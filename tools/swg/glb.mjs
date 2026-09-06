@@ -1,34 +1,42 @@
-// Minimal GLB writer: one node per mesh, one primitive per shader group, no textures yet.
+// Minimal GLB writer: one node per mesh, one primitive per shader group,
+// optional embedded PNG textures, vertex colours and hardpoint child nodes.
+// SWG is left-handed Y-up (Direct3D); SOE's own Maya exporter negates X, so we
+// negate X and reverse winding by default to land in right-handed GLTF space.
 
 function align4(n) {
   return (n + 3) & ~3;
 }
 
-export function buildGlb(meshes, { flipZ = false } = {}) {
+export function buildGlb(meshes, { flipX = true, textures = new Map() } = {}) {
   const buffers = [];
   const bufferViews = [];
   const accessors = [];
   const materials = [];
+  const images = [];
+  const gltfTextures = [];
   const materialIndex = new Map();
+  const imageIndex = new Map();
   const gltfMeshes = [];
   const nodes = [];
+  const rootNodes = [];
   let byteLength = 0;
 
-  const pushView = (arr, target) => {
-    const bytes = Buffer.from(arr.buffer, arr.byteOffset, arr.byteLength);
+  const pushView = (bytes, target) => {
     const padded = align4(bytes.length);
-    const view = { buffer: 0, byteOffset: byteLength, byteLength: bytes.length, target };
+    const view = { buffer: 0, byteOffset: byteLength, byteLength: bytes.length };
+    if (target) view.target = target;
     bufferViews.push(view);
     buffers.push(bytes, Buffer.alloc(padded - bytes.length));
     byteLength += padded;
     return bufferViews.length - 1;
   };
 
-  const pushAccessor = (arr, type, componentType, target, withBounds) => {
-    const view = pushView(arr, target);
-    const n = type === 'VEC3' ? 3 : type === 'VEC2' ? 2 : 1;
+  const pushAccessor = (arr, type, componentType, target, { bounds = false, normalized = false } = {}) => {
+    const view = pushView(Buffer.from(arr.buffer, arr.byteOffset, arr.byteLength), target);
+    const n = { VEC4: 4, VEC3: 3, VEC2: 2, SCALAR: 1 }[type];
     const acc = { bufferView: view, componentType, count: arr.length / n, type };
-    if (withBounds) {
+    if (normalized) acc.normalized = true;
+    if (bounds) {
       const min = Array(n).fill(Infinity);
       const max = Array(n).fill(-Infinity);
       for (let i = 0; i < arr.length; i++) {
@@ -42,36 +50,72 @@ export function buildGlb(meshes, { flipZ = false } = {}) {
     return accessors.length - 1;
   };
 
-  const materialFor = (name) => {
-    if (!materialIndex.has(name)) {
-      materials.push({ name, pbrMetallicRoughness: { baseColorFactor: [0.8, 0.8, 0.8, 1], metallicFactor: 0, roughnessFactor: 1 }, doubleSided: true });
-      materialIndex.set(name, materials.length - 1);
+  const imageFor = (tex) => {
+    if (!imageIndex.has(tex.path)) {
+      const view = pushView(tex.png);
+      images.push({ name: tex.path, mimeType: 'image/png', bufferView: view });
+      gltfTextures.push({ source: images.length - 1, sampler: 0 });
+      imageIndex.set(tex.path, gltfTextures.length - 1);
     }
-    return materialIndex.get(name);
+    return imageIndex.get(tex.path);
+  };
+
+  const materialFor = (shader) => {
+    if (!materialIndex.has(shader)) {
+      const mat = { name: shader, pbrMetallicRoughness: { baseColorFactor: [1, 1, 1, 1], metallicFactor: 0, roughnessFactor: 0.9 }, doubleSided: false };
+      const tex = textures.get(shader);
+      if (tex) {
+        mat.pbrMetallicRoughness.baseColorTexture = { index: imageFor(tex) };
+        if (tex.hasAlpha) {
+          mat.alphaMode = 'MASK';
+          mat.alphaCutoff = 0.5;
+        }
+      } else {
+        mat.pbrMetallicRoughness.baseColorFactor = [0.8, 0.8, 0.8, 1];
+      }
+      materials.push(mat);
+      materialIndex.set(shader, materials.length - 1);
+    }
+    return materialIndex.get(shader);
   };
 
   for (const mesh of meshes) {
     const primitives = [];
     for (const g of mesh.groups) {
       for (const p of g.primitives) {
-        const positions = flipZ ? flip(p.positions) : p.positions;
-        const normals = p.normals ? (flipZ ? flip(p.normals) : p.normals) : null;
-        const indices = flipZ ? reverseWinding(p.indices) : p.indices;
-        const attributes = { POSITION: pushAccessor(positions, 'VEC3', 5126, 34962, true) };
-        if (normals) attributes.NORMAL = pushAccessor(normals, 'VEC3', 5126, 34962, false);
-        if (p.uvs) attributes.TEXCOORD_0 = pushAccessor(p.uvs, 'VEC2', 5126, 34962, false);
+        const positions = flipX ? negateX(p.positions) : p.positions;
+        const normals = p.normals ? (flipX ? negateX(p.normals) : p.normals) : null;
+        const indices = flipX ? reverseWinding(p.indices) : p.indices;
+        const attributes = { POSITION: pushAccessor(positions, 'VEC3', 5126, 34962, { bounds: true }) };
+        if (normals) attributes.NORMAL = pushAccessor(normals, 'VEC3', 5126, 34962);
+        if (p.uvs) attributes.TEXCOORD_0 = pushAccessor(p.uvs, 'VEC2', 5126, 34962);
+        if (p.colors) attributes.COLOR_0 = pushAccessor(p.colors, 'VEC4', 5121, 34962, { normalized: true });
         const idx = indices instanceof Uint16Array ? indices : Uint32Array.from(indices);
-        primitives.push({ attributes, indices: pushAccessor(idx, 'SCALAR', idx instanceof Uint16Array ? 5123 : 5125, 34963, false), material: materialFor(g.shader), mode: 4 });
+        primitives.push({
+          attributes,
+          indices: pushAccessor(idx, 'SCALAR', idx instanceof Uint16Array ? 5123 : 5125, 34963),
+          material: materialFor(g.shader),
+          mode: 4,
+        });
       }
     }
     gltfMeshes.push({ name: mesh.name, primitives });
-    nodes.push({ name: mesh.name, mesh: gltfMeshes.length - 1 });
+    const node = { name: mesh.name, mesh: gltfMeshes.length - 1 };
+    if (mesh.bounds) node.extras = { bounds: mesh.bounds };
+    nodes.push(node);
+    const meshNode = nodes.length - 1;
+    rootNodes.push(meshNode);
+    for (const hp of mesh.hardpoints ?? []) {
+      const [x, y, z] = hp.position;
+      nodes.push({ name: `hp:${hp.name}`, translation: [flipX ? -x : x, y, z] });
+      (nodes[meshNode].children ??= []).push(nodes.length - 1);
+    }
   }
 
   const json = {
     asset: { version: '2.0', generator: 'swg3js converter' },
     scene: 0,
-    scenes: [{ nodes: nodes.map((_, i) => i) }],
+    scenes: [{ nodes: rootNodes }],
     nodes,
     meshes: gltfMeshes,
     materials,
@@ -79,6 +123,11 @@ export function buildGlb(meshes, { flipZ = false } = {}) {
     bufferViews,
     buffers: [{ byteLength }],
   };
+  if (images.length) {
+    json.images = images;
+    json.textures = gltfTextures;
+    json.samplers = [{ magFilter: 9729, minFilter: 9987, wrapS: 10497, wrapT: 10497 }];
+  }
   const jsonBytes = Buffer.from(JSON.stringify(json));
   const jsonPadded = align4(jsonBytes.length);
   const bin = Buffer.concat(buffers);
@@ -98,12 +147,12 @@ export function buildGlb(meshes, { flipZ = false } = {}) {
   return out;
 }
 
-function flip(arr) {
+function negateX(arr) {
   const out = new Float32Array(arr.length);
   for (let i = 0; i < arr.length; i += 3) {
-    out[i] = arr[i];
+    out[i] = -arr[i];
     out[i + 1] = arr[i + 1];
-    out[i + 2] = -arr[i + 2];
+    out[i + 2] = arr[i + 2];
   }
   return out;
 }

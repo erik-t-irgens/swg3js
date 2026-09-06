@@ -35,7 +35,7 @@ URL options: `?planet=lok` spawns on a specific world, `?class=bounty_hunter` pi
 ## What exists today (v0.3)
 
 - **Rigged character pipeline**: skinned GLTF characters with an animation state machine (idle, walk, run, airborne, seated), clip speed matched to movement, and world-space arm solving so aiming and saber swings override the clip pose. The Mixamo X Bot ships as a stand-in in `public/assets/characters/`; add `?rig=0` to use the primitive body.
-- **SWG asset converter** in `tools/swg/`: reads TRE archives and IFF files from a locally owned client install and writes static meshes as GLB. See `tools/swg/README.md`. Output goes to the git-ignored `assets-private/`.
+- **SWG asset converter** in `tools/swg/`: reads TRE archives and IFF files from a locally owned client install and writes textured static meshes as GLB, with retail-manifest verification. See `tools/swg/README.md` and `docs/ASSETS.md`. Output goes to the git-ignored `assets-private/`.
 - **Design doc** in `docs/DESIGN.md` with the settled decisions, pillars, combat model, skill system and phases.
 
 - **Physics** via [Rapier](https://rapier.rs/) (Rust compiled to WebAssembly). Terrain chunks near the player get heightfield colliders, trees and rocks get cylinders, creatures are dynamic rigid bodies, and the player is a kinematic character controller with auto-step, slope limits and ground snapping. Force Push, detonators and deaths all move real bodies.

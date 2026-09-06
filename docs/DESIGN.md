@@ -62,7 +62,7 @@ A private, friends-scale (2 to 10 players) co-op sandbox that recreates the feel
 
 ## Asset pipeline
 
-- `tools/swg/` converts from a locally owned SWG install to GLTF: TRE archive reading, IFF parsing, static meshes first, then skinned meshes and animations, then textures, then world snapshots and terrain.
+- `tools/swg/` converts from a locally owned SWG install to GLTF: TRE archive reading, IFF parsing, static meshes with textures first, then skinned meshes and animations, then world snapshots and terrain. Sourcing rules and provenance are in `docs/ASSETS.md`.
 - Converted output goes to `assets-private/`, which is git-ignored. The game loads it when present and falls back to placeholders when it is not.
 - The Mixamo X Bot stand-in proves the skinned-character pipeline until SWG characters convert.
 

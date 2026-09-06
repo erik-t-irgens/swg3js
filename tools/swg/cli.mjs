@@ -1,17 +1,27 @@
 #!/usr/bin/env node
 // SWG asset converter. Reads a locally owned client install; never ships its output.
 //
-//   node tools/swg/cli.mjs list <swg-dir> [filter]
+//   node tools/swg/cli.mjs verify <swg-dir>                       classify every archive against retail manifests
+//   node tools/swg/cli.mjs list <swg-dir> [filter]                list files across archives (search priority applied)
 //   node tools/swg/cli.mjs extract <swg-dir> <path-in-archive> <out-file>
-//   node tools/swg/cli.mjs dump <file.iff | swg-dir path-in-archive>
-//   node tools/swg/cli.mjs msh <swg-dir> <appearance-path> <out.glb> [--flip-z]
-//   node tools/swg/cli.mjs batch <swg-dir> <out-dir> [filter] [--flip-z]
+//   node tools/swg/cli.mjs dump <file.iff> | <swg-dir> <path-in-archive>   print an IFF tree
+//   node tools/swg/cli.mjs shader <swg-dir> <shader/x.sht>        list a shader's texture slots
+//   node tools/swg/cli.mjs texture <swg-dir> <texture/x.dds> <out.png>
+//   node tools/swg/cli.mjs msh <swg-dir> <appearance-path> <out.glb>
+//   node tools/swg/cli.mjs batch <swg-dir> <out-dir> [filter]     convert every .msh matching filter (default appearance/mesh/)
+//
+// Flags: --retail-only (mount only archives named in the retail manifests)
+//        --no-flip (keep left-handed coordinates)  --no-textures (skip DDS decoding)
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { resolveToMesh } from './appearance.mjs';
+import { decodeDds } from './dds.mjs';
 import { buildGlb } from './glb.mjs';
 import { dump, parseIff } from './iff.mjs';
+import { classifyDirectory, isRetailByName } from './manifest.mjs';
 import { parseMesh } from './msh.mjs';
+import { encodePng } from './png.mjs';
+import { shaderTextures } from './sht.mjs';
 import { openVfs } from './tre.mjs';
 
 const args = process.argv.slice(2);
@@ -20,28 +30,67 @@ const pos = args.filter((a) => !a.startsWith('--'));
 const cmd = pos[0];
 
 function usage() {
-  console.log(readFileSync(new URL(import.meta.url)).toString().split('\n').filter((l) => l.startsWith('//')).map((l) => l.slice(3)).join('\n'));
+  const src = readFileSync(new URL(import.meta.url)).toString().split('\n');
+  console.log(src.filter((l) => l.startsWith('//')).map((l) => l.slice(3)).join('\n'));
   process.exit(1);
+}
+
+function mount(dir) {
+  const retailOnly = flags.has('--retail-only');
+  const vfs = openVfs(dir, {
+    filter: retailOnly ? (f) => isRetailByName(f, statSync(join(dir, f)).size) !== null : undefined,
+  });
+  console.error(`mounted ${vfs.archives.length} archives${retailOnly ? ' (retail only)' : ''}`);
+  return vfs;
+}
+
+const textureCache = new Map();
+
+function textureFor(vfs, shaderPath) {
+  if (flags.has('--no-textures')) return null;
+  if (textureCache.has(shaderPath)) return textureCache.get(shaderPath);
+  let result = null;
+  try {
+    const { main } = shaderTextures(parseIff(vfs.read(shaderPath)));
+    if (main && vfs.has(main)) {
+      const dds = decodeDds(vfs.read(main));
+      result = { path: main, png: encodePng(dds.width, dds.height, dds.rgba), hasAlpha: dds.hasAlpha };
+    }
+  } catch (err) {
+    console.error(`  texture for ${shaderPath} skipped: ${err.message}`);
+  }
+  textureCache.set(shaderPath, result);
+  return result;
 }
 
 function convertOne(vfs, appearancePath, outFile) {
   const meshPath = resolveToMesh(vfs, appearancePath);
   const mesh = parseMesh(parseIff(vfs.read(meshPath)));
-  const glb = buildGlb([{ name: basename(meshPath, '.msh'), groups: mesh.groups }], { flipZ: flags.has('--flip-z') });
+  const textures = new Map();
+  for (const g of mesh.groups) {
+    const t = textureFor(vfs, g.shader);
+    if (t) textures.set(g.shader, t);
+  }
+  const glb = buildGlb([{ name: basename(meshPath, '.msh'), ...mesh }], { flipX: !flags.has('--no-flip'), textures });
   mkdirSync(dirname(outFile), { recursive: true });
   writeFileSync(outFile, glb);
   const tris = mesh.groups.reduce((n, g) => n + g.primitives.reduce((m, p) => m + p.indices.length / 3, 0), 0);
-  return { meshPath, tris, shaders: mesh.groups.map((g) => g.shader) };
+  return { meshPath, tris, shaders: mesh.groups.map((g) => g.shader), textured: textures.size, warnings: mesh.warnings };
 }
 
 switch (cmd) {
+  case 'verify': {
+    if (!pos[1]) usage();
+    for (const r of classifyDirectory(pos[1])) console.log(`${r.file.padEnd(34)} ${String(r.size).padStart(12)}  ${r.verdict}`);
+    break;
+  }
   case 'list': {
-    const vfs = openVfs(pos[1]);
+    const vfs = mount(pos[1]);
     for (const name of vfs.list(pos[2])) console.log(name);
     break;
   }
   case 'extract': {
-    const vfs = openVfs(pos[1]);
+    const vfs = mount(pos[1]);
     mkdirSync(dirname(pos[3]), { recursive: true });
     writeFileSync(pos[3], vfs.read(pos[2]));
     console.log(`wrote ${pos[3]}`);
@@ -49,20 +98,35 @@ switch (cmd) {
   }
   case 'dump': {
     let buf;
-    if (pos[2]) buf = openVfs(pos[1]).read(pos[2]);
+    if (pos[2]) buf = mount(pos[1]).read(pos[2]);
     else if (existsSync(pos[1]) && statSync(pos[1]).isFile()) buf = readFileSync(pos[1]);
     else usage();
     console.log(dump(parseIff(buf)).join('\n'));
     break;
   }
+  case 'shader': {
+    const vfs = mount(pos[1]);
+    const { main, slots } = shaderTextures(parseIff(vfs.read(pos[2])));
+    for (const s of slots) console.log(`${s.slot}  ${s.path}${s.path === main ? '  (main)' : ''}`);
+    break;
+  }
+  case 'texture': {
+    const vfs = mount(pos[1]);
+    const dds = decodeDds(vfs.read(pos[2]));
+    mkdirSync(dirname(pos[3]), { recursive: true });
+    writeFileSync(pos[3], encodePng(dds.width, dds.height, dds.rgba));
+    console.log(`${pos[2]} ${dds.width}x${dds.height} ${dds.format}${dds.hasAlpha ? ' with alpha' : ''} -> ${pos[3]}`);
+    break;
+  }
   case 'msh': {
-    const vfs = openVfs(pos[1]);
+    const vfs = mount(pos[1]);
     const r = convertOne(vfs, pos[2], pos[3]);
-    console.log(`${r.meshPath} -> ${pos[3]} (${r.tris} triangles, shaders: ${r.shaders.join(', ')})`);
+    console.log(`${r.meshPath} -> ${pos[3]} (${r.tris} triangles, ${r.textured}/${r.shaders.length} shaders textured: ${r.shaders.join(', ')})`);
+    for (const w of r.warnings) console.log(`  warning: ${w}`);
     break;
   }
   case 'batch': {
-    const vfs = openVfs(pos[1]);
+    const vfs = mount(pos[1]);
     const outDir = pos[2];
     const filter = pos[3] ?? 'appearance/mesh/';
     let ok = 0;
@@ -79,6 +143,7 @@ switch (cmd) {
     }
     console.log(`converted ${ok} meshes, ${failures.length} failed`);
     if (failures.length) {
+      mkdirSync(outDir, { recursive: true });
       writeFileSync(join(outDir, 'failures.log'), failures.join('\n'));
       console.log(`see ${join(outDir, 'failures.log')}`);
     }

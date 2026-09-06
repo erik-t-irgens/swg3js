@@ -1,0 +1,1337 @@
+{
+ "note": "Retail Star Wars Galaxies client archive inventories, by name, size and hash. Used only to classify archives; contains no game data.",
+ "sources": {
+  "preCU_14_1": "SWGEmu Launchpad required manifest (github.com/swgemu/Launchpad required2.txt) as embedded in launcher forks",
+  "cu_publish_25": "lexun/cuemu-launcher client-files.js",
+  "nge_final": "BubbaJoeX/titan-kaadu base_manifest.json (final NGE client, patch_58 / hotfix_59)"
+ },
+ "preCU_14_1": {
+  "bottom.tre": {
+   "size": 16205884,
+   "md5": "63c2d21719ed56d96b70373d99cc94d6"
+  },
+  "data_animation_00.tre": {
+   "size": 58966791,
+   "md5": "1ae26649af2c30efe317850c4cb1a4bd"
+  },
+  "data_music_00.tre": {
+   "size": 77322894,
+   "md5": "88ee64f7e334616fbf688b09022e81df"
+  },
+  "data_other_00.tre": {
+   "size": 46546173,
+   "md5": "59cb600a9af908b98d8d1c8934ec932b"
+  },
+  "data_sample_00.tre": {
+   "size": 104636589,
+   "md5": "c96a2eb77f27b6453053f0820b38ab7c"
+  },
+  "data_sample_01.tre": {
+   "size": 104848649,
+   "md5": "9c0c272400dd2780addd9a8e25334fbf"
+  },
+  "data_sample_02.tre": {
+   "size": 104806646,
+   "md5": "52a3cc6829df957c9d72eccc1b23cad2"
+  },
+  "data_sample_03.tre": {
+   "size": 104479178,
+   "md5": "2947689850819a256171547af1a300d1"
+  },
+  "data_sample_04.tre": {
+   "size": 33887496,
+   "md5": "a22f0c8c8f4b6104647af628579cc0e3"
+  },
+  "data_skeletal_mesh_00.tre": {
+   "size": 104259690,
+   "md5": "ecdaefc123971d167159698f0f47aca4"
+  },
+  "data_skeletal_mesh_01.tre": {
+   "size": 42575909,
+   "md5": "f39551ae0bda6b2ee0bc4c954fcd3699"
+  },
+  "data_sku1_00.tre": {
+   "size": 104853089,
+   "md5": "218bb19915380a12b74238a1d74ab27e"
+  },
+  "data_sku1_01.tre": {
+   "size": 104861757,
+   "md5": "eba6980265b5d742a3ff8897c6cb2ab5"
+  },
+  "data_sku1_02.tre": {
+   "size": 105217918,
+   "md5": "15787e9235df1bd8031b5076558e68e0"
+  },
+  "data_sku1_03.tre": {
+   "size": 104461486,
+   "md5": "caf586e0b039c79ff2197ceaf2a747b1"
+  },
+  "data_sku1_04.tre": {
+   "size": 104915626,
+   "md5": "4d2734716afcb4f8607bb47243acb15f"
+  },
+  "data_sku1_05.tre": {
+   "size": 7576262,
+   "md5": "9101b7bf19bd225854e84e42565f8bd6"
+  },
+  "data_sku1_06.tre": {
+   "size": 22566812,
+   "md5": "88f986a7de3bd5617a7e16042bd368ce"
+  },
+  "data_sku1_07.tre": {
+   "size": 2333549,
+   "md5": "7511e70cfd04fa20e796fc826fbe0fcf"
+  },
+  "data_static_mesh_00.tre": {
+   "size": 104681322,
+   "md5": "ec1fa71af211fcf1cd86f5aa8752283a"
+  },
+  "data_static_mesh_01.tre": {
+   "size": 94719985,
+   "md5": "d453b7f6f562368a4d06a3f9fd4e8339"
+  },
+  "data_texture_00.tre": {
+   "size": 104816351,
+   "md5": "6c8c538d209f5bd428bc9da194ebd30d"
+  },
+  "data_texture_01.tre": {
+   "size": 104831553,
+   "md5": "740124b213b92a16907a0fbaad0fa130"
+  },
+  "data_texture_02.tre": {
+   "size": 104923301,
+   "md5": "9d5dda098c258bb5caa84a610715d834"
+  },
+  "data_texture_03.tre": {
+   "size": 104659874,
+   "md5": "636c5d29046f354c8a118b3c96285084"
+  },
+  "data_texture_04.tre": {
+   "size": 104887073,
+   "md5": "80057e761dc219250b9319e61f10ba91"
+  },
+  "data_texture_05.tre": {
+   "size": 104820008,
+   "md5": "fe62a811e86f38a21080b02782c9e662"
+  },
+  "data_texture_06.tre": {
+   "size": 104773001,
+   "md5": "968d2cafba5a4c5fcedbeeba7a8c4d20"
+  },
+  "data_texture_07.tre": {
+   "size": 66226334,
+   "md5": "c77f34ffa2c15663679f1aa86c43a3d5"
+  },
+  "default_patch.tre": {
+   "size": 60331,
+   "md5": "907194cd54efd6820c84db37c47dfe2d"
+  },
+  "hotfix_13_1_00.tre": {
+   "size": 3058578,
+   "md5": "e3d351fe25626f2a98cb57126e97763d"
+  },
+  "hotfix_sku1_12_1_00.tre": {
+   "size": 21315,
+   "md5": "0792dac181188afed8776a742b64bcde"
+  },
+  "patch_00.tre": {
+   "size": 18779819,
+   "md5": "1517a0a0e7e11c5d1afc43c1b404a045"
+  },
+  "patch_01.tre": {
+   "size": 17757229,
+   "md5": "36fd18e8342b23ae2df51b916324f348"
+  },
+  "patch_02.tre": {
+   "size": 3396766,
+   "md5": "2324adad81158de1e938db603287ac50"
+  },
+  "patch_03.tre": {
+   "size": 20870097,
+   "md5": "bfdca07c64d3d8f706889eafa5e8b666"
+  },
+  "patch_04.tre": {
+   "size": 27137114,
+   "md5": "4a3604d48f2301341326e0b101280968"
+  },
+  "patch_05.tre": {
+   "size": 25827774,
+   "md5": "207b70e873a73361efdfc9d1703fc16d"
+  },
+  "patch_06.tre": {
+   "size": 40724726,
+   "md5": "1102bbdf4628d9ee09fbe87d323017f9"
+  },
+  "patch_07.tre": {
+   "size": 40567157,
+   "md5": "17509e1d6f4fc09ab780dfeb7398cf9c"
+  },
+  "patch_08.tre": {
+   "size": 36984057,
+   "md5": "775454fc68755ad45c1e1d09ff06d645"
+  },
+  "patch_09.tre": {
+   "size": 57214055,
+   "md5": "021a722867d01fb7bc6b134a26b2df38"
+  },
+  "patch_10.tre": {
+   "size": 33429694,
+   "md5": "a9b46686be046e866344e79d5515f236"
+  },
+  "patch_11_00.tre": {
+   "size": 103221850,
+   "md5": "eb6289b9162851f2ee1adf00a9394df5"
+  },
+  "patch_11_01.tre": {
+   "size": 28868084,
+   "md5": "b7e13f12d157187212ed0cc7d5a71f87"
+  },
+  "patch_11_02.tre": {
+   "size": 28713778,
+   "md5": "2b63328b66db99f2d7d8858242a8bc4b"
+  },
+  "patch_11_03.tre": {
+   "size": 7517816,
+   "md5": "deb4626249c2b9c42dba8e4226dbd030"
+  },
+  "patch_12_00.tre": {
+   "size": 32863489,
+   "md5": "39ac219e16ad81c78075cf326886365d"
+  },
+  "patch_13_00.tre": {
+   "size": 6032263,
+   "md5": "69650433d897167d74c0e352c4be9d8e"
+  },
+  "patch_14_00.tre": {
+   "size": 36469339,
+   "md5": "0649bd5305dd18cd5378cf542647e543"
+  },
+  "patch_sku1_12_00.tre": {
+   "size": 6257317,
+   "md5": "74b60af869237a07fa18dc65f80e7ed2"
+  },
+  "patch_sku1_13_00.tre": {
+   "size": 21315,
+   "md5": "0792dac181188afed8776a742b64bcde"
+  },
+  "patch_sku1_14_00.tre": {
+   "size": 944,
+   "md5": "3170521a8e7e0547e9117bc092cbd021"
+  }
+ },
+ "cu_publish_25": {
+  "bottom.tre": {
+   "md5": "63c2d21719ed56d96b70373d99cc94d6"
+  },
+  "data_animation_00.tre": {
+   "md5": "1ae26649af2c30efe317850c4cb1a4bd"
+  },
+  "data_music_00.tre": {
+   "md5": "88ee64f7e334616fbf688b09022e81df"
+  },
+  "data_other_00.tre": {
+   "md5": "59cb600a9af908b98d8d1c8934ec932b"
+  },
+  "data_sample_00.tre": {
+   "md5": "c96a2eb77f27b6453053f0820b38ab7c"
+  },
+  "data_sample_01.tre": {
+   "md5": "9c0c272400dd2780addd9a8e25334fbf"
+  },
+  "data_sample_02.tre": {
+   "md5": "52a3cc6829df957c9d72eccc1b23cad2"
+  },
+  "data_sample_03.tre": {
+   "md5": "2947689850819a256171547af1a300d1"
+  },
+  "data_sample_04.tre": {
+   "md5": "a22f0c8c8f4b6104647af628579cc0e3"
+  },
+  "data_skeletal_mesh_00.tre": {
+   "md5": "ecdaefc123971d167159698f0f47aca4"
+  },
+  "data_skeletal_mesh_01.tre": {
+   "md5": "f39551ae0bda6b2ee0bc4c954fcd3699"
+  },
+  "data_sku1_00.tre": {
+   "md5": "218bb19915380a12b74238a1d74ab27e"
+  },
+  "data_sku1_01.tre": {
+   "md5": "eba6980265b5d742a3ff8897c6cb2ab5"
+  },
+  "data_sku1_02.tre": {
+   "md5": "15787e9235df1bd8031b5076558e68e0"
+  },
+  "data_sku1_03.tre": {
+   "md5": "caf586e0b039c79ff2197ceaf2a747b1"
+  },
+  "data_sku1_04.tre": {
+   "md5": "4d2734716afcb4f8607bb47243acb15f"
+  },
+  "data_sku1_05.tre": {
+   "md5": "9101b7bf19bd225854e84e42565f8bd6"
+  },
+  "data_sku1_06.tre": {
+   "md5": "88f986a7de3bd5617a7e16042bd368ce"
+  },
+  "data_sku1_07.tre": {
+   "md5": "7511e70cfd04fa20e796fc826fbe0fcf"
+  },
+  "data_static_mesh_00.tre": {
+   "md5": "ec1fa71af211fcf1cd86f5aa8752283a"
+  },
+  "data_static_mesh_01.tre": {
+   "md5": "d453b7f6f562368a4d06a3f9fd4e8339"
+  },
+  "data_texture_00.tre": {
+   "md5": "6c8c538d209f5bd428bc9da194ebd30d"
+  },
+  "data_texture_01.tre": {
+   "md5": "740124b213b92a16907a0fbaad0fa130"
+  },
+  "data_texture_02.tre": {
+   "md5": "9d5dda098c258bb5caa84a610715d834"
+  },
+  "data_texture_03.tre": {
+   "md5": "636c5d29046f354c8a118b3c96285084"
+  },
+  "data_texture_04.tre": {
+   "md5": "80057e761dc219250b9319e61f10ba91"
+  },
+  "data_texture_05.tre": {
+   "md5": "fe62a811e86f38a21080b02782c9e662"
+  },
+  "data_texture_06.tre": {
+   "md5": "968d2cafba5a4c5fcedbeeba7a8c4d20"
+  },
+  "data_texture_07.tre": {
+   "md5": "c77f34ffa2c15663679f1aa86c43a3d5"
+  },
+  "default_patch.tre": {
+   "md5": "907194cd54efd6820c84db37c47dfe2d"
+  },
+  "hotfix_26_client_00.tre": {
+   "md5": "b93b2e4d02a73d21ce4296e8118b245d"
+  },
+  "hotfix_26_shared_00.tre": {
+   "md5": "2e632fe1b43499ccf64e4f0f1b4b6adb"
+  },
+  "hotfix_sku3_26_client_00.tre": {
+   "md5": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "hotfix_sku3_26_shared_00.tre": {
+   "md5": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "patch_00.tre": {
+   "md5": "1517a0a0e7e11c5d1afc43c1b404a045"
+  },
+  "patch_01.tre": {
+   "md5": "36fd18e8342b23ae2df51b916324f348"
+  },
+  "patch_02.tre": {
+   "md5": "2324adad81158de1e938db603287ac50"
+  },
+  "patch_03.tre": {
+   "md5": "bfdca07c64d3d8f706889eafa5e8b666"
+  },
+  "patch_04.tre": {
+   "md5": "4a3604d48f2301341326e0b101280968"
+  },
+  "patch_05.tre": {
+   "md5": "207b70e873a73361efdfc9d1703fc16d"
+  },
+  "patch_06.tre": {
+   "md5": "1102bbdf4628d9ee09fbe87d323017f9"
+  },
+  "patch_07.tre": {
+   "md5": "17509e1d6f4fc09ab780dfeb7398cf9c"
+  },
+  "patch_08.tre": {
+   "md5": "775454fc68755ad45c1e1d09ff06d645"
+  },
+  "patch_09.tre": {
+   "md5": "021a722867d01fb7bc6b134a26b2df38"
+  },
+  "patch_10.tre": {
+   "md5": "a9b46686be046e866344e79d5515f236"
+  },
+  "patch_11_00.tre": {
+   "md5": "eb6289b9162851f2ee1adf00a9394df5"
+  },
+  "patch_11_01.tre": {
+   "md5": "b7e13f12d157187212ed0cc7d5a71f87"
+  },
+  "patch_11_02.tre": {
+   "md5": "2b63328b66db99f2d7d8858242a8bc4b"
+  },
+  "patch_11_03.tre": {
+   "md5": "deb4626249c2b9c42dba8e4226dbd030"
+  },
+  "patch_12_00.tre": {
+   "md5": "39ac219e16ad81c78075cf326886365d"
+  },
+  "patch_13_00.tre": {
+   "md5": "69650433d897167d74c0e352c4be9d8e"
+  },
+  "patch_14_00.tre": {
+   "md5": "0649bd5305dd18cd5378cf542647e543"
+  },
+  "patch_15_00.tre": {
+   "md5": "7d11e335b45439803c951be268d13a18"
+  },
+  "patch_15_01.tre": {
+   "md5": "b58dfe06486f87ce2844f7725b94dea0"
+  },
+  "patch_15_02.tre": {
+   "md5": "54c3daa737465ea3934dd2c3089efdfc"
+  },
+  "patch_16_00.tre": {
+   "md5": "ae508517354b358634b9e37129235860"
+  },
+  "patch_17_00.tre": {
+   "md5": "c9c3616c7dc5628798b33df7e07d29a6"
+  },
+  "patch_18_client_00.tre": {
+   "md5": "3d9eb950e234c80de72444c648d22171"
+  },
+  "patch_18_shared_00.tre": {
+   "md5": "48a0d94243693ab16935dcfbb2acab09"
+  },
+  "patch_19_client_00.tre": {
+   "md5": "2ee0bcd7e01acbe0c872301e1a5aedd6"
+  },
+  "patch_19_shared_00.tre": {
+   "md5": "0b576f76b06037bad69b242d5b128d4d"
+  },
+  "patch_20_client_00.tre": {
+   "md5": "a4aee373e1131e584b222b1181659f6a"
+  },
+  "patch_20_shared_00.tre": {
+   "md5": "3bf144452b7e03d78abde647a1040849"
+  },
+  "patch_23_client_00.tre": {
+   "md5": "64ffb477432e732a7fb139379be5d219"
+  },
+  "patch_23_shared_00.tre": {
+   "md5": "ed4e2275ba67470d472c228a78df9897"
+  },
+  "patch_24_client_00.tre": {
+   "md5": "b0db9c146ca9382e9034a6fab9a050f2"
+  },
+  "patch_24_client_01.tre": {
+   "md5": "671f50b1336728117d3076be8910fda4"
+  },
+  "patch_24_shared_00.tre": {
+   "md5": "768e76ab9a41a03d2b2c29c3c7f30733"
+  },
+  "patch_25_client_00.tre": {
+   "md5": "d77973cfa71782db4ad135a2e723529b"
+  },
+  "patch_25_shared_00.tre": {
+   "md5": "1c449496f29bf072a2a86c29f248e6f6"
+  },
+  "patch_sku1_12_00.tre": {
+   "md5": "74b60af869237a07fa18dc65f80e7ed2"
+  },
+  "patch_sku1_13_00.tre": {
+   "md5": "0792dac181188afed8776a742b64bcde"
+  },
+  "patch_sku1_14_00.tre": {
+   "md5": "3170521a8e7e0547e9117bc092cbd021"
+  },
+  "patch_sku1_15_00.tre": {
+   "md5": "3feff64f5fefbf06bd34956be3a7db1d"
+  },
+  "patch_sku1_16_00.tre": {
+   "md5": "e11f4246f4319ed1f3a57f19832ee8cb"
+  },
+  "patch_sku1_17_00.tre": {
+   "md5": "d2fa5af5931e87507fd8076d2ebbb8e0"
+  },
+  "patch_sku1_18_client_00.tre": {
+   "md5": "d0c21f55ac28aa17a896559e83d83dec"
+  },
+  "patch_sku1_19_client_00.tre": {
+   "md5": "1ba42c19af58ffb03e19539b2c08662b"
+  },
+  "patch_sku1_19_shared_00.tre": {
+   "md5": "c66b0d936dcb06a205b9bc72f0d20933"
+  },
+  "patch_sku1_23_client_00.tre": {
+   "md5": "32c97ebf74c857237e460d8f2b6abfef"
+  },
+  "patch_sku1_24_client_00.tre": {
+   "md5": "07b0c4c301c85573bb0b6654dc73c223"
+  },
+  "patch_sku1_24_shared_00.tre": {
+   "md5": "e26979993f0d868b68c674ac50d10bee"
+  },
+  "patch_sku2_15_00.tre": {
+   "md5": "8588fae6a671cba45a8b53cb2f5a8570"
+  },
+  "patch_sku2_15_01.tre": {
+   "md5": "9f8eef9b5bb0ebd8a365f792d1e362bb"
+  },
+  "patch_sku2_16_00.tre": {
+   "md5": "c5e9c01f6da71c077a517781d478e368"
+  },
+  "patch_sku2_17_00.tre": {
+   "md5": "4b4c06fc9e1543133e7fc9fb5ecb5f06"
+  },
+  "patch_sku2_23_client_00.tre": {
+   "md5": "4c845858ff981cfc56899209e7ec82d6"
+  },
+  "patch_sku2_24_client_00.tre": {
+   "md5": "5b44d588f4314f98ebf8332208b2e061"
+  },
+  "patch_sku2_24_shared_00.tre": {
+   "md5": "352600cd52c7b72440f092e90724ca9b"
+  },
+  "patch_sku3_24_client_00.tre": {
+   "md5": "d2bc35da522d47b65df2c7d53b451420"
+  },
+  "patch_sku3_24_shared_00.tre": {
+   "md5": "f44629c30cff87105254ba977e2383ec"
+  },
+  "patch_sku3_25_client_00.tre": {
+   "md5": "555f8c426477a5ec71251c2ff82054ba"
+  },
+  "patch_sku3_25_shared_00.tre": {
+   "md5": "cdc733f065bcd02c639ad4d07fcf5ca1"
+  },
+  "sku0_client.toc": {
+   "md5": "cff17776d1aae732a3f2f0ff3b46a8b3"
+  },
+  "sku1_client.toc": {
+   "md5": "a8096fac997e2b0ebf566fda25da51ae"
+  },
+  "sku2_client.toc": {
+   "md5": "261ca37ccc673b052de7733c6cdbd12b"
+  },
+  "sku3_client.toc": {
+   "md5": "958aa2ff60d5d55399a616bc060cf754"
+  }
+ },
+ "nge_final": {
+  "bottom.tre": {
+   "size": 16205884,
+   "sha256": "aeada86b4ac7965aef3b87c7e675b5ecbca9a6aa8e1504d25d1bc4ec08a445d9"
+  },
+  "data_animation_00.tre": {
+   "size": 58966791,
+   "sha256": "12fd074834f425460a60d8f908ac3c1a7ab4640e4fdf3610e9772ce1171e9a7c"
+  },
+  "data_music_00.tre": {
+   "size": 77322894,
+   "sha256": "f6ba67daf87dd3a99e9f7a1577ab43fb981fcf04a4bfbfa82d50c9831b036b54"
+  },
+  "data_other_00.tre": {
+   "size": 46546173,
+   "sha256": "7c7a02670ea47ab7eaec0c7b265642cb7dad3d50550da426db24816caceffd57"
+  },
+  "data_sample_00.tre": {
+   "size": 104636589,
+   "sha256": "8895e1022b25e336940095e419c19af0ed27edda7177f0ac63fbdb1fe446d0ed"
+  },
+  "data_sample_01.tre": {
+   "size": 104848649,
+   "sha256": "0af1505081b73ddd301a13ee19abe106db6f75f6d02c31ba6a252b1ed287f6b7"
+  },
+  "data_sample_02.tre": {
+   "size": 104806646,
+   "sha256": "48a759294a5bbb4898f26857f520f219cfdf7c0a63affb0c948255b89ef183ad"
+  },
+  "data_sample_03.tre": {
+   "size": 104479178,
+   "sha256": "ec8c406b11854ccb36efc18d5fa95bbbaa5ccd9ecfcdabbd707a11cb7160f76d"
+  },
+  "data_sample_04.tre": {
+   "size": 33887496,
+   "sha256": "4f11d67fff56d41dccbe15c2eea71cb3e4c171baf62d41725398fbaad5262c17"
+  },
+  "data_skeletal_mesh_00.tre": {
+   "size": 104259690,
+   "sha256": "fd80201b6864cd1cc0cbc5cf462663ceee4ccfd18a39244812b69381d29cc469"
+  },
+  "data_skeletal_mesh_01.tre": {
+   "size": 42575909,
+   "sha256": "41c2fbcda58e0c0a9e2c448ce8e8ec820f0e3ec81b2e911ccbe8e48e5905c202"
+  },
+  "data_sku1_00.tre": {
+   "size": 104853089,
+   "sha256": "bd02fd838ff0e96d4ab594b919dc6e092e107a8557660a071d498bd189e35fb9"
+  },
+  "data_sku1_01.tre": {
+   "size": 104861757,
+   "sha256": "8db6b96c71998b7843db998aef9ca429d514449e0e3497539b75c0e56df0803c"
+  },
+  "data_sku1_02.tre": {
+   "size": 105217918,
+   "sha256": "d9e94dfe6be826652da63b0f7368a4989676d7eeb80f5f493a0a6683819d7ad6"
+  },
+  "data_sku1_03.tre": {
+   "size": 104461486,
+   "sha256": "d3d5fc5b4c26ec3b610d842a3d675a06b84fa862aa2f176eaa5029b42b62cb69"
+  },
+  "data_sku1_04.tre": {
+   "size": 104915626,
+   "sha256": "946e9841b80b5852024811d712210f2b1b9d71b386c508a7c15feb74c6416304"
+  },
+  "data_sku1_05.tre": {
+   "size": 7576262,
+   "sha256": "69e244007a58adb665e34bdcbd927ab067df581af754fd81327c81972d4eed04"
+  },
+  "data_sku1_06.tre": {
+   "size": 22566812,
+   "sha256": "3ff21958a28642137255e6f738416b8237f7775e04b30560c780a775c917c8dc"
+  },
+  "data_sku1_07.tre": {
+   "size": 2333549,
+   "sha256": "191b5b2b71d061011561031c4f5b135bbc84f2fd8debec885e018ece121f56db"
+  },
+  "data_static_mesh_00.tre": {
+   "size": 104681322,
+   "sha256": "ad7fc4b0878d09d4c5616378bd815d782b2085c845a8fc046ee68203139a0ed5"
+  },
+  "data_static_mesh_01.tre": {
+   "size": 94719985,
+   "sha256": "6c656316b37b41f7fe8957b6e83812cfa6eeaca035eec12839ceed2dea5d5c47"
+  },
+  "data_texture_00.tre": {
+   "size": 104816351,
+   "sha256": "71752a151c392124d9ed76606be30a9777ec523752d8fc16672062efd5519744"
+  },
+  "data_texture_01.tre": {
+   "size": 104831553,
+   "sha256": "288e1b54dcab1c27be1f6374736c22790e73a2e3185dccf306c1654b8533c097"
+  },
+  "data_texture_02.tre": {
+   "size": 104923301,
+   "sha256": "468ca6a9b0e251c93b26186951b2fb0ab29f1e379d6c9c40860de509c52567af"
+  },
+  "data_texture_03.tre": {
+   "size": 104659874,
+   "sha256": "2768fe296c902791e8c42bb3327c66d08b15e62b945b8b9e1bc34d1400c6c246"
+  },
+  "data_texture_04.tre": {
+   "size": 104887073,
+   "sha256": "8384cc90d6386bf52535adf0470b10fc8b95a90b96ec2cf357707781420dadbd"
+  },
+  "data_texture_05.tre": {
+   "size": 104820008,
+   "sha256": "7b04dcd4d9522aa98ba5693344a723fed5ed4286670d52f592b83179581adf4b"
+  },
+  "data_texture_06.tre": {
+   "size": 104773001,
+   "sha256": "bce6db3c01be754f5e4f6600ddf97c854eb63f4b04aac2f3c0c10f6d67215628"
+  },
+  "data_texture_07.tre": {
+   "size": 66226334,
+   "sha256": "dd715210b5f2ddbc5ee7825bc804d6f4e1b4685b0fc92b8432b643902718e700"
+  },
+  "default_patch.tre": {
+   "size": 60331,
+   "sha256": "90d4a7da4110ff33d3b0103786e9ac1173da533379558fdeaa9bd398675ef8f9"
+  },
+  "holidays.tre": {
+   "size": 2697174,
+   "sha256": "d5dcae16c8d69f9085f71cadaae449804005a523c4ddfbef7dc0394197b0ad5b"
+  },
+  "hotfix_56_client_00.tre": {
+   "size": 17768462,
+   "sha256": "231e83ab45820ba4c873d98f5dd0b74cfcf2175344c0c5d96f95685cb2de1fe6"
+  },
+  "hotfix_56_shared_00.tre": {
+   "size": 2881496,
+   "sha256": "32e09ae1bdc000fddac7f466d29673e1fa9ed82ea82554616a0dbd3e4aa10f78"
+  },
+  "hotfix_59_client_00.tre": {
+   "size": 1381386,
+   "sha256": "b19e2631abec7569b46779a911907fcfffde1f17c2b156b9ac14f62daa981fc4"
+  },
+  "hotfix_59_shared_00.tre": {
+   "size": 4326904,
+   "sha256": "6b1b163ab3d50a27bac87b58598c21b0d55c9eca119cc41ca0ba5a10f89f69df"
+  },
+  "hotfix_sku1_59_client_00.tre": {
+   "size": 1116547,
+   "sha256": "3d6bb5486ee58c44952a8199a801b68a656954bff10e03eac7b30084dd6a7e5b"
+  },
+  "patch_00.tre": {
+   "size": 18779819,
+   "sha256": "a045fcf9dac95b5cff57989c3c658890f766f7f03f9cf7554679c79fe8bcdbf2"
+  },
+  "patch_01.tre": {
+   "size": 17757229,
+   "sha256": "adb0ad5d9822abe21ae41b91421cf04b7b1d0da3f7c6f2a405b445bec8ff66da"
+  },
+  "patch_02.tre": {
+   "size": 3396766,
+   "sha256": "2b24a6682e06041634081e7fefb4da6a67e49b6eba0144600e5845b0da0aa68c"
+  },
+  "patch_03.tre": {
+   "size": 20870097,
+   "sha256": "94523c1a68638c494eceec5643bbe6526941195b55a944c8642dc978ff35ba18"
+  },
+  "patch_04.tre": {
+   "size": 27137114,
+   "sha256": "b4f382e9caea42b739bb326d2422c9eb190603da8dc85db43100f76344a2d066"
+  },
+  "patch_05.tre": {
+   "size": 25827774,
+   "sha256": "d8cfee8c36679737e035aa5faa98b8c334b00f6e033ac78687a20513ce6fb370"
+  },
+  "patch_06.tre": {
+   "size": 40724726,
+   "sha256": "e2a41cc2c9a7004edb64f13f5b9b419c6058c07984555eb6e8542dd4c02130cb"
+  },
+  "patch_07.tre": {
+   "size": 40567157,
+   "sha256": "2c419ca8a084a4379b23ff20df88f7b128bf193eada2faa86f9c9ea0420a1ad8"
+  },
+  "patch_08.tre": {
+   "size": 36984057,
+   "sha256": "1a748195d27879daabf70a7db8cd9989cfdffba4196bc9329c72822a9dec8dc9"
+  },
+  "patch_09.tre": {
+   "size": 57214055,
+   "sha256": "7e1fcbb9da1b46de2edcba277bef2ad6bcb47b68d68795e746c7ec691926ec81"
+  },
+  "patch_10.tre": {
+   "size": 33429694,
+   "sha256": "7061404407829d6c28b62be2c57da11b8d0226e7002594dbd34fa2d66dc8d5c4"
+  },
+  "patch_11_00.tre": {
+   "size": 103221850,
+   "sha256": "8d1d08a4fa8407967af49b493f631abfe97fcd57e1c5e2170bccdc2979fee047"
+  },
+  "patch_11_01.tre": {
+   "size": 28868084,
+   "sha256": "17d2aa68d1d3e86fdbe7c0134f190e8f9d129ed8c98cd2fa16162c0f4f5cc4e7"
+  },
+  "patch_11_02.tre": {
+   "size": 28713778,
+   "sha256": "49e263e029c26a162f15cef5a4749dc158576ea88d5b93b9ed599db4a5bd32af"
+  },
+  "patch_11_03.tre": {
+   "size": 7517816,
+   "sha256": "f988f3faea213d5005491f92944db93d2541aec86bcf44d53b2143e6c9097a39"
+  },
+  "patch_12_00.tre": {
+   "size": 32863489,
+   "sha256": "eb09b16b8a8c338edd5d462a49b34e39f165168177eadead575b6cf6d9f39556"
+  },
+  "patch_13_00.tre": {
+   "size": 6032263,
+   "sha256": "340ba8f9315040a992bf26e977966b56a3210d72dd37c1baaf34364c12998376"
+  },
+  "patch_14_00.tre": {
+   "size": 36469339,
+   "sha256": "5ab2950dca71148ac34f6f6e8784676b820a64204b709247aa7f71ecc494373b"
+  },
+  "patch_15_00.tre": {
+   "size": 104355270,
+   "sha256": "e8e5025f00219cc8dbc8490bb3a8287ec62cc48f4e00153f473701a9009d5c20"
+  },
+  "patch_15_01.tre": {
+   "size": 104881663,
+   "sha256": "4ab7dc22f6efeed75dd85ee0a300071c2ea629f497cc3c49708210fa517a6966"
+  },
+  "patch_15_02.tre": {
+   "size": 76498147,
+   "sha256": "d9f2940e73d2512ba9e5599a45f749198dc2053d2be3d113e1912773a723b314"
+  },
+  "patch_16_00.tre": {
+   "size": 26584666,
+   "sha256": "edfad6fa03045e6f38ca07421ebdb82c8b3f1c0abb8e6ea2ddd07725e49dacd7"
+  },
+  "patch_17_00.tre": {
+   "size": 56385141,
+   "sha256": "e46c5155adabad7dbfb607588ea8226571953ef8fae49acd1a3637f23899b04d"
+  },
+  "patch_18_client_00.tre": {
+   "size": 1135529,
+   "sha256": "a7540e2e9de0492d9c1028371a7a672db0d3b84e091c353ac339d620414a4d36"
+  },
+  "patch_18_shared_00.tre": {
+   "size": 1770486,
+   "sha256": "0d0c537be3c233fe91587f7d0a024dbe28564b341a79e244bfe2b6e69ee91d50"
+  },
+  "patch_19_client_00.tre": {
+   "size": 10985558,
+   "sha256": "48d928328f4ba1e7e01d4bb48dbca0c90ffa87c51933a4b8192b4f2d1c196614"
+  },
+  "patch_19_shared_00.tre": {
+   "size": 2156419,
+   "sha256": "0c28aebaef7aed109b02608595ef943e312c3ee46c040c35fbb2d6bc5568fffc"
+  },
+  "patch_20_client_00.tre": {
+   "size": 22326935,
+   "sha256": "52576ade1d1cc62dd6931ef5655580305c92946fed2c31b2e0ed2be911ef51e0"
+  },
+  "patch_20_shared_00.tre": {
+   "size": 2283894,
+   "sha256": "bca5c2d839f56d399a751dcda6c7527479f9731ad58f7b06030b3b91a8588153"
+  },
+  "patch_23_client_00.tre": {
+   "size": 18082800,
+   "sha256": "4fe1c6a4d9ca7671cfe637aeb0ab0a8f2c218ce9fea5327fa97d9e32809f963b"
+  },
+  "patch_23_shared_00.tre": {
+   "size": 15445899,
+   "sha256": "f95411738066e96d64b8211d3a906ec898f1df47a9889f12d5ed610a4dfb86a8"
+  },
+  "patch_24_client_00.tre": {
+   "size": 104857042,
+   "sha256": "ba415beafa5790a8472f53d0030c200966f914d5951ef5924f9646cc7e0c1d6d"
+  },
+  "patch_24_client_01.tre": {
+   "size": 87593041,
+   "sha256": "7ec00cf0e32cd97cac179b64763d5ea53f8ff2d43305e68b574f368002d69ebb"
+  },
+  "patch_24_shared_00.tre": {
+   "size": 15582880,
+   "sha256": "ac948fe7e9ae3a816e23fbdedbbe98333780177c046c59f6f38b11673fe40f47"
+  },
+  "patch_25_client_00.tre": {
+   "size": 8918562,
+   "sha256": "50065cb60c476e07359048aca698172cebec7c107fa03533f1e93ef42ff2b17c"
+  },
+  "patch_25_shared_00.tre": {
+   "size": 5713512,
+   "sha256": "f6949823296522ccff98e07579c5512deb7364b4bb23c90bd14cbbc4a8f4937a"
+  },
+  "patch_26_client_00.tre": {
+   "size": 104785564,
+   "sha256": "3ed0ac1cc76ca116e42c756f0ea19825882ffe1a1bfd5c433ffaa581e85cdb46"
+  },
+  "patch_26_client_01.tre": {
+   "size": 37424377,
+   "sha256": "1521ada75fa07f4424b1b73478bd062d78148ca8ff3b590ebb7b562c602cbf9f"
+  },
+  "patch_26_shared_00.tre": {
+   "size": 6975420,
+   "sha256": "9bb73fc47ca5fe47eeb5ea39bf5fc9ddcdb0bc25950080990b5dfde21b8990c1"
+  },
+  "patch_27_client_00.tre": {
+   "size": 100752161,
+   "sha256": "234e022babe6f2582c0fd898419f4708e3986bd8b1775f855c625120e3cdc66c"
+  },
+  "patch_27_client_01.tre": {
+   "size": 103031176,
+   "sha256": "0c5f433cac54e4987c9ad131dede22897aa537701ab3342f4826c26f8f5b9f46"
+  },
+  "patch_27_client_02.tre": {
+   "size": 44477448,
+   "sha256": "d18d2b444fcdd25d00178a509e77347b9081d024febcfe5369a4308fae334afd"
+  },
+  "patch_27_shared_00.tre": {
+   "size": 8387319,
+   "sha256": "525ba93c6c14f631b8ae9019ba88d810a1775d4985f54b7bf8b52933f4b81a76"
+  },
+  "patch_28_client_00.tre": {
+   "size": 11343429,
+   "sha256": "a6ac78964d48c41d8d181896d994486a28dbc8de5ec7b60ddf4a03424accdc95"
+  },
+  "patch_28_shared_00.tre": {
+   "size": 4640503,
+   "sha256": "17f053aa79ba84f48c1a13092d9800ee7fdf6bdaf74945ee985502b568674317"
+  },
+  "patch_29_client_00.tre": {
+   "size": 11434564,
+   "sha256": "e1902715903a27fae322513bbc0847e262bcd82816e4c1d0a2af96605ae3151b"
+  },
+  "patch_29_shared_00.tre": {
+   "size": 3505735,
+   "sha256": "49a61ddc57f3fc679934c897975cb74ba0ba8afa78af02dca9609d28cad3053d"
+  },
+  "patch_30_client_00.tre": {
+   "size": 44402226,
+   "sha256": "85a6d54550c3340827b78b1ea9fabdb600907ca9a0f7130d19c897e65417d956"
+  },
+  "patch_30_shared_00.tre": {
+   "size": 4685346,
+   "sha256": "dcd78d51569f3333ee3a17c7117c34cb0713fe37a0358cb2fa9b78b64c3028ef"
+  },
+  "patch_31_client_00.tre": {
+   "size": 51557904,
+   "sha256": "7a5a54294be43ee3d7d940e225a4957ee7743d43efbbc671a6ebf040c8d31f34"
+  },
+  "patch_31_shared_00.tre": {
+   "size": 7610352,
+   "sha256": "e646685910e9f959f7098ba28f132a0c366efe355bc10cac0509dbbd3c86567b"
+  },
+  "patch_32_client_00.tre": {
+   "size": 28101523,
+   "sha256": "fa3cd12140c3ad34a27c8e2c563cc9dad5d99513705327bda6943cfbd9e2089d"
+  },
+  "patch_32_shared_00.tre": {
+   "size": 10199816,
+   "sha256": "7445a70d2140acfee1c1633e6c39f40deca979f39939d3b08e48d19abc1cd16d"
+  },
+  "patch_33_client_00.tre": {
+   "size": 35393665,
+   "sha256": "ae4169be2a2d0446a6d6f5666bf0b21603019f15e8a0b7458b990434c1a1adcb"
+  },
+  "patch_33_shared_00.tre": {
+   "size": 5232221,
+   "sha256": "b883761c829ea3f3316d2b20efd57492d660cad414442675c02493b9e3d0fb39"
+  },
+  "patch_34_client_00.tre": {
+   "size": 19781801,
+   "sha256": "7e9fbb893906a2522cd2da4a9d4ce3492f0a986da29a327991b24e2632108097"
+  },
+  "patch_34_shared_00.tre": {
+   "size": 4379777,
+   "sha256": "e73a3da0dbb3815d4ff78647491ed2d9e48cf89b5ca8c35414ef6f1b6390b034"
+  },
+  "patch_35_client_00.tre": {
+   "size": 46959358,
+   "sha256": "07e1865f16841cc2f0988d1a6e72de1cc0fc6c0db399a2eb11b76ec468cd60db"
+  },
+  "patch_35_shared_00.tre": {
+   "size": 1870846,
+   "sha256": "10608595b6d7037674e25196782a6e6bc7dde8d7d650c9107ce5fe40080e1c8e"
+  },
+  "patch_36_client_00.tre": {
+   "size": 51250589,
+   "sha256": "6514efff5ac77470b3a584aeb3c8b94d3207ad30e268a4c1b85ab2c0c1988835"
+  },
+  "patch_36_shared_00.tre": {
+   "size": 6382378,
+   "sha256": "04bf720a22c04001a69d4afc87210fdcb6ee9b8037971241db11ac156e5e8654"
+  },
+  "patch_37_client_00.tre": {
+   "size": 57783672,
+   "sha256": "41edd8f033eeaf8828e319dd25742cd579a3bd38f5fe7d097c8e0338a4fdfbde"
+  },
+  "patch_37_shared_00.tre": {
+   "size": 8483974,
+   "sha256": "178b63df1163aa0c99298854cf8035e636afb9988f075055986560badda56bdb"
+  },
+  "patch_38_client_00.tre": {
+   "size": 30291936,
+   "sha256": "110660643c47fbe6b8be4a5d6d1a698487d8bce4a91b55560bbfbe3adec72d77"
+  },
+  "patch_38_shared_00.tre": {
+   "size": 1109617,
+   "sha256": "78d05197d2a45da1e931bd0e79b09596a4ccec7941c6491fc1311af94a5b5ff8"
+  },
+  "patch_39_client_00.tre": {
+   "size": 16166126,
+   "sha256": "666205b3f8b156b8964fe962d9fde7c2a9e8acba207d3ce21402d517c7af9ecb"
+  },
+  "patch_39_shared_00.tre": {
+   "size": 2703260,
+   "sha256": "ec4f0a9011dcf5850d4ffbc3047f30a8fe07fbaa661ab65ff191cc66d2fd44e8"
+  },
+  "patch_40_client_00.tre": {
+   "size": 26334771,
+   "sha256": "5955ae7e38ac577b2de1748cb9d15e4976262cead114ec51ff63e2a665238baf"
+  },
+  "patch_40_shared_00.tre": {
+   "size": 5725838,
+   "sha256": "49a35f07566b5a06e92d8f99963bef6917fb3e368727aefa0f035d1efaaa4732"
+  },
+  "patch_41_client_00.tre": {
+   "size": 48573112,
+   "sha256": "9d21c4048cfcc11b5a549402e32a23eadc760e24e41b6c967c44a5ca9c044ff9"
+  },
+  "patch_41_shared_00.tre": {
+   "size": 4151298,
+   "sha256": "691dd2b93e298b0fa49a7b0410e263b6f4f2e33570fde922dc42fc84ad8e58ed"
+  },
+  "patch_42_client_00.tre": {
+   "size": 76212316,
+   "sha256": "628b6d9b2e64266ac46769ba146ee8faf18c1cfbadd27686dedb44c8a8edd8dc"
+  },
+  "patch_42_shared_00.tre": {
+   "size": 2264953,
+   "sha256": "d22aef51869c24b84a6785a91896b1b516aba3846d3cac3298eec9bb13198244"
+  },
+  "patch_43_client_00.tre": {
+   "size": 87939658,
+   "sha256": "2b0f409f2c0db90c4de151df14466f1b2e650983217179db0250c7b5ea6c812e"
+  },
+  "patch_43_shared_00.tre": {
+   "size": 2690617,
+   "sha256": "4b279c9c47bb8d17dc731871db1a93ca8adef438cf771333d2a670792c1032d8"
+  },
+  "patch_44_client_00.tre": {
+   "size": 65578564,
+   "sha256": "4c30e0e96f64b21b037221ca3471bbdfa619059c4777d92bcbbea2b0426643ae"
+  },
+  "patch_44_shared_00.tre": {
+   "size": 6653731,
+   "sha256": "24ea8be33c352e6c0d4825b17e2f24bac39d799748d24278e4359b7581f9c9cd"
+  },
+  "patch_45_client_00.tre": {
+   "size": 36904478,
+   "sha256": "8f5d90138832b66f6cdb4376d747e3037d91f55ab502e7cbc29a330aeb1f5fe9"
+  },
+  "patch_45_shared_00.tre": {
+   "size": 6185535,
+   "sha256": "f3170400818a60f5d46e04ce8f308c4b169d9a581416a63f7f8b69bb0eaea3a5"
+  },
+  "patch_46_client_00.tre": {
+   "size": 56756989,
+   "sha256": "40530aa25fb8969c9fa48bcdf35275241fc532877cc8d553b2eb8ab526c508be"
+  },
+  "patch_46_shared_00.tre": {
+   "size": 2428940,
+   "sha256": "352980002b5734546e29ca8ed8028eb43dfa512ee56984421963a0a789f357e3"
+  },
+  "patch_47_client_00.tre": {
+   "size": 38869369,
+   "sha256": "3f4ea58f634dcc5ffa952487b772de507c553513593572d8053e81f2f8191cea"
+  },
+  "patch_47_shared_00.tre": {
+   "size": 3654729,
+   "sha256": "f653acd7cc2ef32c46830c2748ba945f8dd5eb272705bc72ef13fae4dad425e4"
+  },
+  "patch_48_client_00.tre": {
+   "size": 104711319,
+   "sha256": "3c5af083549f5bfb4664bf3939ae970085b660ddf1acc84296bae8c3a4696e69"
+  },
+  "patch_48_client_01.tre": {
+   "size": 104791987,
+   "sha256": "287e93674d1b94fc985352670777b506aafe4bba3891cc3537ac9cd03d710578"
+  },
+  "patch_48_client_02.tre": {
+   "size": 12245097,
+   "sha256": "0164fb095e8c4779535855f74f061d4196b803489a17883fd561107d53b771d9"
+  },
+  "patch_48_shared_00.tre": {
+   "size": 1744197,
+   "sha256": "bf70598d699990549118c5471403797364b0d641f93e131089bbcfef69853a41"
+  },
+  "patch_49_client_00.tre": {
+   "size": 24412493,
+   "sha256": "065041741272bcc659a42054064e01db0704079ec7c8b30c5cc52209d10bc74c"
+  },
+  "patch_49_shared_00.tre": {
+   "size": 3046000,
+   "sha256": "ce28606ee83b4684e3a0a331230390c91296908cfbe9ff310220fd7477939526"
+  },
+  "patch_50_client_00.tre": {
+   "size": 65695909,
+   "sha256": "86a803172d1c6a765fc016af0c815294611ddae18c196c9374d4a89bdb9fae22"
+  },
+  "patch_50_shared_00.tre": {
+   "size": 4092395,
+   "sha256": "b81b9049921d8459e84c2d2aafea7e5c421a7adc17dbe88273f85f014a900bbc"
+  },
+  "patch_51_client_00.tre": {
+   "size": 36219712,
+   "sha256": "e59427e159aa7b1f4001ce030a10a5ebfe05ea3e9fcecb72052bc4acb6795b5e"
+  },
+  "patch_51_shared_00.tre": {
+   "size": 4603494,
+   "sha256": "3cc33ab13e06ff1754e534a8a80a1268a4dc3b28785c30e60a4e4f5364bd6bb2"
+  },
+  "patch_52_client_00.tre": {
+   "size": 44097205,
+   "sha256": "10c272e2673f958b73b41b87f8e68a5844c3360d268ad62273aa766db63aa442"
+  },
+  "patch_52_shared_00.tre": {
+   "size": 4877235,
+   "sha256": "009bdf264d9430e31b6af4a84b29b87ff6aaa926537d2ea7468cb5f0209d52b2"
+  },
+  "patch_53_client_00.tre": {
+   "size": 46551154,
+   "sha256": "c8ab0950e137c97225c3cbc1a7394c3ce17279c26c8a01bae3b49e678d2e878e"
+  },
+  "patch_53_shared_00.tre": {
+   "size": 3422695,
+   "sha256": "d84dc7833b712ed9a0cc9eb6585d83095559401931b1432e69ff596696b13758"
+  },
+  "patch_54_client_00.tre": {
+   "size": 24619838,
+   "sha256": "c57a315bff08d4ecf94cfd56756d518d48d7f21555a59a2ec72b091e205f6877"
+  },
+  "patch_54_shared_00.tre": {
+   "size": 2765126,
+   "sha256": "e4332c58756b616e1f921055a483b4ee3cf6ce9474541e39a2cfceacda03d9f1"
+  },
+  "patch_55_client_00.tre": {
+   "size": 88263162,
+   "sha256": "4b15feecbfddd1f7dc51b93605ada8050176f253d7dc5f6320af8ac45968ea45"
+  },
+  "patch_55_shared_00.tre": {
+   "size": 3417375,
+   "sha256": "86f3ef4d9efb8847e3440d0d1f9c319ecccc56bf083d5d1b87716f20461ac06a"
+  },
+  "patch_56_client_00.tre": {
+   "size": 78228631,
+   "sha256": "21b9f620cfcbd52535e11ed05aefe4977c00146d3649f96feca75eafdd4f350a"
+  },
+  "patch_56_shared_00.tre": {
+   "size": 8027466,
+   "sha256": "12f3d14dd0a3243d3495625ed6b128a967f0a39ef1279f55cd36bdec42cdef0a"
+  },
+  "patch_57_client_00.tre": {
+   "size": 12831519,
+   "sha256": "8258bc4ee9dfc395f3174621cf1a7a5fb527d3f00323a577c6bf343420de90ca"
+  },
+  "patch_57_shared_00.tre": {
+   "size": 6883740,
+   "sha256": "f3b22b53d616b9c5e59b91808b6cf3b6e8de43860971a18d9baf8509e6862c4a"
+  },
+  "patch_58_client_00.tre": {
+   "size": 6076008,
+   "sha256": "f624803337f72e45dab78adda5ce34f16488257cf295f4903d03479bdee5766e"
+  },
+  "patch_58_shared_00.tre": {
+   "size": 2508646,
+   "sha256": "16f874233d1bc39dad45575b9fff03d15b4522a0d165250e0bd4091d54b6f7d5"
+  },
+  "patch_sku1_12_00.tre": {
+   "size": 6257317,
+   "sha256": "202008608c9735c047668bdaeab6a28760782f7f3c1fd1d1f978657302295afd"
+  },
+  "patch_sku1_13_00.tre": {
+   "size": 21315,
+   "sha256": "94802a98da8850d633420fa1a807505a6b6d22e655d7feb954f07b4c58d4fb20"
+  },
+  "patch_sku1_14_00.tre": {
+   "size": 944,
+   "sha256": "77b2e74998dd0c772b65359792386b775243a71999b0568cb68e8e1e01ff2e2b"
+  },
+  "patch_sku1_15_00.tre": {
+   "size": 76279094,
+   "sha256": "ef02632fb34d2085bed60a6fa2571f5544193b5f970a88e89db3d2a9ac2dea3c"
+  },
+  "patch_sku1_16_00.tre": {
+   "size": 1556636,
+   "sha256": "cae4369f9f2c4e0180aa4981801a96072b58f54133bf8b691c123558e0b1043d"
+  },
+  "patch_sku1_17_00.tre": {
+   "size": 9039,
+   "sha256": "a315a6fefdff255426cf5c03e2be5e2f1fe3b6c3cb8966e6e8953fee0599ecb8"
+  },
+  "patch_sku1_18_client_00.tre": {
+   "size": 541,
+   "sha256": "8d1a42804acbff2787a52630a23f70220f0ef85374183f59051a314e7e7b4876"
+  },
+  "patch_sku1_19_client_00.tre": {
+   "size": 2709431,
+   "sha256": "b40238db1a0ac0fdd75997c03b90337455a150fa8dfd2622bdca990364ada587"
+  },
+  "patch_sku1_19_shared_00.tre": {
+   "size": 4068,
+   "sha256": "934e292b96e0fe9fa3a2d0a432c774d51e6bc743200dae57b9653a6c01b8cab3"
+  },
+  "patch_sku1_23_client_00.tre": {
+   "size": 126621,
+   "sha256": "a96f46424dcd499e0ae71282fbc7c678725dce8759aae675291e62864b88cca0"
+  },
+  "patch_sku1_24_client_00.tre": {
+   "size": 47663807,
+   "sha256": "9131d3b3dd445b4e44a3e8efa9734e85ded09be86630ab35897e8f7e081fc791"
+  },
+  "patch_sku1_24_shared_00.tre": {
+   "size": 169285,
+   "sha256": "8c4bc66b64abcb33d53e78b7602f8375e6f8788e602c105391ddf86609d2af4e"
+  },
+  "patch_sku1_26_client_00.tre": {
+   "size": 2995122,
+   "sha256": "0d9fd943a96e60b0e8182ebddefa73f7d70ce96b1f62e168956924fc1a08b379"
+  },
+  "patch_sku1_28_client_00.tre": {
+   "size": 6436786,
+   "sha256": "e4afb563602065e7d82011343a4e53e801e98e9fc87762ed1259a1c277eb22ae"
+  },
+  "patch_sku1_28_shared_00.tre": {
+   "size": 52753,
+   "sha256": "670c33daeed9d7240a1b21a07fe3007c1e4ccf56ebcd2b23eb75a6812a0525b5"
+  },
+  "patch_sku1_29_client_00.tre": {
+   "size": 1715227,
+   "sha256": "fd7d635ebaf5d3b162c9eee938b601ae66e3ab774cffba694364145ea3bffe24"
+  },
+  "patch_sku1_31_client_00.tre": {
+   "size": 7515592,
+   "sha256": "ff9cb05346af70bdb22f14ff76b32a28aa0b658eb4c089ef396b046cab62f5cb"
+  },
+  "patch_sku1_32_client_00.tre": {
+   "size": 467,
+   "sha256": "15cf19798e70cb26d7bc71725c2045908e26181cd5e007ca34d5a7c48ef547d3"
+  },
+  "patch_sku1_33_client_00.tre": {
+   "size": 531594,
+   "sha256": "302c3631c6b91e01970d7830e1aba143929e4156c3da987f977ff8c4962ecc5e"
+  },
+  "patch_sku1_34_client_00.tre": {
+   "size": 254827,
+   "sha256": "48508d9926ffd264878c0fa3b967b45ca6cfd01f2e5a2a5469a6e10da4350d70"
+  },
+  "patch_sku1_37_client_00.tre": {
+   "size": 16096956,
+   "sha256": "5f4b28504b23d1f981aec2dfebf3a8cf71d61fc10b8908dacf06cd1680842a9d"
+  },
+  "patch_sku1_37_shared_00.tre": {
+   "size": 371332,
+   "sha256": "bfa137259b635f2357985f77bc43eb495b593f475ae46e6eab2f38aebafbe1a3"
+  },
+  "patch_sku1_39_client_00.tre": {
+   "size": 25960582,
+   "sha256": "c3d4fe1d0eed0f8f049d1436502b6f06e07e1a626018c2150fbee707c75148f2"
+  },
+  "patch_sku1_39_shared_00.tre": {
+   "size": 385801,
+   "sha256": "78e9aa368c254b490260de727519dacfa59e93a7da78533623374bbff4cfc84d"
+  },
+  "patch_sku1_40_client_00.tre": {
+   "size": 5502310,
+   "sha256": "6bfe4786c165efa9f37be65b97ea47130e1fc0a339f91f56c667b5395a8ba97b"
+  },
+  "patch_sku1_40_shared_00.tre": {
+   "size": 36626,
+   "sha256": "ea325f581182a9018f0af1e75c58754898c405f7af73bf39f22718f146426521"
+  },
+  "patch_sku1_41_client_00.tre": {
+   "size": 410308,
+   "sha256": "bdc3e16f6a056e80959e96676889f72b47fda8f7b02c5aebbc1fcde57a66119d"
+  },
+  "patch_sku1_42_client_00.tre": {
+   "size": 1443826,
+   "sha256": "1d05e54f0972d93728779d84db962957a65462b21473913d1bb015fc9769caaa"
+  },
+  "patch_sku1_44_client_00.tre": {
+   "size": 175153,
+   "sha256": "ba5652a774eade9e47daa0042ffa6be6b961cd632719b1f19f00772cd0b2299f"
+  },
+  "patch_sku1_45_client_00.tre": {
+   "size": 725601,
+   "sha256": "de79b6d6fa546fc8f56dc79468dc31b4ba95f7529ea50e2184c582c88a5c96cd"
+  },
+  "patch_sku1_53_client_00.tre": {
+   "size": 63152,
+   "sha256": "d96a0398d52a024b4a9db18f3cb40dfd5e6a9e63bb5ce51ceee9ed297c06f741"
+  },
+  "patch_sku1_54_client_00.tre": {
+   "size": 509534,
+   "sha256": "cfe44087b6fe1532a96b8f0e0c9fb554d61ebeb8bbb66b22bdef8b70c90757aa"
+  },
+  "patch_sku1_55_client_00.tre": {
+   "size": 1661949,
+   "sha256": "96a17dc65a5794f3bcf22aaf52ae64c615f8e5ca63604c1a2589de31bc6ed973"
+  },
+  "patch_sku1_57_client_00.tre": {
+   "size": 761,
+   "sha256": "83b2ac769c2486df32516fc567fa2896f9c198ac274cec657dc3098027f39a6c"
+  },
+  "patch_sku1_58_client_00.tre": {
+   "size": 6565586,
+   "sha256": "faa687c658fc127404553f85cde8f6ae44b592d4fddeb07c6734467e6562ad3f"
+  },
+  "patch_sku2_15_00.tre": {
+   "size": 104549627,
+   "sha256": "eb81a5a02a5a37e2e63a62a201e52aa2b9a57659494f2ed90b12a77892b06fde"
+  },
+  "patch_sku2_15_01.tre": {
+   "size": 5923977,
+   "sha256": "5421231f6973b56b378e4f15e23cf979abbeb0037ffcd863386726a37c8f980c"
+  },
+  "patch_sku2_16_00.tre": {
+   "size": 9780580,
+   "sha256": "794695e81b76ed0630a61d9433987dadf5ef8e17d1dd75d1aaec1c2cb6d0caf2"
+  },
+  "patch_sku2_17_00.tre": {
+   "size": 14599395,
+   "sha256": "9e047cc799ad8e51a51a84f6a765e4d05af2d3658e0595c53d18a358cf28fe75"
+  },
+  "patch_sku2_23_client_00.tre": {
+   "size": 608309,
+   "sha256": "2351e2583ee3bf2c571d989106ab22cea304e574d9219c1f324776f61236b320"
+  },
+  "patch_sku2_24_client_00.tre": {
+   "size": 7707799,
+   "sha256": "570ef9418ee35fcd5c5b8ee29094f2e4fbfd8a2992c88ec2affb0ba4b6c7b006"
+  },
+  "patch_sku2_24_shared_00.tre": {
+   "size": 28330,
+   "sha256": "f70afca75f00656fbbba191801cd4499bd6bf16bf3ca7ed818fa54460acfcb6e"
+  },
+  "patch_sku2_26_client_00.tre": {
+   "size": 744054,
+   "sha256": "d5d30f62d17ac85f19d78c44e60d462b81940b30cbead3eca7ee8657488f4dad"
+  },
+  "patch_sku2_33_client_00.tre": {
+   "size": 1539568,
+   "sha256": "d6a9ddd455b076a258d88502c56ba89b345cf6a1aba38d4921cdcbbefeb07a04"
+  },
+  "patch_sku2_33_shared_00.tre": {
+   "size": 37675,
+   "sha256": "1366a33cd1340eded778b8f832f4c5bb965787009099898da605e461ecfced2b"
+  },
+  "patch_sku2_34_client_00.tre": {
+   "size": 441077,
+   "sha256": "d3ea92176966b4f8b04c14a828efe97c292e4a6e64b2659ad2afe63a6788d96f"
+  },
+  "patch_sku2_34_shared_00.tre": {
+   "size": 2384,
+   "sha256": "2fef523026c23c8a4529eba4b704d497cbb79dca2861bdfffdeb32b0d724a73e"
+  },
+  "patch_sku2_44_client_00.tre": {
+   "size": 1166534,
+   "sha256": "b58e616440a3dd2b3a73c3a528c48127ac755cf9fc1639e74bf5e49063aaae90"
+  },
+  "patch_sku2_44_shared_00.tre": {
+   "size": 1585,
+   "sha256": "7de5ac72de31a2db27f55b3fb36148e94113ce1ad831648e41dfbf40ab64fc5f"
+  },
+  "patch_sku2_56_client_00.tre": {
+   "size": 161346,
+   "sha256": "4626062c7d7859c04e2c3d012d632fce91263715422e422f885731f1a509d78f"
+  },
+  "patch_sku3_24_client_00.tre": {
+   "size": 61793805,
+   "sha256": "128845d5d3375e0a263bef1c46d7ec89f12c90ed47534d5002f310b0c4fc676c"
+  },
+  "patch_sku3_24_shared_00.tre": {
+   "size": 841719,
+   "sha256": "083a01cf0200213f7809e258a40a9bd0932470c9c17a6c11ce0b9d06dcff3b59"
+  },
+  "patch_sku3_25_client_00.tre": {
+   "size": 10595540,
+   "sha256": "cecf366e7c00f7917e6df03b3354a31d303262ff75313b79de6dabcfa1519e69"
+  },
+  "patch_sku3_25_shared_00.tre": {
+   "size": 178943,
+   "sha256": "dcf1729a8ed7a759ce675b0a092271e435da3a938e88be17fcd08cb9d81835f0"
+  },
+  "patch_sku3_27_client_00.tre": {
+   "size": 8417813,
+   "sha256": "1e44f04e6ee2a4c1c23e990c992519a6c92879e4bf9c9001a4b5c8ee01efc248"
+  },
+  "patch_sku3_27_shared_00.tre": {
+   "size": 36626,
+   "sha256": "e9d05db06eb15c20fab185f82adf725472f1368be9ec5223d74e5d87b768bb34"
+  },
+  "patch_sku3_33_client_00.tre": {
+   "size": 8818711,
+   "sha256": "fa4683b47410680399aa70c892297f7a65f9d3b550e9dc91eff5e7466de5a927"
+  },
+  "patch_sku3_33_shared_00.tre": {
+   "size": 202764,
+   "sha256": "44cbaf42b267bbd213d52f47d8621f3616000fdc7ab54f7dc7ba699174377303"
+  },
+  "sku0_client.toc": {
+   "size": 13888528,
+   "sha256": "a8e01bfb5f304131143bcb165c3fe8d2a075262730caa020337a9a4d351358d8"
+  },
+  "sku1_client.toc": {
+   "size": 947044,
+   "sha256": "81ad84b735a4719420ebd71cda40aec7af64bd36f3b1f8f38be51d686faaac40"
+  },
+  "sku2_client.toc": {
+   "size": 210833,
+   "sha256": "4ca2b6448d1e8dcdaee47213a6a06b18c613057a29235a824659c10ad033dcb1"
+  },
+  "sku3_client.toc": {
+   "size": 87143,
+   "sha256": "59408309d8957e7ea25f673e83a7a8b907fedf87b413c2f3a9e976162c1c8a46"
+  }
+ }
+}
