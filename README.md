@@ -32,7 +32,11 @@ Open the printed URL, click **Enter the galaxy**, and go.
 
 URL options: `?planet=lok` spawns on a specific world, `?class=bounty_hunter` picks a class, `?lowfx=1` disables shadows and halves resolution for weak machines.
 
-## What exists today (v0.2)
+## What exists today (v0.3)
+
+- **Rigged character pipeline**: skinned GLTF characters with an animation state machine (idle, walk, run, airborne, seated), clip speed matched to movement, and world-space arm solving so aiming and saber swings override the clip pose. The Mixamo X Bot ships as a stand-in in `public/assets/characters/`; add `?rig=0` to use the primitive body.
+- **SWG asset converter** in `tools/swg/`: reads TRE archives and IFF files from a locally owned client install and writes static meshes as GLB. See `tools/swg/README.md`. Output goes to the git-ignored `assets-private/`.
+- **Design doc** in `docs/DESIGN.md` with the settled decisions, pillars, combat model, skill system and phases.
 
 - **Physics** via [Rapier](https://rapier.rs/) (Rust compiled to WebAssembly). Terrain chunks near the player get heightfield colliders, trees and rocks get cylinders, creatures are dynamic rigid bodies, and the player is a kinematic character controller with auto-step, slope limits and ground snapping. Force Push, detonators and deaths all move real bodies.
 - **Speeder bike**: a dynamic body held up by four spring ray casts, with throttle, steering, lateral grip, boost, hops and engine drag. Mount it with `E`.
@@ -70,7 +74,7 @@ Rough order, all up for discussion:
 The original SWG client assets (the `.tre` archives) are copyrighted by Sony Online Entertainment / Lucasfilm and cannot be redistributed, so they will never be committed to this repo. A private build could load them from a local install via a converter, but a public site cannot ship them. The plan instead:
 
 - **CC0 low-poly packs** that already match the flat-shaded style: Kenney, Quaternius, Poly Pizza. Good for props, buildings and vehicles.
-- **Mixamo** for a rigged humanoid and a large animation library (free with an Adobe account, licensed for use in games).
+- **Mixamo** for a rigged humanoid and a large animation library (free with an Adobe account, licensed for use in games). The X Bot stand-in in this repo comes from the three.js examples.
 - **Sketchfab** fan-made Star Wars models under CC-BY where the licence allows it, credited in a `CREDITS.md`.
 
 GLTF is the loading format for all of it.
@@ -78,11 +82,13 @@ GLTF is the loading format for all of it.
 ## Layout
 
 ```
+docs/DESIGN.md   game design decisions
+tools/swg/       SWG asset converter (TRE, IFF, .msh to GLB)
 src/
   core/      input, camera, physics wrapper
   data/      planet definitions
   world/     noise, terrain, props, creatures, day cycle, world streaming
-  player/    character controller and model
+  player/    character controller, primitive model, skinned rig
   combat/    class kits (Jedi, Bounty Hunter), effects, hit detection
   vehicles/  speeder bike
   ui/        HUD and galaxy map

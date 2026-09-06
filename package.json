@@ -8,7 +8,8 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "swg": "node tools/swg/cli.mjs"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.20.0",

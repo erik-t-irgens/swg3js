@@ -5,6 +5,7 @@ import type { Input } from '../core/input';
 import { RAPIER, type Physics } from '../core/physics';
 import type { Speeder } from '../vehicles/speeder';
 import type { World } from '../world/world';
+import type { CharacterRig } from './rig';
 
 const RUN_SPEED = 7.5;
 const WALK_SPEED = 2.8;
@@ -15,6 +16,7 @@ const fwd = new THREE.Vector3();
 const rgt = new THREE.Vector3();
 const move = new THREE.Vector3();
 const tmpQ = new THREE.Quaternion();
+const armDir = new THREE.Vector3();
 
 interface Parts {
   hips: THREE.Group;
@@ -158,6 +160,8 @@ export class Player {
   private phase = 0;
   private moveAmount = 0;
   private readonly parts: Parts;
+  private rig: CharacterRig | null = null;
+  private groundSpeed = 0;
 
   constructor(scene: THREE.Scene, physics: Physics) {
     const { group, parts } = buildCharacter();
@@ -207,6 +211,40 @@ export class Player {
     if (!jedi && this.saberOn) this.toggleSaber();
     this.parts.saber.visible = jedi;
     this.parts.torso.material = new THREE.MeshStandardMaterial({ color: jedi ? 0xc9b58a : 0x5f6b6e, roughness: 0.8, metalness: jedi ? 0 : 0.3, flatShading: true });
+    this.applyClassLook();
+  }
+
+  /** Swap the primitive body for a skinned rig; weapons move to its hand bones. */
+  attachRig(rig: CharacterRig): void {
+    this.rig = rig;
+    this.parts.hips.visible = false;
+    rig.root.scale.setScalar(1.1);
+    this.group.add(rig.root);
+    const hand = rig.bone('mixamorig:RightHand');
+    const spine = rig.bone('mixamorig:Spine2');
+    const p = this.parts;
+    if (hand) {
+      // Bone space is centimetres; the hand's -X runs along the fingers. Weapons
+      // continue the arm line so an aimed arm points them where it looks.
+      hand.add(p.saber, p.rifle);
+      p.saber.position.set(-8, -1, 1);
+      p.saber.rotation.set(0, 0, Math.PI / 2);
+      p.saber.scale.setScalar(100);
+      p.rifle.position.set(-10, -2, 2);
+      p.rifle.rotation.set(0, -Math.PI / 2, 0);
+      p.rifle.scale.setScalar(100);
+    }
+    if (spine) {
+      spine.add(p.jetpack);
+      p.jetpack.position.set(0, 6, -14);
+      p.jetpack.scale.setScalar(100);
+    }
+    this.applyClassLook();
+  }
+
+  private applyClassLook(): void {
+    const jedi = this.classId === 'jedi';
+    this.rig?.tint(jedi ? 0xb9a57c : 0x66727a);
   }
 
   toggleSaber(): void {
@@ -278,6 +316,7 @@ export class Player {
 
     if (this.mounted) {
       this.animateSeated();
+      this.animateRig(dt, 0, false);
       return;
     }
 
@@ -359,11 +398,47 @@ export class Player {
 
     this.moveAmount += ((moving ? Math.min(1, speed / RUN_SPEED) : 0) - this.moveAmount) * Math.min(1, dt * 10);
     this.phase += dt * speed * (moving ? 1.9 : 0);
+    this.groundSpeed = moving ? speed : 0;
     this.animate(dt);
+    this.animateRig(dt, this.groundSpeed, moving);
 
     this.group.position.copy(this.pos);
     this.group.rotation.set(0, this.heading, 0);
     this.group.updateMatrixWorld(true);
+  }
+
+  private animateRig(dt: number, speed: number, moving: boolean): void {
+    const rig = this.rig;
+    if (!rig) return;
+    if (this.mounted) rig.setState('seated');
+    else if (!this.grounded) rig.setState('air');
+    else if (!moving) rig.setState('idle');
+    else rig.setState(speed < 4.5 ? 'walk' : 'run', speed);
+    rig.update(dt);
+    this.group.updateMatrixWorld(true);
+
+    if (this.mounted) {
+      rig.aimArm('right', armDir.set(-0.25, -0.15, 0.95).normalize());
+      rig.aimArm('left', armDir.set(0.25, -0.15, 0.95).normalize());
+    } else if (this.classId === 'bounty_hunter') {
+      rig.aimArm('right', armDir.set(-0.15, 0.02, 0.99).normalize());
+      rig.aimArm('left', armDir.set(0.2, -0.1, 0.95).normalize());
+    } else if (this.swing >= 0) {
+      const t = this.swing;
+      const e = t < 0.3 ? t / 0.3 : 1;
+      const s = t < 0.3 ? 0 : Math.min(1, (t - 0.3) / 0.45);
+      const eased = s * s * (3 - 2 * s);
+      // Raise up and back, then chop down and across the body.
+      armDir.set(-0.35 + 0.15 * e, 0.1 + 0.85 * e, 0.3 - 0.6 * e);
+      armDir.lerp(new THREE.Vector3(0.55, -0.45, 0.7), eased).normalize();
+      rig.aimArm('right', armDir, -0.6 * eased);
+    } else if (this.saberOn) {
+      rig.aimArm('right', armDir.set(-0.45, -0.55, 0.7).normalize());
+    }
+    for (const f of this.parts.flames) {
+      f.visible = this.jetThrust;
+      f.scale.y = 0.8 + Math.random() * 0.5;
+    }
   }
 
   private animateSeated(): void {

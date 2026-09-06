@@ -8,6 +8,7 @@ import { Input } from './core/input';
 import { Physics } from './core/physics';
 import { PLANETS, planetById, type PlanetDef } from './data/planets';
 import { Player } from './player/player';
+import { CharacterRig } from './player/rig';
 import { GalaxyMap } from './ui/galaxyMap';
 import { Hud } from './ui/hud';
 import type { DriveInput } from './vehicles/speeder';
@@ -103,6 +104,11 @@ class App {
     });
 
     const params = new URLSearchParams(location.search);
+    if (params.get('rig') !== '0') {
+      CharacterRig.load(`${import.meta.env.BASE_URL}assets/characters/xbot.glb`)
+        .then((rig) => this.player.attachRig(rig))
+        .catch((err) => console.warn('Character rig failed to load, using primitives', err));
+    }
     const initialClass = params.get('class') === 'bounty_hunter' ? 'bounty_hunter' : 'jedi';
     this.setClass(initialClass);
     const initial = params.get('planet');
