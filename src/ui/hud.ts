@@ -1,5 +1,11 @@
+import type { Kit } from '../combat/kit';
 import type { PlanetDef } from '../data/planets';
-import { POWERS, type ForcePowers } from '../force/powers';
+
+const COMMON_HELP = [
+  '<b>WASD</b> move · <b>Mouse</b> look · <b>Wheel</b> zoom · <b>Space</b> jump · <b>Shift</b> walk',
+  '<b>E</b> mount/dismount speeder · <b>C</b> switch class · <b>T</b> fast-forward time',
+  '<b>M</b> galaxy map · <b>H</b> help · <b>Esc</b> release mouse',
+];
 
 export class Hud {
   private readonly root: HTMLElement;
@@ -7,57 +13,63 @@ export class Hud {
   private readonly planetTag: HTMLElement;
   private readonly loc: HTMLElement;
   private readonly fps: HTMLElement;
-  private readonly forceFill: HTMLElement;
-  private readonly forceText: HTMLElement;
-  private readonly slots: HTMLElement[] = [];
-  private readonly saber: HTMLElement;
+  private readonly clock: HTMLElement;
+  private readonly className: HTMLElement;
+  private readonly hpFill: HTMLElement;
+  private readonly hpText: HTMLElement;
+  private readonly resFill: HTMLElement;
+  private readonly resText: HTMLElement;
+  private readonly slotsEl: HTMLElement;
   private readonly help: HTMLElement;
-  private acc = 0;
+  private readonly crosshair: HTMLElement;
+  private readonly prompt: HTMLElement;
+  private readonly hurtEl: HTMLElement;
+  private slots: HTMLElement[] = [];
+  private hurtLevel = 0;
+  private lastFps = performance.now();
   private frames = 0;
 
   constructor(parent: HTMLElement) {
     this.root = document.createElement('div');
     this.root.id = 'hud';
     this.root.innerHTML = `
+      <div class="hurt"></div>
       <div class="panel top-left">
         <div class="planet-name"></div>
         <div class="planet-tag"></div>
         <div class="loc"></div>
       </div>
+      <div class="panel help"></div>
       <div class="panel top-right">
+        <div class="clock"></div>
         <div class="fps"></div>
         <div class="hint"><b>M</b> Galaxy map &nbsp; <b>H</b> Help</div>
       </div>
+      <div class="crosshair"></div>
+      <div class="prompt"></div>
       <div class="bottom">
-        <div class="force-bar"><div class="force-fill"></div><div class="force-text"></div></div>
+        <div class="class-name"></div>
+        <div class="bar hp"><div class="fill"></div><div class="text"></div></div>
+        <div class="bar res"><div class="fill"></div><div class="text"></div></div>
         <div class="slots"></div>
-      </div>
-      <div class="panel help">
-        <div><b>WASD</b> move · <b>Mouse</b> look · <b>Wheel</b> zoom</div>
-        <div><b>Space</b> jump · <b>Shift</b> walk · <b>L</b> lightsaber</div>
-        <div><b>1</b> Force Jump · <b>2</b> Force Speed · <b>3</b> Force Push · <b>4</b> Force Lightning (hold)</div>
-        <div><b>M</b> galaxy map · <b>Esc</b> release mouse</div>
       </div>`;
     parent.appendChild(this.root);
-    this.planetName = this.root.querySelector('.planet-name')!;
-    this.planetTag = this.root.querySelector('.planet-tag')!;
-    this.loc = this.root.querySelector('.loc')!;
-    this.fps = this.root.querySelector('.fps')!;
-    this.forceFill = this.root.querySelector('.force-fill')!;
-    this.forceText = this.root.querySelector('.force-text')!;
-    this.help = this.root.querySelector('.help')!;
-    const slots = this.root.querySelector('.slots')!;
-    for (const p of POWERS) {
-      const el = document.createElement('div');
-      el.className = 'slot';
-      el.innerHTML = `<span class="key">${p.key}</span><span class="name">${p.name}</span><span class="cost">${p.cost}</span>`;
-      slots.appendChild(el);
-      this.slots.push(el);
-    }
-    this.saber = document.createElement('div');
-    this.saber.className = 'slot saber';
-    this.saber.innerHTML = `<span class="key">L</span><span class="name">Lightsaber</span><span class="cost">off</span>`;
-    slots.appendChild(this.saber);
+    const q = (sel: string) => this.root.querySelector<HTMLElement>(sel)!;
+    this.planetName = q('.planet-name');
+    this.planetTag = q('.planet-tag');
+    this.loc = q('.loc');
+    this.fps = q('.fps');
+    this.clock = q('.clock');
+    this.className = q('.class-name');
+    this.hpFill = q('.hp .fill');
+    this.hpText = q('.hp .text');
+    this.resFill = q('.res .fill');
+    this.resText = q('.res .text');
+    this.slotsEl = q('.slots');
+    this.help = q('.help');
+    this.crosshair = q('.crosshair');
+    this.prompt = q('.prompt');
+    this.hurtEl = q('.hurt');
   }
 
   setPlanet(p: PlanetDef): void {
@@ -65,25 +77,68 @@ export class Hud {
     this.planetTag.textContent = p.tagline;
   }
 
+  setKit(kit: Kit): void {
+    this.className.textContent = kit.name;
+    this.slotsEl.innerHTML = '';
+    this.slots = [];
+    for (const s of kit.slots) {
+      const el = document.createElement('div');
+      el.className = 'slot';
+      el.innerHTML = `<div class="cd"></div><span class="key">${s.key}</span><span class="name">${s.name}</span><span class="cost">${s.cost}</span>`;
+      this.slotsEl.appendChild(el);
+      this.slots.push(el);
+    }
+    const saber = document.createElement('div');
+    saber.className = 'slot saber';
+    saber.innerHTML = `<div class="cd"></div><span class="key">L</span><span class="name">Lightsaber</span><span class="cost">off</span>`;
+    saber.hidden = kit.id !== 'jedi';
+    this.slotsEl.appendChild(saber);
+    this.slots.push(saber);
+    this.help.innerHTML = [...COMMON_HELP, ...kit.help].map((l) => `<div>${l}</div>`).join('');
+    this.crosshair.hidden = kit.id !== 'bounty_hunter';
+  }
+
+  setPrompt(text: string): void {
+    if (this.prompt.innerHTML !== text) this.prompt.innerHTML = text;
+  }
+
   toggleHelp(): void {
     this.help.classList.toggle('hidden');
   }
 
-  update(dt: number, x: number, y: number, z: number, powers: ForcePowers, saberOn: boolean, creatureName: string): void {
-    this.acc += dt;
+  hurt(): void {
+    this.hurtLevel = 1;
+  }
+
+  update(dt: number, x: number, y: number, z: number, kit: Kit, hp: number, maxHp: number, clock: string, creatureName: string, saberOn: boolean): void {
     this.frames++;
-    if (this.acc >= 0.25) {
-      this.fps.textContent = `${Math.round(this.frames / this.acc)} fps`;
+    const now = performance.now();
+    const acc = (now - this.lastFps) / 1000;
+    if (acc >= 0.25) {
+      this.lastFps = now;
+      this.fps.textContent = `${Math.round(this.frames / acc)} fps`;
       this.loc.textContent = `/loc ${x.toFixed(0)}, ${y.toFixed(0)}, ${z.toFixed(0)} · nearby: ${creatureName}`;
-      this.acc = 0;
+      this.clock.textContent = clock;
       this.frames = 0;
     }
-    const f = powers.force / powers.maxForce;
-    this.forceFill.style.width = `${(f * 100).toFixed(1)}%`;
-    this.forceText.textContent = `Force ${Math.round(powers.force)}`;
-    this.slots[1].classList.toggle('active', powers.speedActive);
-    this.slots[3].classList.toggle('active', powers.lightningActive);
-    this.saber.classList.toggle('active', saberOn);
-    this.saber.querySelector('.cost')!.textContent = saberOn ? 'on' : 'off';
+    this.hpFill.style.width = `${((hp / maxHp) * 100).toFixed(1)}%`;
+    this.hpText.textContent = `Health ${Math.ceil(hp)}`;
+    const r = kit.resource;
+    this.resFill.style.width = `${((r.value / r.max) * 100).toFixed(1)}%`;
+    this.resText.textContent = `${r.label} ${Math.round(r.value)}`;
+    for (let i = 0; i < kit.slots.length; i++) {
+      const el = this.slots[i];
+      el.classList.toggle('active', kit.slotActive(i));
+      (el.firstElementChild as HTMLElement).style.height = `${(kit.slotCooldown(i) * 100).toFixed(0)}%`;
+    }
+    const saber = this.slots[kit.slots.length];
+    if (saber && !saber.hidden) {
+      saber.classList.toggle('active', saberOn);
+      saber.querySelector('.cost')!.textContent = saberOn ? 'on' : 'off';
+    }
+    if (this.hurtLevel > 0) {
+      this.hurtLevel = Math.max(0, this.hurtLevel - dt * 2);
+      this.hurtEl.style.opacity = this.hurtLevel.toFixed(2);
+    }
   }
 }

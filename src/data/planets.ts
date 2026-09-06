@@ -34,7 +34,7 @@ export interface PlanetDef {
     rock: number;
     treeScale: number;
   };
-  creatures: { name: string; count: number; color: number; size: number; speed: number };
+  creatures: { name: string; count: number; color: number; size: number; speed: number; hp: number; aggressive: boolean; damage: number };
 }
 
 export const PLANETS: PlanetDef[] = [
@@ -51,7 +51,7 @@ export const PLANETS: PlanetDef[] = [
     terrain: { base: 0, amplitude: 16, frequency: 0.0038, octaves: 4, ridged: 0.6, flatten: 1.1, detail: 0.35 },
     palette: { low: 0xd8b073, mid: 0xe7c78d, high: 0xf2dcaa, slope: 0xb48d56, shore: 0xe7c78d },
     props: { treeDensity: 0, rockDensity: 0.55, treeStyle: 'none', canopy: 0x000000, trunk: 0x000000, rock: 0x8f7355, treeScale: 1 },
-    creatures: { name: 'Bantha', count: 8, color: 0x6b5334, size: 2.3, speed: 2 },
+    creatures: { name: 'Bantha', count: 8, color: 0x6b5334, size: 2.3, speed: 2, hp: 260, aggressive: false, damage: 0 },
   },
   {
     id: 'naboo',
@@ -67,7 +67,7 @@ export const PLANETS: PlanetDef[] = [
     water: { level: 0, color: 0x2e7fbb, opacity: 0.75 },
     palette: { low: 0x74a64b, mid: 0x4f8c3a, high: 0x9db76c, slope: 0x7c6a4e, shore: 0xd9c98f },
     props: { treeDensity: 1.0, rockDensity: 0.2, treeStyle: 'round', canopy: 0x3f7d32, trunk: 0x6a4a2a, rock: 0x8d8a80, treeScale: 1.2 },
-    creatures: { name: 'Kaadu', count: 10, color: 0x7aa86b, size: 1.3, speed: 4.5 },
+    creatures: { name: 'Kaadu', count: 10, color: 0x7aa86b, size: 1.3, speed: 4.5, hp: 90, aggressive: false, damage: 0 },
   },
   {
     id: 'corellia',
@@ -83,7 +83,7 @@ export const PLANETS: PlanetDef[] = [
     water: { level: 0, color: 0x2a6fa8, opacity: 0.78 },
     palette: { low: 0x5f9a47, mid: 0x4a7f3a, high: 0x8a9a75, slope: 0x6f6a60, shore: 0xc8ba85 },
     props: { treeDensity: 0.9, rockDensity: 0.35, treeStyle: 'pine', canopy: 0x2f6b34, trunk: 0x5d4330, rock: 0x7f7f7a, treeScale: 1.1 },
-    creatures: { name: 'Durni', count: 10, color: 0x8a7a5a, size: 0.9, speed: 5 },
+    creatures: { name: 'Durni', count: 10, color: 0x8a7a5a, size: 0.9, speed: 5, hp: 50, aggressive: false, damage: 0 },
   },
   {
     id: 'dantooine',
@@ -99,7 +99,7 @@ export const PLANETS: PlanetDef[] = [
     water: { level: -4, color: 0x3d7fa6, opacity: 0.7 },
     palette: { low: 0xb9ab53, mid: 0x9ea34e, high: 0xc5bd7a, slope: 0x8a7a55, shore: 0xcfc38a },
     props: { treeDensity: 0.25, rockDensity: 0.3, treeStyle: 'round', canopy: 0x6f8f3a, trunk: 0x6b5238, rock: 0x9a917f, treeScale: 1.4 },
-    creatures: { name: 'Bol', count: 8, color: 0x5e4d3a, size: 2.6, speed: 2.5 },
+    creatures: { name: 'Bol', count: 8, color: 0x5e4d3a, size: 2.6, speed: 2.5, hp: 300, aggressive: false, damage: 0 },
   },
   {
     id: 'lok',
@@ -114,7 +114,7 @@ export const PLANETS: PlanetDef[] = [
     terrain: { base: 2, amplitude: 48, frequency: 0.0032, octaves: 5, ridged: 0.8, flatten: 1.0, detail: 0.7 },
     palette: { low: 0x6a5244, mid: 0x8a6a56, high: 0xa89383, slope: 0x4a3a33, shore: 0x8a6a56 },
     props: { treeDensity: 0, rockDensity: 1.0, treeStyle: 'none', canopy: 0x000000, trunk: 0x000000, rock: 0x3d3230, treeScale: 1 },
-    creatures: { name: 'Kimogila', count: 6, color: 0x5f6b3a, size: 3.2, speed: 3 },
+    creatures: { name: 'Kimogila', count: 6, color: 0x5f6b3a, size: 3.2, speed: 3, hp: 420, aggressive: true, damage: 24 },
   },
   {
     id: 'endor',
@@ -130,7 +130,7 @@ export const PLANETS: PlanetDef[] = [
     water: { level: -6, color: 0x2f6f8a, opacity: 0.8 },
     palette: { low: 0x3f6e33, mid: 0x4f7f3a, high: 0x6f8a55, slope: 0x5a4d3d, shore: 0x8a7a55 },
     props: { treeDensity: 1.5, rockDensity: 0.25, treeStyle: 'giant', canopy: 0x2c5a2e, trunk: 0x5a4030, rock: 0x6f6f66, treeScale: 1.0 },
-    creatures: { name: 'Boar-wolf', count: 10, color: 0x4a3a2a, size: 1.4, speed: 5.5 },
+    creatures: { name: 'Boar-wolf', count: 10, color: 0x4a3a2a, size: 1.4, speed: 5.5, hp: 120, aggressive: true, damage: 12 },
   },
   {
     id: 'dathomir',
@@ -146,7 +146,7 @@ export const PLANETS: PlanetDef[] = [
     water: { level: -5, color: 0x4a5a3a, opacity: 0.85 },
     palette: { low: 0x8a4a35, mid: 0xa25f3f, high: 0xc08a5f, slope: 0x5a2f24, shore: 0x9a6a4a },
     props: { treeDensity: 0.6, rockDensity: 0.5, treeStyle: 'dead', canopy: 0x3a2a24, trunk: 0x4a342a, rock: 0x6a4a3a, treeScale: 1.3 },
-    creatures: { name: 'Rancor', count: 5, color: 0x6b4d3a, size: 4.2, speed: 3.5 },
+    creatures: { name: 'Rancor', count: 5, color: 0x6b4d3a, size: 4.2, speed: 3.5, hp: 900, aggressive: true, damage: 38 },
   },
   {
     id: 'yavin4',
@@ -162,7 +162,7 @@ export const PLANETS: PlanetDef[] = [
     water: { level: -3, color: 0x3a7a6a, opacity: 0.8 },
     palette: { low: 0x4f8a3a, mid: 0x3f7a30, high: 0x7a9a4a, slope: 0x6a5a40, shore: 0xa89a6a },
     props: { treeDensity: 1.5, rockDensity: 0.3, treeStyle: 'round', canopy: 0x2f6a2c, trunk: 0x5a4a30, rock: 0x7a7a6a, treeScale: 1.5 },
-    creatures: { name: 'Mawgax', count: 10, color: 0x7a5a3a, size: 1.2, speed: 4 },
+    creatures: { name: 'Mawgax', count: 10, color: 0x7a5a3a, size: 1.2, speed: 4, hp: 100, aggressive: true, damage: 9 },
   },
   {
     id: 'talus',
@@ -178,7 +178,7 @@ export const PLANETS: PlanetDef[] = [
     water: { level: 1, color: 0x2f7fb0, opacity: 0.75 },
     palette: { low: 0x6faa4f, mid: 0x5a9542, high: 0x9ab27a, slope: 0x7a6a50, shore: 0xd0c48a },
     props: { treeDensity: 0.7, rockDensity: 0.25, treeStyle: 'round', canopy: 0x3f8a3a, trunk: 0x6a4a2a, rock: 0x8a8a80, treeScale: 1.1 },
-    creatures: { name: 'Kahmurra', count: 10, color: 0x8fa07a, size: 1.0, speed: 4 },
+    creatures: { name: 'Kahmurra', count: 10, color: 0x8fa07a, size: 1.0, speed: 4, hp: 70, aggressive: false, damage: 0 },
   },
   {
     id: 'rori',
@@ -194,7 +194,7 @@ export const PLANETS: PlanetDef[] = [
     water: { level: 2, color: 0x4a6a4a, opacity: 0.85 },
     palette: { low: 0x5a7a3a, mid: 0x6a8a45, high: 0x8a9a60, slope: 0x5a5a3a, shore: 0x6a6a45 },
     props: { treeDensity: 1.1, rockDensity: 0.15, treeStyle: 'swamp', canopy: 0x3a6a35, trunk: 0x4a3a2a, rock: 0x6a6a5a, treeScale: 1.2 },
-    creatures: { name: 'Torton', count: 6, color: 0x5a6b4a, size: 2.6, speed: 1.5 },
+    creatures: { name: 'Torton', count: 6, color: 0x5a6b4a, size: 2.6, speed: 1.5, hp: 320, aggressive: false, damage: 0 },
   },
 ];
 

@@ -16,20 +16,31 @@ Open the printed URL, click **Enter the galaxy**, and go.
 | WASD / arrows | Move (relative to camera) |
 | Mouse | Look (pointer locked) |
 | Wheel | Zoom camera |
-| Space | Jump |
-| Shift | Walk |
-| 1 | Force Jump |
-| 2 | Force Speed (toggle) |
-| 3 | Force Push |
-| 4 | Force Lightning (hold) |
-| L | Lightsaber |
+| Space | Jump (Bounty Hunter: hold in the air for jetpack) |
+| Shift | Walk (on a speeder: boost) |
+| LMB | Attack: saber swing or blaster fire |
+| E | Mount / dismount the speeder |
+| C | Switch class (Jedi / Bounty Hunter) |
+| T | Hold to fast-forward the day |
 | M | Galaxy map |
 | H | Toggle help |
 | Esc | Release mouse |
 
-Add `?planet=lok` (or any planet id) to the URL to spawn on a specific world.
+**Jedi**: `1` Force Jump · `2` Force Speed · `3` Force Push · `4` Force Lightning (hold) · `L` lightsaber.
+**Bounty Hunter**: `1` Thermal Detonator · `2` Stim Pack · Space in the air for the jetpack.
+**Speeder**: `W/S` throttle · `A/D` steer · `Shift` boost · `Space` hop.
 
-## What exists today (v0.1)
+URL options: `?planet=lok` spawns on a specific world, `?class=bounty_hunter` picks a class, `?lowfx=1` disables shadows and halves resolution for weak machines.
+
+## What exists today (v0.2)
+
+- **Physics** via [Rapier](https://rapier.rs/) (Rust compiled to WebAssembly). Terrain chunks near the player get heightfield colliders, trees and rocks get cylinders, creatures are dynamic rigid bodies, and the player is a kinematic character controller with auto-step, slope limits and ground snapping. Force Push, detonators and deaths all move real bodies.
+- **Speeder bike**: a dynamic body held up by four spring ray casts, with throttle, steering, lateral grip, boost, hops and engine drag. Mount it with `E`.
+- **Hitbox combat**: the saber blade is swept as a capsule against creature colliders every frame of a swing, and the blaster is a hitscan ray from the camera through the crosshair. No hit-chance rolls anywhere.
+- **Two classes**: Jedi (saber, Force Jump, Speed, Push, Lightning) and Bounty Hunter (blaster rifle, jetpack, physics-simulated thermal detonators, stim pack). Switch with `C`.
+- **Creatures fight back**: health, aggression on the dangerous worlds (rancors, kimogila, boar-wolves, mawgax), stuns, knockback, ragdoll-ish deaths and respawns.
+- **Day and night**: a 12-minute day with a moving sun, sunset tint, moon, stars and moonlight. Hold `T` to fast-forward.
+- **Player health** with regeneration, a defeat screen and respawn.
 
 - **Ten launch-era planets**: Tatooine, Naboo, Corellia, Dantooine, Lok, Endor, Dathomir, Yavin IV, Talus, Rori. Each is a seed plus a set of terrain, palette, sky, fog, vegetation and wildlife parameters in `src/data/planets.ts`.
 - **Streaming procedural terrain**: 64 m chunks generated from layered simplex noise around the player, with analytic normals (no seams), vertex-colored by height, slope and shoreline. Planets are effectively unbounded.
@@ -40,26 +51,40 @@ Add `?planet=lok` (or any planet id) to the URL to spawn on a specific world.
 - **Wildlife**: per-planet creatures (banthas, kaadu, rancors, kimogila...) that wander, flee if skittish, get knocked around and stunned.
 - **Galaxy map** overlay for instant travel.
 
+Debug counters are exposed on `window.__stats` (frame, physics and render milliseconds, draw calls).
+
 ## Roadmap
 
 Rough order, all up for discussion:
 
-1. **Feel**: better character rig and animations (GLTF), camera collision polish, footsteps and ambient audio, day/night cycle.
-2. **Places**: hand-placed cities and points of interest on top of the procedural base (Mos Eisley, Theed, Coronet), starports, buildings with interiors.
-3. **Life**: NPCs with dialogue, quests, creature aggression and combat, loot.
-4. **Systems**: skills and professions, inventory, crafting, harvesters, housing.
-5. **Space**: ships, the JTL-style space layer, travel between planets by actually flying.
-6. **Multiplayer**: authoritative server, chat, guilds. The code keeps world state in plain data with this in mind.
+1. **Feel**: rigged GLTF characters and creatures with real animations (Mixamo for humanoids), saber stances and combos, blocking, dodge rolls, footsteps and ambient audio.
+2. **Models**: replace primitives with proper assets. See "On assets" below.
+3. **Places**: hand-placed cities and points of interest on top of the procedural base (Mos Eisley, Theed, Coronet), starports, buildings with interiors.
+4. **Life**: NPCs with dialogue, quests, enemy humanoids that shoot back, loot.
+5. **Systems**: skills and professions, inventory, crafting, harvesters, housing.
+6. **Space**: ships, the JTL-style space layer, travel between planets by actually flying.
+7. **Multiplayer**: authoritative server, chat, guilds. The code keeps world state in plain data with this in mind.
+
+## On assets
+
+The original SWG client assets (the `.tre` archives) are copyrighted by Sony Online Entertainment / Lucasfilm and cannot be redistributed, so they will never be committed to this repo. A private build could load them from a local install via a converter, but a public site cannot ship them. The plan instead:
+
+- **CC0 low-poly packs** that already match the flat-shaded style: Kenney, Quaternius, Poly Pizza. Good for props, buildings and vehicles.
+- **Mixamo** for a rigged humanoid and a large animation library (free with an Adobe account, licensed for use in games).
+- **Sketchfab** fan-made Star Wars models under CC-BY where the licence allows it, credited in a `CREDITS.md`.
+
+GLTF is the loading format for all of it.
 
 ## Layout
 
 ```
 src/
-  core/      input and camera
+  core/      input, camera, physics wrapper
   data/      planet definitions
-  world/     noise, terrain, props, creatures, world streaming
+  world/     noise, terrain, props, creatures, day cycle, world streaming
   player/    character controller and model
-  force/     force powers and effects
+  combat/    class kits (Jedi, Bounty Hunter), effects, hit detection
+  vehicles/  speeder bike
   ui/        HUD and galaxy map
   main.ts    app wiring and game loop
 ```

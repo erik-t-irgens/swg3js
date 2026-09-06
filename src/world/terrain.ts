@@ -75,7 +75,7 @@ export class Terrain {
     out.copy(tmpA).multiplyScalar(grain);
   }
 
-  buildChunkGeometry(cx: number, cz: number): THREE.BufferGeometry {
+  buildChunk(cx: number, cz: number): { geometry: THREE.BufferGeometry; heights: Float32Array } {
     const n = CHUNK_RES;
     const step = CHUNK_SIZE / n;
     const ox = cx * CHUNK_SIZE;
@@ -86,6 +86,12 @@ export class Terrain {
       for (let i = 0; i < w; i++) {
         hs[j * w + i] = this.heightAt(ox + (i - 1) * step, oz + (j - 1) * step);
       }
+    }
+
+    // Physics copy: column-major, column = x index, row = z index.
+    const physHeights = new Float32Array((n + 1) * (n + 1));
+    for (let xi = 0; xi <= n; xi++) {
+      for (let zi = 0; zi <= n; zi++) physHeights[xi * (n + 1) + zi] = hs[(zi + 1) * w + (xi + 1)];
     }
 
     const vcount = (n + 1) * (n + 1);
@@ -138,6 +144,6 @@ export class Terrain {
     geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
     geo.setIndex(new THREE.BufferAttribute(indices, 1));
     geo.computeBoundingSphere();
-    return geo;
+    return { geometry: geo, heights: physHeights };
   }
 }

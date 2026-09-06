@@ -23,8 +23,16 @@ export class Input {
       this.mouseDY += e.movementY;
     });
     document.addEventListener('wheel', (e) => { this.wheel += Math.sign(e.deltaY); }, { passive: true });
+    document.addEventListener('mousedown', (e) => {
+      if (!this.locked) return;
+      const code = `Mouse${e.button}`;
+      this.down.add(code);
+      this.pressed.add(code);
+    });
+    document.addEventListener('mouseup', (e) => this.down.delete(`Mouse${e.button}`));
     document.addEventListener('pointerlockchange', () => {
       this.locked = document.pointerLockElement === this.canvas;
+      if (!this.locked) this.down.clear();
     });
   }
 

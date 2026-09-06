@@ -72,3 +72,23 @@ b { color: var(--accent); font-weight: 600; }
 
 #fade { position: fixed; inset: 0; background: #000; opacity: 0; transition: opacity 0.45s ease; pointer-events: none; display: flex; align-items: center; justify-content: center; color: var(--accent); letter-spacing: 0.2em; font-size: 14px; }
 #fade.on { opacity: 1; pointer-events: auto !important; }
+
+/* v0.2 additions */
+.bar { position: relative; width: 320px; height: 14px; background: rgba(0,0,0,0.55); border: 1px solid var(--panel-border); border-radius: 7px; overflow: hidden; }
+.bar .fill { height: 100%; transition: width 0.08s linear; }
+.bar.hp .fill { background: linear-gradient(90deg, #b8322a, #ff7a5a); }
+.bar.res .fill { background: linear-gradient(90deg, #2d7fd6, var(--accent)); }
+.bar .text { position: absolute; inset: 0; text-align: center; font-size: 10.5px; line-height: 14px; letter-spacing: 0.08em; text-shadow: 0 1px 2px #000; }
+.bottom { gap: 6px; }
+.class-name { font-size: 11px; letter-spacing: 0.2em; text-transform: uppercase; color: var(--muted); }
+.slot { position: relative; overflow: hidden; }
+.slot .cd { position: absolute; left: 0; right: 0; bottom: 0; height: 0; background: rgba(0,0,0,0.55); pointer-events: none; }
+.slot > span { position: relative; }
+.crosshair { position: absolute; left: 50%; top: 50%; width: 6px; height: 6px; margin: -3px 0 0 -3px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 6px rgba(127,215,255,0.9), 0 0 0 1px rgba(0,0,0,0.5); }
+.prompt { position: absolute; left: 50%; bottom: 150px; transform: translateX(-50%); padding: 6px 14px; background: var(--panel); border: 1px solid var(--panel-border); border-radius: 6px; font-size: 13px; white-space: nowrap; }
+.prompt:empty { display: none; }
+.hurt { position: absolute; inset: 0; opacity: 0; background: radial-gradient(ellipse at center, rgba(255,0,0,0) 45%, rgba(190,20,20,0.55) 100%); }
+.clock { font-family: ui-monospace, Menlo, monospace; font-size: 16px; color: var(--accent); }
+.class-pick { display: flex; gap: 12px; justify-content: center; margin-bottom: 8px; }
+.class-pick button { min-width: 200px; }
+.class-pick small { display: block; color: var(--muted); font-size: 11px; margin-top: 4px; letter-spacing: 0; }
