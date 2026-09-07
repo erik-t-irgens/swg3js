@@ -8,24 +8,31 @@ import { parsePob } from './pob.mjs';
 
 const SINGLE = 1;
 
+/**
+ * Template files nest class sections: FORM STAT { [DERV], FORM 0000 { PCNT, params },
+ * FORM SHOT { [DERV], FORM 0010 { PCNT, params } } }. Walk every form and
+ * collect parameters from all levels; the outermost DERV is the base template.
+ */
 export function readTemplate(root) {
   if (!isForm(root)) throw new Error('template root is not a FORM');
   let base = null;
   const params = new Map();
-  for (const child of root.children) {
-    if (!isForm(child)) continue;
-    if (child.type === 'DERV') {
-      const chunk = child.children.find((c) => !isForm(c));
-      if (chunk) base = readCString(chunk.data).value.replace(/\\/g, '/');
-      continue;
+  const walk = (form) => {
+    for (const child of form.children) {
+      if (isForm(child)) {
+        if (child.type === 'DERV') {
+          const chunk = child.children.find((c) => !isForm(c));
+          if (chunk && base === null) base = readCString(chunk.data).value.replace(/\\/g, '/');
+        } else {
+          walk(child);
+        }
+      } else if (child.tag !== 'PCNT') {
+        const { value: name, next } = readCString(child.data);
+        if (name && !params.has(name)) params.set(name, child.data.subarray(next));
+      }
     }
-    // Version form: PCNT then parameter chunks.
-    for (const chunk of child.children) {
-      if (isForm(chunk) || chunk.tag === 'PCNT') continue;
-      const { value: name, next } = readCString(chunk.data);
-      params.set(name, chunk.data.subarray(next));
-    }
-  }
+  };
+  walk(root);
   return { type: root.type, base, params };
 }
 
@@ -80,7 +87,7 @@ export function resolveTemplateMesh(vfs, templatePath, cache = new Map()) {
       path = t.base;
     }
     if (!result) {
-      if (!appearance) result = { skip: `no appearanceFilename (params: ${lastParams.slice(0, 6).join(', ') || 'none'})` };
+      if (!appearance) result = { skip: `no appearanceFilename (params: ${lastParams.join(', ') || 'none'})` };
       else result = resolveAppearanceToMesh(vfs, appearance);
     }
   } catch (err) {
