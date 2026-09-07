@@ -41,7 +41,7 @@ function mount(dir) {
   const vfs = openVfs(dir, {
     filter: retailOnly ? (f) => isRetailByName(f, statSync(join(dir, f)).size) !== null : undefined,
   });
-  console.error(`mounted ${vfs.archives.length} archives${retailOnly ? ' (retail only)' : ''}`);
+  console.error(`mounted ${vfs.summary}${retailOnly ? ' (retail only)' : ''}`);
   return vfs;
 }
 
@@ -96,7 +96,9 @@ switch (cmd) {
       const h = readHeader(join(pos[1], f));
       let status = 'ok';
       try {
-        openTre(join(pos[1], f));
+        const t = openTre(join(pos[1], f));
+        if (t.dataOnly) status = 'data-only (6000), read through the .toc index';
+        t.close();
       } catch (err) {
         status = `FAIL ${err.message}`;
       }

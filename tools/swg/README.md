@@ -18,7 +18,7 @@ Status:
 
 | Stage | State |
 | --- | --- |
-| TRE archives: header, zlib records, deletion markers, publish load order | Written against the engine's struct definitions, tested on synthetic archives |
+| TRE archives: 5000 headers, 6000 data-only archives via `.toc` indexes, zlib records, deletion markers, publish load order | Verified on a real SWG Legends install: all 201 retail archives mount |
 | Retail manifest verification | Names, sizes and hashes for the 14.1, CU and final NGE sets |
 | IFF parsing and `dump` | Tested |
 | Static meshes (.msh, .apt, .lod) to GLB with vertex colours, hardpoints and bounds | Written against the engine loaders, tested on a synthetic mesh |
@@ -26,4 +26,4 @@ Status:
 | Skinned meshes, skeletons, animations (.mgn, .skt, .ans) | Formats documented, not started |
 | World snapshots and terrain (.ws, .trn) | Not started |
 
-Real client data has still not been run through it. If a conversion fails, run `dump` on the file and share the output.
+Archive reading is verified on real client data. Mesh conversion is still being validated; if a conversion fails, run `dump` on the file and share the output.

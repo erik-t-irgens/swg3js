@@ -3,21 +3,19 @@
 // (token "EERT", version "5000", numberOfFiles, tocOffset, tocCompressor,
 // sizeOfTOC, blockCompressor, sizeOfNameBlock, uncompSizeOfNameBlock), file data,
 // then the table of contents (24-byte records), the name block and an MD5 block.
-import { closeSync, openSync, readFileSync, readSync, readdirSync } from 'node:fs';
+//
+// From Publish 18 on, SOE wrote version "6000" archives whose header is all
+// zeros: they are data-only blobs indexed by the client's .toc files (see toc.mjs).
+import { closeSync, existsSync, fstatSync, openSync, readSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { inflateSync } from 'node:zlib';
+import { openToc, tocRank } from './toc.mjs';
 
 const HEADER_SIZE = 36;
 const RECORD_SIZE = 24;
 export const CT_NONE = 0;
 export const CT_DEPRECATED = 1;
 export const CT_ZLIB = 2;
-
-function expand(buf, compressor, uncompressedSize) {
-  if (compressor === CT_NONE) return buf.subarray(0, uncompressedSize);
-  if (compressor === CT_ZLIB) return inflateSync(buf);
-  throw new Error(`Unsupported TRE compressor ${compressor}`);
-}
 
 function cstring(buf, offset) {
   let end = offset;
@@ -36,27 +34,57 @@ export function readHeader(path) {
   return { magic: buf.toString('latin1', 0, 8), fields, hex: buf.toString('hex') };
 }
 
+/** Expand a stored block: uncompressed blocks are returned as-is. */
+export function expandBlock(buf, compressor, uncompressedSize) {
+  if (compressor === CT_NONE) return buf.subarray(0, uncompressedSize);
+  if (compressor === CT_ZLIB) return inflateSync(buf);
+  throw new Error(`compressor ${compressor} is not supported (1 is the retired SOE codec)`);
+}
+
 export function openTre(path) {
-  const buf = readFileSync(path);
-  const token = buf.toString('latin1', 0, 4);
-  const version = buf.toString('latin1', 4, 8);
-  if (token !== 'EERT' || (version !== '5000' && version !== '4000')) {
-    const hex = buf.subarray(0, 16).toString('hex').replace(/(..)/g, '$1 ').trim();
-    throw new Error(`not a TRE archive I recognise (starts ${JSON.stringify(token + version)}, bytes ${hex})`);
+  const fd = openSync(path, 'r');
+  const fileSize = fstatSync(fd).size;
+  const readAt = (offset, length) => {
+    const buf = Buffer.alloc(length);
+    const n = readSync(fd, buf, 0, length, offset);
+    if (n !== length) throw new Error(`${path}: short read at ${offset} (${n}/${length})`);
+    return buf;
+  };
+  const readBlob = (offset, length, compressedLength, compressor) => {
+    const stored = compressor === CT_NONE ? length : compressedLength;
+    return Buffer.from(expandBlock(readAt(offset, stored), compressor, length));
+  };
+
+  const header = readAt(0, HEADER_SIZE);
+  const token = header.toString('latin1', 0, 4);
+  const version = header.toString('latin1', 4, 8);
+  if (token !== 'EERT') {
+    const hex = header.subarray(0, 16).toString('hex').replace(/(..)/g, '$1 ').trim();
+    closeSync(fd);
+    throw new Error(`not a TRE archive (starts ${JSON.stringify(token + version)}, bytes ${hex})`);
   }
-  const numberOfFiles = buf.readUInt32LE(8);
-  const tocOffset = buf.readUInt32LE(12);
-  const tocCompressor = buf.readUInt32LE(16);
-  const sizeOfTOC = buf.readUInt32LE(20);
-  const blockCompressor = buf.readUInt32LE(24);
-  const sizeOfNameBlock = buf.readUInt32LE(28);
-  const uncompSizeOfNameBlock = buf.readUInt32LE(32);
+
+  if (version === '6000') {
+    return { path, version, fileSize, records: [], dataOnly: true, readBlob, close: () => closeSync(fd) };
+  }
+  if (version !== '5000' && version !== '4000') {
+    closeSync(fd);
+    throw new Error(`unknown TRE version ${JSON.stringify(version)}`);
+  }
+
+  const numberOfFiles = header.readUInt32LE(8);
+  const tocOffset = header.readUInt32LE(12);
+  const tocCompressor = header.readUInt32LE(16);
+  const sizeOfTOC = header.readUInt32LE(20);
+  const blockCompressor = header.readUInt32LE(24);
+  const sizeOfNameBlock = header.readUInt32LE(28);
+  const uncompSizeOfNameBlock = header.readUInt32LE(32);
 
   const tocBytes = tocCompressor === CT_NONE ? numberOfFiles * RECORD_SIZE : sizeOfTOC;
-  const toc = expand(buf.subarray(tocOffset, tocOffset + tocBytes), tocCompressor, numberOfFiles * RECORD_SIZE);
+  const toc = expandBlock(readAt(tocOffset, tocBytes), tocCompressor, numberOfFiles * RECORD_SIZE);
   const nameStart = tocOffset + tocBytes;
   const nameBytes = blockCompressor === CT_NONE ? uncompSizeOfNameBlock : sizeOfNameBlock;
-  const names = expand(buf.subarray(nameStart, nameStart + nameBytes), blockCompressor, uncompSizeOfNameBlock);
+  const names = expandBlock(readAt(nameStart, nameBytes), blockCompressor, uncompSizeOfNameBlock);
 
   const records = [];
   for (let i = 0; i < numberOfFiles; i++) {
@@ -76,13 +104,16 @@ export function openTre(path) {
   }
   return {
     path,
+    version,
+    fileSize,
     records,
+    dataOnly: false,
+    readBlob,
     read(rec) {
       if (rec.deleted) throw new Error(`${rec.name} is a deletion marker in ${path}`);
-      if (rec.compressor === CT_NONE) return Buffer.from(buf.subarray(rec.offset, rec.offset + rec.length));
-      if (rec.compressor === CT_ZLIB) return inflateSync(buf.subarray(rec.offset, rec.offset + rec.compressedLength));
-      throw new Error(`${rec.name}: compressor ${rec.compressor} is not supported (1 is the retired SOE codec)`);
+      return readBlob(rec.offset, rec.length, rec.compressedLength, rec.compressor);
     },
+    close: () => closeSync(fd),
   };
 }
 
@@ -111,41 +142,92 @@ export function archiveRank(file) {
 }
 
 /**
- * A virtual file system over every .tre in a directory. Archives are applied in
- * priority order so later publishes override earlier ones and deletion markers
- * hide files, matching the client. Pass a `filter(fileName)` to restrict which
- * archives are mounted (for example only retail ones).
+ * A virtual file system over every .tre and .toc in a directory. Self-indexed
+ * (5000) archives are applied in priority order, then each .toc index in SKU
+ * order, so later publishes override earlier ones and deletion markers hide
+ * files, matching the client. `filter(fileName)` restricts which archives may
+ * supply data (for example only retail ones); .toc files are always read since
+ * they hold no assets, but entries pointing at excluded archives are ignored.
  */
-export function openVfs(dir, { filter } = {}) {
-  let files = readdirSync(dir).filter((f) => f.toLowerCase().endsWith('.tre'));
-  if (filter) files = files.filter(filter);
-  files.sort((a, b) => archiveRank(a) - archiveRank(b) || a.localeCompare(b, 'en'));
-  if (files.length === 0) throw new Error(`No .tre archives found in ${dir}`);
-  const index = new Map();
-  const archives = [];
+export function openVfs(dir, { filter, log = (msg) => console.error(msg) } = {}) {
+  const treNames = readdirSync(dir).filter((f) => f.toLowerCase().endsWith('.tre'));
+  const tocNames = readdirSync(dir).filter((f) => f.toLowerCase().endsWith('.toc')).sort((a, b) => tocRank(a) - tocRank(b) || a.localeCompare(b, 'en'));
+  const archives = new Map();
   const skipped = [];
-  for (const f of files) {
-    let tre;
-    try {
-      tre = openTre(join(dir, f));
-    } catch (err) {
-      skipped.push(f);
-      console.error(`skipping ${f}: ${err.message}`);
+  const allowed = (name) => !filter || filter(name);
+
+  const archiveFor = (name) => {
+    const key = name.toLowerCase();
+    if (archives.has(key)) return archives.get(key);
+    let path = join(dir, name);
+    if (!existsSync(path) && existsSync(join(dir, 'tres', name))) path = join(dir, 'tres', name);
+    let tre = null;
+    if (!existsSync(path)) {
+      log(`missing archive ${name}`);
+    } else {
+      try {
+        tre = openTre(path);
+      } catch (err) {
+        log(`skipping ${name}: ${err.message}`);
+        skipped.push(name);
+      }
+    }
+    archives.set(key, tre);
+    return tre;
+  };
+
+  const index = new Map();
+  const apply = (name, source) => {
+    const key = name.toLowerCase();
+    if (source.deleted) index.delete(key);
+    else index.set(key, source);
+  };
+
+  // Self-indexed archives first, in publish order.
+  const selfIndexed = treNames.filter(allowed).sort((a, b) => archiveRank(a) - archiveRank(b) || a.localeCompare(b, 'en'));
+  let dataOnly = 0;
+  for (const f of selfIndexed) {
+    const tre = archiveFor(f);
+    if (!tre) continue;
+    if (tre.dataOnly) {
+      dataOnly++;
       continue;
     }
-    archives.push(tre);
-    for (const rec of tre.records) {
-      const key = rec.name.toLowerCase();
-      if (rec.deleted) index.delete(key);
-      else index.set(key, { tre, rec });
+    for (const rec of tre.records) apply(rec.name, { archive: tre.path, deleted: rec.deleted, size: rec.length, read: () => tre.read(rec) });
+  }
+
+  // Then the client's .toc indexes, which resolve the data-only archives.
+  let indexed = 0;
+  const tocsUsed = [];
+  for (const f of tocNames) {
+    let toc;
+    try {
+      toc = openToc(join(dir, f));
+    } catch (err) {
+      log(`skipping ${f}: ${err.message}`);
+      continue;
+    }
+    tocsUsed.push(f);
+    for (const e of toc.entries) {
+      const treeName = toc.treeFiles[e.treeFileIndex];
+      if (treeName === undefined || !allowed(treeName)) continue;
+      const tre = archiveFor(treeName);
+      if (!tre) continue;
+      indexed++;
+      apply(e.name, { archive: tre.path, deleted: e.deleted, size: e.length, read: () => tre.readBlob(e.offset, e.length, e.compressedLength, e.compressor) });
     }
   }
+
+  const opened = [...archives.values()].filter(Boolean);
+  if (!opened.length) throw new Error(`None of the archives in ${dir} could be read`);
+  if (dataOnly && !tocsUsed.length) log(`${dataOnly} data-only (6000) archives found but no .toc index to read them with`);
+
   const norm = (name) => name.toLowerCase().replace(/\\/g, '/');
-  if (!archives.length) throw new Error(`None of the ${files.length} archives in ${dir} could be read`);
   return {
-    archives,
+    archives: opened,
+    tocs: tocsUsed,
     skipped,
-    order: files,
+    summary: `${opened.length} archives (${dataOnly} data-only), ${tocsUsed.length} index files, ${indexed} indexed entries, ${index.size} files`,
     list(filterText) {
       const out = [];
       for (const key of index.keys()) if (!filterText || key.includes(filterText.toLowerCase())) out.push(key);
@@ -156,12 +238,15 @@ export function openVfs(dir, { filter } = {}) {
     },
     stat(name) {
       const e = index.get(norm(name));
-      return e ? { archive: e.tre.path, size: e.rec.length, compressor: e.rec.compressor } : null;
+      return e ? { archive: e.archive, size: e.size } : null;
     },
     read(name) {
       const entry = index.get(norm(name));
       if (!entry) throw new Error(`Not in archives: ${name}`);
-      return entry.tre.read(entry.rec);
+      return entry.read();
+    },
+    close() {
+      for (const a of opened) a.close();
     },
   };
 }
