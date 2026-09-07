@@ -298,11 +298,12 @@ switch (cmd) {
         skip(r.skip, template);
         continue;
       }
-      const id = familyOf(r.parts.length === 1 && !r.parts[0].transform ? r.parts[0].mesh : r.appearance);
+      const single = r.parts.length === 1 && !r.parts[0].transform;
+      const id = familyOf(single ? r.parts[0].mesh : r.appearance);
       if (!models.has(id)) {
         if (models.size >= max) break;
         try {
-          const conv = convertOne(vfs, r.parts.length === 1 && !r.parts[0].transform ? r.parts[0].mesh : r.appearance, join(outDir, `${id}.glb`));
+          const conv = convertOne(vfs, single ? r.parts[0].mesh : r.appearance, join(outDir, `${id}.glb`));
           const b = conv.mesh.bounds ?? { min: [0, 0, 0], max: [0, 0, 0] };
           const bounds = conv.flipX ? { min: [-b.max[0], b.min[1], b.min[2]], max: [-b.min[0], b.max[1], b.max[2]] } : b;
           models.set(id, { id, source: r.source ?? r.appearance, file: `${id}.glb`, bounds, triangles: conv.tris, textured: conv.textured, shaders: conv.shaders.length, parts: conv.partCount });

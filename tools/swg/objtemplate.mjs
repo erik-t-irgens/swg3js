@@ -4,7 +4,6 @@
 // present are inherited from the base template chain.
 import { childrenOf, isForm, readCString, parseIff } from './iff.mjs';
 import { appearancePath, resolveParts } from './appearance.mjs';
-import { parsePob } from './pob.mjs';
 
 const SINGLE = 1;
 
@@ -106,11 +105,11 @@ export function resolveAppearanceToMesh(vfs, rawAppearance) {
   const lower = appearance.toLowerCase();
   if (lower.endsWith('.pob')) {
     if (!vfs.has(appearance)) return { skip: `pob missing: ${appearance}` };
-    const pob = parsePob(parseIff(vfs.read(appearance)));
-    const exterior = pob.cells[0]?.appearance;
-    if (!exterior) return { skip: 'pob without exterior cell' };
-    const r = resolveAppearanceToMesh(vfs, exterior);
-    return r.skip ? r : { ...r, source: appearance };
+    try {
+      return { appearance, parts: resolveParts(vfs, appearance) };
+    } catch (err) {
+      return { skip: `pob failed: ${err.message}` };
+    }
   }
   if (lower.endsWith('.sat')) return { skip: 'skeletal appearance (.sat)' };
   if (lower.endsWith('.prt')) return { skip: 'particle (.prt)' };

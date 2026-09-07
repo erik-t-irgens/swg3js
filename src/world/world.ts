@@ -10,8 +10,14 @@ import { RAPIER as R } from '../core/physics';
 import { CHUNK_RES, CHUNK_SIZE, Terrain } from './terrain';
 import { Speeder } from '../vehicles/speeder';
 
-const VIEW_RADIUS = 5;
+const VIEW_RADIUS = 6;
 const STREAM_BUDGET = 3;
+/** Coarse distant terrain: tile size, vertex resolution and radius in tiles. */
+const FAR_TILE = 512;
+const FAR_RES = 32;
+const FAR_RADIUS = 6;
+/** Fog is authored for a short view; scale it for the long one. */
+const FOG_SCALE = 0.18;
 /** Physics colliders only exist this many chunks out; nothing dynamic lives farther away. */
 const PHYSICS_RADIUS = 3;
 
@@ -84,7 +90,10 @@ export class World {
   readonly speeders: Speeder[] = [];
   private props!: PropFactory;
   private readonly chunks = new Map<string, Chunk>();
+  private readonly farTiles = new Map<string, THREE.Mesh>();
   private readonly chunkRoot = new THREE.Group();
+  private lastTx = Number.NaN;
+  private lastTz = Number.NaN;
   private readonly terrainMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1, metalness: 0 });
   private readonly sun = new THREE.DirectionalLight(0xffffff, 2);
   private readonly hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 1);
@@ -106,14 +115,14 @@ export class World {
   constructor(readonly scene: THREE.Scene, readonly physics: Physics) {
     scene.add(this.chunkRoot, this.sun, this.sun.target, this.hemi);
     this.sun.castShadow = true;
-    this.sun.shadow.mapSize.set(2048, 2048);
+    this.sun.shadow.mapSize.set(4096, 4096);
     const sc = this.sun.shadow.camera;
-    sc.left = -70; sc.right = 70; sc.top = 70; sc.bottom = -70; sc.near = 1; sc.far = 500;
+    sc.left = -140; sc.right = 140; sc.top = 140; sc.bottom = -140; sc.near = 1; sc.far = 600;
     this.sun.shadow.bias = -0.0006;
     this.sun.shadow.normalBias = 0.6;
 
     this.sky = new THREE.Mesh(
-      new THREE.SphereGeometry(1200, 32, 16),
+      new THREE.SphereGeometry(7000, 32, 16),
       new THREE.ShaderMaterial({
         vertexShader: SKY_VERT,
         fragmentShader: SKY_FRAG,
@@ -159,13 +168,13 @@ export class World {
 
     this.dayFog.set(planet.fog.color);
     this.nightFog.set(planet.fog.color).multiplyScalar(0.08).lerp(new THREE.Color(0x0a0f1c), 0.5);
-    this.scene.fog = new THREE.FogExp2(planet.fog.color, planet.fog.density);
+    this.scene.fog = new THREE.FogExp2(planet.fog.color, planet.fog.density * FOG_SCALE);
     this.sunColor.set(s.sunColor);
     this.hemi.color.set(planet.light.ambientSky);
     this.hemi.groundColor.set(planet.light.ambientGround);
 
     if (planet.water) {
-      const geo = new THREE.PlaneGeometry(1400, 1400).rotateX(-Math.PI / 2);
+      const geo = new THREE.PlaneGeometry(12000, 12000).rotateX(-Math.PI / 2);
       const mat = new THREE.MeshStandardMaterial({
         color: planet.water.color,
         transparent: true,
@@ -182,6 +191,8 @@ export class World {
 
     this.lastCx = Number.NaN;
     this.lastCz = Number.NaN;
+    this.lastTx = Number.NaN;
+    this.lastTz = Number.NaN;
     this.exclusions = [];
     this.loadToken++;
     this.day.update(0, false);
@@ -258,9 +269,17 @@ export class World {
     this.props = new PropFactory(planet, scatter);
     for (const c of this.chunks.values()) this.disposeChunk(c);
     this.chunks.clear();
+    for (const t of this.farTiles.values()) {
+      this.chunkRoot.remove(t);
+      t.geometry.dispose();
+    }
+    this.farTiles.clear();
     this.lastCx = Number.NaN;
     this.lastCz = Number.NaN;
+    this.lastTx = Number.NaN;
+    this.lastTz = Number.NaN;
     this.stream(spawn, Infinity);
+    this.streamFar(spawn, Infinity);
 
     for (const st of structures) this.placeStructure(st.model, st.x, st.z, st.rot);
     if (placed.length) this.placeLayout(placed, spawn);
@@ -344,6 +363,13 @@ export class World {
   private unload(): void {
     for (const c of this.chunks.values()) this.disposeChunk(c);
     this.chunks.clear();
+    for (const t of this.farTiles.values()) {
+      this.chunkRoot.remove(t);
+      t.geometry.dispose();
+    }
+    this.farTiles.clear();
+    this.lastTx = Number.NaN;
+    this.lastTz = Number.NaN;
     for (const o of this.structures) this.scene.remove(o);
     this.structures.length = 0;
     for (const c of this.structureColliders) this.physics.removeCollider(c);
@@ -420,6 +446,7 @@ export class World {
   warmUp(center: THREE.Vector3): void {
     this.exclusions = [{ x: center.x, z: center.z, r: 14 }];
     this.stream(center, Infinity);
+    this.streamFar(center, Infinity);
     this.creatures.spawnAround(center);
     const sx = center.x + 5;
     const sz = center.z + 4;
@@ -444,6 +471,7 @@ export class World {
 
   update(dt: number, playerPos: THREE.Vector3, camPos: THREE.Vector3, fastTime: boolean, onAttack: (damage: number) => void): void {
     this.stream(playerPos, STREAM_BUDGET);
+    this.streamFar(playerPos, 1);
     this.day.update(dt, fastTime);
     this.applyLighting();
     this.sky.position.copy(camPos);
@@ -509,6 +537,40 @@ export class World {
         this.addChunkPhysics(c);
       } else {
         this.removeChunkPhysics(c);
+      }
+    }
+  }
+
+  private streamFar(center: THREE.Vector3, budget: number): void {
+    const ptx = Math.floor(center.x / FAR_TILE);
+    const ptz = Math.floor(center.z / FAR_TILE);
+    if (ptx === this.lastTx && ptz === this.lastTz && budget !== Infinity) return;
+    const wanted: { tx: number; tz: number; d: number }[] = [];
+    for (let dz = -FAR_RADIUS; dz <= FAR_RADIUS; dz++) {
+      for (let dx = -FAR_RADIUS; dx <= FAR_RADIUS; dx++) {
+        if (!this.farTiles.has(`${ptx + dx},${ptz + dz}`)) wanted.push({ tx: ptx + dx, tz: ptz + dz, d: dx * dx + dz * dz });
+      }
+    }
+    wanted.sort((a, b) => a.d - b.d);
+    let made = 0;
+    for (const w of wanted) {
+      if (made >= budget) break;
+      const mesh = new THREE.Mesh(this.terrain.buildFarTile(w.tx, w.tz, FAR_TILE, FAR_RES), this.terrainMat);
+      mesh.receiveShadow = true;
+      this.chunkRoot.add(mesh);
+      this.farTiles.set(`${w.tx},${w.tz}`, mesh);
+      made++;
+    }
+    if (wanted.length <= made) {
+      this.lastTx = ptx;
+      this.lastTz = ptz;
+    }
+    for (const [key, t] of this.farTiles) {
+      const [tx, tz] = key.split(',').map(Number);
+      if (Math.max(Math.abs(tx - ptx), Math.abs(tz - ptz)) > FAR_RADIUS + 1) {
+        this.chunkRoot.remove(t);
+        t.geometry.dispose();
+        this.farTiles.delete(key);
       }
     }
   }

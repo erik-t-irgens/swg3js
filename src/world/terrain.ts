@@ -10,8 +10,8 @@ export interface FlattenZone { x: number; z: number; r: number; h: number }
 /** A known ground height from game data (an object's origin), pulling the terrain toward it nearby. */
 export interface Anchor { x: number; z: number; y: number; r: number }
 
-const ANCHOR_CELL = 128;
-const ANCHOR_REACH = 40;
+const ANCHOR_CELL = 256;
+const reachOf = (a: Anchor) => a.r * 2.5 + 40;
 export const CHUNK_RES = 32;
 
 const tmpA = new THREE.Color();
@@ -61,7 +61,7 @@ export class Terrain {
         let sumY = 0;
         let maxT = 0;
         for (const a of list) {
-          const reach = a.r + ANCHOR_REACH;
+          const reach = reachOf(a);
           const d = Math.hypot(x - a.x, z - a.z);
           if (d >= reach) continue;
           let t = 1 - d / reach;
@@ -77,9 +77,9 @@ export class Terrain {
     return h;
   }
 
-  /** Register a ground-height anchor; it influences terrain within r + 40 m. */
+  /** Register a ground-height anchor; it influences terrain within reachOf(a). */
   addAnchor(a: Anchor): void {
-    const reach = a.r + ANCHOR_REACH;
+    const reach = reachOf(a);
     const x0 = Math.floor((a.x - reach) / ANCHOR_CELL);
     const x1 = Math.floor((a.x + reach) / ANCHOR_CELL);
     const z0 = Math.floor((a.z - reach) / ANCHOR_CELL);
@@ -139,10 +139,18 @@ export class Terrain {
   }
 
   buildChunk(cx: number, cz: number): { geometry: THREE.BufferGeometry; heights: Float32Array } {
-    const n = CHUNK_RES;
-    const step = CHUNK_SIZE / n;
-    const ox = cx * CHUNK_SIZE;
-    const oz = cz * CHUNK_SIZE;
+    const r = this.buildGrid(cx * CHUNK_SIZE, cz * CHUNK_SIZE, CHUNK_SIZE, CHUNK_RES, { skirt: 8, wantHeights: true });
+    return { geometry: r.geometry, heights: r.heights! };
+  }
+
+  /** Coarse distant tile, dropped slightly so near chunks win where they overlap. */
+  buildFarTile(tx: number, tz: number, size: number, res: number): THREE.BufferGeometry {
+    return this.buildGrid(tx * size, tz * size, size, res, { skirt: 0, yOffset: -2.5, wantHeights: false }).geometry;
+  }
+
+  private buildGrid(ox: number, oz: number, size: number, n: number, opts: { skirt: number; yOffset?: number; wantHeights: boolean }): { geometry: THREE.BufferGeometry; heights: Float32Array | null } {
+    const step = size / n;
+    const yOff = opts.yOffset ?? 0;
     const w = n + 3;
     const hs = new Float32Array(w * w);
     for (let j = 0; j < w; j++) {
@@ -151,13 +159,18 @@ export class Terrain {
       }
     }
 
-    // Physics copy: column-major, column = x index, row = z index.
-    const physHeights = new Float32Array((n + 1) * (n + 1));
-    for (let xi = 0; xi <= n; xi++) {
-      for (let zi = 0; zi <= n; zi++) physHeights[xi * (n + 1) + zi] = hs[(zi + 1) * w + (xi + 1)];
+    let physHeights: Float32Array | null = null;
+    if (opts.wantHeights) {
+      // Physics copy: column-major, column = x index, row = z index.
+      physHeights = new Float32Array((n + 1) * (n + 1));
+      for (let xi = 0; xi <= n; xi++) {
+        for (let zi = 0; zi <= n; zi++) physHeights[xi * (n + 1) + zi] = hs[(zi + 1) * w + (xi + 1)];
+      }
     }
 
-    const vcount = (n + 1) * (n + 1);
+    const gridCount = (n + 1) * (n + 1);
+    const skirtCount = opts.skirt > 0 ? 4 * (n + 1) : 0;
+    const vcount = gridCount + skirtCount;
     const positions = new Float32Array(vcount * 3);
     const normals = new Float32Array(vcount * 3);
     const colors = new Float32Array(vcount * 3);
@@ -175,7 +188,7 @@ export class Terrain {
         const x = ox + i * step;
         const z = oz + j * step;
         positions[p] = x;
-        positions[p + 1] = h;
+        positions[p + 1] = h + yOff;
         positions[p + 2] = z;
         normals[p] = nx;
         normals[p + 1] = ny;
@@ -188,16 +201,45 @@ export class Terrain {
       }
     }
 
-    const indices = new Uint32Array(n * n * 6);
-    let q = 0;
+    const indices: number[] = [];
     for (let j = 0; j < n; j++) {
       for (let i = 0; i < n; i++) {
         const a = j * (n + 1) + i;
         const b = a + 1;
         const c = a + n + 1;
         const d = c + 1;
-        indices[q++] = a; indices[q++] = c; indices[q++] = b;
-        indices[q++] = b; indices[q++] = c; indices[q++] = d;
+        indices.push(a, c, b, b, c, d);
+      }
+    }
+
+    if (opts.skirt > 0) {
+      // Skirts hang from each edge so coarse far tiles never show through gaps.
+      const edges: number[][] = [[], [], [], []];
+      for (let i = 0; i <= n; i++) {
+        edges[0].push(i);
+        edges[1].push(n * (n + 1) + i);
+        edges[2].push(i * (n + 1));
+        edges[3].push(i * (n + 1) + n);
+      }
+      let sv = gridCount;
+      for (const edge of edges) {
+        const start = sv;
+        for (const src of edge) {
+          positions[sv * 3] = positions[src * 3];
+          positions[sv * 3 + 1] = positions[src * 3 + 1] - opts.skirt;
+          positions[sv * 3 + 2] = positions[src * 3 + 2];
+          normals[sv * 3] = normals[src * 3];
+          normals[sv * 3 + 1] = normals[src * 3 + 1];
+          normals[sv * 3 + 2] = normals[src * 3 + 2];
+          colors[sv * 3] = colors[src * 3] * 0.8;
+          colors[sv * 3 + 1] = colors[src * 3 + 1] * 0.8;
+          colors[sv * 3 + 2] = colors[src * 3 + 2] * 0.8;
+          sv++;
+        }
+        for (let k = 0; k < n; k++) {
+          const a = edge[k], b = edge[k + 1], c = start + k, d = start + k + 1;
+          indices.push(a, b, c, b, d, c, a, c, b, b, c, d);
+        }
       }
     }
 
@@ -205,7 +247,7 @@ export class Terrain {
     geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     geo.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
     geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-    geo.setIndex(new THREE.BufferAttribute(indices, 1));
+    geo.setIndex(indices);
     geo.computeBoundingSphere();
     return { geometry: geo, heights: physHeights };
   }

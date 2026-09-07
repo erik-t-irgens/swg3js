@@ -14,7 +14,7 @@ export class ThirdPersonCamera {
   private readonly desired = new THREE.Vector3();
 
   constructor(aspect: number) {
-    this.camera = new THREE.PerspectiveCamera(60, aspect, 0.1, 1500);
+    this.camera = new THREE.PerspectiveCamera(60, aspect, 0.1, 9000);
   }
 
   /** Horizontal forward direction (from camera toward the player). */

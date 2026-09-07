@@ -3,6 +3,7 @@
 //   .cmp (component appearance) is a list of parts, each a child appearance with a 3x4 transform.
 // Paths inside these files are relative to appearance/ unless already prefixed.
 import { childrenOf, find, findAll, isForm, readCString, parseIff } from './iff.mjs';
+import { parsePob } from './pob.mjs';
 
 export function appearancePath(name) {
   const n = name.replace(/\\/g, '/');
@@ -60,10 +61,41 @@ export function resolveParts(vfs, rawPath, depth = 0) {
     return resolveParts(vfs, readCString(name.data).value, depth + 1);
   }
   if (lower.endsWith('.lod')) {
-    const children = findAll(root, 'CHLD').map((c) => ({ level: c.data.readInt32LE(0), name: readCString(c.data, 4).value }));
+    // Detail levels: INFO lists (id, nearDistance, farDistance); the entry whose
+    // near distance is 0 (the last one) is the highest detail, per the engine.
+    const children = findAll(root, 'CHLD').map((c) => ({ id: c.data.readInt32LE(0), name: readCString(c.data, 4).value }));
     if (!children.length) throw new Error(`${path}: .lod without CHLD`);
-    children.sort((a, b) => a.level - b.level);
-    return resolveParts(vfs, children[0].name, depth + 1);
+    const info = find(root, 'INFO');
+    let pick = children[children.length - 1];
+    if (info && info.data.length >= 12) {
+      let bestNear = Infinity;
+      for (let o = 0; o + 12 <= info.data.length; o += 12) {
+        const id = info.data.readInt32LE(o);
+        const near = info.data.readFloatLE(o + 4);
+        const child = children.find((c) => c.id === id);
+        if (child && near <= bestNear) {
+          bestNear = near;
+          pick = child;
+        }
+      }
+    }
+    return resolveParts(vfs, pick.name, depth + 1);
+  }
+  if (lower.endsWith('.pob')) {
+    // Portal building: exterior (cell 0) plus every interior cell, all in building space.
+    const { cells } = parsePob(root);
+    const out = [];
+    const errors = [];
+    cells.forEach((cell, i) => {
+      if (!cell.appearance) return;
+      try {
+        out.push(...resolveParts(vfs, cell.appearance, depth + 1));
+      } catch (err) {
+        errors.push(`cell ${i}: ${err.message}`);
+      }
+    });
+    if (!out.length) throw new Error(`${path}: no cell appearances resolved (${errors.join('; ')})`);
+    return out;
   }
   if (lower.endsWith('.cmp')) {
     if (!isForm(root) || root.type !== 'CMPA') throw new Error(`${path}: not a component appearance`);
