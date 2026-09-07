@@ -212,7 +212,8 @@ export class World {
     await addScatter('flora', 0.9, 0.8, 1.2);
     if (token !== this.loadToken) return;
 
-    const placements = OUTPOSTS[planet.id] ?? [];
+    const layout = pack.layout;
+    const placements = layout ? [] : (OUTPOSTS[planet.id] ?? []);
     const structures: { model: LoadedModel; x: number; z: number; rot: number; flatten: number }[] = [];
     for (const p of placements) {
       try {
@@ -229,6 +230,30 @@ export class World {
       this.terrain.flattenZones.push({ x: st.x, z: st.z, r: st.flatten, h: this.terrain.rawHeightAt(st.x, st.z) });
       this.exclusions.push({ x: st.x, z: st.z, r: st.model.radius + 4 });
     }
+
+    // Snapshot objects: the world is mirrored in X (left-handed source), centred on the layout centre.
+    const placed: { model: LoadedModel; x: number; y: number; z: number; q: THREE.Quaternion; radius: number }[] = [];
+    if (layout) {
+      const byModel = new Map<string, typeof layout.objects>();
+      for (const o of layout.objects) (byModel.get(o.model) ?? byModel.set(o.model, []).get(o.model)!).push(o);
+      for (const [id, list] of byModel) {
+        let model: LoadedModel;
+        try {
+          model = await pack.model(id);
+        } catch {
+          console.warn(`layout: ${id} failed to load`);
+          continue;
+        }
+        if (token !== this.loadToken) return;
+        for (const o of list) {
+          const gx = -(o.x - layout.center.x);
+          const gz = o.z - layout.center.z;
+          placed.push({ model, x: gx, y: o.y, z: gz, q: new THREE.Quaternion(o.q[1], -o.q[2], -o.q[3], o.q[0]), radius: o.radius });
+          if (o.radius >= 2) this.terrain.addAnchor({ x: gx, z: gz, y: o.y, r: o.radius });
+          if (o.radius >= 1) this.exclusions.push({ x: gx, z: gz, r: o.radius + 2 });
+        }
+      }
+    }
     this.props.dispose();
     this.props = new PropFactory(planet, scatter);
     for (const c of this.chunks.values()) this.disposeChunk(c);
@@ -238,7 +263,48 @@ export class World {
     this.stream(spawn, Infinity);
 
     for (const st of structures) this.placeStructure(st.model, st.x, st.z, st.rot);
-    this.packStatus = `${scatter.length} scatter models, ${structures.length} structures`;
+    if (placed.length) this.placeLayout(placed, spawn);
+    this.packStatus = `${scatter.length} scatter models, ${structures.length} structures, ${placed.length} snapshot objects`;
+  }
+
+  /** Instance every snapshot object and give the larger ones exact collision near the spawn. */
+  private placeLayout(placed: { model: LoadedModel; x: number; y: number; z: number; q: THREE.Quaternion; radius: number }[], spawn: THREE.Vector3): void {
+    const byModel = new Map<LoadedModel, typeof placed>();
+    for (const p of placed) (byModel.get(p.model) ?? byModel.set(p.model, []).get(p.model)!).push(p);
+    const m = new THREE.Matrix4();
+    const one = new THREE.Vector3(1, 1, 1);
+    const pos = new THREE.Vector3();
+    let colliders = 0;
+    for (const [model, list] of byModel) {
+      for (const prim of model.primitives) {
+        const mesh = new THREE.InstancedMesh(prim.geometry, prim.material, list.length);
+        list.forEach((p, i) => {
+          m.compose(pos.set(p.x, p.y, p.z), p.q, one);
+          mesh.setMatrixAt(i, m);
+        });
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        mesh.instanceMatrix.needsUpdate = true;
+        mesh.computeBoundingSphere();
+        this.scene.add(mesh);
+        this.structures.push(mesh);
+      }
+      for (const p of list) {
+        if (p.radius < 1.5 || Math.hypot(p.x - spawn.x, p.z - spawn.z) > 350) continue;
+        for (const prim of model.primitives) {
+          const posAttr = prim.geometry.getAttribute('position');
+          const idx = prim.geometry.getIndex();
+          if (!posAttr || !idx) continue;
+          const desc = R.ColliderDesc.trimesh(new Float32Array(posAttr.array as ArrayLike<number>), new Uint32Array(idx.array as ArrayLike<number>))
+            .setTranslation(p.x, p.y, p.z)
+            .setRotation({ x: p.q.x, y: p.q.y, z: p.q.z, w: p.q.w })
+            .setFriction(0.8);
+          this.structureColliders.push(this.physics.world.createCollider(desc));
+          colliders++;
+        }
+      }
+    }
+    console.info(`layout: ${placed.length} objects, ${byModel.size} models, ${colliders} colliders`);
   }
 
   private placeStructure(model: LoadedModel, x: number, z: number, rot: number): void {

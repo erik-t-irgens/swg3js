@@ -6,6 +6,12 @@ export const CHUNK_SIZE = 64;
 
 /** Level ground of height h within radius r, blended smoothly at the edge. */
 export interface FlattenZone { x: number; z: number; r: number; h: number }
+
+/** A known ground height from game data (an object's origin), pulling the terrain toward it nearby. */
+export interface Anchor { x: number; z: number; y: number; r: number }
+
+const ANCHOR_CELL = 128;
+const ANCHOR_REACH = 40;
 export const CHUNK_RES = 32;
 
 const tmpA = new THREE.Color();
@@ -23,6 +29,8 @@ export class Terrain {
   readonly maxH: number;
   readonly waterLevel: number;
   readonly flattenZones: FlattenZone[] = [];
+  private readonly anchorCells = new Map<string, Anchor[]>();
+  private anchorCount = 0;
 
   constructor(readonly planet: PlanetDef) {
     this.fbm = new FBM(planet.seed);
@@ -46,7 +54,45 @@ export class Terrain {
       t = t * t * (3 - 2 * t);
       h += (zone.h - h) * t;
     }
+    if (this.anchorCount > 0) {
+      const list = this.anchorCells.get(`${Math.floor(x / ANCHOR_CELL)},${Math.floor(z / ANCHOR_CELL)}`);
+      if (list) {
+        let sumW = 0;
+        let sumY = 0;
+        let maxT = 0;
+        for (const a of list) {
+          const reach = a.r + ANCHOR_REACH;
+          const d = Math.hypot(x - a.x, z - a.z);
+          if (d >= reach) continue;
+          let t = 1 - d / reach;
+          t = t * t * (3 - 2 * t);
+          const w = t * (a.r + 4);
+          sumW += w;
+          sumY += w * a.y;
+          if (t > maxT) maxT = t;
+        }
+        if (sumW > 0) h += (sumY / sumW - h) * maxT;
+      }
+    }
     return h;
+  }
+
+  /** Register a ground-height anchor; it influences terrain within r + 40 m. */
+  addAnchor(a: Anchor): void {
+    const reach = a.r + ANCHOR_REACH;
+    const x0 = Math.floor((a.x - reach) / ANCHOR_CELL);
+    const x1 = Math.floor((a.x + reach) / ANCHOR_CELL);
+    const z0 = Math.floor((a.z - reach) / ANCHOR_CELL);
+    const z1 = Math.floor((a.z + reach) / ANCHOR_CELL);
+    for (let cz = z0; cz <= z1; cz++) {
+      for (let cx = x0; cx <= x1; cx++) {
+        const key = `${cx},${cz}`;
+        const list = this.anchorCells.get(key);
+        if (list) list.push(a);
+        else this.anchorCells.set(key, [a]);
+      }
+    }
+    this.anchorCount++;
   }
 
   /** Terrain height before any flattening. */

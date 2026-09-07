@@ -44,6 +44,9 @@ The client reads `[SharedFile] searchTree_<sku>_<priority>` entries from its con
 - The engine is left-handed Y-up. SOE's own Maya exporter negates X, so the converter negates X and reverses winding to produce right-handed GLTF.
 - Shaders: `FORM SSHT` (sometimes inside `FORM CSHD`) holds `TXMS` with one `TXM` per slot: `DATA` (uint32 tag, written little-endian so `MAIN` reads `NIAM` on disk, then sampler bytes) and `NAME` (the `.dds` path).
 - Textures are plain DDS: DXT1 to DXT5 plus uncompressed masked formats.
+- World snapshots (`.ws`): `FORM WSNP > 0001 > NODS` of `NODE` forms plus an `OTNL` chunk of template names. Each node's `DATA` holds network id, container id, template index, cell index, a quaternion (w, x, y, z), a position, a radius and the portal layout CRC; child nodes are objects inside the building's cells.
+- Object templates: `FORM <TYPE> > [DERV { base template }] > FORM 00NN > PCNT + one chunk per parameter` (name, then for strings an int8 type byte of 1 and the value). `appearanceFilename` is inherited through the base chain.
+- Portal objects (`.pob`): `FORM PRTO > 000N > CELS > CELL` forms; cell 0 is the exterior and its `DATA` names the appearance.
 - Skinned meshes (`.mgn`), skeletons (`.skt`) and animations (`.ans`) are documented in the research and are the next converter stage.
 
 ## Reference implementations

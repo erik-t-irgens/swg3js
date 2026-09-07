@@ -13,6 +13,25 @@ export interface PackManifest {
   categories: Record<string, PackModelDef[]>;
 }
 
+/** An object from the game's world snapshot, in SWG coordinates. */
+export interface LayoutObject {
+  template: string;
+  model: string;
+  x: number;
+  y: number;
+  z: number;
+  /** Quaternion as w, x, y, z. */
+  q: number[];
+  radius: number;
+}
+
+export interface Layout {
+  planet: string;
+  center: { x: number; z: number };
+  radius: number;
+  objects: LayoutObject[];
+}
+
 export interface Primitive {
   geometry: THREE.BufferGeometry;
   material: THREE.Material;
@@ -32,6 +51,8 @@ export class AssetPack {
   private readonly loader = new GLTFLoader();
   private readonly cache = new Map<string, Promise<LoadedModel>>();
 
+  layout: Layout | null = null;
+
   private constructor(readonly manifest: PackManifest, private readonly baseUrl: string) {}
 
   static async load(planetId: string): Promise<AssetPack | null> {
@@ -40,7 +61,14 @@ export class AssetPack {
       const res = await fetch(`${baseUrl}manifest.json`);
       if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json')) return null;
       const manifest = (await res.json()) as PackManifest;
-      return new AssetPack(manifest, baseUrl);
+      const pack = new AssetPack(manifest, baseUrl);
+      try {
+        const lr = await fetch(`${baseUrl}layout.json`);
+        if (lr.ok && (lr.headers.get('content-type') ?? '').includes('json')) pack.layout = (await lr.json()) as Layout;
+      } catch {
+        pack.layout = null;
+      }
+      return pack;
     } catch {
       return null;
     }

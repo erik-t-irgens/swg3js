@@ -147,7 +147,13 @@ class App {
     this.hud.setPlanet(planet);
     this.map.setCurrent(planet.id);
     this.updateUrl();
-    void this.world.loadPack(this.spawn).catch((err) => console.warn('asset pack failed', err));
+    void this.world.loadPack(this.spawn).then(() => {
+      const ground = this.world.terrain.heightAt(this.player.pos.x, this.player.pos.z);
+      if (this.player.pos.y < ground + 0.05 && !this.player.mounted) {
+        this.player.pos.y = ground + 0.1;
+        this.player.body.setTranslation({ x: this.player.pos.x, y: this.player.pos.y, z: this.player.pos.z }, true);
+      }
+    }).catch((err) => console.warn('asset pack failed', err));
   }
 
   private async travel(planet: PlanetDef): Promise<void> {

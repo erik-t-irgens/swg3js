@@ -11,6 +11,8 @@
 //   node tools/swg/cli.mjs msh <swg-dir> <appearance-path> <out.glb>
 //   node tools/swg/cli.mjs batch <swg-dir> <out-dir> [filter]     convert every .msh matching filter (default appearance/mesh/)
 //   node tools/swg/cli.mjs pack <swg-dir> <spec.json> <out-dir>    build a game asset pack from a spec (see packs/)
+//   node tools/swg/cli.mjs snapshot <swg-dir> <planet> <out-dir> --center=x,z --radius=r [--max=n]
+//                                                                  convert the world snapshot's objects around a point into a layout
 //
 // Flags: --retail-only (mount only archives named in the retail manifests)
 //        --no-flip (keep left-handed coordinates)  --no-textures (skip DDS decoding)
@@ -22,13 +24,16 @@ import { buildGlb } from './glb.mjs';
 import { dump, parseIff } from './iff.mjs';
 import { classifyDirectory, isRetailByName } from './manifest.mjs';
 import { parseMesh } from './msh.mjs';
-import { buildPack } from './pack.mjs';
+import { buildPack, familyOf } from './pack.mjs';
+import { parseSnapshot } from './ws.mjs';
+import { resolveTemplateMesh } from './objtemplate.mjs';
 import { encodePng } from './png.mjs';
 import { shaderTextures } from './sht.mjs';
 import { openTre, openVfs, readHeader } from './tre.mjs';
 
 const args = process.argv.slice(2);
-const flags = new Set(args.filter((a) => a.startsWith('--')));
+const flags = new Set(args.filter((a) => a.startsWith('--')).map((a) => a.split('=')[0]));
+const options = Object.fromEntries(args.filter((a) => a.startsWith('--') && a.includes('=')).map((a) => a.slice(2).split('=')));
 const pos = args.filter((a) => !a.startsWith('--'));
 const cmd = pos[0];
 
@@ -156,6 +161,60 @@ switch (cmd) {
     const vfs = mount(pos[1]);
     const spec = JSON.parse(readFileSync(pos[2], 'utf8'));
     buildPack(vfs, spec, pos[3], (meshPath, out) => convertOne(vfs, meshPath, out));
+    break;
+  }
+  case 'snapshot': {
+    if (!pos[3] || !options.center) usage();
+    const vfs = mount(pos[1]);
+    const planet = pos[2];
+    const outDir = pos[3];
+    const [cx, cz] = options.center.split(',').map(Number);
+    const radius = Number(options.radius ?? 400);
+    const max = Number(options.max ?? Infinity);
+    const wsPath = `snapshot/${planet}.ws`;
+    if (!vfs.has(wsPath)) throw new Error(`no ${wsPath} in archives`);
+    const snap = parseSnapshot(parseIff(vfs.read(wsPath)));
+    console.error(`${wsPath}: ${snap.nodes.length} top-level objects, ${snap.templates.length} templates`);
+    const inRegion = snap.nodes.filter((n) => Math.hypot(n.pos[0] - cx, n.pos[2] - cz) <= radius);
+    console.error(`${inRegion.length} within ${radius} m of ${cx},${cz}`);
+    const cache = new Map();
+    const skipped = {};
+    const models = new Map();
+    const objects = [];
+    mkdirSync(outDir, { recursive: true });
+    for (const n of inRegion) {
+      const template = snap.templates[n.templateIndex];
+      const r = resolveTemplateMesh(vfs, template, cache);
+      if (r.skip) {
+        skipped[r.skip] = (skipped[r.skip] ?? 0) + 1;
+        continue;
+      }
+      const id = familyOf(r.mesh);
+      if (!models.has(id)) {
+        if (models.size >= max) break;
+        try {
+          const conv = convertOne(vfs, r.mesh, join(outDir, `${id}.glb`));
+          const b = conv.mesh.bounds ?? { min: [0, 0, 0], max: [0, 0, 0] };
+          const bounds = conv.flipX ? { min: [-b.max[0], b.min[1], b.min[2]], max: [-b.min[0], b.max[1], b.max[2]] } : b;
+          models.set(id, { id, source: r.mesh, file: `${id}.glb`, bounds, triangles: conv.tris, textured: conv.textured, shaders: conv.shaders.length });
+          console.error(`  ${id}: ${conv.tris} tris, ${conv.textured}/${conv.shaders.length} textured`);
+        } catch (err) {
+          skipped[`convert failed: ${err.message}`] = (skipped[`convert failed: ${err.message}`] ?? 0) + 1;
+          models.set(id, null);
+          continue;
+        }
+      }
+      if (!models.get(id)) continue;
+      objects.push({ template, model: id, x: n.pos[0], y: n.pos[1], z: n.pos[2], q: n.q, radius: n.radius, children: n.children.length });
+    }
+    const layout = { planet, center: { x: cx, z: cz }, radius, objects, skipped };
+    writeFileSync(join(outDir, 'layout.json'), JSON.stringify(layout));
+    const manifestPath = join(outDir, 'manifest.json');
+    const manifest = existsSync(manifestPath) ? JSON.parse(readFileSync(manifestPath, 'utf8')) : { planet, categories: {} };
+    manifest.categories.layout = [...models.values()].filter(Boolean);
+    writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+    console.log(`layout: ${objects.length} objects, ${manifest.categories.layout.length} models -> ${join(outDir, 'layout.json')}`);
+    for (const [reason, count] of Object.entries(skipped).sort((a, b) => b[1] - a[1])) console.log(`  skipped ${count}: ${reason}`);
     break;
   }
   case 'batch': {
