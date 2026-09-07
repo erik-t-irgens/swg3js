@@ -22,6 +22,7 @@ Open the printed URL, click **Enter the galaxy**, and go.
 | E | Mount / dismount the speeder |
 | C | Switch class (Jedi / Bounty Hunter) |
 | T | Hold to fast-forward the day |
+| N | Noclip fly mode (Space up, Ctrl down, Shift fast) |
 | M | Galaxy map |
 | H | Toggle help |
 | Esc | Release mouse |

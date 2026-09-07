@@ -156,6 +156,8 @@ export class Player {
   /** Swing progress in [0, 1], or -1 when idle. */
   swing = -1;
   jetThrust = false;
+  /** Fly mode for exploring and bug hunting: no gravity, no collision. */
+  noclip = false;
   private regenDelay = 0;
   private phase = 0;
   private moveAmount = 0;
@@ -247,6 +249,16 @@ export class Player {
     this.rig?.tint(jedi ? 0xb9a57c : 0x66727a);
   }
 
+  toggleNoclip(): void {
+    this.noclip = !this.noclip;
+    this.vel.set(0, 0, 0);
+    this.body.setEnabled(!this.noclip);
+    if (!this.noclip) {
+      this.body.setTranslation({ x: this.pos.x, y: this.pos.y, z: this.pos.z }, true);
+      this.grounded = false;
+    }
+  }
+
   toggleSaber(): void {
     this.saberOn = !this.saberOn;
     this.parts.blade.visible = this.saberOn;
@@ -317,6 +329,11 @@ export class Player {
     if (this.mounted) {
       this.animateSeated();
       this.animateRig(dt, 0, false);
+      return;
+    }
+
+    if (this.noclip) {
+      this.flyUpdate(dt, input, cam);
       return;
     }
 
@@ -439,6 +456,35 @@ export class Player {
       f.visible = this.jetThrust;
       f.scale.y = 0.8 + Math.random() * 0.5;
     }
+  }
+
+  private flyUpdate(dt: number, input: Input, cam: ThirdPersonCamera): void {
+    cam.camera.getWorldDirection(fwd);
+    cam.right(rgt);
+    move.set(0, 0, 0);
+    if (input.isDown('KeyW') || input.isDown('ArrowUp')) move.add(fwd);
+    if (input.isDown('KeyS') || input.isDown('ArrowDown')) move.sub(fwd);
+    if (input.isDown('KeyD') || input.isDown('ArrowRight')) move.add(rgt);
+    if (input.isDown('KeyA') || input.isDown('ArrowLeft')) move.sub(rgt);
+    if (input.isDown('Space')) move.y += 1;
+    if (input.isDown('ControlLeft') || input.isDown('ControlRight')) move.y -= 1;
+    const moving = move.lengthSq() > 0;
+    if (moving) move.normalize();
+    const speed = (input.isDown('ShiftLeft') || input.isDown('ShiftRight') ? 120 : 35) * this.speedMultiplier;
+    this.pos.addScaledVector(move, speed * dt);
+    this.vel.set(0, 0, 0);
+    this.grounded = false;
+    this.swimming = false;
+    const desired = Math.atan2(fwd.x, fwd.z);
+    let diff = desired - this.heading;
+    diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+    this.heading += diff * Math.min(1, dt * 10);
+    this.moveAmount = 0;
+    this.animate(dt);
+    this.animateRig(dt, 0, false);
+    this.group.position.copy(this.pos);
+    this.group.rotation.set(0, this.heading, 0);
+    this.group.updateMatrixWorld(true);
   }
 
   private animateSeated(): void {

@@ -75,7 +75,7 @@ class App {
         <div class="controls">
           <div><b>WASD</b> move · <b>Mouse</b> look · <b>Wheel</b> zoom · <b>Space</b> jump · <b>Shift</b> walk</div>
           <div><b>LMB</b> attack · <b>E</b> mount speeder · <b>C</b> switch class · <b>T</b> fast-forward time</div>
-          <div><b>M</b> galaxy map · <b>H</b> toggle help · <b>Esc</b> release mouse</div>
+          <div><b>M</b> galaxy map · <b>H</b> toggle help · <b>N</b> noclip fly · <b>Esc</b> release mouse</div>
         </div>
         <div class="class-pick">
           <button class="enter" data-class="jedi">Enter as Jedi<small>Lightsaber, Force powers</small></button>
@@ -244,7 +244,8 @@ class App {
         if (!this.map.open) {
           if (input.justPressed('KeyL') && this.kit.id === 'jedi' && !player.mounted) player.toggleSaber();
           if (input.justPressed('KeyC')) this.setClass(this.kit.id === 'jedi' ? 'bounty_hunter' : 'jedi');
-          if (input.justPressed('KeyE')) this.handleMount();
+          if (input.justPressed('KeyE') && !player.noclip) this.handleMount();
+          if (input.justPressed('KeyN') && !player.mounted) player.toggleNoclip();
         }
       }
 
@@ -269,7 +270,7 @@ class App {
 
       const fast = simulate && input.isDown('KeyT');
       this.world.update(dt, player.pos, this.cam.camera.position, fast, (dmg) => {
-        if (!simulate || player.mounted) return;
+        if (!simulate || player.mounted || player.noclip) return;
         player.takeDamage(dmg);
         this.hud.hurt();
       });
@@ -288,7 +289,8 @@ class App {
       );
 
       let prompt = '';
-      if (player.mounted) prompt = '<b>E</b> dismount · <b>W/S</b> throttle · <b>A/D</b> steer · <b>Shift</b> boost · <b>Space</b> hop';
+      if (player.noclip) prompt = '<b>NOCLIP</b> · <b>WASD</b> fly · <b>Space</b> up · <b>Ctrl</b> down · <b>Shift</b> fast · <b>N</b> off';
+      else if (player.mounted) prompt = '<b>E</b> dismount · <b>W/S</b> throttle · <b>A/D</b> steer · <b>Shift</b> boost · <b>Space</b> hop';
       else if (this.nearestSpeederDistance() < MOUNT_RANGE) prompt = '<b>E</b> mount speeder';
       this.hud.setPrompt(prompt);
       this.hud.update(dt, player.pos.x, player.pos.y, player.pos.z, this.kit, player.hp, player.maxHp, this.world.day.clock(), this.world.planet.creatures.name, player.saberOn);

@@ -87,7 +87,7 @@ export class BountyHunterKit implements Kit {
 
     // Jetpack: hold Space while airborne.
     const g = world.planet.gravity;
-    this.jetOn = onFoot && input.isDown('Space') && !player.grounded && res.value > 0;
+    this.jetOn = onFoot && !player.noclip && input.isDown('Space') && !player.grounded && res.value > 0;
     if (this.jetOn) {
       player.vel.y = Math.min(11, player.vel.y + (g + 16) * dt);
       res.value -= 30 * dt;
