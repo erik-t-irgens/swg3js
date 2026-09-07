@@ -120,3 +120,53 @@ export function resolveAppearanceToMesh(vfs, rawAppearance) {
     return { skip: `resolve failed: ${err.message}` };
   }
 }
+
+/**
+ * First value of any of the named string parameters along a template's
+ * inheritance chain (sharedTemplate link, DERV base, shared_ naming fallback).
+ */
+export function resolveTemplateString(vfs, templatePath, names, cache = new Map()) {
+  const key = `${templatePath}|${names.join(',')}`;
+  if (cache.has(key)) return cache.get(key);
+  let result = null;
+  let path = templatePath;
+  for (let depth = 0; depth < 12 && path; depth++) {
+    if (!vfs.has(path)) {
+      const guess = path.replace(/([^/]+)$/, 'shared_$1');
+      if (path === templatePath && !/\/shared_[^/]+$/.test(path) && vfs.has(guess)) {
+        path = guess;
+        continue;
+      }
+      break;
+    }
+    let t;
+    try {
+      t = readTemplate(parseIff(vfs.read(path)));
+    } catch {
+      break;
+    }
+    for (const name of names) {
+      const v = stringParam(t.params.get(name));
+      if (v) {
+        result = v;
+        break;
+      }
+    }
+    if (result) break;
+    const shared = stringParam(t.params.get('sharedTemplate'));
+    if (shared) {
+      path = shared;
+      continue;
+    }
+    if (!t.base) {
+      const guess = templatePath.replace(/([^/]+)$/, 'shared_$1');
+      if (path !== guess && vfs.has(guess)) {
+        path = guess;
+        continue;
+      }
+    }
+    path = t.base;
+  }
+  cache.set(key, result);
+  return result;
+}

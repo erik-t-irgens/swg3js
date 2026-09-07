@@ -8,6 +8,7 @@ import { AssetPack, type LoadedModel } from './assetPack';
 import { OUTPOSTS } from '../data/outposts';
 import { RAPIER as R } from '../core/physics';
 import { CHUNK_RES, CHUNK_SIZE, Terrain } from './terrain';
+import { SwgTerrain, type BuildingLayerSource } from './swgTerrain';
 import { Speeder } from '../vehicles/speeder';
 
 const VIEW_RADIUS = 6;
@@ -152,6 +153,7 @@ export class World {
   load(planet: PlanetDef): void {
     this.unload();
     this.planet = planet;
+    this.terrain?.detachSwg();
     this.terrain = new Terrain(planet);
     this.props = new PropFactory(planet);
     this.creatures = new CreatureManager(planet, this.terrain, this.physics);
@@ -242,6 +244,29 @@ export class World {
       this.exclusions.push({ x: st.x, z: st.z, r: st.model.radius + 4 });
     }
 
+    // The planet's real terrain, with every building's ground modification applied where the snapshot puts it.
+    if (layout?.terrain) {
+      const trn = await pack.terrain();
+      if (token !== this.loadToken) return null;
+      if (trn) {
+        const layers: BuildingLayerSource[] = [];
+        for (const o of layout.objects) {
+          if (!o.layer || o.contained) continue;
+          const bytes = await pack.bytes(o.layer);
+          if (!bytes) continue;
+          layers.push({ bytes, x: o.x, z: o.z, yaw: yawOf(o.q) });
+        }
+        if (token !== this.loadToken) return null;
+        try {
+          const t0 = performance.now();
+          this.terrain.attachSwg(SwgTerrain.create(trn, layers, layout.center.x, layout.center.z));
+          console.info(`terrain: ${this.terrain.swg!.template.name} with ${layers.length} building layers loaded in ${(performance.now() - t0).toFixed(0)} ms`);
+        } catch (err) {
+          console.warn('terrain: failed to load the planet terrain, keeping procedural ground', err);
+        }
+      }
+    }
+
     // Snapshot objects: the world is mirrored in X (left-handed source), centred on the layout centre.
     const placed: { model: LoadedModel; x: number; y: number; z: number; q: THREE.Quaternion; radius: number; contained: boolean }[] = [];
     if (layout) {
@@ -260,7 +285,7 @@ export class World {
           const gx = -(o.x - layout.center.x);
           const gz = o.z - layout.center.z;
           placed.push({ model, x: gx, y: o.y, z: gz, q: new THREE.Quaternion(o.q[1], -o.q[2], -o.q[3], o.q[0]), radius: o.radius, contained: !!o.contained });
-          if (o.radius >= 2 && !o.contained) this.terrain.addAnchor({ x: gx, z: gz, y: o.y, r: o.radius });
+          if (o.radius >= 2 && !o.contained && !this.terrain.swg) this.terrain.addAnchor({ x: gx, z: gz, y: o.y, r: o.radius });
           if (o.radius >= 1 && !o.contained) this.exclusions.push({ x: gx, z: gz, r: o.radius + 2 });
         }
       }
@@ -269,9 +294,11 @@ export class World {
     this.props = new PropFactory(planet, scatter);
     for (const c of this.chunks.values()) this.disposeChunk(c);
     this.chunks.clear();
-    for (const t of this.farTiles.values()) {
+    for (const [key, t] of this.farTiles) {
       this.chunkRoot.remove(t);
       t.geometry.dispose();
+      const [tx, tz] = key.split(',').map(Number);
+      this.terrain.releaseFarTile(tx, tz, FAR_TILE, FAR_RES);
     }
     this.farTiles.clear();
     this.lastCx = Number.NaN;
@@ -283,7 +310,7 @@ export class World {
 
     for (const st of structures) this.placeStructure(st.model, st.x, st.z, st.rot);
     if (placed.length) this.placeLayout(placed, spawn);
-    this.packStatus = `${scatter.length} scatter models, ${structures.length} structures, ${placed.length} snapshot objects`;
+    this.packStatus = `${scatter.length} scatter models, ${structures.length} structures, ${placed.length} snapshot objects${this.terrain.swg ? ', SWG terrain' : ''}`;
     if (!placed.length) return null;
 
     // Find open ground near the layout centre that no object's footprint covers.
@@ -453,6 +480,10 @@ export class World {
     this.speeders.push(new Speeder(this.physics, this.scene, sx, this.terrain.heightAt(sx, sz) + 1.2, sz, Math.PI * 0.75));
   }
 
+  get chunkCount(): number {
+    return this.chunks.size;
+  }
+
   collidersNear(x: number, z: number, radius: number): Collider[] {
     const cx = Math.floor(x / CHUNK_SIZE);
     const cz = Math.floor(z / CHUNK_SIZE);
@@ -518,8 +549,11 @@ export class World {
     }
     wanted.sort((a, b) => a.d - b.d);
     let made = 0;
+    const sync = budget === Infinity;
     for (const w of wanted) {
       if (made >= budget) break;
+      // With SWG terrain the pole grids come from a worker; skip until they arrive.
+      if (!this.terrain.prepareChunk(w.cx, w.cz, sync)) continue;
       this.createChunk(w.cx, w.cz);
       made++;
     }
@@ -527,6 +561,7 @@ export class World {
       this.lastCx = pcx;
       this.lastCz = pcz;
     }
+    this.terrain.evict(center, VIEW_RADIUS + 2);
 
     for (const [key, c] of this.chunks) {
       const far = Math.max(Math.abs(c.cx - pcx), Math.abs(c.cz - pcz));
@@ -555,7 +590,9 @@ export class World {
     let made = 0;
     for (const w of wanted) {
       if (made >= budget) break;
-      const mesh = new THREE.Mesh(this.terrain.buildFarTile(w.tx, w.tz, FAR_TILE, FAR_RES), this.terrainMat);
+      const geometry = this.terrain.buildFarTile(w.tx, w.tz, FAR_TILE, FAR_RES, budget === Infinity);
+      if (!geometry) continue;
+      const mesh = new THREE.Mesh(geometry, this.terrainMat);
       mesh.receiveShadow = true;
       this.chunkRoot.add(mesh);
       this.farTiles.set(`${w.tx},${w.tz}`, mesh);
@@ -571,6 +608,7 @@ export class World {
         this.chunkRoot.remove(t);
         t.geometry.dispose();
         this.farTiles.delete(key);
+        this.terrain.releaseFarTile(tx, tz, FAR_TILE, FAR_RES);
       }
     }
   }
@@ -591,4 +629,10 @@ export class World {
     this.chunkRoot.add(group);
     this.chunks.set(key, { key, cx, cz, group, colliders, heights, physics: null });
   }
+}
+
+/** Yaw of a w,x,y,z quaternion: the heading of its forward vector, as the client uses for terrain layers. */
+function yawOf(q: number[]): number {
+  const [w, x, y, z] = q;
+  return Math.atan2(2 * (x * z + w * y), 1 - 2 * (x * x + y * y));
 }

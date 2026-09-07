@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import type { PlanetDef } from '../data/planets';
 import { FBM, hash2 } from './noise';
+import type { SwgTerrain } from './swgTerrain';
 
 export const CHUNK_SIZE = 64;
 
@@ -25,10 +26,12 @@ export class Terrain {
   private readonly high: THREE.Color;
   private readonly slope: THREE.Color;
   private readonly shore: THREE.Color;
-  readonly minH: number;
-  readonly maxH: number;
-  readonly waterLevel: number;
+  minH: number;
+  maxH: number;
+  waterLevel: number;
   readonly flattenZones: FlattenZone[] = [];
+  /** Real SWG terrain for this planet when a converted pack provides it; replaces the noise below. */
+  swg: SwgTerrain | null = null;
   private readonly anchorCells = new Map<string, Anchor[]>();
   private anchorCount = 0;
 
@@ -45,7 +48,34 @@ export class Terrain {
     this.waterLevel = planet.water ? planet.water.level : -Infinity;
   }
 
+  /** Switch to the planet's real terrain generator. Heights, water and colour bands follow it from now on. */
+  attachSwg(swg: SwgTerrain): void {
+    this.swg = swg;
+    this.waterLevel = swg.waterLevel;
+    // Colour bands span the heights SWG worlds actually use rather than the noise planet's range.
+    this.minH = Math.max(this.waterLevel, -20);
+    this.maxH = this.minH + 140;
+  }
+
+  detachSwg(): void {
+    this.swg?.dispose();
+    this.swg = null;
+    this.waterLevel = this.planet.water ? this.planet.water.level : -Infinity;
+  }
+
+  /**
+   * Make sure the ground under a chunk can be sampled. With SWG terrain this means its pole
+   * grids are cached; when they are not, they are queued on the worker (or generated at once
+   * when `sync`) and false is returned so the caller retries next frame.
+   */
+  prepareChunk(cx: number, cz: number, sync: boolean): boolean {
+    if (!this.swg) return true;
+    const step = CHUNK_SIZE / CHUNK_RES;
+    return this.swg.prepareArea(cx * CHUNK_SIZE - step, cz * CHUNK_SIZE - step, CHUNK_SIZE + 2 * step, sync);
+  }
+
   heightAt(x: number, z: number): number {
+    if (this.swg) return this.swg.heightAt(x, z);
     let h = this.rawHeightAt(x, z);
     for (const zone of this.flattenZones) {
       const d = Math.hypot(x - zone.x, z - zone.z);
@@ -97,6 +127,7 @@ export class Terrain {
 
   /** Terrain height before any flattening. */
   rawHeightAt(x: number, z: number): number {
+    if (this.swg) return this.swg.heightAt(x, z);
     const t = this.planet.terrain;
     const f = t.frequency;
     let v = this.fbm.fbm(x * f, z * f, t.octaves);
@@ -143,19 +174,42 @@ export class Terrain {
     return { geometry: r.geometry, heights: r.heights! };
   }
 
-  /** Coarse distant tile, dropped slightly so near chunks win where they overlap. */
-  buildFarTile(tx: number, tz: number, size: number, res: number): THREE.BufferGeometry {
-    return this.buildGrid(tx * size, tz * size, size, res, { skirt: 0, yOffset: -2.5, wantHeights: false }).geometry;
+  /**
+   * Coarse distant tile, dropped slightly so near chunks win where they overlap. With SWG
+   * terrain the samples come from the worker; null means not generated yet (retry later).
+   */
+  buildFarTile(tx: number, tz: number, size: number, res: number, sync = true): THREE.BufferGeometry | null {
+    let hs: Float32Array | undefined;
+    if (this.swg) {
+      const grid = this.swg.farGrid(tx * size, tz * size, size, res, sync);
+      if (!grid) return null;
+      hs = grid;
+    }
+    return this.buildGrid(tx * size, tz * size, size, res, { skirt: 0, yOffset: -2.5, wantHeights: false }, hs).geometry;
   }
 
-  private buildGrid(ox: number, oz: number, size: number, n: number, opts: { skirt: number; yOffset?: number; wantHeights: boolean }): { geometry: THREE.BufferGeometry; heights: Float32Array | null } {
+  releaseFarTile(tx: number, tz: number, size: number, res: number): void {
+    this.swg?.releaseFarGrid(tx * size, tz * size, size, res);
+  }
+
+  /** Drop cached SWG grids far from a point (in game chunks). */
+  evict(center: THREE.Vector3, chunkRadius: number): void {
+    this.swg?.evict(center.x, center.z, Math.ceil((chunkRadius * CHUNK_SIZE) / this.swg.sampler.chunkWidth) + 2);
+  }
+
+  private buildGrid(ox: number, oz: number, size: number, n: number, opts: { skirt: number; yOffset?: number; wantHeights: boolean }, samples?: Float32Array): { geometry: THREE.BufferGeometry; heights: Float32Array | null } {
     const step = size / n;
     const yOff = opts.yOffset ?? 0;
     const w = n + 3;
-    const hs = new Float32Array(w * w);
-    for (let j = 0; j < w; j++) {
-      for (let i = 0; i < w; i++) {
-        hs[j * w + i] = this.heightAt(ox + (i - 1) * step, oz + (j - 1) * step);
+    let hs: Float32Array;
+    if (samples && samples.length === w * w) {
+      hs = samples;
+    } else {
+      hs = new Float32Array(w * w);
+      for (let j = 0; j < w; j++) {
+        for (let i = 0; i < w; i++) {
+          hs[j * w + i] = this.heightAt(ox + (i - 1) * step, oz + (j - 1) * step);
+        }
       }
     }
 
@@ -201,6 +255,10 @@ export class Terrain {
       }
     }
 
+    // SWG ground is fans around each tile's centre pole: split every cell along the diagonal
+    // that touches a centre pole so collision and rendering match the original game exactly.
+    const swg = this.swg;
+    const fanAligned = !!swg && Math.abs(step - swg.tileWidth * 0.5) < 1e-6;
     const indices: number[] = [];
     for (let j = 0; j < n; j++) {
       for (let i = 0; i < n; i++) {
@@ -208,7 +266,8 @@ export class Terrain {
         const b = a + 1;
         const c = a + n + 1;
         const d = c + 1;
-        indices.push(a, c, b, b, c, d);
+        if (fanAligned && (swg!.isTileCentre(ox + i * step, oz + j * step) || swg!.isTileCentre(ox + (i + 1) * step, oz + (j + 1) * step))) indices.push(a, c, d, a, d, b);
+        else indices.push(a, c, b, b, c, d);
       }
     }
 

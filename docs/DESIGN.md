@@ -44,7 +44,7 @@ A private, friends-scale (2 to 10 players) co-op sandbox that recreates the feel
 
 ## World
 
-- Planets remain procedural, but the SWG terrain rule files may replace our noise where they convert cleanly.
+- Planets stay procedural in the public build. Private builds run the ported SWG terrain generator from the planet's own rule file, so cities sit on the exact ground the game gave them; our additions (rooftops, pits, climbing) go on top of it.
 - Cities and points of interest are placed from data files (later the SWG world snapshots), then edited by hand for verticality: rooftop routes, elevated walkways, pits and sewers.
 - Travel: speeders on the surface, shuttles between cities, ships between planets once space exists.
 - Day and night on every world, with a shared clock in multiplayer.
@@ -78,5 +78,4 @@ A private, friends-scale (2 to 10 players) co-op sandbox that recreates the feel
 ## Open questions
 
 - Jedi unlock design once the core is fun.
-- Whether to reproduce SWG's terrain exactly or use its rule files as inspiration only.
 - Death penalty, if any, beyond respawn.

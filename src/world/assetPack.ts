@@ -25,12 +25,16 @@ export interface LayoutObject {
   radius: number;
   /** Inside a building's cell; positioned relative to it by the converter. */
   contained?: boolean;
+  /** Pack-relative terrain modification layer (.lay) flattening the ground under a building. */
+  layer?: string;
 }
 
 export interface Layout {
   planet: string;
   center: { x: number; z: number };
   radius: number;
+  /** Pack-relative terrain template (.trn) copied from the game, when the converter found one. */
+  terrain?: string;
   objects: LayoutObject[];
 }
 
@@ -52,6 +56,7 @@ export interface LoadedModel {
 export class AssetPack {
   private readonly loader = new GLTFLoader();
   private readonly cache = new Map<string, Promise<LoadedModel>>();
+  private readonly bytesCache = new Map<string, Promise<ArrayBuffer | null>>();
 
   layout: Layout | null = null;
 
@@ -115,6 +120,26 @@ export class AssetPack {
       this.cache.set(id, p);
     }
     return p;
+  }
+
+  /** Raw bytes of a pack file (terrain templates, layer files); null when missing. */
+  bytes(file: string): Promise<ArrayBuffer | null> {
+    let p = this.bytesCache.get(file);
+    if (!p) {
+      p = fetch(this.baseUrl + file)
+        .then(async (res) => {
+          if (!res.ok || (res.headers.get('content-type') ?? '').includes('text/html')) return null;
+          return res.arrayBuffer();
+        })
+        .catch(() => null);
+      this.bytesCache.set(file, p);
+    }
+    return p;
+  }
+
+  /** The planet's terrain template bytes, if the pack carries one. */
+  terrain(): Promise<ArrayBuffer | null> {
+    return this.layout?.terrain ? this.bytes(this.layout.terrain) : Promise.resolve(null);
   }
 
   async models(ids: string[]): Promise<LoadedModel[]> {

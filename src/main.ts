@@ -17,7 +17,7 @@ import { World } from './world/world';
 const MOUNT_RANGE = 3.6;
 
 /** Debug counters, readable from the console as window.__stats. */
-const stats = { frameMs: 0, physicsMs: 0, renderMs: 0, rawDt: 0, grounded: false, vel: [0, 0, 0] as number[], calls: 0, pack: '' };
+const stats = { frameMs: 0, physicsMs: 0, renderMs: 0, rawDt: 0, grounded: false, vel: [0, 0, 0] as number[], calls: 0, pack: '', terrain: '', chunks: 0 };
 (window as unknown as { __stats: typeof stats }).__stats = stats;
 const tmp = new THREE.Vector3();
 const tmpQ = new THREE.Quaternion();
@@ -313,6 +313,8 @@ class App {
       stats.vel = [player.vel.x, player.vel.y, player.vel.z];
       stats.calls = this.renderer.info.render.calls;
       stats.pack = this.world.packStatus;
+      stats.terrain = this.world.terrain.swg ? `${this.world.terrain.swg.template.name}: ${this.world.terrain.swg.syncGenerations} sync grids` : 'procedural';
+      stats.chunks = this.world.chunkCount;
       input.endFrame();
     };
     frame();

@@ -13,7 +13,10 @@
 //   node tools/swg/cli.mjs batch <swg-dir> <out-dir> [filter]     convert every .msh matching filter (default appearance/mesh/)
 //   node tools/swg/cli.mjs pack <swg-dir> <spec.json> <out-dir>    build a game asset pack from a spec (see packs/)
 //   node tools/swg/cli.mjs snapshot <swg-dir> <planet> <out-dir> --center=x,z --radius=r [--max=n]
-//                                                                  convert the world snapshot's objects around a point into a layout
+//                                                                  convert the world snapshot's objects around a point into a layout,
+//                                                                  and copy the planet's terrain (.trn) plus building terrain layers (.lay)
+//   node tools/swg/cli.mjs terrain <swg-dir> <planet> <out-dir>    copy just the terrain template into a pack
+//   node tools/swg/cli.mjs terrain-check <out-dir> [--limit=n]     generate terrain at every snapshot object and compare with its height
 //
 // Flags: --retail-only (mount only archives named in the retail manifests)
 //        --no-flip (keep left-handed coordinates)  --no-textures (skip DDS decoding)
@@ -27,7 +30,7 @@ import { classifyDirectory, isRetailByName } from './manifest.mjs';
 import { parseMesh } from './msh.mjs';
 import { buildPack, familyOf } from './pack.mjs';
 import { parseSnapshot, flattenWithWorldTransforms } from './ws.mjs';
-import { resolveTemplateMesh } from './objtemplate.mjs';
+import { resolveTemplateMesh, resolveTemplateString } from './objtemplate.mjs';
 import { encodePng } from './png.mjs';
 import { shaderTextures } from './sht.mjs';
 import { effectAlpha, alphaModeFor } from './eff.mjs';
@@ -173,6 +176,93 @@ function convertOne(vfs, appearancePath, outFile) {
   return { meshPath, mesh, flipX, tris, shaders, textured: textures.size, warnings: mesh.warnings, partCount };
 }
 
+/** Copy terrain/<planet>.trn into the pack as terrain.trn. Returns the file name or null. */
+function copyTerrain(vfs, planet, outDir) {
+  const path = `terrain/${planet}.trn`;
+  if (!vfs.has(path)) return null;
+  writeFileSync(join(outDir, 'terrain.trn'), vfs.read(path));
+  return 'terrain.trn';
+}
+
+/** Copy a building template's terrain modification layer (.lay) into <out>/terrain/. Returns the pack-relative file or null. */
+function copyTerrainLayer(vfs, template, outDir, cache) {
+  const raw = resolveTemplateString(vfs, template, ['terrainModificationFileName'], cache);
+  if (!raw) return null;
+  const path = raw.replace(/\\/g, '/').replace(/^\//, '');
+  const rel = `terrain/${basename(path)}`;
+  const target = join(outDir, rel);
+  if (!existsSync(target)) {
+    if (!vfs.has(path)) {
+      console.warn(`terrain layer missing: ${path} (for ${template})`);
+      return null;
+    }
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, vfs.read(path));
+  }
+  return rel;
+}
+
+/** Yaw (rotation about Y) of a w,x,y,z quaternion: the heading of its forward vector. */
+function yawOf(q) {
+  const [w, x, y, z] = q;
+  return Math.atan2(2 * (x * z + w * y), 1 - 2 * (x * x + y * y));
+}
+
+/** Compare generated terrain heights with the snapshot's object heights. Needs Node 22.18+ (runs the game's TypeScript directly). */
+async function terrainCheck(dir, limit) {
+  const { parseTerrainTemplate, parseLayerFile, TerrainSampler } = await import('../../src/swg/terrain/trn.ts');
+  const trnPath = join(dir, 'terrain.trn');
+  if (!existsSync(trnPath)) throw new Error(`${trnPath} missing; run the snapshot (or terrain) command first`);
+  const t0 = Date.now();
+  const template = parseTerrainTemplate(new Uint8Array(readFileSync(trnPath)));
+  const gen = template.generator;
+  console.log(`terrain ${template.name}: map ${template.mapWidthInMeters} m, chunk ${template.chunkWidthInMeters} m, ${template.numberOfTilesPerChunk} tiles/chunk (${template.tileWidthInMeters} m tiles), version ${template.version}, water ${template.useGlobalWaterTable ? template.globalWaterTableHeight : 'none'}, loaded in ${Date.now() - t0} ms`);
+  console.log(`  layer items: ${Object.entries(gen.summary()).map(([k, v]) => `${k} ${v}`).join(', ')}`);
+  console.log(`  fractal families: ${gen.fractalGroup.families.size}, shader families: ${gen.shaderGroup.families.size}`);
+  const sampler = new TerrainSampler(template);
+  const layoutPath = join(dir, 'layout.json');
+  if (!existsSync(layoutPath)) {
+    console.log('no layout.json: nothing to compare');
+    return;
+  }
+  const layout = JSON.parse(readFileSync(layoutPath, 'utf8'));
+  const objects = layout.objects.filter((o) => !o.contained);
+  // Buildings first: their modification layers flatten the ground for everything else.
+  let layers = 0;
+  const t1 = Date.now();
+  for (const o of objects) {
+    if (!o.layer) continue;
+    const file = join(dir, o.layer);
+    if (!existsSync(file)) continue;
+    const layer = parseLayerFile(new Uint8Array(readFileSync(file)), gen);
+    if (!layer) continue;
+    sampler.addBuildingLayer(layer, o.x, o.z, yawOf(o.q));
+    layers++;
+  }
+  console.log(`  ${layers} building terrain layers applied in ${Date.now() - t1} ms`);
+  const t2 = Date.now();
+  const rows = [];
+  for (const o of objects) {
+    const h = sampler.heightAt(o.x, o.z);
+    rows.push({ o, h, err: h - o.y });
+  }
+  const ms = Date.now() - t2;
+  const abs = rows.map((r) => Math.abs(r.err)).sort((a, b) => a - b);
+  const pct = (p) => abs[Math.min(abs.length - 1, Math.floor(abs.length * p))];
+  console.log(`  ${rows.length} objects sampled in ${ms} ms (${sampler.numberOfPoles}x${sampler.numberOfPoles} poles per chunk)`);
+  console.log(`  |height error| median ${pct(0.5).toFixed(2)} m, 90% ${pct(0.9).toFixed(2)} m, max ${abs[abs.length - 1].toFixed(2)} m; within 0.5 m: ${((abs.filter((a) => a <= 0.5).length / abs.length) * 100).toFixed(1)}%`);
+  const nan = rows.filter((r) => !Number.isFinite(r.h)).length;
+  if (nan) console.log(`  WARNING: ${nan} non-finite heights`);
+  rows.sort((a, b) => Math.abs(b.err) - Math.abs(a.err));
+  console.log(`  worst ${Math.min(limit, rows.length)}:`);
+  for (const r of rows.slice(0, limit)) console.log(`    ${r.err >= 0 ? '+' : ''}${r.err.toFixed(2)} m  at ${r.o.x.toFixed(1)},${r.o.z.toFixed(1)} object y ${r.o.y.toFixed(2)} generated ${r.h.toFixed(2)}  ${r.o.template}${r.o.layer ? ` [${r.o.layer}]` : ''}`);
+  const withLayer = rows.filter((r) => r.o.layer);
+  if (withLayer.length) {
+    const la = withLayer.map((r) => Math.abs(r.err)).sort((a, b) => a - b);
+    console.log(`  buildings with layers: ${withLayer.length}, median |error| ${la[Math.floor(la.length / 2)].toFixed(2)} m`);
+  }
+}
+
 switch (cmd) {
   case 'verify': {
     if (!pos[1]) usage();
@@ -289,6 +379,7 @@ switch (cmd) {
     };
     const models = new Map();
     const objects = [];
+    const layerCache = new Map();
     mkdirSync(outDir, { recursive: true });
     for (const e of inRegion) {
       const n = e.node;
@@ -317,15 +408,22 @@ switch (cmd) {
         skip(`convert failed: ${model?.failed ?? 'unknown'}`, template);
         continue;
       }
-      objects.push({ template, model: id, x: e.world.pos[0], y: e.world.pos[1], z: e.world.pos[2], q: e.world.q, radius: n.radius, contained: e.parentId !== 0 });
+      const obj = { template, model: id, x: e.world.pos[0], y: e.world.pos[1], z: e.world.pos[2], q: e.world.q, radius: n.radius, contained: e.parentId !== 0 };
+      if (!obj.contained) {
+        const layer = copyTerrainLayer(vfs, template, outDir, layerCache);
+        if (layer) obj.layer = layer;
+      }
+      objects.push(obj);
     }
-    const layout = { planet, center: { x: cx, z: cz }, radius, objects, skipped };
+    const terrainFile = copyTerrain(vfs, planet, outDir);
+    const layout = { planet, center: { x: cx, z: cz }, radius, terrain: terrainFile, objects, skipped };
     writeFileSync(join(outDir, 'layout.json'), JSON.stringify(layout));
     const manifestPath = join(outDir, 'manifest.json');
     const manifest = existsSync(manifestPath) ? JSON.parse(readFileSync(manifestPath, 'utf8')) : { planet, categories: {} };
     manifest.categories.layout = [...models.values()].filter((m) => m && !m.failed);
     writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
     console.log(`layout: ${objects.length} objects, ${manifest.categories.layout.length} models -> ${join(outDir, 'layout.json')}`);
+    console.log(`terrain: ${terrainFile ?? 'not found'}, ${objects.filter((o) => o.layer).length} objects with terrain modification layers (${new Set(objects.map((o) => o.layer).filter(Boolean)).size} files)`);
     for (const [reason, count] of Object.entries(skipped).sort((a, b) => b[1] - a[1])) {
       console.log(`  skipped ${count}: ${reason}`);
       for (const ex of [...(examples[reason] ?? [])].slice(0, 3)) console.log(`      e.g. ${ex}`);
@@ -333,6 +431,21 @@ switch (cmd) {
     printEffectSummary();
     break;
   }
+  case 'terrain': {
+    if (!pos[3]) usage();
+    const vfs = mount(pos[1]);
+    mkdirSync(pos[3], { recursive: true });
+    const file = copyTerrain(vfs, pos[2], pos[3]);
+    console.log(file ? `terrain -> ${join(pos[3], file)}` : `no terrain/${pos[2]}.trn in archives`);
+    break;
+  }
+
+  case 'terrain-check': {
+    if (!pos[1]) usage();
+    await terrainCheck(pos[1], Number(options.limit ?? 30));
+    break;
+  }
+
   case 'batch': {
     const vfs = mount(pos[1]);
     const outDir = pos[2];
