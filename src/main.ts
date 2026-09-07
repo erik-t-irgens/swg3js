@@ -17,7 +17,7 @@ import { World } from './world/world';
 const MOUNT_RANGE = 3.6;
 
 /** Debug counters, readable from the console as window.__stats. */
-const stats = { frameMs: 0, physicsMs: 0, renderMs: 0, rawDt: 0, grounded: false, vel: [0, 0, 0] as number[], calls: 0 };
+const stats = { frameMs: 0, physicsMs: 0, renderMs: 0, rawDt: 0, grounded: false, vel: [0, 0, 0] as number[], calls: 0, pack: '' };
 (window as unknown as { __stats: typeof stats }).__stats = stats;
 const tmp = new THREE.Vector3();
 const tmpQ = new THREE.Quaternion();
@@ -147,6 +147,7 @@ class App {
     this.hud.setPlanet(planet);
     this.map.setCurrent(planet.id);
     this.updateUrl();
+    void this.world.loadPack(this.spawn).catch((err) => console.warn('asset pack failed', err));
   }
 
   private async travel(planet: PlanetDef): Promise<void> {
@@ -294,6 +295,7 @@ class App {
       stats.grounded = player.grounded;
       stats.vel = [player.vel.x, player.vel.y, player.vel.z];
       stats.calls = this.renderer.info.render.calls;
+      stats.pack = this.world.packStatus;
       input.endFrame();
     };
     frame();

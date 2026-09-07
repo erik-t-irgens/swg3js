@@ -1,0 +1,37 @@
+{
+  "planet": "tatooine",
+  "note": "Patterns are substrings matched against appearance/mesh/ names; the highest detail LOD of each family is converted. max caps how many families a category keeps.",
+  "categories": {
+    "rocks": { "patterns": ["thm_tato_cave_rock_", "ply_tato_rock", "tato_rock_", "tato_boulder"], "max": 12 },
+    "debris": { "patterns": ["thm_tato_debris_s"], "max": 10 },
+    "vaporators": { "patterns": ["moisture_vap", "vaporator", "thm_tato_vap"], "max": 4 },
+    "flora": { "patterns": ["ply_tato_", "tato_cactus", "tato_plant", "tato_bush", "tato_shrub", "tato_tree"], "max": 16 },
+    "structures": {
+      "patterns": [
+        "thm_tato_cantina_r0_mesh_r0",
+        "thm_tato_sandstone_hovel_s01",
+        "thm_tato_tent_house_s01",
+        "thm_tato_jawa_tent_large",
+        "thm_tato_jawa_tent_med",
+        "thm_tato_jawa_tent_small",
+        "thm_tato_house_sml_s01_fp1_r0_mesh",
+        "thm_tato_house_m_s01_fp1_r0_mesh",
+        "thm_tato_luke_farm_dome",
+        "thm_tato_luke_farm_garage",
+        "thm_tato_watto_junkshop_r0_mesh_l",
+        "thm_tato_imprv_wall_s01",
+        "thm_tato_imprv_wallgate_s01",
+        "thm_tato_imprv_archway_s01",
+        "thm_tato_imprv_pillar_s01",
+        "thm_tato_imprv_building_s01_l",
+        "thm_tato_block_bldg_64x32_s01_l",
+        "thm_tato_block_bldg_32x16_s03_l",
+        "thm_tato_lucky_despot_debris_lg_engine_s01",
+        "thm_tato_lucky_despot_debris_nose_cone",
+        "thm_tato_jnkshp_bldg",
+        "thm_tato_guild_statue_freestand_s01"
+      ],
+      "max": 40
+    }
+  }
+}

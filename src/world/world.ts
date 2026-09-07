@@ -3,7 +3,10 @@ import type { PlanetDef } from '../data/planets';
 import type { Physics, RAPIER } from '../core/physics';
 import { CreatureManager } from './creatures';
 import { DayCycle } from './daycycle';
-import { PropFactory, type Collider, type Exclusion } from './props';
+import { PropFactory, type Collider, type Exclusion, type ScatterItem } from './props';
+import { AssetPack, type LoadedModel } from './assetPack';
+import { OUTPOSTS } from '../data/outposts';
+import { RAPIER as R } from '../core/physics';
 import { CHUNK_RES, CHUNK_SIZE, Terrain } from './terrain';
 import { Speeder } from '../vehicles/speeder';
 
@@ -93,7 +96,12 @@ export class World {
   private readonly moonColor = new THREE.Color(0x8fa8d8);
   private lastCx = Number.NaN;
   private lastCz = Number.NaN;
-  private landingZone: Exclusion | undefined;
+  private exclusions: Exclusion[] = [];
+  pack: AssetPack | null = null;
+  packStatus = 'no pack';
+  private readonly structures: THREE.Object3D[] = [];
+  private structureColliders: RAPIER.Collider[] = [];
+  private loadToken = 0;
 
   constructor(readonly scene: THREE.Scene, readonly physics: Physics) {
     scene.add(this.chunkRoot, this.sun, this.sun.target, this.hemi);
@@ -174,13 +182,95 @@ export class World {
 
     this.lastCx = Number.NaN;
     this.lastCz = Number.NaN;
+    this.exclusions = [];
+    this.loadToken++;
     this.day.update(0, false);
     this.applyLighting();
+  }
+
+  /** Load converted SWG content for this planet, if the private pack exists. */
+  async loadPack(spawn: THREE.Vector3): Promise<void> {
+    const token = this.loadToken;
+    const planet = this.planet;
+    this.packStatus = 'loading';
+    const pack = await AssetPack.load(planet.id);
+    if (token !== this.loadToken) return;
+    if (!pack) {
+      this.packStatus = 'no pack';
+      return;
+    }
+    this.pack = pack;
+
+    const scatter: ScatterItem[] = [];
+    const addScatter = async (category: string, density: number, minScale: number, maxScale: number) => {
+      const models = await pack.models(pack.category(category).map((m) => m.id));
+      for (const model of models) scatter.push({ model, density: density / Math.max(1, models.length), minScale, maxScale });
+    };
+    await addScatter('rocks', planet.props.rockDensity * 1.2, 0.8, 1.6);
+    await addScatter('debris', 0.35, 0.9, 1.1);
+    await addScatter('vaporators', 0.25, 1, 1);
+    await addScatter('flora', 0.9, 0.8, 1.2);
+    if (token !== this.loadToken) return;
+
+    const placements = OUTPOSTS[planet.id] ?? [];
+    const structures: { model: LoadedModel; x: number; z: number; rot: number; flatten: number }[] = [];
+    for (const p of placements) {
+      try {
+        const model = await pack.model(p.model);
+        structures.push({ model, x: spawn.x + p.x, z: spawn.z + p.z, rot: p.rot, flatten: p.flatten ?? model.radius + 6 });
+      } catch {
+        console.warn(`outpost: ${p.model} not in pack, skipped`);
+      }
+    }
+    if (token !== this.loadToken) return;
+
+    // Level the ground under each structure, keep procedural props off it, then rebuild.
+    for (const st of structures) {
+      this.terrain.flattenZones.push({ x: st.x, z: st.z, r: st.flatten, h: this.terrain.rawHeightAt(st.x, st.z) });
+      this.exclusions.push({ x: st.x, z: st.z, r: st.model.radius + 4 });
+    }
+    this.props.dispose();
+    this.props = new PropFactory(planet, scatter);
+    for (const c of this.chunks.values()) this.disposeChunk(c);
+    this.chunks.clear();
+    this.lastCx = Number.NaN;
+    this.lastCz = Number.NaN;
+    this.stream(spawn, Infinity);
+
+    for (const st of structures) this.placeStructure(st.model, st.x, st.z, st.rot);
+    this.packStatus = `${scatter.length} scatter models, ${structures.length} structures`;
+  }
+
+  private placeStructure(model: LoadedModel, x: number, z: number, rot: number): void {
+    const y = this.terrain.heightAt(x, z);
+    const obj = model.scene.clone();
+    obj.position.set(x, y, z);
+    obj.rotation.y = rot;
+    obj.updateMatrixWorld(true);
+    this.scene.add(obj);
+    this.structures.push(obj);
+    const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, rot, 0));
+    for (const prim of model.primitives) {
+      const pos = prim.geometry.getAttribute('position');
+      const idx = prim.geometry.getIndex();
+      if (!pos || !idx) continue;
+      const vertices = new Float32Array(pos.array as ArrayLike<number>);
+      const indices = new Uint32Array(idx.array as ArrayLike<number>);
+      const desc = R.ColliderDesc.trimesh(vertices, indices).setTranslation(x, y, z).setRotation({ x: q.x, y: q.y, z: q.z, w: q.w }).setFriction(0.8);
+      this.structureColliders.push(this.physics.world.createCollider(desc));
+    }
   }
 
   private unload(): void {
     for (const c of this.chunks.values()) this.disposeChunk(c);
     this.chunks.clear();
+    for (const o of this.structures) this.scene.remove(o);
+    this.structures.length = 0;
+    for (const c of this.structureColliders) this.physics.removeCollider(c);
+    this.structureColliders = [];
+    this.pack?.dispose();
+    this.pack = null;
+    this.packStatus = 'no pack';
     if (this.creatures) {
       this.scene.remove(this.creatures.group);
       this.creatures.dispose();
@@ -248,7 +338,7 @@ export class World {
 
   /** Generate every chunk in view immediately (used when arriving on a planet). */
   warmUp(center: THREE.Vector3): void {
-    this.landingZone = { x: center.x, z: center.z, r: 14 };
+    this.exclusions = [{ x: center.x, z: center.z, r: 14 }];
     this.stream(center, Infinity);
     this.creatures.spawnAround(center);
     const sx = center.x + 5;
@@ -351,7 +441,7 @@ export class World {
     mesh.receiveShadow = true;
     mesh.castShadow = true;
     group.add(mesh);
-    const { group: propGroup, colliders } = this.props.buildForChunk(cx, cz, this.terrain, this.landingZone);
+    const { group: propGroup, colliders } = this.props.buildForChunk(cx, cz, this.terrain, this.exclusions);
     propGroup.traverse((o) => {
       if (o instanceof THREE.InstancedMesh) o.computeBoundingSphere();
     });

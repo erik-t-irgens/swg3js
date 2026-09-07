@@ -3,6 +3,9 @@ import type { PlanetDef } from '../data/planets';
 import { FBM, hash2 } from './noise';
 
 export const CHUNK_SIZE = 64;
+
+/** Level ground of height h within radius r, blended smoothly at the edge. */
+export interface FlattenZone { x: number; z: number; r: number; h: number }
 export const CHUNK_RES = 32;
 
 const tmpA = new THREE.Color();
@@ -19,6 +22,7 @@ export class Terrain {
   readonly minH: number;
   readonly maxH: number;
   readonly waterLevel: number;
+  readonly flattenZones: FlattenZone[] = [];
 
   constructor(readonly planet: PlanetDef) {
     this.fbm = new FBM(planet.seed);
@@ -34,6 +38,19 @@ export class Terrain {
   }
 
   heightAt(x: number, z: number): number {
+    let h = this.rawHeightAt(x, z);
+    for (const zone of this.flattenZones) {
+      const d = Math.hypot(x - zone.x, z - zone.z);
+      if (d >= zone.r) continue;
+      let t = 1 - d / zone.r;
+      t = t * t * (3 - 2 * t);
+      h += (zone.h - h) * t;
+    }
+    return h;
+  }
+
+  /** Terrain height before any flattening. */
+  rawHeightAt(x: number, z: number): number {
     const t = this.planet.terrain;
     const f = t.frequency;
     let v = this.fbm.fbm(x * f, z * f, t.octaves);

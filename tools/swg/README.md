@@ -10,7 +10,10 @@ npm run swg -- shader "C:/SWG" shader/thm_tato_moisture_vap.sht
 npm run swg -- texture "C:/SWG" texture/thm_tato_moisture_vap.dds assets-private/vap.png
 npm run swg -- msh "C:/SWG" appearance/thm_tato_moisture_vap_s01.apt assets-private/vaporator.glb
 npm run swg -- batch "C:/SWG" assets-private/meshes appearance/mesh/ --retail-only
+npm run swg -- pack "C:/SWG" tools/swg/packs/tatooine.json assets-private/tatooine --retail-only   # what the game loads
 ```
+
+`pack` converts the highest-detail mesh of every family matching a spec (see `packs/`) and writes `manifest.json`. The game looks for `assets-private/<planet>/manifest.json`, scatters the `rocks`, `debris`, `vaporators` and `flora` categories across the terrain in place of the primitive props, and places the structures listed in `src/data/outposts.ts` near the spawn on flattened ground with triangle-mesh collision.
 
 Flags: `--retail-only` mounts only archives named in the retail manifests, `--no-flip` keeps left-handed coordinates, `--no-textures` skips DDS decoding.
 

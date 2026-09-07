@@ -10,6 +10,7 @@
 //   node tools/swg/cli.mjs texture <swg-dir> <texture/x.dds> <out.png>
 //   node tools/swg/cli.mjs msh <swg-dir> <appearance-path> <out.glb>
 //   node tools/swg/cli.mjs batch <swg-dir> <out-dir> [filter]     convert every .msh matching filter (default appearance/mesh/)
+//   node tools/swg/cli.mjs pack <swg-dir> <spec.json> <out-dir>    build a game asset pack from a spec (see packs/)
 //
 // Flags: --retail-only (mount only archives named in the retail manifests)
 //        --no-flip (keep left-handed coordinates)  --no-textures (skip DDS decoding)
@@ -21,6 +22,7 @@ import { buildGlb } from './glb.mjs';
 import { dump, parseIff } from './iff.mjs';
 import { classifyDirectory, isRetailByName } from './manifest.mjs';
 import { parseMesh } from './msh.mjs';
+import { buildPack } from './pack.mjs';
 import { encodePng } from './png.mjs';
 import { shaderTextures } from './sht.mjs';
 import { openTre, openVfs, readHeader } from './tre.mjs';
@@ -72,11 +74,12 @@ function convertOne(vfs, appearancePath, outFile) {
     const t = textureFor(vfs, g.shader);
     if (t) textures.set(g.shader, t);
   }
-  const glb = buildGlb([{ name: basename(meshPath, '.msh'), ...mesh }], { flipX: !flags.has('--no-flip'), textures });
+  const flipX = !flags.has('--no-flip');
+  const glb = buildGlb([{ name: basename(meshPath, '.msh'), ...mesh }], { flipX, textures });
   mkdirSync(dirname(outFile), { recursive: true });
   writeFileSync(outFile, glb);
   const tris = mesh.groups.reduce((n, g) => n + g.primitives.reduce((m, p) => m + p.indices.length / 3, 0), 0);
-  return { meshPath, tris, shaders: mesh.groups.map((g) => g.shader), textured: textures.size, warnings: mesh.warnings };
+  return { meshPath, mesh, flipX, tris, shaders: mesh.groups.map((g) => g.shader), textured: textures.size, warnings: mesh.warnings };
 }
 
 switch (cmd) {
@@ -145,6 +148,13 @@ switch (cmd) {
     const r = convertOne(vfs, pos[2], pos[3]);
     console.log(`${r.meshPath} -> ${pos[3]} (${r.tris} triangles, ${r.textured}/${r.shaders.length} shaders textured: ${r.shaders.join(', ')})`);
     for (const w of r.warnings) console.log(`  warning: ${w}`);
+    break;
+  }
+  case 'pack': {
+    if (!pos[3]) usage();
+    const vfs = mount(pos[1]);
+    const spec = JSON.parse(readFileSync(pos[2], 'utf8'));
+    buildPack(vfs, spec, pos[3], (meshPath, out) => convertOne(vfs, meshPath, out));
     break;
   }
   case 'batch': {
