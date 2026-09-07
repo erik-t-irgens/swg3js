@@ -3,7 +3,7 @@
 // (token "EERT", version "5000", numberOfFiles, tocOffset, tocCompressor,
 // sizeOfTOC, blockCompressor, sizeOfNameBlock, uncompSizeOfNameBlock), file data,
 // then the table of contents (24-byte records), the name block and an MD5 block.
-import { readFileSync, readdirSync } from 'node:fs';
+import { closeSync, openSync, readFileSync, readSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { inflateSync } from 'node:zlib';
 
@@ -23,6 +23,17 @@ function cstring(buf, offset) {
   let end = offset;
   while (end < buf.length && buf[end] !== 0) end++;
   return buf.toString('latin1', offset, end);
+}
+
+/** Raw header bytes of an archive, for diagnosing unknown variants. */
+export function readHeader(path) {
+  const fd = openSync(path, 'r');
+  const buf = Buffer.alloc(HEADER_SIZE);
+  readSync(fd, buf, 0, HEADER_SIZE, 0);
+  closeSync(fd);
+  const fields = [];
+  for (let i = 8; i < HEADER_SIZE; i += 4) fields.push(buf.readUInt32LE(i));
+  return { magic: buf.toString('latin1', 0, 8), fields, hex: buf.toString('hex') };
 }
 
 export function openTre(path) {

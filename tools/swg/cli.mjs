@@ -2,6 +2,7 @@
 // SWG asset converter. Reads a locally owned client install; never ships its output.
 //
 //   node tools/swg/cli.mjs verify <swg-dir>                       classify every archive against retail manifests
+//   node tools/swg/cli.mjs headers <swg-dir>                      print the raw header of every archive (diagnostic)
 //   node tools/swg/cli.mjs list <swg-dir> [filter]                list files across archives (search priority applied)
 //   node tools/swg/cli.mjs extract <swg-dir> <path-in-archive> <out-file>
 //   node tools/swg/cli.mjs dump <file.iff> | <swg-dir> <path-in-archive>   print an IFF tree
@@ -12,7 +13,7 @@
 //
 // Flags: --retail-only (mount only archives named in the retail manifests)
 //        --no-flip (keep left-handed coordinates)  --no-textures (skip DDS decoding)
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { resolveToMesh } from './appearance.mjs';
 import { decodeDds } from './dds.mjs';
@@ -22,7 +23,7 @@ import { classifyDirectory, isRetailByName } from './manifest.mjs';
 import { parseMesh } from './msh.mjs';
 import { encodePng } from './png.mjs';
 import { shaderTextures } from './sht.mjs';
-import { openVfs } from './tre.mjs';
+import { openTre, openVfs, readHeader } from './tre.mjs';
 
 const args = process.argv.slice(2);
 const flags = new Set(args.filter((a) => a.startsWith('--')));
@@ -87,6 +88,20 @@ switch (cmd) {
     });
     const retail = results.filter((r) => r.set).length;
     console.log(`\n${retail} retail archives, ${results.length - retail} unknown or modified, of ${results.length}`);
+    break;
+  }
+  case 'headers': {
+    if (!pos[1]) usage();
+    for (const f of readdirSync(pos[1]).filter((x) => x.toLowerCase().endsWith('.tre')).sort()) {
+      const h = readHeader(join(pos[1], f));
+      let status = 'ok';
+      try {
+        openTre(join(pos[1], f));
+      } catch (err) {
+        status = `FAIL ${err.message}`;
+      }
+      console.log(`${f.padEnd(34)} ${JSON.stringify(h.magic)} ${h.fields.join(' ')}  ${status}`);
+    }
     break;
   }
   case 'list': {
