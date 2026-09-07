@@ -23,6 +23,8 @@ export interface LayoutObject {
   /** Quaternion as w, x, y, z. */
   q: number[];
   radius: number;
+  /** Inside a building's cell; positioned relative to it by the converter. */
+  contained?: boolean;
 }
 
 export interface Layout {

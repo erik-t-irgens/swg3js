@@ -44,3 +44,48 @@ export function parseSnapshot(root) {
   const nodes = childrenOf(nods, 'NODE').map(readNode);
   return { version: version.type, templates, nodes };
 }
+
+function rotate(q, v) {
+  // q as [w, x, y, z]; standard Hamilton rotation of v.
+  const [w, x, y, z] = q;
+  const tx = 2 * (y * v[2] - z * v[1]);
+  const ty = 2 * (z * v[0] - x * v[2]);
+  const tz = 2 * (x * v[1] - y * v[0]);
+  return [v[0] + w * tx + (y * tz - z * ty), v[1] + w * ty + (z * tx - x * tz), v[2] + w * tz + (x * ty - y * tx)];
+}
+
+function multiply(a, b) {
+  const [aw, ax, ay, az] = a;
+  const [bw, bx, by, bz] = b;
+  return [aw * bw - ax * bx - ay * by - az * bz, aw * bx + ax * bw + ay * bz - az * by, aw * by - ax * bz + ay * bw + az * bx, aw * bz + ax * by - ay * bx + az * bw];
+}
+
+/**
+ * Every node with its world transform. Contained objects (nested, or flat with
+ * containedBy set) are stored relative to their parent building.
+ */
+export function flattenWithWorldTransforms(snapshot) {
+  const byId = new Map();
+  const all = [];
+  const visit = (node, parentId) => {
+    byId.set(node.id, node);
+    all.push({ node, parentId: node.containedBy || parentId });
+    for (const c of node.children) visit(c, node.id);
+  };
+  for (const n of snapshot.nodes) visit(n, 0);
+  const world = new Map();
+  const resolve = (id) => {
+    if (world.has(id)) return world.get(id);
+    const node = byId.get(id);
+    if (!node) return null;
+    const parentId = node.containedBy;
+    let result = { q: node.q, pos: node.pos };
+    if (parentId && parentId !== id) {
+      const parent = resolve(parentId);
+      if (parent) result = { q: multiply(parent.q, node.q), pos: (() => { const r = rotate(parent.q, node.pos); return [parent.pos[0] + r[0], parent.pos[1] + r[1], parent.pos[2] + r[2]]; })() };
+    }
+    world.set(id, result);
+    return result;
+  };
+  return all.map(({ node, parentId }) => ({ node, parentId, world: resolve(node.id) }));
+}

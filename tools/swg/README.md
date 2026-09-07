@@ -32,6 +32,7 @@ Status:
 | Skinned meshes, skeletons, animations (.mgn, .skt, .ans) | Formats documented, not started |
 | World snapshots (.ws), object templates, portal buildings (.pob exterior) | Written against the engine loaders, tested synthetically |
 | Terrain rule files (.trn) | Not started; the game pulls its own terrain to snapshot heights instead |
-| Component appearances (.cmp), skeletal (.sat), particles (.prt) | Skipped with counts in the snapshot output |
+| Component appearances (.cmp) | Parts baked into one mesh by their transforms |
+| Skeletal (.sat), particles (.prt) | Skipped with counts in the snapshot output |
 
 Archive reading is verified on real client data. Mesh conversion is still being validated; if a conversion fails, run `dump` on the file and share the output.

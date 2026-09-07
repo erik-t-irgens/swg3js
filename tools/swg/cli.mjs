@@ -19,14 +19,14 @@
 //        --no-flip (keep left-handed coordinates)  --no-textures (skip DDS decoding)
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
-import { resolveToMesh } from './appearance.mjs';
+import { resolveParts } from './appearance.mjs';
 import { decodeDds } from './dds.mjs';
 import { buildGlb } from './glb.mjs';
 import { dump, parseIff } from './iff.mjs';
 import { classifyDirectory, isRetailByName } from './manifest.mjs';
 import { parseMesh } from './msh.mjs';
 import { buildPack, familyOf } from './pack.mjs';
-import { parseSnapshot } from './ws.mjs';
+import { parseSnapshot, flattenWithWorldTransforms } from './ws.mjs';
 import { resolveTemplateMesh } from './objtemplate.mjs';
 import { encodePng } from './png.mjs';
 import { shaderTextures } from './sht.mjs';
@@ -100,20 +100,77 @@ function textureFor(vfs, shaderPath) {
   return result;
 }
 
+/** Apply a row-major 3x4 transform to a parsed mesh's positions and normals in place. */
+function transformMesh(mesh, m) {
+  for (const g of mesh.groups) {
+    for (const p of g.primitives) {
+      const pos = p.positions;
+      for (let i = 0; i < pos.length; i += 3) {
+        const x = pos[i], y = pos[i + 1], z = pos[i + 2];
+        pos[i] = m[0] * x + m[1] * y + m[2] * z + m[3];
+        pos[i + 1] = m[4] * x + m[5] * y + m[6] * z + m[7];
+        pos[i + 2] = m[8] * x + m[9] * y + m[10] * z + m[11];
+      }
+      const nrm = p.normals;
+      if (nrm) {
+        for (let i = 0; i < nrm.length; i += 3) {
+          const x = nrm[i], y = nrm[i + 1], z = nrm[i + 2];
+          nrm[i] = m[0] * x + m[1] * y + m[2] * z;
+          nrm[i + 1] = m[4] * x + m[5] * y + m[6] * z;
+          nrm[i + 2] = m[8] * x + m[9] * y + m[10] * z;
+        }
+      }
+    }
+  }
+  mesh.bounds = null;
+  for (const hp of mesh.hardpoints) {
+    const [x, y, z] = hp.position;
+    hp.position = [m[0] * x + m[1] * y + m[2] * z + m[3], m[4] * x + m[5] * y + m[6] * z + m[7], m[8] * x + m[9] * y + m[10] * z + m[11]];
+  }
+}
+
+function boundsFromPositions(mesh) {
+  const min = [Infinity, Infinity, Infinity];
+  const max = [-Infinity, -Infinity, -Infinity];
+  for (const g of mesh.groups) for (const p of g.primitives) {
+    for (let i = 0; i < p.positions.length; i += 3) for (let k = 0; k < 3; k++) {
+      min[k] = Math.min(min[k], p.positions[i + k]);
+      max[k] = Math.max(max[k], p.positions[i + k]);
+    }
+  }
+  return { min, max };
+}
+
+/** Load an appearance as one merged mesh: component parts are baked by their transforms. */
+function loadAppearanceMesh(vfs, appearancePath) {
+  const parts = resolveParts(vfs, appearancePath);
+  const merged = { version: '', groups: [], hardpoints: [], bounds: null, warnings: [] };
+  for (const part of parts) {
+    const mesh = parseMesh(parseIff(vfs.read(part.mesh)));
+    if (part.transform) transformMesh(mesh, part.transform);
+    merged.groups.push(...mesh.groups);
+    merged.hardpoints.push(...mesh.hardpoints);
+    merged.warnings.push(...mesh.warnings);
+    if (parts.length === 1) merged.bounds = mesh.bounds;
+  }
+  if (!merged.bounds) merged.bounds = boundsFromPositions(merged);
+  return { mesh: merged, meshPath: parts.length === 1 ? parts[0].mesh : appearancePath, partCount: parts.length };
+}
+
 function convertOne(vfs, appearancePath, outFile) {
-  const meshPath = resolveToMesh(vfs, appearancePath);
-  const mesh = parseMesh(parseIff(vfs.read(meshPath)));
+  const { mesh, meshPath, partCount } = loadAppearanceMesh(vfs, appearancePath);
   const textures = new Map();
   for (const g of mesh.groups) {
     const t = textureFor(vfs, g.shader);
     if (t) textures.set(g.shader, t);
   }
   const flipX = !flags.has('--no-flip');
-  const glb = buildGlb([{ name: basename(meshPath, '.msh'), ...mesh }], { flipX, textures });
+  const glb = buildGlb([{ name: basename(meshPath).replace(/\.[^.]+$/, ''), ...mesh }], { flipX, textures });
   mkdirSync(dirname(outFile), { recursive: true });
   writeFileSync(outFile, glb);
   const tris = mesh.groups.reduce((n, g) => n + g.primitives.reduce((m, p) => m + p.indices.length / 3, 0), 0);
-  return { meshPath, mesh, flipX, tris, shaders: mesh.groups.map((g) => g.shader), textured: textures.size, warnings: mesh.warnings };
+  const shaders = [...new Set(mesh.groups.map((g) => g.shader))];
+  return { meshPath, mesh, flipX, tris, shaders, textured: textures.size, warnings: mesh.warnings, partCount };
 }
 
 switch (cmd) {
@@ -219,51 +276,58 @@ switch (cmd) {
     const wsPath = `snapshot/${planet}.ws`;
     if (!vfs.has(wsPath)) throw new Error(`no ${wsPath} in archives`);
     const snap = parseSnapshot(parseIff(vfs.read(wsPath)));
-    console.error(`${wsPath}: ${snap.nodes.length} top-level objects, ${snap.templates.length} templates`);
-    const inRegion = snap.nodes.filter((n) => Math.hypot(n.pos[0] - cx, n.pos[2] - cz) <= radius);
+    const entries = flattenWithWorldTransforms(snap);
+    console.error(`${wsPath}: ${snap.nodes.length} top-level objects, ${entries.length} including contained, ${snap.templates.length} templates`);
+    const inRegion = entries.filter((e) => e.world && Math.hypot(e.world.pos[0] - cx, e.world.pos[2] - cz) <= radius);
     console.error(`${inRegion.length} within ${radius} m of ${cx},${cz}`);
     const cache = new Map();
     const skipped = {};
     const examples = {};
+    const skip = (reason, template) => {
+      skipped[reason] = (skipped[reason] ?? 0) + 1;
+      (examples[reason] ??= new Set()).add(template);
+    };
     const models = new Map();
     const objects = [];
     mkdirSync(outDir, { recursive: true });
-    for (const n of inRegion) {
+    for (const e of inRegion) {
+      const n = e.node;
       const template = snap.templates[n.templateIndex];
       const r = resolveTemplateMesh(vfs, template, cache);
       if (r.skip) {
-        skipped[r.skip] = (skipped[r.skip] ?? 0) + 1;
-        (examples[r.skip] ??= new Set()).add(template);
+        skip(r.skip, template);
         continue;
       }
-      const id = familyOf(r.mesh);
+      const id = familyOf(r.parts.length === 1 && !r.parts[0].transform ? r.parts[0].mesh : r.appearance);
       if (!models.has(id)) {
         if (models.size >= max) break;
         try {
-          const conv = convertOne(vfs, r.mesh, join(outDir, `${id}.glb`));
+          const conv = convertOne(vfs, r.parts.length === 1 && !r.parts[0].transform ? r.parts[0].mesh : r.appearance, join(outDir, `${id}.glb`));
           const b = conv.mesh.bounds ?? { min: [0, 0, 0], max: [0, 0, 0] };
           const bounds = conv.flipX ? { min: [-b.max[0], b.min[1], b.min[2]], max: [-b.min[0], b.max[1], b.max[2]] } : b;
-          models.set(id, { id, source: r.mesh, file: `${id}.glb`, bounds, triangles: conv.tris, textured: conv.textured, shaders: conv.shaders.length });
-          console.error(`  ${id}: ${conv.tris} tris, ${conv.textured}/${conv.shaders.length} textured`);
+          models.set(id, { id, source: r.appearance, file: `${id}.glb`, bounds, triangles: conv.tris, textured: conv.textured, shaders: conv.shaders.length, parts: conv.partCount });
+          console.error(`  ${id}: ${conv.tris} tris, ${conv.textured}/${conv.shaders.length} textured${conv.partCount > 1 ? `, ${conv.partCount} parts` : ''}`);
         } catch (err) {
-          skipped[`convert failed: ${err.message}`] = (skipped[`convert failed: ${err.message}`] ?? 0) + 1;
-          models.set(id, null);
-          continue;
+          models.set(id, { failed: err.message });
         }
       }
-      if (!models.get(id)) continue;
-      objects.push({ template, model: id, x: n.pos[0], y: n.pos[1], z: n.pos[2], q: n.q, radius: n.radius, children: n.children.length });
+      const model = models.get(id);
+      if (!model || model.failed) {
+        skip(`convert failed: ${model?.failed ?? 'unknown'}`, template);
+        continue;
+      }
+      objects.push({ template, model: id, x: e.world.pos[0], y: e.world.pos[1], z: e.world.pos[2], q: e.world.q, radius: n.radius, contained: e.parentId !== 0 });
     }
     const layout = { planet, center: { x: cx, z: cz }, radius, objects, skipped };
     writeFileSync(join(outDir, 'layout.json'), JSON.stringify(layout));
     const manifestPath = join(outDir, 'manifest.json');
     const manifest = existsSync(manifestPath) ? JSON.parse(readFileSync(manifestPath, 'utf8')) : { planet, categories: {} };
-    manifest.categories.layout = [...models.values()].filter(Boolean);
+    manifest.categories.layout = [...models.values()].filter((m) => m && !m.failed);
     writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
     console.log(`layout: ${objects.length} objects, ${manifest.categories.layout.length} models -> ${join(outDir, 'layout.json')}`);
     for (const [reason, count] of Object.entries(skipped).sort((a, b) => b[1] - a[1])) {
       console.log(`  skipped ${count}: ${reason}`);
-      for (const ex of [...examples[reason]].slice(0, 3)) console.log(`      e.g. ${ex}`);
+      for (const ex of [...(examples[reason] ?? [])].slice(0, 3)) console.log(`      e.g. ${ex}`);
     }
     printEffectSummary();
     break;

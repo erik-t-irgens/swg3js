@@ -3,7 +3,7 @@
 // String values are int8 dataType (1 = SINGLE) then a cstring. Parameters not
 // present are inherited from the base template chain.
 import { childrenOf, isForm, readCString, parseIff } from './iff.mjs';
-import { resolveToMesh } from './appearance.mjs';
+import { appearancePath, resolveParts } from './appearance.mjs';
 import { parsePob } from './pob.mjs';
 
 const SINGLE = 1;
@@ -42,9 +42,9 @@ export function stringParam(buf) {
 }
 
 /**
- * Resolve an object template to a static mesh path by following the DERV
- * chain for appearanceFilename, then unwrapping .pob (exterior cell), .apt and
- * .lod. Returns { mesh } or { skip: reason }.
+ * Resolve an object template to mesh parts by following the DERV chain for
+ * appearanceFilename (or a building's portalLayoutFilename), then unwrapping
+ * .pob (exterior cell), .apt, .lod and .cmp. Returns { appearance, parts } or { skip }.
  */
 export function resolveTemplateMesh(vfs, templatePath, cache = new Map()) {
   if (cache.has(templatePath)) return cache.get(templatePath);
@@ -66,7 +66,8 @@ export function resolveTemplateMesh(vfs, templatePath, cache = new Map()) {
       }
       const t = readTemplate(parseIff(vfs.read(path)));
       lastParams = [...t.params.keys()];
-      const a = stringParam(t.params.get('appearanceFilename'));
+      // Buildings usually leave appearanceFilename empty and carry their look in the portal layout.
+      const a = stringParam(t.params.get('appearanceFilename')) || stringParam(t.params.get('portalLayoutFilename'));
       if (a) {
         appearance = a;
         break;
@@ -97,22 +98,22 @@ export function resolveTemplateMesh(vfs, templatePath, cache = new Map()) {
   return result;
 }
 
-export function resolveAppearanceToMesh(vfs, appearance) {
+export function resolveAppearanceToMesh(vfs, rawAppearance) {
+  const appearance = appearancePath(rawAppearance);
   const lower = appearance.toLowerCase();
   if (lower.endsWith('.pob')) {
     if (!vfs.has(appearance)) return { skip: `pob missing: ${appearance}` };
     const pob = parsePob(parseIff(vfs.read(appearance)));
     const exterior = pob.cells[0]?.appearance;
     if (!exterior) return { skip: 'pob without exterior cell' };
-    return resolveAppearanceToMesh(vfs, exterior);
+    const r = resolveAppearanceToMesh(vfs, exterior);
+    return r.skip ? r : { ...r, appearance };
   }
   if (lower.endsWith('.sat')) return { skip: 'skeletal appearance (.sat)' };
-  if (lower.endsWith('.cmp')) return { skip: 'component appearance (.cmp)' };
   if (lower.endsWith('.prt')) return { skip: 'particle (.prt)' };
-  if (!(lower.endsWith('.apt') || lower.endsWith('.lod') || lower.endsWith('.msh'))) return { skip: `appearance type ${lower.slice(lower.lastIndexOf('.'))}` };
-  if (!vfs.has(appearance)) return { skip: `appearance missing: ${appearance}` };
+  if (!/\.(apt|lod|msh|cmp)$/.test(lower)) return { skip: `appearance type ${lower.slice(lower.lastIndexOf('.'))}` };
   try {
-    return { mesh: resolveToMesh(vfs, appearance) };
+    return { appearance, parts: resolveParts(vfs, appearance) };
   } catch (err) {
     return { skip: `resolve failed: ${err.message}` };
   }

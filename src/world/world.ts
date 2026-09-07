@@ -249,8 +249,8 @@ export class World {
           const gx = -(o.x - layout.center.x);
           const gz = o.z - layout.center.z;
           placed.push({ model, x: gx, y: o.y, z: gz, q: new THREE.Quaternion(o.q[1], -o.q[2], -o.q[3], o.q[0]), radius: o.radius });
-          if (o.radius >= 2) this.terrain.addAnchor({ x: gx, z: gz, y: o.y, r: o.radius });
-          if (o.radius >= 1) this.exclusions.push({ x: gx, z: gz, r: o.radius + 2 });
+          if (o.radius >= 2 && !o.contained) this.terrain.addAnchor({ x: gx, z: gz, y: o.y, r: o.radius });
+          if (o.radius >= 1 && !o.contained) this.exclusions.push({ x: gx, z: gz, r: o.radius + 2 });
         }
       }
     }

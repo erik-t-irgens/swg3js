@@ -5,7 +5,7 @@ import { join } from 'node:path';
 
 /** Strip a LOD suffix so "foo_l2" and "foo" share the family "foo". */
 export function familyOf(meshName) {
-  return meshName.replace(/^appearance\/mesh\//, '').replace(/\.msh$/, '').replace(/_l\d+$/, '');
+  return meshName.replace(/^appearance\/(mesh\/|component\/)?/, '').replace(/\.[a-z]+$/i, '').replace(/_l\d+$/, '');
 }
 
 function lodOf(meshName) {
