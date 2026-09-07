@@ -10,6 +10,31 @@ function slotTag(data, version) {
   return Buffer.from(data.subarray(off, off + 4)).reverse().toString('latin1');
 }
 
+/** Effect (.eff) path referenced by the shader, if any. */
+export function shaderEffect(root) {
+  for (const ssht of findAll(root, 'SSHT')) {
+    for (const versionForm of ssht.children.filter((c) => c.tag === 'FORM')) {
+      const name = childrenOf(versionForm, 'NAME')[0];
+      if (name) return readCString(name.data).value;
+    }
+  }
+  return null;
+}
+
+/**
+ * Whether the effect uses the texture alpha for transparency. SWG keeps
+ * specular and environment masks in the alpha channel of most diffuse maps,
+ * so alpha only means cut-out or blending when the effect says so.
+ */
+export function effectAlphaMode(effect) {
+  if (!effect) return 'OPAQUE';
+  const e = effect.toLowerCase();
+  if (/alpha|blend|transparen|glass|decal|foliage|leaf|leaves|fence|grate|wire/.test(e)) {
+    return /blend|glass|transparen/.test(e) && !/atest|alphatest|cutout/.test(e) ? 'BLEND' : 'MASK';
+  }
+  return 'OPAQUE';
+}
+
 /** All texture slots of a shader, with the main (diffuse) slot resolved. */
 export function shaderTextures(root) {
   const slots = [];
@@ -22,5 +47,5 @@ export function shaderTextures(root) {
     slots.push({ slot: slotTag(data.data, versionForm.type), path: readCString(name.data).value });
   }
   const main = slots.find((s) => s.slot === 'MAIN') ?? slots.find((s) => !/^(NRML|DOT3|ENVM|CNRM|SPEC)$/.test(s.slot)) ?? slots[0] ?? null;
-  return { main: main ? main.path : null, slots };
+  return { main: main ? main.path : null, slots, effect: shaderEffect(root), alphaMode: effectAlphaMode(shaderEffect(root)) };
 }

@@ -66,9 +66,14 @@ export function buildGlb(meshes, { flipX = true, textures = new Map() } = {}) {
       const tex = textures.get(shader);
       if (tex) {
         mat.pbrMetallicRoughness.baseColorTexture = { index: imageFor(tex) };
-        if (tex.hasAlpha) {
+        const mode = tex.alphaMode ?? 'OPAQUE';
+        if (mode === 'MASK' && tex.hasAlpha) {
           mat.alphaMode = 'MASK';
           mat.alphaCutoff = 0.5;
+          mat.doubleSided = true;
+        } else if (mode === 'BLEND' && tex.hasAlpha) {
+          mat.alphaMode = 'BLEND';
+          mat.doubleSided = true;
         }
       } else {
         mat.pbrMetallicRoughness.baseColorFactor = [0.8, 0.8, 0.8, 1];

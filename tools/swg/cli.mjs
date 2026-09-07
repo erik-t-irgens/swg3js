@@ -54,10 +54,10 @@ function textureFor(vfs, shaderPath) {
   if (textureCache.has(shaderPath)) return textureCache.get(shaderPath);
   let result = null;
   try {
-    const { main } = shaderTextures(parseIff(vfs.read(shaderPath)));
+    const { main, alphaMode } = shaderTextures(parseIff(vfs.read(shaderPath)));
     if (main && vfs.has(main)) {
       const dds = decodeDds(vfs.read(main));
-      result = { path: main, png: encodePng(dds.width, dds.height, dds.rgba), hasAlpha: dds.hasAlpha };
+      result = { path: main, png: encodePng(dds.width, dds.height, dds.rgba), hasAlpha: dds.hasAlpha, alphaMode };
     }
   } catch (err) {
     console.error(`  texture for ${shaderPath} skipped: ${err.message}`);
@@ -131,7 +131,8 @@ switch (cmd) {
   }
   case 'shader': {
     const vfs = mount(pos[1]);
-    const { main, slots } = shaderTextures(parseIff(vfs.read(pos[2])));
+    const { main, slots, effect, alphaMode } = shaderTextures(parseIff(vfs.read(pos[2])));
+    console.log(`effect: ${effect ?? '(none)'}  alpha: ${alphaMode}`);
     for (const s of slots) console.log(`${s.slot}  ${s.path}${s.path === main ? '  (main)' : ''}`);
     break;
   }

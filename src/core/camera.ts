@@ -23,7 +23,7 @@ export class ThirdPersonCamera {
   }
 
   right(out: THREE.Vector3): THREE.Vector3 {
-    return out.set(-Math.cos(this.yaw), 0, Math.sin(this.yaw));
+    return out.set(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
   }
 
   update(
