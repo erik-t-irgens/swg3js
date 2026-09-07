@@ -30,7 +30,8 @@ export function openTre(path) {
   const token = buf.toString('latin1', 0, 4);
   const version = buf.toString('latin1', 4, 8);
   if (token !== 'EERT' || (version !== '5000' && version !== '4000')) {
-    throw new Error(`${path}: not a TRE archive (header ${JSON.stringify(token + version)})`);
+    const hex = buf.subarray(0, 16).toString('hex').replace(/(..)/g, '$1 ').trim();
+    throw new Error(`not a TRE archive I recognise (starts ${JSON.stringify(token + version)}, bytes ${hex})`);
   }
   const numberOfFiles = buf.readUInt32LE(8);
   const tocOffset = buf.readUInt32LE(12);
@@ -111,8 +112,16 @@ export function openVfs(dir, { filter } = {}) {
   if (files.length === 0) throw new Error(`No .tre archives found in ${dir}`);
   const index = new Map();
   const archives = [];
+  const skipped = [];
   for (const f of files) {
-    const tre = openTre(join(dir, f));
+    let tre;
+    try {
+      tre = openTre(join(dir, f));
+    } catch (err) {
+      skipped.push(f);
+      console.error(`skipping ${f}: ${err.message}`);
+      continue;
+    }
     archives.push(tre);
     for (const rec of tre.records) {
       const key = rec.name.toLowerCase();
@@ -121,8 +130,10 @@ export function openVfs(dir, { filter } = {}) {
     }
   }
   const norm = (name) => name.toLowerCase().replace(/\\/g, '/');
+  if (!archives.length) throw new Error(`None of the ${files.length} archives in ${dir} could be read`);
   return {
     archives,
+    skipped,
     order: files,
     list(filterText) {
       const out = [];
