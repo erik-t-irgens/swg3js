@@ -7,6 +7,7 @@
 //   node tools/swg/cli.mjs extract <swg-dir> <path-in-archive> <out-file>
 //   node tools/swg/cli.mjs dump <file.iff> | <swg-dir> <path-in-archive>   print an IFF tree
 //   node tools/swg/cli.mjs shader <swg-dir> <shader/x.sht>        list a shader's texture slots
+//   node tools/swg/cli.mjs template <swg-dir> <object/x.iff>       print an object template's parameter chain
 //   node tools/swg/cli.mjs texture <swg-dir> <texture/x.dds> <out.png>
 //   node tools/swg/cli.mjs msh <swg-dir> <appearance-path> <out.glb>
 //   node tools/swg/cli.mjs batch <swg-dir> <out-dir> [filter]     convert every .msh matching filter (default appearance/mesh/)
@@ -29,6 +30,8 @@ import { parseSnapshot } from './ws.mjs';
 import { resolveTemplateMesh } from './objtemplate.mjs';
 import { encodePng } from './png.mjs';
 import { shaderTextures } from './sht.mjs';
+import { effectAlpha, alphaModeFor } from './eff.mjs';
+import { readTemplate, stringParam } from './objtemplate.mjs';
 import { openTre, openVfs, readHeader } from './tre.mjs';
 
 const args = process.argv.slice(2);
@@ -53,16 +56,42 @@ function mount(dir) {
 }
 
 const textureCache = new Map();
+const effectCache = new Map();
+const effectUse = new Map();
+
+/** Alpha mode from the effect file's first pass; falls back to the name heuristic. */
+function alphaFromEffect(vfs, effect, fallback) {
+  if (!effect) return fallback;
+  if (!effectCache.has(effect)) {
+    let mode = fallback;
+    try {
+      if (vfs.has(effect)) mode = alphaModeFor(effectAlpha(parseIff(vfs.read(effect))));
+    } catch (err) {
+      console.error(`  effect ${effect} unreadable: ${err.message}`);
+    }
+    effectCache.set(effect, mode);
+  }
+  const mode = effectCache.get(effect);
+  const key = `${effect} -> ${mode}`;
+  effectUse.set(key, (effectUse.get(key) ?? 0) + 1);
+  return mode;
+}
+
+function printEffectSummary() {
+  if (!effectUse.size) return;
+  console.log('effects used:');
+  for (const [k, n] of [...effectUse.entries()].sort((a, b) => b[1] - a[1])) console.log(`  ${String(n).padStart(4)}  ${k}`);
+}
 
 function textureFor(vfs, shaderPath) {
   if (flags.has('--no-textures')) return null;
   if (textureCache.has(shaderPath)) return textureCache.get(shaderPath);
   let result = null;
   try {
-    const { main, alphaMode } = shaderTextures(parseIff(vfs.read(shaderPath)));
+    const { main, alphaMode, effect } = shaderTextures(parseIff(vfs.read(shaderPath)));
     if (main && vfs.has(main)) {
       const dds = decodeDds(vfs.read(main));
-      result = { path: main, png: encodePng(dds.width, dds.height, dds.rgba), hasAlpha: dds.hasAlpha, alphaMode };
+      result = { path: main, png: encodePng(dds.width, dds.height, dds.rgba), hasAlpha: dds.hasAlpha, alphaMode: alphaFromEffect(vfs, effect, alphaMode) };
     }
   } catch (err) {
     console.error(`  texture for ${shaderPath} skipped: ${err.message}`);
@@ -134,10 +163,25 @@ switch (cmd) {
     console.log(dump(parseIff(buf)).join('\n'));
     break;
   }
+  case 'template': {
+    const vfs = mount(pos[1]);
+    let path = pos[2];
+    for (let depth = 0; depth < 8 && path; depth++) {
+      if (!vfs.has(path)) {
+        console.log(`${path}: missing`);
+        break;
+      }
+      const t = readTemplate(parseIff(vfs.read(path)));
+      console.log(`${path}  [${t.type}]  base: ${t.base ?? '(none)'}`);
+      for (const [name, buf] of t.params) console.log(`  ${name} = ${stringParam(buf) ?? `<${buf.length} bytes, type ${buf[0]}>`}`);
+      path = stringParam(t.params.get('sharedTemplate')) ?? t.base;
+    }
+    break;
+  }
   case 'shader': {
     const vfs = mount(pos[1]);
     const { main, slots, effect, alphaMode } = shaderTextures(parseIff(vfs.read(pos[2])));
-    console.log(`effect: ${effect ?? '(none)'}  alpha: ${alphaMode}`);
+    console.log(`effect: ${effect ?? '(none)'}  alpha by name: ${alphaMode}  alpha by effect file: ${alphaFromEffect(vfs, effect, alphaMode)}`);
     for (const s of slots) console.log(`${s.slot}  ${s.path}${s.path === main ? '  (main)' : ''}`);
     break;
   }
@@ -161,6 +205,7 @@ switch (cmd) {
     const vfs = mount(pos[1]);
     const spec = JSON.parse(readFileSync(pos[2], 'utf8'));
     buildPack(vfs, spec, pos[3], (meshPath, out) => convertOne(vfs, meshPath, out));
+    printEffectSummary();
     break;
   }
   case 'snapshot': {
@@ -179,6 +224,7 @@ switch (cmd) {
     console.error(`${inRegion.length} within ${radius} m of ${cx},${cz}`);
     const cache = new Map();
     const skipped = {};
+    const examples = {};
     const models = new Map();
     const objects = [];
     mkdirSync(outDir, { recursive: true });
@@ -187,6 +233,7 @@ switch (cmd) {
       const r = resolveTemplateMesh(vfs, template, cache);
       if (r.skip) {
         skipped[r.skip] = (skipped[r.skip] ?? 0) + 1;
+        (examples[r.skip] ??= new Set()).add(template);
         continue;
       }
       const id = familyOf(r.mesh);
@@ -214,7 +261,11 @@ switch (cmd) {
     manifest.categories.layout = [...models.values()].filter(Boolean);
     writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
     console.log(`layout: ${objects.length} objects, ${manifest.categories.layout.length} models -> ${join(outDir, 'layout.json')}`);
-    for (const [reason, count] of Object.entries(skipped).sort((a, b) => b[1] - a[1])) console.log(`  skipped ${count}: ${reason}`);
+    for (const [reason, count] of Object.entries(skipped).sort((a, b) => b[1] - a[1])) {
+      console.log(`  skipped ${count}: ${reason}`);
+      for (const ex of [...examples[reason]].slice(0, 3)) console.log(`      e.g. ${ex}`);
+    }
+    printEffectSummary();
     break;
   }
   case 'batch': {

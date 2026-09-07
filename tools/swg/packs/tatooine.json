@@ -5,7 +5,7 @@
     "rocks": { "patterns": ["thm_tato_cave_rock_", "ply_tato_rock", "tato_rock_", "tato_boulder"], "max": 12 },
     "debris": { "patterns": ["thm_tato_debris_s"], "max": 10 },
     "vaporators": { "patterns": ["moisture_vap", "vaporator", "thm_tato_vap"], "max": 4 },
-    "flora": { "patterns": ["ply_tato_", "tato_cactus", "tato_plant", "tato_bush", "tato_shrub", "tato_tree"], "max": 16 },
+    "flora": { "patterns": ["cactus", "tato_shrub", "tato_bush", "tato_tree", "tato_grass", "tato_plant"], "max": 12 },
     "structures": {
       "patterns": [
         "thm_tato_cantina_r0_mesh_r0",

@@ -45,21 +45,42 @@ export function resolveTemplateMesh(vfs, templatePath, cache = new Map()) {
   try {
     let appearance = null;
     let path = templatePath;
-    for (let depth = 0; depth < 8 && path; depth++) {
+    let lastParams = [];
+    for (let depth = 0; depth < 12 && path; depth++) {
       if (!vfs.has(path)) {
+        // Server templates name their client twin; fall back to the shared_ naming convention.
+        const guess = path.replace(/([^/]+)$/, 'shared_$1');
+        if (path === templatePath && !/\/shared_[^/]+$/.test(path) && vfs.has(guess)) {
+          path = guess;
+          continue;
+        }
         result = { skip: `template missing: ${path}` };
         break;
       }
       const t = readTemplate(parseIff(vfs.read(path)));
+      lastParams = [...t.params.keys()];
       const a = stringParam(t.params.get('appearanceFilename'));
       if (a) {
         appearance = a;
         break;
       }
+      // Server object templates link to the client template that holds the appearance.
+      const shared = stringParam(t.params.get('sharedTemplate'));
+      if (shared) {
+        path = shared;
+        continue;
+      }
+      if (!t.base) {
+        const guess = templatePath.replace(/([^/]+)$/, 'shared_$1');
+        if (path !== guess && vfs.has(guess)) {
+          path = guess;
+          continue;
+        }
+      }
       path = t.base;
     }
     if (!result) {
-      if (!appearance) result = { skip: 'no appearanceFilename' };
+      if (!appearance) result = { skip: `no appearanceFilename (params: ${lastParams.slice(0, 6).join(', ') || 'none'})` };
       else result = resolveAppearanceToMesh(vfs, appearance);
     }
   } catch (err) {
