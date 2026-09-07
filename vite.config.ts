@@ -1,8 +1,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { defineConfig, type Plugin } from 'vite';
 
-const PRIVATE_DIR = path.resolve(__dirname, 'assets-private');
+const ROOT = path.dirname(fileURLToPath(import.meta.url));
+const PRIVATE_DIR = path.resolve(ROOT, 'assets-private');
 
 /**
  * Serves the git-ignored assets-private/ folder (converted SWG content) at
@@ -28,7 +30,7 @@ function privateAssets(): Plugin {
       });
     },
     closeBundle() {
-      if (fs.existsSync(PRIVATE_DIR)) fs.cpSync(PRIVATE_DIR, path.resolve(__dirname, 'dist/assets-private'), { recursive: true });
+      if (fs.existsSync(PRIVATE_DIR)) fs.cpSync(PRIVATE_DIR, path.resolve(ROOT, 'dist/assets-private'), { recursive: true });
     },
   };
 }

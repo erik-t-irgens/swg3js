@@ -65,7 +65,7 @@ function alphaFromEffect(vfs, effect, fallback) {
   if (!effectCache.has(effect)) {
     let mode = fallback;
     try {
-      if (vfs.has(effect)) mode = alphaModeFor(effectAlpha(parseIff(vfs.read(effect))));
+      if (vfs.has(effect)) mode = alphaModeFor(effectAlpha(parseIff(vfs.read(effect))), effect);
     } catch (err) {
       console.error(`  effect ${effect} unreadable: ${err.message}`);
     }
