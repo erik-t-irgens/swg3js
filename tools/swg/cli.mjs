@@ -305,7 +305,7 @@ switch (cmd) {
           const conv = convertOne(vfs, r.parts.length === 1 && !r.parts[0].transform ? r.parts[0].mesh : r.appearance, join(outDir, `${id}.glb`));
           const b = conv.mesh.bounds ?? { min: [0, 0, 0], max: [0, 0, 0] };
           const bounds = conv.flipX ? { min: [-b.max[0], b.min[1], b.min[2]], max: [-b.min[0], b.max[1], b.max[2]] } : b;
-          models.set(id, { id, source: r.appearance, file: `${id}.glb`, bounds, triangles: conv.tris, textured: conv.textured, shaders: conv.shaders.length, parts: conv.partCount });
+          models.set(id, { id, source: r.source ?? r.appearance, file: `${id}.glb`, bounds, triangles: conv.tris, textured: conv.textured, shaders: conv.shaders.length, parts: conv.partCount });
           console.error(`  ${id}: ${conv.tris} tris, ${conv.textured}/${conv.shaders.length} textured${conv.partCount > 1 ? `, ${conv.partCount} parts` : ''}`);
         } catch (err) {
           models.set(id, { failed: err.message });

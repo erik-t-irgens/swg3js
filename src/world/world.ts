@@ -189,15 +189,15 @@ export class World {
   }
 
   /** Load converted SWG content for this planet, if the private pack exists. */
-  async loadPack(spawn: THREE.Vector3): Promise<void> {
+  async loadPack(spawn: THREE.Vector3): Promise<THREE.Vector3 | null> {
     const token = this.loadToken;
     const planet = this.planet;
     this.packStatus = 'loading';
     const pack = await AssetPack.load(planet.id);
-    if (token !== this.loadToken) return;
+    if (token !== this.loadToken) return null;
     if (!pack) {
       this.packStatus = 'no pack';
-      return;
+      return null;
     }
     this.pack = pack;
 
@@ -210,7 +210,7 @@ export class World {
     await addScatter('debris', 0.35, 0.9, 1.1);
     await addScatter('vaporators', 0.25, 1, 1);
     await addScatter('flora', 0.9, 0.8, 1.2);
-    if (token !== this.loadToken) return;
+    if (token !== this.loadToken) return null;
 
     const layout = pack.layout;
     const placements = layout ? [] : (OUTPOSTS[planet.id] ?? []);
@@ -223,7 +223,7 @@ export class World {
         console.warn(`outpost: ${p.model} not in pack, skipped`);
       }
     }
-    if (token !== this.loadToken) return;
+    if (token !== this.loadToken) return null;
 
     // Level the ground under each structure, keep procedural props off it, then rebuild.
     for (const st of structures) {
@@ -232,7 +232,7 @@ export class World {
     }
 
     // Snapshot objects: the world is mirrored in X (left-handed source), centred on the layout centre.
-    const placed: { model: LoadedModel; x: number; y: number; z: number; q: THREE.Quaternion; radius: number }[] = [];
+    const placed: { model: LoadedModel; x: number; y: number; z: number; q: THREE.Quaternion; radius: number; contained: boolean }[] = [];
     if (layout) {
       const byModel = new Map<string, typeof layout.objects>();
       for (const o of layout.objects) (byModel.get(o.model) ?? byModel.set(o.model, []).get(o.model)!).push(o);
@@ -244,11 +244,11 @@ export class World {
           console.warn(`layout: ${id} failed to load`);
           continue;
         }
-        if (token !== this.loadToken) return;
+        if (token !== this.loadToken) return null;
         for (const o of list) {
           const gx = -(o.x - layout.center.x);
           const gz = o.z - layout.center.z;
-          placed.push({ model, x: gx, y: o.y, z: gz, q: new THREE.Quaternion(o.q[1], -o.q[2], -o.q[3], o.q[0]), radius: o.radius });
+          placed.push({ model, x: gx, y: o.y, z: gz, q: new THREE.Quaternion(o.q[1], -o.q[2], -o.q[3], o.q[0]), radius: o.radius, contained: !!o.contained });
           if (o.radius >= 2 && !o.contained) this.terrain.addAnchor({ x: gx, z: gz, y: o.y, r: o.radius });
           if (o.radius >= 1 && !o.contained) this.exclusions.push({ x: gx, z: gz, r: o.radius + 2 });
         }
@@ -265,10 +265,24 @@ export class World {
     for (const st of structures) this.placeStructure(st.model, st.x, st.z, st.rot);
     if (placed.length) this.placeLayout(placed, spawn);
     this.packStatus = `${scatter.length} scatter models, ${structures.length} structures, ${placed.length} snapshot objects`;
+    if (!placed.length) return null;
+
+    // Find open ground near the layout centre that no object's footprint covers.
+    const blockers = placed.filter((p) => !p.contained && p.radius >= 1);
+    const clear = (x: number, z: number) => blockers.every((p) => Math.hypot(p.x - x, p.z - z) > p.radius + 1.5);
+    for (let r = 0; r < 120; r += 4) {
+      for (let a = 0; a < Math.PI * 2; a += Math.PI / 8) {
+        const x = spawn.x + Math.sin(a) * r;
+        const z = spawn.z + Math.cos(a) * r;
+        if (clear(x, z)) return new THREE.Vector3(x, this.terrain.heightAt(x, z), z);
+        if (r === 0) break;
+      }
+    }
+    return null;
   }
 
   /** Instance every snapshot object and give the larger ones exact collision near the spawn. */
-  private placeLayout(placed: { model: LoadedModel; x: number; y: number; z: number; q: THREE.Quaternion; radius: number }[], spawn: THREE.Vector3): void {
+  private placeLayout(placed: { model: LoadedModel; x: number; y: number; z: number; q: THREE.Quaternion; radius: number; contained: boolean }[], spawn: THREE.Vector3): void {
     const byModel = new Map<LoadedModel, typeof placed>();
     for (const p of placed) (byModel.get(p.model) ?? byModel.set(p.model, []).get(p.model)!).push(p);
     const m = new THREE.Matrix4();
@@ -290,7 +304,7 @@ export class World {
         this.structures.push(mesh);
       }
       for (const p of list) {
-        if (p.radius < 1.5 || Math.hypot(p.x - spawn.x, p.z - spawn.z) > 350) continue;
+        if (p.contained || p.radius < 1.5 || Math.hypot(p.x - spawn.x, p.z - spawn.z) > 350) continue;
         for (const prim of model.primitives) {
           const posAttr = prim.geometry.getAttribute('position');
           const idx = prim.geometry.getIndex();

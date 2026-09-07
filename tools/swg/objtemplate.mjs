@@ -49,7 +49,10 @@ export function stringParam(buf) {
 export function resolveTemplateMesh(vfs, templatePath, cache = new Map()) {
   if (cache.has(templatePath)) return cache.get(templatePath);
   let result;
+  if (/^object\/cell\//.test(templatePath)) result = { skip: 'cell container (not renderable)' };
+  else if (/^object\/soundobject\//.test(templatePath)) result = { skip: 'sound object' };
   try {
+    if (result) throw null;
     let appearance = null;
     let path = templatePath;
     let lastParams = [];
@@ -92,7 +95,7 @@ export function resolveTemplateMesh(vfs, templatePath, cache = new Map()) {
       else result = resolveAppearanceToMesh(vfs, appearance);
     }
   } catch (err) {
-    result = { skip: `error: ${err.message}` };
+    if (err) result = { skip: `error: ${err.message}` };
   }
   cache.set(templatePath, result);
   return result;
@@ -107,7 +110,7 @@ export function resolveAppearanceToMesh(vfs, rawAppearance) {
     const exterior = pob.cells[0]?.appearance;
     if (!exterior) return { skip: 'pob without exterior cell' };
     const r = resolveAppearanceToMesh(vfs, exterior);
-    return r.skip ? r : { ...r, appearance };
+    return r.skip ? r : { ...r, source: appearance };
   }
   if (lower.endsWith('.sat')) return { skip: 'skeletal appearance (.sat)' };
   if (lower.endsWith('.prt')) return { skip: 'particle (.prt)' };

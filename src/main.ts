@@ -147,11 +147,20 @@ class App {
     this.hud.setPlanet(planet);
     this.map.setCurrent(planet.id);
     this.updateUrl();
-    void this.world.loadPack(this.spawn).then(() => {
-      const ground = this.world.terrain.heightAt(this.player.pos.x, this.player.pos.z);
-      if (this.player.pos.y < ground + 0.05 && !this.player.mounted) {
-        this.player.pos.y = ground + 0.1;
-        this.player.body.setTranslation({ x: this.player.pos.x, y: this.player.pos.y, z: this.player.pos.z }, true);
+    const arrivalSpawn = this.spawn.clone();
+    void this.world.loadPack(this.spawn).then((clearSpawn) => {
+      const p = this.player;
+      if (p.mounted || p.noclip) return;
+      // Still standing where we arrived: move to open ground now that the real city is in.
+      if (clearSpawn && p.pos.distanceTo(arrivalSpawn) < 4) {
+        this.spawn.copy(clearSpawn);
+        p.reset(clearSpawn.clone().setY(clearSpawn.y + 0.1));
+        return;
+      }
+      const ground = this.world.terrain.heightAt(p.pos.x, p.pos.z);
+      if (p.pos.y < ground + 0.05) {
+        p.pos.y = ground + 0.1;
+        p.body.setTranslation({ x: p.pos.x, y: p.pos.y, z: p.pos.z }, true);
       }
     }).catch((err) => console.warn('asset pack failed', err));
   }
