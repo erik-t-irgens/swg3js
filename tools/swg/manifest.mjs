@@ -1,7 +1,7 @@
 // Classify archives against retail client inventories so private builds convert
 // only SOE-origin data and skip a server project's own custom archives.
 import { createHash } from 'node:crypto';
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { createReadStream, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
 const manifest = JSON.parse(readFileSync(new URL('./manifests/retail.json', import.meta.url), 'utf8'));
@@ -22,31 +22,51 @@ export function isRetailByName(file, size) {
   return null;
 }
 
+/** Stream a file through MD5 and SHA-256 at once, without loading it into memory. */
 function hashes(path) {
-  const buf = readFileSync(path);
-  return { md5: createHash('md5').update(buf).digest('hex'), sha256: createHash('sha256').update(buf).digest('hex') };
+  return new Promise((resolve, reject) => {
+    const md5 = createHash('md5');
+    const sha256 = createHash('sha256');
+    createReadStream(path, { highWaterMark: 4 * 1024 * 1024 })
+      .on('data', (chunk) => {
+        md5.update(chunk);
+        sha256.update(chunk);
+      })
+      .on('error', reject)
+      .on('end', () => resolve({ md5: md5.digest('hex'), sha256: sha256.digest('hex') }));
+  });
 }
 
-/** Full classification of every archive in a directory, hashing each one. */
-export function classifyDirectory(dir) {
+function classify(file, size, h) {
+  const key = file.toLowerCase();
+  let verdict = 'unknown: not a retail archive (project custom content, or modified)';
+  let set = null;
+  for (const s of Object.keys(RETAIL_SETS)) {
+    const e = manifest[s][key];
+    if (!e) continue;
+    const hashOk = (e.md5 && e.md5 === h.md5) || (e.sha256 && e.sha256 === h.sha256);
+    if (hashOk) return { set: s, verdict: `retail, hash verified: ${RETAIL_SETS[s]}` };
+    if (e.size === size && !e.md5 && !e.sha256) return { set: s, verdict: `retail by name and size: ${RETAIL_SETS[s]}` };
+    verdict = `retail name, but hash differs from ${RETAIL_SETS[s]} (modified, or a different capture)`;
+  }
+  return { set, verdict };
+}
+
+/**
+ * Classify every archive in a directory, hashing each one. Calls `onResult`
+ * as each file finishes so long runs show progress.
+ */
+export async function classifyDirectory(dir, onResult = () => {}) {
+  const files = readdirSync(dir).filter((x) => /\.(tre|toc)$/i.test(x)).sort();
   const out = [];
-  for (const f of readdirSync(dir).filter((x) => /\.(tre|toc)$/i.test(x)).sort()) {
+  let done = 0;
+  for (const f of files) {
     const path = join(dir, f);
     const size = statSync(path).size;
-    const key = f.toLowerCase();
-    const h = hashes(path);
-    let verdict = 'unknown (not a retail archive: project custom content or modified)';
-    let set = null;
-    for (const s of Object.keys(RETAIL_SETS)) {
-      const e = manifest[s][key];
-      if (!e) continue;
-      const hashOk = (e.md5 && e.md5 === h.md5) || (e.sha256 && e.sha256 === h.sha256);
-      if (hashOk) { verdict = `retail, verified hash: ${RETAIL_SETS[s]}`; set = s; break; }
-      if (e.size === size && !e.md5 && !e.sha256) { verdict = `retail by name and size: ${RETAIL_SETS[s]}`; set = s; break; }
-      verdict = `retail name but hash differs from ${RETAIL_SETS[s]} (modified or different capture)`;
-      set = null;
-    }
-    out.push({ file: f, size, set, verdict, md5: h.md5 });
+    const h = await hashes(path);
+    const result = { file: f, size, md5: h.md5, ...classify(f, size, h) };
+    out.push(result);
+    onResult(result, ++done, files.length);
   }
   return out;
 }

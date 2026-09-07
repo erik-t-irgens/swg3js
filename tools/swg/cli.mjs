@@ -81,7 +81,12 @@ function convertOne(vfs, appearancePath, outFile) {
 switch (cmd) {
   case 'verify': {
     if (!pos[1]) usage();
-    for (const r of classifyDirectory(pos[1])) console.log(`${r.file.padEnd(34)} ${String(r.size).padStart(12)}  ${r.verdict}`);
+    console.error('hashing every archive; large installs take a few minutes');
+    const results = await classifyDirectory(pos[1], (r, done, total) => {
+      console.log(`[${String(done).padStart(3)}/${total}] ${r.file.padEnd(34)} ${String(r.size).padStart(12)}  ${r.verdict}`);
+    });
+    const retail = results.filter((r) => r.set).length;
+    console.log(`\n${retail} retail archives, ${results.length - retail} unknown or modified, of ${results.length}`);
     break;
   }
   case 'list': {
