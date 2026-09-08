@@ -7,6 +7,7 @@ import { Group, groups, RAPIER as R, type Physics } from '../core/physics';
 import type { AssetPack, Layout, LoadedModel } from './assetPack';
 import { CHUNK_SIZE } from './terrain';
 import type { Exclusion } from './props';
+import { cellLayer } from './portalRender';
 
 export const REGION = 256;
 
@@ -256,6 +257,7 @@ export class LayoutStreamer {
         mesh.receiveShadow = true;
         mesh.instanceMatrix.needsUpdate = true;
         mesh.computeBoundingSphere();
+        if (prim.cell > 0) mesh.layers.set(cellLayer(prim.cell));
         this.scene.add(mesh);
         meshes.push(mesh);
       }

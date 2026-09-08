@@ -11,6 +11,7 @@ import { CHUNK_RES, CHUNK_SIZE, Terrain } from './terrain';
 import { SwgTerrain, type BuildingLayerSource } from './swgTerrain';
 import { LayoutStreamer, type Building, type CellState } from './layoutStream';
 import { CSM } from 'three/examples/jsm/csm/CSM.js';
+import { markActor, type PortalRenderer } from './portalRender';
 import { Speeder } from '../vehicles/speeder';
 
 const VIEW_RADIUS = 6;
@@ -122,6 +123,7 @@ export class World {
   private readonly hiddenGround: THREE.Object3D[] = [];
   private groundHiddenFor: Building | null = null;
   private csm: CSM | null = null;
+  private portals: PortalRenderer | null = null;
   private readonly csmMaterials = new WeakSet<THREE.Material>();
   private csmScanAt = 0;
   private loadToken = 0;
@@ -161,6 +163,7 @@ export class World {
     this.sky.frustumCulled = false;
     this.sky.renderOrder = -1;
     scene.add(this.sky);
+    markActor(this.sky);
   }
 
   load(planet: PlanetDef): void {
@@ -429,7 +432,11 @@ export class World {
    * 280 m box around the player. Every lit material must be set up for it, so materials are
    * scanned as objects appear.
    */
-  attachCamera(camera: THREE.PerspectiveCamera, shadows: boolean): void {
+  attachCamera(camera: THREE.PerspectiveCamera, shadows: boolean, portals: PortalRenderer): void {
+    this.portals = portals;
+    markActor(this.sun);
+    markActor(this.sun.target);
+    markActor(this.hemi);
     if (!shadows || this.csm) return;
     this.csm = new CSM({ camera, parent: this.scene, cascades: 3, maxFar: 700, mode: 'practical', shadowMapSize: 2048, lightDirection: new THREE.Vector3(0.3, -1, 0.2).normalize(), lightIntensity: 2, lightMargin: 150 });
     this.csm.fade = true;
@@ -439,18 +446,27 @@ export class World {
     }
     this.sun.castShadow = false;
     this.sun.visible = false;
+    for (const l of this.csm.lights) {
+      markActor(l);
+      markActor(l.target);
+    }
     this.setupShadowMaterials();
   }
 
+  get buildings(): Iterable<Building> {
+    return this.layoutStream?.buildings ?? [];
+  }
+
+  /** New materials join the shadow cascades and the portal stencil scheme. */
   private setupShadowMaterials(): void {
     const csm = this.csm;
-    if (!csm) return;
     this.scene.traverse((o) => {
       const mesh = o as THREE.Mesh;
-      if (!mesh.isMesh || !mesh.material) return;
+      if (!(mesh.isMesh || (o as THREE.Line).isLine || (o as THREE.Points).isPoints) || !mesh.material) return;
       const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
       for (const m of mats) {
-        if (this.csmMaterials.has(m) || (m as THREE.ShaderMaterial).isShaderMaterial) continue;
+        this.portals?.registerMaterial(m, m.userData.interior === true);
+        if (this.csmMaterials.has(m) || (m as THREE.ShaderMaterial).isShaderMaterial || !csm) continue;
         csm.setupMaterial(m);
         this.csmMaterials.add(m);
       }
@@ -460,11 +476,12 @@ export class World {
   /** Call once per frame after the camera has moved. */
   updateShadows(now: number): void {
     const csm = this.csm;
-    if (!csm) return;
-    const lightDir = this.day.sunDir.y > 0.02 ? this.day.sunDir : this.day.moonDir;
-    csm.lightDirection.copy(lightDir).negate().normalize();
-    csm.update();
-    if (now - this.csmScanAt > 500) {
+    if (csm) {
+      const lightDir = this.day.sunDir.y > 0.02 ? this.day.sunDir : this.day.moonDir;
+      csm.lightDirection.copy(lightDir).negate().normalize();
+      csm.update();
+    }
+    if (now - this.csmScanAt > 250) {
       this.csmScanAt = now;
       this.setupShadowMaterials();
     }
@@ -476,9 +493,12 @@ export class World {
     this.stream(center, Infinity);
     this.streamFar(center, Infinity);
     this.creatures.spawnAround(center);
+    markActor(this.creatures.group);
     const sx = center.x + 5;
     const sz = center.z + 4;
-    this.speeders.push(new Speeder(this.physics, this.scene, sx, this.terrain.heightAt(sx, sz) + 1.2, sz, Math.PI * 0.75));
+    const speeder = new Speeder(this.physics, this.scene, sx, this.terrain.heightAt(sx, sz) + 1.2, sz, Math.PI * 0.75);
+    markActor(speeder.group);
+    this.speeders.push(speeder);
   }
 
   get chunkCount(): number {

@@ -3,6 +3,7 @@ import type { ClassId } from '../combat/kit';
 import type { ThirdPersonCamera } from '../core/camera';
 import type { Input } from '../core/input';
 import { Group, groups, RAPIER, type Physics } from '../core/physics';
+import { markActor } from '../world/portalRender';
 import type { Speeder } from '../vehicles/speeder';
 import type { World } from '../world/world';
 import type { CharacterRig } from './rig';
@@ -172,6 +173,7 @@ export class Player {
     this.group = group;
     this.parts = parts;
     scene.add(group);
+    markActor(group);
 
     const world = physics.world;
     this.body = world.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased());
@@ -224,6 +226,7 @@ export class Player {
     this.parts.hips.visible = false;
     rig.root.scale.setScalar(1.1);
     this.group.add(rig.root);
+    markActor(rig.root);
     const hand = rig.bone('mixamorig:RightHand');
     const spine = rig.bone('mixamorig:Spine2');
     const p = this.parts;

@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { markActor } from '../world/portalRender';
 
 interface Ring { mesh: THREE.Mesh<THREE.RingGeometry, THREE.MeshBasicMaterial>; age: number; life: number; maxScale: number }
 interface Tracer { line: THREE.Line<THREE.BufferGeometry, THREE.LineBasicMaterial>; age: number; life: number }
@@ -23,6 +24,7 @@ export class Effects {
     );
     mesh.position.copy(pos).y += 0.08;
     this.scene.add(mesh);
+    markActor(mesh);
     this.rings.push({ mesh, age: 0, life, maxScale });
   }
 
@@ -31,6 +33,7 @@ export class Effects {
     const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color, transparent: true, opacity: 1, toneMapped: false }));
     line.frustumCulled = false;
     this.scene.add(line);
+    markActor(line);
     this.tracers.push({ line, age: 0, life });
   }
 
@@ -38,6 +41,7 @@ export class Effects {
     const light = new THREE.PointLight(color, intensity, distance);
     light.position.copy(pos);
     this.scene.add(light);
+    markActor(light);
     this.flashes.push({ light, age: 0, life, intensity });
   }
 
@@ -48,6 +52,7 @@ export class Effects {
     );
     mesh.position.copy(pos);
     this.scene.add(mesh);
+    markActor(mesh);
     this.bursts.push({ mesh, age: 0, life, size });
   }
 

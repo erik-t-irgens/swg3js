@@ -4,6 +4,7 @@ import { Effects } from './combat/effects';
 import { JediKit } from './combat/jedi';
 import type { ClassId, Kit, KitContext } from './combat/kit';
 import { ThirdPersonCamera } from './core/camera';
+import { PortalRenderer } from './world/portalRender';
 import { Input } from './core/input';
 import { Physics } from './core/physics';
 import { PLANETS, planetById, type PlanetDef } from './data/planets';
@@ -42,9 +43,10 @@ class App {
   private traveling = false;
   private dying = false;
   private spawn = new THREE.Vector3();
+  private readonly portals: PortalRenderer;
 
   constructor(private readonly physics: Physics) {
-    this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true, powerPreference: 'high-performance' });
+    this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true, powerPreference: 'high-performance', stencil: true });
     const lowfx = new URLSearchParams(location.search).get('lowfx') === '1';
     this.renderer.setPixelRatio(lowfx ? 0.5 : Math.min(window.devicePixelRatio, 2));
     this.renderer.setSize(window.innerWidth, window.innerHeight);
@@ -56,7 +58,8 @@ class App {
     this.cam = new ThirdPersonCamera(window.innerWidth / window.innerHeight);
     this.input = new Input(this.canvas);
     this.world = new World(this.scene, physics);
-    this.world.attachCamera(this.cam.camera, !lowfx);
+    this.portals = new PortalRenderer(this.renderer);
+    this.world.attachCamera(this.cam.camera, !lowfx, this.portals);
     this.player = new Player(this.scene, physics);
     this.effects = new Effects(this.scene);
     this.hud = new Hud(this.ui);
@@ -175,11 +178,20 @@ class App {
     this.fade.classList.add('on');
     await new Promise((r) => setTimeout(r, 500));
     this.arrive(planet);
-    this.renderer.render(this.scene, this.cam.camera);
+    this.drawFrame();
     await new Promise((r) => setTimeout(r, 150));
     this.fade.classList.remove('on');
     this.traveling = false;
     this.input.requestLock();
+  }
+
+  /** One frame through the portal renderer: the camera's cell in full, the rest through doorways. */
+  private drawFrame(): void {
+    const cam = this.cam.camera;
+    cam.updateMatrixWorld();
+    const eye = this.player.pos.clone().setY(this.player.pos.y + 1.6);
+    const view = this.portals.cameraCell(this.world.cellState, eye, cam.position, this.world.buildings);
+    this.portals.render(this.scene, cam, view, this.world.buildings);
   }
 
   private async die(): Promise<void> {
@@ -188,7 +200,7 @@ class App {
     this.fade.classList.add('on');
     await new Promise((r) => setTimeout(r, 1400));
     this.player.reset(this.spawn);
-    this.renderer.render(this.scene, this.cam.camera);
+    this.drawFrame();
     await new Promise((r) => setTimeout(r, 200));
     this.fade.classList.remove('on');
     this.dying = false;
@@ -304,7 +316,7 @@ class App {
       this.hud.update(dt, player.pos.x, player.pos.y, player.pos.z, this.kit, player.hp, player.maxHp, this.world.day.clock(), this.world.planet.creatures.name, player.saberOn);
 
       const tRender = performance.now();
-      this.renderer.render(this.scene, this.cam.camera);
+      this.drawFrame();
       stats.renderMs = performance.now() - tRender;
       stats.frameMs = performance.now() - tFrame;
       stats.rawDt = rawDt;

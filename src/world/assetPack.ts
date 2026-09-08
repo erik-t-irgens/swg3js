@@ -131,7 +131,18 @@ export class AssetPack {
             const cellMatch = /^cell[:_]?(\d+)/.exec(o.name) ?? /^cell[:_]?(\d+)/.exec(o.parent?.name ?? '');
             const cell = cellMatch ? Number(cellMatch[1]) : -1;
             const mats = Array.isArray(o.material) ? o.material : [o.material];
-            for (const m of mats) primitives.push({ geometry: o.geometry, material: m, cell });
+            for (let i = 0; i < mats.length; i++) {
+              let m = mats[i];
+              // Interior cells get their own material instances: the portal renderer stencils them apart from the shell.
+              if (cell > 0 && !m.userData.interior) {
+                m = m.clone();
+                m.userData.interior = true;
+                mats[i] = m;
+                if (Array.isArray(o.material)) o.material[i] = m;
+                else o.material = m;
+              }
+              primitives.push({ geometry: o.geometry, material: m, cell });
+            }
           }
         });
         const { min, max } = def.bounds;
