@@ -2,7 +2,7 @@
 // and a one-second animation turning the child joint, written through the real writers and
 // read back as a GLB with skin and animation.
 import { form, chunk, W, encode } from './iffWriter.ts';
-import { parseAnimation, parseMgn, parseSkeleton, poseAtFrame, qmul, skinData, skinnedPrimitives } from '../skeletal.mjs';
+import { expandQuaternion, parseAnimation, parseMgn, parseSkeleton, poseAtFrame, qmul, skinData, skinnedPrimitives } from '../skeletal.mjs';
 import { buildGlb } from '../glb.mjs';
 import { parseIff } from '../iff.mjs';
 
@@ -79,5 +79,20 @@ check('inverse bind matrices counted', json.accessors[json.skins[0].inverseBindM
 check('glb has animation', json.animations?.length === 1 && json.animations[0].channels.length === 4);
 check('joint attributes', json.meshes[0].primitives[0].attributes.JOINTS_0 !== undefined && json.meshes[0].primitives[0].attributes.WEIGHTS_0 !== undefined);
 check('child is child of root node', json.nodes[json.skins[0].joints[0]].children?.[0] === json.skins[0].joints[1]);
+// compressed quaternions: format 0xfe (one base at 0, full range) with zero offsets is identity;
+// format 0xfe with x = +0x3ff (max offset, half range 1) gives x = 1
+check('compressed identity', (() => { const q = expandQuaternion(0, 0xfe, 0xfe, 0xfe); return near(q[0], 1) && near(q[1], 0) && near(q[2], 0) && near(q[3], 0); })());
+check('compressed x axis', (() => { const q = expandQuaternion(0x3ff << 21, 0xfe, 0xfe, 0xfe); return near(q[1], 1, 1e-3) && near(q[0], 0, 0.05); })());
+check('compressed sign bit', (() => { const q = expandQuaternion((0x400 | 0x200) << 21, 0xfe, 0xfe, 0xfe); return near(q[1], -0.5, 1e-3); })());
+// second-level format 0xfc|1: base +1/3, ten-bit z with offset 0x100 of half range 2/3 -> z = 1/3 + 2/3 * 256/511
+check('compressed base selection', (() => { const q = expandQuaternion(0x100, 0xfe, 0xfe, 0xfd); return near(q[3], 1 / 3 + (2 / 3) * (256 / 511), 1e-4); })());
+// a CKAT file through the parser: one transform, one rotation channel of two packed keys
+const ckat = Buffer.from(encode(form('CKAT', form('0001',
+  chunk('INFO', new W().f32(30).i16(2).i16(1).i16(1).i16(0).i16(0).i16(1).bytes()),
+  form('XFRM', chunk('XFIN', new W().str('child').i8(1).i16(0).u8(0).i16(0).i16(0).i16(0).bytes())),
+  form('AROT', chunk('QCHN', new W().i16(2).u8(0xfe).u8(0xfe).u8(0xfe).i16(0).u32(0).i16(1).u32(0x3ff << 21).bytes())),
+  chunk('STRN', new W().f32(0.25).bytes())))));
+const canim = parseAnimation(parseIff(ckat));
+check('ckat parsed', canim.compressed === true && canim.frameCount === 2 && canim.rotationChannels[0].length === 2 && near(canim.rotationChannels[0][1].q[1], 1, 1e-3) && near(canim.staticTranslations[0], 0.25), JSON.stringify(canim.rotationChannels));
 console.log(failures ? `${failures} FAILURES` : 'all passed');
 process.exit(failures ? 1 : 0);

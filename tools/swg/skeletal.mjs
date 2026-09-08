@@ -239,6 +239,7 @@ export function flattenAnimationTemplate(form, name, timeScale = 1) {
   const v = form.children.find(isForm);
   switch (form.type) {
     case 'KFAT':
+    case 'CKAT':
       return [{ name, kind: 'inline', form, timeScale }];
     case 'PXAT': {
       const target = new R(childOf(v, 'INFO').data).str().replace(/\\/g, '/');
@@ -316,6 +317,7 @@ export function flattenAnimationTemplate(form, name, timeScale = 1) {
 // ---------------------------------------------------------------------------------------------
 // Keyframe animation (.ans)
 export function parseAnimation(root) {
+  if (isForm(root) && root.type === 'CKAT') return parseCompressedAnimation(root);
   const v = versionForm(root, 'KFAT');
   const version = Number.parseInt(v.type, 10);
   if (version !== 3) throw new Error(`KFAT: unsupported version ${v.type}`);
@@ -363,6 +365,105 @@ export function parseAnimation(root) {
     while (r.remaining >= 4) staticTranslations.push(r.f32());
   }
   return { version, fps, frameCount, transforms, rotationChannels, staticRotations, translationChannels, staticTranslations };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Compressed quaternions (CompressedQuaternion): x and y in 11 bits, z in 10 bits, each as a
+// sign bit plus an offset from a base value chosen by a per-channel format byte; w is
+// recovered from the unit length. The format byte's high bits pick the precision level
+// (how many bases split the -1..1 range), its low bits pick the base.
+const QFORMATS = (() => {
+  const table = new Array(256).fill(null);
+  const levels = [0xfe, 0xfc, 0xf8, 0xf0, 0xe0, 0xc0, 0x80];
+  levels.forEach((formatId, shift) => {
+    const baseCount = 1 << shift;
+    const baseSeparation = 2 / (baseCount + 1);
+    const halfRange = 0.5 * (4 / (baseCount + 1));
+    for (let i = 0; i < baseCount; i++) table[formatId | i] = { base: -1 + (i + 1) * baseSeparation, expand11: halfRange / 0x3ff, expand10: halfRange / 0x1ff };
+  });
+  return table;
+})();
+
+function expand11(fmt, v) {
+  const f = QFORMATS[fmt];
+  if (!f) return 0;
+  const mag = (v & 0x3ff) * f.expand11;
+  return v & 0x400 ? f.base - mag : f.base + mag;
+}
+function expand10(fmt, v) {
+  const f = QFORMATS[fmt];
+  if (!f) return 0;
+  const mag = (v & 0x1ff) * f.expand10;
+  return v & 0x200 ? f.base - mag : f.base + mag;
+}
+/** CompressedQuaternion::expand: packed [x 11 | y 11 | z 10] with per-axis formats, as [w, x, y, z]. */
+export function expandQuaternion(data, xFormat, yFormat, zFormat) {
+  const x = expand11(xFormat, data >>> 21);
+  const y = expand11(yFormat, data >>> 10);
+  const z = expand10(zFormat, data);
+  const w = Math.sqrt(Math.max(0, 1 - (x * x + y * y + z * z)));
+  return [w, x, y, z];
+}
+
+/** FORM CKAT > FORM 0001: like KFAT with int16 counts, uint8 translation masks and packed rotations. */
+export function parseCompressedAnimation(root) {
+  const v = versionForm(root, 'CKAT');
+  const version = Number.parseInt(v.type, 10);
+  if (version !== 1) throw new Error(`CKAT: unsupported version ${v.type}`);
+  const info = new R(childOf(v, 'INFO').data);
+  const fps = info.f32();
+  const frameCount = info.i16();
+  const transforms = [];
+  for (const xfin of childrenOf(childOf(v, 'XFRM'), 'XFIN')) {
+    const r = new R(xfin.data);
+    transforms.push({ name: r.str(), animatedRotation: r.i8() !== 0, rotationIndex: r.i16(), translationMask: r.u8(), xIndex: r.i16(), yIndex: r.i16(), zIndex: r.i16() });
+  }
+  const rotationChannels = [];
+  const arot = childOf(v, 'AROT');
+  if (arot) {
+    for (const q of childrenOf(arot, 'QCHN')) {
+      const r = new R(q.data);
+      const n = r.i16();
+      const xf = r.u8();
+      const yf = r.u8();
+      const zf = r.u8();
+      const keys = [];
+      for (let i = 0; i < n; i++) {
+        const frame = r.i16();
+        keys.push({ frame, q: expandQuaternion(r.u32(), xf, yf, zf) });
+      }
+      rotationChannels.push(keys);
+    }
+  }
+  const staticRotations = [];
+  const srot = childOf(v, 'SROT');
+  if (srot) {
+    const r = new R(srot.data);
+    while (r.remaining >= 7) {
+      const xf = r.u8();
+      const yf = r.u8();
+      const zf = r.u8();
+      staticRotations.push(expandQuaternion(r.u32(), xf, yf, zf));
+    }
+  }
+  const translationChannels = [];
+  const atrn = childOf(v, 'ATRN');
+  if (atrn) {
+    for (const c of childrenOf(atrn, 'CHNL')) {
+      const r = new R(c.data);
+      const n = r.i16();
+      const keys = [];
+      for (let i = 0; i < n; i++) keys.push({ frame: r.i16(), v: r.f32() });
+      translationChannels.push(keys);
+    }
+  }
+  const staticTranslations = [];
+  const strn = childOf(v, 'STRN');
+  if (strn) {
+    const r = new R(strn.data);
+    while (r.remaining >= 4) staticTranslations.push(r.f32());
+  }
+  return { version, compressed: true, fps, frameCount, transforms, rotationChannels, staticRotations, translationChannels, staticTranslations };
 }
 
 // ---------------------------------------------------------------------------------------------
