@@ -369,7 +369,7 @@ export class CreatureManager {
 
   update(dt: number, playerPos: THREE.Vector3, onAttack: (damage: number) => void): void {
     for (const c of this.creatures) {
-      if ((c.dead && c.deadTimer <= 0) || c.pos.distanceTo(playerPos) > 260 || c.pos.y < this.terrain.minH - 50) {
+      if ((c.dead && c.deadTimer <= 0) || c.pos.distanceTo(playerPos) > 260 || c.pos.y < this.terrain.floor - 20) {
         const p = this.pickSpot(playerPos);
         c.respawn(p.x, p.y, p.z);
       }

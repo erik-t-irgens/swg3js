@@ -27,6 +27,8 @@ export class Terrain {
   private readonly slope: THREE.Color;
   private readonly shore: THREE.Color;
   minH: number;
+  /** Below this the world is considered left (falling through): players reset, creatures respawn. */
+  floor: number;
   maxH: number;
   waterLevel: number;
   readonly flattenZones: FlattenZone[] = [];
@@ -44,6 +46,7 @@ export class Terrain {
     this.slope = new THREE.Color(planet.palette.slope);
     this.shore = new THREE.Color(planet.palette.shore);
     this.minH = planet.terrain.base - planet.terrain.amplitude;
+    this.floor = this.minH - 30;
     this.maxH = planet.terrain.base + planet.terrain.amplitude;
     this.waterLevel = planet.water ? planet.water.level : -Infinity;
   }
@@ -55,6 +58,8 @@ export class Terrain {
     // Colour bands span the heights SWG worlds actually use rather than the noise planet's range.
     this.minH = Math.max(this.waterLevel, -20);
     this.maxH = this.minH + 140;
+    // Real planets go far below zero (Naboo's sea sits 200 m under the Theed plateau).
+    this.floor = -700;
   }
 
   /** Water surface at a point: lakes and pools count as well as the global water level. */
@@ -66,6 +71,7 @@ export class Terrain {
     this.swg?.dispose();
     this.swg = null;
     this.waterLevel = this.planet.water ? this.planet.water.level : -Infinity;
+    this.floor = this.planet.terrain.base - this.planet.terrain.amplitude - 30;
   }
 
   /**

@@ -399,7 +399,7 @@ export class Player {
       if (this.vel.y < 0) this.vel.y = 0;
       this.grounded = true;
     }
-    if (this.pos.y < terrain.minH - 30) {
+    if (this.pos.y < terrain.floor) {
       this.pos.y = ground + 1;
       this.vel.set(0, 0, 0);
     }
