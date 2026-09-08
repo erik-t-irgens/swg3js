@@ -33,7 +33,7 @@ export function buildGlb(meshes, { flipX = true, textures = new Map(), skin = nu
 
   const pushAccessor = (arr, type, componentType, target, { bounds = false, normalized = false } = {}) => {
     const view = pushView(Buffer.from(arr.buffer, arr.byteOffset, arr.byteLength), target);
-    const n = { VEC4: 4, VEC3: 3, VEC2: 2, SCALAR: 1 }[type];
+    const n = { MAT4: 16, VEC4: 4, VEC3: 3, VEC2: 2, SCALAR: 1 }[type];
     const acc = { bufferView: view, componentType, count: arr.length / n, type };
     if (normalized) acc.normalized = true;
     if (bounds) {

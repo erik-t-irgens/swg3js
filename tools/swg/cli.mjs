@@ -349,7 +349,9 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
   if (latFile && vfs.has(latFile)) {
     const lat = parseLat(readIff(vfs, latFile));
     info.animationTable = latFile;
-    const wanted = animations === 'all' ? null : animations.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+    const wanted = animations === 'all' || animations === 'list' ? null : animations.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+    info.available = lat.entries.map((e) => `${e.name}${e.kind === 'file' || e.kind === 'inline' ? '' : ` [${e.kind}]`}`);
+    if (animations === 'list') return info;
     for (const e of lat.entries) {
       if (wanted && !wanted.some((w) => e.name.toLowerCase().includes(w))) continue;
       if (clips.length >= maxAnimations) break;
@@ -829,6 +831,7 @@ switch (cmd) {
     console.log(`${info.sat}: skeleton ${info.skeleton} (${info.joints} joints)`);
     for (const m of info.meshes) console.log(`  mesh ${m.file}: ${m.triangles} tris, ${m.shaders} shaders`);
     console.log(`  animations (${info.animations.length})${info.animationTable ? ` from ${info.animationTable}` : ''}: ${info.animations.join(', ') || 'none'}`);
+    if (info.available && (!info.animations.length || options.anim === 'list')) console.log(`  available (${info.available.length}): ${info.available.join(', ')}`);
     if (info.unknownTransforms) console.log(`  ${info.unknownTransforms} vertex weights named joints the skeleton lacks`);
     for (const m of info.missing) console.log(`  missing: ${m}`);
     for (const m of info.skipped) console.log(`  skipped: ${m}`);

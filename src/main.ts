@@ -89,9 +89,17 @@ class App {
       flora: () => this.world.floraStatus,
       // Show a converted model (path under assets-private/) in front of the player, playing a clip.
       show: async (file: string, clip?: string) => {
-        const gltf = await new GLTFLoader().loadAsync(`${import.meta.env.BASE_URL}assets-private/${file}`);
+        let gltf;
+        try {
+          gltf = await new GLTFLoader().loadAsync(`${import.meta.env.BASE_URL}assets-private/${file}`);
+        } catch (err) {
+          console.error('show: failed to load', file, err);
+          throw err;
+        }
         const p = this.player.pos;
         gltf.scene.position.set(p.x + 3, this.world.terrain.heightAt(p.x + 3, p.z), p.z);
+        const box = new THREE.Box3().setFromObject(gltf.scene);
+        const size = box.getSize(new THREE.Vector3());
         gltf.scene.traverse((o) => {
           o.layers.enable(31);
           const m = o as THREE.Mesh;
@@ -106,7 +114,9 @@ class App {
         const wanted = clip ? gltf.animations.find((a) => a.name === clip) ?? gltf.animations.find((a) => a.name.includes(clip)) : gltf.animations[0];
         if (wanted) mixer.clipAction(wanted).play();
         this.shown.push(mixer);
-        return { clips: names, playing: wanted?.name ?? null, joints: gltf.scene.getObjectByProperty('type', 'Bone') ? 'skinned' : 'static' };
+        const result = { clips: names, playing: wanted?.name ?? null, joints: gltf.scene.getObjectByProperty('type', 'Bone') ? 'skinned' : 'static', size: [size.x, size.y, size.z].map((v) => Number(v.toFixed(2))), at: [gltf.scene.position.x, gltf.scene.position.y, gltf.scene.position.z].map((v) => Number(v.toFixed(1))) };
+        console.info('show:', file, result);
+        return result;
       },
       scene: () => this.scene,
       find: (pattern: string) => {
