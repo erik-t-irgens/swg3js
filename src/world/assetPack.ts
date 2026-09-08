@@ -111,7 +111,8 @@ export class AssetPack {
           if (o instanceof THREE.Mesh) {
             o.castShadow = true;
             o.receiveShadow = true;
-            const cellMatch = /^cell:(\d+):/.exec(o.name) ?? /^cell:(\d+):/.exec(o.parent?.name ?? '');
+            // GLTFLoader strips ':' from node names, so "cell:0:exterior" arrives as "cell0exterior".
+            const cellMatch = /^cell[:_]?(\d+)/.exec(o.name) ?? /^cell[:_]?(\d+)/.exec(o.parent?.name ?? '');
             const cell = cellMatch ? Number(cellMatch[1]) : -1;
             const mats = Array.isArray(o.material) ? o.material : [o.material];
             for (const m of mats) primitives.push({ geometry: o.geometry, material: m, cell });

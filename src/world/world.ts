@@ -578,18 +578,42 @@ export class World {
       this.lastCz = pcz;
     }
     this.terrain.evict(center, VIEW_RADIUS + 2);
+    let changed = made > 0;
 
     for (const [key, c] of this.chunks) {
       const far = Math.max(Math.abs(c.cx - pcx), Math.abs(c.cz - pcz));
       if (far > VIEW_RADIUS + 1) {
         this.disposeChunk(c);
         this.chunks.delete(key);
+        changed = true;
       } else if (far <= PHYSICS_RADIUS) {
         this.addChunkPhysics(c);
       } else {
         this.removeChunkPhysics(c);
       }
     }
+    if (changed) for (const t of this.farTiles.values()) this.refreshFarTile(t);
+  }
+
+  /**
+   * Coarse far tiles overlap the detailed chunks and, on cliffs, poke through them. Drop the
+   * quads of a far tile that lie under loaded chunks so only one ground ever shows.
+   */
+  private refreshFarTile(tile: THREE.Mesh): void {
+    const u = tile.geometry.userData as { fullIndex?: ArrayLike<number>; n: number; ox: number; oz: number; step: number };
+    if (!u.fullIndex) return;
+    const { fullIndex, n, ox, oz, step } = u;
+    const out: number[] = [];
+    for (let j = 0; j < n; j++) {
+      const cz = Math.floor((oz + (j + 0.5) * step) / CHUNK_SIZE);
+      for (let i = 0; i < n; i++) {
+        const cx = Math.floor((ox + (i + 0.5) * step) / CHUNK_SIZE);
+        if (this.chunks.has(`${cx},${cz}`)) continue;
+        const q = (j * n + i) * 6;
+        for (let k = 0; k < 6; k++) out.push(fullIndex[q + k]);
+      }
+    }
+    tile.geometry.setIndex(out);
   }
 
   private streamFar(center: THREE.Vector3, budget: number): void {
@@ -612,6 +636,7 @@ export class World {
       mesh.receiveShadow = true;
       this.chunkRoot.add(mesh);
       this.farTiles.set(`${w.tx},${w.tz}`, mesh);
+      this.refreshFarTile(mesh);
       made++;
     }
     if (wanted.length <= made) {

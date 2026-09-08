@@ -185,7 +185,10 @@ export class Terrain {
       if (!grid) return null;
       hs = grid;
     }
-    return this.buildGrid(tx * size, tz * size, size, res, { skirt: 0, yOffset: -2.5, wantHeights: false }, hs).geometry;
+    const geometry = this.buildGrid(tx * size, tz * size, size, res, { skirt: 0, yOffset: -2.5, wantHeights: false }, hs).geometry;
+    // Remember the full index so quads under detailed chunks can be cut out (World.refreshFarTile).
+    geometry.userData = { fullIndex: geometry.getIndex()!.array.slice(), n: res, ox: tx * size, oz: tz * size, step: size / res };
+    return geometry;
   }
 
   releaseFarTile(tx: number, tz: number, size: number, res: number): void {
