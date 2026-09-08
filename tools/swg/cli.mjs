@@ -14,6 +14,7 @@
 //   node tools/swg/cli.mjs pack <swg-dir> <spec.json> <out-dir>    build a game asset pack from a spec (see packs/)
 //   node tools/swg/cli.mjs planets <swg-dir>                        list the world snapshots in the archives and where each would centre
 //   node tools/swg/cli.mjs pois <swg-dir> <planet>|all <out-dir>    (re)write just pois.json for packs converted already
+//   node tools/swg/cli.mjs flora <swg-dir> <planet>|all <out-dir>   (re)convert just the flora models for packs converted already
 //   node tools/swg/cli.mjs snapshot <swg-dir> <planet>|all <out-dir> [--center=x,z|auto] --radius=r|all [--max=n]
 //                                                                  convert the world snapshot's objects around a point into a layout,
 //                                                                  and copy the planet's terrain (.trn) plus building terrain layers (.lay);
@@ -252,11 +253,17 @@ function convertFlora(vfs, template, outDir, manifest) {
   mkdirSync(join(outDir, 'flora'), { recursive: true });
   const defs = new Map();
   let missing = 0;
+  let particles = 0;
   for (const family of families) {
     for (const child of family.children) {
-      const appearance = child.appearance.replace(/\\/g, '/').replace(/^\//, '');
+      const appearance = child.appearance;
       const key = appearance.toLowerCase();
       if (defs.has(key)) continue;
+      if (/\.prt$/i.test(appearance)) {
+        // Particle systems (insects, dust): not meshes.
+        particles++;
+        continue;
+      }
       if (!vfs.has(appearance)) {
         missing++;
         console.warn(`flora appearance missing: ${appearance} (family ${family.name})`);
@@ -275,7 +282,7 @@ function convertFlora(vfs, template, outDir, manifest) {
     }
   }
   manifest.categories.flora = [...defs.values()];
-  return { models: defs.size, missing, families: families.length };
+  return { models: defs.size, missing, particles, families: families.length };
 }
 
 /** Copy a building template's terrain modification layer (.lay) into <out>/terrain/. Returns the pack-relative file or null. */
@@ -550,7 +557,7 @@ async function snapshotPlanet(vfs, planet, outDir) {
     manifest.categories.layout = [...models.values()].filter((m) => m && !m.failed);
     const flora = lastTemplate ? convertFlora(vfs, lastTemplate, outDir, manifest) : { models: 0, missing: 0, families: 0 };
     writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
-    console.log(`flora: ${flora.models} models for ${flora.families} families${flora.missing ? `, ${flora.missing} appearances missing` : ''}`);
+    console.log(`flora: ${flora.models} models for ${flora.families} families${flora.missing ? `, ${flora.missing} appearances missing` : ''}${flora.particles ? `, ${flora.particles} particle effects skipped` : ''}`);
     writePois(vfs, planet, snap, entries, cx, cz, outDir);
     console.log(`layout: ${objects.length} objects, ${manifest.categories.layout.length} models -> ${join(outDir, 'layout.json')}`);
     const withCells = manifest.categories.layout.filter((m) => m.cells);
@@ -665,6 +672,31 @@ switch (cmd) {
       const known = GAME_PLANETS.includes(planet);
       console.log(`${planet.padEnd(12)} ${String(snap.nodes.length).padStart(6)} objects, terrain ${vfs.has(`terrain/${planet}.trn`) ? 'yes' : 'no '}, centre ${centre.x.toFixed(0)},${centre.z.toFixed(0)} (${centre.why})${known ? '' : '  [not a planet in the game]'}`);
     }
+    break;
+  }
+
+  case 'flora': {
+    // Only the flora models, for packs converted already: <swg-dir> <planet>|all <out-dir>
+    if (!pos[3]) usage();
+    const vfs = mount(pos[1]);
+    const { parseTerrainTemplate } = await import('../../src/swg/terrain/trn.ts');
+    const planets = pos[2] === 'all' ? snapshotPlanets(vfs).filter((p) => GAME_PLANETS.includes(p)) : [pos[2]];
+    for (const planet of planets) {
+      const outDir = pos[2] === 'all' ? join(pos[3], planet) : pos[3];
+      const trnPath = `terrain/${planet}.trn`;
+      if (!vfs.has(trnPath)) {
+        console.warn(`no ${trnPath} in archives`);
+        continue;
+      }
+      const manifestPath = join(outDir, 'manifest.json');
+      const manifest = existsSync(manifestPath) ? JSON.parse(readFileSync(manifestPath, 'utf8')) : { planet, categories: {} };
+      mkdirSync(outDir, { recursive: true });
+      console.log(`=== ${planet} ===`);
+      const flora = convertFlora(vfs, parseTerrainTemplate(new Uint8Array(vfs.read(trnPath))), outDir, manifest);
+      writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+      console.log(`flora: ${flora.models} models for ${flora.families} families${flora.missing ? `, ${flora.missing} appearances missing` : ''}${flora.particles ? `, ${flora.particles} particle effects skipped` : ''}`);
+    }
+    printEffectSummary();
     break;
   }
 

@@ -75,9 +75,15 @@ export class FastRandomGenerator {
   }
 }
 
+/** Families name bare files ("shrb_dsrt_brown.apt"); the engine loads them from appearance/. */
+export function floraAppearancePath(name: string): string {
+  const n = name.replace(/\\/g, '/').replace(/^\//, '');
+  return n.includes('/') ? n : `appearance/${n}`;
+}
+
 export interface FloraChild {
   familyId: number;
-  /** Appearance file, e.g. appearance/tree_tatooine_l.apt */
+  /** Appearance file with its directory, e.g. appearance/tree_tatooine_l.apt */
   appearance: string;
   weight: number;
   shouldSway: boolean;
@@ -139,7 +145,7 @@ export class FloraGroup {
       }
       const n = r.int32();
       for (let k = 0; k < n; k++) {
-        const child: FloraChild = { familyId: family.id, appearance: r.string(), weight: r.float(), shouldSway: false, displacement: 0, period: 0, alignToTerrain: false, shouldScale: false, minScale: 1, maxScale: 1 };
+        const child: FloraChild = { familyId: family.id, appearance: floraAppearancePath(r.string()), weight: r.float(), shouldSway: false, displacement: 0, period: 0, alignToTerrain: false, shouldScale: false, minScale: 1, maxScale: 1 };
         if (version >= 6) {
           child.shouldSway = r.int32() !== 0;
           child.displacement = r.float();
