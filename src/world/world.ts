@@ -412,7 +412,8 @@ export class World {
     for (const p of c.colliders) {
       const ground = this.terrain.heightAt(p.x, p.z) - 0.5;
       const halfH = (p.top - ground) / 2;
-      cols.push(this.physics.createStaticCylinder(p.x, ground + halfH, p.z, p.r, halfH));
+      const col = this.physics.createStaticCylinder(p.x, ground + halfH, p.z, p.r, halfH);
+      if (col) cols.push(col);
     }
     c.physics = cols;
   }

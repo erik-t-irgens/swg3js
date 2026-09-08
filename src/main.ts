@@ -87,6 +87,12 @@ class App {
       cell: () => (this.world.cellState ? { model: this.world.cellState.building.model.def.id, cell: this.world.cellState.cell } : null),
       passes: () => this.portals.passes,
       flora: () => this.world.floraStatus,
+      // The player's position in the original game's coordinates (for terrain-check --at and /way).
+      swg: () => {
+        const c = this.world.layoutCenter;
+        const p = this.player.pos;
+        return c ? { x: Number((c.x - p.x).toFixed(1)), z: Number((c.z + p.z).toFixed(1)), y: Number(p.y.toFixed(2)), ground: Number(this.world.terrain.heightAt(p.x, p.z).toFixed(2)) } : null;
+      },
       // Show a converted model (path under assets-private/) in front of the player, playing a clip.
       show: async (file: string, clip?: string) => {
         let gltf;

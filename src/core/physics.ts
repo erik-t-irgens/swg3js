@@ -100,7 +100,9 @@ export class Physics {
     return hit ? hit.timeOfImpact : null;
   }
 
-  createStaticCylinder(x: number, y: number, z: number, radius: number, halfHeight: number): RAPIER.Collider {
+  /** A static cylinder, or null for a degenerate one (the physics engine aborts on non-positive or NaN sizes). */
+  createStaticCylinder(x: number, y: number, z: number, radius: number, halfHeight: number): RAPIER.Collider | null {
+    if (![x, y, z, radius, halfHeight].every(Number.isFinite) || radius <= 0.01 || halfHeight <= 0.01) return null;
     const desc = RAPIER.ColliderDesc.cylinder(halfHeight, radius).setTranslation(x, y, z).setFriction(0.6);
     return this.world.createCollider(desc);
   }

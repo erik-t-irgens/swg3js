@@ -300,7 +300,8 @@ function convertFlora(vfs, template, outDir, manifest) {
  * (unmounted) loop_stand's stand/walk/run become idle/walk/run, the combat loop likewise.
  */
 function clipName(entry) {
-  const m = /^(loop_stand(?:_combat)?):speed([012])$/.exec(entry.name);
+  // Nested selectors without value names add ":0" levels; the first of each is the default choice.
+  const m = /^(loop_stand(?:_combat)?):speed([012])(?::0)*$/.exec(entry.name);
   if (!m || entry.isDefault === false) return entry.name;
   const base = ['idle', 'walk', 'run'][Number(m[2])];
   return m[1] === 'loop_stand' ? base : `${base}_combat`;
