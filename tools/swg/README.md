@@ -35,7 +35,7 @@ Status:
 | Shaders to main texture, DDS (DXT1/3/5, uncompressed) to PNG embedded in GLB | Tested on synthetic data |
 | Skinned meshes, skeletons, animations (.mgn, .skt, .ans) | Formats documented, not started |
 | World snapshots (.ws), object templates, portal buildings (.pob exterior) | Written against the engine loaders, tested synthetically |
-| Terrain rule files (.trn) and building layers (.lay) | Generator ported from the engine (fractals, boundaries, filters, height, shader, road and river affectors); fractal noise verified bit-for-bit against the engine's code; `terrain-check` validates against real snapshots |
+| Terrain rule files (.trn), bitmaps and building layers (.lay) | Generator ported from the engine (fractals, boundaries, filters, bitmap filters, height, shader, road and river affectors); fractal noise verified bit-for-bit against the engine's code. On retail Tatooine, `terrain-check` puts 81% of Mos Eisley's snapshot objects within 0.5 m of the generated ground (median 0.00 m); the rest are objects that never sat on the ground (rooftop furniture, wall terminals, walls sunk 2 m, hand-typed fort heights) |
 | Component appearances (.cmp) | Parts baked into one mesh by their transforms |
 | Skeletal (.sat), particles (.prt) | Skipped with counts in the snapshot output |
 
