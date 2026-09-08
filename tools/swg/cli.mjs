@@ -14,6 +14,7 @@
 //   node tools/swg/cli.mjs pack <swg-dir> <spec.json> <out-dir>    build a game asset pack from a spec (see packs/)
 //   node tools/swg/cli.mjs planets <swg-dir>                        list the world snapshots in the archives and where each would centre
 //   node tools/swg/cli.mjs pois <swg-dir> <planet>|all <out-dir>    (re)write just pois.json for packs converted already
+//   node tools/swg/cli.mjs creatures <swg-dir> <out-dir>              every planet's creature as a skinned GLB under <out-dir>/creatures/
 //   node tools/swg/cli.mjs sat <swg-dir> <x.sat | object/mobile/shared_x.iff> <out.glb> [--anim=all|idle,walk]
 //                                                                  convert a skeletal appearance (creature, character) with skeleton and animations
 //   node tools/swg/cli.mjs flora <swg-dir> <planet>|all <out-dir>   (re)convert just the flora models for packs converted already
@@ -348,6 +349,14 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
     }
     const { groups, unknownTransforms } = skinnedPrimitives(mgn, skeleton);
     info.unknownTransforms += unknownTransforms;
+    for (let i = 0; i < mgn.positions.length; i += 3) {
+      const b = (info.bounds ??= { min: [Infinity, Infinity, Infinity], max: [-Infinity, -Infinity, -Infinity] });
+      const p = [-mgn.positions[i], mgn.positions[i + 1], mgn.positions[i + 2]];
+      for (let k = 0; k < 3; k++) {
+        b.min[k] = Math.min(b.min[k], p[k]);
+        b.max[k] = Math.max(b.max[k], p[k]);
+      }
+    }
     for (const g of groups) {
       const t = textureFor(vfs, g.shader);
       if (t) textures.set(g.shader, t);
@@ -527,6 +536,22 @@ function loadPlanetObjects(vfs, planet) {
   const entries = flattenWithWorldTransforms(snap);
   return { snap, entries, snapshotCount, buildout: buildout.stats };
 }
+
+/** The creature each planet spawns (src/data/planets.ts) and the mobile template that draws it. */
+const CREATURES = {
+  bantha: 'object/mobile/shared_bantha.iff',
+  kaadu: 'object/mobile/shared_kaadu.iff',
+  durni: 'object/mobile/shared_durni.iff',
+  bol: 'object/mobile/shared_bol.iff',
+  kimogila: 'object/mobile/shared_kimogila.iff',
+  boar_wolf: 'object/mobile/shared_boar_wolf.iff',
+  rancor: 'object/mobile/shared_rancor.iff',
+  mawgax: 'object/mobile/shared_mawgax.iff',
+  kahmurra: 'object/mobile/shared_kahmurra.iff',
+  torton: 'object/mobile/shared_torton.iff',
+};
+/** Logical animations (substrings) the game drives creatures with. */
+const CREATURE_CLIPS = 'idle,walk,run,cbt_stand_combat_attack_light,rea_stand_get_hit_light,trn_stand_to_incapacitated,loop_incapacitated';
 
 /** Planet ids the game can load a pack for (see src/data/planets.ts). */
 const GAME_PLANETS = ['tatooine', 'naboo', 'corellia', 'dantooine', 'lok', 'endor', 'dathomir', 'yavin4', 'talus', 'rori'];
@@ -848,6 +873,29 @@ switch (cmd) {
       writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
       console.log(`flora: ${flora.models} models for ${flora.families} families${flora.missing ? `, ${flora.missing} appearances missing` : ''}${flora.particles ? `, ${flora.particles} particle effects skipped` : ''}`);
     }
+    printEffectSummary();
+    break;
+  }
+
+  case 'creatures': {
+    // <swg-dir> <out-dir>: the creature of every planet the game spawns, as skinned GLBs under <out-dir>/creatures/
+    if (!pos[2]) usage();
+    const vfs = mount(pos[1]);
+    const outDir = join(pos[2], 'creatures');
+    mkdirSync(outDir, { recursive: true });
+    const list = [];
+    for (const [id, template] of Object.entries(CREATURES)) {
+      const out = join(outDir, `${id}.glb`);
+      try {
+        const info = convertSat(vfs, template, out, { animations: CREATURE_CLIPS });
+        list.push({ id, file: `creatures/${id}.glb`, template, clips: info.animations, bounds: info.bounds });
+        console.log(`${id}: ${info.joints} joints, ${info.meshes.reduce((a, m) => a + m.triangles, 0)} tris, clips ${info.animations.join(', ')}${info.missing.length ? `, missing ${info.missing.length}` : ''}`);
+      } catch (err) {
+        console.warn(`${id}: ${err.message}`);
+      }
+    }
+    writeFileSync(join(outDir, 'manifest.json'), JSON.stringify({ creatures: list }, null, 2));
+    console.log(`creatures: ${list.length} -> ${join(outDir, 'manifest.json')}`);
     printEffectSummary();
     break;
   }
