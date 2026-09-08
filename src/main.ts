@@ -51,7 +51,7 @@ class App {
     this.renderer.setPixelRatio(lowfx ? 0.5 : Math.min(window.devicePixelRatio, 2));
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.renderer.shadowMap.enabled = !lowfx;
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.0;
 
@@ -64,6 +64,22 @@ class App {
     this.effects = new Effects(this.scene);
     this.hud = new Hud(this.ui);
     this.map = new GalaxyMap(this.ui, (p) => void this.travel(p));
+    // Console hooks for driving the game from tests: window.__debug.teleport(x, z, yaw), .look(yaw, pitch), .cell().
+    (window as unknown as { __debug: unknown }).__debug = {
+      teleport: (x: number, z: number, yaw?: number) => {
+        this.player.reset(new THREE.Vector3(x, this.world.terrain.heightAt(x, z) + 0.3, z));
+        if (yaw !== undefined) this.cam.yaw = yaw;
+      },
+      look: (yaw: number, pitch: number) => {
+        this.cam.yaw = yaw;
+        this.cam.pitch = pitch;
+      },
+      zoom: (distance: number) => {
+        this.cam.distance = distance;
+      },
+      cell: () => (this.world.cellState ? { model: this.world.cellState.building.model.def.id, cell: this.world.cellState.cell } : null),
+      passes: () => this.portals.passes,
+    };
 
     this.fade = document.createElement('div');
     this.fade.id = 'fade';

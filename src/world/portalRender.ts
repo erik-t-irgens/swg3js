@@ -68,6 +68,8 @@ export class PortalRenderer {
     g.setAttribute('position', new THREE.Float32BufferAttribute([-1, -1, 0, 3, -1, 0, -1, 3, 0], 3));
     this.resetQuad = new THREE.Mesh(g, this.resetMat);
     this.resetQuad.frustumCulled = false;
+    // Drawn on its own whatever layer the camera is set to for the current pass.
+    this.resetQuad.layers.enableAll();
     renderer.autoClear = false;
     renderer.shadowMap.autoUpdate = false;
   }
@@ -104,9 +106,12 @@ export class PortalRenderer {
         g.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
         g.setIndex(p.indices);
         const mesh = new THREE.Mesh(g, this.portalMat);
+        // Rendered standalone (no scene), so the world matrix is set by hand and never recomputed.
         mesh.matrixAutoUpdate = false;
         mesh.matrix.copy(b.matrix);
+        mesh.matrixWorld.copy(b.matrix);
         mesh.frustumCulled = false;
+        mesh.layers.enableAll();
         return mesh;
       });
       this.portalMeshes.set(b, list);

@@ -198,6 +198,8 @@ export class LayoutStreamer {
       }
       if (region.tiers[tier] !== 'loading') return;
       region.tiers[tier] = this.instance(objects, models);
+      // Models that finished loading after the last collider pass get their collision next update.
+      this.lastColliderX = Number.NaN;
     } finally {
       this.loads--;
       if (region.tiers[tier] === 'loading') region.tiers[tier] = null;
