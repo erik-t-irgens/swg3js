@@ -245,6 +245,53 @@ export class ShaderGroup {
   }
 }
 
+/** An 8-bit greyscale image, rows top-down, as the engine's Image holds terrain bitmaps. */
+export interface Bitmap {
+  width: number;
+  height: number;
+  data: Uint8Array;
+}
+
+/** Terrain bitmap families: the second MGRP block, one image per family (BitmapGroup). */
+export class BitmapGroup {
+  readonly families = new Map<number, { name: string; bitmapName: string; image: Bitmap | null }>();
+
+  load(form: IffForm | undefined): void {
+    if (!form) return;
+    const v = formChild(form, '0000');
+    if (!v) return;
+    for (const fam of v.children) {
+      if (!isForm(fam) || fam.type !== 'MFAM') continue;
+      const data = chunkChild(fam, 'DATA');
+      if (!data) continue;
+      const r = new ChunkReader(data.data);
+      const id = r.int32();
+      const name = r.string();
+      const bitmapName = r.string();
+      this.families.set(id, { name, bitmapName, image: null });
+    }
+  }
+
+  setImage(familyId: number, image: Bitmap): void {
+    const f = this.families.get(familyId);
+    if (f) f.image = image;
+  }
+
+  image(familyId: number): Bitmap | null {
+    return this.families.get(familyId)?.image ?? null;
+  }
+}
+
+/** Parse the "HMAP" file the converter writes for a terrain bitmap. */
+export function parseHeightmapFile(bytes: Uint8Array): Bitmap | null {
+  if (bytes.length < 12 || String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]) !== 'HMAP') return null;
+  const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const width = v.getUint32(4, true);
+  const height = v.getUint32(8, true);
+  if (bytes.length < 12 + width * height) return null;
+  return { width, height, data: bytes.subarray(12, 12 + width * height) };
+}
+
 // ---------------------------------------------------------------------------
 // Chunk data
 // ---------------------------------------------------------------------------
@@ -262,9 +309,10 @@ export interface ChunkData {
   normalsDirty: boolean;
   fractalGroup: FractalGroup;
   shaderGroup: ShaderGroup;
+  bitmapGroup: BitmapGroup;
 }
 
-export function createChunkData(startX: number, startZ: number, numberOfPoles: number, distanceBetweenPoles: number, fractalGroup: FractalGroup, shaderGroup: ShaderGroup): ChunkData {
+export function createChunkData(startX: number, startZ: number, numberOfPoles: number, distanceBetweenPoles: number, fractalGroup: FractalGroup, shaderGroup: ShaderGroup, bitmapGroup: BitmapGroup = new BitmapGroup()): ChunkData {
   const n = numberOfPoles * numberOfPoles;
   const size = (numberOfPoles - 1) * distanceBetweenPoles;
   return {
@@ -280,6 +328,7 @@ export function createChunkData(startX: number, startZ: number, numberOfPoles: n
     normalsDirty: true,
     fractalGroup,
     shaderGroup,
+    bitmapGroup,
   };
 }
 
@@ -1046,19 +1095,50 @@ export class FilterShader extends Filter {
   }
 }
 
-/** Bitmap filters need the terrain's TGA images; without them the engine treats them as fully within. */
+/**
+ * Bitmap filter: samples a greyscale image stretched over the layer's boundary extent
+ * (bilinear, rows bottom-up in world Z) and scales the feathered range test by the value.
+ * Without the image the engine treats the filter as fully within, and so do we.
+ */
 export class FilterBitmap extends Filter {
   familyId = 0;
   low = 0;
   high = 0;
   gain = 0;
+  /** The owning layer's extent, set by Layer.affect before sampling (FilterBitmap::setExtent). */
+  extent: Rect = { x0: 0, y0: 0, x1: 0, y1: 0 };
 
   constructor() {
     super('FBIT');
   }
 
-  isWithin(): number {
-    return 1;
+  isWithin(wx: number, wz: number, _x: number, _z: number, d: ChunkData): number {
+    const image = d.bitmapGroup.image(this.familyId);
+    if (!image) return 1;
+    const W = image.width;
+    const H = image.height;
+    const ex = this.extent.x1 - this.extent.x0;
+    const ez = this.extent.y1 - this.extent.y0;
+    const sx = Math.min(((wx - this.extent.x0) * W) / ex, W - 1);
+    const sz = Math.min(((wz - this.extent.y0) * H) / ez, H - 1);
+    const x0 = Math.max(0, Math.trunc(sx));
+    const y0 = Math.max(0, Math.trunc(sz));
+    const x1 = Math.min(x0 + 1, W - 1);
+    const y1 = Math.min(y0 + 1, H - 1);
+    const data = image.data;
+    const v00 = data[(H - 1 - y0) * W + x0] / 255;
+    const v10 = data[(H - 1 - y0) * W + x1] / 255;
+    const v01 = data[(H - 1 - y1) * W + x0] / 255;
+    const v11 = data[(H - 1 - y1) * W + x1] / 255;
+    const dx1 = sx - Math.trunc(sx);
+    const dx2 = 1 - dx1;
+    const dy1 = sz - Math.trunc(sz);
+    const dy2 = 1 - dy1;
+    let h = v00 * (dx2 * dy2) + v10 * (dx1 * dy2) + v01 * (dx2 * dy1) + v11 * (dx1 * dy1);
+    h += this.gain;
+    if (h < 0) h = 0;
+    else if (h >= 1) h = 0.99999;
+    return featheredInterpolant(this.low, h, this.high, this.featherDistance) * h;
   }
 
   load(form: IffForm): void {
@@ -1126,7 +1206,8 @@ function applyOperation(op: number, old: number, value: number, amount: number):
     case Operation.multiply:
       return lerp(old, old * value, amount);
     default:
-      return lerp(old, value, amount);
+      // amount * new + (1 - amount) * old, kept in this form so amount 1 lands exactly on the value
+      return amount * value + (1 - amount) * old;
   }
 }
 
@@ -1808,6 +1889,7 @@ export class Layer extends LayerItem {
             if (this.hasActiveFilters) {
               for (const f of this.filters) {
                 if (!f.active) continue;
+                if (f instanceof FilterBitmap) f.extent = this.extent;
                 const amount = f.isWithin(worldX, worldZ, x, z, d);
                 fuzzyTest = fuzzyAnd(fuzzyTest, feather(f.featherFunction, amount));
                 if (fuzzyTest === 0) break;
@@ -2005,6 +2087,7 @@ export function loadLayerItem(form: IffForm, group: FractalGroup): LayerItem | n
 export class TerrainGenerator {
   readonly shaderGroup = new ShaderGroup();
   readonly fractalGroup = new FractalGroup();
+  readonly bitmapGroup = new BitmapGroup();
   layers: Layer[] = [];
   /** Names of layer item tags that were not understood, for diagnostics. */
   readonly unknownTags = new Map<string, number>();
@@ -2014,7 +2097,10 @@ export class TerrainGenerator {
     const v = formChild(tgen, '0000');
     if (!v) throw new Error('TGEN: unsupported version');
     this.shaderGroup.load(formChild(v, 'SGRP'));
-    this.fractalGroup.load(formChild(v, 'MGRP'));
+    // Both the fractal group and the bitmap group are tagged MGRP; the bitmap group comes second.
+    const mgrps = v.children.filter((c): c is IffForm => isForm(c) && c.type === 'MGRP');
+    this.fractalGroup.load(mgrps[0]);
+    this.bitmapGroup.load(mgrps[1]);
     const lyrs = formChild(v, 'LYRS');
     if (lyrs) {
       for (const c of lyrs.children) {
@@ -2070,7 +2156,7 @@ export class TerrainGenerator {
       if (it instanceof FilterSlope) return `FSLP ${it.name}${on} ${num((it.minimumAngle * 180) / Math.PI)}..${num((it.maximumAngle * 180) / Math.PI)} deg feather ${it.featherFunction}/${num(it.featherDistance)}`;
       if (it instanceof FilterDirection) return `FDIR ${it.name}${on} ${num(it.minimumFeatherAngle)}..${num(it.maximumFeatherAngle)}`;
       if (it instanceof FilterShader) return `FSHD ${it.name}${on} family ${it.familyId}`;
-      if (it instanceof FilterBitmap) return `FBIT ${it.name}${on} family ${it.familyId} ${num(it.low)}..${num(it.high)} (no image: passes)`;
+      if (it instanceof FilterBitmap) return `FBIT ${it.name}${on} family ${it.familyId} ${num(it.low)}..${num(it.high)} gain ${num(it.gain)} image ${this.bitmapGroup.families.get(it.familyId)?.bitmapName ?? '?'}${this.bitmapGroup.image(it.familyId) ? '' : ' (missing: passes)'}`;
       if (it instanceof AffectorHeightConstant) return `AHCN ${it.name}${on} op ${it.operation} height ${num(it.height)}`;
       if (it instanceof AffectorHeightFractal) return `AHFR ${it.name}${on} op ${it.operation} family ${it.familyId} x${num(it.scaleY)}`;
       if (it instanceof AffectorHeightTerrace) return `AHTR ${it.name}${on} height ${num(it.height)} fraction ${num(it.fraction)}`;

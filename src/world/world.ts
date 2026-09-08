@@ -259,7 +259,9 @@ export class World {
         if (token !== this.loadToken) return null;
         try {
           const t0 = performance.now();
-          this.terrain.attachSwg(SwgTerrain.create(trn, layers, layout.center.x, layout.center.z));
+          const swg = await SwgTerrain.create(trn, layers, layout.center.x, layout.center.z, (file) => pack.bytes(file));
+          if (token !== this.loadToken) return null;
+          this.terrain.attachSwg(swg);
           console.info(`terrain: ${this.terrain.swg!.template.name} with ${layers.length} building layers loaded in ${(performance.now() - t0).toFixed(0)} ms`);
         } catch (err) {
           console.warn('terrain: failed to load the planet terrain, keeping procedural ground', err);

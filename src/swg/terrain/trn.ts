@@ -2,7 +2,7 @@
 // reproduces the client's chunk layout: poles every half tile, chunks padded by two poles
 // on each side, and ground made of eight-triangle fans around each tile's centre pole.
 
-import { Layer, TerrainGenerator, createChunkData, type ChunkData } from './generator.ts';
+import { Layer, TerrainGenerator, createChunkData, parseHeightmapFile, type Bitmap, type ChunkData } from './generator.ts';
 import { ChunkReader, chunkChild, formChild, isForm, parseIff, parseIffRoots, type IffForm } from './iff.ts';
 
 export interface TerrainTemplate {
@@ -53,6 +53,25 @@ export function parseTerrainTemplate(bytes: Uint8Array): TerrainTemplate {
   return t as TerrainTemplate;
 }
 
+/** Pack-relative file name the converter uses for a terrain bitmap ("terrain/<name>.hmap"). */
+export function bitmapFileFor(bitmapName: string): string {
+  const base = bitmapName.replace(/\\/g, '/').split('/').pop() ?? bitmapName;
+  return `terrain/${base.replace(/\.[^.]*$/, '')}.hmap`;
+}
+
+/** Every bitmap family of a template with the pack file it expects. */
+export function bitmapFiles(template: TerrainTemplate): { familyId: number; name: string; file: string }[] {
+  return [...template.generator.bitmapGroup.families].map(([familyId, f]) => ({ familyId, name: f.bitmapName, file: bitmapFileFor(f.bitmapName) }));
+}
+
+/** Attach a converted bitmap ("HMAP" bytes) to its family. Returns false when the bytes are not a heightmap. */
+export function attachBitmap(template: TerrainTemplate, familyId: number, bytes: Uint8Array): boolean {
+  const image: Bitmap | null = parseHeightmapFile(bytes);
+  if (!image) return false;
+  template.generator.bitmapGroup.setImage(familyId, image);
+  return true;
+}
+
 /** A building's terrain-modification layer file (.lay): group forms followed by one LAYR root. */
 export function parseLayerFile(bytes: Uint8Array, generator: TerrainGenerator): Layer | null {
   const roots = parseIffRoots(bytes);
@@ -97,7 +116,7 @@ export class TerrainSampler {
 
   /** Run the generator over an arbitrary pole grid (used for chunks and coarse far tiles). */
   generate(startX: number, startZ: number, n: number, step: number): HeightGrid {
-    const d: ChunkData = createChunkData(startX, startZ, n, step, this.generator.fractalGroup, this.generator.shaderGroup);
+    const d: ChunkData = createChunkData(startX, startZ, n, step, this.generator.fractalGroup, this.generator.shaderGroup, this.generator.bitmapGroup);
     this.generator.generateChunk(d);
     return { startX, startZ, n, step, heights: d.heightMap, shaders: d.shaderMap, excluded: d.excludeMap };
   }

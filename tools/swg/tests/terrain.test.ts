@@ -1,5 +1,5 @@
 import { form, chunk, W, encode, encodeRoots, ihdr, mfrc } from './iffWriter.ts';
-import { parseTerrainTemplate, parseLayerFile, TerrainSampler, sampleFans, ORIGIN_OFFSET } from '../../../src/swg/terrain/trn.ts';
+import { parseTerrainTemplate, parseLayerFile, TerrainSampler, sampleFans, ORIGIN_OFFSET, attachBitmap } from '../../../src/swg/terrain/trn.ts';
 import { MultiFractal } from '../../../src/swg/terrain/fractal.ts';
 
 // Synthetic end-to-end test of the terrain port: builds a small .trn and .lay in memory,
@@ -141,7 +141,33 @@ check('outside circle', near(s.heightAt(150, 100), expectAt(150, 100), 1e-3));
 }
 // timing
 {
-  const t0 = performance.now(); let c = 0;
+  // --- bitmap filter: a layer subtracting 2 m scaled by a greyscale image over its rectangle
+{
+  const { BitmapGroup } = await import('../../../src/swg/terrain/generator.ts');
+  const bgrp = form('MGRP', form('0000', form('MFAM', chunk('DATA', new W().i32(1).str('mos').str('terrain/mos.tga').bytes()))));
+  const brec2 = form('BREC', form('0004', ihdr('r'), chunk('DATA', new W().f32(1000).f32(1000).f32(1256).f32(1256).i32(0).f32(0).i32(0).i32(0).f32(0).f32(2).str('').i32(0).bytes())));
+  const fbit = form('FBIT', form('0001', ihdr('b'), form('DATA', chunk('PARM', new W().i32(1).i32(0).f32(0).f32(0).f32(1).f32(0).bytes()))));
+  const adta2 = chunk('ADTA', new W().i32(0).i32(0).i32(1).str('').bytes());
+  const layer = form('LAYR', form('0003', ihdr('hm'), adta2, brec2, fbit, ahcn(2, 2)));
+  const trn2 = encode(form('PTAT', form('0015', chunk('DATA', header), form('TGEN', form('0000', form('SGRP', form('0006')), form('FGRP', form('0008')), form('RGRP', form('0003')), form('EGRP', form('0002')), form('MGRP', form('0000')), bgrp, form('LYRS', layer))), form('BAKE'))));
+  const t2 = parseTerrainTemplate(trn2);
+  check('bitmap group parsed', t2.generator.bitmapGroup.families.get(1)?.bitmapName === 'terrain/mos.tga');
+  // 4x4 image, rows top-down: bottom row (world z near 1000) is 255, top row is 0
+  const img = new Uint8Array(16);
+  for (let y = 0; y < 4; y++) for (let x = 0; x < 4; x++) img[y * 4 + x] = y === 3 ? 255 : y === 2 ? 128 : 0;
+  const hm = new Uint8Array(12 + 16);
+  hm.set([72, 77, 65, 80, 4, 0, 0, 0, 4, 0, 0, 0]);
+  hm.set(img, 12);
+  check('bitmap attached', attachBitmap(t2, 1, hm));
+  const s2 = new TerrainSampler(t2);
+  const hLow = s2.heightAt(1002, 1002); // bottom-left pixel = 255 -> subtract ~2
+  const hHigh = s2.heightAt(1002, 1250); // top row = 0 -> no change
+  check('bitmap filter scales the affector', hLow < -1.9 && hLow > -2.01 && Math.abs(hHigh) < 1e-6, `${hLow} ${hHigh}`);
+  const without = new TerrainSampler(parseTerrainTemplate(trn2));
+  check('missing bitmap passes fully', Math.abs(without.heightAt(1002, 1250) + 2) < 1e-6, String(without.heightAt(1002, 1250)));
+}
+
+const t0 = performance.now(); let c = 0;
   for (let cz = -5; cz < 5; cz++) for (let cx = -5; cx < 5; cx++) { s.generate(cx * 32 - 4, cz * 32 - 4, s.numberOfPoles, s.poleStep); c++; }
   console.log(`generated ${c} chunks in ${(performance.now() - t0).toFixed(1)} ms (${((performance.now() - t0) / c).toFixed(2)} ms/chunk, ${s.numberOfPoles}x${s.numberOfPoles} poles)`);
 }

@@ -3,7 +3,7 @@
 // ahead of time by a worker so streaming never stalls on generation.
 
 import { Layer } from '../swg/terrain/generator';
-import { ORIGIN_OFFSET, parseLayerFile, parseTerrainTemplate, TerrainSampler, UPPER_PAD, type TerrainTemplate } from '../swg/terrain/trn';
+import { attachBitmap, bitmapFiles, ORIGIN_OFFSET, parseLayerFile, parseTerrainTemplate, TerrainSampler, UPPER_PAD, type TerrainTemplate } from '../swg/terrain/trn';
 
 export interface BuildingLayerSource {
   bytes: ArrayBuffer;
@@ -36,8 +36,9 @@ export class SwgTerrain {
   /** How many chunk grids were generated synchronously on the main thread (diagnostics). */
   syncGenerations = 0;
 
-  private constructor(trn: ArrayBuffer, layers: BuildingLayerSource[], centerX: number, centerZ: number) {
+  private constructor(trn: ArrayBuffer, layers: BuildingLayerSource[], bitmaps: { familyId: number; bytes: ArrayBuffer }[], centerX: number, centerZ: number) {
     this.template = parseTerrainTemplate(new Uint8Array(trn));
+    for (const b of bitmaps) attachBitmap(this.template, b.familyId, new Uint8Array(b.bytes));
     this.sampler = new TerrainSampler(this.template);
     this.centerX = centerX;
     this.centerZ = centerZ;
@@ -50,7 +51,12 @@ export class SwgTerrain {
         this.worker = new Worker(new URL('../swg/terrain/worker.ts', import.meta.url), { type: 'module' });
         this.worker.onmessage = (e: MessageEvent) => this.onMessage(e.data);
         this.worker.onerror = (e) => console.warn('terrain worker error', e.message);
-        this.worker.postMessage({ type: 'init', trn: trn.slice(0), layers: layers.map((l) => ({ bytes: l.bytes.slice(0), x: l.x, z: l.z, yaw: l.yaw })) });
+        this.worker.postMessage({
+          type: 'init',
+          trn: trn.slice(0),
+          layers: layers.map((l) => ({ bytes: l.bytes.slice(0), x: l.x, z: l.z, yaw: l.yaw })),
+          bitmaps: bitmaps.map((b) => ({ familyId: b.familyId, bytes: b.bytes.slice(0) })),
+        });
       } catch (err) {
         console.warn('terrain worker unavailable, generating on the main thread', err);
         this.worker = null;
@@ -58,8 +64,19 @@ export class SwgTerrain {
     }
   }
 
-  static create(trn: ArrayBuffer, layers: BuildingLayerSource[], centerX: number, centerZ: number): SwgTerrain {
-    return new SwgTerrain(trn, layers, centerX, centerZ);
+  /**
+   * Build the terrain: parses the template once to learn which bitmap files it needs, fetches
+   * them through `fetchBytes` (pack-relative paths), then starts the worker.
+   */
+  static async create(trn: ArrayBuffer, layers: BuildingLayerSource[], centerX: number, centerZ: number, fetchBytes: (file: string) => Promise<ArrayBuffer | null>): Promise<SwgTerrain> {
+    const probe = parseTerrainTemplate(new Uint8Array(trn));
+    const bitmaps: { familyId: number; bytes: ArrayBuffer }[] = [];
+    for (const b of bitmapFiles(probe)) {
+      const bytes = await fetchBytes(b.file);
+      if (bytes) bitmaps.push({ familyId: b.familyId, bytes });
+      else console.warn(`terrain: bitmap ${b.file} (${b.name}) missing; its filter passes everywhere`);
+    }
+    return new SwgTerrain(trn, layers, bitmaps, centerX, centerZ);
   }
 
   get waterLevel(): number {

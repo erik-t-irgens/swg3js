@@ -36,6 +36,7 @@ import { resolveTemplateMesh, resolveTemplateString } from './objtemplate.mjs';
 import { encodePng } from './png.mjs';
 import { shaderTextures } from './sht.mjs';
 import { effectAlpha, alphaModeFor } from './eff.mjs';
+import { decodeTga, encodeHeightmap } from './tga.mjs';
 import { readTemplate, stringParam } from './objtemplate.mjs';
 import { openTre, openVfs, readHeader } from './tre.mjs';
 
@@ -178,11 +179,34 @@ function convertOne(vfs, appearancePath, outFile) {
   return { meshPath, mesh, flipX, tris, shaders, textured: textures.size, warnings: mesh.warnings, partCount };
 }
 
-/** Copy terrain/<planet>.trn into the pack as terrain.trn. Returns the file name or null. */
-function copyTerrain(vfs, planet, outDir) {
+/**
+ * Copy terrain/<planet>.trn into the pack as terrain.trn, plus every bitmap its bitmap
+ * filters reference (TGA decoded to "HMAP" greyscale files under terrain/). Returns the
+ * terrain file name or null. Needs Node 22.18+ for the bitmap step (runs the game's TypeScript).
+ */
+async function copyTerrain(vfs, planet, outDir) {
   const path = `terrain/${planet}.trn`;
   if (!vfs.has(path)) return null;
-  writeFileSync(join(outDir, 'terrain.trn'), vfs.read(path));
+  const bytes = vfs.read(path);
+  writeFileSync(join(outDir, 'terrain.trn'), bytes);
+  try {
+    const { parseTerrainTemplate, bitmapFiles } = await import('../../src/swg/terrain/trn.ts');
+    const template = parseTerrainTemplate(new Uint8Array(bytes));
+    for (const b of bitmapFiles(template)) {
+      const src = b.name.replace(/\\/g, '/').replace(/^\//, '');
+      if (!vfs.has(src)) {
+        console.warn(`terrain bitmap missing: ${src}`);
+        continue;
+      }
+      const img = decodeTga(vfs.read(src));
+      const target = join(outDir, b.file);
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, encodeHeightmap(img));
+      console.error(`  terrain bitmap ${src}: ${img.width}x${img.height} ${img.greyscale ? 'greyscale' : `type ${img.imageType}/${img.pixelDepth} bit`} -> ${b.file}`);
+    }
+  } catch (err) {
+    console.warn(`terrain bitmaps not converted: ${err.message}`);
+  }
   return 'terrain.trn';
 }
 
@@ -212,7 +236,7 @@ function yawOf(q) {
 
 /** Compare generated terrain heights with the snapshot's object heights. Needs Node 22.18+ (runs the game's TypeScript directly). */
 async function terrainCheck(dir, limit, opts = {}) {
-  const { parseTerrainTemplate, parseLayerFile, TerrainSampler } = await import('../../src/swg/terrain/trn.ts');
+  const { parseTerrainTemplate, parseLayerFile, TerrainSampler, bitmapFiles, attachBitmap } = await import('../../src/swg/terrain/trn.ts');
   const trnPath = join(dir, 'terrain.trn');
   if (!existsSync(trnPath)) throw new Error(`${trnPath} missing; run the snapshot (or terrain) command first`);
   const t0 = Date.now();
@@ -221,6 +245,11 @@ async function terrainCheck(dir, limit, opts = {}) {
   console.log(`terrain ${template.name}: map ${template.mapWidthInMeters} m, chunk ${template.chunkWidthInMeters} m, ${template.numberOfTilesPerChunk} tiles/chunk (${template.tileWidthInMeters} m tiles), version ${template.version}, water ${template.useGlobalWaterTable ? template.globalWaterTableHeight : 'none'}, loaded in ${Date.now() - t0} ms`);
   console.log(`  layer items: ${Object.entries(gen.summary()).map(([k, v]) => `${k} ${v}`).join(', ')}`);
   console.log(`  fractal families: ${gen.fractalGroup.families.size}, shader families: ${gen.shaderGroup.families.size}`);
+  for (const b of bitmapFiles(template)) {
+    const file = join(dir, b.file);
+    const ok = existsSync(file) && attachBitmap(template, b.familyId, new Uint8Array(readFileSync(file)));
+    console.log(`  bitmap family ${b.familyId} ${b.name}: ${ok ? `loaded from ${b.file}` : `${b.file} missing (re-run snapshot or terrain to convert it); filter passes everywhere`}`);
+  }
   if (opts.layers) {
     console.log('  fractals:');
     for (const [id, f] of gen.fractalGroup.families) {
@@ -439,7 +468,7 @@ switch (cmd) {
       }
       objects.push(obj);
     }
-    const terrainFile = copyTerrain(vfs, planet, outDir);
+    const terrainFile = await copyTerrain(vfs, planet, outDir);
     const layout = { planet, center: { x: cx, z: cz }, radius, terrain: terrainFile, objects, skipped };
     writeFileSync(join(outDir, 'layout.json'), JSON.stringify(layout));
     const manifestPath = join(outDir, 'manifest.json');
@@ -459,7 +488,7 @@ switch (cmd) {
     if (!pos[3]) usage();
     const vfs = mount(pos[1]);
     mkdirSync(pos[3], { recursive: true });
-    const file = copyTerrain(vfs, pos[2], pos[3]);
+    const file = await copyTerrain(vfs, pos[2], pos[3]);
     console.log(file ? `terrain -> ${join(pos[3], file)}` : `no terrain/${pos[2]}.trn in archives`);
     break;
   }

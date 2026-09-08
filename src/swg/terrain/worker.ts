@@ -2,12 +2,13 @@
 // Messages in: { type: 'init', trn, layers: [{ bytes, x, z, yaw }] } | { type: 'generate', id, startX, startZ, n, step }
 // Messages out: { type: 'ready', info } | { type: 'grid', id, heights, shaders } | { type: 'error', message }
 
-import { parseLayerFile, parseTerrainTemplate, TerrainSampler } from './trn.ts';
+import { attachBitmap, parseLayerFile, parseTerrainTemplate, TerrainSampler } from './trn.ts';
 
 interface InitMessage {
   type: 'init';
   trn: ArrayBuffer;
   layers: { bytes: ArrayBuffer; x: number; z: number; yaw: number }[];
+  bitmaps: { familyId: number; bytes: ArrayBuffer }[];
 }
 
 interface GenerateMessage {
@@ -28,6 +29,7 @@ ctx.onmessage = (e: MessageEvent<InitMessage | GenerateMessage>) => {
   try {
     if (msg.type === 'init') {
       const template = parseTerrainTemplate(new Uint8Array(msg.trn));
+      for (const b of msg.bitmaps ?? []) attachBitmap(template, b.familyId, new Uint8Array(b.bytes));
       sampler = new TerrainSampler(template);
       let applied = 0;
       for (const l of msg.layers) {
