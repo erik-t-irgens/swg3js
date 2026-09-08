@@ -7,7 +7,7 @@ function align4(n) {
   return (n + 3) & ~3;
 }
 
-export function buildGlb(meshes, { flipX = true, textures = new Map() } = {}) {
+export function buildGlb(meshes, { flipX = true, textures = new Map(), skin = null, animations = [] } = {}) {
   const buffers = [];
   const bufferViews = [];
   const accessors = [];
@@ -95,6 +95,8 @@ export function buildGlb(meshes, { flipX = true, textures = new Map() } = {}) {
         if (normals) attributes.NORMAL = pushAccessor(normals, 'VEC3', 5126, 34962);
         if (p.uvs) attributes.TEXCOORD_0 = pushAccessor(p.uvs, 'VEC2', 5126, 34962);
         if (p.colors) attributes.COLOR_0 = pushAccessor(p.colors, 'VEC4', 5121, 34962, { normalized: true });
+        if (p.joints) attributes.JOINTS_0 = pushAccessor(p.joints, 'VEC4', 5123, 34962);
+        if (p.weights) attributes.WEIGHTS_0 = pushAccessor(p.weights, 'VEC4', 5126, 34962);
         const idx = indices instanceof Uint16Array ? indices : Uint32Array.from(indices);
         primitives.push({
           attributes,
@@ -117,6 +119,41 @@ export function buildGlb(meshes, { flipX = true, textures = new Map() } = {}) {
     }
   }
 
+  // Skinned models: joint nodes (already in GLTF space), one skin shared by every mesh node,
+  // and baked animations as per-frame rotation and translation samplers.
+  let skins;
+  let gltfAnimations;
+  if (skin) {
+    const jointNodeIndex = [];
+    const meshNodeCount = nodes.length;
+    skin.joints.forEach((j) => {
+      nodes.push({ name: j.name, translation: j.translation, rotation: [j.rotation[1], j.rotation[2], j.rotation[3], j.rotation[0]] });
+      jointNodeIndex.push(nodes.length - 1);
+    });
+    skin.joints.forEach((j, i) => {
+      if (j.parent >= 0) (nodes[jointNodeIndex[j.parent]].children ??= []).push(jointNodeIndex[i]);
+      else rootNodes.push(jointNodeIndex[i]);
+    });
+    const ibm = new Float32Array(skin.inverseBind.length * 16);
+    skin.inverseBind.forEach((m, i) => ibm.set(m, i * 16));
+    const skeletonRoot = skin.joints.findIndex((j) => j.parent < 0);
+    skins = [{ joints: jointNodeIndex, inverseBindMatrices: pushAccessor(ibm, 'MAT4', 5126), skeleton: jointNodeIndex[Math.max(0, skeletonRoot)] }];
+    for (let i = 0; i < meshNodeCount; i++) if (nodes[i].mesh !== undefined) nodes[i].skin = 0;
+    gltfAnimations = [];
+    for (const clip of animations) {
+      const input = pushAccessor(clip.times, 'SCALAR', 5126, undefined, { bounds: true });
+      const samplers = [];
+      const channels = [];
+      clip.tracks.forEach((t, i) => {
+        samplers.push({ input, output: pushAccessor(t.rotations, 'VEC4', 5126), interpolation: 'LINEAR' });
+        channels.push({ sampler: samplers.length - 1, target: { node: jointNodeIndex[i], path: 'rotation' } });
+        samplers.push({ input, output: pushAccessor(t.translations, 'VEC3', 5126), interpolation: 'LINEAR' });
+        channels.push({ sampler: samplers.length - 1, target: { node: jointNodeIndex[i], path: 'translation' } });
+      });
+      gltfAnimations.push({ name: clip.name, samplers, channels });
+    }
+  }
+
   const json = {
     asset: { version: '2.0', generator: 'swg3js converter' },
     scene: 0,
@@ -128,6 +165,8 @@ export function buildGlb(meshes, { flipX = true, textures = new Map() } = {}) {
     bufferViews,
     buffers: [{ byteLength }],
   };
+  if (skins) json.skins = skins;
+  if (gltfAnimations && gltfAnimations.length) json.animations = gltfAnimations;
   if (images.length) {
     json.images = images;
     json.textures = gltfTextures;

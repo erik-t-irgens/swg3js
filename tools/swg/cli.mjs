@@ -14,6 +14,8 @@
 //   node tools/swg/cli.mjs pack <swg-dir> <spec.json> <out-dir>    build a game asset pack from a spec (see packs/)
 //   node tools/swg/cli.mjs planets <swg-dir>                        list the world snapshots in the archives and where each would centre
 //   node tools/swg/cli.mjs pois <swg-dir> <planet>|all <out-dir>    (re)write just pois.json for packs converted already
+//   node tools/swg/cli.mjs sat <swg-dir> <x.sat | object/mobile/shared_x.iff> <out.glb> [--anim=all|idle,walk]
+//                                                                  convert a skeletal appearance (creature, character) with skeleton and animations
 //   node tools/swg/cli.mjs flora <swg-dir> <planet>|all <out-dir>   (re)convert just the flora models for packs converted already
 //   node tools/swg/cli.mjs snapshot <swg-dir> <planet>|all <out-dir> [--center=x,z|auto] --radius=r|all [--max=n]
 //                                                                  convert the world snapshot's objects around a point into a layout,
@@ -41,6 +43,7 @@ import { parseMesh } from './msh.mjs';
 import { buildPack, familyOf } from './pack.mjs';
 import { parseSnapshot, flattenWithWorldTransforms } from './ws.mjs';
 import { loadBuildouts, mergeBuildouts } from './buildout.mjs';
+import { parseAnimation, parseLat, parseLmg, parseMgn, parseSat, parseSkeleton, readIff, skinData, skinnedPrimitives } from './skeletal.mjs';
 import { resolveTemplateMesh, resolveTemplateString } from './objtemplate.mjs';
 import { encodePng } from './png.mjs';
 import { shaderTextures } from './sht.mjs';
@@ -289,6 +292,91 @@ function convertFlora(vfs, template, outDir, manifest) {
   }
   manifest.categories.flora = [...defs.values()];
   return { models: defs.size, missing, particles, families: families.length };
+}
+
+/**
+ * Convert a skeletal appearance (.sat, or an object template that names one) into a skinned
+ * GLB with its skeleton and the animations its logical animation table lists.
+ * `animations` filters logical names by substring ('all' keeps every one).
+ */
+function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80 } = {}) {
+  let satPath = path.replace(/\\/g, '/');
+  if (/\.iff$/i.test(satPath)) {
+    const cache = new Map();
+    const a = resolveTemplateString(vfs, satPath, ['appearanceFilename'], cache);
+    if (!a) throw new Error(`${satPath}: no appearanceFilename in its template chain`);
+    satPath = a.replace(/\\/g, '/').replace(/^\//, '');
+  }
+  const sat = parseSat(readIff(vfs, satPath));
+  if (!sat.skeletons.length) throw new Error(`${satPath}: no skeleton`);
+  const skeletonFile = sat.skeletons[0].file;
+  const skeleton = parseSkeleton(readIff(vfs, skeletonFile));
+  const info = { sat: satPath, skeleton: skeletonFile, joints: skeleton.joints.length, meshes: [], animations: [], missing: [], unknownTransforms: 0, skipped: [] };
+  const meshes = [];
+  const textures = new Map();
+  for (const name of sat.meshes) {
+    let file = name;
+    if (/\.lmg$/i.test(file)) {
+      if (!vfs.has(file)) {
+        info.missing.push(file);
+        continue;
+      }
+      const lods = parseLmg(readIff(vfs, file));
+      file = lods.find((l) => vfs.has(l)) ?? lods[0];
+    }
+    if (!file || !vfs.has(file)) {
+      info.missing.push(file ?? name);
+      continue;
+    }
+    let mgn;
+    try {
+      mgn = parseMgn(readIff(vfs, file));
+    } catch (err) {
+      info.skipped.push(`${file}: ${err.message}`);
+      continue;
+    }
+    const { groups, unknownTransforms } = skinnedPrimitives(mgn, skeleton);
+    info.unknownTransforms += unknownTransforms;
+    for (const g of groups) {
+      const t = textureFor(vfs, g.shader);
+      if (t) textures.set(g.shader, t);
+    }
+    meshes.push({ name: basename(file).replace(/\.[^.]+$/, ''), groups });
+    info.meshes.push({ file, shaders: groups.length, triangles: groups.reduce((a, g) => a + g.primitives[0].indices.length / 3, 0) });
+  }
+  const clips = [];
+  const latFile = sat.animationTables.get(skeletonFile.toLowerCase()) ?? [...sat.animationTables.values()][0];
+  if (latFile && vfs.has(latFile)) {
+    const lat = parseLat(readIff(vfs, latFile));
+    info.animationTable = latFile;
+    const wanted = animations === 'all' ? null : animations.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+    for (const e of lat.entries) {
+      if (wanted && !wanted.some((w) => e.name.toLowerCase().includes(w))) continue;
+      if (clips.length >= maxAnimations) break;
+      try {
+        let animation;
+        if (e.kind === 'inline') animation = parseAnimation(e.form);
+        else if (e.kind === 'file') {
+          if (!vfs.has(e.file)) {
+            info.missing.push(e.file);
+            continue;
+          }
+          animation = parseAnimation(readIff(vfs, e.file));
+        } else {
+          info.skipped.push(`${e.name}: ${e.kind} animation templates are not converted`);
+          continue;
+        }
+        clips.push({ name: e.name, animation });
+        info.animations.push(e.name);
+      } catch (err) {
+        info.skipped.push(`${e.name}: ${err.message}`);
+      }
+    }
+  } else if (latFile) info.missing.push(latFile);
+  const skin = skinData(skeleton, clips, { flipX: true });
+  mkdirSync(dirname(outFile), { recursive: true });
+  writeFileSync(outFile, buildGlb(meshes, { flipX: true, textures, skin, animations: skin.clips }));
+  return info;
 }
 
 /** Copy a building template's terrain modification layer (.lay) into <out>/terrain/. Returns the pack-relative file or null. */
@@ -729,6 +817,22 @@ switch (cmd) {
       writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
       console.log(`flora: ${flora.models} models for ${flora.families} families${flora.missing ? `, ${flora.missing} appearances missing` : ''}${flora.particles ? `, ${flora.particles} particle effects skipped` : ''}`);
     }
+    printEffectSummary();
+    break;
+  }
+
+  case 'sat': {
+    // <swg-dir> <appearance/x.sat | object/mobile/shared_x.iff> <out.glb> [--anim=all|idle,walk,run]
+    if (!pos[3]) usage();
+    const vfs = mount(pos[1]);
+    const info = convertSat(vfs, pos[2], pos[3], { animations: options.anim ?? 'all' });
+    console.log(`${info.sat}: skeleton ${info.skeleton} (${info.joints} joints)`);
+    for (const m of info.meshes) console.log(`  mesh ${m.file}: ${m.triangles} tris, ${m.shaders} shaders`);
+    console.log(`  animations (${info.animations.length})${info.animationTable ? ` from ${info.animationTable}` : ''}: ${info.animations.join(', ') || 'none'}`);
+    if (info.unknownTransforms) console.log(`  ${info.unknownTransforms} vertex weights named joints the skeleton lacks`);
+    for (const m of info.missing) console.log(`  missing: ${m}`);
+    for (const m of info.skipped) console.log(`  skipped: ${m}`);
+    console.log(`-> ${pos[3]}`);
     printEffectSummary();
     break;
   }

@@ -11,6 +11,7 @@ import { PLANETS, planetById, type PlanetDef } from './data/planets';
 import { Player } from './player/player';
 import { CharacterRig } from './player/rig';
 import { GalaxyMap, type Poi } from './ui/galaxyMap';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { Hud } from './ui/hud';
 import type { DriveInput } from './vehicles/speeder';
 import { World } from './world/world';
@@ -43,6 +44,8 @@ class App {
   private traveling = false;
   private dying = false;
   private spawn = new THREE.Vector3();
+  /** Animation mixers of models shown through the debug hook. */
+  private readonly shown: THREE.AnimationMixer[] = [];
   private readonly portals: PortalRenderer;
 
   constructor(private readonly physics: Physics) {
@@ -84,6 +87,27 @@ class App {
       cell: () => (this.world.cellState ? { model: this.world.cellState.building.model.def.id, cell: this.world.cellState.cell } : null),
       passes: () => this.portals.passes,
       flora: () => this.world.floraStatus,
+      // Show a converted model (path under assets-private/) in front of the player, playing a clip.
+      show: async (file: string, clip?: string) => {
+        const gltf = await new GLTFLoader().loadAsync(`${import.meta.env.BASE_URL}assets-private/${file}`);
+        const p = this.player.pos;
+        gltf.scene.position.set(p.x + 3, this.world.terrain.heightAt(p.x + 3, p.z), p.z);
+        gltf.scene.traverse((o) => {
+          o.layers.enable(31);
+          const m = o as THREE.Mesh;
+          if (m.isMesh) {
+            m.castShadow = true;
+            m.frustumCulled = false;
+          }
+        });
+        this.scene.add(gltf.scene);
+        const mixer = new THREE.AnimationMixer(gltf.scene);
+        const names = gltf.animations.map((a) => a.name);
+        const wanted = clip ? gltf.animations.find((a) => a.name === clip) ?? gltf.animations.find((a) => a.name.includes(clip)) : gltf.animations[0];
+        if (wanted) mixer.clipAction(wanted).play();
+        this.shown.push(mixer);
+        return { clips: names, playing: wanted?.name ?? null, joints: gltf.scene.getObjectByProperty('type', 'Bone') ? 'skinned' : 'static' };
+      },
       scene: () => this.scene,
       find: (pattern: string) => {
         const out: unknown[] = [];
@@ -376,6 +400,7 @@ class App {
       if (player.mounted) player.syncMount();
 
       const fast = simulate && input.isDown('KeyT');
+      for (const m of this.shown) m.update(dt);
       this.world.update(dt, player.pos, this.cam.camera.position, fast, (dmg) => {
         if (!simulate || player.mounted || player.noclip) return;
         player.takeDamage(dmg);

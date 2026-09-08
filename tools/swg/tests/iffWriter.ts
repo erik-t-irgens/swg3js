@@ -8,6 +8,9 @@ export class W {
   u32(v: number) { const b = new DataView(new ArrayBuffer(4)); b.setUint32(0, v >>> 0, true); this.parts.push(...new Uint8Array(b.buffer)); return this; }
   f32(v: number) { const b = new DataView(new ArrayBuffer(4)); b.setFloat32(0, v, true); this.parts.push(...new Uint8Array(b.buffer)); return this; }
   u8(v: number) { this.parts.push(v & 255); return this; }
+  i8(v: number) { this.parts.push(v & 255); return this; }
+  i16(v: number) { const b = new DataView(new ArrayBuffer(2)); b.setInt16(0, v, true); this.parts.push(...new Uint8Array(b.buffer)); return this; }
+  u16(v: number) { const b = new DataView(new ArrayBuffer(2)); b.setUint16(0, v, true); this.parts.push(...new Uint8Array(b.buffer)); return this; }
   str(s: string) { for (const ch of s) this.parts.push(ch.charCodeAt(0)); this.parts.push(0); return this; }
   bytes() { return new Uint8Array(this.parts); }
 }
