@@ -9,7 +9,8 @@ import { OUTPOSTS } from '../data/outposts';
 import { Group, groups, RAPIER as R } from '../core/physics';
 import { CHUNK_RES, CHUNK_SIZE, Terrain } from './terrain';
 import { SwgTerrain, type BuildingLayerSource } from './swgTerrain';
-import { LayoutStreamer, type Building } from './layoutStream';
+import { LayoutStreamer, type Building, type CellState } from './layoutStream';
+import { CSM } from 'three/examples/jsm/csm/CSM.js';
 import { Speeder } from '../vehicles/speeder';
 
 const VIEW_RADIUS = 6;
@@ -115,9 +116,14 @@ export class World {
   private readonly structures: THREE.Object3D[] = [];
   private structureColliders: RAPIER.Collider[] = [];
   private layoutStream: LayoutStreamer | null = null;
-  /** The building the player is currently inside, if any. */
-  insideBuilding: Building | null = null;
+  /** The building cell the player is in, or null outside. */
+  cellState: CellState | null = null;
+  private readonly prevPlayerPos = new THREE.Vector3(Number.NaN, 0, 0);
   private readonly hiddenGround: THREE.Object3D[] = [];
+  private groundHiddenFor: Building | null = null;
+  private csm: CSM | null = null;
+  private readonly csmMaterials = new WeakSet<THREE.Material>();
+  private csmScanAt = 0;
   private loadToken = 0;
 
   constructor(readonly scene: THREE.Scene, readonly physics: Physics) {
@@ -344,7 +350,9 @@ export class World {
     this.structures.length = 0;
     this.layoutStream?.dispose();
     this.layoutStream = null;
-    this.insideBuilding = null;
+    this.cellState = null;
+    this.groundHiddenFor = null;
+    this.prevPlayerPos.x = Number.NaN;
     this.hiddenGround.length = 0;
     for (const c of this.structureColliders) this.physics.removeCollider(c);
     this.structureColliders = [];
@@ -416,6 +424,52 @@ export class World {
     return best;
   }
 
+  /**
+   * Cascaded shadow maps: three cascades that follow the camera out to 700 m instead of one
+   * 280 m box around the player. Every lit material must be set up for it, so materials are
+   * scanned as objects appear.
+   */
+  attachCamera(camera: THREE.PerspectiveCamera, shadows: boolean): void {
+    if (!shadows || this.csm) return;
+    this.csm = new CSM({ camera, parent: this.scene, cascades: 3, maxFar: 700, mode: 'practical', shadowMapSize: 2048, lightDirection: new THREE.Vector3(0.3, -1, 0.2).normalize(), lightIntensity: 2, lightMargin: 150 });
+    this.csm.fade = true;
+    for (const l of this.csm.lights) {
+      l.shadow.bias = -0.0004;
+      l.shadow.normalBias = 0.4;
+    }
+    this.sun.castShadow = false;
+    this.sun.visible = false;
+    this.setupShadowMaterials();
+  }
+
+  private setupShadowMaterials(): void {
+    const csm = this.csm;
+    if (!csm) return;
+    this.scene.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      if (!mesh.isMesh || !mesh.material) return;
+      const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      for (const m of mats) {
+        if (this.csmMaterials.has(m) || (m as THREE.ShaderMaterial).isShaderMaterial) continue;
+        csm.setupMaterial(m);
+        this.csmMaterials.add(m);
+      }
+    });
+  }
+
+  /** Call once per frame after the camera has moved. */
+  updateShadows(now: number): void {
+    const csm = this.csm;
+    if (!csm) return;
+    const lightDir = this.day.sunDir.y > 0.02 ? this.day.sunDir : this.day.moonDir;
+    csm.lightDirection.copy(lightDir).negate().normalize();
+    csm.update();
+    if (now - this.csmScanAt > 500) {
+      this.csmScanAt = now;
+      this.setupShadowMaterials();
+    }
+  }
+
   /** Generate every chunk in view immediately (used when arriving on a planet). */
   warmUp(center: THREE.Vector3): void {
     this.exclusions = [{ x: center.x, z: center.z, r: 14 }];
@@ -432,49 +486,27 @@ export class World {
   }
 
   get inside(): boolean {
-    return this.insideBuilding !== null;
+    return this.cellState !== null;
   }
 
   /**
-   * SWG only draws and collides the cell you stand in: from inside a building its shell and
-   * the ground under it are gone, which is what makes basements and doorways work. Find the
-   * building whose interior cell boxes contain the player and hide its shell and nearby ground.
+   * Follow the player through building portals, as the original client does. Inside a cell the
+   * character ignores the shell and the ground; the ground is also hidden under the building
+   * whenever the player is below it (basements), so no sand fills the lower floors.
    */
   private updateInterior(playerPos: THREE.Vector3): void {
-    const local = new THREE.Vector3();
-    let found: Building | null = null;
-    const probe = local.copy(playerPos).setY(playerPos.y + 0.9);
     if (!this.layoutStream) return;
-    for (const b of this.layoutStream.buildings) {
-      if (Math.abs(b.x - playerPos.x) > b.radius + 4 || Math.abs(b.z - playerPos.z) > b.radius + 4) continue;
-      local.copy(probe).applyMatrix4(b.inverse);
-      for (const box of b.model.interiorBoxes) {
-        if (local.x >= box.min.x - 0.3 && local.x <= box.max.x + 0.3 && local.z >= box.min.z - 0.3 && local.z <= box.max.z + 0.3 && local.y >= box.min.y - 1.5 && local.y <= box.max.y + 0.5) {
-          found = b;
-          break;
-        }
-      }
-      if (found) break;
-    }
-    if (found === this.insideBuilding) return;
-    // Restore the previous building and its ground.
-    const zero = new THREE.Matrix4().makeScale(0, 0, 0);
-    const prev = this.insideBuilding;
-    if (prev) {
-      for (const e of prev.exterior) {
-        e.mesh.setMatrixAt(e.index, prev.matrix);
-        e.mesh.instanceMatrix.needsUpdate = true;
-      }
-    }
+    if (Number.isNaN(this.prevPlayerPos.x)) this.prevPlayerPos.copy(playerPos);
+    this.cellState = this.layoutStream.trackCell(this.cellState, this.prevPlayerPos, playerPos);
+    this.prevPlayerPos.copy(playerPos);
+    const b = this.cellState?.building ?? null;
+    const underground = b !== null && this.terrain.heightAt(playerPos.x, playerPos.z) > playerPos.y + 1.2;
+    const want = underground ? b : null;
+    if (want === this.groundHiddenFor) return;
     for (const o of this.hiddenGround) o.visible = true;
     this.hiddenGround.length = 0;
-    this.insideBuilding = found;
-    if (!found) return;
-    for (const e of found.exterior) {
-      e.mesh.setMatrixAt(e.index, zero);
-      e.mesh.instanceMatrix.needsUpdate = true;
-    }
-    this.hideGroundUnder(found);
+    this.groundHiddenFor = want;
+    if (want) this.hideGroundUnder(want);
   }
 
   private hideGroundUnder(b: Building): void {
@@ -545,6 +577,12 @@ export class World {
     this.sun.color.copy(night ? this.moonColor : this.sunColor);
     if (!night) this.sun.color.lerp(new THREE.Color(0xff9a4a), Math.min(1, this.day.sunset * 0.8));
     this.sun.intensity = night ? 0.4 : this.planet.light.sunIntensity * (0.1 + 0.9 * d);
+    if (this.csm) {
+      for (const l of this.csm.lights) {
+        l.color.copy(this.sun.color);
+        l.intensity = this.sun.intensity;
+      }
+    }
     this.hemi.intensity = this.planet.light.ambientIntensity * (0.2 + 0.8 * d);
     const fog = this.scene.fog as THREE.FogExp2;
     fog.color.copy(this.nightFog).lerp(this.dayFog, d);
@@ -670,7 +708,7 @@ export class World {
     group.add(propGroup);
     this.chunkRoot.add(group);
     this.chunks.set(key, { key, cx, cz, group, colliders, heights, physics: null });
-    const b = this.insideBuilding;
+    const b = this.groundHiddenFor;
     if (b) {
       const r = b.radius + 2;
       if (b.x + r > cx * CHUNK_SIZE && b.x - r < (cx + 1) * CHUNK_SIZE && b.z + r > cz * CHUNK_SIZE && b.z - r < (cz + 1) * CHUNK_SIZE) {

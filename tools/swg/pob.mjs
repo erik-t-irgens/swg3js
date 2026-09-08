@@ -1,18 +1,36 @@
-// Portal object (.pob) reader: enough to find each cell's appearance. Cell 0 is the exterior.
-//   FORM PRTO > FORM 000N > DATA + FORM PRTS + FORM CELS { FORM CELL > FORM 000N > DATA ... }
+// Portal object (.pob) reader: cells with their appearances, portal geometry and which
+// portal joins which cells. Cell 0 is the exterior (the world).
+//   FORM PRTO > FORM 000N > DATA { int32 portals, int32 cells } + FORM PRTS { PRTL { int32 n, n x vec3 } }
+//              + FORM CELS { FORM CELL > FORM 000N > DATA ... + FORM PRTL { 000N chunk } per portal [+ LGHT] }
 //   Cell DATA: int32 portals, bool8 canSeeParent, [0004+: cstring name], cstring appearance, [0002+: bool8 hasFloor, cstring floor]
+//   Cell portal chunk 000N: [0005: bool8 disabled], [0002+: bool8 passable], int32 geometry, bool8 clockwise, int32 targetCell,
+//                           [0003+: cstring doorStyle], [0004+: bool8 hasDoorHardpoint, 12 floats]
 import { childrenOf, find, isForm, readCString } from './iff.mjs';
 
 export function parsePob(root) {
   if (!isForm(root) || root.type !== 'PRTO') throw new Error(`Not a portal object (got ${root.type ?? root.tag})`);
+  const version = root.children.find(isForm);
+  const portals = [];
+  const prts = version ? childrenOf(version, 'PRTS')[0] : null;
+  if (prts) {
+    for (const p of childrenOf(prts, 'PRTL')) {
+      const n = p.data.readInt32LE(0);
+      const verts = [];
+      for (let i = 0; i < n && 4 + i * 12 + 12 <= p.data.length; i++) {
+        const o = 4 + i * 12;
+        verts.push([p.data.readFloatLE(o), p.data.readFloatLE(o + 4), p.data.readFloatLE(o + 8)]);
+      }
+      portals.push(verts);
+    }
+  }
   const cels = find(root, 'CELS');
   if (!cels) throw new Error('PRTO without CELS');
   const cells = [];
   for (const cell of childrenOf(cels, 'CELL')) {
-    const version = cell.children.find(isForm);
-    const data = version ? childrenOf(version, 'DATA')[0] : null;
-    if (!version || !data) continue;
-    const v = parseInt(version.type, 10);
+    const cv = cell.children.find(isForm);
+    const data = cv ? childrenOf(cv, 'DATA')[0] : null;
+    if (!cv || !data) continue;
+    const v = parseInt(cv.type, 10);
     let o = 5; // int32 portals + bool8 canSeeParent
     let name = '';
     if (v >= 4) {
@@ -27,7 +45,24 @@ export function parsePob(root) {
       const f = readCString(data.data, o + 1);
       floor = f.value;
     }
-    cells.push({ name, appearance: app.value.replace(/\\/g, '/'), floor: floor.replace(/\\/g, '/') });
+    const links = [];
+    for (const pf of childrenOf(cv, 'PRTL')) {
+      const chunk = pf.children.find((c) => !isForm(c));
+      if (!chunk) continue;
+      const pv = parseInt(chunk.tag, 10);
+      const d = chunk.data;
+      let q = 0;
+      let disabled = false;
+      let passable = true;
+      if (pv >= 5) disabled = d[q++] !== 0;
+      if (pv >= 2) passable = d[q++] !== 0;
+      const geometry = d.readInt32LE(q);
+      q += 4;
+      const clockwise = d[q++] !== 0;
+      const target = d.readInt32LE(q);
+      links.push({ geometry, target, clockwise, passable, disabled });
+    }
+    cells.push({ name, appearance: app.value.replace(/\\/g, '/'), floor: floor.replace(/\\/g, '/'), portals: links });
   }
-  return { cells };
+  return { cells, portals };
 }

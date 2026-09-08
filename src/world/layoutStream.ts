@@ -32,7 +32,7 @@ export interface PlacedObject {
   tier: number;
 }
 
-/** A placed portal building: its interior cell boxes decide when the player is inside it. */
+/** A placed portal building; the player's cell inside it is tracked by crossing its portals. */
 export interface Building {
   model: LoadedModel;
   x: number;
@@ -62,6 +62,39 @@ interface Region {
 const tmpM = new THREE.Matrix4();
 const tmpV = new THREE.Vector3();
 const ONE = new THREE.Vector3(1, 1, 1);
+const localA = new THREE.Vector3();
+const localB = new THREE.Vector3();
+const hitP = new THREE.Vector3();
+
+/** Where the player is: outside (cell 0 of no building) or in a cell of a building. */
+export interface CellState {
+  building: Building;
+  cell: number;
+}
+
+/** Does the segment a-b cross the portal polygon (model space)? */
+function crossesPortal(portal: import('./assetPack').Portal, a: THREE.Vector3, b: THREE.Vector3): boolean {
+  const da = portal.normal.dot(a) - portal.d;
+  const db = portal.normal.dot(b) - portal.d;
+  if ((da > 0 && db > 0) || (da < 0 && db < 0) || da === db) return false;
+  const t = da / (da - db);
+  hitP.copy(a).lerp(b, t);
+  // Point in polygon on the plane's dominant axis.
+  const n = portal.normal;
+  const ax = Math.abs(n.x);
+  const ay = Math.abs(n.y);
+  const az = Math.abs(n.z);
+  const u = ax >= ay && ax >= az ? 'y' : ay >= az ? 'x' : 'x';
+  const v = ax >= ay && ax >= az ? 'z' : ay >= az ? 'z' : 'y';
+  let inside = false;
+  const pts = portal.verts;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const pi = pts[i];
+    const pj = pts[j];
+    if (pi[v] > hitP[v] !== pj[v] > hitP[v] && hitP[u] < ((pj[u] - pi[u]) * (hitP[v] - pi[v])) / (pj[v] - pi[v]) + pi[u]) inside = !inside;
+  }
+  return inside;
+}
 
 export class LayoutStreamer {
   readonly buildings = new Set<Building>();
@@ -299,6 +332,46 @@ export class LayoutStreamer {
 
   get colliderCount(): number {
     return this.colliders.size;
+  }
+
+  /**
+   * Follow the player through building portals, as the original client does: you are in the
+   * world until your path crosses a portal into a cell, and in that cell until you cross one out.
+   * `prev` and `pos` are the player's feet positions this frame and last.
+   */
+  trackCell(state: CellState | null, prev: THREE.Vector3, pos: THREE.Vector3): CellState | null {
+    const jump = prev.distanceToSquared(pos);
+    if (jump > 25) return null; // teleport (noclip, travel): start over outside
+    if (state) {
+      const b = state.building;
+      localA.copy(prev).setY(prev.y + 0.9).applyMatrix4(b.inverse);
+      localB.copy(pos).setY(pos.y + 0.9).applyMatrix4(b.inverse);
+      // Left the building entirely (fell out of a window, no-clipped): back outside.
+      if (!b.model.bounds.clone().expandByScalar(3).containsPoint(localB)) return null;
+      for (const portal of b.model.portals) {
+        const link = portal.links.find((l) => l.from === state.cell) ?? portal.links.find((l) => l.to === state.cell);
+        if (!link || !portal.passable) continue;
+        if (crossesPortal(portal, localA, localB)) {
+          const target = link.from === state.cell ? link.to : link.from;
+          return target === 0 ? null : { building: b, cell: target };
+        }
+      }
+      return state;
+    }
+    for (const b of this.buildings) {
+      if (Math.abs(b.x - pos.x) > b.radius + 4 || Math.abs(b.z - pos.z) > b.radius + 4) continue;
+      localA.copy(prev).setY(prev.y + 0.9).applyMatrix4(b.inverse);
+      localB.copy(pos).setY(pos.y + 0.9).applyMatrix4(b.inverse);
+      for (const portal of b.model.portals) {
+        const link = portal.links.find((l) => l.from === 0) ?? portal.links.find((l) => l.to === 0);
+        if (!link || !portal.passable) continue;
+        if (crossesPortal(portal, localA, localB)) {
+          const target = link.from === 0 ? link.to : link.from;
+          if (target > 0) return { building: b, cell: target };
+        }
+      }
+    }
+    return null;
   }
 
   get status(): string {

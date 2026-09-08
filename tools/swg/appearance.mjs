@@ -83,13 +83,13 @@ export function resolveParts(vfs, rawPath, depth = 0) {
   }
   if (lower.endsWith('.pob')) {
     // Portal building: exterior (cell 0) plus every interior cell, all in building space.
-    const { cells } = parsePob(root);
+    const { cells, portals } = parsePob(root);
     const out = [];
     const errors = [];
     cells.forEach((cell, i) => {
       if (!cell.appearance) return;
       try {
-        for (const part of resolveParts(vfs, cell.appearance, depth + 1)) out.push({ ...part, cell: i, cellName: cell.name || (i === 0 ? 'exterior' : `cell${i}`) });
+        for (const part of resolveParts(vfs, cell.appearance, depth + 1)) out.push({ ...part, cell: i, cellName: cell.name || (i === 0 ? 'exterior' : `cell${i}`), cellPortals: cell.portals, portalGeometry: portals });
       } catch (err) {
         errors.push(`cell ${i}: ${err.message}`);
       }

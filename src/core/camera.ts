@@ -1,17 +1,25 @@
 import * as THREE from 'three';
 import type { Input } from './input';
-import type { Collider } from '../world/props';
 
 const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v));
 
-/** SWG-style free-orbit third-person camera. */
+/** Distance along from->to at which the world blocks the camera, or null when clear. */
+export type CameraBlocker = (from: THREE.Vector3, to: THREE.Vector3) => number | null;
+
+const FIRST_PERSON_BELOW = 1.2;
+const EYE_HEIGHT = 1.6;
+
+/** SWG-style free-orbit third-person camera that becomes first person when zoomed all the way in. */
 export class ThirdPersonCamera {
   readonly camera: THREE.PerspectiveCamera;
   yaw = Math.PI;
   pitch = 0.32;
   distance = 7;
+  /** Zoomed in past the character: first person, character hidden. */
+  firstPerson = false;
   private readonly focus = new THREE.Vector3();
   private readonly desired = new THREE.Vector3();
+  private readonly dir = new THREE.Vector3();
 
   constructor(aspect: number) {
     this.camera = new THREE.PerspectiveCamera(60, aspect, 0.1, 9000);
@@ -26,44 +34,37 @@ export class ThirdPersonCamera {
     return out.set(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
   }
 
-  update(
-    input: Input,
-    target: THREE.Vector3,
-    heightAt: (x: number, z: number) => number,
-    blockers: (x: number, z: number, radius: number) => Collider[],
-  ): void {
+  /**
+   * @param blocked  physics query for what the camera would cut through; null skips collision (noclip)
+   */
+  update(input: Input, target: THREE.Vector3, blocked: CameraBlocker | null): void {
     if (input.locked) {
       this.yaw -= input.mouseDX * 0.0025;
-      this.pitch = clamp(this.pitch + input.mouseDY * 0.0025, -0.35, 1.35);
+      this.pitch = clamp(this.pitch + input.mouseDY * 0.0025, this.firstPerson ? -1.4 : -0.35, 1.4);
     }
-    this.distance = clamp(this.distance + input.wheel * 0.9, 1.5, 24);
+    this.distance = clamp(this.distance + input.wheel * 0.9, 0, 24);
+    this.firstPerson = this.distance < FIRST_PERSON_BELOW;
 
-    this.focus.copy(target).y += 1.6;
+    this.focus.copy(target).y += EYE_HEIGHT;
     const cp = Math.cos(this.pitch);
-    this.desired.set(Math.sin(this.yaw) * cp, Math.sin(this.pitch), Math.cos(this.yaw) * cp)
-      .multiplyScalar(this.distance)
-      .add(this.focus);
-    // Step the camera toward the player until it is clear of terrain and props.
-    let dist = this.distance;
-    for (let i = 0; i < 24 && dist > 1.2; i++) {
-      const ground = heightAt(this.desired.x, this.desired.z) + 0.7;
-      let blocked = this.desired.y < ground;
-      if (!blocked) {
-        for (const c of blockers(this.desired.x, this.desired.z, 0.8)) {
-          if (this.desired.y < c.top && Math.hypot(c.x - this.desired.x, c.z - this.desired.z) < c.r + 0.8) {
-            blocked = true;
-            break;
-          }
-        }
-      }
-      if (!blocked) break;
-      dist -= 0.6;
-      this.desired.set(Math.sin(this.yaw) * cp, Math.sin(this.pitch), Math.cos(this.yaw) * cp)
-        .multiplyScalar(Math.max(dist, 1.2))
-        .add(this.focus);
+    this.dir.set(Math.sin(this.yaw) * cp, Math.sin(this.pitch), Math.cos(this.yaw) * cp);
+
+    if (this.firstPerson) {
+      this.camera.position.copy(this.focus);
+      this.camera.lookAt(this.desired.copy(this.focus).sub(this.dir));
+      return;
     }
-    const ground = heightAt(this.desired.x, this.desired.z) + 0.7;
-    if (this.desired.y < ground) this.desired.y = ground;
+
+    let dist = this.distance;
+    this.desired.copy(this.dir).multiplyScalar(dist).add(this.focus);
+    if (blocked) {
+      // Pull the camera in front of whatever it would cut through: walls, props, ground.
+      const hit = blocked(this.focus, this.desired);
+      if (hit !== null) {
+        dist = Math.max(0.6, hit - 0.35);
+        this.desired.copy(this.dir).multiplyScalar(dist).add(this.focus);
+      }
+    }
     this.camera.position.copy(this.desired);
     this.camera.lookAt(this.focus);
   }

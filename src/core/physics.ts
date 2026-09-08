@@ -61,6 +61,26 @@ export class Physics {
     return this.world.createCollider(desc);
   }
 
+  /**
+   * Distance from `from` toward `to` at which static geometry blocks a camera, or null when
+   * clear. Moving bodies (creatures, vehicles, the player) never block it; inside a building
+   * the ground and the building's shell are ignored, as they are for the player.
+   */
+  cameraBlock(from: { x: number; y: number; z: number }, to: { x: number; y: number; z: number }, excludeBody: RAPIER.RigidBody | null, inside: boolean): number | null {
+    const dx = to.x - from.x;
+    const dy = to.y - from.y;
+    const dz = to.z - from.z;
+    const len = Math.hypot(dx, dy, dz);
+    if (len < 1e-4) return null;
+    const ray = new RAPIER.Ray(from, { x: dx / len, y: dy / len, z: dz / len });
+    const filter = groups(Group.all, inside ? Group.all & ~(Group.terrain | Group.exterior) : Group.all);
+    const hit = this.world.castRay(ray, len, true, undefined, filter, undefined, excludeBody ?? undefined, (c) => {
+      const body = c.parent();
+      return !body || body.isFixed();
+    });
+    return hit ? hit.timeOfImpact : null;
+  }
+
   createStaticCylinder(x: number, y: number, z: number, radius: number, halfHeight: number): RAPIER.Collider {
     const desc = RAPIER.ColliderDesc.cylinder(halfHeight, radius).setTranslation(x, y, z).setFriction(0.6);
     return this.world.createCollider(desc);

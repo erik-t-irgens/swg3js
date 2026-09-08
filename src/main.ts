@@ -49,13 +49,14 @@ class App {
     this.renderer.setPixelRatio(lowfx ? 0.5 : Math.min(window.devicePixelRatio, 2));
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.renderer.shadowMap.enabled = !lowfx;
-    this.renderer.shadowMap.type = THREE.PCFShadowMap;
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.0;
 
     this.cam = new ThirdPersonCamera(window.innerWidth / window.innerHeight);
     this.input = new Input(this.canvas);
     this.world = new World(this.scene, physics);
+    this.world.attachCamera(this.cam.camera, !lowfx);
     this.player = new Player(this.scene, physics);
     this.effects = new Effects(this.scene);
     this.hud = new Hud(this.ui);
@@ -291,12 +292,9 @@ class App {
       if (simulate && player.hp <= 0) void this.die();
 
       player.inside = this.world.inside;
-      this.cam.update(
-        input,
-        player.pos,
-        (x, z) => (this.world.inside ? -Infinity : Math.max(this.world.terrain.heightAt(x, z), this.world.terrain.waterLevel)),
-        (x, z, r) => this.world.collidersNear(x, z, r),
-      );
+      this.cam.update(input, player.pos, player.noclip ? null : (from, to) => this.physics.cameraBlock(from, to, player.body, this.world.inside));
+      player.group.visible = !this.cam.firstPerson;
+      this.world.updateShadows(performance.now());
 
       let prompt = '';
       if (player.noclip) prompt = '<b>NOCLIP</b> · <b>WASD</b> fly · <b>Space</b> up · <b>Ctrl</b> down · <b>Shift</b> fast · <b>N</b> off';

@@ -157,6 +157,7 @@ function loadAppearanceMesh(vfs, appearancePath) {
   const parts = resolveParts(vfs, appearancePath);
   const merged = { version: '', groups: [], hardpoints: [], bounds: null, warnings: [] };
   const cells = new Map();
+  let portalGeometry = null;
   for (const part of parts) {
     const mesh = parseMesh(parseIff(vfs.read(part.mesh)));
     if (part.transform) transformMesh(mesh, part.transform);
@@ -165,19 +166,20 @@ function loadAppearanceMesh(vfs, appearancePath) {
     merged.warnings.push(...mesh.warnings);
     if (parts.length === 1) merged.bounds = mesh.bounds;
     if (part.cell !== undefined) {
-      const cell = cells.get(part.cell) ?? cells.set(part.cell, { index: part.cell, name: part.cellName, groups: [], hardpoints: [], warnings: [] }).get(part.cell);
+      const cell = cells.get(part.cell) ?? cells.set(part.cell, { index: part.cell, name: part.cellName, groups: [], hardpoints: [], warnings: [], portals: part.cellPortals ?? [] }).get(part.cell);
       cell.groups.push(...mesh.groups);
       cell.hardpoints.push(...mesh.hardpoints);
+      portalGeometry ??= part.portalGeometry ?? null;
     }
   }
   if (!merged.bounds) merged.bounds = boundsFromPositions(merged);
   const cellList = [...cells.values()].sort((a, b) => a.index - b.index);
   for (const c of cellList) c.bounds = boundsFromPositions(c);
-  return { mesh: merged, meshPath: parts.length === 1 ? parts[0].mesh : appearancePath, partCount: parts.length, cells: cellList.length > 1 ? cellList : null };
+  return { mesh: merged, meshPath: parts.length === 1 ? parts[0].mesh : appearancePath, partCount: parts.length, cells: cellList.length > 1 ? cellList : null, portalGeometry };
 }
 
 function convertOne(vfs, appearancePath, outFile) {
-  const { mesh, meshPath, partCount, cells } = loadAppearanceMesh(vfs, appearancePath);
+  const { mesh, meshPath, partCount, cells, portalGeometry } = loadAppearanceMesh(vfs, appearancePath);
   const textures = new Map();
   for (const g of mesh.groups) {
     const t = textureFor(vfs, g.shader);
@@ -193,8 +195,10 @@ function convertOne(vfs, appearancePath, outFile) {
   const tris = mesh.groups.reduce((n, g) => n + g.primitives.reduce((m, p) => m + p.indices.length / 3, 0), 0);
   const shaders = [...new Set(mesh.groups.map((g) => g.shader))];
   const flipBounds = (b) => (flipX && b ? { min: [-b.max[0], b.min[1], b.min[2]], max: [-b.min[0], b.max[1], b.max[2]] } : b);
-  const cellInfo = cells ? cells.map((c) => ({ index: c.index, name: c.name, bounds: flipBounds(c.bounds) })) : undefined;
-  return { meshPath, mesh, flipX, tris, shaders, textured: textures.size, warnings: mesh.warnings, partCount, cells: cellInfo };
+  const cellInfo = cells ? cells.map((c) => ({ index: c.index, name: c.name, bounds: flipBounds(c.bounds), portals: c.portals.map((p) => ({ geometry: p.geometry, target: p.target, passable: p.passable && !p.disabled })) })) : undefined;
+  // Portal polygons in model space (X flipped with the meshes) so the game can tell which cell the player is in.
+  const portals = portalGeometry ? portalGeometry.map((verts) => verts.map(([x, y, z]) => [flipX ? -x : x, y, z])) : undefined;
+  return { meshPath, mesh, flipX, tris, shaders, textured: textures.size, warnings: mesh.warnings, partCount, cells: cellInfo, portals };
 }
 
 /**
@@ -468,7 +472,7 @@ switch (cmd) {
           const conv = convertOne(vfs, single ? r.parts[0].mesh : r.appearance, join(outDir, `${id}.glb`));
           const b = conv.mesh.bounds ?? { min: [0, 0, 0], max: [0, 0, 0] };
           const bounds = conv.flipX ? { min: [-b.max[0], b.min[1], b.min[2]], max: [-b.min[0], b.max[1], b.max[2]] } : b;
-          models.set(id, { id, source: r.source ?? r.appearance, file: `${id}.glb`, bounds, triangles: conv.tris, textured: conv.textured, shaders: conv.shaders.length, parts: conv.partCount, ...(conv.cells ? { cells: conv.cells } : {}) });
+          models.set(id, { id, source: r.source ?? r.appearance, file: `${id}.glb`, bounds, triangles: conv.tris, textured: conv.textured, shaders: conv.shaders.length, parts: conv.partCount, ...(conv.cells ? { cells: conv.cells, portals: conv.portals ?? [] } : {}) });
           console.error(`  ${id}: ${conv.tris} tris, ${conv.textured}/${conv.shaders.length} textured${conv.partCount > 1 ? `, ${conv.partCount} parts` : ''}`);
         } catch (err) {
           models.set(id, { failed: err.message });

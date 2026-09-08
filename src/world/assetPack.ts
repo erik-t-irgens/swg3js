@@ -7,7 +7,9 @@ export interface PackModelDef {
   bounds: { min: number[]; max: number[] };
   triangles: number;
   /** Portal buildings: one entry per cell, index 0 being the exterior shell. */
-  cells?: { index: number; name: string; bounds: { min: number[]; max: number[] } }[];
+  cells?: { index: number; name: string; bounds: { min: number[]; max: number[] }; portals?: { geometry: number; target: number; passable: boolean }[] }[];
+  /** Portal polygons in model space, indexed by the cells' `geometry` field. */
+  portals?: number[][][];
 }
 
 export interface PackManifest {
@@ -56,6 +58,20 @@ export interface LoadedModel {
   height: number;
   /** Interior cell boxes in model space (buildings only), used to tell when someone is inside. */
   interiorBoxes: THREE.Box3[];
+  /** Overall model-space box. */
+  bounds: THREE.Box3;
+  /** Portal polygons (model space) with the cells on either side, for tracking which cell someone is in. */
+  portals: Portal[];
+}
+
+export interface Portal {
+  verts: THREE.Vector3[];
+  normal: THREE.Vector3;
+  /** Plane offset: normal . p = d on the polygon. */
+  d: number;
+  /** Cells joined by this portal ([from, to] pairs as the cells list them). */
+  links: { from: number; to: number }[];
+  passable: boolean;
 }
 
 /** Converted SWG content for one planet, loaded from the private assets folder. */
@@ -122,6 +138,28 @@ export class AssetPack {
         const interiorBoxes = (def.cells ?? [])
           .filter((c) => c.index > 0)
           .map((c) => new THREE.Box3(new THREE.Vector3(...(c.bounds.min as [number, number, number])), new THREE.Vector3(...(c.bounds.max as [number, number, number]))));
+        const portals: Portal[] = (def.portals ?? []).map((poly) => {
+          const verts = poly.map((v) => new THREE.Vector3(v[0], v[1], v[2]));
+          // Newell normal: robust for any planar polygon winding.
+          const normal = new THREE.Vector3();
+          for (let i = 0; i < verts.length; i++) {
+            const a = verts[i];
+            const b = verts[(i + 1) % verts.length];
+            normal.x += (a.y - b.y) * (a.z + b.z);
+            normal.y += (a.z - b.z) * (a.x + b.x);
+            normal.z += (a.x - b.x) * (a.y + b.y);
+          }
+          normal.normalize();
+          return { verts, normal, d: verts.length ? normal.dot(verts[0]) : 0, links: [], passable: true };
+        });
+        for (const c of def.cells ?? []) {
+          for (const link of c.portals ?? []) {
+            const portal = portals[link.geometry];
+            if (!portal) continue;
+            portal.links.push({ from: c.index, to: link.target });
+            if (!link.passable) portal.passable = false;
+          }
+        }
         return {
           def,
           scene: gltf.scene,
@@ -129,6 +167,8 @@ export class AssetPack {
           radius: Math.max(max[0] - min[0], max[2] - min[2]) / 2,
           height: max[1] - Math.min(0, min[1]),
           interiorBoxes,
+          bounds: new THREE.Box3(new THREE.Vector3(min[0], min[1], min[2]), new THREE.Vector3(max[0], max[1], max[2])),
+          portals,
         };
       });
       this.cache.set(id, p);
