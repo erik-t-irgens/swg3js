@@ -2055,6 +2055,42 @@ export class TerrainGenerator {
     for (const l of this.layers) if (!l.pruned) l.affect(amountMap, d);
   }
 
+  /** One line per layer item with its key parameters, for diagnostics. */
+  describe(): string[] {
+    const lines: string[] = [];
+    const num = (v: number) => (Number.isInteger(v) ? String(v) : v.toFixed(3));
+    const item = (it: LayerItem): string => {
+      const on = it.active ? '' : ' [inactive]';
+      if (it instanceof BoundaryCircle) return `BCIR ${it.name}${on} centre ${num(it.centerX)},${num(it.centerZ)} r ${num(it.radius)} feather ${it.featherFunction}/${num(it.featherDistance)}`;
+      if (it instanceof BoundaryRectangle) return `BREC ${it.name}${on} ${num(it.rect.x0)},${num(it.rect.y0)} to ${num(it.rect.x1)},${num(it.rect.y1)} feather ${it.featherFunction}/${num(it.featherDistance)}${it.localWaterTable ? ` water ${num(it.localWaterTableHeight)}` : ''}`;
+      if (it instanceof BoundaryPolygon) return `BPOL ${it.name}${on} ${it.points.length} pts extent ${num(it.extent.x0)},${num(it.extent.y0)} to ${num(it.extent.x1)},${num(it.extent.y1)} feather ${it.featherFunction}/${num(it.featherDistance)}${it.localWaterTable ? ` water ${num(it.localWaterTableHeight)}` : ''}`;
+      if (it instanceof BoundaryPolyline) return `BPLN ${it.name}${on} ${it.points.length} pts width ${num(it.width)} extent ${num(it.extent.x0)},${num(it.extent.y0)} to ${num(it.extent.x1)},${num(it.extent.y1)} feather ${it.featherFunction}/${num(it.featherDistance)}`;
+      if (it instanceof FilterHeight) return `FHGT ${it.name}${on} ${num(it.low)}..${num(it.high)} feather ${it.featherFunction}/${num(it.featherDistance)}`;
+      if (it instanceof FilterFractal) return `FFRA ${it.name}${on} family ${it.familyId} x${num(it.scaleY)} ${num(it.low)}..${num(it.high)} feather ${it.featherFunction}/${num(it.featherDistance)}`;
+      if (it instanceof FilterSlope) return `FSLP ${it.name}${on} ${num((it.minimumAngle * 180) / Math.PI)}..${num((it.maximumAngle * 180) / Math.PI)} deg feather ${it.featherFunction}/${num(it.featherDistance)}`;
+      if (it instanceof FilterDirection) return `FDIR ${it.name}${on} ${num(it.minimumFeatherAngle)}..${num(it.maximumFeatherAngle)}`;
+      if (it instanceof FilterShader) return `FSHD ${it.name}${on} family ${it.familyId}`;
+      if (it instanceof FilterBitmap) return `FBIT ${it.name}${on} family ${it.familyId} ${num(it.low)}..${num(it.high)} (no image: passes)`;
+      if (it instanceof AffectorHeightConstant) return `AHCN ${it.name}${on} op ${it.operation} height ${num(it.height)}`;
+      if (it instanceof AffectorHeightFractal) return `AHFR ${it.name}${on} op ${it.operation} family ${it.familyId} x${num(it.scaleY)}`;
+      if (it instanceof AffectorHeightTerrace) return `AHTR ${it.name}${on} height ${num(it.height)} fraction ${num(it.fraction)}`;
+      if (it instanceof AffectorRoad) return `AROA ${it.name}${on} ${it.points.length} pts width ${num(it.width)} heights ${it.heightData.segments.length} segs fixed ${it.hasFixedHeights} feather ${it.featherFunction}/${num(it.featherDistance)}`;
+      if (it instanceof AffectorRiver) return `ARIV ${it.name}${on} ${it.points.length} pts width ${num(it.width)} trench ${num(it.trenchDepth)} heights ${it.heightData.segments.length} segs`;
+      if (it instanceof AffectorShaderConstant) return `ASCN ${it.name}${on} family ${it.familyId}`;
+      if (it instanceof AffectorShaderReplace) return `ASRP ${it.name}${on} ${it.sourceFamilyId} -> ${it.destinationFamilyId}`;
+      return `${it.tag} ${it.name}${on}`;
+    };
+    const walk = (l: Layer, depth: number) => {
+      const pad = '  '.repeat(depth);
+      const flags = `${l.active ? '' : ' [inactive]'}${l.invertBoundaries ? ' invertBoundaries' : ''}${l.invertFilters ? ' invertFilters' : ''}`;
+      lines.push(`${pad}LAYR ${l.name}${flags}`);
+      for (const it of [...l.boundaries, ...l.filters, ...l.affectors]) lines.push(`${pad}  ${item(it)}`);
+      for (const s of l.layers) walk(s, depth + 1);
+    };
+    for (const l of this.layers) walk(l, 0);
+    return lines;
+  }
+
   /** Counts of every layer item by tag, for diagnostics. */
   summary(): Record<string, number> {
     const counts: Record<string, number> = {};

@@ -16,7 +16,9 @@
 //                                                                  convert the world snapshot's objects around a point into a layout,
 //                                                                  and copy the planet's terrain (.trn) plus building terrain layers (.lay)
 //   node tools/swg/cli.mjs terrain <swg-dir> <planet> <out-dir>    copy just the terrain template into a pack
-//   node tools/swg/cli.mjs terrain-check <out-dir> [--limit=n]     generate terrain at every snapshot object and compare with its height
+//   node tools/swg/cli.mjs terrain-check <out-dir> [--limit=n] [--layers] [--at=x,z]
+//                                                                  generate terrain at every snapshot object and compare with its height;
+//                                                                  --layers lists every layer, --at prints the height at one point
 //
 // Flags: --retail-only (mount only archives named in the retail manifests)
 //        --no-flip (keep left-handed coordinates)  --no-textures (skip DDS decoding)
@@ -209,7 +211,7 @@ function yawOf(q) {
 }
 
 /** Compare generated terrain heights with the snapshot's object heights. Needs Node 22.18+ (runs the game's TypeScript directly). */
-async function terrainCheck(dir, limit) {
+async function terrainCheck(dir, limit, opts = {}) {
   const { parseTerrainTemplate, parseLayerFile, TerrainSampler } = await import('../../src/swg/terrain/trn.ts');
   const trnPath = join(dir, 'terrain.trn');
   if (!existsSync(trnPath)) throw new Error(`${trnPath} missing; run the snapshot (or terrain) command first`);
@@ -219,7 +221,20 @@ async function terrainCheck(dir, limit) {
   console.log(`terrain ${template.name}: map ${template.mapWidthInMeters} m, chunk ${template.chunkWidthInMeters} m, ${template.numberOfTilesPerChunk} tiles/chunk (${template.tileWidthInMeters} m tiles), version ${template.version}, water ${template.useGlobalWaterTable ? template.globalWaterTableHeight : 'none'}, loaded in ${Date.now() - t0} ms`);
   console.log(`  layer items: ${Object.entries(gen.summary()).map(([k, v]) => `${k} ${v}`).join(', ')}`);
   console.log(`  fractal families: ${gen.fractalGroup.families.size}, shader families: ${gen.shaderGroup.families.size}`);
+  if (opts.layers) {
+    console.log('  fractals:');
+    for (const [id, f] of gen.fractalGroup.families) {
+      const m = f.fractal;
+      console.log(`    ${id} ${f.name}: seed ${m.seed} rule ${m.combinationRule} octaves ${m.numberOfOctaves} freq ${m.frequency} amp ${m.amplitude} scale ${m.scaleX},${m.scaleY} offset ${m.offsetX},${m.offsetY}${m.useBias ? ` bias ${m.bias}` : ''}${m.useGain ? ` gain ${m.gain}` : ''}`);
+    }
+    console.log('  layers:');
+    for (const line of gen.describe()) console.log(`    ${line}`);
+  }
   const sampler = new TerrainSampler(template);
+  if (opts.at) {
+    const [ax, az] = opts.at.split(',').map(Number);
+    console.log(`  height at ${ax},${az}: ${sampler.heightAt(ax, az).toFixed(3)} (base terrain, before building layers)`);
+  }
   const layoutPath = join(dir, 'layout.json');
   if (!existsSync(layoutPath)) {
     console.log('no layout.json: nothing to compare');
@@ -247,6 +262,15 @@ async function terrainCheck(dir, limit) {
     rows.push({ o, h, err: h - o.y });
   }
   const ms = Date.now() - t2;
+  const signed = rows.map((r) => r.err).sort((a, b) => a - b);
+  const q = (p) => signed[Math.min(signed.length - 1, Math.floor(signed.length * p))];
+  console.log(`  signed error (generated - object): 10% ${q(0.1).toFixed(2)}, 25% ${q(0.25).toFixed(2)}, median ${q(0.5).toFixed(2)}, 75% ${q(0.75).toFixed(2)}, 90% ${q(0.9).toFixed(2)} m`);
+  const bins = new Map();
+  for (const e of signed) {
+    const b = Math.max(-10, Math.min(10, Math.round(e)));
+    bins.set(b, (bins.get(b) ?? 0) + 1);
+  }
+  console.log(`  histogram (m -> objects): ${[...bins.entries()].sort((a, b) => a[0] - b[0]).map(([b, n]) => `${b}:${n}`).join(' ')}`);
   const abs = rows.map((r) => Math.abs(r.err)).sort((a, b) => a - b);
   const pct = (p) => abs[Math.min(abs.length - 1, Math.floor(abs.length * p))];
   console.log(`  ${rows.length} objects sampled in ${ms} ms (${sampler.numberOfPoles}x${sampler.numberOfPoles} poles per chunk)`);
@@ -442,7 +466,7 @@ switch (cmd) {
 
   case 'terrain-check': {
     if (!pos[1]) usage();
-    await terrainCheck(pos[1], Number(options.limit ?? 30));
+    await terrainCheck(pos[1], Number(options.limit ?? 30), { layers: args.includes('--layers'), at: options.at });
     break;
   }
 
