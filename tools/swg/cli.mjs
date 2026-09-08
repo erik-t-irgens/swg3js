@@ -15,6 +15,7 @@
 //   node tools/swg/cli.mjs snapshot <swg-dir> <planet> <out-dir> --center=x,z --radius=r [--max=n]
 //                                                                  convert the world snapshot's objects around a point into a layout,
 //                                                                  and copy the planet's terrain (.trn) plus building terrain layers (.lay)
+//   node tools/swg/cli.mjs stat <swg-dir> <file>                    which archive provides a file (after load order and deletions)
 //   node tools/swg/cli.mjs terrain <swg-dir> <planet> <out-dir>    copy just the terrain template into a pack
 //   node tools/swg/cli.mjs terrain-check <out-dir> [--limit=n] [--layers] [--at=x,z]
 //                                                                  generate terrain at every snapshot object and compare with its height;
@@ -148,9 +149,14 @@ function boundsFromPositions(mesh) {
 }
 
 /** Load an appearance as one merged mesh: component parts are baked by their transforms. */
+/**
+ * Load every mesh part of an appearance into one merged mesh. Portal buildings keep their
+ * cells apart in `cells` (exterior first) so the game can hide the shell from inside.
+ */
 function loadAppearanceMesh(vfs, appearancePath) {
   const parts = resolveParts(vfs, appearancePath);
   const merged = { version: '', groups: [], hardpoints: [], bounds: null, warnings: [] };
+  const cells = new Map();
   for (const part of parts) {
     const mesh = parseMesh(parseIff(vfs.read(part.mesh)));
     if (part.transform) transformMesh(mesh, part.transform);
@@ -158,25 +164,37 @@ function loadAppearanceMesh(vfs, appearancePath) {
     merged.hardpoints.push(...mesh.hardpoints);
     merged.warnings.push(...mesh.warnings);
     if (parts.length === 1) merged.bounds = mesh.bounds;
+    if (part.cell !== undefined) {
+      const cell = cells.get(part.cell) ?? cells.set(part.cell, { index: part.cell, name: part.cellName, groups: [], hardpoints: [], warnings: [] }).get(part.cell);
+      cell.groups.push(...mesh.groups);
+      cell.hardpoints.push(...mesh.hardpoints);
+    }
   }
   if (!merged.bounds) merged.bounds = boundsFromPositions(merged);
-  return { mesh: merged, meshPath: parts.length === 1 ? parts[0].mesh : appearancePath, partCount: parts.length };
+  const cellList = [...cells.values()].sort((a, b) => a.index - b.index);
+  for (const c of cellList) c.bounds = boundsFromPositions(c);
+  return { mesh: merged, meshPath: parts.length === 1 ? parts[0].mesh : appearancePath, partCount: parts.length, cells: cellList.length > 1 ? cellList : null };
 }
 
 function convertOne(vfs, appearancePath, outFile) {
-  const { mesh, meshPath, partCount } = loadAppearanceMesh(vfs, appearancePath);
+  const { mesh, meshPath, partCount, cells } = loadAppearanceMesh(vfs, appearancePath);
   const textures = new Map();
   for (const g of mesh.groups) {
     const t = textureFor(vfs, g.shader);
     if (t) textures.set(g.shader, t);
   }
   const flipX = !flags.has('--no-flip');
-  const glb = buildGlb([{ name: basename(meshPath).replace(/\.[^.]+$/, ''), ...mesh }], { flipX, textures });
+  const baseName = basename(meshPath).replace(/\.[^.]+$/, '');
+  // One GLB node per portal cell ("cell:<index>:<name>"), or a single node for plain appearances.
+  const meshes = cells ? cells.map((c) => ({ name: `cell:${c.index}:${c.name}`, groups: c.groups, hardpoints: c.hardpoints, bounds: c.bounds })) : [{ name: baseName, ...mesh }];
+  const glb = buildGlb(meshes, { flipX, textures });
   mkdirSync(dirname(outFile), { recursive: true });
   writeFileSync(outFile, glb);
   const tris = mesh.groups.reduce((n, g) => n + g.primitives.reduce((m, p) => m + p.indices.length / 3, 0), 0);
   const shaders = [...new Set(mesh.groups.map((g) => g.shader))];
-  return { meshPath, mesh, flipX, tris, shaders, textured: textures.size, warnings: mesh.warnings, partCount };
+  const flipBounds = (b) => (flipX && b ? { min: [-b.max[0], b.min[1], b.min[2]], max: [-b.min[0], b.max[1], b.max[2]] } : b);
+  const cellInfo = cells ? cells.map((c) => ({ index: c.index, name: c.name, bounds: flipBounds(c.bounds) })) : undefined;
+  return { meshPath, mesh, flipX, tris, shaders, textured: textures.size, warnings: mesh.warnings, partCount, cells: cellInfo };
 }
 
 /**
@@ -450,7 +468,7 @@ switch (cmd) {
           const conv = convertOne(vfs, single ? r.parts[0].mesh : r.appearance, join(outDir, `${id}.glb`));
           const b = conv.mesh.bounds ?? { min: [0, 0, 0], max: [0, 0, 0] };
           const bounds = conv.flipX ? { min: [-b.max[0], b.min[1], b.min[2]], max: [-b.min[0], b.max[1], b.max[2]] } : b;
-          models.set(id, { id, source: r.source ?? r.appearance, file: `${id}.glb`, bounds, triangles: conv.tris, textured: conv.textured, shaders: conv.shaders.length, parts: conv.partCount });
+          models.set(id, { id, source: r.source ?? r.appearance, file: `${id}.glb`, bounds, triangles: conv.tris, textured: conv.textured, shaders: conv.shaders.length, parts: conv.partCount, ...(conv.cells ? { cells: conv.cells } : {}) });
           console.error(`  ${id}: ${conv.tris} tris, ${conv.textured}/${conv.shaders.length} textured${conv.partCount > 1 ? `, ${conv.partCount} parts` : ''}`);
         } catch (err) {
           models.set(id, { failed: err.message });
@@ -484,6 +502,14 @@ switch (cmd) {
     printEffectSummary();
     break;
   }
+  case 'stat': {
+    if (!pos[2]) usage();
+    const vfs = mount(pos[1]);
+    const st = vfs.stat(pos[2]);
+    console.log(st ? `${pos[2]}: ${st.size} bytes from ${st.archive}` : `${pos[2]}: not in archives`);
+    break;
+  }
+
   case 'terrain': {
     if (!pos[3]) usage();
     const vfs = mount(pos[1]);

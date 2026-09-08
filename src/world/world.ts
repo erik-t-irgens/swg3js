@@ -6,7 +6,7 @@ import { DayCycle } from './daycycle';
 import { PropFactory, type Collider, type Exclusion, type ScatterItem } from './props';
 import { AssetPack, type LoadedModel } from './assetPack';
 import { OUTPOSTS } from '../data/outposts';
-import { RAPIER as R } from '../core/physics';
+import { Group, groups, RAPIER as R } from '../core/physics';
 import { CHUNK_RES, CHUNK_SIZE, Terrain } from './terrain';
 import { SwgTerrain, type BuildingLayerSource } from './swgTerrain';
 import { Speeder } from '../vehicles/speeder';
@@ -30,6 +30,18 @@ interface Chunk {
   colliders: Collider[];
   heights: Float32Array;
   physics: RAPIER.Collider[] | null;
+}
+
+/** A placed portal building: its interior cell boxes decide when the player is inside it. */
+interface Building {
+  model: LoadedModel;
+  x: number;
+  z: number;
+  radius: number;
+  matrix: THREE.Matrix4;
+  inverse: THREE.Matrix4;
+  /** Instances of the exterior shell, collapsed while the player is inside. */
+  exterior: { mesh: THREE.InstancedMesh; index: number }[];
 }
 
 const SKY_VERT = /* glsl */ `
@@ -111,6 +123,10 @@ export class World {
   packStatus = 'no pack';
   private readonly structures: THREE.Object3D[] = [];
   private structureColliders: RAPIER.Collider[] = [];
+  private buildings: Building[] = [];
+  /** The building the player is currently inside, if any. */
+  insideBuilding: Building | null = null;
+  private readonly hiddenGround: THREE.Object3D[] = [];
   private loadToken = 0;
 
   constructor(readonly scene: THREE.Scene, readonly physics: Physics) {
@@ -338,11 +354,26 @@ export class World {
     const pos = new THREE.Vector3();
     let colliders = 0;
     for (const [model, list] of byModel) {
+      const isBuilding = model.interiorBoxes.length > 0;
+      const built: Building[] = [];
+      if (isBuilding) {
+        for (const p of list) {
+          if (p.contained) {
+            built.push(null as unknown as Building);
+            continue;
+          }
+          const matrix = new THREE.Matrix4().compose(pos.set(p.x, p.y, p.z), p.q, one);
+          const b: Building = { model, x: p.x, z: p.z, radius: model.radius, matrix, inverse: matrix.clone().invert(), exterior: [] };
+          built.push(b);
+          this.buildings.push(b);
+        }
+      }
       for (const prim of model.primitives) {
         const mesh = new THREE.InstancedMesh(prim.geometry, prim.material, list.length);
         list.forEach((p, i) => {
           m.compose(pos.set(p.x, p.y, p.z), p.q, one);
           mesh.setMatrixAt(i, m);
+          if (isBuilding && prim.cell === 0 && built[i]) built[i].exterior.push({ mesh, index: i });
         });
         mesh.castShadow = true;
         mesh.receiveShadow = true;
@@ -361,6 +392,9 @@ export class World {
             .setTranslation(p.x, p.y, p.z)
             .setRotation({ x: p.q.x, y: p.q.y, z: p.q.z, w: p.q.w })
             .setFriction(0.8);
+          // Building shells and interiors get their own collision groups so someone inside ignores the shell.
+          if (prim.cell === 0) desc.setCollisionGroups(groups(Group.exterior, Group.all));
+          else if (prim.cell > 0) desc.setCollisionGroups(groups(Group.interior, Group.all));
           this.structureColliders.push(this.physics.world.createCollider(desc));
           colliders++;
         }
@@ -401,6 +435,9 @@ export class World {
     this.lastTz = Number.NaN;
     for (const o of this.structures) this.scene.remove(o);
     this.structures.length = 0;
+    this.buildings = [];
+    this.insideBuilding = null;
+    this.hiddenGround.length = 0;
     for (const c of this.structureColliders) this.physics.removeCollider(c);
     this.structureColliders = [];
     this.pack?.dispose();
@@ -486,6 +523,69 @@ export class World {
     return this.chunks.size;
   }
 
+  get inside(): boolean {
+    return this.insideBuilding !== null;
+  }
+
+  /**
+   * SWG only draws and collides the cell you stand in: from inside a building its shell and
+   * the ground under it are gone, which is what makes basements and doorways work. Find the
+   * building whose interior cell boxes contain the player and hide its shell and nearby ground.
+   */
+  private updateInterior(playerPos: THREE.Vector3): void {
+    const local = new THREE.Vector3();
+    let found: Building | null = null;
+    const probe = local.copy(playerPos).setY(playerPos.y + 0.9);
+    for (const b of this.buildings) {
+      if (Math.abs(b.x - playerPos.x) > b.radius + 4 || Math.abs(b.z - playerPos.z) > b.radius + 4) continue;
+      local.copy(probe).applyMatrix4(b.inverse);
+      for (const box of b.model.interiorBoxes) {
+        if (local.x >= box.min.x - 0.3 && local.x <= box.max.x + 0.3 && local.z >= box.min.z - 0.3 && local.z <= box.max.z + 0.3 && local.y >= box.min.y - 1.5 && local.y <= box.max.y + 0.5) {
+          found = b;
+          break;
+        }
+      }
+      if (found) break;
+    }
+    if (found === this.insideBuilding) return;
+    // Restore the previous building and its ground.
+    const zero = new THREE.Matrix4().makeScale(0, 0, 0);
+    const prev = this.insideBuilding;
+    if (prev) {
+      for (const e of prev.exterior) {
+        e.mesh.setMatrixAt(e.index, prev.matrix);
+        e.mesh.instanceMatrix.needsUpdate = true;
+      }
+    }
+    for (const o of this.hiddenGround) o.visible = true;
+    this.hiddenGround.length = 0;
+    this.insideBuilding = found;
+    if (!found) return;
+    for (const e of found.exterior) {
+      e.mesh.setMatrixAt(e.index, zero);
+      e.mesh.instanceMatrix.needsUpdate = true;
+    }
+    this.hideGroundUnder(found);
+  }
+
+  private hideGroundUnder(b: Building): void {
+    const r = b.radius + 2;
+    const overlaps = (ox: number, oz: number, size: number) => b.x + r > ox && b.x - r < ox + size && b.z + r > oz && b.z - r < oz + size;
+    for (const c of this.chunks.values()) {
+      if (overlaps(c.cx * CHUNK_SIZE, c.cz * CHUNK_SIZE, CHUNK_SIZE)) {
+        c.group.visible = false;
+        this.hiddenGround.push(c.group);
+      }
+    }
+    for (const [key, t] of this.farTiles) {
+      const [tx, tz] = key.split(',').map(Number);
+      if (overlaps(tx * FAR_TILE, tz * FAR_TILE, FAR_TILE)) {
+        t.visible = false;
+        this.hiddenGround.push(t);
+      }
+    }
+  }
+
   collidersNear(x: number, z: number, radius: number): Collider[] {
     const cx = Math.floor(x / CHUNK_SIZE);
     const cz = Math.floor(z / CHUNK_SIZE);
@@ -505,6 +605,7 @@ export class World {
   update(dt: number, playerPos: THREE.Vector3, camPos: THREE.Vector3, fastTime: boolean, onAttack: (damage: number) => void): void {
     this.stream(playerPos, STREAM_BUDGET);
     this.streamFar(playerPos, 1);
+    this.updateInterior(playerPos);
     this.day.update(dt, fastTime);
     this.applyLighting();
     this.sky.position.copy(camPos);
@@ -630,6 +731,14 @@ export class World {
     group.add(propGroup);
     this.chunkRoot.add(group);
     this.chunks.set(key, { key, cx, cz, group, colliders, heights, physics: null });
+    const b = this.insideBuilding;
+    if (b) {
+      const r = b.radius + 2;
+      if (b.x + r > cx * CHUNK_SIZE && b.x - r < (cx + 1) * CHUNK_SIZE && b.z + r > cz * CHUNK_SIZE && b.z - r < (cz + 1) * CHUNK_SIZE) {
+        group.visible = false;
+        this.hiddenGround.push(group);
+      }
+    }
   }
 }
 

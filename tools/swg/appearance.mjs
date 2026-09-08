@@ -89,7 +89,7 @@ export function resolveParts(vfs, rawPath, depth = 0) {
     cells.forEach((cell, i) => {
       if (!cell.appearance) return;
       try {
-        out.push(...resolveParts(vfs, cell.appearance, depth + 1));
+        for (const part of resolveParts(vfs, cell.appearance, depth + 1)) out.push({ ...part, cell: i, cellName: cell.name || (i === 0 ? 'exterior' : `cell${i}`) });
       } catch (err) {
         errors.push(`cell ${i}: ${err.message}`);
       }

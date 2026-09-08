@@ -290,10 +290,11 @@ class App {
 
       if (simulate && player.hp <= 0) void this.die();
 
+      player.inside = this.world.inside;
       this.cam.update(
         input,
         player.pos,
-        (x, z) => Math.max(this.world.terrain.heightAt(x, z), this.world.terrain.waterLevel),
+        (x, z) => (this.world.inside ? -Infinity : Math.max(this.world.terrain.heightAt(x, z), this.world.terrain.waterLevel)),
         (x, z, r) => this.world.collidersNear(x, z, r),
       );
 

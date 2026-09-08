@@ -1,5 +1,15 @@
 import RAPIER from '@dimforge/rapier3d-compat';
 
+/**
+ * Collision group bits. Everything is in `all` by default; terrain and building shells get
+ * their own bits so a character standing inside a building can ignore both (the game only
+ * collides with a building's interior cells while you are in them, and never with the ground).
+ */
+export const Group = { terrain: 0x0001, exterior: 0x0002, interior: 0x0004, all: 0xffff } as const;
+
+/** Rapier interaction groups: membership in the high half, filter in the low half. */
+export const groups = (membership: number, filter: number): number => ((membership << 16) | filter) >>> 0;
+
 export { RAPIER };
 
 export const FIXED_DT = 1 / 60;
@@ -39,6 +49,12 @@ export class Physics {
    * (subdivs + 1)² entries: index = xi * (subdivs + 1) + zi.
    */
   createHeightfield(originX: number, originZ: number, size: number, subdivs: number, heights: Float32Array): RAPIER.Collider {
+    const c = this.createHeightfieldRaw(originX, originZ, size, subdivs, heights);
+    c.setCollisionGroups(groups(Group.terrain, Group.all));
+    return c;
+  }
+
+  private createHeightfieldRaw(originX: number, originZ: number, size: number, subdivs: number, heights: Float32Array): RAPIER.Collider {
     const desc = RAPIER.ColliderDesc.heightfield(subdivs, subdivs, heights, { x: size, y: 1, z: size })
       .setTranslation(originX + size / 2, 0, originZ + size / 2)
       .setFriction(0.9);

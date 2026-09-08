@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import type { ClassId } from '../combat/kit';
 import type { ThirdPersonCamera } from '../core/camera';
 import type { Input } from '../core/input';
-import { RAPIER, type Physics } from '../core/physics';
+import { Group, groups, RAPIER, type Physics } from '../core/physics';
 import type { Speeder } from '../vehicles/speeder';
 import type { World } from '../world/world';
 import type { CharacterRig } from './rig';
@@ -158,6 +158,8 @@ export class Player {
   jetThrust = false;
   /** Fly mode for exploring and bug hunting: no gravity, no collision. */
   noclip = false;
+  /** Inside a building: ignore the ground and the building's shell, as the game does per cell. */
+  inside = false;
   private regenDelay = 0;
   private phase = 0;
   private moveAmount = 0;
@@ -375,7 +377,8 @@ export class Player {
 
     if (this.vel.y > 0.5) this.controller.disableSnapToGround();
     else this.controller.enableSnapToGround(0.35);
-    this.controller.computeColliderMovement(this.collider, { x: this.vel.x * dt, y: this.vel.y * dt, z: this.vel.z * dt });
+    const filter = this.inside ? groups(Group.all, Group.all & ~(Group.terrain | Group.exterior)) : groups(Group.all, Group.all);
+    this.controller.computeColliderMovement(this.collider, { x: this.vel.x * dt, y: this.vel.y * dt, z: this.vel.z * dt }, undefined, filter);
     const mv = this.controller.computedMovement();
     this.pos.x += mv.x;
     this.pos.y += mv.y;

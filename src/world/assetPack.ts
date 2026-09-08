@@ -6,6 +6,8 @@ export interface PackModelDef {
   file: string;
   bounds: { min: number[]; max: number[] };
   triangles: number;
+  /** Portal buildings: one entry per cell, index 0 being the exterior shell. */
+  cells?: { index: number; name: string; bounds: { min: number[]; max: number[] } }[];
 }
 
 export interface PackManifest {
@@ -41,6 +43,8 @@ export interface Layout {
 export interface Primitive {
   geometry: THREE.BufferGeometry;
   material: THREE.Material;
+  /** Portal cell this primitive belongs to (0 = exterior shell), or -1 for plain models. */
+  cell: number;
 }
 
 export interface LoadedModel {
@@ -50,6 +54,8 @@ export interface LoadedModel {
   /** Horizontal radius from the bounds, for collision approximations. */
   radius: number;
   height: number;
+  /** Interior cell boxes in model space (buildings only), used to tell when someone is inside. */
+  interiorBoxes: THREE.Box3[];
 }
 
 /** Converted SWG content for one planet, loaded from the private assets folder. */
@@ -104,17 +110,23 @@ export class AssetPack {
           if (o instanceof THREE.Mesh) {
             o.castShadow = true;
             o.receiveShadow = true;
+            const cellMatch = /^cell:(\d+):/.exec(o.name) ?? /^cell:(\d+):/.exec(o.parent?.name ?? '');
+            const cell = cellMatch ? Number(cellMatch[1]) : -1;
             const mats = Array.isArray(o.material) ? o.material : [o.material];
-            for (const m of mats) primitives.push({ geometry: o.geometry, material: m });
+            for (const m of mats) primitives.push({ geometry: o.geometry, material: m, cell });
           }
         });
         const { min, max } = def.bounds;
+        const interiorBoxes = (def.cells ?? [])
+          .filter((c) => c.index > 0)
+          .map((c) => new THREE.Box3(new THREE.Vector3(...(c.bounds.min as [number, number, number])), new THREE.Vector3(...(c.bounds.max as [number, number, number]))));
         return {
           def,
           scene: gltf.scene,
           primitives,
           radius: Math.max(max[0] - min[0], max[2] - min[2]) / 2,
           height: max[1] - Math.min(0, min[1]),
+          interiorBoxes,
         };
       });
       this.cache.set(id, p);
