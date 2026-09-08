@@ -85,8 +85,8 @@ const ref = new MultiFractal(); ref.setSeed(1337); ref.setNumberOfOctaves(3); re
 const expectAt = (x: number, z: number) => 50 * ref.value2(x, z);
 for (const [x, z] of [[0, 0], [-500, 300], [30, -30]]) check(`fractal height ${x},${z}`, near(s.heightAt(x, z), expectAt(x, z), 1e-3), `${s.heightAt(x, z)} vs ${expectAt(x, z)}`);
 // pole-exact sampling: a pole position equals the grid value
-const g = s.generateChunk(3, -2);
-const st = s.chunkStart(3, -2);
+const g = s.generateBlock(3, -2);
+const st = s.blockStart(3, -2);
 const px = st.x + 7 * s.poleStep, pz = st.z + 9 * s.poleStep;
 check('pole exact', near(s.heightAt(px, pz), g[9 * s.numberOfPoles + 7], 1e-6));
 // inside the circle core (radius*(1-feather)=20): flattened to 7

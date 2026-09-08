@@ -99,10 +99,8 @@ export class SwgTerrain {
   heightAt(gx: number, gz: number): number {
     const x = this.toSwgX(gx);
     const z = this.toSwgZ(gz);
-    const cw = this.sampler.chunkWidth;
-    const cx = Math.floor(x / cw);
-    const cz = Math.floor(z / cw);
-    if (!this.sampler.hasChunk(cx, cz)) this.syncGenerations++;
+    const bw = this.sampler.blockWidth;
+    if (!this.sampler.hasBlock(Math.floor(x / bw), Math.floor(z / bw))) this.syncGenerations++;
     return this.sampler.heightAt(x, z);
   }
 
@@ -114,9 +112,9 @@ export class SwgTerrain {
     return Math.abs(mod(this.toSwgX(gx)) - half) < 1e-3 && Math.abs(mod(this.toSwgZ(gz)) - half) < 1e-3;
   }
 
-  /** SWG chunk keys covering a game-space square (with a one-pole margin for normals). */
-  private chunksCovering(gx0: number, gz0: number, size: number): { cx: number; cz: number }[] {
-    const cw = this.sampler.chunkWidth;
+  /** Pole blocks covering a game-space square (with a one-pole margin for normals). */
+  private blocksCovering(gx0: number, gz0: number, size: number): { cx: number; cz: number }[] {
+    const cw = this.sampler.blockWidth;
     const m = this.sampler.poleStep;
     const xs = [this.toSwgX(gx0 - m), this.toSwgX(gx0 + size + m)].sort((a, b) => a - b);
     const zs = [this.toSwgZ(gz0 - m), this.toSwgZ(gz0 + size + m)].sort((a, b) => a - b);
@@ -133,10 +131,10 @@ export class SwgTerrain {
    */
   prepareArea(gx0: number, gz0: number, size: number, sync: boolean): boolean {
     let ready = true;
-    for (const { cx, cz } of this.chunksCovering(gx0, gz0, size)) {
-      if (this.sampler.hasChunk(cx, cz)) continue;
+    for (const { cx, cz } of this.blocksCovering(gx0, gz0, size)) {
+      if (this.sampler.hasBlock(cx, cz)) continue;
       if (sync || !this.worker || !this.workerReady) {
-        this.sampler.generateChunk(cx, cz);
+        this.sampler.generateBlock(cx, cz);
         this.syncGenerations++;
         continue;
       }
@@ -144,9 +142,9 @@ export class SwgTerrain {
       const key = `c:${cx},${cz}`;
       if (this.requested.has(key)) continue;
       this.requested.add(key);
-      const s = this.sampler.chunkStart(cx, cz);
+      const s = this.sampler.blockStart(cx, cz);
       this.request(key, s.x, s.z, this.sampler.numberOfPoles, this.sampler.poleStep, (heights) => {
-        if (!this.sampler.hasChunk(cx, cz)) this.sampler.putChunk(cx, cz, heights);
+        if (!this.sampler.hasBlock(cx, cz)) this.sampler.putBlock(cx, cz, heights);
       });
     }
     return ready;
@@ -193,10 +191,10 @@ export class SwgTerrain {
     this.farGrids.delete(SwgTerrain.farKey(gx0, gz0, size, res));
   }
 
-  /** Forget chunk grids farther than `chunkRadius` SWG chunks from a game-space point. */
-  evict(gx: number, gz: number, chunkRadius: number): void {
-    const cw = this.sampler.chunkWidth;
-    this.sampler.evict(Math.floor(this.toSwgX(gx) / cw), Math.floor(this.toSwgZ(gz) / cw), chunkRadius);
+  /** Forget pole blocks farther than `blockRadius` blocks from a game-space point. */
+  evict(gx: number, gz: number, blockRadius: number): void {
+    const bw = this.sampler.blockWidth;
+    this.sampler.evict(Math.floor(this.toSwgX(gx) / bw), Math.floor(this.toSwgZ(gz) / bw), blockRadius);
   }
 
   private request(key: string, startX: number, startZ: number, n: number, step: number, resolve: (heights: Float32Array) => void): void {

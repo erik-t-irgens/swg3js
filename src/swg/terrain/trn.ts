@@ -99,71 +99,81 @@ export class TerrainSampler {
   readonly tileWidth: number;
   readonly tilesPerChunk: number;
   readonly poleStep: number;
+  /**
+   * Poles are cached in blocks of several client chunks: the generator gives identical heights
+   * for any grid on the pole lattice, and pruning the layer tree once per 64 m instead of once
+   * per 8 m chunk is several times cheaper.
+   */
+  readonly blockWidth: number;
+  readonly tilesPerBlock: number;
   readonly numberOfPoles: number;
-  private readonly chunks = new Map<string, Float32Array>();
+  private readonly blocks = new Map<string, Float32Array>();
   private readonly building: Layer[] = [];
   readonly template: TerrainTemplate;
 
-  constructor(template: TerrainTemplate) {
+  constructor(template: TerrainTemplate, blockWidth = 64) {
     this.template = template;
     this.generator = template.generator;
     this.chunkWidth = template.chunkWidthInMeters;
     this.tileWidth = template.tileWidthInMeters;
     this.tilesPerChunk = template.numberOfTilesPerChunk;
     this.poleStep = this.tileWidth * 0.5;
-    this.numberOfPoles = 2 * this.tilesPerChunk + ORIGIN_OFFSET + UPPER_PAD;
+    const chunksPerBlock = Math.max(1, Math.round(blockWidth / this.chunkWidth));
+    this.blockWidth = chunksPerBlock * this.chunkWidth;
+    this.tilesPerBlock = chunksPerBlock * this.tilesPerChunk;
+    this.numberOfPoles = 2 * this.tilesPerBlock + ORIGIN_OFFSET + UPPER_PAD;
   }
 
-  /** Run the generator over an arbitrary pole grid (used for chunks and coarse far tiles). */
+  /** Run the generator over an arbitrary pole grid (used for blocks and coarse far tiles). */
   generate(startX: number, startZ: number, n: number, step: number): HeightGrid {
     const d: ChunkData = createChunkData(startX, startZ, n, step, this.generator.fractalGroup, this.generator.shaderGroup, this.generator.bitmapGroup);
     this.generator.generateChunk(d);
     return { startX, startZ, n, step, heights: d.heightMap, shaders: d.shaderMap, excluded: d.excludeMap };
   }
 
-  /** Poles of one client chunk: start = chunk origin minus the two-pole origin offset. */
-  chunkStart(chunkX: number, chunkZ: number): { x: number; z: number } {
-    return { x: chunkX * this.chunkWidth - ORIGIN_OFFSET * this.poleStep, z: chunkZ * this.chunkWidth - ORIGIN_OFFSET * this.poleStep };
+  /** Poles of one block: start = block origin minus the two-pole origin offset. */
+  blockStart(blockX: number, blockZ: number): { x: number; z: number } {
+    return { x: blockX * this.blockWidth - ORIGIN_OFFSET * this.poleStep, z: blockZ * this.blockWidth - ORIGIN_OFFSET * this.poleStep };
   }
 
-  generateChunk(chunkX: number, chunkZ: number): Float32Array {
-    const key = `${chunkX},${chunkZ}`;
-    let h = this.chunks.get(key);
+  generateBlock(blockX: number, blockZ: number): Float32Array {
+    const key = `${blockX},${blockZ}`;
+    let h = this.blocks.get(key);
     if (!h) {
-      const s = this.chunkStart(chunkX, chunkZ);
+      const s = this.blockStart(blockX, blockZ);
       h = this.generate(s.x, s.z, this.numberOfPoles, this.poleStep).heights;
-      this.chunks.set(key, h);
+      this.blocks.set(key, h);
     }
     return h;
   }
 
-  hasChunk(chunkX: number, chunkZ: number): boolean {
-    return this.chunks.has(`${chunkX},${chunkZ}`);
+  hasBlock(blockX: number, blockZ: number): boolean {
+    return this.blocks.has(`${blockX},${blockZ}`);
   }
 
-  putChunk(chunkX: number, chunkZ: number, heights: Float32Array): void {
-    this.chunks.set(`${chunkX},${chunkZ}`, heights);
+  putBlock(blockX: number, blockZ: number, heights: Float32Array): void {
+    this.blocks.set(`${blockX},${blockZ}`, heights);
   }
 
-  /** Drop cached chunks farther than `radius` chunks from the given chunk. */
-  evict(chunkX: number, chunkZ: number, radius: number): void {
-    for (const key of this.chunks.keys()) {
+  /** Drop cached blocks farther than `radius` blocks from the given block. */
+  evict(blockX: number, blockZ: number, radius: number): void {
+    for (const key of this.blocks.keys()) {
       const [x, z] = key.split(',').map(Number);
-      if (Math.max(Math.abs(x - chunkX), Math.abs(z - chunkZ)) > radius) this.chunks.delete(key);
+      if (Math.max(Math.abs(x - blockX), Math.abs(z - blockZ)) > radius) this.blocks.delete(key);
     }
   }
 
   invalidateAll(): void {
-    this.chunks.clear();
+    this.blocks.clear();
   }
 
   /** Terrain height at a world point, from the tile fans exactly as the client's collision sees them. */
   heightAt(x: number, z: number): number {
-    const cw = this.chunkWidth;
-    const chunkX = Math.floor(x / cw);
-    const chunkZ = Math.floor(z / cw);
-    const h = this.generateChunk(chunkX, chunkZ);
-    return sampleFans(h, this.numberOfPoles, this.tilesPerChunk, this.tileWidth, x - chunkX * cw, z - chunkZ * cw);
+    const bw = this.blockWidth;
+    const bx = Math.floor(x / bw);
+    const bz = Math.floor(z / bw);
+    const h = this.generateBlock(bx, bz);
+    return sampleFans(h, this.numberOfPoles, this.tilesPerBlock, this.tileWidth, x - bx * bw, z - bz * bw);
   }
 
   /** Base terrain height at a point, excluding building modifications (generateHeight_expensive on an empty generator). */
@@ -192,7 +202,7 @@ export class TerrainSampler {
     layer.calculateExtent();
     this.generator.addLayer(layer);
     this.building.push(layer);
-    this.chunks.clear();
+    this.blocks.clear();
   }
 
   get buildingLayers(): readonly Layer[] {
@@ -201,7 +211,7 @@ export class TerrainSampler {
 }
 
 /**
- * Height inside one chunk from its pole grid. Each tile is a fan of eight triangles around
+ * Height inside one block from its pole grid. Each tile is a fan of eight triangles around
  * its centre pole; pick the triangle containing the point and interpolate on its plane.
  */
 export function sampleFans(h: Float32Array, n: number, tilesPerChunk: number, tileWidth: number, lx: number, lz: number): number {

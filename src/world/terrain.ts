@@ -194,7 +194,7 @@ export class Terrain {
 
   /** Drop cached SWG grids far from a point (in game chunks). */
   evict(center: THREE.Vector3, chunkRadius: number): void {
-    this.swg?.evict(center.x, center.z, Math.ceil((chunkRadius * CHUNK_SIZE) / this.swg.sampler.chunkWidth) + 2);
+    this.swg?.evict(center.x, center.z, Math.ceil((chunkRadius * CHUNK_SIZE) / this.swg.sampler.blockWidth) + 2);
   }
 
   private buildGrid(ox: number, oz: number, size: number, n: number, opts: { skirt: number; yOffset?: number; wantHeights: boolean }, samples?: Float32Array): { geometry: THREE.BufferGeometry; heights: Float32Array | null } {

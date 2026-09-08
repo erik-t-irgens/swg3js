@@ -302,7 +302,7 @@ async function terrainCheck(dir, limit, opts = {}) {
   console.log(`  histogram (m -> objects): ${[...bins.entries()].sort((a, b) => a[0] - b[0]).map(([b, n]) => `${b}:${n}`).join(' ')}`);
   const abs = rows.map((r) => Math.abs(r.err)).sort((a, b) => a - b);
   const pct = (p) => abs[Math.min(abs.length - 1, Math.floor(abs.length * p))];
-  console.log(`  ${rows.length} objects sampled in ${ms} ms (${sampler.numberOfPoles}x${sampler.numberOfPoles} poles per chunk)`);
+  console.log(`  ${rows.length} objects sampled in ${ms} ms (${sampler.blockWidth} m blocks of ${sampler.numberOfPoles}x${sampler.numberOfPoles} poles)`);
   console.log(`  |height error| median ${pct(0.5).toFixed(2)} m, 90% ${pct(0.9).toFixed(2)} m, max ${abs[abs.length - 1].toFixed(2)} m; within 0.5 m: ${((abs.filter((a) => a <= 0.5).length / abs.length) * 100).toFixed(1)}%`);
   const nan = rows.filter((r) => !Number.isFinite(r.h)).length;
   if (nan) console.log(`  WARNING: ${nan} non-finite heights`);
