@@ -34,8 +34,11 @@ const projView = new THREE.Matrix4();
 
 export class PortalRenderer {
   readonly materials = new Set<THREE.Material>();
-  /** Shadow-casting lights, shaded once per frame before the passes (set by the world). */
-  shadowLights: THREE.Light[] = [];
+  /**
+   * Shadow maps are shaded through this camera: it sees every layer (so every caster counts)
+   * but its frustum holds nothing, so the render that carries the shadow pass draws nothing.
+   */
+  private readonly shadowProbe = new THREE.PerspectiveCamera(1, 1, 0.001, 0.002);
   private readonly portalMat: THREE.MeshBasicMaterial;
   private readonly resetMat: THREE.ShaderMaterial;
   private readonly resetQuad: THREE.Mesh;
@@ -69,6 +72,9 @@ export class PortalRenderer {
     this.resetQuad.frustumCulled = false;
     // Drawn on its own whatever layer the camera is set to for the current pass.
     this.resetQuad.layers.enableAll();
+    this.shadowProbe.layers.enableAll();
+    this.shadowProbe.position.set(0, -1e6, 0);
+    this.shadowProbe.updateMatrixWorld();
     renderer.autoClear = false;
     renderer.shadowMap.autoUpdate = false;
   }
@@ -180,17 +186,12 @@ export class PortalRenderer {
    * Shade the shadow maps once, with everything that will appear this frame (the world, the
    * building the camera is in), so every pass shares the same lighting.
    */
-  private renderShadows(scene: THREE.Scene, camera: THREE.Camera, view: Building | null): void {
+  private renderShadows(scene: THREE.Scene, view: Building | null): void {
     const r = this.renderer;
     if (!r.shadowMap.enabled) return;
-    if (!this.shadowLights.length) {
-      r.shadowMap.needsUpdate = true; // shaded by the first pass instead
-      return;
-    }
     if (view) this.showInterior(view, true);
-    camera.layers.enableAll();
     r.shadowMap.needsUpdate = true;
-    r.shadowMap.render(this.shadowLights, scene, camera);
+    r.render(scene, this.shadowProbe);
     if (view) this.showInterior(view, false);
   }
 
@@ -203,7 +204,7 @@ export class PortalRenderer {
     this.passes = 0;
     projView.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
     frustum.setFromProjectionMatrix(projView);
-    this.renderShadows(scene, camera, view);
+    this.renderShadows(scene, view);
     r.state.buffers.stencil.setClear(1);
     r.clear(true, true, true);
     this.setRef(1);

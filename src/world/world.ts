@@ -450,7 +450,6 @@ export class World {
       markActor(l);
       markActor(l.target);
     }
-    portals.shadowLights = this.csm.lights;
     this.setupShadowMaterials();
   }
 
