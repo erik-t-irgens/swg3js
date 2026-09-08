@@ -38,6 +38,13 @@ const versionForm = (root, tag) => {
 // ---------------------------------------------------------------------------------------------
 // Skeleton (.skt)
 export function parseSkeleton(root) {
+  // A LOD skeleton (SLOD) holds one SKTM form per detail level, finest first.
+  if (isForm(root) && root.type === 'SLOD') {
+    const lod = root.children.find(isForm);
+    const first = lod && childrenOf(lod, 'SKTM')[0];
+    if (!first) throw new Error('SLOD: no skeleton inside');
+    return parseSkeleton(first);
+  }
   const v = versionForm(root, 'SKTM');
   const version = Number.parseInt(v.type, 10);
   if (version !== 2 && version !== 1) throw new Error(`SKTM: unsupported version ${v.type}`);
@@ -69,6 +76,7 @@ export function parseMgn(root) {
   const normalCount = info.i32();
   const shaderCount = info.i32();
   const blendTargetCount = info.i32();
+  // version 4 adds four int16 occlusion counts; older headers end here
   const strings = (chunk, count) => {
     const r = new R(chunk.data);
     const out = [];
