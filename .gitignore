@@ -4,3 +4,4 @@ dist
 *.log
 assets-private
 *.tre
+.why
