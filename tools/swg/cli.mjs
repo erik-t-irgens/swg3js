@@ -350,7 +350,7 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
     const lat = parseLat(readIff(vfs, latFile));
     info.animationTable = latFile;
     const wanted = animations === 'all' || animations === 'list' ? null : animations.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
-    info.available = lat.entries.map((e) => `${e.name}${e.kind === 'file' || e.kind === 'inline' ? '' : ` [${e.kind}]`}`);
+    info.available = lat.entries.map((e) => `${e.name}${e.kind === 'file' || e.kind === 'inline' ? '' : ` [${e.kind}]`}${e.variable ? ` (${e.variable}${e.isDefault ? ', default' : ''})` : ''}${e.timeScale && e.timeScale !== 1 ? ` x${e.timeScale.toFixed(2)}` : ''}`);
     if (animations === 'list') return info;
     for (const e of lat.entries) {
       if (wanted && !wanted.some((w) => e.name.toLowerCase().includes(w))) continue;
@@ -368,6 +368,7 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
           info.skipped.push(`${e.name}: ${e.kind} animation templates are not converted`);
           continue;
         }
+        if (e.timeScale && e.timeScale !== 1 && e.timeScale > 0) animation.fps *= e.timeScale;
         clips.push({ name: e.name, animation });
         info.animations.push(e.name);
       } catch (err) {

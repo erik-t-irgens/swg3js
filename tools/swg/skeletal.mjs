@@ -220,22 +220,87 @@ export function parseLat(root) {
   for (const anim of childrenOf(v, 'ANIM')) {
     const name = new R(childOf(anim, 'INFO').data).str().trim();
     const template = anim.children.find(isForm);
-    entries.push({ name, ...describeAnimationTemplate(template) });
+    entries.push(...flattenAnimationTemplate(template, name));
   }
   void count;
   return { hierarchy, entries };
 }
 
-/** What an animation template form refers to: a keyframe file (inline), a proxy to a .ans file, or something else. */
-function describeAnimationTemplate(form) {
-  if (!form) return { kind: 'none' };
-  if (form.type === 'KFAT') return { kind: 'inline', form };
-  if (form.type === 'PXAT') {
-    const v = form.children.find(isForm);
-    const target = new R(childOf(v, 'INFO').data).str().replace(/\\/g, '/');
-    return { kind: 'file', file: target.includes('/') ? target : `appearance/animation/${target}${/\.ans$/i.test(target) ? '' : '.ans'}` };
+/**
+ * The keyframe animations an animation template form resolves to, unwrapping the selector
+ * templates the client picks from at run time: KFAT (inline keyframes), PXAT (a .ans file),
+ * SSAT (chosen by a named string variable; each value becomes "name:value"), SPAT (chosen by
+ * speed; "name:speedN"), DRAT (chosen by direction; the forward one keeps the name, the
+ * others get ":dirN"), TSCL (time scaled), AGAT (a loop with random emotes; the loop),
+ * PBAT (priority blend; the primary component).
+ */
+export function flattenAnimationTemplate(form, name, timeScale = 1) {
+  if (!form) return [{ name, kind: 'none' }];
+  const v = form.children.find(isForm);
+  switch (form.type) {
+    case 'KFAT':
+      return [{ name, kind: 'inline', form, timeScale }];
+    case 'PXAT': {
+      const target = new R(childOf(v, 'INFO').data).str().replace(/\\/g, '/');
+      return [{ name, kind: 'file', file: target.includes('/') ? target : `appearance/animation/${target}${/\.ans$/i.test(target) ? '' : '.ans'}`, timeScale }];
+    }
+    case 'TSCL': {
+      const scale = new R(childOf(v, 'INFO').data).f32();
+      const child = v.children.filter(isForm)[0];
+      return flattenAnimationTemplate(child, name, timeScale * (scale || 1));
+    }
+    case 'AGAT': {
+      const loop = childOf(v, 'LOOP');
+      const child = loop && loop.children.find(isForm);
+      return flattenAnimationTemplate(child, name, timeScale);
+    }
+    case 'PBAT': {
+      const primary = new R(childOf(v, 'INFO').data).i8();
+      const comps = childrenOf(v, 'COMP');
+      const child = (comps[primary] ?? comps[0])?.children.find(isForm);
+      return flattenAnimationTemplate(child, name, timeScale);
+    }
+    case 'SPAT': {
+      const children = v.children.filter(isForm);
+      return children.flatMap((c, i) => flattenAnimationTemplate(c, `${name}:speed${i}`, timeScale));
+    }
+    case 'DRAT': {
+      const out = [];
+      for (const dir of childrenOf(v, 'DIR')) {
+        const code = new R(childOf(dir, 'INFO').data).i8();
+        const child = dir.children.find(isForm);
+        out.push(...flattenAnimationTemplate(child, code === 0 ? name : `${name}:dir${code}`, timeScale));
+      }
+      return out;
+    }
+    case 'SSAT': {
+      const variable = new R(childOf(v, 'INFO').data).str();
+      const anms = childOf(v, 'ANMS');
+      const templates = anms ? anms.children.filter(isForm) : [];
+      const values = new Map(); // template index -> value names
+      const vals = childOf(v, 'VALS');
+      if (vals) {
+        const r = new R(vals.data);
+        const n = r.i16();
+        for (let i = 0; i < n; i++) {
+          const value = r.str();
+          const index = r.i16();
+          values.set(index, [...(values.get(index) ?? []), value]);
+        }
+      }
+      const dflt = childOf(v, 'DFLT');
+      const defaultIndex = dflt ? new R(dflt.data).i16() : -1;
+      const out = [];
+      templates.forEach((t, i) => {
+        const label = values.get(i)?.[0];
+        const entryName = i === defaultIndex && !label ? name : `${name}:${label ?? i}`;
+        for (const e of flattenAnimationTemplate(t, entryName, timeScale)) out.push({ ...e, variable, values: values.get(i) ?? [], isDefault: i === defaultIndex });
+      });
+      return out;
+    }
+    default:
+      return [{ name, kind: form.type, timeScale }];
   }
-  return { kind: form.type };
 }
 
 // ---------------------------------------------------------------------------------------------
