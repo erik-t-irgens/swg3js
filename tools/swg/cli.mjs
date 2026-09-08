@@ -295,6 +295,17 @@ function convertFlora(vfs, template, outDir, manifest) {
 }
 
 /**
+ * Friendly clip names for the locomotion loops the client selects by speed: the default
+ * (unmounted) loop_stand's stand/walk/run become idle/walk/run, the combat loop likewise.
+ */
+function clipName(entry) {
+  const m = /^(loop_stand(?:_combat)?):speed([012])$/.exec(entry.name);
+  if (!m || entry.isDefault === false) return entry.name;
+  const base = ['idle', 'walk', 'run'][Number(m[2])];
+  return m[1] === 'loop_stand' ? base : `${base}_combat`;
+}
+
+/**
  * Convert a skeletal appearance (.sat, or an object template that names one) into a skinned
  * GLB with its skeleton and the animations its logical animation table lists.
  * `animations` filters logical names by substring ('all' keeps every one).
@@ -350,10 +361,13 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
     const lat = parseLat(readIff(vfs, latFile));
     info.animationTable = latFile;
     const wanted = animations === 'all' || animations === 'list' ? null : animations.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
-    info.available = lat.entries.map((e) => `${e.name}${e.kind === 'file' || e.kind === 'inline' ? '' : ` [${e.kind}]`}${e.variable ? ` (${e.variable}${e.isDefault ? ', default' : ''})` : ''}${e.timeScale && e.timeScale !== 1 ? ` x${e.timeScale.toFixed(2)}` : ''}`);
+    const named = lat.entries.map((e) => ({ ...e, clip: clipName(e) }));
+    info.available = named.map((e) => `${e.clip}${e.clip !== e.name ? ` (${e.name})` : ''}${e.kind === 'file' || e.kind === 'inline' ? '' : ` [${e.kind}]`}${e.variable ? ` (${e.variable}${e.isDefault ? ', default' : ''})` : ''}${e.timeScale && e.timeScale !== 1 ? ` x${e.timeScale.toFixed(2)}` : ''}`);
     if (animations === 'list') return info;
-    for (const e of lat.entries) {
-      if (wanted && !wanted.some((w) => e.name.toLowerCase().includes(w))) continue;
+    const used = new Set();
+    for (const e of named) {
+      if (wanted && !wanted.some((w) => e.clip.toLowerCase().includes(w) || e.name.toLowerCase().includes(w))) continue;
+      if (used.has(e.clip)) continue;
       if (clips.length >= maxAnimations) break;
       try {
         let animation;
@@ -369,8 +383,9 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
           continue;
         }
         if (e.timeScale && e.timeScale !== 1 && e.timeScale > 0) animation.fps *= e.timeScale;
-        clips.push({ name: e.name, animation });
-        info.animations.push(e.name);
+        used.add(e.clip);
+        clips.push({ name: e.clip, animation });
+        info.animations.push(e.clip);
       } catch (err) {
         info.skipped.push(`${e.name}: ${err.message}`);
       }

@@ -264,6 +264,16 @@ export function flattenAnimationTemplate(form, name, timeScale = 1) {
       const children = v.children.filter(isForm);
       return children.flatMap((c, i) => flattenAnimationTemplate(c, `${name}:speed${i}`, timeScale));
     }
+    case 'YWAT': {
+      // Yaw selector: the straight-ahead animation keeps the name; turning variants get :left/:right.
+      const out = [];
+      for (const [tag, suffix] of [['NONE', ''], ['YNEG', ':left'], ['YPOS', ':right']]) {
+        const holder = childOf(v, tag);
+        const child = holder && holder.children.find(isForm);
+        if (child) out.push(...flattenAnimationTemplate(child, `${name}${suffix}`, timeScale));
+      }
+      return out;
+    }
     case 'DRAT': {
       const out = [];
       for (const dir of childrenOf(v, 'DIR')) {
