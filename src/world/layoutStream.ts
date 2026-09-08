@@ -7,7 +7,7 @@ import { Group, groups, RAPIER as R, type Physics } from '../core/physics';
 import type { AssetPack, Layout, LoadedModel } from './assetPack';
 import { CHUNK_SIZE } from './terrain';
 import type { Exclusion } from './props';
-import { cellLayer } from './portalRender';
+import { cellLayer, crossing } from './portalRender';
 
 export const REGION = 256;
 
@@ -65,36 +65,11 @@ const tmpV = new THREE.Vector3();
 const ONE = new THREE.Vector3(1, 1, 1);
 const localA = new THREE.Vector3();
 const localB = new THREE.Vector3();
-const hitP = new THREE.Vector3();
 
 /** Where the player is: outside (cell 0 of no building) or in a cell of a building. */
 export interface CellState {
   building: Building;
   cell: number;
-}
-
-/** Does the segment a-b cross the portal polygon (model space)? */
-function crossesPortal(portal: import('./assetPack').Portal, a: THREE.Vector3, b: THREE.Vector3): boolean {
-  const da = portal.normal.dot(a) - portal.d;
-  const db = portal.normal.dot(b) - portal.d;
-  if ((da > 0 && db > 0) || (da < 0 && db < 0) || da === db) return false;
-  const t = da / (da - db);
-  hitP.copy(a).lerp(b, t);
-  // Point in polygon on the plane's dominant axis.
-  const n = portal.normal;
-  const ax = Math.abs(n.x);
-  const ay = Math.abs(n.y);
-  const az = Math.abs(n.z);
-  const u = ax >= ay && ax >= az ? 'y' : ay >= az ? 'x' : 'x';
-  const v = ax >= ay && ax >= az ? 'z' : ay >= az ? 'z' : 'y';
-  let inside = false;
-  const pts = portal.verts;
-  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
-    const pi = pts[i];
-    const pj = pts[j];
-    if (pi[v] > hitP[v] !== pj[v] > hitP[v] && hitP[u] < ((pj[u] - pi[u]) * (hitP[v] - pi[v])) / (pj[v] - pi[v]) + pi[u]) inside = !inside;
-  }
-  return inside;
 }
 
 export class LayoutStreamer {
@@ -257,7 +232,8 @@ export class LayoutStreamer {
         mesh.receiveShadow = true;
         mesh.instanceMatrix.needsUpdate = true;
         mesh.computeBoundingSphere();
-        if (prim.cell > 0) mesh.layers.set(cellLayer(prim.cell));
+        // Interiors render only through portals; a building without portal data draws normally.
+        if (prim.cell > 0 && model.portals.length) mesh.layers.set(cellLayer(prim.cell));
         this.scene.add(mesh);
         meshes.push(mesh);
       }
@@ -353,7 +329,7 @@ export class LayoutStreamer {
       for (const portal of b.model.portals) {
         const link = portal.links.find((l) => l.from === state.cell) ?? portal.links.find((l) => l.to === state.cell);
         if (!link || !portal.passable) continue;
-        if (crossesPortal(portal, localA, localB)) {
+        if (crossing(portal, localA, localB) !== null) {
           const target = link.from === state.cell ? link.to : link.from;
           return target === 0 ? null : { building: b, cell: target };
         }
@@ -367,7 +343,7 @@ export class LayoutStreamer {
       for (const portal of b.model.portals) {
         const link = portal.links.find((l) => l.from === 0) ?? portal.links.find((l) => l.to === 0);
         if (!link || !portal.passable) continue;
-        if (crossesPortal(portal, localA, localB)) {
+        if (crossing(portal, localA, localB) !== null) {
           const target = link.from === 0 ? link.to : link.from;
           if (target > 0) return { building: b, cell: target };
         }

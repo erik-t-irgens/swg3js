@@ -102,9 +102,10 @@ export class PortalRenderer {
     if (!list) {
       list = b.model.portals.map((p) => {
         const verts: number[] = [];
-        for (let i = 1; i + 1 < p.verts.length; i++) verts.push(p.verts[0].x, p.verts[0].y, p.verts[0].z, p.verts[i].x, p.verts[i].y, p.verts[i].z, p.verts[i + 1].x, p.verts[i + 1].y, p.verts[i + 1].z);
+        for (const v of p.verts) verts.push(v.x, v.y, v.z);
         const g = new THREE.BufferGeometry();
         g.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+        g.setIndex(p.indices);
         const mesh = new THREE.Mesh(g, this.portalMat);
         mesh.matrixAutoUpdate = false;
         mesh.matrix.copy(b.matrix);
@@ -274,25 +275,38 @@ export class PortalRenderer {
   }
 }
 
-/** Parameter along a-b where the segment crosses the portal polygon, or null. */
+/** Parameter along a-b where the segment crosses one of the portal's triangles, or null. */
 export function crossing(portal: import('./assetPack').Portal, a: THREE.Vector3, b: THREE.Vector3): number | null {
   const da = portal.normal.dot(a) - portal.d;
   const db = portal.normal.dot(b) - portal.d;
   if ((da > 0 && db > 0) || (da < 0 && db < 0) || da === db) return null;
   const t = da / (da - db);
   const hit = tmpV.copy(a).lerp(b, t);
-  const n = portal.normal;
-  const ax = Math.abs(n.x);
-  const ay = Math.abs(n.y);
-  const az = Math.abs(n.z);
-  const u: 'x' | 'y' | 'z' = ax >= ay && ax >= az ? 'y' : 'x';
-  const v: 'x' | 'y' | 'z' = ax >= ay && ax >= az ? 'z' : ay >= az ? 'z' : 'y';
-  let inside = false;
-  const pts = portal.verts;
-  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
-    const pi = pts[i];
-    const pj = pts[j];
-    if (pi[v] > hit[v] !== pj[v] > hit[v] && hit[u] < ((pj[u] - pi[u]) * (hit[v] - pi[v])) / (pj[v] - pi[v]) + pi[u]) inside = !inside;
+  const idx = portal.indices;
+  const v = portal.verts;
+  for (let k = 0; k + 2 < idx.length; k += 3) {
+    if (pointInTriangle(hit, v[idx[k]], v[idx[k + 1]], v[idx[k + 2]])) return t;
   }
-  return inside ? t : null;
+  return null;
+}
+
+const e0 = new THREE.Vector3();
+const e1 = new THREE.Vector3();
+const e2 = new THREE.Vector3();
+
+function pointInTriangle(p: THREE.Vector3, a: THREE.Vector3, b: THREE.Vector3, c: THREE.Vector3): boolean {
+  e0.subVectors(c, a);
+  e1.subVectors(b, a);
+  e2.subVectors(p, a);
+  const dot00 = e0.dot(e0);
+  const dot01 = e0.dot(e1);
+  const dot02 = e0.dot(e2);
+  const dot11 = e1.dot(e1);
+  const dot12 = e1.dot(e2);
+  const denom = dot00 * dot11 - dot01 * dot01;
+  if (Math.abs(denom) < 1e-12) return false;
+  const inv = 1 / denom;
+  const u = (dot11 * dot02 - dot01 * dot12) * inv;
+  const w = (dot00 * dot12 - dot01 * dot02) * inv;
+  return u >= -1e-4 && w >= -1e-4 && u + w <= 1 + 1e-4;
 }

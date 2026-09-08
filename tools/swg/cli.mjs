@@ -16,6 +16,7 @@
 //                                                                  convert the world snapshot's objects around a point into a layout,
 //                                                                  and copy the planet's terrain (.trn) plus building terrain layers (.lay)
 //   node tools/swg/cli.mjs stat <swg-dir> <file>                    which archive provides a file (after load order and deletions)
+//   node tools/swg/cli.mjs pob <swg-dir> <file.pob>                 print a portal building's cells, portals and links (diagnostic)
 //   node tools/swg/cli.mjs terrain <swg-dir> <planet> <out-dir>    copy just the terrain template into a pack
 //   node tools/swg/cli.mjs terrain-check <out-dir> [--limit=n] [--layers] [--at=x,z]
 //                                                                  generate terrain at every snapshot object and compare with its height;
@@ -197,7 +198,7 @@ function convertOne(vfs, appearancePath, outFile) {
   const flipBounds = (b) => (flipX && b ? { min: [-b.max[0], b.min[1], b.min[2]], max: [-b.min[0], b.max[1], b.max[2]] } : b);
   const cellInfo = cells ? cells.map((c) => ({ index: c.index, name: c.name, bounds: flipBounds(c.bounds), portals: c.portals.map((p) => ({ geometry: p.geometry, target: p.target, passable: p.passable && !p.disabled })) })) : undefined;
   // Portal polygons in model space (X flipped with the meshes) so the game can tell which cell the player is in.
-  const portals = portalGeometry ? portalGeometry.map((verts) => verts.map(([x, y, z]) => [flipX ? -x : x, y, z])) : undefined;
+  const portals = portalGeometry ? portalGeometry.map((p) => ({ v: p.verts.map(([x, y, z]) => [flipX ? -x : x, y, z]), i: p.indices })) : undefined;
   return { meshPath, mesh, flipX, tris, shaders, textured: textures.size, warnings: mesh.warnings, partCount, cells: cellInfo, portals };
 }
 
@@ -498,6 +499,8 @@ switch (cmd) {
     manifest.categories.layout = [...models.values()].filter((m) => m && !m.failed);
     writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
     console.log(`layout: ${objects.length} objects, ${manifest.categories.layout.length} models -> ${join(outDir, 'layout.json')}`);
+    const withCells = manifest.categories.layout.filter((m) => m.cells);
+    console.log(`buildings: ${withCells.length} models with cells, ${withCells.filter((m) => m.portals && m.portals.length).length} with portals`);
     console.log(`terrain: ${terrainFile ?? 'not found'}, ${objects.filter((o) => o.layer).length} objects with terrain modification layers (${new Set(objects.map((o) => o.layer).filter(Boolean)).size} files)`);
     for (const [reason, count] of Object.entries(skipped).sort((a, b) => b[1] - a[1])) {
       console.log(`  skipped ${count}: ${reason}`);
@@ -506,6 +509,19 @@ switch (cmd) {
     printEffectSummary();
     break;
   }
+  case 'pob': {
+    if (!pos[2]) usage();
+    const vfs = mount(pos[1]);
+    const root = parseIff(vfs.read(pos[2]));
+    console.log(dump(root).slice(0, 60).join('\n'));
+    const { parsePob } = await import('./pob.mjs');
+    const pob = parsePob(root);
+    console.log(`${pob.cells.length} cells, ${pob.portals.length} portal polygons`);
+    pob.portals.forEach(({ verts, indices }, i) => console.log(`  portal ${i}: ${verts.length} verts, ${indices.length / 3} triangles, centre ${verts.reduce((a, v) => a.map((c, k) => c + v[k] / verts.length), [0, 0, 0]).map((v) => v.toFixed(2)).join(',')}`));
+    pob.cells.forEach((c, i) => console.log(`  cell ${i} "${c.name}" ${c.appearance} floor ${c.floor || '-'}: ${c.portals.map((p) => `#${p.geometry}->${p.target}${p.passable ? '' : ' closed'}${p.disabled ? ' disabled' : ''}`).join(' ') || 'no portals'}`));
+    break;
+  }
+
   case 'stat': {
     if (!pos[2]) usage();
     const vfs = mount(pos[1]);

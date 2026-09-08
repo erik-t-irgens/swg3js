@@ -8,8 +8,8 @@ export interface PackModelDef {
   triangles: number;
   /** Portal buildings: one entry per cell, index 0 being the exterior shell. */
   cells?: { index: number; name: string; bounds: { min: number[]; max: number[] }; portals?: { geometry: number; target: number; passable: boolean }[] }[];
-  /** Portal polygons in model space, indexed by the cells' `geometry` field. */
-  portals?: number[][][];
+  /** Portal polygons in model space (vertices and triangle indices), indexed by the cells' `geometry` field. */
+  portals?: { v: number[][]; i: number[] }[];
 }
 
 export interface PackManifest {
@@ -66,6 +66,8 @@ export interface LoadedModel {
 
 export interface Portal {
   verts: THREE.Vector3[];
+  /** Triangle indices into verts. */
+  indices: number[];
   normal: THREE.Vector3;
   /** Plane offset: normal . p = d on the polygon. */
   d: number;
@@ -150,18 +152,16 @@ export class AssetPack {
           .filter((c) => c.index > 0)
           .map((c) => new THREE.Box3(new THREE.Vector3(...(c.bounds.min as [number, number, number])), new THREE.Vector3(...(c.bounds.max as [number, number, number]))));
         const portals: Portal[] = (def.portals ?? []).map((poly) => {
-          const verts = poly.map((v) => new THREE.Vector3(v[0], v[1], v[2]));
-          // Newell normal: robust for any planar polygon winding.
-          const normal = new THREE.Vector3();
-          for (let i = 0; i < verts.length; i++) {
-            const a = verts[i];
-            const b = verts[(i + 1) % verts.length];
-            normal.x += (a.y - b.y) * (a.z + b.z);
-            normal.y += (a.z - b.z) * (a.x + b.x);
-            normal.z += (a.x - b.x) * (a.y + b.y);
+          const verts = poly.v.map((v) => new THREE.Vector3(v[0], v[1], v[2]));
+          const indices = poly.i.filter((k) => k >= 0 && k < verts.length);
+          const normal = new THREE.Vector3(0, 0, 1);
+          if (indices.length >= 3) {
+            const a = verts[indices[0]];
+            const b = verts[indices[1]];
+            const c = verts[indices[2]];
+            normal.copy(b).sub(a).cross(new THREE.Vector3().copy(c).sub(a)).normalize();
           }
-          normal.normalize();
-          return { verts, normal, d: verts.length ? normal.dot(verts[0]) : 0, links: [], passable: true };
+          return { verts, indices, normal, d: verts.length ? normal.dot(verts[indices[0] ?? 0]) : 0, links: [], passable: true };
         });
         for (const c of def.cells ?? []) {
           for (const link of c.portals ?? []) {
