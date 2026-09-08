@@ -4,7 +4,7 @@
 // 0001: type-spec strings whose first letter gives the storage: i/h/b/e/v int32, f float,
 // s/c/p C-string), ROWS (int32 count, cells in column order).
 //
-// .stf: uint16 magic 0xabcd, uint8 version, uint32 next id, uint32 count, then per string
+// .stf: uint32 magic 0xabcd, uint8 version, uint32 next id, uint32 count, then per string
 // {uint32 id, uint32 time (v0) or crc (v1), uint32 length, UTF-16LE chars}, then per string
 // {uint32 id, uint32 length, ASCII name}.
 
@@ -64,9 +64,10 @@ export function parseDatatable(root) {
 
 /** Parse a string table into a Map from string name to text. */
 export function parseStringTable(buf) {
-  if (buf.readUInt16LE(0) !== 0xabcd) throw new Error('not a string table');
-  const version = buf.readUInt8(2);
-  let cursor = 3 + 4; // skip next id
+  // magic_type is a 4-byte long; the version is one byte after it
+  if (buf.readUInt32LE(0) !== 0xabcd) throw new Error('not a string table');
+  const version = buf.readUInt8(4);
+  let cursor = 5 + 4; // magic, version, next id
   const count = buf.readUInt32LE(cursor);
   cursor += 4;
   const texts = new Map();

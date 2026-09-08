@@ -1,0 +1,2623 @@
+{
+ "tatooine": [
+  {
+   "key": "anchorhead",
+   "stringId": "tatooine_region_names:anchorhead",
+   "name": "Anchorhead",
+   "x": 102,
+   "z": -5360,
+   "r": 125,
+   "kind": "city"
+  },
+  {
+   "key": "wayfar",
+   "stringId": "tatooine_region_names:wayfar",
+   "name": "Wayfar",
+   "x": -5174,
+   "z": -6582,
+   "r": 230,
+   "kind": "city"
+  },
+  {
+   "key": "mos_taike",
+   "stringId": "tatooine_region_names:mos_taike",
+   "name": "Mos Taike",
+   "x": 3832,
+   "z": 2360,
+   "r": 264,
+   "kind": "city"
+  },
+  {
+   "key": "bestine",
+   "stringId": "tatooine_region_names:bestine",
+   "name": "Bestine",
+   "x": -1218,
+   "z": -3688,
+   "r": 336,
+   "kind": "city"
+  },
+  {
+   "key": "mos_entha",
+   "stringId": "tatooine_region_names:mos_entha",
+   "name": "Mos Entha",
+   "x": 1488,
+   "z": 3256,
+   "r": 424,
+   "kind": "city"
+  },
+  {
+   "key": "mos_eisley",
+   "stringId": "tatooine_region_names:mos_eisley",
+   "name": "Mos Eisley",
+   "x": 3460,
+   "z": -4768,
+   "r": 456,
+   "kind": "city"
+  },
+  {
+   "key": "mos_espa",
+   "stringId": "tatooine_region_names:mos_espa",
+   "name": "Mos Espa",
+   "x": -2940,
+   "z": 2190,
+   "r": 533,
+   "kind": "city"
+  },
+  {
+   "key": "hung_skeleton",
+   "stringId": "tatooine_region_names:hung_skeleton",
+   "name": "Hung Skeleton",
+   "x": -4824,
+   "z": 6530,
+   "r": 20,
+   "kind": "landmark"
+  },
+  {
+   "key": "bowling_rocks",
+   "stringId": "tatooine_region_names:bowling_rocks",
+   "name": "Bowling Rocks",
+   "x": -5233,
+   "z": 6237,
+   "r": 20,
+   "kind": "landmark"
+  },
+  {
+   "key": "crashed_lifepod",
+   "stringId": "tatooine_region_names:crashed_lifepod",
+   "name": "Crashed Lifepod",
+   "x": -6173,
+   "z": 5887,
+   "r": 20,
+   "kind": "landmark"
+  },
+  {
+   "key": "sand_swept_tanks",
+   "stringId": "tatooine_region_names:sand_swept_tanks",
+   "name": "Sand Swept Tanks",
+   "x": -4696,
+   "z": 5455,
+   "r": 20,
+   "kind": "landmark"
+  },
+  {
+   "key": "crash_debris_camp",
+   "stringId": "tatooine_region_names:crash_debris_camp",
+   "name": "Crash Debris Camp",
+   "x": -4463,
+   "z": 5782,
+   "r": 20,
+   "kind": "landmark"
+  },
+  {
+   "key": "hovel_in_the_hill",
+   "stringId": "tatooine_region_names:hovel_in_the_hill",
+   "name": "Hovel in the Hill",
+   "x": -6353,
+   "z": 4653,
+   "r": 20,
+   "kind": "landmark"
+  },
+  {
+   "key": "radar_dish",
+   "stringId": "tatooine_region_names:radar_dish",
+   "name": "Radar Dish",
+   "x": -5467,
+   "z": 2134,
+   "r": 20,
+   "kind": "landmark"
+  },
+  {
+   "key": "storage_tent",
+   "stringId": "tatooine_region_names:storage_tent",
+   "name": "Storage Tent",
+   "x": -6890,
+   "z": 1508,
+   "r": 20,
+   "kind": "landmark"
+  },
+  {
+   "key": "ore_harvesters",
+   "stringId": "tatooine_region_names:ore_harvesters",
+   "name": "Ore Harvesters",
+   "x": -5784,
+   "z": -560,
+   "r": 20,
+   "kind": "landmark"
+  },
+  {
+   "key": "ruins_of_old_building",
+   "stringId": "tatooine_region_names:ruins_of_old_building",
+   "name": "Ruins of Old Building",
+   "x": -5549,
+   "z": -2425,
+   "r": 20,
+   "kind": "landmark"
+  },
+  {
+   "key": "small_camp",
+   "stringId": "tatooine_region_names:small_camp",
+   "name": "Small Camp",
+   "x": -3321,
+   "z": -3717,
+   "r": 20,
+   "kind": "landmark"
+  },
+  {
+   "key": "elegent_tent",
+   "stringId": "tatooine_region_names:elegent_tent",
+   "name": "Elegent Tent",
+   "x": -2598,
+   "z": -2294,
+   "r": 20,
+   "kind": "landmark"
+  },
+  {
+   "key": "junk_heap",
+   "stringId": "tatooine_region_names:junk_heap",
+   "name": "Junk Heap",
+   "x": -2127,
+   "z": 683,
+   "r": 20,
+   "kind": "landmark"
+  },
+  {
+   "key": "camp_with_two_tents",
+   "stringId": "tatooine_region_names:camp_with_two_tents",
+   "name": "Camp with Two Tents",
+   "x": -1262,
+   "z": 5461,
+   "r": 20,
+   "kind": "landmark"
+  },
+  {
+   "key": "listening_post",
+   "stringId": "tatooine_region_names:listening_post",
+   "name": "Listening Post",
+   "x": 5943,
+   "z": -3828,
+   "r": 20,
+   "kind": "landmark"
+  },
+  {
+   "key": "small_grave_marker",
+   "stringId": "tatooine_region_names:small_grave_marker",
+   "name": "Small Grave Marker",
+   "x": 1877,
+   "z": -3029,
+   "r": 20,
+   "kind": "landmark"
+  },
+  {
+   "key": "pile_o_rocks",
+   "stringId": "tatooine_region_names:pile_o_rocks",
+   "name": "Pile o Rocks",
+   "x": 871,
+   "z": -1057,
+   "r": 20,
+   "kind": "landmark"
+  },
+  {
+   "key": "broken_ruins",
+   "stringId": "tatooine_region_names:broken_ruins",
+   "name": "Broken Ruins",
+   "x": -5722,
+   "z": 6479,
+   "r": 30,
+   "kind": "landmark"
+  },
+  {
+   "key": "ancient_skeleton",
+   "stringId": "tatooine_region_names:ancient_skeleton",
+   "name": "Ancient Skeleton",
+   "x": -5802,
+   "z": 5408,
+   "r": 30,
+   "kind": "landmark"
+  },
+  {
+   "key": "krayt_skeleton",
+   "stringId": "tatooine_region_names:krayt_skeleton",
+   "name": "Krayt Skeleton",
+   "x": -6205,
+   "z": 5056,
+   "r": 30,
+   "kind": "landmark"
+  },
+  {
+   "key": "krayt_buried_alive",
+   "stringId": "tatooine_region_names:krayt_buried_alive",
+   "name": "Krayt Buried Alive",
+   "x": -6741,
+   "z": 3572,
+   "r": 30,
+   "kind": "landmark"
+  },
+  {
+   "key": "destroyed_wall",
+   "stringId": "tatooine_region_names:destroyed_wall",
+   "name": "Destroyed Wall",
+   "x": -4878,
+   "z": 2947,
+   "r": 30,
+   "kind": "landmark"
+  },
+  {
+   "key": "camp_on_tower",
+   "stringId": "tatooine_region_names:camp_on_tower",
+   "name": "Camp on Tower",
+   "x": -6450,
+   "z": 2618,
+   "r": 30,
+   "kind": "landmark"
+  },
+  {
+   "key": "ship_debris",
+   "stringId": "tatooine_region_names:ship_debris",
+   "name": "Ship Debris",
+   "x": -4928,
+   "z": 1258,
+   "r": 30,
+   "kind": "landmark"
+  },
+  {
+   "key": "stone_teepee",
+   "stringId": "tatooine_region_names:stone_teepee",
+   "name": "Stone Teepee",
+   "x": -5743,
+   "z": -1941,
+   "r": 30,
+   "kind": "landmark"
+  },
+  {
+   "key": "strange_brick",
+   "stringId": "tatooine_region_names:strange_brick",
+   "name": "Strange Brick",
+   "x": -5115,
+   "z": -3357,
+   "r": 30,
+   "kind": "landmark"
+  },
+  {
+   "key": "wind_harvest_unit",
+   "stringId": "tatooine_region_names:wind_harvest_unit",
+   "name": "Wind Harvest Unit",
+   "x": -2910,
+   "z": -3248,
+   "r": 30,
+   "kind": "landmark"
+  },
+  {
+   "key": "broken_building_with_ruins",
+   "stringId": "tatooine_region_names:broken_building_with_ruins",
+   "name": "Broken Building with Ruins",
+   "x": -1630,
+   "z": -5584,
+   "r": 30,
+   "kind": "landmark"
+  },
+  {
+   "key": "trifecta_of_stones",
+   "stringId": "tatooine_region_names:trifecta_of_stones",
+   "name": "Trifecta of Stones",
+   "x": -3735,
+   "z": -6811,
+   "r": 30,
+   "kind": "landmark"
+  },
+  {
+   "key": "photo_bio_camp",
+   "stringId": "tatooine_region_names:photo_bio_camp",
+   "name": "Photo Bio Camp",
+   "x": -3170,
+   "z": 3642,
+   "r": 30,
+   "kind": "landmark"
+  },
+  {
+   "key": "burning_bone_alter",
+   "stringId": "tatooine_region_names:burning_bone_alter",
+   "name": "Burning Bone Alter",
+   "x": -6114,
+   "z": 3966,
+   "r": 50,
+   "kind": "landmark"
+  },
+  {
+   "key": "wind_harvest_complex",
+   "stringId": "tatooine_region_names:wind_harvest_complex",
+   "name": "Wind Harvest Complex",
+   "x": -7166,
+   "z": -2399,
+   "r": 50,
+   "kind": "landmark"
+  },
+  {
+   "key": "life_pod_and_debris",
+   "stringId": "tatooine_region_names:life_pod_and_debris",
+   "name": "Life Pod and Debris",
+   "x": -860,
+   "z": -1227,
+   "r": 50,
+   "kind": "landmark"
+  },
+  {
+   "key": "krayt_remains",
+   "stringId": "tatooine_region_names:krayt_remains",
+   "name": "Krayt Remains",
+   "x": 3387,
+   "z": -6593,
+   "r": 50,
+   "kind": "landmark"
+  },
+  {
+   "key": "hidden_x_wing",
+   "stringId": "tatooine_region_names:hidden_x_wing",
+   "name": "Hidden X Wing",
+   "x": -4986,
+   "z": -4357,
+   "r": 75,
+   "kind": "landmark"
+  },
+  {
+   "key": "broken_water_tanks",
+   "stringId": "tatooine_region_names:broken_water_tanks",
+   "name": "Broken Water Tanks",
+   "x": -4324,
+   "z": -5019,
+   "r": 75,
+   "kind": "landmark"
+  },
+  {
+   "key": "long_bone_spine",
+   "stringId": "tatooine_region_names:long_bone_spine",
+   "name": "Long Bone Spine",
+   "x": -4943,
+   "z": -5544,
+   "r": 75,
+   "kind": "landmark"
+  },
+  {
+   "key": "bridge_and_ruins",
+   "stringId": "tatooine_region_names:bridge_and_ruins",
+   "name": "Bridge and Ruins",
+   "x": -3980,
+   "z": -3042,
+   "r": 75,
+   "kind": "landmark"
+  },
+  {
+   "key": "stone_monument",
+   "stringId": "tatooine_region_names:stone_monument",
+   "name": "Stone Monument",
+   "x": -2667,
+   "z": -411,
+   "r": 75,
+   "kind": "landmark"
+  },
+  {
+   "key": "sand_crawler_debris",
+   "stringId": "tatooine_region_names:sand_crawler_debris",
+   "name": "Sand Crawler Debris",
+   "x": 5664,
+   "z": -5760,
+   "r": 75,
+   "kind": "landmark"
+  },
+  {
+   "key": "4_pillars_connected_at_top",
+   "stringId": "tatooine_region_names:4_pillars_connected_at_top",
+   "name": "4 Pillars Connected at Top",
+   "x": 6526,
+   "z": 5524,
+   "r": 75,
+   "kind": "landmark"
+  },
+  {
+   "key": "two_grand_archways",
+   "stringId": "tatooine_region_names:two_grand_archways",
+   "name": "Two Grand Archways",
+   "x": 3491,
+   "z": 4127,
+   "r": 75,
+   "kind": "landmark"
+  },
+  {
+   "key": "single_grand_archway",
+   "stringId": "tatooine_region_names:single_grand_archway",
+   "name": "Single Grand Archway",
+   "x": 5460,
+   "z": 2137,
+   "r": 75,
+   "kind": "landmark"
+  },
+  {
+   "key": "destroyed_platform",
+   "stringId": "tatooine_region_names:destroyed_platform",
+   "name": "Destroyed Platform",
+   "x": 2977,
+   "z": 6472,
+   "r": 75,
+   "kind": "landmark"
+  },
+  {
+   "key": "small_stone_hutt",
+   "stringId": "tatooine_region_names:small_stone_hutt",
+   "name": "Small Stone Hutt",
+   "x": 5776,
+   "z": 3975,
+   "r": 75,
+   "kind": "landmark"
+  },
+  {
+   "key": "ruins_on_a_wall",
+   "stringId": "tatooine_region_names:ruins_on_a_wall",
+   "name": "Ruins on a Wall",
+   "x": 3280,
+   "z": -3680,
+   "r": 75,
+   "kind": "landmark"
+  },
+  {
+   "key": "krayt_skeleton_on_a_hill",
+   "stringId": "tatooine_region_names:krayt_skeleton_on_a_hill",
+   "name": "Krayt Skeleton on a Hill",
+   "x": -2834,
+   "z": 6061,
+   "r": 75,
+   "kind": "landmark"
+  },
+  {
+   "key": "three_short_archways_lined_up_in_a_row",
+   "stringId": "tatooine_region_names:three_short_archways_lined_up_in_a_row",
+   "name": "Three Short Archways Lined up in a Row",
+   "x": 1856,
+   "z": 1472,
+   "r": 75,
+   "kind": "landmark"
+  },
+  {
+   "key": "single_platform_with_one_tall_archway",
+   "stringId": "tatooine_region_names:single_platform_with_one_tall_archway",
+   "name": "Single Platform with One Tall Archway",
+   "x": 496,
+   "z": -3264,
+   "r": 75,
+   "kind": "landmark"
+  },
+  {
+   "key": "imperial_oasis",
+   "stringId": "tatooine_region_names:imperial_oasis",
+   "name": "Imperial Oasis",
+   "x": -5300,
+   "z": 2681,
+   "r": 90,
+   "kind": "landmark"
+  },
+  {
+   "key": "stone_druid_circle",
+   "stringId": "tatooine_region_names:stone_druid_circle",
+   "name": "Stone Druid Circle",
+   "x": -3675,
+   "z": -1649,
+   "r": 100,
+   "kind": "landmark"
+  },
+  {
+   "key": "destroyed_aircraft_hanger",
+   "stringId": "tatooine_region_names:destroyed_aircraft_hanger",
+   "name": "Destroyed Aircraft Hanger",
+   "x": 359,
+   "z": 6568,
+   "r": 100,
+   "kind": "landmark"
+  },
+  {
+   "key": "single_platform_with_messed_up_pillars",
+   "stringId": "tatooine_region_names:single_platform_with_messed_up_pillars",
+   "name": "Single Platform with Messed up Pillars",
+   "x": 6399,
+   "z": 208,
+   "r": 100,
+   "kind": "landmark"
+  },
+  {
+   "key": "single_platform",
+   "stringId": "tatooine_region_names:single_platform",
+   "name": "Single Platform",
+   "x": 2330,
+   "z": 3256,
+   "r": 100,
+   "kind": "landmark"
+  },
+  {
+   "key": "two_desert_housings",
+   "stringId": "tatooine_region_names:two_desert_housings",
+   "name": "Two Desert Housings",
+   "x": 3546,
+   "z": -2508,
+   "r": 100,
+   "kind": "landmark"
+  },
+  {
+   "key": "strange_arches_lined_up",
+   "stringId": "tatooine_region_names:strange_arches_lined_up",
+   "name": "Strange Arches Lined up",
+   "x": -845,
+   "z": 2701,
+   "r": 100,
+   "kind": "landmark"
+  },
+  {
+   "key": "long_destroyed_wall",
+   "stringId": "tatooine_region_names:long_destroyed_wall",
+   "name": "Long Destroyed Wall",
+   "x": 2992,
+   "z": -480,
+   "r": 100,
+   "kind": "landmark"
+  },
+  {
+   "key": "single_platform_with_two_arches_on_top",
+   "stringId": "tatooine_region_names:single_platform_with_two_arches_on_top",
+   "name": "Single Platform with Two Arches on Top",
+   "x": 3657,
+   "z": -3375,
+   "r": 100,
+   "kind": "landmark"
+  },
+  {
+   "key": "eastern_oasis",
+   "stringId": "tatooine_region_names:eastern_oasis",
+   "name": "Eastern Oasis",
+   "x": 6244,
+   "z": -400,
+   "r": 150,
+   "kind": "landmark"
+  },
+  {
+   "key": "oasis_northeast",
+   "stringId": "tatooine_region_names:oasis_northeast",
+   "name": "Oasis Northeast",
+   "x": 6665,
+   "z": 5457,
+   "r": 150,
+   "kind": "landmark"
+  },
+  {
+   "key": "oasis_south",
+   "stringId": "tatooine_region_names:oasis_south",
+   "name": "Oasis South",
+   "x": 1828,
+   "z": -6053,
+   "r": 150,
+   "kind": "landmark"
+  },
+  {
+   "key": "large_rock_with_camp",
+   "stringId": "tatooine_region_names:large_rock_with_camp",
+   "name": "Large Rock with Camp",
+   "x": -6711,
+   "z": -5668,
+   "r": 150,
+   "kind": "landmark"
+  },
+  {
+   "key": "single_desert_household_with_courtyard",
+   "stringId": "tatooine_region_names:single_desert_household_with_courtyard",
+   "name": "Single Desert Household with Courtyard",
+   "x": 4993,
+   "z": -4682,
+   "r": 150,
+   "kind": "landmark"
+  },
+  {
+   "key": "maze",
+   "stringId": "tatooine_region_names:maze",
+   "name": "Maze",
+   "x": -3043,
+   "z": -5127,
+   "r": 175,
+   "kind": "landmark"
+  },
+  {
+   "key": "jawa_mountain_fortress",
+   "stringId": "tatooine_region_names:jawa_mountain_fortress",
+   "name": "Jawa Mountain Fortress",
+   "x": -6144,
+   "z": 1856,
+   "r": 200,
+   "kind": "landmark"
+  },
+  {
+   "key": "fort_tusken",
+   "stringId": "tatooine_region_names:fort_tusken",
+   "name": "Fort Tusken",
+   "x": -3900,
+   "z": 6260,
+   "r": 250,
+   "kind": "landmark"
+  },
+  {
+   "key": "mushroom_mesa",
+   "stringId": "tatooine_region_names:mushroom_mesa",
+   "name": "Mushroom Mesa",
+   "x": 900,
+   "z": 5567,
+   "r": 250,
+   "kind": "landmark"
+  },
+  {
+   "key": "huge_cliff_fortress",
+   "stringId": "tatooine_region_names:huge_cliff_fortress",
+   "name": "Huge Cliff Fortress",
+   "x": 574,
+   "z": 362,
+   "r": 250,
+   "kind": "landmark"
+  },
+  {
+   "key": "arch_mesa",
+   "stringId": "tatooine_region_names:arch_mesa",
+   "name": "Arch Mesa",
+   "x": -289,
+   "z": 3851,
+   "r": 300,
+   "kind": "landmark"
+  },
+  {
+   "key": "cave_southwest",
+   "stringId": "tatooine_region_names:cave_southwest",
+   "name": "Cave Southwest",
+   "x": 6551,
+   "z": -1212,
+   "r": 300,
+   "kind": "landmark"
+  },
+  {
+   "key": "cave_west",
+   "stringId": "tatooine_region_names:cave_west",
+   "name": "Cave West",
+   "x": 5144,
+   "z": 622,
+   "r": 300,
+   "kind": "landmark"
+  },
+  {
+   "key": "cave_central",
+   "stringId": "tatooine_region_names:cave_central",
+   "name": "Cave Central",
+   "x": 0,
+   "z": 0,
+   "r": 300,
+   "kind": "landmark"
+  },
+  {
+   "key": "jabbas_palace",
+   "stringId": "tatooine_region_names:jabbas_palace",
+   "name": "Jabbas Palace",
+   "x": -5983,
+   "z": -6267,
+   "r": 500,
+   "kind": "landmark"
+  },
+  {
+   "key": "krayt_graveyard",
+   "stringId": "tatooine_region_names:krayt_graveyard",
+   "name": "Krayt Graveyard",
+   "x": 7451,
+   "z": 4510,
+   "r": 500,
+   "kind": "landmark"
+  },
+  {
+   "key": "darklighter_estate",
+   "stringId": "tatooine_region_names:darklighter_estate",
+   "name": "Darklighter Estate",
+   "x": -713,
+   "z": -6677,
+   "r": 500,
+   "kind": "landmark"
+  },
+  {
+   "key": "escape_pod",
+   "stringId": "tatooine_region_names:escape_pod",
+   "name": "Escape Pod",
+   "x": -3931,
+   "z": -4420,
+   "r": 500,
+   "kind": "landmark"
+  },
+  {
+   "key": "lars_homestead",
+   "stringId": "tatooine_region_names:lars_homestead",
+   "name": "Lars Homestead",
+   "x": -2582,
+   "z": -5509,
+   "r": 500,
+   "kind": "landmark"
+  },
+  {
+   "key": "old_ben_kenobis hut",
+   "stringId": "tatooine_region_names:old_ben_kenobis hut",
+   "name": "Old Ben Kenobis hut",
+   "x": -4490,
+   "z": -2274,
+   "r": 500,
+   "kind": "landmark"
+  },
+  {
+   "key": "sarlacc_pit",
+   "stringId": "tatooine_region_names:sarlacc_pit",
+   "name": "Sarlacc Pit",
+   "x": -6161,
+   "z": -3375,
+   "r": 500,
+   "kind": "landmark"
+  },
+  {
+   "key": "grand_arena_flats",
+   "stringId": "tatooine_region_names:grand_arena_flats",
+   "name": "Grand Arena Flats",
+   "x": 2592,
+   "z": 4096,
+   "r": 512,
+   "kind": "landmark"
+  },
+  {
+   "key": "valley_of_the_wind",
+   "stringId": "tatooine_region_names:valley_of_the_wind",
+   "name": "Valley of the Wind",
+   "x": -6623,
+   "z": -4863,
+   "r": 534,
+   "kind": "landmark"
+  },
+  {
+   "key": "mospic_highlands",
+   "stringId": "tatooine_region_names:mospic_highlands",
+   "name": "Mospic Highlands",
+   "x": -3632,
+   "z": 4272,
+   "r": 1168,
+   "kind": "area"
+  },
+  {
+   "key": "e_dune_sea",
+   "stringId": "tatooine_region_names:e_dune_sea",
+   "name": "E Dune Sea",
+   "x": 4496,
+   "z": 4848,
+   "r": 1296,
+   "kind": "area"
+  },
+  {
+   "key": "w_dune_sea",
+   "stringId": "tatooine_region_names:w_dune_sea",
+   "name": "W Dune Sea",
+   "x": -5952,
+   "z": -2176,
+   "r": 1344,
+   "kind": "area"
+  },
+  {
+   "key": "mesric_plateau",
+   "stringId": "tatooine_region_names:mesric_plateau",
+   "name": "Mesric Plateau",
+   "x": -336,
+   "z": 368,
+   "r": 1360,
+   "kind": "area"
+  },
+  {
+   "key": "tusken_march",
+   "stringId": "tatooine_region_names:tusken_march",
+   "name": "Tusken March",
+   "x": -5312,
+   "z": 6048,
+   "r": 1376,
+   "kind": "area"
+  },
+  {
+   "key": "jundland_wastes",
+   "stringId": "tatooine_region_names:jundland_wastes",
+   "name": "Jundland Wastes",
+   "x": -2960,
+   "z": -848,
+   "r": 1584,
+   "kind": "area"
+  },
+  {
+   "key": "tatooine_rebel_encampment",
+   "stringId": null,
+   "name": "Rebel Encampment",
+   "x": -784,
+   "z": -4451,
+   "r": 198,
+   "kind": "landmark"
+  },
+  {
+   "key": "tatooine_force_shrine",
+   "stringId": null,
+   "name": "Force Shrine",
+   "x": -6506,
+   "z": -3668,
+   "r": 199,
+   "kind": "landmark"
+  },
+  {
+   "key": "village_ruins",
+   "stringId": null,
+   "name": "Village Ruins",
+   "x": 5695,
+   "z": 1877,
+   "r": 200,
+   "kind": "landmark"
+  }
+ ],
+ "naboo": [
+  {
+   "key": "lake_retreat",
+   "stringId": "naboo_region_names:lake_retreat",
+   "name": "Lake Retreat",
+   "x": -5568,
+   "z": 0,
+   "r": 176,
+   "kind": "city"
+  },
+  {
+   "key": "kaadara",
+   "stringId": "naboo_region_names:kaadara",
+   "name": "Kaadara",
+   "x": 5168,
+   "z": 6704,
+   "r": 320,
+   "kind": "city"
+  },
+  {
+   "key": "moenia",
+   "stringId": "naboo_region_names:moenia",
+   "name": "Moenia",
+   "x": 4800,
+   "z": -4784,
+   "r": 336,
+   "kind": "city"
+  },
+  {
+   "key": "deeja_peak",
+   "stringId": "naboo_region_names:deeja_peak",
+   "name": "Deeja Peak",
+   "x": 5048,
+   "z": -1528,
+   "r": 616,
+   "kind": "city"
+  },
+  {
+   "key": "theed",
+   "stringId": "naboo_region_names:theed",
+   "name": "Theed",
+   "x": -5320,
+   "z": 4368,
+   "r": 840,
+   "kind": "city"
+  },
+  {
+   "key": "keren",
+   "stringId": "naboo_region_names:keren",
+   "name": "Keren",
+   "x": 1424,
+   "z": 2702,
+   "r": 1088,
+   "kind": "city"
+  },
+  {
+   "key": "emperors_retreat",
+   "stringId": "naboo_region_names:emperors_retreat",
+   "name": "Emperors Retreat",
+   "x": 2280,
+   "z": -3944,
+   "r": 280,
+   "kind": "landmark"
+  },
+  {
+   "key": "lianorm_swamp",
+   "stringId": "naboo_region_names:lianorm_swamp",
+   "name": "Lianorm Swamp",
+   "x": -416,
+   "z": 0,
+   "r": 945,
+   "kind": "landmark"
+  },
+  {
+   "key": "paitnnu_wetlands",
+   "stringId": "naboo_region_names:paitnnu_wetlands",
+   "name": "Paitnnu Wetlands",
+   "x": 5104,
+   "z": -5904,
+   "r": 1500,
+   "kind": "area"
+  },
+  {
+   "key": "lasay_swamp",
+   "stringId": "naboo_region_names:lasay_swamp",
+   "name": "Lasay Swamp",
+   "x": -4560,
+   "z": -6304,
+   "r": 3152,
+   "kind": "area"
+  },
+  {
+   "key": "gallo_mountains",
+   "stringId": "naboo_region_names:gallo_mountains",
+   "name": "Gallo Mountains",
+   "x": -2080,
+   "z": -1648,
+   "r": 5472,
+   "kind": "area"
+  },
+  {
+   "key": "great_grass_plains",
+   "stringId": "naboo_region_names:great_grass_plains",
+   "name": "Great Grass Plains",
+   "x": 0,
+   "z": 5820,
+   "r": 7552,
+   "kind": "area"
+  },
+  {
+   "key": "fishing_dock",
+   "stringId": null,
+   "name": "Fishing Dock",
+   "x": -6314,
+   "z": -5087,
+   "r": 64,
+   "kind": "landmark"
+  },
+  {
+   "key": "graveyard",
+   "stringId": null,
+   "name": "Graveyard",
+   "x": 1260,
+   "z": 4291,
+   "r": 64,
+   "kind": "landmark"
+  },
+  {
+   "key": "gate_and_columns",
+   "stringId": null,
+   "name": "Gate and Columns",
+   "x": -259,
+   "z": -60,
+   "r": 64,
+   "kind": "landmark"
+  },
+  {
+   "key": "gungan_fountain",
+   "stringId": null,
+   "name": "Gungan Fountain",
+   "x": 5556,
+   "z": 5531,
+   "r": 64,
+   "kind": "landmark"
+  },
+  {
+   "key": "gungan_head",
+   "stringId": null,
+   "name": "Gungan Head",
+   "x": 1940,
+   "z": 6611,
+   "r": 64,
+   "kind": "landmark"
+  },
+  {
+   "key": "gungan_monument",
+   "stringId": null,
+   "name": "Gungan Monument",
+   "x": -7547,
+   "z": 2251,
+   "r": 64,
+   "kind": "landmark"
+  },
+  {
+   "key": "military_tower",
+   "stringId": null,
+   "name": "Military Tower",
+   "x": 972,
+   "z": -1348,
+   "r": 64,
+   "kind": "landmark"
+  },
+  {
+   "key": "rebel_outpost",
+   "stringId": null,
+   "name": "Rebel Outpost",
+   "x": -1499,
+   "z": -1732,
+   "r": 128,
+   "kind": "landmark"
+  },
+  {
+   "key": "naboo_force_shrine",
+   "stringId": null,
+   "name": "Force Shrine",
+   "x": 7182,
+   "z": -235,
+   "r": 199,
+   "kind": "landmark"
+  }
+ ],
+ "corellia": [
+  {
+   "key": "bela_vistal",
+   "stringId": "corellia_region_names:bela_vistal",
+   "name": "Bela Vistal",
+   "x": 6788,
+   "z": -5654,
+   "r": 480,
+   "kind": "city"
+  },
+  {
+   "key": "coronet",
+   "stringId": "corellia_region_names:coronet",
+   "name": "Coronet",
+   "x": -178,
+   "z": -4504,
+   "r": 581,
+   "kind": "city"
+  },
+  {
+   "key": "tyrena",
+   "stringId": "corellia_region_names:tyrena",
+   "name": "Tyrena",
+   "x": -5282,
+   "z": -2526,
+   "r": 622,
+   "kind": "city"
+  },
+  {
+   "key": "doaba_guerfel",
+   "stringId": "corellia_region_names:doaba_guerfel",
+   "name": "Doaba Guerfel",
+   "x": 3272,
+   "z": 5456,
+   "r": 632,
+   "kind": "city"
+  },
+  {
+   "key": "vreni_island",
+   "stringId": "corellia_region_names:vreni_island",
+   "name": "Vreni Island",
+   "x": -5472,
+   "z": -6272,
+   "r": 690,
+   "kind": "city"
+  },
+  {
+   "key": "kor_vella",
+   "stringId": "corellia_region_names:kor_vella",
+   "name": "Kor Vella",
+   "x": -3512,
+   "z": 3184,
+   "r": 758,
+   "kind": "city"
+  },
+  {
+   "key": "loch_khaxus",
+   "stringId": "corellia_region_names:loch_khaxus",
+   "name": "Loch Khaxus",
+   "x": 7344,
+   "z": 7024,
+   "r": 525,
+   "kind": "landmark"
+  },
+  {
+   "key": "golden_beaches",
+   "stringId": "corellia_region_names:golden_beaches",
+   "name": "Golden Beaches",
+   "x": 7028,
+   "z": 4128,
+   "r": 600,
+   "kind": "landmark"
+  },
+  {
+   "key": "rier_vem",
+   "stringId": "corellia_region_names:rier_vem",
+   "name": "Rier Vem",
+   "x": 976,
+   "z": 2512,
+   "r": 720,
+   "kind": "landmark"
+  },
+  {
+   "key": "rier_let",
+   "stringId": "corellia_region_names:rier_let",
+   "name": "Rier Let",
+   "x": -928,
+   "z": 2976,
+   "r": 928,
+   "kind": "landmark"
+  },
+  {
+   "key": "dregans_pike",
+   "stringId": "corellia_region_names:dregans_pike",
+   "name": "Dregans Pike",
+   "x": 4336,
+   "z": -4144,
+   "r": 976,
+   "kind": "landmark"
+  },
+  {
+   "key": "agrilat_swamp",
+   "stringId": "corellia_region_names:agrilat_swamp",
+   "name": "Agrilat Swamp",
+   "x": 816,
+   "z": 4624,
+   "r": 1168,
+   "kind": "area"
+  },
+  {
+   "key": "bindreg_hills",
+   "stringId": "corellia_region_names:bindreg_hills",
+   "name": "Bindreg Hills",
+   "x": -6672,
+   "z": 1472,
+   "r": 1184,
+   "kind": "area"
+  },
+  {
+   "key": "rhalers_bastion",
+   "stringId": "corellia_region_names:rhalers_bastion",
+   "name": "Rhalers Bastion",
+   "x": -6350,
+   "z": 5120,
+   "r": 1450,
+   "kind": "area"
+  },
+  {
+   "key": "denendre_valley",
+   "stringId": "corellia_region_names:denendre_valley",
+   "name": "Denendre Valley",
+   "x": -4080,
+   "z": 5472,
+   "r": 1536,
+   "kind": "area"
+  },
+  {
+   "key": "suntir_plains",
+   "stringId": "corellia_region_names:suntir_plains",
+   "name": "Suntir Plains",
+   "x": 3168,
+   "z": -6560,
+   "r": 1856,
+   "kind": "area"
+  },
+  {
+   "key": "malal_mountains",
+   "stringId": "corellia_region_names:malal_mountains",
+   "name": "Malal Mountains",
+   "x": 6950,
+   "z": -5984,
+   "r": 2016,
+   "kind": "area"
+  },
+  {
+   "key": "thaos_mountains",
+   "stringId": "corellia_region_names:thaos_mountains",
+   "name": "Thaos Mountains",
+   "x": 960,
+   "z": 6816,
+   "r": 3328,
+   "kind": "area"
+  },
+  {
+   "key": "riverlands",
+   "stringId": "corellia_region_names:riverlands",
+   "name": "Riverlands",
+   "x": 464,
+   "z": -208,
+   "r": 3760,
+   "kind": "area"
+  }
+ ],
+ "dantooine": [
+  {
+   "key": "imperial_outpost",
+   "stringId": "dantooine_region_names:imperial_outpost",
+   "name": "Imperial Outpost",
+   "x": -4224,
+   "z": -2400,
+   "r": 350,
+   "kind": "city"
+  },
+  {
+   "key": "dantooine_mining_outpost",
+   "stringId": "dantooine_region_names:dantooine_mining_outpost",
+   "name": "Mining Outpost",
+   "x": -622,
+   "z": 2488,
+   "r": 400,
+   "kind": "city"
+  },
+  {
+   "key": "dantooine_pirate_outpost",
+   "stringId": "dantooine_region_names:dantooine_pirate_outpost",
+   "name": "Pirate Outpost",
+   "x": 1588,
+   "z": -6390,
+   "r": 400,
+   "kind": "city"
+  },
+  {
+   "key": "jedi_temple",
+   "stringId": "dantooine_region_names:jedi_temple",
+   "name": "Jedi Temple",
+   "x": 4200,
+   "z": 5200,
+   "r": 200,
+   "kind": "landmark"
+  },
+  {
+   "key": "abandoned_rebel_base",
+   "stringId": "dantooine_region_names:abandoned_rebel_base",
+   "name": "Abandoned Rebel Base",
+   "x": -6830,
+   "z": 5514,
+   "r": 300,
+   "kind": "landmark"
+  },
+  {
+   "key": "ataahua_slopes",
+   "stringId": "dantooine_region_names:ataahua_slopes",
+   "name": "Ataahua Slopes",
+   "x": 2368,
+   "z": -1920,
+   "r": 576,
+   "kind": "landmark"
+  },
+  {
+   "key": "burad",
+   "stringId": "dantooine_region_names:burad",
+   "name": "Burad",
+   "x": 5888,
+   "z": -5280,
+   "r": 1248,
+   "kind": "area"
+  },
+  {
+   "key": "rielig_steppe",
+   "stringId": "dantooine_region_names:rielig_steppe",
+   "name": "Rielig Steppe",
+   "x": -1760,
+   "z": -3232,
+   "r": 1312,
+   "kind": "area"
+  },
+  {
+   "key": "darjani_plains",
+   "stringId": "dantooine_region_names:darjani_plains",
+   "name": "Darjani Plains",
+   "x": -5904,
+   "z": -5712,
+   "r": 1340,
+   "kind": "area"
+  },
+  {
+   "key": "taikaha_hills",
+   "stringId": "dantooine_region_names:taikaha_hills",
+   "name": "Taikaha Hills",
+   "x": -4608,
+   "z": 5280,
+   "r": 1472,
+   "kind": "area"
+  },
+  {
+   "key": "mosa_rishin",
+   "stringId": "dantooine_region_names:mosa_rishin",
+   "name": "Mosa Rishin",
+   "x": -6208,
+   "z": -2416,
+   "r": 1680,
+   "kind": "area"
+  },
+  {
+   "key": "fields_of_banir",
+   "stringId": "dantooine_region_names:fields_of_banir",
+   "name": "Fields of Banir",
+   "x": 5136,
+   "z": 3600,
+   "r": 2544,
+   "kind": "area"
+  },
+  {
+   "key": "arissi_plains",
+   "stringId": "dantooine_region_names:arissi_plains",
+   "name": "Arissi Plains",
+   "x": 224,
+   "z": 3776,
+   "r": 2656,
+   "kind": "area"
+  },
+  {
+   "key": "coa_imperial_outpost",
+   "stringId": null,
+   "name": "Coa Imperial Outpost",
+   "x": 2501,
+   "z": -2052,
+   "r": 60,
+   "kind": "landmark"
+  },
+  {
+   "key": "coa_rebel_outpost",
+   "stringId": null,
+   "name": "Coa Rebel Outpost",
+   "x": 6868,
+   "z": -2246,
+   "r": 60,
+   "kind": "landmark"
+  },
+  {
+   "key": "dantari_village",
+   "stringId": null,
+   "name": "Dantari Village",
+   "x": -3843,
+   "z": -5713,
+   "r": 70,
+   "kind": "landmark"
+  },
+  {
+   "key": "pillars",
+   "stringId": null,
+   "name": "Pillars",
+   "x": -5168,
+   "z": 2688,
+   "r": 75,
+   "kind": "landmark"
+  },
+  {
+   "key": "three_stone_huts",
+   "stringId": null,
+   "name": "Three Stone Huts",
+   "x": 290,
+   "z": 3511,
+   "r": 75,
+   "kind": "landmark"
+  },
+  {
+   "key": "arch_bridge_ruins",
+   "stringId": null,
+   "name": "Arch Bridge Ruins",
+   "x": 6749,
+   "z": 4996,
+   "r": 75,
+   "kind": "landmark"
+  },
+  {
+   "key": "large_stone_hut",
+   "stringId": null,
+   "name": "Large Stone Hut",
+   "x": 3231,
+   "z": 6007,
+   "r": 75,
+   "kind": "landmark"
+  },
+  {
+   "key": "meteor_crash",
+   "stringId": null,
+   "name": "Meteor Crash",
+   "x": -5396,
+   "z": 1380,
+   "r": 75,
+   "kind": "landmark"
+  },
+  {
+   "key": "ring_of_fire",
+   "stringId": null,
+   "name": "Ring of Fire",
+   "x": 5472,
+   "z": 5840,
+   "r": 75,
+   "kind": "landmark"
+  },
+  {
+   "key": "stone_hut",
+   "stringId": null,
+   "name": "Stone Hut",
+   "x": -3776,
+   "z": 2546,
+   "r": 75,
+   "kind": "landmark"
+  },
+  {
+   "key": "relay_station",
+   "stringId": null,
+   "name": "Relay Station",
+   "x": -7342,
+   "z": 3681,
+   "r": 100,
+   "kind": "landmark"
+  },
+  {
+   "key": "four_huts",
+   "stringId": null,
+   "name": "Four Huts",
+   "x": -3985,
+   "z": 2131,
+   "r": 100,
+   "kind": "landmark"
+  },
+  {
+   "key": "mud_hut",
+   "stringId": null,
+   "name": "Mud Hut",
+   "x": -6190,
+   "z": 2694,
+   "r": 100,
+   "kind": "landmark"
+  },
+  {
+   "key": "rock_hut",
+   "stringId": null,
+   "name": "Rock Hut",
+   "x": -6060,
+   "z": 1135,
+   "r": 100,
+   "kind": "landmark"
+  },
+  {
+   "key": "mokk_stronghold",
+   "stringId": null,
+   "name": "Mokk Stronghold",
+   "x": -7051,
+   "z": -3345,
+   "r": 150,
+   "kind": "landmark"
+  },
+  {
+   "key": "sacred_alter",
+   "stringId": null,
+   "name": "Sacred Alter",
+   "x": -5752,
+   "z": 1926,
+   "r": 150,
+   "kind": "landmark"
+  },
+  {
+   "key": "dantooine_janta_dantari_cave",
+   "stringId": null,
+   "name": "Janta Dantari Cave",
+   "x": 7068,
+   "z": -4099,
+   "r": 198,
+   "kind": "landmark"
+  },
+  {
+   "key": "dantooine_kunga_dantari_cave",
+   "stringId": null,
+   "name": "Kunga Dantari Cave",
+   "x": -139,
+   "z": -396,
+   "r": 198,
+   "kind": "landmark"
+  },
+  {
+   "key": "dantooine_force_shrine",
+   "stringId": null,
+   "name": "Force Shrine",
+   "x": -6173,
+   "z": 4120,
+   "r": 199,
+   "kind": "landmark"
+  }
+ ],
+ "lok": [
+  {
+   "key": "lok_imperial_outpost",
+   "stringId": "lok_region_names:lok_imperial_outpost",
+   "name": "Imperial Outpost",
+   "x": -1920,
+   "z": -3084,
+   "r": 201,
+   "kind": "city"
+  },
+  {
+   "key": "lok_nyms_stronghold",
+   "stringId": "lok_region_names:lok_nyms_stronghold",
+   "name": "Nyms Stronghold",
+   "x": 436,
+   "z": 5120,
+   "r": 429,
+   "kind": "city"
+  },
+  {
+   "key": "volcano",
+   "stringId": "lok_region_names:volcano",
+   "name": "Volcano",
+   "x": 2960,
+   "z": -4688,
+   "r": 531,
+   "kind": "landmark"
+  },
+  {
+   "key": "mosseru_hills",
+   "stringId": "lok_region_names:mosseru_hills",
+   "name": "Mosseru Hills",
+   "x": 2272,
+   "z": 2048,
+   "r": 1120,
+   "kind": "area"
+  },
+  {
+   "key": "sulphur_hills",
+   "stringId": "lok_region_names:sulphur_hills",
+   "name": "Sulphur Hills",
+   "x": -5248,
+   "z": 928,
+   "r": 1248,
+   "kind": "area"
+  },
+  {
+   "key": "grendin_waste",
+   "stringId": "lok_region_names:grendin_waste",
+   "name": "Grendin Waste",
+   "x": -944,
+   "z": 1856,
+   "r": 1392,
+   "kind": "area"
+  },
+  {
+   "key": "kedarin_highlands",
+   "stringId": "lok_region_names:kedarin_highlands",
+   "name": "Kedarin Highlands",
+   "x": 1884,
+   "z": -2364,
+   "r": 1500,
+   "kind": "area"
+  },
+  {
+   "key": "westerly",
+   "stringId": "lok_region_names:westerly",
+   "name": "Westerly",
+   "x": -4736,
+   "z": 4176,
+   "r": 1600,
+   "kind": "area"
+  },
+  {
+   "key": "corsair_lane",
+   "stringId": "lok_region_names:corsair_lane",
+   "name": "Corsair Lane",
+   "x": 5376,
+   "z": -2192,
+   "r": 1648,
+   "kind": "area"
+  },
+  {
+   "key": "badlands",
+   "stringId": "lok_region_names:badlands",
+   "name": "Badlands",
+   "x": -3680,
+   "z": -4096,
+   "r": 1850,
+   "kind": "area"
+  },
+  {
+   "key": "nym_protectorate",
+   "stringId": "lok_region_names:nym_protectorate",
+   "name": "Nym Protectorate",
+   "x": 560,
+   "z": 4944,
+   "r": 3664,
+   "kind": "area"
+  },
+  {
+   "key": "plains_of_dust",
+   "stringId": "lok_region_names:plains_of_dust",
+   "name": "Plains of Dust",
+   "x": 2176,
+   "z": -4896,
+   "r": 3776,
+   "kind": "area"
+  },
+  {
+   "key": "rebel_outpost",
+   "stringId": null,
+   "name": "Rebel Outpost",
+   "x": 476,
+   "z": 4027,
+   "r": 75,
+   "kind": "landmark"
+  },
+  {
+   "key": "lok_kimogila_town",
+   "stringId": null,
+   "name": "Kimogila Town",
+   "x": -81,
+   "z": 2709,
+   "r": 100,
+   "kind": "landmark"
+  },
+  {
+   "key": "lok_new_cave",
+   "stringId": null,
+   "name": "New Cave",
+   "x": -3010,
+   "z": -672,
+   "r": 100,
+   "kind": "landmark"
+  },
+  {
+   "key": "lok_new_bunker",
+   "stringId": null,
+   "name": "New Bunker",
+   "x": 902,
+   "z": -4193,
+   "r": 100,
+   "kind": "landmark"
+  },
+  {
+   "key": "lok_landmark_near_ottos_base",
+   "stringId": null,
+   "name": "Landmark Near Ottos Base",
+   "x": -2090,
+   "z": -2642,
+   "r": 119,
+   "kind": "landmark"
+  },
+  {
+   "key": "lok_bloodrazor_pirate_ship",
+   "stringId": null,
+   "name": "Bloodrazor Pirate Ship",
+   "x": 3623,
+   "z": 2172,
+   "r": 167,
+   "kind": "landmark"
+  },
+  {
+   "key": "lok_force_shrine",
+   "stringId": null,
+   "name": "Force Shrine",
+   "x": -3641,
+   "z": -6031,
+   "r": 199,
+   "kind": "landmark"
+  },
+  {
+   "key": "lok_evil_droid_engineer_cave",
+   "stringId": null,
+   "name": "Evil Droid Engineer Cave",
+   "x": 3321,
+   "z": -4910,
+   "r": 241,
+   "kind": "landmark"
+  },
+  {
+   "key": "lok_rebel_commanders_base",
+   "stringId": null,
+   "name": "Rebel Commanders Base",
+   "x": -4784,
+   "z": 3552,
+   "r": 300,
+   "kind": "landmark"
+  }
+ ],
+ "endor": [
+  {
+   "key": "endor_smuggler_outpost",
+   "stringId": "endor_region_names:endor_smuggler_outpost",
+   "name": "Smuggler Outpost",
+   "x": -898,
+   "z": 1587,
+   "r": 400,
+   "kind": "city"
+  },
+  {
+   "key": "endor_neutral_outpost",
+   "stringId": "endor_region_names:endor_neutral_outpost",
+   "name": "Neutral Outpost",
+   "x": 3222,
+   "z": -3467,
+   "r": 400,
+   "kind": "city"
+  },
+  {
+   "key": "ewok_village_tree",
+   "stringId": "endor_region_names:ewok_village_tree",
+   "name": "Ewok Village Tree",
+   "x": 84,
+   "z": 39,
+   "r": 80,
+   "kind": "landmark"
+  },
+  {
+   "key": "dulok_village",
+   "stringId": "endor_region_names:dulok_village",
+   "name": "Dulok Village",
+   "x": 6068,
+   "z": -2475,
+   "r": 100,
+   "kind": "landmark"
+  },
+  {
+   "key": "ewok_lake_village",
+   "stringId": "endor_region_names:ewok_lake_village",
+   "name": "Ewok Lake Village",
+   "x": 1459,
+   "z": -3252,
+   "r": 150,
+   "kind": "landmark"
+  },
+  {
+   "key": "yawari_cliffs",
+   "stringId": "endor_region_names:yawari_cliffs",
+   "name": "Yawari Cliffs",
+   "x": -992,
+   "z": 2880,
+   "r": 216,
+   "kind": "landmark"
+  },
+  {
+   "key": "oniantae_hills",
+   "stringId": "endor_region_names:oniantae_hills",
+   "name": "Oniantae Hills",
+   "x": -2912,
+   "z": 2496,
+   "r": 896,
+   "kind": "landmark"
+  },
+  {
+   "key": "fersal_hills",
+   "stringId": "endor_region_names:fersal_hills",
+   "name": "Fersal Hills",
+   "x": 4832,
+   "z": -4320,
+   "r": 992,
+   "kind": "landmark"
+  },
+  {
+   "key": "marauder_mountain",
+   "stringId": "endor_region_names:marauder_mountain",
+   "name": "Marauder Mountain",
+   "x": -5072,
+   "z": -1744,
+   "r": 1042,
+   "kind": "area"
+  },
+  {
+   "key": "nub_shanda",
+   "stringId": "endor_region_names:nub_shanda",
+   "name": "Nub Shanda",
+   "x": 1280,
+   "z": -3808,
+   "r": 1300,
+   "kind": "area"
+  },
+  {
+   "key": "salma_desert",
+   "stringId": "endor_region_names:salma_desert",
+   "name": "Salma Desert",
+   "x": -416,
+   "z": 4416,
+   "r": 1530,
+   "kind": "area"
+  },
+  {
+   "key": "mertune_forest",
+   "stringId": "endor_region_names:mertune_forest",
+   "name": "Mertune Forest",
+   "x": -5120,
+   "z": 1584,
+   "r": 2096,
+   "kind": "area"
+  },
+  {
+   "key": "jiberah_plains",
+   "stringId": "endor_region_names:jiberah_plains",
+   "name": "Jiberah Plains",
+   "x": 2832,
+   "z": 1520,
+   "r": 3088,
+   "kind": "area"
+  },
+  {
+   "key": "stone_village",
+   "stringId": null,
+   "name": "Stone Village",
+   "x": 3924,
+   "z": 5787,
+   "r": 75,
+   "kind": "landmark"
+  },
+  {
+   "key": "korga_cave",
+   "stringId": null,
+   "name": "Korga Cave",
+   "x": 2163,
+   "z": 3617,
+   "r": 150,
+   "kind": "landmark"
+  },
+  {
+   "key": "endor_dulok_korga_cave",
+   "stringId": null,
+   "name": "Dulok Korga Cave",
+   "x": 2268,
+   "z": 3530,
+   "r": 198,
+   "kind": "landmark"
+  },
+  {
+   "key": "endor_marauder_orphans_cave",
+   "stringId": null,
+   "name": "Marauder Orphans Cave",
+   "x": -6902,
+   "z": 700,
+   "r": 198,
+   "kind": "landmark"
+  },
+  {
+   "key": "endor_jinda_cave",
+   "stringId": null,
+   "name": "Jinda Cave",
+   "x": -1712,
+   "z": 0,
+   "r": 198,
+   "kind": "landmark"
+  },
+  {
+   "key": "endor_force_shrine",
+   "stringId": null,
+   "name": "Force Shrine",
+   "x": -3871,
+   "z": -4468,
+   "r": 199,
+   "kind": "landmark"
+  },
+  {
+   "key": "marauders_stronghold",
+   "stringId": null,
+   "name": "Marauders Stronghold",
+   "x": -4648,
+   "z": -2273,
+   "r": 200,
+   "kind": "landmark"
+  },
+  {
+   "key": "endor_death_watch_bunker",
+   "stringId": null,
+   "name": "Death Watch Bunker",
+   "x": -4645,
+   "z": 4341,
+   "r": 200,
+   "kind": "landmark"
+  }
+ ],
+ "dathomir": [
+  {
+   "key": "dathomir_survey_outpost",
+   "stringId": "dathomir_region_names:dathomir_survey_outpost",
+   "name": "Survey Outpost",
+   "x": -85,
+   "z": -1600,
+   "r": 400,
+   "kind": "city"
+  },
+  {
+   "key": "dathomir_trade_outpost",
+   "stringId": "dathomir_region_names:dathomir_trade_outpost",
+   "name": "Trade Outpost",
+   "x": 599,
+   "z": 3071,
+   "r": 400,
+   "kind": "city"
+  },
+  {
+   "key": "vass_meindras",
+   "stringId": "dathomir_region_names:vass_meindras",
+   "name": "Vass Meindras",
+   "x": -4912,
+   "z": 5808,
+   "r": 272,
+   "kind": "landmark"
+  },
+  {
+   "key": "rhoa_arod",
+   "stringId": "dathomir_region_names:rhoa_arod",
+   "name": "Rhoa Arod",
+   "x": -1472,
+   "z": 2528,
+   "r": 320,
+   "kind": "landmark"
+  },
+  {
+   "key": "nightsister_clan",
+   "stringId": "dathomir_region_names:nightsister_clan",
+   "name": "Nightsister Clan",
+   "x": -4069,
+   "z": -184,
+   "r": 400,
+   "kind": "landmark"
+  },
+  {
+   "key": "singing_mountain_fortress",
+   "stringId": "dathomir_region_names:singing_mountain_fortress",
+   "name": "Singing Mountain Fortress",
+   "x": 150,
+   "z": 4575,
+   "r": 400,
+   "kind": "landmark"
+  },
+  {
+   "key": "rhoa_yenth",
+   "stringId": "dathomir_region_names:rhoa_yenth",
+   "name": "Rhoa Yenth",
+   "x": 4736,
+   "z": 2768,
+   "r": 1008,
+   "kind": "area"
+  },
+  {
+   "key": "singing_mountian",
+   "stringId": "dathomir_region_names:singing_mountian",
+   "name": "Singing Mountian",
+   "x": 368,
+   "z": 4560,
+   "r": 1072,
+   "kind": "area"
+  },
+  {
+   "key": "rhoa_dun",
+   "stringId": "dathomir_region_names:rhoa_dun",
+   "name": "Rhoa Dun",
+   "x": -3360,
+   "z": -1792,
+   "r": 1152,
+   "kind": "area"
+  },
+  {
+   "key": "rhoa_sammir",
+   "stringId": "dathomir_region_names:rhoa_sammir",
+   "name": "Rhoa Sammir",
+   "x": 2016,
+   "z": -2016,
+   "r": 1344,
+   "kind": "area"
+  },
+  {
+   "key": "twilight_forest",
+   "stringId": "dathomir_region_names:twilight_forest",
+   "name": "Twilight Forest",
+   "x": -4080,
+   "z": -336,
+   "r": 1712,
+   "kind": "area"
+  },
+  {
+   "key": "takal_nax",
+   "stringId": "dathomir_region_names:takal_nax",
+   "name": "Takal Nax",
+   "x": 1232,
+   "z": 1136,
+   "r": 1808,
+   "kind": "area"
+  },
+  {
+   "key": "yumaou_risoath",
+   "stringId": "dathomir_region_names:yumaou_risoath",
+   "name": "Yumaou Risoath",
+   "x": 5216,
+   "z": -1360,
+   "r": 2192,
+   "kind": "area"
+  },
+  {
+   "key": "asou_dankal",
+   "stringId": "dathomir_region_names:asou_dankal",
+   "name": "Asou Dankal",
+   "x": -2672,
+   "z": 3568,
+   "r": 2384,
+   "kind": "area"
+  },
+  {
+   "key": "the_great_canyon",
+   "stringId": "dathomir_region_names:the_great_canyon",
+   "name": "The Great Canyon",
+   "x": -5424,
+   "z": 3472,
+   "r": 2992,
+   "kind": "area"
+  },
+  {
+   "key": "lhon_kinad",
+   "stringId": "dathomir_region_names:lhon_kinad",
+   "name": "Lhon Kinad",
+   "x": 3008,
+   "z": -4368,
+   "r": 3008,
+   "kind": "area"
+  },
+  {
+   "key": "susk_kinad",
+   "stringId": "dathomir_region_names:susk_kinad",
+   "name": "Susk Kinad",
+   "x": -3296,
+   "z": -4848,
+   "r": 3296,
+   "kind": "area"
+  },
+  {
+   "key": "nightsister_guard_camp",
+   "stringId": null,
+   "name": "Nightsister Guard Camp",
+   "x": -4183,
+   "z": -847,
+   "r": 75,
+   "kind": "landmark"
+  },
+  {
+   "key": "dathomir_imperial_prison",
+   "stringId": null,
+   "name": "Imperial Prison",
+   "x": -6399,
+   "z": 943,
+   "r": 429,
+   "kind": "landmark"
+  }
+ ],
+ "yavin4": [
+  {
+   "key": "yavin4_labor_outpost",
+   "stringId": "yavin4_region_names:yavin4_labor_outpost",
+   "name": "Labor Outpost",
+   "x": -6925,
+   "z": -5707,
+   "r": 200,
+   "kind": "city"
+  },
+  {
+   "key": "yavin4_mining_outpost",
+   "stringId": "yavin4_region_names:yavin4_mining_outpost",
+   "name": "Mining Outpost",
+   "x": -307,
+   "z": 4861,
+   "r": 200,
+   "kind": "city"
+  },
+  {
+   "key": "imperial_fort",
+   "stringId": "yavin4_region_names:imperial_fort",
+   "name": "Imperial Fort",
+   "x": 4030,
+   "z": -6230,
+   "r": 200,
+   "kind": "city"
+  },
+  {
+   "key": "temple_of_exar_kun",
+   "stringId": "yavin4_region_names:temple_of_exar_kun",
+   "name": "Temple of Exar Kun",
+   "x": 5056,
+   "z": 5537,
+   "r": 100,
+   "kind": "landmark"
+  },
+  {
+   "key": "woolamander_temple",
+   "stringId": "yavin4_region_names:woolamander_temple",
+   "name": "Woolamander Temple",
+   "x": 512,
+   "z": -655,
+   "r": 100,
+   "kind": "landmark"
+  },
+  {
+   "key": "great_masassi_temple",
+   "stringId": "yavin4_region_names:great_masassi_temple",
+   "name": "Great Masassi Temple",
+   "x": -3038,
+   "z": -2960,
+   "r": 150,
+   "kind": "landmark"
+  },
+  {
+   "key": "blueleaf_temple",
+   "stringId": "yavin4_region_names:blueleaf_temple",
+   "name": "Blueleaf Temple",
+   "x": -830,
+   "z": -2056,
+   "r": 150,
+   "kind": "landmark"
+  },
+  {
+   "key": "nacolo_peak",
+   "stringId": "yavin4_region_names:nacolo_peak",
+   "name": "Nacolo Peak",
+   "x": 3728,
+   "z": -2480,
+   "r": 912,
+   "kind": "landmark"
+  },
+  {
+   "key": "isle_of_kun",
+   "stringId": "yavin4_region_names:isle_of_kun",
+   "name": "Isle of Kun",
+   "x": 947,
+   "z": 6400,
+   "r": 1152,
+   "kind": "area"
+  },
+  {
+   "key": "ersham_ridge",
+   "stringId": "yavin4_region_names:ersham_ridge",
+   "name": "Ersham Ridge",
+   "x": -4864,
+   "z": -4480,
+   "r": 1500,
+   "kind": "area"
+  },
+  {
+   "key": "yunteh_mountains",
+   "stringId": "yavin4_region_names:yunteh_mountains",
+   "name": "Yunteh Mountains",
+   "x": -6384,
+   "z": 1744,
+   "r": 1616,
+   "kind": "area"
+  },
+  {
+   "key": "swamp_of_fallen_stars",
+   "stringId": "yavin4_region_names:swamp_of_fallen_stars",
+   "name": "Swamp of Fallen Stars",
+   "x": 6512,
+   "z": 144,
+   "r": 1872,
+   "kind": "area"
+  },
+  {
+   "key": "taurin_delta",
+   "stringId": "yavin4_region_names:taurin_delta",
+   "name": "Taurin Delta",
+   "x": 0,
+   "z": -4544,
+   "r": 1875,
+   "kind": "area"
+  },
+  {
+   "key": "borundi_peak",
+   "stringId": "yavin4_region_names:borundi_peak",
+   "name": "Borundi Peak",
+   "x": 5904,
+   "z": -4432,
+   "r": 1900,
+   "kind": "area"
+  },
+  {
+   "key": "wayward_jungle",
+   "stringId": "yavin4_region_names:wayward_jungle",
+   "name": "Wayward Jungle",
+   "x": -5840,
+   "z": 5696,
+   "r": 1984,
+   "kind": "area"
+  },
+  {
+   "key": "valarnos_jungle",
+   "stringId": "yavin4_region_names:valarnos_jungle",
+   "name": "Valarnos Jungle",
+   "x": 2640,
+   "z": 272,
+   "r": 2384,
+   "kind": "area"
+  },
+  {
+   "key": "rebel_commando_camp",
+   "stringId": null,
+   "name": "Rebel Commando Camp",
+   "x": 1590,
+   "z": 1538,
+   "r": 64,
+   "kind": "landmark"
+  },
+  {
+   "key": "yavin4_force_shrine",
+   "stringId": null,
+   "name": "Force Shrine",
+   "x": -4585,
+   "z": -3761,
+   "r": 199,
+   "kind": "landmark"
+  },
+  {
+   "key": "yavin4_jedi_enclave_dark",
+   "stringId": null,
+   "name": "Jedi Enclave Dark",
+   "x": 5070,
+   "z": 310,
+   "r": 577,
+   "kind": "landmark"
+  },
+  {
+   "key": "yavin4_jedi_enclave_light",
+   "stringId": null,
+   "name": "Jedi Enclave Light",
+   "x": -5514,
+   "z": 4912,
+   "r": 577,
+   "kind": "landmark"
+  }
+ ],
+ "talus": [
+  {
+   "key": "talus_imperial_outpost",
+   "stringId": "talus_region_names:talus_imperial_outpost",
+   "name": "Imperial Outpost",
+   "x": -2171,
+   "z": 2296,
+   "r": 240,
+   "kind": "city"
+  },
+  {
+   "key": "nashal",
+   "stringId": "talus_region_names:nashal",
+   "name": "Nashal",
+   "x": 4360,
+   "z": 5251,
+   "r": 350,
+   "kind": "city"
+  },
+  {
+   "key": "dearic",
+   "stringId": "talus_region_names:dearic",
+   "name": "Dearic",
+   "x": 425,
+   "z": -3000,
+   "r": 400,
+   "kind": "city"
+  },
+  {
+   "key": "aakuan_champions_cave",
+   "stringId": null,
+   "name": "Aakuan Champions Cave",
+   "x": 5928,
+   "z": 4656,
+   "r": 75,
+   "kind": "landmark"
+  },
+  {
+   "key": "chunker_bunker",
+   "stringId": null,
+   "name": "Chunker Bunker",
+   "x": 1374,
+   "z": 1470,
+   "r": 75,
+   "kind": "landmark"
+  },
+  {
+   "key": "diseased_ruins",
+   "stringId": null,
+   "name": "Diseased Ruins",
+   "x": -5115,
+   "z": 3216,
+   "r": 75,
+   "kind": "landmark"
+  },
+  {
+   "key": "talus_giant_fynock_cave",
+   "stringId": null,
+   "name": "Giant Fynock Cave",
+   "x": 1591,
+   "z": -868,
+   "r": 89,
+   "kind": "landmark"
+  },
+  {
+   "key": "binayre_camp_talus",
+   "stringId": null,
+   "name": "Binayre Camp Talus",
+   "x": -1622,
+   "z": 618,
+   "r": 100,
+   "kind": "landmark"
+  },
+  {
+   "key": "coa_aclo_office_nospawn",
+   "stringId": null,
+   "name": "Coa Aclo Office Nospawn",
+   "x": 1280,
+   "z": -3127,
+   "r": 100,
+   "kind": "landmark"
+  },
+  {
+   "key": "coa_nightstrikesoldierhegemony_base_nospawn",
+   "stringId": null,
+   "name": "Coa Nightstrikesoldierhegemony Base Nospawn",
+   "x": -4623,
+   "z": -3233,
+   "r": 120,
+   "kind": "landmark"
+  },
+  {
+   "key": "talus_corsec_vs_criminals_battle",
+   "stringId": null,
+   "name": "Corsec vs Criminals Battle",
+   "x": 3033,
+   "z": 6088,
+   "r": 128,
+   "kind": "landmark"
+  },
+  {
+   "key": "lost_aqualish_cave",
+   "stringId": null,
+   "name": "Lost Aqualish Cave",
+   "x": -4355,
+   "z": -1426,
+   "r": 150,
+   "kind": "landmark"
+  },
+  {
+   "key": "quarantined_building",
+   "stringId": null,
+   "name": "Quarantined Building",
+   "x": 3890,
+   "z": -2845,
+   "r": 150,
+   "kind": "landmark"
+  },
+  {
+   "key": "talus_factional_bunker",
+   "stringId": null,
+   "name": "Factional Bunker",
+   "x": -4938,
+   "z": -3107,
+   "r": 150,
+   "kind": "landmark"
+  },
+  {
+   "key": "talus_factional_bunker2",
+   "stringId": null,
+   "name": "Factional Bunker2",
+   "x": 4987,
+   "z": -6022,
+   "r": 150,
+   "kind": "landmark"
+  },
+  {
+   "key": "imperial_vs_rebel_battle",
+   "stringId": null,
+   "name": "Imperial vs Rebel Battle",
+   "x": -2486,
+   "z": 3745,
+   "r": 159,
+   "kind": "landmark"
+  },
+  {
+   "key": "talus_force_shrine",
+   "stringId": null,
+   "name": "Force Shrine",
+   "x": -5786,
+   "z": 4478,
+   "r": 199,
+   "kind": "landmark"
+  }
+ ],
+ "rori": [
+  {
+   "key": "sdungeon_rebel_outpost",
+   "stringId": "rori_region_names:sdungeon_rebel_outpost",
+   "name": "Sdungeon Rebel Outpost",
+   "x": 3677,
+   "z": -6447,
+   "r": 150,
+   "kind": "city"
+  },
+  {
+   "key": "narmle",
+   "stringId": "rori_region_names:narmle",
+   "name": "Narmle",
+   "x": -5200,
+   "z": -2288,
+   "r": 392,
+   "kind": "city"
+  },
+  {
+   "key": "restuss",
+   "stringId": "rori_region_names:restuss",
+   "name": "Restuss",
+   "x": 5318,
+   "z": 5680,
+   "r": 700,
+   "kind": "city"
+  },
+  {
+   "key": "mudlfats",
+   "stringId": "rori_region_names:mudlfats",
+   "name": "Mudlfats",
+   "x": -3408,
+   "z": -6928,
+   "r": 290,
+   "kind": "landmark"
+  },
+  {
+   "key": "mudflats",
+   "stringId": "rori_region_names:mudflats",
+   "name": "Mudflats",
+   "x": -5632,
+   "z": -5920,
+   "r": 545,
+   "kind": "landmark"
+  },
+  {
+   "key": "narlis_fens",
+   "stringId": "rori_region_names:narlis_fens",
+   "name": "Narlis Fens",
+   "x": -368,
+   "z": 1776,
+   "r": 720,
+   "kind": "landmark"
+  },
+  {
+   "key": "lake_octir_swamp",
+   "stringId": "rori_region_names:lake_octir_swamp",
+   "name": "Lake Octir Swamp",
+   "x": -3616,
+   "z": 3680,
+   "r": 2000,
+   "kind": "area"
+  },
+  {
+   "key": "madyn_plains",
+   "stringId": "rori_region_names:madyn_plains",
+   "name": "Madyn Plains",
+   "x": -3744,
+   "z": 1264,
+   "r": 3552,
+   "kind": "area"
+  },
+  {
+   "key": "vaydean_marsh",
+   "stringId": "rori_region_names:vaydean_marsh",
+   "name": "Vaydean Marsh",
+   "x": 6080,
+   "z": 2496,
+   "r": 3712,
+   "kind": "area"
+  },
+  {
+   "key": "asworal_everglades",
+   "stringId": "rori_region_names:asworal_everglades",
+   "name": "Asworal Everglades",
+   "x": -480,
+   "z": -6448,
+   "r": 5696,
+   "kind": "area"
+  },
+  {
+   "key": "race_coordinator",
+   "stringId": null,
+   "name": "Race Coordinator",
+   "x": 4199,
+   "z": 5286,
+   "r": 60,
+   "kind": "landmark"
+  },
+  {
+   "key": "rori_bark_mite_cave",
+   "stringId": null,
+   "name": "Bark Mite Cave",
+   "x": 3554,
+   "z": 5438,
+   "r": 60,
+   "kind": "landmark"
+  },
+  {
+   "key": "militia_commanders_estate",
+   "stringId": null,
+   "name": "Militia Commanders Estate",
+   "x": 5211,
+   "z": 1017,
+   "r": 75,
+   "kind": "landmark"
+  },
+  {
+   "key": "rorgungan_ruins",
+   "stringId": null,
+   "name": "Rorgungan Ruins",
+   "x": -6964,
+   "z": -5637,
+   "r": 75,
+   "kind": "landmark"
+  },
+  {
+   "key": "rori_garyn_thieves_camp",
+   "stringId": null,
+   "name": "Garyn Thieves Camp",
+   "x": -6023,
+   "z": -1821,
+   "r": 80,
+   "kind": "landmark"
+  },
+  {
+   "key": "rori_gungan_camp",
+   "stringId": null,
+   "name": "Gungan Camp",
+   "x": -2066,
+   "z": 3305,
+   "r": 109,
+   "kind": "landmark"
+  },
+  {
+   "key": "rori_rebel_encampment",
+   "stringId": null,
+   "name": "Rebel Encampment",
+   "x": -5356,
+   "z": 5043,
+   "r": 109,
+   "kind": "landmark"
+  },
+  {
+   "key": "imperial_outpost",
+   "stringId": null,
+   "name": "Imperial Outpost",
+   "x": 6543,
+   "z": -4752,
+   "r": 150,
+   "kind": "landmark"
+  },
+  {
+   "key": "pygmy_torton_cave",
+   "stringId": null,
+   "name": "Pygmy Torton Cave",
+   "x": -1856,
+   "z": -4551,
+   "r": 150,
+   "kind": "landmark"
+  },
+  {
+   "key": "rori_imperial_hyperdrive_facility",
+   "stringId": null,
+   "name": "Imperial Hyperdrive Facility",
+   "x": -1132,
+   "z": 4533,
+   "r": 198,
+   "kind": "landmark"
+  },
+  {
+   "key": "rori_force_shrine",
+   "stringId": null,
+   "name": "Force Shrine",
+   "x": 307,
+   "z": -979,
+   "r": 200,
+   "kind": "landmark"
+  },
+  {
+   "key": "blacksun_bunker_rori",
+   "stringId": null,
+   "name": "Blacksun Bunker Rori",
+   "x": 4846,
+   "z": -1084,
+   "r": 250,
+   "kind": "landmark"
+  }
+ ]
+}

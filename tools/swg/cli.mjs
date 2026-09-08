@@ -44,6 +44,10 @@ import { encodePng } from './png.mjs';
 import { shaderTextures } from './sht.mjs';
 import { effectAlpha, alphaModeFor } from './eff.mjs';
 import { localize, parseDatatable } from './datatable.mjs';
+import { createRequire } from 'node:module';
+
+/** Named places per planet (see regions/build.mjs). */
+const REGIONS = createRequire(import.meta.url)('./regions/regions.json');
 import { decodeTga, encodeHeightmap } from './tga.mjs';
 import { readTemplate, stringParam } from './objtemplate.mjs';
 import { openTre, openVfs, readHeader } from './tre.mjs';
@@ -429,41 +433,58 @@ function autoCenter(snap, entries) {
 }
 
 /**
- * Points of interest for the in-game map: the client's named regions (cities, landmarks) from
- * datatables/clientregion/<planet>.iff with their display names, plus every starport and
- * shuttleport in the snapshot named after the region it stands in. SWG coordinates.
+ * Points of interest for the in-game map, in SWG coordinates: the planet's named places
+ * (regions/regions.json: cities, landmarks and areas, with names from the client's string
+ * tables), the client's own region table when it has one, and every starport and shuttleport
+ * in the snapshot named after the city it stands in.
  */
 function pointsOfInterest(vfs, planet, snap, entries, { regions: wantRegions = true } = {}) {
   const strings = new Map();
-  const regions = [];
+  const places = [];
+  const seen = new Set();
+  const add = (p) => {
+    const k = p.name.toLowerCase();
+    if (seen.has(k)) return;
+    seen.add(k);
+    places.push(p);
+  };
+  for (const r of REGIONS[planet] ?? []) {
+    const name = (r.stringId && localize(vfs, r.stringId, strings)) || r.name;
+    add({ name, x: r.x, z: r.z, r: r.r, kind: r.kind });
+  }
   const table = `datatables/clientregion/${planet}.iff`;
   if (wantRegions && vfs.has(table)) {
     const dt = parseDatatable(parseIff(vfs.read(table)));
     for (const row of dt.rows) {
       const [id, x, z, r] = dt.columns.map((c) => row[c]);
       if (typeof id !== 'string' || typeof x !== 'number') continue;
-      regions.push({ name: localize(vfs, id, strings) ?? id.split(':').pop(), x, z, r, kind: 'region' });
+      add({ name: localize(vfs, id, strings) ?? title(id.split(':').pop()), x, z, r, kind: r > 1000 ? 'area' : 'landmark' });
     }
   }
-  const regionAt = (x, z) => {
+  const cities = places.filter((p) => p.kind === 'city');
+  const cityAt = (x, z) => {
     let best = null;
-    for (const r of regions) if (Math.hypot(r.x - x, r.z - z) <= r.r && (!best || r.r < best.r)) best = r;
+    for (const c of cities) if (Math.hypot(c.x - x, c.z - z) <= Math.max(c.r, 300) && (!best || c.r < best.r)) best = c;
     return best;
   };
-  const travel = [];
   for (const e of entries) {
     if (!e.world || e.parentId !== 0) continue;
     const template = snap.templates[e.node.templateIndex];
     const kind = template.includes('starport') ? 'starport' : template.includes('shuttleport') ? 'shuttleport' : null;
     if (!kind) continue;
     const [x, , z] = e.world.pos;
-    const region = regionAt(x, z);
+    const city = cityAt(x, z);
     const label = kind === 'starport' ? 'Starport' : 'Shuttleport';
-    travel.push({ name: region ? `${region.name} ${label}` : `${label} (${x.toFixed(0)}, ${z.toFixed(0)})`, x, z, r: 0, kind });
+    add({ name: city ? `${city.name} ${label}` : `${label} (${x.toFixed(0)}, ${z.toFixed(0)})`, x, z, r: 0, kind });
   }
-  // Cities first (small named regions), then travel points, then the big named areas.
-  regions.sort((a, b) => a.r - b.r);
-  return [...regions.filter((r) => r.r <= 1500), ...travel, ...regions.filter((r) => r.r > 1500)];
+  const order = { city: 0, starport: 1, shuttleport: 2, landmark: 3, area: 4 };
+  places.sort((a, b) => (order[a.kind] ?? 9) - (order[b.kind] ?? 9) || a.name.localeCompare(b.name));
+  return places;
+}
+
+/** "jabbas_palace" -> "Jabbas Palace" */
+function title(key) {
+  return key.split('_').filter(Boolean).map((w, i) => (i > 0 && /^(of|the|in|on|at|and|with)$/.test(w) ? w : w[0].toUpperCase() + w.slice(1))).join(' ');
 }
 
 /** Write <out>/pois.json for a planet; a broken region table costs the regions, never the snapshot. */

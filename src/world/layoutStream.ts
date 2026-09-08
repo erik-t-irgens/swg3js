@@ -79,6 +79,7 @@ export class LayoutStreamer {
   private readonly exclusionCells = new Map<string, Exclusion[]>();
   private readonly colliders = new Map<PlacedObject, R.Collider[]>();
   private loads = 0;
+  private readonly failed = new Set<string>();
   private lastColliderX = Number.NaN;
   private lastColliderZ = Number.NaN;
   private disposed = false;
@@ -189,8 +190,12 @@ export class LayoutStreamer {
       for (const id of ids) {
         try {
           models.set(id, await this.pack.model(id));
-        } catch {
-          // Missing or broken model: its instances are skipped.
+        } catch (err) {
+          // Missing or broken model: its instances are skipped, once noted.
+          if (!this.failed.has(id)) {
+            this.failed.add(id);
+            console.warn(`snapshot model ${id} failed to load: ${err instanceof Error ? err.message : String(err)}`);
+          }
         }
         if (this.disposed) return;
       }

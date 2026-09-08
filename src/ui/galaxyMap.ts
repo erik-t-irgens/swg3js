@@ -6,7 +6,7 @@ export interface Poi {
   x: number;
   z: number;
   r: number;
-  kind: 'region' | 'starport' | 'shuttleport';
+  kind: 'city' | 'starport' | 'shuttleport' | 'landmark' | 'area' | 'region';
 }
 
 export class GalaxyMap {
@@ -62,11 +62,7 @@ export class GalaxyMap {
   private async fillPois(p: PlanetDef, holder: HTMLElement): Promise<void> {
     const pois = await this.loadPois(p.id);
     if (!pois.length) return;
-    const title = document.createElement('div');
-    title.className = 'pois-title';
-    title.textContent = 'Places';
-    holder.appendChild(title);
-    for (const poi of pois) {
+    const chip = (poi: Poi) => {
       const b = document.createElement('button');
       b.className = `poi ${poi.kind}`;
       b.type = 'button';
@@ -76,8 +72,37 @@ export class GalaxyMap {
         e.stopPropagation();
         this.onTeleport(p, poi);
       });
-      holder.appendChild(b);
-    }
+      return b;
+    };
+    const section = (label: string, list: Poi[], collapsed: boolean) => {
+      if (!list.length) return;
+      const title = document.createElement('button');
+      title.type = 'button';
+      title.className = 'pois-title';
+      const body = document.createElement('div');
+      body.className = 'pois-body';
+      body.hidden = collapsed;
+      const render = () => {
+        title.textContent = `${body.hidden ? '▸' : '▾'} ${label} (${list.length})`;
+      };
+      title.addEventListener('click', (e) => {
+        e.stopPropagation();
+        body.hidden = !body.hidden;
+        render();
+      });
+      render();
+      for (const poi of list) body.appendChild(chip(poi));
+      holder.appendChild(title);
+      holder.appendChild(body);
+    };
+    const cities = pois.filter((x) => x.kind === 'city');
+    const travel = pois.filter((x) => x.kind === 'starport' || x.kind === 'shuttleport');
+    const landmarks = pois.filter((x) => x.kind === 'landmark' || x.kind === 'region');
+    const areas = pois.filter((x) => x.kind === 'area');
+    section('Cities', cities, false);
+    section('Travel', travel, cities.length > 0);
+    section('Landmarks', landmarks, true);
+    section('Regions', areas, true);
   }
 
   loadPois(planetId: string): Promise<Poi[]> {
