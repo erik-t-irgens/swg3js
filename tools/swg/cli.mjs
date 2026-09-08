@@ -21,6 +21,7 @@
 //                                                                  the centre defaults to the planet's starport (else its busiest spot);
 //                                                                  "all" converts every planet the game knows into <out-dir>/<planet>
 //   node tools/swg/cli.mjs stat <swg-dir> <file>                    which archive provides a file (after load order and deletions)
+//   node tools/swg/cli.mjs why <swg-dir> <planet> <pattern>         why snapshot objects matching a name do or do not convert
 //   node tools/swg/cli.mjs pob <swg-dir> <file.pob>                 print a portal building's cells, portals and links (diagnostic)
 //   node tools/swg/cli.mjs terrain <swg-dir> <planet> <out-dir>    copy just the terrain template into a pack
 //   node tools/swg/cli.mjs terrain-check <out-dir> [--limit=n] [--layers] [--at=x,z]
@@ -778,6 +779,56 @@ switch (cmd) {
     console.log(`${pob.cells.length} cells, ${pob.portals.length} portal polygons`);
     pob.portals.forEach(({ verts, indices }, i) => console.log(`  portal ${i}: ${verts.length} verts, ${indices.length / 3} triangles, centre ${verts.reduce((a, v) => a.map((c, k) => c + v[k] / verts.length), [0, 0, 0]).map((v) => v.toFixed(2)).join(',')}`));
     pob.cells.forEach((c, i) => console.log(`  cell ${i} "${c.name}" ${c.appearance} floor ${c.floor || '-'}: ${c.portals.map((p) => `#${p.geometry}->${p.target}${p.passable ? '' : ' closed'}${p.disabled ? ' disabled' : ''}`).join(' ') || 'no portals'}`));
+    break;
+  }
+
+  case 'why': {
+    // Why a snapshot object does or does not make it into a pack: <swg-dir> <planet> <pattern>
+    if (!pos[3]) usage();
+    const vfs = mount(pos[1]);
+    const planet = pos[2];
+    const pattern = new RegExp(pos[3], 'i');
+    const wsPath = `snapshot/${planet}.ws`;
+    if (!vfs.has(wsPath)) throw new Error(`no ${wsPath} in archives`);
+    const snap = parseSnapshot(parseIff(vfs.read(wsPath)));
+    const entries = flattenWithWorldTransforms(snap);
+    const cache = new Map();
+    const hits = new Map();
+    for (const e of entries) {
+      const template = snap.templates[e.node.templateIndex];
+      if (!pattern.test(template)) continue;
+      const h = hits.get(template) ?? { count: 0, contained: 0, radius: e.node.radius, example: e };
+      h.count++;
+      if (e.parentId !== 0) h.contained++;
+      hits.set(template, h);
+    }
+    if (!hits.size) {
+      console.log(`no objects in ${wsPath} match /${pos[3]}/i; templates containing "${pos[3].slice(0, 4)}":`);
+      for (const t of snap.templates.filter((t) => t.toLowerCase().includes(pos[3].slice(0, 4).toLowerCase())).slice(0, 20)) console.log(`  ${t}`);
+      break;
+    }
+    const tmpDir = join(pos[4] ?? '.', '.why');
+    mkdirSync(tmpDir, { recursive: true });
+    for (const [template, h] of hits) {
+      const p = h.example.world?.pos ?? [0, 0, 0];
+      console.log(`\n${template}`);
+      console.log(`  ${h.count} in snapshot (${h.contained} inside buildings), radius ${h.radius}, e.g. at ${p[0].toFixed(0)}, ${p[2].toFixed(0)}`);
+      const r = resolveTemplateMesh(vfs, template, cache);
+      if (r.skip) {
+        console.log(`  SKIPPED: ${r.skip}`);
+        continue;
+      }
+      const appearance = r.parts.length === 1 && !r.parts[0].transform ? r.parts[0].mesh : r.appearance;
+      console.log(`  appearance: ${r.appearance ?? '-'}${r.source ? ` (via ${r.source})` : ''}, ${r.parts.length} part(s)`);
+      const st = vfs.stat(appearance);
+      console.log(`  ${appearance}: ${st ? `${st.size} bytes from ${basename(st.archive)}` : 'NOT IN ARCHIVES'}`);
+      try {
+        const conv = convertOne(vfs, appearance, join(tmpDir, `${familyOf(appearance)}.glb`));
+        console.log(`  converts: ${conv.tris} tris, ${conv.textured}/${conv.shaders.length} textured${conv.partCount > 1 ? `, ${conv.partCount} parts` : ''}${conv.cells ? `, ${conv.cells.length} cells, ${conv.portals?.length ?? 0} portal polygons` : ''}`);
+      } catch (err) {
+        console.log(`  CONVERSION FAILED: ${err.message}`);
+      }
+    }
     break;
   }
 
