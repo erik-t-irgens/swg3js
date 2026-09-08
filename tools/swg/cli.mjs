@@ -43,7 +43,7 @@ import { parseMesh } from './msh.mjs';
 import { buildPack, familyOf } from './pack.mjs';
 import { parseSnapshot, flattenWithWorldTransforms } from './ws.mjs';
 import { loadBuildouts, mergeBuildouts } from './buildout.mjs';
-import { parseAnimation, parseLat, parseLmg, parseMgn, parseSat, parseSkeleton, readIff, skinData, skinnedPrimitives } from './skeletal.mjs';
+import { parseAnimation, parseLat, parseLmg, parseMgn, parseSat, parseSkeleton, poseAtFrame, readIff, skinData, skinnedPrimitives } from './skeletal.mjs';
 import { resolveTemplateMesh, resolveTemplateString } from './objtemplate.mjs';
 import { encodePng } from './png.mjs';
 import { shaderTextures } from './sht.mjs';
@@ -386,6 +386,19 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
         used.add(e.clip);
         clips.push({ name: e.clip, animation });
         info.animations.push(e.clip);
+        // How much of the skeleton this clip actually moves, for spotting name mismatches.
+        const jointNames = new Set(skeleton.joints.map((j) => j.name.toLowerCase()));
+        const matched = animation.transforms.filter((t) => jointNames.has(t.name.toLowerCase())).length;
+        const first = poseAtFrame(skeleton, animation, 0);
+        const mid = poseAtFrame(skeleton, animation, Math.floor(animation.frameCount / 2));
+        let moving = 0;
+        first.forEach((a, i) => {
+          const b = mid[i];
+          const dq = Math.abs(a.rotation[0] - b.rotation[0]) + Math.abs(a.rotation[1] - b.rotation[1]) + Math.abs(a.rotation[2] - b.rotation[2]) + Math.abs(a.rotation[3] - b.rotation[3]);
+          const dt = Math.abs(a.translation[0] - b.translation[0]) + Math.abs(a.translation[1] - b.translation[1]) + Math.abs(a.translation[2] - b.translation[2]);
+          if (dq > 1e-3 || dt > 1e-3) moving++;
+        });
+        (info.clipStats ??= []).push(`${e.clip}: ${animation.frameCount} frames at ${animation.fps.toFixed(1)} fps, ${animation.transforms.length} transforms (${matched} match skeleton joints, ${animation.rotationChannels.length} rotation channels), ${moving} joints move by mid-clip${matched === 0 && animation.transforms.length ? `; e.g. animation "${animation.transforms[0].name}" vs skeleton "${skeleton.joints[0].name}", "${skeleton.joints[1]?.name}"` : ''}`);
       } catch (err) {
         info.skipped.push(`${e.name}: ${err.message}`);
       }
@@ -849,6 +862,7 @@ switch (cmd) {
     console.log(`  animations (${info.animations.length})${info.animationTable ? ` from ${info.animationTable}` : ''}: ${info.animations.join(', ') || 'none'}`);
     if (info.available && (!info.animations.length || options.anim === 'list')) console.log(`  available (${info.available.length}): ${info.available.join(', ')}`);
     if (info.unknownTransforms) console.log(`  ${info.unknownTransforms} vertex weights named joints the skeleton lacks`);
+    for (const c of info.clipStats ?? []) console.log(`  clip ${c}`);
     for (const m of info.missing) console.log(`  missing: ${m}`);
     for (const m of info.skipped) console.log(`  skipped: ${m}`);
     console.log(`-> ${pos[3]}`);
