@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "swg": "node tools/swg/cli.mjs",
-    "test:terrain": "node tools/swg/tests/terrain.test.ts"
+    "test:terrain": "node tools/swg/tests/terrain.test.ts",
+    "test:converter": "node tools/swg/tests/buildout.test.ts"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.20.0",

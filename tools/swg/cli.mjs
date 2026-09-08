@@ -40,6 +40,7 @@ import { classifyDirectory, isRetailByName } from './manifest.mjs';
 import { parseMesh } from './msh.mjs';
 import { buildPack, familyOf } from './pack.mjs';
 import { parseSnapshot, flattenWithWorldTransforms } from './ws.mjs';
+import { loadBuildouts, mergeBuildouts } from './buildout.mjs';
 import { resolveTemplateMesh, resolveTemplateString } from './objtemplate.mjs';
 import { encodePng } from './png.mjs';
 import { shaderTextures } from './sht.mjs';
@@ -396,6 +397,18 @@ async function terrainCheck(dir, limit, opts = {}) {
   }
 }
 
+/** A planet's objects from both placement sources: the world snapshot and the buildout areas. */
+function loadPlanetObjects(vfs, planet) {
+  const wsPath = `snapshot/${planet}.ws`;
+  if (!vfs.has(wsPath)) throw new Error(`no ${wsPath} in archives`);
+  const snap = parseSnapshot(parseIff(vfs.read(wsPath)));
+  const snapshotCount = snap.nodes.length;
+  const buildout = loadBuildouts(vfs, planet);
+  mergeBuildouts(snap, buildout);
+  const entries = flattenWithWorldTransforms(snap);
+  return { snap, entries, snapshotCount, buildout: buildout.stats };
+}
+
 /** Planet ids the game can load a pack for (see src/data/planets.ts). */
 const GAME_PLANETS = ['tatooine', 'naboo', 'corellia', 'dantooine', 'lok', 'endor', 'dathomir', 'yavin4', 'talus', 'rori'];
 
@@ -510,10 +523,9 @@ async function snapshotPlanet(vfs, planet, outDir) {
     const radius = options.radius === 'all' ? Infinity : Number(options.radius ?? 400);
     const max = Number(options.max ?? Infinity);
     const wsPath = `snapshot/${planet}.ws`;
-    if (!vfs.has(wsPath)) throw new Error(`no ${wsPath} in archives`);
-    const snap = parseSnapshot(parseIff(vfs.read(wsPath)));
-    const entries = flattenWithWorldTransforms(snap);
-    console.error(`${wsPath}: ${snap.nodes.length} top-level objects, ${entries.length} including contained, ${snap.templates.length} templates`);
+    const { snap, entries, snapshotCount, buildout } = loadPlanetObjects(vfs, planet);
+    console.error(`${wsPath}: ${snapshotCount} top-level objects, ${entries.length} including contained and buildouts, ${snap.templates.length} templates`);
+    console.error(`buildouts: ${buildout.objects} objects in ${buildout.areas} areas${buildout.eventAreas ? `, ${buildout.eventAreas} event-only areas skipped` : ''}${buildout.unknownTemplates ? `, ${buildout.unknownTemplates} rows with unknown templates` : ''}${buildout.missingTables ? `, ${buildout.missingTables} area tables missing` : ''}`);
     let cx;
     let cz;
     if (options.center && options.center !== 'auto') {
@@ -688,11 +700,10 @@ switch (cmd) {
     if (!pos[1]) usage();
     const vfs = mount(pos[1]);
     for (const planet of snapshotPlanets(vfs)) {
-      const snap = parseSnapshot(parseIff(vfs.read(`snapshot/${planet}.ws`)));
-      const entries = flattenWithWorldTransforms(snap);
+      const { snap, entries, buildout } = loadPlanetObjects(vfs, planet);
       const centre = autoCenter(snap, entries);
       const known = GAME_PLANETS.includes(planet);
-      console.log(`${planet.padEnd(12)} ${String(snap.nodes.length).padStart(6)} objects, terrain ${vfs.has(`terrain/${planet}.trn`) ? 'yes' : 'no '}, centre ${centre.x.toFixed(0)},${centre.z.toFixed(0)} (${centre.why})${known ? '' : '  [not a planet in the game]'}`);
+      console.log(`${planet.padEnd(12)} ${String(snap.nodes.length).padStart(6)} objects (${buildout.objects} from buildouts), terrain ${vfs.has(`terrain/${planet}.trn`) ? 'yes' : 'no '}, centre ${centre.x.toFixed(0)},${centre.z.toFixed(0)} (${centre.why})${known ? '' : '  [not a planet in the game]'}`);
     }
     break;
   }
@@ -729,13 +740,11 @@ switch (cmd) {
     const planets = pos[2] === 'all' ? snapshotPlanets(vfs).filter((p) => GAME_PLANETS.includes(p)) : [pos[2]];
     for (const planet of planets) {
       const outDir = pos[2] === 'all' ? join(pos[3], planet) : pos[3];
-      const wsPath = `snapshot/${planet}.ws`;
-      if (!vfs.has(wsPath)) {
-        console.warn(`no ${wsPath} in archives`);
+      if (!vfs.has(`snapshot/${planet}.ws`)) {
+        console.warn(`no snapshot/${planet}.ws in archives`);
         continue;
       }
-      const snap = parseSnapshot(parseIff(vfs.read(wsPath)));
-      const entries = flattenWithWorldTransforms(snap);
+      const { snap, entries } = loadPlanetObjects(vfs, planet);
       const layoutPath = join(outDir, 'layout.json');
       let cx;
       let cz;
@@ -788,22 +797,21 @@ switch (cmd) {
     const vfs = mount(pos[1]);
     const planet = pos[2];
     const pattern = new RegExp(pos[3], 'i');
-    const wsPath = `snapshot/${planet}.ws`;
-    if (!vfs.has(wsPath)) throw new Error(`no ${wsPath} in archives`);
-    const snap = parseSnapshot(parseIff(vfs.read(wsPath)));
-    const entries = flattenWithWorldTransforms(snap);
+    const { snap, entries, buildout } = loadPlanetObjects(vfs, planet);
+    console.log(`${entries.length} objects (${buildout.objects} from ${buildout.areas} buildout areas)`);
     const cache = new Map();
     const hits = new Map();
     for (const e of entries) {
       const template = snap.templates[e.node.templateIndex];
       if (!pattern.test(template)) continue;
-      const h = hits.get(template) ?? { count: 0, contained: 0, radius: e.node.radius, example: e };
+      const h = hits.get(template) ?? { count: 0, contained: 0, buildout: 0, radius: e.node.radius, example: e };
       h.count++;
+      if (e.node.buildout) h.buildout++;
       if (e.parentId !== 0) h.contained++;
       hits.set(template, h);
     }
     if (!hits.size) {
-      console.log(`no objects in ${wsPath} match /${pos[3]}/i; templates containing "${pos[3].slice(0, 4)}":`);
+      console.log(`no objects on ${planet} match /${pos[3]}/i; templates containing "${pos[3].slice(0, 4)}":`);
       for (const t of snap.templates.filter((t) => t.toLowerCase().includes(pos[3].slice(0, 4).toLowerCase())).slice(0, 20)) console.log(`  ${t}`);
       break;
     }
@@ -812,7 +820,7 @@ switch (cmd) {
     for (const [template, h] of hits) {
       const p = h.example.world?.pos ?? [0, 0, 0];
       console.log(`\n${template}`);
-      console.log(`  ${h.count} in snapshot (${h.contained} inside buildings), radius ${h.radius}, e.g. at ${p[0].toFixed(0)}, ${p[2].toFixed(0)}`);
+      console.log(`  ${h.count} placed (${h.buildout} by buildouts, ${h.contained} inside buildings), radius ${h.radius}, e.g. at ${p[0].toFixed(0)}, ${p[2].toFixed(0)}`);
       const r = resolveTemplateMesh(vfs, template, cache);
       if (r.skip) {
         console.log(`  SKIPPED: ${r.skip}`);
