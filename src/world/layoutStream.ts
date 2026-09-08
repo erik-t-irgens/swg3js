@@ -7,7 +7,7 @@ import { Group, groups, RAPIER as R, type Physics } from '../core/physics';
 import type { AssetPack, Layout, LoadedModel } from './assetPack';
 import { CHUNK_SIZE } from './terrain';
 import type { Exclusion } from './props';
-import { cellLayer, crossing } from './portalRender';
+import { INTERIOR_LAYER, crossing } from './portalRender';
 
 export const REGION = 256;
 
@@ -43,10 +43,12 @@ export interface Building {
   inverse: THREE.Matrix4;
   /** Instances of the exterior shell, collapsed while the player is inside. */
   exterior: { mesh: THREE.InstancedMesh; index: number }[];
+  /** This building's own interior meshes by cell, hidden until the portal renderer draws that cell. */
+  interior: Map<number, THREE.Mesh[]>;
 }
 
 interface LoadedTier {
-  meshes: THREE.InstancedMesh[];
+  meshes: THREE.Object3D[];
   buildings: Building[];
   objects: PlacedObject[];
 }
@@ -208,32 +210,51 @@ export class LayoutStreamer {
       const m = models.get(o.model);
       if (m) (byModel.get(m) ?? byModel.set(m, []).get(m)!).push(o);
     }
-    const meshes: THREE.InstancedMesh[] = [];
+    const meshes: THREE.Object3D[] = [];
     const buildings: Building[] = [];
     for (const [model, list] of byModel) {
       const isBuilding = model.interiorBoxes.length > 0;
       const built: (Building | null)[] = list.map((p) => {
         if (!isBuilding || p.contained) return null;
         const matrix = new THREE.Matrix4().compose(tmpV.set(p.x, p.y, p.z), p.q, ONE);
-        const b: Building = { model, x: p.x, z: p.z, radius: model.radius, matrix, inverse: matrix.clone().invert(), exterior: [] };
+        const b: Building = { model, x: p.x, z: p.z, radius: model.radius, matrix, inverse: matrix.clone().invert(), exterior: [], interior: new Map() };
         buildings.push(b);
         this.buildings.add(b);
         return b;
       });
       for (const prim of model.primitives) {
-        const mesh = new THREE.InstancedMesh(prim.geometry, prim.material, list.length);
-        list.forEach((p, i) => {
+        // Interiors of portal buildings are drawn per building and per cell by the portal renderer,
+        // so each placed building gets its own meshes; a building without portal data draws normally.
+        const perBuilding = prim.cell > 0 && model.portals.length > 0;
+        const instanced = perBuilding ? list.filter((_, i) => !built[i]) : list;
+        if (perBuilding) {
+          built.forEach((b) => {
+            if (!b) return;
+            const mesh = new THREE.Mesh(prim.geometry, prim.material);
+            mesh.matrixAutoUpdate = false;
+            mesh.matrix.copy(b.matrix);
+            mesh.matrixWorld.copy(b.matrix);
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            mesh.visible = false;
+            mesh.layers.set(INTERIOR_LAYER);
+            (b.interior.get(prim.cell) ?? b.interior.set(prim.cell, []).get(prim.cell)!).push(mesh);
+            this.scene.add(mesh);
+            meshes.push(mesh);
+          });
+        }
+        if (!instanced.length) continue;
+        const mesh = new THREE.InstancedMesh(prim.geometry, prim.material, instanced.length);
+        instanced.forEach((p, i) => {
           tmpM.compose(tmpV.set(p.x, p.y, p.z), p.q, ONE);
           mesh.setMatrixAt(i, tmpM);
-          const b = built[i];
+          const b = built[list.indexOf(p)];
           if (b && prim.cell === 0) b.exterior.push({ mesh, index: i });
         });
         mesh.castShadow = true;
         mesh.receiveShadow = true;
         mesh.instanceMatrix.needsUpdate = true;
         mesh.computeBoundingSphere();
-        // Interiors render only through portals; a building without portal data draws normally.
-        if (prim.cell > 0 && model.portals.length) mesh.layers.set(cellLayer(prim.cell));
         this.scene.add(mesh);
         meshes.push(mesh);
       }
@@ -248,7 +269,7 @@ export class LayoutStreamer {
     if (!t || t === 'loading') return;
     for (const mesh of t.meshes) {
       this.scene.remove(mesh);
-      mesh.dispose();
+      if ((mesh as THREE.InstancedMesh).isInstancedMesh) (mesh as THREE.InstancedMesh).dispose();
     }
     for (const b of t.buildings) this.buildings.delete(b);
     for (const o of t.objects) this.removeColliders(o);

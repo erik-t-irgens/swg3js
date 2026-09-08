@@ -3,21 +3,18 @@
 // door portals that lead to it, clipped by a stencil mask and with depth reset behind the
 // door. Exterior shells never intersect interiors and rooms bigger than their shells work.
 //
-// Layers: 0 = the world (terrain, shells, props), 1..30 = interior cells by index, 31 = actors
-// (player, creatures, vehicles, effects, lights) which are drawn in every pass.
+// Layers: 0 = the world (terrain, shells, props), 1 = interior cell meshes (each building owns
+// its own, kept hidden except for the one cell being drawn), 31 = actors (player, creatures,
+// vehicles, effects, lights) which are drawn in every pass.
 
 import * as THREE from 'three';
 import type { Building, CellState } from './layoutStream';
 
 export const ACTOR_LAYER = 31;
-const MAX_CELL_LAYER = 30;
+export const INTERIOR_LAYER = 1;
 const PORTAL_RANGE = 90;
 const MAX_PORTALS = 8;
 const MAX_SECOND_LEVEL = 3;
-
-export function cellLayer(cell: number): number {
-  return Math.min(Math.max(1, cell), MAX_CELL_LAYER);
-}
 
 /** Actors are visible from inside and outside alike. */
 export function markActor(o: THREE.Object3D): void {
@@ -150,6 +147,14 @@ export class PortalRenderer {
     this.passes++;
   }
 
+  /** Draw one cell of one building (plus actors): only its meshes are shown for the pass. */
+  private renderCell(scene: THREE.Scene, camera: THREE.Camera, b: Building, cell: number): void {
+    const meshes = b.interior.get(cell) ?? [];
+    for (const m of meshes) m.visible = true;
+    this.renderLayer(scene, camera, INTERIOR_LAYER);
+    for (const m of meshes) m.visible = false;
+  }
+
   /** Portals of a cell that could be on screen, nearest first. */
   private visiblePortals(b: Building, cell: number, camera: THREE.Camera, exclude = -1): PortalDraw[] {
     const meshes = this.meshesFor(b);
@@ -192,9 +197,11 @@ export class PortalRenderer {
     r.shadowMap.needsUpdate = true;
     r.state.buffers.stencil.setClear(1);
     r.clear(true, true, true);
+    // Every material starts the frame in the base region, whatever pass touched it last frame.
+    this.setRef(this.worldMaterials, 1);
+    this.setRef(this.interiorMaterials, 1);
 
     if (!view) {
-      this.setRef(this.worldMaterials, 1);
       this.renderLayer(scene, camera, 0);
       const doors: PortalDraw[] = [];
       for (const b of buildings) {
@@ -212,8 +219,7 @@ export class PortalRenderer {
     }
 
     // Inside: the camera's cell fills the screen; everything else only through its portals.
-    this.setRef(this.interiorMaterials, 1);
-    this.renderLayer(scene, camera, cellLayer(view.cell));
+    this.renderCell(scene, camera, view.building, view.cell);
     for (const d of this.visiblePortals(view.building, view.cell, camera).slice(0, MAX_PORTALS)) {
       const target = this.otherSide(d.building, d.index, view.cell);
       if (target < 0) continue;
@@ -232,7 +238,7 @@ export class PortalRenderer {
       return;
     }
     this.setRef(this.interiorMaterials, ref);
-    this.renderLayer(scene, camera, cellLayer(cell));
+    this.renderCell(scene, camera, d.building, cell);
     if (ref >= 3) return;
     for (const next of this.visiblePortals(d.building, cell, camera, d.index).slice(0, MAX_SECOND_LEVEL)) {
       const target = this.otherSide(d.building, next.index, cell);
