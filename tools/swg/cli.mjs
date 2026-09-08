@@ -12,9 +12,12 @@
 //   node tools/swg/cli.mjs msh <swg-dir> <appearance-path> <out.glb>
 //   node tools/swg/cli.mjs batch <swg-dir> <out-dir> [filter]     convert every .msh matching filter (default appearance/mesh/)
 //   node tools/swg/cli.mjs pack <swg-dir> <spec.json> <out-dir>    build a game asset pack from a spec (see packs/)
-//   node tools/swg/cli.mjs snapshot <swg-dir> <planet> <out-dir> --center=x,z --radius=r|all [--max=n]
+//   node tools/swg/cli.mjs planets <swg-dir>                        list the world snapshots in the archives and where each would centre
+//   node tools/swg/cli.mjs snapshot <swg-dir> <planet>|all <out-dir> [--center=x,z|auto] --radius=r|all [--max=n]
 //                                                                  convert the world snapshot's objects around a point into a layout,
-//                                                                  and copy the planet's terrain (.trn) plus building terrain layers (.lay)
+//                                                                  and copy the planet's terrain (.trn) plus building terrain layers (.lay);
+//                                                                  the centre defaults to the planet's starport (else its busiest spot);
+//                                                                  "all" converts every planet the game knows into <out-dir>/<planet>
 //   node tools/swg/cli.mjs stat <swg-dir> <file>                    which archive provides a file (after load order and deletions)
 //   node tools/swg/cli.mjs pob <swg-dir> <file.pob>                 print a portal building's cells, portals and links (diagnostic)
 //   node tools/swg/cli.mjs terrain <swg-dir> <planet> <out-dir>    copy just the terrain template into a pack
@@ -339,6 +342,127 @@ async function terrainCheck(dir, limit, opts = {}) {
   }
 }
 
+/** Planet ids the game can load a pack for (see src/data/planets.ts). */
+const GAME_PLANETS = ['tatooine', 'naboo', 'corellia', 'dantooine', 'lok', 'endor', 'dathomir', 'yavin4', 'talus', 'rori'];
+
+/** Names of the world snapshots the archives hold (snapshot/<name>.ws). */
+function snapshotPlanets(vfs) {
+  return vfs
+    .list('snapshot/')
+    .filter((n) => n.endsWith('.ws'))
+    .map((n) => basename(n, '.ws'))
+    .sort();
+}
+
+/**
+ * Where to centre a planet when no centre is given: its starport (or shuttleport) if it has
+ * one, else the middle of the 256 m square holding the most objects, which is a city.
+ */
+function autoCenter(snap, entries) {
+  for (const want of ['starport', 'shuttleport']) {
+    const hit = entries.find((e) => e.world && e.parentId === 0 && snap.templates[e.node.templateIndex].includes(want));
+    if (hit) return { x: hit.world.pos[0], z: hit.world.pos[2], why: `${want} ${snap.templates[hit.node.templateIndex].split('/').pop()}` };
+  }
+  const cells = new Map();
+  for (const e of entries) {
+    if (!e.world || e.parentId !== 0) continue;
+    const key = `${Math.floor(e.world.pos[0] / 256)},${Math.floor(e.world.pos[2] / 256)}`;
+    const c = cells.get(key) ?? { n: 0, x: 0, z: 0 };
+    c.n++;
+    c.x += e.world.pos[0];
+    c.z += e.world.pos[2];
+    cells.set(key, c);
+  }
+  let best = null;
+  for (const c of cells.values()) if (!best || c.n > best.n) best = c;
+  if (!best) return { x: 0, z: 0, why: 'empty snapshot' };
+  return { x: best.x / best.n, z: best.z / best.n, why: `busiest square, ${best.n} objects` };
+}
+
+/** Convert one planet's snapshot (see the snapshot command). */
+async function snapshotPlanet(vfs, planet, outDir) {
+    const radius = options.radius === 'all' ? Infinity : Number(options.radius ?? 400);
+    const max = Number(options.max ?? Infinity);
+    const wsPath = `snapshot/${planet}.ws`;
+    if (!vfs.has(wsPath)) throw new Error(`no ${wsPath} in archives`);
+    const snap = parseSnapshot(parseIff(vfs.read(wsPath)));
+    const entries = flattenWithWorldTransforms(snap);
+    console.error(`${wsPath}: ${snap.nodes.length} top-level objects, ${entries.length} including contained, ${snap.templates.length} templates`);
+    let cx;
+    let cz;
+    if (options.center && options.center !== 'auto') {
+      [cx, cz] = options.center.split(',').map(Number);
+    } else {
+      const c = autoCenter(snap, entries);
+      cx = Math.round(c.x);
+      cz = Math.round(c.z);
+      console.error(`centre ${cx},${cz}: ${c.why}`);
+    }
+    const inRegion = entries.filter((e) => e.world && Math.hypot(e.world.pos[0] - cx, e.world.pos[2] - cz) <= radius);
+    console.error(`${inRegion.length} within ${radius} m of ${cx},${cz}`);
+    const cache = new Map();
+    const skipped = {};
+    const examples = {};
+    const skip = (reason, template) => {
+      skipped[reason] = (skipped[reason] ?? 0) + 1;
+      (examples[reason] ??= new Set()).add(template);
+    };
+    const models = new Map();
+    const objects = [];
+    const layerCache = new Map();
+    mkdirSync(outDir, { recursive: true });
+    for (const e of inRegion) {
+      const n = e.node;
+      const template = snap.templates[n.templateIndex];
+      const r = resolveTemplateMesh(vfs, template, cache);
+      if (r.skip) {
+        skip(r.skip, template);
+        continue;
+      }
+      const single = r.parts.length === 1 && !r.parts[0].transform;
+      const id = familyOf(single ? r.parts[0].mesh : r.appearance);
+      if (!models.has(id)) {
+        if (models.size >= max) break;
+        try {
+          const conv = convertOne(vfs, single ? r.parts[0].mesh : r.appearance, join(outDir, `${id}.glb`));
+          const b = conv.mesh.bounds ?? { min: [0, 0, 0], max: [0, 0, 0] };
+          const bounds = conv.flipX ? { min: [-b.max[0], b.min[1], b.min[2]], max: [-b.min[0], b.max[1], b.max[2]] } : b;
+          models.set(id, { id, source: r.source ?? r.appearance, file: `${id}.glb`, bounds, triangles: conv.tris, textured: conv.textured, shaders: conv.shaders.length, parts: conv.partCount, ...(conv.cells ? { cells: conv.cells, portals: conv.portals ?? [] } : {}) });
+          console.error(`  ${id}: ${conv.tris} tris, ${conv.textured}/${conv.shaders.length} textured${conv.partCount > 1 ? `, ${conv.partCount} parts` : ''}`);
+        } catch (err) {
+          models.set(id, { failed: err.message });
+        }
+      }
+      const model = models.get(id);
+      if (!model || model.failed) {
+        skip(`convert failed: ${model?.failed ?? 'unknown'}`, template);
+        continue;
+      }
+      const obj = { template, model: id, x: e.world.pos[0], y: e.world.pos[1], z: e.world.pos[2], q: e.world.q, radius: n.radius, contained: e.parentId !== 0 };
+      if (!obj.contained) {
+        const layer = copyTerrainLayer(vfs, template, outDir, layerCache);
+        if (layer) obj.layer = layer;
+      }
+      objects.push(obj);
+    }
+    const terrainFile = await copyTerrain(vfs, planet, outDir);
+    const layout = { planet, center: { x: cx, z: cz }, radius: Number.isFinite(radius) ? radius : null, terrain: terrainFile, objects, skipped };
+    writeFileSync(join(outDir, 'layout.json'), JSON.stringify(layout));
+    const manifestPath = join(outDir, 'manifest.json');
+    const manifest = existsSync(manifestPath) ? JSON.parse(readFileSync(manifestPath, 'utf8')) : { planet, categories: {} };
+    manifest.categories.layout = [...models.values()].filter((m) => m && !m.failed);
+    writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+    console.log(`layout: ${objects.length} objects, ${manifest.categories.layout.length} models -> ${join(outDir, 'layout.json')}`);
+    const withCells = manifest.categories.layout.filter((m) => m.cells);
+    console.log(`buildings: ${withCells.length} models with cells, ${withCells.filter((m) => m.portals && m.portals.length).length} with portals`);
+    console.log(`terrain: ${terrainFile ?? 'not found'}, ${objects.filter((o) => o.layer).length} objects with terrain modification layers (${new Set(objects.map((o) => o.layer).filter(Boolean)).size} files)`);
+    for (const [reason, count] of Object.entries(skipped).sort((a, b) => b[1] - a[1])) {
+      console.log(`  skipped ${count}: ${reason}`);
+      for (const ex of [...(examples[reason] ?? [])].slice(0, 3)) console.log(`      e.g. ${ex}`);
+    }
+    printEffectSummary();
+}
+
 switch (cmd) {
   case 'verify': {
     if (!pos[1]) usage();
@@ -431,84 +555,35 @@ switch (cmd) {
     printEffectSummary();
     break;
   }
-  case 'snapshot': {
-    if (!pos[3] || !options.center) usage();
+  case 'planets': {
+    if (!pos[1]) usage();
     const vfs = mount(pos[1]);
-    const planet = pos[2];
-    const outDir = pos[3];
-    const [cx, cz] = options.center.split(',').map(Number);
-    const radius = options.radius === 'all' ? Infinity : Number(options.radius ?? 400);
-    const max = Number(options.max ?? Infinity);
-    const wsPath = `snapshot/${planet}.ws`;
-    if (!vfs.has(wsPath)) throw new Error(`no ${wsPath} in archives`);
-    const snap = parseSnapshot(parseIff(vfs.read(wsPath)));
-    const entries = flattenWithWorldTransforms(snap);
-    console.error(`${wsPath}: ${snap.nodes.length} top-level objects, ${entries.length} including contained, ${snap.templates.length} templates`);
-    const inRegion = entries.filter((e) => e.world && Math.hypot(e.world.pos[0] - cx, e.world.pos[2] - cz) <= radius);
-    console.error(`${inRegion.length} within ${radius} m of ${cx},${cz}`);
-    const cache = new Map();
-    const skipped = {};
-    const examples = {};
-    const skip = (reason, template) => {
-      skipped[reason] = (skipped[reason] ?? 0) + 1;
-      (examples[reason] ??= new Set()).add(template);
-    };
-    const models = new Map();
-    const objects = [];
-    const layerCache = new Map();
-    mkdirSync(outDir, { recursive: true });
-    for (const e of inRegion) {
-      const n = e.node;
-      const template = snap.templates[n.templateIndex];
-      const r = resolveTemplateMesh(vfs, template, cache);
-      if (r.skip) {
-        skip(r.skip, template);
-        continue;
-      }
-      const single = r.parts.length === 1 && !r.parts[0].transform;
-      const id = familyOf(single ? r.parts[0].mesh : r.appearance);
-      if (!models.has(id)) {
-        if (models.size >= max) break;
-        try {
-          const conv = convertOne(vfs, single ? r.parts[0].mesh : r.appearance, join(outDir, `${id}.glb`));
-          const b = conv.mesh.bounds ?? { min: [0, 0, 0], max: [0, 0, 0] };
-          const bounds = conv.flipX ? { min: [-b.max[0], b.min[1], b.min[2]], max: [-b.min[0], b.max[1], b.max[2]] } : b;
-          models.set(id, { id, source: r.source ?? r.appearance, file: `${id}.glb`, bounds, triangles: conv.tris, textured: conv.textured, shaders: conv.shaders.length, parts: conv.partCount, ...(conv.cells ? { cells: conv.cells, portals: conv.portals ?? [] } : {}) });
-          console.error(`  ${id}: ${conv.tris} tris, ${conv.textured}/${conv.shaders.length} textured${conv.partCount > 1 ? `, ${conv.partCount} parts` : ''}`);
-        } catch (err) {
-          models.set(id, { failed: err.message });
-        }
-      }
-      const model = models.get(id);
-      if (!model || model.failed) {
-        skip(`convert failed: ${model?.failed ?? 'unknown'}`, template);
-        continue;
-      }
-      const obj = { template, model: id, x: e.world.pos[0], y: e.world.pos[1], z: e.world.pos[2], q: e.world.q, radius: n.radius, contained: e.parentId !== 0 };
-      if (!obj.contained) {
-        const layer = copyTerrainLayer(vfs, template, outDir, layerCache);
-        if (layer) obj.layer = layer;
-      }
-      objects.push(obj);
+    for (const planet of snapshotPlanets(vfs)) {
+      const snap = parseSnapshot(parseIff(vfs.read(`snapshot/${planet}.ws`)));
+      const entries = flattenWithWorldTransforms(snap);
+      const centre = autoCenter(snap, entries);
+      const known = GAME_PLANETS.includes(planet);
+      console.log(`${planet.padEnd(12)} ${String(snap.nodes.length).padStart(6)} objects, terrain ${vfs.has(`terrain/${planet}.trn`) ? 'yes' : 'no '}, centre ${centre.x.toFixed(0)},${centre.z.toFixed(0)} (${centre.why})${known ? '' : '  [not a planet in the game]'}`);
     }
-    const terrainFile = await copyTerrain(vfs, planet, outDir);
-    const layout = { planet, center: { x: cx, z: cz }, radius: Number.isFinite(radius) ? radius : null, terrain: terrainFile, objects, skipped };
-    writeFileSync(join(outDir, 'layout.json'), JSON.stringify(layout));
-    const manifestPath = join(outDir, 'manifest.json');
-    const manifest = existsSync(manifestPath) ? JSON.parse(readFileSync(manifestPath, 'utf8')) : { planet, categories: {} };
-    manifest.categories.layout = [...models.values()].filter((m) => m && !m.failed);
-    writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
-    console.log(`layout: ${objects.length} objects, ${manifest.categories.layout.length} models -> ${join(outDir, 'layout.json')}`);
-    const withCells = manifest.categories.layout.filter((m) => m.cells);
-    console.log(`buildings: ${withCells.length} models with cells, ${withCells.filter((m) => m.portals && m.portals.length).length} with portals`);
-    console.log(`terrain: ${terrainFile ?? 'not found'}, ${objects.filter((o) => o.layer).length} objects with terrain modification layers (${new Set(objects.map((o) => o.layer).filter(Boolean)).size} files)`);
-    for (const [reason, count] of Object.entries(skipped).sort((a, b) => b[1] - a[1])) {
-      console.log(`  skipped ${count}: ${reason}`);
-      for (const ex of [...(examples[reason] ?? [])].slice(0, 3)) console.log(`      e.g. ${ex}`);
-    }
-    printEffectSummary();
     break;
   }
+
+  case 'snapshot': {
+    if (!pos[3]) usage();
+    const vfs = mount(pos[1]);
+    if (pos[2] === 'all') {
+      const planets = snapshotPlanets(vfs).filter((p) => GAME_PLANETS.includes(p));
+      console.log(`converting ${planets.length} planets: ${planets.join(', ')}`);
+      for (const planet of planets) {
+        console.log(`\n=== ${planet} ===`);
+        await snapshotPlanet(vfs, planet, join(pos[3], planet));
+      }
+    } else {
+      await snapshotPlanet(vfs, pos[2], pos[3]);
+    }
+    break;
+  }
+
   case 'pob': {
     if (!pos[2]) usage();
     const vfs = mount(pos[1]);
