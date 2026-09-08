@@ -284,6 +284,25 @@ class App {
     }
   }
 
+  /** E at an elevator terminal: up for an up terminal, down for a down one, up then down for a plain one. */
+  private handleElevator(): boolean {
+    const p = this.player;
+    const near = this.world.elevatorsNear(p.pos, MOUNT_RANGE);
+    if (!near.length) return false;
+    const kind = near[0].kind;
+    const tryDir = (up: boolean) => {
+      const next = this.world.useElevator(p.pos, up);
+      if (!next) return false;
+      p.reset(next);
+      this.physics.world.step();
+      return true;
+    };
+    if (kind === 'up') tryDir(true);
+    else if (kind === 'down') tryDir(false);
+    else if (!tryDir(true)) tryDir(false);
+    return true;
+  }
+
   private handleMount(): void {
     const p = this.player;
     if (p.mounted) {
@@ -332,7 +351,7 @@ class App {
         if (!this.map.open) {
           if (input.justPressed('KeyL') && this.kit.id === 'jedi' && !player.mounted) player.toggleSaber();
           if (input.justPressed('KeyC')) this.setClass(this.kit.id === 'jedi' ? 'bounty_hunter' : 'jedi');
-          if (input.justPressed('KeyE') && !player.noclip) this.handleMount();
+          if (input.justPressed('KeyE') && !player.noclip && !this.handleElevator()) this.handleMount();
           if (input.justPressed('KeyN') && !player.mounted) player.toggleNoclip();
         }
       }
@@ -377,6 +396,7 @@ class App {
       let prompt = '';
       if (player.noclip) prompt = '<b>NOCLIP</b> · <b>WASD</b> fly · <b>Space</b> up · <b>Ctrl</b> down · <b>Shift</b> fast · <b>N</b> off';
       else if (player.mounted) prompt = '<b>E</b> dismount · <b>W/S</b> throttle · <b>A/D</b> steer · <b>Shift</b> boost · <b>Space</b> hop';
+      else if (this.world.elevatorsNear(player.pos, MOUNT_RANGE).length) prompt = `<b>E</b> elevator ${this.world.elevatorsNear(player.pos, MOUNT_RANGE)[0].kind === 'down' ? 'down' : 'up'}`;
       else if (this.nearestSpeederDistance() < MOUNT_RANGE) prompt = '<b>E</b> mount speeder';
       this.hud.setPrompt(prompt);
       this.hud.update(dt, player.pos.x, player.pos.y, player.pos.z, this.kit, player.hp, player.maxHp, this.world.day.clock(), this.world.planet.creatures.name, player.saberOn);

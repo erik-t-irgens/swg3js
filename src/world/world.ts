@@ -581,6 +581,31 @@ export class World {
     return this.chunks.size;
   }
 
+  /** Elevator terminals near the player, nearest first (empty outside buildings). */
+  elevatorsNear(pos: THREE.Vector3, range: number): { kind: 'up' | 'down' | 'both'; d: number }[] {
+    return this.cellState && this.layoutStream ? this.layoutStream.elevatorsNear(pos, range) : [];
+  }
+
+  /**
+   * Ride an elevator the way the original game does: the player is moved straight up or down
+   * to the next floor surface on their vertical line, staying in the building. Returns the new
+   * position, or null when there is no floor that way.
+   */
+  useElevator(pos: THREE.Vector3, up: boolean): THREE.Vector3 | null {
+    const b = this.cellState?.building;
+    if (!b || !this.layoutStream) return null;
+    const floors = this.physics.floorsAt(pos.x, pos.z, pos.y + 80, pos.y - 80);
+    let i = floors.findIndex((f) => Math.abs(f - pos.y) < 1);
+    if (i < 0) i = floors.findIndex((f) => f < pos.y);
+    const target = up ? floors[i - 1] : floors[i + 1];
+    if (target === undefined) return null;
+    const next = new THREE.Vector3(pos.x, target + 0.1, pos.z);
+    const cell = this.layoutStream.cellAt(b, next);
+    this.cellState = { building: b, cell: cell || this.cellState!.cell };
+    this.prevPlayerPos.copy(next);
+    return next;
+  }
+
   /** Flora planted so far and the appearances the pack lacked (diagnostics). */
   get floraStatus(): { planted: number; models: number; missing: string[] } | null {
     return this.flora ? { planted: this.flora.planted, models: this.flora.modelCount, missing: [...this.flora.missing] } : null;

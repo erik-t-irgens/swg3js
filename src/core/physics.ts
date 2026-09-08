@@ -66,6 +66,25 @@ export class Physics {
    * clear. Moving bodies (creatures, vehicles, the player) never block it; inside a building
    * the ground and the building's shell are ignored, as they are for the player.
    */
+  /**
+   * Heights of every upward-facing interior surface on the vertical line through a point,
+   * highest first, between `top` and `bottom` (the floors an elevator can reach).
+   */
+  floorsAt(x: number, z: number, top: number, bottom: number): number[] {
+    const floors: number[] = [];
+    const filter = groups(Group.all, Group.interior);
+    let y = top;
+    for (let i = 0; i < 24 && y > bottom; i++) {
+      const ray = new RAPIER.Ray({ x, y, z }, { x: 0, y: -1, z: 0 });
+      const hit = this.world.castRayAndGetNormal(ray, y - bottom, true, undefined, filter);
+      if (!hit) break;
+      const hy = y - hit.timeOfImpact;
+      if (hit.normal.y > 0.5) floors.push(hy);
+      y = hy - 0.05;
+    }
+    return floors;
+  }
+
   cameraBlock(from: { x: number; y: number; z: number }, to: { x: number; y: number; z: number }, excludeBody: RAPIER.RigidBody | null, inside: boolean): number | null {
     const dx = to.x - from.x;
     const dy = to.y - from.y;

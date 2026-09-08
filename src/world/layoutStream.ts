@@ -24,6 +24,7 @@ const MAX_CONCURRENT_LOADS = 3;
 
 export interface PlacedObject {
   model: string;
+  template: string;
   x: number;
   y: number;
   z: number;
@@ -97,7 +98,7 @@ export class LayoutStreamer {
       const gx = -(o.x - layout.center.x);
       const gz = o.z - layout.center.z;
       const tier = TIERS.findIndex((t) => o.radius >= t.minRadius);
-      const p: PlacedObject = { model: o.model, x: gx, y: o.y, z: gz, q: new THREE.Quaternion(o.q[1], -o.q[2], -o.q[3], o.q[0]), radius: o.radius, contained: !!o.contained, tier: tier < 0 ? TIERS.length - 1 : tier };
+      const p: PlacedObject = { model: o.model, template: o.template, x: gx, y: o.y, z: gz, q: new THREE.Quaternion(o.q[1], -o.q[2], -o.q[3], o.q[0]), radius: o.radius, contained: !!o.contained, tier: tier < 0 ? TIERS.length - 1 : tier };
       this.objects.push(p);
       const rx = Math.floor(gx / REGION);
       const rz = Math.floor(gz / REGION);
@@ -376,6 +377,37 @@ export class LayoutStreamer {
       }
     }
     return null;
+  }
+
+  /** Elevator terminals within `range` of a point: 'up', 'down' or 'both' (plain elevator terminals). */
+  elevatorsNear(pos: THREE.Vector3, range: number): { kind: 'up' | 'down' | 'both'; d: number }[] {
+    const out: { kind: 'up' | 'down' | 'both'; d: number }[] = [];
+    for (const o of this.objects) {
+      if (!o.template.includes('terminal_elevator')) continue;
+      const d = Math.hypot(o.x - pos.x, o.z - pos.z);
+      if (d > range || Math.abs(o.y - pos.y) > 3) continue;
+      out.push({ kind: o.template.includes('_up') ? 'up' : o.template.includes('_down') ? 'down' : 'both', d });
+    }
+    return out.sort((a, b) => a.d - b.d);
+  }
+
+  /** The cell of a building whose bounds hold a world point (smallest first), or 0 for none. */
+  cellAt(b: Building, pos: THREE.Vector3): number {
+    localA.copy(pos).applyMatrix4(b.inverse);
+    let best = 0;
+    let bestVolume = Infinity;
+    for (const c of b.model.def.cells ?? []) {
+      if (c.index === 0) continue;
+      const [x0, y0, z0] = c.bounds.min;
+      const [x1, y1, z1] = c.bounds.max;
+      if (localA.x < x0 - 0.5 || localA.x > x1 + 0.5 || localA.y < y0 - 0.5 || localA.y > y1 + 0.5 || localA.z < z0 - 0.5 || localA.z > z1 + 0.5) continue;
+      const v = (x1 - x0) * (y1 - y0) * (z1 - z0);
+      if (v < bestVolume) {
+        bestVolume = v;
+        best = c.index;
+      }
+    }
+    return best;
   }
 
   get status(): string {
