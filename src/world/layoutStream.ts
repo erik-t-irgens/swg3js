@@ -7,7 +7,7 @@ import { Group, groups, RAPIER as R, type Physics } from '../core/physics';
 import type { AssetPack, Layout, LoadedModel } from './assetPack';
 import { CHUNK_SIZE } from './terrain';
 import type { Exclusion } from './props';
-import { INTERIOR_LAYER, crossing } from './portalRender';
+import { ACTOR_LAYER, INTERIOR_LAYER, crossing } from './portalRender';
 
 export const REGION = 256;
 
@@ -41,10 +41,8 @@ export interface Building {
   radius: number;
   matrix: THREE.Matrix4;
   inverse: THREE.Matrix4;
-  /** Instances of the exterior shell, collapsed while the player is inside. */
-  exterior: { mesh: THREE.InstancedMesh; index: number }[];
-  /** This building's own interior meshes by cell, hidden until the portal renderer draws that cell. */
-  interior: Map<number, THREE.Mesh[]>;
+  /** This building's own interior meshes, hidden until the portal renderer draws the building. */
+  interior: THREE.Mesh[];
 }
 
 interface LoadedTier {
@@ -219,7 +217,7 @@ export class LayoutStreamer {
       const built: (Building | null)[] = list.map((p) => {
         if (!isBuilding || p.contained) return null;
         const matrix = new THREE.Matrix4().compose(tmpV.set(p.x, p.y, p.z), p.q, ONE);
-        const b: Building = { model, x: p.x, z: p.z, radius: model.radius, matrix, inverse: matrix.clone().invert(), exterior: [], interior: new Map() };
+        const b: Building = { model, x: p.x, z: p.z, radius: model.radius, matrix, inverse: matrix.clone().invert(), interior: [] };
         buildings.push(b);
         this.buildings.add(b);
         return b;
@@ -240,7 +238,7 @@ export class LayoutStreamer {
             mesh.receiveShadow = true;
             mesh.visible = false;
             mesh.layers.set(INTERIOR_LAYER);
-            (b.interior.get(prim.cell) ?? b.interior.set(prim.cell, []).get(prim.cell)!).push(mesh);
+            b.interior.push(mesh);
             this.scene.add(mesh);
             meshes.push(mesh);
           });
@@ -250,9 +248,9 @@ export class LayoutStreamer {
         instanced.forEach((p, i) => {
           tmpM.compose(tmpV.set(p.x, p.y, p.z), p.q, ONE);
           mesh.setMatrixAt(i, tmpM);
-          const b = built[list.indexOf(p)];
-          if (b && prim.cell === 0) b.exterior.push({ mesh, index: i });
         });
+        // Objects placed inside buildings draw in every pass, like actors, so they show with the room.
+        if (instanced.some((p) => p.contained)) mesh.layers.enable(ACTOR_LAYER);
         mesh.castShadow = true;
         mesh.receiveShadow = true;
         mesh.instanceMatrix.needsUpdate = true;

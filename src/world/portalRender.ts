@@ -1,42 +1,41 @@
-// Portal rendering, the way the original client draws buildings: only the cell the camera is
-// in is drawn in full; every other cell (and the outside world) is drawn only through the
-// door portals that lead to it, clipped by a stencil mask and with depth reset behind the
-// door. Exterior shells never intersect interiors and rooms bigger than their shells work.
+// Portal rendering, reduced to the one thing that matters: keeping a building's inside and
+// outside apart. Interiors are drawn whole (rooms occlude each other by depth, so doorways
+// between rooms need no special handling); the boundary between a building and the world is
+// the set of its exit portals, and whatever lies on the far side of that boundary is drawn only
+// through those polygons, clipped by a stencil mask with depth reset behind the doorway.
+// Exterior shells never intersect interiors, rooms bigger than their shells work, and the
+// scene is shaded once for every pass so lighting is the same in and out.
 //
-// Layers: 0 = the world (terrain, shells, props), 1 = interior cell meshes (each building owns
-// its own, kept hidden except for the one cell being drawn), 31 = actors (player, creatures,
-// vehicles, effects, lights) which are drawn in every pass.
+// Layers: 0 = the world (terrain, shells, props), 1 = interior meshes (each building owns its
+// own, hidden except while that building is being drawn), 31 = actors (player, creatures,
+// vehicles, effects, lights, objects inside buildings) which are drawn in every pass.
 
 import * as THREE from 'three';
 import type { Building, CellState } from './layoutStream';
 
 export const ACTOR_LAYER = 31;
 export const INTERIOR_LAYER = 1;
-const PORTAL_RANGE = 90;
-const MAX_PORTALS = 8;
-const MAX_SECOND_LEVEL = 3;
+const PORTAL_RANGE = 120;
+const MAX_BUILDINGS = 6;
+/** Doorways count as reaching this far above their polygon when deciding which side the camera is on. */
+const DOOR_HEADROOM = 4;
 
 /** Actors are visible from inside and outside alike. */
 export function markActor(o: THREE.Object3D): void {
   o.traverse((x) => x.layers.enable(ACTOR_LAYER));
 }
 
-interface PortalDraw {
-  building: Building;
-  index: number;
-  mesh: THREE.Mesh;
-  dist: number;
-}
-
 const tmpV = new THREE.Vector3();
 const tmpA = new THREE.Vector3();
 const tmpB = new THREE.Vector3();
+const tmpS = new THREE.Sphere();
 const frustum = new THREE.Frustum();
 const projView = new THREE.Matrix4();
 
 export class PortalRenderer {
-  readonly worldMaterials = new Set<THREE.Material>();
-  readonly interiorMaterials = new Set<THREE.Material>();
+  readonly materials = new Set<THREE.Material>();
+  /** Shadow-casting lights, shaded once per frame before the passes (set by the world). */
+  shadowLights: THREE.Light[] = [];
   private readonly portalMat: THREE.MeshBasicMaterial;
   private readonly resetMat: THREE.ShaderMaterial;
   private readonly resetQuad: THREE.Mesh;
@@ -74,9 +73,9 @@ export class PortalRenderer {
     renderer.shadowMap.autoUpdate = false;
   }
 
-  /** Every lit material must take part in the stencil test; interior materials are tracked apart. */
-  registerMaterial(m: THREE.Material, interior: boolean): void {
-    if (this.worldMaterials.has(m) || this.interiorMaterials.has(m)) return;
+  /** Every material must take part in the stencil test (the second argument is kept for callers). */
+  registerMaterial(m: THREE.Material, _interior = false): void {
+    if (this.materials.has(m)) return;
     m.stencilWrite = true;
     m.stencilFunc = THREE.EqualStencilFunc;
     m.stencilRef = 1;
@@ -84,16 +83,15 @@ export class PortalRenderer {
     m.stencilFail = THREE.KeepStencilOp;
     m.stencilZFail = THREE.KeepStencilOp;
     m.stencilZPass = THREE.KeepStencilOp;
-    (interior ? this.interiorMaterials : this.worldMaterials).add(m);
+    this.materials.add(m);
   }
 
   forget(m: THREE.Material): void {
-    this.worldMaterials.delete(m);
-    this.interiorMaterials.delete(m);
+    this.materials.delete(m);
   }
 
-  private setRef(set: Set<THREE.Material>, ref: number): void {
-    for (const m of set) m.stencilRef = ref;
+  private setRef(ref: number): void {
+    for (const m of this.materials) m.stencilRef = ref;
   }
 
   private meshesFor(b: Building): THREE.Mesh[] {
@@ -120,10 +118,10 @@ export class PortalRenderer {
   }
 
   /**
-   * Stencil a portal polygon: where the region value equals `from` (and the polygon is visible),
-   * increment it. `restore` instead writes 1 everywhere the polygon covers, undoing a pass.
+   * Stencil portal polygons: where the region value equals `from` (and the polygon is visible),
+   * increment it. `restore` instead writes 1 everywhere the polygons cover, undoing a pass.
    */
-  private drawPortal(mesh: THREE.Mesh, camera: THREE.Camera, from: number, depthTest: boolean, restore = false): void {
+  private drawPortals(meshes: THREE.Mesh[], camera: THREE.Camera, from: number, depthTest: boolean, restore = false): void {
     const m = this.portalMat;
     if (restore) {
       m.stencilFunc = THREE.AlwaysStencilFunc;
@@ -136,8 +134,10 @@ export class PortalRenderer {
     }
     m.stencilFuncMask = 0xff;
     m.depthTest = depthTest;
-    this.renderer.render(mesh, camera);
-    this.passes++;
+    for (const mesh of meshes) {
+      this.renderer.render(mesh, camera);
+      this.passes++;
+    }
   }
 
   private resetDepth(ref: number, camera: THREE.Camera): void {
@@ -152,142 +152,134 @@ export class PortalRenderer {
     this.passes++;
   }
 
-  /** Draw one cell of one building (plus actors): only its meshes are shown for the pass. */
-  private renderCell(scene: THREE.Scene, camera: THREE.Camera, b: Building, cell: number): void {
-    const meshes = b.interior.get(cell) ?? [];
-    for (const m of meshes) m.visible = true;
-    this.renderLayer(scene, camera, INTERIOR_LAYER);
-    for (const m of meshes) m.visible = false;
+  private showInterior(b: Building, on: boolean): void {
+    for (const m of b.interior) m.visible = on;
   }
 
-  /** Portals of a cell that could be on screen, nearest first. */
-  private visiblePortals(b: Building, cell: number, camera: THREE.Camera, exclude = -1): PortalDraw[] {
+  /** The building's exit portals (doors and windows onto the world) that could be on screen. */
+  private exitPortals(b: Building, camera: THREE.Camera): THREE.Mesh[] {
+    if (Math.abs(b.x - camera.position.x) > b.radius + PORTAL_RANGE || Math.abs(b.z - camera.position.z) > b.radius + PORTAL_RANGE) return [];
     const meshes = this.meshesFor(b);
-    const out: PortalDraw[] = [];
+    const out: THREE.Mesh[] = [];
     b.model.portals.forEach((p, index) => {
-      if (index === exclude || !p.passable) return;
-      if (!p.links.some((l) => l.from === cell || l.to === cell)) return;
+      if (!p.links.some((l) => l.from === 0 || l.to === 0)) return;
       tmpV.set(0, 0, 0);
       for (const v of p.verts) tmpV.add(v);
       tmpV.multiplyScalar(1 / p.verts.length).applyMatrix4(b.matrix);
-      const dist = tmpV.distanceTo(camera.position);
-      if (dist > PORTAL_RANGE || !frustum.containsPoint(tmpV)) {
-        // Also accept portals whose polygon straddles the frustum edge: cheap sphere test.
-        let r = 0;
-        for (const v of p.verts) r = Math.max(r, tmpA.copy(v).applyMatrix4(b.matrix).distanceTo(tmpV));
-        if (dist > PORTAL_RANGE || !frustum.intersectsSphere(new THREE.Sphere(tmpV.clone(), r))) return;
-      }
-      out.push({ building: b, index, mesh: meshes[index], dist });
+      if (tmpV.distanceTo(camera.position) > PORTAL_RANGE) return;
+      let r = 0;
+      for (const v of p.verts) r = Math.max(r, tmpA.copy(v).applyMatrix4(b.matrix).distanceTo(tmpV));
+      tmpS.set(tmpV, r);
+      if (!frustum.intersectsSphere(tmpS)) return;
+      out.push(meshes[index]);
     });
-    out.sort((a, c) => a.dist - c.dist);
     return out;
   }
 
-  private otherSide(b: Building, index: number, cell: number): number {
-    const p = b.model.portals[index];
-    const link = p.links.find((l) => l.from === cell) ?? p.links.find((l) => l.to === cell);
-    if (!link) return -1;
-    return link.from === cell ? link.to : link.from;
+  /**
+   * Shade the shadow maps once, with everything that will appear this frame (the world, the
+   * building the camera is in), so every pass shares the same lighting.
+   */
+  private renderShadows(scene: THREE.Scene, camera: THREE.Camera, view: Building | null): void {
+    const r = this.renderer;
+    if (!r.shadowMap.enabled) return;
+    if (!this.shadowLights.length) {
+      r.shadowMap.needsUpdate = true; // shaded by the first pass instead
+      return;
+    }
+    if (view) this.showInterior(view, true);
+    camera.layers.enableAll();
+    r.shadowMap.needsUpdate = true;
+    r.shadowMap.render(this.shadowLights, scene, camera);
+    if (view) this.showInterior(view, false);
   }
 
   /**
-   * Draw the frame. `view` is the cell the camera is in (null = outside); `buildings` are the
-   * loaded portal buildings.
+   * Draw the frame. `view` is the building the camera is in (null = outside); `buildings` are
+   * the loaded portal buildings.
    */
-  render(scene: THREE.Scene, camera: THREE.PerspectiveCamera, view: CellState | null, buildings: Iterable<Building>): void {
+  render(scene: THREE.Scene, camera: THREE.PerspectiveCamera, view: Building | null, buildings: Iterable<Building>): void {
     const r = this.renderer;
     this.passes = 0;
     projView.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
     frustum.setFromProjectionMatrix(projView);
-    r.shadowMap.needsUpdate = true;
+    this.renderShadows(scene, camera, view);
     r.state.buffers.stencil.setClear(1);
     r.clear(true, true, true);
-    // Every material starts the frame in the base region, whatever pass touched it last frame.
-    this.setRef(this.worldMaterials, 1);
-    this.setRef(this.interiorMaterials, 1);
+    this.setRef(1);
 
-    if (!view) {
-      this.renderLayer(scene, camera, 0);
-      const doors: PortalDraw[] = [];
-      for (const b of buildings) {
-        if (Math.abs(b.x - camera.position.x) > b.radius + PORTAL_RANGE || Math.abs(b.z - camera.position.z) > b.radius + PORTAL_RANGE) continue;
-        doors.push(...this.visiblePortals(b, 0, camera));
-      }
-      doors.sort((a, c) => a.dist - c.dist);
-      for (const d of doors.slice(0, MAX_PORTALS)) {
-        const cell = this.otherSide(d.building, d.index, 0);
-        if (cell <= 0) continue;
-        this.throughPortal(scene, camera, d, cell, 2);
-        this.drawPortal(d.mesh, camera, 1, false, true);
-      }
-      return;
-    }
-
-    // Inside: the camera's cell fills the screen; everything else only through its portals.
-    this.renderCell(scene, camera, view.building, view.cell);
-    for (const d of this.visiblePortals(view.building, view.cell, camera).slice(0, MAX_PORTALS)) {
-      const target = this.otherSide(d.building, d.index, view.cell);
-      if (target < 0) continue;
-      this.throughPortal(scene, camera, d, target, 2);
-      this.drawPortal(d.mesh, camera, 1, false, true);
-    }
-  }
-
-  /** Stencil a portal seen from region `ref - 1`, reset depth behind it and draw `cell` (0 = world), one level deeper too. */
-  private throughPortal(scene: THREE.Scene, camera: THREE.PerspectiveCamera, d: PortalDraw, cell: number, ref: number): void {
-    this.drawPortal(d.mesh, camera, ref - 1, true);
-    this.resetDepth(ref, camera);
-    if (cell === 0) {
-      this.setRef(this.worldMaterials, ref);
+    if (view) {
+      // Inside: the whole building fills the screen; the world only through its exits.
+      this.showInterior(view, true);
+      this.renderLayer(scene, camera, INTERIOR_LAYER);
+      this.showInterior(view, false);
+      const exits = this.exitPortals(view, camera);
+      if (!exits.length) return;
+      this.drawPortals(exits, camera, 1, true);
+      this.resetDepth(2, camera);
+      this.setRef(2);
       this.renderLayer(scene, camera, 0);
       return;
     }
-    this.setRef(this.interiorMaterials, ref);
-    this.renderCell(scene, camera, d.building, cell);
-    if (ref >= 3) return;
-    for (const next of this.visiblePortals(d.building, cell, camera, d.index).slice(0, MAX_SECOND_LEVEL)) {
-      const target = this.otherSide(d.building, next.index, cell);
-      if (target < 0) continue;
-      this.throughPortal(scene, camera, next, target, ref + 1);
+
+    // Outside: the world, then each nearby building's interior through its doors.
+    this.renderLayer(scene, camera, 0);
+    const near: { b: Building; d: number }[] = [];
+    for (const b of buildings) {
+      const d = Math.hypot(b.x - camera.position.x, b.z - camera.position.z);
+      if (d < b.radius + PORTAL_RANGE) near.push({ b, d });
+    }
+    near.sort((a, c) => a.d - c.d);
+    for (const { b } of near.slice(0, MAX_BUILDINGS)) {
+      const doors = this.exitPortals(b, camera);
+      if (!doors.length) continue;
+      this.drawPortals(doors, camera, 1, true);
+      this.resetDepth(2, camera);
+      this.setRef(2);
+      this.showInterior(b, true);
+      this.renderLayer(scene, camera, INTERIOR_LAYER);
+      this.showInterior(b, false);
+      this.setRef(1);
+      this.drawPortals(doors, camera, 1, false, true);
     }
   }
 
   /**
-   * The cell the camera is in, walking portals from the player's cell along the line to the
-   * camera (the camera never passes through walls, only doorways).
+   * The building the camera is in, if any: starting from the player's side of things, walk the
+   * line from the eye to the camera through whichever exit portals it crosses. Doorways are
+   * taken to reach up to the ceiling, since a camera above the lintel got there through the door.
    */
-  cameraCell(player: CellState | null, eye: THREE.Vector3, cam: THREE.Vector3, buildings: Iterable<Building>): CellState | null {
-    let state = player;
-    const candidates: Building[] = [];
-    if (state) candidates.push(state.building);
-    else for (const b of buildings) if (Math.abs(b.x - cam.x) < b.radius + 30 && Math.abs(b.z - cam.z) < b.radius + 30) candidates.push(b);
+  cameraBuilding(player: CellState | null, eye: THREE.Vector3, cam: THREE.Vector3, buildings: Iterable<Building>): Building | null {
+    let inside: Building | null = player?.building ?? null;
+    const near: Building[] = [];
+    for (const b of buildings) if (Math.abs(b.x - cam.x) < b.radius + 30 && Math.abs(b.z - cam.z) < b.radius + 30) near.push(b);
+    let from = eye;
     for (let hop = 0; hop < 4; hop++) {
-      let best: { b: Building; index: number; t: number } | null = null;
-      for (const b of candidates) {
-        const cell = state && state.building === b ? state.cell : 0;
-        if (state && state.building !== b) continue;
-        tmpA.copy(eye).applyMatrix4(b.inverse);
+      let best: { b: Building; t: number } | null = null;
+      for (const b of inside ? [inside] : near) {
+        tmpA.copy(from).applyMatrix4(b.inverse);
         tmpB.copy(cam).applyMatrix4(b.inverse);
-        b.model.portals.forEach((p, index) => {
-          if (!p.passable || !p.links.some((l) => l.from === cell || l.to === cell)) return;
-          const t = crossing(p, tmpA, tmpB);
-          if (t !== null && (!best || t < best.t)) best = { b, index, t };
-        });
+        for (const p of b.model.portals) {
+          if (!p.links.some((l) => l.from === 0 || l.to === 0)) continue;
+          const t = crossing(p, tmpA, tmpB, DOOR_HEADROOM);
+          if (t !== null && (!best || t < best.t)) best = { b, t };
+        }
       }
-      if (!best) return state;
-      const hit = best as { b: Building; index: number; t: number };
-      const cell = state && state.building === hit.b ? state.cell : 0;
-      const other = this.otherSide(hit.b, hit.index, cell);
-      state = other > 0 ? { building: hit.b, cell: other } : null;
-      eye = eye.clone().lerp(cam, Math.min(1, hit.t + 1e-3));
-      if (!state) return null;
+      if (!best) return inside;
+      const hit = best as { b: Building; t: number };
+      inside = inside ? null : hit.b;
+      from = from.clone().lerp(cam, Math.min(1, hit.t + 1e-3));
     }
-    return state;
+    return inside;
   }
 }
 
-/** Parameter along a-b where the segment crosses one of the portal's triangles, or null. */
-export function crossing(portal: import('./assetPack').Portal, a: THREE.Vector3, b: THREE.Vector3): number | null {
+/**
+ * Parameter along a-b where the segment crosses one of the portal's triangles, or null. With
+ * `headroom`, a crossing up to that far above the polygon still counts (the doorway is taken to
+ * continue upward).
+ */
+export function crossing(portal: import('./assetPack').Portal, a: THREE.Vector3, b: THREE.Vector3, headroom = 0): number | null {
   const da = portal.normal.dot(a) - portal.d;
   const db = portal.normal.dot(b) - portal.d;
   if ((da > 0 && db > 0) || (da < 0 && db < 0) || da === db) return null;
@@ -295,6 +287,11 @@ export function crossing(portal: import('./assetPack').Portal, a: THREE.Vector3,
   const hit = tmpV.copy(a).lerp(b, t);
   const idx = portal.indices;
   const v = portal.verts;
+  if (headroom > 0) {
+    let top = -Infinity;
+    for (const p of v) top = Math.max(top, p.y);
+    if (hit.y > top && hit.y < top + headroom) hit.y = top - 1e-3;
+  }
   for (let k = 0; k + 2 < idx.length; k += 3) {
     if (pointInTriangle(hit, v[idx[k]], v[idx[k + 1]], v[idx[k + 2]])) return t;
   }

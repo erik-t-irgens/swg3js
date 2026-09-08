@@ -201,12 +201,12 @@ class App {
     this.input.requestLock();
   }
 
-  /** One frame through the portal renderer: the camera's cell in full, the rest through doorways. */
+  /** One frame through the portal renderer: the camera's building in full, the world through its doors (or the reverse). */
   private drawFrame(): void {
     const cam = this.cam.camera;
     cam.updateMatrixWorld();
     const eye = this.player.pos.clone().setY(this.player.pos.y + 1.6);
-    const view = this.portals.cameraCell(this.world.cellState, eye, cam.position, this.world.buildings);
+    const view = this.portals.cameraBuilding(this.world.cellState, eye, cam.position, this.world.buildings);
     this.portals.render(this.scene, cam, view, this.world.buildings);
   }
 
