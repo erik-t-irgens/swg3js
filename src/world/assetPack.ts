@@ -62,6 +62,7 @@ export interface LoadedModel {
 export class AssetPack {
   private readonly loader = new GLTFLoader();
   private readonly cache = new Map<string, Promise<LoadedModel>>();
+  private readonly ready = new Map<string, LoadedModel>();
   private readonly bytesCache = new Map<string, Promise<ArrayBuffer | null>>();
 
   layout: Layout | null = null;
@@ -130,8 +131,14 @@ export class AssetPack {
         };
       });
       this.cache.set(id, p);
+      void p.then((m) => this.ready.set(id, m)).catch(() => undefined);
     }
     return p;
+  }
+
+  /** A model that has already finished loading, or null. */
+  loaded(id: string): LoadedModel | null {
+    return this.ready.get(id) ?? null;
   }
 
   /** Raw bytes of a pack file (terrain templates, layer files); null when missing. */
@@ -176,5 +183,6 @@ export class AssetPack {
       }).catch(() => undefined);
     }
     this.cache.clear();
+    this.ready.clear();
   }
 }

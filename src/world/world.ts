@@ -9,6 +9,7 @@ import { OUTPOSTS } from '../data/outposts';
 import { Group, groups, RAPIER as R } from '../core/physics';
 import { CHUNK_RES, CHUNK_SIZE, Terrain } from './terrain';
 import { SwgTerrain, type BuildingLayerSource } from './swgTerrain';
+import { LayoutStreamer, type Building } from './layoutStream';
 import { Speeder } from '../vehicles/speeder';
 
 const VIEW_RADIUS = 6;
@@ -32,17 +33,6 @@ interface Chunk {
   physics: RAPIER.Collider[] | null;
 }
 
-/** A placed portal building: its interior cell boxes decide when the player is inside it. */
-interface Building {
-  model: LoadedModel;
-  x: number;
-  z: number;
-  radius: number;
-  matrix: THREE.Matrix4;
-  inverse: THREE.Matrix4;
-  /** Instances of the exterior shell, collapsed while the player is inside. */
-  exterior: { mesh: THREE.InstancedMesh; index: number }[];
-}
 
 const SKY_VERT = /* glsl */ `
   varying vec3 vDir;
@@ -121,9 +111,10 @@ export class World {
   private exclusions: Exclusion[] = [];
   pack: AssetPack | null = null;
   packStatus = 'no pack';
+  private packBase = '';
   private readonly structures: THREE.Object3D[] = [];
   private structureColliders: RAPIER.Collider[] = [];
-  private buildings: Building[] = [];
+  private layoutStream: LayoutStreamer | null = null;
   /** The building the player is currently inside, if any. */
   insideBuilding: Building | null = null;
   private readonly hiddenGround: THREE.Object3D[] = [];
@@ -285,27 +276,12 @@ export class World {
       }
     }
 
-    // Snapshot objects: the world is mirrored in X (left-handed source), centred on the layout centre.
-    const placed: { model: LoadedModel; x: number; y: number; z: number; q: THREE.Quaternion; radius: number; contained: boolean }[] = [];
+    // Snapshot objects stream in around the player from here on (see LayoutStreamer).
     if (layout) {
-      const byModel = new Map<string, typeof layout.objects>();
-      for (const o of layout.objects) (byModel.get(o.model) ?? byModel.set(o.model, []).get(o.model)!).push(o);
-      for (const [id, list] of byModel) {
-        let model: LoadedModel;
-        try {
-          model = await pack.model(id);
-        } catch {
-          console.warn(`layout: ${id} failed to load`);
-          continue;
-        }
-        if (token !== this.loadToken) return null;
-        for (const o of list) {
-          const gx = -(o.x - layout.center.x);
-          const gz = o.z - layout.center.z;
-          placed.push({ model, x: gx, y: o.y, z: gz, q: new THREE.Quaternion(o.q[1], -o.q[2], -o.q[3], o.q[0]), radius: o.radius, contained: !!o.contained });
-          if (o.radius >= 2 && !o.contained && !this.terrain.swg) this.terrain.addAnchor({ x: gx, z: gz, y: o.y, r: o.radius });
-          if (o.radius >= 1 && !o.contained) this.exclusions.push({ x: gx, z: gz, r: o.radius + 2 });
-        }
+      this.layoutStream?.dispose();
+      this.layoutStream = new LayoutStreamer(this.scene, this.physics, pack, layout);
+      if (!this.terrain.swg) {
+        for (const p of this.layoutStream.objects) if (p.radius >= 2 && !p.contained) this.terrain.addAnchor({ x: p.x, z: p.z, y: p.y, r: p.radius });
       }
     }
     this.props.dispose();
@@ -327,80 +303,11 @@ export class World {
     this.streamFar(spawn, Infinity);
 
     for (const st of structures) this.placeStructure(st.model, st.x, st.z, st.rot);
-    if (placed.length) this.placeLayout(placed, spawn);
-    this.packStatus = `${scatter.length} scatter models, ${structures.length} structures, ${placed.length} snapshot objects${this.terrain.swg ? ', SWG terrain' : ''}`;
-    if (!placed.length) return null;
-
-    // Find open ground near the layout centre that no object's footprint covers.
-    const blockers = placed.filter((p) => !p.contained && p.radius >= 1);
-    const clear = (x: number, z: number) => blockers.every((p) => Math.hypot(p.x - x, p.z - z) > p.radius + 1.5);
-    for (let r = 0; r < 120; r += 4) {
-      for (let a = 0; a < Math.PI * 2; a += Math.PI / 8) {
-        const x = spawn.x + Math.sin(a) * r;
-        const z = spawn.z + Math.cos(a) * r;
-        if (clear(x, z)) return new THREE.Vector3(x, this.terrain.heightAt(x, z), z);
-        if (r === 0) break;
-      }
-    }
-    return null;
-  }
-
-  /** Instance every snapshot object and give the larger ones exact collision near the spawn. */
-  private placeLayout(placed: { model: LoadedModel; x: number; y: number; z: number; q: THREE.Quaternion; radius: number; contained: boolean }[], spawn: THREE.Vector3): void {
-    const byModel = new Map<LoadedModel, typeof placed>();
-    for (const p of placed) (byModel.get(p.model) ?? byModel.set(p.model, []).get(p.model)!).push(p);
-    const m = new THREE.Matrix4();
-    const one = new THREE.Vector3(1, 1, 1);
-    const pos = new THREE.Vector3();
-    let colliders = 0;
-    for (const [model, list] of byModel) {
-      const isBuilding = model.interiorBoxes.length > 0;
-      const built: Building[] = [];
-      if (isBuilding) {
-        for (const p of list) {
-          if (p.contained) {
-            built.push(null as unknown as Building);
-            continue;
-          }
-          const matrix = new THREE.Matrix4().compose(pos.set(p.x, p.y, p.z), p.q, one);
-          const b: Building = { model, x: p.x, z: p.z, radius: model.radius, matrix, inverse: matrix.clone().invert(), exterior: [] };
-          built.push(b);
-          this.buildings.push(b);
-        }
-      }
-      for (const prim of model.primitives) {
-        const mesh = new THREE.InstancedMesh(prim.geometry, prim.material, list.length);
-        list.forEach((p, i) => {
-          m.compose(pos.set(p.x, p.y, p.z), p.q, one);
-          mesh.setMatrixAt(i, m);
-          if (isBuilding && prim.cell === 0 && built[i]) built[i].exterior.push({ mesh, index: i });
-        });
-        mesh.castShadow = true;
-        mesh.receiveShadow = true;
-        mesh.instanceMatrix.needsUpdate = true;
-        mesh.computeBoundingSphere();
-        this.scene.add(mesh);
-        this.structures.push(mesh);
-      }
-      for (const p of list) {
-        if (p.contained || p.radius < 1.5 || Math.hypot(p.x - spawn.x, p.z - spawn.z) > 350) continue;
-        for (const prim of model.primitives) {
-          const posAttr = prim.geometry.getAttribute('position');
-          const idx = prim.geometry.getIndex();
-          if (!posAttr || !idx) continue;
-          const desc = R.ColliderDesc.trimesh(new Float32Array(posAttr.array as ArrayLike<number>), new Uint32Array(idx.array as ArrayLike<number>))
-            .setTranslation(p.x, p.y, p.z)
-            .setRotation({ x: p.q.x, y: p.q.y, z: p.q.z, w: p.q.w })
-            .setFriction(0.8);
-          // Building shells and interiors get their own collision groups so someone inside ignores the shell.
-          if (prim.cell === 0) desc.setCollisionGroups(groups(Group.exterior, Group.all));
-          else if (prim.cell > 0) desc.setCollisionGroups(groups(Group.interior, Group.all));
-          this.structureColliders.push(this.physics.world.createCollider(desc));
-          colliders++;
-        }
-      }
-    }
-    console.info(`layout: ${placed.length} objects, ${byModel.size} models, ${colliders} colliders`);
+    this.packBase = `${scatter.length} scatter models, ${structures.length} structures${this.terrain.swg ? ', SWG terrain' : ''}`;
+    this.packStatus = this.packBase;
+    if (!this.layoutStream) return this.terrain.swg ? new THREE.Vector3(spawn.x, this.terrain.heightAt(spawn.x, spawn.z), spawn.z) : null;
+    this.layoutStream.update(spawn);
+    return this.layoutStream.clearSpawn(spawn, (x, z) => this.terrain.heightAt(x, z)) ?? new THREE.Vector3(spawn.x, this.terrain.heightAt(spawn.x, spawn.z), spawn.z);
   }
 
   private placeStructure(model: LoadedModel, x: number, z: number, rot: number): void {
@@ -435,7 +342,8 @@ export class World {
     this.lastTz = Number.NaN;
     for (const o of this.structures) this.scene.remove(o);
     this.structures.length = 0;
-    this.buildings = [];
+    this.layoutStream?.dispose();
+    this.layoutStream = null;
     this.insideBuilding = null;
     this.hiddenGround.length = 0;
     for (const c of this.structureColliders) this.physics.removeCollider(c);
@@ -536,7 +444,8 @@ export class World {
     const local = new THREE.Vector3();
     let found: Building | null = null;
     const probe = local.copy(playerPos).setY(playerPos.y + 0.9);
-    for (const b of this.buildings) {
+    if (!this.layoutStream) return;
+    for (const b of this.layoutStream.buildings) {
       if (Math.abs(b.x - playerPos.x) > b.radius + 4 || Math.abs(b.z - playerPos.z) > b.radius + 4) continue;
       local.copy(probe).applyMatrix4(b.inverse);
       for (const box of b.model.interiorBoxes) {
@@ -605,6 +514,10 @@ export class World {
   update(dt: number, playerPos: THREE.Vector3, camPos: THREE.Vector3, fastTime: boolean, onAttack: (damage: number) => void): void {
     this.stream(playerPos, STREAM_BUDGET);
     this.streamFar(playerPos, 1);
+    if (this.layoutStream) {
+      this.layoutStream.update(playerPos);
+      this.packStatus = `${this.packBase}; ${this.layoutStream.status}`;
+    }
     this.updateInterior(playerPos);
     this.day.update(dt, fastTime);
     this.applyLighting();
@@ -724,7 +637,8 @@ export class World {
     mesh.receiveShadow = true;
     mesh.castShadow = true;
     group.add(mesh);
-    const { group: propGroup, colliders } = this.props.buildForChunk(cx, cz, this.terrain, this.exclusions);
+    const exclude = this.layoutStream ? [...this.exclusions, ...this.layoutStream.exclusionsFor(cx, cz)] : this.exclusions;
+    const { group: propGroup, colliders } = this.props.buildForChunk(cx, cz, this.terrain, exclude);
     propGroup.traverse((o) => {
       if (o instanceof THREE.InstancedMesh) o.computeBoundingSphere();
     });

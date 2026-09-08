@@ -12,7 +12,7 @@
 //   node tools/swg/cli.mjs msh <swg-dir> <appearance-path> <out.glb>
 //   node tools/swg/cli.mjs batch <swg-dir> <out-dir> [filter]     convert every .msh matching filter (default appearance/mesh/)
 //   node tools/swg/cli.mjs pack <swg-dir> <spec.json> <out-dir>    build a game asset pack from a spec (see packs/)
-//   node tools/swg/cli.mjs snapshot <swg-dir> <planet> <out-dir> --center=x,z --radius=r [--max=n]
+//   node tools/swg/cli.mjs snapshot <swg-dir> <planet> <out-dir> --center=x,z --radius=r|all [--max=n]
 //                                                                  convert the world snapshot's objects around a point into a layout,
 //                                                                  and copy the planet's terrain (.trn) plus building terrain layers (.lay)
 //   node tools/swg/cli.mjs stat <swg-dir> <file>                    which archive provides a file (after load order and deletions)
@@ -432,7 +432,7 @@ switch (cmd) {
     const planet = pos[2];
     const outDir = pos[3];
     const [cx, cz] = options.center.split(',').map(Number);
-    const radius = Number(options.radius ?? 400);
+    const radius = options.radius === 'all' ? Infinity : Number(options.radius ?? 400);
     const max = Number(options.max ?? Infinity);
     const wsPath = `snapshot/${planet}.ws`;
     if (!vfs.has(wsPath)) throw new Error(`no ${wsPath} in archives`);
@@ -487,7 +487,7 @@ switch (cmd) {
       objects.push(obj);
     }
     const terrainFile = await copyTerrain(vfs, planet, outDir);
-    const layout = { planet, center: { x: cx, z: cz }, radius, terrain: terrainFile, objects, skipped };
+    const layout = { planet, center: { x: cx, z: cz }, radius: Number.isFinite(radius) ? radius : null, terrain: terrainFile, objects, skipped };
     writeFileSync(join(outDir, 'layout.json'), JSON.stringify(layout));
     const manifestPath = join(outDir, 'manifest.json');
     const manifest = existsSync(manifestPath) ? JSON.parse(readFileSync(manifestPath, 'utf8')) : { planet, categories: {} };
