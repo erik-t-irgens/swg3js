@@ -13,6 +13,7 @@
 //   node tools/swg/cli.mjs batch <swg-dir> <out-dir> [filter]     convert every .msh matching filter (default appearance/mesh/)
 //   node tools/swg/cli.mjs pack <swg-dir> <spec.json> <out-dir>    build a game asset pack from a spec (see packs/)
 //   node tools/swg/cli.mjs planets <swg-dir>                        list the world snapshots in the archives and where each would centre
+//   node tools/swg/cli.mjs pois <swg-dir> <planet>|all <out-dir>    (re)write just pois.json for packs converted already
 //   node tools/swg/cli.mjs snapshot <swg-dir> <planet>|all <out-dir> [--center=x,z|auto] --radius=r|all [--max=n]
 //                                                                  convert the world snapshot's objects around a point into a layout,
 //                                                                  and copy the planet's terrain (.trn) plus building terrain layers (.lay);
@@ -425,11 +426,11 @@ function autoCenter(snap, entries) {
  * datatables/clientregion/<planet>.iff with their display names, plus every starport and
  * shuttleport in the snapshot named after the region it stands in. SWG coordinates.
  */
-function pointsOfInterest(vfs, planet, snap, entries) {
+function pointsOfInterest(vfs, planet, snap, entries, { regions: wantRegions = true } = {}) {
   const strings = new Map();
   const regions = [];
   const table = `datatables/clientregion/${planet}.iff`;
-  if (vfs.has(table)) {
+  if (wantRegions && vfs.has(table)) {
     const dt = parseDatatable(parseIff(vfs.read(table)));
     for (const row of dt.rows) {
       const [id, x, z, r] = dt.columns.map((c) => row[c]);
@@ -456,6 +457,23 @@ function pointsOfInterest(vfs, planet, snap, entries) {
   // Cities first (small named regions), then travel points, then the big named areas.
   regions.sort((a, b) => a.r - b.r);
   return [...regions.filter((r) => r.r <= 1500), ...travel, ...regions.filter((r) => r.r > 1500)];
+}
+
+/** Write <out>/pois.json for a planet; a broken region table costs the regions, never the snapshot. */
+function writePois(vfs, planet, snap, entries, cx, cz, outDir) {
+  let pois = [];
+  try {
+    pois = pointsOfInterest(vfs, planet, snap, entries);
+  } catch (err) {
+    console.warn(`points of interest: ${err.message}`);
+    try {
+      pois = pointsOfInterest(vfs, planet, snap, entries, { regions: false });
+    } catch {
+      pois = [];
+    }
+  }
+  writeFileSync(join(outDir, 'pois.json'), JSON.stringify({ planet, center: { x: cx, z: cz }, pois }));
+  console.log(`points of interest: ${pois.length} (${pois.filter((p) => p.kind === 'region').length} named regions, ${pois.filter((p) => p.kind !== 'region').length} travel points) -> ${join(outDir, 'pois.json')}`);
 }
 
 /** Convert one planet's snapshot (see the snapshot command). */
@@ -527,15 +545,13 @@ async function snapshotPlanet(vfs, planet, outDir) {
     const terrainFile = await copyTerrain(vfs, planet, outDir);
     const layout = { planet, center: { x: cx, z: cz }, radius: Number.isFinite(radius) ? radius : null, terrain: terrainFile, objects, skipped };
     writeFileSync(join(outDir, 'layout.json'), JSON.stringify(layout));
-    const pois = pointsOfInterest(vfs, planet, snap, entries);
-    writeFileSync(join(outDir, 'pois.json'), JSON.stringify({ planet, center: { x: cx, z: cz }, pois }));
-    console.log(`points of interest: ${pois.length} (${pois.filter((p) => p.kind === 'region').length} named regions, ${pois.filter((p) => p.kind !== 'region').length} travel points) -> ${join(outDir, 'pois.json')}`);
     const manifestPath = join(outDir, 'manifest.json');
     const manifest = existsSync(manifestPath) ? JSON.parse(readFileSync(manifestPath, 'utf8')) : { planet, categories: {} };
     manifest.categories.layout = [...models.values()].filter((m) => m && !m.failed);
     const flora = lastTemplate ? convertFlora(vfs, lastTemplate, outDir, manifest) : { models: 0, missing: 0, families: 0 };
     writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
     console.log(`flora: ${flora.models} models for ${flora.families} families${flora.missing ? `, ${flora.missing} appearances missing` : ''}`);
+    writePois(vfs, planet, snap, entries, cx, cz, outDir);
     console.log(`layout: ${objects.length} objects, ${manifest.categories.layout.length} models -> ${join(outDir, 'layout.json')}`);
     const withCells = manifest.categories.layout.filter((m) => m.cells);
     console.log(`buildings: ${withCells.length} models with cells, ${withCells.filter((m) => m.portals && m.portals.length).length} with portals`);
@@ -648,6 +664,37 @@ switch (cmd) {
       const centre = autoCenter(snap, entries);
       const known = GAME_PLANETS.includes(planet);
       console.log(`${planet.padEnd(12)} ${String(snap.nodes.length).padStart(6)} objects, terrain ${vfs.has(`terrain/${planet}.trn`) ? 'yes' : 'no '}, centre ${centre.x.toFixed(0)},${centre.z.toFixed(0)} (${centre.why})${known ? '' : '  [not a planet in the game]'}`);
+    }
+    break;
+  }
+
+  case 'pois': {
+    // Only the points of interest, for packs converted already: <swg-dir> <planet>|all <out-dir>
+    if (!pos[3]) usage();
+    const vfs = mount(pos[1]);
+    const planets = pos[2] === 'all' ? snapshotPlanets(vfs).filter((p) => GAME_PLANETS.includes(p)) : [pos[2]];
+    for (const planet of planets) {
+      const outDir = pos[2] === 'all' ? join(pos[3], planet) : pos[3];
+      const wsPath = `snapshot/${planet}.ws`;
+      if (!vfs.has(wsPath)) {
+        console.warn(`no ${wsPath} in archives`);
+        continue;
+      }
+      const snap = parseSnapshot(parseIff(vfs.read(wsPath)));
+      const entries = flattenWithWorldTransforms(snap);
+      const layoutPath = join(outDir, 'layout.json');
+      let cx;
+      let cz;
+      if (options.center && options.center !== 'auto') [cx, cz] = options.center.split(',').map(Number);
+      else if (existsSync(layoutPath)) ({ x: cx, z: cz } = JSON.parse(readFileSync(layoutPath, 'utf8')).center);
+      else {
+        const c = autoCenter(snap, entries);
+        cx = Math.round(c.x);
+        cz = Math.round(c.z);
+      }
+      mkdirSync(outDir, { recursive: true });
+      console.log(`=== ${planet} (centre ${cx},${cz}) ===`);
+      writePois(vfs, planet, snap, entries, cx, cz, outDir);
     }
     break;
   }

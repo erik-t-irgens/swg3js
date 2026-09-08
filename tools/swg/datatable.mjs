@@ -14,7 +14,7 @@ const INT_SPECS = 'ihbev';
 
 /** Parse a datatable IFF into { columns: string[], rows: object[] }. */
 export function parseDatatable(root) {
-  if (root.name !== 'DTII') throw new Error(`not a datatable: ${root.name}`);
+  if (root.type !== 'DTII') throw new Error(`not a datatable: ${root.type ?? root.tag}`);
   const version = root.children.find(isForm);
   const cols = childOf(version, 'COLS').data;
   const numCols = cols.readInt32LE(0);
@@ -27,7 +27,7 @@ export function parseDatatable(root) {
   }
   const typeChunk = childOf(version, 'TYPE').data;
   const types = [];
-  if (version.name === '0000') {
+  if (version.type === '0000') {
     for (let i = 0; i < numCols; i++) types.push([0, 'i', 1, 'f', 2, 's'][typeChunk.readInt32LE(i * 4) * 2 + 1] ?? 'i');
   } else {
     cursor = 0;
