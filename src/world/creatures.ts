@@ -11,8 +11,8 @@ export type CreatureDef = PlanetDef['creatures'];
 const tmp = new THREE.Vector3();
 const tmpQ = new THREE.Quaternion();
 const AGGRO_RANGE = 32;
-/** Converted SWG models face the other way from the procedural bodies. */
-const MODEL_YAW = Math.PI;
+/** Converted SWG models already face +Z, the direction the creatures move in. */
+const MODEL_YAW = 0;
 
 /** A converted creature (tools/swg creatures command): a skinned model with the clips the game drives. */
 export interface CreatureModel {
