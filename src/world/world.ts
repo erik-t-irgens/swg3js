@@ -505,6 +505,23 @@ export class World {
     return this.chunks.size;
   }
 
+  /** The snapshot's centre in SWG coordinates (the game's origin), when a converted pack is loaded. */
+  get layoutCenter(): { x: number; z: number } | null {
+    return this.pack?.layout?.center ?? null;
+  }
+
+  /** Move the streamed world to a far-away point at once (teleporting), forgetting any building state. */
+  jumpTo(center: THREE.Vector3): void {
+    this.stream(center, Infinity);
+    this.streamFar(center, Infinity);
+    this.layoutStream?.update(center);
+    this.cellState = null;
+    this.prevPlayerPos.x = Number.NaN;
+    for (const o of this.hiddenGround) o.visible = true;
+    this.hiddenGround.length = 0;
+    this.groundHiddenFor = null;
+  }
+
   get inside(): boolean {
     return this.cellState !== null;
   }

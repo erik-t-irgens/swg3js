@@ -10,7 +10,7 @@ import { Physics } from './core/physics';
 import { PLANETS, planetById, type PlanetDef } from './data/planets';
 import { Player } from './player/player';
 import { CharacterRig } from './player/rig';
-import { GalaxyMap } from './ui/galaxyMap';
+import { GalaxyMap, type Poi } from './ui/galaxyMap';
 import { Hud } from './ui/hud';
 import type { DriveInput } from './vehicles/speeder';
 import { World } from './world/world';
@@ -63,7 +63,11 @@ class App {
     this.player = new Player(this.scene, physics);
     this.effects = new Effects(this.scene);
     this.hud = new Hud(this.ui);
-    this.map = new GalaxyMap(this.ui, (p) => void this.travel(p));
+    this.map = new GalaxyMap(
+      this.ui,
+      (p) => void this.travel(p),
+      (p, poi) => void this.teleport(p, poi),
+    );
     // Console hooks for driving the game from tests: window.__debug.teleport(x, z, yaw), .look(yaw, pitch), .cell().
     (window as unknown as { __debug: unknown }).__debug = {
       teleport: (x: number, z: number, yaw?: number) => {
@@ -194,6 +198,39 @@ class App {
     this.fade.classList.add('on');
     await new Promise((r) => setTimeout(r, 500));
     this.arrive(planet);
+    this.drawFrame();
+    await new Promise((r) => setTimeout(r, 150));
+    this.fade.classList.remove('on');
+    this.traveling = false;
+    this.input.requestLock();
+  }
+
+  /** Jump to a place on the map: travel first when it is on another planet. */
+  private async teleport(planet: PlanetDef, poi: Poi): Promise<void> {
+    if (this.traveling) return;
+    if (planet.id !== this.world.planet.id) {
+      await this.travel(planet);
+      // The pack (and with it the snapshot's centre) loads after arrival; wait for it.
+      for (let i = 0; i < 100 && !this.world.layoutCenter; i++) await new Promise((r) => setTimeout(r, 100));
+    }
+    const c = this.world.layoutCenter;
+    if (!c) return;
+    this.traveling = true;
+    this.map.hide();
+    this.input.captured = false;
+    this.fade.textContent = poi.name.toUpperCase();
+    this.fade.classList.add('on');
+    await new Promise((r) => setTimeout(r, 250));
+    // Snapshot space is mirrored in X and centred on the layout centre.
+    const gx = -(poi.x - c.x);
+    const gz = poi.z - c.z;
+    const pos = new THREE.Vector3(gx, this.world.terrain.heightAt(gx, gz) + 0.3, gz);
+    const p = this.player;
+    if (p.mounted) this.handleMount();
+    p.reset(pos);
+    this.spawn.copy(pos);
+    this.world.jumpTo(pos);
+    this.physics.world.step();
     this.drawFrame();
     await new Promise((r) => setTimeout(r, 150));
     this.fade.classList.remove('on');

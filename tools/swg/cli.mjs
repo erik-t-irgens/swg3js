@@ -41,6 +41,7 @@ import { resolveTemplateMesh, resolveTemplateString } from './objtemplate.mjs';
 import { encodePng } from './png.mjs';
 import { shaderTextures } from './sht.mjs';
 import { effectAlpha, alphaModeFor } from './eff.mjs';
+import { localize, parseDatatable } from './datatable.mjs';
 import { decodeTga, encodeHeightmap } from './tga.mjs';
 import { readTemplate, stringParam } from './objtemplate.mjs';
 import { openTre, openVfs, readHeader } from './tre.mjs';
@@ -379,6 +380,44 @@ function autoCenter(snap, entries) {
   return { x: best.x / best.n, z: best.z / best.n, why: `busiest square, ${best.n} objects` };
 }
 
+/**
+ * Points of interest for the in-game map: the client's named regions (cities, landmarks) from
+ * datatables/clientregion/<planet>.iff with their display names, plus every starport and
+ * shuttleport in the snapshot named after the region it stands in. SWG coordinates.
+ */
+function pointsOfInterest(vfs, planet, snap, entries) {
+  const strings = new Map();
+  const regions = [];
+  const table = `datatables/clientregion/${planet}.iff`;
+  if (vfs.has(table)) {
+    const dt = parseDatatable(parseIff(vfs.read(table)));
+    for (const row of dt.rows) {
+      const [id, x, z, r] = dt.columns.map((c) => row[c]);
+      if (typeof id !== 'string' || typeof x !== 'number') continue;
+      regions.push({ name: localize(vfs, id, strings) ?? id.split(':').pop(), x, z, r, kind: 'region' });
+    }
+  }
+  const regionAt = (x, z) => {
+    let best = null;
+    for (const r of regions) if (Math.hypot(r.x - x, r.z - z) <= r.r && (!best || r.r < best.r)) best = r;
+    return best;
+  };
+  const travel = [];
+  for (const e of entries) {
+    if (!e.world || e.parentId !== 0) continue;
+    const template = snap.templates[e.node.templateIndex];
+    const kind = template.includes('starport') ? 'starport' : template.includes('shuttleport') ? 'shuttleport' : null;
+    if (!kind) continue;
+    const [x, , z] = e.world.pos;
+    const region = regionAt(x, z);
+    const label = kind === 'starport' ? 'Starport' : 'Shuttleport';
+    travel.push({ name: region ? `${region.name} ${label}` : `${label} (${x.toFixed(0)}, ${z.toFixed(0)})`, x, z, r: 0, kind });
+  }
+  // Cities first (small named regions), then travel points, then the big named areas.
+  regions.sort((a, b) => a.r - b.r);
+  return [...regions.filter((r) => r.r <= 1500), ...travel, ...regions.filter((r) => r.r > 1500)];
+}
+
 /** Convert one planet's snapshot (see the snapshot command). */
 async function snapshotPlanet(vfs, planet, outDir) {
     const radius = options.radius === 'all' ? Infinity : Number(options.radius ?? 400);
@@ -448,6 +487,9 @@ async function snapshotPlanet(vfs, planet, outDir) {
     const terrainFile = await copyTerrain(vfs, planet, outDir);
     const layout = { planet, center: { x: cx, z: cz }, radius: Number.isFinite(radius) ? radius : null, terrain: terrainFile, objects, skipped };
     writeFileSync(join(outDir, 'layout.json'), JSON.stringify(layout));
+    const pois = pointsOfInterest(vfs, planet, snap, entries);
+    writeFileSync(join(outDir, 'pois.json'), JSON.stringify({ planet, center: { x: cx, z: cz }, pois }));
+    console.log(`points of interest: ${pois.length} (${pois.filter((p) => p.kind === 'region').length} named regions, ${pois.filter((p) => p.kind !== 'region').length} travel points) -> ${join(outDir, 'pois.json')}`);
     const manifestPath = join(outDir, 'manifest.json');
     const manifest = existsSync(manifestPath) ? JSON.parse(readFileSync(manifestPath, 'utf8')) : { planet, categories: {} };
     manifest.categories.layout = [...models.values()].filter((m) => m && !m.failed);
