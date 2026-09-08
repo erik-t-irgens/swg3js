@@ -3,7 +3,7 @@
 // ahead of time by a worker so streaming never stalls on generation.
 
 import { Layer } from '../swg/terrain/generator';
-import { attachBitmap, bitmapFiles, ORIGIN_OFFSET, parseLayerFile, parseTerrainTemplate, TerrainSampler, UPPER_PAD, type TerrainTemplate } from '../swg/terrain/trn';
+import { attachBitmap, bitmapFiles, ORIGIN_OFFSET, parseLayerFile, parseTerrainTemplate, TerrainSampler, UPPER_PAD, waterTables, type PoleBlock, type TerrainTemplate, type WaterTable } from '../swg/terrain/trn';
 
 export interface BuildingLayerSource {
   bytes: ArrayBuffer;
@@ -15,7 +15,7 @@ export interface BuildingLayerSource {
 
 interface Pending {
   key: string;
-  resolve: (heights: Float32Array) => void;
+  resolve: (block: PoleBlock) => void;
 }
 
 /**
@@ -35,6 +35,8 @@ export class SwgTerrain {
   private readonly farGrids = new Map<string, Float32Array>();
   /** How many chunk grids were generated synchronously on the main thread (diagnostics). */
   syncGenerations = 0;
+  /** Lakes and pools in game coordinates. */
+  readonly waterTables: { name: string; points: { x: number; z: number }[]; height: number }[] = [];
 
   private constructor(trn: ArrayBuffer, layers: BuildingLayerSource[], bitmaps: { familyId: number; bytes: ArrayBuffer }[], centerX: number, centerZ: number) {
     this.template = parseTerrainTemplate(new Uint8Array(trn));
@@ -45,6 +47,9 @@ export class SwgTerrain {
     for (const l of layers) {
       const layer: Layer | null = parseLayerFile(new Uint8Array(l.bytes), this.template.generator);
       if (layer) this.sampler.addBuildingLayer(layer, l.x, l.z, l.yaw);
+    }
+    for (const w of waterTables(this.template.generator)) {
+      this.waterTables.push({ name: w.name, height: w.height, points: w.points.map((pt) => ({ x: this.toGameX(pt.x), z: this.toGameZ(pt.y) })) });
     }
     if (typeof Worker !== 'undefined') {
       try {
@@ -85,6 +90,23 @@ export class SwgTerrain {
 
   get tileWidth(): number {
     return this.template.tileWidthInMeters;
+  }
+
+  toGameX(x: number): number {
+    return this.centerX - x;
+  }
+
+  toGameZ(z: number): number {
+    return z - this.centerZ;
+  }
+
+  /** Water surface height at a game-space point: the global table or any lake covering it (-Infinity when dry). */
+  waterAt(gx: number, gz: number): number {
+    let h = this.waterLevel;
+    for (const w of this.waterTables) {
+      if (w.height > h && pointInPolygon(gx, gz, w.points)) h = w.height;
+    }
+    return h;
   }
 
   toSwgX(gx: number): number {
@@ -143,8 +165,8 @@ export class SwgTerrain {
       if (this.requested.has(key)) continue;
       this.requested.add(key);
       const s = this.sampler.blockStart(cx, cz);
-      this.request(key, s.x, s.z, this.sampler.numberOfPoles, this.sampler.poleStep, (heights) => {
-        if (!this.sampler.hasBlock(cx, cz)) this.sampler.putBlock(cx, cz, heights);
+      this.request(key, s.x, s.z, this.sampler.numberOfPoles, this.sampler.poleStep, (block) => {
+        if (!this.sampler.hasBlock(cx, cz)) this.sampler.putBlock(cx, cz, block);
       });
     }
     return ready;
@@ -178,7 +200,7 @@ export class SwgTerrain {
     }
     if (!this.requested.has(key)) {
       this.requested.add(key);
-      this.request(key, startX, startZ, n, step, (heights) => void finish(heights));
+      this.request(key, startX, startZ, n, step, (block) => void finish(block.heights));
     }
     return null;
   }
@@ -197,13 +219,13 @@ export class SwgTerrain {
     this.sampler.evict(Math.floor(this.toSwgX(gx) / bw), Math.floor(this.toSwgZ(gz) / bw), blockRadius);
   }
 
-  private request(key: string, startX: number, startZ: number, n: number, step: number, resolve: (heights: Float32Array) => void): void {
+  private request(key: string, startX: number, startZ: number, n: number, step: number, resolve: (block: PoleBlock) => void): void {
     const id = this.nextId++;
     this.pending.set(id, { key, resolve });
     this.worker!.postMessage({ type: 'generate', id, startX, startZ, n, step });
   }
 
-  private onMessage(msg: { type: string; id?: number; heights?: Float32Array; info?: unknown; message?: string }): void {
+  private onMessage(msg: { type: string; id?: number; heights?: Float32Array; excluded?: Uint8Array; floraCollidable?: Uint8Array; floraNonCollidable?: Uint8Array; info?: unknown; message?: string }): void {
     if (msg.type === 'ready') {
       this.workerReady = true;
       console.info('terrain worker ready', msg.info);
@@ -212,7 +234,8 @@ export class SwgTerrain {
       if (p) {
         this.pending.delete(msg.id);
         this.requested.delete(p.key);
-        p.resolve(msg.heights);
+        const n = msg.heights.length;
+        p.resolve({ heights: msg.heights, excluded: msg.excluded ?? new Uint8Array(n), floraCollidable: msg.floraCollidable ?? new Uint8Array(n * 2), floraNonCollidable: msg.floraNonCollidable ?? new Uint8Array(n * 2) });
       }
     } else if (msg.type === 'error') {
       console.warn('terrain worker:', msg.message);
@@ -232,3 +255,13 @@ export class SwgTerrain {
 /** Client sampling pads, re-exported for callers that build their own grids. */
 export const SWG_ORIGIN_OFFSET = ORIGIN_OFFSET;
 export const SWG_UPPER_PAD = UPPER_PAD;
+
+function pointInPolygon(x: number, z: number, pts: { x: number; z: number }[]): boolean {
+  let inside = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const a = pts[i];
+    const b = pts[j];
+    if (a.z > z !== b.z > z && x < ((b.x - a.x) * (z - a.z)) / (b.z - a.z) + a.x) inside = !inside;
+  }
+  return inside;
+}

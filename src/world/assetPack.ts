@@ -10,6 +10,8 @@ export interface PackModelDef {
   cells?: { index: number; name: string; bounds: { min: number[]; max: number[] }; portals?: { geometry: number; target: number; passable: boolean }[] }[];
   /** Portal polygons in model space (vertices and triangle indices), indexed by the cells' `geometry` field. */
   portals?: { v: number[][]; i: number[] }[];
+  /** Flora models: the appearance file the terrain's flora families name (e.g. appearance/tree_x.apt). */
+  appearance?: string;
 }
 
 export interface PackManifest {

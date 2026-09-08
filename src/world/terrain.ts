@@ -57,6 +57,11 @@ export class Terrain {
     this.maxH = this.minH + 140;
   }
 
+  /** Water surface at a point: lakes and pools count as well as the global water level. */
+  waterHeightAt(x: number, z: number): number {
+    return this.swg ? this.swg.waterAt(x, z) : this.waterLevel;
+  }
+
   detachSwg(): void {
     this.swg?.dispose();
     this.swg = null;

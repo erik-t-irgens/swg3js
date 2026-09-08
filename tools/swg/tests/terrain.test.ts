@@ -85,7 +85,7 @@ const ref = new MultiFractal(); ref.setSeed(1337); ref.setNumberOfOctaves(3); re
 const expectAt = (x: number, z: number) => 50 * ref.value2(x, z);
 for (const [x, z] of [[0, 0], [-500, 300], [30, -30]]) check(`fractal height ${x},${z}`, near(s.heightAt(x, z), expectAt(x, z), 1e-3), `${s.heightAt(x, z)} vs ${expectAt(x, z)}`);
 // pole-exact sampling: a pole position equals the grid value
-const g = s.generateBlock(3, -2);
+const g = s.generateBlock(3, -2).heights;
 const st = s.blockStart(3, -2);
 const px = st.x + 7 * s.poleStep, pz = st.z + 9 * s.poleStep;
 check('pole exact', near(s.heightAt(px, pz), g[9 * s.numberOfPoles + 7], 1e-6));
@@ -165,6 +165,44 @@ check('outside circle', near(s.heightAt(150, 100), expectAt(150, 100), 1e-3));
   check('bitmap filter scales the affector', hLow < -1.9 && hLow > -2.01 && Math.abs(hHigh) < 1e-6, `${hLow} ${hHigh}`);
   const without = new TerrainSampler(parseTerrainTemplate(trn2));
   check('missing bitmap passes fully', Math.abs(without.heightAt(1002, 1250) + 2) < 1e-6, String(without.heightAt(1002, 1250)));
+}
+
+// --- flora: a family with two weighted children, planted by AFSC/AFSN inside a rectangle; a lake rectangle
+{
+  const { FloraGroup, FastRandomGenerator, PackedIntegerMap, hashTuple, hashFloat } = await import('../../../src/swg/terrain/flora.ts');
+  const { waterTables } = await import('../../../src/swg/terrain/trn.ts');
+  const child = (name: string, weight: number, scale: boolean) => new W().str(name).f32(weight).i32(0).f32(0).f32(0).i32(0).i32(scale ? 1 : 0).f32(0.8).f32(1.2);
+  const ffam = new W().i32(1).str('trees').u8(10).u8(20).u8(30).f32(1).i32(0).i32(2).bytes();
+  const ffamAll = new Uint8Array([...ffam, ...child('appearance/tree_a.apt', 1, true).bytes(), ...child('appearance/tree_b.apt', 3, false).bytes()]);
+  const fgrp = form('FGRP', form('0008', chunk('FFAM', ffamAll)));
+  const floraRect = form('BREC', form('0004', ihdr('grove'), chunk('DATA', new W().f32(0).f32(0).f32(64).f32(64).i32(0).f32(0).i32(0).i32(0).f32(0).f32(2).str('').i32(0).bytes())));
+  const afsc = (tag: string) => form(tag, form('0004', ihdr('plant'), chunk('DATA', new W().i32(1).i32(1).i32(0).i32(1).f32(1).bytes())));
+  const lake = form('BREC', form('0004', ihdr('lake'), chunk('DATA', new W().f32(100).f32(100).f32(200).f32(200).i32(0).f32(0).i32(1).i32(0).f32(12).f32(2).str('shader/water.sht').i32(0).bytes())));
+  const grove = form('LAYR', form('0003', ihdr('grove'), chunk('ADTA', new W().i32(0).i32(0).i32(1).str('').bytes()), floraRect, afsc('AFSC'), afsc('AFSN')));
+  const lakeLayer = form('LAYR', form('0003', ihdr('lake'), chunk('ADTA', new W().i32(0).i32(0).i32(1).str('').bytes()), lake));
+  const tgen3 = form('TGEN', form('0000', sgrp, fgrp, form('RGRP', form('0003')), form('EGRP', form('0002')), mgrp, form('LYRS', grove, lakeLayer)));
+  const t3 = parseTerrainTemplate(encode(form('PTAT', form('0015', chunk('DATA', header), tgen3, form('BAKE')))));
+  const fam = t3.generator.floraGroup.families.get(1);
+  check('flora group parsed', !!fam && fam.name === 'trees' && fam.children.length === 2 && fam.children[0].shouldScale && fam.children[0].maxScale > 1.19 && fam.children[1].appearance === 'appearance/tree_b.apt', JSON.stringify(fam));
+  check('flora weighted choice', t3.generator.floraGroup.createFlora(1, 0.1)?.appearance === 'appearance/tree_a.apt' && t3.generator.floraGroup.createFlora(1, 0.9)?.appearance === 'appearance/tree_b.apt');
+  check('flora affectors known', t3.generator.summary().AFSC === 1 && t3.generator.summary().AFSN === 1, JSON.stringify(t3.generator.summary()));
+  const s3 = new TerrainSampler(t3);
+  const inside = s3.floraAt(10, 10, true);
+  const insideN = s3.floraAt(30, 20, false);
+  const outside = s3.floraAt(300, 300, true);
+  check('flora planted inside the rectangle', inside.family === 1 && insideN.family === 1 && inside.choice >= 0 && inside.choice <= 1, JSON.stringify([inside, insideN]));
+  check('no flora outside', outside.family === 0);
+  check('flora deterministic', s3.floraAt(10, 10, true).choice === inside.choice);
+  const tables = waterTables(t3.generator);
+  check('water table found', tables.length === 1 && tables[0].height === 12 && tables[0].points.length === 4 && tables[0].name === 'lake', JSON.stringify(tables));
+  check('flora tiling header', t3.flora.collidable.tileSize === 0 && t3.flora.legacyMap === false);
+  // packed integer map: width 4, 3 bits, values 5 2 7 1 packed LSB first -> bytes 213, 3
+  const { parseIff } = await import('../../../src/swg/terrain/iff.ts');
+  const pimpParsed = new PackedIntegerMap(parseIff(encode(form('PIMP', form('0000', chunk('CNTL', new W().i32(4).i32(1).i32(3).i32(0).bytes()), chunk('DATA', new Uint8Array([213, 3])))))));
+  check('packed map', [0, 1, 2, 3].map((x) => pimpParsed.getValue(x, 0)).join() === '5,2,7,1', [0, 1, 2, 3].map((x) => pimpParsed.getValue(x, 0)).join());
+  check('fast random', new FastRandomGenerator(1).random() === 16807 && new FastRandomGenerator(1).randomFloat() < 1e-4);
+  const h = hashFloat(hashTuple(1, 2));
+  check('coordinate hash', h >= 0 && h < 1 && hashTuple(1, 2) !== hashTuple(2, 1) && hashTuple(1, 2) === hashTuple(1, 2), String(h));
 }
 
 const t0 = performance.now(); let c = 0;

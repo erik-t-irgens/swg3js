@@ -219,6 +219,7 @@ async function copyTerrain(vfs, planet, outDir) {
   try {
     const { parseTerrainTemplate, bitmapFiles } = await import('../../src/swg/terrain/trn.ts');
     const template = parseTerrainTemplate(new Uint8Array(bytes));
+    lastTemplate = template;
     for (const b of bitmapFiles(template)) {
       const src = b.name.replace(/\\/g, '/').replace(/^\//, '');
       if (!vfs.has(src)) {
@@ -235,6 +236,45 @@ async function copyTerrain(vfs, planet, outDir) {
     console.warn(`terrain bitmaps not converted: ${err.message}`);
   }
   return 'terrain.trn';
+}
+
+/** The terrain template copyTerrain parsed last (for the flora conversion that follows it). */
+let lastTemplate = null;
+
+/**
+ * Convert the appearances the terrain's flora families name (trees, rocks, plants) into
+ * <out>/flora/ and record them as the pack's `flora` category, keyed by appearance file.
+ */
+function convertFlora(vfs, template, outDir, manifest) {
+  const families = [...template.generator.floraGroup.families.values()];
+  if (!families.length) return { models: 0, missing: 0, families: 0 };
+  mkdirSync(join(outDir, 'flora'), { recursive: true });
+  const defs = new Map();
+  let missing = 0;
+  for (const family of families) {
+    for (const child of family.children) {
+      const appearance = child.appearance.replace(/\\/g, '/').replace(/^\//, '');
+      const key = appearance.toLowerCase();
+      if (defs.has(key)) continue;
+      if (!vfs.has(appearance)) {
+        missing++;
+        console.warn(`flora appearance missing: ${appearance} (family ${family.name})`);
+        continue;
+      }
+      const id = familyOf(appearance);
+      try {
+        const conv = convertOne(vfs, appearance, join(outDir, 'flora', `${id}.glb`));
+        const b = conv.mesh.bounds ?? { min: [0, 0, 0], max: [0, 0, 0] };
+        const bounds = conv.flipX ? { min: [-b.max[0], b.min[1], b.min[2]], max: [-b.min[0], b.max[1], b.max[2]] } : b;
+        defs.set(key, { id, file: `flora/${id}.glb`, bounds, triangles: conv.tris, textured: conv.textured, shaders: conv.shaders.length, appearance, family: family.id, familyName: family.name });
+      } catch (err) {
+        missing++;
+        console.warn(`flora ${appearance}: ${err.message}`);
+      }
+    }
+  }
+  manifest.categories.flora = [...defs.values()];
+  return { models: defs.size, missing, families: families.length };
 }
 
 /** Copy a building template's terrain modification layer (.lay) into <out>/terrain/. Returns the pack-relative file or null. */
@@ -493,7 +533,9 @@ async function snapshotPlanet(vfs, planet, outDir) {
     const manifestPath = join(outDir, 'manifest.json');
     const manifest = existsSync(manifestPath) ? JSON.parse(readFileSync(manifestPath, 'utf8')) : { planet, categories: {} };
     manifest.categories.layout = [...models.values()].filter((m) => m && !m.failed);
+    const flora = lastTemplate ? convertFlora(vfs, lastTemplate, outDir, manifest) : { models: 0, missing: 0, families: 0 };
     writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+    console.log(`flora: ${flora.models} models for ${flora.families} families${flora.missing ? `, ${flora.missing} appearances missing` : ''}`);
     console.log(`layout: ${objects.length} objects, ${manifest.categories.layout.length} models -> ${join(outDir, 'layout.json')}`);
     const withCells = manifest.categories.layout.filter((m) => m.cells);
     console.log(`buildings: ${withCells.length} models with cells, ${withCells.filter((m) => m.portals && m.portals.length).length} with portals`);

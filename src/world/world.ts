@@ -4,6 +4,7 @@ import type { Physics, RAPIER } from '../core/physics';
 import { CreatureManager } from './creatures';
 import { DayCycle } from './daycycle';
 import { PropFactory, type Collider, type Exclusion, type ScatterItem } from './props';
+import { FloraPlanter } from './flora';
 import { AssetPack, type LoadedModel } from './assetPack';
 import { OUTPOSTS } from '../data/outposts';
 import { Group, groups, RAPIER as R } from '../core/physics';
@@ -104,6 +105,9 @@ export class World {
   private readonly hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 1);
   private readonly sky: THREE.Mesh<THREE.SphereGeometry, THREE.ShaderMaterial>;
   private water: THREE.Mesh | null = null;
+  private localWater: THREE.Mesh[] = [];
+  /** Real flora from the planet's terrain, replacing procedural props when a pack provides the models. */
+  private flora: FloraPlanter | null = null;
   private readonly dayFog = new THREE.Color();
   private readonly nightFog = new THREE.Color();
   private readonly sunColor = new THREE.Color();
@@ -278,7 +282,10 @@ export class World {
           const swg = await SwgTerrain.create(trn, layers, layout.center.x, layout.center.z, (file) => pack.bytes(file));
           if (token !== this.loadToken) return null;
           this.terrain.attachSwg(swg);
+          this.applySwgWater(swg);
           console.info(`terrain: ${this.terrain.swg!.template.name} with ${layers.length} building layers loaded in ${(performance.now() - t0).toFixed(0)} ms`);
+          await this.loadFlora(pack, swg);
+          if (token !== this.loadToken) return null;
         } catch (err) {
           console.warn('terrain: failed to load the planet terrain, keeping procedural ground', err);
         }
@@ -294,7 +301,7 @@ export class World {
       }
     }
     this.props.dispose();
-    this.props = new PropFactory(planet, scatter);
+    this.props = new PropFactory(planet, this.flora ? [] : scatter);
     for (const c of this.chunks.values()) this.disposeChunk(c);
     this.chunks.clear();
     for (const [key, t] of this.farTiles) {
@@ -353,6 +360,12 @@ export class World {
     this.structures.length = 0;
     this.layoutStream?.dispose();
     this.layoutStream = null;
+    this.flora = null;
+    for (const m of this.localWater) {
+      this.scene.remove(m);
+      m.geometry.dispose();
+    }
+    this.localWater.length = 0;
     this.cellState = null;
     this.groundHiddenFor = null;
     this.prevPlayerPos.x = Number.NaN;
@@ -402,6 +415,69 @@ export class World {
       cols.push(this.physics.createStaticCylinder(p.x, ground + halfH, p.z, p.r, halfH));
     }
     c.physics = cols;
+  }
+
+  /** The converted flora models, keyed by the appearance file the terrain names. */
+  private async loadFlora(pack: AssetPack, swg: SwgTerrain): Promise<void> {
+    const defs = pack.category('flora').filter((d) => d.appearance);
+    if (!defs.length) return;
+    const models = await pack.models(defs.map((d) => d.id));
+    const byAppearance = new Map<string, LoadedModel>();
+    defs.forEach((d, i) => {
+      const m = models[i];
+      if (m) byAppearance.set(d.appearance!.replace(/\\/g, '/').toLowerCase(), m);
+    });
+    const families = swg.template.generator.floraGroup.families.size;
+    this.flora = new FloraPlanter(swg, byAppearance);
+    console.info(`flora: ${byAppearance.size} models for ${families} families`);
+  }
+
+  /** Water where the terrain says it is: the global table's height, plus every lake and pool. */
+  private applySwgWater(swg: SwgTerrain): void {
+    const planet = this.planet;
+    const material = (this.water?.material as THREE.MeshStandardMaterial | undefined) ?? new THREE.MeshStandardMaterial({
+      color: planet.water?.color ?? 0x2e7fbb,
+      transparent: true,
+      opacity: planet.water?.opacity ?? 0.75,
+      roughness: 0.25,
+      metalness: 0.15,
+      depthWrite: false,
+    });
+    // Lakes are mirrored with the world, so their winding flips: draw water from both sides.
+    material.side = THREE.DoubleSide;
+    if (swg.template.useGlobalWaterTable) {
+      if (!this.water) {
+        this.water = new THREE.Mesh(new THREE.PlaneGeometry(12000, 12000).rotateX(-Math.PI / 2), material);
+        this.water.receiveShadow = true;
+        this.scene.add(this.water);
+      }
+      this.water.visible = true;
+      this.water.position.y = swg.template.globalWaterTableHeight;
+    } else if (this.water) {
+      this.water.visible = false;
+    }
+    for (const m of this.localWater) {
+      this.scene.remove(m);
+      m.geometry.dispose();
+    }
+    this.localWater.length = 0;
+    for (const w of swg.waterTables) {
+      const pts = w.points.map((p) => new THREE.Vector2(p.x, p.z));
+      const tris = THREE.ShapeUtils.triangulateShape(pts, []);
+      if (!tris.length) continue;
+      const g = new THREE.BufferGeometry();
+      const pos: number[] = [];
+      for (const p of pts) pos.push(p.x, w.height, p.y);
+      g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+      g.setIndex(tris.flat());
+      g.computeVertexNormals();
+      const mesh = new THREE.Mesh(g, material);
+      mesh.receiveShadow = true;
+      mesh.name = `water:${w.name}`;
+      this.scene.add(mesh);
+      this.localWater.push(mesh);
+    }
+    if (swg.waterTables.length) console.info(`water: ${swg.waterTables.length} local tables${swg.template.useGlobalWaterTable ? `, global at ${swg.template.globalWaterTableHeight.toFixed(1)} m` : ', no global table'}`);
   }
 
   /** Find a comfortable spot near the origin: dry, gentle slope. */
@@ -503,6 +579,11 @@ export class World {
 
   get chunkCount(): number {
     return this.chunks.size;
+  }
+
+  /** Flora planted so far and the appearances the pack lacked (diagnostics). */
+  get floraStatus(): { planted: number; models: number; missing: string[] } | null {
+    return this.flora ? { planted: this.flora.planted, models: this.flora.modelCount, missing: [...this.flora.missing] } : null;
   }
 
   /** The snapshot's centre in SWG coordinates (the game's origin), when a converted pack is loaded. */
@@ -738,7 +819,8 @@ export class World {
     mesh.castShadow = true;
     group.add(mesh);
     const exclude = this.layoutStream ? [...this.exclusions, ...this.layoutStream.exclusionsFor(cx, cz)] : this.exclusions;
-    const { group: propGroup, colliders } = this.props.buildForChunk(cx, cz, this.terrain, exclude);
+    // The planet's own flora replaces the procedural props once its models are loaded.
+    const { group: propGroup, colliders } = this.flora ? this.flora.buildForChunk(cx, cz, (x, z) => this.terrain.heightAt(x, z), exclude) : this.props.buildForChunk(cx, cz, this.terrain, exclude);
     propGroup.traverse((o) => {
       if (o instanceof THREE.InstancedMesh) o.computeBoundingSphere();
     });

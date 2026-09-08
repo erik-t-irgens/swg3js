@@ -2,7 +2,8 @@
 // reproduces the client's chunk layout: poles every half tile, chunks padded by two poles
 // on each side, and ground made of eight-triangle fans around each tile's centre pole.
 
-import { Layer, TerrainGenerator, createChunkData, parseHeightmapFile, type Bitmap, type ChunkData } from './generator.ts';
+import { BoundaryPolygon, BoundaryRectangle, Layer, TerrainGenerator, createChunkData, parseHeightmapFile, type Bitmap, type ChunkData } from './generator.ts';
+import { PackedFixedPointMap, PackedIntegerMap } from './flora.ts';
 import { ChunkReader, chunkChild, formChild, isForm, parseIff, parseIffRoots, type IffForm } from './iff.ts';
 
 export interface TerrainTemplate {
@@ -18,6 +19,55 @@ export interface TerrainTemplate {
   environmentCycleTime: number;
   version: number;
   generator: TerrainGenerator;
+  /** Static flora placement: collidable (trees, rocks) and non-collidable (plants) tiles. */
+  flora: {
+    collidable: FloraTiling;
+    nonCollidable: FloraTiling;
+    radial: FloraTiling;
+    farRadial: FloraTiling;
+    /** Older files sample flora from the generated chunk instead of the baked map. */
+    legacyMap: boolean;
+    /** Baked collidable flora per 16 m tile (version 15): family id and ground height. */
+    collidableMap: PackedIntegerMap | null;
+    collidableHeightMap: PackedFixedPointMap | null;
+  };
+}
+
+export interface FloraTiling {
+  minimumDistance: number;
+  maximumDistance: number;
+  tileSize: number;
+  tileBorder: number;
+  seed: number;
+}
+
+/** A lake or pool: a polygon (SWG coordinates) filled with water at one height. */
+export interface WaterTable {
+  name: string;
+  points: { x: number; y: number }[];
+  height: number;
+}
+
+/** Every local water table in the layer tree (rivers excluded). */
+export function waterTables(generator: TerrainGenerator): WaterTable[] {
+  const out: WaterTable[] = [];
+  const walk = (layers: Layer[]) => {
+    for (const l of layers) {
+      if (!l.active) continue;
+      for (const b of l.boundaries) {
+        if (!b.active) continue;
+        if (b instanceof BoundaryRectangle && b.localWaterTable) {
+          const r = b.rect;
+          out.push({ name: b.name, height: b.localWaterTableHeight, points: [{ x: r.x0, y: r.y0 }, { x: r.x1, y: r.y0 }, { x: r.x1, y: r.y1 }, { x: r.x0, y: r.y1 }] });
+        } else if (b instanceof BoundaryPolygon && b.localWaterTable && b.points.length >= 3) {
+          out.push({ name: b.name, height: b.localWaterTableHeight, points: b.points.map((p) => ({ x: p.x, y: p.y })) });
+        }
+      }
+      walk(l.layers);
+    }
+  };
+  walk(generator.layers);
+  return out;
 }
 
 /** Client chunk sampling parameters (ClientProceduralTerrainAppearanceTemplate: originOffset 2, upperPad 2). */
@@ -45,11 +95,40 @@ export function parseTerrainTemplate(bytes: Uint8Array): TerrainTemplate {
   t.globalWaterTableShaderTemplateName = r.string();
   t.environmentCycleTime = r.float();
   t.tileWidthInMeters = t.chunkWidthInMeters / t.numberOfTilesPerChunk;
+  if (version === 13) {
+    // Fields dropped after version 13.
+    r.string();
+    r.string();
+    r.float();
+    r.string();
+    r.float();
+    r.string();
+    r.float();
+    r.string();
+    r.float();
+    r.int32();
+    r.string();
+  }
+  const none = (): FloraTiling => ({ minimumDistance: 0, maximumDistance: 0, tileSize: 0, tileBorder: 0, seed: 0 });
+  const tiling = (): FloraTiling => (r.remaining >= 20 ? { minimumDistance: r.float(), maximumDistance: r.float(), tileSize: r.float(), tileBorder: r.float(), seed: r.uint32() } : none());
+  const flora: TerrainTemplate['flora'] = { collidable: tiling(), nonCollidable: tiling(), radial: tiling(), farRadial: tiling(), legacyMap: version < 15, collidableMap: null, collidableHeightMap: null };
+  if (version >= 15 && r.remaining >= 1) flora.legacyMap = r.bool8();
   const tgen = formChild(v, 'TGEN');
   if (!tgen) throw new Error('terrain: missing TGEN');
   const generator = new TerrainGenerator();
   generator.load(tgen);
   t.generator = generator;
+  const pimp = formChild(v, 'PIMP');
+  const pfpm = formChild(v, 'PFPM');
+  if (pimp && pfpm) {
+    try {
+      flora.collidableMap = new PackedIntegerMap(pimp);
+      flora.collidableHeightMap = new PackedFixedPointMap(pfpm);
+    } catch (err) {
+      generator.unknownTags.set(`flora map: ${(err as Error).message}`, 1);
+    }
+  }
+  t.flora = flora;
   return t as TerrainTemplate;
 }
 
@@ -91,6 +170,16 @@ export interface HeightGrid {
   heights: Float32Array;
   shaders: Int32Array;
   excluded: Uint8Array;
+  floraCollidable: Uint8Array;
+  floraNonCollidable: Uint8Array;
+}
+
+/** A cached block of poles: heights plus the per-pole maps flora placement reads. */
+export interface PoleBlock {
+  heights: Float32Array;
+  excluded: Uint8Array;
+  floraCollidable: Uint8Array;
+  floraNonCollidable: Uint8Array;
 }
 
 export class TerrainSampler {
@@ -107,7 +196,7 @@ export class TerrainSampler {
   readonly blockWidth: number;
   readonly tilesPerBlock: number;
   readonly numberOfPoles: number;
-  private readonly blocks = new Map<string, Float32Array>();
+  private readonly blocks = new Map<string, PoleBlock>();
   private readonly building: Layer[] = [];
   readonly template: TerrainTemplate;
 
@@ -126,9 +215,9 @@ export class TerrainSampler {
 
   /** Run the generator over an arbitrary pole grid (used for blocks and coarse far tiles). */
   generate(startX: number, startZ: number, n: number, step: number): HeightGrid {
-    const d: ChunkData = createChunkData(startX, startZ, n, step, this.generator.fractalGroup, this.generator.shaderGroup, this.generator.bitmapGroup);
+    const d: ChunkData = createChunkData(startX, startZ, n, step, this.generator.fractalGroup, this.generator.shaderGroup, this.generator.bitmapGroup, this.generator.floraGroup);
     this.generator.generateChunk(d);
-    return { startX, startZ, n, step, heights: d.heightMap, shaders: d.shaderMap, excluded: d.excludeMap };
+    return { startX, startZ, n, step, heights: d.heightMap, shaders: d.shaderMap, excluded: d.excludeMap, floraCollidable: d.floraCollidable, floraNonCollidable: d.floraNonCollidable };
   }
 
   /** Poles of one block: start = block origin minus the two-pole origin offset. */
@@ -136,23 +225,49 @@ export class TerrainSampler {
     return { x: blockX * this.blockWidth - ORIGIN_OFFSET * this.poleStep, z: blockZ * this.blockWidth - ORIGIN_OFFSET * this.poleStep };
   }
 
-  generateBlock(blockX: number, blockZ: number): Float32Array {
+  generateBlock(blockX: number, blockZ: number): PoleBlock {
     const key = `${blockX},${blockZ}`;
-    let h = this.blocks.get(key);
-    if (!h) {
+    let b = this.blocks.get(key);
+    if (!b) {
       const s = this.blockStart(blockX, blockZ);
-      h = this.generate(s.x, s.z, this.numberOfPoles, this.poleStep).heights;
-      this.blocks.set(key, h);
+      const g = this.generate(s.x, s.z, this.numberOfPoles, this.poleStep);
+      b = { heights: g.heights, excluded: g.excluded, floraCollidable: g.floraCollidable, floraNonCollidable: g.floraNonCollidable };
+      this.blocks.set(key, b);
     }
-    return h;
+    return b;
   }
 
   hasBlock(blockX: number, blockZ: number): boolean {
     return this.blocks.has(`${blockX},${blockZ}`);
   }
 
-  putBlock(blockX: number, blockZ: number, heights: Float32Array): void {
-    this.blocks.set(`${blockX},${blockZ}`, heights);
+  putBlock(blockX: number, blockZ: number, block: PoleBlock): void {
+    this.blocks.set(`${blockX},${blockZ}`, block);
+  }
+
+  /** Index of the pole a world point maps to within its block (ProceduralTerrainAppearance::Chunk::_findMapXz). */
+  private poleIndex(x: number, z: number): { block: PoleBlock; index: number } {
+    const bw = this.blockWidth;
+    const bx = Math.floor(x / bw);
+    const bz = Math.floor(z / bw);
+    const block = this.generateBlock(bx, bz);
+    const max = 2 * this.tilesPerBlock;
+    const px = ORIGIN_OFFSET + Math.min(max, Math.max(0, Math.floor((x - bx * bw) / this.poleStep)));
+    const pz = ORIGIN_OFFSET + Math.min(max, Math.max(0, Math.floor((z - bz * bw) / this.poleStep)));
+    return { block, index: pz * this.numberOfPoles + px };
+  }
+
+  /** Static flora family at a world point (0 = none) and its child choice in [0, 1]. */
+  floraAt(x: number, z: number, collidable: boolean): { family: number; choice: number } {
+    const { block, index } = this.poleIndex(x, z);
+    const map = collidable ? block.floraCollidable : block.floraNonCollidable;
+    return { family: map[index * 2], choice: map[index * 2 + 1] / 255 };
+  }
+
+  /** Whether the generator excluded flora at a world point (AEXC affectors). */
+  excludedAt(x: number, z: number): boolean {
+    const { block, index } = this.poleIndex(x, z);
+    return block.excluded[index] !== 0;
   }
 
   /** Drop cached blocks farther than `radius` blocks from the given block. */
@@ -172,7 +287,7 @@ export class TerrainSampler {
     const bw = this.blockWidth;
     const bx = Math.floor(x / bw);
     const bz = Math.floor(z / bw);
-    const h = this.generateBlock(bx, bz);
+    const h = this.generateBlock(bx, bz).heights;
     return sampleFans(h, this.numberOfPoles, this.tilesPerBlock, this.tileWidth, x - bx * bw, z - bz * bw);
   }
 

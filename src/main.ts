@@ -83,6 +83,19 @@ class App {
       },
       cell: () => (this.world.cellState ? { model: this.world.cellState.building.model.def.id, cell: this.world.cellState.cell } : null),
       passes: () => this.portals.passes,
+      flora: () => this.world.floraStatus,
+      scene: () => this.scene,
+      find: (pattern: string) => {
+        const out: unknown[] = [];
+        this.scene.traverse((o) => {
+          if (!new RegExp(pattern).test(o.name)) return;
+          const g = (o as THREE.Mesh).geometry;
+          const m = (o as THREE.Mesh).material as THREE.MeshStandardMaterial | undefined;
+          out.push({ name: o.name, visible: o.visible, y: o.position.y, indices: g?.getIndex()?.count ?? null, verts: g?.getAttribute('position')?.count ?? null, layers: o.layers.mask, material: m ? { opacity: m.opacity, transparent: m.transparent, color: m.color?.getHexString(), stencilRef: m.stencilRef, stencilFunc: m.stencilFunc, stencilWrite: m.stencilWrite } : null });
+        });
+        return out;
+      },
+      water: (x: number, z: number) => this.world.terrain.waterHeightAt(x, z),
     };
 
     this.fade = document.createElement('div');

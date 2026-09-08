@@ -50,6 +50,7 @@ URL options: `?planet=lok` spawns on a specific world, `?class=bounty_hunter` pi
 
 - **Ten launch-era planets**: Tatooine, Naboo, Corellia, Dantooine, Lok, Endor, Dathomir, Yavin IV, Talus, Rori. Each is a seed plus a set of terrain, palette, sky, fog, vegetation and wildlife parameters in `src/data/planets.ts`.
 - **Streaming procedural terrain**: 64 m chunks generated from layered simplex noise around the player, with analytic normals (no seams), vertex-colored by height, slope and shoreline. Planets are effectively unbounded.
+- **Real flora and water in private builds**: the planet's own trees, rocks and plants grow where the terrain rules and the engine's seeded random numbers put them (the same spots on every server), and water sits at the terrain's global table height with every lake and pool from the terrain layers.
 - **Real SWG terrain in private builds**: `src/swg/terrain/` is a port of the game's terrain generator (its seeded fractals, layer boundaries, filters and affectors, and the ground modifications buildings apply). When a converted pack carries the planet's `.trn`, chunks are generated from it in a Web Worker and the ground matches the original game to the centimetre, so snapshot buildings sit exactly on it.
 - **Props**: instanced trees (six styles: pine, round, palm, dead, giant, swamp) and rocks scattered deterministically per chunk, with cylinder colliders.
 - **Water**, per-planet gravity, a gradient sky shader with sun discs (Tatooine gets two), exponential fog, and shadow-casting sunlight.

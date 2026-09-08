@@ -392,7 +392,7 @@ export class Player {
     if (!wasGrounded && this.grounded && Math.abs(mv.y) < 1e-4 && this.vel.y > 0) this.grounded = false;
 
     const ground = terrain.heightAt(this.pos.x, this.pos.z);
-    const wade = terrain.waterLevel - 1.1;
+    const wade = terrain.waterHeightAt(this.pos.x, this.pos.z) - 1.1;
     this.swimming = ground < wade;
     if (this.swimming && this.pos.y < wade) {
       this.pos.y = wade;

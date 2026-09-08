@@ -4,6 +4,7 @@
 // affectors are parsed and kept as inert layer items so layer bookkeeping stays identical.
 
 import { MultiFractal } from './fractal.ts';
+import { FastRandomGenerator, FloraGroup, hashTuple } from './flora.ts';
 import { ChunkReader, chunkChild, formChild, isForm, nameOf, type IffChunk, type IffForm, type IffNode } from './iff.ts';
 
 // ---------------------------------------------------------------------------
@@ -305,14 +306,18 @@ export interface ChunkData {
   heightMap: Float32Array;
   shaderMap: Int32Array;
   excludeMap: Uint8Array;
+  /** Static flora per pole: family id and child choice (0..255) pairs; collidable (trees, rocks) and not (plants). */
+  floraCollidable: Uint8Array;
+  floraNonCollidable: Uint8Array;
   normalMap: Float32Array;
   normalsDirty: boolean;
   fractalGroup: FractalGroup;
   shaderGroup: ShaderGroup;
   bitmapGroup: BitmapGroup;
+  floraGroup: FloraGroup;
 }
 
-export function createChunkData(startX: number, startZ: number, numberOfPoles: number, distanceBetweenPoles: number, fractalGroup: FractalGroup, shaderGroup: ShaderGroup, bitmapGroup: BitmapGroup = new BitmapGroup()): ChunkData {
+export function createChunkData(startX: number, startZ: number, numberOfPoles: number, distanceBetweenPoles: number, fractalGroup: FractalGroup, shaderGroup: ShaderGroup, bitmapGroup: BitmapGroup = new BitmapGroup(), floraGroup: FloraGroup = new FloraGroup()): ChunkData {
   const n = numberOfPoles * numberOfPoles;
   const size = (numberOfPoles - 1) * distanceBetweenPoles;
   return {
@@ -324,11 +329,14 @@ export function createChunkData(startX: number, startZ: number, numberOfPoles: n
     heightMap: new Float32Array(n),
     shaderMap: new Int32Array(n),
     excludeMap: new Uint8Array(n),
+    floraCollidable: new Uint8Array(n * 2),
+    floraNonCollidable: new Uint8Array(n * 2),
     normalMap: new Float32Array(n * 3),
     normalsDirty: true,
     fractalGroup,
     shaderGroup,
     bitmapGroup,
+    floraGroup,
   };
 }
 
@@ -1183,6 +1191,64 @@ export class AffectorInert extends Affector {
   }
 }
 
+/**
+ * AffectorFloraStatic (AFSC collidable, AFSN non-collidable): marks poles with a flora family.
+ * Whether a pole gets flora is decided by a random number seeded from the pole's world position,
+ * so every client and server plants the same trees.
+ */
+export class AffectorFloraStatic extends Affector {
+  familyId = 0;
+  operation = Operation.add as number;
+  removeAll = false;
+  densityOverride = false;
+  densityOverrideDensity = 1;
+
+  constructor(tag: 'AFSC' | 'AFSN') {
+    super(tag);
+  }
+
+  affect(wx: number, wz: number, x: number, z: number, amount: number, d: ChunkData): void {
+    if (amount <= 0) return;
+    const map = this.tag === 'AFSC' ? d.floraCollidable : d.floraNonCollidable;
+    const i = (z * d.numberOfPoles + x) * 2;
+    if (this.removeAll) {
+      map[i] = 0;
+      map[i + 1] = 0;
+      return;
+    }
+    const family = d.floraGroup.families.get(this.familyId);
+    if (!family || this.familyId === 0) return;
+    const density = this.densityOverride ? this.densityOverrideDensity : family.density;
+    const rng = new FastRandomGenerator(hashTuple(wx, wz));
+    const rf = rng.randomFloat();
+    if (rf > amount * density) return;
+    if (this.operation === Operation.add) {
+      map[i] = this.familyId;
+      map[i + 1] = Math.floor(rng.randomFloat() * 255);
+    } else if (this.operation === Operation.replace) {
+      // Replace is a removal of one family.
+      if (map[i] === this.familyId) {
+        map[i] = 0;
+        map[i + 1] = 0;
+      }
+    }
+  }
+
+  load(form: IffForm): void {
+    const v = form.children[0] as IffForm;
+    this.loadHeader(v);
+    const version = Number.parseInt(v.type, 10);
+    const r = new ChunkReader(chunkChild(v, 'DATA')!.data);
+    this.familyId = r.int32();
+    if (version >= 2) this.operation = r.int32();
+    if (version >= 3) this.removeAll = r.int32() !== 0;
+    if (version >= 4) {
+      this.densityOverride = r.int32() !== 0;
+      this.densityOverrideDensity = r.float();
+    }
+  }
+}
+
 export class AffectorExclude extends Affector {
   constructor() {
     super('AEXC');
@@ -1983,7 +2049,7 @@ export class Layer extends LayerItem {
   }
 }
 
-const INERT_AFFECTORS = new Set(['AENV', 'ACCN', 'ACRH', 'ACRF', 'AFCN', 'AFSC', 'AFSN', 'ARCN', 'AFDN', 'AFDF', 'ARIB', 'APAS']);
+const INERT_AFFECTORS = new Set(['AENV', 'ACCN', 'ACRH', 'ACRF', 'AFCN', 'ARCN', 'AFDN', 'AFDF', 'ARIB', 'APAS']);
 const SKIPPED = new Set(['BALL', 'BSPL', 'AHSM', 'AHBM', 'ACBM', 'ASBM', 'AFBM']);
 
 /** TerrainGeneratorLoader::loadLayerItem */
@@ -2056,6 +2122,11 @@ export function loadLayerItem(form: IffForm, group: FractalGroup): LayerItem | n
       item = new AffectorExclude();
       (item as AffectorExclude).load(form);
       break;
+    case 'AFSC':
+    case 'AFSN':
+      item = new AffectorFloraStatic(t);
+      (item as AffectorFloraStatic).load(form);
+      break;
     case 'AROA':
       item = new AffectorRoad();
       (item as AffectorRoad).load(form);
@@ -2088,6 +2159,7 @@ export class TerrainGenerator {
   readonly shaderGroup = new ShaderGroup();
   readonly fractalGroup = new FractalGroup();
   readonly bitmapGroup = new BitmapGroup();
+  readonly floraGroup = new FloraGroup();
   layers: Layer[] = [];
   /** Names of layer item tags that were not understood, for diagnostics. */
   readonly unknownTags = new Map<string, number>();
@@ -2101,6 +2173,11 @@ export class TerrainGenerator {
     const mgrps = v.children.filter((c): c is IffForm => isForm(c) && c.type === 'MGRP');
     this.fractalGroup.load(mgrps[0]);
     this.bitmapGroup.load(mgrps[1]);
+    try {
+      this.floraGroup.load(formChild(v, 'FGRP') ?? null);
+    } catch (err) {
+      this.unknownTags.set(`FGRP: ${(err as Error).message}`, 1);
+    }
     const lyrs = formChild(v, 'LYRS');
     if (lyrs) {
       for (const c of lyrs.children) {
@@ -2133,6 +2210,8 @@ export class TerrainGenerator {
   generateChunk(d: ChunkData): void {
     d.heightMap.fill(0);
     d.shaderMap.fill(0);
+    d.floraCollidable.fill(0);
+    d.floraNonCollidable.fill(0);
     d.excludeMap.fill(0);
     d.normalsDirty = true;
     const n = d.numberOfPoles;
