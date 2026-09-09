@@ -840,7 +840,7 @@ const CREATURES = {
   mawgax: 'object/mobile/shared_mawgax.iff',
   kahmurra: 'object/mobile/shared_kahmurra.iff',
   torton: 'object/mobile/shared_torton.iff',
-  lava_flea: 'object/mobile/shared_lava_flea.iff',
+  lava_flea: 'object/mobile/som/shared_lava_flea.iff',
   webweaver: 'object/mobile/shared_webweaver.iff',
 };
 /** Logical animations (substrings) the game drives creatures with. */
