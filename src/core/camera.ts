@@ -7,7 +7,7 @@ const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v));
 export type CameraBlocker = (from: THREE.Vector3, to: THREE.Vector3) => number | null;
 
 const FIRST_PERSON_BELOW = 1.2;
-const EYE_HEIGHT = 1.6;
+const EYE_HEIGHT = 1.5;
 
 /** SWG-style free-orbit third-person camera that becomes first person when zoomed all the way in. */
 export class ThirdPersonCamera {

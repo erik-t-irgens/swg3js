@@ -8,9 +8,10 @@ import type { Speeder } from '../vehicles/speeder';
 import type { World } from '../world/world';
 import type { CharacterRig } from './rig';
 
-const RUN_SPEED = 7.5;
-const WALK_SPEED = 2.8;
-const JUMP_HEIGHT = 1.7;
+// The original game's run is 5.375 m/s; the character stands about 1.75 m.
+const RUN_SPEED = 5.5;
+const WALK_SPEED = 2.0;
+const JUMP_HEIGHT = 1.4;
 const SWING_TIME = 0.45;
 
 const fwd = new THREE.Vector3();
@@ -177,7 +178,7 @@ export class Player {
 
     const world = physics.world;
     this.body = world.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased());
-    this.collider = world.createCollider(RAPIER.ColliderDesc.capsule(0.5, 0.4).setTranslation(0, 0.9, 0), this.body);
+    this.collider = world.createCollider(RAPIER.ColliderDesc.capsule(0.45, 0.35).setTranslation(0, 0.8, 0), this.body);
     this.controller = world.createCharacterController(0.04);
     this.controller.enableAutostep(0.5, 0.2, true);
     this.controller.setMaxSlopeClimbAngle((55 * Math.PI) / 180);
@@ -224,7 +225,7 @@ export class Player {
   attachRig(rig: CharacterRig): void {
     this.rig = rig;
     this.parts.hips.visible = false;
-    rig.root.scale.setScalar(1.1);
+    rig.root.scale.setScalar(0.95);
     this.group.add(rig.root);
     markActor(rig.root);
     const hand = rig.bone('mixamorig:RightHand');

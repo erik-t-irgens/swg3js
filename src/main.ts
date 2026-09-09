@@ -295,7 +295,7 @@ class App {
   private drawFrame(): void {
     const cam = this.cam.camera;
     cam.updateMatrixWorld();
-    const eye = this.player.pos.clone().setY(this.player.pos.y + 1.6);
+    const eye = this.player.pos.clone().setY(this.player.pos.y + 1.5);
     const view = this.portals.cameraBuilding(this.world.cellState, eye, cam.position, this.world.buildings);
     this.portals.render(this.scene, cam, view, this.world.buildings);
   }
