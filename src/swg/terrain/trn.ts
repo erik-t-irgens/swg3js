@@ -250,10 +250,13 @@ export class TerrainSampler {
     d.probeIndex = half * n + half;
     const lines: string[] = [];
     let last = 0;
-    d.trace = (layer, height) => {
+    d.trace = (layer, height, depth) => {
       const amount = layer.boundaryAmountAt(x, z);
+      const filters = layer.filters.some((f) => f.active) ? layer.filterAmountAt(x, z, half, half, d) : 1;
       const changed = Math.abs(height - last) > 1e-4;
-      if (changed || amount > 0) lines.push(`${layer.name}: boundary amount ${amount.toFixed(3)}, height ${height.toFixed(3)}${changed ? ` (${height - last >= 0 ? '+' : ''}${(height - last).toFixed(3)})` : ''}`);
+      if (changed || (amount > 0 && filters > 0 && depth === 0)) {
+        lines.push(`${'  '.repeat(depth)}${layer.name}: boundary ${amount.toFixed(3)}${layer.filters.some((f) => f.active) ? `, filters ${filters.toFixed(3)}` : ''}, height ${height.toFixed(3)}${changed ? ` (${height - last >= 0 ? '+' : ''}${(height - last).toFixed(3)})` : ''}; ${layer.describeRules()}`);
+      }
       last = height;
     };
     this.generator.generateChunk(d);

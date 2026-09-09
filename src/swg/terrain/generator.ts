@@ -318,9 +318,10 @@ export interface ChunkData {
   startX: number;
   startZ: number;
   numberOfPoles: number;
-  /** Diagnostics: called after each top-level layer with the height at pole `probeIndex`. */
-  trace?: (layer: Layer, height: number) => void;
+  /** Diagnostics: called after each layer (top level and nested, with its depth) with the height at pole `probeIndex`. */
+  trace?: (layer: Layer, height: number, depth: number) => void;
   probeIndex?: number;
+  traceDepth?: number;
   distanceBetweenPoles: number;
   extent: Rect;
   heightMap: Float32Array;
@@ -1947,6 +1948,26 @@ export class Layer extends LayerItem {
     return this.invertBoundaries ? 1 - amount : amount;
   }
 
+  /** How much this layer's filters admit the probe pole (1 when it has none), for diagnostics. */
+  filterAmountAt(worldX: number, worldZ: number, x: number, z: number, d: ChunkData): number {
+    let amount = 1;
+    for (const f of this.filters) {
+      if (!f.active) continue;
+      if (f instanceof FilterBitmap) f.extent = this.extent;
+      amount = fuzzyAnd(amount, feather(f.featherFunction, f.isWithin(worldX, worldZ, x, z, d)));
+    }
+    return this.invertFilters ? 1 - amount : amount;
+  }
+
+  /** Short tags of this layer's active rules, for diagnostics. */
+  describeRules(): string {
+    const tags = (items: { active: boolean; tag: string }[]) => items.filter((i) => i.active).map((i) => i.tag);
+    const b = tags(this.boundaries as unknown as { active: boolean; tag: string }[]);
+    const f = tags(this.filters as unknown as { active: boolean; tag: string }[]);
+    const a = this.affectors.filter((i) => i.active).map((i) => (i instanceof AffectorHeightConstant ? `AHCN(op ${i.operation} h ${i.height})` : i instanceof AffectorHeightFractal ? `AHFR(op ${i.operation} x${i.scaleY})` : i.tag));
+    return [b.length ? `bounds ${b.join(' ')}` : '', f.length ? `filters ${f.join(' ')}` : '', a.length ? `affects ${a.join(' ')}` : ''].filter(Boolean).join('; ');
+  }
+
   affect(previousAmountMap: Float32Array, d: ChunkData): void {
     if (this.hasActiveFilters) {
       for (const f of this.filters) {
@@ -2011,7 +2032,13 @@ export class Layer extends LayerItem {
       }
     }
     if (shouldAffectSubLayers && this.hasActiveLayers) {
-      for (const l of this.layers) if (!l.pruned) l.affect(onlyHasSubLayers ? previousAmountMap : amountMap!, d);
+      for (const l of this.layers) {
+        if (l.pruned) continue;
+        d.traceDepth = (d.traceDepth ?? 0) + 1;
+        l.affect(onlyHasSubLayers ? previousAmountMap : amountMap!, d);
+        d.traceDepth -= 1;
+        if (d.trace && d.probeIndex !== undefined) d.trace(l, d.heightMap[d.probeIndex], (d.traceDepth ?? 0) + 1);
+      }
     }
   }
 
@@ -2250,10 +2277,11 @@ export class TerrainGenerator {
     const n = d.numberOfPoles;
     const amountMap = new Float32Array(n * n).fill(1);
     for (let i = this.layers.length - 1; i >= 0; i--) this.layers[i].prune(d.extent);
+    d.traceDepth = 0;
     for (const l of this.layers) {
       if (l.pruned) continue;
       l.affect(amountMap, d);
-      if (d.trace && d.probeIndex !== undefined) d.trace(l, d.heightMap[d.probeIndex]);
+      if (d.trace && d.probeIndex !== undefined) d.trace(l, d.heightMap[d.probeIndex], 0);
     }
   }
 
