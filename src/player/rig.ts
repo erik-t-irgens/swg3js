@@ -9,7 +9,7 @@ const STATE_CLIPS: Record<RigState, string[]> = {
   walk: ['walk', 'Walk', 'loop_walk', 'walk_combat'],
   run: ['run', 'Run', 'loop_run', 'run_combat'],
   air: ['jump', 'fall', 'loop_jump', 'sneak_pose', 'idle', 'stand'],
-  seated: ['sit', 'loop_sit', 'sit_ground', 'sneak_pose', 'idle', 'stand'],
+  seated: ['sit', 'loop_sit', 'loop_sitting_chair:0', 'loop_sitting_chair', 'loop_sitting_ground', 'sneak_pose', 'idle', 'stand'],
 };
 
 /** Natural travel speed of the placeholder rig's locomotion clips, in m/s, used to scale playback. */

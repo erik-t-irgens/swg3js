@@ -226,25 +226,28 @@ function parseImplementation(form) {
   return { passes, fixedFunction: passes.every((p) => !p.pixelShader && !p.vertexShader && p.stageList.length > 0) };
 }
 
-/** The effect's fixed-function implementation (the one a texture bake can emulate), or null. */
+/** An effect form's fixed-function implementation (the one a texture bake can emulate), or null. */
+export function parseEffect(vfs, root, label = '(inline effect)') {
+  if (!isForm(root) || root.type !== 'EFCT') throw new Error(`expected EFCT, got ${root.type ?? root.tag}`);
+  const v = root.children.find(isForm);
+  const impls = [];
+  for (const c of v.children) {
+    if (isForm(c) && c.type === 'IMPL') impls.push(parseImplementation(c));
+    else if (!isForm(c) && c.tag === 'NAME') {
+      const file = new R(c.data).str().replace(/\\/g, '/');
+      if (vfs.has(file)) impls.push(parseImplementation(parseIff(vfs.read(file))));
+    }
+  }
+  const result = impls.find((i) => i.fixedFunction) ?? null;
+  if (result) result.file = label;
+  return result;
+}
+
+/** The effect file's fixed-function implementation, cached by path. */
 export function loadEffect(vfs, path, cache = new Map()) {
   const key = path.toLowerCase();
   if (cache.has(key)) return cache.get(key);
-  let result = null;
-  if (vfs.has(path)) {
-    const root = parseIff(vfs.read(path));
-    const v = root.children.find(isForm);
-    const impls = [];
-    for (const c of v.children) {
-      if (isForm(c) && c.type === 'IMPL') impls.push(parseImplementation(c));
-      else if (!isForm(c) && c.tag === 'NAME') {
-        const file = new R(c.data).str().replace(/\\/g, '/');
-        if (vfs.has(file)) impls.push(parseImplementation(parseIff(vfs.read(file))));
-      }
-    }
-    result = impls.find((i) => i.fixedFunction) ?? null;
-    if (result) result.file = path;
-  }
+  const result = vfs.has(path) ? parseEffect(vfs, parseIff(vfs.read(path)), path) : null;
   cache.set(key, result);
   return result;
 }
@@ -254,8 +257,14 @@ export function loadEffect(vfs, path, cache = new Map()) {
 function parseStaticShader(form, vfs, ctx) {
   const v = form.children.find(isForm);
   const shader = { textures: new Map(), addresses: new Map(), tfactors: new Map(), coordSets: new Map(), alphaRefs: new Map(), effect: null, effectFile: null, textureFiles: new Map() };
+  // The effect comes first: by file name, or written inline (blueprint shaders do this).
   const name = childOf(v, 'NAME');
+  const inlineEffect = childOf(v, 'EFCT');
   if (name) shader.effectFile = new R(name.data).str().replace(/\\/g, '/');
+  else if (inlineEffect) {
+    shader.effectFile = '(inline effect)';
+    shader.effect = parseEffect(vfs, inlineEffect);
+  }
   const txms = childOf(v, 'TXMS');
   if (txms) {
     for (const txm of childrenOf(txms, 'TXM ')) {
@@ -298,7 +307,7 @@ function parseStaticShader(form, vfs, ctx) {
     const r = new R(childOf(arvs, '0000').data);
     while (r.remaining >= 5) shader.alphaRefs.set(tagString(r.u32()), r.u8());
   }
-  if (shader.effectFile) shader.effect = loadEffect(vfs, shader.effectFile, ctx.effects);
+  if (shader.effectFile && !inlineEffect) shader.effect = loadEffect(vfs, shader.effectFile, ctx.effects);
   return shader;
 }
 
@@ -747,7 +756,7 @@ export function renderBlueprint(vfs, bp, ctx = renderContext()) {
     }
     const shader = shaders[cmd.shader];
     if (!shader || !shader.effect) {
-      unsupported.push(shader ? shader.effectFile ?? 'effect' : `shader #${cmd.shader}`);
+      unsupported.push(shader ? `${shader.effectFile ?? 'no effect'} (shader #${cmd.shader}: ${[...shader.textureFiles.values()].join(', ') || 'no textures'})` : `shader #${cmd.shader}`);
       continue;
     }
     for (const pass of shader.effect.passes) {

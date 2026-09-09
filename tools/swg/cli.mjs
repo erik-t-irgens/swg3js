@@ -306,9 +306,25 @@ function convertFlora(vfs, template, outDir, manifest) {
  */
 function nameLocomotion(entries, loadAnimation) {
   const named = entries.map((e) => ({ ...e, clip: e.name, speed: 0 }));
-  for (const prefix of ['loop_stand', 'loop_stand_combat']) {
-    const suffix = prefix === 'loop_stand' ? '' : '_combat';
-    const group = named.filter((e) => e.isDefault !== false && new RegExp(`^${prefix}:speed\\d+(?::0)*$`).test(e.name));
+  // Creatures: loop_stand:speedN[:variant]; players: loop_standing:<gender>:speedN[:variant].
+  // One entry per speed: the default variant (marked default, or with no variant suffix), from
+  // the first selector branch the table lists.
+  const LOCO = /^(loop_stand(?:ing)?(?:_combat)?)((?::\d+)*):speed(\d+)((?::\d+)*)$/;
+  const branches = new Map();
+  for (const e of named) {
+    const m = e.name.match(LOCO);
+    if (!m) continue;
+    const suffix = m[1].endsWith('_combat') ? '_combat' : '';
+    const key = `${m[1]}${m[2]}`;
+    if (!branches.has(suffix)) branches.set(suffix, { key, bySpeed: new Map() });
+    const branch = branches.get(suffix);
+    if (branch.key !== key) continue;
+    const rank = e.isDefault === true ? 2 : m[4].length === 0 ? 1 : 0;
+    const current = branch.bySpeed.get(Number(m[3]));
+    if (!current || rank > current.rank) branch.bySpeed.set(Number(m[3]), { e, rank });
+  }
+  for (const [suffix, branch] of branches) {
+    const group = [...branch.bySpeed.values()].map((c) => c.e);
     for (const e of group) {
       try {
         e.speed = loadAnimation(e)?.locomotionSpeed ?? 0;
@@ -386,7 +402,7 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
   const sat = parseSat(readIff(vfs, satPath));
   if (!sat.skeletons.length) throw new Error(`${satPath}: no skeleton`);
   const skeletonFile = sat.skeletons[0].file;
-  const skeleton = parseSkeleton(readIff(vfs, skeletonFile));
+  const skeleton = parseSkeleton(readIff(vfs, skeletonFile), (file) => (vfs.has(file) ? readIff(vfs, file) : null));
   const info = { sat: satPath, skeleton: skeletonFile, joints: skeleton.joints.length, meshes: [], animations: [], missing: [], unknownTransforms: 0, skipped: [], textureRenderers: [], customization: new Set() };
   const meshes = [];
   const textures = new Map();
@@ -435,8 +451,9 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
     }
   }
   for (const { mgn, file, body, hiddenTriangles } of composeMeshes(loaded)) {
-    const { groups, unknownTransforms } = skinnedPrimitives(mgn, skeleton);
+    const { groups, unknownTransforms, unknownNames } = skinnedPrimitives(mgn, skeleton);
     info.unknownTransforms += unknownTransforms;
+    for (const n of unknownNames) (info.unknownJoints ??= new Set()).add(n);
     if (body) {
       for (let i = 0; i < mgn.positions.length; i += 3) {
         const b = (info.bounds ??= { min: [Infinity, Infinity, Infinity], max: [-Infinity, -Infinity, -Infinity] });
@@ -675,7 +692,7 @@ const CREATURES = {
 const CREATURE_CLIPS = 'idle,walk,run,cbt_stand_combat_attack_light,rea_stand_get_hit_light,trn_stand_to_incapacitated,loop_incapacitated';
 
 /** The player's clips: locomotion and posture by exact name (=), reactions by substring. */
-const PLAYER_CLIPS = '=idle,=walk,=run,=stand,=loop_stand,=loop_walk,=loop_run,=idle_combat,=walk_combat,=run_combat,=jump,=loop_jump,=sit,=loop_sit,=sit_ground,cbt_stand_combat_attack_light,rea_stand_get_hit_light,trn_stand_to_incapacitated,=loop_incapacitated';
+const PLAYER_CLIPS = '=idle,=walk,=run,=idle_combat,=walk_combat,=run_combat,=jump,=loop_sitting_chair:0,=loop_sitting_ground,=unarmed_standing_ready_punch,=sword_1h_standing_ready_hrz_slash_middle_r,=rea_get_hit_medium_mid_center,=trn_combat_standing_hit_to_incapacitated_face_up,=loop_incapacitated_face_up,=cbt_stand_combat_attack_light,=rea_stand_get_hit_light,=trn_stand_to_incapacitated,=loop_incapacitated';
 const PLAYER_TEMPLATE = 'object/creature/player/shared_human_male.iff';
 
 /** Planet ids the game can load a pack for (see src/data/planets.ts). */
@@ -1036,7 +1053,7 @@ switch (cmd) {
     if (info.customization.size) console.log(`  customization (set with --var=name=value,...):\n    ${[...info.customization].join('\n    ')}`);
     console.log(`  animations (${info.animations.length})${info.animationTable ? ` from ${info.animationTable}` : ''}: ${info.animations.join(', ') || 'none'}`);
     if (info.available && (!info.animations.length || options.anim === 'list')) console.log(`  available (${info.available.length}): ${info.available.join(', ')}`);
-    if (info.unknownTransforms) console.log(`  ${info.unknownTransforms} vertex weights named joints the skeleton lacks`);
+    if (info.unknownTransforms) console.log(`  ${info.unknownTransforms} vertex weights named joints the skeleton lacks: ${[...info.unknownJoints ?? []].join(', ')}`);
     for (const c of info.clipStats ?? []) console.log(`  clip ${c}`);
     for (const m of info.missing) console.log(`  missing: ${m}`);
     for (const m of info.skipped) console.log(`  skipped: ${m}`);
@@ -1061,6 +1078,7 @@ switch (cmd) {
     console.log(`  animations (${info.animations.length}): ${info.animations.join(', ') || 'none'}`);
     if (!info.animations.length && info.available) console.log(`  available (${info.available.length}): ${info.available.join(', ')}`);
     for (const c of info.clipStats ?? []) console.log(`  clip ${c}`);
+    if (info.unknownTransforms) console.log(`  ${info.unknownTransforms} vertex weights named joints the skeleton lacks: ${[...info.unknownJoints ?? []].join(', ')}`);
     for (const m of info.missing) console.log(`  missing: ${m}`);
     for (const m of info.skipped) console.log(`  skipped: ${m}`);
     const manifestFile = join(outDir, 'manifest.json');

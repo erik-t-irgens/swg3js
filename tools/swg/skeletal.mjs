@@ -42,13 +42,25 @@ const versionForm = (root, tag) => {
 
 // ---------------------------------------------------------------------------------------------
 // Skeleton (.skt)
-export function parseSkeleton(root) {
-  // A LOD skeleton (SLOD) holds one SKTM form per detail level, finest first.
+export function parseSkeleton(root, loadFile = null) {
+  // A LOD skeleton (SLOD) holds one skeleton per detail level, finest first, each written inline
+  // (SKTM) or named in a NAME chunk. Meshes are weighted to the finest, so take the one with the
+  // most joints.
   if (isForm(root) && root.type === 'SLOD') {
     const lod = root.children.find(isForm);
-    const first = lod && childrenOf(lod, 'SKTM')[0];
-    if (!first) throw new Error('SLOD: no skeleton inside');
-    return parseSkeleton(first);
+    let best = null;
+    for (const c of lod ? lod.children : []) {
+      let candidate = null;
+      if (isForm(c) && c.type === 'SKTM') candidate = parseSkeleton(c, loadFile);
+      else if (!isForm(c) && c.tag === 'NAME' && loadFile) {
+        const file = new R(c.data).str().replace(/\\/g, '/');
+        const loaded = loadFile(file);
+        if (loaded) candidate = parseSkeleton(loaded, loadFile);
+      }
+      if (candidate && (!best || candidate.joints.length > best.joints.length)) best = candidate;
+    }
+    if (!best) throw new Error('SLOD: no skeleton inside');
+    return best;
   }
   const v = versionForm(root, 'SKTM');
   const version = Number.parseInt(v.type, 10);
@@ -721,6 +733,7 @@ export function skinnedPrimitives(mgn, skeleton) {
   const transformToJoint = mgn.transforms.map((t) => jointIndex.get(t.toLowerCase()) ?? -1);
   const groups = [];
   let unknownTransforms = 0;
+  const unknownNames = new Set();
   for (const s of mgn.shaders) {
     const n = s.vertexCount;
     const positions = new Float32Array(n * 3);
@@ -747,6 +760,7 @@ export function skinnedPrimitives(mgn, skeleton) {
         const j = transformToJoint[mgn.weightTransform[start + k]];
         if (j < 0) {
           unknownTransforms++;
+          unknownNames.add(mgn.transforms[mgn.weightTransform[start + k]]);
           continue;
         }
         list.push([j, mgn.weightValue[start + k]]);
@@ -762,7 +776,7 @@ export function skinnedPrimitives(mgn, skeleton) {
     }
     groups.push({ shader: s.shader, primitives: [{ positions, normals, uvs, indices: Uint32Array.from(s.triangles), joints, weights }] });
   }
-  return { groups, unknownTransforms };
+  return { groups, unknownTransforms, unknownNames: [...unknownNames] };
 }
 
 /** Load and parse a file from the archives. */

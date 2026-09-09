@@ -11,6 +11,10 @@ const check = (name: string, ok: boolean, detail = '') => {
   console.log(`${ok ? 'ok  ' : 'FAIL'} ${name}${ok ? '' : ` ${detail}`}`);
   if (!ok) failures++;
 };
+import { isForm } from '../iff.mjs';
+/** A parsed IFF tree as writer nodes, to embed an encoded file inside another form. */
+const toNode = (n: any): any => (isForm(n) ? form(n.type, ...n.children.map(toNode)) : chunk(n.tag, new Uint8Array(n.data)));
+const parseIffBack = (buf: Buffer) => toNode(parseIff(buf));
 const tag = (s: string) => ((s.charCodeAt(0) << 24) | (s.charCodeAt(1) << 16) | (s.charCodeAt(2) << 8) | s.charCodeAt(3)) >>> 0;
 const MAIN = tag('MAIN');
 
@@ -120,6 +124,20 @@ const px = (img: { rgba: Uint8Array; width: number }, x: number, y: number) => [
   const baked = bakeShader(shader);
   const p = baked ? px(baked, 0, 0) : null;
   check('baked shader is the texture times palette entry 1', !!p && p[0] === 0 && p[1] === 0 && p[2] === 128 && p[3] === 255, JSON.stringify(p));
+}
+
+// A shader carrying its effect inline, as blueprint shaders do.
+{
+  const inline = form('SSHT', form('0001',
+    parseIffBack(vfs.read('effect/test.eff')),
+    form('TXMS', form('TXM ', form('0001', chunk('DATA', new W().u32(MAIN).u8(0).u8(0).u8(0).u8(0).u8(0).u8(0).u8(0).bytes()), chunk('NAME', new W().str('texture/base.tga').bytes())))),
+    form('TFNS', chunk('0000', new W().u32(MAIN).u32(0xff00ff00).bytes()))));
+  put('shader/inline.sht', encode(inline));
+  const shader = loadShader(vfs, 'shader/inline.sht', renderContext());
+  check('inline effect parsed', !!shader && !!shader.effect && shader.effect.passes.length === 1 && shader.effectFile === '(inline effect)', shader ? JSON.stringify(shader.effectFile) : 'null');
+  const baked = shader && shaderNeedsBake(shader) ? bakeShader(shader) : null;
+  const p = baked ? px(baked, 3, 0) : null;
+  check('inline effect bakes with its texture factor (green)', !!p && p[0] === 0 && p[1] === 255 && p[2] === 0, JSON.stringify(p));
 }
 
 if (failures) {
