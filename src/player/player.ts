@@ -395,7 +395,9 @@ export class Player {
     // chest is under; the head stays above the surface unless the player dives.
     const surface = terrain.waterHeightAt(this.pos.x, this.pos.z);
     const depth = surface - this.pos.y;
-    this.swimming = depth > SWIM_DEPTH && terrain.heightAt(this.pos.x, this.pos.z) < surface - SWIM_DEPTH;
+    // Interiors can sit below a lake (the Gungan cities do) and are never water. Once
+    // swimming, a little slack keeps the float line from flickering between states.
+    this.swimming = !this.inside && depth > (this.swimming ? SWIM_DEPTH - 0.3 : SWIM_DEPTH);
     this.submerged = this.swimming && depth > DIVE_DEPTH;
 
     if (this.swimming) {
@@ -407,14 +409,17 @@ export class Player {
       let vy = 0;
       if (input.isDown('Space')) vy = SWIM_SPEED * RUN_SPEED;
       else if (input.isDown('ControlLeft') || input.isDown('ControlRight')) vy = -SWIM_SPEED * RUN_SPEED;
-      else if (this.submerged && moving) {
+      else if (moving) {
+        // Under water the camera steers: swim where you look. At the surface only a steep
+        // look downwards dives, so ordinary forward swimming keeps the head up.
         cam.camera.getWorldDirection(dive);
         vy = dive.y * speed * (mz >= 0 ? 1 : -1);
+        if (!this.submerged && (vy > 0 || dive.y > -0.5)) vy = 0;
       } else if (!this.submerged) vy = 0;
       else vy = -0.3; // a slow sink when idle under water
-      // Buoyancy: rising past the float line stops at it.
-      if (vy > 0 && depth - vy * dt < SWIM_DEPTH) vy = Math.max(0, (depth - SWIM_DEPTH) / dt);
       this.vel.y += (vy - this.vel.y) * (1 - Math.exp(-dt * 6));
+      // Buoyancy: rising past the float line stops at it.
+      if (this.vel.y > 0 && depth - this.vel.y * dt < SWIM_DEPTH) this.vel.y = Math.max(0, (depth - SWIM_DEPTH) / dt);
       this.grounded = false;
     } else if (this.grounded) {
       this.vel.x = move.x * speed;

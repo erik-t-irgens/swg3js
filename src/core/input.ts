@@ -44,6 +44,12 @@ export class Input {
     if (this.locked) document.exitPointerLock();
   }
 
+  /** Hold or release a key from script, for headless tests that cannot drive real key events at speed. */
+  force(code: string, held: boolean): void {
+    if (held) this.down.add(code);
+    else this.down.delete(code);
+  }
+
   isDown(code: string): boolean {
     return !this.captured && this.down.has(code);
   }
