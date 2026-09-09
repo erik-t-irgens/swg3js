@@ -50,7 +50,7 @@ import { composeMeshes, mergeSkeletons, parseAnimation, parseLat, parseLmg, pars
 import { resolveTemplateMesh, resolveTemplateString } from './objtemplate.mjs';
 import { encodePng } from './png.mjs';
 import { shaderTextures } from './sht.mjs';
-import { bakeShader, describeShader, describeVariables, loadShader, parseBlueprint, renderBlueprint, renderContext, shaderNeedsBake } from './texrender.mjs';
+import { bakeShader, describeShader, describeVariables, loadShader, parseBlueprint, preparedShaders, renderBlueprint, renderContext, shaderNeedsBake } from './texrender.mjs';
 import { effectAlpha, alphaModeFor } from './eff.mjs';
 import { localize, parseDatatable } from './datatable.mjs';
 import { createRequire } from 'node:module';
@@ -1116,16 +1116,16 @@ switch (cmd) {
     const bp = parseBlueprint(readIff(vfs, file));
     const ctx = renderContext(customizationValues(options.var));
     console.log(`${file}: ${bp.width}x${bp.height}, ${bp.shaders.length} shaders, ${bp.textures.length} textures, ${bp.commands.length} commands, ${bp.prepare.length} prepare operations`);
-    bp.shaders.forEach((sh, i) => {
-      let desc = 'unreadable';
-      try {
-        desc = describeShader(loadShader(vfs, sh.inline ?? sh.file, ctx));
-      } catch (err) {
-        desc = err.message;
-      }
-      console.log(`  shader ${i} ${sh.file ?? '(inline)'}: ${desc}`);
-    });
+    let prepared = [];
+    try {
+      prepared = preparedShaders(vfs, bp, ctx);
+    } catch (err) {
+      console.log(`  shaders unreadable: ${err.message}`);
+    }
+    prepared.forEach((sh, i) => console.log(`  shader ${i} ${bp.shaders[i].file ?? '(inline)'}: ${describeShader(sh)}`));
     for (const line of describeVariables(bp.variables)) console.log(`  variable ${line}`);
+    bp.prepare.forEach((op) => console.log(`  prepare: ${op.kind} shader ${op.shader} ${op.tag}${op.palette ? ` from ${op.palette} via ${bp.variables[op.variable]?.name}` : ''}${op.kind === 'texture' ? ` = ${bp.textures[op.texture]}` : ''}${op.kind === 'texture1d' ? ` = ${bp.textures[op.base]}.. (${op.count}) via ${bp.variables[op.variable]?.name}` : ''}`));
+    bp.commands.forEach((c) => console.log(`  draw: ${c.kind === 'clear' ? `clear ${c.clearColor ? (c.color >>> 0).toString(16) : '(colour kept)'}` : `shader ${c.shader}, ${c.primitives.map((pr) => (pr.kind === 'fan' ? `fan vb${pr.vb}` : `${pr.triangles} tris vb${pr.vb}`)).join(' + ')}`}`));
     const image = renderBlueprint(vfs, bp, ctx);
     for (const m of image.missing) console.log(`  missing texture: ${m}`);
     for (const u of image.unsupported) console.log(`  not drawn (no fixed-function effect): ${u}`);

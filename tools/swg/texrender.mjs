@@ -693,36 +693,23 @@ function drawTriangle(fb, width, height, va, vb, vc, shader, pass, scale) {
   }
 }
 
-/**
- * Runs a blueprint: prepares its shaders from the customization values in ctx, then executes the
- * draw commands into an RGBA image of the blueprint's preferred size.
- */
-export function renderBlueprint(vfs, bp, ctx = renderContext()) {
-  const shaders = bp.shaders.map((s) => {
-    const sh = loadShader(vfs, s.inline ?? s.file, ctx);
-    if (!sh) throw new Error(`blueprint: shader ${s.file ?? '(inline)'} not found`);
-    // Blueprint textures replace the template's copies; work on a private set.
-    return { ...sh, textures: new Map(sh.textures), tfactors: new Map(sh.tfactors), textureFiles: new Map(sh.textureFiles) };
-  });
+/** Runs the blueprint's prepare operations: textures and texture factors chosen by the variables. */
+function applyPrepare(vfs, bp, ctx, shaders, missing) {
   const valueOf = (i) => {
     const v = bp.variables[i];
     const short = v.name.replace(/^.*\//, '');
     for (const key of [v.name, short]) if (ctx.values.has(key)) return ctx.values.get(key);
     return v.default;
   };
-  const textureAt = (i) => {
-    const file = bp.textures[i];
-    return file ? loadImage(vfs, file, ctx.images) : null;
-  };
-  const missing = new Set();
   const setTexture = (shader, tag, index) => {
-    const img = textureAt(index);
+    const file = bp.textures[index];
+    const img = file ? loadImage(vfs, file, ctx.images) : null;
     if (img) shader.textures.set(tag, img);
     else {
       shader.textures.delete(tag);
-      missing.add(bp.textures[index] ?? `texture #${index}`);
+      missing.add(file ?? `texture #${index}`);
     }
-    shader.textureFiles.set(tag, bp.textures[index]);
+    shader.textureFiles.set(tag, file);
   };
   for (const op of bp.prepare) {
     const shader = shaders[op.shader];
@@ -741,6 +728,21 @@ export function renderBlueprint(vfs, bp, ctx = renderContext()) {
       case 'palette': shader.tfactors.set(op.tag, paletteColor(vfs, op.palette, valueOf(op.variable), ctx)); break;
     }
   }
+}
+
+/**
+ * Runs a blueprint: prepares its shaders from the customization values in ctx, then executes the
+ * draw commands into an RGBA image of the blueprint's preferred size.
+ */
+export function renderBlueprint(vfs, bp, ctx = renderContext()) {
+  const shaders = bp.shaders.map((s) => {
+    const sh = loadShader(vfs, s.inline ?? s.file, ctx);
+    if (!sh) throw new Error(`blueprint: shader ${s.file ?? '(inline)'} not found`);
+    // Blueprint textures replace the template's copies; work on a private set.
+    return { ...sh, textures: new Map(sh.textures), tfactors: new Map(sh.tfactors), textureFiles: new Map(sh.textureFiles) };
+  });
+  const missing = new Set();
+  applyPrepare(vfs, bp, ctx, shaders, missing);
   const { width, height } = bp;
   const fb = new Float32Array(width * height * 4);
   const scale = { x: width / bp.camera, y: height / bp.camera };
@@ -829,12 +831,32 @@ export function describeVariables(list) {
   return list.map((v) => `${v.name}${v.private ? ' (private)' : ''}: ${v.kind === 'palette' ? `palette ${v.palette}` : `0..${v.max - 1}`}, default ${v.default}`);
 }
 
-/** Effect and texture tags a static shader references, for diagnostics. */
+const OP_NAMES = ['disable', 'arg1', 'arg2', 'modulate', 'modulate2x', 'modulate4x', 'add', 'addSigned', 'addSigned2x', 'subtract', 'addSmooth', 'blendDiffuseAlpha', 'blendTextureAlpha', 'blendFactorAlpha', 'blendTextureAlphaPM', 'blendCurrentAlpha', 'premodulate', 'modulateAlphaAddColor', 'modulateColorAddAlpha', 'modulateInvAlphaAddColor', 'modulateInvColorAddAlpha', 'bumpEnvMap', 'bumpEnvMapLuminance', 'dot3', 'multiplyAdd', 'lerp'];
+const ARG_NAMES = ['current', 'diffuse', 'specular', 'temp', 'texture', 'tfactor'];
+const argName = (a) => `${a.complement ? '1-' : ''}${ARG_NAMES[a.arg] ?? a.arg}${a.alphaReplicate ? '.a' : ''}`;
+
+/** Effect, passes, stage operations and bound textures/factors of a static shader, for diagnostics. */
 export function describeShader(shader) {
   if (!shader) return 'missing';
-  const passes = shader.effect ? shader.effect.passes.map((p) => `${p.stageList.length} stages${p.alphaBlend ? ` blend ${p.blendSrc}/${p.blendDst}` : ''}${p.alphaTest ? ' alphatest' : ''}`).join('; ') : 'no fixed-function implementation';
+  const passes = shader.effect
+    ? shader.effect.passes.map((p) => {
+        const stages = p.stageList.map((st) => `${OP_NAMES[st.colorOp] ?? st.colorOp}(${st.colorArgs.slice(0, 2).map(argName).join(',')})/${OP_NAMES[st.alphaOp] ?? st.alphaOp}(${st.alphaArgs.slice(0, 2).map(argName).join(',')}) tex ${st.textureTag}`).join(' > ');
+        return `${stages}${p.alphaBlend ? `; blend ${p.blendSrc}/${p.blendDst}` : ''}${p.alphaTest ? '; alphatest' : ''}; tfactor tag ${p.tfactorTag}`;
+      }).join(' | ')
+    : 'no fixed-function implementation';
   const textures = [...shader.textureFiles].map(([tag, file]) => `${tag}=${file}`).join(', ');
-  return `${shader.effectFile ?? 'no effect'} [${passes}] textures: ${textures || 'none'}`;
+  const factors = [...shader.tfactors].map(([tag, v]) => `${tag}=${(v >>> 0).toString(16).padStart(8, '0')}`).join(', ');
+  return `${shader.effectFile ?? 'no effect'} [${passes}] textures: ${textures || 'none'}; factors: ${factors || 'none'}`;
+}
+
+/** The blueprint's shaders after its prepare operations ran (textures chosen, palette colours set). */
+export function preparedShaders(vfs, bp, ctx = renderContext()) {
+  const shaders = bp.shaders.map((s) => {
+    const sh = loadShader(vfs, s.inline ?? s.file, ctx);
+    return sh ? { ...sh, textures: new Map(sh.textures), tfactors: new Map(sh.tfactors), textureFiles: new Map(sh.textureFiles) } : null;
+  });
+  applyPrepare(vfs, bp, ctx, shaders, new Set());
+  return shaders;
 }
 
 
