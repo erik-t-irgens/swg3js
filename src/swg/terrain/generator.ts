@@ -2031,13 +2031,13 @@ export class Layer extends LayerItem {
         }
       }
     }
+    if (d.trace && d.probeIndex !== undefined) d.trace(this, d.heightMap[d.probeIndex], d.traceDepth ?? 0);
     if (shouldAffectSubLayers && this.hasActiveLayers) {
       for (const l of this.layers) {
         if (l.pruned) continue;
         d.traceDepth = (d.traceDepth ?? 0) + 1;
         l.affect(onlyHasSubLayers ? previousAmountMap : amountMap!, d);
         d.traceDepth -= 1;
-        if (d.trace && d.probeIndex !== undefined) d.trace(l, d.heightMap[d.probeIndex], (d.traceDepth ?? 0) + 1);
       }
     }
   }
@@ -2278,11 +2278,7 @@ export class TerrainGenerator {
     const amountMap = new Float32Array(n * n).fill(1);
     for (let i = this.layers.length - 1; i >= 0; i--) this.layers[i].prune(d.extent);
     d.traceDepth = 0;
-    for (const l of this.layers) {
-      if (l.pruned) continue;
-      l.affect(amountMap, d);
-      if (d.trace && d.probeIndex !== undefined) d.trace(l, d.heightMap[d.probeIndex], 0);
-    }
+    for (const l of this.layers) if (!l.pruned) l.affect(amountMap, d);
   }
 
   /** One line per layer item with its key parameters, for diagnostics. */
