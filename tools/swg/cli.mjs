@@ -833,7 +833,7 @@ const CREATURES = {
 const CREATURE_CLIPS = 'idle,walk,run,cbt_stand_combat_attack_light,rea_stand_get_hit_light,trn_stand_to_incapacitated,loop_incapacitated';
 
 /** The player's clips: locomotion and posture by exact name (=), reactions by substring. */
-const PLAYER_CLIPS = '=idle,=walk,=run,=idle_combat,=walk_combat,=run_combat,=jump,=loop_sitting_chair:0,=loop_sitting_ground,=unarmed_standing_ready_punch,=sword_1h_standing_ready_hrz_slash_middle_r,=rea_get_hit_medium_mid_center,=trn_combat_standing_hit_to_incapacitated_face_up,=loop_incapacitated_face_up,=cbt_stand_combat_attack_light,=rea_stand_get_hit_light,=trn_stand_to_incapacitated,=loop_incapacitated';
+const PLAYER_CLIPS = '=idle,=walk,=run,=idle_combat,=walk_combat,=run_combat,=jump,=loop_sitting_chair:0,=loop_sitting_ground,=loop_swimming:speed0,=loop_swimming:speed1,=unarmed_standing_ready_punch,=sword_1h_standing_ready_hrz_slash_middle_r,=rea_get_hit_medium_mid_center,=trn_combat_standing_hit_to_incapacitated_face_up,=loop_incapacitated_face_up,=cbt_stand_combat_attack_light,=rea_stand_get_hit_light,=trn_stand_to_incapacitated,=loop_incapacitated';
 const PLAYER_TEMPLATE = 'object/creature/player/shared_human_male.iff';
 
 /** Planet ids the game can load a pack for (see src/data/planets.ts). */

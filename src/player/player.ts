@@ -12,6 +12,13 @@ import type { CharacterRig } from './rig';
 const RUN_SPEED = 5.5;
 const WALK_SPEED = 2.0;
 const JUMP_HEIGHT = 1.4;
+/** Depth of the feet below the surface at which walking becomes swimming (the chest is under). */
+const SWIM_DEPTH = 1.1;
+/** Depth at which the head is under and looking down dives. */
+const DIVE_DEPTH = 1.9;
+/** Swimming speed as a fraction of running. */
+const SWIM_SPEED = 0.45;
+const dive = new THREE.Vector3();
 const SWING_TIME = 0.45;
 
 const fwd = new THREE.Vector3();
@@ -148,6 +155,8 @@ export class Player {
   private readonly controller: RAPIER.KinematicCharacterController;
   grounded = true;
   swimming = false;
+  /** Swimming with the head under the surface (diving). */
+  submerged = false;
   heading = 0;
   speedMultiplier = 1;
   saberOn = false;
@@ -381,12 +390,36 @@ export class Player {
 
     const walking = input.isDown('ShiftLeft') || input.isDown('ShiftRight');
     let speed = (walking ? WALK_SPEED : RUN_SPEED) * this.speedMultiplier;
-    if (this.swimming) speed *= 0.45;
 
-    if (this.grounded) {
+    // Water: the surface here, and how deep the body sits in it. Swimming starts when the
+    // chest is under; the head stays above the surface unless the player dives.
+    const surface = terrain.waterHeightAt(this.pos.x, this.pos.z);
+    const depth = surface - this.pos.y;
+    this.swimming = depth > SWIM_DEPTH && terrain.heightAt(this.pos.x, this.pos.z) < surface - SWIM_DEPTH;
+    this.submerged = this.swimming && depth > DIVE_DEPTH;
+
+    if (this.swimming) {
+      // Swimming: slow, no gravity, free up and down; looking down while submerged dives.
+      speed *= SWIM_SPEED;
+      const k = 1 - Math.exp(-dt * 4);
+      this.vel.x += (move.x * speed - this.vel.x) * k;
+      this.vel.z += (move.z * speed - this.vel.z) * k;
+      let vy = 0;
+      if (input.isDown('Space')) vy = SWIM_SPEED * RUN_SPEED;
+      else if (input.isDown('ControlLeft') || input.isDown('ControlRight')) vy = -SWIM_SPEED * RUN_SPEED;
+      else if (this.submerged && moving) {
+        cam.camera.getWorldDirection(dive);
+        vy = dive.y * speed * (mz >= 0 ? 1 : -1);
+      } else if (!this.submerged) vy = 0;
+      else vy = -0.3; // a slow sink when idle under water
+      // Buoyancy: rising past the float line stops at it.
+      if (vy > 0 && depth - vy * dt < SWIM_DEPTH) vy = Math.max(0, (depth - SWIM_DEPTH) / dt);
+      this.vel.y += (vy - this.vel.y) * (1 - Math.exp(-dt * 6));
+      this.grounded = false;
+    } else if (this.grounded) {
       this.vel.x = move.x * speed;
       this.vel.z = move.z * speed;
-      if (input.isDown('Space') && !this.swimming) {
+      if (input.isDown('Space')) {
         this.vel.y = Math.sqrt(2 * g * JUMP_HEIGHT);
         this.grounded = false;
       }
@@ -396,10 +429,11 @@ export class Player {
       this.vel.z += (move.z * speed - this.vel.z) * k;
     }
 
-    this.vel.y -= g * dt;
-    if (this.swimming && this.vel.y < -3) this.vel.y = -3;
+    if (!this.swimming) this.vel.y -= g * dt;
+    // Falling into deep water: the plunge slows quickly.
+    if (depth > 0 && !this.swimming && this.vel.y < -4) this.vel.y += (-4 - this.vel.y) * (1 - Math.exp(-dt * 8));
 
-    if (this.vel.y > 0.5) this.controller.disableSnapToGround();
+    if (this.vel.y > 0.5 || this.swimming) this.controller.disableSnapToGround();
     else this.controller.enableSnapToGround(0.35);
     const filter = this.inside ? groups(Group.all, Group.all & ~(Group.terrain | Group.exterior)) : groups(Group.all, Group.all);
     this.controller.computeColliderMovement(this.collider, { x: this.vel.x * dt, y: this.vel.y * dt, z: this.vel.z * dt }, undefined, filter);
@@ -413,13 +447,6 @@ export class Player {
     if (!wasGrounded && this.grounded && Math.abs(mv.y) < 1e-4 && this.vel.y > 0) this.grounded = false;
 
     const ground = terrain.heightAt(this.pos.x, this.pos.z);
-    const wade = terrain.waterHeightAt(this.pos.x, this.pos.z) - 1.1;
-    this.swimming = ground < wade;
-    if (this.swimming && this.pos.y < wade) {
-      this.pos.y = wade;
-      if (this.vel.y < 0) this.vel.y = 0;
-      this.grounded = true;
-    }
     if (this.pos.y < terrain.floor) {
       this.pos.y = ground + 1;
       this.vel.set(0, 0, 0);
@@ -455,6 +482,7 @@ export class Player {
     const rig = this.rig;
     if (!rig) return;
     if (this.mounted) rig.setState('seated');
+    else if (this.swimming) rig.setState(moving || this.submerged ? 'swim' : 'float', speed);
     else if (!this.grounded) rig.setState('air');
     else if (!moving) rig.setState('idle');
     else rig.setState(speed < 4.5 ? 'walk' : 'run', speed);

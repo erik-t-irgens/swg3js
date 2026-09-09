@@ -141,6 +141,10 @@ class App {
         return out;
       },
       water: (x: number, z: number) => this.world.terrain.waterHeightAt(x, z),
+      player: () => {
+        const p = this.player;
+        return { pos: p.pos.toArray().map((v) => Number(v.toFixed(2))), vel: p.vel.toArray().map((v) => Number(v.toFixed(2))), grounded: p.grounded, swimming: p.swimming, submerged: p.submerged, water: this.world.terrain.waterHeightAt(p.pos.x, p.pos.z), ground: this.world.terrain.heightAt(p.pos.x, p.pos.z), captured: this.input.captured };
+      },
     };
 
     this.fade = document.createElement('div');
@@ -155,7 +159,7 @@ class App {
         <h1>SWG3JS</h1>
         <div class="sub">Star Wars Galaxies, rebuilt for the browser. Ten worlds, one very ambitious side project.</div>
         <div class="controls">
-          <div><b>WASD</b> move · <b>Mouse</b> look · <b>Wheel</b> zoom · <b>Space</b> jump · <b>Shift</b> walk</div>
+          <div><b>WASD</b> move · <b>Mouse</b> look · <b>Wheel</b> zoom · <b>Space</b> jump · <b>Shift</b> walk · in water <b>Space</b>/<b>Ctrl</b> surface/dive</div>
           <div><b>LMB</b> attack · <b>E</b> mount speeder · <b>C</b> switch class · <b>T</b> fast-forward time</div>
           <div><b>M</b> galaxy map · <b>H</b> toggle help · <b>N</b> noclip fly · <b>Esc</b> release mouse</div>
         </div>
