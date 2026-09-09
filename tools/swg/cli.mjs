@@ -815,9 +815,12 @@ async function terrainCheck(dir, limit, opts = {}) {
 
 /** A planet's objects from both placement sources: the world snapshot and the buildout areas. */
 function loadPlanetObjects(vfs, planet) {
+  // The launch planets ship a world snapshot; the expansions' planets place everything through
+  // buildout tables and have none, so an empty snapshot is fine as long as buildouts exist.
   const wsPath = `snapshot/${planet}.ws`;
-  if (!vfs.has(wsPath)) throw new Error(`no ${wsPath} in archives`);
-  const snap = parseSnapshot(parseIff(vfs.read(wsPath)));
+  const hasBuildouts = vfs.has(`datatables/buildout/areas_${planet}.iff`);
+  if (!vfs.has(wsPath) && !hasBuildouts) throw new Error(`no ${wsPath} and no datatables/buildout/areas_${planet}.iff in archives`);
+  const snap = vfs.has(wsPath) ? parseSnapshot(parseIff(vfs.read(wsPath))) : { version: 'none', templates: [], nodes: [] };
   const snapshotCount = snap.nodes.length;
   const buildout = loadBuildouts(vfs, planet);
   mergeBuildouts(snap, buildout);
@@ -852,11 +855,13 @@ const GAME_PLANETS = ['tatooine', 'naboo', 'corellia', 'dantooine', 'lok', 'endo
 
 /** Names of the world snapshots the archives hold (snapshot/<name>.ws). */
 function snapshotPlanets(vfs) {
-  return vfs
-    .list('snapshot/')
-    .filter((n) => n.endsWith('.ws'))
-    .map((n) => basename(n, '.ws'))
-    .sort();
+  const names = new Set(vfs.list('snapshot/').filter((n) => n.endsWith('.ws')).map((n) => basename(n, '.ws')));
+  // Expansion planets have no snapshot, only buildout tables (and a terrain).
+  for (const n of vfs.list('datatables/buildout/areas_')) {
+    const planet = basename(n, '.iff').replace(/^areas_/, '');
+    if (vfs.has(`terrain/${planet}.trn`)) names.add(planet);
+  }
+  return [...names].sort();
 }
 
 /**

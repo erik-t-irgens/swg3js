@@ -1959,13 +1959,26 @@ export class Layer extends LayerItem {
     return this.invertFilters ? 1 - amount : amount;
   }
 
-  /** Short tags of this layer's active rules, for diagnostics. */
+  /** This layer's active rules with their key parameters, for diagnostics. */
   describeRules(): string {
-    const tags = (items: { active: boolean; tag: string }[]) => items.filter((i) => i.active).map((i) => i.tag);
-    const b = tags(this.boundaries as unknown as { active: boolean; tag: string }[]);
-    const f = tags(this.filters as unknown as { active: boolean; tag: string }[]);
-    const a = this.affectors.filter((i) => i.active).map((i) => (i instanceof AffectorHeightConstant ? `AHCN(op ${i.operation} h ${i.height})` : i instanceof AffectorHeightFractal ? `AHFR(op ${i.operation} x${i.scaleY})` : i.tag));
-    return [b.length ? `bounds ${b.join(' ')}` : '', f.length ? `filters ${f.join(' ')}` : '', a.length ? `affects ${a.join(' ')}` : ''].filter(Boolean).join('; ');
+    const num = (v: number) => (Number.isInteger(v) ? String(v) : v.toFixed(3));
+    const fe = (it: { featherFunction: number; featherDistance: number }) => `f${it.featherFunction}/${num(it.featherDistance)}`;
+    const b = this.boundaries.filter((i) => i.active).map((i) => {
+      if (i instanceof BoundaryCircle) return `BCIR(${num(i.centerX)},${num(i.centerZ)} r${num(i.radius)} ${fe(i)})`;
+      if (i instanceof BoundaryRectangle) return `BREC(${num(i.rect.x0)},${num(i.rect.y0)}..${num(i.rect.x1)},${num(i.rect.y1)} ${fe(i)})`;
+      if (i instanceof BoundaryPolygon) return `BPOL(${i.points.length}pts ${fe(i)})`;
+      if (i instanceof BoundaryPolyline) return `BPLN(${i.points.length}pts w${num(i.width)} ${fe(i)})`;
+      return i.tag;
+    });
+    const f = this.filters.filter((i) => i.active).map((i) => {
+      if (i instanceof FilterHeight) return `FHGT(${num(i.low)}..${num(i.high)} ${fe(i)})`;
+      if (i instanceof FilterFractal) return `FFRA(fam ${i.familyId} x${num(i.scaleY)} ${num(i.low)}..${num(i.high)} ${fe(i)})`;
+      if (i instanceof FilterSlope) return `FSLP(${num((i.minimumAngle * 180) / Math.PI)}..${num((i.maximumAngle * 180) / Math.PI)}deg ${fe(i)})`;
+      if (i instanceof FilterBitmap) return `FBIT(fam ${i.familyId} ${num(i.low)}..${num(i.high)} ${fe(i)})`;
+      return i.tag;
+    });
+    const a = this.affectors.filter((i) => i.active).map((i) => (i instanceof AffectorHeightConstant ? `AHCN(op ${i.operation} h ${num(i.height)})` : i instanceof AffectorHeightFractal ? `AHFR(op ${i.operation} fam ${i.familyId} x${num(i.scaleY)})` : i.tag));
+    return [b.length ? `${this.invertBoundaries ? 'inverted ' : ''}bounds ${b.join(' ')}` : '', f.length ? `${this.invertFilters ? 'inverted ' : ''}filters ${f.join(' ')}` : '', a.length ? `affects ${a.join(' ')}` : ''].filter(Boolean).join('; ');
   }
 
   affect(previousAmountMap: Float32Array, d: ChunkData): void {
