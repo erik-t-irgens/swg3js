@@ -318,6 +318,9 @@ export interface ChunkData {
   startX: number;
   startZ: number;
   numberOfPoles: number;
+  /** Diagnostics: called after each top-level layer with the height at pole `probeIndex`. */
+  trace?: (layer: Layer, height: number) => void;
+  probeIndex?: number;
   distanceBetweenPoles: number;
   extent: Rect;
   heightMap: Float32Array;
@@ -1931,6 +1934,19 @@ export class Layer extends LayerItem {
     return this.pruned;
   }
 
+  /** How much this layer's boundaries admit a world point (1 inside, 0 outside, feathered between). */
+  boundaryAmountAt(worldX: number, worldZ: number): number {
+    let amount = 0;
+    let any = false;
+    for (const b of this.boundaries) {
+      if (!b.active) continue;
+      any = true;
+      amount = Math.max(amount, b.isWithin(worldX, worldZ));
+    }
+    if (!any) amount = 1;
+    return this.invertBoundaries ? 1 - amount : amount;
+  }
+
   affect(previousAmountMap: Float32Array, d: ChunkData): void {
     if (this.hasActiveFilters) {
       for (const f of this.filters) {
@@ -2234,7 +2250,11 @@ export class TerrainGenerator {
     const n = d.numberOfPoles;
     const amountMap = new Float32Array(n * n).fill(1);
     for (let i = this.layers.length - 1; i >= 0; i--) this.layers[i].prune(d.extent);
-    for (const l of this.layers) if (!l.pruned) l.affect(amountMap, d);
+    for (const l of this.layers) {
+      if (l.pruned) continue;
+      l.affect(amountMap, d);
+      if (d.trace && d.probeIndex !== undefined) d.trace(l, d.heightMap[d.probeIndex]);
+    }
   }
 
   /** One line per layer item with its key parameters, for diagnostics. */

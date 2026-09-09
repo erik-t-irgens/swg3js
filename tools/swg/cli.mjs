@@ -749,6 +749,7 @@ async function terrainCheck(dir, limit, opts = {}) {
   if (opts.at) {
     const [ax, az] = opts.at.split(',').map(Number);
     console.log(`  height at ${ax},${az}: ${sampler.heightAt(ax, az).toFixed(3)} (base terrain, before building layers)`);
+    for (const line of sampler.trace(ax, az)) console.log(`    ${line}`);
   }
   const layoutPath = join(dir, 'layout.json');
   if (!existsSync(layoutPath)) {
@@ -770,6 +771,12 @@ async function terrainCheck(dir, limit, opts = {}) {
     layers++;
   }
   console.log(`  ${layers} building terrain layers applied in ${Date.now() - t1} ms`);
+  if (opts.at) {
+    const [ax, az] = opts.at.split(',').map(Number);
+    sampler.invalidateAll();
+    console.log(`  height at ${ax},${az} with building layers: ${sampler.heightAt(ax, az).toFixed(3)}`);
+    for (const line of sampler.trace(ax, az)) console.log(`    ${line}`);
+  }
   const t2 = Date.now();
   const rows = [];
   for (const o of objects) {
@@ -779,6 +786,10 @@ async function terrainCheck(dir, limit, opts = {}) {
   const ms = Date.now() - t2;
   const signed = rows.map((r) => r.err).sort((a, b) => a - b);
   const q = (p) => signed[Math.min(signed.length - 1, Math.floor(signed.length * p))];
+  if (!rows.length) {
+    console.log('  no snapshot objects to compare against');
+    return;
+  }
   console.log(`  signed error (generated - object): 10% ${q(0.1).toFixed(2)}, 25% ${q(0.25).toFixed(2)}, median ${q(0.5).toFixed(2)}, 75% ${q(0.75).toFixed(2)}, 90% ${q(0.9).toFixed(2)} m`);
   const bins = new Map();
   for (const e of signed) {

@@ -236,6 +236,34 @@ export class TerrainSampler {
     return { startX, startZ, n, step, heights: d.heightMap, shaders: d.shaderMap, excluded: d.excludeMap, floraCollidable: d.floraCollidable, floraNonCollidable: d.floraNonCollidable };
   }
 
+  /**
+   * Diagnostics for one world point: the height after each top-level layer that touches it, with
+   * how far inside that layer's boundaries the point is, plus a height profile along x and z.
+   */
+  trace(x: number, z: number): string[] {
+    const step = this.poleStep;
+    const half = 8;
+    const n = 2 * half + 1;
+    const startX = x - half * step;
+    const startZ = z - half * step;
+    const d: ChunkData = createChunkData(startX, startZ, n, step, this.generator.fractalGroup, this.generator.shaderGroup, this.generator.bitmapGroup, this.generator.floraGroup);
+    d.probeIndex = half * n + half;
+    const lines: string[] = [];
+    let last = 0;
+    d.trace = (layer, height) => {
+      const amount = layer.boundaryAmountAt(x, z);
+      const changed = Math.abs(height - last) > 1e-4;
+      if (changed || amount > 0) lines.push(`${layer.name}: boundary amount ${amount.toFixed(3)}, height ${height.toFixed(3)}${changed ? ` (${height - last >= 0 ? '+' : ''}${(height - last).toFixed(3)})` : ''}`);
+      last = height;
+    };
+    this.generator.generateChunk(d);
+    const row = (label: string, pick: (i: number) => number) => `${label}: ${Array.from({ length: n }, (_, i) => pick(i).toFixed(1)).join(' ')}`;
+    lines.push(row(`heights along x (${(-half * step).toFixed(0)}..${(half * step).toFixed(0)} m, ${step} m apart)`, (i) => d.heightMap[half * n + i]));
+    lines.push(row(`heights along z (${(-half * step).toFixed(0)}..${(half * step).toFixed(0)} m, ${step} m apart)`, (i) => d.heightMap[i * n + half]));
+    lines.push(`shader family at the point: ${d.shaderMap[d.probeIndex]}`);
+    return lines;
+  }
+
   /** Poles of one block: start = block origin minus the two-pole origin offset. */
   blockStart(blockX: number, blockZ: number): { x: number; z: number } {
     return { x: blockX * this.blockWidth - ORIGIN_OFFSET * this.poleStep, z: blockZ * this.blockWidth - ORIGIN_OFFSET * this.poleStep };
