@@ -15,7 +15,7 @@
 //   node tools/swg/cli.mjs planets <swg-dir>                        list the world snapshots in the archives and where each would centre
 //   node tools/swg/cli.mjs pois <swg-dir> <planet>|all <out-dir>    (re)write just pois.json for packs converted already
 //   node tools/swg/cli.mjs creatures <swg-dir> <out-dir>              every planet's creature as a skinned GLB under <out-dir>/creatures/
-//   node tools/swg/cli.mjs sat <swg-dir> <x.sat | object/mobile/shared_x.iff> <out.glb> [--anim=all|idle,walk] [--var=skin_color=3,...]
+//   node tools/swg/cli.mjs sat <swg-dir> <x.sat | object/mobile/shared_x.iff> <out.glb> [--anim=all|idle,walk] [--var=skin_color=3,...] [--wear=object/tangible/wearables/...,...]
 //   node tools/swg/cli.mjs trt <swg-dir> <x.trt> <out.png> [--var=name=value,...]   bake a texture renderer blueprint (skin, hair) to a PNG
 //                                                                  convert a skeletal appearance (creature, character) with skeleton and animations
 //   node tools/swg/cli.mjs flora <swg-dir> <planet>|all <out-dir>   (re)convert just the flora models for packs converted already
@@ -45,7 +45,7 @@ import { parseMesh } from './msh.mjs';
 import { buildPack, familyOf } from './pack.mjs';
 import { parseSnapshot, flattenWithWorldTransforms } from './ws.mjs';
 import { loadBuildouts, mergeBuildouts } from './buildout.mjs';
-import { parseAnimation, parseLat, parseLmg, parseMgn, parseSat, parseSkeleton, poseAtFrame, readIff, skinData, skinnedPrimitives } from './skeletal.mjs';
+import { composeMeshes, parseAnimation, parseLat, parseLmg, parseMgn, parseSat, parseSkeleton, poseAtFrame, readIff, skinData, skinnedPrimitives } from './skeletal.mjs';
 import { resolveTemplateMesh, resolveTemplateString } from './objtemplate.mjs';
 import { encodePng } from './png.mjs';
 import { shaderTextures } from './sht.mjs';
@@ -374,7 +374,7 @@ function skinnedTexture(vfs, shaderPath, slots, ctx, info) {
   return { path: `${shaderPath}#${rendered ? basename(rendered.file) : 'baked'}`, png: encodePng(image.width, image.height, image.rgba), hasAlpha, alphaMode };
 }
 
-function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80, variables = new Map() } = {}) {
+function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80, variables = new Map(), wear = [] } = {}) {
   let satPath = path.replace(/\\/g, '/');
   if (/\.iff$/i.test(satPath)) {
     const cache = new Map();
@@ -390,35 +390,60 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
   const meshes = [];
   const textures = new Map();
   const ctx = renderContext(variables);
-  for (const name of sat.meshes) {
-    let file = name;
-    if (/\.lmg$/i.test(file)) {
-      if (!vfs.has(file)) {
-        info.missing.push(file);
+  // Mesh generators of the body and of everything worn over it, composed the way the game does:
+  // outer layers hide the zones of inner ones (a shirt hides the torso skin beneath it).
+  const loaded = [];
+  const sources = [{ sat, label: satPath, body: true }];
+  for (const item of wear) {
+    try {
+      let file = item.replace(/\\/g, '/').replace(/^\//, '');
+      if (/\.iff$/i.test(file)) {
+        const a = resolveTemplateString(vfs, file, ['appearanceFilename'], new Map());
+        if (!a) throw new Error('no appearanceFilename in its template chain');
+        file = a.replace(/\\/g, '/').replace(/^\//, '');
+      }
+      if (!vfs.has(file)) throw new Error('not in archives');
+      const worn = parseSat(readIff(vfs, file));
+      const skeletons = worn.skeletons.map((k) => k.file.toLowerCase());
+      if (!skeletons.includes(skeletonFile.toLowerCase())) throw new Error(`built for skeleton ${worn.skeletons.map((k) => k.file).join(', ') || 'none'}, not ${skeletonFile}`);
+      sources.push({ sat: worn, label: file, body: false });
+    } catch (err) {
+      info.skipped.push(`wearable ${item}: ${err.message}`);
+    }
+  }
+  for (const source of sources) {
+    for (const name of source.sat.meshes) {
+      let file = name;
+      if (/\.lmg$/i.test(file)) {
+        if (!vfs.has(file)) {
+          info.missing.push(file);
+          continue;
+        }
+        const lods = parseLmg(readIff(vfs, file));
+        file = lods.find((l) => vfs.has(l)) ?? lods[0];
+      }
+      if (!file || !vfs.has(file)) {
+        info.missing.push(file ?? name);
         continue;
       }
-      const lods = parseLmg(readIff(vfs, file));
-      file = lods.find((l) => vfs.has(l)) ?? lods[0];
+      try {
+        loaded.push({ mgn: parseMgn(readIff(vfs, file)), file, body: source.body });
+      } catch (err) {
+        info.skipped.push(`${file}: ${err.message}`);
+      }
     }
-    if (!file || !vfs.has(file)) {
-      info.missing.push(file ?? name);
-      continue;
-    }
-    let mgn;
-    try {
-      mgn = parseMgn(readIff(vfs, file));
-    } catch (err) {
-      info.skipped.push(`${file}: ${err.message}`);
-      continue;
-    }
+  }
+  for (const { mgn, file, body, hiddenTriangles } of composeMeshes(loaded)) {
     const { groups, unknownTransforms } = skinnedPrimitives(mgn, skeleton);
     info.unknownTransforms += unknownTransforms;
-    for (let i = 0; i < mgn.positions.length; i += 3) {
-      const b = (info.bounds ??= { min: [Infinity, Infinity, Infinity], max: [-Infinity, -Infinity, -Infinity] });
-      const p = [-mgn.positions[i], mgn.positions[i + 1], mgn.positions[i + 2]];
-      for (let k = 0; k < 3; k++) {
-        b.min[k] = Math.min(b.min[k], p[k]);
-        b.max[k] = Math.max(b.max[k], p[k]);
+    if (body) {
+      for (let i = 0; i < mgn.positions.length; i += 3) {
+        const b = (info.bounds ??= { min: [Infinity, Infinity, Infinity], max: [-Infinity, -Infinity, -Infinity] });
+        const p = [-mgn.positions[i], mgn.positions[i + 1], mgn.positions[i + 2]];
+        for (let k = 0; k < 3; k++) {
+          b.min[k] = Math.min(b.min[k], p[k]);
+          b.max[k] = Math.max(b.max[k], p[k]);
+        }
       }
     }
     // Run the mesh's texture renderers (skin, hair, eyes) and hand their output to the shaders they fill.
@@ -439,14 +464,17 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
         info.skipped.push(`${trt.file}: ${err.message}`);
       }
     }
+    const kept = [];
     groups.forEach((g, i) => {
+      if (!g.primitives[0].indices.length) return; // everything this shader drew is under clothing
       const slots = slotsByShader.get(i);
       const t = skinnedTexture(vfs, g.shader, slots, ctx, info);
       if (slots) g.shader = `${g.shader}@${meshName}`; // its own material: the rendered texture is this mesh's
       if (t) textures.set(g.shader, t);
+      kept.push(g);
     });
-    meshes.push({ name: meshName, groups });
-    info.meshes.push({ file, shaders: groups.length, triangles: groups.reduce((a, g) => a + g.primitives[0].indices.length / 3, 0) });
+    if (kept.length) meshes.push({ name: meshName, groups: kept });
+    info.meshes.push({ file, shaders: kept.length, triangles: kept.reduce((a, g) => a + g.primitives[0].indices.length / 3, 0), hidden: hiddenTriangles, layer: mgn.occlusionLayer, occludes: mgn.occludes });
   }
   const clips = [];
   const latFile = sat.animationTables.get(skeletonFile.toLowerCase()) ?? [...sat.animationTables.values()][0];
@@ -996,9 +1024,9 @@ switch (cmd) {
     // <swg-dir> <appearance/x.sat | object/mobile/shared_x.iff> <out.glb> [--anim=all|idle,walk,run]
     if (!pos[3]) usage();
     const vfs = mount(pos[1]);
-    const info = convertSat(vfs, pos[2], pos[3], { animations: options.anim ?? 'all', variables: customizationValues(options.var) });
+    const info = convertSat(vfs, pos[2], pos[3], { animations: options.anim ?? 'all', variables: customizationValues(options.var), wear: (options.wear ?? '').split(',').map((w) => w.trim()).filter(Boolean) });
     console.log(`${info.sat}: skeleton ${info.skeleton} (${info.joints} joints)`);
-    for (const m of info.meshes) console.log(`  mesh ${m.file}: ${m.triangles} tris, ${m.shaders} shaders`);
+    for (const m of info.meshes) console.log(`  mesh ${m.file}: ${m.triangles} tris, ${m.shaders} shaders, layer ${m.layer}${m.hidden ? `, ${m.hidden} tris under clothing` : ''}${m.occludes.length ? `, hides ${m.occludes.join(' ')}` : ''}`);
     for (const t of info.textureRenderers) console.log(`  texture renderer ${t}`);
     if (info.customization.size) console.log(`  customization (set with --var=name=value,...):\n    ${[...info.customization].join('\n    ')}`);
     console.log(`  animations (${info.animations.length})${info.animationTable ? ` from ${info.animationTable}` : ''}: ${info.animations.join(', ') || 'none'}`);

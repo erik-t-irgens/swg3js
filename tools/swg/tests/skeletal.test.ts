@@ -2,7 +2,7 @@
 // and a one-second animation turning the child joint, written through the real writers and
 // read back as a GLB with skin and animation.
 import { form, chunk, W, encode } from './iffWriter.ts';
-import { expandQuaternion, parseAnimation, parseMgn, parseSkeleton, poseAtFrame, qmul, skinData, skinnedPrimitives } from '../skeletal.mjs';
+import { composeMeshes, expandQuaternion, parseAnimation, parseMgn, parseSkeleton, poseAtFrame, qmul, skinData, skinnedPrimitives } from '../skeletal.mjs';
 import { buildGlb } from '../glb.mjs';
 import { parseIff } from '../iff.mjs';
 
@@ -94,5 +94,41 @@ const ckat = Buffer.from(encode(form('CKAT', form('0001',
   chunk('STRN', new W().f32(0.25).bytes())))));
 const canim = parseAnimation(parseIff(ckat));
 check('ckat parsed', canim.compressed === true && canim.frameCount === 2 && canim.rotationChannels[0].length === 2 && near(canim.rotationChannels[0][1].q[1], 1, 1e-3) && near(canim.staticTranslations[0], 0.25), JSON.stringify(canim.rotationChannels));
+// Occlusion: a body mesh whose torso triangle belongs to zone "chest", under a shirt at a higher
+// layer that hides "chest"; a hat at the top layer that hides nothing.
+{
+  const zoned = (layer: number, occludes: number[], fully: number[]) => parseMgn(parseIff(Buffer.from(encode(form('SKMG', form('0004',
+    chunk('INFO', new W().i32(1).i32(2).i32(1).i32(2).i32(4).i32(4).i32(1).i32(1).i32(0).i16(2).i16(1).i16(occludes.length).i16(layer).bytes()),
+    chunk('SKTM', new W().str('appearance/skeleton/test.skt').bytes()),
+    chunk('XFNM', new W().str('root').str('child').bytes()),
+    chunk('POSN', new W().f32(-1).f32(0).f32(0).f32(1).f32(0).f32(0).f32(1).f32(2).f32(0).f32(-1).f32(2).f32(0).bytes()),
+    chunk('TWHD', new W().i32(1).i32(1).i32(1).i32(1).bytes()),
+    chunk('TWDT', new W().i32(0).f32(1).i32(0).f32(1).i32(1).f32(1).i32(1).f32(1).bytes()),
+    chunk('NORM', new W().f32(0).f32(0).f32(1).bytes()),
+    chunk('OZN ', new W().str('chest').str('head').bytes()),
+    ...(fully.length ? [chunk('FOZC', new W().u16(fully.length).i16(fully[0]).bytes())] : []),
+    chunk('OZC ', new W().i16(1).i16(0).bytes()),
+    ...(occludes.length ? [chunk('ZTO ', new W().i16(occludes[0]).bytes())] : []),
+    form('PSDT',
+      chunk('NAME', new W().str('shader/test.sht').bytes()),
+      chunk('PIDX', new W().i32(4).i32(0).i32(1).i32(2).i32(3).bytes()),
+      chunk('NIDX', new W().i32(0).i32(0).i32(0).i32(0).bytes()),
+      form('PRIM', chunk('INFO', new W().i32(2).bytes()),
+        chunk('ITL ', new W().i32(1).i32(0).i32(1).i32(2).bytes()),
+        chunk('OITL', new W().i32(1).i16(0).i32(0).i32(2).i32(3).bytes())))))))));
+  const body = zoned(0, [], []);
+  check('occlusion parsed', body.occlusionZones[0] === 'chest' && body.zoneCombinations.length === 1 && body.zoneCombinations[0][0] === 'chest' && body.shaders[0].triangleZones[1] === 0 && body.shaders[0].triangleZones[0] === -1, JSON.stringify([body.occlusionZones, body.zoneCombinations, [...body.shaders[0].triangleZones]]));
+  const shirt = zoned(2, [0], []);
+  const hat = zoned(3, [], []);
+  const composed = composeMeshes([{ mgn: body, file: 'body' }, { mgn: hat, file: 'hat' }, { mgn: shirt, file: 'shirt' }]);
+  check('outermost first', composed.map((c) => c.file).join(',') === 'hat,shirt,body');
+  check('shirt hides the chest triangle of the body', composed[2].mgn.shaders[0].triangles.length === 3 && composed[2].hiddenTriangles === 1 && composed[1].hiddenTriangles === 0, JSON.stringify(composed.map((c) => c.hiddenTriangles)));
+  const same = composeMeshes([{ mgn: body, file: 'body' }, { mgn: zoned(0, [0], []), file: 'other' }]);
+  check('meshes on the same layer do not hide each other', same.every((c) => c.hiddenTriangles === 0));
+  const helmet = zoned(1, [], [0]);
+  const under = composeMeshes([{ mgn: helmet, file: 'helmet' }, { mgn: shirt, file: 'shirt' }]);
+  check('a fully-occluded combination hides the whole mesh', under[1].mgn.shaders[0].triangles.length === 0 && under[1].hiddenTriangles === 2, JSON.stringify(under.map((c) => c.hiddenTriangles)));
+}
+
 console.log(failures ? `${failures} FAILURES` : 'all passed');
 process.exit(failures ? 1 : 0);

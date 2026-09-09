@@ -82,6 +82,10 @@ export function parseMgn(root) {
   const shaderCount = info.i32();
   const blendTargetCount = info.i32();
   // version 4 adds four int16 occlusion counts; older headers end here
+  const occlusionZoneCount = version >= 4 && info.remaining >= 8 ? info.i16() : 0;
+  const occlusionCombinationCount = version >= 4 && info.remaining >= 6 ? info.i16() : 0;
+  const zonesThisOccludesCount = version >= 4 && info.remaining >= 4 ? info.i16() : 0;
+  const occlusionLayer = version >= 4 && info.remaining >= 2 ? info.i16() : 0;
   const strings = (chunk, count) => {
     const r = new R(chunk.data);
     const out = [];
@@ -152,6 +156,8 @@ export function parseMgn(root) {
       }
     }
     const triangles = [];
+    // Per triangle: the occlusion zone combination it belongs to (-1 for plain triangle lists).
+    const triangleZones = [];
     const prim = childOf(psdt, 'PRIM');
     if (prim) {
       for (const c of prim.children) {
@@ -160,23 +166,54 @@ export function parseMgn(root) {
         const tag = c.tag.trim();
         if (tag === 'ITL') {
           const n = r.i32();
-          for (let i = 0; i < n; i++) triangles.push(r.i32(), r.i32(), r.i32());
+          for (let i = 0; i < n; i++) {
+            triangles.push(r.i32(), r.i32(), r.i32());
+            triangleZones.push(-1);
+          }
         } else if (tag === 'OITL') {
           const n = r.i32();
           for (let i = 0; i < n; i++) {
-            r.i16(); // occlusion zone combination
+            triangleZones.push(r.i16());
             triangles.push(r.i32(), r.i32(), r.i32());
           }
         }
       }
     }
-    shaders.push({ shader: name, vertexCount, positionIndices, normalIndices, uvSets, triangles: Int32Array.from(triangles) });
+    shaders.push({ shader: name, vertexCount, positionIndices, normalIndices, uvSets, triangles: Int32Array.from(triangles), triangleZones: Int16Array.from(triangleZones) });
   }
+  // Occlusion: zone names local to this mesh, the combinations its triangles belong to, the
+  // combination that means the whole mesh is hidden, and the zones this mesh hides on meshes
+  // beneath it (a shirt hides the torso skin). Zones are compared by name across meshes.
   const occlusionZones = [];
-  const ozn = childOf(v, 'OZN');
+  const ozn = childOf(v, 'OZN ');
   if (ozn) {
     const r = new R(ozn.data);
-    while (r.remaining > 0) occlusionZones.push(r.str());
+    while (r.remaining > 0) occlusionZones.push(r.str().toLowerCase());
+  }
+  const zoneName = (i) => occlusionZones[i] ?? `#${i}`;
+  let fullyOccludedBy = [];
+  const fozc = childOf(v, 'FOZC');
+  if (fozc) {
+    const r = new R(fozc.data);
+    const n = r.u16();
+    for (let i = 0; i < n; i++) fullyOccludedBy.push(zoneName(r.i16()));
+  }
+  const zoneCombinations = [];
+  const ozc = childOf(v, 'OZC ');
+  if (ozc) {
+    const r = new R(ozc.data);
+    for (let i = 0; i < occlusionCombinationCount && r.remaining >= 2; i++) {
+      const n = r.i16();
+      const combo = [];
+      for (let k = 0; k < n; k++) combo.push(zoneName(r.i16()));
+      zoneCombinations.push(combo);
+    }
+  }
+  const occludes = [];
+  const zto = childOf(v, 'ZTO ');
+  if (zto) {
+    const r = new R(zto.data);
+    for (let i = 0; i < zonesThisOccludesCount && r.remaining >= 2; i++) occludes.push(zoneName(r.i16()));
   }
   // Texture renderers: blueprints that bake a texture (skin, hair) at run time into one or more
   // of this mesh's shaders. Each TRT chunk names the blueprint and the (shader index, texture tag)
@@ -193,7 +230,62 @@ export function parseMgn(root) {
       textureRenderers.push({ file, slots });
     }
   }
-  return { version, maxTransformsPerVertex, maxTransformsPerShader, skeletons, transforms, positions, weightCounts, weightStart, weightTransform, weightValue, normals, shaders, blendTargetCount, occlusionZones, textureRenderers };
+  return { version, maxTransformsPerVertex, maxTransformsPerShader, skeletons, transforms, positions, weightCounts, weightStart, weightTransform, weightValue, normals, shaders, blendTargetCount, occlusionZones, zoneCombinations, fullyOccludedBy, occludes, occlusionLayer, textureRenderers };
+}
+
+/**
+ * The mesh with the triangles hidden by outer layers removed (CompositeMesh::addShaderPrimitives):
+ * a triangle goes when every zone of its combination is occluded; the whole mesh goes when every
+ * zone of its fully-occluded combination is. Returns the same object when nothing is hidden.
+ */
+export function applyOcclusion(mgn, occluded) {
+  if (!occluded.size) return mgn;
+  const allPresent = (zones) => zones.length > 0 && zones.every((z) => occluded.has(z));
+  if (allPresent(mgn.fullyOccludedBy)) {
+    return { ...mgn, shaders: mgn.shaders.map((s) => ({ ...s, triangles: new Int32Array(0), triangleZones: new Int16Array(0) })), hiddenTriangles: mgn.shaders.reduce((a, s) => a + s.triangles.length / 3, 0) };
+  }
+  const comboHidden = mgn.zoneCombinations.map(allPresent);
+  if (!comboHidden.some(Boolean)) return mgn;
+  let hidden = 0;
+  const shaders = mgn.shaders.map((s) => {
+    const keep = [];
+    const zones = [];
+    for (let t = 0; t < s.triangleZones.length; t++) {
+      const c = s.triangleZones[t];
+      if (c >= 0 && comboHidden[c]) {
+        hidden++;
+        continue;
+      }
+      keep.push(s.triangles[t * 3], s.triangles[t * 3 + 1], s.triangles[t * 3 + 2]);
+      zones.push(c);
+    }
+    return { ...s, triangles: Int32Array.from(keep), triangleZones: Int16Array.from(zones) };
+  });
+  return { ...mgn, shaders, hiddenTriangles: hidden };
+}
+
+/**
+ * Orders meshes outermost first and works out what each one hides, the way the game composes a
+ * body with its wearables: meshes at one occlusion layer see the zones hidden by every layer
+ * above. Returns [{ mgn (filtered), hiddenTriangles }] in draw order.
+ */
+export function composeMeshes(list) {
+  const ordered = [...list].sort((a, b) => b.mgn.occlusionLayer - a.mgn.occlusionLayer);
+  const occluded = new Set();
+  let thisLayer = new Set();
+  const out = [];
+  for (let i = 0; i < ordered.length; i++) {
+    const item = ordered[i];
+    const mgn = applyOcclusion(item.mgn, occluded);
+    out.push({ ...item, mgn, hiddenTriangles: mgn.hiddenTriangles ?? 0 });
+    for (const z of item.mgn.occludes) thisLayer.add(z);
+    const next = ordered[i + 1];
+    if (next && next.mgn.occlusionLayer !== item.mgn.occlusionLayer) {
+      for (const z of thisLayer) occluded.add(z);
+      thisLayer = new Set();
+    }
+  }
+  return out;
 }
 
 /** .lmg: the mesh generator files by detail level (index 0 is the finest). */
