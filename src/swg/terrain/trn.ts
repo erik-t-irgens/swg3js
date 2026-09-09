@@ -2,7 +2,7 @@
 // reproduces the client's chunk layout: poles every half tile, chunks padded by two poles
 // on each side, and ground made of eight-triangle fans around each tile's centre pole.
 
-import { BoundaryPolygon, BoundaryRectangle, Layer, TerrainGenerator, createChunkData, parseHeightmapFile, type Bitmap, type ChunkData } from './generator.ts';
+import { BoundaryPolygon, BoundaryRectangle, Layer, ShaderGroup, TerrainGenerator, createChunkData, parseHeightmapFile, remapShaderFamilies, type Bitmap, type ChunkData } from './generator.ts';
 import { PackedFixedPointMap, PackedIntegerMap } from './flora.ts';
 import { ChunkReader, chunkChild, formChild, isForm, parseIff, parseIffRoots, type IffForm } from './iff.ts';
 
@@ -158,6 +158,20 @@ export function parseLayerFile(bytes: Uint8Array, generator: TerrainGenerator): 
   if (!layr) return null;
   const layer = new Layer();
   layer.load(layr, generator.fractalGroup);
+  // The file's own shader families: match them to the planet's by name (the same file is used
+  // on several planets), adding any the planet lacks.
+  const sgrp = roots.find((n): n is IffForm => isForm(n) && n.type === 'SGRP');
+  if (sgrp) {
+    const local = new ShaderGroup();
+    local.load(sgrp);
+    const map = new Map<number, number>();
+    for (const fam of local.families.values()) {
+      if (!fam.name || fam.name === 'null') continue;
+      const id = generator.shaderGroup.ensure(fam);
+      if (id !== fam.id) map.set(fam.id, id);
+    }
+    if (map.size) remapShaderFamilies(layer, map);
+  }
   return layer;
 }
 

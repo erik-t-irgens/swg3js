@@ -214,6 +214,23 @@ export class ShaderGroup {
     return this.families.get(familyId)?.featherClamp ?? 1;
   }
 
+  /** The family with this name (case-insensitive), or undefined. */
+  byName(name: string): ShaderFamily | undefined {
+    const key = name.toLowerCase();
+    for (const f of this.families.values()) if (f.name.toLowerCase() === key) return f;
+    return undefined;
+  }
+
+  /** The id of the family with this name, adding a copy of `like` under a fresh id when it is new. */
+  ensure(like: ShaderFamily): number {
+    const existing = this.byName(like.name);
+    if (existing) return existing.id;
+    let id = 1;
+    for (const k of this.families.keys()) id = Math.max(id, k + 1);
+    this.families.set(id, { ...like, id, children: like.children.map((c) => ({ ...c })) });
+    return id;
+  }
+
   load(form: IffForm | undefined): void {
     if (!form) return;
     const v = form.children[0];
@@ -2270,3 +2287,25 @@ export class TerrainGenerator {
 }
 
 export type { IffChunk, IffNode };
+
+/**
+ * Renumber the shader families a layer's rules name (constant and replace affectors, roads,
+ * rivers, shader filters) through `map` (old id → new id), recursively through its sublayers.
+ * Layer files carry their own family list, so their ids only mean something in that list.
+ */
+export function remapShaderFamilies(layer: Layer, map: Map<number, number>): void {
+  const m = (id: number) => map.get(id) ?? id;
+  for (const a of layer.affectors) {
+    if (a instanceof AffectorShaderConstant) a.familyId = m(a.familyId);
+    else if (a instanceof AffectorShaderReplace) {
+      a.sourceFamilyId = m(a.sourceFamilyId);
+      a.destinationFamilyId = m(a.destinationFamilyId);
+    } else if (a instanceof AffectorRoad) a.familyId = m(a.familyId);
+    else if (a instanceof AffectorRiver) {
+      a.bankFamilyId = m(a.bankFamilyId);
+      a.bottomFamilyId = m(a.bottomFamilyId);
+    }
+  }
+  for (const f of layer.filters) if (f instanceof FilterShader) f.familyId = m(f.familyId);
+  for (const l of layer.layers) remapShaderFamilies(l, map);
+}

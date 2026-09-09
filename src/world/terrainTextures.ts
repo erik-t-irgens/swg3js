@@ -33,21 +33,31 @@ export class TerrainTextures {
   readonly families: ShaderFamilyDef[];
   private material: THREE.MeshStandardMaterial | null = null;
 
-  private constructor(texture: THREE.DataArrayTexture, families: ShaderFamilyDef[], layers: Map<number, number>) {
+  private constructor(texture: THREE.DataArrayTexture, families: ShaderFamilyDef[], layers: Map<number, number>, planet: Map<number, string>) {
     this.texture = texture;
     this.families = families;
-    const maxId = Math.max(0, ...families.map((f) => f.id));
+    // Ids on the ground are the planet's (plus any a building's layer file added); the pack lists
+    // textures by family name, so match by name first and by id when the name is unknown.
+    const byName = new Map<string, number>();
+    for (const f of families) {
+      const layer = layers.get(f.id);
+      if (layer !== undefined) byName.set(f.name.toLowerCase(), layer);
+    }
+    const maxId = Math.max(0, ...families.map((f) => f.id), ...planet.keys());
     this.layerOf = new Float32Array(maxId + 1);
     this.sizeOf = new Float32Array(maxId + 1).fill(GROUND_REPEAT);
     for (const f of families) {
       const layer = layers.get(f.id);
-      if (layer === undefined) continue;
-      this.layerOf[f.id] = layer;
+      if (layer !== undefined) this.layerOf[f.id] = layer;
+    }
+    for (const [id, name] of planet) {
+      const layer = byName.get(name.toLowerCase());
+      if (layer !== undefined) this.layerOf[id] = layer;
     }
   }
 
   /** Load the pack's ground textures, or null when it has none. */
-  static async load(pack: AssetPack, anisotropy: number): Promise<TerrainTextures | null> {
+  static async load(pack: AssetPack, anisotropy: number, planet: Map<number, string>): Promise<TerrainTextures | null> {
     const bytes = await pack.bytes('terrain/shaders.json');
     if (!bytes) return null;
     let families: ShaderFamilyDef[];
@@ -83,7 +93,7 @@ export class TerrainTextures {
     texture.generateMipmaps = true;
     texture.anisotropy = anisotropy;
     texture.needsUpdate = true;
-    return new TerrainTextures(texture, kept, layers);
+    return new TerrainTextures(texture, kept, layers, planet);
   }
 
   /**

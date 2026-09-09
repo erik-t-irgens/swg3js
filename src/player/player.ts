@@ -248,9 +248,14 @@ export class Player {
         if (d.lengthSq() > 1e-10) along.copy(d).normalize();
       }
       hand.add(p.saber, p.rifle);
+      // A gripped hilt runs across the palm, pointing the way the character faces when the arms
+      // hang at rest: the rig's forward axis taken into the hand's frame in the bind pose.
+      const grip = new THREE.Vector3(0, 0, 1).applyQuaternion(rig.root.getWorldQuaternion(new THREE.Quaternion())).applyQuaternion(hand.getWorldQuaternion(new THREE.Quaternion()).invert());
+      if (grip.lengthSq() < 1e-6) grip.set(0, 0, 1);
+      grip.normalize();
       // The saber's blade runs along its +Y, the rifle's barrel along its +Z.
-      p.saber.position.copy(along).multiplyScalar(0.08 * k);
-      p.saber.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), along);
+      p.saber.position.copy(along).multiplyScalar(0.02 * k);
+      p.saber.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), grip);
       p.saber.scale.setScalar(k);
       p.rifle.position.copy(along).multiplyScalar(0.1 * k);
       p.rifle.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), along);

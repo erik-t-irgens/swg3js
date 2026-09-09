@@ -431,7 +431,10 @@ export class World {
   /** The pack's ground textures; existing chunks and far tiles switch to them when they arrive. */
   private async loadGroundTextures(pack: AssetPack): Promise<void> {
     try {
-      const textures = await TerrainTextures.load(pack, World.anisotropy);
+      const swg = this.terrain.swg;
+      const planet = new Map<number, string>();
+      if (swg) for (const f of swg.template.generator.shaderGroup.families.values()) planet.set(f.id, f.name);
+      const textures = await TerrainTextures.load(pack, World.anisotropy, planet);
       if (!textures) return;
       this.groundTextures?.dispose();
       this.groundTextures = textures;

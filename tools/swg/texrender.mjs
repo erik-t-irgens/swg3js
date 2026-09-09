@@ -793,25 +793,37 @@ export function renderBlueprint(vfs, bp, ctx = renderContext()) {
 export function bakeShader(shader, baseTag = 'MAIN') {
   const base = shader.textures.get(baseTag);
   if (!base || !shader.effect) return null;
-  const pass = shader.effect.passes[0];
   const { width, height } = base;
-  const rgba = new Uint8Array(width * height * 4);
+  // Every pass in order, each blended over the last with its own state (a second hue masked by
+  // the texture's alpha, a specular pass adding nothing when its factor is black). The material's
+  // alpha is the first pass's; later passes only mask their own colour.
+  const fb = new Float32Array(width * height * 4);
+  const alpha = new Float32Array(width * height);
   const out = c4();
   const white = [1, 1, 1, 1];
   const uvs = [[0, 0]];
-  let hasAlpha = false;
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      uvs[0][0] = (x + 0.5) / width;
-      uvs[0][1] = (y + 0.5) / height;
-      shadeFragment(shader, pass, uvs, white, out);
-      const o = (y * width + x) * 4;
-      rgba[o] = Math.round(out[0] * 255);
-      rgba[o + 1] = Math.round(out[1] * 255);
-      rgba[o + 2] = Math.round(out[2] * 255);
-      rgba[o + 3] = Math.round(out[3] * 255);
-      if (rgba[o + 3] !== 255) hasAlpha = true;
+  shader.effect.passes.forEach((pass, index) => {
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        uvs[0][0] = (x + 0.5) / width;
+        uvs[0][1] = (y + 0.5) / height;
+        shadeFragment(shader, pass, uvs, white, out);
+        const o = (y * width + x) * 4;
+        if (index === 0) {
+          fb[o] = out[0]; fb[o + 1] = out[1]; fb[o + 2] = out[2]; fb[o + 3] = out[3];
+          alpha[y * width + x] = out[3];
+        } else writeFragment(fb, o, out, pass, shader);
+      }
     }
+  });
+  const rgba = new Uint8Array(width * height * 4);
+  let hasAlpha = false;
+  for (let i = 0; i < width * height; i++) {
+    rgba[i * 4] = Math.round(clamp01(fb[i * 4]) * 255);
+    rgba[i * 4 + 1] = Math.round(clamp01(fb[i * 4 + 1]) * 255);
+    rgba[i * 4 + 2] = Math.round(clamp01(fb[i * 4 + 2]) * 255);
+    rgba[i * 4 + 3] = Math.round(clamp01(alpha[i]) * 255);
+    if (rgba[i * 4 + 3] !== 255) hasAlpha = true;
   }
   return { width, height, rgba, hasAlpha };
 }

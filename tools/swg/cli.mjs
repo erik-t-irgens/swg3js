@@ -46,7 +46,7 @@ import { parseMesh } from './msh.mjs';
 import { buildPack, familyOf } from './pack.mjs';
 import { parseSnapshot, flattenWithWorldTransforms } from './ws.mjs';
 import { loadBuildouts, mergeBuildouts } from './buildout.mjs';
-import { composeMeshes, mergeSkeletons, parseAnimation, parseLat, parseLmg, parseMgn, parseSat, parseSkeleton, poseAtFrame, readIff, skinData, skinnedPrimitives } from './skeletal.mjs';
+import { R, composeMeshes, mergeSkeletons, parseAnimation, parseLat, parseLmg, parseMgn, parseSat, parseSkeleton, poseAtFrame, readIff, skinData, skinnedPrimitives } from './skeletal.mjs';
 import { resolveTemplateMesh, resolveTemplateString } from './objtemplate.mjs';
 import { encodePng } from './png.mjs';
 import { shaderTextures } from './sht.mjs';
@@ -262,7 +262,25 @@ async function copyTerrain(vfs, planet, outDir) {
 function copyTerrainShaders(vfs, template, outDir) {
   const families = [];
   let missing = 0;
-  for (const fam of template.generator.shaderGroup.families.values()) {
+  // Families the planet's rules use, plus any that building layer files in the pack add by name.
+  const wanted = [...template.generator.shaderGroup.families.values()];
+  const known = new Set(wanted.map((f) => f.name.toLowerCase()));
+  const layerDir = join(outDir, 'terrain');
+  if (existsSync(layerDir)) {
+    let nextId = 1000;
+    for (const file of readdirSync(layerDir).filter((f) => /\.lay$/i.test(f)).sort()) {
+      try {
+        for (const fam of layerFamilies(readFileSync(join(layerDir, file)))) {
+          if (!fam.name || fam.name === 'null' || known.has(fam.name.toLowerCase())) continue;
+          known.add(fam.name.toLowerCase());
+          wanted.push({ ...fam, id: nextId++ });
+        }
+      } catch (err) {
+        console.warn(`terrain layer ${file}: families not read: ${err.message}`);
+      }
+    }
+  }
+  for (const fam of wanted) {
     const child = [...fam.children].sort((a, b) => b.weight - a.weight)[0];
     const entry = { id: fam.id, name: fam.name, size: fam.shaderSize, file: null, shader: child ? child.name.replace(/\\/g, '/') : null };
     families.push(entry);
@@ -293,6 +311,45 @@ function copyTerrainShaders(vfs, template, outDir) {
   mkdirSync(join(outDir, 'terrain'), { recursive: true });
   writeFileSync(join(outDir, 'terrain/shaders.json'), JSON.stringify({ families }, null, 1));
   console.error(`  terrain shaders: ${families.length - missing}/${families.length} families with textures -> terrain/shaders.json`);
+}
+
+/** The shader families a terrain layer file (.lay) carries: SFAM chunks of its SGRP form. */
+function layerFamilies(bytes) {
+  const out = [];
+  let o = 0;
+  while (o + 8 <= bytes.length) {
+    const tag = bytes.toString('latin1', o, o + 4);
+    const size = bytes.readUInt32BE(o + 4);
+    if (tag === 'FORM' && bytes.toString('latin1', o + 8, o + 12) === 'SGRP') {
+      const root = parseIff(bytes.subarray(o, o + 8 + size));
+      const v = root.children.find((c) => c.tag === 'FORM');
+      const version = v ? Number.parseInt(v.type, 10) : 0;
+      for (const c of v ? v.children : []) {
+        if (c.tag !== 'SFAM') continue;
+        const r = new R(c.data);
+        const id = r.i32();
+        let name = 'null';
+        if (version >= 1) {
+          name = r.str();
+          if (version >= 6) r.str();
+          r.u8(); r.u8(); r.u8();
+        }
+        let shaderSize = 2;
+        if (version >= 2) shaderSize = r.f32();
+        if (version === 3) r.f32();
+        let featherClamp = 1;
+        if (version >= 4) featherClamp = r.f32();
+        if (version === 5) r.i32();
+        const n = r.i32();
+        const children = [];
+        for (let k = 0; k < n; k++) children.push({ name: r.str(), weight: version >= 1 ? r.f32() : 1 / n });
+        out.push({ id, name, shaderSize, featherClamp, children });
+      }
+      break;
+    }
+    o += 8 + size;
+  }
+  return out;
 }
 
 /** Box-filter an RGBA image down by whole factors until neither side exceeds `max`. */
