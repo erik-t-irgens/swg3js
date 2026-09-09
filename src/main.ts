@@ -9,7 +9,7 @@ import { Input } from './core/input';
 import { Physics } from './core/physics';
 import { PLANETS, planetById, type PlanetDef } from './data/planets';
 import { Player } from './player/player';
-import { CharacterRig } from './player/rig';
+import { loadPlayerRig } from './player/rig';
 import { GalaxyMap, type Poi } from './ui/galaxyMap';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { Hud } from './ui/hud';
@@ -120,7 +120,11 @@ class App {
         const wanted = clip ? gltf.animations.find((a) => a.name === clip) ?? gltf.animations.find((a) => a.name.includes(clip)) : gltf.animations[0];
         if (wanted) mixer.clipAction(wanted).play();
         this.shown.push(mixer);
-        const result = { clips: names, playing: wanted?.name ?? null, joints: gltf.scene.getObjectByProperty('type', 'Bone') ? 'skinned' : 'static', size: [size.x, size.y, size.z].map((v) => Number(v.toFixed(2))), at: [gltf.scene.position.x, gltf.scene.position.y, gltf.scene.position.z].map((v) => Number(v.toFixed(1))) };
+        const bones: string[] = [];
+        gltf.scene.traverse((o) => {
+          if ((o as THREE.Bone).isBone) bones.push(o.name);
+        });
+        const result = { clips: names, playing: wanted?.name ?? null, joints: bones.length ? 'skinned' : 'static', bones, size: [size.x, size.y, size.z].map((v) => Number(v.toFixed(2))), at: [gltf.scene.position.x, gltf.scene.position.y, gltf.scene.position.z].map((v) => Number(v.toFixed(1))) };
         console.info('show:', file, result);
         return result;
       },
@@ -182,7 +186,7 @@ class App {
 
     const params = new URLSearchParams(location.search);
     if (params.get('rig') !== '0') {
-      CharacterRig.load(`${import.meta.env.BASE_URL}assets/characters/xbot.glb`)
+      loadPlayerRig(import.meta.env.BASE_URL)
         .then((rig) => this.player.attachRig(rig))
         .catch((err) => console.warn('Character rig failed to load, using primitives', err));
     }

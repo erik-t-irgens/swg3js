@@ -225,27 +225,33 @@ export class Player {
   attachRig(rig: CharacterRig): void {
     this.rig = rig;
     this.parts.hips.visible = false;
-    rig.root.scale.setScalar(0.95);
+    rig.root.scale.setScalar(rig.scale);
     this.group.add(rig.root);
     markActor(rig.root);
-    const hand = rig.bone('mixamorig:RightHand');
-    const spine = rig.bone('mixamorig:Spine2');
+    this.group.updateMatrixWorld(true);
+    const hand = rig.boneFor('rightHand');
+    const spine = rig.boneFor('spine');
     const p = this.parts;
+    // Bone space may be centimetres (the placeholder rig) or metres (converted skeletons): size
+    // props by the bone's world scale so they come out in metres either way.
+    const unitsPerMetre = (bone: THREE.Bone) => 1 / Math.max(bone.getWorldScale(new THREE.Vector3()).x, 1e-6);
     if (hand) {
-      // Bone space is centimetres; the hand's -X runs along the fingers. Weapons
-      // continue the arm line so an aimed arm points them where it looks.
+      // The hand's -X runs along the fingers. Weapons continue the arm line so an
+      // aimed arm points them where it looks.
+      const k = unitsPerMetre(hand);
       hand.add(p.saber, p.rifle);
-      p.saber.position.set(-8, -1, 1);
+      p.saber.position.set(-0.08, -0.01, 0.01).multiplyScalar(k);
       p.saber.rotation.set(0, 0, Math.PI / 2);
-      p.saber.scale.setScalar(100);
-      p.rifle.position.set(-10, -2, 2);
+      p.saber.scale.setScalar(k);
+      p.rifle.position.set(-0.1, -0.02, 0.02).multiplyScalar(k);
       p.rifle.rotation.set(0, -Math.PI / 2, 0);
-      p.rifle.scale.setScalar(100);
+      p.rifle.scale.setScalar(k);
     }
     if (spine) {
+      const k = unitsPerMetre(spine);
       spine.add(p.jetpack);
-      p.jetpack.position.set(0, 6, -14);
-      p.jetpack.scale.setScalar(100);
+      p.jetpack.position.set(0, 0.06, -0.14).multiplyScalar(k);
+      p.jetpack.scale.setScalar(k);
     }
     this.applyClassLook();
   }

@@ -3,39 +3,68 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 
 export type RigState = 'idle' | 'walk' | 'run' | 'air' | 'seated';
 
-/** Clip names used for each state, in preference order. */
+/** Clip names used for each state, in preference order (placeholder rig names, then the game's). */
 const STATE_CLIPS: Record<RigState, string[]> = {
-  idle: ['idle', 'Idle'],
-  walk: ['walk', 'Walk'],
-  run: ['run', 'Run'],
-  air: ['jump', 'fall', 'sneak_pose', 'idle'],
-  seated: ['sit', 'sneak_pose', 'idle'],
+  idle: ['idle', 'Idle', 'stand', 'loop_stand', 'idle_combat'],
+  walk: ['walk', 'Walk', 'loop_walk', 'walk_combat'],
+  run: ['run', 'Run', 'loop_run', 'run_combat'],
+  air: ['jump', 'fall', 'loop_jump', 'sneak_pose', 'idle', 'stand'],
+  seated: ['sit', 'loop_sit', 'sit_ground', 'sneak_pose', 'idle', 'stand'],
 };
 
-/** Natural travel speed of each locomotion clip, in m/s, used to scale playback. */
-const CLIP_SPEED: Partial<Record<RigState, number>> = { walk: 1.5, run: 5.5 };
+/** Natural travel speed of the placeholder rig's locomotion clips, in m/s, used to scale playback. */
+const DEFAULT_CLIP_SPEED: Partial<Record<RigState, number>> = { walk: 1.5, run: 5.5 };
 
-const REST_RIGHT_ARM = new THREE.Vector3(-1, 0, 0);
-const REST_LEFT_ARM = new THREE.Vector3(1, 0, 0);
+/** Bones the game needs by role: exact names of the placeholder rig first, then patterns for the game's skeletons. */
+export type BoneRole = 'rightHand' | 'leftHand' | 'spine' | 'rightUpperArm' | 'rightForeArm' | 'leftUpperArm' | 'leftForeArm' | 'head';
+const BONE_ROLES: Record<BoneRole, (string | RegExp)[]> = {
+  rightHand: ['mixamorig:RightHand', 'mixamorigRightHand', /^r_?hand$/i, /^right_?hand$/i, /(^|_)r_?hand/i, /hand_?r$/i],
+  leftHand: ['mixamorig:LeftHand', 'mixamorigLeftHand', /^l_?hand$/i, /^left_?hand$/i, /(^|_)l_?hand/i, /hand_?l$/i],
+  spine: ['mixamorig:Spine2', 'mixamorigSpine2', /^spine_?3$/i, /^spine_?2$/i, /chest/i, /torso/i, /^spine_?1$/i, /spine/i],
+  rightUpperArm: ['mixamorig:RightArm', 'mixamorigRightArm', /^r_?(upper_?arm|bicep|humerus|shoulder|arm)$/i, /^right_?(upper_?arm|arm)$/i, /(^|_)r_?(upper_?arm|bicep)/i],
+  rightForeArm: ['mixamorig:RightForeArm', 'mixamorigRightForeArm', /^r_?(fore_?arm|lower_?arm|elbow|radius)$/i, /^right_?fore_?arm$/i, /(^|_)r_?(fore_?arm|elbow)/i],
+  leftUpperArm: ['mixamorig:LeftArm', 'mixamorigLeftArm', /^l_?(upper_?arm|bicep|humerus|shoulder|arm)$/i, /^left_?(upper_?arm|arm)$/i, /(^|_)l_?(upper_?arm|bicep)/i],
+  leftForeArm: ['mixamorig:LeftForeArm', 'mixamorigLeftForeArm', /^l_?(fore_?arm|lower_?arm|elbow|radius)$/i, /^left_?fore_?arm$/i, /(^|_)l_?(fore_?arm|elbow)/i],
+  head: ['mixamorig:Head', 'mixamorigHead', /^head$/i, /head/i],
+};
+
+export interface RigOptions {
+  /** Movement speed each locomotion clip was animated at (m/s), from a converter manifest. */
+  clipSpeeds?: Record<string, number>;
+  /** Root scale to apply (the placeholder rig is a little tall for the world). */
+  scale?: number;
+}
+
 const tmpQ = new THREE.Quaternion();
 const rootQ = new THREE.Quaternion();
 const parentQ = new THREE.Quaternion();
 const alignQ = new THREE.Quaternion();
 const restWorld = new THREE.Vector3();
 const dirWorld = new THREE.Vector3();
+const tmpA = new THREE.Vector3();
+const tmpB = new THREE.Vector3();
 
-/** A skinned GLTF character with an animation mixer and named bones. */
+/** A skinned GLTF character with an animation mixer and bones found by role. */
 export class CharacterRig {
   readonly root: THREE.Group;
   readonly mixer: THREE.AnimationMixer;
+  readonly scale: number;
   private readonly actions = new Map<string, THREE.AnimationAction>();
   private readonly bones = new Map<string, THREE.Bone>();
+  private readonly roles = new Map<BoneRole, THREE.Bone | null>();
+  private readonly restArm = new Map<'left' | 'right', THREE.Vector3>();
+  /** Bind-pose rotations of the arm bones: relative to the root (upper arms) and to the parent (forearms). */
+  private readonly bindToRoot = new Map<THREE.Bone, THREE.Quaternion>();
+  private readonly bindLocal = new Map<THREE.Bone, THREE.Quaternion>();
   private readonly materials: THREE.MeshStandardMaterial[] = [];
+  private readonly clipSpeeds: Record<string, number>;
   private current: THREE.AnimationAction | null = null;
   private state: RigState | null = null;
 
-  private constructor(scene: THREE.Group, clips: THREE.AnimationClip[]) {
+  private constructor(scene: THREE.Group, clips: THREE.AnimationClip[], options: RigOptions) {
     this.root = scene;
+    this.scale = options.scale ?? 1;
+    this.clipSpeeds = options.clipSpeeds ?? {};
     this.mixer = new THREE.AnimationMixer(scene);
     for (const clip of clips) this.actions.set(clip.name, this.mixer.clipAction(clip));
     scene.traverse((o) => {
@@ -47,19 +76,58 @@ export class CharacterRig {
         for (const m of mats) if (m instanceof THREE.MeshStandardMaterial) this.materials.push(m);
       }
     });
+    // The rest direction of each upper arm (shoulder to elbow) in root space, from the bind pose,
+    // so aiming works whatever pose the skeleton was authored in.
+    scene.updateMatrixWorld(true);
+    scene.getWorldQuaternion(rootQ).invert();
+    for (const side of ['left', 'right'] as const) {
+      const upper = this.boneFor(side === 'right' ? 'rightUpperArm' : 'leftUpperArm');
+      const fore = this.boneFor(side === 'right' ? 'rightForeArm' : 'leftForeArm');
+      const rest = new THREE.Vector3(side === 'right' ? -1 : 1, 0, 0);
+      if (upper && fore) {
+        fore.getWorldPosition(tmpA).sub(upper.getWorldPosition(tmpB)).applyQuaternion(rootQ);
+        if (tmpA.lengthSq() > 1e-8) rest.copy(tmpA).normalize();
+        this.bindToRoot.set(upper, upper.getWorldQuaternion(new THREE.Quaternion()).premultiply(rootQ));
+        this.bindLocal.set(fore, fore.quaternion.clone());
+      }
+      this.restArm.set(side, rest);
+    }
   }
 
-  static async load(url: string): Promise<CharacterRig> {
+  static async load(url: string, options: RigOptions = {}): Promise<CharacterRig> {
     const gltf = await new GLTFLoader().loadAsync(url);
-    return new CharacterRig(gltf.scene, gltf.animations);
+    return new CharacterRig(gltf.scene, gltf.animations, options);
+  }
+
+  /** Every bone name, for finding out what a converted skeleton calls things. */
+  get boneNames(): string[] {
+    return [...this.bones.keys()];
+  }
+
+  get clipNames(): string[] {
+    return [...this.actions.keys()];
   }
 
   bone(name: string): THREE.Bone | undefined {
     return this.bones.get(name) ?? this.bones.get(name.replace('mixamorig:', 'mixamorig'));
   }
 
+  /** The bone playing a role, matched by the first name or pattern that fits. */
+  boneFor(role: BoneRole): THREE.Bone | null {
+    if (this.roles.has(role)) return this.roles.get(role)!;
+    let found: THREE.Bone | null = null;
+    for (const candidate of BONE_ROLES[role]) {
+      if (typeof candidate === 'string') found = this.bones.get(candidate) ?? null;
+      else for (const [name, bone] of this.bones) if (candidate.test(name)) { found = bone; break; }
+      if (found) break;
+    }
+    this.roles.set(role, found);
+    return found;
+  }
+
+  /** Colour the untextured parts (the placeholder rig); real skin and clothing keep their textures. */
   tint(color: number): void {
-    for (const m of this.materials) m.color.set(color);
+    for (const m of this.materials) if (!m.map) m.color.set(color);
   }
 
   setState(state: RigState, speed = 0): void {
@@ -73,8 +141,9 @@ export class CharacterRig {
       }
       this.state = state;
     }
-    const natural = CLIP_SPEED[state];
-    if (this.current && natural) this.current.timeScale = THREE.MathUtils.clamp(speed / natural, 0.5, 2.5);
+    const clip = this.current?.getClip().name;
+    const natural = (clip && this.clipSpeeds[clip]) || DEFAULT_CLIP_SPEED[state];
+    if (this.current && natural && speed > 0) this.current.timeScale = THREE.MathUtils.clamp(speed / natural, 0.5, 2.5);
     else if (this.current) this.current.timeScale = 1;
   }
 
@@ -88,19 +157,46 @@ export class CharacterRig {
    * current, so it overrides the clip pose while respecting the shoulder.
    */
   aimArm(side: 'left' | 'right', dir: THREE.Vector3, roll = 0): void {
-    const upper = this.bone(side === 'right' ? 'mixamorig:RightArm' : 'mixamorig:LeftArm');
-    const fore = this.bone(side === 'right' ? 'mixamorig:RightForeArm' : 'mixamorig:LeftForeArm');
+    const upper = this.boneFor(side === 'right' ? 'rightUpperArm' : 'leftUpperArm');
+    const fore = this.boneFor(side === 'right' ? 'rightForeArm' : 'leftForeArm');
     if (!upper || !upper.parent) return;
-    const rest = side === 'right' ? REST_RIGHT_ARM : REST_LEFT_ARM;
-    // Bones rest at identity relative to the rig root, so the rest axis in world
-    // space is the root's rotation applied to the local rest axis.
+    const rest = this.restArm.get(side)!;
+    // The rest axis is known in root space, so the world rest axis is the root's rotation applied to it.
     this.root.getWorldQuaternion(rootQ);
     upper.parent.getWorldQuaternion(parentQ);
     restWorld.copy(rest).applyQuaternion(rootQ);
     dirWorld.copy(dir).applyQuaternion(rootQ).normalize();
     alignQ.setFromUnitVectors(restWorld, dirWorld);
     if (roll !== 0) alignQ.multiply(tmpQ.setFromAxisAngle(dirWorld, roll));
-    upper.quaternion.copy(parentQ).invert().multiply(alignQ).multiply(rootQ);
-    if (fore) fore.quaternion.identity();
+    // World rotation = align × the bone's bind-pose world rotation, expressed in the parent's frame,
+    // so the bone keeps its authored twist and only the arm direction changes.
+    upper.quaternion.copy(parentQ).invert().multiply(alignQ).multiply(rootQ).multiply(this.bindToRoot.get(upper)!);
+    if (fore) fore.quaternion.copy(this.bindLocal.get(fore)!);
   }
+}
+
+interface PlayerManifest {
+  players: { id: string; file: string; clipSpeeds?: Record<string, number>; scale?: number }[];
+}
+
+/**
+ * The player's rig: a character converted from the game (assets-private/player/manifest.json, the
+ * first entry) when one exists, otherwise the bundled placeholder.
+ */
+export async function loadPlayerRig(baseUrl: string): Promise<CharacterRig> {
+  try {
+    const res = await fetch(`${baseUrl}assets-private/player/manifest.json`);
+    if (res.ok && (res.headers.get('content-type') ?? '').includes('json')) {
+      const manifest = (await res.json()) as PlayerManifest;
+      const entry = manifest.players?.[0];
+      if (entry) {
+        const rig = await CharacterRig.load(`${baseUrl}assets-private/${entry.file}`, { clipSpeeds: entry.clipSpeeds, scale: entry.scale ?? 1 });
+        console.info(`player model ${entry.id}: clips ${rig.clipNames.join(', ')}; bones ${rig.boneNames.join(', ')}`);
+        return rig;
+      }
+    }
+  } catch (err) {
+    console.warn('player model failed to load, using the placeholder', err);
+  }
+  return CharacterRig.load(`${baseUrl}assets/characters/xbot.glb`, { scale: 0.95 });
 }

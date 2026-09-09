@@ -17,6 +17,7 @@
 //   node tools/swg/cli.mjs creatures <swg-dir> <out-dir>              every planet's creature as a skinned GLB under <out-dir>/creatures/
 //   node tools/swg/cli.mjs sat <swg-dir> <x.sat | object/mobile/shared_x.iff> <out.glb> [--anim=all|idle,walk] [--var=skin_color=3,...] [--wear=object/tangible/wearables/...,...]
 //   node tools/swg/cli.mjs trt <swg-dir> <x.trt> <out.png> [--var=name=value,...]   bake a texture renderer blueprint (skin, hair) to a PNG
+//   node tools/swg/cli.mjs player <swg-dir> <out-dir> [--template=object/creature/player/shared_human_male.iff] [--wear=...] [--var=...]   the player's character as <out-dir>/player/<id>.glb + manifest.json
 //                                                                  convert a skeletal appearance (creature, character) with skeleton and animations
 //   node tools/swg/cli.mjs flora <swg-dir> <planet>|all <out-dir>   (re)convert just the flora models for packs converted already
 //   node tools/swg/cli.mjs snapshot <swg-dir> <planet>|all <out-dir> [--center=x,z|auto] --radius=r|all [--max=n]
@@ -497,7 +498,7 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
     if (animations === 'list') return info;
     const used = new Set();
     for (const e of named) {
-      if (wanted && !wanted.some((w) => e.clip.toLowerCase().includes(w) || e.name.toLowerCase().includes(w))) continue;
+      if (wanted && !wanted.some((w) => (w.startsWith('=') ? e.clip.toLowerCase() === w.slice(1) || e.name.toLowerCase() === w.slice(1) : e.clip.toLowerCase().includes(w) || e.name.toLowerCase().includes(w)))) continue;
       if (used.has(e.clip)) continue;
       if (clips.length >= maxAnimations) break;
       try {
@@ -672,6 +673,10 @@ const CREATURES = {
 };
 /** Logical animations (substrings) the game drives creatures with. */
 const CREATURE_CLIPS = 'idle,walk,run,cbt_stand_combat_attack_light,rea_stand_get_hit_light,trn_stand_to_incapacitated,loop_incapacitated';
+
+/** The player's clips: locomotion and posture by exact name (=), reactions by substring. */
+const PLAYER_CLIPS = '=idle,=walk,=run,=stand,=loop_stand,=loop_walk,=loop_run,=idle_combat,=walk_combat,=run_combat,=jump,=loop_jump,=sit,=loop_sit,=sit_ground,cbt_stand_combat_attack_light,rea_stand_get_hit_light,trn_stand_to_incapacitated,=loop_incapacitated';
+const PLAYER_TEMPLATE = 'object/creature/player/shared_human_male.iff';
 
 /** Planet ids the game can load a pack for (see src/data/planets.ts). */
 const GAME_PLANETS = ['tatooine', 'naboo', 'corellia', 'dantooine', 'lok', 'endor', 'dathomir', 'yavin4', 'talus', 'rori'];
@@ -1036,6 +1041,34 @@ switch (cmd) {
     for (const m of info.missing) console.log(`  missing: ${m}`);
     for (const m of info.skipped) console.log(`  skipped: ${m}`);
     console.log(`-> ${pos[3]}`);
+    printEffectSummary();
+    break;
+  }
+
+  case 'player': {
+    // <swg-dir> <out-dir> [--template=object/creature/player/shared_human_male.iff] [--wear=...] [--var=...] [--anim=...]
+    if (!pos[2]) usage();
+    const vfs = mount(pos[1]);
+    const template = (options.template ?? PLAYER_TEMPLATE).replace(/\\/g, '/');
+    const id = basename(template).replace(/^shared_/, '').replace(/\.[^.]+$/, '');
+    const outDir = join(pos[2], 'player');
+    const wear = (options.wear ?? '').split(',').map((w) => w.trim()).filter(Boolean);
+    const info = convertSat(vfs, template, join(outDir, `${id}.glb`), { animations: options.anim ?? PLAYER_CLIPS, variables: customizationValues(options.var), wear, maxAnimations: 40 });
+    console.log(`${info.sat}: skeleton ${info.skeleton} (${info.joints} joints)`);
+    for (const m of info.meshes) console.log(`  mesh ${m.file}: ${m.triangles} tris, ${m.shaders} shaders, layer ${m.layer}${m.hidden ? `, ${m.hidden} tris under clothing` : ''}`);
+    for (const t of info.textureRenderers) console.log(`  texture renderer ${t}`);
+    if (info.customization.size) console.log(`  customization (set with --var=name=value,...):\n    ${[...info.customization].join('\n    ')}`);
+    console.log(`  animations (${info.animations.length}): ${info.animations.join(', ') || 'none'}`);
+    if (!info.animations.length && info.available) console.log(`  available (${info.available.length}): ${info.available.join(', ')}`);
+    for (const c of info.clipStats ?? []) console.log(`  clip ${c}`);
+    for (const m of info.missing) console.log(`  missing: ${m}`);
+    for (const m of info.skipped) console.log(`  skipped: ${m}`);
+    const manifestFile = join(outDir, 'manifest.json');
+    const manifest = existsSync(manifestFile) ? JSON.parse(readFileSync(manifestFile, 'utf8')) : { players: [] };
+    const entry = { id, file: `player/${id}.glb`, template, wear, variables: Object.fromEntries(customizationValues(options.var)), clips: info.animations, clipSpeeds: info.clipSpeeds ?? {}, bounds: info.bounds, scale: 1 };
+    manifest.players = [entry, ...(manifest.players ?? []).filter((p) => p.id !== id)];
+    writeFileSync(manifestFile, JSON.stringify(manifest, null, 2));
+    console.log(`-> ${join(outDir, `${id}.glb`)} and ${manifestFile}; the game uses the first entry`);
     printEffectSummary();
     break;
   }
