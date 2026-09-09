@@ -18,6 +18,8 @@ const MODEL_YAW = 0;
 export interface CreatureModel {
   gltf: GLTF;
   clips: Map<string, THREE.AnimationClip>;
+  /** Movement speed each locomotion clip was animated at (m/s), to scale playback to the real speed. */
+  speeds: Map<string, number>;
 }
 
 /** Load the converted creature for a species name, or null when the pack has none. */
@@ -27,7 +29,7 @@ export async function loadCreatureModel(name: string): Promise<CreatureModel | n
   try {
     const res = await fetch(`${base}manifest.json`);
     if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json')) return null;
-    const manifest = (await res.json()) as { creatures: { id: string; file: string }[] };
+    const manifest = (await res.json()) as { creatures: { id: string; file: string; clipSpeeds?: Record<string, number> }[] };
     const entry = manifest.creatures.find((c) => c.id === id);
     if (!entry) return null;
     const gltf = await new GLTFLoader().loadAsync(`${import.meta.env.BASE_URL}assets-private/${entry.file}`);
@@ -39,7 +41,7 @@ export async function loadCreatureModel(name: string): Promise<CreatureModel | n
         m.frustumCulled = false;
       }
     });
-    return { gltf, clips: new Map(gltf.animations.map((a) => [a.name, a])) };
+    return { gltf, clips: new Map(gltf.animations.map((a) => [a.name, a])), speeds: new Map(Object.entries(entry.clipSpeeds ?? {})) };
   } catch (err) {
     console.warn('creature model', id, err);
     return null;
@@ -71,6 +73,7 @@ export class Creature {
   private model: THREE.Object3D | null = null;
   private mixer: THREE.AnimationMixer | null = null;
   private readonly actions = new Map<string, THREE.AnimationAction>();
+  private clipSpeeds = new Map<string, number>();
   private current: THREE.AnimationAction | null = null;
   private oneShot: THREE.AnimationAction | null = null;
 
@@ -124,6 +127,7 @@ export class Creature {
     this.model = scene;
     this.mixer = new THREE.AnimationMixer(scene);
     for (const [name, clip] of model.clips) this.actions.set(name, this.mixer.clipAction(clip));
+    this.clipSpeeds = model.speeds;
     this.play('idle');
   }
 
@@ -136,10 +140,24 @@ export class Creature {
     return null;
   }
 
-  /** Cross-fade to a looping clip. */
-  private play(name: string): void {
-    const next = this.action(name);
-    if (!next || next === this.current) return;
+  /** Cross-fade to a looping clip; moving clips play at the rate that matches the ground speed. */
+  private play(name: string, moveSpeed = 0): void {
+    const order = name === 'run' ? ['run', 'walk'] : name === 'walk' ? ['walk', 'run'] : [name];
+    let next: THREE.AnimationAction | null = null;
+    let clipName = '';
+    for (const n of order) {
+      next = this.action(n);
+      if (next) {
+        clipName = n;
+        break;
+      }
+    }
+    if (!next) return;
+    if (moveSpeed > 0) {
+      const natural = this.clipSpeeds.get(clipName) ?? 0;
+      next.timeScale = natural > 0.05 ? Math.min(2.5, Math.max(0.6, moveSpeed / natural)) : 1;
+    } else next.timeScale = 1;
+    if (next === this.current) return;
     next.reset().setLoop(THREE.LoopRepeat, Infinity).play();
     if (this.current) next.crossFadeFrom(this.current, 0.25, false);
     this.current = next;
@@ -302,7 +320,7 @@ export class Creature {
       // Locomotion clips by speed; one-shot clips (attack, hit) play over them.
       if (!this.oneShot || !this.oneShot.isRunning()) {
         this.oneShot = null;
-        this.play(!this.moving ? 'idle' : this.speed >= this.def.speed * 1.4 ? 'run' : 'walk');
+        this.play(!this.moving ? 'idle' : this.speed >= this.def.speed * 1.4 ? 'run' : 'walk', this.moving ? this.speed : 0);
       }
       return;
     }

@@ -364,7 +364,13 @@ export function parseAnimation(root) {
     const r = new R(strn.data);
     while (r.remaining >= 4) staticTranslations.push(r.f32());
   }
-  return { version, fps, frameCount, transforms, rotationChannels, staticRotations, translationChannels, staticTranslations };
+  return { version, fps, frameCount, transforms, rotationChannels, staticRotations, translationChannels, staticTranslations, locomotionSpeed: locomotionSpeed(v) };
+}
+
+/** LOCT: the animation's average movement speed (m/s), which the speed selector matches against. */
+function locomotionSpeed(v) {
+  const loct = childOf(v, 'LOCT');
+  return loct && loct.data.length >= 4 ? new R(loct.data).f32() : 0;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -463,7 +469,7 @@ export function parseCompressedAnimation(root) {
     const r = new R(strn.data);
     while (r.remaining >= 4) staticTranslations.push(r.f32());
   }
-  return { version, compressed: true, fps, frameCount, transforms, rotationChannels, staticRotations, translationChannels, staticTranslations };
+  return { version, compressed: true, fps, frameCount, transforms, rotationChannels, staticRotations, translationChannels, staticTranslations, locomotionSpeed: locomotionSpeed(v) };
 }
 
 // ---------------------------------------------------------------------------------------------

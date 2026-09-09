@@ -296,15 +296,36 @@ function convertFlora(vfs, template, outDir, manifest) {
 }
 
 /**
- * Friendly clip names for the locomotion loops the client selects by speed: the default
- * (unmounted) loop_stand's stand/walk/run become idle/walk/run, the combat loop likewise.
+ * Friendly clip names for the locomotion loops. The client's speed selector picks the child
+ * whose recorded movement speed is nearest the creature's speed, in no fixed order, so the
+ * default loop_stand (and loop_stand_combat) steps are named by that speed: idle for the
+ * still one, walk and run for the slowest and fastest moving ones.
  */
-function clipName(entry) {
-  // Nested selectors without value names add ":0" levels; the first of each is the default choice.
-  const m = /^(loop_stand(?:_combat)?):speed([012])(?::0)*$/.exec(entry.name);
-  if (!m || entry.isDefault === false) return entry.name;
-  const base = ['idle', 'walk', 'run'][Number(m[2])];
-  return m[1] === 'loop_stand' ? base : `${base}_combat`;
+function nameLocomotion(entries, loadAnimation) {
+  const named = entries.map((e) => ({ ...e, clip: e.name, speed: 0 }));
+  for (const prefix of ['loop_stand', 'loop_stand_combat']) {
+    const suffix = prefix === 'loop_stand' ? '' : '_combat';
+    const group = named.filter((e) => e.isDefault !== false && new RegExp(`^${prefix}:speed\\d+(?::0)*$`).test(e.name));
+    for (const e of group) {
+      try {
+        e.speed = loadAnimation(e)?.locomotionSpeed ?? 0;
+      } catch {
+        e.speed = 0;
+      }
+    }
+    if (!group.length) continue;
+    const moving = group.filter((e) => e.speed > 0.05).sort((a, b) => a.speed - b.speed);
+    const still = group.filter((e) => e.speed <= 0.05);
+    if (still.length) still[0].clip = `idle${suffix}`;
+    else if (moving.length) moving.shift().clip = `idle${suffix}`;
+    if (moving.length === 1) moving[0].clip = `${moving[0].speed > 4 ? 'run' : 'walk'}${suffix}`;
+    else if (moving.length >= 2) {
+      moving[0].clip = `walk${suffix}`;
+      moving[moving.length - 1].clip = `run${suffix}`;
+      moving.slice(1, -1).forEach((e, i) => (e.clip = `walk${i + 2}${suffix}`));
+    }
+  }
+  return named;
 }
 
 /**
@@ -371,8 +392,18 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
     const lat = parseLat(readIff(vfs, latFile));
     info.animationTable = latFile;
     const wanted = animations === 'all' || animations === 'list' ? null : animations.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
-    const named = lat.entries.map((e) => ({ ...e, clip: clipName(e) }));
-    info.available = named.map((e) => `${e.clip}${e.clip !== e.name ? ` (${e.name})` : ''}${e.kind === 'file' || e.kind === 'inline' ? '' : ` [${e.kind}]`}${e.variable ? ` (${e.variable}${e.isDefault ? ', default' : ''})` : ''}${e.timeScale && e.timeScale !== 1 ? ` x${e.timeScale.toFixed(2)}` : ''}`);
+    const parsed = new Map();
+    const loadAnimation = (e) => {
+      const key = e.kind === 'file' ? e.file : e.form;
+      if (parsed.has(key)) return parsed.get(key);
+      let a = null;
+      if (e.kind === 'inline') a = parseAnimation(e.form);
+      else if (e.kind === 'file' && vfs.has(e.file)) a = parseAnimation(readIff(vfs, e.file));
+      parsed.set(key, a);
+      return a;
+    };
+    const named = nameLocomotion(lat.entries, loadAnimation);
+    info.available = named.map((e) => `${e.clip}${e.clip !== e.name ? ` (${e.name}${e.speed ? ` ${e.speed.toFixed(1)} m/s` : ''})` : ''}${e.kind === 'file' || e.kind === 'inline' ? '' : ` [${e.kind}]`}${e.variable ? ` (${e.variable}${e.isDefault ? ', default' : ''})` : ''}${e.timeScale && e.timeScale !== 1 ? ` x${e.timeScale.toFixed(2)}` : ''}`);
     if (animations === 'list') return info;
     const used = new Set();
     for (const e of named) {
@@ -380,22 +411,20 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
       if (used.has(e.clip)) continue;
       if (clips.length >= maxAnimations) break;
       try {
-        let animation;
-        if (e.kind === 'inline') animation = parseAnimation(e.form);
-        else if (e.kind === 'file') {
-          if (!vfs.has(e.file)) {
-            info.missing.push(e.file);
-            continue;
-          }
-          animation = parseAnimation(readIff(vfs, e.file));
-        } else {
+        if (e.kind !== 'inline' && e.kind !== 'file') {
           info.skipped.push(`${e.name}: ${e.kind} animation templates are not converted`);
           continue;
         }
+        if (e.kind === 'file' && !vfs.has(e.file)) {
+          info.missing.push(e.file);
+          continue;
+        }
+        const animation = { ...loadAnimation(e) };
         if (e.timeScale && e.timeScale !== 1 && e.timeScale > 0) animation.fps *= e.timeScale;
         used.add(e.clip);
         clips.push({ name: e.clip, animation });
         info.animations.push(e.clip);
+        (info.clipSpeeds ??= {})[e.clip] = Number(((animation.locomotionSpeed ?? 0) * (e.timeScale || 1)).toFixed(3));
         // How much of the skeleton this clip actually moves, for spotting name mismatches.
         const jointNames = new Set(skeleton.joints.map((j) => j.name.toLowerCase()));
         const matched = animation.transforms.filter((t) => jointNames.has(t.name.toLowerCase())).length;
@@ -889,7 +918,7 @@ switch (cmd) {
       const out = join(outDir, `${id}.glb`);
       try {
         const info = convertSat(vfs, template, out, { animations: CREATURE_CLIPS });
-        list.push({ id, file: `creatures/${id}.glb`, template, clips: info.animations, bounds: info.bounds });
+        list.push({ id, file: `creatures/${id}.glb`, template, clips: info.animations, clipSpeeds: info.clipSpeeds ?? {}, bounds: info.bounds });
         console.log(`${id}: ${info.joints} joints, ${info.meshes.reduce((a, m) => a + m.triangles, 0)} tris, clips ${info.animations.join(', ')}${info.missing.length ? `, missing ${info.missing.length}` : ''}`);
       } catch (err) {
         console.warn(`${id}: ${err.message}`);
