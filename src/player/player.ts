@@ -232,6 +232,7 @@ export class Player {
     const hand = rig.boneFor('rightHand');
     const fore = rig.boneFor('rightForeArm');
     const spine = rig.boneFor('spine');
+    if (!hand || !spine) console.warn(`rig: no ${!hand ? 'hand' : 'spine'} bone matched; bones are ${rig.boneNames.join(', ')}`);
     const p = this.parts;
     // Bone space may be centimetres (the placeholder rig) or metres (converted skeletons): size
     // props by the bone's world scale so they come out in metres either way.

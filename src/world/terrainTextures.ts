@@ -18,6 +18,12 @@ export interface ShaderFamilyDef {
 }
 
 const LAYER_SIZE = 512;
+/**
+ * Metres per texture repeat. The client gives every ground tile texture coordinates of
+ * 0.25 x tile width per tile, whatever the family's shader size says, which works out to one
+ * repeat every 4 m at every detail level (ClientProceduralTerrainAppearance_ClientChunk).
+ */
+const GROUND_REPEAT = 4;
 
 export class TerrainTextures {
   readonly texture: THREE.DataArrayTexture;
@@ -32,12 +38,11 @@ export class TerrainTextures {
     this.families = families;
     const maxId = Math.max(0, ...families.map((f) => f.id));
     this.layerOf = new Float32Array(maxId + 1);
-    this.sizeOf = new Float32Array(maxId + 1).fill(4);
+    this.sizeOf = new Float32Array(maxId + 1).fill(GROUND_REPEAT);
     for (const f of families) {
       const layer = layers.get(f.id);
       if (layer === undefined) continue;
       this.layerOf[f.id] = layer;
-      this.sizeOf[f.id] = f.size > 0 ? f.size : 4;
     }
   }
 

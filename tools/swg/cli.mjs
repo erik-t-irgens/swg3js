@@ -440,6 +440,7 @@ function skinnedTexture(vfs, shaderPath, slots, ctx, info) {
     info.skipped.push(`${shaderPath}: ${err.message}`);
   }
   if (shader && shader.variables?.length) for (const line of describeVariables(shader.variables)) info.customization.add(`${shaderPath}: ${line}`);
+  info.shaderNotes.add(`${shaderPath}: ${describeShader(shader)}`);
   const rendered = slots?.find((s) => s.tag === 'MAIN') ?? slots?.[0];
   if (!rendered && !(shader && shaderNeedsBake(shader))) return textureFor(vfs, shaderPath);
   let image = rendered ? rendered.image : null;
@@ -468,7 +469,7 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
   if (!sat.skeletons.length) throw new Error(`${satPath}: no skeleton`);
   const skeletonFile = sat.skeletons[0].file;
   const loadSkeleton = (file) => parseSkeleton(readIff(vfs, file), (f) => (vfs.has(f) ? readIff(vfs, f) : null));
-  const info = { sat: satPath, skeleton: skeletonFile, joints: 0, meshes: [], animations: [], missing: [], unknownTransforms: 0, skipped: [], textureRenderers: [], customization: new Set(), attached: [] };
+  const info = { sat: satPath, skeleton: skeletonFile, joints: 0, meshes: [], animations: [], missing: [], unknownTransforms: 0, skipped: [], textureRenderers: [], customization: new Set(), attached: [], shaderNotes: new Set() };
   // Extra skeletons (the face rig) hang from a joint of the first.
   const extras = [];
   for (const k of sat.skeletons.slice(1)) {
@@ -1156,6 +1157,7 @@ switch (cmd) {
     for (const m of info.meshes) console.log(`  mesh ${m.file}: ${m.triangles} tris, ${m.shaders} shaders, layer ${m.layer}${m.hidden ? `, ${m.hidden} tris under clothing` : ''}`);
     for (const t of info.textureRenderers) console.log(`  texture renderer ${t}`);
     if (info.customization.size) console.log(`  customization (set with --var=name=value,...):\n    ${[...info.customization].join('\n    ')}`);
+    if (info.shaderNotes.size) console.log(`  shaders:\n    ${[...info.shaderNotes].join('\n    ')}`);
     console.log(`  animations (${info.animations.length}): ${info.animations.join(', ') || 'none'}`);
     if (!info.animations.length && info.available) console.log(`  available (${info.available.length}): ${info.available.join(', ')}`);
     for (const c of info.clipStats ?? []) console.log(`  clip ${c}`);
