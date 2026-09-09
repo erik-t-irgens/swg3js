@@ -77,6 +77,24 @@ export function parseSkeleton(root, loadFile = null) {
   return { version, joints };
 }
 
+/**
+ * One skeleton from several: an appearance can attach extra skeletons (a face rig with brows,
+ * lids, jaw and eyes) under a named joint of the first. Extra joints keep their names and bind
+ * poses; their roots hang from the attachment joint (the base root when it is not found).
+ */
+export function mergeSkeletons(base, extras) {
+  const joints = base.joints.map((j) => ({ ...j }));
+  const attached = [];
+  for (const { skeleton, attachTo } of extras) {
+    const offset = joints.length;
+    let anchor = joints.findIndex((j) => j.name.toLowerCase() === (attachTo ?? '').toLowerCase());
+    if (anchor < 0) anchor = 0;
+    for (const j of skeleton.joints) joints.push({ ...j, parent: j.parent >= 0 ? offset + j.parent : anchor });
+    attached.push({ joints: skeleton.joints.length, attachTo: joints[anchor].name });
+  }
+  return { version: base.version, joints, attached };
+}
+
 // ---------------------------------------------------------------------------------------------
 // Skinned mesh generator (.mgn)
 export function parseMgn(root) {

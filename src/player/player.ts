@@ -230,21 +230,29 @@ export class Player {
     markActor(rig.root);
     this.group.updateMatrixWorld(true);
     const hand = rig.boneFor('rightHand');
+    const fore = rig.boneFor('rightForeArm');
     const spine = rig.boneFor('spine');
     const p = this.parts;
     // Bone space may be centimetres (the placeholder rig) or metres (converted skeletons): size
     // props by the bone's world scale so they come out in metres either way.
     const unitsPerMetre = (bone: THREE.Bone) => 1 / Math.max(bone.getWorldScale(new THREE.Vector3()).x, 1e-6);
     if (hand) {
-      // The hand's -X runs along the fingers. Weapons continue the arm line so an
-      // aimed arm points them where it looks.
+      // Weapons continue the arm line (forearm to wrist, in the hand's own frame) so an aimed
+      // arm points them where it looks, whatever axis this skeleton's hand bone runs along.
       const k = unitsPerMetre(hand);
+      const along = new THREE.Vector3(-1, 0, 0);
+      if (fore) {
+        const handQ = hand.getWorldQuaternion(new THREE.Quaternion()).invert();
+        const d = hand.getWorldPosition(new THREE.Vector3()).sub(fore.getWorldPosition(new THREE.Vector3())).applyQuaternion(handQ);
+        if (d.lengthSq() > 1e-10) along.copy(d).normalize();
+      }
       hand.add(p.saber, p.rifle);
-      p.saber.position.set(-0.08, -0.01, 0.01).multiplyScalar(k);
-      p.saber.rotation.set(0, 0, Math.PI / 2);
+      // The saber's blade runs along its +Y, the rifle's barrel along its +Z.
+      p.saber.position.copy(along).multiplyScalar(0.08 * k);
+      p.saber.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), along);
       p.saber.scale.setScalar(k);
-      p.rifle.position.set(-0.1, -0.02, 0.02).multiplyScalar(k);
-      p.rifle.rotation.set(0, -Math.PI / 2, 0);
+      p.rifle.position.copy(along).multiplyScalar(0.1 * k);
+      p.rifle.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), along);
       p.rifle.scale.setScalar(k);
     }
     if (spine) {

@@ -2,7 +2,7 @@
 // and a one-second animation turning the child joint, written through the real writers and
 // read back as a GLB with skin and animation.
 import { form, chunk, W, encode } from './iffWriter.ts';
-import { composeMeshes, expandQuaternion, parseAnimation, parseMgn, parseSkeleton, poseAtFrame, qmul, skinData, skinnedPrimitives } from '../skeletal.mjs';
+import { composeMeshes, expandQuaternion, mergeSkeletons, parseAnimation, parseMgn, parseSkeleton, poseAtFrame, qmul, skinData, skinnedPrimitives } from '../skeletal.mjs';
 import { buildGlb } from '../glb.mjs';
 import { parseIff } from '../iff.mjs';
 
@@ -128,6 +128,15 @@ check('ckat parsed', canim.compressed === true && canim.frameCount === 2 && cani
   const helmet = zoned(1, [], [0]);
   const under = composeMeshes([{ mgn: helmet, file: 'helmet' }, { mgn: shirt, file: 'shirt' }]);
   check('a fully-occluded combination hides the whole mesh', under[1].mgn.shaders[0].triangles.length === 0 && under[1].hiddenTriangles === 2, JSON.stringify(under.map((c) => c.hiddenTriangles)));
+}
+
+// A face skeleton attached under the child joint keeps its own hierarchy.
+{
+  const face = { version: 2, joints: [{ name: 'jaw', parent: -1, pre: id, post: id, bindT: [0, 0.1, 0], bindR: id }, { name: 'lip', parent: 0, pre: id, post: id, bindT: [0, 0, 0.05], bindR: id }] };
+  const merged = mergeSkeletons(skeleton, [{ skeleton: face, attachTo: 'child' }]);
+  check('merged skeleton', merged.joints.length === 4 && merged.joints[2].parent === 1 && merged.joints[3].parent === 2 && merged.attached[0].attachTo === 'child', JSON.stringify(merged.joints.map((j) => j.parent)));
+  const fallback = mergeSkeletons(skeleton, [{ skeleton: face, attachTo: 'nose' }]);
+  check('unknown attachment joint falls back to the root', fallback.joints[2].parent === 0);
 }
 
 console.log(failures ? `${failures} FAILURES` : 'all passed');

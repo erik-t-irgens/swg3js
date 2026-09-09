@@ -46,7 +46,7 @@ import { parseMesh } from './msh.mjs';
 import { buildPack, familyOf } from './pack.mjs';
 import { parseSnapshot, flattenWithWorldTransforms } from './ws.mjs';
 import { loadBuildouts, mergeBuildouts } from './buildout.mjs';
-import { composeMeshes, parseAnimation, parseLat, parseLmg, parseMgn, parseSat, parseSkeleton, poseAtFrame, readIff, skinData, skinnedPrimitives } from './skeletal.mjs';
+import { composeMeshes, mergeSkeletons, parseAnimation, parseLat, parseLmg, parseMgn, parseSat, parseSkeleton, poseAtFrame, readIff, skinData, skinnedPrimitives } from './skeletal.mjs';
 import { resolveTemplateMesh, resolveTemplateString } from './objtemplate.mjs';
 import { encodePng } from './png.mjs';
 import { shaderTextures } from './sht.mjs';
@@ -402,8 +402,24 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
   const sat = parseSat(readIff(vfs, satPath));
   if (!sat.skeletons.length) throw new Error(`${satPath}: no skeleton`);
   const skeletonFile = sat.skeletons[0].file;
-  const skeleton = parseSkeleton(readIff(vfs, skeletonFile), (file) => (vfs.has(file) ? readIff(vfs, file) : null));
-  const info = { sat: satPath, skeleton: skeletonFile, joints: skeleton.joints.length, meshes: [], animations: [], missing: [], unknownTransforms: 0, skipped: [], textureRenderers: [], customization: new Set() };
+  const loadSkeleton = (file) => parseSkeleton(readIff(vfs, file), (f) => (vfs.has(f) ? readIff(vfs, f) : null));
+  const info = { sat: satPath, skeleton: skeletonFile, joints: 0, meshes: [], animations: [], missing: [], unknownTransforms: 0, skipped: [], textureRenderers: [], customization: new Set(), attached: [] };
+  // Extra skeletons (the face rig) hang from a joint of the first.
+  const extras = [];
+  for (const k of sat.skeletons.slice(1)) {
+    if (!vfs.has(k.file)) {
+      info.missing.push(k.file);
+      continue;
+    }
+    try {
+      extras.push({ skeleton: loadSkeleton(k.file), attachTo: k.attachTo, file: k.file });
+    } catch (err) {
+      info.skipped.push(`${k.file}: ${err.message}`);
+    }
+  }
+  const skeleton = mergeSkeletons(loadSkeleton(skeletonFile), extras);
+  info.joints = skeleton.joints.length;
+  info.attached = skeleton.attached.map((a, i) => `${extras[i].file} (${a.joints} joints) at ${a.attachTo}`);
   const meshes = [];
   const textures = new Map();
   const ctx = renderContext(variables);
@@ -1047,7 +1063,7 @@ switch (cmd) {
     if (!pos[3]) usage();
     const vfs = mount(pos[1]);
     const info = convertSat(vfs, pos[2], pos[3], { animations: options.anim ?? 'all', variables: customizationValues(options.var), wear: (options.wear ?? '').split(',').map((w) => w.trim()).filter(Boolean) });
-    console.log(`${info.sat}: skeleton ${info.skeleton} (${info.joints} joints)`);
+    console.log(`${info.sat}: skeleton ${info.skeleton} (${info.joints} joints${info.attached.length ? `, with ${info.attached.join('; ')}` : ''})`);
     for (const m of info.meshes) console.log(`  mesh ${m.file}: ${m.triangles} tris, ${m.shaders} shaders, layer ${m.layer}${m.hidden ? `, ${m.hidden} tris under clothing` : ''}${m.occludes.length ? `, hides ${m.occludes.join(' ')}` : ''}`);
     for (const t of info.textureRenderers) console.log(`  texture renderer ${t}`);
     if (info.customization.size) console.log(`  customization (set with --var=name=value,...):\n    ${[...info.customization].join('\n    ')}`);
@@ -1071,7 +1087,7 @@ switch (cmd) {
     const outDir = join(pos[2], 'player');
     const wear = (options.wear ?? '').split(',').map((w) => w.trim()).filter(Boolean);
     const info = convertSat(vfs, template, join(outDir, `${id}.glb`), { animations: options.anim ?? PLAYER_CLIPS, variables: customizationValues(options.var), wear, maxAnimations: 40 });
-    console.log(`${info.sat}: skeleton ${info.skeleton} (${info.joints} joints)`);
+    console.log(`${info.sat}: skeleton ${info.skeleton} (${info.joints} joints${info.attached.length ? `, with ${info.attached.join('; ')}` : ''})`);
     for (const m of info.meshes) console.log(`  mesh ${m.file}: ${m.triangles} tris, ${m.shaders} shaders, layer ${m.layer}${m.hidden ? `, ${m.hidden} tris under clothing` : ''}`);
     for (const t of info.textureRenderers) console.log(`  texture renderer ${t}`);
     if (info.customization.size) console.log(`  customization (set with --var=name=value,...):\n    ${[...info.customization].join('\n    ')}`);
