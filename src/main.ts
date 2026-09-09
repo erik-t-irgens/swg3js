@@ -56,6 +56,7 @@ class App {
     this.renderer.shadowMap.enabled = !lowfx;
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    World.anisotropy = Math.min(8, this.renderer.capabilities.getMaxAnisotropy());
     this.renderer.toneMappingExposure = 1.0;
 
     this.cam = new ThirdPersonCamera(window.innerWidth / window.innerHeight);

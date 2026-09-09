@@ -35,6 +35,8 @@ Named places come from `regions/regions.json`, a table of every planet's cities,
 
 `player <dir> <out-dir> [--template=object/creature/player/shared_human_male.iff] [--wear=...] [--var=...]` converts the player's character (any player species template) with skin baked, clothing composed and the clips the game drives (idle, walk, run, jump, sit, a light attack, a hit, incapacitation; by exact logical name, so pass `--anim=` with names from `sat --anim=list` if a table names them differently) into `<out-dir>/player/<id>.glb` and `player/manifest.json`; the game replaces its placeholder rig with the manifest's first entry when the file exists, finding the hand, spine and arm bones by name pattern and reading each clip's natural speed from the manifest. In the browser console `__debug.show('player/human_male.glb', 'walk')` previews it, and the result lists its bones and clips.
 
+`terrain <dir> <planet> <out-dir>` copies just the terrain template, its bitmaps and its ground textures into an existing pack, which is the quick way to add ground textures to packs converted before they existed.
+
 `creatures <dir> <out-dir>` converts the creature each planet spawns (bantha, kaadu, durni, bol, kimogila, boar-wolf, rancor, mawgax, kahmurra, torton) into `<out-dir>/creatures/<id>.glb` with the clips the game drives (idle, walk, run, a light attack, a light hit, incapacitation) and writes `creatures/manifest.json`; the game swaps its procedural creature bodies for these when the file exists.
 
 `why <dir> <planet> <pattern>` explains a missing building: it lists every snapshot object whose template matches the pattern with its count, size and position, resolves it to its appearance file, says which archive holds that file, and converts it on the spot, printing the failure if there is one.
@@ -57,6 +59,7 @@ Status:
 | Skinned meshes, skeletons, animations (.mgn, .skt, .ans, .lat) | Converted by `sat` and `creatures`; compressed animations, LOD skeletons and animation selectors handled |
 | Texture renderers (.trt) and palettes (.pal) | Blueprints run in software: fixed-function texture stages, alpha blending and testing, palette texture factors; effects that only have pixel-shader implementations are reported and left undrawn |
 | World snapshots (.ws), object templates, portal buildings (.pob exterior) | Written against the engine loaders, tested synthetically |
+| Ground textures (terrain shader families) | Each family's heaviest shader's main texture is written to `terrain/shaders/` with its metres-per-repeat in `terrain/shaders.json`; the game blends three families across every ground triangle where the generator paints them |
 | Terrain rule files (.trn), bitmaps and building layers (.lay) | Generator ported from the engine (fractals, boundaries, filters, bitmap filters, height, shader, road and river affectors); fractal noise verified bit-for-bit against the engine's code. On retail Tatooine, `terrain-check` puts 81% of Mos Eisley's snapshot objects within 0.5 m of the generated ground (median 0.00 m); the rest are objects that never sat on the ground (rooftop furniture, wall terminals, walls sunk 2 m, hand-typed fort heights) |
 | Component appearances (.cmp) | Parts baked into one mesh by their transforms |
 | Skeletal (.sat), particles (.prt) | Skipped with counts in the snapshot output |

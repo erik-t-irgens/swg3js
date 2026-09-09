@@ -5,6 +5,7 @@ import { CreatureManager } from './creatures';
 import { DayCycle } from './daycycle';
 import { PropFactory, type Collider, type Exclusion, type ScatterItem } from './props';
 import { FloraPlanter } from './flora';
+import { TerrainTextures } from './terrainTextures';
 import { AssetPack, type LoadedModel } from './assetPack';
 import { OUTPOSTS } from '../data/outposts';
 import { Group, groups, RAPIER as R } from '../core/physics';
@@ -108,6 +109,10 @@ export class World {
   private localWater: THREE.Mesh[] = [];
   /** Real flora from the planet's terrain, replacing procedural props when a pack provides the models. */
   private flora: FloraPlanter | null = null;
+  /** The planet's ground textures, when the pack carries them; the ground material comes from here. */
+  private groundTextures: TerrainTextures | null = null;
+  /** Texture anisotropy the renderer supports, set once by main. */
+  static anisotropy = 4;
   private readonly dayFog = new THREE.Color();
   private readonly nightFog = new THREE.Color();
   private readonly sunColor = new THREE.Color();
@@ -286,6 +291,8 @@ export class World {
           console.info(`terrain: ${this.terrain.swg!.template.name} with ${layers.length} building layers loaded in ${(performance.now() - t0).toFixed(0)} ms`);
           await this.loadFlora(pack, swg);
           if (token !== this.loadToken) return null;
+          await this.loadGroundTextures(pack);
+          if (token !== this.loadToken) return null;
         } catch (err) {
           console.warn('terrain: failed to load the planet terrain, keeping procedural ground', err);
         }
@@ -361,6 +368,8 @@ export class World {
     this.layoutStream?.dispose();
     this.layoutStream = null;
     this.flora = null;
+    this.groundTextures?.dispose();
+    this.groundTextures = null;
     for (const m of this.localWater) {
       this.scene.remove(m);
       m.geometry.dispose();
@@ -419,6 +428,28 @@ export class World {
   }
 
   /** The converted flora models, keyed by the appearance file the terrain names. */
+  /** The pack's ground textures; existing chunks and far tiles switch to them when they arrive. */
+  private async loadGroundTextures(pack: AssetPack): Promise<void> {
+    try {
+      const textures = await TerrainTextures.load(pack, World.anisotropy);
+      if (!textures) return;
+      this.groundTextures?.dispose();
+      this.groundTextures = textures;
+      const mat = textures.groundMaterial(this.csm);
+      this.csmMaterials.add(mat);
+      for (const c of this.chunks.values()) c.group.traverse((o) => { if ((o as THREE.Mesh).isMesh && (o as THREE.Mesh).material === this.terrainMat) (o as THREE.Mesh).material = mat; });
+      for (const t of this.farTiles.values()) if (t.material === this.terrainMat) t.material = mat;
+      console.info(`terrain: ${textures.families.length} ground textures (${textures.texture.image.width} px)`);
+    } catch (err) {
+      console.warn('terrain: ground textures failed to load', err);
+    }
+  }
+
+  /** The material for new ground meshes: textured when the planet has textures, tinted otherwise. */
+  private get groundMaterial(): THREE.Material {
+    return this.groundTextures && this.terrain.swg ? this.groundTextures.groundMaterial(this.csm) : this.terrainMat;
+  }
+
   private async loadFlora(pack: AssetPack, swg: SwgTerrain): Promise<void> {
     const defs = pack.category('flora').filter((d) => d.appearance);
     if (!defs.length) return;
@@ -814,7 +845,7 @@ export class World {
       if (made >= budget) break;
       const geometry = this.terrain.buildFarTile(w.tx, w.tz, FAR_TILE, FAR_RES, budget === Infinity);
       if (!geometry) continue;
-      const mesh = new THREE.Mesh(geometry, this.terrainMat);
+      const mesh = new THREE.Mesh(geometry, this.groundMaterial);
       mesh.receiveShadow = true;
       this.chunkRoot.add(mesh);
       this.farTiles.set(`${w.tx},${w.tz}`, mesh);
@@ -840,7 +871,7 @@ export class World {
     const key = `${cx},${cz}`;
     const group = new THREE.Group();
     const { geometry, heights } = this.terrain.buildChunk(cx, cz);
-    const mesh = new THREE.Mesh(geometry, this.terrainMat);
+    const mesh = new THREE.Mesh(geometry, this.groundMaterial);
     mesh.receiveShadow = true;
     mesh.castShadow = true;
     group.add(mesh);

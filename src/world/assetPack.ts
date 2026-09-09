@@ -195,6 +195,11 @@ export class AssetPack {
     return this.ready.get(id) ?? null;
   }
 
+  /** Absolute URL of a pack-relative file. */
+  url(file: string): string {
+    return this.baseUrl + file;
+  }
+
   /** Raw bytes of a pack file (terrain templates, layer files); null when missing. */
   bytes(file: string): Promise<ArrayBuffer | null> {
     let p = this.bytesCache.get(file);

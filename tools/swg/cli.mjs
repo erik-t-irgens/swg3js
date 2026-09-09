@@ -250,7 +250,70 @@ async function copyTerrain(vfs, planet, outDir) {
   } catch (err) {
     console.warn(`terrain bitmaps not converted: ${err.message}`);
   }
+  if (lastTemplate) copyTerrainShaders(vfs, lastTemplate, outDir);
   return 'terrain.trn';
+}
+
+/**
+ * The ground textures: one per shader family (its heaviest child's main texture, at most 512 px),
+ * written under <out>/terrain/shaders/ and listed with each family's metres-per-repeat in
+ * terrain/shaders.json, which the game blends across the ground.
+ */
+function copyTerrainShaders(vfs, template, outDir) {
+  const families = [];
+  let missing = 0;
+  for (const fam of template.generator.shaderGroup.families.values()) {
+    const child = [...fam.children].sort((a, b) => b.weight - a.weight)[0];
+    const entry = { id: fam.id, name: fam.name, size: fam.shaderSize, file: null, shader: child ? child.name.replace(/\\/g, '/') : null };
+    families.push(entry);
+    if (!child) continue;
+    const bare = entry.shader.replace(/^\//, '');
+    const path = [bare, `shader/${bare}`].find((c) => vfs.has(c));
+    if (!path) {
+      console.warn(`terrain shader missing: ${bare} (family ${fam.id} ${fam.name})`);
+      missing++;
+      continue;
+    }
+    try {
+      const { main } = shaderTextures(parseIff(vfs.read(path)));
+      if (!main || !vfs.has(main)) throw new Error(`no main texture${main ? ` (${main} not in archives)` : ''}`);
+      const img = downscaleRgba(decodeDds(vfs.read(main)), 512);
+      const rel = `terrain/shaders/${fam.id}_${fam.name.replace(/[^a-z0-9]+/gi, '_').toLowerCase()}.png`;
+      mkdirSync(join(outDir, 'terrain/shaders'), { recursive: true });
+      writeFileSync(join(outDir, rel), encodePng(img.width, img.height, img.rgba));
+      entry.file = rel;
+      entry.texture = main;
+    } catch (err) {
+      console.warn(`terrain shader ${path}: ${err.message}`);
+      missing++;
+    }
+  }
+  mkdirSync(join(outDir, 'terrain'), { recursive: true });
+  writeFileSync(join(outDir, 'terrain/shaders.json'), JSON.stringify({ families }, null, 1));
+  console.error(`  terrain shaders: ${families.length - missing}/${families.length} families with textures -> terrain/shaders.json`);
+}
+
+/** Box-filter an RGBA image down by whole factors until neither side exceeds `max`. */
+function downscaleRgba(img, max) {
+  let { width, height, rgba } = img;
+  while (width > max || height > max) {
+    const w = Math.max(1, width >> 1);
+    const h = Math.max(1, height >> 1);
+    const out = new Uint8Array(w * h * 4);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        for (let c = 0; c < 4; c++) {
+          const x0 = Math.min(width - 1, x * 2), x1 = Math.min(width - 1, x * 2 + 1);
+          const y0 = Math.min(height - 1, y * 2), y1 = Math.min(height - 1, y * 2 + 1);
+          out[(y * w + x) * 4 + c] = (rgba[(y0 * width + x0) * 4 + c] + rgba[(y0 * width + x1) * 4 + c] + rgba[(y1 * width + x0) * 4 + c] + rgba[(y1 * width + x1) * 4 + c] + 2) >> 2;
+        }
+      }
+    }
+    width = w;
+    height = h;
+    rgba = out;
+  }
+  return { width, height, rgba };
 }
 
 /** The terrain template copyTerrain parsed last (for the flora conversion that follows it). */

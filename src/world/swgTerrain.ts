@@ -13,6 +13,12 @@ export interface BuildingLayerSource {
   yaw: number;
 }
 
+/** Coarse samples for a far tile: heights and shader family per sample. */
+export interface FarGrid {
+  heights: Float32Array;
+  shaders: Int32Array;
+}
+
 interface Pending {
   key: string;
   resolve: (block: PoleBlock) => void;
@@ -32,7 +38,7 @@ export class SwgTerrain {
   private nextId = 1;
   private readonly pending = new Map<number, Pending>();
   private readonly requested = new Set<string>();
-  private readonly farGrids = new Map<string, Float32Array>();
+  private readonly farGrids = new Map<string, FarGrid>();
   /** How many chunk grids were generated synchronously on the main thread (diagnostics). */
   syncGenerations = 0;
   /** Lakes and pools in game coordinates. */
@@ -177,7 +183,7 @@ export class SwgTerrain {
    * beyond the tile on each side (the layout Terrain.buildGrid expects), generated directly at
    * that spacing. Returns null until the worker has produced it.
    */
-  farGrid(gx0: number, gz0: number, size: number, res: number, sync: boolean): Float32Array | null {
+  farGrid(gx0: number, gz0: number, size: number, res: number, sync: boolean): FarGrid | null {
     const key = SwgTerrain.farKey(gx0, gz0, size, res);
     const cached = this.farGrids.get(key);
     if (cached) return cached;
@@ -186,23 +192,32 @@ export class SwgTerrain {
     const n = res + 3;
     const startX = this.toSwgX(gx0 + (res + 1) * step);
     const startZ = this.toSwgZ(gz0 - step);
-    const finish = (heights: Float32Array) => {
-      const out = new Float32Array(n * n);
+    const finish = (heights: Float32Array, shaders: Int32Array) => {
+      const out: FarGrid = { heights: new Float32Array(n * n), shaders: new Int32Array(n * n) };
       for (let j = 0; j < n; j++) {
-        for (let i = 0; i < n; i++) out[j * n + i] = heights[j * n + (n - 1 - i)];
+        for (let i = 0; i < n; i++) {
+          out.heights[j * n + i] = heights[j * n + (n - 1 - i)];
+          out.shaders[j * n + i] = shaders[j * n + (n - 1 - i)] ?? 0;
+        }
       }
       this.farGrids.set(key, out);
       return out;
     };
     if (sync || !this.worker || !this.workerReady) {
       this.syncGenerations++;
-      return finish(this.sampler.generate(startX, startZ, n, step).heights);
+      const g = this.sampler.generate(startX, startZ, n, step);
+      return finish(g.heights, g.shaders);
     }
     if (!this.requested.has(key)) {
       this.requested.add(key);
-      this.request(key, startX, startZ, n, step, (block) => void finish(block.heights));
+      this.request(key, startX, startZ, n, step, (block) => void finish(block.heights, block.shaders));
     }
     return null;
+  }
+
+  /** Shader family painted at a game-space point (0 = none). */
+  shaderAt(gx: number, gz: number): number {
+    return this.sampler.shaderAt(this.toSwgX(gx), this.toSwgZ(gz));
   }
 
   private static farKey(gx0: number, gz0: number, size: number, res: number): string {
@@ -225,7 +240,7 @@ export class SwgTerrain {
     this.worker!.postMessage({ type: 'generate', id, startX, startZ, n, step });
   }
 
-  private onMessage(msg: { type: string; id?: number; heights?: Float32Array; excluded?: Uint8Array; floraCollidable?: Uint8Array; floraNonCollidable?: Uint8Array; info?: unknown; message?: string }): void {
+  private onMessage(msg: { type: string; id?: number; heights?: Float32Array; shaders?: Int32Array; excluded?: Uint8Array; floraCollidable?: Uint8Array; floraNonCollidable?: Uint8Array; info?: unknown; message?: string }): void {
     if (msg.type === 'ready') {
       this.workerReady = true;
       console.info('terrain worker ready', msg.info);
@@ -235,7 +250,7 @@ export class SwgTerrain {
         this.pending.delete(msg.id);
         this.requested.delete(p.key);
         const n = msg.heights.length;
-        p.resolve({ heights: msg.heights, excluded: msg.excluded ?? new Uint8Array(n), floraCollidable: msg.floraCollidable ?? new Uint8Array(n * 2), floraNonCollidable: msg.floraNonCollidable ?? new Uint8Array(n * 2) });
+        p.resolve({ heights: msg.heights, shaders: msg.shaders ?? new Int32Array(n), excluded: msg.excluded ?? new Uint8Array(n), floraCollidable: msg.floraCollidable ?? new Uint8Array(n * 2), floraNonCollidable: msg.floraNonCollidable ?? new Uint8Array(n * 2) });
       }
     } else if (msg.type === 'error') {
       console.warn('terrain worker:', msg.message);

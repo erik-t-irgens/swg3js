@@ -177,6 +177,8 @@ export interface HeightGrid {
 /** A cached block of poles: heights plus the per-pole maps flora placement reads. */
 export interface PoleBlock {
   heights: Float32Array;
+  /** Shader family id at each pole (0 = none), the ground texture the client paints there. */
+  shaders: Int32Array;
   excluded: Uint8Array;
   floraCollidable: Uint8Array;
   floraNonCollidable: Uint8Array;
@@ -231,7 +233,7 @@ export class TerrainSampler {
     if (!b) {
       const s = this.blockStart(blockX, blockZ);
       const g = this.generate(s.x, s.z, this.numberOfPoles, this.poleStep);
-      b = { heights: g.heights, excluded: g.excluded, floraCollidable: g.floraCollidable, floraNonCollidable: g.floraNonCollidable };
+      b = { heights: g.heights, shaders: g.shaders, excluded: g.excluded, floraCollidable: g.floraCollidable, floraNonCollidable: g.floraNonCollidable };
       this.blocks.set(key, b);
     }
     return b;
@@ -264,6 +266,11 @@ export class TerrainSampler {
     return { family: map[index * 2], choice: map[index * 2 + 1] / 255 };
   }
 
+  /** Shader family painted at the pole a world point maps to (0 = none). */
+  shaderAt(x: number, z: number): number {
+    const { block, index } = this.poleIndex(x, z);
+    return block.shaders[index] ?? 0;
+  }
   /** Whether the generator excluded flora at a world point (AEXC affectors). */
   excludedAt(x: number, z: number): boolean {
     const { block, index } = this.poleIndex(x, z);

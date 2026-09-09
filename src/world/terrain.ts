@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import type { PlanetDef } from '../data/planets';
 import { FBM, hash2 } from './noise';
-import type { SwgTerrain } from './swgTerrain';
+import type { FarGrid, SwgTerrain } from './swgTerrain';
 
 export const CHUNK_SIZE = 64;
 
@@ -190,13 +190,14 @@ export class Terrain {
    * terrain the samples come from the worker; null means not generated yet (retry later).
    */
   buildFarTile(tx: number, tz: number, size: number, res: number, sync = true): THREE.BufferGeometry | null {
-    let hs: Float32Array | undefined;
+    let hs: FarGrid | undefined;
     if (this.swg) {
       const grid = this.swg.farGrid(tx * size, tz * size, size, res, sync);
       if (!grid) return null;
       hs = grid;
     }
     const geometry = this.buildGrid(tx * size, tz * size, size, res, { skirt: 0, yOffset: -2.5, wantHeights: false }, hs).geometry;
+    if (geometry.userData.fullIndex) return geometry;
     // Remember the full index so quads under detailed chunks can be cut out (World.refreshFarTile).
     geometry.userData = { fullIndex: geometry.getIndex()!.array.slice(), n: res, ox: tx * size, oz: tz * size, step: size / res };
     return geometry;
@@ -211,18 +212,26 @@ export class Terrain {
     this.swg?.evict(center.x, center.z, Math.ceil((chunkRadius * CHUNK_SIZE) / this.swg.sampler.blockWidth) + 2);
   }
 
-  private buildGrid(ox: number, oz: number, size: number, n: number, opts: { skirt: number; yOffset?: number; wantHeights: boolean }, samples?: Float32Array): { geometry: THREE.BufferGeometry; heights: Float32Array | null } {
+  private buildGrid(ox: number, oz: number, size: number, n: number, opts: { skirt: number; yOffset?: number; wantHeights: boolean }, samples?: FarGrid): { geometry: THREE.BufferGeometry; heights: Float32Array | null } {
     const step = size / n;
     const yOff = opts.yOffset ?? 0;
     const w = n + 3;
     let hs: Float32Array;
-    if (samples && samples.length === w * w) {
-      hs = samples;
+    // Shader family per sample when the planet has real terrain: the ground texture painted there.
+    let fams: Int32Array | null = null;
+    if (samples && samples.heights.length === w * w) {
+      hs = samples.heights;
+      fams = samples.shaders;
     } else {
       hs = new Float32Array(w * w);
+      const swg = this.swg;
+      if (swg) fams = new Int32Array(w * w);
       for (let j = 0; j < w; j++) {
         for (let i = 0; i < w; i++) {
-          hs[j * w + i] = this.heightAt(ox + (i - 1) * step, oz + (j - 1) * step);
+          const x = ox + (i - 1) * step;
+          const z = oz + (j - 1) * step;
+          hs[j * w + i] = this.heightAt(x, z);
+          if (fams && swg) fams[j * w + i] = swg.shaderAt(x, z);
         }
       }
     }
@@ -238,6 +247,7 @@ export class Terrain {
 
     const gridCount = (n + 1) * (n + 1);
     const skirtCount = opts.skirt > 0 ? 4 * (n + 1) : 0;
+    const skirtSource = new Int32Array(skirtCount).fill(-1);
     const vcount = gridCount + skirtCount;
     const positions = new Float32Array(vcount * 3);
     const normals = new Float32Array(vcount * 3);
@@ -298,6 +308,7 @@ export class Terrain {
       for (const edge of edges) {
         const start = sv;
         for (const src of edge) {
+          skirtSource[sv - gridCount] = src;
           positions[sv * 3] = positions[src * 3];
           positions[sv * 3 + 1] = positions[src * 3 + 1] - opts.skirt;
           positions[sv * 3 + 2] = positions[src * 3 + 2];
@@ -317,6 +328,50 @@ export class Terrain {
     }
 
     const geo = new THREE.BufferGeometry();
+    if (fams) {
+      // Textured ground: every triangle carries the families of its three corners and each vertex
+      // its corner weight, so the fragment shader can blend three ground textures across it. That
+      // needs one vertex per corner per triangle; the identity index keeps far-tile quad culling
+      // (World.refreshFarTile) working on the same six entries per quad.
+      const family = (v: number) => (v < gridCount ? fams![(Math.floor(v / (n + 1)) + 1) * w + (v % (n + 1)) + 1] : skirtSource[v - gridCount] >= 0 ? fams![(Math.floor(skirtSource[v - gridCount] / (n + 1)) + 1) * w + (skirtSource[v - gridCount] % (n + 1)) + 1] : 0);
+      const tc = indices.length;
+      const dp = new Float32Array(tc * 3);
+      const dn = new Float32Array(tc * 3);
+      const dc = new Float32Array(tc * 3);
+      const df = new Float32Array(tc * 3);
+      const db = new Float32Array(tc * 3);
+      for (let t = 0; t < tc; t += 3) {
+        const f0 = family(indices[t]), f1 = family(indices[t + 1]), f2 = family(indices[t + 2]);
+        for (let k = 0; k < 3; k++) {
+          const src = indices[t + k];
+          const o = (t + k) * 3;
+          dp[o] = positions[src * 3];
+          dp[o + 1] = positions[src * 3 + 1];
+          dp[o + 2] = positions[src * 3 + 2];
+          dn[o] = normals[src * 3];
+          dn[o + 1] = normals[src * 3 + 1];
+          dn[o + 2] = normals[src * 3 + 2];
+          dc[o] = colors[src * 3];
+          dc[o + 1] = colors[src * 3 + 1];
+          dc[o + 2] = colors[src * 3 + 2];
+          df[o] = f0;
+          df[o + 1] = f1;
+          df[o + 2] = f2;
+          db[o + k] = 1;
+        }
+      }
+      geo.setAttribute('position', new THREE.BufferAttribute(dp, 3));
+      geo.setAttribute('normal', new THREE.BufferAttribute(dn, 3));
+      geo.setAttribute('color', new THREE.BufferAttribute(dc, 3));
+      geo.setAttribute('aFamily', new THREE.BufferAttribute(df, 3));
+      geo.setAttribute('aBary', new THREE.BufferAttribute(db, 3));
+      const identity = new Uint32Array(tc);
+      for (let i = 0; i < tc; i++) identity[i] = i;
+      geo.setIndex(new THREE.BufferAttribute(identity, 1));
+      geo.computeBoundingSphere();
+      if (opts.skirt === 0) geo.userData = { fullIndex: identity.slice(), n, ox, oz, step };
+      return { geometry: geo, heights: physHeights };
+    }
     geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     geo.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
     geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
