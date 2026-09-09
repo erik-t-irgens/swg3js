@@ -267,8 +267,10 @@ function copyTerrainShaders(vfs, template, outDir) {
     const entry = { id: fam.id, name: fam.name, size: fam.shaderSize, file: null, shader: child ? child.name.replace(/\\/g, '/') : null };
     families.push(entry);
     if (!child) continue;
+    // Families name their shaders bare (rock_cliff_anza): look for the file wherever it lives.
     const bare = entry.shader.replace(/^\//, '');
-    const path = [bare, `shader/${bare}`].find((c) => vfs.has(c));
+    const stem = bare.replace(/\.sht$/i, '').toLowerCase();
+    const path = [bare, `${bare}.sht`, `shader/${bare}`, `shader/${bare}.sht`, `shader/terrain/${stem}.sht`].find((c) => vfs.has(c)) ?? vfs.list(`${stem}.sht`).find((f) => f === `${stem}.sht` || f.endsWith(`/${stem}.sht`));
     if (!path) {
       console.warn(`terrain shader missing: ${bare} (family ${fam.id} ${fam.name})`);
       missing++;

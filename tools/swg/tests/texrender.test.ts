@@ -54,8 +54,9 @@ check('palette entries', palette.length === 2 && palette[0][0] === 255 && palett
     .u8(0).u32(MAIN).i8(7).u8(15) // alpha test off, ref tag, func, write mask
     .u32(MAIN) // texture factor tag
     .u8(0).u32(0).i8(7).i8(0).i8(0).i8(0).u32(0).u32(0); // stencil
-  const stage = new W().u8(3).u8(4).u8(0).u8(0).u8(5).u8(0).u8(0).u8(0).u8(0).u8(0) // colour: modulate(texture, tfactor)
-    .u8(1).u8(4).u8(0).u8(0).u8(0).u8(0).u8(0) // alpha: select texture
+  // Direct3D numbering: argument 1 and 2 feed modulate; argument 0 is written first in the file.
+  const stage = new W().u8(3).u8(0).u8(0).u8(0).u8(4).u8(0).u8(0).u8(5).u8(0).u8(0) // colour: modulate(texture, tfactor)
+    .u8(1).u8(0).u8(0).u8(4).u8(0).u8(0).u8(0) // alpha: select texture
     .u8(0).u32(MAIN).u32(MAIN).u8(0);
   const eff = form('EFCT', form('0001', chunk('DATA', new W().i8(1).u8(0).bytes()),
     form('IMPL', form('0005', chunk('SCAP', new W().i32(0).bytes()), chunk('DATA', new W().i8(1).u32(tag('MAIN')).u8(1).u8(0).bytes()),

@@ -603,17 +603,19 @@ function shadeFragment(shader, pass, uvs, diffuse, out) {
       const addr = stage.addressU !== undefined ? [stage.addressU, stage.addressV] : shader.addresses.get(stage.textureTag) ?? [0, 0];
       sample(tex, uv[0], uv[1], addr[0], addr[1], regs.texture);
     } else regs.texture[0] = regs.texture[1] = regs.texture[2] = regs.texture[3] = 1;
+    // Arguments follow Direct3D's numbering: 1 and 2 feed the two-input operations, 0 is the
+    // third input of multiply-add and lerp (Direct3d9_ShaderImplementationData::Stage).
     const ca = stage.colorArgs;
-    argValue(ca[0].arg, ca[0].complement, ca[0].alphaReplicate, regs, a1);
-    argValue(ca[1].arg, ca[1].complement, ca[1].alphaReplicate, regs, a2);
-    argValue(ca[2].arg, ca[2].complement, ca[2].alphaReplicate, regs, a0);
+    argValue(ca[1].arg, ca[1].complement, ca[1].alphaReplicate, regs, a1);
+    argValue(ca[2].arg, ca[2].complement, ca[2].alphaReplicate, regs, a2);
+    argValue(ca[0].arg, ca[0].complement, ca[0].alphaReplicate, regs, a0);
     stageOp(stage.colorOp, a1, a2, a0, regs, stage, res, 0, 3);
     if (stage.alphaOp === 0) res[3] = regs.current[3];
     else {
       const aa = stage.alphaArgs;
-      argValue(aa[0].arg, aa[0].complement, false, regs, a1);
-      argValue(aa[1].arg, aa[1].complement, false, regs, a2);
-      argValue(aa[2].arg, aa[2].complement, false, regs, a0);
+      argValue(aa[1].arg, aa[1].complement, false, regs, a1);
+      argValue(aa[2].arg, aa[2].complement, false, regs, a2);
+      argValue(aa[0].arg, aa[0].complement, false, regs, a0);
       stageOp(stage.alphaOp, a1, a2, a0, regs, stage, res, 3, 4);
     }
     const target = stage.result === 3 ? regs.temp : regs.current;
@@ -840,7 +842,8 @@ export function describeShader(shader) {
   if (!shader) return 'missing';
   const passes = shader.effect
     ? shader.effect.passes.map((p) => {
-        const stages = p.stageList.map((st) => `${OP_NAMES[st.colorOp] ?? st.colorOp}(${st.colorArgs.slice(0, 2).map(argName).join(',')})/${OP_NAMES[st.alphaOp] ?? st.alphaOp}(${st.alphaArgs.slice(0, 2).map(argName).join(',')}) tex ${st.textureTag}`).join(' > ');
+        const two = (args) => args.slice(1, 3).map(argName).join(',');
+        const stages = p.stageList.map((st) => `${OP_NAMES[st.colorOp] ?? st.colorOp}(${two(st.colorArgs)})/${OP_NAMES[st.alphaOp] ?? st.alphaOp}(${two(st.alphaArgs)}) tex ${st.textureTag}`).join(' > ');
         return `${stages}${p.alphaBlend ? `; blend ${p.blendSrc}/${p.blendDst}` : ''}${p.alphaTest ? '; alphatest' : ''}; tfactor tag ${p.tfactorTag}`;
       }).join(' | ')
     : 'no fixed-function implementation';
