@@ -102,3 +102,6 @@ b { color: var(--accent); font-weight: 600; }
 .class-pick { display: flex; gap: 12px; justify-content: center; margin-bottom: 8px; }
 .class-pick button { min-width: 200px; }
 .class-pick small { display: block; color: var(--muted); font-size: 11px; margin-top: 4px; letter-spacing: 0; }
+
+/* A zone of a multi-terrain planet in the galaxy map: a heading that travels there. */
+.poi.zone { display: block; width: 100%; text-align: left; margin-top: 8px; font-weight: 600; }

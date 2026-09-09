@@ -15,6 +15,8 @@ npm run swg -- snapshot "C:/SWG" tatooine assets-private/tatooine --center=3528,
 npm run swg -- snapshot "C:/SWG" tatooine assets-private/tatooine --center=3528,-4804 --radius=all --retail-only   # the whole planet (streams in-game)
 npm run swg -- planets "C:/SWG" --retail-only                                                                       # which planets the archives hold, and where each would centre
 npm run swg -- snapshot "C:/SWG" all assets-private --radius=all --retail-only                                      # every planet the game knows, one pack each
+# The expansions' planets convert the same way: mustafar, and Kashyyyk's zones kashyyyk_main, kashyyyk_hunting, kashyyyk_dead_forest,
+# kashyyyk_rryatt_trail, kashyyyk_north_dungeons, kashyyyk_south_dungeons, kashyyyk_pob_dungeons (one pack per zone; `all` includes them).
 npm run swg -- terrain "C:/SWG" tatooine assets-private/tatooine                                                  # just the terrain template
 npm run swg -- terrain-check assets-private/tatooine                                                              # generated heights vs. snapshot heights
 ```

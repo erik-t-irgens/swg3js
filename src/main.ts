@@ -7,7 +7,7 @@ import { ThirdPersonCamera } from './core/camera';
 import { PortalRenderer } from './world/portalRender';
 import { Input } from './core/input';
 import { Physics } from './core/physics';
-import { PLANETS, planetById, type PlanetDef } from './data/planets';
+import { PLANETS, packIdOf, planetById, type PlanetDef } from './data/planets';
 import { Player } from './player/player';
 import { loadPlayerRig } from './player/rig';
 import { GalaxyMap, type Poi } from './ui/galaxyMap';
@@ -69,8 +69,8 @@ class App {
     this.hud = new Hud(this.ui);
     this.map = new GalaxyMap(
       this.ui,
-      (p) => void this.travel(p),
-      (p, poi) => void this.teleport(p, poi),
+      (p, zone) => void this.travel(p, zone),
+      (p, poi, zone) => void this.teleport(p, poi, zone),
     );
     // Console hooks for driving the game from tests: window.__debug.teleport(x, z, yaw), .look(yaw, pitch), .cell().
     (window as unknown as { __debug: unknown }).__debug = {
@@ -194,7 +194,7 @@ class App {
     const initialClass = params.get('class') === 'bounty_hunter' ? 'bounty_hunter' : 'jedi';
     this.setClass(initialClass);
     const initial = params.get('planet');
-    this.arrive(initial && PLANETS.some((p) => p.id === initial) ? planetById(initial) : PLANETS[0]);
+    this.arrive(initial && PLANETS.some((p) => p.id === initial) ? planetById(initial) : PLANETS[0], params.get('zone') ?? undefined);
   }
 
   private setClass(id: ClassId): void {
@@ -209,7 +209,8 @@ class App {
 
   private updateUrl(): void {
     if (!this.world.planet) return;
-    history.replaceState(null, '', `?planet=${this.world.planet.id}&class=${this.kit.id}`);
+    const zone = this.zone ? `&zone=${this.zone}` : '';
+    history.replaceState(null, '', `?planet=${this.world.planet.id}${zone}&class=${this.kit.id}`);
   }
 
   private enter(cls: ClassId | null): void {
@@ -219,15 +220,19 @@ class App {
     this.input.requestLock();
   }
 
-  private arrive(planet: PlanetDef): void {
-    this.world.load(planet);
+  /** The zone of a multi-terrain planet the player is in, when the planet has zones. */
+  private zone: string | undefined;
+
+  private arrive(planet: PlanetDef, zoneId?: string): void {
+    this.zone = planet.zones?.length ? (planet.zones.find((z) => z.id === zoneId) ?? planet.zones[0]).id : undefined;
+    this.world.load(planet, packIdOf(planet, this.zone));
     this.spawn = this.world.spawnPoint();
     this.player.reset(this.spawn);
     this.world.warmUp(this.spawn);
     this.physics.world.step();
     this.cam.yaw = Math.PI;
     this.hud.setPlanet(planet);
-    this.map.setCurrent(planet.id);
+    this.map.setCurrent(planet.id, this.zone);
     this.updateUrl();
     const arrivalSpawn = this.spawn.clone();
     void this.world.loadPack(this.spawn).then((clearSpawn) => {
@@ -247,15 +252,16 @@ class App {
     }).catch((err) => console.warn('asset pack failed', err));
   }
 
-  private async travel(planet: PlanetDef): Promise<void> {
+  private async travel(planet: PlanetDef, zoneId?: string): Promise<void> {
     if (this.traveling) return;
     this.traveling = true;
     this.map.hide();
     this.input.captured = false;
-    this.fade.textContent = `TRAVELING TO ${planet.name.toUpperCase()}`;
+    const zone = planet.zones?.find((z) => z.id === zoneId);
+    this.fade.textContent = `TRAVELING TO ${(zone ? `${planet.name}: ${zone.name}` : planet.name).toUpperCase()}`;
     this.fade.classList.add('on');
     await new Promise((r) => setTimeout(r, 500));
-    this.arrive(planet);
+    this.arrive(planet, zoneId);
     this.drawFrame();
     await new Promise((r) => setTimeout(r, 150));
     this.fade.classList.remove('on');
@@ -264,10 +270,10 @@ class App {
   }
 
   /** Jump to a place on the map: travel first when it is on another planet. */
-  private async teleport(planet: PlanetDef, poi: Poi): Promise<void> {
+  private async teleport(planet: PlanetDef, poi: Poi, zoneId?: string): Promise<void> {
     if (this.traveling) return;
-    if (planet.id !== this.world.planet.id) {
-      await this.travel(planet);
+    if (planet.id !== this.world.planet.id || (planet.zones?.length && zoneId && zoneId !== this.zone)) {
+      await this.travel(planet, zoneId);
       // The pack (and with it the snapshot's centre) loads after arrival; wait for it.
       for (let i = 0; i < 100 && !this.world.layoutCenter; i++) await new Promise((r) => setTimeout(r, 100));
     }

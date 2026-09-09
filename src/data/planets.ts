@@ -1,11 +1,21 @@
 export type TreeStyle = 'none' | 'palm' | 'pine' | 'round' | 'dead' | 'giant' | 'swamp';
 
+/** One terrain of a planet the game split into separate zones (Kashyyyk), each its own converted pack. */
+export interface PlanetZone {
+  id: string;
+  name: string;
+  /** Pack directory under assets-private/ (the snapshot's name). */
+  pack: string;
+}
+
 export interface PlanetDef {
   id: string;
   name: string;
   tagline: string;
   description: string;
   seed: number;
+  /** Zones with their own terrain; the first is where travel lands. Absent for single-terrain planets. */
+  zones?: PlanetZone[];
   /** Downward acceleration in m/s². Real planets vary; SWG feel is snappier than Earth. */
   gravity: number;
   sky: { top: number; horizon: number; sunColor: number; suns: number; sunElevation: number; sunAzimuth: number };
@@ -196,7 +206,54 @@ export const PLANETS: PlanetDef[] = [
     props: { treeDensity: 1.1, rockDensity: 0.15, treeStyle: 'swamp', canopy: 0x3a6a35, trunk: 0x4a3a2a, rock: 0x6a6a5a, treeScale: 1.2 },
     creatures: { name: 'Torton', count: 6, color: 0x5a6b4a, size: 2.6, speed: 1.5, hp: 320, aggressive: false, damage: 0 },
   },
+  {
+    id: 'mustafar',
+    name: 'Mustafar',
+    tagline: 'Rivers of fire',
+    description: 'A volcanic hell of lava rivers, black rock and mining platforms, where the Empire hides what it does not want found.',
+    seed: 2005,
+    gravity: 22,
+    sky: { top: 0x3a1f1c, horizon: 0xc2522a, sunColor: 0xffb070, suns: 1, sunElevation: 0.55, sunAzimuth: 3.6 },
+    fog: { color: 0x5a2a20, density: 0.0046 },
+    light: { sunIntensity: 1.9, ambientSky: 0xb0523a, ambientGround: 0x3a1a14, ambientIntensity: 1.2 },
+    terrain: { base: 2, amplitude: 40, frequency: 0.0034, octaves: 5, ridged: 0.85, flatten: 1.0, detail: 0.7 },
+    water: { level: -4, color: 0xff5a1a, opacity: 0.95 },
+    palette: { low: 0x2a2224, mid: 0x3d3234, high: 0x5a4a48, slope: 0x1e1819, shore: 0x6a2a14 },
+    props: { treeDensity: 0, rockDensity: 1.1, treeStyle: 'none', canopy: 0x000000, trunk: 0x000000, rock: 0x2b2426, treeScale: 1 },
+    creatures: { name: 'Lava Flea', count: 8, color: 0x6a3a22, size: 1.2, speed: 5, hp: 110, aggressive: true, damage: 10 },
+  },
+  {
+    id: 'kashyyyk',
+    name: 'Kashyyyk',
+    tagline: 'Wroshyr forests of the Wookiees',
+    description: 'The Wookiee homeworld: kilometre-tall wroshyr trees, the tree-city of Kachirho, hunting grounds and the shadowed forest floor below.',
+    seed: 2005,
+    gravity: 19,
+    sky: { top: 0x5f93c4, horizon: 0xd9e4d6, sunColor: 0xfff5dc, suns: 1, sunElevation: 0.8, sunAzimuth: 2.6 },
+    fog: { color: 0xb5c9b8, density: 0.0044 },
+    light: { sunIntensity: 2.0, ambientSky: 0x9bb8c8, ambientGround: 0x3c5636, ambientIntensity: 0.9 },
+    terrain: { base: 2, amplitude: 26, frequency: 0.003, octaves: 5, ridged: 0.1, flatten: 1.2, detail: 0.6 },
+    water: { level: -5, color: 0x2f6f7a, opacity: 0.8 },
+    palette: { low: 0x3d6b33, mid: 0x4c7c3a, high: 0x6c8a52, slope: 0x5a4a3a, shore: 0x8a7a55 },
+    props: { treeDensity: 1.6, rockDensity: 0.2, treeStyle: 'giant', canopy: 0x2a5a2c, trunk: 0x5a3f2e, rock: 0x6c6c62, treeScale: 1.3 },
+    creatures: { name: 'Webweaver', count: 8, color: 0x4a3a2a, size: 1.6, speed: 5, hp: 150, aggressive: true, damage: 14 },
+    zones: [
+      { id: 'main', name: 'Kachirho', pack: 'kashyyyk_main' },
+      { id: 'hunting', name: 'Etyyy, the Hunting Grounds', pack: 'kashyyyk_hunting' },
+      { id: 'dead_forest', name: 'Dead Forest', pack: 'kashyyyk_dead_forest' },
+      { id: 'rryatt_trail', name: 'Rryatt Trail', pack: 'kashyyyk_rryatt_trail' },
+      { id: 'north_dungeons', name: 'Myyydril Caverns', pack: 'kashyyyk_north_dungeons' },
+      { id: 'south_dungeons', name: 'Kkowir Forest', pack: 'kashyyyk_south_dungeons' },
+      { id: 'pob_dungeons', name: 'Avatar Platform', pack: 'kashyyyk_pob_dungeons' },
+    ],
+  },
 ];
+
+/** The pack directory a planet (or one of its zones) loads from. */
+export function packIdOf(planet: PlanetDef, zoneId?: string): string {
+  if (!planet.zones?.length) return planet.id;
+  return (planet.zones.find((z) => z.id === zoneId) ?? planet.zones[0]).pack;
+}
 
 export function planetById(id: string): PlanetDef {
   const p = PLANETS.find((x) => x.id === id);

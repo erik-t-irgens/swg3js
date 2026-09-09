@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import type { PlanetDef } from '../data/planets';
+import { packIdOf, type PlanetDef } from '../data/planets';
 import type { Physics, RAPIER } from '../core/physics';
 import { CreatureManager } from './creatures';
 import { DayCycle } from './daycycle';
@@ -175,9 +175,13 @@ export class World {
     markActor(this.sky);
   }
 
-  load(planet: PlanetDef): void {
+  /** The pack directory this planet (or zone) loads from. */
+  packId = '';
+
+  load(planet: PlanetDef, packId = packIdOf(planet)): void {
     this.unload();
     this.planet = planet;
+    this.packId = packId;
     this.terrain?.detachSwg();
     this.terrain = new Terrain(planet);
     this.props = new PropFactory(planet);
@@ -231,7 +235,7 @@ export class World {
     const token = this.loadToken;
     const planet = this.planet;
     this.packStatus = 'loading';
-    const pack = await AssetPack.load(planet.id);
+    const pack = await AssetPack.load(this.packId);
     if (token !== this.loadToken) return null;
     if (!pack) {
       this.packStatus = 'no pack';

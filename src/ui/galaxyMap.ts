@@ -12,13 +12,14 @@ export interface Poi {
 export class GalaxyMap {
   readonly root: HTMLElement;
   private currentId = '';
+  private currentZone: string | undefined;
   private readonly pois = new Map<string, Promise<Poi[]>>();
   open = false;
 
   constructor(
     parent: HTMLElement,
-    private readonly onTravel: (p: PlanetDef) => void,
-    private readonly onTeleport: (p: PlanetDef, poi: Poi) => void,
+    private readonly onTravel: (p: PlanetDef, zone?: string) => void,
+    private readonly onTeleport: (p: PlanetDef, poi: Poi, zone?: string) => void,
   ) {
     this.root = document.createElement('div');
     this.root.id = 'galaxy-map';
@@ -52,15 +53,41 @@ export class GalaxyMap {
       card.addEventListener('click', () => {
         if (p.id !== this.currentId) this.onTravel(p);
       });
+      void this.currentZone;
       list.appendChild(card);
       void this.fillPois(p, card.querySelector('.pois')!);
     }
     this.root.querySelector('.close')!.addEventListener('click', () => this.hide());
   }
 
-  /** Places from the planet's converted pack; a click there teleports instead of travelling. */
+  /**
+   * Places from the planet's converted pack; a click there teleports instead of travelling. A
+   * planet split into zones gets one block per zone, headed by the zone itself.
+   */
   private async fillPois(p: PlanetDef, holder: HTMLElement): Promise<void> {
-    const pois = await this.loadPois(p.id);
+    if (p.zones?.length) {
+      for (const zone of p.zones) {
+        const head = document.createElement('button');
+        head.type = 'button';
+        head.className = 'poi zone';
+        head.textContent = zone.name;
+        head.title = `zone of ${p.name}`;
+        head.addEventListener('click', (e) => {
+          e.stopPropagation();
+          this.onTravel(p, zone.id);
+        });
+        holder.appendChild(head);
+        const body = document.createElement('div');
+        holder.appendChild(body);
+        await this.fillPackPois(p, body, zone.pack, zone.id, true);
+      }
+      return;
+    }
+    await this.fillPackPois(p, holder, p.id, undefined, false);
+  }
+
+  private async fillPackPois(p: PlanetDef, holder: HTMLElement, packId: string, zone: string | undefined, collapsedCities: boolean): Promise<void> {
+    const pois = await this.loadPois(packId);
     if (!pois.length) return;
     const chip = (poi: Poi) => {
       const b = document.createElement('button');
@@ -70,7 +97,7 @@ export class GalaxyMap {
       b.title = `${poi.kind} at ${poi.x.toFixed(0)}, ${poi.z.toFixed(0)}`;
       b.addEventListener('click', (e) => {
         e.stopPropagation();
-        this.onTeleport(p, poi);
+        this.onTeleport(p, poi, zone);
       });
       return b;
     };
@@ -99,8 +126,8 @@ export class GalaxyMap {
     const travel = pois.filter((x) => x.kind === 'starport' || x.kind === 'shuttleport');
     const landmarks = pois.filter((x) => x.kind === 'landmark' || x.kind === 'region');
     const areas = pois.filter((x) => x.kind === 'area');
-    section('Cities', cities, false);
-    section('Travel', travel, cities.length > 0);
+    section('Cities', cities, collapsedCities);
+    section('Travel', travel, cities.length > 0 || collapsedCities);
     section('Landmarks', landmarks, true);
     section('Regions', areas, true);
   }
@@ -120,8 +147,9 @@ export class GalaxyMap {
     return p;
   }
 
-  setCurrent(id: string): void {
+  setCurrent(id: string, zone?: string): void {
     this.currentId = id;
+    this.currentZone = zone;
     this.root.querySelectorAll<HTMLElement>('.planet-card').forEach((c) => {
       c.classList.toggle('current', c.dataset.id === id);
     });

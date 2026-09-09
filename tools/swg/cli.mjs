@@ -826,6 +826,8 @@ const CREATURES = {
   mawgax: 'object/mobile/shared_mawgax.iff',
   kahmurra: 'object/mobile/shared_kahmurra.iff',
   torton: 'object/mobile/shared_torton.iff',
+  lava_flea: 'object/mobile/shared_lava_flea.iff',
+  webweaver: 'object/mobile/shared_webweaver.iff',
 };
 /** Logical animations (substrings) the game drives creatures with. */
 const CREATURE_CLIPS = 'idle,walk,run,cbt_stand_combat_attack_light,rea_stand_get_hit_light,trn_stand_to_incapacitated,loop_incapacitated';
@@ -835,7 +837,7 @@ const PLAYER_CLIPS = '=idle,=walk,=run,=idle_combat,=walk_combat,=run_combat,=ju
 const PLAYER_TEMPLATE = 'object/creature/player/shared_human_male.iff';
 
 /** Planet ids the game can load a pack for (see src/data/planets.ts). */
-const GAME_PLANETS = ['tatooine', 'naboo', 'corellia', 'dantooine', 'lok', 'endor', 'dathomir', 'yavin4', 'talus', 'rori'];
+const GAME_PLANETS = ['tatooine', 'naboo', 'corellia', 'dantooine', 'lok', 'endor', 'dathomir', 'yavin4', 'talus', 'rori', 'mustafar', 'kashyyyk_main', 'kashyyyk_hunting', 'kashyyyk_dead_forest', 'kashyyyk_rryatt_trail', 'kashyyyk_north_dungeons', 'kashyyyk_south_dungeons', 'kashyyyk_pob_dungeons'];
 
 /** Names of the world snapshots the archives hold (snapshot/<name>.ws). */
 function snapshotPlanets(vfs) {
