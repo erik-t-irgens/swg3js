@@ -15,7 +15,8 @@
 //   node tools/swg/cli.mjs planets <swg-dir>                        list the world snapshots in the archives and where each would centre
 //   node tools/swg/cli.mjs pois <swg-dir> <planet>|all <out-dir>    (re)write just pois.json for packs converted already
 //   node tools/swg/cli.mjs creatures <swg-dir> <out-dir>              every planet's creature as a skinned GLB under <out-dir>/creatures/
-//   node tools/swg/cli.mjs sat <swg-dir> <x.sat | object/mobile/shared_x.iff> <out.glb> [--anim=all|idle,walk]
+//   node tools/swg/cli.mjs sat <swg-dir> <x.sat | object/mobile/shared_x.iff> <out.glb> [--anim=all|idle,walk] [--var=skin_color=3,...]
+//   node tools/swg/cli.mjs trt <swg-dir> <x.trt> <out.png> [--var=name=value,...]   bake a texture renderer blueprint (skin, hair) to a PNG
 //                                                                  convert a skeletal appearance (creature, character) with skeleton and animations
 //   node tools/swg/cli.mjs flora <swg-dir> <planet>|all <out-dir>   (re)convert just the flora models for packs converted already
 //   node tools/swg/cli.mjs snapshot <swg-dir> <planet>|all <out-dir> [--center=x,z|auto] --radius=r|all [--max=n]
@@ -48,6 +49,7 @@ import { parseAnimation, parseLat, parseLmg, parseMgn, parseSat, parseSkeleton, 
 import { resolveTemplateMesh, resolveTemplateString } from './objtemplate.mjs';
 import { encodePng } from './png.mjs';
 import { shaderTextures } from './sht.mjs';
+import { bakeShader, describeShader, describeVariables, loadShader, parseBlueprint, renderBlueprint, renderContext, shaderNeedsBake } from './texrender.mjs';
 import { effectAlpha, alphaModeFor } from './eff.mjs';
 import { localize, parseDatatable } from './datatable.mjs';
 import { createRequire } from 'node:module';
@@ -333,7 +335,46 @@ function nameLocomotion(entries, loadAnimation) {
  * GLB with its skeleton and the animations its logical animation table lists.
  * `animations` filters logical names by substring ('all' keeps every one).
  */
-function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80 } = {}) {
+/** --var=a=1,b=2 → Map of customization variable values (matched by full or short name). */
+function customizationValues(spec) {
+  const values = new Map();
+  for (const part of (spec ?? '').split(',')) {
+    const m = part.match(/^\s*([^=]+?)\s*=\s*(-?\d+)\s*$/);
+    if (m) values.set(m[1], Number(m[2]));
+  }
+  return values;
+}
+
+/**
+ * The texture for one skinned mesh's shader: a texture-renderer blueprint's output when the mesh
+ * names one for it (skin, hair, eyes), the shader baked with its default palette colours when its
+ * look depends on them, otherwise the shader's main texture as for any other mesh.
+ */
+function skinnedTexture(vfs, shaderPath, slots, ctx, info) {
+  let shader = null;
+  try {
+    shader = loadShader(vfs, shaderPath, ctx);
+  } catch (err) {
+    info.skipped.push(`${shaderPath}: ${err.message}`);
+  }
+  if (shader && shader.variables?.length) for (const line of describeVariables(shader.variables)) info.customization.add(`${shaderPath}: ${line}`);
+  const rendered = slots?.find((s) => s.tag === 'MAIN') ?? slots?.[0];
+  if (!rendered && !(shader && shaderNeedsBake(shader))) return textureFor(vfs, shaderPath);
+  let image = rendered ? rendered.image : null;
+  if (shader && shader.effect) {
+    const s = { ...shader, textures: new Map(shader.textures) };
+    for (const slot of slots ?? []) s.textures.set(slot.tag, slot.image);
+    if (!rendered || shaderNeedsBake(s, rendered.tag)) image = bakeShader(s, rendered ? rendered.tag : 'MAIN') ?? image;
+  }
+  if (!image) return textureFor(vfs, shaderPath);
+  const pass = shader?.effect?.passes[0];
+  const alphaMode = pass?.alphaTest ? 'MASK' : pass?.alphaBlend ? 'BLEND' : 'OPAQUE';
+  let hasAlpha = image.hasAlpha ?? false;
+  if (image.hasAlpha === undefined) for (let i = 3; i < image.rgba.length; i += 4) if (image.rgba[i] !== 255) { hasAlpha = true; break; }
+  return { path: `${shaderPath}#${rendered ? basename(rendered.file) : 'baked'}`, png: encodePng(image.width, image.height, image.rgba), hasAlpha, alphaMode };
+}
+
+function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80, variables = new Map() } = {}) {
   let satPath = path.replace(/\\/g, '/');
   if (/\.iff$/i.test(satPath)) {
     const cache = new Map();
@@ -345,9 +386,10 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
   if (!sat.skeletons.length) throw new Error(`${satPath}: no skeleton`);
   const skeletonFile = sat.skeletons[0].file;
   const skeleton = parseSkeleton(readIff(vfs, skeletonFile));
-  const info = { sat: satPath, skeleton: skeletonFile, joints: skeleton.joints.length, meshes: [], animations: [], missing: [], unknownTransforms: 0, skipped: [] };
+  const info = { sat: satPath, skeleton: skeletonFile, joints: skeleton.joints.length, meshes: [], animations: [], missing: [], unknownTransforms: 0, skipped: [], textureRenderers: [], customization: new Set() };
   const meshes = [];
   const textures = new Map();
+  const ctx = renderContext(variables);
   for (const name of sat.meshes) {
     let file = name;
     if (/\.lmg$/i.test(file)) {
@@ -379,11 +421,31 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
         b.max[k] = Math.max(b.max[k], p[k]);
       }
     }
-    for (const g of groups) {
-      const t = textureFor(vfs, g.shader);
-      if (t) textures.set(g.shader, t);
+    // Run the mesh's texture renderers (skin, hair, eyes) and hand their output to the shaders they fill.
+    const meshName = basename(file).replace(/\.[^.]+$/, '');
+    const slotsByShader = new Map();
+    for (const trt of mgn.textureRenderers) {
+      if (!vfs.has(trt.file)) {
+        info.missing.push(trt.file);
+        continue;
+      }
+      try {
+        const bp = parseBlueprint(readIff(vfs, trt.file));
+        const image = renderBlueprint(vfs, bp, ctx);
+        info.textureRenderers.push(`${trt.file}: ${bp.width}x${bp.height} for ${trt.slots.map((sl) => `${mgn.shaders[sl.shaderIndex]?.shader ?? sl.shaderIndex}:${sl.tag}`).join(', ')}${image.missing.length ? `; missing textures ${image.missing.join(', ')}` : ''}${image.unsupported.length ? `; effects without fixed-function passes ${image.unsupported.join(', ')}` : ''}`);
+        for (const line of describeVariables(bp.variables)) info.customization.add(`${trt.file}: ${line}`);
+        for (const sl of trt.slots) (slotsByShader.get(sl.shaderIndex) ?? slotsByShader.set(sl.shaderIndex, []).get(sl.shaderIndex)).push({ tag: sl.tag, image, file: trt.file });
+      } catch (err) {
+        info.skipped.push(`${trt.file}: ${err.message}`);
+      }
     }
-    meshes.push({ name: basename(file).replace(/\.[^.]+$/, ''), groups });
+    groups.forEach((g, i) => {
+      const slots = slotsByShader.get(i);
+      const t = skinnedTexture(vfs, g.shader, slots, ctx, info);
+      if (slots) g.shader = `${g.shader}@${meshName}`; // its own material: the rendered texture is this mesh's
+      if (t) textures.set(g.shader, t);
+    });
+    meshes.push({ name: meshName, groups });
     info.meshes.push({ file, shaders: groups.length, triangles: groups.reduce((a, g) => a + g.primitives[0].indices.length / 3, 0) });
   }
   const clips = [];
@@ -934,9 +996,11 @@ switch (cmd) {
     // <swg-dir> <appearance/x.sat | object/mobile/shared_x.iff> <out.glb> [--anim=all|idle,walk,run]
     if (!pos[3]) usage();
     const vfs = mount(pos[1]);
-    const info = convertSat(vfs, pos[2], pos[3], { animations: options.anim ?? 'all' });
+    const info = convertSat(vfs, pos[2], pos[3], { animations: options.anim ?? 'all', variables: customizationValues(options.var) });
     console.log(`${info.sat}: skeleton ${info.skeleton} (${info.joints} joints)`);
     for (const m of info.meshes) console.log(`  mesh ${m.file}: ${m.triangles} tris, ${m.shaders} shaders`);
+    for (const t of info.textureRenderers) console.log(`  texture renderer ${t}`);
+    if (info.customization.size) console.log(`  customization (set with --var=name=value,...):\n    ${[...info.customization].join('\n    ')}`);
     console.log(`  animations (${info.animations.length})${info.animationTable ? ` from ${info.animationTable}` : ''}: ${info.animations.join(', ') || 'none'}`);
     if (info.available && (!info.animations.length || options.anim === 'list')) console.log(`  available (${info.available.length}): ${info.available.join(', ')}`);
     if (info.unknownTransforms) console.log(`  ${info.unknownTransforms} vertex weights named joints the skeleton lacks`);
@@ -945,6 +1009,34 @@ switch (cmd) {
     for (const m of info.skipped) console.log(`  skipped: ${m}`);
     console.log(`-> ${pos[3]}`);
     printEffectSummary();
+    break;
+  }
+
+  case 'trt': {
+    // <swg-dir> <x.trt> <out.png> [--var=name=value,...]: bake a texture renderer blueprint with default (or given) customization values
+    if (!pos[3]) usage();
+    const vfs = mount(pos[1]);
+    const file = pos[2].replace(/\\/g, '/');
+    if (!vfs.has(file)) throw new Error(`${file}: not in archives`);
+    const bp = parseBlueprint(readIff(vfs, file));
+    const ctx = renderContext(customizationValues(options.var));
+    console.log(`${file}: ${bp.width}x${bp.height}, ${bp.shaders.length} shaders, ${bp.textures.length} textures, ${bp.commands.length} commands, ${bp.prepare.length} prepare operations`);
+    bp.shaders.forEach((sh, i) => {
+      let desc = 'unreadable';
+      try {
+        desc = describeShader(loadShader(vfs, sh.inline ?? sh.file, ctx));
+      } catch (err) {
+        desc = err.message;
+      }
+      console.log(`  shader ${i} ${sh.file ?? '(inline)'}: ${desc}`);
+    });
+    for (const line of describeVariables(bp.variables)) console.log(`  variable ${line}`);
+    const image = renderBlueprint(vfs, bp, ctx);
+    for (const m of image.missing) console.log(`  missing texture: ${m}`);
+    for (const u of image.unsupported) console.log(`  not drawn (no fixed-function effect): ${u}`);
+    mkdirSync(dirname(pos[3]), { recursive: true });
+    writeFileSync(pos[3], encodePng(image.width, image.height, image.rgba));
+    console.log(`-> ${pos[3]}`);
     break;
   }
 

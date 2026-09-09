@@ -10,7 +10,7 @@
 // for translation (Skeleton::drawJointFramesNow), which this module bakes per frame.
 import { childOf, childrenOf, isForm, parseIff, readCString } from './iff.mjs';
 
-class R {
+export class R {
   constructor(buf) {
     this.b = buf;
     this.o = 0;
@@ -26,6 +26,11 @@ class R {
   vec() { return [this.f32(), this.f32(), this.f32()]; }
   quat() { return [this.f32(), this.f32(), this.f32(), this.f32()]; } // w x y z
   get remaining() { return this.b.length - this.o; }
+}
+
+/** A four-character tag stored as a little-endian uint32 ("MAIN" is on disk as "NIAM"). */
+export function tagString(u32) {
+  return String.fromCharCode((u32 >>> 24) & 255, (u32 >>> 16) & 255, (u32 >>> 8) & 255, u32 & 255);
 }
 
 const versionForm = (root, tag) => {
@@ -173,7 +178,22 @@ export function parseMgn(root) {
     const r = new R(ozn.data);
     while (r.remaining > 0) occlusionZones.push(r.str());
   }
-  return { version, maxTransformsPerVertex, maxTransformsPerShader, skeletons, transforms, positions, weightCounts, weightStart, weightTransform, weightValue, normals, shaders, blendTargetCount, occlusionZones };
+  // Texture renderers: blueprints that bake a texture (skin, hair) at run time into one or more
+  // of this mesh's shaders. Each TRT chunk names the blueprint and the (shader index, texture tag)
+  // slots it fills.
+  const textureRenderers = [];
+  const trts = childOf(v, 'TRTS');
+  if (trts) {
+    for (const trt of childrenOf(trts, 'TRT ')) {
+      const r = new R(trt.data);
+      const file = r.str().replace(/\\/g, '/');
+      const count = r.i32();
+      const slots = [];
+      for (let i = 0; i < count; i++) slots.push({ shaderIndex: r.i32(), tag: tagString(r.u32()) });
+      textureRenderers.push({ file, slots });
+    }
+  }
+  return { version, maxTransformsPerVertex, maxTransformsPerShader, skeletons, transforms, positions, weightCounts, weightStart, weightTransform, weightValue, normals, shaders, blendTargetCount, occlusionZones, textureRenderers };
 }
 
 /** .lmg: the mesh generator files by detail level (index 0 is the finest). */
