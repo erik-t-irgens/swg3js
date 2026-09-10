@@ -23,6 +23,7 @@
 // to its SWG rest direction, and the JKA bone's world-space change from rest is applied to the
 // SWG bone in that aligned frame. Quaternions here are [w, x, y, z].
 import { closeSync, openSync, readSync, readdirSync, statSync, existsSync } from 'node:fs';
+import * as fsExtra from 'node:fs';
 import { join } from 'node:path';
 import { inflateRawSync } from 'node:zlib';
 
@@ -102,7 +103,18 @@ export function openJkaBase(dir) {
   if (!existsSync(join(base, 'assets0.pk3')) && existsSync(join(base, 'base', 'assets0.pk3'))) base = join(base, 'base');
   if (!existsSync(base)) throw new Error(`${dir}: not found`);
   const files = readdirSync(base).filter((f) => f.toLowerCase().endsWith('.pk3')).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
-  if (!files.length) throw new Error(`${base}: no .pk3 archives (expected assets0.pk3 .. assets3.pk3)`);
+  if (!files.length) {
+    // A folder holding the two humanoid files on their own (as jka-extract writes them) works too.
+    const loose = (name) => [join(base, name), join(base, 'models/players/_humanoid', name)].find((f) => existsSync(f));
+    if (loose('_humanoid.gla') && loose('animation.cfg')) {
+      const { readFileSync } = fsExtra;
+      const paths = { 'models/players/_humanoid/_humanoid.gla': loose('_humanoid.gla'), 'models/players/_humanoid/animation.cfg': loose('animation.cfg') };
+      const file = (name) => paths[name.toLowerCase()];
+      const one = { file: base, has: (name) => !!file(name), read: (name) => readFileSync(file(name)) };
+      return { base, archives: [], has: one.has, read: one.read, where: (name) => file(name) ?? null, archiveOf: () => one, close: () => {} };
+    }
+    throw new Error(`${base}: no .pk3 archives (expected assets0.pk3 .. assets3.pk3) and no loose _humanoid.gla + animation.cfg`);
+  }
   const archives = files.map((f) => openZip(join(base, f)));
   const find = (name) => {
     for (let i = archives.length - 1; i >= 0; i--) if (archives[i].has(name)) return archives[i];

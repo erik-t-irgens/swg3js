@@ -308,3 +308,44 @@ assert.ok(defaultJkaClips().includes('BOTH_A3_TR_BL') && defaultJkaClips().inclu
 assert.ok(defaultJkaClips().includes('BOTH_S2_S1_T_') && defaultJkaClips().includes('BOTH_R3_B__S1'), 'medium and strong starts and returns keep the fast stance suffix');
 assert.ok(BONE_MAP.length >= 20);
 console.log('jka: ok');
+
+// --- re-importing into an existing GLB, and loose humanoid files as a source ----------------------
+{
+  const { buildGlb } = await import('../glb.mjs');
+  const { readGlb, replaceClips, skinJoints } = await import('../glbclips.mjs');
+  const { writeFileSync: wf, mkdirSync } = await import('node:fs');
+  // a skinned GLB with the SWG-style joints (identity inverse binds are enough for the test)
+  const world: number[][] = [];
+  swgJoints.forEach((j, i) => {
+    const p = j.parent >= 0 ? world[j.parent] : [0, 0, 0];
+    world[i] = [p[0] + j.translation[0], p[1] + j.translation[1], p[2] + j.translation[2]];
+  });
+  const inverseBind = world.map((w) => [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -w[0], -w[1], -w[2], 1]);
+  const old = { name: 'walk', times: new Float32Array([0, 0.5]), tracks: swgJoints.map(() => ({ rotations: new Float32Array([0, 0, 0, 1, 0, 0, 0, 1]), translations: new Float32Array(6) })), duration: 0.5 };
+  const stale = { ...old, name: 'BOTH_STALE' };
+  const glb = buildGlb([], { flipX: true, skin: { joints: swgJoints, inverseBind, clips: [old, stale] }, animations: [old, stale] });
+  const parsed = readGlb(glb);
+  assert.equal(parsed.json.animations.length, 2);
+  const joints = skinJoints(parsed.json);
+  assert.deepEqual(joints.map((j: { name: string }) => j.name), swgJoints.map((j) => j.name));
+  assert.deepEqual(joints.map((j: { parent: number }) => j.parent), swgJoints.map((j) => j.parent));
+  assert.ok(Math.abs(joints[1].translation[1] - 1.0) < 1e-6);
+  // loose files instead of pk3 archives
+  const loose = mkdtempSync(join(tmpdir(), 'jka-loose-'));
+  wf(join(loose, '_humanoid.gla'), glaBuf);
+  wf(join(loose, 'animation.cfg'), cfgText);
+  const r2 = importJkaClips(loose, joints, ['BOTH_A1_T__B_', 'BOTH_JUMP1']);
+  assert.equal(r2.clips.length, 2);
+  const out = replaceClips(glb, r2.clips, (name: string) => /^BOTH_/.test(name));
+  const again = readGlb(out);
+  assert.deepEqual(again.json.animations.map((a: { name: string }) => a.name), ['walk', 'BOTH_A1_T__B_', 'BOTH_JUMP1']);
+  assert.equal(again.json.buffers[0].byteLength, again.bin.length);
+  // the appended rotation accessor reads back the retargeted arm pose
+  const anim = again.json.animations[1];
+  const armChannel = anim.channels.find((c: { target: { node: number; path: string } }) => c.target.node === joints[8].node && c.target.path === 'rotation');
+  const acc = again.json.accessors[anim.samplers[armChannel.sampler].output];
+  const view = again.json.bufferViews[acc.bufferView];
+  const rot = new Float32Array(again.bin.buffer, again.bin.byteOffset + view.byteOffset, acc.count * 4);
+  assert.ok(Math.abs(Math.abs(rot[0]) - Math.SQRT1_2) < 1e-3 && Math.abs(Math.abs(rot[3]) - Math.SQRT1_2) < 1e-3, `arm rotation ${Array.from(rot.subarray(0, 4))}`);
+}
+console.log('jka glb round trip: ok');

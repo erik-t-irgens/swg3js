@@ -19,6 +19,8 @@
 //   node tools/swg/cli.mjs trt <swg-dir> <x.trt> <out.png> [--var=name=value,...]   bake a texture renderer blueprint (skin, hair) to a PNG
 //   node tools/swg/cli.mjs player <swg-dir> <out-dir> [--template=object/creature/player/shared_human_male.iff] [--wear=...|none] [--var=...]   the player's character as <out-dir>/player/<id>.glb + manifest.json
 //                                                               [--jka=<Jedi Academy GameData or base dir>] [--jka-anims=BOTH_A1_T__B_,...]  adds Jedi Academy's saber attacks, jumps and rolls, retargeted
+//   node tools/swg/cli.mjs jka-clips <player.glb> <jka-dir> [--jka-anims=...]   re-import Jedi Academy's clips into a converted player GLB (no SWG archives needed)
+//   node tools/swg/cli.mjs jka-extract <jka-dir> <out-dir>                 copy the humanoid skeleton and animation.cfg out of the pk3 archives
 //                                                                  (dressed in a shirt, trousers and shoes unless --wear says otherwise)
 //                                                                  convert a skeletal appearance (creature, character) with skeleton and animations
 //   node tools/swg/cli.mjs flora <swg-dir> <planet>|all <out-dir>   (re)convert just the flora models for packs converted already
@@ -68,6 +70,7 @@ import { R, composeMeshes, mergeSkeletons, parseAnimation, parseLat, parseLmg, p
 import { resolveTemplateMesh, resolveTemplateString } from './objtemplate.mjs';
 import { exportParticle } from './particle.mjs';
 import { defaultJkaClips, importJkaClips } from './jka.mjs';
+import { readGlb, replaceClips, skinJoints } from './glbclips.mjs';
 import { encodePng } from './png.mjs';
 import { shaderTextures } from './sht.mjs';
 import { bakeShader, describeShader, describeVariables, loadShader, parseBlueprint, preparedShaders, renderBlueprint, renderContext, shaderNeedsBake } from './texrender.mjs';
@@ -1572,6 +1575,47 @@ switch (cmd) {
     writeFileSync(manifestFile, JSON.stringify(manifest, null, 2));
     console.log(`-> ${join(outDir, `${id}.glb`)} and ${manifestFile}; the game uses the first entry`);
     printEffectSummary();
+    break;
+  }
+
+  case 'jka-clips': {
+    // <player.glb> <jka-dir|folder with _humanoid.gla + animation.cfg> [--jka-anims=...]: swap the GLB's Jedi Academy clips for freshly retargeted ones
+    if (!pos[2]) usage();
+    const glbFile = pos[1];
+    const buf = readFileSync(glbFile);
+    const { json } = readGlb(buf);
+    const joints = skinJoints(json);
+    const wanted = options['jka-anims'] ? options['jka-anims'].split(',').map((a) => a.trim().toUpperCase()).filter(Boolean) : defaultJkaClips();
+    const r = importJkaClips(pos[2], joints, wanted, { log: (m) => console.log(`  jka: ${m}`) });
+    const backup = `${glbFile}.bak`;
+    if (!existsSync(backup)) writeFileSync(backup, buf);
+    writeFileSync(glbFile, replaceClips(buf, r.clips, (name) => /^BOTH_/i.test(name)));
+    const manifestFile = join(dirname(glbFile), 'manifest.json');
+    if (existsSync(manifestFile)) {
+      const manifest = JSON.parse(readFileSync(manifestFile, 'utf8'));
+      const entry = (manifest.players ?? []).find((p) => basename(p.file) === basename(glbFile));
+      if (entry) {
+        entry.clips = [...(entry.clips ?? []).filter((c) => !/^BOTH_/i.test(c)), ...r.clips.map((c) => c.name)];
+        entry.jkaClips = Object.fromEntries(r.clips.map((c) => [c.name, { loop: c.loop, fps: c.fps, frames: c.frames }]));
+        writeFileSync(manifestFile, JSON.stringify(manifest, null, 2));
+      }
+    }
+    console.log(`-> ${glbFile}: ${r.clips.length} Jedi Academy clips${r.info.missing.length ? `; not in animation.cfg: ${r.info.missing.join(', ')}` : ''} (the previous file is kept as ${basename(backup)})`);
+    break;
+  }
+
+  case 'jka-extract': {
+    // <jka-dir> <out-dir>: the humanoid skeleton and animation.cfg as loose files, for sharing a retarget problem
+    if (!pos[2]) usage();
+    const { openJkaBase } = await import('./jka.mjs');
+    const base = openJkaBase(pos[1]);
+    mkdirSync(pos[2], { recursive: true });
+    for (const name of ['models/players/_humanoid/_humanoid.gla', 'models/players/_humanoid/animation.cfg']) {
+      const out = join(pos[2], basename(name));
+      writeFileSync(out, base.read(name));
+      console.log(`${name} (${base.where(name)}) -> ${out}`);
+    }
+    base.close();
     break;
   }
 
