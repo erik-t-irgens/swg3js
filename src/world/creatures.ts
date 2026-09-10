@@ -345,10 +345,6 @@ export class Creature {
 }
 
 export class CreatureManager {
-  /** Where every living creature stands, for effects that react to them (water ripples). */
-  positions(): Iterable<THREE.Vector3> {
-    return this.creatures.filter((c) => c.hp > 0).map((c) => c.pos);
-  }
 
   readonly group = new THREE.Group();
   readonly creatures: Creature[] = [];

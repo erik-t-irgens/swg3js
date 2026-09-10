@@ -4,7 +4,7 @@ import type { Physics, RAPIER } from '../core/physics';
 import { CreatureManager } from './creatures';
 import { DayCycle } from './daycycle';
 import { SwgSky, type SkyLighting } from './sky';
-import { createWaterMaterial, emitRipple, type WaterMaterial } from './water';
+import { createWaterMaterial, emitRipple, Splashes, type WaterMaterial } from './water';
 import { setEnvironment } from './envmap';
 import { PropFactory, type Collider, type Exclusion, type ScatterItem } from './props';
 import { FloraPlanter } from './flora';
@@ -34,6 +34,8 @@ const SWG_AMBIENT = 1.3;
 const SWG_FILL = 1.0;
 /** The client's fog densities read far thicker here than in the game; planets can override this. */
 const DEFAULT_SWG_FOG_SCALE = 0.08;
+/** Seconds between ripple passes: dense enough that a swimmer's rings overlap into a wake. */
+const RIPPLE_INTERVAL = 0.12;
 const FOG_SCALE = 0.18;
 /** Physics colliders only exist this many chunks out; nothing dynamic lives farther away. */
 const PHYSICS_RADIUS = 3;
@@ -158,14 +160,17 @@ export class World {
   /** Multiplier on the sky's fog density, for tuning from the console. */
   fogScale = 1;
   private rippleClock = 0;
-  private readonly lastRipple = new THREE.Vector3(Number.NaN, 0, 0);
+  /** Where each mover was at the last ripple pass, for its velocity through the water. */
+  private readonly lastSeen = new WeakMap<object, THREE.Vector3>();
+  private readonly splashes = new Splashes();
   private portals: PortalRenderer | null = null;
   private readonly csmMaterials = new WeakSet<THREE.Material>();
   private csmScanAt = 0;
   private loadToken = 0;
 
   constructor(readonly scene: THREE.Scene, readonly physics: Physics) {
-    scene.add(this.chunkRoot, this.sun, this.sun.target, this.hemi, this.fill, this.fill.target);
+    scene.add(this.chunkRoot, this.sun, this.sun.target, this.hemi, this.fill, this.fill.target, this.splashes.points);
+    markActor(this.splashes.points);
     this.sun.castShadow = true;
     this.sun.shadow.mapSize.set(4096, 4096);
     const sc = this.sun.shadow.camera;
@@ -517,21 +522,43 @@ export class World {
     setEnvironment(env, 1);
   }
 
-  /** Rings spread from whatever wades or swims: the player and the creatures, whenever they move through water. */
+  /**
+   * Rings, wakes and splashes from whatever wades or swims: the player, the creatures and the
+   * speeders. Each mover's velocity through the water shapes its wake and throws spray when fast.
+   */
   private emitRipples(dt: number, playerPos: THREE.Vector3): void {
+    this.splashes.update(dt, (x, z) => this.terrain.waterHeightAt(x, z));
     if (!this.waterMaterials.length) return;
     this.rippleClock += dt;
-    if (this.rippleClock < 0.28) return;
+    if (this.rippleClock < RIPPLE_INTERVAL) return;
+    const interval = this.rippleClock;
     this.rippleClock = 0;
-    const touch = (x: number, y: number, z: number, strength: number) => {
-      const depth = this.terrain.waterHeightAt(x, z) - y;
-      if (depth > -0.3 && depth < 2.5) emitRipple(x, z, strength, this.waterTime);
+    const touch = (key: object, p: THREE.Vector3, strength: number) => {
+      const surface = this.terrain.waterHeightAt(p.x, p.z);
+      const depth = surface - p.y;
+      let last = this.lastSeen.get(key);
+      if (!last) {
+        last = new THREE.Vector3(Number.NaN, 0, 0);
+        this.lastSeen.set(key, last);
+      }
+      const known = !Number.isNaN(last.x);
+      const vx = known ? (p.x - last.x) / interval : 0;
+      const vz = known ? (p.z - last.z) / interval : 0;
+      last.copy(p);
+      if (depth < -0.3 || depth > 2.5) return;
+      const speed = Math.hypot(vx, vz);
+      // Standing still barely stirs the water; moving through it leaves a wake.
+      if (speed < 0.15) {
+        if (Math.random() < 0.25) emitRipple(p.x, p.z, strength * 0.25, this.waterTime);
+        return;
+      }
+      emitRipple(p.x, p.z, strength * Math.min(1, 0.4 + speed / 4), this.waterTime, vx, vz);
+      // Spray past a brisk walk, more the faster the mover and the shallower it sits.
+      if (speed > 2.2 && depth < 1.6) this.splashes.spawn(p.x, surface, p.z, Math.round(2 + speed * 1.2 * strength), vx, vz);
     };
-    const moved = Number.isNaN(this.lastRipple.x) || this.lastRipple.distanceToSquared(playerPos) > 0.04;
-    if (moved) touch(playerPos.x, playerPos.y, playerPos.z, 1);
-    this.lastRipple.copy(playerPos);
-    for (const c of this.creatures.positions()) touch(c.x, c.y, c.z, 0.8);
-    for (const sp of this.speeders) touch(sp.pos.x, sp.pos.y, sp.pos.z, 1.2);
+    touch(this, playerPos, 1);
+    for (const c of this.creatures.creatures) if (c.hp > 0) touch(c, c.pos, 0.9);
+    for (const sp of this.speeders) touch(sp, sp.pos, 1.4);
   }
 
   /** Lights, fog and clear colour straight from the sky's colour ramps for this moment. */
