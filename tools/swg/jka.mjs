@@ -246,6 +246,9 @@ const vnorm = (a) => {
   return [a[0] / l, a[1] / l, a[2] / l];
 };
 
+/** How far the hips may rise or drop from a clip, in metres. */
+const ROOT_MOTION_LIMIT = 0.7;
+
 /** Quake (x forward, y left, z up) to the converter's glTF space (z forward, y up, x left). */
 const toGltfV = (v) => [v[1], v[2], v[0]];
 const toGltfQ = (q) => [q[0], q[2], q[3], q[1]];
@@ -351,7 +354,7 @@ function swgBindWorld(joints) {
  * standing frame when given, else the file's base pose). Animations carry a constant root offset
  * the base pose lacks, so a standing frame is the reference that keeps feet on the ground.
  */
-export function planRetarget(gla, joints, map = BONE_MAP, referenceFrame = -1) {
+export function planRetarget(gla, joints, map = BONE_MAP, referenceFrame = -1, { align = false } = {}) {
   const jkaIndex = new Map(gla.bones.map((b, i) => [b.name.toLowerCase(), i]));
   const findSwg = (patterns) => {
     for (const p of patterns) {
@@ -409,6 +412,10 @@ export function planRetarget(gla, joints, map = BONE_MAP, referenceFrame = -1) {
     while (parent >= 0 && !(byJka.get(parent)?.align)) parent = gla.bones[parent].parent;
     p.align = parent >= 0 ? byJka.get(parent).align : [1, 0, 0, 0];
   }
+  // By default the change is applied in world space as it is: with a standing frame as the rest
+  // the two skeletons stand alike, and a direction-only alignment would guess each bone's twist
+  // and turn swings into the wrong plane. The angles stay in the report.
+  if (!align) for (const p of pairs) p.align = [1, 0, 0, 0];
   const pelvis = pairs.find((p) => p.rootMotion);
   const unitScale = pelvis && jkaBase[pelvis.j].t[1] > 1e-3 ? swgBind[pelvis.s].t[1] / jkaBase[pelvis.j].t[1] : 0.0254;
   return { pairs, bySwg, jkaBase, swgBind, unitScale, referenceFrame, report: { matched: pairs.map((p) => `${p.jka} -> ${joints[p.s].name}`), missing, dropped, angles } };
@@ -443,9 +450,11 @@ export function retargetClip(gla, entry, joints, plan, { name = entry.name, fps 
       } else q = parent ? qnorm(qmul(parent.q, j.rotation)) : qnorm(j.rotation);
       let localT = j.translation;
       if (p?.rootMotion) {
-        // The hips carry the crouch and lift of a move: the JKA pelvis' world offset from rest,
-        // in metres, taken into the parent's frame.
-        const d = vsub(anim[p.j].t, jkaBase[p.j].t).map((v) => v * unitScale);
+        // The hips carry the crouch and lift of a move: the JKA pelvis' rise or drop from rest,
+        // in metres. Only the vertical part: the character's own physics moves it along the
+        // ground, and the file's root bone drifts sideways in some clips.
+        const dy = Math.max(-ROOT_MOTION_LIMIT, Math.min(ROOT_MOTION_LIMIT, (anim[p.j].t[1] - jkaBase[p.j].t[1]) * unitScale));
+        const d = [0, dy, 0];
         const inParent = parent ? qrot(qconj(parent.q), d) : d;
         localT = [j.translation[0] + inParent[0], j.translation[1] + inParent[1], j.translation[2] + inParent[2]];
       }
@@ -489,6 +498,44 @@ export function poseCheck(clip, joints, plan, frame = 0) {
     out.push({ bone: joints[p.s].name, degrees: Math.round((Math.acos(Math.max(-1, Math.min(1, a[0] * b[0] + a[1] * b[1] + a[2] * b[2]))) * 180) / Math.PI) });
   }
   return out;
+}
+
+/**
+ * Where a clip's frame puts things, for reading a conversion report: the hips' rise from the
+ * bind pose and the world direction (x left, y up, z forward) of a few limbs, next to the JKA
+ * bone's direction in the same frame so the two can be compared.
+ */
+export function clipReport(gla, entry, clip, joints, plan, at = 0.5) {
+  const frame = Math.min(clip.frames - 1, Math.max(0, Math.round((clip.frames - 1) * at)));
+  const world = [];
+  joints.forEach((j, i) => {
+    const r = clip.tracks[i].rotations;
+    const q = [r[frame * 4 + 3], r[frame * 4], r[frame * 4 + 1], r[frame * 4 + 2]];
+    const t = Array.from(clip.tracks[i].translations.subarray(frame * 3, frame * 3 + 3));
+    if (j.parent < 0) world[i] = { q, t };
+    else {
+      const p = world[j.parent];
+      const rr = qrot(p.q, t);
+      world[i] = { q: qmul(p.q, q), t: [p.t[0] + rr[0], p.t[1] + rr[1], p.t[2] + rr[2]] };
+    }
+  });
+  const jkaFrame = entry.reverse ? entry.first + entry.count - 1 - frame : entry.first + frame;
+  const anim = jkaWorld(gla, jkaFrame);
+  const fmt = (v) => `(${v.map((x) => (x >= 0 ? '+' : '') + x.toFixed(2)).join(' ')})`;
+  const hips = plan.pairs.find((p) => p.rootMotion);
+  const parts = [];
+  if (hips) parts.push(`hips ${(world[hips.s].t[1] - plan.swgBind[hips.s].t[1] >= 0 ? '+' : '')}${(world[hips.s].t[1] - plan.swgBind[hips.s].t[1]).toFixed(2)} m (JKA ${((anim[hips.j].t[1] - plan.jkaBase[hips.j].t[1]) * plan.unitScale).toFixed(2)})`);
+  for (const name of ['rfemurYZ', 'rtibia', 'lfemurYZ', 'rhumerus', 'rradius', 'lhumerus', 'lradius', 'lower_lumbar']) {
+    const p = plan.pairs.find((x) => x.jka === name);
+    if (!p) continue;
+    const childSwg = plan.pairs.find((c) => joints[c.s].parent === p.s);
+    const childJka = p.chain ? plan.pairs.find((c) => c.jka.toLowerCase() === p.chain.toLowerCase()) : null;
+    if (!childSwg || !childJka) continue;
+    const ds = vnorm(vsub(world[childSwg.s].t, world[p.s].t));
+    const dj = vnorm(vsub(anim[childJka.j].t, anim[p.j].t));
+    parts.push(`${joints[p.s].name} ${fmt(ds)} JKA ${fmt(dj)}`);
+  }
+  return `${entry.name} frame ${frame}/${clip.frames}: ${parts.join('; ')}`;
 }
 
 /** The JKA clips the game asks for by default: saber attacks of the three single styles, the moves around them, jumps and rolls. */
@@ -556,6 +603,12 @@ export function importJkaClips(jkaDir, joints, wanted = defaultJkaClips(), { log
     if (stance) {
       const check = poseCheck(stance, joints, plan);
       log(`pose check (${stance.source}, first frame, bend from the bind pose): ${check.map((c) => `${c.bone} ${c.degrees}°`).join(', ')}`);
+    }
+    // Where a few telling clips put the hips and limbs (x left, y up, z forward), against the JKA bones.
+    log(`bind pose: ${clipReport(gla, cfg.get(stance?.source ?? 'BOTH_STAND1') ?? [...cfg.values()][0], stance ?? clips[0], joints, plan, 0)}`);
+    for (const name of ['BOTH_CROUCH1IDLE', 'BOTH_LAND2', 'BOTH_JUMP1', 'BOTH_A2_T__B_', 'BOTH_A2__L__R']) {
+      const c = clips.find((x) => x.source === name);
+      if (c) log(`check: ${clipReport(gla, cfg.get(name), c, joints, plan, 0.5)}`);
     }
     return { clips, info: { bones: gla.numBones, frames: gla.numFrames, animations: cfg.size, matched: plan.report.matched, missingBones: plan.report.missing, angles: plan.report.angles, unitScale: plan.unitScale, missing } };
   } finally {

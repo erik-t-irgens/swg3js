@@ -149,9 +149,9 @@ const jkaBones: Bone[] = [
   { name: 'cervical', parent: 4, local: { q: I, t: [0, 0, 6] } },
   { name: 'cranium', parent: 5, local: { q: I, t: [0, 0, 4] } },
   { name: 'rclavical', parent: 4, local: { q: I, t: [0, -4, 2] } },
-  { name: 'rhumerus', parent: 7, local: { q: I, t: [0, -4, 0] } }, // arm out to the right (-y) in a T pose
-  { name: 'rradius', parent: 8, local: { q: I, t: [0, -12, 0] } },
-  { name: 'rhand', parent: 9, local: { q: I, t: [0, -10, 0] } },
+  { name: 'rhumerus', parent: 7, local: { q: I, t: [0, -4, 0] } }, // arm hanging down (-z), as it stands
+  { name: 'rradius', parent: 8, local: { q: I, t: [0, 0, -12] } },
+  { name: 'rhand', parent: 9, local: { q: I, t: [0, 0, -10] } },
   { name: 'rfemurYZ', parent: 1, local: { q: I, t: [0, -4, -2] } },
   { name: 'rtibia', parent: 11, local: { q: I, t: [0, 0, -18] } },
   { name: 'rtalus', parent: 12, local: { q: I, t: [0, 0, -18] } },
@@ -159,12 +159,12 @@ const jkaBones: Bone[] = [
 // Frames hold each bone's change from the base pose, relative to its parent's change (the
 // renderer chains them into the matrix that moves bind-space vertices). Frame 0: no change.
 // Frame 1: hips dropped 4 units, and the right upper arm swung forward 90 degrees about its own
-// pivot (about z, -y to +x): a rotation about the arm's base position p is T(p) R T(-p).
+// pivot (about the left axis y, -z to +x): a rotation about the arm's base position p is T(p) R T(-p).
 const frame0 = jkaBones.map(() => ({ q: I, t: [0, 0, 0] }));
 const frame1 = frame0.map((b) => ({ q: [...b.q] as Q, t: [...b.t] }));
 frame1[1].t = [0, 0, -4];
 {
-  const R = qaxis([0, 0, 1], Math.PI / 2);
+  const R = qaxis([0, 1, 0], -Math.PI / 2);
   const pivot = [0, -4, 40 + 6 + 6 + 8 + 2]; // rhumerus base position: clavicle at y -4, z 62
   const rp = qrot(R, pivot);
   frame1[8] = { q: R, t: [pivot[0] - rp[0], pivot[1] - rp[1], pivot[2] - rp[2]] };
@@ -179,7 +179,7 @@ assert.equal(gla.numFrames, 3);
 assert.equal(gla.bones[8].name, 'rhumerus');
 assert.equal(gla.bones[8].parent, 7);
 const b1 = gla.boneAt(1, 8);
-assert.ok(Math.abs(b1.q[0] - Math.SQRT1_2) < 2e-4 && Math.abs(b1.q[3] - Math.SQRT1_2) < 2e-4, `rhumerus frame 1 quaternion ${b1.q}`);
+assert.ok(Math.abs(b1.q[0] - Math.SQRT1_2) < 2e-4 && Math.abs(b1.q[2] + Math.SQRT1_2) < 2e-4, `rhumerus frame 1 quaternion ${b1.q}`);
 assert.deepEqual(gla.boneAt(1, 1).t.map((v) => Math.round(v * 64) / 64), [0, 0, -4]);
 assert.ok(Math.abs(gla.bones[1].basePose[11] - 40) < 1e-5, 'pelvis base height');
 
@@ -214,7 +214,7 @@ assert.equal(plan.report.matched.length, 13, plan.report.missing.join('; '));
 assert.ok(plan.report.missing.every((m: string) => /^l/.test(m)), `unexpected misses: ${plan.report.missing}`);
 assert.ok(Math.abs(plan.unitScale - 1.0 / 40) < 1e-9, `unit scale ${plan.unitScale}`);
 const armAngle = plan.report.angles.find((a: { bone: string }) => a.bone === 'rhumerus')!.degrees;
-assert.equal(armAngle, 90, 'the T-pose arm sits 90 degrees from the hanging arm');
+assert.equal(armAngle, 0, 'both arms hang straight down at rest');
 
 // --- retarget: the swung arm should point forward (+z) on the SWG skeleton too -----------------
 const clip = retargetClip(gla, cfg.get('BOTH_A1_T__B_')!, swgJoints, plan);
