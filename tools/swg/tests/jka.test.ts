@@ -93,7 +93,7 @@ function buildGla(bones: Bone[], frames: { q: Q; t: number[] }[][]): Buffer {
   header.writeInt32LE(ofsFrames, 80);
   header.writeInt32LE(numBones, 84);
   header.writeInt32LE(ofsFrames + index.length + pad, 88);
-  header.writeInt32LE(100, 92);
+  header.writeInt32LE(100 + numBones * 4, 92); // as real files: ofsSkel points at the first bone, past the offset table
   header.writeInt32LE(ofsFrames + index.length + pad + pool.length, 96);
   return Buffer.concat([header, skelBlock, index, Buffer.alloc(pad), pool]);
 }

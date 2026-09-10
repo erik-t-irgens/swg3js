@@ -4,9 +4,9 @@
 //
 // Formats (from OpenJK, rd-common/mdx_format.h and qcommon/matcomp.cpp):
 //   .gla  mdxaHeader_t { "2LGA", version, name[64], fScale, numFrames, ofsFrames, numBones,
-//         ofsCompBonePool, ofsSkel, ofsEnd }. At ofsSkel: numBones int32 offsets, each to an
-//         mdxaSkel_t { name[64], flags, parent, basePose 3x4, basePoseInv 3x4, numChildren,
-//         children[] }. At ofsFrames: 3-byte little-endian indices, (frame * numBones + bone),
+//         ofsCompBonePool, ofsSkel, ofsEnd }. Right after the header: numBones int32 offsets
+//         (counted from the end of the header) to mdxaSkel_t { name[64], flags, parent,
+//         basePose 3x4, basePoseInv 3x4, numChildren, children[] }. At ofsFrames: 3-byte little-endian indices, (frame * numBones + bone),
 //         into the pool at ofsCompBonePool of 14-byte bones: four uint16 quaternion parts
 //         (w x y z, value / 16383 - 2) and three uint16 translations (value / 64 - 512). A pool
 //         bone is the bone's transform relative to its parent; the base pose matrices are in
@@ -139,10 +139,13 @@ export function parseGla(buf) {
   const ofsFrames = buf.readInt32LE(80);
   const numBones = buf.readInt32LE(84);
   const ofsCompBonePool = buf.readInt32LE(88);
-  const ofsSkel = buf.readInt32LE(92);
+  // The bone offset table follows the 100-byte header, and its entries count from the same place
+  // (the renderer ignores the header's ofsSkel for this).
+  const HEADER = 100;
   const bones = [];
   for (let i = 0; i < numBones; i++) {
-    const so = ofsSkel + buf.readInt32LE(ofsSkel + i * 4);
+    const so = HEADER + buf.readInt32LE(HEADER + i * 4);
+    if (so + MAX_QPATH + 8 + 48 > buf.length) throw new Error(`bone ${i}: skeleton entry at ${so} runs past the file (${buf.length} bytes)`);
     const basePose = [];
     for (let k = 0; k < 12; k++) basePose.push(buf.readFloatLE(so + MAX_QPATH + 8 + k * 4));
     bones.push({ name: cstr(buf, so, MAX_QPATH), flags: buf.readUInt32LE(so + MAX_QPATH), parent: buf.readInt32LE(so + MAX_QPATH + 4), basePose });
