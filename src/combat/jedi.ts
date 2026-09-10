@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import { RAPIER } from '../core/physics';
 import type { Creature } from '../world/creatures';
+import { KICK_DAMAGE } from './saber';
+import { THROW } from './saberThrow';
 import type { Kit, KitContext, KitSlot, Resource } from './kit';
 
 const tmp = new THREE.Vector3();
@@ -22,7 +24,8 @@ export class JediKit implements Kit {
     { key: '4', name: 'Force Lightning', cost: '18/s' },
   ];
   readonly help = [
-    '<b>LMB</b> saber swing (hold to chain, direction keys pick the swing) · <b>K</b> saber style · <b>L</b> saber on/off',
+    '<b>LMB</b> saber swing (hold to chain, direction keys pick the swing) · <b>RMB</b> throw the saber (staff: kick) · <b>LMB+RMB</b> kata · <b>K</b> style (fast, medium, strong, dual, staff) · <b>L</b> saber on/off',
+    '<b>Jump</b> + direction + <b>LMB</b> flip and jump attacks · <b>Ctrl</b> + forward + <b>LMB</b> lunge or spin · <b>Jump</b> beside a wall: wall run (strafe + forward) or wall flip (strafe) · <b>Jump</b> at a wall: run up and flip back · back + <b>Jump</b>: backflip',
     '<b>1</b> Force Jump · <b>2</b> Force Speed · <b>3</b> Force Push · <b>4</b> Force Lightning (hold)',
   ];
   readonly resource: Resource = { label: 'Force', value: 100, max: 100 };
@@ -32,6 +35,9 @@ export class JediKit implements Kit {
   styleNote = '';
   private readonly hitThisSwing = new Set<Creature>();
   private lastAttackId = -1;
+  /** What the thrown saber has hit on its current leg out or back. */
+  private readonly hitThisLeg = new Set<Creature>();
+  private lastLegId = -1;
   private readonly aura: THREE.Mesh<THREE.SphereGeometry, THREE.MeshBasicMaterial>;
   private readonly bolt: THREE.Line<THREE.BufferGeometry, THREE.LineBasicMaterial>;
   private readonly boltPositions = new Float32Array((LIGHTNING_SEGMENTS + 1) * 3);
@@ -76,32 +82,32 @@ export class JediKit implements Kit {
       this.hitThisSwing.clear();
     }
     if (player.swing === 0) this.hitThisSwing.clear();
+    // Every lit blade sweeps: the staff's second and the dual style's left-hand saber too.
     if (onFoot && player.saberOn && player.bladeActive) {
-      player.bladeSegment(a, b);
-      mid.copy(a).add(b).multiplyScalar(0.5);
-      tmp.copy(b).sub(a);
-      const len = tmp.length();
-      quat.setFromUnitVectors(UP, tmp.normalize());
-      physics.world.intersectionsWithShape(
-        mid,
-        quat,
-        new RAPIER.Capsule(len / 2, 0.16),
-        (collider) => {
-          const c = world.creatures.byCollider.get(collider.handle);
-          if (c && !this.hitThisSwing.has(c)) {
-            this.hitThisSwing.add(c);
-            c.damage(player.saberDamage, player.pos, 5);
-            tmp2.copy(c.pos).y += c.halfHeight;
-            effects.burst(tmp2, 0x9fd4ff, 1.2, 0.2);
-            effects.flash(tmp2, 0x9fd4ff, 10, 8, 0.15);
-          }
-          return true;
-        },
-        undefined,
-        undefined,
-        undefined,
-        player.body,
-      );
+      for (let i = 0; i < player.bladeCount; i++) {
+        player.bladeSegmentAt(i, a, b);
+        this.sweep(ctx, a, b, 0.16, player.saberDamage, this.hitThisSwing);
+      }
+    }
+    // A kick: the foot out in its direction, from the body's middle.
+    const kick = onFoot ? player.saber.kicking : null;
+    if (kick) {
+      const yaw = player.heading + (kick === 'L' ? Math.PI / 2 : kick === 'R' ? -Math.PI / 2 : kick === 'B' ? Math.PI : 0);
+      a.copy(player.pos).y += 0.8;
+      b.set(a.x + Math.sin(yaw) * 1.3, a.y + 0.1, a.z + Math.cos(yaw) * 1.3);
+      this.sweep(ctx, a, b, 0.3, KICK_DAMAGE.min + Math.floor(Math.random() * (KICK_DAMAGE.max - KICK_DAMAGE.min + 1)), this.hitThisSwing, KICK_DAMAGE.push);
+    }
+    // The thrown saber cuts what it flies through, once on the way out and once on the way back.
+    if (player.thrown.inFlight) {
+      if (player.thrown.legId !== this.lastLegId) {
+        this.lastLegId = player.thrown.legId;
+        this.hitThisLeg.clear();
+      }
+      player.thrown.direction(tmp);
+      // The blade lies across the flight, spinning: a disc of its length.
+      a.copy(player.thrown.pos).addScaledVector(tmp, -0.55);
+      b.copy(player.thrown.pos).addScaledVector(tmp, 0.55);
+      this.sweep(ctx, a, b, 0.55, player.thrown.returning ? THROW.returnHitDamage : THROW.hitDamage, this.hitThisLeg, 3);
     }
 
     // 1: Force Jump
@@ -187,6 +193,35 @@ export class JediKit implements Kit {
     }
 
     res.value = Math.min(res.max, Math.max(0, res.value + 9 * dt));
+  }
+
+  /** Hurt every creature a capsule between two points touches, each once per `already`. */
+  private sweep(ctx: KitContext, from: THREE.Vector3, to: THREE.Vector3, radius: number, damage: number, already: Set<Creature>, push = 5): void {
+    const { player, world, physics, effects } = ctx;
+    mid.copy(from).add(to).multiplyScalar(0.5);
+    tmp.copy(to).sub(from);
+    const len = Math.max(0.01, tmp.length());
+    quat.setFromUnitVectors(UP, tmp.normalize());
+    physics.world.intersectionsWithShape(
+      mid,
+      quat,
+      new RAPIER.Capsule(len / 2, radius),
+      (collider) => {
+        const c = world.creatures.byCollider.get(collider.handle);
+        if (c && !already.has(c)) {
+          already.add(c);
+          c.damage(damage, player.pos, push);
+          tmp2.copy(c.pos).y += c.halfHeight;
+          effects.burst(tmp2, 0x9fd4ff, 1.2, 0.2);
+          effects.flash(tmp2, 0x9fd4ff, 10, 8, 0.15);
+        }
+        return true;
+      },
+      undefined,
+      undefined,
+      undefined,
+      player.body,
+    );
   }
 
   private drawBolt(from: THREE.Vector3, to: THREE.Vector3): void {

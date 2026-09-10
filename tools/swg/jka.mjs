@@ -562,9 +562,10 @@ export function clipReport(gla, entry, clip, joints, plan, at = 0.5) {
 }
 
 /**
- * The JKA clips the game asks for by default: saber attacks of the three single styles, the
- * moves around them, jumps and rolls. (BOTH_LAND2, the hard landing, is left out: its frames
- * are authored a body-length above the ground and the multiplayer game never plays it.)
+ * The JKA clips the game asks for by default: saber attacks of the five styles, the moves
+ * around them, the special moves, jumps, rolls and the wall moves. (BOTH_LAND2, the hard
+ * landing, is left out: its frames are authored a body-length above the ground and the
+ * multiplayer game never plays it.)
  */
 export function defaultJkaClips() {
   const quads = ['T__B_', 'TL_BR', '_L__R', 'BL_TR', 'BR_TL', '_R__L', 'TR_BL'];
@@ -572,14 +573,26 @@ export function defaultJkaClips() {
   const returns = ['B_', 'BR', '_R', 'TR', 'TL', '_L', 'BL'];
   const from = ['BR', '_R', 'TR', 'T_', 'TL', '_L', 'BL'];
   const names = [];
-  for (const s of [1, 2, 3]) {
+  // The three single styles (1..3) and the dual (6) and staff (7) styles, whose starts and
+  // returns have their own stance suffix.
+  for (const s of [1, 2, 3, 6, 7]) {
+    const stance = s === 6 || s === 7 ? `S${s}` : 'S1';
     for (const q of quads) names.push(`BOTH_A${s}_${q}`);
-    for (const q of starts) names.push(`BOTH_S${s}_S1_${q}`);
-    for (const q of returns) names.push(`BOTH_R${s}_${q}_S1`);
+    for (const q of starts) names.push(`BOTH_S${s}_${stance}_${q}`);
+    for (const q of returns) names.push(`BOTH_R${s}_${q}_${stance}`);
     for (const a of from) for (const b of from) if (a !== b) names.push(`BOTH_T${s}_${a}_${b}`);
     for (const q of from) names.push(`BOTH_B${s}_${q}___`);
   }
-  names.push('BOTH_STAND2', 'BOTH_SABERFAST_STANCE', 'BOTH_SABERSLOW_STANCE', 'BOTH_STAND1TO2', 'BOTH_STAND2TO1');
+  names.push('BOTH_STAND2', 'BOTH_SABERFAST_STANCE', 'BOTH_SABERSLOW_STANCE', 'BOTH_SABERDUAL_STANCE', 'BOTH_SABERSTAFF_STANCE', 'BOTH_STAND1TO2', 'BOTH_STAND2TO1');
+  // The special moves: katas, leaps, cartwheels, butterflies, spins, the staff's kicks, the throw.
+  names.push('BOTH_A1_SPECIAL', 'BOTH_A2_SPECIAL', 'BOTH_A3_SPECIAL', 'BOTH_A6_SABERPROTECT', 'BOTH_A7_SOULCAL', 'BOTH_A6_FB', 'BOTH_A6_LR', 'BOTH_A7_HILT');
+  names.push('BOTH_JUMPATTACK6', 'BOTH_JUMPATTACK7', 'BOTH_ARIAL_LEFT', 'BOTH_ARIAL_RIGHT', 'BOTH_CARTWHEEL_LEFT', 'BOTH_CARTWHEEL_RIGHT', 'BOTH_BUTTERFLY_FL1', 'BOTH_BUTTERFLY_FR1', 'BOTH_BUTTERFLY_LEFT', 'BOTH_BUTTERFLY_RIGHT', 'BOTH_SPINATTACK6', 'BOTH_SPINATTACK7');
+  for (const d of ['F', 'B', 'L', 'R']) names.push(`BOTH_A7_KICK_${d}`, `BOTH_A7_KICK_${d}_AIR`);
+  names.push('BOTH_SABERPULL', 'BOTH_SABERTHROW1START', 'BOTH_SABERTHROW1STOP');
+  // Wall runs, wall flips, the backflip, wall rebounds and the force jump's flips.
+  for (const side of ['LEFT', 'RIGHT']) names.push(`BOTH_WALL_RUN_${side}`, `BOTH_WALL_RUN_${side}_STOP`, `BOTH_WALL_RUN_${side}_FLIP`, `BOTH_WALL_FLIP_${side}`);
+  names.push('BOTH_WALL_FLIP_BACK1', 'BOTH_FLIP_BACK1', 'BOTH_FORCEWALLRUNFLIP_START', 'BOTH_FORCEWALLRUNFLIP_END');
+  for (const d of ['FORWARD', 'BACK', 'LEFT', 'RIGHT']) names.push(`BOTH_FORCEWALLREBOUND_${d}`, `BOTH_FORCEWALLHOLD_${d}`, `BOTH_FORCEWALLRELEASE_${d}`);
   names.push('BOTH_JUMP1', 'BOTH_JUMPBACK1', 'BOTH_JUMPLEFT1', 'BOTH_JUMPRIGHT1', 'BOTH_INAIR1', 'BOTH_LAND1', 'BOTH_FORCEJUMP1', 'BOTH_FORCEINAIR1', 'BOTH_FORCELAND1');
   names.push('BOTH_FLIP_F', 'BOTH_FLIP_B', 'BOTH_FLIP_L', 'BOTH_FLIP_R', 'BOTH_ROLL_F', 'BOTH_ROLL_B', 'BOTH_ROLL_L', 'BOTH_ROLL_R');
   names.push('BOTH_CROUCH1', 'BOTH_CROUCH1IDLE', 'BOTH_CROUCH1WALK', 'BOTH_CROUCH1WALKBACK', 'BOTH_STAND1');

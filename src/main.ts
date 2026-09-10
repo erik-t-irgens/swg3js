@@ -160,8 +160,8 @@ class App {
         if (name) this.player.moveProfile = name;
         return this.player.moveProfile;
       },
-      /** The saber system's state: style, current move, chain count, and whether the rig has Jedi Academy's clips. */
-      saber: () => ({ style: this.player.saber.style, move: this.player.saber.move, chain: this.player.saber.chainCount, timer: Number(this.player.saber.timer.toFixed(2)), jkaClips: this.player.hasJkaClips, on: this.player.saberOn }),
+      /** The saber system's state: style, current move, chain count, whether the rig has Jedi Academy's clips, the special jump in progress, and the thrown saber's flight. */
+      saber: () => ({ style: this.player.saber.style, move: this.player.saber.move, chain: this.player.saber.chainCount, timer: Number(this.player.saber.timer.toFixed(2)), jkaClips: this.player.hasJkaClips, on: this.player.saberOn, special: this.player.jka.specialJump, thrown: this.player.thrown.inFlight ? { returning: this.player.thrown.returning, at: this.player.thrown.pos.toArray().map((v) => Number(v.toFixed(2))) } : null }),
       /** Particle effects within r metres of the player: file, distance, whether playing, live particles. With `verbose`, every emitter: texture, blend, whether the texture loaded, and the first particle's size, alpha, colour and screen position. */
       particles: (r = 200, verbose = false) => {
         const list = this.world.particlesNear(this.player.pos.x, this.player.pos.z, r);
@@ -215,7 +215,7 @@ class App {
         <div class="sub">Star Wars Galaxies, rebuilt for the browser. Ten worlds, one very ambitious side project.</div>
         <div class="controls">
           <div><b>WASD</b> move · <b>Mouse</b> look · <b>Wheel</b> zoom · <b>Space</b> jump (hold to Force Jump higher) · <b>Ctrl</b> crouch (tap while moving to roll) · <b>Shift</b> walk · in water <b>Space</b>/<b>Ctrl</b> surface/dive, or look down and swim</div>
-          <div><b>LMB</b> attack · <b>E</b> mount speeder · <b>C</b> switch class · <b>T</b> fast-forward time</div>
+          <div><b>LMB</b> attack · <b>RMB</b> throw the saber (staff: kick) · <b>E</b> mount speeder · <b>C</b> switch class · <b>T</b> fast-forward time</div>
           <div><b>M</b> galaxy map · <b>H</b> toggle help · <b>N</b> noclip fly (<b>+</b>/<b>-</b> speed) · <b>F</b> flashlight · <b>Esc</b> release mouse</div>
         </div>
         <div class="class-pick">

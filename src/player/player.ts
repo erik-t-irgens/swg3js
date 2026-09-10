@@ -6,7 +6,9 @@ import { Group, groups, RAPIER, type Physics } from '../core/physics';
 import { markActor } from '../world/portalRender';
 import type { Speeder } from '../vehicles/speeder';
 import type { World } from '../world/world';
-import { MOVES, STYLE_DAMAGE, SaberCombat, animForStyle, type SaberInput } from '../combat/saber';
+import { STANCE_ANIM, STYLE_DAMAGE, SaberCombat, type SaberInput } from '../combat/saber';
+import { SaberThrow, THROW } from '../combat/saberThrow';
+import { UNIT } from './jkaMove';
 import { JkaMovement, type MoveCommand } from './jkaMove';
 import type { CharacterRig } from './rig';
 
@@ -32,6 +34,9 @@ const rgt = new THREE.Vector3();
 const move = new THREE.Vector3();
 const tmpQ = new THREE.Quaternion();
 const armDir = new THREE.Vector3();
+const aim = new THREE.Vector3();
+const aimFrom = new THREE.Vector3();
+const handPos = new THREE.Vector3();
 
 interface Parts {
   hips: THREE.Group;
@@ -44,6 +49,14 @@ interface Parts {
   saber: THREE.Group;
   blade: THREE.Mesh;
   bladeTip: THREE.Object3D;
+  hilt: THREE.Mesh;
+  /** The staff's second blade, out of the far end of the hilt. */
+  staffBlade: THREE.Mesh;
+  staffTip: THREE.Object3D;
+  /** The second saber of the dual style, in the left hand. */
+  saber2: THREE.Group;
+  blade2: THREE.Mesh;
+  bladeTip2: THREE.Object3D;
   saberLight: THREE.PointLight;
   rifle: THREE.Group;
   muzzle: THREE.Object3D;
@@ -112,9 +125,26 @@ function buildCharacter(): { group: THREE.Group; parts: Parts } {
   bladeTip.position.y = 1.25;
   const saberLight = new THREE.PointLight(0x66c8ff, 0, 7);
   saberLight.position.y = 0.6;
-  saber.add(hilt, blade, bladeTip, saberLight);
+  // The staff: a second blade out of the other end of the hilt.
+  const staffBlade = blade.clone();
+  staffBlade.rotation.x = Math.PI;
+  staffBlade.visible = false;
+  const staffTip = new THREE.Object3D();
+  staffTip.position.y = -1.25;
+  saber.add(hilt, blade, bladeTip, staffBlade, staffTip, saberLight);
   blade.visible = false;
   rightArm.add(saber);
+  // The dual style's second saber, for the left hand.
+  const saber2 = new THREE.Group();
+  saber2.position.set(0, -0.7, 0.05);
+  saber2.rotation.x = Math.PI;
+  const blade2 = blade.clone();
+  blade2.visible = false;
+  const bladeTip2 = new THREE.Object3D();
+  bladeTip2.position.y = 1.25;
+  saber2.add(hilt.clone(), blade2, bladeTip2);
+  saber2.visible = false;
+  leftArm.add(saber2);
 
   // Blaster rifle: barrel along the arm.
   const rifle = new THREE.Group();
@@ -149,7 +179,7 @@ function buildCharacter(): { group: THREE.Group; parts: Parts } {
   jetpack.visible = false;
   hips.add(jetpack);
 
-  return { group, parts: { hips, torso, head, leftLeg, rightLeg, leftArm, rightArm, saber, blade, bladeTip, saberLight, rifle, muzzle, jetpack, flames } };
+  return { group, parts: { hips, torso, head, leftLeg, rightLeg, leftArm, rightArm, saber, blade, bladeTip, hilt, staffBlade, staffTip, saber2, blade2, bladeTip2, saberLight, rifle, muzzle, jetpack, flames } };
 }
 
 export class Player {
@@ -181,7 +211,15 @@ export class Player {
   force: { value: number } | null = null;
   /** Whether the rig carries Jedi Academy's clips (set when a rig attaches). */
   hasJkaClips = false;
-  private readonly cmd: MoveCommand = { forward: new THREE.Vector3(), right: new THREE.Vector3(), fmove: 0, smove: 0, walk: false, crouch: false, roll: false, jump: false, speedScale: 1 };
+  /** The saber's flight when thrown (right mouse). */
+  readonly thrown = new SaberThrow();
+  private readonly physics: Physics;
+  private world: World | null = null;
+  /** The thrown saber's own model, spinning through the air. */
+  private readonly flying: THREE.Group;
+  /** A wall run or grab turns the body this way while it lasts. */
+  private lockedHeading: THREE.Vector3 | null = null;
+  private readonly cmd: MoveCommand = { forward: new THREE.Vector3(), right: new THREE.Vector3(), fmove: 0, smove: 0, walk: false, crouch: false, roll: false, jump: false, jumpPressed: false, attack: false, speedScale: 1 };
   /** Ducking (Ctrl on land): half speed, crouch clips, and the crouched attacks. */
   crouching = false;
   private colliderCrouched = false;
@@ -205,6 +243,27 @@ export class Player {
     this.parts = parts;
     scene.add(group);
     markActor(group);
+    this.physics = physics;
+    // The thrown saber: a hilt with its blade, lying flat and spinning like a boomerang.
+    this.flying = new THREE.Group();
+    const flyHilt = parts.hilt.clone();
+    const flyBlade = parts.blade.clone();
+    flyBlade.visible = true;
+    flyHilt.rotation.z = Math.PI / 2;
+    flyBlade.rotation.z = Math.PI / 2;
+    // A faint disc in the spin plane reads as the blur of the spinning blade from any angle.
+    const blur = new THREE.Mesh(
+      new THREE.CircleGeometry(1.2, 32),
+      new THREE.MeshBasicMaterial({ color: 0x8fd6ff, transparent: true, opacity: 0.16, side: THREE.DoubleSide, depthWrite: false, toneMapped: false }),
+    );
+    blur.rotation.x = -Math.PI / 2;
+    const flyLight = new THREE.PointLight(0x66c8ff, 4, 6);
+    this.flying.add(flyHilt, flyBlade, blur, flyLight);
+    this.flying.visible = false;
+    scene.add(this.flying);
+    markActor(this.flying);
+    this.cmd.probe = (dir, dist) => this.probeWall(dir, dist);
+    this.cmd.groundDistance = (max) => this.groundDistanceUnits(max);
 
     const world = physics.world;
     this.body = world.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased());
@@ -266,6 +325,9 @@ export class Player {
     const hand = rig.boneFor('rightHand');
     const fore = rig.boneFor('rightForeArm');
     const spine = rig.boneFor('spine');
+    const leftHand = rig.boneFor('leftHand');
+    const leftFore = rig.boneFor('leftForeArm');
+    this.jka.clipDuration = (a) => rig.clipDuration(a);
     if (!hand || !spine) console.warn(`rig: no ${!hand ? 'hand' : 'spine'} bone matched; bones are ${rig.boneNames.join(', ')}`);
     const p = this.parts;
     // Bone space may be centimetres (the placeholder rig) or metres (converted skeletons): size
@@ -295,6 +357,23 @@ export class Player {
       p.rifle.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), along);
       p.rifle.scale.setScalar(k);
     }
+    if (leftHand) {
+      // The second saber sits in the left hand the same way.
+      const k = unitsPerMetre(leftHand);
+      const along = new THREE.Vector3(1, 0, 0);
+      if (leftFore) {
+        const handQ = leftHand.getWorldQuaternion(new THREE.Quaternion()).invert();
+        const d = leftHand.getWorldPosition(new THREE.Vector3()).sub(leftFore.getWorldPosition(new THREE.Vector3())).applyQuaternion(handQ);
+        if (d.lengthSq() > 1e-10) along.copy(d).normalize();
+      }
+      leftHand.add(p.saber2);
+      const grip = new THREE.Vector3(0, 0, 1).applyQuaternion(rig.root.getWorldQuaternion(new THREE.Quaternion())).applyQuaternion(leftHand.getWorldQuaternion(new THREE.Quaternion()).invert());
+      if (grip.lengthSq() < 1e-6) grip.set(0, 0, 1);
+      grip.normalize();
+      p.saber2.position.copy(along).multiplyScalar(0.02 * k);
+      p.saber2.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), grip);
+      p.saber2.scale.setScalar(k);
+    }
     if (spine) {
       const k = unitsPerMetre(spine);
       spine.add(p.jetpack);
@@ -321,15 +400,96 @@ export class Player {
 
   toggleSaber(): void {
     this.saberOn = !this.saberOn;
-    this.parts.blade.visible = this.saberOn;
-    this.parts.saberLight.intensity = this.saberOn ? 6 : 0;
-    if (!this.saberOn) this.saber.holster();
+    if (!this.saberOn) {
+      this.saber.holster();
+      this.thrown.cancel();
+    }
+    this.updateBlades();
+  }
+
+  /** Which blades show: the main one, the staff's second, the dual style's left-hand saber; none while thrown. */
+  private updateBlades(): void {
+    const p = this.parts;
+    const on = this.saberOn && this.classId === 'jedi';
+    const inHand = !this.thrown.inFlight;
+    p.hilt.visible = inHand;
+    p.blade.visible = on && inHand;
+    p.staffBlade.visible = on && inHand && this.saber.style === 'staff';
+    p.saber2.visible = this.classId === 'jedi' && this.saber.style === 'dual';
+    p.blade2.visible = on && this.saber.style === 'dual';
+    p.saberLight.intensity = on && inHand ? 6 : 0;
+    this.flying.visible = this.thrown.inFlight;
   }
 
   /** True while a swing can hurt: the saber system's attack moves, or the stand-in swing's middle. */
   get bladeActive(): boolean {
+    if (this.thrown.inFlight) return false;
     if (this.hasJkaClips) return this.saber.attacking;
     return this.swing >= 0.25 && this.swing <= 0.8;
+  }
+
+  /** How many blades are lit: the staff and the dual style carry two. */
+  get bladeCount(): number {
+    return this.saber.style === 'staff' || this.saber.style === 'dual' ? 2 : 1;
+  }
+
+  /** The ends of blade `i` in world space (0 is the one in the right hand). */
+  bladeSegmentAt(i: number, a: THREE.Vector3, b: THREE.Vector3): void {
+    const p = this.parts;
+    if (i === 0) {
+      p.saber.getWorldPosition(a);
+      p.bladeTip.getWorldPosition(b);
+    } else if (this.saber.style === 'staff') {
+      p.saber.getWorldPosition(a);
+      p.staffTip.getWorldPosition(b);
+    } else {
+      p.saber2.getWorldPosition(a);
+      p.bladeTip2.getWorldPosition(b);
+    }
+  }
+
+  /** Where the right hand is, for the throw and the catch. */
+  handPosition(out: THREE.Vector3): THREE.Vector3 {
+    return this.parts.saber.getWorldPosition(out);
+  }
+
+  /** A wall past the body's edge along `dir` (horizontal), `dist` units out: its normal, or null. */
+  private probeWall(dir: THREE.Vector3, dist: number): THREE.Vector3 | null {
+    const len = CAPSULE_RADIUS + dist * UNIT;
+    const origin = { x: this.pos.x, y: this.pos.y + 0.9, z: this.pos.z };
+    const ray = new RAPIER.Ray(origin, { x: dir.x, y: 0, z: dir.z });
+    const filter = this.inside ? groups(Group.all, Group.all & ~(Group.terrain | Group.exterior)) : groups(Group.all, Group.all);
+    const hit = this.physics.world.castRayAndGetNormal(ray, len, true, undefined, filter, undefined, this.body, (c) => {
+      const body = c.parent();
+      return !body || body.isFixed();
+    });
+    if (!hit) return null;
+    return new THREE.Vector3(hit.normal.x, hit.normal.y, hit.normal.z);
+  }
+
+  /** Distance to the ground below the feet in units, or null beyond `max` units. */
+  private groundDistanceUnits(max: number): number | null {
+    const d = this.physics.groundDistance(this.pos.x, this.pos.y + 0.1, this.pos.z, max * UNIT + 0.1, this.body);
+    return d === null ? null : Math.max(0, (d - 0.1) / UNIT);
+  }
+
+  /** Whether a creature stands within `radius` metres of the body in a direction relative to its facing. */
+  private enemyNear(dir: 'F' | 'B' | 'L' | 'R', radius: number): boolean {
+    const creatures = this.world?.creatures.creatures ?? [];
+    const sx = Math.sin(this.heading);
+    const sz = Math.cos(this.heading);
+    // Forward is (sin, cos) of the heading; right is turned a quarter round.
+    const dx = dir === 'F' ? sx : dir === 'B' ? -sx : dir === 'R' ? sz : -sz;
+    const dz = dir === 'F' ? sz : dir === 'B' ? -sz : dir === 'R' ? -sx : sx;
+    for (const c of creatures) {
+      if (c.dead) continue;
+      const ox = c.pos.x - this.pos.x;
+      const oz = c.pos.z - this.pos.z;
+      const along = ox * dx + oz * dz;
+      const across = Math.abs(ox * dz - oz * dx);
+      if (along > 0 && along < radius + 0.5 && across < 0.8 && Math.abs(c.pos.y - this.pos.y) < 2) return true;
+    }
+    return false;
   }
 
   /** Damage of the current style's swing. */
@@ -390,6 +550,7 @@ export class Player {
   }
 
   update(dt: number, input: Input, cam: ThirdPersonCamera, world: World): void {
+    this.world = world;
     this.regenDelay = Math.max(0, this.regenDelay - dt);
     if (this.regenDelay <= 0 && this.hp < this.maxHp) this.hp = Math.min(this.maxHp, this.hp + 4 * dt);
 
@@ -400,6 +561,8 @@ export class Player {
 
     if (this.mounted) {
       this.rig?.stopOverride();
+      this.thrown.cancel();
+      this.updateBlades();
       this.animateSeated();
       this.animateRig(dt, 0, false);
       return;
@@ -408,6 +571,8 @@ export class Player {
     if (this.noclip) {
       this.rig?.stopOverride();
       this.saber.holster();
+      this.thrown.cancel();
+      this.updateBlades();
       this.flyUpdate(dt, input, cam);
       return;
     }
@@ -470,6 +635,22 @@ export class Player {
       // Jedi Academy's ground and air rules: friction, acceleration, air control, and jumps
       // that keep lifting while the key is held, as far as the Force Jump level allows.
       const c = this.cmd;
+      // A leaping saber move drives the body itself while it lasts (the keys are ignored).
+      const script = this.saber.scriptNow();
+      let jump = input.isDown('Space');
+      let jumpPressed = input.justPressed('Space');
+      if (script) {
+        mz = script.fmove;
+        mx = script.smove;
+        jump = false;
+        jumpPressed = false;
+        if (script.hop !== null && this.grounded) {
+          this.vel.y = script.hop;
+          this.grounded = false;
+          this.pos.y += 0.02;
+          this.jka.markJumpStart(this.pos.y);
+        }
+      }
       c.forward.copy(fwd);
       c.right.copy(rgt);
       c.fmove = mz;
@@ -477,7 +658,9 @@ export class Player {
       c.walk = walking;
       c.crouch = this.crouching;
       c.roll = (input.justPressed('ControlLeft') || input.justPressed('ControlRight')) && moving && !this.saber.busy;
-      c.jump = input.isDown('Space');
+      c.jump = jump;
+      c.jumpPressed = jumpPressed && !this.saber.busy;
+      c.attack = input.isDown('Mouse0');
       c.speedScale = this.speedMultiplier;
       const force = this.force;
       const ev = this.jka.step(dt, this.vel, this.pos, this.grounded, c, { value: force?.value ?? 100, spend: (n) => { if (force) force.value = Math.max(0, force.value - n); } });
@@ -485,7 +668,13 @@ export class Player {
         this.grounded = false;
         this.playOnce(mz > 0 ? 'BOTH_JUMP1' : mz < 0 ? 'BOTH_JUMPBACK1' : mx > 0 ? 'BOTH_JUMPRIGHT1' : mx < 0 ? 'BOTH_JUMPLEFT1' : 'BOTH_JUMP1', 0.05);
       }
-      if (ev.forceJumpStarted) this.playOnce('BOTH_FORCEJUMP1', 0.08);
+      if (ev.special) {
+        this.grounded = false;
+        this.playOnce(ev.special, 0.05);
+      }
+      if (ev.flip) this.playOnce(`BOTH_FLIP_${ev.flip}`, 0.08);
+      else if (ev.forceJumpStarted) this.playOnce('BOTH_FORCEJUMP1', 0.08);
+      this.lockedHeading = ev.heading;
       if (ev.rolled) this.playOnce(`BOTH_ROLL_${ev.rolled}`, 0.05);
       if (this.jka.rolling) this.crouching = false;
       if (ev.landed !== null && ev.landed >= 2 && !ev.rolled && !this.saber.busy) this.playOnce(ev.forceLanded ? 'BOTH_FORCELAND1' : 'BOTH_LAND1', 0.06);
@@ -530,20 +719,62 @@ export class Player {
 
     // Lightsaber: the first press draws it, then the direction keys pick the swing and holding
     // attack chains the next one; the rig plays the move's clip when it has it.
-    if (this.classId === 'jedi' && !this.jka.rolling) {
+    if (this.classId === 'jedi') {
       const attackPressed = input.justPressed('Mouse0');
-      if (attackPressed && !this.saberOn) this.toggleSaber();
-      const si: SaberInput = { attack: input.isDown('Mouse0'), attackPressed, fmove: mz, smove: mx, grounded: this.grounded, vy: this.vel.y, aboveGround: this.pos.y - ground, jumpHeld: input.isDown('Space'), crouch: this.crouching };
-      const play = this.saber.update(dt, this.saberOn, si, (a) => this.rig?.clipDuration(a) ?? null);
+      const altPressed = input.justPressed('Mouse2');
+      if ((attackPressed || altPressed) && !this.saberOn) this.toggleSaber();
+      const roll = this.jka.roll;
+      const si: SaberInput = {
+        attack: input.isDown('Mouse0'),
+        attackPressed,
+        altAttack: input.isDown('Mouse2'),
+        altAttackPressed: altPressed,
+        fmove: mz,
+        smove: mx,
+        grounded: this.grounded,
+        vy: this.vel.y,
+        aboveGround: this.grounded ? 0 : (this.groundDistanceUnits(400) ?? 400) * UNIT,
+        jumpHeld: input.isDown('Space'),
+        crouch: this.crouching,
+        force: this.force?.value ?? 100,
+        enemyNear: (d, r) => this.enemyNear(d, r),
+        rollEnding: !!roll && roll.dir === 'F' && roll.left <= 0.25,
+        inSpecialJump: this.jka.inSpecialJump || this.jka.rolling,
+      };
+      // The alternate attack throws the saber (the staff kicks instead), from the ready stance.
+      if (altPressed && this.saberOn && !this.thrown.inFlight && this.saber.style !== 'staff' && !this.saber.busy && !si.attack && (this.force?.value ?? 100) >= THROW.cost && !this.swimming) {
+        if (this.force) this.force.value -= THROW.cost;
+        cam.camera.getWorldDirection(aim);
+        this.thrown.throw(this.handPosition(handPos), aim);
+        this.saber.holster();
+      }
+      const play = this.saber.update(dt, this.saberOn && !this.thrown.inFlight, si, (a) => this.rig?.clipDuration(a) ?? null);
       if (play) {
+        if (play.forceCost > 0 && this.force) this.force.value = Math.max(0, this.force.value - play.forceCost);
+        if (play.impulse) {
+          // The move's leap: the client sets the velocity outright, along the view's yaw.
+          const im = play.impulse;
+          this.vel.x = (fwd.x * im.forward + rgt.x * im.right) * UNIT;
+          this.vel.z = (fwd.z * im.forward + rgt.z * im.right) * UNIT;
+          if (im.up !== null) {
+            this.vel.y = im.up * UNIT;
+            this.grounded = false;
+            this.pos.y += 0.02;
+          }
+          this.jka.markJumpStart(this.pos.y);
+        }
         if (play.move.kind === 'ready') this.rig?.stopOverride();
         else if (this.rig?.has(play.anim)) this.rig.play(play.anim, { loop: play.loop, fadeIn: play.blend, timeScale: play.speed });
         else if (play.move.kind === 'attack' || play.move.kind === 'special') this.startSwing();
       }
     }
+    this.updateThrown(dt, input, cam);
+    this.updateBlades();
 
-    const faceCamera = this.classId === 'bounty_hunter' || this.swing >= 0 || this.saber.busy;
-    if (faceCamera) {
+    const faceCamera = this.classId === 'bounty_hunter' || this.swing >= 0 || this.saber.busy || this.thrown.inFlight;
+    if (this.lockedHeading) {
+      this.heading = Math.atan2(this.lockedHeading.x, this.lockedHeading.z);
+    } else if (faceCamera) {
       const desired = Math.atan2(fwd.x, fwd.z);
       let diff = desired - this.heading;
       diff = Math.atan2(Math.sin(diff), Math.cos(diff));
@@ -574,7 +805,8 @@ export class Player {
     else if (!this.grounded) rig.setState('air');
     else if (this.crouching) rig.setState(moving ? 'crouchWalk' : 'crouch', speed);
     else if (!moving && this.saberOn && this.hasJkaClips) {
-      rig.stanceClip = animForStyle(MOVES.get('READY')!, this.saber.style);
+      // Standing with the saber drawn: the style's stance, or the arm out while the saber flies.
+      rig.stanceClip = this.thrown.inFlight ? 'BOTH_SABERPULL' : STANCE_ANIM[this.saber.style];
       rig.setState('stance');
     } else if (!moving) rig.setState('idle');
     else rig.setState(speed < 4.5 ? 'walk' : 'run', speed);
@@ -619,6 +851,18 @@ export class Player {
 
   private playOnce(clip: string, fadeIn: number): void {
     if (this.rig?.has(clip)) this.rig.play(clip, { fadeIn });
+  }
+
+  /** Fly the thrown saber, steer it where the camera looks, and take it back into the hand. */
+  private updateThrown(dt: number, input: Input, cam: ThirdPersonCamera): void {
+    if (!this.thrown.inFlight) return;
+    this.handPosition(handPos);
+    aimFrom.copy(this.pos).y += 1.5;
+    cam.camera.getWorldDirection(aim);
+    const result = this.thrown.update(dt, handPos, aimFrom, aim, input.isDown('Mouse2'), (a, b) => this.physics.cameraBlock(a, b, this.body, this.inside) !== null);
+    if (result === 'caught') return;
+    this.flying.position.copy(this.thrown.pos);
+    this.flying.rotation.set(0, this.thrown.spin, 0);
   }
 
   private flyUpdate(dt: number, input: Input, cam: ThirdPersonCamera): void {

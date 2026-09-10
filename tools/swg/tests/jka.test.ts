@@ -312,6 +312,8 @@ assert.ok(defaultJkaClips().includes('BOTH_A3_TR_BL') && defaultJkaClips().inclu
   assert.ok(Math.abs(c.tracks[1].translations[1] - 1.0) < 1e-6);
 }
 assert.ok(defaultJkaClips().includes('BOTH_S2_S1_T_') && defaultJkaClips().includes('BOTH_R3_B__S1'), 'medium and strong starts and returns keep the fast stance suffix');
+assert.ok(defaultJkaClips().includes('BOTH_S6_S6_T_') && defaultJkaClips().includes('BOTH_R7_B__S7') && defaultJkaClips().includes('BOTH_A7_KICK_F') && defaultJkaClips().includes('BOTH_WALL_RUN_LEFT'), 'dual, staff, kicks and wall moves are asked for');
+assert.equal(new Set(defaultJkaClips()).size, defaultJkaClips().length, 'no clip is asked for twice');
 assert.ok(BONE_MAP.length >= 20);
 console.log('jka: ok');
 
