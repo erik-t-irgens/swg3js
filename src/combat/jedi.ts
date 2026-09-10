@@ -22,13 +22,16 @@ export class JediKit implements Kit {
     { key: '4', name: 'Force Lightning', cost: '18/s' },
   ];
   readonly help = [
-    '<b>LMB</b> saber swing · <b>L</b> saber on/off',
+    '<b>LMB</b> saber swing (hold to chain, direction keys pick the swing) · <b>K</b> saber style · <b>L</b> saber on/off',
     '<b>1</b> Force Jump · <b>2</b> Force Speed · <b>3</b> Force Push · <b>4</b> Force Lightning (hold)',
   ];
   readonly resource: Resource = { label: 'Force', value: 100, max: 100 };
   speedActive = false;
   lightningActive = false;
+  /** Last style change, for the HUD. */
+  styleNote = '';
   private readonly hitThisSwing = new Set<Creature>();
+  private lastAttackId = -1;
   private readonly aura: THREE.Mesh<THREE.SphereGeometry, THREE.MeshBasicMaterial>;
   private readonly bolt: THREE.Line<THREE.BufferGeometry, THREE.LineBasicMaterial>;
   private readonly boltPositions = new Float32Array((LIGHTNING_SEGMENTS + 1) * 3);
@@ -64,12 +67,16 @@ export class JediKit implements Kit {
     const res = this.resource;
     const onFoot = !player.mounted;
 
-    // Lightsaber
-    if (onFoot && input.justPressed('Mouse0')) {
-      if (!player.saberOn) player.toggleSaber();
-      if (player.startSwing()) this.hitThisSwing.clear();
+    // Lightsaber: the player runs the swing itself (Jedi Academy's move system); each new swing
+    // may hit every creature once.
+    player.force = res;
+    if (input.justPressed('KeyK') && onFoot) this.styleNote = `saber style: ${player.saber.cycleStyle()}`;
+    if (player.saber.attackId !== this.lastAttackId) {
+      this.lastAttackId = player.saber.attackId;
+      this.hitThisSwing.clear();
     }
-    if (onFoot && player.saberOn && player.swing >= 0.25 && player.swing <= 0.8) {
+    if (player.swing === 0) this.hitThisSwing.clear();
+    if (onFoot && player.saberOn && player.bladeActive) {
       player.bladeSegment(a, b);
       mid.copy(a).add(b).multiplyScalar(0.5);
       tmp.copy(b).sub(a);
@@ -83,7 +90,7 @@ export class JediKit implements Kit {
           const c = world.creatures.byCollider.get(collider.handle);
           if (c && !this.hitThisSwing.has(c)) {
             this.hitThisSwing.add(c);
-            c.damage(45, player.pos, 5);
+            c.damage(player.saberDamage, player.pos, 5);
             tmp2.copy(c.pos).y += c.halfHeight;
             effects.burst(tmp2, 0x9fd4ff, 1.2, 0.2);
             effects.flash(tmp2, 0x9fd4ff, 10, 8, 0.15);

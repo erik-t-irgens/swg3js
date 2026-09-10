@@ -6,6 +6,8 @@ import { Group, groups, RAPIER, type Physics } from '../core/physics';
 import { markActor } from '../world/portalRender';
 import type { Speeder } from '../vehicles/speeder';
 import type { World } from '../world/world';
+import { STYLE_DAMAGE, SaberCombat, type SaberInput } from '../combat/saber';
+import { JkaMovement, type MoveCommand } from './jkaMove';
 import type { CharacterRig } from './rig';
 
 // The original game's run is 5.375 m/s; the character stands about 1.75 m.
@@ -164,8 +166,18 @@ export class Player {
   hp = 100;
   readonly maxHp = 100;
   mounted: Speeder | null = null;
-  /** Swing progress in [0, 1], or -1 when idle. */
+  /** Swing progress in [0, 1], or -1 when idle (the stand-in swing when the rig has no saber clips). */
   swing = -1;
+  /** Ground and air movement: the original game's numbers, or Jedi Academy's (see jkaMove.ts). */
+  moveProfile: 'swg' | 'jka' = 'jka';
+  readonly jka = new JkaMovement();
+  /** The lightsaber move system (Jedi Academy's styles, swings and chains). */
+  readonly saber = new SaberCombat();
+  /** The Force pool the kit exposes, spent by force jumps. */
+  force: { value: number } | null = null;
+  /** Whether the rig carries Jedi Academy's clips (set when a rig attaches). */
+  hasJkaClips = false;
+  private readonly cmd: MoveCommand = { forward: new THREE.Vector3(), right: new THREE.Vector3(), fmove: 0, smove: 0, walk: false, jump: false, speedScale: 1 };
   jetThrust = false;
   /** Fly mode for exploring and bug hunting: no gravity, no collision. */
   noclip = false;
@@ -205,6 +217,9 @@ export class Player {
     this.grounded = true;
     this.hp = this.maxHp;
     this.swing = -1;
+    this.jka.reset();
+    this.saber.holster();
+    this.rig?.stopOverride(0);
     this.mounted = null;
     this.body.setEnabled(true);
     this.body.setTranslation({ x: p.x, y: p.y, z: p.z }, true);
@@ -235,6 +250,7 @@ export class Player {
   /** Swap the primitive body for a skinned rig; weapons move to its hand bones. */
   attachRig(rig: CharacterRig): void {
     this.rig = rig;
+    this.hasJkaClips = rig.has('BOTH_A1_T__B_') || rig.has('BOTH_A2_T__B_');
     this.parts.hips.visible = false;
     rig.root.scale.setScalar(rig.scale);
     this.group.add(rig.root);
@@ -300,6 +316,18 @@ export class Player {
     this.saberOn = !this.saberOn;
     this.parts.blade.visible = this.saberOn;
     this.parts.saberLight.intensity = this.saberOn ? 6 : 0;
+    if (!this.saberOn) this.saber.holster();
+  }
+
+  /** True while a swing can hurt: the saber system's attack moves, or the stand-in swing's middle. */
+  get bladeActive(): boolean {
+    if (this.hasJkaClips) return this.saber.attacking;
+    return this.swing >= 0.25 && this.swing <= 0.8;
+  }
+
+  /** Damage of the current style's swing. */
+  get saberDamage(): number {
+    return STYLE_DAMAGE[this.saber.style];
   }
 
   startSwing(): boolean {
@@ -364,12 +392,15 @@ export class Player {
     }
 
     if (this.mounted) {
+      this.rig?.stopOverride();
       this.animateSeated();
       this.animateRig(dt, 0, false);
       return;
     }
 
     if (this.noclip) {
+      this.rig?.stopOverride();
+      this.saber.holster();
       this.flyUpdate(dt, input, cam);
       return;
     }
@@ -404,6 +435,9 @@ export class Player {
 
     if (this.swimming) {
       // Swimming: slow, no gravity, free up and down; looking down while submerged dives.
+      // (Untouched by the movement profile: the water keeps its own rules.)
+      this.rig?.stopOverride();
+      this.saber.holster();
       speed *= SWIM_SPEED;
       const k = 1 - Math.exp(-dt * 4);
       this.vel.x += (move.x * speed - this.vel.x) * k;
@@ -423,6 +457,26 @@ export class Player {
       // Buoyancy: rising past the float line stops at it.
       if (this.vel.y > 0 && depth - this.vel.y * dt < SWIM_DEPTH) this.vel.y = Math.max(0, (depth - SWIM_DEPTH) / dt);
       this.grounded = false;
+    } else if (this.moveProfile === 'jka') {
+      // Jedi Academy's ground and air rules: friction, acceleration, air control, and jumps
+      // that keep lifting while the key is held, as far as the Force Jump level allows.
+      const c = this.cmd;
+      c.forward.copy(fwd);
+      c.right.copy(rgt);
+      c.fmove = mz;
+      c.smove = mx;
+      c.walk = walking;
+      c.jump = input.isDown('Space');
+      c.speedScale = this.speedMultiplier;
+      const force = this.force;
+      const ev = this.jka.step(dt, this.vel, this.pos, this.grounded, c, { value: force?.value ?? 100, spend: (n) => { if (force) force.value = Math.max(0, force.value - n); } });
+      if (ev.jumped) {
+        this.grounded = false;
+        this.playOnce(mz > 0 ? 'BOTH_JUMP1' : mz < 0 ? 'BOTH_JUMPBACK1' : mx > 0 ? 'BOTH_JUMPRIGHT1' : mx < 0 ? 'BOTH_JUMPLEFT1' : 'BOTH_JUMP1', 0.05);
+      }
+      if (ev.forceJumpStarted) this.playOnce('BOTH_FORCEJUMP1', 0.08);
+      if (ev.landed !== null && ev.landed >= 2 && !this.saber.busy) this.playOnce(ev.landed > 30 ? 'BOTH_LAND2' : 'BOTH_LAND1', 0.06);
+      if (ev.damage > 0) this.takeDamage(ev.damage);
     } else if (this.grounded) {
       this.vel.x = move.x * speed;
       this.vel.z = move.z * speed;
@@ -436,7 +490,7 @@ export class Player {
       this.vel.z += (move.z * speed - this.vel.z) * k;
     }
 
-    if (!this.swimming) this.vel.y -= g * dt;
+    if (!this.swimming && this.moveProfile !== 'jka') this.vel.y -= g * dt;
     // Falling into deep water: the plunge slows quickly.
     if (depth > 0 && !this.swimming && this.vel.y < -4) this.vel.y += (-4 - this.vel.y) * (1 - Math.exp(-dt * 8));
 
@@ -461,7 +515,21 @@ export class Player {
 
     this.body.setNextKinematicTranslation({ x: this.pos.x, y: this.pos.y, z: this.pos.z });
 
-    const faceCamera = this.classId === 'bounty_hunter' || this.swing >= 0;
+    // Lightsaber: the first press draws it, then the direction keys pick the swing and holding
+    // attack chains the next one; the rig plays the move's clip when it has it.
+    if (this.classId === 'jedi') {
+      const attackPressed = input.justPressed('Mouse0');
+      if (attackPressed && !this.saberOn) this.toggleSaber();
+      const si: SaberInput = { attack: input.isDown('Mouse0'), attackPressed, fmove: mz, smove: mx, grounded: this.grounded, vy: this.vel.y, aboveGround: this.pos.y - ground, jumpHeld: input.isDown('Space') };
+      const play = this.saber.update(dt, this.saberOn, si, (a) => this.rig?.clipDuration(a) ?? null);
+      if (play) {
+        if (play.move.kind === 'ready') this.rig?.stopOverride();
+        else if (this.rig?.has(play.anim)) this.rig.play(play.anim, { loop: play.loop, fadeIn: play.blend, timeScale: play.speed });
+        else if (play.move.kind === 'attack' || play.move.kind === 'special') this.startSwing();
+      }
+    }
+
+    const faceCamera = this.classId === 'bounty_hunter' || this.swing >= 0 || this.saber.busy;
     if (faceCamera) {
       const desired = Math.atan2(fwd.x, fwd.z);
       let diff = desired - this.heading;
@@ -502,6 +570,8 @@ export class Player {
     } else if (this.classId === 'bounty_hunter') {
       rig.aimArm('right', armDir.set(-0.15, 0.02, 0.99).normalize());
       rig.aimArm('left', armDir.set(0.2, -0.1, 0.95).normalize());
+    } else if (rig.overriding || this.hasJkaClips) {
+      // Jedi Academy's clips pose the whole body themselves.
     } else if (this.swing >= 0) {
       const t = this.swing;
       const e = t < 0.3 ? t / 0.3 : 1;
@@ -518,6 +588,11 @@ export class Player {
       f.visible = this.jetThrust;
       f.scale.y = 0.8 + Math.random() * 0.5;
     }
+  }
+
+  /** Play a one-off clip on the rig when it has it (jumps, landings). */
+  private playOnce(clip: string, fadeIn: number): void {
+    if (this.rig?.has(clip)) this.rig.play(clip, { fadeIn });
   }
 
   private flyUpdate(dt: number, input: Input, cam: ThirdPersonCamera): void {

@@ -78,6 +78,14 @@ Rough order, all up for discussion:
 6. **Space**: ships, the JTL-style space layer, travel between planets by actually flying.
 7. **Multiplayer**: authoritative server, chat, guilds. The code keeps world state in plain data with this in mind.
 
+## Jedi Academy movement and saber combat (this branch)
+
+The branch `claude/jka-combat` swaps the player's ground and air movement and the lightsaber combat for translations of Jedi Academy's (OpenJK, GPL-2.0; see `LICENSES/OpenJK-GPL-2.0.txt`). Swimming and noclip are untouched.
+
+- **Movement**: Quake-style friction and acceleration, a little air control, and jumps that keep lifting while Space is held, up to the Force Jump level (level 3 by default, spending Force while it lifts). Landing from higher than your own jump's reach hurts. `__debug.profile('swg')` in the console restores the original numbers.
+- **Saber**: the first click draws the saber; the direction keys held with the click pick the swing (forward: overhead, sideways: horizontal cuts, diagonals: diagonal cuts, backward: a back stab); holding attack chains swings through Jedi Academy's arcs until the style's chain runs out and the saber returns to ready. **K** cycles the fast, medium and strong styles (their own animations, speeds, chain lengths and damage). `__debug.saber()` reports the state.
+- **Animations**: SWG's own walk, run, swim and idle stay. Jedi Academy's swings, stances, jumps, landings, flips and rolls come in when the player is converted with `--jka=<path to Jedi Academy's GameData or base folder>` (see the converter README); the importer retargets them onto the SWG skeleton. Without them, jumps use SWG's clips and swings fall back to the stand-in arm swing.
+
 ## On assets
 
 The original SWG client assets (the `.tre` archives) are copyrighted by Sony Online Entertainment / Lucasfilm and cannot be redistributed, so they will never be committed to this repo. A private build could load them from a local install via a converter, but a public site cannot ship them. The plan instead:
@@ -125,6 +133,7 @@ npm run swg -- planets "$SWG" --retail-only                                     
 npm run swg -- snapshot "$SWG" all assets-private --radius=all --retail-only       # 3. every planet: objects, terrain, ground textures, sky, flora, places (long: minutes per planet)
 npm run swg -- creatures "$SWG" assets-private --retail-only                      # 4. the creatures the planets spawn
 npm run swg -- player "$SWG" assets-private --retail-only                         # 5. the player character, dressed, with its animations
+npm run swg -- player "$SWG" assets-private --retail-only --jka="$JKA"             #    ... plus Jedi Academy's saber and jump clips ($JKA: its GameData or base folder)
 npm run swg -- status assets-private                                              # 6. what is in place, and the command for anything missing
 npm run dev                                                                       # 7. play
 ```

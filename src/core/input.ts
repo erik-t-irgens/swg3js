@@ -46,8 +46,10 @@ export class Input {
 
   /** Hold or release a key from script, for headless tests that cannot drive real key events at speed. */
   force(code: string, held: boolean): void {
-    if (held) this.down.add(code);
-    else this.down.delete(code);
+    if (held) {
+      if (!this.down.has(code)) this.pressed.add(code);
+      this.down.add(code);
+    } else this.down.delete(code);
   }
 
   isDown(code: string): boolean {

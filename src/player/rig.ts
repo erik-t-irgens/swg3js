@@ -8,7 +8,7 @@ const STATE_CLIPS: Record<RigState, string[]> = {
   idle: ['idle', 'Idle', 'stand', 'loop_stand', 'idle_combat'],
   walk: ['walk', 'Walk', 'loop_walk', 'walk_combat'],
   run: ['run', 'Run', 'loop_run', 'run_combat'],
-  air: ['jump', 'fall', 'loop_jump', 'sneak_pose', 'idle', 'stand'],
+  air: ['BOTH_INAIR1', 'jump', 'fall', 'loop_jump', 'sneak_pose', 'idle', 'stand'],
   seated: ['sit', 'loop_sit', 'loop_sitting_chair:0', 'loop_sitting_chair', 'loop_sitting_ground', 'sneak_pose', 'idle', 'stand'],
   swim: ['swim', 'loop_swimming:speed1', 'loop_swimming:speed0', 'walk', 'idle'],
   float: ['float', 'loop_swimming:speed0', 'swim', 'idle'],
@@ -62,6 +62,10 @@ export class CharacterRig {
   private readonly clipSpeeds: Record<string, number>;
   private current: THREE.AnimationAction | null = null;
   private state: RigState | null = null;
+  /** A one-off clip (a swing, a jump, a landing) playing over the state clips until it ends. */
+  private override: THREE.AnimationAction | null = null;
+  private overrideEnds = 0;
+  private overrideTime = 0;
 
   private constructor(scene: THREE.Group, clips: THREE.AnimationClip[], options: RigOptions) {
     this.root = scene;
@@ -132,7 +136,59 @@ export class CharacterRig {
     for (const m of this.materials) if (!m.map) m.color.set(color);
   }
 
+  has(clip: string): boolean {
+    return this.actions.has(clip);
+  }
+
+  /** Length of a clip in seconds, or null when the rig lacks it. */
+  clipDuration(clip: string): number | null {
+    const a = this.actions.get(clip);
+    return a ? a.getClip().duration : null;
+  }
+
+  /** Whether a one-off clip is still playing. */
+  get overriding(): boolean {
+    return this.override !== null;
+  }
+
+  /**
+   * Play a clip over the state clips: once (then the state clip returns) or looping until
+   * `stopOverride`. Returns its length in seconds at the given speed, or null when missing.
+   */
+  play(clip: string, { loop = false, fadeIn = 0.1, timeScale = 1 }: { loop?: boolean; fadeIn?: number; timeScale?: number } = {}): number | null {
+    const next = this.actions.get(clip);
+    if (!next) return null;
+    const from = this.override ?? this.current;
+    next.reset().setLoop(loop ? THREE.LoopRepeat : THREE.LoopOnce, Infinity).setEffectiveWeight(1);
+    next.clampWhenFinished = true;
+    next.timeScale = timeScale;
+    next.play();
+    if (from && from !== next) from.crossFadeTo(next, fadeIn, false);
+    else if (from === next) next.fadeIn(0);
+    this.override = next;
+    const duration = next.getClip().duration / Math.max(1e-3, Math.abs(timeScale));
+    this.overrideEnds = loop ? Infinity : duration;
+    this.overrideTime = 0;
+    return duration;
+  }
+
+  /** End a one-off clip early and fade the state clip back in. */
+  stopOverride(fade = 0.15): void {
+    if (!this.override) return;
+    const back = this.current;
+    if (back && back !== this.override) {
+      back.reset().setEffectiveWeight(1).play();
+      this.override.crossFadeTo(back, fade, false);
+    } else this.override.fadeOut(fade);
+    this.override = null;
+  }
+
   setState(state: RigState, speed = 0): void {
+    if (this.override) {
+      // A one-off clip is playing; remember the state for when it ends.
+      this.state = state;
+      return;
+    }
     if (state !== this.state) {
       const clipName = STATE_CLIPS[state].find((n) => this.actions.has(n));
       const next = clipName ? this.actions.get(clipName)! : null;
@@ -151,6 +207,16 @@ export class CharacterRig {
 
   update(dt: number): void {
     this.mixer.update(dt);
+    if (this.override) {
+      this.overrideTime += dt;
+      if (this.overrideTime >= this.overrideEnds - 0.08) {
+        // Fade back to the state clip just before the one-off clip holds its last frame.
+        const state = this.state;
+        this.stopOverride(0.12);
+        this.state = null;
+        if (state) this.setState(state);
+      }
+    }
   }
 
   /**

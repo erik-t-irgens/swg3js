@@ -18,6 +18,7 @@
 //   node tools/swg/cli.mjs sat <swg-dir> <x.sat | object/mobile/shared_x.iff> <out.glb> [--anim=all|idle,walk] [--var=skin_color=3,...] [--wear=object/tangible/wearables/...,...]
 //   node tools/swg/cli.mjs trt <swg-dir> <x.trt> <out.png> [--var=name=value,...]   bake a texture renderer blueprint (skin, hair) to a PNG
 //   node tools/swg/cli.mjs player <swg-dir> <out-dir> [--template=object/creature/player/shared_human_male.iff] [--wear=...|none] [--var=...]   the player's character as <out-dir>/player/<id>.glb + manifest.json
+                                                                 [--jka=<Jedi Academy GameData or base dir>] [--jka-anims=BOTH_A1_T__B_,...]  adds Jedi Academy's saber attacks, jumps and rolls, retargeted
 //                                                                  (dressed in a shirt, trousers and shoes unless --wear says otherwise)
 //                                                                  convert a skeletal appearance (creature, character) with skeleton and animations
 //   node tools/swg/cli.mjs flora <swg-dir> <planet>|all <out-dir>   (re)convert just the flora models for packs converted already
@@ -66,6 +67,7 @@ import { loadBuildouts, mergeBuildouts } from './buildout.mjs';
 import { R, composeMeshes, mergeSkeletons, parseAnimation, parseLat, parseLmg, parseMgn, parseSat, parseSkeleton, poseAtFrame, readIff, skinData, skinnedPrimitives } from './skeletal.mjs';
 import { resolveTemplateMesh, resolveTemplateString } from './objtemplate.mjs';
 import { exportParticle } from './particle.mjs';
+import { defaultJkaClips, importJkaClips } from './jka.mjs';
 import { encodePng } from './png.mjs';
 import { shaderTextures } from './sht.mjs';
 import { bakeShader, describeShader, describeVariables, loadShader, parseBlueprint, preparedShaders, renderBlueprint, renderContext, shaderNeedsBake } from './texrender.mjs';
@@ -652,7 +654,7 @@ function skinnedTexture(vfs, shaderPath, slots, ctx, info) {
   return { path: `${shaderPath}#${rendered ? basename(rendered.file) : 'baked'}`, png: encodePng(image.width, image.height, image.rgba), hasAlpha, alphaMode };
 }
 
-function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80, variables = new Map(), wear = [] } = {}) {
+function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80, variables = new Map(), wear = [], extraClips = null } = {}) {
   let satPath = path.replace(/\\/g, '/');
   if (/\.iff$/i.test(satPath)) {
     const cache = new Map();
@@ -829,6 +831,14 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
     }
   } else if (latFile) info.missing.push(latFile);
   const skin = skinData(skeleton, clips, { flipX: true });
+  if (extraClips) {
+    // Clips from elsewhere (Jedi Academy's), already retargeted onto this skeleton's joints.
+    const extra = extraClips(skin.joints, info);
+    for (const c of extra) {
+      skin.clips.push(c);
+      info.animations.push(c.name);
+    }
+  }
   mkdirSync(dirname(outFile), { recursive: true });
   writeFileSync(outFile, buildGlb(meshes, { flipX: true, textures, skin, animations: skin.clips }));
   return info;
@@ -1531,8 +1541,20 @@ switch (cmd) {
     const id = basename(template).replace(/^shared_/, '').replace(/\.[^.]+$/, '');
     const outDir = join(pos[2], 'player');
     const wear = options.wear === undefined ? DEFAULT_WEAR : options.wear === 'none' ? [] : options.wear.split(',').map((w) => w.trim()).filter(Boolean);
-    const info = convertSat(vfs, template, join(outDir, `${id}.glb`), { animations: options.anim ?? PLAYER_CLIPS, variables: customizationValues(options.var), wear, maxAnimations: 40 });
+    // --jka=<Jedi Academy GameData or base folder>: its saber attacks, jumps and rolls retargeted onto this skeleton.
+    let jka = null;
+    const extraClips = options.jka
+      ? (joints, info) => {
+          const wanted = options['jka-anims'] ? options['jka-anims'].split(',').map((a) => a.trim().toUpperCase()).filter(Boolean) : defaultJkaClips();
+          const r = importJkaClips(options.jka, joints, wanted, { log: (m) => console.log(`  jka: ${m}`) });
+          jka = r.info;
+          info.jkaClips = Object.fromEntries(r.clips.map((c) => [c.name, { loop: c.loop, fps: c.fps, frames: c.frames }]));
+          return r.clips;
+        }
+      : null;
+    const info = convertSat(vfs, template, join(outDir, `${id}.glb`), { animations: options.anim ?? PLAYER_CLIPS, variables: customizationValues(options.var), wear, maxAnimations: 40, extraClips });
     console.log(`${info.sat}: skeleton ${info.skeleton} (${info.joints} joints${info.attached.length ? `, with ${info.attached.join('; ')}` : ''})`);
+    if (jka) console.log(`  jka: ${Object.keys(info.jkaClips).length} clips retargeted${jka.missing.length ? `; not in animation.cfg: ${jka.missing.join(', ')}` : ''}`);
     for (const m of info.meshes) console.log(`  mesh ${m.file}: ${m.triangles} tris, ${m.shaders} shaders, layer ${m.layer}${m.hidden ? `, ${m.hidden} tris under clothing` : ''}`);
     for (const t of info.textureRenderers) console.log(`  texture renderer ${t}`);
     if (info.customization.size) console.log(`  customization (set with --var=name=value,...):\n    ${[...info.customization].join('\n    ')}`);
@@ -1545,7 +1567,7 @@ switch (cmd) {
     for (const m of info.skipped) console.log(`  skipped: ${m}`);
     const manifestFile = join(outDir, 'manifest.json');
     const manifest = existsSync(manifestFile) ? JSON.parse(readFileSync(manifestFile, 'utf8')) : { players: [] };
-    const entry = { id, file: `player/${id}.glb`, template, wear, variables: Object.fromEntries(customizationValues(options.var)), clips: info.animations, clipSpeeds: info.clipSpeeds ?? {}, bounds: info.bounds, scale: 1 };
+    const entry = { id, file: `player/${id}.glb`, template, wear, variables: Object.fromEntries(customizationValues(options.var)), clips: info.animations, clipSpeeds: info.clipSpeeds ?? {}, bounds: info.bounds, scale: 1, ...(info.jkaClips ? { jkaClips: info.jkaClips } : {}) };
     manifest.players = [entry, ...(manifest.players ?? []).filter((p) => p.id !== id)];
     writeFileSync(manifestFile, JSON.stringify(manifest, null, 2));
     console.log(`-> ${join(outDir, `${id}.glb`)} and ${manifestFile}; the game uses the first entry`);

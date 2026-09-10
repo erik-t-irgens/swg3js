@@ -155,6 +155,13 @@ class App {
         console.table(list.slice(0, 60));
         return summary;
       },
+      /** Movement rules: 'jka' (Jedi Academy's, the default on this branch) or 'swg' (the original numbers). Reports the current one. */
+      profile: (name?: 'jka' | 'swg') => {
+        if (name) this.player.moveProfile = name;
+        return this.player.moveProfile;
+      },
+      /** The saber system's state: style, current move, chain count, and whether the rig has Jedi Academy's clips. */
+      saber: () => ({ style: this.player.saber.style, move: this.player.saber.move, chain: this.player.saber.chainCount, timer: Number(this.player.saber.timer.toFixed(2)), jkaClips: this.player.hasJkaClips, on: this.player.saberOn }),
       /** Particle effects within r metres of the player: file, distance, whether playing, live particles. With `verbose`, every emitter: texture, blend, whether the texture loaded, and the first particle's size, alpha, colour and screen position. */
       particles: (r = 200, verbose = false) => {
         const list = this.world.particlesNear(this.player.pos.x, this.player.pos.z, r);
@@ -185,6 +192,7 @@ class App {
           this.cam.update(this.input, this.player.pos, null);
           this.player.update(dt, this.input, this.cam, this.world);
           this.physics.step(dt);
+          this.input.endFrame();
         }
         for (const k of keys) this.input.force(k, false);
       },
@@ -206,7 +214,7 @@ class App {
         <h1>SWG3JS</h1>
         <div class="sub">Star Wars Galaxies, rebuilt for the browser. Ten worlds, one very ambitious side project.</div>
         <div class="controls">
-          <div><b>WASD</b> move · <b>Mouse</b> look · <b>Wheel</b> zoom · <b>Space</b> jump · <b>Shift</b> walk · in water <b>Space</b>/<b>Ctrl</b> surface/dive, or look down and swim</div>
+          <div><b>WASD</b> move · <b>Mouse</b> look · <b>Wheel</b> zoom · <b>Space</b> jump (hold to Force Jump higher) · <b>Shift</b> walk · in water <b>Space</b>/<b>Ctrl</b> surface/dive, or look down and swim</div>
           <div><b>LMB</b> attack · <b>E</b> mount speeder · <b>C</b> switch class · <b>T</b> fast-forward time</div>
           <div><b>M</b> galaxy map · <b>H</b> toggle help · <b>N</b> noclip fly (<b>+</b>/<b>-</b> speed) · <b>F</b> flashlight · <b>Esc</b> release mouse</div>
         </div>
