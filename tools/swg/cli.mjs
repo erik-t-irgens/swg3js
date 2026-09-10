@@ -41,6 +41,7 @@
 // Flags: --retail-only (mount only archives named in the retail manifests)
 //        --events (place buildout areas that the game only shows during an event; planets lists them)
 //        --areas (why: list every buildout area with its rows, unknown templates and extent)
+//        --near=x,z,r (why: only objects within r metres of x,z; the pattern "." matches everything)
 //        --core3=<dir> (SWGEmu's MMOCoreORB/bin/scripts: place the static objects its screenplays spawn,
 //                       and write the creature and NPC spawns to <pack>/spawns.json; or set CORE3 in the environment)
 //        --no-flip (keep left-handed coordinates)  --no-textures (skip DDS decoding)
@@ -1545,9 +1546,12 @@ switch (cmd) {
     }
     const cache = new Map();
     const hits = new Map();
+    // --near=x,z,r narrows the search to objects within r metres of a point.
+    const near = options.near ? options.near.split(',').map(Number) : null;
     for (const e of entries) {
       const template = snap.templates[e.node.templateIndex];
       if (!pattern.test(template)) continue;
+      if (near && (!e.world || Math.hypot(e.world.pos[0] - near[0], e.world.pos[2] - near[1]) > (near[2] ?? 500))) continue;
       const h = hits.get(template) ?? { count: 0, contained: 0, buildout: 0, radius: e.node.radius, example: e };
       h.count++;
       if (e.node.buildout) h.buildout++;
