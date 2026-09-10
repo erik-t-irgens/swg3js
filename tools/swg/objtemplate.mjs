@@ -111,7 +111,9 @@ export function resolveAppearanceToMesh(vfs, rawAppearance) {
       return { skip: `pob failed: ${err.message}` };
     }
   }
-  if (lower.endsWith('.sat')) return { skip: 'skeletal appearance (.sat)' };
+  // Skeletal appearances (creatures, and static things with animated parts such as the Sarlacc)
+  // resolve to their .sat; the caller decides whether to bake one at its bind pose.
+  if (lower.endsWith('.sat')) return vfs.has(appearance) ? { appearance, skeletal: appearance, parts: [] } : { skip: `skeletal appearance missing: ${appearance}` };
   if (lower.endsWith('.prt')) return { skip: 'particle (.prt)' };
   if (!/\.(apt|lod|msh|cmp)$/.test(lower)) return { skip: `appearance type ${lower.slice(lower.lastIndexOf('.'))}` };
   try {

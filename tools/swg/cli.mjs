@@ -1162,6 +1162,33 @@ async function snapshotPlanet(vfs, planet, outDir) {
         skip(r.skip, template);
         continue;
       }
+      if (r.skeletal) {
+        // Creatures and NPCs are the server's to spawn and animate; other skeletal things (the
+        // Sarlacc, animated banners) are baked at their bind pose as static props.
+        if (/^object\/(mobile|creature)\//i.test(template)) {
+          skip('creature or NPC (skeletal, spawned by the server)', template);
+          continue;
+        }
+        const sid = familyOf(r.skeletal);
+        if (!models.has(sid)) {
+          if (models.size >= max) break;
+          try {
+            const info = convertSat(vfs, r.skeletal, join(outDir, `${sid}.glb`), { animations: 'none' });
+            const tris = info.meshes.reduce((a, m) => a + m.triangles, 0);
+            models.set(sid, { id: sid, source: r.skeletal, file: `${sid}.glb`, bounds: info.bounds ?? { min: [-1, 0, -1], max: [1, 2, 1] }, triangles: tris, textured: info.meshes.length, shaders: info.meshes.reduce((a, m) => a + m.shaders, 0), parts: 1, skeletal: true });
+            console.error(`  ${sid}: ${tris} tris, skeletal appearance baked at its bind pose`);
+          } catch (err) {
+            models.set(sid, { failed: err.message });
+          }
+        }
+        const model = models.get(sid);
+        if (!model || model.failed) {
+          skip(`skeletal convert failed: ${model?.failed ?? 'unknown'}`, template);
+          continue;
+        }
+        objects.push({ template, model: sid, x: e.world.pos[0], y: e.world.pos[1], z: e.world.pos[2], q: e.world.q, radius: n.radius, contained: e.parentId !== 0 });
+        continue;
+      }
       const single = r.parts.length === 1 && !r.parts[0].transform;
       const id = familyOf(single ? r.parts[0].mesh : r.appearance);
       if (!models.has(id)) {
@@ -1534,6 +1561,10 @@ switch (cmd) {
       console.log(`\n${template}`);
       console.log(`  ${h.count} placed (${h.buildout} by buildouts, ${h.contained} inside buildings), radius ${h.radius}, e.g. at ${p[0].toFixed(0)}, ${p[2].toFixed(0)}`);
       const r = resolveTemplateMesh(vfs, template, cache);
+      if (r.skeletal) {
+        console.log(`  skeletal appearance: ${r.skeletal}${/^object\/(mobile|creature)\//i.test(template) ? ' (a creature or NPC: the server spawns these, snapshot leaves them out)' : ' (baked at its bind pose as a static prop)'}`);
+        continue;
+      }
       if (r.skip) {
         console.log(`  SKIPPED: ${r.skip}`);
         continue;

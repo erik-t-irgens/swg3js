@@ -73,6 +73,7 @@ Status:
 | Sky: environment files (ENVM), environment tables, colour ramps, cube maps | Exported per planet; the game draws the gradient sky or skybox, sun, moons, stars and cloud layers and lights the world from the ramps |
 | Cell lights in portal buildings (LGHT) | Each cell's ambient, parallel and point lights with Direct3D attenuation go into the manifest; the game lights the cell the player is in and its neighbours with them |
 | Component appearances (.cmp) | Parts baked into one mesh by their transforms |
-| Skeletal (.sat), particles (.prt) | Skipped with counts in the snapshot output |
+| Skeletal (.sat) in snapshots | Creatures and NPCs are left to the server; other skeletal things (the Sarlacc, animated banners) are baked at their bind pose as static props |
+| Particles (.prt) | Skipped with counts in the snapshot output |
 
 Archive reading is verified on real client data. Mesh conversion is still being validated; if a conversion fails, run `dump` on the file and share the output.
