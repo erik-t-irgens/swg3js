@@ -17,7 +17,9 @@ npm run swg -- planets "C:/SWG" --retail-only                                   
 npm run swg -- snapshot "C:/SWG" all assets-private --radius=all --retail-only                                      # every planet the game knows, one pack each
 # The expansions' planets convert the same way: mustafar, and Kashyyyk's zones kashyyyk_main, kashyyyk_hunting, kashyyyk_dead_forest,
 # kashyyyk_rryatt_trail, kashyyyk_north_dungeons, kashyyyk_south_dungeons, kashyyyk_pob_dungeons (one pack per zone; `all` includes them).
-npm run swg -- terrain "C:/SWG" tatooine assets-private/tatooine                                                  # just the terrain template
+npm run swg -- terrain "C:/SWG" tatooine assets-private/tatooine                                                  # just the terrain template and ground textures
+npm run swg -- terrain "C:/SWG" all assets-private                                                                # the same into every planet pack already there
+npm run swg -- status assets-private                                                                              # what each pack holds, and the command for what is missing
 npm run swg -- terrain-check assets-private/tatooine                                                              # generated heights vs. snapshot heights
 ```
 
@@ -35,9 +37,11 @@ Named places come from `regions/regions.json`, a table of every planet's cities,
 
 `trt <dir> <appearance/x.trt> <out.png> [--var=name=value,...]` bakes one texture renderer blueprint on its own, listing its shaders, effects, textures and variables, for checking a skin before converting the character.
 
-`player <dir> <out-dir> [--template=object/creature/player/shared_human_male.iff] [--wear=...] [--var=...]` converts the player's character (any player species template) with skin baked, clothing composed and the clips the game drives (idle, walk, run, jump, sit, a light attack, a hit, incapacitation; by exact logical name, so pass `--anim=` with names from `sat --anim=list` if a table names them differently) into `<out-dir>/player/<id>.glb` and `player/manifest.json`; the game replaces its placeholder rig with the manifest's first entry when the file exists, finding the hand, spine and arm bones by name pattern and reading each clip's natural speed from the manifest. In the browser console `__debug.show('player/human_male.glb', 'walk')` previews it, and the result lists its bones and clips.
+`player <dir> <out-dir> [--template=object/creature/player/shared_human_male.iff] [--wear=...|none] [--var=...]` converts the player's character (any player species template) with skin baked, clothing composed (a plain shirt, trousers and shoes unless `--wear` lists other wearables, or `none`) and the clips the game drives (idle, walk, run, jump, sit, a light attack, a hit, incapacitation; by exact logical name, so pass `--anim=` with names from `sat --anim=list` if a table names them differently) into `<out-dir>/player/<id>.glb` and `player/manifest.json`; the game replaces its placeholder rig with the manifest's first entry when the file exists, finding the hand, spine and arm bones by name pattern and reading each clip's natural speed from the manifest. In the browser console `__debug.show('player/human_male.glb', 'walk')` previews it, and the result lists its bones and clips.
 
-`terrain <dir> <planet> <out-dir>` copies just the terrain template, its bitmaps and its ground textures into an existing pack, which is the quick way to add ground textures to packs converted before they existed.
+`terrain <dir> <planet>|all <out-dir>` copies just the terrain template, its bitmaps and its ground textures into an existing pack (`all`: into every planet pack under `<out-dir>`), which is the quick way to add ground textures to packs converted before they existed.
+
+`status <out-dir>` needs no archives: it lists what every planet pack, the creatures and the player under `<out-dir>` hold, and prints the command that fills each gap.
 
 `creatures <dir> <out-dir>` converts the creature each planet spawns (bantha, kaadu, durni, bol, kimogila, boar-wolf, rancor, mawgax, kahmurra, torton) into `<out-dir>/creatures/<id>.glb` with the clips the game drives (idle, walk, run, a light attack, a light hit, incapacitation) and writes `creatures/manifest.json`; the game swaps its procedural creature bodies for these when the file exists.
 

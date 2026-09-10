@@ -102,6 +102,45 @@ src/
   main.ts    app wiring and game loop
 ```
 
+## Converting your own SWG install
+
+Everything the game shows from the original client (planets, buildings, ground textures, creatures, the player character) is converted from a locally owned install into `assets-private/`, which is git-ignored and never committed. The converter is `tools/swg/cli.mjs`; `docs/ASSETS.md` explains what may be converted and why, and `tools/swg/README.md` documents every command.
+
+**Setup, once per machine.** Node 22.18 or newer (24 is fine), then `npm install`. Point a variable at the folder holding the `.tre` archives:
+
+```bash
+# macOS / Linux / Git Bash on Windows
+export SWG="/Users/you/SWG"
+# PowerShell (then write "$env:SWG" wherever the commands below say "$SWG")
+$env:SWG = "C:\SWG"
+```
+
+**The whole conversion, in order.** Every command takes `--retail-only`, which mounts only the SOE-origin archives and leaves an emulator project's own content out.
+
+```bash
+npm run swg -- verify "$SWG" --retail-only                                        # 1. which archives are retail (sanity check)
+npm run swg -- planets "$SWG" --retail-only                                       # 2. which planets the archives hold
+npm run swg -- snapshot "$SWG" all assets-private --radius=all --retail-only       # 3. every planet: objects, terrain, ground textures, flora, places (long: minutes per planet)
+npm run swg -- creatures "$SWG" assets-private --retail-only                      # 4. the creatures the planets spawn
+npm run swg -- player "$SWG" assets-private --retail-only                         # 5. the player character, dressed, with its animations
+npm run swg -- status assets-private                                              # 6. what is in place, and the command for anything missing
+npm run dev                                                                       # 7. play
+```
+
+Step 3 also accepts one planet at a time (`snapshot "$SWG" tatooine assets-private/tatooine --center=auto --radius=all --retail-only`), and `--radius=500` for a quick look at just the starport area. Step 5 dresses the character in a shirt, trousers and shoes; `--wear=object/tangible/wearables/...,...` picks other clothes (`list "$SWG" wearables/` shows what exists), `--var=name=value` sets skin and hair colours (the command prints every variable), `--template=object/creature/player/shared_twilek_female.iff` picks another species.
+
+**After pulling new code.** Run `npm run swg -- status assets-private` first: it reports each pack and prints the exact command for whatever is missing. In general:
+
+| What changed | Command to rerun |
+| --- | --- |
+| Ground textures, terrain rules, building layers | `terrain "$SWG" all assets-private --retail-only` (refreshes every existing pack in seconds) |
+| Buildings, objects, flora, a new planet | `snapshot "$SWG" <planet> assets-private/<planet> --center=auto --radius=all --retail-only` |
+| Named places on the galaxy map | `pois "$SWG" all assets-private --retail-only` |
+| Skin, clothes, eyes, animations (walking, swimming) | `player "$SWG" assets-private --retail-only` |
+| Creature models or clips | `creatures "$SWG" assets-private --retail-only` |
+
+Commands that write a single planet's pack take the planet's folder (`assets-private/tatooine`); commands that take `all` take the parent (`assets-private`). Reconverting is always safe: each command overwrites only its own files.
+
 ## Build
 
 ```bash

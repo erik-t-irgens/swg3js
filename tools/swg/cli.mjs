@@ -17,7 +17,8 @@
 //   node tools/swg/cli.mjs creatures <swg-dir> <out-dir>              every planet's creature as a skinned GLB under <out-dir>/creatures/
 //   node tools/swg/cli.mjs sat <swg-dir> <x.sat | object/mobile/shared_x.iff> <out.glb> [--anim=all|idle,walk] [--var=skin_color=3,...] [--wear=object/tangible/wearables/...,...]
 //   node tools/swg/cli.mjs trt <swg-dir> <x.trt> <out.png> [--var=name=value,...]   bake a texture renderer blueprint (skin, hair) to a PNG
-//   node tools/swg/cli.mjs player <swg-dir> <out-dir> [--template=object/creature/player/shared_human_male.iff] [--wear=...] [--var=...]   the player's character as <out-dir>/player/<id>.glb + manifest.json
+//   node tools/swg/cli.mjs player <swg-dir> <out-dir> [--template=object/creature/player/shared_human_male.iff] [--wear=...|none] [--var=...]   the player's character as <out-dir>/player/<id>.glb + manifest.json
+//                                                                  (dressed in a shirt, trousers and shoes unless --wear says otherwise)
 //                                                                  convert a skeletal appearance (creature, character) with skeleton and animations
 //   node tools/swg/cli.mjs flora <swg-dir> <planet>|all <out-dir>   (re)convert just the flora models for packs converted already
 //   node tools/swg/cli.mjs snapshot <swg-dir> <planet>|all <out-dir> [--center=x,z|auto] --radius=r|all [--max=n]
@@ -28,7 +29,9 @@
 //   node tools/swg/cli.mjs stat <swg-dir> <file>                    which archive provides a file (after load order and deletions)
 //   node tools/swg/cli.mjs why <swg-dir> <planet> <pattern>         why snapshot objects matching a name do or do not convert
 //   node tools/swg/cli.mjs pob <swg-dir> <file.pob>                 print a portal building's cells, portals and links (diagnostic)
-//   node tools/swg/cli.mjs terrain <swg-dir> <planet> <out-dir>    copy just the terrain template into a pack
+//   node tools/swg/cli.mjs terrain <swg-dir> <planet>|all <out-dir>  copy just the terrain template and ground textures into a pack
+//                                                                  ("all": into every planet pack already under <out-dir>)
+//   node tools/swg/cli.mjs status <out-dir>                        what the packs under <out-dir> hold and which commands would fill the gaps
 //   node tools/swg/cli.mjs terrain-check <out-dir> [--limit=n] [--layers] [--at=x,z]
 //                                                                  generate terrain at every snapshot object and compare with its height;
 //                                                                  --layers lists every layer, --at prints the height at one point
@@ -847,11 +850,86 @@ const CREATURES = {
 const CREATURE_CLIPS = 'idle,walk,run,cbt_stand_combat_attack_light,rea_stand_get_hit_light,trn_stand_to_incapacitated,loop_incapacitated';
 
 /** The player's clips: locomotion and posture by exact name (=), reactions by substring. */
+/** What the player wears when --wear is not given: a plain shirt, trousers and shoes. */
+const DEFAULT_WEAR = ['object/tangible/wearables/shirt/shared_shirt_s03.iff', 'object/tangible/wearables/pants/shared_pants_s01.iff', 'object/tangible/wearables/shoes/shared_shoes_s01.iff'];
 const PLAYER_CLIPS = '=idle,=walk,=run,=idle_combat,=walk_combat,=run_combat,=jump,=loop_sitting_chair:0,=loop_sitting_ground,=loop_swimming:speed0,=loop_swimming:speed1,=unarmed_standing_ready_punch,=sword_1h_standing_ready_hrz_slash_middle_r,=rea_get_hit_medium_mid_center,=trn_combat_standing_hit_to_incapacitated_face_up,=loop_incapacitated_face_up,=cbt_stand_combat_attack_light,=rea_stand_get_hit_light,=trn_stand_to_incapacitated,=loop_incapacitated';
 const PLAYER_TEMPLATE = 'object/creature/player/shared_human_male.iff';
 
 /** Planet ids the game can load a pack for (see src/data/planets.ts). */
 const GAME_PLANETS = ['tatooine', 'naboo', 'corellia', 'dantooine', 'lok', 'endor', 'dathomir', 'yavin4', 'talus', 'rori', 'mustafar', 'kashyyyk_main', 'kashyyyk_hunting', 'kashyyyk_dead_forest', 'kashyyyk_rryatt_trail', 'kashyyyk_north_dungeons', 'kashyyyk_south_dungeons', 'kashyyyk_pob_dungeons'];
+
+/**
+ * Report what the packs under <dir> hold (planets, creatures, player) and which command
+ * would fill each gap, so a fresh checkout or a second machine knows what to run.
+ */
+function packStatus(dir) {
+  const readJson = (file) => (existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : null);
+  const todo = new Map();
+  const need = (cmd, why) => {
+    if (!todo.has(cmd)) todo.set(cmd, []);
+    todo.get(cmd).push(why);
+  };
+  console.log(`packs under ${dir}:`);
+  let planets = 0;
+  for (const planet of GAME_PLANETS) {
+    const packDir = join(dir, planet);
+    const manifest = readJson(join(packDir, 'manifest.json'));
+    if (!manifest) {
+      console.log(`  ${planet}: no pack`);
+      need(`snapshot <swg-dir> all ${dir} --radius=all --retail-only`, `${planet} has no pack`);
+      continue;
+    }
+    planets++;
+    const layout = readJson(join(packDir, 'layout.json'));
+    const objects = layout ? layout.objects.length : 0;
+    const flora = Object.keys(manifest.categories?.flora ?? {}).length;
+    const pois = readJson(join(packDir, 'pois.json'));
+    const terrain = existsSync(join(packDir, 'terrain.trn'));
+    const shaders = readJson(join(packDir, 'terrain/shaders.json'));
+    const textured = shaders ? shaders.families.filter((f) => f.file).length : 0;
+    const layers = existsSync(join(packDir, 'terrain')) ? readdirSync(join(packDir, 'terrain')).filter((f) => f.endsWith('.lay')).length : 0;
+    const parts = [
+      `${objects} objects`,
+      `${flora} flora models`,
+      pois ? `${(pois.pois ?? pois).length ?? 0} places` : 'no pois.json',
+      terrain ? `terrain${layers ? ` + ${layers} building layers` : ''}` : 'NO TERRAIN',
+      shaders ? `ground textures ${textured}/${shaders.families.length}` : 'NO GROUND TEXTURES',
+    ];
+    console.log(`  ${planet}: ${parts.join(', ')}`);
+    if (!objects) need(`snapshot <swg-dir> ${planet} ${packDir} --center=auto --radius=all --retail-only`, `${planet} has no objects`);
+    if (!terrain) need(`snapshot <swg-dir> ${planet} ${packDir} --center=auto --radius=all --retail-only`, `${planet} has no terrain`);
+    else if (!shaders) need(`terrain <swg-dir> all ${dir} --retail-only`, `${planet} has no ground textures`);
+    if (!pois) need(`pois <swg-dir> all ${dir} --retail-only`, `${planet} has no pois.json`);
+  }
+  const creatures = readJson(join(dir, 'creatures/manifest.json'));
+  if (!creatures) {
+    console.log('  creatures: none');
+    need(`creatures <swg-dir> ${dir} --retail-only`, 'no creatures converted');
+  } else {
+    const have = new Set(creatures.creatures.map((c) => c.id));
+    const missing = Object.keys(CREATURES).filter((id) => !have.has(id));
+    console.log(`  creatures: ${have.size} (${[...have].join(', ')})${missing.length ? `; missing ${missing.join(', ')}` : ''}`);
+    if (missing.length) need(`creatures <swg-dir> ${dir} --retail-only`, `creatures missing: ${missing.join(', ')}`);
+  }
+  const player = readJson(join(dir, 'player/manifest.json'));
+  if (!player || !player.players?.length) {
+    console.log('  player: none (the placeholder rig is used)');
+    need(`player <swg-dir> ${dir} --retail-only`, 'no player character converted');
+  } else {
+    const p = player.players[0];
+    const wear = p.wear?.length ? `${p.wear.length} wearables` : 'NO CLOTHES';
+    const swims = p.clips.some((c) => /swim/i.test(c));
+    console.log(`  player: ${p.id} (${p.template}), ${wear}, ${p.clips.length} clips${swims ? '' : ', NO SWIMMING CLIPS'}`);
+    if (!p.wear?.length) need(`player <swg-dir> ${dir} --retail-only`, 'the player has no clothes');
+    else if (!swims) need(`player <swg-dir> ${dir} --retail-only`, 'the player lacks the swimming clips');
+  }
+  if (!todo.size) {
+    console.log(`everything is in place: ${planets} planet packs, creatures and player`);
+    return;
+  }
+  console.log('\nto fill the gaps (replace <swg-dir> with your SWG folder):');
+  for (const [cmd, whys] of todo) console.log(`  npm run swg -- ${cmd}\n      ${whys.length > 4 ? `${whys.slice(0, 3).join('; ')}; and ${whys.length - 3} more` : whys.join('; ')}`);
+}
 
 /** Names of the world snapshots the archives hold (snapshot/<name>.ws). */
 function snapshotPlanets(vfs) {
@@ -1226,7 +1304,7 @@ switch (cmd) {
     const template = (options.template ?? PLAYER_TEMPLATE).replace(/\\/g, '/');
     const id = basename(template).replace(/^shared_/, '').replace(/\.[^.]+$/, '');
     const outDir = join(pos[2], 'player');
-    const wear = (options.wear ?? '').split(',').map((w) => w.trim()).filter(Boolean);
+    const wear = options.wear === undefined ? DEFAULT_WEAR : options.wear === 'none' ? [] : options.wear.split(',').map((w) => w.trim()).filter(Boolean);
     const info = convertSat(vfs, template, join(outDir, `${id}.glb`), { animations: options.anim ?? PLAYER_CLIPS, variables: customizationValues(options.var), wear, maxAnimations: 40 });
     console.log(`${info.sat}: skeleton ${info.skeleton} (${info.joints} joints${info.attached.length ? `, with ${info.attached.join('; ')}` : ''})`);
     for (const m of info.meshes) console.log(`  mesh ${m.file}: ${m.triangles} tris, ${m.shaders} shaders, layer ${m.layer}${m.hidden ? `, ${m.hidden} tris under clothing` : ''}`);
@@ -1395,9 +1473,21 @@ switch (cmd) {
   case 'terrain': {
     if (!pos[3]) usage();
     const vfs = mount(pos[1]);
-    mkdirSync(pos[3], { recursive: true });
-    const file = await copyTerrain(vfs, pos[2], pos[3]);
-    console.log(file ? `terrain -> ${join(pos[3], file)}` : `no terrain/${pos[2]}.trn in archives`);
+    // "all" refreshes the terrain of every planet pack that exists under <out-dir> already.
+    const targets = pos[2] === 'all' ? GAME_PLANETS.filter((p) => existsSync(join(pos[3], p, 'manifest.json'))).map((p) => [p, join(pos[3], p)]) : [[pos[2], pos[3]]];
+    if (!targets.length) console.log(`no planet packs under ${pos[3]} yet; run snapshot first`);
+    for (const [planet, outDir] of targets) {
+      mkdirSync(outDir, { recursive: true });
+      const file = await copyTerrain(vfs, planet, outDir);
+      console.log(file ? `${planet}: terrain -> ${join(outDir, file)}` : `${planet}: no terrain/${planet}.trn in archives`);
+    }
+    break;
+  }
+
+  case 'status': {
+    // <out-dir>: what the converted packs hold, and the command that fills each gap. Needs no archives.
+    if (!pos[1]) usage();
+    packStatus(pos[1]);
     break;
   }
 
