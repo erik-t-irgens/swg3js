@@ -29,6 +29,38 @@ export function parseCrcStringTable(root) {
   return out;
 }
 
+/** The engine's CRC-32 (polynomial 0x04C11DB7, MSB first, init and final xor 0xFFFFFFFF) over a normalised name. */
+const CRC_TABLE = new Uint32Array(256);
+for (let i = 0; i < 256; i++) {
+  let c = i << 24;
+  for (let k = 0; k < 8; k++) c = c & 0x80000000 ? ((c << 1) ^ 0x04c11db7) >>> 0 : (c << 1) >>> 0;
+  CRC_TABLE[i] = c;
+}
+export function templateCrc(name) {
+  const norm = name.replace(/\\/g, '/').replace(/\/+/g, '/').toLowerCase();
+  let crc = 0xffffffff;
+  for (let i = 0; i < norm.length; i++) crc = (CRC_TABLE[((crc >>> 24) ^ norm.charCodeAt(i)) & 0xff] ^ (crc << 8)) >>> 0;
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+/**
+ * Template names by CRC: the string table first, then every object template in the archives
+ * hashed the engine's way, since an older string table (the retail one, when a project's own
+ * archives are left out) lacks the templates later publishes added.
+ */
+function templateNames(vfs, crcTable) {
+  let computed = null;
+  return (crc) => {
+    const known = crcTable.get(crc);
+    if (known) return known;
+    if (!computed) {
+      computed = new Map();
+      for (const path of vfs.list?.('object/') ?? []) if (/\.iff$/i.test(path)) computed.set(templateCrc(path), path.replace(/\\/g, '/'));
+    }
+    return computed.get(crc);
+  };
+}
+
 function table(vfs, path) {
   if (!vfs.has(path)) return null;
   const buf = vfs.read(path);
@@ -48,6 +80,8 @@ export function loadBuildouts(vfs, planet) {
   if (!areasTable) return { nodes, stats };
   const crcPath = 'misc/object_template_crc_string_table.iff';
   const crcTable = vfs.has(crcPath) ? parseCrcStringTable(parseIff(vfs.read(crcPath))) : new Map();
+  const nameOf = templateNames(vfs, crcTable);
+  stats.computedTemplates = 0;
   let nextId = 1 << 30; // well clear of the snapshot's ids
   areasTable.rows.forEach((area, areaIndex) => {
     const name = area.area;
@@ -79,11 +113,12 @@ export function loadBuildouts(vfs, planet) {
     let currentCell = 0;
     for (const r of rows.rows) {
       const crc = Number(r.shared_template_crc) >>> 0;
-      const template = crcTable.get(crc);
+      const template = nameOf(crc);
       if (!template) {
         stats.unknownTemplates++;
         continue;
       }
+      if (!crcTable.has(crc)) stats.computedTemplates++;
       const cellIndex = Number(r.cell_index) || 0;
       const portalLayoutCrc = Number(r.portal_layout_crc) >>> 0;
       let id;

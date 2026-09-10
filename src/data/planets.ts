@@ -20,6 +20,8 @@ export interface PlanetDef {
   gravity: number;
   sky: { top: number; horizon: number; sunColor: number; suns: number; sunElevation: number; sunAzimuth: number };
   fog: { color: number; density: number };
+  /** Multiplier on the planet's own sky fog density (the client's value reads far too thick here). */
+  swgFogScale?: number;
   light: { sunIntensity: number; ambientSky: number; ambientGround: number; ambientIntensity: number };
   terrain: {
     base: number;
@@ -57,6 +59,7 @@ export const PLANETS: PlanetDef[] = [
     gravity: 22,
     sky: { top: 0x8db9e6, horizon: 0xf4dcae, sunColor: 0xfff1cf, suns: 2, sunElevation: 0.9, sunAzimuth: 0.7 },
     fog: { color: 0xead2a3, density: 0.0032 },
+    swgFogScale: 0.1,
     light: { sunIntensity: 2.6, ambientSky: 0xbfd6f2, ambientGround: 0xd9b57a, ambientIntensity: 1.0 },
     terrain: { base: 0, amplitude: 16, frequency: 0.0038, octaves: 4, ridged: 0.6, flatten: 1.1, detail: 0.35 },
     palette: { low: 0xd8b073, mid: 0xe7c78d, high: 0xf2dcaa, slope: 0xb48d56, shore: 0xe7c78d },
@@ -72,6 +75,7 @@ export const PLANETS: PlanetDef[] = [
     gravity: 20,
     sky: { top: 0x5d9fe3, horizon: 0xd2e7f8, sunColor: 0xfff6e0, suns: 1, sunElevation: 1.0, sunAzimuth: 2.2 },
     fog: { color: 0xc4dcef, density: 0.0024 },
+    swgFogScale: 0.05,
     light: { sunIntensity: 2.4, ambientSky: 0xa9c8ee, ambientGround: 0x6c8a4a, ambientIntensity: 0.9 },
     terrain: { base: 3, amplitude: 24, frequency: 0.0028, octaves: 5, ridged: 0, flatten: 1.35, detail: 0.5 },
     water: { level: 0, color: 0x2e7fbb, opacity: 0.75 },

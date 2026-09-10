@@ -1099,7 +1099,7 @@ async function snapshotPlanet(vfs, planet, outDir) {
     const wsPath = `snapshot/${planet}.ws`;
     const { snap, entries, snapshotCount, buildout } = loadPlanetObjects(vfs, planet);
     console.error(`${wsPath}: ${snapshotCount} top-level objects, ${entries.length} including contained and buildouts, ${snap.templates.length} templates`);
-    console.error(`buildouts: ${buildout.objects} objects in ${buildout.areas} areas${buildout.eventAreas ? `, ${buildout.eventAreas} event-only areas skipped` : ''}${buildout.unknownTemplates ? `, ${buildout.unknownTemplates} rows with unknown templates` : ''}${buildout.missingTables ? `, ${buildout.missingTables} area tables missing` : ''}`);
+    console.error(`buildouts: ${buildout.objects} objects in ${buildout.areas} areas${buildout.eventAreas ? `, ${buildout.eventAreas} event-only areas skipped` : ''}${buildout.computedTemplates ? `, ${buildout.computedTemplates} rows named by hashing the archives' templates (the string table lacks them)` : ''}${buildout.unknownTemplates ? `, WARNING: ${buildout.unknownTemplates} rows with unknown templates (their objects are missing)` : ''}${buildout.missingTables ? `, ${buildout.missingTables} area tables missing` : ''}`);
     let cx;
     let cz;
     if (options.center && options.center !== 'auto') {

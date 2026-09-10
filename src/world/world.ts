@@ -32,6 +32,8 @@ const WATER_SEGMENTS = 200;
 const SWG_MAIN_LIGHT = 2.4;
 const SWG_AMBIENT = 1.3;
 const SWG_FILL = 1.0;
+/** The client's fog densities read far thicker here than in the game; planets can override this. */
+const DEFAULT_SWG_FOG_SCALE = 0.08;
 const FOG_SCALE = 0.18;
 /** Physics colliders only exist this many chunks out; nothing dynamic lives farther away. */
 const PHYSICS_RADIUS = 3;
@@ -453,6 +455,7 @@ export class World {
     markActor(sky.cloudGroup);
     this.sky.visible = false;
     this.day.swg = true;
+    this.fogScale = this.planet.swgFogScale ?? DEFAULT_SWG_FOG_SCALE;
     this.envTimer = 99;
     this.envFromCube = null;
     console.info(`sky: ${sky.data.blocks.length} environment blocks, ${sky.hasGradient ? 'gradient sky' : sky.data.skybox ? 'skybox' : 'clear colour'}, ${sky.data.sun ? 'sun' : 'no sun'}, ${sky.data.moon ? 'moon' : 'no moon'}, ${sky.data.stars?.count ?? 0} stars, reflections from ${sky.environment.day ? 'the planet cube maps' : 'the sky'}`);

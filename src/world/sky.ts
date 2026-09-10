@@ -107,6 +107,9 @@ const CLIENT_CLOUD_HEIGHT = 10;
 const CLOUD_ALTITUDES = [1500, 2300];
 const CLOUD_EXTENT = 24000;
 const CLOUD_FADE = [5500, 8600];
+/** Clouds a touch smaller than the straight scaling gives, and a floor on how slowly they drift (repeats per second). */
+const CLOUD_SIZE_TRIM = 0.7;
+const CLOUD_MIN_DRIFT = 1 / 240;
 /** Seconds in the client's day, which its celestial cycle times count in. */
 const CLIENT_DAY_SECONDS = 86400;
 
@@ -504,7 +507,9 @@ export class SwgSky {
 
     // The sun rides the main light by day, the moon by night; the other one waits below the horizon.
     const lightDir = day.lightDir;
-    const alpha = L.sunMoonAlpha;
+    // The ramp's alpha fades the body around its rise and set; the disc itself stays until it
+    // actually meets the horizon, then goes over the last few degrees.
+    const alpha = Math.max(L.sunMoonAlpha, THREE.MathUtils.clamp(lightDir.y / 0.08, 0, 1));
     if (day.isDay) {
       this.place(this.sun, lightDir, alpha);
       if (this.data.supplementalSun) this.place(this.supplementalSun, SwgSky.offset(lightDir, this.data.supplementalSun.yaw, this.data.supplementalSun.pitch, tmpVec), alpha);
@@ -531,10 +536,12 @@ export class SwgSky {
     this.cloudGroup.position.set(camPos.x, 0, camPos.z);
     for (const c of this.clouds) {
       const u = c.mesh.material.uniforms;
-      const scale = c.altitude / CLIENT_CLOUD_HEIGHT;
+      const scale = (c.altitude / CLIENT_CLOUD_HEIGHT) * CLOUD_SIZE_TRIM;
       const repeat = Math.max(1, c.layer.size || 8) * scale;
       u.uRepeat.value = repeat;
-      const drift = (this.time * c.layer.speed * this.block.windSpeedScale * scale) / repeat;
+      // Drift in texture repeats per second: the client's wind, but never quite still.
+      const perSecond = Math.max((c.layer.speed * this.block.windSpeedScale) / Math.max(1, c.layer.size || 8), CLOUD_MIN_DRIFT);
+      const drift = this.time * perSecond;
       (u.uScroll.value as THREE.Vector2).set(drift, drift * 0.35);
       (u.uCamera.value as THREE.Vector3).copy(camPos);
       // White by day and grey by night in the client, lit by the main light's colour.

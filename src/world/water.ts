@@ -43,7 +43,7 @@ const WAVES = /* glsl */ `
       float front = age * 1.6;
       float packet = exp(-pow((r - front) / 1.1, 2.0));
       float fade = exp(-age * 1.1) * (1.0 - age / ${RIPPLE_LIFE.toFixed(1)});
-      h += rp.w * 0.06 * packet * fade * sin((r - front) * 7.0) / (1.0 + r * 0.5);
+      h += rp.w * 0.35 * packet * fade * sin((r - front) * 7.0) / (1.0 + r * 0.35);
     }
     return h;
   }
@@ -70,7 +70,7 @@ const WAVES = /* glsl */ `
     for (int i = 0; i < 4; i++) {
       vec4 w = RIPPLE[i];
       float k = 6.2831853 / w.z;
-      g += w.xy * k * cos(dot(w.xy, p) * k + uTime * w.w * k) * (uRipple * 0.012);
+      g += w.xy * k * cos(dot(w.xy, p) * k + uTime * w.w * k) * (uRipple * 0.045);
     }
     // The rings' slope, by central differences.
     float e = 0.08;
@@ -92,7 +92,7 @@ export function createWaterMaterial(color: THREE.ColorRepresentation, opacity: n
     side: THREE.DoubleSide,
     envMapIntensity: 1,
   }) as WaterMaterial;
-  const uniforms = { uTime: { value: 0 }, uWaveHeight: { value: waves ? 0.18 : 0 }, uRipple: { value: 1 } };
+  const uniforms = { uTime: { value: 0 }, uWaveHeight: { value: waves ? 0.45 : 0 }, uRipple: { value: 1 } };
   mat.userData = { uniforms };
   mat.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, uniforms, { uRipples: RIPPLES });
