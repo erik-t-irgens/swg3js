@@ -44,6 +44,8 @@
 // Flags: --retail-only (mount only archives named in the retail manifests)
 //        --events (place buildout areas that the game only shows during an event; planets lists them)
 //        --areas (why: list every buildout area with its rows, unknown templates and extent)
+//        --ws-add=<archive>@x1,z1,x2,z2 (snapshot, why, audit: also place what an older publish's world snapshot in that
+//                       archive put inside the rectangle; stat <file> --all lists every archive carrying a file)
 //        --near=x,z,r (why: only objects within r metres of x,z; the pattern "." matches everything)
 //        --core3=<dir> (SWGEmu's MMOCoreORB/bin/scripts: place the static objects its screenplays spawn,
 //                       and write the creature and NPC spawns to <pack>/spawns.json; or set CORE3 in the environment)
@@ -892,6 +894,32 @@ function loadPlanetObjects(vfs, planet) {
   const hasBuildouts = vfs.has(`datatables/buildout/areas_${planet}.iff`);
   if (!vfs.has(wsPath) && !hasBuildouts) throw new Error(`no ${wsPath} and no datatables/buildout/areas_${planet}.iff in archives`);
   const snap = vfs.has(wsPath) ? parseSnapshot(parseIff(vfs.read(wsPath))) : { version: 'none', templates: [], nodes: [] };
+  // --ws-add=<archive>@x1,z1,x2,z2 brings back objects an older publish's snapshot placed inside a
+  // rectangle (a city the final client no longer carries, such as pre-battle Restuss).
+  if (options['ws-add']) {
+    const [archive, rect] = options['ws-add'].split('@');
+    const [x1, z1, x2, z2] = (rect ?? '').split(',').map(Number);
+    if (![x1, z1, x2, z2].every(Number.isFinite)) throw new Error('--ws-add needs <archive>@x1,z1,x2,z2');
+    const old = parseSnapshot(parseIff(vfs.readFrom(wsPath, archive)));
+    const templateIndex = new Map(snap.templates.map((t, i) => [t, i]));
+    let added = 0;
+    const remap = (n) => {
+      const template = old.templates[n.templateIndex];
+      let ti = templateIndex.get(template);
+      if (ti === undefined) {
+        ti = snap.templates.length;
+        snap.templates.push(template);
+        templateIndex.set(template, ti);
+      }
+      added++;
+      return { ...n, id: n.id + (1 << 28), containedBy: n.containedBy ? n.containedBy + (1 << 28) : 0, templateIndex: ti, children: (n.children ?? []).map(remap), wsAdd: true };
+    };
+    for (const n of old.nodes) {
+      const [x, , z] = n.pos;
+      if (x >= Math.min(x1, x2) && x <= Math.max(x1, x2) && z >= Math.min(z1, z2) && z <= Math.max(z1, z2)) snap.nodes.push(remap(n));
+    }
+    console.error(`snapshot from ${archive}: ${added} objects added inside ${x1},${z1} to ${x2},${z2}`);
+  }
   const snapshotCount = snap.nodes.length;
   const buildout = loadBuildouts(vfs, planet, { events: flags.has('--events') });
   mergeBuildouts(snap, buildout);
@@ -1600,6 +1628,11 @@ switch (cmd) {
     const vfs = mount(pos[1]);
     const st = vfs.stat(pos[2]);
     console.log(st ? `${pos[2]}: ${st.size} bytes from ${st.archive}` : `${pos[2]}: not in archives`);
+    if (flags.has('--all')) {
+      const versions = vfs.versions(pos[2]);
+      console.log(`every copy, oldest first (the last one wins):`);
+      for (const v of versions) console.log(`  ${basename(v.archive)}: ${v.deleted ? 'deletion marker' : `${v.size} bytes`}`);
+    }
     break;
   }
 

@@ -177,8 +177,13 @@ export function openVfs(dir, { filter, log = (msg) => console.error(msg) } = {})
   };
 
   const index = new Map();
+  // Every version of a file in load order, so older publishes' copies stay reachable.
+  const history = new Map();
   const apply = (name, source) => {
     const key = name.toLowerCase();
+    let h = history.get(key);
+    if (!h) history.set(key, (h = []));
+    h.push(source);
     if (source.deleted) index.delete(key);
     else index.set(key, source);
   };
@@ -235,6 +240,17 @@ export function openVfs(dir, { filter, log = (msg) => console.error(msg) } = {})
     },
     has(name) {
       return index.has(norm(name));
+    },
+    /** Every archive that carries a file, oldest first, with whether that copy is a deletion marker. */
+    versions(name) {
+      return (history.get(norm(name)) ?? []).map((v) => ({ archive: v.archive, size: v.size, deleted: !!v.deleted }));
+    },
+    /** A file as a named archive holds it, whatever later publishes replaced it with. */
+    readFrom(name, archive) {
+      const want = archive.toLowerCase();
+      const v = (history.get(norm(name)) ?? []).find((x) => !x.deleted && (x.archive.toLowerCase() === want || x.archive.toLowerCase().endsWith(`/${want}`) || x.archive.toLowerCase().endsWith(`\\${want}`)));
+      if (!v) throw new Error(`${name} is not in ${archive}`);
+      return v.read();
     },
     stat(name) {
       const e = index.get(norm(name));
