@@ -39,6 +39,7 @@
 //                                                                  --layers lists every layer, --at prints the height at one point
 //
 // Flags: --retail-only (mount only archives named in the retail manifests)
+//        --events (place buildout areas that the game only shows during an event, such as a destroyed city)
 //        --no-flip (keep left-handed coordinates)  --no-textures (skip DDS decoding)
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
@@ -884,7 +885,7 @@ function loadPlanetObjects(vfs, planet) {
   if (!vfs.has(wsPath) && !hasBuildouts) throw new Error(`no ${wsPath} and no datatables/buildout/areas_${planet}.iff in archives`);
   const snap = vfs.has(wsPath) ? parseSnapshot(parseIff(vfs.read(wsPath))) : { version: 'none', templates: [], nodes: [] };
   const snapshotCount = snap.nodes.length;
-  const buildout = loadBuildouts(vfs, planet);
+  const buildout = loadBuildouts(vfs, planet, { events: flags.has('--events') });
   mergeBuildouts(snap, buildout);
   const entries = flattenWithWorldTransforms(snap);
   return { snap, entries, snapshotCount, buildout: buildout.stats };
@@ -1483,6 +1484,10 @@ switch (cmd) {
     const pattern = new RegExp(pos[3], 'i');
     const { snap, entries, buildout } = loadPlanetObjects(vfs, planet);
     console.log(`${entries.length} objects (${buildout.objects} from ${buildout.areas} buildout areas)`);
+    if (buildout.eventList?.length) {
+      console.log(`event-only buildout areas (${flags.has('--events') ? 'included with --events' : 'left out; add --events to include them'}):`);
+      for (const e of buildout.eventList) console.log(`  ${e.area}: ${e.rows} rows, event "${e.event}"`);
+    }
     const cache = new Map();
     const hits = new Map();
     for (const e of entries) {

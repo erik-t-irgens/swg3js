@@ -54,7 +54,7 @@ Named places come from `regions/regions.json`, a table of every planet's cities,
 
 `pack` converts the highest-detail mesh of every family matching a spec (see `packs/`) and writes `manifest.json`. The game looks for `assets-private/<planet>/manifest.json`, scatters the `rocks`, `debris`, `vaporators` and `flora` categories across the terrain in place of the primitive props, and places the structures listed in `src/data/outposts.ts` near the spawn on flattened ground with triangle-mesh collision.
 
-Flags: `--retail-only` mounts only archives named in the retail manifests, `--no-flip` keeps left-handed coordinates, `--no-textures` skips DDS decoding.
+Flags: `--retail-only` mounts only archives named in the retail manifests, `--events` places buildout areas the game only shows during an event (`why` lists them, with the event each needs), `--no-flip` keeps left-handed coordinates, `--no-textures` skips DDS decoding.
 
 Status:
 

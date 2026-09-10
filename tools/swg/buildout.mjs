@@ -73,8 +73,8 @@ function table(vfs, path) {
  * cellIndex, q [w,x,y,z], pos, radius, portalLayoutCrc). Areas that need an event (Life Day
  * and the like) are skipped.
  */
-export function loadBuildouts(vfs, planet) {
-  const stats = { areas: 0, objects: 0, eventAreas: 0, unknownTemplates: 0, missingTables: 0 };
+export function loadBuildouts(vfs, planet, { events = false } = {}) {
+  const stats = { areas: 0, objects: 0, eventAreas: 0, unknownTemplates: 0, missingTables: 0, eventList: [] };
   const nodes = [];
   const areasTable = table(vfs, `datatables/buildout/areas_${planet}.iff`);
   if (!areasTable) return { nodes, stats };
@@ -86,11 +86,12 @@ export function loadBuildouts(vfs, planet) {
   areasTable.rows.forEach((area, areaIndex) => {
     const name = area.area;
     if (!name) return;
+    const rows = table(vfs, `datatables/buildout/${planet}/${name}.iff`);
     if (area.eventRequired) {
       stats.eventAreas++;
-      return;
+      stats.eventList.push({ area: name, event: String(area.eventRequired), rows: rows ? rows.rows.length : 0 });
+      if (!events) return;
     }
-    const rows = table(vfs, `datatables/buildout/${planet}/${name}.iff`);
     if (!rows) {
       stats.missingTables++;
       return;
@@ -138,7 +139,7 @@ export function loadBuildouts(vfs, planet) {
         else containedBy = 0;
       }
       const pos = cellIndex === 0 ? [x0 + Number(r.px), Number(r.py), z0 + Number(r.pz)] : [Number(r.px), Number(r.py), Number(r.pz)];
-      nodes.push({ id, containedBy, template, cellIndex, q: [Number(r.qw), Number(r.qx), Number(r.qy), Number(r.qz)], pos, radius: Number(r.radius) || 0, portalLayoutCrc, children: [], area: name });
+      nodes.push({ id, containedBy, template, cellIndex, q: [Number(r.qw), Number(r.qx), Number(r.qy), Number(r.qz)], pos, radius: Number(r.radius) || 0, portalLayoutCrc, children: [], area: name, event: area.eventRequired ? String(area.eventRequired) : undefined });
       stats.objects++;
     }
   });
