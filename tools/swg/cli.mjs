@@ -40,6 +40,7 @@
 //
 // Flags: --retail-only (mount only archives named in the retail manifests)
 //        --events (place buildout areas that the game only shows during an event; planets lists them)
+//        --areas (why: list every buildout area with its rows, unknown templates and extent)
 //        --core3=<dir> (SWGEmu's MMOCoreORB/bin/scripts: place the static objects its screenplays spawn,
 //                       and write the creature and NPC spawns to <pack>/spawns.json; or set CORE3 in the environment)
 //        --no-flip (keep left-handed coordinates)  --no-textures (skip DDS decoding)
@@ -1534,6 +1535,10 @@ switch (cmd) {
     const { snap, entries, buildout, spawns } = loadPlanetObjects(vfs, planet);
     console.log(`${entries.length} objects (${buildout.objects} from ${buildout.areas} buildout areas)`);
     if (spawns) console.log(`server spawns: ${spawns.stats.objects} static objects, ${spawns.stats.mobiles} creature and NPC spawns (${spawns.stats.inCells + spawns.stats.mobilesInCells} inside cells skipped)`);
+    if (flags.has('--areas')) {
+      console.log('buildout areas (rows placed / rows in the table, unknown templates, extent in metres):');
+      for (const a of buildout.areaList ?? []) console.log(`  ${a.area}: ${a.placed}/${a.rows}${a.unknown ? `, ${a.unknown} UNKNOWN` : ''}, ${a.x.toFixed(0)},${a.z.toFixed(0)} to ${a.x2.toFixed(0)},${a.z2.toFixed(0)}${a.event ? `, event "${a.event}"` : ''}`);
+    }
     if (buildout.eventList?.length) {
       console.log(`event-only buildout areas (${flags.has('--events') ? 'included with --events' : 'left out; add --events to include them'}):`);
       for (const e of buildout.eventList) console.log(`  ${e.area}: ${e.rows} rows, event "${e.event}"`);

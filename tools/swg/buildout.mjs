@@ -74,7 +74,7 @@ function table(vfs, path) {
  * and the like) are skipped.
  */
 export function loadBuildouts(vfs, planet, { events = false } = {}) {
-  const stats = { areas: 0, objects: 0, eventAreas: 0, unknownTemplates: 0, missingTables: 0, eventList: [] };
+  const stats = { areas: 0, objects: 0, eventAreas: 0, unknownTemplates: 0, missingTables: 0, eventList: [], areaList: [] };
   const nodes = [];
   const areasTable = table(vfs, `datatables/buildout/areas_${planet}.iff`);
   if (!areasTable) return { nodes, stats };
@@ -99,6 +99,8 @@ export function loadBuildouts(vfs, planet, { events = false } = {}) {
     stats.areas++;
     const x0 = Number(area.x1) || 0;
     const z0 = Number(area.z1) || 0;
+    const summary = { area: name, rows: rows.rows.length, placed: 0, unknown: 0, event: area.eventRequired ? String(area.eventRequired) : '', x: x0, z: z0, x2: Number(area.x2) || 0, z2: Number(area.z2) || 0 };
+    stats.areaList.push(summary);
     const v2 = rows.columns.includes('objid');
     const ids = new Map(); // raw objid -> node id (v2)
     const idFor = (raw) => {
@@ -117,8 +119,10 @@ export function loadBuildouts(vfs, planet, { events = false } = {}) {
       const template = nameOf(crc);
       if (!template) {
         stats.unknownTemplates++;
+        summary.unknown++;
         continue;
       }
+      summary.placed++;
       if (!crcTable.has(crc)) stats.computedTemplates++;
       const cellIndex = Number(r.cell_index) || 0;
       const portalLayoutCrc = Number(r.portal_layout_crc) >>> 0;
