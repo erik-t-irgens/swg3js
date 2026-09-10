@@ -34,6 +34,10 @@ const SWG_AMBIENT = 1.3;
 const SWG_FILL = 1.0;
 /** The client's fog densities read far thicker here than in the game; planets can override this. */
 const DEFAULT_SWG_FOG_SCALE = 0.08;
+/** Interior lights: how many point lights may be live at once, and how the client's colours map to three's intensities. */
+const INTERIOR_LIGHT_CAP = 10;
+const INTERIOR_LIGHT_SCALE = 3;
+const INTERIOR_AMBIENT_SCALE = 1.2;
 /** Seconds between ripple passes: dense enough that a swimmer's rings overlap into a wake. */
 const RIPPLE_INTERVAL = 0.12;
 const FOG_SCALE = 0.18;
@@ -163,6 +167,9 @@ export class World {
   /** Where each mover was at the last ripple pass, for its velocity through the water. */
   private readonly lastSeen = new WeakMap<object, THREE.Vector3>();
   private readonly splashes = new Splashes();
+  /** The lights of the building cell the player is in (and its neighbours), from the portal file. */
+  private readonly interiorLights: THREE.Light[] = [];
+  private interiorLightsFor: { building: Building; cell: number } | null = null;
   private portals: PortalRenderer | null = null;
   private readonly csmMaterials = new WeakSet<THREE.Material>();
   private csmScanAt = 0;
@@ -858,6 +865,7 @@ export class World {
     if (Number.isNaN(this.prevPlayerPos.x)) this.prevPlayerPos.copy(playerPos);
     this.cellState = this.layoutStream.trackCell(this.cellState, this.prevPlayerPos, playerPos);
     this.prevPlayerPos.copy(playerPos);
+    this.updateInteriorLights();
     const b = this.cellState?.building ?? null;
     const underground = b !== null && this.terrain.heightAt(playerPos.x, playerPos.z) > playerPos.y + 1.2;
     const want = underground ? b : null;
@@ -866,6 +874,76 @@ export class World {
     this.hiddenGround.length = 0;
     this.groundHiddenFor = want;
     if (want) this.hideGroundUnder(want);
+  }
+
+  /**
+   * Light the cell the player stands in the way the client does: each cell of a portal building
+   * carries its own lights, placed by the building's artists. The current cell's lights and
+   * those of the cells its portals open onto are live, up to a cap; the rest wait.
+   */
+  private updateInteriorLights(): void {
+    const state = this.cellState;
+    const want = state && state.cell > 0 ? { building: state.building, cell: state.cell } : null;
+    const have = this.interiorLightsFor;
+    if ((want?.building ?? null) === (have?.building ?? null) && (want?.cell ?? -1) === (have?.cell ?? -1)) return;
+    for (const l of this.interiorLights) {
+      this.scene.remove(l);
+      if ('target' in l && (l as THREE.SpotLight).target) this.scene.remove((l as THREE.SpotLight).target);
+    }
+    this.interiorLights.length = 0;
+    this.interiorLightsFor = want;
+    if (!want) return;
+    const cells = want.building.model.def.cells ?? [];
+    const current = cells.find((c) => c.index === want.cell);
+    if (!current) return;
+    const order = [want.cell, ...(current.portals ?? []).map((p) => p.target).filter((t) => t > 0 && t !== want.cell)];
+    const matrix = want.building.matrix;
+    const pos = new THREE.Vector3();
+    const dir = new THREE.Vector3();
+    const ambient = new THREE.Color(0, 0, 0);
+    let points = 0;
+    for (const index of order) {
+      const cell = cells.find((c) => c.index === index);
+      for (const l of cell?.lights ?? []) {
+        const color = new THREE.Color(l.color[0], l.color[1], l.color[2]);
+        if (l.type === 0) {
+          ambient.add(color);
+          continue;
+        }
+        if (points >= INTERIOR_LIGHT_CAP) continue;
+        pos.set(l.position[0], l.position[1], l.position[2]).applyMatrix4(matrix);
+        if (l.type === 1) {
+          const light = new THREE.DirectionalLight(color, 1.2);
+          dir.set(l.direction[0], l.direction[1], l.direction[2]).transformDirection(matrix);
+          light.position.copy(pos).addScaledVector(dir, -20);
+          light.target.position.copy(pos);
+          this.scene.add(light, light.target);
+          this.interiorLights.push(light);
+        } else {
+          // Direct3D falloff 1 / (c + l d + q d^2) matched at 3 m to three's I / d^2, cut where it fades below 5%.
+          const [c, li, q] = l.attenuation;
+          const at3 = 1 / Math.max(0.05, c + 3 * li + 9 * q);
+          const intensity = 9 * at3 * INTERIOR_LIGHT_SCALE;
+          let range = 40;
+          for (let d = 1; d <= 40; d++) {
+            if (1 / (c + li * d + q * d * d) < at3 * 0.05) {
+              range = d;
+              break;
+            }
+          }
+          const light = new THREE.PointLight(color, intensity, range, 2);
+          light.position.copy(pos);
+          this.scene.add(light);
+          this.interiorLights.push(light);
+        }
+        points++;
+      }
+    }
+    if (ambient.r + ambient.g + ambient.b > 0.01) {
+      const light = new THREE.AmbientLight(ambient, INTERIOR_AMBIENT_SCALE);
+      this.scene.add(light);
+      this.interiorLights.push(light);
+    }
   }
 
   private hideGroundUnder(b: Building): void {

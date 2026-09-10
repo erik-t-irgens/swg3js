@@ -71,6 +71,7 @@ Status:
 | Ground textures (terrain shader families) | Each family's heaviest shader's main texture is written to `terrain/shaders/` with its metres-per-repeat in `terrain/shaders.json`; the game blends three families across every ground triangle where the generator paints them |
 | Terrain rule files (.trn), bitmaps and building layers (.lay) | Generator ported from the engine (fractals, boundaries, filters, bitmap filters, height, shader, road and river affectors); fractal noise verified bit-for-bit against the engine's code. On retail Tatooine, `terrain-check` puts 81% of Mos Eisley's snapshot objects within 0.5 m of the generated ground (median 0.00 m); the rest are objects that never sat on the ground (rooftop furniture, wall terminals, walls sunk 2 m, hand-typed fort heights) |
 | Sky: environment files (ENVM), environment tables, colour ramps, cube maps | Exported per planet; the game draws the gradient sky or skybox, sun, moons, stars and cloud layers and lights the world from the ramps |
+| Cell lights in portal buildings (LGHT) | Each cell's ambient, parallel and point lights with Direct3D attenuation go into the manifest; the game lights the cell the player is in and its neighbours with them |
 | Component appearances (.cmp) | Parts baked into one mesh by their transforms |
 | Skeletal (.sat), particles (.prt) | Skipped with counts in the snapshot output |
 

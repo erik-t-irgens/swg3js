@@ -2,13 +2,28 @@ import * as THREE from 'three';
 import { isReflective, registerReflective } from './envmap';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 
+export interface CellLight {
+  type: number;
+  color: number[];
+  position: number[];
+  direction: number[];
+  attenuation: number[];
+}
+
 export interface PackModelDef {
   id: string;
   file: string;
   bounds: { min: number[]; max: number[] };
   triangles: number;
   /** Portal buildings: one entry per cell, index 0 being the exterior shell. */
-  cells?: { index: number; name: string; bounds: { min: number[]; max: number[] }; portals?: { geometry: number; target: number; passable: boolean }[] }[];
+  cells?: {
+    index: number;
+    name: string;
+    bounds: { min: number[]; max: number[] };
+    portals?: { geometry: number; target: number; passable: boolean }[];
+    /** The cell's own lights from the portal file: 0 ambient, 1 parallel, 2 point; Direct3D attenuation constants. */
+    lights?: CellLight[];
+  }[];
   /** Portal polygons in model space (vertices and triangle indices), indexed by the cells' `geometry` field. */
   portals?: { v: number[][]; i: number[] }[];
   /** Flora models: the appearance file the terrain's flora families name (e.g. appearance/tree_x.apt). */

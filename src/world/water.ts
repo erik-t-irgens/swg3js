@@ -441,9 +441,9 @@ export function createWaterMaterial(color: THREE.ColorRepresentation, opacity: n
           // by depth alone in the last hand's breadth, where the coarse depth grid can misjudge it.
           float toShore = min(shoreDistance(vWaterXZ, depth), depth * 6.0);
           float lap = vnoise(vWaterXZ * 1.7 + vec2(uTime * 0.35, -uTime * 0.22)) * 0.6 + vnoise(vWaterXZ * 6.0 - vec2(uTime * 0.5, uTime * 0.4)) * 0.4;
-          float band = 1.0 - smoothstep(0.6, 2.4, toShore);
-          float shore = band * mix(1.0, smoothstep(0.3, 0.75, lap), smoothstep(0.0, 1.4, toShore));
-          waterFoam = smoothstep(0.7, 0.98, crest) * 0.35 * calm + clamp(abs(ringHeight(vWaterXZ)) * 2.0, 0.0, 0.15) * detail + shore * 0.45;
+          float band = 1.0 - smoothstep(0.35, 1.5, toShore);
+          float shore = band * mix(1.0, smoothstep(0.35, 0.8, lap), smoothstep(0.0, 1.0, toShore));
+          waterFoam = smoothstep(0.7, 0.98, crest) * 0.35 * calm + clamp(abs(ringHeight(vWaterXZ)) * 2.0, 0.0, 0.15) * detail + shore * 0.3;
         }
         diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.8, 0.86, 0.9), waterFoam);
         diffuseColor.a = mix(diffuseColor.a, 1.0, waterFoam * 0.5);`,

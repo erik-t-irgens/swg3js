@@ -234,7 +234,7 @@ function loadAppearanceMesh(vfs, appearancePath) {
     merged.warnings.push(...mesh.warnings);
     if (parts.length === 1) merged.bounds = mesh.bounds;
     if (part.cell !== undefined) {
-      const cell = cells.get(part.cell) ?? cells.set(part.cell, { index: part.cell, name: part.cellName, groups: [], hardpoints: [], warnings: [], portals: part.cellPortals ?? [] }).get(part.cell);
+      const cell = cells.get(part.cell) ?? cells.set(part.cell, { index: part.cell, name: part.cellName, groups: [], hardpoints: [], warnings: [], portals: part.cellPortals ?? [], lights: part.cellLights ?? [] }).get(part.cell);
       cell.groups.push(...mesh.groups);
       cell.hardpoints.push(...mesh.hardpoints);
       portalGeometry ??= part.portalGeometry ?? null;
@@ -263,7 +263,16 @@ function convertOne(vfs, appearancePath, outFile) {
   const tris = mesh.groups.reduce((n, g) => n + g.primitives.reduce((m, p) => m + p.indices.length / 3, 0), 0);
   const shaders = [...new Set(mesh.groups.map((g) => g.shader))];
   const flipBounds = (b) => (flipX && b ? { min: [-b.max[0], b.min[1], b.min[2]], max: [-b.min[0], b.max[1], b.max[2]] } : b);
-  const cellInfo = cells ? cells.map((c) => ({ index: c.index, name: c.name, bounds: flipBounds(c.bounds), portals: c.portals.map((p) => ({ geometry: p.geometry, target: p.target, passable: p.passable && !p.disabled })) })) : undefined;
+  const flipVec = (v) => (flipX ? [-v[0], v[1], v[2]] : v);
+  const cellInfo = cells
+    ? cells.map((c) => ({
+        index: c.index,
+        name: c.name,
+        bounds: flipBounds(c.bounds),
+        portals: c.portals.map((p) => ({ geometry: p.geometry, target: p.target, passable: p.passable && !p.disabled })),
+        ...(c.lights?.length ? { lights: c.lights.map((l) => ({ type: l.type, color: l.color.map((v) => Math.round(v * 1000) / 1000), position: flipVec(l.position).map((v) => Math.round(v * 100) / 100), direction: flipVec(l.direction).map((v) => Math.round(v * 1000) / 1000), attenuation: l.attenuation.map((v) => Math.round(v * 10000) / 10000) })) } : {}),
+      }))
+    : undefined;
   // Portal polygons in model space (X flipped with the meshes) so the game can tell which cell the player is in.
   const portals = portalGeometry ? portalGeometry.map((p) => ({ v: p.verts.map(([x, y, z]) => [flipX ? -x : x, y, z]), i: p.indices })) : undefined;
   return { meshPath, mesh, flipX, tris, shaders, textured: textures.size, warnings: mesh.warnings, partCount, cells: cellInfo, portals };

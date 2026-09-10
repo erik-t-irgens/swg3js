@@ -22,7 +22,8 @@ Open the printed URL, click **Enter the galaxy**, and go.
 | E | Mount / dismount the speeder |
 | C | Switch class (Jedi / Bounty Hunter) |
 | T | Hold to fast-forward the day |
-| N | Noclip fly mode (Space up, Ctrl down, Shift fast) |
+| N | Noclip fly mode (Space up, Ctrl down, Shift fast, + and - change the speed) |
+| F | Flashlight on and off |
 | In water | Chest-deep water swims: Space surfaces, Ctrl dives, or look down and swim forward; under water you swim where you look |
 | M | Galaxy map |
 | H | Toggle help |

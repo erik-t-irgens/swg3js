@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+const torchDir = new THREE.Vector3();
 import { BountyHunterKit } from './combat/bountyHunter';
 import { Effects } from './combat/effects';
 import { JediKit } from './combat/jedi';
@@ -25,6 +26,7 @@ const tmp = new THREE.Vector3();
 const tmpQ = new THREE.Quaternion();
 
 class App {
+  private torch!: THREE.SpotLight;
   private readonly canvas = document.getElementById('game') as HTMLCanvasElement;
   private readonly ui = document.getElementById('ui') as HTMLElement;
   private readonly renderer: THREE.WebGLRenderer;
@@ -63,6 +65,10 @@ class App {
     this.input = new Input(this.canvas);
     this.world = new World(this.scene, physics);
     this.world.renderer = this.renderer;
+    // A hand torch: a spot light carried at the camera, pointing where it looks. F toggles it.
+    this.torch = new THREE.SpotLight(0xfff1d6, 260, 70, 0.42, 0.45, 1.6);
+    this.torch.visible = false;
+    this.scene.add(this.torch, this.torch.target);
     this.portals = new PortalRenderer(this.renderer);
     this.world.attachCamera(this.cam.camera, !lowfx, this.portals);
     this.player = new Player(this.scene, physics);
@@ -184,7 +190,7 @@ class App {
         <div class="controls">
           <div><b>WASD</b> move · <b>Mouse</b> look · <b>Wheel</b> zoom · <b>Space</b> jump · <b>Shift</b> walk · in water <b>Space</b>/<b>Ctrl</b> surface/dive, or look down and swim</div>
           <div><b>LMB</b> attack · <b>E</b> mount speeder · <b>C</b> switch class · <b>T</b> fast-forward time</div>
-          <div><b>M</b> galaxy map · <b>H</b> toggle help · <b>N</b> noclip fly · <b>Esc</b> release mouse</div>
+          <div><b>M</b> galaxy map · <b>H</b> toggle help · <b>N</b> noclip fly (<b>+</b>/<b>-</b> speed) · <b>F</b> flashlight · <b>Esc</b> release mouse</div>
         </div>
         <div class="class-pick">
           <button class="enter" data-class="jedi">Enter as Jedi<small>Lightsaber, Force powers</small></button>
@@ -431,6 +437,9 @@ class App {
           if (input.justPressed('KeyC')) this.setClass(this.kit.id === 'jedi' ? 'bounty_hunter' : 'jedi');
           if (input.justPressed('KeyE') && !player.noclip && !this.handleElevator()) this.handleMount();
           if (input.justPressed('KeyN') && !player.mounted) player.toggleNoclip();
+          if (player.noclip && (input.justPressed('Equal') || input.justPressed('NumpadAdd'))) player.noclipSpeed = Math.min(2000, player.noclipSpeed * 1.5);
+          if (player.noclip && (input.justPressed('Minus') || input.justPressed('NumpadSubtract'))) player.noclipSpeed = Math.max(2, player.noclipSpeed / 1.5);
+          if (input.justPressed('KeyF')) this.torch.visible = !this.torch.visible;
         }
       }
 
@@ -469,11 +478,16 @@ class App {
 
       player.inside = this.world.inside;
       this.cam.update(input, player.pos, player.noclip ? null : (from, to) => this.physics.cameraBlock(from, to, player.body, this.world.inside));
+      if (this.torch.visible) {
+        this.torch.position.copy(this.cam.camera.position);
+        this.cam.camera.getWorldDirection(torchDir);
+        this.torch.target.position.copy(this.cam.camera.position).addScaledVector(torchDir, 12);
+      }
       player.group.visible = !this.cam.firstPerson;
       this.world.updateShadows(performance.now());
 
       let prompt = '';
-      if (player.noclip) prompt = '<b>NOCLIP</b> · <b>WASD</b> fly · <b>Space</b> up · <b>Ctrl</b> down · <b>Shift</b> fast · <b>N</b> off';
+      if (player.noclip) prompt = `<b>NOCLIP</b> ${Math.round(player.noclipSpeed)} m/s · <b>WASD</b> fly · <b>Space</b> up · <b>Ctrl</b> down · <b>Shift</b> fast · <b>+</b>/<b>-</b> speed · <b>N</b> off`;
       else if (player.mounted) prompt = '<b>E</b> dismount · <b>W/S</b> throttle · <b>A/D</b> steer · <b>Shift</b> boost · <b>Space</b> hop';
       else if (this.world.elevatorsNear(player.pos, MOUNT_RANGE).length) prompt = `<b>E</b> elevator ${this.world.elevatorsNear(player.pos, MOUNT_RANGE)[0].kind === 'down' ? 'down' : 'up'}`;
       else if (this.nearestSpeederDistance() < MOUNT_RANGE) prompt = '<b>E</b> mount speeder';

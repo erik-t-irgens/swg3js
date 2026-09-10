@@ -76,7 +76,32 @@ export function parsePob(root) {
       const target = d.readInt32LE(q);
       links.push({ geometry, target, clockwise, passable, disabled });
     }
-    cells.push({ name, appearance: app.value.replace(/\\/g, '/'), floor: floor.replace(/\\/g, '/'), portals: links });
+    // LGHT: int32 count, then per light int8 type (0 ambient, 1 parallel, 2 point), ARGB diffuse and
+    // specular floats, a 3x4 row-major transform, and constant, linear and quadratic attenuation.
+    // The exporter's yaw hack (yaw_l(PI)) means a light points down the transform's -Z.
+    const lights = [];
+    const lg = cv.children.find((c) => !isForm(c) && c.tag === 'LGHT');
+    if (lg && lg.data.length >= 4) {
+      const d = lg.data;
+      const n = d.readInt32LE(0);
+      let q = 4;
+      for (let i = 0; i < n && q + 1 + 16 * 4 + 12 * 4 + 12 <= d.length; i++) {
+        const type = d.readInt8(q);
+        q += 1;
+        const f = () => {
+          const v = d.readFloatLE(q);
+          q += 4;
+          return v;
+        };
+        const diffuse = [f(), f(), f(), f()];
+        const specular = [f(), f(), f(), f()];
+        const m = [];
+        for (let k = 0; k < 12; k++) m.push(f());
+        const attenuation = [f(), f(), f()];
+        lights.push({ type, color: [diffuse[1], diffuse[2], diffuse[3]], specular: [specular[1], specular[2], specular[3]], position: [m[3], m[7], m[11]], direction: [-m[2], -m[6], -m[10]], attenuation });
+      }
+    }
+    cells.push({ name, appearance: app.value.replace(/\\/g, '/'), floor: floor.replace(/\\/g, '/'), portals: links, lights });
   }
   return { cells, portals };
 }

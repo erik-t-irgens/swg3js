@@ -169,6 +169,8 @@ export class Player {
   jetThrust = false;
   /** Fly mode for exploring and bug hunting: no gravity, no collision. */
   noclip = false;
+  /** Noclip flying speed in m/s (Shift multiplies it); adjusted from the keyboard. */
+  noclipSpeed = 35;
   /** Inside a building: ignore the ground and the building's shell, as the game does per cell. */
   inside = false;
   private regenDelay = 0;
@@ -530,7 +532,7 @@ export class Player {
     if (input.isDown('ControlLeft') || input.isDown('ControlRight')) move.y -= 1;
     const moving = move.lengthSq() > 0;
     if (moving) move.normalize();
-    const speed = (input.isDown('ShiftLeft') || input.isDown('ShiftRight') ? 120 : 35) * this.speedMultiplier;
+    const speed = this.noclipSpeed * (input.isDown('ShiftLeft') || input.isDown('ShiftRight') ? 3.5 : 1) * this.speedMultiplier;
     this.pos.addScaledVector(move, speed * dt);
     this.vel.set(0, 0, 0);
     this.grounded = false;
