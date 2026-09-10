@@ -846,6 +846,11 @@ export class World {
   }
 
   /** The snapshot's centre in SWG coordinates (the game's origin), when a converted pack is loaded. */
+  /** Placed objects around a point with their streaming state, for the console. */
+  objectsNear(x: number, z: number, r: number): ReturnType<LayoutStreamer['describeNear']> {
+    return this.layoutStream?.describeNear(x, z, r) ?? [];
+  }
+
   get layoutCenter(): { x: number; z: number } | null {
     return this.pack?.layout?.center ?? null;
   }

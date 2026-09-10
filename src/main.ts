@@ -148,6 +148,13 @@ class App {
         return out;
       },
       water: (x: number, z: number) => this.world.terrain.waterHeightAt(x, z),
+      /** Placed objects within r metres of the player: model, distance, tier, and whether the model and its region are loaded. */
+      near: (r = 150) => {
+        const list = this.world.objectsNear(this.player.pos.x, this.player.pos.z, r);
+        const summary = { total: list.length, notInManifest: list.filter((o) => !o.inManifest).length, notLoaded: list.filter((o) => o.inManifest && !o.loaded).length, regionsNotLoaded: [...new Set(list.filter((o) => o.regionState !== 'loaded').map((o) => `${o.region}/tier${o.tier}:${o.regionState}`))] };
+        console.table(list.slice(0, 60));
+        return summary;
+      },
       /** Scale the sky's fog density (1 is the client's value) and report it. */
       fog: (scale?: number) => {
         if (scale !== undefined) this.world.fogScale = scale;

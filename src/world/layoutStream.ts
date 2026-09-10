@@ -152,6 +152,21 @@ export class LayoutStreamer {
   }
 
   /** Load what is in range, drop what is not, keep collision around the player. */
+  /** What the layout places within `r` metres of a point, and whether each is drawable right now. */
+  describeNear(x: number, z: number, r: number): { template: string; model: string; d: number; radius: number; tier: number; contained: boolean; inManifest: boolean; loaded: boolean; region: string; regionState: string }[] {
+    const out = [];
+    for (const o of this.objects) {
+      const d = Math.hypot(o.x - x, o.z - z);
+      if (d > r) continue;
+      const rx = Math.floor(o.x / REGION);
+      const rz = Math.floor(o.z / REGION);
+      const region = this.regions.get(`${rx},${rz}`);
+      const state = region?.tiers[o.tier];
+      out.push({ template: o.template, model: o.model, d: Math.round(d), radius: o.radius, tier: o.tier, contained: o.contained, inManifest: !!this.pack.find(o.model), loaded: !!this.pack.loaded(o.model), region: `${rx},${rz}`, regionState: state === null ? 'not loaded' : state === 'loading' ? 'loading' : state ? 'loaded' : 'no region' });
+    }
+    return out.sort((a, b) => a.d - b.d);
+  }
+
   update(playerPos: THREE.Vector3): void {
     if (this.disposed) return;
     const px = playerPos.x;
