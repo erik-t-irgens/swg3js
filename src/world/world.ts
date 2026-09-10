@@ -4,7 +4,7 @@ import type { Physics, RAPIER } from '../core/physics';
 import { CreatureManager } from './creatures';
 import { DayCycle } from './daycycle';
 import { SwgSky, type SkyLighting } from './sky';
-import { createWaterMaterial, type WaterMaterial } from './water';
+import { createWaterMaterial, emitRipple, type WaterMaterial } from './water';
 import { setEnvironment } from './envmap';
 import { PropFactory, type Collider, type Exclusion, type ScatterItem } from './props';
 import { FloraPlanter } from './flora';
@@ -153,6 +153,10 @@ export class World {
   private waterFar: THREE.Mesh | null = null;
   private waterTime = 0;
   private readonly waterMaterials: WaterMaterial[] = [];
+  /** Multiplier on the sky's fog density, for tuning from the console. */
+  fogScale = 1;
+  private rippleClock = 0;
+  private readonly lastRipple = new THREE.Vector3(Number.NaN, 0, 0);
   private portals: PortalRenderer | null = null;
   private readonly csmMaterials = new WeakSet<THREE.Material>();
   private csmScanAt = 0;
@@ -444,8 +448,9 @@ export class World {
     if (!sky) return;
     this.dropSky();
     this.swgSky = sky;
-    this.scene.add(sky.group);
+    this.scene.add(sky.group, sky.cloudGroup);
     markActor(sky.group);
+    markActor(sky.cloudGroup);
     this.sky.visible = false;
     this.day.swg = true;
     this.envTimer = 99;
@@ -509,6 +514,23 @@ export class World {
     setEnvironment(env, 1);
   }
 
+  /** Rings spread from whatever wades or swims: the player and the creatures, whenever they move through water. */
+  private emitRipples(dt: number, playerPos: THREE.Vector3): void {
+    if (!this.waterMaterials.length) return;
+    this.rippleClock += dt;
+    if (this.rippleClock < 0.28) return;
+    this.rippleClock = 0;
+    const touch = (x: number, y: number, z: number, strength: number) => {
+      const depth = this.terrain.waterHeightAt(x, z) - y;
+      if (depth > -0.3 && depth < 2.5) emitRipple(x, z, strength, this.waterTime);
+    };
+    const moved = Number.isNaN(this.lastRipple.x) || this.lastRipple.distanceToSquared(playerPos) > 0.04;
+    if (moved) touch(playerPos.x, playerPos.y, playerPos.z, 1);
+    this.lastRipple.copy(playerPos);
+    for (const c of this.creatures.positions()) touch(c.x, c.y, c.z, 0.8);
+    for (const sp of this.speeders) touch(sp.pos.x, sp.pos.y, sp.pos.z, 1.2);
+  }
+
   /** Lights, fog and clear colour straight from the sky's colour ramps for this moment. */
   private applySwgLighting(L: SkyLighting, playerPos: THREE.Vector3): void {
     this.sun.color.copy(L.main);
@@ -531,8 +553,8 @@ export class World {
     this.fill.target.position.copy(playerPos);
     const fog = this.scene.fog as THREE.FogExp2;
     fog.color.copy(L.fog);
-    // The client's fog is exponential; three's is squared, so scale the density to match at half strength.
-    fog.density = L.fogDensity * 1.2;
+    // The client's fog is Direct3D's EXP2, the same curve as three's, so the density carries over as is.
+    fog.density = L.fogDensity * this.fogScale;
   }
 
   private disposeChunk(c: Chunk): void {
@@ -866,6 +888,7 @@ export class World {
     this.sky.position.copy(camPos);
     this.waterTime += dt;
     for (const m of this.waterMaterials) m.userData.uniforms.uTime.value = this.waterTime;
+    this.emitRipples(dt, playerPos);
     if (this.water) {
       const cell = WATER_NEAR / WATER_SEGMENTS;
       this.water.position.x = Math.round(playerPos.x / cell) * cell;

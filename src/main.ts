@@ -142,6 +142,11 @@ class App {
         return out;
       },
       water: (x: number, z: number) => this.world.terrain.waterHeightAt(x, z),
+      /** Scale the sky's fog density (1 is the client's value) and report it. */
+      fog: (scale?: number) => {
+        if (scale !== undefined) this.world.fogScale = scale;
+        return { scale: this.world.fogScale, density: (this.scene.fog as THREE.FogExp2 | null)?.density ?? null };
+      },
       /** Set the time of day (0 midnight, 0.5 noon) and report the sky's current lighting. */
       time: (t?: number) => {
         if (t !== undefined) this.world.day.time = t;

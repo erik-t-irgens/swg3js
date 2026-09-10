@@ -10,10 +10,43 @@ export interface WaterMaterial extends THREE.MeshPhysicalMaterial {
   userData: { uniforms: { uTime: { value: number }; uWaveHeight: { value: number }; uRipple: { value: number } } };
 }
 
+/** Rings spreading from things that touch the water: x, z, start time, strength; shared by every water material. */
+const MAX_RIPPLES = 24;
+const RIPPLE_LIFE = 3.5;
+const rippleData = new Float32Array(MAX_RIPPLES * 4).fill(-1000);
+const RIPPLES = { value: rippleData };
+let nextRipple = 0;
+
+/** Start a ring at a world position; `strength` scales its height (1 for a person wading). */
+export function emitRipple(x: number, z: number, strength: number, time: number): void {
+  const o = nextRipple * 4;
+  rippleData[o] = x;
+  rippleData[o + 1] = z;
+  rippleData[o + 2] = time;
+  rippleData[o + 3] = strength;
+  nextRipple = (nextRipple + 1) % MAX_RIPPLES;
+}
+
 const WAVES = /* glsl */ `
   uniform float uTime;
   uniform float uWaveHeight;
   uniform float uRipple;
+  uniform vec4 uRipples[${MAX_RIPPLES}];
+  // Height of the spreading rings at a point: a damped wave packet moving out from each source.
+  float rippleHeight(vec2 p) {
+    float h = 0.0;
+    for (int i = 0; i < ${MAX_RIPPLES}; i++) {
+      vec4 rp = uRipples[i];
+      float age = uTime - rp.z;
+      if (age < 0.0 || age > ${RIPPLE_LIFE.toFixed(1)}) continue;
+      float r = distance(p, rp.xy);
+      float front = age * 1.6;
+      float packet = exp(-pow((r - front) / 1.1, 2.0));
+      float fade = exp(-age * 1.1) * (1.0 - age / ${RIPPLE_LIFE.toFixed(1)});
+      h += rp.w * 0.06 * packet * fade * sin((r - front) * 7.0) / (1.0 + r * 0.5);
+    }
+    return h;
+  }
   // Long swells: direction (x, z), wavelength in metres, speed in metres per second.
   const vec4 SWELL[3] = vec4[3](vec4(0.83, 0.55, 46.0, 5.0), vec4(-0.6, 0.8, 29.0, 4.2), vec4(0.2, -0.98, 71.0, 6.1));
   // Ripples for the normal only.
@@ -39,6 +72,9 @@ const WAVES = /* glsl */ `
       float k = 6.2831853 / w.z;
       g += w.xy * k * cos(dot(w.xy, p) * k + uTime * w.w * k) * (uRipple * 0.012);
     }
+    // The rings' slope, by central differences.
+    float e = 0.08;
+    g += vec2(rippleHeight(p + vec2(e, 0.0)) - rippleHeight(p - vec2(e, 0.0)), rippleHeight(p + vec2(0.0, e)) - rippleHeight(p - vec2(0.0, e))) / (2.0 * e);
     return normalize(vec3(-g.x, 1.0, -g.y));
   }
 `;
@@ -59,7 +95,7 @@ export function createWaterMaterial(color: THREE.ColorRepresentation, opacity: n
   const uniforms = { uTime: { value: 0 }, uWaveHeight: { value: waves ? 0.18 : 0 }, uRipple: { value: 1 } };
   mat.userData = { uniforms };
   mat.onBeforeCompile = (shader) => {
-    Object.assign(shader.uniforms, uniforms);
+    Object.assign(shader.uniforms, uniforms, { uRipples: RIPPLES });
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `#include <common>\n${WAVES}\nvarying vec2 vWaterXZ;\nvarying float vWaterDist;`)
       .replace(

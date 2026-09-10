@@ -97,7 +97,46 @@ const SKY_RADIUS = 3500;
 /** The client draws celestial quads 3 m in front of the camera, so a quad's size is a half-width at that distance. */
 const CELESTIAL_DISTANCE = 3;
 /** The client's far plane, which sets where between the block's minimum and maximum fog density it sits. */
-const CLIENT_FAR_PLANE = 1536;
+const CLIENT_FAR_PLANE = 1024;
+/**
+ * The client draws each cloud layer as a sheet 10 m above the camera in its sky pass, so a
+ * layer's shader size is metres per repeat at that height. Here the sheets sit at real
+ * altitudes so they can be flown through, with the repeat and drift scaled to look the same.
+ */
+const CLIENT_CLOUD_HEIGHT = 10;
+const CLOUD_ALTITUDES = [1500, 2300];
+const CLOUD_EXTENT = 24000;
+const CLOUD_FADE = [5500, 8600];
+/** Seconds in the client's day, which its celestial cycle times count in. */
+const CLIENT_DAY_SECONDS = 86400;
+
+const CLOUD_VERT = /* glsl */ `
+  varying vec3 vWorld;
+  void main() {
+    vec4 wp = modelMatrix * vec4(position, 1.0);
+    vWorld = wp.xyz;
+    gl_Position = projectionMatrix * viewMatrix * wp;
+  }
+`;
+const CLOUD_FRAG = /* glsl */ `
+  uniform sampler2D uMap;
+  uniform vec3 uColor;
+  uniform float uOpacity;
+  uniform float uRepeat;
+  uniform vec2 uScroll;
+  uniform vec3 uCamera;
+  uniform vec2 uFade;
+  varying vec3 vWorld;
+  void main() {
+    vec2 uv = vWorld.xz / uRepeat + uScroll;
+    vec4 c = texture2D(uMap, uv);
+    float dist = distance(vWorld.xz, uCamera.xz);
+    float a = c.a * uOpacity * (1.0 - smoothstep(uFade.x, uFade.y, dist));
+    gl_FragColor = vec4(c.rgb * uColor, a);
+    #include <tonemapping_fragment>
+    #include <colorspace_fragment>
+  }
+`;
 
 const DOME_VERT = /* glsl */ `
   varying vec3 vDir;
@@ -125,7 +164,6 @@ const DOME_FRAG = /* glsl */ `
   }
 `;
 
-const tmpColor = new THREE.Color();
 const tmpVec = new THREE.Vector3();
 const tmpVec2 = new THREE.Vector3();
 
@@ -141,7 +179,9 @@ export class SwgSky {
   private readonly supplementalMoon: THREE.Sprite[] = [];
   private readonly celestials: { sprites: THREE.Sprite[]; data: Celestial }[] = [];
   private readonly stars: THREE.Points | null = null;
-  private readonly clouds: { mesh: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>; layer: CloudLayer }[] = [];
+  /** Cloud sheets live outside the camera-following group: their altitude is fixed in the world. */
+  readonly cloudGroup = new THREE.Group();
+  private readonly clouds: { mesh: THREE.Mesh<THREE.PlaneGeometry, THREE.ShaderMaterial>; layer: CloudLayer; altitude: number }[] = [];
   private readonly ramps = new Map<SkyBlock, Uint8Array>();
   private block: SkyBlock;
   private time = 0;
@@ -309,23 +349,38 @@ export class SwgSky {
       this.group.add(this.stars);
     }
 
-    // Cloud layers: a wide disc high above the camera, scrolling with the wind.
-    const cloud = (layer: CloudLayer | null, height: number) => {
+    // Cloud layers: wide sheets at fixed altitudes, fading out long before their edges.
+    const cloud = (layer: CloudLayer | null, altitude: number) => {
       const tex = layer ? textures.get(layer.file) : null;
       if (!layer || !tex) return;
       tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-      const mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false, fog: false, side: THREE.DoubleSide, opacity: 0.9 });
-      const size = 6000;
-      const geo = new THREE.PlaneGeometry(size, size, 1, 1).rotateX(-Math.PI / 2);
+      const mat = new THREE.ShaderMaterial({
+        vertexShader: CLOUD_VERT,
+        fragmentShader: CLOUD_FRAG,
+        uniforms: {
+          uMap: { value: tex },
+          uColor: { value: new THREE.Color(1, 1, 1) },
+          uOpacity: { value: 1 },
+          uRepeat: { value: 1000 },
+          uScroll: { value: new THREE.Vector2() },
+          uCamera: { value: new THREE.Vector3() },
+          uFade: { value: new THREE.Vector2(CLOUD_FADE[0], CLOUD_FADE[1]) },
+        },
+        transparent: true,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        fog: false,
+      });
+      const geo = new THREE.PlaneGeometry(CLOUD_EXTENT, CLOUD_EXTENT, 1, 1).rotateX(-Math.PI / 2);
       const mesh = new THREE.Mesh(geo, mat);
-      mesh.position.y = height;
+      mesh.position.y = altitude;
       mesh.renderOrder = -4;
       mesh.frustumCulled = false;
-      this.group.add(mesh);
-      this.clouds.push({ mesh, layer });
+      this.cloudGroup.add(mesh);
+      this.clouds.push({ mesh, layer, altitude });
     };
-    cloud(this.block.cloudBottom, 700);
-    cloud(this.block.cloudTop, 1000);
+    cloud(this.block.cloudBottom, CLOUD_ALTITUDES[0]);
+    cloud(this.block.cloudTop, CLOUD_ALTITUDES[1]);
   }
 
   /** Load the pack's sky, or null when it has none. */
@@ -404,11 +459,13 @@ export class SwgSky {
     }
   }
 
-  /** Direction of a body given the client's yaw and pitch in degrees, in this engine's mirrored axes. */
-  private static direction(yawDeg: number, pitchDeg: number, out: THREE.Vector3): THREE.Vector3 {
+  /**
+   * Direction of a body the client places by yawing then pitching a frame and looking down its
+   * -Z axis (pitch in radians, already including any cycle), in this engine's mirrored axes.
+   */
+  private static direction(yawDeg: number, pitch: number, out: THREE.Vector3): THREE.Vector3 {
     const yaw = THREE.MathUtils.degToRad(yawDeg);
-    const pitch = THREE.MathUtils.degToRad(Math.abs(pitchDeg));
-    return out.set(Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), -Math.cos(yaw) * Math.cos(pitch));
+    return out.set(Math.cos(pitch) * Math.sin(yaw), Math.sin(pitch), -Math.cos(pitch) * Math.cos(yaw));
   }
 
   /** A direction turned by the client's yaw and pitch offsets (degrees), used for the supplemental bodies. */
@@ -459,30 +516,40 @@ export class SwgSky {
       this.place(this.sun, tmpVec2.set(0, -1, 0), 0);
       this.place(this.supplementalSun, tmpVec2, 0);
     }
+    // Extra bodies: fixed in the sky, or circling once per cycle time (in the client's day seconds).
+    const clientTime = day.ratio * CLIENT_DAY_SECONDS;
     for (const c of this.celestials) {
       const d = c.data;
-      let pitch = d.pitch ?? 45;
-      if (d.cycleTime && d.cycleTime > 0) pitch += ((d.pitchDirection ?? 1) * 360 * ((this.time % d.cycleTime) / d.cycleTime)) % 360;
+      let pitch = THREE.MathUtils.degToRad(d.pitch ?? 45);
+      if (d.cycleTime && d.cycleTime > 0) pitch += (d.pitchDirection ?? 1) * Math.PI * 2 * ((clientTime % d.cycleTime) / d.cycleTime);
       this.place(c.sprites, SwgSky.direction(d.yaw ?? 0, pitch, tmpVec), this.rampAlpha(Row.Ambient, index, 1));
     }
     if (this.stars) {
       (this.stars.material as THREE.PointsMaterial).opacity = L.starAlpha;
       this.stars.visible = L.starAlpha > 0.01;
     }
+    this.cloudGroup.position.set(camPos.x, 0, camPos.z);
     for (const c of this.clouds) {
-      const tex = c.mesh.material.map!;
-      const repeat = 6000 / Math.max(16, c.layer.size || 512);
-      tex.repeat.set(repeat, repeat);
-      const drift = (this.time * c.layer.speed * this.block.windSpeedScale) / Math.max(16, c.layer.size || 512);
-      tex.offset.set(drift + camPos.x / Math.max(16, c.layer.size || 512), -camPos.z / Math.max(16, c.layer.size || 512));
-      // Clouds take the fog colour at the horizon and the main light's tint above.
-      c.mesh.material.color.copy(L.ambient).lerp(L.main, 0.5).multiplyScalar(1.4).lerp(L.fog, 0.35);
+      const u = c.mesh.material.uniforms;
+      const scale = c.altitude / CLIENT_CLOUD_HEIGHT;
+      const repeat = Math.max(1, c.layer.size || 8) * scale;
+      u.uRepeat.value = repeat;
+      const drift = (this.time * c.layer.speed * this.block.windSpeedScale * scale) / repeat;
+      (u.uScroll.value as THREE.Vector2).set(drift, drift * 0.35);
+      (u.uCamera.value as THREE.Vector3).copy(camPos);
+      // White by day and grey by night in the client, lit by the main light's colour.
+      (u.uColor.value as THREE.Color).copy(L.main).multiplyScalar(day.isDay ? 1 : 0.5);
+      u.uOpacity.value = 1;
     }
     return L;
   }
 
   dispose(scene: THREE.Scene): void {
-    scene.remove(this.group);
+    scene.remove(this.group, this.cloudGroup);
+    for (const c of this.clouds) {
+      c.mesh.geometry.dispose();
+      c.mesh.material.dispose();
+    }
     this.group.traverse((o) => {
       if (o instanceof THREE.Mesh || o instanceof THREE.Points) o.geometry.dispose();
       if (o instanceof THREE.Sprite) o.material.dispose();

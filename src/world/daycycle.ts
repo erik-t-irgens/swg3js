@@ -2,7 +2,7 @@ import * as THREE from 'three';
 
 /** The client's day: the clock runs 06:00 to 06:00, and the first 70% of it is daylight. */
 const DAY_NIGHT_SPLIT = 0.7;
-/** The client keeps its main light 22.5 degrees off the vertical all day: the sun and moon ride at this elevation. */
+/** The client pitches its main light 22.5 degrees off the vertical before sweeping it: the sun's peak elevation. */
 const SWG_LIGHT_ELEVATION = THREE.MathUtils.degToRad(90 - 22.5);
 
 /** Time of day in [0, 1): 0 is midnight, 0.5 is noon. */
@@ -39,11 +39,14 @@ export class DayCycle {
     this.daylight = THREE.MathUtils.smoothstep(y, -0.1, 0.22);
     this.sunset = Math.exp(-Math.abs(y) * 9) * (y > -0.15 ? 1 : 0);
     if (this.swg) {
-      // The client sweeps its light half a turn per day and half a turn per night, at a fixed elevation.
+      // The client pitches its light 67.5 degrees, then yaws it half a turn per day and half a
+      // turn per night about the pitched frame: the sun rises on the horizon, peaks at 67.5
+      // degrees at midday and sets on the far side, and the moon follows the same arc by night.
       const n = this.normalized;
       const yaw = (n < 0.5 ? -Math.PI / 2 : -Math.PI * 1.5) + n * Math.PI * 2;
-      const c = Math.cos(SWG_LIGHT_ELEVATION);
-      this.lightDir.set(c * Math.sin(yaw), Math.sin(SWG_LIGHT_ELEVATION), -c * Math.cos(yaw));
+      const sp = Math.sin(SWG_LIGHT_ELEVATION);
+      const cp = Math.cos(SWG_LIGHT_ELEVATION);
+      this.lightDir.set(Math.sin(yaw), Math.cos(yaw) * sp, -Math.cos(yaw) * cp).normalize();
       if (this.isDay) {
         this.sunDir.copy(this.lightDir);
         this.moonDir.copy(this.lightDir).negate();
