@@ -33,7 +33,7 @@ export interface Impulse {
  * The dual and staff leaps use these, as PM_CheckDualForwardJumpDuck's caller does.
  */
 export interface MoveScript {
-  forward?: [number, number];
+  forward?: { from: number; to: number; amount?: number }[];
   right?: [number, number, 1 | -1];
   hops?: { from: number; to: number; vy: number }[];
 }
@@ -131,14 +131,14 @@ special('A_JUMP_T2B', 'BOTH_FORCELEAP2_T__B_', 'T', 'B', 'R_T2B', { chainIdle: '
 special('A_FLIP_STAB', 'BOTH_JUMPFLIPSTABDOWN', 'R', 'T', 'T_T_R');
 special('A_FLIP_SLASH', 'BOTH_JUMPFLIPSLASHDOWN1', 'L', 'R', 'T_R_T');
 // The dual leap (42 frames): runs forward through its middle and hops twice off the ground.
-special('JUMPATTACK_DUAL', 'BOTH_JUMPATTACK6', 'R', 'BL', 'T_BL_TR', { script: { forward: [0.25, 2.0], hops: [{ from: 0.4, to: 0.5, vy: 250 }, { from: 0.95, to: 1.2, vy: 250 }] } });
+special('JUMPATTACK_DUAL', 'BOTH_JUMPATTACK6', 'R', 'BL', 'T_BL_TR', { script: { forward: [{ from: 0.25, to: 2.0 }], hops: [{ from: 0.4, to: 0.5, vy: 250 }, { from: 0.95, to: 1.2, vy: 250 }] } });
 special('JUMPATTACK_ARIAL_LEFT', 'BOTH_ARIAL_LEFT', 'R', 'TL', 'A_TL2BR');
 special('JUMPATTACK_ARIAL_RIGHT', 'BOTH_ARIAL_RIGHT', 'R', 'TR', 'A_TR2BL');
 special('JUMPATTACK_CART_LEFT', 'BOTH_CARTWHEEL_LEFT', 'R', 'TL', 'T_TL_BR');
 special('JUMPATTACK_CART_RIGHT', 'BOTH_CARTWHEEL_RIGHT', 'R', 'TR', 'T_TR_BL');
 // The staff's forward butterflies (56 frames) run forward and hop once.
-special('JUMPATTACK_STAFF_LEFT', 'BOTH_BUTTERFLY_FL1', 'R', 'L', 'T_L_R', { script: { forward: [0.25, 2.7], hops: [{ from: 1.0, to: 1.1, vy: 250 }] } });
-special('JUMPATTACK_STAFF_RIGHT', 'BOTH_BUTTERFLY_FR1', 'R', 'R', 'T_R_L', { script: { forward: [0.25, 2.7], hops: [{ from: 1.0, to: 1.1, vy: 250 }] } });
+special('JUMPATTACK_STAFF_LEFT', 'BOTH_BUTTERFLY_FL1', 'R', 'L', 'T_L_R', { script: { forward: [{ from: 0.25, to: 2.7 }], hops: [{ from: 1.0, to: 1.1, vy: 250 }] } });
+special('JUMPATTACK_STAFF_RIGHT', 'BOTH_BUTTERFLY_FR1', 'R', 'R', 'T_R_L', { script: { forward: [{ from: 0.25, to: 2.7 }], hops: [{ from: 1.0, to: 1.1, vy: 250 }] } });
 // The staff's sideways butterflies keep pushing sideways and hop again in the middle.
 special('BUTTERFLY_LEFT', 'BOTH_BUTTERFLY_LEFT', 'R', 'L', 'T_L_R', { script: { right: [0, 1.85, -1], hops: [{ from: 0.9, to: 1.1, vy: 350 }] } });
 special('BUTTERFLY_RIGHT', 'BOTH_BUTTERFLY_RIGHT', 'R', 'R', 'T_R_L', { script: { right: [0, 2.35, 1], hops: [{ from: 1.0, to: 1.1, vy: 250 }] } });
@@ -149,11 +149,13 @@ for (const d of ['F', 'B', 'R', 'L'] as Dir[]) {
   special(`KICK_${d}`, `BOTH_A7_KICK_${d}`, 'R', 'R', 'S_R2L', { kick: d });
   special(`KICK_${d}_AIR`, `BOTH_A7_KICK_${d}_AIR`, 'R', 'R', 'S_R2L', { kick: d });
 }
+// The katas move on their own (PM_MoveForKata): the staff's spins forward at half speed and hops,
+// the medium one steps forward twice, the strong one once.
 special('DUAL_SPIN_PROTECT', 'BOTH_A6_SABERPROTECT', 'R', 'R', 'READY', { kata: true });
-special('STAFF_SOULCAL', 'BOTH_A7_SOULCAL', 'R', 'R', 'READY', { kata: true });
+special('STAFF_SOULCAL', 'BOTH_A7_SOULCAL', 'R', 'R', 'READY', { kata: true, script: { forward: [{ from: 0, to: 1.25, amount: 0.5 }], hops: [{ from: 1.15, to: 1.35, vy: 250 }] } });
 special('A1_SPECIAL', 'BOTH_A1_SPECIAL', 'R', 'R', 'READY', { kata: true });
-special('A2_SPECIAL', 'BOTH_A2_SPECIAL', 'R', 'R', 'READY', { kata: true });
-special('A3_SPECIAL', 'BOTH_A3_SPECIAL', 'R', 'R', 'READY', { kata: true });
+special('A2_SPECIAL', 'BOTH_A2_SPECIAL', 'R', 'R', 'READY', { kata: true, script: { forward: [{ from: 0.1, to: 0.5 }, { from: 1.9, to: 2.3 }] } });
+special('A3_SPECIAL', 'BOTH_A3_SPECIAL', 'R', 'R', 'READY', { kata: true, script: { forward: [{ from: 0.75, to: 1.45 }] } });
 special('DUAL_FB', 'BOTH_A6_FB', 'R', 'R');
 special('DUAL_LR', 'BOTH_A6_LR', 'R', 'R');
 
@@ -425,9 +427,9 @@ export class SaberCombat {
     const s = this.current.script;
     if (!s || this.duration <= 0) return null;
     const t = this.elapsed;
-    const inWindow = (w: [number, number] | undefined) => !!w && t >= w[0] && t <= w[1];
+    const fw = s.forward?.find((w) => t >= w.from && t <= w.to);
     const hop = s.hops?.find((h) => t >= h.from && t <= h.to);
-    return { fmove: inWindow(s.forward) ? 1 : 0, smove: s.right && inWindow([s.right[0], s.right[1]]) ? s.right[2] : 0, hop: hop ? hop.vy * UNIT : null };
+    return { fmove: fw ? (fw.amount ?? 1) : 0, smove: s.right && t >= s.right[0] && t <= s.right[1] ? s.right[2] : 0, hop: hop ? hop.vy * UNIT : null };
   }
 
   cycleStyle(): SaberStyle {

@@ -61,7 +61,7 @@ export class BountyHunterKit implements Kit {
     this.stimCd = Math.max(0, this.stimCd - dt);
 
     // Blaster: hitscan from the camera through the crosshair.
-    if (onFoot && input.isDown('Mouse0') && this.fireCd <= 0) {
+    if (onFoot && input.held('attack') && this.fireCd <= 0) {
       this.fireCd = FIRE_RATE;
       cam.camera.getWorldDirection(dir);
       from.copy(cam.camera.position);
@@ -87,7 +87,7 @@ export class BountyHunterKit implements Kit {
 
     // Jetpack: hold Space while airborne.
     const g = world.planet.gravity;
-    this.jetOn = onFoot && !player.noclip && input.isDown('Space') && !player.grounded && res.value > 0;
+    this.jetOn = onFoot && !player.noclip && input.held('jump') && !player.grounded && res.value > 0;
     if (this.jetOn) {
       player.vel.y = Math.min(11, player.vel.y + (g + 16) * dt);
       res.value -= 30 * dt;
@@ -97,7 +97,7 @@ export class BountyHunterKit implements Kit {
     player.jetThrust = this.jetOn;
 
     // 1: Thermal Detonator
-    if (onFoot && input.justPressed('Digit1') && this.detCd <= 0) {
+    if (onFoot && input.pressedAction('slot1') && this.detCd <= 0) {
       this.detCd = DET_COOLDOWN;
       this.throwDetonator(ctx);
     }
@@ -118,7 +118,7 @@ export class BountyHunterKit implements Kit {
     }
 
     // 2: Stim Pack
-    if (input.justPressed('Digit2') && this.stimCd <= 0 && player.hp < player.maxHp) {
+    if (input.pressedAction('slot2') && this.stimCd <= 0 && player.hp < player.maxHp) {
       this.stimCd = STIM_COOLDOWN;
       player.heal(45);
       effects.ring(player.pos, 0x7fff9f, 3, 0.6);

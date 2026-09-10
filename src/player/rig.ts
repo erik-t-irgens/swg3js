@@ -1,10 +1,10 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 
-export type RigState = 'idle' | 'walk' | 'run' | 'air' | 'seated' | 'swim' | 'float' | 'crouch' | 'crouchWalk' | 'stance';
+export type RigState = 'idle' | 'walk' | 'run' | 'air' | 'seated' | 'swim' | 'float' | 'crouch' | 'crouchWalk' | 'stance' | 'strafeLeft' | 'strafeRight' | 'runBack' | 'walkBack';
 
-/** Clip names used for each state, in preference order (placeholder rig names, then the game's). */
-const STATE_CLIPS: Record<RigState, string[]> = {
+/** Clip names used for each state, in preference order (placeholder rig names, then the game's); a pattern matches any clip. */
+const STATE_CLIPS: Record<RigState, (string | RegExp)[]> = {
   idle: ['idle', 'Idle', 'stand', 'loop_stand', 'idle_combat'],
   walk: ['walk', 'Walk', 'loop_walk', 'walk_combat'],
   run: ['run', 'Run', 'loop_run', 'run_combat'],
@@ -16,10 +16,16 @@ const STATE_CLIPS: Record<RigState, string[]> = {
   crouchWalk: ['BOTH_CROUCH1WALK', 'sneak', 'walk', 'loop_walk'],
   /** Standing with the saber drawn: the style's stance (set through `stanceClip`), else the idle. */
   stance: ['BOTH_STAND2', 'idle_combat', 'idle', 'Idle', 'stand', 'loop_stand'],
+  // Sideways and backwards locomotion, when the skeleton's tables carry them: the body then
+  // keeps facing the camera while it moves. Nothing else matches, so these states stay unused.
+  strafeLeft: [/strafe.*(left|_l)$/i, /^(run|walk)_?(strafe_?)?l(eft)?$/i, /side.*left/i],
+  strafeRight: [/strafe.*(right|_r)$/i, /^(run|walk)_?(strafe_?)?r(ight)?$/i, /side.*right/i],
+  runBack: [/^run.*back/i, /back.*run/i, /^run.*bwd/i],
+  walkBack: [/^walk.*back/i, /back.*walk/i, /^walk.*bwd/i],
 };
 
 /** Natural travel speed of the placeholder rig's locomotion clips, in m/s, used to scale playback. */
-const DEFAULT_CLIP_SPEED: Partial<Record<RigState, number>> = { walk: 1.5, run: 5.5, swim: 2.5, crouchWalk: 2.2 };
+const DEFAULT_CLIP_SPEED: Partial<Record<RigState, number>> = { walk: 1.5, run: 5.5, swim: 2.5, crouchWalk: 2.2, strafeLeft: 4.5, strafeRight: 4.5, runBack: 4, walkBack: 1.5 };
 
 /** Bones the game needs by role: exact names of the placeholder rig first, then patterns for the game's skeletons. */
 export type BoneRole = 'rightHand' | 'leftHand' | 'spine' | 'rightUpperArm' | 'rightForeArm' | 'leftUpperArm' | 'leftForeArm' | 'head';
@@ -146,6 +152,21 @@ export class CharacterRig {
     for (const m of this.materials) if (!m.map) m.color.set(color);
   }
 
+  /** The first clip a candidate list names (or a pattern matches), or undefined. */
+  private findClip(candidates: (string | RegExp)[]): string | undefined {
+    for (const c of candidates) {
+      if (typeof c === 'string') {
+        if (this.actions.has(c)) return c;
+      } else for (const name of this.actions.keys()) if (c.test(name)) return name;
+    }
+    return undefined;
+  }
+
+  /** Whether the rig has a clip of its own for a state (rather than a stand-in from another). */
+  hasState(state: RigState): boolean {
+    return this.findClip(STATE_CLIPS[state]) !== undefined;
+  }
+
   has(clip: string): boolean {
     return this.actions.has(clip);
   }
@@ -165,7 +186,7 @@ export class CharacterRig {
    * Play a clip over the state clips: once (then the state clip returns) or looping until
    * `stopOverride`. Returns its length in seconds at the given speed, or null when missing.
    */
-  play(clip: string, { loop = false, fadeIn = 0.1, timeScale = 1 }: { loop?: boolean; fadeIn?: number; timeScale?: number } = {}): number | null {
+  play(clip: string, { loop = false, fadeIn = 0.1, timeScale = 1, hold = false }: { loop?: boolean; fadeIn?: number; timeScale?: number; hold?: boolean } = {}): number | null {
     const next = this.actions.get(clip);
     if (!next) return null;
     const from = this.override ?? this.current;
@@ -177,7 +198,9 @@ export class CharacterRig {
     else if (from === next) next.fadeIn(0);
     this.override = next;
     const duration = next.getClip().duration / Math.max(1e-3, Math.abs(timeScale));
-    this.overrideEnds = loop ? Infinity : duration;
+    // A held clip keeps its last frame until the next one-off clip or `stopOverride` (a saber
+    // move chains straight into the next without a dip back to the stance).
+    this.overrideEnds = loop || hold ? Infinity : duration;
     this.overrideTime = 0;
     return duration;
   }
@@ -201,7 +224,7 @@ export class CharacterRig {
     }
     const wantedStance = state === 'stance' && this.stanceClip && this.actions.has(this.stanceClip) ? this.stanceClip : null;
     if (state !== this.state || (wantedStance && this.current?.getClip().name !== wantedStance)) {
-      const clipName = wantedStance ?? STATE_CLIPS[state].find((n) => this.actions.has(n));
+      const clipName = wantedStance ?? this.findClip(STATE_CLIPS[state]);
       const next = clipName ? this.actions.get(clipName)! : null;
       if (next && next !== this.current) {
         // A held clip (a stance) plays once and keeps its last frame.

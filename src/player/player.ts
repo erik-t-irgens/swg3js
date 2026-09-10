@@ -219,6 +219,8 @@ export class Player {
   private readonly flying: THREE.Group;
   /** A wall run or grab turns the body this way while it lasts. */
   private lockedHeading: THREE.Vector3 | null = null;
+  /** The rig has sideways clips, so the body faces the camera while moving. */
+  private directional = false;
   private readonly cmd: MoveCommand = { forward: new THREE.Vector3(), right: new THREE.Vector3(), fmove: 0, smove: 0, walk: false, crouch: false, roll: false, jump: false, jumpPressed: false, attack: false, speedScale: 1 };
   /** Ducking (Ctrl on land): half speed, crouch clips, and the crouched attacks. */
   crouching = false;
@@ -264,6 +266,7 @@ export class Player {
     markActor(this.flying);
     this.cmd.probe = (dir, dist) => this.probeWall(dir, dist);
     this.cmd.groundDistance = (max) => this.groundDistanceUnits(max);
+    this.cmd.floorAhead = (dist) => this.floorAhead(dist);
 
     const world = physics.world;
     this.body = world.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased());
@@ -403,6 +406,7 @@ export class Player {
     if (!this.saberOn) {
       this.saber.holster();
       this.thrown.cancel();
+      this.rig?.stopOverride();
     }
     this.updateBlades();
   }
@@ -465,6 +469,15 @@ export class Player {
     });
     if (!hit) return null;
     return new THREE.Vector3(hit.normal.x, hit.normal.y, hit.normal.z);
+  }
+
+  /** Whether a floor lies `dist` units ahead of the body's edge, within a body height below its middle (the top of a wall being run up). */
+  private floorAhead(dist: number): boolean {
+    const yaw = this.heading;
+    const d = CAPSULE_RADIUS + dist * UNIT;
+    const x = this.pos.x + Math.sin(yaw) * d;
+    const z = this.pos.z + Math.cos(yaw) * d;
+    return this.physics.groundDistance(x, this.pos.y + 1.0, z, 1.0 + 64 * UNIT, this.body) !== null;
   }
 
   /** Distance to the ground below the feet in units, or null beyond `max` units. */
@@ -582,10 +595,10 @@ export class Player {
 
     let mx = 0;
     let mz = 0;
-    if (input.isDown('KeyW') || input.isDown('ArrowUp')) mz += 1;
-    if (input.isDown('KeyS') || input.isDown('ArrowDown')) mz -= 1;
-    if (input.isDown('KeyA') || input.isDown('ArrowLeft')) mx -= 1;
-    if (input.isDown('KeyD') || input.isDown('ArrowRight')) mx += 1;
+    if (input.held('forward')) mz += 1;
+    if (input.held('back')) mz -= 1;
+    if (input.held('left')) mx -= 1;
+    if (input.held('right')) mx += 1;
 
     cam.forward(fwd);
     cam.right(rgt);
@@ -593,8 +606,8 @@ export class Player {
     const moving = move.lengthSq() > 0;
     if (moving) move.normalize();
 
-    const walking = input.isDown('ShiftLeft') || input.isDown('ShiftRight');
-    this.crouching = !this.swimming && (input.isDown('ControlLeft') || input.isDown('ControlRight'));
+    const walking = input.held('walk');
+    this.crouching = !this.swimming && input.held('crouch');
     this.setCrouchCollider(this.crouching && this.grounded);
     let speed = (walking ? WALK_SPEED : RUN_SPEED) * this.speedMultiplier * (this.crouching && this.grounded ? 0.5 : 1);
 
@@ -617,8 +630,8 @@ export class Player {
       this.vel.x += (move.x * speed - this.vel.x) * k;
       this.vel.z += (move.z * speed - this.vel.z) * k;
       let vy = 0;
-      if (input.isDown('Space')) vy = SWIM_SPEED * RUN_SPEED;
-      else if (input.isDown('ControlLeft') || input.isDown('ControlRight')) vy = -SWIM_SPEED * RUN_SPEED;
+      if (input.held('jump')) vy = SWIM_SPEED * RUN_SPEED;
+      else if (input.held('crouch')) vy = -SWIM_SPEED * RUN_SPEED;
       else if (moving) {
         // Under water the camera steers: swim where you look. At the surface only a steep
         // look downwards dives, so ordinary forward swimming keeps the head up.
@@ -637,8 +650,8 @@ export class Player {
       const c = this.cmd;
       // A leaping saber move drives the body itself while it lasts (the keys are ignored).
       const script = this.saber.scriptNow();
-      let jump = input.isDown('Space');
-      let jumpPressed = input.justPressed('Space');
+      let jump = input.held('jump');
+      let jumpPressed = input.pressedAction('jump');
       if (script) {
         mz = script.fmove;
         mx = script.smove;
@@ -657,10 +670,10 @@ export class Player {
       c.smove = mx;
       c.walk = walking;
       c.crouch = this.crouching;
-      c.roll = (input.justPressed('ControlLeft') || input.justPressed('ControlRight')) && moving && !this.saber.busy;
+      c.roll = input.pressedAction('crouch') && moving && !this.saber.busy;
       c.jump = jump;
       c.jumpPressed = jumpPressed && !this.saber.busy;
-      c.attack = input.isDown('Mouse0');
+      c.attack = input.held('attack');
       c.speedScale = this.speedMultiplier;
       const force = this.force;
       const ev = this.jka.step(dt, this.vel, this.pos, this.grounded, c, { value: force?.value ?? 100, spend: (n) => { if (force) force.value = Math.max(0, force.value - n); } });
@@ -682,7 +695,7 @@ export class Player {
     } else if (this.grounded) {
       this.vel.x = move.x * speed;
       this.vel.z = move.z * speed;
-      if (input.isDown('Space')) {
+      if (input.held('jump')) {
         this.vel.y = Math.sqrt(2 * g * JUMP_HEIGHT);
         this.grounded = false;
       }
@@ -720,21 +733,21 @@ export class Player {
     // Lightsaber: the first press draws it, then the direction keys pick the swing and holding
     // attack chains the next one; the rig plays the move's clip when it has it.
     if (this.classId === 'jedi') {
-      const attackPressed = input.justPressed('Mouse0');
-      const altPressed = input.justPressed('Mouse2');
+      const attackPressed = input.pressedAction('attack');
+      const altPressed = input.pressedAction('altAttack');
       if ((attackPressed || altPressed) && !this.saberOn) this.toggleSaber();
       const roll = this.jka.roll;
       const si: SaberInput = {
-        attack: input.isDown('Mouse0'),
+        attack: input.held('attack'),
         attackPressed,
-        altAttack: input.isDown('Mouse2'),
+        altAttack: input.held('altAttack'),
         altAttackPressed: altPressed,
         fmove: mz,
         smove: mx,
         grounded: this.grounded,
         vy: this.vel.y,
         aboveGround: this.grounded ? 0 : (this.groundDistanceUnits(400) ?? 400) * UNIT,
-        jumpHeld: input.isDown('Space'),
+        jumpHeld: input.held('jump'),
         crouch: this.crouching,
         force: this.force?.value ?? 100,
         enemyNear: (d, r) => this.enemyNear(d, r),
@@ -747,6 +760,7 @@ export class Player {
         cam.camera.getWorldDirection(aim);
         this.thrown.throw(this.handPosition(handPos), aim);
         this.saber.holster();
+        this.rig?.stopOverride();
       }
       const play = this.saber.update(dt, this.saberOn && !this.thrown.inFlight, si, (a) => this.rig?.clipDuration(a) ?? null);
       if (play) {
@@ -764,14 +778,19 @@ export class Player {
           this.jka.markJumpStart(this.pos.y);
         }
         if (play.move.kind === 'ready') this.rig?.stopOverride();
-        else if (this.rig?.has(play.anim)) this.rig.play(play.anim, { loop: play.loop, fadeIn: play.blend, timeScale: play.speed });
+        // Held: the move keeps its last frame until the next chains in, with no dip to the stance between.
+        else if (this.rig?.has(play.anim)) this.rig.play(play.anim, { loop: play.loop, fadeIn: play.blend, timeScale: play.speed, hold: true });
         else if (play.move.kind === 'attack' || play.move.kind === 'special') this.startSwing();
       }
     }
     this.updateThrown(dt, input, cam);
     this.updateBlades();
 
-    const faceCamera = this.classId === 'bounty_hunter' || this.swing >= 0 || this.saber.busy || this.thrown.inFlight;
+    // The body faces the camera while fighting, in the air, rolling, and whenever the rig can
+    // play the movement sideways or backwards; otherwise it turns the way it runs.
+    const directional = !!this.rig && this.rig.hasState('strafeLeft') && this.rig.hasState('strafeRight');
+    this.directional = directional;
+    const faceCamera = this.classId === 'bounty_hunter' || this.swing >= 0 || this.saber.busy || this.thrown.inFlight || this.jka.inSpecialJump || this.jka.rolling || (!this.grounded && this.hasJkaClips) || (moving && directional);
     if (this.lockedHeading) {
       this.heading = Math.atan2(this.lockedHeading.x, this.lockedHeading.z);
     } else if (faceCamera) {
@@ -790,20 +809,26 @@ export class Player {
     this.phase += dt * speed * (moving ? 1.9 : 0);
     this.groundSpeed = moving ? speed : 0;
     this.animate(dt);
-    this.animateRig(dt, this.groundSpeed, moving);
+    this.animateRig(dt, this.groundSpeed, moving, mz, mx);
 
     this.group.position.copy(this.pos);
     this.group.rotation.set(0, this.heading, 0);
     this.group.updateMatrixWorld(true);
   }
 
-  private animateRig(dt: number, speed: number, moving: boolean): void {
+  private animateRig(dt: number, speed: number, moving: boolean, mz = 0, mx = 0): void {
     const rig = this.rig;
     if (!rig) return;
+    const running = speed >= 4.5;
     if (this.mounted) rig.setState('seated');
     else if (this.swimming) rig.setState(moving || this.submerged ? 'swim' : 'float', speed);
     else if (!this.grounded) rig.setState('air');
     else if (this.crouching) rig.setState(moving ? 'crouchWalk' : 'crouch', speed);
+    else if (moving && this.directional && mz <= 0 && (mz < 0 || mx !== 0)) {
+      // Facing the camera and moving backwards or sideways: the matching clip.
+      const back = running ? 'runBack' : 'walkBack';
+      rig.setState(mz < 0 && rig.hasState(back) ? back : mx > 0 ? 'strafeRight' : mx < 0 ? 'strafeLeft' : running ? 'run' : 'walk', speed);
+    }
     else if (!moving && this.saberOn && this.hasJkaClips) {
       // Standing with the saber drawn: the style's stance, or the arm out while the saber flies.
       rig.stanceClip = this.thrown.inFlight ? 'BOTH_SABERPULL' : STANCE_ANIM[this.saber.style];
@@ -859,7 +884,7 @@ export class Player {
     this.handPosition(handPos);
     aimFrom.copy(this.pos).y += 1.5;
     cam.camera.getWorldDirection(aim);
-    const result = this.thrown.update(dt, handPos, aimFrom, aim, input.isDown('Mouse2'), (a, b) => this.physics.cameraBlock(a, b, this.body, this.inside) !== null);
+    const result = this.thrown.update(dt, handPos, aimFrom, aim, input.held('altAttack'), (a, b) => this.physics.cameraBlock(a, b, this.body, this.inside) !== null);
     if (result === 'caught') return;
     this.flying.position.copy(this.thrown.pos);
     this.flying.rotation.set(0, this.thrown.spin, 0);
@@ -869,15 +894,15 @@ export class Player {
     cam.camera.getWorldDirection(fwd);
     cam.right(rgt);
     move.set(0, 0, 0);
-    if (input.isDown('KeyW') || input.isDown('ArrowUp')) move.add(fwd);
-    if (input.isDown('KeyS') || input.isDown('ArrowDown')) move.sub(fwd);
-    if (input.isDown('KeyD') || input.isDown('ArrowRight')) move.add(rgt);
-    if (input.isDown('KeyA') || input.isDown('ArrowLeft')) move.sub(rgt);
-    if (input.isDown('Space')) move.y += 1;
-    if (input.isDown('ControlLeft') || input.isDown('ControlRight')) move.y -= 1;
+    if (input.held('forward')) move.add(fwd);
+    if (input.held('back')) move.sub(fwd);
+    if (input.held('right')) move.add(rgt);
+    if (input.held('left')) move.sub(rgt);
+    if (input.held('jump')) move.y += 1;
+    if (input.held('crouch')) move.y -= 1;
     const moving = move.lengthSq() > 0;
     if (moving) move.normalize();
-    const speed = this.noclipSpeed * (input.isDown('ShiftLeft') || input.isDown('ShiftRight') ? 3.5 : 1) * this.speedMultiplier;
+    const speed = this.noclipSpeed * (input.held('walk') ? 3.5 : 1) * this.speedMultiplier;
     this.pos.addScaledVector(move, speed * dt);
     this.vel.set(0, 0, 0);
     this.grounded = false;

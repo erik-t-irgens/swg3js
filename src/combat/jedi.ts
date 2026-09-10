@@ -76,7 +76,7 @@ export class JediKit implements Kit {
     // Lightsaber: the player runs the swing itself (Jedi Academy's move system); each new swing
     // may hit every creature once.
     player.force = res;
-    if (input.justPressed('KeyK') && onFoot) this.styleNote = `saber style: ${player.saber.cycleStyle()}`;
+    if (input.pressedAction('saberStyle') && onFoot) this.styleNote = `saber style: ${player.saber.cycleStyle()}`;
     if (player.saber.attackId !== this.lastAttackId) {
       this.lastAttackId = player.saber.attackId;
       this.hitThisSwing.clear();
@@ -111,14 +111,14 @@ export class JediKit implements Kit {
     }
 
     // 1: Force Jump
-    if (onFoot && input.justPressed('Digit1') && player.grounded && !player.swimming && res.value >= 20) {
+    if (onFoot && input.pressedAction('slot1') && player.grounded && !player.swimming && res.value >= 20) {
       res.value -= 20;
       player.launch(Math.sqrt(2 * planet.gravity * 11), 9, cam);
       effects.ring(player.pos, 0x9fd4ff, 5, 0.5);
     }
 
     // 2: Force Speed (toggle)
-    if (input.justPressed('Digit2')) {
+    if (input.pressedAction('slot2')) {
       if (this.speedActive) this.speedActive = false;
       else if (res.value >= 10) this.speedActive = true;
     }
@@ -135,7 +135,7 @@ export class JediKit implements Kit {
     }
 
     // 3: Force Push
-    if (onFoot && input.justPressed('Digit3') && res.value >= 25) {
+    if (onFoot && input.pressedAction('slot3') && res.value >= 25) {
       res.value -= 25;
       cam.forward(tmp);
       effects.ring(player.pos, 0xbfe0ff, 12, 0.45);
@@ -159,7 +159,7 @@ export class JediKit implements Kit {
     }
 
     // 4: Force Lightning (hold)
-    this.lightningActive = onFoot && input.isDown('Digit4') && res.value > 0;
+    this.lightningActive = onFoot && input.held('slot4') && res.value > 0;
     this.bolt.visible = this.lightningActive;
     if (this.lightningActive) {
       res.value -= 18 * dt;

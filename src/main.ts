@@ -6,7 +6,7 @@ import { JediKit } from './combat/jedi';
 import type { ClassId, Kit, KitContext } from './combat/kit';
 import { ThirdPersonCamera } from './core/camera';
 import { PortalRenderer } from './world/portalRender';
-import { Input } from './core/input';
+import { Input, type Action } from './core/input';
 import { Physics } from './core/physics';
 import { PLANETS, packIdOf, planetById, type PlanetDef } from './data/planets';
 import { Player } from './player/player';
@@ -160,6 +160,14 @@ class App {
         if (name) this.player.moveProfile = name;
         return this.player.moveProfile;
       },
+      /** Rebind an action to one or more keys (KeyboardEvent.code names, or Mouse0/Mouse1/Mouse2); no keys restores the default. Kept in local storage. */
+      bind: (action: Action, ...codes: string[]) => {
+        this.input.bind(action, codes);
+        return this.input.bindings[action];
+      },
+      /** Every action and the keys bound to it. */
+      bindings: () => ({ ...this.input.bindings }),
+      resetBindings: () => this.input.resetBindings(),
       /** The saber system's state: style, current move, chain count, whether the rig has Jedi Academy's clips, the special jump in progress, and the thrown saber's flight. */
       saber: () => ({ style: this.player.saber.style, move: this.player.saber.move, chain: this.player.saber.chainCount, timer: Number(this.player.saber.timer.toFixed(2)), jkaClips: this.player.hasJkaClips, on: this.player.saberOn, special: this.player.jka.specialJump, thrown: this.player.thrown.inFlight ? { returning: this.player.thrown.returning, at: this.player.thrown.pos.toArray().map((v) => Number(v.toFixed(2))) } : null }),
       /** Particle effects within r metres of the player: file, distance, whether playing, live particles. With `verbose`, every emitter: texture, blend, whether the texture loaded, and the first particle's size, alpha, colour and screen position. */
@@ -217,6 +225,7 @@ class App {
           <div><b>WASD</b> move · <b>Mouse</b> look · <b>Wheel</b> zoom · <b>Space</b> jump (hold to Force Jump higher) · <b>Ctrl</b> crouch (tap while moving to roll) · <b>Shift</b> walk · in water <b>Space</b>/<b>Ctrl</b> surface/dive, or look down and swim</div>
           <div><b>LMB</b> attack · <b>RMB</b> throw the saber (staff: kick) · <b>E</b> mount speeder · <b>C</b> switch class · <b>T</b> fast-forward time</div>
           <div><b>M</b> galaxy map · <b>H</b> toggle help · <b>N</b> noclip fly (<b>+</b>/<b>-</b> speed) · <b>F</b> flashlight · <b>Esc</b> release mouse</div>
+          <div><b>X</b> also crouches (a Mac turns Ctrl-click into a right click) · rebind any key in the console: <b>__debug.bind('crouch', 'KeyV')</b>, <b>__debug.bindings()</b></div>
         </div>
         <div class="class-pick">
           <button class="enter" data-class="jedi">Enter as Jedi<small>Lightsaber, Force powers</small></button>
@@ -456,16 +465,16 @@ class App {
       const player = this.player;
 
       if (active) {
-        if (input.justPressed('KeyM')) this.toggleMap();
-        if (input.justPressed('KeyH')) this.hud.toggleHelp();
+        if (input.pressedAction('map')) this.toggleMap();
+        if (input.pressedAction('help')) this.hud.toggleHelp();
         if (!this.map.open) {
-          if (input.justPressed('KeyL') && this.kit.id === 'jedi' && !player.mounted) player.toggleSaber();
-          if (input.justPressed('KeyC')) this.setClass(this.kit.id === 'jedi' ? 'bounty_hunter' : 'jedi');
-          if (input.justPressed('KeyE') && !player.noclip && !this.handleElevator()) this.handleMount();
-          if (input.justPressed('KeyN') && !player.mounted) player.toggleNoclip();
-          if (player.noclip && (input.justPressed('Equal') || input.justPressed('NumpadAdd'))) player.noclipSpeed = Math.min(2000, player.noclipSpeed * 1.5);
-          if (player.noclip && (input.justPressed('Minus') || input.justPressed('NumpadSubtract'))) player.noclipSpeed = Math.max(2, player.noclipSpeed / 1.5);
-          if (input.justPressed('KeyF')) this.torch.visible = !this.torch.visible;
+          if (input.pressedAction('saberToggle') && this.kit.id === 'jedi' && !player.mounted) player.toggleSaber();
+          if (input.pressedAction('switchClass')) this.setClass(this.kit.id === 'jedi' ? 'bounty_hunter' : 'jedi');
+          if (input.pressedAction('mount') && !player.noclip && !this.handleElevator()) this.handleMount();
+          if (input.pressedAction('noclip') && !player.mounted) player.toggleNoclip();
+          if (player.noclip && input.pressedAction('noclipFaster')) player.noclipSpeed = Math.min(2000, player.noclipSpeed * 1.5);
+          if (player.noclip && input.pressedAction('noclipSlower')) player.noclipSpeed = Math.max(2, player.noclipSpeed / 1.5);
+          if (input.pressedAction('flashlight')) this.torch.visible = !this.torch.visible;
         }
       }
 
@@ -479,16 +488,16 @@ class App {
       let drive: DriveInput | null = null;
       if (simulate && player.mounted) {
         drive = {
-          throttle: (input.isDown('KeyW') || input.isDown('ArrowUp') ? 1 : 0) - (input.isDown('KeyS') || input.isDown('ArrowDown') ? 1 : 0),
-          steer: (input.isDown('KeyD') || input.isDown('ArrowRight') ? 1 : 0) - (input.isDown('KeyA') || input.isDown('ArrowLeft') ? 1 : 0),
-          boost: input.isDown('ShiftLeft') || input.isDown('ShiftRight'),
-          hop: input.justPressed('Space'),
+          throttle: (input.held('forward') ? 1 : 0) - (input.held('back') ? 1 : 0),
+          steer: (input.held('right') ? 1 : 0) - (input.held('left') ? 1 : 0),
+          boost: input.held('walk'),
+          hop: input.pressedAction('jump'),
         };
       }
       for (const sp of this.world.speeders) sp.update(dt, this.physics, sp === player.mounted ? drive : null);
       if (player.mounted) player.syncMount();
 
-      const fast = simulate && input.isDown('KeyT');
+      const fast = simulate && input.held('fastForward');
       for (const m of this.shown) m.update(dt);
       this.world.update(dt, player.pos, this.cam.camera.position, fast, (dmg) => {
         if (!simulate || player.mounted || player.noclip) return;

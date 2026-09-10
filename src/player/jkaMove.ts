@@ -74,6 +74,8 @@ export interface MoveCommand {
   probe?: WallProbe;
   /** Distance to the ground below in units, up to `max`, or null when farther. */
   groundDistance?: (max: number) => number | null;
+  /** Whether there is a floor to stand on `dist` units ahead, within a body height below the body's middle. */
+  floorAhead?: (dist: number) => boolean;
 }
 
 export interface MoveEvents {
@@ -108,6 +110,7 @@ const CLIP_SECONDS: Record<string, number> = {
   BOTH_WALL_FLIP_BACK1: 1.35,
   BOTH_FORCEWALLRUNFLIP_START: 1.35,
   BOTH_FORCEWALLRUNFLIP_END: 0.95,
+  BOTH_FORCEWALLRUNFLIP_ALT: 0.95,
   BOTH_FORCEWALLREBOUND_FORWARD: 0.6,
   BOTH_FORCEWALLREBOUND_BACK: 0.6,
   BOTH_FORCEWALLREBOUND_LEFT: 0.6,
@@ -452,6 +455,15 @@ export class JkaMovement {
           this.jumpHeld = true;
         }
       }
+    }
+
+    // Running up a wall and clearing its top: flip over onto whatever is up there (PM_AdjustAngleForWallRunUp).
+    if (!grounded && this.special === 'BOTH_FORCEWALLRUNFLIP_START' && this.specialElapsed > 0.25 && cmd.probe && cmd.floorAhead && !cmd.probe(cmd.forward, 64) && cmd.floorAhead(48)) {
+      vx = cmd.forward.x * 100;
+      vz = cmd.forward.z * 100;
+      vy += 400;
+      this.jumpHeld = true;
+      this.startSpecial('BOTH_FORCEWALLRUNFLIP_ALT', ev);
     }
 
     if (!grounded) {
