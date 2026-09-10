@@ -34,7 +34,8 @@
 //   node tools/swg/cli.mjs sky <swg-dir> <planet>|all <out-dir>      the planet's sky (sun, moons, colour ramps, skybox, reflection maps) into a pack
 //                                                                  (snapshot and terrain do this too)
 //   node tools/swg/cli.mjs audit <swg-dir> <out-dir> [planet] [--limit=n]   every object the archives place on each converted planet against its pack:
-//                                                                  what is missing, why (skipped kind, creature, older conversion), and where
+//                                                                  what is missing, why (skipped kind, creature, older conversion), and where;
+//                                                                  also written to <out-dir>/audit.txt
 //   node tools/swg/cli.mjs status <out-dir>                        what the packs under <out-dir> hold and which commands would fill the gaps
 //   node tools/swg/cli.mjs terrain-check <out-dir> [--limit=n] [--layers] [--at=x,z]
 //                                                                  generate terrain at every snapshot object and compare with its height;
@@ -1634,7 +1635,14 @@ switch (cmd) {
     // <swg-dir> <out-dir> [planet]: everything the archives place on each converted planet against what its pack holds
     if (!pos[2]) usage();
     const vfs = mount(pos[1]);
-    const planets = pos[3] ? [pos[3]] : GAME_PLANETS.filter((p) => existsSync(join(pos[2], p, 'layout.json')));
+    const planets = pos[3] && !pos[3].startsWith('--') ? [pos[3]] : GAME_PLANETS.filter((p) => existsSync(join(pos[2], p, 'layout.json')));
+    // Everything printed also goes to <out-dir>/audit.txt, for sharing.
+    const lines = [];
+    const log = (line) => {
+      console.log(line);
+      lines.push(line);
+    };
+    log(`audit of ${pos[2]} on ${new Date().toISOString()}; ${vfs.summary}${flags.has('--retail-only') ? ' (retail only)' : ''}${flags.has('--events') ? ', event areas included' : ''}`);
     for (const planet of planets) {
       const packDir = join(pos[2], planet);
       const layout = JSON.parse(readFileSync(join(packDir, 'layout.json'), 'utf8'));
@@ -1645,7 +1653,7 @@ switch (cmd) {
         const loaded = loadPlanetObjects(vfs, planet);
         entries = loaded.entries.map((e) => ({ template: loaded.snap.templates[e.node.templateIndex], e }));
       } catch (err) {
-        console.log(`${planet}: ${err.message}`);
+        log(`${planet}: ${err.message}`);
         continue;
       }
       const placed = new Map();
@@ -1669,13 +1677,16 @@ switch (cmd) {
       }
       const glbMissing = [...models.values()].filter((m) => !existsSync(join(packDir, m.file))).map((m) => m.id);
       const noModel = layout.objects.filter((o) => !models.has(o.model)).length;
-      console.log(`${planet}: archives place ${entries.length} objects, pack has ${layout.objects.length}; ${missingObjects} not in the pack across ${missing.length} templates${noModel ? `; ${noModel} placed objects name a model the manifest lacks` : ''}${glbMissing.length ? `; ${glbMissing.length} manifest models have no file: ${glbMissing.slice(0, 5).join(', ')}` : ''}`);
+      log(`${planet}: archives place ${entries.length} objects, pack has ${layout.objects.length}; ${missingObjects} not in the pack across ${missing.length} templates${noModel ? `; ${noModel} placed objects name a model the manifest lacks` : ''}${glbMissing.length ? `; ${glbMissing.length} manifest models have no file: ${glbMissing.slice(0, 5).join(', ')}` : ''}`);
       const byReason = new Map();
       for (const m of missing) byReason.set(m.reason, (byReason.get(m.reason) ?? 0) + (m.want - m.have));
-      for (const [reason, n] of [...byReason].sort((a, b) => b[1] - a[1])) console.log(`  ${String(n).padStart(6)}  ${reason}`);
-      const limit = Number(options.limit ?? 25);
-      for (const m of missing.sort((a, b) => b.want - b.have - (a.want - a.have)).slice(0, limit)) console.log(`    ${m.want - m.have} of ${m.want} missing  ${m.template}  (${m.reason})${m.at ? ` e.g. ${m.at[0].toFixed(0)},${m.at[2].toFixed(0)}` : ''}`);
+      for (const [reason, n] of [...byReason].sort((a, b) => b[1] - a[1])) log(`  ${String(n).padStart(6)}  ${reason}`);
+      const limit = Number(options.limit ?? 60);
+      for (const m of missing.sort((a, b) => b.want - b.have - (a.want - a.have)).slice(0, limit)) log(`    ${m.want - m.have} of ${m.want} missing  ${m.template}  (${m.reason})${m.at ? ` e.g. ${m.at[0].toFixed(0)},${m.at[2].toFixed(0)}` : ''}`);
+      log('');
     }
+    writeFileSync(join(pos[2], 'audit.txt'), lines.join('\n') + '\n');
+    console.log(`written to ${join(pos[2], 'audit.txt')}`);
     break;
   }
 
