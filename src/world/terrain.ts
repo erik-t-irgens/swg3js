@@ -85,6 +85,12 @@ export class Terrain {
     return this.swg.prepareArea(cx * CHUNK_SIZE - step, cz * CHUNK_SIZE - step, CHUNK_SIZE + 2 * step, sync);
   }
 
+  /** Ground height from data already generated, or null when nothing covers the point yet. */
+  heightIfCached(x: number, z: number, farSize: number, farRes: number): number | null {
+    if (this.swg) return this.swg.heightIfCached(x, z, farSize, farRes);
+    return this.heightAt(x, z);
+  }
+
   heightAt(x: number, z: number): number {
     if (this.swg) return this.swg.heightAt(x, z);
     let h = this.rawHeightAt(x, z);

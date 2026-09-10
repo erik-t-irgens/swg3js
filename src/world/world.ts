@@ -4,7 +4,7 @@ import type { Physics, RAPIER } from '../core/physics';
 import { CreatureManager } from './creatures';
 import { DayCycle } from './daycycle';
 import { SwgSky, type SkyLighting } from './sky';
-import { createWaterMaterial, emitRipple, Splashes, type WaterMaterial } from './water';
+import { createWaterMaterial, emitRipple, Splashes, updateWaterDepth, type WaterMaterial } from './water';
 import { setEnvironment } from './envmap';
 import { PropFactory, type Collider, type Exclusion, type ScatterItem } from './props';
 import { FloraPlanter } from './flora';
@@ -919,6 +919,7 @@ export class World {
     this.waterTime += dt;
     for (const m of this.waterMaterials) m.userData.uniforms.uTime.value = this.waterTime;
     this.emitRipples(dt, playerPos);
+    if (this.waterMaterials.length) updateWaterDepth(playerPos.x, playerPos.z, (x, z) => this.terrain.heightIfCached(x, z, FAR_TILE, FAR_RES));
     if (this.water) {
       const cell = WATER_NEAR / WATER_SEGMENTS;
       this.water.position.x = Math.round(playerPos.x / cell) * cell;

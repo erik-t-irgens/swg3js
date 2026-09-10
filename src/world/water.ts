@@ -25,6 +25,59 @@ const RINGS = { value: ringData };
 const RING_MOTION = { value: ringMotion };
 let nextRing = 0;
 
+/**
+ * Depth under the water: a moving window of ground heights around the player, from terrain
+ * already generated, sampled by the shaders to calm and flatten waves in the shallows and to
+ * foam the shoreline. A full pass refreshes over a couple of seconds, so shores keep up.
+ */
+const DEPTH_CELLS = 128;
+const DEPTH_CELL = 16;
+const DEPTH_UNKNOWN = -10000;
+const depthHeights = new Float32Array(DEPTH_CELLS * DEPTH_CELLS).fill(DEPTH_UNKNOWN);
+const depthTexture = new THREE.DataTexture(depthHeights, DEPTH_CELLS, DEPTH_CELLS, THREE.RedFormat, THREE.FloatType);
+depthTexture.magFilter = depthTexture.minFilter = THREE.LinearFilter;
+depthTexture.wrapS = depthTexture.wrapT = THREE.ClampToEdgeWrapping;
+depthTexture.needsUpdate = true;
+const DEPTH = { tex: { value: depthTexture }, origin: { value: new THREE.Vector2(-1e9, -1e9) }, size: { value: DEPTH_CELLS * DEPTH_CELL } };
+let depthCursor = 0;
+
+/** Move the depth window to the player and refresh a slice of it from the ground heights available. */
+export function updateWaterDepth(centerX: number, centerZ: number, heightAt: (x: number, z: number) => number | null): void {
+  const half = (DEPTH_CELLS * DEPTH_CELL) / 2;
+  const ox = Math.floor((centerX - half) / DEPTH_CELL) * DEPTH_CELL;
+  const oz = Math.floor((centerZ - half) / DEPTH_CELL) * DEPTH_CELL;
+  const origin = DEPTH.origin.value;
+  const shiftX = Math.round((ox - origin.x) / DEPTH_CELL);
+  const shiftZ = Math.round((oz - origin.y) / DEPTH_CELL);
+  if (Math.abs(shiftX) >= 8 || Math.abs(shiftZ) >= 8 || origin.x < -1e8) {
+    if (origin.x > -1e8 && Math.abs(shiftX) < DEPTH_CELLS && Math.abs(shiftZ) < DEPTH_CELLS) {
+      // Slide what is known along with the window; the rest fills in over the next passes.
+      const old = depthHeights.slice();
+      depthHeights.fill(DEPTH_UNKNOWN);
+      for (let j = 0; j < DEPTH_CELLS; j++) {
+        const sj = j + shiftZ;
+        if (sj < 0 || sj >= DEPTH_CELLS) continue;
+        for (let i = 0; i < DEPTH_CELLS; i++) {
+          const si = i + shiftX;
+          if (si >= 0 && si < DEPTH_CELLS) depthHeights[j * DEPTH_CELLS + i] = old[sj * DEPTH_CELLS + si];
+        }
+      }
+    } else depthHeights.fill(DEPTH_UNKNOWN);
+    origin.set(ox, oz);
+  }
+  // Refresh the cells nearest the player most, the rest round-robin.
+  const total = DEPTH_CELLS * DEPTH_CELLS;
+  for (let n = 0; n < 700; n++) {
+    const k = depthCursor;
+    depthCursor = (depthCursor + 1) % total;
+    const i = k % DEPTH_CELLS;
+    const j = (k - i) / DEPTH_CELLS;
+    const h = heightAt(origin.x + (i + 0.5) * DEPTH_CELL, origin.y + (j + 0.5) * DEPTH_CELL);
+    if (h !== null) depthHeights[k] = h;
+  }
+  depthTexture.needsUpdate = true;
+}
+
 /** Start a ring at a world position moving with a velocity; `strength` scales its height (1 for a person wading). */
 export function emitRipple(x: number, z: number, strength: number, time: number, vx = 0, vz = 0): void {
   const o = nextRing * 4;
@@ -54,24 +107,24 @@ function seaState(seed: number, windAngle: number): { waves: THREE.Vector4[]; om
   const waves: THREE.Vector4[] = [];
   const omega: number[] = [];
   for (let i = 0; i < WAVE_COUNT; i++) {
-    // Wavelengths from 6 m to 70 m, roughly log-spaced with jitter; longer waves lean into the wind.
+    // Wavelengths from 2.5 m to 28 m, roughly log-spaced with jitter; longer waves lean into the wind.
     const t = (i + rnd() * 0.8) / WAVE_COUNT;
-    const wavelength = 6 * Math.pow(70 / 6, t);
+    const wavelength = 2.5 * Math.pow(28 / 2.5, t);
     const spread = THREE.MathUtils.lerp(1.2, 0.35, t);
     const angle = windAngle + (rnd() - 0.5) * 2 * spread;
     const k = (2 * Math.PI) / wavelength;
-    // Amplitude as a fraction of wavelength, smaller for the short chop; steepness stays below breaking.
-    const amplitude = wavelength * THREE.MathUtils.lerp(0.004, 0.011, t) * (0.7 + rnd() * 0.6);
+    // Amplitude as a fraction of wavelength (a gentle sea, about 20 cm crest to trough in all).
+    const amplitude = wavelength * THREE.MathUtils.lerp(0.0025, 0.0055, t) * (0.7 + rnd() * 0.6);
     waves.push(new THREE.Vector4(Math.cos(angle), Math.sin(angle), k, amplitude));
     omega.push(Math.sqrt(9.81 * k));
   }
   const ripples: THREE.Vector4[] = [];
   const rippleOmega: number[] = [];
   for (let i = 0; i < RIPPLE_COUNT; i++) {
-    const wavelength = 0.5 + rnd() * 2.5;
+    const wavelength = 0.3 + rnd() * 1.1;
     const angle = windAngle + (rnd() - 0.5) * Math.PI * 1.6;
     const k = (2 * Math.PI) / wavelength;
-    ripples.push(new THREE.Vector4(Math.cos(angle), Math.sin(angle), k, 0.004 + rnd() * 0.01));
+    ripples.push(new THREE.Vector4(Math.cos(angle), Math.sin(angle), k, 0.0015 + rnd() * 0.003));
     rippleOmega.push(Math.sqrt(9.81 * k) * (0.8 + rnd() * 0.4));
   }
   return { waves, omega, ripples, rippleOmega };
@@ -87,6 +140,18 @@ const WAVES_GLSL = /* glsl */ `
   uniform float uRippleOmega[${RIPPLE_COUNT}];
   uniform vec4 uRings[${MAX_RIPPLES}];
   uniform vec4 uRingMotion[${MAX_RIPPLES}];
+  uniform sampler2D uDepthTex;
+  uniform vec2 uDepthOrigin;
+  uniform float uDepthSize;
+  varying float vWaterLevel;
+
+  // Water depth at a point: the surface's own level less the ground under it (deep where unknown).
+  float waterDepth(vec2 p) {
+    vec2 uv = (p - uDepthOrigin) / uDepthSize;
+    if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) return 100.0;
+    float ground = texture2D(uDepthTex, uv).r;
+    return ground < -5000.0 ? 100.0 : vWaterLevel - ground;
+  }
 
   float hash21(vec2 p) {
     p = fract(p * vec2(123.34, 456.21));
@@ -184,6 +249,9 @@ export function createWaterMaterial(color: THREE.ColorRepresentation, opacity: n
   }) as WaterMaterial;
   const sea = seaState(seed, windAngle);
   const uniforms = {
+    uDepthTex: DEPTH.tex,
+    uDepthOrigin: DEPTH.origin,
+    uDepthSize: DEPTH.size,
     uTime: { value: 0 },
     uWaveHeight: { value: waves ? 1 : 0 },
     uRipple: { value: 1 },
@@ -210,8 +278,10 @@ export function createWaterMaterial(color: THREE.ColorRepresentation, opacity: n
           vec4 wp = modelMatrix * vec4(transformed, 1.0);
           float dist = distance(wp.xyz, cameraPosition);
           vWaterDist = dist;
-          // The swell fades out where the mesh is too coarse to carry it (the far ring is flat).
-          float fade = uWaveHeight * (1.0 - smoothstep(900.0, 1400.0, dist));
+          vWaterLevel = wp.y;
+          // The swell fades out where the mesh is too coarse to carry it (the far ring is flat),
+          // and dies away in the shallows so the shoreline holds still.
+          float fade = uWaveHeight * (1.0 - smoothstep(900.0, 1400.0, dist)) * smoothstep(0.3, 5.0, waterDepth(wp.xz));
           vec3 disp; vec3 n; float crest;
           gerstner(wp.xz, fade, disp, n, crest);
           transformed += disp;
@@ -229,17 +299,20 @@ export function createWaterMaterial(color: THREE.ColorRepresentation, opacity: n
         float waterFoam;
         {
           vec3 disp; vec3 wn; float crest;
-          gerstner(vWaterXZ, 1.0, disp, wn, crest);
+          float depth = waterDepth(vWaterXZ);
+          float calm = smoothstep(0.15, 3.0, depth);
+          gerstner(vWaterXZ, calm, disp, wn, crest);
           float detail = 1.0 - smoothstep(80.0, 500.0, vWaterDist);
-          vec2 slope = rippleSlope(vWaterXZ) * detail;
+          vec2 slope = rippleSlope(vWaterXZ) * detail * (0.4 + 0.6 * calm);
           float e = 0.06;
           slope += vec2(ringHeight(vWaterXZ + vec2(e, 0.0)) - ringHeight(vWaterXZ - vec2(e, 0.0)), ringHeight(vWaterXZ + vec2(0.0, e)) - ringHeight(vWaterXZ - vec2(0.0, e))) / (2.0 * e) * detail;
           waterNormalW = normalize(vec3(wn.x - slope.x, wn.y, wn.z - slope.y));
-          // Foam where crests are steepest, and along fresh rings.
-          waterFoam = smoothstep(0.62, 0.95, crest) * 0.55 + clamp(abs(ringHeight(vWaterXZ)) * 6.0, 0.0, 0.6) * detail;
+          // Foam on the steepest crests, faintly along fresh rings, and in a lapping band at the shore.
+          float shore = (1.0 - smoothstep(0.05, 1.1, depth)) * (0.35 + 0.65 * vnoise(vWaterXZ * 0.9 + vec2(uTime * 0.25, -uTime * 0.18)));
+          waterFoam = smoothstep(0.7, 0.98, crest) * 0.35 * calm + clamp(abs(ringHeight(vWaterXZ)) * 2.0, 0.0, 0.15) * detail + shore * 0.5;
         }
-        diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.92, 0.95, 0.97), waterFoam);
-        diffuseColor.a = mix(diffuseColor.a, 1.0, waterFoam * 0.7);`,
+        diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.8, 0.86, 0.9), waterFoam);
+        diffuseColor.a = mix(diffuseColor.a, 1.0, waterFoam * 0.5);`,
       )
       .replace(
         '#include <roughnessmap_fragment>',
@@ -293,7 +366,7 @@ export class Splashes {
     geo.setAttribute('position', new THREE.BufferAttribute(this.pos, 3));
     geo.setAttribute('aAlpha', new THREE.BufferAttribute(this.alpha, 1));
     const mat = new THREE.ShaderMaterial({
-      uniforms: { uMap: { value: Splashes.sprite() }, uSize: { value: 0.35 } },
+      uniforms: { uMap: { value: Splashes.sprite() }, uSize: { value: 0.22 } },
       vertexShader: /* glsl */ `
         attribute float aAlpha;
         uniform float uSize;
@@ -309,11 +382,13 @@ export class Splashes {
         varying float vAlpha;
         void main() {
           vec4 t = texture2D(uMap, gl_PointCoord);
-          gl_FragColor = vec4(vec3(0.85, 0.92, 1.0) * t.rgb, t.a * vAlpha);
+          gl_FragColor = vec4(vec3(0.72, 0.8, 0.88), t.a * vAlpha * 0.6);
+          #include <tonemapping_fragment>
+          #include <colorspace_fragment>
         }`,
       transparent: true,
       depthWrite: false,
-      blending: THREE.AdditiveBlending,
+      blending: THREE.NormalBlending,
       fog: false,
     });
     this.points = new THREE.Points(geo, mat);

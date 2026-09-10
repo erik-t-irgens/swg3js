@@ -1,3 +1,4 @@
+import * as THREE from 'three';
 // Bridges the game's terrain to a converted planet's real SWG terrain generator.
 // Heights are sampled on the main thread from cached pole grids; grids are produced
 // ahead of time by a worker so streaming never stalls on generation.
@@ -130,6 +131,32 @@ export class SwgTerrain {
     const bw = this.sampler.blockWidth;
     if (!this.sampler.hasBlock(Math.floor(x / bw), Math.floor(z / bw))) this.syncGenerations++;
     return this.sampler.heightAt(x, z);
+  }
+
+  /**
+   * Height at a game-space point from grids already generated: the pole block when cached,
+   * else the far tile's coarse samples, else null. Never generates anything.
+   */
+  heightIfCached(gx: number, gz: number, farSize: number, farRes: number): number | null {
+    const x = this.toSwgX(gx);
+    const z = this.toSwgZ(gz);
+    const bw = this.sampler.blockWidth;
+    if (this.sampler.hasBlock(Math.floor(x / bw), Math.floor(z / bw))) return this.sampler.heightAt(x, z);
+    const tx = Math.floor(gx / farSize);
+    const tz = Math.floor(gz / farSize);
+    const grid = this.farGrids.get(SwgTerrain.farKey(tx * farSize, tz * farSize, farSize, farRes));
+    if (!grid) return null;
+    const step = farSize / farRes;
+    const n = farRes + 3;
+    // Column i is game x = gx0 + (i - 1) * step; row j likewise in z.
+    const fx = THREE.MathUtils.clamp((gx - tx * farSize) / step + 1, 0, n - 1.001);
+    const fz = THREE.MathUtils.clamp((gz - tz * farSize) / step + 1, 0, n - 1.001);
+    const i = Math.floor(fx);
+    const j = Math.floor(fz);
+    const u = fx - i;
+    const v = fz - j;
+    const h = grid.heights;
+    return (h[j * n + i] * (1 - u) + h[j * n + i + 1] * u) * (1 - v) + (h[(j + 1) * n + i] * (1 - u) + h[(j + 1) * n + i + 1] * u) * v;
   }
 
   /** Whether a game-space corner lies on a tile centre pole, which decides the ground triangulation. */
