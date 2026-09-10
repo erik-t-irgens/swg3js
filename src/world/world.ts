@@ -865,6 +865,10 @@ export class World {
     return this.particles?.describeNear(x, z, r) ?? [];
   }
 
+  emittersNear(x: number, z: number, r: number): ReturnType<ParticleEffects['describeEmitters']> {
+    return this.particles?.describeEmitters(x, z, r) ?? [];
+  }
+
   get particleStatus(): string {
     return this.particles?.status ?? 'no particle effects';
   }

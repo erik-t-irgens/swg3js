@@ -18,6 +18,7 @@ export interface WaveForm {
   interp: number;
   /** 0: the random band is picked once per particle; 1: every frame. */
   sample: number;
+  /** The editor's display range; the client does not clamp values to it. */
   min?: number;
   max?: number;
   /** [percent, value, randomMin, randomMax] rows in ascending percent. */
@@ -55,6 +56,7 @@ export interface ParticleTiming {
 }
 
 export interface EmitterDef {
+  name: string;
   timing: ParticleTiming | null;
   translationX: WaveForm;
   translationY: WaveForm;
@@ -148,8 +150,6 @@ function wave(wf: WaveForm, t: number, r: number): number {
   const rmin = lerp(a[2], b[2], f);
   const rmax = lerp(a[3], b[3], f);
   if (rmin !== 0 || rmax !== 0) v += -rmin + (wf.sample === 1 ? rand() : r) * (rmin + rmax);
-  if (wf.min !== undefined && v < wf.min) v = wf.min;
-  if (wf.max !== undefined && v > wf.max) v = wf.max;
   return v;
 }
 
@@ -611,6 +611,8 @@ export class ParticleEffects {
   private readonly pending = new Set<EffectHandle>();
   private readonly loader = new THREE.TextureLoader();
   private readonly fogColor = new THREE.Color(0.6, 0.6, 0.6);
+  private readonly textureErrors = new Set<string>();
+  private lastCamera: THREE.Camera | null = null;
   private fogDensity = 0;
   private quadCount = 0;
   private activeCount = 0;
@@ -624,7 +626,7 @@ export class ParticleEffects {
   ) {}
 
   get status(): string {
-    return `${this.instances.size} particle effects placed, ${this.activeCount} playing, ${this.quadCount} quads in ${this.batches.size} batches`;
+    return `${this.instances.size} particle effects placed, ${this.activeCount} playing, ${this.quadCount} quads in ${this.batches.size} batches${this.textureErrors.size ? `, ${this.textureErrors.size} textures failed to load: ${[...this.textureErrors].join(', ')}` : ''}`;
   }
 
   /** Place an effect; `matrix` is its world transform. Returns a handle for `remove`. */
@@ -665,7 +667,10 @@ export class ParticleEffects {
   private texture(file: string): THREE.Texture {
     let t = this.textures.get(file);
     if (!t) {
-      t = this.loader.load(this.baseUrl + file);
+      t = this.loader.load(this.baseUrl + file, undefined, undefined, () => {
+        this.textureErrors.add(file);
+        console.warn(`particle texture ${file} failed to load`);
+      });
       t.colorSpace = THREE.SRGBColorSpace;
       t.flipY = false;
       t.wrapS = THREE.ClampToEdgeWrapping;
@@ -729,6 +734,7 @@ export class ParticleEffects {
       this.fogColor.copy(fog.color);
       this.fogDensity = fog.density;
     } else this.fogDensity = 0;
+    this.lastCamera = camera;
     camera.updateMatrixWorld();
     camPos.setFromMatrixPosition(camera.matrixWorld);
     camera.matrixWorld.extractBasis(camX, camY, camZ);
@@ -868,6 +874,39 @@ export class ParticleEffects {
       (g.getAttribute('uv') as THREE.BufferAttribute).needsUpdate = true;
     }
     return n;
+  }
+
+  /**
+   * Every emitter of the effects within `r` metres, with what it draws: texture, blend, whether
+   * the texture loaded, live particles, and the first particle's size, alpha, colour and screen
+   * position, for telling an invisible effect from a missing one.
+   */
+  describeEmitters(x: number, z: number, r: number): Record<string, unknown>[] {
+    const out: Record<string, unknown>[] = [];
+    const cam = this.lastCamera;
+    for (const inst of this.instances.values()) {
+      const d = Math.hypot(inst.position.x - x, inst.position.z - z);
+      if (d > r) continue;
+      for (const e of inst.emitters) {
+        const tex = e.def.particle.quad!.texture;
+        const img = this.textures.get(tex.file!)?.image as { width?: number; height?: number } | undefined;
+        const p = e.particles[0];
+        const row: Record<string, unknown> = { effect: inst.handle.file.replace(/^particles\/|\.json$/g, ''), emitter: e.def.name, d: Math.round(d), texture: tex.file, blend: tex.blend, textureLoaded: img?.width ? `${img.width}x${img.height}` : this.textureErrors.has(tex.file!) ? 'FAILED' : 'pending', playing: inst.active, lod: Math.round(e.lodPercent * 100) / 100, particles: e.particles.length, max: e.def.maxParticles, rate: Math.round(waveMax(e.def.rate) * 10) / 10, life: Math.round(e.maxLife * 10) / 10, scale: e.effect.scale, emitterLife: e.def.emitterLife.join('..'), orientation: e.def.orientation };
+        if (p) {
+          const t = p.age / p.life;
+          const quad = e.def.particle.quad!;
+          const length = wave(quad.length, t, p.r1) * e.effect.scale;
+          rampColor(e.def.particle.color, e.def.particle.color.sample === 1 ? p.r3 : t, tmpColor);
+          row.first = { x: Math.round(p.pos.x * 10) / 10, y: Math.round(p.pos.y * 10) / 10, z: Math.round(p.pos.z * 10) / 10, age: Math.round(t * 100) / 100, halfLength: Math.round(length * 100) / 100, halfWidth: Math.round((quad.linked ? length : wave(quad.width, t, p.r2) * e.effect.scale) * 100) / 100, alpha: Math.round(wave(e.def.particle.alpha, t, p.r0) * 100) / 100, color: tmpColor.getHexString() };
+          if (cam) {
+            tmpV.copy(p.pos).project(cam);
+            (row.first as Record<string, unknown>).screen = tmpV.z < 1 ? `${Math.round((tmpV.x + 1) * 50)}%,${Math.round((1 - tmpV.y) * 50)}%` : 'behind camera';
+          }
+        }
+        out.push(row);
+      }
+    }
+    return out.sort((a, b) => (a.d as number) - (b.d as number));
   }
 
   /** Effects within `r` metres of a point, for the console. */
