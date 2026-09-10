@@ -142,6 +142,8 @@ Step 3 also accepts one planet at a time (`snapshot "$SWG" tatooine assets-priva
 | Skin, clothes, eyes, animations (walking, swimming) | `player "$SWG" assets-private --retail-only` |
 | Creature models or clips | `creatures "$SWG" assets-private --retail-only` |
 
+Two optional sources add what the client files alone do not place. `--events` on `snapshot` includes buildout areas the game only shows during an event (`planets` lists which planets have any, with the event each needs). `--core3=<path to Core3/MMOCoreORB/bin/scripts>` reads the SWGEmu server scripts: the static objects its screenplays place go into the pack, and every creature and NPC spawn point is written to the pack's `spawns.json` for later use.
+
 Commands that write a single planet's pack take the planet's folder (`assets-private/tatooine`); commands that take `all` take the parent (`assets-private`). Reconverting is always safe: each command overwrites only its own files.
 
 ## Build

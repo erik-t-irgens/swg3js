@@ -39,7 +39,9 @@
 //                                                                  --layers lists every layer, --at prints the height at one point
 //
 // Flags: --retail-only (mount only archives named in the retail manifests)
-//        --events (place buildout areas that the game only shows during an event, such as a destroyed city)
+//        --events (place buildout areas that the game only shows during an event; planets lists them)
+//        --core3=<dir> (SWGEmu's MMOCoreORB/bin/scripts: place the static objects its screenplays spawn,
+//                       and write the creature and NPC spawns to <pack>/spawns.json; or set CORE3 in the environment)
 //        --no-flip (keep left-handed coordinates)  --no-textures (skip DDS decoding)
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
@@ -65,6 +67,7 @@ import { createRequire } from 'node:module';
 const REGIONS = createRequire(import.meta.url)('./regions/regions.json');
 import { decodeTga, encodeHeightmap } from './tga.mjs';
 import { exportSky } from './sky.mjs';
+import { mobileTemplates, scanServerSpawns } from './spawns.mjs';
 import { loadEffect } from './texrender.mjs';
 import { readTemplate, stringParam } from './objtemplate.mjs';
 import { openTre, openVfs, readHeader } from './tre.mjs';
@@ -887,8 +890,17 @@ function loadPlanetObjects(vfs, planet) {
   const snapshotCount = snap.nodes.length;
   const buildout = loadBuildouts(vfs, planet, { events: flags.has('--events') });
   mergeBuildouts(snap, buildout);
+  // Server placements (SWGEmu's scripts) are a third source, when a checkout is given.
+  const core3 = options.core3 ?? process.env.CORE3;
+  let spawns = null;
+  if (core3) {
+    spawns = scanServerSpawns(core3, planet);
+    let nextId = 1 << 29;
+    const extra = spawns.objects.map((o) => ({ id: nextId++, containedBy: 0, template: o.template, cellIndex: 0, q: o.q, pos: o.pos, radius: 4, portalLayoutCrc: 0, children: [], area: `server:${o.file}` }));
+    mergeBuildouts(snap, { nodes: extra });
+  }
   const entries = flattenWithWorldTransforms(snap);
-  return { snap, entries, snapshotCount, buildout: buildout.stats };
+  return { snap, entries, snapshotCount, buildout: buildout.stats, spawns, core3 };
 }
 
 /** The creature each planet spawns (src/data/planets.ts) and the mobile template that draws it. */
@@ -1107,8 +1119,17 @@ async function snapshotPlanet(vfs, planet, outDir) {
     const radius = options.radius === 'all' ? Infinity : Number(options.radius ?? 400);
     const max = Number(options.max ?? Infinity);
     const wsPath = `snapshot/${planet}.ws`;
-    const { snap, entries, snapshotCount, buildout } = loadPlanetObjects(vfs, planet);
+    const { snap, entries, snapshotCount, buildout, spawns, core3 } = loadPlanetObjects(vfs, planet);
     console.error(`${wsPath}: ${snapshotCount} top-level objects, ${entries.length} including contained and buildouts, ${snap.templates.length} templates`);
+    if (spawns) {
+      const st = spawns.stats;
+      console.error(`server spawns (${core3}): ${st.objects} static objects placed, ${st.mobiles} creature and NPC spawns noted for spawns.json (${st.inCells + st.mobilesInCells} inside building cells skipped) from ${st.files} scripts`);
+      const names = [...new Set(spawns.mobiles.map((m) => m.name))];
+      const defs = mobileTemplates(core3, names);
+      const list = spawns.mobiles.map((m) => ({ name: m.name, x: m.pos[0], y: m.pos[1], z: m.pos[2], heading: Math.round(m.heading * 1000) / 1000, respawn: m.respawn, templates: defs.get(m.name)?.templates ?? [], label: defs.get(m.name)?.objectName ?? m.name }));
+      mkdirSync(outDir, { recursive: true });
+      writeFileSync(join(outDir, 'spawns.json'), JSON.stringify({ planet, source: 'core3', mobiles: list }));
+    }
     console.error(`buildouts: ${buildout.objects} objects in ${buildout.areas} areas${buildout.eventAreas ? `, ${buildout.eventAreas} event-only areas skipped` : ''}${buildout.computedTemplates ? `, ${buildout.computedTemplates} rows named by hashing the archives' templates (the string table lacks them)` : ''}${buildout.unknownTemplates ? `, WARNING: ${buildout.unknownTemplates} rows with unknown templates (their objects are missing)` : ''}${buildout.missingTables ? `, ${buildout.missingTables} area tables missing` : ''}`);
     let cx;
     let cz;
@@ -1287,7 +1308,8 @@ switch (cmd) {
       const { snap, entries, buildout } = loadPlanetObjects(vfs, planet);
       const centre = autoCenter(snap, entries);
       const known = GAME_PLANETS.includes(planet);
-      console.log(`${planet.padEnd(12)} ${String(snap.nodes.length).padStart(6)} objects (${buildout.objects} from buildouts), terrain ${vfs.has(`terrain/${planet}.trn`) ? 'yes' : 'no '}, centre ${centre.x.toFixed(0)},${centre.z.toFixed(0)} (${centre.why})${known ? '' : '  [not a planet in the game]'}`);
+      const events = buildout.eventList?.length ? `; event-only areas: ${buildout.eventList.map((e) => `${e.area} (${e.rows} rows, "${e.event}")`).join(', ')}` : '';
+      console.log(`${planet.padEnd(12)} ${String(snap.nodes.length).padStart(6)} objects (${buildout.objects} from buildouts), terrain ${vfs.has(`terrain/${planet}.trn`) ? 'yes' : 'no '}, centre ${centre.x.toFixed(0)},${centre.z.toFixed(0)} (${centre.why})${known ? '' : '  [not a planet in the game]'}${events}`);
     }
     break;
   }
@@ -1482,8 +1504,9 @@ switch (cmd) {
     const vfs = mount(pos[1]);
     const planet = pos[2];
     const pattern = new RegExp(pos[3], 'i');
-    const { snap, entries, buildout } = loadPlanetObjects(vfs, planet);
+    const { snap, entries, buildout, spawns } = loadPlanetObjects(vfs, planet);
     console.log(`${entries.length} objects (${buildout.objects} from ${buildout.areas} buildout areas)`);
+    if (spawns) console.log(`server spawns: ${spawns.stats.objects} static objects, ${spawns.stats.mobiles} creature and NPC spawns (${spawns.stats.inCells + spawns.stats.mobilesInCells} inside cells skipped)`);
     if (buildout.eventList?.length) {
       console.log(`event-only buildout areas (${flags.has('--events') ? 'included with --events' : 'left out; add --events to include them'}):`);
       for (const e of buildout.eventList) console.log(`  ${e.area}: ${e.rows} rows, event "${e.event}"`);
