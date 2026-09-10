@@ -229,9 +229,9 @@ function seaState(seed: number, windAngle: number): { waves: THREE.Vector4[]; om
   const waves: THREE.Vector4[] = [];
   const omega: number[] = [];
   for (let i = 0; i < WAVE_COUNT; i++) {
-    // Swells from 9 m to 45 m, roughly log-spaced with jitter; longer waves lean into the wind.
+    // Swells from 7.5 m to 38 m, roughly log-spaced with jitter; longer waves lean into the wind.
     const t = (i + rnd() * 0.8) / WAVE_COUNT;
-    const wavelength = 9 * Math.pow(45 / 9, t);
+    const wavelength = 7.5 * Math.pow(38 / 7.5, t);
     const spread = THREE.MathUtils.lerp(1.1, 0.3, t);
     const angle = windAngle + (rnd() - 0.5) * 2 * spread;
     const k = (2 * Math.PI) / wavelength;
@@ -437,9 +437,12 @@ export function createWaterMaterial(color: THREE.ColorRepresentation, opacity: n
           slope += vec2(ringHeight(vWaterXZ + vec2(e, 0.0)) - ringHeight(vWaterXZ - vec2(e, 0.0)), ringHeight(vWaterXZ + vec2(0.0, e)) - ringHeight(vWaterXZ - vec2(0.0, e))) / (2.0 * e) * detail;
           waterNormalW = normalize(vec3(wn.x - slope.x, wn.y, wn.z - slope.y));
           // Foam on the steepest crests, faintly along fresh rings, and in a narrow lapping band at the shore.
-          float toShore = shoreDistance(vWaterXZ, depth);
+          // The band runs right up to the water's edge: by distance where the slope is known, and
+          // by depth alone in the last hand's breadth, where the coarse depth grid can misjudge it.
+          float toShore = min(shoreDistance(vWaterXZ, depth), depth * 6.0);
           float lap = vnoise(vWaterXZ * 1.7 + vec2(uTime * 0.35, -uTime * 0.22)) * 0.6 + vnoise(vWaterXZ * 6.0 - vec2(uTime * 0.5, uTime * 0.4)) * 0.4;
-          float shore = (1.0 - smoothstep(0.3, 2.2, toShore)) * smoothstep(0.35, 0.75, lap) * step(0.02, depth);
+          float band = 1.0 - smoothstep(0.6, 2.4, toShore);
+          float shore = band * mix(1.0, smoothstep(0.3, 0.75, lap), smoothstep(0.0, 1.4, toShore));
           waterFoam = smoothstep(0.7, 0.98, crest) * 0.35 * calm + clamp(abs(ringHeight(vWaterXZ)) * 2.0, 0.0, 0.15) * detail + shore * 0.45;
         }
         diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.8, 0.86, 0.9), waterFoam);
