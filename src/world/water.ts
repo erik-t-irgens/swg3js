@@ -94,7 +94,11 @@ export function createWaterMaterial(color: THREE.ColorRepresentation, opacity: n
   }) as WaterMaterial;
   const uniforms = { uTime: { value: 0 }, uWaveHeight: { value: waves ? 0.45 : 0 }, uRipple: { value: 1 } };
   mat.userData = { uniforms };
-  mat.onBeforeCompile = (shader) => {
+  // Other systems (cascaded shadows, portals) assign their own compile hooks to every material
+  // in the scene; ours must survive that, so later assignments are composed in front of it.
+  let external: ((shader: THREE.WebGLProgramParametersWithUniforms, renderer: THREE.WebGLRenderer) => void) | null = null;
+  const ours = (shader: THREE.WebGLProgramParametersWithUniforms, renderer: THREE.WebGLRenderer) => {
+    external?.call(mat, shader, renderer);
     Object.assign(shader.uniforms, uniforms, { uRipples: RIPPLES });
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `#include <common>\n${WAVES}\nvarying vec2 vWaterXZ;\nvarying float vWaterDist;`)
@@ -126,7 +130,14 @@ export function createWaterMaterial(color: THREE.ColorRepresentation, opacity: n
         }`,
       );
   };
-  mat.customProgramCacheKey = () => `swg-water-${waves ? 'waves' : 'flat'}`;
+  Object.defineProperty(mat, 'onBeforeCompile', {
+    configurable: true,
+    get: () => ours,
+    set: (fn: typeof external) => {
+      external = fn;
+    },
+  });
+  mat.customProgramCacheKey = () => `swg-water-${waves ? 'waves' : 'flat'}-${external ? 'hooked' : 'plain'}`;
   registerReflective(mat);
   return mat;
 }
