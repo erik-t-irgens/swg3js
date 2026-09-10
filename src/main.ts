@@ -155,6 +155,12 @@ class App {
         console.table(list.slice(0, 60));
         return summary;
       },
+      /** Particle effects within r metres of the player: file, distance, whether playing, live particles. */
+      particles: (r = 200) => {
+        const list = this.world.particlesNear(this.player.pos.x, this.player.pos.z, r);
+        console.table(list.slice(0, 60));
+        return { status: this.world.particleStatus, total: list.length, playing: list.filter((p) => p.playing).length };
+      },
       /** Scale the sky's fog density (1 is the client's value) and report it. */
       fog: (scale?: number) => {
         if (scale !== undefined) this.world.fogScale = scale;

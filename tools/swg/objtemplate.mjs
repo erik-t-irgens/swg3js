@@ -43,7 +43,8 @@ export function stringParam(buf) {
 /**
  * Resolve an object template to mesh parts by following the DERV chain for
  * appearanceFilename (or a building's portalLayoutFilename), then unwrapping
- * .pob (exterior cell), .apt, .lod and .cmp. Returns { appearance, parts } or { skip }.
+ * .pob (exterior cell), .apt, .lod and .cmp. Returns { appearance, parts, effects? } for meshes,
+ * { appearance, particle, parts: [] } for a particle effect on its own, or { skip }.
  */
 export function resolveTemplateMesh(vfs, templatePath, cache = new Map()) {
   if (cache.has(templatePath)) return cache.get(templatePath);
@@ -100,13 +101,25 @@ export function resolveTemplateMesh(vfs, templatePath, cache = new Map()) {
   return result;
 }
 
+/**
+ * Separate an appearance's particle effects from its meshes: an effect on its own (a campfire's
+ * smoke) becomes { particle }, a mesh with effects attached (a candle with its flame) keeps them
+ * in `effects` with their transforms in the appearance's space.
+ */
+function splitParticles(appearance, parts) {
+  const meshes = parts.filter((p) => p.mesh);
+  const effects = parts.filter((p) => p.particle).map((p) => ({ particle: p.particle, transform: p.transform }));
+  if (!meshes.length && effects.length) return { appearance, particle: effects[0].particle, parts: [], effects: effects.slice(1) };
+  return effects.length ? { appearance, parts: meshes, effects } : { appearance, parts: meshes };
+}
+
 export function resolveAppearanceToMesh(vfs, rawAppearance) {
   const appearance = appearancePath(rawAppearance);
   const lower = appearance.toLowerCase();
   if (lower.endsWith('.pob')) {
     if (!vfs.has(appearance)) return { skip: `pob missing: ${appearance}` };
     try {
-      return { appearance, parts: resolveParts(vfs, appearance) };
+      return splitParticles(appearance, resolveParts(vfs, appearance));
     } catch (err) {
       return { skip: `pob failed: ${err.message}` };
     }
@@ -114,10 +127,9 @@ export function resolveAppearanceToMesh(vfs, rawAppearance) {
   // Skeletal appearances (creatures, and static things with animated parts such as the Sarlacc)
   // resolve to their .sat; the caller decides whether to bake one at its bind pose.
   if (lower.endsWith('.sat')) return vfs.has(appearance) ? { appearance, skeletal: appearance, parts: [] } : { skip: `skeletal appearance missing: ${appearance}` };
-  if (lower.endsWith('.prt')) return { skip: 'particle (.prt)' };
-  if (!/\.(apt|lod|msh|cmp)$/.test(lower)) return { skip: `appearance type ${lower.slice(lower.lastIndexOf('.'))}` };
+  if (!/\.(apt|lod|msh|cmp|prt)$/.test(lower)) return { skip: `appearance type ${lower.slice(lower.lastIndexOf('.'))}` };
   try {
-    return { appearance, parts: resolveParts(vfs, appearance) };
+    return splitParticles(appearance, resolveParts(vfs, appearance));
   } catch (err) {
     return { skip: `resolve failed: ${err.message}` };
   }

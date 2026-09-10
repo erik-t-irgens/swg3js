@@ -8,6 +8,7 @@ import type { AssetPack, Layout, LoadedModel } from './assetPack';
 import { CHUNK_SIZE } from './terrain';
 import type { Exclusion } from './props';
 import { ACTOR_LAYER, INTERIOR_LAYER, crossing } from './portalRender';
+import { mirroredTransform, type EffectHandle, type ParticleEffects } from './particles';
 
 export const REGION = 256;
 
@@ -50,6 +51,8 @@ interface LoadedTier {
   meshes: THREE.Object3D[];
   buildings: Building[];
   objects: PlacedObject[];
+  /** Particle effects placed with this tier: effects of their own, and those attached to its models. */
+  effects: EffectHandle[];
 }
 
 interface Region {
@@ -94,6 +97,7 @@ export class LayoutStreamer {
     private readonly physics: Physics,
     private readonly pack: AssetPack,
     layout: Layout,
+    private readonly effects: ParticleEffects | null = null,
   ) {
     for (const o of layout.objects) {
       // Snapshot space is mirrored in X and centred on the layout centre.
@@ -207,6 +211,8 @@ export class LayoutStreamer {
       const ids = [...new Set(objects.map((o) => o.model))];
       const models = new Map<string, LoadedModel>();
       for (const id of ids) {
+        // Particle effects have no mesh to load; the effect player fetches their descriptions.
+        if (this.pack.find(id)?.particle) continue;
         try {
           models.set(id, await this.pack.model(id));
         } catch (err) {
@@ -236,7 +242,22 @@ export class LayoutStreamer {
     }
     const meshes: THREE.Object3D[] = [];
     const buildings: Building[] = [];
+    const effects: EffectHandle[] = [];
+    const localFx = new THREE.Matrix4();
+    if (this.effects) {
+      for (const o of objects) {
+        const def = this.pack.find(o.model);
+        if (def?.particle) effects.push(this.effects.place(def.file, tmpM.compose(tmpV.set(o.x, o.y, o.z), o.q, ONE), o.contained));
+      }
+    }
     for (const [model, list] of byModel) {
+      // A model's attached effects (lamps, fountains, chimneys) play at every placed copy.
+      if (this.effects && model.def.effects?.length) {
+        for (const p of list) {
+          tmpM.compose(tmpV.set(p.x, p.y, p.z), p.q, ONE);
+          for (const fx of model.def.effects) effects.push(this.effects.place(fx.file, localFx.multiplyMatrices(tmpM, mirroredTransform(fx.transform, localFx)), p.contained || (fx.cell ?? 0) > 0));
+        }
+      }
       const isBuilding = model.interiorBoxes.length > 0;
       const built: (Building | null)[] = list.map((p) => {
         if (!isBuilding || p.contained) return null;
@@ -285,7 +306,7 @@ export class LayoutStreamer {
     }
     this.loadedModels += byModel.size;
     this.loadedInstances += objects.length;
-    return { meshes, buildings, objects };
+    return { meshes, buildings, objects, effects };
   }
 
   private unloadTier(region: Region, tier: number): void {
@@ -297,6 +318,7 @@ export class LayoutStreamer {
     }
     for (const b of t.buildings) this.buildings.delete(b);
     for (const o of t.objects) this.removeColliders(o);
+    if (this.effects) for (const h of t.effects) this.effects.remove(h);
     this.loadedInstances -= t.objects.length;
     region.tiers[tier] = null;
   }

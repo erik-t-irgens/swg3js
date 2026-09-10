@@ -65,6 +65,7 @@ import { parseSnapshot, flattenWithWorldTransforms } from './ws.mjs';
 import { loadBuildouts, mergeBuildouts } from './buildout.mjs';
 import { R, composeMeshes, mergeSkeletons, parseAnimation, parseLat, parseLmg, parseMgn, parseSat, parseSkeleton, poseAtFrame, readIff, skinData, skinnedPrimitives } from './skeletal.mjs';
 import { resolveTemplateMesh, resolveTemplateString } from './objtemplate.mjs';
+import { exportParticle } from './particle.mjs';
 import { encodePng } from './png.mjs';
 import { shaderTextures } from './sht.mjs';
 import { bakeShader, describeShader, describeVariables, loadShader, parseBlueprint, preparedShaders, renderBlueprint, renderContext, shaderNeedsBake } from './texrender.mjs';
@@ -238,8 +239,15 @@ function loadAppearanceMesh(vfs, appearancePath) {
   const parts = resolveParts(vfs, appearancePath);
   const merged = { version: '', groups: [], hardpoints: [], bounds: null, warnings: [] };
   const cells = new Map();
+  const effects = [];
   let portalGeometry = null;
   for (const part of parts) {
+    if (part.particle) {
+      // A particle effect among the parts (a lamp's flame, a fountain's spray): kept with its
+      // transform for the runtime to play at every placed copy of the model.
+      effects.push({ particle: part.particle, transform: part.transform ?? null, ...(part.cell !== undefined ? { cell: part.cell } : {}) });
+      continue;
+    }
     const mesh = parseMesh(parseIff(vfs.read(part.mesh)));
     if (part.transform) transformMesh(mesh, part.transform);
     merged.groups.push(...mesh.groups);
@@ -253,14 +261,16 @@ function loadAppearanceMesh(vfs, appearancePath) {
       portalGeometry ??= part.portalGeometry ?? null;
     }
   }
+  if (!merged.groups.length) throw new Error(`${appearancePath}: no mesh parts (${effects.length} particle effects only)`);
   if (!merged.bounds) merged.bounds = boundsFromPositions(merged);
   const cellList = [...cells.values()].sort((a, b) => a.index - b.index);
   for (const c of cellList) c.bounds = boundsFromPositions(c);
-  return { mesh: merged, meshPath: parts.length === 1 ? parts[0].mesh : appearancePath, partCount: parts.length, cells: cellList.length > 1 ? cellList : null, portalGeometry };
+  const meshParts = parts.length - effects.length;
+  return { mesh: merged, meshPath: meshParts === 1 ? parts.find((p) => p.mesh).mesh : appearancePath, partCount: meshParts, cells: cellList.length > 1 ? cellList : null, portalGeometry, effects };
 }
 
 function convertOne(vfs, appearancePath, outFile) {
-  const { mesh, meshPath, partCount, cells, portalGeometry } = loadAppearanceMesh(vfs, appearancePath);
+  const { mesh, meshPath, partCount, cells, portalGeometry, effects } = loadAppearanceMesh(vfs, appearancePath);
   const textures = new Map();
   for (const g of mesh.groups) {
     const t = textureFor(vfs, g.shader);
@@ -288,7 +298,60 @@ function convertOne(vfs, appearancePath, outFile) {
     : undefined;
   // Portal polygons in model space (X flipped with the meshes) so the game can tell which cell the player is in.
   const portals = portalGeometry ? portalGeometry.map((p) => ({ v: p.verts.map(([x, y, z]) => [flipX ? -x : x, y, z]), i: p.indices })) : undefined;
-  return { meshPath, mesh, flipX, tris, shaders, textured: textures.size, warnings: mesh.warnings, partCount, cells: cellInfo, portals };
+  return { meshPath, mesh, flipX, tris, shaders, textured: textures.size, warnings: mesh.warnings, partCount, cells: cellInfo, portals, effects };
+}
+
+// Particle effects: converted once per .prt into <out-dir>/particles/, textures shared.
+const particleTextures = new Map();
+const particleEffects = new Map();
+
+/** The first fixed-function pass of a shader's effect, for its blend mode. */
+function passFor(vfs, shaderPath) {
+  try {
+    const { effect } = shaderTextures(parseIff(vfs.read(shaderPath)));
+    const eff = effect ? loadEffect(vfs, effect.replace(/\\/g, '/')) : null;
+    return eff?.passes?.[0] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Convert a particle effect into the pack (cached per file); returns its manifest entry or { failed }. */
+function convertParticle(vfs, prtPath, outDir) {
+  const key = prtPath.toLowerCase();
+  let entry = particleEffects.get(key);
+  if (entry) return entry;
+  try {
+    entry = exportParticle(vfs, prtPath, outDir, {
+      textureFor: (shader) => textureFor(vfs, shader),
+      passFor: (shader) => passFor(vfs, shader),
+      textures: particleTextures,
+      write: (file, bytes) => {
+        mkdirSync(dirname(file), { recursive: true });
+        writeFileSync(file, bytes);
+      },
+      log: (m) => console.error(m),
+    });
+    console.error(`  ${entry.id}: particle effect, ${entry.quads} quad emitter(s)${entry.meshes ? `, ${entry.meshes} mesh emitter(s) (not drawn yet)` : ''}${entry.missingTextures.length ? `, textures missing: ${entry.missingTextures.join(', ')}` : ''}`);
+  } catch (err) {
+    entry = { failed: err.message };
+  }
+  particleEffects.set(key, entry);
+  return entry;
+}
+
+/** Attached effects of a converted model, as the manifest stores them (transforms in the model's unflipped space). */
+function attachedEffects(vfs, effects, outDir) {
+  const out = [];
+  for (const e of effects ?? []) {
+    const p = convertParticle(vfs, e.particle, outDir);
+    if (p.failed) {
+      console.error(`  attached effect ${e.particle} skipped: ${p.failed}`);
+      continue;
+    }
+    out.push({ file: p.file, id: p.id, ...(e.transform ? { transform: e.transform.map((v) => Math.round(v * 10000) / 10000) } : {}), ...(e.cell !== undefined ? { cell: e.cell } : {}) });
+  }
+  return out;
 }
 
 /**
@@ -1224,7 +1287,19 @@ async function snapshotPlanet(vfs, planet, outDir) {
         objects.push({ template, model: sid, x: e.world.pos[0], y: e.world.pos[1], z: e.world.pos[2], q: e.world.q, radius: n.radius, contained: e.parentId !== 0 });
         continue;
       }
-      const single = r.parts.length === 1 && !r.parts[0].transform;
+      if (r.particle) {
+        // A particle effect on its own (smoke, sparks, a campfire's flames): the pack keeps its
+        // description and textures, and the game plays it where the snapshot places it.
+        const p = convertParticle(vfs, r.particle, outDir);
+        if (p.failed) {
+          skip(`particle convert failed: ${p.failed}`, template);
+          continue;
+        }
+        if (!models.has(p.id)) models.set(p.id, { ...p, source: r.source ?? r.appearance });
+        objects.push({ template, model: p.id, x: e.world.pos[0], y: e.world.pos[1], z: e.world.pos[2], q: e.world.q, radius: Math.max(n.radius, p.bounds.max[0]), contained: e.parentId !== 0 });
+        continue;
+      }
+      const single = r.parts.length === 1 && !r.parts[0].transform && !r.effects?.length;
       const id = familyOf(single ? r.parts[0].mesh : r.appearance);
       if (!models.has(id)) {
         if (models.size >= max) break;
@@ -1232,8 +1307,9 @@ async function snapshotPlanet(vfs, planet, outDir) {
           const conv = convertOne(vfs, single ? r.parts[0].mesh : r.appearance, join(outDir, `${id}.glb`));
           const b = conv.mesh.bounds ?? { min: [0, 0, 0], max: [0, 0, 0] };
           const bounds = conv.flipX ? { min: [-b.max[0], b.min[1], b.min[2]], max: [-b.min[0], b.max[1], b.max[2]] } : b;
-          models.set(id, { id, source: r.source ?? r.appearance, file: `${id}.glb`, bounds, triangles: conv.tris, textured: conv.textured, shaders: conv.shaders.length, parts: conv.partCount, ...(conv.cells ? { cells: conv.cells, portals: conv.portals ?? [] } : {}) });
-          console.error(`  ${id}: ${conv.tris} tris, ${conv.textured}/${conv.shaders.length} textured${conv.partCount > 1 ? `, ${conv.partCount} parts` : ''}`);
+          const effects = attachedEffects(vfs, conv.effects, outDir);
+          models.set(id, { id, source: r.source ?? r.appearance, file: `${id}.glb`, bounds, triangles: conv.tris, textured: conv.textured, shaders: conv.shaders.length, parts: conv.partCount, ...(conv.cells ? { cells: conv.cells, portals: conv.portals ?? [] } : {}), ...(effects.length ? { effects } : {}) });
+          console.error(`  ${id}: ${conv.tris} tris, ${conv.textured}/${conv.shaders.length} textured${conv.partCount > 1 ? `, ${conv.partCount} parts` : ''}${effects.length ? `, ${effects.length} attached particle effect(s)` : ''}`);
         } catch (err) {
           models.set(id, { failed: err.message });
         }
@@ -1260,7 +1336,10 @@ async function snapshotPlanet(vfs, planet, outDir) {
     writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
     console.log(`flora: ${flora.models} models for ${flora.families} families${flora.missing ? `, ${flora.missing} appearances missing` : ''}${flora.particles ? `, ${flora.particles} particle effects skipped` : ''}`);
     writePois(vfs, planet, snap, entries, cx, cz, outDir);
+    const fx = manifest.categories.layout.filter((m) => m.particle);
+    const attached = manifest.categories.layout.reduce((n, m) => n + (m.effects?.length ?? 0), 0);
     console.log(`layout: ${objects.length} objects, ${manifest.categories.layout.length} models -> ${join(outDir, 'layout.json')}`);
+    if (fx.length || attached) console.log(`particles: ${fx.length} effects placed on their own (${objects.filter((o) => fx.some((m) => m.id === o.model)).length} placements), ${attached} attached to models, ${particleTextures.size} textures`);
     const withCells = manifest.categories.layout.filter((m) => m.cells);
     console.log(`buildings: ${withCells.length} models with cells, ${withCells.filter((m) => m.portals && m.portals.length).length} with portals`);
     console.log(`terrain: ${terrainFile ?? 'not found'}, ${objects.filter((o) => o.layer).length} objects with terrain modification layers (${new Set(objects.map((o) => o.layer).filter(Boolean)).size} files)`);
@@ -1611,8 +1690,18 @@ switch (cmd) {
         console.log(`  SKIPPED: ${r.skip}`);
         continue;
       }
-      const appearance = r.parts.length === 1 && !r.parts[0].transform ? r.parts[0].mesh : r.appearance;
-      console.log(`  appearance: ${r.appearance ?? '-'}${r.source ? ` (via ${r.source})` : ''}, ${r.parts.length} part(s)`);
+      if (r.particle) {
+        console.log(`  appearance: ${r.appearance}${r.source ? ` (via ${r.source})` : ''}: a particle effect`);
+        try {
+          const p = exportParticle(vfs, r.particle, tmpDir, { textureFor: (sh) => textureFor(vfs, sh), passFor: (sh) => passFor(vfs, sh), write: () => {}, log: (m) => console.log(m) });
+          console.log(`  converts: ${p.quads} quad emitter(s), ${p.meshes} mesh emitter(s), reach ${p.bounds.max[0]} m${p.missingTextures.length ? `, textures missing: ${p.missingTextures.join(', ')}` : ''}`);
+        } catch (err) {
+          console.log(`  CONVERSION FAILED: ${err.message}`);
+        }
+        continue;
+      }
+      const appearance = r.parts.length === 1 && !r.parts[0].transform && !r.effects?.length ? r.parts[0].mesh : r.appearance;
+      console.log(`  appearance: ${r.appearance ?? '-'}${r.source ? ` (via ${r.source})` : ''}, ${r.parts.length} part(s)${r.effects?.length ? `, ${r.effects.length} attached particle effect(s)` : ''}`);
       const st = vfs.stat(appearance);
       console.log(`  ${appearance}: ${st ? `${st.size} bytes from ${basename(st.archive)}` : 'NOT IN ARCHIVES'}`);
       try {
@@ -1706,7 +1795,7 @@ switch (cmd) {
         const have = placed.get(template) ?? 0;
         if (have >= h.count) continue;
         const r = resolveTemplateMesh(vfs, template, cache);
-        const reason = r.skip ? r.skip : r.skeletal ? (/^object\/(mobile|creature)\//i.test(template) ? 'creature or NPC (server spawns it)' : 'skeletal prop: reconvert to bake it') : 'converted, but the pack lacks it (radius filter, or an older conversion)';
+        const reason = r.skip ? r.skip : r.skeletal ? (/^object\/(mobile|creature)\//i.test(template) ? 'creature or NPC (server spawns it)' : 'skeletal prop: reconvert to bake it') : r.particle ? 'particle effect: reconvert to add it' : 'converted, but the pack lacks it (radius filter, or an older conversion)';
         missing.push({ template, want: h.count, have, reason, at: h.example.world?.pos });
         missingObjects += h.count - have;
       }

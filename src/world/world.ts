@@ -15,6 +15,7 @@ import { Group, groups, RAPIER as R } from '../core/physics';
 import { CHUNK_RES, CHUNK_SIZE, Terrain } from './terrain';
 import { SwgTerrain, type BuildingLayerSource } from './swgTerrain';
 import { LayoutStreamer, type Building, type CellState } from './layoutStream';
+import { ParticleEffects } from './particles';
 import { CSM } from 'three/examples/jsm/csm/CSM.js';
 import { INTERIOR_LAYER, markActor, type PortalRenderer } from './portalRender';
 import { Speeder } from '../vehicles/speeder';
@@ -144,6 +145,9 @@ export class World {
   private readonly structures: THREE.Object3D[] = [];
   private structureColliders: RAPIER.Collider[] = [];
   private layoutStream: LayoutStreamer | null = null;
+  /** Particle effects from the pack (campfires, smoke, sparks), placed by the streamer. */
+  private particles: ParticleEffects | null = null;
+  private camera: THREE.PerspectiveCamera | null = null;
   /** The building cell the player is in, or null outside. */
   cellState: CellState | null = null;
   private readonly prevPlayerPos = new THREE.Vector3(Number.NaN, 0, 0);
@@ -349,7 +353,10 @@ export class World {
     // Snapshot objects stream in around the player from here on (see LayoutStreamer).
     if (layout) {
       this.layoutStream?.dispose();
-      this.layoutStream = new LayoutStreamer(this.scene, this.physics, pack, layout);
+      this.particles?.dispose();
+      this.particles = new ParticleEffects(this.scene, pack.url(''));
+      this.particles.heightAt = (x, z) => this.terrain.heightAt(x, z);
+      this.layoutStream = new LayoutStreamer(this.scene, this.physics, pack, layout, this.particles);
       if (!this.terrain.swg) {
         for (const p of this.layoutStream.objects) if (p.radius >= 2 && !p.contained) this.terrain.addAnchor({ x: p.x, z: p.z, y: p.y, r: p.radius });
       }
@@ -414,6 +421,8 @@ export class World {
     this.structures.length = 0;
     this.layoutStream?.dispose();
     this.layoutStream = null;
+    this.particles?.dispose();
+    this.particles = null;
     this.flora = null;
     this.groundTextures?.dispose();
     this.groundTextures = null;
@@ -750,6 +759,7 @@ export class World {
    */
   attachCamera(camera: THREE.PerspectiveCamera, shadows: boolean, portals: PortalRenderer): void {
     this.portals = portals;
+    this.camera = camera;
     // The sun, sky light and their shadows stay on the world layer: rooms are lit by their own
     // lights, as in the client, and never by sunlight through the walls.
     if (!shadows || this.csm) return;
@@ -849,6 +859,14 @@ export class World {
   /** Placed objects around a point with their streaming state, for the console. */
   objectsNear(x: number, z: number, r: number): ReturnType<LayoutStreamer['describeNear']> {
     return this.layoutStream?.describeNear(x, z, r) ?? [];
+  }
+
+  particlesNear(x: number, z: number, r: number): ReturnType<ParticleEffects['describeNear']> {
+    return this.particles?.describeNear(x, z, r) ?? [];
+  }
+
+  get particleStatus(): string {
+    return this.particles?.status ?? 'no particle effects';
   }
 
   get layoutCenter(): { x: number; z: number } | null {
@@ -998,8 +1016,9 @@ export class World {
     this.streamFar(playerPos, 1);
     if (this.layoutStream) {
       this.layoutStream.update(playerPos);
-      this.packStatus = `${this.packBase}; ${this.layoutStream.status}`;
+      this.packStatus = `${this.packBase}; ${this.layoutStream.status}${this.particles ? `; ${this.particles.status}` : ''}`;
     }
+    if (this.particles && this.camera) this.particles.update(dt, this.camera, this.scene.fog instanceof THREE.FogExp2 ? this.scene.fog : null);
     this.updateInterior(playerPos);
     this.day.update(dt, fastTime);
     if (this.swgSky) {

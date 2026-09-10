@@ -1,6 +1,7 @@
 // Resolve appearance files to static mesh parts:
 //   .msh is a mesh; .apt points at a child; .lod lists detail levels (take the highest);
-//   .cmp (component appearance) is a list of parts, each a child appearance with a 3x4 transform.
+//   .cmp (component appearance) is a list of parts, each a child appearance with a 3x4 transform;
+//   .prt is a particle effect, returned as a part of its own ({ particle }) for the caller to place.
 // Paths inside these files are relative to appearance/ unless already prefixed.
 import { childrenOf, find, findAll, isForm, readCString, parseIff } from './iff.mjs';
 import { parsePob } from './pob.mjs';
@@ -54,6 +55,8 @@ export function resolveParts(vfs, rawPath, depth = 0) {
   if (depth > 8) throw new Error(`Appearance chain too deep at ${path}`);
   if (lower.endsWith('.msh')) return [{ mesh: path, transform: null }];
   if (!vfs.has(path)) throw new Error(`Not in archives: ${path}`);
+  // Particle effects are parts too (a candle is a mesh plus a flame); callers place them.
+  if (lower.endsWith('.prt')) return [{ particle: path, transform: null }];
   const root = parseIff(vfs.read(path));
   if (lower.endsWith('.apt')) {
     const name = find(root, 'NAME');
@@ -115,7 +118,7 @@ export function resolveParts(vfs, rawPath, depth = 0) {
         transform = yawPitchRollTransform(pos, d.readFloatLE(next + 12) * deg, d.readFloatLE(next + 16) * deg, d.readFloatLE(next + 20) * deg);
       }
       for (const sub of resolveParts(vfs, name, depth + 1)) {
-        out.push({ mesh: sub.mesh, transform: sub.transform ? composeTransform(transform, sub.transform) : transform });
+        out.push({ ...(sub.particle ? { particle: sub.particle } : { mesh: sub.mesh }), transform: sub.transform ? composeTransform(transform, sub.transform) : transform });
       }
     }
     if (!out.length) throw new Error(`${path}: component appearance without parts`);

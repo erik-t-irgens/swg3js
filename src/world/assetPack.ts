@@ -28,6 +28,10 @@ export interface PackModelDef {
   portals?: { v: number[][]; i: number[] }[];
   /** Flora models: the appearance file the terrain's flora families name (e.g. appearance/tree_x.apt). */
   appearance?: string;
+  /** A particle effect (particles/<id>.json) rather than a mesh; placed like any other object. */
+  particle?: boolean;
+  /** Particle effects attached to this model (a lamp's flame), transforms in the converter's unflipped model space. */
+  effects?: { file: string; id: string; transform?: number[]; cell?: number }[];
 }
 
 export interface PackManifest {
