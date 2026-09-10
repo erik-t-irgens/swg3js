@@ -116,6 +116,12 @@ export function openJkaBase(dir) {
       return a.read(name);
     },
     where: (name) => find(name)?.file ?? null,
+    /** The archive a file is read from (later archives win). */
+    archiveOf: (name) => {
+      const a = find(name);
+      if (!a) throw new Error(`${name}: not in any archive under ${base}`);
+      return a;
+    },
     close: () => archives.forEach((a) => a.close()),
   };
 }
@@ -274,8 +280,10 @@ export const BONE_MAP = [
 
 /** World rotation and position of every JKA bone at a frame (or the base pose when frame < 0), in glTF space. */
 function jkaWorld(gla, frame) {
-  const out = [];
-  for (let b = 0; b < gla.numBones; b++) {
+  const out = new Array(gla.numBones);
+  // Bones are not stored parents-first, so resolve each one's chain on demand.
+  const world = (b) => {
+    if (out[b]) return out[b];
     const bone = gla.bones[b];
     let q;
     let t;
@@ -286,8 +294,8 @@ function jkaWorld(gla, frame) {
     } else {
       const local = gla.boneAt(frame, b);
       const lq = qnorm(local.q);
-      if (bone.parent >= 0) {
-        const p = out[bone.parent];
+      if (bone.parent >= 0 && bone.parent !== b) {
+        const p = world(bone.parent);
         q = qnorm(qmul(p.q, lq));
         const r = qrot(p.q, local.t);
         t = [p.t[0] + r[0], p.t[1] + r[1], p.t[2] + r[2]];
@@ -296,21 +304,27 @@ function jkaWorld(gla, frame) {
         t = local.t;
       }
     }
-    out.push({ q, t });
-  }
+    out[b] = { q, t };
+    return out[b];
+  };
+  for (let b = 0; b < gla.numBones; b++) world(b);
   return out.map((w) => ({ q: toGltfQ(w.q), t: toGltfV(w.t) }));
 }
 
 /** World rotation and position of every SWG joint in its bind pose from the skin's local joints. */
 function swgBindWorld(joints) {
-  const out = [];
-  joints.forEach((j, i) => {
-    if (j.parent >= 0) {
-      const p = out[j.parent];
+  const out = new Array(joints.length);
+  const world = (i) => {
+    if (out[i]) return out[i];
+    const j = joints[i];
+    if (j.parent >= 0 && j.parent !== i) {
+      const p = world(j.parent);
       const r = qrot(p.q, j.translation);
-      out.push({ q: qnorm(qmul(p.q, j.rotation)), t: [p.t[0] + r[0], p.t[1] + r[1], p.t[2] + r[2]] });
-    } else out.push({ q: qnorm(j.rotation), t: [...j.translation] });
-  });
+      out[i] = { q: qnorm(qmul(p.q, j.rotation)), t: [p.t[0] + r[0], p.t[1] + r[1], p.t[2] + r[2]] };
+    } else out[i] = { q: qnorm(j.rotation), t: [...j.translation] };
+    return out[i];
+  };
+  joints.forEach((_, i) => world(i));
   return out;
 }
 
@@ -333,7 +347,13 @@ export function planRetarget(gla, joints, map = BONE_MAP) {
   const missing = [];
   for (const m of map) {
     const j = jkaIndex.get(m.jka.toLowerCase());
-    const s = findSwg(m.swg);
+    let s = findSwg(m.swg);
+    if (s < 0 && m.rootMotion) {
+      // No joint called pelvis or hips: the hips are whatever both thighs hang from.
+      const thighs = map.filter((x) => /femur/i.test(x.jka)).map((x) => findSwg(x.swg)).filter((i) => i >= 0);
+      const parents = [...new Set(thighs.map((i) => joints[i].parent))];
+      if (parents.length === 1 && parents[0] >= 0) s = parents[0];
+    }
     if (j === undefined || s < 0) {
       missing.push(`${m.jka} -> ${j === undefined ? 'no such JKA bone' : 'no SWG joint matched'}`);
       continue;
@@ -445,12 +465,18 @@ export function importJkaClips(jkaDir, joints, wanted = defaultJkaClips(), { log
     const cfgPath = 'models/players/_humanoid/animation.cfg';
     if (!base.has(glaPath)) throw new Error(`${glaPath} is not in the archives under ${base.base}`);
     if (!base.has(cfgPath)) throw new Error(`${cfgPath} is not in the archives under ${base.base}`);
-    const gla = parseGla(base.read(glaPath));
-    const cfg = parseAnimationCfg(base.read(cfgPath).toString('latin1'));
-    log(`${glaPath} (${base.where(glaPath)}): ${gla.numBones} bones, ${gla.numFrames} frames; animation.cfg: ${cfg.size} animations`);
+    // A mod may replace the skeleton file; its frame numbers only make sense with the
+    // animation.cfg shipped beside it, so read both from the same archive.
+    const glaFrom = base.where(glaPath);
+    const source = base.archiveOf(glaPath);
+    const cfgFrom = source.has(cfgPath) ? source.file : base.where(cfgPath);
+    const gla = parseGla(source.read(glaPath));
+    const cfg = parseAnimationCfg((source.has(cfgPath) ? source.read(cfgPath) : base.read(cfgPath)).toString('latin1'));
+    log(`${glaPath} (${glaFrom}): ${gla.numBones} bones, ${gla.numFrames} frames; ${cfgPath} (${cfgFrom}): ${cfg.size} animations`);
+    if (cfgFrom !== glaFrom) log(`WARNING: the skeleton and its animation.cfg come from different archives; frame ranges may not match`);
     const plan = planRetarget(gla, joints);
     log(`retarget: ${plan.report.matched.length} bones matched (${plan.report.matched.join(', ')}); scale ${plan.unitScale.toFixed(4)} m per unit`);
-    if (plan.report.missing.length) log(`retarget: unmatched: ${plan.report.missing.join('; ')}`);
+    if (plan.report.missing.length) log(`retarget: unmatched: ${plan.report.missing.join('; ')}; the SWG joints are ${joints.map((j) => j.name).join(', ')}`);
     log(`retarget: rest-direction differences: ${plan.report.angles.map((a) => `${a.bone} ${a.degrees}°`).join(', ')}`);
     const clips = [];
     const missing = [];

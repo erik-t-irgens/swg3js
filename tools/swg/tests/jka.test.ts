@@ -38,14 +38,18 @@ function buildGla(bones: Bone[], frames: { q: Q; t: number[] }[][]): Buffer {
   const numBones = bones.length;
   // world base pose from locals
   const world: { q: Q; t: number[] }[] = [];
-  bones.forEach((b, i) => {
+  const at = (i: number): { q: Q; t: number[] } => {
+    if (world[i]) return world[i];
+    const b = bones[i];
     if (b.parent < 0) world[i] = { q: b.local.q, t: b.local.t };
     else {
-      const p = world[b.parent];
+      const p = at(b.parent);
       const r = qrot(p.q, b.local.t);
       world[i] = { q: qmul(p.q, b.local.q), t: [p.t[0] + r[0], p.t[1] + r[1], p.t[2] + r[2]] };
     }
-  });
+    return world[i];
+  };
+  bones.forEach((_, i) => at(i));
   const skelParts: Buffer[] = [];
   const offsets: number[] = [];
   let skelSize = numBones * 4;
@@ -235,6 +239,24 @@ assert.ok(angleBetween(world[14].q, I) < 1e-6);
 // the leg, untouched in JKA, stays hanging down
 const thighDir = [world[12].t[0] - world[11].t[0], world[12].t[1] - world[11].t[1], world[12].t[2] - world[11].t[2]];
 assert.ok(thighDir[1] < -0.44, `thigh should still point down, got ${thighDir}`);
+
+// --- hips found as the thighs' shared parent when no joint is called pelvis; bones in any order ---
+{
+  const renamed = swgJoints.map((j) => (j.name === 'pelvis' ? { ...j, name: 'hipsocket' } : j));
+  const p2 = planRetarget(gla, renamed);
+  assert.ok(p2.report.matched.includes('pelvis -> hipsocket'), p2.report.matched.join(', '));
+  // a JKA file that lists a child before its parent
+  const shuffled: Bone[] = [
+    { name: 'pelvis', parent: 1, local: { q: I, t: [0, 0, 40] } },
+    { name: 'model_root', parent: -1, local: { q: I, t: [0, 0, 0] } },
+    { name: 'lower_lumbar', parent: 0, local: { q: I, t: [0, 0, 6] } },
+  ];
+  const g2 = parseGla(buildGla(shuffled, [shuffled.map((b) => b.local)]));
+  const p3 = planRetarget(g2, swgJoints);
+  const c2 = retargetClip(g2, { name: 'X', first: 0, count: 1, reverse: false, loop: -1, fps: 20 }, swgJoints, p3);
+  assert.equal(c2.frames, 1);
+  assert.ok(Math.abs(p3.unitScale - 1 / 40) < 1e-9);
+}
 
 // --- the same through a pk3 base folder ---------------------------------------------------------
 const tmpDir = mkdtempSync(join(tmpdir(), "jka-"));
