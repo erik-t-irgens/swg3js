@@ -81,6 +81,8 @@ export class LayoutStreamer {
   private readonly colliders = new Map<PlacedObject, R.Collider[]>();
   private loads = 0;
   private readonly failed = new Set<string>();
+  /** The widest object's radius, which widens the region sweep for colliders. */
+  private largestRadius = 0;
   private lastColliderX = Number.NaN;
   private lastColliderZ = Number.NaN;
   private disposed = false;
@@ -110,6 +112,7 @@ export class LayoutStreamer {
       }
       region.objects[p.tier].push(p);
       if (p.radius >= 1 && !p.contained) this.addExclusion({ x: gx, z: gz, r: p.radius + 2 });
+      if (!p.contained) this.largestRadius = Math.max(this.largestRadius, Math.min(p.radius, 600));
     }
   }
 
@@ -285,13 +288,16 @@ export class LayoutStreamer {
 
   /** Exact collision for the larger objects near the player; created and dropped as they move. */
   private updateColliders(px: number, pz: number): void {
+    // Distances count from an object's edge, not its centre: a palace is wider than the range,
+    // and its collision must stay while the player walks its far wings.
     for (const [o] of this.colliders) {
-      if (Math.hypot(o.x - px, o.z - pz) > COLLIDER_RANGE * UNLOAD_SLACK) this.removeColliders(o);
+      if (Math.hypot(o.x - px, o.z - pz) - o.radius > COLLIDER_RANGE * UNLOAD_SLACK) this.removeColliders(o);
     }
-    const rx0 = Math.floor((px - COLLIDER_RANGE) / REGION);
-    const rx1 = Math.floor((px + COLLIDER_RANGE) / REGION);
-    const rz0 = Math.floor((pz - COLLIDER_RANGE) / REGION);
-    const rz1 = Math.floor((pz + COLLIDER_RANGE) / REGION);
+    const reach = COLLIDER_RANGE + this.largestRadius;
+    const rx0 = Math.floor((px - reach) / REGION);
+    const rx1 = Math.floor((px + reach) / REGION);
+    const rz0 = Math.floor((pz - reach) / REGION);
+    const rz1 = Math.floor((pz + reach) / REGION);
     for (let rz = rz0; rz <= rz1; rz++) {
       for (let rx = rx0; rx <= rx1; rx++) {
         const region = this.regions.get(`${rx},${rz}`);
@@ -300,7 +306,7 @@ export class LayoutStreamer {
           if (!t || t === 'loading') continue;
           for (const o of t.objects) {
             if (o.contained || o.radius < COLLIDER_MIN_RADIUS || this.colliders.has(o)) continue;
-            if (Math.hypot(o.x - px, o.z - pz) > COLLIDER_RANGE) continue;
+            if (Math.hypot(o.x - px, o.z - pz) - o.radius > COLLIDER_RANGE) continue;
             this.addColliders(o);
           }
         }
@@ -314,9 +320,10 @@ export class LayoutStreamer {
     const cols: R.Collider[] = [];
     for (const prim of model.primitives) {
       const posAttr = prim.geometry.getAttribute('position');
+      if (!posAttr || posAttr.count < 3) continue;
       const idx = prim.geometry.getIndex();
-      if (!posAttr || !idx) continue;
-      const desc = R.ColliderDesc.trimesh(new Float32Array(posAttr.array as ArrayLike<number>), new Uint32Array(idx.array as ArrayLike<number>))
+      const indices = idx ? new Uint32Array(idx.array as ArrayLike<number>) : Uint32Array.from({ length: posAttr.count - (posAttr.count % 3) }, (_, i) => i);
+      const desc = R.ColliderDesc.trimesh(new Float32Array(posAttr.array as ArrayLike<number>), indices)
         .setTranslation(o.x, o.y, o.z)
         .setRotation({ x: o.q.x, y: o.q.y, z: o.q.z, w: o.q.w })
         .setFriction(0.8);
