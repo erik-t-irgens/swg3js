@@ -24,6 +24,8 @@ const LAYER_SIZE = 512;
  * repeat every 4 m at every detail level (ClientProceduralTerrainAppearance_ClientChunk).
  */
 const GROUND_REPEAT = 4;
+/** Largest family id the uniform lookup arrays cover; ids are dense per planet, well under this. */
+const MAX_FAMILY_ID = 127;
 
 export class TerrainTextures {
   readonly texture: THREE.DataArrayTexture;
@@ -43,17 +45,24 @@ export class TerrainTextures {
       const layer = layers.get(f.id);
       if (layer !== undefined) byName.set(f.name.toLowerCase(), layer);
     }
-    const maxId = Math.max(0, ...families.map((f) => f.id), ...planet.keys());
+    // The lookup arrays are shader uniforms, and every element costs a uniform slot, so they
+    // are sized by the planet's own (small, dense) ids. Families a pack lists under other ids
+    // (those a building's layer file added) reach the ground by name only.
+    const ids = planet.size ? [...planet.keys()] : families.map((f) => f.id);
+    const maxId = Math.min(MAX_FAMILY_ID, Math.max(0, ...ids));
     this.layerOf = new Float32Array(maxId + 1);
     this.sizeOf = new Float32Array(maxId + 1).fill(GROUND_REPEAT);
     for (const f of families) {
       const layer = layers.get(f.id);
-      if (layer !== undefined) this.layerOf[f.id] = layer;
+      if (layer !== undefined && f.id <= maxId) this.layerOf[f.id] = layer;
     }
+    const untextured: string[] = [];
     for (const [id, name] of planet) {
       const layer = byName.get(name.toLowerCase());
-      if (layer !== undefined) this.layerOf[id] = layer;
+      if (layer !== undefined && id <= maxId) this.layerOf[id] = layer;
+      else if (id <= maxId) untextured.push(`${id} ${name}`);
     }
+    console.info(`ground textures: ${layers.size} loaded for ${planet.size || families.length} families${untextured.length ? `; without a texture (drawn with the first): ${untextured.join(', ')}` : ''}`);
   }
 
   /** Load the pack's ground textures, or null when it has none. */

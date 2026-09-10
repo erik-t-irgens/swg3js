@@ -270,7 +270,8 @@ function copyTerrainShaders(vfs, template, outDir) {
   const known = new Set(wanted.map((f) => f.name.toLowerCase()));
   const layerDir = join(outDir, 'terrain');
   if (existsSync(layerDir)) {
-    let nextId = 1000;
+    // Ids after the planet's own; the game matches these by name, the id only has to be unique here.
+    let nextId = Math.max(0, ...wanted.map((f) => f.id)) + 1;
     for (const file of readdirSync(layerDir).filter((f) => /\.lay$/i.test(f)).sort()) {
       try {
         for (const fam of layerFamilies(readFileSync(join(layerDir, file)))) {
@@ -301,6 +302,9 @@ function copyTerrainShaders(vfs, template, outDir) {
       const { main } = shaderTextures(parseIff(vfs.read(path)));
       if (!main || !vfs.has(main)) throw new Error(`no main texture${main ? ` (${main} not in archives)` : ''}`);
       const img = downscaleRgba(decodeDds(vfs.read(main)), 512);
+      // The alpha channel is a specular or blend mask, not transparency: browsers drop the colour of
+      // transparent pixels when they draw an image, so the ground texture is written opaque.
+      for (let i = 3; i < img.rgba.length; i += 4) img.rgba[i] = 255;
       const rel = `terrain/shaders/${fam.id}_${fam.name.replace(/[^a-z0-9]+/gi, '_').toLowerCase()}.png`;
       mkdirSync(join(outDir, 'terrain/shaders'), { recursive: true });
       writeFileSync(join(outDir, rel), encodePng(img.width, img.height, img.rgba));
