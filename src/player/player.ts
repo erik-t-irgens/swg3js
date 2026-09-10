@@ -177,7 +177,9 @@ export class Player {
   force: { value: number } | null = null;
   /** Whether the rig carries Jedi Academy's clips (set when a rig attaches). */
   hasJkaClips = false;
-  private readonly cmd: MoveCommand = { forward: new THREE.Vector3(), right: new THREE.Vector3(), fmove: 0, smove: 0, walk: false, jump: false, speedScale: 1 };
+  private readonly cmd: MoveCommand = { forward: new THREE.Vector3(), right: new THREE.Vector3(), fmove: 0, smove: 0, walk: false, crouch: false, jump: false, speedScale: 1 };
+  /** Ducking (Ctrl on land): half speed, crouch clips, and the crouched attacks. */
+  crouching = false;
   jetThrust = false;
   /** Fly mode for exploring and bug hunting: no gravity, no collision. */
   noclip = false;
@@ -422,7 +424,8 @@ export class Player {
     if (moving) move.normalize();
 
     const walking = input.isDown('ShiftLeft') || input.isDown('ShiftRight');
-    let speed = (walking ? WALK_SPEED : RUN_SPEED) * this.speedMultiplier;
+    this.crouching = !this.swimming && (input.isDown('ControlLeft') || input.isDown('ControlRight'));
+    let speed = (walking ? WALK_SPEED : RUN_SPEED) * this.speedMultiplier * (this.crouching && this.grounded ? 0.5 : 1);
 
     // Water: the surface here, and how deep the body sits in it. Swimming starts when the
     // chest is under; the head stays above the surface unless the player dives.
@@ -466,6 +469,7 @@ export class Player {
       c.fmove = mz;
       c.smove = mx;
       c.walk = walking;
+      c.crouch = this.crouching;
       c.jump = input.isDown('Space');
       c.speedScale = this.speedMultiplier;
       const force = this.force;
@@ -520,7 +524,7 @@ export class Player {
     if (this.classId === 'jedi') {
       const attackPressed = input.justPressed('Mouse0');
       if (attackPressed && !this.saberOn) this.toggleSaber();
-      const si: SaberInput = { attack: input.isDown('Mouse0'), attackPressed, fmove: mz, smove: mx, grounded: this.grounded, vy: this.vel.y, aboveGround: this.pos.y - ground, jumpHeld: input.isDown('Space') };
+      const si: SaberInput = { attack: input.isDown('Mouse0'), attackPressed, fmove: mz, smove: mx, grounded: this.grounded, vy: this.vel.y, aboveGround: this.pos.y - ground, jumpHeld: input.isDown('Space'), crouch: this.crouching };
       const play = this.saber.update(dt, this.saberOn, si, (a) => this.rig?.clipDuration(a) ?? null);
       if (play) {
         if (play.move.kind === 'ready') this.rig?.stopOverride();
@@ -559,6 +563,7 @@ export class Player {
     if (this.mounted) rig.setState('seated');
     else if (this.swimming) rig.setState(moving || this.submerged ? 'swim' : 'float', speed);
     else if (!this.grounded) rig.setState('air');
+    else if (this.crouching) rig.setState(moving ? 'crouchWalk' : 'crouch', speed);
     else if (!moving) rig.setState('idle');
     else rig.setState(speed < 4.5 ? 'walk' : 'run', speed);
     rig.update(dt);

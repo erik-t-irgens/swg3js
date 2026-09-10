@@ -90,6 +90,7 @@ for (const from of QUADS) {
 def({ name: 'A_BACKSTAB', anim: 'BOTH_A2_STABBACK1', start: 'R', end: 'R', kind: 'special', blend: 100, chainIdle: 'READY', chainAttack: 'READY' });
 def({ name: 'A_BACK', anim: 'BOTH_ATTACK_BACK', start: 'R', end: 'R', kind: 'special', blend: 100, chainIdle: 'READY', chainAttack: 'READY' });
 def({ name: 'A_LUNGE', anim: 'BOTH_LUNGE2_B__T_', start: 'B', end: 'T', kind: 'special', blend: 100, chainIdle: 'READY', chainAttack: 'READY' });
+def({ name: 'A_BACK_CR', anim: 'BOTH_CROUCHATTACKBACK1', start: 'R', end: 'R', kind: 'special', blend: 100, chainIdle: 'READY', chainAttack: 'READY' });
 def({ name: 'A_JUMP_T2B', anim: 'BOTH_FORCELEAP2_T__B_', start: 'T', end: 'B', kind: 'special', blend: 100, chainIdle: 'READY', chainAttack: 'READY' });
 def({ name: 'A_FLIP_STAB', anim: 'BOTH_JUMPFLIPSTABDOWN', start: 'R', end: 'T', kind: 'special', blend: 100, chainIdle: 'READY', chainAttack: 'T_T_R' });
 def({ name: 'A_FLIP_SLASH', anim: 'BOTH_JUMPFLIPSLASHDOWN1', start: 'L', end: 'R', kind: 'special', blend: 100, chainIdle: 'READY', chainAttack: 'T_R_T' });
@@ -176,6 +177,7 @@ export interface AttackContext {
   vy: number;
   aboveGround: number;
   jumpHeld: boolean;
+  crouch: boolean;
 }
 
 /** PM_SaberAttackForMovement: which swing the direction keys ask for. */
@@ -188,9 +190,11 @@ export function attackForMovement(style: SaberStyle, ctx: AttackContext): string
       if (style === 'medium') return 'A_FLIP_STAB';
       if (style === 'strong') return 'A_JUMP_T2B';
     }
+    // Crouched and moving forward in the fast style: the lunge.
+    if (ctx.crouch && ctx.grounded && style === 'fast') return 'A_LUNGE';
     return 'A_T2B';
   }
-  if (ctx.fmove < 0) return style === 'fast' ? 'A_BACKSTAB' : 'A_BACK';
+  if (ctx.fmove < 0) return style === 'fast' ? 'A_BACKSTAB' : ctx.crouch ? 'A_BACK_CR' : 'A_BACK';
   return 'A_T2B';
 }
 

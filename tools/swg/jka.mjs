@@ -9,8 +9,10 @@
 //         basePose 3x4, basePoseInv 3x4, numChildren, children[] }. At ofsFrames: 3-byte little-endian indices, (frame * numBones + bone),
 //         into the pool at ofsCompBonePool of 14-byte bones: four uint16 quaternion parts
 //         (w x y z, value / 16383 - 2) and three uint16 translations (value / 64 - 512). A pool
-//         bone is the bone's transform relative to its parent; the base pose matrices are in
-//         model space.
+//         bone is the bone's change from its base pose, relative to its parent's change: the
+//         renderer chains them (parent x bone) into a matrix that takes bind-space vertices to
+//         the animated pose, and a bone's animated world matrix is that chain times its base
+//         pose matrix (which is in model space).
 //   animation.cfg  lines of "NAME firstFrame numFrames loopFrames fps" (negative numFrames
 //         plays backwards, loopFrames -1 means no loop).
 //   .pk3  plain zip archives (stored or deflate), later archive numbers override earlier ones.
@@ -262,11 +264,11 @@ export const BONE_MAP = [
   { jka: 'thoracic', swg: [/^spine_?3$/i, /^chest$/i, /^upper_?spine/i, /^torso$/i, /^spine_?c$/i], chain: 'cervical' },
   { jka: 'cervical', swg: [/^neck_?1?$/i, /neck/i], chain: 'cranium' },
   { jka: 'cranium', swg: [/^head$/i, /^head_?1$/i, /head/i], chain: null },
-  { jka: 'rclavical', swg: [/^r_?clav/i, /^r_?collar/i, /^r_?shoulder$/i], chain: 'rhumerus' },
+  { jka: 'rclavical', swg: [/^r_?clav/i, /^r_?collar/i, /^r_?shoulder$/i], chain: 'rhumerus', loose: true },
   { jka: 'rhumerus', swg: [/^r_?bicep$/i, /^r_?upper_?arm$/i, /^r_?arm$/i, /^r_?humerus$/i], chain: 'rradius' },
   { jka: 'rradius', swg: [/^r_?forearm$/i, /^r_?fore_?arm$/i, /^r_?lower_?arm$/i, /^r_?elbow$/i], chain: 'rhand' },
   { jka: 'rhand', swg: [/^r_?wrist$/i, /^r_?hand$/i], chain: null },
-  { jka: 'lclavical', swg: [/^l_?clav/i, /^l_?collar/i, /^l_?shoulder$/i], chain: 'lhumerus' },
+  { jka: 'lclavical', swg: [/^l_?clav/i, /^l_?collar/i, /^l_?shoulder$/i], chain: 'lhumerus', loose: true },
   { jka: 'lhumerus', swg: [/^l_?bicep$/i, /^l_?upper_?arm$/i, /^l_?arm$/i, /^l_?humerus$/i], chain: 'lradius' },
   { jka: 'lradius', swg: [/^l_?forearm$/i, /^l_?fore_?arm$/i, /^l_?lower_?arm$/i, /^l_?elbow$/i], chain: 'lhand' },
   { jka: 'lhand', swg: [/^l_?wrist$/i, /^l_?hand$/i], chain: null },
@@ -278,36 +280,48 @@ export const BONE_MAP = [
   { jka: 'ltalus', swg: [/^l_?foot$/i, /^l_?ankle$/i], chain: null },
 ];
 
-/** World rotation and position of every JKA bone at a frame (or the base pose when frame < 0), in glTF space. */
+/** Rotation and position of a base pose matrix (its rotation columns normalised, as files may carry a scale). */
+function basePoseOf(bone) {
+  const m = bone.basePose.slice();
+  for (let c = 0; c < 3; c++) {
+    const l = Math.hypot(m[c], m[4 + c], m[8 + c]) || 1;
+    m[c] /= l;
+    m[4 + c] /= l;
+    m[8 + c] /= l;
+  }
+  return { q: qfromMat(m), t: [m[3], m[7], m[11]] };
+}
+
+/**
+ * World rotation and position of every JKA bone at a frame (or the base pose when frame < 0), in
+ * glTF space. A frame's chained bone transforms take the bind pose to the animated one, so the
+ * animated world transform is that chain applied to the base pose.
+ */
 function jkaWorld(gla, frame) {
   const out = new Array(gla.numBones);
+  const chain = new Array(gla.numBones);
   // Bones are not stored parents-first, so resolve each one's chain on demand.
-  const world = (b) => {
-    if (out[b]) return out[b];
+  const chainOf = (b) => {
+    if (chain[b]) return chain[b];
     const bone = gla.bones[b];
-    let q;
-    let t;
-    if (frame < 0) {
-      const m = bone.basePose;
-      q = qfromMat(m);
-      t = [m[3], m[7], m[11]];
-    } else {
-      const local = gla.boneAt(frame, b);
-      const lq = qnorm(local.q);
-      if (bone.parent >= 0 && bone.parent !== b) {
-        const p = world(bone.parent);
-        q = qnorm(qmul(p.q, lq));
-        const r = qrot(p.q, local.t);
-        t = [p.t[0] + r[0], p.t[1] + r[1], p.t[2] + r[2]];
-      } else {
-        q = lq;
-        t = local.t;
-      }
-    }
-    out[b] = { q, t };
-    return out[b];
+    const local = gla.boneAt(frame, b);
+    const lq = qnorm(local.q);
+    if (bone.parent >= 0 && bone.parent !== b) {
+      const p = chainOf(bone.parent);
+      const r = qrot(p.q, local.t);
+      chain[b] = { q: qnorm(qmul(p.q, lq)), t: [p.t[0] + r[0], p.t[1] + r[1], p.t[2] + r[2]] };
+    } else chain[b] = { q: lq, t: local.t };
+    return chain[b];
   };
-  for (let b = 0; b < gla.numBones; b++) world(b);
+  for (let b = 0; b < gla.numBones; b++) {
+    const base = basePoseOf(gla.bones[b]);
+    if (frame < 0) out[b] = base;
+    else {
+      const c = chainOf(b);
+      const r = qrot(c.q, base.t);
+      out[b] = { q: qnorm(qmul(c.q, base.q)), t: [r[0] + c.t[0], r[1] + c.t[1], r[2] + c.t[2]] };
+    }
+  }
   return out.map((w) => ({ q: toGltfQ(w.q), t: toGltfV(w.t) }));
 }
 
@@ -364,14 +378,24 @@ export function planRetarget(gla, joints, map = BONE_MAP) {
   const byJka = new Map(pairs.map((p) => [p.j, p]));
   // Rest direction of each bone: towards its chain child, in both skeletons.
   const angles = [];
+  const dropped = [];
   for (const p of pairs) {
     const child = p.chain ? byJka.get(jkaIndex.get(p.chain.toLowerCase())) : null;
     if (child) {
       const dj = vnorm(vsub(jkaBase[child.j].t, jkaBase[p.j].t));
       const ds = vnorm(vsub(swgBind[child.s].t, swgBind[p.s].t));
       p.align = qbetween(dj, ds);
-      angles.push({ bone: p.jka, degrees: Math.round((Math.acos(Math.max(-1, Math.min(1, dj[0] * ds[0] + dj[1] * ds[1] + dj[2] * ds[2]))) * 180) / Math.PI) });
+      p.degrees = Math.round((Math.acos(Math.max(-1, Math.min(1, dj[0] * ds[0] + dj[1] * ds[1] + dj[2] * ds[2]))) * 180) / Math.PI);
+      angles.push({ bone: p.jka, degrees: p.degrees });
     } else p.align = null;
+  }
+  // A loose joint (a clavicle) whose rest direction disagrees badly is left at its bind pose:
+  // the arm below it is placed on its own, so nothing is lost but a shrug.
+  for (const p of pairs.filter((x) => x.loose && x.degrees !== undefined && x.degrees > 60)) {
+    dropped.push(`${p.jka} (${p.degrees}° from ${joints[p.s].name})`);
+    pairs.splice(pairs.indexOf(p), 1);
+    bySwg.delete(p.s);
+    byJka.delete(p.j);
   }
   // Leaf bones take their parent's alignment.
   for (const p of pairs) {
@@ -382,7 +406,7 @@ export function planRetarget(gla, joints, map = BONE_MAP) {
   }
   const pelvis = pairs.find((p) => p.rootMotion);
   const unitScale = pelvis && jkaBase[pelvis.j].t[1] > 1e-3 ? swgBind[pelvis.s].t[1] / jkaBase[pelvis.j].t[1] : 0.0254;
-  return { pairs, bySwg, jkaBase, swgBind, unitScale, report: { matched: pairs.map((p) => `${p.jka} -> ${joints[p.s].name}`), missing, angles } };
+  return { pairs, bySwg, jkaBase, swgBind, unitScale, report: { matched: pairs.map((p) => `${p.jka} -> ${joints[p.s].name}`), missing, dropped, angles } };
 }
 
 /**
@@ -433,6 +457,35 @@ export function retargetClip(gla, entry, joints, plan, { name = entry.name, fps 
   return { name, times, tracks, duration: times[frames - 1], loop: entry.loop >= 0, fps, frames, source: entry.name };
 }
 
+/**
+ * How far a retargeted frame bends the mapped bones away from the bind pose, per bone in degrees.
+ * A standing clip should keep the legs and spine within a few tens of degrees; wild numbers mean
+ * the mapping or the spaces are wrong.
+ */
+export function poseCheck(clip, joints, plan, frame = 0) {
+  const world = [];
+  joints.forEach((j, i) => {
+    const r = clip.tracks[i].rotations;
+    const q = [r[frame * 4 + 3], r[frame * 4], r[frame * 4 + 1], r[frame * 4 + 2]];
+    const t = Array.from(clip.tracks[i].translations.subarray(frame * 3, frame * 3 + 3));
+    if (j.parent < 0) world[i] = { q, t };
+    else {
+      const p = world[j.parent];
+      const rr = qrot(p.q, t);
+      world[i] = { q: qmul(p.q, q), t: [p.t[0] + rr[0], p.t[1] + rr[1], p.t[2] + rr[2]] };
+    }
+  });
+  const out = [];
+  for (const p of plan.pairs) {
+    const child = plan.pairs.find((c) => joints[c.s].parent === p.s);
+    if (!child) continue;
+    const a = vnorm(vsub(plan.swgBind[child.s].t, plan.swgBind[p.s].t));
+    const b = vnorm(vsub(world[child.s].t, world[p.s].t));
+    out.push({ bone: joints[p.s].name, degrees: Math.round((Math.acos(Math.max(-1, Math.min(1, a[0] * b[0] + a[1] * b[1] + a[2] * b[2]))) * 180) / Math.PI) });
+  }
+  return out;
+}
+
 /** The JKA clips the game asks for by default: saber attacks of the three single styles, the moves around them, jumps and rolls. */
 export function defaultJkaClips() {
   const quads = ['T__B_', 'TL_BR', '_L__R', 'BL_TR', 'BR_TL', '_R__L', 'TR_BL'];
@@ -450,6 +503,7 @@ export function defaultJkaClips() {
   names.push('BOTH_STAND2', 'BOTH_SABERFAST_STANCE', 'BOTH_SABERSLOW_STANCE', 'BOTH_STAND1TO2', 'BOTH_STAND2TO1');
   names.push('BOTH_JUMP1', 'BOTH_JUMPBACK1', 'BOTH_JUMPLEFT1', 'BOTH_JUMPRIGHT1', 'BOTH_INAIR1', 'BOTH_LAND1', 'BOTH_LAND2', 'BOTH_FORCEJUMP1', 'BOTH_FORCEINAIR1', 'BOTH_FORCELAND1');
   names.push('BOTH_FLIP_F', 'BOTH_FLIP_B', 'BOTH_FLIP_L', 'BOTH_FLIP_R', 'BOTH_ROLL_F', 'BOTH_ROLL_B', 'BOTH_ROLL_L', 'BOTH_ROLL_R');
+  names.push('BOTH_CROUCH1', 'BOTH_CROUCH1IDLE', 'BOTH_CROUCH1WALK', 'BOTH_CROUCH1WALKBACK', 'BOTH_STAND1');
   names.push('BOTH_LUNGE2_B__T_', 'BOTH_FORCELEAP2_T__B_', 'BOTH_JUMPFLIPSTABDOWN', 'BOTH_JUMPFLIPSLASHDOWN1', 'BOTH_ATTACK_BACK', 'BOTH_A2_STABBACK1', 'BOTH_CROUCHATTACKBACK1', 'BOTH_ROLL_STAB');
   return names;
 }
@@ -477,6 +531,7 @@ export function importJkaClips(jkaDir, joints, wanted = defaultJkaClips(), { log
     const plan = planRetarget(gla, joints);
     log(`retarget: ${plan.report.matched.length} bones matched (${plan.report.matched.join(', ')}); scale ${plan.unitScale.toFixed(4)} m per unit`);
     if (plan.report.missing.length) log(`retarget: unmatched: ${plan.report.missing.join('; ')}; the SWG joints are ${joints.map((j) => j.name).join(', ')}`);
+    if (plan.report.dropped.length) log(`retarget: left at bind pose (rest directions disagree): ${plan.report.dropped.join('; ')}`);
     log(`retarget: rest-direction differences: ${plan.report.angles.map((a) => `${a.bone} ${a.degrees}°`).join(', ')}`);
     const clips = [];
     const missing = [];
@@ -487,6 +542,11 @@ export function importJkaClips(jkaDir, joints, wanted = defaultJkaClips(), { log
         continue;
       }
       clips.push(retargetClip(gla, entry, joints, plan));
+    }
+    const stance = clips.find((c) => c.source === 'BOTH_STAND1') ?? clips.find((c) => c.source === 'BOTH_STAND2') ?? clips[0];
+    if (stance) {
+      const check = poseCheck(stance, joints, plan);
+      log(`pose check (${stance.source}, first frame, bend from the bind pose): ${check.map((c) => `${c.bone} ${c.degrees}°`).join(', ')}`);
     }
     return { clips, info: { bones: gla.numBones, frames: gla.numFrames, animations: cfg.size, matched: plan.report.matched, missingBones: plan.report.missing, angles: plan.report.angles, unitScale: plan.unitScale, missing } };
   } finally {

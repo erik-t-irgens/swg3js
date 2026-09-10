@@ -17,6 +17,7 @@ export const JKA = {
   /** Full run speed (cl_run); walking halves the command. */
   speed: 250,
   walkScale: 0.5,
+  duckScale: 0.5,
   stopSpeed: 100,
   accelerate: 10,
   airAccelerate: 1,
@@ -37,6 +38,8 @@ export interface MoveCommand {
   fmove: number;
   smove: number;
   walk: boolean;
+  /** Ducking (PMF_DUCKED): half speed on the ground. */
+  crouch: boolean;
   jump: boolean;
   speedScale: number;
 }
@@ -107,7 +110,7 @@ export class JkaMovement {
     }
     if (!grounded) this.apexY = Number.isFinite(this.apexY) ? Math.max(this.apexY, pos.y) : pos.y;
 
-    const speed = JKA.speed * (cmd.walk ? JKA.walkScale : 1) * cmd.speedScale;
+    const speed = JKA.speed * (cmd.walk ? JKA.walkScale : 1) * (cmd.crouch && grounded ? JKA.duckScale : 1) * cmd.speedScale;
     wish.set(0, 0, 0).addScaledVector(cmd.forward, cmd.fmove).addScaledVector(cmd.right, cmd.smove);
     wish.y = 0;
     // PM_CmdScale: a diagonal command is not faster than a straight one.
