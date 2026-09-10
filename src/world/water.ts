@@ -14,7 +14,9 @@ export interface WaterMaterial extends THREE.MeshPhysicalMaterial {
 }
 
 const WAVE_COUNT = 8;
-const RIPPLE_COUNT = 6;
+/** The detail tile: a Phillips-spectrum height field of this many samples across this many metres. */
+const TILE_N = 256;
+const TILE_SIZE = 28;
 /** Rings spreading from things that touch the water: shared by every water material. */
 const MAX_RIPPLES = 32;
 const RIPPLE_LIFE = 3.0;
@@ -93,12 +95,132 @@ export function emitRipple(x: number, z: number, strength: number, time: number,
   nextRing = (nextRing + 1) % MAX_RIPPLES;
 }
 
+/** In-place radix-2 complex FFT (inverse when `inverse`), lengths a power of two. */
+function fft(re: Float64Array, im: Float64Array, inverse: boolean): void {
+  const n = re.length;
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) {
+      [re[i], re[j]] = [re[j], re[i]];
+      [im[i], im[j]] = [im[j], im[i]];
+    }
+  }
+  for (let len = 2; len <= n; len <<= 1) {
+    const ang = ((inverse ? 2 : -2) * Math.PI) / len;
+    const wr = Math.cos(ang);
+    const wi = Math.sin(ang);
+    for (let i = 0; i < n; i += len) {
+      let cr = 1;
+      let ci = 0;
+      for (let k = 0; k < len / 2; k++) {
+        const ur = re[i + k];
+        const ui = im[i + k];
+        const vr = re[i + k + len / 2] * cr - im[i + k + len / 2] * ci;
+        const vi = re[i + k + len / 2] * ci + im[i + k + len / 2] * cr;
+        re[i + k] = ur + vr;
+        im[i + k] = ui + vi;
+        re[i + k + len / 2] = ur - vr;
+        im[i + k + len / 2] = ui - vi;
+        const nr = cr * wr - ci * wi;
+        ci = cr * wi + ci * wr;
+        cr = nr;
+      }
+    }
+  }
+  if (inverse) for (let i = 0; i < n; i++) (re[i] /= n), (im[i] /= n);
+}
+
+/**
+ * A tiling wave height field from the Phillips spectrum (Tessendorf's ocean statistics): every
+ * wavelength the tile can hold gets a random amplitude and phase shaped by the wind, and an
+ * inverse FFT turns them into heights. Returned as a normal map for the water's fine detail.
+ */
+function spectrumNormalTile(seed: number, windAngle: number, windSpeed: number): THREE.DataTexture {
+  let st = seed >>> 0 || 1;
+  const rnd = () => {
+    st = (st * 1664525 + 1013904223) >>> 0;
+    return st / 4294967296;
+  };
+  const gauss = () => {
+    const u = Math.max(1e-9, rnd());
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * rnd());
+  };
+  const N = TILE_N;
+  const L = TILE_SIZE;
+  const g = 9.81;
+  const Lw = (windSpeed * windSpeed) / g;
+  const wx = Math.cos(windAngle);
+  const wz = Math.sin(windAngle);
+  const re = new Float64Array(N * N);
+  const im = new Float64Array(N * N);
+  for (let j = 0; j < N; j++) {
+    for (let i = 0; i < N; i++) {
+      const kx = ((2 * Math.PI) / L) * (i < N / 2 ? i : i - N);
+      const kz = ((2 * Math.PI) / L) * (j < N / 2 ? j : j - N);
+      const k2 = kx * kx + kz * kz;
+      if (k2 < 1e-9) continue;
+      const k = Math.sqrt(k2);
+      const kw = (kx * wx + kz * wz) / k;
+      // Phillips: exp(-1/(kL)^2) / k^4 times how well the wave lines up with the wind, damped for the shortest waves.
+      let ph = (Math.exp(-1 / (k2 * Lw * Lw)) / (k2 * k2)) * kw * kw * Math.exp(-k2 * 0.01);
+      if (kw < 0) ph *= 0.25;
+      const amp = Math.sqrt(ph) * 0.7071;
+      re[j * N + i] = gauss() * amp;
+      im[j * N + i] = gauss() * amp;
+    }
+  }
+  // Rows, then columns.
+  const rowR = new Float64Array(N);
+  const rowI = new Float64Array(N);
+  for (let j = 0; j < N; j++) {
+    for (let i = 0; i < N; i++) (rowR[i] = re[j * N + i]), (rowI[i] = im[j * N + i]);
+    fft(rowR, rowI, true);
+    for (let i = 0; i < N; i++) (re[j * N + i] = rowR[i]), (im[j * N + i] = rowI[i]);
+  }
+  for (let i = 0; i < N; i++) {
+    for (let j = 0; j < N; j++) (rowR[j] = re[j * N + i]), (rowI[j] = im[j * N + i]);
+    fft(rowR, rowI, true);
+    for (let j = 0; j < N; j++) (re[j * N + i] = rowR[j]), (im[j * N + i] = rowI[j]);
+  }
+  // Normalise the heights to a set range, then take slopes for the normal map.
+  let max = 1e-9;
+  for (let i = 0; i < N * N; i++) max = Math.max(max, Math.abs(re[i]));
+  const height = 0.1;
+  const cell = L / N;
+  const data = new Uint8Array(N * N * 4);
+  for (let j = 0; j < N; j++) {
+    for (let i = 0; i < N; i++) {
+      const h = (a: number, b: number) => (re[((b + N) % N) * N + ((a + N) % N)] / max) * height;
+      const dx = (h(i + 1, j) - h(i - 1, j)) / (2 * cell);
+      const dz = (h(i, j + 1) - h(i, j - 1)) / (2 * cell);
+      const len = Math.hypot(dx, dz, 1);
+      const o = (j * N + i) * 4;
+      data[o] = Math.round((-dx / len) * 127 + 128);
+      data[o + 1] = Math.round((-dz / len) * 127 + 128);
+      data[o + 2] = Math.round((1 / len) * 255);
+      data[o + 3] = 255;
+    }
+  }
+  const tex = new THREE.DataTexture(data, N, N, THREE.RGBAFormat);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.minFilter = THREE.LinearMipmapLinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.generateMipmaps = true;
+  tex.anisotropy = 8;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+let detailTile: THREE.DataTexture | null = null;
+
 /**
  * A sea state: waves spread around the wind direction, wavelengths spread from short chop to
  * long swell, amplitudes that grow with wavelength, and each wave's phase speed from the
  * dispersion relation c = sqrt(g * wavelength / 2 pi).
  */
-function seaState(seed: number, windAngle: number): { waves: THREE.Vector4[]; omega: number[]; ripples: THREE.Vector4[]; rippleOmega: number[] } {
+function seaState(seed: number, windAngle: number): { waves: THREE.Vector4[]; omega: number[] } {
   let s = seed >>> 0 || 1;
   const rnd = () => {
     s = (s * 1664525 + 1013904223) >>> 0;
@@ -107,27 +229,18 @@ function seaState(seed: number, windAngle: number): { waves: THREE.Vector4[]; om
   const waves: THREE.Vector4[] = [];
   const omega: number[] = [];
   for (let i = 0; i < WAVE_COUNT; i++) {
-    // Wavelengths from 2.5 m to 28 m, roughly log-spaced with jitter; longer waves lean into the wind.
+    // Swells from 9 m to 45 m, roughly log-spaced with jitter; longer waves lean into the wind.
     const t = (i + rnd() * 0.8) / WAVE_COUNT;
-    const wavelength = 2.5 * Math.pow(28 / 2.5, t);
-    const spread = THREE.MathUtils.lerp(1.2, 0.35, t);
+    const wavelength = 9 * Math.pow(45 / 9, t);
+    const spread = THREE.MathUtils.lerp(1.1, 0.3, t);
     const angle = windAngle + (rnd() - 0.5) * 2 * spread;
     const k = (2 * Math.PI) / wavelength;
-    // Amplitude as a fraction of wavelength (a gentle sea, about 20 cm crest to trough in all).
-    const amplitude = wavelength * THREE.MathUtils.lerp(0.0025, 0.0055, t) * (0.7 + rnd() * 0.6);
+    // Amplitude as a fraction of wavelength: a moderate sea, the longest swells about 40 cm high.
+    const amplitude = wavelength * THREE.MathUtils.lerp(0.005, 0.0095, t) * (0.7 + rnd() * 0.6);
     waves.push(new THREE.Vector4(Math.cos(angle), Math.sin(angle), k, amplitude));
     omega.push(Math.sqrt(9.81 * k));
   }
-  const ripples: THREE.Vector4[] = [];
-  const rippleOmega: number[] = [];
-  for (let i = 0; i < RIPPLE_COUNT; i++) {
-    const wavelength = 0.3 + rnd() * 1.1;
-    const angle = windAngle + (rnd() - 0.5) * Math.PI * 1.6;
-    const k = (2 * Math.PI) / wavelength;
-    ripples.push(new THREE.Vector4(Math.cos(angle), Math.sin(angle), k, 0.0015 + rnd() * 0.003));
-    rippleOmega.push(Math.sqrt(9.81 * k) * (0.8 + rnd() * 0.4));
-  }
-  return { waves, omega, ripples, rippleOmega };
+  return { waves, omega };
 }
 
 const WAVES_GLSL = /* glsl */ `
@@ -136,8 +249,8 @@ const WAVES_GLSL = /* glsl */ `
   uniform float uRipple;
   uniform vec4 uWaves[${WAVE_COUNT}];
   uniform float uOmega[${WAVE_COUNT}];
-  uniform vec4 uRippleWaves[${RIPPLE_COUNT}];
-  uniform float uRippleOmega[${RIPPLE_COUNT}];
+  uniform sampler2D uDetail;
+  uniform float uDetailSize;
   uniform vec4 uRings[${MAX_RIPPLES}];
   uniform vec4 uRingMotion[${MAX_RIPPLES}];
   uniform sampler2D uDepthTex;
@@ -150,7 +263,8 @@ const WAVES_GLSL = /* glsl */ `
     vec2 uv = (p - uDepthOrigin) / uDepthSize;
     if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) return 100.0;
     float ground = texture2D(uDepthTex, uv).r;
-    return ground < -5000.0 ? 100.0 : vWaterLevel - ground;
+    // Unknown cells hold a huge negative height; anything blended toward one counts as deep water.
+    return ground < -500.0 ? 100.0 : min(vWaterLevel - ground, 100.0);
   }
 
   float hash21(vec2 p) {
@@ -196,17 +310,31 @@ const WAVES_GLSL = /* glsl */ `
     crest = sumAmp > 1e-4 ? height / sumAmp : 0.0;
   }
 
-  // Short wind ripples: slope only.
-  vec2 rippleSlope(vec2 p) {
-    vec2 g = vec2(0.0);
-    float warp = phaseWarp(p * 3.0) * 0.5;
-    for (int i = 0; i < ${RIPPLE_COUNT}; i++) {
-      vec4 w = uRippleWaves[i];
-      float k = w.z;
-      float phase = k * dot(w.xy, p) - uRippleOmega[i] * uTime + warp;
-      g += w.xy * (k * w.w * cos(phase));
-    }
-    return g * uRipple;
+  // Fine waves from the spectrum tile: two layers at different scales and headings, drifting
+  // with the wind, their slopes added so neither tiling shows.
+  vec2 detailSlope(vec2 p) {
+    vec2 a = p / uDetailSize + uTime * vec2(0.018, 0.007);
+    vec2 pr = vec2(p.x * 0.83 - p.y * 0.56, p.x * 0.56 + p.y * 0.83);
+    vec2 b = pr / (uDetailSize * 0.47) - uTime * vec2(0.012, 0.02);
+    vec3 na = texture2D(uDetail, a).xyz * vec3(2.0, 2.0, 1.0) - vec3(1.0, 1.0, 0.0);
+    vec3 nb = texture2D(uDetail, b).xyz * vec3(2.0, 2.0, 1.0) - vec3(1.0, 1.0, 0.0);
+    vec2 sa = na.xy / max(na.z, 0.2);
+    vec2 sb = nb.xy / max(nb.z, 0.2);
+    return (sa * 0.8 + sb * 0.55) * uRipple;
+  }
+
+  // Metres to the shore, from the depth and how fast it changes: a band of foam the same
+  // width on a beach and on a steep bank.
+  float shoreDistance(vec2 p, float depth) {
+    float e = 4.0;
+    float dxp = waterDepth(p + vec2(e, 0.0));
+    float dxm = waterDepth(p - vec2(e, 0.0));
+    float dzp = waterDepth(p + vec2(0.0, e));
+    float dzm = waterDepth(p - vec2(0.0, e));
+    // No verdict next to cells the window has not filled yet.
+    if (depth >= 99.0 || max(max(dxp, dxm), max(dzp, dzm)) >= 99.0) return 100.0;
+    vec2 grad = vec2(dxp - dxm, dzp - dzm) / (2.0 * e);
+    return depth / max(length(grad), 0.02);
   }
 
   // Rings and wakes: a damped packet spreading from each source, stronger ahead of a moving one.
@@ -239,26 +367,27 @@ export function createWaterMaterial(color: THREE.ColorRepresentation, opacity: n
     color,
     transparent: true,
     opacity,
-    roughness: 0.08,
+    roughness: 0.16,
     metalness: 0,
     ior: 1.33,
-    specularIntensity: 1,
+    specularIntensity: 0.8,
     depthWrite: false,
     side: THREE.DoubleSide,
-    envMapIntensity: 1,
+    envMapIntensity: 0.55,
   }) as WaterMaterial;
   const sea = seaState(seed, windAngle);
+  detailTile ??= spectrumNormalTile(seed * 7919 + 13, windAngle, 6.5);
   const uniforms = {
     uDepthTex: DEPTH.tex,
     uDepthOrigin: DEPTH.origin,
     uDepthSize: DEPTH.size,
+    uDetail: { value: detailTile },
+    uDetailSize: { value: TILE_SIZE },
     uTime: { value: 0 },
     uWaveHeight: { value: waves ? 1 : 0 },
     uRipple: { value: 1 },
     uWaves: { value: sea.waves },
     uOmega: { value: sea.omega },
-    uRippleWaves: { value: sea.ripples },
-    uRippleOmega: { value: sea.rippleOmega },
     uRings: RINGS,
     uRingMotion: RING_MOTION,
   };
@@ -302,14 +431,16 @@ export function createWaterMaterial(color: THREE.ColorRepresentation, opacity: n
           float depth = waterDepth(vWaterXZ);
           float calm = smoothstep(0.15, 3.0, depth);
           gerstner(vWaterXZ, calm, disp, wn, crest);
-          float detail = 1.0 - smoothstep(80.0, 500.0, vWaterDist);
-          vec2 slope = rippleSlope(vWaterXZ) * detail * (0.4 + 0.6 * calm);
+          float detail = 1.0 - smoothstep(120.0, 700.0, vWaterDist);
+          vec2 slope = detailSlope(vWaterXZ) * (0.35 + 0.65 * detail) * (0.5 + 0.5 * calm);
           float e = 0.06;
           slope += vec2(ringHeight(vWaterXZ + vec2(e, 0.0)) - ringHeight(vWaterXZ - vec2(e, 0.0)), ringHeight(vWaterXZ + vec2(0.0, e)) - ringHeight(vWaterXZ - vec2(0.0, e))) / (2.0 * e) * detail;
           waterNormalW = normalize(vec3(wn.x - slope.x, wn.y, wn.z - slope.y));
-          // Foam on the steepest crests, faintly along fresh rings, and in a lapping band at the shore.
-          float shore = (1.0 - smoothstep(0.05, 1.1, depth)) * (0.35 + 0.65 * vnoise(vWaterXZ * 0.9 + vec2(uTime * 0.25, -uTime * 0.18)));
-          waterFoam = smoothstep(0.7, 0.98, crest) * 0.35 * calm + clamp(abs(ringHeight(vWaterXZ)) * 2.0, 0.0, 0.15) * detail + shore * 0.5;
+          // Foam on the steepest crests, faintly along fresh rings, and in a narrow lapping band at the shore.
+          float toShore = shoreDistance(vWaterXZ, depth);
+          float lap = vnoise(vWaterXZ * 1.7 + vec2(uTime * 0.35, -uTime * 0.22)) * 0.6 + vnoise(vWaterXZ * 6.0 - vec2(uTime * 0.5, uTime * 0.4)) * 0.4;
+          float shore = (1.0 - smoothstep(0.3, 2.2, toShore)) * smoothstep(0.35, 0.75, lap) * step(0.02, depth);
+          waterFoam = smoothstep(0.7, 0.98, crest) * 0.35 * calm + clamp(abs(ringHeight(vWaterXZ)) * 2.0, 0.0, 0.15) * detail + shore * 0.45;
         }
         diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.8, 0.86, 0.9), waterFoam);
         diffuseColor.a = mix(diffuseColor.a, 1.0, waterFoam * 0.5);`,
@@ -352,6 +483,7 @@ export class Splashes {
   private readonly age: Float32Array;
   private readonly life: Float32Array;
   private readonly alpha: Float32Array;
+  private readonly size: Float32Array;
   private next = 0;
   private alive = 0;
 
@@ -362,19 +494,21 @@ export class Splashes {
     this.age = new Float32Array(max).fill(99);
     this.life = new Float32Array(max).fill(1);
     this.alpha = new Float32Array(max);
+    this.size = new Float32Array(max).fill(0.1);
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(this.pos, 3));
     geo.setAttribute('aAlpha', new THREE.BufferAttribute(this.alpha, 1));
+    geo.setAttribute('aSize', new THREE.BufferAttribute(this.size, 1));
     const mat = new THREE.ShaderMaterial({
-      uniforms: { uMap: { value: Splashes.sprite() }, uSize: { value: 0.22 } },
+      uniforms: { uMap: { value: Splashes.sprite() } },
       vertexShader: /* glsl */ `
         attribute float aAlpha;
-        uniform float uSize;
+        attribute float aSize;
         varying float vAlpha;
         void main() {
           vAlpha = aAlpha;
           vec4 mv = modelViewMatrix * vec4(position, 1.0);
-          gl_PointSize = uSize * 400.0 / max(1.0, -mv.z);
+          gl_PointSize = aSize * 400.0 / max(1.0, -mv.z);
           gl_Position = projectionMatrix * mv;
         }`,
       fragmentShader: /* glsl */ `
@@ -382,7 +516,7 @@ export class Splashes {
         varying float vAlpha;
         void main() {
           vec4 t = texture2D(uMap, gl_PointCoord);
-          gl_FragColor = vec4(vec3(0.72, 0.8, 0.88), t.a * vAlpha * 0.6);
+          gl_FragColor = vec4(vec3(0.72, 0.8, 0.88), t.a * vAlpha * 0.42);
           #include <tonemapping_fragment>
           #include <colorspace_fragment>
         }`,
@@ -431,8 +565,10 @@ export class Splashes {
       this.vel[k * 3 + 1] = 1.2 + Math.random() * 1.6 + speed * 0.12;
       this.vel[k * 3 + 2] = (dz * 0.4 + dx * side * 0.8) * out + spread * 0.3;
       this.age[k] = 0;
-      this.life[k] = 0.5 + Math.random() * 0.5;
+      this.life[k] = 0.4 + Math.random() * 0.45;
       this.alpha[k] = 1;
+      // Droplet size grows with speed up to a brisk run, then stays put.
+      this.size[k] = (0.06 + 0.022 * Math.min(speed, 7)) * (0.7 + Math.random() * 0.6);
     }
     this.alive = this.max;
   }
@@ -460,6 +596,7 @@ export class Splashes {
     geo.setDrawRange(0, this.max);
     (geo.getAttribute('position') as THREE.BufferAttribute).needsUpdate = true;
     (geo.getAttribute('aAlpha') as THREE.BufferAttribute).needsUpdate = true;
+    (geo.getAttribute('aSize') as THREE.BufferAttribute).needsUpdate = true;
   }
 
   dispose(): void {

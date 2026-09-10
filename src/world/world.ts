@@ -554,7 +554,7 @@ export class World {
       }
       emitRipple(p.x, p.z, strength * Math.min(1, 0.4 + speed / 4), this.waterTime, vx, vz);
       // Spray past a brisk walk, more the faster the mover and the shallower it sits.
-      if (speed > 2.2 && depth < 1.6) this.splashes.spawn(p.x, surface, p.z, Math.round(2 + speed * 1.2 * strength), vx, vz);
+      if (speed > 1.6 && depth < 1.6) this.splashes.spawn(p.x, surface, p.z, Math.round(1 + Math.min(speed, 8) * 0.9 * strength), vx, vz);
     };
     touch(this, playerPos, 1);
     for (const c of this.creatures.creatures) if (c.hp > 0) touch(c, c.pos, 0.9);
