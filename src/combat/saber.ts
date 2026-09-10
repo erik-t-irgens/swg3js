@@ -199,7 +199,9 @@ export function animForStyle(move: SaberMove, style: SaberStyle): string {
   const d = style === 'fast' ? '1' : style === 'medium' ? '2' : '3';
   if (move.kind === 'special' || move.kind === 'none') return move.anim;
   if (move.kind === 'ready') return style === 'fast' ? 'BOTH_SABERFAST_STANCE' : style === 'strong' ? 'BOTH_SABERSLOW_STANCE' : 'BOTH_STAND2';
-  return move.anim.replace(/^BOTH_([ASRTB])1_/, `BOTH_$1${d}_`).replace(/_S1_/, `_S${d}_`).replace(/_S1$/, `_S${d}`);
+  // Only the leading style digit changes: the starts and returns of every style keep the
+  // "_S1" of the stance they leave from and return to (BOTH_S2_S1_T_, BOTH_R3_B__S1).
+  return move.anim.replace(/^BOTH_([ASRTB])1_/, `BOTH_$1${d}_`);
 }
 
 /** BG_SaberStartTransAnim: the arcs play quicker in the fast style and slower in the strong one. */

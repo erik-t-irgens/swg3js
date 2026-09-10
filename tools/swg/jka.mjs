@@ -262,11 +262,11 @@ export const BONE_MAP = [
   { jka: 'thoracic', swg: [/^spine_?3$/i, /^chest$/i, /^upper_?spine/i, /^torso$/i, /^spine_?c$/i], chain: 'cervical' },
   { jka: 'cervical', swg: [/^neck_?1?$/i, /neck/i], chain: 'cranium' },
   { jka: 'cranium', swg: [/^head$/i, /^head_?1$/i, /head/i], chain: null },
-  { jka: 'rclavical', swg: [/^r_?clavicle$/i, /^r_?collar/i, /^r_?shoulder$/i], chain: 'rhumerus' },
+  { jka: 'rclavical', swg: [/^r_?clav/i, /^r_?collar/i, /^r_?shoulder$/i], chain: 'rhumerus' },
   { jka: 'rhumerus', swg: [/^r_?bicep$/i, /^r_?upper_?arm$/i, /^r_?arm$/i, /^r_?humerus$/i], chain: 'rradius' },
   { jka: 'rradius', swg: [/^r_?forearm$/i, /^r_?fore_?arm$/i, /^r_?lower_?arm$/i, /^r_?elbow$/i], chain: 'rhand' },
   { jka: 'rhand', swg: [/^r_?wrist$/i, /^r_?hand$/i], chain: null },
-  { jka: 'lclavical', swg: [/^l_?clavicle$/i, /^l_?collar/i, /^l_?shoulder$/i], chain: 'lhumerus' },
+  { jka: 'lclavical', swg: [/^l_?clav/i, /^l_?collar/i, /^l_?shoulder$/i], chain: 'lhumerus' },
   { jka: 'lhumerus', swg: [/^l_?bicep$/i, /^l_?upper_?arm$/i, /^l_?arm$/i, /^l_?humerus$/i], chain: 'lradius' },
   { jka: 'lradius', swg: [/^l_?forearm$/i, /^l_?fore_?arm$/i, /^l_?lower_?arm$/i, /^l_?elbow$/i], chain: 'lhand' },
   { jka: 'lhand', swg: [/^l_?wrist$/i, /^l_?hand$/i], chain: null },
@@ -442,8 +442,8 @@ export function defaultJkaClips() {
   const names = [];
   for (const s of [1, 2, 3]) {
     for (const q of quads) names.push(`BOTH_A${s}_${q}`);
-    for (const q of starts) names.push(`BOTH_S${s}_S${s}_${q}`);
-    for (const q of returns) names.push(`BOTH_R${s}_${q}_S${s}`);
+    for (const q of starts) names.push(`BOTH_S${s}_S1_${q}`);
+    for (const q of returns) names.push(`BOTH_R${s}_${q}_S1`);
     for (const a of from) for (const b of from) if (a !== b) names.push(`BOTH_T${s}_${a}_${b}`);
     for (const q of from) names.push(`BOTH_B${s}_${q}___`);
   }

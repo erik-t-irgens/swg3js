@@ -277,5 +277,6 @@ assert.equal(r.clips[1].name, 'BOTH_JUMP1');
 assert.equal(r.clips[1].loop, true);
 assert.ok(messages.some((m) => m.includes('13 bones matched')), messages.join('\n'));
 assert.ok(defaultJkaClips().includes('BOTH_A3_TR_BL') && defaultJkaClips().includes('BOTH_FORCEJUMP1'));
+assert.ok(defaultJkaClips().includes('BOTH_S2_S1_T_') && defaultJkaClips().includes('BOTH_R3_B__S1'), 'medium and strong starts and returns keep the fast stance suffix');
 assert.ok(BONE_MAP.length >= 20);
 console.log('jka: ok');
