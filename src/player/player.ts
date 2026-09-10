@@ -177,7 +177,7 @@ export class Player {
   force: { value: number } | null = null;
   /** Whether the rig carries Jedi Academy's clips (set when a rig attaches). */
   hasJkaClips = false;
-  private readonly cmd: MoveCommand = { forward: new THREE.Vector3(), right: new THREE.Vector3(), fmove: 0, smove: 0, walk: false, crouch: false, jump: false, speedScale: 1 };
+  private readonly cmd: MoveCommand = { forward: new THREE.Vector3(), right: new THREE.Vector3(), fmove: 0, smove: 0, walk: false, crouch: false, roll: false, jump: false, speedScale: 1 };
   /** Ducking (Ctrl on land): half speed, crouch clips, and the crouched attacks. */
   crouching = false;
   jetThrust = false;
@@ -470,6 +470,7 @@ export class Player {
       c.smove = mx;
       c.walk = walking;
       c.crouch = this.crouching;
+      c.roll = (input.justPressed('ControlLeft') || input.justPressed('ControlRight')) && moving && !this.saber.busy;
       c.jump = input.isDown('Space');
       c.speedScale = this.speedMultiplier;
       const force = this.force;
@@ -479,6 +480,8 @@ export class Player {
         this.playOnce(mz > 0 ? 'BOTH_JUMP1' : mz < 0 ? 'BOTH_JUMPBACK1' : mx > 0 ? 'BOTH_JUMPRIGHT1' : mx < 0 ? 'BOTH_JUMPLEFT1' : 'BOTH_JUMP1', 0.05);
       }
       if (ev.forceJumpStarted) this.playOnce('BOTH_FORCEJUMP1', 0.08);
+      if (ev.rolled) this.playOnce(`BOTH_ROLL_${ev.rolled}`, 0.05);
+      if (this.jka.rolling) this.crouching = false;
       if (ev.landed !== null && ev.landed >= 2 && !this.saber.busy) this.playOnce(ev.landed > 30 ? 'BOTH_LAND2' : 'BOTH_LAND1', 0.06);
       if (ev.damage > 0) this.takeDamage(ev.damage);
     } else if (this.grounded) {
@@ -521,7 +524,7 @@ export class Player {
 
     // Lightsaber: the first press draws it, then the direction keys pick the swing and holding
     // attack chains the next one; the rig plays the move's clip when it has it.
-    if (this.classId === 'jedi') {
+    if (this.classId === 'jedi' && !this.jka.rolling) {
       const attackPressed = input.justPressed('Mouse0');
       if (attackPressed && !this.saberOn) this.toggleSaber();
       const si: SaberInput = { attack: input.isDown('Mouse0'), attackPressed, fmove: mz, smove: mx, grounded: this.grounded, vy: this.vel.y, aboveGround: this.pos.y - ground, jumpHeld: input.isDown('Space'), crouch: this.crouching };

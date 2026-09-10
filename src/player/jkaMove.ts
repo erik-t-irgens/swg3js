@@ -28,6 +28,12 @@ export const JKA = {
   forceJumpStrength: [225, 420, 590, 840],
   /** Force points a second while a force jump lifts, divided by the level. */
   forceJumpDrain: 30,
+  /** A roll (crouch while moving): its speed, in units a second, and how long it carries you. */
+  rollSpeed: 220,
+  rollTime: 0.55,
+  /** Damage per metre fallen beyond what your own jump could reach, and its cap. */
+  fallDamagePerMetre: 8,
+  fallDamageMax: 60,
 };
 
 export interface MoveCommand {
@@ -40,6 +46,8 @@ export interface MoveCommand {
   walk: boolean;
   /** Ducking (PMF_DUCKED): half speed on the ground. */
   crouch: boolean;
+  /** Crouch pressed this frame while moving: a roll in the movement direction. */
+  roll: boolean;
   jump: boolean;
   speedScale: number;
 }
@@ -47,6 +55,8 @@ export interface MoveCommand {
 export interface MoveEvents {
   jumped: boolean;
   forceJumpStarted: boolean;
+  /** A roll began: which way, relative to the command (forward, back, left, right). */
+  rolled: 'F' | 'B' | 'L' | 'R' | null;
   /** Set on the frame the feet touch down: the client's landing "delta" (fall energy in its units). */
   landed: number | null;
   damage: number;
@@ -65,6 +75,9 @@ export class JkaMovement {
   private apexY = Number.NaN;
   private wasGrounded = true;
   private lastVy = 0;
+  /** Seconds left in a roll; the roll's direction, in units a second. */
+  private rollLeft = 0;
+  private readonly rollVel = new THREE.Vector3();
 
   /** Gravity in metres per second squared. */
   get gravity(): number {
@@ -72,6 +85,7 @@ export class JkaMovement {
   }
 
   reset(): void {
+    this.rollLeft = 0;
     this.jumpHeld = false;
     this.forceJumping = false;
     this.jumpStartY = Number.NaN;
@@ -83,12 +97,16 @@ export class JkaMovement {
     return this.forceJumping;
   }
 
+  get rolling(): boolean {
+    return this.rollLeft > 0;
+  }
+
   /**
    * One step. `vel` and `pos` are in metres; `grounded` is the character controller's verdict
    * from the previous step. `force` reports the pool and spends from it.
    */
   step(dt: number, vel: THREE.Vector3, pos: THREE.Vector3, grounded: boolean, cmd: MoveCommand, force: { value: number; spend: (n: number) => void }): MoveEvents {
-    const ev: MoveEvents = { jumped: false, forceJumpStarted: false, landed: null, damage: 0 };
+    const ev: MoveEvents = { jumped: false, forceJumpStarted: false, rolled: null, landed: null, damage: 0 };
     // Metres to units for the client's arithmetic.
     let vx = vel.x / UNIT;
     let vy = vel.y / UNIT;
@@ -101,9 +119,11 @@ export class JkaMovement {
       ev.landed = delta;
       const level = Math.max(0, Math.min(3, this.forceLevel));
       const fell = Number.isFinite(this.apexY) ? (this.apexY - pos.y) / UNIT : 0;
-      // Coming down from within your own jump's reach never hurts, as in the client's forceJumpZStart rule.
-      if (fell <= JKA.forceJumpHeight[level] + JKA.forceJumpHeight[0]) delta = 0;
-      if (delta > 7) ev.damage = Math.min(100, Math.round((delta - 7) * 2));
+      // Coming down from within your own jump's reach never hurts, as in the client's forceJumpZStart rule;
+      // beyond that the damage grows with the extra height rather than with the square of the speed.
+      const safe = JKA.forceJumpHeight[level] + JKA.forceJumpHeight[0];
+      if (fell <= safe) delta = 0;
+      else ev.damage = Math.min(JKA.fallDamageMax, Math.round(((fell - safe) * UNIT) * JKA.fallDamagePerMetre));
       this.forceJumping = false;
       this.jumpStartY = Number.NaN;
       this.apexY = Number.NaN;
@@ -120,6 +140,28 @@ export class JkaMovement {
     const wishSpeed = wish.length() * scale;
     if (wishSpeed > 0) wishDir.copy(wish).normalize();
     else wishDir.set(0, 0, 0);
+
+    // A roll carries you along the command at its own speed, ignoring friction and new input.
+    if (this.rollLeft > 0) {
+      this.rollLeft -= dt;
+      vx = this.rollVel.x;
+      vz = this.rollVel.z;
+      if (!grounded) vy -= JKA.gravity * dt;
+      vel.set(vx * UNIT, vy * UNIT, vz * UNIT);
+      this.lastVy = vy;
+      this.wasGrounded = grounded;
+      return ev;
+    }
+    if (grounded && cmd.roll && wishSpeed > 0) {
+      // PM_TryRoll: a roll the way you are moving.
+      this.rollLeft = JKA.rollTime;
+      this.rollVel.set(wishDir.x * JKA.rollSpeed, 0, wishDir.z * JKA.rollSpeed);
+      ev.rolled = Math.abs(cmd.fmove) >= Math.abs(cmd.smove) ? (cmd.fmove >= 0 ? 'F' : 'B') : cmd.smove > 0 ? 'R' : 'L';
+      vel.set(this.rollVel.x * UNIT, 0, this.rollVel.z * UNIT);
+      this.lastVy = 0;
+      this.wasGrounded = true;
+      return ev;
+    }
 
     if (grounded) {
       // PM_Friction on the ground plane.

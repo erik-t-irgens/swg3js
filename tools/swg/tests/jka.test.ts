@@ -294,6 +294,17 @@ assert.equal(r.clips[1].name, 'BOTH_JUMP1');
 assert.equal(r.clips[1].loop, true);
 assert.ok(messages.some((m) => m.includes('13 bones matched')), messages.join('\n'));
 assert.ok(defaultJkaClips().includes('BOTH_A3_TR_BL') && defaultJkaClips().includes('BOTH_FORCEJUMP1'));
+// A standing frame as the rest pose: frame 2 equals frame 1, so measured against it nothing moves.
+{
+  const still = planRetarget(gla, swgJoints, BONE_MAP, 2);
+  assert.equal(still.referenceFrame, 2);
+  const c = retargetClip(gla, cfg.get('BOTH_A1_T__B_')!, swgJoints, still);
+  const { poseCheck } = await import('../jka.mjs');
+  const check = poseCheck(c, swgJoints, still) as { bone: string; degrees: number }[];
+  assert.ok(check.every((x) => x.degrees === 0), JSON.stringify(check));
+  // and the hips sit where the bind pose puts them
+  assert.ok(Math.abs(c.tracks[1].translations[1] - 1.0) < 1e-6);
+}
 assert.ok(defaultJkaClips().includes('BOTH_S2_S1_T_') && defaultJkaClips().includes('BOTH_R3_B__S1'), 'medium and strong starts and returns keep the fast stance suffix');
 assert.ok(BONE_MAP.length >= 20);
 console.log('jka: ok');

@@ -214,7 +214,7 @@ class App {
         <h1>SWG3JS</h1>
         <div class="sub">Star Wars Galaxies, rebuilt for the browser. Ten worlds, one very ambitious side project.</div>
         <div class="controls">
-          <div><b>WASD</b> move · <b>Mouse</b> look · <b>Wheel</b> zoom · <b>Space</b> jump (hold to Force Jump higher) · <b>Ctrl</b> crouch · <b>Shift</b> walk · in water <b>Space</b>/<b>Ctrl</b> surface/dive, or look down and swim</div>
+          <div><b>WASD</b> move · <b>Mouse</b> look · <b>Wheel</b> zoom · <b>Space</b> jump (hold to Force Jump higher) · <b>Ctrl</b> crouch (tap while moving to roll) · <b>Shift</b> walk · in water <b>Space</b>/<b>Ctrl</b> surface/dive, or look down and swim</div>
           <div><b>LMB</b> attack · <b>E</b> mount speeder · <b>C</b> switch class · <b>T</b> fast-forward time</div>
           <div><b>M</b> galaxy map · <b>H</b> toggle help · <b>N</b> noclip fly (<b>+</b>/<b>-</b> speed) · <b>F</b> flashlight · <b>Esc</b> release mouse</div>
         </div>

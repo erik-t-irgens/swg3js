@@ -346,7 +346,12 @@ function swgBindWorld(joints) {
  * Plan the retarget: which SWG joint each JKA bone drives and the per-bone alignment between
  * rest directions. Returns { pairs, unitScale, report } where report lists what matched.
  */
-export function planRetarget(gla, joints, map = BONE_MAP) {
+/**
+ * Plan the retarget against a reference frame: the bones' rest is that frame's pose (a relaxed
+ * standing frame when given, else the file's base pose). Animations carry a constant root offset
+ * the base pose lacks, so a standing frame is the reference that keeps feet on the ground.
+ */
+export function planRetarget(gla, joints, map = BONE_MAP, referenceFrame = -1) {
   const jkaIndex = new Map(gla.bones.map((b, i) => [b.name.toLowerCase(), i]));
   const findSwg = (patterns) => {
     for (const p of patterns) {
@@ -355,7 +360,7 @@ export function planRetarget(gla, joints, map = BONE_MAP) {
     }
     return -1;
   };
-  const jkaBase = jkaWorld(gla, -1);
+  const jkaBase = jkaWorld(gla, referenceFrame);
   const swgBind = swgBindWorld(joints);
   const pairs = [];
   const missing = [];
@@ -406,7 +411,7 @@ export function planRetarget(gla, joints, map = BONE_MAP) {
   }
   const pelvis = pairs.find((p) => p.rootMotion);
   const unitScale = pelvis && jkaBase[pelvis.j].t[1] > 1e-3 ? swgBind[pelvis.s].t[1] / jkaBase[pelvis.j].t[1] : 0.0254;
-  return { pairs, bySwg, jkaBase, swgBind, unitScale, report: { matched: pairs.map((p) => `${p.jka} -> ${joints[p.s].name}`), missing, dropped, angles } };
+  return { pairs, bySwg, jkaBase, swgBind, unitScale, referenceFrame, report: { matched: pairs.map((p) => `${p.jka} -> ${joints[p.s].name}`), missing, dropped, angles } };
 }
 
 /**
@@ -528,7 +533,11 @@ export function importJkaClips(jkaDir, joints, wanted = defaultJkaClips(), { log
     const cfg = parseAnimationCfg((source.has(cfgPath) ? source.read(cfgPath) : base.read(cfgPath)).toString('latin1'));
     log(`${glaPath} (${glaFrom}): ${gla.numBones} bones, ${gla.numFrames} frames; ${cfgPath} (${cfgFrom}): ${cfg.size} animations`);
     if (cfgFrom !== glaFrom) log(`WARNING: the skeleton and its animation.cfg come from different archives; frame ranges may not match`);
-    const plan = planRetarget(gla, joints);
+    // Measure every clip against a relaxed standing frame rather than the file's base pose.
+    const stand = cfg.get('BOTH_STAND1') ?? cfg.get('BOTH_STAND2');
+    const referenceFrame = stand && stand.count > 0 && stand.first < gla.numFrames ? stand.first : -1;
+    const plan = planRetarget(gla, joints, BONE_MAP, referenceFrame);
+    log(`retarget: rest pose is ${referenceFrame >= 0 ? `${stand.name} frame ${referenceFrame}` : "the file's base pose"}`);
     log(`retarget: ${plan.report.matched.length} bones matched (${plan.report.matched.join(', ')}); scale ${plan.unitScale.toFixed(4)} m per unit`);
     if (plan.report.missing.length) log(`retarget: unmatched: ${plan.report.missing.join('; ')}; the SWG joints are ${joints.map((j) => j.name).join(', ')}`);
     if (plan.report.dropped.length) log(`retarget: left at bind pose (rest directions disagree): ${plan.report.dropped.join('; ')}`);
