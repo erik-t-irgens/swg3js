@@ -36,6 +36,8 @@
 //   node tools/swg/cli.mjs audit <swg-dir> <out-dir> [planet] [--limit=n]   every object the archives place on each converted planet against its pack:
 //                                                                  what is missing, why (skipped kind, creature, older conversion), and where;
 //                                                                  also written to <out-dir>/audit.txt
+//   node tools/swg/cli.mjs extras <swg-dir>                       what the archives outside the retail manifests add or replace, by category
+//                                                                  (a listing only; nothing from them is converted)
 //   node tools/swg/cli.mjs status <out-dir>                        what the packs under <out-dir> hold and which commands would fill the gaps
 //   node tools/swg/cli.mjs terrain-check <out-dir> [--limit=n] [--layers] [--at=x,z]
 //                                                                  generate terrain at every snapshot object and compare with its height;
@@ -1720,6 +1722,57 @@ switch (cmd) {
     }
     writeFileSync(join(pos[2], 'audit.txt'), lines.join('\n') + '\n');
     console.log(`written to ${join(pos[2], 'audit.txt')}`);
+    break;
+  }
+
+  case 'extras': {
+    // <swg-dir>: what the archives outside the retail manifests add or replace, by category, without converting any of it
+    if (!pos[1]) usage();
+    const dir = pos[1];
+    const isRetail = (f) => isRetailByName(f, statSync(join(dir, f)).size) !== null;
+    const all = openVfs(dir, { log: () => {} });
+    const retail = openVfs(dir, { filter: isRetail, log: () => {} });
+    const extra = all.archives.map((a) => basename(a.path)).filter((f) => !isRetail(f));
+    console.log(`archives outside the retail manifests: ${extra.length ? extra.join(', ') : 'none'}`);
+    const category = (name) => {
+      if (name.startsWith('snapshot/')) return 'world snapshots';
+      if (name.startsWith('datatables/buildout/')) return 'buildout tables';
+      if (/^terrain\/.*\.(trn|lay|tga)$/.test(name)) return 'terrain rules, building layers and heightmaps';
+      if (name.startsWith('terrain/environment/') || name.startsWith('datatables/environment/')) return 'sky and environment';
+      if (name.startsWith('datatables/clientregion/') || /^string\/en\/.*region/.test(name)) return 'named regions';
+      if (name.startsWith('object/')) return 'object templates';
+      if (name.startsWith('appearance/')) return 'appearances (meshes, portals, skeletons, animations)';
+      if (name.startsWith('texture/')) return 'textures';
+      if (name.startsWith('shader/') || name.startsWith('effect/')) return 'shaders and effects';
+      if (name.startsWith('datatables/')) return 'other datatables';
+      if (name.startsWith('string/')) return 'strings';
+      if (name.startsWith('ui/')) return 'user interface';
+      if (name.startsWith('sound/') || name.startsWith('music/')) return 'sound and music';
+      return 'other';
+    };
+    const detail = new Set(['world snapshots', 'buildout tables', 'terrain rules, building layers and heightmaps', 'sky and environment', 'named regions']);
+    const groups = new Map();
+    for (const name of all.list()) {
+      const st = all.stat(name);
+      if (!st || isRetail(basename(st.archive))) continue;
+      const cat = category(name);
+      const g = groups.get(cat) ?? { added: [], replaced: [] };
+      (retail.has(name) ? g.replaced : g.added).push(`${name} (${basename(st.archive)})`);
+      groups.set(cat, g);
+    }
+    const order = [...groups.entries()].sort((a, b) => b[1].added.length + b[1].replaced.length - (a[1].added.length + a[1].replaced.length));
+    for (const [cat, g] of order) {
+      console.log(`\n${cat}: ${g.added.length} new, ${g.replaced.length} replacing retail files`);
+      const show = (label, list) => {
+        if (!list.length) return;
+        const limit = detail.has(cat) ? list.length : 12;
+        console.log(`  ${label}:`);
+        for (const n of list.slice(0, limit)) console.log(`    ${n}`);
+        if (list.length > limit) console.log(`    ... and ${list.length - limit} more`);
+      };
+      show('replaced', g.replaced);
+      show('new', g.added);
+    }
     break;
   }
 
