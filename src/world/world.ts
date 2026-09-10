@@ -3,6 +3,9 @@ import { packIdOf, type PlanetDef } from '../data/planets';
 import type { Physics, RAPIER } from '../core/physics';
 import { CreatureManager } from './creatures';
 import { DayCycle } from './daycycle';
+import { SwgSky, type SkyLighting } from './sky';
+import { createWaterMaterial, type WaterMaterial } from './water';
+import { setEnvironment } from './envmap';
 import { PropFactory, type Collider, type Exclusion, type ScatterItem } from './props';
 import { FloraPlanter } from './flora';
 import { TerrainTextures } from './terrainTextures';
@@ -23,6 +26,12 @@ const FAR_TILE = 512;
 const FAR_RES = 32;
 const FAR_RADIUS = 6;
 /** Fog is authored for a short view; scale it for the long one. */
+/** The sea plane around the player that swells, its subdivision, and the sky-driven light strengths. */
+const WATER_NEAR = 3000;
+const WATER_SEGMENTS = 200;
+const SWG_MAIN_LIGHT = 2.4;
+const SWG_AMBIENT = 1.3;
+const SWG_FILL = 1.0;
 const FOG_SCALE = 0.18;
 /** Physics colliders only exist this many chunks out; nothing dynamic lives farther away. */
 const PHYSICS_RADIUS = 3;
@@ -132,13 +141,25 @@ export class World {
   private readonly hiddenGround: THREE.Object3D[] = [];
   private groundHiddenFor: Building | null = null;
   private csm: CSM | null = null;
+  /** The planet's own sky when its pack carries one; the procedural dome is hidden while it is up. */
+  swgSky: SwgSky | null = null;
+  /** Set by main: needed to filter the sky into an environment map for reflective surfaces. */
+  renderer: THREE.WebGLRenderer | null = null;
+  private pmrem: THREE.PMREMGenerator | null = null;
+  private envTexture: THREE.Texture | null = null;
+  private envFromCube: 'day' | 'night' | null = null;
+  private envTimer = 99;
+  private readonly fill = new THREE.DirectionalLight(0xffffff, 0);
+  private waterFar: THREE.Mesh | null = null;
+  private waterTime = 0;
+  private readonly waterMaterials: WaterMaterial[] = [];
   private portals: PortalRenderer | null = null;
   private readonly csmMaterials = new WeakSet<THREE.Material>();
   private csmScanAt = 0;
   private loadToken = 0;
 
   constructor(readonly scene: THREE.Scene, readonly physics: Physics) {
-    scene.add(this.chunkRoot, this.sun, this.sun.target, this.hemi);
+    scene.add(this.chunkRoot, this.sun, this.sun.target, this.hemi, this.fill, this.fill.target);
     this.sun.castShadow = true;
     this.sun.shadow.mapSize.set(4096, 4096);
     const sc = this.sun.shadow.camera;
@@ -204,21 +225,7 @@ export class World {
     this.hemi.color.set(planet.light.ambientSky);
     this.hemi.groundColor.set(planet.light.ambientGround);
 
-    if (planet.water) {
-      const geo = new THREE.PlaneGeometry(12000, 12000).rotateX(-Math.PI / 2);
-      const mat = new THREE.MeshStandardMaterial({
-        color: planet.water.color,
-        transparent: true,
-        opacity: planet.water.opacity,
-        roughness: 0.25,
-        metalness: 0.15,
-        depthWrite: false,
-      });
-      this.water = new THREE.Mesh(geo, mat);
-      this.water.position.y = planet.water.level;
-      this.water.receiveShadow = true;
-      this.scene.add(this.water);
-    }
+    if (planet.water) this.createGlobalWater(planet.water.color, planet.water.opacity, planet.water.level);
 
     this.lastCx = Number.NaN;
     this.lastCz = Number.NaN;
@@ -297,6 +304,8 @@ export class World {
           if (token !== this.loadToken) return null;
           await this.loadGroundTextures(pack);
           if (token !== this.loadToken) return null;
+          await this.loadSky(pack);
+          if (token !== this.loadToken) return null;
         } catch (err) {
           console.warn('terrain: failed to load the planet terrain, keeping procedural ground', err);
         }
@@ -374,6 +383,7 @@ export class World {
     this.flora = null;
     this.groundTextures?.dispose();
     this.groundTextures = null;
+    this.dropSky();
     for (const m of this.localWater) {
       this.scene.remove(m);
       m.geometry.dispose();
@@ -398,9 +408,131 @@ export class World {
     if (this.water) {
       this.scene.remove(this.water);
       this.water.geometry.dispose();
-      (this.water.material as THREE.Material).dispose();
       this.water = null;
     }
+    if (this.waterFar) {
+      this.scene.remove(this.waterFar);
+      this.waterFar.geometry.dispose();
+      this.waterFar = null;
+    }
+    for (const m of this.waterMaterials) m.dispose();
+    this.waterMaterials.length = 0;
+  }
+
+  /**
+   * The sea: a finely divided plane around the player that swells, and a flat ring beyond it
+   * out to the horizon. Both follow the player, the near plane snapping to its own cell size.
+   */
+  private createGlobalWater(color: number, opacity: number, level: number): void {
+    const near = createWaterMaterial(color, opacity, true);
+    const far = createWaterMaterial(color, opacity, false);
+    this.waterMaterials.push(near, far);
+    this.water = new THREE.Mesh(new THREE.PlaneGeometry(WATER_NEAR, WATER_NEAR, WATER_SEGMENTS, WATER_SEGMENTS).rotateX(-Math.PI / 2), near);
+    this.water.position.y = level;
+    this.water.receiveShadow = true;
+    this.water.frustumCulled = false;
+    this.scene.add(this.water);
+    this.waterFar = new THREE.Mesh(new THREE.RingGeometry(WATER_NEAR * 0.48, 9000, 96, 1).rotateX(-Math.PI / 2), far);
+    this.waterFar.position.y = level - 0.05;
+    this.waterFar.frustumCulled = false;
+    this.scene.add(this.waterFar);
+  }
+
+  /** The planet's sky from its pack: replaces the procedural dome and drives the lights, fog and reflections. */
+  private async loadSky(pack: AssetPack): Promise<void> {
+    const sky = await SwgSky.load(pack);
+    if (!sky) return;
+    this.dropSky();
+    this.swgSky = sky;
+    this.scene.add(sky.group);
+    markActor(sky.group);
+    this.sky.visible = false;
+    this.day.swg = true;
+    this.envTimer = 99;
+    this.envFromCube = null;
+    console.info(`sky: ${sky.data.blocks.length} environment blocks, ${sky.hasGradient ? 'gradient sky' : sky.data.skybox ? 'skybox' : 'clear colour'}, ${sky.data.sun ? 'sun' : 'no sun'}, ${sky.data.moon ? 'moon' : 'no moon'}, ${sky.data.stars?.count ?? 0} stars, reflections from ${sky.environment.day ? 'the planet cube maps' : 'the sky'}`);
+  }
+
+  private dropSky(): void {
+    if (this.swgSky) {
+      this.swgSky.dispose(this.scene);
+      this.swgSky = null;
+    }
+    this.sky.visible = true;
+    this.day.swg = false;
+    this.fill.intensity = 0;
+    this.envTexture?.dispose();
+    this.envTexture = null;
+    this.envFromCube = null;
+    setEnvironment(null);
+  }
+
+  /**
+   * The environment reflective surfaces see: the block's day or night cube map when the pack
+   * has one, otherwise the sky dome itself, filtered again every few seconds as it changes.
+   */
+  private refreshEnvironment(dt: number): void {
+    const sky = this.swgSky;
+    if (!sky || !this.renderer) return;
+    this.pmrem ??= new THREE.PMREMGenerator(this.renderer);
+    const cube = this.day.isDay ? sky.environment.day : sky.environment.night;
+    if (cube) {
+      const want = this.day.isDay ? 'day' : 'night';
+      if (this.envFromCube === want) return;
+      this.envFromCube = want;
+      const pmrem = this.pmrem;
+      new THREE.CubeTextureLoader().load(
+        cube.faces.map((f) => this.pack!.url(f)),
+        (tex) => {
+          tex.colorSpace = THREE.SRGBColorSpace;
+          const env = pmrem.fromCubemap(tex).texture;
+          tex.dispose();
+          this.envTexture?.dispose();
+          this.envTexture = env;
+          setEnvironment(env, 1);
+        },
+        undefined,
+        () => {
+          console.warn('sky: reflection cube map failed to load; reflecting the sky instead');
+          this.envFromCube = null;
+          sky.environment.day = sky.environment.night = null;
+        },
+      );
+      return;
+    }
+    this.envTimer += dt;
+    if (this.envTimer < 4) return;
+    this.envTimer = 0;
+    const env = this.pmrem.fromScene(sky.domeScene, 0.04, 1, 20000).texture;
+    this.envTexture?.dispose();
+    this.envTexture = env;
+    setEnvironment(env, 1);
+  }
+
+  /** Lights, fog and clear colour straight from the sky's colour ramps for this moment. */
+  private applySwgLighting(L: SkyLighting, playerPos: THREE.Vector3): void {
+    this.sun.color.copy(L.main);
+    this.sun.intensity = SWG_MAIN_LIGHT * L.mainScale;
+    if (this.csm) {
+      for (const l of this.csm.lights) {
+        l.color.copy(this.sun.color);
+        l.intensity = this.sun.intensity;
+      }
+    }
+    this.hemi.color.copy(L.ambient);
+    this.hemi.groundColor.copy(L.bounce).multiplyScalar(L.bounceScale).lerp(L.ambient, 0.5);
+    this.hemi.intensity = SWG_AMBIENT;
+    this.fill.color.copy(L.fill);
+    this.fill.intensity = SWG_FILL * L.fillScale;
+    // The client's fill light sits 45 degrees up on the far side from the main light.
+    const d = this.day.lightDir;
+    const h = Math.hypot(d.x, d.z) || 1;
+    this.fill.position.set(playerPos.x - (d.x / h) * 140, playerPos.y + 140, playerPos.z - (d.z / h) * 140);
+    this.fill.target.position.copy(playerPos);
+    const fog = this.scene.fog as THREE.FogExp2;
+    fog.color.copy(L.fog);
+    // The client's fog is exponential; three's is squared, so scale the density to match at half strength.
+    fog.density = L.fogDensity * 1.2;
   }
 
   private disposeChunk(c: Chunk): void {
@@ -474,27 +606,21 @@ export class World {
   /** Water where the terrain says it is: the global table's height, plus every lake and pool. */
   private applySwgWater(swg: SwgTerrain): void {
     const planet = this.planet;
-    const material = (this.water?.material as THREE.MeshStandardMaterial | undefined) ?? new THREE.MeshStandardMaterial({
-      color: planet.water?.color ?? 0x2e7fbb,
-      transparent: true,
-      opacity: planet.water?.opacity ?? 0.75,
-      roughness: 0.25,
-      metalness: 0.15,
-      depthWrite: false,
-    });
-    // Lakes are mirrored with the world, so their winding flips: draw water from both sides.
-    material.side = THREE.DoubleSide;
     if (swg.template.useGlobalWaterTable) {
-      if (!this.water) {
-        this.water = new THREE.Mesh(new THREE.PlaneGeometry(12000, 12000).rotateX(-Math.PI / 2), material);
-        this.water.receiveShadow = true;
-        this.scene.add(this.water);
+      if (!this.water) this.createGlobalWater(planet.water?.color ?? 0x2e7fbb, planet.water?.opacity ?? 0.75, swg.template.globalWaterTableHeight);
+      this.water!.visible = true;
+      this.water!.position.y = swg.template.globalWaterTableHeight;
+      if (this.waterFar) {
+        this.waterFar.visible = true;
+        this.waterFar.position.y = swg.template.globalWaterTableHeight - 0.05;
       }
-      this.water.visible = true;
-      this.water.position.y = swg.template.globalWaterTableHeight;
     } else if (this.water) {
       this.water.visible = false;
+      if (this.waterFar) this.waterFar.visible = false;
     }
+    // Lakes are triangulated outlines with no interior vertices, so they ripple but do not swell.
+    const material = createWaterMaterial(planet.water?.color ?? 0x2e7fbb, planet.water?.opacity ?? 0.75, false);
+    this.waterMaterials.push(material);
     for (const m of this.localWater) {
       this.scene.remove(m);
       m.geometry.dispose();
@@ -592,8 +718,7 @@ export class World {
   updateShadows(now: number): void {
     const csm = this.csm;
     if (csm) {
-      const lightDir = this.day.sunDir.y > 0.02 ? this.day.sunDir : this.day.moonDir;
-      csm.lightDirection.copy(lightDir).negate().normalize();
+      csm.lightDirection.copy(this.day.lightDir).negate().normalize();
       csm.update();
     }
     if (now - this.csmScanAt > 250) {
@@ -734,15 +859,24 @@ export class World {
     }
     this.updateInterior(playerPos);
     this.day.update(dt, fastTime);
-    this.applyLighting();
+    if (this.swgSky) {
+      this.applySwgLighting(this.swgSky.update(this.day, camPos, dt), playerPos);
+      this.refreshEnvironment(dt);
+    } else this.applyLighting();
     this.sky.position.copy(camPos);
+    this.waterTime += dt;
+    for (const m of this.waterMaterials) m.userData.uniforms.uTime.value = this.waterTime;
     if (this.water) {
-      this.water.position.x = playerPos.x;
-      this.water.position.z = playerPos.z;
+      const cell = WATER_NEAR / WATER_SEGMENTS;
+      this.water.position.x = Math.round(playerPos.x / cell) * cell;
+      this.water.position.z = Math.round(playerPos.z / cell) * cell;
+    }
+    if (this.waterFar) {
+      this.waterFar.position.x = playerPos.x;
+      this.waterFar.position.z = playerPos.z;
     }
     this.sun.target.position.copy(playerPos);
-    const lightDir = this.day.sunDir.y > 0.02 ? this.day.sunDir : this.day.moonDir;
-    this.sun.position.copy(playerPos).addScaledVector(lightDir, 220);
+    this.sun.position.copy(playerPos).addScaledVector(this.day.lightDir, 220);
     this.creatures.update(dt, playerPos, onAttack);
   }
 

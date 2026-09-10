@@ -120,7 +120,7 @@ $env:SWG = "C:\SWG"
 ```bash
 npm run swg -- verify "$SWG" --retail-only                                        # 1. which archives are retail (sanity check)
 npm run swg -- planets "$SWG" --retail-only                                       # 2. which planets the archives hold
-npm run swg -- snapshot "$SWG" all assets-private --radius=all --retail-only       # 3. every planet: objects, terrain, ground textures, flora, places (long: minutes per planet)
+npm run swg -- snapshot "$SWG" all assets-private --radius=all --retail-only       # 3. every planet: objects, terrain, ground textures, sky, flora, places (long: minutes per planet)
 npm run swg -- creatures "$SWG" assets-private --retail-only                      # 4. the creatures the planets spawn
 npm run swg -- player "$SWG" assets-private --retail-only                         # 5. the player character, dressed, with its animations
 npm run swg -- status assets-private                                              # 6. what is in place, and the command for anything missing
@@ -133,7 +133,9 @@ Step 3 also accepts one planet at a time (`snapshot "$SWG" tatooine assets-priva
 
 | What changed | Command to rerun |
 | --- | --- |
-| Ground textures, terrain rules, building layers | `terrain "$SWG" all assets-private --retail-only` (refreshes every existing pack in seconds) |
+| Ground textures, terrain rules, building layers, the sky | `terrain "$SWG" all assets-private --retail-only` (refreshes every existing pack in seconds) |
+| Just the sky: sun, moons, stars, colour ramps, skybox, reflection maps | `sky "$SWG" all assets-private --retail-only` |
+| Reflective metal and glass on buildings and props | `snapshot "$SWG" <planet> assets-private/<planet> --center=auto --radius=all --retail-only` (the shine is baked into each model's textures) |
 | Buildings, objects, flora, a new planet | `snapshot "$SWG" <planet> assets-private/<planet> --center=auto --radius=all --retail-only` |
 | Named places on the galaxy map | `pois "$SWG" all assets-private --retail-only` |
 | Skin, clothes, eyes, animations (walking, swimming) | `player "$SWG" assets-private --retail-only` |

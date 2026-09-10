@@ -62,6 +62,7 @@ class App {
     this.cam = new ThirdPersonCamera(window.innerWidth / window.innerHeight);
     this.input = new Input(this.canvas);
     this.world = new World(this.scene, physics);
+    this.world.renderer = this.renderer;
     this.portals = new PortalRenderer(this.renderer);
     this.world.attachCamera(this.cam.camera, !lowfx, this.portals);
     this.player = new Player(this.scene, physics);
@@ -141,6 +142,12 @@ class App {
         return out;
       },
       water: (x: number, z: number) => this.world.terrain.waterHeightAt(x, z),
+      /** Set the time of day (0 midnight, 0.5 noon) and report the sky's current lighting. */
+      time: (t?: number) => {
+        if (t !== undefined) this.world.day.time = t;
+        const L = this.world.swgSky?.lighting;
+        return { time: this.world.day.time, clock: this.world.day.clock(), swg: this.world.day.swg, isDay: this.world.day.isDay, index: this.world.day.colorIndex, light: this.world.day.lightDir.toArray().map((v) => Number(v.toFixed(2))), lighting: L ? { main: L.main.getHexString(), mainScale: Number(L.mainScale.toFixed(2)), ambient: L.ambient.getHexString(), fog: L.fog.getHexString(), fogDensity: L.fogDensity, sunMoonAlpha: L.sunMoonAlpha, starAlpha: L.starAlpha } : null };
+      },
       /** Simulate `seconds` of play at 60 Hz with the given keys held, without waiting on real frames. */
       advance: (seconds: number, keys: string[] = []) => {
         for (const k of keys) this.input.force(k, true);

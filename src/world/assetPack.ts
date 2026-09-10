@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { isReflective, registerReflective } from './envmap';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 
 export interface PackModelDef {
@@ -137,6 +138,7 @@ export class AssetPack {
             const mats = Array.isArray(o.material) ? o.material : [o.material];
             for (let i = 0; i < mats.length; i++) {
               let m = mats[i];
+              if (isReflective(m)) registerReflective(m);
               // Interior cells get their own material instances: the portal renderer stencils them apart from the shell.
               if (cell > 0 && !m.userData.interior) {
                 m = m.clone();
