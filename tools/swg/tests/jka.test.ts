@@ -138,7 +138,7 @@ function buildZip(files: Record<string, Buffer>): Buffer {
   return Buffer.concat([...parts, cdBuf, eocd]);
 }
 
-// --- a JKA-like skeleton (Quake space: x forward, y left, z up) with a T pose ------------------
+// --- a JKA-like skeleton (the file's space: x across with the right side at -x, -y forward, z up) ---
 const I: Q = [1, 0, 0, 0];
 const jkaBones: Bone[] = [
   { name: 'model_root', parent: -1, local: { q: I, t: [0, 0, 0] } },
@@ -148,24 +148,24 @@ const jkaBones: Bone[] = [
   { name: 'thoracic', parent: 3, local: { q: I, t: [0, 0, 8] } },
   { name: 'cervical', parent: 4, local: { q: I, t: [0, 0, 6] } },
   { name: 'cranium', parent: 5, local: { q: I, t: [0, 0, 4] } },
-  { name: 'rclavical', parent: 4, local: { q: I, t: [0, -4, 2] } },
-  { name: 'rhumerus', parent: 7, local: { q: I, t: [0, -4, 0] } }, // arm hanging down (-z), as it stands
+  { name: 'rclavical', parent: 4, local: { q: I, t: [-4, 0, 2] } },
+  { name: 'rhumerus', parent: 7, local: { q: I, t: [-4, 0, 0] } }, // arm hanging down (-z), as it stands
   { name: 'rradius', parent: 8, local: { q: I, t: [0, 0, -12] } },
   { name: 'rhand', parent: 9, local: { q: I, t: [0, 0, -10] } },
-  { name: 'rfemurYZ', parent: 1, local: { q: I, t: [0, -4, -2] } },
+  { name: 'rfemurYZ', parent: 1, local: { q: I, t: [-4, 0, -2] } },
   { name: 'rtibia', parent: 11, local: { q: I, t: [0, 0, -18] } },
   { name: 'rtalus', parent: 12, local: { q: I, t: [0, 0, -18] } },
 ];
 // Frames hold each bone's change from the base pose, relative to its parent's change (the
 // renderer chains them into the matrix that moves bind-space vertices). Frame 0: no change.
 // Frame 1: hips dropped 4 units, and the right upper arm swung forward 90 degrees about its own
-// pivot (about the left axis y, -z to +x): a rotation about the arm's base position p is T(p) R T(-p).
+// pivot (about the across axis x, -z to -y): a rotation about the arm's base position p is T(p) R T(-p).
 const frame0 = jkaBones.map(() => ({ q: I, t: [0, 0, 0] }));
 const frame1 = frame0.map((b) => ({ q: [...b.q] as Q, t: [...b.t] }));
 frame1[1].t = [0, 0, -4];
 {
-  const R = qaxis([0, 1, 0], -Math.PI / 2);
-  const pivot = [0, -4, 40 + 6 + 6 + 8 + 2]; // rhumerus base position: clavicle at y -4, z 62
+  const R = qaxis([1, 0, 0], -Math.PI / 2);
+  const pivot = [-4, 0, 40 + 6 + 6 + 8 + 2]; // rhumerus base position: clavicle at x -4, z 62
   const rp = qrot(R, pivot);
   frame1[8] = { q: R, t: [pivot[0] - rp[0], pivot[1] - rp[1], pivot[2] - rp[2]] };
 }
@@ -179,7 +179,7 @@ assert.equal(gla.numFrames, 3);
 assert.equal(gla.bones[8].name, 'rhumerus');
 assert.equal(gla.bones[8].parent, 7);
 const b1 = gla.boneAt(1, 8);
-assert.ok(Math.abs(b1.q[0] - Math.SQRT1_2) < 2e-4 && Math.abs(b1.q[2] + Math.SQRT1_2) < 2e-4, `rhumerus frame 1 quaternion ${b1.q}`);
+assert.ok(Math.abs(b1.q[0] - Math.SQRT1_2) < 2e-4 && Math.abs(b1.q[1] + Math.SQRT1_2) < 2e-4, `rhumerus frame 1 quaternion ${b1.q}`);
 assert.deepEqual(gla.boneAt(1, 1).t.map((v) => Math.round(v * 64) / 64), [0, 0, -4]);
 assert.ok(Math.abs(gla.bones[1].basePose[11] - 40) < 1e-5, 'pelvis base height');
 
@@ -212,7 +212,7 @@ const swgJoints = [
 const plan = planRetarget(gla, swgJoints);
 assert.equal(plan.report.matched.length, 13, plan.report.missing.join('; '));
 assert.ok(plan.report.missing.every((m: string) => /^l/.test(m)), `unexpected misses: ${plan.report.missing}`);
-assert.ok(Math.abs(plan.unitScale - 1.0 / 40) < 1e-9, `unit scale ${plan.unitScale}`);
+assert.ok(Math.abs(plan.unitScale - 0.9 / 36) < 1e-9, `unit scale (SWG leg over JKA leg) ${plan.unitScale}`);
 const armAngle = plan.report.angles.find((a: { bone: string }) => a.bone === 'rhumerus')!.degrees;
 assert.equal(armAngle, 0, 'both arms hang straight down at rest');
 
@@ -272,7 +272,7 @@ assert.ok(thighDir[1] < -0.44, `thigh should still point down, got ${thighDir}`)
   const p3 = planRetarget(g2, swgJoints);
   const c2 = retargetClip(g2, { name: 'X', first: 0, count: 1, reverse: false, loop: -1, fps: 20 }, swgJoints, p3);
   assert.equal(c2.frames, 1);
-  assert.ok(Math.abs(p3.unitScale - 1 / 40) < 1e-9);
+  assert.ok(Math.abs(p3.unitScale - 0.0254) < 1e-9, 'no legs to measure: an inch per unit');
 }
 
 // --- the same through a pk3 base folder ---------------------------------------------------------
@@ -294,14 +294,20 @@ assert.equal(r.clips[1].name, 'BOTH_JUMP1');
 assert.equal(r.clips[1].loop, true);
 assert.ok(messages.some((m) => m.includes('13 bones matched')), messages.join('\n'));
 assert.ok(defaultJkaClips().includes('BOTH_A3_TR_BL') && defaultJkaClips().includes('BOTH_FORCEJUMP1'));
-// A standing frame as the rest pose: frame 2 equals frame 1, so measured against it nothing moves.
+// A standing frame as the rest pose: frame 2 equals frame 1, so measured against it nothing
+// changes, and the limbs point where that frame points them (the arm forward, 90 degrees from
+// the SWG bind pose) while the unaligned spine stays as bound.
 {
   const still = planRetarget(gla, swgJoints, BONE_MAP, 2);
   assert.equal(still.referenceFrame, 2);
   const c = retargetClip(gla, cfg.get('BOTH_A1_T__B_')!, swgJoints, still);
   const { poseCheck } = await import('../jka.mjs');
   const check = poseCheck(c, swgJoints, still) as { bone: string; degrees: number }[];
-  assert.ok(check.every((x) => x.degrees === 0), JSON.stringify(check));
+  assert.ok(check.every((x) => x.degrees === (/^r_(bicep|forearm)$/.test(x.bone) ? 90 : 0)), JSON.stringify(check));
+  // without the alignment the change alone is applied, and nothing moves
+  const plain = planRetarget(gla, swgJoints, BONE_MAP, 2, { align: false });
+  const cp = retargetClip(gla, cfg.get('BOTH_A1_T__B_')!, swgJoints, plain);
+  assert.ok((poseCheck(cp, swgJoints, plain) as { degrees: number }[]).every((x) => x.degrees === 0));
   // and the hips sit where the bind pose puts them
   assert.ok(Math.abs(c.tracks[1].translations[1] - 1.0) < 1e-6);
 }

@@ -17,11 +17,13 @@
 //         plays backwards, loopFrames -1 means no loop).
 //   .pk3  plain zip archives (stored or deflate), later archive numbers override earlier ones.
 //
-// Quake space is x forward, y left, z up; the converter's glTF space is z forward, y up, x left,
-// so the mapping is a permutation with no mirror. Rest poses differ (JKA stands in a T pose,
-// SWG's bind pose does not), so each mapped bone carries an alignment from its JKA rest direction
-// to its SWG rest direction, and the JKA bone's world-space change from rest is applied to the
-// SWG bone in that aligned frame. Quaternions here are [w, x, y, z].
+// The humanoid skeleton's model space, measured from the file (the legs and the T-pose arms are
+// spread along x, the elbows and knees bend towards -y): x runs across the body with the right
+// side at -x, -y is forward and z is up. The converter's glTF space is z forward, y up, x left,
+// so the mapping is (x, z, -y), a rotation with no mirror.
+// Rest poses differ (JKA stands in a T pose, SWG's bind pose is an A pose), so each limb bone
+// carries an alignment turning its SWG rest direction onto its JKA rest direction, and the JKA
+// bone's world-space change from rest is applied on top of that. Quaternions here are [w, x, y, z].
 import { closeSync, openSync, readSync, readdirSync, statSync, existsSync } from 'node:fs';
 import * as fsExtra from 'node:fs';
 import { join } from 'node:path';
@@ -111,7 +113,7 @@ export function openJkaBase(dir) {
       const paths = { 'models/players/_humanoid/_humanoid.gla': loose('_humanoid.gla'), 'models/players/_humanoid/animation.cfg': loose('animation.cfg') };
       const file = (name) => paths[name.toLowerCase()];
       const one = { file: base, has: (name) => !!file(name), read: (name) => readFileSync(file(name)) };
-      return { base, archives: [], has: one.has, read: one.read, where: (name) => file(name) ?? null, archiveOf: () => one, close: () => {} };
+      return { base, archives: [], has: one.has, read: one.read, where: (name) => (file(name) ? base : null), archiveOf: () => one, close: () => {} };
     }
     throw new Error(`${base}: no .pk3 archives (expected assets0.pk3 .. assets3.pk3) and no loose _humanoid.gla + animation.cfg`);
   }
@@ -261,9 +263,9 @@ const vnorm = (a) => {
 /** How far the hips may rise or drop from a clip, in metres. */
 const ROOT_MOTION_LIMIT = 0.7;
 
-/** Quake (x forward, y left, z up) to the converter's glTF space (z forward, y up, x left). */
-const toGltfV = (v) => [v[1], v[2], v[0]];
-const toGltfQ = (q) => [q[0], q[2], q[3], q[1]];
+/** GLA model space (x across, right side at -x; -y forward; z up) to the converter's glTF space (x left, y up, z forward). */
+const toGltfV = (v) => [v[0], v[2], -v[1]];
+const toGltfQ = (q) => [q[0], q[1], q[3], -q[2]];
 
 // ---------------------------------------------------------------------------------------------
 // Retargeting.
@@ -279,20 +281,20 @@ export const BONE_MAP = [
   { jka: 'thoracic', swg: [/^spine_?3$/i, /^chest$/i, /^upper_?spine/i, /^torso$/i, /^spine_?c$/i], chain: 'cervical' },
   { jka: 'cervical', swg: [/^neck_?1?$/i, /neck/i], chain: 'cranium' },
   { jka: 'cranium', swg: [/^head$/i, /^head_?1$/i, /head/i], chain: null },
-  { jka: 'rclavical', swg: [/^r_?clav/i, /^r_?collar/i, /^r_?shoulder$/i], chain: 'rhumerus', loose: true },
-  { jka: 'rhumerus', swg: [/^r_?bicep$/i, /^r_?upper_?arm$/i, /^r_?arm$/i, /^r_?humerus$/i], chain: 'rradius' },
-  { jka: 'rradius', swg: [/^r_?forearm$/i, /^r_?fore_?arm$/i, /^r_?lower_?arm$/i, /^r_?elbow$/i], chain: 'rhand' },
-  { jka: 'rhand', swg: [/^r_?wrist$/i, /^r_?hand$/i], chain: null },
-  { jka: 'lclavical', swg: [/^l_?clav/i, /^l_?collar/i, /^l_?shoulder$/i], chain: 'lhumerus', loose: true },
-  { jka: 'lhumerus', swg: [/^l_?bicep$/i, /^l_?upper_?arm$/i, /^l_?arm$/i, /^l_?humerus$/i], chain: 'lradius' },
-  { jka: 'lradius', swg: [/^l_?forearm$/i, /^l_?fore_?arm$/i, /^l_?lower_?arm$/i, /^l_?elbow$/i], chain: 'lhand' },
-  { jka: 'lhand', swg: [/^l_?wrist$/i, /^l_?hand$/i], chain: null },
-  { jka: 'rfemurYZ', swg: [/^r_?thigh$/i, /^r_?upper_?leg$/i, /^r_?leg$/i, /^r_?femur$/i, /^r_?hip$/i], chain: 'rtibia' },
-  { jka: 'rtibia', swg: [/^r_?calf$/i, /^r_?shin$/i, /^r_?lower_?leg$/i, /^r_?knee$/i, /^r_?tibia$/i], chain: 'rtalus' },
-  { jka: 'rtalus', swg: [/^r_?foot$/i, /^r_?ankle$/i], chain: null },
-  { jka: 'lfemurYZ', swg: [/^l_?thigh$/i, /^l_?upper_?leg$/i, /^l_?leg$/i, /^l_?femur$/i, /^l_?hip$/i], chain: 'ltibia' },
-  { jka: 'ltibia', swg: [/^l_?calf$/i, /^l_?shin$/i, /^l_?lower_?leg$/i, /^l_?knee$/i, /^l_?tibia$/i], chain: 'ltalus' },
-  { jka: 'ltalus', swg: [/^l_?foot$/i, /^l_?ankle$/i], chain: null },
+  { jka: 'rclavical', limb: true, swg: [/^r_?clav/i, /^r_?collar/i, /^r_?shoulder$/i], chain: 'rhumerus', loose: true },
+  { jka: 'rhumerus', limb: true, swg: [/^r_?bicep$/i, /^r_?upper_?arm$/i, /^r_?arm$/i, /^r_?humerus$/i], chain: 'rradius' },
+  { jka: 'rradius', limb: true, swg: [/^r_?forearm$/i, /^r_?fore_?arm$/i, /^r_?lower_?arm$/i, /^r_?elbow$/i], chain: 'rhand' },
+  { jka: 'rhand', limb: true, swg: [/^r_?wrist$/i, /^r_?hand$/i], chain: null },
+  { jka: 'lclavical', limb: true, swg: [/^l_?clav/i, /^l_?collar/i, /^l_?shoulder$/i], chain: 'lhumerus', loose: true },
+  { jka: 'lhumerus', limb: true, swg: [/^l_?bicep$/i, /^l_?upper_?arm$/i, /^l_?arm$/i, /^l_?humerus$/i], chain: 'lradius' },
+  { jka: 'lradius', limb: true, swg: [/^l_?forearm$/i, /^l_?fore_?arm$/i, /^l_?lower_?arm$/i, /^l_?elbow$/i], chain: 'lhand' },
+  { jka: 'lhand', limb: true, swg: [/^l_?wrist$/i, /^l_?hand$/i], chain: null },
+  { jka: 'rfemurYZ', limb: true, swg: [/^r_?thigh$/i, /^r_?upper_?leg$/i, /^r_?leg$/i, /^r_?femur$/i, /^r_?hip$/i], chain: 'rtibia' },
+  { jka: 'rtibia', limb: true, swg: [/^r_?calf$/i, /^r_?shin$/i, /^r_?lower_?leg$/i, /^r_?knee$/i, /^r_?tibia$/i], chain: 'rtalus' },
+  { jka: 'rtalus', limb: true, swg: [/^r_?foot$/i, /^r_?ankle$/i], chain: null },
+  { jka: 'lfemurYZ', limb: true, swg: [/^l_?thigh$/i, /^l_?upper_?leg$/i, /^l_?leg$/i, /^l_?femur$/i, /^l_?hip$/i], chain: 'ltibia' },
+  { jka: 'ltibia', limb: true, swg: [/^l_?calf$/i, /^l_?shin$/i, /^l_?lower_?leg$/i, /^l_?knee$/i, /^l_?tibia$/i], chain: 'ltalus' },
+  { jka: 'ltalus', limb: true, swg: [/^l_?foot$/i, /^l_?ankle$/i], chain: null },
 ];
 
 /** Rotation and position of a base pose matrix (its rotation columns normalised, as files may carry a scale). */
@@ -358,15 +360,13 @@ function swgBindWorld(joints) {
 }
 
 /**
- * Plan the retarget: which SWG joint each JKA bone drives and the per-bone alignment between
- * rest directions. Returns { pairs, unitScale, report } where report lists what matched.
+ * Plan the retarget: which SWG joint each JKA bone drives, the alignment between the two rest
+ * directions of each limb bone, and the unit scale. The bones' rest is the reference frame's
+ * pose (a relaxed standing frame when given, else the file's base pose): animations carry a
+ * constant root offset the base pose lacks, so a standing frame is the reference that keeps
+ * feet on the ground. Returns { pairs, unitScale, report } where report lists what matched.
  */
-/**
- * Plan the retarget against a reference frame: the bones' rest is that frame's pose (a relaxed
- * standing frame when given, else the file's base pose). Animations carry a constant root offset
- * the base pose lacks, so a standing frame is the reference that keeps feet on the ground.
- */
-export function planRetarget(gla, joints, map = BONE_MAP, referenceFrame = -1, { align = false } = {}) {
+export function planRetarget(gla, joints, map = BONE_MAP, referenceFrame = -1, { align = true } = {}) {
   const jkaIndex = new Map(gla.bones.map((b, i) => [b.name.toLowerCase(), i]));
   const findSwg = (patterns) => {
     for (const p of patterns) {
@@ -424,12 +424,22 @@ export function planRetarget(gla, joints, map = BONE_MAP, referenceFrame = -1, {
     while (parent >= 0 && !(byJka.get(parent)?.align)) parent = gla.bones[parent].parent;
     p.align = parent >= 0 ? byJka.get(parent).align : [1, 0, 0, 0];
   }
-  // By default the change is applied in world space as it is: with a standing frame as the rest
-  // the two skeletons stand alike, and a direction-only alignment would guess each bone's twist
-  // and turn swings into the wrong plane. The angles stay in the report.
-  if (!align) for (const p of pairs) p.align = [1, 0, 0, 0];
-  const pelvis = pairs.find((p) => p.rootMotion);
-  const unitScale = pelvis && jkaBase[pelvis.j].t[1] > 1e-3 ? swgBind[pelvis.s].t[1] / jkaBase[pelvis.j].t[1] : 0.0254;
+  // Only the limbs are aligned: their joints sit on the limb's axis, so matching the directions
+  // puts an arm or a leg where JKA has it. The spine's joints are placed differently in the two
+  // skeletons (a lean would be read into the posture), so it takes the change as it is.
+  for (const p of pairs) if (!align || !p.limb) p.align = [1, 0, 0, 0];
+  // Units: the leg (thigh plus shin) is the same body part in both skeletons; the pelvis height
+  // is not, as the file's origin sits some way up the body.
+  const legOf = (side) => {
+    const th = pairs.find((p) => p.jka === `${side}femurYZ`);
+    const sh = pairs.find((p) => p.jka === `${side}tibia`);
+    const an = pairs.find((p) => p.jka === `${side}talus`);
+    if (!th || !sh || !an) return null;
+    const j = vlen(vsub(jkaBase[sh.j].t, jkaBase[th.j].t)) + vlen(vsub(jkaBase[an.j].t, jkaBase[sh.j].t));
+    const s = vlen(vsub(swgBind[sh.s].t, swgBind[th.s].t)) + vlen(vsub(swgBind[an.s].t, swgBind[sh.s].t));
+    return j > 1e-3 && s > 1e-6 ? s / j : null;
+  };
+  const unitScale = legOf('r') ?? legOf('l') ?? 0.0254;
   return { pairs, bySwg, jkaBase, swgBind, unitScale, referenceFrame, report: { matched: pairs.map((p) => `${p.jka} -> ${joints[p.s].name}`), missing, dropped, angles } };
 }
 
@@ -456,9 +466,10 @@ export function retargetClip(gla, entry, joints, plan, { name = entry.name, fps 
       let q;
       let t;
       if (p) {
+        // The bone's change from rest in world space, applied to the SWG bone once that is
+        // turned to point the way the JKA bone points at rest (align takes JKA to SWG).
         const delta = qmul(anim[p.j].q, qconj(jkaBase[p.j].q));
-        const aligned = qmul(qmul(p.align, delta), qconj(p.align));
-        q = qnorm(qmul(aligned, swgBind[i].q));
+        q = qnorm(qmul(delta, qmul(qconj(p.align), swgBind[i].q)));
       } else q = parent ? qnorm(qmul(parent.q, j.rotation)) : qnorm(j.rotation);
       let localT = j.translation;
       if (p?.rootMotion) {
@@ -550,7 +561,11 @@ export function clipReport(gla, entry, clip, joints, plan, at = 0.5) {
   return `${entry.name} frame ${frame}/${clip.frames}: ${parts.join('; ')}`;
 }
 
-/** The JKA clips the game asks for by default: saber attacks of the three single styles, the moves around them, jumps and rolls. */
+/**
+ * The JKA clips the game asks for by default: saber attacks of the three single styles, the
+ * moves around them, jumps and rolls. (BOTH_LAND2, the hard landing, is left out: its frames
+ * are authored a body-length above the ground and the multiplayer game never plays it.)
+ */
 export function defaultJkaClips() {
   const quads = ['T__B_', 'TL_BR', '_L__R', 'BL_TR', 'BR_TL', '_R__L', 'TR_BL'];
   const starts = ['T_', 'TL', '_L', 'BL', 'BR', '_R', 'TR'];
@@ -565,7 +580,7 @@ export function defaultJkaClips() {
     for (const q of from) names.push(`BOTH_B${s}_${q}___`);
   }
   names.push('BOTH_STAND2', 'BOTH_SABERFAST_STANCE', 'BOTH_SABERSLOW_STANCE', 'BOTH_STAND1TO2', 'BOTH_STAND2TO1');
-  names.push('BOTH_JUMP1', 'BOTH_JUMPBACK1', 'BOTH_JUMPLEFT1', 'BOTH_JUMPRIGHT1', 'BOTH_INAIR1', 'BOTH_LAND1', 'BOTH_LAND2', 'BOTH_FORCEJUMP1', 'BOTH_FORCEINAIR1', 'BOTH_FORCELAND1');
+  names.push('BOTH_JUMP1', 'BOTH_JUMPBACK1', 'BOTH_JUMPLEFT1', 'BOTH_JUMPRIGHT1', 'BOTH_INAIR1', 'BOTH_LAND1', 'BOTH_FORCEJUMP1', 'BOTH_FORCEINAIR1', 'BOTH_FORCELAND1');
   names.push('BOTH_FLIP_F', 'BOTH_FLIP_B', 'BOTH_FLIP_L', 'BOTH_FLIP_R', 'BOTH_ROLL_F', 'BOTH_ROLL_B', 'BOTH_ROLL_L', 'BOTH_ROLL_R');
   names.push('BOTH_CROUCH1', 'BOTH_CROUCH1IDLE', 'BOTH_CROUCH1WALK', 'BOTH_CROUCH1WALKBACK', 'BOTH_STAND1');
   names.push('BOTH_LUNGE2_B__T_', 'BOTH_FORCELEAP2_T__B_', 'BOTH_JUMPFLIPSTABDOWN', 'BOTH_JUMPFLIPSLASHDOWN1', 'BOTH_ATTACK_BACK', 'BOTH_A2_STABBACK1', 'BOTH_CROUCHATTACKBACK1', 'BOTH_ROLL_STAB');
@@ -618,7 +633,7 @@ export function importJkaClips(jkaDir, joints, wanted = defaultJkaClips(), { log
     }
     // Where a few telling clips put the hips and limbs (x left, y up, z forward), against the JKA bones.
     log(`bind pose: ${clipReport(gla, cfg.get(stance?.source ?? 'BOTH_STAND1') ?? [...cfg.values()][0], stance ?? clips[0], joints, plan, 0)}`);
-    for (const name of ['BOTH_CROUCH1IDLE', 'BOTH_LAND2', 'BOTH_JUMP1', 'BOTH_A2_T__B_', 'BOTH_A2__L__R']) {
+    for (const name of ['BOTH_CROUCH1IDLE', 'BOTH_FORCELAND1', 'BOTH_JUMP1', 'BOTH_A2_T__B_', 'BOTH_A2__L__R']) {
       const c = clips.find((x) => x.source === name);
       if (c) log(`check: ${clipReport(gla, cfg.get(name), c, joints, plan, 0.5)}`);
     }

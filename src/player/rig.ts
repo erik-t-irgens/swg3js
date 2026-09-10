@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 
-export type RigState = 'idle' | 'walk' | 'run' | 'air' | 'seated' | 'swim' | 'float' | 'crouch' | 'crouchWalk';
+export type RigState = 'idle' | 'walk' | 'run' | 'air' | 'seated' | 'swim' | 'float' | 'crouch' | 'crouchWalk' | 'stance';
 
 /** Clip names used for each state, in preference order (placeholder rig names, then the game's). */
 const STATE_CLIPS: Record<RigState, string[]> = {
@@ -14,6 +14,8 @@ const STATE_CLIPS: Record<RigState, string[]> = {
   float: ['float', 'loop_swimming:speed0', 'swim', 'idle'],
   crouch: ['BOTH_CROUCH1IDLE', 'BOTH_CROUCH1', 'sneak_pose', 'idle', 'stand'],
   crouchWalk: ['BOTH_CROUCH1WALK', 'sneak', 'walk', 'loop_walk'],
+  /** Standing with the saber drawn: the style's stance (set through `stanceClip`), else the idle. */
+  stance: ['BOTH_STAND2', 'idle_combat', 'idle', 'Idle', 'stand', 'loop_stand'],
 };
 
 /** Natural travel speed of the placeholder rig's locomotion clips, in m/s, used to scale playback. */
@@ -37,6 +39,8 @@ export interface RigOptions {
   clipSpeeds?: Record<string, number>;
   /** Root scale to apply (the placeholder rig is a little tall for the world). */
   scale?: number;
+  /** Clips that hold their last frame instead of looping (Jedi Academy's stances, the in-air pose). */
+  hold?: string[];
 }
 
 const tmpQ = new THREE.Quaternion();
@@ -62,6 +66,9 @@ export class CharacterRig {
   private readonly bindLocal = new Map<THREE.Bone, THREE.Quaternion>();
   private readonly materials: THREE.MeshStandardMaterial[] = [];
   private readonly clipSpeeds: Record<string, number>;
+  private readonly hold: Set<string>;
+  /** The clip the `stance` state plays, when the rig has it; the saber style picks it. */
+  stanceClip: string | null = null;
   private current: THREE.AnimationAction | null = null;
   private state: RigState | null = null;
   /** A one-off clip (a swing, a jump, a landing) playing over the state clips until it ends. */
@@ -73,6 +80,7 @@ export class CharacterRig {
     this.root = scene;
     this.scale = options.scale ?? 1;
     this.clipSpeeds = options.clipSpeeds ?? {};
+    this.hold = new Set(options.hold ?? []);
     this.mixer = new THREE.AnimationMixer(scene);
     for (const clip of clips) this.actions.set(clip.name, this.mixer.clipAction(clip));
     scene.traverse((o) => {
@@ -191,11 +199,14 @@ export class CharacterRig {
       this.state = state;
       return;
     }
-    if (state !== this.state) {
-      const clipName = STATE_CLIPS[state].find((n) => this.actions.has(n));
+    const wantedStance = state === 'stance' && this.stanceClip && this.actions.has(this.stanceClip) ? this.stanceClip : null;
+    if (state !== this.state || (wantedStance && this.current?.getClip().name !== wantedStance)) {
+      const clipName = wantedStance ?? STATE_CLIPS[state].find((n) => this.actions.has(n));
       const next = clipName ? this.actions.get(clipName)! : null;
       if (next && next !== this.current) {
-        next.reset().setEffectiveWeight(1).play();
+        // A held clip (a stance) plays once and keeps its last frame.
+        next.reset().setLoop(this.hold.has(clipName!) ? THREE.LoopOnce : THREE.LoopRepeat, Infinity).setEffectiveWeight(1).play();
+        next.clampWhenFinished = true;
         if (this.current) this.current.crossFadeTo(next, 0.18, false);
         this.current = next;
       }
@@ -246,7 +257,7 @@ export class CharacterRig {
 }
 
 interface PlayerManifest {
-  players: { id: string; file: string; clipSpeeds?: Record<string, number>; scale?: number }[];
+  players: { id: string; file: string; clipSpeeds?: Record<string, number>; scale?: number; jkaClips?: Record<string, { loop: boolean }> }[];
 }
 
 /**
@@ -260,7 +271,8 @@ export async function loadPlayerRig(baseUrl: string): Promise<CharacterRig> {
       const manifest = (await res.json()) as PlayerManifest;
       const entry = manifest.players?.[0];
       if (entry) {
-        const rig = await CharacterRig.load(`${baseUrl}assets-private/${entry.file}`, { clipSpeeds: entry.clipSpeeds, scale: entry.scale ?? 1 });
+        const hold = Object.entries(entry.jkaClips ?? {}).filter(([, c]) => !c.loop).map(([name]) => name);
+        const rig = await CharacterRig.load(`${baseUrl}assets-private/${entry.file}`, { clipSpeeds: entry.clipSpeeds, scale: entry.scale ?? 1, hold });
         console.info(`player model ${entry.id}: clips ${rig.clipNames.join(', ')}; bones ${rig.boneNames.join(', ')}`);
         return rig;
       }

@@ -6,12 +6,16 @@ import { Group, groups, RAPIER, type Physics } from '../core/physics';
 import { markActor } from '../world/portalRender';
 import type { Speeder } from '../vehicles/speeder';
 import type { World } from '../world/world';
-import { STYLE_DAMAGE, SaberCombat, type SaberInput } from '../combat/saber';
+import { MOVES, STYLE_DAMAGE, SaberCombat, animForStyle, type SaberInput } from '../combat/saber';
 import { JkaMovement, type MoveCommand } from './jkaMove';
 import type { CharacterRig } from './rig';
 
 // The original game's run is 5.375 m/s; the character stands about 1.75 m.
 const RUN_SPEED = 5.5;
+/** The player's capsule: its radius and half the straight part, standing and crouched (1.6 m and 1.0 m tall). */
+const CAPSULE_RADIUS = 0.35;
+const STAND_HALF_HEIGHT = 0.45;
+const CROUCH_HALF_HEIGHT = 0.15;
 const WALK_SPEED = 2.0;
 const JUMP_HEIGHT = 1.4;
 /** Depth of the feet below the surface at which walking becomes swimming (the chest is under). */
@@ -180,6 +184,7 @@ export class Player {
   private readonly cmd: MoveCommand = { forward: new THREE.Vector3(), right: new THREE.Vector3(), fmove: 0, smove: 0, walk: false, crouch: false, roll: false, jump: false, speedScale: 1 };
   /** Ducking (Ctrl on land): half speed, crouch clips, and the crouched attacks. */
   crouching = false;
+  private colliderCrouched = false;
   jetThrust = false;
   /** Fly mode for exploring and bug hunting: no gravity, no collision. */
   noclip = false;
@@ -203,7 +208,7 @@ export class Player {
 
     const world = physics.world;
     this.body = world.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased());
-    this.collider = world.createCollider(RAPIER.ColliderDesc.capsule(0.45, 0.35).setTranslation(0, 0.8, 0), this.body);
+    this.collider = world.createCollider(RAPIER.ColliderDesc.capsule(STAND_HALF_HEIGHT, CAPSULE_RADIUS).setTranslation(0, CAPSULE_RADIUS + STAND_HALF_HEIGHT, 0), this.body);
     this.controller = world.createCharacterController(0.04);
     this.controller.enableAutostep(0.5, 0.2, true);
     this.controller.setMaxSlopeClimbAngle((55 * Math.PI) / 180);
@@ -425,6 +430,7 @@ export class Player {
 
     const walking = input.isDown('ShiftLeft') || input.isDown('ShiftRight');
     this.crouching = !this.swimming && (input.isDown('ControlLeft') || input.isDown('ControlRight'));
+    this.setCrouchCollider(this.crouching && this.grounded);
     let speed = (walking ? WALK_SPEED : RUN_SPEED) * this.speedMultiplier * (this.crouching && this.grounded ? 0.5 : 1);
 
     // Water: the surface here, and how deep the body sits in it. Swimming starts when the
@@ -482,7 +488,7 @@ export class Player {
       if (ev.forceJumpStarted) this.playOnce('BOTH_FORCEJUMP1', 0.08);
       if (ev.rolled) this.playOnce(`BOTH_ROLL_${ev.rolled}`, 0.05);
       if (this.jka.rolling) this.crouching = false;
-      if (ev.landed !== null && ev.landed >= 2 && !this.saber.busy) this.playOnce(ev.landed > 30 ? 'BOTH_LAND2' : 'BOTH_LAND1', 0.06);
+      if (ev.landed !== null && ev.landed >= 2 && !ev.rolled && !this.saber.busy) this.playOnce(ev.forceLanded ? 'BOTH_FORCELAND1' : 'BOTH_LAND1', 0.06);
       if (ev.damage > 0) this.takeDamage(ev.damage);
     } else if (this.grounded) {
       this.vel.x = move.x * speed;
@@ -567,7 +573,10 @@ export class Player {
     else if (this.swimming) rig.setState(moving || this.submerged ? 'swim' : 'float', speed);
     else if (!this.grounded) rig.setState('air');
     else if (this.crouching) rig.setState(moving ? 'crouchWalk' : 'crouch', speed);
-    else if (!moving) rig.setState('idle');
+    else if (!moving && this.saberOn && this.hasJkaClips) {
+      rig.stanceClip = animForStyle(MOVES.get('READY')!, this.saber.style);
+      rig.setState('stance');
+    } else if (!moving) rig.setState('idle');
     else rig.setState(speed < 4.5 ? 'walk' : 'run', speed);
     rig.update(dt);
     this.group.updateMatrixWorld(true);
@@ -599,6 +608,15 @@ export class Player {
   }
 
   /** Play a one-off clip on the rig when it has it (jumps, landings). */
+  /** The capsule shrinks to the crouch height while ducking (its feet stay where they are). */
+  private setCrouchCollider(crouched: boolean): void {
+    if (crouched === this.colliderCrouched) return;
+    this.colliderCrouched = crouched;
+    const half = crouched ? CROUCH_HALF_HEIGHT : STAND_HALF_HEIGHT;
+    this.collider.setHalfHeight(half);
+    this.collider.setTranslationWrtParent({ x: 0, y: CAPSULE_RADIUS + half, z: 0 });
+  }
+
   private playOnce(clip: string, fadeIn: number): void {
     if (this.rig?.has(clip)) this.rig.play(clip, { fadeIn });
   }

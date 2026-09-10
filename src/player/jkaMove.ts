@@ -59,6 +59,8 @@ export interface MoveEvents {
   rolled: 'F' | 'B' | 'L' | 'R' | null;
   /** Set on the frame the feet touch down: the client's landing "delta" (fall energy in its units). */
   landed: number | null;
+  /** The landing ended a force jump (or fell far): the absorbing landing rather than the hop. */
+  forceLanded: boolean;
   damage: number;
 }
 
@@ -106,7 +108,7 @@ export class JkaMovement {
    * from the previous step. `force` reports the pool and spends from it.
    */
   step(dt: number, vel: THREE.Vector3, pos: THREE.Vector3, grounded: boolean, cmd: MoveCommand, force: { value: number; spend: (n: number) => void }): MoveEvents {
-    const ev: MoveEvents = { jumped: false, forceJumpStarted: false, rolled: null, landed: null, damage: 0 };
+    const ev: MoveEvents = { jumped: false, forceJumpStarted: false, rolled: null, landed: null, forceLanded: false, damage: 0 };
     // Metres to units for the client's arithmetic.
     let vx = vel.x / UNIT;
     let vy = vel.y / UNIT;
@@ -124,6 +126,7 @@ export class JkaMovement {
       const safe = JKA.forceJumpHeight[level] + JKA.forceJumpHeight[0];
       if (fell <= safe) delta = 0;
       else ev.damage = Math.min(JKA.fallDamageMax, Math.round(((fell - safe) * UNIT) * JKA.fallDamagePerMetre));
+      ev.forceLanded = this.forceJumping || ev.damage > 0;
       this.forceJumping = false;
       this.jumpStartY = Number.NaN;
       this.apexY = Number.NaN;
@@ -152,7 +155,10 @@ export class JkaMovement {
       this.wasGrounded = grounded;
       return ev;
     }
-    if (grounded && cmd.roll && wishSpeed > 0) {
+    // Touching down crouched while moving rolls out of the landing and absorbs some of it.
+    const landingRoll = ev.landed !== null && ev.landed >= 2 && cmd.crouch && wishSpeed > 0;
+    if (landingRoll) ev.damage = Math.round(ev.damage / 3);
+    if (grounded && (cmd.roll || landingRoll) && wishSpeed > 0) {
       // PM_TryRoll: a roll the way you are moving.
       this.rollLeft = JKA.rollTime;
       this.rollVel.set(wishDir.x * JKA.rollSpeed, 0, wishDir.z * JKA.rollSpeed);
