@@ -64,7 +64,38 @@ function maskInfo(mask) {
   return { shift, max: (1 << bits) - 1 };
 }
 
-export function decodeDds(buf) {
+/** Bytes one mip level of the given size takes in this file's pixel format. */
+function levelBytes(buf, width, height) {
+  const pfFlags = buf.readUInt32LE(80);
+  if (pfFlags & 0x4) {
+    const fourCC = buf.toString('latin1', 84, 88);
+    return Math.max(1, Math.ceil(width / 4)) * Math.max(1, Math.ceil(height / 4)) * (fourCC === 'DXT1' ? 8 : 16);
+  }
+  return width * height * (buf.readUInt32LE(88) / 8);
+}
+
+/** Whether the file holds the six faces of a cube map (DDSCAPS2_CUBEMAP). */
+export function isDdsCube(buf) {
+  return buf.toString('latin1', 0, 4) === 'DDS ' && (buf.readUInt32LE(112) & 0x200) !== 0;
+}
+
+/**
+ * The six faces of a cube map DDS, each decoded at its top level, in the file's order:
+ * +X, -X, +Y, -Y, +Z, -Z. Every face carries its whole mip chain before the next face.
+ */
+export function decodeDdsCube(buf) {
+  if (!isDdsCube(buf)) throw new Error('Not a cube map DDS');
+  const height = buf.readUInt32LE(12);
+  const width = buf.readUInt32LE(16);
+  const mips = buf.readUInt32LE(8) & 0x20000 ? Math.max(1, buf.readUInt32LE(28)) : 1;
+  let faceBytes = 0;
+  for (let m = 0, w = width, h = height; m < mips; m++, w = Math.max(1, w >> 1), h = Math.max(1, h >> 1)) faceBytes += levelBytes(buf, w, h);
+  const faces = [];
+  for (let f = 0; f < 6; f++) faces.push(decodeDds(buf, 128 + f * faceBytes));
+  return { size: width, faces };
+}
+
+export function decodeDds(buf, dataOffset = 128) {
   if (buf.toString('latin1', 0, 4) !== 'DDS ') throw new Error('Not a DDS file');
   const height = buf.readUInt32LE(12);
   const width = buf.readUInt32LE(16);
@@ -72,7 +103,7 @@ export function decodeDds(buf) {
   const fourCC = buf.toString('latin1', 84, 88);
   const bitCount = buf.readUInt32LE(88);
   const masks = [buf.readUInt32LE(92), buf.readUInt32LE(96), buf.readUInt32LE(100), buf.readUInt32LE(104)];
-  const data = buf.subarray(128);
+  const data = buf.subarray(dataOffset);
   const out = new Uint8Array(width * height * 4);
   let hasAlpha = false;
 

@@ -31,6 +31,8 @@
 //   node tools/swg/cli.mjs pob <swg-dir> <file.pob>                 print a portal building's cells, portals and links (diagnostic)
 //   node tools/swg/cli.mjs terrain <swg-dir> <planet>|all <out-dir>  copy just the terrain template and ground textures into a pack
 //                                                                  ("all": into every planet pack already under <out-dir>)
+//   node tools/swg/cli.mjs sky <swg-dir> <planet>|all <out-dir>      the planet's sky (sun, moons, colour ramps, skybox, reflection maps) into a pack
+//                                                                  (snapshot and terrain do this too)
 //   node tools/swg/cli.mjs status <out-dir>                        what the packs under <out-dir> hold and which commands would fill the gaps
 //   node tools/swg/cli.mjs terrain-check <out-dir> [--limit=n] [--layers] [--at=x,z]
 //                                                                  generate terrain at every snapshot object and compare with its height;
@@ -61,6 +63,8 @@ import { createRequire } from 'node:module';
 /** Named places per planet (see regions/build.mjs). */
 const REGIONS = createRequire(import.meta.url)('./regions/regions.json');
 import { decodeTga, encodeHeightmap } from './tga.mjs';
+import { exportSky } from './sky.mjs';
+import { loadEffect } from './texrender.mjs';
 import { readTemplate, stringParam } from './objtemplate.mjs';
 import { openTre, openVfs, readHeader } from './tre.mjs';
 
@@ -118,16 +122,57 @@ function textureFor(vfs, shaderPath) {
   if (textureCache.has(shaderPath)) return textureCache.get(shaderPath);
   let result = null;
   try {
-    const { main, alphaMode, effect } = shaderTextures(parseIff(vfs.read(shaderPath)));
+    const { main, slots, alphaMode, effect } = shaderTextures(parseIff(vfs.read(shaderPath)));
     if (main && vfs.has(main)) {
       const dds = decodeDds(vfs.read(main));
       result = { path: main, png: encodePng(dds.width, dds.height, dds.rgba), hasAlpha: dds.hasAlpha, alphaMode: alphaFromEffect(vfs, effect, alphaMode) };
+      Object.assign(result, surfaceFor(vfs, effect, slots, dds, result.alphaMode));
     }
   } catch (err) {
     console.error(`  texture for ${shaderPath} skipped: ${err.message}`);
   }
   textureCache.set(shaderPath, result);
   return result;
+}
+
+const surfaceEffects = new Map();
+
+/**
+ * How shiny a shader's surface is, from its effect and texture slots. The game keeps the
+ * specular and reflection mask in the alpha channel of the diffuse map (when the effect does
+ * not use alpha for transparency): bright alpha means glossy metal or glass. Reflective
+ * shaders carry an environment cube map (slot ENVM) that the scene's own environment replaces.
+ * Returns glTF metallic/roughness factors and, where a mask exists, a metallicRoughness image.
+ */
+function surfaceFor(vfs, effect, slots, dds, alphaMode) {
+  const name = (effect ?? '').toLowerCase();
+  let tags = surfaceEffects.get(name);
+  if (!tags) {
+    tags = new Set();
+    try {
+      const eff = effect ? loadEffect(vfs, effect.replace(/\\/g, '/')) : null;
+      for (const pass of eff?.passes ?? []) for (const st of pass.stageList ?? []) if (st.textureTag) tags.add(st.textureTag);
+    } catch {
+      /* effects the renderer cannot parse just get no shine */
+    }
+    surfaceEffects.set(name, tags);
+  }
+  const slotTags = new Set((slots ?? []).map((s) => s.slot));
+  const reflective = slotTags.has('ENVM') || tags.has('ENVM') || /env|chrome|mirror|refl/.test(name);
+  const specular = reflective || slotTags.has('SPEC') || tags.has('SPEC') || /spec|gloss|shin|metal|glass/.test(name);
+  if (!specular) return {};
+  const masked = dds.hasAlpha && alphaMode === 'OPAQUE';
+  if (!masked) return { metallic: reflective ? 0.6 : 0, roughness: reflective ? 0.3 : 0.45 };
+  // Roughness in green, metalness in blue, both from the mask.
+  const mr = new Uint8Array(dds.width * dds.height * 4);
+  for (let i = 0; i < dds.width * dds.height; i++) {
+    const a = dds.rgba[i * 4 + 3];
+    mr[i * 4] = 0;
+    mr[i * 4 + 1] = 255 - Math.round(a * 0.85);
+    mr[i * 4 + 2] = reflective ? a : 0;
+    mr[i * 4 + 3] = 255;
+  }
+  return { metallic: 1, roughness: 1, mr: { png: encodePng(dds.width, dds.height, mr) } };
 }
 
 /** Apply a row-major 3x4 transform to a parsed mesh's positions and normals in place. */
@@ -254,6 +299,7 @@ async function copyTerrain(vfs, planet, outDir) {
     console.warn(`terrain bitmaps not converted: ${err.message}`);
   }
   if (lastTemplate) copyTerrainShaders(vfs, lastTemplate, outDir);
+  exportSky(vfs, planet, outDir, { textureFor: (p) => textureFor(vfs, p) });
   return 'terrain.trn';
 }
 
@@ -892,17 +938,20 @@ function packStatus(dir) {
     const shaders = readJson(join(packDir, 'terrain/shaders.json'));
     const textured = shaders ? shaders.families.filter((f) => f.file).length : 0;
     const layers = existsSync(join(packDir, 'terrain')) ? readdirSync(join(packDir, 'terrain')).filter((f) => f.endsWith('.lay')).length : 0;
+    const sky = readJson(join(packDir, 'sky.json'));
     const parts = [
       `${objects} objects`,
       `${flora} flora models`,
       pois ? `${(pois.pois ?? pois).length ?? 0} places` : 'no pois.json',
       terrain ? `terrain${layers ? ` + ${layers} building layers` : ''}` : 'NO TERRAIN',
       shaders ? `ground textures ${textured}/${shaders.families.length}` : 'NO GROUND TEXTURES',
+      sky ? `sky (${sky.blocks.length} blocks)` : 'NO SKY',
     ];
     console.log(`  ${planet}: ${parts.join(', ')}`);
     if (!objects) need(`snapshot <swg-dir> ${planet} ${packDir} --center=auto --radius=all --retail-only`, `${planet} has no objects`);
     if (!terrain) need(`snapshot <swg-dir> ${planet} ${packDir} --center=auto --radius=all --retail-only`, `${planet} has no terrain`);
     else if (!shaders) need(`terrain <swg-dir> all ${dir} --retail-only`, `${planet} has no ground textures`);
+    else if (!sky) need(`sky <swg-dir> all ${dir} --retail-only`, `${planet} has no sky`);
     if (!pois) need(`pois <swg-dir> all ${dir} --retail-only`, `${planet} has no pois.json`);
   }
   const creatures = readJson(join(dir, 'creatures/manifest.json'));
@@ -1485,6 +1534,20 @@ switch (cmd) {
       const file = await copyTerrain(vfs, planet, outDir);
       console.log(file ? `${planet}: terrain -> ${join(outDir, file)}` : `${planet}: no terrain/${planet}.trn in archives`);
     }
+    break;
+  }
+
+  case 'sky': {
+    if (!pos[3]) usage();
+    const vfs = mount(pos[1]);
+    const targets = pos[2] === 'all' ? GAME_PLANETS.filter((p) => existsSync(join(pos[3], p, 'manifest.json'))).map((p) => [p, join(pos[3], p)]) : [[pos[2], pos[3]]];
+    if (!targets.length) console.log(`no planet packs under ${pos[3]} yet; run snapshot first`);
+    for (const [planet, outDir] of targets) {
+      mkdirSync(outDir, { recursive: true });
+      console.log(`${planet}:`);
+      exportSky(vfs, planet, outDir, { textureFor: (p) => textureFor(vfs, p), log: console.log });
+    }
+    printEffectSummary();
     break;
   }
 

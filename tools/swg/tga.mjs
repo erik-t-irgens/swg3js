@@ -26,6 +26,7 @@ export function decodeTga(buf) {
   const bpp = pixelDepth >> 3;
   const rle = imageType >= 9;
   const pixels = new Uint8Array(width * height);
+  const rgba = new Uint8Array(width * height * 4);
   // Value of one pixel: greyscale -> the byte, colour-mapped -> first byte of the palette entry, true colour -> first stored byte.
   const value = (at) => {
     if (cmap) {
@@ -34,14 +35,41 @@ export function decodeTga(buf) {
     }
     return buf[at];
   };
-  const put = (row, x, v) => {
+  // The full colour of one pixel (stored BGR(A), or a palette entry, or a grey level).
+  const colour = (at, out, o) => {
+    let src = buf;
+    let depth = bpp;
+    if (cmap) {
+      const idx = bpp === 2 ? buf.readUInt16LE(at) : buf[at];
+      src = cmap;
+      at = idx * cmBytes;
+      depth = cmBytes;
+    }
+    if (depth >= 3) {
+      out[o] = src[at + 2];
+      out[o + 1] = src[at + 1];
+      out[o + 2] = src[at];
+      out[o + 3] = depth === 4 ? src[at + 3] : 255;
+    } else if (depth === 2) {
+      const v = src[at] | (src[at + 1] << 8);
+      out[o] = ((v >> 10) & 31) * 255 / 31;
+      out[o + 1] = ((v >> 5) & 31) * 255 / 31;
+      out[o + 2] = (v & 31) * 255 / 31;
+      out[o + 3] = 255;
+    } else {
+      out[o] = out[o + 1] = out[o + 2] = src[at];
+      out[o + 3] = 255;
+    }
+  };
+  const put = (row, x, at) => {
     const y = topToBottom ? row : height - 1 - row;
-    pixels[y * width + x] = v;
+    pixels[y * width + x] = value(at);
+    colour(at, rgba, (y * width + x) * 4);
   };
   if (!rle) {
     for (let row = 0; row < height; row++) {
       for (let x = 0; x < width; x++) {
-        put(row, x, value(o));
+        put(row, x, o);
         o += bpp;
       }
     }
@@ -52,19 +80,18 @@ export function decodeTga(buf) {
         const packet = buf[o++];
         const count = (packet & 0x7f) + 1;
         if (packet & 0x80) {
-          const v = value(o);
+          for (let k = 0; k < count && x < width; k++) put(row, x++, o);
           o += bpp;
-          for (let k = 0; k < count && x < width; k++) put(row, x++, v);
         } else {
           for (let k = 0; k < count && x < width; k++) {
-            put(row, x++, value(o));
+            put(row, x++, o);
             o += bpp;
           }
         }
       }
     }
   }
-  return { width, height, pixels, imageType, pixelDepth, greyscale: imageType === 3 || imageType === 11 };
+  return { width, height, pixels, rgba, imageType, pixelDepth, greyscale: imageType === 3 || imageType === 11 };
 }
 
 /** Pack a decoded bitmap as the game's terrain heightmap file: "HMAP", uint32 width, uint32 height, top-down bytes. */

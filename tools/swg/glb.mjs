@@ -66,6 +66,9 @@ export function buildGlb(meshes, { flipX = true, textures = new Map(), skin = nu
       const tex = textures.get(shader);
       if (tex) {
         mat.pbrMetallicRoughness.baseColorTexture = { index: imageFor(tex) };
+        if (tex.metallic !== undefined) mat.pbrMetallicRoughness.metallicFactor = tex.metallic;
+        if (tex.roughness !== undefined) mat.pbrMetallicRoughness.roughnessFactor = tex.roughness;
+        if (tex.mr) mat.pbrMetallicRoughness.metallicRoughnessTexture = { index: imageFor({ path: `${tex.path}#mr`, png: tex.mr.png }) };
         const mode = tex.alphaMode ?? 'OPAQUE';
         if (mode === 'MASK' && tex.hasAlpha) {
           mat.alphaMode = 'MASK';
