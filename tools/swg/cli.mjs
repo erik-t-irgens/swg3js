@@ -18,7 +18,7 @@
 //   node tools/swg/cli.mjs sat <swg-dir> <x.sat | object/mobile/shared_x.iff> <out.glb> [--anim=all|idle,walk] [--var=skin_color=3,...] [--wear=object/tangible/wearables/...,...]
 //   node tools/swg/cli.mjs trt <swg-dir> <x.trt> <out.png> [--var=name=value,...]   bake a texture renderer blueprint (skin, hair) to a PNG
 //   node tools/swg/cli.mjs player <swg-dir> <out-dir> [--template=object/creature/player/shared_human_male.iff] [--wear=...|none] [--var=...]   the player's character as <out-dir>/player/<id>.glb + manifest.json
-                                                                 [--jka=<Jedi Academy GameData or base dir>] [--jka-anims=BOTH_A1_T__B_,...]  adds Jedi Academy's saber attacks, jumps and rolls, retargeted
+//                                                               [--jka=<Jedi Academy GameData or base dir>] [--jka-anims=BOTH_A1_T__B_,...]  adds Jedi Academy's saber attacks, jumps and rolls, retargeted
 //                                                                  (dressed in a shirt, trousers and shoes unless --wear says otherwise)
 //                                                                  convert a skeletal appearance (creature, character) with skeleton and animations
 //   node tools/swg/cli.mjs flora <swg-dir> <planet>|all <out-dir>   (re)convert just the flora models for packs converted already
