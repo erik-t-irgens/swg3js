@@ -103,7 +103,7 @@ export function openZip(file) {
 export function openJkaBase(dir) {
   let base = dir;
   if (!existsSync(join(base, 'assets0.pk3')) && existsSync(join(base, 'base', 'assets0.pk3'))) base = join(base, 'base');
-  if (!existsSync(base)) throw new Error(`${dir}: not found`);
+  if (!existsSync(base)) throw new Error(`${dir}: not found (a path with spaces needs quotes, and forward slashes work in every shell: "B:/Steam/steamapps/common/Jedi Academy/GameData")`);
   const files = readdirSync(base).filter((f) => f.toLowerCase().endsWith('.pk3')).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
   if (!files.length) {
     // A folder holding the two humanoid files on their own (as jka-extract writes them) works too.
