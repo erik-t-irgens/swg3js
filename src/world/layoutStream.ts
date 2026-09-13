@@ -19,8 +19,22 @@ const TIERS = [
   { minRadius: 0, range: 320 },
 ];
 const UNLOAD_SLACK = 1.15;
+/**
+ * Interiors exist only this far from the building's edge. The portal renderer draws a room
+ * only through a doorway within PORTAL_RANGE (120 m) that is actually on screen, so anything
+ * past this is scene-graph weight that can never be seen. Dropped a little farther out than
+ * it is built so walking a threshold does not build and drop it every frame.
+ */
+const INTERIOR_RANGE = 160;
+const INTERIOR_DROP = 220;
 const COLLIDER_RANGE = 170;
 const COLLIDER_MIN_RADIUS = 1.5;
+/**
+ * Model radius below which a placed object does not cast a shadow. Shadow casters are culled
+ * against the light's frustum rather than the camera's, so every small prop in the cascades'
+ * reach costs a draw call per cascade for a shadow the size of its own footprint.
+ */
+const SHADOW_MIN_RADIUS = 1.2;
 const MAX_CONCURRENT_LOADS = 3;
 
 export interface PlacedObject {
@@ -43,8 +57,14 @@ export interface Building {
   radius: number;
   matrix: THREE.Matrix4;
   inverse: THREE.Matrix4;
-  /** This building's own interior meshes, hidden until the portal renderer draws the building. */
+  /**
+   * This building's own interior meshes, hidden until the portal renderer draws the building.
+   * Empty until the player is close enough for a doorway to show anything: a building's inside
+   * is the bulk of its geometry and is never visible from across the valley.
+   */
   interior: THREE.Mesh[];
+  /** Whether `interior` is currently built, so the sweep can tell "not yet" from "has none". */
+  interiorBuilt: boolean;
 }
 
 interface LoadedTier {
@@ -88,6 +108,10 @@ export class LayoutStreamer {
   private largestRadius = 0;
   private lastColliderX = Number.NaN;
   private lastColliderZ = Number.NaN;
+  /** Where the last interior sweep ran, so a region loading in knows what is near. */
+  private lastInteriorX = Number.NaN;
+  private lastInteriorZ = Number.NaN;
+  private lastInside: Building | null = null;
   private disposed = false;
   loadedModels = 0;
   loadedInstances = 0;
@@ -171,10 +195,16 @@ export class LayoutStreamer {
     return out.sort((a, b) => a.d - b.d);
   }
 
-  update(playerPos: THREE.Vector3): void {
+  update(playerPos: THREE.Vector3, inside: Building | null = null): void {
     if (this.disposed) return;
     const px = playerPos.x;
     const pz = playerPos.z;
+    // 60 m of hysteresis between building and dropping, so this only needs to run as the
+    // player moves, not every frame.
+    if (Number.isNaN(this.lastInteriorX) || Math.hypot(px - this.lastInteriorX, pz - this.lastInteriorZ) > 8 || inside !== this.lastInside) {
+      this.lastInside = inside;
+      this.updateInteriors(px, pz, inside);
+    }
     // Nearest regions first so the player's surroundings fill in before the horizon.
     const candidates: { region: Region; tier: number; d: number }[] = [];
     for (const region of this.regions.values()) {
@@ -225,7 +255,12 @@ export class LayoutStreamer {
         if (this.disposed) return;
       }
       if (region.tiers[tier] !== 'loading') return;
-      region.tiers[tier] = this.instance(objects, models);
+      const loaded = this.instance(objects, models);
+      region.tiers[tier] = loaded;
+      // A region that arrives already under the player's nose needs its interiors now.
+      for (const b of loaded.buildings) {
+        if (Math.hypot(b.x - this.lastInteriorX, b.z - this.lastInteriorZ) - b.radius <= INTERIOR_RANGE) this.buildInterior(b);
+      }
       // Models that finished loading after the last collider pass get their collision next update.
       this.lastColliderX = Number.NaN;
     } finally {
@@ -262,7 +297,7 @@ export class LayoutStreamer {
       const built: (Building | null)[] = list.map((p) => {
         if (!isBuilding || p.contained) return null;
         const matrix = new THREE.Matrix4().compose(tmpV.set(p.x, p.y, p.z), p.q, ONE);
-        const b: Building = { model, x: p.x, z: p.z, radius: model.radius, matrix, inverse: matrix.clone().invert(), interior: [] };
+        const b: Building = { model, x: p.x, z: p.z, radius: model.radius, matrix, inverse: matrix.clone().invert(), interior: [], interiorBuilt: false };
         buildings.push(b);
         this.buildings.add(b);
         return b;
@@ -270,24 +305,9 @@ export class LayoutStreamer {
       for (const prim of model.primitives) {
         // Interiors of portal buildings are drawn per building and per cell by the portal renderer,
         // so each placed building gets its own meshes; a building without portal data draws normally.
+        // Those meshes are made only once the player is near (see buildInterior).
         const perBuilding = prim.cell > 0 && model.portals.length > 0;
         const instanced = perBuilding ? list.filter((_, i) => !built[i]) : list;
-        if (perBuilding) {
-          built.forEach((b) => {
-            if (!b) return;
-            const mesh = new THREE.Mesh(prim.geometry, prim.material);
-            mesh.matrixAutoUpdate = false;
-            mesh.matrix.copy(b.matrix);
-            mesh.matrixWorld.copy(b.matrix);
-            mesh.castShadow = true;
-            mesh.receiveShadow = true;
-            mesh.visible = false;
-            mesh.layers.set(INTERIOR_LAYER);
-            b.interior.push(mesh);
-            this.scene.add(mesh);
-            meshes.push(mesh);
-          });
-        }
         if (!instanced.length) continue;
         const mesh = new THREE.InstancedMesh(prim.geometry, prim.material, instanced.length);
         instanced.forEach((p, i) => {
@@ -296,7 +316,7 @@ export class LayoutStreamer {
         });
         // Objects placed inside buildings draw in every pass, like actors, so they show with the room.
         if (instanced.some((p) => p.contained)) mesh.layers.enable(ACTOR_LAYER);
-        mesh.castShadow = true;
+        mesh.castShadow = model.radius >= SHADOW_MIN_RADIUS;
         mesh.receiveShadow = true;
         mesh.instanceMatrix.needsUpdate = true;
         mesh.computeBoundingSphere();
@@ -309,9 +329,88 @@ export class LayoutStreamer {
     return { meshes, buildings, objects, effects };
   }
 
+  /**
+   * Make a building's interior meshes. Geometry and materials are shared with the model, so
+   * this is a handful of Object3Ds, not a copy of the mesh; the portal renderer shows them.
+   */
+  private buildInterior(b: Building): void {
+    if (b.interiorBuilt) return;
+    b.interiorBuilt = true;
+    if (!b.model.portals.length) return;
+    for (const prim of b.model.primitives) {
+      if (prim.cell <= 0) continue;
+      const mesh = new THREE.Mesh(prim.geometry, prim.material);
+      mesh.matrixAutoUpdate = false;
+      mesh.matrix.copy(b.matrix);
+      mesh.matrixWorld.copy(b.matrix);
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      mesh.visible = false;
+      mesh.layers.set(INTERIOR_LAYER);
+      b.interior.push(mesh);
+      this.scene.add(mesh);
+    }
+  }
+
+  /** Drop a building's interior meshes. Shared geometry and materials are left alone. */
+  private dropInterior(b: Building): void {
+    if (!b.interiorBuilt) return;
+    for (const mesh of b.interior) this.scene.remove(mesh);
+    b.interior.length = 0;
+    b.interiorBuilt = false;
+  }
+
+  /**
+   * Keep interiors around the player. The building the player is inside always keeps its own,
+   * however far its far wings reach, so walking a long hall never empties the room ahead.
+   */
+  private updateInteriors(px: number, pz: number, inside: Building | null): void {
+    this.lastInteriorX = px;
+    this.lastInteriorZ = pz;
+    for (const b of this.buildings) {
+      if (b === inside) {
+        this.buildInterior(b);
+        continue;
+      }
+      const edge = Math.hypot(b.x - px, b.z - pz) - b.radius;
+      if (edge <= INTERIOR_RANGE) this.buildInterior(b);
+      else if (edge > INTERIOR_DROP) this.dropInterior(b);
+    }
+  }
+
+  /** Buildings whose interiors are built right now, for the stats line. */
+  get interiorCount(): number {
+    let n = 0;
+    for (const b of this.buildings) if (b.interiorBuilt) n++;
+    return n;
+  }
+
+  /**
+   * What lazy interiors save: meshes built now against the meshes every loaded building would
+   * hold if each kept its interior the moment it streamed in. `force` builds them all, to see
+   * the cost directly; the next sweep drops them again.
+   */
+  interiorStats(force = false): { buildings: number; built: number; meshes: number; eagerMeshes: number } {
+    let buildings = 0;
+    let built = 0;
+    let meshes = 0;
+    let eagerMeshes = 0;
+    for (const b of this.buildings) {
+      buildings++;
+      if (force) this.buildInterior(b);
+      if (b.interiorBuilt) {
+        built++;
+        meshes += b.interior.length;
+      }
+      eagerMeshes += b.model.portals.length ? b.model.primitives.filter((pr) => pr.cell > 0).length : 0;
+    }
+    return { buildings, built, meshes, eagerMeshes };
+  }
+
   private unloadTier(region: Region, tier: number): void {
     const t = region.tiers[tier];
     if (!t || t === 'loading') return;
+    for (const b of t.buildings) this.dropInterior(b);
     for (const mesh of t.meshes) {
       this.scene.remove(mesh);
       if ((mesh as THREE.InstancedMesh).isInstancedMesh) (mesh as THREE.InstancedMesh).dispose();
@@ -455,11 +554,12 @@ export class LayoutStreamer {
   }
 
   get status(): string {
-    return `${this.loadedInstances}/${this.objects.length} snapshot objects in view, ${this.loadedModels} models, ${this.colliders.size} exact colliders`;
+    return `${this.loadedInstances}/${this.objects.length} snapshot objects in view, ${this.loadedModels} models, ${this.colliders.size} exact colliders, ${this.interiorCount} interiors built`;
   }
 
   dispose(): void {
     this.disposed = true;
+    for (const b of this.buildings) this.dropInterior(b);
     for (const region of this.regions.values()) for (let t = 0; t < TIERS.length; t++) this.unloadTier(region, t);
     for (const o of [...this.colliders.keys()]) this.removeColliders(o);
     this.buildings.clear();

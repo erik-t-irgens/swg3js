@@ -45,6 +45,56 @@ const RIPPLE_INTERVAL = 0.12;
 const FOG_SCALE = 0.18;
 /** Physics colliders only exist this many chunks out; nothing dynamic lives farther away. */
 const PHYSICS_RADIUS = 3;
+/**
+ * How far the shadow cascades reach. The shadow pass is by far the most expensive thing in the
+ * frame -- casters are culled against the light's frustum, not the camera's, so a long reach
+ * draws the whole disc around the player in every cascade. A shorter reach is also *sharper*:
+ * the same shadow map covers less ground, so every texel is smaller. Raise it for longer
+ * shadows at a steep cost, lower it for crisper ones.
+ */
+const SHADOW_DISTANCE = 320;
+/**
+ * Placed objects smaller than this (metres of model radius) never cast. A shrub's shadow is a
+ * smudge under the shrub; paying a draw call per cascade for it is the single biggest waste in
+ * the frame. Objects keep receiving shadows either way.
+ */
+const SHADOW_MIN_RADIUS = 1.2;
+/**
+ * Shadow look. The client's own ambient keeps shadowed surfaces readable; this scales it, and
+ * below 1 the world sits darker than retail did. Radius is the blur in shadow-map texels --
+ * three's PCF path is a 20-tap Vogel disk, so 1 is a crisp contact edge and 2-3 is soft.
+ * Normal bias pushes the lookup along the surface normal to hide acne; large values detach a
+ * shadow from whatever casts it, so it stays small and the depth bias does the work.
+ */
+const AMBIENT_SCALE = 0.8;
+const SHADOW_RADIUS = 1.4;
+/**
+ * Both biases are measured in shadow-map texels of the cascade they belong to, not in fixed
+ * numbers, because a texel is 5 cm in the near cascade and 30 cm in the far one -- a single
+ * value is either acne up close or a detached shadow far away.
+ *
+ * The depth bias especially: three stores it normalised over the shadow camera's depth range,
+ * so its meaning in metres is (bias x range). CSM defaults that range to 1..2000, which turned
+ * a -0.0004 bias into 0.8 m of offset and erased every contact shadow -- a standing character
+ * lost its legs, and the shadow only reappeared once they jumped clear of it.
+ */
+const SHADOW_NORMAL_BIAS_TEXELS = 1;
+const SHADOW_BIAS_TEXELS = 0.5;
+/**
+ * The shadow camera's depth range. The light sits LIGHT_MARGIN behind the cascade's bounding
+ * box, so the range only has to cover that plus the cascade's own reach; keeping it tight is
+ * what makes the depth bias mean centimetres instead of metres.
+ */
+const LIGHT_MARGIN = 150;
+const LIGHT_NEAR = 1;
+/** How dark a shadow goes, 0..1. The ambient decides what light still reaches it. */
+const SHADOW_INTENSITY = 1;
+/**
+ * Shadow map edge, per cascade. Crispness is texel density, not filtering: the near cascade
+ * covers about 55 m, so 2048 puts a texel at 2.7 cm and 4096 at 1.3 cm. Each step doubles the
+ * memory (three cascades at 4096 is roughly 200 MB of depth) without costing draw calls.
+ */
+const SHADOW_MAP_SIZE = 2048;
 
 interface Chunk {
   key: string;
@@ -154,6 +204,22 @@ export class World {
   private readonly hiddenGround: THREE.Object3D[] = [];
   private groundHiddenFor: Building | null = null;
   private csm: CSM | null = null;
+  /** How far the cascades reach; `__debug.shadows(m)` rebuilds them at a new distance. */
+  shadowDistance = SHADOW_DISTANCE;
+  /** Model radius below which a placed object does not cast; `__debug.shadows(m, r)` changes it. */
+  shadowMinRadius = SHADOW_MIN_RADIUS;
+  /** Multiplier on the sky's ambient: below 1 is darker than retail. */
+  ambientScale = AMBIENT_SCALE;
+  private shadowRadius = SHADOW_RADIUS;
+  private shadowIntensity = SHADOW_INTENSITY;
+  private shadowMapSize = SHADOW_MAP_SIZE;
+
+  /** Which ramp row feeds ambient, and how hard. Reports the colour it lands on. */
+  setAmbient(row?: number, scale?: number): { row: number; scale: number; color: string; intensity: number; ground: string; shadowRow: string | null } {
+    if (row !== undefined && this.swgSky) this.swgSky.ambientRow = row;
+    if (scale !== undefined) this.ambientScale = scale;
+    return { row: this.swgSky?.ambientRow ?? -1, scale: this.ambientScale, color: this.hemi.color.getHexString(), intensity: this.hemi.intensity, ground: this.hemi.groundColor.getHexString(), shadowRow: this.swgSky?.lighting.shadow.getHexString() ?? null };
+  }
   /** The planet's own sky when its pack carries one; the procedural dome is hidden while it is up. */
   swgSky: SwgSky | null = null;
   /** Set by main: needed to filter the sky into an environment map for reflective surfaces. */
@@ -603,9 +669,12 @@ export class World {
         l.intensity = this.sun.intensity;
       }
     }
-    this.hemi.color.copy(L.ambient);
-    this.hemi.groundColor.copy(L.bounce).multiplyScalar(L.bounceScale).lerp(L.ambient, 0.5);
-    this.hemi.intensity = SWG_AMBIENT;
+    // Sky above, ground bounce below: the two halves of the client's ambient. Both carry their
+    // own scale in the ramp's alpha, so the colours go in as they are and the scales set the
+    // light's strength; the bounce is the darker half, mixed toward the sky so it never blackens.
+    this.hemi.color.copy(L.ambient).multiplyScalar(L.ambientScale);
+    this.hemi.groundColor.copy(L.bounce).multiplyScalar(L.bounceScale).lerp(this.hemi.color, 0.35);
+    this.hemi.intensity = SWG_AMBIENT * this.ambientScale;
     this.fill.color.copy(L.fill);
     this.fill.intensity = SWG_FILL * L.fillScale;
     // The client's fill light sits 45 degrees up on the far side from the main light.
@@ -753,9 +822,9 @@ export class World {
   }
 
   /**
-   * Cascaded shadow maps: three cascades that follow the camera out to 700 m instead of one
-   * 280 m box around the player. Every lit material must be set up for it, so materials are
-   * scanned as objects appear.
+   * Cascaded shadow maps: three cascades that follow the camera out to SHADOW_DISTANCE instead
+   * of one 280 m box around the player. Every lit material must be set up for it, so materials
+   * are scanned as objects appear.
    */
   attachCamera(camera: THREE.PerspectiveCamera, shadows: boolean, portals: PortalRenderer): void {
     this.portals = portals;
@@ -763,15 +832,122 @@ export class World {
     // The sun, sky light and their shadows stay on the world layer: rooms are lit by their own
     // lights, as in the client, and never by sunlight through the walls.
     if (!shadows || this.csm) return;
-    this.csm = new CSM({ camera, parent: this.scene, cascades: 3, maxFar: 700, mode: 'practical', shadowMapSize: 2048, lightDirection: new THREE.Vector3(0.3, -1, 0.2).normalize(), lightIntensity: 2, lightMargin: 150 });
+    this.csm = new CSM({ camera, parent: this.scene, cascades: 3, maxFar: this.shadowDistance, mode: 'practical', shadowMapSize: this.shadowMapSize, lightDirection: new THREE.Vector3(0.3, -1, 0.2).normalize(), lightIntensity: 2, lightMargin: LIGHT_MARGIN, lightNear: LIGHT_NEAR, lightFar: LIGHT_MARGIN + this.shadowDistance });
     this.csm.fade = true;
-    for (const l of this.csm.lights) {
-      l.shadow.bias = -0.0004;
-      l.shadow.normalBias = 0.4;
-    }
+    this.applyShadowQuality();
     this.sun.castShadow = false;
     this.sun.visible = false;
     this.setupShadowMaterials();
+  }
+
+  /**
+   * Retune the shadows and report what they cost. `distance` rebuilds the cascades at a new
+   * reach (shorter is cheaper *and* sharper); `minRadius` re-gates which placed objects cast.
+   */
+  setShadows(distance?: number, minRadius?: number): { distance: number; minRadius: number; casters: number; notCasting: number } {
+    // Retune in place. CSM.dispose() deletes every patched material's onBeforeCompile, which
+    // would take the ground's texture blending with it, and it leaves its lights in the scene;
+    // updateFrustums() re-splits the cascades and refreshes their uniforms without either.
+    if (distance !== undefined && distance !== this.shadowDistance) {
+      this.shadowDistance = distance;
+      if (this.csm) {
+        this.csm.maxFar = distance;
+        this.csm.lightFar = LIGHT_MARGIN + distance;
+        this.csm.updateFrustums();
+        // The cascade boxes just changed size, so the texel-relative biases have to follow.
+        this.applyShadowQuality();
+      }
+    }
+    if (minRadius !== undefined) {
+      this.shadowMinRadius = minRadius;
+      this.scene.traverse((o) => {
+        const m = o as THREE.InstancedMesh;
+        if (!m.isInstancedMesh) return;
+        if (!m.boundingSphere) m.computeBoundingSphere();
+        const g = m.geometry;
+        if (!g.boundingSphere) g.computeBoundingSphere();
+        m.castShadow = (g.boundingSphere?.radius ?? 0) >= minRadius;
+      });
+    }
+    let casters = 0;
+    let notCasting = 0;
+    this.scene.traverse((o) => {
+      const m = o as THREE.Mesh;
+      if (!m.isMesh && !(o as THREE.InstancedMesh).isInstancedMesh) return;
+      if (m.castShadow) casters++;
+      else notCasting++;
+    });
+    return { distance: this.shadowDistance, minRadius: this.shadowMinRadius, casters, notCasting };
+  }
+
+  /**
+   * The cascades are fitted to the camera's frustum, so a new aspect ratio resizes every
+   * cascade box -- and with it the texel size the biases are derived from.
+   */
+  onCameraResized(): void {
+    if (!this.csm) return;
+    this.csm.updateFrustums();
+    this.applyShadowQuality();
+  }
+
+  /** Push the current bias, blur and darkness onto every cascade. */
+  private applyShadowQuality(): void {
+    const size = this.shadowMapSize;
+    for (const l of this.csm?.lights ?? []) {
+      const cam = l.shadow.camera;
+      cam.near = LIGHT_NEAR;
+      cam.far = LIGHT_MARGIN + this.shadowDistance;
+      cam.updateProjectionMatrix();
+      // One texel of this cascade, in metres: its map covers the whole cascade box.
+      const texel = (cam.right - cam.left) / size;
+      l.shadow.normalBias = SHADOW_NORMAL_BIAS_TEXELS * texel;
+      // Back to normalised depth, which is the unit three stores this one in.
+      l.shadow.bias = -(SHADOW_BIAS_TEXELS * texel) / (cam.far - cam.near);
+      l.shadow.radius = this.shadowRadius;
+      l.shadow.intensity = this.shadowIntensity;
+      if (l.shadow.mapSize.width !== size) {
+        l.shadow.mapSize.set(size, size);
+        // The render target is sized on creation, so drop it and let three make a new one.
+        l.shadow.map?.dispose();
+        l.shadow.map = null;
+      }
+    }
+  }
+
+  /**
+   * Shadow look, live. `radius` is the blur in shadow-map texels (1 crisp, 3 soft) and
+   * `intensity` how dark a shadow goes (1 full). Reports the cascade split distances, which
+   * are what actually decide how crisp a near shadow can be.
+   */
+  setShadowLook(radius?: number, intensity?: number, mapSize?: number): { radius: number; intensity: number; mapSize: number; cascades: { range: string; boxMetres: string; metresPerTexel: string; normalBiasCm: string; depthBiasCm: string }[] } {
+    if (radius !== undefined) this.shadowRadius = radius;
+    if (intensity !== undefined) this.shadowIntensity = intensity;
+    if (mapSize !== undefined) this.shadowMapSize = mapSize;
+    this.applyShadowQuality();
+    const csm = this.csm;
+    const size = this.shadowMapSize;
+    const cascades: { range: string; boxMetres: string; metresPerTexel: string; normalBiasCm: string; depthBiasCm: string }[] = [];
+    if (csm) {
+      const near = this.camera?.near ?? 0.1;
+      let from = near;
+      csm.breaks.forEach((b, i) => {
+        const to = near + (this.shadowDistance - near) * b;
+        const l = csm.lights[i];
+        const cam = l?.shadow.camera;
+        // The map covers the cascade's bounding box, which is wider than the slice it is fitted
+        // to -- that box over the map's edge is the real texel size, and what decides aliasing.
+        const box = cam ? cam.right - cam.left : 0;
+        cascades.push({
+          range: `${from.toFixed(0)}-${to.toFixed(0)}m`,
+          boxMetres: box.toFixed(0),
+          metresPerTexel: (box / size).toFixed(4),
+          normalBiasCm: ((l?.shadow.normalBias ?? 0) * 100).toFixed(1),
+          depthBiasCm: cam ? (Math.abs(l.shadow.bias) * (cam.far - cam.near) * 100).toFixed(1) : '0',
+        });
+        from = to;
+      });
+    }
+    return { radius: this.shadowRadius, intensity: this.shadowIntensity, mapSize: size, cascades };
   }
 
   get buildings(): Iterable<Building> {
@@ -819,6 +995,11 @@ export class World {
     const speeder = new Speeder(this.physics, this.scene, sx, this.terrain.heightAt(sx, sz) + 1.2, sz, Math.PI * 0.75);
     markActor(speeder.group);
     this.speeders.push(speeder);
+  }
+
+  /** Interior-mesh accounting, for the console hook. */
+  interiorStats(force = false): { buildings: number; built: number; meshes: number; eagerMeshes: number } | null {
+    return this.layoutStream?.interiorStats(force) ?? null;
   }
 
   get chunkCount(): number {
@@ -1019,7 +1200,8 @@ export class World {
     this.stream(playerPos, STREAM_BUDGET);
     this.streamFar(playerPos, 1);
     if (this.layoutStream) {
-      this.layoutStream.update(playerPos);
+      // The building the player is in keeps its interior however far its wings reach.
+      this.layoutStream.update(playerPos, this.cellState?.building ?? null);
       this.packStatus = `${this.packBase}; ${this.layoutStream.status}${this.particles ? `; ${this.particles.status}` : ''}`;
     }
     if (this.particles && this.camera) this.particles.update(dt, this.camera, this.scene.fog instanceof THREE.FogExp2 ? this.scene.fog : null);

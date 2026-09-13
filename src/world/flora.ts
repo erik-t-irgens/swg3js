@@ -10,6 +10,9 @@ import { RandomGenerator } from '../swg/terrain/fractal';
 import { FastRandomGenerator, hashFloat, hashTuple, type FloraChild } from '../swg/terrain/flora';
 import type { LoadedModel } from './assetPack';
 import type { Collider, Exclusion } from './props';
+
+/** Flora smaller than this (metres of model radius) never casts a shadow. */
+const SHADOW_MIN_RADIUS = 1.2;
 import type { SwgTerrain } from './swgTerrain';
 import { CHUNK_SIZE } from './terrain';
 
@@ -173,7 +176,9 @@ export class FloraPlanter {
           mesh.setMatrixAt(i, tmpM);
         });
         mesh.instanceMatrix.needsUpdate = true;
-        mesh.castShadow = true;
+        // Grass and shrubs cast nothing: their shadow is a smudge under themselves, and a
+        // caster costs a draw call in every cascade it falls in. Trees still cast.
+        mesh.castShadow = model.radius * Math.max(...list.map((p) => p.scale)) >= SHADOW_MIN_RADIUS;
         mesh.receiveShadow = true;
         mesh.computeBoundingSphere();
         group.add(mesh);

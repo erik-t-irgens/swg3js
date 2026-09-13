@@ -65,6 +65,10 @@ export interface SkyData {
 /** What the sky decides for the rest of the scene at one moment. */
 export interface SkyLighting {
   ambient: THREE.Color;
+  /** Scale from the ambient row's alpha, as the client stores every light scale. */
+  ambientScale: number;
+  /** The client's shadow colour for this hour (ramp row 7): what a shadowed surface tends to. */
+  shadow: THREE.Color;
   main: THREE.Color;
   mainScale: number;
   fill: THREE.Color;
@@ -80,6 +84,17 @@ export interface SkyLighting {
 }
 
 /** Colour ramp rows, in the order the client reads them. */
+/**
+ * Rows of the client's 256 x 10 colour ramp, indexed by time of day.
+ *
+ * Rows 0..7 are the names the engine's own light terms suggest, but rows 0 (Ambient), 3 (Fill)
+ * and 4 (Bounce) read #000000 at every hour on every planet, which cannot be what the client
+ * lit with -- a scene with no ambient renders everything out of the sun's reach pure black.
+ * Rows 8 and 9 are the two that actually carry per-planet light colours (alpha ~164, the
+ * client's 4 * (a - 128) / 128 scale encoding), and row 8 is consistently the darker of the
+ * pair. That is the shape of a hemisphere term: 9 the sky above, 8 the ground bounce below.
+ * They are used as such here; `__debug.ambient(row)` switches rows to compare.
+ */
 const enum Row {
   Ambient = 0,
   MainDiffuse = 1,
@@ -88,7 +103,12 @@ const enum Row {
   Bounce = 4,
   Clear = 5,
   Fog = 6,
+  /** The client's own shadow colour for this hour: dark and tinted, never black. */
   Shadow = 7,
+  /** Light bounced off the ground; the darker half of the hemisphere. */
+  GroundBounce = 8,
+  /** Light from the sky; the ambient that keeps shadowed surfaces readable. */
+  SkyAmbient = 9,
 }
 /** The client's light scale constant: main, fill and bounce scales are 4 * (alpha - 128) / 128. */
 const LIGHT_SCALE = 4;
@@ -190,6 +210,8 @@ export class SwgSky {
   private time = 0;
   readonly lighting: SkyLighting = {
     ambient: new THREE.Color(0.3, 0.3, 0.3),
+    ambientScale: 1,
+    shadow: new THREE.Color(0, 0, 0),
     main: new THREE.Color(1, 1, 1),
     mainScale: 1,
     fill: new THREE.Color(0, 0, 0),
@@ -478,6 +500,15 @@ export class SwgSky {
     return out.set(Math.sin(az) * Math.cos(el), Math.sin(el), -Math.cos(az) * Math.cos(el));
   }
 
+  /**
+   * Which ramp row feeds the ambient term. Row 0 is black at every hour on every planet, which
+   * leaves everything in shadow unlit; rows 8 and 9 carry plausible per-planet light colours.
+   * `__debug.ambient(row)` switches it so the rows can be compared against the original game.
+   */
+  ambientRow: number = Row.SkyAmbient;
+  /** Which ramp row feeds the ground bounce (the hemisphere's lower half). */
+  bounceRow: number = Row.GroundBounce;
+
   /** Advance the sky to the day cycle's moment and read this moment's lighting. */
   update(day: DayCycle, camPos: THREE.Vector3, dt: number): SkyLighting {
     this.time += dt;
@@ -486,13 +517,15 @@ export class SwgSky {
     const t = day.normalized;
     const L = this.lighting;
     L.isDay = day.isDay;
-    this.rampColor(Row.Ambient, index, L.ambient, 0.3);
+    this.rampColor(this.ambientRow, index, L.ambient, 0.3);
+    L.ambientScale = this.rampScale(this.ambientRow, index);
     this.rampColor(Row.MainDiffuse, index, L.main, 1);
     L.mainScale = this.rampScale(Row.MainDiffuse, index);
     this.rampColor(Row.Fill, index, L.fill, 0);
     L.fillScale = this.rampScale(Row.Fill, index);
-    this.rampColor(Row.Bounce, index, L.bounce, 0);
-    L.bounceScale = this.rampScale(Row.Bounce, index);
+    this.rampColor(this.bounceRow, index, L.bounce, 0);
+    L.bounceScale = this.rampScale(this.bounceRow, index);
+    this.rampColor(Row.Shadow, index, L.shadow, 0);
     this.rampColor(Row.Clear, index, L.clear, 0.5);
     this.rampColor(Row.Fog, index, L.fog, 0.5);
     L.sunMoonAlpha = this.rampAlpha(Row.Clear, index, 1);

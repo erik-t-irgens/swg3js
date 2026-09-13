@@ -45,6 +45,18 @@ export class PortalRenderer {
   private readonly portalMeshes = new WeakMap<Building, THREE.Mesh[]>();
   /** Passes drawn last frame, for the stats overlay. */
   passes = 0;
+  /** What each pass of the last frame drew, for the console hook. */
+  readonly passLog: { label: string; calls: number; triangles: number }[] = [];
+
+  /** Run one renderer.render() and record what it cost. */
+  private pass(label: string, target: THREE.Object3D, camera: THREE.Camera): void {
+    const info = this.renderer.info.render;
+    const c0 = info.calls;
+    const t0 = info.triangles;
+    this.renderer.render(target as THREE.Scene, camera);
+    this.passLog.push({ label, calls: info.calls - c0, triangles: info.triangles - t0 });
+    this.passes++;
+  }
 
   constructor(private readonly renderer: THREE.WebGLRenderer) {
     this.portalMat = new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false, depthTest: true, side: THREE.DoubleSide });
@@ -140,22 +152,18 @@ export class PortalRenderer {
     }
     m.stencilFuncMask = 0xff;
     m.depthTest = depthTest;
-    for (const mesh of meshes) {
-      this.renderer.render(mesh, camera);
-      this.passes++;
-    }
+    for (const mesh of meshes) this.pass('portal', mesh, camera);
   }
 
   private resetDepth(ref: number, camera: THREE.Camera): void {
     this.resetMat.stencilRef = ref;
-    this.renderer.render(this.resetQuad, camera);
+    this.pass('depth reset', this.resetQuad, camera);
   }
 
   private renderLayer(scene: THREE.Scene, camera: THREE.Camera, layer: number): void {
     camera.layers.set(layer);
     camera.layers.enable(ACTOR_LAYER);
-    this.renderer.render(scene, camera);
-    this.passes++;
+    this.pass(layer === INTERIOR_LAYER ? 'interior' : 'world', scene, camera);
   }
 
   private showInterior(b: Building, on: boolean): void {
@@ -191,7 +199,7 @@ export class PortalRenderer {
     if (!r.shadowMap.enabled) return;
     if (view) this.showInterior(view, true);
     r.shadowMap.needsUpdate = true;
-    r.render(scene, this.shadowProbe);
+    this.pass('shadows', scene, this.shadowProbe);
     if (view) this.showInterior(view, false);
   }
 
@@ -202,6 +210,7 @@ export class PortalRenderer {
   render(scene: THREE.Scene, camera: THREE.PerspectiveCamera, view: Building | null, buildings: Iterable<Building>): void {
     const r = this.renderer;
     this.passes = 0;
+    this.passLog.length = 0;
     projView.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
     frustum.setFromProjectionMatrix(projView);
     this.renderShadows(scene, view);
