@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { Character } from './character';
 
 export type RigState = 'idle' | 'walk' | 'run' | 'air' | 'seated' | 'swim' | 'float' | 'crouch' | 'crouchWalk' | 'stance' | 'strafeLeft' | 'strafeRight' | 'runBack' | 'walkBack';
 
@@ -82,6 +83,28 @@ export class CharacterRig {
   private overrideEnds = 0;
   private overrideTime = 0;
 
+  /** Meshes carrying each morph target, by target name. */
+  private readonly morphs = new Map<string, THREE.Mesh[]>();
+
+  /** Every shape slider this character has, and where each one currently sits. */
+  morphValues(): Record<string, number> {
+    const out: Record<string, number> = {};
+    for (const [name, meshes] of this.morphs) {
+      const m = meshes[0];
+      out[name] = m.morphTargetInfluences![m.morphTargetDictionary![name]];
+    }
+    return out;
+  }
+
+  /** Set one shape slider, on every mesh that carries it. Returns false for an unknown name. */
+  setMorph(name: string, value: number): boolean {
+    const meshes = this.morphs.get(name);
+    if (!meshes) return false;
+    const v = Math.min(Math.max(value, 0), 1);
+    for (const m of meshes) m.morphTargetInfluences![m.morphTargetDictionary![name]] = v;
+    return true;
+  }
+
   private constructor(scene: THREE.Group, clips: THREE.AnimationClip[], options: RigOptions) {
     this.root = scene;
     this.scale = options.scale ?? 1;
@@ -100,6 +123,16 @@ export class CharacterRig {
     });
     // The rest direction of each upper arm (shoulder to elbow) in root space, from the bind pose,
     // so aiming works whatever pose the skeleton was authored in.
+    // Morph targets: the character creator's shape sliders, as the converter carried them out of
+    // the mesh's blend targets. They are gathered by name across every mesh, because one slider
+    // can move two of them at once (the body's blend_muscle and the head's, so the neck matches).
+    scene.traverse((o) => {
+      const m = o as THREE.Mesh;
+      if (!m.isMesh || !m.morphTargetDictionary || !m.morphTargetInfluences) return;
+      for (const name of Object.keys(m.morphTargetDictionary)) {
+        (this.morphs.get(name) ?? this.morphs.set(name, []).get(name)!).push(m);
+      }
+    });
     scene.updateMatrixWorld(true);
     scene.getWorldQuaternion(rootQ).invert();
     for (const side of ['left', 'right'] as const) {
@@ -120,6 +153,20 @@ export class CharacterRig {
     const gltf = await new GLTFLoader().loadAsync(url);
     return new CharacterRig(gltf.scene, gltf.animations, options);
   }
+
+  /**
+   * A rig around a character assembled from parts. The group holds the shared skeleton and the
+   * meshes bound to it, so everything below -- the state machine, the clip matching, the arm
+   * solving -- works on it exactly as it does on a single converted model.
+   */
+  static fromCharacter(character: Character, options: RigOptions = {}): CharacterRig {
+    const rig = new CharacterRig(character.group, character.clips, options);
+    rig.character = character;
+    return rig;
+  }
+
+  /** The parts this rig was assembled from, when it came from a parts pack. */
+  character: Character | null = null;
 
   /** Every bone name, for finding out what a converted skeleton calls things. */
   get boneNames(): string[] {
@@ -287,7 +334,19 @@ interface PlayerManifest {
  * The player's rig: a character converted from the game (assets-private/player/manifest.json, the
  * first entry) when one exists, otherwise the bundled placeholder.
  */
-export async function loadPlayerRig(baseUrl: string): Promise<CharacterRig> {
+export async function loadPlayerRig(baseUrl: string, id = 'human_male'): Promise<CharacterRig> {
+  // A parts pack first: one skeleton with the body, head and clothing as separate meshes, which
+  // is what lets the character be reshaped and dressed while the game is running.
+  try {
+    const character = await Character.load(baseUrl, id);
+    const m = character.manifest;
+    const hold = Object.entries(m.jkaClips ?? {}).filter(([, c]) => !c.loop).map(([name]) => name);
+    const rig = CharacterRig.fromCharacter(character, { clipSpeeds: m.clipSpeeds, scale: m.scale ?? 1, hold });
+    console.info(`player ${m.id}: assembled from ${m.parts.length} parts, ${character.clips.length} clips, ${Object.keys(character.morphValues()).length} shape sliders`);
+    return rig;
+  } catch (err) {
+    console.info('no parts pack for the player, falling back to the single model', err instanceof Error ? err.message : err);
+  }
   try {
     const res = await fetch(`${baseUrl}assets-private/player/manifest.json`);
     if (res.ok && (res.headers.get('content-type') ?? '').includes('json')) {

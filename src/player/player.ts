@@ -236,7 +236,8 @@ export class Player {
   private phase = 0;
   private moveAmount = 0;
   private readonly parts: Parts;
-  private rig: CharacterRig | null = null;
+  /** The skinned character, once it has loaded; null while the primitive body stands in. */
+  rig: CharacterRig | null = null;
   private groundSpeed = 0;
 
   constructor(scene: THREE.Scene, physics: Physics) {
