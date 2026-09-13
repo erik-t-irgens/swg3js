@@ -7,7 +7,7 @@ function align4(n) {
   return (n + 3) & ~3;
 }
 
-export function buildGlb(meshes, { flipX = true, textures = new Map(), skin = null, animations = [] } = {}) {
+export function buildGlb(meshes, { flipX = true, textures = new Map(), skin = null, animations = [], keepZones = false } = {}) {
   const buffers = [];
   const bufferViews = [];
   const accessors = [];
@@ -89,6 +89,26 @@ export function buildGlb(meshes, { flipX = true, textures = new Map(), skin = nu
 
   for (const mesh of meshes) {
     const primitives = [];
+    // glTF requires every primitive of a mesh to carry the same morph targets in the same order,
+    // and the mesh's single weights array drives all of them. A target usually moves only some of
+    // the mesh's shader groups (a jaw blend does nothing to the eyes), so take the union here and
+    // let each primitive fill in zeros for the ones that miss it.
+    const targetNames = [];
+    for (const g of mesh.groups) {
+      for (const prim of g.primitives) {
+        for (const t of prim.targets ?? []) if (!targetNames.includes(t.name)) targetNames.push(t.name);
+      }
+    }
+    // One zero block per vertex count, shared by every primitive that needs a no-op target.
+    const zeroAccessor = new Map();
+    const zerosFor = (count) => {
+      let a = zeroAccessor.get(count);
+      if (a === undefined) {
+        a = pushAccessor(new Float32Array(count * 3), 'VEC3', 5126, 34962, { bounds: true });
+        zeroAccessor.set(count, a);
+      }
+      return a;
+    };
     for (const g of mesh.groups) {
       for (const p of g.primitives) {
         const positions = flipX ? negateX(p.positions) : p.positions;
@@ -101,15 +121,44 @@ export function buildGlb(meshes, { flipX = true, textures = new Map(), skin = nu
         if (p.joints) attributes.JOINTS_0 = pushAccessor(p.joints, 'VEC4', 5123, 34962);
         if (p.weights) attributes.WEIGHTS_0 = pushAccessor(p.weights, 'VEC4', 5126, 34962);
         const idx = indices instanceof Uint16Array ? indices : Uint32Array.from(indices);
-        primitives.push({
+        const prim = {
           attributes,
           indices: pushAccessor(idx, 'SCALAR', idx instanceof Uint16Array ? 5123 : 5125, 34963),
           material: materialFor(g.shader),
           mode: 4,
-        });
+        };
+        // Morph targets: the character creator's shape sliders. A target's POSITION accessor
+        // needs min/max like any other, and its deltas mirror in X with the mesh they belong to.
+        if (targetNames.length) {
+          const own = new Map((p.targets ?? []).map((t) => [t.name, t]));
+          const count = p.positions.length / 3;
+          prim.targets = targetNames.map((name) => {
+            const t = own.get(name);
+            if (!t) {
+              const entry = { POSITION: zerosFor(count) };
+              if (normals) entry.NORMAL = zerosFor(count);
+              return entry;
+            }
+            const entry = { POSITION: pushAccessor(flipX ? negateX(t.positions) : t.positions, 'VEC3', 5126, 34962, { bounds: true }) };
+            if (normals) entry.NORMAL = t.normals ? pushAccessor(flipX ? negateX(t.normals) : t.normals, 'VEC3', 5126, 34962) : zerosFor(count);
+            return entry;
+          });
+        }
+        // Occlusion: which zone combination each triangle belongs to, so the game can hide the
+        // skin under a shirt at run time instead of the converter deciding once and for all.
+        if (p.zones?.length && keepZones) prim.extras = { zones: Array.from(p.zones) };
+        primitives.push(prim);
       }
     }
-    gltfMeshes.push({ name: mesh.name, primitives });
+    const gltfMesh = { name: mesh.name, primitives };
+    if (mesh.extras) gltfMesh.extras = { ...mesh.extras };
+    if (targetNames.length) {
+      // glTF carries morph target names in the mesh's extras, where every loader (three included)
+      // looks for them; weights start at zero so a fresh model is the unmorphed shape.
+      gltfMesh.weights = targetNames.map(() => 0);
+      gltfMesh.extras = { ...(gltfMesh.extras ?? {}), targetNames };
+    }
+    gltfMeshes.push(gltfMesh);
     const node = { name: mesh.name, mesh: gltfMeshes.length - 1 };
     if (mesh.bounds) node.extras = { bounds: mesh.bounds };
     nodes.push(node);

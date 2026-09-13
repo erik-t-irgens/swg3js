@@ -245,6 +245,44 @@ export function parseMgn(root) {
     const r = new R(zto.data);
     for (let i = 0; i < zonesThisOccludesCount && r.remaining >= 2; i++) occludes.push(zoneName(r.i16()));
   }
+  // Blend targets: the body and face morphs the character creator's sliders drive
+  // (blend_muscle, blend_fat, blend_skinny, blend_jaw_0...). Each is a sparse set of deltas
+  // against the bind pose, indexed into this mesh's own position and normal arrays:
+  //
+  //   INFO  int32 positionCount, int32 normalCount, then the target's name
+  //   POSN  positionCount x (uint32 index, float dx, dy, dz)
+  //   NORM  normalCount   x (uint32 index, float dx, dy, dz)
+  //   DOT3  int32 count, then count x (uint32 index, float dx, dy, dz, dw)  -- tangent frame
+  //
+  // The tangent deltas are read past but not kept: nothing downstream shades with them yet.
+  const blendTargets = [];
+  const blts = childOf(v, 'BLTS');
+  if (blts) {
+    for (const blt of childrenOf(blts, 'BLT ')) {
+      const info = childOf(blt, 'INFO');
+      if (!info) continue;
+      const positionCount = info.data.readInt32LE(0);
+      const normalCount = info.data.readInt32LE(4);
+      const name = new R(info.data.subarray(8)).str();
+      const sparse = (chunk, count) => {
+        const index = new Uint32Array(count);
+        const delta = new Float32Array(count * 3);
+        if (!chunk) return { index: index.subarray(0, 0), delta: delta.subarray(0, 0) };
+        for (let i = 0; i < count && (i + 1) * 16 <= chunk.data.length; i++) {
+          index[i] = chunk.data.readUInt32LE(i * 16);
+          delta[i * 3] = chunk.data.readFloatLE(i * 16 + 4);
+          delta[i * 3 + 1] = chunk.data.readFloatLE(i * 16 + 8);
+          delta[i * 3 + 2] = chunk.data.readFloatLE(i * 16 + 12);
+        }
+        return { index, delta };
+      };
+      blendTargets.push({
+        name,
+        positions: sparse(childOf(blt, 'POSN'), positionCount),
+        normals: sparse(childOf(blt, 'NORM'), normalCount),
+      });
+    }
+  }
   // Texture renderers: blueprints that bake a texture (skin, hair) at run time into one or more
   // of this mesh's shaders. Each TRT chunk names the blueprint and the (shader index, texture tag)
   // slots it fills.
@@ -260,7 +298,7 @@ export function parseMgn(root) {
       textureRenderers.push({ file, slots });
     }
   }
-  return { version, maxTransformsPerVertex, maxTransformsPerShader, skeletons, transforms, positions, weightCounts, weightStart, weightTransform, weightValue, normals, shaders, blendTargetCount, occlusionZones, zoneCombinations, fullyOccludedBy, occludes, occlusionLayer, textureRenderers };
+  return { version, maxTransformsPerVertex, maxTransformsPerShader, skeletons, transforms, positions, weightCounts, weightStart, weightTransform, weightValue, normals, shaders, blendTargetCount, blendTargets, occlusionZones, zoneCombinations, fullyOccludedBy, occludes, occlusionLayer, textureRenderers };
 }
 
 /**
@@ -792,7 +830,39 @@ export function skinnedPrimitives(mgn, skeleton) {
       });
       if (!top.length) weights[i * 4] = 1;
     }
-    groups.push({ shader: s.shader, primitives: [{ positions, normals, uvs, indices: Uint32Array.from(s.triangles), joints, weights }] });
+    // Blend targets are sparse deltas against the mesh's own vertex arrays, so they follow the
+    // same positionIndices/normalIndices this group was built from. Two output vertices sharing
+    // one mesh position (a UV seam) get the same delta, which is what keeps the seam shut.
+    const targets = [];
+    for (const bt of mgn.blendTargets ?? []) {
+      const dPos = new Float32Array(n * 3);
+      const dNrm = normals ? new Float32Array(n * 3) : null;
+      const posAt = new Map();
+      for (let k = 0; k < bt.positions.index.length; k++) posAt.set(bt.positions.index[k], k);
+      const nrmAt = new Map();
+      for (let k = 0; k < bt.normals.index.length; k++) nrmAt.set(bt.normals.index[k], k);
+      let touched = 0;
+      for (let i = 0; i < n; i++) {
+        const k = posAt.get(s.positionIndices[i]);
+        if (k !== undefined) {
+          dPos[i * 3] = bt.positions.delta[k * 3];
+          dPos[i * 3 + 1] = bt.positions.delta[k * 3 + 1];
+          dPos[i * 3 + 2] = bt.positions.delta[k * 3 + 2];
+          touched++;
+        }
+        if (dNrm && s.normalIndices) {
+          const m = nrmAt.get(s.normalIndices[i]);
+          if (m !== undefined) {
+            dNrm[i * 3] = bt.normals.delta[m * 3];
+            dNrm[i * 3 + 1] = bt.normals.delta[m * 3 + 1];
+            dNrm[i * 3 + 2] = bt.normals.delta[m * 3 + 2];
+          }
+        }
+      }
+      // A face target moves nothing on a body group; carrying it there would be dead weight.
+      if (touched) targets.push({ name: bt.name, positions: dPos, normals: dNrm });
+    }
+    groups.push({ shader: s.shader, primitives: [{ positions, normals, uvs, indices: Uint32Array.from(s.triangles), joints, weights, targets: targets.length ? targets : undefined, zones: s.triangleZones }] });
   }
   return { groups, unknownTransforms, unknownNames: [...unknownNames] };
 }

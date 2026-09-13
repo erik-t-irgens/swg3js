@@ -46,14 +46,99 @@ export function resolveToMesh(vfs, path, depth = 0) {
 }
 
 /**
+ * The detail levels a .lod lists, highest detail first: [{ name, near, far }].
+ * The engine picks by camera distance; `near` is where a level takes over.
+ */
+export function lodLevels(root) {
+  const children = findAll(root, 'CHLD').map((c) => ({ id: c.data.readInt32LE(0), name: readCString(c.data, 4).value }));
+  if (!children.length) return [];
+  const info = find(root, 'INFO');
+  const levels = [];
+  if (info) {
+    for (let o = 0; o + 12 <= info.data.length; o += 12) {
+      const id = info.data.readInt32LE(o);
+      const child = children.find((c) => c.id === id);
+      if (child) levels.push({ name: child.name, near: info.data.readFloatLE(o + 4), far: info.data.readFloatLE(o + 8) });
+    }
+  }
+  // Highest detail (near 0) first. Without INFO the file's last child is the detailed one.
+  if (levels.length) return levels.sort((a, b) => a.near - b.near);
+  return [{ name: children[children.length - 1].name, near: 0, far: Infinity }];
+}
+
+/**
+ * How many detail levels an appearance offers, and where each takes over. A model may hold
+ * several .lod chains (a building's cells each have their own); the count is the deepest chain
+ * and a level's distance is the farthest any chain defers to it, so detail is never dropped
+ * earlier than the artists intended.
+ */
+export function detailLevels(vfs, rawPath, depth = 0, seen = new Set()) {
+  const path = appearancePath(rawPath);
+  const lower = path.toLowerCase();
+  if (depth > 8 || seen.has(path) || !vfs.has(path)) return [];
+  seen.add(path);
+  if (lower.endsWith('.msh') || lower.endsWith('.prt')) return [];
+  let root;
+  try {
+    root = parseIff(vfs.read(path));
+  } catch {
+    return [];
+  }
+  const merge = (chains) => {
+    const out = [];
+    for (const chain of chains) {
+      chain.forEach((lvl, i) => {
+        if (!out[i]) out[i] = { near: lvl.near, far: lvl.far };
+        else {
+          out[i].near = Math.max(out[i].near, lvl.near);
+          out[i].far = Math.max(out[i].far, lvl.far);
+        }
+      });
+    }
+    return out;
+  };
+  if (lower.endsWith('.apt')) {
+    const name = find(root, 'NAME');
+    return name ? detailLevels(vfs, readCString(name.data).value, depth + 1, seen) : [];
+  }
+  if (lower.endsWith('.lod')) {
+    const levels = lodLevels(root);
+    const nested = levels.map((l) => detailLevels(vfs, l.name, depth + 1, seen));
+    // This chain's own levels, deepened by any chain nested under its highest-detail level.
+    const own = levels.map((l) => ({ near: l.near, far: l.far }));
+    const deeper = merge(nested.filter((n) => n.length > own.length));
+    return own.length >= deeper.length ? own : merge([own, deeper]);
+  }
+  if (lower.endsWith('.pob')) {
+    const { cells } = parsePob(root);
+    return merge(cells.filter((c) => c.appearance).map((c) => detailLevels(vfs, c.appearance, depth + 1, seen)));
+  }
+  if (lower.endsWith('.cmp')) {
+    const version = root.children.find(isForm);
+    const chains = [];
+    for (const part of childrenOf(version ?? root, 'PART')) {
+      chains.push(detailLevels(vfs, readCString(part.data).value, depth + 1, seen));
+    }
+    return merge(chains);
+  }
+  return [];
+}
+
+/**
  * Resolve an appearance to mesh parts: [{ mesh, transform | null }], where
  * transform is a row-major 3x4 in the appearance's local space.
+ *
+ * `detail` picks a level of detail: 0 is the highest, and a chain with fewer levels than
+ * asked for stays on its own lowest. A level the artists left empty (`no_render`) resolves
+ * to no parts, which is how the game makes small things vanish in the distance.
  */
-export function resolveParts(vfs, rawPath, depth = 0) {
+export function resolveParts(vfs, rawPath, depth = 0, detail = 0) {
   const path = appearancePath(rawPath);
   const lower = path.toLowerCase();
   if (depth > 8) throw new Error(`Appearance chain too deep at ${path}`);
   if (lower.endsWith('.msh')) return [{ mesh: path, transform: null }];
+  // The engine's placeholder for "draw nothing at this range".
+  if (/(^|\/)no_render\.[^/]+$/.test(lower)) return [];
   if (!vfs.has(path)) throw new Error(`Not in archives: ${path}`);
   // Particle effects are parts too (a candle is a mesh plus a flame); callers place them.
   if (lower.endsWith('.prt')) return [{ particle: path, transform: null }];
@@ -61,28 +146,16 @@ export function resolveParts(vfs, rawPath, depth = 0) {
   if (lower.endsWith('.apt')) {
     const name = find(root, 'NAME');
     if (!name) throw new Error(`${path}: .apt without NAME`);
-    return resolveParts(vfs, readCString(name.data).value, depth + 1);
+    return resolveParts(vfs, readCString(name.data).value, depth + 1, detail);
   }
   if (lower.endsWith('.lod')) {
-    // Detail levels: INFO lists (id, nearDistance, farDistance); the entry whose
-    // near distance is 0 (the last one) is the highest detail, per the engine.
-    const children = findAll(root, 'CHLD').map((c) => ({ id: c.data.readInt32LE(0), name: readCString(c.data, 4).value }));
-    if (!children.length) throw new Error(`${path}: .lod without CHLD`);
-    const info = find(root, 'INFO');
-    let pick = children[children.length - 1];
-    if (info && info.data.length >= 12) {
-      let bestNear = Infinity;
-      for (let o = 0; o + 12 <= info.data.length; o += 12) {
-        const id = info.data.readInt32LE(o);
-        const near = info.data.readFloatLE(o + 4);
-        const child = children.find((c) => c.id === id);
-        if (child && near <= bestNear) {
-          bestNear = near;
-          pick = child;
-        }
-      }
-    }
-    return resolveParts(vfs, pick.name, depth + 1);
+    // Detail levels, highest first. A chain shorter than the level asked for stays on its
+    // own lowest, so a whole model can drop a level even where only some parts have one.
+    const levels = lodLevels(root);
+    if (!levels.length) throw new Error(`${path}: .lod without CHLD`);
+    const pick = levels[Math.min(detail, levels.length - 1)];
+    // Levels below the first are already reduced; nested chains stay on their highest.
+    return resolveParts(vfs, pick.name, depth + 1, detail === 0 ? 0 : Math.max(0, detail - (levels.length - 1)));
   }
   if (lower.endsWith('.pob')) {
     // Portal building: exterior (cell 0) plus every interior cell, all in building space.
@@ -92,12 +165,12 @@ export function resolveParts(vfs, rawPath, depth = 0) {
     cells.forEach((cell, i) => {
       if (!cell.appearance) return;
       try {
-        for (const part of resolveParts(vfs, cell.appearance, depth + 1)) out.push({ ...part, cell: i, cellName: cell.name || (i === 0 ? 'exterior' : `cell${i}`), cellPortals: cell.portals, cellLights: cell.lights ?? [], portalGeometry: portals });
+        for (const part of resolveParts(vfs, cell.appearance, depth + 1, detail)) out.push({ ...part, cell: i, cellName: cell.name || (i === 0 ? 'exterior' : `cell${i}`), cellPortals: cell.portals, cellLights: cell.lights ?? [], portalGeometry: portals });
       } catch (err) {
         errors.push(`cell ${i}: ${err.message}`);
       }
     });
-    if (!out.length) throw new Error(`${path}: no cell appearances resolved (${errors.join('; ')})`);
+    if (!out.length && detail === 0) throw new Error(`${path}: no cell appearances resolved (${errors.join('; ')})`);
     return out;
   }
   if (lower.endsWith('.cmp')) {
@@ -117,11 +190,11 @@ export function resolveParts(vfs, rawPath, depth = 0) {
         const deg = Math.PI / 180;
         transform = yawPitchRollTransform(pos, d.readFloatLE(next + 12) * deg, d.readFloatLE(next + 16) * deg, d.readFloatLE(next + 20) * deg);
       }
-      for (const sub of resolveParts(vfs, name, depth + 1)) {
+      for (const sub of resolveParts(vfs, name, depth + 1, detail)) {
         out.push({ ...(sub.particle ? { particle: sub.particle } : { mesh: sub.mesh }), transform: sub.transform ? composeTransform(transform, sub.transform) : transform });
       }
     }
-    if (!out.length) throw new Error(`${path}: component appearance without parts`);
+    if (!out.length && detail === 0) throw new Error(`${path}: component appearance without parts`);
     return out;
   }
   throw new Error(`Unsupported appearance type: ${path}`);

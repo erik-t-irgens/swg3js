@@ -19,6 +19,10 @@
 //   node tools/swg/cli.mjs trt <swg-dir> <x.trt> <out.png> [--var=name=value,...]   bake a texture renderer blueprint (skin, hair) to a PNG
 //   node tools/swg/cli.mjs player <swg-dir> <out-dir> [--template=object/creature/player/shared_human_male.iff] [--wear=...|none] [--var=...]   the player's character as <out-dir>/player/<id>.glb + manifest.json
 //                                                               [--jka=<Jedi Academy GameData or base dir>] [--jka-anims=BOTH_A1_T__B_,...]  adds Jedi Academy's saber attacks, jumps and rolls, retargeted
+//   node tools/swg/cli.mjs wardrobe <swg-dir> <out-dir> [--gender=male|female] [--kind=wearables,hair] [--match=...] [--limit=N]   every wearable and hairstyle as parts
+//   node tools/swg/cli.mjs parts <swg-dir> <out-dir> [--template=...] [--wear=...]   body, head and worn items as separate GLBs on one shared skeleton
+//   node tools/swg/cli.mjs clips-save <model.glb> <out.clips> [--only=BOTH_]   lift a model's animations into a bundle that survives re-conversion
+//   node tools/swg/cli.mjs clips-apply <model.glb> <in.clips> [--drop=BOTH_]   put a bundle's animations back onto a model, joints matched by name
 //   node tools/swg/cli.mjs jka-clips <player.glb> <jka-dir> [--jka-anims=...]   re-import Jedi Academy's clips into a converted player GLB (no SWG archives needed)
 //   node tools/swg/cli.mjs jka-extract <jka-dir> <out-dir>                 copy the humanoid skeleton and animation.cfg out of the pk3 archives
 //                                                                  (dressed in a shirt, trousers and shoes unless --wear says otherwise)
@@ -56,7 +60,7 @@
 //                       and write the creature and NPC spawns to <pack>/spawns.json; or set CORE3 in the environment)
 //        --no-flip (keep left-handed coordinates)  --no-textures (skip DDS decoding)
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, join, relative } from 'node:path';
 import { resolveParts } from './appearance.mjs';
 import { decodeDds } from './dds.mjs';
 import { buildGlb } from './glb.mjs';
@@ -70,7 +74,8 @@ import { R, composeMeshes, mergeSkeletons, parseAnimation, parseLat, parseLmg, p
 import { resolveTemplateMesh, resolveTemplateString } from './objtemplate.mjs';
 import { exportParticle } from './particle.mjs';
 import { defaultJkaClips, importJkaClips } from './jka.mjs';
-import { readGlb, replaceClips, skinJoints } from './glbclips.mjs';
+import { extractClips, readGlb, replaceClips, skinJoints } from './glbclips.mjs';
+import { packClips, retargetClips, unpackClips } from './clipbundle.mjs';
 import { encodePng } from './png.mjs';
 import { shaderTextures } from './sht.mjs';
 import { bakeShader, describeShader, describeVariables, loadShader, parseBlueprint, preparedShaders, renderBlueprint, renderContext, shaderNeedsBake } from './texrender.mjs';
@@ -657,7 +662,15 @@ function skinnedTexture(vfs, shaderPath, slots, ctx, info) {
   return { path: `${shaderPath}#${rendered ? basename(rendered.file) : 'baked'}`, png: encodePng(image.width, image.height, image.rgba), hasAlpha, alphaMode };
 }
 
-function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80, variables = new Map(), wear = [], extraClips = null } = {}) {
+/**
+ * Convert a skeletal appearance.
+ *
+ * By default everything -- body, head and whatever is worn -- is merged into one GLB, with the
+ * skin under the clothing culled away for good. `parts` instead writes each mesh as its own GLB
+ * against the same skeleton, keeps every triangle, and carries the occlusion zones through, so
+ * the game can dress and undress a character at run time rather than the converter deciding once.
+ */
+function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80, variables = new Map(), wear = [], extraClips = null, parts = null, gender = null } = {}) {
   let satPath = path.replace(/\\/g, '/');
   if (/\.iff$/i.test(satPath)) {
     const cache = new Map();
@@ -701,6 +714,12 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
         if (!a) throw new Error('no appearanceFilename in its template chain');
         file = a.replace(/\\/g, '/').replace(/^\//, '');
       }
+      // A wearable's template names one gender's appearance and the client swaps the suffix for
+      // the other, so a male character given shirt_s03_f.sat should wear shirt_s03_m.sat.
+      if (gender) {
+        const swapped = file.replace(/_[fm](\.sat)$/i, `_${gender}$1`);
+        if (swapped !== file && vfs.has(swapped)) file = swapped;
+      }
       if (!vfs.has(file)) throw new Error('not in archives');
       const worn = parseSat(readIff(vfs, file));
       const skeletons = worn.skeletons.map((k) => k.file.toLowerCase());
@@ -732,7 +751,9 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
       }
     }
   }
-  for (const { mgn, file, body, hiddenTriangles } of composeMeshes(loaded)) {
+  // In parts mode nothing is hidden at conversion time: the zones travel with the mesh instead.
+  const composed = parts ? loaded.map((l) => ({ ...l, hiddenTriangles: 0 })) : composeMeshes(loaded);
+  for (const { mgn, file, body, hiddenTriangles } of composed) {
     const { groups, unknownTransforms, unknownNames } = skinnedPrimitives(mgn, skeleton);
     info.unknownTransforms += unknownTransforms;
     for (const n of unknownNames) (info.unknownJoints ??= new Set()).add(n);
@@ -773,7 +794,21 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
       if (t) textures.set(g.shader, t);
       kept.push(g);
     });
-    if (kept.length) meshes.push({ name: meshName, groups: kept });
+    if (kept.length) {
+      const entry = { name: meshName, groups: kept };
+      if (parts) {
+        // What this mesh hides on the layers beneath it, and the zone names its triangles index.
+        entry.extras = {
+          occlusionLayer: mgn.occlusionLayer,
+          occludes: mgn.occludes,
+          zoneNames: mgn.occlusionZones,
+          zoneCombinations: mgn.zoneCombinations,
+          fullyOccludedBy: mgn.fullyOccludedBy,
+          body: !!body,
+        };
+      }
+      meshes.push(entry);
+    }
     info.meshes.push({ file, shaders: kept.length, triangles: kept.reduce((a, g) => a + g.primitives[0].indices.length / 3, 0), hidden: hiddenTriangles, layer: mgn.occlusionLayer, occludes: mgn.occludes });
   }
   const clips = [];
@@ -841,6 +876,29 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
       skin.clips.push(c);
       info.animations.push(c.name);
     }
+  }
+  if (parts) {
+    // One GLB per mesh, each carrying the same skeleton so they can be bound to one at run time,
+    // plus a rig of skeleton and animations alone that every part and every species shares.
+    mkdirSync(parts.dir, { recursive: true });
+    info.parts = [];
+    const rigFile = join(parts.dir, `${parts.rig ?? 'rig'}.glb`);
+    writeFileSync(rigFile, buildGlb([], { flipX: true, skin, animations: skin.clips }));
+    info.rig = { file: relative(parts.dir, rigFile), joints: skin.joints.length, clips: skin.clips.length };
+    for (const mesh of meshes) {
+      const file = join(parts.dir, `${mesh.name}.glb`);
+      const own = new Map();
+      for (const g of mesh.groups) if (textures.has(g.shader)) own.set(g.shader, textures.get(g.shader));
+      writeFileSync(file, buildGlb([mesh], { flipX: true, textures: own, skin, keepZones: true }));
+      info.parts.push({
+        name: mesh.name,
+        file: relative(parts.dir, file),
+        bytes: statSync(file).size,
+        triangles: mesh.groups.reduce((a, g) => a + g.primitives[0].indices.length / 3, 0),
+        ...(mesh.extras ?? {}),
+      });
+    }
+    return info;
   }
   mkdirSync(dirname(outFile), { recursive: true });
   writeFileSync(outFile, buildGlb(meshes, { flipX: true, textures, skin, animations: skin.clips }));
@@ -1575,6 +1633,228 @@ switch (cmd) {
     writeFileSync(manifestFile, JSON.stringify(manifest, null, 2));
     console.log(`-> ${join(outDir, `${id}.glb`)} and ${manifestFile}; the game uses the first entry`);
     printEffectSummary();
+    break;
+  }
+
+  case 'wardrobe': {
+    // <swg-dir> <out-dir> [--gender=male|female] [--kind=wearables,hair] [--match=armor] [--limit=N]
+    // Every wearable and hairstyle built for the humanoid skeleton, as parts a character can put on.
+    if (!pos[2]) usage();
+    const vfs = mount(pos[1]);
+    const gender = (options.gender ?? 'male').toLowerCase().startsWith('f') ? 'f' : 'm';
+    const kinds = (options.kind ?? 'wearables,hair').split(',').map((k) => k.trim()).filter(Boolean);
+    const match = options.match ? new RegExp(options.match, 'i') : null;
+    const limit = options.limit ? Number(options.limit) : Infinity;
+    const template = (options.template ?? PLAYER_TEMPLATE).replace(/\\/g, '/');
+    const speciesId = basename(template).replace(/^shared_/, '').replace(/\.[^.]+$/, '');
+    const outDir = join(pos[2], 'wardrobe', speciesId);
+    mkdirSync(outDir, { recursive: true });
+
+    // The species' merged skeleton: everything worn has to be weighted to these joints.
+    const speciesSat = parseSat(readIff(vfs, resolveTemplateString(vfs, template, ['appearanceFilename'], new Map()).replace(/\\/g, '/').replace(/^\//, '')));
+    const loadSkeleton = (file) => parseSkeleton(readIff(vfs, file), (f) => (vfs.has(f) ? readIff(vfs, f) : null));
+    const baseSkeletonFile = speciesSat.skeletons[0].file;
+    const extraSkeletons = speciesSat.skeletons.slice(1).filter((k) => vfs.has(k.file)).map((k) => ({ skeleton: loadSkeleton(k.file), attachTo: k.attachTo, file: k.file }));
+    const skeleton = mergeSkeletons(loadSkeleton(baseSkeletonFile), extraSkeletons);
+    const skin = skinData(skeleton, [], { flipX: true });
+    const allowed = new Set([baseSkeletonFile.toLowerCase(), ...extraSkeletons.map((e) => e.file.toLowerCase())]);
+
+    const templates = [...vfs.list()].filter((n) => kinds.some((k) => new RegExp(`^object/tangible/${k}/.*/shared_.*\\.iff$`).test(n))).sort();
+    const ctx = renderContext(customizationValues(options.var));
+    const catalogue = [];
+    const failed = [];
+    let done = 0;
+    for (const tpl of templates) {
+      if (done >= limit) break;
+      const id = basename(tpl).replace(/^shared_/, '').replace(/\.[^.]+$/, '');
+      if (match && !match.test(tpl)) continue;
+      try {
+        let satPath = resolveTemplateString(vfs, tpl, ['appearanceFilename'], new Map());
+        if (!satPath) throw new Error('no appearance in its template chain');
+        satPath = satPath.replace(/\\/g, '/').replace(/^\//, '');
+        // A template names one gender's appearance; the client swaps the suffix for the other.
+        // Take the wearer's if it exists, and note when only the other was authored.
+        const wanted = satPath.replace(/_[fm](\.sat)$/i, `_${gender}$1`);
+        let usedOtherGender = false;
+        if (wanted !== satPath && vfs.has(wanted)) satPath = wanted;
+        else if (/_[fm]\.sat$/i.test(satPath) && !satPath.toLowerCase().endsWith(`_${gender}.sat`)) usedOtherGender = true;
+        if (!vfs.has(satPath)) throw new Error(`${satPath} not in archives`);
+        const sat = parseSat(readIff(vfs, satPath));
+        if (!sat.skeletons.some((k) => allowed.has(k.file.toLowerCase()))) throw new Error(`built for ${sat.skeletons.map((k) => basename(k.file)).join(', ') || 'no skeleton'}`);
+        const entries = [];
+        for (let name of sat.meshes) {
+          if (/\.lmg$/i.test(name)) {
+            if (!vfs.has(name)) continue;
+            const lods = parseLmg(readIff(vfs, name));
+            name = lods.find((l) => vfs.has(l)) ?? lods[0];
+          }
+          if (!name || !vfs.has(name)) continue;
+          const mgn = parseMgn(readIff(vfs, name));
+          const { groups } = skinnedPrimitives(mgn, skeleton);
+          const meshName = basename(name).replace(/\.[^.]+$/, '');
+          const textures = new Map();
+          const info = { missing: [], skipped: [], customization: new Set(), textureRenderers: [], shaderNotes: new Set() };
+          const kept = [];
+          for (const g of groups) {
+            if (!g.primitives[0].indices.length) continue;
+            const t = skinnedTexture(vfs, g.shader, null, ctx, info);
+            if (t) textures.set(g.shader, t);
+            kept.push(g);
+          }
+          if (!kept.length) continue;
+          const file = `${meshName}.glb`;
+          writeFileSync(join(outDir, file), buildGlb([{ name: meshName, groups: kept, extras: { occlusionLayer: mgn.occlusionLayer, occludes: mgn.occludes, zoneNames: mgn.occlusionZones, zoneCombinations: mgn.zoneCombinations, fullyOccludedBy: mgn.fullyOccludedBy } }], { flipX: true, textures, skin, keepZones: true }));
+          entries.push({
+            name: meshName,
+            file,
+            bytes: statSync(join(outDir, file)).size,
+            triangles: kept.reduce((a, g) => a + g.primitives[0].indices.length / 3, 0),
+            occlusionLayer: mgn.occlusionLayer,
+            occludes: mgn.occludes,
+            zoneNames: mgn.occlusionZones,
+            zoneCombinations: mgn.zoneCombinations,
+            fullyOccludedBy: mgn.fullyOccludedBy,
+            morphs: mgn.blendTargets.map((b) => b.name),
+          });
+        }
+        if (!entries.length) throw new Error('no mesh survived');
+        catalogue.push({ id, template: tpl, kind: tpl.split('/')[2], sat: satPath, gender: usedOtherGender ? (gender === 'm' ? 'f' : 'm') : gender, parts: entries });
+        done++;
+        if (done % 50 === 0) console.log(`  ${done} converted...`);
+      } catch (err) {
+        failed.push(`${id}: ${err.message}`);
+      }
+    }
+    const bytes = catalogue.reduce((a, c) => a + c.parts.reduce((b, p) => b + p.bytes, 0), 0);
+    writeFileSync(join(outDir, 'wardrobe.json'), JSON.stringify({ species: speciesId, gender, skeleton: baseSkeletonFile, items: catalogue }, null, 2));
+    console.log(`-> ${outDir}: ${catalogue.length} items, ${catalogue.reduce((a, c) => a + c.parts.length, 0)} meshes, ${(bytes / 1e6).toFixed(1)} MB`);
+    const withMorphs = catalogue.filter((c) => c.parts.some((p) => p.morphs.length)).length;
+    const otherGender = catalogue.filter((c) => c.gender !== gender).length;
+    console.log(`   ${withMorphs} carry body-shape morphs; ${otherGender} exist only in the other gender's mesh`);
+    if (failed.length) console.log(`   ${failed.length} skipped, e.g. ${failed.slice(0, 4).join('; ')}`);
+    break;
+  }
+
+  case 'parts': {
+    // <swg-dir> <out-dir> [--template=...] [--wear=...]: body, head and each worn item as its own
+    // GLB against one shared skeleton, with the occlusion zones left for the game to apply.
+    if (!pos[2]) usage();
+    const vfs = mount(pos[1]);
+    const template = (options.template ?? PLAYER_TEMPLATE).replace(/\\/g, '/');
+    const id = basename(template).replace(/^shared_/, '').replace(/\.[^.]+$/, '');
+    const outDir = join(pos[2], 'characters', id);
+    const wear = options.wear === undefined ? DEFAULT_WEAR : options.wear === 'none' ? [] : options.wear.split(',').map((w) => w.trim()).filter(Boolean);
+    const variables = customizationValues(options.var);
+    const info = convertSat(vfs, template, null, {
+      animations: options.anim ?? 'all',
+      maxAnimations: options['max-anims'] ? Number(options['max-anims']) : 80,
+      variables,
+      wear,
+      parts: { dir: outDir, rig: 'rig' },
+      gender: /female/i.test(id) ? 'f' : 'm',
+    });
+    const manifest = {
+      id,
+      template,
+      skeleton: info.skeleton,
+      rig: info.rig,
+      joints: info.joints,
+      // What the conversion dressed this character in; the game starts it wearing the same.
+      defaultWear: info.parts.filter((p) => p.occlusionLayer > 0).map((p) => p.name),
+      parts: info.parts,
+      customization: [...info.customization],
+    };
+    writeFileSync(join(outDir, 'parts.json'), JSON.stringify(manifest, null, 2));
+    const total = info.parts.reduce((a, p) => a + p.bytes, 0);
+    console.log(`-> ${outDir}`);
+    console.log(`   rig ${info.rig.file}: ${info.rig.joints} joints, ${info.rig.clips} clips`);
+    for (const p of info.parts) {
+      console.log(`   ${p.name.padEnd(22)} ${String(p.triangles).padStart(5)} tris  ${(p.bytes / 1024).toFixed(0).padStart(5)} KB  layer ${p.occlusionLayer}${p.occludes?.length ? `  hides ${p.occludes.join(' ')}` : ''}`);
+    }
+    console.log(`   ${info.parts.length} parts, ${(total / 1e6).toFixed(1)} MB of meshes (the rig and its clips are shared)`);
+    if (info.skipped.length) console.log(`   skipped: ${info.skipped.slice(0, 5).join('; ')}`);
+    break;
+  }
+
+  case 'clips-save': {
+    // <model.glb> <out.clips> [--only=BOTH_,TORSO_]: lift a model's animations out into a bundle
+    if (!pos[2]) usage();
+    const buf = readFileSync(pos[1]);
+    const prefixes = options.only ? options.only.split(',').map((x) => x.trim()).filter(Boolean) : null;
+    const keep = prefixes ? (name) => prefixes.some((p) => name.toUpperCase().startsWith(p.toUpperCase())) : () => true;
+    const bundle = extractClips(buf, keep);
+    if (!bundle.clips.length) throw new Error(`${pos[1]} has no animations matching ${prefixes ? prefixes.join(', ') : 'anything'}`);
+    // A GLB cannot say whether a clip loops or how fast it plays; the manifest beside it can,
+    // and that is exactly the part a re-conversion would otherwise throw away.
+    const srcManifest = join(dirname(pos[1]), 'manifest.json');
+    if (existsSync(srcManifest)) {
+      const m = JSON.parse(readFileSync(srcManifest, 'utf8'));
+      const entry = (m.players ?? []).find((e) => basename(e.file) === basename(pos[1]));
+      if (entry) {
+        const names = new Set(bundle.clips.map((c) => c.name));
+        bundle.meta = {
+          jkaClips: Object.fromEntries(Object.entries(entry.jkaClips ?? {}).filter(([n]) => names.has(n))),
+          clipSpeeds: Object.fromEntries(Object.entries(entry.clipSpeeds ?? {}).filter(([n]) => names.has(n))),
+          scale: entry.scale,
+        };
+      }
+    }
+    const packed = packClips(bundle);
+    writeFileSync(pos[2], packed);
+    if (bundle.meta) console.log(`   carrying ${Object.keys(bundle.meta.jkaClips).length} Jedi Academy loop flags and ${Object.keys(bundle.meta.clipSpeeds).length} clip speeds`);
+    const frames = bundle.clips.reduce((n, c) => n + c.times.length, 0);
+    console.log(`-> ${pos[2]}: ${bundle.clips.length} clips, ${frames} frames, ${bundle.joints.length} joints, ${(packed.length / 1e6).toFixed(1)} MB`);
+    console.log(`   ${bundle.clips.slice(0, 6).map((c) => c.name).join(', ')}${bundle.clips.length > 6 ? ', ...' : ''}`);
+    break;
+  }
+
+  case 'clips-apply': {
+    // <model.glb> <in.clips> [--drop=BOTH_]: put a bundle's animations onto a model, matching joints by name
+    if (!pos[2]) usage();
+    const glbFile = pos[1];
+    const buf = readFileSync(glbFile);
+    const { json } = readGlb(buf);
+    const joints = skinJoints(json);
+    const bundle = unpackClips(readFileSync(pos[2]));
+    const { clips, missing } = retargetClips(bundle, joints);
+    const prefixes = options.drop ? options.drop.split(',').map((x) => x.trim()).filter(Boolean) : null;
+    const incoming = new Set(clips.map((c) => c.name));
+    // Replace clips of the same name, and anything the caller names by prefix.
+    const drop = (name) => incoming.has(name) || (prefixes ? prefixes.some((p) => name.toUpperCase().startsWith(p.toUpperCase())) : false);
+    const backup = `${glbFile}.bak`;
+    if (!existsSync(backup)) writeFileSync(backup, buf);
+    writeFileSync(glbFile, replaceClips(buf, clips, drop));
+    // Put the loop flags and speeds back on the manifest the game reads.
+    let restored = '';
+    // A parts rig keeps the same animation metadata, in its own manifest.
+    const partsManifest = join(dirname(glbFile), 'parts.json');
+    if (bundle.meta && existsSync(partsManifest)) {
+      const m = JSON.parse(readFileSync(partsManifest, 'utf8'));
+      const { json: after } = readGlb(readFileSync(glbFile));
+      const present = new Set((after.animations ?? []).map((a) => a.name));
+      m.rig = { ...(m.rig ?? {}), clips: present.size };
+      m.jkaClips = Object.fromEntries(Object.entries(bundle.meta.jkaClips ?? {}).filter(([n]) => present.has(n)));
+      m.clipSpeeds = { ...(m.clipSpeeds ?? {}), ...(bundle.meta.clipSpeeds ?? {}) };
+      if (bundle.meta.scale !== undefined) m.scale = bundle.meta.scale;
+      writeFileSync(partsManifest, JSON.stringify(m, null, 2));
+      restored = `; parts.json updated with ${Object.keys(m.jkaClips).length} loop flags`;
+    }
+    const outManifest = join(dirname(glbFile), 'manifest.json');
+    if (bundle.meta && existsSync(outManifest)) {
+      const m = JSON.parse(readFileSync(outManifest, 'utf8'));
+      const entry = (m.players ?? []).find((e) => basename(e.file) === basename(glbFile));
+      if (entry) {
+        const { json: after } = readGlb(readFileSync(glbFile));
+        const present = new Set((after.animations ?? []).map((a) => a.name));
+        entry.clips = [...present];
+        entry.jkaClips = { ...(entry.jkaClips ?? {}), ...Object.fromEntries(Object.entries(bundle.meta.jkaClips ?? {}).filter(([n]) => present.has(n))) };
+        entry.clipSpeeds = { ...(entry.clipSpeeds ?? {}), ...(bundle.meta.clipSpeeds ?? {}) };
+        if (bundle.meta.scale !== undefined) entry.scale = bundle.meta.scale;
+        writeFileSync(outManifest, JSON.stringify(m, null, 2));
+        restored = `; manifest updated with ${Object.keys(entry.jkaClips).length} loop flags`;
+      }
+    }
+    console.log(`-> ${glbFile}: ${clips.length} clips applied${restored}${missing.length ? `; the bundle had no track for ${missing.length} joints (${missing.slice(0, 6).join(', ')}${missing.length > 6 ? ', ...' : ''}), which hold their bind pose` : ''}`);
     break;
   }
 
