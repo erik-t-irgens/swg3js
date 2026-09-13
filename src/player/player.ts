@@ -219,8 +219,10 @@ export class Player {
   private readonly flying: THREE.Group;
   /** A wall run or grab turns the body this way while it lasts. */
   private lockedHeading: THREE.Vector3 | null = null;
-  /** The rig has sideways clips, so the body faces the camera while moving. */
+  /** The rig has Jedi Academy's back-pedal clips, so the legs keep near the camera's facing while moving. */
   private directional = false;
+  /** How far the torso turns from the legs back towards the camera, in radians, this frame. */
+  private torsoTwist = 0;
   private readonly cmd: MoveCommand = { forward: new THREE.Vector3(), right: new THREE.Vector3(), fmove: 0, smove: 0, walk: false, crouch: false, roll: false, jump: false, jumpPressed: false, attack: false, speedScale: 1 };
   /** Ducking (Ctrl on land): half speed, crouch clips, and the crouched attacks. */
   crouching = false;
@@ -787,24 +789,40 @@ export class Player {
     this.updateThrown(dt, input, cam);
     this.updateBlades();
 
-    // The body faces the camera while fighting, in the air, rolling, and whenever the rig can
-    // play the movement sideways or backwards; otherwise it turns the way it runs.
-    const directional = !!this.rig && this.rig.hasState('strafeLeft') && this.rig.hasState('strafeRight');
+    // The body faces the camera while fighting, in the air, rolling and through the wall moves.
+    // On the ground, with Jedi Academy's back-pedal clips, the legs turn at most 45 degrees off
+    // the camera the way the game's do (CG_PlayerAngles' movement directions): sideways runs
+    // angle the legs, backing up plays the back-pedal facing forward, and the torso twists back
+    // to the camera. Without those clips the body turns the way it runs, as SWG has no sideways
+    // or backwards clips of its own.
+    const directional = !!this.rig && this.rig.hasState('runBack');
     this.directional = directional;
-    const faceCamera = this.classId === 'bounty_hunter' || this.swing >= 0 || this.saber.busy || this.thrown.inFlight || this.jka.inSpecialJump || this.jka.rolling || (!this.grounded && this.hasJkaClips) || (moving && directional);
+    const faceCamera = this.classId === 'bounty_hunter' || this.swing >= 0 || this.saber.busy || this.thrown.inFlight || this.jka.inSpecialJump || this.jka.rolling || (!this.grounded && this.hasJkaClips);
+    const camYaw = Math.atan2(fwd.x, fwd.z);
+    let legsOffset = 0;
     if (this.lockedHeading) {
       this.heading = Math.atan2(this.lockedHeading.x, this.lockedHeading.z);
     } else if (faceCamera) {
-      const desired = Math.atan2(fwd.x, fwd.z);
-      let diff = desired - this.heading;
+      let diff = camYaw - this.heading;
       diff = Math.atan2(Math.sin(diff), Math.cos(diff));
       this.heading += diff * Math.min(1, dt * 16);
+    } else if (moving && directional) {
+      // Forward 0, diagonals 22.5, sideways 45 (the sign turns the legs towards the side moved);
+      // backing up keeps the legs forward and the back diagonals turn them the other way.
+      const side = mx > 0 ? -1 : mx < 0 ? 1 : 0;
+      legsOffset = mz > 0 ? side * (Math.PI / 8) : mz < 0 ? -side * (Math.PI / 8) : side * (Math.PI / 4);
+      const desired = camYaw + legsOffset;
+      let diff = desired - this.heading;
+      diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+      this.heading += diff * Math.min(1, dt * 14);
     } else if (moving) {
       const desired = Math.atan2(move.x, move.z);
       let diff = desired - this.heading;
       diff = Math.atan2(Math.sin(diff), Math.cos(diff));
       this.heading += diff * Math.min(1, dt * 14);
     }
+    // How far the torso turns back towards the camera after the legs' angle.
+    this.torsoTwist = directional && this.grounded && !faceCamera && !this.lockedHeading ? Math.atan2(Math.sin(camYaw - this.heading), Math.cos(camYaw - this.heading)) : 0;
 
     this.moveAmount += ((moving ? Math.min(1, speed / RUN_SPEED) : 0) - this.moveAmount) * Math.min(1, dt * 10);
     this.phase += dt * speed * (moving ? 1.9 : 0);
@@ -825,10 +843,9 @@ export class Player {
     else if (this.swimming) rig.setState(moving || this.submerged ? 'swim' : 'float', speed);
     else if (!this.grounded) rig.setState('air');
     else if (this.crouching) rig.setState(moving ? 'crouchWalk' : 'crouch', speed);
-    else if (moving && this.directional && mz <= 0 && (mz < 0 || mx !== 0)) {
-      // Facing the camera and moving backwards or sideways: the matching clip.
-      const back = running ? 'runBack' : 'walkBack';
-      rig.setState(mz < 0 && rig.hasState(back) ? back : mx > 0 ? 'strafeRight' : mx < 0 ? 'strafeLeft' : running ? 'run' : 'walk', speed);
+    else if (moving && this.directional && mz < 0) {
+      // Backing up with the legs facing forward: the back-pedal clip.
+      rig.setState(running && rig.hasState('runBack') ? 'runBack' : rig.hasState('walkBack') ? 'walkBack' : 'runBack', speed);
     }
     else if (!moving && this.saberOn && this.hasJkaClips) {
       // Standing with the saber drawn: the style's stance, or the arm out while the saber flies.
@@ -838,6 +855,7 @@ export class Player {
     else rig.setState(speed < 4.5 ? 'walk' : 'run', speed);
     rig.update(dt);
     this.group.updateMatrixWorld(true);
+    if (this.torsoTwist !== 0 && !rig.overriding) rig.twistTorso(this.torsoTwist);
 
     if (this.mounted) {
       rig.aimArm('right', armDir.set(-0.25, -0.15, 0.95).normalize());

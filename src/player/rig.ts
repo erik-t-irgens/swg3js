@@ -21,8 +21,8 @@ const STATE_CLIPS: Record<RigState, (string | RegExp)[]> = {
   // keeps facing the camera while it moves. Nothing else matches, so these states stay unused.
   strafeLeft: [/strafe.*(left|_l)$/i, /^(run|walk)_?(strafe_?)?l(eft)?$/i, /side.*left/i],
   strafeRight: [/strafe.*(right|_r)$/i, /^(run|walk)_?(strafe_?)?r(ight)?$/i, /side.*right/i],
-  runBack: [/^run.*back/i, /back.*run/i, /^run.*bwd/i],
-  walkBack: [/^walk.*back/i, /back.*walk/i, /^walk.*bwd/i],
+  runBack: ['BOTH_RUNBACK1', /^run.*back/i, /back.*run/i, /^run.*bwd/i],
+  walkBack: ['BOTH_WALKBACK1', /^walk.*back/i, /back.*walk/i, /^walk.*bwd/i],
 };
 
 /** Natural travel speed of the placeholder rig's locomotion clips, in m/s, used to scale playback. */
@@ -51,6 +51,7 @@ export interface RigOptions {
 }
 
 const tmpQ = new THREE.Quaternion();
+const UP_AXIS = new THREE.Vector3(0, 1, 0);
 const rootQ = new THREE.Quaternion();
 const parentQ = new THREE.Quaternion();
 const alignQ = new THREE.Quaternion();
@@ -299,6 +300,27 @@ export class CharacterRig {
         this.state = null;
         if (state) this.setState(state);
       }
+    }
+  }
+
+  /**
+   * Turn the torso about the vertical by `angle` radians (positive to the character's left),
+   * spread over the spine bones, so the upper body can face the camera while the legs run at
+   * an angle. Call after update() and after world matrices are current.
+   */
+  twistTorso(angle: number): void {
+    const spines = [...this.bones.values()].filter((b) => /^spine_?[1-3]$/i.test(b.name));
+    if (!spines.length) return;
+    const each = THREE.MathUtils.clamp(angle, -1.2, 1.2) / spines.length;
+    this.root.getWorldQuaternion(rootQ);
+    tmpQ.setFromAxisAngle(UP_AXIS, each);
+    for (const bone of spines) {
+      if (!bone.parent) continue;
+      // A turn about the character's up axis, expressed in the bone's parent frame.
+      bone.parent.getWorldQuaternion(parentQ);
+      alignQ.copy(parentQ).invert().multiply(rootQ).multiply(tmpQ).multiply(rootQ.clone().invert()).multiply(parentQ);
+      bone.quaternion.premultiply(alignQ);
+      bone.updateMatrixWorld(true);
     }
   }
 
