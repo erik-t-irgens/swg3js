@@ -15,6 +15,7 @@ export type Action =
   | 'switchClass'
   | 'map'
   | 'help'
+  | 'inventory'
   | 'noclip'
   | 'noclipFaster'
   | 'noclipSlower'
@@ -45,6 +46,7 @@ export const DEFAULT_BINDINGS: Record<Action, string[]> = {
   switchClass: ['KeyC'],
   map: ['KeyM'],
   help: ['KeyH'],
+  inventory: ['KeyI'],
   noclip: ['KeyN'],
   noclipFaster: ['Equal', 'NumpadAdd'],
   noclipSlower: ['Minus', 'NumpadSubtract'],

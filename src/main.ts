@@ -11,7 +11,9 @@ import { Physics } from './core/physics';
 import { PLANETS, packIdOf, planetById, type PlanetDef } from './data/planets';
 import { Player } from './player/player';
 import { loadPlayerRig } from './player/rig';
+import { Character } from './player/character';
 import { GalaxyMap, type Poi } from './ui/galaxyMap';
+import { WardrobeUi } from './ui/wardrobeUi';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { Hud } from './ui/hud';
 import type { DriveInput } from './vehicles/speeder';
@@ -20,7 +22,7 @@ import { World } from './world/world';
 const MOUNT_RANGE = 3.6;
 
 /** Debug counters, readable from the console as window.__stats. */
-const stats = { frameMs: 0, physicsMs: 0, renderMs: 0, rawDt: 0, grounded: false, vel: [0, 0, 0] as number[], calls: 0, pack: '', terrain: '', chunks: 0 };
+const stats = { frameMs: 0, physicsMs: 0, renderMs: 0, rawDt: 0, grounded: false, vel: [0, 0, 0] as number[], calls: 0, triangles: 0, pack: '', terrain: '', chunks: 0 };
 (window as unknown as { __stats: typeof stats }).__stats = stats;
 const tmp = new THREE.Vector3();
 const tmpQ = new THREE.Quaternion();
@@ -39,6 +41,7 @@ class App {
   private kit!: Kit;
   private readonly hud: Hud;
   private readonly map: GalaxyMap;
+  private readonly wardrobe: WardrobeUi;
   private readonly fade: HTMLElement;
   private readonly start: HTMLElement;
   private readonly timer = new THREE.Timer();
@@ -74,6 +77,8 @@ class App {
     this.player = new Player(this.scene, physics);
     this.effects = new Effects(this.scene);
     this.hud = new Hud(this.ui);
+    this.wardrobe = new WardrobeUi(this.ui, () => this.hud.setPrompt(''));
+    this.wardrobe.setBaseUrl(import.meta.env.BASE_URL);
     this.map = new GalaxyMap(
       this.ui,
       (p, zone) => void this.travel(p, zone),
@@ -94,7 +99,85 @@ class App {
       },
       cell: () => (this.world.cellState ? { model: this.world.cellState.building.model.def.id, cell: this.world.cellState.cell } : null),
       passes: () => this.portals.passes,
+      /** Every pass of the last frame: what it was and what it drew. */
+      passLog: () => {
+        const log = this.portals.passLog;
+        const byLabel = new Map<string, { passes: number; calls: number; triangles: number }>();
+        for (const p of log) {
+          const e = byLabel.get(p.label) ?? byLabel.set(p.label, { passes: 0, calls: 0, triangles: 0 }).get(p.label)!;
+          e.passes++;
+          e.calls += p.calls;
+          e.triangles += p.triangles;
+        }
+        return { total: { passes: log.length, calls: log.reduce((a, p) => a + p.calls, 0) }, byLabel: Object.fromEntries(byLabel) };
+      },
       flora: () => this.world.floraStatus,
+      /**
+       * Load a character assembled from parts and stand it beside the player: one skeleton, a
+       * body, a head and whatever is worn, each its own file. Then `.wear(name)`, `.remove(name)`,
+       * `.setMorph(name, v)` and `.status()` on what comes back.
+       */
+      character: async (id = 'human_male') => {
+        const c = await Character.load(import.meta.env.BASE_URL, id);
+        const p = this.player.pos;
+        c.group.position.set(p.x + 1.5, this.world.terrain.heightAt(p.x + 1.5, p.z), p.z);
+        c.group.traverse((o) => o.layers.enable(31));
+        this.scene.add(c.group);
+        (window as unknown as { __character: Character }).__character = c;
+        return { parts: c.status(), morphs: Object.keys(c.morphValues()).length, clips: c.clips.length, at: c.group.position.toArray() };
+      },
+      /**
+       * The character's shape sliders, from the mesh's blend targets. With no arguments, every
+       * slider and where it sits; with a name and a value in 0..1, move one.
+       * Two-sided sliders come as pairs (blend_jaw_0 and blend_jaw_1 are one slider's two ends).
+       */
+      morph: (name?: string, value?: number) => {
+        const rig = this.player.rig;
+        if (!rig) return 'the character rig has not loaded';
+        if (name === undefined) return rig.morphValues();
+        if (value === undefined) return rig.morphValues()[name] ?? `no such shape: ${name}`;
+        if (!rig.setMorph(name, value)) return `no such shape: ${name}`;
+        return { [name]: value };
+      },
+      /** What the player is wearing, and what the pack offers. `wear`/`remove` change it. */
+      wardrobe: () => {
+        const c = this.player.rig?.character;
+        if (!c) return 'the player is not assembled from parts';
+        return { worn: c.status(), available: c.manifest.parts.filter((p) => p.occlusionLayer > 0).map((p) => p.name) };
+      },
+      wear: async (name: string) => {
+        const c = this.player.rig?.character;
+        if (!c) return 'the player is not assembled from parts';
+        if (await c.wear(name)) return c.status();
+        // Not one of the character's own parts: try the converted catalogue.
+        return (await c.wearItem(name, import.meta.env.BASE_URL)) ? c.status() : `no such part or wardrobe item: ${name}`;
+      },
+      /** The wardrobe doll: what the last clone produced and how big its canvas is. */
+      preview: () => this.wardrobe.previewState(),
+      /** The converted wardrobe: every wearable and hairstyle. `find` narrows by id or category. */
+      closet: async (find?: string) => {
+        const c = this.player.rig?.character;
+        if (!c) return 'the player is not assembled from parts';
+        const w = await c.catalogue(import.meta.env.BASE_URL);
+        const re = find ? new RegExp(find, 'i') : null;
+        const hits = w.items.filter((i) => !re || re.test(i.id) || re.test(i.template));
+        return { total: w.items.length, matched: hits.length, items: hits.slice(0, 40).map((i) => `${i.id} (${i.kind}, layer ${i.parts[0]?.occlusionLayer})`) };
+      },
+      remove: (name: string) => {
+        const c = this.player.rig?.character;
+        if (!c) return 'the player is not assembled from parts';
+        return c.remove(name) ? c.status() : `cannot remove ${name}`;
+      },
+      /** Which sky-ramp row feeds ambient light, and its strength. Row 0 is black on every planet; try 8 and 9. */
+      ambient: (row?: number, scale?: number) => this.world.setAmbient(row, scale),
+      /** Shadow look: radius is the blur in shadow-map texels (1 crisp, 3 soft), intensity how dark a shadow goes. Reports the cascade splits. */
+      shadowLook: (radius?: number, intensity?: number, mapSize?: number) => this.world.setShadowLook(radius, intensity, mapSize),
+      /** Retune shadows: distance is how far the cascades reach, minRadius which objects cast. Shorter reach is cheaper and sharper. */
+      shadows: (distance?: number, minRadius?: number) => this.world.setShadows(distance, minRadius),
+      /** Building interiors: how many are built against how many every loaded building would hold. `force` builds them all to compare. */
+      interiors: (force = false) => this.world.interiorStats(force),
+      /** Draw calls of the whole frame, summed over the portal renderer's passes. */
+      drawCalls: () => ({ calls: stats.calls, passes: this.portals.passes, triangles: stats.triangles }),
       // The player's position in the original game's coordinates (for terrain-check --at and /way).
       swg: () => {
         const c = this.world.layoutCenter;
@@ -239,18 +322,21 @@ class App {
     });
     this.start.querySelector('.resume')!.addEventListener('click', () => this.enter(null));
 
+    // Releasing the mouse leaves the game running and the world visible, so the wardrobe and the
+    // map can be used with a cursor. Clicking the world takes the mouse back; the menu is only
+    // for arriving and for dying, not for every Escape.
     document.addEventListener('pointerlockchange', () => {
-      if (!this.input.locked && this.started && !this.map.open && !this.traveling) {
-        this.start.classList.remove('hidden');
-        this.start.querySelector('.class-pick')!.classList.add('hidden');
-        this.start.querySelector('.resume')!.classList.remove('hidden');
-      }
+      if (this.started && !this.traveling) this.hud.setMouseFree(!this.input.locked && !this.map.open && !this.wardrobe.open);
+    });
+    this.canvas.addEventListener('click', () => {
+      if (this.started && !this.input.locked && !this.map.open && !this.wardrobe.open && !this.traveling) this.input.requestLock();
     });
 
     window.addEventListener('resize', () => {
       this.renderer.setSize(window.innerWidth, window.innerHeight);
       this.cam.camera.aspect = window.innerWidth / window.innerHeight;
       this.cam.camera.updateProjectionMatrix();
+      this.world.onCameraResized();
     });
 
     const params = new URLSearchParams(location.search);
@@ -371,12 +457,25 @@ class App {
   }
 
   /** One frame through the portal renderer: the camera's building in full, the world through its doors (or the reverse). */
+  /** Draw calls and triangles of the last frame, summed over every pass. */
+  private frameCalls = 0;
+  private frameTriangles = 0;
+
   private drawFrame(): void {
     const cam = this.cam.camera;
     cam.updateMatrixWorld();
     const eye = this.player.pos.clone().setY(this.player.pos.y + 1.5);
     const view = this.portals.cameraBuilding(this.world.cellState, eye, cam.position, this.world.buildings);
+    const info = this.renderer.info.render;
+    // Every renderer.render() resets these, so sum them as the passes go by.
+    const auto = this.renderer.info.autoReset;
+    this.renderer.info.autoReset = false;
+    info.calls = 0;
+    info.triangles = 0;
     this.portals.render(this.scene, cam, view, this.world.buildings);
+    this.frameCalls = info.calls;
+    this.frameTriangles = info.triangles;
+    this.renderer.info.autoReset = auto;
   }
 
   private async die(): Promise<void> {
@@ -389,6 +488,20 @@ class App {
     await new Promise((r) => setTimeout(r, 200));
     this.fade.classList.remove('on');
     this.dying = false;
+  }
+
+  /** I: the wardrobe, with the mouse free to use it. */
+  private toggleWardrobe(): void {
+    const character = this.player.rig?.character ?? null;
+    if (this.wardrobe.toggle()) {
+      if (character) void this.wardrobe.attach(character, import.meta.env.BASE_URL).catch((err) => console.warn('wardrobe', err));
+      else this.wardrobe.explain('This character is a single model, not a set of parts, so there is nothing to change. Convert it with <code>npm run swg -- parts</code>.');
+      this.input.captured = true;
+      this.input.releaseLock();
+    } else {
+      this.input.captured = false;
+      this.input.requestLock();
+    }
   }
 
   private toggleMap(): void {
@@ -466,8 +579,9 @@ class App {
 
       if (active) {
         if (input.pressedAction('map')) this.toggleMap();
+        if (input.pressedAction('inventory')) this.toggleWardrobe();
         if (input.pressedAction('help')) this.hud.toggleHelp();
-        if (!this.map.open) {
+        if (!this.map.open && !this.wardrobe.open) {
           if (input.pressedAction('saberToggle') && this.kit.id === 'jedi' && !player.mounted) player.toggleSaber();
           if (input.pressedAction('switchClass')) this.setClass(this.kit.id === 'jedi' ? 'bounty_hunter' : 'jedi');
           if (input.pressedAction('mount') && !player.noclip && !this.handleElevator()) this.handleMount();
@@ -478,7 +592,7 @@ class App {
         }
       }
 
-      const simulate = active && !this.map.open;
+      const simulate = active && !this.map.open && !this.wardrobe.open;
       if (simulate) {
         player.update(dt, input, this.cam, this.world);
         const ctx: KitContext = { dt, input, player, world: this.world, cam: this.cam, physics: this.physics, effects: this.effects };
@@ -536,7 +650,8 @@ class App {
       stats.rawDt = rawDt;
       stats.grounded = player.grounded;
       stats.vel = [player.vel.x, player.vel.y, player.vel.z];
-      stats.calls = this.renderer.info.render.calls;
+      stats.calls = this.frameCalls;
+      stats.triangles = this.frameTriangles;
       stats.pack = this.world.packStatus;
       stats.terrain = this.world.terrain.swg ? `${this.world.terrain.swg.template.name}: ${this.world.terrain.swg.syncGenerations} sync grids` : 'procedural';
       stats.chunks = this.world.chunkCount;

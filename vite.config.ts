@@ -39,5 +39,7 @@ export default defineConfig({
   base: './',
   plugins: [privateAssets()],
   build: { target: 'es2022', sourcemap: false },
-  server: { host: true },
+  // PORT lets a launcher assign the port; without it Vite picks its own default, so `npm run dev`
+  // behaves exactly as before.
+  server: { host: true, port: Number(process.env.PORT) || undefined },
 });

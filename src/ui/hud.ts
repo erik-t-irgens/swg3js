@@ -4,7 +4,7 @@ import type { PlanetDef } from '../data/planets';
 const COMMON_HELP = [
   '<b>WASD</b> move · <b>Mouse</b> look · <b>Wheel</b> zoom · <b>Space</b> jump · <b>Shift</b> walk',
   '<b>E</b> mount/dismount speeder · <b>C</b> switch class · <b>T</b> fast-forward time',
-  '<b>M</b> galaxy map · <b>H</b> help · <b>N</b> noclip fly · <b>Esc</b> release mouse',
+  '<b>M</b> galaxy map · <b>I</b> wardrobe · <b>H</b> help · <b>N</b> noclip fly · <b>Esc</b> free the mouse',
 ];
 
 export class Hud {
@@ -22,6 +22,7 @@ export class Hud {
   private readonly slotsEl: HTMLElement;
   private readonly help: HTMLElement;
   private readonly crosshair: HTMLElement;
+  private readonly mouseFree: HTMLElement;
   private readonly prompt: HTMLElement;
   private readonly hurtEl: HTMLElement;
   private slots: HTMLElement[] = [];
@@ -39,13 +40,14 @@ export class Hud {
         <div class="planet-tag"></div>
         <div class="loc"></div>
       </div>
-      <div class="panel help"></div>
+      <div class="panel help hidden"></div>
       <div class="panel top-right">
         <div class="clock"></div>
         <div class="fps"></div>
-        <div class="hint"><b>M</b> Galaxy map &nbsp; <b>H</b> Help</div>
+        <div class="hint"><b>M</b> Map &nbsp; <b>I</b> Wardrobe &nbsp; <b>H</b> Help</div>
       </div>
       <div class="crosshair"></div>
+      <div class="mouse-free hidden">Mouse free · <b>click</b> to look again</div>
       <div class="prompt"></div>
       <div class="bottom">
         <div class="class-name"></div>
@@ -68,6 +70,7 @@ export class Hud {
     this.slotsEl = q('.slots');
     this.help = q('.help');
     this.crosshair = q('.crosshair');
+    this.mouseFree = q('.mouse-free');
     this.prompt = q('.prompt');
     this.hurtEl = q('.hurt');
   }
@@ -100,6 +103,12 @@ export class Hud {
 
   setPrompt(text: string): void {
     if (this.prompt.innerHTML !== text) this.prompt.innerHTML = text;
+  }
+
+  /** A quiet note that the pointer is loose, instead of a menu over the whole game. */
+  setMouseFree(free: boolean): void {
+    this.mouseFree.classList.toggle('hidden', !free);
+    this.crosshair.classList.toggle('hidden', free);
   }
 
   toggleHelp(): void {
