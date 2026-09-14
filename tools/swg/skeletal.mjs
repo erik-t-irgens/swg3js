@@ -397,12 +397,21 @@ export function parseLat(root) {
   const hierarchy = info.str();
   const count = info.i16();
   const entries = [];
-  for (const anim of childrenOf(v, 'ANIM')) {
-    const name = new R(childOf(anim, 'INFO').data).str().trim();
-    const template = anim.children.find(isForm);
-    entries.push(...flattenAnimationTemplate(template, name));
-  }
-  return { hierarchy, entries, count };
+  const logical = [];
+  // Entries are ANIM forms; look through any grouping forms too, in case a table nests them.
+  const visit = (node) => {
+    for (const c of node.children) {
+      if (!isForm(c)) continue;
+      if (c.type === 'ANIM') {
+        const name = new R(childOf(c, 'INFO').data).str().trim();
+        const template = c.children.find(isForm);
+        logical.push(name);
+        entries.push(...flattenAnimationTemplate(template, name));
+      } else visit(c);
+    }
+  };
+  visit(v);
+  return { hierarchy, entries, count, logical };
 }
 
 /**

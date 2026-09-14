@@ -238,7 +238,9 @@ export class Player {
    * turns the hilt about the forearm in Jedi Academy's held poses only (stances, saber runs), and
    * `jkaRoll` in every Jedi Academy clip, swings included. Both default to nothing.
    */
-  readonly gripTune = { jkaRoll: 0, stanceRoll: 0 };
+  readonly gripTune: { jkaRoll: number; stanceRoll: number; source: 'solved' | 'tags'; tilt: number; turn: number } = { jkaRoll: 0, stanceRoll: 0, source: 'solved', tilt: 0, turn: 0 };
+  /** The hand bones the sabers hang from, for refitting the grip from the console. */
+  private handBones: { right: THREE.Bone | null; left: THREE.Bone | null } = { right: null, left: null };
   /** Bolts turned away so far, for the console. */
   blocks = 0;
   private readonly physics: Physics;
@@ -418,6 +420,7 @@ export class Player {
       const grip = this.gripAxis('right', hand) ?? swgGrip;
       this.saberQ.swg.setFromUnitVectors(new THREE.Vector3(0, 1, 0), swgGrip);
       this.saberQ.jka.setFromUnitVectors(new THREE.Vector3(0, 1, 0), grip);
+      this.handBones.right = hand;
       this.forearm.copy(along).normalize();
       // The saber's blade runs along its +Y, the rifle's barrel along its +Z. A hold point sits in
       // the palm already; a wrist bone needs the grip moved a little along the arm.
@@ -446,6 +449,7 @@ export class Player {
       const grip = this.gripAxis('left', leftHand) ?? swgGrip;
       this.saber2Q.swg.setFromUnitVectors(new THREE.Vector3(0, 1, 0), swgGrip);
       this.saber2Q.jka.setFromUnitVectors(new THREE.Vector3(0, 1, 0), grip);
+      this.handBones.left = leftHand;
       this.forearm2.copy(along).normalize();
       p.saber2.position.copy(along).multiplyScalar(/^hold/i.test(leftHand.name) ? 0 : 0.02 * k);
       p.saber2.quaternion.copy(this.saber2Q.swg);
@@ -461,12 +465,45 @@ export class Player {
    * the frame of the bone the weapon hangs from (the hold point), at the bind pose.
    */
   private gripAxis(side: 'left' | 'right', hand: THREE.Bone): THREE.Vector3 | null {
-    const g = this.rig?.grip?.[side];
-    const bone = g && this.rig?.bone(g.bone);
-    if (!g || !bone || g.axis.length !== 3) return null;
-    const axis = new THREE.Vector3(g.axis[0], g.axis[1], g.axis[2]);
-    if (axis.lengthSq() < 1e-6) return null;
+    const tuned = this.tunedGrip(side);
+    const bone = tuned && this.rig?.bone(tuned.bone);
+    if (!tuned || !bone) return null;
+    const axis = new THREE.Vector3(tuned.axis[0], tuned.axis[1], tuned.axis[2]);
     return axis.applyQuaternion(bone.getWorldQuaternion(new THREE.Quaternion())).applyQuaternion(hand.getWorldQuaternion(new THREE.Quaternion()).invert()).normalize();
+  }
+
+  /**
+   * The importer's blade axis for a hand in the bone it was solved in, from the source the console
+   * picked (the swings' solve or the game's tags), tilted and turned by the console's degrees: the
+   * numbers to bake into the manifest once a setting looks right in every clip.
+   */
+  tunedGrip(side: 'left' | 'right'): { bone: string; axis: number[] } | null {
+    const all = this.rig?.grip;
+    const g = (this.gripTune.source === 'tags' ? all?.tags?.[side] : null) ?? all?.[side];
+    if (!g || g.axis.length !== 3) return null;
+    const u = new THREE.Vector3(g.axis[0], g.axis[1], g.axis[2]);
+    if (u.lengthSq() < 1e-6) return null;
+    u.normalize();
+    const { tilt, turn } = this.gripTune;
+    if (tilt !== 0 || turn !== 0) {
+      // Two turns about axes perpendicular to the blade, in the solved bone's frame (mirrored for the left hand).
+      const ref = Math.abs(u.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0);
+      const v = new THREE.Vector3().crossVectors(u, ref).normalize();
+      const w = new THREE.Vector3().crossVectors(u, v).normalize();
+      const sign = side === 'left' ? -1 : 1;
+      u.applyQuaternion(new THREE.Quaternion().setFromAxisAngle(v, (sign * tilt * Math.PI) / 180));
+      u.applyQuaternion(new THREE.Quaternion().setFromAxisAngle(w, (sign * turn * Math.PI) / 180));
+    }
+    return { bone: g.bone, axis: [u.x, u.y, u.z].map((n) => Number(n.toFixed(4))) };
+  }
+
+  /** Recompute the hilts' orientation from the console's grip settings. */
+  refitGrip(): void {
+    const up = new THREE.Vector3(0, 1, 0);
+    const right = this.handBones.right && this.gripAxis('right', this.handBones.right);
+    if (right) this.saberQ.jka.setFromUnitVectors(up, right);
+    const left = this.handBones.left && this.gripAxis('left', this.handBones.left);
+    if (left) this.saber2Q.jka.setFromUnitVectors(up, left);
   }
 
   private applyClassLook(): void {
@@ -584,7 +621,7 @@ export class Player {
     const kind = this.gunKind;
     // The hierarchy's own shots for the posture first (pistol_combat_standing_fire_N, pistol_combat_kneeling_fire_N), then the additive ones.
     const posture = this.prone ? 'prone' : this.kneeling ? 'kneeling' : 'standing';
-    let shots = rig.clipsMatching(new RegExp(`^${kind}_combat_${posture}_fire_\\d+$`));
+    let shots = rig.clipsMatching(new RegExp(`^${kind}_(combat_)?${posture}(_aimed)?_fire_\\d+$`));
     if (!shots.length && this.kneeling) shots = rig.clipsMatching(new RegExp(`^${kind}_kneeling_fire_\\d+$`));
     if (!shots.length && !this.prone) shots = rig.clipsMatching(new RegExp(`^add_${kind}_fire_\\d+$`));
     const pool = shots.length ? shots : rig.clipsMatching(new RegExp(`^(add_)?${kind}_(combat_)?(prone_|kneeling_|standing_)?fire_\\d+$`));
@@ -1083,10 +1120,13 @@ export class Player {
     // hierarchy tells which loop it plays there.
     // The state hierarchy names loop_<kind>_combat_standing_aimed as the combat and aimed loops: those when
     // the table has them, else the relaxed carry.
+    // The state hierarchy: the pistol's combat and aimed states both idle with loop_pistol_combat_standing_aimed,
+    // the rifle's with loop_rifle_a_combat_standing_aimed; those when the table has them, else the relaxed carry.
     for (const [state, n] of [['Idle', 0], ['Walk', 1], ['Run', 2]] as const) {
       const relaxed = new RegExp(gun === 'pistol' ? `^loop_pistol_standing:speed${n}$` : `^loop_rifle:speed${n}$`);
-      rig.prefer(`gunReady${state}`, rig.clipMatching(new RegExp(`^loop_${gun}_combat_standing(_aimed)?:speed${n}$`)) ?? relaxed);
-      rig.prefer(`gunAim${state}`, rig.clipMatching(new RegExp(`^loop_${gun}_combat_standing_aimed:speed${n}$`)) ?? relaxed);
+      const combat = rig.clipMatching(new RegExp(`^loop_${gun}(_a)?_combat_standing(_aimed)?:speed${n}$`)) ?? relaxed;
+      rig.prefer(`gunReady${state}`, combat);
+      rig.prefer(`gunAim${state}`, combat);
     }
     for (const [state, n] of [['Idle', 0], ['Move', 1]] as const) {
       rig.prefer(`gunProne${state}`, new RegExp(`^loop_${gun}_prone:speed${n}`));
@@ -1094,14 +1134,17 @@ export class Player {
       rig.prefer(`gunProneAim${state}`, new RegExp(`^loop_${gun}_combat_prone_aimed:speed${n}`));
     }
     // Kneeling: the hierarchy's combat kneel (loop_<kind>_combat_kneeling_aimed) when aiming or in combat, else the relaxed kneel.
-    const kneelAimed = armed ? rig.clipMatching(new RegExp(`^loop_${gun}_combat_kneeling(_aimed)?`)) : null;
+    const kneelAimed = armed ? rig.clipMatching(new RegExp(`^loop_${gun}_(combat_kneeling|kneeling_combat)(_aimed)?`)) : null;
     rig.prefer('kneel', armed ? ((this.aiming || this.gunReady) && kneelAimed ? kneelAimed : new RegExp(`^loop_${gun}_kneeling`)) : null);
     // Aiming standing or kneeling without an aimed loop of its own: the transition into the aimed pose is
     // held at its end on the upper body over the carry's legs, and its inverse plays once when the aim ends.
-    const hasAimLoop = armed && (this.kneeling ? !!kneelAimed : !!rig.clipMatching(new RegExp(`^loop_${gun}_combat_standing_aimed:speed0$`)));
-    const aimIn = armed && this.aiming && !this.prone && !hasAimLoop ? rig.firstOf(...(this.kneeling ? [`trn_${gun}_combat_kneeling_to_${gun}_combat_kneeling_aimed`] : gun === 'pistol' ? ['trn_pistol_combat_to_pistol_combat_aimed'] : ['trn_rifle_a_standing_ready_to_aimed'])) : null;
+    // The hierarchy has no separate aimed pose (the combat loop is the aimed one), so the held transition is
+    // only a stand-in for the pistol while its combat loop is missing from the table; the rifle's
+    // trn_rifle_a_* transitions belong to no state of the hierarchy and aimed off to the side, so they are not used.
+    const hasAimLoop = armed && (this.kneeling ? !!kneelAimed : !!rig.clipMatching(new RegExp(`^loop_${gun}(_a)?_combat_standing(_aimed)?:speed0$`)));
+    const aimIn = armed && this.aiming && !this.prone && !hasAimLoop ? rig.firstOf(...(this.kneeling ? [`trn_${gun}_combat_kneeling_to_${gun}_combat_kneeling_aimed`] : gun === 'pistol' ? ['trn_pistol_combat_to_pistol_combat_aimed'] : [])) : null;
     if (armed && this.wasAiming && !this.aiming && !this.prone && !this.swimming && !hasAimLoop) {
-      const out = rig.firstOf(...(this.kneeling ? [`trn_${gun}_combat_kneeling_aimed_to_${gun}_combat_kneeling`] : gun === 'pistol' ? ['trn_pistol_combat_standing_aimed_to_pistol_combat_standing'] : ['trn_rifle_a_standing_aimed_to_ready']));
+      const out = rig.firstOf(...(this.kneeling ? [`trn_${gun}_combat_kneeling_aimed_to_${gun}_combat_kneeling`] : gun === 'pistol' ? ['trn_pistol_combat_standing_aimed_to_pistol_combat_standing'] : []));
       if (out) rig.playUpper(out, 0.08);
     }
     this.wasAiming = this.aiming;

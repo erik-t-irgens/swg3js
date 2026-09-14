@@ -43,4 +43,15 @@ ok(g.sections.length === 2 && g.sections[0].id === 'weapons' && g.sections[1].id
 ok(g.objects.length === 3 && g.objects[0].y === 1.1 && g.objects[1].y === 0, 'weapons float at display height, houses stand on the ground');
 ok(g.sections[1].z > g.sections[0].z + g.sections[0].depth, 'the houses start beyond the weapons');
 ok(g.objects.every((o: { q: number[] }) => o.q.length === 4), 'every exhibit carries a rotation');
+// A partial build keeps the sections it does not rebuild, and asks for their models to be kept.
+const kept: string[] = [];
+const g2 = buildGallery({ log: () => {}, only: ['vehicles'], existing: { sections: g.sections, anims: { origin: { x: 0, z: 0 }, swg: { file: 'anims_swg.glb', categories: [] } } } }, {
+  convert: (t: string) => ({ model: labelOf(t), radius: 2, height: 1.5 }),
+  convertAnims: () => null,
+  templates: (prefix: string) => (prefix.startsWith('object/mobile/vehicle') ? ['object/mobile/vehicle/shared_speeder_a.iff'] : []),
+  keepModels: (ids: string[]) => kept.push(...ids),
+});
+ok(g2.sections.map((s: { id: string }) => s.id).join(',') === 'weapons,vehicles,houses', 'a vehicles-only build keeps the weapons and houses from the last one');
+ok(kept.includes('pistol_a') && kept.includes('house_a'), 'the kept sections ask for their models');
+ok(g2.anims.swg?.file === 'anims_swg.glb', 'the animation grid is kept too');
 console.log(`${checks} checks passed`);

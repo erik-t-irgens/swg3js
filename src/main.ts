@@ -338,14 +338,20 @@ class App {
         return this.world.gallery ? { ...this.world.gallery.status(), nearest: this.world.gallery.nearest(this.player.pos) } : 'not on the gallery planet (?planet=gallery)';
       },
       /**
-       * Turn the hilt in the hand to see where it looks right, in degrees about the forearm:
-       * `grip({ stanceRoll: 30 })` for Jedi Academy's held poses only (stances, saber runs), `grip({ jkaRoll: 10 })`
-       * for every Jedi Academy clip, swings included. No argument reports the current values.
+       * Move the blade's axis in the hand to see where it looks right. `grip({ source: 'tags' })` swaps in the axis
+       * the importer read from the game's own tag geometry (when it could), `grip({ source: 'solved' })` the one
+       * solved from the swings; `grip({ tilt: 20, turn: -10 })` turns the axis by degrees about two axes at right
+       * angles to it, for every clip alike (there is one true axis), and the result's `effective` field is the
+       * axis to bake into the manifest. `stanceRoll` and `jkaRoll` roll the hilt about the forearm as before.
        */
-      grip: (tune?: { jkaRoll?: number; stanceRoll?: number }) => {
+      grip: (tune?: { jkaRoll?: number; stanceRoll?: number; source?: 'solved' | 'tags'; tilt?: number; turn?: number }) => {
         if (tune?.jkaRoll !== undefined) this.player.gripTune.jkaRoll = tune.jkaRoll;
         if (tune?.stanceRoll !== undefined) this.player.gripTune.stanceRoll = tune.stanceRoll;
-        return { ...this.player.gripTune, axes: this.player.rig?.grip ?? null };
+        if (tune?.source !== undefined) this.player.gripTune.source = tune.source;
+        if (tune?.tilt !== undefined) this.player.gripTune.tilt = tune.tilt;
+        if (tune?.turn !== undefined) this.player.gripTune.turn = tune.turn;
+        this.player.refitGrip();
+        return { ...this.player.gripTune, effective: { right: this.player.tunedGrip('right'), left: this.player.tunedGrip('left') }, axes: this.player.rig?.grip ?? null };
       },
       /** The blaster in hand, 'pistol' or 'rifle': which of the game's carries play. */
       gun: (kind?: 'pistol' | 'rifle') => {

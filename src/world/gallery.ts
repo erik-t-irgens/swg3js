@@ -39,11 +39,11 @@ const ROW = 3;
 const PER_ROW = 24;
 const CATEGORY_GAP = 6;
 /**
- * Mannequins wake within this range of the player and sleep beyond the larger one: a few metres,
- * so only the handful around you animate and the rest of the grid is labels. `__debug.gallery(r)`
+ * Mannequins wake within this range of the player and sleep beyond the larger one: a dozen metres,
+ * so the rows around you animate and the rest of the grid is labels. `__debug.gallery(r)`
  * widens it.
  */
-export const RANGE = { wake: 3, sleepMargin: 1.5 };
+export const RANGE = { wake: 12, sleepMargin: 4 };
 const MAX_LIVE = 360;
 
 /** A text label as a sprite: white on a dark pill, sized in metres. */

@@ -1180,7 +1180,7 @@ const CREATURE_CLIPS = 'idle,walk,run,cbt_stand_combat_attack_light,rea_stand_ge
 /** The player's clips: locomotion and posture by exact name (=), reactions by substring. */
 /** What the player wears when --wear is not given: a plain shirt, trousers and shoes. */
 const DEFAULT_WEAR = ['object/tangible/wearables/shirt/shared_shirt_s03.iff', 'object/tangible/wearables/pants/shared_pants_s01.iff', 'object/tangible/wearables/shoes/shared_shoes_s01.iff'];
-const PLAYER_CLIPS = '=idle,=walk,=run,=idle_combat,=walk_combat,=run_combat,=jump,strafe,backward,walk_back,run_back,loop_crouched,loop_kneeling,loop_prone,trn_standing_to_crouched,trn_crouched_to_standing,trn_standing_to_kneeling,trn_kneeling_to_standing,trn_crouched_to_kneeling,trn_kneeling_to_prone,trn_prone_to_kneeling,trn_standing_to_prone,trn_prone_to_standing,loop_pistol_standing,loop_rifle:,loop_combat_standing,loop_pistol_kneeling,loop_rifle_kneeling,loop_pistol_prone,loop_rifle_prone,loop_pistol_combat_prone,loop_rifle_combat_prone,add_pistol_fire,add_rifle_fire,pistol_combat_prone_fire,rifle_combat_prone_fire,pistol_reload,rifle_reload,loop_pistol_combat_standing,loop_rifle_combat_standing,loop_pistol_combat_kneeling,loop_rifle_combat_kneeling,pistol_combat_standing_fire,rifle_combat_standing_fire,pistol_combat_kneeling_fire,rifle_combat_kneeling_fire,pistol_kneeling_fire,rifle_kneeling_fire,trn_pistol_standing_to_pistol_combat,trn_rifle_a_standing,trn_pistol_combat_to_pistol_combat_aimed,trn_pistol_combat_standing_aimed_to,trn_pistol_combat_standing_to,trn_rifle_combat_standing_to,trn_rifle_combat_standing_aimed_to,trn_pistol_combat_kneeling,trn_rifle_combat_kneeling,trn_pistol_combat_prone_to,trn_rifle_combat_prone_to,trn_pistol_combat_prone_aimed_to,trn_rifle_combat_prone_aimed_to,=loop_sitting_chair:0,=loop_sitting_ground,=loop_swimming:speed0,=loop_swimming:speed1,=unarmed_standing_ready_punch,=sword_1h_standing_ready_hrz_slash_middle_r,=rea_get_hit_medium_mid_center,=trn_combat_standing_hit_to_incapacitated_face_up,=loop_incapacitated_face_up,=cbt_stand_combat_attack_light,=rea_stand_get_hit_light,=trn_stand_to_incapacitated,=loop_incapacitated';
+const PLAYER_CLIPS = '=idle,=walk,=run,=idle_combat,=walk_combat,=run_combat,=jump,strafe,backward,walk_back,run_back,loop_crouched,loop_kneeling,loop_prone,trn_standing_to_crouched,trn_crouched_to_standing,trn_standing_to_kneeling,trn_kneeling_to_standing,trn_crouched_to_kneeling,trn_kneeling_to_prone,trn_prone_to_kneeling,trn_standing_to_prone,trn_prone_to_standing,loop_pistol_standing,loop_rifle:,loop_combat_standing,loop_pistol_kneeling,loop_rifle_kneeling,loop_pistol_prone,loop_rifle_prone,loop_pistol_combat_prone,loop_rifle_combat_prone,add_pistol_fire,add_rifle_fire,pistol_combat_prone_fire,rifle_combat_prone_fire,pistol_reload,rifle_reload,loop_pistol_combat_standing,loop_rifle_combat_standing,loop_rifle_a_combat,loop_pistol_combat_kneeling,loop_rifle_combat_kneeling,loop_rifle_kneeling_combat,loop_pistol_kneeling_combat,pistol_combat_standing_fire,rifle_combat_standing_fire,rifle_standing_aimed_fire,pistol_standing_aimed_fire,pistol_combat_kneeling_fire,rifle_combat_kneeling_fire,pistol_kneeling_fire,rifle_kneeling_fire,trn_pistol_standing_to_pistol_combat,trn_rifle_a_standing,trn_pistol_combat_to_pistol_combat_aimed,trn_pistol_combat_standing_aimed_to,trn_pistol_combat_standing_to,trn_rifle_combat_standing_to,trn_rifle_combat_standing_aimed_to,trn_pistol_combat_kneeling,trn_rifle_combat_kneeling,trn_pistol_combat_prone_to,trn_rifle_combat_prone_to,trn_pistol_combat_prone_aimed_to,trn_rifle_combat_prone_aimed_to,=loop_sitting_chair:0,=loop_sitting_ground,=loop_swimming:speed0,=loop_swimming:speed1,=unarmed_standing_ready_punch,=sword_1h_standing_ready_hrz_slash_middle_r,=rea_get_hit_medium_mid_center,=trn_combat_standing_hit_to_incapacitated_face_up,=loop_incapacitated_face_up,=cbt_stand_combat_attack_light,=rea_stand_get_hit_light,=trn_stand_to_incapacitated,=loop_incapacitated';
 const PLAYER_TEMPLATE = 'object/creature/player/shared_human_male.iff';
 
 /** Planet ids the game can load a pack for (see src/data/planets.ts). */
@@ -1605,8 +1605,8 @@ switch (cmd) {
       const sat = parseSat(readIff(vfs, file));
       const latFile = sat.animationTables.get(sat.skeletons[0]?.file.toLowerCase()) ?? [...sat.animationTables.values()][0];
       const lat = parseLat(readIff(vfs, latFile));
-      latNames = new Set(lat.entries.map((e) => e.name.split(':')[0].toLowerCase()));
-      console.log(`${file}: logical table ${latFile} (${latNames.size} logical names in ${lat.entries.length} entries; the table says it holds ${lat.count}), hierarchy ${lat.hierarchy}`);
+      latNames = new Set(lat.logical.map((n) => n.toLowerCase()));
+      console.log(`${file}: logical table ${latFile} (${lat.logical.length} logical names read of the ${lat.count} it declares, ${lat.entries.length} clips once the selectors are unwrapped), hierarchy ${lat.hierarchy}`);
       file = lat.hierarchy.replace(/\\/g, '/').replace(/^\//, '');
     }
     if (!vfs.has(file)) throw new Error(`${file}: not in the archives`);
@@ -2207,9 +2207,23 @@ switch (cmd) {
       convertSat(vfs, PLAYER_TEMPLATE, join(outDir, file), { animations: '=idle', maxAnimations: 1, wear: DEFAULT_WEAR, extraClips });
       return { file, clips: jkaInfo ?? [] };
     };
-    const g = buildGallery({ log: console.log, only, limit }, {
+    // What the pack already holds, so a partial build keeps the other sections.
+    let existing = null;
+    try {
+      if (existsSync(join(outDir, 'gallery.json')) && existsSync(join(outDir, 'manifest.json'))) {
+        existing = JSON.parse(readFileSync(join(outDir, 'gallery.json'), 'utf8'));
+        existing.models = new Map((JSON.parse(readFileSync(join(outDir, 'manifest.json'), 'utf8')).categories?.layout ?? []).map((m) => [m.id, m]));
+      }
+    } catch (err) {
+      console.log(`  the last build could not be read (${err.message}); building only what --only names`);
+      existing = null;
+    }
+    const g = buildGallery({ log: console.log, only, limit, existing }, {
       convert,
       convertAnims,
+      keepModels: (ids) => {
+        for (const id of ids) if (!models.has(id) && existing?.models?.has(id)) models.set(id, existing.models.get(id));
+      },
       templates: (prefix) => galleryTemplates(vfs, prefix),
       copySky: () => {
         try {

@@ -945,12 +945,15 @@ export function importJkaClips(jkaDir, joints, wanted = defaultJkaClips(), { log
       log(`grip: the game's tag geometry could not be read (${err.message}); using the swings' solve`);
     }
     if (tags && solved) {
-      // How the game's own axis fares against the swings' quadrants, beside the solved one.
+      // How the game's own axis fares against the swings' quadrants, beside the solved one; the solve
+      // stays the default (it is what the swings were made to look like) and the tags travel as an
+      // alternative the game can switch to (__debug.grip({ source: 'tags' })).
       const fit = swingFit(gla, cfg, joints, plan, tags.right.axis);
       if (fit) tags.right.fit = Number(fit.mean.toFixed(3));
-      log(`grip: the game's own blade axis in ${tags.right.bone} is ${tags.right.axis.join(', ')} (${tags.right.from}; fit to the swings ${tags.right.fit ?? '?'}, the solved axis ${solved.right.axis.join(', ')} fits ${solved.right.fit})`);
+      log(`grip: the game's own blade axis in ${tags.right.bone} is ${tags.right.axis.join(', ')} (${tags.right.from}; fit to the swings ${tags.right.fit ?? '?'}); the solved axis ${solved.right.axis.join(', ')} fits ${solved.right.fit} and is the default`);
+      solved.tags = tags;
     }
-    const grip = tags ?? solved;
+    const grip = solved ?? tags;
     if (grip && !tags) log(`grip: blade axis in ${grip.right.bone} ${grip.right.axis.join(', ')} from ${grip.right.swings} swings (fit ${grip.right.fit})${grip.left ? `; ${grip.left.bone} ${grip.left.axis.join(', ')} mirrored through ${grip.left.from}` : ''}`);
     const stance = clips.find((c) => c.source === 'BOTH_STAND1') ?? clips.find((c) => c.source === 'BOTH_STAND2') ?? clips[0];
     if (stance) {

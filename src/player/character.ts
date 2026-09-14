@@ -27,6 +27,8 @@ interface PartDef {
 export interface GripAxes {
   right?: { bone: string; axis: number[] };
   left?: { bone: string; axis: number[] };
+  /** The axes read from the game's own tag geometry, when the importer could, as an alternative to the solved ones. */
+  tags?: { right?: { bone: string; axis: number[] }; left?: { bone: string; axis: number[] } };
 }
 
 export interface PartsManifest {
