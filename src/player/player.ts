@@ -8,6 +8,7 @@ import type { Speeder } from '../vehicles/speeder';
 import type { World } from '../world/world';
 import { STANCE_ANIM, STYLE_DAMAGE, SaberCombat, type SaberInput } from '../combat/saber';
 import { SaberThrow, THROW } from '../combat/saberThrow';
+import { canBlock, inFront, parryClip, parryZone, reflectDirection } from '../combat/deflect';
 import { UNIT } from './jkaMove';
 import { JkaMovement, type MoveCommand } from './jkaMove';
 import type { CharacterRig } from './rig';
@@ -213,6 +214,10 @@ export class Player {
   hasJkaClips = false;
   /** The saber's flight when thrown (right mouse). */
   readonly thrown = new SaberThrow();
+  /** Saber defence rank (1..3): how well bolts are blocked and where they are sent (see deflect.ts). */
+  saberDefense = 3;
+  /** Bolts turned away so far, for the console. */
+  blocks = 0;
   private readonly physics: Physics;
   private world: World | null = null;
   /** The thrown saber's own model, spinning through the air. */
@@ -489,9 +494,34 @@ export class Player {
     return d === null ? null : Math.max(0, (d - 0.1) / UNIT);
   }
 
-  /** Whether a creature stands within `radius` metres of the body in a direction relative to its facing. */
+  /**
+   * A bolt flying along `dir` has reached the body at `hit`: turn it away with the saber when it
+   * can be blocked (lit, in hand, ahead of the view, and not mid-swing below the top defence
+   * rank), writing the way it leaves to `out` and playing the parry for where it struck.
+   */
+  deflect(dir: THREE.Vector3, hit: THREE.Vector3, cam: ThirdPersonCamera, out: THREE.Vector3): boolean {
+    if (this.classId !== 'jedi' || this.mounted || this.noclip || this.swimming) return false;
+    const attacking = this.hasJkaClips ? this.saber.attacking : this.swing >= 0;
+    if (!canBlock({ saberOn: this.saberOn, inHand: !this.thrown.inFlight, attacking, special: this.jka.inSpecialJump || this.jka.rolling || this.saber.busy, rank: this.saberDefense })) return false;
+    cam.forward(fwd);
+    aimFrom.copy(this.pos);
+    aimFrom.y += 1.55;
+    if (!inFront(hit, aimFrom, fwd)) return false;
+    cam.camera.getWorldDirection(aim);
+    reflectDirection(this.saberDefense, dir, aim, out);
+    this.blocks++;
+    // The parry: a whole-body clip, so only when the legs have nothing better to do.
+    if (this.rig && this.hasJkaClips && !attacking && this.groundSpeed < 1) {
+      cam.right(rgt);
+      const clip = parryClip(this.saber.style, parryZone(hit, aimFrom, rgt), (c) => this.rig!.has(c));
+      if (clip) this.rig.play(clip, { fadeIn: 0.05 });
+    }
+    return true;
+  }
+
+  /** Whether a creature or turret stands within `radius` metres of the body in a direction relative to its facing. */
   private enemyNear(dir: 'F' | 'B' | 'L' | 'R', radius: number): boolean {
-    const creatures = this.world?.creatures.creatures ?? [];
+    const creatures = [...(this.world?.creatures.creatures ?? []), ...(this.world?.turrets.turrets ?? [])];
     const sx = Math.sin(this.heading);
     const sz = Math.cos(this.heading);
     // Forward is (sin, cos) of the heading; right is turned a quarter round.

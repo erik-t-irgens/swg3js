@@ -19,6 +19,9 @@ import { ParticleEffects } from './particles';
 import { CSM } from 'three/examples/jsm/csm/CSM.js';
 import { INTERIOR_LAYER, markActor, type PortalRenderer } from './portalRender';
 import { Speeder } from '../vehicles/speeder';
+import { Bolts } from '../combat/bolts';
+import { TurretManager, type TurretTarget } from '../combat/turrets';
+import type { Hittable } from '../combat/kit';
 
 const VIEW_RADIUS = 6;
 const STREAM_BUDGET = 3;
@@ -162,6 +165,10 @@ export class World {
   planet!: PlanetDef;
   terrain!: Terrain;
   creatures!: CreatureManager;
+  /** Blaster turrets standing near where the player arrived. */
+  turrets!: TurretManager;
+  /** Every blaster bolt in the air, whoever fired it. */
+  readonly bolts: Bolts;
   readonly day = new DayCycle(0, 1);
   readonly speeders: Speeder[] = [];
   private props!: PropFactory;
@@ -253,6 +260,7 @@ export class World {
   private loadToken = 0;
 
   constructor(readonly scene: THREE.Scene, readonly physics: Physics) {
+    this.bolts = new Bolts(scene);
     scene.add(this.chunkRoot, this.sun, this.sun.target, this.hemi, this.fill, this.fill.target, this.splashes.points);
     markActor(this.splashes.points);
     for (let i = 0; i < INTERIOR_LIGHT_CAP; i++) {
@@ -312,6 +320,8 @@ export class World {
     this.props = new PropFactory(planet);
     this.creatures = new CreatureManager(planet, this.terrain, this.physics);
     this.scene.add(this.creatures.group);
+    this.turrets = new TurretManager(this.physics, this.terrain);
+    this.scene.add(this.turrets.group);
     this.physics.setGravity(planet.gravity);
 
     const s = planet.sky;
@@ -511,6 +521,11 @@ export class World {
       this.scene.remove(this.creatures.group);
       this.creatures.dispose();
     }
+    if (this.turrets) {
+      this.scene.remove(this.turrets.group);
+      this.turrets.dispose();
+    }
+    this.bolts.clear();
     for (const sp of this.speeders) sp.dispose(this.physics, this.scene);
     this.speeders.length = 0;
     this.props?.dispose();
@@ -990,6 +1005,8 @@ export class World {
     this.streamFar(center, Infinity);
     this.creatures.spawnAround(center);
     markActor(this.creatures.group);
+    this.turrets.spawnAround(center, 3, (x, z) => this.collidersNear(x, z, 4).length === 0);
+    markActor(this.turrets.group);
     const sx = center.x + 5;
     const sz = center.z + 4;
     const speeder = new Speeder(this.physics, this.scene, sx, this.terrain.heightAt(sx, sz) + 1.2, sz, Math.PI * 0.75);
@@ -1196,7 +1213,13 @@ export class World {
     return out;
   }
 
-  update(dt: number, playerPos: THREE.Vector3, camPos: THREE.Vector3, fastTime: boolean, onAttack: (damage: number) => void): void {
+  /** The creature or turret a physics collider belongs to. */
+  hittableAt(handle: number): Hittable | undefined {
+    return this.creatures.byCollider.get(handle) ?? this.turrets.byCollider.get(handle);
+  }
+
+  /** `target` is whom the turrets shoot at, or null while nothing should be shot (noclip, riding). */
+  update(dt: number, playerPos: THREE.Vector3, camPos: THREE.Vector3, fastTime: boolean, onAttack: (damage: number) => void, target: TurretTarget | null = null): void {
     this.stream(playerPos, STREAM_BUDGET);
     this.streamFar(playerPos, 1);
     if (this.layoutStream) {
@@ -1228,6 +1251,7 @@ export class World {
     this.sun.target.position.copy(playerPos);
     this.sun.position.copy(playerPos).addScaledVector(this.day.lightDir, 220);
     this.creatures.update(dt, playerPos, onAttack);
+    if (target) this.turrets.update(dt, target, this.bolts);
   }
 
   private applyLighting(): void {

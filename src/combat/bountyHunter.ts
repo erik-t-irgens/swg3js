@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { RAPIER } from '../core/physics';
+import { BLASTER } from './bolts';
 import type { Kit, KitContext, KitSlot, Resource } from './kit';
 
 interface Detonator {
@@ -8,7 +9,6 @@ interface Detonator {
   fuse: number;
 }
 
-const FIRE_RATE = 0.16;
 const DET_COOLDOWN = 3;
 const STIM_COOLDOWN = 12;
 const BLAST_RADIUS = 9;
@@ -17,6 +17,10 @@ const dir = new THREE.Vector3();
 const from = new THREE.Vector3();
 const end = new THREE.Vector3();
 const tmp = new THREE.Vector3();
+const aimDir = new THREE.Vector3();
+const side = new THREE.Vector3();
+const lift = new THREE.Vector3();
+const UP = new THREE.Vector3(0, 1, 0);
 
 export class BountyHunterKit implements Kit {
   readonly id = 'bounty_hunter' as const;
@@ -27,7 +31,7 @@ export class BountyHunterKit implements Kit {
     { key: 'Space', name: 'Jetpack', cost: 'fuel' },
   ];
   readonly help = [
-    '<b>LMB</b> fire blaster (hold) · <b>Space</b> in the air: jetpack',
+    '<b>LMB</b> fire the blaster (hold) · <b>RMB</b> rapid fire, less accurate · bolts fly at 58 m/s and can be sidestepped · <b>Space</b> in the air: jetpack',
     '<b>1</b> Thermal Detonator · <b>2</b> Stim Pack',
   ];
   readonly resource: Resource = { label: 'Fuel', value: 100, max: 100 };
@@ -60,29 +64,30 @@ export class BountyHunterKit implements Kit {
     this.detCd = Math.max(0, this.detCd - dt);
     this.stimCd = Math.max(0, this.stimCd - dt);
 
-    // Blaster: hitscan from the camera through the crosshair.
-    if (onFoot && input.held('attack') && this.fireCd <= 0) {
-      this.fireCd = FIRE_RATE;
+    // Blaster: a bolt from the muzzle towards whatever the crosshair is on (the E-11's primary
+    // trigger is slow and true; the alternate trigger fires fast with some scatter).
+    const primary = input.held('attack');
+    const rapid = !primary && input.held('altAttack');
+    if (onFoot && (primary || rapid) && this.fireCd <= 0) {
+      this.fireCd = primary ? BLASTER.fireTime : BLASTER.altFireTime;
       cam.camera.getWorldDirection(dir);
       from.copy(cam.camera.position);
       const ray = new RAPIER.Ray(from, dir);
       const hit = physics.world.castRay(ray, 250, true, undefined, undefined, undefined, player.body);
-      if (hit) {
-        const p = ray.pointAt(hit.timeOfImpact);
-        end.set(p.x, p.y, p.z);
-      } else {
-        end.copy(from).addScaledVector(dir, 250);
-      }
+      end.copy(from).addScaledVector(dir, hit ? hit.timeOfImpact : 250);
       player.muzzle(tmp);
-      effects.tracer(tmp, end, 0xff5a3a, 0.08);
-      effects.flash(tmp, 0xff6a3a, 8, 6, 0.08);
-      const creature = hit ? world.creatures.byCollider.get(hit.collider.handle) : undefined;
-      if (creature) {
-        creature.damage(22, player.pos, 2.5);
-        effects.burst(end, 0xffb070, 0.6, 0.15);
-      } else if (hit) {
-        effects.burst(end, 0xffb070, 0.3, 0.12);
+      // Aim from the muzzle at the crosshair's point, unless that point is beside or behind it.
+      aimDir.copy(end).sub(tmp);
+      if (aimDir.lengthSq() < 1 || aimDir.dot(dir) < 0.5) aimDir.copy(dir);
+      aimDir.normalize();
+      if (rapid) {
+        const s = (BLASTER.altSpread * Math.PI) / 180;
+        side.crossVectors(aimDir, UP).normalize();
+        lift.crossVectors(side, aimDir);
+        aimDir.addScaledVector(side, Math.tan((Math.random() * 2 - 1) * s)).addScaledVector(lift, Math.tan((Math.random() * 2 - 1) * s)).normalize();
       }
+      ctx.bolts.fire(tmp, aimDir, { owner: 'player', exclude: player.body });
+      effects.flash(tmp, 0xff6a3a, 8, 6, 0.08);
     }
 
     // Jetpack: hold Space while airborne.
@@ -160,6 +165,10 @@ export class BountyHunterKit implements Kit {
       tmp.setY(0).normalize();
       c.damage(130 * f + 15);
       c.knock(tmp, 16 * f + 5);
+    }
+    for (const t of world.turrets.turrets) {
+      const d = t.pos.distanceTo(at);
+      if (d <= BLAST_RADIUS) t.damage(130 * (1 - d / BLAST_RADIUS) + 15);
     }
     for (const sp of world.speeders) {
       tmp.copy(sp.pos).sub(at);

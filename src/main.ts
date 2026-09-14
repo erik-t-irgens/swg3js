@@ -26,6 +26,7 @@ const stats = { frameMs: 0, physicsMs: 0, renderMs: 0, rawDt: 0, grounded: false
 (window as unknown as { __stats: typeof stats }).__stats = stats;
 const tmp = new THREE.Vector3();
 const tmpQ = new THREE.Quaternion();
+const boltFrom = new THREE.Vector3();
 
 class App {
   private torch!: THREE.SpotLight;
@@ -275,21 +276,55 @@ class App {
         const L = this.world.swgSky?.lighting;
         return { time: this.world.day.time, clock: this.world.day.clock(), swg: this.world.day.swg, isDay: this.world.day.isDay, index: this.world.day.colorIndex, light: this.world.day.lightDir.toArray().map((v) => Number(v.toFixed(2))), lighting: L ? { main: L.main.getHexString(), mainScale: Number(L.mainScale.toFixed(2)), ambient: L.ambient.getHexString(), fog: L.fog.getHexString(), fogDensity: L.fogDensity, sunMoonAlpha: L.sunMoonAlpha, starAlpha: L.starAlpha } : null };
       },
-      /** Simulate `seconds` of play at 60 Hz with the given keys held, without waiting on real frames. */
+      /** Simulate `seconds` of play at 60 Hz with the given keys held (KeyboardEvent codes or Mouse0..2), without waiting on real frames: movement, the weapons, the bolts and the turrets. */
       advance: (seconds: number, keys: string[] = []) => {
         for (const k of keys) this.input.force(k, true);
         const dt = 1 / 60;
         for (let i = 0; i < Math.round(seconds / dt); i++) {
           this.cam.update(this.input, this.player.pos, null);
           this.player.update(dt, this.input, this.cam, this.world);
+          this.stepCombat(dt);
+          if (!this.player.noclip && !this.player.mounted) this.world.turrets.update(dt, this.player, this.world.bolts);
           this.physics.step(dt);
+          this.effects.update(dt);
           this.input.endFrame();
         }
         for (const k of keys) this.input.force(k, false);
       },
+      /** Bolts in the air: whose, where, which way, and how many have flown and been blocked. */
+      bolts: () => ({ fired: { ...this.world.bolts.fired }, blocked: this.player.blocks, inFlight: this.world.bolts.bolts.map((b) => ({ owner: b.owner, reflected: b.reflected, at: b.pos.toArray().map((v) => Number(v.toFixed(1))), dir: b.dir.toArray().map((v) => Number(v.toFixed(2))) })) }),
+      /** The turrets: where each stands, its health, whether it is down, and its shots. */
+      turrets: () => this.world.turrets.turrets.map((t) => ({ at: t.pos.toArray().map((v) => Number(v.toFixed(1))), distance: Number(t.pos.distanceTo(this.player.pos).toFixed(1)), hp: t.hp, dead: t.dead, shots: t.shots })),
+      /** Stand a turret `distance` metres ahead of the player, facing them, and report where. */
+      turret: (distance = 20) => {
+        this.cam.forward(tmp);
+        const x = this.player.pos.x + tmp.x * distance;
+        const z = this.player.pos.z + tmp.z * distance;
+        const t = this.world.turrets.place(x, z, Math.atan2(-tmp.x, -tmp.z));
+        return t.pos.toArray().map((v) => Number(v.toFixed(1)));
+      },
+      /** Fire a bolt at the player from `distance` metres in front, as an enemy would, for testing blocks. */
+      shootPlayer: (distance = 15) => {
+        this.cam.forward(tmp);
+        boltFrom.copy(this.player.pos).addScaledVector(tmp, distance);
+        boltFrom.y += 1.15;
+        tmp.negate();
+        this.world.bolts.fire(boltFrom, tmp, { owner: 'enemy', damage: 15 });
+        return this.world.bolts.bolts.length;
+      },
+      /** Full health, for tests that stand in front of the turrets. */
+      heal: () => {
+        this.player.heal(this.player.maxHp);
+        return this.player.hp;
+      },
+      /** The saber defence rank (1..3): how bolts are turned away. */
+      saberDefense: (rank?: number) => {
+        if (rank !== undefined) this.player.saberDefense = Math.max(1, Math.min(3, Math.round(rank)));
+        return this.player.saberDefense;
+      },
       player: () => {
         const p = this.player;
-        return { pos: p.pos.toArray().map((v) => Number(v.toFixed(2))), vel: p.vel.toArray().map((v) => Number(v.toFixed(2))), grounded: p.grounded, heading: Number(((p.heading * 180) / Math.PI).toFixed(0)), cameraYaw: Number(((Math.atan2(this.cam.camera.getWorldDirection(new THREE.Vector3()).x, this.cam.camera.getWorldDirection(new THREE.Vector3()).z) * 180) / Math.PI).toFixed(0)), swimming: p.swimming, submerged: p.submerged, water: this.world.terrain.waterHeightAt(p.pos.x, p.pos.z), ground: this.world.terrain.heightAt(p.pos.x, p.pos.z), captured: this.input.captured };
+        return { hp: Number(p.hp.toFixed(1)), pos: p.pos.toArray().map((v) => Number(v.toFixed(2))), camera: this.cam.camera.position.toArray().map((v) => Number(v.toFixed(2))), vel: p.vel.toArray().map((v) => Number(v.toFixed(2))), grounded: p.grounded, heading: Number(((p.heading * 180) / Math.PI).toFixed(0)), cameraYaw: Number(((Math.atan2(this.cam.camera.getWorldDirection(new THREE.Vector3()).x, this.cam.camera.getWorldDirection(new THREE.Vector3()).z) * 180) / Math.PI).toFixed(0)), swimming: p.swimming, submerged: p.submerged, water: this.world.terrain.waterHeightAt(p.pos.x, p.pos.z), ground: this.world.terrain.heightAt(p.pos.x, p.pos.z), captured: this.input.captured };
       },
     };
 
@@ -306,7 +341,7 @@ class App {
         <div class="sub">Star Wars Galaxies, rebuilt for the browser. Ten worlds, one very ambitious side project.</div>
         <div class="controls">
           <div><b>WASD</b> move · <b>Mouse</b> look · <b>Wheel</b> zoom · <b>Space</b> jump (hold to Force Jump higher) · <b>Ctrl</b> crouch (tap while moving to roll) · <b>Shift</b> walk · in water <b>Space</b>/<b>Ctrl</b> surface/dive, or look down and swim</div>
-          <div><b>LMB</b> attack · <b>RMB</b> throw the saber (staff: kick) · <b>E</b> mount speeder · <b>C</b> switch class · <b>T</b> fast-forward time</div>
+          <div><b>LMB</b> attack or fire · <b>RMB</b> throw the saber (staff: kick), or rapid fire · <b>E</b> mount speeder · <b>C</b> switch class · <b>T</b> fast-forward time</div>
           <div><b>M</b> galaxy map · <b>H</b> toggle help · <b>N</b> noclip fly (<b>+</b>/<b>-</b> speed) · <b>F</b> flashlight · <b>Esc</b> release mouse</div>
           <div><b>X</b> also crouches (a Mac turns Ctrl-click into a right click) · rebind any key in the console: <b>__debug.bind('crouch', 'KeyV')</b>, <b>__debug.bindings()</b></div>
         </div>
@@ -456,6 +491,25 @@ class App {
     this.input.requestLock();
   }
 
+  /** The class's weapon and abilities, then the bolts in the air (a bolt reaching the player meets the saber first). */
+  private stepCombat(dt: number): void {
+    const player = this.player;
+    const ctx: KitContext = { dt, input: this.input, player, world: this.world, cam: this.cam, physics: this.physics, effects: this.effects, bolts: this.world.bolts };
+    this.kit.update(ctx);
+    this.world.bolts.update(dt, {
+      physics: this.physics,
+      effects: this.effects,
+      hittableAt: (h) => this.world.hittableAt(h),
+      player,
+      block: (bolt, hit, out) => player.deflect(bolt.dir, hit, this.cam, out),
+      onPlayerHit: (dmg) => {
+        if (player.mounted || player.noclip) return;
+        player.takeDamage(dmg);
+        this.hud.hurt();
+      },
+    });
+  }
+
   /** One frame through the portal renderer: the camera's building in full, the world through its doors (or the reverse). */
   /** Draw calls and triangles of the last frame, summed over every pass. */
   private frameCalls = 0;
@@ -595,8 +649,7 @@ class App {
       const simulate = active && !this.map.open && !this.wardrobe.open;
       if (simulate) {
         player.update(dt, input, this.cam, this.world);
-        const ctx: KitContext = { dt, input, player, world: this.world, cam: this.cam, physics: this.physics, effects: this.effects };
-        this.kit.update(ctx);
+        this.stepCombat(dt);
       }
 
       let drive: DriveInput | null = null;
@@ -617,7 +670,7 @@ class App {
         if (!simulate || player.mounted || player.noclip) return;
         player.takeDamage(dmg);
         this.hud.hurt();
-      });
+      }, simulate && !player.mounted && !player.noclip ? player : null);
       const tPhys = performance.now();
       this.physics.step(dt);
       stats.physicsMs = performance.now() - tPhys;

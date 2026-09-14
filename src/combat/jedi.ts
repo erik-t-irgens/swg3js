@@ -3,7 +3,7 @@ import { RAPIER } from '../core/physics';
 import type { Creature } from '../world/creatures';
 import { KICK_DAMAGE } from './saber';
 import { THROW } from './saberThrow';
-import type { Kit, KitContext, KitSlot, Resource } from './kit';
+import type { Hittable, Kit, KitContext, KitSlot, Resource } from './kit';
 
 const tmp = new THREE.Vector3();
 const tmp2 = new THREE.Vector3();
@@ -27,16 +27,17 @@ export class JediKit implements Kit {
     '<b>LMB</b> saber swing (hold to chain, direction keys pick the swing) · <b>RMB</b> throw the saber (staff: kick) · <b>LMB+RMB</b> kata · <b>K</b> style (fast, medium, strong, dual, staff) · <b>L</b> saber on/off',
     '<b>Jump</b> + direction + <b>LMB</b> flip and jump attacks · <b>Ctrl</b> + forward + <b>LMB</b> lunge or spin · <b>Jump</b> beside a wall: wall run (strafe + forward) or wall flip (strafe) · <b>Jump</b> at a wall: run up and flip back · back + <b>Jump</b>: backflip',
     '<b>1</b> Force Jump · <b>2</b> Force Speed · <b>3</b> Force Push · <b>4</b> Force Lightning (hold)',
+    'A lit saber facing a blaster bolt turns it away, back where you look; blocks work mid-swing too at the top defence rank',
   ];
   readonly resource: Resource = { label: 'Force', value: 100, max: 100 };
   speedActive = false;
   lightningActive = false;
   /** Last style change, for the HUD. */
   styleNote = '';
-  private readonly hitThisSwing = new Set<Creature>();
+  private readonly hitThisSwing = new Set<Hittable>();
   private lastAttackId = -1;
   /** What the thrown saber has hit on its current leg out or back. */
-  private readonly hitThisLeg = new Set<Creature>();
+  private readonly hitThisLeg = new Set<Hittable>();
   private lastLegId = -1;
   private readonly aura: THREE.Mesh<THREE.SphereGeometry, THREE.MeshBasicMaterial>;
   private readonly bolt: THREE.Line<THREE.BufferGeometry, THREE.LineBasicMaterial>;
@@ -196,7 +197,7 @@ export class JediKit implements Kit {
   }
 
   /** Hurt every creature a capsule between two points touches, each once per `already`. */
-  private sweep(ctx: KitContext, from: THREE.Vector3, to: THREE.Vector3, radius: number, damage: number, already: Set<Creature>, push = 5): void {
+  private sweep(ctx: KitContext, from: THREE.Vector3, to: THREE.Vector3, radius: number, damage: number, already: Set<Hittable>, push = 5): void {
     const { player, world, physics, effects } = ctx;
     mid.copy(from).add(to).multiplyScalar(0.5);
     tmp.copy(to).sub(from);
@@ -207,7 +208,7 @@ export class JediKit implements Kit {
       quat,
       new RAPIER.Capsule(len / 2, radius),
       (collider) => {
-        const c = world.creatures.byCollider.get(collider.handle);
+        const c = world.hittableAt(collider.handle);
         if (c && !already.has(c)) {
           already.add(c);
           c.damage(damage, player.pos, push);
