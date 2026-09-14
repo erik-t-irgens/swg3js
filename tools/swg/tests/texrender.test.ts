@@ -1,7 +1,7 @@
 // The browser's texture renderer against known answers: a modulate stage with a palette factor,
 // a blueprint drawn from a fan, a texture choice, and the exporter's shape feeding it.
 import assert from 'node:assert/strict';
-import { bakeShader, liveShader, renderBlueprint, renderRecipe, recipeVariables, type BlueprintDef, type Img, type Recipe, type ShaderDef } from '../../../src/player/texrender.ts';
+import { bakeShader, liveShader, recipeNormal, renderBlueprint, renderRecipe, recipeVariables, type BlueprintDef, type Img, type Recipe, type ShaderDef } from '../../../src/player/texrender.ts';
 import { exportShader, ImageRegistry, palettesOf } from '../customize.mjs';
 
 let checks = 0;
@@ -102,6 +102,16 @@ const bodyOut = renderRecipe(body, vals, palettes, images)!;
 ok(bodyOut.rgba[2] > 0 && bodyOut.rgba[1] === 0, "the body's scoped value reaches the body (blue)");
 ok(shirtOut.rgba[0] > 0 && shirtOut.rgba[1] === 0 && shirtOut.rgba[2] === 0, 'the shirt keeps its default (red): an unscoped value never reaches a private variable');
 ok(recipeVariables(shirt).has('shirt_s03_m_l0|index_color_1') && !recipeVariables(shirt).has('index_color_1'), "a private variable's key names its mesh");
+// A normal map picked by a choice (the head's age among wrinkle maps), the game's compressed
+// layout (x in alpha, y in green) turned into the RGB map the renderer reads.
+const wrinkles = (a: number): Img => ({ width: 2, height: 2, rgba: new Uint8Array([255, 128, 0, a, 255, 200, 0, 60, 255, 128, 0, 128, 255, 128, 0, 255]) });
+const aged: ShaderDef = { ...shader, textures: { MAIN: 'skin.png', CNRM: 'w0.png' }, palettes: [], choices: [{ tag: 'CNRM', variable: 'index_age', private: true, default: 0, files: ['w0.png', 'w1.png'] }] };
+const withNormals = (f: string | null): Img | null => (f === 'w0.png' ? wrinkles(128) : f === 'w1.png' ? wrinkles(255) : images(f));
+const head: Recipe = { mesh: 'head_l0', material: 'shader/face.sht', kind: 'bake', baseTag: 'MAIN', shader: aged, slots: [] };
+const young = recipeNormal(head, new Map(), palettes, withNormals)!;
+const old = recipeNormal(head, new Map([['head_l0|index_age', 1]]), palettes, withNormals)!;
+ok(young.rgba[0] === 128 && young.rgba[2] === 255 && young.rgba[3] === 255, 'a compressed map is unswizzled: x from the alpha, z rebuilt to one where flat');
+ok(old.rgba[0] === 255 && old.rgba[0] !== young.rgba[0], "the mesh's own age picks the other wrinkle map");
 console.log(`${checks} checks passed`);
 
 // The browser's PNG decoder reads the converter's PNGs byte for byte, transparent texels included.

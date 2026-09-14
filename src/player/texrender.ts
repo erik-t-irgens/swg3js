@@ -555,6 +555,48 @@ export function recipeVariableDefs(r: Recipe): { name: string; private: boolean;
   return out;
 }
 
+/**
+ * The normal map a recipe's shader lights its mesh with, after the values have picked it (the
+ * head's age is a choice among wrinkle maps on the CNRM tag), as a tangent-space normal map the
+ * renderer reads: the game's compressed maps keep x in the alpha and y in the green channel,
+ * which is told from an ordinary RGB map by the alpha carrying the detail and the red none.
+ */
+export function recipeNormal(r: Recipe, values: Values, palettes: Record<string, number[][]>, images: (file: string | null) => Img | null): Img | null {
+  const live = liveShader(r.shader, images, values, palettes, r.mesh);
+  const src = live?.textures.get('CNRM') ?? live?.textures.get('NRML') ?? null;
+  if (!src) return null;
+  const n = src.width * src.height;
+  let sumA = 0;
+  let sumR = 0;
+  let sqA = 0;
+  let sqR = 0;
+  const step = Math.max(1, Math.floor(n / 4096));
+  let count = 0;
+  for (let i = 0; i < n; i += step) {
+    const r8 = src.rgba[i * 4];
+    const a8 = src.rgba[i * 4 + 3];
+    sumR += r8;
+    sqR += r8 * r8;
+    sumA += a8;
+    sqA += a8 * a8;
+    count++;
+  }
+  const varA = sqA / count - (sumA / count) ** 2;
+  const varR = sqR / count - (sumR / count) ** 2;
+  const swizzled = varA > 4 && varA > varR * 4;
+  const out = new Uint8Array(n * 4);
+  for (let i = 0; i < n; i++) {
+    const x = (swizzled ? src.rgba[i * 4 + 3] : src.rgba[i * 4]) / 127.5 - 1;
+    const y = src.rgba[i * 4 + 1] / 127.5 - 1;
+    const z = swizzled ? Math.sqrt(Math.max(0, 1 - x * x - y * y)) : src.rgba[i * 4 + 2] / 127.5 - 1;
+    out[i * 4] = Math.round((x * 0.5 + 0.5) * 255);
+    out[i * 4 + 1] = Math.round((y * 0.5 + 0.5) * 255);
+    out[i * 4 + 2] = Math.round((z * 0.5 + 0.5) * 255);
+    out[i * 4 + 3] = 255;
+  }
+  return { width: src.width, height: src.height, rgba: out };
+}
+
 /** Makes a recipe's texture for the values: the rendered blueprint, or the shader baked over it and its own textures. */
 export function renderRecipe(r: Recipe, values: Values, palettes: Record<string, number[][]>, images: (file: string | null) => Img | null): Img | null {
   const rendered = new Map<string, Img>();

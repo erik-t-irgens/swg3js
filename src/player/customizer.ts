@@ -3,7 +3,7 @@
 // A change re-renders only the recipes that read the variable, off the main thread's critical
 // path in idle time, one after another, so a slider that moves fast lands on its last value.
 import * as THREE from 'three';
-import { type CustomizeFile, type Img, type Recipe, type Values, recipeVariableDefs, recipeVariables, renderRecipe, variableKey } from './texrender';
+import { type CustomizeFile, type Img, type Recipe, type Values, recipeNormal, recipeVariableDefs, recipeVariables, renderRecipe, variableKey } from './texrender';
 import { decodePng } from './png';
 
 export class Customizer {
@@ -198,6 +198,9 @@ export class Customizer {
         const img = renderRecipe(r, this.values, this.palettes, (file) => (file ? this.images.get(`${dir}${file}`.toLowerCase()) ?? null : null));
         if (!img) continue;
         this.put(r, img);
+        // The lighting detail the shader picks with the values too (the age's wrinkles).
+        const normal = recipeNormal(r, this.values, this.palettes, (file) => (file ? this.images.get(`${dir}${file}`.toLowerCase()) ?? null : null));
+        if (normal) this.putNormal(r, normal);
         const ms = performance.now() - t0;
         if (ms > 250) console.info(`customize: ${r.material} rendered in ${ms.toFixed(0)} ms (${img.width}x${img.height})`);
       }
@@ -231,6 +234,33 @@ export class Customizer {
     }
   }
 
+  private putNormal(r: Recipe, img: Img): void {
+    const key = `${r.material}#normal`;
+    let tex = this.textures.get(key);
+    if (!tex || tex.image.width !== img.width || tex.image.height !== img.height) {
+      tex?.dispose();
+      tex = new THREE.DataTexture(new Uint8Array(img.rgba), img.width, img.height, THREE.RGBAFormat);
+      tex.colorSpace = THREE.NoColorSpace;
+      tex.flipY = false;
+      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+      tex.minFilter = THREE.LinearMipmapLinearFilter;
+      tex.magFilter = THREE.LinearFilter;
+      tex.generateMipmaps = true;
+      tex.anisotropy = 4;
+      this.textures.set(key, tex);
+    } else (tex.image.data as Uint8Array).set(img.rgba);
+    tex.needsUpdate = true;
+    for (const m of this.materialsFor(r.material)) {
+      const std = m as THREE.MeshStandardMaterial;
+      if (std.normalMap !== tex) {
+        std.normalMap = tex;
+        // The game's maps are the DirectX way up: green points down the texture.
+        std.normalScale.set(1, -1);
+        std.needsUpdate = true;
+      }
+    }
+  }
+
   /**
    * A part came or went: the materials a recipe feeds get its texture again after a reload, and
    * a piece just put on whose look a chosen value changes (a hairstyle in the hair colour picked,
@@ -244,10 +274,16 @@ export class Customizer {
         if (this.active(r) && this.readsSetValue(r)) this.queued.add(r);
         continue;
       }
+      const normal = this.textures.get(`${r.material}#normal`);
       for (const m of this.materialsFor(r.material)) {
         const std = m as THREE.MeshStandardMaterial;
         if (std.map !== tex) {
           std.map = tex;
+          std.needsUpdate = true;
+        }
+        if (normal && std.normalMap !== normal) {
+          std.normalMap = normal;
+          std.normalScale.set(1, -1);
           std.needsUpdate = true;
         }
       }
