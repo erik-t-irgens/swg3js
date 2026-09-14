@@ -431,13 +431,17 @@ export class CharacterRig {
     if (this.override) {
       this.overrideTime += dt;
       if (this.overrideTime >= this.overrideEnds - 0.08) {
-        // Fade back to the state clip just before the one-off clip holds its last frame.
+        // Fade straight from the one-off clip into the state's clip just before it holds its last
+        // frame (not through the clip that played before it, which would show as a hitch).
         const state = this.state;
         const upper = this.wantedUpper;
-        this.stopOverride(0.12);
+        const ending = this.override;
+        this.override = null;
+        this.current = ending;
         this.state = null;
         this.upperName = null;
         if (state) this.setState(state, 0, upper);
+        if (this.current === ending) ending.fadeOut(0.12);
       }
     }
   }
@@ -510,9 +514,9 @@ export class CharacterRig {
     let action = this.halves.get(key);
     if (action) return action;
     const src = this.actions.get(clip)!.getClip();
-    // A clip that drives only some joints keeps just those as its upper layer (the rest were baked at rest).
-    const own = this.partialClips[clip];
-    const upper = own ? new Set(own) : this.upperBones();
+    // The split is always at the lowest spine bone; a clip that drives only some joints (a shot on the
+    // arms) simply has no tracks for the rest, so its lower half is empty and its upper half is its own joints.
+    const upper = this.upperBones();
     const tracks = src.tracks.filter((t) => upper.has(THREE.PropertyBinding.parseTrackName(t.name).nodeName ?? '') === (half === 'upper'));
     action = this.mixer.clipAction(new THREE.AnimationClip(key, src.duration, tracks), undefined, this.additive.has(clip) ? THREE.AdditiveAnimationBlendMode : THREE.NormalAnimationBlendMode);
     this.halves.set(key, action);

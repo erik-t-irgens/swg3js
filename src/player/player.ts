@@ -1069,7 +1069,13 @@ export class Player {
     for (const [state, n] of [['Idle', 0], ['Walk', 1], ['Run', 2]] as const) {
       rig.prefer(`gun${state}`, new RegExp(gun === 'pistol' ? `^loop_pistol_standing:speed${n}` : `^loop_rifle:speed${n}`));
     }
-    // The combat carry (loop_combat_standing) is the same for both; the game has one combat stance for every weapon.
+    // The table's one combat stance (loop_combat_standing) is the unarmed one, fists up: with a blaster
+    // the combat carry keeps the gun's own carry and turns to face the camera, until the game's state
+    // hierarchy tells which loop it plays there.
+    for (const [state, n] of [['Idle', 0], ['Walk', 1], ['Run', 2]] as const) {
+      rig.prefer(`gunReady${state}`, new RegExp(gun === 'pistol' ? `^loop_pistol_standing:speed${n}` : `^loop_rifle:speed${n}`));
+      rig.prefer(`gunAim${state}`, new RegExp(gun === 'pistol' ? `^loop_pistol_standing:speed${n}` : `^loop_rifle:speed${n}`));
+    }
     for (const [state, n] of [['Idle', 0], ['Move', 1]] as const) {
       rig.prefer(`gunProne${state}`, new RegExp(`^loop_${gun}_prone:speed${n}`));
       rig.prefer(`gunProneReady${state}`, new RegExp(`^loop_${gun}_combat_prone:speed${n}`));

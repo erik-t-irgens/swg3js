@@ -6,6 +6,7 @@
 //   node tools/swg/cli.mjs list <swg-dir> [filter]                list files across archives (search priority applied)
 //   node tools/swg/cli.mjs extract <swg-dir> <path-in-archive> <out-file>
 //   node tools/swg/cli.mjs dump <file.iff> | <swg-dir> <path-in-archive>   print an IFF tree
+//   node tools/swg/cli.mjs ash <swg-dir> <appearance/x.sat | object/.../shared_x.iff> [--find=pistol]   the animation state hierarchy behind a skeletal appearance, with its strings
 //   node tools/swg/cli.mjs shader <swg-dir> <shader/x.sht>        list a shader's texture slots
 //   node tools/swg/cli.mjs template <swg-dir> <object/x.iff>       print an object template's parameter chain
 //   node tools/swg/cli.mjs texture <swg-dir> <texture/x.dds> <out.png>
@@ -70,7 +71,7 @@ import { basename, dirname, join, relative } from 'node:path';
 import { resolveParts } from './appearance.mjs';
 import { decodeDds } from './dds.mjs';
 import { buildGlb } from './glb.mjs';
-import { dump, parseIff } from './iff.mjs';
+import { dump, isForm, parseIff } from './iff.mjs';
 import { classifyDirectory, isRetailByName } from './manifest.mjs';
 import { parseMesh } from './msh.mjs';
 import { buildPack, familyOf } from './pack.mjs';
@@ -603,6 +604,34 @@ function convertFlora(vfs, template, outDir, manifest) {
  */
 function nameLocomotion(entries, loadAnimation) {
   const named = entries.map((e) => ({ ...e, clip: e.name, speed: 0 }));
+  // A speed selector's branches are listed in the file's order, not by speed: rank each group's
+  // ":speedN" by the speed its animation carries (0 the slowest, so speed0 is the idle everywhere).
+  const groups = new Map();
+  for (const e of named) {
+    const m = /^(.*):speed(\d+)(.*)$/.exec(e.name);
+    if (!m) continue;
+    const g = groups.get(m[1]) ?? groups.set(m[1], new Map()).get(m[1]);
+    const idx = Number(m[2]);
+    const list = g.get(idx) ?? g.set(idx, []).get(idx);
+    list.push({ e, tail: m[3] });
+  }
+  for (const [base, byIndex] of groups) {
+    if (byIndex.size < 2) continue;
+    const ranked = [...byIndex.entries()].map(([idx, list]) => {
+      const rep = list.find((x) => x.tail === '') ?? list.find((x) => x.e.isDefault) ?? list[0];
+      let speed = 0;
+      try {
+        speed = loadAnimation(rep.e)?.locomotionSpeed ?? 0;
+      } catch {
+        speed = 0;
+      }
+      return { idx, speed, list };
+    });
+    ranked.sort((a, b) => a.speed - b.speed || a.idx - b.idx);
+    ranked.forEach((r, rank) => {
+      for (const { e, tail } of r.list) e.clip = e.name = `${base}:speed${rank}${tail}`;
+    });
+  }
   // Creatures: loop_stand:speedN[:variant]; players: loop_standing:<gender>:speedN[:variant].
   // One entry per speed: the default variant (marked default, or with no variant suffix), from
   // the first selector branch the table lists.
@@ -1557,6 +1586,68 @@ switch (cmd) {
     else if (existsSync(pos[1]) && statSync(pos[1]).isFile()) buf = readFileSync(pos[1]);
     else usage();
     console.log(dump(parseIff(buf)).join('\n'));
+    break;
+  }
+  case 'ash': {
+    // <swg-dir> <appearance/x.sat | object/.../shared_x.iff | appearance/ash/x.ash>: the animation state
+    // hierarchy behind a skeletal appearance, every state with the strings it carries, for reading how
+    // the game picks its loops (a pistol's combat stance) from names the logical table alone does not show.
+    if (!pos[2]) usage();
+    const vfs = mount(pos[1]);
+    let file = pos[2].replace(/\\/g, '/');
+    if (/\.iff$/i.test(file)) {
+      const a = resolveTemplateString(vfs, file, ['appearanceFilename'], new Map());
+      if (!a) throw new Error(`${file}: no appearanceFilename in its template chain`);
+      file = a.replace(/\\/g, '/').replace(/^\//, '');
+    }
+    if (/\.sat$/i.test(file)) {
+      const sat = parseSat(readIff(vfs, file));
+      const latFile = sat.animationTables.get(sat.skeletons[0]?.file.toLowerCase()) ?? [...sat.animationTables.values()][0];
+      const lat = parseLat(readIff(vfs, latFile));
+      console.log(`${file}: logical table ${latFile} (${lat.entries.length} entries), hierarchy ${lat.hierarchy}`);
+      file = lat.hierarchy.replace(/\\/g, '/').replace(/^\//, '');
+    }
+    if (!vfs.has(file)) throw new Error(`${file}: not in the archives`);
+    const strings = (data) => {
+      const out = [];
+      let cur = '';
+      for (const b of data) {
+        if (b >= 0x20 && b < 0x7f) cur += String.fromCharCode(b);
+        else {
+          if (cur.length >= 3) out.push(cur);
+          cur = '';
+        }
+      }
+      if (cur.length >= 3) out.push(cur);
+      return out;
+    };
+    const walk = (node, depth, lines) => {
+      const pad = '  '.repeat(depth);
+      if (isForm(node)) {
+        lines.push(`${pad}FORM ${node.type}`);
+        for (const c of node.children) walk(c, depth + 1, lines);
+      } else {
+        const str = strings(node.data);
+        const nums = node.data.length <= 16 ? ` [${[...node.data].map((b) => b.toString(16).padStart(2, '0')).join(' ')}]` : '';
+        lines.push(`${pad}${node.tag} (${node.data.length} bytes)${str.length ? ` ${str.join(' | ')}` : nums}`);
+      }
+      return lines;
+    };
+    const lines = walk(parseIff(vfs.read(file)), 0, []);
+    const find = options.find ? String(options.find).toLowerCase() : null;
+    console.log(`${file}: ${lines.length} lines${find ? `, those with "${find}" and their forms` : ''}`);
+    if (!find) console.log(lines.join('\n'));
+    else {
+      const stack = [];
+      for (const line of lines) {
+        const depth = line.search(/\S/) / 2;
+        stack.length = depth;
+        stack[depth] = line;
+        if (line.toLowerCase().includes(find)) {
+          for (let d = 0; d <= depth; d++) if (stack[d] && !stack[d].printed) { console.log(stack[d]); stack[d] = Object.assign(new String(stack[d]), { printed: true }); }
+        }
+      }
+    }
     break;
   }
   case 'template': {

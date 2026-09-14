@@ -213,11 +213,11 @@ const qmul = (a, b) => [
   a[0] * b[3] + a[1] * b[2] - a[2] * b[1] + a[3] * b[0],
 ];
 const qconj = (q) => [q[0], -q[1], -q[2], -q[3]];
-function qnorm(q) {
+export function qnorm(q) {
   const l = Math.hypot(q[0], q[1], q[2], q[3]) || 1;
   return [q[0] / l, q[1] / l, q[2] / l, q[3] / l];
 }
-function qrot(q, v) {
+export function qrot(q, v) {
   const r = qmul(qmul(q, [0, v[0], v[1], v[2]]), qconj(q));
   return [r[1], r[2], r[3]];
 }
@@ -314,7 +314,7 @@ function basePoseOf(bone) {
  * glTF space. A frame's chained bone transforms take the bind pose to the animated one, so the
  * animated world transform is that chain applied to the base pose.
  */
-function jkaWorld(gla, frame) {
+export function jkaWorld(gla, frame) {
   const out = new Array(gla.numBones);
   const chain = new Array(gla.numBones);
   // Bones are not stored parents-first, so resolve each one's chain on demand.
@@ -555,6 +555,132 @@ export function gripFromConstraints(constraints) {
   return { axis, mean: cos.reduce((a, b) => a + b, 0) / cos.length, min: Math.min(...cos) };
 }
 
+// ---------------------------------------------------------------------------------------------
+// Ghoul2 meshes (.glm), read only for their tag surfaces: the three-vertex bolt triangles the
+// game hangs weapons from (*r_hand, *l_hand on a player, *blade1 on a hilt).
+//   mdxmHeader_t { "2LGM", version, name[64], animName[64], animIndex, numBones, numLODs, ofsLODs,
+//                  numSurfaces, ofsSurfHierarchy, ofsSurfaces, ofsEnd }  (168 bytes)
+//   then numSurfaces int32 offsets (from the table) to mdxmSurfHierarchy_t { name[64], flags,
+//   shader[64], shaderIndex, parentIndex, numChildren, childIndexes[] }; flags bit 0 marks a bolt.
+//   At ofsLODs: mdxmLOD_t { ofsEnd }, then numSurfaces int32 offsets (from that table) to
+//   mdxmSurface_t { ident, index, ofsHeader, numVerts, ofsVerts, numTriangles, ofsTriangles,
+//   numBoneReferences, ofsBoneReferences, ofsEnd }; vertices { normal[3], pos[3], packed weights
+//   (bone reference i in bits 5i..5i+4, count-1 in bits 30-31), weights[4] } (32 bytes), positions
+//   in model space at the skeleton's base pose; bone references index the GLA's bones.
+export function parseGlm(buf) {
+  if (buf.length < 168 || buf.toString('latin1', 0, 4) !== '2LGM') throw new Error('not a GLM file (missing 2LGM ident)');
+  const name = cstr(buf, 8, MAX_QPATH);
+  const animName = cstr(buf, 72, MAX_QPATH);
+  const numBones = buf.readInt32LE(140);
+  const ofsLODs = buf.readInt32LE(148);
+  const numSurfaces = buf.readInt32LE(152);
+  const table = 168;
+  const surfaces = [];
+  for (let i = 0; i < numSurfaces; i++) {
+    const o = table + buf.readInt32LE(table + i * 4);
+    surfaces.push({ name: cstr(buf, o, MAX_QPATH), flags: buf.readUInt32LE(o + MAX_QPATH), verts: [] });
+  }
+  // The first level of detail carries every surface's vertices.
+  const lodTable = ofsLODs + 4;
+  for (let i = 0; i < numSurfaces; i++) {
+    const so = lodTable + buf.readInt32LE(lodTable + i * 4);
+    const numVerts = buf.readInt32LE(so + 12);
+    const ofsVerts = buf.readInt32LE(so + 16);
+    const numRefs = buf.readInt32LE(so + 28);
+    const ofsRefs = buf.readInt32LE(so + 32);
+    const refs = [];
+    for (let k = 0; k < numRefs; k++) refs.push(buf.readInt32LE(so + ofsRefs + k * 4));
+    const verts = [];
+    // Tags are three vertices; only those are kept, the meshes are not needed.
+    if (numVerts === 3 || surfaces[i].flags & 1) {
+      for (let v = 0; v < numVerts; v++) {
+        const vo = so + ofsVerts + v * 32;
+        const packed = buf.readUInt32LE(vo + 24);
+        verts.push({ pos: [buf.readFloatLE(vo + 12), buf.readFloatLE(vo + 16), buf.readFloatLE(vo + 20)], bone: refs[packed & 31] ?? -1, weights: (packed >>> 30) + 1 });
+      }
+    }
+    surfaces[i].verts = verts;
+  }
+  return { name, animName, numBones, surfaces };
+}
+
+/**
+ * The bolt frame the game builds from a tag triangle (G2_ProcessSurfaceBolt): its longest side,
+ * squared up against the shortest, is the frame's y axis, the shortest its x, their cross its -z,
+ * and the third vertex its origin. Returns the axes as columns in the vertices' own space.
+ */
+export function tagFrame(verts) {
+  const p = verts.map((v) => v.pos);
+  const sides = [0, 1, 2].map((j) => [p[(j + 1) % 3][0] - p[j][0], p[(j + 1) % 3][1] - p[j][1], p[(j + 1) % 3][2] - p[j][2]]);
+  const len = (v) => Math.hypot(v[0], v[1], v[2]);
+  const norm = (v) => { const l = len(v) || 1; return [v[0] / l, v[1] / l, v[2] / l]; };
+  // The game takes side 0 as the longest and side 2 as the shortest (its exporter lays tags out so).
+  const longest = sides[0];
+  const shortest = sides[2];
+  const y0 = norm(longest);
+  const x = norm(shortest);
+  const d = y0[0] * x[0] + y0[1] * x[1] + y0[2] * x[2];
+  const y = norm([y0[0] - d * x[0], y0[1] - d * x[1], y0[2] - d * x[2]]);
+  const c = norm([longest[1] * shortest[2] - longest[2] * shortest[1], longest[2] * shortest[0] - longest[0] * shortest[2], longest[0] * shortest[1] - longest[1] * shortest[0]]);
+  return { origin: p[2], x, y, z: [-c[0], -c[1], -c[2]] };
+}
+
+const PLAYER_GLMS = ['models/players/kyle/model.glm', 'models/players/jedi_hm/model.glm', 'models/players/luke/model.glm', 'models/players/jan/model.glm'];
+const HILT_GLMS = ['models/weapons2/saber_1/saber_w.glm', 'models/weapons2/saber/saber_w.glm', 'models/weapons2/saber_2/saber_w.glm'];
+
+/**
+ * Where the blade points in each hand, from the game's own geometry: a hilt bolts to the
+ * *r_hand (or *l_hand) tag of the player model, and its blade runs along -y of the hilt's
+ * *blade1 tag (CG_AddSaberBlade reads NEGATIVE_Y of that bolt). Both tags are triangles at the
+ * skeleton's base pose, so the blade's direction in the hand bone's own frame is fixed, and from
+ * there it goes into the SWG hand's frame through the retarget plan (whose rest frame maps the
+ * two hands onto each other). Returns null when the archives lack the models.
+ */
+export function gripFromTags(base, gla, joints, plan, { log = () => {} } = {}) {
+  const playerFile = PLAYER_GLMS.find((f) => base.has(f));
+  const hiltFile = HILT_GLMS.find((f) => base.has(f));
+  if (!playerFile || !hiltFile) {
+    log(`grip: no tag geometry (${playerFile ? 'player model found' : 'no player model.glm'}, ${hiltFile ? 'hilt found' : 'no hilt saber_w.glm'})`);
+    return null;
+  }
+  const player = parseGlm(base.read(playerFile));
+  const hilt = parseGlm(base.read(hiltFile));
+  const blade = hilt.surfaces.find((s) => s.name.toLowerCase() === '*blade1' && s.verts.length === 3);
+  if (!blade) {
+    log(`grip: ${hiltFile} has no *blade1 tag`);
+    return null;
+  }
+  // The blade in the hilt's model space, then in the hand tag's bolt frame (the hilt's model space is that frame).
+  const bt = tagFrame(blade.verts);
+  const bladeInHilt = [-bt.y[0], -bt.y[1], -bt.y[2]];
+  const out = {};
+  for (const [side, tagName, jka] of [['right', '*r_hand', 'rhand'], ['left', '*l_hand', 'lhand']]) {
+    const tag = player.surfaces.find((s) => s.name.toLowerCase() === tagName && s.verts.length === 3);
+    const pair = plan.pairs.find((p) => p.jka === jka);
+    if (!tag || !pair) continue;
+    const bone = tag.verts[0].bone;
+    if (bone < 0 || bone >= gla.numBones) continue;
+    const ht = tagFrame(tag.verts);
+    // Blade in the player model's space at the base pose: the bolt frame's columns times the hilt-space direction.
+    const inModel = [0, 1, 2].map((r) => ht.x[r] * bladeInHilt[0] + ht.y[r] * bladeInHilt[1] + ht.z[r] * bladeInHilt[2]);
+    // Into the hand bone's own frame: the base pose matrix's rotation, transposed.
+    const m = gla.bones[bone].basePose;
+    const cols = [0, 1, 2].map((c) => { const l = Math.hypot(m[c], m[4 + c], m[8 + c]) || 1; return [m[c] / l, m[4 + c] / l, m[8 + c] / l]; });
+    const local = cols.map((c) => c[0] * inModel[0] + c[1] * inModel[1] + c[2] * inModel[2]);
+    // The tag's bone is the hand (or a finger under it): take it into the mapped hand's frame at the plan's rest frame.
+    const world = qrot(plan.jkaBase[bone].q, toGltfV(local));
+    const swgRest = qmul(qconj(pair.align), plan.swgBind[pair.s].q);
+    const axis = qrot(qconj(swgRest), world);
+    const l = Math.hypot(axis[0], axis[1], axis[2]) || 1;
+    out[side] = { bone: joints[pair.s].name, axis: axis.map((v) => Number((v / l).toFixed(4))), from: `${tagName} of ${playerFile} (bone ${gla.bones[bone].name}) and *blade1 of ${hiltFile}` };
+  }
+  if (!out.right) {
+    log(`grip: ${playerFile} has no *r_hand tag`);
+    return null;
+  }
+  return out;
+}
+
 /**
  * Where the blade points in the hand: the axis in the saber hand's SWG bone frame that the
  * swings put where their quadrants say (the medium and strong swings, whose starts and ends
@@ -562,10 +688,8 @@ export function gripFromConstraints(constraints) {
  * left hand's axis is the right's mirrored through the dual stance, where both sabers are
  * held alike. Returns null when the skeleton or the animations lack what this needs.
  */
-export function solveGrip(gla, cfg, joints, plan) {
-  const right = plan.pairs.find((p) => p.jka === 'rhand');
-  const left = plan.pairs.find((p) => p.jka === 'lhand');
-  if (!right) return null;
+/** The swings' start and end constraints on the right hand (the quadrant each points the blade to). */
+function swingConstraints(gla, cfg, joints, plan, right) {
   const constraints = [];
   for (const digit of [2, 3]) {
     for (const [suffix, s, e] of SWINGS) {
@@ -575,6 +699,24 @@ export function solveGrip(gla, cfg, joints, plan) {
       constraints.push({ q: clipWorldQ(clip, joints, 0, right.s), dir: QUAD_DIR[s] }, { q: clipWorldQ(clip, joints, clip.frames - 1, right.s), dir: QUAD_DIR[e] });
     }
   }
+  return constraints;
+}
+
+/** How well a given axis in the right hand meets the swings' quadrants: the mean and least cosine. */
+export function swingFit(gla, cfg, joints, plan, axis) {
+  const right = plan.pairs.find((p) => p.jka === 'rhand');
+  if (!right) return null;
+  const constraints = swingConstraints(gla, cfg, joints, plan, right);
+  if (!constraints.length) return null;
+  const cos = constraints.map((c) => { const w = qrot(c.q, axis); return w[0] * c.dir[0] + w[1] * c.dir[1] + w[2] * c.dir[2]; });
+  return { mean: cos.reduce((a, b) => a + b, 0) / cos.length, min: Math.min(...cos) };
+}
+
+export function solveGrip(gla, cfg, joints, plan) {
+  const right = plan.pairs.find((p) => p.jka === 'rhand');
+  const left = plan.pairs.find((p) => p.jka === 'lhand');
+  if (!right) return null;
+  const constraints = swingConstraints(gla, cfg, joints, plan, right);
   const solved = gripFromConstraints(constraints);
   if (!solved) return null;
   const out = { right: { bone: joints[right.s].name, axis: solved.axis.map((v) => Number(v.toFixed(4))), fit: Number(solved.mean.toFixed(3)), swings: constraints.length / 2 } };
@@ -789,8 +931,16 @@ export function importJkaClips(jkaDir, joints, wanted = defaultJkaClips(), { log
       if (clip.loop && /^BOTH_(WALK|RUN|CROUCH1WALK)/.test(entry.name)) clip.speed = travelSpeed(clip, joints);
       clips.push(clip);
     }
-    const grip = solveGrip(gla, cfg, joints, plan);
-    if (grip) log(`grip: blade axis in ${grip.right.bone} ${grip.right.axis.join(', ')} from ${grip.right.swings} swings (fit ${grip.right.fit})${grip.left ? `; ${grip.left.bone} ${grip.left.axis.join(', ')} mirrored through ${grip.left.from}` : ''}`);
+    const solved = solveGrip(gla, cfg, joints, plan);
+    const tags = gripFromTags(base, gla, joints, plan, { log });
+    if (tags && solved) {
+      // How the game's own axis fares against the swings' quadrants, beside the solved one.
+      const fit = swingFit(gla, cfg, joints, plan, tags.right.axis);
+      if (fit) tags.right.fit = Number(fit.mean.toFixed(3));
+      log(`grip: the game's own blade axis in ${tags.right.bone} is ${tags.right.axis.join(', ')} (${tags.right.from}; fit to the swings ${tags.right.fit ?? '?'}, the solved axis ${solved.right.axis.join(', ')} fits ${solved.right.fit})`);
+    }
+    const grip = tags ?? solved;
+    if (grip && !tags) log(`grip: blade axis in ${grip.right.bone} ${grip.right.axis.join(', ')} from ${grip.right.swings} swings (fit ${grip.right.fit})${grip.left ? `; ${grip.left.bone} ${grip.left.axis.join(', ')} mirrored through ${grip.left.from}` : ''}`);
     const stance = clips.find((c) => c.source === 'BOTH_STAND1') ?? clips.find((c) => c.source === 'BOTH_STAND2') ?? clips[0];
     if (stance) {
       const check = poseCheck(stance, joints, plan);
