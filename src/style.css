@@ -130,6 +130,7 @@ b { color: var(--accent); font-weight: 600; }
 .wardrobe-header h2 { margin: 0; flex: none; font-size: 15px; letter-spacing: 0.12em; color: var(--accent); font-weight: 600; }
 .wardrobe-header .count { flex: 1; font-size: 11px; color: var(--muted); }
 .wardrobe-header .count.warn { color: #e2a33c; }
+.wardrobe-header .mixed-label { flex: none; display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted); cursor: pointer; }
 .wardrobe-header button { padding: 5px 10px; font-size: 11px; background: rgba(45,127,214,0.3); color: var(--text); border: 1px solid var(--panel-border); border-radius: 4px; cursor: pointer; }
 .wardrobe-header button:hover { border-color: var(--accent); }
 .wardrobe-main { flex: 1 1 auto; min-height: 0; display: flex; gap: 12px; padding: 8px 14px 14px; }

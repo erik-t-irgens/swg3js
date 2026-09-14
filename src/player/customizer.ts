@@ -285,6 +285,39 @@ export class Customizer {
     return p;
   }
 
+  /** What goes into a mesh's textures, for the console: each recipe's shader stages, choices, factors and blueprint operations. */
+  describe(mesh: string): unknown[] {
+    const shader = (s: Recipe['shader']) =>
+      s && {
+        effect: s.effect,
+        textures: s.textures,
+        stages: (s.passes?.[0]?.stages ?? []).map((st) => `${st.textureTag}: color op ${st.colorOp} of ${st.colorArgs.map((a) => a[0]).join(',')}; alpha op ${st.alphaOp} of ${st.alphaArgs.map((a) => a[0]).join(',')}`),
+        choices: s.choices.map((c) => `${c.tag} <- ${c.variable}${c.private ? ' (private)' : ''} default ${c.default}: ${c.files.length} textures`),
+        palettes: s.palettes.map((p) => `${p.tag} <- ${p.variable}${p.private ? ' (private)' : ''} from ${p.palette}`),
+        tfactors: s.tfactors,
+      };
+    return this.recipes
+      .filter((r) => r.mesh.includes(mesh) || r.material.includes(mesh))
+      .map((r) => ({
+        mesh: r.mesh,
+        material: r.material,
+        kind: r.kind,
+        baseTag: r.baseTag,
+        active: this.active(r),
+        rendered: this.textures.has(r.material),
+        shader: shader(r.shader),
+        slots: r.slots.map((slot) => ({
+          tag: slot.tag,
+          file: slot.file,
+          size: `${slot.blueprint.width}x${slot.blueprint.height}`,
+          variables: slot.blueprint.variables.map((v) => `${v.name}${v.private ? ' (private)' : ''}: ${v.kind} default ${v.default}${v.max !== undefined ? ` of ${v.max}` : ''}`),
+          prepare: slot.blueprint.prepare.map((op) => `${op.kind} ${op.tag} on shader ${op.shader}${'variable' in op ? ` <- variable ${op.variable}` : ''}`),
+          shaders: slot.blueprint.shaders.map(shader),
+        })),
+        values: [...this.values].filter(([k]) => k.startsWith(`${r.mesh}|`) || !k.includes('|')).map(([k, v]) => `${k}=${v}`),
+      }));
+  }
+
   dispose(): void {
     for (const t of this.textures.values()) t.dispose();
     this.textures.clear();

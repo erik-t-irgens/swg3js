@@ -225,6 +225,9 @@ export class Character {
       const owner = meshes.find((m) => m.skeleton);
       if (owner) this.skeleton = owner.skeleton;
     }
+    // Where the shape sliders sit now: a piece put on later takes the same shape, or it would
+    // fit the body the pack was converted with rather than the one it is worn on.
+    const shape = this.morphValues();
     for (const s of meshes) {
       // Later parts drop their own copy of the bones and drive the shared ones. Their bind matrix
       // is their own: it says where the mesh sits relative to the skeleton, which the shared
@@ -236,8 +239,9 @@ export class Character {
       const idx = s.geometry.getIndex();
       fullIndices.push(idx ? Uint32Array.from(idx.array as ArrayLike<number>) : new Uint32Array(0));
       if (s.morphTargetDictionary) {
-        for (const morph of Object.keys(s.morphTargetDictionary)) {
+        for (const [morph, index] of Object.entries(s.morphTargetDictionary)) {
           (this.morphs.get(morph) ?? this.morphs.set(morph, []).get(morph)!).push(s);
+          if (morph in shape && s.morphTargetInfluences) s.morphTargetInfluences[index] = shape[morph];
         }
       }
     }

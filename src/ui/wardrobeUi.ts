@@ -51,6 +51,7 @@ export class WardrobeUi {
         <div class="wardrobe-header">
           ${tabStrip(INVENTORY_TABS, 'wardrobe')}
           <span class="count"></span>
+          <label class="mixed-label" title="Pieces authored for the other gender's body share the skeleton, not the shape: some fit, some do not"><input type="checkbox" class="mixed" /> other gender's pieces too</label>
           <button class="strip">Take everything off</button>
           <button class="close">Close <b>I</b></button>
         </div>
@@ -65,6 +66,7 @@ export class WardrobeUi {
     this.root.querySelector<HTMLElement>('.wardrobe-preview')!.prepend(this.preview.canvas);
     this.root.querySelector('.close')!.addEventListener('click', () => this.hide());
     this.root.querySelector('.strip')!.addEventListener('click', () => void this.stripAll());
+    this.root.querySelector('.mixed')!.addEventListener('change', () => this.build());
     wireTabs(this.root, 'wardrobe', (id) => this.onTab(id));
     // A click on the backdrop closes it; one inside must not.
     this.root.addEventListener('click', (e) => {
@@ -122,14 +124,25 @@ export class WardrobeUi {
       return;
     }
     const equipped = this.equippedNow();
+    const worn = new Set(equipped.values());
+    // A piece authored for the other gender's body fits this one only sometimes (the meshes
+    // share a skeleton, not a shape), so those stay out of the lists unless asked for.
+    const own = (this.character?.manifest.gender ?? (/female/.test(this.character?.manifest.id ?? '') ? 'female' : 'male')).charAt(0);
+    const mixed = this.root.querySelector<HTMLInputElement>('.mixed')?.checked ?? false;
+    let hidden = 0;
     const bySlot = new Map<string, { id: string; label: string }[]>();
     for (const item of w.items) {
       if (item.kind === 'hair' || /^hair_/.test(item.id)) continue; // the appearance tab's
+      const other = !!item.gender && item.gender.charAt(0) !== own;
+      if (other && !mixed && !worn.has(item.id)) {
+        hidden++;
+        continue;
+      }
       const slot = slotOf(item.id);
-      (bySlot.get(slot) ?? bySlot.set(slot, []).get(slot)!).push({ id: item.id, label: prettyName(item.id) });
+      (bySlot.get(slot) ?? bySlot.set(slot, []).get(slot)!).push({ id: item.id, label: `${prettyName(item.id)}${other ? ` (${item.gender === 'f' ? "women's" : "men's"})` : ''}` });
     }
     for (const list of bySlot.values()) list.sort((a, b) => a.label.localeCompare(b.label));
-    this.root.querySelector<HTMLElement>('.count')!.textContent = `${w.items.length} items`;
+    this.root.querySelector<HTMLElement>('.count')!.textContent = `${w.items.length - hidden} items${hidden ? ` · ${hidden} of the other gender's hidden` : ''}`;
     const rows: string[] = [];
     for (const slot of [...SLOTS, OTHER]) {
       const list = bySlot.get(slot.id);
