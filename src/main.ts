@@ -1045,6 +1045,8 @@ class App {
       else if (this.world.elevatorsNear(player.pos, MOUNT_RANGE).length) prompt = `<b>E</b> elevator ${this.world.elevatorsNear(player.pos, MOUNT_RANGE)[0].kind === 'down' ? 'down' : 'up'}`;
       else if (this.nearestSpeederDistance() < MOUNT_RANGE) prompt = '<b>E</b> mount';
       this.hud.setPrompt(prompt);
+      const flying = player.mounted?.spec.ship && player.mounted.airborne && !input.held('freeLook') ? player.mounted : null;
+      this.hud.setFlight(flying ? flying.stick : null);
       this.hud.update(dt, player.pos.x, player.pos.y, player.pos.z, this.kit, player.hp, player.maxHp, this.world.day.clock(), this.world.planet.creatures.name, player.saberOn);
 
       if (this.breakFrames) throw new Error('debug: the frame is broken on purpose');

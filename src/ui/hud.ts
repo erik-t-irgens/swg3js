@@ -22,6 +22,11 @@ export class Hud {
   private readonly slotsEl: HTMLElement;
   private readonly help: HTMLElement;
   private readonly crosshair: HTMLElement;
+  private readonly flight: HTMLElement;
+  private flying = false;
+  private readonly stickLine: HTMLElement;
+  private readonly stickHead: HTMLElement;
+  private readonly stickDot: HTMLElement;
   private readonly mouseFree: HTMLElement;
   private readonly prompt: HTMLElement;
   private readonly hurtEl: HTMLElement;
@@ -47,6 +52,15 @@ export class Hud {
         <div class="hint"><b>M</b> Map &nbsp; <b>I</b> Inventory &nbsp; <b>B</b> Spawner &nbsp; <b>H</b> Help</div>
       </div>
       <div class="crosshair"></div>
+      <svg class="flight hidden" viewBox="-160 -160 320 320" width="320" height="320">
+        <circle class="ring" r="120" />
+        <circle class="dead" r="12" />
+        <line class="cross" x1="-24" y1="0" x2="-14" y2="0" /><line class="cross" x1="14" y1="0" x2="24" y2="0" />
+        <line class="cross" x1="0" y1="-24" x2="0" y2="-14" /><line class="cross" x1="0" y1="14" x2="0" y2="24" />
+        <line class="stick-line" x1="0" y1="0" x2="0" y2="0" />
+        <polygon class="stick-head" points="0,0 0,0 0,0" />
+        <circle class="stick-dot" r="5" />
+      </svg>
       <div class="mouse-free hidden">Mouse free · <b>click</b> to look again</div>
       <div class="prompt"></div>
       <div class="bottom">
@@ -70,6 +84,10 @@ export class Hud {
     this.slotsEl = q('.slots');
     this.help = q('.help');
     this.crosshair = q('.crosshair');
+    this.flight = q('.flight');
+    this.stickLine = q('.stick-line');
+    this.stickHead = q('.stick-head');
+    this.stickDot = q('.stick-dot');
     this.mouseFree = q('.mouse-free');
     this.prompt = q('.prompt');
     this.hurtEl = q('.hurt');
@@ -98,7 +116,36 @@ export class Hud {
     this.slotsEl.appendChild(saber);
     this.slots.push(saber);
     this.help.innerHTML = [...COMMON_HELP, ...kit.help].map((l) => `<div>${l}</div>`).join('');
-    this.crosshair.hidden = kit.id !== 'bounty_hunter';
+    this.crosshair.hidden = kit.id !== 'bounty_hunter' || this.flying;
+  }
+
+  /**
+   * The flight display, in a ship in flight only: a crosshair at the centre and the virtual stick
+   * the mouse moves, an arrow from the centre toward it, or a dot when it sits in the dead band.
+   */
+  setFlight(stick: { x: number; y: number } | null): void {
+    this.flying = !!stick;
+    this.flight.classList.toggle('hidden', !stick);
+    if (!stick) return;
+    const r = 120;
+    const x = stick.x * r;
+    const y = stick.y * r;
+    const len = Math.hypot(x, y);
+    const centred = len < 12;
+    this.stickDot.setAttribute('cx', String(x));
+    this.stickDot.setAttribute('cy', String(y));
+    this.stickDot.style.display = centred ? '' : 'none';
+    this.stickLine.style.display = centred ? 'none' : '';
+    this.stickHead.style.display = centred ? 'none' : '';
+    if (centred) return;
+    const ux = x / len;
+    const uy = y / len;
+    // The shaft stops short of the head; the head is a little triangle pointing on.
+    const hx = x - ux * 10;
+    const hy = y - uy * 10;
+    this.stickLine.setAttribute('x2', String(hx));
+    this.stickLine.setAttribute('y2', String(hy));
+    this.stickHead.setAttribute('points', `${x},${y} ${hx - uy * 6},${hy + ux * 6} ${hx + uy * 6},${hy - ux * 6}`);
   }
 
   setPrompt(text: string): void {
