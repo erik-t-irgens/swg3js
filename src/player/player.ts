@@ -9,8 +9,7 @@ import type { World } from '../world/world';
 import { STANCE_ANIM, STYLE_DAMAGE, SaberCombat, type Dir, type SaberInput } from '../combat/saber';
 import { SaberThrow, THROW } from '../combat/saberThrow';
 import { canBlock, inFront, parryClip, parryZone, reflectDirection } from '../combat/deflect';
-import { UNIT } from './jkaMove';
-import { JkaMovement, type MoveCommand } from './jkaMove';
+import { JKA, JkaMovement, UNIT, type MoveCommand } from './jkaMove';
 import type { CharacterRig } from './rig';
 
 // The original game's run is 5.375 m/s; the character stands about 1.75 m.
@@ -227,6 +226,8 @@ export class Player {
   jkaMode = false;
   /** Which way the current jump was made, for its air and landing clips (PMF_BACKWARDS_JUMP and kin). */
   private jumpDir: Dir = 'F';
+  /** The walk key is held: the walk clips rather than the runs, whatever the speed. */
+  private walkKey = false;
   /** Bolts turned away so far, for the console. */
   blocks = 0;
   private readonly physics: Physics;
@@ -656,6 +657,7 @@ export class Player {
     if (moving) move.normalize();
 
     const walking = input.held('walk');
+    this.walkKey = walking;
     this.crouching = !this.swimming && input.held('crouch');
     this.setCrouchCollider(this.crouching && this.grounded);
     let speed = (walking ? WALK_SPEED : RUN_SPEED) * this.speedMultiplier * (this.crouching && this.grounded ? 0.5 : 1);
@@ -723,7 +725,7 @@ export class Player {
       c.jump = jump;
       c.jumpPressed = jumpPressed && !this.saber.busy;
       c.attack = input.held('attack');
-      c.speedScale = this.speedMultiplier;
+      c.speedScale = this.speedMultiplier * this.paceScale(walking, mz, mx);
       const force = this.force;
       const ev = this.jka.step(dt, this.vel, this.pos, this.grounded, c, { value: force?.value ?? 100, spend: (n) => { if (force) force.value = Math.max(0, force.value - n); } });
       if (ev.jumped) {
@@ -885,7 +887,8 @@ export class Player {
 
     this.moveAmount += ((moving ? Math.min(1, speed / RUN_SPEED) : 0) - this.moveAmount) * Math.min(1, dt * 10);
     this.phase += dt * speed * (moving ? 1.9 : 0);
-    this.groundSpeed = moving ? speed : 0;
+    // The clips are scaled to the speed the body actually moves at, so the feet stay planted.
+    this.groundSpeed = moving ? (this.moveProfile === 'jka' && !this.swimming ? Math.hypot(this.vel.x, this.vel.z) : speed) : 0;
     this.animate(dt);
     this.animateRig(dt, this.groundSpeed, moving, mz, mx);
 
@@ -897,22 +900,27 @@ export class Player {
   private animateRig(dt: number, speed: number, moving: boolean, mz = 0, mx = 0): void {
     const rig = this.rig;
     if (!rig) return;
-    const running = speed >= 4.5;
-    const stance = STANCE_ANIM[this.saber.style];
+    // The walk key picks the walk clips; the speed only sets how fast a clip plays.
+    const running = !this.walkKey;
+    const style = this.saber.style;
+    const stance = STANCE_ANIM[style];
+    // The saber run and walk are the staff's, the dual sabers' or the single saber's (the three single styles share them).
+    rig.prefer('runSaber', style === 'staff' ? 'BOTH_RUN_STAFF' : style === 'dual' ? 'BOTH_RUN_DUAL' : 'BOTH_RUN2');
+    rig.prefer('walkSaber', style === 'staff' ? 'BOTH_WALK_STAFF' : style === 'dual' ? 'BOTH_WALK_DUAL' : 'BOTH_WALK2');
     if (this.mounted) rig.setState('seated');
     // Swimming with the block held: the stance on the torso and arms over the swimming legs.
     else if (this.swimming) rig.setState(moving || this.submerged ? 'swim' : 'float', speed, this.blocking && this.hasJkaClips ? stance : null);
     else if (!this.grounded) {
-      rig.airClip = this.jumpClip('INAIR', this.jka.isForceJumping);
+      rig.prefer('air', this.jumpClip('INAIR', this.jka.isForceJumping));
       rig.setState('air');
     }
-    else if (this.crouching) rig.setState(moving ? 'crouchWalk' : 'crouch', speed);
+    else if (this.crouching) rig.setState(moving ? (this.directional && mz < 0 ? 'crouchWalkBack' : 'crouchWalk') : 'crouch', speed);
     else if (moving && this.directional && mz < 0) {
       // Backing up with the legs facing forward: the back-pedal clip.
       rig.setState(running && rig.hasState('runBack') ? 'runBack' : rig.hasState('walkBack') ? 'walkBack' : 'runBack', speed);
     } else if (!moving && this.hasJkaClips && (this.blocking || this.thrown.inFlight)) {
       // Standing with the block held: the style's stance; the arm out while the saber flies.
-      rig.stanceClip = this.thrown.inFlight ? 'BOTH_SABERPULL' : stance;
+      rig.prefer('stance', this.thrown.inFlight ? 'BOTH_SABERPULL' : stance);
       rig.setState('stance');
     } else if (!moving) rig.setState('idle');
     // Moving with the block held: Jedi Academy's saber run and walk; otherwise the game's own, saber lit or not.
@@ -957,6 +965,25 @@ export class Player {
     const half = crouched ? CROUCH_HALF_HEIGHT : STAND_HALF_HEIGHT;
     this.collider.setHalfHeight(half);
     this.collider.setTranslationWrtParent({ x: 0, y: CAPSULE_RADIUS + half, z: 0 });
+  }
+
+  /**
+   * Movement keeps pace with the clip that plays for it, so the feet stay planted: walking is
+   * as fast as the walk clip travels (SWG's own, or Jedi Academy's saber walk with the block
+   * held), crouch-walking as its clip, and backing up with the block held a touch slower than
+   * the run, as its back-pedal is. Returns the factor on Jedi Academy's own speed for the keys.
+   */
+  private paceScale(walking: boolean, mz: number, mx: number): number {
+    const rig = this.rig;
+    if (!rig || this.swimming || !this.grounded || (!mz && !mx)) return 1;
+    const crouch = this.crouching;
+    const base = JKA.speed * UNIT * (walking ? JKA.walkScale : 1) * (crouch ? JKA.duckScale : 1);
+    const back = this.directional && mz < 0;
+    let target: number | null = null;
+    if (crouch) target = rig.naturalSpeed(back ? 'crouchWalkBack' : 'crouchWalk');
+    else if (walking) target = rig.naturalSpeed(this.jkaMode ? (back ? 'walkBack' : 'walkSaber') : 'walk');
+    else if (this.jkaMode && back) target = Math.min(rig.naturalSpeed('runBack') ?? base, base * 0.85);
+    return target && target > 0.3 ? target / base : 1;
   }
 
   /**

@@ -752,6 +752,31 @@ const mirrorT = (t) => [-t[0], t[1], t[2]];
  * Everything buildGlb needs for a skinned model: joint nodes with mirrored bind-pose TRS and
  * inverse bind matrices, plus baked animations (per frame keys) named by their logical name.
  */
+/** Clip names the game plays on repeat: the idles, locomotion, the combat stances and anything named as a loop. */
+const LOOPING_CLIP = /^(idle|walk|run|strafe|backward|walk_back|run_back|loop_|[a-z0-9_]*_combat$|[a-z0-9_:]*_loop$)/i;
+
+/** Append a key one interval after the last that copies `wrapFrame`, so a loop closes smoothly. */
+export function closeLoop(clip, wrapFrame = 0) {
+  const n = clip.times.length;
+  const dt = n > 1 ? clip.times[n - 1] - clip.times[n - 2] : 1 / 30;
+  const times = new Float32Array(n + 1);
+  times.set(clip.times);
+  times[n] = clip.times[n - 1] + dt;
+  for (const tr of clip.tracks) {
+    const r = new Float32Array((n + 1) * 4);
+    r.set(tr.rotations);
+    r.set(tr.rotations.subarray(wrapFrame * 4, wrapFrame * 4 + 4), n * 4);
+    const t = new Float32Array((n + 1) * 3);
+    t.set(tr.translations);
+    t.set(tr.translations.subarray(wrapFrame * 3, wrapFrame * 3 + 3), n * 3);
+    tr.rotations = r;
+    tr.translations = t;
+  }
+  clip.times = times;
+  clip.duration = times[n];
+  return clip;
+}
+
 export function skinData(skeleton, animations, { flipX = true } = {}) {
   const bind = poseAtFrame(skeleton, null, 0);
   const joints = skeleton.joints.map((j, i) => ({ name: j.name, parent: j.parent, rotation: flipX ? mirrorQ(bind[i].rotation) : bind[i].rotation, translation: flipX ? mirrorT(bind[i].translation) : bind[i].translation }));
@@ -778,7 +803,10 @@ export function skinData(skeleton, animations, { flipX = true } = {}) {
         tracks[i].translations.set(t, f * 3);
       });
     }
-    clips.push({ name, times, tracks, duration: times[frames - 1] });
+    const clip = { name, times, tracks, duration: times[frames - 1] };
+    // The game loops these; their last frame leads back to the first over one more interval.
+    if (LOOPING_CLIP.test(name) && frames > 1) closeLoop(clip, 0);
+    clips.push(clip);
   }
   return { joints, inverseBind, clips };
 }

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { openZip, openJkaBase, parseGla, parseAnimationCfg, planRetarget, retargetClip, importJkaClips, defaultJkaClips, BONE_MAP } from '../jka.mjs';
+import { openZip, openJkaBase, parseGla, parseAnimationCfg, planRetarget, retargetClip, importJkaClips, defaultJkaClips, closeLoop, travelSpeed, BONE_MAP } from '../jka.mjs';
 
 // --- helpers ---------------------------------------------------------------------------------
 type Q = [number, number, number, number];
@@ -292,6 +292,31 @@ assert.equal(r.clips.length, 2);
 assert.deepEqual(r.info.missing, ['BOTH_NOPE']);
 assert.equal(r.clips[1].name, 'BOTH_JUMP1');
 assert.equal(r.clips[1].loop, true);
+// A looping clip closes: one key more than its frames, a frame interval after the last, a copy of the loop frame.
+assert.equal(r.clips[1].frames, 2);
+assert.equal(r.clips[1].times.length, 3, 'a loop gets its closing key');
+assert.ok(Math.abs(r.clips[1].times[2] - 0.2) < 1e-6, 'one interval after the last frame (10 fps)');
+assert.deepEqual(Array.from(r.clips[1].tracks[3].rotations.subarray(8, 12)), Array.from(r.clips[1].tracks[3].rotations.subarray(0, 4)), 'the closing key is the first frame');
+assert.equal(r.clips[0].times.length, 2, 'a clip that does not loop is left alone');
+{
+  // travelSpeed: two feet, the lower one sliding back at 2 m/s while the other swings, reads as 2 m/s.
+  const feetJoints = [{ name: 'root', parent: -1, rotation: [1, 0, 0, 0], translation: [0, 0, 0] }, { name: 'lAnkle', parent: 0, rotation: [1, 0, 0, 0], translation: [0, 0, 0] }, { name: 'rAnkle', parent: 0, rotation: [1, 0, 0, 0], translation: [0, 0, 0] }];
+  const n = 11;
+  const tr = feetJoints.map(() => ({ rotations: new Float32Array(n * 4), translations: new Float32Array(n * 3) }));
+  const times = new Float32Array(n);
+  for (let f = 0; f < n; f++) {
+    times[f] = f * 0.1;
+    for (const t of tr) t.rotations.set([0, 0, 0, 1], f * 4);
+    // The left foot planted (y 0) moving back at 2 m/s; the right foot up (y 0.2) swinging forward at 6 m/s.
+    tr[1].translations.set([0, 0, 1 - 2 * times[f]], f * 3);
+    tr[2].translations.set([0.2, 0.2, -1 + 6 * times[f]], f * 3);
+  }
+  const speed = travelSpeed({ times, tracks: tr }, feetJoints);
+  assert.ok(speed !== null && Math.abs(speed - 2) < 1e-3, `the planted foot's speed is the travel speed: ${speed}`);
+  const closed = closeLoop({ times: new Float32Array([0, 0.1]), tracks: [{ rotations: new Float32Array([0, 0, 0, 1, 1, 0, 0, 0]), translations: new Float32Array([1, 2, 3, 4, 5, 6]) }], fps: 10 });
+  assert.deepEqual(Array.from(closed.times), [0, 0.1, 0.2].map((v) => Math.fround(v)));
+  assert.deepEqual(Array.from(closed.tracks[0].translations.subarray(6, 9)), [1, 2, 3]);
+}
 assert.ok(messages.some((m) => m.includes('13 bones matched')), messages.join('\n'));
 assert.ok(defaultJkaClips().includes('BOTH_A3_TR_BL') && defaultJkaClips().includes('BOTH_FORCEJUMP1'));
 // A standing frame as the rest pose: frame 2 equals frame 1, so measured against it nothing

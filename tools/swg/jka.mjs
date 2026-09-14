@@ -491,7 +491,80 @@ export function retargetClip(gla, entry, joints, plan, { name = entry.name, fps 
       tracks[i].translations.set(localT, f * 3);
     });
   }
-  return { name, times, tracks, duration: times[frames - 1], loop: entry.loop >= 0, fps, frames, source: entry.name };
+  const clip = { name, times, tracks, duration: times[frames - 1], loop: entry.loop >= 0, fps, frames, source: entry.name };
+  // A looping clip's last frame leads back to its loop frame over one more interval; without
+  // that key the loop cuts a frame short and hitches (the cycle closes last -> first).
+  if (clip.loop && frames > 1) closeLoop(clip, Math.min(frames - 1, Math.max(0, entry.loop)));
+  return clip;
+}
+
+/**
+ * Append one key to a looping clip, a copy of `wrapFrame`, one frame interval after the last,
+ * so the interpolation from the last frame back to the loop's start takes its proper time.
+ */
+export function closeLoop(clip, wrapFrame = 0) {
+  const n = clip.times.length;
+  const dt = n > 1 ? clip.times[n - 1] - clip.times[n - 2] : 1 / (clip.fps || 30);
+  const times = new Float32Array(n + 1);
+  times.set(clip.times);
+  times[n] = clip.times[n - 1] + dt;
+  for (const tr of clip.tracks) {
+    const r = new Float32Array((n + 1) * 4);
+    r.set(tr.rotations);
+    r.set(tr.rotations.subarray(wrapFrame * 4, wrapFrame * 4 + 4), n * 4);
+    const t = new Float32Array((n + 1) * 3);
+    t.set(tr.translations);
+    t.set(tr.translations.subarray(wrapFrame * 3, wrapFrame * 3 + 3), n * 3);
+    tr.rotations = r;
+    tr.translations = t;
+  }
+  clip.times = times;
+  clip.duration = times[n];
+  return clip;
+}
+
+/** The joints that are feet, for measuring how fast a locomotion clip travels. */
+const FOOT = /ankle|foot|talus/i;
+
+/**
+ * How fast an in-place locomotion clip travels, in metres a second, from its feet: the planted
+ * foot (the lower of the two) slides back under the body at the travel speed, so the median of
+ * its horizontal speed over the cycle is the speed the clip was made for. Null without two feet.
+ */
+export function travelSpeed(clip, joints) {
+  const feet = joints.map((j, i) => (FOOT.test(j.name) ? i : -1)).filter((i) => i >= 0);
+  const n = clip.times.length;
+  if (feet.length < 2 || n < 3) return null;
+  // World positions of the feet each frame, by forward kinematics over the clip's local poses.
+  const positions = [];
+  for (let f = 0; f < n; f++) {
+    const world = new Array(joints.length);
+    const at = (i) => {
+      if (world[i]) return world[i];
+      const j = joints[i];
+      const r = clip.tracks[i].rotations;
+      const q = [r[f * 4 + 3], r[f * 4], r[f * 4 + 1], r[f * 4 + 2]];
+      const t = Array.from(clip.tracks[i].translations.subarray(f * 3, f * 3 + 3));
+      if (j.parent < 0) return (world[i] = { q, t });
+      const p = at(j.parent);
+      const rt = qrot(p.q, t);
+      return (world[i] = { q: qnorm(qmul(p.q, q)), t: [p.t[0] + rt[0], p.t[1] + rt[1], p.t[2] + rt[2]] });
+    };
+    positions.push(feet.map((i) => at(i).t));
+  }
+  const speeds = [];
+  for (let f = 1; f < n - 1; f++) {
+    // The planted foot is the lower one; its speed from the frames either side.
+    let low = 0;
+    for (let k = 1; k < feet.length; k++) if (positions[f][k][1] < positions[f][low][1]) low = k;
+    const a = positions[f - 1][low];
+    const b = positions[f + 1][low];
+    const dt = clip.times[f + 1] - clip.times[f - 1];
+    if (dt > 0) speeds.push(Math.hypot(b[0] - a[0], b[2] - a[2]) / dt);
+  }
+  if (!speeds.length) return null;
+  speeds.sort((x, y) => x - y);
+  return Number(speeds[Math.floor(speeds.length / 2)].toFixed(3));
 }
 
 /**
@@ -598,7 +671,7 @@ export function defaultJkaClips() {
   names.push('BOTH_FLIP_F', 'BOTH_FLIP_B', 'BOTH_FLIP_L', 'BOTH_FLIP_R', 'BOTH_ROLL_F', 'BOTH_ROLL_B', 'BOTH_ROLL_L', 'BOTH_ROLL_R');
   names.push('BOTH_CROUCH1', 'BOTH_CROUCH1IDLE', 'BOTH_CROUCH1WALK', 'BOTH_CROUCH1WALKBACK', 'BOTH_STAND1', 'BOTH_RUNBACK1', 'BOTH_WALKBACK1');
   // Moving with the saber held up (the block): the saber run and walk, and their back-pedals.
-  names.push('BOTH_RUN1', 'BOTH_RUN2', 'BOTH_WALK1', 'BOTH_WALK2', 'BOTH_RUNBACK2', 'BOTH_WALKBACK2');
+  names.push('BOTH_RUN1', 'BOTH_RUN2', 'BOTH_WALK1', 'BOTH_WALK2', 'BOTH_RUNBACK2', 'BOTH_WALKBACK2', 'BOTH_RUN_STAFF', 'BOTH_WALK_STAFF', 'BOTH_RUN_DUAL', 'BOTH_WALK_DUAL');
   names.push('BOTH_LUNGE2_B__T_', 'BOTH_FORCELEAP2_T__B_', 'BOTH_JUMPFLIPSTABDOWN', 'BOTH_JUMPFLIPSLASHDOWN1', 'BOTH_ATTACK_BACK', 'BOTH_A2_STABBACK1', 'BOTH_CROUCHATTACKBACK1', 'BOTH_ROLL_STAB');
   // The parries that block blaster bolts: one set for the single styles, one each for the dual sabers and the staff.
   for (const s of [1, 6, 7]) for (const z of ['T_', 'TR', 'TL', 'BR', 'BL']) names.push(`BOTH_P${s}_S${s}_${z}`);
@@ -642,7 +715,10 @@ export function importJkaClips(jkaDir, joints, wanted = defaultJkaClips(), { log
         missing.push(name);
         continue;
       }
-      clips.push(retargetClip(gla, entry, joints, plan));
+      const clip = retargetClip(gla, entry, joints, plan);
+      // Locomotion clips carry the speed they travel at, so the game can match its movement to them.
+      if (clip.loop && /^BOTH_(WALK|RUN|CROUCH1WALK)/.test(entry.name)) clip.speed = travelSpeed(clip, joints);
+      clips.push(clip);
     }
     const stance = clips.find((c) => c.source === 'BOTH_STAND1') ?? clips.find((c) => c.source === 'BOTH_STAND2') ?? clips[0];
     if (stance) {

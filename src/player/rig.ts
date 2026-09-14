@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { Character } from './character';
 
-export type RigState = 'idle' | 'walk' | 'run' | 'air' | 'seated' | 'swim' | 'float' | 'crouch' | 'crouchWalk' | 'stance' | 'strafeLeft' | 'strafeRight' | 'runBack' | 'walkBack' | 'runSaber' | 'walkSaber';
+export type RigState = 'idle' | 'walk' | 'run' | 'air' | 'seated' | 'swim' | 'float' | 'crouch' | 'crouchWalk' | 'crouchWalkBack' | 'stance' | 'strafeLeft' | 'strafeRight' | 'runBack' | 'walkBack' | 'runSaber' | 'walkSaber';
 
 /** Clip names used for each state, in preference order (placeholder rig names, then the game's); a pattern matches any clip. */
 const STATE_CLIPS: Record<RigState, (string | RegExp)[]> = {
@@ -15,6 +15,7 @@ const STATE_CLIPS: Record<RigState, (string | RegExp)[]> = {
   float: ['float', 'loop_swimming:speed0', 'swim', 'idle'],
   crouch: ['BOTH_CROUCH1IDLE', 'BOTH_CROUCH1', 'sneak_pose', 'idle', 'stand'],
   crouchWalk: ['BOTH_CROUCH1WALK', 'sneak', 'walk', 'loop_walk'],
+  crouchWalkBack: ['BOTH_CROUCH1WALKBACK', 'BOTH_CROUCH1WALK', 'sneak', 'walk', 'loop_walk'],
   /** Standing with the saber drawn: the style's stance (set through `stanceClip`), else the idle. */
   stance: ['BOTH_STAND2', 'idle_combat', 'idle', 'Idle', 'stand', 'loop_stand'],
   // Sideways and backwards locomotion, when the skeleton's tables carry them: the body then
@@ -29,7 +30,7 @@ const STATE_CLIPS: Record<RigState, (string | RegExp)[]> = {
 };
 
 /** Natural travel speed of the placeholder rig's locomotion clips, in m/s, used to scale playback. */
-const DEFAULT_CLIP_SPEED: Partial<Record<RigState, number>> = { walk: 1.5, run: 5.5, swim: 2.5, crouchWalk: 2.2, strafeLeft: 4.5, strafeRight: 4.5, runBack: 4, walkBack: 1.5, runSaber: 6.3, walkSaber: 2 };
+const DEFAULT_CLIP_SPEED: Partial<Record<RigState, number>> = { walk: 1.5, run: 5.5, swim: 2.5, crouchWalk: 2.2, strafeLeft: 4.5, strafeRight: 4.5, runBack: 4, walkBack: 1.5, runSaber: 6.3, walkSaber: 2, crouchWalkBack: 2 };
 
 /** Bones the game needs by role: exact names of the placeholder rig first, then patterns for the game's skeletons. */
 export type BoneRole = 'rightHand' | 'leftHand' | 'spine' | 'rightUpperArm' | 'rightForeArm' | 'leftUpperArm' | 'leftForeArm' | 'head';
@@ -80,10 +81,8 @@ export class CharacterRig {
   private readonly materials: THREE.MeshStandardMaterial[] = [];
   private readonly clipSpeeds: Record<string, number>;
   private readonly hold: Set<string>;
-  /** The clip the `stance` state plays, when the rig has it; the saber style picks it. */
-  stanceClip: string | null = null;
-  /** The clip the `air` state plays, when the rig has it: the jump's direction and whether it is a force jump. */
-  airClip: string | null = null;
+  /** A clip to play for a state ahead of its table, when the rig has it: the style's stance, the jump's direction, the style's run. */
+  private readonly preferred = new Map<RigState, string>();
   private current: THREE.AnimationAction | null = null;
   private state: RigState | null = null;
   /** A clip on the upper body only, over the state clip's legs (the saber stance while swimming). */
@@ -296,10 +295,11 @@ export class CharacterRig {
       this.state = state;
       return;
     }
-    const preferred = state === 'stance' ? this.stanceClip : state === 'air' ? this.airClip : null;
+    const preferred = this.preferred.get(state) ?? null;
     const wantedStance = preferred && this.actions.has(preferred) ? preferred : null;
     const upperName = upper && this.actions.has(upper) ? upper : null;
-    if (state !== this.state || (wantedStance && this.current?.getClip().name !== wantedStance) || upperName !== this.upperName) {
+    const playing = this.current?.getClip().name.replace(/^lower:/, '');
+    if (state !== this.state || (wantedStance && playing !== wantedStance) || upperName !== this.upperName) {
       const clipName = wantedStance ?? this.findClip(STATE_CLIPS[state]);
       const next = clipName ? (upperName ? this.half(clipName, 'lower') : this.actions.get(clipName)!) : null;
       if (next && next !== this.current) {
@@ -341,6 +341,19 @@ export class CharacterRig {
         if (state) this.setState(state, 0, upper);
       }
     }
+  }
+
+  /** Ask a state to play `clip` when the rig has it (null goes back to the state's table). */
+  prefer(state: RigState, clip: string | null): void {
+    if (clip) this.preferred.set(state, clip);
+    else this.preferred.delete(state);
+  }
+
+  /** The speed, in metres a second, the clip a state would play was made for, or null when unknown. */
+  naturalSpeed(state: RigState): number | null {
+    const preferred = this.preferred.get(state);
+    const clip = preferred && this.actions.has(preferred) ? preferred : this.findClip(STATE_CLIPS[state]);
+    return (clip && this.clipSpeeds[clip]) || DEFAULT_CLIP_SPEED[state] || null;
   }
 
   /** What plays now, for the console. */

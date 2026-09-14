@@ -355,7 +355,10 @@ export class JkaMovement {
         vx = 0;
         vz = 0;
       } else {
-        const control = s < JKA.stopSpeed ? JKA.stopSpeed : s;
+        // A slow pace (a walk matched to its clip) scales the stopping speed down with it, or the
+        // friction meant for a run would hold the body far under the speed asked for.
+        const stop = JKA.stopSpeed * Math.min(1, cmd.speedScale);
+        const control = s < stop ? stop : s;
         const drop = control * JKA.friction * dt;
         const k = Math.max(0, s - drop) / s;
         vx *= k;

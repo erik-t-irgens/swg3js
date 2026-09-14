@@ -1646,13 +1646,15 @@ switch (cmd) {
           const wanted = options['jka-anims'] ? options['jka-anims'].split(',').map((a) => a.trim().toUpperCase()).filter(Boolean) : defaultJkaClips();
           const r = importJkaClips(options.jka, joints, wanted, { log: (m) => console.log(`  jka: ${m}`) });
           jka = r.info;
-          info.jkaClips = Object.fromEntries(r.clips.map((c) => [c.name, { loop: c.loop, fps: c.fps, frames: c.frames }]));
+          info.jkaClips = Object.fromEntries(r.clips.map((c) => [c.name, { loop: c.loop, fps: c.fps, frames: c.frames, ...(c.speed ? { speed: c.speed } : {}) }]));
+          for (const c of r.clips) if (c.speed) (info.clipSpeeds ??= {})[c.name] = c.speed;
           return r.clips;
         }
       : null;
     const info = convertSat(vfs, template, join(outDir, `${id}.glb`), { animations: options.anim ?? PLAYER_CLIPS, variables: customizationValues(options.var), wear, maxAnimations: 48, extraClips });
     console.log(`${info.sat}: skeleton ${info.skeleton} (${info.joints} joints${info.attached.length ? `, with ${info.attached.join('; ')}` : ''})`);
     if (jka) console.log(`  jka: ${Object.keys(info.jkaClips).length} clips retargeted${jka.missing.length ? `; not in animation.cfg: ${jka.missing.join(', ')}` : ''}`);
+    if (jka) console.log(`  jka: locomotion speeds from the feet: ${Object.entries(info.jkaClips).filter(([, c]) => c.speed).map(([n, c]) => `${n} ${c.speed.toFixed(2)} m/s`).join(', ') || 'none'}`);
     for (const m of info.meshes) console.log(`  mesh ${m.file}: ${m.triangles} tris, ${m.shaders} shaders, layer ${m.layer}${m.hidden ? `, ${m.hidden} tris under clothing` : ''}`);
     for (const t of info.textureRenderers) console.log(`  texture renderer ${t}`);
     if (info.customization.size) console.log(`  customization (set with --var=name=value,...):\n    ${[...info.customization].join('\n    ')}`);
@@ -1917,7 +1919,8 @@ switch (cmd) {
       const entry = (manifest.players ?? []).find((p) => basename(p.file) === basename(glbFile));
       if (entry) {
         entry.clips = [...(entry.clips ?? []).filter((c) => !/^BOTH_/i.test(c)), ...r.clips.map((c) => c.name)];
-        entry.jkaClips = Object.fromEntries(r.clips.map((c) => [c.name, { loop: c.loop, fps: c.fps, frames: c.frames }]));
+        entry.jkaClips = Object.fromEntries(r.clips.map((c) => [c.name, { loop: c.loop, fps: c.fps, frames: c.frames, ...(c.speed ? { speed: c.speed } : {}) }]));
+        entry.clipSpeeds = { ...(entry.clipSpeeds ?? {}), ...Object.fromEntries(r.clips.filter((c) => c.speed).map((c) => [c.name, c.speed])) };
         writeFileSync(manifestFile, JSON.stringify(manifest, null, 2));
       }
     }

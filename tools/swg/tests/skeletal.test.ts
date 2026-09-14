@@ -69,14 +69,16 @@ check('root static translation', near(pose1[0].translation[0], 0.5));
 check('quaternion product', (() => { const r = qmul(rot90, rot90); return near(r[0], 0) && near(r[2], 1); })());
 
 // through the GLB writer
-const skin = skinData(skeleton, [{ name: 'turn', animation }], { flipX: true });
+const skin = skinData(skeleton, [{ name: 'turn', animation }, { name: 'walk', animation }], { flipX: true });
+check('a one-off clip keeps its frames', skin.clips[0].times.length === animation.frameCount);
+check('a looping clip closes with a key back to its first frame', skin.clips[1].times.length === animation.frameCount + 1 && near(skin.clips[1].tracks[1].rotations[animation.frameCount * 4 + 1], skin.clips[1].tracks[1].rotations[1]) && near(skin.clips[1].duration, animation.frameCount / (animation.fps || 30)));
 check('mirrored child rotation', near(skin.clips[0].tracks[1].rotations[4 + 1], -rot90[2]) && near(skin.clips[0].tracks[1].rotations[4 + 3], rot90[0]));
 const glb = buildGlb([{ name: 'test', groups: prims.groups }], { flipX: true, skin, animations: skin.clips });
 const jsonLen = glb.readUInt32LE(12);
 const json = JSON.parse(glb.toString('utf8', 20, 20 + jsonLen));
 check('glb has skin', json.skins?.length === 1 && json.skins[0].joints.length === 2 && json.nodes[0].skin === 0, JSON.stringify(json.skins));
 check('inverse bind matrices counted', json.accessors[json.skins[0].inverseBindMatrices].count === 2 && json.accessors[json.skins[0].inverseBindMatrices].type === 'MAT4');
-check('glb has animation', json.animations?.length === 1 && json.animations[0].channels.length === 4);
+check('glb has animation', json.animations?.length === 2 && json.animations[0].channels.length === 4);
 check('joint attributes', json.meshes[0].primitives[0].attributes.JOINTS_0 !== undefined && json.meshes[0].primitives[0].attributes.WEIGHTS_0 !== undefined);
 check('child is child of root node', json.nodes[json.skins[0].joints[0]].children?.[0] === json.skins[0].joints[1]);
 // compressed quaternions: format 0xfe (one base at 0, full range) with zero offsets is identity;

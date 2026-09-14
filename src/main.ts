@@ -276,8 +276,8 @@ class App {
         const L = this.world.swgSky?.lighting;
         return { time: this.world.day.time, clock: this.world.day.clock(), swg: this.world.day.swg, isDay: this.world.day.isDay, index: this.world.day.colorIndex, light: this.world.day.lightDir.toArray().map((v) => Number(v.toFixed(2))), lighting: L ? { main: L.main.getHexString(), mainScale: Number(L.mainScale.toFixed(2)), ambient: L.ambient.getHexString(), fog: L.fog.getHexString(), fogDensity: L.fogDensity, sunMoonAlpha: L.sunMoonAlpha, starAlpha: L.starAlpha } : null };
       },
-      /** Simulate `seconds` of play at 60 Hz with the given keys held (KeyboardEvent codes or Mouse0..2), without waiting on real frames: movement, the weapons, the bolts and the turrets. */
-      advance: (seconds: number, keys: string[] = []) => {
+      /** Simulate `seconds` of play at 60 Hz with the given keys held (KeyboardEvent codes or Mouse0..2), without waiting on real frames: movement, the weapons, the bolts and the turrets. With `hold`, the keys stay down afterwards (a later call without it releases them), so a key is not pressed afresh each call. */
+      advance: (seconds: number, keys: string[] = [], hold = false) => {
         for (const k of keys) this.input.force(k, true);
         const dt = 1 / 60;
         for (let i = 0; i < Math.round(seconds / dt); i++) {
@@ -289,7 +289,7 @@ class App {
           this.effects.update(dt);
           this.input.endFrame();
         }
-        for (const k of keys) this.input.force(k, false);
+        if (!hold) for (const k of keys) this.input.force(k, false);
       },
       /** Bolts in the air: whose, where, which way, and how many have flown and been blocked. */
       bolts: () => ({ fired: { ...this.world.bolts.fired }, blocked: this.player.blocks, inFlight: this.world.bolts.bolts.map((b) => ({ owner: b.owner, reflected: b.reflected, at: b.pos.toArray().map((v) => Number(v.toFixed(1))), dir: b.dir.toArray().map((v) => Number(v.toFixed(2))) })) }),
