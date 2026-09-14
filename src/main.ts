@@ -21,6 +21,7 @@ import { Hud } from './ui/hud';
 import { specFor, type DriveInput } from './vehicles/vehicle';
 import { VehiclesUi } from './ui/vehiclesUi';
 import { NpcUi } from './ui/npcUi';
+import { AppearanceUi } from './ui/appearanceUi';
 import { Garage, type VehicleDef } from './vehicles/garage';
 import type { Vehicle, VehicleKind } from './vehicles/vehicle';
 import { World } from './world/world';
@@ -39,6 +40,7 @@ function mountPrompt(v: import('./vehicles/vehicle').Vehicle): string {
 }
 
 const MOUNT_RANGE = 3.6;
+type InventoryTab = 'wardrobe' | 'appearance' | 'weapons';
 /** The camera pitch a flyer holds its height at: the default view, a little above level. */
 const CAMERA_REST_PITCH = 0.32;
 
@@ -68,10 +70,11 @@ class App {
   private readonly vehiclesUi: VehiclesUi;
   private garage: Garage | null = null;
   private npcUi: NpcUi;
+  private appearanceUi: AppearanceUi;
   private characterId = 'human_male';
   private speciesList: SpeciesEntry[] = [];
   private breakFrames = false;
-  private inventoryTab: 'wardrobe' | 'weapons' = 'wardrobe';
+  private inventoryTab: InventoryTab = 'wardrobe';
   private spawnerTab: 'garage' | 'npcs' = 'garage';
   private weapons: WeaponCatalogue | null = null;
   private readonly fade: HTMLElement;
@@ -114,9 +117,11 @@ class App {
     this.weaponsUi = new WeaponsUi(this.ui, (def, hand) => void this.equip(def, hand));
     this.vehiclesUi = new VehiclesUi(this.ui, (def, kind) => void this.spawnVehicle(def, kind), () => this.world.removeVehicles(this.player.mounted));
     this.npcUi = new NpcUi(this.ui);
+    this.appearanceUi = new AppearanceUi(this.ui, () => this.hud.setPrompt(''));
+    this.appearanceUi.onTab = (id) => this.toggleInventory(id as InventoryTab);
     // The tabs: a click on the other tab of a panel swaps to it, the key toggles whichever was last open.
-    this.wardrobe.onTab = (id) => this.toggleInventory(id as 'wardrobe' | 'weapons');
-    this.weaponsUi.onTab = (id) => this.toggleInventory(id as 'wardrobe' | 'weapons');
+    this.wardrobe.onTab = (id) => this.toggleInventory(id as InventoryTab);
+    this.weaponsUi.onTab = (id) => this.toggleInventory(id as InventoryTab);
     this.vehiclesUi.onTab = (id) => this.toggleSpawner(id as 'garage' | 'npcs');
     this.npcUi.onTab = (id) => this.toggleSpawner(id as 'garage' | 'npcs');
     void WeaponCatalogue.load(import.meta.env.BASE_URL).then((c) => {
@@ -529,7 +534,7 @@ class App {
         <div class="sub">Star Wars Galaxies, rebuilt for the browser. Ten worlds, one very ambitious side project.</div>
         <div class="controls">
           <div><b>WASD</b> move · <b>Mouse</b> look · <b>Wheel</b> zoom · <b>Space</b> jump (hold to Force Jump higher) · <b>Ctrl</b> crouch (tap while moving to roll) · <b>Shift</b> walk · in water <b>Space</b>/<b>Ctrl</b> surface/dive, or look down and swim</div>
-          <div><b>LMB</b> attack or fire · <b>RMB</b> hold to block with the saber (bounty hunter: rapid fire) · <b>R</b> throw the saber (staff: kick) · <b>I</b> inventory: wardrobe and weapons · <b>B</b> spawner: garage and NPCs · <b>V</b> kneel · <b>Z</b> prone · <b>E</b> mount speeder · <b>C</b> switch class · <b>T</b> fast-forward time</div>
+          <div><b>LMB</b> attack or fire · <b>RMB</b> hold to block with the saber (bounty hunter: rapid fire) · <b>R</b> throw the saber (staff: kick) · <b>I</b> inventory: wardrobe, appearance and weapons · <b>B</b> spawner: garage and NPCs · <b>V</b> kneel · <b>Z</b> prone · <b>E</b> mount speeder · <b>C</b> switch class · <b>T</b> fast-forward time</div>
           <div><b>M</b> galaxy map · <b>H</b> toggle help · <b>N</b> noclip fly (<b>+</b>/<b>-</b> speed) · <b>F</b> flashlight · <b>Esc</b> release mouse</div>
           <div><b>X</b> also crouches (a Mac turns Ctrl-click into a right click) · rebind any key in the console: <b>__debug.bind('crouch', 'KeyV')</b>, <b>__debug.bindings()</b></div>
         </div>
@@ -578,9 +583,9 @@ class App {
     }
     void loadSpeciesIndex(import.meta.env.BASE_URL).then((list) => {
       this.speciesList = list;
-      this.wardrobe.setSpecies(list, this.characterId);
+      this.appearanceUi.setSpecies(list, this.characterId);
     });
-    this.wardrobe.onSpecies = (id) => void this.switchCharacter(id);
+    this.appearanceUi.onSpecies = (id) => void this.switchCharacter(id);
     const initialClass = params.get('class') === 'bounty_hunter' ? 'bounty_hunter' : 'jedi';
     this.setClass(initialClass);
     const initial = params.get('planet');
@@ -601,8 +606,9 @@ class App {
     } catch {
       /* private mode: the choice lasts the session */
     }
-    this.wardrobe.setSpecies(this.speciesList, id);
+    this.appearanceUi.setSpecies(this.speciesList, id);
     if (this.wardrobe.open) void this.wardrobe.attach(rig.character, import.meta.env.BASE_URL).catch((err) => console.warn('wardrobe', err));
+    if (this.appearanceUi.open) this.appearanceUi.attach(rig.character);
     this.hud.setPrompt(`now playing as ${id.replace(/_/g, ' ')}`);
     return `playing as ${id}`;
   }
@@ -831,11 +837,12 @@ class App {
 
   /** The panels' open state moved to the tabs: closing one panel of a pair and opening the other keeps the mouse free. */
   private anyPanelOpen(): boolean {
-    return this.wardrobe.open || this.weaponsUi.open || this.vehiclesUi.open || this.npcUi.open;
+    return this.wardrobe.open || this.appearanceUi.open || this.weaponsUi.open || this.vehiclesUi.open || this.npcUi.open;
   }
 
   private closePanels(): void {
     if (this.wardrobe.open) this.wardrobe.hide();
+    if (this.appearanceUi.open) this.appearanceUi.hide();
     if (this.weaponsUi.open) this.weaponsUi.hide();
     if (this.vehiclesUi.open) this.vehiclesUi.hide();
     if (this.npcUi.open) this.npcUi.hide();
@@ -933,20 +940,24 @@ class App {
   }
 
   /** I: the inventory, the wardrobe or the weapons tab; the key toggles the last tab used, a tab click swaps. */
-  private toggleInventory(tab?: 'wardrobe' | 'weapons'): void {
+  private toggleInventory(tab?: InventoryTab): void {
     const want = tab ?? this.inventoryTab;
-    const wasOpen = tab === undefined && (this.wardrobe.open || this.weaponsUi.open);
+    const wasOpen = tab === undefined && (this.wardrobe.open || this.appearanceUi.open || this.weaponsUi.open);
     this.closePanels();
     if (wasOpen) {
       this.freeMouse(false);
       return;
     }
     this.inventoryTab = want;
+    const character = this.player.rig?.character ?? null;
     if (want === 'wardrobe') {
-      const character = this.player.rig?.character ?? null;
       this.wardrobe.show();
       if (character) void this.wardrobe.attach(character, import.meta.env.BASE_URL).catch((err) => console.warn('wardrobe', err));
       else this.wardrobe.explain('This character is a single model, not a set of parts, so there is nothing to change. Convert it with <code>npm run swg -- parts</code>.');
+    } else if (want === 'appearance') {
+      this.appearanceUi.show();
+      if (character) this.appearanceUi.attach(character);
+      else this.appearanceUi.explain('This character is a single model, not a set of parts, so there is nothing to shape. Convert it with <code>npm run swg -- species</code>.');
     } else {
       this.weaponsUi.held = { right: this.player.equipped.right?.id ?? null, left: this.player.equipped.left?.id ?? null };
       this.weaponsUi.show();

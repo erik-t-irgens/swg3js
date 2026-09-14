@@ -158,6 +158,12 @@ b { color: var(--accent); font-weight: 600; }
 .bake-hint code { color: var(--accent); user-select: all; }
 .wardrobe-empty code { color: var(--accent); }
 
+/* The panels with a doll beside a long list (the wardrobe, the appearance editor) take more of the screen. */
+.wardrobe-panel.wide { width: min(1120px, 96vw); max-height: 90vh; }
+#wardrobe .wardrobe-panel { width: min(960px, 96vw); }
+.wardrobe-slot.colour { align-items: flex-start; }
+.wardrobe-slot.colour .slot-label { padding-top: 2px; }
+
 /* Tabs in a panel's header: the inventory (I) holds the wardrobe and the weapons, the spawner (B) the garage and the NPCs. */
 .tabs { display: flex; gap: 2px; flex: none; }
 .tabs .tab { padding: 5px 12px; font-size: 13px; letter-spacing: 0.1em; font-weight: 600; text-transform: uppercase; color: var(--muted); background: transparent; border: 1px solid transparent; border-bottom: 2px solid transparent; border-radius: 4px 4px 0 0; cursor: pointer; }
