@@ -56,33 +56,58 @@ export class CharacterPreview {
 
   private readonly observer: ResizeObserver;
 
+  /** Where the camera looks, off the doll's middle: the right button drags it, to bring the face up close. */
+  private readonly pan = new THREE.Vector3();
+  private panning = false;
+
   private bindDrag(): void {
     const down = (e: PointerEvent) => {
-      this.dragging = true;
+      this.dragging = e.button !== 2;
+      this.panning = e.button === 2;
       this.lastX = e.clientX;
       this.lastY = e.clientY;
       this.canvas.setPointerCapture(e.pointerId);
       e.preventDefault();
     };
     const move = (e: PointerEvent) => {
-      if (!this.dragging) return;
-      this.yaw -= (e.clientX - this.lastX) * 0.011;
-      this.pitch = Math.min(Math.max(this.pitch + (e.clientY - this.lastY) * 0.006, -0.5), 0.7);
+      if (!this.dragging && !this.panning) return;
+      const dx = e.clientX - this.lastX;
+      const dy = e.clientY - this.lastY;
       this.lastX = e.clientX;
       this.lastY = e.clientY;
+      if (this.panning) {
+        // Slide the view across the screen: a pixel moves the target the same way whatever the zoom.
+        const perPixel = (2 * this.distance * Math.tan(((this.camera.fov * Math.PI) / 180) / 2)) / Math.max(1, this.canvas.clientHeight);
+        const right = new THREE.Vector3(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
+        this.pan.addScaledVector(right, -dx * perPixel);
+        this.pan.y += dy * perPixel;
+      } else {
+        this.yaw -= dx * 0.011;
+        this.pitch = Math.min(Math.max(this.pitch + dy * 0.006, -0.5), 0.7);
+      }
       this.userFramed = true;
       this.dirty = true;
     };
     const up = (e: PointerEvent) => {
       this.dragging = false;
+      this.panning = false;
       if (this.canvas.hasPointerCapture(e.pointerId)) this.canvas.releasePointerCapture(e.pointerId);
     };
+    this.canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+    this.canvas.addEventListener('dblclick', () => {
+      // Back to the whole doll.
+      this.pan.set(0, 0, 0);
+      this.userFramed = false;
+      this.distance = this.fitDistance(this.modelSize);
+      this.dirty = true;
+    });
     this.canvas.addEventListener('pointerdown', down);
     this.canvas.addEventListener('pointermove', move);
     this.canvas.addEventListener('pointerup', up);
     this.canvas.addEventListener('pointercancel', up);
     this.canvas.addEventListener('wheel', (e) => {
-      this.distance = Math.min(Math.max(this.distance + Math.sign(e.deltaY) * 0.22, 0.6), 12);
+      // Finer steps close in, so the face can be framed.
+      this.distance = Math.min(Math.max(this.distance * (e.deltaY > 0 ? 1.12 : 1 / 1.12), 0.25), 12);
       this.userFramed = true;
       this.dirty = true;
       e.preventDefault();
@@ -198,8 +223,8 @@ export class CharacterPreview {
     this.frames++;
     this.follow();
     const cp = Math.cos(this.pitch);
-    this.camera.position.set(Math.sin(this.yaw) * cp * this.distance, this.height + Math.sin(this.pitch) * this.distance, Math.cos(this.yaw) * cp * this.distance);
-    this.camera.lookAt(0, this.height, 0);
+    this.camera.position.set(Math.sin(this.yaw) * cp * this.distance + this.pan.x, this.height + Math.sin(this.pitch) * this.distance + this.pan.y, Math.cos(this.yaw) * cp * this.distance + this.pan.z);
+    this.camera.lookAt(this.pan.x, this.height + this.pan.y, this.pan.z);
     this.renderer.render(this.scene, this.camera);
     this.lastRender = { calls: this.renderer.info.render.calls, triangles: this.renderer.info.render.triangles, camera: this.camera.position.toArray().map((v) => Number(v.toFixed(2))) };
   };

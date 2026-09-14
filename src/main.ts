@@ -193,6 +193,12 @@ class App {
         if (!c?.customizer) return 'no live recipes on this character';
         return c.customizer.describe(mesh);
       },
+      /** The normal maps' strength and way up, live: `normals(1, -1)` is the game's (green down), `normals(1, 1)` the other, `normals(0, 0)` none. */
+      normals: (x = 1, y = -1) => {
+        const c = this.player.rig?.character;
+        if (!c?.customizer) return 'no live recipes on this character';
+        return `${c.customizer.setNormalScale(x, y)} materials set to (${x}, ${y})`;
+      },
       /** Play as another species or gender (`species()` lists what the pack has): `species('twilek_female')`. */
       species: async (id?: string) => {
         if (!id) return this.speciesList.length ? this.speciesList.map((s) => `${s.id}: ${s.morphs.length} sliders, ${s.variables.length} variables, ${s.jkaClips} JKA clips`) : `no species index (run the converter's species command); playing ${this.characterId}`;

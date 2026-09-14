@@ -30,7 +30,7 @@ export class AppearanceUi {
           <button class="close">Close <b>I</b></button>
         </div>
         <div class="wardrobe-main">
-          <div class="wardrobe-preview"><div class="preview-hint">drag to turn · wheel to zoom</div></div>
+          <div class="wardrobe-preview"><div class="preview-hint">drag to turn · right-drag to pan · wheel to zoom · double-click to reset</div></div>
           <div class="wardrobe-body"></div>
         </div>
       </div>`;

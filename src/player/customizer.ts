@@ -234,6 +234,24 @@ export class Customizer {
     }
   }
 
+  /** How the normal maps are read: their strength and whether green points down the texture (the DirectX way, the game's). */
+  normalScale = new THREE.Vector2(1, -1);
+
+  /** Change the strength or flip the normal maps on every material that has one, live. */
+  setNormalScale(x: number, y: number): number {
+    this.normalScale.set(x, y);
+    let n = 0;
+    for (const r of this.recipes) {
+      const normal = this.textures.get(`${r.material}#normal`);
+      if (!normal) continue;
+      for (const m of this.materialsFor(r.material)) {
+        (m as THREE.MeshStandardMaterial).normalScale.copy(this.normalScale);
+        n++;
+      }
+    }
+    return n;
+  }
+
   private putNormal(r: Recipe, img: Img): void {
     const key = `${r.material}#normal`;
     let tex = this.textures.get(key);
@@ -254,8 +272,7 @@ export class Customizer {
       const std = m as THREE.MeshStandardMaterial;
       if (std.normalMap !== tex) {
         std.normalMap = tex;
-        // The game's maps are the DirectX way up: green points down the texture.
-        std.normalScale.set(1, -1);
+        std.normalScale.copy(this.normalScale);
         std.needsUpdate = true;
       }
     }
@@ -283,7 +300,7 @@ export class Customizer {
         }
         if (normal && std.normalMap !== normal) {
           std.normalMap = normal;
-          std.normalScale.set(1, -1);
+          std.normalScale.copy(this.normalScale);
           std.needsUpdate = true;
         }
       }
