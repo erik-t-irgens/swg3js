@@ -41,6 +41,9 @@ const right = new THREE.Vector3();
 const up = new THREE.Vector3();
 const UP = new THREE.Vector3(0, 1, 0);
 
+/** Every turret's eye shares one material, so a turret going does not take the eye's shader program with it. */
+const EYE_MAT = new THREE.MeshBasicMaterial({ color: 0xff3020, toneMapped: false });
+
 export class Turret implements Hittable {
   readonly group = new THREE.Group();
   readonly pos = new THREE.Vector3();
@@ -75,7 +78,7 @@ export class Turret implements Hittable {
     const tube = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.045, 0.8, 8).rotateX(Math.PI / 2), mats.dark);
     tube.position.z = 0.6;
     this.muzzle.position.z = 1.02;
-    this.eye = new THREE.Mesh(new THREE.SphereGeometry(0.05, 8, 6), new THREE.MeshBasicMaterial({ color: 0xff3020, toneMapped: false }));
+    this.eye = new THREE.Mesh(new THREE.SphereGeometry(0.05, 8, 6), EYE_MAT);
     this.eye.position.set(0, 0.2, 0.1);
     this.barrel.add(housing, tube, this.muzzle, this.eye);
     this.head.add(this.barrel);
@@ -163,7 +166,7 @@ export class Turret implements Hittable {
     this.group.traverse((o) => {
       if ((o as THREE.Mesh).isMesh) (o as THREE.Mesh).geometry.dispose();
     });
-    this.eye.material.dispose();
+
   }
 }
 

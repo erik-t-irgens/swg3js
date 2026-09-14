@@ -917,7 +917,7 @@ class App {
     this.loadingScreen.setWhat('compiling shaders');
     this.effects.warmUp();
     this.world.bolts.warmUp();
-    this.kit.warmUp?.();
+    for (const id of ['jedi', 'bounty_hunter'] as ClassId[]) this.kitFor(id).warmUp?.();
     const tCompile = performance.now();
     const compiled = this.world.compileAll();
     if (compiled) console.info(`shaders: ${compiled} programs compiled behind the loading screen in ${(performance.now() - tCompile).toFixed(0)} ms`);
@@ -944,9 +944,15 @@ class App {
     upsertCharacter(c);
   }
 
+  /** The kits, made once each and kept: a swap that built a kit anew would compile its shaders again, and its light coming and going recompiled everything. */
+  private readonly kits: Partial<Record<ClassId, Kit>> = {};
+
+  private kitFor(id: ClassId): Kit {
+    return (this.kits[id] ??= id === 'jedi' ? new JediKit(this.scene) : new BountyHunterKit(this.scene));
+  }
+
   private setClass(id: ClassId): void {
-    this.kit?.dispose();
-    this.kit = id === 'jedi' ? new JediKit(this.scene) : new BountyHunterKit(this.scene);
+    this.kit = this.kitFor(id);
     this.player.setClass(id);
     this.player.speedMultiplier = 1;
     this.hud.setKit(this.kit);

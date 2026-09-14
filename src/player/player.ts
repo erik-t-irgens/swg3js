@@ -76,8 +76,13 @@ interface Parts {
   muzzle: THREE.Object3D;
 }
 
+/** The placeholder torso's look per class, made once (a material made per swap compiled its shader per swap). */
+const TORSO_JEDI = new THREE.MeshStandardMaterial({ color: 0xc9b58a, roughness: 0.8, metalness: 0, flatShading: true });
+const TORSO_HUNTER = new THREE.MeshStandardMaterial({ color: 0x5f6b6e, roughness: 0.8, metalness: 0.3, flatShading: true });
+
 function buildCharacter(): { group: THREE.Group; parts: Parts } {
   const robe = new THREE.MeshStandardMaterial({ color: 0xc9b58a, roughness: 0.9, flatShading: true });
+
   const cloth = new THREE.MeshStandardMaterial({ color: 0x5a4632, roughness: 0.9, flatShading: true });
   const skin = new THREE.MeshStandardMaterial({ color: 0xd9a77a, roughness: 0.8, flatShading: true });
   const metal = new THREE.MeshStandardMaterial({ color: 0x9aa3ad, roughness: 0.4, metalness: 0.8 });
@@ -412,7 +417,7 @@ export class Player {
     this.parts.rifle.visible = !jedi;
     if (!jedi && this.saberOn) this.toggleSaber();
     this.parts.saber.visible = jedi;
-    this.parts.torso.material = new THREE.MeshStandardMaterial({ color: jedi ? 0xc9b58a : 0x5f6b6e, roughness: 0.8, metalness: jedi ? 0 : 0.3, flatShading: true });
+    this.parts.torso.material = jedi ? TORSO_JEDI : TORSO_HUNTER;
     this.applyClassLook();
   }
 

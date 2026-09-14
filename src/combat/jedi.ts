@@ -43,7 +43,6 @@ export class JediKit implements Kit {
   private readonly aura: THREE.Mesh<THREE.SphereGeometry, THREE.MeshBasicMaterial>;
   private readonly bolt: THREE.Line<THREE.BufferGeometry, THREE.LineBasicMaterial>;
   private readonly boltPositions = new Float32Array((LIGHTNING_SEGMENTS + 1) * 3);
-  private readonly boltLight = new THREE.PointLight(0x9fd4ff, 0, 18);
   private time = 0;
 
   constructor(private readonly scene: THREE.Scene) {
@@ -57,7 +56,7 @@ export class JediKit implements Kit {
     this.bolt = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0xbfe6ff, toneMapped: false }));
     this.bolt.visible = false;
     this.bolt.frustumCulled = false;
-    scene.add(this.aura, this.bolt, this.boltLight);
+    scene.add(this.aura, this.bolt);
   }
 
   slotActive(i: number): boolean {
@@ -200,10 +199,10 @@ export class JediKit implements Kit {
       start.y += 1.35;
       const end = target ? target.pos.clone().setY(target.pos.y + target.halfHeight) : start.clone().addScaledVector(tmp, 14);
       this.drawBolt(start, end);
-      this.boltLight.position.copy(end).lerp(start, 0.5).y += 0.5;
-      this.boltLight.intensity = 14 + Math.random() * 12;
-    } else {
-      this.boltLight.intensity = 0;
+      // The glow comes from the pooled flash lights (a light of the kit's own would come and go
+      // with the class, and a change in the light count recompiles every shader).
+      tmp2.copy(end).lerp(start, 0.5).y += 0.5;
+      ctx.effects.flash(tmp2, 0x9fd4ff, 14 + Math.random() * 12, 18, 0.08);
     }
 
     res.value = Math.min(res.max, Math.max(0, res.value + 9 * dt));
@@ -253,7 +252,7 @@ export class JediKit implements Kit {
   }
 
   dispose(): void {
-    this.scene.remove(this.aura, this.bolt, this.boltLight);
+    this.scene.remove(this.aura, this.bolt);
     this.aura.geometry.dispose();
     this.aura.material.dispose();
     this.bolt.geometry.dispose();

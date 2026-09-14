@@ -1,15 +1,25 @@
 import * as THREE from 'three';
 import { markActor } from '../world/portalRender';
 
-interface Ring { mesh: THREE.Mesh<THREE.RingGeometry, THREE.MeshBasicMaterial>; age: number; life: number; maxScale: number }
-interface Tracer { line: THREE.Line<THREE.BufferGeometry, THREE.LineBasicMaterial>; age: number; life: number }
+type RingMesh = THREE.Mesh<THREE.RingGeometry, THREE.MeshBasicMaterial>;
+type BurstMesh = THREE.Mesh<THREE.SphereGeometry, THREE.MeshBasicMaterial>;
+type TracerLine = THREE.Line<THREE.BufferGeometry, THREE.LineBasicMaterial>;
+interface Ring { mesh: RingMesh; age: number; life: number; maxScale: number }
+interface Tracer { line: TracerLine; age: number; life: number }
 interface Flash { light: THREE.PointLight; age: number; life: number; intensity: number }
 
 /** Point lights kept in the scene for the flashes, so the light count never changes (a change recompiles every material). */
 const FLASH_POOL = 4;
-interface Burst { mesh: THREE.Mesh<THREE.SphereGeometry, THREE.MeshBasicMaterial>; age: number; life: number; size: number }
+interface Burst { mesh: BurstMesh; age: number; life: number; size: number }
 
-/** Short-lived visual effects: shock rings, blaster tracers, light flashes, impact bursts. */
+/**
+ * Short-lived visual effects: shock rings, blaster tracers, light flashes, impact bursts.
+ *
+ * The meshes and their materials are pooled and never disposed. A material made for each
+ * spark and disposed after it would take its compiled shader program with it (three deletes a
+ * program when the last material using it goes), and the next spark would compile it again:
+ * a stall on every first shot after a quiet moment.
+ */
 export class Effects {
   private readonly rings: Ring[] = [];
   private readonly tracers: Tracer[] = [];
@@ -17,6 +27,9 @@ export class Effects {
   private readonly bursts: Burst[] = [];
   private readonly ringGeo = new THREE.RingGeometry(0.6, 1, 32).rotateX(-Math.PI / 2);
   private readonly burstGeo = new THREE.SphereGeometry(1, 8, 6);
+  private readonly ringPool: RingMesh[] = [];
+  private readonly burstPool: BurstMesh[] = [];
+  private readonly tracerPool: TracerLine[] = [];
 
   private readonly lights: THREE.PointLight[] = [];
   private nextLight = 0;
@@ -33,22 +46,35 @@ export class Effects {
   }
 
   ring(pos: THREE.Vector3, color: number, maxScale: number, life: number): void {
-    const mesh = new THREE.Mesh(
-      this.ringGeo,
-      new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.8, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide }),
-    );
+    let mesh = this.ringPool.pop();
+    if (!mesh) {
+      mesh = new THREE.Mesh(this.ringGeo, new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.8, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide }));
+      markActor(mesh);
+    }
+    mesh.material.color.set(color);
+    mesh.material.opacity = 0.8;
+    mesh.scale.set(0.3, 1, 0.3);
     mesh.position.copy(pos).y += 0.08;
     this.scene.add(mesh);
-    markActor(mesh);
     this.rings.push({ mesh, age: 0, life, maxScale });
   }
 
   tracer(a: THREE.Vector3, b: THREE.Vector3, color: number, life = 0.07): void {
-    const geo = new THREE.BufferGeometry().setFromPoints([a, b]);
-    const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color, transparent: true, opacity: 1, toneMapped: false }));
-    line.frustumCulled = false;
+    let line = this.tracerPool.pop();
+    if (!line) {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
+      line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color, transparent: true, opacity: 1, toneMapped: false }));
+      line.frustumCulled = false;
+      markActor(line);
+    }
+    const pos = line.geometry.getAttribute('position') as THREE.BufferAttribute;
+    pos.setXYZ(0, a.x, a.y, a.z);
+    pos.setXYZ(1, b.x, b.y, b.z);
+    pos.needsUpdate = true;
+    line.material.color.set(color);
+    line.material.opacity = 1;
     this.scene.add(line);
-    markActor(line);
     this.tracers.push({ line, age: 0, life });
   }
 
@@ -66,13 +92,16 @@ export class Effects {
   }
 
   burst(pos: THREE.Vector3, color: number, size: number, life: number): void {
-    const mesh = new THREE.Mesh(
-      this.burstGeo,
-      new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false }),
-    );
+    let mesh = this.burstPool.pop();
+    if (!mesh) {
+      mesh = new THREE.Mesh(this.burstGeo, new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false }));
+      markActor(mesh);
+    }
+    mesh.material.color.set(color);
+    mesh.material.opacity = 0.9;
+    mesh.scale.setScalar(size * 0.2);
     mesh.position.copy(pos);
     this.scene.add(mesh);
-    markActor(mesh);
     this.bursts.push({ mesh, age: 0, life, size });
   }
 
@@ -82,9 +111,9 @@ export class Effects {
    */
   warmUp(): void {
     const at = new THREE.Vector3(0, -900, 0);
-    this.ring(at, 0xffa050, 1, 0.05);
-    this.tracer(at, at.clone().setY(-899), 0xff6a3a, 0.05);
-    this.burst(at, 0xffc080, 1, 0.05);
+    this.ring(at, 0xffa050, 1, 0.5);
+    this.tracer(at, at.clone().setY(-899), 0xff6a3a, 0.5);
+    this.burst(at, 0xffc080, 1, 0.5);
   }
 
   update(dt: number): void {
@@ -94,7 +123,7 @@ export class Effects {
       const t = r.age / r.life;
       if (t >= 1) {
         this.scene.remove(r.mesh);
-        r.mesh.material.dispose();
+        this.ringPool.push(r.mesh);
         this.rings.splice(i, 1);
         continue;
       }
@@ -108,8 +137,7 @@ export class Effects {
       const t = tr.age / tr.life;
       if (t >= 1) {
         this.scene.remove(tr.line);
-        tr.line.geometry.dispose();
-        tr.line.material.dispose();
+        this.tracerPool.push(tr.line);
         this.tracers.splice(i, 1);
         continue;
       }
@@ -132,7 +160,7 @@ export class Effects {
       const t = b.age / b.life;
       if (t >= 1) {
         this.scene.remove(b.mesh);
-        b.mesh.material.dispose();
+        this.burstPool.push(b.mesh);
         this.bursts.splice(i, 1);
         continue;
       }
