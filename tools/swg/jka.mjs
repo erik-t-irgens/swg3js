@@ -559,7 +559,7 @@ export function gripFromConstraints(constraints) {
 // Ghoul2 meshes (.glm), read only for their tag surfaces: the three-vertex bolt triangles the
 // game hangs weapons from (*r_hand, *l_hand on a player, *blade1 on a hilt).
 //   mdxmHeader_t { "2LGM", version, name[64], animName[64], animIndex, numBones, numLODs, ofsLODs,
-//                  numSurfaces, ofsSurfHierarchy, ofsSurfaces, ofsEnd }  (168 bytes)
+//                  numSurfaces, ofsSurfHierarchy, ofsEnd }  (164 bytes)
 //   then numSurfaces int32 offsets (from the table) to mdxmSurfHierarchy_t { name[64], flags,
 //   shader[64], shaderIndex, parentIndex, numChildren, childIndexes[] }; flags bit 0 marks a bolt.
 //   At ofsLODs: mdxmLOD_t { ofsEnd }, then numSurfaces int32 offsets (from that table) to
@@ -568,22 +568,28 @@ export function gripFromConstraints(constraints) {
 //   (bone reference i in bits 5i..5i+4, count-1 in bits 30-31), weights[4] } (32 bytes), positions
 //   in model space at the skeleton's base pose; bone references index the GLA's bones.
 export function parseGlm(buf) {
-  if (buf.length < 168 || buf.toString('latin1', 0, 4) !== '2LGM') throw new Error('not a GLM file (missing 2LGM ident)');
+  if (buf.length < 164 || buf.toString('latin1', 0, 4) !== '2LGM') throw new Error('not a GLM file (missing 2LGM ident)');
   const name = cstr(buf, 8, MAX_QPATH);
   const animName = cstr(buf, 72, MAX_QPATH);
   const numBones = buf.readInt32LE(140);
   const ofsLODs = buf.readInt32LE(148);
   const numSurfaces = buf.readInt32LE(152);
-  const table = 168;
+  const ofsEnd = buf.readInt32LE(160);
+  const table = 164;
+  const inside = (o, what) => {
+    if (o < 0 || o + 4 > buf.length) throw new Error(`${what} at ${o} is outside the file (${buf.length} bytes, ofsEnd ${ofsEnd})`);
+    return o;
+  };
+  if (numSurfaces < 0 || numSurfaces > 4096 || ofsLODs <= 0 || ofsLODs >= buf.length) throw new Error(`header out of range: ${numSurfaces} surfaces, LODs at ${ofsLODs} of ${buf.length} bytes`);
   const surfaces = [];
   for (let i = 0; i < numSurfaces; i++) {
-    const o = table + buf.readInt32LE(table + i * 4);
+    const o = inside(table + buf.readInt32LE(table + i * 4), `surface ${i} hierarchy`);
     surfaces.push({ name: cstr(buf, o, MAX_QPATH), flags: buf.readUInt32LE(o + MAX_QPATH), verts: [] });
   }
   // The first level of detail carries every surface's vertices.
   const lodTable = ofsLODs + 4;
   for (let i = 0; i < numSurfaces; i++) {
-    const so = lodTable + buf.readInt32LE(lodTable + i * 4);
+    const so = inside(lodTable + buf.readInt32LE(lodTable + i * 4), `surface ${i}`);
     const numVerts = buf.readInt32LE(so + 12);
     const ofsVerts = buf.readInt32LE(so + 16);
     const numRefs = buf.readInt32LE(so + 28);
@@ -932,7 +938,12 @@ export function importJkaClips(jkaDir, joints, wanted = defaultJkaClips(), { log
       clips.push(clip);
     }
     const solved = solveGrip(gla, cfg, joints, plan);
-    const tags = gripFromTags(base, gla, joints, plan, { log });
+    let tags = null;
+    try {
+      tags = gripFromTags(base, gla, joints, plan, { log });
+    } catch (err) {
+      log(`grip: the game's tag geometry could not be read (${err.message}); using the swings' solve`);
+    }
     if (tags && solved) {
       // How the game's own axis fares against the swings' quadrants, beside the solved one.
       const fit = swingFit(gla, cfg, joints, plan, tags.right.axis);

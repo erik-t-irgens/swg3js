@@ -2148,9 +2148,13 @@ switch (cmd) {
       // 10 cm box for a mesh; the visible body is the static appearance of the same name, which the
       // client attaches at run time. Show that one.
       const pv = r.skeletal && /^appearance\/pv_(.+)\.sat$/i.exec(r.skeletal);
-      if (pv && vfs.has(`appearance/${pv[1]}.apt`)) {
-        const body = resolveAppearanceToMesh(vfs, `appearance/${pv[1]}.apt`);
-        if (!body.skip) r = { ...body, source: `appearance/${pv[1]}.apt (the body of ${r.skeletal})` };
+      if (pv) {
+        const x = pv[1];
+        const candidates = [`appearance/${x}.apt`, `appearance/${x}.lod`, `appearance/lod/${x}.lod`, `appearance/${x}.msh`, `appearance/mesh/${x}.msh`, `appearance/mesh/${x}_l0.msh`];
+        const found = candidates.find((c) => vfs.has(c));
+        const body = found ? resolveAppearanceToMesh(vfs, found) : null;
+        if (body && !body.skip) r = { ...body, source: `${found} (the body of ${r.skeletal})` };
+        else return { skip: `vehicle placeholder ${r.skeletal} with no body found (tried ${x}.apt/.lod/.msh)` };
       }
       if (r.particle) return { skip: 'particle effect' };
       let id;

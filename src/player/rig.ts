@@ -110,6 +110,8 @@ export interface RigOptions {
 
 const tmpQ = new THREE.Quaternion();
 const UP_AXIS = new THREE.Vector3(0, 1, 0);
+const RIGHT_AXIS = new THREE.Vector3(1, 0, 0);
+const pitchQ = new THREE.Quaternion();
 const rootQ = new THREE.Quaternion();
 const parentQ = new THREE.Quaternion();
 const alignQ = new THREE.Quaternion();
@@ -528,12 +530,15 @@ export class CharacterRig {
    * spread over the spine bones, so the upper body can face the camera while the legs run at
    * an angle. Call after update() and after world matrices are current.
    */
-  twistTorso(angle: number): void {
+  twistTorso(angle: number, pitch = 0): void {
     const spines = [...this.bones.values()].filter((b) => /^spine_?[1-3]$/i.test(b.name));
     if (!spines.length) return;
     const each = THREE.MathUtils.clamp(angle, -1.2, 1.2) / spines.length;
+    // A tilt about the character's right axis too (positive bends forward and down), for aiming a gun where the camera looks.
+    const eachPitch = THREE.MathUtils.clamp(pitch, -0.9, 0.9) / spines.length;
     this.root.getWorldQuaternion(rootQ);
     tmpQ.setFromAxisAngle(UP_AXIS, each);
+    if (eachPitch !== 0) tmpQ.multiply(pitchQ.setFromAxisAngle(RIGHT_AXIS, eachPitch));
     for (const bone of spines) {
       if (!bone.parent) continue;
       // The twist goes on top of the clip's pose, never on top of last frame's twist: a bone the
@@ -544,7 +549,7 @@ export class CharacterRig {
         this.twists.set(bone, twist);
       } else if (bone.quaternion.equals(twist.twisted)) bone.quaternion.copy(twist.clean);
       twist.clean.copy(bone.quaternion);
-      if (each !== 0) {
+      if (each !== 0 || eachPitch !== 0) {
         // A turn about the character's up axis, expressed in the bone's parent frame.
         bone.parent.getWorldQuaternion(parentQ);
         alignQ.copy(parentQ).invert().multiply(rootQ).multiply(tmpQ).multiply(rootQ.clone().invert()).multiply(parentQ);

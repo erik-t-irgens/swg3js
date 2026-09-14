@@ -265,6 +265,10 @@ export class Player {
   private directional = false;
   /** How far the torso turns from the legs back towards the camera, in radians, this frame. */
   private torsoTwist = 0;
+  /** The torso's tilt toward where the camera looks while a blaster is up, so the barrel follows the crosshair. */
+  private torsoPitch = 0;
+  /** Where the camera looks, kept from the last update for the rig. */
+  private readonly lookDir = new THREE.Vector3(0, 0, 1);
   private readonly cmd: MoveCommand = { forward: new THREE.Vector3(), right: new THREE.Vector3(), fmove: 0, smove: 0, walk: false, crouch: false, roll: false, jump: false, jumpPressed: false, attack: false, speedScale: 1 };
   /** Ducking (Ctrl on land): half speed, crouch clips, and the crouched attacks. */
   crouching = false;
@@ -1050,6 +1054,7 @@ export class Player {
     // The clips are scaled to the speed the body actually moves at, so the feet stay planted.
     this.groundSpeed = moving ? (this.moveProfile === 'jka' && !this.swimming ? Math.hypot(this.vel.x, this.vel.z) : speed) : 0;
     this.animate(dt);
+    cam.camera.getWorldDirection(this.lookDir);
     this.animateRig(dt, this.groundSpeed, moving, mz, mx);
 
     this.group.position.copy(this.pos);
@@ -1138,7 +1143,11 @@ export class Player {
     rig.update(dt);
     this.group.updateMatrixWorld(true);
     // Always called: with no twist it puts the spine's clip pose back.
-    rig.twistTorso(rig.overridingJka ? 0 : this.torsoTwist);
+    // With a blaster up the torso also tilts to where the camera looks, so the barrel follows the crosshair.
+    const gunUp = this.classId === 'bounty_hunter' && !this.prone && !this.swimming && !this.mounted && (this.aiming || this.gunReady);
+    const wantedPitch = gunUp ? -Math.asin(THREE.MathUtils.clamp(this.lookDir.y, -1, 1)) : 0;
+    this.torsoPitch += (wantedPitch - this.torsoPitch) * Math.min(1, dt * 10);
+    rig.twistTorso(rig.overridingJka ? 0 : this.torsoTwist, rig.overridingJka ? 0 : this.torsoPitch);
     // The hilt turns in the hand to whichever convention poses the arms: the game's own clips
     // hold it their way, Jedi Academy's the way its swings were made for.
     const jkaArms = rig.armSource().startsWith('BOTH_');
