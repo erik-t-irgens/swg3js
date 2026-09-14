@@ -97,6 +97,10 @@ export class CharacterPreview {
     this.dispose();
     // The clone rebinds its own skeleton, so posing the doll never moves the character in the world.
     const copy = cloneSkinned(character.group);
+    // The clone carries the character's place and heading in the world; the doll stands at the
+    // origin facing the viewer, in the character's own frame (its height scale kept).
+    copy.position.set(0, 0, 0);
+    copy.quaternion.identity();
     // The clone inherits stale matrices, and a skinned mesh's bounds are read through them, so
     // without this the box comes out empty and the camera frames nothing.
     copy.updateMatrixWorld(true);
@@ -113,6 +117,20 @@ export class CharacterPreview {
     // Stand the model in the middle of the view with its feet on the floor, so turning it spins
     // it about its own middle rather than about whatever corner the origin happens to sit in.
     copy.position.sub(new THREE.Vector3(centre.x, box.min.y, centre.z));
+    // The clone is a snapshot: a slider moved afterwards changes the character in the world and
+    // not the doll, unless the doll follows. Each frame copies the shape sliders and the height
+    // across, mesh by mesh (the clone walks in the same order as the original).
+    const sources: THREE.Mesh[] = [];
+    character.group.traverse((o) => {
+      if ((o as THREE.Mesh).isMesh) sources.push(o as THREE.Mesh);
+    });
+    const clones: THREE.Mesh[] = [];
+    copy.traverse((o) => {
+      if ((o as THREE.Mesh).isMesh) clones.push(o as THREE.Mesh);
+    });
+    this.pairs = sources.length === clones.length ? sources.map((m, i) => [m, clones[i]]) : [];
+    this.source = character.group;
+    this.foot = new THREE.Vector3(centre.x, box.min.y, centre.z).divide(character.group.scale);
     // Frame it once. A rebuild after an equip must leave the view exactly as the user set it.
     if (!this.framed) {
       this.height = size.y / 2;
@@ -128,6 +146,24 @@ export class CharacterPreview {
       if ((o as THREE.Mesh).isMesh) meshes++;
     });
     this.lastBuild = { meshes, size: [size.x, size.y, size.z].map((v) => Number(v.toFixed(2))), distance: Number(this.distance.toFixed(2)) };
+  }
+
+  private pairs: [THREE.Mesh, THREE.Mesh][] = [];
+  private source: THREE.Object3D | null = null;
+  /** Where the feet sit under the character's origin, at a scale of one. */
+  private foot = new THREE.Vector3();
+
+  /** The doll takes the character's shape sliders, its height and what is visible, as they are now. */
+  private follow(): void {
+    if (!this.model || !this.source) return;
+    for (const [src, dst] of this.pairs) {
+      if (src.morphTargetInfluences && dst.morphTargetInfluences) for (let i = 0; i < src.morphTargetInfluences.length; i++) dst.morphTargetInfluences[i] = src.morphTargetInfluences[i];
+      dst.visible = src.visible;
+    }
+    if (!this.model.scale.equals(this.source.scale)) {
+      this.model.scale.copy(this.source.scale);
+      this.model.position.copy(this.foot).multiply(this.source.scale).negate();
+    }
   }
 
   /** What the last clone produced, for the console when the doll looks wrong. */
@@ -160,6 +196,7 @@ export class CharacterPreview {
     if (!this.model) return;
     this.dirty = false;
     this.frames++;
+    this.follow();
     const cp = Math.cos(this.pitch);
     this.camera.position.set(Math.sin(this.yaw) * cp * this.distance, this.height + Math.sin(this.pitch) * this.distance, Math.cos(this.yaw) * cp * this.distance);
     this.camera.lookAt(0, this.height, 0);

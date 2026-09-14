@@ -34,11 +34,18 @@ export class Customizer {
       if (!file.recipes?.length) return false;
       this.loaded.add(dir);
       Object.assign(this.palettes, file.palettes);
+      // The same piece may sit in two packs (the default shirt is in the parts pack and in the
+      // wardrobe): one recipe per material and mesh, the first pack's.
+      const have = new Set(this.recipes.map((r) => `${r.material}|${r.mesh}`));
       for (const r of file.recipes) {
+        const key = `${r.material}|${r.mesh}`;
+        if (have.has(key)) continue;
+        have.add(key);
         this.recipes.push(r);
         this.dirOf.set(r, `${dir}${file.images}`);
         this.deps.set(r, recipeVariables(r));
       }
+      this.invalidate();
       return true;
     } catch {
       return false;
@@ -51,12 +58,31 @@ export class Customizer {
   }
 
   /**
-   * Every variable the recipes read: its key (a private one is scoped to its mesh), its default,
-   * its kind, and the palette or the number of choices; what the sliders and swatches show.
+   * Whether a recipe feeds a material the character has. The wardrobe brings a recipe for every
+   * item it holds, over a thousand, and only the ones on the character are worth a variable, a
+   * link or a render; the rest wait until their item is put on.
+   */
+  private active(r: Recipe): boolean {
+    return this.materialsFor(r.material).length > 0;
+  }
+
+  private variableCache: ReturnType<Customizer['variables']> | null = null;
+
+  /** Forget what was worked out about the character's materials: a part came or went. */
+  invalidate(): void {
+    this.variableCache = null;
+  }
+
+  /**
+   * Every variable the character's recipes read: its key (a private one is scoped to its mesh),
+   * its default, its kind, and the palette or the number of choices; what the sliders and
+   * swatches show.
    */
   variables(): { key: string; name: string; private: boolean; mesh: string; default: number; kind: 'palette' | 'index'; palette?: string; count?: number; colors?: number[][] }[] {
+    if (this.variableCache) return this.variableCache;
     const out = new Map<string, { key: string; name: string; private: boolean; mesh: string; default: number; kind: 'palette' | 'index'; palette?: string; count?: number; colors?: number[][] }>();
     for (const r of this.recipes) {
+      if (!this.active(r)) continue;
       for (const d of recipeVariableDefs(r)) {
         const key = variableKey(d.name, d.private, r.mesh);
         const prev = out.get(key);
@@ -67,7 +93,8 @@ export class Customizer {
         out.set(key, { key, name: d.name, private: d.private, mesh: r.mesh, default: d.default, kind: d.kind, ...(d.palette ? { palette: d.palette, colors: this.palettes[d.palette] } : {}), ...(d.count ? { count: d.count } : {}) });
       }
     }
-    return [...out.values()];
+    this.variableCache = [...out.values()];
+    return this.variableCache;
   }
 
   /** The keys a change to `key` also sets: a shared variable reaches the private copies of the same name on every mesh (the head's own skin colour follows the owner's). */
@@ -106,6 +133,8 @@ export class Customizer {
     let n = 0;
     for (const [r, d] of this.deps) {
       if (!d.has(a) && !d.has(b)) continue;
+      // An item not on the character renders when it is put on (see reapply), not now.
+      if (!this.active(r)) continue;
       this.queued.add(r);
       n++;
     }
@@ -137,10 +166,21 @@ export class Customizer {
     if (this.queued.size) void this.run();
   }
 
-  /** Render every recipe (the pack was baked with its own defaults; ours may differ). */
+  /** Render every recipe on the character (the pack was baked with its own defaults; ours may differ). */
   renderAll(): void {
-    for (const r of this.recipes) this.queued.add(r);
+    for (const r of this.recipes) if (this.active(r)) this.queued.add(r);
     void this.run();
+  }
+
+  /** Whether a value has been set that the recipe reads, under either spelling of the key. */
+  private readsSetValue(r: Recipe): boolean {
+    const d = this.deps.get(r);
+    if (!d) return false;
+    for (const key of this.values.keys()) {
+      const [a, b] = Customizer.spellings(key);
+      if (d.has(a) || d.has(b)) return true;
+    }
+    return false;
   }
 
   private async run(): Promise<void> {
@@ -191,11 +231,19 @@ export class Customizer {
     }
   }
 
-  /** The materials a recipe feeds get its texture again after a part is reloaded. */
+  /**
+   * A part came or went: the materials a recipe feeds get its texture again after a reload, and
+   * a piece just put on whose look a chosen value changes (a hairstyle in the hair colour picked,
+   * a shirt in a colour set before it was worn) is rendered for the first time.
+   */
   reapply(): void {
+    this.invalidate();
     for (const r of this.recipes) {
       const tex = this.textures.get(r.material);
-      if (!tex) continue;
+      if (!tex) {
+        if (this.active(r) && this.readsSetValue(r)) this.queued.add(r);
+        continue;
+      }
       for (const m of this.materialsFor(r.material)) {
         const std = m as THREE.MeshStandardMaterial;
         if (std.map !== tex) {
@@ -204,6 +252,7 @@ export class Customizer {
         }
       }
     }
+    if (this.queued.size) void this.run();
   }
 
   private async loadImagesFor(r: Recipe): Promise<void> {

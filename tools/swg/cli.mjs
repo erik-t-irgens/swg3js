@@ -2123,7 +2123,8 @@ switch (cmd) {
     const match = options.match ? new RegExp(options.match, 'i') : null;
     const limit = options.limit ? Number(options.limit) : Infinity;
     const template = (options.template ?? PLAYER_TEMPLATE).replace(/\\/g, '/');
-    const speciesId = basename(template).replace(/^shared_/, '').replace(/\.[^.]+$/, '');
+    // The wardrobe is per gender: human_male, human_female (the --gender wins over the template's own).
+    const speciesId = basename(template).replace(/^shared_/, '').replace(/\.[^.]+$/, '').replace(/_(male|female)$/, gender === 'f' ? '_female' : '_male');
     const outDir = join(pos[2], 'wardrobe', speciesId);
     mkdirSync(outDir, { recursive: true });
 
@@ -2167,6 +2168,8 @@ switch (cmd) {
         const sat = parseSat(readIff(vfs, satPath));
         if (!sat.skeletons.some((k) => allowed.has(k.file.toLowerCase()))) throw new Error(`built for ${sat.skeletons.map((k) => basename(k.file)).join(', ') || 'no skeleton'}`);
         const entries = [];
+        // The item's variables (a shirt's colour 1 and 2), noted per mesh as its shaders are read.
+        const info = { missing: [], skipped: [], customization: new Set(), variables: new Map(), textureRenderers: [], shaderNotes: new Set() };
         for (let name of sat.meshes) {
           if (/\.lmg$/i.test(name)) {
             if (!vfs.has(name)) continue;
@@ -2178,7 +2181,6 @@ switch (cmd) {
           const { groups } = skinnedPrimitives(mgn, skeleton);
           const meshName = basename(name).replace(/\.[^.]+$/, '');
           const textures = new Map();
-          const info = { missing: [], skipped: [], customization: new Set(), variables: new Map(), textureRenderers: [], shaderNotes: new Set() };
           const kept = [];
           for (const g of groups) {
             if (!g.primitives[0].indices.length) continue;
@@ -2232,7 +2234,15 @@ switch (cmd) {
     const withMorphs = catalogue.filter((c) => c.parts.some((p) => p.morphs.length)).length;
     const otherGender = catalogue.filter((c) => c.gender !== gender).length;
     console.log(`   ${withMorphs} carry body-shape morphs; ${otherGender} exist only in the other gender's mesh`);
-    if (failed.length) console.log(`   ${failed.length} skipped, e.g. ${failed.slice(0, 4).join('; ')}`);
+    if (failed.length) {
+      // The reasons, most common first, so a bug that fails every item shows as one line rather than hiding behind the usual few.
+      const reasons = new Map();
+      for (const f of failed) {
+        const why = f.replace(/^[^:]*: /, '').replace(/[a-z0-9_/.]+\.(sat|iff|mgn|lmg|sht)/gi, '…');
+        reasons.set(why, (reasons.get(why) ?? 0) + 1);
+      }
+      console.log(`   ${failed.length} skipped: ${[...reasons].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([why, n]) => `${n} × ${why}`).join('; ')}`);
+    }
     break;
   }
 

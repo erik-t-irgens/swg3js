@@ -245,8 +245,6 @@ export class Character {
     // The rest contribute meshes only; their bones would be a second, unanimated skeleton.
     if (first) for (const sc of scenes) this.group.add(sc);
     else for (const m of meshes) this.group.add(m);
-    // A part loaded after a colour changed takes the rendered texture too.
-    this.customizer?.reapply();
     // The outermost def decides how the whole item occludes.
     const outer = defs.reduce((a, b) => (b.occlusionLayer > a.occlusionLayer ? b : a));
     this.parts.set(key, {
@@ -259,6 +257,9 @@ export class Character {
       occludes: outer.occludes ?? [],
       body: !!outer.body,
     });
+    // A part loaded after a colour changed takes the rendered texture too (once it is registered,
+    // so its materials are found), and one that reads a chosen colour is rendered in it.
+    this.customizer?.reapply();
   }
 
   /**
@@ -267,6 +268,7 @@ export class Character {
    * client's own scheme, applied per frame's worth of dressing rather than at conversion time.
    */
   private applyOcclusion(): void {
+    this.customizer?.invalidate();
     // What is on is visible to start with; culling below may then hide a whole mesh.
     for (const part of this.parts.values()) for (const m of part.meshes) m.visible = part.worn;
     // Outermost layers hide the zones of everything under them, and a layer's hiding only takes
@@ -363,7 +365,15 @@ export class Character {
   /** The meshes on show: the body's and every worn piece's, so colours are offered only for what is worn. */
   wornMeshes(): Set<string> {
     const out = new Set<string>();
-    for (const p of this.parts.values()) if (p.worn) for (const m of p.meshes) out.add(m.name);
+    for (const p of this.parts.values()) {
+      if (!p.worn) continue;
+      for (const m of p.meshes) {
+        out.add(m.name);
+        // A mesh with several materials loads as several meshes, the second onwards suffixed
+        // (body_m_l0, body_m_l0_1): the recipes name the converter's mesh, without the suffix.
+        out.add(m.name.replace(/_\d+$/, ''));
+      }
+    }
     return out;
   }
 

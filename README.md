@@ -191,7 +191,7 @@ npm run swg -- clips-save assets-private/player/human_male.glb assets-private/pl
 npm run swg -- clips-apply assets-private/characters/human_male/rig.glb assets-private/player/jka.clips   #    carry the Jedi Academy clips onto the parts rig
 npm run swg -- species @SWG assets-private --retail-only                         # 6b. every playable species and gender as parts, with the character creator's index
 npm run swg -- wardrobe @SWG assets-private --retail-only                        # 7. every wearable and hairstyle, for the wardrobe on I (optional, long)
-npm run swg -- wardrobe @SWG assets-private --retail-only --gender=female        #    ... and the women's; every humanoid species of a gender shares it
+npm run swg -- wardrobe @SWG assets-private --retail-only --gender=female        #    ... and the women's (wardrobe/human_female); every humanoid species of a gender shares it
 npm run swg -- weapons @SWG assets-private --retail-only                         #    every weapon, for the rack on B
 npm run swg -- ships @SWG assets-private --retail-only                           #    every player ship, with its interior, for the garage on G
 npm run swg -- status assets-private                                              # 8. what is in place, and the command for anything missing

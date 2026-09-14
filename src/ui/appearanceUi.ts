@@ -136,13 +136,20 @@ export class AppearanceUi {
     const live = (c.customizer?.variables() ?? []).filter((v) => (!v.private || worn.has(v.mesh)) && !c.customizer!.isLinked(v.key));
     const manifestVars = c.manifest.variables ?? [];
     const rows: { key: string; name: string; private: boolean; mesh: string; kind: 'palette' | 'index'; colors?: number[][]; count?: number; default: number; live: boolean }[] = [];
-    if (live.length) {
-      for (const v of live) {
-        const m = manifestVars.find((mv) => mv.name === v.name && mv.private === v.private);
-        rows.push({ key: v.key, name: v.name, private: v.private, mesh: v.mesh, kind: v.kind, colors: v.colors ?? m?.colors, count: v.count ?? m?.count, default: v.default, live: true });
+    const short = (n: string) => n.replace(/^.*\//, '');
+    for (const v of live) {
+      const m = manifestVars.find((mv) => short(mv.name) === short(v.name) && mv.private === v.private);
+      rows.push({ key: v.key, name: v.name, private: v.private, mesh: v.mesh, kind: v.kind, colors: v.colors ?? m?.colors, count: v.count ?? m?.count, default: v.default, live: true });
+    }
+    // What the manifest lists that no recipe reads live (a pack converted before live customization
+    // lists everything so) still shows, dimmed, with the bake command behind it.
+    for (const v of manifestVars) {
+      for (const mesh of v.private && v.meshes?.length ? v.meshes : ['']) {
+        if (v.private && live.length && !worn.has(mesh)) continue;
+        if (rows.some((r) => r.private === v.private && short(r.name) === short(v.name) && (!v.private || r.mesh === mesh))) continue;
+        if (v.private && live.length && c.customizer?.isLinked(`${mesh}|${v.name}`)) continue;
+        rows.push({ key: v.private ? `${mesh}|${v.name}` : v.name, name: v.name, private: v.private, mesh, kind: v.kind, colors: v.colors, count: v.count, default: v.default, live: false });
       }
-    } else {
-      for (const v of manifestVars) for (const mesh of v.private && v.meshes?.length ? v.meshes : ['']) rows.push({ key: v.private ? `${mesh}|${v.name}` : v.name, name: v.name, private: v.private, mesh, kind: v.kind, colors: v.colors, count: v.count, default: v.default, live: false });
     }
     if (!rows.length) return '';
     const row = (v: (typeof rows)[number]): string => {
