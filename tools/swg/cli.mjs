@@ -858,10 +858,16 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
     info.available = named.map((e) => `${e.clip}${e.clip !== e.name ? ` (${e.name}${e.speed ? ` ${e.speed.toFixed(1)} m/s` : ''})` : ''}${e.kind === 'file' || e.kind === 'inline' ? '' : ` [${e.kind}]`}${e.variable ? ` (${e.variable}${e.isDefault ? ', default' : ''})` : ''}${e.timeScale && e.timeScale !== 1 ? ` x${e.timeScale.toFixed(2)}` : ''}`);
     if (animations === 'list') return info;
     const used = new Set();
+    const cut = [];
     for (const e of named) {
       if (wanted && !wanted.some((w) => (w.startsWith('=') ? e.clip.toLowerCase() === w.slice(1) || e.name.toLowerCase() === w.slice(1) : e.clip.toLowerCase().includes(w) || e.name.toLowerCase().includes(w)))) continue;
       if (used.has(e.clip)) continue;
-      if (clips.length >= maxAnimations) break;
+      if (clips.length >= maxAnimations) {
+        // Past the cap: say which wanted clips were left out rather than dropping them quietly.
+        if (!used.has(e.clip)) cut.push(e.clip);
+        used.add(e.clip);
+        continue;
+      }
       try {
         if (e.kind !== 'inline' && e.kind !== 'file') {
           info.skipped.push(`${e.name}: ${e.kind} animation templates are not converted`);
@@ -896,6 +902,10 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
       } catch (err) {
         info.skipped.push(`${e.name}: ${err.message}`);
       }
+    }
+    if (cut.length) {
+      info.cut = cut;
+      console.warn(`   ${cut.length} wanted clips left out by the --max-anims cap of ${maxAnimations}: ${cut.slice(0, 8).join(', ')}${cut.length > 8 ? ', ...' : ''}; raise --max-anims to keep them`);
     }
   } else if (latFile) info.missing.push(latFile);
   const skin = skinData(skeleton, clips, { flipX: true });
@@ -1194,8 +1204,20 @@ function packStatus(dir) {
     const wear = p.wear?.length ? `${p.wear.length} wearables` : 'NO CLOTHES';
     const swims = p.clips.some((c) => /swim/i.test(c));
     console.log(`  player: ${p.id} (${p.template}), ${wear}, ${p.clips.length} clips${swims ? '' : ', NO SWIMMING CLIPS'}`);
+    // The clips each posture and carry the game plays needs; a rig converted before they were listed lacks them.
+    const POSTURE_CLIPS = [
+      ['crouch', /^loop_crouched:speed[01]/],
+      ['prone', /^loop_prone:speed[01]/],
+      ['pistol', /^loop_pistol_(standing|combat)/],
+      ['rifle', /^loop_rifle(_combat)?:speed/],
+      ['prone blaster', /^loop_(pistol|rifle)_combat_prone/],
+    ];
+    const lacking = (names) => POSTURE_CLIPS.filter(([, re]) => !names.some((c) => re.test(c))).map(([what]) => what);
+    const playerLacks = lacking(p.clips);
+    if (playerLacks.length) console.log(`  player clips missing: ${playerLacks.join(', ')}`);
     if (!p.wear?.length) need(`player <swg-dir> ${dir} --retail-only`, 'the player has no clothes');
     else if (!swims) need(`player <swg-dir> ${dir} --retail-only`, 'the player lacks the swimming clips');
+    else if (playerLacks.length) need(`player <swg-dir> ${dir} --retail-only${p.jkaClips ? ' --jka=<jka-dir>' : ''}`, `the player lacks the ${playerLacks.join(', ')} clips`);
     // The parts pack the game prefers: it must carry the named locomotion clips, and the Jedi Academy clips travel to it by bundle.
     const partsFile = join(dir, 'characters', p.id, 'parts.json');
     const partsManifest = readJson(partsFile);
@@ -1207,6 +1229,11 @@ function packStatus(dir) {
       console.log(`  parts: ${partsManifest.parts?.length ?? 0} parts, rig ${partsManifest.rig?.clips ?? '?'} clips${walks ? '' : ', NO WALK/RUN/IDLE CLIPS (the game falls back to the single model)'}${jkaCount ? `, ${jkaCount} Jedi Academy clips` : ''}`);
       if (!walks && !partsManifest.clips) console.log('  (an older parts.json does not list its clips; re-run parts to be sure)');
       if (!walks) need(`parts <swg-dir> ${dir} --retail-only`, 'the parts rig lacks the named idle, walk and run clips');
+      const partsLacks = lacking([...clipNames]);
+      if (partsLacks.length) {
+        console.log(`  parts clips missing: ${partsLacks.join(', ')} (the game plays the parts rig, so the player's clips do not reach it until parts is rerun)`);
+        need(`parts <swg-dir> ${dir} --retail-only`, `the parts rig lacks the ${partsLacks.join(', ')} clips`);
+      }
       if (playerJka && jkaCount < playerJka) need(`clips-save ${join(dir, p.file)} ${join(dir, 'player', 'jka.clips')} --only=BOTH_ && clips-apply ${join(dir, 'characters', p.id, 'rig.glb')} ${join(dir, 'player', 'jka.clips')}`, `the parts rig has ${jkaCount} of the player's ${playerJka} Jedi Academy clips`);
     }
   }
@@ -1658,7 +1685,7 @@ switch (cmd) {
           return r.clips;
         }
       : null;
-    const info = convertSat(vfs, template, join(outDir, `${id}.glb`), { animations: options.anim ?? PLAYER_CLIPS, variables: customizationValues(options.var), wear, maxAnimations: options['max-anims'] ? Number(options['max-anims']) : 120, extraClips });
+    const info = convertSat(vfs, template, join(outDir, `${id}.glb`), { animations: options.anim ?? PLAYER_CLIPS, variables: customizationValues(options.var), wear, maxAnimations: options['max-anims'] ? Number(options['max-anims']) : 240, extraClips });
     console.log(`${info.sat}: skeleton ${info.skeleton} (${info.joints} joints${info.attached.length ? `, with ${info.attached.join('; ')}` : ''})`);
     if (jka) console.log(`  jka: ${Object.keys(info.jkaClips).length} clips retargeted${jka.missing.length ? `; not in animation.cfg: ${jka.missing.join(', ')}` : ''}`);
     if (jka) console.log(`  jka: locomotion speeds from the feet: ${Object.entries(info.jkaClips).filter(([, c]) => c.speed).map(([n, c]) => `${n} ${c.speed.toFixed(2)} m/s`).join(', ') || 'none'}`);
@@ -1795,7 +1822,7 @@ switch (cmd) {
     // finds its states by these names, and the table's first eighty clips are not them.
     const info = convertSat(vfs, template, null, {
       animations: options.anim ?? PLAYER_CLIPS,
-      maxAnimations: options['max-anims'] ? Number(options['max-anims']) : 120,
+      maxAnimations: options['max-anims'] ? Number(options['max-anims']) : 240,
       variables,
       wear,
       parts: { dir: outDir, rig: 'rig' },

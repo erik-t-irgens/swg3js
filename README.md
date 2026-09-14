@@ -171,7 +171,7 @@ Step 3 also accepts one planet at a time (`snapshot @SWG tatooine assets-private
 | Reflective metal and glass on buildings and props | `snapshot @SWG <planet> assets-private/<planet> --center=auto --radius=all --retail-only` (the shine is baked into each model's textures) |
 | Buildings, objects, flora, a new planet | `snapshot @SWG <planet> assets-private/<planet> --center=auto --radius=all --retail-only` |
 | Named places on the galaxy map | `pois @SWG all assets-private --retail-only` |
-| Skin, clothes, eyes, animations (walking, swimming) | `player @SWG assets-private --retail-only` |
+| Skin, clothes, eyes, animations (walking, swimming, crouching, prone, the blaster carries) | `player @SWG assets-private --retail-only --jka=@JKA`, then `parts @SWG assets-private --retail-only` and the `clips-save` and `clips-apply` pair (steps 5 and 6): the game plays the parts rig, so new SWG clips reach it only through `parts`, and the Jedi Academy clips through the bundle |
 | Creature models or clips | `creatures @SWG assets-private --retail-only` |
 
 Two optional sources add what the client files alone do not place. `--events` on `snapshot` includes buildout areas the game only shows during an event (`planets` lists which planets have any, with the event each needs). `--core3=<path to Core3/MMOCoreORB/bin/scripts>` reads the SWGEmu server scripts: the static objects its screenplays place go into the pack, and every creature and NPC spawn point is written to the pack's `spawns.json` for later use.
