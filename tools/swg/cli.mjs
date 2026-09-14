@@ -1989,7 +1989,9 @@ switch (cmd) {
           id = familyOf(r.skeletal);
           if (!models.has(id)) {
             const info = convertSat(vfs, r.skeletal, join(outDir, `${id}.glb`), { animations: 'none' });
-            models.set(id, { id, source: r.skeletal, file: `${id}.glb`, bounds: info.bounds ?? { min: [-1, 0, -1], max: [1, 2, 1] }, triangles: info.meshes.reduce((a, m) => a + m.triangles, 0) });
+            const tris = info.meshes.reduce((a, m) => a + m.triangles, 0);
+            models.set(id, { id, source: r.skeletal, file: `${id}.glb`, bounds: info.bounds ?? { min: [-1, 0, -1], max: [1, 2, 1] }, triangles: tris, skeletal: true, ...(tris ? {} : { failed: `no triangles (${[...info.missing, ...info.skipped].slice(0, 3).join('; ') || 'no meshes'})` }) });
+            if (!tris) console.log(`  ${template}: ${r.skeletal} converted with no triangles: ${[...info.missing, ...info.skipped].slice(0, 3).join('; ') || 'no meshes in it'}`);
           }
         } else {
           const single = r.parts.length === 1 && !r.parts[0].transform && !r.effects?.length;
@@ -1999,7 +2001,8 @@ switch (cmd) {
             const b = conv.mesh.bounds ?? { min: [0, 0, 0], max: [0, 0, 0] };
             const bounds = conv.flipX ? { min: [-b.max[0], b.min[1], b.min[2]], max: [-b.min[0], b.max[1], b.max[2]] } : b;
             const effects = attachedEffects(vfs, conv.effects, outDir);
-            models.set(id, { id, source: r.source ?? r.appearance, file: `${id}.glb`, bounds, triangles: conv.tris, textured: conv.textured, shaders: conv.shaders.length, parts: conv.partCount, ...(conv.cells ? { cells: conv.cells, portals: conv.portals ?? [] } : {}), ...(effects.length ? { effects } : {}) });
+            models.set(id, { id, source: r.source ?? r.appearance, file: `${id}.glb`, bounds, triangles: conv.tris, textured: conv.textured, shaders: conv.shaders.length, parts: conv.partCount, ...(conv.cells ? { cells: conv.cells, portals: conv.portals ?? [] } : {}), ...(effects.length ? { effects } : {}), ...(conv.tris ? {} : { failed: 'no triangles' }) });
+            if (!conv.tris) console.log(`  ${template}: converted with no triangles`);
           }
         }
       } catch (err) {

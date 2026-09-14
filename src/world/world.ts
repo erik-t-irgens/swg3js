@@ -450,7 +450,8 @@ export class World {
       this.particles?.dispose();
       this.particles = new ParticleEffects(this.scene, pack.url(''));
       this.particles.heightAt = (x, z) => this.terrain.heightAt(x, z);
-      this.layoutStream = new LayoutStreamer(this.scene, this.physics, pack, layout, this.particles);
+      // The gallery is one long walk of exhibits with nothing else to draw: everything loads from anywhere on it.
+      this.layoutStream = new LayoutStreamer(this.scene, this.physics, pack, layout, this.particles, { reach: planet.id === 'gallery' ? 4 : 1 });
       if (!this.terrain.swg) {
         for (const p of this.layoutStream.objects) if (p.radius >= 2 && !p.contained) this.terrain.addAnchor({ x: p.x, z: p.z, y: p.y, r: p.radius });
       }

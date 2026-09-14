@@ -114,10 +114,13 @@ export function buildGallery({ log = () => {}, only = ['houses', 'vehicles', 'we
   const section = (id, title, templates, { gap, rowWidth, y = 0 }) => {
     const items = [];
     let skipped = 0;
+    const reasons = new Map();
     for (const template of templates.slice(0, limit)) {
       const r = deps.convert(template);
       if (!r || r.skip) {
         skipped++;
+        const why = String(r?.skip ?? 'failed').replace(/:.*$/, '').slice(0, 60);
+        reasons.set(why, (reasons.get(why) ?? 0) + 1);
         continue;
       }
       items.push({ template, model: r.model, radius: r.radius, height: r.height, label: labelOf(template) });
@@ -125,7 +128,7 @@ export function buildGallery({ log = () => {}, only = ['houses', 'vehicles', 'we
     const { placed, depth } = layOutRows(items, { gap, rowWidth, startZ: z });
     for (const p of placed) objects.push({ template: p.template, model: p.model, x: p.x, y, z: p.z, q: [1, 0, 0, 0], radius: p.radius });
     sections.push({ id, title, z, depth, items: placed.map((p) => ({ label: p.label, template: p.template, model: p.model, x: p.x, y, z: p.z, radius: p.radius, height: p.height })) });
-    log(`${title}: ${placed.length} placed${skipped ? `, ${skipped} skipped` : ''}, rows from z ${z} to ${Math.round(z + depth)}`);
+    log(`${title}: ${placed.length} placed${skipped ? `, ${skipped} skipped (${[...reasons.entries()].map(([why, n]) => `${n} ${why}`).join('; ')})` : ''}, rows from z ${z} to ${Math.round(z + depth)}`);
     z += depth + 30;
   };
   const anims = {};

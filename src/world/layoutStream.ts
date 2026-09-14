@@ -115,6 +115,8 @@ export class LayoutStreamer {
   private disposed = false;
   loadedModels = 0;
   loadedInstances = 0;
+  /** How far each size tier loads, in metres; a world can reach farther than a planet does. */
+  private readonly ranges: number[];
 
   constructor(
     private readonly scene: THREE.Scene,
@@ -122,7 +124,9 @@ export class LayoutStreamer {
     private readonly pack: AssetPack,
     layout: Layout,
     private readonly effects: ParticleEffects | null = null,
+    options: { reach?: number } = {},
   ) {
+    this.ranges = TIERS.map((t) => t.range * (options.reach ?? 1));
     for (const o of layout.objects) {
       // Snapshot space is mirrored in X and centred on the layout centre.
       const gx = -(o.x - layout.center.x);
@@ -214,9 +218,9 @@ export class LayoutStreamer {
       for (let t = 0; t < TIERS.length; t++) {
         const state = region.tiers[t];
         if (!region.objects[t].length) continue;
-        if (d <= TIERS[t].range) {
+        if (d <= this.ranges[t]) {
           if (state === null) candidates.push({ region, tier: t, d });
-        } else if (state && state !== 'loading' && d > TIERS[t].range * UNLOAD_SLACK) {
+        } else if (state && state !== 'loading' && d > this.ranges[t] * UNLOAD_SLACK) {
           this.unloadTier(region, t);
         }
       }
