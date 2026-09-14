@@ -850,6 +850,13 @@ export class Player {
       let diff = desired - this.heading;
       diff = Math.atan2(Math.sin(diff), Math.cos(diff));
       this.heading += diff * Math.min(1, dt * 14);
+    } else if (directional && this.grounded) {
+      // Standing: the torso follows the view and the legs lag behind it, swinging round once the
+      // view is more than 45 degrees off them (CG_SwingAngles' tolerance).
+      let diff = camYaw - this.heading;
+      diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+      const over = Math.abs(diff) - Math.PI / 4;
+      if (over > 0) this.heading += Math.sign(diff) * over * Math.min(1, dt * 12);
     }
     // How far the torso turns back towards the camera after the legs' angle.
     this.torsoTwist = directional && this.grounded && !faceCamera && !this.lockedHeading ? Math.atan2(Math.sin(camYaw - this.heading), Math.cos(camYaw - this.heading)) : 0;
@@ -885,7 +892,8 @@ export class Player {
     else rig.setState(speed < 4.5 ? 'walk' : 'run', speed);
     rig.update(dt);
     this.group.updateMatrixWorld(true);
-    if (this.torsoTwist !== 0 && !rig.overriding) rig.twistTorso(this.torsoTwist);
+    // Always called: with no twist it puts the spine's clip pose back.
+    rig.twistTorso(rig.overriding ? 0 : this.torsoTwist);
 
     if (this.mounted) {
       rig.aimArm('right', armDir.set(-0.25, -0.15, 0.95).normalize());

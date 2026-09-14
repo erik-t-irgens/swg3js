@@ -67,6 +67,8 @@ export class CharacterRig {
   readonly scale: number;
   private readonly actions = new Map<string, THREE.AnimationAction>();
   private readonly bones = new Map<string, THREE.Bone>();
+  /** Each spine bone's pose before and after the torso twist, so the twist never stacks on itself. */
+  private readonly twists = new Map<THREE.Bone, { clean: THREE.Quaternion; twisted: THREE.Quaternion }>();
   private readonly roles = new Map<BoneRole, THREE.Bone | null>();
   private readonly restArm = new Map<'left' | 'right', THREE.Vector3>();
   /** Bind-pose rotations of the arm bones: relative to the root (upper arms) and to the parent (forearms). */
@@ -316,10 +318,21 @@ export class CharacterRig {
     tmpQ.setFromAxisAngle(UP_AXIS, each);
     for (const bone of spines) {
       if (!bone.parent) continue;
-      // A turn about the character's up axis, expressed in the bone's parent frame.
-      bone.parent.getWorldQuaternion(parentQ);
-      alignQ.copy(parentQ).invert().multiply(rootQ).multiply(tmpQ).multiply(rootQ.clone().invert()).multiply(parentQ);
-      bone.quaternion.premultiply(alignQ);
+      // The twist goes on top of the clip's pose, never on top of last frame's twist: a bone the
+      // clip did not write this frame still holds the twisted value, so put the clean one back.
+      let twist = this.twists.get(bone);
+      if (!twist) {
+        twist = { clean: new THREE.Quaternion(), twisted: new THREE.Quaternion() };
+        this.twists.set(bone, twist);
+      } else if (bone.quaternion.equals(twist.twisted)) bone.quaternion.copy(twist.clean);
+      twist.clean.copy(bone.quaternion);
+      if (each !== 0) {
+        // A turn about the character's up axis, expressed in the bone's parent frame.
+        bone.parent.getWorldQuaternion(parentQ);
+        alignQ.copy(parentQ).invert().multiply(rootQ).multiply(tmpQ).multiply(rootQ.clone().invert()).multiply(parentQ);
+        bone.quaternion.premultiply(alignQ);
+      }
+      twist.twisted.copy(bone.quaternion);
       bone.updateMatrixWorld(true);
     }
   }
