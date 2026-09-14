@@ -70,30 +70,37 @@ export class PortalRenderer {
     this.passes++;
   }
 
-  private quarantine(target: THREE.Object3D, camera: THREE.Camera, err: unknown): void {
-    const candidates: THREE.Object3D[] = [];
-    target.traverse((o) => {
-      const m = o as THREE.Mesh;
-      if (o.visible && (m.isMesh || (o as THREE.Points).isPoints || (o as THREE.Sprite).isSprite || (o as THREE.Line).isLine) && o.layers.test(camera.layers)) candidates.push(o);
-    });
-    let culprit: THREE.Object3D | null = null;
-    for (const o of candidates) {
-      try {
-        this.renderer.render(o as unknown as THREE.Scene, camera);
-      } catch {
-        culprit = o;
-        break;
-      }
-    }
+  /** The object the renderer is drawing right now, noted by the hook on renderBufferDirect. */
+  private drawing: THREE.Object3D | null = null;
+
+  /**
+   * Hook the renderer's draw call so the object being drawn is always known: a draw that throws
+   * is then named at once. Finding it by drawing every candidate alone as its own scene, as
+   * this used to, compiled a lightless shader for each and cost seconds per failure.
+   */
+  private hookDraws(): void {
+    const r = this.renderer;
+    const direct = r.renderBufferDirect.bind(r);
+    r.renderBufferDirect = (camera, scene, geometry, material, object, group) => {
+      this.drawing = object;
+      direct(camera, scene, geometry, material, object, group);
+    };
+  }
+
+  private quarantine(target: THREE.Object3D, _camera: THREE.Camera, err: unknown): void {
+    const culprit: THREE.Object3D | null = this.drawing;
     const why = String((err as Error)?.message ?? err);
     if (culprit) {
       culprit.visible = false;
       const m = culprit as THREE.Mesh;
       const geo = m.geometry as THREE.BufferGeometry | undefined;
       const mat = (Array.isArray(m.material) ? m.material[0] : m.material) as THREE.Material | undefined;
-      const detail = { name: culprit.name || '(unnamed)', type: culprit.type, parent: culprit.parent?.name || culprit.parent?.type, attributes: geo ? Object.keys(geo.attributes) : [], index: geo ? !!geo.index : false, groups: geo?.groups?.length ?? 0, drawRange: geo ? [geo.drawRange.start, geo.drawRange.count] : null, material: mat?.type, materialName: mat?.name, uniforms: (mat as THREE.ShaderMaterial | undefined)?.uniforms ? Object.keys((mat as THREE.ShaderMaterial).uniforms) : undefined, userData: culprit.userData };
+      // The renderer's own record of the material: the uniforms its program will read, and which of them have no value.
+      const props = mat ? (this.renderer.properties.get(mat) as { uniforms?: Record<string, { value: unknown }> }) : null;
+      const valueless = Object.entries(props?.uniforms ?? {}).filter(([, u]) => u && u.value === undefined).map(([k]) => k);
+      const detail = { name: culprit.name || '(unnamed)', type: culprit.type, parent: culprit.parent?.name || culprit.parent?.type, layers: culprit.layers.mask, attributes: geo ? Object.keys(geo.attributes) : [], index: geo ? !!geo.index : false, groups: geo?.groups?.length ?? 0, drawRange: geo ? [geo.drawRange.start, geo.drawRange.count] : null, material: mat?.type, materialName: mat?.name, defines: mat?.defines ? Object.keys(mat.defines) : [], ownHook: !!mat && mat.onBeforeCompile.toString().length > 40 ? 'yes' : 'no', uniforms: (mat as THREE.ShaderMaterial | undefined)?.uniforms ? Object.keys((mat as THREE.ShaderMaterial).uniforms) : undefined, valueless, userData: culprit.userData };
       this.broken.push({ name: detail.name, type: detail.type, why });
-      console.error(`render: hid an object that fails to draw (${why}):`, detail, err);
+      console.error(`render: hid an object that fails to draw (${why}): ${JSON.stringify(detail)}`, err);
     } else {
       this.broken.push({ name: '(not found)', type: target.type, why });
       console.error(`render: a pass failed (${why}) and no single object reproduces it:`, err);
@@ -101,6 +108,7 @@ export class PortalRenderer {
   }
 
   constructor(private readonly renderer: THREE.WebGLRenderer) {
+    this.hookDraws();
     this.portalMat = new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false, depthTest: true, side: THREE.DoubleSide });
     this.portalMat.stencilWrite = true;
     this.portalMat.stencilZPass = THREE.ReplaceStencilOp;

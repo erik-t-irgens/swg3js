@@ -184,12 +184,61 @@ function textureFor(vfs, shaderPath) {
       const dds = decodeDds(vfs.read(main));
       result = { path: main, png: encodePng(dds.width, dds.height, dds.rgba), hasAlpha: dds.hasAlpha, alphaMode: alphaFromEffect(vfs, effect, alphaMode) };
       Object.assign(result, surfaceFor(vfs, effect, slots, dds, result.alphaMode));
+      const normalSlot = (slots ?? []).find((s) => /^(CNRM|NRML|DOT3)$/.test(s.slot));
+      const normal = normalSlot ? normalFor(vfs, normalSlot.path) : null;
+      if (normal) result.normal = normal;
     }
   } catch (err) {
     console.error(`  texture for ${shaderPath} skipped: ${err.message}`);
   }
   textureCache.set(shaderPath, result);
   return result;
+}
+
+const normalCache = new Map();
+
+/**
+ * A shader's normal map as glTF wants it: tangent-space RGB, green up. The game's compressed
+ * normal maps ("cn" textures, the CNRM slot) keep x in the alpha and y in the green channel
+ * with z left to be rebuilt, told from an ordinary RGB map by the alpha carrying the detail
+ * and the red none; the game's green points down the texture, and the glTF loader reads a map
+ * without tangents with its green flipped, so the green is inverted here to come out right.
+ */
+function normalFor(vfs, file) {
+  const key = file.replace(/\\/g, '/').toLowerCase();
+  if (normalCache.has(key)) return normalCache.get(key);
+  let out = null;
+  try {
+    if (vfs.has(key)) {
+      const dds = decodeDds(vfs.read(key));
+      const n = dds.width * dds.height;
+      const src = dds.rgba;
+      let sumA = 0, sumR = 0, sqA = 0, sqR = 0, count = 0;
+      const step = Math.max(1, Math.floor(n / 4096));
+      for (let i = 0; i < n; i += step) {
+        const r8 = src[i * 4], a8 = src[i * 4 + 3];
+        sumR += r8; sqR += r8 * r8; sumA += a8; sqA += a8 * a8; count++;
+      }
+      const varA = sqA / count - (sumA / count) ** 2;
+      const varR = sqR / count - (sumR / count) ** 2;
+      const swizzled = varA > 4 && varA > varR * 4;
+      const rgba = new Uint8Array(n * 4);
+      for (let i = 0; i < n; i++) {
+        const x = (swizzled ? src[i * 4 + 3] : src[i * 4]) / 127.5 - 1;
+        const y = src[i * 4 + 1] / 127.5 - 1;
+        const z = swizzled ? Math.sqrt(Math.max(0, 1 - x * x - y * y)) : src[i * 4 + 2] / 127.5 - 1;
+        rgba[i * 4] = Math.round((x * 0.5 + 0.5) * 255);
+        rgba[i * 4 + 1] = 255 - Math.round((y * 0.5 + 0.5) * 255);
+        rgba[i * 4 + 2] = Math.round((z * 0.5 + 0.5) * 255);
+        rgba[i * 4 + 3] = 255;
+      }
+      out = { path: key, png: encodePng(dds.width, dds.height, rgba), swizzled };
+    }
+  } catch (err) {
+    console.error(`  normal map ${file} skipped: ${err.message}`);
+  }
+  normalCache.set(key, out);
+  return out;
 }
 
 const surfaceEffects = new Map();
@@ -887,7 +936,9 @@ function skinnedTexture(vfs, shaderPath, slots, ctx, info, mesh = null) {
   const alphaMode = pass?.alphaTest ? 'MASK' : pass?.alphaBlend ? 'BLEND' : 'OPAQUE';
   let hasAlpha = image.hasAlpha ?? false;
   if (image.hasAlpha === undefined) for (let i = 3; i < image.rgba.length; i += 4) if (image.rgba[i] !== 255) { hasAlpha = true; break; }
-  return { path: `${shaderPath}#${rendered ? basename(rendered.file) : 'baked'}`, png: encodePng(image.width, image.height, image.rgba), hasAlpha, alphaMode };
+  const normalFile = shader?.textureFiles?.get('CNRM') ?? shader?.textureFiles?.get('NRML') ?? shader?.textureFiles?.get('DOT3') ?? null;
+  const normal = normalFile ? normalFor(vfs, normalFile) : null;
+  return { path: `${shaderPath}#${rendered ? basename(rendered.file) : 'baked'}`, png: encodePng(image.width, image.height, image.rgba), hasAlpha, alphaMode, ...(normal ? { normal } : {}) };
 }
 
 /**
