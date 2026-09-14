@@ -3,7 +3,16 @@
 import { DEFAULT_BINDINGS, type Action, type Input } from '../core/input';
 import { DEFAULT_SETTINGS, saveSettings, type Settings } from '../core/settings';
 
-type Page = 'main' | 'controls' | 'graphics' | 'emotes';
+type Page = 'main' | 'controls' | 'graphics' | 'emotes' | 'multiplayer';
+
+/** What the multiplayer page needs from the game: the relay's address and state, and who is here. */
+export interface NetSource {
+  url(): string;
+  status(): string;
+  peers(): string[];
+  connect(url: string): void;
+  disconnect(): void;
+}
 
 /** What the emotes page needs from the game: the rig's emote clips, and the wheel's slots to read and write. */
 export interface EmoteSource {
@@ -129,6 +138,8 @@ export class Menu {
 
   /** The emotes page's source, given by the game once a character is up. */
   emotes: EmoteSource | null = null;
+  /** The multiplayer page's source. */
+  net: NetSource | null = null;
 
   constructor(parent: HTMLElement, private readonly input: Input, private readonly settings: Settings) {
     this.root = document.createElement('div');
@@ -142,6 +153,7 @@ export class Menu {
           <button data-page="controls">Controls</button>
           <button data-page="graphics">Graphics</button>
           <button data-page="emotes">Emotes</button>
+          <button data-page="multiplayer">Multiplayer</button>
           <div class="menu-spacer"></div>
           <button class="resume-nav">Resume <b>Esc</b></button>
         </nav>
@@ -188,6 +200,7 @@ export class Menu {
           <button class="big" data-page="controls">Controls</button>
           <button class="big" data-page="graphics">Graphics</button>
           <button class="big" data-page="emotes">Emotes</button>
+          <button class="big" data-page="multiplayer">Multiplayer</button>
         </div>
         <p class="menu-hint">The world keeps turning behind this; the character stands still. Settings are kept in this browser.</p>`;
       body.querySelector('.resume')!.addEventListener('click', () => this.onResume());
@@ -200,6 +213,26 @@ export class Menu {
       body.querySelector('.reset-keys')!.addEventListener('click', () => {
         this.input.resetBindings();
         this.showPage('controls');
+      });
+    } else if (page === 'multiplayer') {
+      const net = this.net;
+      const peers = net?.peers() ?? [];
+      body.innerHTML = `<h2>Multiplayer</h2>
+        <p class="menu-hint">A start: a relay passes everyone's place and pose to everyone else, and each player is shown as their own character where they stand, doing what they do. No combat between players yet, no vehicles or ships carried across, nothing kept on the relay. Run one with <code>node server/relay.mjs</code> (port 8787) and give its address here; <code>?server=ws://host:8787</code> in the page's address does the same.</p>
+        <div class="knob"><div class="knob-label">Relay address<small>ws://host:8787, or wss:// behind a proxy with TLS</small></div><div class="knob-control"><input type="text" class="server" value="${(net?.url() ?? '').replace(/"/g, '&quot;')}" placeholder="ws://localhost:8787" spellcheck="false" /></div></div>
+        <div class="menu-actions"><button class="connect">Connect</button><button class="disconnect">Disconnect</button><span class="menu-hint net-status">${net?.status() ?? 'off'}</span></div>
+        <h3>Here <span>${peers.length} on this world</span></h3>${peers.length ? `<ul class="peer-list">${peers.map((n) => `<li>${n.replace(/</g, '&lt;')}</li>`).join('')}</ul>` : '<p class="menu-hint">Nobody else here.</p>'}`;
+      const input = body.querySelector<HTMLInputElement>('.server')!;
+      body.querySelector('.connect')!.addEventListener('click', () => {
+        net?.connect(input.value.trim());
+        window.setTimeout(() => this.showPage('multiplayer'), 600);
+      });
+      body.querySelector('.disconnect')!.addEventListener('click', () => {
+        net?.disconnect();
+        this.showPage('multiplayer');
+      });
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') body.querySelector<HTMLButtonElement>('.connect')!.click();
       });
     } else if (page === 'emotes') {
       const src = this.emotes;

@@ -1,0 +1,174 @@
+// The other players: each one a rig of its species, stood where the relay last said, gliding to
+// each new place, playing the state the other's rig plays, with a name over its head.
+import * as THREE from 'three';
+import { CharacterRig, loadPlayerRig, type RigState } from '../player/rig';
+import { markActor } from '../world/portalRender';
+import type { Hello, PeerState } from './net';
+
+interface Remote {
+  id: number;
+  hello: Hello;
+  group: THREE.Group;
+  rig: CharacterRig | null;
+  label: THREE.Sprite;
+  target: THREE.Vector3;
+  heading: number;
+  state: string;
+  speed: number;
+  saber: boolean;
+  /** Seconds since the last state: past a while the figure stands still. */
+  silent: number;
+}
+
+const STATES: Set<string> = new Set(['idle', 'walk', 'run', 'air', 'seated', 'swim', 'float', 'crouch', 'crouchWalk', 'crouchWalkBack', 'stance', 'strafeLeft', 'strafeRight', 'runBack', 'walkBack', 'runSaber', 'walkSaber', 'gunIdle', 'gunWalk', 'gunRun', 'gunReadyIdle', 'gunReadyWalk', 'gunReadyRun', 'gunAimIdle', 'gunAimWalk', 'gunAimRun', 'kneel', 'prone', 'proneMove']);
+
+export class RemotePlayers {
+  private readonly remotes = new Map<number, Remote>();
+  /** The world the local player is on: peers elsewhere are kept but not shown. */
+  private planet = '';
+  private zone: string | undefined;
+
+  constructor(private readonly scene: THREE.Scene, private readonly baseUrl: string) {}
+
+  get count(): number {
+    return this.remotes.size;
+  }
+
+  /** How many are on this world, and their names. */
+  here(): string[] {
+    return [...this.remotes.values()].filter((r) => this.sameWorld(r.hello)).map((r) => r.hello.name);
+  }
+
+  setWorld(planet: string, zone: string | undefined): void {
+    this.planet = planet;
+    this.zone = zone;
+    for (const r of this.remotes.values()) r.group.visible = this.sameWorld(r.hello);
+  }
+
+  private sameWorld(h: Hello): boolean {
+    return h.planet === this.planet && (h.zone ?? undefined) === this.zone;
+  }
+
+  add(id: number, hello: Hello): void {
+    this.remove(id);
+    const group = new THREE.Group();
+    group.visible = this.sameWorld(hello);
+    const label = makeLabel(hello.name);
+    label.position.y = 2.15;
+    group.add(label);
+    this.scene.add(group);
+    markActor(group);
+    const remote: Remote = { id, hello, group, rig: null, label, target: new THREE.Vector3(0, -1000, 0), heading: 0, state: 'idle', speed: 0, saber: false, silent: 0 };
+    this.remotes.set(id, remote);
+    void this.dress(remote);
+  }
+
+  /** The rig of the peer's species, put under its group once it loads (the placeholder is nothing meanwhile). */
+  private async dress(remote: Remote): Promise<void> {
+    const species = remote.hello.species;
+    try {
+      const rig = await loadPlayerRig(this.baseUrl, species);
+      if (this.remotes.get(remote.id) !== remote || remote.hello.species !== species) return;
+      rig.root.scale.setScalar(rig.scale);
+      remote.group.add(rig.root);
+      markActor(rig.root);
+      remote.rig = rig;
+      remote.rig.setState('idle');
+    } catch (err) {
+      console.warn(`remote player ${remote.hello.name}: no rig for ${species}`, err);
+    }
+  }
+
+  hello(id: number, hello: Hello): void {
+    const r = this.remotes.get(id);
+    if (!r) return;
+    const speciesChanged = r.hello.species !== hello.species;
+    r.hello = hello;
+    r.group.visible = this.sameWorld(hello);
+    (r.label.material as THREE.SpriteMaterial).map?.dispose();
+    r.group.remove(r.label);
+    r.label = makeLabel(hello.name);
+    r.label.position.y = 2.15;
+    r.group.add(r.label);
+    if (speciesChanged) {
+      if (r.rig) r.group.remove(r.rig.root);
+      r.rig = null;
+      void this.dress(r);
+    }
+  }
+
+  state(id: number, s: PeerState): void {
+    const r = this.remotes.get(id);
+    if (!r) return;
+    const first = r.target.y < -900;
+    r.target.set(s.p[0], s.p[1], s.p[2]);
+    if (first) r.group.position.copy(r.target);
+    r.heading = s.h;
+    r.state = STATES.has(s.s) ? s.s : 'idle';
+    r.speed = s.v;
+    r.saber = s.sab;
+    r.silent = 0;
+  }
+
+  emote(id: number, clip: string): void {
+    const r = this.remotes.get(id);
+    r?.rig?.play(clip, { fadeIn: 0.15, loop: /^dance_/.test(clip) });
+  }
+
+  remove(id: number): void {
+    const r = this.remotes.get(id);
+    if (!r) return;
+    this.remotes.delete(id);
+    this.scene.remove(r.group);
+    (r.label.material as THREE.SpriteMaterial).map?.dispose();
+  }
+
+  update(dt: number): void {
+    for (const r of this.remotes.values()) {
+      if (!r.group.visible) continue;
+      r.silent += dt;
+      // Glide to the last place heard, a tenth of a second's worth at a time, so the figure moves
+      // smoothly between the relay's few updates a second.
+      const k = 1 - Math.exp(-dt / 0.1);
+      r.group.position.lerp(r.target, k);
+      let diff = r.heading - r.group.rotation.y;
+      diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+      r.group.rotation.y += diff * k;
+      const rig = r.rig;
+      if (rig) {
+        const moving = r.silent < 0.6 && r.group.position.distanceTo(r.target) > 0.05;
+        const state = (r.silent > 1.5 ? 'idle' : moving || r.state === 'idle' ? r.state : r.state) as RigState;
+        rig.setState(rig.hasState(state) ? state : 'idle', r.speed);
+        rig.update(dt);
+      }
+    }
+  }
+
+  dispose(): void {
+    for (const id of [...this.remotes.keys()]) this.remove(id);
+  }
+}
+
+/** A name over the head: text on a small canvas, as a sprite that faces the camera. */
+function makeLabel(name: string): THREE.Sprite {
+  const canvas = document.createElement('canvas');
+  canvas.width = 256;
+  canvas.height = 64;
+  const ctx = canvas.getContext('2d')!;
+  ctx.font = '600 28px system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  const w = Math.min(250, ctx.measureText(name).width + 24);
+  ctx.beginPath();
+  ctx.roundRect(128 - w / 2, 12, w, 40, 8);
+  ctx.fill();
+  ctx.fillStyle = '#dff1ff';
+  ctx.fillText(name, 128, 33);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false, depthWrite: false, toneMapped: false }));
+  sprite.scale.set(1.6, 0.4, 1);
+  sprite.renderOrder = 10;
+  return sprite;
+}

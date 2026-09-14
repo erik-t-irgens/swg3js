@@ -10,6 +10,7 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "swg": "node tools/swg/cli.mjs",
+    "relay": "node server/relay.mjs",
     "test:terrain": "node tools/swg/tests/terrain.test.ts",
     "test:converter": "node tools/swg/tests/buildout.test.ts && node tools/swg/tests/skeletal.test.ts && node tools/swg/tests/texrender.test.ts && node tools/swg/tests/sky.test.ts && node tools/swg/tests/particle.test.ts && node tools/swg/tests/jka.test.ts && node tools/swg/tests/clipbundle.test.ts && node tools/swg/tests/deflect.test.ts && node tools/swg/tests/saber.test.ts && node tools/swg/tests/gallery.test.ts && node tools/swg/tests/weapons.test.ts && node tools/swg/tests/ships.test.ts && node tools/swg/tests/texrender.test.ts"
   },

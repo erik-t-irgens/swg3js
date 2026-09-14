@@ -27,6 +27,8 @@ import { CreatorBar } from './ui/creatorBar';
 import { Menu } from './ui/menu';
 import { LoadingScreen } from './ui/loading';
 import { EmoteWheel } from './ui/emoteWheel';
+import { Net, type Hello } from './net/net';
+import { RemotePlayers } from './net/remotePlayers';
 import { defaultEmotes, emoteChoices, loadEmotes, saveEmotes } from './core/emotes';
 import { loadSettings, type Settings } from './core/settings';
 import { deleteCharacter, loadCharacters, newCharacterId, upsertCharacter, type Appearance, type SavedCharacter } from './core/characters';
@@ -94,6 +96,11 @@ class App {
   private readonly menu: Menu;
   private readonly loadingScreen: LoadingScreen;
   private readonly emoteWheel: EmoteWheel;
+  /** Playing together: the relay's client and the other players it tells of. */
+  private readonly net = new Net();
+  private readonly remotes: RemotePlayers;
+  private netStatus = 'off';
+  private lastStateSent = 0;
   /** The wheel's eight slots, clip names; filled from the rig's own emotes the first time. */
   private emotes: (string | null)[] = loadEmotes();
   /** An emote is playing on the player: any movement ends it. */
@@ -589,6 +596,16 @@ class App {
     this.ui.appendChild(this.fade);
     this.loadingScreen = new LoadingScreen(this.ui, import.meta.env.BASE_URL);
     this.emoteWheel = new EmoteWheel(this.ui);
+    this.remotes = new RemotePlayers(this.scene, import.meta.env.BASE_URL);
+    this.net.onJoin = (peer) => this.remotes.add(peer.id, peer.hello);
+    this.net.onHello = (peer) => this.remotes.hello(peer.id, peer.hello);
+    this.net.onLeave = (id) => this.remotes.remove(id);
+    this.net.onState = (id, state) => this.remotes.state(id, state);
+    this.net.onEmote = (id, clip) => this.remotes.emote(id, clip);
+    this.net.onStatus = (status, detail) => {
+      this.netStatus = detail ? `${status} (${detail})` : status;
+      if (status === 'online') this.hud.setPrompt('connected to the relay');
+    };
 
     this.select = new CharacterSelect(this.ui);
     this.select.onPlay = (c) => void this.play(c).catch((err) => console.warn('could not enter the world', err));
@@ -605,6 +622,17 @@ class App {
     this.creatorBar.onTab = (id) => this.showCreatorTab(id);
     this.creatorBar.onCreate = (name, cls, planet) => void this.finishCreation(name, cls, planet).catch((err) => console.warn('creator', err));
     this.menu = new Menu(this.ui, this.input, this.settings);
+    this.menu.net = {
+      url: () => Net.savedUrl(),
+      status: () => this.netStatus,
+      peers: () => this.remotes.here(),
+      connect: (url) => {
+        Net.saveUrl(url);
+        if (url) this.net.connect(url, this.helloNow());
+        else this.net.disconnect();
+      },
+      disconnect: () => this.net.disconnect(),
+    };
     this.menu.onResume = () => this.resume();
     this.menu.onSwitchCharacter = () => this.switchToSelect();
     this.menu.onSetting = (key) => this.applySetting(key);
@@ -684,6 +712,7 @@ class App {
     this.inWorld = false;
     this.started = false;
     this.current = null;
+    this.net.disconnect();
     this.world.leave();
     this.hud.setPrompt('');
     this.hud.setMouseFree(false);
@@ -790,6 +819,23 @@ class App {
     return rig.character;
   }
 
+  /** Who and where this player is, for the relay. */
+  private helloNow(): Hello {
+    return { name: this.current?.name ?? 'someone', species: this.characterId, class: this.kit?.id ?? 'jedi', planet: this.world.planet?.id ?? '', zone: this.zone };
+  }
+
+  /** Tell the relay where this player is, a few times a second, and move the others along. */
+  private stepNet(dt: number): void {
+    this.remotes.update(dt);
+    if (!this.net.online) return;
+    const now = performance.now();
+    if (now - this.lastStateSent < 100) return;
+    this.lastStateSent = now;
+    const p = this.player;
+    const rig = p.rig;
+    this.net.sendState({ p: [Number(p.pos.x.toFixed(2)), Number(p.pos.y.toFixed(2)), Number(p.pos.z.toFixed(2))], h: Number(p.heading.toFixed(3)), s: p.mounted ? 'seated' : (rig?.describe().state ?? 'idle'), v: Number(Math.hypot(p.vel.x, p.vel.z).toFixed(2)), m: !!p.mounted, sab: p.saberOn });
+  }
+
   /** The wheel's slots from the rig's own emotes when none were kept yet, and the menu's Emotes page fed from it. */
   private wireEmotes(clips: string[]): void {
     if (this.emotes.every((e) => e === null)) this.emotes = defaultEmotes(clips);
@@ -812,6 +858,7 @@ class App {
       return;
     }
     this.emoting = true;
+    this.net.sendEmote(clip);
   }
 
   /** Play as another species or gender: the parts pack of that id replaces the rig, the wardrobe follows. */
@@ -932,6 +979,9 @@ class App {
     c.played = Date.now();
     upsertCharacter(c);
     this.savePlace(true);
+    this.remotes.setWorld(planet.id, this.zone);
+    const relay = Net.savedUrl();
+    if (relay) this.net.connect(relay, this.helloNow());
     await this.loadingScreen.hide();
     this.traveling = false;
     this.input.requestLock();
@@ -1023,6 +1073,8 @@ class App {
     this.hud.setPlanet(planet);
     this.map.setCurrent(planet.id, this.zone);
     this.updateUrl();
+    this.remotes.setWorld(planet.id, this.zone);
+    this.net.setHello(this.helloNow());
     const arrivalSpawn = this.spawn.clone();
     void this.world.loadPack(stand).then((clearSpawn) => {
       const p = this.player;
@@ -1541,6 +1593,7 @@ class App {
       }
 
       this.stepVehicles(dt, simulate);
+      this.stepNet(dt);
 
       const fast = simulate && input.held('fastForward');
       for (const m of this.shown) m.update(dt);

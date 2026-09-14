@@ -292,3 +292,6 @@ b { color: var(--accent); font-weight: 600; }
 #emote-wheel .sector.on { border-color: var(--accent); color: var(--accent); transform: scale(1.12); box-shadow: 0 0 14px rgba(127,215,255,0.5); }
 #emote-wheel .hub { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); font-size: 14px; letter-spacing: 0.1em; color: var(--accent); text-shadow: 0 1px 8px rgba(0,0,0,0.8); }
 #emote-wheel .wheel-hint { margin-top: 8px; font-size: 10px; letter-spacing: 0.06em; color: var(--muted); text-shadow: 0 1px 6px rgba(0,0,0,0.8); }
+.knob-control input[type=text] { flex: 1; padding: 6px 8px; font-size: 13px; background: rgba(0,0,0,0.45); color: var(--text); border: 1px solid var(--panel-border); border-radius: 4px; }
+.knob-control input[type=text]:focus { outline: none; border-color: var(--accent); }
+.peer-list { margin: 6px 0; padding-left: 18px; font-size: 13px; }
