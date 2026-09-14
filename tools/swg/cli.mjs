@@ -88,7 +88,8 @@ import { extractClips, readGlb, replaceClips, skinJoints } from './glbclips.mjs'
 import { packClips, retargetClips, unpackClips } from './clipbundle.mjs';
 import { encodePng } from './png.mjs';
 import { shaderTextures } from './sht.mjs';
-import { bakeShader, describeShader, describeVariables, loadShader, parseBlueprint, parsePalette, preparedShaders, renderBlueprint, renderContext, shaderNeedsBake } from './texrender.mjs';
+import { bakeShader, describeShader, describeVariables, loadImage, loadShader, parseBlueprint, parsePalette, preparedShaders, renderBlueprint, renderContext, shaderNeedsBake } from './texrender.mjs';
+import { ImageRegistry, exportBlueprint, exportPalettes, exportShader, palettesOf } from './customize.mjs';
 import { effectAlpha, alphaModeFor } from './eff.mjs';
 import { localize, parseDatatable } from './datatable.mjs';
 import { createRequire } from 'node:module';
@@ -745,6 +746,7 @@ function convertParts(vfs, outRoot, template, { wear = DEFAULT_WEAR, variables =
     console.log(`   ${p.name.padEnd(22)} ${String(p.triangles).padStart(5)} tris  ${(p.bytes / 1024).toFixed(0).padStart(5)} KB  layer ${p.occlusionLayer}${p.occludes?.length ? `  hides ${p.occludes.join(' ')}` : ''}${p.morphs?.length ? `  ${p.morphs.length} morphs` : ''}`);
   }
   console.log(`   ${info.parts.length} parts, ${(total / 1e6).toFixed(1)} MB of meshes (the rig and its clips are shared)`);
+  if (info.recipes) console.log(`   live customization: ${info.recipes} texture recipes over ${info.images} images in customize/ (the game renders skin, hair and eyes itself)`);
   const palettes = manifest.variables.filter((v) => v.kind === 'palette');
   if (manifest.variables.length) console.log(`   customization: ${palettes.length} colour palettes (${palettes.map((v) => `${v.name} ${v.colors.length}`).join(', ')}), ${manifest.variables.length - palettes.length} choices; set with --var=name=value`);
   if (info.skipped.length) console.log(`   skipped: ${info.skipped.slice(0, 5).join('; ')}`);
@@ -931,6 +933,11 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
   }
   info.attached = skeleton.attached.map((a, i) => `${extras[i].file} (${a.joints} joints) at ${a.attachTo}`);
   const meshes = [];
+  const recipes = parts ? [] : null;
+  const registry = parts ? new ImageRegistry((id, bytes) => {
+    mkdirSync(join(parts.dir, 'customize'), { recursive: true });
+    writeFileSync(join(parts.dir, 'customize', id), bytes);
+  }) : null;
   const textures = new Map();
   const ctx = renderContext(variables);
   // Mesh generators of the body and of everything worn over it, composed the way the game does:
@@ -1021,7 +1028,7 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
         info.textureRenderers.push(`${trt.file}: ${bp.width}x${bp.height} for ${trt.slots.map((sl) => `${mgn.shaders[sl.shaderIndex]?.shader ?? sl.shaderIndex}:${sl.tag}`).join(', ')}${image.missing.length ? `; missing textures ${image.missing.join(', ')}` : ''}${image.unsupported.length ? `; effects without fixed-function passes ${image.unsupported.join(', ')}` : ''}`);
         for (const line of describeVariables(bp.variables)) info.customization.add(`${trt.file}: ${line}`);
         noteVariables(info, bp.variables, trt.file);
-        for (const sl of trt.slots) (slotsByShader.get(sl.shaderIndex) ?? slotsByShader.set(sl.shaderIndex, []).get(sl.shaderIndex)).push({ tag: sl.tag, image, file: trt.file });
+        for (const sl of trt.slots) (slotsByShader.get(sl.shaderIndex) ?? slotsByShader.set(sl.shaderIndex, []).get(sl.shaderIndex)).push({ tag: sl.tag, image, file: trt.file, bp });
       } catch (err) {
         info.skipped.push(`${trt.file}: ${err.message}`);
       }
@@ -1030,10 +1037,39 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
     groups.forEach((g, i) => {
       if (!g.primitives[0].indices.length) return; // everything this shader drew is under clothing
       const slots = slotsByShader.get(i);
+      const shaderPath = g.shader;
       const t = skinnedTexture(vfs, g.shader, slots, ctx, info);
       if (slots) g.shader = `${g.shader}@${meshName}`; // its own material: the rendered texture is this mesh's
       if (t) textures.set(g.shader, t);
       kept.push(g);
+      // For a parts pack: how this material's texture is made, so the game can make it again with
+      // other colours and choices (a rendered blueprint, a shader baked over one, or a shader
+      // baked from its own textures and palette factors). A plain texture needs nothing.
+      if (parts && recipes) {
+        try {
+          const shader = loadShader(vfs, shaderPath, ctx);
+          const rendered = slots?.find((sl) => sl.tag === 'MAIN') ?? slots?.[0];
+          let bake = false;
+          if (shader?.effect) {
+            const s = { ...shader, textures: new Map(shader.textures) };
+            for (const slot of slots ?? []) s.textures.set(slot.tag, slot.image);
+            bake = !rendered || shaderNeedsBake(s, rendered.tag);
+          }
+          if (rendered || bake) {
+            const load = (file) => loadImage(vfs, file, ctx.images);
+            recipes.push({
+              mesh: meshName,
+              material: g.shader,
+              kind: bake ? 'bake' : 'render',
+              baseTag: rendered ? rendered.tag : 'MAIN',
+              shader: exportShader(shader, registry, load),
+              slots: (slots ?? []).map((sl) => ({ tag: sl.tag, file: sl.file, blueprint: exportBlueprint(vfs, sl.bp, ctx, registry, loadImage) })),
+            });
+          }
+        } catch (err) {
+          info.skipped.push(`${shaderPath}: no live recipe (${err.message})`);
+        }
+      }
     });
     if (kept.length) {
       const entry = { name: meshName, groups: kept, blendTargets: mgn.blendTargets };
@@ -1140,6 +1176,13 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
     // plus a rig of skeleton and animations alone that every part and every species shares.
     mkdirSync(parts.dir, { recursive: true });
     info.parts = [];
+    // The live customization recipes and the images they draw from.
+    if (recipes.length) {
+      const palettes = exportPalettes(vfs, recipes.flatMap((r) => palettesOf(r)));
+      writeFileSync(join(parts.dir, 'customize.json'), JSON.stringify({ images: 'customize/', recipes, palettes }, null, 1));
+      info.recipes = recipes.length;
+      info.images = registry.ids.size;
+    }
     const rigFile = join(parts.dir, `${parts.rig ?? 'rig'}.glb`);
     writeFileSync(rigFile, buildGlb([], { flipX: true, skin, animations: skin.clips }));
     info.rig = { file: relative(parts.dir, rigFile), joints: skin.joints.length, clips: skin.clips.length };

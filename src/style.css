@@ -155,6 +155,9 @@ b { color: var(--accent); font-weight: 600; }
 .swatch { width: 14px; height: 14px; padding: 0; border: 1px solid rgba(0,0,0,0.6); border-radius: 2px; cursor: pointer; }
 .swatch.on { outline: 2px solid var(--accent); outline-offset: 1px; }
 .bake-hint { font-size: 11px; color: var(--muted); padding: 4px 0 8px; line-height: 1.5; }
+.wardrobe-slot.colour .palette { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.wardrobe-slot.colour input[type=range] { width: 100%; accent-color: var(--accent); }
+.wardrobe-slot.colour.dead .swatch, .wardrobe-slot.colour.dead input { opacity: 0.55; }
 .bake-hint code { color: var(--accent); user-select: all; }
 .wardrobe-empty code { color: var(--accent); }
 

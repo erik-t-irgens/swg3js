@@ -340,7 +340,9 @@ export function loadShader(vfs, source, ctx) {
     const base = v.children.find((c) => isForm(c) ? c.type === 'SSHT' || c.type === 'CSHD' : c.tag === 'NAME');
     shader = base ? loadShader(vfs, isForm(base) ? base : new R(base.data).str(), ctx) : null;
     if (shader) {
-      shader = { ...shader, textures: new Map(shader.textures), tfactors: new Map(shader.tfactors), textureFiles: new Map(shader.textureFiles), variables: [] };
+      // The customization operations are kept as well as applied, so a pack can carry them for the
+      // game to apply again with other values.
+      shader = { ...shader, textures: new Map(shader.textures), tfactors: new Map(shader.tfactors), textureFiles: new Map(shader.textureFiles), variables: [], textureChoices: [], paletteFactors: [] };
       const txtr = childOf(v, 'TXTR');
       if (txtr) {
         const r = new R(childOf(txtr, 'DATA').data);
@@ -358,6 +360,7 @@ export function loadShader(vfs, source, ctx) {
           const def = o.i16();
           const value = variableValue(ctx, variable, isPrivate, def);
           shader.variables.push({ name: variable, kind: 'int', min: 0, max: n, default: def, private: isPrivate });
+          shader.textureChoices.push({ tag, files: files.slice(baseIndex, baseIndex + n), variable, private: isPrivate, default: def });
           const chosen = files[baseIndex + Math.min(Math.max(value, 0), n - 1)];
           if (chosen) {
             shader.textureFiles.set(tag, chosen);
@@ -375,6 +378,7 @@ export function loadShader(vfs, source, ctx) {
         const def = o.i32();
         const value = variableValue(ctx, variable, isPrivate, def);
         shader.variables.push({ name: variable, kind: 'palette', palette, default: def, private: isPrivate });
+        shader.paletteFactors.push({ tag, palette, variable, private: isPrivate, default: def });
         shader.tfactors.set(tag, paletteColor(vfs, palette, value, ctx));
       }
     }

@@ -7,6 +7,7 @@
 
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { Customizer } from './customizer';
 
 /** A mesh's occlusion data, as the converter carried it out of the mesh generator. */
 interface PartDef {
@@ -137,6 +138,8 @@ export class Character {
   private skeleton: THREE.Skeleton | null = null;
   private dir = '';
   private wardrobe: Wardrobe | null = null;
+  /** Live colours and choices, when the pack carries the recipes (customize.json). */
+  customizer: Customizer | null = null;
 
   private constructor(readonly manifest: PartsManifest, clips: THREE.AnimationClip[]) {
     this.clips = clips;
@@ -165,6 +168,12 @@ export class Character {
     for (const def of wanted) await character.addPart(def.name, [def], true);
     if (!character.skeleton) throw new Error(`${id}: no part carried a skeleton`);
     character.applyOcclusion();
+    character.customizer = await Customizer.load(dir);
+    if (character.customizer) {
+      character.customizer.materialsFor = (name) => character.materialsNamed(name);
+      // The pack's values are the manifest's; ours start there, and the recipes render only when a value moves.
+      for (const [k, v] of Object.entries(manifest.values ?? {})) character.customizer.values.set(k, v);
+    }
     return character;
   }
 
@@ -233,6 +242,8 @@ export class Character {
     // The rest contribute meshes only; their bones would be a second, unanimated skeleton.
     if (first) for (const sc of scenes) this.group.add(sc);
     else for (const m of meshes) this.group.add(m);
+    // A part loaded after a colour changed takes the rendered texture too.
+    this.customizer?.reapply();
     // The outermost def decides how the whole item occludes.
     const outer = defs.reduce((a, b) => (b.occlusionLayer > a.occlusionLayer ? b : a));
     this.parts.set(key, {
@@ -341,6 +352,33 @@ export class Character {
     else await this.addPart(id, item.parts, true);
     this.applyOcclusion();
     return true;
+  }
+
+  /** Every material of the given name across the parts (the recipes name materials by the converter's shader key). */
+  materialsNamed(name: string): THREE.Material[] {
+    const out: THREE.Material[] = [];
+    for (const part of this.parts.values()) {
+      for (const m of part.meshes) {
+        const mats = Array.isArray(m.material) ? m.material : [m.material];
+        for (const mat of mats) if (mat.name === name && !out.includes(mat)) out.push(mat);
+      }
+    }
+    return out;
+  }
+
+  /** Whether a customization variable can change live (the pack carries a recipe that reads it). */
+  canCustomize(name: string): boolean {
+    return !!this.customizer?.affects(name);
+  }
+
+  /** Set a colour or choice live: the skin, hair or eye textures that read it are rendered again. Returns how many. */
+  setVariable(name: string, value: number): number {
+    return this.customizer?.set(name, value) ?? 0;
+  }
+
+  /** The customization values in force (the pack's, with whatever has been changed). */
+  variableValues(): Record<string, number> {
+    return Object.fromEntries(this.customizer?.values ?? []);
   }
 
   /** Every shape slider, and where each sits. */

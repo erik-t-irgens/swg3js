@@ -109,29 +109,49 @@ export class AppearanceUi {
     const c = this.character;
     const vars = c?.manifest.variables ?? [];
     if (!vars.length) return '';
-    const values = c?.manifest.values ?? {};
+    const values = { ...(c?.manifest.values ?? {}), ...(c?.variableValues() ?? {}) };
     const rows: string[] = [];
     for (const v of vars) {
       const short = v.name.replace(/^.*\//, '');
       const current = values[v.name] ?? values[short] ?? v.default;
+      const live = c?.canCustomize(v.name) ?? false;
+      const dead = live ? '' : ' dead';
       if (v.kind === 'palette' && v.colors?.length) {
+        // Swatches to click, and a slider under them to scrub through the palette.
         const swatches = v.colors.map((rgb, i) => `<button class="swatch${i === current ? ' on' : ''}" data-var="${v.name}" data-value="${i}" style="background:rgb(${rgb[0]},${rgb[1]},${rgb[2]})" title="${short} = ${i}"></button>`).join('');
-        rows.push(`<div class="wardrobe-slot colour"><span class="slot-label">${prettyMorph(short)}</span><div class="swatches">${swatches}</div><span class="slot-count">${v.colors.length}</span></div>`);
-      } else if (v.kind === 'index') {
-        const opts = Array.from({ length: v.count ?? 0 }, (_, i) => `<option value="${i}"${i === current ? ' selected' : ''}>${i + 1} of ${v.count}</option>`).join('');
-        rows.push(`<label class="wardrobe-slot colour"><span class="slot-label">${prettyMorph(short)}</span><select data-var="${v.name}">${opts}</select><span class="slot-count">${v.count}</span></label>`);
+        rows.push(`<div class="wardrobe-slot colour${dead}"><span class="slot-label">${prettyMorph(short)}</span><div class="palette"><div class="swatches">${swatches}</div><input type="range" class="scrub" min="0" max="${v.colors.length - 1}" step="1" value="${current}" data-var="${v.name}" /></div><span class="slot-count">${current + 1}/${v.colors.length}</span></div>`);
+      } else if (v.kind === 'index' && (v.count ?? 0) > 0) {
+        rows.push(`<label class="wardrobe-slot colour${dead}"><span class="slot-label">${prettyMorph(short)}</span><input type="range" class="choice" min="0" max="${(v.count ?? 1) - 1}" step="1" value="${current}" data-var="${v.name}" /><span class="slot-count">${current + 1}/${v.count}</span></label>`);
       }
     }
     if (!rows.length) return '';
-    return `<h3 class="wardrobe-section">Colours and features <span>baked by the converter: pick one for the command</span></h3>${rows.join('')}<div class="bake-hint"></div>`;
+    const anyLive = vars.some((v) => c?.canCustomize(v.name));
+    const note = anyLive ? 'rendered live from the game\'s own palettes and blueprints' : 'this pack has no live recipes: run the converter\'s species command again, then these change live';
+    return `<h3 class="wardrobe-section">Colours and features <span>${note}</span></h3>${rows.join('')}<div class="bake-hint"></div>`;
   }
 
-  /** The command that bakes this character again with a variable set, shown under the swatches. */
-  private showBake(name: string, value: number): void {
+  /** A colour or choice picked: rendered live when the pack has the recipe, else the bake command is shown. */
+  private pick(name: string, value: number): void {
+    const c = this.character;
     const hint = this.body.querySelector<HTMLElement>('.bake-hint');
-    if (!hint) return;
-    const id = this.character?.manifest.id ?? 'human_male';
-    hint.innerHTML = `<code>npm run swg -- species @SWG assets-private --retail-only --only=${id} --var=${name.replace(/^.*\//, '')}=${value}</code> bakes ${id} with this ${prettyMorph(name.replace(/^.*\//, '')).toLowerCase()}; live colours are not there yet.`;
+    const short = name.replace(/^.*\//, '');
+    if (c?.canCustomize(name)) {
+      const n = c.setVariable(name, value);
+      if (hint) hint.textContent = `${prettyMorph(short)} ${value}: ${n} texture${n === 1 ? '' : 's'} rendering`;
+      this.onChange();
+    } else if (hint) {
+      const id = c?.manifest.id ?? 'human_male';
+      hint.innerHTML = `Not live in this pack. <code>npm run swg -- species @SWG assets-private --retail-only --only=${id} --var=${short}=${value}</code> bakes ${id} with this ${prettyMorph(short).toLowerCase()}; a pack converted now carries the live recipes.`;
+    }
+    // The row's swatch, slider and count agree.
+    for (const row of this.body.querySelectorAll<HTMLElement>('.wardrobe-slot.colour')) {
+      const input = row.querySelector<HTMLInputElement>('input[data-var]');
+      if (!input || input.dataset.var !== name) continue;
+      input.value = String(value);
+      for (const sw of row.querySelectorAll<HTMLElement>('.swatch')) sw.classList.toggle('on', Number(sw.dataset.value) === value);
+      const count = row.querySelector<HTMLElement>('.slot-count');
+      if (count) count.textContent = `${value + 1}/${Number(input.max) + 1}`;
+    }
   }
 
   /**
@@ -166,14 +186,15 @@ export class AppearanceUi {
       });
     }
     for (const b of this.body.querySelectorAll<HTMLButtonElement>('.swatch')) {
-      b.addEventListener('click', () => {
-        for (const o of this.body.querySelectorAll('.swatch.on')) o.classList.remove('on');
-        b.classList.add('on');
-        this.showBake(b.dataset.var!, Number(b.dataset.value));
-      });
+      b.addEventListener('click', () => this.pick(b.dataset.var!, Number(b.dataset.value)));
     }
-    for (const sel of this.body.querySelectorAll<HTMLSelectElement>('select[data-var]')) {
-      sel.addEventListener('change', () => this.showBake(sel.dataset.var!, Number(sel.value)));
+    for (const input of this.body.querySelectorAll<HTMLInputElement>('input[data-var]')) {
+      // A slider fires as it moves; the render waits for the value to settle for a moment.
+      let timer = 0;
+      input.addEventListener('input', () => {
+        window.clearTimeout(timer);
+        timer = window.setTimeout(() => this.pick(input.dataset.var!, Number(input.value)), 120);
+      });
     }
   }
 

@@ -117,7 +117,7 @@ class App {
     this.weaponsUi = new WeaponsUi(this.ui, (def, hand) => void this.equip(def, hand));
     this.vehiclesUi = new VehiclesUi(this.ui, (def, kind) => void this.spawnVehicle(def, kind), () => this.world.removeVehicles(this.player.mounted));
     this.npcUi = new NpcUi(this.ui);
-    this.appearanceUi = new AppearanceUi(this.ui, () => this.hud.setPrompt(''));
+    this.appearanceUi = new AppearanceUi(this.ui, () => this.saveAppearance());
     this.appearanceUi.onTab = (id) => this.toggleInventory(id as InventoryTab);
     // The tabs: a click on the other tab of a panel swaps to it, the key toggles whichever was last open.
     this.wardrobe.onTab = (id) => this.toggleInventory(id as InventoryTab);
@@ -578,7 +578,10 @@ class App {
     this.characterId = params.get('character') ?? remembered ?? 'human_male';
     if (params.get('rig') !== '0') {
       loadPlayerRig(import.meta.env.BASE_URL, this.characterId)
-        .then((rig) => this.player.attachRig(rig))
+        .then((rig) => {
+          this.player.attachRig(rig);
+          this.restoreAppearance();
+        })
         .catch((err) => console.warn('Character rig failed to load, using primitives', err));
     }
     void loadSpeciesIndex(import.meta.env.BASE_URL).then((list) => {
@@ -592,6 +595,32 @@ class App {
     this.arrive(initial && PLANETS.some((p) => p.id === initial) ? planetById(initial) : PLANETS[0], params.get('zone') ?? undefined);
   }
 
+  /** The sliders and colours of the character being played, kept per character in this browser. */
+  private saveAppearance(): void {
+    const c = this.player.rig?.character;
+    if (!c) return;
+    try {
+      localStorage.setItem(`swg.appearance.${c.manifest.id}`, JSON.stringify({ morphs: c.morphValues(), values: c.variableValues() }));
+    } catch {
+      /* private mode: the look lasts the session */
+    }
+  }
+
+  private restoreAppearance(): void {
+    const c = this.player.rig?.character;
+    if (!c) return;
+    try {
+      const saved = localStorage.getItem(`swg.appearance.${c.manifest.id}`);
+      if (!saved) return;
+      const { morphs, values } = JSON.parse(saved) as { morphs?: Record<string, number>; values?: Record<string, number> };
+      for (const [name, v] of Object.entries(morphs ?? {})) c.setMorph(name, v);
+      const changed = Object.fromEntries(Object.entries(values ?? {}).filter(([k, v]) => c.canCustomize(k) && (c.manifest.values?.[k] ?? c.manifest.values?.[k.replace(/^.*\//, '')]) !== v));
+      if (Object.keys(changed).length) c.customizer?.setAll(changed);
+    } catch {
+      /* nothing saved, or not ours */
+    }
+  }
+
   /** Play as another species or gender: the parts pack of that id replaces the rig, the wardrobe follows. */
   async switchCharacter(id: string): Promise<string> {
     const rig = await loadPlayerRig(import.meta.env.BASE_URL, id);
@@ -601,6 +630,7 @@ class App {
     this.player.detachRig();
     this.player.attachRig(rig);
     this.characterId = id;
+    this.restoreAppearance();
     try {
       localStorage.setItem('swg.character', id);
     } catch {
