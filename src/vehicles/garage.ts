@@ -111,6 +111,7 @@ export class Garage {
     const model = def.source === 'creature' ? cloneSkinned(loaded.scene) : loaded.scene.clone();
     let bounds = def.bounds;
     const hardpoints: string[] = [];
+    const engines: THREE.Vector3[] = [];
     const seat = { point: null as THREE.Vector3 | null };
     if (!bounds || def.source !== 'creature') {
       // A machine's box is measured from the model itself: the pack's bounds are the mesh file's
@@ -137,7 +138,10 @@ export class Garage {
     model.traverse((o) => {
       if (!o.name.startsWith('hp:')) return;
       hardpoints.push(o.name.slice(3));
-      if (!seat.point && /rider|saddle|seat|driver|pilot|passenger|player|mount/i.test(o.name)) seat.point = o.getWorldPosition(new THREE.Vector3()).sub(model.getWorldPosition(new THREE.Vector3())).add(model.position);
+      const local = () => o.getWorldPosition(new THREE.Vector3()).sub(model.getWorldPosition(new THREE.Vector3())).add(model.position);
+      if (!seat.point && /rider|saddle|seat|driver|pilot|passenger|player|mount/i.test(o.name)) seat.point = local();
+      // The game's engines are separate parts a player fits; their hardpoints say where the glow goes.
+      if (/engine|thrust|exhaust|booster|(^|[_:])eng\d/i.test(o.name)) engines.push(local());
     });
     if (place) [x, y, z] = place(bounds);
     const spec = specFor(kind, def.id, def.label, bounds, { animal: def.source === 'creature' });
@@ -147,7 +151,7 @@ export class Garage {
     } else if (seat.point) spec.seat = [seat.point.x, seat.point.y, seat.point.z];
     const v = new Vehicle(spec, model, physics, scene, x, y - bounds.min[1] + spec.hover, z, heading);
     v.hardpoints = hardpoints;
-    if (def.source !== 'creature') addEngineGlow(v);
+    if (def.source !== 'creature') addEngineGlow(v, engines);
     if (def.source === 'creature' && loaded.animations.length) {
       const mixer = new THREE.AnimationMixer(model);
       const clips = new Map(loaded.animations.map((a) => [a.name, a]));
@@ -182,23 +186,26 @@ export class Garage {
  * Engine glow on a machine: additive discs at the rear of its box, brighter and longer the
  * faster it goes, orange for a podracer's turbines and blue for a repulsor drive.
  */
-function addEngineGlow(v: Vehicle): void {
+function addEngineGlow(v: Vehicle, engines: THREE.Vector3[] = []): void {
   const b = v.spec.bounds;
   const w = b.max[0] - b.min[0];
   const h = b.max[1] - b.min[1];
   const pod = v.spec.kind === 'podracer';
-  const color = pod ? 0xffa040 : 0x4fd0ff;
+  const ship = !!v.spec.ship;
+  const color = pod ? 0xffa040 : ship ? 0x9fd8ff : 0x4fd0ff;
   const mat = new THREE.SpriteMaterial({ map: glowTexture(), color, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false });
   const glows: THREE.Sprite[] = [];
-  const xs = w > 1.2 ? [-w * 0.28, w * 0.28] : [0];
-  for (const x of xs) {
+  // At the engine hardpoints when the model has them (a ship's engine is a part a player fits,
+  // so the hull carries only the socket), else at the rear of the box.
+  const spots = engines.length ? engines : (w > 1.2 ? [-w * 0.28, w * 0.28] : [0]).map((x) => new THREE.Vector3(x, b.min[1] + h * 0.45, b.min[2] - 0.05));
+  for (const p of spots) {
     const sp = new THREE.Sprite(mat);
-    sp.position.set(x, b.min[1] + h * 0.45, b.min[2] - 0.05);
+    sp.position.copy(p);
     sp.scale.setScalar(0.2);
     v.group.add(sp);
     glows.push(sp);
   }
-  const size = Math.min(1.6, 0.25 + w * 0.18);
+  const size = ship ? Math.min(4, 0.6 + w * 0.12) : Math.min(1.6, 0.25 + w * 0.18);
   const base = v.onUpdate;
   v.onUpdate = (dt, self, drive) => {
     base?.(dt, self, drive);

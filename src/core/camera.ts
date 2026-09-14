@@ -10,6 +10,10 @@ const FIRST_PERSON_BELOW = 1.2;
 /** How far below level the third-person camera itself may go; the view tilts on past it. */
 const LOWEST_CAMERA_PITCH = -0.35;
 const EYE_HEIGHT = 1.5;
+const chaseOffset = new THREE.Vector3();
+const FLIP = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI);
+/** A touch of nose-down, so the ship sits below the middle of the view. */
+const chaseTilt = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -0.1);
 
 /** SWG-style free-orbit third-person camera that becomes first person when zoomed all the way in. */
 export class ThirdPersonCamera {
@@ -30,6 +34,22 @@ export class ThirdPersonCamera {
 
   constructor(aspect: number) {
     this.camera = new THREE.PerspectiveCamera(60, aspect, 0.1, 9000);
+  }
+
+  /**
+   * Behind a ship in its own frame: above and behind it looking along its nose, rolling and
+   * looping with it. The orbit's yaw is kept at the ship's heading so leaving it is seamless.
+   */
+  chase(target: THREE.Vector3, attitude: THREE.Quaternion, heading: number, distance: number): void {
+    this.distance = clamp(this.distance + 0, 0, 24);
+    this.firstPerson = false;
+    this.yaw = heading + Math.PI;
+    this.pitch = 0.32;
+    chaseOffset.set(0, distance * 0.32, -distance).applyQuaternion(attitude);
+    this.camera.position.copy(target).add(chaseOffset);
+    // Cameras look down their own -Z; the ship's nose is its +Z.
+    this.camera.quaternion.copy(attitude).multiply(FLIP).multiply(chaseTilt);
+    this.focus.copy(target);
   }
 
   /** Horizontal forward direction (from camera toward the player). */

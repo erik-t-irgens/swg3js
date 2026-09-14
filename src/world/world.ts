@@ -706,12 +706,15 @@ export class World {
     // A vehicle stirs the water from its bow and its stern, harder the bigger it is, each point
     // wandering a little so the rings overlap unevenly rather than as one neat wake.
     for (const v of this.vehicles) {
+      // Only one riding on the water (a machine floats above it, so its underside is no guide):
+      // the touch points sit just under the surface, a flyer overhead stirs nothing.
+      if (!v.onWater) continue;
       const strength = 1.6 + v.radius * 0.5;
       v.quaternion(tmpQ);
       const reach = Math.max(0.5, v.radius * 0.6);
       for (const [key, along] of [[v, reach], [v.seat, -reach]] as const) {
         tmpV.set((Math.random() - 0.5) * v.radius * 0.6, 0, along + (Math.random() - 0.5) * 0.4).applyQuaternion(tmpQ).add(v.pos);
-        tmpV.y = v.pos.y + v.spec.bounds.min[1];
+        tmpV.y = this.terrain.waterHeightAt(tmpV.x, tmpV.z) - 0.3;
         touch(key, tmpV, strength * (0.8 + Math.random() * 0.4));
       }
     }

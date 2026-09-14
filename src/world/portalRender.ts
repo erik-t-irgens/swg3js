@@ -48,14 +48,56 @@ export class PortalRenderer {
   /** What each pass of the last frame drew, for the console hook. */
   readonly passLog: { label: string; calls: number; triangles: number }[] = [];
 
-  /** Run one renderer.render() and record what it cost. */
+  /** Objects hidden because they failed to draw, with why, for the console and the stats. */
+  readonly broken: { name: string; type: string; why: string }[] = [];
+
+  /**
+   * Run one renderer.render() and record what it cost. When the draw throws, the object that
+   * throws is found by drawing the candidates one at a time, hidden, and named in the console,
+   * so one bad mesh costs its own pixels rather than the rest of the frame (which left the
+   * water and the doorways half drawn whenever it came into view).
+   */
   private pass(label: string, target: THREE.Object3D, camera: THREE.Camera): void {
     const info = this.renderer.info.render;
     const c0 = info.calls;
     const t0 = info.triangles;
-    this.renderer.render(target as THREE.Scene, camera);
+    try {
+      this.renderer.render(target as THREE.Scene, camera);
+    } catch (err) {
+      this.quarantine(target, camera, err);
+    }
     this.passLog.push({ label, calls: info.calls - c0, triangles: info.triangles - t0 });
     this.passes++;
+  }
+
+  private quarantine(target: THREE.Object3D, camera: THREE.Camera, err: unknown): void {
+    const candidates: THREE.Object3D[] = [];
+    target.traverse((o) => {
+      const m = o as THREE.Mesh;
+      if (o.visible && (m.isMesh || (o as THREE.Points).isPoints || (o as THREE.Sprite).isSprite || (o as THREE.Line).isLine) && o.layers.test(camera.layers)) candidates.push(o);
+    });
+    let culprit: THREE.Object3D | null = null;
+    for (const o of candidates) {
+      try {
+        this.renderer.render(o as unknown as THREE.Scene, camera);
+      } catch {
+        culprit = o;
+        break;
+      }
+    }
+    const why = String((err as Error)?.message ?? err);
+    if (culprit) {
+      culprit.visible = false;
+      const m = culprit as THREE.Mesh;
+      const geo = m.geometry as THREE.BufferGeometry | undefined;
+      const mat = (Array.isArray(m.material) ? m.material[0] : m.material) as THREE.Material | undefined;
+      const detail = { name: culprit.name || '(unnamed)', type: culprit.type, parent: culprit.parent?.name || culprit.parent?.type, attributes: geo ? Object.keys(geo.attributes) : [], index: geo ? !!geo.index : false, groups: geo?.groups?.length ?? 0, drawRange: geo ? [geo.drawRange.start, geo.drawRange.count] : null, material: mat?.type, materialName: mat?.name, uniforms: (mat as THREE.ShaderMaterial | undefined)?.uniforms ? Object.keys((mat as THREE.ShaderMaterial).uniforms) : undefined, userData: culprit.userData };
+      this.broken.push({ name: detail.name, type: detail.type, why });
+      console.error(`render: hid an object that fails to draw (${why}):`, detail, err);
+    } else {
+      this.broken.push({ name: '(not found)', type: target.type, why });
+      console.error(`render: a pass failed (${why}) and no single object reproduces it:`, err);
+    }
   }
 
   constructor(private readonly renderer: THREE.WebGLRenderer) {

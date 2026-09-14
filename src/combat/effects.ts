@@ -23,8 +23,9 @@ export class Effects {
 
   constructor(private readonly scene: THREE.Scene) {
     for (let i = 0; i < FLASH_POOL; i++) {
+      // Always in the scene and always visible: three.js counts the visible lights when it
+      // compiles a material, so a light that comes and goes recompiles everything each time.
       const light = new THREE.PointLight(0xffffff, 0, 1);
-      light.visible = false;
       scene.add(light);
       markActor(light);
       this.lights.push(light);
@@ -61,7 +62,6 @@ export class Effects {
     light.intensity = intensity;
     light.distance = distance;
     light.position.copy(pos);
-    light.visible = true;
     this.flashes.push({ light, age: 0, life, intensity });
   }
 
@@ -110,7 +110,6 @@ export class Effects {
       const t = f.age / f.life;
       if (t >= 1) {
         f.light.intensity = 0;
-        f.light.visible = false;
         this.flashes.splice(i, 1);
         continue;
       }

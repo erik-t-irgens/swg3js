@@ -20,6 +20,9 @@ export interface DriveInput {
   up: boolean;
   down: boolean;
   vertical?: number;
+  /** Ships: the mouse's movement this step (pixels), which pitches and turns the ship directly. */
+  lookDX?: number;
+  lookDY?: number;
 }
 
 export interface VehicleSpec {
@@ -146,6 +149,12 @@ const lat = new THREE.Vector3();
 const alpha = new THREE.Vector3();
 const qInv = new THREE.Quaternion();
 const e = new THREE.Euler();
+const qTmp = new THREE.Quaternion();
+const axis = new THREE.Vector3();
+const tmp2 = new THREE.Vector3();
+const AXIS_X = new THREE.Vector3(1, 0, 0);
+const AXIS_Y = new THREE.Vector3(0, 1, 0);
+const AXIS_Z = new THREE.Vector3(0, 0, 1);
 const torque = new THREE.Vector3();
 const wantUp = new THREE.Vector3();
 
@@ -160,10 +169,9 @@ export class Vehicle {
   steer = 0;
   /** Over water rather than ground this step. */
   onWater = false;
-  /** A ship: the speed the throttle has built (m/s), and its pitch and roll (rad). */
+  /** A ship: the speed the throttle has built (m/s), and its attitude in flight (free to roll and loop). */
   cruise = 0;
-  pitch = 0;
-  roll = 0;
+  readonly attitude = new THREE.Quaternion();
   /** A ship in free flight this step (not on its landing gear). */
   airborne = false;
   /** The boost meter: a burst's charge left, or a heat boost's heat, 0 to 1. */
@@ -245,9 +253,14 @@ export class Vehicle {
     return out.set(r.x, r.y, r.z, r.w);
   }
 
-  /** The way the vehicle faces (rad): 0 along +z, growing toward +x, as the player's heading. */
+  /** The way the vehicle faces (rad): 0 along +z, growing toward +x, as the player's heading; a ship's is its nose's bearing whatever its bank. */
   get heading(): number {
     const r = this.body.rotation();
+    if (this.spec.ship) {
+      qTmp.set(r.x, r.y, r.z, r.w);
+      const f = tmp2.set(0, 0, 1).applyQuaternion(qTmp);
+      if (Math.hypot(f.x, f.z) > 1e-3) return Math.atan2(f.x, f.z);
+    }
     return 2 * Math.atan2(r.y, r.w);
   }
 
@@ -472,35 +485,50 @@ export class Vehicle {
     this.airborne = this.cruise > 4 || (wasAirborne && h > s.fly!.floor + 1);
     if (!this.airborne) {
       if (wasAirborne) {
+        // Down on the gear: level, keeping the heading, and back on the springs.
         body.setGravityScale(1, true);
-        this.pitch = 0;
-        this.roll = 0;
+        e.set(0, this.heading, 0, 'YXZ');
+        q.setFromEuler(e);
+        body.setRotation({ x: q.x, y: q.y, z: q.z, w: q.w }, true);
         this.altitude = s.fly!.floor;
       }
       return false;
     }
-    if (!wasAirborne) body.setGravityScale(0, true);
-    // Attitude: yaw toward the heading asked, pitch with the view's tilt, roll with the keys and
-    // a lean into the turn; each eases toward its target at the ship's turn rate.
-    let yawRate = 0;
-    if (drive?.heading !== undefined && drive?.heading !== null) {
-      let diff = drive.heading - this.heading;
-      diff = Math.atan2(Math.sin(diff), Math.cos(diff));
-      yawRate = THREE.MathUtils.clamp(diff / 0.5, -1, 1) * s.turnRate;
+    if (!wasAirborne) {
+      body.setGravityScale(0, true);
+      this.attitude.copy(q);
     }
-    const wantPitch = THREE.MathUtils.clamp(drive?.vertical ?? 0, -1, 1) * 0.6 + ((drive?.up ? 1 : 0) - (drive?.down ? 1 : 0)) * 0.5;
-    const wantRoll = -(drive?.steer ?? 0) * s.bank - (yawRate / Math.max(0.1, s.turnRate)) * s.bank * 0.6;
-    this.pitch += (wantPitch - this.pitch) * Math.min(1, 2.5 * dt);
-    this.roll += (wantRoll - this.roll) * Math.min(1, 2.5 * dt);
-    let heading = this.heading + yawRate * dt;
-    // Never into the ground: level out and climb when low.
+    // The attitude is flown directly, about the ship's own axes: the mouse pitches and turns it
+    // (limited to a few times the ship's turn rate, so a freighter answers slowly), A and D roll
+    // it, Space and X pitch it, and nothing levels it out: it can fly on its back and loop.
+    const rate = s.turnRate;
+    const cap = rate * 3 * dt;
+    const yawDelta = THREE.MathUtils.clamp(-(drive?.lookDX ?? 0) * 0.0025, -cap, cap);
+    const pitchDelta = THREE.MathUtils.clamp((drive?.lookDY ?? 0) * 0.0025, -cap, cap) - ((drive?.up ? 1 : 0) - (drive?.down ? 1 : 0)) * rate * dt;
+    const rollDelta = (drive?.steer ?? 0) * rate * 1.6 * dt;
+    const a = this.attitude;
+    if (yawDelta) a.multiply(qTmp.setFromAxisAngle(AXIS_Y, yawDelta));
+    if (pitchDelta) a.multiply(qTmp.setFromAxisAngle(AXIS_X, pitchDelta));
+    if (rollDelta) a.multiply(qTmp.setFromAxisAngle(AXIS_Z, rollDelta));
+    fwd.set(0, 0, 1).applyQuaternion(a);
+    // Never into the ground nor above the ceiling: near either, the nose is turned toward the
+    // horizon in the world's frame (whichever way up the ship is), and it climbs or sinks.
     const minH = s.fly!.floor + 2;
-    if (h < minH && this.pitch < 0.15) this.pitch += (0.15 - this.pitch) * Math.min(1, 6 * dt);
-    if (h > s.fly!.ceiling && this.pitch > 0) this.pitch *= Math.max(0, 1 - 4 * dt);
-    e.set(-this.pitch, heading, this.roll, 'YXZ');
-    q.setFromEuler(e);
-    body.setRotation({ x: q.x, y: q.y, z: q.z, w: q.w }, true);
-    fwd.set(0, 0, 1).applyQuaternion(q);
+    const tooLow = h < minH + Math.max(0, -fwd.y) * this.cruise * 1.5;
+    const tooHigh = h > s.fly!.ceiling;
+    if ((tooLow && fwd.y < 0.15) || (tooHigh && fwd.y > 0)) {
+      const want = tooLow ? 0.15 : -0.05;
+      axis.crossVectors(fwd, WORLD_UP);
+      if (axis.lengthSq() > 1e-6) {
+        const angle = THREE.MathUtils.clamp((want - fwd.y) * 4 * dt, -rate * dt, rate * dt);
+        qTmp.setFromAxisAngle(axis.normalize(), angle);
+        a.premultiply(qTmp);
+        fwd.set(0, 0, 1).applyQuaternion(a);
+      }
+    }
+    a.normalize();
+    body.setRotation({ x: a.x, y: a.y, z: a.z, w: a.w }, true);
+    q.copy(a);
     tmp.copy(fwd).multiplyScalar(this.cruise);
     // Slow, the ship holds a few metres up; with the throttle off it settles down and lands.
     if (this.cruise < 8) tmp.y += this.cruise < 2 ? -1.5 : THREE.MathUtils.clamp((minH - h) * 1.5, -2, 4);

@@ -33,7 +33,7 @@ function mountPrompt(v: import('./vehicles/vehicle').Vehicle): string {
   const boost = v.spec.boost === 'heat' ? ` · <b>Shift</b> boost · heat ${bar(v.meter)}${v.overheated > 0 ? ' BURNT OUT' : ''}` : v.spec.boost === 'burst' ? ` · <b>Shift</b> boost ${bar(v.meter)}` : '';
   const hop = v.spec.hop ? ' · <b>Space</b> hop' : '';
   const fly = v.spec.fly ? ' · look up/down or <b>Space</b>/<b>X</b> to climb and sink' : '';
-  if (k === 'ship') return `<b>E</b> leave · <b>W</b>/<b>S</b> throttle up and down · mouse turns and pitches · <b>A/D</b> roll · <b>Alt</b> look around · <b>Shift</b> burn · ${v.airborne ? 'flying' : 'landed'} · ${Math.round(Math.abs(v.speed) * 3.6)} km/h`;
+  if (k === 'ship') return `<b>E</b> leave · <b>W</b>/<b>S</b> throttle up and down · mouse pitches and turns (loops and rolls allowed) · <b>A/D</b> roll · <b>Space</b>/<b>X</b> pitch · <b>Alt</b> look around · <b>Shift</b> burn · ${v.airborne ? 'flying' : 'landed'} · ${Math.round(Math.abs(v.speed) * 3.6)} km/h`;
   const turn = k === 'ground' ? 'mouse or <b>A/D</b> turn' : 'mouse or <b>A/D</b> steer';
   return `<b>E</b> dismount · <b>W/S</b> throttle · ${turn} · <b>Alt</b> look around${boost}${hop}${fly} · ${k} · ${Math.round(Math.abs(v.speed) * 3.6)} km/h`;
 }
@@ -335,13 +335,13 @@ class App {
         for (const k of keys) this.input.force(k, true);
         const dt = 1 / 60;
         for (let i = 0; i < Math.round(seconds / dt); i++) {
-          this.cam.update(this.input, this.player.pos, null);
           this.player.update(dt, this.input, this.cam, this.world);
           this.stepCombat(dt);
           this.stepVehicles(dt, true);
           if (!this.player.noclip && !this.player.mounted) this.world.turrets.update(dt, this.player, this.world.bolts);
           this.physics.step(dt);
           this.effects.update(dt);
+          this.updateCamera(null);
           this.input.endFrame();
         }
         if (!hold) for (const k of keys) this.input.force(k, false);
@@ -669,6 +669,14 @@ class App {
     this.input.requestLock();
   }
 
+  /** The camera after everything has moved: chasing a ship in flight in its own frame, else orbiting the player. */
+  private updateCamera(blocked: import('./core/camera').CameraBlocker | null): void {
+    const { player, input } = this;
+    const ship = player.mounted?.spec.ship && player.mounted.airborne && !input.held('freeLook') ? player.mounted : null;
+    if (ship) this.cam.chase(ship.pos, ship.attitude, ship.heading, Math.max(this.cam.distance, 6 + ship.radius * 2.2));
+    else this.cam.update(input, player.pos, blocked);
+  }
+
   /** Drive the ridden vehicle from the keys (the mouse or A/D steer, Alt frees the look, W/S throttle, Shift boost, Space hop, the view's tilt or Space and X climb and sink), step every vehicle, and seat the rider. */
   private stepVehicles(dt: number, simulate: boolean): void {
     const { player, input } = this;
@@ -680,6 +688,14 @@ class App {
       const free = input.held('freeLook');
       const tilt = -(this.cam.pitch - CAMERA_REST_PITCH);
       const vertical = free ? 0 : Math.sign(tilt) * THREE.MathUtils.clamp((Math.abs(tilt) - 0.12) / 0.45, 0, 1);
+      // A ship in flight takes the mouse itself (the camera chases it); Alt hands it back to the orbit.
+      const shipFlying = !!player.mounted.spec.ship && player.mounted.airborne && !free && input.locked;
+      const lookDX = shipFlying ? input.mouseDX : 0;
+      const lookDY = shipFlying ? input.mouseDY : 0;
+      if (shipFlying) {
+        input.mouseDX = 0;
+        input.mouseDY = 0;
+      }
       drive = {
         throttle: (input.held('forward') ? 1 : 0) - (input.held('back') ? 1 : 0),
         steer: (input.held('right') ? 1 : 0) - (input.held('left') ? 1 : 0),
@@ -689,6 +705,8 @@ class App {
         up: input.held('jump'),
         down: input.held('crouch'),
         vertical,
+        lookDX,
+        lookDY,
       };
     }
     const terrain = this.world.terrain;
@@ -1012,7 +1030,7 @@ class App {
       if (simulate && player.hp <= 0) void this.die();
 
       player.inside = this.world.inside;
-      this.cam.update(input, player.pos, player.noclip ? null : (from, to) => this.physics.cameraBlock(from, to, player.body, this.world.inside));
+      this.updateCamera(player.noclip ? null : (from, to) => this.physics.cameraBlock(from, to, player.body, this.world.inside));
       if (this.torch.visible) {
         this.torch.position.copy(this.cam.camera.position);
         this.cam.camera.getWorldDirection(torchDir);
