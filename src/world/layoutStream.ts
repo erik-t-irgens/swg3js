@@ -249,6 +249,27 @@ export class LayoutStreamer {
     }
   }
 
+  /**
+   * Whether every region a point can see out to `within` metres has its objects in: what a
+   * loading screen waits for before the player is let go, so the ground and the buildings are
+   * there to stand on and walk into rather than arriving under the feet.
+   */
+  settled(px: number, pz: number, within = 220): boolean {
+    if (this.disposed) return true;
+    for (const region of this.regions.values()) {
+      const dx = Math.max(0, Math.abs(px - region.cx) - REGION / 2);
+      const dz = Math.max(0, Math.abs(pz - region.cz) - REGION / 2);
+      const d = Math.hypot(dx, dz);
+      for (let t = 0; t < TIERS.length; t++) {
+        if (!region.objects[t].length) continue;
+        if (d > Math.min(this.ranges[t], within)) continue;
+        const state = region.tiers[t];
+        if (state === null || state === 'loading') return false;
+      }
+    }
+    return true;
+  }
+
   private async loadTier(region: Region, tier: number): Promise<void> {
     region.tiers[tier] = 'loading';
     this.loads++;

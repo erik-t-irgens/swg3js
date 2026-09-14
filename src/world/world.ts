@@ -1219,6 +1219,20 @@ export class World {
     return this.pack?.layout?.center ?? null;
   }
 
+  /**
+   * Whether the world around a point is in: the pack loaded, the ground chunks around it made
+   * (with the terrain's grids from the worker), and the placed objects within working range
+   * loaded. A loading screen holds the player until this says so.
+   */
+  settled(pos: THREE.Vector3): boolean {
+    if (this.packStatus === 'loading') return false;
+    const pcx = Math.floor(pos.x / CHUNK_SIZE);
+    const pcz = Math.floor(pos.z / CHUNK_SIZE);
+    for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) if (!this.chunks.has(`${pcx + dx},${pcz + dz}`)) return false;
+    if (this.layoutStream && !this.layoutStream.settled(pos.x, pos.z)) return false;
+    return true;
+  }
+
   /** Move the streamed world to a far-away point at once (teleporting), forgetting any building state. */
   jumpTo(center: THREE.Vector3): void {
     this.stream(center, Infinity);

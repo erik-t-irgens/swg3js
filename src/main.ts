@@ -22,6 +22,9 @@ import { specFor, type DriveInput } from './vehicles/vehicle';
 import { VehiclesUi } from './ui/vehiclesUi';
 import { NpcUi } from './ui/npcUi';
 import { AppearanceUi } from './ui/appearanceUi';
+import { CharacterSelect } from './ui/characterSelect';
+import { CreatorBar } from './ui/creatorBar';
+import { deleteCharacter, loadCharacters, newCharacterId, upsertCharacter, type Appearance, type SavedCharacter } from './core/characters';
 import { Garage, type VehicleDef } from './vehicles/garage';
 import type { Vehicle, VehicleKind } from './vehicles/vehicle';
 import { World } from './world/world';
@@ -78,7 +81,15 @@ class App {
   private spawnerTab: 'garage' | 'npcs' = 'garage';
   private weapons: WeaponCatalogue | null = null;
   private readonly fade: HTMLElement;
-  private readonly start: HTMLElement;
+  private readonly select: CharacterSelect;
+  private readonly creatorBar: CreatorBar;
+  /** The character being played, as kept in this browser; null on the select screen and in the creator. */
+  private current: SavedCharacter | null = null;
+  /** The creator is up: the appearance and wardrobe panels at full size over no world at all. */
+  private creating = false;
+  /** A planet is loaded and the loop runs the world; false on the select screen and in the creator, where nothing streams. */
+  private inWorld = false;
+  private lastPlaceSave = 0;
   private readonly timer = new THREE.Timer();
   private started = false;
   private traveling = false;
@@ -543,30 +554,20 @@ class App {
     this.fade.id = 'fade';
     this.ui.appendChild(this.fade);
 
-    this.start = document.createElement('div');
-    this.start.id = 'start';
-    this.start.className = 'overlay';
-    this.start.innerHTML = `
-      <div class="start-panel">
-        <h1>SWG3JS</h1>
-        <div class="sub">Star Wars Galaxies, rebuilt for the browser. Ten worlds, one very ambitious side project.</div>
-        <div class="controls">
-          <div><b>WASD</b> move · <b>Mouse</b> look · <b>Wheel</b> zoom · <b>Space</b> jump (hold to Force Jump higher) · <b>Ctrl</b> crouch (tap while moving to roll) · <b>Shift</b> walk · in water <b>Space</b>/<b>Ctrl</b> surface/dive, or look down and swim</div>
-          <div><b>LMB</b> attack or fire · <b>RMB</b> hold to block with the saber (bounty hunter: rapid fire) · <b>R</b> throw the saber (staff: kick) · <b>I</b> inventory: wardrobe, appearance and weapons · <b>B</b> spawner: garage and NPCs · <b>V</b> kneel · <b>Z</b> prone · <b>E</b> mount speeder · <b>C</b> switch class · <b>T</b> fast-forward time</div>
-          <div><b>M</b> galaxy map · <b>H</b> toggle help · <b>N</b> noclip fly (<b>+</b>/<b>-</b> speed) · <b>F</b> flashlight · <b>Esc</b> release mouse</div>
-          <div><b>X</b> also crouches (a Mac turns Ctrl-click into a right click) · rebind any key in the console: <b>__debug.bind('crouch', 'KeyV')</b>, <b>__debug.bindings()</b></div>
-        </div>
-        <div class="class-pick">
-          <button class="enter" data-class="jedi">Enter as Jedi<small>Lightsaber, Force powers</small></button>
-          <button class="enter" data-class="bounty_hunter">Enter as Bounty Hunter<small>Blaster rifle, detonators</small></button>
-        </div>
-        <button class="resume hidden">Resume</button>
-      </div>`;
-    this.ui.appendChild(this.start);
-    this.start.querySelectorAll<HTMLElement>('.enter').forEach((b) => {
-      b.addEventListener('click', () => this.enter(b.dataset.class as ClassId));
-    });
-    this.start.querySelector('.resume')!.addEventListener('click', () => this.enter(null));
+    this.select = new CharacterSelect(this.ui);
+    this.select.onPlay = (c) => void this.play(c).catch((err) => console.warn('could not enter the world', err));
+    this.select.onCreate = () => void this.openCreator().catch((err) => console.warn('creator', err));
+    this.select.onDelete = (c) => {
+      deleteCharacter(c.id);
+      this.select.show(loadCharacters());
+    };
+    this.creatorBar = new CreatorBar(this.ui);
+    this.creatorBar.onBack = () => {
+      this.leaveCreator();
+      this.select.show(loadCharacters());
+    };
+    this.creatorBar.onTab = (id) => this.showCreatorTab(id);
+    this.creatorBar.onCreate = (name, cls, planet) => void this.finishCreation(name, cls, planet).catch((err) => console.warn('creator', err));
 
     // Releasing the mouse leaves the game running and the world visible, so the wardrobe and the
     // map can be used with a cursor. Clicking the world takes the mouse back; the menu is only
@@ -585,81 +586,229 @@ class App {
       this.world.onCameraResized();
     });
 
-    const params = new URLSearchParams(location.search);
-    // The character: ?character=twilek_female, else the last one picked in the wardrobe, else the human male.
-    let remembered: string | null = null;
-    try {
-      remembered = localStorage.getItem('swg.character');
-    } catch {
-      remembered = null;
-    }
-    this.characterId = params.get('character') ?? remembered ?? 'human_male';
-    if (params.get('rig') !== '0') {
-      loadPlayerRig(import.meta.env.BASE_URL, this.characterId)
-        .then((rig) => {
-          this.player.attachRig(rig);
-          this.restoreAppearance();
-        })
-        .catch((err) => console.warn('Character rig failed to load, using primitives', err));
-    }
+    // Nothing loads until a character is chosen: the select screen first, the creator or the
+    // world after. The species list is small and feeds both the creator and the console.
     void loadSpeciesIndex(import.meta.env.BASE_URL).then((list) => {
       this.speciesList = list;
       this.appearanceUi.setSpecies(list, this.characterId);
     });
     this.appearanceUi.onSpecies = (id) => void this.switchCharacter(id);
-    const initialClass = params.get('class') === 'bounty_hunter' ? 'bounty_hunter' : 'jedi';
-    this.setClass(initialClass);
-    const initial = params.get('planet');
-    this.arrive(initial && PLANETS.some((p) => p.id === initial) ? planetById(initial) : PLANETS[0], params.get('zone') ?? undefined);
+    const params = new URLSearchParams(location.search);
+    this.setClass(params.get('class') === 'bounty_hunter' ? 'bounty_hunter' : 'jedi');
+    this.select.show(loadCharacters());
+    // Where the character stands is written back now and then, and when the page goes.
+    window.addEventListener('pagehide', () => this.savePlace(true));
   }
 
-  /** The sliders and colours of the character being played, kept per character in this browser. */
+  /** The look of the character as it is now. */
+  private appearanceOf(c: Character): Appearance {
+    return { morphs: c.morphValues(), values: c.variableValues(), height: c.height };
+  }
+
+  /** The sliders and colours changed on the appearance tab: written into the character's record while one is being played. */
   private saveAppearance(): void {
     const c = this.player.rig?.character;
-    if (!c) return;
-    try {
-      localStorage.setItem(`swg.appearance.${c.manifest.id}`, JSON.stringify({ morphs: c.morphValues(), values: c.variableValues(), height: c.height }));
-    } catch {
-      /* private mode: the look lasts the session */
+    if (!c || !this.current || this.creating) return;
+    this.current.appearance = this.appearanceOf(c);
+    this.current.outfit = this.outfitOf(c);
+    upsertCharacter(this.current);
+  }
+
+  /** What the character wears, by the names it wears them under. */
+  private outfitOf(c: Character): string[] {
+    return c.status().filter((p) => p.worn && !p.body).map((p) => p.name);
+  }
+
+  private applyAppearance(c: Character, a: Appearance | null): void {
+    if (!a) return;
+    for (const [name, v] of Object.entries(a.morphs ?? {})) c.setMorph(name, v);
+    if (a.height !== undefined) c.setHeight(a.height);
+    const changed = Object.fromEntries(Object.entries(a.values ?? {}).filter(([k, v]) => c.canCustomize(k) && (c.manifest.values?.[k] ?? c.manifest.values?.[k.replace(/^.*\//, '')]) !== v));
+    if (Object.keys(changed).length) c.customizer?.setAll(changed);
+  }
+
+  /** Dress the character in a saved outfit: everything else comes off, each piece goes on by the name it was worn under. */
+  private async dress(c: Character, outfit: string[]): Promise<void> {
+    for (const p of c.status()) if (p.worn && !p.body) c.remove(p.name);
+    for (const key of outfit) {
+      const on = (await c.wear(key)) || (await c.wearItem(key, import.meta.env.BASE_URL).catch(() => false));
+      if (!on) console.warn(`outfit: ${key} is not in the wardrobe any more`);
     }
   }
 
-  private restoreAppearance(): void {
-    const c = this.player.rig?.character;
-    if (!c) return;
-    try {
-      const saved = localStorage.getItem(`swg.appearance.${c.manifest.id}`);
-      if (!saved) return;
-      const { morphs, values, height } = JSON.parse(saved) as { morphs?: Record<string, number>; values?: Record<string, number>; height?: number };
-      for (const [name, v] of Object.entries(morphs ?? {})) c.setMorph(name, v);
-      if (height !== undefined) c.setHeight(height);
-      const changed = Object.fromEntries(Object.entries(values ?? {}).filter(([k, v]) => c.canCustomize(k) && (c.manifest.values?.[k] ?? c.manifest.values?.[k.replace(/^.*\//, '')]) !== v));
-      if (Object.keys(changed).length) c.customizer?.setAll(changed);
-    } catch {
-      /* nothing saved, or not ours */
-    }
-  }
-
-  /** Play as another species or gender: the parts pack of that id replaces the rig, the wardrobe follows. */
-  async switchCharacter(id: string): Promise<string> {
+  /** Put the rig of a species on the player (the placeholder body, or another species, comes off). */
+  private async useSpecies(id: string): Promise<Character | null> {
+    if (this.player.rig?.character?.manifest.id === id) return this.player.rig.character;
     const rig = await loadPlayerRig(import.meta.env.BASE_URL, id);
-    if (!rig.character || rig.character.manifest.id !== id) return `no parts pack for ${id}: run the converter's species command`;
     this.player.unequip('right');
     this.player.unequip('left');
     this.player.detachRig();
     this.player.attachRig(rig);
-    this.characterId = id;
-    this.restoreAppearance();
-    try {
-      localStorage.setItem('swg.character', id);
-    } catch {
-      /* private mode: the choice lasts the session */
+    this.characterId = rig.character?.manifest.id ?? id;
+    this.appearanceUi.setSpecies(this.speciesList, this.characterId);
+    return rig.character;
+  }
+
+  /** Play as another species or gender: the parts pack of that id replaces the rig, the wardrobe follows. */
+  async switchCharacter(id: string): Promise<string> {
+    const character = await this.useSpecies(id);
+    if (!character || character.manifest.id !== id) return `no parts pack for ${id}: run the converter's species command`;
+    if (this.creating) {
+      // A fresh start for the species, with the look last tuned for it in this browser when there is one.
+      this.applyAppearance(character, this.legacyAppearance(id));
+    } else if (this.current) {
+      this.current.species = id;
+      this.current.appearance = this.appearanceOf(character);
+      this.current.outfit = this.outfitOf(character);
+      upsertCharacter(this.current);
     }
-    this.appearanceUi.setSpecies(this.speciesList, id);
-    if (this.wardrobe.open) void this.wardrobe.attach(rig.character, import.meta.env.BASE_URL).catch((err) => console.warn('wardrobe', err));
-    if (this.appearanceUi.open) this.appearanceUi.attach(rig.character, import.meta.env.BASE_URL);
-    this.hud.setPrompt(`now playing as ${id.replace(/_/g, ' ')}`);
+    if (this.wardrobe.open) void this.wardrobe.attach(character, import.meta.env.BASE_URL).catch((err) => console.warn('wardrobe', err));
+    if (this.appearanceUi.open) this.appearanceUi.attach(character, import.meta.env.BASE_URL);
+    if (this.inWorld) this.hud.setPrompt(`now playing as ${id.replace(/_/g, ' ')}`);
     return `playing as ${id}`;
+  }
+
+  /** The look kept per species before characters had records of their own, as a starting point in the creator. */
+  private legacyAppearance(species: string): Appearance | null {
+    try {
+      const saved = localStorage.getItem(`swg.appearance.${species}`);
+      return saved ? (JSON.parse(saved) as Appearance) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // ---- The creator: the appearance and wardrobe panels at full size, no world behind them. ----
+
+  private async openCreator(): Promise<void> {
+    this.select.hide();
+    this.creating = true;
+    this.current = null;
+    this.wardrobe.root.classList.add('creation');
+    this.appearanceUi.root.classList.add('creation');
+    this.creatorBar.show();
+    const species = this.speciesList.find((s) => s.id === this.characterId)?.id ?? this.speciesList[0]?.id ?? 'human_male';
+    const character = await this.useSpecies(species);
+    if (!this.creating) return;
+    if (character) this.applyAppearance(character, this.legacyAppearance(species));
+    this.showCreatorTab('appearance');
+  }
+
+  private showCreatorTab(tab: 'appearance' | 'wardrobe'): void {
+    if (!this.creating) return;
+    this.closePanels();
+    this.creatorBar.setStep(tab);
+    this.inventoryTab = tab;
+    const character = this.player.rig?.character ?? null;
+    if (tab === 'appearance') {
+      this.appearanceUi.show();
+      if (character) this.appearanceUi.attach(character, import.meta.env.BASE_URL);
+      else this.appearanceUi.explain('No parts pack for the player: run <code>npm run swg -- species @SWG assets-private --retail-only</code> and reload.');
+    } else {
+      this.wardrobe.show();
+      if (character) void this.wardrobe.attach(character, import.meta.env.BASE_URL).catch((err) => console.warn('wardrobe', err));
+      else this.wardrobe.explain('No parts pack for the player: run the converter\'s <code>species</code> command and reload.');
+    }
+  }
+
+  private leaveCreator(): void {
+    this.creating = false;
+    this.closePanels();
+    this.creatorBar.hide();
+    this.wardrobe.root.classList.remove('creation');
+    this.appearanceUi.root.classList.remove('creation');
+  }
+
+  private async finishCreation(name: string, cls: ClassId, planet: string): Promise<void> {
+    const c = this.player.rig?.character;
+    const record: SavedCharacter = {
+      id: newCharacterId(),
+      name,
+      species: this.characterId,
+      class: cls,
+      appearance: c ? this.appearanceOf(c) : { morphs: {}, values: {}, height: 0.5 },
+      outfit: c ? this.outfitOf(c) : [],
+      planet,
+      created: Date.now(),
+      played: 0,
+    };
+    if (!upsertCharacter(record)) {
+      this.creatorBar.note('No room for another character: delete one first.');
+      return;
+    }
+    this.leaveCreator();
+    await this.play(record);
+  }
+
+  // ---- Playing a character: its rig, look and outfit, then its world behind a loading screen. ----
+
+  private async play(c: SavedCharacter): Promise<void> {
+    this.select.hide();
+    this.current = c;
+    this.traveling = true;
+    this.input.captured = false;
+    this.loading(`ENTERING AS ${c.name}`, 'the character');
+    const character = await this.useSpecies(c.species);
+    if (character) {
+      this.applyAppearance(character, c.appearance);
+      await this.dress(character, c.outfit ?? []);
+    }
+    this.setClass(c.class);
+    const planet = PLANETS.find((p) => p.id === c.planet) ?? PLANETS[0];
+    this.loading(`LOADING ${planet.name}`, 'the ground and the city');
+    this.arrive(planet, c.zone, c.pos ? new THREE.Vector3(c.pos[0], c.pos[1], c.pos[2]) : undefined);
+    if (c.heading !== undefined) {
+      this.player.heading = c.heading;
+      this.cam.yaw = c.heading + Math.PI;
+    }
+    this.inWorld = true;
+    this.started = true;
+    await this.settle();
+    c.played = Date.now();
+    upsertCharacter(c);
+    this.savePlace(true);
+    this.fade.classList.remove('on');
+    this.traveling = false;
+    this.input.requestLock();
+  }
+
+  /** The loading screen's words: what is being waited for. */
+  private loading(title: string, what: string): void {
+    this.fade.innerHTML = `${title.toUpperCase()}<small>loading ${what}…</small>`;
+    this.fade.classList.add('on');
+  }
+
+  /**
+   * Hold the loading screen until the world around the player is in: the pack, the ground
+   * chunks under and around the feet, and the placed objects within working range. The player
+   * is not simulated meanwhile, so nothing falls through ground that is not there yet. A world
+   * that never settles (a pack missing) lets go after a while rather than never.
+   */
+  private async settle(timeoutMs = 30000): Promise<void> {
+    const t0 = performance.now();
+    while (performance.now() - t0 < timeoutMs) {
+      if (this.world.settled(this.player.pos)) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    // A frame with everything in, so the first thing seen is the world and not the fade lifting off a blank.
+    this.drawFrame();
+    await new Promise((r) => setTimeout(r, 120));
+  }
+
+  /** Write where the character stands into its record, every few seconds or at once. */
+  private savePlace(now = false): void {
+    const c = this.current;
+    if (!c || !this.inWorld || this.creating) return;
+    const t = performance.now();
+    if (!now && t - this.lastPlaceSave < 3000) return;
+    this.lastPlaceSave = t;
+    const p = this.player;
+    c.planet = this.world.planet?.id ?? c.planet;
+    c.zone = this.zone;
+    c.pos = [Number(p.pos.x.toFixed(2)), Number(p.pos.y.toFixed(2)), Number(p.pos.z.toFixed(2))];
+    c.heading = Number(p.heading.toFixed(3));
+    c.played = Date.now();
+    upsertCharacter(c);
   }
 
   private setClass(id: ClassId): void {
@@ -677,33 +826,29 @@ class App {
     history.replaceState(null, '', `?planet=${this.world.planet.id}${zone}&class=${this.kit.id}`);
   }
 
-  private enter(cls: ClassId | null): void {
-    if (cls) this.setClass(cls);
-    this.started = true;
-    this.start.classList.add('hidden');
-    this.input.requestLock();
-  }
-
   /** The zone of a multi-terrain planet the player is in, when the planet has zones. */
   private zone: string | undefined;
 
-  private arrive(planet: PlanetDef, zoneId?: string): void {
+  /** Load a planet and stand the player at its spawn, or at `at` (where a character last stood). */
+  private arrive(planet: PlanetDef, zoneId?: string, at?: THREE.Vector3): void {
     this.zone = planet.zones?.length ? (planet.zones.find((z) => z.id === zoneId) ?? planet.zones[0]).id : undefined;
     this.world.load(planet, packIdOf(planet, this.zone));
     this.spawn = this.world.spawnPoint();
-    this.player.reset(this.spawn);
-    this.world.warmUp(this.spawn);
+    const stand = at ?? this.spawn;
+    this.player.reset(stand);
+    this.world.warmUp(stand);
     this.physics.world.step();
     this.cam.yaw = Math.PI;
     this.hud.setPlanet(planet);
     this.map.setCurrent(planet.id, this.zone);
     this.updateUrl();
     const arrivalSpawn = this.spawn.clone();
-    void this.world.loadPack(this.spawn).then((clearSpawn) => {
+    void this.world.loadPack(stand).then((clearSpawn) => {
       const p = this.player;
       if (p.mounted || p.noclip) return;
       // Still standing where we arrived: move to open ground now that the real city is in.
-      if (clearSpawn && p.pos.distanceTo(arrivalSpawn) < 4) {
+      // A character back where it stood stays put.
+      if (clearSpawn && !at && p.pos.distanceTo(arrivalSpawn) < 4) {
         this.spawn.copy(clearSpawn);
         p.reset(clearSpawn.clone().setY(clearSpawn.y + 0.1));
         return;
@@ -722,12 +867,11 @@ class App {
     this.map.hide();
     this.input.captured = false;
     const zone = planet.zones?.find((z) => z.id === zoneId);
-    this.fade.textContent = `TRAVELING TO ${(zone ? `${planet.name}: ${zone.name}` : planet.name).toUpperCase()}`;
-    this.fade.classList.add('on');
-    await new Promise((r) => setTimeout(r, 500));
+    this.loading(`TRAVELING TO ${zone ? `${planet.name}: ${zone.name}` : planet.name}`, 'the ground and the city');
+    await new Promise((r) => setTimeout(r, 400));
     this.arrive(planet, zoneId);
-    this.drawFrame();
-    await new Promise((r) => setTimeout(r, 150));
+    await this.settle();
+    this.savePlace(true);
     this.fade.classList.remove('on');
     this.traveling = false;
     this.input.requestLock();
@@ -746,8 +890,7 @@ class App {
     this.traveling = true;
     this.map.hide();
     this.input.captured = false;
-    this.fade.textContent = poi.name.toUpperCase();
-    this.fade.classList.add('on');
+    this.loading(poi.name, 'the ground and the buildings');
     await new Promise((r) => setTimeout(r, 250));
     // Snapshot space is mirrored in X and centred on the layout centre.
     const gx = -(poi.x - c.x);
@@ -759,8 +902,8 @@ class App {
     this.spawn.copy(pos);
     this.world.jumpTo(pos);
     this.physics.world.step();
-    this.drawFrame();
-    await new Promise((r) => setTimeout(r, 150));
+    await this.settle();
+    this.savePlace(true);
     this.fade.classList.remove('on');
     this.traveling = false;
     this.input.requestLock();
@@ -1003,6 +1146,10 @@ class App {
 
   /** I: the inventory, the wardrobe or the weapons tab; the key toggles the last tab used, a tab click swaps. */
   private toggleInventory(tab?: InventoryTab): void {
+    if (this.creating) {
+      if (tab === 'appearance' || tab === 'wardrobe') this.showCreatorTab(tab);
+      return;
+    }
     const want = tab ?? this.inventoryTab;
     const wasOpen = tab === undefined && (this.wardrobe.open || this.appearanceUi.open || this.weaponsUi.open);
     this.closePanels();
@@ -1122,9 +1269,16 @@ class App {
       this.timer.update();
       const rawDt = this.timer.getDelta();
       const dt = Math.min(0.05, rawDt);
-      const active = this.started && !this.traveling && !this.dying;
       const input = this.input;
       const player = this.player;
+      // On the select screen and in the creator there is no world: nothing streams, nothing draws
+      // but the panels, and the frame costs nothing.
+      if (!this.inWorld) {
+        input.endFrame();
+        return;
+      }
+      const active = this.started && !this.traveling && !this.dying;
+      if (active) this.savePlace();
 
       if (active) {
         if (input.pressedAction('map')) this.toggleMap();

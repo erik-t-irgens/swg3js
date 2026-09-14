@@ -86,6 +86,9 @@ export class Input {
   constructor(private canvas: HTMLCanvasElement) {
     this.loadBindings();
     window.addEventListener('keydown', (e) => {
+      // Typing a name into a field: the field keeps every key, the game sees none of them.
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
       if (['Space', 'Tab', 'KeyM', 'AltLeft', 'AltRight'].includes(e.code)) e.preventDefault();
       if (e.repeat) return;
       this.down.add(e.code);
