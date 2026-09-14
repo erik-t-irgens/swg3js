@@ -238,8 +238,12 @@ export class Player {
    * turns the hilt about the forearm in Jedi Academy's held poses only (stances, saber runs), and
    * `jkaRoll` in every Jedi Academy clip, swings included. Both default to nothing.
    */
-  /** The torso's turn to the right, in degrees, while aiming standing (the game's aimed poses point the arm off to the left of the body) and in the hip-fire carry. */
-  readonly gunTune = { aimYaw: 30, readyYaw: 0 };
+  /**
+   * The torso's turn to the right, in degrees, per blaster: the game's poses point the arm off to the left
+   * of the body. `ready` is the hip-fire carry (every posture but prone), `aim` the aim standing or
+   * moving, `aimKneel` the aim kneeling or crouched. The pistol's two-handed standing aim points straight.
+   */
+  readonly gunTune = { pistol: { ready: 30, aim: 0, aimKneel: 30 }, rifle: { ready: 30, aim: 30, aimKneel: 30 } };
   /** The torso's current turn for the aim, eased. */
   private aimTwist = 0;
   /** The hip-fire pose chosen when the combat carry came up, kept while it lasts (a rifle's is a held transition into it). */
@@ -1188,7 +1192,7 @@ export class Player {
       rig.prefer('crouch', swg ? /^loop_crouched:speed0/ : null);
       rig.prefer('crouchWalk', swg ? /^loop_crouched:speed1/ : null);
       rig.prefer('crouchWalkBack', swg ? /^loop_crouched:speed1/ : null);
-      rig.setState(moving ? (this.directional && mz < 0 ? 'crouchWalkBack' : 'crouchWalk') : 'crouch', speed);
+      rig.setState(moving ? (this.directional && mz < 0 ? 'crouchWalkBack' : 'crouchWalk') : 'crouch', speed, gunUpper);
     }
     else if (moving && this.directional && mz < 0) {
       // Backing up with the legs facing forward: the back-pedal clip.
@@ -1214,8 +1218,9 @@ export class Player {
     this.torsoPitch += (wantedPitch - this.torsoPitch) * Math.min(1, dt * 10);
     // Aiming standing (not crouched, kneeling or prone) the torso also turns right by the tuned angle, since the
     // game's aimed poses point the arm off to the left of the body; the legs keep facing the camera.
-    const standingUp = armedUp && !this.crouching && !this.kneeling;
-    const wantedTwist = standingUp ? (this.aiming ? -this.gunTune.aimYaw : this.gunReady ? -this.gunTune.readyYaw : 0) * (Math.PI / 180) : 0;
+    const tune = this.gunTune[gun];
+    const low = this.crouching || this.kneeling;
+    const wantedTwist = armedUp ? (this.aiming ? -(low ? tune.aimKneel : tune.aim) : this.gunReady ? -tune.ready : 0) * (Math.PI / 180) : 0;
     this.aimTwist += (wantedTwist - this.aimTwist) * Math.min(1, dt * 10);
     rig.twistTorso(rig.overridingJka ? 0 : this.torsoTwist + this.aimTwist, rig.overridingJka ? 0 : this.torsoPitch);
     // The hilt turns in the hand to whichever convention poses the arms: the game's own clips

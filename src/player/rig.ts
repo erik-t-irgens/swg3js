@@ -114,6 +114,8 @@ const RIGHT_AXIS = new THREE.Vector3(1, 0, 0);
 const pitchQ = new THREE.Quaternion();
 const steadyQ = new THREE.Quaternion();
 const IDENTITY_Q = new THREE.Quaternion();
+/** States whose legs walk or run around the standing pelvis, where a pose on the upper body is held steady. */
+const LOCOMOTION_STATES = new Set<RigState>(['walk', 'run', 'runBack', 'walkBack', 'runSaber', 'walkSaber', 'strafeLeft', 'strafeRight', 'gunWalk', 'gunRun', 'gunReadyWalk', 'gunReadyRun', 'gunAimWalk', 'gunAimRun']);
 const rootQ = new THREE.Quaternion();
 const parentQ = new THREE.Quaternion();
 const alignQ = new THREE.Quaternion();
@@ -542,7 +544,8 @@ export class CharacterRig {
    */
   private steadyTurn(bone: THREE.Bone, out: THREE.Quaternion): THREE.Quaternion {
     out.identity();
-    if (!this.upper || !this.steady) return out;
+    // Only over walking and running legs: a posture's pelvis (prone, kneeling, swimming) is meant to be turned.
+    if (!this.upper || !this.steady || !this.state || !LOCOMOTION_STATES.has(this.state)) return out;
     const parent = bone.parent;
     if (!(parent instanceof THREE.Bone) || this.upperBones().has(parent.name)) return out;
     const rest = this.restLocal.get(parent);

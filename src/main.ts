@@ -369,11 +369,15 @@ class App {
         this.player.refitGrip();
         return { ...this.player.gripTune, effective: { right: this.player.tunedGrip('right'), left: this.player.tunedGrip('left') }, axes: this.player.rig?.grip ?? null };
       },
-      /** The blaster in hand, 'pistol' or 'rifle': which of the game's carries play. `gun(undefined, { aimYaw: 30 })` sets how far right, in degrees, the torso turns while aiming standing so the pose's arm points at the crosshair; `readyYaw` the same for the hip-fire carry. */
-      gun: (kind?: 'pistol' | 'rifle', tune?: { aimYaw?: number; readyYaw?: number }) => {
+      /** The blaster in hand, 'pistol' or 'rifle': which of the game's carries play. `gun('rifle', { aim: 30, aimKneel: 30, ready: 30 })` sets how far right, in degrees, that blaster's torso turns while aiming standing or moving, aiming kneeling or crouched, and in the hip-fire carry, so the pose's arm points at the crosshair. */
+      gun: (kind?: 'pistol' | 'rifle', tune?: { ready?: number; aim?: number; aimKneel?: number }) => {
         if (kind) this.player.gunKind = kind;
-        if (tune?.aimYaw !== undefined) this.player.gunTune.aimYaw = tune.aimYaw;
-        if (tune?.readyYaw !== undefined) this.player.gunTune.readyYaw = tune.readyYaw;
+        if (tune) {
+          const t = this.player.gunTune[kind ?? this.player.gunKind];
+          if (tune.ready !== undefined) t.ready = tune.ready;
+          if (tune.aim !== undefined) t.aim = tune.aim;
+          if (tune.aimKneel !== undefined) t.aimKneel = tune.aimKneel;
+        }
         return { kind: this.player.gunKind, tune: this.player.gunTune, aiming: this.player.aiming, ready: this.player.gunReady, sinceShot: Number(this.player.sinceShot.toFixed(1)), clips: this.player.rig?.clipsMatching(/pistol|rifle/) ?? [] };
       },
       /** The saber defence rank (1..3): how bolts are turned away. */
