@@ -1074,20 +1074,64 @@ export class World {
     return this.layoutStream?.buildings ?? [];
   }
 
-  /** New materials join the shadow cascades and the portal stencil scheme. */
+  /** Materials whose shaders have been asked for ahead of their first draw. */
+  private readonly compiledMaterials = new WeakSet<THREE.Material>();
+
+  /**
+   * New materials join the shadow cascades and the portal stencil scheme, and then have their
+   * shaders compiled in the background: a building that streams in would otherwise compile on
+   * the first frame it is looked at, a stall of a good fraction of a second.
+   */
   private setupShadowMaterials(): void {
     const csm = this.csm;
+    const fresh: THREE.Object3D[] = [];
     this.scene.traverse((o) => {
       const mesh = o as THREE.Mesh;
-      if (!(mesh.isMesh || (o as THREE.Line).isLine || (o as THREE.Points).isPoints) || !mesh.material) return;
+      if (!(mesh.isMesh || (o as THREE.Line).isLine || (o as THREE.Points).isPoints || (o as THREE.Sprite).isSprite) || !mesh.material) return;
       const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      let isNew = false;
       for (const m of mats) {
         this.portals?.registerMaterial(m, m.userData.interior === true);
+        if (!this.compiledMaterials.has(m)) {
+          this.compiledMaterials.add(m);
+          isNew = true;
+        }
         if (this.csmMaterials.has(m) || (m as THREE.ShaderMaterial).isShaderMaterial || !csm) continue;
         csm.setupMaterial(m);
         this.csmMaterials.add(m);
       }
+      if (isNew) fresh.push(o);
     });
+    if (fresh.length) this.compileObjects(fresh);
+  }
+
+  /** Compile the shaders of some objects in the background, with the world's own lights and fog. */
+  private compileObjects(objects: THREE.Object3D[]): void {
+    const r = this.renderer;
+    const camera = this.camera;
+    if (!r || !camera) return;
+    // The renderer walks a root; a stand-in root walks just these, so the rest of the scene is not re-examined.
+    const root = new THREE.Object3D();
+    root.traverse = (cb: (o: THREE.Object3D) => void) => {
+      for (const o of objects) cb(o);
+    };
+    root.traverseVisible = () => {};
+    const t0 = performance.now();
+    r.compileAsync(root, camera, this.scene).then(() => {
+      const ms = performance.now() - t0;
+      if (ms > 50) console.info(`shaders: ${objects.length} new objects compiled in the background in ${ms.toFixed(0)} ms`);
+    }).catch(() => {});
+  }
+
+  /** Compile every material in the scene now, seen or not, while a loading screen hides the stall. */
+  compileAll(): number {
+    const r = this.renderer;
+    const camera = this.camera;
+    if (!r || !camera) return 0;
+    this.setupShadowMaterials();
+    const before = r.info.programs?.length ?? 0;
+    r.compile(this.scene, camera);
+    return (r.info.programs?.length ?? 0) - before;
   }
 
   /** Call once per frame after the camera has moved. */

@@ -103,6 +103,15 @@ export class Bolts {
     return bolt;
   }
 
+  /** A bolt of each colour far below the world, gone on the next update, so the first real shot finds its shaders compiled. */
+  warmUp(colors: number[] = [0xff4a2a, 0x3af06a]): void {
+    for (const color of colors) {
+      const b = this.fire(new THREE.Vector3(0, -900, 0), new THREE.Vector3(0, -1, 0), { owner: 'enemy', color, speed: 0 });
+      b.age = BLASTER.life;
+      this.fired.enemy--;
+    }
+  }
+
   /** Fly every bolt on by `dt` and settle what each one struck. */
   update(dt: number, w: BoltWorld): void {
     for (let i = this.bolts.length - 1; i >= 0; i--) {

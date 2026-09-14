@@ -54,5 +54,7 @@ export interface Kit {
   /** 0 = ready, 1 = just used. */
   slotCooldown(index: number): number;
   update(ctx: KitContext): void;
+  /** Put the kit's own visuals in the scene, hidden, so their shaders compile behind the loading screen. */
+  warmUp?(): void;
   dispose(): void;
 }

@@ -59,6 +59,8 @@ const boltFrom = new THREE.Vector3();
 
 class App {
   private torch!: THREE.SpotLight;
+  private torchOn = false;
+  private lastPrograms = 0;
   private readonly canvas = document.getElementById('game') as HTMLCanvasElement;
   private readonly ui = document.getElementById('ui') as HTMLElement;
   private readonly renderer: THREE.WebGLRenderer;
@@ -133,8 +135,9 @@ class App {
     this.world.setShadows(S.shadowDistance, S.shadowCasterRadius);
     this.world.setReach(S.objectReach, S.terrainRadius, S.farRadius);
     // A hand torch: a spot light carried at the camera, pointing where it looks. F toggles it.
-    this.torch = new THREE.SpotLight(0xfff1d6, 260, 70, 0.42, 0.45, 1.6);
-    this.torch.visible = false;
+    // Always in the scene and visible, turned up and down: a light that comes and goes changes the
+    // light count, and that recompiles every shader in the world.
+    this.torch = new THREE.SpotLight(0xfff1d6, 0, 70, 0.42, 0.45, 1.6);
     this.scene.add(this.torch, this.torch.target);
     this.portals = new PortalRenderer(this.renderer);
     // The cascades exist even with shadows off, so turning them on later in the menu needs no rebuild.
@@ -908,8 +911,19 @@ class App {
       this.loadingScreen.setWhat(`loading ${stage}`);
       await new Promise((r) => setTimeout(r, 100));
     }
+    // Every shader compiles now, behind the screen: the effects, the bolts and the kit's own
+    // visuals put one of themselves in the scene first, so the first shot, hit or throw finds its
+    // shaders ready rather than compiling them on the frame it is needed.
+    this.loadingScreen.setWhat('compiling shaders');
+    this.effects.warmUp();
+    this.world.bolts.warmUp();
+    this.kit.warmUp?.();
+    const tCompile = performance.now();
+    const compiled = this.world.compileAll();
+    if (compiled) console.info(`shaders: ${compiled} programs compiled behind the loading screen in ${(performance.now() - tCompile).toFixed(0)} ms`);
     // A frame with everything in, so the first thing seen is the world and not the screen lifting off a blank.
     this.drawFrame();
+    this.lastPrograms = this.renderer.info.programs?.length ?? 0;
     this.loadingScreen.setProgress(1);
     await new Promise((r) => setTimeout(r, 120));
   }
@@ -1411,7 +1425,7 @@ class App {
           if (input.pressedAction('noclip') && !player.mounted) player.toggleNoclip();
           if (player.noclip && input.pressedAction('noclipFaster')) player.noclipSpeed = Math.min(2000, player.noclipSpeed * 1.5);
           if (player.noclip && input.pressedAction('noclipSlower')) player.noclipSpeed = Math.max(2, player.noclipSpeed / 1.5);
-          if (input.pressedAction('flashlight')) this.torch.visible = !this.torch.visible;
+          if (input.pressedAction('flashlight')) this.torchOn = !this.torchOn;
         }
       }
 
@@ -1439,7 +1453,8 @@ class App {
 
       player.inside = this.world.inside;
       this.updateCamera(player.noclip ? null : (from, to) => this.physics.cameraBlock(from, to, player.body, this.world.inside), dt);
-      if (this.torch.visible) {
+      this.torch.intensity = this.torchOn ? 260 : 0;
+      if (this.torchOn) {
         this.torch.position.copy(this.cam.camera.position);
         this.cam.camera.getWorldDirection(torchDir);
         this.torch.target.position.copy(this.cam.camera.position).addScaledVector(torchDir, 12);
@@ -1467,6 +1482,10 @@ class App {
       this.drawFrame();
       stats.renderMs = performance.now() - tRender;
       stats.frameMs = performance.now() - tFrame;
+      // A shader compiled on a live frame is a stall: say which frame, and how many, so the cause can be found.
+      const programs = this.renderer.info.programs?.length ?? 0;
+      if (programs > this.lastPrograms && this.lastPrograms > 0) console.info(`shaders: ${programs - this.lastPrograms} compiled during play (${stats.frameMs.toFixed(0)} ms frame, ${programs} programs in all)`);
+      this.lastPrograms = programs;
       stats.rawDt = rawDt;
       stats.grounded = player.grounded;
       stats.vel = [player.vel.x, player.vel.y, player.vel.z];

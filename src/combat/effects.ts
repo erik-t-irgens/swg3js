@@ -76,6 +76,17 @@ export class Effects {
     this.bursts.push({ mesh, age: 0, life, size });
   }
 
+  /**
+   * One of each effect far below the world for a moment: their shaders compile with the first
+   * draw, which the loading screen hides, rather than with the first shot or the first hit.
+   */
+  warmUp(): void {
+    const at = new THREE.Vector3(0, -900, 0);
+    this.ring(at, 0xffa050, 1, 0.05);
+    this.tracer(at, at.clone().setY(-899), 0xff6a3a, 0.05);
+    this.burst(at, 0xffc080, 1, 0.05);
+  }
+
   update(dt: number): void {
     for (let i = this.rings.length - 1; i >= 0; i--) {
       const r = this.rings[i];

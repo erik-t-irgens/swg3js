@@ -43,6 +43,18 @@ export class BountyHunterKit implements Kit {
   private readonly detGeo = new THREE.SphereGeometry(0.16, 10, 8);
   private readonly detMat = new THREE.MeshStandardMaterial({ color: 0x3a3f45, roughness: 0.4, metalness: 0.7 });
   private readonly detLightMat = new THREE.MeshBasicMaterial({ color: 0xff3030, toneMapped: false });
+  private proto: THREE.Mesh | null = null;
+
+  /** A detonator hidden in the scene, so the first one thrown finds its shaders compiled. */
+  warmUp(): void {
+    if (this.proto) return;
+    const mesh = new THREE.Mesh(this.detGeo, this.detMat);
+    mesh.add(new THREE.Mesh(new THREE.SphereGeometry(0.05, 6, 4), this.detLightMat));
+    mesh.visible = false;
+    mesh.position.y = -900;
+    this.scene.add(mesh);
+    this.proto = mesh;
+  }
 
   constructor(private readonly scene: THREE.Scene) {}
 
@@ -185,6 +197,7 @@ export class BountyHunterKit implements Kit {
   }
 
   dispose(): void {
+    if (this.proto) this.scene.remove(this.proto);
     for (const d of this.detonators) this.scene.remove(d.mesh);
     this.detonators.length = 0;
     this.detGeo.dispose();
