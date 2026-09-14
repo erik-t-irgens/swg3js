@@ -115,11 +115,34 @@ export class Input {
     });
   }
 
+  private wantLock = false;
+  private lockRetry = 0;
+
+  /**
+   * Take the mouse. A browser refuses a lock asked for right after Escape released one (and
+   * while the page is not the active document): the promise rejects rather than throwing, and
+   * the ask is repeated a moment later while the game still wants it.
+   */
   requestLock(): void {
-    if (!this.locked) this.canvas.requestPointerLock?.();
+    this.wantLock = true;
+    if (this.locked) return;
+    window.clearTimeout(this.lockRetry);
+    let p: unknown;
+    try {
+      p = this.canvas.requestPointerLock?.();
+    } catch {
+      p = undefined;
+    }
+    (p as Promise<void> | undefined)?.catch(() => {
+      this.lockRetry = window.setTimeout(() => {
+        if (this.wantLock && !this.locked) this.requestLock();
+      }, 1200);
+    });
   }
 
   releaseLock(): void {
+    this.wantLock = false;
+    window.clearTimeout(this.lockRetry);
     if (this.locked) document.exitPointerLock();
   }
 

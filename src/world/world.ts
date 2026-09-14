@@ -17,7 +17,7 @@ import { SwgTerrain, type BuildingLayerSource } from './swgTerrain';
 import { LayoutStreamer, type Building, type CellState } from './layoutStream';
 import { ParticleEffects } from './particles';
 import { CSM } from 'three/examples/jsm/csm/CSM.js';
-import { INTERIOR_LAYER, markActor, type PortalRenderer } from './portalRender';
+import { ACTOR_LAYER, INTERIOR_LAYER, markActor, type PortalRenderer } from './portalRender';
 import { createPlaceholderSpeeder } from '../vehicles/speeder';
 import { Dust } from '../vehicles/dust';
 import { Garage, type VehicleDef } from '../vehicles/garage';
@@ -46,7 +46,8 @@ const SWG_FILL = 1.0;
 /** The client's fog densities read far thicker here than in the game; planets can override this. */
 const DEFAULT_SWG_FOG_SCALE = 0.08;
 /** Interior lights: how many point lights may be live at once, and how the client's colours map to three's intensities. */
-const INTERIOR_LIGHT_CAP = 10;
+/** Point lights a room may have at once. Every one lengthens every interior shader (and on some drivers each costs a second of compile time), so no more than a room needs. */
+const INTERIOR_LIGHT_CAP = 8;
 const INTERIOR_LIGHT_SCALE = 3;
 const INTERIOR_AMBIENT_SCALE = 1.2;
 const INTERIOR_AMBIENT_FLOOR = 0.18;
@@ -1105,32 +1106,77 @@ export class World {
     if (fresh.length) this.compileObjects(fresh);
   }
 
-  /** Compile the shaders of some objects in the background, with the world's own lights and fog. */
+  /** Objects whose shaders are still to be asked for, a few per frame. */
+  private readonly compileQueue: THREE.Object3D[] = [];
+
+  /** Queue some objects' shaders for the background: a batch of new buildings must not all land in one frame. */
   private compileObjects(objects: THREE.Object3D[]): void {
-    const r = this.renderer;
-    const camera = this.camera;
-    if (!r || !camera) return;
-    // The renderer walks a root; a stand-in root walks just these, so the rest of the scene is not re-examined.
+    this.compileQueue.push(...objects);
+  }
+
+  /** The renderer walks a root; a stand-in root walks just these, so the rest of the scene is not re-examined. */
+  private static rootOf(objects: THREE.Object3D[]): THREE.Object3D {
     const root = new THREE.Object3D();
     root.traverse = (cb: (o: THREE.Object3D) => void) => {
       for (const o of objects) cb(o);
     };
     root.traverseVisible = () => {};
-    const t0 = performance.now();
-    r.compileAsync(root, camera, this.scene).then(() => {
-      const ms = performance.now() - t0;
-      if (ms > 50) console.info(`shaders: ${objects.length} new objects compiled in the background in ${ms.toFixed(0)} ms`);
-    }).catch(() => {});
+    return root;
   }
 
-  /** Compile every material in the scene now, seen or not, while a loading screen hides the stall. */
-  compileAll(): number {
+  /** Compile with the camera seeing the world's layers, whatever pass it was last on: the lights are what the world pass shades with. */
+  private withWorldLayers<T>(camera: THREE.Camera, fn: () => T): T {
+    const mask = camera.layers.mask;
+    camera.layers.set(0);
+    camera.layers.enable(ACTOR_LAYER);
+    try {
+      return fn();
+    } finally {
+      camera.layers.mask = mask;
+    }
+  }
+
+  /** A few queued objects a frame, asked for in the background; called once per frame. */
+  private drainCompiles(): void {
+    if (!this.compileQueue.length) return;
+    const r = this.renderer;
+    const camera = this.camera;
+    if (!r || !camera) {
+      this.compileQueue.length = 0;
+      return;
+    }
+    const batch = this.compileQueue.splice(0, 2);
+    const before = r.info.programs?.length ?? 0;
+    const t0 = performance.now();
+    this.withWorldLayers(camera, () => r.compileAsync(World.rootOf(batch), camera, this.scene).catch(() => {}));
+    const made = (r.info.programs?.length ?? 0) - before;
+    const ms = performance.now() - t0;
+    if (made && ms > 30) console.info(`shaders: ${made} started in the background (${ms.toFixed(0)} ms), ${this.compileQueue.length} objects still queued`);
+  }
+
+  /**
+   * Compile every material in the scene, seen or not, in batches with a frame between them so
+   * a loading screen can show the count going up; the stall is spent behind the screen rather
+   * than on the first shot or the first look at a building. Returns how many programs were made.
+   */
+  async compileAllAsync(onProgress: (done: number, total: number) => void = () => {}): Promise<number> {
     const r = this.renderer;
     const camera = this.camera;
     if (!r || !camera) return 0;
     this.setupShadowMaterials();
+    this.compileQueue.length = 0;
+    const objects: THREE.Object3D[] = [];
+    this.scene.traverse((o) => {
+      const m = o as THREE.Mesh;
+      if ((m.isMesh || (o as THREE.Line).isLine || (o as THREE.Points).isPoints || (o as THREE.Sprite).isSprite) && m.material) objects.push(o);
+    });
     const before = r.info.programs?.length ?? 0;
-    r.compile(this.scene, camera);
+    const BATCH = 8;
+    for (let i = 0; i < objects.length; i += BATCH) {
+      this.withWorldLayers(camera, () => r.compile(World.rootOf(objects.slice(i, i + BATCH)), camera, this.scene));
+      onProgress(Math.min(objects.length, i + BATCH), objects.length);
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+    }
     return (r.info.programs?.length ?? 0) - before;
   }
 
@@ -1145,6 +1191,7 @@ export class World {
       this.csmScanAt = now;
       this.setupShadowMaterials();
     }
+    this.drainCompiles();
   }
 
   /** Generate every chunk in view immediately (used when arriving on a planet). */

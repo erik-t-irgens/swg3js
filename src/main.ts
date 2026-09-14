@@ -919,7 +919,7 @@ class App {
     this.world.bolts.warmUp();
     for (const id of ['jedi', 'bounty_hunter'] as ClassId[]) this.kitFor(id).warmUp?.();
     const tCompile = performance.now();
-    const compiled = this.world.compileAll();
+    const compiled = await this.world.compileAllAsync((done, total) => this.loadingScreen.setWhat(`compiling shaders, ${done} of ${total} objects`));
     if (compiled) console.info(`shaders: ${compiled} programs compiled behind the loading screen in ${(performance.now() - tCompile).toFixed(0)} ms`);
     // A frame with everything in, so the first thing seen is the world and not the screen lifting off a blank.
     this.drawFrame();
@@ -1438,6 +1438,8 @@ class App {
       const simulate = active && !this.map.open && !this.anyPanelOpen();
       if (simulate) {
         player.update(dt, input, this.cam, this.world);
+        // The thrown and orbiting sabers glow from the pooled flash lights, so no light comes or goes with them.
+        for (const spot of player.lightSpots()) this.effects.flash(spot.pos, 0x66c8ff, spot.intensity, spot.distance, 0.08);
         this.stepCombat(dt);
       }
 

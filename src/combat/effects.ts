@@ -32,7 +32,6 @@ export class Effects {
   private readonly tracerPool: TracerLine[] = [];
 
   private readonly lights: THREE.PointLight[] = [];
-  private nextLight = 0;
 
   constructor(private readonly scene: THREE.Scene) {
     for (let i = 0; i < FLASH_POOL; i++) {
@@ -79,11 +78,14 @@ export class Effects {
   }
 
   flash(pos: THREE.Vector3, color: number, intensity: number, distance: number, life: number): void {
-    // The next pooled light, taking over from the oldest flash when all are lit.
-    const light = this.lights[this.nextLight];
-    this.nextLight = (this.nextLight + 1) % this.lights.length;
-    const i = this.flashes.findIndex((f) => f.light === light);
-    if (i >= 0) this.flashes.splice(i, 1);
+    // A pooled light that is dark, else the one whose flash is oldest.
+    let light = this.lights.find((l) => !this.flashes.some((f) => f.light === l));
+    if (!light) {
+      let oldest = 0;
+      for (let i = 1; i < this.flashes.length; i++) if (this.flashes[i].age / this.flashes[i].life > this.flashes[oldest].age / this.flashes[oldest].life) oldest = i;
+      light = this.flashes[oldest].light;
+      this.flashes.splice(oldest, 1);
+    }
     light.color.set(color);
     light.intensity = intensity;
     light.distance = distance;

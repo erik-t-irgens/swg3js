@@ -278,8 +278,14 @@ export class Player {
   private readonly flying: THREE.Group;
   /** The dual kata's sabers, out of the hands and circling the body. */
   private readonly orbit: THREE.Group[] = [];
-  private readonly orbitLights: THREE.PointLight[] = [];
-  private flyLight!: THREE.PointLight;
+
+  /** Where the sabers out of the hand want light this frame: the thrown one, the orbiting two. */
+  lightSpots(): { pos: THREE.Vector3; intensity: number; distance: number }[] {
+    const out: { pos: THREE.Vector3; intensity: number; distance: number }[] = [];
+    if (this.thrown.inFlight) out.push({ pos: this.flying.position, intensity: 4, distance: 6 });
+    if (this.orbiting) for (const g of this.orbit) out.push({ pos: g.position, intensity: 3, distance: 5 });
+    return out;
+  }
   private orbitAngle = 0;
   /**
    * The hilt's rotation in the hand for each source of arm poses: SWG's own clips hold the
@@ -340,12 +346,9 @@ export class Player {
       new THREE.MeshBasicMaterial({ color: 0x8fd6ff, transparent: true, opacity: 0.16, side: THREE.DoubleSide, depthWrite: false, toneMapped: false }),
     );
     blur.rotation.x = -Math.PI / 2;
-    // The lights live at the scene's root, always visible, and are only turned up while the
-    // saber flies: three counts the visible lights when it compiles a material, so a light that
-    // appears with the throw would recompile every shader in the world on the first throw.
-    this.flyLight = new THREE.PointLight(0x66c8ff, 0, 6);
-    scene.add(this.flyLight);
-    markActor(this.flyLight);
+    // No light of its own: every point light in the scene makes every shader longer (and on
+    // some drivers seconds slower to compile), so the flying saber's glow comes from the pooled
+    // flash lights, which the game feeds from lightSpots() each frame.
     this.flying.add(flyHilt, flyBlade, blur);
     this.flying.visible = false;
     scene.add(this.flying);
@@ -363,10 +366,6 @@ export class Player {
       scene.add(g);
       markActor(g);
       this.orbit.push(g);
-      const light = new THREE.PointLight(0x66c8ff, 0, 5);
-      scene.add(light);
-      markActor(light);
-      this.orbitLights.push(light);
     }
     this.cmd.probe = (dir, dist) => this.probeWall(dir, dist);
     this.cmd.groundDistance = (max) => this.groundDistanceUnits(max);
@@ -602,10 +601,8 @@ export class Player {
     if (this.held.right) this.held.right.visible = inHand || gunRight;
     if (this.held.left) this.held.left.visible = !this.orbiting;
     for (const g of this.orbit) g.visible = this.orbiting;
-    for (const l of this.orbitLights) l.intensity = this.orbiting ? 3 : 0;
     p.saberLight.intensity = on && inHand ? 6 : 0;
     this.flying.visible = this.thrown.inFlight;
-    this.flyLight.intensity = this.thrown.inFlight ? 4 : 0;
   }
 
   /** True while a swing can hurt: the saber system's attack moves, or the stand-in swing's middle. */
@@ -815,7 +812,6 @@ export class Player {
       const g = this.orbit[i];
       const a = this.orbitAngle + i * Math.PI;
       g.position.set(this.pos.x + Math.cos(a) * ORBIT.radius, this.pos.y + ORBIT.height, this.pos.z + Math.sin(a) * ORBIT.radius);
-      this.orbitLights[i].position.copy(g.position);
       // The blade lies along the circle and spins on its own as well.
       g.rotation.set(0, -a + this.orbitAngle * 3, 0);
     }
@@ -1494,7 +1490,6 @@ export class Player {
     if (result === 'caught') return;
     this.flying.position.copy(this.thrown.pos);
     this.flying.rotation.set(0, this.thrown.spin, 0);
-    this.flyLight.position.copy(this.thrown.pos);
   }
 
   private flyUpdate(dt: number, input: Input, cam: ThirdPersonCamera): void {
