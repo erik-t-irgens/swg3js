@@ -9,6 +9,8 @@ import { markActor } from './portalRender';
 
 export interface GalleryClip {
   name: string;
+  /** The joints a clip drives when it moves only part of the skeleton; layered over the idle. */
+  joints?: string[];
   speed?: number;
   loop?: boolean;
   fps?: number;
@@ -203,8 +205,17 @@ export class Gallery {
     this.group.add(root);
     markActor(root);
     const mixer = new THREE.AnimationMixer(root);
-    const action = mixer.clipAction(clip);
-    action.setLoop(THREE.LoopRepeat, Infinity).play();
+    if (s.clip.joints?.length) {
+      // Part of the skeleton only (a shot on the arms, a face): the idle underneath, the clip's own joints over it.
+      const idle = model.clips.get('idle') ?? [...model.clips.values()].find((c) => /^loop_stand|^idle|^loop_standing/.test(c.name));
+      if (idle) mixer.clipAction(idle).setLoop(THREE.LoopRepeat, Infinity).play();
+      const own = new Set(s.clip.joints);
+      const layer = new THREE.AnimationClip(`layer:${clip.name}`, clip.duration, clip.tracks.filter((t) => own.has(THREE.PropertyBinding.parseTrackName(t.name).nodeName ?? '')));
+      mixer.clipAction(layer).setLoop(THREE.LoopRepeat, Infinity).play();
+    } else {
+      const action = mixer.clipAction(clip);
+      action.setLoop(THREE.LoopRepeat, Infinity).play();
+    }
     // Spread the phases so a row does not march in step.
     mixer.update(Math.random() * clip.duration);
     s.live = { root, mixer };

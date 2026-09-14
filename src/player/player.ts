@@ -41,6 +41,9 @@ const handPos = new THREE.Vector3();
 /** The dual kata's saber protect: the sabers circle the body at this radius and height, this fast. */
 const ORBIT = { radius: 1.4, height: 1.0, turnsPerSecond: 1.5 };
 const orbitTangent = new THREE.Vector3();
+const gripQ = new THREE.Quaternion();
+const rollQ = new THREE.Quaternion();
+const forearmAxis = new THREE.Vector3();
 /** Seconds after a shot before the relaxed carry returns. */
 const GUN_READY_SECONDS = 5;
 /** Running with the block held, forwards or back-pedalling, is at most this much of the full run. */
@@ -222,6 +225,16 @@ export class Player {
   sinceShot = Infinity;
   /** The rig has the game's blaster carries (set when a rig attaches). */
   hasGunClips = false;
+  /** Lying prone (Z toggles it): a crawl, the blaster's prone carries; a saber swing or a jump gets up. */
+  prone = false;
+  /** The jump key stood the body up from prone and is still down: no jump until it is pressed again. */
+  private jumpLatched = false;
+  /**
+   * Calibration for the blade's angle in the hand, in degrees, set from the console: `stanceRoll`
+   * turns the hilt about the forearm in Jedi Academy's held poses only (stances, saber runs), and
+   * `jkaRoll` in every Jedi Academy clip, swings included. Both default to nothing.
+   */
+  readonly gripTune = { jkaRoll: 0, stanceRoll: 0 };
   /** Bolts turned away so far, for the console. */
   blocks = 0;
   private readonly physics: Physics;
@@ -239,6 +252,9 @@ export class Player {
   private readonly saberQ = { swg: new THREE.Quaternion(), jka: new THREE.Quaternion() };
   private readonly saber2Q = { swg: new THREE.Quaternion(), jka: new THREE.Quaternion() };
   private gripBlend = 0;
+  /** The forearm's direction in each hand's own frame, the axis a calibration roll turns about. */
+  private readonly forearm = new THREE.Vector3(-1, 0, 0);
+  private readonly forearm2 = new THREE.Vector3(1, 0, 0);
   /** A wall run or grab turns the body this way while it lasts. */
   private lockedHeading: THREE.Vector3 | null = null;
   /** The rig has Jedi Academy's back-pedal clips, so the legs keep near the camera's facing while moving. */
@@ -394,6 +410,7 @@ export class Player {
       const grip = this.gripAxis('right', hand) ?? swgGrip;
       this.saberQ.swg.setFromUnitVectors(new THREE.Vector3(0, 1, 0), swgGrip);
       this.saberQ.jka.setFromUnitVectors(new THREE.Vector3(0, 1, 0), grip);
+      this.forearm.copy(along).normalize();
       // The saber's blade runs along its +Y, the rifle's barrel along its +Z. A hold point sits in
       // the palm already; a wrist bone needs the grip moved a little along the arm.
       const grabbed = /^hold/i.test(hand.name);
@@ -403,6 +420,7 @@ export class Player {
       p.rifle.position.copy(along).multiplyScalar(grabbed ? 0.04 * k : 0.1 * k);
       p.rifle.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), along);
       p.rifle.scale.setScalar(k);
+      this.fitGun();
     }
     if (leftHand) {
       // The second saber sits in the left hand the same way.
@@ -420,6 +438,7 @@ export class Player {
       const grip = this.gripAxis('left', leftHand) ?? swgGrip;
       this.saber2Q.swg.setFromUnitVectors(new THREE.Vector3(0, 1, 0), swgGrip);
       this.saber2Q.jka.setFromUnitVectors(new THREE.Vector3(0, 1, 0), grip);
+      this.forearm2.copy(along).normalize();
       p.saber2.position.copy(along).multiplyScalar(/^hold/i.test(leftHand.name) ? 0 : 0.02 * k);
       p.saber2.quaternion.copy(this.saber2Q.swg);
       p.saber2.scale.setScalar(k);
@@ -509,6 +528,12 @@ export class Player {
     }
   }
 
+  /** Size the placeholder gun to its kind: a pistol is a stub of the rifle until the weapons are converted. */
+  fitGun(): void {
+    const s = this.gunKind === 'pistol' ? 0.45 : 1;
+    this.parts.rifle.scale.set(this.parts.rifle.scale.x, this.parts.rifle.scale.y, Math.abs(this.parts.rifle.scale.x) * s);
+  }
+
   /** The combat carry is up: aiming, or within five seconds of a shot. */
   get gunReady(): boolean {
     return this.aiming || this.sinceShot < GUN_READY_SECONDS;
@@ -520,7 +545,7 @@ export class Player {
     const rig = this.rig;
     if (!rig || !this.hasGunClips) return;
     const kind = this.gunKind;
-    const shots = rig.clipsMatching(new RegExp(this.aiming ? `^${kind}_combat(_standing)?_aimed_fire_\\d+$` : `^${kind}_combat(_standing)?_fire_\\d+$`));
+    const shots = this.prone ? rig.clipsMatching(new RegExp(`^${kind}_combat_prone_fire_\\d+$`)) : rig.clipsMatching(new RegExp(this.aiming ? `^${kind}_combat(_standing)?_aimed_fire_\\d+$` : `^${kind}_combat(_standing)?_fire_\\d+$`));
     const pool = shots.length ? shots : rig.clipsMatching(new RegExp(`^${kind}_combat(_standing)?(_aimed)?_fire_\\d+$`));
     if (pool.length) rig.playUpper(pool[Math.floor(Math.random() * pool.length)], 0.04);
   }
@@ -737,8 +762,15 @@ export class Player {
 
     const walking = input.held('walk');
     this.walkKey = walking;
-    this.crouching = !this.swimming && input.held('crouch');
-    this.setCrouchCollider(this.crouching && this.grounded);
+    // Prone: Z toggles it on the ground; jumping, swimming or a saber swing brings the body up.
+    if (input.pressedAction('prone') && !this.mounted && !this.noclip) this.prone = !this.prone;
+    // Getting up on the jump key is only that: the jump itself waits for the key to be let go and pressed again.
+    if (this.prone && input.pressedAction('jump')) this.jumpLatched = true;
+    if (!input.held('jump')) this.jumpLatched = false;
+    const wasProne = this.jumpLatched;
+    if (this.prone && (this.swimming || input.pressedAction('jump') || (this.classId === 'jedi' && (input.pressedAction('attack') || input.pressedAction('block'))))) this.prone = false;
+    this.crouching = !this.swimming && !this.prone && input.held('crouch');
+    this.setCrouchCollider((this.crouching || this.prone) && this.grounded);
     let speed = (walking ? WALK_SPEED : RUN_SPEED) * this.speedMultiplier * (this.crouching && this.grounded ? 0.5 : 1);
 
     // Water: the surface here, and how deep the body sits in it. Swimming starts when the
@@ -780,8 +812,8 @@ export class Player {
       const c = this.cmd;
       // A leaping saber move drives the body itself while it lasts (the keys are ignored).
       const script = this.saber.scriptNow();
-      let jump = input.held('jump');
-      let jumpPressed = input.pressedAction('jump');
+      let jump = input.held('jump') && !this.prone && !wasProne;
+      let jumpPressed = input.pressedAction('jump') && !wasProne;
       if (script) {
         mz = script.fmove;
         mx = script.smove;
@@ -827,7 +859,7 @@ export class Player {
     } else if (this.grounded) {
       this.vel.x = move.x * speed;
       this.vel.z = move.z * speed;
-      if (input.held('jump')) {
+      if (input.held('jump') && !this.prone && !wasProne) {
         this.vel.y = Math.sqrt(2 * g * JUMP_HEIGHT);
         this.grounded = false;
       }
@@ -994,6 +1026,11 @@ export class Player {
       rig.prefer(`gunReady${state}`, new RegExp(`^loop_${gun}_combat(_standing)?:speed${n}`));
       rig.prefer(`gunAim${state}`, new RegExp(`^loop_${gun}_combat(_standing)?_aimed:speed${n}`));
     }
+    for (const [state, n] of [['Idle', 0], ['Move', 1]] as const) {
+      rig.prefer(`gunProne${state}`, new RegExp(`^loop_${gun}_prone:speed${n}`));
+      rig.prefer(`gunProneReady${state}`, new RegExp(`^loop_${gun}_combat_prone:speed${n}`));
+      rig.prefer(`gunProneAim${state}`, new RegExp(`^loop_${gun}_combat_prone_aimed:speed${n}`));
+    }
     if (this.mounted) rig.setState('seated');
     // Swimming with the block held: the stance on the torso and arms over the swimming legs.
     else if (this.swimming) rig.setState(moving || this.submerged ? 'swim' : 'float', speed, this.blocking && this.hasJkaClips ? stance : null);
@@ -1001,7 +1038,18 @@ export class Player {
       rig.prefer('air', this.jumpClip('INAIR', this.jka.isForceJumping));
       rig.setState('air');
     }
-    else if (this.crouching) rig.setState(moving ? (this.directional && mz < 0 ? 'crouchWalkBack' : 'crouchWalk') : 'crouch', speed);
+    else if (this.prone) {
+      // Lying down: a blaster has its own prone carries, else the game's crawl.
+      if (this.classId === 'bounty_hunter' && this.hasGunClips) rig.setState(`${this.aiming ? 'gunProneAim' : this.gunReady ? 'gunProneReady' : 'gunProne'}${moving ? 'Move' : 'Idle'}` as RigState, speed);
+      else rig.setState(moving ? 'proneMove' : 'prone', speed);
+    } else if (this.crouching) {
+      // Crouched: the game's own loop_crouched clips unless Jedi Academy's animations are in charge.
+      const swg = !this.jkaMode && !!rig.clipMatching(/^loop_crouched:speed1/);
+      rig.prefer('crouch', swg ? /^loop_crouched:speed0/ : null);
+      rig.prefer('crouchWalk', swg ? /^loop_crouched:speed1/ : null);
+      rig.prefer('crouchWalkBack', swg ? /^loop_crouched:speed1/ : null);
+      rig.setState(moving ? (this.directional && mz < 0 ? 'crouchWalkBack' : 'crouchWalk') : 'crouch', speed);
+    }
     else if (moving && this.directional && mz < 0) {
       // Backing up with the legs facing forward: the back-pedal clip.
       rig.setState(running && rig.hasState('runBack') ? 'runBack' : rig.hasState('walkBack') ? 'walkBack' : 'runBack', speed);
@@ -1025,8 +1073,14 @@ export class Player {
     // hold it their way, Jedi Academy's the way its swings were made for.
     const jkaArms = rig.armSource().startsWith('BOTH_');
     this.gripBlend += ((jkaArms ? 1 : 0) - this.gripBlend) * Math.min(1, dt * 14);
-    this.parts.saber.quaternion.slerpQuaternions(this.saberQ.swg, this.saberQ.jka, this.gripBlend);
-    this.parts.saber2.quaternion.slerpQuaternions(this.saber2Q.swg, this.saber2Q.jka, this.gripBlend);
+    // The console's calibration: a turn about the forearm for every Jedi Academy clip, and one more for its held poses.
+    const roll = ((this.gripTune.jkaRoll + (jkaArms && !rig.overriding ? this.gripTune.stanceRoll : 0)) * Math.PI) / 180;
+    gripQ.copy(this.saberQ.jka);
+    if (roll !== 0) gripQ.premultiply(rollQ.setFromAxisAngle(forearmAxis.copy(this.forearm), roll));
+    this.parts.saber.quaternion.slerpQuaternions(this.saberQ.swg, gripQ, this.gripBlend);
+    gripQ.copy(this.saber2Q.jka);
+    if (roll !== 0) gripQ.premultiply(rollQ.setFromAxisAngle(forearmAxis.copy(this.forearm2), roll));
+    this.parts.saber2.quaternion.slerpQuaternions(this.saber2Q.swg, gripQ, this.gripBlend);
 
     if (this.mounted) {
       rig.aimArm('right', armDir.set(-0.25, -0.15, 0.95).normalize());
@@ -1058,6 +1112,9 @@ export class Player {
     const half = crouched ? CROUCH_HALF_HEIGHT : STAND_HALF_HEIGHT;
     this.collider.setHalfHeight(half);
     this.collider.setTranslationWrtParent({ x: 0, y: CAPSULE_RADIUS + half, z: 0 });
+    // The offset only reaches the collider's world position at the next physics step; placing it now
+    // keeps this frame's ground test from seeing the new capsule at the old centre (and flickering).
+    this.collider.setTranslation({ x: this.pos.x, y: this.pos.y + CAPSULE_RADIUS + half, z: this.pos.z });
   }
 
   /**
@@ -1070,13 +1127,18 @@ export class Player {
     const rig = this.rig;
     if (!rig || this.swimming || !this.grounded || (!mz && !mx)) return 1;
     const crouch = this.crouching;
+    // The prone crawl and a crouch on the game's own clip are paced by the clip; the base is what the keys would give.
+
     const base = JKA.speed * UNIT * (walking ? JKA.walkScale : 1) * (crouch ? JKA.duckScale : 1);
     const back = this.directional && mz < 0;
     let target: number | null = null;
     // Crouched: with the walk key the crouch walk's own pace; without it the game's crouched walk speed, a little quicker.
     // Jedi Academy's clips were made for less than its speeds (it lets the feet slide), so the
     // paces taken from them are held within bands of the game's own speed.
-    if (crouch) target = walking ? Math.max(rig.naturalSpeed(back ? 'crouchWalkBack' : 'crouchWalk') ?? 0, 0.8) : base * JKA.walkScale;
+    if (this.prone) target = Math.max(0.3, rig.naturalSpeed(this.classId === 'bounty_hunter' && this.hasGunClips ? (this.aiming ? 'gunProneAimMove' : this.gunReady ? 'gunProneReadyMove' : 'gunProneMove') : 'proneMove') ?? 0.6);
+    // Crouched the game's way: the crawl clip's own pace, halved with the walk key (the clip slows with it).
+    else if (crouch && !this.jkaMode && rig.clipMatching(/^loop_crouched:speed1/)) target = Math.max(0.5, rig.naturalSpeed('crouchWalk') ?? 1.5) * (walking ? JKA.walkScale : 1);
+    else if (crouch) target = walking ? Math.max(rig.naturalSpeed(back ? 'crouchWalkBack' : 'crouchWalk') ?? 0, 0.8) : base * JKA.walkScale;
     else if (walking && this.classId === 'bounty_hunter' && this.hasGunClips) target = Math.max(rig.naturalSpeed(this.aiming ? 'gunAimWalk' : this.gunReady ? 'gunReadyWalk' : 'gunWalk') ?? 0, 0.8);
     else if (walking) target = Math.max(rig.naturalSpeed(this.jkaMode ? (back ? 'walkBack' : 'walkSaber') : 'walk') ?? 0, this.jkaMode ? 1.2 : 0.8);
     else if (this.jkaMode && back) target = THREE.MathUtils.clamp(rig.naturalSpeed('runBack') ?? base, base * 0.5, base * BLOCK_RUN_SCALE);

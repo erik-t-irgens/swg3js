@@ -31,9 +31,11 @@ export class BountyHunterKit implements Kit {
   ];
   readonly help = [
     '<b>LMB</b> fire the blaster (hold): from the hip it scatters a little · <b>RMB</b> hold to aim: a true shot, the camera in close · bolts fly at 58 m/s and can be sidestepped',
-    '<b>1</b> Thermal Detonator · <b>2</b> Stim Pack',
+    '<b>1</b> Thermal Detonator · <b>2</b> Stim Pack · <b>K</b> pistol or rifle · <b>Z</b> prone (the prone carries and shots)',
   ];
   readonly resource: Resource | null = null;
+  /** Last gun change, for the HUD. */
+  gunNote = '';
   private fireCd = 0;
   private detCd = 0;
   private stimCd = 0;
@@ -57,6 +59,12 @@ export class BountyHunterKit implements Kit {
   update(ctx: KitContext): void {
     const { dt, input, player, world, cam, physics, effects } = ctx;
     const onFoot = !player.mounted;
+    // K switches the kind of blaster, as it switches the saber styles: the pistol's carries or the rifle's.
+    if (input.pressedAction('saberStyle') && onFoot) {
+      player.gunKind = player.gunKind === 'pistol' ? 'rifle' : 'pistol';
+      player.fitGun();
+      this.gunNote = `blaster: ${player.gunKind}`;
+    }
     this.fireCd = Math.max(0, this.fireCd - dt);
     this.detCd = Math.max(0, this.detCd - dt);
     this.stimCd = Math.max(0, this.stimCd - dt);

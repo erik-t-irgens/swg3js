@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { Character, type GripAxes } from './character';
 
-export type RigState = 'idle' | 'walk' | 'run' | 'air' | 'seated' | 'swim' | 'float' | 'crouch' | 'crouchWalk' | 'crouchWalkBack' | 'stance' | 'strafeLeft' | 'strafeRight' | 'runBack' | 'walkBack' | 'runSaber' | 'walkSaber' | 'gunIdle' | 'gunWalk' | 'gunRun' | 'gunReadyIdle' | 'gunReadyWalk' | 'gunReadyRun' | 'gunAimIdle' | 'gunAimWalk' | 'gunAimRun';
+export type RigState = 'idle' | 'walk' | 'run' | 'air' | 'seated' | 'swim' | 'float' | 'crouch' | 'crouchWalk' | 'crouchWalkBack' | 'stance' | 'strafeLeft' | 'strafeRight' | 'runBack' | 'walkBack' | 'runSaber' | 'walkSaber' | 'gunIdle' | 'gunWalk' | 'gunRun' | 'gunReadyIdle' | 'gunReadyWalk' | 'gunReadyRun' | 'gunAimIdle' | 'gunAimWalk' | 'gunAimRun' | 'prone' | 'proneMove' | 'gunProneIdle' | 'gunProneMove' | 'gunProneReadyIdle' | 'gunProneReadyMove' | 'gunProneAimIdle' | 'gunProneAimMove';
 
 /** Clip names used for each state, in preference order (placeholder rig names, then the game's); a pattern matches any clip. */
 const STATE_CLIPS: Record<RigState, (string | RegExp)[]> = {
@@ -39,10 +39,19 @@ const STATE_CLIPS: Record<RigState, (string | RegExp)[]> = {
   gunAimIdle: [/^loop_rifle_combat(_standing)?_aimed:speed0/, /^loop_pistol_combat(_standing)?_aimed:speed0/, /^loop_rifle_combat(_standing)?:speed0/, /^loop_pistol_combat(_standing)?:speed0/, 'idle_combat', 'idle'],
   gunAimWalk: [/^loop_rifle_combat(_standing)?_aimed:speed1/, /^loop_pistol_combat(_standing)?_aimed:speed1/, /^loop_rifle_combat(_standing)?:speed1/, /^loop_pistol_combat(_standing)?:speed1/, 'walk_combat', 'walk'],
   gunAimRun: [/^loop_rifle_combat(_standing)?_aimed:speed2/, /^loop_pistol_combat(_standing)?_aimed:speed2/, /^loop_rifle_combat(_standing)?:speed2/, /^loop_pistol_combat(_standing)?:speed2/, 'run_combat', 'run'],
+  // Lying prone (Z): the game's own, still and crawling; a blaster has its own relaxed, combat and aimed prone loops.
+  prone: [/^loop_prone:speed0/, /^loop_prone:speed1/, 'BOTH_CROUCH1IDLE', 'idle'],
+  proneMove: [/^loop_prone:speed1/, /^loop_prone:speed0/, 'BOTH_CROUCH1WALK', 'walk'],
+  gunProneIdle: [/^loop_rifle_prone:speed0/, /^loop_pistol_prone:speed0/, /^loop_prone:speed0/, 'idle'],
+  gunProneMove: [/^loop_rifle_prone:speed1/, /^loop_pistol_prone:speed1/, /^loop_prone:speed1/, 'walk'],
+  gunProneReadyIdle: [/^loop_rifle_combat_prone:speed0/, /^loop_pistol_combat_prone:speed0/, /^loop_rifle_combat_prone:speed1/, /^loop_pistol_combat_prone:speed1/, /^loop_prone:speed0/, 'idle'],
+  gunProneReadyMove: [/^loop_rifle_combat_prone:speed1/, /^loop_pistol_combat_prone:speed1/, /^loop_prone:speed1/, 'walk'],
+  gunProneAimIdle: [/^loop_rifle_combat_prone_aimed:speed0/, /^loop_pistol_combat_prone_aimed:speed0/, /^loop_rifle_combat_prone_aimed:speed1/, /^loop_pistol_combat_prone_aimed:speed1/, /^loop_prone:speed0/, 'idle'],
+  gunProneAimMove: [/^loop_rifle_combat_prone_aimed:speed1/, /^loop_pistol_combat_prone_aimed:speed1/, /^loop_prone:speed1/, 'walk'],
 };
 
 /** Natural travel speed of the placeholder rig's locomotion clips, in m/s, used to scale playback. */
-const DEFAULT_CLIP_SPEED: Partial<Record<RigState, number>> = { walk: 1.5, run: 5.5, swim: 2.5, crouchWalk: 2.2, strafeLeft: 4.5, strafeRight: 4.5, runBack: 4, walkBack: 1.5, runSaber: 6.3, walkSaber: 2, crouchWalkBack: 2, gunWalk: 1.5, gunRun: 5.5, gunReadyWalk: 1.5, gunReadyRun: 5.5, gunAimWalk: 1.5, gunAimRun: 5.5 };
+const DEFAULT_CLIP_SPEED: Partial<Record<RigState, number>> = { walk: 1.5, run: 5.5, swim: 2.5, crouchWalk: 2.2, strafeLeft: 4.5, strafeRight: 4.5, runBack: 4, walkBack: 1.5, runSaber: 6.3, walkSaber: 2, crouchWalkBack: 2, gunWalk: 1.5, gunRun: 5.5, gunReadyWalk: 1.5, gunReadyRun: 5.5, gunAimWalk: 1.5, gunAimRun: 5.5, proneMove: 0.6, gunProneMove: 0.6, gunProneReadyMove: 0.6, gunProneAimMove: 0.6 };
 
 /** Bones the game needs by role: exact names of the placeholder rig first, then patterns for the game's skeletons. */
 export type BoneRole = 'rightHand' | 'leftHand' | 'spine' | 'rightUpperArm' | 'rightForeArm' | 'leftUpperArm' | 'leftForeArm' | 'head';
@@ -65,6 +74,8 @@ export interface RigOptions {
   scale?: number;
   /** Clips that hold their last frame instead of looping (Jedi Academy's stances, the in-air pose). */
   hold?: string[];
+  /** Clips that move only part of the skeleton, with the joints they drive (a shot on the arms); played as layers. */
+  partialClips?: Record<string, string[]>;
   /** Where the blade points in each hand, from the importer; without it the game guesses from the bind pose. */
   grip?: GripAxes;
 }
@@ -97,6 +108,7 @@ export class CharacterRig {
   private readonly clipSpeeds: Record<string, number>;
   private readonly hold: Set<string>;
   readonly grip: GripAxes | null;
+  readonly partialClips: Record<string, string[]>;
   /** A clip to play for a state ahead of its table, when the rig has it: the style's stance, the jump's direction, the style's run. */
   private readonly preferred = new Map<RigState, string | RegExp>();
   /** A one-shot clip on the upper body over whatever the legs do (a shot fired), and when it ends. */
@@ -146,6 +158,7 @@ export class CharacterRig {
     this.clipSpeeds = options.clipSpeeds ?? {};
     this.hold = new Set(options.hold ?? []);
     this.grip = options.grip ?? null;
+    this.partialClips = options.partialClips ?? {};
     this.mixer = new THREE.AnimationMixer(scene);
     for (const clip of clips) this.actions.set(clip.name, this.mixer.clipAction(clip));
     scene.traverse((o) => {
@@ -444,7 +457,9 @@ export class CharacterRig {
     let action = this.halves.get(key);
     if (action) return action;
     const src = this.actions.get(clip)!.getClip();
-    const upper = this.upperBones();
+    // A clip that drives only some joints keeps just those as its upper layer (the rest were baked at rest).
+    const own = this.partialClips[clip];
+    const upper = own ? new Set(own) : this.upperBones();
     const tracks = src.tracks.filter((t) => upper.has(THREE.PropertyBinding.parseTrackName(t.name).nodeName ?? '') === (half === 'upper'));
     action = this.mixer.clipAction(new THREE.AnimationClip(key, src.duration, tracks));
     this.halves.set(key, action);
@@ -508,7 +523,7 @@ export class CharacterRig {
 }
 
 interface PlayerManifest {
-  players: { id: string; file: string; clipSpeeds?: Record<string, number>; scale?: number; jkaClips?: Record<string, { loop: boolean }>; jkaGrip?: GripAxes }[];
+  players: { id: string; file: string; clipSpeeds?: Record<string, number>; scale?: number; jkaClips?: Record<string, { loop: boolean }>; jkaGrip?: GripAxes; partialClips?: Record<string, string[]> }[];
 }
 
 /**
@@ -525,7 +540,7 @@ export async function loadPlayerRig(baseUrl: string, id = 'human_male'): Promise
     // Without the named locomotion set the character could only stand: use the single model instead.
     if (!['idle', 'walk', 'run'].every((n) => names.has(n))) throw new Error(`the parts rig has ${character.clips.length} clips but no idle, walk and run; run the converter's parts command again`);
     const hold = Object.entries(m.jkaClips ?? {}).filter(([, c]) => !c.loop).map(([name]) => name);
-    const rig = CharacterRig.fromCharacter(character, { clipSpeeds: m.clipSpeeds, scale: m.scale ?? 1, hold, grip: m.jkaGrip });
+    const rig = CharacterRig.fromCharacter(character, { clipSpeeds: m.clipSpeeds, scale: m.scale ?? 1, hold, grip: m.jkaGrip, partialClips: m.partialClips });
     console.info(`player ${m.id}: assembled from ${m.parts.length} parts, ${character.clips.length} clips, ${Object.keys(character.morphValues()).length} shape sliders`);
     return rig;
   } catch (err) {
@@ -538,7 +553,7 @@ export async function loadPlayerRig(baseUrl: string, id = 'human_male'): Promise
       const entry = manifest.players?.[0];
       if (entry) {
         const hold = Object.entries(entry.jkaClips ?? {}).filter(([, c]) => !c.loop).map(([name]) => name);
-        const rig = await CharacterRig.load(`${baseUrl}assets-private/${entry.file}`, { clipSpeeds: entry.clipSpeeds, scale: entry.scale ?? 1, hold, grip: entry.jkaGrip });
+        const rig = await CharacterRig.load(`${baseUrl}assets-private/${entry.file}`, { clipSpeeds: entry.clipSpeeds, scale: entry.scale ?? 1, hold, grip: entry.jkaGrip, partialClips: entry.partialClips });
         console.info(`player model ${entry.id}: clips ${rig.clipNames.join(', ')}; bones ${rig.boneNames.join(', ')}`);
         return rig;
       }

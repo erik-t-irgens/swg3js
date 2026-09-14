@@ -41,6 +41,8 @@ export interface PartsManifest {
   jkaClips?: Record<string, { loop: boolean }>;
   /** Where the blade points in each hand, solved from Jedi Academy's swings (see the importer). */
   jkaGrip?: GripAxes;
+  /** Clips that move only part of the skeleton, with the joints they drive. */
+  partialClips?: Record<string, string[]>;
   clipSpeeds?: Record<string, number>;
   scale?: number;
   customization?: string[];

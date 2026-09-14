@@ -337,6 +337,16 @@ class App {
         if (range !== undefined) RANGE.wake = Math.max(1, range);
         return this.world.gallery ? { ...this.world.gallery.status(), nearest: this.world.gallery.nearest(this.player.pos) } : 'not on the gallery planet (?planet=gallery)';
       },
+      /**
+       * Turn the hilt in the hand to see where it looks right, in degrees about the forearm:
+       * `grip({ stanceRoll: 30 })` for Jedi Academy's held poses only (stances, saber runs), `grip({ jkaRoll: 10 })`
+       * for every Jedi Academy clip, swings included. No argument reports the current values.
+       */
+      grip: (tune?: { jkaRoll?: number; stanceRoll?: number }) => {
+        if (tune?.jkaRoll !== undefined) this.player.gripTune.jkaRoll = tune.jkaRoll;
+        if (tune?.stanceRoll !== undefined) this.player.gripTune.stanceRoll = tune.stanceRoll;
+        return { ...this.player.gripTune, axes: this.player.rig?.grip ?? null };
+      },
       /** The blaster in hand, 'pistol' or 'rifle': which of the game's carries play. */
       gun: (kind?: 'pistol' | 'rifle') => {
         if (kind) this.player.gunKind = kind;
@@ -349,7 +359,7 @@ class App {
       },
       player: () => {
         const p = this.player;
-        return { hp: Number(p.hp.toFixed(1)), blocking: p.blocking, aiming: p.aiming, gunReady: p.gunReady, jkaMode: p.jkaMode, rig: p.rig?.describe() ?? null, pos: p.pos.toArray().map((v) => Number(v.toFixed(2))), camera: this.cam.camera.position.toArray().map((v) => Number(v.toFixed(2))), vel: p.vel.toArray().map((v) => Number(v.toFixed(2))), grounded: p.grounded, heading: Number(((p.heading * 180) / Math.PI).toFixed(0)), cameraYaw: Number(((Math.atan2(this.cam.camera.getWorldDirection(new THREE.Vector3()).x, this.cam.camera.getWorldDirection(new THREE.Vector3()).z) * 180) / Math.PI).toFixed(0)), swimming: p.swimming, submerged: p.submerged, water: this.world.terrain.waterHeightAt(p.pos.x, p.pos.z), ground: this.world.terrain.heightAt(p.pos.x, p.pos.z), captured: this.input.captured };
+        return { hp: Number(p.hp.toFixed(1)), blocking: p.blocking, aiming: p.aiming, gunReady: p.gunReady, prone: p.prone, crouching: p.crouching, jkaMode: p.jkaMode, rig: p.rig?.describe() ?? null, pos: p.pos.toArray().map((v) => Number(v.toFixed(2))), camera: this.cam.camera.position.toArray().map((v) => Number(v.toFixed(2))), vel: p.vel.toArray().map((v) => Number(v.toFixed(2))), grounded: p.grounded, heading: Number(((p.heading * 180) / Math.PI).toFixed(0)), cameraYaw: Number(((Math.atan2(this.cam.camera.getWorldDirection(new THREE.Vector3()).x, this.cam.camera.getWorldDirection(new THREE.Vector3()).z) * 180) / Math.PI).toFixed(0)), swimming: p.swimming, submerged: p.submerged, water: this.world.terrain.waterHeightAt(p.pos.x, p.pos.z), ground: this.world.terrain.heightAt(p.pos.x, p.pos.z), captured: this.input.captured };
       },
     };
 
@@ -366,7 +376,7 @@ class App {
         <div class="sub">Star Wars Galaxies, rebuilt for the browser. Ten worlds, one very ambitious side project.</div>
         <div class="controls">
           <div><b>WASD</b> move · <b>Mouse</b> look · <b>Wheel</b> zoom · <b>Space</b> jump (hold to Force Jump higher) · <b>Ctrl</b> crouch (tap while moving to roll) · <b>Shift</b> walk · in water <b>Space</b>/<b>Ctrl</b> surface/dive, or look down and swim</div>
-          <div><b>LMB</b> attack or fire · <b>RMB</b> hold to block with the saber (bounty hunter: rapid fire) · <b>R</b> throw the saber (staff: kick) · <b>E</b> mount speeder · <b>C</b> switch class · <b>T</b> fast-forward time</div>
+          <div><b>LMB</b> attack or fire · <b>RMB</b> hold to block with the saber (bounty hunter: rapid fire) · <b>R</b> throw the saber (staff: kick) · <b>Z</b> prone · <b>E</b> mount speeder · <b>C</b> switch class · <b>T</b> fast-forward time</div>
           <div><b>M</b> galaxy map · <b>H</b> toggle help · <b>N</b> noclip fly (<b>+</b>/<b>-</b> speed) · <b>F</b> flashlight · <b>Esc</b> release mouse</div>
           <div><b>X</b> also crouches (a Mac turns Ctrl-click into a right click) · rebind any key in the console: <b>__debug.bind('crouch', 'KeyV')</b>, <b>__debug.bindings()</b></div>
         </div>

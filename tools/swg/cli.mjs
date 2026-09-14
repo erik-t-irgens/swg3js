@@ -880,6 +880,9 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
         // How much of the skeleton this clip actually moves, for spotting name mismatches.
         const jointNames = new Set(skeleton.joints.map((j) => j.name.toLowerCase()));
         const matched = animation.transforms.filter((t) => jointNames.has(t.name.toLowerCase())).length;
+        // A clip that moves only part of the skeleton (a fire on the arms, an emote on the face) is
+        // noted with the joints it drives, so it can be layered over a full pose instead of T-posing the rest.
+        if (matched < jointNames.size) (info.partialClips ??= {})[e.clip] = animation.transforms.map((t) => t.name).filter((n) => jointNames.has(n.toLowerCase()));
         const first = poseAtFrame(skeleton, animation, 0);
         const mid = poseAtFrame(skeleton, animation, Math.floor(animation.frameCount / 2));
         let moving = 0;
@@ -1120,7 +1123,7 @@ const CREATURE_CLIPS = 'idle,walk,run,cbt_stand_combat_attack_light,rea_stand_ge
 /** The player's clips: locomotion and posture by exact name (=), reactions by substring. */
 /** What the player wears when --wear is not given: a plain shirt, trousers and shoes. */
 const DEFAULT_WEAR = ['object/tangible/wearables/shirt/shared_shirt_s03.iff', 'object/tangible/wearables/pants/shared_pants_s01.iff', 'object/tangible/wearables/shoes/shared_shoes_s01.iff'];
-const PLAYER_CLIPS = '=idle,=walk,=run,=idle_combat,=walk_combat,=run_combat,=jump,strafe,backward,walk_back,run_back,loop_pistol_standing,loop_rifle:,loop_pistol_combat:,loop_pistol_combat_standing,loop_pistol_combat_aimed,loop_rifle_combat:,loop_rifle_combat_standing,loop_rifle_combat_aimed,pistol_combat_fire,rifle_combat_fire,pistol_combat_standing_fire,rifle_combat_standing_fire,pistol_combat_aimed_fire,rifle_combat_aimed_fire,pistol_reload,rifle_reload,trn_pistol_combat_to_pistol_combat_aimed,trn_rifle_combat_standing_to_rifle_combat_standing_aimed,=loop_sitting_chair:0,=loop_sitting_ground,=loop_swimming:speed0,=loop_swimming:speed1,=unarmed_standing_ready_punch,=sword_1h_standing_ready_hrz_slash_middle_r,=rea_get_hit_medium_mid_center,=trn_combat_standing_hit_to_incapacitated_face_up,=loop_incapacitated_face_up,=cbt_stand_combat_attack_light,=rea_stand_get_hit_light,=trn_stand_to_incapacitated,=loop_incapacitated';
+const PLAYER_CLIPS = '=idle,=walk,=run,=idle_combat,=walk_combat,=run_combat,=jump,strafe,backward,walk_back,run_back,loop_crouched,loop_prone,loop_pistol_prone,loop_rifle_prone,loop_pistol_combat_prone,loop_rifle_combat_prone,pistol_combat_prone_fire,rifle_combat_prone_fire,trn_pistol_standing_to_pistol_combat,trn_rifle_standing_to_rifle_combat,trn_pistol_combat_to_pistol_combat_aimed,trn_rifle_combat_standing_to_rifle_combat_standing_aimed,trn_pistol_combat_standing_aimed_to_pistol_combat_standing,trn_rifle_combat_standing_aimed_to_rifle_combat_standing,loop_pistol_standing,loop_rifle:,loop_pistol_combat:,loop_pistol_combat_standing,loop_pistol_combat_aimed,loop_rifle_combat:,loop_rifle_combat_standing,loop_rifle_combat_aimed,pistol_combat_fire,rifle_combat_fire,pistol_combat_standing_fire,rifle_combat_standing_fire,pistol_combat_aimed_fire,rifle_combat_aimed_fire,pistol_reload,rifle_reload,trn_pistol_combat_to_pistol_combat_aimed,trn_rifle_combat_standing_to_rifle_combat_standing_aimed,=loop_sitting_chair:0,=loop_sitting_ground,=loop_swimming:speed0,=loop_swimming:speed1,=unarmed_standing_ready_punch,=sword_1h_standing_ready_hrz_slash_middle_r,=rea_get_hit_medium_mid_center,=trn_combat_standing_hit_to_incapacitated_face_up,=loop_incapacitated_face_up,=cbt_stand_combat_attack_light,=rea_stand_get_hit_light,=trn_stand_to_incapacitated,=loop_incapacitated';
 const PLAYER_TEMPLATE = 'object/creature/player/shared_human_male.iff';
 
 /** Planet ids the game can load a pack for (see src/data/planets.ts). */
@@ -1671,7 +1674,7 @@ switch (cmd) {
     for (const m of info.skipped) console.log(`  skipped: ${m}`);
     const manifestFile = join(outDir, 'manifest.json');
     const manifest = existsSync(manifestFile) ? JSON.parse(readFileSync(manifestFile, 'utf8')) : { players: [] };
-    const entry = { id, file: `player/${id}.glb`, template, wear, variables: Object.fromEntries(customizationValues(options.var)), clips: info.animations, clipSpeeds: info.clipSpeeds ?? {}, bounds: info.bounds, scale: 1, ...(info.jkaClips ? { jkaClips: info.jkaClips } : {}), ...(info.jkaGrip ? { jkaGrip: info.jkaGrip } : {}) };
+    const entry = { id, file: `player/${id}.glb`, template, wear, variables: Object.fromEntries(customizationValues(options.var)), clips: info.animations, clipSpeeds: info.clipSpeeds ?? {}, ...(info.partialClips ? { partialClips: info.partialClips } : {}), bounds: info.bounds, scale: 1, ...(info.jkaClips ? { jkaClips: info.jkaClips } : {}), ...(info.jkaGrip ? { jkaGrip: info.jkaGrip } : {}) };
     manifest.players = [entry, ...(manifest.players ?? []).filter((p) => p.id !== id)];
     writeFileSync(manifestFile, JSON.stringify(manifest, null, 2));
     console.log(`-> ${join(outDir, `${id}.glb`)} and ${manifestFile}; the game uses the first entry`);
@@ -1808,6 +1811,7 @@ switch (cmd) {
       defaultWear: info.parts.filter((p) => p.occlusionLayer > 0).map((p) => p.name),
       clips: info.animations,
       clipSpeeds: info.clipSpeeds ?? {},
+      ...(info.partialClips ? { partialClips: info.partialClips } : {}),
       parts: info.parts,
       customization: [...info.customization],
     };
@@ -1984,7 +1988,7 @@ switch (cmd) {
       const file = `anims_${source}.glb`;
       if (source === 'swg') {
         const info = convertSat(vfs, PLAYER_TEMPLATE, join(outDir, file), { animations: 'all', maxAnimations: 5000, wear: DEFAULT_WEAR });
-        return { file, clips: info.animations.map((n) => ({ name: n, speed: info.clipSpeeds?.[n] || undefined })) };
+        return { file, clips: info.animations.map((n) => ({ name: n, speed: info.clipSpeeds?.[n] || undefined, joints: info.partialClips?.[n] })) };
       }
       if (!options.jka) {
         console.log('  no --jka=<dir>: the Jedi Academy animations are left out');
