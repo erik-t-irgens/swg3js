@@ -77,6 +77,7 @@ const GRAPHICS: { title: string; knobs: Knob[] }[] = [
       { key: 'renderScale', label: 'Render scale', hint: 'Resolution over the screen\'s. Below 1 is the biggest saving there is; above 1 sharpens at a steep cost.', kind: 'range', min: 0.5, max: 2, step: 0.05, format: (v) => `${v.toFixed(2)}×` },
       { key: 'fov', label: 'Field of view', hint: 'Degrees, upright. Aiming a blaster narrows it by the same amount as before.', kind: 'range', min: 45, max: 100, step: 1, format: (v) => `${v}°` },
       { key: 'exposure', label: 'Exposure', hint: 'How bright the picture comes out of tone mapping.', kind: 'range', min: 0.5, max: 2, step: 0.05, format: (v) => v.toFixed(2) },
+      { key: 'normalStrength', label: 'Normal map strength', hint: 'How strongly the surface detail maps bend the lighting: 0 is flat, 1 as the game has them, 2 doubled.', kind: 'range', min: 0, max: 2, step: 0.05, format: (v) => v.toFixed(2) },
       { key: 'fog', label: 'Fog', hint: 'Over the planet\'s own fog: thinner shows farther, thicker hides more (and what is hidden still draws).', kind: 'range', min: 0.2, max: 3, step: 0.1, format: (v) => `${v.toFixed(1)}×` },
     ],
   },

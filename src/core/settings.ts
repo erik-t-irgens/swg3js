@@ -20,6 +20,8 @@ export interface Settings {
   shadowCasterRadius: number;
   /** Multiplier over the planet's own fog density. */
   fog: number;
+  /** How strongly the normal maps bend the lighting, 0 flat to 2 doubled. */
+  normalStrength: number;
   /** Tone mapping exposure. */
   exposure: number;
   /** How far placed objects (buildings, props) load, as a scale of the game's ranges. */
@@ -41,6 +43,7 @@ export const DEFAULT_SETTINGS: Settings = {
   shadowSoftness: 1.4,
   shadowCasterRadius: 1.2,
   fog: 1,
+  normalStrength: 1,
   exposure: 1,
   objectReach: 1,
   terrainRadius: 6,

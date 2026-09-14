@@ -168,6 +168,14 @@ export class AssetPack {
               }
               primitives.push({ geometry: o.geometry, material: m, cell });
             }
+            // A placed object never morphs: it stands at its default shape. A geometry that came
+            // with blend targets (an NPC's clothing carries the body's) would leave the instanced
+            // mesh drawn from it without morph influences, and the renderer's morph update
+            // throws on that, so the targets are dropped here.
+            if (Object.keys(o.geometry.morphAttributes).length) {
+              o.geometry.morphAttributes = {};
+              o.geometry.morphTargetsRelative = false;
+            }
           }
         });
         const { min, max } = def.bounds;

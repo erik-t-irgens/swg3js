@@ -131,6 +131,8 @@ class App {
     this.world = new World(this.scene, physics);
     this.world.renderer = this.renderer;
     this.world.userFog = S.fog;
+    this.world.normalScale.set(S.normalStrength, -S.normalStrength);
+    Character.normalScale.set(S.normalStrength, -S.normalStrength);
     this.world.setShadowLook(S.shadowSoftness, undefined, S.shadowMapSize);
     this.world.setShadows(S.shadowDistance, S.shadowCasterRadius);
     this.world.setReach(S.objectReach, S.terrainRadius, S.farRadius);
@@ -698,6 +700,11 @@ class App {
         break;
       case 'fog':
         this.world.userFog = S.fog;
+        break;
+      case 'normalStrength':
+        Character.normalScale.set(S.normalStrength, -S.normalStrength);
+        this.world.setNormalScale(S.normalStrength, -S.normalStrength);
+        this.player.rig?.character?.customizer?.setNormalScale(S.normalStrength, -S.normalStrength);
         break;
       case 'shadows':
         this.world.setShadowsEnabled(S.shadows);

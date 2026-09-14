@@ -1096,6 +1096,8 @@ export class World {
         if (!this.compiledMaterials.has(m)) {
           this.compiledMaterials.add(m);
           isNew = true;
+          const std = m as THREE.MeshStandardMaterial;
+          if (std.normalMap && std.normalScale) std.normalScale.copy(this.normalScale);
         }
         if (this.csmMaterials.has(m) || (m as THREE.ShaderMaterial).isShaderMaterial || !csm) continue;
         csm.setupMaterial(m);
@@ -1390,8 +1392,12 @@ export class World {
     this.lastTx = Number.NaN;
   }
 
+  /** The normal maps' scale for every material in the scene, now and as they arrive: strength, with the green flipped (the game's maps are Direct3D's). */
+  normalScale = new THREE.Vector2(1, -1);
+
   /** The strength and way up of every normal map in the scene, live, for checking the convention by eye. */
   setNormalScale(x: number, y: number): number {
+    this.normalScale.set(x, y);
     let n = 0;
     this.scene.traverse((o) => {
       const m = (o as THREE.Mesh).material;

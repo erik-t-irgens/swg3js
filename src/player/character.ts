@@ -147,6 +147,9 @@ export class Character {
   customizer: Customizer | null = null;
   private pendingCustomizer: Customizer | null = null;
 
+  /** The normal maps' scale for the live recipes' maps, set from the settings before a character loads. */
+  static readonly normalScale = new THREE.Vector2(1, -1);
+
   private constructor(readonly manifest: PartsManifest, clips: THREE.AnimationClip[]) {
     this.clips = clips;
   }
@@ -175,6 +178,7 @@ export class Character {
     if (!character.skeleton) throw new Error(`${id}: no part carried a skeleton`);
     character.applyOcclusion();
     const customizer = new Customizer();
+    customizer.normalScale.copy(Character.normalScale);
     customizer.materialsFor = (name) => character.materialsNamed(name);
     // The pack's values are the manifest's; ours start there, and the recipes render only when a value moves.
     for (const [k, v] of Object.entries(manifest.values ?? {})) customizer.values.set(k, v);
