@@ -77,6 +77,7 @@ interface Parts {
 }
 
 /** The placeholder torso's look per class, made once (a material made per swap compiled its shader per swap). */
+const hiltGlow = new THREE.Vector3();
 const TORSO_JEDI = new THREE.MeshStandardMaterial({ color: 0xc9b58a, roughness: 0.8, metalness: 0, flatShading: true });
 const TORSO_HUNTER = new THREE.MeshStandardMaterial({ color: 0x5f6b6e, roughness: 0.8, metalness: 0.3, flatShading: true });
 
@@ -148,7 +149,10 @@ function buildCharacter(): { group: THREE.Group; parts: Parts } {
   staffBlade.visible = false;
   const staffTip = new THREE.Object3D();
   staffTip.position.y = -1.25;
-  saber.add(hilt, blade, bladeTip, staffBlade, staffTip, saberLight);
+  // The saber's own light is not in the group: the group is hidden as a bounty hunter, and a
+  // light that comes and goes recompiles every shader. The hilt's glow comes from the pooled
+  // flash lights instead (lightSpots), and this light stays out of the scene.
+  saber.add(hilt, blade, bladeTip, staffBlade, staffTip);
   blade.visible = false;
   rightArm.add(saber);
   // The dual style's second saber, for the left hand.
@@ -283,6 +287,11 @@ export class Player {
   lightSpots(): { pos: THREE.Vector3; intensity: number; distance: number }[] {
     const out: { pos: THREE.Vector3; intensity: number; distance: number }[] = [];
     if (this.thrown.inFlight) out.push({ pos: this.flying.position, intensity: 4, distance: 6 });
+    if (this.saberOn && !this.thrown.inFlight && !this.orbiting && this.classId === 'jedi' && !this.mounted) {
+      this.parts.saber.getWorldPosition(hiltGlow);
+      hiltGlow.y += 0.6;
+      out.push({ pos: hiltGlow, intensity: 6, distance: 7 });
+    }
     if (this.orbiting) for (const g of this.orbit) out.push({ pos: g.position, intensity: 3, distance: 5 });
     return out;
   }
@@ -601,7 +610,6 @@ export class Player {
     if (this.held.right) this.held.right.visible = inHand || gunRight;
     if (this.held.left) this.held.left.visible = !this.orbiting;
     for (const g of this.orbit) g.visible = this.orbiting;
-    p.saberLight.intensity = on && inHand ? 6 : 0;
     this.flying.visible = this.thrown.inFlight;
   }
 

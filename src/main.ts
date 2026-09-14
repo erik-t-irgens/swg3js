@@ -1492,7 +1492,7 @@ class App {
       stats.frameMs = performance.now() - tFrame;
       // A shader compiled on a live frame is a stall: say which frame, and how many, so the cause can be found.
       const programs = this.renderer.info.programs?.length ?? 0;
-      if (programs > this.lastPrograms && this.lastPrograms > 0) console.info(`shaders: ${programs - this.lastPrograms} compiled during play (${stats.frameMs.toFixed(0)} ms frame, ${programs} programs in all)`);
+      if (programs > this.lastPrograms && this.lastPrograms > 0 && !this.traveling) console.info(`shaders: ${programs - this.lastPrograms} compiled during play (${stats.frameMs.toFixed(0)} ms frame, ${programs} programs in all)`);
       this.lastPrograms = programs;
       stats.rawDt = rawDt;
       stats.grounded = player.grounded;

@@ -1124,15 +1124,39 @@ export class World {
     return root;
   }
 
-  /** Compile with the camera seeing the world's layers, whatever pass it was last on: the lights are what the world pass shades with. */
-  private withWorldLayers<T>(camera: THREE.Camera, fn: () => T): T {
+  /**
+   * Compile with the camera seeing one pass's layers, whatever pass it was last on: the lights a
+   * pass sees are baked into the program, so the world pass (the sun and its cascades) and an
+   * interior pass (a room's lights) each need their own, and an actor drawn in both needs both.
+   */
+  private withLayers<T>(camera: THREE.Camera, layer: number, fn: () => T): T {
     const mask = camera.layers.mask;
-    camera.layers.set(0);
+    camera.layers.set(layer);
     camera.layers.enable(ACTOR_LAYER);
     try {
       return fn();
     } finally {
       camera.layers.mask = mask;
+    }
+  }
+
+  /** Which passes draw an object: the world's, an interior's, or both for an actor. */
+  private static passesOf(o: THREE.Object3D): number[] {
+    const interior = o.layers.isEnabled(INTERIOR_LAYER);
+    const actor = o.layers.isEnabled(ACTOR_LAYER);
+    const world = o.layers.isEnabled(0);
+    if (actor) return [0, INTERIOR_LAYER];
+    if (interior && !world) return [INTERIOR_LAYER];
+    return [0];
+  }
+
+  /** Compile some objects for every pass that draws them. */
+  private compileFor(r: THREE.WebGLRenderer, camera: THREE.Camera, objects: THREE.Object3D[], async: boolean): void {
+    const byPass = new Map<number, THREE.Object3D[]>();
+    for (const o of objects) for (const p of World.passesOf(o)) (byPass.get(p) ?? byPass.set(p, []).get(p)!).push(o);
+    for (const [layer, list] of byPass) {
+      const root = World.rootOf(list);
+      this.withLayers(camera, layer, () => (async ? r.compileAsync(root, camera, this.scene).catch(() => {}) : r.compile(root, camera, this.scene)));
     }
   }
 
@@ -1148,7 +1172,7 @@ export class World {
     const batch = this.compileQueue.splice(0, 2);
     const before = r.info.programs?.length ?? 0;
     const t0 = performance.now();
-    this.withWorldLayers(camera, () => r.compileAsync(World.rootOf(batch), camera, this.scene).catch(() => {}));
+    this.compileFor(r, camera, batch, true);
     const made = (r.info.programs?.length ?? 0) - before;
     const ms = performance.now() - t0;
     if (made && ms > 30) console.info(`shaders: ${made} started in the background (${ms.toFixed(0)} ms), ${this.compileQueue.length} objects still queued`);
@@ -1173,7 +1197,7 @@ export class World {
     const before = r.info.programs?.length ?? 0;
     const BATCH = 8;
     for (let i = 0; i < objects.length; i += BATCH) {
-      this.withWorldLayers(camera, () => r.compile(World.rootOf(objects.slice(i, i + BATCH)), camera, this.scene));
+      this.compileFor(r, camera, objects.slice(i, i + BATCH), false);
       onProgress(Math.min(objects.length, i + BATCH), objects.length);
       await new Promise((resolve) => requestAnimationFrame(resolve));
     }
