@@ -122,41 +122,45 @@ src/
 
 Everything the game shows from the original client (planets, buildings, ground textures, creatures, the player character) is converted from a locally owned install into `assets-private/`, which is git-ignored and never committed. The converter is `tools/swg/cli.mjs`; `docs/ASSETS.md` explains what may be converted and why, and `tools/swg/README.md` documents every command.
 
-**Setup, once per machine.** Node 22.18 or newer (24 is fine), then `npm install`. Point a variable at the folder holding the `.tre` archives:
+**Setup, once per machine.** Node 22.18 or newer (24 is fine), then `npm install`. Copy `.env.example` to `.env` (git-ignored) and put the folder holding the `.tre` archives in it, and Jedi Academy's `GameData` folder if you have the game:
 
-```bash
-# macOS / Linux / Git Bash on Windows
-export SWG="/Users/you/SWG"
-# PowerShell (then write "$env:SWG" wherever the commands below say "$SWG")
-$env:SWG = "C:\SWG"
 ```
+SWG=C:/SWG
+JKA=C:/Program Files (x86)/Steam/steamapps/common/Jedi Academy/GameData
+```
+
+The converter replaces `@SWG`, `@JKA` and `@CORE3` on its command line with those values, so the commands below work the same in cmd, PowerShell, Git Bash and a Unix shell, and paths with spaces need no quoting. A shell variable works too (`export SWG=...`, then `@SWG` as the argument), and the environment wins over `.env`.
 
 **The whole conversion, in order.** Every command takes `--retail-only`, which mounts only the SOE-origin archives and leaves an emulator project's own content out.
 
 ```bash
-npm run swg -- verify "$SWG" --retail-only                                        # 1. which archives are retail (sanity check)
-npm run swg -- planets "$SWG" --retail-only                                       # 2. which planets the archives hold
-npm run swg -- snapshot "$SWG" all assets-private --radius=all --retail-only       # 3. every planet: objects, terrain, ground textures, sky, flora, places (long: minutes per planet)
-npm run swg -- creatures "$SWG" assets-private --retail-only                      # 4. the creatures the planets spawn
-npm run swg -- player "$SWG" assets-private --retail-only                         # 5. the player character, dressed, with its animations
-npm run swg -- player "$SWG" assets-private --retail-only --jka="$JKA"             #    ... plus Jedi Academy's saber and jump clips ($JKA: its GameData or base folder)
-npm run swg -- status assets-private                                              # 6. what is in place, and the command for anything missing
-npm run dev                                                                       # 7. play
+npm run swg -- verify @SWG --retail-only                                        # 1. which archives are retail (sanity check)
+npm run swg -- planets @SWG --retail-only                                       # 2. which planets the archives hold
+npm run swg -- snapshot @SWG all assets-private --radius=all --retail-only       # 3. every planet: objects, terrain, ground textures, sky, flora, places (long: minutes per planet)
+npm run swg -- creatures @SWG assets-private --retail-only                      # 4. the creatures the planets spawn
+npm run swg -- player @SWG assets-private --retail-only                         # 5. the player character, dressed, with its animations
+npm run swg -- player @SWG assets-private --retail-only --jka=@JKA             #    ... plus Jedi Academy's saber, jump and parry clips (@JKA: its GameData or base folder)
+npm run swg -- parts @SWG assets-private --retail-only                           # 6. the same character as parts (body, head, clothes on one skeleton), which the game prefers
+npm run swg -- clips-save assets-private/player/human_male.glb assets-private/player/jka.clips --only=BOTH_
+npm run swg -- clips-apply assets-private/characters/human_male/rig.glb assets-private/player/jka.clips   #    carry the Jedi Academy clips onto the parts rig
+npm run swg -- wardrobe @SWG assets-private --retail-only                        # 7. every wearable and hairstyle, for the wardrobe on I (optional, long)
+npm run swg -- status assets-private                                              # 8. what is in place, and the command for anything missing
+npm run dev                                                                       # 9. play
 ```
 
-Step 3 also accepts one planet at a time (`snapshot "$SWG" tatooine assets-private/tatooine --center=auto --radius=all --retail-only`), and `--radius=500` for a quick look at just the starport area. Step 5 dresses the character in a shirt, trousers and shoes; `--wear=object/tangible/wearables/...,...` picks other clothes (`list "$SWG" wearables/` shows what exists), `--var=name=value` sets skin and hair colours (the command prints every variable), `--template=object/creature/player/shared_twilek_female.iff` picks another species.
+Step 3 also accepts one planet at a time (`snapshot @SWG tatooine assets-private/tatooine --center=auto --radius=all --retail-only`), and `--radius=500` for a quick look at just the starport area. Step 5 dresses the character in a shirt, trousers and shoes; `--wear=object/tangible/wearables/...,...` picks other clothes (`list @SWG wearables/` shows what exists), `--var=name=value` sets skin and hair colours (the command prints every variable), `--template=object/creature/player/shared_twilek_female.iff` picks another species.
 
 **After pulling new code.** Run `npm run swg -- status assets-private` first: it reports each pack and prints the exact command for whatever is missing. In general:
 
 | What changed | Command to rerun |
 | --- | --- |
-| Ground textures, terrain rules, building layers, the sky | `terrain "$SWG" all assets-private --retail-only` (refreshes every existing pack in seconds) |
-| Just the sky: sun, moons, stars, colour ramps, skybox, reflection maps | `sky "$SWG" all assets-private --retail-only` |
-| Reflective metal and glass on buildings and props | `snapshot "$SWG" <planet> assets-private/<planet> --center=auto --radius=all --retail-only` (the shine is baked into each model's textures) |
-| Buildings, objects, flora, a new planet | `snapshot "$SWG" <planet> assets-private/<planet> --center=auto --radius=all --retail-only` |
-| Named places on the galaxy map | `pois "$SWG" all assets-private --retail-only` |
-| Skin, clothes, eyes, animations (walking, swimming) | `player "$SWG" assets-private --retail-only` |
-| Creature models or clips | `creatures "$SWG" assets-private --retail-only` |
+| Ground textures, terrain rules, building layers, the sky | `terrain @SWG all assets-private --retail-only` (refreshes every existing pack in seconds) |
+| Just the sky: sun, moons, stars, colour ramps, skybox, reflection maps | `sky @SWG all assets-private --retail-only` |
+| Reflective metal and glass on buildings and props | `snapshot @SWG <planet> assets-private/<planet> --center=auto --radius=all --retail-only` (the shine is baked into each model's textures) |
+| Buildings, objects, flora, a new planet | `snapshot @SWG <planet> assets-private/<planet> --center=auto --radius=all --retail-only` |
+| Named places on the galaxy map | `pois @SWG all assets-private --retail-only` |
+| Skin, clothes, eyes, animations (walking, swimming) | `player @SWG assets-private --retail-only` |
+| Creature models or clips | `creatures @SWG assets-private --retail-only` |
 
 Two optional sources add what the client files alone do not place. `--events` on `snapshot` includes buildout areas the game only shows during an event (`planets` lists which planets have any, with the event each needs). `--core3=<path to Core3/MMOCoreORB/bin/scripts>` reads the SWGEmu server scripts: the static objects its screenplays place go into the pack, and every creature and NPC spawn point is written to the pack's `spawns.json` for later use.
 

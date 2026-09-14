@@ -50,6 +50,9 @@
 //                                                                  generate terrain at every snapshot object and compare with its height;
 //                                                                  --layers lists every layer, --at prints the height at one point
 //
+// Paths: a .env file beside package.json can name the folders once (SWG=..., JKA=..., CORE3=...); any
+//        argument or flag value written @SWG, @JKA, @CORE3 (any @NAME) is replaced by that value, from
+//        .env or the environment, so paths with spaces need no quoting in any shell.
 // Flags: --retail-only (mount only archives named in the retail manifests)
 //        --events (place buildout areas that the game only shows during an event; planets lists them)
 //        --areas (why: list every buildout area with its rows, unknown templates and extent)
@@ -92,7 +95,28 @@ import { loadEffect } from './texrender.mjs';
 import { readTemplate, stringParam } from './objtemplate.mjs';
 import { openTre, openVfs, readHeader } from './tre.mjs';
 
-const args = process.argv.slice(2);
+// A .env beside package.json names the folders once; @NAME anywhere in the arguments becomes that
+// variable's value (from .env or the environment), whichever shell is running.
+const envFile = new URL('../../.env', import.meta.url);
+if (existsSync(envFile)) {
+  for (const line of readFileSync(envFile, 'utf8').split(/\r?\n/)) {
+    const m = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/.exec(line);
+    if (!m || line.trim().startsWith('#')) continue;
+    let value = m[2];
+    if (/^(['"]).*\1$/.test(value)) value = value.slice(1, -1);
+    if (process.env[m[1]] === undefined) process.env[m[1]] = value;
+  }
+}
+const expandEnv = (a) =>
+  a.replace(/(^|=)@([A-Za-z_][A-Za-z0-9_]*)$/g, (whole, before, name) => {
+    const value = process.env[name];
+    if (value === undefined) {
+      console.error(`@${name}: not set; put ${name}=<path> in .env beside package.json (see .env.example), or in the environment`);
+      process.exit(1);
+    }
+    return before + value;
+  });
+const args = process.argv.slice(2).map(expandEnv);
 const flags = new Set(args.filter((a) => a.startsWith('--')).map((a) => a.split('=')[0]));
 const options = Object.fromEntries(args.filter((a) => a.startsWith('--') && a.includes('=')).map((a) => a.slice(2).split('=')));
 const pos = args.filter((a) => !a.startsWith('--'));
