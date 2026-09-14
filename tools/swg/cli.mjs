@@ -1271,6 +1271,7 @@ function packStatus(dir) {
     const lacking = (names) => POSTURE_CLIPS.filter(([, re]) => !names.some((c) => re.test(c))).map(([what]) => what);
     const playerLacks = lacking(p.clips);
     if (playerLacks.length) console.log(`  player clips missing: ${playerLacks.join(', ')}`);
+    if (!Object.keys(p.jkaClips ?? {}).length) console.log('  player: no Jedi Academy clips (saber swings, jumps, rolls): add --jka=<jka-dir> to the player command, then re-run parts, clips-save and clips-apply');
     if (!p.wear?.length) need(`player <swg-dir> ${dir} --retail-only`, 'the player has no clothes');
     else if (!swims) need(`player <swg-dir> ${dir} --retail-only`, 'the player lacks the swimming clips');
     else if (playerLacks.length) need(`player <swg-dir> ${dir} --retail-only${p.jkaClips ? ' --jka=<jka-dir>' : ''}`, `the player lacks the ${playerLacks.join(', ')} clips`);
@@ -1885,6 +1886,11 @@ switch (cmd) {
       if (lacking.length) console.log(`  the animation table in these archives lacks ${lacking.join(', ')}: the blaster's combat stances and hip shots the state hierarchy names. The retail table has 870 logical names, the Legends one 908; convert without --retail-only to take them from the Legends table (the clips themselves are the game's own files; nothing leaves assets-private).`);
     }
     const entry = { id, file: `player/${id}.glb`, template, wear, variables: Object.fromEntries(customizationValues(options.var)), clips: info.animations, clipSpeeds: info.clipSpeeds ?? {}, ...(info.partialClips ? { partialClips: info.partialClips } : {}), bounds: info.bounds, scale: 1, ...(info.jkaClips ? { jkaClips: info.jkaClips } : {}), ...(info.jkaGrip ? { jkaGrip: info.jkaGrip } : {}) };
+    if (!info.jkaClips && existsSync(join(outDir, 'manifest.json'))) {
+      const before = (JSON.parse(readFileSync(join(outDir, 'manifest.json'), 'utf8')).players ?? []).find((e) => e.id === id);
+      const had = Object.keys(before?.jkaClips ?? {}).length;
+      if (had) console.log(`\n  WARNING: the previous conversion carried ${had} Jedi Academy clips (saber swings, jumps, rolls) and this one has none.\n  Re-run with --jka=<Jedi Academy GameData or base folder> (@JKA), then parts, clips-save and clips-apply, or the game loses them.\n`);
+    }
     manifest.players = [entry, ...(manifest.players ?? []).filter((p) => p.id !== id)];
     writeFileSync(manifestFile, JSON.stringify(manifest, null, 2));
     console.log(`-> ${join(outDir, `${id}.glb`)} and ${manifestFile}; the game uses the first entry`);
@@ -2001,6 +2007,19 @@ switch (cmd) {
     const outDir = join(pos[2], 'characters', id);
     const wear = options.wear === undefined ? DEFAULT_WEAR : options.wear === 'none' ? [] : options.wear.split(',').map((w) => w.trim()).filter(Boolean);
     const variables = customizationValues(options.var);
+    // The Jedi Academy clips reach the rig by bundle (clips-save and clips-apply), so a rebuild
+    // keeps the ones the old rig carried rather than dropping them until the bundle is applied again.
+    const rigFile = join(outDir, 'rig.glb');
+    const oldParts = existsSync(join(outDir, 'parts.json')) ? JSON.parse(readFileSync(join(outDir, 'parts.json'), 'utf8')) : null;
+    let carried = null;
+    if (existsSync(rigFile)) {
+      try {
+        const bundle = extractClips(readFileSync(rigFile), (name) => /^BOTH_/i.test(name));
+        if (bundle.clips.length) carried = { bundle, jkaClips: oldParts?.jkaClips ?? {}, jkaGrip: oldParts?.jkaGrip, scale: oldParts?.scale };
+      } catch (err) {
+        console.log(`  (the old rig's Jedi Academy clips could not be read: ${err.message})`);
+      }
+    }
     // The same named clip set the single model gets (idle, walk, run, swimming...): the game
     // finds its states by these names, and the table's first eighty clips are not them.
     const info = convertSat(vfs, template, null, {
@@ -2011,6 +2030,17 @@ switch (cmd) {
       parts: { dir: outDir, rig: 'rig' },
       gender: /female/i.test(id) ? 'f' : 'm',
     });
+    let kept = null;
+    if (carried) {
+      const buf = readFileSync(rigFile);
+      const { json } = readGlb(buf);
+      if (!(json.animations ?? []).some((a) => /^BOTH_/i.test(a.name))) {
+        const { clips } = retargetClips(carried.bundle, skinJoints(json));
+        writeFileSync(rigFile, replaceClips(buf, clips, (name) => clips.some((c) => c.name === name)));
+        info.rig.clips = (info.rig.clips ?? 0) + clips.length;
+        kept = { count: clips.length, jkaClips: Object.fromEntries(Object.entries(carried.jkaClips).filter(([n]) => clips.some((c) => c.name === n))) };
+      }
+    }
     const manifest = {
       id,
       template,
@@ -2024,11 +2054,12 @@ switch (cmd) {
       ...(info.partialClips ? { partialClips: info.partialClips } : {}),
       parts: info.parts,
       customization: [...info.customization],
+      ...(kept ? { jkaClips: kept.jkaClips, ...(carried.jkaGrip ? { jkaGrip: carried.jkaGrip } : {}), ...(carried.scale !== undefined ? { scale: carried.scale } : {}) } : {}),
     };
     writeFileSync(join(outDir, 'parts.json'), JSON.stringify(manifest, null, 2));
     const total = info.parts.reduce((a, p) => a + p.bytes, 0);
     console.log(`-> ${outDir}`);
-    console.log(`   rig ${info.rig.file}: ${info.rig.joints} joints, ${info.rig.clips} clips`);
+    console.log(`   rig ${info.rig.file}: ${info.rig.joints} joints, ${info.rig.clips} clips${kept ? ` (${kept.count} Jedi Academy clips carried over from the old rig)` : ''}`);
     for (const p of info.parts) {
       console.log(`   ${p.name.padEnd(22)} ${String(p.triangles).padStart(5)} tris  ${(p.bytes / 1024).toFixed(0).padStart(5)} KB  layer ${p.occlusionLayer}${p.occludes?.length ? `  hides ${p.occludes.join(' ')}` : ''}`);
     }

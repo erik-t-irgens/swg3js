@@ -175,8 +175,7 @@ npm run swg -- verify @SWG --retail-only                                        
 npm run swg -- planets @SWG --retail-only                                       # 2. which planets the archives hold
 npm run swg -- snapshot @SWG all assets-private --radius=all --retail-only       # 3. every planet: objects, terrain, ground textures, sky, flora, places (long: minutes per planet)
 npm run swg -- creatures @SWG assets-private --retail-only                      # 4. the creatures the planets spawn
-npm run swg -- player @SWG assets-private --retail-only                         # 5. the player character, dressed, with its animations
-npm run swg -- player @SWG assets-private --retail-only --jka=@JKA             #    ... plus Jedi Academy's saber, jump and parry clips (@JKA: its GameData or base folder)
+npm run swg -- player @SWG assets-private --retail-only --jka=@JKA             # 5. the player character, dressed, with its animations and Jedi Academy's saber, jump and parry clips (@JKA: its GameData or base folder); always with --jka once you have it, a run without it drops them
 npm run swg -- parts @SWG assets-private --retail-only                           # 6. the same character as parts (body, head, clothes on one skeleton), which the game prefers
 npm run swg -- clips-save assets-private/player/human_male.glb assets-private/player/jka.clips --only=BOTH_
 npm run swg -- clips-apply assets-private/characters/human_male/rig.glb assets-private/player/jka.clips   #    carry the Jedi Academy clips onto the parts rig
