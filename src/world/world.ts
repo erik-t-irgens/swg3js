@@ -1390,6 +1390,23 @@ export class World {
     this.lastTx = Number.NaN;
   }
 
+  /** The strength and way up of every normal map in the scene, live, for checking the convention by eye. */
+  setNormalScale(x: number, y: number): number {
+    let n = 0;
+    this.scene.traverse((o) => {
+      const m = (o as THREE.Mesh).material;
+      if (!m) return;
+      for (const mat of Array.isArray(m) ? m : [m]) {
+        const std = mat as THREE.MeshStandardMaterial;
+        if (std.normalMap && std.normalScale) {
+          std.normalScale.set(x, y);
+          n++;
+        }
+      }
+    });
+    return n;
+  }
+
   /** Turn the sun's shadows on or off, live: every material takes the change on its next draw. */
   setShadowsEnabled(on: boolean): void {
     const r = this.renderer;

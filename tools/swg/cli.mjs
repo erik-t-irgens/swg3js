@@ -198,11 +198,11 @@ function textureFor(vfs, shaderPath) {
 const normalCache = new Map();
 
 /**
- * A shader's normal map as glTF wants it: tangent-space RGB, green up. The game's compressed
- * normal maps ("cn" textures, the CNRM slot) keep x in the alpha and y in the green channel
- * with z left to be rebuilt, told from an ordinary RGB map by the alpha carrying the detail
- * and the red none; the game's green points down the texture, and the glTF loader reads a map
- * without tangents with its green flipped, so the green is inverted here to come out right.
+ * A shader's normal map as tangent-space RGB. The game's compressed normal maps ("cn"
+ * textures, the CNRM slot) keep x in the alpha and y in the green channel with z left to be
+ * rebuilt, told from an ordinary RGB map by the alpha carrying the detail and the red none.
+ * The game is Direct3D's: its green points down the texture, and the glTF loader reads a map
+ * without tangents with its green flipped, which is exactly that, so the channels go as they are.
  */
 function normalFor(vfs, file) {
   const key = file.replace(/\\/g, '/').toLowerCase();
@@ -228,7 +228,7 @@ function normalFor(vfs, file) {
         const y = src[i * 4 + 1] / 127.5 - 1;
         const z = swizzled ? Math.sqrt(Math.max(0, 1 - x * x - y * y)) : src[i * 4 + 2] / 127.5 - 1;
         rgba[i * 4] = Math.round((x * 0.5 + 0.5) * 255);
-        rgba[i * 4 + 1] = 255 - Math.round((y * 0.5 + 0.5) * 255);
+        rgba[i * 4 + 1] = Math.round((y * 0.5 + 0.5) * 255);
         rgba[i * 4 + 2] = Math.round((z * 0.5 + 0.5) * 255);
         rgba[i * 4 + 3] = 255;
       }
