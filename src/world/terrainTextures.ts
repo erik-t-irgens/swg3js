@@ -35,9 +35,13 @@ export class TerrainTextures {
   readonly families: ShaderFamilyDef[];
   private material: THREE.MeshStandardMaterial | null = null;
 
+  private readonly layerIndex: Map<number, number>;
+  private readonly averages = new Map<number, THREE.Color>();
+
   private constructor(texture: THREE.DataArrayTexture, families: ShaderFamilyDef[], layers: Map<number, number>, planet: Map<number, string>) {
     this.texture = texture;
     this.families = families;
+    this.layerIndex = layers;
     // Ids on the ground are the planet's (plus any a building's layer file added); the pack lists
     // textures by family name, so match by name first and by id when the name is unknown.
     const byName = new Map<string, number>();
@@ -134,6 +138,29 @@ export class TerrainTextures {
     mat.customProgramCacheKey = () => `swg-ground-${count}`;
     this.material = mat;
     return mat;
+  }
+
+  /** The mean colour of a family's texture (its layer's pixels, sampled sparsely), for dust and spray; null without one. */
+  averageColor(familyId: number): THREE.Color | null {
+    const layer = this.layerIndex.get(familyId);
+    if (layer === undefined) return null;
+    let c = this.averages.get(familyId);
+    if (c) return c;
+    const img = this.texture.image as { data: Uint8Array; width: number; height: number };
+    const per = img.width * img.height * 4;
+    let r = 0;
+    let g = 0;
+    let b = 0;
+    let n = 0;
+    for (let i = layer * per; i < (layer + 1) * per; i += 4 * 37) {
+      r += img.data[i];
+      g += img.data[i + 1];
+      b += img.data[i + 2];
+      n++;
+    }
+    c = new THREE.Color(r / n / 255, g / n / 255, b / n / 255).convertSRGBToLinear();
+    this.averages.set(familyId, c);
+    return c;
   }
 
   dispose(): void {

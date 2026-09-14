@@ -12,7 +12,9 @@ export interface VehicleDef {
   kind: VehicleKind;
   /** Whether the kind was read off the name; unknown names default to a speeder bike and are marked. */
   inferred: boolean;
-  source: 'gallery' | 'creature';
+  source: 'gallery' | 'creature' | 'ship';
+  /** A ship's interior, when it has one (not entered yet). */
+  interior?: { file: string; cells: number } | null;
   file: string;
   template?: string;
   bounds?: VehicleSpec['bounds'];
@@ -59,6 +61,15 @@ export class Garage {
     } catch (err) {
       console.warn('garage: no creatures', err);
     }
+    try {
+      const res = await fetch(`${baseUrl}assets-private/ships/manifest.json`);
+      if (res.ok && (res.headers.get('content-type') ?? '').includes('json')) {
+        const manifest = (await res.json()) as { ships: { id: string; label: string; template: string; file: string; bounds?: VehicleSpec['bounds']; class: string; interior: { file?: string; cells?: number; failed?: string } | null }[] };
+        for (const sh of manifest.ships) g.vehicles.push({ id: sh.id, label: `${sh.label} (${sh.class})`, kind: 'ship', inferred: true, source: 'ship', file: `assets-private/ships/${sh.file}`, template: sh.template, bounds: sh.bounds, interior: sh.interior?.file ? { file: `assets-private/ships/${sh.interior.file}`, cells: sh.interior.cells ?? 0 } : null });
+      }
+    } catch (err) {
+      console.warn('garage: no ships', err);
+    }
     g.vehicles.sort((a, b) => a.kind.localeCompare(b.kind) || a.id.localeCompare(b.id));
     return g;
   }
@@ -99,21 +110,44 @@ export class Garage {
     const loaded = await this.model(def);
     const model = def.source === 'creature' ? cloneSkinned(loaded.scene) : loaded.scene.clone();
     let bounds = def.bounds;
+    const hardpoints: string[] = [];
+    const seat = { point: null as THREE.Vector3 | null };
     if (!bounds || def.source !== 'creature') {
       // A machine's box is measured from the model itself: the pack's bounds are the mesh file's
       // own, which for a substituted appearance can be another mesh's, and a wrong box is a
       // collider the model does not fill, springs in the wrong place and a vehicle that tumbles.
+      // The model is then moved so the box is centred on the vehicle and sits on its underside:
+      // a pod whose parts hang off to one side of its origin would otherwise stand its collider
+      // where the mesh is not, and the rider could walk through the mesh.
       const box = new THREE.Box3().setFromObject(model);
-      if (!box.isEmpty()) bounds = { min: [box.min.x, box.min.y, box.min.z], max: [box.max.x, box.max.y, box.max.z] };
+      if (!box.isEmpty()) {
+        const w = box.max.x - box.min.x;
+        const h = box.max.y - box.min.y;
+        const l = box.max.z - box.min.z;
+        const cx = (box.min.x + box.max.x) / 2;
+        const cz = (box.min.z + box.max.z) / 2;
+        model.position.set(-cx, -box.min.y, -cz);
+        model.updateMatrixWorld(true);
+        bounds = { min: [-w / 2, 0, -l / 2], max: [w / 2, h, l / 2] };
+        if (Math.max(w, h, l) > 40) console.warn(`garage: ${def.id} measures ${w.toFixed(1)}×${h.toFixed(1)}×${l.toFixed(1)} m, more than a vehicle should; its model may carry an effect plane or a far part`);
+      }
     }
     if (!bounds) bounds = { min: [-0.5, 0, -1], max: [0.5, 1, 1] };
+    // The game's hardpoints ride along as hp:<name> nodes; a rider's, saddle's or seat's places the seat.
+    model.traverse((o) => {
+      if (!o.name.startsWith('hp:')) return;
+      hardpoints.push(o.name.slice(3));
+      if (!seat.point && /rider|saddle|seat|driver|pilot|passenger|player|mount/i.test(o.name)) seat.point = o.getWorldPosition(new THREE.Vector3()).sub(model.getWorldPosition(new THREE.Vector3())).add(model.position);
+    });
     if (place) [x, y, z] = place(bounds);
     const spec = specFor(kind, def.id, def.label, bounds, { animal: def.source === 'creature' });
     if (def.source === 'creature') {
       // A mount's saddle sits on its back, and it walks and runs with its own clips at their own pace.
       spec.seat = [0, bounds.max[1] * 0.92, (bounds.min[2] + bounds.max[2]) / 2];
-    }
+    } else if (seat.point) spec.seat = [seat.point.x, seat.point.y, seat.point.z];
     const v = new Vehicle(spec, model, physics, scene, x, y - bounds.min[1] + spec.hover, z, heading);
+    v.hardpoints = hardpoints;
+    if (def.source !== 'creature') addEngineGlow(v);
     if (def.source === 'creature' && loaded.animations.length) {
       const mixer = new THREE.AnimationMixer(model);
       const clips = new Map(loaded.animations.map((a) => [a.name, a]));
@@ -142,6 +176,55 @@ export class Garage {
     }
     return v;
   }
+}
+
+/**
+ * Engine glow on a machine: additive discs at the rear of its box, brighter and longer the
+ * faster it goes, orange for a podracer's turbines and blue for a repulsor drive.
+ */
+function addEngineGlow(v: Vehicle): void {
+  const b = v.spec.bounds;
+  const w = b.max[0] - b.min[0];
+  const h = b.max[1] - b.min[1];
+  const pod = v.spec.kind === 'podracer';
+  const color = pod ? 0xffa040 : 0x4fd0ff;
+  const mat = new THREE.SpriteMaterial({ map: glowTexture(), color, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false });
+  const glows: THREE.Sprite[] = [];
+  const xs = w > 1.2 ? [-w * 0.28, w * 0.28] : [0];
+  for (const x of xs) {
+    const sp = new THREE.Sprite(mat);
+    sp.position.set(x, b.min[1] + h * 0.45, b.min[2] - 0.05);
+    sp.scale.setScalar(0.2);
+    v.group.add(sp);
+    glows.push(sp);
+  }
+  const size = Math.min(1.6, 0.25 + w * 0.18);
+  const base = v.onUpdate;
+  v.onUpdate = (dt, self, drive) => {
+    base?.(dt, self, drive);
+    const throttle = drive ? Math.max(0, drive.throttle) : 0;
+    const k = size * (0.35 + 0.65 * Math.min(1, Math.abs(self.speed) / self.spec.maxSpeed) + 0.4 * throttle + (self.boosting ? 0.6 : 0)) * (self.overheated > 0 ? 0.4 + 0.3 * Math.random() : 1);
+    for (const g of glows) g.scale.set(k, k, 1);
+    mat.opacity = 0.55 + 0.45 * Math.min(1, Math.abs(self.speed) / 8 + throttle);
+  };
+}
+
+let glowTex: THREE.Texture | null = null;
+function glowTexture(): THREE.Texture {
+  if (glowTex) return glowTex;
+  const size = 64;
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext('2d')!;
+  const g = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+  g.addColorStop(0, 'rgba(255,255,255,1)');
+  g.addColorStop(0.3, 'rgba(255,255,255,0.7)');
+  g.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, size, size);
+  glowTex = new THREE.CanvasTexture(canvas);
+  glowTex.colorSpace = THREE.SRGBColorSpace;
+  return glowTex;
 }
 
 /** Clone a skinned model so its skeleton is its own (three's SkeletonUtils, inlined for the one use). */

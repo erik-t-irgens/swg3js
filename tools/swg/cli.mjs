@@ -7,6 +7,7 @@
 //   node tools/swg/cli.mjs extract <swg-dir> <path-in-archive> <out-file>
 //   node tools/swg/cli.mjs dump <file.iff> | <swg-dir> <path-in-archive>   print an IFF tree
 //   node tools/swg/cli.mjs weapons <swg-dir> <out-dir> [--limit=N]       every weapon the game can hold, with its class, under <out-dir>/weapons
+//   node tools/swg/cli.mjs ships <swg-dir> <out-dir> [--limit=N]         every ship a player can fly, with its interior when it has one, under <out-dir>/ships
 //   node tools/swg/cli.mjs ash <swg-dir> <appearance/x.sat | object/.../shared_x.iff> [--find=pistol]   the animation state hierarchy behind a skeletal appearance, with its strings
 //   node tools/swg/cli.mjs shader <swg-dir> <shader/x.sht>        list a shader's texture slots
 //   node tools/swg/cli.mjs template <swg-dir> <object/x.iff>       print an object template's parameter chain
@@ -1185,7 +1186,7 @@ const CREATURE_CLIPS = 'idle,walk,run,cbt_stand_combat_attack_light,rea_stand_ge
 /** The player's clips: locomotion and posture by exact name (=), reactions by substring. */
 /** What the player wears when --wear is not given: a plain shirt, trousers and shoes. */
 const DEFAULT_WEAR = ['object/tangible/wearables/shirt/shared_shirt_s03.iff', 'object/tangible/wearables/pants/shared_pants_s01.iff', 'object/tangible/wearables/shoes/shared_shoes_s01.iff'];
-const PLAYER_CLIPS = '=idle,=walk,=run,=idle_combat,=walk_combat,=run_combat,=jump,strafe,backward,walk_back,run_back,loop_crouched,loop_kneeling,loop_prone,trn_standing_to_crouched,trn_crouched_to_standing,trn_standing_to_kneeling,trn_kneeling_to_standing,trn_crouched_to_kneeling,trn_kneeling_to_prone,trn_prone_to_kneeling,trn_standing_to_prone,trn_prone_to_standing,loop_pistol_standing,loop_rifle:,loop_pistol_riding,loop_rifle_riding,loop_combat_standing,loop_pistol_kneeling,loop_rifle_kneeling,loop_pistol_prone,loop_rifle_prone,loop_pistol_combat_prone,loop_rifle_combat_prone,add_pistol_fire,add_rifle_fire,pistol_combat_prone_fire,rifle_combat_prone_fire,pistol_reload,rifle_reload,loop_pistol_combat_standing,loop_rifle_combat_standing,loop_rifle_a_combat,loop_pistol_combat_kneeling,loop_rifle_combat_kneeling,loop_rifle_kneeling_combat,loop_pistol_kneeling_combat,pistol_combat_standing_fire,rifle_combat_standing_fire,rifle_standing_aimed_fire,pistol_standing_aimed_fire,pistol_combat_kneeling_fire,rifle_combat_kneeling_fire,pistol_kneeling_fire,rifle_kneeling_fire,trn_pistol_standing_to_pistol_combat,trn_rifle_a_standing,trn_pistol_combat_to_pistol_combat_aimed,trn_pistol_combat_standing_aimed_to,trn_pistol_combat_standing_to,trn_rifle_combat_standing_to,trn_rifle_combat_standing_aimed_to,trn_pistol_combat_kneeling,trn_rifle_combat_kneeling,trn_pistol_combat_prone_to,trn_rifle_combat_prone_to,trn_pistol_combat_prone_aimed_to,trn_rifle_combat_prone_aimed_to,=loop_sitting_chair:0,=loop_sitting_ground,=loop_swimming:speed0,=loop_swimming:speed1,=unarmed_standing_ready_punch,=sword_1h_standing_ready_hrz_slash_middle_r,=rea_get_hit_medium_mid_center,=trn_combat_standing_hit_to_incapacitated_face_up,=loop_incapacitated_face_up,=cbt_stand_combat_attack_light,=rea_stand_get_hit_light,=trn_stand_to_incapacitated,=loop_incapacitated';
+const PLAYER_CLIPS = '=idle,=walk,=run,=idle_combat,=walk_combat,=run_combat,=jump,strafe,backward,walk_back,run_back,loop_crouched,loop_kneeling,loop_prone,trn_standing_to_crouched,trn_crouched_to_standing,trn_standing_to_kneeling,trn_kneeling_to_standing,trn_crouched_to_kneeling,trn_kneeling_to_prone,trn_prone_to_kneeling,trn_standing_to_prone,trn_prone_to_standing,loop_pistol_standing,loop_rifle:,loop_pistol_riding,loop_rifle_riding,loop_riding,loop_ride,loop_combat_standing,loop_pistol_kneeling,loop_rifle_kneeling,loop_pistol_prone,loop_rifle_prone,loop_pistol_combat_prone,loop_rifle_combat_prone,add_pistol_fire,add_rifle_fire,pistol_combat_prone_fire,rifle_combat_prone_fire,pistol_reload,rifle_reload,loop_pistol_combat_standing,loop_rifle_combat_standing,loop_rifle_a_combat,loop_pistol_combat_kneeling,loop_rifle_combat_kneeling,loop_rifle_kneeling_combat,loop_pistol_kneeling_combat,pistol_combat_standing_fire,rifle_combat_standing_fire,rifle_standing_aimed_fire,pistol_standing_aimed_fire,pistol_combat_kneeling_fire,rifle_combat_kneeling_fire,pistol_kneeling_fire,rifle_kneeling_fire,trn_pistol_standing_to_pistol_combat,trn_rifle_a_standing,trn_pistol_combat_to_pistol_combat_aimed,trn_pistol_combat_standing_aimed_to,trn_pistol_combat_standing_to,trn_rifle_combat_standing_to,trn_rifle_combat_standing_aimed_to,trn_pistol_combat_kneeling,trn_rifle_combat_kneeling,trn_pistol_combat_prone_to,trn_rifle_combat_prone_to,trn_pistol_combat_prone_aimed_to,trn_rifle_combat_prone_aimed_to,=loop_sitting_chair:0,=loop_sitting_ground,=loop_swimming:speed0,=loop_swimming:speed1,=unarmed_standing_ready_punch,=sword_1h_standing_ready_hrz_slash_middle_r,=rea_get_hit_medium_mid_center,=trn_combat_standing_hit_to_incapacitated_face_up,=loop_incapacitated_face_up,=cbt_stand_combat_attack_light,=rea_stand_get_hit_light,=trn_stand_to_incapacitated,=loop_incapacitated';
 const PLAYER_TEMPLATE = 'object/creature/player/shared_human_male.iff';
 
 /** Planet ids the game can load a pack for (see src/data/planets.ts). */
@@ -1295,12 +1296,16 @@ function packStatus(dir) {
   const weapons = readJson(join(dir, 'weapons/manifest.json'));
   if (!weapons) {
     console.log('  weapons: none (the placeholder saber and rifle are used)');
-    need(`weapons <swg-dir> ${dir} --retail-only`, 'no weapons converted for the rack (G in game)');
+    need(`weapons <swg-dir> ${dir} --retail-only`, 'no weapons converted for the rack (B in game)');
   } else console.log(`  weapons: ${weapons.weapons?.length ?? 0} on the rack, ${weapons.skipped?.length ?? 0} left out`);
+  const ships = readJson(join(dir, 'ships/manifest.json'));
+  if (!ships) need(`ships <swg-dir> ${dir} --retail-only`, 'no ships converted for the garage (G in game, at the bottom)');
+  else console.log(`  ships: ${ships.ships.length} ships, ${ships.ships.filter((sh) => sh.interior && !sh.interior.failed).length} with an interior, ${ships.skipped.length} left out`);
   if (!todo.size) {
     console.log(`everything is in place: ${planets} planet packs, creatures and player`);
     return;
   }
+
   console.log('\nto fill the gaps (replace <swg-dir> with your SWG folder):');
   for (const [cmd, whys] of todo) console.log(`  npm run swg -- ${cmd}\n      ${whys.length > 4 ? `${whys.slice(0, 3).join('; ')}; and ${whys.length - 3} more` : whys.join('; ')}`);
 }
@@ -2188,6 +2193,69 @@ switch (cmd) {
     printEffectSummary();
     break;
   }
+  case 'ships': {
+    // <swg-dir> <out-dir> [--limit=N]: every ship a player can fly (object/ship/player/), as models under
+    // <out-dir>/ships with a manifest naming each one's class and, for the multi-crew ships, its interior
+    // (the ship template's interiorLayoutFileName, a portal building converted alongside with its cells).
+    if (!pos[2]) usage();
+    const vfs = mount(pos[1]);
+    const outDir = join(pos[2], 'ships');
+    mkdirSync(outDir, { recursive: true });
+    const { buildShips, SHIP_CLASSES } = await import('./ships.mjs');
+    const { galleryTemplates } = await import('./gallery.mjs');
+    const models = new Map();
+    const cache = new Map();
+    const convert = (template) => {
+      const r = resolveTemplateMesh(vfs, template, cache);
+      if (r.skip) return { skip: r.skip };
+      if (r.particle) return { skip: 'particle effect' };
+      if (r.skeletal) return { skip: 'skeletal appearance' };
+      const single = r.parts.length === 1 && !r.parts[0].transform && !r.effects?.length;
+      const id = familyOf(single ? r.parts[0].mesh : r.appearance);
+      if (!models.has(id)) {
+        try {
+          const conv = convertOne(vfs, single ? r.parts[0].mesh : r.appearance, join(outDir, `${id}.glb`));
+          const b = conv.mesh.bounds ?? { min: [0, 0, 0], max: [0, 0, 0] };
+          const bounds = conv.flipX ? { min: [-b.max[0], b.min[1], b.min[2]], max: [-b.min[0], b.max[1], b.max[2]] } : b;
+          const effects = attachedEffects(vfs, conv.effects, outDir);
+          models.set(id, { id, file: `${id}.glb`, bounds, triangles: conv.tris, textured: conv.textured, shaders: conv.shaders.length, parts: conv.partCount, ...(effects.length ? { effects } : {}), ...(conv.tris ? {} : { failed: 'no triangles' }) });
+        } catch (err) {
+          models.set(id, { id, failed: err.message });
+        }
+      }
+      const def = models.get(id);
+      if (!def || def.failed) return { skip: def?.failed ?? 'failed' };
+      return { model: id, file: def.file, bounds: def.bounds };
+    };
+    const interiorOf = (template) => {
+      const pob = resolveTemplateString(vfs, template, ['interiorLayoutFileName', 'interiorLayoutFilename'], cache);
+      return pob && vfs.has(pob) ? pob : null;
+    };
+    const convertInterior = (template, pob) => {
+      const id = `${familyOf(pob)}_interior`;
+      if (!models.has(id)) {
+        try {
+          const conv = convertOne(vfs, pob, join(outDir, `${id}.glb`));
+          models.set(id, { id, file: `${id}.glb`, triangles: conv.tris, textured: conv.textured, shaders: conv.shaders.length, cells: conv.cells, portals: conv.portals ?? [], interior: true, ...(conv.tris ? {} : { failed: 'no triangles' }) });
+        } catch (err) {
+          models.set(id, { id, failed: err.message });
+        }
+      }
+      const def = models.get(id);
+      if (!def || def.failed) return { skip: def?.failed ?? 'failed' };
+      return { file: def.file, cells: def.cells?.length ?? 0 };
+    };
+    const limit = options.limit ? Number(options.limit) : Infinity;
+    const { ships, skipped } = buildShips(galleryTemplates(vfs, 'object/ship/player/'), { convert, interiorOf, convertInterior }, { log: console.log, limit });
+    const manifest = { classes: SHIP_CLASSES, ships, skipped, models: [...models.values()].filter((m) => !m.failed) };
+    writeFileSync(join(outDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
+    const withInterior = ships.filter((sh) => sh.interior && !sh.interior.failed).length;
+    console.log(`-> ${outDir}: ${ships.length} ships in ${models.size} models, ${withInterior} with an interior, ${skipped.length} left out (listed in manifest.json; G in game opens the garage, ships at the bottom)`);
+    if (skipped.length) console.log(`   left out:\n${skipped.map((sk) => `     ${sk.template}  (${sk.why})`).join('\n')}`);
+    printEffectSummary();
+    break;
+  }
+
   case 'gallery': {
     // <swg-dir> <out-dir> [--jka=<dir>] [--only=houses,vehicles,weapons,anims] [--limit=N]
     if (!pos[2]) usage();

@@ -22,6 +22,7 @@ export type Action =
   | 'inventory'
   | 'weapons'
   | 'garage'
+  | 'freeLook'
   | 'noclip'
   | 'noclipFaster'
   | 'noclipSlower'
@@ -59,6 +60,7 @@ export const DEFAULT_BINDINGS: Record<Action, string[]> = {
   inventory: ['KeyI'],
   weapons: ['KeyB'],
   garage: ['KeyG'],
+  freeLook: ['AltLeft', 'AltRight'],
   noclip: ['KeyN'],
   noclipFaster: ['Equal', 'NumpadAdd'],
   noclipSlower: ['Minus', 'NumpadSubtract'],
@@ -86,7 +88,7 @@ export class Input {
   constructor(private canvas: HTMLCanvasElement) {
     this.loadBindings();
     window.addEventListener('keydown', (e) => {
-      if (['Space', 'Tab', 'KeyM'].includes(e.code)) e.preventDefault();
+      if (['Space', 'Tab', 'KeyM', 'AltLeft', 'AltRight'].includes(e.code)) e.preventDefault();
       if (e.repeat) return;
       this.down.add(e.code);
       this.pressed.add(e.code);

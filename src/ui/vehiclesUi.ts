@@ -7,7 +7,8 @@ const KINDS: { id: VehicleKind; label: string; blurb: string }[] = [
   { id: 'podracer', label: 'Podracers', blurb: 'fast, drifting, banking; the boost heats and burns out' },
   { id: 'speederbike', label: 'Speeder bikes', blurb: 'quick and grippy, a burst boost, a hop' },
   { id: 'ground', label: 'Ground vehicles and mounts', blurb: 'walkers and animals: slow, turn in place, on their feet' },
-  { id: 'flyer', label: 'Flyers', blurb: 'hover cars and aircraft: Space climbs, Ctrl sinks' },
+  { id: 'flyer', label: 'Flyers', blurb: 'flying cars and aircraft: look up and down, or Space and X, to climb and sink' },
+  { id: 'ship', label: 'Ships', blurb: 'the player ships: W builds speed, the mouse pitches and turns, A/D roll; a first flight model' },
 ];
 
 export class VehiclesUi {

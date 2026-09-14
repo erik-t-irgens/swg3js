@@ -21,7 +21,7 @@ import { Hud } from './ui/hud';
 import { specFor, type DriveInput } from './vehicles/vehicle';
 import { VehiclesUi } from './ui/vehiclesUi';
 import { Garage, type VehicleDef } from './vehicles/garage';
-import type { VehicleKind } from './vehicles/vehicle';
+import type { Vehicle, VehicleKind } from './vehicles/vehicle';
 import { World } from './world/world';
 import { RANGE } from './world/gallery';
 
@@ -31,12 +31,15 @@ function mountPrompt(v: import('./vehicles/vehicle').Vehicle): string {
   const bar = (f: number) => '▮'.repeat(Math.round(f * 8)) + '▯'.repeat(8 - Math.round(f * 8));
   const boost = v.spec.boost === 'heat' ? ` · <b>Shift</b> boost · heat ${bar(v.meter)}${v.overheated > 0 ? ' BURNT OUT' : ''}` : v.spec.boost === 'burst' ? ` · <b>Shift</b> boost ${bar(v.meter)}` : '';
   const hop = v.spec.hop ? ' · <b>Space</b> hop' : '';
-  const fly = v.spec.fly ? ' · <b>Space</b> climb · <b>Ctrl</b>/<b>X</b> sink' : '';
-  const turn = k === 'ground' ? '<b>A/D</b> turn' : '<b>A/D</b> steer';
-  return `<b>E</b> dismount · <b>W/S</b> throttle · ${turn}${boost}${hop}${fly} · ${k} · ${Math.round(Math.abs(v.speed) * 3.6)} km/h`;
+  const fly = v.spec.fly ? ' · look up/down or <b>Space</b>/<b>X</b> to climb and sink' : '';
+  if (k === 'ship') return `<b>E</b> leave · <b>W</b>/<b>S</b> throttle up and down · mouse turns and pitches · <b>A/D</b> roll · <b>Alt</b> look around · <b>Shift</b> burn · ${v.airborne ? 'flying' : 'landed'} · ${Math.round(Math.abs(v.speed) * 3.6)} km/h`;
+  const turn = k === 'ground' ? 'mouse or <b>A/D</b> turn' : 'mouse or <b>A/D</b> steer';
+  return `<b>E</b> dismount · <b>W/S</b> throttle · ${turn} · <b>Alt</b> look around${boost}${hop}${fly} · ${k} · ${Math.round(Math.abs(v.speed) * 3.6)} km/h`;
 }
 
 const MOUNT_RANGE = 3.6;
+/** The camera pitch a flyer holds its height at: the default view, a little above level. */
+const CAMERA_REST_PITCH = 0.32;
 
 /** Debug counters, readable from the console as window.__stats. */
 const stats = { frameMs: 0, physicsMs: 0, renderMs: 0, rawDt: 0, grounded: false, vel: [0, 0, 0] as number[], calls: 0, triangles: 0, pack: '', terrain: '', chunks: 0 };
@@ -643,21 +646,30 @@ class App {
     this.input.requestLock();
   }
 
-  /** Drive the ridden vehicle from the keys (W/S throttle, A/D steer, Shift boost, Space hop or climb, Ctrl or X sink), step every vehicle, and seat the rider. */
+  /** Drive the ridden vehicle from the keys (the mouse or A/D steer, Alt frees the look, W/S throttle, Shift boost, Space hop, the view's tilt or Space and X climb and sink), step every vehicle, and seat the rider. */
   private stepVehicles(dt: number, simulate: boolean): void {
     const { player, input } = this;
     let drive: DriveInput | null = null;
     if (simulate && player.mounted) {
+      // The mouse steers: the vehicle turns toward where the camera looks, and a flyer climbs or
+      // sinks as the view tilts up or down past a dead band around level. Alt frees the camera
+      // to look around without steering.
+      const free = input.held('freeLook');
+      const tilt = -(this.cam.pitch - CAMERA_REST_PITCH);
+      const vertical = free ? 0 : Math.sign(tilt) * THREE.MathUtils.clamp((Math.abs(tilt) - 0.12) / 0.45, 0, 1);
       drive = {
         throttle: (input.held('forward') ? 1 : 0) - (input.held('back') ? 1 : 0),
         steer: (input.held('right') ? 1 : 0) - (input.held('left') ? 1 : 0),
+        heading: free ? null : this.cam.yaw + Math.PI,
         boost: input.held('walk'),
         hop: input.pressedAction('jump'),
         up: input.held('jump'),
         down: input.held('crouch'),
+        vertical,
       };
     }
-    for (const v of this.world.vehicles) v.update(dt, this.physics, v === player.mounted ? drive : null, (x, z) => this.world.terrain.heightAt(x, z));
+    const terrain = this.world.terrain;
+    for (const v of this.world.vehicles) v.update(dt, this.physics, v === player.mounted ? drive : null, (x, z) => terrain.heightAt(x, z), (x, z) => terrain.waterHeightAt(x, z));
     if (player.mounted) player.syncMount();
   }
 
@@ -737,8 +749,10 @@ class App {
   /** Spawn a vehicle from the garage in front of the player, as its own kind or one chosen for the test. */
   async spawnVehicle(def: VehicleDef, kind?: VehicleKind): Promise<string> {
     const v = await this.world.spawnVehicle(def, this.player.pos, this.player.heading, kind);
-    this.hud.setPrompt(`${def.label}: a ${v.spec.kind} (E to ride)`);
-    return `${def.id} spawned as a ${v.spec.kind}`;
+    const b = v.spec.bounds;
+    const size = [b.max[0] - b.min[0], b.max[1] - b.min[1], b.max[2] - b.min[2]].map((n) => n.toFixed(1)).join('×');
+    this.hud.setPrompt(`${def.label}: a ${v.spec.kind}, ${size} m (E to ride)`);
+    return `${def.id} spawned as a ${v.spec.kind}: ${size} m at ${v.pos.toArray().map((n) => n.toFixed(1)).join(',')}, ${v.pos.distanceTo(this.player.pos).toFixed(1)} m away, seat ${v.spec.seat.map((n) => n.toFixed(2)).join(',')}, hardpoints: ${v.hardpoints.join(' ') || 'none'}`;
   }
 
   /** B: the weapons rack, with the mouse free to use it. */
@@ -831,7 +845,7 @@ class App {
     let best = null;
     let bestD = MOUNT_RANGE;
     for (const sp of this.world.vehicles) {
-      const d = sp.pos.distanceTo(p.pos) - sp.radius;
+      const d = this.vehicleReach(sp);
       if (d < bestD) {
         bestD = d;
         best = sp;
@@ -845,8 +859,16 @@ class App {
 
   private nearestSpeederDistance(): number {
     let d = Infinity;
-    for (const sp of this.world.vehicles) d = Math.min(d, sp.pos.distanceTo(this.player.pos) - sp.radius);
+    for (const sp of this.world.vehicles) d = Math.min(d, this.vehicleReach(sp));
     return d;
+  }
+
+  /** How far a vehicle's side is from the player across the ground, or far when it is well above or below them (a flyer overhead, a bike up a cliff). */
+  private vehicleReach(v: Vehicle): number {
+    const p = this.player.pos;
+    const dy = Math.abs(v.pos.y - p.y);
+    if (dy > 4) return Infinity;
+    return Math.hypot(v.pos.x - p.x, v.pos.z - p.z) - v.radius;
   }
 
   run(): void {

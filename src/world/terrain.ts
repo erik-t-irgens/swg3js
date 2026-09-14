@@ -169,6 +169,12 @@ export class Terrain {
     return this.detail.fbm(x * 0.012 + 50, z * 0.012 - 50, 2) * 0.5 + 0.5;
   }
 
+  /** The palette's ground colour at a point (a real planet's ground textures are asked separately). */
+  groundColorAt(x: number, z: number, out: THREE.Color): THREE.Color {
+    this.colorAt(this.heightAt(x, z), 1, x, z, out);
+    return out;
+  }
+
   private colorAt(h: number, ny: number, x: number, z: number, out: THREE.Color): void {
     // Flat ground (no height range) takes the middle of the palette rather than dividing by nothing.
     const span = this.maxH - this.minH;

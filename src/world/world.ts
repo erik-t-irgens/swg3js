@@ -19,6 +19,7 @@ import { ParticleEffects } from './particles';
 import { CSM } from 'three/examples/jsm/csm/CSM.js';
 import { INTERIOR_LAYER, markActor, type PortalRenderer } from './portalRender';
 import { createPlaceholderSpeeder } from '../vehicles/speeder';
+import { Dust } from '../vehicles/dust';
 import { Garage, type VehicleDef } from '../vehicles/garage';
 import { Vehicle, type VehicleKind, type VehicleSpec } from '../vehicles/vehicle';
 import { Bolts } from '../combat/bolts';
@@ -26,6 +27,8 @@ import { Gallery } from './gallery';
 import { TurretManager, type TurretTarget } from '../combat/turrets';
 import type { Hittable } from '../combat/kit';
 
+const tmpQ = new THREE.Quaternion();
+const tmpV = new THREE.Vector3();
 const VIEW_RADIUS = 6;
 const STREAM_BUDGET = 3;
 /** Coarse distant terrain: tile size, vertex resolution and radius in tiles. */
@@ -252,6 +255,9 @@ export class World {
   /** Where each mover was at the last ripple pass, for its velocity through the water. */
   private readonly lastSeen = new WeakMap<object, THREE.Vector3>();
   private readonly splashes = new Splashes();
+  private readonly dust = new Dust();
+  private dustDue = 0;
+  private readonly dustColor = new THREE.Color();
   /**
    * A fixed pool of lights for building interiors, on the interior layer only: the cell the
    * player is in borrows them. A fixed count keeps the shader variants stable, so entering a new
@@ -268,8 +274,9 @@ export class World {
 
   constructor(readonly scene: THREE.Scene, readonly physics: Physics) {
     this.bolts = new Bolts(scene);
-    scene.add(this.chunkRoot, this.sun, this.sun.target, this.hemi, this.fill, this.fill.target, this.splashes.points);
+    scene.add(this.chunkRoot, this.sun, this.sun.target, this.hemi, this.fill, this.fill.target, this.splashes.points, this.dust.points);
     markActor(this.splashes.points);
+    markActor(this.dust.points);
     for (let i = 0; i < INTERIOR_LIGHT_CAP; i++) {
       const l = new THREE.PointLight(0xffffff, 0, 1, 2);
       l.layers.set(INTERIOR_LAYER);
@@ -696,7 +703,53 @@ export class World {
     };
     touch(this, playerPos, 1);
     for (const c of this.creatures.creatures) if (c.hp > 0) touch(c, c.pos, 0.9);
-    for (const sp of this.vehicles) touch(sp, sp.pos, 1.4);
+    // A vehicle stirs the water from its bow and its stern, harder the bigger it is, each point
+    // wandering a little so the rings overlap unevenly rather than as one neat wake.
+    for (const v of this.vehicles) {
+      const strength = 1.6 + v.radius * 0.5;
+      v.quaternion(tmpQ);
+      const reach = Math.max(0.5, v.radius * 0.6);
+      for (const [key, along] of [[v, reach], [v.seat, -reach]] as const) {
+        tmpV.set((Math.random() - 0.5) * v.radius * 0.6, 0, along + (Math.random() - 0.5) * 0.4).applyQuaternion(tmpQ).add(v.pos);
+        tmpV.y = v.pos.y + v.spec.bounds.min[1];
+        touch(key, tmpV, strength * (0.8 + Math.random() * 0.4));
+      }
+    }
+  }
+
+  /**
+   * Dust behind every machine (not the animals) running over ground: more the faster it goes,
+   * in the colour of the ground there, none over water, none in the air.
+   */
+  private emitDust(dt: number): void {
+    this.dust.update(dt);
+    this.dustDue += dt;
+    if (this.dustDue < 0.05) return;
+    const interval = this.dustDue;
+    this.dustDue = 0;
+    for (const v of this.vehicles) {
+      const speed = Math.abs(v.speed);
+      if (v.spec.animal || v.groundedPoints < 2 || v.onWater || speed < 2.5) continue;
+      const ground = this.terrain.heightAt(v.pos.x, v.pos.z);
+      const height = v.pos.y + v.spec.bounds.min[1] - ground;
+      if (height > v.spec.hover * 2 + 1) continue;
+      v.quaternion(tmpQ);
+      const l = v.spec.bounds.max[2] - v.spec.bounds.min[2];
+      const w = v.spec.bounds.max[0] - v.spec.bounds.min[0];
+      tmpV.set(0, 0, -l * 0.35).applyQuaternion(tmpQ).add(v.pos);
+      const vel = v.body.linvel();
+      const count = Math.round(interval * (12 + 70 * Math.min(1, speed / 35)) * (0.6 + Math.min(1.4, w * 0.35)));
+      this.dust.spawn(tmpV.x, ground, tmpV.z, count, vel.x, vel.z, Math.max(0.6, w * 0.9), this.groundColorAt(tmpV.x, tmpV.z, this.dustColor));
+    }
+  }
+
+  /** The colour of the ground at a point: its texture family's mean on a real planet, the palette's elsewhere. */
+  groundColorAt(x: number, z: number, out: THREE.Color): THREE.Color {
+    if (this.terrain.swg && this.groundTextures) {
+      const c = this.groundTextures.averageColor(this.terrain.swg.shaderAt(x, z));
+      if (c) return out.copy(c);
+    }
+    return this.terrain.groundColorAt(x, z, out);
   }
 
   /** Lights, fog and clear colour straight from the sky's colour ramps for this moment. */
@@ -1042,7 +1095,7 @@ export class World {
   /** Stand a vehicle from the garage on the ground in front of a point, facing away from it. */
   async spawnVehicle(def: VehicleDef, at: THREE.Vector3, heading: number, kind?: VehicleKind): Promise<Vehicle> {
     this.garage ??= await Garage.load(import.meta.env.BASE_URL);
-    const place = (b: VehicleSpec['bounds']) => this.clearGround(b, at, heading);
+    const place = (b: VehicleSpec['bounds']) => this.clearGround(b, at, heading, def.source === 'creature');
     const v = await this.garage.spawn(def, this.physics, this.scene, at.x, at.y, at.z, heading, kind, place);
     markActor(v.group);
     this.vehicles.push(v);
@@ -1063,17 +1116,20 @@ export class World {
    * length plus a gap, and further on while anything else stands there, since a box spawned
    * inside an exhibit, a house or another vehicle is thrown out of it by the physics.
    */
-  private clearGround(b: VehicleSpec['bounds'], at: THREE.Vector3, heading: number): [number, number, number] {
+  private clearGround(b: VehicleSpec['bounds'], at: THREE.Vector3, heading: number, animal = false): [number, number, number] {
     const w = b.max[0] - b.min[0];
     const h = b.max[1] - b.min[1];
     const l = b.max[2] - b.min[2];
+    // On the water rather than under it: a machine floats on the surface, an animal swims chest-deep.
+    const floorAt = (x: number, z: number) => Math.max(this.terrain.heightAt(x, z), this.terrain.waterHeightAt(x, z) - (animal ? h * 0.55 : 0));
     const shape = new R.Cuboid(w / 2 + 0.3, h / 2, l / 2 + 0.3);
     const rot = { x: 0, y: Math.sin(heading / 2), z: 0, w: Math.cos(heading / 2) };
     const first = l / 2 + 3;
-    for (let d = first; d <= first + 60; d += 2) {
+    // Not far: past 24 m the spot is out of sight, so the vehicle lands at the first spot anyway.
+    for (let d = first; d <= first + 24; d += 2) {
       const x = at.x + Math.sin(heading) * d;
       const z = at.z + Math.cos(heading) * d;
-      const y = this.terrain.heightAt(x, z);
+      const y = floorAt(x, z);
       // A vehicle spawned this same frame is not in the physics queries yet, so those are checked by distance.
       let blocked = this.vehicles.some((v) => Math.hypot(v.pos.x - x, v.pos.z - z) < v.radius + Math.max(w, l) / 2 + 0.5);
       if (!blocked) {
@@ -1082,9 +1138,9 @@ export class World {
           return false;
         });
       }
-      if (!blocked || d + 2 > first + 60) return [x, y, z];
+      if (!blocked) return [x, y, z];
     }
-    return [at.x + Math.sin(heading) * first, this.terrain.heightAt(at.x, at.z), at.z + Math.cos(heading) * first];
+    return [at.x + Math.sin(heading) * first, floorAt(at.x, at.z), at.z + Math.cos(heading) * first];
   }
 
   /** Take every spawned vehicle away but the one ridden. */
@@ -1323,6 +1379,7 @@ export class World {
     this.waterTime += dt;
     for (const m of this.waterMaterials) m.userData.uniforms.uTime.value = this.waterTime;
     this.emitRipples(dt, playerPos);
+    this.emitDust(dt);
     if (this.waterMaterials.length) updateWaterDepth(playerPos.x, playerPos.z, (x, z) => this.terrain.heightIfCached(x, z, FAR_TILE, FAR_RES));
     if (this.water) {
       const cell = WATER_NEAR / WATER_SEGMENTS;

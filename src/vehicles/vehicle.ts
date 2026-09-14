@@ -6,16 +6,20 @@
 import * as THREE from 'three';
 import { RAPIER, type Physics } from '../core/physics';
 
-export type VehicleKind = 'podracer' | 'speederbike' | 'ground' | 'flyer';
+export type VehicleKind = 'podracer' | 'speederbike' | 'ground' | 'flyer' | 'ship';
 
 export interface DriveInput {
   throttle: number;
+  /** Steering from the keys, -1 left to 1 right; added to any steering toward `heading`. */
   steer: number;
+  /** A heading (rad, the vehicle's own convention) to turn toward: the camera's, so the mouse steers. */
+  heading?: number | null;
   boost: boolean;
   hop: boolean;
-  /** Flyers: climb and sink. */
+  /** Flyers: climb and sink from the keys, and a rate from the mouse's pitch (-1 sink to 1 climb). */
   up: boolean;
   down: boolean;
+  vertical?: number;
 }
 
 export interface VehicleSpec {
@@ -43,6 +47,10 @@ export interface VehicleSpec {
   hop: boolean;
   /** Flyers: vertical speed, the most height above the ground, and the least. */
   fly: { climb: number; ceiling: number; floor: number } | null;
+  /** A living mount: it swims chest-deep rather than floating, and kicks up no dust. */
+  animal: boolean;
+  /** A starship: flies free of the ground once it has speed (a first flight model), lands as a flyer. */
+  ship?: boolean;
   /** Where the rider sits, in the model's frame. */
   seat: [number, number, number];
 }
@@ -68,12 +76,12 @@ export function specFor(kind: VehicleKind, id: string, label: string, bounds: Ve
   const length = bounds.max[2] - bounds.min[2];
   const height = bounds.max[1] - bounds.min[1];
   const seat: [number, number, number] = [0, bounds.min[1] + height * 0.62, -length * 0.08];
-  const base = { id, label, kind, bounds, seat, fly: null as VehicleSpec['fly'] };
+  const base = { id, label, kind, bounds, seat, fly: null as VehicleSpec['fly'], animal };
   switch (kind) {
     case 'podracer':
       return { ...base, mass: 900, hover: 1.2, maxSpeed: 85, boostSpeed: 125, reverseSpeed: 6, accel: 30, brake: 45, turnRate: 1.7, turnAuthorityAt: 10, grip: 1.3, bank: 0.55, boost: 'heat', hop: false };
     case 'speederbike':
-      return { ...base, mass: 320, hover: 0.9, maxSpeed: 42, boostSpeed: 60, reverseSpeed: 8, accel: 20, brake: 28, turnRate: 2.3, turnAuthorityAt: 5, grip: 2.8, bank: 0.45, boost: 'burst', hop: true };
+      return { ...base, mass: 320, hover: 0.45, maxSpeed: 42, boostSpeed: 60, reverseSpeed: 8, accel: 20, brake: 28, turnRate: 2.3, turnAuthorityAt: 5, grip: 2.8, bank: 0.45, boost: 'burst', hop: true };
     case 'ground':
       return animal
         ? { ...base, mass: 700, hover: 0.15, maxSpeed: 14, boostSpeed: 20, reverseSpeed: 3, accel: 8, brake: 14, turnRate: 1.6, turnAuthorityAt: 0, grip: 9, bank: 0, boost: 'burst', hop: true }
@@ -83,7 +91,7 @@ export function specFor(kind: VehicleKind, id: string, label: string, bounds: Ve
       return {
         ...base,
         mass: 800,
-        hover: 0.9,
+        hover: 0.5,
         maxSpeed: hoverCar ? 45 : 70,
         boostSpeed: hoverCar ? 60 : 95,
         reverseSpeed: 8,
@@ -96,7 +104,30 @@ export function specFor(kind: VehicleKind, id: string, label: string, bounds: Ve
         boost: 'burst',
         hop: false,
         // A flying car climbs slowly and not far; a gunship or an airspeeder is an aircraft.
-        fly: hoverCar ? { climb: 6, ceiling: 60, floor: 0.9 } : { climb: 14, ceiling: 260, floor: 0.9 },
+        fly: hoverCar ? { climb: 6, ceiling: 60, floor: 0.5 } : { climb: 14, ceiling: 260, floor: 0.5 },
+      };
+    }
+    case 'ship': {
+      // Sized by length: a fighter is nimble, a freighter ponderous. Speeds are what the ground can
+      // show; space flight is for later.
+      const big = length > 18;
+      return {
+        ...base,
+        ship: true,
+        mass: big ? 40000 : 9000,
+        hover: 1.5,
+        maxSpeed: big ? 90 : 140,
+        boostSpeed: big ? 130 : 220,
+        reverseSpeed: 6,
+        accel: big ? 14 : 30,
+        brake: big ? 18 : 40,
+        turnRate: big ? 0.5 : 1.1,
+        turnAuthorityAt: 0,
+        grip: 1,
+        bank: big ? 0.5 : 1.0,
+        boost: 'burst',
+        hop: false,
+        fly: { climb: big ? 20 : 45, ceiling: 1500, floor: 1.5 },
       };
     }
   }
@@ -114,6 +145,7 @@ const tmp = new THREE.Vector3();
 const lat = new THREE.Vector3();
 const alpha = new THREE.Vector3();
 const qInv = new THREE.Quaternion();
+const e = new THREE.Euler();
 const torque = new THREE.Vector3();
 const wantUp = new THREE.Vector3();
 
@@ -124,6 +156,16 @@ export class Vehicle {
   readonly pos = new THREE.Vector3();
   groundedPoints = 0;
   speed = 0;
+  /** The steering in effect this step, -1 left to 1 right, keys and mouse together. */
+  steer = 0;
+  /** Over water rather than ground this step. */
+  onWater = false;
+  /** A ship: the speed the throttle has built (m/s), and its pitch and roll (rad). */
+  cruise = 0;
+  pitch = 0;
+  roll = 0;
+  /** A ship in free flight this step (not on its landing gear). */
+  airborne = false;
   /** The boost meter: a burst's charge left, or a heat boost's heat, 0 to 1. */
   meter = 0;
   /** A heat boost that has burnt out: seconds until the engine comes back. */
@@ -139,6 +181,8 @@ export class Vehicle {
   private readonly inertia: THREE.Vector3;
   /** Half the footprint's longer side: the distance from the centre to the side, for mounting and placing. */
   readonly radius: number;
+  /** The game's hardpoint names the model carries (hp:<name> nodes), for finding seats and engines. */
+  hardpoints: string[] = [];
   /** Something to move with the vehicle (an animal's mixer, an engine glow). */
   onUpdate: ((dt: number, v: Vehicle, drive: DriveInput | null) => void) | null = null;
 
@@ -201,17 +245,33 @@ export class Vehicle {
     return out.set(r.x, r.y, r.z, r.w);
   }
 
+  /** The way the vehicle faces (rad): 0 along +z, growing toward +x, as the player's heading. */
+  get heading(): number {
+    const r = this.body.rotation();
+    return 2 * Math.atan2(r.y, r.w);
+  }
+
   /** The speed as a share of the boosted top speed, for the HUD and the camera. */
   get speedShare(): number {
     return Math.min(1, Math.abs(this.speed) / this.spec.boostSpeed);
   }
 
-  update(dt: number, physics: Physics, drive: DriveInput | null, groundAt?: (x: number, z: number) => number): void {
+  /**
+   * One step. `groundAt` is the terrain's height and `waterAt` the water surface's (or -Infinity):
+   * a machine floats on water at its ride height, an animal swims with its body chest-deep.
+   */
+  update(dt: number, physics: Physics, drive: DriveInput | null, groundAt?: (x: number, z: number) => number, waterAt?: (x: number, z: number) => number): void {
     const s = this.spec;
     const body = this.body;
     body.resetForces(true);
     body.resetTorques(true);
     this.hopCd = Math.max(0, this.hopCd - dt);
+    if (s.ship && this.flyShip(dt, drive, groundAt, waterAt)) {
+      this.group.position.copy(this.pos);
+      this.group.quaternion.copy(q);
+      this.onUpdate?.(dt, this, drive);
+      return;
+    }
 
     const t = body.translation();
     this.pos.set(t.x, t.y, t.z);
@@ -233,22 +293,36 @@ export class Vehicle {
     this.groundedPoints = 0;
     const flying = !!s.fly && this.altitude > s.fly.floor + 0.05;
     const drop = this.centre.y - s.bounds.min[1];
+    // The water is a floor too: a machine rides on it, an animal sinks in to its chest.
+    const height = s.bounds.max[1] - s.bounds.min[1];
+    const floorAt = (x: number, z: number) => {
+      const ground = groundAt ? groundAt(x, z) : -Infinity;
+      const water = waterAt ? waterAt(x, z) : -Infinity;
+      return Math.max(ground, s.animal ? water - height * 0.55 : water);
+    };
+    this.onWater = !!waterAt && !!groundAt && waterAt(this.pos.x, this.pos.z) > groundAt(this.pos.x, this.pos.z) + 0.05 && this.pos.y - s.bounds.min[1] < waterAt(this.pos.x, this.pos.z) + ride * 1.6 + 0.3;
     if (!flying) {
       for (const hp of this.hoverPoints) {
         p.copy(hp).applyQuaternion(q).add(this.pos);
         // The ray starts at the collider's centre height over the corner, so a corner pushed
         // into the ground still reads a (negative) distance and is lifted out.
         const hit = physics.groundDistance(p.x, p.y + drop, p.z, drop + ride * 2.2 + 0.5, body);
-        const dist = hit === null ? null : hit - drop;
+        let dist = hit === null ? null : hit - drop;
+        if (waterAt) {
+          const toWater = p.y - floorAt(p.x, p.z);
+          if (dist === null || toWater < dist) dist = toWater;
+        }
         if (dist === null || dist > ride * 1.6 + 0.3) continue;
         this.groundedPoints++;
         rel.copy(p).sub(this.pos);
         const vPointY = lv.y + tmp.crossVectors(av, rel).y;
-        const f = Math.max(0, k * (ride - dist) - c * vPointY);
+        // No more than a few g per corner: a corner well under the floor (a spawn under the
+        // water, a slope streamed in late) rises out rather than being launched skyward.
+        const f = THREE.MathUtils.clamp(k * (ride - dist) - c * vPointY, 0, m * g * 0.9);
         body.addForceAtPoint({ x: 0, y: f, z: 0 }, { x: p.x, y: p.y, z: p.z }, true);
       }
     } else if (groundAt) {
-      const ground = groundAt(this.pos.x, this.pos.z);
+      const ground = floorAt(this.pos.x, this.pos.z);
       const h = this.pos.y - s.bounds.min[1] - ground;
       const f = m * (g + 6 * (this.altitude - h) - 3.5 * lv.y);
       body.addForce({ x: 0, y: f, z: 0 }, true);
@@ -258,10 +332,10 @@ export class Vehicle {
     // ground being streamed in, and a spawn can land a hair inside a slope. Near or below that
     // height with nothing under the corners, hold the ride height off the terrain instead of falling.
     if (groundAt && this.groundedPoints < 2) {
-      const ground = groundAt(this.pos.x, this.pos.z);
+      const ground = floorAt(this.pos.x, this.pos.z);
       const h = this.pos.y - s.bounds.min[1] - ground;
       if (h < ride * 1.6 + 0.3) {
-        const f = m * Math.max(0, g + 6 * (ride - h) - 3.5 * lv.y);
+        const f = m * THREE.MathUtils.clamp(g + 6 * (ride - h) - 3.5 * lv.y, 0, g * 3.5);
         body.addForce({ x: 0, y: f, z: 0 }, true);
         this.groundedPoints = 4;
       }
@@ -272,9 +346,18 @@ export class Vehicle {
     const speedFwd = lv.dot(fwd);
     this.speed = speedFwd;
     const share = Math.min(1, Math.abs(speedFwd) / Math.max(1, s.maxSpeed));
-    const steer = drive?.steer ?? 0;
+    // Steering: the keys when held, else a turn toward the heading asked for (the camera's, so
+    // the mouse steers): full lock beyond 20 degrees off, easing in under it.
+    let steer = drive?.steer ?? 0;
+    if (steer === 0 && drive?.heading !== undefined && drive.heading !== null) {
+      let diff = drive.heading - this.heading;
+      diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+      steer = THREE.MathUtils.clamp(steer - diff / 0.35, -1, 1);
+    }
+    this.steer = steer;
     wantUp.copy(WORLD_UP);
-    if (s.bank > 0 && steer !== 0) wantUp.applyAxisAngle(fwd, -steer * s.bank * share);
+    // Lean into the turn, as a rider does.
+    if (s.bank > 0 && steer !== 0) wantUp.applyAxisAngle(fwd, steer * s.bank * share);
     // Torques are asked for as turning accelerations (rad/s²) and scaled by the inertia below, so
     // a barge and a bike right themselves alike; the rates stay well under the step's stability limit.
     alpha.crossVectors(up, wantUp).multiplyScalar(40);
@@ -330,8 +413,8 @@ export class Vehicle {
         this.hopCd = 0.9;
       }
       if (s.fly) {
-        if (drive.up) this.altitude = Math.min(s.fly.ceiling, this.altitude + s.fly.climb * dt);
-        if (drive.down) this.altitude = Math.max(s.fly.floor, this.altitude - s.fly.climb * dt);
+        const rate = (drive.up ? 1 : 0) - (drive.down ? 1 : 0) + (drive.vertical ?? 0);
+        this.altitude = THREE.MathUtils.clamp(this.altitude + s.fly.climb * THREE.MathUtils.clamp(rate, -1, 1) * dt, s.fly.floor, s.fly.ceiling);
       }
     } else if (s.fly && !drive) this.altitude = Math.max(s.fly.floor, this.altitude - s.fly.climb * 0.5 * dt);
     // Torque = inertia × acceleration, about the body's own axes.
@@ -362,6 +445,72 @@ export class Vehicle {
     this.group.position.copy(this.pos);
     this.group.quaternion.copy(q);
     this.onUpdate?.(dt, this, drive);
+  }
+
+  /**
+   * A ship's flight, a first model: W builds speed and S bleeds it, the mouse's heading turns the
+   * ship and its tilt pitches it, A/D roll; the body is flown by hand (no gravity, its velocity
+   * and attitude set each step) and stays above the ground. Below a few metres a second with the
+   * gear near the ground it lands and is a flyer on its springs again. Returns whether it flew.
+   */
+  private flyShip(dt: number, drive: DriveInput | null, groundAt?: (x: number, z: number) => number, waterAt?: (x: number, z: number) => number): boolean {
+    const s = this.spec;
+    const body = this.body;
+    const t = body.translation();
+    this.pos.set(t.x, t.y, t.z);
+    this.quaternion(q);
+    const floor = Math.max(groundAt ? groundAt(this.pos.x, this.pos.z) : -Infinity, waterAt ? waterAt(this.pos.x, this.pos.z) : -Infinity);
+    const h = this.pos.y - s.bounds.min[1] - floor;
+    const throttle = drive?.throttle ?? 0;
+    const top = drive?.boost ? s.boostSpeed : s.maxSpeed;
+    this.boosting = !!drive?.boost && throttle > 0;
+    if (throttle > 0) this.cruise = Math.min(top, this.cruise + s.accel * dt);
+    else if (throttle < 0) this.cruise = Math.max(0, this.cruise - s.brake * dt);
+    else if (!drive) this.cruise = Math.max(0, this.cruise - s.brake * 0.5 * dt);
+    this.speed = this.cruise;
+    const wasAirborne = this.airborne;
+    this.airborne = this.cruise > 4 || (wasAirborne && h > s.fly!.floor + 1);
+    if (!this.airborne) {
+      if (wasAirborne) {
+        body.setGravityScale(1, true);
+        this.pitch = 0;
+        this.roll = 0;
+        this.altitude = s.fly!.floor;
+      }
+      return false;
+    }
+    if (!wasAirborne) body.setGravityScale(0, true);
+    // Attitude: yaw toward the heading asked, pitch with the view's tilt, roll with the keys and
+    // a lean into the turn; each eases toward its target at the ship's turn rate.
+    let yawRate = 0;
+    if (drive?.heading !== undefined && drive?.heading !== null) {
+      let diff = drive.heading - this.heading;
+      diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+      yawRate = THREE.MathUtils.clamp(diff / 0.5, -1, 1) * s.turnRate;
+    }
+    const wantPitch = THREE.MathUtils.clamp(drive?.vertical ?? 0, -1, 1) * 0.6 + ((drive?.up ? 1 : 0) - (drive?.down ? 1 : 0)) * 0.5;
+    const wantRoll = -(drive?.steer ?? 0) * s.bank - (yawRate / Math.max(0.1, s.turnRate)) * s.bank * 0.6;
+    this.pitch += (wantPitch - this.pitch) * Math.min(1, 2.5 * dt);
+    this.roll += (wantRoll - this.roll) * Math.min(1, 2.5 * dt);
+    let heading = this.heading + yawRate * dt;
+    // Never into the ground: level out and climb when low.
+    const minH = s.fly!.floor + 2;
+    if (h < minH && this.pitch < 0.15) this.pitch += (0.15 - this.pitch) * Math.min(1, 6 * dt);
+    if (h > s.fly!.ceiling && this.pitch > 0) this.pitch *= Math.max(0, 1 - 4 * dt);
+    e.set(-this.pitch, heading, this.roll, 'YXZ');
+    q.setFromEuler(e);
+    body.setRotation({ x: q.x, y: q.y, z: q.z, w: q.w }, true);
+    fwd.set(0, 0, 1).applyQuaternion(q);
+    tmp.copy(fwd).multiplyScalar(this.cruise);
+    // Slow, the ship holds a few metres up; with the throttle off it settles down and lands.
+    if (this.cruise < 8) tmp.y += this.cruise < 2 ? -1.5 : THREE.MathUtils.clamp((minH - h) * 1.5, -2, 4);
+    if (h < s.fly!.floor + 0.5 && tmp.y < 0) tmp.y = 0;
+    body.setLinvel({ x: tmp.x, y: tmp.y, z: tmp.z }, true);
+    body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+    this.groundedPoints = 0;
+    this.onWater = false;
+    this.meter = Math.min(1, this.meter + dt * 0.2);
+    return true;
   }
 
   dispose(physics: Physics, scene: THREE.Scene): void {
