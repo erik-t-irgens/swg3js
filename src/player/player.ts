@@ -38,6 +38,9 @@ const aim = new THREE.Vector3();
 const aimFrom = new THREE.Vector3();
 const handPos = new THREE.Vector3();
 /** How Jedi Academy spells the jump directions in its clip names. */
+/** The dual kata's saber protect: the sabers circle the body at this radius and height, this fast. */
+const ORBIT = { radius: 1.4, height: 1.0, turnsPerSecond: 1.5 };
+const orbitTangent = new THREE.Vector3();
 /** Seconds after a shot before the relaxed carry returns. */
 const GUN_READY_SECONDS = 5;
 /** Running with the block held, forwards or back-pedalling, is at most this much of the full run. */
@@ -225,6 +228,17 @@ export class Player {
   private world: World | null = null;
   /** The thrown saber's own model, spinning through the air. */
   private readonly flying: THREE.Group;
+  /** The dual kata's sabers, out of the hands and circling the body. */
+  private readonly orbit: THREE.Group[] = [];
+  private orbitAngle = 0;
+  /**
+   * The hilt's rotation in the hand for each source of arm poses: SWG's own clips hold the
+   * blade the game's way (along the character's forward at rest), Jedi Academy's the way its
+   * swings say (the axis the importer solved). The blend follows whichever clip poses the arms.
+   */
+  private readonly saberQ = { swg: new THREE.Quaternion(), jka: new THREE.Quaternion() };
+  private readonly saber2Q = { swg: new THREE.Quaternion(), jka: new THREE.Quaternion() };
+  private gripBlend = 0;
   /** A wall run or grab turns the body this way while it lasts. */
   private lockedHeading: THREE.Vector3 | null = null;
   /** The rig has Jedi Academy's back-pedal clips, so the legs keep near the camera's facing while moving. */
@@ -274,6 +288,20 @@ export class Player {
     this.flying.visible = false;
     scene.add(this.flying);
     markActor(this.flying);
+    // Two more for the dual kata: the same spinning saber, one each side of the body.
+    for (let i = 0; i < 2; i++) {
+      const g = new THREE.Group();
+      const h = parts.hilt.clone();
+      const b = parts.blade.clone();
+      b.visible = true;
+      h.rotation.z = Math.PI / 2;
+      b.rotation.z = Math.PI / 2;
+      g.add(h, b, new THREE.PointLight(0x66c8ff, 3, 5));
+      g.visible = false;
+      scene.add(g);
+      markActor(g);
+      this.orbit.push(g);
+    }
     this.cmd.probe = (dir, dist) => this.probeWall(dir, dist);
     this.cmd.groundDistance = (max) => this.groundDistanceUnits(max);
     this.cmd.floorAhead = (dist) => this.floorAhead(dist);
@@ -360,14 +388,17 @@ export class Player {
       hand.add(p.saber, p.rifle);
       // Where the blade points in the hand: the axis the importer solved from Jedi Academy's
       // swings when it is there; else a guess, the way the character faces with the arms at rest.
-      const grip = this.gripAxis('right', hand) ?? new THREE.Vector3(0, 0, 1).applyQuaternion(rig.root.getWorldQuaternion(new THREE.Quaternion())).applyQuaternion(hand.getWorldQuaternion(new THREE.Quaternion()).invert());
-      if (grip.lengthSq() < 1e-6) grip.set(0, 0, 1);
-      grip.normalize();
+      const swgGrip = new THREE.Vector3(0, 0, 1).applyQuaternion(rig.root.getWorldQuaternion(new THREE.Quaternion())).applyQuaternion(hand.getWorldQuaternion(new THREE.Quaternion()).invert());
+      if (swgGrip.lengthSq() < 1e-6) swgGrip.set(0, 0, 1);
+      swgGrip.normalize();
+      const grip = this.gripAxis('right', hand) ?? swgGrip;
+      this.saberQ.swg.setFromUnitVectors(new THREE.Vector3(0, 1, 0), swgGrip);
+      this.saberQ.jka.setFromUnitVectors(new THREE.Vector3(0, 1, 0), grip);
       // The saber's blade runs along its +Y, the rifle's barrel along its +Z. A hold point sits in
       // the palm already; a wrist bone needs the grip moved a little along the arm.
       const grabbed = /^hold/i.test(hand.name);
       p.saber.position.copy(along).multiplyScalar(grabbed ? 0 : 0.02 * k);
-      p.saber.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), grip);
+      p.saber.quaternion.copy(this.saberQ.swg);
       p.saber.scale.setScalar(k);
       p.rifle.position.copy(along).multiplyScalar(grabbed ? 0.04 * k : 0.1 * k);
       p.rifle.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), along);
@@ -383,11 +414,14 @@ export class Player {
         if (d.lengthSq() > 1e-10) along.copy(d).normalize();
       }
       leftHand.add(p.saber2);
-      const grip = this.gripAxis('left', leftHand) ?? new THREE.Vector3(0, 0, 1).applyQuaternion(rig.root.getWorldQuaternion(new THREE.Quaternion())).applyQuaternion(leftHand.getWorldQuaternion(new THREE.Quaternion()).invert());
-      if (grip.lengthSq() < 1e-6) grip.set(0, 0, 1);
-      grip.normalize();
+      const swgGrip = new THREE.Vector3(0, 0, 1).applyQuaternion(rig.root.getWorldQuaternion(new THREE.Quaternion())).applyQuaternion(leftHand.getWorldQuaternion(new THREE.Quaternion()).invert());
+      if (swgGrip.lengthSq() < 1e-6) swgGrip.set(0, 0, 1);
+      swgGrip.normalize();
+      const grip = this.gripAxis('left', leftHand) ?? swgGrip;
+      this.saber2Q.swg.setFromUnitVectors(new THREE.Vector3(0, 1, 0), swgGrip);
+      this.saber2Q.jka.setFromUnitVectors(new THREE.Vector3(0, 1, 0), grip);
       p.saber2.position.copy(along).multiplyScalar(/^hold/i.test(leftHand.name) ? 0 : 0.02 * k);
-      p.saber2.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), grip);
+      p.saber2.quaternion.copy(this.saber2Q.swg);
       p.saber2.scale.setScalar(k);
     }
     // The game's own blaster carries: only then do the clips pose the arms, else they are aimed by hand.
@@ -437,12 +471,13 @@ export class Player {
   private updateBlades(): void {
     const p = this.parts;
     const on = this.saberOn && this.classId === 'jedi';
-    const inHand = !this.thrown.inFlight;
+    const inHand = !this.thrown.inFlight && !this.orbiting;
     p.hilt.visible = inHand;
     p.blade.visible = on && inHand;
     p.staffBlade.visible = on && inHand && this.saber.style === 'staff';
-    p.saber2.visible = this.classId === 'jedi' && this.saber.style === 'dual';
-    p.blade2.visible = on && this.saber.style === 'dual';
+    p.saber2.visible = this.classId === 'jedi' && this.saber.style === 'dual' && !this.orbiting;
+    p.blade2.visible = on && this.saber.style === 'dual' && !this.orbiting;
+    for (const g of this.orbit) g.visible = this.orbiting;
     p.saberLight.intensity = on && inHand ? 6 : 0;
     this.flying.visible = this.thrown.inFlight;
   }
@@ -488,6 +523,31 @@ export class Player {
     const shots = rig.clipsMatching(new RegExp(this.aiming ? `^${kind}_combat(_standing)?_aimed_fire_\\d+$` : `^${kind}_combat(_standing)?_fire_\\d+$`));
     const pool = shots.length ? shots : rig.clipsMatching(new RegExp(`^${kind}_combat(_standing)?(_aimed)?_fire_\\d+$`));
     if (pool.length) rig.playUpper(pool[Math.floor(Math.random() * pool.length)], 0.04);
+  }
+
+  /** The dual kata is on: both sabers are out of the hands, circling the body. */
+  get orbiting(): boolean {
+    return this.saber.move === 'DUAL_SPIN_PROTECT' && this.saberOn;
+  }
+
+  /** The ends of orbiting saber `i` (0 or 1) in world space. */
+  orbitSegment(i: number, a: THREE.Vector3, b: THREE.Vector3): void {
+    const g = this.orbit[i];
+    a.copy(g.position).addScaledVector(orbitTangent.set(Math.cos(g.rotation.y), 0, -Math.sin(g.rotation.y)), -0.5);
+    b.copy(g.position).addScaledVector(orbitTangent, 1.0);
+  }
+
+  /** Fly the dual kata's sabers round the body, as the game's saber protect does. */
+  private updateOrbit(dt: number): void {
+    if (!this.orbiting) return;
+    this.orbitAngle += ORBIT.turnsPerSecond * Math.PI * 2 * dt;
+    for (let i = 0; i < 2; i++) {
+      const g = this.orbit[i];
+      const a = this.orbitAngle + i * Math.PI;
+      g.position.set(this.pos.x + Math.cos(a) * ORBIT.radius, this.pos.y + ORBIT.height, this.pos.z + Math.sin(a) * ORBIT.radius);
+      // The blade lies along the circle and spins on its own as well.
+      g.rotation.set(0, -a + this.orbitAngle * 3, 0);
+    }
   }
 
   /** Where the right hand is, for the throw and the catch. */
@@ -859,6 +919,7 @@ export class Player {
       }
     }
     this.updateThrown(dt, input, cam);
+    this.updateOrbit(dt);
     this.updateBlades();
 
     // The body faces the camera while fighting, in the air, rolling and through the wall moves.
@@ -960,6 +1021,12 @@ export class Player {
     this.group.updateMatrixWorld(true);
     // Always called: with no twist it puts the spine's clip pose back.
     rig.twistTorso(rig.overriding ? 0 : this.torsoTwist);
+    // The hilt turns in the hand to whichever convention poses the arms: the game's own clips
+    // hold it their way, Jedi Academy's the way its swings were made for.
+    const jkaArms = rig.armSource().startsWith('BOTH_');
+    this.gripBlend += ((jkaArms ? 1 : 0) - this.gripBlend) * Math.min(1, dt * 14);
+    this.parts.saber.quaternion.slerpQuaternions(this.saberQ.swg, this.saberQ.jka, this.gripBlend);
+    this.parts.saber2.quaternion.slerpQuaternions(this.saber2Q.swg, this.saber2Q.jka, this.gripBlend);
 
     if (this.mounted) {
       rig.aimArm('right', armDir.set(-0.25, -0.15, 0.95).normalize());

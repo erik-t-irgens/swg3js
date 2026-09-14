@@ -260,6 +260,12 @@ export class CharacterRig {
     return a ? a.getClip().duration : null;
   }
 
+  /** The clip posing the arms right now: a shot on the upper body, a one-off, the upper layer, else the state clip. */
+  armSource(): string {
+    const a = this.upperShot ?? this.override ?? this.upper ?? this.current;
+    return a ? a.getClip().name.replace(/^(upper|lower):/, '') : '';
+  }
+
   /** Whether a one-off clip is still playing. */
   get overriding(): boolean {
     return this.override !== null;

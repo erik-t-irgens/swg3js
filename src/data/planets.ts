@@ -259,6 +259,24 @@ export function packIdOf(planet: PlanetDef, zoneId?: string): string {
   return (planet.zones.find((z) => z.id === zoneId) ?? planet.zones[0]).pack;
 }
 
+/** The development gallery: flat ground under Tatooine's sky, for looking at every animation, house, vehicle and weapon. */
+PLANETS.push({
+  id: 'gallery',
+  name: 'Gallery',
+  tagline: 'Every animation, house, vehicle and weapon, in rows',
+  description: 'A flat development world: the animations of both games on a grid of player models, every player house, vehicle and weapon, each with its name over it. Built by the converter\'s gallery command.',
+  seed: 4242,
+  gravity: 20,
+  sky: { top: 0x8db9e6, horizon: 0xf4dcae, sunColor: 0xfff1cf, suns: 2, sunElevation: 0.9, sunAzimuth: 0.7 },
+  fog: { color: 0xead2a3, density: 0.0012 },
+  swgFogScale: 0.05,
+  light: { sunIntensity: 2.6, ambientSky: 0xbfd6f2, ambientGround: 0xd9b57a, ambientIntensity: 1.0 },
+  terrain: { base: 0, amplitude: 0, frequency: 0.004, octaves: 1, ridged: 0, flatten: 1, detail: 0 },
+  palette: { low: 0xd8b073, mid: 0xe7c78d, high: 0xf2dcaa, slope: 0xb48d56, shore: 0xe7c78d },
+  props: { treeDensity: 0, rockDensity: 0, treeStyle: 'none', canopy: 0x000000, trunk: 0x000000, rock: 0x8f7355, treeScale: 1 },
+  creatures: { name: 'Bantha', count: 0, color: 0x6b5334, size: 2.3, speed: 2, hp: 260, aggressive: false, damage: 0 },
+});
+
 export function planetById(id: string): PlanetDef {
   const p = PLANETS.find((x) => x.id === id);
   if (!p) throw new Error(`Unknown planet ${id}`);

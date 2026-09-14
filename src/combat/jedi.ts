@@ -39,6 +39,7 @@ export class JediKit implements Kit {
   /** What the thrown saber has hit on its current leg out or back. */
   private readonly hitThisLeg = new Set<Hittable>();
   private lastLegId = -1;
+  private orbitTimer = 0;
   private readonly aura: THREE.Mesh<THREE.SphereGeometry, THREE.MeshBasicMaterial>;
   private readonly bolt: THREE.Line<THREE.BufferGeometry, THREE.LineBasicMaterial>;
   private readonly boltPositions = new Float32Array((LIGHTNING_SEGMENTS + 1) * 3);
@@ -97,6 +98,18 @@ export class JediKit implements Kit {
       a.copy(player.pos).y += 0.8;
       b.set(a.x + Math.sin(yaw) * 1.3, a.y + 0.1, a.z + Math.cos(yaw) * 1.3);
       this.sweep(ctx, a, b, 0.3, KICK_DAMAGE.min + Math.floor(Math.random() * (KICK_DAMAGE.max - KICK_DAMAGE.min + 1)), this.hitThisSwing, KICK_DAMAGE.push);
+    }
+    // The dual kata's circling sabers cut everything they pass, again each half turn.
+    if (player.orbiting) {
+      this.orbitTimer += dt;
+      if (this.orbitTimer > 0.33) {
+        this.orbitTimer = 0;
+        this.hitThisSwing.clear();
+      }
+      for (let i = 0; i < 2; i++) {
+        player.orbitSegment(i, a, b);
+        this.sweep(ctx, a, b, 0.25, player.saberDamage, this.hitThisSwing, 4);
+      }
     }
     // The thrown saber cuts what it flies through, once on the way out and once on the way back.
     if (player.thrown.inFlight) {

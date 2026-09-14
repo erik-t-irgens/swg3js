@@ -317,6 +317,22 @@ class App {
         this.player.heal(this.player.maxHp);
         return this.player.hp;
       },
+      /** Play any clip the player's rig has, looping (or once), to see it on the player: `__debug.anim('BOTH_A2_SPECIAL')`; no name stops it. */
+      anim: (name?: string, loop = true) => {
+        const rig = this.player.rig;
+        if (!rig) return 'no rig';
+        if (!name) {
+          rig.stopOverride();
+          return 'stopped';
+        }
+        const clips = rig.clipsMatching(new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'));
+        const exact = rig.has(name) ? name : clips[0];
+        if (!exact) return `no clip matches ${name}`;
+        rig.play(exact, { loop, hold: !loop });
+        return { playing: exact, matches: clips.slice(0, 20) };
+      },
+      /** The gallery world: how many exhibits and mannequins are up, and the animation slot nearest the player. */
+      gallery: () => (this.world.gallery ? { ...this.world.gallery.status(), nearest: this.world.gallery.nearest(this.player.pos) } : 'not on the gallery planet (?planet=gallery)'),
       /** The blaster in hand, 'pistol' or 'rifle': which of the game's carries play. */
       gun: (kind?: 'pistol' | 'rifle') => {
         if (kind) this.player.gunKind = kind;

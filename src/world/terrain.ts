@@ -170,7 +170,9 @@ export class Terrain {
   }
 
   private colorAt(h: number, ny: number, x: number, z: number, out: THREE.Color): void {
-    const t = Math.min(1, Math.max(0, (h - this.minH) / (this.maxH - this.minH)));
+    // Flat ground (no height range) takes the middle of the palette rather than dividing by nothing.
+    const span = this.maxH - this.minH;
+    const t = span > 1e-6 ? Math.min(1, Math.max(0, (h - this.minH) / span)) : 0.5;
     if (t < 0.5) tmpA.copy(this.low).lerp(this.mid, t * 2);
     else tmpA.copy(this.mid).lerp(this.high, (t - 0.5) * 2);
 

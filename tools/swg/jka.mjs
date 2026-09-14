@@ -776,7 +776,9 @@ export function importJkaClips(jkaDir, joints, wanted = defaultJkaClips(), { log
     log(`retarget: rest-direction differences: ${plan.report.angles.map((a) => `${a.bone} ${a.degrees}°`).join(', ')}`);
     const clips = [];
     const missing = [];
-    for (const name of wanted) {
+    // 'all' takes every animation the file names.
+    const names = wanted === 'all' ? [...cfg.keys()] : wanted;
+    for (const name of names) {
       const entry = cfg.get(name.toUpperCase());
       if (!entry || !entry.count) {
         missing.push(name);

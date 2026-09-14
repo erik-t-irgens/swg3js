@@ -20,6 +20,7 @@ import { CSM } from 'three/examples/jsm/csm/CSM.js';
 import { INTERIOR_LAYER, markActor, type PortalRenderer } from './portalRender';
 import { Speeder } from '../vehicles/speeder';
 import { Bolts } from '../combat/bolts';
+import { Gallery } from './gallery';
 import { TurretManager, type TurretTarget } from '../combat/turrets';
 import type { Hittable } from '../combat/kit';
 
@@ -167,6 +168,8 @@ export class World {
   creatures!: CreatureManager;
   /** Blaster turrets standing near where the player arrived. */
   turrets!: TurretManager;
+  /** The gallery world's labels and animated mannequins, on that planet only. */
+  gallery: Gallery | null = null;
   /** Every blaster bolt in the air, whoever fired it. */
   readonly bolts: Bolts;
   readonly day = new DayCycle(0, 1);
@@ -426,6 +429,21 @@ export class World {
       }
     }
 
+    // A pack with a sky but no terrain (the gallery) still gets its sky.
+    if (!layout?.terrain) {
+      try {
+        await this.loadSky(pack);
+      } catch (err) {
+        console.warn('sky: failed to load', err);
+      }
+      if (token !== this.loadToken) return null;
+    }
+    if (planet.id === 'gallery' && layout) {
+      this.gallery?.dispose();
+      this.gallery = new Gallery(this.scene, pack.url(''), layout.center, (x, z) => this.terrain.heightAt(x, z));
+      void this.gallery.load();
+    }
+
     // Snapshot objects stream in around the player from here on (see LayoutStreamer).
     if (layout) {
       this.layoutStream?.dispose();
@@ -526,6 +544,8 @@ export class World {
       this.turrets.dispose();
     }
     this.bolts.clear();
+    this.gallery?.dispose();
+    this.gallery = null;
     for (const sp of this.speeders) sp.dispose(this.physics, this.scene);
     this.speeders.length = 0;
     this.props?.dispose();
@@ -1005,7 +1025,7 @@ export class World {
     this.streamFar(center, Infinity);
     this.creatures.spawnAround(center);
     markActor(this.creatures.group);
-    this.turrets.spawnAround(center, 3, (x, z) => this.collidersNear(x, z, 4).length === 0);
+    if (this.planet.id !== 'gallery') this.turrets.spawnAround(center, 3, (x, z) => this.collidersNear(x, z, 4).length === 0);
     markActor(this.turrets.group);
     const sx = center.x + 5;
     const sz = center.z + 4;
@@ -1252,6 +1272,7 @@ export class World {
     this.sun.position.copy(playerPos).addScaledVector(this.day.lightDir, 220);
     this.creatures.update(dt, playerPos, onAttack);
     if (target) this.turrets.update(dt, target, this.bolts);
+    this.gallery?.update(dt, playerPos);
   }
 
   private applyLighting(): void {

@@ -25,6 +25,9 @@
 //   node tools/swg/cli.mjs clips-apply <model.glb> <in.clips> [--drop=BOTH_]   put a bundle's animations back onto a model, joints matched by name
 //   node tools/swg/cli.mjs jka-clips <player.glb> <jka-dir> [--jka-anims=...]   re-import Jedi Academy's clips into a converted player GLB (no SWG archives needed)
 //   node tools/swg/cli.mjs jka-extract <jka-dir> <out-dir>                 copy the humanoid skeleton and animation.cfg out of the pk3 archives
+//   node tools/swg/cli.mjs gallery <swg-dir> <out-dir> [--jka=<dir>] [--only=houses,vehicles,weapons,anims] [--limit=N]
+//                                                                  a flat development world under <out-dir>/gallery: every player house, vehicle and
+//                                                                  weapon in rows, and every animation from both games on a grid of player models
 //                                                                  (dressed in a shirt, trousers and shoes unless --wear says otherwise)
 //                                                                  convert a skeletal appearance (creature, character) with skeleton and animations
 //   node tools/swg/cli.mjs flora <swg-dir> <planet>|all <out-dir>   (re)convert just the flora models for packs converted already
@@ -1930,6 +1933,89 @@ switch (cmd) {
       }
     }
     console.log(`-> ${glbFile}: ${r.clips.length} Jedi Academy clips${r.info.missing.length ? `; not in animation.cfg: ${r.info.missing.join(', ')}` : ''} (the previous file is kept as ${basename(backup)})`);
+    break;
+  }
+
+  case 'gallery': {
+    // <swg-dir> <out-dir> [--jka=<dir>] [--only=houses,vehicles,weapons,anims] [--limit=N]
+    if (!pos[2]) usage();
+    const vfs = mount(pos[1]);
+    const outDir = join(pos[2], 'gallery');
+    mkdirSync(outDir, { recursive: true });
+    const { buildGallery, galleryTemplates } = await import('./gallery.mjs');
+    const models = new Map();
+    const cache = new Map();
+    const only = options.only ? options.only.split(',').map((s) => s.trim()) : ['houses', 'vehicles', 'weapons', 'anims'];
+    const limit = options.limit ? Number(options.limit) : Infinity;
+    // One template into the pack's models, as the snapshot does it (static, portal building, or a skeletal thing at its bind pose).
+    const convert = (template) => {
+      const r = resolveTemplateMesh(vfs, template, cache);
+      if (r.skip) return { skip: r.skip };
+      if (r.particle) return { skip: 'particle effect' };
+      let id;
+      try {
+        if (r.skeletal) {
+          id = familyOf(r.skeletal);
+          if (!models.has(id)) {
+            const info = convertSat(vfs, r.skeletal, join(outDir, `${id}.glb`), { animations: 'none' });
+            models.set(id, { id, source: r.skeletal, file: `${id}.glb`, bounds: info.bounds ?? { min: [-1, 0, -1], max: [1, 2, 1] }, triangles: info.meshes.reduce((a, m) => a + m.triangles, 0) });
+          }
+        } else {
+          const single = r.parts.length === 1 && !r.parts[0].transform && !r.effects?.length;
+          id = familyOf(single ? r.parts[0].mesh : r.appearance);
+          if (!models.has(id)) {
+            const conv = convertOne(vfs, single ? r.parts[0].mesh : r.appearance, join(outDir, `${id}.glb`));
+            const b = conv.mesh.bounds ?? { min: [0, 0, 0], max: [0, 0, 0] };
+            const bounds = conv.flipX ? { min: [-b.max[0], b.min[1], b.min[2]], max: [-b.min[0], b.max[1], b.max[2]] } : b;
+            const effects = attachedEffects(vfs, conv.effects, outDir);
+            models.set(id, { id, source: r.source ?? r.appearance, file: `${id}.glb`, bounds, triangles: conv.tris, textured: conv.textured, shaders: conv.shaders.length, parts: conv.partCount, ...(conv.cells ? { cells: conv.cells, portals: conv.portals ?? [] } : {}), ...(effects.length ? { effects } : {}) });
+          }
+        }
+      } catch (err) {
+        console.log(`  ${template}: ${err.message}`);
+        return { skip: err.message };
+      }
+      const def = models.get(id);
+      if (!def || def.failed) return { skip: def?.failed ?? 'failed' };
+      const b = def.bounds;
+      return { model: id, radius: Math.max(0.5, Math.abs(b.min[0]), Math.abs(b.max[0]), Math.abs(b.min[2]), Math.abs(b.max[2])), height: b.max[1] };
+    };
+    const convertAnims = (source) => {
+      const file = `anims_${source}.glb`;
+      if (source === 'swg') {
+        const info = convertSat(vfs, PLAYER_TEMPLATE, join(outDir, file), { animations: 'all', maxAnimations: 5000, wear: DEFAULT_WEAR });
+        return { file, clips: info.animations.map((n) => ({ name: n, speed: info.clipSpeeds?.[n] || undefined })) };
+      }
+      if (!options.jka) {
+        console.log('  no --jka=<dir>: the Jedi Academy animations are left out');
+        return null;
+      }
+      let jkaInfo = null;
+      const extraClips = (joints) => {
+        const r = importJkaClips(options.jka, joints, 'all', { log: (m) => console.log(`  jka: ${m}`) });
+        jkaInfo = r.clips.map((c) => ({ name: c.name, loop: c.loop, fps: c.fps, frames: c.frames, speed: c.speed || undefined }));
+        return r.clips;
+      };
+      convertSat(vfs, PLAYER_TEMPLATE, join(outDir, file), { animations: '=idle', maxAnimations: 1, wear: DEFAULT_WEAR, extraClips });
+      return { file, clips: jkaInfo ?? [] };
+    };
+    const g = buildGallery({ log: console.log, only, limit }, {
+      convert,
+      convertAnims,
+      templates: (prefix) => galleryTemplates(vfs, prefix),
+      copySky: () => {
+        try {
+          exportSky(vfs, 'tatooine', outDir, { textureFor: (p) => textureFor(vfs, p), log: () => {} });
+        } catch (err) {
+          console.log(`  sky: ${err.message}`);
+        }
+      },
+    });
+    writeFileSync(join(outDir, 'layout.json'), JSON.stringify({ planet: 'gallery', center: { x: 0, z: 0 }, radius: null, objects: g.objects }));
+    writeFileSync(join(outDir, 'manifest.json'), JSON.stringify({ planet: 'gallery', categories: { layout: [...models.values()].filter((m) => m && !m.failed) } }, null, 2));
+    writeFileSync(join(outDir, 'gallery.json'), JSON.stringify({ sections: g.sections, anims: g.anims }));
+    console.log(`-> ${outDir}: ${g.objects.length} exhibits, ${models.size} models; play it with ?planet=gallery`);
+    printEffectSummary();
     break;
   }
 
