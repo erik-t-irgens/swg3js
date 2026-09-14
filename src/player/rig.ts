@@ -113,6 +113,7 @@ const UP_AXIS = new THREE.Vector3(0, 1, 0);
 const RIGHT_AXIS = new THREE.Vector3(1, 0, 0);
 const pitchQ = new THREE.Quaternion();
 const steadyQ = new THREE.Quaternion();
+const IDENTITY_Q = new THREE.Quaternion();
 const rootQ = new THREE.Quaternion();
 const parentQ = new THREE.Quaternion();
 const alignQ = new THREE.Quaternion();
@@ -433,7 +434,6 @@ export class CharacterRig {
 
   update(dt: number): void {
     this.mixer.update(dt);
-    this.steadyUpper();
     if (this.upperShot) {
       this.upperShotTime += dt;
       if (this.upperShotTime >= this.upperShotEnds - 0.05) {
@@ -532,30 +532,22 @@ export class CharacterRig {
     return { state: this.state, clip: this.current?.getClip().name ?? null, upper: this.upperName, override: this.override?.getClip().name ?? null, shot: this.shotName ?? this.upperShot?.getClip().name.replace(/^upper:/, '') ?? null };
   }
 
-  /**
-   * With a pose riding the upper body over locomotion legs, the pelvis's rock from the run would carry
-   * the torso with it: the lowest spine bone is turned back by the pelvis's departure from its rest,
-   * so the torso sits as if the pelvis stood still while the legs run.
-   */
   /** Whether the torso is held steady over locomotion legs while a pose rides the upper body. */
   steady = true;
-  private readonly steadied = { clean: new THREE.Quaternion(), applied: new THREE.Quaternion() };
 
-  private steadyUpper(): void {
-    if (!this.upper || !this.steady) return;
-    const names = this.upperBones();
-    let base: THREE.Bone | null = null;
-    for (const bone of this.bones.values()) if (names.has(bone.name) && bone.parent instanceof THREE.Bone && !names.has(bone.parent.name)) base = bone;
-    const parent = base?.parent;
-    const rest = parent instanceof THREE.Bone ? this.restLocal.get(parent) : undefined;
-    if (!base || !(parent instanceof THREE.Bone) || !rest) return;
-    // The mixer only writes a bone when its value changes, so a held pose leaves last frame's corrected
-    // value in place: put the clean pose back first, as the torso twist does, or the turn stacks up.
-    if (base.quaternion.equals(this.steadied.applied)) base.quaternion.copy(this.steadied.clean);
-    this.steadied.clean.copy(base.quaternion);
-    steadyQ.copy(parent.quaternion).invert().multiply(rest);
-    base.quaternion.premultiply(steadyQ);
-    this.steadied.applied.copy(base.quaternion);
+  /**
+   * With a pose riding the upper body over locomotion legs, the pelvis's rock from the run would carry
+   * the torso with it: the turn that takes the pelvis back to its rest, to go on the lowest spine bone
+   * so the torso sits as if the pelvis stood still while the legs run. Identity when nothing rides.
+   */
+  private steadyTurn(bone: THREE.Bone, out: THREE.Quaternion): THREE.Quaternion {
+    out.identity();
+    if (!this.upper || !this.steady) return out;
+    const parent = bone.parent;
+    if (!(parent instanceof THREE.Bone) || this.upperBones().has(parent.name)) return out;
+    const rest = this.restLocal.get(parent);
+    if (!rest) return out;
+    return out.copy(parent.quaternion).invert().multiply(rest);
   }
 
   /** The bones from the lowest spine bone up: the torso, arms and head. */
@@ -611,6 +603,11 @@ export class CharacterRig {
         this.twists.set(bone, twist);
       } else if (bone.quaternion.equals(twist.twisted)) bone.quaternion.copy(twist.clean);
       twist.clean.copy(bone.quaternion);
+      // The lowest spine bone also takes the turn that holds the torso steady over running legs.
+      if (!(bone.parent instanceof THREE.Bone && /spine|torso|chest/i.test(bone.parent.name))) {
+        this.steadyTurn(bone, steadyQ);
+        if (!steadyQ.equals(IDENTITY_Q)) bone.quaternion.premultiply(steadyQ);
+      }
       if (each !== 0 || eachPitch !== 0) {
         // A turn about the character's up axis, expressed in the bone's parent frame.
         bone.parent.getWorldQuaternion(parentQ);
