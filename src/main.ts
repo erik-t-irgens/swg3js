@@ -329,8 +329,19 @@ class App {
         const clips = rig.clipsMatching(new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'));
         const exact = rig.has(name) ? name : clips[0];
         if (!exact) return `no clip matches ${name}`;
+        if (/^add_/.test(exact)) {
+          rig.playUpper(exact);
+          return { playing: exact, note: 'an additive clip: played once as a delta over the current pose', matches: clips.slice(0, 20) };
+        }
         rig.play(exact, { loop, hold: !loop });
         return { playing: exact, matches: clips.slice(0, 20) };
+      },
+      /** Play a clip once on the upper body over whatever the legs do (a shot, a gesture), as the game's shots play. */
+      upper: (name: string) => {
+        const rig = this.player.rig;
+        if (!rig) return 'no rig';
+        const d = rig.playUpper(name);
+        return d === null ? `no clip ${name} (or a whole-body clip is playing)` : { playing: name, seconds: Number(d.toFixed(2)) };
       },
       /** The gallery world: how many mannequins are up and the animation slot nearest the player; `gallery(10)` widens the range they wake in (metres). */
       gallery: (range?: number) => {

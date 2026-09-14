@@ -210,9 +210,14 @@ export class Gallery {
       // Part of the skeleton only (a shot on the arms, a face): the idle underneath, the clip's own joints over it;
       // the game's add_ clips are deltas, added to the idle the way the game adds them to whatever plays.
       const idle = model.clips.get('idle') ?? [...model.clips.values()].find((c) => /^loop_stand|^idle|^loop_standing/.test(c.name));
-      if (idle) mixer.clipAction(idle).setLoop(THREE.LoopRepeat, Infinity).play();
       const own = new Set(s.clip.joints ?? []);
-      const layer = new THREE.AnimationClip(`layer:${clip.name}`, clip.duration, own.size ? clip.tracks.filter((t) => own.has(THREE.PropertyBinding.parseTrackName(t.name).nodeName ?? '')) : clip.tracks.slice());
+      const nodeOf = (t: THREE.KeyframeTrack) => THREE.PropertyBinding.parseTrackName(t.name).nodeName ?? '';
+      // Two actions on one bone blend half and half in three.js, so the idle keeps only the joints the clip leaves alone.
+      if (idle) {
+        const rest = isAdditive(clip.name) || !own.size ? idle : new THREE.AnimationClip(`rest:${clip.name}`, idle.duration, idle.tracks.filter((t) => !own.has(nodeOf(t))));
+        mixer.clipAction(rest).setLoop(THREE.LoopRepeat, Infinity).play();
+      }
+      const layer = new THREE.AnimationClip(`layer:${clip.name}`, clip.duration, own.size ? clip.tracks.filter((t) => own.has(nodeOf(t))) : clip.tracks.slice());
       if (isAdditive(clip.name)) {
         const bones = new Map<string, THREE.Bone>();
         root.traverse((o) => {

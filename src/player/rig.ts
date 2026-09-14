@@ -147,6 +147,8 @@ export class CharacterRig {
   private upperShot: THREE.AnimationAction | null = null;
   private upperShotEnds = 0;
   private upperShotTime = 0;
+  /** A one-shot that replaces the upper layer while it plays (a full shot clip: the state clip keeps the legs only). */
+  private shotName: string | null = null;
   private current: THREE.AnimationAction | null = null;
   private state: RigState | null = null;
   /** A clip on the upper body only, over the state clip's legs (the saber stance while swimming). */
@@ -391,7 +393,8 @@ export class CharacterRig {
       return;
     }
     const wantedStance = this.preferredClip(state);
-    const upperName = upper && this.actions.has(upper) ? upper : null;
+    // A one-shot on the upper body takes the layer while it plays; the caller's layer returns after it.
+    const upperName = this.shotName ?? (upper && this.actions.has(upper) ? upper : null);
     const playing = this.current?.getClip().name.replace(/^lower:/, '');
     if (state !== this.state || (wantedStance && playing !== wantedStance) || upperName !== this.upperName) {
       const clipName = wantedStance ?? this.findClip(STATE_CLIPS[state]);
@@ -405,9 +408,10 @@ export class CharacterRig {
       }
       const nextUpper = upperName ? this.half(upperName, 'upper') : null;
       if (nextUpper !== this.upper) {
-        if (this.upper) this.upper.fadeOut(0.18);
+        const shot = upperName !== null && upperName === this.shotName;
+        if (this.upper) this.upper.fadeOut(shot ? 0.05 : 0.18);
         if (nextUpper) {
-          nextUpper.reset().setLoop(this.hold.has(upperName!) ? THREE.LoopOnce : THREE.LoopRepeat, Infinity).setEffectiveWeight(1).fadeIn(0.18).play();
+          nextUpper.reset().setLoop(shot || this.hold.has(upperName!) ? THREE.LoopOnce : THREE.LoopRepeat, Infinity).setEffectiveWeight(1).fadeIn(shot ? 0.05 : 0.18).play();
           nextUpper.clampWhenFinished = true;
         }
         this.upper = nextUpper;
@@ -429,6 +433,11 @@ export class CharacterRig {
         this.upperShot.fadeOut(0.12);
         this.upperShot = null;
       }
+    }
+    if (this.shotName) {
+      this.upperShotTime += dt;
+      // The layer the caller wants comes back through the next setState once the shot is done.
+      if (this.upperShotTime >= this.upperShotEnds - 0.08) this.shotName = null;
     }
     if (this.override) {
       this.overrideTime += dt;
@@ -466,17 +475,37 @@ export class CharacterRig {
     return [...this.actions.keys()].filter((n) => pattern.test(n));
   }
 
-  /** Play a clip once on the upper body only, over the legs' state clip (a shot fired while running). */
+  /**
+   * Play a clip once on the upper body only, over the legs' state clip (a shot fired while running).
+   * An additive clip (the game's add_ shots) goes on top of everything; any other takes the upper
+   * layer for its length, with the state clip driving the legs only meanwhile.
+   */
   playUpper(clip: string, fadeIn = 0.05): number | null {
     if (!this.actions.has(clip)) return null;
-    const action = this.half(clip, 'upper');
-    if (this.upperShot && this.upperShot !== action) this.upperShot.fadeOut(fadeIn);
-    action.reset().setLoop(THREE.LoopOnce, 1).setEffectiveWeight(1).fadeIn(fadeIn).play();
-    action.clampWhenFinished = true;
-    this.upperShot = action;
+    const duration = this.actions.get(clip)!.getClip().duration;
+    if (this.additive.has(clip)) {
+      const action = this.half(clip, 'upper');
+      if (this.upperShot && this.upperShot !== action) this.upperShot.fadeOut(fadeIn);
+      action.reset().setLoop(THREE.LoopOnce, 1).setEffectiveWeight(1).fadeIn(fadeIn).play();
+      action.clampWhenFinished = true;
+      this.upperShot = action;
+      this.upperShotTime = 0;
+      this.upperShotEnds = duration;
+      return duration;
+    }
+    if (this.override) return null; // a one-off clip has the whole body
+    this.shotName = clip;
     this.upperShotTime = 0;
-    this.upperShotEnds = action.getClip().duration;
-    return this.upperShotEnds;
+    this.upperShotEnds = duration;
+    // Restart the layer even when the same shot is already up.
+    if (this.upperName === clip) {
+      this.upper?.reset().play();
+    } else if (this.state) {
+      const state = this.state;
+      this.state = null;
+      this.setState(state, 0, this.wantedUpper);
+    }
+    return duration;
   }
 
   /** Ask a state to play `clip` when the rig has it: a name or a pattern (null goes back to the state's table). */
@@ -493,7 +522,7 @@ export class CharacterRig {
 
   /** What plays now, for the console. */
   describe(): { state: RigState | null; clip: string | null; upper: string | null; override: string | null; shot: string | null } {
-    return { state: this.state, clip: this.current?.getClip().name ?? null, upper: this.upperName, override: this.override?.getClip().name ?? null, shot: this.upperShot?.getClip().name.replace(/^upper:/, '') ?? null };
+    return { state: this.state, clip: this.current?.getClip().name ?? null, upper: this.upperName, override: this.override?.getClip().name ?? null, shot: this.shotName ?? this.upperShot?.getClip().name.replace(/^upper:/, '') ?? null };
   }
 
   /** The bones from the lowest spine bone up: the torso, arms and head. */

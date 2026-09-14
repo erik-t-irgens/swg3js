@@ -1122,9 +1122,13 @@ export class Player {
     // the table has them, else the relaxed carry.
     // The state hierarchy: the pistol's combat and aimed states both idle with loop_pistol_combat_standing_aimed,
     // the rifle's with loop_rifle_a_combat_standing_aimed; those when the table has them, else the relaxed carry.
+    // The combat loop may be a single clip rather than a speed set: then it is the combat idle, and while
+    // moving it rides the upper body over the relaxed walk or run.
+    const combatIdle = rig.clipMatching(new RegExp(`^loop_${gun}(_a)?_combat_standing(_aimed)?(:speed0)?$`));
+    const combatMoves = !!rig.clipMatching(new RegExp(`^loop_${gun}(_a)?_combat_standing(_aimed)?:speed1$`));
     for (const [state, n] of [['Idle', 0], ['Walk', 1], ['Run', 2]] as const) {
       const relaxed = new RegExp(gun === 'pistol' ? `^loop_pistol_standing:speed${n}$` : `^loop_rifle:speed${n}$`);
-      const combat = rig.clipMatching(new RegExp(`^loop_${gun}(_a)?_combat_standing(_aimed)?:speed${n}$`)) ?? relaxed;
+      const combat = (n === 0 ? combatIdle : rig.clipMatching(new RegExp(`^loop_${gun}(_a)?_combat_standing(_aimed)?:speed${n}$`))) ?? relaxed;
       rig.prefer(`gunReady${state}`, combat);
       rig.prefer(`gunAim${state}`, combat);
     }
@@ -1178,7 +1182,8 @@ export class Player {
     } else if (armed) {
       // The blaster carries: relaxed, combat after a shot, or aimed (the combat legs under the held aimed pose); each with its idle, walk and run.
       const carry = this.aiming ? 'gunAim' : this.gunReady ? 'gunReady' : 'gun';
-      rig.setState(`${carry}${!moving ? 'Idle' : running ? 'Run' : 'Walk'}` as RigState, speed, aimIn);
+      const combatOnTop = moving && carry !== 'gun' && !combatMoves && combatIdle ? combatIdle : null;
+      rig.setState(`${carry}${!moving ? 'Idle' : running ? 'Run' : 'Walk'}` as RigState, speed, aimIn ?? combatOnTop);
     } else if (!moving) rig.setState('idle');
     // Moving with the block held: Jedi Academy's saber run and walk; otherwise the game's own, saber lit or not.
     else if (this.jkaMode) rig.setState(running ? 'runSaber' : 'walkSaber', speed);
@@ -1193,7 +1198,10 @@ export class Player {
     rig.twistTorso(rig.overridingJka ? 0 : this.torsoTwist, rig.overridingJka ? 0 : this.torsoPitch);
     // The hilt turns in the hand to whichever convention poses the arms: the game's own clips
     // hold it their way, Jedi Academy's the way its swings were made for.
-    const jkaArms = rig.armSource().startsWith('BOTH_');
+    // The hilt's axis: the solved one through Jedi Academy's one-off clips (its swings, katas, throws),
+    // the bind-pose guess for everything held (its stances, runs and walks, and the game's own clips):
+    // the stances read right with the guess and the swings with the solve, whatever the maths says.
+    const jkaArms = rig.armSource().startsWith('BOTH_') && rig.overridingJka;
     this.gripBlend += ((jkaArms ? 1 : 0) - this.gripBlend) * Math.min(1, dt * 14);
     // The console's calibration: a turn about the forearm for every Jedi Academy clip, and one more for its held poses.
     const roll = ((this.gripTune.jkaRoll + (jkaArms && !rig.overridingJka ? this.gripTune.stanceRoll : 0)) * Math.PI) / 180;
