@@ -20,8 +20,8 @@ Open the printed URL, click **Enter the galaxy**, and go.
 | Ctrl / X | Crouch (hold) |
 | V | Kneel and get up again |
 | Z | Lie prone and get up again |
-| G | The weapons rack |
-| B | The garage: spawn any vehicle or mount to try |
+| B | The weapons rack |
+| G | The garage: spawn any vehicle or mount to try |
 | K | Jedi: next saber style · Bounty Hunter: pistol or rifle |
 | Shift | Walk (on a vehicle: boost) |
 | LMB | Attack: saber swing or blaster fire |
@@ -105,7 +105,7 @@ The branch `claude/jka-combat` swaps the player's ground and air movement and th
 
 ## The weapons rack
 
-`npm run swg -- weapons @SWG assets-private --retail-only` converts every weapon the game can hold into `assets-private/weapons/`, sorted by class from its template path: pistols, carbines, rifles, heavy weapons, one-hand swords, knives, two-hand swords, polearms and lances, lightsabers. **G** opens the rack in game: a row per weapon with a button per hand it can go in, and the kinds the game does not play yet (grenades and thrown weapons, turrets, mines and traps, batons, axes, the unarmed "weapons" and the special melee kinds) listed at the bottom with why. A weapon goes on the hand's hold point exactly as the game hangs it there, and its class decides everything else: a blaster switches to the bounty hunter's kit with the pistol's or the rifle's carries (carbines and heavy weapons use the rifle's) and its own torso turns (`__debug.gun('carbine', { ready, aim, aimKneel })`, one set per kind); a sword or knife switches to the jedi's kit and fights with the fast, medium and strong styles (K cycles those alone), a one-hand sword or knife in each hand fights as the dual style and nothing else, a two-hand sword never dual-wields, a polearm or lance fights as the staff, and a lightsaber from the rack hangs its own hilt where the placeholder's was with the blade out of it. A held blade sweeps its own length for hits. `__debug.equip('dl44')`, `__debug.equip('knife_survival', 'left')` and `__debug.equip(null, 'left')` do the same from the console, `__debug.weapons('sword')` lists matches.
+`npm run swg -- weapons @SWG assets-private --retail-only` converts every weapon the game can hold into `assets-private/weapons/`, sorted by class from its template path: pistols, carbines, rifles, heavy weapons, one-hand swords, knives, two-hand swords, polearms and lances, lightsabers. **B** opens the rack in game: a row per weapon with a button per hand it can go in, and the kinds the game does not play yet (grenades and thrown weapons, turrets, mines and traps, batons, axes, the unarmed "weapons" and the special melee kinds) listed at the bottom with why. A weapon goes on the hand's hold point exactly as the game hangs it there, and its class decides everything else: a blaster switches to the bounty hunter's kit with the pistol's or the rifle's carries (carbines and heavy weapons use the rifle's) and its own torso turns (`__debug.gun('carbine', { ready, aim, aimKneel })`, one set per kind); a sword or knife switches to the jedi's kit and fights with the fast, medium and strong styles (K cycles those alone), a one-hand sword or knife in each hand fights as the dual style and nothing else, a two-hand sword never dual-wields, a polearm or lance fights as the staff, and a lightsaber from the rack hangs its own hilt where the placeholder's was with the blade out of it. A held blade sweeps its own length for hits. `__debug.equip('dl44')`, `__debug.equip('knife_survival', 'left')` and `__debug.equip(null, 'left')` do the same from the console, `__debug.weapons('sword')` lists matches.
 
 ## Vehicles and the garage
 
@@ -118,7 +118,7 @@ Every vehicle is one physics body held up by springs at the corners of its footp
 
 A fast vehicle can outrun the physics ground being streamed in, so the terrain's own height is a floor under every vehicle. Both blaster fire and Force Push still shove them.
 
-**B** opens the garage: every vehicle the gallery pack holds (`gallery --only=vehicles`) and every creature in the creatures pack, listed by kind, with a button that stands one six metres in front of you, a "try it as" choice to drive any model with another kind's handling, and Remove all. Walk up and press **E** to ride, **E** again to get off. In the console, `__debug.vehicles('speeder')` lists what can be spawned and what stands on the world, `__debug.spawn('speeder_ab1')` or `__debug.spawn('bantha', 'ground')` stands one ahead of you, `__debug.mount()` rides the nearest, and `__debug.unspawn()` clears them. Rider animations (the `loop_*_riding` clips) are not played on vehicles yet; the rider sits in the model's seat.
+**G** opens the garage: every vehicle the gallery pack holds (`gallery --only=vehicles`) and every creature in the creatures pack, listed by kind, with a button that stands one six metres in front of you, a "try it as" choice to drive any model with another kind's handling, and Remove all. Walk up and press **E** to ride, **E** again to get off. In the console, `__debug.vehicles('speeder')` lists what can be spawned and what stands on the world, `__debug.spawn('speeder_ab1')` or `__debug.spawn('bantha', 'ground')` stands one ahead of you, `__debug.mount()` rides the nearest, and `__debug.unspawn()` clears them. Rider animations (the `loop_*_riding` clips) are not played on vehicles yet; the rider sits in the model's seat.
 
 ## The gallery (a development world)
 

@@ -22,7 +22,7 @@ export class WeaponsUi {
           <span class="count"></span>
           <input class="find" placeholder="find" />
           <button class="empty">Empty hands</button>
-          <button class="close">Close <b>G</b></button>
+          <button class="close">Close <b>B</b></button>
         </div>
         <div class="wardrobe-main"><div class="wardrobe-body weapons-body"></div></div>
       </div>`;

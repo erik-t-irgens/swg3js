@@ -28,7 +28,7 @@ export class VehiclesUi {
           <span class="count"></span>
           <input class="find" placeholder="find" />
           <button class="clear">Remove all</button>
-          <button class="close">Close <b>B</b></button>
+          <button class="close">Close <b>G</b></button>
         </div>
         <div class="wardrobe-main"><div class="wardrobe-body weapons-body"></div></div>
       </div>`;

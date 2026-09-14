@@ -372,7 +372,7 @@ class App {
       /** The garage: `vehicles('speeder')` lists what can be spawned; `spawn('speeder_ab1')` or `spawn('bantha', 'ground')` stands one in front of you; `vehicles.clear` is the panel's Remove all. */
       vehicles: (find?: string) => {
         const g = this.garage ?? this.world.garage;
-        if (!g) return 'the garage is not loaded yet: open it with B once, or call spawn()';
+        if (!g) return 'the garage is not loaded yet: open it with G once, or call spawn()';
         const f = find?.toLowerCase();
         return { onWorld: this.world.vehicles.map((v) => `${v.spec.id} (${v.spec.kind}${v === this.player.mounted ? ', ridden' : ''}) at ${v.pos.toArray().map((n) => n.toFixed(0)).join(',')}`), garage: g.vehicles.filter((v) => !f || v.id.toLowerCase().includes(f) || v.kind.includes(f)).map((v) => `${v.id}: ${v.kind}${v.inferred ? '' : ' (guessed)'}, ${v.source}`).slice(0, 80) };
       },
@@ -470,7 +470,7 @@ class App {
         <div class="sub">Star Wars Galaxies, rebuilt for the browser. Ten worlds, one very ambitious side project.</div>
         <div class="controls">
           <div><b>WASD</b> move · <b>Mouse</b> look · <b>Wheel</b> zoom · <b>Space</b> jump (hold to Force Jump higher) · <b>Ctrl</b> crouch (tap while moving to roll) · <b>Shift</b> walk · in water <b>Space</b>/<b>Ctrl</b> surface/dive, or look down and swim</div>
-          <div><b>LMB</b> attack or fire · <b>RMB</b> hold to block with the saber (bounty hunter: rapid fire) · <b>R</b> throw the saber (staff: kick) · <b>G</b> weapons rack · <b>B</b> garage · <b>V</b> kneel · <b>Z</b> prone · <b>E</b> mount speeder · <b>C</b> switch class · <b>T</b> fast-forward time</div>
+          <div><b>LMB</b> attack or fire · <b>RMB</b> hold to block with the saber (bounty hunter: rapid fire) · <b>R</b> throw the saber (staff: kick) · <b>B</b> weapons rack · <b>G</b> garage · <b>B</b> garage · <b>V</b> kneel · <b>Z</b> prone · <b>E</b> mount speeder · <b>C</b> switch class · <b>T</b> fast-forward time</div>
           <div><b>M</b> galaxy map · <b>H</b> toggle help · <b>N</b> noclip fly (<b>+</b>/<b>-</b> speed) · <b>F</b> flashlight · <b>Esc</b> release mouse</div>
           <div><b>X</b> also crouches (a Mac turns Ctrl-click into a right click) · rebind any key in the console: <b>__debug.bind('crouch', 'KeyV')</b>, <b>__debug.bindings()</b></div>
         </div>
@@ -690,7 +690,7 @@ class App {
     this.dying = false;
   }
 
-  /** B: the garage, with the mouse free to use it. */
+  /** G: the garage, with the mouse free to use it. */
   private toggleGarage(): void {
     if (this.wardrobe.open) this.wardrobe.toggle();
     if (this.weaponsUi.open) this.weaponsUi.hide();
@@ -717,9 +717,10 @@ class App {
     return `${def.id} spawned as a ${v.spec.kind}`;
   }
 
-  /** G: the weapons rack, with the mouse free to use it. */
+  /** B: the weapons rack, with the mouse free to use it. */
   private toggleWeapons(): void {
     if (this.wardrobe.open) this.wardrobe.toggle();
+    if (this.vehiclesUi.open) this.vehiclesUi.hide();
     if (this.weaponsUi.toggle()) {
       this.weaponsUi.held = { right: this.player.equipped.right?.id ?? null, left: this.player.equipped.left?.id ?? null };
       this.weaponsUi.render();
