@@ -112,7 +112,7 @@ export class Garage {
     let bounds = def.bounds;
     const hardpoints: string[] = [];
     const engines: THREE.Vector3[] = [];
-    const seat = { point: null as THREE.Vector3 | null };
+    const seat = { point: null as THREE.Vector3 | null, cockpit: null as THREE.Vector3 | null };
     if (!bounds || def.source !== 'creature') {
       // A machine's box is measured from the model itself: the pack's bounds are the mesh file's
       // own, which for a substituted appearance can be another mesh's, and a wrong box is a
@@ -142,6 +142,7 @@ export class Garage {
       if (!seat.point && /rider|saddle|seat|driver|pilot|passenger|player|mount/i.test(o.name)) seat.point = local();
       // The game's engines are separate parts a player fits; their hardpoints say where the glow goes.
       if (/engine|thrust|exhaust|booster|(^|[_:])eng\d/i.test(o.name)) engines.push(local());
+      if (!seat.cockpit && /cockpit|canopy|camera|view|pilot/i.test(o.name)) seat.cockpit = local();
     });
     if (place) [x, y, z] = place(bounds);
     const spec = specFor(kind, def.id, def.label, bounds, { animal: def.source === 'creature' });
@@ -152,6 +153,8 @@ export class Garage {
     const v = new Vehicle(spec, model, physics, scene, x, y - bounds.min[1] + spec.hover, z, heading);
     v.hardpoints = hardpoints;
     if (def.source !== 'creature') addEngineGlow(v, engines);
+    // The cockpit view: the model's own point when it names one, else forward of the middle at eye height.
+    if (spec.ship) v.cockpit = seat.cockpit ? [seat.cockpit.x, seat.cockpit.y, seat.cockpit.z] : [0, bounds.min[1] + (bounds.max[1] - bounds.min[1]) * 0.7, bounds.min[2] + (bounds.max[2] - bounds.min[2]) * 0.72];
     if (def.source === 'creature' && loaded.animations.length) {
       const mixer = new THREE.AnimationMixer(model);
       const clips = new Map(loaded.animations.map((a) => [a.name, a]));

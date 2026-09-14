@@ -11,6 +11,8 @@ const FIRST_PERSON_BELOW = 1.2;
 const LOWEST_CAMERA_PITCH = -0.35;
 const EYE_HEIGHT = 1.5;
 const chaseOffset = new THREE.Vector3();
+/** Seconds for the follow camera to catch up with the ship's frame. */
+const CHASE_LAG = 0.28;
 const FLIP = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI);
 /** A touch of nose-down, so the ship sits below the middle of the view. */
 const chaseTilt = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -0.1);
@@ -31,6 +33,8 @@ export class ThirdPersonCamera {
   private readonly posDir = new THREE.Vector3();
   private readonly lookTarget = new THREE.Vector3();
   private readonly dir = new THREE.Vector3();
+  private readonly chaseFrame = new THREE.Quaternion();
+  private chasing = false;
 
   constructor(aspect: number) {
     this.camera = new THREE.PerspectiveCamera(60, aspect, 0.1, 9000);
@@ -40,16 +44,38 @@ export class ThirdPersonCamera {
    * Behind a ship in its own frame: above and behind it looking along its nose, rolling and
    * looping with it. The orbit's yaw is kept at the ship's heading so leaving it is seamless.
    */
-  chase(target: THREE.Vector3, attitude: THREE.Quaternion, heading: number, distance: number): void {
-    this.distance = clamp(this.distance + 0, 0, 24);
-    this.firstPerson = false;
+  chase(input: Input, dt: number, target: THREE.Vector3, attitude: THREE.Quaternion, heading: number, reach: number, cockpit: THREE.Vector3 | null): void {
+    this.distance = clamp(this.distance + input.wheel * 0.9, 0, 24);
+    input.wheel = 0;
     this.yaw = heading + Math.PI;
     this.pitch = 0.32;
-    chaseOffset.set(0, distance * 0.32, -distance).applyQuaternion(attitude);
-    this.camera.position.copy(target).add(chaseOffset);
-    // Cameras look down their own -Z; the ship's nose is its +Z.
-    this.camera.quaternion.copy(attitude).multiply(FLIP).multiply(chaseTilt);
+    this.firstPerson = this.distance < FIRST_PERSON_BELOW;
+    // The camera's frame follows the ship's with a lag (a quarter of a second to catch up), so a
+    // turn shows the ship swinging and banking against the view before the view comes round.
+    if (!this.chasing) {
+      this.chaseFrame.copy(attitude);
+      this.chasing = true;
+    }
+    this.chaseFrame.slerp(attitude, 1 - Math.exp(-dt / CHASE_LAG)).normalize();
+    if (this.firstPerson) {
+      // In the cockpit: on the ship's own frame exactly, looking along its nose.
+      chaseOffset.copy(cockpit ?? chaseOffset.set(0, 1, 0)).applyQuaternion(attitude);
+      this.camera.position.copy(target).add(chaseOffset);
+      this.camera.quaternion.copy(attitude).multiply(FLIP);
+    } else {
+      // The wheel sets how far back, scaled to the ship: zoomed out it sits well behind a barge.
+      const distance = reach * (0.35 + this.distance / 12);
+      chaseOffset.set(0, distance * 0.32, -distance).applyQuaternion(this.chaseFrame);
+      this.camera.position.copy(target).add(chaseOffset);
+      // Cameras look down their own -Z; the ship's nose is its +Z.
+      this.camera.quaternion.copy(this.chaseFrame).multiply(FLIP).multiply(chaseTilt);
+    }
     this.focus.copy(target);
+  }
+
+  /** Back to orbiting: the next chase starts from the ship's frame afresh. */
+  release(): void {
+    this.chasing = false;
   }
 
   /** Horizontal forward direction (from camera toward the player). */

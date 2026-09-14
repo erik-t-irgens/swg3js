@@ -33,7 +33,7 @@ function mountPrompt(v: import('./vehicles/vehicle').Vehicle): string {
   const boost = v.spec.boost === 'heat' ? ` · <b>Shift</b> boost · heat ${bar(v.meter)}${v.overheated > 0 ? ' BURNT OUT' : ''}` : v.spec.boost === 'burst' ? ` · <b>Shift</b> boost ${bar(v.meter)}` : '';
   const hop = v.spec.hop ? ' · <b>Space</b> hop' : '';
   const fly = v.spec.fly ? ' · look up/down or <b>Space</b>/<b>X</b> to climb and sink' : '';
-  if (k === 'ship') return `<b>E</b> leave · <b>W</b>/<b>S</b> throttle up and down · mouse pitches and turns (loops and rolls allowed) · <b>A/D</b> roll · <b>Space</b>/<b>X</b> pitch · <b>Alt</b> look around · <b>Shift</b> burn · ${v.airborne ? 'flying' : 'landed'} · ${Math.round(Math.abs(v.speed) * 3.6)} km/h`;
+  if (k === 'ship') return `<b>E</b> leave · <b>W</b>/<b>S</b> throttle up and down · mouse pitches and turns (loops and rolls allowed) · <b>A/D</b> roll · <b>Space</b>/<b>X</b> pitch · <b>wheel</b> zoom, all the way in for the cockpit · <b>Alt</b> look around · <b>Shift</b> burn · ${v.airborne ? 'flying' : 'landed'} · ${Math.round(Math.abs(v.speed) * 3.6)} km/h`;
   const turn = k === 'ground' ? 'mouse or <b>A/D</b> turn' : 'mouse or <b>A/D</b> steer';
   return `<b>E</b> dismount · <b>W/S</b> throttle · ${turn} · <b>Alt</b> look around${boost}${hop}${fly} · ${k} · ${Math.round(Math.abs(v.speed) * 3.6)} km/h`;
 }
@@ -134,11 +134,13 @@ class App {
         if (yaw !== undefined) this.cam.yaw = yaw;
       },
       /** Feed mouse movement to the real loop as if the pointer were locked (headless tests cannot lock it), and report the camera. */
-      mouse: (dx = 0, dy = 0) => {
+      mouse: (dx = 0, dy = 0, wheel = 0) => {
         this.input.locked = true;
         this.input.mouseDX += dx;
         this.input.mouseDY += dy;
-        return { yaw: Number(this.cam.yaw.toFixed(3)), pitch: Number(this.cam.pitch.toFixed(3)), distance: Number(this.cam.distance.toFixed(2)), at: this.cam.camera.position.toArray().map((v) => Number(v.toFixed(2))) };
+        this.input.wheel += wheel;
+        const look = this.cam.camera.getWorldDirection(new THREE.Vector3());
+        return { yaw: Number(this.cam.yaw.toFixed(3)), pitch: Number(this.cam.pitch.toFixed(3)), distance: Number(this.cam.distance.toFixed(2)), firstPerson: this.cam.firstPerson, at: this.cam.camera.position.toArray().map((v) => Number(v.toFixed(2))), look: look.toArray().map((v) => Number(v.toFixed(3))) };
       },
       /** Make every frame throw after the camera has moved (for testing that a failing frame cannot make the view drift). */
       breakFrames: (on: boolean) => {
@@ -673,8 +675,15 @@ class App {
   private updateCamera(blocked: import('./core/camera').CameraBlocker | null): void {
     const { player, input } = this;
     const ship = player.mounted?.spec.ship && player.mounted.airborne && !input.held('freeLook') ? player.mounted : null;
-    if (ship) this.cam.chase(ship.pos, ship.attitude, ship.heading, Math.max(this.cam.distance, 6 + ship.radius * 2.2));
-    else this.cam.update(input, player.pos, blocked);
+    if (ship) {
+      this.cam.chase(input, 1 / 60, ship.pos, ship.attitude, ship.heading, 6 + ship.radius * 2.2, ship.cockpit ? tmp.fromArray(ship.cockpit) : null);
+      // In the cockpit the hull would fill the view: it is hidden until the camera comes back out.
+      ship.group.visible = !this.cam.firstPerson;
+    } else {
+      this.cam.release();
+      if (player.mounted?.spec.ship) player.mounted.group.visible = true;
+      this.cam.update(input, player.pos, blocked);
+    }
   }
 
   /** Drive the ridden vehicle from the keys (the mouse or A/D steer, Alt frees the look, W/S throttle, Shift boost, Space hop, the view's tilt or Space and X climb and sink), step every vehicle, and seat the rider. */
@@ -711,7 +720,20 @@ class App {
     }
     const terrain = this.world.terrain;
     for (const v of this.world.vehicles) v.update(dt, this.physics, v === player.mounted ? drive : null, (x, z) => terrain.heightAt(x, z), (x, z) => terrain.waterHeightAt(x, z));
-    if (player.mounted) player.syncMount();
+    if (player.mounted) {
+      player.syncMount();
+      const m = player.mounted;
+      if (m.crashed) {
+        // Flown into the ground: hurt by the speed, and the crash shown where it happened.
+        const dmg = Math.round(THREE.MathUtils.clamp((m.crashed - 8) * 1.2, 5, 95));
+        player.takeDamage(dmg);
+        this.hud.hurt();
+        this.effects.burst(m.pos, 0xffb070, 3 + m.radius, 0.35);
+        this.effects.flash(m.pos, 0xff8a50, 20, 25, 0.3);
+        this.hud.setPrompt(`crashed at ${Math.round(m.crashed * 3.6)} km/h: ${dmg} damage`);
+        m.crashed = 0;
+      }
+    }
   }
 
   /** The class's weapon and abilities, then the bolts in the air (a bolt reaching the player meets the saber first). */

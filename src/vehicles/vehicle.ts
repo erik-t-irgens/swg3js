@@ -180,6 +180,10 @@ export class Vehicle {
   readonly spin = new THREE.Vector3();
   /** A ship in free flight this step (not on its landing gear). */
   airborne = false;
+  /** A ship that just flew into the ground: the speed it hit at, read once by the game for the damage. */
+  crashed = 0;
+  /** The cockpit, in the model's frame, for the first-person view: a hardpoint's place or the front of the hull. */
+  cockpit: [number, number, number] | null = null;
   /** The boost meter: a burst's charge left, or a heat boost's heat, 0 to 1. */
   meter = 0;
   /** A heat boost that has burnt out: seconds until the engine comes back. */
@@ -221,6 +225,7 @@ export class Vehicle {
     ];
     this.meter = spec.boost === 'burst' ? 1 : 0;
     this.altitude = spec.fly ? spec.fly.floor : 0;
+    if (spec.ship) this.cockpit = [0, b.min[1] + h * 0.7, b.min[2] + l * 0.72];
     const world = physics.world;
     this.body = world.createRigidBody(
       RAPIER.RigidBodyDesc.dynamic()
@@ -538,20 +543,39 @@ export class Vehicle {
     if (pitchDelta) a.multiply(qTmp.setFromAxisAngle(AXIS_X, pitchDelta));
     if (rollDelta) a.multiply(qTmp.setFromAxisAngle(AXIS_Z, rollDelta));
     fwd.set(0, 0, 1).applyQuaternion(a);
-    // Never into the ground nor above the ceiling: near either, the nose is turned toward the
-    // horizon in the world's frame (whichever way up the ship is), and it climbs or sinks.
+    // A light hand near the ground and the ceiling: within a few seconds of the ground on the
+    // present course the nose is eased toward the horizon, gently and only while the stick is
+    // slack, so a pilot who keeps pushing can fly into it; the ceiling is eased the same way.
     const minH = s.fly!.floor + 2;
-    const tooLow = h < minH + Math.max(0, -fwd.y) * this.cruise * 1.5;
+    const toGround = fwd.y < -0.02 ? h / (-fwd.y * Math.max(this.cruise, 1)) : Infinity;
+    const tooLow = h < minH || toGround < 2.5;
     const tooHigh = h > s.fly!.ceiling;
-    if ((tooLow && fwd.y < 0.15) || (tooHigh && fwd.y > 0)) {
-      const want = tooLow ? 0.15 : -0.05;
+    const slack = Math.abs(stick.y) < 0.15;
+    if (((tooLow && fwd.y < 0.1) || (tooHigh && fwd.y > 0)) && slack) {
+      const want = tooLow ? 0.1 : -0.05;
       axis.crossVectors(fwd, WORLD_UP);
       if (axis.lengthSq() > 1e-6) {
-        const angle = THREE.MathUtils.clamp((want - fwd.y) * 4 * dt, -rate * dt, rate * dt);
+        const pull = tooLow ? THREE.MathUtils.clamp(1 - toGround / 2.5, 0.25, 1) : 0.5;
+        const angle = THREE.MathUtils.clamp((want - fwd.y) * 1.5 * dt, -rate * 0.5 * dt, rate * 0.5 * dt) * pull;
         qTmp.setFromAxisAngle(axis.normalize(), angle);
         a.premultiply(qTmp);
         fwd.set(0, 0, 1).applyQuaternion(a);
       }
+    }
+    // Into the ground: a crash. The ship stops dead where it hit and drops onto its gear, and
+    // the rider is thrown about by the speed (the game reports it as damage).
+    if (h < s.fly!.floor * 0.5 && fwd.y < -0.05 && this.cruise > 8) {
+      this.crashed = this.cruise;
+      this.cruise = 0;
+      this.airborne = false;
+      body.setGravityScale(1, true);
+      e.set(0, this.heading, 0, 'YXZ');
+      q.setFromEuler(e);
+      body.setRotation({ x: q.x, y: q.y, z: q.z, w: q.w }, true);
+      body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+      body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+      this.altitude = s.fly!.floor;
+      return false;
     }
     a.normalize();
     body.setRotation({ x: a.x, y: a.y, z: a.z, w: a.w }, true);
