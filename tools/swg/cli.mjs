@@ -725,6 +725,15 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
   }
   const skeleton = mergeSkeletons(loadSkeleton(skeletonFile), extras);
   info.joints = skeleton.joints.length;
+  {
+    const ext = { min: [Infinity, Infinity, Infinity], max: [-Infinity, -Infinity, -Infinity] };
+    for (const j of skeleton.joints) for (let k = 0; k < 3; k++) {
+      ext.min[k] = Math.min(ext.min[k], j.bindT[k]);
+      ext.max[k] = Math.max(ext.max[k], j.bindT[k]);
+    }
+    info.jointExtent = ext;
+    info.rootJoint = skeleton.joints.find((j) => j.parent < 0)?.name ?? '?';
+  }
   info.attached = skeleton.attached.map((a, i) => `${extras[i].file} (${a.joints} joints) at ${a.attachTo}`);
   const meshes = [];
   const textures = new Map();
@@ -784,6 +793,15 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
     const { groups, unknownTransforms, unknownNames } = skinnedPrimitives(mgn, skeleton);
     info.unknownTransforms += unknownTransforms;
     for (const n of unknownNames) (info.unknownJoints ??= new Set()).add(n);
+    // Each mesh's own extent, for telling a tiny model from a wrong one.
+    const ext = { min: [Infinity, Infinity, Infinity], max: [-Infinity, -Infinity, -Infinity] };
+    for (let i = 0; i < mgn.positions.length; i += 3) {
+      for (let k = 0; k < 3; k++) {
+        ext.min[k] = Math.min(ext.min[k], mgn.positions[i + k]);
+        ext.max[k] = Math.max(ext.max[k], mgn.positions[i + k]);
+      }
+    }
+    (info.meshExtents ??= []).push({ file, vertices: mgn.positions.length / 3, min: ext.min, max: ext.max });
     if (body) {
       for (let i = 0; i < mgn.positions.length; i += 3) {
         const b = (info.bounds ??= { min: [Infinity, Infinity, Infinity], max: [-Infinity, -Infinity, -Infinity] });
@@ -1655,6 +1673,10 @@ switch (cmd) {
     console.log(`${info.sat}: skeleton ${info.skeleton} (${info.joints} joints${info.attached.length ? `, with ${info.attached.join('; ')}` : ''})`);
     for (const m of info.meshes) console.log(`  mesh ${m.file}: ${m.triangles} tris, ${m.shaders} shaders, layer ${m.layer}${m.hidden ? `, ${m.hidden} tris under clothing` : ''}${m.occludes.length ? `, hides ${m.occludes.join(' ')}` : ''}`);
     for (const t of info.textureRenderers) console.log(`  texture renderer ${t}`);
+    const fmt = (v) => v.map((x) => (Number.isFinite(x) ? x.toFixed(2) : String(x))).join(' ');
+    if (info.bounds) console.log(`  bounds (x mirrored): min ${fmt(info.bounds.min)}, max ${fmt(info.bounds.max)}`);
+    for (const e of info.meshExtents ?? []) console.log(`  extent ${e.file}: ${e.vertices} vertices, min ${fmt(e.min)}, max ${fmt(e.max)}`);
+    if (info.jointExtent) console.log(`  joints: bind translations within ${fmt(info.jointExtent.min)} to ${fmt(info.jointExtent.max)}; root ${info.rootJoint}`);
     if (info.customization.size) console.log(`  customization (set with --var=name=value,...):\n    ${[...info.customization].join('\n    ')}`);
     console.log(`  animations (${info.animations.length})${info.animationTable ? ` from ${info.animationTable}` : ''}: ${info.animations.join(', ') || 'none'}`);
     if (info.available && (!info.animations.length || options.anim === 'list')) console.log(`  available (${info.available.length}): ${info.available.join(', ')}`);
