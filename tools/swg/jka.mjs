@@ -523,6 +523,73 @@ export function closeLoop(clip, wrapFrame = 0) {
   return clip;
 }
 
+/** Where a swing's start and end quadrants point the blade, in the converter's frame (x left, y up, z forward). */
+const QUAD_DIR = { T: [0, 1, 0], B: [0, -1, 0], L: [1, 0, 0], R: [-1, 0, 0], TL: [Math.SQRT1_2, Math.SQRT1_2, 0], TR: [-Math.SQRT1_2, Math.SQRT1_2, 0], BL: [Math.SQRT1_2, -Math.SQRT1_2, 0], BR: [-Math.SQRT1_2, -Math.SQRT1_2, 0] };
+/** The seven swings: animation name suffix, start quadrant, end quadrant. */
+const SWINGS = [['T__B_', 'T', 'B'], ['TL_BR', 'TL', 'BR'], ['_L__R', 'L', 'R'], ['BL_TR', 'BL', 'TR'], ['BR_TL', 'BR', 'TL'], ['_R__L', 'R', 'L'], ['TR_BL', 'TR', 'BL']];
+
+/** World rotation of joint `i` at frame `f` of a retargeted clip (local rotations composed down the chain). */
+function clipWorldQ(clip, joints, f, i) {
+  const j = joints[i];
+  const r = clip.tracks[i].rotations;
+  const q = [r[f * 4 + 3], r[f * 4], r[f * 4 + 1], r[f * 4 + 2]];
+  return j.parent < 0 ? q : qmul(clipWorldQ(clip, joints, f, j.parent), q);
+}
+
+/**
+ * The axis, in a bone's own frame, that points the way a set of constraints want it to in the
+ * world: each constraint is the bone's world rotation and the world direction wanted then. The
+ * least-squares answer is the sum of the wanted directions taken back into the bone's frame.
+ * Returns the unit axis and how well it fits (the mean and least cosine over the constraints).
+ */
+export function gripFromConstraints(constraints) {
+  const sum = [0, 0, 0];
+  for (const c of constraints) {
+    const local = qrot(qconj(c.q), c.dir);
+    for (let k = 0; k < 3; k++) sum[k] += local[k];
+  }
+  const len = Math.hypot(sum[0], sum[1], sum[2]);
+  if (len < 1e-6) return null;
+  const axis = sum.map((v) => v / len);
+  const cos = constraints.map((c) => { const w = qrot(c.q, axis); return w[0] * c.dir[0] + w[1] * c.dir[1] + w[2] * c.dir[2]; });
+  return { axis, mean: cos.reduce((a, b) => a + b, 0) / cos.length, min: Math.min(...cos) };
+}
+
+/**
+ * Where the blade points in the hand: the axis in the saber hand's SWG bone frame that the
+ * swings put where their quadrants say (the medium and strong swings, whose starts and ends
+ * are literal: the overhead starts pointing up, a side cut starts pointing that way). The
+ * left hand's axis is the right's mirrored through the dual stance, where both sabers are
+ * held alike. Returns null when the skeleton or the animations lack what this needs.
+ */
+export function solveGrip(gla, cfg, joints, plan) {
+  const right = plan.pairs.find((p) => p.jka === 'rhand');
+  const left = plan.pairs.find((p) => p.jka === 'lhand');
+  if (!right) return null;
+  const constraints = [];
+  for (const digit of [2, 3]) {
+    for (const [suffix, s, e] of SWINGS) {
+      const entry = cfg.get(`BOTH_A${digit}_${suffix}`);
+      if (!entry || !entry.count) continue;
+      const clip = retargetClip(gla, entry, joints, plan);
+      constraints.push({ q: clipWorldQ(clip, joints, 0, right.s), dir: QUAD_DIR[s] }, { q: clipWorldQ(clip, joints, clip.frames - 1, right.s), dir: QUAD_DIR[e] });
+    }
+  }
+  const solved = gripFromConstraints(constraints);
+  if (!solved) return null;
+  const out = { right: { bone: joints[right.s].name, axis: solved.axis.map((v) => Number(v.toFixed(4))), fit: Number(solved.mean.toFixed(3)), swings: constraints.length / 2 } };
+  const stance = cfg.get('BOTH_SABERDUAL_STANCE');
+  if (left && stance && stance.count) {
+    const clip = retargetClip(gla, stance, joints, plan);
+    const qr = clipWorldQ(clip, joints, 0, right.s);
+    const ql = clipWorldQ(clip, joints, 0, left.s);
+    const world = qrot(qr, solved.axis);
+    const mirrored = qrot(qconj(ql), [-world[0], world[1], world[2]]);
+    out.left = { bone: joints[left.s].name, axis: mirrored.map((v) => Number(v.toFixed(4))), from: stance.name };
+  }
+  return out;
+}
+
 /** The joints that are feet, for measuring how fast a locomotion clip travels. */
 const FOOT = /ankle|foot|talus/i;
 
@@ -720,6 +787,8 @@ export function importJkaClips(jkaDir, joints, wanted = defaultJkaClips(), { log
       if (clip.loop && /^BOTH_(WALK|RUN|CROUCH1WALK)/.test(entry.name)) clip.speed = travelSpeed(clip, joints);
       clips.push(clip);
     }
+    const grip = solveGrip(gla, cfg, joints, plan);
+    if (grip) log(`grip: blade axis in ${grip.right.bone} ${grip.right.axis.join(', ')} from ${grip.right.swings} swings (fit ${grip.right.fit})${grip.left ? `; ${grip.left.bone} ${grip.left.axis.join(', ')} mirrored through ${grip.left.from}` : ''}`);
     const stance = clips.find((c) => c.source === 'BOTH_STAND1') ?? clips.find((c) => c.source === 'BOTH_STAND2') ?? clips[0];
     if (stance) {
       const check = poseCheck(stance, joints, plan);
@@ -731,7 +800,7 @@ export function importJkaClips(jkaDir, joints, wanted = defaultJkaClips(), { log
       const c = clips.find((x) => x.source === name);
       if (c) log(`check: ${clipReport(gla, cfg.get(name), c, joints, plan, 0.5)}`);
     }
-    return { clips, info: { bones: gla.numBones, frames: gla.numFrames, animations: cfg.size, matched: plan.report.matched, missingBones: plan.report.missing, angles: plan.report.angles, unitScale: plan.unitScale, missing } };
+    return { clips, info: { bones: gla.numBones, frames: gla.numFrames, animations: cfg.size, matched: plan.report.matched, missingBones: plan.report.missing, angles: plan.report.angles, unitScale: plan.unitScale, missing, grip } };
   } finally {
     base.close();
   }

@@ -1648,6 +1648,7 @@ switch (cmd) {
           jka = r.info;
           info.jkaClips = Object.fromEntries(r.clips.map((c) => [c.name, { loop: c.loop, fps: c.fps, frames: c.frames, ...(c.speed ? { speed: c.speed } : {}) }]));
           for (const c of r.clips) if (c.speed) (info.clipSpeeds ??= {})[c.name] = c.speed;
+          if (r.info.grip) info.jkaGrip = r.info.grip;
           return r.clips;
         }
       : null;
@@ -1667,7 +1668,7 @@ switch (cmd) {
     for (const m of info.skipped) console.log(`  skipped: ${m}`);
     const manifestFile = join(outDir, 'manifest.json');
     const manifest = existsSync(manifestFile) ? JSON.parse(readFileSync(manifestFile, 'utf8')) : { players: [] };
-    const entry = { id, file: `player/${id}.glb`, template, wear, variables: Object.fromEntries(customizationValues(options.var)), clips: info.animations, clipSpeeds: info.clipSpeeds ?? {}, bounds: info.bounds, scale: 1, ...(info.jkaClips ? { jkaClips: info.jkaClips } : {}) };
+    const entry = { id, file: `player/${id}.glb`, template, wear, variables: Object.fromEntries(customizationValues(options.var)), clips: info.animations, clipSpeeds: info.clipSpeeds ?? {}, bounds: info.bounds, scale: 1, ...(info.jkaClips ? { jkaClips: info.jkaClips } : {}), ...(info.jkaGrip ? { jkaGrip: info.jkaGrip } : {}) };
     manifest.players = [entry, ...(manifest.players ?? []).filter((p) => p.id !== id)];
     writeFileSync(manifestFile, JSON.stringify(manifest, null, 2));
     console.log(`-> ${join(outDir, `${id}.glb`)} and ${manifestFile}; the game uses the first entry`);
@@ -1839,6 +1840,7 @@ switch (cmd) {
           jkaClips: Object.fromEntries(Object.entries(entry.jkaClips ?? {}).filter(([n]) => names.has(n))),
           clipSpeeds: Object.fromEntries(Object.entries(entry.clipSpeeds ?? {}).filter(([n]) => names.has(n))),
           scale: entry.scale,
+          ...(entry.jkaGrip ? { grip: entry.jkaGrip } : {}),
         };
       }
     }
@@ -1879,6 +1881,7 @@ switch (cmd) {
       m.jkaClips = Object.fromEntries(Object.entries(bundle.meta.jkaClips ?? {}).filter(([n]) => present.has(n)));
       m.clipSpeeds = { ...(m.clipSpeeds ?? {}), ...(bundle.meta.clipSpeeds ?? {}) };
       if (bundle.meta.scale !== undefined) m.scale = bundle.meta.scale;
+      if (bundle.meta.grip) m.jkaGrip = bundle.meta.grip;
       writeFileSync(partsManifest, JSON.stringify(m, null, 2));
       restored = `; parts.json updated with ${Object.keys(m.jkaClips).length} loop flags`;
     }
@@ -1893,6 +1896,7 @@ switch (cmd) {
         entry.jkaClips = { ...(entry.jkaClips ?? {}), ...Object.fromEntries(Object.entries(bundle.meta.jkaClips ?? {}).filter(([n]) => present.has(n))) };
         entry.clipSpeeds = { ...(entry.clipSpeeds ?? {}), ...(bundle.meta.clipSpeeds ?? {}) };
         if (bundle.meta.scale !== undefined) entry.scale = bundle.meta.scale;
+        if (bundle.meta.grip) entry.jkaGrip = bundle.meta.grip;
         writeFileSync(outManifest, JSON.stringify(m, null, 2));
         restored = `; manifest updated with ${Object.keys(entry.jkaClips).length} loop flags`;
       }
@@ -1921,6 +1925,7 @@ switch (cmd) {
         entry.clips = [...(entry.clips ?? []).filter((c) => !/^BOTH_/i.test(c)), ...r.clips.map((c) => c.name)];
         entry.jkaClips = Object.fromEntries(r.clips.map((c) => [c.name, { loop: c.loop, fps: c.fps, frames: c.frames, ...(c.speed ? { speed: c.speed } : {}) }]));
         entry.clipSpeeds = { ...(entry.clipSpeeds ?? {}), ...Object.fromEntries(r.clips.filter((c) => c.speed).map((c) => [c.name, c.speed])) };
+        if (r.info.grip) entry.jkaGrip = r.info.grip;
         writeFileSync(manifestFile, JSON.stringify(manifest, null, 2));
       }
     }

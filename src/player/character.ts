@@ -23,6 +23,12 @@ interface PartDef {
   body?: boolean;
 }
 
+/** The blade's axis in a hand bone's own frame, for each hand. */
+export interface GripAxes {
+  right?: { bone: string; axis: number[] };
+  left?: { bone: string; axis: number[] };
+}
+
 export interface PartsManifest {
   id: string;
   skeleton: string;
@@ -33,6 +39,8 @@ export interface PartsManifest {
   defaultWear?: string[];
   /** Animation metadata the GLB cannot hold: which clips hold their last frame, and clip speeds. */
   jkaClips?: Record<string, { loop: boolean }>;
+  /** Where the blade points in each hand, solved from Jedi Academy's swings (see the importer). */
+  jkaGrip?: GripAxes;
   clipSpeeds?: Record<string, number>;
   scale?: number;
   customization?: string[];

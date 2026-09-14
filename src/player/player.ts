@@ -38,6 +38,8 @@ const aim = new THREE.Vector3();
 const aimFrom = new THREE.Vector3();
 const handPos = new THREE.Vector3();
 /** How Jedi Academy spells the jump directions in its clip names. */
+/** Running with the block held, forwards or back-pedalling, is at most this much of the full run. */
+const BLOCK_RUN_SCALE = 0.8;
 const JUMP_SUFFIX: Record<Dir, string> = { F: '', B: 'BACK', L: 'LEFT', R: 'RIGHT' };
 
 interface Parts {
@@ -369,16 +371,18 @@ export class Player {
         if (d.lengthSq() > 1e-10) along.copy(d).normalize();
       }
       hand.add(p.saber, p.rifle);
-      // A gripped hilt runs across the palm, pointing the way the character faces when the arms
-      // hang at rest: the rig's forward axis taken into the hand's frame in the bind pose.
-      const grip = new THREE.Vector3(0, 0, 1).applyQuaternion(rig.root.getWorldQuaternion(new THREE.Quaternion())).applyQuaternion(hand.getWorldQuaternion(new THREE.Quaternion()).invert());
+      // Where the blade points in the hand: the axis the importer solved from Jedi Academy's
+      // swings when it is there; else a guess, the way the character faces with the arms at rest.
+      const grip = this.gripAxis('right', hand) ?? new THREE.Vector3(0, 0, 1).applyQuaternion(rig.root.getWorldQuaternion(new THREE.Quaternion())).applyQuaternion(hand.getWorldQuaternion(new THREE.Quaternion()).invert());
       if (grip.lengthSq() < 1e-6) grip.set(0, 0, 1);
       grip.normalize();
-      // The saber's blade runs along its +Y, the rifle's barrel along its +Z.
-      p.saber.position.copy(along).multiplyScalar(0.02 * k);
+      // The saber's blade runs along its +Y, the rifle's barrel along its +Z. A hold point sits in
+      // the palm already; a wrist bone needs the grip moved a little along the arm.
+      const grabbed = /^hold/i.test(hand.name);
+      p.saber.position.copy(along).multiplyScalar(grabbed ? 0 : 0.02 * k);
       p.saber.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), grip);
       p.saber.scale.setScalar(k);
-      p.rifle.position.copy(along).multiplyScalar(0.1 * k);
+      p.rifle.position.copy(along).multiplyScalar(grabbed ? 0.04 * k : 0.1 * k);
       p.rifle.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), along);
       p.rifle.scale.setScalar(k);
     }
@@ -392,10 +396,10 @@ export class Player {
         if (d.lengthSq() > 1e-10) along.copy(d).normalize();
       }
       leftHand.add(p.saber2);
-      const grip = new THREE.Vector3(0, 0, 1).applyQuaternion(rig.root.getWorldQuaternion(new THREE.Quaternion())).applyQuaternion(leftHand.getWorldQuaternion(new THREE.Quaternion()).invert());
+      const grip = this.gripAxis('left', leftHand) ?? new THREE.Vector3(0, 0, 1).applyQuaternion(rig.root.getWorldQuaternion(new THREE.Quaternion())).applyQuaternion(leftHand.getWorldQuaternion(new THREE.Quaternion()).invert());
       if (grip.lengthSq() < 1e-6) grip.set(0, 0, 1);
       grip.normalize();
-      p.saber2.position.copy(along).multiplyScalar(0.02 * k);
+      p.saber2.position.copy(along).multiplyScalar(/^hold/i.test(leftHand.name) ? 0 : 0.02 * k);
       p.saber2.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), grip);
       p.saber2.scale.setScalar(k);
     }
@@ -406,6 +410,19 @@ export class Player {
       p.jetpack.scale.setScalar(k);
     }
     this.applyClassLook();
+  }
+
+  /**
+   * The importer's blade axis for a hand, taken from the bone it was solved in (the wrist) into
+   * the frame of the bone the weapon hangs from (the hold point), at the bind pose.
+   */
+  private gripAxis(side: 'left' | 'right', hand: THREE.Bone): THREE.Vector3 | null {
+    const g = this.rig?.grip?.[side];
+    const bone = g && this.rig?.bone(g.bone);
+    if (!g || !bone || g.axis.length !== 3) return null;
+    const axis = new THREE.Vector3(g.axis[0], g.axis[1], g.axis[2]);
+    if (axis.lengthSq() < 1e-6) return null;
+    return axis.applyQuaternion(bone.getWorldQuaternion(new THREE.Quaternion())).applyQuaternion(hand.getWorldQuaternion(new THREE.Quaternion()).invert()).normalize();
   }
 
   private applyClassLook(): void {
@@ -980,9 +997,14 @@ export class Player {
     const base = JKA.speed * UNIT * (walking ? JKA.walkScale : 1) * (crouch ? JKA.duckScale : 1);
     const back = this.directional && mz < 0;
     let target: number | null = null;
-    if (crouch) target = rig.naturalSpeed(back ? 'crouchWalkBack' : 'crouchWalk');
-    else if (walking) target = rig.naturalSpeed(this.jkaMode ? (back ? 'walkBack' : 'walkSaber') : 'walk');
-    else if (this.jkaMode && back) target = Math.min(rig.naturalSpeed('runBack') ?? base, base * 0.85);
+    // Crouched: with the walk key the crouch walk's own pace; without it the game's crouched walk speed, a little quicker.
+    // Jedi Academy's clips were made for less than its speeds (it lets the feet slide), so the
+    // paces taken from them are held within bands of the game's own speed.
+    if (crouch) target = walking ? Math.max(rig.naturalSpeed(back ? 'crouchWalkBack' : 'crouchWalk') ?? 0, 0.8) : base * JKA.walkScale;
+    else if (walking) target = Math.max(rig.naturalSpeed(this.jkaMode ? (back ? 'walkBack' : 'walkSaber') : 'walk') ?? 0, this.jkaMode ? 1.2 : 0.8);
+    else if (this.jkaMode && back) target = THREE.MathUtils.clamp(rig.naturalSpeed('runBack') ?? base, base * 0.5, base * BLOCK_RUN_SCALE);
+    // Running with the block held: the saber run's own pace, within a band under the full run.
+    else if (this.jkaMode && this.blocking) target = THREE.MathUtils.clamp(rig.naturalSpeed('runSaber') ?? base, base * 0.65, base * BLOCK_RUN_SCALE);
     return target && target > 0.3 ? target / base : 1;
   }
 

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { openZip, openJkaBase, parseGla, parseAnimationCfg, planRetarget, retargetClip, importJkaClips, defaultJkaClips, closeLoop, travelSpeed, BONE_MAP } from '../jka.mjs';
+import { openZip, openJkaBase, parseGla, parseAnimationCfg, planRetarget, retargetClip, importJkaClips, defaultJkaClips, closeLoop, travelSpeed, gripFromConstraints, BONE_MAP } from '../jka.mjs';
 
 // --- helpers ---------------------------------------------------------------------------------
 type Q = [number, number, number, number];
@@ -313,6 +313,14 @@ assert.equal(r.clips[0].times.length, 2, 'a clip that does not loop is left alon
   }
   const speed = travelSpeed({ times, tracks: tr }, feetJoints);
   assert.ok(speed !== null && Math.abs(speed - 2) < 1e-3, `the planted foot's speed is the travel speed: ${speed}`);
+  // gripFromConstraints: a bone turned 90 degrees about y wanting +z in the world holds the axis +x... and the identity wanting +z agrees on +z only when both are averaged.
+  const turned: Q = [Math.SQRT1_2, 0, Math.SQRT1_2, 0];
+  const g1 = gripFromConstraints([{ q: turned, dir: [1, 0, 0] }]);
+  assert.ok(g1 && Math.abs(g1.axis[2] - 1) < 1e-6 && Math.abs(g1.mean - 1) < 1e-6, `a bone turned 90 about y needs its +z to point +x: ${JSON.stringify(g1)}`);
+  const g2 = gripFromConstraints([{ q: [1, 0, 0, 0], dir: [0, 0, 1] }, { q: turned, dir: [1, 0, 0] }]);
+  assert.ok(g2 && Math.abs(g2.axis[2] - 1) < 1e-6 && g2.min > 0.99, 'two agreeing constraints keep the fit perfect');
+  const g3 = gripFromConstraints([{ q: [1, 0, 0, 0], dir: [0, 0, 1] }, { q: [1, 0, 0, 0], dir: [1, 0, 0] }]);
+  assert.ok(g3 && Math.abs(g3.mean - Math.SQRT1_2) < 1e-6, 'disagreeing constraints split the difference and report the fit');
   const closed = closeLoop({ times: new Float32Array([0, 0.1]), tracks: [{ rotations: new Float32Array([0, 0, 0, 1, 1, 0, 0, 0]), translations: new Float32Array([1, 2, 3, 4, 5, 6]) }], fps: 10 });
   assert.deepEqual(Array.from(closed.times), [0, 0.1, 0.2].map((v) => Math.fround(v)));
   assert.deepEqual(Array.from(closed.tracks[0].translations.subarray(6, 9)), [1, 2, 3]);
