@@ -24,6 +24,8 @@ import { NpcUi } from './ui/npcUi';
 import { AppearanceUi } from './ui/appearanceUi';
 import { CharacterSelect } from './ui/characterSelect';
 import { CreatorBar } from './ui/creatorBar';
+import { Menu } from './ui/menu';
+import { loadSettings, type Settings } from './core/settings';
 import { deleteCharacter, loadCharacters, newCharacterId, upsertCharacter, type Appearance, type SavedCharacter } from './core/characters';
 import { Garage, type VehicleDef } from './vehicles/garage';
 import type { Vehicle, VehicleKind } from './vehicles/vehicle';
@@ -83,6 +85,8 @@ class App {
   private readonly fade: HTMLElement;
   private readonly select: CharacterSelect;
   private readonly creatorBar: CreatorBar;
+  private readonly menu: Menu;
+  private readonly settings: Settings = loadSettings();
   /** The character being played, as kept in this browser; null on the select screen and in the creator. */
   private current: SavedCharacter | null = null;
   /** The creator is up: the appearance and wardrobe panels at full size over no world at all. */
@@ -101,25 +105,39 @@ class App {
 
   constructor(private readonly physics: Physics) {
     this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true, powerPreference: 'high-performance', stencil: true });
+    // ?lowfx=1 is the cheap preset for this session; otherwise the settings kept in this browser.
     const lowfx = new URLSearchParams(location.search).get('lowfx') === '1';
-    this.renderer.setPixelRatio(lowfx ? 0.5 : Math.min(window.devicePixelRatio, 2));
+    if (lowfx) Object.assign(this.settings, { renderScale: 0.5, shadows: false });
+    const S = this.settings;
+    this.renderer.setPixelRatio(S.renderScale);
     this.renderer.setSize(window.innerWidth, window.innerHeight);
-    this.renderer.shadowMap.enabled = !lowfx;
+    this.renderer.shadowMap.enabled = S.shadows;
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     World.anisotropy = Math.min(8, this.renderer.capabilities.getMaxAnisotropy());
-    this.renderer.toneMappingExposure = 1.0;
+    this.renderer.toneMappingExposure = S.exposure;
 
     this.cam = new ThirdPersonCamera(window.innerWidth / window.innerHeight);
+    this.cam.sensitivity = S.sensitivity;
+    this.cam.invertY = S.invertY;
+    this.cam.baseFov = S.fov;
+    this.cam.camera.fov = S.fov;
+    this.cam.camera.updateProjectionMatrix();
     this.input = new Input(this.canvas);
     this.world = new World(this.scene, physics);
     this.world.renderer = this.renderer;
+    this.world.userFog = S.fog;
+    this.world.setShadowLook(S.shadowSoftness, undefined, S.shadowMapSize);
+    this.world.setShadows(S.shadowDistance, S.shadowCasterRadius);
+    this.world.setReach(S.objectReach, S.terrainRadius, S.farRadius);
     // A hand torch: a spot light carried at the camera, pointing where it looks. F toggles it.
     this.torch = new THREE.SpotLight(0xfff1d6, 260, 70, 0.42, 0.45, 1.6);
     this.torch.visible = false;
     this.scene.add(this.torch, this.torch.target);
     this.portals = new PortalRenderer(this.renderer);
-    this.world.attachCamera(this.cam.camera, !lowfx, this.portals);
+    // The cascades exist even with shadows off, so turning them on later in the menu needs no rebuild.
+    this.world.attachCamera(this.cam.camera, true, this.portals);
+    if (!S.shadows) this.world.setShadowsEnabled(false);
     this.player = new Player(this.scene, physics);
     this.effects = new Effects(this.scene);
     this.hud = new Hud(this.ui);
@@ -568,12 +586,33 @@ class App {
     };
     this.creatorBar.onTab = (id) => this.showCreatorTab(id);
     this.creatorBar.onCreate = (name, cls, planet) => void this.finishCreation(name, cls, planet).catch((err) => console.warn('creator', err));
+    this.menu = new Menu(this.ui, this.input, this.settings);
+    this.menu.onResume = () => this.resume();
+    this.menu.onSwitchCharacter = () => this.switchToSelect();
+    this.menu.onSetting = (key) => this.applySetting(key);
+    // Escape: in the world it opens the menu (the browser drops the pointer lock on it, which is
+    // caught below); with the menu up it resumes; with a panel or the map up it closes that.
+    window.addEventListener('keydown', (e) => {
+      if (e.code !== 'Escape' || !this.inWorld || !this.started || this.traveling) return;
+      // The Escape that dropped the lock (and so opened the menu) must not close it again in the same breath.
+      if (this.menu.open) {
+        if (performance.now() - this.menuOpenedAt > 300) this.resume();
+      }
+      else if (this.anyPanelOpen() || this.map.open) {
+        this.closePanels();
+        this.map.hide();
+        this.freeMouse(false);
+      } else this.openMenu();
+    });
 
     // Releasing the mouse leaves the game running and the world visible, so the wardrobe and the
     // map can be used with a cursor. Clicking the world takes the mouse back; the menu is only
     // for arriving and for dying, not for every Escape.
     document.addEventListener('pointerlockchange', () => {
-      if (this.started && !this.traveling) this.hud.setMouseFree(!this.input.locked && !this.map.open && !this.anyPanelOpen());
+      if (!this.started || this.traveling) return;
+      // The lock went without a panel asking for it: Escape, or a click away. The menu, not a bare cursor.
+      if (!this.input.locked && !this.input.captured && this.inWorld && !this.map.open && !this.anyPanelOpen()) this.openMenu();
+      this.hud.setMouseFree(!this.input.locked && !this.map.open && !this.anyPanelOpen());
     });
     this.canvas.addEventListener('click', () => {
       if (this.started && !this.input.locked && !this.map.open && !this.anyPanelOpen() && !this.traveling) this.input.requestLock();
@@ -598,6 +637,84 @@ class App {
     this.select.show(loadCharacters());
     // Where the character stands is written back now and then, and when the page goes.
     window.addEventListener('pagehide', () => this.savePlace(true));
+  }
+
+  // ---- The Escape menu and its settings. ----
+
+  private menuOpenedAt = 0;
+
+  private openMenu(): void {
+    if (this.menu.open) return;
+    this.menuOpenedAt = performance.now();
+    this.menu.show();
+    this.freeMouse(true);
+  }
+
+  private resume(): void {
+    this.menu.hide();
+    this.freeMouse(false);
+  }
+
+  /** Back to the select screen: the place is written, the world unloaded, nothing streams until a character is chosen. */
+  private switchToSelect(): void {
+    this.savePlace(true);
+    this.menu.hide();
+    this.closePanels();
+    this.map.hide();
+    if (this.player.mounted) this.handleMount();
+    this.player.noclip = false;
+    this.inWorld = false;
+    this.started = false;
+    this.current = null;
+    this.world.leave();
+    this.hud.setPrompt('');
+    this.hud.setMouseFree(false);
+    this.input.captured = false;
+    this.input.releaseLock();
+    this.select.show(loadCharacters());
+  }
+
+  /** A setting moved in the menu: it takes effect now. */
+  private applySetting(key: keyof Settings): void {
+    const S = this.settings;
+    switch (key) {
+      case 'renderScale':
+        this.renderer.setPixelRatio(S.renderScale);
+        this.renderer.setSize(window.innerWidth, window.innerHeight);
+        this.world.onCameraResized();
+        break;
+      case 'fov':
+        this.cam.baseFov = S.fov;
+        break;
+      case 'exposure':
+        this.renderer.toneMappingExposure = S.exposure;
+        break;
+      case 'fog':
+        this.world.userFog = S.fog;
+        break;
+      case 'shadows':
+        this.world.setShadowsEnabled(S.shadows);
+        break;
+      case 'shadowMapSize':
+      case 'shadowSoftness':
+        this.world.setShadowLook(S.shadowSoftness, undefined, S.shadowMapSize);
+        break;
+      case 'shadowDistance':
+      case 'shadowCasterRadius':
+        this.world.setShadows(S.shadowDistance, S.shadowCasterRadius);
+        break;
+      case 'objectReach':
+      case 'terrainRadius':
+      case 'farRadius':
+        this.world.setReach(S.objectReach, S.terrainRadius, S.farRadius);
+        break;
+      case 'sensitivity':
+        this.cam.sensitivity = S.sensitivity;
+        break;
+      case 'invertY':
+        this.cam.invertY = S.invertY;
+        break;
+    }
   }
 
   /** The look of the character as it is now. */
@@ -1042,7 +1159,7 @@ class App {
 
   /** The panels' open state moved to the tabs: closing one panel of a pair and opening the other keeps the mouse free. */
   private anyPanelOpen(): boolean {
-    return this.wardrobe.open || this.appearanceUi.open || this.weaponsUi.open || this.vehiclesUi.open || this.npcUi.open;
+    return this.wardrobe.open || this.appearanceUi.open || this.weaponsUi.open || this.vehiclesUi.open || this.npcUi.open || this.menu.open;
   }
 
   private closePanels(): void {
@@ -1277,7 +1394,7 @@ class App {
         input.endFrame();
         return;
       }
-      const active = this.started && !this.traveling && !this.dying;
+      const active = this.started && !this.traveling && !this.dying && !this.menu.open;
       if (active) this.savePlace();
 
       if (active) {

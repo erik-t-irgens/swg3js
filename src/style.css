@@ -227,3 +227,43 @@ b { color: var(--accent); font-weight: 600; }
 #creator-bar .step.on { color: var(--accent); border-color: var(--accent); }
 #creator-bar .note { flex: 1; font-size: 11px; color: #e2a33c; }
 #fade small { display: block; margin-top: 10px; font-size: 11px; letter-spacing: 0.08em; color: var(--muted); }
+
+/* The Escape menu: a nav down the left, a page on the right. */
+#menu .menu-panel { width: min(1040px, 94vw); height: min(720px, 90vh); display: flex; background: var(--panel); border: 1px solid var(--panel-border); border-radius: 10px; overflow: hidden; }
+.menu-nav { flex: 0 0 200px; display: flex; flex-direction: column; gap: 4px; padding: 18px 12px; border-right: 1px solid var(--panel-border); background: rgba(0,0,0,0.25); }
+.menu-nav h1 { margin: 0 8px 14px; font-size: 22px; letter-spacing: 0.18em; color: var(--accent); font-weight: 700; }
+.menu-nav button { text-align: left; padding: 9px 12px; font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase; background: transparent; color: var(--muted); border: 1px solid transparent; border-radius: 6px; cursor: pointer; }
+.menu-nav button:hover { color: var(--text); border-color: var(--panel-border); }
+.menu-nav button.on { color: var(--accent); background: rgba(45,127,214,0.2); border-color: var(--panel-border); }
+.menu-nav .menu-spacer { flex: 1; }
+.menu-nav .resume-nav b { float: right; font-size: 10px; color: var(--muted); }
+.menu-body { flex: 1 1 auto; min-width: 0; overflow-y: auto; padding: 18px 26px 26px; }
+.menu-body h2 { margin: 0 0 14px; font-size: 20px; letter-spacing: 0.12em; color: var(--accent); font-weight: 600; }
+.menu-body h3 { margin: 18px 0 6px; font-size: 12px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); border-bottom: 1px solid var(--panel-border); padding-bottom: 4px; }
+.menu-body h3 span { float: right; text-transform: none; letter-spacing: 0; font-weight: normal; font-size: 10px; }
+.menu-actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0; }
+.menu-actions button { padding: 9px 16px; font-size: 13px; background: rgba(45,127,214,0.3); color: var(--text); border: 1px solid var(--panel-border); border-radius: 6px; cursor: pointer; letter-spacing: 0.06em; }
+.menu-actions button:hover { border-color: var(--accent); }
+.menu-actions button.big { min-width: 220px; padding: 14px 18px; font-size: 15px; }
+.menu-hint { font-size: 11px; color: var(--muted); }
+.knob { display: flex; align-items: center; gap: 16px; padding: 8px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
+.knob-label { flex: 0 0 46%; font-size: 13px; color: var(--text); }
+.knob-label small { display: block; font-size: 10px; color: var(--muted); margin-top: 2px; line-height: 1.4; }
+.knob-control { flex: 1; display: flex; align-items: center; gap: 10px; }
+.knob-control input[type=range] { flex: 1; min-width: 0; accent-color: var(--accent); }
+.knob-control .value { width: 70px; flex: none; text-align: right; font-size: 11px; color: var(--muted); }
+.knob-control select { padding: 5px 8px; font-size: 12px; background: rgba(0,0,0,0.45); color: var(--text); border: 1px solid var(--panel-border); border-radius: 4px; }
+.knob-control .switch { position: relative; width: 42px; height: 22px; }
+.knob-control .switch input { opacity: 0; width: 0; height: 0; }
+.knob-control .switch span { position: absolute; inset: 0; background: rgba(255,255,255,0.12); border: 1px solid var(--panel-border); border-radius: 22px; cursor: pointer; transition: background 0.15s; }
+.knob-control .switch span::before { content: ''; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: var(--muted); transition: transform 0.15s, background 0.15s; }
+.knob-control .switch input:checked + span { background: rgba(45,127,214,0.5); border-color: var(--accent); }
+.knob-control .switch input:checked + span::before { transform: translateX(20px); background: var(--accent); }
+.keys { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 24px; }
+.key-row { display: flex; align-items: center; gap: 6px; padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
+.key-row .key-label { flex: 1; font-size: 12px; color: var(--text); }
+.key-row.changed .key-label { color: var(--accent); }
+.key-row .key { flex: 0 0 96px; padding: 5px 6px; font-size: 11px; background: rgba(0,0,0,0.4); color: var(--text); border: 1px solid var(--panel-border); border-radius: 4px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.key-row .key.empty { color: var(--muted); }
+.key-row .key:hover { border-color: var(--accent); }
+.key-row .key.capturing { border-color: var(--accent); color: var(--accent); box-shadow: 0 0 10px rgba(127,215,255,0.4); }

@@ -33,7 +33,7 @@ Open the printed URL. The first screen is the **character select**: up to five c
 | In water | Chest-deep water swims: Space surfaces, Ctrl dives, or look down and swim forward; under water you swim where you look |
 | M | Galaxy map |
 | H | Toggle help |
-| Esc | Release mouse |
+| Esc | The menu: resume, switch character, Controls (every action with a primary and a secondary key, click one and press the new key, Backspace clears; mouse sensitivity, inverted Y) and Graphics (render scale, field of view, exposure, fog, shadows on and off, their resolution, distance, softness and smallest caster, object reach, ground detail and far radii), all applied live and kept in this browser; with a panel or the map up, Esc closes that instead |
 
 **Jedi**: `1` Force Jump · `2` Force Speed · `3` Force Push · `4` Force Lightning (hold) · `L` lightsaber.
 **Bounty Hunter**: `1` Thermal Detonator · `2` Stim Pack · `RMB` aim · `K` pistol or rifle · `V` kneel and `Z` prone for steadier shots.

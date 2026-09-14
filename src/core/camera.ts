@@ -36,6 +36,11 @@ export class ThirdPersonCamera {
   firstPerson = false;
   /** Aiming a blaster: the camera comes in over the shoulder and the view narrows. */
   aim = false;
+  /** Mouse look speed over the game's own, and whether pushing forward looks down. */
+  sensitivity = 1;
+  invertY = false;
+  /** The field of view when not aiming, degrees. */
+  baseFov = 60;
   private aimBlend = 0;
   private readonly focus = new THREE.Vector3();
   private readonly desired = new THREE.Vector3();
@@ -121,8 +126,9 @@ export class ThirdPersonCamera {
    */
   update(input: Input, target: THREE.Vector3, blocked: CameraBlocker | null, dt = 1 / 60, eyes: THREE.Vector3 | null = null): void {
     if (input.locked) {
-      this.yaw -= input.mouseDX * 0.0025;
-      this.pitch = clamp(this.pitch + input.mouseDY * 0.0025, this.firstPerson ? -1.4 : -1.25, 1.4);
+      const k = 0.0025 * this.sensitivity;
+      this.yaw -= input.mouseDX * k;
+      this.pitch = clamp(this.pitch + input.mouseDY * k * (this.invertY ? -1 : 1), this.firstPerson ? -1.4 : -1.25, 1.4);
     }
     // The movement is spent here, not at the end of the frame: an error later in the frame used to
     // leave it accumulating, and every frame after re-applied the growing sum, so the view slid
@@ -150,7 +156,7 @@ export class ThirdPersonCamera {
     }
 
     this.aimBlend += ((this.aim ? 1 : 0) - this.aimBlend) * 0.15;
-    const fov = 60 - 14 * this.aimBlend;
+    const fov = this.baseFov - 14 * this.aimBlend;
     if (Math.abs(this.camera.fov - fov) > 0.01) {
       this.camera.fov = fov;
       this.camera.updateProjectionMatrix();

@@ -116,7 +116,7 @@ export class LayoutStreamer {
   loadedModels = 0;
   loadedInstances = 0;
   /** How far each size tier loads, in metres; a world can reach farther than a planet does. */
-  private readonly ranges: number[];
+  private ranges: number[];
 
   constructor(
     private readonly scene: THREE.Scene,
@@ -247,6 +247,11 @@ export class LayoutStreamer {
       this.lastColliderZ = pz;
       this.updateColliders(px, pz);
     }
+  }
+
+  /** Scale the ranges the tiers load out to; what is now out of range drops on the next update, what is in loads. */
+  setReach(scale: number): void {
+    this.ranges = TIERS.map((t) => t.range * scale);
   }
 
   /**

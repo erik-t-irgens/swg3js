@@ -29,6 +29,7 @@ import type { Hittable } from '../combat/kit';
 
 const tmpQ = new THREE.Quaternion();
 const tmpV = new THREE.Vector3();
+/** Detailed ground chunks each way, by default; the settings move it (World.viewRadius). */
 const VIEW_RADIUS = 6;
 const STREAM_BUDGET = 3;
 /** Coarse distant terrain: tile size, vertex resolution and radius in tiles. */
@@ -199,6 +200,11 @@ export class World {
   private groundTextures: TerrainTextures | null = null;
   /** Texture anisotropy the renderer supports, set once by main. */
   static anisotropy = 4;
+  /** Detailed ground chunks each way around the player, and coarse far tiles; the settings move them. */
+  viewRadius = VIEW_RADIUS;
+  farRadius = FAR_RADIUS;
+  /** How far placed objects load, over the game's ranges; the settings move it. */
+  objectReach = 1;
   private readonly dayFog = new THREE.Color();
   private readonly nightFog = new THREE.Color();
   private readonly sunColor = new THREE.Color();
@@ -251,6 +257,8 @@ export class World {
   private readonly waterMaterials: WaterMaterial[] = [];
   /** Multiplier on the sky's fog density, for tuning from the console. */
   fogScale = 1;
+  /** The player's own fog setting, over the planet's: 1 as the planet has it. */
+  userFog = 1;
   private rippleClock = 0;
   /** Where each mover was at the last ripple pass, for its velocity through the water. */
   private readonly lastSeen = new WeakMap<object, THREE.Vector3>();
@@ -462,7 +470,7 @@ export class World {
       this.particles = new ParticleEffects(this.scene, pack.url(''));
       this.particles.heightAt = (x, z) => this.terrain.heightAt(x, z);
       // The gallery is one long walk of exhibits with nothing else to draw: everything loads from anywhere on it.
-      this.layoutStream = new LayoutStreamer(this.scene, this.physics, pack, layout, this.particles, { reach: planet.id === 'gallery' ? 4 : 1 });
+      this.layoutStream = new LayoutStreamer(this.scene, this.physics, pack, layout, this.particles, { reach: planet.id === 'gallery' ? 4 : this.objectReach });
       if (!this.terrain.swg) {
         for (const p of this.layoutStream.objects) if (p.radius >= 2 && !p.contained) this.terrain.addAnchor({ x: p.x, z: p.z, y: p.y, r: p.radius });
       }
@@ -511,6 +519,11 @@ export class World {
       const desc = R.ColliderDesc.trimesh(vertices, indices).setTranslation(x, y, z).setRotation({ x: q.x, y: q.y, z: q.z, w: q.w }).setFriction(0.8);
       this.structureColliders.push(this.physics.world.createCollider(desc));
     }
+  }
+
+  /** Leave the planet: everything it streamed goes, for the select screen to show over nothing. */
+  leave(): void {
+    this.unload();
   }
 
   private unload(): void {
@@ -781,7 +794,7 @@ export class World {
     const fog = this.scene.fog as THREE.FogExp2;
     fog.color.copy(L.fog);
     // The client's fog is Direct3D's EXP2, the same curve as three's, so the density carries over as is.
-    fog.density = L.fogDensity * this.fogScale;
+    fog.density = L.fogDensity * this.fogScale * this.userFog;
   }
 
   private disposeChunk(c: Chunk): void {
@@ -1219,6 +1232,29 @@ export class World {
     return this.pack?.layout?.center ?? null;
   }
 
+  /** How far placed objects load, live: the streamer re-ranges, and the ground radii re-stream on the next move. */
+  setReach(objects: number, terrain: number, far: number): void {
+    this.objectReach = objects;
+    if (this.layoutStream && this.planet?.id !== 'gallery') this.layoutStream.setReach(objects);
+    this.viewRadius = Math.round(terrain);
+    this.farRadius = Math.round(far);
+    this.lastCx = Number.NaN;
+    this.lastTx = Number.NaN;
+  }
+
+  /** Turn the sun's shadows on or off, live: every material takes the change on its next draw. */
+  setShadowsEnabled(on: boolean): void {
+    const r = this.renderer;
+    if (!r || r.shadowMap.enabled === on) return;
+    r.shadowMap.enabled = on;
+    this.scene.traverse((o) => {
+      const m = (o as THREE.Mesh).material;
+      if (!m) return;
+      for (const mat of Array.isArray(m) ? m : [m]) mat.needsUpdate = true;
+    });
+    if (this.csm) for (const l of this.csm.lights) l.castShadow = on;
+  }
+
   /**
    * Whether the world around a point is in: the pack loaded, the ground chunks around it made
    * (with the terrain's grids from the worker), and the placed objects within working range
@@ -1445,8 +1481,9 @@ export class World {
     if (pcx === this.lastCx && pcz === this.lastCz && budget !== Infinity) return;
 
     const wanted: { cx: number; cz: number; d: number }[] = [];
-    for (let dz = -VIEW_RADIUS; dz <= VIEW_RADIUS; dz++) {
-      for (let dx = -VIEW_RADIUS; dx <= VIEW_RADIUS; dx++) {
+    const R = this.viewRadius;
+    for (let dz = -R; dz <= R; dz++) {
+      for (let dx = -R; dx <= R; dx++) {
         const key = `${pcx + dx},${pcz + dz}`;
         if (!this.chunks.has(key)) wanted.push({ cx: pcx + dx, cz: pcz + dz, d: dx * dx + dz * dz });
       }
@@ -1465,12 +1502,12 @@ export class World {
       this.lastCx = pcx;
       this.lastCz = pcz;
     }
-    this.terrain.evict(center, VIEW_RADIUS + 2);
+    this.terrain.evict(center, this.viewRadius + 2);
     let changed = made > 0;
 
     for (const [key, c] of this.chunks) {
       const far = Math.max(Math.abs(c.cx - pcx), Math.abs(c.cz - pcz));
-      if (far > VIEW_RADIUS + 1) {
+      if (far > this.viewRadius + 1) {
         this.disposeChunk(c);
         this.chunks.delete(key);
         changed = true;
@@ -1509,8 +1546,9 @@ export class World {
     const ptz = Math.floor(center.z / FAR_TILE);
     if (ptx === this.lastTx && ptz === this.lastTz && budget !== Infinity) return;
     const wanted: { tx: number; tz: number; d: number }[] = [];
-    for (let dz = -FAR_RADIUS; dz <= FAR_RADIUS; dz++) {
-      for (let dx = -FAR_RADIUS; dx <= FAR_RADIUS; dx++) {
+    const R = this.farRadius;
+    for (let dz = -R; dz <= R; dz++) {
+      for (let dx = -R; dx <= R; dx++) {
         if (!this.farTiles.has(`${ptx + dx},${ptz + dz}`)) wanted.push({ tx: ptx + dx, tz: ptz + dz, d: dx * dx + dz * dz });
       }
     }
@@ -1533,7 +1571,7 @@ export class World {
     }
     for (const [key, t] of this.farTiles) {
       const [tx, tz] = key.split(',').map(Number);
-      if (Math.max(Math.abs(tx - ptx), Math.abs(tz - ptz)) > FAR_RADIUS + 1) {
+      if (Math.max(Math.abs(tx - ptx), Math.abs(tz - ptz)) > this.farRadius + 1) {
         this.chunkRoot.remove(t);
         t.geometry.dispose();
         this.farTiles.delete(key);
