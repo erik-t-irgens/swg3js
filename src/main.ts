@@ -502,6 +502,19 @@ class App {
         return v.spec;
       },
       /** Every vehicle's state: where, how level (1 upright, 0 on its side), how fast it turns and moves, and how many corners find the ground. */
+      /** Set the ship whose room the player is in (or the nearest ship) adrift: forward speed and a spin (rad/s) with no gravity or righting, so the room's physics can be tried; `shipDrift(0)` brings it to rest. */
+      shipDrift: (speed = 2, spin = 0.4) => {
+        const p = this.player;
+        const v = p.aboard?.vehicle ?? this.world.vehicles.filter((x) => x.spec.ship).sort((a, b) => a.pos.distanceTo(p.worldPos) - b.pos.distanceTo(p.worldPos))[0];
+        if (!v) return 'no ship';
+        v.drift = speed !== 0 || spin !== 0;
+        v.body.setGravityScale(v.drift ? 0 : 1, true);
+        v.quaternion(tmpQ);
+        tmp.set(0, 0, 1).applyQuaternion(tmpQ).multiplyScalar(speed);
+        v.body.setLinvel({ x: tmp.x, y: tmp.y, z: tmp.z }, true);
+        v.body.setAngvel({ x: spin * 0.35, y: spin, z: spin * 0.5 }, true);
+        return v.drift ? `${v.spec.id} adrift at ${speed} m/s, spinning ${spin} rad/s` : `${v.spec.id} at rest`;
+      },
       vehicleState: () => this.world.vehicles.map((v) => {
         v.quaternion(tmpQ);
         const upY = new THREE.Vector3(0, 1, 0).applyQuaternion(tmpQ).y;
@@ -833,7 +846,8 @@ class App {
     this.lastStateSent = now;
     const p = this.player;
     const rig = p.rig;
-    this.net.sendState({ p: [Number(p.pos.x.toFixed(2)), Number(p.pos.y.toFixed(2)), Number(p.pos.z.toFixed(2))], h: Number(p.heading.toFixed(3)), s: p.mounted ? 'seated' : (rig?.describe().state ?? 'idle'), v: Number(Math.hypot(p.vel.x, p.vel.z).toFixed(2)), m: !!p.mounted, sab: p.saberOn });
+    const at = p.worldPos;
+    this.net.sendState({ p: [Number(at.x.toFixed(2)), Number(at.y.toFixed(2)), Number(at.z.toFixed(2))], h: Number(p.heading.toFixed(3)), s: p.mounted ? 'seated' : (rig?.describe().state ?? 'idle'), v: Number(Math.hypot(p.vel.x, p.vel.z).toFixed(2)), m: !!p.mounted, sab: p.saberOn });
   }
 
   /** The wheel's slots from the rig's own emotes when none were kept yet, and the menu's Emotes page fed from it. */
@@ -1028,9 +1042,10 @@ class App {
     if (!now && t - this.lastPlaceSave < 3000) return;
     this.lastPlaceSave = t;
     const p = this.player;
+    const at = p.worldPos;
     c.planet = this.world.planet?.id ?? c.planet;
     c.zone = this.zone;
-    c.pos = [Number(p.pos.x.toFixed(2)), Number(p.pos.y.toFixed(2)), Number(p.pos.z.toFixed(2))];
+    c.pos = [Number(at.x.toFixed(2)), Number(at.y.toFixed(2)), Number(at.z.toFixed(2))];
     c.heading = Number(p.heading.toFixed(3));
     c.played = Date.now();
     upsertCharacter(c);
@@ -1153,7 +1168,7 @@ class App {
     } else {
       this.cam.release();
       if (player.mounted?.spec.ship) player.mounted.group.visible = true;
-      this.cam.update(input, player.pos, blocked, dt, this.eyes());
+      this.cam.update(input, player.worldPos, blocked, dt, this.eyes());
     }
   }
 
@@ -1203,7 +1218,21 @@ class App {
       };
     }
     const terrain = this.world.terrain;
-    for (const v of this.world.vehicles) v.update(dt, this.physics, v === player.mounted ? drive : null, (x, z) => terrain.heightAt(x, z), (x, z) => terrain.waterHeightAt(x, z));
+    for (const v of this.world.vehicles) {
+      if (!v.drift) v.update(dt, this.physics, v === player.mounted ? drive : null, (x, z) => terrain.heightAt(x, z), (x, z) => terrain.waterHeightAt(x, z));
+      else {
+        const t = v.body.translation();
+        v.pos.set(t.x, t.y, t.z);
+        v.group.position.copy(v.pos);
+        v.quaternion(v.group.quaternion);
+      }
+      v.interior?.physics.step(dt);
+    }
+    if (player.aboard) {
+      // Fallen out of the room (through a door in flight): back into the world with the hull's motion.
+      if (!player.aboard.contains(player.pos)) this.leaveShip(true);
+      else player.placeVisual();
+    }
     // Every vehicle's hits and its state: sparks on a hit, smoke from a battered hull, and the
     // end of one whose hull is gone (its rider thrown off first).
     for (const v of [...this.world.vehicles]) {
@@ -1474,6 +1503,10 @@ class App {
 
   private handleMount(): void {
     const p = this.player;
+    if (p.aboard) {
+      this.leaveShip(false);
+      return;
+    }
     if (p.mounted) {
       const sp = p.mounted;
       sp.quaternion(tmpQ);
@@ -1495,10 +1528,61 @@ class App {
         best = sp;
       }
     }
+    if (best?.interior) {
+      this.boardShip(best);
+      return;
+    }
     if (best) {
       p.mount(best);
       this.cam.distance = Math.max(this.cam.distance, 9.5);
     }
+  }
+
+  /** Step into a ship's room, at its entry. The seat inside is not there yet: E again steps out. */
+  private boardShip(v: Vehicle): void {
+    const room = v.interior;
+    if (!room) return;
+    this.player.board(room, room.entry.clone());
+    this.cam.zoomTarget = Math.min(this.cam.zoomTarget, 4);
+    this.hud.setPrompt(`aboard: <b>E</b> steps out · the room has physics of its own · <b>__debug.shipDrift(2, 0.4)</b> sets the hull adrift to test it`);
+  }
+
+  /** Out of a ship's room: beside the hull on the floor found there, or, having fallen out, where the hull's frame put the figure, with the hull's motion. */
+  private leaveShip(fell: boolean): void {
+    const p = this.player;
+    const room = p.aboard;
+    if (!room) return;
+    const v = room.vehicle;
+    room.toWorld(p.pos, tmp);
+    p.leave();
+    if (!fell) {
+      v.quaternion(tmpQ);
+      tmp.set(-(v.spec.bounds.max[0] - v.spec.bounds.min[0]) / 2 - 1.2, 0, 0).applyQuaternion(tmpQ).add(v.pos);
+      const from = v.pos.y + 0.5;
+      const hit = this.physics.groundDistance(tmp.x, from, tmp.z, 20, v.body);
+      tmp.y = hit !== null ? from - hit + 0.15 : this.world.terrain.heightAt(tmp.x, tmp.z) + 0.3;
+    }
+    p.stand(tmp);
+    if (fell) {
+      const lv = v.body.linvel();
+      p.vel.set(lv.x, lv.y, lv.z);
+      p.grounded = false;
+    }
+    this.hud.setPrompt('');
+  }
+
+  /** Whether the nearest vehicle in reach has a room to step into. */
+  private nearestHasRoom(): boolean {
+    let best: Vehicle | null = null;
+    let bestD = MOUNT_RANGE;
+    for (const sp of this.world.vehicles) {
+      const d = this.vehicleReach(sp);
+      if (d < bestD) {
+        bestD = d;
+        best = sp;
+      }
+    }
+    return !!best?.interior;
   }
 
   private nearestSpeederDistance(): number {
@@ -1597,11 +1681,11 @@ class App {
 
       const fast = simulate && input.held('fastForward');
       for (const m of this.shown) m.update(dt);
-      this.world.update(dt, player.pos, this.cam.camera.position, fast, (dmg) => {
-        if (!simulate || player.mounted || player.noclip) return;
+      this.world.update(dt, player.worldPos, this.cam.camera.position, fast, (dmg) => {
+        if (!simulate || player.mounted || player.noclip || player.aboard) return;
         player.takeDamage(dmg);
         this.hud.hurt();
-      }, simulate && !player.mounted && !player.noclip ? player : null);
+      }, simulate && !player.mounted && !player.noclip && !player.aboard ? player : null);
       const tPhys = performance.now();
       this.physics.step(dt);
       stats.physicsMs = performance.now() - tPhys;
@@ -1609,8 +1693,9 @@ class App {
 
       if (simulate && player.hp <= 0) void this.die();
 
-      player.inside = this.world.inside;
-      this.updateCamera(player.noclip ? null : (from, to) => this.physics.cameraBlock(from, to, player.body, this.world.inside), dt);
+      player.inside = this.world.inside || !!player.aboard;
+      const room = player.aboard;
+      this.updateCamera(player.noclip ? null : room ? (from, to) => room.cameraBlock(from, to) : (from, to) => this.physics.cameraBlock(from, to, player.body, this.world.inside), dt);
       this.torch.intensity = this.torchOn ? 260 : 0;
       if (this.torchOn) {
         this.torch.position.copy(this.cam.camera.position);
@@ -1629,11 +1714,13 @@ class App {
       if (player.noclip) prompt = `<b>NOCLIP</b> ${Math.round(player.noclipSpeed)} m/s · <b>WASD</b> fly · <b>Space</b> up · <b>Ctrl</b> down · <b>Shift</b> fast · <b>+</b>/<b>-</b> speed · <b>N</b> off`;
       else if (player.mounted) prompt = mountPrompt(player.mounted);
       else if (this.world.elevatorsNear(player.pos, MOUNT_RANGE).length) prompt = `<b>E</b> elevator ${this.world.elevatorsNear(player.pos, MOUNT_RANGE)[0].kind === 'down' ? 'down' : 'up'}`;
-      else if (this.nearestSpeederDistance() < MOUNT_RANGE) prompt = '<b>E</b> mount';
+      else if (player.aboard) prompt = `aboard ${player.aboard.vehicle.spec.label} · <b>E</b> step out`;
+      else if (this.nearestSpeederDistance() < MOUNT_RANGE) prompt = this.nearestHasRoom() ? '<b>E</b> board' : '<b>E</b> mount';
       this.hud.setPrompt(prompt);
       const flying = player.mounted?.spec.ship && player.mounted.airborne && !input.held('freeLook') ? player.mounted : null;
       this.hud.setFlight(flying ? flying.stick : null);
-      this.hud.update(dt, player.pos.x, player.pos.y, player.pos.z, this.kit, player.hp, player.maxHp, this.world.day.clock(), this.world.planet.creatures.name, player.saberOn);
+      const at = player.worldPos;
+      this.hud.update(dt, at.x, at.y, at.z, this.kit, player.hp, player.maxHp, this.world.day.clock(), this.world.planet.creatures.name, player.saberOn);
 
       if (this.breakFrames) throw new Error('debug: the frame is broken on purpose');
       const tRender = performance.now();

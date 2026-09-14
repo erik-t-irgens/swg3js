@@ -222,6 +222,10 @@ export class Vehicle {
   hardpoints: string[] = [];
   /** Something to move with the vehicle (an animal's mixer, an engine glow). */
   onUpdate: ((dt: number, v: Vehicle, drive: DriveInput | null) => void) | null = null;
+  /** A ship's interior, a room of its own inside the hull, once loaded. */
+  interior: import('./interior').ShipInterior | null = null;
+  /** Let go: no springs, no righting, no gravity; the body keeps whatever motion it was given (for testing the room inside). */
+  drift = false;
 
   constructor(readonly spec: VehicleSpec, model: THREE.Object3D, physics: Physics, scene: THREE.Scene, x: number, y: number, z: number, heading: number) {
     this.group.add(model);
@@ -645,6 +649,8 @@ export class Vehicle {
   }
 
   dispose(physics: Physics, scene: THREE.Scene): void {
+    this.interior?.dispose();
+    this.interior = null;
     physics.world.removeRigidBody(this.body);
     scene.remove(this.group);
     this.group.traverse((o) => {

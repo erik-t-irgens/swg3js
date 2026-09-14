@@ -23,6 +23,7 @@ import { Dust } from '../vehicles/dust';
 import { Garage, type VehicleDef } from '../vehicles/garage';
 import { Vehicle, type VehicleKind, type VehicleSpec } from '../vehicles/vehicle';
 import { Bolts } from '../combat/bolts';
+import { ShipInterior } from '../vehicles/interior';
 import { Gallery } from './gallery';
 import { TurretManager, type TurretTarget } from '../combat/turrets';
 import type { Hittable } from '../combat/kit';
@@ -1243,6 +1244,13 @@ export class World {
     const v = await this.garage.spawn(def, this.physics, this.scene, at.x, at.y, at.z, heading, kind, place);
     markActor(v.group);
     this.vehicles.push(v);
+    if (def.interior) {
+      try {
+        v.interior = await ShipInterior.load(v, `${import.meta.env.BASE_URL}${def.interior.file}`, def.interior.def, -this.physics.world.gravity.y);
+      } catch (err) {
+        console.warn(`${def.id}: its interior did not load`, err);
+      }
+    }
     return v;
   }
 

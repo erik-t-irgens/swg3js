@@ -29,6 +29,13 @@ export class Physics {
     return new Physics();
   }
 
+  /** Another world, for a room that has physics of its own (a ship's interior), after the first has initialised the engine. */
+  static local(gravity = 20): Physics {
+    const p = new Physics();
+    p.setGravity(gravity);
+    return p;
+  }
+
   setGravity(g: number): void {
     this.world.gravity = { x: 0, y: -g, z: 0 };
   }

@@ -13,8 +13,8 @@ export interface VehicleDef {
   /** Whether the kind was read off the name; unknown names default to a speeder bike and are marked. */
   inferred: boolean;
   source: 'gallery' | 'creature' | 'ship';
-  /** A ship's interior, when it has one (not entered yet). */
-  interior?: { file: string; cells: number } | null;
+  /** A ship's interior, when it has one: the model, and what the manifest says of its cells and bounds. */
+  interior?: { file: string; cells: number; def: import('./interior').InteriorDef } | null;
   file: string;
   template?: string;
   bounds?: VehicleSpec['bounds'];
@@ -64,8 +64,12 @@ export class Garage {
     try {
       const res = await fetch(`${baseUrl}assets-private/ships/manifest.json`);
       if (res.ok && (res.headers.get('content-type') ?? '').includes('json')) {
-        const manifest = (await res.json()) as { ships: { id: string; label: string; template: string; file: string; bounds?: VehicleSpec['bounds']; class: string; interior: { file?: string; cells?: number; failed?: string } | null }[] };
-        for (const sh of manifest.ships) g.vehicles.push({ id: sh.id, label: `${sh.label} (${sh.class})`, kind: 'ship', inferred: true, source: 'ship', file: `assets-private/ships/${sh.file}`, template: sh.template, bounds: sh.bounds, interior: sh.interior?.file ? { file: `assets-private/ships/${sh.interior.file}`, cells: sh.interior.cells ?? 0 } : null });
+        const manifest = (await res.json()) as { ships: { id: string; label: string; template: string; file: string; bounds?: VehicleSpec['bounds']; class: string; interior: { file?: string; cells?: number; failed?: string } | null }[]; models?: { file: string; bounds?: { min: number[]; max: number[] }; cells?: { index: number; name: string; bounds: { min: number[]; max: number[] } }[] }[] };
+        const modelByFile = new Map((manifest.models ?? []).map((m) => [m.file, m]));
+        for (const sh of manifest.ships) {
+          const im = sh.interior?.file ? modelByFile.get(sh.interior.file) : undefined;
+          g.vehicles.push({ id: sh.id, label: `${sh.label} (${sh.class})`, kind: 'ship', inferred: true, source: 'ship', file: `assets-private/ships/${sh.file}`, template: sh.template, bounds: sh.bounds, interior: sh.interior?.file ? { file: `assets-private/ships/${sh.interior.file}`, cells: sh.interior.cells ?? 0, def: { bounds: im?.bounds, cells: im?.cells } } : null });
+        }
       }
     } catch (err) {
       console.warn('garage: no ships', err);

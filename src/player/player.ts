@@ -77,6 +77,8 @@ interface Parts {
 }
 
 /** The placeholder torso's look per class, made once (a material made per swap compiled its shader per swap). */
+const roomQ = new THREE.Quaternion();
+const UP_AXIS = new THREE.Vector3(0, 1, 0);
 const hiltGlow = new THREE.Vector3();
 const TORSO_JEDI = new THREE.MeshStandardMaterial({ color: 0xc9b58a, roughness: 0.8, metalness: 0, flatShading: true });
 const TORSO_HUNTER = new THREE.MeshStandardMaterial({ color: 0x5f6b6e, roughness: 0.8, metalness: 0.3, flatShading: true });
@@ -188,9 +190,9 @@ export class Player {
   readonly group: THREE.Group;
   readonly pos = new THREE.Vector3();
   readonly vel = new THREE.Vector3();
-  readonly body: RAPIER.RigidBody;
-  readonly collider: RAPIER.Collider;
-  private readonly controller: RAPIER.KinematicCharacterController;
+  body: RAPIER.RigidBody;
+  collider: RAPIER.Collider;
+  private controller: RAPIER.KinematicCharacterController;
   grounded = true;
   swimming = false;
   /** Swimming with the head under the surface (diving). */
@@ -276,7 +278,11 @@ export class Player {
   private handBones: { right: THREE.Bone | null; left: THREE.Bone | null } = { right: null, left: null };
   /** Bolts turned away so far, for the console. */
   blocks = 0;
-  private readonly physics: Physics;
+  private physics: Physics;
+  /** The ship's room this player is in, with physics of its own; `pos` is then in the hull's frame. */
+  aboard: import('../vehicles/interior').ShipInterior | null = null;
+  /** The world's own body, collider and controller, kept while aboard a ship and taken back on leaving. */
+  private worldBody: { physics: Physics; body: RAPIER.RigidBody; collider: RAPIER.Collider; controller: RAPIER.KinematicCharacterController } | null = null;
   private world: World | null = null;
   /** The thrown saber's own model, spinning through the air. */
   private readonly flying: THREE.Group;
@@ -380,16 +386,93 @@ export class Player {
     this.cmd.groundDistance = (max) => this.groundDistanceUnits(max);
     this.cmd.floorAhead = (dist) => this.floorAhead(dist);
 
-    const world = physics.world;
-    this.body = world.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased());
-    this.collider = world.createCollider(RAPIER.ColliderDesc.capsule(STAND_HALF_HEIGHT, CAPSULE_RADIUS).setTranslation(0, CAPSULE_RADIUS + STAND_HALF_HEIGHT, 0), this.body);
-    this.controller = world.createCharacterController(0.04);
-    this.controller.enableAutostep(0.5, 0.2, true);
-    this.controller.setMaxSlopeClimbAngle((55 * Math.PI) / 180);
-    this.controller.setMinSlopeSlideAngle((60 * Math.PI) / 180);
-    this.controller.enableSnapToGround(0.35);
-    this.controller.setApplyImpulsesToDynamicBodies(true);
-    this.controller.setCharacterMass(80);
+    const made = Player.makeBody(physics.world);
+    this.body = made.body;
+    this.collider = made.collider;
+    this.controller = made.controller;
+  }
+
+  /** A kinematic capsule with its character controller, in a physics world: the player's in the world, or in a ship's room. */
+  private static makeBody(world: RAPIER.World): { body: RAPIER.RigidBody; collider: RAPIER.Collider; controller: RAPIER.KinematicCharacterController } {
+    const body = world.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased());
+    const collider = world.createCollider(RAPIER.ColliderDesc.capsule(STAND_HALF_HEIGHT, CAPSULE_RADIUS).setTranslation(0, CAPSULE_RADIUS + STAND_HALF_HEIGHT, 0), body);
+    const controller = world.createCharacterController(0.04);
+    controller.enableAutostep(0.5, 0.2, true);
+    controller.setMaxSlopeClimbAngle((55 * Math.PI) / 180);
+    controller.setMinSlopeSlideAngle((60 * Math.PI) / 180);
+    controller.enableSnapToGround(0.35);
+    controller.setApplyImpulsesToDynamicBodies(true);
+    controller.setCharacterMass(80);
+    return { body, collider, controller };
+  }
+
+  /**
+   * Step into a ship's room: the body moves to the room's own physics world, in the hull's
+   * frame, and from here `pos` is in that frame; the figure is drawn wherever the hull puts it.
+   */
+  board(interior: import('../vehicles/interior').ShipInterior, local: THREE.Vector3): void {
+    if (this.aboard) this.leave();
+    this.mounted = null;
+    this.worldBody = { physics: this.physics, body: this.body, collider: this.collider, controller: this.controller };
+    this.body.setEnabled(false);
+    this.physics = interior.physics;
+    const made = Player.makeBody(interior.physics.world);
+    this.body = made.body;
+    this.collider = made.collider;
+    this.controller = made.controller;
+    this.pos.copy(local);
+    this.vel.set(0, 0, 0);
+    this.grounded = true;
+    this.swimming = false;
+    this.submerged = false;
+    this.body.setTranslation({ x: local.x, y: local.y, z: local.z }, true);
+    this.aboard = interior;
+    this.placeVisual();
+  }
+
+  /** Back to the world's body; the caller then stands the player somewhere with `reset`. */
+  leave(): void {
+    const saved = this.worldBody;
+    const room = this.aboard;
+    if (!saved || !room) return;
+    const w = room.physics.world;
+    w.removeCharacterController(this.controller);
+    w.removeRigidBody(this.body);
+    this.physics = saved.physics;
+    this.body = saved.body;
+    this.collider = saved.collider;
+    this.controller = saved.controller;
+    this.body.setEnabled(true);
+    this.worldBody = null;
+    this.aboard = null;
+  }
+
+  /** Where the figure stands in the world: `pos` itself, or, aboard a ship, `pos` carried through the hull's transform. */
+  get worldPos(): THREE.Vector3 {
+    return this.aboard ? this.group.position : this.pos;
+  }
+
+  /** Put the figure where it is: in the world at `pos`, or, aboard, where the hull's transform carries `pos`. */
+  placeVisual(): void {
+    const room = this.aboard;
+    if (room) {
+      room.vehicle.group.updateMatrixWorld(true);
+      this.group.position.copy(this.pos).applyMatrix4(room.vehicle.group.matrixWorld);
+      this.group.quaternion.copy(room.vehicle.group.quaternion).multiply(tmpQ.setFromAxisAngle(UP_AXIS, this.heading));
+    } else {
+      this.group.position.copy(this.pos);
+      this.group.rotation.set(0, this.heading, 0);
+    }
+  }
+
+  /** Stand the player somewhere, keeping health and the rest as they are (stepping off a ship). */
+  stand(p: THREE.Vector3): void {
+    this.pos.copy(p);
+    this.vel.set(0, 0, 0);
+    this.grounded = true;
+    this.body.setEnabled(true);
+    this.body.setTranslation({ x: p.x, y: p.y, z: p.z }, true);
+    this.placeVisual();
   }
 
   reset(p: THREE.Vector3): void {
@@ -1006,6 +1089,13 @@ export class Player {
 
     cam.forward(fwd);
     cam.right(rgt);
+    // Aboard a ship the camera looks in the world, but the walking is done in the hull's frame:
+    // its directions are turned by the hull's own heading so forward on the screen is forward in the room.
+    if (this.aboard) {
+      this.aboard.vehicle.quaternion(roomQ).invert();
+      fwd.applyQuaternion(roomQ).setY(0).normalize();
+      rgt.applyQuaternion(roomQ).setY(0).normalize();
+    }
     move.set(0, 0, 0).addScaledVector(fwd, mz).addScaledVector(rgt, mx);
     const moving = move.lengthSq() > 0;
     if (moving) move.normalize();
@@ -1036,7 +1126,7 @@ export class Player {
 
     // Water: the surface here, and how deep the body sits in it. Swimming starts when the
     // chest is under; the head stays above the surface unless the player dives.
-    const surface = terrain.waterHeightAt(this.pos.x, this.pos.z);
+    const surface = this.aboard ? -1e9 : terrain.waterHeightAt(this.pos.x, this.pos.z);
     const depth = surface - this.pos.y;
     // Interiors can sit below a lake (the Gungan cities do) and are never water. Once
     // swimming, a little slack keeps the float line from flickering between states.
@@ -1147,8 +1237,8 @@ export class Player {
     if (this.grounded && this.vel.y < 0) this.vel.y = 0;
     if (!wasGrounded && this.grounded && Math.abs(mv.y) < 1e-4 && this.vel.y > 0) this.grounded = false;
 
-    const ground = terrain.heightAt(this.pos.x, this.pos.z);
-    if (this.pos.y < terrain.floor) {
+    const ground = this.aboard ? -1e9 : terrain.heightAt(this.pos.x, this.pos.z);
+    if (!this.aboard && this.pos.y < terrain.floor) {
       this.pos.y = ground + 1;
       this.vel.set(0, 0, 0);
     }
@@ -1270,8 +1360,7 @@ export class Player {
     cam.camera.getWorldDirection(this.lookDir);
     this.animateRig(dt, this.groundSpeed, moving, mz, mx);
 
-    this.group.position.copy(this.pos);
-    this.group.rotation.set(0, this.heading, 0);
+    this.placeVisual();
     this.group.updateMatrixWorld(true);
   }
 
@@ -1524,8 +1613,7 @@ export class Player {
     this.moveAmount = 0;
     this.animate(dt);
     this.animateRig(dt, 0, false);
-    this.group.position.copy(this.pos);
-    this.group.rotation.set(0, this.heading, 0);
+    this.placeVisual();
     this.group.updateMatrixWorld(true);
   }
 
