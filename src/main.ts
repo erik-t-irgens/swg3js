@@ -18,7 +18,7 @@ import { WeaponsUi } from './ui/weaponsUi';
 import { WeaponCatalogue, type WeaponDef } from './player/weapons';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { Hud } from './ui/hud';
-import type { DriveInput } from './vehicles/vehicle';
+import { specFor, type DriveInput } from './vehicles/vehicle';
 import { VehiclesUi } from './ui/vehiclesUi';
 import { Garage, type VehicleDef } from './vehicles/garage';
 import type { VehicleKind } from './vehicles/vehicle';
@@ -376,6 +376,30 @@ class App {
         const f = find?.toLowerCase();
         return { onWorld: this.world.vehicles.map((v) => `${v.spec.id} (${v.spec.kind}${v === this.player.mounted ? ', ridden' : ''}) at ${v.pos.toArray().map((n) => n.toFixed(0)).join(',')}`), garage: g.vehicles.filter((v) => !f || v.id.toLowerCase().includes(f) || v.kind.includes(f)).map((v) => `${v.id}: ${v.kind}${v.inferred ? '' : ' (guessed)'}, ${v.source}`).slice(0, 80) };
       },
+      /** Stand a plain box of the given size in front of you as a vehicle of `kind`, for handling tests without a model. */
+      spawnBox: (w = 1, h = 1, l = 2.4, kind: VehicleKind = 'speederbike') => {
+        const bounds = { min: [-w / 2, 0, -l / 2] as [number, number, number], max: [w / 2, h, l / 2] as [number, number, number] };
+        const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, l), new THREE.MeshStandardMaterial({ color: 0x8899aa }));
+        mesh.position.y = h / 2;
+        const v = this.world.addVehicle(specFor(kind, 'box', 'box', bounds), mesh, this.player.pos, this.player.heading);
+        return `box ${w}×${h}×${l} spawned as a ${kind} at ${v.pos.toArray().map((n) => n.toFixed(1)).join(',')}`;
+      },
+      /** Change the ridden (else the nearest) vehicle's handling live: `vehicleTune({ bank: 0, turnRate: 1.2 })`; returns the spec. */
+      vehicleTune: (patch: Partial<import('./vehicles/vehicle').VehicleSpec> = {}) => {
+        const v = this.player.mounted ?? [...this.world.vehicles].sort((a, b) => a.pos.distanceTo(this.player.pos) - b.pos.distanceTo(this.player.pos))[0];
+        if (!v) return 'no vehicle';
+        Object.assign(v.spec, patch);
+        return v.spec;
+      },
+      /** Every vehicle's state: where, how level (1 upright, 0 on its side), how fast it turns and moves, and how many corners find the ground. */
+      vehicleState: () => this.world.vehicles.map((v) => {
+        v.quaternion(tmpQ);
+        const upY = new THREE.Vector3(0, 1, 0).applyQuaternion(tmpQ).y;
+        const a = v.body.angvel();
+        const e = new THREE.Euler().setFromQuaternion(tmpQ, 'YXZ');
+        const com = v.body.localCom();
+        return { id: v.spec.id, kind: v.spec.kind, com: [com.x, com.y, com.z].map((n) => Number(n.toFixed(2))), at: v.pos.toArray().map((n) => Number(n.toFixed(2))), level: Number(upY.toFixed(3)), pitch: Math.round((e.x * 180) / Math.PI), roll: Math.round((e.z * 180) / Math.PI), spin: Number(Math.hypot(a.x, a.y, a.z).toFixed(3)), speed: Number(v.speed.toFixed(2)), corners: v.groundedPoints, ridden: v === this.player.mounted };
+      }),
       /** Remove every spawned vehicle except the one being ridden, as the garage's Remove all does. */
       unspawn: () => {
         this.world.removeVehicles(this.player.mounted);
@@ -807,7 +831,7 @@ class App {
     let best = null;
     let bestD = MOUNT_RANGE;
     for (const sp of this.world.vehicles) {
-      const d = sp.pos.distanceTo(p.pos);
+      const d = sp.pos.distanceTo(p.pos) - sp.radius;
       if (d < bestD) {
         bestD = d;
         best = sp;
@@ -821,7 +845,7 @@ class App {
 
   private nearestSpeederDistance(): number {
     let d = Infinity;
-    for (const sp of this.world.vehicles) d = Math.min(d, sp.pos.distanceTo(this.player.pos));
+    for (const sp of this.world.vehicles) d = Math.min(d, sp.pos.distanceTo(this.player.pos) - sp.radius);
     return d;
   }
 
@@ -889,7 +913,7 @@ class App {
       if (player.noclip) prompt = `<b>NOCLIP</b> ${Math.round(player.noclipSpeed)} m/s · <b>WASD</b> fly · <b>Space</b> up · <b>Ctrl</b> down · <b>Shift</b> fast · <b>+</b>/<b>-</b> speed · <b>N</b> off`;
       else if (player.mounted) prompt = mountPrompt(player.mounted);
       else if (this.world.elevatorsNear(player.pos, MOUNT_RANGE).length) prompt = `<b>E</b> elevator ${this.world.elevatorsNear(player.pos, MOUNT_RANGE)[0].kind === 'down' ? 'down' : 'up'}`;
-      else if (this.nearestSpeederDistance() < MOUNT_RANGE) prompt = '<b>E</b> mount speeder';
+      else if (this.nearestSpeederDistance() < MOUNT_RANGE) prompt = '<b>E</b> mount';
       this.hud.setPrompt(prompt);
       this.hud.update(dt, player.pos.x, player.pos.y, player.pos.z, this.kit, player.hp, player.maxHp, this.world.day.clock(), this.world.planet.creatures.name, player.saberOn);
 

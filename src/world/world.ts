@@ -20,7 +20,7 @@ import { CSM } from 'three/examples/jsm/csm/CSM.js';
 import { INTERIOR_LAYER, markActor, type PortalRenderer } from './portalRender';
 import { createPlaceholderSpeeder } from '../vehicles/speeder';
 import { Garage, type VehicleDef } from '../vehicles/garage';
-import type { Vehicle, VehicleKind } from '../vehicles/vehicle';
+import { Vehicle, type VehicleKind, type VehicleSpec } from '../vehicles/vehicle';
 import { Bolts } from '../combat/bolts';
 import { Gallery } from './gallery';
 import { TurretManager, type TurretTarget } from '../combat/turrets';
@@ -1042,12 +1042,49 @@ export class World {
   /** Stand a vehicle from the garage on the ground in front of a point, facing away from it. */
   async spawnVehicle(def: VehicleDef, at: THREE.Vector3, heading: number, kind?: VehicleKind): Promise<Vehicle> {
     this.garage ??= await Garage.load(import.meta.env.BASE_URL);
-    const x = at.x + Math.sin(heading) * 6;
-    const z = at.z + Math.cos(heading) * 6;
-    const v = await this.garage.spawn(def, this.physics, this.scene, x, this.terrain.heightAt(x, z), z, heading, kind);
+    const place = (b: VehicleSpec['bounds']) => this.clearGround(b, at, heading);
+    const v = await this.garage.spawn(def, this.physics, this.scene, at.x, at.y, at.z, heading, kind, place);
     markActor(v.group);
     this.vehicles.push(v);
     return v;
+  }
+
+  /** Stand a ready-made model as a vehicle on clear ground ahead of a point (the garage's placement, for a model that is not in it). */
+  addVehicle(spec: VehicleSpec, model: THREE.Object3D, at: THREE.Vector3, heading: number): Vehicle {
+    const [x, y, z] = this.clearGround(spec.bounds, at, heading);
+    const v = new Vehicle(spec, model, this.physics, this.scene, x, y - spec.bounds.min[1] + spec.hover, z, heading);
+    markActor(v.group);
+    this.vehicles.push(v);
+    return v;
+  }
+
+  /**
+   * Ground ahead of a point that a box of these bounds can stand on: ahead by the box's half
+   * length plus a gap, and further on while anything else stands there, since a box spawned
+   * inside an exhibit, a house or another vehicle is thrown out of it by the physics.
+   */
+  private clearGround(b: VehicleSpec['bounds'], at: THREE.Vector3, heading: number): [number, number, number] {
+    const w = b.max[0] - b.min[0];
+    const h = b.max[1] - b.min[1];
+    const l = b.max[2] - b.min[2];
+    const shape = new R.Cuboid(w / 2 + 0.3, h / 2, l / 2 + 0.3);
+    const rot = { x: 0, y: Math.sin(heading / 2), z: 0, w: Math.cos(heading / 2) };
+    const first = l / 2 + 3;
+    for (let d = first; d <= first + 60; d += 2) {
+      const x = at.x + Math.sin(heading) * d;
+      const z = at.z + Math.cos(heading) * d;
+      const y = this.terrain.heightAt(x, z);
+      // A vehicle spawned this same frame is not in the physics queries yet, so those are checked by distance.
+      let blocked = this.vehicles.some((v) => Math.hypot(v.pos.x - x, v.pos.z - z) < v.radius + Math.max(w, l) / 2 + 0.5);
+      if (!blocked) {
+        this.physics.world.intersectionsWithShape({ x, y: y - b.min[1] + h / 2 + 0.5, z }, rot, shape, () => {
+          blocked = true;
+          return false;
+        });
+      }
+      if (!blocked || d + 2 > first + 60) return [x, y, z];
+    }
+    return [at.x + Math.sin(heading) * first, this.terrain.heightAt(at.x, at.z), at.z + Math.cos(heading) * first];
   }
 
   /** Take every spawned vehicle away but the one ridden. */

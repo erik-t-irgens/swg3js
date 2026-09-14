@@ -112,6 +112,8 @@ const av = new THREE.Vector3();
 const lv = new THREE.Vector3();
 const tmp = new THREE.Vector3();
 const lat = new THREE.Vector3();
+const alpha = new THREE.Vector3();
+const qInv = new THREE.Quaternion();
 const torque = new THREE.Vector3();
 const wantUp = new THREE.Vector3();
 
@@ -131,6 +133,12 @@ export class Vehicle {
   altitude = 0;
   private hopCd = 0;
   private readonly hoverPoints: THREE.Vector3[];
+  /** The collider's centre in the model's frame, where the ground rays start (inside the body, so a buried corner still finds the ground). */
+  private readonly centre: THREE.Vector3;
+  /** The body's angular inertia about its own axes, so a torque can be asked for as a turning acceleration whatever the size. */
+  private readonly inertia: THREE.Vector3;
+  /** Half the footprint's longer side: the distance from the centre to the side, for mounting and placing. */
+  readonly radius: number;
   /** Something to move with the vehicle (an animal's mixer, an engine glow). */
   onUpdate: ((dt: number, v: Vehicle, drive: DriveInput | null) => void) | null = null;
 
@@ -143,12 +151,15 @@ export class Vehicle {
     this.seat.position.set(spec.seat[0], spec.seat[1], spec.seat[2]);
     this.group.add(this.seat);
     scene.add(this.group);
-    // Springs at the corners of the footprint, on the underside.
+    // Springs at the corners of the footprint, on the underside. The footprint is no smaller than a
+    // bike's, so a tiny or mis-measured model still stands on a base wide enough to right it.
+    const fw = Math.max(0.8, w);
+    const fl = Math.max(1.6, l);
     this.hoverPoints = [
-      new THREE.Vector3(-w * 0.4, b.min[1], l * 0.4),
-      new THREE.Vector3(w * 0.4, b.min[1], l * 0.4),
-      new THREE.Vector3(-w * 0.4, b.min[1], -l * 0.4),
-      new THREE.Vector3(w * 0.4, b.min[1], -l * 0.4),
+      new THREE.Vector3(-fw * 0.4, b.min[1], fl * 0.4),
+      new THREE.Vector3(fw * 0.4, b.min[1], fl * 0.4),
+      new THREE.Vector3(-fw * 0.4, b.min[1], -fl * 0.4),
+      new THREE.Vector3(fw * 0.4, b.min[1], -fl * 0.4),
     ];
     this.meter = spec.boost === 'burst' ? 1 : 0;
     this.altitude = spec.fly ? spec.fly.floor : 0;
@@ -164,7 +175,24 @@ export class Vehicle {
     const cx = (b.min[0] + b.max[0]) / 2;
     const cy = (b.min[1] + b.max[1]) / 2;
     const cz = (b.min[2] + b.max[2]) / 2;
-    world.createCollider(RAPIER.ColliderDesc.cuboid(Math.max(0.2, w / 2), Math.max(0.15, h / 2), Math.max(0.3, l / 2)).setTranslation(cx, cy, cz).setMass(spec.mass).setFriction(0.4).setRestitution(0.1), this.body);
+    this.centre = new THREE.Vector3(cx, cy, cz);
+    this.radius = Math.max(w, l) / 2;
+    // A box's inertia, on extents no smaller than a bike's, so a tiny or a mis-measured model
+    // still turns like a vehicle rather than a top.
+    const ew = fw;
+    const eh = Math.max(0.6, h);
+    const el = fl;
+    const m = spec.mass;
+    this.inertia = new THREE.Vector3((m / 12) * (eh * eh + el * el), (m / 12) * (ew * ew + el * el), (m / 12) * (ew * ew + eh * eh));
+    world.createCollider(
+      RAPIER.ColliderDesc.cuboid(Math.max(0.2, w / 2), Math.max(0.15, h / 2), Math.max(0.3, l / 2))
+        .setTranslation(cx, cy, cz)
+        // The mass properties are in the collider's own frame, so the centre of mass is its centre.
+        .setMassProperties(m, { x: 0, y: 0, z: 0 }, { x: this.inertia.x, y: this.inertia.y, z: this.inertia.z }, { x: 0, y: 0, z: 0, w: 1 })
+        .setFriction(0.4)
+        .setRestitution(0.1),
+      this.body,
+    );
     this.pos.set(x, y, z);
   }
 
@@ -204,10 +232,14 @@ export class Vehicle {
     // above its floor, a hold on the height over the terrain.
     this.groundedPoints = 0;
     const flying = !!s.fly && this.altitude > s.fly.floor + 0.05;
+    const drop = this.centre.y - s.bounds.min[1];
     if (!flying) {
       for (const hp of this.hoverPoints) {
         p.copy(hp).applyQuaternion(q).add(this.pos);
-        const dist = physics.groundDistance(p.x, p.y, p.z, ride * 2.2 + 0.5, body);
+        // The ray starts at the collider's centre height over the corner, so a corner pushed
+        // into the ground still reads a (negative) distance and is lifted out.
+        const hit = physics.groundDistance(p.x, p.y + drop, p.z, drop + ride * 2.2 + 0.5, body);
+        const dist = hit === null ? null : hit - drop;
         if (dist === null || dist > ride * 1.6 + 0.3) continue;
         this.groundedPoints++;
         rel.copy(p).sub(this.pos);
@@ -243,10 +275,12 @@ export class Vehicle {
     const steer = drive?.steer ?? 0;
     wantUp.copy(WORLD_UP);
     if (s.bank > 0 && steer !== 0) wantUp.applyAxisAngle(fwd, -steer * s.bank * share);
-    torque.crossVectors(up, wantUp).multiplyScalar(m * 45);
-    torque.x -= av.x * m * 6;
-    torque.z -= av.z * m * 6;
-    torque.y -= av.y * m * 2.2;
+    // Torques are asked for as turning accelerations (rad/s²) and scaled by the inertia below, so
+    // a barge and a bike right themselves alike; the rates stay well under the step's stability limit.
+    alpha.crossVectors(up, wantUp).multiplyScalar(40);
+    alpha.x -= av.x * 8;
+    alpha.z -= av.z * 8;
+    alpha.y = -av.y * 3;
 
     // The boost: a burst that recharges, or heat that builds while boosting (about four seconds'
     // worth) and, at the top, burns the engine out: a few seconds limping at a third of the power
@@ -289,7 +323,7 @@ export class Vehicle {
         const wide = 1 - 0.3 * THREE.MathUtils.clamp((Math.abs(speedFwd) - s.maxSpeed) / Math.max(1, s.boostSpeed - s.maxSpeed), 0, 1);
         const sign = speedFwd < -0.5 ? -1 : 1;
         const want = -steer * s.turnRate * authority * wide * sign;
-        torque.y += (want - av.y) * m * 8 + av.y * m * 2.2;
+        alpha.y = (want - av.y) * 8;
       }
       if (drive.hop && s.hop && grounded && this.hopCd <= 0) {
         body.applyImpulse({ x: 0, y: m * 7.5, z: 0 }, true);
@@ -300,6 +334,8 @@ export class Vehicle {
         if (drive.down) this.altitude = Math.max(s.fly.floor, this.altitude - s.fly.climb * dt);
       }
     } else if (s.fly && !drive) this.altitude = Math.max(s.fly.floor, this.altitude - s.fly.climb * 0.5 * dt);
+    // Torque = inertia × acceleration, about the body's own axes.
+    torque.copy(alpha).applyQuaternion(qInv.copy(q).invert()).multiply(this.inertia).applyQuaternion(q);
     body.addTorque({ x: torque.x, y: torque.y, z: torque.z }, true);
 
     // Grip: sideways speed is turned back into forward speed at the spec's rate (a turn redirects

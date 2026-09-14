@@ -95,14 +95,19 @@ export class Garage {
   }
 
   /** Stand a vehicle on the ground at a point, facing a heading, and hand it back to drive. */
-  async spawn(def: VehicleDef, physics: Physics, scene: THREE.Scene, x: number, y: number, z: number, heading: number, kind: VehicleKind = def.kind): Promise<Vehicle> {
+  async spawn(def: VehicleDef, physics: Physics, scene: THREE.Scene, x: number, y: number, z: number, heading: number, kind: VehicleKind = def.kind, place?: (bounds: VehicleSpec['bounds']) => [number, number, number]): Promise<Vehicle> {
     const loaded = await this.model(def);
     const model = def.source === 'creature' ? cloneSkinned(loaded.scene) : loaded.scene.clone();
     let bounds = def.bounds;
-    if (!bounds) {
+    if (!bounds || def.source !== 'creature') {
+      // A machine's box is measured from the model itself: the pack's bounds are the mesh file's
+      // own, which for a substituted appearance can be another mesh's, and a wrong box is a
+      // collider the model does not fill, springs in the wrong place and a vehicle that tumbles.
       const box = new THREE.Box3().setFromObject(model);
-      bounds = { min: [box.min.x, box.min.y, box.min.z], max: [box.max.x, box.max.y, box.max.z] };
+      if (!box.isEmpty()) bounds = { min: [box.min.x, box.min.y, box.min.z], max: [box.max.x, box.max.y, box.max.z] };
     }
+    if (!bounds) bounds = { min: [-0.5, 0, -1], max: [0.5, 1, 1] };
+    if (place) [x, y, z] = place(bounds);
     const spec = specFor(kind, def.id, def.label, bounds, { animal: def.source === 'creature' });
     if (def.source === 'creature') {
       // A mount's saddle sits on its back, and it walks and runs with its own clips at their own pace.
