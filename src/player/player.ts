@@ -4,7 +4,7 @@ import type { ThirdPersonCamera } from '../core/camera';
 import type { Input } from '../core/input';
 import { Group, groups, RAPIER, type Physics } from '../core/physics';
 import { markActor } from '../world/portalRender';
-import type { Speeder } from '../vehicles/speeder';
+import type { Vehicle } from '../vehicles/vehicle';
 import type { World } from '../world/world';
 import { STANCE_ANIM, STYLE_DAMAGE, SaberCombat, type Dir, type SaberInput } from '../combat/saber';
 import { SaberThrow, THROW } from '../combat/saberThrow';
@@ -192,7 +192,7 @@ export class Player {
   classId: ClassId = 'jedi';
   hp = 100;
   readonly maxHp = 100;
-  mounted: Speeder | null = null;
+  mounted: Vehicle | null = null;
   /** Swing progress in [0, 1], or -1 when idle (the stand-in swing when the rig has no saber clips). */
   swing = -1;
   /** Ground and air movement: the original game's numbers, or Jedi Academy's (see jkaMove.ts). */
@@ -898,7 +898,7 @@ export class Player {
     return this.parts.muzzle.getWorldPosition(out);
   }
 
-  mount(speeder: Speeder): void {
+  mount(speeder: Vehicle): void {
     this.mounted = speeder;
     this.body.setEnabled(false);
     this.vel.set(0, 0, 0);

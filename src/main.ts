@@ -18,9 +18,23 @@ import { WeaponsUi } from './ui/weaponsUi';
 import { WeaponCatalogue, type WeaponDef } from './player/weapons';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { Hud } from './ui/hud';
-import type { DriveInput } from './vehicles/speeder';
+import type { DriveInput } from './vehicles/vehicle';
+import { VehiclesUi } from './ui/vehiclesUi';
+import { Garage, type VehicleDef } from './vehicles/garage';
+import type { VehicleKind } from './vehicles/vehicle';
 import { World } from './world/world';
 import { RANGE } from './world/gallery';
+
+/** The keys for the vehicle ridden, by its kind. */
+function mountPrompt(v: import('./vehicles/vehicle').Vehicle): string {
+  const k = v.spec.kind;
+  const bar = (f: number) => '▮'.repeat(Math.round(f * 8)) + '▯'.repeat(8 - Math.round(f * 8));
+  const boost = v.spec.boost === 'heat' ? ` · <b>Shift</b> boost · heat ${bar(v.meter)}${v.overheated > 0 ? ' BURNT OUT' : ''}` : v.spec.boost === 'burst' ? ` · <b>Shift</b> boost ${bar(v.meter)}` : '';
+  const hop = v.spec.hop ? ' · <b>Space</b> hop' : '';
+  const fly = v.spec.fly ? ' · <b>Space</b> climb · <b>Ctrl</b>/<b>X</b> sink' : '';
+  const turn = k === 'ground' ? '<b>A/D</b> turn' : '<b>A/D</b> steer';
+  return `<b>E</b> dismount · <b>W/S</b> throttle · ${turn}${boost}${hop}${fly} · ${k} · ${Math.round(Math.abs(v.speed) * 3.6)} km/h`;
+}
 
 const MOUNT_RANGE = 3.6;
 
@@ -47,6 +61,8 @@ class App {
   private readonly map: GalaxyMap;
   private readonly wardrobe: WardrobeUi;
   private readonly weaponsUi: WeaponsUi;
+  private readonly vehiclesUi: VehiclesUi;
+  private garage: Garage | null = null;
   private weapons: WeaponCatalogue | null = null;
   private readonly fade: HTMLElement;
   private readonly start: HTMLElement;
@@ -86,6 +102,7 @@ class App {
     this.wardrobe = new WardrobeUi(this.ui, () => this.hud.setPrompt(''));
     this.wardrobe.setBaseUrl(import.meta.env.BASE_URL);
     this.weaponsUi = new WeaponsUi(this.ui, (def, hand) => void this.equip(def, hand));
+    this.vehiclesUi = new VehiclesUi(this.ui, (def, kind) => void this.spawnVehicle(def, kind), () => this.world.removeVehicles(this.player.mounted));
     void WeaponCatalogue.load(import.meta.env.BASE_URL).then((c) => {
       this.weapons = c;
       this.weaponsUi.attach(c);
@@ -295,6 +312,7 @@ class App {
           this.cam.update(this.input, this.player.pos, null);
           this.player.update(dt, this.input, this.cam, this.world);
           this.stepCombat(dt);
+          this.stepVehicles(dt, true);
           if (!this.player.noclip && !this.player.mounted) this.world.turrets.update(dt, this.player, this.world.bolts);
           this.physics.step(dt);
           this.effects.update(dt);
@@ -345,6 +363,29 @@ class App {
         }
         rig.play(exact, { loop, hold: !loop });
         return { playing: exact, matches: clips.slice(0, 20) };
+      },
+      /** Mount the nearest vehicle, or dismount, as E does. */
+      mount: () => {
+        this.handleMount();
+        return this.player.mounted ? `riding ${this.player.mounted.spec.id}` : 'on foot';
+      },
+      /** The garage: `vehicles('speeder')` lists what can be spawned; `spawn('speeder_ab1')` or `spawn('bantha', 'ground')` stands one in front of you; `vehicles.clear` is the panel's Remove all. */
+      vehicles: (find?: string) => {
+        const g = this.garage ?? this.world.garage;
+        if (!g) return 'the garage is not loaded yet: open it with B once, or call spawn()';
+        const f = find?.toLowerCase();
+        return { onWorld: this.world.vehicles.map((v) => `${v.spec.id} (${v.spec.kind}${v === this.player.mounted ? ', ridden' : ''}) at ${v.pos.toArray().map((n) => n.toFixed(0)).join(',')}`), garage: g.vehicles.filter((v) => !f || v.id.toLowerCase().includes(f) || v.kind.includes(f)).map((v) => `${v.id}: ${v.kind}${v.inferred ? '' : ' (guessed)'}, ${v.source}`).slice(0, 80) };
+      },
+      /** Remove every spawned vehicle except the one being ridden, as the garage's Remove all does. */
+      unspawn: () => {
+        this.world.removeVehicles(this.player.mounted);
+        return this.world.vehicles.length;
+      },
+      spawn: async (name: string, kind?: VehicleKind) => {
+        this.garage ??= await Garage.load(import.meta.env.BASE_URL);
+        this.world.garage = this.garage;
+        const def = this.garage.find(name);
+        return def ? this.spawnVehicle(def, kind) : `no vehicle matches ${name}`;
       },
       /** The weapons rack: `weapons('dl44')` lists matches; `equip('dl44')` or `equip('dl44', 'left')` puts one in a hand, `equip(null, 'left')` empties it. */
       weapons: (find?: string) => {
@@ -429,7 +470,7 @@ class App {
         <div class="sub">Star Wars Galaxies, rebuilt for the browser. Ten worlds, one very ambitious side project.</div>
         <div class="controls">
           <div><b>WASD</b> move · <b>Mouse</b> look · <b>Wheel</b> zoom · <b>Space</b> jump (hold to Force Jump higher) · <b>Ctrl</b> crouch (tap while moving to roll) · <b>Shift</b> walk · in water <b>Space</b>/<b>Ctrl</b> surface/dive, or look down and swim</div>
-          <div><b>LMB</b> attack or fire · <b>RMB</b> hold to block with the saber (bounty hunter: rapid fire) · <b>R</b> throw the saber (staff: kick) · <b>G</b> weapons rack · <b>V</b> kneel · <b>Z</b> prone · <b>E</b> mount speeder · <b>C</b> switch class · <b>T</b> fast-forward time</div>
+          <div><b>LMB</b> attack or fire · <b>RMB</b> hold to block with the saber (bounty hunter: rapid fire) · <b>R</b> throw the saber (staff: kick) · <b>G</b> weapons rack · <b>B</b> garage · <b>V</b> kneel · <b>Z</b> prone · <b>E</b> mount speeder · <b>C</b> switch class · <b>T</b> fast-forward time</div>
           <div><b>M</b> galaxy map · <b>H</b> toggle help · <b>N</b> noclip fly (<b>+</b>/<b>-</b> speed) · <b>F</b> flashlight · <b>Esc</b> release mouse</div>
           <div><b>X</b> also crouches (a Mac turns Ctrl-click into a right click) · rebind any key in the console: <b>__debug.bind('crouch', 'KeyV')</b>, <b>__debug.bindings()</b></div>
         </div>
@@ -578,6 +619,24 @@ class App {
     this.input.requestLock();
   }
 
+  /** Drive the ridden vehicle from the keys (W/S throttle, A/D steer, Shift boost, Space hop or climb, Ctrl or X sink), step every vehicle, and seat the rider. */
+  private stepVehicles(dt: number, simulate: boolean): void {
+    const { player, input } = this;
+    let drive: DriveInput | null = null;
+    if (simulate && player.mounted) {
+      drive = {
+        throttle: (input.held('forward') ? 1 : 0) - (input.held('back') ? 1 : 0),
+        steer: (input.held('right') ? 1 : 0) - (input.held('left') ? 1 : 0),
+        boost: input.held('walk'),
+        hop: input.pressedAction('jump'),
+        up: input.held('jump'),
+        down: input.held('crouch'),
+      };
+    }
+    for (const v of this.world.vehicles) v.update(dt, this.physics, v === player.mounted ? drive : null, (x, z) => this.world.terrain.heightAt(x, z));
+    if (player.mounted) player.syncMount();
+  }
+
   /** The class's weapon and abilities, then the bolts in the air (a bolt reaching the player meets the saber first). */
   private stepCombat(dt: number): void {
     const player = this.player;
@@ -629,6 +688,33 @@ class App {
     await new Promise((r) => setTimeout(r, 200));
     this.fade.classList.remove('on');
     this.dying = false;
+  }
+
+  /** B: the garage, with the mouse free to use it. */
+  private toggleGarage(): void {
+    if (this.wardrobe.open) this.wardrobe.toggle();
+    if (this.weaponsUi.open) this.weaponsUi.hide();
+    if (this.vehiclesUi.toggle()) {
+      if (!this.garage) {
+        void Garage.load(import.meta.env.BASE_URL).then((g) => {
+          this.garage = g;
+          this.world.garage = g;
+          this.vehiclesUi.attach(g);
+        });
+      } else this.vehiclesUi.attach(this.garage);
+      this.input.captured = true;
+      this.input.releaseLock();
+    } else {
+      this.input.captured = false;
+      this.input.requestLock();
+    }
+  }
+
+  /** Spawn a vehicle from the garage in front of the player, as its own kind or one chosen for the test. */
+  async spawnVehicle(def: VehicleDef, kind?: VehicleKind): Promise<string> {
+    const v = await this.world.spawnVehicle(def, this.player.pos, this.player.heading, kind);
+    this.hud.setPrompt(`${def.label}: a ${v.spec.kind} (E to ride)`);
+    return `${def.id} spawned as a ${v.spec.kind}`;
   }
 
   /** G: the weapons rack, with the mouse free to use it. */
@@ -712,14 +798,14 @@ class App {
     if (p.mounted) {
       const sp = p.mounted;
       sp.quaternion(tmpQ);
-      tmp.set(-1.6, 0, 0).applyQuaternion(tmpQ).add(sp.pos);
+      tmp.set(-(sp.spec.bounds.max[0] - sp.spec.bounds.min[0]) / 2 - 1.0, 0, 0).applyQuaternion(tmpQ).add(sp.pos);
       tmp.y = Math.max(this.world.terrain.heightAt(tmp.x, tmp.z), this.world.terrain.waterLevel - 1) + 0.3;
       p.dismount(tmp);
       return;
     }
     let best = null;
     let bestD = MOUNT_RANGE;
-    for (const sp of this.world.speeders) {
+    for (const sp of this.world.vehicles) {
       const d = sp.pos.distanceTo(p.pos);
       if (d < bestD) {
         bestD = d;
@@ -734,7 +820,7 @@ class App {
 
   private nearestSpeederDistance(): number {
     let d = Infinity;
-    for (const sp of this.world.speeders) d = Math.min(d, sp.pos.distanceTo(this.player.pos));
+    for (const sp of this.world.vehicles) d = Math.min(d, sp.pos.distanceTo(this.player.pos));
     return d;
   }
 
@@ -753,6 +839,7 @@ class App {
         if (input.pressedAction('map')) this.toggleMap();
         if (input.pressedAction('inventory')) this.toggleWardrobe();
         if (input.pressedAction('weapons')) this.toggleWeapons();
+        if (input.pressedAction('garage')) this.toggleGarage();
         if (input.pressedAction('help')) this.hud.toggleHelp();
         if (!this.map.open && !this.wardrobe.open) {
           if (input.pressedAction('saberToggle') && this.kit.id === 'jedi' && !player.mounted) player.toggleSaber();
@@ -771,17 +858,7 @@ class App {
         this.stepCombat(dt);
       }
 
-      let drive: DriveInput | null = null;
-      if (simulate && player.mounted) {
-        drive = {
-          throttle: (input.held('forward') ? 1 : 0) - (input.held('back') ? 1 : 0),
-          steer: (input.held('right') ? 1 : 0) - (input.held('left') ? 1 : 0),
-          boost: input.held('walk'),
-          hop: input.pressedAction('jump'),
-        };
-      }
-      for (const sp of this.world.speeders) sp.update(dt, this.physics, sp === player.mounted ? drive : null);
-      if (player.mounted) player.syncMount();
+      this.stepVehicles(dt, simulate);
 
       const fast = simulate && input.held('fastForward');
       for (const m of this.shown) m.update(dt);
@@ -809,7 +886,7 @@ class App {
 
       let prompt = '';
       if (player.noclip) prompt = `<b>NOCLIP</b> ${Math.round(player.noclipSpeed)} m/s · <b>WASD</b> fly · <b>Space</b> up · <b>Ctrl</b> down · <b>Shift</b> fast · <b>+</b>/<b>-</b> speed · <b>N</b> off`;
-      else if (player.mounted) prompt = '<b>E</b> dismount · <b>W/S</b> throttle · <b>A/D</b> steer · <b>Shift</b> boost · <b>Space</b> hop';
+      else if (player.mounted) prompt = mountPrompt(player.mounted);
       else if (this.world.elevatorsNear(player.pos, MOUNT_RANGE).length) prompt = `<b>E</b> elevator ${this.world.elevatorsNear(player.pos, MOUNT_RANGE)[0].kind === 'down' ? 'down' : 'up'}`;
       else if (this.nearestSpeederDistance() < MOUNT_RANGE) prompt = '<b>E</b> mount speeder';
       this.hud.setPrompt(prompt);

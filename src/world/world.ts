@@ -18,7 +18,9 @@ import { LayoutStreamer, type Building, type CellState } from './layoutStream';
 import { ParticleEffects } from './particles';
 import { CSM } from 'three/examples/jsm/csm/CSM.js';
 import { INTERIOR_LAYER, markActor, type PortalRenderer } from './portalRender';
-import { Speeder } from '../vehicles/speeder';
+import { createPlaceholderSpeeder } from '../vehicles/speeder';
+import { Garage, type VehicleDef } from '../vehicles/garage';
+import type { Vehicle, VehicleKind } from '../vehicles/vehicle';
 import { Bolts } from '../combat/bolts';
 import { Gallery } from './gallery';
 import { TurretManager, type TurretTarget } from '../combat/turrets';
@@ -173,7 +175,9 @@ export class World {
   /** Every blaster bolt in the air, whoever fired it. */
   readonly bolts: Bolts;
   readonly day = new DayCycle(0, 1);
-  readonly speeders: Speeder[] = [];
+  /** Every vehicle on the world: the placeholder bike and whatever the garage (B) spawned. */
+  readonly vehicles: Vehicle[] = [];
+  garage: Garage | null = null;
   private props!: PropFactory;
   private readonly chunks = new Map<string, Chunk>();
   private readonly farTiles = new Map<string, THREE.Mesh>();
@@ -547,8 +551,8 @@ export class World {
     this.bolts.clear();
     this.gallery?.dispose();
     this.gallery = null;
-    for (const sp of this.speeders) sp.dispose(this.physics, this.scene);
-    this.speeders.length = 0;
+    for (const sp of this.vehicles) sp.dispose(this.physics, this.scene);
+    this.vehicles.length = 0;
     this.props?.dispose();
     if (this.water) {
       this.scene.remove(this.water);
@@ -692,7 +696,7 @@ export class World {
     };
     touch(this, playerPos, 1);
     for (const c of this.creatures.creatures) if (c.hp > 0) touch(c, c.pos, 0.9);
-    for (const sp of this.speeders) touch(sp, sp.pos, 1.4);
+    for (const sp of this.vehicles) touch(sp, sp.pos, 1.4);
   }
 
   /** Lights, fog and clear colour straight from the sky's colour ramps for this moment. */
@@ -1030,9 +1034,32 @@ export class World {
     markActor(this.turrets.group);
     const sx = center.x + 5;
     const sz = center.z + 4;
-    const speeder = new Speeder(this.physics, this.scene, sx, this.terrain.heightAt(sx, sz) + 1.2, sz, Math.PI * 0.75);
+    const speeder = createPlaceholderSpeeder(this.physics, this.scene, sx, this.terrain.heightAt(sx, sz) + 1.2, sz, Math.PI * 0.75);
     markActor(speeder.group);
-    this.speeders.push(speeder);
+    this.vehicles.push(speeder);
+  }
+
+  /** Stand a vehicle from the garage on the ground in front of a point, facing away from it. */
+  async spawnVehicle(def: VehicleDef, at: THREE.Vector3, heading: number, kind?: VehicleKind): Promise<Vehicle> {
+    this.garage ??= await Garage.load(import.meta.env.BASE_URL);
+    const x = at.x + Math.sin(heading) * 6;
+    const z = at.z + Math.cos(heading) * 6;
+    const v = await this.garage.spawn(def, this.physics, this.scene, x, this.terrain.heightAt(x, z), z, heading, kind);
+    markActor(v.group);
+    this.vehicles.push(v);
+    return v;
+  }
+
+  /** Take every spawned vehicle away but the one ridden. */
+  removeVehicles(keep: Vehicle | null): number {
+    let n = 0;
+    for (const v of [...this.vehicles]) {
+      if (v === keep) continue;
+      v.dispose(this.physics, this.scene);
+      this.vehicles.splice(this.vehicles.indexOf(v), 1);
+      n++;
+    }
+    return n;
   }
 
   /** Interior-mesh accounting, for the console hook. */

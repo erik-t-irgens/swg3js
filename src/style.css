@@ -155,3 +155,7 @@ b { color: var(--accent); font-weight: 600; }
 .weapons-skipped { font-size: 11px; color: var(--muted); margin: 4px 0; }
 .weapons-skipped div { padding: 4px 0 6px 12px; line-height: 1.5; }
 #weapons .hint { padding: 12px; font-size: 12px; color: var(--muted); }
+#garage .wardrobe-header .find { flex: none; width: 140px; padding: 4px 8px; font-size: 11px; background: rgba(0,0,0,0.3); color: var(--text); border: 1px solid var(--panel-border); border-radius: 4px; }
+#garage .weapons-row select { flex: none; font-size: 10px; padding: 3px 4px; background: rgba(0,0,0,0.3); color: var(--text); border: 1px solid var(--panel-border); border-radius: 4px; }
+#garage .weapons-row em { color: var(--muted); font-style: normal; font-size: 10px; }
+#garage .hint { padding: 12px; font-size: 12px; color: var(--muted); }

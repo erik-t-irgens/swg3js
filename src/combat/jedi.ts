@@ -162,7 +162,7 @@ export class JediKit implements Kit {
         c.damage(10);
         c.knock(tmp2, 22 * (1 - d / 18) + 6);
       }
-      for (const sp of world.speeders) {
+      for (const sp of world.vehicles) {
         tmp2.copy(sp.pos).sub(player.pos);
         const d = tmp2.length();
         if (d > 12 || sp === player.mounted) continue;

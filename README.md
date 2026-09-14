@@ -21,10 +21,11 @@ Open the printed URL, click **Enter the galaxy**, and go.
 | V | Kneel and get up again |
 | Z | Lie prone and get up again |
 | G | The weapons rack |
+| B | The garage: spawn any vehicle or mount to try |
 | K | Jedi: next saber style · Bounty Hunter: pistol or rifle |
-| Shift | Walk (on a speeder: boost) |
+| Shift | Walk (on a vehicle: boost) |
 | LMB | Attack: saber swing or blaster fire |
-| E | Mount / dismount the speeder |
+| E | Mount / dismount the nearest vehicle |
 | C | Switch class (Jedi / Bounty Hunter) |
 | T | Hold to fast-forward the day |
 | N | Noclip fly mode (Space up, Ctrl down, Shift fast, + and - change the speed) |
@@ -36,7 +37,7 @@ Open the printed URL, click **Enter the galaxy**, and go.
 
 **Jedi**: `1` Force Jump · `2` Force Speed · `3` Force Push · `4` Force Lightning (hold) · `L` lightsaber.
 **Bounty Hunter**: `1` Thermal Detonator · `2` Stim Pack · `RMB` aim · `K` pistol or rifle · `V` kneel and `Z` prone for steadier shots.
-**Speeder**: `W/S` throttle · `A/D` steer · `Shift` boost · `Space` hop.
+**Vehicles**: `W/S` throttle and brake · `A/D` steer · `Shift` boost · `Space` hop (bikes and mounts) or climb (flyers) · `Ctrl`/`X` sink (flyers) · `E` off.
 
 URL options: `?planet=lok` spawns on a specific world, `?class=bounty_hunter` picks a class, `?lowfx=1` disables shadows and halves resolution for weak machines.
 
@@ -105,6 +106,19 @@ The branch `claude/jka-combat` swaps the player's ground and air movement and th
 ## The weapons rack
 
 `npm run swg -- weapons @SWG assets-private --retail-only` converts every weapon the game can hold into `assets-private/weapons/`, sorted by class from its template path: pistols, carbines, rifles, heavy weapons, one-hand swords, knives, two-hand swords, polearms and lances, lightsabers. **G** opens the rack in game: a row per weapon with a button per hand it can go in, and the kinds the game does not play yet (grenades and thrown weapons, turrets, mines and traps, batons, axes, the unarmed "weapons" and the special melee kinds) listed at the bottom with why. A weapon goes on the hand's hold point exactly as the game hangs it there, and its class decides everything else: a blaster switches to the bounty hunter's kit with the pistol's or the rifle's carries (carbines and heavy weapons use the rifle's) and its own torso turns (`__debug.gun('carbine', { ready, aim, aimKneel })`, one set per kind); a sword or knife switches to the jedi's kit and fights with the fast, medium and strong styles (K cycles those alone), a one-hand sword or knife in each hand fights as the dual style and nothing else, a two-hand sword never dual-wields, a polearm or lance fights as the staff, and a lightsaber from the rack hangs its own hilt where the placeholder's was with the blade out of it. A held blade sweeps its own length for hits. `__debug.equip('dl44')`, `__debug.equip('knife_survival', 'left')` and `__debug.equip(null, 'left')` do the same from the console, `__debug.weapons('sword')` lists matches.
+
+## Vehicles and the garage
+
+Every vehicle is one physics body held up by springs at the corners of its footprint (or by its feet), driven by a spec that says how it handles (`src/vehicles/vehicle.ts`). There are four kinds, and the kind is read from the vehicle's name (`vehicleKindOf`); when a name says nothing the garage guesses and marks it:
+
+- **Podracer** (`podracer`): the fastest thing there is (85 m/s, 125 boosting), a wide drifting turn that redirects its speed rather than scrubbing it, banking into corners, and a **heat** boost after Star Wars: Racer: holding Shift builds heat for about four seconds; at the top the engine burns out and the pod limps at a third of its power for three seconds, and the heat has to fall before it boosts again. The prompt shows the heat bar and the speed.
+- **Speeder bike** (`speederbike`: swoops, STAPs, BARCs, flash speeders): quick and tight (42 m/s, 60 boosting), bites into turns, banks, a **burst** boost that runs down and recharges, and a hop on Space.
+- **Ground** (`ground`: walkers, wheel bikes, tanks, and every animal mount): slow, turns in place, never slides. An animal from the creatures pack walks and runs with its own clips at its own pace under a saddle on its back, and can hop.
+- **Flyer** (`flyer`: landspeeders and skiffs as flying cars, gunships and airspeeders as aircraft): Space climbs and Ctrl or X sinks; the vehicle holds its height over the ground meanwhile and settles back down when nobody drives it. A flying car climbs slowly to 60 m, an aircraft fast to 260 m.
+
+A fast vehicle can outrun the physics ground being streamed in, so the terrain's own height is a floor under every vehicle. Both blaster fire and Force Push still shove them.
+
+**B** opens the garage: every vehicle the gallery pack holds (`gallery --only=vehicles`) and every creature in the creatures pack, listed by kind, with a button that stands one six metres in front of you, a "try it as" choice to drive any model with another kind's handling, and Remove all. Walk up and press **E** to ride, **E** again to get off. In the console, `__debug.vehicles('speeder')` lists what can be spawned and what stands on the world, `__debug.spawn('speeder_ab1')` or `__debug.spawn('bantha', 'ground')` stands one ahead of you, `__debug.mount()` rides the nearest, and `__debug.unspawn()` clears them. Rider animations (the `loop_*_riding` clips) are not played on vehicles yet; the rider sits in the model's seat.
 
 ## The gallery (a development world)
 

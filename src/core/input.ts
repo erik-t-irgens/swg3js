@@ -21,6 +21,7 @@ export type Action =
   | 'help'
   | 'inventory'
   | 'weapons'
+  | 'garage'
   | 'noclip'
   | 'noclipFaster'
   | 'noclipSlower'
@@ -57,6 +58,7 @@ export const DEFAULT_BINDINGS: Record<Action, string[]> = {
   help: ['KeyH'],
   inventory: ['KeyI'],
   weapons: ['KeyG'],
+  garage: ['KeyB'],
   noclip: ['KeyN'],
   noclipFaster: ['Equal', 'NumpadAdd'],
   noclipSlower: ['Minus', 'NumpadSubtract'],

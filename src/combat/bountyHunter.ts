@@ -171,7 +171,7 @@ export class BountyHunterKit implements Kit {
       const d = t.pos.distanceTo(at);
       if (d <= BLAST_RADIUS) t.damage(130 * (1 - d / BLAST_RADIUS) + 15);
     }
-    for (const sp of world.speeders) {
+    for (const sp of world.vehicles) {
       tmp.copy(sp.pos).sub(at);
       const d = tmp.length();
       if (d > BLAST_RADIUS) continue;
