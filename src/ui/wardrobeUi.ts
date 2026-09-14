@@ -6,6 +6,7 @@
 // which is the rule the original game's paper doll enforces too.
 
 import type { Character, Wardrobe } from '../player/character';
+import { INVENTORY_TABS, tabStrip, wireTabs } from './tabs';
 import { CharacterPreview } from './characterPreview';
 
 /** Equipment slots, in the order they read down a body, and the id fragments that name them. */
@@ -39,6 +40,8 @@ export class WardrobeUi {
   private character: Character | null = null;
   private catalogue: Wardrobe | null = null;
   open = false;
+  /** A click on another tab: the game swaps the panels. */
+  onTab: (id: string) => void = () => {};
 
   constructor(parent: HTMLElement, private readonly onChange: () => void) {
     this.root = document.createElement('div');
@@ -47,7 +50,7 @@ export class WardrobeUi {
     this.root.innerHTML = `
       <div class="wardrobe-panel">
         <div class="wardrobe-header">
-          <h2>WARDROBE</h2>
+          ${tabStrip(INVENTORY_TABS, 'wardrobe')}
           <span class="count"></span>
           <button class="strip">Take everything off</button>
           <button class="close">Close <b>I</b></button>
@@ -63,6 +66,7 @@ export class WardrobeUi {
     this.root.querySelector<HTMLElement>('.wardrobe-preview')!.prepend(this.preview.canvas);
     this.root.querySelector('.close')!.addEventListener('click', () => this.hide());
     this.root.querySelector('.strip')!.addEventListener('click', () => void this.stripAll());
+    wireTabs(this.root, 'wardrobe', (id) => this.onTab(id));
     // A click on the backdrop closes it; one inside must not.
     this.root.addEventListener('click', (e) => {
       if (e.target === this.root) this.hide();

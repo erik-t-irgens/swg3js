@@ -1,5 +1,6 @@
 // The weapons rack: every converted weapon by class, a row each with a button per hand it can go
 // in. Picking one puts it in that hand and switches to the kit that fights with it.
+import { INVENTORY_TABS, tabStrip, wireTabs } from './tabs';
 import { CLASS_LABELS, ONE_HANDED, type WeaponCatalogue, type WeaponClass, type WeaponDef } from '../player/weapons';
 
 const ORDER: WeaponClass[] = ['pistol', 'carbine', 'rifle', 'heavy', 'sword1h', 'knife', 'sword2h', 'polearm', 'lightsaber'];
@@ -10,6 +11,8 @@ export class WeaponsUi {
   private readonly count: HTMLElement;
   private catalogue: WeaponCatalogue | null = null;
   open = false;
+  /** A click on another tab: the game swaps the panels. */
+  onTab: (id: string) => void = () => {};
 
   constructor(parent: HTMLElement, private readonly onPick: (def: WeaponDef | null, hand: 'right' | 'left') => void) {
     this.root = document.createElement('div');
@@ -18,11 +21,11 @@ export class WeaponsUi {
     this.root.innerHTML = `
       <div class="wardrobe-panel">
         <div class="wardrobe-header">
-          <h2>WEAPONS</h2>
+          ${tabStrip(INVENTORY_TABS, 'weapons')}
           <span class="count"></span>
           <input class="find" placeholder="find" />
           <button class="empty">Empty hands</button>
-          <button class="close">Close <b>B</b></button>
+          <button class="close">Close <b>I</b></button>
         </div>
         <div class="wardrobe-main"><div class="wardrobe-body weapons-body"></div></div>
       </div>`;
@@ -30,6 +33,7 @@ export class WeaponsUi {
     this.body = this.root.querySelector('.weapons-body')!;
     this.count = this.root.querySelector('.count')!;
     this.root.querySelector('.close')!.addEventListener('click', () => this.hide());
+    wireTabs(this.root, 'weapons', (id) => this.onTab(id));
     this.root.querySelector('.empty')!.addEventListener('click', () => {
       this.onPick(null, 'right');
       this.onPick(null, 'left');

@@ -4,6 +4,9 @@ import { markActor } from '../world/portalRender';
 interface Ring { mesh: THREE.Mesh<THREE.RingGeometry, THREE.MeshBasicMaterial>; age: number; life: number; maxScale: number }
 interface Tracer { line: THREE.Line<THREE.BufferGeometry, THREE.LineBasicMaterial>; age: number; life: number }
 interface Flash { light: THREE.PointLight; age: number; life: number; intensity: number }
+
+/** Point lights kept in the scene for the flashes, so the light count never changes (a change recompiles every material). */
+const FLASH_POOL = 4;
 interface Burst { mesh: THREE.Mesh<THREE.SphereGeometry, THREE.MeshBasicMaterial>; age: number; life: number; size: number }
 
 /** Short-lived visual effects: shock rings, blaster tracers, light flashes, impact bursts. */
@@ -15,7 +18,18 @@ export class Effects {
   private readonly ringGeo = new THREE.RingGeometry(0.6, 1, 32).rotateX(-Math.PI / 2);
   private readonly burstGeo = new THREE.SphereGeometry(1, 8, 6);
 
-  constructor(private readonly scene: THREE.Scene) {}
+  private readonly lights: THREE.PointLight[] = [];
+  private nextLight = 0;
+
+  constructor(private readonly scene: THREE.Scene) {
+    for (let i = 0; i < FLASH_POOL; i++) {
+      const light = new THREE.PointLight(0xffffff, 0, 1);
+      light.visible = false;
+      scene.add(light);
+      markActor(light);
+      this.lights.push(light);
+    }
+  }
 
   ring(pos: THREE.Vector3, color: number, maxScale: number, life: number): void {
     const mesh = new THREE.Mesh(
@@ -38,10 +52,16 @@ export class Effects {
   }
 
   flash(pos: THREE.Vector3, color: number, intensity: number, distance: number, life: number): void {
-    const light = new THREE.PointLight(color, intensity, distance);
+    // The next pooled light, taking over from the oldest flash when all are lit.
+    const light = this.lights[this.nextLight];
+    this.nextLight = (this.nextLight + 1) % this.lights.length;
+    const i = this.flashes.findIndex((f) => f.light === light);
+    if (i >= 0) this.flashes.splice(i, 1);
+    light.color.set(color);
+    light.intensity = intensity;
+    light.distance = distance;
     light.position.copy(pos);
-    this.scene.add(light);
-    markActor(light);
+    light.visible = true;
     this.flashes.push({ light, age: 0, life, intensity });
   }
 
@@ -89,7 +109,8 @@ export class Effects {
       f.age += dt;
       const t = f.age / f.life;
       if (t >= 1) {
-        this.scene.remove(f.light);
+        f.light.intensity = 0;
+        f.light.visible = false;
         this.flashes.splice(i, 1);
         continue;
       }

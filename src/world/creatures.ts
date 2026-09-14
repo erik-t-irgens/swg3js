@@ -374,6 +374,28 @@ export class CreatureManager {
     }
   }
 
+  /** Stand one of the planet's creatures at a point (the NPC tab's spawn). */
+  spawnAt(x: number, z: number): Creature {
+    const c = new Creature(this.planet.creatures, this.mat, this.physics, x, this.terrain.heightAt(x, z), z);
+    if (this.model) c.setModel(this.model);
+    this.creatures.push(c);
+    this.byCollider.set(c.collider.handle, c);
+    this.group.add(c.group);
+    return c;
+  }
+
+  /** Take every creature away. */
+  removeAll(): number {
+    const n = this.creatures.length;
+    for (const c of this.creatures) {
+      this.group.remove(c.group);
+      c.dispose();
+    }
+    this.creatures.length = 0;
+    this.byCollider.clear();
+    return n;
+  }
+
   private pickSpot(center: THREE.Vector3): THREE.Vector3 {
     for (let attempt = 0; attempt < 24; attempt++) {
       const a = Math.random() * Math.PI * 2;

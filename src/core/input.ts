@@ -20,8 +20,7 @@ export type Action =
   | 'map'
   | 'help'
   | 'inventory'
-  | 'weapons'
-  | 'garage'
+  | 'spawner'
   | 'freeLook'
   | 'noclip'
   | 'noclipFaster'
@@ -58,8 +57,7 @@ export const DEFAULT_BINDINGS: Record<Action, string[]> = {
   map: ['KeyM'],
   help: ['KeyH'],
   inventory: ['KeyI'],
-  weapons: ['KeyB'],
-  garage: ['KeyG'],
+  spawner: ['KeyB'],
   freeLook: ['AltLeft', 'AltRight'],
   noclip: ['KeyN'],
   noclipFaster: ['Equal', 'NumpadAdd'],

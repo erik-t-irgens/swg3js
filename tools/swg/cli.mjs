@@ -1297,10 +1297,10 @@ function packStatus(dir) {
   const weapons = readJson(join(dir, 'weapons/manifest.json'));
   if (!weapons) {
     console.log('  weapons: none (the placeholder saber and rifle are used)');
-    need(`weapons <swg-dir> ${dir} --retail-only`, 'no weapons converted for the rack (B in game)');
+    need(`weapons <swg-dir> ${dir} --retail-only`, 'no weapons converted for the rack (I in game, the Weapons tab)');
   } else console.log(`  weapons: ${weapons.weapons?.length ?? 0} on the rack, ${weapons.skipped?.length ?? 0} left out`);
   const ships = readJson(join(dir, 'ships/manifest.json'));
-  if (!ships) need(`ships <swg-dir> ${dir} --retail-only`, 'no ships converted for the garage (G in game, at the bottom)');
+  if (!ships) need(`ships <swg-dir> ${dir} --retail-only`, 'no ships converted for the garage (B in game, at the bottom)');
   else console.log(`  ships: ${ships.ships.length} ships, ${ships.ships.filter((sh) => sh.interior && !sh.interior.failed).length} with an interior, ${ships.skipped.length} left out`);
   if (!todo.size) {
     console.log(`everything is in place: ${planets} planet packs, creatures and player`);
@@ -2218,7 +2218,7 @@ switch (cmd) {
     const { weapons, skipped } = buildWeapons(galleryTemplates(vfs, 'object/weapon/'), { convert }, { log: console.log, limit });
     const manifest = { classes: WEAPON_CLASSES, weapons, skipped };
     writeFileSync(join(outDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
-    console.log(`-> ${outDir}: ${weapons.length} weapons in ${models.size} models, ${skipped.length} left out (listed in manifest.json; G in game opens the rack)`);
+    console.log(`-> ${outDir}: ${weapons.length} weapons in ${models.size} models, ${skipped.length} left out (listed in manifest.json; I in game opens the rack, the Weapons tab)`);
     const unknown = skipped.filter((s) => /unknown|melee kind/.test(s.why));
     if (unknown.length) console.log(`   kinds without a style yet:\n${unknown.map((s) => `     ${s.template}  (${s.why})`).join('\n')}`);
     printEffectSummary();
@@ -2281,7 +2281,7 @@ switch (cmd) {
     const manifest = { classes: SHIP_CLASSES, ships, skipped, models: [...models.values()].filter((m) => !m.failed) };
     writeFileSync(join(outDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
     const withInterior = ships.filter((sh) => sh.interior && !sh.interior.failed).length;
-    console.log(`-> ${outDir}: ${ships.length} ships in ${models.size} models, ${withInterior} with an interior, ${skipped.length} left out (listed in manifest.json; G in game opens the garage, ships at the bottom)`);
+    console.log(`-> ${outDir}: ${ships.length} ships in ${models.size} models, ${withInterior} with an interior, ${skipped.length} left out (listed in manifest.json; B in game opens the garage, ships at the bottom)`);
     if (skipped.length) console.log(`   left out:\n${skipped.map((sk) => `     ${sk.template}  (${sk.why})`).join('\n')}`);
     printEffectSummary();
     break;

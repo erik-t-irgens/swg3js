@@ -20,6 +20,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { Hud } from './ui/hud';
 import { specFor, type DriveInput } from './vehicles/vehicle';
 import { VehiclesUi } from './ui/vehiclesUi';
+import { NpcUi } from './ui/npcUi';
 import { Garage, type VehicleDef } from './vehicles/garage';
 import type { Vehicle, VehicleKind } from './vehicles/vehicle';
 import { World } from './world/world';
@@ -66,6 +67,9 @@ class App {
   private readonly weaponsUi: WeaponsUi;
   private readonly vehiclesUi: VehiclesUi;
   private garage: Garage | null = null;
+  private npcUi: NpcUi;
+  private inventoryTab: 'wardrobe' | 'weapons' = 'wardrobe';
+  private spawnerTab: 'garage' | 'npcs' = 'garage';
   private weapons: WeaponCatalogue | null = null;
   private readonly fade: HTMLElement;
   private readonly start: HTMLElement;
@@ -106,6 +110,12 @@ class App {
     this.wardrobe.setBaseUrl(import.meta.env.BASE_URL);
     this.weaponsUi = new WeaponsUi(this.ui, (def, hand) => void this.equip(def, hand));
     this.vehiclesUi = new VehiclesUi(this.ui, (def, kind) => void this.spawnVehicle(def, kind), () => this.world.removeVehicles(this.player.mounted));
+    this.npcUi = new NpcUi(this.ui);
+    // The tabs: a click on the other tab of a panel swaps to it, the key toggles whichever was last open.
+    this.wardrobe.onTab = (id) => this.toggleInventory(id as 'wardrobe' | 'weapons');
+    this.weaponsUi.onTab = (id) => this.toggleInventory(id as 'wardrobe' | 'weapons');
+    this.vehiclesUi.onTab = (id) => this.toggleSpawner(id as 'garage' | 'npcs');
+    this.npcUi.onTab = (id) => this.toggleSpawner(id as 'garage' | 'npcs');
     void WeaponCatalogue.load(import.meta.env.BASE_URL).then((c) => {
       this.weapons = c;
       this.weaponsUi.attach(c);
@@ -121,6 +131,13 @@ class App {
       teleport: (x: number, z: number, yaw?: number) => {
         this.player.reset(new THREE.Vector3(x, this.world.terrain.heightAt(x, z) + 0.3, z));
         if (yaw !== undefined) this.cam.yaw = yaw;
+      },
+      /** Feed mouse movement to the real loop as if the pointer were locked (headless tests cannot lock it), and report the camera. */
+      mouse: (dx = 0, dy = 0) => {
+        this.input.locked = true;
+        this.input.mouseDX += dx;
+        this.input.mouseDY += dy;
+        return { yaw: Number(this.cam.yaw.toFixed(3)), pitch: Number(this.cam.pitch.toFixed(3)), distance: Number(this.cam.distance.toFixed(2)), at: this.cam.camera.position.toArray().map((v) => Number(v.toFixed(2))) };
       },
       look: (yaw: number, pitch: number) => {
         this.cam.yaw = yaw;
@@ -497,7 +514,7 @@ class App {
         <div class="sub">Star Wars Galaxies, rebuilt for the browser. Ten worlds, one very ambitious side project.</div>
         <div class="controls">
           <div><b>WASD</b> move · <b>Mouse</b> look · <b>Wheel</b> zoom · <b>Space</b> jump (hold to Force Jump higher) · <b>Ctrl</b> crouch (tap while moving to roll) · <b>Shift</b> walk · in water <b>Space</b>/<b>Ctrl</b> surface/dive, or look down and swim</div>
-          <div><b>LMB</b> attack or fire · <b>RMB</b> hold to block with the saber (bounty hunter: rapid fire) · <b>R</b> throw the saber (staff: kick) · <b>B</b> weapons rack · <b>G</b> garage · <b>B</b> garage · <b>V</b> kneel · <b>Z</b> prone · <b>E</b> mount speeder · <b>C</b> switch class · <b>T</b> fast-forward time</div>
+          <div><b>LMB</b> attack or fire · <b>RMB</b> hold to block with the saber (bounty hunter: rapid fire) · <b>R</b> throw the saber (staff: kick) · <b>I</b> inventory: wardrobe and weapons · <b>B</b> spawner: garage and NPCs · <b>V</b> kneel · <b>Z</b> prone · <b>E</b> mount speeder · <b>C</b> switch class · <b>T</b> fast-forward time</div>
           <div><b>M</b> galaxy map · <b>H</b> toggle help · <b>N</b> noclip fly (<b>+</b>/<b>-</b> speed) · <b>F</b> flashlight · <b>Esc</b> release mouse</div>
           <div><b>X</b> also crouches (a Mac turns Ctrl-click into a right click) · rebind any key in the console: <b>__debug.bind('crouch', 'KeyV')</b>, <b>__debug.bindings()</b></div>
         </div>
@@ -517,10 +534,10 @@ class App {
     // map can be used with a cursor. Clicking the world takes the mouse back; the menu is only
     // for arriving and for dying, not for every Escape.
     document.addEventListener('pointerlockchange', () => {
-      if (this.started && !this.traveling) this.hud.setMouseFree(!this.input.locked && !this.map.open && !this.wardrobe.open);
+      if (this.started && !this.traveling) this.hud.setMouseFree(!this.input.locked && !this.map.open && !this.anyPanelOpen());
     });
     this.canvas.addEventListener('click', () => {
-      if (this.started && !this.input.locked && !this.map.open && !this.wardrobe.open && !this.traveling) this.input.requestLock();
+      if (this.started && !this.input.locked && !this.map.open && !this.anyPanelOpen() && !this.traveling) this.input.requestLock();
     });
 
     window.addEventListener('resize', () => {
@@ -726,11 +743,36 @@ class App {
     this.dying = false;
   }
 
-  /** G: the garage, with the mouse free to use it. */
-  private toggleGarage(): void {
-    if (this.wardrobe.open) this.wardrobe.toggle();
+  /** The panels' open state moved to the tabs: closing one panel of a pair and opening the other keeps the mouse free. */
+  private anyPanelOpen(): boolean {
+    return this.wardrobe.open || this.weaponsUi.open || this.vehiclesUi.open || this.npcUi.open;
+  }
+
+  private closePanels(): void {
+    if (this.wardrobe.open) this.wardrobe.hide();
     if (this.weaponsUi.open) this.weaponsUi.hide();
-    if (this.vehiclesUi.toggle()) {
+    if (this.vehiclesUi.open) this.vehiclesUi.hide();
+    if (this.npcUi.open) this.npcUi.hide();
+  }
+
+  private freeMouse(free: boolean): void {
+    this.input.captured = free;
+    if (free) this.input.releaseLock();
+    else this.input.requestLock();
+  }
+
+  /** B: the spawner, the garage or the NPCs tab; the key toggles the last tab used, a tab click swaps. */
+  private toggleSpawner(tab?: 'garage' | 'npcs'): void {
+    const want = tab ?? this.spawnerTab;
+    const wasOpen = tab === undefined && (this.vehiclesUi.open || this.npcUi.open);
+    this.closePanels();
+    if (wasOpen) {
+      this.freeMouse(false);
+      return;
+    }
+    this.spawnerTab = want;
+    if (want === 'garage') {
+      this.vehiclesUi.show();
       if (!this.garage) {
         void Garage.load(import.meta.env.BASE_URL).then((g) => {
           this.garage = g;
@@ -738,12 +780,45 @@ class App {
           this.vehiclesUi.attach(g);
         });
       } else this.vehiclesUi.attach(this.garage);
-      this.input.captured = true;
-      this.input.releaseLock();
     } else {
-      this.input.captured = false;
-      this.input.requestLock();
+      this.npcUi.attach(this.npcKinds());
+      this.npcUi.show();
     }
+    this.freeMouse(true);
+  }
+
+  /** What the NPC tab can stand in front of the player: a blaster turret, and the planet's creature. */
+  private npcKinds(): import('./ui/npcUi').NpcKind[] {
+    const ahead = (distance: number) => {
+      this.cam.forward(tmp);
+      return { x: this.player.pos.x + tmp.x * distance, z: this.player.pos.z + tmp.z * distance, facing: Math.atan2(-tmp.x, -tmp.z) };
+    };
+    return [
+      {
+        id: 'turret',
+        label: 'Blaster turret',
+        blurb: 'turns to face you within 45 m and fires; 120 health, stands again 25 s after it is destroyed',
+        count: () => this.world.turrets.turrets.length,
+        spawn: () => {
+          const p = ahead(20);
+          this.world.turrets.place(p.x, p.z, p.facing);
+          return `a turret 20 m ahead (${this.world.turrets.turrets.length} out)`;
+        },
+        clear: () => this.world.turrets.removeAll(),
+      },
+      {
+        id: 'creature',
+        label: this.world.planet.creatures.name,
+        blurb: `${this.world.planet.creatures.aggressive ? 'attacks on sight' : 'wanders, fights back when hit'}; ${this.world.planet.creatures.hp} health`,
+        count: () => this.world.creatures.creatures.length,
+        spawn: () => {
+          const p = ahead(12);
+          this.world.creatures.spawnAt(p.x, p.z);
+          return `a ${this.world.planet.creatures.name} 12 m ahead (${this.world.creatures.creatures.length} out)`;
+        },
+        clear: () => this.world.creatures.removeAll(),
+      },
+    ];
   }
 
   /** Spawn a vehicle from the garage in front of the player, as its own kind or one chosen for the test. */
@@ -753,21 +828,6 @@ class App {
     const size = [b.max[0] - b.min[0], b.max[1] - b.min[1], b.max[2] - b.min[2]].map((n) => n.toFixed(1)).join('×');
     this.hud.setPrompt(`${def.label}: a ${v.spec.kind}, ${size} m (E to ride)`);
     return `${def.id} spawned as a ${v.spec.kind}: ${size} m at ${v.pos.toArray().map((n) => n.toFixed(1)).join(',')}, ${v.pos.distanceTo(this.player.pos).toFixed(1)} m away, seat ${v.spec.seat.map((n) => n.toFixed(2)).join(',')}, hardpoints: ${v.hardpoints.join(' ') || 'none'}`;
-  }
-
-  /** B: the weapons rack, with the mouse free to use it. */
-  private toggleWeapons(): void {
-    if (this.wardrobe.open) this.wardrobe.toggle();
-    if (this.vehiclesUi.open) this.vehiclesUi.hide();
-    if (this.weaponsUi.toggle()) {
-      this.weaponsUi.held = { right: this.player.equipped.right?.id ?? null, left: this.player.equipped.left?.id ?? null };
-      this.weaponsUi.render();
-      this.input.captured = true;
-      this.input.releaseLock();
-    } else {
-      this.input.captured = false;
-      this.input.requestLock();
-    }
   }
 
   /** Put a weapon from the rack in a hand (null empties it), switching to the kit that fights with it. */
@@ -786,20 +846,28 @@ class App {
     return `${def.id} in the ${hand} hand`;
   }
 
-  /** I: the wardrobe, with the mouse free to use it. */
-  private toggleWardrobe(): void {
-    const character = this.player.rig?.character ?? null;
-    if (this.weaponsUi.open) this.weaponsUi.hide();
-    if (this.wardrobe.toggle()) {
+  /** I: the inventory, the wardrobe or the weapons tab; the key toggles the last tab used, a tab click swaps. */
+  private toggleInventory(tab?: 'wardrobe' | 'weapons'): void {
+    const want = tab ?? this.inventoryTab;
+    const wasOpen = tab === undefined && (this.wardrobe.open || this.weaponsUi.open);
+    this.closePanels();
+    if (wasOpen) {
+      this.freeMouse(false);
+      return;
+    }
+    this.inventoryTab = want;
+    if (want === 'wardrobe') {
+      const character = this.player.rig?.character ?? null;
+      this.wardrobe.show();
       if (character) void this.wardrobe.attach(character, import.meta.env.BASE_URL).catch((err) => console.warn('wardrobe', err));
       else this.wardrobe.explain('This character is a single model, not a set of parts, so there is nothing to change. Convert it with <code>npm run swg -- parts</code>.');
-      this.input.captured = true;
-      this.input.releaseLock();
     } else {
-      this.input.captured = false;
-      this.input.requestLock();
+      this.weaponsUi.held = { right: this.player.equipped.right?.id ?? null, left: this.player.equipped.left?.id ?? null };
+      this.weaponsUi.show();
     }
+    this.freeMouse(true);
   }
+
 
   private toggleMap(): void {
     if (this.map.open) {
@@ -884,11 +952,10 @@ class App {
 
       if (active) {
         if (input.pressedAction('map')) this.toggleMap();
-        if (input.pressedAction('inventory')) this.toggleWardrobe();
-        if (input.pressedAction('weapons')) this.toggleWeapons();
-        if (input.pressedAction('garage')) this.toggleGarage();
+        if (input.pressedAction('inventory')) this.toggleInventory();
+        if (input.pressedAction('spawner')) this.toggleSpawner();
         if (input.pressedAction('help')) this.hud.toggleHelp();
-        if (!this.map.open && !this.wardrobe.open) {
+        if (!this.map.open && !this.anyPanelOpen()) {
           if (input.pressedAction('saberToggle') && this.kit.id === 'jedi' && !player.mounted) player.toggleSaber();
           if (input.pressedAction('switchClass')) this.setClass(this.kit.id === 'jedi' ? 'bounty_hunter' : 'jedi');
           if (input.pressedAction('mount') && !player.noclip && !this.handleElevator()) this.handleMount();
@@ -899,7 +966,7 @@ class App {
         }
       }
 
-      const simulate = active && !this.map.open && !this.wardrobe.open;
+      const simulate = active && !this.map.open && !this.anyPanelOpen();
       if (simulate) {
         player.update(dt, input, this.cam, this.world);
         this.stepCombat(dt);

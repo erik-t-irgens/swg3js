@@ -1083,7 +1083,7 @@ export class World {
     this.streamFar(center, Infinity);
     this.creatures.spawnAround(center);
     markActor(this.creatures.group);
-    if (this.planet.id !== 'gallery') this.turrets.spawnAround(center, 3, (x, z) => this.collidersNear(x, z, 4).length === 0);
+    // Turrets are spawned from the NPC tab (B) now, not stood around the arrival point.
     markActor(this.turrets.group);
     const sx = center.x + 5;
     const sz = center.z + 4;

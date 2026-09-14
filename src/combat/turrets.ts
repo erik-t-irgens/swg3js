@@ -220,6 +220,13 @@ export class TurretManager {
     t.dispose();
   }
 
+  /** Take every turret away. */
+  removeAll(): number {
+    const n = this.turrets.length;
+    for (const t of [...this.turrets]) this.remove(t);
+    return n;
+  }
+
   update(dt: number, target: TurretTarget, bolts: Bolts): void {
     for (const t of this.turrets) t.update(dt, target, bolts);
   }

@@ -1,5 +1,6 @@
 // The garage: the gallery's vehicles and the animal mounts, by the kind each handles as, with a
 // button to stand one beside you, and a way to try a model as another kind.
+import { SPAWNER_TABS, tabStrip, wireTabs } from './tabs';
 import type { Garage, VehicleDef } from '../vehicles/garage';
 import type { VehicleKind } from '../vehicles/vehicle';
 
@@ -17,6 +18,8 @@ export class VehiclesUi {
   private readonly count: HTMLElement;
   private garage: Garage | null = null;
   open = false;
+  /** A click on another tab: the game swaps the panels. */
+  onTab: (id: string) => void = () => {};
 
   constructor(parent: HTMLElement, private readonly onSpawn: (def: VehicleDef, kind?: VehicleKind) => void, private readonly onClear: () => number) {
     this.root = document.createElement('div');
@@ -25,11 +28,11 @@ export class VehiclesUi {
     this.root.innerHTML = `
       <div class="wardrobe-panel">
         <div class="wardrobe-header">
-          <h2>GARAGE</h2>
+          ${tabStrip(SPAWNER_TABS, 'garage')}
           <span class="count"></span>
           <input class="find" placeholder="find" />
           <button class="clear">Remove all</button>
-          <button class="close">Close <b>G</b></button>
+          <button class="close">Close <b>B</b></button>
         </div>
         <div class="wardrobe-main"><div class="wardrobe-body weapons-body"></div></div>
       </div>`;
@@ -37,6 +40,7 @@ export class VehiclesUi {
     this.body = this.root.querySelector('.weapons-body')!;
     this.count = this.root.querySelector('.count')!;
     this.root.querySelector('.close')!.addEventListener('click', () => this.hide());
+    wireTabs(this.root, 'garage', (id) => this.onTab(id));
     this.root.querySelector('.clear')!.addEventListener('click', () => {
       const n = this.onClear();
       this.count.textContent = `${n} removed`;
