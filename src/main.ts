@@ -68,6 +68,7 @@ class App {
   private readonly vehiclesUi: VehiclesUi;
   private garage: Garage | null = null;
   private npcUi: NpcUi;
+  private breakFrames = false;
   private inventoryTab: 'wardrobe' | 'weapons' = 'wardrobe';
   private spawnerTab: 'garage' | 'npcs' = 'garage';
   private weapons: WeaponCatalogue | null = null;
@@ -138,6 +139,11 @@ class App {
         this.input.mouseDX += dx;
         this.input.mouseDY += dy;
         return { yaw: Number(this.cam.yaw.toFixed(3)), pitch: Number(this.cam.pitch.toFixed(3)), distance: Number(this.cam.distance.toFixed(2)), at: this.cam.camera.position.toArray().map((v) => Number(v.toFixed(2))) };
+      },
+      /** Make every frame throw after the camera has moved (for testing that a failing frame cannot make the view drift). */
+      breakFrames: (on: boolean) => {
+        this.breakFrames = on;
+        return this.breakFrames;
       },
       look: (yaw: number, pitch: number) => {
         this.cam.yaw = yaw;
@@ -940,8 +946,25 @@ class App {
   }
 
   run(): void {
+    // A frame that throws is logged (once per distinct error every few seconds, so the console
+    // stays readable) and the next one runs as usual, with nothing left half-applied from the
+    // input: the game keeps going, and the message says what failed and where.
+    const seen = new Map<string, number>();
     const frame = () => {
       requestAnimationFrame(frame);
+      try {
+        step();
+      } catch (err) {
+        const key = String((err as Error)?.message ?? err);
+        const now = performance.now();
+        if ((seen.get(key) ?? -Infinity) < now - 5000) {
+          seen.set(key, now);
+          console.error('frame failed (the game carries on):', err);
+        }
+        this.input.endFrame();
+      }
+    };
+    const step = () => {
       const tFrame = performance.now();
       this.timer.update();
       const rawDt = this.timer.getDelta();
@@ -1006,6 +1029,7 @@ class App {
       this.hud.setPrompt(prompt);
       this.hud.update(dt, player.pos.x, player.pos.y, player.pos.z, this.kit, player.hp, player.maxHp, this.world.day.clock(), this.world.planet.creatures.name, player.saberOn);
 
+      if (this.breakFrames) throw new Error('debug: the frame is broken on purpose');
       const tRender = performance.now();
       this.drawFrame();
       stats.renderMs = performance.now() - tRender;

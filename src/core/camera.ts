@@ -50,6 +50,12 @@ export class ThirdPersonCamera {
       this.pitch = clamp(this.pitch + input.mouseDY * 0.0025, this.firstPerson ? -1.4 : -1.25, 1.4);
     }
     this.distance = clamp(this.distance + input.wheel * 0.9, 0, 24);
+    // The movement is spent here, not at the end of the frame: an error later in the frame used to
+    // leave it accumulating, and every frame after re-applied the growing sum, so the view slid
+    // on with a momentum of its own whenever something in a particular direction failed to draw.
+    input.mouseDX = 0;
+    input.mouseDY = 0;
+    input.wheel = 0;
     this.firstPerson = this.distance < FIRST_PERSON_BELOW;
 
     this.focus.copy(target).y += EYE_HEIGHT;
