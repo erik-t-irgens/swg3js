@@ -6,6 +6,7 @@
 //   node tools/swg/cli.mjs list <swg-dir> [filter]                list files across archives (search priority applied)
 //   node tools/swg/cli.mjs extract <swg-dir> <path-in-archive> <out-file>
 //   node tools/swg/cli.mjs dump <file.iff> | <swg-dir> <path-in-archive>   print an IFF tree
+//   node tools/swg/cli.mjs weapons <swg-dir> <out-dir> [--limit=N]       every weapon the game can hold, with its class, under <out-dir>/weapons
 //   node tools/swg/cli.mjs ash <swg-dir> <appearance/x.sat | object/.../shared_x.iff> [--find=pistol]   the animation state hierarchy behind a skeletal appearance, with its strings
 //   node tools/swg/cli.mjs shader <swg-dir> <shader/x.sht>        list a shader's texture slots
 //   node tools/swg/cli.mjs template <swg-dir> <object/x.iff>       print an object template's parameter chain
@@ -1291,6 +1292,11 @@ function packStatus(dir) {
       if (playerJka && jkaCount < playerJka) need(`clips-save ${join(dir, p.file)} ${join(dir, 'player', 'jka.clips')} --only=BOTH_ && clips-apply ${join(dir, 'characters', p.id, 'rig.glb')} ${join(dir, 'player', 'jka.clips')}`, `the parts rig has ${jkaCount} of the player's ${playerJka} Jedi Academy clips`);
     }
   }
+  const weapons = readJson(join(dir, 'weapons/manifest.json'));
+  if (!weapons) {
+    console.log('  weapons: none (the placeholder saber and rifle are used)');
+    need(`weapons <swg-dir> ${dir} --retail-only`, 'no weapons converted for the rack (G in game)');
+  } else console.log(`  weapons: ${weapons.weapons?.length ?? 0} on the rack, ${weapons.skipped?.length ?? 0} left out`);
   if (!todo.size) {
     console.log(`everything is in place: ${planets} planet packs, creatures and player`);
     return;
@@ -2139,6 +2145,49 @@ switch (cmd) {
     break;
   }
 
+  case 'weapons': {
+    // <swg-dir> <out-dir> [--limit=N]: every weapon the game can hold, as models under <out-dir>/weapons
+    // with a manifest naming each one's class (pistol, carbine, rifle, heavy, one-hand sword, knife,
+    // two-hand sword, polearm, lightsaber); the kinds the game does not play yet are listed with why.
+    if (!pos[2]) usage();
+    const vfs = mount(pos[1]);
+    const outDir = join(pos[2], 'weapons');
+    mkdirSync(outDir, { recursive: true });
+    const { buildWeapons, WEAPON_CLASSES } = await import('./weapons.mjs');
+    const { galleryTemplates } = await import('./gallery.mjs');
+    const models = new Map();
+    const cache = new Map();
+    const convert = (template) => {
+      const r = resolveTemplateMesh(vfs, template, cache);
+      if (r.skip) return { skip: r.skip };
+      if (r.particle) return { skip: 'particle effect' };
+      if (r.skeletal) return { skip: 'skeletal appearance' };
+      const single = r.parts.length === 1 && !r.parts[0].transform && !r.effects?.length;
+      const id = familyOf(single ? r.parts[0].mesh : r.appearance);
+      if (!models.has(id)) {
+        try {
+          const conv = convertOne(vfs, single ? r.parts[0].mesh : r.appearance, join(outDir, `${id}.glb`));
+          const b = conv.mesh.bounds ?? { min: [0, 0, 0], max: [0, 0, 0] };
+          const bounds = conv.flipX ? { min: [-b.max[0], b.min[1], b.min[2]], max: [-b.min[0], b.max[1], b.max[2]] } : b;
+          models.set(id, { id, file: `${id}.glb`, bounds, triangles: conv.tris, textured: conv.textured, shaders: conv.shaders.length, ...(conv.tris ? {} : { failed: 'no triangles' }) });
+        } catch (err) {
+          models.set(id, { id, failed: err.message });
+        }
+      }
+      const def = models.get(id);
+      if (!def || def.failed) return { skip: def?.failed ?? 'failed' };
+      return { model: id, file: def.file, bounds: def.bounds };
+    };
+    const limit = options.limit ? Number(options.limit) : Infinity;
+    const { weapons, skipped } = buildWeapons(galleryTemplates(vfs, 'object/weapon/'), { convert }, { log: console.log, limit });
+    const manifest = { classes: WEAPON_CLASSES, weapons, skipped };
+    writeFileSync(join(outDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
+    console.log(`-> ${outDir}: ${weapons.length} weapons in ${models.size} models, ${skipped.length} left out (listed in manifest.json; G in game opens the rack)`);
+    const unknown = skipped.filter((s) => /unknown|melee kind/.test(s.why));
+    if (unknown.length) console.log(`   kinds without a style yet:\n${unknown.map((s) => `     ${s.template}  (${s.why})`).join('\n')}`);
+    printEffectSummary();
+    break;
+  }
   case 'gallery': {
     // <swg-dir> <out-dir> [--jka=<dir>] [--only=houses,vehicles,weapons,anims] [--limit=N]
     if (!pos[2]) usage();

@@ -78,7 +78,7 @@ export class JediKit implements Kit {
     // Lightsaber: the player runs the swing itself (Jedi Academy's move system); each new swing
     // may hit every creature once.
     player.force = res;
-    if (input.pressedAction('saberStyle') && onFoot) this.styleNote = `saber style: ${player.saber.cycleStyle()}`;
+    if (input.pressedAction('saberStyle') && onFoot) this.styleNote = player.allowedStyles.length > 1 ? `saber style: ${player.saber.cycleStyle(player.allowedStyles)}` : `${player.equipped.right?.id ?? 'this weapon'} fights only as ${player.saber.style}`;
     if (player.saber.attackId !== this.lastAttackId) {
       this.lastAttackId = player.saber.attackId;
       this.hitThisSwing.clear();

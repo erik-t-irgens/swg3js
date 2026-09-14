@@ -4,7 +4,7 @@ import type { PlanetDef } from '../data/planets';
 const COMMON_HELP = [
   '<b>WASD</b> move · <b>Mouse</b> look · <b>Wheel</b> zoom · <b>Space</b> jump · <b>Shift</b> walk',
   '<b>E</b> mount/dismount speeder · <b>C</b> switch class · <b>T</b> fast-forward time',
-  '<b>M</b> galaxy map · <b>I</b> wardrobe · <b>H</b> help · <b>N</b> noclip fly · <b>Esc</b> free the mouse',
+  '<b>M</b> galaxy map · <b>I</b> wardrobe · <b>G</b> weapons · <b>H</b> help · <b>N</b> noclip fly · <b>Esc</b> free the mouse',
 ];
 
 export class Hud {
@@ -44,7 +44,7 @@ export class Hud {
       <div class="panel top-right">
         <div class="clock"></div>
         <div class="fps"></div>
-        <div class="hint"><b>M</b> Map &nbsp; <b>I</b> Wardrobe &nbsp; <b>H</b> Help</div>
+        <div class="hint"><b>M</b> Map &nbsp; <b>I</b> Wardrobe &nbsp; <b>G</b> Weapons &nbsp; <b>H</b> Help</div>
       </div>
       <div class="crosshair"></div>
       <div class="mouse-free hidden">Mouse free · <b>click</b> to look again</div>

@@ -11,6 +11,8 @@ import { SaberThrow, THROW } from '../combat/saberThrow';
 import { canBlock, inFront, parryClip, parryZone, reflectDirection } from '../combat/deflect';
 import { JKA, JkaMovement, UNIT, type MoveCommand } from './jkaMove';
 import type { CharacterRig, RigState } from './rig';
+import { FIGHTS, ONE_HANDED, gunKindOf, type WeaponClass, type WeaponDef } from './weapons';
+import { STYLES, type SaberStyle } from '../combat/saber';
 
 // The original game's run is 5.375 m/s; the character stands about 1.75 m.
 const RUN_SPEED = 5.5;
@@ -219,6 +221,13 @@ export class Player {
   private walkKey = false;
   /** The blaster in hand: a pistol is carried at the side like a hilt, a rifle across the chest. */
   gunKind: 'pistol' | 'rifle' = 'rifle';
+  /** The kind of blaster for the torso's turns: a carbine and a heavy weapon play the rifle's carries but may want their own angles. */
+  gunClass: 'pistol' | 'carbine' | 'rifle' | 'heavy' = 'rifle';
+  /** The weapons in hand from the rack (assets-private/weapons), and their models on the hand bones. */
+  readonly equipped: { right: WeaponDef | null; left: WeaponDef | null } = { right: null, left: null };
+  private readonly held: { right: THREE.Object3D | null; left: THREE.Object3D | null } = { right: null, left: null };
+  /** A held weapon's reach for the hit sweep: its grip end and its far end, in the model's own frame. */
+  private readonly reach: { right: { near: THREE.Object3D; far: THREE.Object3D } | null; left: { near: THREE.Object3D; far: THREE.Object3D } | null } = { right: null, left: null };
   /** Aiming the blaster (right mouse held): the aimed carry, a steadier shot, the camera in closer. */
   aiming = false;
   /** Seconds since the last shot; the combat carry stays up this long before the relaxed one returns. */
@@ -243,7 +252,12 @@ export class Player {
    * of the body. `ready` is the hip-fire carry (every posture but prone), `aim` the aim standing or
    * moving, `aimKneel` the aim kneeling or crouched. The pistol's two-handed standing aim points straight.
    */
-  readonly gunTune = { pistol: { ready: 30, aim: 0, aimKneel: 30 }, rifle: { ready: 30, aim: 30, aimKneel: 30 } };
+  readonly gunTune: Record<'pistol' | 'carbine' | 'rifle' | 'heavy', { ready: number; aim: number; aimKneel: number }> = {
+    pistol: { ready: 30, aim: 0, aimKneel: 30 },
+    carbine: { ready: 30, aim: 30, aimKneel: 30 },
+    rifle: { ready: 30, aim: 30, aimKneel: 30 },
+    heavy: { ready: 30, aim: 30, aimKneel: 30 },
+  };
   /** The torso's current turn for the aim, eased. */
   private aimTwist = 0;
   /** The hip-fire pose chosen when the combat carry came up, kept while it lasts (a rifle's is a held transition into it). */
@@ -544,13 +558,22 @@ export class Player {
   /** Which blades show: the main one, the staff's second, the dual style's left-hand saber; none while thrown. */
   private updateBlades(): void {
     const p = this.parts;
-    const on = this.saberOn && this.classId === 'jedi';
+    const rightWeapon = this.equipped.right;
+    const leftWeapon = this.equipped.left;
+    // A weapon from the rack in a hand hides the placeholder there; a lightsaber from the rack keeps the blade, on its own hilt.
+    const meleeRight = !!rightWeapon && FIGHTS[rightWeapon.class] !== 'gun' && rightWeapon.class !== 'lightsaber';
+    const gunRight = !!rightWeapon && FIGHTS[rightWeapon.class] === 'gun';
+    const on = this.saberOn && this.classId === 'jedi' && !meleeRight;
     const inHand = !this.thrown.inFlight && !this.orbiting;
-    p.hilt.visible = inHand;
+    p.saber.visible = this.classId === 'jedi' && !meleeRight;
+    p.hilt.visible = inHand && rightWeapon?.class !== 'lightsaber';
     p.blade.visible = on && inHand;
     p.staffBlade.visible = on && inHand && this.saber.style === 'staff';
-    p.saber2.visible = this.classId === 'jedi' && this.saber.style === 'dual' && !this.orbiting;
-    p.blade2.visible = on && this.saber.style === 'dual' && !this.orbiting;
+    p.saber2.visible = this.classId === 'jedi' && this.saber.style === 'dual' && !this.orbiting && !leftWeapon;
+    p.blade2.visible = on && this.saber.style === 'dual' && !this.orbiting && !leftWeapon;
+    p.rifle.visible = this.classId === 'bounty_hunter' && !gunRight;
+    if (this.held.right) this.held.right.visible = inHand || gunRight;
+    if (this.held.left) this.held.left.visible = !this.orbiting;
     for (const g of this.orbit) g.visible = this.orbiting;
     p.saberLight.intensity = on && inHand ? 6 : 0;
     this.flying.visible = this.thrown.inFlight;
@@ -568,9 +591,28 @@ export class Player {
     return this.saber.style === 'staff' || this.saber.style === 'dual' ? 2 : 1;
   }
 
-  /** The ends of blade `i` in world space (0 is the one in the right hand). */
+  /** The ends of blade `i` in world space (0 is the one in the right hand). A weapon from the rack sweeps its own length. */
   bladeSegmentAt(i: number, a: THREE.Vector3, b: THREE.Vector3): void {
     const p = this.parts;
+    const right = this.reach.right;
+    const left = this.reach.left;
+    if (i === 0 && right && this.equipped.right?.class !== 'lightsaber') {
+      right.near.getWorldPosition(a);
+      right.far.getWorldPosition(b);
+      return;
+    }
+    if (i === 1 && this.saber.style === 'dual' && left) {
+      left.near.getWorldPosition(a);
+      left.far.getWorldPosition(b);
+      return;
+    }
+    if (i === 1 && this.saber.style === 'staff' && right && this.equipped.right?.class !== 'lightsaber') {
+      // A polearm: the shaft's other half.
+      right.near.getWorldPosition(a);
+      right.far.getWorldPosition(b);
+      b.sub(a).multiplyScalar(-0.5).add(a);
+      return;
+    }
     if (i === 0) {
       p.saber.getWorldPosition(a);
       p.bladeTip.getWorldPosition(b);
@@ -609,6 +651,92 @@ export class Player {
     names.push(`trn_${from}_to_${to}`);
     const clip = rig.firstOf(...names);
     if (clip) rig.play(clip, { fadeIn: 0.08 });
+  }
+
+  /**
+   * Put a weapon from the rack in a hand: its model on the hand's hold point (the game's hardpoint,
+   * which its meshes are made for), its class picking the carries, the style and the sweep. Returns
+   * the class of kit the weapon wants (a blaster the bounty hunter's, a blade the jedi's).
+   */
+  equip(def: WeaponDef, model: THREE.Object3D, hand: 'right' | 'left' = 'right'): ClassId {
+    if (hand === 'left' && !ONE_HANDED.has(def.class)) hand = 'right';
+    this.unequip(hand);
+    const bone = this.handBones[hand];
+    const holder = new THREE.Group();
+    holder.name = `weapon:${def.id}`;
+    holder.add(model);
+    if (bone) {
+      const k = 1 / Math.max(bone.getWorldScale(new THREE.Vector3()).x, 1e-6);
+      holder.scale.setScalar(k);
+      bone.add(holder);
+    } else this.parts.rightArm.add(holder);
+    markActor(holder);
+    // The reach: the grip is the model's origin, the far end the extreme of its longest extent.
+    const near = new THREE.Object3D();
+    const far = new THREE.Object3D();
+    const b = def.bounds;
+    if (b) {
+      const ext = [0, 1, 2].map((k) => b.max[k] - b.min[k]);
+      const axis = ext.indexOf(Math.max(...ext));
+      const towards = Math.abs(b.max[axis]) >= Math.abs(b.min[axis]) ? b.max[axis] : b.min[axis];
+      far.position.setComponent(axis, towards);
+    } else far.position.y = def.length;
+    holder.add(near, far);
+    this.held[hand] = holder;
+    this.reach[hand] = { near, far };
+    this.equipped[hand] = def;
+    if (hand === 'right' && def.class === 'lightsaber') {
+      // The rack's hilt hangs where the placeholder's does, so the blade comes out of it.
+      holder.removeFromParent();
+      this.parts.saber.add(holder);
+      holder.scale.setScalar(1 / Math.max(this.parts.saber.getWorldScale(new THREE.Vector3()).x, 1e-6));
+    }
+    const fights = FIGHTS[def.class];
+    if (fights === 'gun') {
+      this.gunKind = gunKindOf(def.class);
+      this.gunClass = def.class as 'pistol' | 'carbine' | 'rifle' | 'heavy';
+    } else if (this.classId === 'jedi' && !this.saberOn) this.toggleSaber();
+    this.settleStyle();
+    this.updateBlades();
+    return fights === 'gun' ? 'bounty_hunter' : 'jedi';
+  }
+
+  /** Take the rack's weapon out of a hand (the placeholder comes back). */
+  unequip(hand: 'right' | 'left'): void {
+    const held = this.held[hand];
+    if (held) {
+      held.removeFromParent();
+      held.traverse((o) => {
+        const m = o as THREE.Mesh;
+        if (m.isMesh) m.geometry.dispose();
+      });
+    }
+    this.held[hand] = null;
+    this.reach[hand] = null;
+    this.equipped[hand] = null;
+    this.settleStyle();
+    this.updateBlades();
+  }
+
+  /**
+   * The saber styles the weapons in hand allow: a polearm fights as the staff, one blade in each hand as
+   * the dual style, a single sword or knife with the three single-blade styles, a lightsaber or empty
+   * hands with all five.
+   */
+  get allowedStyles(): SaberStyle[] {
+    const r = this.equipped.right;
+    const l = this.equipped.left;
+    if (r && FIGHTS[r.class] === 'gun') return STYLES;
+    if (r?.class === 'polearm') return ['staff'];
+    if (r && ONE_HANDED.has(r.class) && l && ONE_HANDED.has(l.class)) return ['dual'];
+    if (r && (FIGHTS[r.class] === 'single')) return ['fast', 'medium', 'strong'];
+    return STYLES;
+  }
+
+  /** Keep the style within what the hands allow. */
+  private settleStyle(): void {
+    const allowed = this.allowedStyles;
+    if (!allowed.includes(this.saber.style)) this.saber.style = allowed.includes('medium') ? 'medium' : allowed[0];
   }
 
   /** Size the placeholder gun to its kind: a pistol is a stub of the rifle until the weapons are converted. */
@@ -1218,7 +1346,7 @@ export class Player {
     this.torsoPitch += (wantedPitch - this.torsoPitch) * Math.min(1, dt * 10);
     // Aiming standing (not crouched, kneeling or prone) the torso also turns right by the tuned angle, since the
     // game's aimed poses point the arm off to the left of the body; the legs keep facing the camera.
-    const tune = this.gunTune[gun];
+    const tune = this.gunTune[this.gunClass];
     const low = this.crouching || this.kneeling;
     const wantedTwist = armedUp ? (this.aiming ? -(low ? tune.aimKneel : tune.aim) : this.gunReady ? -tune.ready : 0) * (Math.PI / 180) : 0;
     this.aimTwist += (wantedTwist - this.aimTwist) * Math.min(1, dt * 10);

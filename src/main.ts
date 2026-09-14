@@ -14,6 +14,8 @@ import { loadPlayerRig } from './player/rig';
 import { Character } from './player/character';
 import { GalaxyMap, type Poi } from './ui/galaxyMap';
 import { WardrobeUi } from './ui/wardrobeUi';
+import { WeaponsUi } from './ui/weaponsUi';
+import { WeaponCatalogue, type WeaponDef } from './player/weapons';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { Hud } from './ui/hud';
 import type { DriveInput } from './vehicles/speeder';
@@ -44,6 +46,8 @@ class App {
   private readonly hud: Hud;
   private readonly map: GalaxyMap;
   private readonly wardrobe: WardrobeUi;
+  private readonly weaponsUi: WeaponsUi;
+  private weapons: WeaponCatalogue | null = null;
   private readonly fade: HTMLElement;
   private readonly start: HTMLElement;
   private readonly timer = new THREE.Timer();
@@ -81,6 +85,12 @@ class App {
     this.hud = new Hud(this.ui);
     this.wardrobe = new WardrobeUi(this.ui, () => this.hud.setPrompt(''));
     this.wardrobe.setBaseUrl(import.meta.env.BASE_URL);
+    this.weaponsUi = new WeaponsUi(this.ui, (def, hand) => void this.equip(def, hand));
+    void WeaponCatalogue.load(import.meta.env.BASE_URL).then((c) => {
+      this.weapons = c;
+      this.weaponsUi.attach(c);
+      if (c) console.info(`weapons: ${c.weapons.length} on the rack, ${c.skipped.length} left out`);
+    });
     this.map = new GalaxyMap(
       this.ui,
       (p, zone) => void this.travel(p, zone),
@@ -336,6 +346,18 @@ class App {
         rig.play(exact, { loop, hold: !loop });
         return { playing: exact, matches: clips.slice(0, 20) };
       },
+      /** The weapons rack: `weapons('dl44')` lists matches; `equip('dl44')` or `equip('dl44', 'left')` puts one in a hand, `equip(null, 'left')` empties it. */
+      weapons: (find?: string) => {
+        const c = this.weapons;
+        if (!c) return 'no weapons converted (npm run swg -- weapons @SWG assets-private --retail-only)';
+        const f = find?.toLowerCase();
+        return { held: { right: this.player.equipped.right?.id ?? null, left: this.player.equipped.left?.id ?? null }, styles: this.player.allowedStyles, weapons: c.weapons.filter((w) => !f || w.id.toLowerCase().includes(f) || w.class.includes(f)).map((w) => `${w.id} (${w.class}, ${w.length} m)`).slice(0, 80), leftOut: c.skipped.length };
+      },
+      equip: (name: string | null, hand: 'right' | 'left' = 'right') => {
+        if (name === null) return this.equip(null, hand);
+        const def = this.weapons?.find(name);
+        return def ? this.equip(def, hand) : `no weapon matches ${name}`;
+      },
       /** Whether the torso is held steady over running legs while a pose rides the upper body (on by default). */
       steady: (on?: boolean) => {
         if (this.player.rig && on !== undefined) this.player.rig.steady = on;
@@ -369,16 +391,19 @@ class App {
         this.player.refitGrip();
         return { ...this.player.gripTune, effective: { right: this.player.tunedGrip('right'), left: this.player.tunedGrip('left') }, axes: this.player.rig?.grip ?? null };
       },
-      /** The blaster in hand, 'pistol' or 'rifle': which of the game's carries play. `gun('rifle', { aim: 30, aimKneel: 30, ready: 30 })` sets how far right, in degrees, that blaster's torso turns while aiming standing or moving, aiming kneeling or crouched, and in the hip-fire carry, so the pose's arm points at the crosshair. */
-      gun: (kind?: 'pistol' | 'rifle', tune?: { ready?: number; aim?: number; aimKneel?: number }) => {
-        if (kind) this.player.gunKind = kind;
+      /** The blaster in hand, 'pistol' or 'rifle': which of the game's carries play. `gun('carbine', { aim: 30, aimKneel: 30, ready: 30 })` sets how far right, in degrees, that kind's torso turns while aiming standing or moving, aiming kneeling or crouched, and in the hip-fire carry, so the pose's arm points at the crosshair; pistol, carbine, rifle and heavy each have their own. */
+      gun: (kind?: 'pistol' | 'carbine' | 'rifle' | 'heavy', tune?: { ready?: number; aim?: number; aimKneel?: number }) => {
+        if (kind) {
+          this.player.gunClass = kind;
+          this.player.gunKind = kind === 'pistol' ? 'pistol' : 'rifle';
+        }
         if (tune) {
-          const t = this.player.gunTune[kind ?? this.player.gunKind];
+          const t = this.player.gunTune[(kind as 'pistol' | 'carbine' | 'rifle' | 'heavy' | undefined) ?? this.player.gunClass];
           if (tune.ready !== undefined) t.ready = tune.ready;
           if (tune.aim !== undefined) t.aim = tune.aim;
           if (tune.aimKneel !== undefined) t.aimKneel = tune.aimKneel;
         }
-        return { kind: this.player.gunKind, tune: this.player.gunTune, aiming: this.player.aiming, ready: this.player.gunReady, sinceShot: Number(this.player.sinceShot.toFixed(1)), clips: this.player.rig?.clipsMatching(/pistol|rifle/) ?? [] };
+        return { kind: this.player.gunKind, class: this.player.gunClass, tune: this.player.gunTune, aiming: this.player.aiming, ready: this.player.gunReady, sinceShot: Number(this.player.sinceShot.toFixed(1)), clips: this.player.rig?.clipsMatching(/pistol|rifle/) ?? [] };
       },
       /** The saber defence rank (1..3): how bolts are turned away. */
       saberDefense: (rank?: number) => {
@@ -404,7 +429,7 @@ class App {
         <div class="sub">Star Wars Galaxies, rebuilt for the browser. Ten worlds, one very ambitious side project.</div>
         <div class="controls">
           <div><b>WASD</b> move · <b>Mouse</b> look · <b>Wheel</b> zoom · <b>Space</b> jump (hold to Force Jump higher) · <b>Ctrl</b> crouch (tap while moving to roll) · <b>Shift</b> walk · in water <b>Space</b>/<b>Ctrl</b> surface/dive, or look down and swim</div>
-          <div><b>LMB</b> attack or fire · <b>RMB</b> hold to block with the saber (bounty hunter: rapid fire) · <b>R</b> throw the saber (staff: kick) · <b>V</b> kneel · <b>Z</b> prone · <b>E</b> mount speeder · <b>C</b> switch class · <b>T</b> fast-forward time</div>
+          <div><b>LMB</b> attack or fire · <b>RMB</b> hold to block with the saber (bounty hunter: rapid fire) · <b>R</b> throw the saber (staff: kick) · <b>G</b> weapons rack · <b>V</b> kneel · <b>Z</b> prone · <b>E</b> mount speeder · <b>C</b> switch class · <b>T</b> fast-forward time</div>
           <div><b>M</b> galaxy map · <b>H</b> toggle help · <b>N</b> noclip fly (<b>+</b>/<b>-</b> speed) · <b>F</b> flashlight · <b>Esc</b> release mouse</div>
           <div><b>X</b> also crouches (a Mac turns Ctrl-click into a right click) · rebind any key in the console: <b>__debug.bind('crouch', 'KeyV')</b>, <b>__debug.bindings()</b></div>
         </div>
@@ -606,9 +631,40 @@ class App {
     this.dying = false;
   }
 
+  /** G: the weapons rack, with the mouse free to use it. */
+  private toggleWeapons(): void {
+    if (this.wardrobe.open) this.wardrobe.toggle();
+    if (this.weaponsUi.toggle()) {
+      this.weaponsUi.held = { right: this.player.equipped.right?.id ?? null, left: this.player.equipped.left?.id ?? null };
+      this.weaponsUi.render();
+      this.input.captured = true;
+      this.input.releaseLock();
+    } else {
+      this.input.captured = false;
+      this.input.requestLock();
+    }
+  }
+
+  /** Put a weapon from the rack in a hand (null empties it), switching to the kit that fights with it. */
+  async equip(def: WeaponDef | null, hand: 'right' | 'left'): Promise<string> {
+    if (!def) {
+      this.player.unequip(hand);
+      this.weaponsUi.held[hand] = null;
+      return `${hand} hand empty`;
+    }
+    if (!this.weapons) return 'no weapons converted';
+    const model = await this.weapons.model(def);
+    const wants = this.player.equip(def, model, hand);
+    this.weaponsUi.held = { right: this.player.equipped.right?.id ?? null, left: this.player.equipped.left?.id ?? null };
+    if (wants !== this.kit.id) this.setClass(wants);
+    this.hud.setPrompt(`${def.id} in the ${hand} hand (${def.class}, ${this.player.saber.style})`);
+    return `${def.id} in the ${hand} hand`;
+  }
+
   /** I: the wardrobe, with the mouse free to use it. */
   private toggleWardrobe(): void {
     const character = this.player.rig?.character ?? null;
+    if (this.weaponsUi.open) this.weaponsUi.hide();
     if (this.wardrobe.toggle()) {
       if (character) void this.wardrobe.attach(character, import.meta.env.BASE_URL).catch((err) => console.warn('wardrobe', err));
       else this.wardrobe.explain('This character is a single model, not a set of parts, so there is nothing to change. Convert it with <code>npm run swg -- parts</code>.');
@@ -696,6 +752,7 @@ class App {
       if (active) {
         if (input.pressedAction('map')) this.toggleMap();
         if (input.pressedAction('inventory')) this.toggleWardrobe();
+        if (input.pressedAction('weapons')) this.toggleWeapons();
         if (input.pressedAction('help')) this.hud.toggleHelp();
         if (!this.map.open && !this.wardrobe.open) {
           if (input.pressedAction('saberToggle') && this.kit.id === 'jedi' && !player.mounted) player.toggleSaber();

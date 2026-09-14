@@ -61,9 +61,15 @@ export class BountyHunterKit implements Kit {
     const onFoot = !player.mounted;
     // K switches the kind of blaster, as it switches the saber styles: the pistol's carries or the rifle's.
     if (input.pressedAction('saberStyle') && onFoot) {
-      player.gunKind = player.gunKind === 'pistol' ? 'rifle' : 'pistol';
-      player.fitGun();
-      this.gunNote = `blaster: ${player.gunKind}`;
+      if (player.equipped.right) this.gunNote = `${player.equipped.right.id} is a ${player.gunClass}; G opens the rack`;
+      else {
+        // The placeholder blaster cycles through the kinds, for their carries and turns.
+        const kinds = ['pistol', 'carbine', 'rifle', 'heavy'] as const;
+        player.gunClass = kinds[(kinds.indexOf(player.gunClass) + 1) % kinds.length];
+        player.gunKind = player.gunClass === 'pistol' ? 'pistol' : 'rifle';
+        player.fitGun();
+        this.gunNote = `blaster: ${player.gunClass}`;
+      }
     }
     this.fireCd = Math.max(0, this.fireCd - dt);
     this.detCd = Math.max(0, this.detCd - dt);

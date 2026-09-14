@@ -466,8 +466,10 @@ export class SaberCombat {
     return { fmove: fw ? (fw.amount ?? 1) : 0, smove: s.right && t >= s.right[0] && t <= s.right[1] ? s.right[2] : 0, hop: hop ? hop.vy * UNIT : null };
   }
 
-  cycleStyle(): SaberStyle {
-    this.style = STYLES[(STYLES.indexOf(this.style) + 1) % STYLES.length];
+  cycleStyle(allowed: SaberStyle[] = STYLES): SaberStyle {
+    const list = allowed.length ? allowed : STYLES;
+    const i = list.indexOf(this.style);
+    this.style = list[(i + 1) % list.length];
     return this.style;
   }
 
