@@ -108,6 +108,9 @@ export interface Wardrobe {
   items: { id: string; kind: string; gender: string; template: string; parts: PartDef[] }[];
 }
 
+/** What is on or of the head: the head itself, hair, and headwear, hidden from a view out of the eyes. */
+const HEAD_PART = /head|hair|face|mouth|eye|beard|helmet|helm|hat\b|hood|mask|goggle|cap\b|visor|crown|tiara|headband|headdress/i;
+
 /** One loaded part: its meshes, bound to the shared skeleton, and what it hides. */
 interface Part {
   /**
@@ -271,10 +274,24 @@ export class Character {
    * hides "chest" removes exactly the body triangles the mesh marked as chest -- the original
    * client's own scheme, applied per frame's worth of dressing rather than at conversion time.
    */
+  /** In first person the head and what sits on it are out of the picture; the body and its animation stay. */
+  private headHidden = false;
+
+  /** Hide or show the head, the hair and anything worn on the head, for a view from the eyes. */
+  setHeadHidden(hidden: boolean): void {
+    if (this.headHidden === hidden) return;
+    this.headHidden = hidden;
+    this.applyOcclusion();
+  }
+
+  private onHead(part: Part, mesh: THREE.Object3D): boolean {
+    return HEAD_PART.test(part.key) || HEAD_PART.test(mesh.name);
+  }
+
   private applyOcclusion(): void {
     this.customizer?.invalidate();
     // What is on is visible to start with; culling below may then hide a whole mesh.
-    for (const part of this.parts.values()) for (const m of part.meshes) m.visible = part.worn;
+    for (const part of this.parts.values()) for (const m of part.meshes) m.visible = part.worn && !(this.headHidden && this.onHead(part, m));
     // Outermost layers hide the zones of everything under them, and a layer's hiding only takes
     // effect below it -- two garments on the same layer do not cut holes in each other.
     const byLayer = [...this.parts.values()].filter((p) => p.worn).sort((a, b) => b.layer - a.layer);

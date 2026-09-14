@@ -6,7 +6,14 @@ const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v));
 /** Distance along from->to at which the world blocks the camera, or null when clear. */
 export type CameraBlocker = (from: THREE.Vector3, to: THREE.Vector3) => number | null;
 
-const FIRST_PERSON_BELOW = 1.2;
+/** Closer than this and the view is from the eyes: the body stays, the head goes. */
+const FIRST_PERSON_BELOW = 0.5;
+/** The nearest the orbit sits when it is not first person: the shoulders fill the side of the view. */
+const NEAREST_ORBIT = 0.7;
+/** One wheel notch scales the distance by this: small steps in close, larger ones far out. */
+const ZOOM_STEP = 1.08;
+/** Seconds for the distance to settle on the wheel's target. */
+const ZOOM_LAG = 0.09;
 /** How far below level the third-person camera itself may go; the view tilts on past it. */
 const LOWEST_CAMERA_PITCH = -0.35;
 const EYE_HEIGHT = 1.5;
@@ -23,7 +30,9 @@ export class ThirdPersonCamera {
   yaw = Math.PI;
   pitch = 0.32;
   distance = 7;
-  /** Zoomed in past the character: first person, character hidden. */
+  /** Where the wheel has asked the distance to go; the distance eases there. */
+  zoomTarget = 7;
+  /** Zoomed in past the character: first person, from the eyes. */
   firstPerson = false;
   /** Aiming a blaster: the camera comes in over the shoulder and the view narrows. */
   aim = false;
@@ -37,7 +46,28 @@ export class ThirdPersonCamera {
   private chasing = false;
 
   constructor(aspect: number) {
-    this.camera = new THREE.PerspectiveCamera(60, aspect, 0.1, 9000);
+    this.camera = new THREE.PerspectiveCamera(60, aspect, 0.05, 9000);
+  }
+
+  /**
+   * The wheel moves a target the distance glides to, by a fraction of itself per notch, so the
+   * steps are fine in close and the motion never jumps. In past the nearest orbit it drops to the
+   * eyes; out from there it comes back to that orbit.
+   */
+  private zoom(input: Input, dt: number, max = 24): void {
+    if (input.wheel) {
+      let t = this.zoomTarget;
+      if (t < NEAREST_ORBIT) t = input.wheel > 0 ? NEAREST_ORBIT : 0;
+      else {
+        t = clamp(t * Math.pow(ZOOM_STEP, input.wheel), 0, max);
+        if (t < NEAREST_ORBIT) t = input.wheel > 0 ? NEAREST_ORBIT : 0;
+      }
+      this.zoomTarget = t;
+      input.wheel = 0;
+    }
+    this.distance += (this.zoomTarget - this.distance) * (1 - Math.exp(-dt / ZOOM_LAG));
+    if (Math.abs(this.zoomTarget - this.distance) < 0.002) this.distance = this.zoomTarget;
+    this.firstPerson = this.distance < FIRST_PERSON_BELOW;
   }
 
   /**
@@ -45,11 +75,9 @@ export class ThirdPersonCamera {
    * looping with it. The orbit's yaw is kept at the ship's heading so leaving it is seamless.
    */
   chase(input: Input, dt: number, target: THREE.Vector3, attitude: THREE.Quaternion, heading: number, reach: number, cockpit: THREE.Vector3 | null): void {
-    this.distance = clamp(this.distance + input.wheel * 0.9, 0, 24);
-    input.wheel = 0;
+    this.zoom(input, dt);
     this.yaw = heading + Math.PI;
     this.pitch = 0.32;
-    this.firstPerson = this.distance < FIRST_PERSON_BELOW;
     // The camera's frame follows the ship's with a lag (a quarter of a second to catch up), so a
     // turn shows the ship swinging and banking against the view before the view comes round.
     if (!this.chasing) {
@@ -89,20 +117,19 @@ export class ThirdPersonCamera {
 
   /**
    * @param blocked  physics query for what the camera would cut through; null skips collision (noclip)
+   * @param eyes     where the character's eyes are this frame, for the first-person view; the standing eye height over `target` otherwise
    */
-  update(input: Input, target: THREE.Vector3, blocked: CameraBlocker | null): void {
+  update(input: Input, target: THREE.Vector3, blocked: CameraBlocker | null, dt = 1 / 60, eyes: THREE.Vector3 | null = null): void {
     if (input.locked) {
       this.yaw -= input.mouseDX * 0.0025;
       this.pitch = clamp(this.pitch + input.mouseDY * 0.0025, this.firstPerson ? -1.4 : -1.25, 1.4);
     }
-    this.distance = clamp(this.distance + input.wheel * 0.9, 0, 24);
     // The movement is spent here, not at the end of the frame: an error later in the frame used to
     // leave it accumulating, and every frame after re-applied the growing sum, so the view slid
     // on with a momentum of its own whenever something in a particular direction failed to draw.
     input.mouseDX = 0;
     input.mouseDY = 0;
-    input.wheel = 0;
-    this.firstPerson = this.distance < FIRST_PERSON_BELOW;
+    this.zoom(input, dt);
 
     this.focus.copy(target).y += EYE_HEIGHT;
     const cp = Math.cos(this.pitch);
@@ -114,8 +141,11 @@ export class ThirdPersonCamera {
     this.posDir.set(Math.sin(this.yaw) * cpp, Math.sin(posPitch), Math.cos(this.yaw) * cpp);
 
     if (this.firstPerson) {
-      this.camera.position.copy(this.focus);
-      this.camera.lookAt(this.desired.copy(this.focus).sub(this.dir));
+      // From the eyes as the animation carries them (a crouch, a jump, a run's bob), a touch
+      // forward of the head's joint so the neck is not in the picture.
+      if (eyes) this.focus.copy(eyes);
+      this.camera.position.copy(this.focus).addScaledVector(this.dir, -0.12);
+      this.camera.lookAt(this.desired.copy(this.camera.position).sub(this.dir));
       return;
     }
 
@@ -131,7 +161,7 @@ export class ThirdPersonCamera {
       // Pull the camera in front of whatever it would cut through: walls, props, ground.
       const hit = blocked(this.focus, this.desired);
       if (hit !== null) {
-        dist = Math.max(0.6, hit - 0.35);
+        dist = Math.max(0.3, hit - 0.35);
         this.desired.copy(this.posDir).multiplyScalar(dist).add(this.focus);
       }
     }

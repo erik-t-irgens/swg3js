@@ -193,8 +193,8 @@ class App {
         if (!c?.customizer) return 'no live recipes on this character';
         return c.customizer.describe(mesh);
       },
-      /** The normal maps' strength and way up, live: `normals(1, -1)` is the game's (green down), `normals(1, 1)` the other, `normals(0, 0)` none. */
-      normals: (x = 1, y = -1) => {
+      /** The normal maps' strength and way up, live: `normals(1, 1)` is the default, `normals(1, -1)` the other way up, `normals(0, 0)` none. */
+      normals: (x = 1, y = 1) => {
         const c = this.player.rig?.character;
         if (!c?.customizer) return 'no live recipes on this character';
         return `${c.customizer.setNormalScale(x, y)} materials set to (${x}, ${y})`;
@@ -767,18 +767,31 @@ class App {
   }
 
   /** The camera after everything has moved: chasing a ship in flight in its own frame, else orbiting the player. */
-  private updateCamera(blocked: import('./core/camera').CameraBlocker | null): void {
+  private updateCamera(blocked: import('./core/camera').CameraBlocker | null, dt = 1 / 60): void {
     const { player, input } = this;
     const ship = player.mounted?.spec.ship && player.mounted.airborne && !input.held('freeLook') ? player.mounted : null;
     if (ship) {
-      this.cam.chase(input, 1 / 60, ship.pos, ship.attitude, ship.heading, 6 + ship.radius * 2.2, ship.cockpit ? tmp.fromArray(ship.cockpit) : null);
+      this.cam.chase(input, dt, ship.pos, ship.attitude, ship.heading, 6 + ship.radius * 2.2, ship.cockpit ? tmp.fromArray(ship.cockpit) : null);
       // In the cockpit the hull would fill the view: it is hidden until the camera comes back out.
       ship.group.visible = !this.cam.firstPerson;
     } else {
       this.cam.release();
       if (player.mounted?.spec.ship) player.mounted.group.visible = true;
-      this.cam.update(input, player.pos, blocked);
+      this.cam.update(input, player.pos, blocked, dt, this.eyes());
     }
+  }
+
+  private readonly eyePoint = new THREE.Vector3();
+
+  /** Where the player's eyes are this frame: a little above and ahead of the head's joint, as the animation places it; null without a head. */
+  private eyes(): THREE.Vector3 | null {
+    const rig = this.player.rig;
+    const head = rig?.boneFor('head');
+    if (!rig || !head) return null;
+    head.getWorldPosition(this.eyePoint);
+    // The joint sits at the skull's base; the eyes are a hand up and ahead in the head's own frame.
+    this.eyePoint.add(tmp.set(0, 0.09, 0.06).applyQuaternion(this.player.group.quaternion));
+    return this.eyePoint;
   }
 
   /** Drive the ridden vehicle from the keys (the mouse or A/D steer, Alt frees the look, W/S throttle, Shift boost, Space hop, the view's tilt or Space and X climb and sink), step every vehicle, and seat the rider. */
@@ -1152,13 +1165,18 @@ class App {
       if (simulate && player.hp <= 0) void this.die();
 
       player.inside = this.world.inside;
-      this.updateCamera(player.noclip ? null : (from, to) => this.physics.cameraBlock(from, to, player.body, this.world.inside));
+      this.updateCamera(player.noclip ? null : (from, to) => this.physics.cameraBlock(from, to, player.body, this.world.inside), dt);
       if (this.torch.visible) {
         this.torch.position.copy(this.cam.camera.position);
         this.cam.camera.getWorldDirection(torchDir);
         this.torch.target.position.copy(this.cam.camera.position).addScaledVector(torchDir, 12);
       }
-      player.group.visible = !this.cam.firstPerson;
+      // First person from a parts character keeps the body in the picture, headless; a single model hides whole.
+      const parts = player.rig?.character;
+      if (parts) {
+        player.group.visible = true;
+        parts.setHeadHidden(this.cam.firstPerson);
+      } else player.group.visible = !this.cam.firstPerson;
       this.world.updateShadows(performance.now());
 
       let prompt = '';

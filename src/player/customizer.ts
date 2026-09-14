@@ -234,8 +234,8 @@ export class Customizer {
     }
   }
 
-  /** How the normal maps are read: their strength and whether green points down the texture (the DirectX way, the game's). */
-  normalScale = new THREE.Vector2(1, -1);
+  /** How the normal maps are read: their strength and green up the texture, as the renderer reads it (checked by eye on the wrinkles). */
+  normalScale = new THREE.Vector2(1, 1);
 
   /** Change the strength or flip the normal maps on every material that has one, live. */
   setNormalScale(x: number, y: number): number {
