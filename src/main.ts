@@ -336,6 +336,11 @@ class App {
         rig.play(exact, { loop, hold: !loop });
         return { playing: exact, matches: clips.slice(0, 20) };
       },
+      /** Whether the torso is held steady over running legs while a pose rides the upper body (on by default). */
+      steady: (on?: boolean) => {
+        if (this.player.rig && on !== undefined) this.player.rig.steady = on;
+        return this.player.rig?.steady ?? null;
+      },
       /** Play a clip once on the upper body over whatever the legs do (a shot, a gesture), as the game's shots play. */
       upper: (name: string) => {
         const rig = this.player.rig;
@@ -364,7 +369,7 @@ class App {
         this.player.refitGrip();
         return { ...this.player.gripTune, effective: { right: this.player.tunedGrip('right'), left: this.player.tunedGrip('left') }, axes: this.player.rig?.grip ?? null };
       },
-      /** The blaster in hand, 'pistol' or 'rifle': which of the game's carries play. `gun(undefined, { aimYaw: 45 })` sets how far right, in degrees, the body turns while aiming so the pose's arm points at the crosshair; `readyYaw` the same for the combat carry. */
+      /** The blaster in hand, 'pistol' or 'rifle': which of the game's carries play. `gun(undefined, { aimYaw: 30 })` sets how far right, in degrees, the torso turns while aiming standing so the pose's arm points at the crosshair; `readyYaw` the same for the hip-fire carry. */
       gun: (kind?: 'pistol' | 'rifle', tune?: { aimYaw?: number; readyYaw?: number }) => {
         if (kind) this.player.gunKind = kind;
         if (tune?.aimYaw !== undefined) this.player.gunTune.aimYaw = tune.aimYaw;

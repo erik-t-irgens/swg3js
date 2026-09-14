@@ -112,6 +112,7 @@ const tmpQ = new THREE.Quaternion();
 const UP_AXIS = new THREE.Vector3(0, 1, 0);
 const RIGHT_AXIS = new THREE.Vector3(1, 0, 0);
 const pitchQ = new THREE.Quaternion();
+const steadyQ = new THREE.Quaternion();
 const rootQ = new THREE.Quaternion();
 const parentQ = new THREE.Quaternion();
 const alignQ = new THREE.Quaternion();
@@ -137,6 +138,8 @@ export class CharacterRig {
   private readonly materials: THREE.MeshStandardMaterial[] = [];
   private readonly clipSpeeds: Record<string, number>;
   private readonly hold: Set<string>;
+  /** Every bone's rest rotation under its parent, for holding the torso steady over running legs. */
+  private readonly restLocal = new Map<THREE.Bone, THREE.Quaternion>();
   /** Clips that add to the pose underneath instead of replacing it (the game's add_ shots). */
   private readonly additive = new Set<string>();
   readonly grip: GripAxes | null;
@@ -192,12 +195,15 @@ export class CharacterRig {
     this.clipSpeeds = options.clipSpeeds ?? {};
     this.hold = new Set(options.hold ?? []);
     // The game's transitions into an aimed pose end in it and have no loop of their own: held at their end.
-    for (const clip of clips) if (/^trn_.*_aimed$/.test(clip.name)) this.hold.add(clip.name);
+    for (const clip of clips) if (/^trn_.*_(aimed|ready)$/.test(clip.name)) this.hold.add(clip.name);
     this.grip = options.grip ?? null;
     this.partialClips = options.partialClips ?? {};
     this.mixer = new THREE.AnimationMixer(scene);
     scene.traverse((o) => {
-      if (o instanceof THREE.Bone) this.bones.set(o.name, o);
+      if (o instanceof THREE.Bone) {
+        this.bones.set(o.name, o);
+        this.restLocal.set(o, o.quaternion.clone());
+      }
     });
     for (const clip of clips) {
       // The game's add_ clips (a blaster's shots) are deltas on whatever plays: made additive against the rest pose.
@@ -427,6 +433,7 @@ export class CharacterRig {
 
   update(dt: number): void {
     this.mixer.update(dt);
+    this.steadyUpper();
     if (this.upperShot) {
       this.upperShotTime += dt;
       if (this.upperShotTime >= this.upperShotEnds - 0.05) {
@@ -523,6 +530,32 @@ export class CharacterRig {
   /** What plays now, for the console. */
   describe(): { state: RigState | null; clip: string | null; upper: string | null; override: string | null; shot: string | null } {
     return { state: this.state, clip: this.current?.getClip().name ?? null, upper: this.upperName, override: this.override?.getClip().name ?? null, shot: this.shotName ?? this.upperShot?.getClip().name.replace(/^upper:/, '') ?? null };
+  }
+
+  /**
+   * With a pose riding the upper body over locomotion legs, the pelvis's rock from the run would carry
+   * the torso with it: the lowest spine bone is turned back by the pelvis's departure from its rest,
+   * so the torso sits as if the pelvis stood still while the legs run.
+   */
+  /** Whether the torso is held steady over locomotion legs while a pose rides the upper body. */
+  steady = true;
+  private readonly steadied = { clean: new THREE.Quaternion(), applied: new THREE.Quaternion() };
+
+  private steadyUpper(): void {
+    if (!this.upper || !this.steady) return;
+    const names = this.upperBones();
+    let base: THREE.Bone | null = null;
+    for (const bone of this.bones.values()) if (names.has(bone.name) && bone.parent instanceof THREE.Bone && !names.has(bone.parent.name)) base = bone;
+    const parent = base?.parent;
+    const rest = parent instanceof THREE.Bone ? this.restLocal.get(parent) : undefined;
+    if (!base || !(parent instanceof THREE.Bone) || !rest) return;
+    // The mixer only writes a bone when its value changes, so a held pose leaves last frame's corrected
+    // value in place: put the clean pose back first, as the torso twist does, or the turn stacks up.
+    if (base.quaternion.equals(this.steadied.applied)) base.quaternion.copy(this.steadied.clean);
+    this.steadied.clean.copy(base.quaternion);
+    steadyQ.copy(parent.quaternion).invert().multiply(rest);
+    base.quaternion.premultiply(steadyQ);
+    this.steadied.applied.copy(base.quaternion);
   }
 
   /** The bones from the lowest spine bone up: the torso, arms and head. */

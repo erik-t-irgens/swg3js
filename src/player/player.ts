@@ -238,8 +238,12 @@ export class Player {
    * turns the hilt about the forearm in Jedi Academy's held poses only (stances, saber runs), and
    * `jkaRoll` in every Jedi Academy clip, swings included. Both default to nothing.
    */
-  /** The body's turn to the right, in degrees, while aiming or in the combat carry: the game's aimed poses point the arm off to the left of the body. */
-  readonly gunTune = { aimYaw: 45, readyYaw: 0 };
+  /** The torso's turn to the right, in degrees, while aiming standing (the game's aimed poses point the arm off to the left of the body) and in the hip-fire carry. */
+  readonly gunTune = { aimYaw: 30, readyYaw: 0 };
+  /** The torso's current turn for the aim, eased. */
+  private aimTwist = 0;
+  /** The hip-fire pose chosen when the combat carry came up, kept while it lasts (a rifle's is a held transition into it). */
+  private readyPose: string | null = null;
   readonly gripTune: { jkaRoll: number; stanceRoll: number; source: 'solved' | 'tags'; tilt: number; turn: number } = { jkaRoll: 0, stanceRoll: 0, source: 'solved', tilt: 0, turn: 0 };
   /** The hand bones the sabers hang from, for refitting the grip from the console. */
   private handBones: { right: THREE.Bone | null; left: THREE.Bone | null } = { right: null, left: null };
@@ -1060,10 +1064,7 @@ export class Player {
     if (this.lockedHeading) {
       this.heading = Math.atan2(this.lockedHeading.x, this.lockedHeading.z);
     } else if (faceCamera) {
-      // With a blaster up the body turns right so the aimed pose's arm points where the camera looks.
-      const armedNow = this.classId === 'bounty_hunter' && this.hasGunClips && !this.prone && !this.swimming;
-      const yawOffset = armedNow ? ((this.aiming ? this.gunTune.aimYaw : this.gunReady ? this.gunTune.readyYaw : 0) * Math.PI) / 180 : 0;
-      let diff = camYaw - yawOffset - this.heading;
+      let diff = camYaw - this.heading;
       diff = Math.atan2(Math.sin(diff), Math.cos(diff));
       this.heading += diff * Math.min(1, dt * 16);
     } else if (moving && directional) {
@@ -1129,31 +1130,43 @@ export class Player {
     // the rifle's with loop_rifle_a_combat_standing_aimed; those when the table has them, else the relaxed carry.
     // The combat loop may be a single clip rather than a speed set: then it is the combat idle, and while
     // moving it rides the upper body over the relaxed walk or run.
-    const combatIdle = rig.clipMatching(new RegExp(`^loop_${gun}(_a)?_combat_standing(_aimed)?(:speed0)?$`));
-    const combatMoves = !!rig.clipMatching(new RegExp(`^loop_${gun}(_a)?_combat_standing(_aimed)?:speed1$`));
+    // The legs (and the arms when nothing rides them) are the relaxed carry's idle, walk and run for every
+    // carry; the hip-fire and aimed poses ride the upper body over them, so the legs never sway them.
     for (const [state, n] of [['Idle', 0], ['Walk', 1], ['Run', 2]] as const) {
       const relaxed = new RegExp(gun === 'pistol' ? `^loop_pistol_standing:speed${n}$` : `^loop_rifle:speed${n}$`);
-      const combat = (n === 0 ? combatIdle : rig.clipMatching(new RegExp(`^loop_${gun}(_a)?_combat_standing(_aimed)?:speed${n}$`))) ?? relaxed;
-      rig.prefer(`gunReady${state}`, combat);
-      rig.prefer(`gunAim${state}`, combat);
+      rig.prefer(`gunReady${state}`, relaxed);
+      rig.prefer(`gunAim${state}`, relaxed);
     }
     for (const [state, n] of [['Idle', 0], ['Move', 1]] as const) {
       rig.prefer(`gunProne${state}`, new RegExp(`^loop_${gun}_prone:speed${n}`));
       rig.prefer(`gunProneReady${state}`, new RegExp(`^loop_${gun}_combat_prone:speed${n}`));
       rig.prefer(`gunProneAim${state}`, new RegExp(`^loop_${gun}_combat_prone_aimed:speed${n}`));
     }
-    // Kneeling: the hierarchy's combat kneel (loop_<kind>_combat_kneeling_aimed) when aiming or in combat, else the relaxed kneel.
-    const kneelAimed = armed ? rig.clipMatching(new RegExp(`^loop_${gun}_(combat_kneeling|kneeling_combat)(_aimed)?`)) : null;
-    rig.prefer('kneel', armed ? ((this.aiming || this.gunReady) && kneelAimed ? kneelAimed : new RegExp(`^loop_${gun}_kneeling`)) : null);
-    // Aiming standing or kneeling without an aimed loop of its own: the transition into the aimed pose is
-    // held at its end on the upper body over the carry's legs, and its inverse plays once when the aim ends.
-    // The hierarchy has no separate aimed pose (the combat loop is the aimed one), so the held transition is
-    // only a stand-in for the pistol while its combat loop is missing from the table; the rifle's
-    // trn_rifle_a_* transitions belong to no state of the hierarchy and aimed off to the side, so they are not used.
-    const hasAimLoop = armed && (this.kneeling ? !!kneelAimed : !!rig.clipMatching(new RegExp(`^loop_${gun}(_a)?_combat_standing(_aimed)?:speed0$`)));
-    const aimIn = armed && this.aiming && !this.prone && !hasAimLoop ? rig.firstOf(...(this.kneeling ? [`trn_${gun}_combat_kneeling_to_${gun}_combat_kneeling_aimed`] : gun === 'pistol' ? ['trn_pistol_combat_to_pistol_combat_aimed'] : [])) : null;
-    if (armed && this.wasAiming && !this.aiming && !this.prone && !this.swimming && !hasAimLoop) {
-      const out = rig.firstOf(...(this.kneeling ? [`trn_${gun}_combat_kneeling_aimed_to_${gun}_combat_kneeling`] : gun === 'pistol' ? ['trn_pistol_combat_standing_aimed_to_pistol_combat_standing'] : []));
+    // Kneeling keeps the relaxed kneel underneath; the poses ride its upper body like the standing ones.
+    rig.prefer('kneel', armed ? new RegExp(`^loop_${gun}_kneeling`) : null);
+    // The poses on the upper body. Aimed: the table's aimed loop when it has one, else the transition into
+    // the aimed pose held at its end (the pistol's, the rifle's ready-to-aimed, kneeling's own). Hip fire
+    // (the combat carry after a shot): the pistol's one-handed riding carry (loop_pistol_riding, held at
+    // chest height), the rifle's "ready" pose, which the table has only as the end of its transitions
+    // (hold-to-ready, or aimed-to-ready when the aim has just ended), so those are held at their ends.
+    const armedUp = armed && !this.prone && !this.swimming;
+    let gunUpper: string | null = null;
+    if (armedUp && this.aiming) {
+      gunUpper = this.kneeling
+        ? rig.firstOf(...rig.clipsMatching(new RegExp(`^loop_${gun}_(combat_kneeling|kneeling_combat)_aimed`)), `trn_${gun}_combat_kneeling_to_${gun}_combat_kneeling_aimed`)
+        : rig.firstOf(...rig.clipsMatching(new RegExp(`^loop_${gun}(_a)?_combat_standing_aimed(:speed0)?$`)), gun === 'pistol' ? 'trn_pistol_combat_to_pistol_combat_aimed' : 'trn_rifle_a_standing_ready_to_aimed');
+      this.readyPose = null;
+    } else if (armedUp && this.gunReady) {
+      if (!this.readyPose || !this.readyPose.includes(gun)) {
+        this.readyPose = gun === 'pistol'
+          ? rig.firstOf('loop_pistol_riding', ...rig.clipsMatching(/^loop_pistol_combat_standing_aimed/))
+          : rig.firstOf(this.wasAiming ? 'trn_rifle_a_standing_aimed_to_ready' : 'trn_rifle_a_standing_hold_to_ready', 'loop_rifle_riding');
+      }
+      gunUpper = this.readyPose;
+    } else this.readyPose = null;
+    // The pistol's way down from the aim plays once before its hip-fire pose takes over.
+    if (armedUp && this.wasAiming && !this.aiming && gun === 'pistol') {
+      const out = rig.firstOf(this.kneeling ? 'trn_pistol_combat_kneeling_aimed_to_pistol_combat_kneeling' : 'trn_pistol_combat_standing_aimed_to_pistol_combat_standing');
       if (out) rig.playUpper(out, 0.08);
     }
     this.wasAiming = this.aiming;
@@ -1168,7 +1181,7 @@ export class Player {
       // Lying down: a blaster has its own prone carries, else the game's crawl.
       if (armed) rig.setState(`${this.aiming ? 'gunProneAim' : this.gunReady ? 'gunProneReady' : 'gunProne'}${moving ? 'Move' : 'Idle'}` as RigState, speed);
       else rig.setState(moving ? 'proneMove' : 'prone', speed);
-    } else if (this.kneeling) rig.setState('kneel', 0, aimIn);
+    } else if (this.kneeling) rig.setState('kneel', 0, gunUpper);
     else if (this.crouching) {
       // Crouched: the game's own loop_crouched clips unless Jedi Academy's animations are in charge.
       const swg = !this.jkaMode && !!rig.clipMatching(/^loop_crouched:speed1/);
@@ -1187,8 +1200,7 @@ export class Player {
     } else if (armed) {
       // The blaster carries: relaxed, combat after a shot, or aimed (the combat legs under the held aimed pose); each with its idle, walk and run.
       const carry = this.aiming ? 'gunAim' : this.gunReady ? 'gunReady' : 'gun';
-      const combatOnTop = moving && carry !== 'gun' && !combatMoves && combatIdle ? combatIdle : null;
-      rig.setState(`${carry}${!moving ? 'Idle' : running ? 'Run' : 'Walk'}` as RigState, speed, aimIn ?? combatOnTop);
+      rig.setState(`${carry}${!moving ? 'Idle' : running ? 'Run' : 'Walk'}` as RigState, speed, gunUpper);
     } else if (!moving) rig.setState('idle');
     // Moving with the block held: Jedi Academy's saber run and walk; otherwise the game's own, saber lit or not.
     else if (this.jkaMode) rig.setState(running ? 'runSaber' : 'walkSaber', speed);
@@ -1200,7 +1212,12 @@ export class Player {
     const gunUp = this.classId === 'bounty_hunter' && !this.prone && !this.swimming && !this.mounted && (this.aiming || this.gunReady);
     const wantedPitch = gunUp ? -Math.asin(THREE.MathUtils.clamp(this.lookDir.y, -1, 1)) : 0;
     this.torsoPitch += (wantedPitch - this.torsoPitch) * Math.min(1, dt * 10);
-    rig.twistTorso(rig.overridingJka ? 0 : this.torsoTwist, rig.overridingJka ? 0 : this.torsoPitch);
+    // Aiming standing (not crouched, kneeling or prone) the torso also turns right by the tuned angle, since the
+    // game's aimed poses point the arm off to the left of the body; the legs keep facing the camera.
+    const standingUp = armedUp && !this.crouching && !this.kneeling;
+    const wantedTwist = standingUp ? (this.aiming ? -this.gunTune.aimYaw : this.gunReady ? -this.gunTune.readyYaw : 0) * (Math.PI / 180) : 0;
+    this.aimTwist += (wantedTwist - this.aimTwist) * Math.min(1, dt * 10);
+    rig.twistTorso(rig.overridingJka ? 0 : this.torsoTwist + this.aimTwist, rig.overridingJka ? 0 : this.torsoPitch);
     // The hilt turns in the hand to whichever convention poses the arms: the game's own clips
     // hold it their way, Jedi Academy's the way its swings were made for.
     // The hilt's axis: the solved one through Jedi Academy's one-off clips (its swings, katas, throws),
