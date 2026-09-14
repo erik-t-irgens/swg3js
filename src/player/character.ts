@@ -39,6 +39,8 @@ export interface CustomVariable {
   count?: number;
   /** Which files (shaders, texture renderers) read it. */
   sources: string[];
+  /** The meshes it was met on (a private variable belongs to each of these separately). */
+  meshes?: string[];
 }
 
 /** One playable species and gender, as characters/index.json lists it. */
@@ -373,12 +375,28 @@ export class Character {
 
   /** Set a colour or choice live: the skin, hair or eye textures that read it are rendered again. Returns how many. */
   setVariable(name: string, value: number): number {
-    return this.customizer?.set(name, value) ?? 0;
+    if (!this.customizer) {
+      this.plainValues.set(name, value);
+      return 0;
+    }
+    return this.customizer.set(name, value);
   }
 
   /** The customization values in force (the pack's, with whatever has been changed). */
   variableValues(): Record<string, number> {
-    return Object.fromEntries(this.customizer?.values ?? []);
+    return Object.fromEntries([...this.plainValues, ...(this.customizer?.values ?? [])]);
+  }
+
+  private readonly plainValues = new Map<string, number>();
+  private baseScale: number | null = null;
+  /** The height slider's setting, 0 to 1; the whole character is scaled by it. */
+  height = 0.5;
+
+  /** Scale the character for a height setting from 0 (shortest) to 1 (tallest), over the size the rig gave it. */
+  setHeight(t: number): void {
+    this.height = Math.min(1, Math.max(0, t));
+    if (this.baseScale === null) this.baseScale = this.group.scale.x || 1;
+    this.group.scale.setScalar(this.baseScale * (0.86 + 0.28 * this.height));
   }
 
   /** Every shape slider, and where each sits. */

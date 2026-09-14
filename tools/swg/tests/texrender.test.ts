@@ -92,4 +92,14 @@ ok(written.length === 1 && exported.textures.MAIN === written[0] && exported.pas
 ok(palettesOf({ shader: exported, slots: [] } as unknown as Recipe)[0] === 'palette/skin.pal', 'the palettes a recipe needs are listed');
 const again = bakeShader(liveShader(exported, (f) => (f === written[0] ? tex : null), new Map(), palettes)!, 'MAIN')!;
 ok(again.rgba[0] === baked.rgba[0] || near(again.rgba[0], 128), 'the exported shader bakes like the hand-written one');
+// A private variable is the mesh's own: the body's colour 1 does not reach a shirt's, and a scoped key does.
+const priv: ShaderDef = { ...shader, palettes: [{ tag: 'TFAC', palette: 'palette/skin.pal', variable: '/private/index_color_1', private: true, default: 0 }] };
+const shirt: Recipe = { mesh: 'shirt_s03_m_l0', material: 'shader/shirt.sht', kind: 'bake', baseTag: 'MAIN', shader: priv, slots: [] };
+const body: Recipe = { mesh: 'body_m_l0', material: 'shader/body.sht', kind: 'bake', baseTag: 'MAIN', shader: priv, slots: [] };
+const vals = new Map([['body_m_l0|/private/index_color_1', 2], ['index_color_1', 1]]);
+const shirtOut = renderRecipe(shirt, vals, palettes, images)!;
+const bodyOut = renderRecipe(body, vals, palettes, images)!;
+ok(bodyOut.rgba[2] > 0 && bodyOut.rgba[1] === 0, "the body's scoped value reaches the body (blue)");
+ok(shirtOut.rgba[0] > 0 && shirtOut.rgba[1] === 0 && shirtOut.rgba[2] === 0, 'the shirt keeps its default (red): an unscoped value never reaches a private variable');
+ok(recipeVariables(shirt).has('shirt_s03_m_l0|index_color_1') && !recipeVariables(shirt).has('index_color_1'), "a private variable's key names its mesh");
 console.log(`${checks} checks passed`);

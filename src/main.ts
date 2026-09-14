@@ -181,6 +181,12 @@ class App {
        * body, a head and whatever is worn, each its own file. Then `.wear(name)`, `.remove(name)`,
        * `.setMorph(name, v)` and `.status()` on what comes back.
        */
+      /** The character's appearance: every live variable (key, kind, palette size or choices, which mesh owns it), the shape sliders, and the values in force. */
+      appearance: () => {
+        const c = this.player.rig?.character;
+        if (!c) return 'no parts character';
+        return { live: !!c.customizer, variables: (c.customizer?.variables() ?? []).map((v) => `${v.key}: ${v.kind}${v.colors ? ` ${v.colors.length} colours` : v.count ? ` ${v.count} choices` : ''}${v.private ? ` (private to ${v.mesh})` : ''} default ${v.default}`), manifest: (c.manifest.variables ?? []).map((v) => `${v.private ? 'private ' : ''}${v.name}: ${v.kind} ${v.colors?.length ?? v.count ?? '?'} from ${v.sources.join(', ')}${v.meshes?.length ? ` on ${v.meshes.join(', ')}` : ''}`), morphs: c.morphValues(), values: c.variableValues(), height: c.height };
+      },
       /** Play as another species or gender (`species()` lists what the pack has): `species('twilek_female')`. */
       species: async (id?: string) => {
         if (!id) return this.speciesList.length ? this.speciesList.map((s) => `${s.id}: ${s.morphs.length} sliders, ${s.variables.length} variables, ${s.jkaClips} JKA clips`) : `no species index (run the converter's species command); playing ${this.characterId}`;
@@ -600,7 +606,7 @@ class App {
     const c = this.player.rig?.character;
     if (!c) return;
     try {
-      localStorage.setItem(`swg.appearance.${c.manifest.id}`, JSON.stringify({ morphs: c.morphValues(), values: c.variableValues() }));
+      localStorage.setItem(`swg.appearance.${c.manifest.id}`, JSON.stringify({ morphs: c.morphValues(), values: c.variableValues(), height: c.height }));
     } catch {
       /* private mode: the look lasts the session */
     }
@@ -612,8 +618,9 @@ class App {
     try {
       const saved = localStorage.getItem(`swg.appearance.${c.manifest.id}`);
       if (!saved) return;
-      const { morphs, values } = JSON.parse(saved) as { morphs?: Record<string, number>; values?: Record<string, number> };
+      const { morphs, values, height } = JSON.parse(saved) as { morphs?: Record<string, number>; values?: Record<string, number>; height?: number };
       for (const [name, v] of Object.entries(morphs ?? {})) c.setMorph(name, v);
+      if (height !== undefined) c.setHeight(height);
       const changed = Object.fromEntries(Object.entries(values ?? {}).filter(([k, v]) => c.canCustomize(k) && (c.manifest.values?.[k] ?? c.manifest.values?.[k.replace(/^.*\//, '')]) !== v));
       if (Object.keys(changed).length) c.customizer?.setAll(changed);
     } catch {

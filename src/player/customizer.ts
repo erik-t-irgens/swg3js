@@ -3,7 +3,7 @@
 // A change re-renders only the recipes that read the variable, off the main thread's critical
 // path in idle time, one after another, so a slider that moves fast lands on its last value.
 import * as THREE from 'three';
-import { type CustomizeFile, type Img, type Recipe, type Values, recipeVariables, renderRecipe } from './texrender';
+import { type CustomizeFile, type Img, type Recipe, type Values, recipeVariableDefs, recipeVariables, renderRecipe, variableKey } from './texrender';
 
 export class Customizer {
   readonly values: Values = new Map();
@@ -35,24 +35,24 @@ export class Customizer {
     }
   }
 
-  /** Every variable the recipes read, with its default: what the sliders and swatches show. */
-  variables(): { name: string; default: number }[] {
-    const out = new Map<string, number>();
+  /**
+   * Every variable the recipes read: its key (a private one is scoped to its mesh), its default,
+   * its kind, and the palette or the number of choices; what the sliders and swatches show.
+   */
+  variables(): { key: string; name: string; private: boolean; mesh: string; default: number; kind: 'palette' | 'index'; palette?: string; count?: number; colors?: number[][] }[] {
+    const out = new Map<string, { key: string; name: string; private: boolean; mesh: string; default: number; kind: 'palette' | 'index'; palette?: string; count?: number; colors?: number[][] }>();
     for (const r of this.file.recipes) {
-      const add = (name: string, def: number) => {
-        if (!out.has(name)) out.set(name, def);
-      };
-      for (const c of r.shader?.choices ?? []) add(c.variable, c.default);
-      for (const p of r.shader?.palettes ?? []) add(p.variable, p.default);
-      for (const slot of r.slots) {
-        for (const s of slot.blueprint.shaders) {
-          for (const c of s?.choices ?? []) add(c.variable, c.default);
-          for (const p of s?.palettes ?? []) add(p.variable, p.default);
+      for (const d of recipeVariableDefs(r)) {
+        const key = variableKey(d.name, d.private, r.mesh);
+        const prev = out.get(key);
+        if (prev) {
+          if (d.count && (!prev.count || d.count > prev.count)) prev.count = d.count;
+          continue;
         }
-        for (const v of slot.blueprint.variables) add(v.name, v.default);
+        out.set(key, { key, name: d.name, private: d.private, mesh: r.mesh, default: d.default, kind: d.kind, ...(d.palette ? { palette: d.palette, colors: this.file.palettes[d.palette] } : {}), ...(d.count ? { count: d.count } : {}) });
       }
     }
-    return [...out].map(([name, def]) => ({ name, default: def }));
+    return [...out.values()];
   }
 
   /** Whether any recipe reads the variable. */

@@ -813,15 +813,18 @@ function writeSpeciesIndex(outRoot) {
 }
 
 /** Remember a customization variable by name, with where it was met, for the structured manifest. */
-function noteVariables(info, list, source) {
+function noteVariables(info, list, source, mesh = null) {
   if (!info.variables) return;
   for (const v of list) {
+    // A private variable is the object's own (a shirt's colour 1 is not the body's colour 1), so
+    // it is kept per mesh; a shared one (the owner's skin colour) is one for the whole character.
     const key = `${v.private ? 'private:' : ''}${v.name}`;
-    const entry = info.variables.get(key) ?? info.variables.set(key, { name: v.name, private: !!v.private, kind: v.kind, sources: [] }).get(key);
+    const entry = info.variables.get(key) ?? info.variables.set(key, { name: v.name, private: !!v.private, kind: v.kind, sources: [], meshes: [] }).get(key);
     if (v.kind === 'palette') entry.palette = v.palette;
     else entry.max = Math.max(entry.max ?? 0, v.max ?? 0);
     if (entry.default === undefined) entry.default = v.default ?? 0;
     if (!entry.sources.includes(source)) entry.sources.push(source);
+    if (mesh && !entry.meshes.includes(mesh)) entry.meshes.push(mesh);
   }
 }
 
@@ -829,7 +832,7 @@ function noteVariables(info, list, source) {
 function customizationList(vfs, info) {
   const out = [];
   for (const v of info.variables?.values() ?? []) {
-    const entry = { name: v.name, private: v.private, kind: v.kind === 'palette' ? 'palette' : 'index', default: v.default, sources: v.sources.map((f) => basename(f)) };
+    const entry = { name: v.name, private: v.private, kind: v.kind === 'palette' ? 'palette' : 'index', default: v.default, sources: v.sources.map((f) => basename(f)), meshes: v.meshes ?? [] };
     if (v.kind === 'palette') {
       entry.palette = v.palette;
       try {
@@ -858,7 +861,7 @@ function customizationValues(spec) {
  * names one for it (skin, hair, eyes), the shader baked with its default palette colours when its
  * look depends on them, otherwise the shader's main texture as for any other mesh.
  */
-function skinnedTexture(vfs, shaderPath, slots, ctx, info) {
+function skinnedTexture(vfs, shaderPath, slots, ctx, info, mesh = null) {
   let shader = null;
   try {
     shader = loadShader(vfs, shaderPath, ctx);
@@ -867,7 +870,7 @@ function skinnedTexture(vfs, shaderPath, slots, ctx, info) {
   }
   if (shader && shader.variables?.length) {
     for (const line of describeVariables(shader.variables)) info.customization.add(`${shaderPath}: ${line}`);
-    noteVariables(info, shader.variables, shaderPath);
+    noteVariables(info, shader.variables, shaderPath, mesh);
   }
   info.shaderNotes.add(`${shaderPath}: ${describeShader(shader)}`);
   const rendered = slots?.find((s) => s.tag === 'MAIN') ?? slots?.[0];
@@ -1027,7 +1030,7 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
         const image = renderBlueprint(vfs, bp, ctx);
         info.textureRenderers.push(`${trt.file}: ${bp.width}x${bp.height} for ${trt.slots.map((sl) => `${mgn.shaders[sl.shaderIndex]?.shader ?? sl.shaderIndex}:${sl.tag}`).join(', ')}${image.missing.length ? `; missing textures ${image.missing.join(', ')}` : ''}${image.unsupported.length ? `; effects without fixed-function passes ${image.unsupported.join(', ')}` : ''}`);
         for (const line of describeVariables(bp.variables)) info.customization.add(`${trt.file}: ${line}`);
-        noteVariables(info, bp.variables, trt.file);
+        noteVariables(info, bp.variables, trt.file, meshName);
         for (const sl of trt.slots) (slotsByShader.get(sl.shaderIndex) ?? slotsByShader.set(sl.shaderIndex, []).get(sl.shaderIndex)).push({ tag: sl.tag, image, file: trt.file, bp });
       } catch (err) {
         info.skipped.push(`${trt.file}: ${err.message}`);
@@ -1038,7 +1041,7 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
       if (!g.primitives[0].indices.length) return; // everything this shader drew is under clothing
       const slots = slotsByShader.get(i);
       const shaderPath = g.shader;
-      const t = skinnedTexture(vfs, g.shader, slots, ctx, info);
+      const t = skinnedTexture(vfs, g.shader, slots, ctx, info, meshName);
       if (slots) g.shader = `${g.shader}@${meshName}`; // its own material: the rendered texture is this mesh's
       if (t) textures.set(g.shader, t);
       kept.push(g);

@@ -107,27 +107,53 @@ export class AppearanceUi {
    */
   private colourRows(): string {
     const c = this.character;
-    const vars = c?.manifest.variables ?? [];
-    if (!vars.length) return '';
-    const values = { ...(c?.manifest.values ?? {}), ...(c?.variableValues() ?? {}) };
-    const rows: string[] = [];
-    for (const v of vars) {
-      const short = v.name.replace(/^.*\//, '');
-      const current = values[v.name] ?? values[short] ?? v.default;
-      const live = c?.canCustomize(v.name) ?? false;
-      const dead = live ? '' : ' dead';
-      if (v.kind === 'palette' && v.colors?.length) {
-        // Swatches to click, and a slider under them to scrub through the palette.
-        const swatches = v.colors.map((rgb, i) => `<button class="swatch${i === current ? ' on' : ''}" data-var="${v.name}" data-value="${i}" style="background:rgb(${rgb[0]},${rgb[1]},${rgb[2]})" title="${short} = ${i}"></button>`).join('');
-        rows.push(`<div class="wardrobe-slot colour${dead}"><span class="slot-label">${prettyMorph(short)}</span><div class="palette"><div class="swatches">${swatches}</div><input type="range" class="scrub" min="0" max="${v.colors.length - 1}" step="1" value="${current}" data-var="${v.name}" /></div><span class="slot-count">${current + 1}/${v.colors.length}</span></div>`);
-      } else if (v.kind === 'index' && (v.count ?? 0) > 0) {
-        rows.push(`<label class="wardrobe-slot colour${dead}"><span class="slot-label">${prettyMorph(short)}</span><input type="range" class="choice" min="0" max="${(v.count ?? 1) - 1}" step="1" value="${current}" data-var="${v.name}" /><span class="slot-count">${current + 1}/${v.count}</span></label>`);
+    if (!c) return '';
+    const values = { ...(c.manifest.values ?? {}), ...c.variableValues() };
+    const morphs = new Set(Object.keys(c.morphValues()).map((m) => m.replace(/_[01]$/, '')));
+    // Live variables come from the pack's recipes, each private one scoped to its own mesh (a
+    // shirt's colour 1 is not the pants' colour 1); a pack without recipes lists the manifest's.
+    const live = c.customizer?.variables() ?? [];
+    const manifestVars = c.manifest.variables ?? [];
+    const rows: { key: string; name: string; private: boolean; mesh: string; kind: 'palette' | 'index'; colors?: number[][]; count?: number; default: number; live: boolean }[] = [];
+    if (live.length) {
+      for (const v of live) {
+        const m = manifestVars.find((mv) => mv.name === v.name && mv.private === v.private);
+        rows.push({ key: v.key, name: v.name, private: v.private, mesh: v.mesh, kind: v.kind, colors: v.colors ?? m?.colors, count: v.count ?? m?.count, default: v.default, live: true });
       }
+    } else {
+      for (const v of manifestVars) for (const mesh of v.private && v.meshes?.length ? v.meshes : ['']) rows.push({ key: v.private ? `${mesh}|${v.name}` : v.name, name: v.name, private: v.private, mesh, kind: v.kind, colors: v.colors, count: v.count, default: v.default, live: false });
     }
     if (!rows.length) return '';
-    const anyLive = vars.some((v) => c?.canCustomize(v.name));
-    const note = anyLive ? 'rendered live from the game\'s own palettes and blueprints' : 'this pack has no live recipes: run the converter\'s species command again, then these change live';
-    return `<h3 class="wardrobe-section">Colours and features <span>${note}</span></h3>${rows.join('')}<div class="bake-hint"></div>`;
+    const row = (v: (typeof rows)[number]): string => {
+      const short = v.name.replace(/^.*\//, '');
+      const current = values[v.key] ?? values[v.name] ?? values[short] ?? v.default;
+      const dead = v.live ? '' : ' dead';
+      const label = prettyMorph(short);
+      if (v.kind === 'palette' && v.colors?.length) {
+        const swatches = v.colors.map((rgb, i) => `<button class="swatch${i === current ? ' on' : ''}" data-var="${v.key}" data-value="${i}" style="background:rgb(${rgb[0]},${rgb[1]},${rgb[2]})" title="${short} = ${i}"></button>`).join('');
+        return `<div class="wardrobe-slot colour${dead}"><span class="slot-label">${label}</span><div class="palette"><div class="swatches">${swatches}</div><input type="range" class="scrub" min="0" max="${v.colors.length - 1}" step="1" value="${current}" data-var="${v.key}" /></div><span class="slot-count">${current + 1}/${v.colors.length}</span></div>`;
+      }
+      if ((v.count ?? 0) > 1) {
+        const height = /height/i.test(short);
+        return `<label class="wardrobe-slot colour${dead}"><span class="slot-label">${label}</span><input type="range" class="choice" min="0" max="${(v.count ?? 1) - 1}" step="1" value="${current}" data-var="${v.key}"${height ? ' data-height="1"' : ''} /><span class="slot-count">${current + 1}/${v.count}</span></label>`;
+      }
+      return '';
+    };
+    const sections: string[] = [];
+    // The owner's own: skin, hair, eyes and the like. A blend variable that a shape slider already
+    // drives (blend_fat and the fat morph are one thing in the game) is left to that slider.
+    const shared = rows.filter((v) => !v.private && !morphs.has(v.name.replace(/^.*\//, '')));
+    const sharedRows = shared.map(row).filter(Boolean);
+    if (sharedRows.length) sections.push(`<h3 class="wardrobe-section">Skin, hair and eyes <span>${rows.some((v) => v.live) ? "rendered live from the game's own palettes and blueprints" : "this pack has no live recipes: run the converter's species command again"}</span></h3>${sharedRows.join('')}`);
+    // Each worn piece's own colours, in a section of its own.
+    const byMesh = new Map<string, string[]>();
+    for (const v of rows.filter((v) => v.private)) {
+      const html = row(v);
+      if (html) (byMesh.get(v.mesh) ?? byMesh.set(v.mesh, []).get(v.mesh)!).push(html);
+    }
+    for (const [mesh, list] of byMesh) sections.push(`<h3 class="wardrobe-section">${prettyMesh(mesh)} <span>its own colours</span></h3>${list.join('')}`);
+    if (!sections.length) return '';
+    return `${sections.join('')}<div class="bake-hint"></div>`;
   }
 
   /** A colour or choice picked: rendered live when the pack has the recipe, else the bake command is shown. */
@@ -135,9 +161,14 @@ export class AppearanceUi {
     const c = this.character;
     const hint = this.body.querySelector<HTMLElement>('.bake-hint');
     const short = name.replace(/^.*\//, '');
-    if (c?.canCustomize(name)) {
-      const n = c.setVariable(name, value);
-      if (hint) hint.textContent = `${prettyMorph(short)} ${value}: ${n} texture${n === 1 ? '' : 's'} rendering`;
+    const heightInput = this.body.querySelector<HTMLInputElement>(`input[data-height][data-var="${CSS.escape(name)}"]`);
+    if (heightInput) {
+      // Height scales the whole character; the game maps the variable's range onto a size band.
+      c?.setHeight(value / Math.max(1, Number(heightInput.max)));
+    }
+    if (c?.canCustomize(name) || heightInput) {
+      const n = c?.setVariable(name, value) ?? 0;
+      if (hint) hint.textContent = heightInput ? `${prettyMorph(short)} ${value}` : `${prettyMorph(short)} ${value}: ${n} texture${n === 1 ? '' : 's'} rendering`;
       this.onChange();
     } else if (hint) {
       const id = c?.manifest.id ?? 'human_male';
@@ -172,7 +203,8 @@ export class AppearanceUi {
   }
 
   private wireShape(): void {
-    for (const input of this.body.querySelectorAll<HTMLInputElement>('input[type=range]')) {
+    for (const input of this.body.querySelectorAll<HTMLInputElement>('input[data-hi]')) {
+      let timer = 0;
       input.addEventListener('input', () => {
         const c = this.character;
         if (!c) return;
@@ -182,6 +214,12 @@ export class AppearanceUi {
           c.setMorph(input.dataset.hi!, Math.max(0, v));
         } else c.setMorph(input.dataset.hi!, v);
         input.nextElementSibling!.textContent = v.toFixed(2);
+        // The same variable may pick the skin's texture (the game's fat and muscle blueprints do): follow it, once the slider settles.
+        const linked = c.customizer?.variables().find((cv) => !cv.private && cv.name.replace(/^.*\//, '') === input.dataset.hi && (cv.count ?? 0) > 1);
+        if (linked) {
+          window.clearTimeout(timer);
+          timer = window.setTimeout(() => c.setVariable(linked.key, Math.round(Math.max(0, v) * ((linked.count ?? 1) - 1))), 150);
+        }
         this.onChange();
       });
     }
@@ -215,6 +253,12 @@ export class AppearanceUi {
     else this.show();
     return this.open;
   }
+}
+
+/** "shirt_s03_m_l0" reads as "Shirt s03". */
+function prettyMesh(mesh: string): string {
+  const s = mesh.replace(/_[fm]_l\d+$/, '').replace(/_l\d+$/, '').replace(/_/g, ' ');
+  return s ? s.charAt(0).toUpperCase() + s.slice(1) : 'Body';
 }
 
 /** "blend_jaw" reads as "Jaw", "index_color_skin" as "Color skin". */

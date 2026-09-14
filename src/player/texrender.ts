@@ -106,9 +106,15 @@ const argbToRgba = (v: number, out: number[] = [0, 0, 0, 0]): number[] => {
 };
 const clamp01 = (x: number): number => (x < 0 ? 0 : x > 1 ? 1 : x);
 
-export function valueOf(values: Values, name: string, def: number): number {
+/** The key a variable's value is kept under: a private one is the mesh's own ("shirt_s03_m_l0|/private/index_color_1"). */
+export function variableKey(name: string, priv: boolean, scope: string): string {
+  return priv ? `${scope}|${name}` : name;
+}
+
+export function valueOf(values: Values, name: string, def: number, priv = false, scope = ''): number {
   const short = name.replace(/^.*\//, '');
-  for (const key of [name, short]) {
+  const keys = priv ? [`${scope}|${name}`, `${scope}|${short}`] : [name, short];
+  for (const key of keys) {
     const v = values.get(key);
     if (v !== undefined) return v;
   }
@@ -133,7 +139,7 @@ interface LiveShader {
   alphaRefs: Map<string, number>;
 }
 
-export function liveShader(def: ShaderDef | null, images: (file: string | null) => Img | null, values: Values, palettes: Record<string, number[][]>): LiveShader | null {
+export function liveShader(def: ShaderDef | null, images: (file: string | null) => Img | null, values: Values, palettes: Record<string, number[][]>, scope = ''): LiveShader | null {
   if (!def) return null;
   const textures = new Map<string, Img>();
   for (const [tag, file] of Object.entries(def.textures)) {
@@ -141,12 +147,12 @@ export function liveShader(def: ShaderDef | null, images: (file: string | null) 
     if (img) textures.set(tag, img);
   }
   for (const c of def.choices) {
-    const v = Math.min(Math.max(valueOf(values, c.variable, c.default), 0), c.files.length - 1);
+    const v = Math.min(Math.max(valueOf(values, c.variable, c.default, c.private, scope), 0), c.files.length - 1);
     const img = images(c.files[v] ?? null);
     if (img) textures.set(c.tag, img);
   }
   const tfactors = new Map<string, number>(Object.entries(def.tfactors));
-  for (const p of def.palettes) tfactors.set(p.tag, paletteColor(palettes, p.palette, valueOf(values, p.variable, p.default)));
+  for (const p of def.palettes) tfactors.set(p.tag, paletteColor(palettes, p.palette, valueOf(values, p.variable, p.default, p.private, scope)));
   return {
     passes: def.passes,
     textures,
@@ -399,10 +405,10 @@ function drawTriangle(fb: Float32Array, width: number, height: number, va: Vert,
 }
 
 /** Runs a blueprint's prepare operations: textures and factors chosen by the values. */
-function applyPrepare(bp: BlueprintDef, shaders: (LiveShader | null)[], values: Values, palettes: Record<string, number[][]>, images: (file: string | null) => Img | null): void {
+function applyPrepare(bp: BlueprintDef, shaders: (LiveShader | null)[], values: Values, palettes: Record<string, number[][]>, images: (file: string | null) => Img | null, scope: string): void {
   const value = (i: number): number => {
     const v = bp.variables[i];
-    return v ? valueOf(values, v.name, v.default) : 0;
+    return v ? valueOf(values, v.name, v.default, v.private, scope) : 0;
   };
   const setTexture = (shader: LiveShader, tag: string, index: number): void => {
     const img = images(bp.textures[index] ?? null);
@@ -429,9 +435,9 @@ function applyPrepare(bp: BlueprintDef, shaders: (LiveShader | null)[], values: 
 }
 
 /** Runs a blueprint into an RGBA image of its own size. */
-export function renderBlueprint(bp: BlueprintDef, values: Values, palettes: Record<string, number[][]>, images: (file: string | null) => Img | null): Img {
-  const shaders = bp.shaders.map((s) => liveShader(s, images, values, palettes));
-  applyPrepare(bp, shaders, values, palettes, images);
+export function renderBlueprint(bp: BlueprintDef, values: Values, palettes: Record<string, number[][]>, images: (file: string | null) => Img | null, scope = ''): Img {
+  const shaders = bp.shaders.map((s) => liveShader(s, images, values, palettes, scope));
+  applyPrepare(bp, shaders, values, palettes, images, scope);
   const { width, height } = bp;
   const fb = new Float32Array(width * height * 4);
   const sx = width / bp.camera;
@@ -511,18 +517,40 @@ export function bakeShader(shader: LiveShader, baseTag: string): Img | null {
 /** The variable names (full and short) a recipe's output depends on. */
 export function recipeVariables(r: Recipe): Set<string> {
   const out = new Set<string>();
-  const add = (n: string) => {
-    out.add(n);
-    out.add(n.replace(/^.*\//, ''));
+  const add = (n: string, priv: boolean) => {
+    out.add(variableKey(n, priv, r.mesh));
+    out.add(variableKey(n.replace(/^.*\//, ''), priv, r.mesh));
   };
   const fromShader = (s: ShaderDef | null) => {
-    for (const c of s?.choices ?? []) add(c.variable);
-    for (const p of s?.palettes ?? []) add(p.variable);
+    for (const c of s?.choices ?? []) add(c.variable, c.private);
+    for (const p of s?.palettes ?? []) add(p.variable, p.private);
   };
   fromShader(r.shader);
   for (const slot of r.slots) {
     for (const s of slot.blueprint.shaders) fromShader(s);
-    for (const v of slot.blueprint.variables) add(v.name);
+    for (const v of slot.blueprint.variables) add(v.name, v.private);
+  }
+  return out;
+}
+
+/** Every variable a recipe reads, with whether it is the mesh's own. */
+export function recipeVariableDefs(r: Recipe): { name: string; private: boolean; default: number; kind: 'palette' | 'index'; palette?: string; count?: number }[] {
+  const out: { name: string; private: boolean; default: number; kind: 'palette' | 'index'; palette?: string; count?: number }[] = [];
+  const seen = new Set<string>();
+  const push = (d: (typeof out)[number]) => {
+    const key = variableKey(d.name, d.private, r.mesh);
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(d);
+  };
+  const fromShader = (s: ShaderDef | null) => {
+    for (const c of s?.choices ?? []) push({ name: c.variable, private: c.private, default: c.default, kind: 'index', count: c.files.length });
+    for (const p of s?.palettes ?? []) push({ name: p.variable, private: p.private, default: p.default, kind: 'palette', palette: p.palette });
+  };
+  fromShader(r.shader);
+  for (const slot of r.slots) {
+    for (const s of slot.blueprint.shaders) fromShader(s);
+    for (const v of slot.blueprint.variables) push({ name: v.name, private: v.private, default: v.default, kind: v.kind === 'palette' ? 'palette' : 'index', ...(v.palette ? { palette: v.palette } : {}), ...(v.max !== undefined ? { count: v.max } : {}) });
   }
   return out;
 }
@@ -530,9 +558,9 @@ export function recipeVariables(r: Recipe): Set<string> {
 /** Makes a recipe's texture for the values: the rendered blueprint, or the shader baked over it and its own textures. */
 export function renderRecipe(r: Recipe, values: Values, palettes: Record<string, number[][]>, images: (file: string | null) => Img | null): Img | null {
   const rendered = new Map<string, Img>();
-  for (const slot of r.slots) rendered.set(slot.tag, renderBlueprint(slot.blueprint, values, palettes, images));
+  for (const slot of r.slots) rendered.set(slot.tag, renderBlueprint(slot.blueprint, values, palettes, images, r.mesh));
   if (r.kind === 'render') return rendered.get(r.baseTag) ?? [...rendered.values()][0] ?? null;
-  const shader = liveShader(r.shader, images, values, palettes);
+  const shader = liveShader(r.shader, images, values, palettes, r.mesh);
   if (!shader) return rendered.get(r.baseTag) ?? null;
   for (const [tag, img] of rendered) shader.textures.set(tag, img);
   return bakeShader(shader, r.baseTag) ?? rendered.get(r.baseTag) ?? null;
