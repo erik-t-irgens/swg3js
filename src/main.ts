@@ -11,7 +11,7 @@ import { Physics } from './core/physics';
 import { PLANETS, packIdOf, planetById, type PlanetDef } from './data/planets';
 import { Player } from './player/player';
 import { loadPlayerRig } from './player/rig';
-import { Character } from './player/character';
+import { Character, loadSpeciesIndex, type SpeciesEntry } from './player/character';
 import { GalaxyMap, type Poi } from './ui/galaxyMap';
 import { WardrobeUi } from './ui/wardrobeUi';
 import { WeaponsUi } from './ui/weaponsUi';
@@ -68,6 +68,8 @@ class App {
   private readonly vehiclesUi: VehiclesUi;
   private garage: Garage | null = null;
   private npcUi: NpcUi;
+  private characterId = 'human_male';
+  private speciesList: SpeciesEntry[] = [];
   private breakFrames = false;
   private inventoryTab: 'wardrobe' | 'weapons' = 'wardrobe';
   private spawnerTab: 'garage' | 'npcs' = 'garage';
@@ -174,6 +176,11 @@ class App {
        * body, a head and whatever is worn, each its own file. Then `.wear(name)`, `.remove(name)`,
        * `.setMorph(name, v)` and `.status()` on what comes back.
        */
+      /** Play as another species or gender (`species()` lists what the pack has): `species('twilek_female')`. */
+      species: async (id?: string) => {
+        if (!id) return this.speciesList.length ? this.speciesList.map((s) => `${s.id}: ${s.morphs.length} sliders, ${s.variables.length} variables, ${s.jkaClips} JKA clips`) : `no species index (run the converter's species command); playing ${this.characterId}`;
+        return this.switchCharacter(id);
+      },
       character: async (id = 'human_male') => {
         const c = await Character.load(import.meta.env.BASE_URL, id);
         const p = this.player.pos;
@@ -556,15 +563,48 @@ class App {
     });
 
     const params = new URLSearchParams(location.search);
+    // The character: ?character=twilek_female, else the last one picked in the wardrobe, else the human male.
+    let remembered: string | null = null;
+    try {
+      remembered = localStorage.getItem('swg.character');
+    } catch {
+      remembered = null;
+    }
+    this.characterId = params.get('character') ?? remembered ?? 'human_male';
     if (params.get('rig') !== '0') {
-      loadPlayerRig(import.meta.env.BASE_URL)
+      loadPlayerRig(import.meta.env.BASE_URL, this.characterId)
         .then((rig) => this.player.attachRig(rig))
         .catch((err) => console.warn('Character rig failed to load, using primitives', err));
     }
+    void loadSpeciesIndex(import.meta.env.BASE_URL).then((list) => {
+      this.speciesList = list;
+      this.wardrobe.setSpecies(list, this.characterId);
+    });
+    this.wardrobe.onSpecies = (id) => void this.switchCharacter(id);
     const initialClass = params.get('class') === 'bounty_hunter' ? 'bounty_hunter' : 'jedi';
     this.setClass(initialClass);
     const initial = params.get('planet');
     this.arrive(initial && PLANETS.some((p) => p.id === initial) ? planetById(initial) : PLANETS[0], params.get('zone') ?? undefined);
+  }
+
+  /** Play as another species or gender: the parts pack of that id replaces the rig, the wardrobe follows. */
+  async switchCharacter(id: string): Promise<string> {
+    const rig = await loadPlayerRig(import.meta.env.BASE_URL, id);
+    if (!rig.character || rig.character.manifest.id !== id) return `no parts pack for ${id}: run the converter's species command`;
+    this.player.unequip('right');
+    this.player.unequip('left');
+    this.player.detachRig();
+    this.player.attachRig(rig);
+    this.characterId = id;
+    try {
+      localStorage.setItem('swg.character', id);
+    } catch {
+      /* private mode: the choice lasts the session */
+    }
+    this.wardrobe.setSpecies(this.speciesList, id);
+    if (this.wardrobe.open) void this.wardrobe.attach(rig.character, import.meta.env.BASE_URL).catch((err) => console.warn('wardrobe', err));
+    this.hud.setPrompt(`now playing as ${id.replace(/_/g, ' ')}`);
+    return `playing as ${id}`;
   }
 
   private setClass(id: ClassId): void {

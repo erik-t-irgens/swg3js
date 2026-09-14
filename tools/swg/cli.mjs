@@ -8,6 +8,7 @@
 //   node tools/swg/cli.mjs dump <file.iff> | <swg-dir> <path-in-archive>   print an IFF tree
 //   node tools/swg/cli.mjs weapons <swg-dir> <out-dir> [--limit=N]       every weapon the game can hold, with its class, under <out-dir>/weapons
 //   node tools/swg/cli.mjs ships <swg-dir> <out-dir> [--limit=N]         every ship a player can fly, with its interior when it has one, under <out-dir>/ships
+//   node tools/swg/cli.mjs species <swg-dir> <out-dir> [--only=human,twilek_female] [--var=...]   every playable species and gender as parts, with characters/index.json for the character creator
 //   node tools/swg/cli.mjs ash <swg-dir> <appearance/x.sat | object/.../shared_x.iff> [--find=pistol]   the animation state hierarchy behind a skeletal appearance, with its strings
 //   node tools/swg/cli.mjs shader <swg-dir> <shader/x.sht>        list a shader's texture slots
 //   node tools/swg/cli.mjs template <swg-dir> <object/x.iff>       print an object template's parameter chain
@@ -87,7 +88,7 @@ import { extractClips, readGlb, replaceClips, skinJoints } from './glbclips.mjs'
 import { packClips, retargetClips, unpackClips } from './clipbundle.mjs';
 import { encodePng } from './png.mjs';
 import { shaderTextures } from './sht.mjs';
-import { bakeShader, describeShader, describeVariables, loadShader, parseBlueprint, preparedShaders, renderBlueprint, renderContext, shaderNeedsBake } from './texrender.mjs';
+import { bakeShader, describeShader, describeVariables, loadShader, parseBlueprint, parsePalette, preparedShaders, renderBlueprint, renderContext, shaderNeedsBake } from './texrender.mjs';
 import { effectAlpha, alphaModeFor } from './eff.mjs';
 import { localize, parseDatatable } from './datatable.mjs';
 import { createRequire } from 'node:module';
@@ -680,6 +681,166 @@ function nameLocomotion(entries, loadAnimation) {
  * GLB with its skeleton and the animations its logical animation table lists.
  * `animations` filters logical names by substring ('all' keeps every one).
  */
+/**
+ * A character as parts (body, head and each worn item as its own GLB against one shared skeleton)
+ * under <outRoot>/characters/<id>/, keeping the Jedi Academy clips an old rig there carried.
+ */
+function convertParts(vfs, outRoot, template, { wear = DEFAULT_WEAR, variables = new Map(), anim = undefined, maxAnims = undefined } = {}) {
+  const id = basename(template).replace(/^shared_/, '').replace(/\.[^.]+$/, '');
+  const outDir = join(outRoot, 'characters', id);
+  const rigFile = join(outDir, 'rig.glb');
+  const oldParts = existsSync(join(outDir, 'parts.json')) ? JSON.parse(readFileSync(join(outDir, 'parts.json'), 'utf8')) : null;
+  let carried = null;
+  if (existsSync(rigFile)) {
+    try {
+      const bundle = extractClips(readFileSync(rigFile), (name) => /^BOTH_/i.test(name));
+      if (bundle.clips.length) carried = { bundle, jkaClips: oldParts?.jkaClips ?? {}, jkaGrip: oldParts?.jkaGrip, scale: oldParts?.scale };
+    } catch (err) {
+      console.log(`  (the old rig's Jedi Academy clips could not be read: ${err.message})`);
+    }
+  }
+  const gender = /female/i.test(id) ? 'f' : 'm';
+  const info = convertSat(vfs, template, null, {
+    animations: anim ?? PLAYER_CLIPS,
+    maxAnimations: maxAnims ? Number(maxAnims) : 240,
+    variables,
+    wear,
+    parts: { dir: outDir, rig: 'rig' },
+    gender,
+  });
+  let kept = null;
+  if (carried) {
+    const buf = readFileSync(rigFile);
+    const { json } = readGlb(buf);
+    if (!(json.animations ?? []).some((a) => /^BOTH_/i.test(a.name))) {
+      const { clips } = retargetClips(carried.bundle, skinJoints(json));
+      writeFileSync(rigFile, replaceClips(buf, clips, (name) => clips.some((c) => c.name === name)));
+      info.rig.clips = (info.rig.clips ?? 0) + clips.length;
+      kept = { count: clips.length, jkaClips: Object.fromEntries(Object.entries(carried.jkaClips).filter(([n]) => clips.some((c) => c.name === n))) };
+    }
+  }
+  const manifest = {
+    id,
+    species: id.replace(/_(male|female)$/, ''),
+    gender: gender === 'f' ? 'female' : 'male',
+    template,
+    skeleton: info.skeleton,
+    rig: info.rig,
+    joints: info.joints,
+    defaultWear: info.parts.filter((p) => p.occlusionLayer > 0).map((p) => p.name),
+    clips: info.animations,
+    clipSpeeds: info.clipSpeeds ?? {},
+    ...(info.partialClips ? { partialClips: info.partialClips } : {}),
+    parts: info.parts,
+    customization: [...info.customization],
+    variables: customizationList(vfs, info),
+    values: Object.fromEntries(variables),
+    ...(kept ? { jkaClips: kept.jkaClips, ...(carried.jkaGrip ? { jkaGrip: carried.jkaGrip } : {}), ...(carried.scale !== undefined ? { scale: carried.scale } : {}) } : {}),
+  };
+  writeFileSync(join(outDir, 'parts.json'), JSON.stringify(manifest, null, 2));
+  const total = info.parts.reduce((a, p) => a + p.bytes, 0);
+  console.log(`-> ${outDir}`);
+  console.log(`   rig ${info.rig.file}: ${info.rig.joints} joints, ${info.rig.clips} clips${kept ? ` (${kept.count} Jedi Academy clips carried over from the old rig)` : ''}`);
+  for (const p of info.parts) {
+    console.log(`   ${p.name.padEnd(22)} ${String(p.triangles).padStart(5)} tris  ${(p.bytes / 1024).toFixed(0).padStart(5)} KB  layer ${p.occlusionLayer}${p.occludes?.length ? `  hides ${p.occludes.join(' ')}` : ''}${p.morphs?.length ? `  ${p.morphs.length} morphs` : ''}`);
+  }
+  console.log(`   ${info.parts.length} parts, ${(total / 1e6).toFixed(1)} MB of meshes (the rig and its clips are shared)`);
+  const palettes = manifest.variables.filter((v) => v.kind === 'palette');
+  if (manifest.variables.length) console.log(`   customization: ${palettes.length} colour palettes (${palettes.map((v) => `${v.name} ${v.colors.length}`).join(', ')}), ${manifest.variables.length - palettes.length} choices; set with --var=name=value`);
+  if (info.skipped.length) console.log(`   skipped: ${info.skipped.slice(0, 5).join('; ')}`);
+  return { id, outDir, manifest };
+}
+
+/** Put a saved clip bundle onto a parts rig that lacks its clips, with the loop flags into parts.json; returns how many clips went on. */
+function applyBundleToRig(rigFile, bundleFile) {
+  const buf = readFileSync(rigFile);
+  const { json } = readGlb(buf);
+  if ((json.animations ?? []).some((a) => /^BOTH_/i.test(a.name))) return 0;
+  const bundle = unpackClips(readFileSync(bundleFile));
+  const { clips } = retargetClips(bundle, skinJoints(json));
+  if (!clips.length) return 0;
+  writeFileSync(rigFile, replaceClips(buf, clips, (name) => clips.some((c) => c.name === name)));
+  const partsManifest = join(dirname(rigFile), 'parts.json');
+  if (existsSync(partsManifest)) {
+    const m = JSON.parse(readFileSync(partsManifest, 'utf8'));
+    const present = new Set(clips.map((c) => c.name));
+    m.rig = { ...(m.rig ?? {}), clips: (m.rig?.clips ?? 0) + clips.length };
+    m.jkaClips = Object.fromEntries(Object.entries(bundle.meta?.jkaClips ?? {}).filter(([n]) => present.has(n)));
+    m.clipSpeeds = { ...(m.clipSpeeds ?? {}), ...(bundle.meta?.clipSpeeds ?? {}) };
+    if (bundle.meta?.scale !== undefined) m.scale = bundle.meta.scale;
+    if (bundle.meta?.grip) m.jkaGrip = bundle.meta.grip;
+    writeFileSync(partsManifest, JSON.stringify(m, null, 2));
+  }
+  return clips.length;
+}
+
+/** characters/index.json: every parts pack under <outRoot>/characters, with what each offers the character creator. */
+function writeSpeciesIndex(outRoot) {
+  const dir = join(outRoot, 'characters');
+  const species = [];
+  if (existsSync(dir)) {
+    for (const id of readdirSync(dir).sort()) {
+      const file = join(dir, id, 'parts.json');
+      if (!existsSync(file)) continue;
+      let m;
+      try {
+        m = JSON.parse(readFileSync(file, 'utf8'));
+      } catch {
+        continue;
+      }
+      const gender = m.gender ?? (/female/i.test(id) ? 'female' : 'male');
+      const wardrobeDir = [id, `human_${gender}`].find((w) => existsSync(join(outRoot, 'wardrobe', w, 'wardrobe.json')));
+      species.push({
+        id,
+        species: m.species ?? id.replace(/_(male|female)$/, ''),
+        gender,
+        template: m.template,
+        skeleton: m.skeleton,
+        parts: m.parts?.length ?? 0,
+        morphs: [...new Set((m.parts ?? []).flatMap((p) => p.morphs ?? []))],
+        variables: m.variables ?? [],
+        jkaClips: Object.keys(m.jkaClips ?? {}).length,
+        wardrobe: wardrobeDir ?? null,
+      });
+    }
+  }
+  const index = { species };
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'index.json'), JSON.stringify(index, null, 2));
+  return index;
+}
+
+/** Remember a customization variable by name, with where it was met, for the structured manifest. */
+function noteVariables(info, list, source) {
+  if (!info.variables) return;
+  for (const v of list) {
+    const key = `${v.private ? 'private:' : ''}${v.name}`;
+    const entry = info.variables.get(key) ?? info.variables.set(key, { name: v.name, private: !!v.private, kind: v.kind, sources: [] }).get(key);
+    if (v.kind === 'palette') entry.palette = v.palette;
+    else entry.max = Math.max(entry.max ?? 0, v.max ?? 0);
+    if (entry.default === undefined) entry.default = v.default ?? 0;
+    if (!entry.sources.includes(source)) entry.sources.push(source);
+  }
+}
+
+/** The structured customization list a manifest carries: each variable with its palette's colours or its range. */
+function customizationList(vfs, info) {
+  const out = [];
+  for (const v of info.variables?.values() ?? []) {
+    const entry = { name: v.name, private: v.private, kind: v.kind === 'palette' ? 'palette' : 'index', default: v.default, sources: v.sources.map((f) => basename(f)) };
+    if (v.kind === 'palette') {
+      entry.palette = v.palette;
+      try {
+        entry.colors = vfs.has(v.palette) ? parsePalette(vfs.read(v.palette)).map(([r, g, b]) => [r, g, b]) : [];
+      } catch {
+        entry.colors = [];
+      }
+    } else entry.count = v.max ?? 0;
+    out.push(entry);
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
 /** --var=a=1,b=2 → Map of customization variable values (matched by full or short name). */
 function customizationValues(spec) {
   const values = new Map();
@@ -702,7 +863,10 @@ function skinnedTexture(vfs, shaderPath, slots, ctx, info) {
   } catch (err) {
     info.skipped.push(`${shaderPath}: ${err.message}`);
   }
-  if (shader && shader.variables?.length) for (const line of describeVariables(shader.variables)) info.customization.add(`${shaderPath}: ${line}`);
+  if (shader && shader.variables?.length) {
+    for (const line of describeVariables(shader.variables)) info.customization.add(`${shaderPath}: ${line}`);
+    noteVariables(info, shader.variables, shaderPath);
+  }
   info.shaderNotes.add(`${shaderPath}: ${describeShader(shader)}`);
   const rendered = slots?.find((s) => s.tag === 'MAIN') ?? slots?.[0];
   if (!rendered && !(shader && shaderNeedsBake(shader))) return textureFor(vfs, shaderPath);
@@ -740,7 +904,7 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
   if (!sat.skeletons.length) throw new Error(`${satPath}: no skeleton`);
   const skeletonFile = sat.skeletons[0].file;
   const loadSkeleton = (file) => parseSkeleton(readIff(vfs, file), (f) => (vfs.has(f) ? readIff(vfs, f) : null));
-  const info = { sat: satPath, skeleton: skeletonFile, joints: 0, meshes: [], animations: [], missing: [], unknownTransforms: 0, skipped: [], textureRenderers: [], customization: new Set(), attached: [], shaderNotes: new Set() };
+  const info = { sat: satPath, skeleton: skeletonFile, joints: 0, meshes: [], animations: [], missing: [], unknownTransforms: 0, skipped: [], textureRenderers: [], customization: new Set(), variables: new Map(), attached: [], shaderNotes: new Set() };
   // Extra skeletons (the face rig) hang from a joint of the first.
   const extras = [];
   for (const k of sat.skeletons.slice(1)) {
@@ -856,6 +1020,7 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
         const image = renderBlueprint(vfs, bp, ctx);
         info.textureRenderers.push(`${trt.file}: ${bp.width}x${bp.height} for ${trt.slots.map((sl) => `${mgn.shaders[sl.shaderIndex]?.shader ?? sl.shaderIndex}:${sl.tag}`).join(', ')}${image.missing.length ? `; missing textures ${image.missing.join(', ')}` : ''}${image.unsupported.length ? `; effects without fixed-function passes ${image.unsupported.join(', ')}` : ''}`);
         for (const line of describeVariables(bp.variables)) info.customization.add(`${trt.file}: ${line}`);
+        noteVariables(info, bp.variables, trt.file);
         for (const sl of trt.slots) (slotsByShader.get(sl.shaderIndex) ?? slotsByShader.set(sl.shaderIndex, []).get(sl.shaderIndex)).push({ tag: sl.tag, image, file: trt.file });
       } catch (err) {
         info.skipped.push(`${trt.file}: ${err.message}`);
@@ -871,7 +1036,7 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
       kept.push(g);
     });
     if (kept.length) {
-      const entry = { name: meshName, groups: kept };
+      const entry = { name: meshName, groups: kept, blendTargets: mgn.blendTargets };
       if (parts) {
         // What this mesh hides on the layers beneath it, and the zone names its triangles index.
         entry.extras = {
@@ -988,6 +1153,7 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
         file: relative(parts.dir, file),
         bytes: statSync(file).size,
         triangles: mesh.groups.reduce((a, g) => a + g.primitives[0].indices.length / 3, 0),
+        ...(mesh.blendTargets?.length ? { morphs: mesh.blendTargets.map((b) => b.name) } : {}),
         ...(mesh.extras ?? {}),
       });
     }
@@ -1299,6 +1465,9 @@ function packStatus(dir) {
     console.log('  weapons: none (the placeholder saber and rifle are used)');
     need(`weapons <swg-dir> ${dir} --retail-only`, 'no weapons converted for the rack (I in game, the Weapons tab)');
   } else console.log(`  weapons: ${weapons.weapons?.length ?? 0} on the rack, ${weapons.skipped?.length ?? 0} left out`);
+  const speciesIndex = readJson(join(dir, 'characters/index.json'));
+  if (speciesIndex?.species?.length) console.log(`  species: ${speciesIndex.species.map((sp) => `${sp.id} (${sp.morphs.length} sliders, ${sp.variables.length} variables${sp.jkaClips ? '' : ', NO Jedi Academy clips'})`).join(', ')}`);
+  else need(`species <swg-dir> ${dir} --retail-only`, 'no species index: only the one character can be played');
   const ships = readJson(join(dir, 'ships/manifest.json'));
   if (!ships) need(`ships <swg-dir> ${dir} --retail-only`, 'no ships converted for the garage (B in game, at the bottom)');
   else console.log(`  ships: ${ships.ships.length} ships, ${ships.ships.filter((sh) => sh.interior && !sh.interior.failed).length} with an interior, ${ships.skipped.length} left out`);
@@ -1955,7 +2124,7 @@ switch (cmd) {
           const { groups } = skinnedPrimitives(mgn, skeleton);
           const meshName = basename(name).replace(/\.[^.]+$/, '');
           const textures = new Map();
-          const info = { missing: [], skipped: [], customization: new Set(), textureRenderers: [], shaderNotes: new Set() };
+          const info = { missing: [], skipped: [], customization: new Set(), variables: new Map(), textureRenderers: [], shaderNotes: new Set() };
           const kept = [];
           for (const g of groups) {
             if (!g.primitives[0].indices.length) continue;
@@ -2003,68 +2172,48 @@ switch (cmd) {
     if (!pos[2]) usage();
     const vfs = mount(pos[1]);
     const template = (options.template ?? PLAYER_TEMPLATE).replace(/\\/g, '/');
-    const id = basename(template).replace(/^shared_/, '').replace(/\.[^.]+$/, '');
-    const outDir = join(pos[2], 'characters', id);
     const wear = options.wear === undefined ? DEFAULT_WEAR : options.wear === 'none' ? [] : options.wear.split(',').map((w) => w.trim()).filter(Boolean);
-    const variables = customizationValues(options.var);
-    // The Jedi Academy clips reach the rig by bundle (clips-save and clips-apply), so a rebuild
-    // keeps the ones the old rig carried rather than dropping them until the bundle is applied again.
-    const rigFile = join(outDir, 'rig.glb');
-    const oldParts = existsSync(join(outDir, 'parts.json')) ? JSON.parse(readFileSync(join(outDir, 'parts.json'), 'utf8')) : null;
-    let carried = null;
-    if (existsSync(rigFile)) {
+    convertParts(vfs, pos[2], template, { wear, variables: customizationValues(options.var), anim: options.anim, maxAnims: options['max-anims'] });
+    writeSpeciesIndex(pos[2]);
+    break;
+  }
+
+  case 'species': {
+    // <swg-dir> <out-dir> [--only=human,twilek_female] [--wear=...] [--var=...]: every playable species and
+    // gender (object/creature/player/shared_<species>_<gender>.iff) as a parts pack, the Jedi Academy
+    // clip bundle applied to each rig when the player has one, and characters/index.json listing them
+    // with their customization variables (palette colours, index ranges) and shape sliders.
+    if (!pos[2]) usage();
+    const vfs = mount(pos[1]);
+    const only = options.only ? options.only.split(',').map((x) => x.trim().toLowerCase()).filter(Boolean) : null;
+    const templates = [...vfs.list('object/creature/player/')].filter((n) => /\/shared_[a-z_]+_(male|female)\.iff$/i.test(n)).sort();
+    const picked = templates.filter((t) => !only || only.some((o) => basename(t).toLowerCase().includes(o)));
+    if (!picked.length) {
+      console.log(`no player species templates${only ? ` matching ${only.join(', ')}` : ''}; the archives hold: ${templates.map((t) => basename(t)).join(', ') || 'none'}`);
+      break;
+    }
+    const wear = options.wear === undefined ? DEFAULT_WEAR : options.wear === 'none' ? [] : options.wear.split(',').map((w) => w.trim()).filter(Boolean);
+    const bundle = join(pos[2], 'player', 'jka.clips');
+    const done = [];
+    const failed = [];
+    for (const template of picked) {
+      const id = basename(template).replace(/^shared_/, '').replace(/\.[^.]+$/, '');
+      console.log(`\n${id} (${template})`);
       try {
-        const bundle = extractClips(readFileSync(rigFile), (name) => /^BOTH_/i.test(name));
-        if (bundle.clips.length) carried = { bundle, jkaClips: oldParts?.jkaClips ?? {}, jkaGrip: oldParts?.jkaGrip, scale: oldParts?.scale };
+        const r = convertParts(vfs, pos[2], template, { wear, variables: customizationValues(options.var), anim: options.anim, maxAnims: options['max-anims'] });
+        if (existsSync(bundle)) {
+          const n = applyBundleToRig(join(r.outDir, 'rig.glb'), bundle);
+          if (n) console.log(`   ${n} Jedi Academy clips applied from ${bundle}`);
+        } else console.log('   no player/jka.clips bundle to apply: run the player command with --jka and clips-save first for the saber, jump and roll clips');
+        done.push(id);
       } catch (err) {
-        console.log(`  (the old rig's Jedi Academy clips could not be read: ${err.message})`);
+        failed.push(`${id}: ${err.message}`);
+        console.log(`   failed: ${err.message}`);
       }
     }
-    // The same named clip set the single model gets (idle, walk, run, swimming...): the game
-    // finds its states by these names, and the table's first eighty clips are not them.
-    const info = convertSat(vfs, template, null, {
-      animations: options.anim ?? PLAYER_CLIPS,
-      maxAnimations: options['max-anims'] ? Number(options['max-anims']) : 240,
-      variables,
-      wear,
-      parts: { dir: outDir, rig: 'rig' },
-      gender: /female/i.test(id) ? 'f' : 'm',
-    });
-    let kept = null;
-    if (carried) {
-      const buf = readFileSync(rigFile);
-      const { json } = readGlb(buf);
-      if (!(json.animations ?? []).some((a) => /^BOTH_/i.test(a.name))) {
-        const { clips } = retargetClips(carried.bundle, skinJoints(json));
-        writeFileSync(rigFile, replaceClips(buf, clips, (name) => clips.some((c) => c.name === name)));
-        info.rig.clips = (info.rig.clips ?? 0) + clips.length;
-        kept = { count: clips.length, jkaClips: Object.fromEntries(Object.entries(carried.jkaClips).filter(([n]) => clips.some((c) => c.name === n))) };
-      }
-    }
-    const manifest = {
-      id,
-      template,
-      skeleton: info.skeleton,
-      rig: info.rig,
-      joints: info.joints,
-      // What the conversion dressed this character in; the game starts it wearing the same.
-      defaultWear: info.parts.filter((p) => p.occlusionLayer > 0).map((p) => p.name),
-      clips: info.animations,
-      clipSpeeds: info.clipSpeeds ?? {},
-      ...(info.partialClips ? { partialClips: info.partialClips } : {}),
-      parts: info.parts,
-      customization: [...info.customization],
-      ...(kept ? { jkaClips: kept.jkaClips, ...(carried.jkaGrip ? { jkaGrip: carried.jkaGrip } : {}), ...(carried.scale !== undefined ? { scale: carried.scale } : {}) } : {}),
-    };
-    writeFileSync(join(outDir, 'parts.json'), JSON.stringify(manifest, null, 2));
-    const total = info.parts.reduce((a, p) => a + p.bytes, 0);
-    console.log(`-> ${outDir}`);
-    console.log(`   rig ${info.rig.file}: ${info.rig.joints} joints, ${info.rig.clips} clips${kept ? ` (${kept.count} Jedi Academy clips carried over from the old rig)` : ''}`);
-    for (const p of info.parts) {
-      console.log(`   ${p.name.padEnd(22)} ${String(p.triangles).padStart(5)} tris  ${(p.bytes / 1024).toFixed(0).padStart(5)} KB  layer ${p.occlusionLayer}${p.occludes?.length ? `  hides ${p.occludes.join(' ')}` : ''}`);
-    }
-    console.log(`   ${info.parts.length} parts, ${(total / 1e6).toFixed(1)} MB of meshes (the rig and its clips are shared)`);
-    if (info.skipped.length) console.log(`   skipped: ${info.skipped.slice(0, 5).join('; ')}`);
+    const index = writeSpeciesIndex(pos[2]);
+    console.log(`\n-> ${join(pos[2], 'characters', 'index.json')}: ${index.species.length} characters (${done.length} converted now${failed.length ? `, ${failed.length} failed: ${failed.join('; ')}` : ''})`);
+    for (const sp of index.species) console.log(`   ${sp.id.padEnd(22)} ${sp.parts} parts, ${sp.morphs.length} shape sliders, ${sp.variables.filter((v) => v.kind === 'palette').length} colour palettes, ${sp.variables.filter((v) => v.kind === 'index').length} choices, ${sp.jkaClips} Jedi Academy clips${sp.wardrobe ? `, wardrobe ${sp.wardrobe}` : ''}`);
     break;
   }
 

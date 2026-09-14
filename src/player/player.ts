@@ -406,6 +406,17 @@ export class Player {
   }
 
   /** Swap the primitive body for a skinned rig; weapons move to its hand bones. */
+  /** Take the rig off (a species change puts another on): the model leaves the scene and the placeholder body shows until the next attaches. */
+  detachRig(): void {
+    const rig = this.rig;
+    if (!rig) return;
+    rig.stopOverride();
+    this.group.remove(rig.root);
+    this.rig = null;
+    this.hasJkaClips = false;
+    this.parts.hips.visible = true;
+  }
+
   attachRig(rig: CharacterRig): void {
     this.rig = rig;
     this.hasJkaClips = rig.has('BOTH_A1_T__B_') || rig.has('BOTH_A2_T__B_');

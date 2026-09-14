@@ -21,6 +21,48 @@ interface PartDef {
   zoneCombinations?: string[][];
   fullyOccludedBy?: string[];
   body?: boolean;
+  /** The shape sliders this mesh carries (blend targets), by name. */
+  morphs?: string[];
+}
+
+/** A customization variable the species' skin, hair or eyes take: a palette of colours, or a choice among N textures. */
+export interface CustomVariable {
+  name: string;
+  private: boolean;
+  kind: 'palette' | 'index';
+  default: number;
+  /** A palette's colours, 0..255 each, in the order the variable indexes them. */
+  colors?: number[][];
+  palette?: string;
+  /** An index variable's number of choices. */
+  count?: number;
+  /** Which files (shaders, texture renderers) read it. */
+  sources: string[];
+}
+
+/** One playable species and gender, as characters/index.json lists it. */
+export interface SpeciesEntry {
+  id: string;
+  species: string;
+  gender: string;
+  template: string;
+  skeleton: string;
+  parts: number;
+  morphs: string[];
+  variables: CustomVariable[];
+  jkaClips: number;
+  wardrobe: string | null;
+}
+
+/** The species index, or an empty list when the pack has none (only the one character converted by hand). */
+export async function loadSpeciesIndex(baseUrl: string): Promise<SpeciesEntry[]> {
+  try {
+    const res = await fetch(`${baseUrl}assets-private/characters/index.json`);
+    if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json')) return [];
+    return ((await res.json()) as { species: SpeciesEntry[] }).species ?? [];
+  } catch {
+    return [];
+  }
 }
 
 /** The blade's axis in a hand bone's own frame, for each hand. */
@@ -33,6 +75,9 @@ export interface GripAxes {
 
 export interface PartsManifest {
   id: string;
+  species?: string;
+  gender?: string;
+  template?: string;
   skeleton: string;
   rig: { file: string; joints: number; clips: number };
   joints: number;
@@ -48,6 +93,9 @@ export interface PartsManifest {
   clipSpeeds?: Record<string, number>;
   scale?: number;
   customization?: string[];
+  /** The customization variables, structured, and the values the pack was baked with. */
+  variables?: CustomVariable[];
+  values?: Record<string, number>;
 }
 
 /** The converted catalogue of everything a species can wear. */
@@ -259,10 +307,22 @@ export class Character {
    */
   async catalogue(baseUrl: string): Promise<Wardrobe> {
     if (this.wardrobe) return this.wardrobe;
-    const dir = `${baseUrl}assets-private/wardrobe/${this.manifest.id}/`;
-    const res = await fetch(`${dir}wardrobe.json`);
-    if (!res.ok) throw new Error(`no wardrobe for ${this.manifest.id}`);
-    const w = (await res.json()) as Wardrobe;
+    // The species' own wardrobe, else the human one of the same gender: the humanoid species
+    // share a skeleton, and every wearable is weighted to it, so the same meshes fit them all.
+    const gender = this.manifest.gender ?? (/female/.test(this.manifest.id) ? 'female' : 'male');
+    let dir = '';
+    let w: Wardrobe | null = null;
+    for (const cand of [this.manifest.id, `human_${gender}`]) {
+      const d = `${baseUrl}assets-private/wardrobe/${cand}/`;
+      const res = await fetch(`${d}wardrobe.json`);
+      if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json')) continue;
+      const found = (await res.json()) as Wardrobe & { skeleton?: string };
+      if (cand !== this.manifest.id && found.skeleton && found.skeleton.toLowerCase() !== this.manifest.skeleton.toLowerCase()) continue;
+      dir = d;
+      w = found;
+      break;
+    }
+    if (!w) throw new Error(`no wardrobe for ${this.manifest.id}`);
     // Each item's meshes live beside the catalogue, not in the character's own folder.
     for (const item of w.items) for (const part of item.parts) part.dir = dir;
     this.wardrobe = w;
