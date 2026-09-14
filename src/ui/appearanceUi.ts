@@ -59,13 +59,32 @@ export class AppearanceUi {
   }
 
 
+  private baseUrl = '';
+  private hair: { id: string; label: string }[] = [];
+
   /** Show a character: its sliders and colours, and the doll. */
-  attach(character: Character): void {
+  attach(character: Character, baseUrl = ''): void {
     this.character = character;
+    this.baseUrl = baseUrl;
     this.speciesId = character.manifest.id;
     const sel = this.root.querySelector<HTMLSelectElement>('.species')!;
     if (sel.value !== this.speciesId && [...sel.options].some((o) => o.value === this.speciesId)) sel.value = this.speciesId;
     this.build();
+    // The hairstyles come from the wardrobe, which loads on its own time; the section fills in when it lands.
+    void character.hairOptions(baseUrl).then((list) => {
+      if (this.character !== character) return;
+      this.hair = list;
+      this.build();
+    });
+  }
+
+  /** The hairstyle section: the species' own styles, either gender's, and none. */
+  private hairRows(): string {
+    const c = this.character;
+    if (!c || !this.hair.length) return '';
+    const worn = c.hairWorn();
+    const options = [`<option value="">— none —</option>`, ...this.hair.map((h) => `<option value="${h.id}"${h.id === worn ? ' selected' : ''}>${h.label}</option>`)];
+    return `<h3 class="wardrobe-section">Hair <span>${this.hair.length} styles for this species</span></h3><label class="wardrobe-slot"><span class="slot-label">Style</span><select class="hair-pick">${options.join('')}</select><span class="slot-count">${this.hair.length}</span></label>`;
   }
 
   /** Say why there is nothing to edit, in place of the sliders. */
@@ -80,9 +99,10 @@ export class AppearanceUi {
     if (!c) return '';
     const values = c.morphValues();
     const names = Object.keys(values).sort();
-    if (!names.length) return '';
     const seen = new Set<string>();
     const rows: string[] = [];
+    // Height first: a scale over the model within the species' own range.
+    rows.push(`<label class="wardrobe-slot shape"><span class="slot-label">Height</span><input type="range" class="height" min="0" max="1" step="0.01" value="${c.height.toFixed(2)}" /><span class="slot-count">${c.height.toFixed(2)}</span></label>`);
     for (const n of names) {
       if (seen.has(n)) continue;
       const pair = /^(.*)_0$/.exec(n);
@@ -112,7 +132,8 @@ export class AppearanceUi {
     const morphs = new Set(Object.keys(c.morphValues()).map((m) => m.replace(/_[01]$/, '')));
     // Live variables come from the pack's recipes, each private one scoped to its own mesh (a
     // shirt's colour 1 is not the pants' colour 1); a pack without recipes lists the manifest's.
-    const live = c.customizer?.variables() ?? [];
+    const worn = c.wornMeshes();
+    const live = (c.customizer?.variables() ?? []).filter((v) => (!v.private || worn.has(v.mesh)) && !c.customizer!.isLinked(v.key));
     const manifestVars = c.manifest.variables ?? [];
     const rows: { key: string; name: string; private: boolean; mesh: string; kind: 'palette' | 'index'; colors?: number[][]; count?: number; default: number; live: boolean }[] = [];
     if (live.length) {
@@ -197,9 +218,28 @@ export class AppearanceUi {
     const colours = this.colourRows();
     const c = this.character;
     this.root.querySelector<HTMLElement>('.count')!.textContent = c ? `${Object.keys(c.morphValues()).length} sliders · ${(c.manifest.variables ?? []).length} variables` : '';
-    this.body.innerHTML = shape || colours ? `${shape}${colours}` : '<div class="wardrobe-empty">This character carries no shape sliders and lists no customization variables. A parts pack from the converter\'s <code>species</code> command has both.</div>';
+    const hair = this.hairRows();
+    this.body.innerHTML = shape || colours || hair ? `${hair}${shape}${colours}` : '<div class="wardrobe-empty">This character carries no shape sliders and lists no customization variables. A parts pack from the converter\'s <code>species</code> command has both.</div>';
     if (c) this.preview.refresh(c);
     this.wireShape();
+    const pick = this.body.querySelector<HTMLSelectElement>('.hair-pick');
+    pick?.addEventListener('change', () => {
+      const ch = this.character;
+      if (!ch) return;
+      void ch.wearHair(pick.value || null, this.baseUrl).then(() => {
+        this.preview.refresh(ch);
+        this.build();
+        this.onChange();
+      });
+    });
+    const height = this.body.querySelector<HTMLInputElement>('input.height');
+    height?.addEventListener('input', () => {
+      const ch = this.character;
+      if (!ch) return;
+      ch.setHeight(Number(height.value));
+      height.nextElementSibling!.textContent = Number(height.value).toFixed(2);
+      this.onChange();
+    });
   }
 
   private wireShape(): void {

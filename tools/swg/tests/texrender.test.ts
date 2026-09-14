@@ -103,3 +103,11 @@ ok(bodyOut.rgba[2] > 0 && bodyOut.rgba[1] === 0, "the body's scoped value reache
 ok(shirtOut.rgba[0] > 0 && shirtOut.rgba[1] === 0 && shirtOut.rgba[2] === 0, 'the shirt keeps its default (red): an unscoped value never reaches a private variable');
 ok(recipeVariables(shirt).has('shirt_s03_m_l0|index_color_1') && !recipeVariables(shirt).has('index_color_1'), "a private variable's key names its mesh");
 console.log(`${checks} checks passed`);
+
+// The browser's PNG decoder reads the converter's PNGs byte for byte, transparent texels included.
+const { encodePng } = await import('../png.mjs');
+const { decodePng } = await import('../../../src/player/png.ts');
+const src = new Uint8Array([200, 100, 50, 0, 10, 20, 30, 128, 0, 0, 0, 255, 255, 255, 255, 255]);
+const decoded = await decodePng(new Uint8Array(encodePng(2, 2, src)));
+ok(decoded.width === 2 && decoded.height === 2 && [...decoded.rgba].every((v, i) => v === src[i]), 'a PNG round-trips exactly, colour under zero alpha included');
+console.log(`${checks} checks passed (with the PNG decoder)`);

@@ -2140,6 +2140,14 @@ switch (cmd) {
     const ctx = renderContext(customizationValues(options.var));
     const catalogue = [];
     const failed = [];
+    // The live recipes for the items whose look a colour changes (a shirt's palette factors, a
+    // hairstyle's colour), one per material and mesh, with their images beside them.
+    const recipes = [];
+    const recipeKeys = new Set();
+    const registry = new ImageRegistry((id, bytes) => {
+      mkdirSync(join(outDir, 'customize'), { recursive: true });
+      writeFileSync(join(outDir, 'customize', id), bytes);
+    });
     let done = 0;
     for (const tpl of templates) {
       if (done >= limit) break;
@@ -2174,9 +2182,21 @@ switch (cmd) {
           const kept = [];
           for (const g of groups) {
             if (!g.primitives[0].indices.length) continue;
-            const t = skinnedTexture(vfs, g.shader, null, ctx, info);
+            const t = skinnedTexture(vfs, g.shader, null, ctx, info, meshName);
             if (t) textures.set(g.shader, t);
             kept.push(g);
+            const rkey = `${g.shader}|${meshName}`;
+            if (!recipeKeys.has(rkey)) {
+              try {
+                const shader = loadShader(vfs, g.shader, ctx);
+                if (shader?.effect && shaderNeedsBake(shader)) {
+                  recipeKeys.add(rkey);
+                  recipes.push({ mesh: meshName, material: g.shader, kind: 'bake', baseTag: 'MAIN', shader: exportShader(shader, registry, (f) => loadImage(vfs, f, ctx.images)), slots: [] });
+                }
+              } catch (err) {
+                info.skipped.push(`${g.shader}: no live recipe (${err.message})`);
+              }
+            }
           }
           if (!kept.length) continue;
           const file = `${meshName}.glb`;
@@ -2195,7 +2215,7 @@ switch (cmd) {
           });
         }
         if (!entries.length) throw new Error('no mesh survived');
-        catalogue.push({ id, template: tpl, kind: tpl.split('/')[2], sat: satPath, gender: usedOtherGender ? (gender === 'm' ? 'f' : 'm') : gender, parts: entries });
+        catalogue.push({ id, template: tpl, kind: tpl.split('/')[2], sat: satPath, gender: usedOtherGender ? (gender === 'm' ? 'f' : 'm') : gender, parts: entries, variables: customizationList(vfs, info) });
         done++;
         if (done % 50 === 0) console.log(`  ${done} converted...`);
       } catch (err) {
@@ -2204,7 +2224,11 @@ switch (cmd) {
     }
     const bytes = catalogue.reduce((a, c) => a + c.parts.reduce((b, p) => b + p.bytes, 0), 0);
     writeFileSync(join(outDir, 'wardrobe.json'), JSON.stringify({ species: speciesId, gender, skeleton: baseSkeletonFile, items: catalogue }, null, 2));
-    console.log(`-> ${outDir}: ${catalogue.length} items, ${catalogue.reduce((a, c) => a + c.parts.length, 0)} meshes, ${(bytes / 1e6).toFixed(1)} MB`);
+    if (recipes.length) {
+      const palettes = exportPalettes(vfs, recipes.flatMap((r) => palettesOf(r)));
+      writeFileSync(join(outDir, 'customize.json'), JSON.stringify({ images: 'customize/', recipes, palettes }, null, 1));
+    }
+    console.log(`-> ${outDir}: ${catalogue.length} items, ${catalogue.reduce((a, c) => a + c.parts.length, 0)} meshes, ${(bytes / 1e6).toFixed(1)} MB${recipes.length ? `; ${recipes.length} live colour recipes over ${registry.ids.size} images` : ''}`);
     const withMorphs = catalogue.filter((c) => c.parts.some((p) => p.morphs.length)).length;
     const otherGender = catalogue.filter((c) => c.gender !== gender).length;
     console.log(`   ${withMorphs} carry body-shape morphs; ${otherGender} exist only in the other gender's mesh`);

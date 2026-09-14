@@ -4,6 +4,7 @@
 // path in idle time, one after another, so a slider that moves fast lands on its last value.
 import * as THREE from 'three';
 import { type CustomizeFile, type Img, type Recipe, type Values, recipeVariableDefs, recipeVariables, renderRecipe, variableKey } from './texrender';
+import { decodePng } from './png';
 
 export class Customizer {
   readonly values: Values = new Map();
@@ -11,6 +12,11 @@ export class Customizer {
   private readonly pending = new Map<string, Promise<Img | null>>();
   private readonly deps = new Map<Recipe, Set<string>>();
   private readonly textures = new Map<string, THREE.DataTexture>();
+  /** Every recipe from every source (the parts pack, the wardrobe), with the folder its images live in. */
+  private readonly recipes: Recipe[] = [];
+  private readonly dirOf = new Map<Recipe, string>();
+  private readonly palettes: Record<string, number[][]> = {};
+  private readonly loaded = new Set<string>();
   private queued = new Set<Recipe>();
   private running = false;
   /** Materials by name across the character's meshes, refreshed by the character as parts come and go. */
@@ -18,21 +24,30 @@ export class Customizer {
   /** Called when a render lands, so a preview can redraw. */
   onRendered: () => void = () => {};
 
-  private constructor(readonly file: CustomizeFile, private readonly dir: string) {
-    for (const r of file.recipes) this.deps.set(r, recipeVariables(r));
-  }
-
-  /** The pack's recipes, or null when the pack carries none (converted before live customization). */
-  static async load(dir: string): Promise<Customizer | null> {
+  /** The recipes of a pack folder, added to what is already here; false when the folder has none. */
+  async addSource(dir: string): Promise<boolean> {
+    if (this.loaded.has(dir)) return true;
     try {
       const res = await fetch(`${dir}customize.json`);
-      if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json')) return null;
+      if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json')) return false;
       const file = (await res.json()) as CustomizeFile;
-      if (!file.recipes?.length) return null;
-      return new Customizer(file, dir);
+      if (!file.recipes?.length) return false;
+      this.loaded.add(dir);
+      Object.assign(this.palettes, file.palettes);
+      for (const r of file.recipes) {
+        this.recipes.push(r);
+        this.dirOf.set(r, `${dir}${file.images}`);
+        this.deps.set(r, recipeVariables(r));
+      }
+      return true;
     } catch {
-      return null;
+      return false;
     }
+  }
+
+  /** Whether any recipes are here at all. */
+  get any(): boolean {
+    return this.recipes.length > 0;
   }
 
   /**
@@ -41,7 +56,7 @@ export class Customizer {
    */
   variables(): { key: string; name: string; private: boolean; mesh: string; default: number; kind: 'palette' | 'index'; palette?: string; count?: number; colors?: number[][] }[] {
     const out = new Map<string, { key: string; name: string; private: boolean; mesh: string; default: number; kind: 'palette' | 'index'; palette?: string; count?: number; colors?: number[][] }>();
-    for (const r of this.file.recipes) {
+    for (const r of this.recipes) {
       for (const d of recipeVariableDefs(r)) {
         const key = variableKey(d.name, d.private, r.mesh);
         const prev = out.get(key);
@@ -49,28 +64,61 @@ export class Customizer {
           if (d.count && (!prev.count || d.count > prev.count)) prev.count = d.count;
           continue;
         }
-        out.set(key, { key, name: d.name, private: d.private, mesh: r.mesh, default: d.default, kind: d.kind, ...(d.palette ? { palette: d.palette, colors: this.file.palettes[d.palette] } : {}), ...(d.count ? { count: d.count } : {}) });
+        out.set(key, { key, name: d.name, private: d.private, mesh: r.mesh, default: d.default, kind: d.kind, ...(d.palette ? { palette: d.palette, colors: this.palettes[d.palette] } : {}), ...(d.count ? { count: d.count } : {}) });
       }
     }
     return [...out.values()];
   }
 
+  /** The keys a change to `key` also sets: a shared variable reaches the private copies of the same name on every mesh (the head's own skin colour follows the owner's). */
+  private linked(key: string): string[] {
+    if (key.includes('|')) return [];
+    const short = key.replace(/^.*\//, '');
+    const out = new Set<string>();
+    for (const v of this.variables()) if (v.private && v.name.replace(/^.*\//, '') === short) out.add(v.key);
+    return [...out];
+  }
+
+  /** Whether a private variable is a copy of a shared one (and so follows it rather than showing on its own). */
+  isLinked(key: string): boolean {
+    if (!key.includes('|')) return false;
+    const short = key.replace(/^.*\|/, '').replace(/^.*\//, '');
+    return this.variables().some((v) => !v.private && v.name.replace(/^.*\//, '') === short);
+  }
+
+  /** The two spellings a key may be read under: as given, and with the variable's path dropped (the mesh scope kept). */
+  private static spellings(key: string): [string, string] {
+    const bar = key.indexOf('|');
+    const scope = bar >= 0 ? key.slice(0, bar + 1) : '';
+    const name = bar >= 0 ? key.slice(bar + 1) : key;
+    return [key, `${scope}${name.replace(/^.*\//, '')}`];
+  }
+
   /** Whether any recipe reads the variable. */
   affects(name: string): boolean {
-    const short = name.replace(/^.*\//, '');
-    for (const d of this.deps.values()) if (d.has(name) || d.has(short)) return true;
+    const [a, b] = Customizer.spellings(name);
+    for (const d of this.deps.values()) if (d.has(a) || d.has(b)) return true;
     return false;
   }
 
-  /** Set a variable and re-render what reads it; returns how many recipes will re-render. */
-  set(name: string, value: number): number {
-    this.values.set(name, value);
-    const short = name.replace(/^.*\//, '');
+  private queueReaders(key: string): number {
+    const [a, b] = Customizer.spellings(key);
     let n = 0;
     for (const [r, d] of this.deps) {
-      if (!d.has(name) && !d.has(short)) continue;
+      if (!d.has(a) && !d.has(b)) continue;
       this.queued.add(r);
       n++;
+    }
+    return n;
+  }
+
+  /** Set a variable (and the private copies that follow it) and re-render what reads them; returns how many recipes will re-render. */
+  set(name: string, value: number): number {
+    this.values.set(name, value);
+    let n = this.queueReaders(name);
+    for (const k of this.linked(name)) {
+      this.values.set(k, value);
+      n += this.queueReaders(k);
     }
     if (n) void this.run();
     return n;
@@ -78,14 +126,20 @@ export class Customizer {
 
   /** Set several at once (a saved appearance) and render everything that reads any of them. */
   setAll(values: Record<string, number>): void {
-    for (const [name, v] of Object.entries(values)) this.values.set(name, v);
-    for (const [r, d] of this.deps) for (const name of Object.keys(values)) if (d.has(name) || d.has(name.replace(/^.*\//, ''))) this.queued.add(r);
+    for (const [name, v] of Object.entries(values)) {
+      this.values.set(name, v);
+      this.queueReaders(name);
+      for (const k of this.linked(name)) {
+        this.values.set(k, v);
+        this.queueReaders(k);
+      }
+    }
     if (this.queued.size) void this.run();
   }
 
   /** Render every recipe (the pack was baked with its own defaults; ours may differ). */
   renderAll(): void {
-    for (const r of this.file.recipes) this.queued.add(r);
+    for (const r of this.recipes) this.queued.add(r);
     void this.run();
   }
 
@@ -100,7 +154,8 @@ export class Customizer {
         // Between recipes the frame gets a turn, so a whole re-render does not freeze the game.
         await new Promise((resolve) => setTimeout(resolve, 0));
         const t0 = performance.now();
-        const img = renderRecipe(r, this.values, this.file.palettes, (file) => (file ? this.images.get(file.toLowerCase()) ?? null : null));
+        const dir = this.dirOf.get(r) ?? '';
+        const img = renderRecipe(r, this.values, this.palettes, (file) => (file ? this.images.get(`${dir}${file}`.toLowerCase()) ?? null : null));
         if (!img) continue;
         this.put(r, img);
         const ms = performance.now() - t0;
@@ -138,7 +193,7 @@ export class Customizer {
 
   /** The materials a recipe feeds get its texture again after a part is reloaded. */
   reapply(): void {
-    for (const r of this.file.recipes) {
+    for (const r of this.recipes) {
       const tex = this.textures.get(r.material);
       if (!tex) continue;
       for (const m of this.materialsFor(r.material)) {
@@ -162,15 +217,16 @@ export class Customizer {
       for (const s of slot.blueprint.shaders) fromShader(s);
       for (const f of slot.blueprint.textures) if (f) files.add(f);
     }
-    await Promise.all([...files].map((f) => this.image(f)));
+    const dir = this.dirOf.get(r) ?? '';
+    await Promise.all([...files].map((f) => this.image(dir, f)));
   }
 
-  private image(file: string): Promise<Img | null> {
-    const key = file.toLowerCase();
+  private image(dir: string, file: string): Promise<Img | null> {
+    const key = `${dir}${file}`.toLowerCase();
     if (this.images.has(key)) return Promise.resolve(this.images.get(key)!);
     let p = this.pending.get(key);
     if (!p) {
-      p = loadPng(`${this.dir}${this.file.images}${file}`).then((img) => {
+      p = loadPng(`${dir}${file}`).then((img) => {
         this.images.set(key, img);
         this.pending.delete(key);
         return img;
@@ -186,8 +242,21 @@ export class Customizer {
   }
 }
 
-/** A PNG's pixels, rows top to bottom, through an image element and a canvas. */
-function loadPng(url: string): Promise<Img | null> {
+/** A PNG's pixels, rows top to bottom, read as they are (a canvas would premultiply the alpha and black out the transparent texels). */
+async function loadPng(url: string): Promise<Img | null> {
+  try {
+    if (typeof DecompressionStream !== 'undefined') {
+      const res = await fetch(url);
+      if (!res.ok) return null;
+      return await decodePng(new Uint8Array(await res.arrayBuffer()));
+    }
+  } catch (err) {
+    console.warn('customize: could not decode', url, err);
+  }
+  return loadPngByCanvas(url);
+}
+
+function loadPngByCanvas(url: string): Promise<Img | null> {
   return new Promise((resolve) => {
     const im = new Image();
     im.onload = () => {

@@ -140,8 +140,9 @@ export class Character {
   private skeleton: THREE.Skeleton | null = null;
   private dir = '';
   private wardrobe: Wardrobe | null = null;
-  /** Live colours and choices, when the pack carries the recipes (customize.json). */
+  /** Live colours and choices, when a pack carries the recipes (customize.json): the parts pack's, and the wardrobe's once an item is worn. */
   customizer: Customizer | null = null;
+  private pendingCustomizer: Customizer | null = null;
 
   private constructor(readonly manifest: PartsManifest, clips: THREE.AnimationClip[]) {
     this.clips = clips;
@@ -170,12 +171,12 @@ export class Character {
     for (const def of wanted) await character.addPart(def.name, [def], true);
     if (!character.skeleton) throw new Error(`${id}: no part carried a skeleton`);
     character.applyOcclusion();
-    character.customizer = await Customizer.load(dir);
-    if (character.customizer) {
-      character.customizer.materialsFor = (name) => character.materialsNamed(name);
-      // The pack's values are the manifest's; ours start there, and the recipes render only when a value moves.
-      for (const [k, v] of Object.entries(manifest.values ?? {})) character.customizer.values.set(k, v);
-    }
+    const customizer = new Customizer();
+    customizer.materialsFor = (name) => character.materialsNamed(name);
+    // The pack's values are the manifest's; ours start there, and the recipes render only when a value moves.
+    for (const [k, v] of Object.entries(manifest.values ?? {})) customizer.values.set(k, v);
+    if (await customizer.addSource(dir)) character.customizer = customizer;
+    else character.pendingCustomizer = customizer;
     return character;
   }
 
@@ -336,6 +337,9 @@ export class Character {
       break;
     }
     if (!w) throw new Error(`no wardrobe for ${this.manifest.id}`);
+    // The wardrobe's own colour recipes join the character's.
+    const cz = this.customizer ?? this.pendingCustomizer;
+    if (cz && (await cz.addSource(dir)) && !this.customizer) this.customizer = cz;
     // Each item's meshes live beside the catalogue, not in the character's own folder.
     for (const item of w.items) for (const part of item.parts) part.dir = dir;
     this.wardrobe = w;
@@ -354,6 +358,44 @@ export class Character {
     else await this.addPart(id, item.parts, true);
     this.applyOcclusion();
     return true;
+  }
+
+  /** The meshes on show: the body's and every worn piece's, so colours are offered only for what is worn. */
+  wornMeshes(): Set<string> {
+    const out = new Set<string>();
+    for (const p of this.parts.values()) if (p.worn) for (const m of p.meshes) out.add(m.name);
+    return out;
+  }
+
+  /** The hairstyles this species may wear, from the wardrobe: a species' hair suits both its genders. */
+  async hairOptions(baseUrl: string): Promise<{ id: string; label: string }[]> {
+    let w: Wardrobe;
+    try {
+      w = await this.catalogue(baseUrl);
+    } catch {
+      return [];
+    }
+    const species = (this.manifest.species ?? this.manifest.id.replace(/_(male|female)$/, '')).toLowerCase();
+    return w.items
+      .filter((i) => i.kind === 'hair' && (i.template.toLowerCase().includes(`/hair/${species}/`) || i.id.toLowerCase().includes(`hair_${species}_`)))
+      .map((i) => ({ id: i.id, label: i.id.replace(/^hair_[a-z]+_(male|female)_?/, '').replace(/_/g, ' ') || i.id }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }
+
+  /** The hair worn now, by catalogue id, or null. */
+  hairWorn(): string | null {
+    for (const p of this.parts.values()) if (p.worn && !p.body && /^hair_/.test(p.key)) return p.key;
+    return null;
+  }
+
+  /** Put a hairstyle on (taking any other off), or none. */
+  async wearHair(id: string | null, baseUrl: string): Promise<boolean> {
+    for (const p of [...this.parts.values()]) if (p.worn && !p.body && /^hair_/.test(p.key) && p.key !== id) this.remove(p.key);
+    if (!id) {
+      this.applyOcclusion();
+      return true;
+    }
+    return (await this.wear(id)) || this.wearItem(id, baseUrl);
   }
 
   /** Every material of the given name across the parts (the recipes name materials by the converter's shader key). */
@@ -392,11 +434,12 @@ export class Character {
   /** The height slider's setting, 0 to 1; the whole character is scaled by it. */
   height = 0.5;
 
-  /** Scale the character for a height setting from 0 (shortest) to 1 (tallest), over the size the rig gave it. */
+  /** Scale the character for a height setting from 0 (shortest) to 1 (tallest) within its species' range, over the size the rig gave it. */
   setHeight(t: number): void {
     this.height = Math.min(1, Math.max(0, t));
     if (this.baseScale === null) this.baseScale = this.group.scale.x || 1;
-    this.group.scale.setScalar(this.baseScale * (0.86 + 0.28 * this.height));
+    const [lo, hi] = heightRange(this.manifest.species ?? this.manifest.id);
+    this.group.scale.setScalar(this.baseScale * (lo + (hi - lo) * this.height));
   }
 
   /** Every shape slider, and where each sits. */
@@ -430,6 +473,30 @@ export class Character {
       drawn: p.meshes.reduce((a, m) => a + (m.visible ? (m.geometry.getIndex()?.count ?? 0) / 3 : 0), 0),
     }));
   }
+}
+
+/**
+ * How far a species' height slider reaches, as a scale over its model: the game's creation ranges,
+ * near enough (a Wookiee's model already stands tall, so its band is narrow and above one; a
+ * Sullustan's or Bothan's is short and below).
+ */
+const HEIGHT_RANGES: Record<string, [number, number]> = {
+  human: [0.88, 1.1],
+  twilek: [0.88, 1.1],
+  zabrak: [0.88, 1.1],
+  wookiee: [0.96, 1.12],
+  trandoshan: [0.94, 1.12],
+  rodian: [0.86, 1.04],
+  moncal: [0.9, 1.08],
+  mon_calamari: [0.9, 1.08],
+  bothan: [0.84, 1.0],
+  sullustan: [0.8, 0.96],
+  ithorian: [0.96, 1.12],
+};
+
+export function heightRange(species: string): [number, number] {
+  const key = species.toLowerCase().replace(/_(male|female)$/, '');
+  return HEIGHT_RANGES[key] ?? [0.88, 1.1];
 }
 
 /** The per-triangle zone combination the converter left on the primitive. */

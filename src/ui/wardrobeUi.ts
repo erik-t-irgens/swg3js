@@ -11,7 +11,6 @@ import { CharacterPreview } from './characterPreview';
 
 /** Equipment slots, in the order they read down a body, and the id fragments that name them. */
 const SLOTS: { id: string; label: string; match: RegExp }[] = [
-  { id: 'hair', label: 'Hair', match: /^hair_/ },
   { id: 'head', label: 'Head', match: /helmet|_hat|^hat_|goggles|headwrap|mask|headdress|bonnet/ },
   { id: 'neck', label: 'Neck', match: /necklace|choker|pendant/ },
   { id: 'chest', label: 'Chest', match: /chest_plate|chest_armor|^shirt|_shirt|jacket|robe|vest|dress|bodysuit|bikini|apron|tunic|blouse|coat/ },
@@ -125,6 +124,7 @@ export class WardrobeUi {
     const equipped = this.equippedNow();
     const bySlot = new Map<string, { id: string; label: string }[]>();
     for (const item of w.items) {
+      if (item.kind === 'hair' || /^hair_/.test(item.id)) continue; // the appearance tab's
       const slot = slotOf(item.id);
       (bySlot.get(slot) ?? bySlot.set(slot, []).get(slot)!).push({ id: item.id, label: prettyName(item.id) });
     }

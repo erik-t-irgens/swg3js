@@ -645,7 +645,7 @@ class App {
     }
     this.appearanceUi.setSpecies(this.speciesList, id);
     if (this.wardrobe.open) void this.wardrobe.attach(rig.character, import.meta.env.BASE_URL).catch((err) => console.warn('wardrobe', err));
-    if (this.appearanceUi.open) this.appearanceUi.attach(rig.character);
+    if (this.appearanceUi.open) this.appearanceUi.attach(rig.character, import.meta.env.BASE_URL);
     this.hud.setPrompt(`now playing as ${id.replace(/_/g, ' ')}`);
     return `playing as ${id}`;
   }
@@ -993,7 +993,7 @@ class App {
       else this.wardrobe.explain('This character is a single model, not a set of parts, so there is nothing to change. Convert it with <code>npm run swg -- parts</code>.');
     } else if (want === 'appearance') {
       this.appearanceUi.show();
-      if (character) this.appearanceUi.attach(character);
+      if (character) this.appearanceUi.attach(character, import.meta.env.BASE_URL);
       else this.appearanceUi.explain('This character is a single model, not a set of parts, so there is nothing to shape. Convert it with <code>npm run swg -- species</code>.');
     } else {
       this.weaponsUi.held = { right: this.player.equipped.right?.id ?? null, left: this.player.equipped.left?.id ?? null };
