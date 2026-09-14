@@ -54,6 +54,8 @@ export interface VehicleSpec {
   animal: boolean;
   /** A starship: flies free of the ground once it has speed (a first flight model), lands as a flyer. */
   ship?: boolean;
+  /** A ship's turning inertia: seconds for a turn to build up or die away after the stick moves. */
+  inertia?: number;
   /** Where the rider sits, in the model's frame. */
   seat: [number, number, number];
 }
@@ -117,6 +119,7 @@ export function specFor(kind: VehicleKind, id: string, label: string, bounds: Ve
       return {
         ...base,
         ship: true,
+        inertia: big ? 1.4 : 0.55,
         mass: big ? 40000 : 9000,
         hover: 1.5,
         maxSpeed: big ? 90 : 140,
@@ -172,6 +175,9 @@ export class Vehicle {
   /** A ship: the speed the throttle has built (m/s), and its attitude in flight (free to roll and loop). */
   cruise = 0;
   readonly attitude = new THREE.Quaternion();
+  /** The virtual stick the mouse moves (-1 to 1, self-centring) and the turning rates it has built (rad/s). */
+  readonly stick = new THREE.Vector2();
+  readonly spin = new THREE.Vector3();
   /** A ship in free flight this step (not on its landing gear). */
   airborne = false;
   /** The boost meter: a burst's charge left, or a heat boost's heat, 0 to 1. */
@@ -497,15 +503,36 @@ export class Vehicle {
     if (!wasAirborne) {
       body.setGravityScale(0, true);
       this.attitude.copy(q);
+      this.stick.set(0, 0);
+      this.spin.set(0, 0, 0);
     }
-    // The attitude is flown directly, about the ship's own axes: the mouse pitches and turns it
-    // (limited to a few times the ship's turn rate, so a freighter answers slowly), A and D roll
-    // it, Space and X pitch it, and nothing levels it out: it can fly on its back and loop.
+    // Flown like a flight sim: the mouse moves a virtual stick that centres itself when it stops,
+    // the stick asks for turning rates about the ship's own axes, and the ship's inertia lets those
+    // rates build up and die away over a moment, so a turn carries on a little after the mouse
+    // stops and a freighter takes longer to answer than a fighter. A and D roll, Space and X
+    // pitch, and nothing levels it out: it can fly on its back and loop.
     const rate = s.turnRate;
-    const cap = rate * 3 * dt;
-    const yawDelta = THREE.MathUtils.clamp(-(drive?.lookDX ?? 0) * 0.0025, -cap, cap);
-    const pitchDelta = THREE.MathUtils.clamp((drive?.lookDY ?? 0) * 0.0025, -cap, cap) - ((drive?.up ? 1 : 0) - (drive?.down ? 1 : 0)) * rate * dt;
-    const rollDelta = (drive?.steer ?? 0) * rate * 1.6 * dt;
+    const stick = this.stick;
+    const dx = drive?.lookDX ?? 0;
+    const dy = drive?.lookDY ?? 0;
+    stick.x = THREE.MathUtils.clamp(stick.x + dx * 0.004, -1, 1);
+    stick.y = THREE.MathUtils.clamp(stick.y + dy * 0.004, -1, 1);
+    const centre = Math.min(1, 2.5 * dt);
+    if (!dx) stick.x -= stick.x * centre;
+    if (!dy) stick.y -= stick.y * centre;
+    const wantYaw = -stick.x * rate * 1.5;
+    const wantPitch = stick.y * rate * 1.5 - ((drive?.up ? 1 : 0) - (drive?.down ? 1 : 0)) * rate;
+    const wantRoll = (drive?.steer ?? 0) * rate * 1.6;
+    const ease = Math.min(1, dt / Math.max(0.05, s.inertia ?? 0.5));
+    // A roll answers twice as quickly as a turn: the hull spins about its long axis more readily than it swings.
+    const easeRoll = Math.min(1, (2 * dt) / Math.max(0.05, s.inertia ?? 0.5));
+    const spin = this.spin;
+    spin.y += (wantYaw - spin.y) * ease;
+    spin.x += (wantPitch - spin.x) * ease;
+    spin.z += (wantRoll - spin.z) * easeRoll;
+    const yawDelta = spin.y * dt;
+    const pitchDelta = spin.x * dt;
+    const rollDelta = spin.z * dt;
     const a = this.attitude;
     if (yawDelta) a.multiply(qTmp.setFromAxisAngle(AXIS_Y, yawDelta));
     if (pitchDelta) a.multiply(qTmp.setFromAxisAngle(AXIS_X, pitchDelta));
