@@ -18,6 +18,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { Hud } from './ui/hud';
 import type { DriveInput } from './vehicles/speeder';
 import { World } from './world/world';
+import { RANGE } from './world/gallery';
 
 const MOUNT_RANGE = 3.6;
 
@@ -331,8 +332,11 @@ class App {
         rig.play(exact, { loop, hold: !loop });
         return { playing: exact, matches: clips.slice(0, 20) };
       },
-      /** The gallery world: how many exhibits and mannequins are up, and the animation slot nearest the player. */
-      gallery: () => (this.world.gallery ? { ...this.world.gallery.status(), nearest: this.world.gallery.nearest(this.player.pos) } : 'not on the gallery planet (?planet=gallery)'),
+      /** The gallery world: how many mannequins are up and the animation slot nearest the player; `gallery(10)` widens the range they wake in (metres). */
+      gallery: (range?: number) => {
+        if (range !== undefined) RANGE.wake = Math.max(1, range);
+        return this.world.gallery ? { ...this.world.gallery.status(), nearest: this.world.gallery.nearest(this.player.pos) } : 'not on the gallery planet (?planet=gallery)';
+      },
       /** The blaster in hand, 'pistol' or 'rifle': which of the game's carries play. */
       gun: (kind?: 'pistol' | 'rifle') => {
         if (kind) this.player.gunKind = kind;

@@ -35,9 +35,12 @@ const SPACING = 1.83;
 const ROW = 3;
 const PER_ROW = 24;
 const CATEGORY_GAP = 6;
-/** Mannequins wake within this range of the player and sleep beyond the larger one. */
-const WAKE = 34;
-const SLEEP = 42;
+/**
+ * Mannequins wake within this range of the player and sleep beyond the larger one: a few metres,
+ * so only the handful around you animate and the rest of the grid is labels. `__debug.gallery(r)`
+ * widens it.
+ */
+export const RANGE = { wake: 3, sleepMargin: 1.5 };
 const MAX_LIVE = 360;
 
 /** A text label as a sprite: white on a dark pill, sized in metres. */
@@ -156,9 +159,9 @@ export class Gallery {
     for (const s of this.slots) {
       const d = Math.hypot(s.x - playerPos.x, s.z - playerPos.z);
       if (s.live) {
-        if (d > SLEEP) this.sleep(s);
+        if (d > RANGE.wake + RANGE.sleepMargin) this.sleep(s);
         else s.live.mixer.update(dt);
-      } else if (d < WAKE && this.live < MAX_LIVE) this.wake(s);
+      } else if (d < RANGE.wake && this.live < MAX_LIVE) this.wake(s);
     }
   }
 
@@ -217,8 +220,8 @@ export class Gallery {
   }
 
   /** What is awake, for the console. */
-  status(): { slots: number; live: number; models: Record<string, string> } {
-    return { slots: this.slots.length, live: this.live, models: Object.fromEntries([...this.models.entries()].map(([k, v]) => [k, typeof v === 'string' ? v : 'loaded'])) };
+  status(): { slots: number; live: number; range: number; models: Record<string, string> } {
+    return { slots: this.slots.length, live: this.live, range: RANGE.wake, models: Object.fromEntries([...this.models.entries()].map(([k, v]) => [k, typeof v === 'string' ? v : 'loaded'])) };
   }
 
   /** The slot nearest a point: its clip and where it stands. */
