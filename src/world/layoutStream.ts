@@ -254,6 +254,26 @@ export class LayoutStreamer {
     this.ranges = TIERS.map((t) => t.range * scale);
   }
 
+  /** How much of what `settled` waits for is in, 0 to 1 (1 with nothing to wait for). */
+  progress(px: number, pz: number, within = 220): number {
+    if (this.disposed) return 1;
+    let need = 0;
+    let have = 0;
+    for (const region of this.regions.values()) {
+      const dx = Math.max(0, Math.abs(px - region.cx) - REGION / 2);
+      const dz = Math.max(0, Math.abs(pz - region.cz) - REGION / 2);
+      const d = Math.hypot(dx, dz);
+      for (let t = 0; t < TIERS.length; t++) {
+        if (!region.objects[t].length) continue;
+        if (d > Math.min(this.ranges[t], within)) continue;
+        need++;
+        const state = region.tiers[t];
+        if (state !== null && state !== 'loading') have++;
+      }
+    }
+    return need ? have / need : 1;
+  }
+
   /**
    * Whether every region a point can see out to `within` metres has its objects in: what a
    * loading screen waits for before the player is let go, so the ground and the buildings are

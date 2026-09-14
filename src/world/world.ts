@@ -214,6 +214,8 @@ export class World {
   private exclusions: Exclusion[] = [];
   pack: AssetPack | null = null;
   packStatus = 'no pack';
+  /** How far the pack's own loading has got, 0 to 1, by stage; the loading screen reads it. */
+  packProgress = 1;
   private packBase = '';
   private readonly structures: THREE.Object3D[] = [];
   private structureColliders: RAPIER.Collider[] = [];
@@ -378,13 +380,16 @@ export class World {
     const token = this.loadToken;
     const planet = this.planet;
     this.packStatus = 'loading';
+    this.packProgress = 0;
     const pack = await AssetPack.load(this.packId);
     if (token !== this.loadToken) return null;
     if (!pack) {
       this.packStatus = 'no pack';
+      this.packProgress = 1;
       return null;
     }
     this.pack = pack;
+    this.packProgress = 0.12;
 
     const scatter: ScatterItem[] = [];
     const addScatter = async (category: string, density: number, minScale: number, maxScale: number) => {
@@ -396,6 +401,7 @@ export class World {
     await addScatter('vaporators', 0.25, 1, 1);
     await addScatter('flora', 0.9, 0.8, 1.2);
     if (token !== this.loadToken) return null;
+    this.packProgress = 0.3;
 
     const layout = pack.layout;
     const placements = layout ? [] : (OUTPOSTS[planet.id] ?? []);
@@ -435,13 +441,17 @@ export class World {
           if (token !== this.loadToken) return null;
           this.terrain.attachSwg(swg);
           this.applySwgWater(swg);
+          this.packProgress = 0.55;
           console.info(`terrain: ${this.terrain.swg!.template.name} with ${layers.length} building layers loaded in ${(performance.now() - t0).toFixed(0)} ms`);
           await this.loadFlora(pack, swg);
           if (token !== this.loadToken) return null;
+          this.packProgress = 0.7;
           await this.loadGroundTextures(pack);
           if (token !== this.loadToken) return null;
+          this.packProgress = 0.85;
           await this.loadSky(pack);
           if (token !== this.loadToken) return null;
+          this.packProgress = 0.92;
         } catch (err) {
           console.warn('terrain: failed to load the planet terrain, keeping procedural ground', err);
         }
@@ -496,6 +506,7 @@ export class World {
     for (const st of structures) this.placeStructure(st.model, st.x, st.z, st.rot);
     this.packBase = `${scatter.length} scatter models, ${structures.length} structures${this.terrain.swg ? ', SWG terrain' : ''}`;
     this.packStatus = this.packBase;
+    this.packProgress = 1;
     if (!this.layoutStream) return this.terrain.swg ? new THREE.Vector3(spawn.x, this.terrain.heightAt(spawn.x, spawn.z), spawn.z) : null;
     this.layoutStream.update(spawn);
     return this.layoutStream.clearSpawn(spawn, (x, z) => this.terrain.heightAt(x, z)) ?? new THREE.Vector3(spawn.x, this.terrain.heightAt(spawn.x, spawn.z), spawn.z);
@@ -1230,6 +1241,28 @@ export class World {
 
   get layoutCenter(): { x: number; z: number } | null {
     return this.pack?.layout?.center ?? null;
+  }
+
+  /**
+   * How far along the world around a point is, 0 to 1: the pack's stages, the ground chunks
+   * around the point, and the placed objects within working range, weighted by how long each
+   * tends to take. What the loading screen fills its picture by.
+   */
+  progress(pos: THREE.Vector3): { total: number; stage: string } {
+    const pcx = Math.floor(pos.x / CHUNK_SIZE);
+    const pcz = Math.floor(pos.z / CHUNK_SIZE);
+    const R = Math.min(2, this.viewRadius);
+    let need = 0;
+    let have = 0;
+    for (let dz = -R; dz <= R; dz++) for (let dx = -R; dx <= R; dx++) {
+      need++;
+      if (this.chunks.has(`${pcx + dx},${pcz + dz}`)) have++;
+    }
+    const ground = need ? have / need : 1;
+    const objects = this.layoutStream ? this.layoutStream.progress(pos.x, pos.z) : this.packProgress < 1 ? 0 : 1;
+    const total = this.packProgress * 0.45 + ground * 0.2 + objects * 0.35;
+    const stage = this.packProgress < 0.12 ? 'the planet\'s pack' : this.packProgress < 0.55 ? 'the terrain' : this.packProgress < 0.92 ? 'the flora, the ground and the sky' : ground < 1 ? 'the ground underfoot' : objects < 1 ? 'the buildings and the props' : 'the last of it';
+    return { total, stage };
   }
 
   /** How far placed objects load, live: the streamer re-ranges, and the ground radii re-stream on the next move. */

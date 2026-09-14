@@ -23,6 +23,7 @@
 //   node tools/swg/cli.mjs trt <swg-dir> <x.trt> <out.png> [--var=name=value,...]   bake a texture renderer blueprint (skin, hair) to a PNG
 //   node tools/swg/cli.mjs player <swg-dir> <out-dir> [--template=object/creature/player/shared_human_male.iff] [--wear=...|none] [--var=...]   the player's character as <out-dir>/player/<id>.glb + manifest.json
 //                                                               [--jka=<Jedi Academy GameData or base dir>] [--jka-anims=BOTH_A1_T__B_,...]  adds Jedi Academy's saber attacks, jumps and rolls, retargeted
+//   node tools/swg/cli.mjs loading <swg-dir> <out-dir> [--match=ui_load] [--list]   the game's loading-screen pictures, one per planet, as <out-dir>/loading/<planet>.png
 //   node tools/swg/cli.mjs wardrobe <swg-dir> <out-dir> [--gender=male|female] [--kind=wearables,hair] [--match=...] [--limit=N]   every wearable and hairstyle as parts
 //   node tools/swg/cli.mjs parts <swg-dir> <out-dir> [--template=...] [--wear=...]   body, head and worn items as separate GLBs on one shared skeleton
 //   node tools/swg/cli.mjs clips-save <model.glb> <out.clips> [--only=BOTH_]   lift a model's animations into a bundle that survives re-conversion
@@ -1947,6 +1948,50 @@ switch (cmd) {
     const { main, slots, effect, alphaMode } = shaderTextures(parseIff(vfs.read(pos[2])));
     console.log(`effect: ${effect ?? '(none)'}  alpha by name: ${alphaMode}  alpha by effect file: ${alphaFromEffect(vfs, effect, alphaMode)}`);
     for (const s of slots) console.log(`${s.slot}  ${s.path}${s.path === main ? '  (main)' : ''}`);
+    break;
+  }
+  case 'loading': {
+    // <swg-dir> <out-dir> [--match=...] [--list]: the client's loading-screen pictures, one per
+    // planet, found by name among the UI textures (the archives name them after the planet), as
+    // PNGs the game's loading screen colours in as the world arrives.
+    if (!pos[2]) usage();
+    const vfs = mount(pos[1]);
+    const match = options.match ? new RegExp(options.match, 'i') : /ui_(load|loading)|load(ing)?_?screen|loadscreen/i;
+    const candidates = vfs.list('texture/').filter((n) => /\.dds$/i.test(n) && match.test(n));
+    if (options.list || !candidates.length) {
+      console.log(candidates.length ? `${candidates.length} loading-screen textures:` : `no texture matches ${match}; every UI texture with "load" in its name:`);
+      for (const n of candidates.length ? candidates : vfs.list('texture/').filter((n) => /load/i.test(n))) console.log(`  ${n}`);
+      if (!candidates.length) console.log('pick a pattern from these and run again with --match=<pattern>');
+      if (options.list) break;
+    }
+    const outDir = join(pos[2], 'loading');
+    mkdirSync(outDir, { recursive: true });
+    const planets = [['tatooine', /tatooine|tat\b/], ['naboo', /naboo/], ['corellia', /corellia|corel/], ['dantooine', /dantooine|dant/], ['lok', /\blok|_lok/], ['endor', /endor/], ['dathomir', /dathomir|dath/], ['yavin4', /yavin/], ['talus', /talus/], ['rori', /rori/], ['mustafar', /mustafar|must/], ['kashyyyk', /kashyyyk|kash/]];
+    const index = {};
+    for (const [id, re] of planets) {
+      // The largest matching texture: the client keeps a small and a large of some.
+      const hits = candidates.filter((n) => re.test(basename(n)));
+      if (!hits.length) continue;
+      let best = null;
+      for (const n of hits) {
+        try {
+          const dds = decodeDds(vfs.read(n));
+          if (!best || dds.width * dds.height > best.dds.width * best.dds.height) best = { name: n, dds };
+        } catch (err) {
+          console.log(`  ${n}: ${err.message}`);
+        }
+      }
+      if (!best) continue;
+      const img = downscaleRgba(best.dds, 2048);
+      // Loading screens have no transparency: whatever the alpha holds is not for the picture.
+      for (let i = 3; i < img.rgba.length; i += 4) img.rgba[i] = 255;
+      writeFileSync(join(outDir, `${id}.png`), encodePng(img.width, img.height, img.rgba));
+      index[id] = { file: `${id}.png`, source: best.name, width: img.width, height: img.height };
+      console.log(`  ${id.padEnd(10)} <- ${best.name} (${best.dds.width}x${best.dds.height}${hits.length > 1 ? `, of ${hits.length}` : ''})`);
+    }
+    writeFileSync(join(outDir, 'index.json'), JSON.stringify(index, null, 2));
+    const missing = planets.map(([id]) => id).filter((id) => !index[id]);
+    console.log(`-> ${outDir}: ${Object.keys(index).length} planets${missing.length ? `; none found for ${missing.join(', ')} (the game draws its own)` : ''}`);
     break;
   }
   case 'texture': {

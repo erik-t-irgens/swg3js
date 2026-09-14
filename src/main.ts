@@ -25,6 +25,7 @@ import { AppearanceUi } from './ui/appearanceUi';
 import { CharacterSelect } from './ui/characterSelect';
 import { CreatorBar } from './ui/creatorBar';
 import { Menu } from './ui/menu';
+import { LoadingScreen } from './ui/loading';
 import { loadSettings, type Settings } from './core/settings';
 import { deleteCharacter, loadCharacters, newCharacterId, upsertCharacter, type Appearance, type SavedCharacter } from './core/characters';
 import { Garage, type VehicleDef } from './vehicles/garage';
@@ -86,6 +87,7 @@ class App {
   private readonly select: CharacterSelect;
   private readonly creatorBar: CreatorBar;
   private readonly menu: Menu;
+  private readonly loadingScreen: LoadingScreen;
   private readonly settings: Settings = loadSettings();
   /** The character being played, as kept in this browser; null on the select screen and in the creator. */
   private current: SavedCharacter | null = null;
@@ -571,6 +573,7 @@ class App {
     this.fade = document.createElement('div');
     this.fade.id = 'fade';
     this.ui.appendChild(this.fade);
+    this.loadingScreen = new LoadingScreen(this.ui, import.meta.env.BASE_URL);
 
     this.select = new CharacterSelect(this.ui);
     this.select.onPlay = (c) => void this.play(c).catch((err) => console.warn('could not enter the world', err));
@@ -864,15 +867,15 @@ class App {
     this.current = c;
     this.traveling = true;
     this.input.captured = false;
-    this.loading(`ENTERING AS ${c.name}`, 'the character');
+    const planet = PLANETS.find((p) => p.id === c.planet) ?? PLANETS[0];
+    this.loadingScreen.show(planet, planet.name, `${c.name} is on the way`);
     const character = await this.useSpecies(c.species);
     if (character) {
       this.applyAppearance(character, c.appearance);
       await this.dress(character, c.outfit ?? []);
     }
     this.setClass(c.class);
-    const planet = PLANETS.find((p) => p.id === c.planet) ?? PLANETS[0];
-    this.loading(`LOADING ${planet.name}`, 'the ground and the city');
+    this.loadingScreen.setProgress(0.04);
     this.arrive(planet, c.zone, c.pos ? new THREE.Vector3(c.pos[0], c.pos[1], c.pos[2]) : undefined);
     if (c.heading !== undefined) {
       this.player.heading = c.heading;
@@ -884,15 +887,9 @@ class App {
     c.played = Date.now();
     upsertCharacter(c);
     this.savePlace(true);
-    this.fade.classList.remove('on');
+    await this.loadingScreen.hide();
     this.traveling = false;
     this.input.requestLock();
-  }
-
-  /** The loading screen's words: what is being waited for. */
-  private loading(title: string, what: string): void {
-    this.fade.innerHTML = `${title.toUpperCase()}<small>loading ${what}…</small>`;
-    this.fade.classList.add('on');
   }
 
   /**
@@ -905,10 +902,15 @@ class App {
     const t0 = performance.now();
     while (performance.now() - t0 < timeoutMs) {
       if (this.world.settled(this.player.pos)) break;
+      const { total, stage } = this.world.progress(this.player.pos);
+      // The picture fills to 96% on the world's word; the last of it is the frame drawn below.
+      this.loadingScreen.setProgress(0.04 + total * 0.92);
+      this.loadingScreen.setWhat(`loading ${stage}`);
       await new Promise((r) => setTimeout(r, 100));
     }
-    // A frame with everything in, so the first thing seen is the world and not the fade lifting off a blank.
+    // A frame with everything in, so the first thing seen is the world and not the screen lifting off a blank.
     this.drawFrame();
+    this.loadingScreen.setProgress(1);
     await new Promise((r) => setTimeout(r, 120));
   }
 
@@ -984,12 +986,12 @@ class App {
     this.map.hide();
     this.input.captured = false;
     const zone = planet.zones?.find((z) => z.id === zoneId);
-    this.loading(`TRAVELING TO ${zone ? `${planet.name}: ${zone.name}` : planet.name}`, 'the ground and the city');
+    this.loadingScreen.show(planet, zone ? `${planet.name}: ${zone.name}` : planet.name, 'travelling');
     await new Promise((r) => setTimeout(r, 400));
     this.arrive(planet, zoneId);
     await this.settle();
     this.savePlace(true);
-    this.fade.classList.remove('on');
+    await this.loadingScreen.hide();
     this.traveling = false;
     this.input.requestLock();
   }
@@ -1007,7 +1009,7 @@ class App {
     this.traveling = true;
     this.map.hide();
     this.input.captured = false;
-    this.loading(poi.name, 'the ground and the buildings');
+    this.loadingScreen.show(planet, poi.name, `on ${planet.name}`);
     await new Promise((r) => setTimeout(r, 250));
     // Snapshot space is mirrored in X and centred on the layout centre.
     const gx = -(poi.x - c.x);
@@ -1021,7 +1023,7 @@ class App {
     this.physics.world.step();
     await this.settle();
     this.savePlace(true);
-    this.fade.classList.remove('on');
+    await this.loadingScreen.hide();
     this.traveling = false;
     this.input.requestLock();
   }
