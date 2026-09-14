@@ -935,7 +935,11 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
         const matched = animation.transforms.filter((t) => jointNames.has(t.name.toLowerCase())).length;
         // A clip that moves only part of the skeleton (a fire on the arms, an emote on the face) is
         // noted with the joints it drives, so it can be layered over a full pose instead of T-posing the rest.
-        if (matched < jointNames.size) (info.partialClips ??= {})[e.clip] = animation.transforms.map((t) => t.name).filter((n) => jointNames.has(n.toLowerCase()));
+        if (matched < jointNames.size) {
+          // The joints by the skeleton's own spelling, which is what the model's nodes are named.
+          const canonical = new Map(skeleton.joints.map((j) => [j.name.toLowerCase(), j.name]));
+          (info.partialClips ??= {})[e.clip] = animation.transforms.map((t) => canonical.get(t.name.toLowerCase())).filter((n) => n !== undefined);
+        }
         const first = poseAtFrame(skeleton, animation, 0);
         const mid = poseAtFrame(skeleton, animation, Math.floor(animation.frameCount / 2));
         let moving = 0;
@@ -1863,6 +1867,12 @@ switch (cmd) {
     for (const m of info.skipped) console.log(`  skipped: ${m}`);
     const manifestFile = join(outDir, 'manifest.json');
     const manifest = existsSync(manifestFile) ? JSON.parse(readFileSync(manifestFile, 'utf8')) : { players: [] };
+    {
+      const wantedGun = ['loop_pistol_combat_standing_aimed', 'pistol_combat_standing_fire_1', 'loop_pistol_combat_kneeling_aimed', 'loop_rifle_a_combat_standing_aimed', 'rifle_standing_aimed_fire_1', 'loop_rifle_kneeling_combat_aimed'];
+      const have = new Set(info.animations.map((n) => n.split(':')[0]));
+      const lacking = wantedGun.filter((n) => !have.has(n));
+      if (lacking.length) console.log(`  the animation table in these archives lacks ${lacking.join(', ')}: the blaster's combat stances and hip shots the state hierarchy names. The retail table has 870 logical names, the Legends one 908; convert without --retail-only to take them from the Legends table (the clips themselves are the game's own files; nothing leaves assets-private).`);
+    }
     const entry = { id, file: `player/${id}.glb`, template, wear, variables: Object.fromEntries(customizationValues(options.var)), clips: info.animations, clipSpeeds: info.clipSpeeds ?? {}, ...(info.partialClips ? { partialClips: info.partialClips } : {}), bounds: info.bounds, scale: 1, ...(info.jkaClips ? { jkaClips: info.jkaClips } : {}), ...(info.jkaGrip ? { jkaGrip: info.jkaGrip } : {}) };
     manifest.players = [entry, ...(manifest.players ?? []).filter((p) => p.id !== id)];
     writeFileSync(manifestFile, JSON.stringify(manifest, null, 2));

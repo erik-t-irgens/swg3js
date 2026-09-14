@@ -238,6 +238,8 @@ export class Player {
    * turns the hilt about the forearm in Jedi Academy's held poses only (stances, saber runs), and
    * `jkaRoll` in every Jedi Academy clip, swings included. Both default to nothing.
    */
+  /** The body's turn to the right, in degrees, while aiming or in the combat carry: the game's aimed poses point the arm off to the left of the body. */
+  readonly gunTune = { aimYaw: 45, readyYaw: 0 };
   readonly gripTune: { jkaRoll: number; stanceRoll: number; source: 'solved' | 'tags'; tilt: number; turn: number } = { jkaRoll: 0, stanceRoll: 0, source: 'solved', tilt: 0, turn: 0 };
   /** The hand bones the sabers hang from, for refitting the grip from the console. */
   private handBones: { right: THREE.Bone | null; left: THREE.Bone | null } = { right: null, left: null };
@@ -1058,7 +1060,10 @@ export class Player {
     if (this.lockedHeading) {
       this.heading = Math.atan2(this.lockedHeading.x, this.lockedHeading.z);
     } else if (faceCamera) {
-      let diff = camYaw - this.heading;
+      // With a blaster up the body turns right so the aimed pose's arm points where the camera looks.
+      const armedNow = this.classId === 'bounty_hunter' && this.hasGunClips && !this.prone && !this.swimming;
+      const yawOffset = armedNow ? ((this.aiming ? this.gunTune.aimYaw : this.gunReady ? this.gunTune.readyYaw : 0) * Math.PI) / 180 : 0;
+      let diff = camYaw - yawOffset - this.heading;
       diff = Math.atan2(Math.sin(diff), Math.cos(diff));
       this.heading += diff * Math.min(1, dt * 16);
     } else if (moving && directional) {

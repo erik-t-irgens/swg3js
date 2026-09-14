@@ -364,10 +364,12 @@ class App {
         this.player.refitGrip();
         return { ...this.player.gripTune, effective: { right: this.player.tunedGrip('right'), left: this.player.tunedGrip('left') }, axes: this.player.rig?.grip ?? null };
       },
-      /** The blaster in hand, 'pistol' or 'rifle': which of the game's carries play. */
-      gun: (kind?: 'pistol' | 'rifle') => {
+      /** The blaster in hand, 'pistol' or 'rifle': which of the game's carries play. `gun(undefined, { aimYaw: 45 })` sets how far right, in degrees, the body turns while aiming so the pose's arm points at the crosshair; `readyYaw` the same for the combat carry. */
+      gun: (kind?: 'pistol' | 'rifle', tune?: { aimYaw?: number; readyYaw?: number }) => {
         if (kind) this.player.gunKind = kind;
-        return { kind: this.player.gunKind, aiming: this.player.aiming, ready: this.player.gunReady, sinceShot: Number(this.player.sinceShot.toFixed(1)), clips: this.player.rig?.clipsMatching(/pistol|rifle/) ?? [] };
+        if (tune?.aimYaw !== undefined) this.player.gunTune.aimYaw = tune.aimYaw;
+        if (tune?.readyYaw !== undefined) this.player.gunTune.readyYaw = tune.readyYaw;
+        return { kind: this.player.gunKind, tune: this.player.gunTune, aiming: this.player.aiming, ready: this.player.gunReady, sinceShot: Number(this.player.sinceShot.toFixed(1)), clips: this.player.rig?.clipsMatching(/pistol|rifle/) ?? [] };
       },
       /** The saber defence rank (1..3): how bolts are turned away. */
       saberDefense: (rank?: number) => {
