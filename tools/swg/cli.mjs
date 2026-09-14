@@ -1190,6 +1190,19 @@ function packStatus(dir) {
     console.log(`  player: ${p.id} (${p.template}), ${wear}, ${p.clips.length} clips${swims ? '' : ', NO SWIMMING CLIPS'}`);
     if (!p.wear?.length) need(`player <swg-dir> ${dir} --retail-only`, 'the player has no clothes');
     else if (!swims) need(`player <swg-dir> ${dir} --retail-only`, 'the player lacks the swimming clips');
+    // The parts pack the game prefers: it must carry the named locomotion clips, and the Jedi Academy clips travel to it by bundle.
+    const partsFile = join(dir, 'characters', p.id, 'parts.json');
+    const partsManifest = readJson(partsFile);
+    if (partsManifest) {
+      const clipNames = new Set([...(partsManifest.clips ?? []), ...Object.keys(partsManifest.clipSpeeds ?? {}), ...Object.keys(partsManifest.jkaClips ?? {})]);
+      const walks = clipNames.has('walk') && clipNames.has('run') && clipNames.has('idle');
+      const jkaCount = Object.keys(partsManifest.jkaClips ?? {}).length;
+      const playerJka = Object.keys(p.jkaClips ?? {}).length;
+      console.log(`  parts: ${partsManifest.parts?.length ?? 0} parts, rig ${partsManifest.rig?.clips ?? '?'} clips${walks ? '' : ', NO WALK/RUN/IDLE CLIPS (the game falls back to the single model)'}${jkaCount ? `, ${jkaCount} Jedi Academy clips` : ''}`);
+      if (!walks && !partsManifest.clips) console.log('  (an older parts.json does not list its clips; re-run parts to be sure)');
+      if (!walks) need(`parts <swg-dir> ${dir} --retail-only`, 'the parts rig lacks the named idle, walk and run clips');
+      if (playerJka && jkaCount < playerJka) need(`clips-save ${join(dir, p.file)} ${join(dir, 'player', 'jka.clips')} --only=BOTH_ && clips-apply ${join(dir, 'characters', p.id, 'rig.glb')} ${join(dir, 'player', 'jka.clips')}`, `the parts rig has ${jkaCount} of the player's ${playerJka} Jedi Academy clips`);
+    }
   }
   if (!todo.size) {
     console.log(`everything is in place: ${planets} planet packs, creatures and player`);
@@ -1769,9 +1782,11 @@ switch (cmd) {
     const outDir = join(pos[2], 'characters', id);
     const wear = options.wear === undefined ? DEFAULT_WEAR : options.wear === 'none' ? [] : options.wear.split(',').map((w) => w.trim()).filter(Boolean);
     const variables = customizationValues(options.var);
+    // The same named clip set the single model gets (idle, walk, run, swimming...): the game
+    // finds its states by these names, and the table's first eighty clips are not them.
     const info = convertSat(vfs, template, null, {
-      animations: options.anim ?? 'all',
-      maxAnimations: options['max-anims'] ? Number(options['max-anims']) : 80,
+      animations: options.anim ?? PLAYER_CLIPS,
+      maxAnimations: options['max-anims'] ? Number(options['max-anims']) : 48,
       variables,
       wear,
       parts: { dir: outDir, rig: 'rig' },
@@ -1785,6 +1800,8 @@ switch (cmd) {
       joints: info.joints,
       // What the conversion dressed this character in; the game starts it wearing the same.
       defaultWear: info.parts.filter((p) => p.occlusionLayer > 0).map((p) => p.name),
+      clips: info.animations,
+      clipSpeeds: info.clipSpeeds ?? {},
       parts: info.parts,
       customization: [...info.customization],
     };

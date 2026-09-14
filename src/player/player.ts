@@ -216,6 +216,13 @@ export class Player {
   readonly thrown = new SaberThrow();
   /** Saber defence rank (1..3): how well bolts are blocked and where they are sent (see deflect.ts). */
   saberDefense = 3;
+  /** Holding the block (right mouse) with the saber lit: the stance is up and bolts are turned away. */
+  blocking = false;
+  /**
+   * Jedi Academy's animations and camera facing are in charge: while blocking, swinging, throwing,
+   * flipping or rolling. Otherwise the game's own clips play and the body turns the way it runs.
+   */
+  jkaMode = false;
   /** Bolts turned away so far, for the console. */
   blocks = 0;
   private readonly physics: Physics;
@@ -502,7 +509,7 @@ export class Player {
   deflect(dir: THREE.Vector3, hit: THREE.Vector3, cam: ThirdPersonCamera, out: THREE.Vector3): boolean {
     if (this.classId !== 'jedi' || this.mounted || this.noclip || this.swimming) return false;
     const attacking = this.hasJkaClips ? this.saber.attacking : this.swing >= 0;
-    if (!canBlock({ saberOn: this.saberOn, inHand: !this.thrown.inFlight, attacking, special: this.jka.inSpecialJump || this.jka.rolling || this.saber.busy, rank: this.saberDefense })) return false;
+    if (!canBlock({ blocking: this.blocking, saberOn: this.saberOn, inHand: !this.thrown.inFlight, attacking, special: this.jka.inSpecialJump || this.jka.rolling || this.saber.busy, rank: this.saberDefense })) return false;
     cam.forward(fwd);
     aimFrom.copy(this.pos);
     aimFrom.y += 1.55;
@@ -604,6 +611,9 @@ export class Player {
       this.swing += dt / SWING_TIME;
       if (this.swing >= 1) this.swing = -1;
     }
+    this.blocking = this.classId === 'jedi' && this.saberOn && input.held('block') && !this.mounted && !this.noclip;
+    const fighting = this.swing >= 0 || this.saber.busy || this.thrown.inFlight || this.jka.inSpecialJump || this.jka.rolling;
+    this.jkaMode = this.hasJkaClips && (this.blocking || fighting || !!this.rig?.overriding);
 
     if (this.mounted) {
       this.rig?.stopOverride();
@@ -712,7 +722,8 @@ export class Player {
       const ev = this.jka.step(dt, this.vel, this.pos, this.grounded, c, { value: force?.value ?? 100, spend: (n) => { if (force) force.value = Math.max(0, force.value - n); } });
       if (ev.jumped) {
         this.grounded = false;
-        this.playOnce(mz > 0 ? 'BOTH_JUMP1' : mz < 0 ? 'BOTH_JUMPBACK1' : mx > 0 ? 'BOTH_JUMPRIGHT1' : mx < 0 ? 'BOTH_JUMPLEFT1' : 'BOTH_JUMP1', 0.05);
+        // A plain jump is the game's own unless Jedi Academy's animations are in charge.
+        if (this.jkaMode) this.playOnce(mz > 0 ? 'BOTH_JUMP1' : mz < 0 ? 'BOTH_JUMPBACK1' : mx > 0 ? 'BOTH_JUMPRIGHT1' : mx < 0 ? 'BOTH_JUMPLEFT1' : 'BOTH_JUMP1', 0.05);
       }
       if (ev.special) {
         this.grounded = false;
@@ -723,7 +734,7 @@ export class Player {
       this.lockedHeading = ev.heading;
       if (ev.rolled) this.playOnce(`BOTH_ROLL_${ev.rolled}`, 0.05);
       if (this.jka.rolling) this.crouching = false;
-      if (ev.landed !== null && ev.landed >= 2 && !ev.rolled && !this.saber.busy) this.playOnce(ev.forceLanded ? 'BOTH_FORCELAND1' : 'BOTH_LAND1', 0.06);
+      if (ev.landed !== null && ev.landed >= 2 && !ev.rolled && !this.saber.busy && (this.jkaMode || ev.forceLanded)) this.playOnce(ev.forceLanded ? 'BOTH_FORCELAND1' : 'BOTH_LAND1', 0.06);
       if (ev.damage > 0) this.takeDamage(ev.damage);
     } else if (this.grounded) {
       this.vel.x = move.x * speed;
@@ -767,14 +778,16 @@ export class Player {
     // attack chains the next one; the rig plays the move's clip when it has it.
     if (this.classId === 'jedi') {
       const attackPressed = input.pressedAction('attack');
-      const altPressed = input.pressedAction('altAttack');
-      if ((attackPressed || altPressed) && !this.saberOn) this.toggleSaber();
+      const blockPressed = input.pressedAction('block');
+      const throwPressed = input.pressedAction('saberThrow');
+      if ((attackPressed || blockPressed) && !this.saberOn) this.toggleSaber();
       const roll = this.jka.roll;
       const si: SaberInput = {
         attack: input.held('attack'),
         attackPressed,
-        altAttack: input.held('altAttack'),
-        altAttackPressed: altPressed,
+        // The block held with attack makes the kata; the staff's kick sits on the throw key.
+        altAttack: input.held('block'),
+        altAttackPressed: this.saber.style === 'staff' ? throwPressed : blockPressed,
         fmove: mz,
         smove: mx,
         grounded: this.grounded,
@@ -787,8 +800,8 @@ export class Player {
         rollEnding: !!roll && roll.dir === 'F' && roll.left <= 0.25,
         inSpecialJump: this.jka.inSpecialJump || this.jka.rolling,
       };
-      // The alternate attack throws the saber (the staff kicks instead), from the ready stance.
-      if (altPressed && this.saberOn && !this.thrown.inFlight && this.saber.style !== 'staff' && !this.saber.busy && !si.attack && (this.force?.value ?? 100) >= THROW.cost && !this.swimming) {
+      // The throw key throws the saber (the staff kicks instead), from the ready stance.
+      if (throwPressed && this.saberOn && !this.thrown.inFlight && this.saber.style !== 'staff' && !this.saber.busy && !si.attack && (this.force?.value ?? 100) >= THROW.cost && !this.swimming) {
         if (this.force) this.force.value -= THROW.cost;
         cam.camera.getWorldDirection(aim);
         this.thrown.throw(this.handPosition(handPos), aim);
@@ -825,9 +838,10 @@ export class Player {
     // angle the legs, backing up plays the back-pedal facing forward, and the torso twists back
     // to the camera. Without those clips the body turns the way it runs, as SWG has no sideways
     // or backwards clips of its own.
-    const directional = !!this.rig && this.rig.hasState('runBack');
+    // Only while Jedi Academy's animations are in charge; the game's own clips turn the body the way it runs.
+    const directional = this.jkaMode && !!this.rig && this.rig.hasState('runBack');
     this.directional = directional;
-    const faceCamera = this.classId === 'bounty_hunter' || this.swing >= 0 || this.saber.busy || this.thrown.inFlight || this.jka.inSpecialJump || this.jka.rolling || (!this.grounded && this.hasJkaClips);
+    const faceCamera = this.classId === 'bounty_hunter' || fighting || (!this.grounded && this.jkaMode);
     const camYaw = Math.atan2(fwd.x, fwd.z);
     let legsOffset = 0;
     if (this.lockedHeading) {
@@ -876,20 +890,23 @@ export class Player {
     const rig = this.rig;
     if (!rig) return;
     const running = speed >= 4.5;
+    const stance = STANCE_ANIM[this.saber.style];
     if (this.mounted) rig.setState('seated');
-    else if (this.swimming) rig.setState(moving || this.submerged ? 'swim' : 'float', speed);
-    else if (!this.grounded) rig.setState('air');
+    // Swimming with the block held: the stance on the torso and arms over the swimming legs.
+    else if (this.swimming) rig.setState(moving || this.submerged ? 'swim' : 'float', speed, this.blocking && this.hasJkaClips ? stance : null);
+    else if (!this.grounded) rig.setState(this.jkaMode ? 'air' : 'jump');
     else if (this.crouching) rig.setState(moving ? 'crouchWalk' : 'crouch', speed);
     else if (moving && this.directional && mz < 0) {
       // Backing up with the legs facing forward: the back-pedal clip.
       rig.setState(running && rig.hasState('runBack') ? 'runBack' : rig.hasState('walkBack') ? 'walkBack' : 'runBack', speed);
-    }
-    else if (!moving && this.saberOn && this.hasJkaClips) {
-      // Standing with the saber drawn: the style's stance, or the arm out while the saber flies.
-      rig.stanceClip = this.thrown.inFlight ? 'BOTH_SABERPULL' : STANCE_ANIM[this.saber.style];
+    } else if (!moving && this.hasJkaClips && (this.blocking || this.thrown.inFlight)) {
+      // Standing with the block held: the style's stance; the arm out while the saber flies.
+      rig.stanceClip = this.thrown.inFlight ? 'BOTH_SABERPULL' : stance;
       rig.setState('stance');
     } else if (!moving) rig.setState('idle');
-    else rig.setState(speed < 4.5 ? 'walk' : 'run', speed);
+    // Moving with the block held: Jedi Academy's saber run and walk; otherwise the game's own, saber lit or not.
+    else if (this.jkaMode) rig.setState(running ? 'runSaber' : 'walkSaber', speed);
+    else rig.setState(running ? 'run' : 'walk', speed);
     rig.update(dt);
     this.group.updateMatrixWorld(true);
     // Always called: with no twist it puts the spine's clip pose back.
@@ -941,7 +958,7 @@ export class Player {
     this.handPosition(handPos);
     aimFrom.copy(this.pos).y += 1.5;
     cam.camera.getWorldDirection(aim);
-    const result = this.thrown.update(dt, handPos, aimFrom, aim, input.held('altAttack'), (a, b) => this.physics.cameraBlock(a, b, this.body, this.inside) !== null);
+    const result = this.thrown.update(dt, handPos, aimFrom, aim, input.held('saberThrow'), (a, b) => this.physics.cameraBlock(a, b, this.body, this.inside) !== null);
     if (result === 'caught') return;
     this.flying.position.copy(this.thrown.pos);
     this.flying.rotation.set(0, this.thrown.spin, 0);

@@ -13,13 +13,14 @@ const ok = (cond: boolean, what: string) => {
 };
 
 // --- who may block
-ok(canBlock({ saberOn: true, inHand: true, attacking: false, special: false, rank: 1 }), 'a lit saber in hand blocks');
-ok(!canBlock({ saberOn: false, inHand: true, attacking: false, special: false, rank: 3 }), 'a saber that is off does not');
-ok(!canBlock({ saberOn: true, inHand: false, attacking: false, special: false, rank: 3 }), 'a thrown saber does not');
-ok(!canBlock({ saberOn: true, inHand: true, attacking: false, special: true, rank: 3 }), 'not in the middle of a flip or a roll');
-ok(!canBlock({ saberOn: true, inHand: true, attacking: true, special: false, rank: 2 }), 'not mid-swing below the top rank');
-ok(canBlock({ saberOn: true, inHand: true, attacking: true, special: false, rank: 3 }), 'mid-swing is fine at the top rank');
-ok(!canBlock({ saberOn: true, inHand: true, attacking: false, special: false, rank: 0 }), 'no defence rank, no block');
+ok(canBlock({ blocking: true, saberOn: true, inHand: true, attacking: false, special: false, rank: 1 }), 'a lit saber in hand blocks while the block is held');
+ok(!canBlock({ blocking: false, saberOn: true, inHand: true, attacking: false, special: false, rank: 3 }), 'nothing is blocked without holding the block');
+ok(!canBlock({ blocking: true, saberOn: false, inHand: true, attacking: false, special: false, rank: 3 }), 'a saber that is off does not');
+ok(!canBlock({ blocking: true, saberOn: true, inHand: false, attacking: false, special: false, rank: 3 }), 'a thrown saber does not');
+ok(!canBlock({ blocking: true, saberOn: true, inHand: true, attacking: false, special: true, rank: 3 }), 'not in the middle of a flip or a roll');
+ok(!canBlock({ blocking: true, saberOn: true, inHand: true, attacking: true, special: false, rank: 2 }), 'not mid-swing below the top rank');
+ok(canBlock({ blocking: true, saberOn: true, inHand: true, attacking: true, special: false, rank: 3 }), 'mid-swing is fine at the top rank');
+ok(!canBlock({ blocking: true, saberOn: true, inHand: true, attacking: false, special: false, rank: 0 }), 'no defence rank, no block');
 
 // --- in front of the view
 const eye = v(0, 1.55, 0);

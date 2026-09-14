@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { Character } from './character';
 
-export type RigState = 'idle' | 'walk' | 'run' | 'air' | 'seated' | 'swim' | 'float' | 'crouch' | 'crouchWalk' | 'stance' | 'strafeLeft' | 'strafeRight' | 'runBack' | 'walkBack';
+export type RigState = 'idle' | 'walk' | 'run' | 'air' | 'jump' | 'seated' | 'swim' | 'float' | 'crouch' | 'crouchWalk' | 'stance' | 'strafeLeft' | 'strafeRight' | 'runBack' | 'walkBack' | 'runSaber' | 'walkSaber';
 
 /** Clip names used for each state, in preference order (placeholder rig names, then the game's); a pattern matches any clip. */
 const STATE_CLIPS: Record<RigState, (string | RegExp)[]> = {
@@ -10,6 +10,8 @@ const STATE_CLIPS: Record<RigState, (string | RegExp)[]> = {
   walk: ['walk', 'Walk', 'loop_walk', 'walk_combat'],
   run: ['run', 'Run', 'loop_run', 'run_combat'],
   air: ['BOTH_INAIR1', 'jump', 'fall', 'loop_jump', 'sneak_pose', 'idle', 'stand'],
+  /** In the air the game's own way (no block held): the original jump clip. */
+  jump: ['jump', 'fall', 'loop_jump', 'BOTH_INAIR1', 'sneak_pose', 'idle', 'stand'],
   seated: ['sit', 'loop_sit', 'loop_sitting_chair:0', 'loop_sitting_chair', 'loop_sitting_ground', 'sneak_pose', 'idle', 'stand'],
   swim: ['swim', 'loop_swimming:speed1', 'loop_swimming:speed0', 'walk', 'idle'],
   float: ['float', 'loop_swimming:speed0', 'swim', 'idle'],
@@ -21,12 +23,15 @@ const STATE_CLIPS: Record<RigState, (string | RegExp)[]> = {
   // keeps facing the camera while it moves. Nothing else matches, so these states stay unused.
   strafeLeft: [/strafe.*(left|_l)$/i, /^(run|walk)_?(strafe_?)?l(eft)?$/i, /side.*left/i],
   strafeRight: [/strafe.*(right|_r)$/i, /^(run|walk)_?(strafe_?)?r(ight)?$/i, /side.*right/i],
-  runBack: ['BOTH_RUNBACK1', /^run.*back/i, /back.*run/i, /^run.*bwd/i],
-  walkBack: ['BOTH_WALKBACK1', /^walk.*back/i, /back.*walk/i, /^walk.*bwd/i],
+  runBack: ['BOTH_RUNBACK2', 'BOTH_RUNBACK1', /^run.*back/i, /back.*run/i, /^run.*bwd/i],
+  walkBack: ['BOTH_WALKBACK2', 'BOTH_WALKBACK1', /^walk.*back/i, /back.*walk/i, /^walk.*bwd/i],
+  /** Moving with the block held: Jedi Academy's saber run and walk, else the game's own. */
+  runSaber: ['BOTH_RUN2', 'BOTH_RUN1', 'run', 'Run', 'loop_run', 'run_combat'],
+  walkSaber: ['BOTH_WALK2', 'BOTH_WALK1', 'walk', 'Walk', 'loop_walk', 'walk_combat'],
 };
 
 /** Natural travel speed of the placeholder rig's locomotion clips, in m/s, used to scale playback. */
-const DEFAULT_CLIP_SPEED: Partial<Record<RigState, number>> = { walk: 1.5, run: 5.5, swim: 2.5, crouchWalk: 2.2, strafeLeft: 4.5, strafeRight: 4.5, runBack: 4, walkBack: 1.5 };
+const DEFAULT_CLIP_SPEED: Partial<Record<RigState, number>> = { walk: 1.5, run: 5.5, swim: 2.5, crouchWalk: 2.2, strafeLeft: 4.5, strafeRight: 4.5, runBack: 4, walkBack: 1.5, runSaber: 6.3, walkSaber: 2 };
 
 /** Bones the game needs by role: exact names of the placeholder rig first, then patterns for the game's skeletons. */
 export type BoneRole = 'rightHand' | 'leftHand' | 'spine' | 'rightUpperArm' | 'rightForeArm' | 'leftUpperArm' | 'leftForeArm' | 'head';
@@ -81,6 +86,14 @@ export class CharacterRig {
   stanceClip: string | null = null;
   private current: THREE.AnimationAction | null = null;
   private state: RigState | null = null;
+  /** A clip on the upper body only, over the state clip's legs (the saber stance while swimming). */
+  private upper: THREE.AnimationAction | null = null;
+  private upperName: string | null = null;
+  /** The upper-body clip the caller last asked for, restored after a one-off clip. */
+  private wantedUpper: string | null = null;
+  /** Half-body versions of clips, made on demand: 'upper:<clip>' and 'lower:<clip>'. */
+  private readonly halves = new Map<string, THREE.AnimationAction>();
+  private upperBoneNames: Set<string> | null = null;
   /** A one-off clip (a swing, a jump, a landing) playing over the state clips until it ends. */
   private override: THREE.AnimationAction | null = null;
   private overrideEnds = 0;
@@ -240,6 +253,12 @@ export class CharacterRig {
     const next = this.actions.get(clip);
     if (!next) return null;
     const from = this.override ?? this.current;
+    if (this.upper) {
+      // A one-off clip poses the whole body; the upper layer comes back with the state after it.
+      this.upper.fadeOut(fadeIn);
+      this.upper = null;
+      this.upperName = null;
+    }
     next.reset().setLoop(loop ? THREE.LoopRepeat : THREE.LoopOnce, Infinity).setEffectiveWeight(1);
     next.clampWhenFinished = true;
     next.timeScale = timeScale;
@@ -266,16 +285,22 @@ export class CharacterRig {
     this.override = null;
   }
 
-  setState(state: RigState, speed = 0): void {
+  /**
+   * Play the state's clip. With `upper`, that clip drives the legs only and `upper` (a stance)
+   * drives the spine, arms and head: the saber held up while the legs swim.
+   */
+  setState(state: RigState, speed = 0, upper: string | null = null): void {
+    this.wantedUpper = upper;
     if (this.override) {
       // A one-off clip is playing; remember the state for when it ends.
       this.state = state;
       return;
     }
     const wantedStance = state === 'stance' && this.stanceClip && this.actions.has(this.stanceClip) ? this.stanceClip : null;
-    if (state !== this.state || (wantedStance && this.current?.getClip().name !== wantedStance)) {
+    const upperName = upper && this.actions.has(upper) ? upper : null;
+    if (state !== this.state || (wantedStance && this.current?.getClip().name !== wantedStance) || upperName !== this.upperName) {
       const clipName = wantedStance ?? this.findClip(STATE_CLIPS[state]);
-      const next = clipName ? this.actions.get(clipName)! : null;
+      const next = clipName ? (upperName ? this.half(clipName, 'lower') : this.actions.get(clipName)!) : null;
       if (next && next !== this.current) {
         // A held clip (a stance) plays once and keeps its last frame.
         next.reset().setLoop(this.hold.has(clipName!) ? THREE.LoopOnce : THREE.LoopRepeat, Infinity).setEffectiveWeight(1).play();
@@ -283,9 +308,19 @@ export class CharacterRig {
         if (this.current) this.current.crossFadeTo(next, 0.18, false);
         this.current = next;
       }
+      const nextUpper = upperName ? this.half(upperName, 'upper') : null;
+      if (nextUpper !== this.upper) {
+        if (this.upper) this.upper.fadeOut(0.18);
+        if (nextUpper) {
+          nextUpper.reset().setLoop(this.hold.has(upperName!) ? THREE.LoopOnce : THREE.LoopRepeat, Infinity).setEffectiveWeight(1).fadeIn(0.18).play();
+          nextUpper.clampWhenFinished = true;
+        }
+        this.upper = nextUpper;
+      }
+      this.upperName = upperName;
       this.state = state;
     }
-    const clip = this.current?.getClip().name;
+    const clip = this.current?.getClip().name.replace(/^lower:/, '');
     const natural = (clip && this.clipSpeeds[clip]) || DEFAULT_CLIP_SPEED[state];
     if (this.current && natural && speed > 0) this.current.timeScale = THREE.MathUtils.clamp(speed / natural, 0.5, 2.5);
     else if (this.current) this.current.timeScale = 1;
@@ -298,11 +333,45 @@ export class CharacterRig {
       if (this.overrideTime >= this.overrideEnds - 0.08) {
         // Fade back to the state clip just before the one-off clip holds its last frame.
         const state = this.state;
+        const upper = this.wantedUpper;
         this.stopOverride(0.12);
         this.state = null;
-        if (state) this.setState(state);
+        this.upperName = null;
+        if (state) this.setState(state, 0, upper);
       }
     }
+  }
+
+  /** What plays now, for the console. */
+  describe(): { state: RigState | null; clip: string | null; upper: string | null; override: string | null } {
+    return { state: this.state, clip: this.current?.getClip().name ?? null, upper: this.upperName, override: this.override?.getClip().name ?? null };
+  }
+
+  /** The bones from the lowest spine bone up: the torso, arms and head. */
+  private upperBones(): Set<string> {
+    if (this.upperBoneNames) return this.upperBoneNames;
+    const names = new Set<string>();
+    let base: THREE.Bone | null = null;
+    for (const [name, bone] of this.bones) if (/^spine_?1$/i.test(name)) base = bone;
+    base ??= this.boneFor('spine');
+    // Walk down to the lowest spine bone so the whole torso is one layer.
+    while (base?.parent instanceof THREE.Bone && /spine|torso|chest/i.test(base.parent.name)) base = base.parent;
+    base?.traverse((o) => names.add(o.name));
+    this.upperBoneNames = names;
+    return names;
+  }
+
+  /** A clip's tracks for one half of the body only, as an action of its own. */
+  private half(clip: string, half: 'upper' | 'lower'): THREE.AnimationAction {
+    const key = `${half}:${clip}`;
+    let action = this.halves.get(key);
+    if (action) return action;
+    const src = this.actions.get(clip)!.getClip();
+    const upper = this.upperBones();
+    const tracks = src.tracks.filter((t) => upper.has(THREE.PropertyBinding.parseTrackName(t.name).nodeName ?? '') === (half === 'upper'));
+    action = this.mixer.clipAction(new THREE.AnimationClip(key, src.duration, tracks));
+    this.halves.set(key, action);
+    return action;
   }
 
   /**
@@ -375,6 +444,9 @@ export async function loadPlayerRig(baseUrl: string, id = 'human_male'): Promise
   try {
     const character = await Character.load(baseUrl, id);
     const m = character.manifest;
+    const names = new Set(character.clips.map((c) => c.name));
+    // Without the named locomotion set the character could only stand: use the single model instead.
+    if (!['idle', 'walk', 'run'].every((n) => names.has(n))) throw new Error(`the parts rig has ${character.clips.length} clips but no idle, walk and run; run the converter's parts command again`);
     const hold = Object.entries(m.jkaClips ?? {}).filter(([, c]) => !c.loop).map(([name]) => name);
     const rig = CharacterRig.fromCharacter(character, { clipSpeeds: m.clipSpeeds, scale: m.scale ?? 1, hold });
     console.info(`player ${m.id}: assembled from ${m.parts.length} parts, ${character.clips.length} clips, ${Object.keys(character.morphValues()).length} shape sliders`);

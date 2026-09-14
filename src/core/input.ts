@@ -9,6 +9,8 @@ export type Action =
   | 'walk'
   | 'attack'
   | 'altAttack'
+  | 'block'
+  | 'saberThrow'
   | 'saberToggle'
   | 'saberStyle'
   | 'mount'
@@ -40,6 +42,8 @@ export const DEFAULT_BINDINGS: Record<Action, string[]> = {
   walk: ['ShiftLeft', 'ShiftRight'],
   attack: ['Mouse0'],
   altAttack: ['Mouse2'],
+  block: ['Mouse2'],
+  saberThrow: ['KeyR'],
   saberToggle: ['KeyL'],
   saberStyle: ['KeyK'],
   mount: ['KeyE'],

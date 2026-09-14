@@ -32,11 +32,12 @@ export function inFront(point: THREE.Vector3, origin: THREE.Vector3, forward: TH
 }
 
 /**
- * Whether the saber can block a bolt now: lit and in hand, not mid-flip or knocked about, and
- * not in the middle of a swing unless the defence rank is the top one, which blocks while attacking.
+ * Whether the saber can block a bolt now: the block held, the saber lit and in hand, not
+ * mid-flip or knocked about, and not in the middle of a swing unless the defence rank is the
+ * top one, which blocks while attacking.
  */
-export function canBlock(s: { saberOn: boolean; inHand: boolean; attacking: boolean; special: boolean; rank: number }): boolean {
-  if (!s.saberOn || !s.inHand || s.special) return false;
+export function canBlock(s: { blocking: boolean; saberOn: boolean; inHand: boolean; attacking: boolean; special: boolean; rank: number }): boolean {
+  if (!s.blocking || !s.saberOn || !s.inHand || s.special) return false;
   if (s.attacking && s.rank < 3) return false;
   return s.rank >= 1;
 }

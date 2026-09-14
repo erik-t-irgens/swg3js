@@ -24,10 +24,10 @@ export class JediKit implements Kit {
     { key: '4', name: 'Force Lightning', cost: '18/s' },
   ];
   readonly help = [
-    '<b>LMB</b> saber swing (hold to chain, direction keys pick the swing) · <b>RMB</b> throw the saber (staff: kick) · <b>LMB+RMB</b> kata · <b>K</b> style (fast, medium, strong, dual, staff) · <b>L</b> saber on/off',
+    '<b>LMB</b> saber swing (hold to chain, direction keys pick the swing) · <b>RMB</b> hold to block: the stance comes up and bolts are turned away · <b>LMB+RMB</b> kata · <b>R</b> throw the saber (staff: kick) · <b>K</b> style (fast, medium, strong, dual, staff) · <b>L</b> saber on/off',
     '<b>Jump</b> + direction + <b>LMB</b> flip and jump attacks · <b>Ctrl</b> + forward + <b>LMB</b> lunge or spin · <b>Jump</b> beside a wall: wall run (strafe + forward) or wall flip (strafe) · <b>Jump</b> at a wall: run up and flip back · back + <b>Jump</b>: backflip',
     '<b>1</b> Force Jump · <b>2</b> Force Speed · <b>3</b> Force Push · <b>4</b> Force Lightning (hold)',
-    'A lit saber facing a blaster bolt turns it away, back where you look; blocks work mid-swing too at the top defence rank',
+    'Bolts are only turned away while the block is held, back where you look; at the top defence rank the block holds through a swing',
   ];
   readonly resource: Resource = { label: 'Force', value: 100, max: 100 };
   speedActive = false;

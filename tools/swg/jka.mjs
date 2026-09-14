@@ -596,6 +596,8 @@ export function defaultJkaClips() {
   names.push('BOTH_JUMP1', 'BOTH_JUMPBACK1', 'BOTH_JUMPLEFT1', 'BOTH_JUMPRIGHT1', 'BOTH_INAIR1', 'BOTH_LAND1', 'BOTH_FORCEJUMP1', 'BOTH_FORCEINAIR1', 'BOTH_FORCELAND1');
   names.push('BOTH_FLIP_F', 'BOTH_FLIP_B', 'BOTH_FLIP_L', 'BOTH_FLIP_R', 'BOTH_ROLL_F', 'BOTH_ROLL_B', 'BOTH_ROLL_L', 'BOTH_ROLL_R');
   names.push('BOTH_CROUCH1', 'BOTH_CROUCH1IDLE', 'BOTH_CROUCH1WALK', 'BOTH_CROUCH1WALKBACK', 'BOTH_STAND1', 'BOTH_RUNBACK1', 'BOTH_WALKBACK1');
+  // Moving with the saber held up (the block): the saber run and walk, and their back-pedals.
+  names.push('BOTH_RUN1', 'BOTH_RUN2', 'BOTH_WALK1', 'BOTH_WALK2', 'BOTH_RUNBACK2', 'BOTH_WALKBACK2');
   names.push('BOTH_LUNGE2_B__T_', 'BOTH_FORCELEAP2_T__B_', 'BOTH_JUMPFLIPSTABDOWN', 'BOTH_JUMPFLIPSLASHDOWN1', 'BOTH_ATTACK_BACK', 'BOTH_A2_STABBACK1', 'BOTH_CROUCHATTACKBACK1', 'BOTH_ROLL_STAB');
   // The parries that block blaster bolts: one set for the single styles, one each for the dual sabers and the staff.
   for (const s of [1, 6, 7]) for (const z of ['T_', 'TR', 'TL', 'BR', 'BL']) names.push(`BOTH_P${s}_S${s}_${z}`);
