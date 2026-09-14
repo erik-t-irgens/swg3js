@@ -315,6 +315,7 @@ assert.ok(defaultJkaClips().includes('BOTH_S2_S1_T_') && defaultJkaClips().inclu
 assert.ok(defaultJkaClips().includes('BOTH_S6_S6_T_') && defaultJkaClips().includes('BOTH_R7_B__S7') && defaultJkaClips().includes('BOTH_A7_KICK_F') && defaultJkaClips().includes('BOTH_WALL_RUN_LEFT'), 'dual, staff, kicks and wall moves are asked for');
 assert.ok(defaultJkaClips().includes('BOTH_P1_S1_T_') && defaultJkaClips().includes('BOTH_P7_S7_BL'), 'the parries that block bolts are asked for');
 assert.ok(defaultJkaClips().includes('BOTH_RUN2') && defaultJkaClips().includes('BOTH_WALKBACK2'), 'the saber run and walk are asked for');
+assert.ok(defaultJkaClips().includes('BOTH_JUMPBACK1') && defaultJkaClips().includes('BOTH_FORCEINAIRLEFT1') && defaultJkaClips().includes('BOTH_LANDRIGHT1'), 'every jump direction and its force version are asked for');
 assert.equal(new Set(defaultJkaClips()).size, defaultJkaClips().length, 'no clip is asked for twice');
 assert.ok(BONE_MAP.length >= 20);
 console.log('jka: ok');

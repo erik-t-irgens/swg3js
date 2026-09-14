@@ -6,7 +6,7 @@ import { Group, groups, RAPIER, type Physics } from '../core/physics';
 import { markActor } from '../world/portalRender';
 import type { Speeder } from '../vehicles/speeder';
 import type { World } from '../world/world';
-import { STANCE_ANIM, STYLE_DAMAGE, SaberCombat, type SaberInput } from '../combat/saber';
+import { STANCE_ANIM, STYLE_DAMAGE, SaberCombat, type Dir, type SaberInput } from '../combat/saber';
 import { SaberThrow, THROW } from '../combat/saberThrow';
 import { canBlock, inFront, parryClip, parryZone, reflectDirection } from '../combat/deflect';
 import { UNIT } from './jkaMove';
@@ -38,6 +38,8 @@ const armDir = new THREE.Vector3();
 const aim = new THREE.Vector3();
 const aimFrom = new THREE.Vector3();
 const handPos = new THREE.Vector3();
+/** How Jedi Academy spells the jump directions in its clip names. */
+const JUMP_SUFFIX: Record<Dir, string> = { F: '', B: 'BACK', L: 'LEFT', R: 'RIGHT' };
 
 interface Parts {
   hips: THREE.Group;
@@ -223,6 +225,8 @@ export class Player {
    * flipping or rolling. Otherwise the game's own clips play and the body turns the way it runs.
    */
   jkaMode = false;
+  /** Which way the current jump was made, for its air and landing clips (PMF_BACKWARDS_JUMP and kin). */
+  private jumpDir: Dir = 'F';
   /** Bolts turned away so far, for the console. */
   blocks = 0;
   private readonly physics: Physics;
@@ -323,6 +327,8 @@ export class Player {
   setClass(id: ClassId): void {
     this.classId = id;
     const jedi = id === 'jedi';
+    // Only a Force user force jumps, flips and runs walls; the bounty hunter has the jetpack.
+    this.jka.forceLevel = jedi ? 3 : 0;
     this.parts.rifle.visible = !jedi;
     this.parts.jetpack.visible = !jedi;
     if (!jedi && this.saberOn) this.toggleSaber();
@@ -722,19 +728,20 @@ export class Player {
       const ev = this.jka.step(dt, this.vel, this.pos, this.grounded, c, { value: force?.value ?? 100, spend: (n) => { if (force) force.value = Math.max(0, force.value - n); } });
       if (ev.jumped) {
         this.grounded = false;
-        // A plain jump is the game's own unless Jedi Academy's animations are in charge.
-        if (this.jkaMode) this.playOnce(mz > 0 ? 'BOTH_JUMP1' : mz < 0 ? 'BOTH_JUMPBACK1' : mx > 0 ? 'BOTH_JUMPRIGHT1' : mx < 0 ? 'BOTH_JUMPLEFT1' : 'BOTH_JUMP1', 0.05);
+        // The jump for the direction pushed (PM_JumpForDir); with the body turned the way it runs, that is always forward.
+        this.jumpDir = this.jkaMode ? (mz > 0 ? 'F' : mz < 0 ? 'B' : mx > 0 ? 'R' : mx < 0 ? 'L' : 'F') : 'F';
+        this.playOnce(this.jumpClip('JUMP', false), 0.05);
       }
       if (ev.special) {
         this.grounded = false;
         this.playOnce(ev.special, 0.05);
       }
       if (ev.flip) this.playOnce(`BOTH_FLIP_${ev.flip}`, 0.08);
-      else if (ev.forceJumpStarted) this.playOnce('BOTH_FORCEJUMP1', 0.08);
+      else if (ev.forceJumpStarted) this.playOnce(this.jumpClip('JUMP', true), 0.08);
       this.lockedHeading = ev.heading;
       if (ev.rolled) this.playOnce(`BOTH_ROLL_${ev.rolled}`, 0.05);
       if (this.jka.rolling) this.crouching = false;
-      if (ev.landed !== null && ev.landed >= 2 && !ev.rolled && !this.saber.busy && (this.jkaMode || ev.forceLanded)) this.playOnce(ev.forceLanded ? 'BOTH_FORCELAND1' : 'BOTH_LAND1', 0.06);
+      if (ev.landed !== null && ev.landed >= 2 && !ev.rolled && !this.saber.busy) this.playOnce(this.jumpClip('LAND', ev.forceLanded), 0.06);
       if (ev.damage > 0) this.takeDamage(ev.damage);
     } else if (this.grounded) {
       this.vel.x = move.x * speed;
@@ -794,6 +801,7 @@ export class Player {
         vy: this.vel.y,
         aboveGround: this.grounded ? 0 : (this.groundDistanceUnits(400) ?? 400) * UNIT,
         jumpHeld: input.held('jump'),
+        jumpPressed: input.pressedAction('jump') && !this.swimming,
         crouch: this.crouching,
         force: this.force?.value ?? 100,
         enemyNear: (d, r) => this.enemyNear(d, r),
@@ -894,7 +902,10 @@ export class Player {
     if (this.mounted) rig.setState('seated');
     // Swimming with the block held: the stance on the torso and arms over the swimming legs.
     else if (this.swimming) rig.setState(moving || this.submerged ? 'swim' : 'float', speed, this.blocking && this.hasJkaClips ? stance : null);
-    else if (!this.grounded) rig.setState(this.jkaMode ? 'air' : 'jump');
+    else if (!this.grounded) {
+      rig.airClip = this.jumpClip('INAIR', this.jka.isForceJumping);
+      rig.setState('air');
+    }
     else if (this.crouching) rig.setState(moving ? 'crouchWalk' : 'crouch', speed);
     else if (moving && this.directional && mz < 0) {
       // Backing up with the legs facing forward: the back-pedal clip.
@@ -946,6 +957,20 @@ export class Player {
     const half = crouched ? CROUCH_HALF_HEIGHT : STAND_HALF_HEIGHT;
     this.collider.setHalfHeight(half);
     this.collider.setTranslationWrtParent({ x: 0, y: CAPSULE_RADIUS + half, z: 0 });
+  }
+
+  /**
+   * The jump, in-air or landing clip for the current jump's direction, the force version when
+   * asked (PM_ForceJumpAnimForJumpAnim), falling back to the plain forward one the rig has.
+   */
+  private jumpClip(base: 'JUMP' | 'INAIR' | 'LAND', force: boolean): string {
+    const rig = this.rig;
+    const suffix = JUMP_SUFFIX[this.jumpDir];
+    for (const name of [`BOTH_FORCE${base}${suffix}1`, `BOTH_FORCE${base}1`, `BOTH_${base}${suffix}1`, `BOTH_${base}1`]) {
+      if (!force && name.startsWith('BOTH_FORCE')) continue;
+      if (!rig || rig.has(name)) return name;
+    }
+    return `BOTH_${base}1`;
   }
 
   private playOnce(clip: string, fadeIn: number): void {

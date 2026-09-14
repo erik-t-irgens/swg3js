@@ -593,7 +593,8 @@ export function defaultJkaClips() {
   for (const side of ['LEFT', 'RIGHT']) names.push(`BOTH_WALL_RUN_${side}`, `BOTH_WALL_RUN_${side}_STOP`, `BOTH_WALL_RUN_${side}_FLIP`, `BOTH_WALL_FLIP_${side}`);
   names.push('BOTH_WALL_FLIP_BACK1', 'BOTH_FLIP_BACK1', 'BOTH_FORCEWALLRUNFLIP_START', 'BOTH_FORCEWALLRUNFLIP_END');
   for (const d of ['FORWARD', 'BACK', 'LEFT', 'RIGHT']) names.push(`BOTH_FORCEWALLREBOUND_${d}`, `BOTH_FORCEWALLHOLD_${d}`, `BOTH_FORCEWALLRELEASE_${d}`);
-  names.push('BOTH_JUMP1', 'BOTH_JUMPBACK1', 'BOTH_JUMPLEFT1', 'BOTH_JUMPRIGHT1', 'BOTH_INAIR1', 'BOTH_LAND1', 'BOTH_FORCEJUMP1', 'BOTH_FORCEINAIR1', 'BOTH_FORCELAND1');
+  // Jumps, the air and landings in the four directions (PM_JumpForDir), and their force jump versions (PM_ForceJumpAnimForJumpAnim).
+  for (const d of ['', 'BACK', 'LEFT', 'RIGHT']) for (const f of ['', 'FORCE']) names.push(`BOTH_${f}JUMP${d}1`, `BOTH_${f}INAIR${d}1`, `BOTH_${f}LAND${d}1`);
   names.push('BOTH_FLIP_F', 'BOTH_FLIP_B', 'BOTH_FLIP_L', 'BOTH_FLIP_R', 'BOTH_ROLL_F', 'BOTH_ROLL_B', 'BOTH_ROLL_L', 'BOTH_ROLL_R');
   names.push('BOTH_CROUCH1', 'BOTH_CROUCH1IDLE', 'BOTH_CROUCH1WALK', 'BOTH_CROUCH1WALKBACK', 'BOTH_STAND1', 'BOTH_RUNBACK1', 'BOTH_WALKBACK1');
   // Moving with the saber held up (the block): the saber run and walk, and their back-pedals.

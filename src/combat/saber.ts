@@ -249,6 +249,8 @@ export interface AttackContext {
   /** Attack held (the special jump attacks want it), and the Force pool. */
   attack?: boolean;
   force?: number;
+  /** Jump pressed this frame: the leap attacks start on it at once, mid-chain too. */
+  jumpPressed?: boolean;
   /** Whether an enemy stands within `radius` metres in a direction (PM_CheckEnemyPresence, PM_CanBackstab). */
   enemyNear?: (dir: Dir, radius: number) => boolean;
 }
@@ -305,7 +307,12 @@ export function attackForMovement(style: SaberStyle, ctx: AttackContext, cur = '
       // Someone behind: the back attack, which the fast style stabs and the others swing (crouched: low).
       sel = { move: style === 'fast' || style === 'staff' ? 'A_BACKSTAB' : ctx.crouch ? 'A_BACK_CR' : 'A_BACK' };
     } else sel = { move: 'A_T2B' };
-  } else sel = { move: 'A_T2B' };
+  } else {
+    // Not moving: the overhead from the ready stance; mid-chain, the swing that starts where
+    // the last one ended (PM_AttackMoveForQuad), so a standing chain works round the quadrants.
+    const end = cur !== 'READY' ? MOVES.get(cur)?.end : undefined;
+    sel = { move: end && end !== 'R' ? attackForQuad(end) : 'A_T2B' };
+  }
   if (style === 'dual' && ctx.enemyNear) {
     // Enemies on both sides, or before and behind: the dual sabers hit both ways at once.
     const r = 100 * UNIT;
@@ -313,6 +320,33 @@ export function attackForMovement(style: SaberStyle, ctx: AttackContext, cur = '
     else if (['A_T2B', 'S_T2B', 'A_BACK', 'A_BACK_CR'].includes(sel.move) && ctx.enemyNear('F', r) && ctx.enemyNear('B', r)) sel = { move: 'DUAL_FB' };
   }
   return sel;
+}
+
+/**
+ * The leap attacks for a fresh press of jump with attack held and a direction pushed, on or
+ * just off the ground: forward is the medium flip slash, the strong leap, the dual leap or the
+ * staff's forward butterfly; sideways the cartwheels or the staff's sideways butterflies; back
+ * the staff's backflip attack. The game waits for the swing to end and a narrow rising window;
+ * here the press itself starts the leap, which is what the keys feel like they should do.
+ */
+export function jumpAttackFor(style: SaberStyle, ctx: AttackContext): Selection | null {
+  const above = ctx.aboveGround / UNIT;
+  const force = ctx.force ?? 100;
+  if (!ctx.attack || !(ctx.grounded || above <= 40) || ctx.vy < -0.5) return null;
+  if (ctx.smove !== 0 && force >= ALT_ATTACK_POWER.sideways) {
+    const right = ctx.smove > 0;
+    if (style === 'staff') return { move: right ? 'BUTTERFLY_RIGHT' : 'BUTTERFLY_LEFT', impulse: { forward: 0, right: right ? 190 : -190, up: right ? 350 : 250 }, forceCost: ALT_ATTACK_POWER.sideways };
+    return { move: right ? 'JUMPATTACK_ARIAL_RIGHT' : 'JUMPATTACK_ARIAL_LEFT', impulse: { forward: 0, right: right ? 190 : -190, up: right ? 300 : 350 }, forceCost: ALT_ATTACK_POWER.sideways };
+  }
+  if (ctx.fmove > 0 && force >= ALT_ATTACK_POWER.forwardBack) {
+    if (style === 'dual') return { move: 'JUMPATTACK_DUAL', forceCost: ALT_ATTACK_POWER.forwardBack };
+    if (style === 'staff') return { move: 'JUMPATTACK_STAFF_RIGHT', forceCost: ALT_ATTACK_POWER.forwardBack };
+    if (style === 'medium') return { move: 'A_FLIP_SLASH', impulse: { forward: 150, right: 0, up: 400 }, forceCost: ALT_ATTACK_POWER.forwardBack };
+    if (style === 'strong') return { move: 'A_JUMP_T2B', impulse: { forward: 300, right: 0, up: 280 }, forceCost: ALT_ATTACK_POWER.forwardBack };
+    return null;
+  }
+  if (ctx.fmove < 0 && style === 'staff') return { move: 'A_BACKFLIP_ATK', impulse: { forward: 0, right: 0, up: 500 } };
+  return null;
 }
 
 /** The style's kata (attack and the alternate attack pressed together while standing still). */
@@ -460,6 +494,15 @@ export class SaberCombat {
     // Out of a forward roll, attack stabs (PM_WeaponLightsaber's roll case).
     if (input.rollEnding && input.attack && !c.kata && cur !== 'ROLL_STAB' && force >= ALT_ATTACK_POWER.forwardBack) {
       return this.set('ROLL_STAB', clipDuration, null, ALT_ATTACK_POWER.forwardBack);
+    }
+    // A fresh press of jump with attack held: the style's leap attack, starting at once even in
+    // the middle of a chain (the swing it cuts short is the price of the leap).
+    if (input.jumpPressed && input.attack && !c.kata && !input.inSpecialJump && c.kind !== 'special' && cur !== 'ROLL_STAB') {
+      const leap = jumpAttackFor(this.style, input);
+      if (leap) {
+        this.buffered = false;
+        return this.set(leap.move, clipDuration, leap.impulse ?? null, leap.forceCost ?? 0);
+      }
     }
     if (this.timer > 0) return null;
     // Both buttons while standing still on the ground: the style's kata (PM_CanDoKata).

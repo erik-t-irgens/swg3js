@@ -382,8 +382,8 @@ export class JkaMovement {
               vz = -side.z * 150;
             }
           }
-        } else if (cmd.fmove < 0 && !cmd.attack && cmd.smove === 0) {
-          // Back and jump: a backflip.
+        } else if (cmd.fmove < 0 && !cmd.attack && cmd.smove === 0 && level > 1) {
+          // Back and jump: a backflip (a Force move, like the wall moves).
           anim = 'BOTH_FLIP_BACK1';
           lift = JKA.jumpVelocity;
           vx = -cmd.forward.x * 150;

@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { Character } from './character';
 
-export type RigState = 'idle' | 'walk' | 'run' | 'air' | 'jump' | 'seated' | 'swim' | 'float' | 'crouch' | 'crouchWalk' | 'stance' | 'strafeLeft' | 'strafeRight' | 'runBack' | 'walkBack' | 'runSaber' | 'walkSaber';
+export type RigState = 'idle' | 'walk' | 'run' | 'air' | 'seated' | 'swim' | 'float' | 'crouch' | 'crouchWalk' | 'stance' | 'strafeLeft' | 'strafeRight' | 'runBack' | 'walkBack' | 'runSaber' | 'walkSaber';
 
 /** Clip names used for each state, in preference order (placeholder rig names, then the game's); a pattern matches any clip. */
 const STATE_CLIPS: Record<RigState, (string | RegExp)[]> = {
@@ -10,8 +10,6 @@ const STATE_CLIPS: Record<RigState, (string | RegExp)[]> = {
   walk: ['walk', 'Walk', 'loop_walk', 'walk_combat'],
   run: ['run', 'Run', 'loop_run', 'run_combat'],
   air: ['BOTH_INAIR1', 'jump', 'fall', 'loop_jump', 'sneak_pose', 'idle', 'stand'],
-  /** In the air the game's own way (no block held): the original jump clip. */
-  jump: ['jump', 'fall', 'loop_jump', 'BOTH_INAIR1', 'sneak_pose', 'idle', 'stand'],
   seated: ['sit', 'loop_sit', 'loop_sitting_chair:0', 'loop_sitting_chair', 'loop_sitting_ground', 'sneak_pose', 'idle', 'stand'],
   swim: ['swim', 'loop_swimming:speed1', 'loop_swimming:speed0', 'walk', 'idle'],
   float: ['float', 'loop_swimming:speed0', 'swim', 'idle'],
@@ -84,6 +82,8 @@ export class CharacterRig {
   private readonly hold: Set<string>;
   /** The clip the `stance` state plays, when the rig has it; the saber style picks it. */
   stanceClip: string | null = null;
+  /** The clip the `air` state plays, when the rig has it: the jump's direction and whether it is a force jump. */
+  airClip: string | null = null;
   private current: THREE.AnimationAction | null = null;
   private state: RigState | null = null;
   /** A clip on the upper body only, over the state clip's legs (the saber stance while swimming). */
@@ -296,7 +296,8 @@ export class CharacterRig {
       this.state = state;
       return;
     }
-    const wantedStance = state === 'stance' && this.stanceClip && this.actions.has(this.stanceClip) ? this.stanceClip : null;
+    const preferred = state === 'stance' ? this.stanceClip : state === 'air' ? this.airClip : null;
+    const wantedStance = preferred && this.actions.has(preferred) ? preferred : null;
     const upperName = upper && this.actions.has(upper) ? upper : null;
     if (state !== this.state || (wantedStance && this.current?.getClip().name !== wantedStance) || upperName !== this.upperName) {
       const clipName = wantedStance ?? this.findClip(STATE_CLIPS[state]);
