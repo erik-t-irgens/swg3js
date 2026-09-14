@@ -26,6 +26,8 @@ import { CharacterSelect } from './ui/characterSelect';
 import { CreatorBar } from './ui/creatorBar';
 import { Menu } from './ui/menu';
 import { LoadingScreen } from './ui/loading';
+import { EmoteWheel } from './ui/emoteWheel';
+import { defaultEmotes, emoteChoices, loadEmotes, saveEmotes } from './core/emotes';
 import { loadSettings, type Settings } from './core/settings';
 import { deleteCharacter, loadCharacters, newCharacterId, upsertCharacter, type Appearance, type SavedCharacter } from './core/characters';
 import { Garage, type VehicleDef } from './vehicles/garage';
@@ -42,7 +44,8 @@ function mountPrompt(v: import('./vehicles/vehicle').Vehicle): string {
   const fly = v.spec.fly ? ' · look up/down or <b>Space</b>/<b>X</b> to climb and sink' : '';
   if (k === 'ship') return `<b>E</b> leave · <b>W</b>/<b>S</b> throttle up and down · mouse pitches and turns (loops and rolls allowed) · <b>A/D</b> roll · <b>Space</b>/<b>X</b> pitch · <b>wheel</b> zoom, all the way in for the cockpit · <b>Alt</b> look around · <b>Shift</b> burn · ${v.airborne ? 'flying' : 'landed'} · ${Math.round(Math.abs(v.speed) * 3.6)} km/h`;
   const turn = k === 'ground' ? 'mouse or <b>A/D</b> turn' : 'mouse or <b>A/D</b> steer';
-  return `<b>E</b> dismount · <b>W/S</b> throttle · ${turn} · <b>Alt</b> look around${boost}${hop}${fly} · ${k} · ${Math.round(Math.abs(v.speed) * 3.6)} km/h`;
+  const hull = v.hp < v.maxHp ? ` · hull ${Math.round((v.hp / v.maxHp) * 100)}%${v.hp / v.maxHp < 0.34 ? ' LIMPING' : v.hp / v.maxHp < 0.67 ? ' smoking' : ''}` : '';
+  return `<b>E</b> dismount · <b>W/S</b> throttle · ${turn} · <b>Alt</b> look around${boost}${hop}${fly} · ${k} · ${Math.round(Math.abs(v.speed) * 3.6)} km/h${hull}`;
 }
 
 const MOUNT_RANGE = 3.6;
@@ -90,6 +93,11 @@ class App {
   private readonly creatorBar: CreatorBar;
   private readonly menu: Menu;
   private readonly loadingScreen: LoadingScreen;
+  private readonly emoteWheel: EmoteWheel;
+  /** The wheel's eight slots, clip names; filled from the rig's own emotes the first time. */
+  private emotes: (string | null)[] = loadEmotes();
+  /** An emote is playing on the player: any movement ends it. */
+  private emoting = false;
   private readonly settings: Settings = loadSettings();
   /** The character being played, as kept in this browser; null on the select screen and in the creator. */
   private current: SavedCharacter | null = null;
@@ -580,6 +588,7 @@ class App {
     this.fade.id = 'fade';
     this.ui.appendChild(this.fade);
     this.loadingScreen = new LoadingScreen(this.ui, import.meta.env.BASE_URL);
+    this.emoteWheel = new EmoteWheel(this.ui);
 
     this.select = new CharacterSelect(this.ui);
     this.select.onPlay = (c) => void this.play(c).catch((err) => console.warn('could not enter the world', err));
@@ -776,8 +785,33 @@ class App {
     this.player.detachRig();
     this.player.attachRig(rig);
     this.characterId = rig.character?.manifest.id ?? id;
+    this.wireEmotes(rig.clipNames);
     this.appearanceUi.setSpecies(this.speciesList, this.characterId);
     return rig.character;
+  }
+
+  /** The wheel's slots from the rig's own emotes when none were kept yet, and the menu's Emotes page fed from it. */
+  private wireEmotes(clips: string[]): void {
+    if (this.emotes.every((e) => e === null)) this.emotes = defaultEmotes(clips);
+    this.menu.emotes = {
+      choices: () => emoteChoices(clips),
+      slots: () => this.emotes,
+      set: (i, clip) => {
+        this.emotes[i] = clip;
+        saveEmotes(this.emotes);
+      },
+    };
+  }
+
+  /** Play an emote or a dance on the player: a dance loops until they move, an emote plays once. */
+  private playEmote(clip: string | null): void {
+    const rig = this.player.rig;
+    if (!clip || !rig || this.player.mounted) return;
+    if (rig.play(clip, { fadeIn: 0.15, loop: /^dance_/.test(clip) }) === null) {
+      this.hud.setPrompt(`the rig has no clip ${clip}`);
+      return;
+    }
+    this.emoting = true;
   }
 
   /** Play as another species or gender: the parts pack of that id replaces the rig, the wardrobe follows. */
@@ -1118,6 +1152,39 @@ class App {
     }
     const terrain = this.world.terrain;
     for (const v of this.world.vehicles) v.update(dt, this.physics, v === player.mounted ? drive : null, (x, z) => terrain.heightAt(x, z), (x, z) => terrain.waterHeightAt(x, z));
+    // Every vehicle's hits and its state: sparks on a hit, smoke from a battered hull, and the
+    // end of one whose hull is gone (its rider thrown off first).
+    for (const v of [...this.world.vehicles]) {
+      if (v.justHit > 0) {
+        this.effects.burst(v.pos, 0xffc070, 0.4 + Math.min(2, v.justHit * 0.08), 0.2);
+        this.effects.flash(v.pos, 0xffa050, 6 + v.justHit, 5, 0.12);
+        if (v === player.mounted) {
+          player.takeDamage(Math.round(Math.min(40, (v.justHit - 6) * 1.5)));
+          this.hud.hurt();
+        }
+      }
+      const condition = v.hp / v.maxHp;
+      if (condition < 0.67 && condition > 0 && Math.random() < dt * (condition < 0.34 ? 9 : 3)) {
+        tmp.copy(v.pos).y += (v.spec.bounds.max[1] - v.spec.bounds.min[1]) * 0.4;
+        tmp.x += (Math.random() - 0.5) * v.radius;
+        tmp.z += (Math.random() - 0.5) * v.radius;
+        this.effects.burst(tmp, condition < 0.34 ? 0x303030 : 0x505050, 0.5 + Math.random() * 0.5, 0.9);
+        if (condition < 0.34 && Math.random() < 0.3) this.effects.tracer(tmp, tmp.clone().add(new THREE.Vector3((Math.random() - 0.5) * 1.5, Math.random() * 0.8, (Math.random() - 0.5) * 1.5)), 0xffd080, 0.12);
+      }
+      if (v.destroyed) {
+        if (v === player.mounted) {
+          this.handleMount();
+          player.takeDamage(25);
+          this.hud.hurt();
+          this.hud.setPrompt('');
+        }
+        this.effects.ring(v.pos, 0xffa050, 6 + v.radius, 0.5);
+        this.effects.burst(v.pos, 0xffc080, 2 + v.radius, 0.4);
+        this.effects.flash(v.pos, 0xffa050, 60, 20, 0.35);
+        v.dispose(this.physics, this.scene);
+        this.world.vehicles.splice(this.world.vehicles.indexOf(v), 1);
+      }
+    }
     if (player.mounted) {
       player.syncMount();
       const m = player.mounted;
@@ -1359,7 +1426,11 @@ class App {
       const sp = p.mounted;
       sp.quaternion(tmpQ);
       tmp.set(-(sp.spec.bounds.max[0] - sp.spec.bounds.min[0]) / 2 - 1.0, 0, 0).applyQuaternion(tmpQ).add(sp.pos);
-      tmp.y = Math.max(this.world.terrain.heightAt(tmp.x, tmp.z), this.world.terrain.waterLevel - 1) + 0.3;
+      // The floor beside the vehicle, by a ray from its own height: in a hangar that is the
+      // hangar's floor, not the terrain under the building, which put the rider outside it.
+      const from = sp.pos.y + 0.5;
+      const hit = this.physics.groundDistance(tmp.x, from, tmp.z, 12, sp.body);
+      tmp.y = hit !== null ? from - hit + 0.15 : Math.max(this.world.terrain.heightAt(tmp.x, tmp.z), this.world.terrain.waterLevel - 1) + 0.3;
       p.dismount(tmp);
       return;
     }
@@ -1440,7 +1511,25 @@ class App {
           if (player.noclip && input.pressedAction('noclipFaster')) player.noclipSpeed = Math.min(2000, player.noclipSpeed * 1.5);
           if (player.noclip && input.pressedAction('noclipSlower')) player.noclipSpeed = Math.max(2, player.noclipSpeed / 1.5);
           if (input.pressedAction('flashlight')) this.torchOn = !this.torchOn;
+          // The emote wheel: held open, the mouse picks, the key's release plays; the arrows play the first four outright.
+          if (input.pressedAction('emoteWheel') && !player.mounted) this.emoteWheel.show(this.emotes);
+          for (let i = 1; i <= 4; i++) if (input.pressedAction(`emote${i}` as Action)) this.playEmote(this.emotes[i - 1]);
         }
+      }
+      if (this.emoteWheel.open) {
+        this.emoteWheel.move(input.mouseDX, input.mouseDY);
+        input.mouseDX = 0;
+        input.mouseDY = 0;
+        if (!input.held('emoteWheel') || !active) {
+          const clip = this.emoteWheel.selected();
+          this.emoteWheel.hide();
+          if (active) this.playEmote(clip);
+        }
+      }
+      // Moving, jumping or attacking ends an emote; a dance would otherwise loop for good.
+      if (this.emoting && (input.held('forward') || input.held('back') || input.held('left') || input.held('right') || input.held('jump') || input.held('attack') || player.mounted)) {
+        player.rig?.stopOverride(0.2);
+        this.emoting = false;
       }
 
       const simulate = active && !this.map.open && !this.anyPanelOpen();

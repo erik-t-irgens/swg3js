@@ -30,17 +30,22 @@ export type Action =
   | 'slot1'
   | 'slot2'
   | 'slot3'
-  | 'slot4';
+  | 'slot4'
+  | 'emoteWheel'
+  | 'emote1'
+  | 'emote2'
+  | 'emote3'
+  | 'emote4';
 
 /**
  * Default bindings, as KeyboardEvent codes and `Mouse<button>`. Crouch has X beside Ctrl
  * because on a Mac Ctrl with a click is a right click, which breaks the crouched attacks.
  */
 export const DEFAULT_BINDINGS: Record<Action, string[]> = {
-  forward: ['KeyW', 'ArrowUp'],
-  back: ['KeyS', 'ArrowDown'],
-  left: ['KeyA', 'ArrowLeft'],
-  right: ['KeyD', 'ArrowRight'],
+  forward: ['KeyW'],
+  back: ['KeyS'],
+  left: ['KeyA'],
+  right: ['KeyD'],
   jump: ['Space'],
   crouch: ['ControlLeft', 'ControlRight', 'KeyX'],
   prone: ['KeyZ'],
@@ -68,6 +73,11 @@ export const DEFAULT_BINDINGS: Record<Action, string[]> = {
   slot2: ['Digit2'],
   slot3: ['Digit3'],
   slot4: ['Digit4'],
+  emoteWheel: ['KeyG'],
+  emote1: ['ArrowUp'],
+  emote2: ['ArrowRight'],
+  emote3: ['ArrowDown'],
+  emote4: ['ArrowLeft'],
 };
 const STORAGE_KEY = 'swg3js.bindings';
 

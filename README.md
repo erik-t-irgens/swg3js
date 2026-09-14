@@ -13,7 +13,8 @@ Open the printed URL. The first screen is the **character select**: up to five c
 
 | Key | Action |
 | --- | --- |
-| WASD / arrows | Move (relative to camera) |
+| WASD | Move (relative to camera) |
+| G (hold) | Emote wheel: move the mouse to a slot and let go; the arrows play slots 1 to 4 outright; the Escape menu's Emotes page fills the eight slots from the rig's own emotes and dances (a dance loops until you move) |
 | Mouse | Look (pointer locked); past a mild upward pitch the third-person camera stays put and the view tilts on up |
 | Wheel | Zoom camera: glides by a fraction per notch, in to the shoulders, and one notch further to first person (the body stays in view, headless, seen from the eyes as the animation carries them, and turns with the mouse) |
 | Space | Jump (from prone: stand up) |

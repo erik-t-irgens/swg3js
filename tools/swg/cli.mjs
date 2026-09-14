@@ -183,6 +183,10 @@ function textureFor(vfs, shaderPath) {
     if (main && vfs.has(main)) {
       const dds = decodeDds(vfs.read(main));
       result = { path: main, png: encodePng(dds.width, dds.height, dds.rgba), hasAlpha: dds.hasAlpha, alphaMode: alphaFromEffect(vfs, effect, alphaMode) };
+      // Glass: a window, a canopy or a cockpit whose texture carries alpha is see-through whatever
+      // its effect says (the client's own glass effects blend, and a ship's windows drawn opaque
+      // showed as slabs of their tint), so the outside shows through them.
+      if (dds.hasAlpha && result.alphaMode === 'OPAQUE' && /glass|window|canopy|cockpit|transp|viewport/i.test(`${shaderPath} ${main} ${effect ?? ''}`)) result.alphaMode = 'BLEND';
       Object.assign(result, surfaceFor(vfs, effect, slots, dds, result.alphaMode));
       const normalSlot = (slots ?? []).find((s) => /^(CNRM|NRML|DOT3)$/.test(s.slot));
       const normal = normalSlot ? normalFor(vfs, normalSlot.path) : null;

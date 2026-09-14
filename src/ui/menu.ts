@@ -3,7 +3,14 @@
 import { DEFAULT_BINDINGS, type Action, type Input } from '../core/input';
 import { DEFAULT_SETTINGS, saveSettings, type Settings } from '../core/settings';
 
-type Page = 'main' | 'controls' | 'graphics';
+type Page = 'main' | 'controls' | 'graphics' | 'emotes';
+
+/** What the emotes page needs from the game: the rig's emote clips, and the wheel's slots to read and write. */
+export interface EmoteSource {
+  choices(): { clip: string; label: string }[];
+  slots(): (string | null)[];
+  set(index: number, clip: string | null): void;
+}
 
 const ACTION_LABELS: Record<Action, string> = {
   forward: 'Move forward',
@@ -37,6 +44,11 @@ const ACTION_LABELS: Record<Action, string> = {
   slot2: 'Slot 2',
   slot3: 'Slot 3',
   slot4: 'Slot 4',
+  emoteWheel: 'Emote wheel (hold)',
+  emote1: 'Emote 1',
+  emote2: 'Emote 2',
+  emote3: 'Emote 3',
+  emote4: 'Emote 4',
 };
 
 /** "KeyW" reads as "W", "Mouse0" as "Left mouse", "ControlLeft" as "Left Ctrl". */
@@ -115,6 +127,9 @@ export class Menu {
   /** A setting moved: the game applies it. */
   onSetting: (key: keyof Settings, value: number | boolean) => void = () => {};
 
+  /** The emotes page's source, given by the game once a character is up. */
+  emotes: EmoteSource | null = null;
+
   constructor(parent: HTMLElement, private readonly input: Input, private readonly settings: Settings) {
     this.root = document.createElement('div');
     this.root.id = 'menu';
@@ -126,6 +141,7 @@ export class Menu {
           <button data-page="main" class="on">Menu</button>
           <button data-page="controls">Controls</button>
           <button data-page="graphics">Graphics</button>
+          <button data-page="emotes">Emotes</button>
           <div class="menu-spacer"></div>
           <button class="resume-nav">Resume <b>Esc</b></button>
         </nav>
@@ -171,6 +187,7 @@ export class Menu {
           <button class="big switch">Switch character</button>
           <button class="big" data-page="controls">Controls</button>
           <button class="big" data-page="graphics">Graphics</button>
+          <button class="big" data-page="emotes">Emotes</button>
         </div>
         <p class="menu-hint">The world keeps turning behind this; the character stands still. Settings are kept in this browser.</p>`;
       body.querySelector('.resume')!.addEventListener('click', () => this.onResume());
@@ -184,6 +201,18 @@ export class Menu {
         this.input.resetBindings();
         this.showPage('controls');
       });
+    } else if (page === 'emotes') {
+      const src = this.emotes;
+      if (!src) {
+        body.innerHTML = '<h2>Emotes</h2><p class="menu-hint">No character is up yet.</p>';
+        return;
+      }
+      const choices = src.choices();
+      const slots = src.slots();
+      body.innerHTML = `<h2>Emotes</h2><p class="menu-hint">Hold <b>${keyName(this.input.bindings.emoteWheel[0] ?? '')}</b> for the wheel and move the mouse to a slot; slots 1 to 4 also play on their own keys (the arrows). ${choices.length} emotes and dances in the rig.</p>${slots
+        .map((clip, i) => `<div class="knob"><div class="knob-label">Slot ${i + 1}<small>${i < 4 ? `also ${keyName(this.input.bindings[`emote${i + 1}` as Action][0] ?? '')}` : 'wheel only'}</small></div><div class="knob-control"><select data-slot="${i}"><option value="">— empty —</option>${choices.map((c) => `<option value="${c.clip}"${c.clip === clip ? ' selected' : ''}>${c.label}</option>`).join('')}</select></div></div>`)
+        .join('')}`;
+      for (const sel of body.querySelectorAll<HTMLSelectElement>('select[data-slot]')) sel.addEventListener('change', () => src.set(Number(sel.dataset.slot), sel.value || null));
     } else {
       body.innerHTML = `<h2>Graphics</h2>${GRAPHICS.map((g) => `<h3>${g.title}</h3>${this.knobRows(g.knobs)}`).join('')}<div class="menu-actions"><button class="reset-gfx">Reset graphics to defaults</button></div>`;
       this.wireKnobs(body);

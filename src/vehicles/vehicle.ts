@@ -86,7 +86,7 @@ export function specFor(kind: VehicleKind, id: string, label: string, bounds: Ve
     case 'podracer':
       return { ...base, mass: 900, hover: 1.2, maxSpeed: 85, boostSpeed: 125, reverseSpeed: 6, accel: 30, brake: 45, turnRate: 1.7, turnAuthorityAt: 10, grip: 1.3, bank: 0.55, boost: 'heat', hop: false };
     case 'speederbike':
-      return { ...base, mass: 320, hover: 0.45, maxSpeed: 42, boostSpeed: 60, reverseSpeed: 8, accel: 20, brake: 28, turnRate: 2.3, turnAuthorityAt: 5, grip: 2.8, bank: 0.45, boost: 'burst', hop: true };
+      return { ...base, mass: 320, hover: 0.65, maxSpeed: 42, boostSpeed: 60, reverseSpeed: 8, accel: 20, brake: 28, turnRate: 2.3, turnAuthorityAt: 5, grip: 2.8, bank: 0.45, boost: 'burst', hop: true };
     case 'ground':
       return animal
         ? { ...base, mass: 700, hover: 0.15, maxSpeed: 14, boostSpeed: 20, reverseSpeed: 3, accel: 8, brake: 14, turnRate: 1.6, turnAuthorityAt: 0, grip: 9, bank: 0, boost: 'burst', hop: true }
@@ -160,6 +160,12 @@ const AXIS_Y = new THREE.Vector3(0, 1, 0);
 const AXIS_Z = new THREE.Vector3(0, 0, 1);
 const torque = new THREE.Vector3();
 const wantUp = new THREE.Vector3();
+const right = new THREE.Vector3();
+/** Velocity lost in one step past which a vehicle has hit something (m/s), and the hull taken per m/s beyond it. */
+const HIT_THRESHOLD = 6;
+const HIT_DAMAGE = 4;
+/** How much of the ground's slope a hover kind takes on: 1 lies flat on it, 0 stays level. */
+const SLOPE_FOLLOW = 0.85;
 
 export class Vehicle {
   readonly group = new THREE.Group();
@@ -191,6 +197,19 @@ export class Vehicle {
   boosting = false;
   /** Flyers: the height above the ground held, within the spec's floor and ceiling. */
   altitude = 0;
+  /** The hull's condition: hard hits take from it, and at nothing the vehicle is done for. */
+  hp = 100;
+  readonly maxHp = 100;
+  /** The speed lost in a hard hit this step (m/s), read once by the game for the sparks and the damage shown; 0 otherwise. */
+  justHit = 0;
+  /** At no hull left: the game blows it up and takes the rider off. */
+  get destroyed(): boolean {
+    return this.hp <= 0;
+  }
+  private readonly prevVel = new THREE.Vector3();
+  private prevVelValid = false;
+  /** A step whose own impulse (a hop, a spawn) must not read as a hit. */
+  private skipHitCheck = true;
   private hopCd = 0;
   private readonly hoverPoints: THREE.Vector3[];
   /** The collider's centre in the model's frame, where the ground rays start (inside the body, so a buried corner still finds the ground). */
@@ -308,6 +327,18 @@ export class Vehicle {
     fwd.set(0, 0, 1).applyQuaternion(q).setY(0).normalize();
     const m = body.mass();
     const g = -physics.world.gravity.y;
+    // A hard hit: the velocity lost since the last step beyond what braking or a slope can take
+    // off in one, read as damage by the speed lost. A step that started an impulse of its own
+    // (a hop, the first after a spawn) is let by.
+    this.justHit = 0;
+    if (this.prevVelValid && !this.skipHitCheck && !s.ship) {
+      const lost = this.prevVel.distanceTo(lv);
+      if (lost > HIT_THRESHOLD) {
+        this.justHit = lost;
+        this.hp = Math.max(0, this.hp - (lost - HIT_THRESHOLD) * HIT_DAMAGE);
+      }
+    }
+    this.skipHitCheck = false;
     const ride = s.hover + (s.fly ? this.altitude - s.fly.floor : 0);
     const k = (m * g) / (4 * Math.max(0.2, ride * 0.35));
     const c = 2 * Math.sqrt(k * (m / 4)) * 0.55;
@@ -365,6 +396,8 @@ export class Vehicle {
       }
     }
     const grounded = this.groundedPoints >= 2;
+    this.prevVel.copy(lv);
+    this.prevVelValid = true;
 
     // Attitude: upright, banked into the turn for the kinds that lean; damp the rest.
     const speedFwd = lv.dot(fwd);
@@ -380,6 +413,22 @@ export class Vehicle {
     }
     this.steer = steer;
     wantUp.copy(WORLD_UP);
+    // A hover kind pitches and rolls to the ground under it, as its cushion does: the ground a
+    // length ahead and behind, and a width either side, give the slope, so a rise ahead lifts the
+    // nose before the hull meets it rather than the nose ploughing in.
+    if (groundAt && grounded && !flying && !s.animal && s.kind !== 'ground') {
+      const L = Math.max(1.2, (s.bounds.max[2] - s.bounds.min[2]) * 0.6);
+      const W = Math.max(0.8, (s.bounds.max[0] - s.bounds.min[0]) * 0.6);
+      right.crossVectors(fwd, WORLD_UP).normalize();
+      const ahead = groundAt(this.pos.x + fwd.x * L, this.pos.z + fwd.z * L);
+      const behind = groundAt(this.pos.x - fwd.x * L, this.pos.z - fwd.z * L);
+      const toRight = groundAt(this.pos.x + right.x * W, this.pos.z + right.z * W);
+      const toLeft = groundAt(this.pos.x - right.x * W, this.pos.z - right.z * W);
+      const pitch = THREE.MathUtils.clamp((ahead - behind) / (2 * L), -0.7, 0.7);
+      const roll = THREE.MathUtils.clamp((toRight - toLeft) / (2 * W), -0.7, 0.7);
+      // The surface normal, tilted back from level by the slopes.
+      wantUp.addScaledVector(fwd, -pitch * SLOPE_FOLLOW).addScaledVector(right, -roll * SLOPE_FOLLOW).normalize();
+    }
     // Lean into the turn, as a rider does.
     if (s.bank > 0 && steer !== 0) wantUp.applyAxisAngle(fwd, steer * s.bank * share);
     // Torques are asked for as turning accelerations (rad/s²) and scaled by the inertia below, so
@@ -410,7 +459,9 @@ export class Vehicle {
         }
       } else this.meter = Math.max(0, this.meter - dt * (this.overheated > 0 ? 0.2 : 0.35));
     }
-    const power = this.overheated > 0 ? 0.35 : 1;
+    // A battered hull drives worse: sluggish at two thirds, limping at a third.
+    const condition = this.hp / this.maxHp;
+    const power = (this.overheated > 0 ? 0.35 : 1) * (condition < 0.34 ? 0.55 : condition < 0.67 ? 0.8 : 1);
 
     if (drive) {
       if (drive.throttle > 0) {
@@ -435,6 +486,7 @@ export class Vehicle {
       if (drive.hop && s.hop && grounded && this.hopCd <= 0) {
         body.applyImpulse({ x: 0, y: m * 7.5, z: 0 }, true);
         this.hopCd = 0.9;
+        this.skipHitCheck = true;
       }
       if (s.fly) {
         const rate = (drive.up ? 1 : 0) - (drive.down ? 1 : 0) + (drive.vertical ?? 0);

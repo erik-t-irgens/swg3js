@@ -8,6 +8,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { Customizer } from './customizer';
+import { markActor } from '../world/portalRender';
 
 /** A mesh's occlusion data, as the converter carried it out of the mesh generator. */
 interface PartDef {
@@ -256,6 +257,11 @@ export class Character {
     // The rest contribute meshes only; their bones would be a second, unanimated skeleton.
     if (first) for (const sc of scenes) this.group.add(sc);
     else for (const m of meshes) this.group.add(m);
+    // Actors draw in every pass, inside a building as well as out: a piece put on after the rig
+    // was marked would otherwise be left on the world layer, and vanish indoors (leaving the
+    // head and hands, which the body's own mesh carries).
+    for (const sc of scenes) markActor(sc);
+    for (const m of meshes) markActor(m);
     // The outermost def decides how the whole item occludes.
     const outer = defs.reduce((a, b) => (b.occlusionLayer > a.occlusionLayer ? b : a));
     this.parts.set(key, {
