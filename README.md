@@ -15,7 +15,7 @@ Open the printed URL, click **Enter the galaxy**, and go.
 | --- | --- |
 | WASD / arrows | Move (relative to camera) |
 | Mouse | Look (pointer locked); past a mild upward pitch the third-person camera stays put and the view tilts on up |
-| Wheel | Zoom camera: glides by a fraction per notch, in to the shoulders, and one notch further to first person (the body stays in view, headless, seen from the eyes as the animation carries them) |
+| Wheel | Zoom camera: glides by a fraction per notch, in to the shoulders, and one notch further to first person (the body stays in view, headless, seen from the eyes as the animation carries them, and turns with the mouse) |
 | Space | Jump (from prone: stand up) |
 | Ctrl / X | Crouch (hold) |
 | V | Kneel and get up again |

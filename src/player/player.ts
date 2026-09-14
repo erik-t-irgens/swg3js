@@ -1201,11 +1201,15 @@ export class Player {
     // Only while Jedi Academy's animations are in charge; the game's own clips turn the body the way it runs.
     const directional = this.jkaMode && !!this.rig && this.rig.hasState('runBack');
     this.directional = directional;
-    const faceCamera = (this.classId === 'bounty_hunter' && (this.gunReady || !this.hasGunClips)) || fighting || (!this.grounded && this.jkaMode);
+    const faceCamera = (this.classId === 'bounty_hunter' && (this.gunReady || !this.hasGunClips)) || fighting || (!this.grounded && this.jkaMode) || cam.firstPerson;
     const camYaw = Math.atan2(fwd.x, fwd.z);
     let legsOffset = 0;
     if (this.lockedHeading) {
       this.heading = Math.atan2(this.lockedHeading.x, this.lockedHeading.z);
+    } else if (cam.firstPerson) {
+      // Seen from the eyes, the body turns with the view at once: a lag would show the shoulders
+      // swinging round, and turning the view alone would look back down into the neck.
+      this.heading = camYaw;
     } else if (faceCamera) {
       let diff = camYaw - this.heading;
       diff = Math.atan2(Math.sin(diff), Math.cos(diff));

@@ -790,7 +790,7 @@ class App {
     if (!rig || !head) return null;
     head.getWorldPosition(this.eyePoint);
     // The joint sits at the skull's base; the eyes are a hand up and ahead in the head's own frame.
-    this.eyePoint.add(tmp.set(0, 0.09, 0.06).applyQuaternion(this.player.group.quaternion));
+    this.eyePoint.add(tmp.set(0, 0.12, 0.09).applyQuaternion(this.player.group.quaternion));
     return this.eyePoint;
   }
 
