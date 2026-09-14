@@ -578,8 +578,12 @@ export class Player {
     if (!rig || !this.hasGunClips) return;
     // Prone has its own shots; standing and kneeling use the game's additive shots (add_<kind>_fire_N), a recoil on the arms over whatever pose is up.
     const kind = this.gunKind;
-    const shots = this.prone ? rig.clipsMatching(new RegExp(`^${kind}_combat_prone_fire_\\d+$`)) : rig.clipsMatching(new RegExp(`^add_${kind}_fire_\\d+$`));
-    const pool = shots.length ? shots : rig.clipsMatching(new RegExp(`^(add_)?${kind}_(combat_)?(prone_)?fire_\\d+$`));
+    // The hierarchy's own shots for the posture first (pistol_combat_standing_fire_N, pistol_combat_kneeling_fire_N), then the additive ones.
+    const posture = this.prone ? 'prone' : this.kneeling ? 'kneeling' : 'standing';
+    let shots = rig.clipsMatching(new RegExp(`^${kind}_combat_${posture}_fire_\\d+$`));
+    if (!shots.length && this.kneeling) shots = rig.clipsMatching(new RegExp(`^${kind}_kneeling_fire_\\d+$`));
+    if (!shots.length && !this.prone) shots = rig.clipsMatching(new RegExp(`^add_${kind}_fire_\\d+$`));
+    const pool = shots.length ? shots : rig.clipsMatching(new RegExp(`^(add_)?${kind}_(combat_)?(prone_|kneeling_|standing_)?fire_\\d+$`));
     if (pool.length) rig.playUpper(pool[Math.floor(Math.random() * pool.length)], 0.04);
   }
 
@@ -1072,20 +1076,26 @@ export class Player {
     // The table's one combat stance (loop_combat_standing) is the unarmed one, fists up: with a blaster
     // the combat carry keeps the gun's own carry and turns to face the camera, until the game's state
     // hierarchy tells which loop it plays there.
+    // The state hierarchy names loop_<kind>_combat_standing_aimed as the combat and aimed loops: those when
+    // the table has them, else the relaxed carry.
     for (const [state, n] of [['Idle', 0], ['Walk', 1], ['Run', 2]] as const) {
-      rig.prefer(`gunReady${state}`, new RegExp(gun === 'pistol' ? `^loop_pistol_standing:speed${n}` : `^loop_rifle:speed${n}`));
-      rig.prefer(`gunAim${state}`, new RegExp(gun === 'pistol' ? `^loop_pistol_standing:speed${n}` : `^loop_rifle:speed${n}`));
+      const relaxed = new RegExp(gun === 'pistol' ? `^loop_pistol_standing:speed${n}$` : `^loop_rifle:speed${n}$`);
+      rig.prefer(`gunReady${state}`, rig.clipMatching(new RegExp(`^loop_${gun}_combat_standing(_aimed)?:speed${n}$`)) ?? relaxed);
+      rig.prefer(`gunAim${state}`, rig.clipMatching(new RegExp(`^loop_${gun}_combat_standing_aimed:speed${n}$`)) ?? relaxed);
     }
     for (const [state, n] of [['Idle', 0], ['Move', 1]] as const) {
       rig.prefer(`gunProne${state}`, new RegExp(`^loop_${gun}_prone:speed${n}`));
       rig.prefer(`gunProneReady${state}`, new RegExp(`^loop_${gun}_combat_prone:speed${n}`));
       rig.prefer(`gunProneAim${state}`, new RegExp(`^loop_${gun}_combat_prone_aimed:speed${n}`));
     }
-    rig.prefer('kneel', armed ? new RegExp(`^loop_${gun}_kneeling`) : null);
-    // Aiming standing or kneeling has no loop of its own: the transition into the aimed pose is held
-    // at its end on the upper body over the carry's legs, and its inverse plays once when the aim ends.
-    const aimIn = armed && this.aiming && !this.prone ? rig.firstOf(...(this.kneeling ? [`trn_${gun}_combat_kneeling_to_${gun}_combat_kneeling_aimed`] : gun === 'pistol' ? ['trn_pistol_combat_to_pistol_combat_aimed'] : ['trn_rifle_a_standing_ready_to_aimed'])) : null;
-    if (armed && this.wasAiming && !this.aiming && !this.prone && !this.swimming) {
+    // Kneeling: the hierarchy's combat kneel (loop_<kind>_combat_kneeling_aimed) when aiming or in combat, else the relaxed kneel.
+    const kneelAimed = armed ? rig.clipMatching(new RegExp(`^loop_${gun}_combat_kneeling(_aimed)?`)) : null;
+    rig.prefer('kneel', armed ? ((this.aiming || this.gunReady) && kneelAimed ? kneelAimed : new RegExp(`^loop_${gun}_kneeling`)) : null);
+    // Aiming standing or kneeling without an aimed loop of its own: the transition into the aimed pose is
+    // held at its end on the upper body over the carry's legs, and its inverse plays once when the aim ends.
+    const hasAimLoop = armed && (this.kneeling ? !!kneelAimed : !!rig.clipMatching(new RegExp(`^loop_${gun}_combat_standing_aimed:speed0$`)));
+    const aimIn = armed && this.aiming && !this.prone && !hasAimLoop ? rig.firstOf(...(this.kneeling ? [`trn_${gun}_combat_kneeling_to_${gun}_combat_kneeling_aimed`] : gun === 'pistol' ? ['trn_pistol_combat_to_pistol_combat_aimed'] : ['trn_rifle_a_standing_ready_to_aimed'])) : null;
+    if (armed && this.wasAiming && !this.aiming && !this.prone && !this.swimming && !hasAimLoop) {
       const out = rig.firstOf(...(this.kneeling ? [`trn_${gun}_combat_kneeling_aimed_to_${gun}_combat_kneeling`] : gun === 'pistol' ? ['trn_pistol_combat_standing_aimed_to_pistol_combat_standing'] : ['trn_rifle_a_standing_aimed_to_ready']));
       if (out) rig.playUpper(out, 0.08);
     }

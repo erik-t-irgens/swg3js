@@ -402,8 +402,7 @@ export function parseLat(root) {
     const template = anim.children.find(isForm);
     entries.push(...flattenAnimationTemplate(template, name));
   }
-  void count;
-  return { hierarchy, entries };
+  return { hierarchy, entries, count };
 }
 
 /**

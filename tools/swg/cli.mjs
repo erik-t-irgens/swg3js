@@ -78,7 +78,7 @@ import { buildPack, familyOf } from './pack.mjs';
 import { parseSnapshot, flattenWithWorldTransforms } from './ws.mjs';
 import { loadBuildouts, mergeBuildouts } from './buildout.mjs';
 import { R, composeMeshes, mergeSkeletons, parseAnimation, parseLat, parseLmg, parseMgn, parseSat, parseSkeleton, poseAtFrame, readIff, skinData, skinnedPrimitives } from './skeletal.mjs';
-import { resolveTemplateMesh, resolveTemplateString } from './objtemplate.mjs';
+import { resolveAppearanceToMesh, resolveTemplateMesh, resolveTemplateString } from './objtemplate.mjs';
 import { exportParticle } from './particle.mjs';
 import { defaultJkaClips, importJkaClips } from './jka.mjs';
 import { extractClips, readGlb, replaceClips, skinJoints } from './glbclips.mjs';
@@ -1180,7 +1180,7 @@ const CREATURE_CLIPS = 'idle,walk,run,cbt_stand_combat_attack_light,rea_stand_ge
 /** The player's clips: locomotion and posture by exact name (=), reactions by substring. */
 /** What the player wears when --wear is not given: a plain shirt, trousers and shoes. */
 const DEFAULT_WEAR = ['object/tangible/wearables/shirt/shared_shirt_s03.iff', 'object/tangible/wearables/pants/shared_pants_s01.iff', 'object/tangible/wearables/shoes/shared_shoes_s01.iff'];
-const PLAYER_CLIPS = '=idle,=walk,=run,=idle_combat,=walk_combat,=run_combat,=jump,strafe,backward,walk_back,run_back,loop_crouched,loop_kneeling,loop_prone,trn_standing_to_crouched,trn_crouched_to_standing,trn_standing_to_kneeling,trn_kneeling_to_standing,trn_crouched_to_kneeling,trn_kneeling_to_prone,trn_prone_to_kneeling,trn_standing_to_prone,trn_prone_to_standing,loop_pistol_standing,loop_rifle:,loop_combat_standing,loop_pistol_kneeling,loop_rifle_kneeling,loop_pistol_prone,loop_rifle_prone,loop_pistol_combat_prone,loop_rifle_combat_prone,add_pistol_fire,add_rifle_fire,pistol_combat_prone_fire,rifle_combat_prone_fire,pistol_reload,rifle_reload,trn_pistol_standing_to_pistol_combat,trn_rifle_a_standing,trn_pistol_combat_to_pistol_combat_aimed,trn_pistol_combat_standing_aimed_to,trn_pistol_combat_standing_to,trn_rifle_combat_standing_to,trn_rifle_combat_standing_aimed_to,trn_pistol_combat_kneeling,trn_rifle_combat_kneeling,trn_pistol_combat_prone_to,trn_rifle_combat_prone_to,trn_pistol_combat_prone_aimed_to,trn_rifle_combat_prone_aimed_to,=loop_sitting_chair:0,=loop_sitting_ground,=loop_swimming:speed0,=loop_swimming:speed1,=unarmed_standing_ready_punch,=sword_1h_standing_ready_hrz_slash_middle_r,=rea_get_hit_medium_mid_center,=trn_combat_standing_hit_to_incapacitated_face_up,=loop_incapacitated_face_up,=cbt_stand_combat_attack_light,=rea_stand_get_hit_light,=trn_stand_to_incapacitated,=loop_incapacitated';
+const PLAYER_CLIPS = '=idle,=walk,=run,=idle_combat,=walk_combat,=run_combat,=jump,strafe,backward,walk_back,run_back,loop_crouched,loop_kneeling,loop_prone,trn_standing_to_crouched,trn_crouched_to_standing,trn_standing_to_kneeling,trn_kneeling_to_standing,trn_crouched_to_kneeling,trn_kneeling_to_prone,trn_prone_to_kneeling,trn_standing_to_prone,trn_prone_to_standing,loop_pistol_standing,loop_rifle:,loop_combat_standing,loop_pistol_kneeling,loop_rifle_kneeling,loop_pistol_prone,loop_rifle_prone,loop_pistol_combat_prone,loop_rifle_combat_prone,add_pistol_fire,add_rifle_fire,pistol_combat_prone_fire,rifle_combat_prone_fire,pistol_reload,rifle_reload,loop_pistol_combat_standing,loop_rifle_combat_standing,loop_pistol_combat_kneeling,loop_rifle_combat_kneeling,pistol_combat_standing_fire,rifle_combat_standing_fire,pistol_combat_kneeling_fire,rifle_combat_kneeling_fire,pistol_kneeling_fire,rifle_kneeling_fire,trn_pistol_standing_to_pistol_combat,trn_rifle_a_standing,trn_pistol_combat_to_pistol_combat_aimed,trn_pistol_combat_standing_aimed_to,trn_pistol_combat_standing_to,trn_rifle_combat_standing_to,trn_rifle_combat_standing_aimed_to,trn_pistol_combat_kneeling,trn_rifle_combat_kneeling,trn_pistol_combat_prone_to,trn_rifle_combat_prone_to,trn_pistol_combat_prone_aimed_to,trn_rifle_combat_prone_aimed_to,=loop_sitting_chair:0,=loop_sitting_ground,=loop_swimming:speed0,=loop_swimming:speed1,=unarmed_standing_ready_punch,=sword_1h_standing_ready_hrz_slash_middle_r,=rea_get_hit_medium_mid_center,=trn_combat_standing_hit_to_incapacitated_face_up,=loop_incapacitated_face_up,=cbt_stand_combat_attack_light,=rea_stand_get_hit_light,=trn_stand_to_incapacitated,=loop_incapacitated';
 const PLAYER_TEMPLATE = 'object/creature/player/shared_human_male.iff';
 
 /** Planet ids the game can load a pack for (see src/data/planets.ts). */
@@ -1600,11 +1600,13 @@ switch (cmd) {
       if (!a) throw new Error(`${file}: no appearanceFilename in its template chain`);
       file = a.replace(/\\/g, '/').replace(/^\//, '');
     }
+    let latNames = null;
     if (/\.sat$/i.test(file)) {
       const sat = parseSat(readIff(vfs, file));
       const latFile = sat.animationTables.get(sat.skeletons[0]?.file.toLowerCase()) ?? [...sat.animationTables.values()][0];
       const lat = parseLat(readIff(vfs, latFile));
-      console.log(`${file}: logical table ${latFile} (${lat.entries.length} entries), hierarchy ${lat.hierarchy}`);
+      latNames = new Set(lat.entries.map((e) => e.name.split(':')[0].toLowerCase()));
+      console.log(`${file}: logical table ${latFile} (${latNames.size} logical names in ${lat.entries.length} entries; the table says it holds ${lat.count}), hierarchy ${lat.hierarchy}`);
       file = lat.hierarchy.replace(/\\/g, '/').replace(/^\//, '');
     }
     if (!vfs.has(file)) throw new Error(`${file}: not in the archives`);
@@ -1633,7 +1635,51 @@ switch (cmd) {
       }
       return lines;
     };
-    const lines = walk(parseIff(vfs.read(file)), 0, []);
+    const root = parseIff(vfs.read(file));
+    // The states, each with its idle's logical name, its actions and its links, and which of the
+    // logical names the table lacks: those the game cannot play from this table.
+    if (latNames) {
+      const states = [];
+      const missing = new Map();
+      const known = (n) => latNames.has(n.toLowerCase());
+      const note = (n, where) => { if (!known(n)) missing.set(n, (missing.get(n) ?? []).concat(where)); };
+      const visit = (node, path) => {
+        if (!isForm(node)) return;
+        if (node.type === 'STAT') {
+          const info = node.children.find((c) => !isForm(c) && c.tag === 'INFO');
+          const [name, idle] = info ? strings(info.data) : ['?'];
+          const here = [...path, name ?? '?'];
+          const state = { path: here.join('/'), idle: idle ?? null, actions: [], links: [] };
+          for (const c of node.children) {
+            if (!isForm(c)) continue;
+            if (c.type === 'ACTS') {
+              const acts = (f) => { for (const a of f.children) { if (isForm(a)) acts(a); else if (a.tag === 'ACTN') { const [act, logical] = strings(a.data); state.actions.push(`${act}=${logical ?? '?'}`); if (logical) note(logical, `${state.path} action ${act}`); } } };
+              acts(c);
+            } else if (c.type === 'LNKS') {
+              for (const l of c.children) if (!isForm(l) && l.tag === 'LINK') { const parts = strings(l.data); const last = parts[parts.length - 1]; const trn = parts.length > 1 && /^(trn_|rea_|add_|loop_)|_to_/.test(last) ? last : null; state.links.push(`${(trn ? parts.slice(0, -1) : parts).join('/')}${trn ? ` via ${trn}` : ''}`); if (trn) note(trn, `${state.path} link`); }
+            } else if (c.type === 'CHLD') for (const child of c.children) visit(child, here);
+          }
+          if (idle) note(idle, `${state.path} idle`);
+          states.push(state);
+          return;
+        }
+        for (const c of node.children) visit(c, path);
+      };
+      visit(root, []);
+      const find = options.find ? String(options.find).toLowerCase() : null;
+      const shown = find ? states.filter((st) => st.path.toLowerCase().includes(find)) : states;
+      console.log(`${file}: ${states.length} states${find ? `, ${shown.length} under "${find}"` : ''}`);
+      for (const st of shown) {
+        console.log(`${st.path}: idle ${st.idle ?? '(none)'}${st.idle && !known(st.idle) ? ' [NOT IN TABLE]' : ''}`);
+        if (st.actions.length) console.log(`    actions: ${st.actions.map((a) => (known(a.split('=')[1]) ? a : `${a} [NOT IN TABLE]`)).join(', ')}`);
+        if (st.links.length) console.log(`    links: ${st.links.join(', ')}`);
+      }
+      const relevant = [...missing.entries()].filter(([, w]) => !find || w.some((x) => x.toLowerCase().includes(find)));
+      console.log(`\n${relevant.length} logical names the hierarchy uses that the table lacks${find ? ` (under "${find}")` : ''}:`);
+      for (const [n, w] of relevant) console.log(`  ${n}  (${w.length} uses, e.g. ${w[0]})`);
+      break;
+    }
+    const lines = walk(root, 0, []);
     const find = options.find ? String(options.find).toLowerCase() : null;
     console.log(`${file}: ${lines.length} lines${find ? `, those with "${find}" and their forms` : ''}`);
     if (!find) console.log(lines.join('\n'));
@@ -2096,8 +2142,16 @@ switch (cmd) {
     const limit = options.limit ? Number(options.limit) : Infinity;
     // One template into the pack's models, as the snapshot does it (static, portal building, or a skeletal thing at its bind pose).
     const convert = (template) => {
-      const r = resolveTemplateMesh(vfs, template, cache);
+      let r = resolveTemplateMesh(vfs, template, cache);
       if (r.skip) return { skip: r.skip };
+      // A rideable vehicle's skeletal appearance (pv_<name>.sat) is a two-joint placeholder with a
+      // 10 cm box for a mesh; the visible body is the static appearance of the same name, which the
+      // client attaches at run time. Show that one.
+      const pv = r.skeletal && /^appearance\/pv_(.+)\.sat$/i.exec(r.skeletal);
+      if (pv && vfs.has(`appearance/${pv[1]}.apt`)) {
+        const body = resolveAppearanceToMesh(vfs, `appearance/${pv[1]}.apt`);
+        if (!body.skip) r = { ...body, source: `appearance/${pv[1]}.apt (the body of ${r.skeletal})` };
+      }
       if (r.particle) return { skip: 'particle effect' };
       let id;
       try {
