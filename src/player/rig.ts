@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { Character, type GripAxes } from './character';
 
-export type RigState = 'idle' | 'walk' | 'run' | 'air' | 'seated' | 'swim' | 'float' | 'crouch' | 'crouchWalk' | 'crouchWalkBack' | 'stance' | 'strafeLeft' | 'strafeRight' | 'runBack' | 'walkBack' | 'runSaber' | 'walkSaber';
+export type RigState = 'idle' | 'walk' | 'run' | 'air' | 'seated' | 'swim' | 'float' | 'crouch' | 'crouchWalk' | 'crouchWalkBack' | 'stance' | 'strafeLeft' | 'strafeRight' | 'runBack' | 'walkBack' | 'runSaber' | 'walkSaber' | 'gunIdle' | 'gunWalk' | 'gunRun' | 'gunReadyIdle' | 'gunReadyWalk' | 'gunReadyRun' | 'gunAimIdle' | 'gunAimWalk' | 'gunAimRun';
 
 /** Clip names used for each state, in preference order (placeholder rig names, then the game's); a pattern matches any clip. */
 const STATE_CLIPS: Record<RigState, (string | RegExp)[]> = {
@@ -27,10 +27,22 @@ const STATE_CLIPS: Record<RigState, (string | RegExp)[]> = {
   /** Moving with the block held: Jedi Academy's saber run and walk, else the game's own. */
   runSaber: ['BOTH_RUN2', 'BOTH_RUN1', 'run', 'Run', 'loop_run', 'run_combat'],
   walkSaber: ['BOTH_WALK2', 'BOTH_WALK1', 'walk', 'Walk', 'loop_walk', 'walk_combat'],
+  // A blaster in hand, the game's own way: the relaxed carry (a rifle across the chest, a pistol
+  // at the side), the combat carry after a shot, and the aimed carry. Each has its idle, walk and
+  // run as the table's speed variants; the kind of gun picks between them through `prefer`.
+  gunIdle: [/^loop_rifle:speed0/, /^loop_pistol_standing:speed0/, 'idle', 'stand'],
+  gunWalk: [/^loop_rifle:speed1/, /^loop_pistol_standing:speed1/, 'walk', 'loop_walk'],
+  gunRun: [/^loop_rifle:speed2/, /^loop_pistol_standing:speed2/, 'run', 'loop_run'],
+  gunReadyIdle: [/^loop_rifle_combat(_standing)?:speed0/, /^loop_pistol_combat(_standing)?:speed0/, /^loop_combat_standing:speed0/, 'idle_combat', /^loop_rifle:speed0/, 'idle'],
+  gunReadyWalk: [/^loop_rifle_combat(_standing)?:speed1/, /^loop_pistol_combat(_standing)?:speed1/, /^loop_combat_standing:speed1/, 'walk_combat', /^loop_rifle:speed1/, 'walk'],
+  gunReadyRun: [/^loop_rifle_combat(_standing)?:speed2/, /^loop_pistol_combat(_standing)?:speed2/, /^loop_combat_standing:speed2/, 'run_combat', /^loop_rifle:speed2/, 'run'],
+  gunAimIdle: [/^loop_rifle_combat(_standing)?_aimed:speed0/, /^loop_pistol_combat(_standing)?_aimed:speed0/, /^loop_rifle_combat(_standing)?:speed0/, /^loop_pistol_combat(_standing)?:speed0/, 'idle_combat', 'idle'],
+  gunAimWalk: [/^loop_rifle_combat(_standing)?_aimed:speed1/, /^loop_pistol_combat(_standing)?_aimed:speed1/, /^loop_rifle_combat(_standing)?:speed1/, /^loop_pistol_combat(_standing)?:speed1/, 'walk_combat', 'walk'],
+  gunAimRun: [/^loop_rifle_combat(_standing)?_aimed:speed2/, /^loop_pistol_combat(_standing)?_aimed:speed2/, /^loop_rifle_combat(_standing)?:speed2/, /^loop_pistol_combat(_standing)?:speed2/, 'run_combat', 'run'],
 };
 
 /** Natural travel speed of the placeholder rig's locomotion clips, in m/s, used to scale playback. */
-const DEFAULT_CLIP_SPEED: Partial<Record<RigState, number>> = { walk: 1.5, run: 5.5, swim: 2.5, crouchWalk: 2.2, strafeLeft: 4.5, strafeRight: 4.5, runBack: 4, walkBack: 1.5, runSaber: 6.3, walkSaber: 2, crouchWalkBack: 2 };
+const DEFAULT_CLIP_SPEED: Partial<Record<RigState, number>> = { walk: 1.5, run: 5.5, swim: 2.5, crouchWalk: 2.2, strafeLeft: 4.5, strafeRight: 4.5, runBack: 4, walkBack: 1.5, runSaber: 6.3, walkSaber: 2, crouchWalkBack: 2, gunWalk: 1.5, gunRun: 5.5, gunReadyWalk: 1.5, gunReadyRun: 5.5, gunAimWalk: 1.5, gunAimRun: 5.5 };
 
 /** Bones the game needs by role: exact names of the placeholder rig first, then patterns for the game's skeletons. */
 export type BoneRole = 'rightHand' | 'leftHand' | 'spine' | 'rightUpperArm' | 'rightForeArm' | 'leftUpperArm' | 'leftForeArm' | 'head';
@@ -86,7 +98,11 @@ export class CharacterRig {
   private readonly hold: Set<string>;
   readonly grip: GripAxes | null;
   /** A clip to play for a state ahead of its table, when the rig has it: the style's stance, the jump's direction, the style's run. */
-  private readonly preferred = new Map<RigState, string>();
+  private readonly preferred = new Map<RigState, string | RegExp>();
+  /** A one-shot clip on the upper body over whatever the legs do (a shot fired), and when it ends. */
+  private upperShot: THREE.AnimationAction | null = null;
+  private upperShotEnds = 0;
+  private upperShotTime = 0;
   private current: THREE.AnimationAction | null = null;
   private state: RigState | null = null;
   /** A clip on the upper body only, over the state clip's legs (the saber stance while swimming). */
@@ -300,8 +316,7 @@ export class CharacterRig {
       this.state = state;
       return;
     }
-    const preferred = this.preferred.get(state) ?? null;
-    const wantedStance = preferred && this.actions.has(preferred) ? preferred : null;
+    const wantedStance = this.preferredClip(state);
     const upperName = upper && this.actions.has(upper) ? upper : null;
     const playing = this.current?.getClip().name.replace(/^lower:/, '');
     if (state !== this.state || (wantedStance && playing !== wantedStance) || upperName !== this.upperName) {
@@ -334,6 +349,13 @@ export class CharacterRig {
 
   update(dt: number): void {
     this.mixer.update(dt);
+    if (this.upperShot) {
+      this.upperShotTime += dt;
+      if (this.upperShotTime >= this.upperShotEnds - 0.05) {
+        this.upperShot.fadeOut(0.12);
+        this.upperShot = null;
+      }
+    }
     if (this.override) {
       this.overrideTime += dt;
       if (this.overrideTime >= this.overrideEnds - 0.08) {
@@ -348,16 +370,46 @@ export class CharacterRig {
     }
   }
 
-  /** Ask a state to play `clip` when the rig has it (null goes back to the state's table). */
-  prefer(state: RigState, clip: string | null): void {
+  /** The clip a state prefers, when the rig has it: a name, or the first clip a pattern matches. */
+  private preferredClip(state: RigState): string | null {
+    const p = this.preferred.get(state);
+    if (!p) return null;
+    if (p instanceof RegExp) return this.findClip([p]) ?? null;
+    return this.actions.has(p) ? p : null;
+  }
+
+  /** The first clip whose name a pattern matches, or undefined. */
+  clipMatching(pattern: RegExp): string | undefined {
+    return this.findClip([pattern]);
+  }
+
+  /** Every clip a pattern matches. */
+  clipsMatching(pattern: RegExp): string[] {
+    return [...this.actions.keys()].filter((n) => pattern.test(n));
+  }
+
+  /** Play a clip once on the upper body only, over the legs' state clip (a shot fired while running). */
+  playUpper(clip: string, fadeIn = 0.05): number | null {
+    if (!this.actions.has(clip)) return null;
+    const action = this.half(clip, 'upper');
+    if (this.upperShot && this.upperShot !== action) this.upperShot.fadeOut(fadeIn);
+    action.reset().setLoop(THREE.LoopOnce, 1).setEffectiveWeight(1).fadeIn(fadeIn).play();
+    action.clampWhenFinished = true;
+    this.upperShot = action;
+    this.upperShotTime = 0;
+    this.upperShotEnds = action.getClip().duration;
+    return this.upperShotEnds;
+  }
+
+  /** Ask a state to play `clip` when the rig has it: a name or a pattern (null goes back to the state's table). */
+  prefer(state: RigState, clip: string | RegExp | null): void {
     if (clip) this.preferred.set(state, clip);
     else this.preferred.delete(state);
   }
 
   /** The speed, in metres a second, the clip a state would play was made for, or null when unknown. */
   naturalSpeed(state: RigState): number | null {
-    const preferred = this.preferred.get(state);
-    const clip = preferred && this.actions.has(preferred) ? preferred : this.findClip(STATE_CLIPS[state]);
+    const clip = this.preferredClip(state) ?? this.findClip(STATE_CLIPS[state]);
     return (clip && this.clipSpeeds[clip]) || DEFAULT_CLIP_SPEED[state] || null;
   }
 

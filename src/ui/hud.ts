@@ -133,8 +133,12 @@ export class Hud {
     this.hpFill.style.width = `${((hp / maxHp) * 100).toFixed(1)}%`;
     this.hpText.textContent = `Health ${Math.ceil(hp)}`;
     const r = kit.resource;
-    this.resFill.style.width = `${((r.value / r.max) * 100).toFixed(1)}%`;
-    this.resText.textContent = `${r.label} ${Math.round(r.value)}`;
+    const bar = this.resFill.parentElement;
+    if (bar) bar.hidden = !r;
+    if (r) {
+      this.resFill.style.width = `${((r.value / r.max) * 100).toFixed(1)}%`;
+      this.resText.textContent = `${r.label} ${Math.round(r.value)}`;
+    }
     for (let i = 0; i < kit.slots.length; i++) {
       const el = this.slots[i];
       el.classList.toggle('active', kit.slotActive(i));

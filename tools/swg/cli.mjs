@@ -1117,7 +1117,7 @@ const CREATURE_CLIPS = 'idle,walk,run,cbt_stand_combat_attack_light,rea_stand_ge
 /** The player's clips: locomotion and posture by exact name (=), reactions by substring. */
 /** What the player wears when --wear is not given: a plain shirt, trousers and shoes. */
 const DEFAULT_WEAR = ['object/tangible/wearables/shirt/shared_shirt_s03.iff', 'object/tangible/wearables/pants/shared_pants_s01.iff', 'object/tangible/wearables/shoes/shared_shoes_s01.iff'];
-const PLAYER_CLIPS = '=idle,=walk,=run,=idle_combat,=walk_combat,=run_combat,=jump,strafe,backward,walk_back,run_back,=loop_sitting_chair:0,=loop_sitting_ground,=loop_swimming:speed0,=loop_swimming:speed1,=unarmed_standing_ready_punch,=sword_1h_standing_ready_hrz_slash_middle_r,=rea_get_hit_medium_mid_center,=trn_combat_standing_hit_to_incapacitated_face_up,=loop_incapacitated_face_up,=cbt_stand_combat_attack_light,=rea_stand_get_hit_light,=trn_stand_to_incapacitated,=loop_incapacitated';
+const PLAYER_CLIPS = '=idle,=walk,=run,=idle_combat,=walk_combat,=run_combat,=jump,strafe,backward,walk_back,run_back,loop_pistol_standing,loop_rifle:,loop_pistol_combat:,loop_pistol_combat_standing,loop_pistol_combat_aimed,loop_rifle_combat:,loop_rifle_combat_standing,loop_rifle_combat_aimed,pistol_combat_fire,rifle_combat_fire,pistol_combat_standing_fire,rifle_combat_standing_fire,pistol_combat_aimed_fire,rifle_combat_aimed_fire,pistol_reload,rifle_reload,trn_pistol_combat_to_pistol_combat_aimed,trn_rifle_combat_standing_to_rifle_combat_standing_aimed,=loop_sitting_chair:0,=loop_sitting_ground,=loop_swimming:speed0,=loop_swimming:speed1,=unarmed_standing_ready_punch,=sword_1h_standing_ready_hrz_slash_middle_r,=rea_get_hit_medium_mid_center,=trn_combat_standing_hit_to_incapacitated_face_up,=loop_incapacitated_face_up,=cbt_stand_combat_attack_light,=rea_stand_get_hit_light,=trn_stand_to_incapacitated,=loop_incapacitated';
 const PLAYER_TEMPLATE = 'object/creature/player/shared_human_male.iff';
 
 /** Planet ids the game can load a pack for (see src/data/planets.ts). */
@@ -1652,7 +1652,7 @@ switch (cmd) {
           return r.clips;
         }
       : null;
-    const info = convertSat(vfs, template, join(outDir, `${id}.glb`), { animations: options.anim ?? PLAYER_CLIPS, variables: customizationValues(options.var), wear, maxAnimations: 48, extraClips });
+    const info = convertSat(vfs, template, join(outDir, `${id}.glb`), { animations: options.anim ?? PLAYER_CLIPS, variables: customizationValues(options.var), wear, maxAnimations: options['max-anims'] ? Number(options['max-anims']) : 120, extraClips });
     console.log(`${info.sat}: skeleton ${info.skeleton} (${info.joints} joints${info.attached.length ? `, with ${info.attached.join('; ')}` : ''})`);
     if (jka) console.log(`  jka: ${Object.keys(info.jkaClips).length} clips retargeted${jka.missing.length ? `; not in animation.cfg: ${jka.missing.join(', ')}` : ''}`);
     if (jka) console.log(`  jka: locomotion speeds from the feet: ${Object.entries(info.jkaClips).filter(([, c]) => c.speed).map(([n, c]) => `${n} ${c.speed.toFixed(2)} m/s`).join(', ') || 'none'}`);
@@ -1789,7 +1789,7 @@ switch (cmd) {
     // finds its states by these names, and the table's first eighty clips are not them.
     const info = convertSat(vfs, template, null, {
       animations: options.anim ?? PLAYER_CLIPS,
-      maxAnimations: options['max-anims'] ? Number(options['max-anims']) : 48,
+      maxAnimations: options['max-anims'] ? Number(options['max-anims']) : 120,
       variables,
       wear,
       parts: { dir: outDir, rig: 'rig' },

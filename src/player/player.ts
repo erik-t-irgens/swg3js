@@ -10,7 +10,7 @@ import { STANCE_ANIM, STYLE_DAMAGE, SaberCombat, type Dir, type SaberInput } fro
 import { SaberThrow, THROW } from '../combat/saberThrow';
 import { canBlock, inFront, parryClip, parryZone, reflectDirection } from '../combat/deflect';
 import { JKA, JkaMovement, UNIT, type MoveCommand } from './jkaMove';
-import type { CharacterRig } from './rig';
+import type { CharacterRig, RigState } from './rig';
 
 // The original game's run is 5.375 m/s; the character stands about 1.75 m.
 const RUN_SPEED = 5.5;
@@ -38,6 +38,8 @@ const aim = new THREE.Vector3();
 const aimFrom = new THREE.Vector3();
 const handPos = new THREE.Vector3();
 /** How Jedi Academy spells the jump directions in its clip names. */
+/** Seconds after a shot before the relaxed carry returns. */
+const GUN_READY_SECONDS = 5;
 /** Running with the block held, forwards or back-pedalling, is at most this much of the full run. */
 const BLOCK_RUN_SCALE = 0.8;
 const JUMP_SUFFIX: Record<Dir, string> = { F: '', B: 'BACK', L: 'LEFT', R: 'RIGHT' };
@@ -64,8 +66,6 @@ interface Parts {
   saberLight: THREE.PointLight;
   rifle: THREE.Group;
   muzzle: THREE.Object3D;
-  jetpack: THREE.Group;
-  flames: THREE.Mesh[];
 }
 
 function buildCharacter(): { group: THREE.Group; parts: Parts } {
@@ -164,26 +164,7 @@ function buildCharacter(): { group: THREE.Group; parts: Parts } {
   rifle.visible = false;
   rightArm.add(rifle);
 
-  // Jetpack on the back with two flame cones.
-  const jetpack = new THREE.Group();
-  jetpack.position.set(0, 0.55, -0.3);
-  const pack = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.46, 0.18), dark);
-  jetpack.add(pack);
-  const flames: THREE.Mesh[] = [];
-  for (const sx of [-1, 1]) {
-    const flame = new THREE.Mesh(
-      new THREE.ConeGeometry(0.07, 0.5, 6).rotateX(Math.PI),
-      new THREE.MeshBasicMaterial({ color: 0xffa040, transparent: true, opacity: 0.9, toneMapped: false }),
-    );
-    flame.position.set(sx * 0.1, -0.45, 0);
-    flame.visible = false;
-    jetpack.add(flame);
-    flames.push(flame);
-  }
-  jetpack.visible = false;
-  hips.add(jetpack);
-
-  return { group, parts: { hips, torso, head, leftLeg, rightLeg, leftArm, rightArm, saber, blade, bladeTip, hilt, staffBlade, staffTip, saber2, blade2, bladeTip2, saberLight, rifle, muzzle, jetpack, flames } };
+  return { group, parts: { hips, torso, head, leftLeg, rightLeg, leftArm, rightArm, saber, blade, bladeTip, hilt, staffBlade, staffTip, saber2, blade2, bladeTip2, saberLight, rifle, muzzle } };
 }
 
 export class Player {
@@ -230,6 +211,14 @@ export class Player {
   private jumpDir: Dir = 'F';
   /** The walk key is held: the walk clips rather than the runs, whatever the speed. */
   private walkKey = false;
+  /** The blaster in hand: a pistol is carried at the side like a hilt, a rifle across the chest. */
+  gunKind: 'pistol' | 'rifle' = 'rifle';
+  /** Aiming the blaster (right mouse held): the aimed carry, a steadier shot, the camera in closer. */
+  aiming = false;
+  /** Seconds since the last shot; the combat carry stays up this long before the relaxed one returns. */
+  sinceShot = Infinity;
+  /** The rig has the game's blaster carries (set when a rig attaches). */
+  hasGunClips = false;
   /** Bolts turned away so far, for the console. */
   blocks = 0;
   private readonly physics: Physics;
@@ -246,7 +235,6 @@ export class Player {
   /** Ducking (Ctrl on land): half speed, crouch clips, and the crouched attacks. */
   crouching = false;
   private colliderCrouched = false;
-  jetThrust = false;
   /** Fly mode for exploring and bug hunting: no gravity, no collision. */
   noclip = false;
   /** Noclip flying speed in m/s (Shift multiplies it); adjusted from the keyboard. */
@@ -333,7 +321,6 @@ export class Player {
     // Only a Force user force jumps, flips and runs walls; the bounty hunter has the jetpack.
     this.jka.forceLevel = jedi ? 3 : 0;
     this.parts.rifle.visible = !jedi;
-    this.parts.jetpack.visible = !jedi;
     if (!jedi && this.saberOn) this.toggleSaber();
     this.parts.saber.visible = jedi;
     this.parts.torso.material = new THREE.MeshStandardMaterial({ color: jedi ? 0xc9b58a : 0x5f6b6e, roughness: 0.8, metalness: jedi ? 0 : 0.3, flatShading: true });
@@ -403,12 +390,8 @@ export class Player {
       p.saber2.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), grip);
       p.saber2.scale.setScalar(k);
     }
-    if (spine) {
-      const k = unitsPerMetre(spine);
-      spine.add(p.jetpack);
-      p.jetpack.position.set(0, 0.06, -0.14).multiplyScalar(k);
-      p.jetpack.scale.setScalar(k);
-    }
+    // The game's own blaster carries: only then do the clips pose the arms, else they are aimed by hand.
+    this.hasGunClips = !!rig.clipMatching(/^loop_(rifle|pistol)/);
     this.applyClassLook();
   }
 
@@ -489,6 +472,22 @@ export class Player {
       p.saber2.getWorldPosition(a);
       p.bladeTip2.getWorldPosition(b);
     }
+  }
+
+  /** The combat carry is up: aiming, or within five seconds of a shot. */
+  get gunReady(): boolean {
+    return this.aiming || this.sinceShot < GUN_READY_SECONDS;
+  }
+
+  /** A shot left the blaster: keep the combat carry up, and play the shot on the upper body when the rig has one. */
+  shotFired(): void {
+    this.sinceShot = 0;
+    const rig = this.rig;
+    if (!rig || !this.hasGunClips) return;
+    const kind = this.gunKind;
+    const shots = rig.clipsMatching(new RegExp(this.aiming ? `^${kind}_combat(_standing)?_aimed_fire_\\d+$` : `^${kind}_combat(_standing)?_fire_\\d+$`));
+    const pool = shots.length ? shots : rig.clipsMatching(new RegExp(`^${kind}_combat(_standing)?(_aimed)?_fire_\\d+$`));
+    if (pool.length) rig.playUpper(pool[Math.floor(Math.random() * pool.length)], 0.04);
   }
 
   /** Where the right hand is, for the throw and the catch. */
@@ -636,6 +635,9 @@ export class Player {
       if (this.swing >= 1) this.swing = -1;
     }
     this.blocking = this.classId === 'jedi' && this.saberOn && input.held('block') && !this.mounted && !this.noclip;
+    this.aiming = this.classId === 'bounty_hunter' && input.held('altAttack') && !this.mounted && !this.noclip && !this.swimming;
+    this.sinceShot += dt;
+    cam.aim = this.aiming;
     const fighting = this.swing >= 0 || this.saber.busy || this.thrown.inFlight || this.jka.inSpecialJump || this.jka.rolling;
     this.jkaMode = this.hasJkaClips && (this.blocking || fighting || !!this.rig?.overriding);
 
@@ -868,7 +870,7 @@ export class Player {
     // Only while Jedi Academy's animations are in charge; the game's own clips turn the body the way it runs.
     const directional = this.jkaMode && !!this.rig && this.rig.hasState('runBack');
     this.directional = directional;
-    const faceCamera = this.classId === 'bounty_hunter' || fighting || (!this.grounded && this.jkaMode);
+    const faceCamera = (this.classId === 'bounty_hunter' && (this.gunReady || !this.hasGunClips)) || fighting || (!this.grounded && this.jkaMode);
     const camYaw = Math.atan2(fwd.x, fwd.z);
     let legsOffset = 0;
     if (this.lockedHeading) {
@@ -924,6 +926,13 @@ export class Player {
     // The saber run and walk are the staff's, the dual sabers' or the single saber's (the three single styles share them).
     rig.prefer('runSaber', style === 'staff' ? 'BOTH_RUN_STAFF' : style === 'dual' ? 'BOTH_RUN_DUAL' : 'BOTH_RUN2');
     rig.prefer('walkSaber', style === 'staff' ? 'BOTH_WALK_STAFF' : style === 'dual' ? 'BOTH_WALK_DUAL' : 'BOTH_WALK2');
+    // The kind of blaster picks its carries: the pistol's stand at the side, the rifle's across the chest.
+    const gun = this.gunKind;
+    for (const [state, n] of [['Idle', 0], ['Walk', 1], ['Run', 2]] as const) {
+      rig.prefer(`gun${state}`, new RegExp(gun === 'pistol' ? `^loop_pistol_standing:speed${n}` : `^loop_rifle:speed${n}`));
+      rig.prefer(`gunReady${state}`, new RegExp(`^loop_${gun}_combat(_standing)?:speed${n}`));
+      rig.prefer(`gunAim${state}`, new RegExp(`^loop_${gun}_combat(_standing)?_aimed:speed${n}`));
+    }
     if (this.mounted) rig.setState('seated');
     // Swimming with the block held: the stance on the torso and arms over the swimming legs.
     else if (this.swimming) rig.setState(moving || this.submerged ? 'swim' : 'float', speed, this.blocking && this.hasJkaClips ? stance : null);
@@ -939,6 +948,10 @@ export class Player {
       // Standing with the block held: the style's stance; the arm out while the saber flies.
       rig.prefer('stance', this.thrown.inFlight ? 'BOTH_SABERPULL' : stance);
       rig.setState('stance');
+    } else if (this.classId === 'bounty_hunter' && this.hasGunClips) {
+      // The blaster carries: relaxed, combat after a shot, or aimed; each with its idle, walk and run.
+      const carry = this.aiming ? 'gunAim' : this.gunReady ? 'gunReady' : 'gun';
+      rig.setState(`${carry}${!moving ? 'Idle' : running ? 'Run' : 'Walk'}` as RigState, speed);
     } else if (!moving) rig.setState('idle');
     // Moving with the block held: Jedi Academy's saber run and walk; otherwise the game's own, saber lit or not.
     else if (this.jkaMode) rig.setState(running ? 'runSaber' : 'walkSaber', speed);
@@ -951,7 +964,7 @@ export class Player {
     if (this.mounted) {
       rig.aimArm('right', armDir.set(-0.25, -0.15, 0.95).normalize());
       rig.aimArm('left', armDir.set(0.25, -0.15, 0.95).normalize());
-    } else if (this.classId === 'bounty_hunter') {
+    } else if (this.classId === 'bounty_hunter' && !this.hasGunClips) {
       rig.aimArm('right', armDir.set(-0.15, 0.02, 0.99).normalize());
       rig.aimArm('left', armDir.set(0.2, -0.1, 0.95).normalize());
     } else if (rig.overriding || this.hasJkaClips) {
@@ -967,10 +980,6 @@ export class Player {
       rig.aimArm('right', armDir, -0.6 * eased);
     } else if (this.saberOn) {
       rig.aimArm('right', armDir.set(-0.45, -0.55, 0.7).normalize());
-    }
-    for (const f of this.parts.flames) {
-      f.visible = this.jetThrust;
-      f.scale.y = 0.8 + Math.random() * 0.5;
     }
   }
 
@@ -1001,6 +1010,7 @@ export class Player {
     // Jedi Academy's clips were made for less than its speeds (it lets the feet slide), so the
     // paces taken from them are held within bands of the game's own speed.
     if (crouch) target = walking ? Math.max(rig.naturalSpeed(back ? 'crouchWalkBack' : 'crouchWalk') ?? 0, 0.8) : base * JKA.walkScale;
+    else if (walking && this.classId === 'bounty_hunter' && this.hasGunClips) target = Math.max(rig.naturalSpeed(this.aiming ? 'gunAimWalk' : this.gunReady ? 'gunReadyWalk' : 'gunWalk') ?? 0, 0.8);
     else if (walking) target = Math.max(rig.naturalSpeed(this.jkaMode ? (back ? 'walkBack' : 'walkSaber') : 'walk') ?? 0, this.jkaMode ? 1.2 : 0.8);
     else if (this.jkaMode && back) target = THREE.MathUtils.clamp(rig.naturalSpeed('runBack') ?? base, base * 0.5, base * BLOCK_RUN_SCALE);
     // Running with the block held: the saber run's own pace, within a band under the full run.
@@ -1079,7 +1089,6 @@ export class Player {
     p.rightArm.rotation.z = -0.2;
     p.hips.position.y = 0.55;
     p.torso.rotation.x = 0.25;
-    for (const f of p.flames) f.visible = false;
   }
 
   private animate(dt: number): void {
@@ -1127,9 +1136,5 @@ export class Player {
       p.torso.rotation.y += (0 - p.torso.rotation.y) * k;
     }
 
-    for (const f of p.flames) {
-      f.visible = this.jetThrust;
-      f.scale.y = 0.8 + Math.random() * 0.5;
-    }
   }
 }

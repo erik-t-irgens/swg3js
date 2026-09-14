@@ -28,17 +28,15 @@ export class BountyHunterKit implements Kit {
   readonly slots: KitSlot[] = [
     { key: '1', name: 'Thermal Detonator', cost: '3s' },
     { key: '2', name: 'Stim Pack', cost: '12s' },
-    { key: 'Space', name: 'Jetpack', cost: 'fuel' },
   ];
   readonly help = [
-    '<b>LMB</b> fire the blaster (hold) · <b>RMB</b> rapid fire, less accurate · bolts fly at 58 m/s and can be sidestepped · <b>Space</b> in the air: jetpack',
+    '<b>LMB</b> fire the blaster (hold): from the hip it scatters a little · <b>RMB</b> hold to aim: a true shot, the camera in close · bolts fly at 58 m/s and can be sidestepped',
     '<b>1</b> Thermal Detonator · <b>2</b> Stim Pack',
   ];
-  readonly resource: Resource = { label: 'Fuel', value: 100, max: 100 };
+  readonly resource: Resource | null = null;
   private fireCd = 0;
   private detCd = 0;
   private stimCd = 0;
-  private jetOn = false;
   private readonly detonators: Detonator[] = [];
   private readonly detGeo = new THREE.SphereGeometry(0.16, 10, 8);
   private readonly detMat = new THREE.MeshStandardMaterial({ color: 0x3a3f45, roughness: 0.4, metalness: 0.7 });
@@ -46,8 +44,8 @@ export class BountyHunterKit implements Kit {
 
   constructor(private readonly scene: THREE.Scene) {}
 
-  slotActive(i: number): boolean {
-    return i === 2 && this.jetOn;
+  slotActive(): boolean {
+    return false;
   }
 
   slotCooldown(i: number): number {
@@ -58,18 +56,17 @@ export class BountyHunterKit implements Kit {
 
   update(ctx: KitContext): void {
     const { dt, input, player, world, cam, physics, effects } = ctx;
-    const res = this.resource;
     const onFoot = !player.mounted;
     this.fireCd = Math.max(0, this.fireCd - dt);
     this.detCd = Math.max(0, this.detCd - dt);
     this.stimCd = Math.max(0, this.stimCd - dt);
 
-    // Blaster: a bolt from the muzzle towards whatever the crosshair is on (the E-11's primary
-    // trigger is slow and true; the alternate trigger fires fast with some scatter).
+    // Blaster: a bolt from the muzzle towards whatever the crosshair is on. Aimed (right mouse
+    // held) it flies true; from the hip it scatters as the E-11's rapid trigger does.
     const primary = input.held('attack');
-    const rapid = !primary && input.held('altAttack');
-    if (onFoot && (primary || rapid) && this.fireCd <= 0) {
-      this.fireCd = primary ? BLASTER.fireTime : BLASTER.altFireTime;
+    const rapid = primary && !player.aiming;
+    if (onFoot && primary && this.fireCd <= 0) {
+      this.fireCd = BLASTER.fireTime;
       cam.camera.getWorldDirection(dir);
       from.copy(cam.camera.position);
       const ray = new RAPIER.Ray(from, dir);
@@ -88,18 +85,8 @@ export class BountyHunterKit implements Kit {
       }
       ctx.bolts.fire(tmp, aimDir, { owner: 'player', exclude: player.body });
       effects.flash(tmp, 0xff6a3a, 8, 6, 0.08);
+      player.shotFired();
     }
-
-    // Jetpack: hold Space while airborne.
-    const g = world.planet.gravity;
-    this.jetOn = onFoot && !player.noclip && input.held('jump') && !player.grounded && res.value > 0;
-    if (this.jetOn) {
-      player.vel.y = Math.min(11, player.vel.y + (g + 16) * dt);
-      res.value -= 30 * dt;
-    } else if (player.grounded || player.mounted) {
-      res.value = Math.min(res.max, res.value + 22 * dt);
-    }
-    player.jetThrust = this.jetOn;
 
     // 1: Thermal Detonator
     if (onFoot && input.pressedAction('slot1') && this.detCd <= 0) {

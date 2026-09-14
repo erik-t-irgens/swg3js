@@ -17,6 +17,9 @@ export class ThirdPersonCamera {
   distance = 7;
   /** Zoomed in past the character: first person, character hidden. */
   firstPerson = false;
+  /** Aiming a blaster: the camera comes in over the shoulder and the view narrows. */
+  aim = false;
+  private aimBlend = 0;
   private readonly focus = new THREE.Vector3();
   private readonly desired = new THREE.Vector3();
   private readonly dir = new THREE.Vector3();
@@ -55,7 +58,13 @@ export class ThirdPersonCamera {
       return;
     }
 
-    let dist = this.distance;
+    this.aimBlend += ((this.aim ? 1 : 0) - this.aimBlend) * 0.15;
+    const fov = 60 - 14 * this.aimBlend;
+    if (Math.abs(this.camera.fov - fov) > 0.01) {
+      this.camera.fov = fov;
+      this.camera.updateProjectionMatrix();
+    }
+    let dist = this.distance * (1 - 0.45 * this.aimBlend);
     this.desired.copy(this.dir).multiplyScalar(dist).add(this.focus);
     if (blocked) {
       // Pull the camera in front of whatever it would cut through: walls, props, ground.

@@ -317,6 +317,11 @@ class App {
         this.player.heal(this.player.maxHp);
         return this.player.hp;
       },
+      /** The blaster in hand, 'pistol' or 'rifle': which of the game's carries play. */
+      gun: (kind?: 'pistol' | 'rifle') => {
+        if (kind) this.player.gunKind = kind;
+        return { kind: this.player.gunKind, aiming: this.player.aiming, ready: this.player.gunReady, sinceShot: Number(this.player.sinceShot.toFixed(1)), clips: this.player.rig?.clipsMatching(/pistol|rifle/) ?? [] };
+      },
       /** The saber defence rank (1..3): how bolts are turned away. */
       saberDefense: (rank?: number) => {
         if (rank !== undefined) this.player.saberDefense = Math.max(1, Math.min(3, Math.round(rank)));
@@ -324,7 +329,7 @@ class App {
       },
       player: () => {
         const p = this.player;
-        return { hp: Number(p.hp.toFixed(1)), blocking: p.blocking, jkaMode: p.jkaMode, rig: p.rig?.describe() ?? null, pos: p.pos.toArray().map((v) => Number(v.toFixed(2))), camera: this.cam.camera.position.toArray().map((v) => Number(v.toFixed(2))), vel: p.vel.toArray().map((v) => Number(v.toFixed(2))), grounded: p.grounded, heading: Number(((p.heading * 180) / Math.PI).toFixed(0)), cameraYaw: Number(((Math.atan2(this.cam.camera.getWorldDirection(new THREE.Vector3()).x, this.cam.camera.getWorldDirection(new THREE.Vector3()).z) * 180) / Math.PI).toFixed(0)), swimming: p.swimming, submerged: p.submerged, water: this.world.terrain.waterHeightAt(p.pos.x, p.pos.z), ground: this.world.terrain.heightAt(p.pos.x, p.pos.z), captured: this.input.captured };
+        return { hp: Number(p.hp.toFixed(1)), blocking: p.blocking, aiming: p.aiming, gunReady: p.gunReady, jkaMode: p.jkaMode, rig: p.rig?.describe() ?? null, pos: p.pos.toArray().map((v) => Number(v.toFixed(2))), camera: this.cam.camera.position.toArray().map((v) => Number(v.toFixed(2))), vel: p.vel.toArray().map((v) => Number(v.toFixed(2))), grounded: p.grounded, heading: Number(((p.heading * 180) / Math.PI).toFixed(0)), cameraYaw: Number(((Math.atan2(this.cam.camera.getWorldDirection(new THREE.Vector3()).x, this.cam.camera.getWorldDirection(new THREE.Vector3()).z) * 180) / Math.PI).toFixed(0)), swimming: p.swimming, submerged: p.submerged, water: this.world.terrain.waterHeightAt(p.pos.x, p.pos.z), ground: this.world.terrain.heightAt(p.pos.x, p.pos.z), captured: this.input.captured };
       },
     };
 
@@ -347,7 +352,7 @@ class App {
         </div>
         <div class="class-pick">
           <button class="enter" data-class="jedi">Enter as Jedi<small>Lightsaber, Force powers</small></button>
-          <button class="enter" data-class="bounty_hunter">Enter as Bounty Hunter<small>Blaster rifle, jetpack, detonators</small></button>
+          <button class="enter" data-class="bounty_hunter">Enter as Bounty Hunter<small>Blaster rifle, detonators</small></button>
         </div>
         <button class="resume hidden">Resume</button>
       </div>`;
@@ -391,7 +396,6 @@ class App {
     this.kit = id === 'jedi' ? new JediKit(this.scene) : new BountyHunterKit(this.scene);
     this.player.setClass(id);
     this.player.speedMultiplier = 1;
-    this.player.jetThrust = false;
     this.hud.setKit(this.kit);
     this.updateUrl();
   }

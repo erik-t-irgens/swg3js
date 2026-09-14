@@ -48,7 +48,8 @@ export interface Kit {
   readonly name: string;
   readonly slots: KitSlot[];
   readonly help: string[];
-  readonly resource: Resource;
+  /** The pool the abilities draw on, shown as the second bar; a kit without one shows none. */
+  readonly resource: Resource | null;
   slotActive(index: number): boolean;
   /** 0 = ready, 1 = just used. */
   slotCooldown(index: number): number;
