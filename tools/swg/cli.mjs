@@ -7,7 +7,7 @@
 //   node tools/swg/cli.mjs extract <swg-dir> <path-in-archive> <out-file>
 //   node tools/swg/cli.mjs dump <file.iff> | <swg-dir> <path-in-archive>   print an IFF tree
 //   node tools/swg/cli.mjs weapons <swg-dir> <out-dir> [--limit=N]       every weapon the game can hold, with its class, under <out-dir>/weapons
-//   node tools/swg/cli.mjs ships <swg-dir> <out-dir> [--limit=N]         every ship a player can fly, with its interior when it has one, under <out-dir>/ships
+//   node tools/swg/cli.mjs ships <swg-dir> <out-dir> [--limit=N] [--match=yacht]   every ship a player can fly, with its interior when it has one, under <out-dir>/ships
 //   node tools/swg/cli.mjs species <swg-dir> <out-dir> [--only=human,twilek_female] [--var=...]   every playable species and gender as parts, with characters/index.json for the character creator
 //   node tools/swg/cli.mjs ash <swg-dir> <appearance/x.sat | object/.../shared_x.iff> [--find=pistol]   the animation state hierarchy behind a skeletal appearance, with its strings
 //   node tools/swg/cli.mjs shader <swg-dir> <shader/x.sht>        list a shader's texture slots
@@ -1856,8 +1856,12 @@ switch (cmd) {
     break;
   }
   case 'list': {
+    // <swg-dir> <text>: every mounted file whose name contains the text, with the archive it comes from.
     const vfs = mount(pos[1]);
-    for (const name of vfs.list(pos[2])) console.log(name);
+    for (const name of vfs.list(pos[2])) {
+      const held = vfs.versions(name);
+      console.log(`${name}${held.length ? `  (${held[held.length - 1].archive})` : ''}`);
+    }
     break;
   }
   case 'extract': {
@@ -2587,12 +2591,20 @@ switch (cmd) {
       if (!def || def.failed) return { skip: def?.failed ?? 'failed' };
       return { model: id, file: def.file, bounds: def.bounds };
     };
+    // The interior the template names, whether or not the archives hold it: a missing one is
+    // reported as such rather than passed over as if the ship had none.
     const interiorOf = (template) => {
       const pob = resolveTemplateString(vfs, template, ['interiorLayoutFileName', 'interiorLayoutFilename'], cache);
-      return pob && vfs.has(pob) ? pob : null;
+      if (!pob) return null;
+      return pob.replace(/\\/g, '/').replace(/^\//, '');
     };
     const convertInterior = (template, pob) => {
       const id = `${familyOf(pob)}_interior`;
+      if (!vfs.has(pob)) {
+        // Which archive the file is in, or would be: the retail filter can leave one out.
+        const held = vfs.versions(pob);
+        return { skip: `${pob} not in the mounted archives${held.length ? ` (held by ${held.map((v) => v.archive).join(', ')})` : ''}` };
+      }
       if (!models.has(id)) {
         try {
           const conv = convertOne(vfs, pob, join(outDir, `${id}.glb`));
@@ -2606,7 +2618,9 @@ switch (cmd) {
       return { file: def.file, cells: def.cells?.length ?? 0 };
     };
     const limit = options.limit ? Number(options.limit) : Infinity;
-    const { ships, skipped } = buildShips(galleryTemplates(vfs, 'object/ship/player/'), { convert, interiorOf, convertInterior }, { log: console.log, limit });
+    const match = options.match ? new RegExp(options.match, 'i') : null;
+    const templates = galleryTemplates(vfs, 'object/ship/player/').filter((t) => !match || match.test(t));
+    const { ships, skipped } = buildShips(templates, { convert, interiorOf, convertInterior }, { log: console.log, limit });
     const manifest = { classes: SHIP_CLASSES, ships, skipped, models: [...models.values()].filter((m) => !m.failed) };
     writeFileSync(join(outDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
     const withInterior = ships.filter((sh) => sh.interior && !sh.interior.failed).length;
