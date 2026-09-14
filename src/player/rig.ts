@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { Character, type GripAxes } from './character';
 
-export type RigState = 'idle' | 'walk' | 'run' | 'air' | 'seated' | 'swim' | 'float' | 'crouch' | 'crouchWalk' | 'crouchWalkBack' | 'stance' | 'strafeLeft' | 'strafeRight' | 'runBack' | 'walkBack' | 'runSaber' | 'walkSaber' | 'gunIdle' | 'gunWalk' | 'gunRun' | 'gunReadyIdle' | 'gunReadyWalk' | 'gunReadyRun' | 'gunAimIdle' | 'gunAimWalk' | 'gunAimRun' | 'prone' | 'proneMove' | 'gunProneIdle' | 'gunProneMove' | 'gunProneReadyIdle' | 'gunProneReadyMove' | 'gunProneAimIdle' | 'gunProneAimMove';
+export type RigState = 'idle' | 'walk' | 'run' | 'air' | 'seated' | 'swim' | 'float' | 'crouch' | 'crouchWalk' | 'crouchWalkBack' | 'stance' | 'strafeLeft' | 'strafeRight' | 'runBack' | 'walkBack' | 'runSaber' | 'walkSaber' | 'gunIdle' | 'gunWalk' | 'gunRun' | 'gunReadyIdle' | 'gunReadyWalk' | 'gunReadyRun' | 'gunAimIdle' | 'gunAimWalk' | 'gunAimRun' | 'kneel' | 'prone' | 'proneMove' | 'gunProneIdle' | 'gunProneMove' | 'gunProneReadyIdle' | 'gunProneReadyMove' | 'gunProneAimIdle' | 'gunProneAimMove';
 
 /** Clip names used for each state, in preference order (placeholder rig names, then the game's); a pattern matches any clip. */
 const STATE_CLIPS: Record<RigState, (string | RegExp)[]> = {
@@ -33,12 +33,16 @@ const STATE_CLIPS: Record<RigState, (string | RegExp)[]> = {
   gunIdle: [/^loop_rifle:speed0/, /^loop_pistol_standing:speed0/, 'idle', 'stand'],
   gunWalk: [/^loop_rifle:speed1/, /^loop_pistol_standing:speed1/, 'walk', 'loop_walk'],
   gunRun: [/^loop_rifle:speed2/, /^loop_pistol_standing:speed2/, 'run', 'loop_run'],
-  gunReadyIdle: [/^loop_rifle_combat(_standing)?:speed0/, /^loop_pistol_combat(_standing)?:speed0/, /^loop_combat_standing:speed0/, 'idle_combat', /^loop_rifle:speed0/, 'idle'],
-  gunReadyWalk: [/^loop_rifle_combat(_standing)?:speed1/, /^loop_pistol_combat(_standing)?:speed1/, /^loop_combat_standing:speed1/, 'walk_combat', /^loop_rifle:speed1/, 'walk'],
-  gunReadyRun: [/^loop_rifle_combat(_standing)?:speed2/, /^loop_pistol_combat(_standing)?:speed2/, /^loop_combat_standing:speed2/, 'run_combat', /^loop_rifle:speed2/, 'run'],
-  gunAimIdle: [/^loop_rifle_combat(_standing)?_aimed:speed0/, /^loop_pistol_combat(_standing)?_aimed:speed0/, /^loop_rifle_combat(_standing)?:speed0/, /^loop_pistol_combat(_standing)?:speed0/, 'idle_combat', 'idle'],
-  gunAimWalk: [/^loop_rifle_combat(_standing)?_aimed:speed1/, /^loop_pistol_combat(_standing)?_aimed:speed1/, /^loop_rifle_combat(_standing)?:speed1/, /^loop_pistol_combat(_standing)?:speed1/, 'walk_combat', 'walk'],
-  gunAimRun: [/^loop_rifle_combat(_standing)?_aimed:speed2/, /^loop_pistol_combat(_standing)?_aimed:speed2/, /^loop_rifle_combat(_standing)?:speed2/, /^loop_pistol_combat(_standing)?:speed2/, 'run_combat', 'run'],
+  // The combat carry is the game's one combat stance for every weapon (loop_combat_standing); there
+  // is no aimed loop: aiming holds the last frame of the transition into the aimed pose on the upper body.
+  gunReadyIdle: [/^loop_combat_standing:speed0$/, /^loop_combat_standing:speed0/, 'idle_combat', /^loop_rifle:speed0/, 'idle'],
+  gunReadyWalk: [/^loop_combat_standing:speed1$/, /^loop_combat_standing:speed1/, 'walk_combat', /^loop_rifle:speed1/, 'walk'],
+  gunReadyRun: [/^loop_combat_standing:speed2$/, /^loop_combat_standing:speed2/, 'run_combat', /^loop_rifle:speed2/, 'run'],
+  gunAimIdle: [/^loop_combat_standing:speed0$/, /^loop_combat_standing:speed0/, 'idle_combat', 'idle'],
+  gunAimWalk: [/^loop_combat_standing:speed1$/, /^loop_combat_standing:speed1/, 'walk_combat', 'walk'],
+  gunAimRun: [/^loop_combat_standing:speed2$/, /^loop_combat_standing:speed2/, 'run_combat', 'run'],
+  // Kneeling (V): the game's own; a blaster has its kneel through `prefer` (loop_pistol_kneeling, loop_rifle_kneeling).
+  kneel: ['loop_kneeling', 'BOTH_CROUCH1IDLE', 'sneak_pose', 'idle'],
   // Lying prone (Z): the game's own, still and crawling; a blaster has its own relaxed, combat and aimed prone loops.
   prone: [/^loop_prone:speed0/, /^loop_prone:speed1/, 'BOTH_CROUCH1IDLE', 'idle'],
   proneMove: [/^loop_prone:speed1/, /^loop_prone:speed0/, 'BOTH_CROUCH1WALK', 'walk'],
@@ -49,6 +53,30 @@ const STATE_CLIPS: Record<RigState, (string | RegExp)[]> = {
   gunProneAimIdle: [/^loop_rifle_combat_prone_aimed:speed0/, /^loop_pistol_combat_prone_aimed:speed0/, /^loop_rifle_combat_prone_aimed:speed1/, /^loop_pistol_combat_prone_aimed:speed1/, /^loop_prone:speed0/, 'idle'],
   gunProneAimMove: [/^loop_rifle_combat_prone_aimed:speed1/, /^loop_pistol_combat_prone_aimed:speed1/, /^loop_prone:speed1/, 'walk'],
 };
+
+/** The game's additive clips: add_pistol_fire_N and kin, deltas meant to play over whatever pose is up. */
+export function isAdditive(name: string): boolean {
+  return /^add_/.test(name);
+}
+
+/**
+ * Turn a clip that was baked over the rest pose into the delta from it, in place, so three.js can
+ * add it to whatever the body is doing (AdditiveAnimationBlendMode). The reference is each bone's
+ * rest transform, which is what the skinned model's nodes hold before anything plays.
+ */
+export function additiveAgainstRest(clip: THREE.AnimationClip, bones: Map<string, THREE.Bone>): THREE.AnimationClip {
+  const tracks: THREE.KeyframeTrack[] = [];
+  for (const t of clip.tracks) {
+    const { nodeName, propertyName } = THREE.PropertyBinding.parseTrackName(t.name);
+    const bone = nodeName ? bones.get(nodeName) : undefined;
+    if (!bone) continue;
+    if (propertyName === 'quaternion') tracks.push(new THREE.QuaternionKeyframeTrack(t.name, [0], bone.quaternion.toArray()));
+    else if (propertyName === 'position') tracks.push(new THREE.VectorKeyframeTrack(t.name, [0], bone.position.toArray()));
+    else if (propertyName === 'scale') tracks.push(new THREE.VectorKeyframeTrack(t.name, [0], bone.scale.toArray()));
+  }
+  THREE.AnimationUtils.makeClipAdditive(clip, 0, new THREE.AnimationClip('rest', 1, tracks));
+  return clip;
+}
 
 /** Natural travel speed of the placeholder rig's locomotion clips, in m/s, used to scale playback. */
 const DEFAULT_CLIP_SPEED: Partial<Record<RigState, number>> = { walk: 1.5, run: 5.5, swim: 2.5, crouchWalk: 2.2, strafeLeft: 4.5, strafeRight: 4.5, runBack: 4, walkBack: 1.5, runSaber: 6.3, walkSaber: 2, crouchWalkBack: 2, gunWalk: 1.5, gunRun: 5.5, gunReadyWalk: 1.5, gunReadyRun: 5.5, gunAimWalk: 1.5, gunAimRun: 5.5, proneMove: 0.6, gunProneMove: 0.6, gunProneReadyMove: 0.6, gunProneAimMove: 0.6 };
@@ -107,6 +135,8 @@ export class CharacterRig {
   private readonly materials: THREE.MeshStandardMaterial[] = [];
   private readonly clipSpeeds: Record<string, number>;
   private readonly hold: Set<string>;
+  /** Clips that add to the pose underneath instead of replacing it (the game's add_ shots). */
+  private readonly additive = new Set<string>();
   readonly grip: GripAxes | null;
   readonly partialClips: Record<string, string[]>;
   /** A clip to play for a state ahead of its table, when the rig has it: the style's stance, the jump's direction, the style's run. */
@@ -157,12 +187,23 @@ export class CharacterRig {
     this.scale = options.scale ?? 1;
     this.clipSpeeds = options.clipSpeeds ?? {};
     this.hold = new Set(options.hold ?? []);
+    // The game's transitions into an aimed pose end in it and have no loop of their own: held at their end.
+    for (const clip of clips) if (/^trn_.*_aimed$/.test(clip.name)) this.hold.add(clip.name);
     this.grip = options.grip ?? null;
     this.partialClips = options.partialClips ?? {};
     this.mixer = new THREE.AnimationMixer(scene);
-    for (const clip of clips) this.actions.set(clip.name, this.mixer.clipAction(clip));
     scene.traverse((o) => {
       if (o instanceof THREE.Bone) this.bones.set(o.name, o);
+    });
+    for (const clip of clips) {
+      // The game's add_ clips (a blaster's shots) are deltas on whatever plays: made additive against the rest pose.
+      if (isAdditive(clip.name)) {
+        additiveAgainstRest(clip, this.bones);
+        this.additive.add(clip.name);
+        this.actions.set(clip.name, this.mixer.clipAction(clip, undefined, THREE.AdditiveAnimationBlendMode));
+      } else this.actions.set(clip.name, this.mixer.clipAction(clip));
+    }
+    scene.traverse((o) => {
       if (o instanceof THREE.SkinnedMesh || o instanceof THREE.Mesh) {
         o.castShadow = true;
         o.frustumCulled = false;
@@ -275,13 +316,25 @@ export class CharacterRig {
 
   /** The clip posing the arms right now: a shot on the upper body, a one-off, the upper layer, else the state clip. */
   armSource(): string {
-    const a = this.upperShot ?? this.override ?? this.upper ?? this.current;
+    const shot = this.upperShot && !this.additive.has(this.upperShot.getClip().name.replace(/^(upper|lower):/, '')) ? this.upperShot : null;
+    const a = shot ?? this.override ?? this.upper ?? this.current;
     return a ? a.getClip().name.replace(/^(upper|lower):/, '') : '';
   }
 
   /** Whether a one-off clip is still playing. */
   get overriding(): boolean {
     return this.override !== null;
+  }
+
+  /** Whether the one-off clip playing is one of Jedi Academy's (a swing, a flip), not a game transition. */
+  get overridingJka(): boolean {
+    return this.override !== null && this.override.getClip().name.startsWith('BOTH_');
+  }
+
+  /** The first of these clips the rig has, or null. */
+  firstOf(...names: string[]): string | null {
+    for (const n of names) if (this.actions.has(n)) return n;
+    return null;
   }
 
   /**
@@ -433,8 +486,8 @@ export class CharacterRig {
   }
 
   /** What plays now, for the console. */
-  describe(): { state: RigState | null; clip: string | null; upper: string | null; override: string | null } {
-    return { state: this.state, clip: this.current?.getClip().name ?? null, upper: this.upperName, override: this.override?.getClip().name ?? null };
+  describe(): { state: RigState | null; clip: string | null; upper: string | null; override: string | null; shot: string | null } {
+    return { state: this.state, clip: this.current?.getClip().name ?? null, upper: this.upperName, override: this.override?.getClip().name ?? null, shot: this.upperShot?.getClip().name.replace(/^upper:/, '') ?? null };
   }
 
   /** The bones from the lowest spine bone up: the torso, arms and head. */
@@ -461,7 +514,7 @@ export class CharacterRig {
     const own = this.partialClips[clip];
     const upper = own ? new Set(own) : this.upperBones();
     const tracks = src.tracks.filter((t) => upper.has(THREE.PropertyBinding.parseTrackName(t.name).nodeName ?? '') === (half === 'upper'));
-    action = this.mixer.clipAction(new THREE.AnimationClip(key, src.duration, tracks));
+    action = this.mixer.clipAction(new THREE.AnimationClip(key, src.duration, tracks), undefined, this.additive.has(clip) ? THREE.AdditiveAnimationBlendMode : THREE.NormalAnimationBlendMode);
     this.halves.set(key, action);
     return action;
   }

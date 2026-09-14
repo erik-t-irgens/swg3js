@@ -31,7 +31,7 @@ export class BountyHunterKit implements Kit {
   ];
   readonly help = [
     '<b>LMB</b> fire the blaster (hold): from the hip it scatters a little · <b>RMB</b> hold to aim: a true shot, the camera in close · bolts fly at 58 m/s and can be sidestepped',
-    '<b>1</b> Thermal Detonator · <b>2</b> Stim Pack · <b>K</b> pistol or rifle · <b>Z</b> prone (the prone carries and shots)',
+    '<b>1</b> Thermal Detonator · <b>2</b> Stim Pack · <b>K</b> pistol or rifle · <b>V</b> kneel and <b>Z</b> prone (steadier shots, their own carries)',
   ];
   readonly resource: Resource | null = null;
   /** Last gun change, for the HUD. */
@@ -86,7 +86,7 @@ export class BountyHunterKit implements Kit {
       if (aimDir.lengthSq() < 1 || aimDir.dot(dir) < 0.5) aimDir.copy(dir);
       aimDir.normalize();
       if (rapid) {
-        const s = (BLASTER.altSpread * Math.PI) / 180;
+        const s = (BLASTER.altSpread * player.postureSpread * Math.PI) / 180;
         side.crossVectors(aimDir, UP).normalize();
         lift.crossVectors(side, aimDir);
         aimDir.addScaledVector(side, Math.tan((Math.random() * 2 - 1) * s)).addScaledVector(lift, Math.tan((Math.random() * 2 - 1) * s)).normalize();

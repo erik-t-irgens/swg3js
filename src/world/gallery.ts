@@ -6,6 +6,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { markActor } from './portalRender';
+import { additiveAgainstRest, isAdditive } from '../player/rig';
 
 export interface GalleryClip {
   name: string;
@@ -205,13 +206,21 @@ export class Gallery {
     this.group.add(root);
     markActor(root);
     const mixer = new THREE.AnimationMixer(root);
-    if (s.clip.joints?.length) {
-      // Part of the skeleton only (a shot on the arms, a face): the idle underneath, the clip's own joints over it.
+    if (s.clip.joints?.length || isAdditive(clip.name)) {
+      // Part of the skeleton only (a shot on the arms, a face): the idle underneath, the clip's own joints over it;
+      // the game's add_ clips are deltas, added to the idle the way the game adds them to whatever plays.
       const idle = model.clips.get('idle') ?? [...model.clips.values()].find((c) => /^loop_stand|^idle|^loop_standing/.test(c.name));
       if (idle) mixer.clipAction(idle).setLoop(THREE.LoopRepeat, Infinity).play();
-      const own = new Set(s.clip.joints);
-      const layer = new THREE.AnimationClip(`layer:${clip.name}`, clip.duration, clip.tracks.filter((t) => own.has(THREE.PropertyBinding.parseTrackName(t.name).nodeName ?? '')));
-      mixer.clipAction(layer).setLoop(THREE.LoopRepeat, Infinity).play();
+      const own = new Set(s.clip.joints ?? []);
+      const layer = new THREE.AnimationClip(`layer:${clip.name}`, clip.duration, own.size ? clip.tracks.filter((t) => own.has(THREE.PropertyBinding.parseTrackName(t.name).nodeName ?? '')) : clip.tracks.slice());
+      if (isAdditive(clip.name)) {
+        const bones = new Map<string, THREE.Bone>();
+        root.traverse((o) => {
+          if (o instanceof THREE.Bone) bones.set(o.name, o);
+        });
+        additiveAgainstRest(layer, bones);
+        mixer.clipAction(layer, undefined, THREE.AdditiveAnimationBlendMode).setLoop(THREE.LoopRepeat, Infinity).play();
+      } else mixer.clipAction(layer).setLoop(THREE.LoopRepeat, Infinity).play();
     } else {
       const action = mixer.clipAction(clip);
       action.setLoop(THREE.LoopRepeat, Infinity).play();

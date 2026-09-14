@@ -227,8 +227,12 @@ export class Player {
   hasGunClips = false;
   /** Lying prone (Z toggles it): a crawl, the blaster's prone carries; a saber swing or a jump gets up. */
   prone = false;
-  /** The jump key stood the body up from prone and is still down: no jump until it is pressed again. */
+  /** Kneeling (V toggles it): still, the blaster's kneel; moving, the crouch key, a jump or a saber swing gets up. */
+  kneeling = false;
+  /** The jump key stood the body up from prone or a kneel and is still down: no jump until it is pressed again. */
   private jumpLatched = false;
+  /** Aiming last frame, to play the game's transition out of the aimed pose when it ends. */
+  private wasAiming = false;
   /**
    * Calibration for the blade's angle in the hand, in degrees, set from the console: `stanceRoll`
    * turns the hilt about the forearm in Jedi Academy's held poses only (stances, saber runs), and
@@ -528,6 +532,34 @@ export class Player {
     }
   }
 
+  /** How much a posture steadies a shot from the hip: prone most, then a kneel, then a crouch. */
+  get postureSpread(): number {
+    return this.prone ? 0.35 : this.kneeling ? 0.5 : this.crouching ? 0.75 : 1;
+  }
+
+  /**
+   * The game's one-shot between two postures (standing, crouched, kneeling, prone), when it has one:
+   * a blaster in combat has its own set, aimed or not. A crouch's only plays standing still, and not
+   * while Jedi Academy's crouch is in charge.
+   */
+  private postureTransition(was: { prone: boolean; kneel: boolean; crouch: boolean }, moving: boolean): void {
+    const rig = this.rig;
+    if (!rig) return;
+    const from = was.prone ? 'prone' : was.kneel ? 'kneeling' : was.crouch ? 'crouched' : 'standing';
+    const to = this.prone ? 'prone' : this.kneeling ? 'kneeling' : this.crouching ? 'crouched' : 'standing';
+    if (from === to) return;
+    if ((from === 'crouched' || to === 'crouched') && (moving || this.jkaMode)) return;
+    const names: string[] = [];
+    const gun = this.classId === 'bounty_hunter' && this.hasGunClips && this.gunReady ? this.gunKind : null;
+    if (gun && from !== 'crouched' && to !== 'crouched') {
+      if (this.aiming) names.push(`trn_${gun}_combat_${from}_aimed_to_${gun}_combat_${to}_aimed`);
+      names.push(`trn_${gun}_combat_${from}_to_${gun}_combat_${to}`);
+    }
+    names.push(`trn_${from}_to_${to}`);
+    const clip = rig.firstOf(...names);
+    if (clip) rig.play(clip, { fadeIn: 0.08 });
+  }
+
   /** Size the placeholder gun to its kind: a pistol is a stub of the rifle until the weapons are converted. */
   fitGun(): void {
     const s = this.gunKind === 'pistol' ? 0.45 : 1;
@@ -544,9 +576,10 @@ export class Player {
     this.sinceShot = 0;
     const rig = this.rig;
     if (!rig || !this.hasGunClips) return;
+    // Prone has its own shots; standing and kneeling use the game's additive shots (add_<kind>_fire_N), a recoil on the arms over whatever pose is up.
     const kind = this.gunKind;
-    const shots = this.prone ? rig.clipsMatching(new RegExp(`^${kind}_combat_prone_fire_\\d+$`)) : rig.clipsMatching(new RegExp(this.aiming ? `^${kind}_combat(_standing)?_aimed_fire_\\d+$` : `^${kind}_combat(_standing)?_fire_\\d+$`));
-    const pool = shots.length ? shots : rig.clipsMatching(new RegExp(`^${kind}_combat(_standing)?(_aimed)?_fire_\\d+$`));
+    const shots = this.prone ? rig.clipsMatching(new RegExp(`^${kind}_combat_prone_fire_\\d+$`)) : rig.clipsMatching(new RegExp(`^add_${kind}_fire_\\d+$`));
+    const pool = shots.length ? shots : rig.clipsMatching(new RegExp(`^(add_)?${kind}_(combat_)?(prone_)?fire_\\d+$`));
     if (pool.length) rig.playUpper(pool[Math.floor(Math.random() * pool.length)], 0.04);
   }
 
@@ -724,7 +757,7 @@ export class Player {
     this.sinceShot += dt;
     cam.aim = this.aiming;
     const fighting = this.swing >= 0 || this.saber.busy || this.thrown.inFlight || this.jka.inSpecialJump || this.jka.rolling;
-    this.jkaMode = this.hasJkaClips && (this.blocking || fighting || !!this.rig?.overriding);
+    this.jkaMode = this.hasJkaClips && (this.blocking || fighting || !!this.rig?.overridingJka);
 
     if (this.mounted) {
       this.rig?.stopOverride();
@@ -762,15 +795,26 @@ export class Player {
 
     const walking = input.held('walk');
     this.walkKey = walking;
-    // Prone: Z toggles it on the ground; jumping, swimming or a saber swing brings the body up.
-    if (input.pressedAction('prone') && !this.mounted && !this.noclip) this.prone = !this.prone;
+    // Postures: Z toggles prone and V kneeling, on the ground; jumping, swimming or a saber swing brings the
+    // body up, and a kneel also ends when you move or crouch. The game's own transitions play between them.
+    const was = { prone: this.prone, kneel: this.kneeling, crouch: this.crouching };
+    const onGround = !this.mounted && !this.noclip && !this.swimming;
+    if (input.pressedAction('prone') && onGround) this.prone = !this.prone;
+    if (input.pressedAction('kneel') && onGround) {
+      this.kneeling = !this.kneeling;
+      if (this.kneeling) this.prone = false;
+    }
+    if (this.prone) this.kneeling = false;
     // Getting up on the jump key is only that: the jump itself waits for the key to be let go and pressed again.
-    if (this.prone && input.pressedAction('jump')) this.jumpLatched = true;
+    if ((this.prone || this.kneeling) && input.pressedAction('jump')) this.jumpLatched = true;
     if (!input.held('jump')) this.jumpLatched = false;
     const wasProne = this.jumpLatched;
-    if (this.prone && (this.swimming || input.pressedAction('jump') || (this.classId === 'jedi' && (input.pressedAction('attack') || input.pressedAction('block'))))) this.prone = false;
-    this.crouching = !this.swimming && !this.prone && input.held('crouch');
-    this.setCrouchCollider((this.crouching || this.prone) && this.grounded);
+    const getsUp = this.swimming || input.pressedAction('jump') || (this.classId === 'jedi' && (input.pressedAction('attack') || input.pressedAction('block')));
+    if (this.prone && getsUp) this.prone = false;
+    if (this.kneeling && (getsUp || moving || input.held('crouch'))) this.kneeling = false;
+    this.crouching = !this.swimming && !this.prone && !this.kneeling && input.held('crouch');
+    this.setCrouchCollider((this.crouching || this.prone || this.kneeling) && this.grounded);
+    if (this.grounded && !this.swimming) this.postureTransition(was, moving);
     let speed = (walking ? WALK_SPEED : RUN_SPEED) * this.speedMultiplier * (this.crouching && this.grounded ? 0.5 : 1);
 
     // Water: the surface here, and how deep the body sits in it. Swimming starts when the
@@ -1021,16 +1065,25 @@ export class Player {
     rig.prefer('walkSaber', style === 'staff' ? 'BOTH_WALK_STAFF' : style === 'dual' ? 'BOTH_WALK_DUAL' : 'BOTH_WALK2');
     // The kind of blaster picks its carries: the pistol's stand at the side, the rifle's across the chest.
     const gun = this.gunKind;
+    const armed = this.classId === 'bounty_hunter' && this.hasGunClips;
     for (const [state, n] of [['Idle', 0], ['Walk', 1], ['Run', 2]] as const) {
       rig.prefer(`gun${state}`, new RegExp(gun === 'pistol' ? `^loop_pistol_standing:speed${n}` : `^loop_rifle:speed${n}`));
-      rig.prefer(`gunReady${state}`, new RegExp(`^loop_${gun}_combat(_standing)?:speed${n}`));
-      rig.prefer(`gunAim${state}`, new RegExp(`^loop_${gun}_combat(_standing)?_aimed:speed${n}`));
     }
+    // The combat carry (loop_combat_standing) is the same for both; the game has one combat stance for every weapon.
     for (const [state, n] of [['Idle', 0], ['Move', 1]] as const) {
       rig.prefer(`gunProne${state}`, new RegExp(`^loop_${gun}_prone:speed${n}`));
       rig.prefer(`gunProneReady${state}`, new RegExp(`^loop_${gun}_combat_prone:speed${n}`));
       rig.prefer(`gunProneAim${state}`, new RegExp(`^loop_${gun}_combat_prone_aimed:speed${n}`));
     }
+    rig.prefer('kneel', armed ? new RegExp(`^loop_${gun}_kneeling`) : null);
+    // Aiming standing or kneeling has no loop of its own: the transition into the aimed pose is held
+    // at its end on the upper body over the carry's legs, and its inverse plays once when the aim ends.
+    const aimIn = armed && this.aiming && !this.prone ? rig.firstOf(...(this.kneeling ? [`trn_${gun}_combat_kneeling_to_${gun}_combat_kneeling_aimed`] : gun === 'pistol' ? ['trn_pistol_combat_to_pistol_combat_aimed'] : ['trn_rifle_a_standing_ready_to_aimed'])) : null;
+    if (armed && this.wasAiming && !this.aiming && !this.prone && !this.swimming) {
+      const out = rig.firstOf(...(this.kneeling ? [`trn_${gun}_combat_kneeling_aimed_to_${gun}_combat_kneeling`] : gun === 'pistol' ? ['trn_pistol_combat_standing_aimed_to_pistol_combat_standing'] : ['trn_rifle_a_standing_aimed_to_ready']));
+      if (out) rig.playUpper(out, 0.08);
+    }
+    this.wasAiming = this.aiming;
     if (this.mounted) rig.setState('seated');
     // Swimming with the block held: the stance on the torso and arms over the swimming legs.
     else if (this.swimming) rig.setState(moving || this.submerged ? 'swim' : 'float', speed, this.blocking && this.hasJkaClips ? stance : null);
@@ -1040,9 +1093,10 @@ export class Player {
     }
     else if (this.prone) {
       // Lying down: a blaster has its own prone carries, else the game's crawl.
-      if (this.classId === 'bounty_hunter' && this.hasGunClips) rig.setState(`${this.aiming ? 'gunProneAim' : this.gunReady ? 'gunProneReady' : 'gunProne'}${moving ? 'Move' : 'Idle'}` as RigState, speed);
+      if (armed) rig.setState(`${this.aiming ? 'gunProneAim' : this.gunReady ? 'gunProneReady' : 'gunProne'}${moving ? 'Move' : 'Idle'}` as RigState, speed);
       else rig.setState(moving ? 'proneMove' : 'prone', speed);
-    } else if (this.crouching) {
+    } else if (this.kneeling) rig.setState('kneel', 0, aimIn);
+    else if (this.crouching) {
       // Crouched: the game's own loop_crouched clips unless Jedi Academy's animations are in charge.
       const swg = !this.jkaMode && !!rig.clipMatching(/^loop_crouched:speed1/);
       rig.prefer('crouch', swg ? /^loop_crouched:speed0/ : null);
@@ -1057,10 +1111,10 @@ export class Player {
       // Standing with the block held: the style's stance; the arm out while the saber flies.
       rig.prefer('stance', this.thrown.inFlight ? 'BOTH_SABERPULL' : stance);
       rig.setState('stance');
-    } else if (this.classId === 'bounty_hunter' && this.hasGunClips) {
-      // The blaster carries: relaxed, combat after a shot, or aimed; each with its idle, walk and run.
+    } else if (armed) {
+      // The blaster carries: relaxed, combat after a shot, or aimed (the combat legs under the held aimed pose); each with its idle, walk and run.
       const carry = this.aiming ? 'gunAim' : this.gunReady ? 'gunReady' : 'gun';
-      rig.setState(`${carry}${!moving ? 'Idle' : running ? 'Run' : 'Walk'}` as RigState, speed);
+      rig.setState(`${carry}${!moving ? 'Idle' : running ? 'Run' : 'Walk'}` as RigState, speed, aimIn);
     } else if (!moving) rig.setState('idle');
     // Moving with the block held: Jedi Academy's saber run and walk; otherwise the game's own, saber lit or not.
     else if (this.jkaMode) rig.setState(running ? 'runSaber' : 'walkSaber', speed);
@@ -1068,13 +1122,13 @@ export class Player {
     rig.update(dt);
     this.group.updateMatrixWorld(true);
     // Always called: with no twist it puts the spine's clip pose back.
-    rig.twistTorso(rig.overriding ? 0 : this.torsoTwist);
+    rig.twistTorso(rig.overridingJka ? 0 : this.torsoTwist);
     // The hilt turns in the hand to whichever convention poses the arms: the game's own clips
     // hold it their way, Jedi Academy's the way its swings were made for.
     const jkaArms = rig.armSource().startsWith('BOTH_');
     this.gripBlend += ((jkaArms ? 1 : 0) - this.gripBlend) * Math.min(1, dt * 14);
     // The console's calibration: a turn about the forearm for every Jedi Academy clip, and one more for its held poses.
-    const roll = ((this.gripTune.jkaRoll + (jkaArms && !rig.overriding ? this.gripTune.stanceRoll : 0)) * Math.PI) / 180;
+    const roll = ((this.gripTune.jkaRoll + (jkaArms && !rig.overridingJka ? this.gripTune.stanceRoll : 0)) * Math.PI) / 180;
     gripQ.copy(this.saberQ.jka);
     if (roll !== 0) gripQ.premultiply(rollQ.setFromAxisAngle(forearmAxis.copy(this.forearm), roll));
     this.parts.saber.quaternion.slerpQuaternions(this.saberQ.swg, gripQ, this.gripBlend);
