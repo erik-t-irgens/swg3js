@@ -239,7 +239,41 @@ export class Garage {
       // A mount's saddle sits on its back, and it walks and runs with its own clips at their own pace.
       spec.seat = [0, bounds.max[1] * 0.92, (bounds.min[2] + bounds.max[2]) / 2];
     } else if (seat.point) spec.seat = [seat.point.x, seat.point.y, seat.point.z];
+    // The cockpit frame (the game's cockpit file): the instruments and canopy around the pilot,
+    // authored in the ship's own space, so it hangs on the model at its origin and lands in the
+    // canopy by itself. The game never drew a pilot in a fighter, so the seat comes from the
+    // frame: a little below and behind its middle. A ship flown from its rooms has a bridge, not a frame.
+    let frame: THREE.Object3D | null = null;
+    if (spec.ship && def.cockpit && !(def.cells ?? []).some((c) => c.index > 0)) {
+      try {
+        frame = (await this.model({ file: def.cockpit.file } as VehicleDef)).scene.clone();
+        frame.traverse((o) => {
+          o.userData.cockpit = true;
+          const m = o as THREE.Mesh;
+          if (m.isMesh) m.castShadow = false;
+        });
+        frame.position.copy(FRAME_NUDGE);
+        frame.visible = false;
+        model.add(frame);
+        model.updateMatrixWorld(true);
+        const box = new THREE.Box3().setFromObject(frame);
+        if (!box.isEmpty() && !seat.point) {
+          // The frame's middle in the hull's frame (the model carries the re-centring).
+          const middle = box.getCenter(new THREE.Vector3()).sub(model.getWorldPosition(new THREE.Vector3())).add(model.position);
+          spec.seat = [middle.x + SEAT_FROM_FRAME.x, middle.y + SEAT_FROM_FRAME.y, middle.z + SEAT_FROM_FRAME.z];
+          console.info(`garage: ${def.id} cockpit frame: middle at ${middle.toArray().map((n) => n.toFixed(2)).join(',')} in the hull's frame, the seat under it at ${spec.seat.map((n) => n.toFixed(2)).join(',')}`);
+        }
+      } catch (err) {
+        console.warn(`garage: ${def.id}: its cockpit frame did not load`, err);
+        frame = null;
+      }
+    }
     const v = new Vehicle(spec, model, physics, scene, x, y - bounds.min[1] + spec.hover, z, heading);
+    if (frame) {
+      v.cockpitFrame = frame;
+      const off = def.cockpit?.firstOffset;
+      if (off && off.length >= 3) v.cockpitOffset = [off[0], off[1], off[2]];
+    }
     v.hardpoints = hardpoints;
     model.traverse((o) => {
       if (o.userData.attachment === 'engine') {
@@ -251,32 +285,6 @@ export class Garage {
     // The cockpit view: the model's own point when it names one, else the seated pilot's eyes over the seat, else forward of the middle at eye height.
     // The cockpit view: the model's own point when it names one, else the seated pilot's eyes over the seat (a hardpoint's, or the kind's own place, where the rider is drawn).
     if (spec.ship) v.cockpit = seat.cockpit ? [seat.cockpit.x, seat.cockpit.y, seat.cockpit.z] : [spec.seat[0], spec.seat[1] + SEATED_EYE, spec.seat[2]];
-    // The cockpit frame, hung at the cockpit point: the instruments and canopy around the pilot,
-    // seen from outside through the glass and from the eyes in first person.
-    // A ship flown from its rooms has a bridge, not a frame.
-    if (spec.ship && def.cockpit && v.cockpit && !(def.cells ?? []).some((c) => c.index > 0)) {
-      try {
-        const frame = (await this.model({ file: def.cockpit.file } as VehicleDef)).scene.clone();
-        frame.traverse((o) => {
-          o.userData.cockpit = true;
-          const m = o as THREE.Mesh;
-          if (m.isMesh) m.castShadow = false;
-        });
-        // The frame's middle on the seated pilot's chest: the frame is drawn around the pilot,
-        // and its model's origin is not where the pilot sits.
-        const box = new THREE.Box3().setFromObject(frame);
-        const centre = box.isEmpty() ? new THREE.Vector3() : box.getCenter(new THREE.Vector3());
-        frame.position.set(spec.seat[0] - centre.x + FRAME_NUDGE.x, spec.seat[1] + SEATED_CHEST - centre.y + FRAME_NUDGE.y, spec.seat[2] + FRAME_FORWARD - centre.z + FRAME_NUDGE.z);
-        frame.visible = false;
-        v.group.add(frame);
-        v.cockpitFrame = frame;
-        console.info(`garage: ${def.id} cockpit frame: its model's middle at ${centre.toArray().map((n) => n.toFixed(2)).join(',')} in its own frame, its origin placed at ${frame.position.toArray().map((n) => n.toFixed(2)).join(',')} in the hull's; the seat is at ${spec.seat.map((n) => n.toFixed(2)).join(',')}, the hull's box ${bounds.min.map((n) => n.toFixed(1)).join(',')} to ${bounds.max.map((n) => n.toFixed(1)).join(',')}`);
-        const off = def.cockpit.firstOffset;
-        if (off && off.length >= 3) v.cockpitOffset = [off[0], off[1], off[2]];
-      } catch (err) {
-        console.warn(`garage: ${def.id}: its cockpit frame did not load`, err);
-      }
-    }
     if (def.source !== 'creature') collectPanes(v);
     if (def.source === 'creature' && loaded.animations.length) {
       const mixer = new THREE.AnimationMixer(model);
@@ -320,10 +328,9 @@ function findHardpoint(model: THREE.Object3D, name: string): THREE.Object3D | nu
 
 /** A seated pilot's eyes over the seat point, metres. */
 const SEATED_EYE = 1.0;
-/** Where the cockpit frame's middle sits over the seat point: up and forward, found by eye in the X-wing. */
-const SEATED_CHEST = 0.24;
-const FRAME_FORWARD = 0.32;
-/** A live adjustment of where the cockpit frame sits over the seat, for finding the right place (__debug.cockpitFrame). */
+/** Where the pilot sits from the cockpit frame's middle: a little below and behind it, found by eye in the X-wing. */
+const SEAT_FROM_FRAME = new THREE.Vector3(0, -0.45, -0.32);
+/** A live adjustment of where the cockpit frame sits in the hull, for checking it (__debug.cockpitFrame). */
 export const FRAME_NUDGE = new THREE.Vector3();
 /** How much of a hull's glass is seen through while someone is aboard or at the controls. */
 const CLEAR_PANE = 0.45;
@@ -409,7 +416,7 @@ function addEngineGlow(v: Vehicle, engines: THREE.Vector3[] = []): void {
     base?.(dt, self, drive);
     const throttle = drive ? Math.max(0, drive.throttle) : 0;
     const share = Math.min(1, Math.abs(self.speed) / self.spec.maxSpeed);
-    for (const t of self.trails) t.update(dt, self.airborne && Math.abs(self.speed) > 6 ? 0.3 + 0.7 * share + 0.3 * throttle : 0, size * (0.06 + 0.09 * share));
+    for (const t of self.trails) t.update(dt, self.airborne && Math.abs(self.speed) > 6 ? 0.5 * (0.3 + 0.7 * share + 0.3 * throttle) : 0, size * (0.015 + 0.0225 * share));
     // The drive's own appearance while it runs; the cockpit frame and clear glass while someone is at the controls or aboard.
     const running = throttle > 0 || self.airborne || Math.abs(self.speed) > 1;
     for (const p of self.engineParts) p.visible = running;
