@@ -15,6 +15,8 @@ export class DayCycle {
   readonly lightDir = new THREE.Vector3(0, 1, 0);
   /** True while the planet's own sky drives the light: the sun then follows the client's path. */
   swg = false;
+  /** A fixed direction the light comes from (space: the zone's own main light), overriding the sun's arc. */
+  fixed: THREE.Vector3 | null = null;
   /** 0 at night, 1 in full daylight. */
   daylight = 1;
   /** Peaks when the sun sits on the horizon. */
@@ -38,7 +40,13 @@ export class DayCycle {
     const y = this.sunDir.y;
     this.daylight = THREE.MathUtils.smoothstep(y, -0.1, 0.22);
     this.sunset = Math.exp(-Math.abs(y) * 9) * (y > -0.15 ? 1 : 0);
-    if (this.swg) {
+    if (this.fixed) {
+      this.lightDir.copy(this.fixed).normalize();
+      this.sunDir.copy(this.lightDir);
+      this.moonDir.copy(this.lightDir).negate();
+      this.daylight = 1;
+      this.sunset = 0;
+    } else if (this.swg) {
       // The client pitches its light 67.5 degrees, then yaws it half a turn per day and half a
       // turn per night about the pitched frame: the sun rises on the horizon, peaks at 67.5
       // degrees at midday and sets on the far side, and the moon follows the same arc by night.

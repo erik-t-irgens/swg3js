@@ -59,7 +59,27 @@ export interface SkyData {
   stars: { count: number; colors: { width: number; height: number; rgba: string } | null } | null;
   nightSky: { shader: string; image: CelestialImage | null } | null;
   skybox: { cube?: CubeFaces | null; sides?: Record<string, string | null> } | null;
+  /** A space zone's own environment, from its terrain file (see tools/swg/space.mjs). */
+  space?: SpaceEnvironment | null;
   blocks: SkyBlock[];
+}
+
+/** A parallel light of a space zone: colours as the client stores them, and the frame it shines down. */
+interface SpaceLight {
+  shadows: boolean;
+  diffuse: number[];
+  specular: number[];
+  yaw: number;
+  pitch: number;
+  roll: number;
+}
+interface SpaceEnvironment {
+  clear: number[] | null;
+  ambient: number[] | null;
+  lights: SpaceLight[];
+  dust: { count: number; radius: number } | null;
+  celestials: { shader: string; size: number; yaw: number; pitch: number; roll: number; image: CelestialImage | null }[];
+  environmentMap: CubeFaces | null;
 }
 
 /** What the sky decides for the rest of the scene at one moment. */
@@ -208,6 +228,10 @@ export class SwgSky {
   private readonly ramps = new Map<SkyBlock, Uint8Array>();
   private block: SkyBlock;
   private time = 0;
+  /** In space, the direction the main light comes from, fixed: the day cycle follows it instead of the sun's arc. */
+  readonly spaceLightDir: THREE.Vector3 | null = null;
+  /** Space dust: points fixed in the world within a radius of the camera, wrapped round as it moves, so speed can be seen against nothing. */
+  private readonly dust: { points: THREE.Points; radius: number; last: THREE.Vector3 | null } | null = null;
   readonly lighting: SkyLighting = {
     ambient: new THREE.Color(0.3, 0.3, 0.3),
     ambientScale: 1,
@@ -369,9 +393,51 @@ export class SwgSky {
     this.supplementalMoon.push(...body(data.supplementalMoon));
     for (const c of data.celestials) this.celestials.push({ sprites: body(c), data: c });
 
-    // Stars: the client scatters `count` points and colours them from a small ramp image.
+    // A space zone: its star sprites hang where its terrain file turns them, for good; its main
+    // light comes from a fixed direction; and dust drifts past the camera.
+    const space = data.space;
+    if (space) {
+      for (const c of space.celestials) {
+        const additive = c.image?.alphaMode !== 'BLEND';
+        const s = sprite(c.image, c.size, additive);
+        if (!s) continue;
+        s.position.copy(SwgSky.direction(c.yaw, THREE.MathUtils.degToRad(c.pitch), tmpVec)).multiplyScalar(SKY_RADIUS);
+        s.material.rotation = THREE.MathUtils.degToRad(c.roll);
+      }
+      const main = space.lights[0];
+      if (main) this.spaceLightDir = SwgSky.direction(main.yaw, THREE.MathUtils.degToRad(main.pitch), new THREE.Vector3());
+      if (space.dust && space.dust.count > 0) {
+        const n = Math.min(space.dust.count, 4000);
+        const r = Math.max(8, space.dust.radius);
+        const pos = new Float32Array(n * 3);
+        for (let i = 0; i < n * 3; i++) pos[i] = (Math.random() * 2 - 1) * r;
+        const g = new THREE.BufferGeometry();
+        g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+        // A soft round mote, drawn from a small canvas: a bare point is a hard square.
+        const canvas = document.createElement('canvas');
+        canvas.width = canvas.height = 32;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          const grad = ctx.createRadialGradient(16, 16, 0, 16, 16, 16);
+          grad.addColorStop(0, 'rgba(255,255,255,1)');
+          grad.addColorStop(0.4, 'rgba(255,255,255,0.5)');
+          grad.addColorStop(1, 'rgba(255,255,255,0)');
+          ctx.fillStyle = grad;
+          ctx.fillRect(0, 0, 32, 32);
+        }
+        const mote = new THREE.CanvasTexture(canvas);
+        const mat = new THREE.PointsMaterial({ color: 0xc8d4e6, map: mote, size: 0.16, sizeAttenuation: true, transparent: true, opacity: 0.7, depthWrite: false, fog: false, blending: THREE.AdditiveBlending });
+        const points = new THREE.Points(g, mat);
+        points.frustumCulled = false;
+        points.renderOrder = 5;
+        this.group.add(points);
+        this.dust = { points, radius: r, last: null };
+      }
+    }
+
+    // Stars: the client scatters `count` points and colours them from a small ramp image (more of them in space, where they are the view).
     if (data.stars && data.stars.count > 0) {
-      const n = Math.min(data.stars.count, 6000);
+      const n = Math.min(data.stars.count, space ? 30000 : 6000);
       const pos = new Float32Array(n * 3);
       const col = new Float32Array(n * 3);
       const palette = data.stars.colors ? Uint8Array.from(atob(data.stars.colors.rgba), (ch) => ch.charCodeAt(0)) : null;
@@ -381,7 +447,8 @@ export class SwgSky {
         return seed / 4294967296;
       };
       for (let i = 0; i < n; i++) {
-        const y = rnd() * 0.98 + 0.02;
+        // Over a planet the stars stay above the horizon; in space they are all around.
+        const y = space ? rnd() * 2 - 1 : rnd() * 0.98 + 0.02;
         const a = rnd() * Math.PI * 2;
         const r = Math.sqrt(1 - y * y);
         pos[i * 3] = Math.cos(a) * r * SKY_RADIUS * 1.2;
@@ -465,6 +532,7 @@ export class SwgSky {
       if (c?.glowImage?.file) files.add(c.glowImage.file);
     }
     for (const f of Object.values(data.skybox?.sides ?? {})) if (f) files.add(f);
+    for (const c of data.space?.celestials ?? []) if (c.image?.file) files.add(c.image.file);
     for (const f of data.skybox?.cube?.faces ?? []) if (f) files.add(f);
     const loader = new THREE.TextureLoader();
     const textures = new Map<string, THREE.Texture>();
@@ -518,7 +586,8 @@ export class SwgSky {
     for (const s of sprites) {
       s.position.copy(dir).multiplyScalar(SKY_RADIUS);
       s.material.opacity = alpha;
-      s.visible = alpha > 0.002 && dir.y > -0.3;
+      // Below the horizon a body is behind the ground; in space there is no ground to be behind.
+      s.visible = alpha > 0.002 && (dir.y > -0.3 || !!this.data.space);
     }
   }
 
@@ -570,6 +639,26 @@ export class SwgSky {
     L.starAlpha = this.rampAlpha(Row.Fog, index, day.isDay ? 0 : 1);
     const fog = this.block.fog;
     L.fogDensity = fog.enabled ? THREE.MathUtils.lerp(fog.min, fog.max, THREE.MathUtils.clamp((CLIENT_FAR_PLANE - 512) / (2048 - 512), 0, 1)) : 0;
+    const space = this.data.space;
+    if (space) {
+      // The zone's own lights, as its terrain file gives them, at every hour: no day here.
+      const main = space.lights[0];
+      const second = space.lights[1];
+      if (main) L.main.setRGB(main.diffuse[0], main.diffuse[1], main.diffuse[2], THREE.SRGBColorSpace);
+      L.mainScale = 1;
+      if (space.ambient) L.ambient.setRGB(space.ambient[0], space.ambient[1], space.ambient[2], THREE.SRGBColorSpace);
+      L.ambientScale = 1;
+      if (second) L.fill.setRGB(second.diffuse[0], second.diffuse[1], second.diffuse[2], THREE.SRGBColorSpace);
+      L.fillScale = second ? 1 : 0;
+      L.bounce.copy(L.ambient).multiplyScalar(0.6);
+      L.bounceScale = 1;
+      if (space.clear) L.clear.setRGB(space.clear[0], space.clear[1], space.clear[2], THREE.SRGBColorSpace);
+      L.fog.copy(L.clear);
+      L.fogDensity = 0;
+      L.sunMoonAlpha = 0;
+      L.starAlpha = 1;
+      L.isDay = true;
+    }
 
     const u = this.dome.material.uniforms;
     u.uTime.value = t;
@@ -581,7 +670,13 @@ export class SwgSky {
     // The ramp's alpha fades the body around its rise and set; the disc itself stays until it
     // actually meets the horizon, then goes over the last few degrees.
     const alpha = Math.max(L.sunMoonAlpha, THREE.MathUtils.clamp(lightDir.y / 0.08, 0, 1));
-    if (day.isDay) {
+    if (space) {
+      // The environment file's sun and moon stay away: the zone's own star sprites are the suns here.
+      this.place(this.sun, tmpVec2.set(0, -1, 0), 0);
+      this.place(this.supplementalSun, tmpVec2, 0);
+      this.place(this.moon, tmpVec2, 0);
+      this.place(this.supplementalMoon, tmpVec2, 0);
+    } else if (day.isDay) {
       this.place(this.sun, lightDir, alpha);
       if (this.data.supplementalSun) this.place(this.supplementalSun, SwgSky.offset(lightDir, this.data.supplementalSun.yaw, this.data.supplementalSun.pitch, tmpVec), alpha);
       this.place(this.moon, tmpVec2.set(0, -1, 0), 0);
@@ -604,6 +699,31 @@ export class SwgSky {
       (this.stars.material as THREE.PointsMaterial).opacity = L.starAlpha;
       this.stars.visible = L.starAlpha > 0.01;
     }
+    // The dust stays where it is in the world as the camera (and the group) moves: each mote is
+    // shifted back by the move, and one that falls out of the radius comes in on the far side.
+    const dust = this.dust;
+    if (dust) {
+      if (dust.last) {
+        const dx = camPos.x - dust.last.x;
+        const dy = camPos.y - dust.last.y;
+        const dz = camPos.z - dust.last.z;
+        if (dx || dy || dz) {
+          const a = dust.points.geometry.getAttribute('position') as THREE.BufferAttribute;
+          const arr = a.array as Float32Array;
+          const r = dust.radius;
+          for (let i = 0; i < arr.length; i += 3) {
+            arr[i] -= dx;
+            arr[i + 1] -= dy;
+            arr[i + 2] -= dz;
+            if (Math.abs(arr[i]) > r) arr[i] -= Math.sign(arr[i]) * 2 * r;
+            if (Math.abs(arr[i + 1]) > r) arr[i + 1] -= Math.sign(arr[i + 1]) * 2 * r;
+            if (Math.abs(arr[i + 2]) > r) arr[i + 2] -= Math.sign(arr[i + 2]) * 2 * r;
+          }
+          a.needsUpdate = true;
+        }
+        dust.last.copy(camPos);
+      } else dust.last = camPos.clone();
+    }
     this.cloudGroup.position.set(camPos.x, 0, camPos.z);
     for (const c of this.clouds) {
       const u = c.mesh.material.uniforms;
@@ -620,6 +740,32 @@ export class SwgSky {
       u.uOpacity.value = 1;
     }
     return L;
+  }
+
+  /** What the sky is made of, for the console; naming a part toggles it, to see what each contributes. */
+  describe(toggle?: 'dome' | 'skybox' | 'stars' | 'dust' | 'sprites'): Record<string, unknown> {
+    const sprites = [...this.sun, ...this.supplementalSun, ...this.moon, ...this.supplementalMoon, ...this.celestials.flatMap((c) => c.sprites)];
+    if (toggle === 'dome') this.dome.visible = !this.dome.visible;
+    if (toggle === 'skybox' && this.skybox) this.skybox.visible = !this.skybox.visible;
+    if (toggle === 'stars' && this.stars) this.stars.visible = !this.stars.visible;
+    if (toggle === 'dust' && this.dust) this.dust.points.visible = !this.dust.points.visible;
+    if (toggle === 'sprites') for (const s of this.group.children) if (s instanceof THREE.Sprite) s.visible = !s.visible;
+    const faces = this.skybox ? this.skybox.children.map((m) => {
+      const map = ((m as THREE.Mesh).material as THREE.MeshBasicMaterial).map;
+      const img = map?.image as { width?: number; height?: number } | undefined;
+      return `${img?.width ?? '?'}x${img?.height ?? '?'}${m.visible ? '' : ' hidden'}`;
+    }) : [];
+    return {
+      block: this.block.name,
+      gradient: this.block.gradientSky,
+      dome: this.dome.visible,
+      skybox: this.skybox ? `${faces.length} faces: ${faces.join(', ')}${this.skybox.visible ? '' : ' (hidden)'}` : 'none',
+      stars: this.stars ? `${(this.stars.geometry.getAttribute('position') as THREE.BufferAttribute).count}${this.stars.visible ? '' : ' hidden'}` : 'none',
+      dust: this.dust ? `${(this.dust.points.geometry.getAttribute('position') as THREE.BufferAttribute).count} within ${this.dust.radius} m${this.dust.points.visible ? '' : ' hidden'}` : 'none',
+      sprites: `${sprites.length}, ${this.group.children.filter((s) => s instanceof THREE.Sprite && s.visible).length} visible`,
+      spaceLight: this.spaceLightDir ? this.spaceLightDir.toArray().map((v) => Number(v.toFixed(2))) : null,
+      lighting: { main: `#${this.lighting.main.getHexString()} x${this.lighting.mainScale.toFixed(2)}`, ambient: `#${this.lighting.ambient.getHexString()} x${this.lighting.ambientScale.toFixed(2)}`, clear: `#${this.lighting.clear.getHexString()}`, fog: this.lighting.fogDensity },
+    };
   }
 
   dispose(scene: THREE.Scene): void {

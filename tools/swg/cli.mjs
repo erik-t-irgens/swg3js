@@ -3323,10 +3323,11 @@ switch (cmd) {
     // places (drawn as the faction stations the client has), every asteroid of its fields
     // (scattered from each field's seed through its style table), the planets and moons its
     // terrain file hangs in the sky (as space.json, with each one's surface texture), and its
-    // sky (the nebula skybox, the stars, the sun and moon) like a planet's.
+    // sky from the same file (the six-sided nebula skybox, the lights, the star field, the dust
+    // and the star sprites) into sky.json with the environment tables' blocks.
     if (!pos[3]) usage();
     const vfs = mount(pos[1]);
-    const { SPACE_ZONES, stationTemplate, parseSpacePlanets, parseSpaceSkybox, scatterField } = await import('./space.mjs');
+    const { SPACE_ZONES, stationTemplate, parseSpacePlanets, parseSpaceEnvironment, scatterField } = await import('./space.mjs');
     const zones = pos[2] === 'all' ? Object.keys(SPACE_ZONES).filter((z) => vfs.has(`terrain/${z}.trn`)) : [pos[2]];
     for (const zone of zones) {
       if (!vfs.has(`terrain/${zone}.trn`)) {
@@ -3414,9 +3415,9 @@ switch (cmd) {
       writeFileSync(join(outDir, 'space.json'), JSON.stringify({ zone, planet: SPACE_ZONES[zone] ?? null, stations, planets }, null, 2));
       writeFileSync(join(outDir, 'manifest.json'), JSON.stringify({ planet: zone, categories: { layout: [...models.values()].filter((m) => !m.failed) } }, null, 2));
       writeFileSync(join(outDir, 'layout.json'), JSON.stringify({ planet: zone, center: { x: 0, z: 0 }, radius: null, objects, skipped: [] }));
-      const skybox = parseSpaceSkybox(trnRoot);
-      exportSky(vfs, zone, outDir, { textureFor: (p) => textureFor(vfs, p), log: console.log, skybox });
-      console.log(`-> ${outDir}: ${stations.length} stations, ${asteroids} asteroids in ${models.size} models, ${planets.length} planets and moons${skybox ? `, sky ${basename(skybox)}` : ', no skybox named'}`);
+      const env = parseSpaceEnvironment(trnRoot);
+      exportSky(vfs, zone, outDir, { textureFor: (p) => textureFor(vfs, p), log: console.log, space: env });
+      console.log(`-> ${outDir}: ${stations.length} stations, ${asteroids} asteroids in ${models.size} models, ${planets.length} planets and moons${env.skybox ? `, skybox ${env.skybox}` : ', no skybox named'}, ${env.lights.length} lights, ${env.celestials.length} star sprites, ${env.stars?.count ?? 0} stars, ${env.dust?.count ?? 0} dust`);
     }
     printEffectSummary();
     break;

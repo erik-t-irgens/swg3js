@@ -32,6 +32,7 @@ const tmpQ = new THREE.Quaternion();
 const tmpV = new THREE.Vector3();
 const tmpM = new THREE.Matrix4();
 /** How far out a space zone's planets hang, and the radius (metres) a planet of size 1 has there. */
+const SPACE_REACH = 3;
 const SPACE_BODY_DISTANCE = 2600;
 const SPACE_BODY_SIZE = 240;
 /** Detailed ground chunks each way, by default; the settings move it (World.viewRadius). */
@@ -493,8 +494,11 @@ export class World {
       this.particles = new ParticleEffects(this.scene, pack.url(''));
       this.particles.heightAt = (x, z) => this.terrain.heightAt(x, z);
       // The gallery is one long walk of exhibits with nothing else to draw: everything loads from anywhere on it.
-      this.layoutStream = new LayoutStreamer(this.scene, this.physics, pack, layout, this.particles, { reach: planet.id === 'gallery' ? 4 : this.objectReach });
-      if (!this.terrain.swg) {
+      this.layoutStream = new LayoutStreamer(this.scene, this.physics, pack, layout, this.particles, { reach: planet.id === 'gallery' ? 4 : this.streamReach() });
+      // Placed objects pull the procedural ground up to their feet, so buildings stand on it;
+      // in space nothing stands on anything, and an anchor would raise a needle of ground three
+      // kilometres tall under every asteroid.
+      if (!this.terrain.swg && !planet.space) {
         for (const p of this.layoutStream.objects) if (p.radius >= 2 && !p.contained) this.terrain.addAnchor({ x: p.x, z: p.z, y: p.y, r: p.radius });
       }
     }
@@ -686,6 +690,7 @@ export class World {
     markActor(sky.cloudGroup);
     this.sky.visible = false;
     this.day.swg = true;
+    this.day.fixed = sky.spaceLightDir;
     this.fogScale = this.planet.swgFogScale ?? DEFAULT_SWG_FOG_SCALE;
     this.envTimer = 99;
     this.envFromCube = null;
@@ -699,6 +704,7 @@ export class World {
     }
     this.sky.visible = true;
     this.day.swg = false;
+    this.day.fixed = null;
     this.fill.intensity = 0;
     this.envTexture?.dispose();
     this.envTexture = null;
@@ -1466,7 +1472,7 @@ export class World {
       need++;
       if (this.chunks.has(`${pcx + dx},${pcz + dz}`)) have++;
     }
-    const ground = need ? have / need : 1;
+    const ground = need && !this.planet.space ? have / need : 1;
     const objects = this.layoutStream ? this.layoutStream.progress(pos.x, pos.z) : this.packProgress < 1 ? 0 : 1;
     const total = this.packProgress * 0.45 + ground * 0.2 + objects * 0.35;
     const stage = this.packProgress < 0.12 ? 'the planet\'s pack' : this.packProgress < 0.55 ? 'the terrain' : this.packProgress < 0.92 ? 'the flora, the ground and the sky' : ground < 1 ? 'the ground underfoot' : objects < 1 ? 'the buildings and the props' : 'the last of it';
@@ -1474,9 +1480,14 @@ export class World {
   }
 
   /** How far placed objects load, live: the streamer re-ranges, and the ground radii re-stream on the next move. */
+  /** How far placed objects load: the setting, and in space (no ground, no buildings, only a few hundred rocks and a station) three times as far. */
+  private streamReach(): number {
+    return this.objectReach * (this.planet?.space ? SPACE_REACH : 1);
+  }
+
   setReach(objects: number, terrain: number, far: number): void {
     this.objectReach = objects;
-    if (this.layoutStream && this.planet?.id !== 'gallery') this.layoutStream.setReach(objects);
+    if (this.layoutStream && this.planet?.id !== 'gallery') this.layoutStream.setReach(this.streamReach());
     this.viewRadius = Math.round(terrain);
     this.farRadius = Math.round(far);
     this.lastCx = Number.NaN;
@@ -1526,7 +1537,7 @@ export class World {
     if (this.packStatus === 'loading') return false;
     const pcx = Math.floor(pos.x / CHUNK_SIZE);
     const pcz = Math.floor(pos.z / CHUNK_SIZE);
-    for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) if (!this.chunks.has(`${pcx + dx},${pcz + dz}`)) return false;
+    if (!this.planet.space) for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) if (!this.chunks.has(`${pcx + dx},${pcz + dz}`)) return false;
     if (this.layoutStream && !this.layoutStream.settled(pos.x, pos.z)) return false;
     return true;
   }
@@ -1740,6 +1751,8 @@ export class World {
   }
 
   private stream(center: THREE.Vector3, budget: number): void {
+    // Space has no ground: none is built, and none fills the lower half of the view from three kilometres down.
+    if (this.planet.space) return;
     const pcx = Math.floor(center.x / CHUNK_SIZE);
     const pcz = Math.floor(center.z / CHUNK_SIZE);
     if (pcx === this.lastCx && pcz === this.lastCz && budget !== Infinity) return;
@@ -1806,6 +1819,7 @@ export class World {
   }
 
   private streamFar(center: THREE.Vector3, budget: number): void {
+    if (this.planet.space) return;
     const ptx = Math.floor(center.x / FAR_TILE);
     const ptz = Math.floor(center.z / FAR_TILE);
     if (ptx === this.lastTx && ptz === this.lastTz && budget !== Infinity) return;

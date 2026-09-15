@@ -143,10 +143,11 @@ export function parseEnvironmentFile(root) {
  * Write the planet's sky data into the pack. `textureFor(shaderPath)` resolves a shader to
  * its main texture ({ png, alphaMode, hasAlpha }) the way meshes get theirs.
  */
-export function exportSky(vfs, planet, outDir, { textureFor, log = console.error, skybox = null }) {
+export function exportSky(vfs, planet, outDir, { textureFor, log = console.error, space = null }) {
   const envPath = `terrain/environment/${planet}.iff`;
   const tablePath = `datatables/environment/${planet}.iff`;
-  if (!vfs.has(envPath) && !vfs.has(tablePath)) {
+  // A space zone's sky can stand on its terrain file alone (Kashyyyk's system has no environment file of its own).
+  if (!vfs.has(envPath) && !vfs.has(tablePath) && !space) {
     log(`  sky: no ${envPath} or ${tablePath} in archives`);
     return null;
   }
@@ -249,7 +250,7 @@ export function exportSky(vfs, planet, outDir, { textureFor, log = console.error
     }
   };
 
-  const sky = { planet, cycleSeconds: 86400, dayNightSplit: 0.7, sunElevationDegrees: 67.5, sun: null, supplementalSun: null, moon: null, supplementalMoon: null, celestials: [], stars: null, nightSky: null, timeLock: null, skybox: null, distant: [], blocks: [] };
+  const sky = { planet, cycleSeconds: 86400, dayNightSplit: 0.7, sunElevationDegrees: 67.5, sun: null, supplementalSun: null, moon: null, supplementalMoon: null, celestials: [], stars: null, nightSky: null, timeLock: null, skybox: null, distant: [], space: null, blocks: [] };
   const celestial = (c) => (c ? { ...c, image: shaderImage(c.shader), glowImage: shaderImage(c.glowShader) } : null);
   if (vfs.has(envPath)) {
     const env = parseEnvironmentFile(parseIff(vfs.read(envPath)));
@@ -272,9 +273,7 @@ export function exportSky(vfs, planet, outDir, { textureFor, log = console.error
         }
         sky.stars = { count: env.stars.count, colors };
       }
-      // A space zone's sky is the cube map its terrain file names, handed in by the caller.
-      if (skybox) sky.skybox = { cube: cube(skybox, 1024) };
-      else if (env.skybox?.mask) {
+      if (!space && env.skybox?.mask) {
         if (env.skybox.cubeMap) sky.skybox = { cube: cube(env.skybox.mask.includes('/') ? env.skybox.mask : `texture/${env.skybox.mask}.dds`, 1024) };
         else {
           const sides = {};
@@ -283,6 +282,35 @@ export function exportSky(vfs, planet, outDir, { textureFor, log = console.error
         }
       }
     }
+  }
+  if (space) {
+    // A space zone: its terrain file's six-sided skybox, lights, dust and star sprites, and the
+    // cube map it names for reflections; its star field over the environment file's.
+    if (space.skybox) {
+      const sides = {};
+      for (const side of ['front', 'right', 'back', 'left', 'top', 'bottom']) sides[side] = image(`texture/${space.skybox}_${side}.dds`, { opaque: true });
+      sky.skybox = { sides };
+    }
+    if (space.stars?.count) {
+      let colors = sky.stars?.colors ?? null;
+      if (!colors && space.stars.colorRamp) {
+        try {
+          const img = decodeImage(space.stars.colorRamp);
+          colors = { width: img.width, height: img.height, rgba: Buffer.from(img.rgba).toString('base64') };
+        } catch (err) {
+          notes.push(`${clean(space.stars.colorRamp)}: ${err.message}`);
+        }
+      }
+      sky.stars = { count: space.stars.count, colors };
+    }
+    sky.space = {
+      clear: space.clear,
+      ambient: space.ambient,
+      lights: space.lights,
+      dust: space.dust,
+      celestials: space.celestials.map((c) => ({ ...c, image: shaderImage(c.shader) })),
+      environmentMap: space.environmentMap ? cube(space.environmentMap) : null,
+    };
   }
   if (vfs.has(tablePath)) {
     const table = parseDatatable(parseIff(vfs.read(tablePath)));
@@ -299,15 +327,16 @@ export function exportSky(vfs, planet, outDir, { textureFor, log = console.error
         ramp: ramp(str(9)),
         shadows: Number(v(10)) !== 0,
         fog: { enabled: Number(v(11)) !== 0, min: Number(v(12)) || 0, max: Number(v(13)) || 0 },
-        dayEnvironment: cube(str(15)),
-        nightEnvironment: cube(str(16)),
+        // In space, what reflections see is the cube map the zone's terrain file names.
+        dayEnvironment: sky.space?.environmentMap ?? cube(str(15)),
+        nightEnvironment: sky.space?.environmentMap ?? cube(str(16)),
         windSpeedScale: Number(v(24)) || 1,
       };
       sky.blocks.push(block);
     }
   }
   writeFileSync(join(outDir, 'sky.json'), JSON.stringify(sky));
-  const parts = [`${sky.blocks.length} environment blocks`, sky.sun ? 'sun' : 'no sun', sky.moon ? 'moon' : 'no moon', sky.skybox ? 'skybox' : 'gradient sky', sky.stars ? `${sky.stars.count} stars` : 'no stars'];
+  const parts = [`${sky.blocks.length} environment blocks`, sky.sun ? 'sun' : 'no sun', sky.moon ? 'moon' : 'no moon', sky.skybox ? 'skybox' : 'gradient sky', sky.stars ? `${sky.stars.count} stars` : 'no stars', ...(sky.space ? [`${sky.space.lights.length} space lights`, `${sky.space.celestials.length} star sprites`] : [])];
   log(`  sky: ${parts.join(', ')} -> sky.json${notes.length ? `; ${notes.length} problems: ${[...new Set(notes)].slice(0, 6).join('; ')}` : ''}`);
   return 'sky.json';
 }

@@ -2,9 +2,9 @@
 // stations come from datatables/space/spacestation/<zone>.iff (a name and a place each), its
 // asteroid fields from datatables/space/asteroidfield/<zone>.iff (a centre, a radius, a count,
 // a seed and a style table naming the asteroid appearances with their likelihoods, or a spline
-// the field follows), and its sky from the environment tables like a planet's, with the planets
-// and moons in the picture named in the zone's terrain file (terrain/<zone>.trn, PLAN forms:
-// the planet appearance, then eight floats). The pure parts live here, for the tests.
+// the field follows), and its sky from its terrain file (terrain/<zone>.trn: the skybox, the
+// lights, the star field, the dust, the star sprites, and the planets and moons in the picture
+// as PLAN forms, the planet appearance then eight floats). The pure parts live here, for the tests.
 import { findAll, readCString } from './iff.mjs';
 
 /** The space zones the game flies, and the planet each is the sky of. */
@@ -62,15 +62,55 @@ export function parseSpacePlanets(root) {
   return out;
 }
 
-/** The cube map a zone's terrain file names as its sky (an ENVI form: the texture's path), or null. */
-export function parseSpaceSkybox(root) {
-  for (const form of findAll(root, 'ENVI')) {
-    const c = form.children.find((ch) => ch.tag === '0000' || ch.tag === 'DATA');
-    if (!c) continue;
-    const { value } = readCString(c.data, 0);
-    if (value) return value.replace(/\\/g, '/');
+/**
+ * A zone's own environment, from the forms of its terrain file: the six-sided skybox the SKYB
+ * form names (a byte, then the name: the faces are texture/<name>_<front|right|back|left|top|
+ * bottom>.dds), the cube map the ENVI form names (what reflections see, not the sky), the clear
+ * colour (CLEA: three floats), the ambient light (AMBI: alpha, red, green, blue), the parallel
+ * lights (PARA: a byte, the diffuse and specular colours as alpha-red-green-blue, then yaw,
+ * pitch and roll in degrees, the light shining down the turned frame's forward), the star field
+ * (STAR: the colour ramp's path, then a count), the dust round the camera (DUST: a count, then
+ * a radius in metres) and the celestial sprites (CELE: a shader, a size, a spare float, a byte,
+ * then yaw, pitch and roll in degrees, the sprite hung along the turned frame's forward).
+ */
+export function parseSpaceEnvironment(root) {
+  const chunkOf = (form) => form.children.find((ch) => ch.tag === '0000' || ch.tag === 'DATA');
+  const each = (tag) => findAll(root, tag).map(chunkOf).filter(Boolean).map((c) => c.data);
+  const first = (tag) => each(tag)[0] ?? null;
+  const f32s = (b, from, n) => {
+    const out = [];
+    for (let i = 0; i < n; i++) out.push(from + 4 * i + 4 <= b.length ? b.readFloatLE(from + 4 * i) : 0);
+    return out;
+  };
+  const rgb = (b, at) => f32s(b, at, 4).slice(1);
+  const out = { skybox: null, environmentMap: null, clear: null, ambient: null, lights: [], stars: null, dust: null, celestials: [] };
+  const skyb = first('SKYB');
+  if (skyb && skyb.length > 1) out.skybox = readCString(skyb, 1).value || null;
+  const envi = first('ENVI');
+  if (envi) out.environmentMap = readCString(envi, 0).value.replace(/\\/g, '/') || null;
+  const clea = first('CLEA');
+  if (clea && clea.length >= 12) out.clear = f32s(clea, 0, 3);
+  const ambi = first('AMBI');
+  if (ambi && ambi.length >= 16) out.ambient = rgb(ambi, 0);
+  for (const b of each('PARA')) {
+    if (b.length < 45) continue;
+    const [yaw, pitch, roll] = f32s(b, 33, 3);
+    out.lights.push({ shadows: b[0] !== 0, diffuse: rgb(b, 1), specular: rgb(b, 17), yaw, pitch, roll });
   }
-  return null;
+  const star = first('STAR');
+  if (star) {
+    const { value, next } = readCString(star, 0);
+    out.stars = { colorRamp: value.replace(/\\/g, '/'), count: next + 4 <= star.length ? star.readInt32LE(next) : 0 };
+  }
+  const dust = first('DUST');
+  if (dust && dust.length >= 8) out.dust = { count: dust.readInt32LE(0), radius: dust.readFloatLE(4) };
+  for (const b of each('CELE')) {
+    const { value, next } = readCString(b, 0);
+    if (!value || next + 21 > b.length) continue;
+    const [yaw, pitch, roll] = f32s(b, next + 9, 3);
+    out.celestials.push({ shader: value.replace(/\\/g, '/'), size: b.readFloatLE(next), yaw, pitch, roll });
+  }
+  return out;
 }
 
 /** A small seeded random generator (mulberry32), so a field scatters the same way every conversion. */
