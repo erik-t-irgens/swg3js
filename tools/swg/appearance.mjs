@@ -5,6 +5,7 @@
 // Paths inside these files are relative to appearance/ unless already prefixed.
 import { childrenOf, find, findAll, isForm, readCString, parseIff } from './iff.mjs';
 import { parsePob } from './pob.mjs';
+import { readHardpoints } from './msh.mjs';
 
 export function appearancePath(name) {
   const n = name.replace(/\\/g, '/');
@@ -21,6 +22,12 @@ export function composeTransform(a, b) {
     out[r * 4 + 3] = a[r * 4] * b[3] + a[r * 4 + 1] * b[7] + a[r * 4 + 2] * b[11] + a[r * 4 + 3];
   }
   return out;
+}
+
+/** A hardpoint carried through a 3x4 transform: its matrix composed, its position moved. */
+export function transformHardpoint(hp, t) {
+  const matrix = composeTransform(t, hp.matrix);
+  return { ...hp, matrix, position: [matrix[3], matrix[7], matrix[11]] };
 }
 
 function yawPitchRollTransform(pos, yaw, pitch, roll) {
@@ -143,10 +150,21 @@ export function resolveParts(vfs, rawPath, depth = 0, detail = 0) {
   // Particle effects are parts too (a candle is a mesh plus a flame); callers place them.
   if (lower.endsWith('.prt')) return [{ particle: path, transform: null }];
   const root = parseIff(vfs.read(path));
+  // The hardpoints of this level of the chain (a ship's live in its .lod, where its wings,
+  // engines and seats hang; a mesh's own are read with the mesh): carried on the first part.
+  const withHardpoints = (parts) => {
+    const appr = find(root, 'APPR');
+    const hps = appr ? readHardpoints(appr) : [];
+    if (!hps.length) return parts;
+    const first = parts.find((p) => p.mesh) ?? parts[0];
+    if (!first) return parts;
+    first.hardpoints = [...(first.hardpoints ?? []), ...hps];
+    return parts;
+  };
   if (lower.endsWith('.apt')) {
     const name = find(root, 'NAME');
     if (!name) throw new Error(`${path}: .apt without NAME`);
-    return resolveParts(vfs, readCString(name.data).value, depth + 1, detail);
+    return withHardpoints(resolveParts(vfs, readCString(name.data).value, depth + 1, detail));
   }
   if (lower.endsWith('.lod')) {
     // Detail levels, highest first. A chain shorter than the level asked for stays on its
@@ -155,7 +173,7 @@ export function resolveParts(vfs, rawPath, depth = 0, detail = 0) {
     if (!levels.length) throw new Error(`${path}: .lod without CHLD`);
     const pick = levels[Math.min(detail, levels.length - 1)];
     // Levels below the first are already reduced; nested chains stay on their highest.
-    return resolveParts(vfs, pick.name, depth + 1, detail === 0 ? 0 : Math.max(0, detail - (levels.length - 1)));
+    return withHardpoints(resolveParts(vfs, pick.name, depth + 1, detail === 0 ? 0 : Math.max(0, detail - (levels.length - 1))));
   }
   if (lower.endsWith('.pob')) {
     // Portal building: exterior (cell 0) plus every interior cell, all in building space.
@@ -191,11 +209,13 @@ export function resolveParts(vfs, rawPath, depth = 0, detail = 0) {
         transform = yawPitchRollTransform(pos, d.readFloatLE(next + 12) * deg, d.readFloatLE(next + 16) * deg, d.readFloatLE(next + 20) * deg);
       }
       for (const sub of resolveParts(vfs, name, depth + 1, detail)) {
-        out.push({ ...(sub.particle ? { particle: sub.particle } : { mesh: sub.mesh }), transform: sub.transform ? composeTransform(transform, sub.transform) : transform });
+        // A sub-part's own hardpoints move with it into the component's frame.
+        const hardpoints = sub.hardpoints?.map((hp) => transformHardpoint(hp, transform));
+        out.push({ ...(sub.particle ? { particle: sub.particle } : { mesh: sub.mesh }), transform: sub.transform ? composeTransform(transform, sub.transform) : transform, ...(hardpoints?.length ? { hardpoints } : {}) });
       }
     }
     if (!out.length && detail === 0) throw new Error(`${path}: component appearance without parts`);
-    return out;
+    return withHardpoints(out);
   }
   throw new Error(`Unsupported appearance type: ${path}`);
 }

@@ -361,6 +361,8 @@ function loadAppearanceMesh(vfs, appearancePath) {
     }
     const mesh = parseMesh(parseIff(vfs.read(part.mesh)));
     if (part.transform) transformMesh(mesh, part.transform);
+    // The appearance chain's own hardpoints (a .lod's, a .cmp's) ride on the part, already in its frame.
+    if (part.hardpoints?.length) mesh.hardpoints.push(...part.hardpoints);
     merged.groups.push(...mesh.groups);
     merged.hardpoints.push(...mesh.hardpoints);
     merged.warnings.push(...mesh.warnings);

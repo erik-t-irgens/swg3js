@@ -133,7 +133,8 @@ function fanToList(idx) {
   return Uint32Array.from(out);
 }
 
-function readHardpoints(appr) {
+/** The hardpoints of an APPR form (a mesh's, a detail chain's, a component's): name, 3x4 matrix, position. */
+export function readHardpoints(appr) {
   const out = [];
   for (const hpnt of findAll(appr, 'HPNT')) {
     const d = hpnt.data;
