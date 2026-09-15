@@ -179,6 +179,10 @@ const right = new THREE.Vector3();
 const HIT_THRESHOLD = 6;
 const HIT_DAMAGE = 4;
 /** Speed (m/s) a step may take off a flying hull before it counts as having hit something, and how long the contacts then have it. */
+/** A hover machine in the air: the share of its weight the repulsor still carries, the fall (m/s) it settles to, and how high over the ground it still does so. */
+const GLIDE_LIFT = 0.5;
+const GLIDE_FALL = 5;
+const GLIDE_CEILING = 30;
 const SHIP_HIT_LOSS = 5;
 const SHIP_HIT_FREE = 0.4;
 /** How much of the ground's slope a hover kind takes on: 1 lies flat on it, 0 stays level. */
@@ -646,6 +650,17 @@ export class Vehicle {
         const f = m * THREE.MathUtils.clamp(g + 6 * (ride - h) - 3.5 * lv.y, 0, g * 3.5);
         body.addForce({ x: 0, y: f, z: 0 }, true);
         this.groundedPoints = 4;
+      }
+    }
+    // Off the ground, a repulsor still fights gravity: past its cushion the machine sinks at a
+    // walking pace rather than dropping, so a ramp gives a glide. Never more than its weight,
+    // and only near the ground, so it is not a flyer.
+    if (groundAt && !flying && !s.animal && s.hover >= 0.3 && this.groundedPoints < 2) {
+      const h = this.pos.y - s.bounds.min[1] - floorAt(this.pos.x, this.pos.z);
+      if (h < GLIDE_CEILING) {
+        let f = m * g * GLIDE_LIFT;
+        if (lv.y < -GLIDE_FALL) f += m * (-GLIDE_FALL - lv.y) * 2.5;
+        body.addForce({ x: 0, y: Math.min(f, m * g * 0.95), z: 0 }, true);
       }
     }
     const grounded = this.groundedPoints >= 2;
