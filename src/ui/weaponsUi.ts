@@ -3,7 +3,7 @@
 import { INVENTORY_TABS, tabStrip, wireTabs } from './tabs';
 import { CLASS_LABELS, ONE_HANDED, type WeaponCatalogue, type WeaponClass, type WeaponDef } from '../player/weapons';
 
-const ORDER: WeaponClass[] = ['pistol', 'carbine', 'rifle', 'heavy', 'sword1h', 'knife', 'sword2h', 'polearm', 'lightsaber'];
+const ORDER: WeaponClass[] = ['pistol', 'carbine', 'rifle', 'heavy', 'sword1h', 'knife', 'sword2h', 'polearm', 'lightsaber', 'lightsaber2h', 'lightsaberStaff'];
 
 export class WeaponsUi {
   readonly root: HTMLElement;
@@ -52,6 +52,9 @@ export class WeaponsUi {
 
   /** What is in each hand, to mark in the list. */
   held: { right: string | null; left: string | null } = { right: null, left: null };
+  /** The blade colour worn now, and the game's choices; a pick goes to the game. */
+  saberColor = '#3aa0ff';
+  onSaberColor: (hex: string) => void = () => {};
 
   render(): void {
     const c = this.catalogue;
@@ -64,6 +67,9 @@ export class WeaponsUi {
     const groups = c.byClass();
     let shown = 0;
     const html: string[] = [];
+    // The blade: the game's own colours, and any colour at all.
+    const colors = c.saberColors;
+    html.push(`<h3 class="weapons-class">Blade colour <span>${colors.length ? `${colors.length} of the game's, or your own` : 'your own'}</span></h3><div class="blade-colours">${colors.map((h) => `<button class="swatch${h.toLowerCase() === this.saberColor.toLowerCase() ? ' on' : ''}" data-colour="${h}" style="background:${h}" title="${h}"></button>`).join('')}<label class="blade-own">own <input type="color" class="blade-custom" value="${this.saberColor}" /></label></div>`);
     for (const cls of ORDER) {
       const list = (groups.get(cls) ?? []).filter((w) => !find || w.id.toLowerCase().includes(find));
       if (!list.length) continue;
@@ -83,6 +89,18 @@ export class WeaponsUi {
     }
     this.body.innerHTML = html.join('');
     this.count.textContent = `${shown} of ${c.weapons.length} weapons`;
+    for (const b of this.body.querySelectorAll<HTMLButtonElement>('button[data-colour]')) {
+      b.addEventListener('click', () => {
+        this.saberColor = b.dataset.colour!;
+        this.onSaberColor(this.saberColor);
+        this.render();
+      });
+    }
+    this.body.querySelector<HTMLInputElement>('.blade-custom')?.addEventListener('input', (e) => {
+      this.saberColor = (e.target as HTMLInputElement).value;
+      this.onSaberColor(this.saberColor);
+      for (const b of this.body.querySelectorAll<HTMLButtonElement>('button[data-colour]')) b.classList.toggle('on', b.dataset.colour!.toLowerCase() === this.saberColor.toLowerCase());
+    });
     for (const b of this.body.querySelectorAll<HTMLButtonElement>('button[data-id]')) {
       b.addEventListener('click', () => {
         const def = c.weapons.find((w) => w.id === b.dataset.id);

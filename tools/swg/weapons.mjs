@@ -13,6 +13,8 @@ export const WEAPON_CLASSES = {
   sword2h: { fights: 'single', hands: 'right', label: 'Two-hand swords' },
   polearm: { fights: 'staff', hands: 'right', label: 'Polearms and lances' },
   lightsaber: { fights: 'lightsaber', hands: 'right', label: 'Lightsabers' },
+  lightsaber2h: { fights: 'lightsaber', hands: 'right', label: 'Two-hand lightsabers' },
+  lightsaberStaff: { fights: 'lightsaber', hands: 'right', label: 'Double-bladed lightsabers' },
 };
 
 /**
@@ -23,6 +25,10 @@ export function weaponClassOf(template) {
   const t = template.toLowerCase();
   if (!t.startsWith('object/weapon/')) return { skip: 'not a weapon' };
   if (/\/lightsaber\//.test(t)) return { cls: 'lightsaber' };
+  // The crafted sabers live under the sword folders, their appearance a lightsaber file (.lsb).
+  if (/\/melee\/sword\/crafted_saber\//.test(t)) return { cls: 'lightsaber' };
+  if (/\/melee\/2h_sword\/crafted_saber\//.test(t)) return { cls: 'lightsaber2h' };
+  if (/\/melee\/polearm\/crafted_saber\//.test(t)) return { cls: 'lightsaberStaff' };
   if (/\/ranged\/pistol\//.test(t)) return { cls: 'pistol' };
   if (/\/ranged\/carbine\//.test(t)) return { cls: 'carbine' };
   if (/\/ranged\/rifle\//.test(t)) return { cls: 'rifle' };
@@ -68,7 +74,10 @@ export function buildWeapons(templates, deps, { log = () => {}, limit = Infinity
       skipped.push({ template, why: r?.skip ?? 'failed' });
       continue;
     }
-    weapons.push({ id: weaponLabel(template), template, class: c.cls, model: r.model, file: r.file, bounds: r.bounds, length: Number(weaponLength(r.bounds).toFixed(2)) });
+    const entry = { id: weaponLabel(template), template, class: c.cls, model: r.model, file: r.file, bounds: r.bounds, length: Number(weaponLength(r.bounds).toFixed(2)) };
+    // A lightsaber: the blade the client draws from its hilt, and the light it casts.
+    if (r.blade) entry.blade = { length: Number(r.blade.length.toFixed(3)), width: Number(r.blade.width.toFixed(3)), open: r.blade.open, close: r.blade.close, ...(r.blade.light ? { light: r.blade.light } : {}) };
+    weapons.push(entry);
     counts.set(c.cls, (counts.get(c.cls) ?? 0) + 1);
   }
   for (const [cls, n] of counts) log(`${WEAPON_CLASSES[cls].label}: ${n}`);

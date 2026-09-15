@@ -20,6 +20,8 @@ export interface SavedCharacter {
   appearance: Appearance;
   /** The worn pieces by the names the character wears them under (catalogue ids, or the pack's part names). */
   outfit: string[];
+  /** The lightsaber's blade colour, as hex; absent means the default blue. */
+  saber?: { color: string };
   planet: string;
   zone?: string;
   /** Where it last stood, and which way it faced; absent until it has been played. */

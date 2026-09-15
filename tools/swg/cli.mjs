@@ -2678,11 +2678,19 @@ switch (cmd) {
       }
       const def = models.get(id);
       if (!def || def.failed) return { skip: def?.failed ?? 'failed' };
-      return { model: id, file: def.file, bounds: def.bounds };
+      return { model: id, file: def.file, bounds: def.bounds, blade: r.saber ?? null };
     };
     const limit = options.limit ? Number(options.limit) : Infinity;
     const { weapons, skipped } = buildWeapons(galleryTemplates(vfs, 'object/weapon/'), { convert }, { log: console.log, limit });
-    const manifest = { classes: WEAPON_CLASSES, weapons, skipped };
+    // The blade colours the game offers (palette/wp_lightsaber.pal), as hex.
+    let saberColors = [];
+    try {
+      const { parsePalette } = await import('./texrender.mjs');
+      if (vfs.has('palette/wp_lightsaber.pal')) saberColors = parsePalette(vfs.read('palette/wp_lightsaber.pal')).map(([r, g, b]) => `#${[r, g, b].map((v) => v.toString(16).padStart(2, '0')).join('')}`);
+    } catch (err) {
+      console.warn('weapons: the saber palette did not read', err);
+    }
+    const manifest = { classes: WEAPON_CLASSES, weapons, skipped, saberColors };
     writeFileSync(join(outDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
     console.log(`-> ${outDir}: ${weapons.length} weapons in ${models.size} models, ${skipped.length} left out (listed in manifest.json; I in game opens the rack, the Weapons tab)`);
     const unknown = skipped.filter((s) => /unknown|melee kind/.test(s.why));

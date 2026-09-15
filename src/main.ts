@@ -9,7 +9,7 @@ import { PortalRenderer } from './world/portalRender';
 import { Input, type Action } from './core/input';
 import { Physics } from './core/physics';
 import { PLANETS, packIdOf, planetById, spaceZoneOf, type PlanetDef } from './data/planets';
-import { Player } from './player/player';
+import { DEFAULT_SABER_COLOR, Player } from './player/player';
 import { loadPlayerRig } from './player/rig';
 import { Character, loadSpeciesIndex, type SpeciesEntry } from './player/character';
 import { GalaxyMap, type Poi } from './ui/galaxyMap';
@@ -226,6 +226,14 @@ class App {
     this.wardrobe = new WardrobeUi(this.ui, () => this.hud.setPrompt(''));
     this.wardrobe.setBaseUrl(import.meta.env.BASE_URL);
     this.weaponsUi = new WeaponsUi(this.ui, (def, hand) => void this.equip(def, hand));
+    // A blade colour picked on the rack goes on the blades now and into the character's record.
+    this.weaponsUi.onSaberColor = (hex) => {
+      this.player.setSaberColor(hex);
+      if (this.current && !this.creating) {
+        this.current.saber = { color: hex };
+        upsertCharacter(this.current);
+      }
+    };
     this.vehiclesUi = new VehiclesUi(this.ui, (def, kind) => void this.spawnVehicle(def, kind), () => this.world.removeVehicles(this.player.mounted ?? this.player.aboard?.vehicle ?? null));
     this.shipMenu = new ShipMenu(this.ui, { status: () => this.shipStatus(), goToSpace: () => void this.goToSpace(), land: () => void this.landShip(), eject: () => void this.eject() }, () => keyName(this.input.bindings.ship[0] ?? ''));
     this.shipMenu.onClose = () => this.toggleShipMenu();
@@ -1274,6 +1282,9 @@ class App {
       await this.dress(character, c.outfit ?? []);
     }
     this.setClass(c.class);
+    const bladeColor = c.saber?.color ?? DEFAULT_SABER_COLOR;
+    this.player.setSaberColor(bladeColor);
+    this.weaponsUi.saberColor = bladeColor;
     this.loadingScreen.setProgress(0.04);
     this.arrive(planet, c.zone, c.pos ? new THREE.Vector3(c.pos[0], c.pos[1], c.pos[2]) : undefined);
     if (c.heading !== undefined) {
@@ -2304,7 +2315,7 @@ class App {
       if (simulate) {
         player.update(dt, input, this.cam, this.world);
         // The thrown and orbiting sabers glow from the pooled flash lights, so no light comes or goes with them.
-        for (const spot of player.lightSpots()) this.effects.flash(spot.pos, 0x66c8ff, spot.intensity, spot.distance, 0.08);
+        for (const spot of player.lightSpots()) this.effects.flash(spot.pos, player.saberColor, spot.intensity, spot.distance, 0.08);
         // Aboard, the room's own lights, the nearest few, through the same pool (no new lights, so nothing recompiles).
         if (player.aboard) for (const l of player.aboard.roomLights(player.pos, 3, roomLightSpots)) this.effects.flash(l.pos, l.color, l.intensity, l.distance, 0.08);
         this.stepCombat(dt);
@@ -2364,6 +2375,8 @@ class App {
       this.hud.update(dt, at.x, at.y, at.z, this.kit, player.hp, player.maxHp, this.world.day.clock(), this.world.planet.creatures.name, player.saberOn);
 
       if (this.breakFrames) throw new Error('debug: the frame is broken on purpose');
+      // The blades are drawn from where the hands ended up this frame, so they never trail the pose.
+      player.drawBlades(dt, this.cam.camera);
       const tRender = performance.now();
       this.drawFrame();
       stats.renderMs = performance.now() - tRender;

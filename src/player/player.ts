@@ -11,8 +11,9 @@ import { SaberThrow, THROW } from '../combat/saberThrow';
 import { canBlock, inFront, parryClip, parryZone, reflectDirection } from '../combat/deflect';
 import { JKA, JkaMovement, UNIT, type MoveCommand } from './jkaMove';
 import type { CharacterRig, RigState } from './rig';
-import { FIGHTS, ONE_HANDED, gunKindOf, type WeaponClass, type WeaponDef } from './weapons';
+import { FIGHTS, ONE_HANDED, gunKindOf, isSaber, type WeaponClass, type WeaponDef } from './weapons';
 import { STYLES, type SaberStyle } from '../combat/saber';
+import { SaberBlade } from '../combat/saberBlade';
 
 // The original game's run is 5.375 m/s; the character stands about 1.75 m.
 const RUN_SPEED = 5.5;
@@ -94,6 +95,19 @@ interface Parts {
 /** The placeholder torso's look per class, made once (a material made per swap compiled its shader per swap). */
 const UP_AXIS = new THREE.Vector3(0, 1, 0);
 const hiltGlow = new THREE.Vector3();
+/** The placeholder blade meshes are frames for the blade renderer, never drawn themselves. */
+const BLADE_FRAME = new THREE.MeshBasicMaterial({ visible: false });
+/** Where the placeholder hilt ends and its blade begins, along the saber's Y. */
+const HILT_TOP = 0.13;
+/** The blade colour a character starts with. */
+export const DEFAULT_SABER_COLOR = '#3aa0ff';
+const bladeBase = new THREE.Vector3();
+const bladeEnd = new THREE.Vector3();
+/** Whether an object is drawn: itself and every parent visible. */
+function isShown(o: THREE.Object3D): boolean {
+  for (let p: THREE.Object3D | null = o; p; p = p.parent) if (!p.visible) return false;
+  return true;
+}
 const TORSO_JEDI = new THREE.MeshStandardMaterial({ color: 0xc9b58a, roughness: 0.8, metalness: 0, flatShading: true });
 const TORSO_HUNTER = new THREE.MeshStandardMaterial({ color: 0x5f6b6e, roughness: 0.8, metalness: 0.3, flatShading: true });
 
@@ -141,20 +155,14 @@ function buildCharacter(): { group: THREE.Group; parts: Parts } {
   rightArm.position.set(0.34, 0.72, 0);
   hips.add(leftArm, rightArm);
 
-  // Lightsaber: blade runs along the arm, away from the hand.
+  // Lightsaber: blade runs along the arm, away from the hand. The blade mesh is never drawn (its
+  // material is invisible): it is the frame the SaberBlade renderer draws the real blade in, from
+  // the hilt's top (HILT_TOP along its Y) to the tip, and its `visible` flag says whether it is out.
   const saber = new THREE.Group();
   saber.position.set(0, -0.7, 0.05);
   saber.rotation.x = Math.PI;
   const hilt = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.035, 0.26, 8), metal);
-  const blade = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.02, 0.02, 1.1, 8).translate(0, 0.68, 0),
-    new THREE.MeshBasicMaterial({ color: 0x8fd6ff, toneMapped: false }),
-  );
-  const core = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.009, 0.009, 1.1, 6).translate(0, 0.68, 0),
-    new THREE.MeshBasicMaterial({ color: 0xffffff, toneMapped: false }),
-  );
-  blade.add(core);
+  const blade = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, 1.1, 8).translate(0, 0.68, 0), BLADE_FRAME);
   const bladeTip = new THREE.Object3D();
   bladeTip.position.y = 1.25;
   const saberLight = new THREE.PointLight(0x66c8ff, 0, 7);
@@ -304,6 +312,18 @@ export class Player {
   private readonly flying: THREE.Group;
   /** The dual kata's sabers, out of the hands and circling the body. */
   private readonly orbit: THREE.Group[] = [];
+  /** A blur disc in the thrown saber's spin plane, coloured like the blade. */
+  private readonly flyingBlur: THREE.MeshBasicMaterial;
+  /**
+   * Every blade the character can have out, each drawn by its own renderer along a frame mesh: the
+   * one in the right hand, the staff's second, the dual style's left, the thrown one, the two orbiting.
+   * The frame's own visibility (through its parents) says whether the blade is out.
+   */
+  private readonly blades: { frame: THREE.Object3D; blade: SaberBlade; snap: boolean }[] = [];
+  /** The colour the pooled lights glow with around a lit blade: the blade's, softened toward white. */
+  saberColor = new THREE.Color(DEFAULT_SABER_COLOR).getHex();
+  /** How far up the saber's Y the blade begins: the placeholder hilt's top, or the rack hilt's half-length. */
+  private hiltTop = HILT_TOP;
 
   /** Where the sabers out of the hand want light this frame: the thrown one, the orbiting two. */
   lightSpots(): { pos: THREE.Vector3; intensity: number; distance: number }[] {
@@ -312,7 +332,7 @@ export class Player {
     if (this.saberOn && !this.thrown.inFlight && !this.orbiting && this.classId === 'jedi' && !this.mounted) {
       this.parts.saber.getWorldPosition(hiltGlow);
       hiltGlow.y += 0.6;
-      out.push({ pos: hiltGlow, intensity: 6, distance: 7 });
+      out.push({ pos: hiltGlow, intensity: 4, distance: 7 });
     }
     if (this.orbiting) for (const g of this.orbit) out.push({ pos: g.position, intensity: 3, distance: 5 });
     return out;
@@ -372,10 +392,8 @@ export class Player {
     flyHilt.rotation.z = Math.PI / 2;
     flyBlade.rotation.z = Math.PI / 2;
     // A faint disc in the spin plane reads as the blur of the spinning blade from any angle.
-    const blur = new THREE.Mesh(
-      new THREE.CircleGeometry(1.2, 32),
-      new THREE.MeshBasicMaterial({ color: 0x8fd6ff, transparent: true, opacity: 0.16, side: THREE.DoubleSide, depthWrite: false, toneMapped: false }),
-    );
+    this.flyingBlur = new THREE.MeshBasicMaterial({ color: 0x8fd6ff, transparent: true, opacity: 0.16, side: THREE.DoubleSide, depthWrite: false, toneMapped: false });
+    const blur = new THREE.Mesh(new THREE.CircleGeometry(1.2, 32), this.flyingBlur);
     blur.rotation.x = -Math.PI / 2;
     // No light of its own: every point light in the scene makes every shader longer (and on
     // some drivers seconds slower to compile), so the flying saber's glow comes from the pooled
@@ -397,7 +415,20 @@ export class Player {
       scene.add(g);
       markActor(g);
       this.orbit.push(g);
+      this.blades.push({ frame: b, blade: new SaberBlade(), snap: true });
     }
+    // The blades themselves, in the scene's own frame (they are built from world positions each frame).
+    this.blades.push(
+      { frame: parts.blade, blade: new SaberBlade(), snap: false },
+      { frame: parts.staffBlade, blade: new SaberBlade(), snap: false },
+      { frame: parts.blade2, blade: new SaberBlade(), snap: false },
+      { frame: flyBlade, blade: new SaberBlade(), snap: true },
+    );
+    for (const b of this.blades) {
+      scene.add(b.blade.group);
+      markActor(b.blade.group);
+    }
+    this.setSaberColor(DEFAULT_SABER_COLOR);
     this.cmd.probe = (dir, dist) => this.probeWall(dir, dist);
     this.cmd.groundDistance = (max) => this.groundDistanceUnits(max);
     this.cmd.floorAhead = (dist) => this.floorAhead(dist);
@@ -707,18 +738,49 @@ export class Player {
     this.updateBlades();
   }
 
+  /** The blades' colour (hex, as '#rrggbb' or a number): the glow, the thrown saber's blur, the pooled lights. */
+  setSaberColor(hex: string | number): void {
+    const c = new THREE.Color(hex);
+    for (const b of this.blades) b.blade.setColor(c.getHex());
+    this.flyingBlur.color.copy(c);
+    // The light the blade throws is the colour softened toward white: a pure colour lit the body a flat, saturated wash.
+    this.saberColor = c.lerp(new THREE.Color(0xffffff), 0.4).getHex();
+  }
+
+  /**
+   * Draw every blade that is out, from its hilt's top to its tip, with the smear its motion leaves:
+   * once a frame, after the body is posed and before the frame is drawn. A blade whose frame is
+   * hidden retracts; the thrown and orbiting ones snap, as the blade in the hand does while they
+   * are out (the blade leaves with the hilt, it does not shrink back into it).
+   */
+  drawBlades(dt: number, camera: THREE.Camera): void {
+    const busy = this.saber.busy || this.swing >= 0;
+    const swing = this.bladeActive ? 1 : busy ? 0.55 : 0;
+    const away = this.thrown.inFlight || this.orbiting;
+    for (const { frame, blade, snap } of this.blades) {
+      const shown = isShown(frame);
+      const length = blade.spec.length;
+      // The frame's world matrix is this frame's pose, not the last drawn one, so the blade never trails the hand.
+      frame.updateWorldMatrix(true, false);
+      frame.localToWorld(bladeBase.set(0, this.hiltTop, 0));
+      frame.localToWorld(bladeEnd.set(0, this.hiltTop + length, 0));
+      blade.update(dt, bladeBase, bladeEnd, shown, camera, swing, snap || away);
+    }
+  }
+
   /** Which blades show: the main one, the staff's second, the dual style's left-hand saber; none while thrown. */
   private updateBlades(): void {
     const p = this.parts;
     const rightWeapon = this.equipped.right;
     const leftWeapon = this.equipped.left;
     // A weapon from the rack in a hand hides the placeholder there; a lightsaber from the rack keeps the blade, on its own hilt.
-    const meleeRight = !!rightWeapon && FIGHTS[rightWeapon.class] !== 'gun' && rightWeapon.class !== 'lightsaber';
+    const saberRight = isSaber(rightWeapon?.class);
+    const meleeRight = !!rightWeapon && FIGHTS[rightWeapon.class] !== 'gun' && !saberRight;
     const gunRight = !!rightWeapon && FIGHTS[rightWeapon.class] === 'gun';
     const on = this.saberOn && this.classId === 'jedi' && !meleeRight;
     const inHand = !this.thrown.inFlight && !this.orbiting;
     p.saber.visible = this.classId === 'jedi' && !meleeRight;
-    p.hilt.visible = inHand && rightWeapon?.class !== 'lightsaber';
+    p.hilt.visible = inHand && !saberRight;
     p.blade.visible = on && inHand;
     p.staffBlade.visible = on && inHand && this.saber.style === 'staff';
     p.saber2.visible = this.classId === 'jedi' && this.saber.style === 'dual' && !this.orbiting && !leftWeapon;
@@ -747,7 +809,8 @@ export class Player {
     const p = this.parts;
     const right = this.reach.right;
     const left = this.reach.left;
-    if (i === 0 && right && this.equipped.right?.class !== 'lightsaber') {
+    const saberRight = isSaber(this.equipped.right?.class);
+    if (i === 0 && right && !saberRight) {
       right.near.getWorldPosition(a);
       right.far.getWorldPosition(b);
       return;
@@ -757,7 +820,7 @@ export class Player {
       left.far.getWorldPosition(b);
       return;
     }
-    if (i === 1 && this.saber.style === 'staff' && right && this.equipped.right?.class !== 'lightsaber') {
+    if (i === 1 && this.saber.style === 'staff' && right && !saberRight) {
       // A polearm: the shaft's other half.
       right.near.getWorldPosition(a);
       right.far.getWorldPosition(b);
@@ -836,11 +899,14 @@ export class Player {
     this.held[hand] = holder;
     this.reach[hand] = { near, far };
     this.equipped[hand] = def;
-    if (hand === 'right' && def.class === 'lightsaber') {
-      // The rack's hilt hangs where the placeholder's does, so the blade comes out of it.
+    if (hand === 'right' && isSaber(def.class)) {
+      // The rack's hilt hangs where the placeholder's does, so the blade comes out of it: the model
+      // is centred on the grip, so the blade begins half its length up, and the blade file says how long.
       holder.removeFromParent();
       this.parts.saber.add(holder);
       holder.scale.setScalar(1 / Math.max(this.parts.saber.getWorldScale(new THREE.Vector3()).x, 1e-6));
+      this.hiltTop = b ? Math.abs(b.max[1] - b.min[1]) / 2 : HILT_TOP;
+      this.setBladeSpec(def.blade ? { length: def.blade.length, width: def.blade.width, open: def.blade.open, close: def.blade.close } : null);
     }
     const fights = FIGHTS[def.class];
     if (fights === 'gun') {
@@ -852,6 +918,16 @@ export class Player {
     return fights === 'gun' ? 'bounty_hunter' : 'jedi';
   }
 
+  /** The blades' size and timing, from a rack saber's blade file, or the placeholder's when null; the tips move to match. */
+  private setBladeSpec(spec: { length: number; width: number; open: number; close: number } | null): void {
+    const s = spec ?? { length: 1.1, width: 0.12, open: 0.32, close: 0.32 };
+    for (const b of this.blades) b.blade.spec = { ...s };
+    const tip = this.hiltTop + s.length;
+    this.parts.bladeTip.position.y = tip;
+    this.parts.staffTip.position.y = -tip;
+    this.parts.bladeTip2.position.y = tip;
+  }
+
   /** Take the rack's weapon out of a hand (the placeholder comes back). */
   unequip(hand: 'right' | 'left'): void {
     const held = this.held[hand];
@@ -861,6 +937,10 @@ export class Player {
         const m = o as THREE.Mesh;
         if (m.isMesh) m.geometry.dispose();
       });
+    }
+    if (hand === 'right' && isSaber(this.equipped.right?.class)) {
+      this.hiltTop = HILT_TOP;
+      this.setBladeSpec(null);
     }
     this.held[hand] = null;
     this.reach[hand] = null;
@@ -878,7 +958,9 @@ export class Player {
     const r = this.equipped.right;
     const l = this.equipped.left;
     if (r && FIGHTS[r.class] === 'gun') return STYLES;
-    if (r?.class === 'polearm') return ['staff'];
+    if (r?.class === 'polearm' || r?.class === 'lightsaberStaff') return ['staff'];
+    if (r?.class === 'lightsaber2h') return ['medium', 'strong'];
+    if (r?.class === 'lightsaber') return ['fast', 'medium', 'strong'];
     if (r && ONE_HANDED.has(r.class) && l && ONE_HANDED.has(l.class)) return ['dual'];
     if (r && (FIGHTS[r.class] === 'single')) return ['fast', 'medium', 'strong'];
     return STYLES;

@@ -127,12 +127,78 @@ export function resolveAppearanceToMesh(vfs, rawAppearance) {
   // Skeletal appearances (creatures, and static things with animated parts such as the Sarlacc)
   // resolve to their .sat; the caller decides whether to bake one at its bind pose.
   if (lower.endsWith('.sat')) return vfs.has(appearance) ? { appearance, skeletal: appearance, parts: [] } : { skip: `skeletal appearance missing: ${appearance}` };
+  // A lightsaber (.lsb): the hilt's appearance, and the blade the client draws from it.
+  if (lower.endsWith('.lsb')) {
+    if (!vfs.has(appearance)) return { skip: `lightsaber missing: ${appearance}` };
+    let saber;
+    try {
+      saber = parseLightsaber(parseIff(vfs.read(appearance)));
+    } catch (err) {
+      return { skip: `lightsaber failed: ${err.message}` };
+    }
+    if (!saber.hilt) return { skip: `lightsaber names no hilt: ${appearance}` };
+    const hilt = resolveAppearanceToMesh(vfs, saber.hilt);
+    return hilt.skip ? hilt : { ...hilt, saber };
+  }
   if (!/\.(apt|lod|msh|cmp|prt)$/.test(lower)) return { skip: `appearance type ${lower.slice(lower.lastIndexOf('.'))}` };
   try {
     return splitParticles(appearance, resolveParts(vfs, appearance));
   } catch (err) {
     return { skip: `resolve failed: ${err.message}` };
   }
+}
+
+/**
+ * A lightsaber appearance (LSAT form): BASE names the hilt's appearance, ASND its idle sound, the
+ * BLAD form the blade (SHDR its shader, LGTH its length and WDTH its width in metres, OPEN and
+ * CLOS the seconds it takes to ignite and retract), and an LGHT form, when there is one, the
+ * light the blade casts (COLR as r, g, b, a bytes, RANG two floats, TIME two floats, DAYN a byte).
+ */
+export function parseLightsaber(root) {
+  const out = { hilt: null, sound: null, shader: null, length: 1.3, width: 0.12, open: 1.5, close: 1.5, light: null };
+  const walk = (node, inBlade, inLight) => {
+    if (isForm(node)) {
+      const type = node.type;
+      for (const c of node.children ?? []) walk(c, inBlade || type === 'BLAD', inLight || type === 'LGHT');
+      return;
+    }
+    const d = node.data;
+    const f = (o = 0) => (d.length >= o + 4 ? d.readFloatLE(o) : 0);
+    switch (node.tag) {
+      case 'BASE':
+        out.hilt = readCString(d, 0).value.replace(/\\/g, '/');
+        break;
+      case 'ASND':
+        out.sound = readCString(d, 0).value.replace(/\\/g, '/');
+        break;
+      case 'SHDR':
+        if (inBlade) out.shader = readCString(d, 0).value.replace(/\\/g, '/');
+        break;
+      case 'LGTH':
+        if (inBlade) out.length = f();
+        break;
+      case 'WDTH':
+        if (inBlade) out.width = f();
+        break;
+      case 'OPEN':
+        if (inBlade) out.open = f();
+        break;
+      case 'CLOS':
+        if (inBlade) out.close = f();
+        break;
+      case 'COLR':
+        if (inLight && d.length >= 3) out.light = { ...(out.light ?? {}), color: [d[0], d[1], d[2]] };
+        break;
+      case 'RANG':
+        if (inLight) out.light = { ...(out.light ?? {}), range: [f(0), f(4)] };
+        break;
+      case 'TIME':
+        if (inLight) out.light = { ...(out.light ?? {}), time: [f(0), f(4)] };
+        break;
+    }
+  };
+  walk(root, false, false);
+  return out;
 }
 
 /**

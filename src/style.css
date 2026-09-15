@@ -212,6 +212,11 @@ b { color: var(--accent); font-weight: 600; }
 .weapons-row button { flex: none; padding: 3px 8px; font-size: 10px; background: rgba(45,127,214,0.25); color: var(--text); border: 1px solid var(--panel-border); border-radius: 4px; cursor: pointer; }
 .weapons-row button.on { background: rgba(45,127,214,0.6); border-color: var(--accent); }
 .weapons-skipped { font-size: 11px; color: var(--muted); margin: 4px 0; }
+.blade-colours { display: flex; flex-wrap: wrap; align-items: center; gap: 3px; padding: 4px 0 8px; }
+.blade-colours .swatch { width: 18px; height: 18px; padding: 0; border: 1px solid rgba(0,0,0,0.6); border-radius: 3px; cursor: pointer; }
+.blade-colours .swatch.on { outline: 2px solid var(--accent); outline-offset: 1px; }
+.blade-own { display: flex; align-items: center; gap: 5px; margin-left: 8px; font-size: 11px; color: var(--muted); }
+.blade-own input { width: 34px; height: 22px; padding: 0; border: 1px solid var(--panel-border); background: transparent; cursor: pointer; }
 .weapons-skipped div { padding: 4px 0 6px 12px; line-height: 1.5; }
 #weapons .hint { padding: 12px; font-size: 12px; color: var(--muted); }
 #garage .wardrobe-header .find { flex: none; width: 140px; padding: 4px 8px; font-size: 11px; background: rgba(0,0,0,0.3); color: var(--text); border: 1px solid var(--panel-border); border-radius: 4px; }
