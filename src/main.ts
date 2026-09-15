@@ -61,6 +61,8 @@ const stats = { frameMs: 0, physicsMs: 0, renderMs: 0, rawDt: 0, grounded: false
 const tmp = new THREE.Vector3();
 const tmpQ = new THREE.Quaternion();
 const roomLightSpots: import('./vehicles/interior').RoomLight[] = [];
+/** How near the controls in a ship's bridge E takes them, metres in the hull's frame. */
+const CONTROLS_RANGE = 2.5;
 const boltFrom = new THREE.Vector3();
 
 class App {
@@ -1180,7 +1182,8 @@ class App {
   /** The camera after everything has moved: chasing a ship in flight in its own frame, else orbiting the player. */
   private updateCamera(blocked: import('./core/camera').CameraBlocker | null, dt = 1 / 60): void {
     const { player, input } = this;
-    const ship = player.mounted?.spec.ship && player.mounted.airborne && !input.held('freeLook') ? player.mounted : null;
+    const flown = player.mounted ?? player.piloting;
+    const ship = flown?.spec.ship && flown.airborne && !input.held('freeLook') ? flown : null;
     if (ship) {
       this.cam.chase(input, dt, ship.pos, ship.attitude, ship.heading, 6 + ship.radius * 2.2, ship.cockpitEye(tmp));
       // In the cockpit the hull would fill the view: it is hidden until the camera comes back out,
@@ -1212,7 +1215,8 @@ class App {
   private stepVehicles(dt: number, simulate: boolean): void {
     const { player, input } = this;
     let drive: DriveInput | null = null;
-    if (simulate && player.mounted) {
+    const pilot = player.mounted ?? player.piloting;
+    if (simulate && pilot) {
       // The mouse steers: the vehicle turns toward where the camera looks, and a flyer climbs or
       // sinks as the view tilts up or down past a dead band around level. Alt frees the camera
       // to look around without steering.
@@ -1220,7 +1224,7 @@ class App {
       const tilt = -(this.cam.pitch - CAMERA_REST_PITCH);
       const vertical = free ? 0 : Math.sign(tilt) * THREE.MathUtils.clamp((Math.abs(tilt) - 0.12) / 0.45, 0, 1);
       // A ship in flight takes the mouse itself (the camera chases it); Alt hands it back to the orbit.
-      const shipFlying = !!player.mounted.spec.ship && player.mounted.airborne && !free && input.locked;
+      const shipFlying = !!pilot.spec.ship && pilot.airborne && !free && input.locked;
       const lookDX = shipFlying ? input.mouseDX : 0;
       const lookDY = shipFlying ? input.mouseDY : 0;
       if (shipFlying) {
@@ -1242,7 +1246,7 @@ class App {
     }
     const terrain = this.world.terrain;
     for (const v of this.world.vehicles) {
-      if (!v.drift) v.update(dt, this.physics, v === player.mounted ? drive : null, (x, z) => terrain.heightAt(x, z), (x, z) => terrain.waterHeightAt(x, z));
+      if (!v.drift) v.update(dt, this.physics, v === pilot ? drive : null, (x, z) => terrain.heightAt(x, z), (x, z) => terrain.waterHeightAt(x, z));
       else {
         const t = v.body.translation();
         v.pos.set(t.x, t.y, t.z);
@@ -1288,6 +1292,12 @@ class App {
         v.dispose(this.physics, this.scene);
         this.world.vehicles.splice(this.world.vehicles.indexOf(v), 1);
       }
+    }
+    if (player.piloting?.crashed) {
+      const m = player.piloting;
+      player.takeDamage(Math.round(THREE.MathUtils.clamp((m.crashed - 8) * 1.2, 5, 95)));
+      this.hud.hurt();
+      m.crashed = 0;
     }
     if (player.mounted) {
       player.syncMount();
@@ -1527,6 +1537,24 @@ class App {
   private handleMount(): void {
     const p = this.player;
     if (p.aboard) {
+      const room = p.aboard;
+      const v = room.vehicle;
+      if (p.piloting) {
+        // Letting go of the controls: only once the ship is down on its gear.
+        if (v.airborne) {
+          this.hud.setPrompt('land before leaving the controls');
+          return;
+        }
+        p.piloting = null;
+        this.hud.setPrompt('');
+        return;
+      }
+      if (room.pilotSpot && p.pos.distanceTo(room.pilotSpot) < CONTROLS_RANGE) {
+        p.piloting = v;
+        this.cam.zoomTarget = Math.max(this.cam.zoomTarget, 6);
+        this.hud.setPrompt(`at the controls of the ${v.spec.label} · <b>W</b>/<b>S</b> throttle · mouse steers · <b>E</b> lets go once landed`);
+        return;
+      }
       this.leaveShip(false);
       return;
     }
@@ -1741,7 +1769,8 @@ class App {
       if (player.noclip) prompt = `<b>NOCLIP</b> ${Math.round(player.noclipSpeed)} m/s · <b>WASD</b> fly · <b>Space</b> up · <b>Ctrl</b> down · <b>Shift</b> fast · <b>+</b>/<b>-</b> speed · <b>N</b> off`;
       else if (player.mounted) prompt = mountPrompt(player.mounted);
       else if (this.world.elevatorsNear(player.pos, MOUNT_RANGE).length) prompt = `<b>E</b> elevator ${this.world.elevatorsNear(player.pos, MOUNT_RANGE)[0].kind === 'down' ? 'down' : 'up'}`;
-      else if (player.aboard) prompt = `aboard ${player.aboard.vehicle.spec.label} · <b>E</b> step out`;
+      else if (player.piloting) prompt = `at the controls of the ${player.piloting.spec.label} · <b>W</b>/<b>S</b> throttle · mouse steers · ${player.piloting.airborne ? 'land, then' : ''} <b>E</b> lets go · ${Math.round(Math.abs(player.piloting.speed) * 3.6)} km/h`;
+      else if (player.aboard) prompt = player.aboard.pilotSpot && player.pos.distanceTo(player.aboard.pilotSpot) < CONTROLS_RANGE ? `<b>E</b> take the controls` : `aboard ${player.aboard.vehicle.spec.label} · <b>E</b> step out`;
       else if (this.nearestSpeederDistance() < MOUNT_RANGE) prompt = this.nearestHasRoom() ? '<b>E</b> board' : '<b>E</b> mount';
       this.hud.setPrompt(prompt);
       const flying = player.mounted?.spec.ship && player.mounted.airborne && !input.held('freeLook') ? player.mounted : null;

@@ -2636,7 +2636,8 @@ switch (cmd) {
     const vfs = mount(pos[1]);
     const outDir = join(pos[2], 'ships');
     mkdirSync(outDir, { recursive: true });
-    const { buildShips, SHIP_CLASSES } = await import('./ships.mjs');
+    const shipsModule = await import('./ships.mjs');
+    const { buildShips, SHIP_CLASSES } = shipsModule;
     const { galleryTemplates } = await import('./gallery.mjs');
     const models = new Map();
     const cache = new Map();
@@ -2654,14 +2655,14 @@ switch (cmd) {
           const bounds = conv.flipX ? { min: [-b.max[0], b.min[1], b.min[2]], max: [-b.min[0], b.max[1], b.max[2]] } : b;
           const effects = attachedEffects(vfs, conv.effects, outDir);
           // A hull that is a portal building (the yacht) carries its rooms as cells; the game boards them.
-          models.set(id, { id, file: `${id}.glb`, bounds, triangles: conv.tris, textured: conv.textured, shaders: conv.shaders.length, parts: conv.partCount, ...(conv.cells ? { cells: conv.cells, portals: conv.portals ?? [] } : {}), ...(effects.length ? { effects } : {}), ...(conv.tris ? {} : { failed: 'no triangles' }) });
+          models.set(id, { id, file: `${id}.glb`, bounds, triangles: conv.tris, textured: conv.textured, shaders: conv.shaders.length, parts: conv.partCount, hardpoints: conv.mesh.hardpoints.map((h) => h.name), ...(conv.cells ? { cells: conv.cells, portals: conv.portals ?? [] } : {}), ...(effects.length ? { effects } : {}), ...(conv.tris ? {} : { failed: 'no triangles' }) });
         } catch (err) {
           models.set(id, { id, failed: err.message });
         }
       }
       const def = models.get(id);
       if (!def || def.failed) return { skip: def?.failed ?? 'failed' };
-      return { model: id, file: def.file, bounds: def.bounds, cells: def.cells ? def.cells.filter((c) => c.index > 0).length : 0 };
+      return { model: id, file: def.file, bounds: def.bounds, cells: def.cells ? def.cells.filter((c) => c.index > 0).length : 0, hardpoints: def.hardpoints ?? [] };
     };
     // The interior the template names, whether or not the archives hold it: a missing one is
     // reported as such rather than passed over as if the ship had none.
@@ -2698,19 +2699,58 @@ switch (cmd) {
         try {
           if (!vfs.has(path)) throw new Error(`Not in archives: ${path}`);
           const conv = convertOne(vfs, path, join(outDir, `${id}.glb`));
-          models.set(id, { id, file: `${id}.glb`, triangles: conv.tris, textured: conv.textured, shaders: conv.shaders.length, parts: conv.partCount, ...(conv.tris ? {} : { failed: 'no triangles' }) });
+          models.set(id, { id, file: `${id}.glb`, triangles: conv.tris, textured: conv.textured, shaders: conv.shaders.length, parts: conv.partCount, hardpoints: conv.mesh.hardpoints.map((h) => h.name), ...(conv.tris ? {} : { failed: 'no triangles' }) });
         } catch (err) {
           models.set(id, { id, failed: err.message });
         }
       }
       const def = models.get(id);
-      return !def || def.failed ? { skip: def?.failed ?? 'failed' } : { file: def.file };
+      return !def || def.failed ? { skip: def?.failed ?? 'failed' } : { file: def.file, hardpoints: def.hardpoints ?? [] };
+    };
+    // The components a ship is fitted with: the game's engines, guns and boosters are objects of
+    // their own (object/tangible/ship/components/), hung on the hull's and wings' hardpoints named
+    // for them (engine_pos1, weapon1_neg1, booster_pos1). The first of the components made for
+    // the ship's family and side is taken, its hardpoint's index picking among the guns.
+    const componentTemplates = galleryTemplates(vfs, 'object/tangible/ship/components/');
+    const componentKinds = { engine: 'eng', weapon: 'wpn', booster: 'bst' };
+    const componentsFor = (id, hardpoints, notes) => {
+      const out = [];
+      const family = id.replace(/^(advanced|basic|prototype|player)_/, '').replace(/_modified$|_imperial_guard$|_longprobe$/, '');
+      for (const hp of hardpoints) {
+        const m = /^(engine|weapon|booster)(\d*)_?([a-z]+)?_?(\d*)$/i.exec(hp);
+        if (!m) continue;
+        const [, kind, slot, side] = m;
+        const short = componentKinds[kind.toLowerCase()];
+        const candidates = componentTemplates.filter((t) => {
+          const base = t.replace(/^.*\/shared_/, '').replace(/\.iff$/, '');
+          return base.startsWith(`${short}_`) && base.includes(family) && (!side || base.includes(`_${side.toLowerCase()}`) || !/_(pos|neg)(_|$)/.test(base));
+        });
+        if (!candidates.length) {
+          notes.push(`no ${kind} component for ${hp}`);
+          continue;
+        }
+        // The lowest style first; a gun's own index (…_0, …_1) follows the hardpoint's number.
+        candidates.sort();
+        const index = slot ? Number(slot) - 1 : 0;
+        const indexed = candidates.filter((t) => new RegExp(`_${index}\\.iff$`).test(t));
+        const template = (indexed.length ? indexed : candidates)[0];
+        const r = resolveTemplateMesh(vfs, template, cache);
+        if (r.skip || !r.appearance) {
+          notes.push(`${kind} ${template}: ${r.skip ?? 'no appearance'}`);
+          continue;
+        }
+        const conv = convertAppearance(r.appearance);
+        if (conv.skip) notes.push(`${kind} ${template}: ${conv.skip}`);
+        else out.push({ kind: 'component', slot: kind.toLowerCase(), file: conv.file, template, hardpoint: hp });
+      }
+      return out;
     };
     // What the ship's client data hangs on the hull, and its cockpit frame: the wings (templates
     // of their own, their appearances converted like the hull), an appearance shown while the
     // drive runs, the thruster and contrail hardpoints, and the cockpit's frame with its offsets.
-    const extrasOf = (template) => {
+    const extrasOf = (template, hull) => {
       const out = { attachments: [], thrusters: [], contrails: [], cockpit: null, notes: [] };
+      const hardpoints = [...(hull?.hardpoints ?? [])];
       const cdf = resolveTemplateString(vfs, template, ['clientDataFile'], cache);
       if (cdf) {
         const cdfPath = cdf.replace(/\\/g, '/').replace(/^\//, '');
@@ -2726,7 +2766,10 @@ switch (cmd) {
               }
               const m = convertAppearance(r.appearance);
               if (m.skip) out.notes.push(`wing ${wing.template}: ${m.skip}`);
-              else out.attachments.push({ kind: 'wing', file: m.file, template: wing.template, transform: wing.transform });
+              else {
+                out.attachments.push({ kind: 'wing', file: m.file, template: wing.template, transform: wing.transform });
+                hardpoints.push(...m.hardpoints);
+              }
             }
             for (const on of data.onOff) {
               const m = convertAppearance(on.appearance);
@@ -2742,6 +2785,9 @@ switch (cmd) {
           }
         }
       }
+      // The engines, guns and boosters on the hull's and wings' hardpoints.
+      const { shipLabelOf } = shipsModule;
+      out.attachments.push(...componentsFor(shipLabelOf(template), hardpoints, out.notes));
       const cockpit = resolveTemplateString(vfs, template, ['cockpitFilename'], cache);
       if (cockpit && !/noframe/i.test(cockpit)) {
         const cpPath = cockpit.replace(/\\/g, '/').replace(/^\//, '');

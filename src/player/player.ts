@@ -280,6 +280,8 @@ export class Player {
   private physics: Physics;
   /** The ship's room this player is in, with physics of its own; `pos` is then in the hull's frame. */
   aboard: import('../vehicles/interior').ShipInterior | null = null;
+  /** The ship flown from inside its rooms (standing at its controls, still aboard). */
+  piloting: Vehicle | null = null;
   /** The world's own body, collider and controller, kept while aboard a ship and taken back on leaving. */
   private worldBody: { physics: Physics; body: RAPIER.RigidBody; collider: RAPIER.Collider; controller: RAPIER.KinematicCharacterController } | null = null;
   private world: World | null = null;
@@ -457,6 +459,7 @@ export class Player {
     this.body.setEnabled(true);
     this.worldBody = null;
     this.aboard = null;
+    this.piloting = null;
   }
 
   /** Where the figure stands in the world: `pos` itself, or, aboard a ship, `pos` carried through the hull's transform. */
@@ -1094,10 +1097,14 @@ export class Player {
 
     let mx = 0;
     let mz = 0;
-    if (input.held('forward')) mz += 1;
-    if (input.held('back')) mz -= 1;
-    if (input.held('left')) mx -= 1;
-    if (input.held('right')) mx += 1;
+    // At a ship's controls the keys fly the ship; the figure stands where it is.
+    const atControls = !!this.piloting;
+    if (!atControls) {
+      if (input.held('forward')) mz += 1;
+      if (input.held('back')) mz -= 1;
+      if (input.held('left')) mx -= 1;
+      if (input.held('right')) mx += 1;
+    }
 
     // Aboard a ship the camera's frame is the hull's, so its directions are already the room's:
     // forward on the screen is forward in the room, whatever the hull is doing.
@@ -1217,7 +1224,7 @@ export class Player {
     } else if (this.grounded) {
       this.vel.x = move.x * speed;
       this.vel.z = move.z * speed;
-      if (input.held('jump') && !this.prone && !wasProne) {
+      if (input.held('jump') && !this.prone && !wasProne && !atControls) {
         this.vel.y = Math.sqrt(2 * g * JUMP_HEIGHT);
         this.grounded = false;
       }

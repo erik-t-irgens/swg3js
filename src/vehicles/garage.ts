@@ -19,7 +19,7 @@ export interface VehicleDef {
   /** What the manifest says of the hull model's own cells, when it is a portal building (rooms, their lights). */
   cells?: NonNullable<import('./interior').InteriorDef['cells']>;
   /** What the ship's client data hangs on the hull: its wings, and an appearance shown while the drive runs. */
-  attachments?: { kind: 'wing' | 'engine'; file: string; hardpoint?: string | null; transform?: number[] | null }[];
+  attachments?: { kind: 'wing' | 'engine' | 'component'; slot?: string; file: string; hardpoint?: string | null; transform?: number[] | null }[];
   /** The cockpit frame drawn around the pilot, with the first-person view's offset from the cockpit point. */
   cockpit?: { file: string; zoom?: number[]; firstOffset?: number[]; thirdOffset?: number[] } | null;
   /** The hardpoints the client data puts thruster effects at. */
@@ -167,9 +167,12 @@ export class Garage {
         part.userData.attachment = a.kind;
         const hp = a.hardpoint ? findHardpoint(model, a.hardpoint) : null;
         if (hp) {
+          // At the hardpoint, turned its way (a gun points where its hardpoint does), in the model's frame.
           model.updateMatrixWorld(true);
           part.position.copy(hp.getWorldPosition(new THREE.Vector3())).sub(model.getWorldPosition(new THREE.Vector3()));
-        } else if (a.transform && a.transform.length >= 3 && a.transform.slice(0, 3).some((n) => n !== 0)) part.position.set(a.transform[0], a.transform[1], a.transform[2]);
+          part.quaternion.copy(model.getWorldQuaternion(new THREE.Quaternion()).invert().multiply(hp.getWorldQuaternion(new THREE.Quaternion())));
+        } else if (a.hardpoint) console.warn(`garage: ${def.id}: no hardpoint "${a.hardpoint}" for ${a.slot ?? a.kind} ${a.file}`);
+        else if (a.transform && a.transform.length >= 3 && a.transform.slice(0, 3).some((n) => n !== 0)) part.position.set(a.transform[0], a.transform[1], a.transform[2]);
         model.add(part);
       } catch (err) {
         console.warn(`garage: ${def.id}: ${a.kind} ${a.file} did not load`, err);
@@ -245,7 +248,8 @@ export class Garage {
     });
     if (def.source !== 'creature') addEngineGlow(v, engines);
     // The cockpit view: the model's own point when it names one, else the seated pilot's eyes over the seat, else forward of the middle at eye height.
-    if (spec.ship) v.cockpit = seat.cockpit ? [seat.cockpit.x, seat.cockpit.y, seat.cockpit.z] : seat.point ? [seat.point.x, seat.point.y + 1.15, seat.point.z] : [0, bounds.min[1] + (bounds.max[1] - bounds.min[1]) * 0.7, bounds.min[2] + (bounds.max[2] - bounds.min[2]) * 0.72];
+    // The cockpit view: the model's own point when it names one, else the seated pilot's eyes over the seat (a hardpoint's, or the kind's own place, where the rider is drawn).
+    if (spec.ship) v.cockpit = seat.cockpit ? [seat.cockpit.x, seat.cockpit.y, seat.cockpit.z] : [spec.seat[0], spec.seat[1] + SEATED_EYE, spec.seat[2]];
     // The cockpit frame, hung at the cockpit point: the instruments and canopy around the pilot,
     // seen from outside through the glass and from the eyes in first person.
     if (spec.ship && def.cockpit && v.cockpit) {
@@ -307,6 +311,8 @@ function findHardpoint(model: THREE.Object3D, name: string): THREE.Object3D | nu
   return found;
 }
 
+/** A seated pilot's eyes over the seat point, metres. */
+const SEATED_EYE = 1.0;
 /** How much of a hull's glass is seen through while someone is aboard or at the controls. */
 const CLEAR_PANE = 0.45;
 /** A "glass" covering more of the hull's triangles than this is its skin under a glassy name, not a window. */

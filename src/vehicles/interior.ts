@@ -89,8 +89,8 @@ export class ShipInterior {
   private colliders: RAPIER.Collider[] = [];
   /** The room nodes, to show only from inside when they are part of the hull model (a room drawn through the hull's skin looks wrong from outside). */
   private readonly rooms: THREE.Object3D[] = [];
-  /** The shell's shadow casters: off while someone is aboard, so the sun reaches the rooms (which lie where the shell's shadow would fall). */
-  private readonly shellCasters: THREE.Object3D[] = [];
+  /** Where the pilot stands to take the controls, in the hull's frame: the front of the bridge, when the rooms have one. */
+  pilotSpot: THREE.Vector3 | null = null;
   /** The rooms' point lights, in the hull's frame. */
   readonly lights: RoomLight[] = [];
   /** The rooms' hardpoints, in the hull's frame: seats, terminals and the way in, by name. */
@@ -182,6 +182,50 @@ export class ShipInterior {
   private findEntry(box: THREE.Box3): void {
     const centre = box.getCenter(new THREE.Vector3());
     const size = box.getSize(new THREE.Vector3());
+    const best = this.findSpot(box, centre);
+    if (best) this.entry.copy(best);
+    else {
+      // No floor with room found: the middle, on whatever is under it.
+      this.entry.copy(centre);
+      const down = this.physics.groundDistance(centre.x, box.max.y - 0.05, centre.z, size.y + 1);
+      this.entry.y = down !== null ? box.max.y - 0.05 - down + 0.15 : box.min.y + 0.3;
+      console.warn('ship interior: no clear floor found in the entry room; standing the boarder at its middle');
+    }
+  }
+
+  /**
+   * The pilot's place: the front of the bridge (a cell named for it), so the controls can be
+   * taken there. Rooms without a bridge have none, and the ship is flown from its seat outside.
+   */
+  private findPilotSpot(): void {
+    const boxes = new Map<number, THREE.Box3>();
+    const names = new Map<number, string>();
+    this.group.traverse((o) => {
+      const m = o as THREE.Mesh;
+      const cell = cellIndexOf(o);
+      if (!m.isMesh || cell <= 0) return;
+      if (!names.has(cell)) names.set(cell, cellNameOf(o));
+      if (!m.geometry.boundingBox) m.geometry.computeBoundingBox();
+      const box = m.geometry.boundingBox!.clone().applyMatrix4(new THREE.Matrix4().copy(this.vehicle.group.matrixWorld).invert().multiply(m.matrixWorld));
+      (boxes.get(cell) ?? boxes.set(cell, new THREE.Box3()).get(cell)!).union(box);
+    });
+    const bridge = [...names.entries()].find(([, n]) => /bridge|cockpit|pilot|flight|control|helm/i.test(n))?.[0];
+    if (bridge === undefined) return;
+    const box = boxes.get(bridge)!;
+    // Toward the nose (+Z in the hull's frame), on the bridge's centre line.
+    const target = new THREE.Vector3((box.min.x + box.max.x) / 2, (box.min.y + box.max.y) / 2, box.max.z);
+    const spot = this.findSpot(box, target);
+    if (!spot) return;
+    this.pilotSpot = spot;
+    // The view from the controls: standing eyes over the spot.
+    this.vehicle.cockpit = [spot.x, spot.y + 1.55, spot.z];
+    console.info(`ship interior: the controls are at the front of "${names.get(bridge)}", ${spot.toArray().map((n) => n.toFixed(1)).join(',')}`);
+  }
+
+  /** A standing spot on a floor within a box, nearest a target point, with head and elbow room; null when there is none. */
+  private findSpot(box: THREE.Box3, target: THREE.Vector3): THREE.Vector3 | null {
+    const centre = target;
+    const size = box.getSize(new THREE.Vector3());
     const steps = 7;
     type Spot = { x: number; y: number; z: number; d: number };
     const found: { best: Spot | null } = { best: null };
@@ -213,14 +257,7 @@ export class ShipInterior {
       if (found.best) break;
     }
     const best = found.best;
-    if (best) this.entry.set(best.x, best.y + 0.15, best.z);
-    else {
-      // No floor with room found: the middle, on whatever is under it.
-      this.entry.copy(centre);
-      const down = this.physics.groundDistance(centre.x, box.max.y - 0.05, centre.z, size.y + 1);
-      this.entry.y = down !== null ? box.max.y - 0.05 - down + 0.15 : box.min.y + 0.3;
-      console.warn('ship interior: no clear floor found in the entry room; standing the boarder at its middle');
-    }
+    return best ? new THREE.Vector3(best.x, best.y + 0.15, best.z) : null;
   }
 
   /** Load an interior model and hang it inside a hull, with its own physics world at the planet's gravity. */
@@ -244,11 +281,9 @@ export class ShipInterior {
   static fromHull(vehicle: Vehicle, gravity: number, def: InteriorDef = {}): ShipInterior | null {
     const meshes: THREE.Mesh[] = [];
     const rooms: THREE.Object3D[] = [];
-    const shellCasters: THREE.Object3D[] = [];
     vehicle.group.traverse((o) => {
       const cell = cellIndexOf(o);
       const m = o as THREE.Mesh;
-      if (cell === 0 && m.isMesh && m.castShadow) shellCasters.push(m);
       if (cell <= 0) return;
       if (/^cell[:_]?\d+/.test(o.name)) rooms.push(o);
       if (m.isMesh) meshes.push(m);
@@ -256,8 +291,8 @@ export class ShipInterior {
     if (!meshes.length) return null;
     const interior = new ShipInterior(vehicle, vehicle.group, vehicle.group, meshes, def, gravity, false);
     interior.rooms.push(...rooms);
-    interior.shellCasters.push(...shellCasters);
     interior.readHardpointsAndLights(def);
+    interior.findPilotSpot();
     interior.reveal(false);
     return interior;
   }
@@ -270,10 +305,6 @@ export class ShipInterior {
    */
   reveal(aboard: boolean): void {
     for (const r of this.rooms) r.visible = aboard;
-    // The rooms lie where the shell's shadow falls (they are larger than the hull and elsewhere
-    // in it), so while someone is aboard the shell casts none and the sun comes in at the rooms'
-    // own windows; the hull's shadow on the ground outside returns when they step off.
-    for (const c of this.shellCasters) c.castShadow = !aboard;
     // The hull's glass is the game's own solid pane while the rooms are hidden (nothing behind it
     // to see) and clear while someone is aboard, so those outside see them in (the vehicle's own
     // panes, shared with a pilot at the controls).

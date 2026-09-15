@@ -7,6 +7,47 @@ function align4(n) {
   return (n + 3) & ~3;
 }
 
+/**
+ * A hardpoint's rotation as a glTF quaternion [x, y, z, w] from its row-major 3x4 matrix, mirrored
+ * with the model when X is flipped (R' = M R M for the mirror M), or null for the identity.
+ */
+function hardpointRotation(m, flipX) {
+  if (!m || m.length < 12) return null;
+  const sgn = flipX ? [-1, 1, 1] : [1, 1, 1];
+  const r = (i, j) => sgn[i] * m[i * 4 + j] * sgn[j];
+  const r00 = r(0, 0), r01 = r(0, 1), r02 = r(0, 2), r10 = r(1, 0), r11 = r(1, 1), r12 = r(1, 2), r20 = r(2, 0), r21 = r(2, 1), r22 = r(2, 2);
+  if (Math.abs(r00 - 1) < 1e-5 && Math.abs(r11 - 1) < 1e-5 && Math.abs(r22 - 1) < 1e-5) return null;
+  const trace = r00 + r11 + r22;
+  let x, y, z, w;
+  if (trace > 0) {
+    const sq = 0.5 / Math.sqrt(trace + 1);
+    w = 0.25 / sq;
+    x = (r21 - r12) * sq;
+    y = (r02 - r20) * sq;
+    z = (r10 - r01) * sq;
+  } else if (r00 > r11 && r00 > r22) {
+    const sq = 2 * Math.sqrt(1 + r00 - r11 - r22);
+    w = (r21 - r12) / sq;
+    x = 0.25 * sq;
+    y = (r01 + r10) / sq;
+    z = (r02 + r20) / sq;
+  } else if (r11 > r22) {
+    const sq = 2 * Math.sqrt(1 + r11 - r00 - r22);
+    w = (r02 - r20) / sq;
+    x = (r01 + r10) / sq;
+    y = 0.25 * sq;
+    z = (r12 + r21) / sq;
+  } else {
+    const sq = 2 * Math.sqrt(1 + r22 - r00 - r11);
+    w = (r10 - r01) / sq;
+    x = (r02 + r20) / sq;
+    y = (r12 + r21) / sq;
+    z = 0.25 * sq;
+  }
+  const len = Math.hypot(x, y, z, w) || 1;
+  return [x / len, y / len, z / len, w / len];
+}
+
 export function buildGlb(meshes, { flipX = true, textures = new Map(), skin = null, animations = [], keepZones = false } = {}) {
   const buffers = [];
   const bufferViews = [];
@@ -176,7 +217,11 @@ export function buildGlb(meshes, { flipX = true, textures = new Map(), skin = nu
     rootNodes.push(meshNode);
     for (const hp of mesh.hardpoints ?? []) {
       const [x, y, z] = hp.position;
-      nodes.push({ name: `hp:${hp.name}`, translation: [flipX ? -x : x, y, z] });
+      const node = { name: `hp:${hp.name}`, translation: [flipX ? -x : x, y, z] };
+      // The hardpoint's own frame, for what hangs on it (a gun points the way its hardpoint does).
+      const rotation = hardpointRotation(hp.matrix, flipX);
+      if (rotation) node.rotation = rotation;
+      nodes.push(node);
       (nodes[meshNode].children ??= []).push(nodes.length - 1);
     }
   }
