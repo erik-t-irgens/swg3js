@@ -107,6 +107,9 @@ export class Garage {
               m.visible = false;
               m.castShadow = false;
             }
+            // Glass casts no shadow: the shadow pass draws depth whatever the opacity, and a pane
+            // that did would keep the sun out of the room behind it.
+            if (mats.some((mat) => mat.transparent && mat.opacity < 1)) m.castShadow = false;
           }
         });
         return { scene: gltf.scene, animations: gltf.animations };

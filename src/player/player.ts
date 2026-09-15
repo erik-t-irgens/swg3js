@@ -1585,6 +1585,9 @@ export class Player {
 
   private flyUpdate(dt: number, input: Input, cam: ThirdPersonCamera): void {
     cam.camera.getWorldDirection(fwd);
+    // Aboard, the flying is in the room's frame: the camera's world direction turned into it
+    // (its right is already the room's).
+    if (this.aboard) fwd.applyQuaternion(this.aboard.vehicle.quaternion(tmpQ).invert());
     cam.right(rgt);
     move.set(0, 0, 0);
     if (input.held('forward')) move.add(fwd);
