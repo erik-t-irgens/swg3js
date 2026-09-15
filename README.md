@@ -42,6 +42,21 @@ Open the printed URL. The first screen is the **character select**: up to five c
 
 URL options: `?planet=lok` spawns on a specific world, `?class=bounty_hunter` picks a class, `?lowfx=1` disables shadows and halves resolution for weak machines.
 
+## Installation
+
+1. **Node 22.18 or newer** (24 is fine) and a Chromium browser. Chrome on Windows is what the game is tested in.
+2. Clone the repo and `npm install`.
+3. Copy `.env.example` to `.env` (git-ignored) and fill in where your own installs are:
+   ```
+   SWG=C:/SWG                                                                # the folder holding the client's .tre archives
+   JKA=C:/Program Files (x86)/Steam/steamapps/common/Jedi Academy/GameData  # Jedi Academy, for the saber and jump animations
+   ```
+   The converter replaces `@SWG` and `@JKA` on its command line with these, so paths with spaces need no quoting.
+4. Convert the assets into `assets-private/` (git-ignored, never committed) with the command list under **Converting your own SWG install** below, every command with `--retail-only`. `npm run swg -- status assets-private` says what is in place and prints the command for anything missing.
+5. `npm run dev` and open the printed URL.
+
+For **Claude Code in VS Code**: `CLAUDE.md` at the repo root is the handoff, read automatically at the start of a session, with what the project is, the rules, the architecture, what took a long time to learn, where things stand and what comes next; `.claude/launch.json` starts the dev server from the extension. Ask it to read `CLAUDE.md` and `docs/ASSETS.md` before anything else.
+
 ## What exists today (v0.3)
 
 - **Rigged character pipeline**: skinned GLTF characters with an animation state machine (idle, walk, run, airborne, seated), clip speed matched to movement, and world-space arm solving so aiming and saber swings override the clip pose. The Mixamo X Bot ships as a stand-in in `public/assets/characters/`; add `?rig=0` to use the primitive body.
@@ -160,6 +175,37 @@ A vehicle's hull takes damage from a hard hit (the velocity lost in one step bey
 
 Every converted model carries its normal map: the converter reads the shader's `CNRM`, `NRML` or `DOT3` slot, unpacks the game's compressed layout (x in the alpha, y in the green, z rebuilt; an ordinary RGB map is left as it is) and writes it into the GLB as the material's normal texture; the game's maps are Direct3D's, green down, and the glTF loader's own flip of a map without tangents turns them the renderer's way up (`__debug.normals(1, -1)` is that; `(1, 1)` flips every normal map in the world and on the character the other way, to check by eye on a wall's edges), and the Graphics menu has a strength slider for them (1 as the game has them). Packs converted before this carry none: run the conversion commands again (the planets' packs, `species`, `wardrobe`, `weapons`, `ships`, `creatures`, `gallery`) to get them. A character's head and body take theirs from the live recipes as well, since the age slider picks among them.
 
+## Debugging
+
+**Checks before pushing.** `npm run typecheck` (or `npx tsc --noEmit -p .`), `npm run build`, `npm run test:converter` (plain node scripts that print `ok` per check; there is no test framework), and `node --check tools/swg/<file>.mjs` for converter modules.
+
+**The console.** The game logs what it does as it does it, and the messages are meant to be read: a vehicle's hardpoints on spawning (`garage: xwing hardpoints: …`), a portal building's shell and rooms, a ship interior's colliders and entry, where a cockpit frame and the seat landed, `shaders: N compiled during play` when a shader compiled on a live frame (a stall; everything should compile behind the loading screen or in the background), and `hid an object` with the material names when something failed to draw. When something is wrong, the first thing to paste is the console from spawning or entering the thing that is wrong.
+
+**`__debug` in the browser console** is the toolbox, on `window`; each helper returns a plain object or string. The ones that matter most:
+
+| Helper | What it does |
+| --- | --- |
+| `teleport(x, z)`, `time(0.5)`, `fog(1)`, `advance(seconds, ['KeyW'])` | Move, set the time of day, scale the fog, simulate play with keys held |
+| `near(30)`, `find('name')`, `passes()`, `passLog()`, `drawCalls()`, `interiors()` | What is placed around you, what the portal renderer drew this frame and what it cost |
+| `shadows(distance, minRadius)`, `shadowLook(radius, intensity)`, `ambient(row)`, `normals(1, -1)` | Retune shadows, ambient light and normal maps live |
+| `appearance()`, `recipe('head')`, `morph('blend_fat', 1)`, `species('twilek_female')`, `wardrobe()`, `wear`/`remove`, `preview()` | The character's live customization, textures, shape and clothes |
+| `saber()`, `saberDefense(3)`, `profile('jka')`, `anim('BOTH_A2_SPECIAL')`, `upper('clip')`, `gun('rifle', { aim: 30 })`, `steady(false)` | Combat and animation state |
+| `bolts()`, `turrets()`, `turret(20)`, `shootPlayer()`, `heal()` | Blaster fights and the turrets used to test blocking |
+| `vehicles('speeder')`, `spawn('xwing')`, `mount()`, `unspawn()`, `vehicleTune({ turnRate: 1.2 })`, `vehicleState()` | The garage and a vehicle's live handling |
+| `shipDrift(2, 0.4)`, `shipShadows(false)`, `cockpitFrame(dx, dy, dz)`, `pushBodies(true)` | Ship interiors: set a hull adrift to test the room's own physics, turn a ship's shadow casting off (it lists what it changed), nudge a cockpit frame and report the numbers, turn the engine's push against bodies back on |
+| `bind('crouch', 'KeyV')`, `bindings()`, `resetBindings()` | Key bindings, kept in local storage |
+| `connect('ws://host:8787')`, `disconnect()`, `peers()`, `status()` | The relay |
+| `particles(30, true)`, `water()`, `flora()`, `cell()`, `scene()`, `player()` | Effects, water, flora, the portal cell you are in, the scene, the player's state |
+
+**Common problems.**
+
+- *Something is missing or old after pulling*: run `npm run swg -- status assets-private`; converter changes need the pack reconverted, and the table under **Converting your own SWG install** says which command. Ships: `npm run swg -- ships @SWG assets-private --retail-only` (`--match=yacht` redoes one ship and keeps the rest).
+- *A hitch the first time something appears*: a shader compiled on a live frame; the console says `shaders: N compiled during play`. Whatever appeared should be warmed up behind the loading screen or given to the compile queue (see `compileObjects` in `src/world/world.ts`). Adding or removing a light recompiles everything: lights are pooled (`effects.flash`) and never added at runtime.
+- *`RuntimeError: unreachable` then `recursive use of an object` on every frame*: the physics engine panicked and its world is poisoned until reload. The known cause was the character controller pushing a dynamic body with a trimesh collider (now off); a new one means a bad trimesh or an unsupported shape pair.
+- *A model's hardpoints, cells or names do not match*: GLTFLoader strips `:` from node names and keeps the original in `userData.name`; read names through `hardpointName()` and `cellIndexOf()`.
+- *A ray or query finds nothing right after building a physics world*: the world must step once first.
+- *Which shader is a window, and what did the converter make of it*: `npm run swg -- materials @SWG --ship=<id>`; `dump @SWG <file> --strings` shows a file's readable strings when its layout is unknown; `template @SWG object/…/shared_x.iff` shows an object's parameters through its base chain.
+
 ## On assets
 
 The original SWG client assets (the `.tre` archives) are copyrighted by Sony Online Entertainment / Lucasfilm and cannot be redistributed, so they will never be committed to this repo. A private build could load them from a local install via a converter, but a public site cannot ship them. The plan instead:
@@ -181,9 +227,12 @@ src/
   world/     noise, terrain, props, creatures, day cycle, world streaming
   player/    character controller, primitive model, skinned rig
   combat/    class kits (Jedi, Bounty Hunter), effects, hit detection
-  vehicles/  speeder bike
-  ui/        HUD and galaxy map
-  main.ts    app wiring and game loop
+  vehicles/  garage, vehicle physics, ship interiors, engine trails
+  net/       relay client and the other players
+  ui/        HUD, menus, galaxy map, loading screen, character select and creator
+  main.ts    app wiring, game loop, the __debug helpers
+server/relay.mjs   the multiplayer relay
+CLAUDE.md          the handoff for Claude Code: rules, architecture, lessons learned, what is next
 ```
 
 ## Converting your own SWG install
