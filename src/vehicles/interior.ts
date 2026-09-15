@@ -179,6 +179,9 @@ export class ShipInterior {
     const first = owned ? (def.cells ?? []).find((c) => c.index === preferred) : undefined;
     const box = first ? new THREE.Box3(new THREE.Vector3(...(first.bounds.min as [number, number, number])), new THREE.Vector3(...(first.bounds.max as [number, number, number]))) : (preferred !== undefined ? cellBoxes.get(preferred) : undefined) ?? this.bounds.clone().expandByScalar(-1.5);
     this.entryBox = box;
+    // The engine's scene queries only see colliders after a step: without one, every ray cast
+    // here missed everything and the entry fell back to the box's edge (in a wall, or under the deck).
+    this.physics.world.step();
     this.findEntry(box);
     console.info(`ship interior (${owned ? 'its own model' : 'rooms of the hull model'}): ${this.colliders.length} colliders, ${triangles} triangles, ${this.cells} cells; entry at ${this.entry.toArray().map((v) => v.toFixed(1)).join(',')}`);
   }
