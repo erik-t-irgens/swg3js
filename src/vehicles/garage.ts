@@ -367,6 +367,19 @@ export class Garage {
     }
     v.hardpoints = hardpoints;
     v.riderPose = def.riderPose ?? null;
+    if (kind === 'podracer') {
+      // A pod's cockpit, from the mesh, for the pods whose authored origin is nowhere near it
+      // (some were left unfinished): the pod hangs at the end its origin leans to, and the pilot
+      // sits half a metre under the mesh's top there. The rider takes it when the game's own seat
+      // lands outside the pod.
+      const L = bounds.max[2] - bounds.min[2];
+      const h = bounds.max[1] - bounds.min[1];
+      const end = model.position.z < -0.5 ? -1 : 1;
+      const z = end * Math.max(0, L / 2 - Math.min(2.5, L * 0.16));
+      const top = backHeight(model, bounds, z);
+      v.podSeat = [0, THREE.MathUtils.clamp((top ?? h * 0.6) - 0.55, 0.3, h * 0.9), z];
+      console.info(`garage: ${def.id} cockpit guessed at ${v.podSeat.map((n) => n.toFixed(2)).join(',')} from the mesh (its origin sits at ${model.position.toArray().map((n) => n.toFixed(2)).join(',')} in its box)`);
+    }
     v.def = def;
     model.traverse((o) => {
       if (o.userData.attachment === 'engine') {

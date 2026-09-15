@@ -1629,6 +1629,13 @@ class App {
     // Every vehicle's hits and its state: sparks on a hit, smoke from a battered hull, and the
     // end of one whose hull is gone (its rider thrown off first).
     for (const v of [...this.world.vehicles]) {
+      // On its back for a moment: the rider is thrown, and hurt by it.
+      if (v === player.mounted && v.flipped) {
+        this.dismountBeside(v);
+        player.takeDamage(10);
+        this.hud.hurt();
+        this.hud.setPrompt('thrown off: the speeder is on its back');
+      }
       if (v.justHit > 0) {
         this.effects.burst(v.pos, 0xffc070, 0.4 + Math.min(2, v.justHit * 0.08), 0.2);
         this.effects.flash(v.pos, 0xffa050, 6 + v.justHit, 5, 0.12);
@@ -2066,23 +2073,7 @@ class App {
       return;
     }
     if (p.mounted) {
-      const sp = p.mounted;
-      sp.quaternion(tmpQ);
-      tmp.set(-(sp.spec.bounds.max[0] - sp.spec.bounds.min[0]) / 2 - 1.0, 0, 0).applyQuaternion(tmpQ).add(sp.pos);
-      // The floor beside the vehicle, by a ray from its own height: in a hangar that is the
-      // hangar's floor, not the terrain under the building, which put the rider outside it.
-      const from = sp.pos.y + 0.5;
-      if (this.world.planet.space) {
-        // Out into space: beside the hull where it is, carrying its motion, adrift.
-        tmp.y = sp.pos.y;
-        p.dismount(tmp);
-        const lv = sp.body.linvel();
-        p.vel.set(lv.x, lv.y, lv.z);
-        return;
-      }
-      const hit = this.physics.groundDistance(tmp.x, from, tmp.z, 12, sp.body);
-      tmp.y = hit !== null ? from - hit + 0.15 : Math.max(this.world.terrain.heightAt(tmp.x, tmp.z), this.world.terrain.waterLevel - 1) + 0.3;
-      p.dismount(tmp);
+      this.dismountBeside(p.mounted);
       return;
     }
     let best = null;
@@ -2098,11 +2089,40 @@ class App {
       this.boardShip(best);
       return;
     }
+    if (best?.upsideDown) {
+      // On its back: E turns it over rather than climbing on.
+      best.rightSelf();
+      this.physics.world.step();
+      return;
+    }
     if (best) {
       p.mount(best);
       if (best.spec.ship && best.def) this.lastShipDef = best.def;
       this.cam.distance = Math.max(this.cam.distance, 9.5);
     }
+  }
+
+  /** Off the vehicle onto the floor beside it (in space, adrift beside it with its motion). */
+  private dismountBeside(sp: Vehicle): void {
+    const p = this.player;
+    sp.quaternion(tmpQ);
+    tmp.set(-(sp.spec.bounds.max[0] - sp.spec.bounds.min[0]) / 2 - 1.0, 0, 0).applyQuaternion(tmpQ).add(sp.pos);
+    // A machine on its back has its side vector pointing down: beside it along the ground instead.
+    if (sp.upsideDown) tmp.set(sp.pos.x + Math.cos(sp.heading) * (sp.radius + 1), sp.pos.y, sp.pos.z - Math.sin(sp.heading) * (sp.radius + 1));
+    // The floor beside the vehicle, by a ray from its own height: in a hangar that is the
+    // hangar's floor, not the terrain under the building, which put the rider outside it.
+    const from = sp.pos.y + 0.5;
+    if (this.world.planet.space) {
+      // Out into space: beside the hull where it is, carrying its motion, adrift.
+      tmp.y = sp.pos.y;
+      p.dismount(tmp);
+      const lv = sp.body.linvel();
+      p.vel.set(lv.x, lv.y, lv.z);
+      return;
+    }
+    const hit = this.physics.groundDistance(tmp.x, from, tmp.z, 12, sp.body);
+    tmp.y = hit !== null ? from - hit + 0.15 : Math.max(this.world.terrain.heightAt(tmp.x, tmp.z), this.world.terrain.waterLevel - 1) + 0.3;
+    p.dismount(tmp);
   }
 
   /** Step into a ship's room, at its entry. The seat inside is not there yet: E again steps out. */
@@ -2158,6 +2178,19 @@ class App {
     let d = Infinity;
     for (const sp of this.world.vehicles) d = Math.min(d, this.vehicleReach(sp));
     return d;
+  }
+
+  private nearestVehicle(): Vehicle | null {
+    let best: Vehicle | null = null;
+    let bestD = MOUNT_RANGE;
+    for (const sp of this.world.vehicles) {
+      const d = this.vehicleReach(sp);
+      if (d < bestD) {
+        bestD = d;
+        best = sp;
+      }
+    }
+    return best;
   }
 
   /** How far a vehicle's side is from the player across the ground, or far when it is well above or below them (a flyer overhead, a bike up a cliff). */
@@ -2289,7 +2322,7 @@ class App {
       else if (player.piloting) prompt = `at the controls of the ${player.piloting.spec.label} · <b>W</b>/<b>S</b> throttle · mouse steers · <b>Alt</b> looks around · <b>E</b> lets go · ${Math.round(Math.abs(player.piloting.speed) * 3.6)} km/h${shipHint}`;
       else if (player.aboard) prompt = (player.aboard.pilotSpot && player.pos.distanceTo(player.aboard.pilotSpot) < CONTROLS_RANGE ? `<b>E</b> take the controls` : `aboard ${player.aboard.vehicle.spec.label} · <b>E</b> step out`) + (this.world.planet.space ? ` · <b>${shipKey}</b> ship menu` : '');
       else if (player.eva) prompt = `adrift · <b>W/S</b> thrust ahead and back · <b>A/D</b> sideways · <b>Space/Ctrl</b> up and down · mouse turns · <b>Z/V</b> roll · <b>${keyName(input.bindings.brake[0] ?? '')}</b> brake · ${Math.round(player.vel.length() * 3.6)} km/h${this.nearestSpeederDistance() < MOUNT_RANGE ? (this.nearestHasRoom() ? ' · <b>E</b> board' : ' · <b>E</b> mount') : ''}`;
-      else if (this.nearestSpeederDistance() < MOUNT_RANGE) prompt = this.nearestHasRoom() ? '<b>E</b> board' : '<b>E</b> mount';
+      else if (this.nearestSpeederDistance() < MOUNT_RANGE) prompt = this.nearestHasRoom() ? '<b>E</b> board' : this.nearestVehicle()?.upsideDown ? '<b>E</b> flip it upright' : '<b>E</b> mount';
       this.hud.setPrompt(prompt);
       const flying = player.mounted?.spec.ship && player.mounted.airborne && !input.held('freeLook') ? player.mounted : null;
       this.hud.setFlight(flying ? flying.stick : null);

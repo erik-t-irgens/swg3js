@@ -96,7 +96,8 @@ export function specFor(kind: VehicleKind, id: string, label: string, bounds: Ve
     case 'podracer':
       return { ...base, mass: 900, hover: 1.2, maxSpeed: 85, boostSpeed: 125, reverseSpeed: 6, accel: 30, brake: 45, turnRate: 1.7, turnAuthorityAt: 10, grip: 1.3, bank: 0.55, boost: 'heat', hop: false };
     case 'speederbike':
-      return { ...base, mass: 320, hover: 0.65, maxSpeed: 42, boostSpeed: 60, reverseSpeed: 8, accel: 20, brake: 28, turnRate: 2.3, turnAuthorityAt: 5, grip: 2.8, bank: 0.45, boost: 'burst', hop: true };
+      // A bike past 75 km/h is unruly on this ground: 65 flat out, 75 on the boost.
+      return { ...base, mass: 320, hover: 0.65, maxSpeed: 18, boostSpeed: 21, reverseSpeed: 6, accel: 14, brake: 24, turnRate: 2.3, turnAuthorityAt: 4, grip: 2.8, bank: 0.45, boost: 'burst', hop: true };
     case 'ground':
       return animal
         ? { ...base, mass: 700, hover: 0.15, maxSpeed: 14, boostSpeed: 20, reverseSpeed: 3, accel: 8, brake: 14, turnRate: 1.6, turnAuthorityAt: 0, grip: 9, bank: 0, boost: 'burst', hop: true }
@@ -107,8 +108,9 @@ export function specFor(kind: VehicleKind, id: string, label: string, bounds: Ve
         ...base,
         mass: 800,
         hover: 0.5,
-        maxSpeed: hoverCar ? 45 : 70,
-        boostSpeed: hoverCar ? 60 : 95,
+        // A landspeeder keeps to the bikes' pace; an aircraft flies.
+        maxSpeed: hoverCar ? 17 : 70,
+        boostSpeed: hoverCar ? 21 : 95,
         reverseSpeed: 8,
         accel: hoverCar ? 16 : 22,
         brake: 22,
@@ -203,6 +205,31 @@ export class Vehicle {
   airborne = false;
   /** A ship that just flew into the ground: the speed it hit at, read once by the game for the damage. */
   crashed = 0;
+  /** A pod racer's cockpit as guessed from its mesh, where the pilot's pelvis goes when the game's own seat lands outside the pod. */
+  podSeat: [number, number, number] | null = null;
+  /** Whether the seat has been checked against the box once (the rider logs what it found). */
+  seatChecked = false;
+  /** On its back now, and for long enough that the rider is thrown. */
+  upsideDown = false;
+  flipped = false;
+  private overFor = 0;
+
+  /** Turn a machine on its back the right way up where it lies (E on it), as a Halo warthog is flipped. */
+  rightSelf(): void {
+    const s = this.spec;
+    e.set(0, this.heading, 0, 'YXZ');
+    q.setFromEuler(e);
+    this.body.setRotation({ x: q.x, y: q.y, z: q.z, w: q.w }, true);
+    const height = s.bounds.max[1] - s.bounds.min[1];
+    this.pos.y += height * 0.5 + s.hover;
+    this.body.setTranslation({ x: this.pos.x, y: this.pos.y, z: this.pos.z }, true);
+    this.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+    this.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+    this.overFor = 0;
+    this.flipped = false;
+    this.upsideDown = false;
+    this.skipHitCheck = true;
+  }
   /** The cockpit, in the model's frame, for the first-person view: a hardpoint's place or the front of the hull. */
   cockpit: [number, number, number] | null = null;
   /** The boost meter: a burst's charge left, or a heat boost's heat, 0 to 1. */
@@ -542,8 +569,10 @@ export class Vehicle {
     }
     this.skipHitCheck = false;
     const ride = s.hover + (s.fly ? this.altitude - s.fly.floor : 0);
-    const k = (m * g) / (4 * Math.max(0.2, ride * 0.35));
-    const c = 2 * Math.sqrt(k * (m / 4)) * 0.55;
+    // Stiff springs, well damped: a corner pressed to the ground pushes back with the whole
+    // weight, so the hull is held off the ground rather than wallowing in it.
+    const k = (m * g) / (4 * Math.max(0.15, ride * 0.25));
+    const c = 2 * Math.sqrt(k * (m / 4)) * 0.75;
 
     // Height: springs off the ground at the corners (hover kinds and feet alike), or, for a flyer
     // above its floor, a hold on the height over the terrain.
@@ -575,8 +604,30 @@ export class Vehicle {
         const vPointY = lv.y + tmp.crossVectors(av, rel).y;
         // No more than a few g per corner: a corner well under the floor (a spawn under the
         // water, a slope streamed in late) rises out rather than being launched skyward.
-        const f = THREE.MathUtils.clamp(k * (ride - dist) - c * vPointY, 0, m * g * 0.9);
+        const f = THREE.MathUtils.clamp(k * (ride - dist) - c * vPointY, 0, m * g * 1.5);
         body.addForceAtPoint({ x: 0, y: f, z: 0 }, { x: p.x, y: p.y, z: p.z }, true);
+      }
+      // The ground is a hard floor: a corner that has got under it is lifted out at once, and
+      // the speed it went in at is a hit, so a hull cannot sink into a slope as into water.
+      if (groundAt && !s.animal) {
+        let under = 0;
+        for (const hp of this.hoverPoints) {
+          p.copy(hp).applyQuaternion(q).add(this.pos);
+          under = Math.max(under, groundAt(p.x, p.z) - p.y);
+        }
+        if (under > 0.08) {
+          this.pos.y += under + 0.02;
+          body.setTranslation({ x: this.pos.x, y: this.pos.y, z: this.pos.z }, true);
+          if (lv.y < -HIT_THRESHOLD) {
+            this.justHit = Math.max(this.justHit, -lv.y);
+            this.hp = Math.max(0, this.hp - (-lv.y - HIT_THRESHOLD) * HIT_DAMAGE);
+          }
+          if (lv.y < 0) {
+            lv.y = 0;
+            body.setLinvel({ x: lv.x, y: 0, z: lv.z }, true);
+            this.skipHitCheck = true;
+          }
+        }
       }
     } else if (groundAt) {
       const ground = floorAt(this.pos.x, this.pos.z);
@@ -600,6 +651,11 @@ export class Vehicle {
     const grounded = this.groundedPoints >= 2;
     this.prevVel.copy(lv);
     this.prevVelValid = true;
+    // On its back (a machine, not a mount) for more than a moment: the rider comes off, and E
+    // on it turns it back over rather than climbing on.
+    this.overFor = up.y < -0.2 && !s.animal ? this.overFor + dt : 0;
+    this.upsideDown = up.y < -0.2 && !s.animal;
+    this.flipped = this.overFor > 0.6;
 
     // Attitude: upright, banked into the turn for the kinds that lean; damp the rest.
     const speedFwd = lv.dot(fwd);

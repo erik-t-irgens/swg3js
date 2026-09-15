@@ -47,6 +47,7 @@ const EVA_BRAKE = 12;
 const EVA_MAX_SPEED = 60;
 const EVA_ROLL_RATE = 1.6;
 const seatOffset = new THREE.Vector3();
+const seatLocal = new THREE.Vector3();
 const armDir = new THREE.Vector3();
 const aim = new THREE.Vector3();
 const aimFrom = new THREE.Vector3();
@@ -1146,7 +1147,25 @@ export class Player {
     // A seat that names where the pelvis goes: the riding clip's own root offset comes off, in
     // the vehicle's frame, so the pelvis lands on the seat whatever pose is playing.
     const clip = this.rig?.currentClip;
-    if (this.mounted.seatPelvis && clip && this.rig?.rootOffset(clip, seatOffset)) this.pos.sub(seatOffset.applyQuaternion(tmpQ));
+    const root = clip ? this.rig?.rootOffset(clip, seatOffset) : null;
+    if (this.mounted.seatPelvis && root) this.pos.sub(seatOffset.applyQuaternion(tmpQ));
+    // A pod whose game seat puts the pelvis outside its own box (an unfinished model, its origin
+    // nowhere near the cockpit): the pelvis goes to the cockpit guessed from the mesh instead.
+    const v = this.mounted;
+    if (v.podSeat && root && !v.seatPelvis) {
+      const b = v.spec.bounds;
+      const local = seatLocal.set(v.spec.seat[0] + root.x, v.spec.seat[1] + root.y, v.spec.seat[2] + root.z);
+      const h = b.max[1] - b.min[1];
+      const outside = local.y < b.min[1] + 0.15 || local.y > b.min[1] + h * 0.95 || Math.abs(local.z) > (b.max[2] - b.min[2]) / 2 - 0.3 || Math.abs(local.x) > (b.max[0] - b.min[0]) / 2;
+      if (!v.seatChecked) {
+        v.seatChecked = true;
+        console.info(`rider: ${v.spec.id} seats the pelvis at ${local.toArray().map((n) => n.toFixed(2)).join(',')} in a ${(b.max[0] - b.min[0]).toFixed(1)}×${h.toFixed(1)}×${(b.max[2] - b.min[2]).toFixed(1)} m box${outside ? `: outside it, so the cockpit guessed from the mesh (${v.podSeat.map((n) => n.toFixed(2)).join(',')}) is used` : ''}`);
+      }
+      if (outside) {
+        seatLocal.set(v.podSeat[0], v.podSeat[1], v.podSeat[2]).sub(root);
+        this.pos.copy(seatLocal).applyQuaternion(tmpQ).add(v.pos);
+      }
+    }
     this.group.position.copy(this.pos);
     this.group.quaternion.copy(tmpQ);
     this.heading = 2 * Math.atan2(tmpQ.y, tmpQ.w);
