@@ -1086,11 +1086,12 @@ export class Player {
       input.mouseDX = 0;
       input.mouseDY = 0;
     }
-    const roll = (input.held('rollLeft') ? 1 : 0) - (input.held('rollRight') ? 1 : 0);
+    // The body's frame is the converted models' (X mirrored): its right is down -X, and a roll to the left is a turn the other way about Z.
+    const roll = (input.held('rollRight') ? 1 : 0) - (input.held('rollLeft') ? 1 : 0);
     if (roll) q.multiply(tmpQ.setFromAxisAngle(AXIS_Z, roll * EVA_ROLL_RATE * dt));
     q.normalize();
     evaFwd.set(0, 0, 1).applyQuaternion(q);
-    evaRight.set(1, 0, 0).applyQuaternion(q);
+    evaRight.set(-1, 0, 0).applyQuaternion(q);
     evaUp.set(0, 1, 0).applyQuaternion(q);
     // Thrust along the body's axes; the brake takes speed off whichever way it points.
     const ahead = (input.held('forward') ? 1 : 0) - (input.held('back') ? 1 : 0);
@@ -1121,7 +1122,10 @@ export class Player {
     this.heading = Math.atan2(evaFwd.x, evaFwd.z);
     this.group.position.copy(this.pos);
     this.group.quaternion.copy(q);
-    this.animateRig(dt, 0, false);
+    // Weightless: the treading-water pose, until there is a pose of its own.
+    this.rig?.setState('float');
+    this.rig?.update(dt);
+    this.group.updateMatrixWorld(true);
   }
 
   dismount(to: THREE.Vector3): void {
