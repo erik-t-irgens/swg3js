@@ -1478,7 +1478,10 @@ export class Player {
     // Only while Jedi Academy's animations are in charge; the game's own clips turn the body the way it runs.
     const directional = this.jkaMode && !!this.rig && this.rig.hasState('runBack');
     this.directional = directional;
-    const faceCamera = (this.classId === 'bounty_hunter' && (this.gunReady || !this.hasGunClips)) || fighting || (!this.grounded && this.jkaMode) || cam.firstPerson;
+    // A swing on the upper body over running legs: the legs keep their angle to the way moved
+    // and the torso its turn back to the camera, as they do running without a swing.
+    const swingOnLegs = !!this.rig?.overridingUpperOnly && moving && this.grounded;
+    const faceCamera = (this.classId === 'bounty_hunter' && (this.gunReady || !this.hasGunClips)) || (fighting && !swingOnLegs) || (!this.grounded && this.jkaMode) || cam.firstPerson;
     const camYaw = Math.atan2(fwd.x, fwd.z);
     let legsOffset = 0;
     if (this.lockedHeading) {
@@ -1593,9 +1596,10 @@ export class Player {
       if (out) rig.playUpper(out, 0.08);
     }
     this.wasAiming = this.aiming;
-    // A swing while running: the legs keep running (Jedi Academy's own run) under the swing on the
-    // upper body, the way that game plays its torso and legs apart; standing, the swing has the whole body.
-    if (rig.overridingJka && this.saber.busy && !this.jka.rolling && !this.jka.inSpecialJump && moving && this.grounded && !this.mounted && !this.swimming) rig.overrideUpperOnly();
+    // A swing while moving, or in the air: the legs keep what they were doing (Jedi Academy's run,
+    // walk, back-pedal or angled strafe, or the jump) under the swing on the upper body, the way
+    // that game plays its torso and legs apart; standing still, the swing has the whole body.
+    if (rig.overridingJka && this.saber.busy && !this.jka.rolling && !this.jka.inSpecialJump && (moving || !this.grounded) && !this.mounted && !this.swimming) rig.overrideUpperOnly();
     if (this.mounted) {
       // Seated the way the game seats a rider on this vehicle: its rider pose's branch of the
       // riding loop (a speeder bike's crouch, a landspeeder's seat, the hover chair, the pilot's chair), else the default saddle.
@@ -1653,7 +1657,9 @@ export class Player {
     const low = this.crouching || this.kneeling;
     const wantedTwist = armedUp ? (this.aiming ? -(low ? tune.aimKneel : tune.aim) : this.gunReady ? -tune.ready : 0) * (Math.PI / 180) : 0;
     this.aimTwist += (wantedTwist - this.aimTwist) * Math.min(1, dt * 10);
-    rig.twistTorso(rig.overridingJka ? 0 : this.torsoTwist + this.aimTwist, rig.overridingJka ? 0 : this.torsoPitch);
+    // A whole-body Jedi Academy clip is left alone; a swing on the upper body alone takes the twist, so the torso faces the camera over angled legs.
+    const wholeJka = rig.overridingJka && !rig.overridingUpperOnly;
+    rig.twistTorso(wholeJka ? 0 : this.torsoTwist + this.aimTwist, wholeJka ? 0 : this.torsoPitch);
     // The hilt turns in the hand to whichever convention poses the arms: the game's own clips
     // hold it their way, Jedi Academy's the way its swings were made for.
     // The hilt's axis: the solved one through Jedi Academy's one-off clips (its swings, katas, throws),

@@ -6,6 +6,7 @@ import { markActor } from '../world/portalRender';
 import { isDanceClip, isFlourishClip, loopsEmote } from '../core/emotes';
 import type { Hello, PeerState, PeerVehicle } from './net';
 import type { Garage } from '../vehicles/garage';
+import { applyLook } from '../player/look';
 
 /** The vehicle a peer is on, as a picture: which, where it is heading to, and how it is turned. */
 interface RemoteVehicle {
@@ -34,6 +35,8 @@ interface Remote {
   /** The dance loop playing, to come back to after a flourish. */
   dance: string | null;
   vehicle: RemoteVehicle | null;
+  /** The look last put on the rig, so a repeated hello does not dress it again. */
+  lookApplied: string | null;
 }
 
 const STATES: Set<string> = new Set(['idle', 'walk', 'run', 'air', 'seated', 'swim', 'float', 'crouch', 'crouchWalk', 'crouchWalkBack', 'stance', 'strafeLeft', 'strafeRight', 'runBack', 'walkBack', 'runSaber', 'walkSaber', 'gunIdle', 'gunWalk', 'gunRun', 'gunReadyIdle', 'gunReadyWalk', 'gunReadyRun', 'gunAimIdle', 'gunAimWalk', 'gunAimRun', 'kneel', 'prone', 'proneMove']);
@@ -81,7 +84,7 @@ export class RemotePlayers {
     group.add(label);
     this.scene.add(group);
     markActor(group);
-    const remote: Remote = { id, hello, group, rig: null, label, target: new THREE.Vector3(0, -1000, 0), heading: 0, targetQ: null, state: 'idle', speed: 0, saber: false, silent: 0, dance: null, vehicle: null };
+    const remote: Remote = { id, hello, group, rig: null, label, target: new THREE.Vector3(0, -1000, 0), heading: 0, targetQ: null, state: 'idle', speed: 0, saber: false, silent: 0, dance: null, vehicle: null, lookApplied: null };
     this.remotes.set(id, remote);
     void this.dress(remote);
   }
@@ -97,8 +100,24 @@ export class RemotePlayers {
       markActor(rig.root);
       remote.rig = rig;
       remote.rig.setState('idle');
+      await this.applyLook(remote);
     } catch (err) {
       console.warn(`remote player ${remote.hello.name}: no rig for ${species}`, err);
+    }
+  }
+
+  /** The peer's look on its rig: shape, height, colours and outfit, as their hello gives it (once per look). */
+  private async applyLook(r: Remote): Promise<void> {
+    const c = r.rig?.character;
+    const look = r.hello.look;
+    if (!c || !look) return;
+    const key = JSON.stringify(look);
+    if (r.lookApplied === key) return;
+    r.lookApplied = key;
+    try {
+      await applyLook(c, look, this.baseUrl);
+    } catch (err) {
+      console.warn(`remote player ${r.hello.name}: their look did not go on`, err);
     }
   }
 
@@ -107,6 +126,7 @@ export class RemotePlayers {
     if (!r) return;
     const speciesChanged = r.hello.species !== hello.species;
     r.hello = hello;
+    if (!speciesChanged) void this.applyLook(r);
     r.group.visible = this.sameWorld(hello);
     (r.label.material as THREE.SpriteMaterial).map?.dispose();
     r.group.remove(r.label);

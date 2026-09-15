@@ -1,12 +1,16 @@
 // The client of the relay (server/relay.mjs): a WebSocket that carries where this player is a
 // few times a second and brings back everyone else's, with a reconnect when the line drops.
 
+import type { Look } from '../player/look';
+
 export interface Hello {
   name: string;
   species: string;
   class: 'jedi' | 'bounty_hunter';
   planet: string;
   zone?: string;
+  /** How the character looks: shape, height, colours and outfit, so the others draw it as it is. */
+  look?: Look;
 }
 
 /** The vehicle a peer is on: which (a garage id), where it is and how it is turned, and how the peer is in it. */

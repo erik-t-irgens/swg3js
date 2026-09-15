@@ -373,6 +373,10 @@ export class CharacterRig {
   /** Whether the one-off clip drives the upper body only, the state's clip keeping the legs. */
   private overrideUpper = false;
 
+  get overridingUpperOnly(): boolean {
+    return this.override !== null && this.overrideUpper;
+  }
+
   /**
    * Take a one-off clip that poses the whole body off the legs: the clip goes on playing on the
    * spine, arms and head from where it is, and the state's clip has the legs from here on, so a

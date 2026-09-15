@@ -33,6 +33,7 @@ import { draggable } from './ui/drag';
 import { LoadingScreen } from './ui/loading';
 import { EmoteWheel } from './ui/emoteWheel';
 import { Net, type Hello, type PeerVehicle } from './net/net';
+import { applyAppearance, dress, packLook } from './player/look';
 import { RemotePlayers } from './net/remotePlayers';
 import { danceOf, defaultEmotes, emoteChoices, FLOURISHES, isDanceClip, isFlourishClip, loadEmotes, loopsEmote, saveEmotes } from './core/emotes';
 import { loadSettings, type Settings } from './core/settings';
@@ -1049,20 +1050,12 @@ class App {
   }
 
   private applyAppearance(c: Character, a: Appearance | null): void {
-    if (!a) return;
-    for (const [name, v] of Object.entries(a.morphs ?? {})) c.setMorph(name, v);
-    if (a.height !== undefined) c.setHeight(a.height);
-    const changed = Object.fromEntries(Object.entries(a.values ?? {}).filter(([k, v]) => c.canCustomize(k) && (c.manifest.values?.[k] ?? c.manifest.values?.[k.replace(/^.*\//, '')]) !== v));
-    if (Object.keys(changed).length) c.customizer?.setAll(changed);
+    applyAppearance(c, a);
   }
 
   /** Dress the character in a saved outfit: everything else comes off, each piece goes on by the name it was worn under. */
   private async dress(c: Character, outfit: string[]): Promise<void> {
-    for (const p of c.status()) if (p.worn && !p.body) c.remove(p.name);
-    for (const key of outfit) {
-      const on = (await c.wear(key)) || (await c.wearItem(key, import.meta.env.BASE_URL).catch(() => false));
-      if (!on) console.warn(`outfit: ${key} is not in the wardrobe any more`);
-    }
+    await dress(c, outfit, import.meta.env.BASE_URL, (key) => console.warn(`outfit: ${key} is not in the wardrobe any more`));
   }
 
   /** Put the rig of a species on the player (the placeholder body, or another species, comes off). */
@@ -1079,9 +1072,10 @@ class App {
     return rig.character;
   }
 
-  /** Who and where this player is, for the relay. */
+  /** Who and where this player is, for the relay, and how they look, so the others draw them as they are. */
   private helloNow(): Hello {
-    return { name: this.current?.name ?? 'someone', species: this.characterId, class: this.kit?.id ?? 'jedi', planet: this.world.planet?.id ?? '', zone: this.zone };
+    const c = this.current;
+    return { name: c?.name ?? 'someone', species: this.characterId, class: this.kit?.id ?? 'jedi', planet: this.world.planet?.id ?? '', zone: this.zone, look: c ? packLook(c.appearance, c.outfit ?? []) : undefined };
   }
 
   /** Tell the relay where this player is, a few times a second, and move the others along. */

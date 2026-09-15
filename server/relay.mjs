@@ -6,7 +6,7 @@
 //   node server/relay.mjs [port]      (default 8787)
 //
 // Messages, JSON, client to relay:
-//   { t: 'hello', name, species, class, planet, zone }   who and where; sent on joining and on travel
+//   { t: 'hello', name, species, class, planet, zone, look }   who, where and how they look (shape, height, colours, outfit); sent on joining and on travel
 //   { t: 'state', p: [x, y, z], h, s, v, m, sab, q?, veh? }   position, heading, rig state, speed, mounted, saber lit,
 //                                                          the whole turn as a quaternion (aboard, adrift), the vehicle
 //                                                          ridden { id, p, q, role: ride|pilot|aboard, pose }
@@ -103,6 +103,12 @@ function onMessage(c, text) {
   if (!msg || typeof msg.t !== 'string') return;
   if (msg.t === 'hello') {
     const hello = { name: String(msg.name ?? 'someone').slice(0, 24), species: String(msg.species ?? 'human_male').slice(0, 40), class: msg.class === 'bounty_hunter' ? 'bounty_hunter' : 'jedi', planet: String(msg.planet ?? '').slice(0, 24), zone: msg.zone ? String(msg.zone).slice(0, 24) : undefined };
+    // The look: numbers by name and the outfit's names, kept within a few kilobytes.
+    const look = msg.look;
+    if (look && typeof look === 'object' && JSON.stringify(look).length <= 16384) {
+      const numbers = (o) => Object.fromEntries(Object.entries(o && typeof o === 'object' ? o : {}).filter(([k, v]) => k.length <= 80 && Number.isFinite(Number(v))).slice(0, 120).map(([k, v]) => [k, Number(v)]));
+      hello.look = { morphs: numbers(look.morphs), values: numbers(look.values), height: Number(look.height) || 0, outfit: (Array.isArray(look.outfit) ? look.outfit : []).slice(0, 40).map((s) => String(s).slice(0, 80)) };
+    }
     const first = !c.hello;
     c.hello = hello;
     broadcast({ t: first ? 'join' : 'hello', id: c.id, hello }, c);
