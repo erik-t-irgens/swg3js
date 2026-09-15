@@ -32,8 +32,19 @@ export function cellIndexOf(o: THREE.Object3D | null): number {
   return -1;
 }
 
+/** The cell's name from its node, "cell:2:hall" arriving as "cell2hall". */
+export function cellNameOf(o: THREE.Object3D | null): string {
+  for (let n = o; n; n = n.parent) {
+    const m = /^cell[:_]?\d+[:_]?(.*)$/.exec(n.name);
+    if (m) return m[1];
+  }
+  return '';
+}
+
 /** How much of a hull's window is seen through while someone is aboard. */
 const CLEAR_PANE = 0.45;
+/** A "glass" covering more of the shell's triangles than this is its skin under a glassy name, not a window. */
+const PANE_SHARE = 0.35;
 
 const inverse = new THREE.Matrix4();
 const localA = new THREE.Vector3();
@@ -114,17 +125,59 @@ export class ShipInterior {
     else this.bounds.copy(measured);
     this.bounds.expandByScalar(1.5);
     this.cells = Math.max(cellBoxes.size, (def.cells ?? []).filter((c) => c.index > 0).length);
-    // The entry: the floor of the first room, or of the whole interior. The manifest's cell box
-    // when it has one, else the box measured from the room's own meshes.
-    const first = (def.cells ?? []).filter((c) => c.index > 0).sort((a, c) => a.index - c.index)[0];
-    const firstMeasured = [...cellBoxes.entries()].sort((a, c) => a[0] - c[0])[0]?.[1];
-    const box = first ? new THREE.Box3(new THREE.Vector3(...(first.bounds.min as [number, number, number])), new THREE.Vector3(...(first.bounds.max as [number, number, number]))) : firstMeasured ?? this.bounds.clone().expandByScalar(-1.5);
-    box.getCenter(this.entry);
-    // The floor under the room's middle, found in the room's own physics; a room whose box reaches
-    // below its floor (a hull's underside, a sunken pit) would otherwise stand the boarder in it.
-    const down = this.physics.groundDistance(this.entry.x, box.max.y - 0.05, this.entry.z, box.max.y - box.min.y + 1);
-    this.entry.y = down !== null ? box.max.y - 0.05 - down + 0.15 : box.min.y + 0.3;
+    // The entry: a spot on the floor of the first room (an entry, lobby or airlock by name when
+    // there is one, else the lowest-numbered), found in the room's own physics.
+    const named = /entry|entrance|lobby|airlock|ramp|hall|corridor|foyer/i;
+    const cellNames = new Map<number, string>();
+    for (const m of meshes) {
+      const c = cellIndexOf(m);
+      if (c > 0 && !cellNames.has(c)) cellNames.set(c, cellNameOf(m));
+    }
+    const ordered = [...cellBoxes.keys()].sort((a, c) => a - c);
+    const preferred = ordered.find((c) => named.test(cellNames.get(c) ?? '')) ?? ordered[0];
+    const first = (def.cells ?? []).find((c) => c.index === preferred);
+    const box = first ? new THREE.Box3(new THREE.Vector3(...(first.bounds.min as [number, number, number])), new THREE.Vector3(...(first.bounds.max as [number, number, number]))) : (preferred !== undefined ? cellBoxes.get(preferred) : undefined) ?? this.bounds.clone().expandByScalar(-1.5);
+    this.findEntry(box);
     console.info(`ship interior (${owned ? 'its own model' : 'rooms of the hull model'}): ${this.colliders.length} colliders, ${triangles} triangles, ${this.cells} cells; entry at ${this.entry.toArray().map((v) => v.toFixed(1)).join(',')}`);
+  }
+
+  /**
+   * A standing spot in a room: floors are sought under a grid of points across the room's box,
+   * each needing head room above and elbow room around, and the one nearest the room's middle
+   * wins. The box's middle alone stood the boarder in a pit, a wall or an open stairwell.
+   */
+  private findEntry(box: THREE.Box3): void {
+    const centre = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    const steps = 7;
+    let best: { x: number; y: number; z: number; d: number } | null = null;
+    const w = this.physics.world;
+    const clear = (x: number, y: number, z: number, dx: number, dz: number, reach: number) => w.castRay(new RAPIER.Ray({ x, y, z }, { x: dx, y: 0, z: dz }), reach, true) === null;
+    for (let i = 0; i < steps; i++) {
+      for (let j = 0; j < steps; j++) {
+        const x = box.min.x + ((i + 0.5) / steps) * size.x;
+        const z = box.min.z + ((j + 0.5) / steps) * size.z;
+        const d = Math.hypot(x - centre.x, z - centre.z);
+        if (best && d >= best.d) continue;
+        for (const y of this.physics.floorsAt(x, z, box.max.y + 0.5, box.min.y - 0.5)) {
+          // Head room: nothing within 1.9 m above the floor; elbow room: nothing within 0.5 m around the waist.
+          const up = w.castRay(new RAPIER.Ray({ x, y: y + 0.1, z }, { x: 0, y: 1, z: 0 }), 1.9, true);
+          if (up) continue;
+          const waist = y + 0.9;
+          if (!clear(x, waist, z, 1, 0, 0.5) || !clear(x, waist, z, -1, 0, 0.5) || !clear(x, waist, z, 0, 1, 0.5) || !clear(x, waist, z, 0, -1, 0.5)) continue;
+          best = { x, y, z, d };
+          break;
+        }
+      }
+    }
+    if (best) this.entry.set(best.x, best.y + 0.15, best.z);
+    else {
+      // No floor with room found: the middle, on whatever is under it.
+      this.entry.copy(centre);
+      const down = this.physics.groundDistance(centre.x, box.max.y - 0.05, centre.z, size.y + 1);
+      this.entry.y = down !== null ? box.max.y - 0.05 - down + 0.15 : box.min.y + 0.3;
+      console.warn('ship interior: no clear floor found in the entry room; standing the boarder at its middle');
+    }
   }
 
   /** Load an interior model and hang it inside a hull, with its own physics world at the planet's gravity. */
@@ -149,6 +202,17 @@ export class ShipInterior {
     const meshes: THREE.Mesh[] = [];
     const rooms: THREE.Object3D[] = [];
     const panes: ShipInterior['panes'] = [];
+    // How much of the shell each material covers: a glassy name on most of a hull is its skin.
+    const shellTris = new Map<THREE.Material, number>();
+    let shellTotal = 0;
+    vehicle.group.traverse((o) => {
+      const m = o as THREE.Mesh;
+      if (cellIndexOf(o) !== 0 || !m.isMesh) return;
+      const tris = (m.geometry.getIndex()?.count ?? m.geometry.getAttribute('position')?.count ?? 0) / 3;
+      const mats = Array.isArray(m.material) ? m.material : [m.material];
+      for (const mat of mats) shellTris.set(mat, (shellTris.get(mat) ?? 0) + tris / mats.length);
+      shellTotal += tris;
+    });
     vehicle.group.traverse((o) => {
       const cell = cellIndexOf(o);
       const m = o as THREE.Mesh;
@@ -158,6 +222,10 @@ export class ShipInterior {
         const mats = Array.isArray(m.material) ? m.material : [m.material];
         mats.forEach((mat, i) => {
           if (mat.userData.invisible || !(mat.userData.glass || (mat.transparent && mat.opacity < 1))) return;
+          if (shellTotal && (shellTris.get(mat) ?? 0) / shellTotal > PANE_SHARE) {
+            console.info(`${vehicle.spec.id}: "${mat.name}" covers ${Math.round(((shellTris.get(mat) ?? 0) / shellTotal) * 100)}% of the shell, kept solid`);
+            return;
+          }
           const clear = mat.clone();
           clear.userData = { ...mat.userData };
           clear.transparent = true;

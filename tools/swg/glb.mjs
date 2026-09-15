@@ -86,14 +86,8 @@ export function buildGlb(meshes, { flipX = true, textures = new Map(), skin = nu
           // Glass with no alpha in its texture: a fixed share of its tint over what is behind.
           if (tex.opacity !== undefined) mat.pbrMetallicRoughness.baseColorFactor[3] = tex.opacity;
         }
-        if (tex.glass) {
-          // Marked for the runtime (glass casts no shadow); forced glass is smooth and a little reflective too.
-          mat.extras = { ...(mat.extras ?? {}), glass: true };
-          if (tex.opacity !== undefined) {
-            mat.pbrMetallicRoughness.roughnessFactor = Math.min(mat.pbrMetallicRoughness.roughnessFactor, 0.15);
-            mat.pbrMetallicRoughness.metallicFactor = Math.max(mat.pbrMetallicRoughness.metallicFactor, 0.2);
-          }
-        }
+        // Glass by name is marked for the runtime: it casts no shadow and clears while someone is aboard.
+        if (tex.glass) mat.extras = { ...(mat.extras ?? {}), glass: true };
       } else {
         mat.pbrMetallicRoughness.baseColorFactor = [0.8, 0.8, 0.8, 1];
       }
