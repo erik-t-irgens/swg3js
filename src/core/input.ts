@@ -187,6 +187,11 @@ export class Input {
     return false;
   }
 
+  /** Take this frame's press of a key, so nothing later in the frame sees it (a dance's flourish keys over the kit's slots). */
+  consumeKey(code: string): boolean {
+    return this.pressed.delete(code);
+  }
+
   /** Rebind an action to one or more codes (KeyboardEvent.code, or Mouse0, Mouse1, Mouse2). An empty list restores the default. */
   bind(action: Action, codes: string[]): void {
     if (!(action in DEFAULT_BINDINGS)) throw new Error(`no such action: ${action}; actions are ${Object.keys(DEFAULT_BINDINGS).join(', ')}`);

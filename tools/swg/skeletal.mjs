@@ -477,7 +477,9 @@ export function flattenAnimationTemplate(form, name, timeScale = 1) {
       const anms = childOf(v, 'ANMS');
       const templates = anms ? anms.children.filter(isForm) : [];
       const values = new Map(); // template index -> value names
-      const vals = childOf(v, 'VALS');
+      // The value list's tag is "VAL " (three letters and a space): an i16 count, then each
+      // value's name and the i16 index of the template it picks (several values can share one).
+      const vals = childOf(v, 'VAL ') ?? childOf(v, 'VALS');
       if (vals) {
         const r = new R(vals.data);
         const n = r.i16();
@@ -491,8 +493,10 @@ export function flattenAnimationTemplate(form, name, timeScale = 1) {
       const defaultIndex = dflt ? new R(dflt.data).i16() : -1;
       const out = [];
       templates.forEach((t, i) => {
-        const label = values.get(i)?.[0];
-        const entryName = i === defaultIndex && !label ? name : `${name}:${label ?? i}`;
+        // The default branch keeps the plain name (the game plays it when the variable is unset);
+        // every other is named for the first value that picks it, and carries every value that does.
+        const label = values.get(i)?.find((v) => v !== 'default') ?? values.get(i)?.[0];
+        const entryName = i === defaultIndex ? name : `${name}:${label ?? i}`;
         for (const e of flattenAnimationTemplate(t, entryName, timeScale)) out.push({ ...e, variable, values: values.get(i) ?? [], isDefault: i === defaultIndex });
       });
       return out;

@@ -202,7 +202,8 @@ export class Net {
         }
         break;
       case 'emote':
-        if (msg.id !== undefined && msg.clip) this.onEmote(msg.id, msg.clip);
+        // An empty clip is the end of a dance or a sit: the figure goes back to what it was doing.
+        if (msg.id !== undefined && typeof msg.clip === 'string') this.onEmote(msg.id, msg.clip);
         break;
     }
   }

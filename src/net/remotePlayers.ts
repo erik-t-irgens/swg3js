@@ -3,6 +3,7 @@
 import * as THREE from 'three';
 import { CharacterRig, loadPlayerRig, type RigState } from '../player/rig';
 import { markActor } from '../world/portalRender';
+import { isDanceClip, isFlourishClip, loopsEmote } from '../core/emotes';
 import type { Hello, PeerState } from './net';
 
 interface Remote {
@@ -18,6 +19,8 @@ interface Remote {
   saber: boolean;
   /** Seconds since the last state: past a while the figure stands still. */
   silent: number;
+  /** The dance loop playing, to come back to after a flourish. */
+  dance: string | null;
 }
 
 const STATES: Set<string> = new Set(['idle', 'walk', 'run', 'air', 'seated', 'swim', 'float', 'crouch', 'crouchWalk', 'crouchWalkBack', 'stance', 'strafeLeft', 'strafeRight', 'runBack', 'walkBack', 'runSaber', 'walkSaber', 'gunIdle', 'gunWalk', 'gunRun', 'gunReadyIdle', 'gunReadyWalk', 'gunReadyRun', 'gunAimIdle', 'gunAimWalk', 'gunAimRun', 'kneel', 'prone', 'proneMove']);
@@ -58,7 +61,7 @@ export class RemotePlayers {
     group.add(label);
     this.scene.add(group);
     markActor(group);
-    const remote: Remote = { id, hello, group, rig: null, label, target: new THREE.Vector3(0, -1000, 0), heading: 0, state: 'idle', speed: 0, saber: false, silent: 0 };
+    const remote: Remote = { id, hello, group, rig: null, label, target: new THREE.Vector3(0, -1000, 0), heading: 0, state: 'idle', speed: 0, saber: false, silent: 0, dance: null };
     this.remotes.set(id, remote);
     void this.dress(remote);
   }
@@ -110,9 +113,17 @@ export class RemotePlayers {
     r.silent = 0;
   }
 
+  /** An emote from the relay: a dance or a sit loops, a flourish plays over the dance (which comes back after it), an empty clip ends whatever plays. */
   emote(id: number, clip: string): void {
     const r = this.remotes.get(id);
-    r?.rig?.play(clip, { fadeIn: 0.15, loop: /^dance_/.test(clip) });
+    if (!r) return;
+    if (!clip) {
+      r.rig?.stopOverride(0.2);
+      r.dance = null;
+      return;
+    }
+    r.rig?.play(clip, { fadeIn: 0.15, loop: loopsEmote(clip) });
+    r.dance = isDanceClip(clip) ? clip : isFlourishClip(clip) ? r.dance : null;
   }
 
   remove(id: number): void {
@@ -136,6 +147,8 @@ export class RemotePlayers {
       r.group.rotation.y += diff * k;
       const rig = r.rig;
       if (rig) {
+        // A flourish over, the dance goes on.
+        if (r.dance && !rig.overriding) rig.play(r.dance, { fadeIn: 0.15, loop: true });
         const moving = r.silent < 0.6 && r.group.position.distanceTo(r.target) > 0.05;
         const state = (r.silent > 1.5 ? 'idle' : moving || r.state === 'idle' ? r.state : r.state) as RigState;
         rig.setState(rig.hasState(state) ? state : 'idle', r.speed);

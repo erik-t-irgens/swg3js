@@ -1443,7 +1443,14 @@ export class Player {
       if (out) rig.playUpper(out, 0.08);
     }
     this.wasAiming = this.aiming;
-    if (this.mounted) rig.setState('seated');
+    if (this.mounted) {
+      // Seated the way the game seats a rider on this vehicle: its rider pose's branch of the
+      // riding loop (a speeder bike's crouch, a landspeeder's seat, the hover chair, the pilot's chair), else the default saddle.
+      const pose = this.mounted.riderPose ?? `vehicle_${this.mounted.spec.id.replace(/^pv_/, '')}`;
+      const clip = rig.variant('loop_riding', pose);
+      rig.prefer('seated', clip && clip !== 'loop_riding' ? clip : null);
+      rig.setState('seated');
+    }
     // Swimming with the block held: the stance on the torso and arms over the swimming legs.
     else if (this.swimming) rig.setState(moving || this.submerged ? 'swim' : 'float', speed, this.blocking && this.hasJkaClips ? stance : null);
     else if (!this.grounded) {

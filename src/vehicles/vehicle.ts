@@ -241,6 +241,8 @@ export class Vehicle {
   gunNext = 0;
   /** The colour of the ship's bolts: green for the Empire's, red for everyone else's. */
   boltColor = 0xff4a2a;
+  /** How the rider sits, the game's rider pose (vehicle_speeder_bike, saddle_body2_wide, space_sitting): the riding clip's selector value. */
+  riderPose: string | null = null;
   /** The gun a ship fires, from the game's weapon table: its projectile (an index into the projectile table), speed and range in metres. */
   weapon: { name: string; projectile: number; speed: number; range: number } | null = null;
   /** The handles of the body's colliders, so a bolt's hit can be traced back to the vehicle. */

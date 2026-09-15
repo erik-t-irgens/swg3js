@@ -10,7 +10,8 @@ const STATE_CLIPS: Record<RigState, (string | RegExp)[]> = {
   walk: ['walk', 'Walk', 'loop_walk', 'walk_combat'],
   run: ['run', 'Run', 'loop_run', 'run_combat'],
   air: ['BOTH_INAIR1', 'jump', 'fall', 'loop_jump', 'sneak_pose', 'idle', 'stand'],
-  seated: ['loop_riding', /^loop_riding/, 'loop_ride', 'sit', 'loop_sit', 'loop_sitting_chair:0', 'loop_sitting_chair', 'loop_sitting_ground', 'sneak_pose', 'idle', 'stand'],
+  // Riding: the vehicle's own pose is asked for through `prefer` (loop_riding:vehicle_speeder_bike, the saddle poses); the plain loop_riding is the game's default saddle.
+  seated: ['loop_riding', /^loop_riding/, 'loop_ride', 'sit', 'loop_sit', /^loop_sitting_chair/, 'loop_sitting_ground', 'sneak_pose', 'idle', 'stand'],
   swim: ['swim', 'loop_swimming:speed1', 'loop_swimming:speed0', 'walk', 'idle'],
   float: ['float', 'loop_swimming:speed0', 'swim', 'idle'],
   crouch: ['BOTH_CROUCH1IDLE', 'BOTH_CROUCH1', 'sneak_pose', 'idle', 'stand'],
@@ -106,6 +107,8 @@ export interface RigOptions {
   partialClips?: Record<string, string[]>;
   /** Where the blade points in each hand, from the importer; without it the game guesses from the bind pose. */
   grip?: GripAxes;
+  /** Selector branches by clip: the variable and every value that picks the clip (a flourish two dances share). */
+  variants?: Record<string, { variable: string; values: string[] }>;
 }
 
 const tmpQ = new THREE.Quaternion();
@@ -147,6 +150,7 @@ export class CharacterRig {
   private readonly additive = new Set<string>();
   readonly grip: GripAxes | null;
   readonly partialClips: Record<string, string[]>;
+  readonly variants: Record<string, { variable: string; values: string[] }>;
   /** A clip to play for a state ahead of its table, when the rig has it: the style's stance, the jump's direction, the style's run. */
   private readonly preferred = new Map<RigState, string | RegExp>();
   /** A one-shot clip on the upper body over whatever the legs do (a shot fired), and when it ends. */
@@ -201,6 +205,7 @@ export class CharacterRig {
     for (const clip of clips) if (/^trn_.*_(aimed|ready)$/.test(clip.name)) this.hold.add(clip.name);
     this.grip = options.grip ?? null;
     this.partialClips = options.partialClips ?? {};
+    this.variants = options.variants ?? {};
     this.mixer = new THREE.AnimationMixer(scene);
     scene.traverse((o) => {
       if (o instanceof THREE.Bone) {
@@ -348,6 +353,19 @@ export class CharacterRig {
   firstOf(...names: string[]): string | null {
     for (const n of names) if (this.actions.has(n)) return n;
     return null;
+  }
+
+  /**
+   * The clip a selector picks for a value (`variant('skill_action_3', 'dance_18')`, `variant('loop_riding',
+   * 'vehicle_hover_chair')`): the branch named for the value, else the branch whose value list holds it
+   * (the game names a shared branch for its first value), else the plain default, else null.
+   */
+  variant(base: string, value: string): string | null {
+    const exact = `${base}:${value}`;
+    if (this.actions.has(exact)) return exact;
+    const prefix = `${base}:`;
+    for (const [clip, v] of Object.entries(this.variants)) if (clip.startsWith(prefix) && v.values.includes(value) && this.actions.has(clip)) return clip;
+    return this.actions.has(base) ? base : null;
   }
 
   /**
@@ -647,7 +665,7 @@ export class CharacterRig {
 }
 
 interface PlayerManifest {
-  players: { id: string; file: string; clipSpeeds?: Record<string, number>; scale?: number; jkaClips?: Record<string, { loop: boolean }>; jkaGrip?: GripAxes; partialClips?: Record<string, string[]> }[];
+  players: { id: string; file: string; clipSpeeds?: Record<string, number>; scale?: number; jkaClips?: Record<string, { loop: boolean }>; jkaGrip?: GripAxes; partialClips?: Record<string, string[]>; variants?: RigOptions['variants'] }[];
 }
 
 /**
@@ -664,7 +682,7 @@ export async function loadPlayerRig(baseUrl: string, id = 'human_male'): Promise
     // Without the named locomotion set the character could only stand: use the single model instead.
     if (!['idle', 'walk', 'run'].every((n) => names.has(n))) throw new Error(`the parts rig has ${character.clips.length} clips but no idle, walk and run; run the converter's parts command again`);
     const hold = Object.entries(m.jkaClips ?? {}).filter(([, c]) => !c.loop).map(([name]) => name);
-    const rig = CharacterRig.fromCharacter(character, { clipSpeeds: m.clipSpeeds, scale: m.scale ?? 1, hold, grip: m.jkaGrip, partialClips: m.partialClips });
+    const rig = CharacterRig.fromCharacter(character, { clipSpeeds: m.clipSpeeds, scale: m.scale ?? 1, hold, grip: m.jkaGrip, partialClips: m.partialClips, variants: m.variants });
     console.info(`player ${m.id}: assembled from ${m.parts.length} parts, ${character.clips.length} clips, ${Object.keys(character.morphValues()).length} shape sliders`);
     return rig;
   } catch (err) {
@@ -677,7 +695,7 @@ export async function loadPlayerRig(baseUrl: string, id = 'human_male'): Promise
       const entry = manifest.players?.[0];
       if (entry) {
         const hold = Object.entries(entry.jkaClips ?? {}).filter(([, c]) => !c.loop).map(([name]) => name);
-        const rig = await CharacterRig.load(`${baseUrl}assets-private/${entry.file}`, { clipSpeeds: entry.clipSpeeds, scale: entry.scale ?? 1, hold, grip: entry.jkaGrip, partialClips: entry.partialClips });
+        const rig = await CharacterRig.load(`${baseUrl}assets-private/${entry.file}`, { clipSpeeds: entry.clipSpeeds, scale: entry.scale ?? 1, hold, grip: entry.jkaGrip, partialClips: entry.partialClips, variants: entry.variants });
         console.info(`player model ${entry.id}: clips ${rig.clipNames.join(', ')}; bones ${rig.boneNames.join(', ')}`);
         return rig;
       }

@@ -27,6 +27,8 @@ export interface VehicleDef {
   attachments?: { kind: 'wing' | 'engine' | 'component'; slot?: string; file: string; hardpoint?: string | null; transform?: number[] | null; hinge?: number[] | null; angle?: number; time?: number }[];
   /** The gun a ship fires, from the game's weapon table. */
   weapon?: ShipWeapon | null;
+  /** How the rider sits, from the game's mount tables (the riding clip's selector value), or null for the default saddle. */
+  riderPose?: string | null;
   /** The cockpit frame drawn around the pilot, with the first-person view's offset from the cockpit point. */
   cockpit?: { file: string; zoom?: number[]; firstOffset?: number[]; thirdOffset?: number[] } | null;
   /** The hardpoints the client data puts thruster effects at. */
@@ -56,7 +58,7 @@ export interface ProjectileDef {
 }
 
 interface GalleryIndex {
-  sections: { id: string; items: { label: string; template: string; model: string; radius: number; height?: number }[] }[];
+  sections: { id: string; items: { label: string; template: string; model: string; radius: number; height?: number; riderPose?: string }[] }[];
 }
 
 /** A hardpoint node's name without its hp: prefix, or null for any other node. */
@@ -88,7 +90,7 @@ export class Garage {
           const m = files.get(it.model);
           if (!m) continue;
           const kind = vehicleKindOf(it.label) ?? vehicleKindOf(it.template) ?? vehicleKindOf(it.model);
-          g.vehicles.push({ id: it.label, label: it.label.replace(/_/g, ' '), kind: kind ?? 'speederbike', inferred: kind !== null, source: 'gallery', file: `assets-private/gallery/${m.file}`, template: it.template, bounds: m.bounds });
+          g.vehicles.push({ id: it.label, label: it.label.replace(/_/g, ' '), kind: kind ?? 'speederbike', inferred: kind !== null, source: 'gallery', file: `assets-private/gallery/${m.file}`, template: it.template, bounds: m.bounds, riderPose: it.riderPose ?? null });
         }
       }
     } catch (err) {
@@ -97,8 +99,8 @@ export class Garage {
     try {
       const res = await fetch(`${baseUrl}assets-private/creatures/manifest.json`);
       if (res.ok && (res.headers.get('content-type') ?? '').includes('json')) {
-        const manifest = (await res.json()) as { creatures: { id: string; file: string; clipSpeeds?: Record<string, number>; bounds?: VehicleSpec['bounds'] }[] };
-        for (const c of manifest.creatures) g.vehicles.push({ id: c.id, label: `${c.id.replace(/_/g, ' ')} (mount)`, kind: 'ground', inferred: true, source: 'creature', file: `assets-private/${c.file}`, bounds: c.bounds, clipSpeeds: c.clipSpeeds });
+        const manifest = (await res.json()) as { creatures: { id: string; file: string; clipSpeeds?: Record<string, number>; bounds?: VehicleSpec['bounds']; riderPose?: string }[] };
+        for (const c of manifest.creatures) g.vehicles.push({ id: c.id, label: `${c.id.replace(/_/g, ' ')} (mount)`, kind: 'ground', inferred: true, source: 'creature', file: `assets-private/${c.file}`, bounds: c.bounds, clipSpeeds: c.clipSpeeds, riderPose: c.riderPose ?? null });
       }
     } catch (err) {
       console.warn('garage: no creatures', err);
@@ -129,6 +131,8 @@ export class Garage {
             cockpit: sh.cockpit ? { ...sh.cockpit, file: `assets-private/ships/${sh.cockpit.file}` } : null,
             thrusters: sh.thrusters ?? [],
             weapon: sh.weapon ?? null,
+            // A pilot sits as the game's pilot chairs seat one (space_sitting), the one riding pose that is a chair.
+            riderPose: 'space_sitting',
           });
         }
       }
@@ -340,6 +344,7 @@ export class Garage {
       if (off && off.length >= 3) v.cockpitOffset = [off[0], off[1], off[2]];
     }
     v.hardpoints = hardpoints;
+    v.riderPose = def.riderPose ?? null;
     model.traverse((o) => {
       if (o.userData.attachment === 'engine') {
         o.visible = false;

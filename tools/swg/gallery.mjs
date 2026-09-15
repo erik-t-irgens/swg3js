@@ -120,7 +120,7 @@ export function buildGallery({ log = () => {}, only = ['houses', 'vehicles', 'we
     const kept = !only.includes(id) ? existing?.sections?.find((s) => s.id === id) : null;
     if (!only.includes(id) && !kept) return;
     if (kept) {
-      for (const it of kept.items) items.push({ template: it.template, model: it.model, radius: it.radius, height: it.height, label: it.label ?? labelOf(it.template) });
+      for (const it of kept.items) items.push({ template: it.template, model: it.model, radius: it.radius, height: it.height, label: it.label ?? labelOf(it.template), ...(it.riderPose ? { riderPose: it.riderPose, seats: it.seats } : {}) });
       deps.keepModels?.([...new Set(items.map((it) => it.model))]);
     } else {
       for (const template of templates.slice(0, limit)) {
@@ -131,12 +131,13 @@ export function buildGallery({ log = () => {}, only = ['houses', 'vehicles', 'we
           reasons.set(why, (reasons.get(why) ?? 0) + 1);
           continue;
         }
-        items.push({ template, model: r.model, radius: r.radius, height: r.height, label: labelOf(template) });
+        // A vehicle carries how its rider sits (the mount tables' rider pose), for the riding clip.
+        items.push({ template, model: r.model, radius: r.radius, height: r.height, label: labelOf(template), ...(r.riderPose ? { riderPose: r.riderPose, seats: r.seats } : {}) });
       }
     }
     const { placed, depth } = layOutRows(items, { gap, rowWidth, startZ: z });
     for (const p of placed) objects.push({ template: p.template, model: p.model, x: p.x, y, z: p.z, q: [1, 0, 0, 0], radius: p.radius });
-    sections.push({ id, title, z, depth, items: placed.map((p) => ({ label: p.label, template: p.template, model: p.model, x: p.x, y, z: p.z, radius: p.radius, height: p.height })) });
+    sections.push({ id, title, z, depth, items: placed.map((p) => ({ label: p.label, template: p.template, model: p.model, x: p.x, y, z: p.z, radius: p.radius, height: p.height, ...(p.riderPose ? { riderPose: p.riderPose, seats: p.seats } : {}) })) });
     log(`${title}: ${placed.length} placed${kept ? ' (kept from the last build)' : ''}${skipped ? `, ${skipped} skipped (${[...reasons.entries()].map(([why, n]) => `${n} ${why}`).join('; ')})` : ''}, rows from z ${z} to ${Math.round(z + depth)}`);
     z += depth + 30;
   };

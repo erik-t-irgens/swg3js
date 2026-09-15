@@ -94,6 +94,8 @@ export interface PartsManifest {
   jkaGrip?: GripAxes;
   /** Clips that move only part of the skeleton, with the joints they drive. */
   partialClips?: Record<string, string[]>;
+  /** Selector branches by clip: the variable and every value that picks the clip. */
+  variants?: Record<string, { variable: string; values: string[] }>;
   clipSpeeds?: Record<string, number>;
   scale?: number;
   customization?: string[];

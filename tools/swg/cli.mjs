@@ -95,6 +95,7 @@ import { bakeShader, describeShader, describeVariables, loadImage, loadShader, p
 import { ImageRegistry, exportBlueprint, exportPalettes, exportShader, palettesOf } from './customize.mjs';
 import { effectAlpha, alphaModeFor } from './eff.mjs';
 import { localize, parseDatatable } from './datatable.mjs';
+import { riderPoseFor } from './mounts.mjs';
 import { createRequire } from 'node:module';
 
 /** Named places per planet (see regions/build.mjs). */
@@ -693,6 +694,9 @@ function nameLocomotion(entries, loadAnimation) {
   }
   for (const [base, byIndex] of groups) {
     if (byIndex.size < 2) continue;
+    // The skill loop's branches are a walk, a run and the performances (the dances and music
+    // loops), not one motion at three speeds: they keep the table's order, so the dances stay speed2.
+    if (base.startsWith('loop_skill')) continue;
     const ranked = [...byIndex.entries()].map(([idx, list]) => {
       const rep = list.find((x) => x.tail === '') ?? list.find((x) => x.e.isDefault) ?? list[0];
       let speed = 0;
@@ -711,7 +715,8 @@ function nameLocomotion(entries, loadAnimation) {
   // Creatures: loop_stand:speedN[:variant]; players: loop_standing:<gender>:speedN[:variant].
   // One entry per speed: the default variant (marked default, or with no variant suffix), from
   // the first selector branch the table lists.
-  const LOCO = /^(loop_stand(?:ing)?(?:_combat)?)((?::\d+)*):speed(\d+)((?::\d+)*)$/;
+  // Selector branches are named for their values (a gender's "o", a mood's "bored") or numbered when the table names none.
+  const LOCO = /^(loop_stand(?:ing)?(?:_combat)?)((?::[\w-]+)*):speed(\d+)((?::[\w-]+)*)$/;
   const branches = new Map();
   for (const e of named) {
     const m = e.name.match(LOCO);
@@ -775,7 +780,7 @@ function convertParts(vfs, outRoot, template, { wear = DEFAULT_WEAR, variables =
   const gender = /female/i.test(id) ? 'f' : 'm';
   const info = convertSat(vfs, template, null, {
     animations: anim ?? PLAYER_CLIPS,
-    maxAnimations: maxAnims ? Number(maxAnims) : 240,
+    maxAnimations: maxAnims ? Number(maxAnims) : PLAYER_MAX_CLIPS,
     variables,
     wear,
     parts: { dir: outDir, rig: 'rig' },
@@ -804,6 +809,7 @@ function convertParts(vfs, outRoot, template, { wear = DEFAULT_WEAR, variables =
     clips: info.animations,
     clipSpeeds: info.clipSpeeds ?? {},
     ...(info.partialClips ? { partialClips: info.partialClips } : {}),
+    ...(info.variants ? { variants: info.variants } : {}),
     parts: info.parts,
     customization: [...info.customization],
     variables: customizationList(vfs, info),
@@ -1210,6 +1216,9 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
         clips.push({ name: e.clip, animation });
         info.animations.push(e.clip);
         (info.clipSpeeds ??= {})[e.clip] = Number(((animation.locomotionSpeed ?? 0) * (e.timeScale || 1)).toFixed(3));
+        // A selector branch and every value that picks it (a flourish shared by two dances, the
+        // saddle pose two mounts share), so the game can ask for a clip by the value it knows.
+        if (e.variable && e.values?.length) (info.variants ??= {})[e.clip] = { variable: e.variable, values: e.values };
         // How much of the skeleton this clip actually moves, for spotting name mismatches.
         const jointNames = new Set(skeleton.joints.map((j) => j.name.toLowerCase()));
         const matched = animation.transforms.filter((t) => jointNames.has(t.name.toLowerCase())).length;
@@ -1472,7 +1481,12 @@ const CREATURE_CLIPS = 'idle,walk,run,cbt_stand_combat_attack_light,rea_stand_ge
 /** The player's clips: locomotion and posture by exact name (=), reactions by substring. */
 /** What the player wears when --wear is not given: a plain shirt, trousers and shoes. */
 const DEFAULT_WEAR = ['object/tangible/wearables/shirt/shared_shirt_s03.iff', 'object/tangible/wearables/pants/shared_pants_s01.iff', 'object/tangible/wearables/shoes/shared_shoes_s01.iff'];
-const PLAYER_CLIPS = '=idle,=walk,=run,=idle_combat,=walk_combat,=run_combat,=jump,strafe,backward,walk_back,run_back,loop_crouched,loop_kneeling,loop_prone,trn_standing_to_crouched,trn_crouched_to_standing,trn_standing_to_kneeling,trn_kneeling_to_standing,trn_crouched_to_kneeling,trn_kneeling_to_prone,trn_prone_to_kneeling,trn_standing_to_prone,trn_prone_to_standing,loop_pistol_standing,loop_rifle:,loop_pistol_riding,loop_rifle_riding,loop_riding,loop_ride,loop_combat_standing,loop_pistol_kneeling,loop_rifle_kneeling,loop_pistol_prone,loop_rifle_prone,loop_pistol_combat_prone,loop_rifle_combat_prone,add_pistol_fire,add_rifle_fire,pistol_combat_prone_fire,rifle_combat_prone_fire,pistol_reload,rifle_reload,loop_pistol_combat_standing,loop_rifle_combat_standing,loop_rifle_a_combat,loop_pistol_combat_kneeling,loop_rifle_combat_kneeling,loop_rifle_kneeling_combat,loop_pistol_kneeling_combat,pistol_combat_standing_fire,rifle_combat_standing_fire,rifle_standing_aimed_fire,pistol_standing_aimed_fire,pistol_combat_kneeling_fire,rifle_combat_kneeling_fire,pistol_kneeling_fire,rifle_kneeling_fire,trn_pistol_standing_to_pistol_combat,trn_rifle_a_standing,trn_pistol_combat_to_pistol_combat_aimed,trn_pistol_combat_standing_aimed_to,trn_pistol_combat_standing_to,trn_rifle_combat_standing_to,trn_rifle_combat_standing_aimed_to,trn_pistol_combat_kneeling,trn_rifle_combat_kneeling,trn_pistol_combat_prone_to,trn_rifle_combat_prone_to,trn_pistol_combat_prone_aimed_to,trn_rifle_combat_prone_aimed_to,=loop_sitting_chair:0,=loop_sitting_ground,=loop_swimming:speed0,=loop_swimming:speed1,=unarmed_standing_ready_punch,=sword_1h_standing_ready_hrz_slash_middle_r,=rea_get_hit_medium_mid_center,=trn_combat_standing_hit_to_incapacitated_face_up,=loop_incapacitated_face_up,=cbt_stand_combat_attack_light,=rea_stand_get_hit_light,=trn_stand_to_incapacitated,=loop_incapacitated';
+const PLAYER_CLIPS = '=idle,=walk,=run,=idle_combat,=walk_combat,=run_combat,=jump,strafe,backward,walk_back,run_back,loop_crouched,loop_kneeling,loop_prone,trn_standing_to_crouched,trn_crouched_to_standing,trn_standing_to_kneeling,trn_kneeling_to_standing,trn_crouched_to_kneeling,trn_kneeling_to_prone,trn_prone_to_kneeling,trn_standing_to_prone,trn_prone_to_standing,loop_pistol_standing,loop_rifle:,loop_pistol_riding,loop_rifle_riding,loop_riding,loop_ride,loop_combat_standing,loop_pistol_kneeling,loop_rifle_kneeling,loop_pistol_prone,loop_rifle_prone,loop_pistol_combat_prone,loop_rifle_combat_prone,add_pistol_fire,add_rifle_fire,pistol_combat_prone_fire,rifle_combat_prone_fire,pistol_reload,rifle_reload,loop_pistol_combat_standing,loop_rifle_combat_standing,loop_rifle_a_combat,loop_pistol_combat_kneeling,loop_rifle_combat_kneeling,loop_rifle_kneeling_combat,loop_pistol_kneeling_combat,pistol_combat_standing_fire,rifle_combat_standing_fire,rifle_standing_aimed_fire,pistol_standing_aimed_fire,pistol_combat_kneeling_fire,rifle_combat_kneeling_fire,pistol_kneeling_fire,rifle_kneeling_fire,trn_pistol_standing_to_pistol_combat,trn_rifle_a_standing,trn_pistol_combat_to_pistol_combat_aimed,trn_pistol_combat_standing_aimed_to,trn_pistol_combat_standing_to,trn_rifle_combat_standing_to,trn_rifle_combat_standing_aimed_to,trn_pistol_combat_kneeling,trn_rifle_combat_kneeling,trn_pistol_combat_prone_to,trn_rifle_combat_prone_to,trn_pistol_combat_prone_aimed_to,trn_rifle_combat_prone_aimed_to,loop_sitting_chair,loop_sitting_ground,trn_sitting_chair_to_standing,trn_standing_to_sitting_ground,=loop_swimming:speed0,=loop_swimming:speed1,=unarmed_standing_ready_punch,=sword_1h_standing_ready_hrz_slash_middle_r,=rea_get_hit_medium_mid_center,=trn_combat_standing_hit_to_incapacitated_face_up,=loop_incapacitated_face_up,=cbt_stand_combat_attack_light,=rea_stand_get_hit_light,=trn_stand_to_incapacitated,=loop_incapacitated' +
+  // The emotes (every emt_ clip), the dances (loop_skill's speed2 branch is the dance and music
+  // loops, one per style; skill_action_1..8 the flourishes, one per style each) and the sits.
+  ',emt_,loop_skill:speed2,skill_action_,dance_';
+/** Clips a player rig keeps at most: the locomotion, carries, emotes, dances and flourishes come to about a thousand. */
+const PLAYER_MAX_CLIPS = 1400;
 const PLAYER_TEMPLATE = 'object/creature/player/shared_human_male.iff';
 
 /** Planet ids the game can load a pack for (see src/data/planets.ts). */
@@ -2221,8 +2235,10 @@ switch (cmd) {
       const out = join(outDir, `${id}.glb`);
       try {
         const info = convertSat(vfs, template, out, { animations: CREATURE_CLIPS });
-        list.push({ id, file: `creatures/${id}.glb`, template, clips: info.animations, clipSpeeds: info.clipSpeeds ?? {}, bounds: info.bounds });
-        console.log(`${id}: ${info.joints} joints, ${info.meshes.reduce((a, m) => a + m.triangles, 0)} tris, clips ${info.animations.join(', ')}${info.missing.length ? `, missing ${info.missing.length}` : ''}`);
+        // How a rider sits on it, from the mount tables (the saddle its body takes), for the riding clip.
+        const ride = info.sat ? riderPoseFor(vfs, info.sat) : null;
+        list.push({ id, file: `creatures/${id}.glb`, template, clips: info.animations, clipSpeeds: info.clipSpeeds ?? {}, bounds: info.bounds, ...(ride ? { riderPose: ride.pose } : {}) });
+        console.log(`${id}: ${info.joints} joints, ${info.meshes.reduce((a, m) => a + m.triangles, 0)} tris, clips ${info.animations.join(', ')}${info.missing.length ? `, missing ${info.missing.length}` : ''}${ride ? `, ridden as ${ride.pose}` : ', not in the mount tables'}`);
       } catch (err) {
         console.warn(`${id}: ${err.message}`);
       }
@@ -2278,7 +2294,7 @@ switch (cmd) {
           return r.clips;
         }
       : null;
-    const info = convertSat(vfs, template, join(outDir, `${id}.glb`), { animations: options.anim ?? PLAYER_CLIPS, variables: customizationValues(options.var), wear, maxAnimations: options['max-anims'] ? Number(options['max-anims']) : 240, extraClips });
+    const info = convertSat(vfs, template, join(outDir, `${id}.glb`), { animations: options.anim ?? PLAYER_CLIPS, variables: customizationValues(options.var), wear, maxAnimations: options['max-anims'] ? Number(options['max-anims']) : PLAYER_MAX_CLIPS, extraClips });
     console.log(`${info.sat}: skeleton ${info.skeleton} (${info.joints} joints${info.attached.length ? `, with ${info.attached.join('; ')}` : ''})`);
     if (jka) console.log(`  jka: ${Object.keys(info.jkaClips).length} clips retargeted${jka.missing.length ? `; not in animation.cfg: ${jka.missing.join(', ')}` : ''}`);
     if (jka) console.log(`  jka: locomotion speeds from the feet: ${Object.entries(info.jkaClips).filter(([, c]) => c.speed).map(([n, c]) => `${n} ${c.speed.toFixed(2)} m/s`).join(', ') || 'none'}`);
@@ -2300,7 +2316,7 @@ switch (cmd) {
       const lacking = wantedGun.filter((n) => !have.has(n));
       if (lacking.length) console.log(`  the animation table in these archives lacks ${lacking.join(', ')}: the blaster's combat stances and hip shots the state hierarchy names. The retail table has 870 logical names, the Legends one 908; convert without --retail-only to take them from the Legends table (the clips themselves are the game's own files; nothing leaves assets-private).`);
     }
-    const entry = { id, file: `player/${id}.glb`, template, wear, variables: Object.fromEntries(customizationValues(options.var)), clips: info.animations, clipSpeeds: info.clipSpeeds ?? {}, ...(info.partialClips ? { partialClips: info.partialClips } : {}), bounds: info.bounds, scale: 1, ...(info.jkaClips ? { jkaClips: info.jkaClips } : {}), ...(info.jkaGrip ? { jkaGrip: info.jkaGrip } : {}) };
+    const entry = { id, file: `player/${id}.glb`, template, wear, variables: Object.fromEntries(customizationValues(options.var)), clips: info.animations, clipSpeeds: info.clipSpeeds ?? {}, ...(info.partialClips ? { partialClips: info.partialClips } : {}), ...(info.variants ? { variants: info.variants } : {}), bounds: info.bounds, scale: 1, ...(info.jkaClips ? { jkaClips: info.jkaClips } : {}), ...(info.jkaGrip ? { jkaGrip: info.jkaGrip } : {}) };
     if (!info.jkaClips && existsSync(join(outDir, 'manifest.json'))) {
       const before = (JSON.parse(readFileSync(join(outDir, 'manifest.json'), 'utf8')).players ?? []).find((e) => e.id === id);
       const had = Object.keys(before?.jkaClips ?? {}).length;
@@ -2955,6 +2971,8 @@ switch (cmd) {
       // 10 cm box for a mesh; the visible body is the static appearance of the same name, which the
       // client attaches at run time. Show that one.
       const pv = r.skeletal && /^appearance\/pv_(.+)\.sat$/i.exec(r.skeletal);
+      // The skeletal appearance is what the mount tables key the rider's pose on, body or not.
+      const ridden = r.skeletal;
       if (pv) {
         const x = pv[1];
         const candidates = [`appearance/${x}.apt`, `appearance/${x}.lod`, `appearance/lod/${x}.lod`, `appearance/${x}.msh`, `appearance/mesh/${x}.msh`, `appearance/mesh/${x}_l0.msh`];
@@ -2993,7 +3011,9 @@ switch (cmd) {
       const def = models.get(id);
       if (!def || def.failed) return { skip: def?.failed ?? 'failed' };
       const b = def.bounds;
-      return { model: id, radius: Math.max(0.5, Math.abs(b.min[0]), Math.abs(b.max[0]), Math.abs(b.min[2]), Math.abs(b.max[2])), height: b.max[1] };
+      // A vehicle's rider pose from the mount tables, by its skeletal appearance, for the riding clip.
+      const ride = ridden ? riderPoseFor(vfs, ridden) : null;
+      return { model: id, radius: Math.max(0.5, Math.abs(b.min[0]), Math.abs(b.max[0]), Math.abs(b.min[2]), Math.abs(b.max[2])), height: b.max[1], ...(ride ? { riderPose: ride.pose, seats: ride.seats } : {}) };
     };
     const convertAnims = (source) => {
       const file = `anims_${source}.glb`;

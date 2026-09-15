@@ -30,7 +30,7 @@ import { LoadingScreen } from './ui/loading';
 import { EmoteWheel } from './ui/emoteWheel';
 import { Net, type Hello } from './net/net';
 import { RemotePlayers } from './net/remotePlayers';
-import { defaultEmotes, emoteChoices, loadEmotes, saveEmotes } from './core/emotes';
+import { danceOf, defaultEmotes, emoteChoices, FLOURISHES, isDanceClip, isFlourishClip, loadEmotes, loopsEmote, saveEmotes } from './core/emotes';
 import { loadSettings, type Settings } from './core/settings';
 import { deleteCharacter, loadCharacters, newCharacterId, upsertCharacter, type Appearance, type SavedCharacter } from './core/characters';
 import { FRAME_NUDGE, Garage, type VehicleDef } from './vehicles/garage';
@@ -122,6 +122,8 @@ class App {
   private emotes: (string | null)[] = loadEmotes();
   /** An emote is playing on the player: any movement ends it. */
   private emoting = false;
+  /** The dance loop playing, kept so a flourish (the number keys) goes back to it when it ends. */
+  private dance: string | null = null;
   /** The ship the pilot's guns lead (Tab cycles the ships ahead), and this frame's lead point and the way to aim for it. */
   private shipTarget: Vehicle | null = null;
   private readonly shipLead = new THREE.Vector3();
@@ -441,6 +443,8 @@ class App {
         for (const k of keys) this.input.force(k, true);
         const dt = 1 / 60;
         for (let i = 0; i < Math.round(seconds / dt); i++) {
+          this.stepEmoteKeys();
+          this.stepEmoteEnd();
           this.player.update(dt, this.input, this.cam, this.world);
           this.stepCombat(dt);
           this.stepVehicles(dt, true);
@@ -501,6 +505,8 @@ class App {
         this.handleMount();
         return this.player.mounted ? `riding ${this.player.mounted.spec.id}` : 'on foot';
       },
+      /** The clip the rig's selector picks for a value: `variant('loop_riding', 'vehicle_hover_chair')`, `variant('skill_action_3', 'dance_18')`. */
+      variant: (base: string, value: string) => this.player.rig?.variant(base, value) ?? 'no rig',
       /** The garage: `vehicles('speeder')` lists what can be spawned; `spawn('speeder_ab1')` or `spawn('bantha', 'ground')` stands one in front of you; `vehicles.clear` is the panel's Remove all. */
       vehicles: (find?: string) => {
         const g = this.garage ?? this.world.garage;
@@ -575,7 +581,7 @@ class App {
         const a = v.body.angvel();
         const e = new THREE.Euler().setFromQuaternion(tmpQ, 'YXZ');
         const com = v.body.localCom();
-        return { id: v.spec.id, kind: v.spec.kind, com: [com.x, com.y, com.z].map((n) => Number(n.toFixed(2))), at: v.pos.toArray().map((n) => Number(n.toFixed(2))), level: Number(upY.toFixed(3)), pitch: Math.round((e.x * 180) / Math.PI), roll: Math.round((e.z * 180) / Math.PI), spin: Number(Math.hypot(a.x, a.y, a.z).toFixed(3)), speed: Number(v.speed.toFixed(2)), corners: v.groundedPoints, ridden: v === this.player.mounted, hp: Math.round(v.hp), ...(v.wings.length ? { wingsOpen: Number(v.wingsOpen.toFixed(2)) } : {}), ...(v.spec.ship ? { airborne: v.airborne, target: this.shipTarget === v } : {}) };
+        return { id: v.spec.id, kind: v.spec.kind, com: [com.x, com.y, com.z].map((n) => Number(n.toFixed(2))), at: v.pos.toArray().map((n) => Number(n.toFixed(2))), level: Number(upY.toFixed(3)), pitch: Math.round((e.x * 180) / Math.PI), roll: Math.round((e.z * 180) / Math.PI), spin: Number(Math.hypot(a.x, a.y, a.z).toFixed(3)), speed: Number(v.speed.toFixed(2)), corners: v.groundedPoints, ridden: v === this.player.mounted, hp: Math.round(v.hp), riderPose: v.riderPose, ...(v.wings.length ? { wingsOpen: Number(v.wingsOpen.toFixed(2)) } : {}), ...(v.spec.ship ? { airborne: v.airborne, target: this.shipTarget === v } : {}) };
       }),
       /** Remove every spawned vehicle except the one being ridden, as the garage's Remove all does. */
       unspawn: () => {
@@ -917,16 +923,59 @@ class App {
     };
   }
 
-  /** Play an emote or a dance on the player: a dance loops until they move, an emote plays once. */
+  /**
+   * Play an emote, a dance or a sit on the player: a dance or a sit loops until they move, an
+   * emote plays once, and a flourish plays once over the dance, which comes back after it.
+   */
   private playEmote(clip: string | null): void {
     const rig = this.player.rig;
     if (!clip || !rig || this.player.mounted) return;
-    if (rig.play(clip, { fadeIn: 0.15, loop: /^dance_/.test(clip) }) === null) {
+    if (rig.play(clip, { fadeIn: 0.15, loop: loopsEmote(clip) }) === null) {
       this.hud.setPrompt(`the rig has no clip ${clip}`);
       return;
     }
     this.emoting = true;
+    this.dance = isDanceClip(clip) ? clip : isFlourishClip(clip) ? this.dance : null;
     this.net.sendEmote(clip);
+  }
+
+  /** The emote ends (the player moved, mounted, or was told to stop): the figure goes back to what it was doing, here and on the relay. */
+  private endEmote(): void {
+    if (!this.emoting) return;
+    this.player.rig?.stopOverride(0.2);
+    this.emoting = false;
+    this.dance = null;
+    this.net.sendEmote('');
+  }
+
+  /** The emote keys: the arrows play the wheel's first four slots outright, and a dance takes the number keys. */
+  private stepEmoteKeys(): void {
+    for (let i = 1; i <= 4; i++) if (this.input.pressedAction(`emote${i}` as Action)) this.playEmote(this.emotes[i - 1]);
+    this.stepDance();
+  }
+
+  /** Moving, jumping, attacking or mounting ends an emote; a dance or a sit would otherwise loop for good. */
+  private stepEmoteEnd(): void {
+    const { input, player } = this;
+    if (this.emoting && (input.held('forward') || input.held('back') || input.held('left') || input.held('right') || input.held('jump') || input.held('attack') || player.mounted)) this.endEmote();
+  }
+
+  /**
+   * Dancing: the number keys play the dance's flourishes (the game's /flourish 1 to 8, each
+   * style's own), taken before the kit sees them as its slots, and the loop comes back when a
+   * flourish ends.
+   */
+  private stepDance(): void {
+    const rig = this.player.rig;
+    if (!this.dance || !this.emoting || !rig) return;
+    const style = danceOf(this.dance);
+    for (let i = 1; i <= FLOURISHES; i++) {
+      if (!this.input.consumeKey(`Digit${i}`)) continue;
+      const clip = style ? rig.variant(`skill_action_${i}`, style) : null;
+      if (clip) this.playEmote(clip);
+      else this.hud.setPrompt(`this dance has no flourish ${i}`);
+    }
+    if (!rig.overriding) rig.play(this.dance, { fadeIn: 0.15, loop: true });
   }
 
   /** Play as another species or gender: the parts pack of that id replaces the rig, the wardrobe follows. */
@@ -1835,7 +1884,7 @@ class App {
           if (input.pressedAction('flashlight')) this.torchOn = !this.torchOn;
           // The emote wheel: held open, the mouse picks, the key's release plays; the arrows play the first four outright.
           if (input.pressedAction('emoteWheel') && !player.mounted) this.emoteWheel.show(this.emotes);
-          for (let i = 1; i <= 4; i++) if (input.pressedAction(`emote${i}` as Action)) this.playEmote(this.emotes[i - 1]);
+          this.stepEmoteKeys();
         }
       }
       if (this.emoteWheel.open) {
@@ -1848,11 +1897,7 @@ class App {
           if (active) this.playEmote(clip);
         }
       }
-      // Moving, jumping or attacking ends an emote; a dance would otherwise loop for good.
-      if (this.emoting && (input.held('forward') || input.held('back') || input.held('left') || input.held('right') || input.held('jump') || input.held('attack') || player.mounted)) {
-        player.rig?.stopOverride(0.2);
-        this.emoting = false;
-      }
+      this.stepEmoteEnd();
 
       const simulate = active && !this.map.open && !this.anyPanelOpen();
       if (simulate) {
