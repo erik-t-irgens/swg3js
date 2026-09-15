@@ -26,7 +26,9 @@ import { NpcUi } from './ui/npcUi';
 import { AppearanceUi } from './ui/appearanceUi';
 import { CharacterSelect } from './ui/characterSelect';
 import { CreatorBar } from './ui/creatorBar';
-import { Menu } from './ui/menu';
+import { Menu, keyName } from './ui/menu';
+import { ShipMenu, type ShipStatus } from './ui/shipMenu';
+import { draggable } from './ui/drag';
 import { LoadingScreen } from './ui/loading';
 import { EmoteWheel } from './ui/emoteWheel';
 import { Net, type Hello } from './net/net';
@@ -85,6 +87,19 @@ const SHIP_TARGET_RANGE = 2500;
 /** How high over the ground a ship must climb to be offered space (the sky's ceiling is 1500 m), and how high it arrives back over the planet. */
 const SPACE_GATE_HEIGHT = 1100;
 const SPACE_ARRIVAL_HEIGHT = 700;
+/** Where someone stood in a ship's rooms as it crossed between a planet and space: in the hull's frame, facing this way, at the controls or not. */
+interface ShipCrew {
+  local: THREE.Vector3;
+  heading: number;
+  piloting: boolean;
+}
+/** A ship carried across: spawned again over the arrival point at `height`, launched at `speed`, its crew put back. */
+interface ShipCrossing {
+  def: VehicleDef;
+  speed: number;
+  height: number;
+  crew?: ShipCrew | null;
+}
 const tmp2 = new THREE.Vector3();
 const boltFrom = new THREE.Vector3();
 
@@ -120,6 +135,7 @@ class App {
   private readonly select: CharacterSelect;
   private readonly creatorBar: CreatorBar;
   private readonly menu: Menu;
+  private readonly shipMenu: ShipMenu;
   private readonly loadingScreen: LoadingScreen;
   private readonly emoteWheel: EmoteWheel;
   /** Playing together: the relay's client and the other players it tells of. */
@@ -206,7 +222,9 @@ class App {
     this.wardrobe = new WardrobeUi(this.ui, () => this.hud.setPrompt(''));
     this.wardrobe.setBaseUrl(import.meta.env.BASE_URL);
     this.weaponsUi = new WeaponsUi(this.ui, (def, hand) => void this.equip(def, hand));
-    this.vehiclesUi = new VehiclesUi(this.ui, (def, kind) => void this.spawnVehicle(def, kind), () => this.world.removeVehicles(this.player.mounted));
+    this.vehiclesUi = new VehiclesUi(this.ui, (def, kind) => void this.spawnVehicle(def, kind), () => this.world.removeVehicles(this.player.mounted ?? this.player.aboard?.vehicle ?? null));
+    this.shipMenu = new ShipMenu(this.ui, { status: () => this.shipStatus(), goToSpace: () => void this.goToSpace(), land: () => void this.landShip(), eject: () => void this.eject() }, () => keyName(this.input.bindings.ship[0] ?? ''));
+    this.shipMenu.onClose = () => this.toggleShipMenu();
     this.npcUi = new NpcUi(this.ui);
     this.appearanceUi = new AppearanceUi(this.ui, () => this.saveAppearance());
     this.appearanceUi.onTab = (id) => this.toggleInventory(id as InventoryTab);
@@ -225,6 +243,10 @@ class App {
       (p, zone) => void this.travel(p, zone),
       (p, poi, zone) => void this.teleport(p, poi, zone),
     );
+    // Every panel moves by its header and stays put; the overlay round it is clear, so the world shows behind.
+    draggable(this.map.root, '.map-panel', '.map-header', 'map');
+    draggable(this.shipMenu.root, '.ship-panel', '.ship-header', 'ship');
+    for (const [id, ui] of [['wardrobe', this.wardrobe], ['weapons', this.weaponsUi], ['garage', this.vehiclesUi], ['npcs', this.npcUi], ['appearance', this.appearanceUi]] as const) draggable(ui.root, '.wardrobe-panel', '.wardrobe-header', id);
     // Console hooks for driving the game from tests: window.__debug.teleport(x, z, yaw), .look(yaw, pitch), .cell().
     (window as unknown as { __debug: unknown }).__debug = {
       teleport: (x: number, z: number, yaw?: number) => {
@@ -521,6 +543,35 @@ class App {
         this.handleMount();
         return this.player.mounted ? `riding ${this.player.mounted.spec.id}` : 'on foot';
       },
+      /** Aboard a ship's rooms: stand at the pilot's spot and take the controls, as walking there and pressing E does; `controls(false)` lets go. */
+      controls: (take = true) => {
+        const p = this.player;
+        const room = p.aboard;
+        if (!room) return 'not aboard a ship';
+        if (!take) {
+          p.piloting = null;
+          return 'let go of the controls';
+        }
+        if (!room.pilotSpot) return 'this ship has no pilot spot in its rooms';
+        p.pos.copy(room.pilotSpot);
+        p.body.setTranslation({ x: p.pos.x, y: p.pos.y, z: p.pos.z }, true);
+        p.placeVisual();
+        this.handleMount();
+        return p.piloting ? `at the controls of the ${p.piloting.spec.id}` : 'could not take the controls';
+      },
+      /** The ship menu from the console: `ship()` or `ship('status')` reports what it would show; `ship('space')`, `ship('land')`, `ship('eject')` press its buttons; `ship('open')` opens it. */
+      ship: (action: 'status' | 'open' | 'space' | 'land' | 'eject' = 'status') => {
+        if (action === 'open') {
+          this.toggleShipMenu();
+          return this.shipMenu.open ? 'open' : 'not in a ship';
+        }
+        if (action === 'space') void this.goToSpace();
+        else if (action === 'land') void this.landShip();
+        else if (action === 'eject') void this.eject();
+        const s = this.shipStatus();
+        const p = this.player;
+        return { ...s, gate: this.spaceGate, aboard: !!p.aboard, piloting: !!p.piloting, mounted: !!p.mounted, local: p.aboard ? p.pos.toArray().map((n) => Number(n.toFixed(2))) : null, heading: Number(p.heading.toFixed(2)) };
+      },
       /** The clip the rig's selector picks for a value: `variant('loop_riding', 'vehicle_hover_chair')`, `variant('skill_action_3', 'dance_18')`. */
       variant: (base: string, value: string) => this.player.rig?.variant(base, value) ?? 'no rig',
       /** Travel to a world by id (`travel('space_tatooine')`), as the galaxy map does; a space zone is arrived at in the ship last flown. */
@@ -617,7 +668,7 @@ class App {
       }),
       /** Remove every spawned vehicle except the one being ridden, as the garage's Remove all does. */
       unspawn: () => {
-        this.world.removeVehicles(this.player.mounted);
+        this.world.removeVehicles(this.player.mounted ?? this.player.aboard?.vehicle ?? null);
         return this.world.vehicles.length;
       },
       spawn: async (name: string, kind?: VehicleKind) => {
@@ -727,6 +778,7 @@ class App {
     this.creatorBar.onTab = (id) => this.showCreatorTab(id);
     this.creatorBar.onCreate = (name, cls, planet) => void this.finishCreation(name, cls, planet).catch((err) => console.warn('creator', err));
     this.menu = new Menu(this.ui, this.input, this.settings);
+    draggable(this.menu.root, '.menu-panel', '.menu-nav', 'menu');
     this.menu.net = {
       url: () => Net.savedUrl(),
       status: () => this.netStatus,
@@ -814,6 +866,8 @@ class App {
     this.closePanels();
     this.map.hide();
     if (this.player.mounted) this.handleMount();
+    // Off the ship before its room's physics world goes with the world.
+    if (this.player.aboard) this.leaveShip(true);
     this.player.noclip = false;
     this.inWorld = false;
     this.started = false;
@@ -1186,7 +1240,10 @@ class App {
     if (!now && t - this.lastPlaceSave < 3000) return;
     this.lastPlaceSave = t;
     const p = this.player;
-    const at = p.worldPos;
+    // In a ship in flight over a planet, the place kept is the ground at the arrival point: the
+    // ship is not kept, so a character put back in mid-air on foot would only fall.
+    const flying = !!(p.mounted ?? p.aboard?.vehicle)?.airborne && !this.world.planet.space;
+    const at = flying ? this.spawn : p.worldPos;
     c.planet = this.world.planet?.id ?? c.planet;
     c.zone = this.zone;
     c.pos = [Number(at.x.toFixed(2)), Number(at.y.toFixed(2)), Number(at.z.toFixed(2))];
@@ -1237,7 +1294,7 @@ class App {
     const arrivalSpawn = this.spawn.clone();
     void this.world.loadPack(stand).then((clearSpawn) => {
       const p = this.player;
-      if (p.mounted || p.noclip) return;
+      if (p.mounted || p.aboard || p.noclip) return;
       // Still standing where we arrived: move to open ground now that the real city is in.
       // A character back where it stood stays put.
       if (clearSpawn && !at && p.pos.distanceTo(arrivalSpawn) < 4) {
@@ -1255,22 +1312,29 @@ class App {
 
   /**
    * Go to another world. With `ship`, arrive flying it: the ship carried up into space, or down
-   * out of it, is spawned again over the arrival point at `height` and launched at `speed`. A
+   * out of it, is spawned again over the arrival point at `height` and launched at `speed`, and
+   * whoever was aboard its rooms stands in the new hull where they stood in the old (`crew`). A
    * space zone is always arrived at in a ship (the one last flown, else an X-wing).
    */
-  private async travel(planet: PlanetDef, zoneId?: string, ship?: { def: VehicleDef; speed: number; height: number }): Promise<void> {
+  private async travel(planet: PlanetDef, zoneId?: string, ship?: ShipCrossing): Promise<void> {
     if (this.traveling) return;
     this.traveling = true;
     this.map.hide();
+    this.closePanels();
     this.input.captured = false;
     const zone = planet.zones?.find((z) => z.id === zoneId);
-    console.info(`travel: to ${planet.name}${zone ? ` (${zone.name})` : ''}${ship ? ` flying the ${ship.def.id}` : ''}`);
+    console.info(`travel: to ${planet.name}${zone ? ` (${zone.name})` : ''}${ship ? ` flying the ${ship.def.id}${ship.crew ? ` from its rooms${ship.crew.piloting ? ' at the controls' : ''}` : ''}` : ''}`);
     this.loadingScreen.show(planet, zone ? `${planet.name}: ${zone.name}` : planet.name, 'travelling');
     await new Promise((r) => setTimeout(r, 400));
     const p = this.player;
+    // Off the ship before the world it stands in goes: its room's physics world goes with it.
+    if (p.aboard) {
+      p.aboard.reveal(false);
+      p.leave();
+    }
     if (p.mounted) p.dismount(p.pos.clone());
     this.arrive(planet, zoneId);
-    if (ship) await this.arriveInShip(ship.def, ship.speed, ship.height);
+    if (ship) await this.arriveInShip(ship.def, ship.speed, ship.height, ship.crew);
     else if (planet.space) await this.arriveInSpace();
     await this.settle();
     this.savePlace(true);
@@ -1292,29 +1356,70 @@ class App {
     return g.find('xwing') ?? g.vehicles.find((v) => v.kind === 'ship') ?? null;
   }
 
-  /** Spawn a ship over the arrival point, seat the player in it and launch it, on the way into or out of space. */
-  private async arriveInShip(def: VehicleDef, speed: number, height: number): Promise<void> {
+  /**
+   * Spawn a ship over the arrival point, put the player in it and launch it, on the way into or
+   * out of space. A ship with rooms is boarded: where the crew record says, at the controls if
+   * they were there, else at its pilot's spot; a fighter is sat in.
+   */
+  private async arriveInShip(def: VehicleDef, speed: number, height: number, crew: ShipCrew | null = null): Promise<void> {
     const p = this.player;
     const at = this.spawn.clone();
     at.y += height;
     const v = await this.world.spawnVehicle(def, at, Math.PI, def.kind, true);
-    p.mount(v);
+    const room = v.interior;
+    if (room && (crew || room.pilotSpot)) {
+      room.reveal(true);
+      p.board(room, crew ? crew.local.clone() : room.pilotSpot!.clone());
+      if (crew) p.heading = crew.heading;
+      if (crew ? crew.piloting : true) p.piloting = v;
+      this.cam.zoomTarget = Math.max(this.cam.zoomTarget, 6);
+    } else {
+      p.mount(v);
+      this.cam.distance = Math.max(this.cam.distance, 9.5);
+    }
     this.lastShipDef = def;
     v.launch(speed);
-    this.cam.distance = Math.max(this.cam.distance, 9.5);
     this.physics.world.step();
   }
 
-  /** E at the top of the sky, or anywhere in space: the ship goes up into the planet's space zone, or down to the planet. */
-  private async crossAtmosphere(gate: 'up' | 'down'): Promise<void> {
-    const ship = this.player.mounted;
-    if (!ship?.def || this.traveling) return;
-    if (gate === 'up') {
-      const zone = spaceZoneOf(this.world.planet);
-      if (zone) await this.travel(zone, undefined, { def: ship.def, speed: Math.max(60, ship.speed), height: 0 });
-    } else if (this.world.planet.space) {
-      await this.travel(planetById(this.world.planet.space), undefined, { def: ship.def, speed: 90, height: SPACE_ARRIVAL_HEIGHT });
-    }
+  /** The ship the player flies, from its seat or its bridge, when it is one the garage knows and can spawn again. */
+  private pilotedShip(): Vehicle | null {
+    const p = this.player;
+    const ship = p.mounted ?? p.piloting;
+    return ship?.spec.ship && ship.def ? ship : null;
+  }
+
+  /** Where the player stands in the ship's rooms, to stand there again in the hull spawned on the other side. */
+  private crewRecord(): ShipCrew | null {
+    const p = this.player;
+    return p.aboard ? { local: p.pos.clone(), heading: p.heading, piloting: !!p.piloting } : null;
+  }
+
+  /** The ship menu's way up: the flown ship, high enough over a planet with an orbit, goes into it with everyone aboard. */
+  private async goToSpace(): Promise<void> {
+    const ship = this.pilotedShip();
+    const zone = spaceZoneOf(this.world.planet);
+    if (!ship || !zone || this.traveling || this.spaceGate !== 'up') return;
+    this.closePanels();
+    await this.travel(zone, undefined, { def: ship.def!, speed: Math.max(60, ship.speed), height: 0, crew: this.crewRecord() });
+  }
+
+  /** The ship menu's way down: the flown ship leaves orbit for the planet below, with everyone aboard. */
+  private async landShip(): Promise<void> {
+    const ship = this.pilotedShip();
+    const below = this.world.planet.space;
+    if (!ship || !below || this.traveling) return;
+    this.closePanels();
+    await this.travel(planetById(below), undefined, { def: ship.def!, speed: 90, height: SPACE_ARRIVAL_HEIGHT, crew: this.crewRecord() });
+  }
+
+  /** The ship menu's way off: whoever is in a ship in space goes down to the planet on foot, the ship left behind. */
+  private async eject(): Promise<void> {
+    const p = this.player;
+    const below = this.world.planet.space;
+    if (!below || this.traveling || !(p.mounted || p.aboard)) return;
+    this.closePanels();
+    await this.travel(planetById(below));
   }
 
   /** Jump to a place on the map: travel first when it is on another planet. */
@@ -1493,9 +1598,9 @@ class App {
         this.world.vehicles.splice(this.world.vehicles.indexOf(v), 1);
       }
     }
-    // The way up and the way down: a ship near the top of a planet's sky is offered its space
-    // zone; a ship in space, the planet below. Both on E, the way a landed ship is left.
-    const flown = player.mounted;
+    // The way up and the way down, for whoever flies the ship: near the top of a planet's sky its
+    // space zone is within reach; in space, the planet below. Both are taken from the ship menu.
+    const flown = player.mounted ?? player.piloting;
     this.spaceGate = null;
     if (flown?.spec.ship && flown.def) {
       if (this.world.planet.space) this.spaceGate = 'down';
@@ -1682,7 +1787,7 @@ class App {
 
   /** The panels' open state moved to the tabs: closing one panel of a pair and opening the other keeps the mouse free. */
   private anyPanelOpen(): boolean {
-    return this.wardrobe.open || this.appearanceUi.open || this.weaponsUi.open || this.vehiclesUi.open || this.npcUi.open || this.menu.open;
+    return this.wardrobe.open || this.appearanceUi.open || this.weaponsUi.open || this.vehiclesUi.open || this.npcUi.open || this.shipMenu.open || this.menu.open;
   }
 
   private closePanels(): void {
@@ -1691,6 +1796,40 @@ class App {
     if (this.weaponsUi.open) this.weaponsUi.hide();
     if (this.vehiclesUi.open) this.vehiclesUi.hide();
     if (this.npcUi.open) this.npcUi.hide();
+    if (this.shipMenu.open) this.shipMenu.hide();
+  }
+
+  /** P: the ship menu, for whoever is in a ship (at its controls, riding it, or aboard as a passenger). */
+  private toggleShipMenu(): void {
+    if (this.shipMenu.open) {
+      this.shipMenu.hide();
+      this.freeMouse(false);
+      return;
+    }
+    if (!this.shipStatus()) return;
+    this.closePanels();
+    this.map.hide();
+    this.shipMenu.show();
+    this.freeMouse(true);
+  }
+
+  /** The ship the player is in and their standing with it, for the ship menu; null on foot or on a ground vehicle. */
+  private shipStatus(): ShipStatus | null {
+    const p = this.player;
+    const ship = p.mounted ?? p.piloting ?? p.aboard?.vehicle ?? null;
+    if (!ship?.spec.ship) return null;
+    const inSpace = !!this.world.planet.space;
+    return {
+      ship: ship.spec.label,
+      role: ship === p.mounted || ship === p.piloting ? 'pilot' : 'passenger',
+      inSpace,
+      flying: ship.airborne,
+      altitude: inSpace ? null : ship.pos.y - this.world.terrain.heightAt(ship.pos.x, ship.pos.z),
+      gateHeight: SPACE_GATE_HEIGHT,
+      spaceName: spaceZoneOf(this.world.planet)?.name ?? null,
+      planetName: inSpace ? planetById(this.world.planet.space!).name : null,
+      speed: Math.round(Math.abs(ship.speed) * 3.6),
+    };
   }
 
   private freeMouse(free: boolean): void {
@@ -1868,10 +2007,6 @@ class App {
       return;
     }
     if (p.mounted) {
-      if (this.spaceGate) {
-        void this.crossAtmosphere(this.spaceGate);
-        return;
-      }
       const sp = p.mounted;
       sp.quaternion(tmpQ);
       tmp.set(-(sp.spec.bounds.max[0] - sp.spec.bounds.min[0]) / 2 - 1.0, 0, 0).applyQuaternion(tmpQ).add(sp.pos);
@@ -2005,6 +2140,7 @@ class App {
         if (input.pressedAction('map')) this.toggleMap();
         if (input.pressedAction('inventory')) this.toggleInventory();
         if (input.pressedAction('spawner')) this.toggleSpawner();
+        if (input.pressedAction('ship')) this.toggleShipMenu();
         if (input.pressedAction('help')) this.hud.toggleHelp();
         if (!this.map.open && !this.anyPanelOpen()) {
           if (input.pressedAction('saberToggle') && this.kit.id === 'jedi' && !player.mounted) player.toggleSaber();
@@ -2075,12 +2211,15 @@ class App {
       } else player.group.visible = !this.cam.firstPerson;
       this.world.updateShadows(performance.now());
 
+      // The ship menu is where space is gone to and come back from; the prompt says when the ship is high enough.
+      const shipKey = keyName(input.bindings.ship[0] ?? '');
+      const shipHint = this.spaceGate === 'up' ? ` · <b>at altitude for space: ${shipKey}</b> ship menu` : this.world.planet.space ? ` · <b>${shipKey}</b> ship menu` : '';
       let prompt = '';
       if (player.noclip) prompt = `<b>NOCLIP</b> ${Math.round(player.noclipSpeed)} m/s · <b>WASD</b> fly · <b>Space</b> up · <b>Ctrl</b> down · <b>Shift</b> fast · <b>+</b>/<b>-</b> speed · <b>N</b> off`;
-      else if (player.mounted) prompt = mountPrompt(player.mounted) + (this.spaceGate === 'up' ? ' · <b>E</b> leave for space' : this.spaceGate === 'down' ? ` · <b>E</b> land on ${planetById(this.world.planet.space!).name}` : '');
+      else if (player.mounted) prompt = mountPrompt(player.mounted) + (player.mounted.spec.ship ? shipHint : '');
       else if (this.world.elevatorsNear(player.pos, MOUNT_RANGE).length) prompt = `<b>E</b> elevator ${this.world.elevatorsNear(player.pos, MOUNT_RANGE)[0].kind === 'down' ? 'down' : 'up'}`;
-      else if (player.piloting) prompt = `at the controls of the ${player.piloting.spec.label} · <b>W</b>/<b>S</b> throttle · mouse steers · <b>Alt</b> looks around · <b>E</b> lets go · ${Math.round(Math.abs(player.piloting.speed) * 3.6)} km/h`;
-      else if (player.aboard) prompt = player.aboard.pilotSpot && player.pos.distanceTo(player.aboard.pilotSpot) < CONTROLS_RANGE ? `<b>E</b> take the controls` : `aboard ${player.aboard.vehicle.spec.label} · <b>E</b> step out`;
+      else if (player.piloting) prompt = `at the controls of the ${player.piloting.spec.label} · <b>W</b>/<b>S</b> throttle · mouse steers · <b>Alt</b> looks around · <b>E</b> lets go · ${Math.round(Math.abs(player.piloting.speed) * 3.6)} km/h${shipHint}`;
+      else if (player.aboard) prompt = (player.aboard.pilotSpot && player.pos.distanceTo(player.aboard.pilotSpot) < CONTROLS_RANGE ? `<b>E</b> take the controls` : `aboard ${player.aboard.vehicle.spec.label} · <b>E</b> step out`) + (this.world.planet.space ? ` · <b>${shipKey}</b> ship menu` : '');
       else if (this.nearestSpeederDistance() < MOUNT_RANGE) prompt = this.nearestHasRoom() ? '<b>E</b> board' : '<b>E</b> mount';
       this.hud.setPrompt(prompt);
       const flying = player.mounted?.spec.ship && player.mounted.airborne && !input.held('freeLook') ? player.mounted : null;

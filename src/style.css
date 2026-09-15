@@ -45,8 +45,13 @@ b { color: var(--accent); font-weight: 600; }
 .slot .cost { color: var(--muted); font-size: 9px; }
 .slot.active { border-color: var(--accent); box-shadow: 0 0 12px rgba(127,215,255,0.5); background: rgba(45,127,214,0.35); }
 
-.overlay { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(2, 6, 12, 0.72); backdrop-filter: blur(4px); pointer-events: auto !important; }
+/* A panel over the game: the overlay round it is clear, so the world shows behind an open panel (a graphics setting is seen as it moves); the select screen alone dims, there being no world behind it yet. */
+.overlay { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; pointer-events: auto !important; }
 .overlay * { pointer-events: auto; }
+#start.overlay { background: rgba(2, 6, 12, 0.72); backdrop-filter: blur(4px); }
+/* A panel's header drags it about; where it is put is kept. */
+.drag-handle { cursor: move; user-select: none; }
+.drag-handle button, .drag-handle input, .drag-handle select, .drag-handle label { cursor: pointer; }
 
 #start .start-panel { text-align: center; max-width: 560px; padding: 36px 40px; background: var(--panel); border: 1px solid var(--panel-border); border-radius: 10px; }
 #start h1 { margin: 0 0 4px; font-size: 44px; letter-spacing: 0.18em; color: var(--accent); font-weight: 700; }
@@ -233,6 +238,22 @@ b { color: var(--accent); font-weight: 600; }
 #creator-bar .step.on { color: var(--accent); border-color: var(--accent); }
 #creator-bar .note { flex: 1; font-size: 11px; color: #e2a33c; }
 #fade small { display: block; margin-top: 10px; font-size: 11px; letter-spacing: 0.08em; color: var(--muted); }
+
+/* The ship menu (P): the way into space and back, and off the ship, for whoever is in one. */
+.ship-panel { width: min(560px, 94vw); background: var(--panel); border: 1px solid var(--panel-border); border-radius: 10px; overflow: hidden; }
+.ship-header { display: flex; align-items: center; gap: 12px; padding: 12px 18px; border-bottom: 1px solid var(--panel-border); }
+.ship-header h2 { margin: 0; font-size: 18px; letter-spacing: 0.12em; color: var(--accent); }
+.ship-header .ship-title { flex: 1; color: var(--muted); font-size: 12px; }
+.ship-header button { padding: 6px 12px; font-size: 11px; background: rgba(45,127,214,0.3); color: var(--text); border: 1px solid var(--panel-border); border-radius: 4px; cursor: pointer; }
+.ship-header button:hover { border-color: var(--accent); }
+.ship-body { padding: 12px 18px 16px; }
+.ship-status { margin: 0 0 12px; font-size: 12px; color: var(--text); }
+.ship-action { display: flex; align-items: center; gap: 12px; padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
+.ship-action button { flex: 0 0 240px; padding: 9px 14px; font-size: 13px; text-align: left; background: rgba(45,127,214,0.3); color: var(--text); border: 1px solid var(--panel-border); border-radius: 6px; cursor: pointer; letter-spacing: 0.04em; }
+.ship-action button:hover:not(:disabled) { border-color: var(--accent); background: rgba(45,127,214,0.5); }
+.ship-action button:disabled { opacity: 0.45; cursor: default; }
+.ship-action .why { flex: 1; font-size: 11px; color: var(--muted); line-height: 1.4; }
+.ship-body .menu-hint { margin: 12px 0 0; }
 
 /* The Escape menu: a nav down the left, a page on the right. */
 #menu .menu-panel { width: min(1040px, 94vw); height: min(720px, 90vh); display: flex; background: var(--panel); border: 1px solid var(--panel-border); border-radius: 10px; overflow: hidden; }

@@ -38,6 +38,7 @@ const ACTION_LABELS: Record<Action, string> = {
   saberToggle: 'Saber on and off',
   saberStyle: 'Next saber style / blaster',
   mount: 'Mount, dismount, elevator',
+  ship: 'Ship menu (in a ship)',
   switchClass: 'Switch class',
   map: 'Galaxy map',
   help: 'Help',

@@ -16,6 +16,7 @@ export type Action =
   | 'saberToggle'
   | 'saberStyle'
   | 'mount'
+  | 'ship'
   | 'switchClass'
   | 'map'
   | 'help'
@@ -59,6 +60,7 @@ export const DEFAULT_BINDINGS: Record<Action, string[]> = {
   saberToggle: ['KeyL'],
   saberStyle: ['KeyK'],
   mount: ['KeyE'],
+  ship: ['KeyP'],
   switchClass: ['KeyC'],
   map: ['KeyM'],
   help: ['KeyH'],
