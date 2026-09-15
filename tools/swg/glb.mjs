@@ -87,9 +87,12 @@ export function buildGlb(meshes, { flipX = true, textures = new Map(), skin = nu
           if (tex.opacity !== undefined) mat.pbrMetallicRoughness.baseColorFactor[3] = tex.opacity;
         }
         if (tex.glass) {
-          // Glass is smooth and a little reflective, whatever its effect said.
-          mat.pbrMetallicRoughness.roughnessFactor = Math.min(mat.pbrMetallicRoughness.roughnessFactor, 0.15);
-          mat.pbrMetallicRoughness.metallicFactor = Math.max(mat.pbrMetallicRoughness.metallicFactor, 0.2);
+          // Marked for the runtime (glass casts no shadow); forced glass is smooth and a little reflective too.
+          mat.extras = { ...(mat.extras ?? {}), glass: true };
+          if (tex.opacity !== undefined) {
+            mat.pbrMetallicRoughness.roughnessFactor = Math.min(mat.pbrMetallicRoughness.roughnessFactor, 0.15);
+            mat.pbrMetallicRoughness.metallicFactor = Math.max(mat.pbrMetallicRoughness.metallicFactor, 0.2);
+          }
         }
       } else {
         mat.pbrMetallicRoughness.baseColorFactor = [0.8, 0.8, 0.8, 1];

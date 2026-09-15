@@ -5,6 +5,7 @@
 // and airspeeders as aircraft) climb and sink on Space and Ctrl and hold their height over the ground.
 import * as THREE from 'three';
 import { RAPIER, type Physics } from '../core/physics';
+import { cellIndexOf } from './interior';
 
 export type VehicleKind = 'podracer' | 'speederbike' | 'ground' | 'flyer' | 'ship';
 
@@ -270,16 +271,69 @@ export class Vehicle {
     const el = fl;
     const m = spec.mass;
     this.inertia = new THREE.Vector3((m / 12) * (eh * eh + el * el), (m / 12) * (ew * ew + el * el), (m / 12) * (ew * ew + eh * eh));
-    world.createCollider(
-      RAPIER.ColliderDesc.cuboid(Math.max(0.2, w / 2), Math.max(0.15, h / 2), Math.max(0.3, l / 2))
-        .setTranslation(cx, cy, cz)
-        // The mass properties are in the collider's own frame, so the centre of mass is its centre.
-        .setMassProperties(m, { x: 0, y: 0, z: 0 }, { x: this.inertia.x, y: this.inertia.y, z: this.inertia.z }, { x: 0, y: 0, z: 0, w: 1 })
-        .setFriction(0.4)
-        .setRestitution(0.1),
-      this.body,
-    );
+    // The collision is the model's own triangles (a machine's hull, a portal building's shell:
+    // the rooms inside it have a world of their own), so a figure walking up to a ship meets its
+    // skin, not a box around it. The mass is the box's, on the first piece; the rest weigh nothing.
+    // An animal keeps the box: its mesh is skinned and moves with its clips.
+    const mass = { m, inertia: this.inertia, centre: { x: cx, y: cy, z: cz } };
+    const pieces = spec.animal ? 0 : this.hullColliders(model, world, mass);
+    if (!pieces) {
+      world.createCollider(
+        RAPIER.ColliderDesc.cuboid(Math.max(0.2, w / 2), Math.max(0.15, h / 2), Math.max(0.3, l / 2))
+          .setTranslation(cx, cy, cz)
+          // The mass properties are in the collider's own frame, so the centre of mass is its centre.
+          .setMassProperties(m, { x: 0, y: 0, z: 0 }, { x: this.inertia.x, y: this.inertia.y, z: this.inertia.z }, { x: 0, y: 0, z: 0, w: 1 })
+          .setFriction(0.4)
+          .setRestitution(0.1),
+        this.body,
+      );
+    }
     this.pos.set(x, y, z);
+  }
+
+  /**
+   * Trimesh colliders on the body from the model's meshes in the vehicle's frame: every mesh of a
+   * plain model, and of a portal building only the shell's (cell 0). Returns how many were made.
+   */
+  private hullColliders(model: THREE.Object3D, world: RAPIER.World, mass: { m: number; inertia: THREE.Vector3; centre: { x: number; y: number; z: number } }): number {
+    this.group.updateMatrixWorld(true);
+    const groupInverse = new THREE.Matrix4().copy(this.group.matrixWorld).invert();
+    const p = new THREE.Vector3();
+    const q = new THREE.Quaternion();
+    const sc = new THREE.Vector3();
+    let pieces = 0;
+    let triangles = 0;
+    model.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      if (!mesh.isMesh || (mesh as THREE.SkinnedMesh).isSkinnedMesh || cellIndexOf(o) > 0) return;
+      const posAttr = mesh.geometry.getAttribute('position');
+      if (!posAttr || posAttr.count < 3) return;
+      const idx = mesh.geometry.getIndex();
+      const indices = idx ? new Uint32Array(idx.array as ArrayLike<number>) : Uint32Array.from({ length: posAttr.count - (posAttr.count % 3) }, (_, i) => i);
+      if (indices.length < 3) return;
+      new THREE.Matrix4().copy(groupInverse).multiply(mesh.matrixWorld).decompose(p, q, sc);
+      let vertices = new Float32Array(posAttr.array as ArrayLike<number>);
+      if (Math.abs(sc.x - 1) > 1e-4 || Math.abs(sc.y - 1) > 1e-4 || Math.abs(sc.z - 1) > 1e-4) {
+        // A scaled node: the scale goes into the vertices, since a collider has none.
+        vertices = vertices.slice();
+        for (let i = 0; i < vertices.length; i += 3) {
+          vertices[i] *= sc.x;
+          vertices[i + 1] *= sc.y;
+          vertices[i + 2] *= sc.z;
+        }
+      }
+      const desc = RAPIER.ColliderDesc.trimesh(vertices, indices).setTranslation(p.x, p.y, p.z).setRotation({ x: q.x, y: q.y, z: q.z, w: q.w }).setFriction(0.4).setRestitution(0.1);
+      // The mass properties are in the collider's own frame: the box's centre, moved back into it.
+      if (pieces === 0) {
+        const c = new THREE.Vector3(mass.centre.x, mass.centre.y, mass.centre.z).sub(p).applyQuaternion(q.clone().invert());
+        desc.setMassProperties(mass.m, { x: c.x, y: c.y, z: c.z }, { x: mass.inertia.x, y: mass.inertia.y, z: mass.inertia.z }, { x: 0, y: 0, z: 0, w: 1 });
+      } else desc.setDensity(0);
+      world.createCollider(desc, this.body);
+      pieces++;
+      triangles += indices.length / 3;
+    });
+    if (pieces) console.info(`${this.spec.id}: hull collision from ${pieces} meshes, ${triangles} triangles`);
+    return pieces;
   }
 
   quaternion(out: THREE.Quaternion): THREE.Quaternion {

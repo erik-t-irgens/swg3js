@@ -7,11 +7,11 @@
 //   node tools/swg/cli.mjs extract <swg-dir> <path-in-archive> <out-file>
 //   node tools/swg/cli.mjs dump <file.iff> | <swg-dir> <path-in-archive>   print an IFF tree
 //   node tools/swg/cli.mjs weapons <swg-dir> <out-dir> [--limit=N]       every weapon the game can hold, with its class, under <out-dir>/weapons
-//   node tools/swg/cli.mjs ships <swg-dir> <out-dir> [--limit=N] [--match=yacht] [--glass=<regex>]   every ship a player can fly, with its interior when it has one, under <out-dir>/ships (--match redoes those ships only; --glass names more shaders as glass)
+//   node tools/swg/cli.mjs ships <swg-dir> <out-dir> [--limit=N] [--match=yacht] [--glass=<regex>]   every ship a player can fly, with its interior when it has one, under <out-dir>/ships (--match redoes those ships only; --glass=<regex> forces named shaders to blend)
 //   node tools/swg/cli.mjs species <swg-dir> <out-dir> [--only=human,twilek_female] [--var=...]   every playable species and gender as parts, with characters/index.json for the character creator
 //   node tools/swg/cli.mjs ash <swg-dir> <appearance/x.sat | object/.../shared_x.iff> [--find=pistol]   the animation state hierarchy behind a skeletal appearance, with its strings
 //   node tools/swg/cli.mjs shader <swg-dir> <shader/x.sht>        list a shader's texture slots
-//   node tools/swg/cli.mjs materials <swg-dir> <appearance-path>   every shader an appearance uses, with its effect, alpha and whether it is glass (diagnostic)
+//   node tools/swg/cli.mjs materials <swg-dir> <appearance-path>   every shader an appearance uses, with its effect, alpha and what the converter makes of it (diagnostic)
 //   node tools/swg/cli.mjs template <swg-dir> <object/x.iff>       print an object template's parameter chain
 //   node tools/swg/cli.mjs texture <swg-dir> <texture/x.dds> <out.png>
 //   node tools/swg/cli.mjs msh <swg-dir> <appearance-path> <out.glb>
@@ -175,18 +175,17 @@ function printEffectSummary() {
   for (const [k, n] of [...effectUse.entries()].sort((a, b) => b[1] - a[1])) console.log(`  ${String(n).padStart(4)}  ${k}`);
 }
 
-/** What names a glass shader: a window, a canopy or a cockpit; --glass=<regex> widens it. */
-const GLASS = new RegExp(options.glass ? `glass|window|canopy|cockpit|transp|viewport|${options.glass}` : 'glass|window|canopy|cockpit|transp|viewport', 'i');
-/** The names that are glass even with no alpha in the texture: "cockpit" alone can be a panel, not a pane. */
-const GLASS_PLAIN = new RegExp(options.glass ? `glass|window|canopy|transp|viewport|${options.glass}` : 'glass|window|canopy|transp|viewport', 'i');
-/** How much of the outside shows through glass whose texture has no alpha to say. */
+/**
+ * What names a glass shader: a window, a canopy, a viewport. The game draws these as their
+ * effect says, opaque and reflective for a hull's windows (the outside shows through a room's
+ * invisible pane and the hull's single-sided window seen from behind), so they are only marked,
+ * for the runtime to let the sun through them. --glass=<regex> forces named shaders to blend
+ * at a fixed opacity, for a ship whose windows the effect files leave solid.
+ */
+const GLASS_NAMED = /glass|window|canopy|cockpit|transp|viewport|pane/i;
+const GLASS_FORCED = options.glass ? new RegExp(options.glass, 'i') : null;
+/** How much of the outside shows through forced glass. */
 const GLASS_OPACITY = 0.45;
-
-/** Whether a shader is glass: named as such with alpha in its texture, or by the stricter names without. */
-function isGlass(shaderPath, main, effect, hasAlpha) {
-  const names = `${shaderPath} ${main ?? ''} ${effect ?? ''}`;
-  return hasAlpha ? GLASS.test(names) : GLASS_PLAIN.test(names);
-}
 
 function textureFor(vfs, shaderPath) {
   if (flags.has('--no-textures')) return null;
@@ -201,14 +200,14 @@ function textureFor(vfs, shaderPath) {
     } else if (main && vfs.has(main)) {
       const dds = decodeDds(vfs.read(main));
       result = { path: main, png: encodePng(dds.width, dds.height, dds.rgba), hasAlpha: dds.hasAlpha, alphaMode: alphaFromEffect(vfs, effect, alphaMode) };
-      // Glass: a window, a canopy or a cockpit whose texture carries alpha is see-through whatever
-      // its effect says (the client's own glass effects blend, and a ship's windows drawn opaque
-      // showed as slabs of their tint), so the outside shows through them.
-      if (isGlass(shaderPath, main, effect, dds.hasAlpha) && result.alphaMode === 'OPAQUE') {
-        // Glass whose effect does not blend: the texture's alpha, when it has one, is the
-        // effect's reflection or specular mask, not transparency (blended with it the yacht's
-        // windows stayed slabs of green), so the pane shows the outside through a fixed share of
-        // its tint, the mask taken out of the image.
+      // Glass by name is drawn as its effect says (a name told nothing about transparency: a
+      // fuselage texture called cockpit blended at a fixed share looked like a ghost ship), only
+      // marked so the runtime lets the sun through it.
+      if (GLASS_NAMED.test(shaderPath)) result.glass = true;
+      if (GLASS_FORCED && GLASS_FORCED.test(`${shaderPath} ${main} ${effect ?? ''}`) && result.alphaMode === 'OPAQUE') {
+        // Forced glass: the texture's alpha, when it has one, is the effect's reflection or
+        // specular mask, not transparency, so the pane shows the outside through a fixed share
+        // of its tint, the mask taken out of the image.
         result.alphaMode = 'BLEND';
         result.opacity = GLASS_OPACITY;
         result.glass = true;
@@ -2056,9 +2055,9 @@ switch (cmd) {
         const { main, alphaMode, effect } = shaderTextures(parseIff(vfs.read(shader)));
         const hasAlpha = main && vfs.has(main) ? decodeDds(vfs.read(main)).hasAlpha : null;
         const byEffect = alphaFromEffect(vfs, effect, alphaMode);
-        const glass = isGlass(shader, main, effect, !!hasAlpha);
         const invisible = /invisible/i.test(effect ?? '');
-        const decided = invisible ? 'invisible (collision only)' : glass && byEffect === 'OPAQUE' ? `BLEND (glass, opacity ${GLASS_OPACITY}${hasAlpha ? ', the alpha taken as a mask' : ''})` : byEffect;
+        const forced = GLASS_FORCED && GLASS_FORCED.test(`${shader} ${main ?? ''} ${effect ?? ''}`) && byEffect === 'OPAQUE';
+        const decided = invisible ? 'invisible (collision only)' : forced ? `BLEND (forced glass, opacity ${GLASS_OPACITY}${hasAlpha ? ', the alpha taken as a mask' : ''})` : `${byEffect}${GLASS_NAMED.test(shader) ? ' (glass by name: drawn as the effect says, casts no shadow)' : ''}`;
         line += `\n      effect ${effect ?? '(none)'}  texture ${main ?? '(none)'}${hasAlpha === null ? '' : hasAlpha ? ' with alpha' : ' no alpha'}  -> ${decided}`;
       } catch (err) {
         line += `\n      unreadable: ${err.message}`;
