@@ -266,7 +266,7 @@ export class Garage {
         // and its model's origin is not where the pilot sits.
         const box = new THREE.Box3().setFromObject(frame);
         const centre = box.isEmpty() ? new THREE.Vector3() : box.getCenter(new THREE.Vector3());
-        frame.position.set(spec.seat[0] - centre.x + FRAME_NUDGE.x, spec.seat[1] + SEATED_CHEST - centre.y + FRAME_NUDGE.y, spec.seat[2] - centre.z + FRAME_NUDGE.z);
+        frame.position.set(spec.seat[0] - centre.x + FRAME_NUDGE.x, spec.seat[1] + SEATED_CHEST - centre.y + FRAME_NUDGE.y, spec.seat[2] + FRAME_FORWARD - centre.z + FRAME_NUDGE.z);
         frame.visible = false;
         v.group.add(frame);
         v.cockpitFrame = frame;
@@ -319,8 +319,9 @@ function findHardpoint(model: THREE.Object3D, name: string): THREE.Object3D | nu
 
 /** A seated pilot's eyes over the seat point, metres. */
 const SEATED_EYE = 1.0;
-/** A seated pilot's chest over the seat point, where the cockpit frame is centred. */
-const SEATED_CHEST = 0.6;
+/** Where the cockpit frame's middle sits over the seat point: up and forward, found by eye in the X-wing. */
+const SEATED_CHEST = 0.24;
+const FRAME_FORWARD = 0.32;
 /** A live adjustment of where the cockpit frame sits over the seat, for finding the right place (__debug.cockpitFrame). */
 export const FRAME_NUDGE = new THREE.Vector3();
 /** How much of a hull's glass is seen through while someone is aboard or at the controls. */
@@ -407,7 +408,7 @@ function addEngineGlow(v: Vehicle, engines: THREE.Vector3[] = []): void {
     base?.(dt, self, drive);
     const throttle = drive ? Math.max(0, drive.throttle) : 0;
     const share = Math.min(1, Math.abs(self.speed) / self.spec.maxSpeed);
-    for (const t of self.trails) t.update(dt, self.airborne && Math.abs(self.speed) > 6 ? 0.3 + 0.7 * share + 0.3 * throttle : 0, size * (0.25 + 0.35 * share));
+    for (const t of self.trails) t.update(dt, self.airborne && Math.abs(self.speed) > 6 ? 0.3 + 0.7 * share + 0.3 * throttle : 0, size * (0.06 + 0.09 * share));
     // The drive's own appearance while it runs; the cockpit frame and clear glass while someone is at the controls or aboard.
     const running = throttle > 0 || self.airborne || Math.abs(self.speed) > 1;
     for (const p of self.engineParts) p.visible = running;

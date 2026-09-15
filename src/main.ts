@@ -521,13 +521,17 @@ class App {
         const v = p.aboard?.vehicle ?? this.world.vehicles.filter((x) => x.spec.ship).sort((a, b) => a.pos.distanceTo(p.worldPos) - b.pos.distanceTo(p.worldPos))[0];
         if (!v) return 'no ship';
         let n = 0;
+        const changed: string[] = [];
         v.group.traverse((o) => {
           const m = o as THREE.Mesh;
           if (!m.isMesh) return;
+          const was = m.castShadow;
           m.castShadow = on && !(Array.isArray(m.material) ? m.material : [m.material]).some((mat) => mat.userData.glass || mat.userData.invisible || (mat.transparent && mat.opacity < 1));
+          if (m.castShadow !== was) changed.push(`${m.name || '(unnamed)'} [${(Array.isArray(m.material) ? m.material : [m.material]).map((mat) => mat.name).join('|')}] visible=${m.visible} ${was}->${m.castShadow}`);
           n++;
         });
-        return `${v.spec.id}: ${n} meshes ${on ? 'cast shadows again' : 'cast no shadow'}`;
+        console.info(`shipShadows(${on}): ${changed.length} meshes changed\n  ${changed.join('\n  ')}`);
+        return `${v.spec.id}: ${n} meshes ${on ? 'cast shadows again' : 'cast no shadow'}, ${changed.length} changed (listed in the console)`;
       },
       /** Whether the figure pushes the dynamic bodies it walks into (off: a hull's triangles as the pushed shape crashed the engine). */
       pushBodies: (on = true) => {

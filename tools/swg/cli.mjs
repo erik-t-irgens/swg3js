@@ -2711,9 +2711,11 @@ switch (cmd) {
     // their own (object/tangible/ship/components/), hung on the hull's and wings' hardpoints named
     // for them (engine_pos1, weapon1_neg1, booster_pos1). The first of the components made for
     // the ship's family and side is taken, its hardpoint's index picking among the guns.
-    // Wherever the archives keep them: every template under object/tangible/ship/ named eng_, wpn_ or bst_.
-    const componentTemplates = galleryTemplates(vfs, 'object/tangible/ship/').filter((t) => /\/shared_(eng|wpn|bst)_/i.test(t));
-    const componentKinds = { engine: 'eng', weapon: 'wpn', booster: 'bst' };
+    // Wherever the archives keep them and however they are named (the wings are
+    // attachment/wing/shared_xwing_wing_pos_s01, so an engine is likely shared_xwing_engine_pos_s01
+    // beside them): every template under object/tangible/ship/ that names the ship's family and the kind.
+    const componentTemplates = galleryTemplates(vfs, 'object/tangible/ship/').filter((t) => !/\/shared_.*wing(_|$)/i.test(t) || /engine|weapon|booster|gun/i.test(t));
+    const componentKinds = { engine: /(^|_)(eng|engine|engines)(_|$|\d)/i, weapon: /(^|_)(wpn|weapon|weapons|gun|guns|cannon|blaster)(_|$|\d)/i, booster: /(^|_)(bst|booster|boosters)(_|$|\d)/i };
     const componentsFor = (id, hardpoints, notes) => {
       const out = [];
       const family = id.replace(/^(advanced|basic|prototype|player)_/, '').replace(/_modified$|_imperial_guard$|_longprobe$/, '');
@@ -2721,19 +2723,24 @@ switch (cmd) {
         const m = /^(engine|weapon|booster)(\d*)_?([a-z]+)?_?(\d*)$/i.exec(hp);
         if (!m) continue;
         const [, kind, slot, side] = m;
-        const short = componentKinds[kind.toLowerCase()];
-        const candidates = componentTemplates.filter((t) => {
+        const kindRe = componentKinds[kind.toLowerCase()];
+        let candidates = componentTemplates.filter((t) => {
           const base = t.replace(/^.*\/shared_/, '').replace(/\.iff$/, '');
-          return base.startsWith(`${short}_`) && base.includes(family) && (!side || base.includes(`_${side.toLowerCase()}`) || !/_(pos|neg)(_|$)/.test(base));
+          return base.includes(family) && kindRe.test(base) && !/(^|_)wing(_|$)/.test(base);
         });
+        if (side) {
+          const sided = candidates.filter((t) => t.includes(`_${side.toLowerCase()}`));
+          if (sided.length) candidates = sided;
+          else candidates = candidates.filter((t) => !/_(pos|neg)(_|$|\d)/.test(t));
+        }
         if (!candidates.length) {
-          notes.push(`no ${kind} component for ${hp}`);
+          notes.push(`no ${kind} component for ${hp} (none named for ${family} under object/tangible/ship/)`);
           continue;
         }
         // The lowest style first; a gun's own index (…_0, …_1) follows the hardpoint's number.
         candidates.sort();
         const index = slot ? Number(slot) - 1 : 0;
-        const indexed = candidates.filter((t) => new RegExp(`_${index}\\.iff$`).test(t));
+        const indexed = candidates.filter((t) => new RegExp(`_${index}\\.iff$`).test(t) || new RegExp(`${kind.toLowerCase()}${index + 1}`, 'i').test(t));
         const template = (indexed.length ? indexed : candidates)[0];
         const r = resolveTemplateMesh(vfs, template, cache);
         if (r.skip || !r.appearance) {
