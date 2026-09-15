@@ -31,6 +31,9 @@ import type { Hittable } from '../combat/kit';
 const tmpQ = new THREE.Quaternion();
 const tmpV = new THREE.Vector3();
 const tmpM = new THREE.Matrix4();
+/** How far out a space zone's planets hang, and the radius (metres) a planet of size 1 has there. */
+const SPACE_BODY_DISTANCE = 2600;
+const SPACE_BODY_SIZE = 240;
 /** Detailed ground chunks each way, by default; the settings move it (World.viewRadius). */
 const VIEW_RADIUS = 6;
 const STREAM_BUDGET = 3;
@@ -467,10 +470,11 @@ export class World {
       }
     }
 
-    // A pack with a sky but no terrain (the gallery) still gets its sky.
+    // A pack with a sky but no terrain (the gallery, a space zone) still gets its sky, and a space zone its planets.
     if (!layout?.terrain) {
       try {
         await this.loadSky(pack);
+        if (planet.space) await this.loadSpaceBodies(pack);
       } catch (err) {
         console.warn('sky: failed to load', err);
       }
@@ -562,6 +566,10 @@ export class World {
     this.layoutStream = null;
     this.particles?.dispose();
     this.particles = null;
+    if (this.spaceBodies) {
+      this.scene.remove(this.spaceBodies);
+      this.spaceBodies = null;
+    }
     this.flora = null;
     this.groundTextures?.dispose();
     this.groundTextures = null;
@@ -628,9 +636,49 @@ export class World {
   }
 
   /** The planet's sky from its pack: replaces the procedural dome and drives the lights, fog and reflections. */
+  /** A space zone's planets and moons: textured spheres hung far out in the directions the zone's terrain file gives, riding with the camera like the sky. */
+  private spaceBodies: THREE.Group | null = null;
+
+  private async loadSpaceBodies(pack: AssetPack): Promise<void> {
+    type SpaceData = { planets: { direction: number[]; size: number; texture: string | null }[] };
+    let data: SpaceData | null = null;
+    try {
+      const res = await fetch(pack.url('space.json'));
+      if (res.ok && (res.headers.get('content-type') ?? '').includes('json')) data = (await res.json()) as SpaceData;
+    } catch {
+      data = null;
+    }
+    if (!data) return;
+    const group = new THREE.Group();
+    const loader = new THREE.TextureLoader();
+    for (const p of data.planets) {
+      // The direction is in the game's own coordinates, mirrored in X like everything converted.
+      const dir = new THREE.Vector3(-p.direction[0], p.direction[1], p.direction[2]);
+      if (dir.lengthSq() < 1) continue;
+      dir.normalize();
+      const tex = p.texture ? await loader.loadAsync(pack.url(p.texture)).catch(() => null) : null;
+      if (tex) tex.colorSpace = THREE.SRGBColorSpace;
+      const mesh = new THREE.Mesh(new THREE.SphereGeometry(SPACE_BODY_SIZE * p.size, 48, 32), new THREE.MeshLambertMaterial({ map: tex ?? undefined, color: tex ? 0xffffff : 0x8a97a6, fog: false, depthWrite: false }));
+      mesh.position.copy(dir).multiplyScalar(SPACE_BODY_DISTANCE);
+      mesh.renderOrder = -4;
+      mesh.frustumCulled = false;
+      group.add(mesh);
+    }
+    this.spaceBodies = group;
+    this.scene.add(group);
+    markActor(group);
+    console.info(`space: ${group.children.length} planets and moons in the sky`);
+  }
+
   private async loadSky(pack: AssetPack): Promise<void> {
+    const token = this.loadToken;
     const sky = await SwgSky.load(pack);
     if (!sky) return;
+    // Another world was loaded while the textures came: this sky is not wanted any more.
+    if (token !== this.loadToken) {
+      sky.dispose(this.scene);
+      return;
+    }
     this.dropSky();
     this.swgSky = sky;
     this.scene.add(sky.group, sky.cloudGroup);
@@ -929,6 +977,8 @@ export class World {
 
   /** Find a comfortable spot near the origin: dry, gentle slope. */
   spawnPoint(): THREE.Vector3 {
+    // A space zone has no ground to stand on: its arrival point is the zone's origin, in a ship.
+    if (this.planet.space) return new THREE.Vector3(0, 0, 0);
     const n = new THREE.Vector3();
     let best = new THREE.Vector3(0, this.terrain.heightAt(0, 0), 0);
     let bestScore = -Infinity;
@@ -1209,7 +1259,14 @@ export class World {
     for (let i = 0; i < objects.length; i += BATCH) {
       this.compileFor(r, camera, objects.slice(i, i + BATCH), false);
       onProgress(Math.min(objects.length, i + BATCH), objects.length);
-      await new Promise((resolve) => requestAnimationFrame(resolve));
+      // A tab in the background gets no animation frames, and its timers are throttled to one a
+      // minute after a while; a message to itself is neither, so loading goes on unlooked-at.
+      await new Promise<void>((resolve) => {
+        if (!document.hidden) return requestAnimationFrame(() => resolve());
+        const ch = new MessageChannel();
+        ch.port1.onmessage = () => resolve();
+        ch.port2.postMessage(0);
+      });
     }
     return (r.info.programs?.length ?? 0) - before;
   }
@@ -1237,6 +1294,8 @@ export class World {
     markActor(this.creatures.group);
     // Turrets are spawned from the NPC tab (B) now, not stood around the arrival point.
     markActor(this.turrets.group);
+    // No bike is stood in space: there is no ground for it, and the player arrives in a ship.
+    if (this.planet.space) return;
     const sx = center.x + 5;
     const sz = center.z + 4;
     const speeder = createPlaceholderSpeeder(this.physics, this.scene, sx, this.terrain.heightAt(sx, sz) + 1.2, sz, Math.PI * 0.75);
@@ -1245,10 +1304,13 @@ export class World {
   }
 
   /** Stand a vehicle from the garage on the ground in front of a point, facing away from it. */
-  async spawnVehicle(def: VehicleDef, at: THREE.Vector3, heading: number, kind?: VehicleKind): Promise<Vehicle> {
+  async spawnVehicle(def: VehicleDef, at: THREE.Vector3, heading: number, kind?: VehicleKind, airborne = false): Promise<Vehicle> {
     this.garage ??= await Garage.load(import.meta.env.BASE_URL);
-    const place = (b: VehicleSpec['bounds']) => this.clearGround(b, at, heading, def.source === 'creature');
+    // In space, or arriving in the air, the vehicle stands exactly where it is asked to.
+    const space = !!this.planet.space;
+    const place = airborne || space ? (b: VehicleSpec['bounds']) => [at.x, at.y + b.min[1], at.z] as [number, number, number] : (b: VehicleSpec['bounds']) => this.clearGround(b, at, heading, def.source === 'creature');
     const v = await this.garage.spawn(def, this.physics, this.scene, at.x, at.y, at.z, heading, kind, place);
+    v.space = space;
     markActor(v.group);
     this.vehicles.push(v);
     // The ship's bolt and hit effects, played once far below the world, so the first shot finds
@@ -1630,6 +1692,7 @@ export class World {
       this.refreshEnvironment(dt);
     } else this.applyLighting();
     this.sky.position.copy(camPos);
+    this.spaceBodies?.position.copy(camPos);
     this.waterTime += dt;
     for (const m of this.waterMaterials) m.userData.uniforms.uTime.value = this.waterTime;
     this.emitRipples(dt, playerPos);

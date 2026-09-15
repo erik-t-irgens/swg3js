@@ -50,6 +50,8 @@
 //                                                                  ("all": into every planet pack already under <out-dir>)
 //   node tools/swg/cli.mjs sky <swg-dir> <planet>|all <out-dir>      the planet's sky (sun, moons, colour ramps, skybox, reflection maps) into a pack
 //                                                                  (snapshot and terrain do this too)
+//   node tools/swg/cli.mjs space <swg-dir> <zone>|all <out-dir>     a space zone (space_tatooine, ...): its stations, asteroid fields, planets and sky
+//                                                                  as <out-dir>/<zone>, a pack the game flies through
 //   node tools/swg/cli.mjs audit <swg-dir> <out-dir> [planet] [--limit=n]   every object the archives place on each converted planet against its pack:
 //                                                                  what is missing, why (skipped kind, creature, older conversion), and where;
 //                                                                  also written to <out-dir>/audit.txt
@@ -77,7 +79,7 @@ import { basename, dirname, join, relative } from 'node:path';
 import { resolveParts } from './appearance.mjs';
 import { decodeDds } from './dds.mjs';
 import { buildGlb } from './glb.mjs';
-import { dump, isForm, parseIff } from './iff.mjs';
+import { dump, find, isForm, parseIff, readCString } from './iff.mjs';
 import { classifyDirectory, isRetailByName } from './manifest.mjs';
 import { parseMesh } from './msh.mjs';
 import { buildPack, familyOf } from './pack.mjs';
@@ -3311,6 +3313,110 @@ switch (cmd) {
       mkdirSync(outDir, { recursive: true });
       console.log(`${planet}:`);
       exportSky(vfs, planet, outDir, { textureFor: (p) => textureFor(vfs, p), log: console.log });
+    }
+    printEffectSummary();
+    break;
+  }
+
+  case 'space': {
+    // <swg-dir> <zone>|all <out-dir>: a space zone as a pack: the stations its station table
+    // places (drawn as the faction stations the client has), every asteroid of its fields
+    // (scattered from each field's seed through its style table), the planets and moons its
+    // terrain file hangs in the sky (as space.json, with each one's surface texture), and its
+    // sky (the nebula skybox, the stars, the sun and moon) like a planet's.
+    if (!pos[3]) usage();
+    const vfs = mount(pos[1]);
+    const { SPACE_ZONES, stationTemplate, parseSpacePlanets, parseSpaceSkybox, scatterField } = await import('./space.mjs');
+    const zones = pos[2] === 'all' ? Object.keys(SPACE_ZONES).filter((z) => vfs.has(`terrain/${z}.trn`)) : [pos[2]];
+    for (const zone of zones) {
+      if (!vfs.has(`terrain/${zone}.trn`)) {
+        console.log(`${zone}: no terrain/${zone}.trn in the archives`);
+        continue;
+      }
+      const outDir = join(pos[3], zone);
+      mkdirSync(join(outDir, 'space'), { recursive: true });
+      console.log(`${zone}:`);
+      const models = new Map();
+      const cache = new Map();
+      const convert = (template) => {
+        const r = resolveTemplateMesh(vfs, template, cache);
+        if (r.skip) return { skip: r.skip };
+        if (r.particle || r.skeletal) return { skip: r.particle ? 'particle effect' : 'skeletal appearance' };
+        const single = r.parts.length === 1 && !r.parts[0].transform && !r.effects?.length && !r.parts[0].hardpoints?.length;
+        const id = familyOf(single ? r.parts[0].mesh : r.appearance);
+        if (!models.has(id)) {
+          try {
+            const conv = convertOne(vfs, single ? r.parts[0].mesh : r.appearance, join(outDir, `${id}.glb`));
+            const b = conv.mesh.bounds ?? { min: [0, 0, 0], max: [0, 0, 0] };
+            const bounds = conv.flipX ? { min: [-b.max[0], b.min[1], b.min[2]], max: [-b.min[0], b.max[1], b.max[2]] } : b;
+            models.set(id, { id, file: `${id}.glb`, bounds, triangles: conv.tris, ...(conv.cells ? { cells: conv.cells, portals: conv.portals ?? [] } : {}), ...(conv.tris ? {} : { failed: 'no triangles' }) });
+          } catch (err) {
+            models.set(id, { id, failed: err.message });
+          }
+        }
+        const def = models.get(id);
+        if (!def || def.failed) return { skip: def?.failed ?? 'failed' };
+        const bb = def.bounds;
+        // In space an object is met from every side: its radius is its whole extent.
+        return { model: id, radius: Math.max(0.5, ...bb.min.map(Math.abs), ...bb.max.map(Math.abs)) };
+      };
+      const table = (path) => {
+        const p = String(path ?? '').replace(/\\/g, '/');
+        return p && vfs.has(p) ? parseDatatable(parseIff(vfs.read(p))).rows : null;
+      };
+      const objects = [];
+      const stations = [];
+      for (const row of table(`datatables/space/spacestation/${zone}.iff`) ?? []) {
+        const template = stationTemplate(row.Name);
+        const r = convert(template);
+        if (r.skip) {
+          console.log(`  station ${row.Name}: ${template}: ${r.skip}`);
+          continue;
+        }
+        objects.push({ template, model: r.model, x: row.LocationX, y: row.LocationY, z: row.LocationZ, q: [1, 0, 0, 0], radius: r.radius });
+        stations.push({ name: row.Name, model: r.model, x: row.LocationX, y: row.LocationY, z: row.LocationZ, radius: r.radius });
+        console.log(`  station ${row.Name}: ${template.replace(/^.*\//, '')} at ${row.LocationX}, ${row.LocationY}, ${row.LocationZ} (${Math.round(r.radius)} m across)`);
+      }
+      let asteroids = 0;
+      for (const row of table(`datatables/space/asteroidfield/${zone}.iff`) ?? []) {
+        const styles = table(row.FieldStyleTable) ?? [];
+        let kept = 0;
+        for (const a of scatterField(row, styles)) {
+          const r = convert(a.template);
+          if (r.skip) continue;
+          objects.push({ template: a.template, model: r.model, x: a.x, y: a.y, z: a.z, q: a.q, radius: r.radius });
+          kept++;
+        }
+        asteroids += kept;
+        console.log(`  field "${row.Name}": ${kept} of ${row.NumAsteroids} asteroids${styles.length ? '' : ` (no style table ${row.FieldStyleTable})`}${Number(row.Type) === 2 ? ', along a spline' : ''}, radius ${row.Radius} m at ${row.CenterLocationX}, ${row.CenterLocationY}, ${row.CenterLocationZ}`);
+      }
+      const planets = [];
+      const trnRoot = parseIff(vfs.read(`terrain/${zone}.trn`));
+      for (const p of parseSpacePlanets(trnRoot)) {
+        let texture = null;
+        try {
+          if (vfs.has(p.appearance)) {
+            // A planet appearance: its SURF chunk is a float then the surface shader.
+            const surf = find(parseIff(vfs.read(p.appearance)), 'SURF');
+            const shader = surf ? readCString(surf.data, 4).value.replace(/\\/g, '/') : null;
+            const t = shader ? textureFor(vfs, shader) : null;
+            if (t?.png) {
+              texture = `space/${basename(p.appearance).replace(/\.pln$/i, '')}.png`;
+              writeFileSync(join(outDir, texture), t.png);
+            }
+          }
+        } catch (err) {
+          console.log(`  planet ${p.appearance}: ${err.message}`);
+        }
+        planets.push({ appearance: p.appearance, direction: p.direction.map((v) => Math.round(v * 100) / 100), size: Math.round(p.size * 1000) / 1000, texture });
+        console.log(`  planet ${basename(p.appearance)}: toward ${p.direction.map((v) => v.toFixed(0)).join(', ')}, size ${p.size}${texture ? '' : ', no surface texture'}`);
+      }
+      writeFileSync(join(outDir, 'space.json'), JSON.stringify({ zone, planet: SPACE_ZONES[zone] ?? null, stations, planets }, null, 2));
+      writeFileSync(join(outDir, 'manifest.json'), JSON.stringify({ planet: zone, categories: { layout: [...models.values()].filter((m) => !m.failed) } }, null, 2));
+      writeFileSync(join(outDir, 'layout.json'), JSON.stringify({ planet: zone, center: { x: 0, z: 0 }, radius: null, objects, skipped: [] }));
+      const skybox = parseSpaceSkybox(trnRoot);
+      exportSky(vfs, zone, outDir, { textureFor: (p) => textureFor(vfs, p), log: console.log, skybox });
+      console.log(`-> ${outDir}: ${stations.length} stations, ${asteroids} asteroids in ${models.size} models, ${planets.length} planets and moons${skybox ? `, sky ${basename(skybox)}` : ', no skybox named'}`);
     }
     printEffectSummary();
     break;

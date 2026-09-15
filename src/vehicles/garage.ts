@@ -367,6 +367,7 @@ export class Garage {
     }
     v.hardpoints = hardpoints;
     v.riderPose = def.riderPose ?? null;
+    v.def = def;
     model.traverse((o) => {
       if (o.userData.attachment === 'engine') {
         o.visible = false;

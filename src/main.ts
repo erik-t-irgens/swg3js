@@ -8,7 +8,7 @@ import { ThirdPersonCamera } from './core/camera';
 import { PortalRenderer } from './world/portalRender';
 import { Input, type Action } from './core/input';
 import { Physics } from './core/physics';
-import { PLANETS, packIdOf, planetById, type PlanetDef } from './data/planets';
+import { PLANETS, packIdOf, planetById, spaceZoneOf, type PlanetDef } from './data/planets';
 import { Player } from './player/player';
 import { loadPlayerRig } from './player/rig';
 import { Character, loadSpeciesIndex, type SpeciesEntry } from './player/character';
@@ -46,7 +46,12 @@ function mountPrompt(v: import('./vehicles/vehicle').Vehicle): string {
   const boost = v.spec.boost === 'heat' ? ` · <b>Shift</b> boost · heat ${bar(v.meter)}${v.overheated > 0 ? ' BURNT OUT' : ''}` : v.spec.boost === 'burst' ? ` · <b>Shift</b> boost ${bar(v.meter)}` : '';
   const hop = v.spec.hop ? ' · <b>Space</b> hop' : '';
   const fly = v.spec.fly ? ' · look up/down or <b>Space</b>/<b>X</b> to climb and sink' : '';
-  if (k === 'ship') return `<b>E</b> leave · <b>W</b>/<b>S</b> throttle up and down · mouse pitches and turns (loops and rolls allowed) · <b>A/D</b> roll · <b>Space</b>/<b>X</b> pitch · <b>wheel</b> zoom, all the way in for the cockpit · <b>Alt</b> look around${v.guns.length ? ' · <b>click</b> fires · <b>Tab</b> next target' : ''} · <b>Shift</b> burn · ${v.airborne ? 'flying' : 'landed'} · ${Math.round(Math.abs(v.speed) * 3.6)} km/h${v.hp < v.maxHp ? ` · hull ${Math.round((v.hp / v.maxHp) * 100)}%` : ''}`;
+  if (k === 'ship') {
+    // Hovering, the ship is a VTOL: it holds still until the throttle opens, rises and sinks on the keys, slides sideways. In flight the mouse flies it.
+    const hover = `<b>W</b> throttle up into flight · mouse turns · <b>Space</b>/<b>Ctrl</b> rise and sink · <b>A/D</b> slide`;
+    const flight = `<b>W</b>/<b>S</b> throttle up and down · mouse pitches and turns (loops and rolls allowed) · <b>A/D</b> roll · <b>Space</b>/<b>X</b> pitch`;
+    return `<b>E</b> leave · ${v.airborne ? flight : hover} · <b>wheel</b> zoom, all the way in for the cockpit · <b>Alt</b> look around${v.guns.length ? ' · <b>click</b> fires · <b>Tab</b> next target' : ''} · <b>Shift</b> burn · ${v.airborne ? 'flying' : 'hovering'} · ${Math.round(Math.abs(v.speed) * 3.6)} km/h${v.hp < v.maxHp ? ` · hull ${Math.round((v.hp / v.maxHp) * 100)}%` : ''}`;
+  }
   const turn = k === 'ground' ? 'mouse or <b>A/D</b> turn' : 'mouse or <b>A/D</b> steer';
   const hull = v.hp < v.maxHp ? ` · hull ${Math.round((v.hp / v.maxHp) * 100)}%${v.hp / v.maxHp < 0.34 ? ' LIMPING' : v.hp / v.maxHp < 0.67 ? ' smoking' : ''}` : '';
   return `<b>E</b> dismount · <b>W/S</b> throttle · ${turn} · <b>Alt</b> look around${boost}${hop}${fly} · ${k} · ${Math.round(Math.abs(v.speed) * 3.6)} km/h${hull}`;
@@ -77,6 +82,9 @@ const SHIP_BOLT_RANGE = 512;
 const SHIP_GUN_CONE = THREE.MathUtils.degToRad(12);
 const SHIP_TARGET_CONE = THREE.MathUtils.degToRad(70);
 const SHIP_TARGET_RANGE = 2500;
+/** How high over the ground a ship must climb to be offered space (the sky's ceiling is 1500 m), and how high it arrives back over the planet. */
+const SPACE_GATE_HEIGHT = 1100;
+const SPACE_ARRIVAL_HEIGHT = 700;
 const tmp2 = new THREE.Vector3();
 const boltFrom = new THREE.Vector3();
 
@@ -132,6 +140,10 @@ class App {
   private shipLeadValid = false;
   /** The picture's effects (bloom, the speed blur), when the settings ask for them. */
   private postfx: PostFX | null = null;
+  /** The ship last flown, spawned again on arriving in space (or back from it). */
+  private lastShipDef: VehicleDef | null = null;
+  /** The way between a planet and its space, offered on E: up near the top of the sky, down anywhere in space. */
+  private spaceGate: 'up' | 'down' | null = null;
   private readonly settings: Settings = loadSettings();
   /** The character being played, as kept in this browser; null on the select screen and in the creator. */
   private current: SavedCharacter | null = null;
@@ -511,6 +523,11 @@ class App {
       },
       /** The clip the rig's selector picks for a value: `variant('loop_riding', 'vehicle_hover_chair')`, `variant('skill_action_3', 'dance_18')`. */
       variant: (base: string, value: string) => this.player.rig?.variant(base, value) ?? 'no rig',
+      /** Travel to a world by id (`travel('space_tatooine')`), as the galaxy map does; a space zone is arrived at in the ship last flown. */
+      travel: (id: string) => {
+        void this.travel(planetById(id));
+        return `travelling to ${id}`;
+      },
       /** Nudge the ridden vehicle's seat by metres in its own frame (right, up, forward) and report where it now is, with the pose playing and its root offset, for finding a seat by eye. */
       seat: (dx = 0, dy = 0, dz = 0) => {
         const v = this.player.mounted;
@@ -1112,6 +1129,8 @@ class App {
       this.player.heading = c.heading;
       this.cam.yaw = c.heading + Math.PI;
     }
+    // Space is never stood in: a character who was last there comes back flying a ship.
+    if (planet.space) await this.arriveInSpace();
     this.inWorld = true;
     this.started = true;
     await this.settle();
@@ -1234,20 +1253,68 @@ class App {
     }).catch((err) => console.warn('asset pack failed', err));
   }
 
-  private async travel(planet: PlanetDef, zoneId?: string): Promise<void> {
+  /**
+   * Go to another world. With `ship`, arrive flying it: the ship carried up into space, or down
+   * out of it, is spawned again over the arrival point at `height` and launched at `speed`. A
+   * space zone is always arrived at in a ship (the one last flown, else an X-wing).
+   */
+  private async travel(planet: PlanetDef, zoneId?: string, ship?: { def: VehicleDef; speed: number; height: number }): Promise<void> {
     if (this.traveling) return;
     this.traveling = true;
     this.map.hide();
     this.input.captured = false;
     const zone = planet.zones?.find((z) => z.id === zoneId);
+    console.info(`travel: to ${planet.name}${zone ? ` (${zone.name})` : ''}${ship ? ` flying the ${ship.def.id}` : ''}`);
     this.loadingScreen.show(planet, zone ? `${planet.name}: ${zone.name}` : planet.name, 'travelling');
     await new Promise((r) => setTimeout(r, 400));
+    const p = this.player;
+    if (p.mounted) p.dismount(p.pos.clone());
     this.arrive(planet, zoneId);
+    if (ship) await this.arriveInShip(ship.def, ship.speed, ship.height);
+    else if (planet.space) await this.arriveInSpace();
     await this.settle();
     this.savePlace(true);
     await this.loadingScreen.hide();
     this.traveling = false;
     this.input.requestLock();
+  }
+
+  /** Arrive in space without a ship carried up: seated in the one last flown, else the default, moving off gently. */
+  private async arriveInSpace(): Promise<void> {
+    const def = this.lastShipDef ?? (await this.defaultShipDef());
+    if (def) await this.arriveInShip(def, 40, 0);
+  }
+
+  /** A ship to arrive in space with when none was flown: the first X-wing the garage has, else its first ship. */
+  private async defaultShipDef(): Promise<VehicleDef | null> {
+    this.world.garage ??= await Garage.load(import.meta.env.BASE_URL);
+    const g = this.world.garage;
+    return g.find('xwing') ?? g.vehicles.find((v) => v.kind === 'ship') ?? null;
+  }
+
+  /** Spawn a ship over the arrival point, seat the player in it and launch it, on the way into or out of space. */
+  private async arriveInShip(def: VehicleDef, speed: number, height: number): Promise<void> {
+    const p = this.player;
+    const at = this.spawn.clone();
+    at.y += height;
+    const v = await this.world.spawnVehicle(def, at, Math.PI, def.kind, true);
+    p.mount(v);
+    this.lastShipDef = def;
+    v.launch(speed);
+    this.cam.distance = Math.max(this.cam.distance, 9.5);
+    this.physics.world.step();
+  }
+
+  /** E at the top of the sky, or anywhere in space: the ship goes up into the planet's space zone, or down to the planet. */
+  private async crossAtmosphere(gate: 'up' | 'down'): Promise<void> {
+    const ship = this.player.mounted;
+    if (!ship?.def || this.traveling) return;
+    if (gate === 'up') {
+      const zone = spaceZoneOf(this.world.planet);
+      if (zone) await this.travel(zone, undefined, { def: ship.def, speed: Math.max(60, ship.speed), height: 0 });
+    } else if (this.world.planet.space) {
+      await this.travel(planetById(this.world.planet.space), undefined, { def: ship.def, speed: 90, height: SPACE_ARRIVAL_HEIGHT });
+    }
   }
 
   /** Jump to a place on the map: travel first when it is on another planet. */
@@ -1347,15 +1414,20 @@ class App {
         input.mouseDX = 0;
         input.mouseDY = 0;
       }
+      // A ship not yet in flight hovers as a VTOL: the view's tilt does not lift it, Space and X
+      // do, and A and D slide it sideways rather than turning it; in flight the keys roll it.
+      const hovering = !!pilot.spec.ship && !pilot.airborne;
+      const keys = (input.held('right') ? 1 : 0) - (input.held('left') ? 1 : 0);
       drive = {
         throttle: (input.held('forward') ? 1 : 0) - (input.held('back') ? 1 : 0),
-        steer: (input.held('right') ? 1 : 0) - (input.held('left') ? 1 : 0),
+        steer: hovering ? 0 : keys,
+        strafe: hovering ? keys : 0,
         heading: free ? null : this.cam.yaw + Math.PI,
         boost: input.held('walk'),
         hop: input.pressedAction('jump'),
         up: input.held('jump'),
         down: input.held('crouch'),
-        vertical,
+        vertical: pilot.spec.ship ? 0 : vertical,
         lookDX,
         lookDY,
       };
@@ -1420,6 +1492,14 @@ class App {
         v.dispose(this.physics, this.scene);
         this.world.vehicles.splice(this.world.vehicles.indexOf(v), 1);
       }
+    }
+    // The way up and the way down: a ship near the top of a planet's sky is offered its space
+    // zone; a ship in space, the planet below. Both on E, the way a landed ship is left.
+    const flown = player.mounted;
+    this.spaceGate = null;
+    if (flown?.spec.ship && flown.def) {
+      if (this.world.planet.space) this.spaceGate = 'down';
+      else if (flown.airborne && spaceZoneOf(this.world.planet) && flown.pos.y - terrain.heightAt(flown.pos.x, flown.pos.z) > SPACE_GATE_HEIGHT) this.spaceGate = 'up';
     }
     if (player.piloting?.crashed) {
       const m = player.piloting;
@@ -1788,6 +1868,10 @@ class App {
       return;
     }
     if (p.mounted) {
+      if (this.spaceGate) {
+        void this.crossAtmosphere(this.spaceGate);
+        return;
+      }
       const sp = p.mounted;
       sp.quaternion(tmpQ);
       tmp.set(-(sp.spec.bounds.max[0] - sp.spec.bounds.min[0]) / 2 - 1.0, 0, 0).applyQuaternion(tmpQ).add(sp.pos);
@@ -1814,6 +1898,7 @@ class App {
     }
     if (best) {
       p.mount(best);
+      if (best.spec.ship && best.def) this.lastShipDef = best.def;
       this.cam.distance = Math.max(this.cam.distance, 9.5);
     }
   }
@@ -1992,7 +2077,7 @@ class App {
 
       let prompt = '';
       if (player.noclip) prompt = `<b>NOCLIP</b> ${Math.round(player.noclipSpeed)} m/s · <b>WASD</b> fly · <b>Space</b> up · <b>Ctrl</b> down · <b>Shift</b> fast · <b>+</b>/<b>-</b> speed · <b>N</b> off`;
-      else if (player.mounted) prompt = mountPrompt(player.mounted);
+      else if (player.mounted) prompt = mountPrompt(player.mounted) + (this.spaceGate === 'up' ? ' · <b>E</b> leave for space' : this.spaceGate === 'down' ? ` · <b>E</b> land on ${planetById(this.world.planet.space!).name}` : '');
       else if (this.world.elevatorsNear(player.pos, MOUNT_RANGE).length) prompt = `<b>E</b> elevator ${this.world.elevatorsNear(player.pos, MOUNT_RANGE)[0].kind === 'down' ? 'down' : 'up'}`;
       else if (player.piloting) prompt = `at the controls of the ${player.piloting.spec.label} · <b>W</b>/<b>S</b> throttle · mouse steers · <b>Alt</b> looks around · <b>E</b> lets go · ${Math.round(Math.abs(player.piloting.speed) * 3.6)} km/h`;
       else if (player.aboard) prompt = player.aboard.pilotSpot && player.pos.distanceTo(player.aboard.pilotSpot) < CONTROLS_RANGE ? `<b>E</b> take the controls` : `aboard ${player.aboard.vehicle.spec.label} · <b>E</b> step out`;

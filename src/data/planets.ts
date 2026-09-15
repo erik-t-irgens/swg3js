@@ -16,6 +16,8 @@ export interface PlanetDef {
   seed: number;
   /** Zones with their own terrain; the first is where travel lands. Absent for single-terrain planets. */
   zones?: PlanetZone[];
+  /** A space zone: the id of the planet it is the orbit of. No ground, no gravity, flown in a ship. */
+  space?: string;
   /** Downward acceleration in m/s². Real planets vary; SWG feel is snappier than Earth. */
   gravity: number;
   sky: { top: number; horizon: number; sunColor: number; suns: number; sunElevation: number; sunAzimuth: number };
@@ -276,6 +278,49 @@ PLANETS.push({
   props: { treeDensity: 0, rockDensity: 0, treeStyle: 'none', canopy: 0x000000, trunk: 0x000000, rock: 0x8f7355, treeScale: 1 },
   creatures: { name: 'Bantha', count: 0, color: 0x6b5334, size: 2.3, speed: 2, hp: 260, aggressive: false, damage: 0 },
 });
+
+/**
+ * The space zones (the converter's `space` command, one pack each): the orbit of a planet, with
+ * its stations, asteroid fields and the planet itself hanging in the sky. No ground (the
+ * procedural terrain sits three kilometres down, out of sight and reach), no gravity, no fog.
+ */
+const SPACE_ZONES: { id: string; planet: string }[] = [
+  { id: 'space_tatooine', planet: 'tatooine' },
+  { id: 'space_naboo', planet: 'naboo' },
+  { id: 'space_corellia', planet: 'corellia' },
+  { id: 'space_dantooine', planet: 'dantooine' },
+  { id: 'space_lok', planet: 'lok' },
+  { id: 'space_endor', planet: 'endor' },
+  { id: 'space_dathomir', planet: 'dathomir' },
+  { id: 'space_yavin4', planet: 'yavin4' },
+  { id: 'space_kashyyyk', planet: 'kashyyyk' },
+];
+for (const z of SPACE_ZONES) {
+  const parent = PLANETS.find((p) => p.id === z.planet);
+  if (!parent) continue;
+  PLANETS.push({
+    id: z.id,
+    name: `${parent.name} orbit`,
+    tagline: 'The system above: stations, asteroid fields, the planet below',
+    description: `The space above ${parent.name}: its station, its asteroid fields and the planet hanging in the sky. Flown in a ship; a ship climbing past the sky over ${parent.name} is offered the way up, and one here the way down.`,
+    seed: parent.seed + 7,
+    gravity: 0,
+    space: parent.id,
+    sky: { top: 0x000000, horizon: 0x000000, sunColor: 0xffffff, suns: 1, sunElevation: 0.9, sunAzimuth: 1.2 },
+    fog: { color: 0x000000, density: 0 },
+    swgFogScale: 0,
+    light: { ...parent.light },
+    terrain: { base: -3000, amplitude: 0, frequency: 0.004, octaves: 1, ridged: 0, flatten: 1, detail: 0 },
+    palette: { low: 0x000000, mid: 0x000000, high: 0x000000, slope: 0x000000, shore: 0x000000 },
+    props: { treeDensity: 0, rockDensity: 0, treeStyle: 'none', canopy: 0x000000, trunk: 0x000000, rock: 0x000000, treeScale: 1 },
+    creatures: { name: 'Nothing', count: 0, color: 0x000000, size: 1, speed: 0, hp: 1, aggressive: false, damage: 0 },
+  });
+}
+
+/** The space zone above a planet, when the game has one. */
+export function spaceZoneOf(planet: PlanetDef): PlanetDef | null {
+  return PLANETS.find((p) => p.space === planet.id) ?? null;
+}
 
 export function planetById(id: string): PlanetDef {
   const p = PLANETS.find((x) => x.id === id);

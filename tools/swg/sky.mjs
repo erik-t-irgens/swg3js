@@ -143,7 +143,7 @@ export function parseEnvironmentFile(root) {
  * Write the planet's sky data into the pack. `textureFor(shaderPath)` resolves a shader to
  * its main texture ({ png, alphaMode, hasAlpha }) the way meshes get theirs.
  */
-export function exportSky(vfs, planet, outDir, { textureFor, log = console.error }) {
+export function exportSky(vfs, planet, outDir, { textureFor, log = console.error, skybox = null }) {
   const envPath = `terrain/environment/${planet}.iff`;
   const tablePath = `datatables/environment/${planet}.iff`;
   if (!vfs.has(envPath) && !vfs.has(tablePath)) {
@@ -272,7 +272,9 @@ export function exportSky(vfs, planet, outDir, { textureFor, log = console.error
         }
         sky.stars = { count: env.stars.count, colors };
       }
-      if (env.skybox?.mask) {
+      // A space zone's sky is the cube map its terrain file names, handed in by the caller.
+      if (skybox) sky.skybox = { cube: cube(skybox, 1024) };
+      else if (env.skybox?.mask) {
         if (env.skybox.cubeMap) sky.skybox = { cube: cube(env.skybox.mask.includes('/') ? env.skybox.mask : `texture/${env.skybox.mask}.dds`, 1024) };
         else {
           const sides = {};

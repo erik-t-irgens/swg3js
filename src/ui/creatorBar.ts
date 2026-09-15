@@ -14,7 +14,7 @@ export class CreatorBar {
     this.root = document.createElement('div');
     this.root.id = 'creator-bar';
     this.root.className = 'hidden';
-    const worlds = PLANETS.filter((p) => p.id !== 'gallery');
+    const worlds = PLANETS.filter((p) => p.id !== 'gallery' && !p.space);
     this.root.innerHTML = `
       <button class="back">← Characters</button>
       <div class="steps"><button class="step on" data-step="appearance">1 · Species &amp; look</button><button class="step" data-step="wardrobe">2 · Clothes</button></div>

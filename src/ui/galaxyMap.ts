@@ -47,7 +47,7 @@ export class GalaxyMap {
           <h3>${p.name}</h3>
           <div class="tag">${p.tagline}</div>
           <p>${p.description}</p>
-          <div class="meta">Gravity ${p.gravity} m/s² · ${p.creatures.name} country</div>
+          <div class="meta">${p.space ? 'Orbit · no gravity · flown in a ship' : `Gravity ${p.gravity} m/s² · ${p.creatures.name} country`}</div>
           <div class="pois"></div>
         </div>`;
       card.addEventListener('click', () => {

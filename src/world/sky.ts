@@ -305,6 +305,43 @@ export class SwgSky {
       this.group.add(box);
     }
 
+    // A cube-map skybox (a space zone's nebula): the converter wrote its six faces in the game's
+    // order (+X -X +Y -Y +Z -Z), already mirrored for the game's X axis, drawn on the same box.
+    if (data.skybox?.cube?.faces?.length === 6) {
+      const faces = data.skybox.cube.faces;
+      const quads: number[][][] = [
+        [[1, 1, 1], [1, 1, -1], [1, -1, -1], [1, -1, 1]], // +X
+        [[-1, 1, -1], [-1, 1, 1], [-1, -1, 1], [-1, -1, -1]], // -X
+        [[-1, 1, -1], [1, 1, -1], [1, 1, 1], [-1, 1, 1]], // +Y
+        [[-1, -1, 1], [1, -1, 1], [1, -1, -1], [-1, -1, -1]], // -Y
+        [[-1, 1, 1], [1, 1, 1], [1, -1, 1], [-1, -1, 1]], // +Z
+        [[1, 1, -1], [-1, 1, -1], [-1, -1, -1], [1, -1, -1]], // -Z
+      ];
+      const box = new THREE.Group();
+      faces.forEach((file, i) => {
+        const tex = textures.get(file);
+        if (!tex) return;
+        const g = new THREE.BufferGeometry();
+        const pos: number[] = [];
+        const uv: number[] = [];
+        const uvs = [[0, 1], [1, 1], [1, 0], [0, 0]];
+        for (let k = 0; k < 4; k++) {
+          pos.push(quads[i][k][0] * SKY_RADIUS * 1.5, quads[i][k][1] * SKY_RADIUS * 1.5, quads[i][k][2] * SKY_RADIUS * 1.5);
+          uv.push(uvs[k][0], uvs[k][1]);
+        }
+        g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+        g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+        g.setIndex([0, 1, 2, 0, 2, 3]);
+        tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+        const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide, depthWrite: false, depthTest: false, fog: false }));
+        m.renderOrder = -9;
+        m.frustumCulled = false;
+        box.add(m);
+      });
+      this.skybox = box;
+      this.group.add(box);
+    }
+
     const sprite = (image: CelestialImage | null, size: number, additive: boolean): THREE.Sprite | null => {
       const tex = image ? textures.get(image.file) : null;
       if (!tex || size <= 0) return null;
@@ -428,6 +465,7 @@ export class SwgSky {
       if (c?.glowImage?.file) files.add(c.glowImage.file);
     }
     for (const f of Object.values(data.skybox?.sides ?? {})) if (f) files.add(f);
+    for (const f of data.skybox?.cube?.faces ?? []) if (f) files.add(f);
     const loader = new THREE.TextureLoader();
     const textures = new Map<string, THREE.Texture>();
     await Promise.all(

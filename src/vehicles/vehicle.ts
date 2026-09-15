@@ -31,6 +31,8 @@ export interface DriveInput {
   /** Ships: the mouse's movement this step (pixels), which pitches and turns the ship directly. */
   lookDX?: number;
   lookDY?: number;
+  /** A hovering ship: sideways, -1 left to 1 right, as a VTOL slides. */
+  strafe?: number;
 }
 
 export interface VehicleSpec {
@@ -141,7 +143,8 @@ export function specFor(kind: VehicleKind, id: string, label: string, bounds: Ve
         bank: big ? 0.5 : 1.0,
         boost: 'burst',
         hop: false,
-        fly: { climb: big ? 20 : 45, ceiling: 1500, floor: 1.5 },
+        // Hovering, the ship rises and sinks on the keys at a VTOL's pace; in flight the stick has it.
+        fly: { climb: big ? 6 : 10, ceiling: 1500, floor: 1.5 },
       };
     }
   }
@@ -250,6 +253,10 @@ export class Vehicle {
   boltColor = 0xff4a2a;
   /** How the rider sits, the game's rider pose (vehicle_speeder_bike, saddle_body2_wide, space_sitting): the riding clip's selector value. */
   riderPose: string | null = null;
+  /** The garage entry this was spawned from, so it can be spawned again elsewhere (a ship carried into space). */
+  def: import('./garage').VehicleDef | null = null;
+  /** In a space zone: no ceiling, no landing, twice the speed. */
+  space = false;
   /**
    * The seat is where the rider's pelvis goes rather than the rider's origin: the riding clip's
    * own root offset is taken off, so a pose authored for a chair whose origin is under the seat
@@ -430,6 +437,21 @@ export class Vehicle {
     });
     if (pieces) console.info(`${this.spec.id}: hull collision from ${pieces} meshes, ${triangles} triangles`);
     return pieces;
+  }
+
+  /** Put a ship straight into flight at `speed` metres a second, on its present heading: arriving from another world in the air. */
+  launch(speed: number): void {
+    if (!this.spec.ship) return;
+    this.cruise = speed;
+    this.speed = speed;
+    this.airborne = true;
+    this.body.setGravityScale(0, true);
+    this.quaternion(this.attitude);
+    this.stick.set(0, 0);
+    this.spin.set(0, 0, 0);
+    this.skipHitCheck = true;
+    fwd.set(0, 0, 1).applyQuaternion(this.attitude).multiplyScalar(speed);
+    this.body.setLinvel({ x: fwd.x, y: fwd.y, z: fwd.z }, true);
   }
 
   /** Where the first-person view sits, in the model's frame: the cockpit point with the cockpit file's offset. */
@@ -659,6 +681,12 @@ export class Vehicle {
         const want = -steer * s.turnRate * (podYaw ? 1.9 : authority) * wide * sign;
         alpha.y = (want - av.y) * (podYaw ? 12 : 8);
       }
+      // A hovering ship slides sideways on its keys, as a VTOL does, at a share of its thrust.
+      if (drive.strafe && s.ship) {
+        right.crossVectors(fwd, WORLD_UP).normalize();
+        tmp.copy(right).multiplyScalar(m * s.accel * 0.6 * power * drive.strafe);
+        body.addForce({ x: tmp.x, y: tmp.y, z: tmp.z }, true);
+      }
       if (drive.hop && s.hop && grounded && this.hopCd <= 0) {
         body.applyImpulse({ x: 0, y: m * 7.5, z: 0 }, true);
         this.hopCd = 0.9;
@@ -714,7 +742,8 @@ export class Vehicle {
     const floor = Math.max(groundAt ? groundAt(this.pos.x, this.pos.z) : -Infinity, waterAt ? waterAt(this.pos.x, this.pos.z) : -Infinity);
     const h = this.pos.y - s.bounds.min[1] - floor;
     const throttle = drive?.throttle ?? 0;
-    const top = drive?.boost ? s.boostSpeed : s.maxSpeed;
+    // Space has the room for twice the speed the ground shows.
+    const top = (drive?.boost ? s.boostSpeed : s.maxSpeed) * (this.space ? 2 : 1);
     this.boosting = !!drive?.boost && throttle > 0;
     if (throttle > 0) this.cruise = Math.min(top, this.cruise + s.accel * dt);
     else if (throttle < 0) this.cruise = Math.max(0, this.cruise - s.brake * dt);
@@ -776,8 +805,8 @@ export class Vehicle {
     // slack, so a pilot who keeps pushing can fly into it; the ceiling is eased the same way.
     const minH = s.fly!.floor + 2;
     const toGround = fwd.y < -0.02 ? h / (-fwd.y * Math.max(this.cruise, 1)) : Infinity;
-    const tooLow = h < minH || toGround < 2.5;
-    const tooHigh = h > s.fly!.ceiling;
+    const tooLow = !this.space && (h < minH || toGround < 2.5);
+    const tooHigh = !this.space && h > s.fly!.ceiling;
     const slack = Math.abs(stick.y) < 0.15;
     if (((tooLow && fwd.y < 0.1) || (tooHigh && fwd.y > 0)) && slack) {
       const want = tooLow ? 0.1 : -0.05;
@@ -792,7 +821,7 @@ export class Vehicle {
     }
     // Into the ground: a crash. The ship stops dead where it hit and drops onto its gear, and
     // the rider is thrown about by the speed (the game reports it as damage).
-    if (h < s.fly!.floor * 0.5 && fwd.y < -0.05 && this.cruise > 8) {
+    if (!this.space && h < s.fly!.floor * 0.5 && fwd.y < -0.05 && this.cruise > 8) {
       this.crashed = this.cruise;
       this.cruise = 0;
       this.airborne = false;
