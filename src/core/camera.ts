@@ -161,8 +161,9 @@ export class ThirdPersonCamera {
   /**
    * @param blocked  physics query for what the camera would cut through; null skips collision (noclip)
    * @param eyes     where the character's eyes are this frame, for the first-person view; the standing eye height over `target` otherwise
+   * @param scale    the orbit's distance over the wheel's, for orbiting something larger than a figure (a ship)
    */
-  update(input: Input, target: THREE.Vector3, blocked: CameraBlocker | null, dt = 1 / 60, eyes: THREE.Vector3 | null = null): void {
+  update(input: Input, target: THREE.Vector3, blocked: CameraBlocker | null, dt = 1 / 60, eyes: THREE.Vector3 | null = null, scale = 1): void {
     if (input.locked) {
       const k = 0.0025 * this.sensitivity;
       this.yaw -= input.mouseDX * k;
@@ -204,7 +205,7 @@ export class ThirdPersonCamera {
       this.camera.fov = fov;
       this.camera.updateProjectionMatrix();
     }
-    let dist = this.distance * (1 - 0.45 * this.aimBlend);
+    let dist = this.distance * scale * (1 - 0.45 * this.aimBlend);
     this.desired.copy(this.posDir).multiplyScalar(dist).add(this.focus);
     if (blocked) {
       // Pull the camera in front of whatever it would cut through: walls, props, ground.

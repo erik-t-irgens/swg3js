@@ -2711,7 +2711,8 @@ switch (cmd) {
     // their own (object/tangible/ship/components/), hung on the hull's and wings' hardpoints named
     // for them (engine_pos1, weapon1_neg1, booster_pos1). The first of the components made for
     // the ship's family and side is taken, its hardpoint's index picking among the guns.
-    const componentTemplates = galleryTemplates(vfs, 'object/tangible/ship/components/');
+    // Wherever the archives keep them: every template under object/tangible/ship/ named eng_, wpn_ or bst_.
+    const componentTemplates = galleryTemplates(vfs, 'object/tangible/ship/').filter((t) => /\/shared_(eng|wpn|bst)_/i.test(t));
     const componentKinds = { engine: 'eng', weapon: 'wpn', booster: 'bst' };
     const componentsFor = (id, hardpoints, notes) => {
       const out = [];

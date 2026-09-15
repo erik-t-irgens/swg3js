@@ -32,7 +32,7 @@ import { RemotePlayers } from './net/remotePlayers';
 import { defaultEmotes, emoteChoices, loadEmotes, saveEmotes } from './core/emotes';
 import { loadSettings, type Settings } from './core/settings';
 import { deleteCharacter, loadCharacters, newCharacterId, upsertCharacter, type Appearance, type SavedCharacter } from './core/characters';
-import { Garage, type VehicleDef } from './vehicles/garage';
+import { FRAME_NUDGE, Garage, type VehicleDef } from './vehicles/garage';
 import type { Vehicle, VehicleKind } from './vehicles/vehicle';
 import { World } from './world/world';
 import { RANGE } from './world/gallery';
@@ -506,6 +506,15 @@ class App {
       },
       /** Every vehicle's state: where, how level (1 upright, 0 on its side), how fast it turns and moves, and how many corners find the ground. */
       /** Set the ship whose room the player is in (or the nearest ship) adrift: forward speed and a spin (rad/s) with no gravity or righting, so the room's physics can be tried; `shipDrift(0)` brings it to rest. */
+      /** Move the cockpit frame over the seat of the ship you are in (metres right, up, forward), to find where it should sit; the numbers to report. */
+      cockpitFrame: (dx = 0, dy = 0, dz = 0) => {
+        FRAME_NUDGE.x += dx;
+        FRAME_NUDGE.y += dy;
+        FRAME_NUDGE.z += dz;
+        const v = this.player.mounted;
+        if (v?.cockpitFrame) v.cockpitFrame.position.add(new THREE.Vector3(dx, dy, dz));
+        return `frame nudge ${FRAME_NUDGE.toArray().map((n) => n.toFixed(2)).join(', ')} (right, up, forward)`;
+      },
       /** Shadow casting by every mesh of the ship you are aboard (or the nearest ship): off, to see whether its own geometry is what keeps the sun out of the rooms. */
       shipShadows: (on = true) => {
         const p = this.player;
@@ -1184,6 +1193,13 @@ class App {
     const { player, input } = this;
     const flown = player.mounted ?? player.piloting;
     const ship = flown?.spec.ship && flown.airborne && !input.held('freeLook') ? flown : null;
+    if (flown?.spec.ship && flown.airborne && input.held('freeLook')) {
+      // Alt in flight: the orbit around the ship itself, in its frame, out far enough to see it whole.
+      this.cam.release();
+      this.cam.setFrame(flown.group.quaternion);
+      this.cam.update(input, flown.pos, null, dt, null, Math.max(1, (6 + flown.radius * 2.2) / 6));
+      return;
+    }
     if (ship) {
       this.cam.chase(input, dt, ship.pos, ship.attitude, ship.heading, 6 + ship.radius * 2.2, ship.cockpitEye(tmp));
       // In the cockpit the hull would fill the view: it is hidden until the camera comes back out,

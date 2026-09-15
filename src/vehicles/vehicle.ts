@@ -231,6 +231,8 @@ export class Vehicle {
   cockpitOffset: [number, number, number] = [0, 0, 0];
   /** Appearances shown only while the drive runs (the game's "engine on" attachments). */
   engineParts: THREE.Object3D[] = [];
+  /** The exhaust ribbons behind a ship in flight, in the world. */
+  trails: import('./trail').EngineTrail[] = [];
   /** Whether someone is in the hull's rooms; with a pilot at the controls, what clears the glass. */
   occupied = false;
   /**
@@ -740,6 +742,8 @@ export class Vehicle {
   dispose(physics: Physics, scene: THREE.Scene): void {
     this.interior?.dispose();
     this.interior = null;
+    for (const t of this.trails) t.dispose(scene);
+    this.trails = [];
     physics.world.removeRigidBody(this.body);
     scene.remove(this.group);
     this.group.traverse((o) => {
