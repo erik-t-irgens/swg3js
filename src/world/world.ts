@@ -1253,7 +1253,7 @@ export class World {
       }
     }
     // A hull that is itself a portal building (the yacht) has its rooms inside the hull model.
-    if (!v.interior) v.interior = ShipInterior.fromHull(v, gravity);
+    if (!v.interior) v.interior = ShipInterior.fromHull(v, gravity, { cells: def.cells });
     return v;
   }
 

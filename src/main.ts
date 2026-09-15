@@ -60,6 +60,7 @@ const stats = { frameMs: 0, physicsMs: 0, renderMs: 0, rawDt: 0, grounded: false
 (window as unknown as { __stats: typeof stats }).__stats = stats;
 const tmp = new THREE.Vector3();
 const tmpQ = new THREE.Quaternion();
+const roomLightSpots: import('./vehicles/interior').RoomLight[] = [];
 const boltFrom = new THREE.Vector3();
 
 class App {
@@ -1677,6 +1678,8 @@ class App {
         player.update(dt, input, this.cam, this.world);
         // The thrown and orbiting sabers glow from the pooled flash lights, so no light comes or goes with them.
         for (const spot of player.lightSpots()) this.effects.flash(spot.pos, 0x66c8ff, spot.intensity, spot.distance, 0.08);
+        // Aboard, the room's own lights, the nearest few, through the same pool (no new lights, so nothing recompiles).
+        if (player.aboard) for (const l of player.aboard.roomLights(player.pos, 3, roomLightSpots)) this.effects.flash(l.pos, l.color, l.intensity, l.distance, 0.08);
         this.stepCombat(dt);
       }
 

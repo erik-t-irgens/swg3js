@@ -183,7 +183,7 @@ function printEffectSummary() {
  * someone is aboard. "cockpit" is not glass: it names the panels around the pilot as often as
  * the canopy. --glass=<regex> marks more shaders for a ship whose windows are named otherwise.
  */
-const GLASS_NAMED = new RegExp(options.glass ? `glass|window|windshield|canopy|transp|viewport|pane|${options.glass}` : 'glass|window|windshield|canopy|transp|viewport|pane', 'i');
+const GLASS_NAMED = new RegExp(options.glass ? `glass|window|windshield|canopy|transparen|viewport|pane|${options.glass}` : 'glass|window|windshield|canopy|transparen|viewport|pane', 'i');
 
 function textureFor(vfs, shaderPath) {
   if (flags.has('--no-textures')) return null;
@@ -2064,6 +2064,11 @@ switch (cmd) {
       if (cells) line += `\n      in cells ${[...u.cells].join(', ')}`;
       console.log(line);
     }
+    // The hardpoints, cell by cell: the seats, the engines, and whatever names the way in.
+    const hps = cells ? cells.map((c) => ({ where: `${c.index}:${c.name}`, hardpoints: c.hardpoints })) : [{ where: '-', hardpoints: mesh.hardpoints }];
+    const count = hps.reduce((n, h) => n + h.hardpoints.length, 0);
+    console.log(`${count} hardpoints`);
+    for (const h of hps) if (h.hardpoints.length) console.log(`  ${h.where}: ${h.hardpoints.map((hp) => `${hp.name} (${hp.position.map((v) => v.toFixed(1)).join(',')})`).join('  ')}`);
     break;
   }
   case 'shader': {

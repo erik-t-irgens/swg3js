@@ -16,6 +16,8 @@ export interface VehicleDef {
   source: 'gallery' | 'creature' | 'ship';
   /** A ship's interior, when it has one: the model, and what the manifest says of its cells and bounds. */
   interior?: { file: string; cells: number; def: import('./interior').InteriorDef } | null;
+  /** What the manifest says of the hull model's own cells, when it is a portal building (rooms, their lights). */
+  cells?: NonNullable<import('./interior').InteriorDef['cells']>;
   file: string;
   template?: string;
   bounds?: VehicleSpec['bounds'];
@@ -25,6 +27,13 @@ export interface VehicleDef {
 
 interface GalleryIndex {
   sections: { id: string; items: { label: string; template: string; model: string; radius: number; height?: number }[] }[];
+}
+
+/** A hardpoint node's name without its hp: prefix, or null for any other node. */
+export function hardpointName(o: THREE.Object3D): string | null {
+  const name = ((o.userData as { name?: string }).name ?? o.name) || '';
+  const m = /^hp[:_]?(.+)$/i.exec(name);
+  return m ? m[1] : null;
 }
 
 export class Garage {
@@ -65,11 +74,13 @@ export class Garage {
     try {
       const res = await fetch(`${baseUrl}assets-private/ships/manifest.json`);
       if (res.ok && (res.headers.get('content-type') ?? '').includes('json')) {
-        const manifest = (await res.json()) as { ships: { id: string; label: string; template: string; file: string; bounds?: VehicleSpec['bounds']; class: string; interior: { file?: string; cells?: number; failed?: string } | null }[]; models?: { file: string; bounds?: { min: number[]; max: number[] }; cells?: { index: number; name: string; bounds: { min: number[]; max: number[] } }[] }[] };
+        type Cells = NonNullable<import('./interior').InteriorDef['cells']>;
+        const manifest = (await res.json()) as { ships: { id: string; label: string; template: string; file: string; bounds?: VehicleSpec['bounds']; class: string; interior: { file?: string; cells?: number; failed?: string } | null }[]; models?: { file: string; bounds?: { min: number[]; max: number[] }; cells?: Cells }[] };
         const modelByFile = new Map((manifest.models ?? []).map((m) => [m.file, m]));
         for (const sh of manifest.ships) {
           const im = sh.interior?.file ? modelByFile.get(sh.interior.file) : undefined;
-          g.vehicles.push({ id: sh.id, label: `${sh.label} (${sh.class})`, kind: 'ship', inferred: true, source: 'ship', file: `assets-private/ships/${sh.file}`, template: sh.template, bounds: sh.bounds, interior: sh.interior?.file ? { file: `assets-private/ships/${sh.interior.file}`, cells: sh.interior.cells ?? 0, def: { bounds: im?.bounds, cells: im?.cells } } : null });
+          const hull = modelByFile.get(sh.file);
+          g.vehicles.push({ id: sh.id, label: `${sh.label} (${sh.class})`, kind: 'ship', inferred: true, source: 'ship', file: `assets-private/ships/${sh.file}`, template: sh.template, bounds: sh.bounds, interior: sh.interior?.file ? { file: `assets-private/ships/${sh.interior.file}`, cells: sh.interior.cells ?? 0, def: { bounds: im?.bounds, cells: im?.cells } } : null, cells: hull?.cells });
         }
       }
     } catch (err) {
@@ -164,15 +175,19 @@ export class Garage {
     }
     if (!bounds) bounds = { min: [-0.5, 0, -1], max: [0.5, 1, 1] };
     // The game's hardpoints ride along as hp:<name> nodes; a rider's, saddle's or seat's places the seat.
+    // The loader strips the colon from a node's name ("hp:engine" arrives as "hpengine") and
+    // keeps the original in userData, which is where the hardpoints are read.
     model.traverse((o) => {
-      if (!o.name.startsWith('hp:')) return;
-      hardpoints.push(o.name.slice(3));
+      const name = hardpointName(o);
+      if (name === null) return;
+      hardpoints.push(name);
       const local = () => o.getWorldPosition(new THREE.Vector3()).sub(model.getWorldPosition(new THREE.Vector3())).add(model.position);
-      if (!seat.point && /rider|saddle|seat|driver|pilot|passenger|player|mount/i.test(o.name)) seat.point = local();
+      if (!seat.point && /rider|saddle|seat|driver|pilot|passenger|player|mount/i.test(name)) seat.point = local();
       // The game's engines are separate parts a player fits; their hardpoints say where the glow goes.
-      if (/engine|thrust|exhaust|booster|(^|[_:])eng\d/i.test(o.name)) engines.push(local());
-      if (!seat.cockpit && /cockpit|canopy|camera|view|pilot/i.test(o.name)) seat.cockpit = local();
+      if (/engine|thrust|exhaust|booster|(^|[_:])eng\d/i.test(name)) engines.push(local());
+      if (!seat.cockpit && /cockpit|canopy|camera|view|pilot/i.test(name)) seat.cockpit = local();
     });
+    if (hardpoints.length) console.info(`garage: ${def.id} hardpoints: ${hardpoints.join(', ')}`);
     if (place) [x, y, z] = place(bounds);
     const spec = specFor(kind, def.id, def.label, bounds, { animal: def.source === 'creature' });
     if (def.source === 'creature') {
