@@ -1168,6 +1168,8 @@ class App {
     } else {
       this.cam.release();
       if (player.mounted?.spec.ship) player.mounted.group.visible = true;
+      // Aboard a ship the view is upright in the hull's frame, as the body is.
+      this.cam.setFrame(player.aboard ? player.aboard.vehicle.group.quaternion : null);
       this.cam.update(input, player.worldPos, blocked, dt, this.eyes());
     }
   }

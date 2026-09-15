@@ -23,6 +23,7 @@ const CHASE_LAG = 0.28;
 const FLIP = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI);
 /** A touch of nose-down, so the ship sits below the middle of the view. */
 const chaseTilt = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -0.1);
+const frameInverse = new THREE.Quaternion();
 
 /** SWG-style free-orbit third-person camera that becomes first person when zoomed all the way in. */
 export class ThirdPersonCamera {
@@ -49,6 +50,13 @@ export class ThirdPersonCamera {
   private readonly dir = new THREE.Vector3();
   private readonly chaseFrame = new THREE.Quaternion();
   private chasing = false;
+  /**
+   * The frame the view is upright in: the world's, or aboard a ship the hull's, so the orbit,
+   * its up and the yaw all follow the room whatever the hull is doing. Yaw and pitch are in this frame.
+   */
+  private readonly frame = new THREE.Quaternion();
+  private framed = false;
+  private readonly up = new THREE.Vector3(0, 1, 0);
 
   constructor(aspect: number) {
     this.camera = new THREE.PerspectiveCamera(60, aspect, 0.05, 9000);
@@ -111,7 +119,37 @@ export class ThirdPersonCamera {
     this.chasing = false;
   }
 
-  /** Horizontal forward direction (from camera toward the player). */
+  /**
+   * Put the view in a frame (a ship's hull, aboard) or back in the world's (null). The way the
+   * camera looks is kept across the change: its yaw and pitch are re-read in the new frame.
+   */
+  setFrame(q: THREE.Quaternion | null): void {
+    const was = this.framed;
+    if (!q && !was) return;
+    if (q && was) {
+      // The frame turning under a view already in it: the view turns with it, as the body does,
+      // so the yaw and pitch stay what they are in the room.
+      this.frame.copy(q);
+      this.up.set(0, 1, 0).applyQuaternion(q);
+      this.camera.up.copy(this.up);
+      return;
+    }
+    const cp = Math.cos(this.pitch);
+    this.dir.set(Math.sin(this.yaw) * cp, Math.sin(this.pitch), Math.cos(this.yaw) * cp);
+    if (was) this.dir.applyQuaternion(this.frame);
+    if (q) {
+      this.frame.copy(q);
+      this.dir.applyQuaternion(frameInverse.copy(q).invert());
+    }
+    this.framed = !!q;
+    this.yaw = Math.atan2(this.dir.x, this.dir.z);
+    this.pitch = clamp(Math.asin(clamp(this.dir.y, -1, 1)), -1.4, 1.4);
+    this.up.set(0, 1, 0);
+    if (this.framed) this.up.applyQuaternion(this.frame);
+    this.camera.up.copy(this.up);
+  }
+
+  /** Horizontal forward direction (from camera toward the player), in the view's frame: the world's, or aboard, the hull's. */
   forward(out: THREE.Vector3): THREE.Vector3 {
     return out.set(-Math.sin(this.yaw), 0, -Math.cos(this.yaw));
   }
@@ -137,7 +175,7 @@ export class ThirdPersonCamera {
     input.mouseDY = 0;
     this.zoom(input, dt);
 
-    this.focus.copy(target).y += EYE_HEIGHT;
+    this.focus.copy(target).addScaledVector(this.up, EYE_HEIGHT);
     const cp = Math.cos(this.pitch);
     this.dir.set(Math.sin(this.yaw) * cp, Math.sin(this.pitch), Math.cos(this.yaw) * cp);
     // Behind the player the camera cannot go below the ground, so past a mild upward pitch it stays at that
@@ -145,6 +183,11 @@ export class ThirdPersonCamera {
     const posPitch = this.firstPerson ? this.pitch : Math.max(this.pitch, LOWEST_CAMERA_PITCH);
     const cpp = Math.cos(posPitch);
     this.posDir.set(Math.sin(this.yaw) * cpp, Math.sin(posPitch), Math.cos(this.yaw) * cpp);
+    // Aboard, the orbit is in the hull's frame: the room stays upright however the hull banks.
+    if (this.framed) {
+      this.dir.applyQuaternion(this.frame);
+      this.posDir.applyQuaternion(this.frame);
+    }
 
     if (this.firstPerson) {
       // From the eyes as the animation carries them (a crouch, a jump, a run's bob), a touch

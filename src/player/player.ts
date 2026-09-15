@@ -77,7 +77,6 @@ interface Parts {
 }
 
 /** The placeholder torso's look per class, made once (a material made per swap compiled its shader per swap). */
-const roomQ = new THREE.Quaternion();
 const UP_AXIS = new THREE.Vector3(0, 1, 0);
 const hiltGlow = new THREE.Vector3();
 const TORSO_JEDI = new THREE.MeshStandardMaterial({ color: 0xc9b58a, roughness: 0.8, metalness: 0, flatShading: true });
@@ -1087,15 +1086,10 @@ export class Player {
     if (input.held('left')) mx -= 1;
     if (input.held('right')) mx += 1;
 
+    // Aboard a ship the camera's frame is the hull's, so its directions are already the room's:
+    // forward on the screen is forward in the room, whatever the hull is doing.
     cam.forward(fwd);
     cam.right(rgt);
-    // Aboard a ship the camera looks in the world, but the walking is done in the hull's frame:
-    // its directions are turned by the hull's own heading so forward on the screen is forward in the room.
-    if (this.aboard) {
-      this.aboard.vehicle.quaternion(roomQ).invert();
-      fwd.applyQuaternion(roomQ).setY(0).normalize();
-      rgt.applyQuaternion(roomQ).setY(0).normalize();
-    }
     move.set(0, 0, 0).addScaledVector(fwd, mz).addScaledVector(rgt, mx);
     const moving = move.lengthSq() > 0;
     if (moving) move.normalize();

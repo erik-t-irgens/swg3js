@@ -50,6 +50,8 @@ export class ShipInterior {
   private colliders: RAPIER.Collider[] = [];
   /** The room nodes, to show only from inside when they are part of the hull model (a room drawn through the hull's skin looks wrong from outside). */
   private readonly rooms: THREE.Object3D[] = [];
+  /** The shell's window panes and how clear each is: opaque from outside while the rooms are hidden, clear again from inside. */
+  private readonly panes: { material: THREE.Material & { opacity: number }; opacity: number }[] = [];
 
   /**
    * @param frame the object whose frame the room's physics is in: the hull's group.
@@ -137,14 +139,32 @@ export class ShipInterior {
   static fromHull(vehicle: Vehicle, gravity: number, def: InteriorDef = {}): ShipInterior | null {
     const meshes: THREE.Mesh[] = [];
     const rooms: THREE.Object3D[] = [];
+    const panes: ShipInterior['panes'] = [];
     vehicle.group.traverse((o) => {
-      if (cellIndexOf(o) <= 0) return;
+      const cell = cellIndexOf(o);
+      const m = o as THREE.Mesh;
+      if (cell === 0 && m.isMesh) {
+        // The shell's glass: this hull's own copy of each pane's material, so it can go opaque
+        // while the rooms behind it are hidden without touching another hull of the same model.
+        const mats = Array.isArray(m.material) ? m.material : [m.material];
+        mats.forEach((mat, i) => {
+          if (!mat.transparent || mat.opacity >= 1 || mat.userData.invisible) return;
+          const own = mat.clone();
+          own.userData = { ...mat.userData };
+          if (Array.isArray(m.material)) m.material[i] = own;
+          else m.material = own;
+          panes.push({ material: own, opacity: own.opacity });
+        });
+        return;
+      }
+      if (cell <= 0) return;
       if (/^cell[:_]?\d+/.test(o.name)) rooms.push(o);
-      if ((o as THREE.Mesh).isMesh) meshes.push(o as THREE.Mesh);
+      if (m.isMesh) meshes.push(m);
     });
     if (!meshes.length) return null;
     const interior = new ShipInterior(vehicle, vehicle.group, vehicle.group, meshes, def, gravity, false);
     interior.rooms.push(...rooms);
+    interior.panes.push(...panes);
     interior.reveal(false);
     return interior;
   }
@@ -157,6 +177,9 @@ export class ShipInterior {
    */
   reveal(aboard: boolean): void {
     for (const r of this.rooms) r.visible = aboard;
+    // With the rooms hidden there is nothing behind the glass to see, so the panes go opaque
+    // (a change of opacity only: the same shader, nothing to compile).
+    for (const p of this.panes) p.material.opacity = aboard ? p.opacity : 1;
   }
 
   /** Whether a point in the hull's frame is still within the room. */
