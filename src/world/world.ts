@@ -30,6 +30,7 @@ import type { Hittable } from '../combat/kit';
 
 const tmpQ = new THREE.Quaternion();
 const tmpV = new THREE.Vector3();
+const tmpM = new THREE.Matrix4();
 /** Detailed ground chunks each way, by default; the settings move it (World.viewRadius). */
 const VIEW_RADIUS = 6;
 const STREAM_BUDGET = 3;
@@ -284,8 +285,14 @@ export class World {
   private csmScanAt = 0;
   private loadToken = 0;
 
+  /** The ships pack's particle effects (bolts in flight, their hits), played wherever the ships go, on every planet. */
+  readonly shipFx: ParticleEffects;
+  private readonly warmedFx = new Set<string>();
+
   constructor(readonly scene: THREE.Scene, readonly physics: Physics) {
     this.bolts = new Bolts(scene);
+    this.shipFx = new ParticleEffects(scene, `${import.meta.env.BASE_URL}assets-private/ships/`);
+    this.bolts.visuals = this.shipFx;
     scene.add(this.chunkRoot, this.sun, this.sun.target, this.hemi, this.fill, this.fill.target, this.splashes.points, this.dust.points);
     markActor(this.splashes.points);
     markActor(this.dust.points);
@@ -1244,6 +1251,17 @@ export class World {
     const v = await this.garage.spawn(def, this.physics, this.scene, at.x, at.y, at.z, heading, kind, place);
     markActor(v.group);
     this.vehicles.push(v);
+    // The ship's bolt and hit effects, played once far below the world, so the first shot finds
+    // their shaders compiled rather than stalling the frame.
+    const p = v.weapon ? this.garage.projectileFor(v.weapon.projectile) : null;
+    if (p) {
+      for (const file of [p.effect, p.hit]) {
+        if (!file || this.warmedFx.has(file)) continue;
+        this.warmedFx.add(file);
+        const h = this.shipFx.place(file, tmpM.makeTranslation(at.x, -900, at.z), false, true);
+        window.setTimeout(() => this.shipFx.remove(h), 4000);
+      }
+    }
     const gravity = -this.physics.world.gravity.y;
     if (def.interior) {
       try {
@@ -1589,9 +1607,9 @@ export class World {
     return out;
   }
 
-  /** The creature or turret a physics collider belongs to. */
+  /** The creature, turret or vehicle a physics collider belongs to. */
   hittableAt(handle: number): Hittable | undefined {
-    return this.creatures.byCollider.get(handle) ?? this.turrets.byCollider.get(handle);
+    return this.creatures.byCollider.get(handle) ?? this.turrets.byCollider.get(handle) ?? this.vehicles.find((v) => v.colliderHandles.includes(handle));
   }
 
   /** `target` is whom the turrets shoot at, or null while nothing should be shot (noclip, riding). */
@@ -1604,6 +1622,7 @@ export class World {
       this.packStatus = `${this.packBase}; ${this.layoutStream.status}${this.particles ? `; ${this.particles.status}` : ''}`;
     }
     if (this.particles && this.camera) this.particles.update(dt, this.camera, this.scene.fog instanceof THREE.FogExp2 ? this.scene.fog : null);
+    if (this.camera) this.shipFx.update(dt, this.camera, this.scene.fog instanceof THREE.FogExp2 ? this.scene.fog : null);
     this.updateInterior(playerPos);
     this.day.update(dt, fastTime);
     if (this.swgSky) {

@@ -52,17 +52,20 @@ The converter replaces `@SWG` and `@JKA` on its command line with those. Then fo
 - The game's rooms in a portal building are often larger than the hull around them and are only meant to be seen through portals. The window openings are "invisible collidable" meshes: colliders only, never drawn, never casting.
 - A cockpit frame (`cockpit/<ship>.iff`) is authored in the ship's own space: hang it on the model at its origin and it lands in the canopy. The game never drew a pilot in a fighter, so the seat is derived from the frame's middle (`SEAT_FROM_FRAME` in `garage.ts`).
 - Ship attachments (wings, engines, guns, boosters) are templates under `object/tangible/ship/attachment/`, named `shared_<ship>_<kind>_<side>_s01`; the hull's client data (`clientdata/ship/client_shared_<ship>.cdf`) names the wings; the components hang on hardpoints named `engine_pos1`, `weapon1_neg1`, `booster_pos1`. Wings are modelled in the hull's frame and sit at its origin.
+- A WING form's DATA is the wing template, a float open angle in degrees, a float seconds to open, then the sound; its PSOR is the hinge (position, then yaw, pitch, roll in degrees), not a placement. The wings are static meshes the client turns about the hinge's Z; the X-wing's foils are two diagonal pairs at ±14°. `dump --hex` is how that was decoded.
+- Ship bolts come from `datatables/projectile/projectile.iff` (index to the bolt's `.prt`, its fire `.cef` and its hit `.cef` per surface; a `.cef` names a `.prt` and a `.snd`) and `datatables/space/ship_weapon_components.iff` (weapon name to projectile index, speed, range). Space bolts are 600 m/s, 512 m, drawn 19 m long ahead of the projectile point in local-space emitters, which `particles.ts` honours; passing effects are placed `transient`.
+- A bolt is a thing in flight with a velocity: it carries the shooter's velocity (`inherit`) and its ray leads by its visual reach, so a fast ship's bolts never lag it and a long streak does not poke through what it hits.
 - Normal maps are Direct3D's (green down); the converter writes them as they are and the game uses `normalScale (1, -1)`.
 
 ## Where things stand
 
-Working: character creation and selection, planets with buildings and interiors, Jedi and Bounty Hunter combat, vehicles, ships that fly with wings, engine glows and trails, guns from the weapon hardpoints, cockpit frames with first-person view, ship interiors as a still room with its own physics (the "gravity hull" approach), boarding, walking the rooms with their own lights and sunlight, flying a multi-crew ship from its bridge, a relay for playing together.
+Working: character creation and selection, planets with buildings and interiors, Jedi and Bounty Hunter combat, vehicles, ships that fly with wings that open in flight, engine glows and trails, guns from the weapon hardpoints firing the game's own bolts (the projectile and weapon tables, the bolt and hit effects, the ship's velocity carried) that hurt ships, a target with a lead reticle (Tab cycles), cockpit frames with first-person view, ship interiors as a still room with its own physics (the "gravity hull" approach), boarding, walking the rooms with their own lights and sunlight, flying a multi-crew ship from its bridge, a relay for playing together.
 
 Known gaps and the agreed order for the next work:
 
-1. Ships do not take damage from bolts yet, so dogfights have no ending (vehicle damage exists for collisions: `hp`, `justHit`, `destroyed` in `vehicle.ts`; bolts need to find vehicles in `Bolts.update` through `hittableAt`).
+1. The wing hinge's axis order (yaw, pitch, roll about the hinge's Z) is verified only on the X-wing and ARC-170; the B-wing and V-wing entries are the test, and the owner has not reported on them yet. No sound plays for the wings or the guns (the sound names are in the manifest and `projectiles.json`; there is no audio system).
 2. A hull's rooms are hidden until someone boards; the proper fix is drawing them through the portal renderer with the windows as exits, so they show from outside.
-3. The relay does not carry who is aboard or at the controls of what.
+3. The relay does not carry who is aboard or at the controls of what, nor bolts, so ships cannot fight each other across it; nothing but the player fires at ships yet.
 4. The lifts and terminals inside ship rooms are objects the server spawned, not part of the models; elevators do not work, and the Star Destroyer's bridge is behind one.
 5. Space itself: no space maps yet.
 6. The engine client data (`clientdata/ship/component/eng_*.cdf`, `GLOW` forms) carries glow sizes per engine style; their float layout is not decoded, so glows are sized by hull height.

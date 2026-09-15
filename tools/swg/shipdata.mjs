@@ -7,7 +7,8 @@
 // around the pilot in first person, with the view's zoom steps and offsets.
 //
 //   FORM CLDF > FORM 0000 >
-//     FORM WING: DATA (template cstring, then the open and close sound cstrings), PSOR (6 floats)
+//     FORM WING: DATA (template cstring, float open angle in degrees, float seconds to open, open sound cstring),
+//                PSOR (6 floats: the hinge's position, then yaw, pitch and roll in degrees; the wing turns about the hinge's Z)
 //     FORM ONOF: INFO (int32 on/off), APPR (appearance cstring), HARD (hardpoint cstring)
 //     FORM VTHR: INFO (float, the damage share it starts at), HOBJ* (particle cstring + hardpoint cstring), VSND
 //     FORM CONT > FORM 0000 > INFO (hardpoint cstring, name cstring, byte, appearance cstring)
@@ -47,8 +48,14 @@ export function parseClientData(root) {
         const data = find(form, 'DATA');
         const psor = find(form, 'PSOR');
         if (!data) break;
-        const [template, ...sounds] = strings(data.data);
-        out.wings.push({ template: template.replace(/\\/g, '/'), sounds: sounds.filter(Boolean).map((s) => s.replace(/^@+/, '')), transform: psor ? floats(psor.data, 0, 6) : null });
+        // The wing's template, how far it opens (degrees) and how long that takes (seconds), then
+        // the sound of it opening. The wing is a static mesh modelled in the hull's frame: the
+        // client turns the whole object about the hinge in PSOR, between closed and open.
+        const { value: template, next } = readCString(data.data, 0);
+        const angle = data.data.length >= next + 4 ? data.data.readFloatLE(next) : 0;
+        const time = data.data.length >= next + 8 ? data.data.readFloatLE(next + 4) : 0;
+        const sounds = data.data.length > next + 8 ? strings(data.data, next + 8).filter(Boolean).map((s) => s.replace(/^@+/, '')) : [];
+        out.wings.push({ template: template.replace(/\\/g, '/'), angle, time, sounds, hinge: psor ? floats(psor.data, 0, 6) : null });
         break;
       }
       case 'ONOF': {
@@ -122,6 +129,29 @@ export function parseClientData(root) {
         break;
     }
   }
+  return out;
+}
+
+/**
+ * A client effect (clienteffect/*.cef, FORM CLEF): what the game plays for an event (a gun firing,
+ * a bolt striking armour). Its chunks name a particle effect, a sound and force feedback; only
+ * the particle effects and sounds are read, as lists, whatever the chunk layout.
+ */
+export function parseClientEffect(root) {
+  if (!isForm(root) || root.type !== 'CLEF') throw new Error(`not a client effect: ${root.type ?? root.tag}`);
+  const out = { particles: [], sounds: [] };
+  const walk = (node) => {
+    if (isForm(node)) {
+      for (const c of node.children) walk(c);
+      return;
+    }
+    for (const s of strings(node.data)) {
+      const p = s.replace(/\\/g, '/').replace(/^\//, '');
+      if (/\.prt$/i.test(p)) out.particles.push(p);
+      else if (/\.snd$/i.test(p)) out.sounds.push(p);
+    }
+  };
+  walk(root);
   return out;
 }
 

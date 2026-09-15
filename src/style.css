@@ -103,6 +103,12 @@ b { color: var(--accent); font-weight: 600; }
 .flight .stick-head { fill: #ffffff; filter: drop-shadow(0 0 3px rgba(0,0,0,0.8)); }
 .flight .stick-dot { fill: #ffffff; filter: drop-shadow(0 0 3px rgba(0,0,0,0.8)); }
 .crosshair { position: absolute; left: 50%; top: 50%; width: 6px; height: 6px; margin: -3px 0 0 -3px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 6px rgba(127,215,255,0.9), 0 0 0 1px rgba(0,0,0,0.5); }
+.targets { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+.targets .tbox { fill: none; stroke: #ff8a50; stroke-width: 1.5; filter: drop-shadow(0 0 3px rgba(0,0,0,0.8)); }
+.targets .lead { fill: none; stroke: #ffffff; stroke-width: 1.5; filter: drop-shadow(0 0 3px rgba(0,0,0,0.8)); }
+.targets .lead-cross { stroke: #ffffff; stroke-width: 1.5; filter: drop-shadow(0 0 3px rgba(0,0,0,0.8)); }
+.targets .lead-line { stroke: rgba(255,255,255,0.45); stroke-width: 1; stroke-dasharray: 4 4; }
+.targets .tlabel { fill: #ffffff; font-size: 12px; text-anchor: middle; paint-order: stroke; stroke: rgba(0,0,0,0.8); stroke-width: 3px; }
 .prompt { position: absolute; left: 50%; bottom: 150px; transform: translateX(-50%); padding: 6px 14px; background: var(--panel); border: 1px solid var(--panel-border); border-radius: 6px; font-size: 13px; white-space: nowrap; }
 .prompt:empty { display: none; }
 .hurt { position: absolute; inset: 0; opacity: 0; background: radial-gradient(ellipse at center, rgba(255,0,0,0) 45%, rgba(190,20,20,0.55) 100%); }

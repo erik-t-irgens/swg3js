@@ -19,6 +19,7 @@ import { WeaponCatalogue, type WeaponDef } from './player/weapons';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { Hud } from './ui/hud';
 import { specFor, type DriveInput } from './vehicles/vehicle';
+import { interceptTime, leadPoint } from './combat/intercept';
 import { VehiclesUi } from './ui/vehiclesUi';
 import { NpcUi } from './ui/npcUi';
 import { AppearanceUi } from './ui/appearanceUi';
@@ -44,7 +45,7 @@ function mountPrompt(v: import('./vehicles/vehicle').Vehicle): string {
   const boost = v.spec.boost === 'heat' ? ` · <b>Shift</b> boost · heat ${bar(v.meter)}${v.overheated > 0 ? ' BURNT OUT' : ''}` : v.spec.boost === 'burst' ? ` · <b>Shift</b> boost ${bar(v.meter)}` : '';
   const hop = v.spec.hop ? ' · <b>Space</b> hop' : '';
   const fly = v.spec.fly ? ' · look up/down or <b>Space</b>/<b>X</b> to climb and sink' : '';
-  if (k === 'ship') return `<b>E</b> leave · <b>W</b>/<b>S</b> throttle up and down · mouse pitches and turns (loops and rolls allowed) · <b>A/D</b> roll · <b>Space</b>/<b>X</b> pitch · <b>wheel</b> zoom, all the way in for the cockpit · <b>Alt</b> look around${v.guns.length ? ' · <b>click</b> fires' : ''} · <b>Shift</b> burn · ${v.airborne ? 'flying' : 'landed'} · ${Math.round(Math.abs(v.speed) * 3.6)} km/h`;
+  if (k === 'ship') return `<b>E</b> leave · <b>W</b>/<b>S</b> throttle up and down · mouse pitches and turns (loops and rolls allowed) · <b>A/D</b> roll · <b>Space</b>/<b>X</b> pitch · <b>wheel</b> zoom, all the way in for the cockpit · <b>Alt</b> look around${v.guns.length ? ' · <b>click</b> fires · <b>Tab</b> next target' : ''} · <b>Shift</b> burn · ${v.airborne ? 'flying' : 'landed'} · ${Math.round(Math.abs(v.speed) * 3.6)} km/h${v.hp < v.maxHp ? ` · hull ${Math.round((v.hp / v.maxHp) * 100)}%` : ''}`;
   const turn = k === 'ground' ? 'mouse or <b>A/D</b> turn' : 'mouse or <b>A/D</b> steer';
   const hull = v.hp < v.maxHp ? ` · hull ${Math.round((v.hp / v.maxHp) * 100)}%${v.hp / v.maxHp < 0.34 ? ' LIMPING' : v.hp / v.maxHp < 0.67 ? ' smoking' : ''}` : '';
   return `<b>E</b> dismount · <b>W/S</b> throttle · ${turn} · <b>Alt</b> look around${boost}${hop}${fly} · ${k} · ${Math.round(Math.abs(v.speed) * 3.6)} km/h${hull}`;
@@ -63,10 +64,18 @@ const tmpQ = new THREE.Quaternion();
 const roomLightSpots: import('./vehicles/interior').RoomLight[] = [];
 /** How near the controls in a ship's bridge E takes them, metres in the hull's frame. */
 const CONTROLS_RANGE = 2.5;
-/** A ship's guns: seconds between shots of one gun, the bolt's speed in the blaster's units a second, and its damage. */
+/**
+ * A ship's guns: seconds between shots of one gun, their damage, the bolt's speed (m/s) and range
+ * (m) for a ship whose manifest names no weapon (the weapon table's light blaster), how far off
+ * the nose a target may sit for the guns to lead it (rad), and how far off to be picked at all.
+ */
 const SHIP_GUN_INTERVAL = 0.55;
-const SHIP_BOLT_SPEED = 7000;
 const SHIP_GUN_DAMAGE = 45;
+const SHIP_BOLT_SPEED = 600;
+const SHIP_BOLT_RANGE = 512;
+const SHIP_GUN_CONE = THREE.MathUtils.degToRad(12);
+const SHIP_TARGET_CONE = THREE.MathUtils.degToRad(70);
+const SHIP_TARGET_RANGE = 2500;
 const tmp2 = new THREE.Vector3();
 const boltFrom = new THREE.Vector3();
 
@@ -113,6 +122,11 @@ class App {
   private emotes: (string | null)[] = loadEmotes();
   /** An emote is playing on the player: any movement ends it. */
   private emoting = false;
+  /** The ship the pilot's guns lead (Tab cycles the ships ahead), and this frame's lead point and the way to aim for it. */
+  private shipTarget: Vehicle | null = null;
+  private readonly shipLead = new THREE.Vector3();
+  private readonly shipAim = new THREE.Vector3();
+  private shipLeadValid = false;
   private readonly settings: Settings = loadSettings();
   /** The character being played, as kept in this browser; null on the select screen and in the creator. */
   private current: SavedCharacter | null = null;
@@ -1275,22 +1289,10 @@ class App {
         lookDY,
       };
     }
-    // A ship's guns: the guns fire in turn along the nose while the trigger is held, the bolts
-    // the world's own, so they strike what a blaster's would.
-    if (simulate && pilot?.spec.ship && pilot.guns.length) {
-      pilot.gunCooldown = Math.max(0, pilot.gunCooldown - dt);
-      if (input.held('attack') && input.locked && pilot.gunCooldown <= 0) {
-        const g = pilot.guns[pilot.gunNext % pilot.guns.length];
-        pilot.gunNext++;
-        pilot.gunCooldown = SHIP_GUN_INTERVAL / Math.max(1, Math.min(4, pilot.guns.length / 2));
-        pilot.group.updateMatrixWorld(true);
-        const from = pilot.group.localToWorld(g.pos.clone());
-        const dir = g.dir.clone().applyQuaternion(pilot.group.quaternion).normalize();
-        from.addScaledVector(dir, 1.2);
-        this.world.bolts.fire(from, dir, { owner: 'player', damage: SHIP_GUN_DAMAGE, speed: SHIP_BOLT_SPEED, color: pilot.boltColor, exclude: pilot.body });
-        this.effects.flash(from, pilot.boltColor, 5, 6, 0.06);
-      }
-    }
+    // A ship's target and guns: the guns lead the target when it sits within their cone, else
+    // fire along the nose; the bolts are the game's own and strike what a blaster's would, ships included.
+    if (simulate && pilot?.spec.ship) this.aimShip(pilot, dt);
+    else this.shipLeadValid = false;
     const terrain = this.world.terrain;
     for (const v of this.world.vehicles) {
       if (!v.drift) v.update(dt, this.physics, v === pilot ? drive : null, (x, z) => terrain.heightAt(x, z), (x, z) => terrain.waterHeightAt(x, z));
@@ -1317,6 +1319,14 @@ class App {
           player.takeDamage(Math.round(Math.min(40, (v.justHit - 6) * 1.5)));
           this.hud.hurt();
         }
+      }
+      if (v.struck > 0) {
+        // Bolts in the hull: a jolt to whoever is at the controls, a little of it as hurt.
+        if (v === player.mounted || v === player.piloting) {
+          player.takeDamage(Math.round(Math.min(12, v.struck * 0.2)));
+          this.hud.hurt();
+        }
+        v.struck = 0;
       }
       const condition = v.hp / v.maxHp;
       if (condition < 0.67 && condition > 0 && Math.random() < dt * (condition < 0.34 ? 9 : 3)) {
@@ -1360,6 +1370,85 @@ class App {
         m.crashed = 0;
       }
     }
+  }
+
+  /**
+   * A ship's target and guns. The target is a ship ahead: Tab cycles the ships within the
+   * target cone by how far off the nose they sit, and with none chosen the nearest to the nose
+   * is taken. Its lead is worked out every frame (where a bolt fired now would meet it, in the
+   * shooter's frame, since a bolt carries the ship's own velocity). The guns fire in turn while
+   * the trigger is held, at the lead when it sits within their cone, else along the nose, with
+   * the weapon table's speed and range and the projectile table's look.
+   */
+  private aimShip(pilot: Vehicle, dt: number): void {
+    const { input } = this;
+    if (this.shipTarget && (this.shipTarget.destroyed || this.shipTarget === pilot || !this.world.vehicles.includes(this.shipTarget))) this.shipTarget = null;
+    const nose = tmp.set(0, 0, 1).applyQuaternion(pilot.group.quaternion);
+    const ahead: { v: Vehicle; off: number }[] = [];
+    for (const v of this.world.vehicles) {
+      if (v === pilot || !v.spec.ship || v.destroyed) continue;
+      tmp2.copy(v.pos).sub(pilot.pos);
+      const d = tmp2.length();
+      if (d > SHIP_TARGET_RANGE || d < 1) continue;
+      const off = Math.acos(THREE.MathUtils.clamp(tmp2.dot(nose) / d, -1, 1));
+      if (off < SHIP_TARGET_CONE) ahead.push({ v, off });
+    }
+    ahead.sort((a, b) => a.off - b.off);
+    if (input.pressedAction('target') && ahead.length) {
+      const i = this.shipTarget ? ahead.findIndex((a) => a.v === this.shipTarget) : -1;
+      this.shipTarget = ahead[(i + 1) % ahead.length].v;
+    } else if (!this.shipTarget && ahead.length) this.shipTarget = ahead[0].v;
+    const speed = pilot.weapon?.speed ?? SHIP_BOLT_SPEED;
+    const range = pilot.weapon?.range ?? SHIP_BOLT_RANGE;
+    const own = pilot.body.linvel();
+    this.shipLeadValid = false;
+    const t = this.shipTarget;
+    if (t) {
+      const tv = t.body.linvel();
+      const rel = tmp2.copy(t.pos).sub(pilot.pos);
+      const relVel = boltFrom.set(tv.x - own.x, tv.y - own.y, tv.z - own.z);
+      const time = interceptTime(rel, relVel, speed);
+      if (time !== null && time * speed < range * 1.5) {
+        leadPoint(rel, relVel, time, this.shipAim);
+        this.shipLead.copy(this.shipAim).add(pilot.pos);
+        this.shipAim.normalize();
+        this.shipLeadValid = true;
+      }
+    }
+    if (!pilot.guns.length) return;
+    pilot.gunCooldown = Math.max(0, pilot.gunCooldown - dt);
+    if (!(input.held('attack') && input.locked && pilot.gunCooldown <= 0)) return;
+    const g = pilot.guns[pilot.gunNext % pilot.guns.length];
+    pilot.gunNext++;
+    pilot.gunCooldown = SHIP_GUN_INTERVAL / Math.max(1, Math.min(4, pilot.guns.length / 2));
+    pilot.group.updateMatrixWorld(true);
+    const from = pilot.group.localToWorld(g.pos.clone());
+    const dir = g.dir.clone().applyQuaternion(pilot.group.quaternion).normalize();
+    // Led onto the target when it sits within the guns' cone: the lead is what the ship's frame
+    // sees, so the bolt's own velocity (the muzzle's plus the ship's) meets the target there.
+    if (this.shipLeadValid && Math.acos(THREE.MathUtils.clamp(this.shipAim.dot(nose), -1, 1)) < SHIP_GUN_CONE) dir.copy(this.shipAim);
+    from.addScaledVector(dir, 1.2);
+    const projectile = pilot.weapon ? this.world.garage?.projectileFor(pilot.weapon.projectile) ?? null : null;
+    this.world.bolts.fire(from, dir, { owner: 'player', damage: SHIP_GUN_DAMAGE, metresPerSecond: speed, inherit: new THREE.Vector3(own.x, own.y, own.z), life: range / speed + 0.05, color: pilot.boltColor, exclude: pilot.body, projectile });
+    this.effects.flash(from, pilot.boltColor, 5, 6, 0.06);
+  }
+
+  /** The target display for the HUD: where the target and its lead show on screen, in pixels, and what to call it. */
+  private targetHud(pilot: Vehicle): Parameters<Hud['setTarget']>[0] {
+    const t = this.shipTarget;
+    if (!t) return null;
+    const cam = this.cam.camera;
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    const toScreen = (p: THREE.Vector3) => {
+      tmp2.copy(p).project(cam);
+      const behind = tmp2.z > 1;
+      return { x: ((behind ? -tmp2.x : tmp2.x) + 1) * 0.5 * w, y: (1 - (behind ? -tmp2.y : tmp2.y)) * 0.5 * h, on: !behind && Math.abs(tmp2.x) <= 1 && Math.abs(tmp2.y) <= 1 };
+    };
+    const at = toScreen(t.pos);
+    const lead = this.shipLeadValid ? toScreen(this.shipLead) : { x: 0, y: 0, on: false };
+    const range = Math.round(t.pos.distanceTo(pilot.pos));
+    return { x: at.x, y: at.y, onScreen: at.on, leadX: lead.x, leadY: lead.y, leadOnScreen: lead.on, label: `${t.spec.label} · ${range} m · hull ${Math.round((t.hp / t.maxHp) * 100)}%` };
   }
 
   /** The class's weapon and abilities, then the bolts in the air (a bolt reaching the player meets the saber first). */
@@ -1819,6 +1908,8 @@ class App {
       this.hud.setPrompt(prompt);
       const flying = player.mounted?.spec.ship && player.mounted.airborne && !input.held('freeLook') ? player.mounted : null;
       this.hud.setFlight(flying ? flying.stick : null);
+      const aimed = player.mounted ?? player.piloting;
+      this.hud.setTarget(aimed?.spec.ship && aimed.airborne && !input.held('freeLook') ? this.targetHud(aimed) : null);
       const at = player.worldPos;
       this.hud.update(dt, at.x, at.y, at.z, this.kit, player.hp, player.maxHp, this.world.day.clock(), this.world.planet.creatures.name, player.saberOn);
 

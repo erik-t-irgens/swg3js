@@ -30,6 +30,12 @@ export class Hud {
   private readonly mouseFree: HTMLElement;
   private readonly prompt: HTMLElement;
   private readonly hurtEl: HTMLElement;
+  private readonly targets: HTMLElement;
+  private readonly tbox: HTMLElement;
+  private readonly lead: HTMLElement;
+  private readonly leadLine: HTMLElement;
+  private readonly leadCross: HTMLElement[];
+  private readonly tlabel: HTMLElement;
   private slots: HTMLElement[] = [];
   private hurtLevel = 0;
   private lastFps = performance.now();
@@ -61,6 +67,13 @@ export class Hud {
         <polygon class="stick-head" points="0,0 0,0 0,0" />
         <circle class="stick-dot" r="5" />
       </svg>
+      <svg class="targets hidden">
+        <rect class="tbox" width="34" height="34" rx="2" />
+        <line class="lead-line" x1="0" y1="0" x2="0" y2="0" />
+        <circle class="lead" r="7" />
+        <line class="lead-cross" x1="0" y1="0" x2="0" y2="0" /><line class="lead-cross" x1="0" y1="0" x2="0" y2="0" />
+        <text class="tlabel"></text>
+      </svg>
       <div class="mouse-free hidden">Mouse free · <b>click</b> to look again</div>
       <div class="prompt"></div>
       <div class="bottom">
@@ -91,6 +104,52 @@ export class Hud {
     this.mouseFree = q('.mouse-free');
     this.prompt = q('.prompt');
     this.hurtEl = q('.hurt');
+    this.targets = q('.targets');
+    this.tbox = q('.tbox');
+    this.lead = q('.lead');
+    this.leadLine = q('.lead-line');
+    this.leadCross = [...this.root.querySelectorAll<HTMLElement>('.lead-cross')];
+    this.tlabel = q('.tlabel');
+  }
+
+  /**
+   * The ship's target in flight: a box on the target where it shows on screen, its name, range
+   * and hull under it, and the lead reticle where the guns must point for a bolt fired now to
+   * meet it, joined to the box by a line. Nothing while there is no target.
+   */
+  setTarget(t: { x: number; y: number; onScreen: boolean; leadX: number; leadY: number; leadOnScreen: boolean; label: string } | null): void {
+    this.targets.classList.toggle('hidden', !t);
+    if (!t) return;
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    // A target off the screen is kept at its edge, so the pilot knows which way to turn.
+    const clampEdge = (x: number, y: number, on: boolean) => (on ? { x, y } : { x: Math.min(w - 20, Math.max(20, x)), y: Math.min(h - 20, Math.max(20, y)) });
+    const box = clampEdge(t.x, t.y, t.onScreen);
+    this.tbox.setAttribute('x', String(box.x - 17));
+    this.tbox.setAttribute('y', String(box.y - 17));
+    this.tbox.style.opacity = t.onScreen ? '1' : '0.45';
+    this.tlabel.setAttribute('x', String(box.x));
+    this.tlabel.setAttribute('y', String(box.y + 32));
+    if (this.tlabel.textContent !== t.label) this.tlabel.textContent = t.label;
+    const showLead = t.onScreen && t.leadOnScreen;
+    this.lead.style.display = showLead ? '' : 'none';
+    this.leadLine.style.display = showLead ? '' : 'none';
+    for (const c of this.leadCross) c.style.display = showLead ? '' : 'none';
+    if (!showLead) return;
+    this.lead.setAttribute('cx', String(t.leadX));
+    this.lead.setAttribute('cy', String(t.leadY));
+    this.leadCross[0].setAttribute('x1', String(t.leadX - 11));
+    this.leadCross[0].setAttribute('x2', String(t.leadX + 11));
+    this.leadCross[0].setAttribute('y1', String(t.leadY));
+    this.leadCross[0].setAttribute('y2', String(t.leadY));
+    this.leadCross[1].setAttribute('x1', String(t.leadX));
+    this.leadCross[1].setAttribute('x2', String(t.leadX));
+    this.leadCross[1].setAttribute('y1', String(t.leadY - 11));
+    this.leadCross[1].setAttribute('y2', String(t.leadY + 11));
+    this.leadLine.setAttribute('x1', String(box.x));
+    this.leadLine.setAttribute('y1', String(box.y));
+    this.leadLine.setAttribute('x2', String(t.leadX));
+    this.leadLine.setAttribute('y2', String(t.leadY));
   }
 
   setPlanet(p: PlanetDef): void {

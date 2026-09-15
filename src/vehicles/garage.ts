@@ -19,8 +19,14 @@ export interface VehicleDef {
   interior?: { file: string; cells: number; def: import('./interior').InteriorDef } | null;
   /** What the manifest says of the hull model's own cells, when it is a portal building (rooms, their lights). */
   cells?: NonNullable<import('./interior').InteriorDef['cells']>;
-  /** What the ship's client data hangs on the hull: its wings, and an appearance shown while the drive runs. */
-  attachments?: { kind: 'wing' | 'engine' | 'component'; slot?: string; file: string; hardpoint?: string | null; transform?: number[] | null }[];
+  /**
+   * What the ship's client data hangs on the hull: its wings (with the hinge each opens about,
+   * as a position and yaw, pitch and roll in degrees, the angle it opens by and the seconds it
+   * takes), an appearance shown while the drive runs, and the fitted components.
+   */
+  attachments?: { kind: 'wing' | 'engine' | 'component'; slot?: string; file: string; hardpoint?: string | null; transform?: number[] | null; hinge?: number[] | null; angle?: number; time?: number }[];
+  /** The gun a ship fires, from the game's weapon table. */
+  weapon?: ShipWeapon | null;
   /** The cockpit frame drawn around the pilot, with the first-person view's offset from the cockpit point. */
   cockpit?: { file: string; zoom?: number[]; firstOffset?: number[]; thirdOffset?: number[] } | null;
   /** The hardpoints the client data puts thruster effects at. */
@@ -30,6 +36,23 @@ export interface VehicleDef {
   bounds?: VehicleSpec['bounds'];
   /** A creature's locomotion clip speeds, for its mixer. */
   clipSpeeds?: Record<string, number>;
+}
+
+export interface ShipWeapon {
+  name: string;
+  /** An index into the projectile table. */
+  projectile: number;
+  /** Metres a second, and the range in metres. */
+  speed: number;
+  range: number;
+}
+
+/** A row of the game's projectile table, as the ships pack carries it: the bolt's effect and the hit effects per surface. */
+export interface ProjectileDef {
+  index: number;
+  effect: string;
+  reach: number;
+  hit: { metal: string | null; other: string | null; shield: string | null };
 }
 
 interface GalleryIndex {
@@ -45,6 +68,8 @@ export function hardpointName(o: THREE.Object3D): string | null {
 
 export class Garage {
   readonly vehicles: VehicleDef[] = [];
+  /** The game's projectiles, by index, when the ships pack carries them. */
+  readonly projectiles = new Map<number, ProjectileDef>();
   private readonly loader = new GLTFLoader();
   private readonly models = new Map<string, Promise<{ scene: THREE.Group; animations: THREE.AnimationClip[] }>>();
 
@@ -84,7 +109,7 @@ export class Garage {
         type Cells = NonNullable<import('./interior').InteriorDef['cells']>;
         type Attachment = NonNullable<VehicleDef['attachments']>[number];
         type Cockpit = NonNullable<VehicleDef['cockpit']>;
-        const manifest = (await res.json()) as { ships: { id: string; label: string; template: string; file: string; bounds?: VehicleSpec['bounds']; class: string; interior: { file?: string; cells?: number; failed?: string } | null; attachments?: Attachment[]; cockpit?: Cockpit | null; thrusters?: string[] }[]; models?: { file: string; bounds?: { min: number[]; max: number[] }; cells?: Cells }[] };
+        const manifest = (await res.json()) as { ships: { id: string; label: string; template: string; file: string; bounds?: VehicleSpec['bounds']; class: string; interior: { file?: string; cells?: number; failed?: string } | null; attachments?: Attachment[]; cockpit?: Cockpit | null; thrusters?: string[]; weapon?: ShipWeapon | null }[]; models?: { file: string; bounds?: { min: number[]; max: number[] }; cells?: Cells }[] };
         const modelByFile = new Map((manifest.models ?? []).map((m) => [m.file, m]));
         for (const sh of manifest.ships) {
           const im = sh.interior?.file ? modelByFile.get(sh.interior.file) : undefined;
@@ -103,11 +128,23 @@ export class Garage {
             attachments: (sh.attachments ?? []).map((a) => ({ ...a, file: `assets-private/ships/${a.file}` })),
             cockpit: sh.cockpit ? { ...sh.cockpit, file: `assets-private/ships/${sh.cockpit.file}` } : null,
             thrusters: sh.thrusters ?? [],
+            weapon: sh.weapon ?? null,
           });
         }
       }
     } catch (err) {
       console.warn('garage: no ships', err);
+    }
+    try {
+      // The projectile table beside the ships: the bolts' effects and where they strike. An
+      // older pack has none, and the ships' bolts are then drawn as a blaster's.
+      const res = await fetch(`${baseUrl}assets-private/ships/projectiles.json`);
+      if (res.ok && (res.headers.get('content-type') ?? '').includes('json')) {
+        const table = (await res.json()) as { projectiles: ProjectileDef[] };
+        for (const p of table.projectiles) g.projectiles.set(p.index, p);
+      }
+    } catch (err) {
+      console.warn('garage: no projectile table', err);
     }
     g.vehicles.sort((a, b) => a.kind.localeCompare(b.kind) || a.id.localeCompare(b.id));
     return g;
@@ -116,6 +153,13 @@ export class Garage {
   find(name: string): VehicleDef | undefined {
     const n = name.toLowerCase();
     return this.vehicles.find((v) => v.id.toLowerCase() === n) ?? this.vehicles.find((v) => v.id.toLowerCase().includes(n));
+  }
+
+  /** How a ship's bolt looks, from the projectile table, or null when the pack has no table. */
+  projectileFor(index: number): import('../combat/bolts').ProjectileVisual | null {
+    const p = this.projectiles.get(index);
+    if (!p) return null;
+    return { effect: p.effect, reach: p.reach, hit: p.hit.metal ?? p.hit.other ?? null };
   }
 
   byKind(): Map<VehicleKind, VehicleDef[]> {
@@ -161,7 +205,8 @@ export class Garage {
     // What the client data hangs on the hull, before the hull is measured: a wing is part of the
     // ship's box and its collision, and its hardpoints (the thrusters') count with the hull's.
     // The game's attachments are modelled in the hull's frame: they sit at its origin unless
-    // the client data names a hardpoint or gives a place.
+    // the client data names a hardpoint or gives a place. A wing that opens keeps its hinge.
+    const wings: Vehicle['wings'] = [];
     for (const a of def.attachments ?? []) {
       try {
         const part = (await this.model({ file: a.file } as VehicleDef)).scene.clone();
@@ -175,6 +220,16 @@ export class Garage {
         } else if (a.hardpoint) console.warn(`garage: ${def.id}: no hardpoint "${a.hardpoint}" for ${a.slot ?? a.kind} ${a.file}`);
         else if (a.transform && a.transform.length >= 3 && a.transform.slice(0, 3).some((n) => n !== 0)) part.position.set(a.transform[0], a.transform[1], a.transform[2]);
         model.add(part);
+        if (a.kind === 'wing' && a.angle && a.hinge && a.hinge.length >= 6) {
+          // The hinge, authored in the hull's frame: the converter mirrors X, so its place flips
+          // in X, its yaw and roll change sign, and so does the turn about it (a roll).
+          const [hx, hy, hz, yaw, pitch, roll] = a.hinge;
+          const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(THREE.MathUtils.degToRad(pitch), -THREE.MathUtils.degToRad(yaw), -THREE.MathUtils.degToRad(roll), 'YXZ'));
+          const hinge = new THREE.Matrix4().compose(new THREE.Vector3(-hx, hy, hz), q, new THREE.Vector3(1, 1, 1));
+          part.updateMatrix();
+          part.matrixAutoUpdate = false;
+          wings.push({ node: part, base: part.matrix.clone(), hinge, hingeInverse: hinge.clone().invert(), angle: -THREE.MathUtils.degToRad(a.angle), time: a.time ?? 3 });
+        }
       } catch (err) {
         console.warn(`garage: ${def.id}: ${a.kind} ${a.file} did not load`, err);
       }
@@ -296,8 +351,11 @@ export class Garage {
     if (spec.ship) {
       // A gun that points nowhere useful (a hardpoint with no turn of its own) fires along the nose.
       v.guns = (guns.muzzle.length ? guns.muzzle : guns.mount).map((g) => ({ pos: g.pos, dir: g.dir.z > 0.5 ? g.dir : new THREE.Vector3(0, 0, 1) }));
-      v.boltColor = /(^|_)tie|imperial|lambda|star_destroyer/i.test(def.id) ? 0x3af06a : 0xff4a2a;
-      if (v.guns.length) console.info(`garage: ${def.id} guns: ${v.guns.length}`);
+      v.boltColor = /(^|_)tie|imperial|lambda|star_destroyer|decimator/i.test(def.id) ? 0x3af06a : 0xff4a2a;
+      v.weapon = def.weapon ?? null;
+      v.wings.push(...wings);
+      if (v.guns.length) console.info(`garage: ${def.id} guns: ${v.guns.length}${v.weapon ? `, firing ${v.weapon.name} (projectile ${v.weapon.projectile}${this.projectiles.has(v.weapon.projectile) ? '' : ', not in the pack: drawn as a blaster bolt'}, ${v.weapon.speed} m/s to ${v.weapon.range} m)` : ', no weapon in the manifest: a blaster bolt'}`);
+      if (wings.length) console.info(`garage: ${def.id} wings that open: ${wings.map((w) => `${Math.round(THREE.MathUtils.radToDeg(-w.angle))}° in ${w.time} s`).join(', ')}`);
     }
     // The cockpit view: the model's own point when it names one, else the seated pilot's eyes over the seat, else forward of the middle at eye height.
     // The cockpit view: the model's own point when it names one, else the seated pilot's eyes over the seat (a hardpoint's, or the kind's own place, where the rider is drawn).

@@ -116,11 +116,16 @@ export interface EffectDef {
   groups: { timing: ParticleTiming | null; emitters: EmitterDef[] }[];
 }
 
-/** Rough radius an effect reaches, from its manifest bounds. */
+/** A placed effect: its file, its world transform (moved in place by `move`), and whether it is inside a building. */
 export interface EffectHandle {
   readonly file: string;
   readonly matrix: THREE.Matrix4;
   readonly contained: boolean;
+  /**
+   * A passing effect (a bolt in flight, a hit): played from its start the moment it is placed
+   * rather than run ahead, never put to sleep for distance, and dropped once it has played out.
+   */
+  readonly transient: boolean;
 }
 
 const GLOBAL_LOD = [20, 200];
@@ -295,7 +300,11 @@ const tmpSide = new THREE.Vector3();
 const tmpColor = new THREE.Color();
 const tmpM = new THREE.Matrix4();
 const tmpM3 = new THREE.Matrix3();
+const tmpM3Local = new THREE.Matrix3();
+const tmpPos = new THREE.Vector3();
 const tmpQ = new THREE.Quaternion();
+const Y_AXIS = new THREE.Vector3(0, 1, 0);
+const Z_AXIS = new THREE.Vector3(0, 0, 1);
 const tmpE = new THREE.Euler();
 const camX = new THREE.Vector3();
 const camY = new THREE.Vector3();
@@ -423,11 +432,18 @@ class EmitterState {
         shapePoint(d.shape, tmpDir);
         tmpV.copy(tmpDir).multiplyScalar(shapeSize + distance);
       }
-      // Emitter space to world: rotate by the emitter's frame, place along its movement this frame.
-      tmpV.applyMatrix3(tmpM3);
-      tmpV2.setFromMatrixPosition(this.worldPrev).lerp(this.position, rand());
-      p.pos.copy(tmpV2).add(tmpV);
-      p.vel.copy(tmpDir).applyMatrix3(tmpM3);
+      if (d.localSpace) {
+        // Carried by the emitter: the particle lives in the emitter's own frame and is put into
+        // the world only when drawn, so it rides along with whatever the effect is on (a bolt).
+        p.pos.copy(tmpV);
+        p.vel.copy(tmpDir);
+      } else {
+        // Emitter space to world: rotate by the emitter's frame, place along its movement this frame.
+        tmpV.applyMatrix3(tmpM3);
+        tmpV2.setFromMatrixPosition(this.worldPrev).lerp(this.position, rand());
+        p.pos.copy(tmpV2).add(tmpV);
+        p.vel.copy(tmpDir).applyMatrix3(tmpM3);
+      }
       const speed = wave(d.speed, agePercent, rand()) * s;
       p.vel.multiplyScalar(speed);
       p.life = Math.max(0.01, wave(d.lifeTime, agePercent, rand()));
@@ -442,8 +458,11 @@ class EmitterState {
       if (p.vel.lengthSq() > 0) p.up.copy(p.vel).normalize();
       else p.up.copy(this.axisY);
       if (d.orientation === 'velocity') {
-        if (Math.abs(p.up.dot(this.axisY)) > 0.99) p.side.crossVectors(p.up, this.axisZ);
-        else p.side.crossVectors(p.up, this.axisY);
+        // In the emitter's own frame its axes are the plain ones.
+        const axisY = d.localSpace ? Y_AXIS : this.axisY;
+        const axisZ = d.localSpace ? Z_AXIS : this.axisZ;
+        if (Math.abs(p.up.dot(axisY)) > 0.99) p.side.crossVectors(p.up, axisZ);
+        else p.side.crossVectors(p.up, axisY);
         if (p.side.lengthSq() < 1e-8) p.side.set(1, 0, 0);
         p.side.normalize();
       }
@@ -556,6 +575,8 @@ class EffectInstance {
   readonly maxLife: number;
   active = false;
   loops = 0;
+  /** Played out with no loops left (a one-shot hit): nothing more to draw. */
+  finished = false;
 
   constructor(
     readonly handle: EffectHandle,
@@ -592,6 +613,7 @@ class EffectInstance {
       this.loops++;
       const limit = this.def.timing ? randomInt(this.def.timing.loopCount) : -1;
       if (limit === -1 || this.loops < limit) this.restart();
+      else this.finished = true;
     }
   }
 
@@ -629,9 +651,13 @@ export class ParticleEffects {
     return `${this.instances.size} particle effects placed, ${this.activeCount} playing, ${this.quadCount} quads in ${this.batches.size} batches${this.textureErrors.size ? `, ${this.textureErrors.size} textures failed to load: ${[...this.textureErrors].join(', ')}` : ''}`;
   }
 
-  /** Place an effect; `matrix` is its world transform. Returns a handle for `remove`. */
-  place(file: string, matrix: THREE.Matrix4, contained: boolean): EffectHandle {
-    const handle: EffectHandle = { file, matrix: matrix.clone(), contained };
+  /**
+   * Place an effect; `matrix` is its world transform. Returns a handle for `remove` and `move`.
+   * A `transient` effect (a bolt, a hit) plays from its start when placed, is never put to sleep
+   * for distance, and is dropped by itself once it has played out.
+   */
+  place(file: string, matrix: THREE.Matrix4, contained: boolean, transient = false): EffectHandle {
+    const handle: EffectHandle = { file, matrix: matrix.clone(), contained, transient };
     this.pending.add(handle);
     void this.load(file).then((def) => {
       if (this.disposed || !this.pending.delete(handle) || !def) return;
@@ -640,9 +666,20 @@ export class ParticleEffects {
     return handle;
   }
 
+  /** Move a placed effect: its emitters follow (the handle's matrix is what they hang on). */
+  move(handle: EffectHandle, matrix: THREE.Matrix4): void {
+    handle.matrix.copy(matrix);
+    this.instances.get(handle)?.position.setFromMatrixPosition(matrix);
+  }
+
   remove(handle: EffectHandle): void {
     this.pending.delete(handle);
     this.instances.delete(handle);
+  }
+
+  /** Whether a placed effect is still to come or still playing. */
+  playing(handle: EffectHandle): boolean {
+    return this.pending.has(handle) || (this.instances.get(handle)?.finished === false);
   }
 
   private load(file: string): Promise<EffectDef | null> {
@@ -743,9 +780,10 @@ export class ParticleEffects {
       b.material.uniforms.uFogDensity.value = this.fogDensity;
     }
     let active = 0;
-    for (const inst of this.instances.values()) {
+    for (const [handle, inst] of this.instances) {
       const distance = inst.position.distanceTo(camPos);
-      if (distance > inst.sleepDistance) {
+      const transient = handle.transient;
+      if (!transient && distance > inst.sleepDistance) {
         if (inst.active) {
           inst.active = false;
           for (const e of inst.emitters) e.particles.length = 0;
@@ -753,19 +791,27 @@ export class ParticleEffects {
         continue;
       }
       if (!inst.active) {
-        // Woken: run the effect ahead so a smoke column is already standing when it comes into view.
         inst.active = true;
         inst.restart();
-        const warm = Math.min(10, inst.maxLife);
-        const steps = Math.ceil(warm / MAX_STEP);
-        for (let i = 0; i < steps; i++) inst.update(warm / steps, this.heightAt, distance);
+        if (!transient) {
+          // Woken: run the effect ahead so a smoke column is already standing when it comes into view.
+          const warm = Math.min(10, inst.maxLife);
+          const steps = Math.ceil(warm / MAX_STEP);
+          for (let i = 0; i < steps; i++) inst.update(warm / steps, this.heightAt, distance);
+        }
       }
       active++;
       inst.update(dt * (inst.def.playbackRate || 1), this.heightAt, distance);
+      if (transient && inst.finished) {
+        // A hit that has played out: gone, so a fight does not pile up spent effects.
+        this.instances.delete(handle);
+        continue;
+      }
       for (const e of inst.emitters) {
         const tex = e.def.particle.quad!.texture;
         const b = this.batch(tex.file!, tex.blend ?? 'alpha');
-        for (const p of e.particles) b.queue.push({ p, e, d: p.pos.distanceToSquared(camPos) });
+        const local = e.def.localSpace;
+        for (const p of e.particles) b.queue.push({ p, e, d: (local ? e.position : p.pos).distanceToSquared(camPos) });
       }
     }
     this.activeCount = active;
@@ -797,17 +843,27 @@ export class ParticleEffects {
       alpha = clamp01(alpha);
       let rotation = (p.initialRotation + wave(quad.rotation, t, p.r2)) * TWO_PI;
       if (p.initialRotation < 0) rotation = -rotation;
+      // A particle carried by its emitter is put into the world here: its place through the
+      // emitter's transform, and its heading through the emitter's turn.
+      const local = d.localSpace;
+      if (local) {
+        tmpM3Local.setFromMatrix4(e.world);
+        tmpPos.copy(p.pos).applyMatrix4(e.world);
+      } else tmpPos.copy(p.pos);
       switch (d.orientation) {
         case 'velocity': {
           tmpUp.subVectors(p.pos, p.prev);
           if (tmpUp.lengthSq() < 1e-12) tmpUp.copy(p.up);
+          if (local) tmpUp.applyMatrix3(tmpM3Local);
           tmpUp.normalize();
           tmpSide.copy(p.side);
+          if (local) tmpSide.applyMatrix3(tmpM3Local).normalize();
           break;
         }
         case 'velocityBank': {
           tmpUp.copy(p.up);
-          tmpSide.crossVectors(tmpUp, tmpV.subVectors(camPos, p.pos));
+          if (local) tmpUp.applyMatrix3(tmpM3Local).normalize();
+          tmpSide.crossVectors(tmpUp, tmpV.subVectors(camPos, tmpPos));
           if (tmpSide.lengthSq() < 1e-12) tmpSide.copy(camX);
           tmpSide.normalize();
           break;
@@ -832,7 +888,7 @@ export class ParticleEffects {
       tmpUp.multiplyScalar(length);
       tmpSide.multiplyScalar(width);
       const o = i * 12;
-      const px = p.pos.x, py = p.pos.y, pz = p.pos.z;
+      const px = tmpPos.x, py = tmpPos.y, pz = tmpPos.z;
       // a: -up +side, b: +up +side, c: +up -side, d: -up -side
       pos[o] = px - tmpUp.x + tmpSide.x; pos[o + 1] = py - tmpUp.y + tmpSide.y; pos[o + 2] = pz - tmpUp.z + tmpSide.z;
       pos[o + 3] = px + tmpUp.x + tmpSide.x; pos[o + 4] = py + tmpUp.y + tmpSide.y; pos[o + 5] = pz + tmpUp.z + tmpSide.z;

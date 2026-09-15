@@ -160,6 +160,7 @@ const AXIS_X = new THREE.Vector3(1, 0, 0);
 const AXIS_Y = new THREE.Vector3(0, 1, 0);
 const AXIS_Z = new THREE.Vector3(0, 0, 1);
 const torque = new THREE.Vector3();
+const wingTurn = new THREE.Matrix4();
 const wantUp = new THREE.Vector3();
 const right = new THREE.Vector3();
 /** Velocity lost in one step past which a vehicle has hit something (m/s), and the hull taken per m/s beyond it. */
@@ -240,6 +241,20 @@ export class Vehicle {
   gunNext = 0;
   /** The colour of the ship's bolts: green for the Empire's, red for everyone else's. */
   boltColor = 0xff4a2a;
+  /** The gun a ship fires, from the game's weapon table: its projectile (an index into the projectile table), speed and range in metres. */
+  weapon: { name: string; projectile: number; speed: number; range: number } | null = null;
+  /** The handles of the body's colliders, so a bolt's hit can be traced back to the vehicle. */
+  readonly colliderHandles: number[] = [];
+  /** Damage taken from bolts since the game last looked (read once by the game, for the pilot's jolt). */
+  struck = 0;
+  /**
+   * Wings that open: the game's fighters carry them as separate objects modelled in the hull's
+   * frame, turned about a hinge by an angle when the ship flies. Each keeps its node's resting
+   * matrix, the hinge's frame and its inverse, and how far and how fast it opens.
+   */
+  readonly wings: { node: THREE.Object3D; base: THREE.Matrix4; hinge: THREE.Matrix4; hingeInverse: THREE.Matrix4; angle: number; time: number }[] = [];
+  /** How far the wings are open, 0 closed to 1 open; open in flight, closed on the ground. */
+  wingsOpen = 0;
   /** Whether someone is in the hull's rooms; with a pilot at the controls, what clears the glass. */
   occupied = false;
   /**
@@ -303,7 +318,7 @@ export class Vehicle {
     const mass = { m, inertia: this.inertia, centre: { x: cx, y: cy, z: cz } };
     const pieces = spec.animal ? 0 : this.hullColliders(model, world, mass);
     if (!pieces) {
-      world.createCollider(
+      const box = world.createCollider(
         RAPIER.ColliderDesc.cuboid(Math.max(0.2, w / 2), Math.max(0.15, h / 2), Math.max(0.3, l / 2))
           .setTranslation(cx, cy, cz)
           // The mass properties are in the collider's own frame, so the centre of mass is its centre.
@@ -312,9 +327,45 @@ export class Vehicle {
           .setRestitution(0.1),
         this.body,
       );
+      this.colliderHandles.push(box.handle);
     }
     this.pos.set(x, y, z);
   }
+
+  /** Half the hull's height, as a bolt's target (the Hittable contract). */
+  get halfHeight(): number {
+    return (this.spec.bounds.max[1] - this.spec.bounds.min[1]) / 2;
+  }
+
+  get dead(): boolean {
+    return this.destroyed;
+  }
+
+  /** A bolt's hit: the hull takes it (a vehicle is too heavy for a bolt to shove). */
+  damage(amount: number): void {
+    if (this.destroyed) return;
+    this.hp = Math.max(0, this.hp - amount);
+    this.struck += amount;
+  }
+
+  /**
+   * The wings open in flight and close on the ground, each turned about its hinge's Z by its
+   * angle over its time, the way the client turns the wing objects it hangs on the hull.
+   */
+  private updateWings(dt: number): void {
+    if (!this.wings.length) return;
+    const want = this.airborne ? 1 : 0;
+    if (this.wingsOpen === want && this.wingsSettled) return;
+    for (const w of this.wings) {
+      const rate = dt / Math.max(0.1, w.time);
+      this.wingsOpen += THREE.MathUtils.clamp(want - this.wingsOpen, -rate, rate);
+      wingTurn.makeRotationZ(w.angle * this.wingsOpen);
+      w.node.matrix.copy(w.hinge).multiply(wingTurn).multiply(w.hingeInverse).multiply(w.base);
+      w.node.matrixWorldNeedsUpdate = true;
+    }
+    this.wingsSettled = this.wingsOpen === want;
+  }
+  private wingsSettled = false;
 
   /**
    * Trimesh colliders on the body from the model's meshes in the vehicle's frame: every mesh of a
@@ -355,7 +406,7 @@ export class Vehicle {
         const c = new THREE.Vector3(mass.centre.x, mass.centre.y, mass.centre.z).sub(p).applyQuaternion(q.clone().invert());
         desc.setMassProperties(mass.m, { x: c.x, y: c.y, z: c.z }, { x: mass.inertia.x, y: mass.inertia.y, z: mass.inertia.z }, { x: 0, y: 0, z: 0, w: 1 });
       } else desc.setDensity(0);
-      world.createCollider(desc, this.body);
+      this.colliderHandles.push(world.createCollider(desc, this.body).handle);
       pieces++;
       triangles += indices.length / 3;
     });
@@ -411,6 +462,7 @@ export class Vehicle {
     body.resetForces(true);
     body.resetTorques(true);
     this.hopCd = Math.max(0, this.hopCd - dt);
+    this.updateWings(dt);
     if (s.ship && this.flyShip(dt, drive, groundAt, waterAt)) {
       this.group.position.copy(this.pos);
       this.group.quaternion.copy(q);

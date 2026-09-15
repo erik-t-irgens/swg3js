@@ -5,9 +5,10 @@
 //   node tools/swg/cli.mjs headers <swg-dir>                      print the raw header of every archive (diagnostic)
 //   node tools/swg/cli.mjs list <swg-dir> [filter]                list files across archives (search priority applied)
 //   node tools/swg/cli.mjs extract <swg-dir> <path-in-archive> <out-file>
-//   node tools/swg/cli.mjs dump <file.iff> | <swg-dir> <path-in-archive> [--strings]   print an IFF tree (--strings lists every readable string in each chunk)
+//   node tools/swg/cli.mjs dump <file.iff> | <swg-dir> <path-in-archive> [--strings] [--hex]   print an IFF tree (--strings lists every readable string in each chunk, --hex every chunk's bytes with the floats they would be)
 //   node tools/swg/cli.mjs weapons <swg-dir> <out-dir> [--limit=N]       every weapon the game can hold, with its class, under <out-dir>/weapons
-//   node tools/swg/cli.mjs ships <swg-dir> <out-dir> [--limit=N] [--match=yacht] [--glass=<regex>]   every ship a player can fly, with its interior when it has one, under <out-dir>/ships (--match redoes those ships only; --glass=<regex> marks more shaders as glass)
+//   node tools/swg/cli.mjs ships <swg-dir> <out-dir> [--limit=N] [--match=yacht] [--glass=<regex>]   every ship a player can fly, with its interior when it has one, under <out-dir>/ships (--match redoes those ships only; --glass=<regex> marks more shaders as glass);
+//                                                                  also the game's projectile table with every bolt and hit effect as projectiles.json
 //   node tools/swg/cli.mjs species <swg-dir> <out-dir> [--only=human,twilek_female] [--var=...]   every playable species and gender as parts, with characters/index.json for the character creator
 //   node tools/swg/cli.mjs ash <swg-dir> <appearance/x.sat | object/.../shared_x.iff> [--find=pistol]   the animation state hierarchy behind a skeletal appearance, with its strings
 //   node tools/swg/cli.mjs shader <swg-dir> <shader/x.sht>        list a shader's texture slots
@@ -84,7 +85,7 @@ import { parseSnapshot, flattenWithWorldTransforms } from './ws.mjs';
 import { loadBuildouts, mergeBuildouts } from './buildout.mjs';
 import { R, composeMeshes, mergeSkeletons, parseAnimation, parseLat, parseLmg, parseMgn, parseSat, parseSkeleton, poseAtFrame, readIff, skinData, skinnedPrimitives } from './skeletal.mjs';
 import { resolveAppearanceToMesh, resolveTemplateMesh, resolveTemplateString } from './objtemplate.mjs';
-import { exportParticle } from './particle.mjs';
+import { exportParticle, parseParticleEffect } from './particle.mjs';
 import { defaultJkaClips, importJkaClips } from './jka.mjs';
 import { extractClips, readGlb, replaceClips, skinJoints } from './glbclips.mjs';
 import { packClips, retargetClips, unpackClips } from './clipbundle.mjs';
@@ -1894,6 +1895,30 @@ switch (cmd) {
     else if (existsSync(pos[1]) && statSync(pos[1]).isFile()) buf = readFileSync(pos[1]);
     else usage();
     console.log(dump(parseIff(buf), 0, [], flags.has('--strings')).join('\n'));
+    if (flags.has('--hex')) {
+      // Every chunk's bytes as hex, the text they spell, and the floats each aligned four would be:
+      // the way to decode a chunk whose layout is unknown (a client data file's, a cockpit's).
+      const hex = (node, depth) => {
+        const pad = '  '.repeat(depth);
+        if (isForm(node)) {
+          console.log(`${pad}FORM ${node.type}`);
+          for (const c of node.children) hex(c, depth + 1);
+          return;
+        }
+        const d = node.data;
+        console.log(`${pad}${node.tag} ${d.length} bytes`);
+        for (let o = 0; o < d.length; o += 16) {
+          const slice = d.subarray(o, Math.min(o + 16, d.length));
+          const bytes = [...slice].map((b) => b.toString(16).padStart(2, '0')).join(' ');
+          const text = [...slice].map((b) => (b >= 32 && b < 127 ? String.fromCharCode(b) : '.')).join('');
+          const floats = [];
+          for (let i = 0; i + 4 <= slice.length; i += 4) floats.push(slice.readFloatLE(i).toPrecision(4));
+          console.log(`${pad}  ${o.toString(16).padStart(4, '0')}  ${bytes.padEnd(48)} |${text.padEnd(16)}| ${floats.join(' ')}`);
+        }
+      };
+      console.log('');
+      hex(parseIff(buf), 0);
+    }
     break;
   }
   case 'ash': {
@@ -2691,7 +2716,7 @@ switch (cmd) {
       return { file: def.file, cells: def.cells?.length ?? 0 };
     };
     // A model of an appearance for something that hangs on a hull (a wing, an engine, a cockpit frame).
-    const { parseClientData, parseCockpit } = await import('./shipdata.mjs');
+    const { parseClientData, parseCockpit, parseClientEffect } = await import('./shipdata.mjs');
     const convertAppearance = (appearance, suffix = '') => {
       const path = appearance.replace(/\\/g, '/').replace(/^\//, '');
       const id = `${familyOf(path)}${suffix}`;
@@ -2785,7 +2810,9 @@ switch (cmd) {
               const m = convertAppearance(r.appearance);
               if (m.skip) out.notes.push(`wing ${wing.template}: ${m.skip}`);
               else {
-                out.attachments.push({ kind: 'wing', file: m.file, template: wing.template, transform: wing.transform });
+                // A wing sits in the hull's frame at its origin; PSOR is the hinge it opens about,
+                // not a place for it: the hinge's position and its yaw, pitch and roll (degrees).
+                out.attachments.push({ kind: 'wing', file: m.file, template: wing.template, transform: null, hinge: wing.hinge, angle: wing.angle, time: wing.time, sound: wing.sounds[0] ?? null });
                 hardpoints.push(...m.hardpoints);
               }
             }
@@ -2825,11 +2852,68 @@ switch (cmd) {
       }
       return out;
     };
+    // The game's projectiles (datatables/projectile/projectile.iff): each index names the bolt's
+    // particle effect, the effect played when it fires (a sound) and the one played where it
+    // strikes, per surface (a particle effect and a sound, through a client effect file). The
+    // weapon table (datatables/space/ship_weapon_components.iff) gives each gun its projectile,
+    // speed and range. The bolt and hit effects are converted into the pack's particles/, and the
+    // tables written as projectiles.json; each ship's manifest entry names the gun it fires.
+    const { defaultWeaponFor, boltReach } = shipsModule;
+    const projectiles = [];
+    const weapons = [];
+    const effectOf = (cef) => {
+      const path = (cef ?? '').replace(/\\/g, '/').replace(/^\//, '');
+      if (!path || !vfs.has(path)) return { particle: null, sound: null };
+      try {
+        const fx = parseClientEffect(parseIff(vfs.read(path)));
+        return { particle: fx.particles[0] ?? null, sound: fx.sounds[0] ?? null };
+      } catch (err) {
+        console.error(`  client effect ${path}: ${err.message}`);
+        return { particle: null, sound: null };
+      }
+    };
+    const particleFile = (prt) => {
+      if (!prt) return null;
+      const p = convertParticle(vfs, prt, outDir);
+      return p.failed ? null : p.file;
+    };
+    try {
+      const table = parseDatatable(parseIff(vfs.read('datatables/projectile/projectile.iff')));
+      for (const row of table.rows) {
+        const bolt = (row.appearanceTemplateName ?? '').replace(/\\/g, '/');
+        if (!/\.prt$/i.test(bolt)) continue; // the tractor and lightning beams are not bolts
+        const file = particleFile(bolt);
+        if (!file) continue;
+        const reach = boltReach(parseParticleEffect(parseIff(vfs.read(bolt))));
+        const fire = effectOf(row.fireClientEffectTemplateName);
+        const metal = effectOf(row.hitMetalClientEffectTemplateName);
+        const other = effectOf(row.hitOtherClientEffectTemplateName);
+        const shield = effectOf(row.hitShieldClientEffectTemplateName);
+        projectiles.push({
+          index: row.index,
+          effect: file,
+          reach: Number(reach.toFixed(2)),
+          hit: { metal: particleFile(metal.particle), other: particleFile(other.particle), shield: particleFile(shield.particle) },
+          sounds: { fire: fire.sound, hitMetal: metal.sound, hitOther: other.sound },
+        });
+      }
+      const wt = parseDatatable(parseIff(vfs.read('datatables/space/ship_weapon_components.iff')));
+      for (const row of wt.rows) weapons.push({ name: row.name, projectile: row.projectile_index, speed: row.speed, range: row.range, missile: !!row.missile });
+      console.log(`projectiles: ${projectiles.length} bolts with their hit effects, ${weapons.length} weapons`);
+    } catch (err) {
+      console.error(`projectiles not converted: ${err.message}`);
+    }
+    const weaponOf = (id) => {
+      const name = defaultWeaponFor(id, weapons.map((w) => w.name));
+      const w = weapons.find((x) => x.name === name);
+      return w ? { name: w.name, projectile: w.projectile, speed: w.speed, range: w.range } : null;
+    };
     const limit = options.limit ? Number(options.limit) : Infinity;
     const match = options.match ? new RegExp(options.match, 'i') : null;
     const templates = galleryTemplates(vfs, 'object/ship/player/').filter((t) => !match || match.test(t));
-    const { ships, skipped } = buildShips(templates, { convert, interiorOf, convertInterior, extrasOf }, { log: console.log, limit });
+    const { ships, skipped } = buildShips(templates, { convert, interiorOf, convertInterior, extrasOf, weaponOf }, { log: console.log, limit });
     const manifest = { classes: SHIP_CLASSES, ships, skipped, models: [...models.values()].filter((m) => !m.failed) };
+    if (projectiles.length) writeFileSync(join(outDir, 'projectiles.json'), JSON.stringify({ projectiles, weapons }, null, 2));
     if (match) {
       // A matched run redoes some ships: the rest keep their place in the manifest.
       try {

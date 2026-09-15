@@ -22,6 +22,7 @@ export type Action =
   | 'inventory'
   | 'spawner'
   | 'freeLook'
+  | 'target'
   | 'noclip'
   | 'noclipFaster'
   | 'noclipSlower'
@@ -64,6 +65,7 @@ export const DEFAULT_BINDINGS: Record<Action, string[]> = {
   inventory: ['KeyI'],
   spawner: ['KeyB'],
   freeLook: ['AltLeft', 'AltRight'],
+  target: ['Tab'],
   noclip: ['KeyN'],
   noclipFaster: ['Equal', 'NumpadAdd'],
   noclipSlower: ['Minus', 'NumpadSubtract'],

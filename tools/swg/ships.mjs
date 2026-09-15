@@ -29,13 +29,54 @@ export function shipLabelOf(template) {
   return template.replace(/^.*\//, '').replace(/^shared_/, '').replace(/^player_/, '').replace(/\.iff$/, '');
 }
 
+/** Ships that fire the Empire's green bolts, by their id. */
+export const IMPERIAL_SHIP = /(^|_)tie|imperial|lambda|star_destroyer|decimator/i;
+
+/**
+ * The weapon a ship fires, from the game's weapon table (datatables/space/ship_weapon_components):
+ * the blaster named for the ship's family when there is one (wpn_awing_blaster, wpn_tiefighter_basic,
+ * wpn_z95_blaster), else the light blaster in the faction's colour, else the generic gun.
+ */
+export function defaultWeaponFor(id, weaponNames) {
+  const family = id.replace(/^(advanced|basic|prototype|player)_/, '').replace(/_modified$|_imperial_guard$|_longprobe$/, '');
+  const compact = family.replace(/_/g, '');
+  const gun = (w) => /blaster|basic|cannon/i.test(w) && !/missile|launcher|countermeasure|mining|tractor/i.test(w);
+  const own = weaponNames.find((w) => {
+    const b = w.replace(/^wpn_/, '');
+    return (b.startsWith(`${family}_`) || b.startsWith(compact)) && gun(b);
+  });
+  if (own) return own;
+  const want = IMPERIAL_SHIP.test(id) ? 'wpn_light_blaster_green' : 'wpn_light_blaster';
+  if (weaponNames.includes(want)) return want;
+  return weaponNames.includes('wpn_generic') ? 'wpn_generic' : weaponNames[0] ?? null;
+}
+
+/**
+ * The reach of a bolt's particle effect ahead of the projectile, in metres: the client draws a
+ * space bolt as a quad centred ahead of the projectile's own point, so a bolt's visual tip is its
+ * emitter's forward offset plus the quad's half length, the furthest of its emitters.
+ */
+export function boltReach(effect) {
+  let reach = 0;
+  for (const g of effect.groups ?? []) {
+    for (const e of g.emitters ?? []) {
+      const quad = e.particle?.quad;
+      if (!quad) continue;
+      const at = (wf) => (wf?.points?.length ? wf.points[0][1] : 0);
+      reach = Math.max(reach, (at(e.translationZ) + at(quad.length)) * (effect.scale || 1));
+    }
+  }
+  return reach;
+}
+
 /**
  * Build the ships manifest. `deps.convert(template)` converts a template into the pack's models,
  * returning { model, file, bounds } or { skip }; `deps.interiorOf(template)` names the ship's
  * interior layout (a .pob path) or null; `deps.convertInterior(template, pob)` converts it,
  * returning { file, cells } or { skip }; `deps.extrasOf(template)` converts what the ship's client
  * data hangs on the hull (wings, an engine appearance) and its cockpit frame, returning
- * { attachments, thrusters, contrails, cockpit, notes }. Ships whose exterior fails are listed with why.
+ * { attachments, thrusters, contrails, cockpit, notes }; `deps.weaponOf(id)` names the weapon the ship
+ * fires as { name, projectile, speed, range } or null. Ships whose exterior fails are listed with why.
  */
 export function buildShips(templates, deps, { log = () => {}, limit = Infinity } = {}) {
   const ships = [];
@@ -57,9 +98,11 @@ export function buildShips(templates, deps, { log = () => {}, limit = Infinity }
     const length = b ? b.max[2] - b.min[2] : 0;
     // What hangs on the hull and the cockpit frame, from the ship's client data and cockpit files.
     const extras = deps.extrasOf?.(template, r) ?? { attachments: [], thrusters: [], contrails: [], cockpit: null, notes: [] };
-    ships.push({ id, label: id.replace(/_/g, ' '), template, class: shipClassOf(`${template} ${r.model}`), file: r.file, model: r.model, bounds: b, length: Number(length.toFixed(2)), interior, attachments: extras.attachments, thrusters: extras.thrusters, contrails: extras.contrails, cockpit: extras.cockpit, ...(extras.damage ? { damage: extras.damage } : {}), ...(extras.destroyed ? { destroyed: extras.destroyed } : {}), ...(extras.notes.length ? { notes: extras.notes } : {}) });
-    const hung = extras.attachments.length ? `, ${extras.attachments.filter((a) => a.kind === 'wing').length} wings, ${extras.attachments.filter((a) => a.kind === 'engine').length} engine appearances, ${extras.attachments.filter((a) => a.kind === 'component').length} components (${extras.attachments.filter((a) => a.kind === 'component').map((a) => `${a.slot} at ${a.hardpoint}`).join(', ') || 'none'})` : '';
-    log(`${id}: ${SHIP_CLASSES[shipClassOf(template)]}, ${length.toFixed(1)} m${interior ? interior.failed ? `, interior ${pob} failed: ${interior.failed}` : interior.hull ? `, ${interior.cells} rooms in the hull model` : `, interior ${pob}: ${interior.cells} cells` : ', no interior named by its template'}${hung}${extras.thrusters.length ? `, thrusters at ${extras.thrusters.join(' ')}` : ''}${extras.cockpit ? ', cockpit frame' : ''}${extras.notes.length ? `\n   ${extras.notes.join('\n   ')}` : ''}`);
+    const weapon = deps.weaponOf?.(id) ?? null;
+    ships.push({ id, label: id.replace(/_/g, ' '), template, class: shipClassOf(`${template} ${r.model}`), file: r.file, model: r.model, bounds: b, length: Number(length.toFixed(2)), interior, attachments: extras.attachments, thrusters: extras.thrusters, contrails: extras.contrails, cockpit: extras.cockpit, weapon, ...(extras.damage ? { damage: extras.damage } : {}), ...(extras.destroyed ? { destroyed: extras.destroyed } : {}), ...(extras.notes.length ? { notes: extras.notes } : {}) });
+    const wings = extras.attachments.filter((a) => a.kind === 'wing');
+    const hung = extras.attachments.length ? `, ${wings.length} wings${wings.some((w) => w.angle) ? ` (${wings.filter((w) => w.angle).length} that open, ${wings.filter((w) => w.angle).map((w) => `${w.angle}°`).join(' ')} in ${wings.find((w) => w.angle).time} s)` : ''}, ${extras.attachments.filter((a) => a.kind === 'engine').length} engine appearances, ${extras.attachments.filter((a) => a.kind === 'component').length} components (${extras.attachments.filter((a) => a.kind === 'component').map((a) => `${a.slot} at ${a.hardpoint}`).join(', ') || 'none'})` : '';
+    log(`${id}: ${SHIP_CLASSES[shipClassOf(template)]}, ${length.toFixed(1)} m${interior ? interior.failed ? `, interior ${pob} failed: ${interior.failed}` : interior.hull ? `, ${interior.cells} rooms in the hull model` : `, interior ${pob}: ${interior.cells} cells` : ', no interior named by its template'}${hung}${extras.thrusters.length ? `, thrusters at ${extras.thrusters.join(' ')}` : ''}${extras.cockpit ? ', cockpit frame' : ''}${weapon ? `, fires ${weapon.name} (projectile ${weapon.projectile}, ${weapon.speed} m/s to ${weapon.range} m)` : ''}${extras.notes.length ? `\n   ${extras.notes.join('\n   ')}` : ''}`);
   }
   ships.sort((a, b) => a.class.localeCompare(b.class) || a.id.localeCompare(b.id));
   return { ships, skipped };

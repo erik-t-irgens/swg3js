@@ -44,6 +44,7 @@ const ACTION_LABELS: Record<Action, string> = {
   inventory: 'Inventory',
   spawner: 'Spawner',
   freeLook: 'Free look (riding)',
+  target: 'Next target (ship)',
   noclip: 'Noclip fly',
   noclipFaster: 'Noclip faster',
   noclipSlower: 'Noclip slower',
