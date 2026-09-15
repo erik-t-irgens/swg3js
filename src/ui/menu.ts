@@ -119,7 +119,8 @@ const GRAPHICS: { title: string; knobs: Knob[] }[] = [
     knobs: [
       { key: 'bloom', label: 'Bloom', hint: 'The bright parts spill over: engine glows, bolts, the suns. Turning it on or off recompiles every shader, a pause of a few seconds.', kind: 'toggle' },
       { key: 'bloomStrength', label: 'Bloom strength', hint: '0.1 a touch, 0.5 a glow, 1 a haze.', kind: 'range', min: 0.05, max: 1.5, step: 0.05, format: (v) => v.toFixed(2) },
-      { key: 'speedBlur', label: 'Speed blur', hint: 'The edges of the picture streak toward the centre at speed on a vehicle (needs bloom on, which runs the picture through the effects).', kind: 'toggle' },
+      { key: 'speedBlur', label: 'Motion blur', hint: 'What the camera moves past smears along its movement: the ground under a ship at speed, a wall in a turn; what moves with you stays sharp (needs bloom on, which runs the picture through the effects).', kind: 'toggle' },
+      { key: 'motionBlur', label: 'Motion blur strength', hint: 'How much of a frame\'s movement is smeared: 0.2 a hint, 0.5 a film\'s, 1 the whole.', kind: 'range', min: 0.1, max: 1, step: 0.05, format: (v) => v.toFixed(2) },
     ],
   },
   {

@@ -9,12 +9,12 @@ export interface Poi {
   kind: 'city' | 'starport' | 'shuttleport' | 'landmark' | 'area' | 'region';
 }
 
+/** The galaxy: a card per world to travel to, with the places on each to jump to. Lives in a tab of the map window. */
 export class GalaxyMap {
   readonly root: HTMLElement;
   private currentId = '';
   private currentZone: string | undefined;
   private readonly pois = new Map<string, Promise<Poi[]>>();
-  open = false;
 
   constructor(
     parent: HTMLElement,
@@ -22,17 +22,10 @@ export class GalaxyMap {
     private readonly onTeleport: (p: PlanetDef, poi: Poi, zone?: string) => void,
   ) {
     this.root = document.createElement('div');
-    this.root.id = 'galaxy-map';
-    this.root.className = 'overlay hidden';
+    this.root.className = 'galaxy-body hidden';
     this.root.innerHTML = `
-      <div class="map-panel">
-        <div class="map-header">
-          <h2>Galaxy Map</h2>
-          <span>Choose a destination. Starports and shuttle tickets come later; for now the Force provides.</span>
-          <button class="close">Close (M)</button>
-        </div>
-        <div class="planets"></div>
-      </div>`;
+      <p class="menu-hint">Choose a destination. Starports and shuttle tickets come later; for now the Force provides. A place under a world jumps straight to it.</p>
+      <div class="planets"></div>`;
     parent.appendChild(this.root);
     const list = this.root.querySelector('.planets')!;
     for (const p of PLANETS) {
@@ -57,7 +50,6 @@ export class GalaxyMap {
       list.appendChild(card);
       void this.fillPois(p, card.querySelector('.pois')!);
     }
-    this.root.querySelector('.close')!.addEventListener('click', () => this.hide());
   }
 
   /**
@@ -156,12 +148,10 @@ export class GalaxyMap {
   }
 
   show(): void {
-    this.open = true;
     this.root.classList.remove('hidden');
   }
 
   hide(): void {
-    this.open = false;
     this.root.classList.add('hidden');
   }
 }

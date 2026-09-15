@@ -14,7 +14,7 @@ import { OUTPOSTS } from '../data/outposts';
 import { Group, groups, RAPIER as R } from '../core/physics';
 import { CHUNK_RES, CHUNK_SIZE, Terrain } from './terrain';
 import { SwgTerrain, type BuildingLayerSource } from './swgTerrain';
-import { LayoutStreamer, type Building, type CellState } from './layoutStream';
+import { LayoutStreamer, type Building, type CellState, type PlacedObject } from './layoutStream';
 import { ParticleEffects } from './particles';
 import { CSM } from 'three/examples/jsm/csm/CSM.js';
 import { ACTOR_LAYER, INTERIOR_LAYER, markActor, type PortalRenderer } from './portalRender';
@@ -1455,6 +1455,11 @@ export class World {
 
   get layoutCenter(): { x: number; z: number } | null {
     return this.pack?.layout?.center ?? null;
+  }
+
+  /** Everything the pack places on this world, loaded or not, in the game's coordinates (a map's worth, not the scene's). */
+  get placedObjects(): readonly PlacedObject[] {
+    return this.layoutStream?.objects ?? [];
   }
 
   /**

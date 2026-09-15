@@ -13,6 +13,7 @@ import { Player } from './player/player';
 import { loadPlayerRig } from './player/rig';
 import { Character, loadSpeciesIndex, type SpeciesEntry } from './player/character';
 import { GalaxyMap, type Poi } from './ui/galaxyMap';
+import { MapUi } from './ui/mapUi';
 import { WardrobeUi } from './ui/wardrobeUi';
 import { WeaponsUi } from './ui/weaponsUi';
 import { WeaponCatalogue, type WeaponDef } from './player/weapons';
@@ -118,7 +119,7 @@ class App {
   private readonly effects: Effects;
   private kit!: Kit;
   private readonly hud: Hud;
-  private readonly map: GalaxyMap;
+  private readonly map: MapUi;
   private readonly wardrobe: WardrobeUi;
   private readonly weaponsUi: WeaponsUi;
   private readonly vehiclesUi: VehiclesUi;
@@ -172,6 +173,8 @@ class App {
   private started = false;
   private traveling = false;
   private dying = false;
+  /** The last frame's length, for the effects that smear by how far the camera moved in it. */
+  private lastDt = 1 / 60;
   private spawn = new THREE.Vector3();
   /** Animation mixers of models shown through the debug hook. */
   private readonly shown: THREE.AnimationMixer[] = [];
@@ -238,11 +241,39 @@ class App {
       this.weaponsUi.attach(c);
       if (c) console.info(`weapons: ${c.weapons.length} on the rack, ${c.skipped.length} left out`);
     });
-    this.map = new GalaxyMap(
+    const galaxy = new GalaxyMap(
       this.ui,
       (p, zone) => void this.travel(p, zone),
       (p, poi, zone) => void this.teleport(p, poi, zone),
     );
+    // The map window: the world here (the planet's own map, or the space zone in three axes) and the galaxy to travel.
+    this.map = new MapUi(this.ui, galaxy, {
+      here: () => {
+        const planet = this.world.planet;
+        const zone = this.zone ? planet.zones?.find((z) => z.id === this.zone) : undefined;
+        return { packId: packIdOf(planet, this.zone), name: zone ? `${planet.name}: ${zone.name}` : planet.name, space: !!planet.space };
+      },
+      player: () => {
+        const p = this.player;
+        const v = p.mounted ?? p.piloting ?? p.aboard?.vehicle ?? null;
+        const at = v ? v.pos : p.worldPos;
+        const flying = !!v?.spec.ship && v.airborne && !this.world.planet.space;
+        return { x: at.x, y: at.y, z: at.z, heading: v ? v.heading : p.heading, altitude: flying ? at.y - this.world.terrain.heightAt(at.x, at.z) : null };
+      },
+      center: () => this.world.layoutCenter,
+      pois: (id) => galaxy.loadPois(id),
+      objects: () => this.world.placedObjects,
+      ships: () => {
+        const p = this.player;
+        const mine = p.mounted ?? p.piloting ?? p.aboard?.vehicle ?? null;
+        return this.world.vehicles
+          .filter((v) => v.spec.ship)
+          .map((v) => ({ x: v.pos.x, y: v.pos.y, z: v.pos.z, quaternion: v.quaternion(new THREE.Quaternion()), mine: v === mine }))
+          .sort((a, b) => (b.mine ? 1 : 0) - (a.mine ? 1 : 0));
+      },
+      onTeleport: (poi) => void this.teleport(this.world.planet, poi, this.zone),
+    });
+    this.map.onClose = () => this.toggleMap();
     // Every panel moves by its header and stays put; the overlay round it is clear, so the world shows behind.
     draggable(this.map.root, '.map-panel', '.map-header', 'map');
     draggable(this.shipMenu.root, '.ship-panel', '.ship-header', 'ship');
@@ -493,6 +524,13 @@ class App {
           this.input.endFrame();
         }
         if (!hold) for (const k of keys) this.input.force(k, false);
+      },
+      /** Open or close the map window (M), on its `'here'` or `'galaxy'` tab. */
+      map: (tab?: 'here' | 'galaxy') => {
+        if (this.map.open && !tab) this.toggleMap();
+        else if (!this.map.open) this.toggleMap();
+        if (tab && this.map.open) this.map.show(tab);
+        return this.map.open ? `map open on ${tab ?? 'here'}` : 'map closed';
       },
       /** The converted sky's parts (the dome, the skybox faces, the stars, space dust, the sun and star sprites) and its lighting now; `sky('skybox')` and the like toggle a part to see what it contributes. */
       sky: (toggle?: 'dome' | 'skybox' | 'stars' | 'dust' | 'sprites') => this.world.swgSky?.describe(toggle) ?? 'no converted sky on this world',
@@ -902,6 +940,7 @@ class App {
       case 'bloom':
       case 'bloomStrength':
       case 'speedBlur':
+      case 'motionBlur':
         this.setPostFX();
         break;
       case 'fog':
@@ -1281,6 +1320,7 @@ class App {
   /** Load a planet and stand the player at its spawn, or at `at` (where a character last stood). */
   private arrive(planet: PlanetDef, zoneId?: string, at?: THREE.Vector3): void {
     this.zone = planet.zones?.length ? (planet.zones.find((z) => z.id === zoneId) ?? planet.zones[0]).id : undefined;
+    this.postfx?.reset();
     this.world.load(planet, packIdOf(planet, this.zone));
     this.spawn = this.world.spawnPoint();
     const stand = at ?? this.spawn;
@@ -1747,7 +1787,7 @@ class App {
     // With the effects on, the passes draw into their target and the picture goes out through them.
     this.postfx?.begin();
     this.portals.render(this.scene, cam, view, this.world.buildings);
-    this.postfx?.end(this.speedBlurAmount());
+    this.postfx?.end(cam, this.lastDt);
     this.frameCalls = info.calls;
     this.frameTriangles = info.triangles;
     this.renderer.info.autoReset = auto;
@@ -1761,18 +1801,8 @@ class App {
       this.postfx = null;
       return;
     }
-    if (!this.postfx) this.postfx = new PostFX(this.renderer, { bloom: S.bloom, bloomStrength: S.bloomStrength, speedBlur: S.speedBlur });
-    else this.postfx.set({ bloom: S.bloom, bloomStrength: S.bloomStrength, speedBlur: S.speedBlur });
-  }
-
-  /** How hard the picture streaks at speed: on a vehicle past half its top speed, hardest boosting; a pod racer streaks sooner. */
-  private speedBlurAmount(): number {
-    const v = this.player.mounted;
-    if (!v || (!v.airborne && v.groundedPoints === 0 && !v.spec.ship)) return 0;
-    const top = v.spec.boostSpeed;
-    const from = v.spec.kind === 'podracer' ? 0.35 : 0.55;
-    const share = THREE.MathUtils.clamp((Math.abs(v.speed) / Math.max(1, top) - from) / (1 - from), 0, 1);
-    return share * (v.boosting ? 1 : 0.6);
+    if (!this.postfx) this.postfx = new PostFX(this.renderer, { bloom: S.bloom, bloomStrength: S.bloomStrength, motionBlur: S.speedBlur, motionBlurStrength: S.motionBlur });
+    else this.postfx.set({ bloom: S.bloom, bloomStrength: S.bloomStrength, motionBlur: S.speedBlur, motionBlurStrength: S.motionBlur });
   }
 
   private async die(): Promise<void> {
@@ -2127,6 +2157,7 @@ class App {
       this.timer.update();
       const rawDt = this.timer.getDelta();
       const dt = Math.min(0.05, rawDt);
+      this.lastDt = dt;
       const input = this.input;
       const player = this.player;
       // On the select screen and in the creator there is no world: nothing streams, nothing draws

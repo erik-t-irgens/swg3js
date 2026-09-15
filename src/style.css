@@ -65,6 +65,18 @@ b { color: var(--accent); font-weight: 600; }
 .map-header h2 { margin: 0; font-size: 22px; letter-spacing: 0.12em; color: var(--accent); }
 .map-header span { flex: 1; color: var(--muted); font-size: 13px; }
 .planets { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; padding: 16px 22px; overflow-y: auto; }
+/* The map window: the world here (the planet's map, or the zone in three axes) and the galaxy, as tabs. */
+.map-header .tabs { flex: none; }
+.map-header .map-readout { flex: 1; font-size: 11px; color: var(--muted); }
+.map-body.here { position: relative; width: 100%; height: min(620px, 72vh); background: #060a12; }
+.map-body.here[hidden] { display: none; }
+.map2d, .map3d { display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; }
+.map2d[hidden], .map3d[hidden] { display: none; }
+.map2d:active, .map3d:active { cursor: grabbing; }
+.galaxy-body { display: flex; flex-direction: column; min-height: 0; max-height: min(620px, 72vh); }
+.galaxy-body.hidden { display: none; }
+.galaxy-body > .menu-hint { margin: 10px 22px 0; }
+.galaxy-body .planets { flex: 1 1 auto; min-height: 0; }
 .planet-card { display: flex; gap: 12px; padding: 12px; background: rgba(0,0,0,0.35); border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; cursor: pointer; transition: border-color 0.15s, transform 0.15s; }
 .planet-card:hover { border-color: var(--accent); transform: translateY(-2px); }
 .planet-card.current { border-color: var(--accent); background: rgba(45,127,214,0.25); cursor: default; }

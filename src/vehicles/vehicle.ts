@@ -176,6 +176,9 @@ const right = new THREE.Vector3();
 /** Velocity lost in one step past which a vehicle has hit something (m/s), and the hull taken per m/s beyond it. */
 const HIT_THRESHOLD = 6;
 const HIT_DAMAGE = 4;
+/** Speed (m/s) a step may take off a flying hull before it counts as having hit something, and how long the contacts then have it. */
+const SHIP_HIT_LOSS = 5;
+const SHIP_HIT_FREE = 0.4;
 /** How much of the ground's slope a hover kind takes on: 1 lies flat on it, 0 stays level. */
 const SLOPE_FOLLOW = 0.85;
 
@@ -214,6 +217,11 @@ export class Vehicle {
   readonly maxHp = 100;
   /** The speed lost in a hard hit this step (m/s), read once by the game for the sparks and the damage shown; 0 otherwise. */
   justHit = 0;
+  /** In flight, the velocity the last step was told to fly at; what the step took off it is a hit. */
+  private readonly commanded = new THREE.Vector3();
+  private commandedValid = false;
+  /** Seconds left in which the contacts, not the throttle, have the hull after a hit. */
+  private hitCooldown = 0;
   /** At no hull left: the game blows it up and takes the rider off. */
   get destroyed(): boolean {
     return this.hp <= 0;
@@ -742,6 +750,23 @@ export class Vehicle {
     const floor = Math.max(groundAt ? groundAt(this.pos.x, this.pos.z) : -Infinity, waterAt ? waterAt(this.pos.x, this.pos.z) : -Infinity);
     const h = this.pos.y - s.bounds.min[1] - floor;
     const throttle = drive?.throttle ?? 0;
+    // Something solid was hit: the step took speed off the hull that the last frame commanded
+    // (a building, an asteroid, a station). The hull bounces off with most of its speed gone
+    // and is hurt by what it lost, and for a moment nothing is commanded, so the contacts can
+    // push it clear rather than the throttle driving it deeper in, which wedged it there.
+    this.justHit = 0;
+    this.hitCooldown = Math.max(0, this.hitCooldown - dt);
+    if (this.airborne && this.commandedValid && this.hitCooldown <= 0) {
+      const lv = body.linvel();
+      const lost = Math.hypot(this.commanded.x - lv.x, this.commanded.y - lv.y, this.commanded.z - lv.z);
+      if (lost > SHIP_HIT_LOSS) {
+        this.justHit = lost;
+        this.hp = Math.max(0, this.hp - (lost - SHIP_HIT_LOSS) * HIT_DAMAGE);
+        this.cruise = Math.min(this.cruise, Math.max(4, this.cruise * 0.3));
+        this.hitCooldown = SHIP_HIT_FREE;
+      }
+    }
+    this.commandedValid = false;
     // Space has the room for twice the speed the ground shows.
     const top = (drive?.boost ? s.boostSpeed : s.maxSpeed) * (this.space ? 2 : 1);
     this.boosting = !!drive?.boost && throttle > 0;
@@ -804,7 +829,15 @@ export class Vehicle {
     // present course the nose is eased toward the horizon, gently and only while the stick is
     // slack, so a pilot who keeps pushing can fly into it; the ceiling is eased the same way.
     const minH = s.fly!.floor + 2;
-    const toGround = fwd.y < -0.02 ? h / (-fwd.y * Math.max(this.cruise, 1)) : Infinity;
+    let toGround = fwd.y < -0.02 ? h / (-fwd.y * Math.max(this.cruise, 1)) : Infinity;
+    // The ground ahead as well as below: a slope or a cliff on the course, within a couple of
+    // seconds' flying, counts as ground coming up, so the nose is eased over it.
+    if (!this.space && groundAt && this.cruise > 4) {
+      const ahead = Math.min(2.5 * this.cruise, 200);
+      const gAhead = groundAt(this.pos.x + fwd.x * ahead, this.pos.z + fwd.z * ahead);
+      const belly = this.pos.y + s.bounds.min[1] + fwd.y * ahead;
+      if (gAhead + minH > belly) toGround = Math.min(toGround, THREE.MathUtils.clamp(((belly - gAhead) / minH) * 2.5, 0, 2.5));
+    }
     const tooLow = !this.space && (h < minH || toGround < 2.5);
     const tooHigh = !this.space && h > s.fly!.ceiling;
     const slack = Math.abs(stick.y) < 0.15;
@@ -820,28 +853,43 @@ export class Vehicle {
       }
     }
     // Into the ground: a crash. The ship stops dead where it hit and drops onto its gear, and
-    // the rider is thrown about by the speed (the game reports it as damage).
-    if (!this.space && h < s.fly!.floor * 0.5 && fwd.y < -0.05 && this.cruise > 8) {
-      this.crashed = this.cruise;
+    // the rider is thrown about by the speed (the game reports it as damage). Flown into a
+    // slope sideways (the hull ignores the ground's own collider) it is inside the ground with
+    // the nose level: that is a crash too, and the hull is lifted back onto the surface.
+    const inGround = !this.space && h < 0;
+    if (inGround || (!this.space && h < s.fly!.floor * 0.5 && fwd.y < -0.05 && this.cruise > 8)) {
+      this.crashed = Math.max(this.cruise, inGround ? 8 : 0);
       this.cruise = 0;
       this.airborne = false;
       body.setGravityScale(1, true);
       e.set(0, this.heading, 0, 'YXZ');
       q.setFromEuler(e);
       body.setRotation({ x: q.x, y: q.y, z: q.z, w: q.w }, true);
+      if (inGround) {
+        this.pos.y = floor - s.bounds.min[1] + 0.3;
+        body.setTranslation({ x: this.pos.x, y: this.pos.y, z: this.pos.z }, true);
+      }
       body.setLinvel({ x: 0, y: 0, z: 0 }, true);
       body.setAngvel({ x: 0, y: 0, z: 0 }, true);
       this.altitude = s.fly!.floor;
       return false;
     }
     a.normalize();
-    body.setRotation({ x: a.x, y: a.y, z: a.z, w: a.w }, true);
-    q.copy(a);
     tmp.copy(fwd).multiplyScalar(this.cruise);
     // Slow, the ship holds a few metres up; with the throttle off it settles down and lands.
     if (this.cruise < 8) tmp.y += this.cruise < 2 ? -1.5 : THREE.MathUtils.clamp((minH - h) * 1.5, -2, 4);
     if (h < s.fly!.floor + 0.5 && tmp.y < 0) tmp.y = 0;
-    body.setLinvel({ x: tmp.x, y: tmp.y, z: tmp.z }, true);
+    if (this.hitCooldown > 0) {
+      // Just hit: the contacts have the hull for a moment; the attitude follows where they leave it.
+      this.quaternion(q);
+      a.copy(q);
+    } else {
+      body.setRotation({ x: a.x, y: a.y, z: a.z, w: a.w }, true);
+      q.copy(a);
+      body.setLinvel({ x: tmp.x, y: tmp.y, z: tmp.z }, true);
+      this.commanded.copy(tmp);
+      this.commandedValid = true;
+    }
     body.setAngvel({ x: 0, y: 0, z: 0 }, true);
     this.groundedPoints = 0;
     this.onWater = false;

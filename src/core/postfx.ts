@@ -1,22 +1,38 @@
 // The picture after the frame: the portal renderer draws its passes into a high-range target
 // instead of the screen, and the target goes out through bloom (the bright parts spilling over,
-// for the engine glows, the bolts and the suns), a speed blur (the edges of the picture streaked
-// toward the centre at speed, a racer's), and the output pass, which does the tone mapping and
-// colour space the renderer did on its own before. Three applies its tone mapping only when
-// drawing to the screen, so the materials come out linear into the target and the output pass
-// maps them once; turning this on or off changes every material's program, a recompile of them all.
+// for the engine glows, the bolts and the suns), a motion blur (what moves across the picture
+// as the camera moves is smeared along its movement: the ground rushing by under a ship at
+// speed, a wall sweeping past in a turn, while the ship itself and the far sky stay sharp), and
+// the output pass, which does the tone mapping and colour space the renderer did on its own
+// before. Three applies its tone mapping only when drawing to the screen, so the materials come
+// out linear into the target and the output pass maps them once; turning this on or off changes
+// every material's program, a recompile of them all.
 import * as THREE from 'three';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 
-const SPEED_BLUR = {
+/**
+ * A camera motion blur from the depth buffer: each pixel's point is found in the world from its
+ * depth, projected with the last frame's camera to see where it was on the screen, and the
+ * colour is averaged along that movement. Nothing is stored per object, so what moves with the
+ * camera (the ship flown) stays sharp, and what the camera moves past smears in proportion.
+ */
+const MOTION_BLUR = {
   uniforms: {
     tDiffuse: { value: null as THREE.Texture | null },
-    /** How far the edge of the picture streaks toward the centre, as a share of its distance (0 none). */
-    uAmount: { value: 0 },
-    uCentre: { value: new THREE.Vector2(0.5, 0.5) },
+    tDepth: { value: null as THREE.Texture | null },
+    uInvViewProj: { value: new THREE.Matrix4() },
+    uPrevViewProj: { value: new THREE.Matrix4() },
+    /** How much of the movement is smeared (0 none, 1 the whole frame's). */
+    uStrength: { value: 0.5 },
+    /** The longest smear, as a share of the screen. */
+    uMaxLength: { value: 0.04 },
+    /** The camera's near and far planes, to turn depth into distance. */
+    uNearFar: { value: new THREE.Vector2(0.05, 9000) },
+    /** Nothing nearer than the first distance smears, everything past the second does: what moves with the camera (the ship flown, a cockpit) sits close and stays sharp. */
+    uNearCut: { value: new THREE.Vector2(25, 60) },
   },
   vertexShader: /* glsl */ `
     varying vec2 vUv;
@@ -27,18 +43,37 @@ const SPEED_BLUR = {
   `,
   fragmentShader: /* glsl */ `
     uniform sampler2D tDiffuse;
-    uniform float uAmount;
-    uniform vec2 uCentre;
+    uniform sampler2D tDepth;
+    uniform mat4 uInvViewProj;
+    uniform mat4 uPrevViewProj;
+    uniform float uStrength;
+    uniform float uMaxLength;
+    uniform vec2 uNearFar;
+    uniform vec2 uNearCut;
     varying vec2 vUv;
     void main() {
-      vec2 d = vUv - uCentre;
-      // The middle stays sharp: the streak grows with the distance from the centre, squared.
-      float w = uAmount * dot(d, d) * 2.0;
+      float depth = texture2D(tDepth, vUv).x;
+      float ndcZ = depth * 2.0 - 1.0;
+      vec4 clip = vec4(vUv * 2.0 - 1.0, ndcZ, 1.0);
+      vec4 world = uInvViewProj * clip;
+      world /= world.w;
+      vec4 prev = uPrevViewProj * world;
+      vec2 prevUv = prev.xy / prev.w * 0.5 + 0.5;
+      // How far away the point is: what is close moves with the camera (the hull, the cockpit) and is left sharp.
+      float dist = (2.0 * uNearFar.x * uNearFar.y) / (uNearFar.y + uNearFar.x - ndcZ * (uNearFar.y - uNearFar.x));
+      vec2 v = (vUv - prevUv) * uStrength * smoothstep(uNearCut.x, uNearCut.y, dist);
+      float len = length(v);
+      if (len > uMaxLength) v *= uMaxLength / len;
+      // Nothing to do for a still pixel: the sharp picture as it is.
+      if (len < 0.0005) {
+        gl_FragColor = texture2D(tDiffuse, vUv);
+        return;
+      }
       vec4 c = vec4(0.0);
-      const int N = 10;
+      const int N = 12;
       for (int i = 0; i < N; i++) {
-        float t = float(i) / float(N - 1);
-        c += texture2D(tDiffuse, vUv - d * w * t);
+        float t = float(i) / float(N - 1) - 0.5;
+        c += texture2D(tDiffuse, vUv + v * t);
       }
       gl_FragColor = c / float(N);
     }
@@ -49,8 +84,14 @@ export interface PostFXOptions {
   bloom: boolean;
   /** How much the bright parts spill: 0.1 a touch, 0.5 a glow, 1 a haze. */
   bloomStrength: number;
-  speedBlur: boolean;
+  motionBlur: boolean;
+  /** How much of a frame's movement is smeared: 0.2 a hint, 0.5 a film's, 1 the whole. */
+  motionBlurStrength: number;
 }
+
+/** The blur is scaled as if every frame lasted this long, so a slow frame is not a longer smear. */
+const SHUTTER = 1 / 60;
+const viewProj = new THREE.Matrix4();
 
 export class PostFX {
   private readonly target: THREE.WebGLRenderTarget;
@@ -59,6 +100,10 @@ export class PostFX {
   private readonly blur: ShaderPass;
   private readonly output: OutputPass;
   private readonly size = new THREE.Vector2();
+  private readonly prevViewProj = new THREE.Matrix4();
+  private prevValid = false;
+  /** The depth of the frame drawn since `begin`: the buffer drawn into changes from frame to frame. */
+  private depth: THREE.Texture | null = null;
   readonly options: PostFXOptions;
 
   constructor(
@@ -67,14 +112,17 @@ export class PostFX {
   ) {
     this.options = { ...options };
     renderer.getDrawingBufferSize(this.size);
-    // The frame's own target: a stencil for the portals, a depth buffer, half floats for light
+    // The frame's own target: a stencil for the portals, a depth buffer the blur can read (a
+    // texture, resolved from the multisampled one after the frame), half floats for light
     // brighter than white, and the same multisampling the screen had.
-    this.target = new THREE.WebGLRenderTarget(this.size.x, this.size.y, { type: THREE.HalfFloatType, stencilBuffer: true, depthBuffer: true, samples: 4 });
+    const depthTexture = new THREE.DepthTexture(this.size.x, this.size.y, THREE.UnsignedInt248Type);
+    depthTexture.format = THREE.DepthStencilFormat;
+    this.target = new THREE.WebGLRenderTarget(this.size.x, this.size.y, { type: THREE.HalfFloatType, stencilBuffer: true, depthBuffer: true, samples: 4, depthTexture });
     this.composer = new EffectComposer(renderer, this.target);
     this.composer.setPixelRatio(1);
     this.composer.setSize(this.size.x, this.size.y);
     this.bloom = new UnrealBloomPass(new THREE.Vector2(this.size.x / 2, this.size.y / 2), options.bloomStrength, 0.5, 0.85);
-    this.blur = new ShaderPass(SPEED_BLUR);
+    this.blur = new ShaderPass(MOTION_BLUR);
     this.output = new OutputPass();
     this.composer.addPass(this.bloom);
     this.composer.addPass(this.blur);
@@ -99,6 +147,7 @@ export class PostFX {
     this.renderer.getDrawingBufferSize(this.size);
     this.composer.setSize(this.size.x, this.size.y);
     this.bloom.setSize(this.size.x / 2, this.size.y / 2);
+    this.prevValid = false;
   }
 
   /**
@@ -107,20 +156,38 @@ export class PostFX {
    * changes from frame to frame; drawing into a fixed one showed every other frame black.
    */
   begin(): void {
-    this.renderer.setRenderTarget(this.composer.readBuffer);
+    const rt = this.composer.readBuffer;
+    this.depth = rt.depthTexture;
+    this.renderer.setRenderTarget(rt);
   }
 
-  /**
-   * After the frame's passes: the picture goes out through the effects. `speedBlur` is how hard
-   * the edges streak (0 none, 1 hard), and `centre` where they streak toward on the screen (0 to 1).
-   */
-  end(speedBlur = 0, centre?: THREE.Vector2): void {
+  /** After the frame's passes: the picture goes out through the effects, blurred by how the camera moved since the last frame (`dt` seconds ago). */
+  end(camera: THREE.Camera, dt: number): void {
     this.renderer.setRenderTarget(null);
-    const amount = this.options.speedBlur ? THREE.MathUtils.clamp(speedBlur, 0, 1) : 0;
-    this.blur.enabled = amount > 0.002;
-    (this.blur.uniforms.uAmount as { value: number }).value = amount * 0.9;
-    if (centre) (this.blur.uniforms.uCentre as { value: THREE.Vector2 }).value.copy(centre);
+    const on = this.options.motionBlur && this.options.motionBlurStrength > 0 && !!this.depth;
+    this.blur.enabled = on;
+    if (on) {
+      const u = this.blur.uniforms;
+      camera.updateMatrixWorld();
+      viewProj.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+      if (!this.prevValid) {
+        this.prevViewProj.copy(viewProj);
+        this.prevValid = true;
+      }
+      (u.tDepth as { value: THREE.Texture | null }).value = this.depth;
+      (u.uInvViewProj as { value: THREE.Matrix4 }).value.copy(viewProj).invert();
+      (u.uPrevViewProj as { value: THREE.Matrix4 }).value.copy(this.prevViewProj);
+      (u.uStrength as { value: number }).value = this.options.motionBlurStrength * THREE.MathUtils.clamp(SHUTTER / Math.max(dt, 1e-3), 0.25, 2);
+      const persp = camera as THREE.PerspectiveCamera;
+      if (persp.isPerspectiveCamera) (u.uNearFar as { value: THREE.Vector2 }).value.set(persp.near, persp.far);
+      this.prevViewProj.copy(viewProj);
+    }
     this.composer.render();
+  }
+
+  /** The camera was moved by a jump, not a motion (a teleport, a new world): the next frame blurs nothing. */
+  reset(): void {
+    this.prevValid = false;
   }
 
   dispose(): void {

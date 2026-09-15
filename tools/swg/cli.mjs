@@ -51,6 +51,7 @@
 //   node tools/swg/cli.mjs sky <swg-dir> <planet>|all <out-dir>      the planet's sky (sun, moons, colour ramps, skybox, reflection maps) into a pack
 //                                                                  (snapshot and terrain do this too)
 //   node tools/swg/cli.mjs space <swg-dir> <zone>|all <out-dir>     a space zone (space_tatooine, ...): its stations, asteroid fields, planets and sky
+//   node tools/swg/cli.mjs maps <swg-dir> <out-dir>                 the client's planet map image into every converted planet pack (map.png, map.json)
 //                                                                  as <out-dir>/<zone>, a pack the game flies through
 //   node tools/swg/cli.mjs audit <swg-dir> <out-dir> [planet] [--limit=n]   every object the archives place on each converted planet against its pack:
 //                                                                  what is missing, why (skipped kind, creature, older conversion), and where;
@@ -3420,6 +3421,43 @@ switch (cmd) {
       console.log(`-> ${outDir}: ${stations.length} stations, ${asteroids} asteroids in ${models.size} models, ${planets.length} planets and moons${env.skybox ? `, skybox ${env.skybox}` : ', no skybox named'}, ${env.lights.length} lights, ${env.celestials.length} star sprites, ${env.stars?.count ?? 0} stars, ${env.dust?.count ?? 0} dust`);
     }
     printEffectSummary();
+    break;
+  }
+
+  case 'maps': {
+    // <swg-dir> <out-dir>: the client's own planet map (texture/ui_map_<planet>.dds) as map.png in
+    // every converted planet pack under <out-dir>, with map.json saying how wide a ground it
+    // covers (the terrain's width, from the pack's terrain.trn; the map shows the whole of it).
+    if (!pos[2]) usage();
+    const vfs = mount(pos[1]);
+    const { parseTerrainTemplate } = await import('../../src/swg/terrain/trn.ts');
+    // The zones whose map is not named for the pack.
+    const MAP_NAMES = { kashyyyk_north_dungeons: 'ui_map_kashyyyk_north_dungeons_slaver', kashyyyk_south_dungeons: 'ui_map_kashyyyk_south_dungeons_hracca' };
+    let done = 0;
+    for (const planet of GAME_PLANETS) {
+      const outDir = join(pos[2], planet);
+      if (!existsSync(join(outDir, 'layout.json'))) continue;
+      const texture = `texture/${MAP_NAMES[planet] ?? `ui_map_${planet}`}.dds`;
+      if (!vfs.has(texture)) {
+        console.log(`${planet}: no ${texture} in the archives`);
+        continue;
+      }
+      let width = 16384;
+      const trn = join(outDir, 'terrain.trn');
+      if (existsSync(trn)) {
+        try {
+          width = parseTerrainTemplate(new Uint8Array(readFileSync(trn))).mapWidthInMeters || width;
+        } catch (err) {
+          console.log(`${planet}: terrain.trn not read (${err.message}); the map is taken as ${width} m wide`);
+        }
+      }
+      const img = decodeDds(vfs.read(texture));
+      writeFileSync(join(outDir, 'map.png'), encodePng(img.width, img.height, img.rgba));
+      writeFileSync(join(outDir, 'map.json'), JSON.stringify({ image: 'map.png', width, texture }, null, 2));
+      console.log(`${planet}: ${texture} ${img.width}x${img.height} over ${width} m -> ${join(outDir, 'map.png')}`);
+      done++;
+    }
+    console.log(`${done} planet maps written`);
     break;
   }
 

@@ -34,8 +34,10 @@ export interface Settings {
   bloom: boolean;
   /** How much they spill: 0.1 a touch, 0.5 a glow, 1 a haze. */
   bloomStrength: number;
-  /** The edges of the picture streaking toward the centre at speed on a vehicle. */
+  /** A motion blur: what the camera moves past smears along its movement (the ground under a ship at speed). */
   speedBlur: boolean;
+  /** How much of a frame's movement the blur smears: 0.2 a hint, 0.5 a film's, 1 the whole. */
+  motionBlur: number;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -57,6 +59,7 @@ export const DEFAULT_SETTINGS: Settings = {
   bloom: false,
   bloomStrength: 0.35,
   speedBlur: true,
+  motionBlur: 0.35,
 };
 
 const KEY = 'swg.settings';
