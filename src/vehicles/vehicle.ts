@@ -233,6 +233,13 @@ export class Vehicle {
   engineParts: THREE.Object3D[] = [];
   /** The exhaust ribbons behind a ship in flight, in the world. */
   trails: import('./trail').EngineTrail[] = [];
+  /** A ship's guns: where each fires from and the way it points, in the model's frame, from the weapon hardpoints. */
+  guns: { pos: THREE.Vector3; dir: THREE.Vector3 }[] = [];
+  /** Seconds until the guns can fire again, and which gun fires next. */
+  gunCooldown = 0;
+  gunNext = 0;
+  /** The colour of the ship's bolts: green for the Empire's, red for everyone else's. */
+  boltColor = 0xff4a2a;
   /** Whether someone is in the hull's rooms; with a pilot at the controls, what clears the glass. */
   occupied = false;
   /**

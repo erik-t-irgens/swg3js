@@ -181,6 +181,9 @@ export class Garage {
     }
     let bounds = def.bounds;
     const hardpoints: string[] = [];
+    // The guns: a gun part's own muzzle when it names one, else the weapon hardpoint it hangs on,
+    // each firing the way its hardpoint points (forward, for a fixed gun).
+    const guns: { muzzle: { pos: THREE.Vector3; dir: THREE.Vector3 }[]; mount: { pos: THREE.Vector3; dir: THREE.Vector3 }[] } = { muzzle: [], mount: [] };
     // Where the engines glow, by what the hardpoints are called, best first: the engine parts'
     // own glow points, the client data's thruster points, any exhaust, any numbered engine.
     const engineSpots: { glow: THREE.Vector3[]; thruster: THREE.Vector3[]; exhaust: THREE.Vector3[]; engine: THREE.Vector3[] } = { glow: [], thruster: [], exhaust: [], engine: [] };
@@ -228,6 +231,9 @@ export class Garage {
       if (name === null) return;
       hardpoints.push(name);
       const local = () => o.getWorldPosition(new THREE.Vector3()).sub(model.getWorldPosition(new THREE.Vector3())).add(model.position);
+      const pointing = () => new THREE.Vector3(0, 0, 1).applyQuaternion(model.getWorldQuaternion(new THREE.Quaternion()).invert().multiply(o.getWorldQuaternion(new THREE.Quaternion()))).normalize();
+      if (/muzzle|barrel|(^|_)fire|flash/i.test(name)) guns.muzzle.push({ pos: local(), dir: pointing() });
+      else if (/^weapon\d*(_[a-z]+)?\d*$|^gun\d*(_[a-z]+)?\d*$/i.test(name)) guns.mount.push({ pos: local(), dir: pointing() });
       if (!seat.point && /rider|saddle|seat|driver|pilot|passenger|player|mount/i.test(name)) seat.point = local();
       // Not the "engine on" appearance's or the engine sound's hardpoints, which sit at the hull's origin, and not the boosters'.
       if (/engine_glow/i.test(name)) engineSpots.glow.push(local());
@@ -287,6 +293,12 @@ export class Garage {
     });
     const engines = engineSpots.glow.length ? engineSpots.glow : engineSpots.thruster.length ? engineSpots.thruster : engineSpots.exhaust.length ? engineSpots.exhaust : engineSpots.engine;
     if (def.source !== 'creature') addEngineGlow(v, engines);
+    if (spec.ship) {
+      // A gun that points nowhere useful (a hardpoint with no turn of its own) fires along the nose.
+      v.guns = (guns.muzzle.length ? guns.muzzle : guns.mount).map((g) => ({ pos: g.pos, dir: g.dir.z > 0.5 ? g.dir : new THREE.Vector3(0, 0, 1) }));
+      v.boltColor = /(^|_)tie|imperial|lambda|star_destroyer/i.test(def.id) ? 0x3af06a : 0xff4a2a;
+      if (v.guns.length) console.info(`garage: ${def.id} guns: ${v.guns.length}`);
+    }
     // The cockpit view: the model's own point when it names one, else the seated pilot's eyes over the seat, else forward of the middle at eye height.
     // The cockpit view: the model's own point when it names one, else the seated pilot's eyes over the seat (a hardpoint's, or the kind's own place, where the rider is drawn).
     if (spec.ship) v.cockpit = seat.cockpit ? [seat.cockpit.x, seat.cockpit.y, seat.cockpit.z] : [spec.seat[0], spec.seat[1] + SEATED_EYE, spec.seat[2]];

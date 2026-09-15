@@ -44,7 +44,7 @@ function mountPrompt(v: import('./vehicles/vehicle').Vehicle): string {
   const boost = v.spec.boost === 'heat' ? ` · <b>Shift</b> boost · heat ${bar(v.meter)}${v.overheated > 0 ? ' BURNT OUT' : ''}` : v.spec.boost === 'burst' ? ` · <b>Shift</b> boost ${bar(v.meter)}` : '';
   const hop = v.spec.hop ? ' · <b>Space</b> hop' : '';
   const fly = v.spec.fly ? ' · look up/down or <b>Space</b>/<b>X</b> to climb and sink' : '';
-  if (k === 'ship') return `<b>E</b> leave · <b>W</b>/<b>S</b> throttle up and down · mouse pitches and turns (loops and rolls allowed) · <b>A/D</b> roll · <b>Space</b>/<b>X</b> pitch · <b>wheel</b> zoom, all the way in for the cockpit · <b>Alt</b> look around · <b>Shift</b> burn · ${v.airborne ? 'flying' : 'landed'} · ${Math.round(Math.abs(v.speed) * 3.6)} km/h`;
+  if (k === 'ship') return `<b>E</b> leave · <b>W</b>/<b>S</b> throttle up and down · mouse pitches and turns (loops and rolls allowed) · <b>A/D</b> roll · <b>Space</b>/<b>X</b> pitch · <b>wheel</b> zoom, all the way in for the cockpit · <b>Alt</b> look around${v.guns.length ? ' · <b>click</b> fires' : ''} · <b>Shift</b> burn · ${v.airborne ? 'flying' : 'landed'} · ${Math.round(Math.abs(v.speed) * 3.6)} km/h`;
   const turn = k === 'ground' ? 'mouse or <b>A/D</b> turn' : 'mouse or <b>A/D</b> steer';
   const hull = v.hp < v.maxHp ? ` · hull ${Math.round((v.hp / v.maxHp) * 100)}%${v.hp / v.maxHp < 0.34 ? ' LIMPING' : v.hp / v.maxHp < 0.67 ? ' smoking' : ''}` : '';
   return `<b>E</b> dismount · <b>W/S</b> throttle · ${turn} · <b>Alt</b> look around${boost}${hop}${fly} · ${k} · ${Math.round(Math.abs(v.speed) * 3.6)} km/h${hull}`;
@@ -63,6 +63,11 @@ const tmpQ = new THREE.Quaternion();
 const roomLightSpots: import('./vehicles/interior').RoomLight[] = [];
 /** How near the controls in a ship's bridge E takes them, metres in the hull's frame. */
 const CONTROLS_RANGE = 2.5;
+/** A ship's guns: seconds between shots of one gun, the bolt's speed in the blaster's units a second, and its damage. */
+const SHIP_GUN_INTERVAL = 0.55;
+const SHIP_BOLT_SPEED = 7000;
+const SHIP_GUN_DAMAGE = 45;
+const tmp2 = new THREE.Vector3();
 const boltFrom = new THREE.Vector3();
 
 class App {
@@ -1198,10 +1203,16 @@ class App {
     const flown = player.mounted ?? player.piloting;
     const ship = flown?.spec.ship && flown.airborne && !input.held('freeLook') ? flown : null;
     if (flown?.spec.ship && flown.airborne && input.held('freeLook')) {
-      // Alt in flight: the orbit around the ship itself, in its frame, out far enough to see it whole.
+      // Alt in flight: looking around from the pilot's own head, in the ship's frame, and the
+      // wheel zooms out from there, in steps sized to the ship.
       this.cam.release();
       this.cam.setFrame(flown.group.quaternion);
-      this.cam.update(input, flown.pos, null, dt, null, Math.max(1, (6 + flown.radius * 2.2) / 6));
+      const eye = player.piloting ? this.eyes() : flown.cockpitEye(tmp) ? flown.group.localToWorld(tmp.clone()) : null;
+      const head = eye ?? flown.pos;
+      // The orbit's centre is the standing eye height under the head, the way the figure's camera is placed.
+      const under = head.clone().addScaledVector(tmp2.set(0, 1, 0).applyQuaternion(flown.group.quaternion), -1.5);
+      this.cam.update(input, under, null, dt, eye ? head.clone() : null, Math.max(1, (6 + flown.radius * 2.2) / 6));
+      flown.group.visible = true;
       return;
     }
     if (ship) {
@@ -1263,6 +1274,22 @@ class App {
         lookDX,
         lookDY,
       };
+    }
+    // A ship's guns: the guns fire in turn along the nose while the trigger is held, the bolts
+    // the world's own, so they strike what a blaster's would.
+    if (simulate && pilot?.spec.ship && pilot.guns.length) {
+      pilot.gunCooldown = Math.max(0, pilot.gunCooldown - dt);
+      if (input.held('attack') && input.locked && pilot.gunCooldown <= 0) {
+        const g = pilot.guns[pilot.gunNext % pilot.guns.length];
+        pilot.gunNext++;
+        pilot.gunCooldown = SHIP_GUN_INTERVAL / Math.max(1, Math.min(4, pilot.guns.length / 2));
+        pilot.group.updateMatrixWorld(true);
+        const from = pilot.group.localToWorld(g.pos.clone());
+        const dir = g.dir.clone().applyQuaternion(pilot.group.quaternion).normalize();
+        from.addScaledVector(dir, 1.2);
+        this.world.bolts.fire(from, dir, { owner: 'player', damage: SHIP_GUN_DAMAGE, speed: SHIP_BOLT_SPEED, color: pilot.boltColor, exclude: pilot.body });
+        this.effects.flash(from, pilot.boltColor, 5, 6, 0.06);
+      }
     }
     const terrain = this.world.terrain;
     for (const v of this.world.vehicles) {
