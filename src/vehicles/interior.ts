@@ -133,8 +133,12 @@ export class ShipInterior {
         .setCollisionGroups(groups(Group.interior, Group.all));
       this.colliders.push(w.createCollider(desc));
       triangles += indices.length / 3;
-      m.castShadow = true;
+      // An invisible pane (a room's window opening) is a collider only: drawn as nothing, casting nothing.
+      const mats = Array.isArray(m.material) ? m.material : [m.material];
+      const invisible = mats.length > 0 && mats.every((mat) => mat.userData.invisible);
+      m.castShadow = !invisible;
       m.receiveShadow = true;
+      if (invisible) m.visible = false;
       // The mesh's box in the hull's frame, and its cell's.
       if (!m.geometry.boundingBox) m.geometry.computeBoundingBox();
       const bb = m.geometry.boundingBox!;
@@ -285,7 +289,8 @@ export class ShipInterior {
       const cell = cellIndexOf(o);
       const m = o as THREE.Mesh;
       if (cell <= 0) return;
-      if (/^cell[:_]?\d+/.test(o.name)) rooms.push(o);
+      // The cell's own node, not the meshes under it (showing those again would show a window's invisible pane).
+      if (/^cell[:_]?\d+/.test(o.name) && !(o.parent && /^cell[:_]?\d+/.test(o.parent.name))) rooms.push(o);
       if (m.isMesh) meshes.push(m);
     });
     if (!meshes.length) return null;

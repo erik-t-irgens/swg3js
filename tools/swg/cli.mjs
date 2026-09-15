@@ -2737,19 +2737,29 @@ switch (cmd) {
           notes.push(`no ${kind} component for ${hp} (none named for ${family} under object/tangible/ship/)`);
           continue;
         }
-        // The lowest style first; a gun's own index (…_0, …_1) follows the hardpoint's number.
-        candidates.sort();
-        const index = slot ? Number(slot) - 1 : 0;
-        const indexed = candidates.filter((t) => new RegExp(`_${index}\\.iff$`).test(t) || new RegExp(`${kind.toLowerCase()}${index + 1}`, 'i').test(t));
-        const template = (indexed.length ? indexed : candidates)[0];
-        const r = resolveTemplateMesh(vfs, template, cache);
-        if (r.skip || !r.appearance) {
-          notes.push(`${kind} ${template}: ${r.skip ?? 'no appearance'}`);
-          continue;
+        // The hardpoint's own slot (weapon1 for weapon1_pos1) when the names carry one, else the
+        // unnumbered ones; the lowest style (s01) of those; and every part of that style, since a
+        // gun comes as its parts (…_0, …_1) on the one hardpoint.
+        const base = (t) => t.replace(/^.*\/shared_/, '').replace(/\.iff$/, '');
+        const numbered = slot ? candidates.filter((t) => new RegExp(`${kind}${slot}(_|$)`, 'i').test(base(t))) : [];
+        const pool = numbered.length ? numbered : candidates.filter((t) => !new RegExp(`${kind}\\d`, 'i').test(base(t)));
+        const chosen = pool.length ? pool : candidates;
+        const styleOf = (t) => {
+          const m2 = /_s(\d+)/.exec(base(t));
+          return m2 ? Number(m2[1]) : 0;
+        };
+        const lowest = Math.min(...chosen.map(styleOf));
+        const parts = chosen.filter((t) => styleOf(t) === lowest).sort();
+        for (const template of parts) {
+          const r = resolveTemplateMesh(vfs, template, cache);
+          if (r.skip || !r.appearance) {
+            notes.push(`${kind} ${template}: ${r.skip ?? 'no appearance'}`);
+            continue;
+          }
+          const conv = convertAppearance(r.appearance);
+          if (conv.skip) notes.push(`${kind} ${template}: ${conv.skip}`);
+          else out.push({ kind: 'component', slot: kind.toLowerCase(), file: conv.file, template, hardpoint: hp });
         }
-        const conv = convertAppearance(r.appearance);
-        if (conv.skip) notes.push(`${kind} ${template}: ${conv.skip}`);
-        else out.push({ kind: 'component', slot: kind.toLowerCase(), file: conv.file, template, hardpoint: hp });
       }
       return out;
     };

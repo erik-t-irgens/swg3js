@@ -270,6 +270,7 @@ export class Garage {
         frame.visible = false;
         v.group.add(frame);
         v.cockpitFrame = frame;
+        console.info(`garage: ${def.id} cockpit frame: its model's middle at ${centre.toArray().map((n) => n.toFixed(2)).join(',')} in its own frame, its origin placed at ${frame.position.toArray().map((n) => n.toFixed(2)).join(',')} in the hull's; the seat is at ${spec.seat.map((n) => n.toFixed(2)).join(',')}, the hull's box ${bounds.min.map((n) => n.toFixed(1)).join(',')} to ${bounds.max.map((n) => n.toFixed(1)).join(',')}`);
         const off = def.cockpit.firstOffset;
         if (off && off.length >= 3) v.cockpitOffset = [off[0], off[1], off[2]];
       } catch (err) {

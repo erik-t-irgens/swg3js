@@ -1560,11 +1560,8 @@ class App {
       const room = p.aboard;
       const v = room.vehicle;
       if (p.piloting) {
-        // Letting go of the controls: only once the ship is down on its gear.
-        if (v.airborne) {
-          this.hud.setPrompt('land before leaving the controls');
-          return;
-        }
+        // Letting go of the controls, in flight too: the ship carries on as it was (there is no
+        // landing place in space), and the room stays a still room around whoever is aboard.
         p.piloting = null;
         this.hud.setPrompt('');
         return;
@@ -1572,7 +1569,7 @@ class App {
       if (room.pilotSpot && p.pos.distanceTo(room.pilotSpot) < CONTROLS_RANGE) {
         p.piloting = v;
         this.cam.zoomTarget = Math.max(this.cam.zoomTarget, 6);
-        this.hud.setPrompt(`at the controls of the ${v.spec.label} · <b>W</b>/<b>S</b> throttle · mouse steers · <b>E</b> lets go once landed`);
+        this.hud.setPrompt(`at the controls of the ${v.spec.label} · <b>W</b>/<b>S</b> throttle · mouse steers · <b>E</b> lets go`);
         return;
       }
       this.leaveShip(false);
@@ -1789,7 +1786,7 @@ class App {
       if (player.noclip) prompt = `<b>NOCLIP</b> ${Math.round(player.noclipSpeed)} m/s · <b>WASD</b> fly · <b>Space</b> up · <b>Ctrl</b> down · <b>Shift</b> fast · <b>+</b>/<b>-</b> speed · <b>N</b> off`;
       else if (player.mounted) prompt = mountPrompt(player.mounted);
       else if (this.world.elevatorsNear(player.pos, MOUNT_RANGE).length) prompt = `<b>E</b> elevator ${this.world.elevatorsNear(player.pos, MOUNT_RANGE)[0].kind === 'down' ? 'down' : 'up'}`;
-      else if (player.piloting) prompt = `at the controls of the ${player.piloting.spec.label} · <b>W</b>/<b>S</b> throttle · mouse steers · ${player.piloting.airborne ? 'land, then' : ''} <b>E</b> lets go · ${Math.round(Math.abs(player.piloting.speed) * 3.6)} km/h`;
+      else if (player.piloting) prompt = `at the controls of the ${player.piloting.spec.label} · <b>W</b>/<b>S</b> throttle · mouse steers · <b>Alt</b> looks around · <b>E</b> lets go · ${Math.round(Math.abs(player.piloting.speed) * 3.6)} km/h`;
       else if (player.aboard) prompt = player.aboard.pilotSpot && player.pos.distanceTo(player.aboard.pilotSpot) < CONTROLS_RANGE ? `<b>E</b> take the controls` : `aboard ${player.aboard.vehicle.spec.label} · <b>E</b> step out`;
       else if (this.nearestSpeederDistance() < MOUNT_RANGE) prompt = this.nearestHasRoom() ? '<b>E</b> board' : '<b>E</b> mount';
       this.hud.setPrompt(prompt);
