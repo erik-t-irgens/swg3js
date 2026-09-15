@@ -181,7 +181,9 @@ export class Garage {
     }
     let bounds = def.bounds;
     const hardpoints: string[] = [];
-    const engines: THREE.Vector3[] = [];
+    // Where the engines glow, by what the hardpoints are called, best first: the engine parts'
+    // own glow points, the client data's thruster points, any exhaust, any numbered engine.
+    const engineSpots: { glow: THREE.Vector3[]; thruster: THREE.Vector3[]; exhaust: THREE.Vector3[]; engine: THREE.Vector3[] } = { glow: [], thruster: [], exhaust: [], engine: [] };
     const seat = { point: null as THREE.Vector3 | null, cockpit: null as THREE.Vector3 | null };
     if (!bounds || def.source !== 'creature') {
       // A machine's box is measured from the model itself: the pack's bounds are the mesh file's
@@ -227,9 +229,11 @@ export class Garage {
       hardpoints.push(name);
       const local = () => o.getWorldPosition(new THREE.Vector3()).sub(model.getWorldPosition(new THREE.Vector3())).add(model.position);
       if (!seat.point && /rider|saddle|seat|driver|pilot|passenger|player|mount/i.test(name)) seat.point = local();
-      // The thrusters: the hardpoints the client data puts them at, else any named for an exhaust
-      // (not the "engine on" appearance's or the engine sound's, which sit at the hull's origin).
-      if (def.thrusters?.length ? def.thrusters.includes(name) : /exhaust|thrust|booster|engine_glow|^engine\d*$|(^|[_:])eng\d/i.test(name)) engines.push(local());
+      // Not the "engine on" appearance's or the engine sound's hardpoints, which sit at the hull's origin, and not the boosters'.
+      if (/engine_glow/i.test(name)) engineSpots.glow.push(local());
+      else if (def.thrusters?.includes(name)) engineSpots.thruster.push(local());
+      else if (/exhaust|thrust/i.test(name)) engineSpots.exhaust.push(local());
+      else if (/^engine\d*$|(^|[_:])eng\d/i.test(name)) engineSpots.engine.push(local());
       if (!seat.cockpit && /cockpit|canopy|camera|view|pilot/i.test(name)) seat.cockpit = local();
     });
     if (hardpoints.length) console.info(`garage: ${def.id} hardpoints: ${hardpoints.join(', ')}`);
@@ -281,6 +285,7 @@ export class Garage {
         v.engineParts.push(o);
       }
     });
+    const engines = engineSpots.glow.length ? engineSpots.glow : engineSpots.thruster.length ? engineSpots.thruster : engineSpots.exhaust.length ? engineSpots.exhaust : engineSpots.engine;
     if (def.source !== 'creature') addEngineGlow(v, engines);
     // The cockpit view: the model's own point when it names one, else the seated pilot's eyes over the seat, else forward of the middle at eye height.
     // The cockpit view: the model's own point when it names one, else the seated pilot's eyes over the seat (a hardpoint's, or the kind's own place, where the rider is drawn).
@@ -401,7 +406,8 @@ function addEngineGlow(v: Vehicle, engines: THREE.Vector3[] = []): void {
     v.group.add(sp);
     glows.push(sp);
   }
-  const size = ship ? Math.min(7, (0.6 + w * 0.12) * 1.7) : Math.min(1.6, 0.25 + w * 0.18);
+  // A ship's glow is sized by its hull's height, not its width: a fighter's wings make it wide, its engines are not.
+  const size = ship ? Math.min(7, Math.max(0.5, h * 0.4)) : Math.min(1.6, 0.25 + w * 0.18);
   // A ship's exhaust leaves a ribbon behind it in flight, longer the faster it goes.
   if (ship) {
     const holder = v.group.parent ?? v.group;
@@ -424,7 +430,7 @@ function addEngineGlow(v: Vehicle, engines: THREE.Vector3[] = []): void {
     self.setGlassClear(drive !== null || self.occupied);
     const k = size * (0.35 + 0.65 * Math.min(1, Math.abs(self.speed) / self.spec.maxSpeed) + 0.4 * throttle + (self.boosting ? 0.6 : 0)) * (self.overheated > 0 ? 0.4 + 0.3 * Math.random() : 1);
     for (const g of glows) g.scale.set(k, k, 1);
-    mat.opacity = 0.55 + 0.45 * Math.min(1, Math.abs(self.speed) / 8 + throttle);
+    mat.opacity = (ship ? 0.35 : 0.55) + 0.45 * Math.min(1, Math.abs(self.speed) / 8 + throttle);
   };
 }
 
