@@ -17,6 +17,10 @@ const ZOOM_LAG = 0.09;
 /** How far below level the third-person camera itself may go; the view tilts on past it. */
 const LOWEST_CAMERA_PITCH = -0.35;
 const EYE_HEIGHT = 1.5;
+/** Aiming a blaster in third person: how far the view sits over the right shoulder, and how much higher. */
+const AIM_SHOULDER = 0.6;
+const AIM_RAISE = 0.15;
+const shoulder = new THREE.Vector3();
 const chaseOffset = new THREE.Vector3();
 /** Seconds for the follow camera to catch up with the ship's frame. */
 const CHASE_LAG = 0.28;
@@ -177,6 +181,13 @@ export class ThirdPersonCamera {
     this.zoom(input, dt);
 
     this.focus.copy(target).addScaledVector(this.up, EYE_HEIGHT);
+    // Aiming a blaster: the view comes in over the right shoulder, and back to the middle after.
+    this.aimBlend += ((this.aim ? 1 : 0) - this.aimBlend) * 0.15;
+    if (this.aimBlend > 0.001 && !this.firstPerson) {
+      this.right(shoulder);
+      if (this.framed) shoulder.applyQuaternion(this.frame);
+      this.focus.addScaledVector(shoulder, AIM_SHOULDER * this.aimBlend).addScaledVector(this.up, AIM_RAISE * this.aimBlend);
+    }
     const cp = Math.cos(this.pitch);
     this.dir.set(Math.sin(this.yaw) * cp, Math.sin(this.pitch), Math.cos(this.yaw) * cp);
     // Behind the player the camera cannot go below the ground, so past a mild upward pitch it stays at that
@@ -199,7 +210,6 @@ export class ThirdPersonCamera {
       return;
     }
 
-    this.aimBlend += ((this.aim ? 1 : 0) - this.aimBlend) * 0.15;
     const fov = this.baseFov - 14 * this.aimBlend;
     if (Math.abs(this.camera.fov - fov) > 0.01) {
       this.camera.fov = fov;

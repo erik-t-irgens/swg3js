@@ -425,9 +425,26 @@ export class CharacterRig {
    * Play a clip over the state clips: once (then the state clip returns) or looping until
    * `stopOverride`. Returns its length in seconds at the given speed, or null when missing.
    */
-  play(clip: string, { loop = false, fadeIn = 0.1, timeScale = 1, hold = false }: { loop?: boolean; fadeIn?: number; timeScale?: number; hold?: boolean } = {}): number | null {
-    const next = this.actions.get(clip);
-    if (!next) return null;
+  play(clip: string, { loop = false, fadeIn = 0.1, timeScale = 1, hold = false, upperOnly = false }: { loop?: boolean; fadeIn?: number; timeScale?: number; hold?: boolean; upperOnly?: boolean } = {}): number | null {
+    if (!this.actions.has(clip)) return null;
+    // A one-off chained onto one already on the upper body alone (a swing's follow-through after
+    // the swing) stays on the upper body: the legs go on with what they were doing.
+    if (upperOnly && this.overrideUpper && this.override) {
+      const next = this.half(clip, 'upper');
+      const from = this.override;
+      next.reset().setLoop(loop ? THREE.LoopRepeat : THREE.LoopOnce, Infinity).setEffectiveWeight(1);
+      next.clampWhenFinished = true;
+      next.timeScale = timeScale;
+      next.play();
+      if (from !== next) from.crossFadeTo(next, fadeIn, false);
+      else next.fadeIn(0);
+      this.override = next;
+      const duration = next.getClip().duration / Math.max(1e-3, Math.abs(timeScale));
+      this.overrideEnds = loop || hold ? Infinity : duration;
+      this.overrideTime = 0;
+      return duration;
+    }
+    const next = this.actions.get(clip)!;
     const from = this.override ?? this.current;
     if (this.upper) {
       // A one-off clip poses the whole body; the upper layer comes back with the state after it.
@@ -497,11 +514,15 @@ export class CharacterRig {
     if (state !== this.state || (wantedStance && playing !== wantedStance) || upperName !== this.upperName) {
       const clipName = wantedStance ?? this.findClip(STATE_CLIPS[state]);
       const next = clipName ? (upperName || legsOnly ? this.half(clipName, 'lower') : this.actions.get(clipName)!) : null;
-      if (next && next !== this.current) {
+      // The same action already playing is left alone, unless it was faded out (a one-off clip
+      // took the whole body from it meanwhile) and has gone dead: then it is started again.
+      if (next && (next !== this.current || !next.enabled)) {
+        const same = next === this.current;
         // A held clip (a stance) plays once and keeps its last frame.
         next.reset().setLoop(this.hold.has(clipName!) ? THREE.LoopOnce : THREE.LoopRepeat, Infinity).setEffectiveWeight(1).play();
         next.clampWhenFinished = true;
-        if (this.current) this.current.crossFadeTo(next, 0.18, false);
+        if (this.current && !same) this.current.crossFadeTo(next, 0.18, false);
+        else if (same) next.fadeIn(0.12);
         this.current = next;
       }
       const nextUpper = upperName ? this.half(upperName, 'upper') : null;
@@ -659,6 +680,21 @@ export class CharacterRig {
     base?.traverse((o) => names.add(o.name));
     this.upperBoneNames = names;
     return names;
+  }
+
+  /** How a clip splits into its halves, for the console: which bones each half drives, and where the split is. */
+  splitInfo(clip: string): { base: string | null; upper: string[]; lower: string[]; weights: Record<string, number> } | null {
+    const src = this.actions.get(clip)?.getClip();
+    if (!src) return null;
+    const upper = this.upperBones();
+    const names = src.tracks.map((t) => THREE.PropertyBinding.parseTrackName(t.name).nodeName ?? '');
+    let base: THREE.Bone | null = null;
+    for (const [name, bone] of this.bones) if (/^spine_?1$/i.test(name)) base = bone;
+    base ??= this.boneFor('spine');
+    while (base?.parent instanceof THREE.Bone && /spine|torso|chest/i.test(base.parent.name)) base = base.parent;
+    const weights: Record<string, number> = {};
+    for (const a of [this.current, this.upper, this.override, this.upperShot]) if (a) weights[a.getClip().name] = Number(a.getEffectiveWeight().toFixed(2)) + (a.enabled ? 0 : -100);
+    return { base: base?.name ?? null, upper: [...new Set(names.filter((n) => upper.has(n)))], lower: [...new Set(names.filter((n) => !upper.has(n)))], weights };
   }
 
   /** A clip's tracks for one half of the body only, as an action of its own. */

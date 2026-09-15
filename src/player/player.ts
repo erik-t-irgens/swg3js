@@ -1461,7 +1461,7 @@ export class Player {
         }
         if (play.move.kind === 'ready') this.rig?.stopOverride();
         // Held: the move keeps its last frame until the next chains in, with no dip to the stance between.
-        else if (this.rig?.has(play.anim)) this.rig.play(play.anim, { loop: play.loop, fadeIn: play.blend, timeScale: play.speed, hold: true });
+        else if (this.rig?.has(play.anim)) this.rig.play(play.anim, { loop: play.loop, fadeIn: play.blend, timeScale: play.speed, hold: true, upperOnly: this.rig.overridingUpperOnly });
         else if (play.move.kind === 'attack' || play.move.kind === 'special') this.startSwing();
       }
     }

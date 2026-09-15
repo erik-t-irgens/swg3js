@@ -663,6 +663,8 @@ class App {
         const p = this.player;
         return { ...s, gate: this.spaceGate, aboard: !!p.aboard, piloting: !!p.piloting, mounted: !!p.mounted, local: p.aboard ? p.pos.toArray().map((n) => Number(n.toFixed(2))) : null, heading: Number(p.heading.toFixed(2)) };
       },
+      /** How a clip splits between the upper body and the legs (`split('BOTH_RUN2')`): the bones each half drives, the bone the split is at, and the weights of the actions playing now. */
+      split: (clip: string) => this.player.rig?.splitInfo(clip) ?? 'no rig',
       /** The clip the rig's selector picks for a value: `variant('loop_riding', 'vehicle_hover_chair')`, `variant('skill_action_3', 'dance_18')`. */
       variant: (base: string, value: string) => this.player.rig?.variant(base, value) ?? 'no rig',
       /** Travel to a world by id (`travel('space_tatooine')`), as the galaxy map does; a space zone is arrived at in the ship last flown. */
