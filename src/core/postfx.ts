@@ -101,9 +101,13 @@ export class PostFX {
     this.bloom.setSize(this.size.x / 2, this.size.y / 2);
   }
 
-  /** Before the frame's passes: they draw into the target. */
+  /**
+   * Before the frame's passes: they draw into the composer's read buffer. The composer swaps
+   * its two buffers after every pass that writes across, so which of them is the read buffer
+   * changes from frame to frame; drawing into a fixed one showed every other frame black.
+   */
   begin(): void {
-    this.renderer.setRenderTarget(this.target);
+    this.renderer.setRenderTarget(this.composer.readBuffer);
   }
 
   /**

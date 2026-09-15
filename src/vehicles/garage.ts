@@ -206,9 +206,15 @@ export class Garage {
   /** Stand a vehicle on the ground at a point, facing a heading, and hand it back to drive. */
   async spawn(def: VehicleDef, physics: Physics, scene: THREE.Scene, x: number, y: number, z: number, heading: number, kind: VehicleKind = def.kind, place?: (bounds: VehicleSpec['bounds']) => [number, number, number]): Promise<Vehicle> {
     const loaded = await this.model(def);
-    // A model with clips of its own (a creature, a walker) needs its own skeleton to play them on.
+    // A skinned model (a creature, a walker, a pod racer built on a skeleton) needs a skeleton of
+    // its own: a plain clone shares the loaded scene's bones, and its mesh then draws where that
+    // scene stands, at the origin, however the vehicle moves.
     const animated = loaded.animations.length > 0;
-    const model = def.source === 'creature' || animated ? cloneSkinned(loaded.scene) : loaded.scene.clone();
+    let skinned = false;
+    loaded.scene.traverse((o) => {
+      if ((o as THREE.SkinnedMesh).isSkinnedMesh) skinned = true;
+    });
+    const model = skinned ? cloneSkinned(loaded.scene) : loaded.scene.clone();
     // What the client data hangs on the hull, before the hull is measured: a wing is part of the
     // ship's box and its collision, and its hardpoints (the thrusters') count with the hull's.
     // The game's attachments are modelled in the hull's frame: they sit at its origin unless
@@ -308,8 +314,18 @@ export class Garage {
     if (place) [x, y, z] = place(bounds);
     const spec = specFor(kind, def.id, def.label, bounds, { animal: def.source === 'creature' });
     if (def.source === 'creature') {
-      // A mount's saddle sits on its back, and it walks and runs with its own clips at their own pace.
-      spec.seat = [0, bounds.max[1] * 0.92, (bounds.min[2] + bounds.max[2]) / 2];
+      // A mount's saddle sits on its back: the top of the body over the middle of its length
+      // (measured from the mesh at rest, since the box's top is the head or the hump), and the
+      // saddle poses put the pelvis 0.16 m over that. It walks and runs with its own clips at their own pace.
+      const zMid = (bounds.min[2] + bounds.max[2]) / 2;
+      const back = backHeight(model, bounds, zMid);
+      spec.seat = [0, back ?? bounds.max[1] * 0.92, zMid];
+    } else if (def.source === 'gallery' && def.riderPose) {
+      // The game's own convention for its vehicles: the rider sits at the vehicle's authored
+      // origin and the riding clip's root offset puts the pelvis in the seat (a speeder bike's
+      // rider hardpoint is exactly its clip's root, 1.16 m up). The model was moved so its box
+      // stands on the vehicle's origin, so the authored origin is where the model now sits.
+      spec.seat = [model.position.x, model.position.y, model.position.z];
     } else if (seat.point) spec.seat = [seat.point.x, seat.point.y, seat.point.z];
     // The cockpit frame (the game's cockpit file): the instruments and canopy around the pilot,
     // authored in the ship's own space, so it hangs on the model at its origin and lands in the
@@ -341,6 +357,9 @@ export class Garage {
       }
     }
     const v = new Vehicle(spec, model, physics, scene, x, y - bounds.min[1] + spec.hover, z, heading);
+    // A pilot's seat from the cockpit frame names where the pelvis goes; the pilot's chair pose
+    // has its origin half a metre under it, which the game takes off when it seats the rider.
+    if (spec.ship && frame) v.seatPelvis = true;
     if (frame) {
       v.cockpitFrame = frame;
       const off = def.cockpit?.firstOffset;
@@ -400,6 +419,29 @@ export class Garage {
   }
 }
 
+/**
+ * The height of a creature's back over a point along its length: the highest vertex of its
+ * meshes at rest within a strip round the spine there, or null when nothing lies in the strip.
+ */
+function backHeight(model: THREE.Object3D, bounds: VehicleSpec['bounds'], z: number): number | null {
+  const halfW = Math.max(0.1, (bounds.max[0] - bounds.min[0]) * 0.12);
+  const halfL = Math.max(0.1, (bounds.max[2] - bounds.min[2]) * 0.08);
+  let top = -Infinity;
+  const p = new THREE.Vector3();
+  model.updateMatrixWorld(true);
+  model.traverse((o) => {
+    const m = o as THREE.Mesh;
+    if (!m.isMesh) return;
+    const pos = m.geometry.getAttribute('position');
+    if (!pos) return;
+    for (let i = 0; i < pos.count; i++) {
+      p.fromBufferAttribute(pos, i).applyMatrix4(m.matrixWorld);
+      if (Math.abs(p.x) <= halfW && Math.abs(p.z - z) <= halfL && p.y > top) top = p.y;
+    }
+  });
+  return Number.isFinite(top) ? top : null;
+}
+
 /** The node of a model's hardpoint by name, or null. */
 function findHardpoint(model: THREE.Object3D, name: string): THREE.Object3D | null {
   let found: THREE.Object3D | null = null;
@@ -412,8 +454,8 @@ function findHardpoint(model: THREE.Object3D, name: string): THREE.Object3D | nu
 
 /** A seated pilot's eyes over the seat point, metres. */
 const SEATED_EYE = 1.0;
-/** Where the pilot sits from the cockpit frame's middle: a little below and behind it, found by eye in the X-wing. */
-const SEAT_FROM_FRAME = new THREE.Vector3(0, -0.45, -0.32);
+/** Where the pilot's pelvis sits from the cockpit frame's middle: a little below and behind it, found by eye in the X-wing (with the default saddle pose, whose pelvis is 0.16 m over the rider's origin). */
+const SEAT_FROM_FRAME = new THREE.Vector3(0, -0.29, -0.32);
 /** A live adjustment of where the cockpit frame sits in the hull, for checking it (__debug.cockpitFrame). */
 export const FRAME_NUDGE = new THREE.Vector3();
 /** How much of a hull's glass is seen through while someone is aboard or at the controls. */

@@ -511,6 +511,17 @@ class App {
       },
       /** The clip the rig's selector picks for a value: `variant('loop_riding', 'vehicle_hover_chair')`, `variant('skill_action_3', 'dance_18')`. */
       variant: (base: string, value: string) => this.player.rig?.variant(base, value) ?? 'no rig',
+      /** Nudge the ridden vehicle's seat by metres in its own frame (right, up, forward) and report where it now is, with the pose playing and its root offset, for finding a seat by eye. */
+      seat: (dx = 0, dy = 0, dz = 0) => {
+        const v = this.player.mounted;
+        if (!v) return 'not riding anything';
+        v.seat.position.x += dx;
+        v.seat.position.y += dy;
+        v.seat.position.z += dz;
+        const clip = this.player.rig?.currentClip ?? null;
+        const root = clip ? this.player.rig?.rootOffset(clip, tmp) : null;
+        return { vehicle: v.spec.id, seat: v.seat.position.toArray().map((n) => Number(n.toFixed(2))), seatIsPelvis: v.seatPelvis, riderPose: v.riderPose, clip, clipRoot: root ? root.toArray().map((n) => Number(n.toFixed(2))) : null };
+      },
       /** The garage: `vehicles('speeder')` lists what can be spawned; `spawn('speeder_ab1')` or `spawn('bantha', 'ground')` stands one in front of you; `vehicles.clear` is the panel's Remove all. */
       vehicles: (find?: string) => {
         const g = this.garage ?? this.world.garage;

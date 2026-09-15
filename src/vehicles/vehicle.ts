@@ -250,6 +250,14 @@ export class Vehicle {
   boltColor = 0xff4a2a;
   /** How the rider sits, the game's rider pose (vehicle_speeder_bike, saddle_body2_wide, space_sitting): the riding clip's selector value. */
   riderPose: string | null = null;
+  /**
+   * The seat is where the rider's pelvis goes rather than the rider's origin: the riding clip's
+   * own root offset is taken off, so a pose authored for a chair whose origin is under the seat
+   * (space_sitting, half a metre below the pelvis) still lands the pelvis on the seat. A vehicle
+   * from the game keeps the game's own convention: the rider at the vehicle's origin, the clip's
+   * root offset placing the pelvis (a speeder bike's rider hardpoint is exactly its clip's root).
+   */
+  seatPelvis = false;
   /** The gun a ship fires, from the game's weapon table: its projectile (an index into the projectile table), speed and range in metres. */
   weapon: { name: string; projectile: number; speed: number; range: number } | null = null;
   /** The handles of the body's colliders, so a bolt's hit can be traced back to the vehicle. */

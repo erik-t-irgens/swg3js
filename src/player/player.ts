@@ -35,6 +35,7 @@ const fwd = new THREE.Vector3();
 const rgt = new THREE.Vector3();
 const move = new THREE.Vector3();
 const tmpQ = new THREE.Quaternion();
+const seatOffset = new THREE.Vector3();
 const armDir = new THREE.Vector3();
 const aim = new THREE.Vector3();
 const aimFrom = new THREE.Vector3();
@@ -1052,6 +1053,10 @@ export class Player {
     this.mounted.group.updateMatrixWorld(true);
     this.mounted.seat.getWorldPosition(this.pos);
     this.mounted.quaternion(tmpQ);
+    // A seat that names where the pelvis goes: the riding clip's own root offset comes off, in
+    // the vehicle's frame, so the pelvis lands on the seat whatever pose is playing.
+    const clip = this.rig?.currentClip;
+    if (this.mounted.seatPelvis && clip && this.rig?.rootOffset(clip, seatOffset)) this.pos.sub(seatOffset.applyQuaternion(tmpQ));
     this.group.position.copy(this.pos);
     this.group.quaternion.copy(tmpQ);
     this.heading = 2 * Math.atan2(tmpQ.y, tmpQ.w);

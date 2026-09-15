@@ -332,6 +332,27 @@ export class CharacterRig {
     return a ? a.getClip().duration : null;
   }
 
+  /** The clip playing under everything (the state's), by name, or null. */
+  get currentClip(): string | null {
+    return this.current?.getClip().name.replace(/^lower:/, '') ?? null;
+  }
+
+  /**
+   * Where a clip puts the skeleton's root at its first frame, in the rig's own frame (a riding
+   * clip's is the pelvis over the vehicle's origin: a speeder bike's 1.16 m up, a chair's 0.5 m).
+   * Null when the rig lacks the clip or the clip leaves the root where the bind pose has it.
+   */
+  rootOffset(clip: string, out: THREE.Vector3): THREE.Vector3 | null {
+    const a = this.actions.get(clip);
+    if (!a) return null;
+    let root: THREE.Bone | null = null;
+    for (const b of this.bones.values()) if (!(b.parent instanceof THREE.Bone)) { root = b; break; }
+    if (!root) return null;
+    const track = a.getClip().tracks.find((t) => t.name === `${root!.name}.position`);
+    if (!track || track.values.length < 3) return null;
+    return out.set(track.values[0], track.values[1], track.values[2]).multiplyScalar(this.scale);
+  }
+
   /** The clip posing the arms right now: a shot on the upper body, a one-off, the upper layer, else the state clip. */
   armSource(): string {
     const shot = this.upperShot && !this.additive.has(this.upperShot.getClip().name.replace(/^(upper|lower):/, '')) ? this.upperShot : null;
