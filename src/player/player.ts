@@ -46,6 +46,8 @@ const EVA_ACCEL = 8;
 const EVA_BRAKE = 12;
 const EVA_MAX_SPEED = 60;
 const EVA_ROLL_RATE = 1.6;
+/** The kick upward (m/s) a rider gets from a vehicle blowing up under them. */
+const FLING_UP = 6;
 const seatOffset = new THREE.Vector3();
 const seatLocal = new THREE.Vector3();
 const armDir = new THREE.Vector3();
@@ -1053,6 +1055,25 @@ export class Player {
     this.vel.set(0, 0, 0);
     this.swing = -1;
     this.eva = false;
+    this.flung = false;
+    // The saber goes away for the ride: lit, it is in the way of everything.
+    if (this.saberOn) this.toggleSaber();
+  }
+
+  /**
+   * Thrown from a vehicle that has just blown up under the rider: off it with its speed and a
+   * kick upward, flailing through the air, and down on the ground prone.
+   */
+  flung = false;
+
+  fling(from: THREE.Vector3, velocity: THREE.Vector3): void {
+    this.dismount(from);
+    this.vel.copy(velocity);
+    this.vel.y += FLING_UP;
+    this.grounded = false;
+    this.flung = true;
+    this.prone = false;
+    this.kneeling = false;
   }
 
   /**
@@ -1349,7 +1370,8 @@ export class Player {
         this.vel.y = Math.sqrt(2 * g * JUMP_HEIGHT);
         this.grounded = false;
       }
-    } else {
+    } else if (!this.flung) {
+      // In the air the keys steer a little; thrown from a wreck, the momentum is the wreck's until the ground.
       const k = 1 - Math.exp(-dt * 2.5);
       this.vel.x += (move.x * speed - this.vel.x) * k;
       this.vel.z += (move.z * speed - this.vel.z) * k;
@@ -1371,6 +1393,13 @@ export class Player {
     this.grounded = this.controller.computedGrounded();
     if (this.grounded && this.vel.y < 0) this.vel.y = 0;
     if (!wasGrounded && this.grounded && Math.abs(mv.y) < 1e-4 && this.vel.y > 0) this.grounded = false;
+    // Down from a wreck: flat on the ground where the fall ends.
+    if (this.flung && this.grounded) {
+      this.flung = false;
+      this.prone = true;
+      this.vel.x = 0;
+      this.vel.z = 0;
+    }
 
     const ground = this.aboard ? -1e9 : terrain.heightAt(this.pos.x, this.pos.z);
     if (!this.aboard && this.pos.y < terrain.floor) {
@@ -1574,6 +1603,8 @@ export class Player {
     }
     // Swimming with the block held: the stance on the torso and arms over the swimming legs.
     else if (this.swimming) rig.setState(moving || this.submerged ? 'swim' : 'float', speed, this.blocking && this.hasJkaClips ? stance : null);
+    // Thrown from a wreck: flailing (the swimming stroke) all the way down.
+    else if (this.flung && !this.grounded) rig.setState('swim', 3);
     else if (!this.grounded) {
       rig.prefer('air', this.jumpClip('INAIR', this.jka.isForceJumping));
       rig.setState('air');

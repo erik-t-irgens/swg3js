@@ -535,6 +535,29 @@ class App {
         }
         if (!hold) for (const k of keys) this.input.force(k, false);
       },
+      /** With the effects on: scan the frame for pixels that are not numbers (what the bloom smears into a black box) and name the object under the first one. */
+      blackBox: () => {
+        if (!this.postfx) return 'the effects are off (turn bloom on): the scan reads their frame';
+        this.postfx.wantScan = true;
+        this.drawFrame();
+        const s = this.postfx.lastScan;
+        if (!s) return 'no scan';
+        let under: Record<string, unknown> | null = null;
+        if (s.first) {
+          const ray = new THREE.Raycaster();
+          ray.setFromCamera(new THREE.Vector2((s.first[0] / s.width) * 2 - 1, -(s.first[1] / s.height) * 2 + 1), this.cam.camera);
+          const hits = ray.intersectObjects(this.scene.children, true);
+          const hit = hits.find((h) => h.object.visible);
+          if (hit) {
+            const o = hit.object as THREE.Mesh;
+            const mat = (Array.isArray(o.material) ? o.material[0] : o.material) as THREE.Material | undefined;
+            let named: THREE.Object3D | null = o;
+            while (named && !named.name) named = named.parent;
+            under = { object: o.name || '(unnamed)', named: named?.name ?? null, parents: [o.parent?.name, o.parent?.parent?.name].filter(Boolean), material: mat?.type, materialName: mat?.name, distance: Number(hit.distance.toFixed(1)), userData: o.userData };
+          }
+        }
+        return { ...s, under };
+      },
       /** Draw `n` frames back to back with the GPU waited on after each, and report the milliseconds one takes; `bench(30, false)` first turns bloom (the effects) off, `bench(30, true)` on. */
       bench: (n = 30, bloom?: boolean) => {
         if (bloom !== undefined && bloom !== this.settings.bloom) {
@@ -1662,7 +1685,10 @@ class App {
       }
       if (v.destroyed) {
         if (v === player.mounted) {
-          this.handleMount();
+          // Blown up under the rider: thrown clear with its speed and a kick upward, flailing, down prone.
+          const lv = v.body.linvel();
+          tmp.copy(v.pos).y += 0.6;
+          player.fling(tmp, tmp2.set(lv.x, lv.y, lv.z));
           player.takeDamage(25);
           this.hud.hurt();
           this.hud.setPrompt('');

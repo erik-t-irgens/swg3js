@@ -122,7 +122,8 @@ export class Input {
       this.mouseDX += e.movementX;
       this.mouseDY += e.movementY;
     });
-    document.addEventListener('wheel', (e) => { this.wheel += Math.sign(e.deltaY); }, { passive: true });
+    // The wheel zooms the view, unless a panel has the mouse: scrolling a menu is not a zoom.
+    document.addEventListener('wheel', (e) => { if (!this.captured) this.wheel += Math.sign(e.deltaY); }, { passive: true });
     document.addEventListener('mousedown', (e) => {
       if (!this.locked) return;
       const code = `Mouse${e.button}`;

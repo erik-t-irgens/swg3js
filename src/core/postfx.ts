@@ -81,6 +81,40 @@ const MOTION_BLUR = {
   `,
 };
 
+/**
+ * A pixel that is not a number (a material that divided by zero: a degenerate tangent, a zero
+ * roughness against a reflection) is black to the screen, and the bloom's blur spreads it into
+ * a black box the size of its coarsest level. Such pixels are made black-and-opaque before the
+ * effects see them, and the brightest are held to a ceiling.
+ */
+const SANITIZE = {
+  uniforms: { tDiffuse: { value: null as THREE.Texture | null } },
+  vertexShader: /* glsl */ `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: /* glsl */ `
+    uniform sampler2D tDiffuse;
+    varying vec2 vUv;
+    void main() {
+      vec4 c = texture2D(tDiffuse, vUv);
+      if (any(isnan(c)) || any(isinf(c))) c = vec4(0.0, 0.0, 0.0, 1.0);
+      gl_FragColor = vec4(clamp(c.rgb, 0.0, 256.0), 1.0);
+    }
+  `,
+};
+
+/** What a scan of the frame's own pixels found: how many were not numbers, and where the first was (from the top left, in pixels). */
+export interface BadPixels {
+  width: number;
+  height: number;
+  bad: number;
+  first: [number, number] | null;
+}
+
 export interface PostFXOptions {
   bloom: boolean;
   /** How much the bright parts spill: 0.1 a touch, 0.5 a glow, 1 a haze. */
@@ -129,6 +163,8 @@ export class PostFX {
     this.blur = new ShaderPass(MOTION_BLUR);
     this.output = new OutputPass();
     this.fxaa = new ShaderPass(FXAAShader);
+    this.sanitize = new ShaderPass(SANITIZE);
+    this.composer.addPass(this.sanitize);
     this.composer.addPass(this.bloom);
     this.composer.addPass(this.blur);
     this.composer.addPass(this.output);
@@ -138,6 +174,33 @@ export class PostFX {
   }
 
   private readonly fxaa: ShaderPass;
+  private readonly sanitize: ShaderPass;
+  /** Set to scan the next frame's pixels before the effects; the result lands in `lastScan`. */
+  wantScan = false;
+  lastScan: BadPixels | null = null;
+
+  /** Read the frame just drawn and count the pixels that are not numbers (half floats with every exponent bit set and a mantissa). */
+  private scan(rt: THREE.WebGLRenderTarget): void {
+    const w = rt.width;
+    const h = rt.height;
+    const buf = new Uint16Array(w * h * 4);
+    this.renderer.readRenderTargetPixels(rt, 0, 0, w, h, buf);
+    let bad = 0;
+    let first: [number, number] | null = null;
+    for (let i = 0; i < buf.length; i++) {
+      const v = buf[i];
+      if ((v & 0x7c00) === 0x7c00 && (v & 0x03ff) !== 0) {
+        bad++;
+        if (!first) {
+          const px = (i >> 2) % w;
+          const py = Math.floor((i >> 2) / w);
+          // Read-back rows run from the bottom; the screen counts from the top.
+          first = [px, h - 1 - py];
+        }
+      }
+    }
+    this.lastScan = { width: w, height: h, bad, first };
+  }
 
   private setFxaaSize(): void {
     (this.fxaa.uniforms.resolution as { value: THREE.Vector2 }).value.set(1 / Math.max(1, this.size.x), 1 / Math.max(1, this.size.y));
@@ -177,6 +240,10 @@ export class PostFX {
 
   /** After the frame's passes: the picture goes out through the effects, blurred by how the camera moved since the last frame (`dt` seconds ago). */
   end(camera: THREE.Camera, dt: number): void {
+    if (this.wantScan) {
+      this.wantScan = false;
+      this.scan(this.composer.readBuffer);
+    }
     this.renderer.setRenderTarget(null);
     const on = this.options.motionBlur && this.options.motionBlurStrength > 0 && !!this.depth;
     this.blur.enabled = on;
