@@ -10,7 +10,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { Group, groups, Physics, RAPIER } from '../core/physics';
-import { markActor } from '../world/portalRender';
+import { ACTOR_LAYER, markActor } from '../world/portalRender';
 import type { Vehicle } from './vehicle';
 
 /** What the ships manifest says of an interior model: its cells and bounds, as a pack model carries them. */
@@ -32,6 +32,9 @@ export function cellIndexOf(o: THREE.Object3D | null): number {
   return -1;
 }
 
+/** How much of a hull's window is seen through while someone is aboard. */
+const CLEAR_PANE = 0.45;
+
 const inverse = new THREE.Matrix4();
 const localA = new THREE.Vector3();
 const localB = new THREE.Vector3();
@@ -50,8 +53,14 @@ export class ShipInterior {
   private colliders: RAPIER.Collider[] = [];
   /** The room nodes, to show only from inside when they are part of the hull model (a room drawn through the hull's skin looks wrong from outside). */
   private readonly rooms: THREE.Object3D[] = [];
-  /** The shell's window panes and how clear each is: opaque from outside while the rooms are hidden, clear again from inside. */
-  private readonly panes: { material: THREE.Material & { opacity: number }; opacity: number }[] = [];
+  /**
+   * The shell's window panes, each with its solid material (the game's own, for a hull with
+   * nobody aboard and its rooms hidden) and a clear one to show the rooms through while
+   * someone is aboard. The clear ones ride on hidden stand-in meshes so the background compile
+   * has them ready before the first boarding.
+   */
+  private readonly panes: { mesh: THREE.Mesh; index: number; solid: THREE.Material; clear: THREE.Material }[] = [];
+  private readonly standIns: THREE.Mesh[] = [];
 
   /**
    * @param frame the object whose frame the room's physics is in: the hull's group.
@@ -144,16 +153,17 @@ export class ShipInterior {
       const cell = cellIndexOf(o);
       const m = o as THREE.Mesh;
       if (cell === 0 && m.isMesh) {
-        // The shell's glass: this hull's own copy of each pane's material, so it can go opaque
-        // while the rooms behind it are hidden without touching another hull of the same model.
+        // The shell's glass (marked by the converter): a clear copy of each pane's material to
+        // show the rooms through it while someone is aboard.
         const mats = Array.isArray(m.material) ? m.material : [m.material];
         mats.forEach((mat, i) => {
-          if (!mat.transparent || mat.opacity >= 1 || mat.userData.invisible) return;
-          const own = mat.clone();
-          own.userData = { ...mat.userData };
-          if (Array.isArray(m.material)) m.material[i] = own;
-          else m.material = own;
-          panes.push({ material: own, opacity: own.opacity });
+          if (mat.userData.invisible || !(mat.userData.glass || (mat.transparent && mat.opacity < 1))) return;
+          const clear = mat.clone();
+          clear.userData = { ...mat.userData };
+          clear.transparent = true;
+          clear.opacity = Math.min(mat.transparent ? mat.opacity : 1, CLEAR_PANE);
+          clear.depthWrite = false;
+          panes.push({ mesh: m, index: i, solid: mat, clear });
         });
         return;
       }
@@ -165,6 +175,16 @@ export class ShipInterior {
     const interior = new ShipInterior(vehicle, vehicle.group, vehicle.group, meshes, def, gravity, false);
     interior.rooms.push(...rooms);
     interior.panes.push(...panes);
+    // Hidden stand-ins carrying the clear materials: the world's material scan compiles every
+    // mesh in the scene, seen or not, so the clear panes are ready before the first boarding.
+    for (const p of panes) {
+      const standIn = new THREE.Mesh(p.mesh.geometry, p.clear);
+      standIn.visible = false;
+      standIn.castShadow = false;
+      standIn.layers.enable(ACTOR_LAYER);
+      vehicle.group.add(standIn);
+      interior.standIns.push(standIn);
+    }
     interior.reveal(false);
     return interior;
   }
@@ -177,9 +197,13 @@ export class ShipInterior {
    */
   reveal(aboard: boolean): void {
     for (const r of this.rooms) r.visible = aboard;
-    // With the rooms hidden there is nothing behind the glass to see, so the panes go opaque
-    // (a change of opacity only: the same shader, nothing to compile).
-    for (const p of this.panes) p.material.opacity = aboard ? p.opacity : 1;
+    // The hull's glass is the game's own solid pane while the rooms are hidden (nothing behind it
+    // to see) and clear while someone is aboard, so those outside see them in.
+    for (const p of this.panes) {
+      const want = aboard ? p.clear : p.solid;
+      if (Array.isArray(p.mesh.material)) p.mesh.material[p.index] = want;
+      else p.mesh.material = want;
+    }
   }
 
   /** Whether a point in the hull's frame is still within the room. */
@@ -214,7 +238,10 @@ export class ShipInterior {
         const m = o as THREE.Mesh;
         if (m.isMesh) m.geometry.dispose();
       });
-    } else this.reveal(true);
+    } else {
+      this.reveal(true);
+      for (const s of this.standIns) this.vehicle.group.remove(s);
+    }
     this.physics.world.free();
     this.colliders = [];
   }
