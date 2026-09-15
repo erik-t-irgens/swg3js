@@ -7,10 +7,11 @@
 //   node tools/swg/cli.mjs extract <swg-dir> <path-in-archive> <out-file>
 //   node tools/swg/cli.mjs dump <file.iff> | <swg-dir> <path-in-archive>   print an IFF tree
 //   node tools/swg/cli.mjs weapons <swg-dir> <out-dir> [--limit=N]       every weapon the game can hold, with its class, under <out-dir>/weapons
-//   node tools/swg/cli.mjs ships <swg-dir> <out-dir> [--limit=N] [--match=yacht]   every ship a player can fly, with its interior when it has one, under <out-dir>/ships
+//   node tools/swg/cli.mjs ships <swg-dir> <out-dir> [--limit=N] [--match=yacht] [--glass=<regex>]   every ship a player can fly, with its interior when it has one, under <out-dir>/ships (--match redoes those ships only; --glass names more shaders as glass)
 //   node tools/swg/cli.mjs species <swg-dir> <out-dir> [--only=human,twilek_female] [--var=...]   every playable species and gender as parts, with characters/index.json for the character creator
 //   node tools/swg/cli.mjs ash <swg-dir> <appearance/x.sat | object/.../shared_x.iff> [--find=pistol]   the animation state hierarchy behind a skeletal appearance, with its strings
 //   node tools/swg/cli.mjs shader <swg-dir> <shader/x.sht>        list a shader's texture slots
+//   node tools/swg/cli.mjs materials <swg-dir> <appearance-path>   every shader an appearance uses, with its effect, alpha and whether it is glass (diagnostic)
 //   node tools/swg/cli.mjs template <swg-dir> <object/x.iff>       print an object template's parameter chain
 //   node tools/swg/cli.mjs texture <swg-dir> <texture/x.dds> <out.png>
 //   node tools/swg/cli.mjs msh <swg-dir> <appearance-path> <out.glb>
@@ -174,6 +175,19 @@ function printEffectSummary() {
   for (const [k, n] of [...effectUse.entries()].sort((a, b) => b[1] - a[1])) console.log(`  ${String(n).padStart(4)}  ${k}`);
 }
 
+/** What names a glass shader: a window, a canopy or a cockpit; --glass=<regex> widens it. */
+const GLASS = new RegExp(options.glass ? `glass|window|canopy|cockpit|transp|viewport|${options.glass}` : 'glass|window|canopy|cockpit|transp|viewport', 'i');
+/** The names that are glass even with no alpha in the texture: "cockpit" alone can be a panel, not a pane. */
+const GLASS_PLAIN = new RegExp(options.glass ? `glass|window|canopy|transp|viewport|${options.glass}` : 'glass|window|canopy|transp|viewport', 'i');
+/** How much of the outside shows through glass whose texture has no alpha to say. */
+const GLASS_OPACITY = 0.45;
+
+/** Whether a shader is glass: named as such with alpha in its texture, or by the stricter names without. */
+function isGlass(shaderPath, main, effect, hasAlpha) {
+  const names = `${shaderPath} ${main ?? ''} ${effect ?? ''}`;
+  return hasAlpha ? GLASS.test(names) : GLASS_PLAIN.test(names);
+}
+
 function textureFor(vfs, shaderPath) {
   if (flags.has('--no-textures')) return null;
   if (textureCache.has(shaderPath)) return textureCache.get(shaderPath);
@@ -186,7 +200,13 @@ function textureFor(vfs, shaderPath) {
       // Glass: a window, a canopy or a cockpit whose texture carries alpha is see-through whatever
       // its effect says (the client's own glass effects blend, and a ship's windows drawn opaque
       // showed as slabs of their tint), so the outside shows through them.
-      if (dds.hasAlpha && result.alphaMode === 'OPAQUE' && /glass|window|canopy|cockpit|transp|viewport/i.test(`${shaderPath} ${main} ${effect ?? ''}`)) result.alphaMode = 'BLEND';
+      if (isGlass(shaderPath, main, effect, dds.hasAlpha) && result.alphaMode === 'OPAQUE') {
+        result.alphaMode = 'BLEND';
+        // Glass whose texture has no alpha at all (a tinted pane the client drew with its own
+        // glass effect) shows the outside through a fixed share of its tint.
+        if (!dds.hasAlpha) result.opacity = GLASS_OPACITY;
+        result.glass = true;
+      }
       Object.assign(result, surfaceFor(vfs, effect, slots, dds, result.alphaMode));
       const normalSlot = (slots ?? []).find((s) => /^(CNRM|NRML|DOT3)$/.test(s.slot));
       const normal = normalSlot ? normalFor(vfs, normalSlot.path) : null;
@@ -2002,6 +2022,39 @@ switch (cmd) {
     }
     break;
   }
+  case 'materials': {
+    // Every shader an appearance uses, cell by cell for a portal building, with what the converter
+    // makes of it: its effect, its alpha mode and whether it counts as glass. To find a window that
+    // came out opaque: the shader that should be glass but is not is the one to name with --glass=.
+    if (!pos[2]) usage();
+    const vfs = mount(pos[1]);
+    const { mesh, cells } = loadAppearanceMesh(vfs, pos[2]);
+    const use = new Map();
+    const note = (g, where) => {
+      const u = use.get(g.shader) ?? use.set(g.shader, { tris: 0, cells: new Set() }).get(g.shader);
+      u.tris += g.primitives.reduce((m, p) => m + p.indices.length / 3, 0);
+      u.cells.add(where);
+    };
+    if (cells) for (const c of cells) for (const g of c.groups) note(g, `${c.index}:${c.name}`);
+    else for (const g of mesh.groups) note(g, '-');
+    console.log(`${pos[2]}: ${use.size} shaders${cells ? `, ${cells.length} cells` : ''}`);
+    for (const [shader, u] of [...use.entries()].sort((a, b) => b[1].tris - a[1].tris)) {
+      let line = `  ${shader}  ${u.tris} tris`;
+      try {
+        const { main, alphaMode, effect } = shaderTextures(parseIff(vfs.read(shader)));
+        const hasAlpha = main && vfs.has(main) ? decodeDds(vfs.read(main)).hasAlpha : null;
+        const byEffect = alphaFromEffect(vfs, effect, alphaMode);
+        const glass = isGlass(shader, main, effect, !!hasAlpha);
+        const decided = glass && byEffect === 'OPAQUE' ? `BLEND (glass${hasAlpha ? '' : `, opacity ${GLASS_OPACITY}`})` : byEffect;
+        line += `\n      effect ${effect ?? '(none)'}  texture ${main ?? '(none)'}${hasAlpha === null ? '' : hasAlpha ? ' with alpha' : ' no alpha'}  -> ${decided}`;
+      } catch (err) {
+        line += `\n      unreadable: ${err.message}`;
+      }
+      if (cells) line += `\n      in cells ${[...u.cells].join(', ')}`;
+      console.log(line);
+    }
+    break;
+  }
   case 'shader': {
     const vfs = mount(pos[1]);
     const { main, slots, effect, alphaMode } = shaderTextures(parseIff(vfs.read(pos[2])));
@@ -2623,6 +2676,20 @@ switch (cmd) {
     const templates = galleryTemplates(vfs, 'object/ship/player/').filter((t) => !match || match.test(t));
     const { ships, skipped } = buildShips(templates, { convert, interiorOf, convertInterior }, { log: console.log, limit });
     const manifest = { classes: SHIP_CLASSES, ships, skipped, models: [...models.values()].filter((m) => !m.failed) };
+    if (match) {
+      // A matched run redoes some ships: the rest keep their place in the manifest.
+      try {
+        const old = JSON.parse(readFileSync(join(outDir, 'manifest.json'), 'utf8'));
+        const done = new Set(ships.map((sh) => sh.id));
+        const files = new Set(manifest.models.map((m) => m.file));
+        manifest.ships = [...(old.ships ?? []).filter((sh) => !done.has(sh.id) && !match.test(sh.template)), ...ships].sort((a, b) => a.class.localeCompare(b.class) || a.id.localeCompare(b.id));
+        manifest.skipped = [...(old.skipped ?? []).filter((sk) => !match.test(sk.template)), ...skipped];
+        manifest.models = [...(old.models ?? []).filter((m) => !files.has(m.file)), ...manifest.models];
+        console.log(`(--match: ${ships.length} ships redone, ${manifest.ships.length - ships.length} kept from the manifest as they were)`);
+      } catch {
+        /* no manifest yet: this run's ships are all of it */
+      }
+    }
     writeFileSync(join(outDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
     const withInterior = ships.filter((sh) => sh.interior && !sh.interior.failed).length;
     console.log(`-> ${outDir}: ${ships.length} ships in ${models.size} models, ${withInterior} with an interior, ${skipped.length} left out (listed in manifest.json; B in game opens the garage, ships at the bottom)`);

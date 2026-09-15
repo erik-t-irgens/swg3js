@@ -75,9 +75,16 @@ export function buildGlb(meshes, { flipX = true, textures = new Map(), skin = nu
           mat.alphaMode = 'MASK';
           mat.alphaCutoff = 0.5;
           mat.doubleSided = true;
-        } else if (mode === 'BLEND' && tex.hasAlpha) {
+        } else if (mode === 'BLEND' && (tex.hasAlpha || tex.opacity !== undefined)) {
           mat.alphaMode = 'BLEND';
           mat.doubleSided = true;
+          // Glass with no alpha in its texture: a fixed share of its tint over what is behind.
+          if (tex.opacity !== undefined) mat.pbrMetallicRoughness.baseColorFactor[3] = tex.opacity;
+        }
+        if (tex.glass) {
+          // Glass is smooth and a little reflective, whatever its effect said.
+          mat.pbrMetallicRoughness.roughnessFactor = Math.min(mat.pbrMetallicRoughness.roughnessFactor, 0.15);
+          mat.pbrMetallicRoughness.metallicFactor = Math.max(mat.pbrMetallicRoughness.metallicFactor, 0.2);
         }
       } else {
         mat.pbrMetallicRoughness.baseColorFactor = [0.8, 0.8, 0.8, 1];
