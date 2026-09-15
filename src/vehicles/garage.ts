@@ -84,13 +84,13 @@ export class Garage {
       const [idx, man] = await Promise.all([fetch(`${baseUrl}assets-private/gallery/gallery.json`), fetch(`${baseUrl}assets-private/gallery/manifest.json`)]);
       if (idx.ok && man.ok) {
         const index = (await idx.json()) as GalleryIndex;
-        const manifest = (await man.json()) as { categories: { layout: { id: string; file: string; bounds?: VehicleSpec['bounds'] }[] } };
+        const manifest = (await man.json()) as { categories: { layout: { id: string; file: string; bounds?: VehicleSpec['bounds']; clipSpeeds?: Record<string, number> }[] } };
         const files = new Map(manifest.categories.layout.map((m) => [m.id, m]));
         for (const it of index.sections.find((s) => s.id === 'vehicles')?.items ?? []) {
           const m = files.get(it.model);
           if (!m) continue;
           const kind = vehicleKindOf(it.label) ?? vehicleKindOf(it.template) ?? vehicleKindOf(it.model);
-          g.vehicles.push({ id: it.label, label: it.label.replace(/_/g, ' '), kind: kind ?? 'speederbike', inferred: kind !== null, source: 'gallery', file: `assets-private/gallery/${m.file}`, template: it.template, bounds: m.bounds, riderPose: it.riderPose ?? null });
+          g.vehicles.push({ id: it.label, label: it.label.replace(/_/g, ' '), kind: kind ?? 'speederbike', inferred: kind !== null, source: 'gallery', file: `assets-private/gallery/${m.file}`, template: it.template, bounds: m.bounds, riderPose: it.riderPose ?? null, clipSpeeds: m.clipSpeeds });
         }
       }
     } catch (err) {
@@ -99,8 +99,9 @@ export class Garage {
     try {
       const res = await fetch(`${baseUrl}assets-private/creatures/manifest.json`);
       if (res.ok && (res.headers.get('content-type') ?? '').includes('json')) {
-        const manifest = (await res.json()) as { creatures: { id: string; file: string; clipSpeeds?: Record<string, number>; bounds?: VehicleSpec['bounds']; riderPose?: string }[] };
-        for (const c of manifest.creatures) g.vehicles.push({ id: c.id, label: `${c.id.replace(/_/g, ' ')} (mount)`, kind: 'ground', inferred: true, source: 'creature', file: `assets-private/${c.file}`, bounds: c.bounds, clipSpeeds: c.clipSpeeds, riderPose: c.riderPose ?? null });
+        const manifest = (await res.json()) as { creatures: { id: string; file: string; clipSpeeds?: Record<string, number>; bounds?: VehicleSpec['bounds']; riderPose?: string; mount?: boolean }[] };
+        // The mounts the game sold (the saddle map's creatures) come first; the planets' other creatures can be ridden too, as a wild thing.
+        for (const c of manifest.creatures) g.vehicles.push({ id: c.id, label: `${c.id.replace(/_/g, ' ')} (${c.mount ? 'mount' : 'wild'})`, kind: 'ground', inferred: true, source: 'creature', file: `assets-private/${c.file}`, bounds: c.bounds, clipSpeeds: c.clipSpeeds, riderPose: c.riderPose ?? null });
       }
     } catch (err) {
       console.warn('garage: no creatures', err);
@@ -205,7 +206,9 @@ export class Garage {
   /** Stand a vehicle on the ground at a point, facing a heading, and hand it back to drive. */
   async spawn(def: VehicleDef, physics: Physics, scene: THREE.Scene, x: number, y: number, z: number, heading: number, kind: VehicleKind = def.kind, place?: (bounds: VehicleSpec['bounds']) => [number, number, number]): Promise<Vehicle> {
     const loaded = await this.model(def);
-    const model = def.source === 'creature' ? cloneSkinned(loaded.scene) : loaded.scene.clone();
+    // A model with clips of its own (a creature, a walker) needs its own skeleton to play them on.
+    const animated = loaded.animations.length > 0;
+    const model = def.source === 'creature' || animated ? cloneSkinned(loaded.scene) : loaded.scene.clone();
     // What the client data hangs on the hull, before the hull is measured: a wing is part of the
     // ship's box and its collision, and its hardpoints (the thrusters') count with the hull's.
     // The game's attachments are modelled in the hull's frame: they sit at its origin unless
@@ -366,7 +369,8 @@ export class Garage {
     // The cockpit view: the model's own point when it names one, else the seated pilot's eyes over the seat (a hardpoint's, or the kind's own place, where the rider is drawn).
     if (spec.ship) v.cockpit = seat.cockpit ? [seat.cockpit.x, seat.cockpit.y, seat.cockpit.z] : [spec.seat[0], spec.seat[1] + SEATED_EYE, spec.seat[2]];
     if (def.source !== 'creature') collectPanes(v);
-    if (def.source === 'creature' && loaded.animations.length) {
+    if (animated) {
+      // Its own idle, walk and run, picked by speed: an animal's, or a walker's from its animation table.
       const mixer = new THREE.AnimationMixer(model);
       const clips = new Map(loaded.animations.map((a) => [a.name, a]));
       const pick = (names: string[]) => names.map((n) => clips.get(n)).find((c) => c);

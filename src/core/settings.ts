@@ -30,6 +30,12 @@ export interface Settings {
   terrainRadius: number;
   /** Coarse far tiles each way. */
   farRadius: number;
+  /** The bright parts of the picture spilling over (engine glows, bolts, the suns). */
+  bloom: boolean;
+  /** How much they spill: 0.1 a touch, 0.5 a glow, 1 a haze. */
+  bloomStrength: number;
+  /** The edges of the picture streaking toward the centre at speed on a vehicle. */
+  speedBlur: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -48,6 +54,9 @@ export const DEFAULT_SETTINGS: Settings = {
   objectReach: 1,
   terrainRadius: 6,
   farRadius: 6,
+  bloom: false,
+  bloomStrength: 0.35,
+  speedBlur: true,
 };
 
 const KEY = 'swg.settings';

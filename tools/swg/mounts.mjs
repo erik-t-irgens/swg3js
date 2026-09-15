@@ -47,3 +47,25 @@ function tables(vfs) {
 export function riderPoseFor(vfs, satPath, seat = 1) {
   return riderPoseFromTables(satPath, seat, tables(vfs));
 }
+
+/**
+ * Every creature the saddle map lists as mountable (a creature .sat, not a vehicle's pv_ one)
+ * that has a mobile template in the archives, as { id, template, sat, saddle }: the banthas,
+ * dewbacks, kaadu, cu pa, varactyls, tauntauns and the rest. The mount tables list a creature
+ * by its _hue appearance (the customizable one the player buys); the id drops that suffix.
+ */
+export function mountCreatures(vfs) {
+  const mobiles = vfs.list('object/mobile/');
+  const out = [];
+  for (const r of tables(vfs).logical) {
+    const sat = norm(r.sat_name);
+    if (!/^appearance\/[^/]+\.sat$/.test(sat) || /\/pv_/.test(sat)) continue;
+    const stemName = sat.replace(/^appearance\//, '').replace(/\.sat$/, '');
+    const base = stemName.replace(/_hue$/, '');
+    const template = [`object/mobile/shared_${stemName}.iff`, `object/mobile/shared_${base}.iff`, ...mobiles.filter((m) => m.endsWith(`/shared_${stemName}.iff`) || m.endsWith(`/shared_${base}.iff`))].find((c) => vfs.has(c));
+    // A vehicle listed by its own appearance (the basilisk, the wheel bike, the pod racers) is the gallery's.
+    if (!template || /\/vehicle\//.test(template) || /pod_?racer|speeder|wheel_bike|walker|atpt/.test(base)) continue;
+    if (!out.some((o) => o.id === base)) out.push({ id: base, template, sat, saddle: r.logical_saddle_name });
+  }
+  return out;
+}

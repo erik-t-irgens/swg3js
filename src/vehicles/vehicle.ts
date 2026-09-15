@@ -4,7 +4,14 @@
 // animal mounts) turn in place and stay on their feet, flyers (landspeeders as flying cars, gunships
 // and airspeeders as aircraft) climb and sink on Space and Ctrl and hold their height over the ground.
 import * as THREE from 'three';
-import { cleanTrimesh, RAPIER, TRIMESH_FLAGS, type Physics } from '../core/physics';
+import { cleanTrimesh, Group, groups, RAPIER, TRIMESH_FLAGS, type Physics } from '../core/physics';
+
+/**
+ * A vehicle's hull meets everything but the ground: the springs hold it off the terrain from
+ * their own rays, and a hull that also collided with the heightfield dug its underside or its
+ * feet into every slope the springs did not pitch it to, snagging and jolting there.
+ */
+const HULL_GROUPS = groups(Group.all, Group.all & ~Group.terrain);
 import { cellIndexOf } from './interior';
 
 export type VehicleKind = 'podracer' | 'speederbike' | 'ground' | 'flyer' | 'ship';
@@ -326,7 +333,8 @@ export class Vehicle {
           // The mass properties are in the collider's own frame, so the centre of mass is its centre.
           .setMassProperties(m, { x: 0, y: 0, z: 0 }, { x: this.inertia.x, y: this.inertia.y, z: this.inertia.z }, { x: 0, y: 0, z: 0, w: 1 })
           .setFriction(0.4)
-          .setRestitution(0.1),
+          .setRestitution(0.1)
+          .setCollisionGroups(HULL_GROUPS),
         this.body,
       );
       this.colliderHandles.push(box.handle);
@@ -402,7 +410,7 @@ export class Vehicle {
           vertices[i + 2] *= sc.z;
         }
       }
-      const desc = RAPIER.ColliderDesc.trimesh(vertices, indices, TRIMESH_FLAGS).setTranslation(p.x, p.y, p.z).setRotation({ x: q.x, y: q.y, z: q.z, w: q.w }).setFriction(0.4).setRestitution(0.1);
+      const desc = RAPIER.ColliderDesc.trimesh(vertices, indices, TRIMESH_FLAGS).setTranslation(p.x, p.y, p.z).setRotation({ x: q.x, y: q.y, z: q.z, w: q.w }).setFriction(0.4).setRestitution(0.1).setCollisionGroups(HULL_GROUPS);
       // The mass properties are in the collider's own frame: the box's centre, moved back into it.
       if (pieces === 0) {
         const c = new THREE.Vector3(mass.centre.x, mass.centre.y, mass.centre.z).sub(p).applyQuaternion(q.clone().invert());
@@ -585,8 +593,12 @@ export class Vehicle {
       // The surface normal, tilted back from level by the slopes.
       wantUp.addScaledVector(fwd, -pitch * SLOPE_FOLLOW).addScaledVector(right, -roll * SLOPE_FOLLOW).normalize();
     }
+    // A pod racer on the keys yaws hard, its nose swinging round the way a Racer pod's does
+    // under the air brakes, banking further and sliding wide while it does; the mouse steers it
+    // as it steers everything else.
+    const podYaw = s.kind === 'podracer' && (drive?.steer ?? 0) !== 0;
     // Lean into the turn, as a rider does.
-    if (s.bank > 0 && steer !== 0) wantUp.applyAxisAngle(fwd, steer * s.bank * share);
+    if (s.bank > 0 && steer !== 0) wantUp.applyAxisAngle(fwd, steer * s.bank * share * (podYaw ? 1.6 : 1));
     // Torques are asked for as turning accelerations (rad/s²) and scaled by the inertia below, so
     // a barge and a bike right themselves alike; the rates stay well under the step's stability limit.
     alpha.crossVectors(up, wantUp).multiplyScalar(40);
@@ -636,8 +648,8 @@ export class Vehicle {
         const authority = s.turnAuthorityAt <= 0 ? 1 : THREE.MathUtils.clamp(Math.abs(speedFwd) / s.turnAuthorityAt, 0.3, 1);
         const wide = 1 - 0.3 * THREE.MathUtils.clamp((Math.abs(speedFwd) - s.maxSpeed) / Math.max(1, s.boostSpeed - s.maxSpeed), 0, 1);
         const sign = speedFwd < -0.5 ? -1 : 1;
-        const want = -steer * s.turnRate * authority * wide * sign;
-        alpha.y = (want - av.y) * 8;
+        const want = -steer * s.turnRate * (podYaw ? 1.9 : authority) * wide * sign;
+        alpha.y = (want - av.y) * (podYaw ? 12 : 8);
       }
       if (drive.hop && s.hop && grounded && this.hopCd <= 0) {
         body.applyImpulse({ x: 0, y: m * 7.5, z: 0 }, true);
@@ -657,7 +669,7 @@ export class Vehicle {
     // the vehicle rather than scrubbing its speed off), with a little of it lost to the slide. A pod
     // drifts wide, a bike bites, a walker does not slide at all; in the air there is little to grip.
     lat.copy(lv).addScaledVector(fwd, -speedFwd).setY(0);
-    const gripRate = Math.min(1 / dt, grounded ? s.grip : s.grip * 0.15);
+    const gripRate = Math.min(1 / dt, grounded ? s.grip * (podYaw ? 0.3 : 1) : s.grip * 0.15);
     tmp.copy(lat).multiplyScalar(-m * gripRate).addScaledVector(fwd, lat.length() * m * gripRate * 0.85 * Math.sign(speedFwd || 1));
     body.addForce({ x: tmp.x, y: tmp.y, z: tmp.z }, true);
 

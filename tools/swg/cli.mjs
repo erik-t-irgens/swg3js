@@ -95,7 +95,7 @@ import { bakeShader, describeShader, describeVariables, loadImage, loadShader, p
 import { ImageRegistry, exportBlueprint, exportPalettes, exportShader, palettesOf } from './customize.mjs';
 import { effectAlpha, alphaModeFor } from './eff.mjs';
 import { localize, parseDatatable } from './datatable.mjs';
-import { riderPoseFor } from './mounts.mjs';
+import { mountCreatures, riderPoseFor } from './mounts.mjs';
 import { createRequire } from 'node:module';
 
 /** Named places per planet (see regions/build.mjs). */
@@ -2228,23 +2228,41 @@ switch (cmd) {
     // <swg-dir> <out-dir>: the creature of every planet the game spawns, as skinned GLBs under <out-dir>/creatures/
     if (!pos[2]) usage();
     const vfs = mount(pos[1]);
+    // <swg-dir> <out-dir> [--no-mounts] [--match=bantha]: the planets' creatures, then every
+    // creature the game's saddle map lists as mountable (the banthas, dewbacks, kaadu, cu pa,
+    // varactyls, tauntauns and the rest), each converted with the clips the game drives.
     const outDir = join(pos[2], 'creatures');
     mkdirSync(outDir, { recursive: true });
+    const wanted = Object.entries(CREATURES).map(([id, template]) => ({ id, template, mount: false }));
+    const mounts = flags.has('--no-mounts') ? [] : mountCreatures(vfs);
+    for (const m of mounts) {
+      const have = wanted.find((w) => w.id === m.id);
+      if (have) have.mount = true;
+      else wanted.push({ id: m.id, template: m.template, mount: true });
+    }
+    const match = options.match ? new RegExp(options.match, 'i') : null;
     const list = [];
-    for (const [id, template] of Object.entries(CREATURES)) {
+    // A matched run redoes some creatures and keeps the rest of the manifest as it was.
+    const old = match && existsSync(join(outDir, 'manifest.json')) ? JSON.parse(readFileSync(join(outDir, 'manifest.json'), 'utf8')).creatures ?? [] : [];
+    for (const { id, template, mount } of wanted) {
+      if (match && !match.test(id)) {
+        const kept = old.find((c) => c.id === id);
+        if (kept) list.push(kept);
+        continue;
+      }
       const out = join(outDir, `${id}.glb`);
       try {
         const info = convertSat(vfs, template, out, { animations: CREATURE_CLIPS });
         // How a rider sits on it, from the mount tables (the saddle its body takes), for the riding clip.
         const ride = info.sat ? riderPoseFor(vfs, info.sat) : null;
-        list.push({ id, file: `creatures/${id}.glb`, template, clips: info.animations, clipSpeeds: info.clipSpeeds ?? {}, bounds: info.bounds, ...(ride ? { riderPose: ride.pose } : {}) });
-        console.log(`${id}: ${info.joints} joints, ${info.meshes.reduce((a, m) => a + m.triangles, 0)} tris, clips ${info.animations.join(', ')}${info.missing.length ? `, missing ${info.missing.length}` : ''}${ride ? `, ridden as ${ride.pose}` : ', not in the mount tables'}`);
+        list.push({ id, file: `creatures/${id}.glb`, template, clips: info.animations, clipSpeeds: info.clipSpeeds ?? {}, bounds: info.bounds, ...(ride ? { riderPose: ride.pose } : {}), ...(mount ? { mount: true } : {}) });
+        console.log(`${id}: ${info.joints} joints, ${info.meshes.reduce((a, m) => a + m.triangles, 0)} tris, clips ${info.animations.join(', ')}${info.missing.length ? `, missing ${info.missing.length}` : ''}${ride ? `, ridden as ${ride.pose}` : ', not in the mount tables'}${mount ? ' (a mount)' : ''}`);
       } catch (err) {
         console.warn(`${id}: ${err.message}`);
       }
     }
     writeFileSync(join(outDir, 'manifest.json'), JSON.stringify({ creatures: list }, null, 2));
-    console.log(`creatures: ${list.length} -> ${join(outDir, 'manifest.json')}`);
+    console.log(`creatures: ${list.length} (${list.filter((c) => c.mount).length} mounts) -> ${join(outDir, 'manifest.json')}`);
     printEffectSummary();
     break;
   }
@@ -2973,7 +2991,19 @@ switch (cmd) {
       const pv = r.skeletal && /^appearance\/pv_(.+)\.sat$/i.exec(r.skeletal);
       // The skeletal appearance is what the mount tables key the rider's pose on, body or not.
       const ridden = r.skeletal;
-      if (pv) {
+      // A skeletal vehicle with an animation table of its own (the walkers, the basilisk) walks
+      // with its clips; one on the shared placeholder table (monstrosity.lat: the pod racers,
+      // the pv_ placeholders) is a still model.
+      let animated = false;
+      if (r.skeletal) {
+        try {
+          const lat = [...parseSat(readIff(vfs, r.skeletal)).animationTables.values()][0] ?? '';
+          animated = !!lat && !/monstrosity\.lat$/i.test(lat);
+        } catch {
+          animated = false;
+        }
+      }
+      if (pv && !animated) {
         const x = pv[1];
         const candidates = [`appearance/${x}.apt`, `appearance/${x}.lod`, `appearance/lod/${x}.lod`, `appearance/${x}.msh`, `appearance/mesh/${x}.msh`, `appearance/mesh/${x}_l0.msh`];
         const found = candidates.find((c) => vfs.has(c));
@@ -2987,10 +3017,11 @@ switch (cmd) {
         if (r.skeletal) {
           id = familyOf(r.skeletal);
           if (!models.has(id)) {
-            const info = convertSat(vfs, r.skeletal, join(outDir, `${id}.glb`), { animations: 'none' });
+            const info = convertSat(vfs, r.skeletal, join(outDir, `${id}.glb`), { animations: animated ? CREATURE_CLIPS : 'none' });
             const tris = info.meshes.reduce((a, m) => a + m.triangles, 0);
-            models.set(id, { id, source: r.skeletal, file: `${id}.glb`, bounds: info.bounds ?? { min: [-1, 0, -1], max: [1, 2, 1] }, triangles: tris, skeletal: true, ...(tris ? {} : { failed: `no triangles (${[...info.missing, ...info.skipped].slice(0, 3).join('; ') || 'no meshes'})` }) });
+            models.set(id, { id, source: r.skeletal, file: `${id}.glb`, bounds: info.bounds ?? { min: [-1, 0, -1], max: [1, 2, 1] }, triangles: tris, skeletal: true, ...(animated ? { clips: info.animations, clipSpeeds: info.clipSpeeds ?? {} } : {}), ...(tris ? {} : { failed: `no triangles (${[...info.missing, ...info.skipped].slice(0, 3).join('; ') || 'no meshes'})` }) });
             if (!tris) console.log(`  ${template}: ${r.skeletal} converted with no triangles: ${[...info.missing, ...info.skipped].slice(0, 3).join('; ') || 'no meshes in it'}`);
+            else if (animated) console.log(`  ${template}: walks with its own clips (${info.animations.join(', ')})`);
           }
         } else {
           const single = r.parts.length === 1 && !r.parts[0].transform && !r.effects?.length && !r.parts[0].hardpoints?.length;

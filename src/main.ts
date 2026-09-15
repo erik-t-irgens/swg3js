@@ -20,6 +20,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { Hud } from './ui/hud';
 import { specFor, type DriveInput } from './vehicles/vehicle';
 import { interceptTime, leadPoint } from './combat/intercept';
+import { PostFX } from './core/postfx';
 import { VehiclesUi } from './ui/vehiclesUi';
 import { NpcUi } from './ui/npcUi';
 import { AppearanceUi } from './ui/appearanceUi';
@@ -129,6 +130,8 @@ class App {
   private readonly shipLead = new THREE.Vector3();
   private readonly shipAim = new THREE.Vector3();
   private shipLeadValid = false;
+  /** The picture's effects (bloom, the speed blur), when the settings ask for them. */
+  private postfx: PostFX | null = null;
   private readonly settings: Settings = loadSettings();
   /** The character being played, as kept in this browser; null on the select screen and in the creator. */
   private current: SavedCharacter | null = null;
@@ -159,6 +162,7 @@ class App {
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     World.anisotropy = Math.min(8, this.renderer.capabilities.getMaxAnisotropy());
     this.renderer.toneMappingExposure = S.exposure;
+    this.setPostFX();
 
     this.cam = new ThirdPersonCamera(window.innerWidth / window.innerHeight);
     this.cam.sensitivity = S.sensitivity;
@@ -581,7 +585,7 @@ class App {
         const a = v.body.angvel();
         const e = new THREE.Euler().setFromQuaternion(tmpQ, 'YXZ');
         const com = v.body.localCom();
-        return { id: v.spec.id, kind: v.spec.kind, com: [com.x, com.y, com.z].map((n) => Number(n.toFixed(2))), at: v.pos.toArray().map((n) => Number(n.toFixed(2))), level: Number(upY.toFixed(3)), pitch: Math.round((e.x * 180) / Math.PI), roll: Math.round((e.z * 180) / Math.PI), spin: Number(Math.hypot(a.x, a.y, a.z).toFixed(3)), speed: Number(v.speed.toFixed(2)), corners: v.groundedPoints, ridden: v === this.player.mounted, hp: Math.round(v.hp), riderPose: v.riderPose, ...(v.wings.length ? { wingsOpen: Number(v.wingsOpen.toFixed(2)) } : {}), ...(v.spec.ship ? { airborne: v.airborne, target: this.shipTarget === v } : {}) };
+        return { id: v.spec.id, kind: v.spec.kind, com: [com.x, com.y, com.z].map((n) => Number(n.toFixed(2))), at: v.pos.toArray().map((n) => Number(n.toFixed(2))), level: Number(upY.toFixed(3)), pitch: Math.round((e.x * 180) / Math.PI), roll: Math.round((e.z * 180) / Math.PI), spin: Number(Math.hypot(a.x, a.y, a.z).toFixed(3)), speed: Number(v.speed.toFixed(2)), corners: v.groundedPoints, ridden: v === this.player.mounted, hp: Math.round(v.hp), riderPose: v.riderPose, vel: [v.body.linvel().x, v.body.linvel().y, v.body.linvel().z].map((n) => Number(n.toFixed(2))), steer: Number(v.steer.toFixed(2)), heading: Number(v.heading.toFixed(2)), boosting: v.boosting, overheated: Number(v.overheated.toFixed(1)), meter: Number(v.meter.toFixed(2)), ...(v.wings.length ? { wingsOpen: Number(v.wingsOpen.toFixed(2)) } : {}), ...(v.spec.ship ? { airborne: v.airborne, target: this.shipTarget === v } : {}) };
       }),
       /** Remove every spawned vehicle except the one being ridden, as the garage's Remove all does. */
       unspawn: () => {
@@ -739,6 +743,7 @@ class App {
 
     window.addEventListener('resize', () => {
       this.renderer.setSize(window.innerWidth, window.innerHeight);
+      this.postfx?.setSize();
       this.cam.camera.aspect = window.innerWidth / window.innerHeight;
       this.cam.camera.updateProjectionMatrix();
       this.world.onCameraResized();
@@ -801,6 +806,7 @@ class App {
       case 'renderScale':
         this.renderer.setPixelRatio(S.renderScale);
         this.renderer.setSize(window.innerWidth, window.innerHeight);
+        this.postfx?.setSize();
         this.world.onCameraResized();
         break;
       case 'fov':
@@ -808,6 +814,11 @@ class App {
         break;
       case 'exposure':
         this.renderer.toneMappingExposure = S.exposure;
+        break;
+      case 'bloom':
+      case 'bloomStrength':
+      case 'speedBlur':
+        this.setPostFX();
         break;
       case 'fog':
         this.world.userFog = S.fog;
@@ -1535,10 +1546,35 @@ class App {
     this.renderer.info.autoReset = false;
     info.calls = 0;
     info.triangles = 0;
+    // With the effects on, the passes draw into their target and the picture goes out through them.
+    this.postfx?.begin();
     this.portals.render(this.scene, cam, view, this.world.buildings);
+    this.postfx?.end(this.speedBlurAmount());
     this.frameCalls = info.calls;
     this.frameTriangles = info.triangles;
     this.renderer.info.autoReset = auto;
+  }
+
+  /** The effects the settings ask for, made or dropped as they change; a change of them recompiles every shader. */
+  private setPostFX(): void {
+    const S = this.settings;
+    if (!S.bloom) {
+      this.postfx?.dispose();
+      this.postfx = null;
+      return;
+    }
+    if (!this.postfx) this.postfx = new PostFX(this.renderer, { bloom: S.bloom, bloomStrength: S.bloomStrength, speedBlur: S.speedBlur });
+    else this.postfx.set({ bloom: S.bloom, bloomStrength: S.bloomStrength, speedBlur: S.speedBlur });
+  }
+
+  /** How hard the picture streaks at speed: on a vehicle past half its top speed, hardest boosting; a pod racer streaks sooner. */
+  private speedBlurAmount(): number {
+    const v = this.player.mounted;
+    if (!v || (!v.airborne && v.groundedPoints === 0 && !v.spec.ship)) return 0;
+    const top = v.spec.boostSpeed;
+    const from = v.spec.kind === 'podracer' ? 0.35 : 0.55;
+    const share = THREE.MathUtils.clamp((Math.abs(v.speed) / Math.max(1, top) - from) / (1 - from), 0, 1);
+    return share * (v.boosting ? 1 : 0.6);
   }
 
   private async die(): Promise<void> {
