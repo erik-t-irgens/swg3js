@@ -452,8 +452,8 @@ class App {
         }
         if (!hold) for (const k of keys) this.input.force(k, false);
       },
-      /** Bolts in the air: whose, where, which way, and how many have flown and been blocked. */
-      bolts: () => ({ fired: { ...this.world.bolts.fired }, blocked: this.player.blocks, inFlight: this.world.bolts.bolts.map((b) => ({ owner: b.owner, reflected: b.reflected, at: b.pos.toArray().map((v) => Number(v.toFixed(1))), dir: b.dir.toArray().map((v) => Number(v.toFixed(2))) })) }),
+      /** Bolts in the air: whose, where, which way, how fast, whether drawn as the game's projectile effect, how many have flown and been blocked, and the ship effects' state. */
+      bolts: () => ({ fired: { ...this.world.bolts.fired }, blocked: this.player.blocks, inFlight: this.world.bolts.bolts.map((b) => ({ owner: b.owner, reflected: b.reflected, at: b.pos.toArray().map((v) => Number(v.toFixed(1))), dir: b.dir.toArray().map((v) => Number(v.toFixed(2))), speed: Math.round(b.speed), effect: b.fx?.file ?? null })), shipEffects: this.world.shipFx.status, target: this.shipTarget?.spec.id ?? null, lead: this.shipLeadValid ? this.shipLead.toArray().map((v) => Number(v.toFixed(1))) : null }),
       /** The turrets: where each stands, its health, whether it is down, and its shots. */
       turrets: () => this.world.turrets.turrets.map((t) => ({ at: t.pos.toArray().map((v) => Number(v.toFixed(1))), distance: Number(t.pos.distanceTo(this.player.pos).toFixed(1)), hp: t.hp, dead: t.dead, shots: t.shots })),
       /** Stand a turret `distance` metres ahead of the player, facing them, and report where. */
@@ -575,7 +575,7 @@ class App {
         const a = v.body.angvel();
         const e = new THREE.Euler().setFromQuaternion(tmpQ, 'YXZ');
         const com = v.body.localCom();
-        return { id: v.spec.id, kind: v.spec.kind, com: [com.x, com.y, com.z].map((n) => Number(n.toFixed(2))), at: v.pos.toArray().map((n) => Number(n.toFixed(2))), level: Number(upY.toFixed(3)), pitch: Math.round((e.x * 180) / Math.PI), roll: Math.round((e.z * 180) / Math.PI), spin: Number(Math.hypot(a.x, a.y, a.z).toFixed(3)), speed: Number(v.speed.toFixed(2)), corners: v.groundedPoints, ridden: v === this.player.mounted };
+        return { id: v.spec.id, kind: v.spec.kind, com: [com.x, com.y, com.z].map((n) => Number(n.toFixed(2))), at: v.pos.toArray().map((n) => Number(n.toFixed(2))), level: Number(upY.toFixed(3)), pitch: Math.round((e.x * 180) / Math.PI), roll: Math.round((e.z * 180) / Math.PI), spin: Number(Math.hypot(a.x, a.y, a.z).toFixed(3)), speed: Number(v.speed.toFixed(2)), corners: v.groundedPoints, ridden: v === this.player.mounted, hp: Math.round(v.hp), ...(v.wings.length ? { wingsOpen: Number(v.wingsOpen.toFixed(2)) } : {}), ...(v.spec.ship ? { airborne: v.airborne, target: this.shipTarget === v } : {}) };
       }),
       /** Remove every spawned vehicle except the one being ridden, as the garage's Remove all does. */
       unspawn: () => {
