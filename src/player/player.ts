@@ -1593,6 +1593,9 @@ export class Player {
       if (out) rig.playUpper(out, 0.08);
     }
     this.wasAiming = this.aiming;
+    // A swing while running: the legs keep running (Jedi Academy's own run) under the swing on the
+    // upper body, the way that game plays its torso and legs apart; standing, the swing has the whole body.
+    if (rig.overridingJka && this.saber.busy && !this.jka.rolling && !this.jka.inSpecialJump && moving && this.grounded && !this.mounted && !this.swimming) rig.overrideUpperOnly();
     if (this.mounted) {
       // Seated the way the game seats a rider on this vehicle: its rider pose's branch of the
       // riding loop (a speeder bike's crouch, a landspeeder's seat, the hover chair, the pilot's chair), else the default saddle.

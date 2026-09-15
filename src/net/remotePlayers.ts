@@ -4,7 +4,17 @@ import * as THREE from 'three';
 import { CharacterRig, loadPlayerRig, type RigState } from '../player/rig';
 import { markActor } from '../world/portalRender';
 import { isDanceClip, isFlourishClip, loopsEmote } from '../core/emotes';
-import type { Hello, PeerState } from './net';
+import type { Hello, PeerState, PeerVehicle } from './net';
+import type { Garage } from '../vehicles/garage';
+
+/** The vehicle a peer is on, as a picture: which, where it is heading to, and how it is turned. */
+interface RemoteVehicle {
+  id: string;
+  obj: THREE.Object3D | null;
+  target: THREE.Vector3;
+  targetQ: THREE.Quaternion;
+  pose: string | null;
+}
 
 interface Remote {
   id: number;
@@ -14,6 +24,8 @@ interface Remote {
   label: THREE.Sprite;
   target: THREE.Vector3;
   heading: number;
+  /** The figure's whole turn, when the peer sends one (aboard a hull, adrift). */
+  targetQ: THREE.Quaternion | null;
   state: string;
   speed: number;
   saber: boolean;
@@ -21,6 +33,7 @@ interface Remote {
   silent: number;
   /** The dance loop playing, to come back to after a flourish. */
   dance: string | null;
+  vehicle: RemoteVehicle | null;
 }
 
 const STATES: Set<string> = new Set(['idle', 'walk', 'run', 'air', 'seated', 'swim', 'float', 'crouch', 'crouchWalk', 'crouchWalkBack', 'stance', 'strafeLeft', 'strafeRight', 'runBack', 'walkBack', 'runSaber', 'walkSaber', 'gunIdle', 'gunWalk', 'gunRun', 'gunReadyIdle', 'gunReadyWalk', 'gunReadyRun', 'gunAimIdle', 'gunAimWalk', 'gunAimRun', 'kneel', 'prone', 'proneMove']);
@@ -31,7 +44,14 @@ export class RemotePlayers {
   private planet = '';
   private zone: string | undefined;
 
-  constructor(private readonly scene: THREE.Scene, private readonly baseUrl: string) {}
+  /** The garage, for the vehicles the peers ride (loaded the first time one is seen). */
+  private garage: Promise<Garage> | null = null;
+
+  constructor(
+    private readonly scene: THREE.Scene,
+    private readonly baseUrl: string,
+    private readonly loadGarage: () => Promise<Garage>,
+  ) {}
 
   get count(): number {
     return this.remotes.size;
@@ -61,7 +81,7 @@ export class RemotePlayers {
     group.add(label);
     this.scene.add(group);
     markActor(group);
-    const remote: Remote = { id, hello, group, rig: null, label, target: new THREE.Vector3(0, -1000, 0), heading: 0, state: 'idle', speed: 0, saber: false, silent: 0, dance: null };
+    const remote: Remote = { id, hello, group, rig: null, label, target: new THREE.Vector3(0, -1000, 0), heading: 0, targetQ: null, state: 'idle', speed: 0, saber: false, silent: 0, dance: null, vehicle: null };
     this.remotes.set(id, remote);
     void this.dress(remote);
   }
@@ -107,10 +127,62 @@ export class RemotePlayers {
     r.target.set(s.p[0], s.p[1], s.p[2]);
     if (first) r.group.position.copy(r.target);
     r.heading = s.h;
+    r.targetQ = s.q && s.q.length === 4 ? (r.targetQ ?? new THREE.Quaternion()).set(s.q[0], s.q[1], s.q[2], s.q[3]).normalize() : null;
     r.state = STATES.has(s.s) ? s.s : 'idle';
     r.speed = s.v;
     r.saber = s.sab;
     r.silent = 0;
+    this.vehicleState(r, s.veh);
+  }
+
+  /** The vehicle a peer is on: brought in when first seen (or changed), moved along after, taken away when they are off it. */
+  private vehicleState(r: Remote, veh: PeerVehicle | undefined): void {
+    if (!veh) {
+      this.dropVehicle(r);
+      return;
+    }
+    if (!r.vehicle || r.vehicle.id !== veh.id) {
+      this.dropVehicle(r);
+      const rv: RemoteVehicle = { id: veh.id, obj: null, target: new THREE.Vector3(veh.p[0], veh.p[1], veh.p[2]), targetQ: new THREE.Quaternion(veh.q[0], veh.q[1], veh.q[2], veh.q[3]), pose: veh.pose ?? null };
+      r.vehicle = rv;
+      void this.bringVehicle(r, rv);
+    }
+    const rv = r.vehicle;
+    rv.target.set(veh.p[0], veh.p[1], veh.p[2]);
+    rv.targetQ.set(veh.q[0], veh.q[1], veh.q[2], veh.q[3]).normalize();
+    rv.pose = veh.pose ?? null;
+    if (rv.obj && rv.obj.position.y < -900) {
+      rv.obj.position.copy(rv.target);
+      rv.obj.quaternion.copy(rv.targetQ);
+    }
+  }
+
+  private async bringVehicle(r: Remote, rv: RemoteVehicle): Promise<void> {
+    try {
+      this.garage ??= this.loadGarage();
+      const g = await this.garage;
+      const def = g.find(rv.id);
+      if (!def) {
+        console.warn(`remote player ${r.hello.name} rides a ${rv.id} the garage does not know`);
+        return;
+      }
+      const obj = await g.visual(def);
+      if (r.vehicle !== rv) return;
+      obj.position.copy(rv.target);
+      obj.quaternion.copy(rv.targetQ);
+      obj.visible = r.group.visible;
+      this.scene.add(obj);
+      markActor(obj);
+      rv.obj = obj;
+    } catch (err) {
+      console.warn(`remote player ${r.hello.name}: their ${rv.id} did not load`, err);
+    }
+  }
+
+  private dropVehicle(r: Remote): void {
+    if (!r.vehicle) return;
+    if (r.vehicle.obj) this.scene.remove(r.vehicle.obj);
+    r.vehicle = null;
   }
 
   /** An emote from the relay: a dance or a sit loops, a flourish plays over the dance (which comes back after it), an empty clip ends whatever plays. */
@@ -130,27 +202,45 @@ export class RemotePlayers {
     const r = this.remotes.get(id);
     if (!r) return;
     this.remotes.delete(id);
+    this.dropVehicle(r);
     this.scene.remove(r.group);
     (r.label.material as THREE.SpriteMaterial).map?.dispose();
   }
 
   update(dt: number): void {
     for (const r of this.remotes.values()) {
+      if (r.vehicle?.obj) r.vehicle.obj.visible = r.group.visible;
       if (!r.group.visible) continue;
       r.silent += dt;
       // Glide to the last place heard, a tenth of a second's worth at a time, so the figure moves
       // smoothly between the relay's few updates a second.
       const k = 1 - Math.exp(-dt / 0.1);
       r.group.position.lerp(r.target, k);
-      let diff = r.heading - r.group.rotation.y;
-      diff = Math.atan2(Math.sin(diff), Math.cos(diff));
-      r.group.rotation.y += diff * k;
+      if (r.targetQ) {
+        // The whole turn: aboard a hull or adrift, the figure is not upright in the world.
+        r.group.quaternion.slerp(r.targetQ, k);
+      } else {
+        let diff = r.heading - r.group.rotation.y;
+        diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+        r.group.rotation.set(0, r.group.rotation.y + diff * k, 0);
+      }
+      const rv = r.vehicle;
+      if (rv?.obj) {
+        rv.obj.position.lerp(rv.target, k);
+        rv.obj.quaternion.slerp(rv.targetQ, k);
+      }
       const rig = r.rig;
       if (rig) {
         // A flourish over, the dance goes on.
         if (r.dance && !rig.overriding) rig.play(r.dance, { fadeIn: 0.15, loop: true });
         const moving = r.silent < 0.6 && r.group.position.distanceTo(r.target) > 0.05;
         const state = (r.silent > 1.5 ? 'idle' : moving || r.state === 'idle' ? r.state : r.state) as RigState;
+        // Seated the way the peer's own vehicle seats them: its riding pose's branch of the riding loop.
+        if (state === 'seated') {
+          const pose = rv?.pose ?? (rv ? `vehicle_${rv.id.replace(/^pv_/, '')}` : null);
+          const clip = pose ? rig.variant('loop_riding', pose) : null;
+          rig.prefer('seated', clip && clip !== 'loop_riding' ? clip : null);
+        }
         rig.setState(rig.hasState(state) ? state : 'idle', r.speed);
         rig.update(dt);
       }

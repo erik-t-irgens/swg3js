@@ -32,7 +32,7 @@ import { ShipMenu, type ShipStatus } from './ui/shipMenu';
 import { draggable } from './ui/drag';
 import { LoadingScreen } from './ui/loading';
 import { EmoteWheel } from './ui/emoteWheel';
-import { Net, type Hello } from './net/net';
+import { Net, type Hello, type PeerVehicle } from './net/net';
 import { RemotePlayers } from './net/remotePlayers';
 import { danceOf, defaultEmotes, emoteChoices, FLOURISHES, isDanceClip, isFlourishClip, loadEmotes, loopsEmote, saveEmotes } from './core/emotes';
 import { loadSettings, type Settings } from './core/settings';
@@ -842,7 +842,10 @@ class App {
     this.ui.appendChild(this.fade);
     this.loadingScreen = new LoadingScreen(this.ui, import.meta.env.BASE_URL);
     this.emoteWheel = new EmoteWheel(this.ui);
-    this.remotes = new RemotePlayers(this.scene, import.meta.env.BASE_URL);
+    this.remotes = new RemotePlayers(this.scene, import.meta.env.BASE_URL, async () => {
+      this.world.garage ??= await Garage.load(import.meta.env.BASE_URL);
+      return this.world.garage;
+    });
     this.net.onJoin = (peer) => this.remotes.add(peer.id, peer.hello);
     this.net.onHello = (peer) => this.remotes.hello(peer.id, peer.hello);
     this.net.onLeave = (id) => this.remotes.remove(id);
@@ -1091,7 +1094,14 @@ class App {
     const p = this.player;
     const rig = p.rig;
     const at = p.worldPos;
-    this.net.sendState({ p: [Number(at.x.toFixed(2)), Number(at.y.toFixed(2)), Number(at.z.toFixed(2))], h: Number(p.heading.toFixed(3)), s: p.mounted ? 'seated' : (rig?.describe().state ?? 'idle'), v: Number(Math.hypot(p.vel.x, p.vel.z).toFixed(2)), m: !!p.mounted, sab: p.saberOn });
+    const n2 = (n: number) => Number(n.toFixed(2));
+    const n3 = (n: number) => Number(n.toFixed(3));
+    // The vehicle this player is on, so the others see it with them on it; and the figure's
+    // whole turn where a heading is not enough (aboard a banked hull, adrift in space).
+    const v = p.mounted ?? p.piloting ?? p.aboard?.vehicle ?? null;
+    const veh: PeerVehicle | undefined = v ? { id: v.def?.id ?? v.spec.id, p: [n2(v.pos.x), n2(v.pos.y), n2(v.pos.z)], q: v.quaternion(tmpQ).toArray().map(n3) as [number, number, number, number], role: p.mounted ? 'ride' : p.piloting ? 'pilot' : 'aboard', pose: v.riderPose ?? undefined } : undefined;
+    const q = p.aboard || p.eva ? (p.group.quaternion.toArray().map(n3) as [number, number, number, number]) : undefined;
+    this.net.sendState({ p: [n2(at.x), n2(at.y), n2(at.z)], h: n3(p.heading), s: p.mounted ? 'seated' : (rig?.describe().state ?? 'idle'), v: n2(Math.hypot(p.vel.x, p.vel.z)), m: !!p.mounted, sab: p.saberOn, q, veh });
   }
 
   /** The wheel's slots from the rig's own emotes when none were kept yet, and the menu's Emotes page fed from it. */

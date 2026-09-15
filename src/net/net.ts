@@ -9,6 +9,17 @@ export interface Hello {
   zone?: string;
 }
 
+/** The vehicle a peer is on: which (a garage id), where it is and how it is turned, and how the peer is in it. */
+export interface PeerVehicle {
+  id: string;
+  p: [number, number, number];
+  q: [number, number, number, number];
+  /** Riding it from its seat, flying it from its rooms, or aboard as a passenger. */
+  role: 'ride' | 'pilot' | 'aboard';
+  /** The riding pose's name, for the rider's clip. */
+  pose?: string;
+}
+
 export interface PeerState {
   p: [number, number, number];
   h: number;
@@ -20,6 +31,10 @@ export interface PeerState {
   m: boolean;
   /** The saber is lit. */
   sab: boolean;
+  /** The figure's whole turn (aboard a banked hull, adrift in space), when a heading is not enough. */
+  q?: [number, number, number, number];
+  /** The vehicle the peer is on, when they are on one. */
+  veh?: PeerVehicle;
 }
 
 export interface Peer {
@@ -196,7 +211,7 @@ export class Net {
       case 'state':
         if (msg.id !== undefined && msg.p) {
           const peer = this.peers.get(msg.id);
-          const state: PeerState = { p: msg.p, h: msg.h ?? 0, s: msg.s ?? 'idle', v: msg.v ?? 0, m: !!msg.m, sab: !!msg.sab };
+          const state: PeerState = { p: msg.p, h: msg.h ?? 0, s: msg.s ?? 'idle', v: msg.v ?? 0, m: !!msg.m, sab: !!msg.sab, q: msg.q, veh: msg.veh };
           if (peer) peer.state = state;
           this.onState(msg.id, state);
         }

@@ -367,7 +367,35 @@ export class CharacterRig {
 
   /** Whether the one-off clip playing is one of Jedi Academy's (a swing, a flip), not a game transition. */
   get overridingJka(): boolean {
-    return this.override !== null && this.override.getClip().name.startsWith('BOTH_');
+    return this.override !== null && this.override.getClip().name.replace(/^upper:/, '').startsWith('BOTH_');
+  }
+
+  /** Whether the one-off clip drives the upper body only, the state's clip keeping the legs. */
+  private overrideUpper = false;
+
+  /**
+   * Take a one-off clip that poses the whole body off the legs: the clip goes on playing on the
+   * spine, arms and head from where it is, and the state's clip has the legs from here on, so a
+   * swing started running keeps the run under it, the way Jedi Academy plays its torso and legs
+   * apart. (Nothing is done to a clip already on the upper body alone.)
+   */
+  overrideUpperOnly(): void {
+    const full = this.override;
+    if (!full || this.overrideUpper) return;
+    const name = full.getClip().name;
+    const up = this.half(name, 'upper');
+    up.reset().setLoop(full.loop, Infinity).setEffectiveWeight(1);
+    up.clampWhenFinished = true;
+    up.timeScale = full.timeScale;
+    up.time = full.time;
+    up.fadeIn(0.1).play();
+    full.fadeOut(0.1);
+    this.override = up;
+    this.overrideUpper = true;
+    // The legs: the state's clip again, as its lower half.
+    const state = this.state;
+    this.state = null;
+    if (state) this.setState(state, 0, this.wantedUpper);
   }
 
   /** The first of these clips the rig has, or null. */
@@ -407,8 +435,14 @@ export class CharacterRig {
     next.clampWhenFinished = true;
     next.timeScale = timeScale;
     next.play();
-    if (from && from !== next) from.crossFadeTo(next, fadeIn, false);
+    if (this.overrideUpper && from) {
+      // The last one-off had the upper body alone; this one takes the whole body, so the legs' clip goes too.
+      from.fadeOut(fadeIn);
+      if (this.current && this.current !== from) this.current.fadeOut(fadeIn);
+      next.fadeIn(fadeIn);
+    } else if (from && from !== next) from.crossFadeTo(next, fadeIn, false);
     else if (from === next) next.fadeIn(0);
+    this.overrideUpper = false;
     this.override = next;
     const duration = next.getClip().duration / Math.max(1e-3, Math.abs(timeScale));
     // A held clip keeps its last frame until the next one-off clip or `stopOverride` (a saber
@@ -421,6 +455,16 @@ export class CharacterRig {
   /** End a one-off clip early and fade the state clip back in. */
   stopOverride(fade = 0.15): void {
     if (!this.override) return;
+    if (this.overrideUpper) {
+      // The upper body's clip goes; the state's clip comes back whole over the legs it kept.
+      this.override.fadeOut(fade);
+      this.override = null;
+      this.overrideUpper = false;
+      const state = this.state;
+      this.state = null;
+      if (state) this.setState(state, 0, this.wantedUpper);
+      return;
+    }
     const back = this.current;
     if (back && back !== this.override) {
       back.reset().setEffectiveWeight(1).play();
@@ -435,18 +479,20 @@ export class CharacterRig {
    */
   setState(state: RigState, speed = 0, upper: string | null = null): void {
     this.wantedUpper = upper;
-    if (this.override) {
+    if (this.override && !this.overrideUpper) {
       // A one-off clip is playing; remember the state for when it ends.
       this.state = state;
       return;
     }
+    // A one-off clip on the upper body alone: the state drives the legs only, and no layer of its own.
+    const legsOnly = this.override !== null;
     const wantedStance = this.preferredClip(state);
     // A one-shot on the upper body takes the layer while it plays; the caller's layer returns after it.
-    const upperName = this.shotName ?? (upper && this.actions.has(upper) ? upper : null);
+    const upperName = legsOnly ? null : (this.shotName ?? (upper && this.actions.has(upper) ? upper : null));
     const playing = this.current?.getClip().name.replace(/^lower:/, '');
     if (state !== this.state || (wantedStance && playing !== wantedStance) || upperName !== this.upperName) {
       const clipName = wantedStance ?? this.findClip(STATE_CLIPS[state]);
-      const next = clipName ? (upperName ? this.half(clipName, 'lower') : this.actions.get(clipName)!) : null;
+      const next = clipName ? (upperName || legsOnly ? this.half(clipName, 'lower') : this.actions.get(clipName)!) : null;
       if (next && next !== this.current) {
         // A held clip (a stance) plays once and keeps its last frame.
         next.reset().setLoop(this.hold.has(clipName!) ? THREE.LoopOnce : THREE.LoopRepeat, Infinity).setEffectiveWeight(1).play();
@@ -455,7 +501,7 @@ export class CharacterRig {
         this.current = next;
       }
       const nextUpper = upperName ? this.half(upperName, 'upper') : null;
-      if (nextUpper !== this.upper) {
+      if (nextUpper !== this.upper && !legsOnly) {
         const shot = upperName !== null && upperName === this.shotName;
         if (this.upper) this.upper.fadeOut(shot ? 0.05 : 0.18);
         if (nextUpper) {
@@ -490,6 +536,11 @@ export class CharacterRig {
     if (this.override) {
       this.overrideTime += dt;
       if (this.overrideTime >= this.overrideEnds - 0.08) {
+        if (this.overrideUpper) {
+          // The upper body's clip is done: the state's clip comes back whole over the legs it kept.
+          this.stopOverride(0.12);
+          return;
+        }
         // Fade straight from the one-off clip into the state's clip just before it holds its last
         // frame (not through the clip that played before it, which would show as a hitch).
         const state = this.state;

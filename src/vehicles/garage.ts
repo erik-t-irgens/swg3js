@@ -209,16 +209,45 @@ export class Garage {
     // A skinned model (a creature, a walker, a pod racer built on a skeleton) needs a skeleton of
     // its own: a plain clone shares the loaded scene's bones, and its mesh then draws where that
     // scene stands, at the origin, however the vehicle moves.
-    const animated = loaded.animations.length > 0;
     let skinned = false;
     loaded.scene.traverse((o) => {
       if ((o as THREE.SkinnedMesh).isSkinnedMesh) skinned = true;
     });
     const model = skinned ? cloneSkinned(loaded.scene) : loaded.scene.clone();
-    // What the client data hangs on the hull, before the hull is measured: a wing is part of the
-    // ship's box and its collision, and its hardpoints (the thrusters') count with the hull's.
-    // The game's attachments are modelled in the hull's frame: they sit at its origin unless
-    // the client data names a hardpoint or gives a place. A wing that opens keeps its hinge.
+    const wings = await this.attachParts(def, model);
+    const bounds = this.frameModel(def, model);
+    const hardpoints: string[] = [];
+    return this.finishSpawn(def, model, wings, bounds, hardpoints, loaded.animations, physics, scene, x, y, z, heading, kind, place);
+  }
+
+  /**
+   * A vehicle as a picture only, for another player's ride seen across the relay: the model with
+   * its parts hung on it and framed as a spawned one is, its rooms hidden, with no physics.
+   */
+  async visual(def: VehicleDef): Promise<THREE.Object3D> {
+    const loaded = await this.model(def);
+    let skinned = false;
+    loaded.scene.traverse((o) => {
+      if ((o as THREE.SkinnedMesh).isSkinnedMesh) skinned = true;
+    });
+    const model = skinned ? cloneSkinned(loaded.scene) : loaded.scene.clone();
+    await this.attachParts(def, model);
+    this.frameModel(def, model);
+    model.traverse((o) => {
+      if (cellIndexOf(o) > 0) o.visible = false;
+    });
+    const holder = new THREE.Group();
+    holder.add(model);
+    return holder;
+  }
+
+  /**
+   * What the client data hangs on the hull, before the hull is measured: a wing is part of the
+   * ship's box and its collision, and its hardpoints (the thrusters') count with the hull's.
+   * The game's attachments are modelled in the hull's frame: they sit at its origin unless
+   * the client data names a hardpoint or gives a place. A wing that opens keeps its hinge.
+   */
+  private async attachParts(def: VehicleDef, model: THREE.Object3D): Promise<Vehicle['wings']> {
     const wings: Vehicle['wings'] = [];
     for (const a of def.attachments ?? []) {
       try {
@@ -247,15 +276,15 @@ export class Garage {
         console.warn(`garage: ${def.id}: ${a.kind} ${a.file} did not load`, err);
       }
     }
+    return wings;
+  }
+
+  /**
+   * The vehicle's box, and the model moved so the box is centred on the vehicle and stands on
+   * its underside (a creature keeps its pack's bounds and its place). Returns the bounds.
+   */
+  private frameModel(def: VehicleDef, model: THREE.Object3D): VehicleSpec['bounds'] {
     let bounds = def.bounds;
-    const hardpoints: string[] = [];
-    // The guns: a gun part's own muzzle when it names one, else the weapon hardpoint it hangs on,
-    // each firing the way its hardpoint points (forward, for a fixed gun).
-    const guns: { muzzle: { pos: THREE.Vector3; dir: THREE.Vector3 }[]; mount: { pos: THREE.Vector3; dir: THREE.Vector3 }[] } = { muzzle: [], mount: [] };
-    // Where the engines glow, by what the hardpoints are called, best first: the engine parts'
-    // own glow points, the client data's thruster points, any exhaust, any numbered engine.
-    const engineSpots: { glow: THREE.Vector3[]; thruster: THREE.Vector3[]; exhaust: THREE.Vector3[]; engine: THREE.Vector3[] } = { glow: [], thruster: [], exhaust: [], engine: [] };
-    const seat = { point: null as THREE.Vector3 | null, cockpit: null as THREE.Vector3 | null };
     if (!bounds || def.source !== 'creature') {
       // A machine's box is measured from the model itself: the pack's bounds are the mesh file's
       // own, which for a substituted appearance can be another mesh's, and a wrong box is a
@@ -290,7 +319,17 @@ export class Garage {
         if (Math.max(w, h, l) > 40) console.warn(`garage: ${def.id} measures ${w.toFixed(1)}×${h.toFixed(1)}×${l.toFixed(1)} m, more than a vehicle should; its model may carry an effect plane or a far part`);
       }
     }
-    if (!bounds) bounds = { min: [-0.5, 0, -1], max: [0.5, 1, 1] };
+    return bounds ?? { min: [-0.5, 0, -1], max: [0.5, 1, 1] };
+  }
+
+  private async finishSpawn(def: VehicleDef, model: THREE.Object3D, wings: Vehicle['wings'], bounds: VehicleSpec['bounds'], hardpoints: string[], animations: THREE.AnimationClip[], physics: Physics, scene: THREE.Scene, x: number, y: number, z: number, heading: number, kind: VehicleKind, place?: (bounds: VehicleSpec['bounds']) => [number, number, number]): Promise<Vehicle> {
+    // The guns: a gun part's own muzzle when it names one, else the weapon hardpoint it hangs on,
+    // each firing the way its hardpoint points (forward, for a fixed gun).
+    const guns: { muzzle: { pos: THREE.Vector3; dir: THREE.Vector3 }[]; mount: { pos: THREE.Vector3; dir: THREE.Vector3 }[] } = { muzzle: [], mount: [] };
+    // Where the engines glow, by what the hardpoints are called, best first: the engine parts'
+    // own glow points, the client data's thruster points, any exhaust, any numbered engine.
+    const engineSpots: { glow: THREE.Vector3[]; thruster: THREE.Vector3[]; exhaust: THREE.Vector3[]; engine: THREE.Vector3[] } = { glow: [], thruster: [], exhaust: [], engine: [] };
+    const seat = { point: null as THREE.Vector3 | null, cockpit: null as THREE.Vector3 | null };
     // The game's hardpoints ride along as hp:<name> nodes; a rider's, saddle's or seat's places the seat.
     // The loader strips the colon from a node's name ("hp:engine" arrives as "hpengine") and
     // keeps the original in userData, which is where the hardpoints are read.
@@ -402,10 +441,10 @@ export class Garage {
     // The cockpit view: the model's own point when it names one, else the seated pilot's eyes over the seat (a hardpoint's, or the kind's own place, where the rider is drawn).
     if (spec.ship) v.cockpit = seat.cockpit ? [seat.cockpit.x, seat.cockpit.y, seat.cockpit.z] : [spec.seat[0], spec.seat[1] + SEATED_EYE, spec.seat[2]];
     if (def.source !== 'creature') collectPanes(v);
-    if (animated) {
+    if (animations.length) {
       // Its own idle, walk and run, picked by speed: an animal's, or a walker's from its animation table.
       const mixer = new THREE.AnimationMixer(model);
-      const clips = new Map(loaded.animations.map((a) => [a.name, a]));
+      const clips = new Map(animations.map((a) => [a.name, a]));
       const pick = (names: string[]) => names.map((n) => clips.get(n)).find((c) => c);
       const idle = pick(['idle', 'loop_stand:speed0']);
       const walk = pick(['walk', 'loop_stand:speed1']);

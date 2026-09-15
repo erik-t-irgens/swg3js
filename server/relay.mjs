@@ -7,7 +7,9 @@
 //
 // Messages, JSON, client to relay:
 //   { t: 'hello', name, species, class, planet, zone }   who and where; sent on joining and on travel
-//   { t: 'state', p: [x, y, z], h, s, v }                position, heading, rig state, speed
+//   { t: 'state', p: [x, y, z], h, s, v, m, sab, q?, veh? }   position, heading, rig state, speed, mounted, saber lit,
+//                                                          the whole turn as a quaternion (aboard, adrift), the vehicle
+//                                                          ridden { id, p, q, role: ride|pilot|aboard, pose }
 //   { t: 'emote', clip }
 // Relay to client:
 //   { t: 'welcome', id, peers: [{ id, hello, state }] }
@@ -110,6 +112,16 @@ function onMessage(c, text) {
     const p = Array.isArray(msg.p) && msg.p.length === 3 ? msg.p.map(Number) : null;
     if (!p || p.some((v) => !Number.isFinite(v))) return;
     c.state = { p, h: Number(msg.h) || 0, s: typeof msg.s === 'string' ? msg.s.slice(0, 32) : 'idle', v: Number(msg.v) || 0, m: !!msg.m, sab: !!msg.sab };
+    // The figure's whole turn, and the vehicle it is on: numbers checked, names kept short.
+    const quat = (q) => (Array.isArray(q) && q.length === 4 && q.every((v) => Number.isFinite(Number(v))) ? q.map(Number) : null);
+    const q = quat(msg.q);
+    if (q) c.state.q = q;
+    const veh = msg.veh;
+    if (veh && typeof veh === 'object' && typeof veh.id === 'string') {
+      const vp = Array.isArray(veh.p) && veh.p.length === 3 ? veh.p.map(Number) : null;
+      const vq = quat(veh.q);
+      if (vp && !vp.some((v) => !Number.isFinite(v)) && vq) c.state.veh = { id: veh.id.slice(0, 48), p: vp, q: vq, role: ['ride', 'pilot', 'aboard'].includes(veh.role) ? veh.role : 'ride', pose: typeof veh.pose === 'string' ? veh.pose.slice(0, 48) : undefined };
+    }
     broadcast({ t: 'state', id: c.id, ...c.state }, c);
   } else if (msg.t === 'emote') {
     if (!c.hello || typeof msg.clip !== 'string') return;
