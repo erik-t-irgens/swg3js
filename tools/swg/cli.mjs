@@ -1794,7 +1794,7 @@ async function snapshotPlanet(vfs, planet, outDir) {
         objects.push({ template, model: p.id, x: e.world.pos[0], y: e.world.pos[1], z: e.world.pos[2], q: e.world.q, radius: Math.max(n.radius, p.bounds.max[0]), contained: e.parentId !== 0 });
         continue;
       }
-      const single = r.parts.length === 1 && !r.parts[0].transform && !r.effects?.length;
+      const single = r.parts.length === 1 && !r.parts[0].transform && !r.effects?.length && !r.parts[0].hardpoints?.length;
       const id = familyOf(single ? r.parts[0].mesh : r.appearance);
       if (!models.has(id)) {
         if (models.size >= max) break;
@@ -2037,7 +2037,7 @@ switch (cmd) {
       }
       const r = resolveTemplateMesh(vfs, template, new Map());
       if (r.skip) throw new Error(`${template}: ${r.skip}`);
-      const single = r.parts.length === 1 && !r.parts[0].transform && !r.effects?.length;
+      const single = r.parts.length === 1 && !r.parts[0].transform && !r.effects?.length && !r.parts[0].hardpoints?.length;
       appearance = single ? r.parts[0].mesh : r.appearance;
       console.log(`${template} -> ${appearance}`);
     }
@@ -2602,7 +2602,7 @@ switch (cmd) {
       if (r.skip) return { skip: r.skip };
       if (r.particle) return { skip: 'particle effect' };
       if (r.skeletal) return { skip: 'skeletal appearance' };
-      const single = r.parts.length === 1 && !r.parts[0].transform && !r.effects?.length;
+      const single = r.parts.length === 1 && !r.parts[0].transform && !r.effects?.length && !r.parts[0].hardpoints?.length;
       const id = familyOf(single ? r.parts[0].mesh : r.appearance);
       if (!models.has(id)) {
         try {
@@ -2645,7 +2645,7 @@ switch (cmd) {
       if (r.skip) return { skip: r.skip };
       if (r.particle) return { skip: 'particle effect' };
       if (r.skeletal) return { skip: 'skeletal appearance' };
-      const single = r.parts.length === 1 && !r.parts[0].transform && !r.effects?.length;
+      const single = r.parts.length === 1 && !r.parts[0].transform && !r.effects?.length && !r.parts[0].hardpoints?.length;
       const id = familyOf(single ? r.parts[0].mesh : r.appearance);
       if (!models.has(id)) {
         try {
@@ -2689,10 +2689,82 @@ switch (cmd) {
       if (!def || def.failed) return { skip: def?.failed ?? 'failed' };
       return { file: def.file, cells: def.cells?.length ?? 0 };
     };
+    // A model of an appearance for something that hangs on a hull (a wing, an engine, a cockpit frame).
+    const { parseClientData, parseCockpit } = await import('./shipdata.mjs');
+    const convertAppearance = (appearance, suffix = '') => {
+      const path = appearance.replace(/\\/g, '/').replace(/^\//, '');
+      const id = `${familyOf(path)}${suffix}`;
+      if (!models.has(id)) {
+        try {
+          if (!vfs.has(path)) throw new Error(`Not in archives: ${path}`);
+          const conv = convertOne(vfs, path, join(outDir, `${id}.glb`));
+          models.set(id, { id, file: `${id}.glb`, triangles: conv.tris, textured: conv.textured, shaders: conv.shaders.length, parts: conv.partCount, ...(conv.tris ? {} : { failed: 'no triangles' }) });
+        } catch (err) {
+          models.set(id, { id, failed: err.message });
+        }
+      }
+      const def = models.get(id);
+      return !def || def.failed ? { skip: def?.failed ?? 'failed' } : { file: def.file };
+    };
+    // What the ship's client data hangs on the hull, and its cockpit frame: the wings (templates
+    // of their own, their appearances converted like the hull), an appearance shown while the
+    // drive runs, the thruster and contrail hardpoints, and the cockpit's frame with its offsets.
+    const extrasOf = (template) => {
+      const out = { attachments: [], thrusters: [], contrails: [], cockpit: null, notes: [] };
+      const cdf = resolveTemplateString(vfs, template, ['clientDataFile'], cache);
+      if (cdf) {
+        const cdfPath = cdf.replace(/\\/g, '/').replace(/^\//, '');
+        if (!vfs.has(cdfPath)) out.notes.push(`client data ${cdfPath} not in archives`);
+        else {
+          try {
+            const data = parseClientData(parseIff(vfs.read(cdfPath)));
+            for (const wing of data.wings) {
+              const r = resolveTemplateMesh(vfs, wing.template, cache);
+              if (r.skip || !r.appearance) {
+                out.notes.push(`wing ${wing.template}: ${r.skip ?? 'no appearance'}`);
+                continue;
+              }
+              const m = convertAppearance(r.appearance);
+              if (m.skip) out.notes.push(`wing ${wing.template}: ${m.skip}`);
+              else out.attachments.push({ kind: 'wing', file: m.file, template: wing.template, transform: wing.transform });
+            }
+            for (const on of data.onOff) {
+              const m = convertAppearance(on.appearance);
+              if (m.skip) out.notes.push(`engine appearance ${on.appearance}: ${m.skip}`);
+              else out.attachments.push({ kind: 'engine', file: m.file, hardpoint: on.hardpoint || null });
+            }
+            out.thrusters = data.thrusters.map((t) => t.hardpoint).filter(Boolean);
+            out.contrails = data.contrails.map((c) => c.hardpoint).filter(Boolean);
+            if (data.damage.length) out.damage = data.damage.map((d) => ({ from: d.from, to: d.to, hardpoint: d.hardpoint, position: d.transform ? d.transform.slice(0, 3) : null, particle: d.appearance || null }));
+            if (data.destroyed) out.destroyed = data.destroyed;
+          } catch (err) {
+            out.notes.push(`client data ${cdfPath}: ${err.message}`);
+          }
+        }
+      }
+      const cockpit = resolveTemplateString(vfs, template, ['cockpitFilename'], cache);
+      if (cockpit && !/noframe/i.test(cockpit)) {
+        const cpPath = cockpit.replace(/\\/g, '/').replace(/^\//, '');
+        if (!vfs.has(cpPath)) out.notes.push(`cockpit ${cpPath} not in archives`);
+        else {
+          try {
+            const cp = parseCockpit(parseIff(vfs.read(cpPath)));
+            if (cp.appearance) {
+              const m = convertAppearance(cp.appearance, '_cockpit');
+              if (m.skip) out.notes.push(`cockpit ${cp.appearance}: ${m.skip}`);
+              else out.cockpit = { file: m.file, zoom: cp.zoom, first: cp.first, firstOffset: cp.firstOffset, thirdOffset: cp.thirdOffset };
+            }
+          } catch (err) {
+            out.notes.push(`cockpit ${cpPath}: ${err.message}`);
+          }
+        }
+      }
+      return out;
+    };
     const limit = options.limit ? Number(options.limit) : Infinity;
     const match = options.match ? new RegExp(options.match, 'i') : null;
     const templates = galleryTemplates(vfs, 'object/ship/player/').filter((t) => !match || match.test(t));
-    const { ships, skipped } = buildShips(templates, { convert, interiorOf, convertInterior }, { log: console.log, limit });
+    const { ships, skipped } = buildShips(templates, { convert, interiorOf, convertInterior, extrasOf }, { log: console.log, limit });
     const manifest = { classes: SHIP_CLASSES, ships, skipped, models: [...models.values()].filter((m) => !m.failed) };
     if (match) {
       // A matched run redoes some ships: the rest keep their place in the manifest.
@@ -2755,7 +2827,7 @@ switch (cmd) {
             if (!tris) console.log(`  ${template}: ${r.skeletal} converted with no triangles: ${[...info.missing, ...info.skipped].slice(0, 3).join('; ') || 'no meshes in it'}`);
           }
         } else {
-          const single = r.parts.length === 1 && !r.parts[0].transform && !r.effects?.length;
+          const single = r.parts.length === 1 && !r.parts[0].transform && !r.effects?.length && !r.parts[0].hardpoints?.length;
           id = familyOf(single ? r.parts[0].mesh : r.appearance);
           if (!models.has(id)) {
             const conv = convertOne(vfs, single ? r.parts[0].mesh : r.appearance, join(outDir, `${id}.glb`));

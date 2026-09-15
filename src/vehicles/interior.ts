@@ -10,7 +10,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { cleanTrimesh, Group, groups, Physics, RAPIER, TRIMESH_FLAGS } from '../core/physics';
-import { ACTOR_LAYER, markActor } from '../world/portalRender';
+import { markActor } from '../world/portalRender';
 import type { Vehicle } from './vehicle';
 
 /** What the ships manifest says of an interior model: its cells and bounds, as a pack model carries them. */
@@ -70,10 +70,6 @@ function hardpointNameOf(o: THREE.Object3D): string | null {
   return m ? m[1] : null;
 }
 
-/** How much of a hull's window is seen through while someone is aboard. */
-const CLEAR_PANE = 0.45;
-/** A "glass" covering more of the shell's triangles than this is its skin under a glassy name, not a window. */
-const PANE_SHARE = 0.35;
 
 const inverse = new THREE.Matrix4();
 const localA = new THREE.Vector3();
@@ -93,14 +89,6 @@ export class ShipInterior {
   private colliders: RAPIER.Collider[] = [];
   /** The room nodes, to show only from inside when they are part of the hull model (a room drawn through the hull's skin looks wrong from outside). */
   private readonly rooms: THREE.Object3D[] = [];
-  /**
-   * The shell's window panes, each with its solid material (the game's own, for a hull with
-   * nobody aboard and its rooms hidden) and a clear one to show the rooms through while
-   * someone is aboard. The clear ones ride on hidden stand-in meshes so the background compile
-   * has them ready before the first boarding.
-   */
-  private readonly panes: { mesh: THREE.Mesh; index: number; solid: THREE.Material; clear: THREE.Material }[] = [];
-  private readonly standIns: THREE.Mesh[] = [];
   /** The shell's shadow casters: off while someone is aboard, so the sun reaches the rooms (which lie where the shell's shadow would fall). */
   private readonly shellCasters: THREE.Object3D[] = [];
   /** The rooms' point lights, in the hull's frame. */
@@ -256,42 +244,11 @@ export class ShipInterior {
   static fromHull(vehicle: Vehicle, gravity: number, def: InteriorDef = {}): ShipInterior | null {
     const meshes: THREE.Mesh[] = [];
     const rooms: THREE.Object3D[] = [];
-    const panes: ShipInterior['panes'] = [];
     const shellCasters: THREE.Object3D[] = [];
-    // How much of the shell each material covers: a glassy name on most of a hull is its skin.
-    const shellTris = new Map<THREE.Material, number>();
-    let shellTotal = 0;
-    vehicle.group.traverse((o) => {
-      const m = o as THREE.Mesh;
-      if (cellIndexOf(o) !== 0 || !m.isMesh) return;
-      const tris = (m.geometry.getIndex()?.count ?? m.geometry.getAttribute('position')?.count ?? 0) / 3;
-      const mats = Array.isArray(m.material) ? m.material : [m.material];
-      for (const mat of mats) shellTris.set(mat, (shellTris.get(mat) ?? 0) + tris / mats.length);
-      shellTotal += tris;
-    });
     vehicle.group.traverse((o) => {
       const cell = cellIndexOf(o);
       const m = o as THREE.Mesh;
-      if (cell === 0 && m.isMesh) {
-        if (m.castShadow) shellCasters.push(m);
-        // The shell's glass (marked by the converter): a clear copy of each pane's material to
-        // show the rooms through it while someone is aboard.
-        const mats = Array.isArray(m.material) ? m.material : [m.material];
-        mats.forEach((mat, i) => {
-          if (mat.userData.invisible || !(mat.userData.glass || (mat.transparent && mat.opacity < 1))) return;
-          if (shellTotal && (shellTris.get(mat) ?? 0) / shellTotal > PANE_SHARE) {
-            console.info(`${vehicle.spec.id}: "${mat.name}" covers ${Math.round(((shellTris.get(mat) ?? 0) / shellTotal) * 100)}% of the shell, kept solid`);
-            return;
-          }
-          const clear = mat.clone();
-          clear.userData = { ...mat.userData };
-          clear.transparent = true;
-          clear.opacity = Math.min(mat.transparent ? mat.opacity : 1, CLEAR_PANE);
-          clear.depthWrite = false;
-          panes.push({ mesh: m, index: i, solid: mat, clear });
-        });
-        return;
-      }
+      if (cell === 0 && m.isMesh && m.castShadow) shellCasters.push(m);
       if (cell <= 0) return;
       if (/^cell[:_]?\d+/.test(o.name)) rooms.push(o);
       if (m.isMesh) meshes.push(m);
@@ -299,19 +256,8 @@ export class ShipInterior {
     if (!meshes.length) return null;
     const interior = new ShipInterior(vehicle, vehicle.group, vehicle.group, meshes, def, gravity, false);
     interior.rooms.push(...rooms);
-    interior.panes.push(...panes);
     interior.shellCasters.push(...shellCasters);
     interior.readHardpointsAndLights(def);
-    // Hidden stand-ins carrying the clear materials: the world's material scan compiles every
-    // mesh in the scene, seen or not, so the clear panes are ready before the first boarding.
-    for (const p of panes) {
-      const standIn = new THREE.Mesh(p.mesh.geometry, p.clear);
-      standIn.visible = false;
-      standIn.castShadow = false;
-      standIn.layers.enable(ACTOR_LAYER);
-      vehicle.group.add(standIn);
-      interior.standIns.push(standIn);
-    }
     interior.reveal(false);
     return interior;
   }
@@ -329,12 +275,10 @@ export class ShipInterior {
     // own windows; the hull's shadow on the ground outside returns when they step off.
     for (const c of this.shellCasters) c.castShadow = !aboard;
     // The hull's glass is the game's own solid pane while the rooms are hidden (nothing behind it
-    // to see) and clear while someone is aboard, so those outside see them in.
-    for (const p of this.panes) {
-      const want = aboard ? p.clear : p.solid;
-      if (Array.isArray(p.mesh.material)) p.mesh.material[p.index] = want;
-      else p.mesh.material = want;
-    }
+    // to see) and clear while someone is aboard, so those outside see them in (the vehicle's own
+    // panes, shared with a pilot at the controls).
+    this.vehicle.occupied = aboard;
+    this.vehicle.setGlassClear(aboard);
   }
 
   /**
@@ -429,10 +373,7 @@ export class ShipInterior {
         const m = o as THREE.Mesh;
         if (m.isMesh) m.geometry.dispose();
       });
-    } else {
-      this.reveal(true);
-      for (const s of this.standIns) this.vehicle.group.remove(s);
-    }
+    } else this.reveal(true);
     this.physics.world.free();
     this.colliders = [];
   }

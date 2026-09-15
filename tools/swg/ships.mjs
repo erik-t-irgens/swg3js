@@ -33,7 +33,9 @@ export function shipLabelOf(template) {
  * Build the ships manifest. `deps.convert(template)` converts a template into the pack's models,
  * returning { model, file, bounds } or { skip }; `deps.interiorOf(template)` names the ship's
  * interior layout (a .pob path) or null; `deps.convertInterior(template, pob)` converts it,
- * returning { file, cells } or { skip }. Ships whose exterior fails are listed with why.
+ * returning { file, cells } or { skip }; `deps.extrasOf(template)` converts what the ship's client
+ * data hangs on the hull (wings, an engine appearance) and its cockpit frame, returning
+ * { attachments, thrusters, contrails, cockpit, notes }. Ships whose exterior fails are listed with why.
  */
 export function buildShips(templates, deps, { log = () => {}, limit = Infinity } = {}) {
   const ships = [];
@@ -53,8 +55,11 @@ export function buildShips(templates, deps, { log = () => {}, limit = Infinity }
     } else if (r.cells) interior = { hull: true, cells: r.cells };
     const b = r.bounds;
     const length = b ? b.max[2] - b.min[2] : 0;
-    ships.push({ id, label: id.replace(/_/g, ' '), template, class: shipClassOf(`${template} ${r.model}`), file: r.file, model: r.model, bounds: b, length: Number(length.toFixed(2)), interior });
-    log(`${id}: ${SHIP_CLASSES[shipClassOf(template)]}, ${length.toFixed(1)} m${interior ? interior.failed ? `, interior ${pob} failed: ${interior.failed}` : interior.hull ? `, ${interior.cells} rooms in the hull model` : `, interior ${pob}: ${interior.cells} cells` : ', no interior named by its template'}`);
+    // What hangs on the hull and the cockpit frame, from the ship's client data and cockpit files.
+    const extras = deps.extrasOf?.(template) ?? { attachments: [], thrusters: [], contrails: [], cockpit: null, notes: [] };
+    ships.push({ id, label: id.replace(/_/g, ' '), template, class: shipClassOf(`${template} ${r.model}`), file: r.file, model: r.model, bounds: b, length: Number(length.toFixed(2)), interior, attachments: extras.attachments, thrusters: extras.thrusters, contrails: extras.contrails, cockpit: extras.cockpit, ...(extras.damage ? { damage: extras.damage } : {}), ...(extras.destroyed ? { destroyed: extras.destroyed } : {}), ...(extras.notes.length ? { notes: extras.notes } : {}) });
+    const hung = extras.attachments.length ? `, ${extras.attachments.filter((a) => a.kind === 'wing').length} wings, ${extras.attachments.filter((a) => a.kind === 'engine').length} engine appearances` : '';
+    log(`${id}: ${SHIP_CLASSES[shipClassOf(template)]}, ${length.toFixed(1)} m${interior ? interior.failed ? `, interior ${pob} failed: ${interior.failed}` : interior.hull ? `, ${interior.cells} rooms in the hull model` : `, interior ${pob}: ${interior.cells} cells` : ', no interior named by its template'}${hung}${extras.thrusters.length ? `, thrusters at ${extras.thrusters.join(' ')}` : ''}${extras.cockpit ? ', cockpit frame' : ''}${extras.notes.length ? `\n   ${extras.notes.join('\n   ')}` : ''}`);
   }
   ships.sort((a, b) => a.class.localeCompare(b.class) || a.id.localeCompare(b.id));
   return { ships, skipped };

@@ -225,6 +225,22 @@ export class Vehicle {
   onUpdate: ((dt: number, v: Vehicle, drive: DriveInput | null) => void) | null = null;
   /** A ship's interior, a room of its own inside the hull, once loaded. */
   interior: import('./interior').ShipInterior | null = null;
+  /** The cockpit frame drawn around the pilot (the game's cockpit file), hung in the hull at the cockpit point; shown while someone is at the controls. */
+  cockpitFrame: THREE.Object3D | null = null;
+  /** The first-person view's offset from the cockpit point, from the cockpit file. */
+  cockpitOffset: [number, number, number] = [0, 0, 0];
+  /** Appearances shown only while the drive runs (the game's "engine on" attachments). */
+  engineParts: THREE.Object3D[] = [];
+  /** Whether someone is in the hull's rooms; with a pilot at the controls, what clears the glass. */
+  occupied = false;
+  /**
+   * The hull's window panes (glass marked by the converter): each with its solid material, the
+   * game's own for a hull with nobody in it, and a clear copy shown while someone is aboard or
+   * at the controls, so those outside see in. The clear copies ride on hidden stand-in meshes
+   * so the background compile has their shaders ready before the first boarding.
+   */
+  readonly panes: { mesh: THREE.Mesh; index: number; solid: THREE.Material; clear: THREE.Material }[] = [];
+  private glassClear = false;
   /** Let go: no springs, no righting, no gravity; the body keeps whatever motion it was given (for testing the room inside). */
   drift = false;
 
@@ -336,6 +352,23 @@ export class Vehicle {
     });
     if (pieces) console.info(`${this.spec.id}: hull collision from ${pieces} meshes, ${triangles} triangles`);
     return pieces;
+  }
+
+  /** Where the first-person view sits, in the model's frame: the cockpit point with the cockpit file's offset. */
+  cockpitEye(out: THREE.Vector3): THREE.Vector3 | null {
+    if (!this.cockpit) return null;
+    return out.set(this.cockpit[0] + this.cockpitOffset[0], this.cockpit[1] + this.cockpitOffset[1], this.cockpit[2] + this.cockpitOffset[2]);
+  }
+
+  /** Swap the hull's glass between the game's solid pane and the clear copy (a material swap, nothing to compile). */
+  setGlassClear(on: boolean): void {
+    if (on === this.glassClear) return;
+    this.glassClear = on;
+    for (const p of this.panes) {
+      const want = on ? p.clear : p.solid;
+      if (Array.isArray(p.mesh.material)) p.mesh.material[p.index] = want;
+      else p.mesh.material = want;
+    }
   }
 
   quaternion(out: THREE.Quaternion): THREE.Quaternion {

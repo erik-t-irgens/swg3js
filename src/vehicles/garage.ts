@@ -18,6 +18,12 @@ export interface VehicleDef {
   interior?: { file: string; cells: number; def: import('./interior').InteriorDef } | null;
   /** What the manifest says of the hull model's own cells, when it is a portal building (rooms, their lights). */
   cells?: NonNullable<import('./interior').InteriorDef['cells']>;
+  /** What the ship's client data hangs on the hull: its wings, and an appearance shown while the drive runs. */
+  attachments?: { kind: 'wing' | 'engine'; file: string; hardpoint?: string | null; transform?: number[] | null }[];
+  /** The cockpit frame drawn around the pilot, with the first-person view's offset from the cockpit point. */
+  cockpit?: { file: string; zoom?: number[]; firstOffset?: number[]; thirdOffset?: number[] } | null;
+  /** The hardpoints the client data puts thruster effects at. */
+  thrusters?: string[];
   file: string;
   template?: string;
   bounds?: VehicleSpec['bounds'];
@@ -75,12 +81,28 @@ export class Garage {
       const res = await fetch(`${baseUrl}assets-private/ships/manifest.json`);
       if (res.ok && (res.headers.get('content-type') ?? '').includes('json')) {
         type Cells = NonNullable<import('./interior').InteriorDef['cells']>;
-        const manifest = (await res.json()) as { ships: { id: string; label: string; template: string; file: string; bounds?: VehicleSpec['bounds']; class: string; interior: { file?: string; cells?: number; failed?: string } | null }[]; models?: { file: string; bounds?: { min: number[]; max: number[] }; cells?: Cells }[] };
+        type Attachment = NonNullable<VehicleDef['attachments']>[number];
+        type Cockpit = NonNullable<VehicleDef['cockpit']>;
+        const manifest = (await res.json()) as { ships: { id: string; label: string; template: string; file: string; bounds?: VehicleSpec['bounds']; class: string; interior: { file?: string; cells?: number; failed?: string } | null; attachments?: Attachment[]; cockpit?: Cockpit | null; thrusters?: string[] }[]; models?: { file: string; bounds?: { min: number[]; max: number[] }; cells?: Cells }[] };
         const modelByFile = new Map((manifest.models ?? []).map((m) => [m.file, m]));
         for (const sh of manifest.ships) {
           const im = sh.interior?.file ? modelByFile.get(sh.interior.file) : undefined;
           const hull = modelByFile.get(sh.file);
-          g.vehicles.push({ id: sh.id, label: `${sh.label} (${sh.class})`, kind: 'ship', inferred: true, source: 'ship', file: `assets-private/ships/${sh.file}`, template: sh.template, bounds: sh.bounds, interior: sh.interior?.file ? { file: `assets-private/ships/${sh.interior.file}`, cells: sh.interior.cells ?? 0, def: { bounds: im?.bounds, cells: im?.cells } } : null, cells: hull?.cells });
+          g.vehicles.push({
+            id: sh.id,
+            label: `${sh.label} (${sh.class})`,
+            kind: 'ship',
+            inferred: true,
+            source: 'ship',
+            file: `assets-private/ships/${sh.file}`,
+            template: sh.template,
+            bounds: sh.bounds,
+            interior: sh.interior?.file ? { file: `assets-private/ships/${sh.interior.file}`, cells: sh.interior.cells ?? 0, def: { bounds: im?.bounds, cells: im?.cells } } : null,
+            cells: hull?.cells,
+            attachments: (sh.attachments ?? []).map((a) => ({ ...a, file: `assets-private/ships/${a.file}` })),
+            cockpit: sh.cockpit ? { ...sh.cockpit, file: `assets-private/ships/${sh.cockpit.file}` } : null,
+            thrusters: sh.thrusters ?? [],
+          });
         }
       }
     } catch (err) {
@@ -135,6 +157,24 @@ export class Garage {
   async spawn(def: VehicleDef, physics: Physics, scene: THREE.Scene, x: number, y: number, z: number, heading: number, kind: VehicleKind = def.kind, place?: (bounds: VehicleSpec['bounds']) => [number, number, number]): Promise<Vehicle> {
     const loaded = await this.model(def);
     const model = def.source === 'creature' ? cloneSkinned(loaded.scene) : loaded.scene.clone();
+    // What the client data hangs on the hull, before the hull is measured: a wing is part of the
+    // ship's box and its collision, and its hardpoints (the thrusters') count with the hull's.
+    // The game's attachments are modelled in the hull's frame: they sit at its origin unless
+    // the client data names a hardpoint or gives a place.
+    for (const a of def.attachments ?? []) {
+      try {
+        const part = (await this.model({ file: a.file } as VehicleDef)).scene.clone();
+        part.userData.attachment = a.kind;
+        const hp = a.hardpoint ? findHardpoint(model, a.hardpoint) : null;
+        if (hp) {
+          model.updateMatrixWorld(true);
+          part.position.copy(hp.getWorldPosition(new THREE.Vector3())).sub(model.getWorldPosition(new THREE.Vector3()));
+        } else if (a.transform && a.transform.length >= 3 && a.transform.slice(0, 3).some((n) => n !== 0)) part.position.set(a.transform[0], a.transform[1], a.transform[2]);
+        model.add(part);
+      } catch (err) {
+        console.warn(`garage: ${def.id}: ${a.kind} ${a.file} did not load`, err);
+      }
+    }
     let bounds = def.bounds;
     const hardpoints: string[] = [];
     const engines: THREE.Vector3[] = [];
@@ -183,8 +223,9 @@ export class Garage {
       hardpoints.push(name);
       const local = () => o.getWorldPosition(new THREE.Vector3()).sub(model.getWorldPosition(new THREE.Vector3())).add(model.position);
       if (!seat.point && /rider|saddle|seat|driver|pilot|passenger|player|mount/i.test(name)) seat.point = local();
-      // The game's engines are separate parts a player fits; their hardpoints say where the glow goes.
-      if (/engine|thrust|exhaust|booster|(^|[_:])eng\d/i.test(name)) engines.push(local());
+      // The thrusters: the hardpoints the client data puts them at, else any named for an exhaust
+      // (not the "engine on" appearance's or the engine sound's, which sit at the hull's origin).
+      if (def.thrusters?.length ? def.thrusters.includes(name) : /exhaust|thrust|booster|engine_glow|^engine\d*$|(^|[_:])eng\d/i.test(name)) engines.push(local());
       if (!seat.cockpit && /cockpit|canopy|camera|view|pilot/i.test(name)) seat.cockpit = local();
     });
     if (hardpoints.length) console.info(`garage: ${def.id} hardpoints: ${hardpoints.join(', ')}`);
@@ -196,9 +237,36 @@ export class Garage {
     } else if (seat.point) spec.seat = [seat.point.x, seat.point.y, seat.point.z];
     const v = new Vehicle(spec, model, physics, scene, x, y - bounds.min[1] + spec.hover, z, heading);
     v.hardpoints = hardpoints;
+    model.traverse((o) => {
+      if (o.userData.attachment === 'engine') {
+        o.visible = false;
+        v.engineParts.push(o);
+      }
+    });
     if (def.source !== 'creature') addEngineGlow(v, engines);
-    // The cockpit view: the model's own point when it names one, else forward of the middle at eye height.
-    if (spec.ship) v.cockpit = seat.cockpit ? [seat.cockpit.x, seat.cockpit.y, seat.cockpit.z] : [0, bounds.min[1] + (bounds.max[1] - bounds.min[1]) * 0.7, bounds.min[2] + (bounds.max[2] - bounds.min[2]) * 0.72];
+    // The cockpit view: the model's own point when it names one, else the seated pilot's eyes over the seat, else forward of the middle at eye height.
+    if (spec.ship) v.cockpit = seat.cockpit ? [seat.cockpit.x, seat.cockpit.y, seat.cockpit.z] : seat.point ? [seat.point.x, seat.point.y + 1.15, seat.point.z] : [0, bounds.min[1] + (bounds.max[1] - bounds.min[1]) * 0.7, bounds.min[2] + (bounds.max[2] - bounds.min[2]) * 0.72];
+    // The cockpit frame, hung at the cockpit point: the instruments and canopy around the pilot,
+    // seen from outside through the glass and from the eyes in first person.
+    if (spec.ship && def.cockpit && v.cockpit) {
+      try {
+        const frame = (await this.model({ file: def.cockpit.file } as VehicleDef)).scene.clone();
+        frame.traverse((o) => {
+          o.userData.cockpit = true;
+          const m = o as THREE.Mesh;
+          if (m.isMesh) m.castShadow = false;
+        });
+        frame.position.fromArray(v.cockpit);
+        frame.visible = false;
+        v.group.add(frame);
+        v.cockpitFrame = frame;
+        const off = def.cockpit.firstOffset;
+        if (off && off.length >= 3) v.cockpitOffset = [off[0], off[1], off[2]];
+      } catch (err) {
+        console.warn(`garage: ${def.id}: its cockpit frame did not load`, err);
+      }
+    }
+    if (def.source !== 'creature') collectPanes(v);
     if (def.source === 'creature' && loaded.animations.length) {
       const mixer = new THREE.AnimationMixer(model);
       const clips = new Map(loaded.animations.map((a) => [a.name, a]));
@@ -226,6 +294,62 @@ export class Garage {
       };
     }
     return v;
+  }
+}
+
+/** The node of a model's hardpoint by name, or null. */
+function findHardpoint(model: THREE.Object3D, name: string): THREE.Object3D | null {
+  let found: THREE.Object3D | null = null;
+  const want = name.toLowerCase();
+  model.traverse((o) => {
+    if (!found && hardpointName(o)?.toLowerCase() === want) found = o;
+  });
+  return found;
+}
+
+/** How much of a hull's glass is seen through while someone is aboard or at the controls. */
+const CLEAR_PANE = 0.45;
+/** A "glass" covering more of the hull's triangles than this is its skin under a glassy name, not a window. */
+const PANE_SHARE = 0.35;
+
+/**
+ * The hull's glass (the converter marks it by name): a clear copy of each pane's material, on
+ * a hidden stand-in mesh so the background compile has its shader ready, swapped in while
+ * someone is in the ship. A portal building's rooms (cells past the shell) are left alone.
+ */
+function collectPanes(v: Vehicle): void {
+  const tris = new Map<THREE.Material, number>();
+  let total = 0;
+  const meshes: THREE.Mesh[] = [];
+  v.group.traverse((o) => {
+    const m = o as THREE.Mesh;
+    if (!m.isMesh || cellIndexOf(o) > 0 || m.userData.cockpit) return;
+    meshes.push(m);
+    const n = (m.geometry.getIndex()?.count ?? m.geometry.getAttribute('position')?.count ?? 0) / 3;
+    const mats = Array.isArray(m.material) ? m.material : [m.material];
+    for (const mat of mats) tris.set(mat, (tris.get(mat) ?? 0) + n / mats.length);
+    total += n;
+  });
+  for (const m of meshes) {
+    const mats = Array.isArray(m.material) ? m.material : [m.material];
+    mats.forEach((mat, i) => {
+      if (mat.userData.invisible || !(mat.userData.glass || (mat.transparent && mat.opacity < 1))) return;
+      if (total && (tris.get(mat) ?? 0) / total > PANE_SHARE) {
+        console.info(`${v.spec.id}: "${mat.name}" covers ${Math.round(((tris.get(mat) ?? 0) / total) * 100)}% of the hull, kept solid`);
+        return;
+      }
+      const clear = mat.clone();
+      clear.userData = { ...mat.userData };
+      clear.transparent = true;
+      clear.opacity = Math.min(mat.transparent ? mat.opacity : 1, CLEAR_PANE);
+      clear.depthWrite = false;
+      v.panes.push({ mesh: m, index: i, solid: mat, clear });
+      const standIn = new THREE.Mesh(m.geometry, clear);
+      standIn.visible = false;
+      standIn.castShadow = false;
+      standIn.layers.enable(ACTOR_LAYER);
+      v.group.add(standIn);
+    });
   }
 }
 
@@ -257,6 +381,11 @@ function addEngineGlow(v: Vehicle, engines: THREE.Vector3[] = []): void {
   v.onUpdate = (dt, self, drive) => {
     base?.(dt, self, drive);
     const throttle = drive ? Math.max(0, drive.throttle) : 0;
+    // The drive's own appearance while it runs; the cockpit frame and clear glass while someone is at the controls or aboard.
+    const running = throttle > 0 || self.airborne || Math.abs(self.speed) > 1;
+    for (const p of self.engineParts) p.visible = running;
+    if (self.cockpitFrame) self.cockpitFrame.visible = drive !== null;
+    self.setGlassClear(drive !== null || self.occupied);
     const k = size * (0.35 + 0.65 * Math.min(1, Math.abs(self.speed) / self.spec.maxSpeed) + 0.4 * throttle + (self.boosting ? 0.6 : 0)) * (self.overheated > 0 ? 0.4 + 0.3 * Math.random() : 1);
     for (const g of glows) g.scale.set(k, k, 1);
     mat.opacity = 0.55 + 0.45 * Math.min(1, Math.abs(self.speed) / 8 + throttle);

@@ -1182,9 +1182,10 @@ class App {
     const { player, input } = this;
     const ship = player.mounted?.spec.ship && player.mounted.airborne && !input.held('freeLook') ? player.mounted : null;
     if (ship) {
-      this.cam.chase(input, dt, ship.pos, ship.attitude, ship.heading, 6 + ship.radius * 2.2, ship.cockpit ? tmp.fromArray(ship.cockpit) : null);
-      // In the cockpit the hull would fill the view: it is hidden until the camera comes back out.
-      ship.group.visible = !this.cam.firstPerson;
+      this.cam.chase(input, dt, ship.pos, ship.attitude, ship.heading, 6 + ship.radius * 2.2, ship.cockpitEye(tmp));
+      // In the cockpit the hull would fill the view: it is hidden until the camera comes back out,
+      // unless the ship has a cockpit frame, when the view is from inside it and the hull stays.
+      ship.group.visible = !this.cam.firstPerson || !!ship.cockpitFrame;
     } else {
       this.cam.release();
       if (player.mounted?.spec.ship) player.mounted.group.visible = true;
