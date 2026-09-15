@@ -10,6 +10,49 @@ export const Group = { terrain: 0x0001, exterior: 0x0002, interior: 0x0004, all:
 /** Rapier interaction groups: membership in the high half, filter in the low half. */
 export const groups = (membership: number, filter: number): number => ((membership << 16) | filter) >>> 0;
 
+/**
+ * A mesh's triangles made safe for a trimesh collider: indices past the vertices, triangles with
+ * a repeated corner or no area, and non-finite vertices are dropped (a bad triangle in a
+ * trimesh the character controller meets is a panic inside the engine, after which every call
+ * into it fails as "recursive use"), and the engine merges duplicates and doubles on top.
+ */
+export const TRIMESH_FLAGS = RAPIER.TriMeshFlags.MERGE_DUPLICATE_VERTICES | RAPIER.TriMeshFlags.DELETE_DEGENERATE_TRIANGLES | RAPIER.TriMeshFlags.DELETE_DUPLICATE_TRIANGLES;
+
+export function cleanTrimesh(vertices: Float32Array, indices: Uint32Array): { vertices: Float32Array; indices: Uint32Array; dropped: number } | null {
+  const count = Math.floor(vertices.length / 3);
+  const out: number[] = [];
+  let dropped = 0;
+  for (let i = 0; i + 2 < indices.length; i += 3) {
+    const a = indices[i];
+    const b = indices[i + 1];
+    const c = indices[i + 2];
+    if (a >= count || b >= count || c >= count || a === b || b === c || a === c) {
+      dropped++;
+      continue;
+    }
+    const ax = vertices[a * 3];
+    const ay = vertices[a * 3 + 1];
+    const az = vertices[a * 3 + 2];
+    const ux = vertices[b * 3] - ax;
+    const uy = vertices[b * 3 + 1] - ay;
+    const uz = vertices[b * 3 + 2] - az;
+    const vx = vertices[c * 3] - ax;
+    const vy = vertices[c * 3 + 1] - ay;
+    const vz = vertices[c * 3 + 2] - az;
+    const nx = uy * vz - uz * vy;
+    const ny = uz * vx - ux * vz;
+    const nz = ux * vy - uy * vx;
+    const area2 = nx * nx + ny * ny + nz * nz;
+    if (!Number.isFinite(area2) || area2 < 1e-12) {
+      dropped++;
+      continue;
+    }
+    out.push(a, b, c);
+  }
+  if (out.length < 3) return null;
+  return { vertices, indices: Uint32Array.from(out), dropped };
+}
+
 export { RAPIER };
 
 export const FIXED_DT = 1 / 60;

@@ -4,7 +4,7 @@
 // animal mounts) turn in place and stay on their feet, flyers (landspeeders as flying cars, gunships
 // and airspeeders as aircraft) climb and sink on Space and Ctrl and hold their height over the ground.
 import * as THREE from 'three';
-import { RAPIER, type Physics } from '../core/physics';
+import { cleanTrimesh, RAPIER, TRIMESH_FLAGS, type Physics } from '../core/physics';
 import { cellIndexOf } from './interior';
 
 export type VehicleKind = 'podracer' | 'speederbike' | 'ground' | 'flyer' | 'ship';
@@ -307,12 +307,14 @@ export class Vehicle {
       const mesh = o as THREE.Mesh;
       if (!mesh.isMesh || (mesh as THREE.SkinnedMesh).isSkinnedMesh || cellIndexOf(o) > 0) return;
       const posAttr = mesh.geometry.getAttribute('position');
-      if (!posAttr || posAttr.count < 3) return;
+      if (!posAttr || posAttr.count < 3 || posAttr.itemSize !== 3 || (posAttr as THREE.InterleavedBufferAttribute).isInterleavedBufferAttribute) return;
       const idx = mesh.geometry.getIndex();
-      const indices = idx ? new Uint32Array(idx.array as ArrayLike<number>) : Uint32Array.from({ length: posAttr.count - (posAttr.count % 3) }, (_, i) => i);
-      if (indices.length < 3) return;
+      const raw = idx ? new Uint32Array(idx.array as ArrayLike<number>) : Uint32Array.from({ length: posAttr.count - (posAttr.count % 3) }, (_, i) => i);
+      const clean = cleanTrimesh(new Float32Array(posAttr.array as ArrayLike<number>), raw);
+      if (!clean) return;
+      const indices = clean.indices;
       new THREE.Matrix4().copy(groupInverse).multiply(mesh.matrixWorld).decompose(p, q, sc);
-      let vertices = new Float32Array(posAttr.array as ArrayLike<number>);
+      let vertices = clean.vertices;
       if (Math.abs(sc.x - 1) > 1e-4 || Math.abs(sc.y - 1) > 1e-4 || Math.abs(sc.z - 1) > 1e-4) {
         // A scaled node: the scale goes into the vertices, since a collider has none.
         vertices = vertices.slice();
@@ -322,7 +324,7 @@ export class Vehicle {
           vertices[i + 2] *= sc.z;
         }
       }
-      const desc = RAPIER.ColliderDesc.trimesh(vertices, indices).setTranslation(p.x, p.y, p.z).setRotation({ x: q.x, y: q.y, z: q.z, w: q.w }).setFriction(0.4).setRestitution(0.1);
+      const desc = RAPIER.ColliderDesc.trimesh(vertices, indices, TRIMESH_FLAGS).setTranslation(p.x, p.y, p.z).setRotation({ x: q.x, y: q.y, z: q.z, w: q.w }).setFriction(0.4).setRestitution(0.1);
       // The mass properties are in the collider's own frame: the box's centre, moved back into it.
       if (pieces === 0) {
         const c = new THREE.Vector3(mass.centre.x, mass.centre.y, mass.centre.z).sub(p).applyQuaternion(q.clone().invert());

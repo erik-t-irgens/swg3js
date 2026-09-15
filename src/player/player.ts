@@ -400,9 +400,22 @@ export class Player {
     controller.setMaxSlopeClimbAngle((55 * Math.PI) / 180);
     controller.setMinSlopeSlideAngle((60 * Math.PI) / 180);
     controller.enableSnapToGround(0.35);
-    controller.setApplyImpulsesToDynamicBodies(true);
+    // The figure does not push the vehicles it walks into: the engine's push works the contact
+    // between the figure and the body's shape, and with a hull's own triangles as that shape it
+    // panicked the moment a figure landed on a ship, after which every call into the engine
+    // failed ("recursive use of an object"). __debug.pushBodies(true) turns it back on to check.
+    controller.setApplyImpulsesToDynamicBodies(Player.pushBodies);
     controller.setCharacterMass(80);
     return { body, collider, controller };
+  }
+
+  /** Whether the figure pushes dynamic bodies it walks into (see makeBody). */
+  static pushBodies = false;
+
+  setPushBodies(on: boolean): void {
+    Player.pushBodies = on;
+    this.controller.setApplyImpulsesToDynamicBodies(on);
+    this.worldBody?.controller.setApplyImpulsesToDynamicBodies(on);
   }
 
   /**

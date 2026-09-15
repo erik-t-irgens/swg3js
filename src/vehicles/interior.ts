@@ -9,7 +9,7 @@
 // cell:<index>:<name> nodes beside the shell, cell 0 (the yacht, the Sorosuub cruisers).
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { Group, groups, Physics, RAPIER } from '../core/physics';
+import { cleanTrimesh, Group, groups, Physics, RAPIER, TRIMESH_FLAGS } from '../core/physics';
 import { ACTOR_LAYER, markActor } from '../world/portalRender';
 import type { Vehicle } from './vehicle';
 
@@ -126,16 +126,19 @@ export class ShipInterior {
     const corner = new THREE.Vector3();
     for (const m of meshes) {
       const posAttr = m.geometry.getAttribute('position');
-      if (!posAttr || posAttr.count < 3) continue;
+      if (!posAttr || posAttr.count < 3 || posAttr.itemSize !== 3 || (posAttr as THREE.InterleavedBufferAttribute).isInterleavedBufferAttribute) continue;
       const idx = m.geometry.getIndex();
-      const indices = idx ? new Uint32Array(idx.array as ArrayLike<number>) : Uint32Array.from({ length: posAttr.count - (posAttr.count % 3) }, (_, i) => i);
+      const raw = idx ? new Uint32Array(idx.array as ArrayLike<number>) : Uint32Array.from({ length: posAttr.count - (posAttr.count % 3) }, (_, i) => i);
+      const clean = cleanTrimesh(new Float32Array(posAttr.array as ArrayLike<number>), raw);
+      if (!clean) continue;
+      const indices = clean.indices;
       // The mesh's own place within the hull, since the colliders are in the hull's frame.
       const local = new THREE.Matrix4().copy(frameInverse).multiply(m.matrixWorld);
       const p = new THREE.Vector3();
       const q = new THREE.Quaternion();
       const s = new THREE.Vector3();
       local.decompose(p, q, s);
-      const desc = RAPIER.ColliderDesc.trimesh(new Float32Array(posAttr.array as ArrayLike<number>), indices)
+      const desc = RAPIER.ColliderDesc.trimesh(clean.vertices, indices, TRIMESH_FLAGS)
         .setTranslation(p.x, p.y, p.z)
         .setRotation({ x: q.x, y: q.y, z: q.z, w: q.w })
         .setFriction(0.8)
