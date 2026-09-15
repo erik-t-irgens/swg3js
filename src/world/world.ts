@@ -603,6 +603,7 @@ export class World {
     this.bolts.clear();
     this.gallery?.dispose();
     this.gallery = null;
+    this.spaceStations = [];
     for (const sp of this.vehicles) sp.dispose(this.physics, this.scene);
     this.vehicles.length = 0;
     this.props?.dispose();
@@ -643,8 +644,25 @@ export class World {
   /** A space zone's planets and moons: textured spheres hung far out in the directions the zone's terrain file gives, riding with the camera like the sky. */
   private spaceBodies: THREE.Group | null = null;
 
+  /** The zone's stations by name, in the game's coordinates, for the map. */
+  private spaceStations: { name: string; x: number; z: number }[] = [];
+
+  /** The name of the station standing at a point (the nearest within a kilometre), else a plain word. */
+  stationNameAt(x: number, z: number): string {
+    let best: string | null = null;
+    let bestD = 1000;
+    for (const s of this.spaceStations) {
+      const d = Math.hypot(s.x - x, s.z - z);
+      if (d < bestD) {
+        bestD = d;
+        best = s.name;
+      }
+    }
+    return best ? `station ${best.replace(/^station_/, '').replace(/_/g, ' ')}` : 'station';
+  }
+
   private async loadSpaceBodies(pack: AssetPack): Promise<void> {
-    type SpaceData = { planets: { direction: number[]; size: number; texture: string | null }[] };
+    type SpaceData = { planets: { direction: number[]; size: number; texture: string | null }[]; stations?: { name: string; x: number; y: number; z: number }[] };
     let data: SpaceData | null = null;
     try {
       const res = await fetch(pack.url('space.json'));
@@ -653,6 +671,8 @@ export class World {
       data = null;
     }
     if (!data) return;
+    // The stations' names, at the game's mirrored X.
+    this.spaceStations = (data.stations ?? []).map((s) => ({ name: s.name, x: -s.x, z: s.z }));
     const group = new THREE.Group();
     const loader = new THREE.TextureLoader();
     for (const p of data.planets) {

@@ -16,10 +16,10 @@ export interface MapSource {
   /** The pack's layout centre in the game's own coordinates (the snapshot's), which the map image and the places are in. */
   center(): { x: number; z: number } | null;
   pois(packId: string): Promise<Poi[]>;
-  /** The zone's placed objects, in the game's coordinates: the rocks and the stations. */
-  objects(): readonly { x: number; y: number; z: number; radius: number }[];
-  /** The ships about, the player's own first. */
-  ships(): { x: number; y: number; z: number; quaternion: THREE.Quaternion; mine: boolean }[];
+  /** The zone's placed objects, in the game's coordinates: the rocks and the stations (named). */
+  objects(): readonly { x: number; y: number; z: number; radius: number; station: boolean; name?: string }[];
+  /** The ships about (and the player on foot), the player's own first, each named for the cursor. */
+  ships(): { x: number; y: number; z: number; quaternion: THREE.Quaternion; mine: boolean; label: string }[];
   onTeleport(poi: Poi): void;
 }
 
@@ -32,8 +32,6 @@ type Tab = 'here' | 'galaxy';
 
 /** A place drawn no larger than this (metres) is a dot; larger ones get a ring of their own size. */
 const POI_RING_MIN = 200;
-/** Objects at least this wide are drawn as stations in space. */
-const STATION_RADIUS = 100;
 
 export class MapUi {
   readonly root: HTMLElement;
@@ -69,7 +67,12 @@ export class MapUi {
   private readonly shipMarks = new THREE.Group();
   private readonly drop: THREE.Line;
   private objectsFor = '';
+  private objectCount = 0;
   private panning3d = false;
+  /** What the cursor is over in the space view, named beside it. */
+  private readonly tip = document.createElement('div');
+  private readonly raycaster = new THREE.Raycaster();
+  private readonly hover = { x: -1, y: -1 };
 
   constructor(
     parent: HTMLElement,
@@ -95,8 +98,11 @@ export class MapUi {
     this.readout = this.root.querySelector<HTMLElement>('.map-readout')!;
     this.canvas2d.className = 'map2d';
     this.canvas3d.className = 'map3d';
+    this.tip.className = 'map-tip';
+    this.tip.hidden = true;
     this.hereBody.appendChild(this.canvas2d);
     this.hereBody.appendChild(this.canvas3d);
+    this.hereBody.appendChild(this.tip);
     this.ctx = this.canvas2d.getContext('2d')!;
     // The galaxy tab's body: the cards, made by the galaxy map into the panel.
     galaxy.root.remove();
@@ -403,7 +409,13 @@ export class MapUi {
       e.preventDefault();
     });
     c.addEventListener('contextmenu', (e) => e.preventDefault());
+    c.addEventListener('pointerleave', () => {
+      this.hover.x = -1;
+      this.tip.hidden = true;
+    });
     c.addEventListener('pointermove', (e) => {
+      this.hover.x = e.offsetX;
+      this.hover.y = e.offsetY;
       if (!this.dragging && !this.panning3d) return;
       const dx = e.clientX - this.lastX;
       const dy = e.clientY - this.lastY;
@@ -449,11 +461,13 @@ export class MapUi {
       (s as THREE.Mesh).geometry.dispose();
     }
     const objects = this.source.objects();
+    this.objectCount = objects.length;
     const pos: number[] = [];
     for (const o of objects) {
-      if (o.radius >= STATION_RADIUS) {
+      if (o.station) {
         const m = new THREE.Mesh(new THREE.OctahedronGeometry(Math.max(80, o.radius * 0.6)), new THREE.MeshBasicMaterial({ color: 0xffd27f, wireframe: true }));
         m.position.set(o.x, o.y, o.z);
+        m.name = o.name ?? 'station';
         this.stations.add(m);
       } else pos.push(o.x, o.y, o.z);
     }
@@ -479,7 +493,8 @@ export class MapUi {
       this.camera3d.updateProjectionMatrix();
     }
     const here = this.source.here();
-    if (this.objectsFor !== here.packId || (this.rocks && (this.rocks.geometry.getAttribute('position') as THREE.BufferAttribute).count === 0 && this.source.objects().length)) this.rebuild3d(here.packId);
+    // Built once per zone, and again while the zone's objects are still arriving.
+    if (this.objectsFor !== here.packId || (this.objectCount === 0 && this.frame % 30 === 0)) this.rebuild3d(here.packId);
     // The ships: cones the way each points, the player's in orange; a dashed line from the player's down to the zone's plane.
     for (const s of [...this.shipMarks.children]) {
       this.shipMarks.remove(s);
@@ -492,6 +507,7 @@ export class MapUi {
       m.geometry.rotateX(Math.PI / 2);
       m.position.set(s.x, s.y, s.z);
       m.quaternion.copy(s.quaternion);
+      m.name = s.label;
       this.shipMarks.add(m);
     }
     const me = ships.find((s) => s.mine) ?? { x: 0, y: 0, z: 0 };
@@ -508,9 +524,41 @@ export class MapUi {
     this.camera3d.position.set(this.target3d.x + o.distance * Math.cos(o.pitch) * Math.sin(o.yaw), this.target3d.y + o.distance * Math.sin(o.pitch), this.target3d.z + o.distance * Math.cos(o.pitch) * Math.cos(o.yaw));
     this.camera3d.lookAt(this.target3d);
     r.render(this.scene3d, this.camera3d);
+    this.hover3d(w, h);
     const p = this.source.player();
     const heading = Math.round((THREE.MathUtils.radToDeg(p.heading) % 360 + 360) % 360);
-    this.readout.textContent = `${here.name} · ${Math.round(-p.x)}, ${Math.round(p.y)}, ${Math.round(p.z)} · heading ${heading}° · ${this.source.objects().length} objects · drag turns, right-drag slides, wheel zooms`;
+    this.readout.textContent = `${here.name} · ${Math.round(-p.x)}, ${Math.round(p.y)}, ${Math.round(p.z)} · heading ${heading}° · ${this.objectCount} objects · drag turns, right-drag slides, wheel zooms`;
     this.frame++;
+  }
+
+  /** Name what the cursor rests on: a rock, a station, a ship. */
+  private hover3d(w: number, h: number): void {
+    if (this.hover.x < 0 || this.dragging || this.panning3d) {
+      this.tip.hidden = true;
+      return;
+    }
+    const ndc = new THREE.Vector2((this.hover.x / w) * 2 - 1, -(this.hover.y / h) * 2 + 1);
+    this.raycaster.setFromCamera(ndc, this.camera3d);
+    // A dot is a few pixels wide: it is hit within a few pixels' worth of the distance to it.
+    this.raycaster.params.Points.threshold = this.orbit.distance * 0.008;
+    let label: string | null = null;
+    const ships = this.raycaster.intersectObjects(this.shipMarks.children, false);
+    if (ships.length) label = ships[0].object.name;
+    if (!label) {
+      const stations = this.raycaster.intersectObjects(this.stations.children, false);
+      if (stations.length) label = stations[0].object.name;
+    }
+    if (!label && this.rocks) {
+      const rocks = this.raycaster.intersectObject(this.rocks, false);
+      if (rocks.length) label = 'asteroid';
+    }
+    if (!label) {
+      this.tip.hidden = true;
+      return;
+    }
+    this.tip.textContent = label;
+    this.tip.hidden = false;
+    this.tip.style.left = `${this.hover.x + 14}px`;
+    this.tip.style.top = `${this.hover.y + 10}px`;
   }
 }

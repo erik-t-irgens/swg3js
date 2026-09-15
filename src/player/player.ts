@@ -35,6 +35,17 @@ const fwd = new THREE.Vector3();
 const rgt = new THREE.Vector3();
 const move = new THREE.Vector3();
 const tmpQ = new THREE.Quaternion();
+const AXIS_X = new THREE.Vector3(1, 0, 0);
+const AXIS_Y = new THREE.Vector3(0, 1, 0);
+const AXIS_Z = new THREE.Vector3(0, 0, 1);
+const evaFwd = new THREE.Vector3();
+const evaRight = new THREE.Vector3();
+const evaUp = new THREE.Vector3();
+/** Adrift in space: thrust (m/s²), the brake (m/s²), the fastest drift (m/s) and the roll (rad/s). */
+const EVA_ACCEL = 8;
+const EVA_BRAKE = 12;
+const EVA_MAX_SPEED = 60;
+const EVA_ROLL_RATE = 1.6;
 const seatOffset = new THREE.Vector3();
 const armDir = new THREE.Vector3();
 const aim = new THREE.Vector3();
@@ -475,6 +486,9 @@ export class Player {
       room.vehicle.group.updateMatrixWorld(true);
       this.group.position.copy(this.pos).applyMatrix4(room.vehicle.group.matrixWorld);
       this.group.quaternion.copy(room.vehicle.group.quaternion).multiply(tmpQ.setFromAxisAngle(UP_AXIS, this.heading));
+    } else if (this.eva) {
+      this.group.position.copy(this.pos);
+      this.group.quaternion.copy(this.evaFrame);
     } else {
       this.group.position.copy(this.pos);
       this.group.rotation.set(0, this.heading, 0);
@@ -501,6 +515,7 @@ export class Player {
     this.saber.holster();
     this.rig?.stopOverride(0);
     this.mounted = null;
+    this.eva = false;
     this.body.setEnabled(true);
     this.body.setTranslation({ x: p.x, y: p.y, z: p.z }, true);
     this.group.position.copy(p);
@@ -1036,6 +1051,77 @@ export class Player {
     this.body.setEnabled(false);
     this.vel.set(0, 0, 0);
     this.swing = -1;
+    this.eva = false;
+  }
+
+  /**
+   * Adrift in space on foot: no down, no ground. The body turns freely, the mouse yawing and
+   * pitching it in its own frame and the roll keys rolling it, and the view rides behind it
+   * however it is turned. The keys are thrusters: forward and back, sideways, up and down, each
+   * adding to a momentum that is kept until the brake takes it off, and a hull met on the way
+   * takes the speed into it. (Later this wants a jetpack to move and a helmet to live.)
+   */
+  eva = false;
+  /** The body's frame adrift: forward down its +Z, up its +Y. */
+  readonly evaFrame = new THREE.Quaternion();
+
+  private evaUpdate(dt: number, input: Input, cam: ThirdPersonCamera): void {
+    if (!this.eva) {
+      this.eva = true;
+      this.evaFrame.setFromAxisAngle(UP_AXIS, this.heading);
+      this.prone = false;
+      this.kneeling = false;
+      this.crouching = false;
+    }
+    this.rig?.stopOverride();
+    this.saber.holster();
+    this.thrown.cancel();
+    this.updateBlades();
+    const q = this.evaFrame;
+    // The mouse turns the body, unless Alt holds it for the view to look round.
+    if (input.locked && !input.held('freeLook')) {
+      const k = 0.0025 * cam.sensitivity;
+      if (input.mouseDX) q.multiply(tmpQ.setFromAxisAngle(AXIS_Y, -input.mouseDX * k));
+      if (input.mouseDY) q.multiply(tmpQ.setFromAxisAngle(AXIS_X, input.mouseDY * k * (cam.invertY ? -1 : 1)));
+      input.mouseDX = 0;
+      input.mouseDY = 0;
+    }
+    const roll = (input.held('rollLeft') ? 1 : 0) - (input.held('rollRight') ? 1 : 0);
+    if (roll) q.multiply(tmpQ.setFromAxisAngle(AXIS_Z, roll * EVA_ROLL_RATE * dt));
+    q.normalize();
+    evaFwd.set(0, 0, 1).applyQuaternion(q);
+    evaRight.set(1, 0, 0).applyQuaternion(q);
+    evaUp.set(0, 1, 0).applyQuaternion(q);
+    // Thrust along the body's axes; the brake takes speed off whichever way it points.
+    const ahead = (input.held('forward') ? 1 : 0) - (input.held('back') ? 1 : 0);
+    const side = (input.held('right') ? 1 : 0) - (input.held('left') ? 1 : 0);
+    const rise = (input.held('jump') ? 1 : 0) - (input.held('crouch') ? 1 : 0);
+    if (ahead || side || rise) {
+      move.set(0, 0, 0).addScaledVector(evaFwd, ahead).addScaledVector(evaRight, side).addScaledVector(evaUp, rise).normalize();
+      this.vel.addScaledVector(move, EVA_ACCEL * dt);
+    }
+    if (input.held('brake')) {
+      const speed = this.vel.length();
+      if (speed > 0) this.vel.multiplyScalar(Math.max(0, speed - EVA_BRAKE * dt) / speed);
+    }
+    if (this.vel.length() > EVA_MAX_SPEED) this.vel.setLength(EVA_MAX_SPEED);
+    // Move with the collider: a hull or a rock in the way stops the drift into it.
+    this.controller.disableSnapToGround();
+    this.controller.computeColliderMovement(this.collider, { x: this.vel.x * dt, y: this.vel.y * dt, z: this.vel.z * dt }, undefined, groups(Group.all, Group.all));
+    const mv = this.controller.computedMovement();
+    const wanted = this.vel.lengthSq() * dt * dt;
+    const got = mv.x * mv.x + mv.y * mv.y + mv.z * mv.z;
+    if (wanted > 1e-8 && got < wanted * 0.9) this.vel.set(mv.x, mv.y, mv.z).divideScalar(dt).multiplyScalar(0.5);
+    this.pos.x += mv.x;
+    this.pos.y += mv.y;
+    this.pos.z += mv.z;
+    this.grounded = false;
+    this.swimming = false;
+    this.body.setNextKinematicTranslation({ x: this.pos.x, y: this.pos.y, z: this.pos.z });
+    this.heading = Math.atan2(evaFwd.x, evaFwd.z);
+    this.group.position.copy(this.pos);
+    this.group.quaternion.copy(q);
+    this.animateRig(dt, 0, false);
   }
 
   dismount(to: THREE.Vector3): void {
@@ -1096,6 +1182,13 @@ export class Player {
       this.flyUpdate(dt, input, cam);
       return;
     }
+
+    // On foot in space, outside any ship's rooms: adrift.
+    if (world.planet.space && !this.aboard) {
+      this.evaUpdate(dt, input, cam);
+      return;
+    }
+    this.eva = false;
 
     const g = world.planet.gravity;
     const terrain = world.terrain;

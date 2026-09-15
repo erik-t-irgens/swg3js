@@ -60,6 +60,9 @@ const ACTION_LABELS: Record<Action, string> = {
   emote2: 'Emote 2',
   emote3: 'Emote 3',
   emote4: 'Emote 4',
+  brake: 'Brake (adrift in space)',
+  rollLeft: 'Roll left (adrift in space)',
+  rollRight: 'Roll right (adrift in space)',
 };
 
 /** "KeyW" reads as "W", "Mouse0" as "Left mouse", "ControlLeft" as "Left Ctrl". */

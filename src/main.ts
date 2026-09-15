@@ -262,14 +262,24 @@ class App {
       },
       center: () => this.world.layoutCenter,
       pois: (id) => galaxy.loadPois(id),
-      objects: () => this.world.placedObjects,
+      objects: () =>
+        this.world.placedObjects.map((o) => {
+          const station = o.template.includes('spacestation');
+          return { x: o.x, y: o.y, z: o.z, radius: o.radius, station, name: station ? this.world.stationNameAt(o.x, o.z) : undefined };
+        }),
       ships: () => {
         const p = this.player;
         const mine = p.mounted ?? p.piloting ?? p.aboard?.vehicle ?? null;
-        return this.world.vehicles
+        const out = this.world.vehicles
           .filter((v) => v.spec.ship)
-          .map((v) => ({ x: v.pos.x, y: v.pos.y, z: v.pos.z, quaternion: v.quaternion(new THREE.Quaternion()), mine: v === mine }))
+          .map((v) => ({ x: v.pos.x, y: v.pos.y, z: v.pos.z, quaternion: v.quaternion(new THREE.Quaternion()), mine: v === mine, label: v === mine ? 'your ship' : `a ship (${v.spec.label})` }))
           .sort((a, b) => (b.mine ? 1 : 0) - (a.mine ? 1 : 0));
+        // On foot (adrift), the player is the mark the view centres on.
+        if (!mine) {
+          const at = p.worldPos;
+          out.unshift({ x: at.x, y: at.y, z: at.z, quaternion: p.eva ? p.evaFrame.clone() : new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), p.heading), mine: true, label: 'you' });
+        }
+        return out;
       },
       onTeleport: (poi) => void this.teleport(this.world.planet, poi, this.zone),
     });
@@ -524,6 +534,23 @@ class App {
           this.input.endFrame();
         }
         if (!hold) for (const k of keys) this.input.force(k, false);
+      },
+      /** Draw `n` frames back to back with the GPU waited on after each, and report the milliseconds one takes; `bench(30, false)` first turns bloom (the effects) off, `bench(30, true)` on. */
+      bench: (n = 30, bloom?: boolean) => {
+        if (bloom !== undefined && bloom !== this.settings.bloom) {
+          this.settings.bloom = bloom;
+          this.setPostFX();
+        }
+        const gl = this.renderer.getContext();
+        this.drawFrame();
+        gl.finish();
+        const t0 = performance.now();
+        for (let i = 0; i < n; i++) {
+          this.drawFrame();
+          gl.finish();
+        }
+        const ms = (performance.now() - t0) / n;
+        return { effects: !!this.postfx, msPerFrame: Number(ms.toFixed(2)), fps: Math.round(1000 / ms), calls: this.frameCalls, passes: this.portals.passes };
       },
       /** Open or close the map window (M), on its `'here'` or `'galaxy'` tab. */
       map: (tab?: 'here' | 'galaxy') => {
@@ -1522,8 +1549,8 @@ class App {
     } else {
       this.cam.release();
       if (player.mounted?.spec.ship) player.mounted.group.visible = true;
-      // Aboard a ship the view is upright in the hull's frame, as the body is.
-      this.cam.setFrame(player.aboard ? player.aboard.vehicle.group.quaternion : null);
+      // Aboard a ship the view is upright in the hull's frame, as the body is; adrift in space, in the body's own.
+      this.cam.setFrame(player.aboard ? player.aboard.vehicle.group.quaternion : player.eva ? player.evaFrame : null);
       this.cam.update(input, player.worldPos, blocked, dt, this.eyes());
     }
   }
@@ -2045,6 +2072,14 @@ class App {
       // The floor beside the vehicle, by a ray from its own height: in a hangar that is the
       // hangar's floor, not the terrain under the building, which put the rider outside it.
       const from = sp.pos.y + 0.5;
+      if (this.world.planet.space) {
+        // Out into space: beside the hull where it is, carrying its motion, adrift.
+        tmp.y = sp.pos.y;
+        p.dismount(tmp);
+        const lv = sp.body.linvel();
+        p.vel.set(lv.x, lv.y, lv.z);
+        return;
+      }
       const hit = this.physics.groundDistance(tmp.x, from, tmp.z, 12, sp.body);
       tmp.y = hit !== null ? from - hit + 0.15 : Math.max(this.world.terrain.heightAt(tmp.x, tmp.z), this.world.terrain.waterLevel - 1) + 0.3;
       p.dismount(tmp);
@@ -2253,6 +2288,7 @@ class App {
       else if (this.world.elevatorsNear(player.pos, MOUNT_RANGE).length) prompt = `<b>E</b> elevator ${this.world.elevatorsNear(player.pos, MOUNT_RANGE)[0].kind === 'down' ? 'down' : 'up'}`;
       else if (player.piloting) prompt = `at the controls of the ${player.piloting.spec.label} · <b>W</b>/<b>S</b> throttle · mouse steers · <b>Alt</b> looks around · <b>E</b> lets go · ${Math.round(Math.abs(player.piloting.speed) * 3.6)} km/h${shipHint}`;
       else if (player.aboard) prompt = (player.aboard.pilotSpot && player.pos.distanceTo(player.aboard.pilotSpot) < CONTROLS_RANGE ? `<b>E</b> take the controls` : `aboard ${player.aboard.vehicle.spec.label} · <b>E</b> step out`) + (this.world.planet.space ? ` · <b>${shipKey}</b> ship menu` : '');
+      else if (player.eva) prompt = `adrift · <b>W/S</b> thrust ahead and back · <b>A/D</b> sideways · <b>Space/Ctrl</b> up and down · mouse turns · <b>Z/V</b> roll · <b>${keyName(input.bindings.brake[0] ?? '')}</b> brake · ${Math.round(player.vel.length() * 3.6)} km/h${this.nearestSpeederDistance() < MOUNT_RANGE ? (this.nearestHasRoom() ? ' · <b>E</b> board' : ' · <b>E</b> mount') : ''}`;
       else if (this.nearestSpeederDistance() < MOUNT_RANGE) prompt = this.nearestHasRoom() ? '<b>E</b> board' : '<b>E</b> mount';
       this.hud.setPrompt(prompt);
       const flying = player.mounted?.spec.ship && player.mounted.airborne && !input.held('freeLook') ? player.mounted : null;

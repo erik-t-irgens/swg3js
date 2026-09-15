@@ -12,6 +12,7 @@ import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
+import { FXAAShader } from 'three/examples/jsm/shaders/FXAAShader.js';
 
 /**
  * A camera motion blur from the depth buffer: each pixel's point is found in the world from its
@@ -112,22 +113,34 @@ export class PostFX {
   ) {
     this.options = { ...options };
     renderer.getDrawingBufferSize(this.size);
-    // The frame's own target: a stencil for the portals, a depth buffer the blur can read (a
-    // texture, resolved from the multisampled one after the frame), half floats for light
-    // brighter than white, and the same multisampling the screen had.
+    // The frame's own target: a stencil for the portals, a depth buffer the blur can read as a
+    // texture, and half floats for light brighter than white. It is not multisampled: the
+    // renderer resolves a multisampled target after every render() call, and the portal
+    // renderer makes a dozen of those a frame (the shadows, the world, each building's doors,
+    // depth reset and rooms), so multisampling here cost a full-screen resolve per pass and
+    // took the frame from 144 to 11 a second. The edges are smoothed by FXAA at the end instead.
     const depthTexture = new THREE.DepthTexture(this.size.x, this.size.y, THREE.UnsignedInt248Type);
     depthTexture.format = THREE.DepthStencilFormat;
-    this.target = new THREE.WebGLRenderTarget(this.size.x, this.size.y, { type: THREE.HalfFloatType, stencilBuffer: true, depthBuffer: true, samples: 4, depthTexture });
+    this.target = new THREE.WebGLRenderTarget(this.size.x, this.size.y, { type: THREE.HalfFloatType, stencilBuffer: true, depthBuffer: true, samples: 0, depthTexture });
     this.composer = new EffectComposer(renderer, this.target);
     this.composer.setPixelRatio(1);
     this.composer.setSize(this.size.x, this.size.y);
     this.bloom = new UnrealBloomPass(new THREE.Vector2(this.size.x / 2, this.size.y / 2), options.bloomStrength, 0.5, 0.85);
     this.blur = new ShaderPass(MOTION_BLUR);
     this.output = new OutputPass();
+    this.fxaa = new ShaderPass(FXAAShader);
     this.composer.addPass(this.bloom);
     this.composer.addPass(this.blur);
     this.composer.addPass(this.output);
+    this.composer.addPass(this.fxaa);
+    this.setFxaaSize();
     this.apply();
+  }
+
+  private readonly fxaa: ShaderPass;
+
+  private setFxaaSize(): void {
+    (this.fxaa.uniforms.resolution as { value: THREE.Vector2 }).value.set(1 / Math.max(1, this.size.x), 1 / Math.max(1, this.size.y));
   }
 
   /** Take the options as they now are. */
@@ -147,6 +160,7 @@ export class PostFX {
     this.renderer.getDrawingBufferSize(this.size);
     this.composer.setSize(this.size.x, this.size.y);
     this.bloom.setSize(this.size.x / 2, this.size.y / 2);
+    this.setFxaaSize();
     this.prevValid = false;
   }
 

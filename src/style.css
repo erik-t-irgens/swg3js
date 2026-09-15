@@ -72,6 +72,8 @@ b { color: var(--accent); font-weight: 600; }
 .map-body.here[hidden] { display: none; }
 .map2d, .map3d { display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; }
 .map2d[hidden], .map3d[hidden] { display: none; }
+.map-tip { position: absolute; padding: 3px 8px; font-size: 11px; color: var(--text); background: rgba(8,14,24,0.9); border: 1px solid var(--panel-border); border-radius: 4px; pointer-events: none; white-space: nowrap; }
+.map-tip[hidden] { display: none; }
 .map2d:active, .map3d:active { cursor: grabbing; }
 .galaxy-body { display: flex; flex-direction: column; min-height: 0; max-height: min(620px, 72vh); }
 .galaxy-body.hidden { display: none; }

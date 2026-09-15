@@ -37,7 +37,10 @@ export type Action =
   | 'emote1'
   | 'emote2'
   | 'emote3'
-  | 'emote4';
+  | 'emote4'
+  | 'brake'
+  | 'rollLeft'
+  | 'rollRight';
 
 /**
  * Default bindings, as KeyboardEvent codes and `Mouse<button>`. Crouch has X beside Ctrl
@@ -82,6 +85,10 @@ export const DEFAULT_BINDINGS: Record<Action, string[]> = {
   emote2: ['ArrowRight'],
   emote3: ['ArrowDown'],
   emote4: ['ArrowLeft'],
+  // Adrift in space on foot: the brake kills the drift, and the posture keys roll the body instead (there is no ground to lie on).
+  brake: ['KeyQ'],
+  rollLeft: ['KeyZ'],
+  rollRight: ['KeyV'],
 };
 const STORAGE_KEY = 'swg3js.bindings';
 
