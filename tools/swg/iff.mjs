@@ -50,15 +50,24 @@ export function find(node, name) {
   return findAll(node, name)[0];
 }
 
-export function dump(node, depth = 0, lines = []) {
+/**
+ * An IFF tree as lines. With `strings`, every run of printable text of four characters or more
+ * in a chunk is listed after it, so a file's names and paths can be read off (a ship's client
+ * data, a cockpit's) without knowing its layout.
+ */
+export function dump(node, depth = 0, lines = [], strings = false) {
   const pad = '  '.repeat(depth);
   if (isForm(node)) {
     lines.push(`${pad}FORM ${node.type} (${node.children.length} children)`);
-    for (const c of node.children) dump(c, depth + 1, lines);
+    for (const c of node.children) dump(c, depth + 1, lines, strings);
   } else {
     const preview = node.data.subarray(0, 16).toString('hex').replace(/(..)/g, '$1 ').trim();
     const text = node.data.subarray(0, 32).toString('latin1').replace(/[^\x20-\x7e]/g, '.');
     lines.push(`${pad}${node.tag} ${node.data.length} bytes  ${preview}  |${text}|`);
+    if (strings) {
+      const found = node.data.toString('latin1').match(/[\x20-\x7e]{4,}/g) ?? [];
+      if (found.length) lines.push(`${pad}  strings: ${found.join(' | ')}`);
+    }
   }
   return lines;
 }

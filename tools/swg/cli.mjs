@@ -5,7 +5,7 @@
 //   node tools/swg/cli.mjs headers <swg-dir>                      print the raw header of every archive (diagnostic)
 //   node tools/swg/cli.mjs list <swg-dir> [filter]                list files across archives (search priority applied)
 //   node tools/swg/cli.mjs extract <swg-dir> <path-in-archive> <out-file>
-//   node tools/swg/cli.mjs dump <file.iff> | <swg-dir> <path-in-archive>   print an IFF tree
+//   node tools/swg/cli.mjs dump <file.iff> | <swg-dir> <path-in-archive> [--strings]   print an IFF tree (--strings lists every readable string in each chunk)
 //   node tools/swg/cli.mjs weapons <swg-dir> <out-dir> [--limit=N]       every weapon the game can hold, with its class, under <out-dir>/weapons
 //   node tools/swg/cli.mjs ships <swg-dir> <out-dir> [--limit=N] [--match=yacht] [--glass=<regex>]   every ship a player can fly, with its interior when it has one, under <out-dir>/ships (--match redoes those ships only; --glass=<regex> marks more shaders as glass)
 //   node tools/swg/cli.mjs species <swg-dir> <out-dir> [--only=human,twilek_female] [--var=...]   every playable species and gender as parts, with characters/index.json for the character creator
@@ -1891,7 +1891,7 @@ switch (cmd) {
     if (pos[2]) buf = mount(pos[1]).read(pos[2]);
     else if (existsSync(pos[1]) && statSync(pos[1]).isFile()) buf = readFileSync(pos[1]);
     else usage();
-    console.log(dump(parseIff(buf)).join('\n'));
+    console.log(dump(parseIff(buf), 0, [], flags.has('--strings')).join('\n'));
     break;
   }
   case 'ash': {
