@@ -101,6 +101,12 @@ export class Garage {
             m.castShadow = true;
             m.frustumCulled = false;
             m.userData.shared = true;
+            // An invisible collidable surface (a room's window pane): not drawn, still a collider.
+            const mats = Array.isArray(m.material) ? m.material : [m.material];
+            if (mats.length && mats.every((mat) => mat.userData.invisible)) {
+              m.visible = false;
+              m.castShadow = false;
+            }
           }
         });
         return { scene: gltf.scene, animations: gltf.animations };

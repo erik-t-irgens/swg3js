@@ -194,18 +194,30 @@ function textureFor(vfs, shaderPath) {
   let result = null;
   try {
     const { main, slots, alphaMode, effect } = shaderTextures(parseIff(vfs.read(shaderPath)));
-    if (main && vfs.has(main)) {
+    if (/invisible/i.test(effect ?? '')) {
+      // An invisible collidable surface (the pane in a room's window opening, a rail you cannot
+      // cross): drawn as nothing, kept in the mesh for the colliders built from it.
+      result = { path: shaderPath, invisible: true, alphaMode: 'BLEND', opacity: 0, hasAlpha: false };
+    } else if (main && vfs.has(main)) {
       const dds = decodeDds(vfs.read(main));
       result = { path: main, png: encodePng(dds.width, dds.height, dds.rgba), hasAlpha: dds.hasAlpha, alphaMode: alphaFromEffect(vfs, effect, alphaMode) };
       // Glass: a window, a canopy or a cockpit whose texture carries alpha is see-through whatever
       // its effect says (the client's own glass effects blend, and a ship's windows drawn opaque
       // showed as slabs of their tint), so the outside shows through them.
       if (isGlass(shaderPath, main, effect, dds.hasAlpha) && result.alphaMode === 'OPAQUE') {
+        // Glass whose effect does not blend: the texture's alpha, when it has one, is the
+        // effect's reflection or specular mask, not transparency (blended with it the yacht's
+        // windows stayed slabs of green), so the pane shows the outside through a fixed share of
+        // its tint, the mask taken out of the image.
         result.alphaMode = 'BLEND';
-        // Glass whose texture has no alpha at all (a tinted pane the client drew with its own
-        // glass effect) shows the outside through a fixed share of its tint.
-        if (!dds.hasAlpha) result.opacity = GLASS_OPACITY;
+        result.opacity = GLASS_OPACITY;
         result.glass = true;
+        if (dds.hasAlpha) {
+          const rgba = new Uint8Array(dds.rgba);
+          for (let i = 3; i < rgba.length; i += 4) rgba[i] = 255;
+          result.png = encodePng(dds.width, dds.height, rgba);
+          result.hasAlpha = false;
+        }
       }
       Object.assign(result, surfaceFor(vfs, effect, slots, dds, result.alphaMode));
       const normalSlot = (slots ?? []).find((s) => /^(CNRM|NRML|DOT3)$/.test(s.slot));
@@ -2045,7 +2057,8 @@ switch (cmd) {
         const hasAlpha = main && vfs.has(main) ? decodeDds(vfs.read(main)).hasAlpha : null;
         const byEffect = alphaFromEffect(vfs, effect, alphaMode);
         const glass = isGlass(shader, main, effect, !!hasAlpha);
-        const decided = glass && byEffect === 'OPAQUE' ? `BLEND (glass${hasAlpha ? '' : `, opacity ${GLASS_OPACITY}`})` : byEffect;
+        const invisible = /invisible/i.test(effect ?? '');
+        const decided = invisible ? 'invisible (collision only)' : glass && byEffect === 'OPAQUE' ? `BLEND (glass, opacity ${GLASS_OPACITY}${hasAlpha ? ', the alpha taken as a mask' : ''})` : byEffect;
         line += `\n      effect ${effect ?? '(none)'}  texture ${main ?? '(none)'}${hasAlpha === null ? '' : hasAlpha ? ' with alpha' : ' no alpha'}  -> ${decided}`;
       } catch (err) {
         line += `\n      unreadable: ${err.message}`;

@@ -64,7 +64,12 @@ export function buildGlb(meshes, { flipX = true, textures = new Map(), skin = nu
     if (!materialIndex.has(shader)) {
       const mat = { name: shader, pbrMetallicRoughness: { baseColorFactor: [1, 1, 1, 1], metallicFactor: 0, roughnessFactor: 0.9 }, doubleSided: false };
       const tex = textures.get(shader);
-      if (tex) {
+      if (tex?.invisible) {
+        // Drawn as nothing; the runtime may hide the mesh outright, the colliders still see it.
+        mat.alphaMode = 'BLEND';
+        mat.pbrMetallicRoughness.baseColorFactor = [0, 0, 0, 0];
+        mat.extras = { invisible: true };
+      } else if (tex) {
         mat.pbrMetallicRoughness.baseColorTexture = { index: imageFor(tex) };
         if (tex.metallic !== undefined) mat.pbrMetallicRoughness.metallicFactor = tex.metallic;
         if (tex.roughness !== undefined) mat.pbrMetallicRoughness.roughnessFactor = tex.roughness;
