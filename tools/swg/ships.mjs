@@ -50,11 +50,11 @@ export function buildShips(templates, deps, { log = () => {}, limit = Infinity }
     if (pob) {
       const i = deps.convertInterior?.(template, pob) ?? { skip: 'no interior conversion' };
       interior = i.skip ? { pob, failed: i.skip } : { pob, file: i.file, cells: i.cells ?? 0 };
-    }
+    } else if (r.cells) interior = { hull: true, cells: r.cells };
     const b = r.bounds;
     const length = b ? b.max[2] - b.min[2] : 0;
     ships.push({ id, label: id.replace(/_/g, ' '), template, class: shipClassOf(`${template} ${r.model}`), file: r.file, model: r.model, bounds: b, length: Number(length.toFixed(2)), interior });
-    log(`${id}: ${SHIP_CLASSES[shipClassOf(template)]}, ${length.toFixed(1)} m${interior ? interior.failed ? `, interior ${pob} failed: ${interior.failed}` : `, interior ${pob}: ${interior.cells} cells` : ', no interior named by its template'}`);
+    log(`${id}: ${SHIP_CLASSES[shipClassOf(template)]}, ${length.toFixed(1)} m${interior ? interior.failed ? `, interior ${pob} failed: ${interior.failed}` : interior.hull ? `, ${interior.cells} rooms in the hull model` : `, interior ${pob}: ${interior.cells} cells` : ', no interior named by its template'}`);
   }
   ships.sort((a, b) => a.class.localeCompare(b.class) || a.id.localeCompare(b.id));
   return { ships, skipped };

@@ -5,6 +5,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { Vehicle, specFor, vehicleKindOf, type VehicleKind, type VehicleSpec } from './vehicle';
 import type { Physics } from '../core/physics';
 import { ACTOR_LAYER } from '../world/portalRender';
+import { cellIndexOf } from './interior';
 
 export interface VehicleDef {
   id: string;
@@ -124,7 +125,21 @@ export class Garage {
       // The model is then moved so the box is centred on the vehicle and sits on its underside:
       // a pod whose parts hang off to one side of its origin would otherwise stand its collider
       // where the mesh is not, and the rider could walk through the mesh.
-      const box = new THREE.Box3().setFromObject(model);
+      // A hull that is a portal building carries its rooms as cells beside the shell, and the
+      // game's rooms are often larger than the hull around them: the vehicle is the shell, cell 0.
+      const box = new THREE.Box3();
+      let shell = 0;
+      model.updateMatrixWorld(true);
+      model.traverse((o) => {
+        if (!(o as THREE.Mesh).isMesh || cellIndexOf(o) !== 0) return;
+        box.expandByObject(o);
+        shell++;
+      });
+      if (!shell) box.setFromObject(model);
+      else {
+        const all = new THREE.Box3().setFromObject(model);
+        console.info(`garage: ${def.id} is a portal building; its shell measures ${box.max.x - box.min.x | 0}×${box.max.y - box.min.y | 0}×${box.max.z - box.min.z | 0} m, its rooms with it ${all.max.x - all.min.x | 0}×${all.max.y - all.min.y | 0}×${all.max.z - all.min.z | 0} m`);
+      }
       if (!box.isEmpty()) {
         const w = box.max.x - box.min.x;
         const h = box.max.y - box.min.y;

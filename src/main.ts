@@ -1542,6 +1542,7 @@ class App {
   private boardShip(v: Vehicle): void {
     const room = v.interior;
     if (!room) return;
+    room.reveal(true);
     this.player.board(room, room.entry.clone());
     this.cam.zoomTarget = Math.min(this.cam.zoomTarget, 4);
     this.hud.setPrompt(`aboard: <b>E</b> steps out · the room has physics of its own · <b>__debug.shipDrift(2, 0.4)</b> sets the hull adrift to test it`);
@@ -1555,6 +1556,7 @@ class App {
     const v = room.vehicle;
     room.toWorld(p.pos, tmp);
     p.leave();
+    room.reveal(false);
     if (!fell) {
       v.quaternion(tmpQ);
       tmp.set(-(v.spec.bounds.max[0] - v.spec.bounds.min[0]) / 2 - 1.2, 0, 0).applyQuaternion(tmpQ).add(v.pos);

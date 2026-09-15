@@ -1244,13 +1244,16 @@ export class World {
     const v = await this.garage.spawn(def, this.physics, this.scene, at.x, at.y, at.z, heading, kind, place);
     markActor(v.group);
     this.vehicles.push(v);
+    const gravity = -this.physics.world.gravity.y;
     if (def.interior) {
       try {
-        v.interior = await ShipInterior.load(v, `${import.meta.env.BASE_URL}${def.interior.file}`, def.interior.def, -this.physics.world.gravity.y);
+        v.interior = await ShipInterior.load(v, `${import.meta.env.BASE_URL}${def.interior.file}`, def.interior.def, gravity);
       } catch (err) {
         console.warn(`${def.id}: its interior did not load`, err);
       }
     }
+    // A hull that is itself a portal building (the yacht) has its rooms inside the hull model.
+    if (!v.interior) v.interior = ShipInterior.fromHull(v, gravity);
     return v;
   }
 

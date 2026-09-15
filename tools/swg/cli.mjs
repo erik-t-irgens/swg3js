@@ -2582,14 +2582,15 @@ switch (cmd) {
           const b = conv.mesh.bounds ?? { min: [0, 0, 0], max: [0, 0, 0] };
           const bounds = conv.flipX ? { min: [-b.max[0], b.min[1], b.min[2]], max: [-b.min[0], b.max[1], b.max[2]] } : b;
           const effects = attachedEffects(vfs, conv.effects, outDir);
-          models.set(id, { id, file: `${id}.glb`, bounds, triangles: conv.tris, textured: conv.textured, shaders: conv.shaders.length, parts: conv.partCount, ...(effects.length ? { effects } : {}), ...(conv.tris ? {} : { failed: 'no triangles' }) });
+          // A hull that is a portal building (the yacht) carries its rooms as cells; the game boards them.
+          models.set(id, { id, file: `${id}.glb`, bounds, triangles: conv.tris, textured: conv.textured, shaders: conv.shaders.length, parts: conv.partCount, ...(conv.cells ? { cells: conv.cells, portals: conv.portals ?? [] } : {}), ...(effects.length ? { effects } : {}), ...(conv.tris ? {} : { failed: 'no triangles' }) });
         } catch (err) {
           models.set(id, { id, failed: err.message });
         }
       }
       const def = models.get(id);
       if (!def || def.failed) return { skip: def?.failed ?? 'failed' };
-      return { model: id, file: def.file, bounds: def.bounds };
+      return { model: id, file: def.file, bounds: def.bounds, cells: def.cells ? def.cells.filter((c) => c.index > 0).length : 0 };
     };
     // The interior the template names, whether or not the archives hold it: a missing one is
     // reported as such rather than passed over as if the ship had none.
