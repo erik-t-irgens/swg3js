@@ -304,6 +304,8 @@ export class Vehicle {
    * root offset placing the pelvis (a speeder bike's rider hardpoint is exactly its clip's root).
    */
   seatPelvis = false;
+  /** The seat rides a bone of the model's skeleton (an animal's back), so the rider moves with its gait; its world turn is then the rider's. */
+  seatFollows = false;
   /** The gun a ship fires, from the game's weapon table: its projectile (an index into the projectile table), speed and range in metres. */
   weapon: { name: string; projectile: number; speed: number; range: number } | null = null;
   /** The handles of the body's colliders, so a bolt's hit can be traced back to the vehicle. */

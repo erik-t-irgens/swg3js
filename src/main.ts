@@ -122,7 +122,6 @@ class App {
   /** The burns lit lightsabers leave on what they touch. */
   private readonly marks = new SaberMarks();
   private readonly bladeSegments = [0, 1, 2].map(() => ({ a: new THREE.Vector3(), b: new THREE.Vector3() }));
-  private readonly bladeColour = new THREE.Color();
   private readonly markPoint = new THREE.Vector3();
   private readonly markNormal = new THREE.Vector3();
   private kit!: Kit;
@@ -1078,14 +1077,13 @@ class App {
     if (player.aboard || player.noclip || !player.saberOn) return;
     const n = player.saberSegments(this.bladeSegments);
     if (!n) return;
-    this.bladeColour.set(player.bladeColor);
     for (let i = 0; i < n; i++) {
       const seg = this.bladeSegments[i];
       const hit = this.physics.surfaceHit(seg.a, seg.b, player.body, this.world.inside);
       if (!hit) continue;
       this.markPoint.fromArray(hit.point);
       this.markNormal.fromArray(hit.normal);
-      this.marks.touch(i, this.markPoint, this.markNormal, this.bladeColour);
+      this.marks.touch(i, this.markPoint, this.markNormal);
     }
   }
 

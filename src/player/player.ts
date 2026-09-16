@@ -766,7 +766,8 @@ export class Player {
   /** How high the eyes are over the feet in the posture held: standing, crouched, kneeling, or lying down. */
   get eyeHeight(): number {
     if (this.mounted || this.aboard || this.eva || this.swimming) return 1.5;
-    return this.prone ? 0.45 : this.kneeling ? 1.0 : this.crouching ? 1.05 : 1.5;
+    // A roll is a crouch that moves: the view stays down through it, as the game's does.
+    return this.prone ? 0.45 : this.kneeling ? 1.0 : this.crouching || this.jka.rolling ? 1.05 : 1.5;
   }
 
   /** Whether the blade in the right hand is a lightsaber (the placeholder's, or a hilt from the rack) rather than a sword or polearm. */
@@ -808,6 +809,8 @@ export class Player {
     const busy = this.saber.busy || this.swing >= 0;
     const swing = this.bladeActive ? 1 : busy ? 0.55 : 0;
     const away = this.thrown.inFlight || this.orbiting;
+    // Aboard, the sweep is remembered in the hull's frame, so the ship's own motion leaves no smear.
+    const hull = this.aboard ? this.aboard.vehicle.group.matrixWorld : null;
     for (const { frame, blade, snap, hiltTop } of this.blades) {
       const shown = isShown(frame);
       const length = blade.spec.length;
@@ -815,7 +818,7 @@ export class Player {
       frame.updateWorldMatrix(true, false);
       frame.localToWorld(bladeBase.set(0, hiltTop, 0));
       frame.localToWorld(bladeEnd.set(0, hiltTop + length, 0));
-      blade.update(dt, bladeBase, bladeEnd, shown, camera, swing, snap || away);
+      blade.update(dt, bladeBase, bladeEnd, shown, camera, swing, snap || away, hull);
     }
   }
 
@@ -1191,7 +1194,13 @@ export class Player {
     this.parts.bladeTip.getWorldPosition(b);
   }
 
+  /** Where a bolt leaves: the held gun's muzzle (the far end of its barrel), or the placeholder rifle's. */
   muzzle(out: THREE.Vector3): THREE.Vector3 {
+    const right = this.reach.right;
+    if (right && this.held.right && this.equipped.right && FIGHTS[this.equipped.right.class] === 'gun') {
+      right.far.updateWorldMatrix(true, false);
+      return right.far.getWorldPosition(out);
+    }
     return this.parts.muzzle.getWorldPosition(out);
   }
 
@@ -1310,7 +1319,9 @@ export class Player {
     if (!this.mounted) return;
     this.mounted.group.updateMatrixWorld(true);
     this.mounted.seat.getWorldPosition(this.pos);
-    this.mounted.quaternion(tmpQ);
+    // A seat riding an animal's back turns with it: the rider sways with the gait.
+    if (this.mounted.seatFollows) this.mounted.seat.getWorldQuaternion(tmpQ);
+    else this.mounted.quaternion(tmpQ);
     // A seat that names where the pelvis goes: the riding clip's own root offset comes off, in
     // the vehicle's frame, so the pelvis lands on the seat whatever pose is playing.
     const clip = this.rig?.currentClip;
@@ -1485,7 +1496,8 @@ export class Player {
       c.smove = mx;
       c.walk = walking;
       c.crouch = this.crouching;
-      c.roll = input.pressedAction('crouch') && moving && !this.saber.busy;
+      // A crouch tap on the move rolls, as the game's does, unless a swing is in its cutting part (its wind-up and return may be rolled out of).
+      c.roll = input.pressedAction('crouch') && moving && !this.saber.attacking;
       c.jump = jump;
       c.jumpPressed = jumpPressed && !this.saber.busy;
       c.attack = input.held('attack');

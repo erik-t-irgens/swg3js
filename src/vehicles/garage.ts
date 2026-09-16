@@ -441,6 +441,7 @@ export class Garage {
     // The cockpit view: the model's own point when it names one, else the seated pilot's eyes over the seat (a hardpoint's, or the kind's own place, where the rider is drawn).
     if (spec.ship) v.cockpit = seat.cockpit ? [seat.cockpit.x, seat.cockpit.y, seat.cockpit.z] : [spec.seat[0], spec.seat[1] + SEATED_EYE, spec.seat[2]];
     if (def.source !== 'creature') collectPanes(v);
+    if (def.source === 'creature' && !animations.length) attachSeatToBack(v, model);
     if (animations.length) {
       // Its own idle, walk and run, picked by speed: an animal's, or a walker's from its animation table.
       const mixer = new THREE.AnimationMixer(model);
@@ -452,6 +453,17 @@ export class Garage {
       const actions = new Map<string, THREE.AnimationAction>();
       for (const c of [idle, walk, run]) if (c) actions.set(c.name, mixer.clipAction(c).setLoop(THREE.LoopRepeat, Infinity));
       let current: THREE.AnimationAction | null = null;
+      // A mount's seat rides its back: hung on the skeleton once the idle has posed it (its rest pose
+      // can stand far from any animated one), so only the gait's own motion reaches the rider.
+      if (def.source === 'creature') {
+        const first = idle ?? walk ?? run;
+        if (first) {
+          current = actions.get(first.name)!;
+          current.reset().setEffectiveWeight(1).play();
+          mixer.update(0);
+        }
+        attachSeatToBack(v, model);
+      }
       v.onUpdate = (dt, self) => {
         const s = Math.abs(self.speed);
         const want = s < 0.4 ? idle : s < 5 ? (walk ?? run) : (run ?? walk);
@@ -470,6 +482,40 @@ export class Garage {
     }
     return v;
   }
+}
+
+/**
+ * Hang a mount's seat on the bone of its skeleton nearest the saddle (a spine bone over the back),
+ * keeping where the seat is, so the rider rises and sways with the animal's walk and run rather
+ * than sitting still over a body that moves under them. A model with no skeleton keeps the fixed seat.
+ */
+function attachSeatToBack(v: Vehicle, model: THREE.Object3D): void {
+  model.traverse((o) => {
+    const sm = o as THREE.SkinnedMesh;
+    if (sm.isSkinnedMesh) sm.skeleton.bones.forEach((b) => b.updateMatrixWorld(true));
+  });
+  v.group.updateMatrixWorld(true);
+  const seatAt = v.seat.getWorldPosition(new THREE.Vector3());
+  let best: THREE.Bone | null = null;
+  let bestD = Infinity;
+  const at = new THREE.Vector3();
+  model.traverse((o) => {
+    const bone = o as THREE.Bone;
+    if (!bone.isBone) return;
+    // The head, tail, legs and the root are not the back: a spine bone is, or failing a name, the nearest.
+    const name = bone.name.toLowerCase();
+    if (/head|neck|jaw|tail|leg|foot|toe|knee|thigh|calf|shin|ankle|ear|eye|tongue|wing|arm|hand|finger/.test(name)) return;
+    bone.getWorldPosition(at);
+    const d = at.distanceTo(seatAt) * (/spine|back|pelvis|hip|body|torso|chest/.test(name) ? 0.7 : 1);
+    if (d < bestD) {
+      bestD = d;
+      best = bone;
+    }
+  });
+  if (!best) return;
+  (best as THREE.Bone).attach(v.seat);
+  v.seatFollows = true;
+  console.info(`garage: ${v.spec.id}: the seat rides the ${(best as THREE.Bone).name} bone, ${bestD.toFixed(2)} m from the saddle`);
 }
 
 /**

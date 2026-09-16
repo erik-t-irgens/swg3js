@@ -99,6 +99,7 @@ const side = new THREE.Vector3();
 const pt = new THREE.Vector3();
 const end = new THREE.Vector3();
 const mid = new THREE.Vector3();
+const localBase = new THREE.Vector3();
 
 export class SaberBlade {
   readonly group = new THREE.Group();
@@ -111,6 +112,10 @@ export class SaberBlade {
   private readonly history: { a: THREE.Vector3; b: THREE.Vector3; age: number }[] = [];
   /** How far the blade is out, 0 to 1. */
   private lit = 0;
+  /** The frame the sweep is remembered in (a moving ship's hull), and whether there is one. */
+  private readonly frameM = new THREE.Matrix4();
+  private readonly frameInv = new THREE.Matrix4();
+  private framed = false;
   spec: BladeSpec = { length: 1.1, width: 0.12, open: IGNITE, close: IGNITE };
 
   constructor() {
@@ -148,12 +153,25 @@ export class SaberBlade {
    * Draw the blade from `base` (the hilt's emitter) toward `tip` (the full blade's end) this frame.
    * `on` ignites or retracts it; `swing` (0 to 1) is how hard it is being swung, which lengthens the smear.
    */
-  update(dt: number, base: THREE.Vector3, tip: THREE.Vector3, on: boolean, camera: THREE.Camera, swing: number, snap = false): void {
+  update(dt: number, base: THREE.Vector3, tip: THREE.Vector3, on: boolean, camera: THREE.Camera, swing: number, snap = false, frame: THREE.Matrix4 | null = null): void {
     const openRate = 1 / Math.max(0.05, Math.min(IGNITE, this.spec.open));
     const closeRate = 1 / Math.max(0.05, Math.min(IGNITE, this.spec.close));
     this.lit = snap ? (on ? 1 : 0) : THREE.MathUtils.clamp(this.lit + (on ? openRate : -closeRate) * dt, 0, 1);
+    // The sweep is remembered in a frame: the world's, or aboard a moving ship the hull's, so the
+    // ship's own motion is no smear. A change of frame forgets the path.
+    const framed = frame !== null;
+    if (framed !== this.framed) for (const h of this.history) h.age = Infinity;
+    this.framed = framed;
+    if (frame) {
+      this.frameM.copy(frame);
+      this.frameInv.copy(frame).invert();
+    } else {
+      this.frameM.identity();
+      this.frameInv.identity();
+    }
+    localBase.copy(base).applyMatrix4(this.frameInv);
     // A jump (a teleport, a catch back into the hand) is not a sweep: forget the path.
-    if (Number.isFinite(this.history[0].age) && this.history[0].a.distanceToSquared(base) > 4) for (const h of this.history) h.age = Infinity;
+    if (Number.isFinite(this.history[0].age) && this.history[0].a.distanceToSquared(localBase) > 4) for (const h of this.history) h.age = Infinity;
     if (this.lit <= 0.001) {
       for (const h of this.history) h.age = Infinity;
       for (const m of [this.glow, this.core, this.smearGlow, this.smearCore]) m.visible = false;
@@ -175,8 +193,8 @@ export class SaberBlade {
       this.history[i].b.copy(this.history[i - 1].b);
       this.history[i].age = this.history[i - 1].age + dt;
     }
-    this.history[0].a.copy(base);
-    this.history[0].b.copy(end);
+    this.history[0].a.copy(localBase);
+    this.history[0].b.copy(end).applyMatrix4(this.frameInv);
     this.history[0].age = 0;
     const life = SMEAR_LIFE + (SMEAR_LIFE_SWING - SMEAR_LIFE) * THREE.MathUtils.clamp(swing, 0, 1);
     this.sweep(this.smearGlow, life, 2);
@@ -225,7 +243,7 @@ export class SaberBlade {
       for (let c = 0; c < ALONG; c++) {
         const s = c / (ALONG - 1);
         const i = r * ALONG + c;
-        pt.copy(src.a).lerp(src.b, s);
+        pt.copy(src.a).lerp(src.b, s).applyMatrix4(this.frameM);
         pos.setXYZ(i, pt.x, pt.y, pt.z);
         uv.setXY(i, 0.5, s);
         fade.setX(i, f);
