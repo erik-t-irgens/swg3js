@@ -17,6 +17,8 @@ import { GalaxyMap, type Poi } from './ui/galaxyMap';
 import { MapUi } from './ui/mapUi';
 import { WardrobeUi } from './ui/wardrobeUi';
 import { WeaponsUi } from './ui/weaponsUi';
+import { ForceUi } from './ui/forceUi';
+import { DEFAULT_LOADOUT, POWERS } from './combat/forcePowers';
 import { WeaponCatalogue, type WeaponDef } from './player/weapons';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { Hud } from './ui/hud';
@@ -63,7 +65,7 @@ function mountPrompt(v: import('./vehicles/vehicle').Vehicle): string {
 }
 
 const MOUNT_RANGE = 3.6;
-type InventoryTab = 'wardrobe' | 'appearance' | 'weapons';
+type InventoryTab = 'wardrobe' | 'appearance' | 'weapons' | 'force';
 /** The camera pitch a flyer holds its height at: the default view, a little above level. */
 const CAMERA_REST_PITCH = 0.32;
 
@@ -129,6 +131,7 @@ class App {
   private readonly map: MapUi;
   private readonly wardrobe: WardrobeUi;
   private readonly weaponsUi: WeaponsUi;
+  private readonly forceUi: ForceUi;
   private readonly vehiclesUi: VehiclesUi;
   private garage: Garage | null = null;
   private npcUi: NpcUi;
@@ -233,6 +236,17 @@ class App {
     this.wardrobe = new WardrobeUi(this.ui, () => this.hud.setPrompt(''));
     this.wardrobe.setBaseUrl(import.meta.env.BASE_URL);
     this.weaponsUi = new WeaponsUi(this.ui, (def, hand) => void this.equip(def, hand));
+    // The Force tab: the powers in the number slots, given to the Jedi kit and kept with the character.
+    this.forceUi = new ForceUi(this.ui);
+    this.forceUi.loadout = [...DEFAULT_LOADOUT];
+    this.forceUi.onChange = (loadout) => {
+      this.jediKit().setLoadout(loadout);
+      if (this.kit.id === 'jedi') this.hud.setKit(this.kit);
+      if (this.current && !this.creating) {
+        this.current.powers = loadout.map((p) => p ?? '');
+        upsertCharacter(this.current);
+      }
+    };
     // A blade colour picked on the rack goes on the blades now and into the character's record.
     this.weaponsUi.onSaberColor = (hex) => {
       this.player.setSaberColor(hex);
@@ -250,6 +264,7 @@ class App {
     // The tabs: a click on the other tab of a panel swaps to it, the key toggles whichever was last open.
     this.wardrobe.onTab = (id) => this.toggleInventory(id as InventoryTab);
     this.weaponsUi.onTab = (id) => this.toggleInventory(id as InventoryTab);
+    this.forceUi.onTab = (id) => this.toggleInventory(id as InventoryTab);
     this.vehiclesUi.onTab = (id) => this.toggleSpawner(id as 'garage' | 'npcs');
     this.npcUi.onTab = (id) => this.toggleSpawner(id as 'garage' | 'npcs');
     void WeaponCatalogue.load(import.meta.env.BASE_URL).then((c) => {
@@ -545,6 +560,7 @@ class App {
           this.stepCombat(dt);
           this.stepVehicles(dt, true);
           if (!this.player.noclip && !this.player.mounted) this.world.turrets.update(dt, this.player, this.world.bolts);
+          this.world.creatures.update(dt, this.player.worldPos, (dmg) => this.player.takeDamage(dmg));
           this.physics.step(dt);
           this.effects.update(dt);
           this.updateCamera(null);
@@ -833,6 +849,22 @@ class App {
       },
       /** How many lightsaber burns are on the world's surfaces now. */
       marks: () => this.marks.count(),
+      /** The Force powers in the slots: `powers(['grip', 'pull', null, 'repulse'])` sets them (ids from forcePowers.ts), no argument lists them. */
+      powers: (ids?: (string | null)[]) => {
+        if (ids) this.forceUi.onChange(ids);
+        return { slots: this.jediKit().loadout, all: POWERS.map((p) => `${p.id}: ${p.name} (${p.kind}, ${p.cost})`) };
+      },
+      /** Stand a creature of the planet `metres` ahead, for trying the powers and guns on. */
+      creature: (metres = 8) => {
+        const list = () => this.world.creatures.creatures.map((c) => ({ hp: Number(c.hp.toFixed(1)), at: c.pos.toArray().map((n) => Number(n.toFixed(2))), dist: Number(c.pos.distanceTo(this.player.pos).toFixed(2)), dead: c.dead, slowed: Number(c.slowed.toFixed(1)), held: c.held, grounded: c.grounded }));
+        if (metres <= 0) return list();
+        const p = this.player.pos;
+        this.cam.forward(tmp);
+        this.world.creatures.spawnAt(p.x + tmp.x * metres, p.z + tmp.z * metres);
+        return list();
+      },
+      /** The gun in hand: its Jedi Academy type and numbers. */
+      gunType: () => (this.kit.id === 'bounty_hunter' ? (this.kit as BountyHunterKit).profile({ player: this.player } as KitContext) : 'not a bounty hunter'),
       /** The blaster in hand, 'pistol' or 'rifle': which of the game's carries play. `gun('carbine', { aim: 30, aimKneel: 30, ready: 30 })` sets how far right, in degrees, that kind's torso turns while aiming standing or moving, aiming kneeling or crouched, and in the hip-fire carry, as a starting point; the barrel is then measured against the crosshair every frame and the torso turned the rest of the way (`fix`, in degrees; `gun(undefined, { fix: false })` turns that off to see the poses bare). */
       gun: (kind?: 'pistol' | 'carbine' | 'rifle' | 'heavy', tune?: { ready?: number; aim?: number; aimKneel?: number; fix?: boolean }) => {
         if (kind) {
@@ -1314,6 +1346,9 @@ class App {
       this.applyAppearance(character, c.appearance);
       await this.dress(character, c.outfit ?? []);
     }
+    // The character's Force powers in the slots (the default four for a character from before there was a choice).
+    this.jediKit().setLoadout(c.powers?.length ? c.powers.map((p) => p || null) : [...DEFAULT_LOADOUT]);
+    this.forceUi.loadout = [...this.jediKit().loadout];
     this.setClass(c.class);
     const bladeColor = c.saber?.color ?? DEFAULT_SABER_COLOR;
     this.player.setSaberColor(bladeColor);
@@ -1930,13 +1965,18 @@ class App {
 
   /** The panels' open state moved to the tabs: closing one panel of a pair and opening the other keeps the mouse free. */
   private anyPanelOpen(): boolean {
-    return this.wardrobe.open || this.appearanceUi.open || this.weaponsUi.open || this.vehiclesUi.open || this.npcUi.open || this.shipMenu.open || this.menu.open;
+    return this.wardrobe.open || this.appearanceUi.open || this.weaponsUi.open || this.forceUi.open || this.vehiclesUi.open || this.npcUi.open || this.shipMenu.open || this.menu.open;
+  }
+
+  private jediKit(): JediKit {
+    return this.kitFor('jedi') as JediKit;
   }
 
   private closePanels(): void {
     if (this.wardrobe.open) this.wardrobe.hide();
     if (this.appearanceUi.open) this.appearanceUi.hide();
     if (this.weaponsUi.open) this.weaponsUi.hide();
+    if (this.forceUi.open) this.forceUi.hide();
     if (this.vehiclesUi.open) this.vehiclesUi.hide();
     if (this.npcUi.open) this.npcUi.hide();
     if (this.shipMenu.open) this.shipMenu.hide();
@@ -2073,7 +2113,7 @@ class App {
       return;
     }
     const want = tab ?? this.inventoryTab;
-    const wasOpen = tab === undefined && (this.wardrobe.open || this.appearanceUi.open || this.weaponsUi.open);
+    const wasOpen = tab === undefined && (this.wardrobe.open || this.appearanceUi.open || this.weaponsUi.open || this.forceUi.open);
     this.closePanels();
     if (wasOpen) {
       this.freeMouse(false);
@@ -2089,6 +2129,9 @@ class App {
       this.appearanceUi.show();
       if (character) this.appearanceUi.attach(character, import.meta.env.BASE_URL);
       else this.appearanceUi.explain('This character is a single model, not a set of parts, so there is nothing to shape. Convert it with <code>npm run swg -- species</code>.');
+    } else if (want === 'force') {
+      this.forceUi.loadout = [...this.jediKit().loadout];
+      this.forceUi.show();
     } else {
       this.weaponsUi.held = { right: this.player.equipped.right?.id ?? null, left: this.player.equipped.left?.id ?? null };
       this.weaponsUi.show();

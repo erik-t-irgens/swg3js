@@ -1171,8 +1171,13 @@ export class Player {
 
   /** Damage of the current style's swing. */
   get saberDamage(): number {
-    return STYLE_DAMAGE[this.saber.style];
+    return STYLE_DAMAGE[this.saber.style] * this.damageBoost;
   }
+
+  /** What the blade does over its style's damage (Force Rage raises it). */
+  damageBoost = 1;
+  /** What hurts the player counts for this much (Force Protect lowers it). */
+  damageTaken = 1;
 
   startSwing(): boolean {
     if (this.swing >= 0) return false;
@@ -1181,7 +1186,7 @@ export class Player {
   }
 
   takeDamage(amount: number): void {
-    this.hp = Math.max(0, this.hp - amount);
+    this.hp = Math.max(0, this.hp - amount * this.damageTaken);
     this.regenDelay = 5;
   }
 

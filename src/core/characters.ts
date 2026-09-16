@@ -22,6 +22,8 @@ export interface SavedCharacter {
   outfit: string[];
   /** The lightsaber's blade colour, as hex; absent means the default blue. */
   saber?: { color: string };
+  /** The Force powers in the number slots, by id; absent means the default four. */
+  powers?: string[];
   planet: string;
   zone?: string;
   /** Where it last stood, and which way it faced; absent until it has been played. */

@@ -3,7 +3,9 @@ import { RAPIER } from '../core/physics';
 import type { Creature } from '../world/creatures';
 import { KICK_DAMAGE } from './saber';
 import { THROW } from './saberThrow';
+import { DEFAULT_LOADOUT, POWERS, SLOT_COUNT, powerById } from './forcePowers';
 import type { Hittable, Kit, KitContext, KitSlot, Resource } from './kit';
+import type { Action } from '../core/input';
 
 const tmp = new THREE.Vector3();
 const tmp2 = new THREE.Vector3();
@@ -13,25 +15,36 @@ const mid = new THREE.Vector3();
 const quat = new THREE.Quaternion();
 const UP = new THREE.Vector3(0, 1, 0);
 const LIGHTNING_SEGMENTS = 14;
+const SLOT_ACTIONS: Action[] = ['slot1', 'slot2', 'slot3', 'slot4', 'slot5', 'slot6'];
+/** Rage lasts this long, then rests this long. */
+const RAGE_TIME = 10;
+const RAGE_REST = 20;
 
 export class JediKit implements Kit {
   readonly id = 'jedi' as const;
   readonly name = 'Jedi';
-  readonly slots: KitSlot[] = [
-    { key: '1', name: 'Force Jump', cost: '20' },
-    { key: '2', name: 'Force Speed', cost: '6/s' },
-    { key: '3', name: 'Force Push', cost: '25' },
-    { key: '4', name: 'Force Lightning', cost: '18/s' },
-  ];
+  /** The power in each number slot, by id (null for an empty slot); the HUD's slots follow it. */
+  loadout: (string | null)[] = [...DEFAULT_LOADOUT];
   readonly help = [
     '<b>LMB</b> saber swing (hold to chain, direction keys pick the swing) · <b>RMB</b> hold to block: the stance comes up and bolts are turned away · <b>LMB+RMB</b> kata · <b>R</b> throw the saber (staff: kick) · <b>K</b> style (fast, medium, strong, dual, staff) · <b>L</b> saber on/off',
     '<b>Jump</b> + direction + <b>LMB</b> flip and jump attacks · <b>Ctrl</b> + forward + <b>LMB</b> lunge or spin · <b>Jump</b> beside a wall: wall run (strafe + forward) or wall flip (strafe) · <b>Jump</b> at a wall: run up and flip back · back + <b>Jump</b>: backflip',
-    '<b>1</b> Force Jump · <b>2</b> Force Speed · <b>3</b> Force Push · <b>4</b> Force Lightning (hold)',
+    '<b>1</b> to <b>6</b> the Force powers in the slots: the inventory\'s Force tab (<b>I</b>) picks which; a tap power fires on the key, a hold power lasts while it is down, a toggle until the key again',
     'Bolts are only turned away while the block is held, back where you look; at the top defence rank the block holds through a swing',
   ];
   readonly resource: Resource = { label: 'Force', value: 100, max: 100 };
   speedActive = false;
   lightningActive = false;
+  protectActive = false;
+  drainActive = false;
+  /** Seconds of rage left, and of its rest after. */
+  private rageLeft = 0;
+  private rageRest = 0;
+  /** The creature held by the Force, while the grip lasts. */
+  private gripped: Creature | null = null;
+  private healCd = 0;
+  private repulseCd = 0;
+  private slowCd = 0;
+  private pullCd = 0;
   /** Last style change, for the HUD. */
   styleNote = '';
   private readonly hitThisSwing = new Set<Hittable>();
@@ -59,12 +72,74 @@ export class JediKit implements Kit {
     scene.add(this.aura, this.bolt);
   }
 
-  slotActive(i: number): boolean {
-    return i === 1 ? this.speedActive : i === 3 ? this.lightningActive : false;
+  /** The slots as the HUD shows them: one per number key with a power in it. */
+  get slots(): KitSlot[] {
+    const out: KitSlot[] = [];
+    for (let i = 0; i < SLOT_COUNT; i++) {
+      const p = this.loadout[i] ? powerById(this.loadout[i]!) : null;
+      if (p) out.push({ key: String(i + 1), name: p.name, cost: p.cost });
+    }
+    return out;
   }
 
-  slotCooldown(): number {
-    return 0;
+  /** Put powers in the slots (ids; unknown ones are dropped), keeping toggles that are no longer there off. */
+  setLoadout(ids: (string | null)[]): void {
+    this.loadout = [];
+    for (let i = 0; i < SLOT_COUNT; i++) this.loadout.push(ids[i] && powerById(ids[i]!) ? ids[i]! : null);
+    if (!this.loadout.includes('speed')) this.speedActive = false;
+    if (!this.loadout.includes('protect')) this.protectActive = false;
+    if (!this.loadout.includes('rage')) this.rageLeft = 0;
+  }
+
+  /** The slot index (0-based among the HUD's slots) for the i-th number key, or -1. */
+  private hudIndexOf(id: string): number {
+    let n = 0;
+    for (let i = 0; i < SLOT_COUNT; i++) {
+      if (!this.loadout[i]) continue;
+      if (this.loadout[i] === id) return n;
+      n++;
+    }
+    return -1;
+  }
+
+  slotActive(i: number): boolean {
+    const id = this.slots[i]?.name;
+    const p = POWERS.find((x) => x.name === id);
+    switch (p?.id) {
+      case 'speed':
+        return this.speedActive;
+      case 'lightning':
+        return this.lightningActive;
+      case 'drain':
+        return this.drainActive;
+      case 'protect':
+        return this.protectActive;
+      case 'rage':
+        return this.rageLeft > 0;
+      case 'grip':
+        return this.gripped !== null;
+      default:
+        return false;
+    }
+  }
+
+  slotCooldown(i: number): number {
+    const name = this.slots[i]?.name;
+    const p = POWERS.find((x) => x.name === name);
+    switch (p?.id) {
+      case 'heal':
+        return this.healCd / 6;
+      case 'repulse':
+        return this.repulseCd / 4;
+      case 'slow':
+        return this.slowCd / 5;
+      case 'pull':
+        return this.pullCd / 1.5;
+      case 'rage':
+        return this.rageLeft > 0 ? 0 : this.rageRest / RAGE_REST;
+      default:
+        return 0;
+    }
   }
 
   update(ctx: KitContext): void {
@@ -123,74 +198,142 @@ export class JediKit implements Kit {
       this.sweep(ctx, a, b, 0.55, player.thrown.returning ? THROW.returnHitDamage : THROW.hitDamage, this.hitThisLeg, 3);
     }
 
-    // 1: Force Jump
-    if (onFoot && input.pressedAction('slot1') && player.grounded && !player.swimming && res.value >= 20) {
-      res.value -= 20;
-      player.launch(Math.sqrt(2 * planet.gravity * 11), 9, cam);
-      effects.ring(player.pos, 0x9fd4ff, 5, 0.5);
+    // The powers in the slots.
+    this.healCd = Math.max(0, this.healCd - dt);
+    this.repulseCd = Math.max(0, this.repulseCd - dt);
+    this.slowCd = Math.max(0, this.slowCd - dt);
+    this.pullCd = Math.max(0, this.pullCd - dt);
+    this.rageRest = Math.max(0, this.rageRest - dt);
+    let lightning = false;
+    let drain = false;
+    let grip = false;
+    for (let i = 0; i < SLOT_COUNT; i++) {
+      const id = this.loadout[i];
+      if (!id) continue;
+      const action = SLOT_ACTIONS[i];
+      const pressed = input.pressedAction(action);
+      const held = input.held(action);
+      switch (id) {
+        case 'jump':
+          if (onFoot && pressed && player.grounded && !player.swimming && res.value >= 20) {
+            res.value -= 20;
+            player.launch(Math.sqrt(2 * planet.gravity * 11), 9, cam);
+            effects.ring(player.pos, 0x9fd4ff, 5, 0.5);
+          }
+          break;
+        case 'speed':
+          if (pressed) {
+            if (this.speedActive) this.speedActive = false;
+            else if (res.value >= 10) this.speedActive = true;
+          }
+          break;
+        case 'push':
+          if (onFoot && pressed && res.value >= 25) {
+            res.value -= 25;
+            this.shove(ctx, 1);
+          }
+          break;
+        case 'pull':
+          if (onFoot && pressed && res.value >= 20 && this.pullCd <= 0) {
+            res.value -= 20;
+            this.pullCd = 1.5;
+            this.shove(ctx, -1);
+          }
+          break;
+        case 'lightning':
+          lightning = onFoot && held && res.value > 0;
+          break;
+        case 'drain':
+          drain = onFoot && held && res.value > 0 && !lightning;
+          break;
+        case 'grip':
+          grip = onFoot && held && res.value > 0;
+          break;
+        case 'repulse':
+          if (onFoot && pressed && res.value >= 40 && this.repulseCd <= 0) {
+            res.value -= 40;
+            this.repulseCd = 4;
+            this.repulse(ctx);
+          }
+          break;
+        case 'slow':
+          if (onFoot && pressed && res.value >= 25 && this.slowCd <= 0) {
+            const target = this.targetAhead(ctx, 24, 0.5);
+            if (target) {
+              res.value -= 25;
+              this.slowCd = 5;
+              target.slow(5);
+              tmp.copy(target.pos).y += target.halfHeight;
+              effects.ring(tmp, 0xc0a0ff, 3, 0.6);
+              effects.flash(tmp, 0xc0a0ff, 12, 8, 0.3);
+            }
+          }
+          break;
+        case 'heal':
+          if (pressed && res.value >= 30 && this.healCd <= 0 && player.hp < player.maxHp) {
+            res.value -= 30;
+            this.healCd = 6;
+            player.heal(35);
+            effects.ring(player.pos, 0x9fffb0, 3, 0.6);
+          }
+          break;
+        case 'protect':
+          if (pressed) {
+            if (this.protectActive) this.protectActive = false;
+            else if (res.value >= 15) this.protectActive = true;
+          }
+          break;
+        case 'rage':
+          if (pressed && this.rageLeft <= 0 && this.rageRest <= 0 && player.hp > 25) {
+            this.rageLeft = RAGE_TIME;
+            effects.ring(player.pos, 0xff4040, 4, 0.5);
+          }
+          break;
+      }
     }
 
-    // 2: Force Speed (toggle)
-    if (input.pressedAction('slot2')) {
-      if (this.speedActive) this.speedActive = false;
-      else if (res.value >= 10) this.speedActive = true;
-    }
+    // Speed: a toggle that drains while it lasts.
     if (this.speedActive) {
       res.value -= 6 * dt;
       if (res.value <= 0) this.speedActive = false;
     }
-    player.speedMultiplier = this.speedActive ? 2.1 : 1;
-    this.aura.visible = this.speedActive && onFoot;
+    // Protect: what hurts counts for a third, while it drains.
+    if (this.protectActive) {
+      res.value -= 5 * dt;
+      if (res.value <= 0) this.protectActive = false;
+    }
+    player.damageTaken = this.protectActive ? 0.34 : 1;
+    // Rage: faster and harder for its time, paid for in health; then the rest.
+    if (this.rageLeft > 0) {
+      this.rageLeft -= dt;
+      player.hp = Math.max(8, player.hp - 3 * dt);
+      if (this.rageLeft <= 0) this.rageRest = RAGE_REST;
+    }
+    const raging = this.rageLeft > 0;
+    player.damageBoost = raging ? 1.5 : 1;
+    player.speedMultiplier = (this.speedActive ? 2.1 : 1) * (raging ? 1.3 : 1);
+    this.aura.visible = (this.speedActive || this.protectActive || raging) && onFoot;
     if (this.aura.visible) {
+      this.aura.material.color.set(raging ? 0xff5040 : this.protectActive ? 0x60ff90 : 0x5fb8ff);
       this.aura.position.copy(player.pos).y += 1;
       const s = 1 + Math.sin(this.time * 9) * 0.08;
       this.aura.scale.set(s, s * 1.3, s);
     }
 
-    // 3: Force Push
-    if (onFoot && input.pressedAction('slot3') && res.value >= 25) {
-      res.value -= 25;
+    // Lightning and Drain: a bolt at the nearest creature ahead, hurting it while the key is down;
+    // the drain gives what it takes back to the player.
+    this.lightningActive = lightning;
+    this.drainActive = drain;
+    this.bolt.visible = lightning || drain;
+    if (lightning || drain) {
+      res.value -= (drain ? 10 : 18) * dt;
       cam.forward(tmp);
-      effects.ring(player.pos, 0xbfe0ff, 12, 0.45);
-      for (const c of world.creatures.creatures) {
-        tmp2.copy(c.pos).sub(player.pos);
-        const d = tmp2.length();
-        if (d > 16) continue;
-        tmp2.normalize();
-        if (d > 3 && tmp2.dot(tmp) < 0.35) continue;
-        c.damage(10);
-        c.knock(tmp2, 22 * (1 - d / 18) + 6);
-      }
-      for (const sp of world.vehicles) {
-        tmp2.copy(sp.pos).sub(player.pos);
-        const d = tmp2.length();
-        if (d > 12 || sp === player.mounted) continue;
-        tmp2.normalize();
-        const m = sp.body.mass();
-        sp.body.applyImpulse({ x: tmp2.x * m * 9 * (1 - d / 14), y: m * 4, z: tmp2.z * m * 9 * (1 - d / 14) }, true);
-      }
-    }
-
-    // 4: Force Lightning (hold)
-    this.lightningActive = onFoot && input.held('slot4') && res.value > 0;
-    this.bolt.visible = this.lightningActive;
-    if (this.lightningActive) {
-      res.value -= 18 * dt;
-      cam.forward(tmp);
-      let target: Creature | null = null;
-      let bestD = 26;
-      for (const c of world.creatures.creatures) {
-        if (c.dead) continue;
-        tmp2.copy(c.pos).sub(player.pos);
-        const d = tmp2.length();
-        if (d >= bestD) continue;
-        if (tmp2.normalize().dot(tmp) < 0.45) continue;
-        bestD = d;
-        target = c;
-      }
+      const target = this.targetAhead(ctx, 26, 0.45);
       if (target) {
-        target.damage(30 * dt);
-        if (target.grounded && Math.random() < dt * 1.2) {
+        const hurt = (drain ? 20 : 30) * dt;
+        target.damage(hurt);
+        if (drain) player.heal(hurt * 0.6);
+        if (!drain && target.grounded && Math.random() < dt * 1.2) {
           tmp2.copy(target.pos).sub(player.pos).setY(0).normalize();
           target.knock(tmp2, 4);
         }
@@ -198,14 +341,103 @@ export class JediKit implements Kit {
       const start = tmp2.copy(player.pos).addScaledVector(tmp, 0.4);
       start.y += 1.35;
       const end = target ? target.pos.clone().setY(target.pos.y + target.halfHeight) : start.clone().addScaledVector(tmp, 14);
+      this.bolt.material.color.set(drain ? 0xff6060 : 0xbfe6ff);
       this.drawBolt(start, end);
       // The glow comes from the pooled flash lights (a light of the kit's own would come and go
       // with the class, and a change in the light count recompiles every shader).
       tmp2.copy(end).lerp(start, 0.5).y += 0.5;
-      ctx.effects.flash(tmp2, 0x9fd4ff, 14 + Math.random() * 12, 18, 0.08);
+      ctx.effects.flash(tmp2, drain ? 0xff6060 : 0x9fd4ff, 14 + Math.random() * 12, 18, 0.08);
+    }
+
+    // Grip: the creature under the crosshair lifted and held ahead, choking; let go and it is thrown.
+    if (grip) {
+      if (!this.gripped || this.gripped.dead) this.gripped = this.targetAhead(ctx, 14, 0.7);
+      const g = this.gripped;
+      if (g) {
+        res.value -= 12 * dt;
+        cam.forward(tmp);
+        tmp2.copy(player.pos).addScaledVector(tmp, 3.2 + g.halfHeight);
+        tmp2.y = player.pos.y + 1.6 + g.halfHeight;
+        g.holdAt(tmp2, dt);
+        g.damage(6 * dt);
+        tmp2.copy(g.pos).y += g.halfHeight;
+        ctx.effects.flash(tmp2, 0xc0b0ff, 4, 5, 0.08);
+      }
+    } else if (this.gripped) {
+      cam.forward(tmp);
+      this.gripped.release(tmp, 18);
+      this.gripped = null;
     }
 
     res.value = Math.min(res.max, Math.max(0, res.value + 9 * dt));
+  }
+
+  /** The nearest living creature within `range` metres and the cone about the view (`cone` is the cosine at its edge). */
+  private targetAhead(ctx: KitContext, range: number, cone: number): Creature | null {
+    const { player, world, cam } = ctx;
+    cam.forward(tmp);
+    let best: Creature | null = null;
+    let bestD = range;
+    for (const c of world.creatures.creatures) {
+      if (c.dead) continue;
+      tmp2.copy(c.pos).sub(player.pos);
+      const d = tmp2.length();
+      if (d >= bestD) continue;
+      if (tmp2.normalize().dot(tmp) < cone) continue;
+      bestD = d;
+      best = c;
+    }
+    return best;
+  }
+
+  /** Push (`sign` 1) or Pull (-1): everything ahead thrown away from, or dragged toward, the player; vehicles too. */
+  private shove(ctx: KitContext, sign: number): void {
+    const { player, world, cam, effects } = ctx;
+    cam.forward(tmp);
+    effects.ring(player.pos, sign > 0 ? 0xbfe0ff : 0xffd0a0, 12, 0.45);
+    for (const c of world.creatures.creatures) {
+      tmp2.copy(c.pos).sub(player.pos);
+      const d = tmp2.length();
+      if (d > 16) continue;
+      tmp2.normalize();
+      if (d > 3 && tmp2.dot(tmp) < 0.35) continue;
+      c.damage(sign > 0 ? 10 : 4);
+      // Pulled, it comes to the player's feet: the shove scales with how far it is.
+      tmp2.multiplyScalar(sign);
+      c.knock(tmp2, sign > 0 ? 22 * (1 - d / 18) + 6 : 4 + d * 1.1);
+    }
+    for (const sp of world.vehicles) {
+      tmp2.copy(sp.pos).sub(player.pos);
+      const d = tmp2.length();
+      if (d > 12 || sp === player.mounted) continue;
+      tmp2.normalize().multiplyScalar(sign);
+      const m = sp.body.mass();
+      sp.body.applyImpulse({ x: tmp2.x * m * 9 * (1 - d / 14), y: m * 4, z: tmp2.z * m * 9 * (1 - d / 14) }, true);
+    }
+  }
+
+  /** Repulse: a blast in every direction from the player. */
+  private repulse(ctx: KitContext): void {
+    const { player, world, effects } = ctx;
+    effects.ring(player.pos, 0xbfe0ff, 18, 0.5);
+    effects.burst(tmp.copy(player.pos).setY(player.pos.y + 1), 0xdfefff, 3, 0.3);
+    effects.flash(tmp, 0xbfe0ff, 40, 14, 0.25);
+    for (const c of world.creatures.creatures) {
+      tmp2.copy(c.pos).sub(player.pos);
+      const d = tmp2.length();
+      if (d > 10) continue;
+      tmp2.setY(0).normalize();
+      c.damage(25 * (1 - d / 12) + 5);
+      c.knock(tmp2, 26 * (1 - d / 12) + 8);
+    }
+    for (const sp of world.vehicles) {
+      tmp2.copy(sp.pos).sub(player.pos);
+      const d = tmp2.length();
+      if (d > 10 || sp === player.mounted) continue;
+      tmp2.normalize();
+      const m = sp.body.mass();
+      sp.body.applyImpulse({ x: tmp2.x * m * 10 * (1 - d / 12), y: m * 5, z: tmp2.z * m * 10 * (1 - d / 12) }, true);
+    }
   }
 
   /** Hurt every creature a capsule between two points touches, each once per `already`. */

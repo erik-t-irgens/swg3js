@@ -26,6 +26,7 @@ export const INVENTORY_TABS: TabDef[] = [
   { id: 'wardrobe', label: 'Wardrobe' },
   { id: 'appearance', label: 'Appearance' },
   { id: 'weapons', label: 'Weapons' },
+  { id: 'force', label: 'Force' },
 ];
 
 export const SPAWNER_TABS: TabDef[] = [

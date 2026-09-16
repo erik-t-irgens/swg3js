@@ -55,6 +55,8 @@ const ACTION_LABELS: Record<Action, string> = {
   slot2: 'Slot 2',
   slot3: 'Slot 3',
   slot4: 'Slot 4',
+  slot5: 'Slot 5',
+  slot6: 'Slot 6',
   emoteWheel: 'Emote wheel (hold)',
   emote1: 'Emote 1',
   emote2: 'Emote 2',

@@ -204,6 +204,35 @@ export class Creature {
     this.retarget = 0;
   }
 
+  /** Seconds left in a Force slow: it moves and animates at a crawl. */
+  slowed = 0;
+  /** Held in the air by the Force: it hangs where it is put, and its own moves stop. */
+  held = false;
+
+  /** Slow it for `seconds` (a Force stasis). */
+  slow(seconds: number): void {
+    if (this.dead) return;
+    this.slowed = Math.max(this.slowed, seconds);
+  }
+
+  /** Hold it at a point in the air this frame: pulled there, its own moves stopped. */
+  holdAt(point: THREE.Vector3, dt: number): void {
+    if (this.dead) return;
+    this.held = true;
+    this.stunned = Math.max(this.stunned, 0.3);
+    this.grounded = false;
+    // A spring toward the point, damped: it settles there and hangs.
+    tmp.copy(point).sub(this.pos);
+    const k = Math.min(12, 1 / Math.max(dt, 1e-3));
+    this.body.setLinvel({ x: tmp.x * k * 0.5, y: tmp.y * k * 0.5 + 0.5, z: tmp.z * k * 0.5 }, true);
+  }
+
+  /** Let go of a held creature, thrown along `dir`. */
+  release(dir: THREE.Vector3, power: number): void {
+    this.held = false;
+    this.knock(dir, power);
+  }
+
   /** Apply a horizontal shove plus lift. Power is a target speed in m/s for a size-1 creature. */
   knock(dir: THREE.Vector3, power: number): void {
     if (this.dead) return;
@@ -251,9 +280,22 @@ export class Creature {
     const r = this.body.rotation();
     this.group.quaternion.set(r.x, r.y, r.z, r.w);
 
+    // Slowed by the Force, it lives at a crawl: its clips, its moves and its attacks all at the same fraction.
+    this.slowed = Math.max(0, this.slowed - dt);
+    const slowness = this.slowed > 0 ? 0.12 : 1;
+    if (slowness < 1 && !this.dead) {
+      const v0 = this.body.linvel();
+      this.body.setLinvel({ x: v0.x * 0.5, y: v0.y, z: v0.z * 0.5 }, true);
+    }
+    dt *= slowness;
     this.mixer?.update(dt);
     if (this.dead) {
       this.deadTimer -= dt;
+      return;
+    }
+    // Held in the air: nothing of its own until it is let go.
+    if (this.held) {
+      this.held = false;
       return;
     }
 

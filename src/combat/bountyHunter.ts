@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { RAPIER } from '../core/physics';
-import { BLASTER } from './bolts';
+import { GUNS, gunTypeFor, type GunProfile } from './guns';
 import type { Kit, KitContext, KitSlot, Resource } from './kit';
 
 interface Detonator {
@@ -18,6 +18,8 @@ const from = new THREE.Vector3();
 const end = new THREE.Vector3();
 const tmp = new THREE.Vector3();
 const aimDir = new THREE.Vector3();
+const shotDir = new THREE.Vector3();
+const muzzle = new THREE.Vector3();
 const side = new THREE.Vector3();
 const lift = new THREE.Vector3();
 const UP = new THREE.Vector3(0, 1, 0);
@@ -30,13 +32,17 @@ export class BountyHunterKit implements Kit {
     { key: '2', name: 'Stim Pack', cost: '12s' },
   ];
   readonly help = [
-    '<b>LMB</b> fire the blaster (hold): from the hip it scatters a little · <b>RMB</b> hold to aim: a true shot, the camera in close · bolts fly at 58 m/s and can be sidestepped',
+    '<b>LMB</b> fire (hold): from the hip it scatters, aimed it flies true · <b>RMB</b> hold to aim, the camera in close · each kind of gun handles its own way: a pistol or a sniper charges while the trigger is held and fires on release, a bowcaster charges into a fan of bolts, a carbine streams, a flechette spreads shards, a launcher blasts where it lands',
     '<b>1</b> Thermal Detonator · <b>2</b> Stim Pack · <b>K</b> pistol or rifle · <b>V</b> kneel and <b>Z</b> prone (steadier shots, their own carries)',
   ];
   readonly resource: Resource | null = null;
   /** Last gun change, for the HUD. */
   gunNote = '';
   private fireCd = 0;
+  /** Seconds the trigger has been held on a gun that charges, and whether it is charging now. */
+  private chargeTime = 0;
+  private charging = false;
+  private lastProfile: GunProfile | null = null;
   private detCd = 0;
   private stimCd = 0;
   private readonly detonators: Detonator[] = [];
@@ -60,6 +66,19 @@ export class BountyHunterKit implements Kit {
 
   slotActive(): boolean {
     return false;
+  }
+
+  /** How charged the held shot is, 0 to 1, for the HUD; 0 when the gun does not charge. */
+  charge(): number {
+    const c = this.lastProfile?.charge;
+    return c && this.charging ? Math.min(1, this.chargeTime / c.time) : 0;
+  }
+
+  /** The gun in hand: the rack's, by its name and class, or the placeholder's by its kind. */
+  profile(ctx: KitContext): GunProfile {
+    const def = ctx.player.equipped.right;
+    const cls = def ? def.class : ctx.player.gunClass;
+    return GUNS[gunTypeFor(def?.id ?? null, cls)];
   }
 
   slotCooldown(i: number): number {
@@ -87,32 +106,31 @@ export class BountyHunterKit implements Kit {
     this.detCd = Math.max(0, this.detCd - dt);
     this.stimCd = Math.max(0, this.stimCd - dt);
 
-    // Blaster: a bolt from the muzzle towards whatever the crosshair is on. Aimed (right mouse
-    // held) it flies true; from the hip it scatters as the E-11's rapid trigger does.
-    const primary = input.held('attack');
-    const rapid = primary && !player.aiming;
-    if (onFoot && primary && this.fireCd <= 0) {
-      this.fireCd = BLASTER.fireTime;
-      cam.camera.getWorldDirection(dir);
-      from.copy(cam.camera.position);
-      const ray = new RAPIER.Ray(from, dir);
-      const hit = physics.world.castRay(ray, 250, true, undefined, undefined, undefined, player.body);
-      end.copy(from).addScaledVector(dir, hit ? hit.timeOfImpact : 250);
-      player.muzzle(tmp);
-      // Aim from the muzzle at the crosshair's point, unless that point is beside or behind it.
-      aimDir.copy(end).sub(tmp);
-      if (aimDir.lengthSq() < 1 || aimDir.dot(dir) < 0.5) aimDir.copy(dir);
-      aimDir.normalize();
-      if (rapid) {
-        const s = (BLASTER.altSpread * player.postureSpread * Math.PI) / 180;
-        side.crossVectors(aimDir, UP).normalize();
-        lift.crossVectors(side, aimDir);
-        aimDir.addScaledVector(side, Math.tan((Math.random() * 2 - 1) * s)).addScaledVector(lift, Math.tan((Math.random() * 2 - 1) * s)).normalize();
-      }
-      ctx.bolts.fire(tmp, aimDir, { owner: 'player', exclude: player.body });
-      effects.flash(tmp, 0xff6a3a, 8, 6, 0.08);
-      player.shotFired();
+    // The gun in hand fires its own way (see guns.ts). A gun that charges takes the trigger held and
+    // fires on release; any other fires as long as the trigger is held and its rate allows.
+    const gun = this.profile(ctx);
+    if (gun !== this.lastProfile) {
+      this.charging = false;
+      this.chargeTime = 0;
+      this.lastProfile = gun;
     }
+    const primary = onFoot && input.held('attack');
+    if (gun.charge) {
+      if (primary && this.fireCd <= 0) {
+        if (!this.charging) {
+          this.charging = true;
+          this.chargeTime = 0;
+        }
+        this.chargeTime += dt;
+        // The charge glows at the muzzle as it builds.
+        player.muzzle(tmp);
+        effects.flash(tmp, gun.color, 2 + 10 * Math.min(1, this.chargeTime / gun.charge.time), 4, 0.06);
+      } else if (this.charging) {
+        this.charging = false;
+        this.fire(ctx, gun, Math.min(1, this.chargeTime / gun.charge.time));
+        this.chargeTime = 0;
+      }
+    } else if (primary && this.fireCd <= 0) this.fire(ctx, gun, 0);
 
     // 1: Thermal Detonator
     if (onFoot && input.pressedAction('slot1') && this.detCd <= 0) {
@@ -141,6 +159,108 @@ export class BountyHunterKit implements Kit {
       player.heal(45);
       effects.ring(player.pos, 0x7fff9f, 3, 0.6);
     }
+  }
+
+  /**
+   * One shot from the gun: from the muzzle at the crosshair's point (unless that point is beside or
+   * behind the muzzle, then straight ahead), scattered by the gun's spread (less aimed, less in a steadier
+   * posture), as many bolts as it fires at once, at the charge's damage. A hitscan gun lands its shot at
+   * once and draws the beam; a blasting bolt carries its blast to where it lands.
+   */
+  private fire(ctx: KitContext, gun: GunProfile, charge: number): void {
+    const { player, cam, physics, effects } = ctx;
+    this.fireCd = gun.fireTime;
+    cam.camera.getWorldDirection(dir);
+    from.copy(cam.camera.position);
+    const ray = new RAPIER.Ray(from, dir);
+    const hit = physics.world.castRay(ray, 300, true, undefined, undefined, undefined, player.body);
+    end.copy(from).addScaledVector(dir, hit ? hit.timeOfImpact : 300);
+    player.muzzle(muzzle);
+    aimDir.copy(end).sub(muzzle);
+    if (aimDir.lengthSq() < 1 || aimDir.dot(dir) < 0.5) aimDir.copy(dir);
+    aimDir.normalize();
+    // The Bryar's charge climbs in five steps, as the game's does; a sniper's climbs smoothly.
+    const level = gun.type === 'bryar' ? Math.max(1, Math.min(5, Math.ceil(charge * 5))) / 5 : charge;
+    const damage = gun.charge ? gun.damage + (gun.charge.maxDamage - gun.damage) * (gun.charge.bolts ? 1 : level) : gun.damage;
+    const count = gun.charge?.bolts ? 1 + Math.floor(charge * (gun.charge.bolts - 1)) : (gun.pellets ?? 1);
+    const base = ((player.aiming ? gun.aimSpread : gun.spread) * player.postureSpread * Math.PI) / 180;
+    side.crossVectors(aimDir, UP).normalize();
+    lift.crossVectors(side, aimDir);
+    for (let i = 0; i < count; i++) {
+      shotDir.copy(aimDir);
+      // A fan of bolts (the bowcaster's) spreads across evenly; shards scatter at random.
+      if (gun.charge?.bolts && count > 1) shotDir.addScaledVector(side, Math.tan(((i - (count - 1) / 2) * (gun.pelletSpread ?? 4) * Math.PI) / 180));
+      const s = base + (gun.pellets ? ((gun.pelletSpread ?? 0) * Math.PI) / 180 : 0);
+      if (s > 0) shotDir.addScaledVector(side, Math.tan((Math.random() * 2 - 1) * s)).addScaledVector(lift, Math.tan((Math.random() * 2 - 1) * s));
+      shotDir.normalize();
+      if (gun.hitscan) this.hitscan(ctx, gun, muzzle, shotDir, damage, level);
+      else {
+        const splash = gun.splash;
+        ctx.bolts.fire(muzzle, shotDir, {
+          owner: 'player',
+          exclude: player.body,
+          damage,
+          speed: gun.speed,
+          color: gun.color,
+          size: gun.size * (gun.charge && !gun.charge.bolts ? 0.8 + level * 0.6 : 1),
+          push: gun.push,
+          life: 6,
+          onHit: splash ? (p) => this.blast(ctx, p, splash.damage, splash.radius) : undefined,
+        });
+      }
+    }
+    effects.flash(muzzle, gun.color, 6 + 6 * gun.size, 6, 0.08);
+    player.shotFired();
+  }
+
+  /** A shot that lands the instant it is fired: what the line meets is hurt, and the line is drawn as a fading beam. */
+  private hitscan(ctx: KitContext, gun: GunProfile, at: THREE.Vector3, along: THREE.Vector3, damage: number, level: number): void {
+    const { player, world, physics, effects } = ctx;
+    const ray = new RAPIER.Ray(at, along);
+    const hit = physics.world.castRay(ray, 400, true, undefined, undefined, undefined, player.body);
+    const reach = hit ? hit.timeOfImpact : 400;
+    end.copy(at).addScaledVector(along, reach);
+    ctx.bolts.beam(at, end, gun.color, 0.3 + level * 0.3, 1 + level * 1.5);
+    if (!hit) return;
+    const target = world.hittableAt(hit.collider.handle);
+    if (target) {
+      tmp.copy(at);
+      target.damage(damage, tmp, gun.push * (1 + level));
+      effects.burst(end, 0xffb070, 0.7, 0.15);
+    } else effects.burst(end, 0xffb070, 0.35, 0.12);
+    effects.flash(end, gun.color, 10, 6, 0.1);
+  }
+
+  /** A blast at a point: everything within `radius` metres hurt by up to `damage` and thrown outward, the player too when close. */
+  private blast(ctx: KitContext, at: THREE.Vector3, damage: number, radius: number): void {
+    const { world, effects, player } = ctx;
+    effects.ring(at, 0xffa050, radius * 2.5, 0.4);
+    effects.burst(at, 0xffc080, radius * 0.6, 0.3);
+    effects.flash(at, 0xffa050, 30 + damage * 0.3, radius * 4, 0.25);
+    for (const c of world.creatures.creatures) {
+      tmp.copy(c.pos).sub(at);
+      const d = tmp.length();
+      if (d > radius) continue;
+      const f = 1 - d / radius;
+      tmp.setY(0).normalize();
+      c.damage(damage * f + damage * 0.1);
+      c.knock(tmp, 10 * f + 4);
+    }
+    for (const t of world.turrets.turrets) {
+      const d = t.pos.distanceTo(at);
+      if (d <= radius) t.damage(damage * (1 - d / radius) + damage * 0.1);
+    }
+    for (const sp of world.vehicles) {
+      tmp.copy(sp.pos).sub(at);
+      const d = tmp.length();
+      if (d > radius * 1.5) continue;
+      const f = 1 - d / (radius * 1.5);
+      const m = sp.body.mass();
+      tmp.normalize();
+      sp.body.applyImpulse({ x: tmp.x * m * 6 * f, y: m * 4 * f, z: tmp.z * m * 6 * f }, true);
+    }
+    const dp = player.pos.distanceTo(at);
+    if (dp < radius * 0.7 && !player.mounted) player.takeDamage(damage * 0.35 * (1 - dp / (radius * 0.7)));
   }
 
   private throwDetonator(ctx: KitContext): void {

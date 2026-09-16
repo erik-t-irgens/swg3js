@@ -33,6 +33,8 @@ export type Action =
   | 'slot2'
   | 'slot3'
   | 'slot4'
+  | 'slot5'
+  | 'slot6'
   | 'emoteWheel'
   | 'emote1'
   | 'emote2'
@@ -80,6 +82,8 @@ export const DEFAULT_BINDINGS: Record<Action, string[]> = {
   slot2: ['Digit2'],
   slot3: ['Digit3'],
   slot4: ['Digit4'],
+  slot5: ['Digit5'],
+  slot6: ['Digit6'],
   emoteWheel: ['KeyG'],
   emote1: ['ArrowUp'],
   emote2: ['ArrowRight'],

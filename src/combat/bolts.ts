@@ -66,6 +66,12 @@ export interface BoltOptions {
   exclude?: RAPIER.RigidBody;
   /** A ship's bolt: drawn as the game's projectile effect, when the effects are loaded. */
   projectile?: ProjectileVisual | null;
+  /** The bolt's size over the E-11's (a rocket is twice, a repeater's bolt smaller). */
+  size?: number;
+  /** The shove on what it hits, as the creatures' knock scale. */
+  push?: number;
+  /** Called where the bolt lands, whatever it lands on (a rocket's blast). */
+  onHit?: (point: THREE.Vector3) => void;
 }
 
 export interface Bolt {
@@ -86,6 +92,16 @@ export interface Bolt {
   /** The projectile effect carried along, in place of the mesh, for a ship's bolt. */
   fx: EffectHandle | null;
   hitFx: string | null;
+  push: number;
+  onHit: ((point: THREE.Vector3) => void) | null;
+}
+
+/** A shot that landed the instant it was fired: its line, fading over its life. */
+interface Beam {
+  mesh: THREE.Group;
+  age: number;
+  life: number;
+  width: number;
 }
 
 /** What a bolt may strike and what to do about it. */
@@ -115,8 +131,13 @@ const LENGTH = 32 * UNIT;
 
 export class Bolts {
   readonly bolts: Bolt[] = [];
-  private readonly core = new THREE.CylinderGeometry(0.025, 0.025, LENGTH, 6, 1).rotateX(Math.PI / 2);
-  private readonly glow = new THREE.CylinderGeometry(0.07, 0.07, LENGTH * 0.9, 8, 1).rotateX(Math.PI / 2);
+  // The bolt: a bright core, a glow that tapers off toward the tail, and a rounder head of light.
+  private readonly core = new THREE.CylinderGeometry(0.02, 0.012, LENGTH, 6, 1).rotateX(Math.PI / 2);
+  private readonly glow = new THREE.CylinderGeometry(0.075, 0.02, LENGTH * 1.1, 8, 1).rotateX(Math.PI / 2);
+  private readonly head = new THREE.SphereGeometry(0.06, 8, 6).translate(0, 0, LENGTH * 0.5);
+  private readonly beamCore = new THREE.CylinderGeometry(0.012, 0.012, 1, 5, 1).rotateX(Math.PI / 2).translate(0, 0, 0.5);
+  private readonly beamGlow = new THREE.CylinderGeometry(0.045, 0.045, 1, 8, 1).rotateX(Math.PI / 2).translate(0, 0, 0.5);
+  private readonly beams: Beam[] = [];
   private readonly materials = new Map<number, [THREE.MeshBasicMaterial, THREE.MeshBasicMaterial]>();
   /** Bolts fired this session by each side, for the console. */
   readonly fired = { player: 0, enemy: 0 };
@@ -126,10 +147,12 @@ export class Bolts {
   constructor(private readonly scene: THREE.Scene) {}
 
   /** Fire a bolt from `from` along `dir` (unit length). */
-  fire(from: THREE.Vector3, dir: THREE.Vector3, { owner, damage = BLASTER.damage, speed = BLASTER.velocity, metresPerSecond, inherit, life = BLASTER.life, color = 0xff4a2a, exclude, projectile }: BoltOptions): Bolt {
+  fire(from: THREE.Vector3, dir: THREE.Vector3, { owner, damage = BLASTER.damage, speed = BLASTER.velocity, metresPerSecond, inherit, life = BLASTER.life, color = 0xff4a2a, exclude, projectile, size = 1, push = BLASTER.push, onHit }: BoltOptions): Bolt {
     const [coreMat, glowMat] = this.materialsFor(color);
     const mesh = new THREE.Group();
-    mesh.add(new THREE.Mesh(this.core, coreMat), new THREE.Mesh(this.glow, glowMat));
+    mesh.add(new THREE.Mesh(this.core, coreMat), new THREE.Mesh(this.glow, glowMat), new THREE.Mesh(this.head, glowMat));
+    // A bigger bolt is wider and a little longer, not just scaled up.
+    mesh.scale.set(size, size, 0.6 + size * 0.4);
     mesh.position.copy(from);
     // The bolt's velocity: its muzzle speed along the barrel, plus whatever the shooter itself
     // was doing, so a fighter at full throttle sees its bolts pull away as they should.
@@ -142,7 +165,7 @@ export class Bolts {
     if (fx) mesh.visible = false;
     this.scene.add(mesh);
     markActor(mesh);
-    const bolt: Bolt = { pos: from.clone(), dir: heading, speed: s, damage, owner, exclude, age: 0, life, lead: fx && projectile ? projectile.reach : LENGTH / 2, reflected: 0, mesh, fx, hitFx: fx ? (projectile?.hit ?? null) : null };
+    const bolt: Bolt = { pos: from.clone(), dir: heading, speed: s, damage, owner, exclude, age: 0, life, lead: fx && projectile ? projectile.reach : (LENGTH / 2) * mesh.scale.z, reflected: 0, mesh, fx, hitFx: fx ? (projectile?.hit ?? null) : null, push, onHit: onHit ?? null };
     this.bolts.push(bolt);
     this.fired[owner]++;
     return bolt;
@@ -157,8 +180,42 @@ export class Bolts {
     }
   }
 
+  /**
+   * A shot that has already landed (a disruptor's): its line from muzzle to mark, drawn as a beam
+   * that thins away over `life` seconds. `width` is over the plain beam's.
+   */
+  beam(from: THREE.Vector3, to: THREE.Vector3, color: number, life = 0.35, width = 1): void {
+    const [coreMat, glowMat] = this.materialsFor(color);
+    const mesh = new THREE.Group();
+    mesh.add(new THREE.Mesh(this.beamCore, coreMat.clone()), new THREE.Mesh(this.beamGlow, glowMat.clone()));
+    mesh.position.copy(from);
+    tmp.copy(to).sub(from);
+    const len = tmp.length();
+    if (len < 1e-3) return;
+    mesh.quaternion.setFromUnitVectors(Z, tmp.divideScalar(len));
+    mesh.scale.set(width, width, len);
+    this.scene.add(mesh);
+    markActor(mesh);
+    this.beams.push({ mesh, age: 0, life, width });
+  }
+
   /** Fly every bolt on by `dt` and settle what each one struck. */
   update(dt: number, w: BoltWorld): void {
+    for (let i = this.beams.length - 1; i >= 0; i--) {
+      const b = this.beams[i];
+      b.age += dt;
+      const t = b.age / b.life;
+      if (t >= 1) {
+        this.scene.remove(b.mesh);
+        for (const m of b.mesh.children) ((m as THREE.Mesh).material as THREE.Material).dispose();
+        this.beams.splice(i, 1);
+        continue;
+      }
+      const w2 = b.width * (1 - t * t);
+      b.mesh.scale.x = w2;
+      b.mesh.scale.y = w2;
+      for (const m of b.mesh.children) ((m as THREE.Mesh).material as THREE.MeshBasicMaterial).opacity = (1 - t) * 0.9;
+    }
     for (let i = this.bolts.length - 1; i >= 0; i--) {
       const b = this.bolts[i];
       b.age += dt;
@@ -196,13 +253,15 @@ export class Bolts {
           w.onPlayerHit(b.damage, b.pos);
           w.effects.burst(hitPoint, 0xff8060, 0.5, 0.15);
         }
+        b.onHit?.(hitPoint);
         this.remove(i);
         continue;
       }
       const target = w.hittableAt(hit.collider.handle);
+      b.onHit?.(hitPoint);
       if (target) {
         tmp.copy(b.pos).addScaledVector(b.dir, -1);
-        target.damage(b.damage, tmp, BLASTER.push);
+        target.damage(b.damage, tmp, b.push);
         w.effects.burst(hitPoint, 0xffb070, 0.7, 0.15);
         w.effects.flash(hitPoint, 0xff8a50, 10, 6, 0.1);
       } else {
@@ -243,8 +302,8 @@ export class Bolts {
     if (!m) {
       const c = new THREE.Color(color);
       m = [
-        new THREE.MeshBasicMaterial({ color: c.clone().lerp(new THREE.Color(0xffffff), 0.55), toneMapped: false }),
-        new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.45, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false }),
+        new THREE.MeshBasicMaterial({ color: c.clone().lerp(new THREE.Color(0xffffff), 0.7).multiplyScalar(1.6), toneMapped: false }),
+        new THREE.MeshBasicMaterial({ color: c.clone().multiplyScalar(1.3), transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false }),
       ];
       this.materials.set(color, m);
     }
@@ -253,8 +312,13 @@ export class Bolts {
 
   dispose(): void {
     this.clear();
+    for (const b of this.beams) this.scene.remove(b.mesh);
+    this.beams.length = 0;
     this.core.dispose();
     this.glow.dispose();
+    this.head.dispose();
+    this.beamCore.dispose();
+    this.beamGlow.dispose();
     for (const [a, b] of this.materials.values()) {
       a.dispose();
       b.dispose();

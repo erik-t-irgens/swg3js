@@ -22,6 +22,7 @@ export class Hud {
   private readonly slotsEl: HTMLElement;
   private readonly help: HTMLElement;
   private readonly crosshair: HTMLElement;
+  private readonly chargeEl: HTMLElement;
   private readonly flight: HTMLElement;
   private flying = false;
   private readonly stickLine: HTMLElement;
@@ -58,6 +59,7 @@ export class Hud {
         <div class="hint"><b>M</b> Map &nbsp; <b>I</b> Inventory &nbsp; <b>B</b> Spawner &nbsp; <b>H</b> Help</div>
       </div>
       <div class="crosshair"></div>
+      <div class="charge" hidden><div class="fill"></div></div>
       <svg class="flight hidden" viewBox="-160 -160 320 320" width="320" height="320">
         <circle class="ring" r="120" />
         <circle class="dead" r="12" />
@@ -97,6 +99,7 @@ export class Hud {
     this.slotsEl = q('.slots');
     this.help = q('.help');
     this.crosshair = q('.crosshair');
+    this.chargeEl = q('.charge');
     this.flight = q('.flight');
     this.stickLine = q('.stick-line');
     this.stickHead = q('.stick-head');
@@ -250,6 +253,10 @@ export class Hud {
       el.classList.toggle('active', kit.slotActive(i));
       (el.firstElementChild as HTMLElement).style.height = `${(kit.slotCooldown(i) * 100).toFixed(0)}%`;
     }
+    // A charging shot: a bar filling under the crosshair.
+    const charge = kit.charge?.() ?? 0;
+    this.chargeEl.hidden = charge <= 0;
+    if (charge > 0) (this.chargeEl.firstElementChild as HTMLElement).style.width = `${(charge * 100).toFixed(0)}%`;
     const saber = this.slots[kit.slots.length];
     if (saber && !saber.hidden) {
       saber.classList.toggle('active', saberOn);
