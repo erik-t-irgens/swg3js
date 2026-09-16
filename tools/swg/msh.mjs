@@ -150,7 +150,11 @@ function readBounds(appr) {
   const box = find(appr, 'BOX ');
   if (!box || box.data.length < 24) return null;
   const f = (i) => box.data.readFloatLE(i * 4);
-  return { min: [f(0), f(1), f(2)], max: [f(3), f(4), f(5)] };
+  // The chunk holds the box's two corners with the larger one first; taken componentwise so the
+  // order never matters (read as min then max, every pack's bounds came out swapped).
+  const a = [f(0), f(1), f(2)];
+  const b = [f(3), f(4), f(5)];
+  return { min: a.map((v, k) => Math.min(v, b[k])), max: a.map((v, k) => Math.max(v, b[k])) };
 }
 
 function findParent(root, target) {

@@ -150,6 +150,27 @@ export class Physics {
     return hit ? hit.timeOfImpact : null;
   }
 
+  /**
+   * The first fixed surface a segment from `from` to `to` meets (the world, a building's shell or rooms,
+   * never a moving body): where, and its normal. Null when the segment is clear.
+   */
+  surfaceHit(from: { x: number; y: number; z: number }, to: { x: number; y: number; z: number }, excludeBody: RAPIER.RigidBody | null, inside: boolean): { point: [number, number, number]; normal: [number, number, number] } | null {
+    const dx = to.x - from.x;
+    const dy = to.y - from.y;
+    const dz = to.z - from.z;
+    const len = Math.hypot(dx, dy, dz);
+    if (len < 1e-4) return null;
+    const ray = new RAPIER.Ray(from, { x: dx / len, y: dy / len, z: dz / len });
+    const filter = groups(Group.all, inside ? Group.all & ~(Group.terrain | Group.exterior) : Group.all);
+    const hit = this.world.castRayAndGetNormal(ray, len, true, undefined, filter, undefined, excludeBody ?? undefined, (c) => {
+      const body = c.parent();
+      return !body || body.isFixed();
+    });
+    if (!hit) return null;
+    const t = hit.timeOfImpact;
+    return { point: [from.x + ray.dir.x * t, from.y + ray.dir.y * t, from.z + ray.dir.z * t], normal: [hit.normal.x, hit.normal.y, hit.normal.z] };
+  }
+
   /** A static cylinder, or null for a degenerate one (the physics engine aborts on non-positive or NaN sizes). */
   createStaticCylinder(x: number, y: number, z: number, radius: number, halfHeight: number): RAPIER.Collider | null {
     if (![x, y, z, radius, halfHeight].every(Number.isFinite) || radius <= 0.01 || halfHeight <= 0.01) return null;

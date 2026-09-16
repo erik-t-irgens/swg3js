@@ -10,6 +10,7 @@ import { Input, type Action } from './core/input';
 import { Physics } from './core/physics';
 import { PLANETS, packIdOf, planetById, spaceZoneOf, type PlanetDef } from './data/planets';
 import { DEFAULT_SABER_COLOR, Player } from './player/player';
+import { SaberMarks } from './combat/saberMarks';
 import { loadPlayerRig } from './player/rig';
 import { Character, loadSpeciesIndex, type SpeciesEntry } from './player/character';
 import { GalaxyMap, type Poi } from './ui/galaxyMap';
@@ -118,6 +119,12 @@ class App {
   private readonly world: World;
   private readonly player: Player;
   private readonly effects: Effects;
+  /** The burns lit lightsabers leave on what they touch. */
+  private readonly marks = new SaberMarks();
+  private readonly bladeSegments = [0, 1, 2].map(() => ({ a: new THREE.Vector3(), b: new THREE.Vector3() }));
+  private readonly bladeColour = new THREE.Color();
+  private readonly markPoint = new THREE.Vector3();
+  private readonly markNormal = new THREE.Vector3();
   private kit!: Kit;
   private readonly hud: Hud;
   private readonly map: MapUi;
@@ -222,6 +229,7 @@ class App {
     if (!S.shadows) this.world.setShadowsEnabled(false);
     this.player = new Player(this.scene, physics);
     this.effects = new Effects(this.scene);
+    this.scene.add(this.marks.mesh);
     this.hud = new Hud(this.ui);
     this.wardrobe = new WardrobeUi(this.ui, () => this.hud.setPrompt(''));
     this.wardrobe.setBaseUrl(import.meta.env.BASE_URL);
@@ -534,6 +542,7 @@ class App {
           this.stepEmoteKeys();
           this.stepEmoteEnd();
           this.player.update(dt, this.input, this.cam, this.world);
+          this.scorch(dt);
           this.stepCombat(dt);
           this.stepVehicles(dt, true);
           if (!this.player.noclip && !this.player.mounted) this.world.turrets.update(dt, this.player, this.world.bolts);
@@ -823,6 +832,8 @@ class App {
         this.player.refitGrip();
         return { ...this.player.gripTune, effective: { right: this.player.tunedGrip('right'), left: this.player.tunedGrip('left') }, axes: this.player.rig?.grip ?? null };
       },
+      /** How many lightsaber burns are on the world's surfaces now. */
+      marks: () => this.marks.count(),
       /** The blaster in hand, 'pistol' or 'rifle': which of the game's carries play. `gun('carbine', { aim: 30, aimKneel: 30, ready: 30 })` sets how far right, in degrees, that kind's torso turns while aiming standing or moving, aiming kneeling or crouched, and in the hip-fire carry, as a starting point; the barrel is then measured against the crosshair every frame and the torso turned the rest of the way (`fix`, in degrees; `gun(undefined, { fix: false })` turns that off to see the poses bare). */
       gun: (kind?: 'pistol' | 'carbine' | 'rifle' | 'heavy', tune?: { ready?: number; aim?: number; aimKneel?: number; fix?: boolean }) => {
         if (kind) {
@@ -1054,6 +1065,28 @@ class App {
     this.current.appearance = this.appearanceOf(c);
     this.current.outfit = this.outfitOf(c);
     upsertCharacter(this.current);
+  }
+
+  /**
+   * A lit lightsaber through a wall or the ground burns it: each blade is cast along its length against
+   * the world's fixed surfaces, and where it meets one a mark is laid in the blade's colour, spaced along
+   * the blade's path. Swords and polearms burn nothing, nor does a blade aboard a ship's rooms.
+   */
+  private scorch(dt: number): void {
+    this.marks.update(dt);
+    const player = this.player;
+    if (player.aboard || player.noclip || !player.saberOn) return;
+    const n = player.saberSegments(this.bladeSegments);
+    if (!n) return;
+    this.bladeColour.set(player.bladeColor);
+    for (let i = 0; i < n; i++) {
+      const seg = this.bladeSegments[i];
+      const hit = this.physics.surfaceHit(seg.a, seg.b, player.body, this.world.inside);
+      if (!hit) continue;
+      this.markPoint.fromArray(hit.point);
+      this.markNormal.fromArray(hit.normal);
+      this.marks.touch(i, this.markPoint, this.markNormal, this.bladeColour);
+    }
   }
 
   /** What the character wears, by the names it wears them under. */
@@ -1390,6 +1423,7 @@ class App {
   private arrive(planet: PlanetDef, zoneId?: string, at?: THREE.Vector3): void {
     this.zone = planet.zones?.length ? (planet.zones.find((z) => z.id === zoneId) ?? planet.zones[0]).id : undefined;
     this.postfx?.reset();
+    this.marks.clear();
     this.world.load(planet, packIdOf(planet, this.zone));
     this.spawn = this.world.spawnPoint();
     const stand = at ?? this.spawn;
@@ -1593,7 +1627,7 @@ class App {
       if (player.mounted?.spec.ship) player.mounted.group.visible = true;
       // Aboard a ship the view is upright in the hull's frame, as the body is; adrift in space, in the body's own.
       this.cam.setFrame(player.aboard ? player.aboard.vehicle.group.quaternion : player.eva ? player.evaFrame : null);
-      this.cam.update(input, player.worldPos, blocked, dt, this.eyes());
+      this.cam.update(input, player.worldPos, blocked, dt, this.eyes(), 1, player.eyeHeight);
     }
   }
 
@@ -2318,6 +2352,7 @@ class App {
         player.update(dt, input, this.cam, this.world);
         // The thrown and orbiting sabers glow from the pooled flash lights, so no light comes or goes with them.
         for (const spot of player.lightSpots()) this.effects.flash(spot.pos, player.saberColor, spot.intensity, spot.distance, 0.08);
+        this.scorch(dt);
         // Aboard, the room's own lights, the nearest few, through the same pool (no new lights, so nothing recompiles).
         if (player.aboard) for (const l of player.aboard.roomLights(player.pos, 3, roomLightSpots)) this.effects.flash(l.pos, l.color, l.intensity, l.distance, 0.08);
         this.stepCombat(dt);

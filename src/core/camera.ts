@@ -162,12 +162,16 @@ export class ThirdPersonCamera {
     return out.set(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
   }
 
+  /** The height of the orbit's centre over the target, eased: the standing eye height, lower for a crouch, a kneel or lying down. */
+  private eyeHeight = EYE_HEIGHT;
+
   /**
    * @param blocked  physics query for what the camera would cut through; null skips collision (noclip)
    * @param eyes     where the character's eyes are this frame, for the first-person view; the standing eye height over `target` otherwise
    * @param scale    the orbit's distance over the wheel's, for orbiting something larger than a figure (a ship)
+   * @param eyeHeight  how high over `target` the view centres: the posture's eye height
    */
-  update(input: Input, target: THREE.Vector3, blocked: CameraBlocker | null, dt = 1 / 60, eyes: THREE.Vector3 | null = null, scale = 1): void {
+  update(input: Input, target: THREE.Vector3, blocked: CameraBlocker | null, dt = 1 / 60, eyes: THREE.Vector3 | null = null, scale = 1, eyeHeight = EYE_HEIGHT): void {
     if (input.locked) {
       const k = 0.0025 * this.sensitivity;
       this.yaw -= input.mouseDX * k;
@@ -180,7 +184,9 @@ export class ThirdPersonCamera {
     input.mouseDY = 0;
     this.zoom(input, dt);
 
-    this.focus.copy(target).addScaledVector(this.up, EYE_HEIGHT);
+    // A posture change moves the view's centre down or up over a few frames, not in one jump.
+    this.eyeHeight += (eyeHeight - this.eyeHeight) * Math.min(1, dt * 8);
+    this.focus.copy(target).addScaledVector(this.up, this.eyeHeight);
     // Aiming a blaster: the view comes in over the right shoulder, and back to the middle after.
     this.aimBlend += ((this.aim ? 1 : 0) - this.aimBlend) * 0.15;
     if (this.aimBlend > 0.001 && !this.firstPerson) {

@@ -334,17 +334,21 @@ export class Player {
   private readonly blades: { frame: THREE.Object3D; blade: SaberBlade; snap: boolean; hand: 'right' | 'left'; hiltTop: number }[] = [];
   /** The colour the pooled lights glow with around a lit blade: the blade's, softened toward white. */
   saberColor = new THREE.Color(DEFAULT_SABER_COLOR).getHex();
+  /** The blade's own colour, as the glow draws it. */
+  bladeColor = new THREE.Color(DEFAULT_SABER_COLOR).getHex();
 
   /** Where the sabers out of the hand want light this frame: the thrown one, the orbiting two. */
   lightSpots(): { pos: THREE.Vector3; intensity: number; distance: number }[] {
     const out: { pos: THREE.Vector3; intensity: number; distance: number }[] = [];
-    if (this.thrown.inFlight) out.push({ pos: this.flying.position, intensity: 4, distance: 6 });
+    // Only a lightsaber glows: a sword or polearm from the rack in the right hand lights nothing.
+    if (!this.saberInHand) return out;
+    if (this.thrown.inFlight) out.push({ pos: this.flying.position, intensity: 2.5, distance: 6 });
     if (this.saberOn && !this.thrown.inFlight && !this.orbiting && this.classId === 'jedi' && !this.mounted) {
       this.parts.saber.getWorldPosition(hiltGlow);
       hiltGlow.y += 0.6;
-      out.push({ pos: hiltGlow, intensity: 4, distance: 7 });
+      out.push({ pos: hiltGlow, intensity: 2.2, distance: 6 });
     }
-    if (this.orbiting) for (const g of this.orbit) out.push({ pos: g.position, intensity: 3, distance: 5 });
+    if (this.orbiting) for (const g of this.orbit) out.push({ pos: g.position, intensity: 2, distance: 5 });
     return out;
   }
   private orbitAngle = 0;
@@ -752,10 +756,46 @@ export class Player {
   /** The blades' colour (hex, as '#rrggbb' or a number): the glow, the thrown saber's blur, the pooled lights. */
   setSaberColor(hex: string | number): void {
     const c = new THREE.Color(hex);
+    this.bladeColor = c.getHex();
     for (const b of this.blades) b.blade.setColor(c.getHex());
     this.flyingBlur.color.copy(c);
-    // The light the blade throws is the colour softened toward white: a pure colour lit the body a flat, saturated wash.
-    this.saberColor = c.lerp(new THREE.Color(0xffffff), 0.4).getHex();
+    // The light the blade throws is the blade's colour, barely softened so a pure colour still shows the body's shading.
+    this.saberColor = c.lerp(new THREE.Color(0xffffff), 0.12).getHex();
+  }
+
+  /** How high the eyes are over the feet in the posture held: standing, crouched, kneeling, or lying down. */
+  get eyeHeight(): number {
+    if (this.mounted || this.aboard || this.eva || this.swimming) return 1.5;
+    return this.prone ? 0.45 : this.kneeling ? 1.0 : this.crouching ? 1.05 : 1.5;
+  }
+
+  /** Whether the blade in the right hand is a lightsaber (the placeholder's, or a hilt from the rack) rather than a sword or polearm. */
+  get saberInHand(): boolean {
+    const r = this.equipped.right;
+    return !r || isSaber(r.class);
+  }
+
+  /**
+   * The lit lightsaber blades in the world this frame, as segments from the hilt's emitter to the tip
+   * (only lightsabers: a sword or polearm leaves no burn), for the marks they scorch into what they touch.
+   */
+  saberSegments(out: { a: THREE.Vector3; b: THREE.Vector3 }[]): number {
+    let n = 0;
+    if (!this.saberOn || this.classId === 'jedi' && this.mounted) return 0;
+    const push = (frame: THREE.Object3D, hiltTop: number, length: number) => {
+      if (!isShown(frame) || n >= out.length) return;
+      frame.localToWorld(out[n].a.set(0, hiltTop, 0));
+      frame.localToWorld(out[n].b.set(0, hiltTop + length, 0));
+      n++;
+    };
+    for (const b of this.blades) {
+      if (b.snap) continue;
+      const isLeft = b.hand === 'left';
+      const held = isLeft ? this.equipped.left : this.equipped.right;
+      if (held && !isSaber(held.class)) continue;
+      push(b.frame, b.hiltTop, b.blade.spec.length);
+    }
+    return n;
   }
 
   /**
@@ -903,9 +943,11 @@ export class Player {
     // The reach: the grip is the model's origin, the far end the extreme of its longest extent.
     const near = new THREE.Object3D();
     const far = new THREE.Object3D();
+    // The manifest's min and max come swapped from some packs, so the extents are taken as sizes: the
+    // longest axis is the barrel or the blade, and its far end the extreme farther from the grip.
     const b = def.bounds;
     if (b) {
-      const ext = [0, 1, 2].map((k) => b.max[k] - b.min[k]);
+      const ext = [0, 1, 2].map((k) => Math.abs(b.max[k] - b.min[k]));
       const axis = ext.indexOf(Math.max(...ext));
       const towards = Math.abs(b.max[axis]) >= Math.abs(b.min[axis]) ? b.max[axis] : b.min[axis];
       far.position.setComponent(axis, towards);
@@ -1012,7 +1054,9 @@ export class Player {
     const kind = this.gunKind;
     // The hierarchy's own shots for the posture first (pistol_combat_standing_fire_N, pistol_combat_kneeling_fire_N), then the additive ones.
     const posture = this.prone ? 'prone' : this.kneeling ? 'kneeling' : 'standing';
-    let shots = rig.clipsMatching(new RegExp(`^${kind}_(combat_)?${posture}(_aimed)?_fire_\\d+$`));
+    // Prone, the aimed shots for every shot: the unaimed prone shots throw the off hand about.
+    let shots = this.prone ? rig.clipsMatching(new RegExp(`^${kind}_(combat_)?prone_aimed_fire_\\d+$`)) : [];
+    if (!shots.length) shots = rig.clipsMatching(new RegExp(`^${kind}_(combat_)?${posture}(_aimed)?_fire_\\d+$`));
     if (!shots.length && this.kneeling) shots = rig.clipsMatching(new RegExp(`^${kind}_kneeling_fire_\\d+$`));
     if (!shots.length && !this.prone) shots = rig.clipsMatching(new RegExp(`^add_${kind}_fire_\\d+$`));
     const pool = shots.length ? shots : rig.clipsMatching(new RegExp(`^(add_)?${kind}_(combat_)?(prone_|kneeling_|standing_)?fire_\\d+$`));
