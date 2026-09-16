@@ -3,7 +3,23 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 
-export type WeaponClass = 'pistol' | 'carbine' | 'rifle' | 'heavy' | 'sword1h' | 'knife' | 'sword2h' | 'polearm' | 'lightsaber' | 'lightsaber2h' | 'lightsaberStaff';
+export type WeaponClass = 'pistol' | 'carbine' | 'rifle' | 'heavy' | 'sword1h' | 'knife' | 'sword2h' | 'polearm' | 'fist' | 'lightsaber' | 'lightsaber2h' | 'lightsaberStaff';
+
+/**
+ * A gun's client effect: the family and index its template names into the client's weapon table
+ * (bolt 21 is a fireball, rocket 3 the lightning beam, projectile_rifle a slug), and the effects
+ * that row named, converted into the pack: the shot (with how far ahead of its point it reaches),
+ * the muzzle flash, the hit on a creature and the miss.
+ */
+export interface GunFx {
+  id: string;
+  index: number;
+  shot?: string | null;
+  reach?: number;
+  fire?: string | null;
+  hit?: string | null;
+  miss?: string | null;
+}
 
 /** A lightsaber's blade, from the client's blade file: metres, and seconds to ignite and retract. */
 export interface BladeDef {
@@ -30,6 +46,7 @@ export interface WeaponDef {
   bounds?: { min: number[]; max: number[] };
   length: number;
   blade?: BladeDef;
+  fx?: GunFx;
 }
 
 export interface WeaponsManifest {
@@ -38,13 +55,15 @@ export interface WeaponsManifest {
   skipped: { template: string; why: string }[];
   /** The blade colours the game offers, as hex. */
   saberColors?: string[];
+  /** Effects beyond the guns' own rows: the flame thrower's and the lightning rifle's beams, the acid and ice beams. */
+  effects?: Partial<Record<'flame' | 'lightning' | 'lightningMuzzle' | 'acid' | 'ice', string>>;
 }
 
 /** What each class fights like, when the manifest does not say. */
-export const FIGHTS: Record<WeaponClass, Fights> = { pistol: 'gun', carbine: 'gun', rifle: 'gun', heavy: 'gun', sword1h: 'single', knife: 'single', sword2h: 'single', polearm: 'staff', lightsaber: 'lightsaber', lightsaber2h: 'lightsaber', lightsaberStaff: 'lightsaber' };
-export const CLASS_LABELS: Record<WeaponClass, string> = { pistol: 'Pistols', carbine: 'Carbines', rifle: 'Rifles', heavy: 'Heavy weapons', sword1h: 'One-hand swords', knife: 'Knives', sword2h: 'Two-hand swords', polearm: 'Polearms and lances', lightsaber: 'Lightsabers', lightsaber2h: 'Two-hand lightsabers', lightsaberStaff: 'Double-bladed lightsabers' };
+export const FIGHTS: Record<WeaponClass, Fights> = { pistol: 'gun', carbine: 'gun', rifle: 'gun', heavy: 'gun', sword1h: 'single', knife: 'single', sword2h: 'single', polearm: 'staff', fist: 'single', lightsaber: 'lightsaber', lightsaber2h: 'lightsaber', lightsaberStaff: 'lightsaber' };
+export const CLASS_LABELS: Record<WeaponClass, string> = { pistol: 'Pistols', carbine: 'Carbines', rifle: 'Rifles', heavy: 'Heavy weapons', sword1h: 'One-hand swords and clubs', knife: 'Knives', sword2h: 'Two-hand swords and axes', polearm: 'Polearms and lances', fist: 'Fist weapons', lightsaber: 'Lightsabers', lightsaber2h: 'Two-hand lightsabers', lightsaberStaff: 'Double-bladed lightsabers' };
 /** Classes a left hand may hold too: every blade but the double-bladed staff; one in each hand fights as the dual style. */
-export const OFF_HAND = new Set<WeaponClass>(['sword1h', 'knife', 'sword2h', 'polearm', 'lightsaber', 'lightsaber2h']);
+export const OFF_HAND = new Set<WeaponClass>(['sword1h', 'knife', 'sword2h', 'polearm', 'fist', 'lightsaber', 'lightsaber2h']);
 /** The blaster carries a class plays: the pistol's, or the rifle's (carbines and heavy weapons use the rifle set). */
 export function gunKindOf(cls: WeaponClass): 'pistol' | 'rifle' {
   return cls === 'pistol' ? 'pistol' : 'rifle';
@@ -75,6 +94,11 @@ export class WeaponCatalogue {
   /** The blade colours the game offers, as hex, when the pack has them. */
   get saberColors(): string[] {
     return this.manifest.saberColors ?? [];
+  }
+
+  /** The pack's extra effects (beams for the flame thrower and the like), by name. */
+  effect(name: 'flame' | 'lightning' | 'lightningMuzzle' | 'acid' | 'ice'): string | null {
+    return this.manifest.effects?.[name] ?? null;
   }
 
   find(id: string): WeaponDef | undefined {

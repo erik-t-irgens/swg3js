@@ -291,11 +291,15 @@ export class World {
 
   /** The ships pack's particle effects (bolts in flight, their hits), played wherever the ships go, on every planet. */
   readonly shipFx: ParticleEffects;
+  /** The weapons pack's particle effects: the guns' own bolts, muzzle flashes, hits and beams. */
+  readonly weaponFx: ParticleEffects;
   private readonly warmedFx = new Set<string>();
 
   constructor(readonly scene: THREE.Scene, readonly physics: Physics) {
     this.bolts = new Bolts(scene);
     this.shipFx = new ParticleEffects(scene, `${import.meta.env.BASE_URL}assets-private/ships/`);
+    this.weaponFx = new ParticleEffects(scene, `${import.meta.env.BASE_URL}assets-private/weapons/`);
+    this.bolts.weaponVisuals = this.weaponFx;
     this.bolts.visuals = this.shipFx;
     scene.add(this.chunkRoot, this.sun, this.sun.target, this.hemi, this.fill, this.fill.target, this.splashes.points, this.dust.points);
     markActor(this.splashes.points);
@@ -1720,7 +1724,11 @@ export class World {
       this.packStatus = `${this.packBase}; ${this.layoutStream.status}${this.particles ? `; ${this.particles.status}` : ''}`;
     }
     if (this.particles && this.camera) this.particles.update(dt, this.camera, this.scene.fog instanceof THREE.FogExp2 ? this.scene.fog : null);
-    if (this.camera) this.shipFx.update(dt, this.camera, this.scene.fog instanceof THREE.FogExp2 ? this.scene.fog : null);
+    if (this.camera) {
+      const fog = this.scene.fog instanceof THREE.FogExp2 ? this.scene.fog : null;
+      this.shipFx.update(dt, this.camera, fog);
+      this.weaponFx.update(dt, this.camera, fog);
+    }
     this.updateInterior(playerPos);
     this.day.update(dt, fastTime);
     if (this.swgSky) {

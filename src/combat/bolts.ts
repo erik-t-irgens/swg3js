@@ -42,12 +42,14 @@ export type BoltOwner = 'player' | 'enemy';
 
 /** How a ship's bolt looks: the projectile table's effect for it, and the one for where it strikes. */
 export interface ProjectileVisual {
-  /** The bolt's particle effect, relative to the ships pack. */
+  /** The bolt's particle effect, relative to its pack. */
   effect: string;
   /** How far ahead of the projectile's own point the effect reaches (metres): the bolt's tip. */
   reach: number;
   /** The effect played where the bolt strikes, when the table names one. */
   hit?: string | null;
+  /** Which pack's effects these are: the ships' (the default) or the weapons'. */
+  pack?: 'ships' | 'weapons';
 }
 
 export interface BoltOptions {
@@ -70,8 +72,14 @@ export interface BoltOptions {
   size?: number;
   /** The shove on what it hits, as the creatures' knock scale. */
   push?: number;
-  /** Called where the bolt lands, whatever it lands on (a rocket's blast). */
-  onHit?: (point: THREE.Vector3) => void;
+  /** Called where the bolt lands, with what it struck when that is something that can be hurt (a rocket's blast, a burn). */
+  onHit?: (point: THREE.Vector3, target: Hittable | null) => void;
+  /** The bolt falls, metres a second squared (a slug's drop, a crossbow's arc). */
+  gravity?: number;
+  /** Off a wall or the ground the bolt bounces, this many times, before it lands. */
+  bounces?: number;
+  /** The bolt turns toward this each frame (a homing rocket). */
+  homing?: { pos: THREE.Vector3; dead?: boolean } | null;
 }
 
 export interface Bolt {
@@ -92,8 +100,15 @@ export interface Bolt {
   /** The projectile effect carried along, in place of the mesh, for a ship's bolt. */
   fx: EffectHandle | null;
   hitFx: string | null;
+  /** Which effects player drew it, when an effect did. */
+  fxPack: ParticleEffects | null;
   push: number;
-  onHit: ((point: THREE.Vector3) => void) | null;
+  onHit: ((point: THREE.Vector3, target: Hittable | null) => void) | null;
+  gravity: number;
+  bounces: number;
+  homing: { pos: THREE.Vector3; dead?: boolean } | null;
+  /** The bolt's velocity as a vector when it falls or turns; `dir` and `speed` follow it. */
+  vel: THREE.Vector3 | null;
 }
 
 /** A shot that landed the instant it was fired: its line, fading over its life. */
@@ -143,11 +158,26 @@ export class Bolts {
   readonly fired = { player: 0, enemy: 0 };
   /** The player of the ships pack's particle effects, once there is one: a ship's bolt is drawn through it. */
   visuals: ParticleEffects | null = null;
+  /** The weapons pack's, for the guns' own shot, flash and hit effects. */
+  weaponVisuals: ParticleEffects | null = null;
+
+  /** The effects player for a visual's pack. */
+  private playerFor(v: ProjectileVisual | null | undefined): ParticleEffects | null {
+    if (!v) return null;
+    return v.pack === 'weapons' ? this.weaponVisuals : this.visuals;
+  }
+
+  /** Play a weapons-pack effect once at a point, facing `dir` (a muzzle flash, a hit). */
+  flash(effect: string | null | undefined, at: THREE.Vector3, dir: THREE.Vector3): void {
+    if (!effect || !this.weaponVisuals) return;
+    placeQ.setFromUnitVectors(Z, tmp.copy(dir).normalize());
+    this.weaponVisuals.place(effect, placeM.compose(at, placeQ, ONE), false, true);
+  }
 
   constructor(private readonly scene: THREE.Scene) {}
 
   /** Fire a bolt from `from` along `dir` (unit length). */
-  fire(from: THREE.Vector3, dir: THREE.Vector3, { owner, damage = BLASTER.damage, speed = BLASTER.velocity, metresPerSecond, inherit, life = BLASTER.life, color = 0xff4a2a, exclude, projectile, size = 1, push = BLASTER.push, onHit }: BoltOptions): Bolt {
+  fire(from: THREE.Vector3, dir: THREE.Vector3, { owner, damage = BLASTER.damage, speed = BLASTER.velocity, metresPerSecond, inherit, life = BLASTER.life, color = 0xff4a2a, exclude, projectile, size = 1, push = BLASTER.push, onHit, gravity = 0, bounces = 0, homing = null }: BoltOptions): Bolt {
     const [coreMat, glowMat] = this.materialsFor(color);
     const mesh = new THREE.Group();
     mesh.add(new THREE.Mesh(this.core, coreMat), new THREE.Mesh(this.glow, glowMat), new THREE.Mesh(this.head, glowMat));
@@ -161,11 +191,12 @@ export class Bolts {
     const s = vel.length();
     const heading = s > 1e-6 ? vel.divideScalar(s) : dir.clone().normalize();
     mesh.quaternion.setFromUnitVectors(Z, heading);
-    const fx = projectile && this.visuals ? this.visuals.place(projectile.effect, placeM.compose(from, mesh.quaternion, ONE), false, true) : null;
+    const fxPlayer = this.playerFor(projectile);
+    const fx = projectile && fxPlayer ? fxPlayer.place(projectile.effect, placeM.compose(from, mesh.quaternion, ONE), false, true) : null;
     if (fx) mesh.visible = false;
     this.scene.add(mesh);
     markActor(mesh);
-    const bolt: Bolt = { pos: from.clone(), dir: heading, speed: s, damage, owner, exclude, age: 0, life, lead: fx && projectile ? projectile.reach : (LENGTH / 2) * mesh.scale.z, reflected: 0, mesh, fx, hitFx: fx ? (projectile?.hit ?? null) : null, push, onHit: onHit ?? null };
+    const bolt: Bolt = { pos: from.clone(), dir: heading, speed: s, damage, owner, exclude, age: 0, life, lead: fx && projectile ? projectile.reach : (LENGTH / 2) * mesh.scale.z, reflected: 0, mesh, fx, hitFx: fx ? (projectile?.hit ?? null) : null, fxPack: fx ? fxPlayer : null, push, onHit: onHit ?? null, gravity, bounces, homing, vel: gravity || homing ? vel.clone().multiplyScalar(s) : null };
     this.bolts.push(bolt);
     this.fired[owner]++;
     return bolt;
@@ -223,6 +254,22 @@ export class Bolts {
         this.remove(i);
         continue;
       }
+      // A bolt that falls or turns keeps a velocity: gravity pulls it, a homing one steers toward its mark.
+      if (b.vel) {
+        if (b.gravity) b.vel.y -= b.gravity * dt;
+        if (b.homing && !b.homing.dead) {
+          tmp.copy(b.homing.pos).sub(b.pos);
+          tmp.y += 0.8;
+          const d = tmp.length();
+          if (d > 0.5) {
+            tmp.divideScalar(d);
+            const s = b.vel.length();
+            b.vel.divideScalar(s).lerp(tmp, Math.min(1, dt * 3.5)).normalize().multiplyScalar(s);
+          }
+        }
+        b.speed = b.vel.length();
+        if (b.speed > 1e-6) b.dir.copy(b.vel).divideScalar(b.speed);
+      }
       const step = b.speed * dt;
       // The bolt's own length leads the way so it does not visibly poke through what it hits.
       const ray = new RAPIER.Ray(b.pos, b.dir);
@@ -235,6 +282,19 @@ export class Bolts {
       const p = ray.pointAt(hit.timeOfImpact);
       hitPoint.set(p.x, p.y, p.z);
       hitNormal.set(hit.normal.x, hit.normal.y, hit.normal.z);
+      // Off a wall or the ground, a bouncing bolt turns and flies on.
+      if (b.bounces > 0 && hit.collider.handle !== w.player.collider.handle && !w.hittableAt(hit.collider.handle)) {
+        b.bounces--;
+        if (hitNormal.lengthSq() > 1e-6) {
+          hitNormal.normalize();
+          b.dir.reflect(hitNormal);
+          if (b.vel) b.vel.copy(b.dir).multiplyScalar(b.speed);
+        }
+        b.pos.copy(hitPoint).addScaledVector(b.dir, 0.05 + b.lead * 0.5);
+        this.settle(b);
+        w.effects.burst(hitPoint, 0xffb070, 0.3, 0.1);
+        continue;
+      }
       if (hit.collider.handle === w.player.collider.handle) {
         if (b.owner !== 'player' && w.block(b, hitPoint, bounce)) {
           // Turned away by the saber: it now belongs to the player and flies on from the block.
@@ -253,12 +313,12 @@ export class Bolts {
           w.onPlayerHit(b.damage, b.pos);
           w.effects.burst(hitPoint, 0xff8060, 0.5, 0.15);
         }
-        b.onHit?.(hitPoint);
+        b.onHit?.(hitPoint, null);
         this.remove(i);
         continue;
       }
       const target = w.hittableAt(hit.collider.handle);
-      b.onHit?.(hitPoint);
+      b.onHit?.(hitPoint, target ?? null);
       if (target) {
         tmp.copy(b.pos).addScaledVector(b.dir, -1);
         target.damage(b.damage, tmp, b.push);
@@ -268,11 +328,11 @@ export class Bolts {
         w.effects.burst(hitPoint, 0xffb070, 0.35, 0.12);
         w.effects.flash(hitPoint, 0xff8a50, 6, 4, 0.08);
       }
-      // The game's own hit effect for a ship's bolt, stood on the surface it struck.
-      if (b.hitFx && this.visuals) {
+      // The game's own hit effect for a ship's or a gun's bolt, stood on the surface it struck.
+      if (b.hitFx && b.fxPack) {
         if (hitNormal.lengthSq() < 1e-6) hitNormal.copy(b.dir).negate();
         placeQ.setFromUnitVectors(Y, hitNormal.normalize());
-        this.visuals.place(b.hitFx, placeM.compose(hitPoint, placeQ, ONE), false, true);
+        b.fxPack.place(b.hitFx, placeM.compose(hitPoint, placeQ, ONE), false, true);
       }
       this.remove(i);
     }
@@ -282,7 +342,7 @@ export class Bolts {
   private settle(b: Bolt): void {
     b.mesh.position.copy(b.pos);
     b.mesh.quaternion.setFromUnitVectors(Z, b.dir);
-    if (b.fx && this.visuals) this.visuals.move(b.fx, placeM.compose(b.pos, b.mesh.quaternion, ONE));
+    if (b.fx && b.fxPack) b.fxPack.move(b.fx, placeM.compose(b.pos, b.mesh.quaternion, ONE));
   }
 
   /** Take every bolt out of the air (leaving a planet). */
@@ -293,7 +353,7 @@ export class Bolts {
   private remove(i: number): void {
     const b = this.bolts[i];
     this.scene.remove(b.mesh);
-    if (b.fx && this.visuals) this.visuals.remove(b.fx);
+    if (b.fx && b.fxPack) b.fxPack.remove(b.fx);
     this.bolts.splice(i, 1);
   }
 

@@ -12,10 +12,19 @@ export const WEAPON_CLASSES = {
   knife: { fights: 'single', hands: 'either', label: 'Knives' },
   sword2h: { fights: 'single', hands: 'right', label: 'Two-hand swords' },
   polearm: { fights: 'staff', hands: 'right', label: 'Polearms and lances' },
+  fist: { fights: 'single', hands: 'either', label: 'Fist weapons' },
   lightsaber: { fights: 'lightsaber', hands: 'right', label: 'Lightsabers' },
   lightsaber2h: { fights: 'lightsaber', hands: 'right', label: 'Two-hand lightsabers' },
   lightsaberStaff: { fights: 'lightsaber', hands: 'right', label: 'Double-bladed lightsabers' },
 };
+
+/** A melee folder's class when its weapon turns out to carry a lightsaber blade (the named sabers under sword/ and polearm/). */
+export function saberClassFor(template) {
+  const t = template.toLowerCase();
+  if (/\/melee\/2h_sword\//.test(t)) return 'lightsaber2h';
+  if (/\/melee\/polearm\//.test(t)) return 'lightsaberStaff';
+  return 'lightsaber';
+}
 
 /**
  * The class a weapon template belongs to from its path, or null with a reason for the ones the
@@ -36,10 +45,15 @@ export function weaponClassOf(template) {
   if (/\/ranged\/(thrown|grenade)\//.test(t)) return { skip: 'grenade or thrown weapon' };
   if (/\/ranged\/(turret|mine|trap)\//.test(t) || /\/trap\//.test(t)) return { skip: 'turret, mine or trap' };
   if (/\/melee\/2h_sword\//.test(t)) return { cls: 'sword2h' };
+  // The game's axes (the vibro axe, the heavy-duty axe) are two-handed, its batons (the gaderiffi, the stun baton) one-handed clubs.
+  if (/\/melee\/axe\//.test(t)) return { cls: 'sword2h' };
+  if (/\/melee\/baton\//.test(t)) return { cls: 'sword1h' };
   if (/\/melee\/sword\//.test(t)) return { cls: 'sword1h' };
   if (/\/melee\/knife\//.test(t)) return { cls: 'knife' };
   if (/\/melee\/polearm\//.test(t)) return { cls: 'polearm' };
-  if (/\/melee\/(unarmed|baton|axe|special)\//.test(t)) return { skip: `melee kind ${/\/melee\/([^/]+)\//.exec(t)?.[1]} (no style for it yet)` };
+  // The "special" melee weapons are worn on the hand: knucklers, the punch dagger, the razor, the fan, the blasterfist.
+  if (/\/melee\/special\//.test(t)) return { cls: 'fist' };
+  if (/\/melee\/unarmed\//.test(t)) return { skip: 'unarmed (nothing to hold)' };
   return { skip: 'unknown weapon path' };
 }
 
@@ -74,11 +88,18 @@ export function buildWeapons(templates, deps, { log = () => {}, limit = Infinity
       skipped.push({ template, why: r?.skip ?? 'failed' });
       continue;
     }
-    const entry = { id: weaponLabel(template), template, class: c.cls, model: r.model, file: r.file, bounds: r.bounds, length: Number(weaponLength(r.bounds).toFixed(2)) };
+    // A weapon with a blade file is a lightsaber whatever folder it sits in (the named sabers under sword/ and polearm/).
+    const cls = r.blade ? saberClassFor(template) : c.cls;
+    const entry = { id: weaponLabel(template), template, class: cls, model: r.model, file: r.file, bounds: r.bounds, length: Number(weaponLength(r.bounds).toFixed(2)) };
     // A lightsaber: the blade the client draws from its hilt, and the light it casts.
     if (r.blade) entry.blade = { length: Number(r.blade.length.toFixed(3)), width: Number(r.blade.width.toFixed(3)), open: r.blade.open, close: r.blade.close, ...(r.blade.light ? { light: r.blade.light } : {}) };
+    // A gun: the client's weapon effect (its family and index into the weapon table), with the shot, muzzle flash and hit effects converted.
+    if (WEAPON_CLASSES[cls].fights === 'gun' && deps.fxFor) {
+      const fx = deps.fxFor(template);
+      if (fx) entry.fx = fx;
+    }
     weapons.push(entry);
-    counts.set(c.cls, (counts.get(c.cls) ?? 0) + 1);
+    counts.set(cls, (counts.get(cls) ?? 0) + 1);
   }
   for (const [cls, n] of counts) log(`${WEAPON_CLASSES[cls].label}: ${n}`);
   const reasons = new Map();

@@ -11,6 +11,7 @@ export type Action =
   | 'walk'
   | 'attack'
   | 'altAttack'
+  | 'altFire'
   | 'block'
   | 'saberThrow'
   | 'saberToggle'
@@ -60,6 +61,8 @@ export const DEFAULT_BINDINGS: Record<Action, string[]> = {
   walk: ['ShiftLeft', 'ShiftRight'],
   attack: ['Mouse0'],
   altAttack: ['Mouse2'],
+  // A gun's other trigger (the charge, the rapid trigger, the mines, the homing rocket); Q on the ground, the brake adrift.
+  altFire: ['Mouse1', 'KeyQ'],
   block: ['Mouse2'],
   saberThrow: ['KeyR'],
   saberToggle: ['KeyL'],

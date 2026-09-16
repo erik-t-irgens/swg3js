@@ -1027,6 +1027,7 @@ export class Player {
     if (r?.class === 'polearm' || r?.class === 'lightsaberStaff') return ['staff'];
     if (r?.class === 'lightsaber2h') return ['medium', 'strong'];
     if (r?.class === 'lightsaber') return ['fast', 'medium', 'strong'];
+    if (r?.class === 'fist' || r?.class === 'knife') return ['fast'];
     if (r && (FIGHTS[r.class] === 'single')) return ['fast', 'medium', 'strong'];
     return STYLES;
   }

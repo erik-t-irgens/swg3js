@@ -40,6 +40,52 @@ export function stringParam(buf) {
   return readCString(buf, 1).value.replace(/\\/g, '/');
 }
 
+/** An integer parameter: int8 dataType (1 = SINGLE), then the delta byte (' ', '+', '-' or '%'), then the int32. */
+export function intParam(buf) {
+  if (!buf || buf.length < 6 || buf[0] !== SINGLE) return null;
+  return buf.readInt32LE(2);
+}
+
+/**
+ * The first value of a parameter along a template's inheritance chain (sharedTemplate link, DERV
+ * base, shared_ naming fallback), decoded by `decode` (stringParam, intParam); null when none has it.
+ */
+export function resolveTemplateParam(vfs, templatePath, name, decode, cache = new Map()) {
+  const key = `${templatePath}|${name}|${decode.name}`;
+  if (cache.has(key)) return cache.get(key);
+  let result = null;
+  let path = templatePath;
+  for (let depth = 0; depth < 12 && path; depth++) {
+    if (!vfs.has(path)) {
+      const guess = path.replace(/([^/]+)$/, 'shared_$1');
+      if (path === templatePath && !/\/shared_[^/]+$/.test(path) && vfs.has(guess)) {
+        path = guess;
+        continue;
+      }
+      break;
+    }
+    let t;
+    try {
+      t = readTemplate(parseIff(vfs.read(path)));
+    } catch {
+      break;
+    }
+    const v = decode(t.params.get(name));
+    if (v !== null && v !== undefined && v !== '') {
+      result = v;
+      break;
+    }
+    const shared = stringParam(t.params.get('sharedTemplate'));
+    if (shared) {
+      path = shared;
+      continue;
+    }
+    path = t.base;
+  }
+  cache.set(key, result);
+  return result;
+}
+
 /**
  * Resolve an object template to mesh parts by following the DERV chain for
  * appearanceFilename (or a building's portalLayoutFilename), then unwrapping

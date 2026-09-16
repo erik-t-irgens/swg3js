@@ -2680,8 +2680,71 @@ switch (cmd) {
       if (!def || def.failed) return { skip: def?.failed ?? 'failed' };
       return { model: id, file: def.file, bounds: def.bounds, blade: r.saber ?? null };
     };
+    // The client's weapon effects: each gun's template names a family (bolt, rocket, projectile_rifle,
+    // ...) and an index into datatables/weapon/weapon.iff, whose row names the shot's particle
+    // effect, the muzzle flash and the hit and miss effects (client effect files naming a particle
+    // and a sound). The shot, the flash and the hit on a creature are converted into the pack.
+    const { resolveTemplateParam, intParam: readInt } = await import('./objtemplate.mjs');
+    const { boltReach } = await import('./ships.mjs');
+    const { parseClientEffect } = await import('./shipdata.mjs');
+    const fxCache = new Map();
+    let fxTable = null;
+    try {
+      fxTable = parseDatatable(parseIff(vfs.read('datatables/weapon/weapon.iff')));
+    } catch (err) {
+      console.warn(`weapons: the weapon effect table did not read: ${err.message}`);
+    }
+    const cefParts = (cef) => {
+      const path = (cef ?? '').replace(/\\/g, '/').replace(/^\//, '');
+      if (!path || !vfs.has(path)) return { particle: null, sound: null };
+      try {
+        const fx = parseClientEffect(parseIff(vfs.read(path)));
+        return { particle: fx.particles[0] ?? null, sound: fx.sounds[0] ?? null };
+      } catch {
+        return { particle: null, sound: null };
+      }
+    };
+    const particleFile = (prt) => {
+      if (!prt) return null;
+      const p = convertParticle(vfs, prt.replace(/\\/g, '/'), outDir);
+      return p.failed ? null : p.file;
+    };
+    const paramCache = new Map();
+    const fxFor = (template) => {
+      if (!fxTable) return null;
+      const id = resolveTemplateParam(vfs, template, 'weaponEffect', stringParam, paramCache) ?? 'bolt';
+      const index = resolveTemplateParam(vfs, template, 'weaponEffectIndex', readInt, paramCache) ?? 0;
+      const key = `${id}|${index}`;
+      if (fxCache.has(key)) return fxCache.get(key);
+      const row = fxTable.rows.find((r) => r['Weapon Effect Id'] === id && r['Weapon Effect Index'] === index);
+      let out = { id, index };
+      if (row) {
+        const shot = (row['Projectile Appearance Template'] ?? '').replace(/\\/g, '/');
+        const fire = cefParts(row['Fire Client Effect']);
+        const hit = cefParts(row['Hit (Creature) Client Effect']);
+        const miss = cefParts(row['Miss (Hit Nothing) Client Effect']);
+        let reach = 0;
+        if (/\.prt$/i.test(shot) && vfs.has(shot)) {
+          try {
+            reach = boltReach(parseParticleEffect(parseIff(vfs.read(shot))));
+          } catch {
+            reach = 0;
+          }
+        }
+        out = { id, index, shot: /\.prt$/i.test(shot) ? particleFile(shot) : null, reach: Number(reach.toFixed(2)), fire: particleFile(fire.particle), hit: particleFile(hit.particle), miss: particleFile(miss.particle), sounds: { fire: fire.sound, hit: hit.sound } };
+      }
+      fxCache.set(key, out);
+      return out;
+    };
     const limit = options.limit ? Number(options.limit) : Infinity;
-    const { weapons, skipped } = buildWeapons(galleryTemplates(vfs, 'object/weapon/'), { convert }, { log: console.log, limit });
+    const { weapons, skipped } = buildWeapons(galleryTemplates(vfs, 'object/weapon/'), { convert, fxFor }, { log: console.log, limit });
+    // Effects the new gun types need beyond their own rows: the flame thrower's and the lightning rifle's beams, the lightning's muzzle.
+    const effects = {};
+    for (const [name, prt] of [['flame', 'appearance/pt_beam_flame_thrower.prt'], ['lightning', 'appearance/pt_beam_lightning.prt'], ['lightningMuzzle', 'appearance/pt_muzzle_lightning.prt'], ['acid', 'appearance/pt_beam_acid.prt'], ['ice', 'appearance/pt_beam_ice.prt']]) {
+      if (!vfs.has(prt)) continue;
+      const file = particleFile(prt);
+      if (file) effects[name] = file;
+    }
     // The blade colours the game offers (palette/wp_lightsaber.pal), as hex.
     let saberColors = [];
     try {
@@ -2690,9 +2753,9 @@ switch (cmd) {
     } catch (err) {
       console.warn('weapons: the saber palette did not read', err);
     }
-    const manifest = { classes: WEAPON_CLASSES, weapons, skipped, saberColors };
+    const manifest = { classes: WEAPON_CLASSES, weapons, skipped, saberColors, effects };
     writeFileSync(join(outDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
-    console.log(`-> ${outDir}: ${weapons.length} weapons in ${models.size} models, ${skipped.length} left out (listed in manifest.json; I in game opens the rack, the Weapons tab)`);
+    console.log(`-> ${outDir}: ${weapons.length} weapons in ${models.size} models, ${skipped.length} left out (listed in manifest.json; I in game opens the rack, the Weapons tab); ${fxCache.size} weapon effect rows, ${particleEffects.size} particle effects`);
     const unknown = skipped.filter((s) => /unknown|melee kind/.test(s.why));
     if (unknown.length) console.log(`   kinds without a style yet:\n${unknown.map((s) => `     ${s.template}  (${s.why})`).join('\n')}`);
     printEffectSummary();

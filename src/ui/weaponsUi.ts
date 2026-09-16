@@ -4,7 +4,7 @@ import { INVENTORY_TABS, tabStrip, wireTabs } from './tabs';
 import { GroupState, escapeHtml, groupHtml, prettyName } from './catalogue';
 import { CLASS_LABELS, OFF_HAND, type WeaponCatalogue, type WeaponClass, type WeaponDef } from '../player/weapons';
 
-const ORDER: WeaponClass[] = ['lightsaber', 'lightsaber2h', 'lightsaberStaff', 'sword1h', 'knife', 'sword2h', 'polearm', 'pistol', 'carbine', 'rifle', 'heavy'];
+const ORDER: WeaponClass[] = ['lightsaber', 'lightsaber2h', 'lightsaberStaff', 'sword1h', 'knife', 'fist', 'sword2h', 'polearm', 'pistol', 'carbine', 'rifle', 'heavy'];
 /** What a class fights like, for its heading. */
 const NOTES: Record<WeaponClass, string> = {
   lightsaber: 'one hand: fast, medium and strong styles',
@@ -12,12 +12,13 @@ const NOTES: Record<WeaponClass, string> = {
   lightsaberStaff: 'a blade from each end: the staff style',
   sword1h: 'the single-blade styles; one in each hand fights dual',
   knife: 'the single-blade styles; one in each hand fights dual',
+  fist: 'knucklers and the like: the fast style; one on each hand fights dual',
   sword2h: 'the single-blade styles; one in each hand fights dual',
   polearm: 'the staff style',
-  pistol: "the bounty hunter's pistol carries",
-  carbine: "the rifle's carries",
-  rifle: "the rifle's carries",
-  heavy: "the rifle's carries",
+  pistol: 'each fires as its kind: hover an entry for what it does',
+  carbine: 'each fires as its kind: hover an entry for what it does',
+  rifle: 'each fires as its kind: hover an entry for what it does',
+  heavy: 'each fires as its kind: hover an entry for what it does',
 };
 
 export class WeaponsUi {

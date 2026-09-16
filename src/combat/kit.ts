@@ -5,6 +5,7 @@ import type { Physics } from '../core/physics';
 import type { Player } from '../player/player';
 import type { World } from '../world/world';
 import type { Bolts } from './bolts';
+import type { WeaponCatalogue } from '../player/weapons';
 import type { Effects } from './effects';
 
 export type ClassId = 'jedi' | 'bounty_hunter';
@@ -25,6 +26,8 @@ export interface KitContext {
   effects: Effects;
   /** Blaster bolts in the air, for the kits that fire them. */
   bolts: Bolts;
+  /** The weapons rack, for a gun's own effects (null before it loads). */
+  weapons: WeaponCatalogue | null;
 }
 
 /** Something a blade, a bolt or a blast can hurt: the creatures and the turrets. */
@@ -34,6 +37,10 @@ export interface Hittable {
   dead: boolean;
   /** Hurt it; with `from` and `push`, shove it away from there. */
   damage(amount: number, from?: THREE.Vector3, push?: number): void;
+  /** Burn or corrode it for a while (a creature), stagger it, or slow it; the turrets and vehicles do without. */
+  afflict?(dps: number, seconds: number): void;
+  stun?(seconds: number): void;
+  slow?(seconds: number): void;
 }
 
 export interface Resource {

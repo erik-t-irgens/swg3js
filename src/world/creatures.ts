@@ -209,10 +209,27 @@ export class Creature {
   /** Held in the air by the Force: it hangs where it is put, and its own moves stop. */
   held = false;
 
-  /** Slow it for `seconds` (a Force stasis). */
+  /** Slow it for `seconds` (a Force stasis, a carbonite bolt). */
   slow(seconds: number): void {
     if (this.dead) return;
     this.slowed = Math.max(this.slowed, seconds);
+  }
+
+  /** Damage over time (a burn, acid): `dps` a second for `seconds`; a new one replaces a weaker one. */
+  private dotDps = 0;
+  private dotLeft = 0;
+  afflict(dps: number, seconds: number): void {
+    if (this.dead) return;
+    if (dps * seconds >= this.dotDps * this.dotLeft) {
+      this.dotDps = dps;
+      this.dotLeft = seconds;
+    }
+  }
+
+  /** Stagger it: no moves of its own for `seconds`. */
+  stun(seconds: number): void {
+    if (this.dead) return;
+    this.stunned = Math.max(this.stunned, seconds);
   }
 
   /** Hold it at a point in the air this frame: pulled there, its own moves stopped. */
@@ -292,6 +309,14 @@ export class Creature {
     if (this.dead) {
       this.deadTimer -= dt;
       return;
+    }
+    // A burn or acid eats at it, in real time, whatever it is doing.
+    if (this.dotLeft > 0) {
+      const step = Math.min(this.dotLeft, dt / slowness);
+      this.dotLeft -= step;
+      this.hp -= this.dotDps * step;
+      if (this.hp <= 0) this.die();
+      if (this.dead) return;
     }
     // Held in the air: nothing of its own until it is let go.
     if (this.held) {

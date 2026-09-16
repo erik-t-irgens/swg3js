@@ -51,6 +51,7 @@ const ACTION_LABELS: Record<Action, string> = {
   noclipSlower: 'Noclip slower',
   flashlight: 'Flashlight',
   fastForward: 'Fast-forward the day',
+  altFire: 'Alternate fire (guns)',
   slot1: 'Slot 1',
   slot2: 'Slot 2',
   slot3: 'Slot 3',

@@ -864,7 +864,10 @@ class App {
         return list();
       },
       /** The gun in hand: its Jedi Academy type and numbers. */
-      gunType: () => (this.kit.id === 'bounty_hunter' ? (this.kit as BountyHunterKit).profile({ player: this.player } as KitContext) : 'not a bounty hunter'),
+      gunType: () => {
+        const p = (this.kits.bounty_hunter as BountyHunterKit | undefined ?? new BountyHunterKit(this.scene)).profile({ player: this.player } as KitContext);
+        return { type: p.type, label: p.label, primary: p.blurb, alt: p.altBlurb || 'none', fx: this.player.equipped.right?.fx ?? null };
+      },
       /** The blaster in hand, 'pistol' or 'rifle': which of the game's carries play. `gun('carbine', { aim: 30, aimKneel: 30, ready: 30 })` sets how far right, in degrees, that kind's torso turns while aiming standing or moving, aiming kneeling or crouched, and in the hip-fire carry, as a starting point; the barrel is then measured against the crosshair every frame and the torso turned the rest of the way (`fix`, in degrees; `gun(undefined, { fix: false })` turns that off to see the poses bare). */
       gun: (kind?: 'pistol' | 'carbine' | 'rifle' | 'heavy', tune?: { ready?: number; aim?: number; aimKneel?: number; fix?: boolean }) => {
         if (kind) {
@@ -1898,7 +1901,7 @@ class App {
   /** The class's weapon and abilities, then the bolts in the air (a bolt reaching the player meets the saber first). */
   private stepCombat(dt: number): void {
     const player = this.player;
-    const ctx: KitContext = { dt, input: this.input, player, world: this.world, cam: this.cam, physics: this.physics, effects: this.effects, bolts: this.world.bolts };
+    const ctx: KitContext = { dt, input: this.input, player, world: this.world, cam: this.cam, physics: this.physics, effects: this.effects, bolts: this.world.bolts, weapons: this.weapons };
     this.kit.update(ctx);
     this.world.bolts.update(dt, {
       physics: this.physics,
