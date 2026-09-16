@@ -11,7 +11,7 @@ import { SaberThrow, THROW } from '../combat/saberThrow';
 import { canBlock, inFront, parryClip, parryZone, reflectDirection } from '../combat/deflect';
 import { JKA, JkaMovement, UNIT, type MoveCommand } from './jkaMove';
 import type { CharacterRig, RigState } from './rig';
-import { FIGHTS, ONE_HANDED, gunKindOf, isSaber, type WeaponClass, type WeaponDef } from './weapons';
+import { FIGHTS, OFF_HAND, gunKindOf, isSaber, type WeaponClass, type WeaponDef } from './weapons';
 import { STYLES, type SaberStyle } from '../combat/saber';
 import { SaberBlade } from '../combat/saberBlade';
 
@@ -52,6 +52,8 @@ const FLING_UP = 6;
 const seatOffset = new THREE.Vector3();
 const seatLocal = new THREE.Vector3();
 const armDir = new THREE.Vector3();
+const barrelA = new THREE.Vector3();
+const barrelB = new THREE.Vector3();
 const aim = new THREE.Vector3();
 const aimFrom = new THREE.Vector3();
 const handPos = new THREE.Vector3();
@@ -85,6 +87,7 @@ interface Parts {
   staffTip: THREE.Object3D;
   /** The second saber of the dual style, in the left hand. */
   saber2: THREE.Group;
+  hilt2: THREE.Mesh;
   blade2: THREE.Mesh;
   bladeTip2: THREE.Object3D;
   saberLight: THREE.PointLight;
@@ -103,6 +106,8 @@ const HILT_TOP = 0.13;
 export const DEFAULT_SABER_COLOR = '#3aa0ff';
 const bladeBase = new THREE.Vector3();
 const bladeEnd = new THREE.Vector3();
+/** How far the spine turns for the aim before the rest goes on the body's facing (radians). */
+const AIM_SPINE_MAX = 0.6;
 /** Whether an object is drawn: itself and every parent visible. */
 function isShown(o: THREE.Object3D): boolean {
   for (let p: THREE.Object3D | null = o; p; p = p.parent) if (!p.visible) return false;
@@ -187,7 +192,8 @@ function buildCharacter(): { group: THREE.Group; parts: Parts } {
   blade2.visible = false;
   const bladeTip2 = new THREE.Object3D();
   bladeTip2.position.y = 1.25;
-  saber2.add(hilt.clone(), blade2, bladeTip2);
+  const hilt2 = hilt.clone();
+  saber2.add(hilt2, blade2, bladeTip2);
   saber2.visible = false;
   leftArm.add(saber2);
 
@@ -205,7 +211,7 @@ function buildCharacter(): { group: THREE.Group; parts: Parts } {
   rifle.visible = false;
   rightArm.add(rifle);
 
-  return { group, parts: { hips, torso, head, leftLeg, rightLeg, leftArm, rightArm, saber, blade, bladeTip, hilt, staffBlade, staffTip, saber2, blade2, bladeTip2, saberLight, rifle, muzzle } };
+  return { group, parts: { hips, torso, head, leftLeg, rightLeg, leftArm, rightArm, saber, blade, bladeTip, hilt, staffBlade, staffTip, saber2, hilt2, blade2, bladeTip2, saberLight, rifle, muzzle } };
 }
 
 export class Player {
@@ -293,6 +299,12 @@ export class Player {
   };
   /** The torso's current turn for the aim, eased. */
   private aimTwist = 0;
+  /**
+   * The rest of the way to the crosshair: each frame the barrel is measured where the pose and the tuned
+   * turn left it, and the difference to where the camera looks is folded into the torso's turn and tilt
+   * for the next frame, so the gun lines up whatever the carry (hip or aimed, standing or kneeling).
+   */
+  readonly aimFix = { yaw: 0, pitch: 0, on: true };
   /** The hip-fire pose chosen when the combat carry came up, kept while it lasts (a rifle's is a held transition into it). */
   private readyPose: string | null = null;
   readonly gripTune: { jkaRoll: number; stanceRoll: number; source: 'solved' | 'tags'; tilt: number; turn: number } = { jkaRoll: 0, stanceRoll: 0, source: 'solved', tilt: 0, turn: 0 };
@@ -319,11 +331,9 @@ export class Player {
    * one in the right hand, the staff's second, the dual style's left, the thrown one, the two orbiting.
    * The frame's own visibility (through its parents) says whether the blade is out.
    */
-  private readonly blades: { frame: THREE.Object3D; blade: SaberBlade; snap: boolean }[] = [];
+  private readonly blades: { frame: THREE.Object3D; blade: SaberBlade; snap: boolean; hand: 'right' | 'left'; hiltTop: number }[] = [];
   /** The colour the pooled lights glow with around a lit blade: the blade's, softened toward white. */
   saberColor = new THREE.Color(DEFAULT_SABER_COLOR).getHex();
-  /** How far up the saber's Y the blade begins: the placeholder hilt's top, or the rack hilt's half-length. */
-  private hiltTop = HILT_TOP;
 
   /** Where the sabers out of the hand want light this frame: the thrown one, the orbiting two. */
   lightSpots(): { pos: THREE.Vector3; intensity: number; distance: number }[] {
@@ -415,14 +425,15 @@ export class Player {
       scene.add(g);
       markActor(g);
       this.orbit.push(g);
-      this.blades.push({ frame: b, blade: new SaberBlade(), snap: true });
+      this.blades.push({ frame: b, blade: new SaberBlade(), snap: true, hand: 'right', hiltTop: HILT_TOP });
     }
     // The blades themselves, in the scene's own frame (they are built from world positions each frame).
+    // Each follows the hilt in one hand: the right's blade, the staff's second, the thrown and the orbiting ones; the left's blade.
     this.blades.push(
-      { frame: parts.blade, blade: new SaberBlade(), snap: false },
-      { frame: parts.staffBlade, blade: new SaberBlade(), snap: false },
-      { frame: parts.blade2, blade: new SaberBlade(), snap: false },
-      { frame: flyBlade, blade: new SaberBlade(), snap: true },
+      { frame: parts.blade, blade: new SaberBlade(), snap: false, hand: 'right', hiltTop: HILT_TOP },
+      { frame: parts.staffBlade, blade: new SaberBlade(), snap: false, hand: 'right', hiltTop: HILT_TOP },
+      { frame: parts.blade2, blade: new SaberBlade(), snap: false, hand: 'left', hiltTop: HILT_TOP },
+      { frame: flyBlade, blade: new SaberBlade(), snap: true, hand: 'right', hiltTop: HILT_TOP },
     );
     for (const b of this.blades) {
       scene.add(b.blade.group);
@@ -757,13 +768,13 @@ export class Player {
     const busy = this.saber.busy || this.swing >= 0;
     const swing = this.bladeActive ? 1 : busy ? 0.55 : 0;
     const away = this.thrown.inFlight || this.orbiting;
-    for (const { frame, blade, snap } of this.blades) {
+    for (const { frame, blade, snap, hiltTop } of this.blades) {
       const shown = isShown(frame);
       const length = blade.spec.length;
       // The frame's world matrix is this frame's pose, not the last drawn one, so the blade never trails the hand.
       frame.updateWorldMatrix(true, false);
-      frame.localToWorld(bladeBase.set(0, this.hiltTop, 0));
-      frame.localToWorld(bladeEnd.set(0, this.hiltTop + length, 0));
+      frame.localToWorld(bladeBase.set(0, hiltTop, 0));
+      frame.localToWorld(bladeEnd.set(0, hiltTop + length, 0));
       blade.update(dt, bladeBase, bladeEnd, shown, camera, swing, snap || away);
     }
   }
@@ -775,6 +786,7 @@ export class Player {
     const leftWeapon = this.equipped.left;
     // A weapon from the rack in a hand hides the placeholder there; a lightsaber from the rack keeps the blade, on its own hilt.
     const saberRight = isSaber(rightWeapon?.class);
+    const saberLeft = isSaber(leftWeapon?.class);
     const meleeRight = !!rightWeapon && FIGHTS[rightWeapon.class] !== 'gun' && !saberRight;
     const gunRight = !!rightWeapon && FIGHTS[rightWeapon.class] === 'gun';
     const on = this.saberOn && this.classId === 'jedi' && !meleeRight;
@@ -783,8 +795,11 @@ export class Player {
     p.hilt.visible = inHand && !saberRight;
     p.blade.visible = on && inHand;
     p.staffBlade.visible = on && inHand && this.saber.style === 'staff';
-    p.saber2.visible = this.classId === 'jedi' && this.saber.style === 'dual' && !this.orbiting && !leftWeapon;
-    p.blade2.visible = on && this.saber.style === 'dual' && !this.orbiting && !leftWeapon;
+    // The left hand's saber: the placeholder in the dual style, or the rack's hilt there, with its blade.
+    const leftSaber = this.saber.style === 'dual' && !this.orbiting && (!leftWeapon || saberLeft);
+    p.saber2.visible = this.classId === 'jedi' && leftSaber;
+    p.hilt2.visible = !saberLeft;
+    p.blade2.visible = on && leftSaber;
     p.rifle.visible = this.classId === 'bounty_hunter' && !gunRight;
     if (this.held.right) this.held.right.visible = inHand || gunRight;
     if (this.held.left) this.held.left.visible = !this.orbiting;
@@ -815,7 +830,7 @@ export class Player {
       right.far.getWorldPosition(b);
       return;
     }
-    if (i === 1 && this.saber.style === 'dual' && left) {
+    if (i === 1 && this.saber.style === 'dual' && left && !isSaber(this.equipped.left?.class)) {
       left.near.getWorldPosition(a);
       left.far.getWorldPosition(b);
       return;
@@ -873,7 +888,7 @@ export class Player {
    * the class of kit the weapon wants (a blaster the bounty hunter's, a blade the jedi's).
    */
   equip(def: WeaponDef, model: THREE.Object3D, hand: 'right' | 'left' = 'right'): ClassId {
-    if (hand === 'left' && !ONE_HANDED.has(def.class)) hand = 'right';
+    if (hand === 'left' && !OFF_HAND.has(def.class)) hand = 'right';
     this.unequip(hand);
     const bone = this.handBones[hand];
     const holder = new THREE.Group();
@@ -899,14 +914,14 @@ export class Player {
     this.held[hand] = holder;
     this.reach[hand] = { near, far };
     this.equipped[hand] = def;
-    if (hand === 'right' && isSaber(def.class)) {
-      // The rack's hilt hangs where the placeholder's does, so the blade comes out of it: the model
-      // is centred on the grip, so the blade begins half its length up, and the blade file says how long.
+    if (isSaber(def.class)) {
+      // The rack's hilt hangs where the placeholder's does in that hand, so the blade comes out of it: the
+      // model is centred on the grip, so the blade begins half its length up, and the blade file says how long.
+      const saber = hand === 'right' ? this.parts.saber : this.parts.saber2;
       holder.removeFromParent();
-      this.parts.saber.add(holder);
-      holder.scale.setScalar(1 / Math.max(this.parts.saber.getWorldScale(new THREE.Vector3()).x, 1e-6));
-      this.hiltTop = b ? Math.abs(b.max[1] - b.min[1]) / 2 : HILT_TOP;
-      this.setBladeSpec(def.blade ? { length: def.blade.length, width: def.blade.width, open: def.blade.open, close: def.blade.close } : null);
+      saber.add(holder);
+      holder.scale.setScalar(1 / Math.max(saber.getWorldScale(new THREE.Vector3()).x, 1e-6));
+      this.setBladeSpec(hand, def.blade ? { length: def.blade.length, width: def.blade.width, open: def.blade.open, close: def.blade.close } : null, b ? Math.abs(b.max[1] - b.min[1]) / 2 : HILT_TOP);
     }
     const fights = FIGHTS[def.class];
     if (fights === 'gun') {
@@ -918,14 +933,22 @@ export class Player {
     return fights === 'gun' ? 'bounty_hunter' : 'jedi';
   }
 
-  /** The blades' size and timing, from a rack saber's blade file, or the placeholder's when null; the tips move to match. */
-  private setBladeSpec(spec: { length: number; width: number; open: number; close: number } | null): void {
+  /**
+   * The blades in one hand: their size and timing from a rack saber's blade file (the placeholder's when
+   * null), and where up the hilt they begin; the tips the hits are swept to move to match.
+   */
+  private setBladeSpec(hand: 'right' | 'left', spec: { length: number; width: number; open: number; close: number } | null, hiltTop = HILT_TOP): void {
     const s = spec ?? { length: 1.1, width: 0.12, open: 0.32, close: 0.32 };
-    for (const b of this.blades) b.blade.spec = { ...s };
-    const tip = this.hiltTop + s.length;
-    this.parts.bladeTip.position.y = tip;
-    this.parts.staffTip.position.y = -tip;
-    this.parts.bladeTip2.position.y = tip;
+    for (const b of this.blades) {
+      if (b.hand !== hand) continue;
+      b.blade.spec = { ...s };
+      b.hiltTop = hiltTop;
+    }
+    const tip = hiltTop + s.length;
+    if (hand === 'right') {
+      this.parts.bladeTip.position.y = tip;
+      this.parts.staffTip.position.y = -tip;
+    } else this.parts.bladeTip2.position.y = tip;
   }
 
   /** Take the rack's weapon out of a hand (the placeholder comes back). */
@@ -938,10 +961,7 @@ export class Player {
         if (m.isMesh) m.geometry.dispose();
       });
     }
-    if (hand === 'right' && isSaber(this.equipped.right?.class)) {
-      this.hiltTop = HILT_TOP;
-      this.setBladeSpec(null);
-    }
+    if (isSaber(this.equipped[hand]?.class)) this.setBladeSpec(hand, null);
     this.held[hand] = null;
     this.reach[hand] = null;
     this.equipped[hand] = null;
@@ -950,18 +970,18 @@ export class Player {
   }
 
   /**
-   * The saber styles the weapons in hand allow: a polearm fights as the staff, one blade in each hand as
-   * the dual style, a single sword or knife with the three single-blade styles, a lightsaber or empty
-   * hands with all five.
+   * The saber styles the weapons in hand allow: a polearm or a double-bladed saber fights as the staff, a
+   * blade in each hand (any but the staff) as the dual style, a single sword or knife with the three
+   * single-blade styles, a lightsaber with the styles its grip allows, empty hands with all five.
    */
   get allowedStyles(): SaberStyle[] {
     const r = this.equipped.right;
     const l = this.equipped.left;
     if (r && FIGHTS[r.class] === 'gun') return STYLES;
+    if (r && OFF_HAND.has(r.class) && l && OFF_HAND.has(l.class)) return ['dual'];
     if (r?.class === 'polearm' || r?.class === 'lightsaberStaff') return ['staff'];
     if (r?.class === 'lightsaber2h') return ['medium', 'strong'];
     if (r?.class === 'lightsaber') return ['fast', 'medium', 'strong'];
-    if (r && ONE_HANDED.has(r.class) && l && ONE_HANDED.has(l.class)) return ['dual'];
     if (r && (FIGHTS[r.class] === 'single')) return ['fast', 'medium', 'strong'];
     return STYLES;
   }
@@ -1543,7 +1563,8 @@ export class Player {
         }
         if (play.move.kind === 'ready') this.rig?.stopOverride();
         // Held: the move keeps its last frame until the next chains in, with no dip to the stance between.
-        else if (this.rig?.has(play.anim)) this.rig.play(play.anim, { loop: play.loop, fadeIn: play.blend, timeScale: play.speed, hold: true, upperOnly: this.rig.overridingUpperOnly });
+        // A special (a kata, a kick, a lunge, the jump attacks) is a whole-body move: it takes the legs back even from a swing that had the upper body alone.
+        else if (this.rig?.has(play.anim)) this.rig.play(play.anim, { loop: play.loop, fadeIn: play.blend, timeScale: play.speed, hold: true, upperOnly: this.rig.overridingUpperOnly && play.move.kind !== 'special' });
         else if (play.move.kind === 'attack' || play.move.kind === 'special') this.startSwing();
       }
     }
@@ -1562,7 +1583,9 @@ export class Player {
     this.directional = directional;
     // A swing on the upper body over running legs: the legs keep their angle to the way moved
     // and the torso its turn back to the camera, as they do running without a swing.
-    const swingOnLegs = !!this.rig?.overridingUpperOnly && moving && this.grounded;
+    // Decided from the move itself, not from whether the upper body has taken it yet: a swing that
+    // starts on the move must not turn the legs to the camera for a frame before it is split off them.
+    const swingOnLegs = moving && this.grounded && !!this.rig && (this.rig.overridingUpperOnly || (this.hasJkaClips && this.saber.busy && this.saber.current.kind !== 'special' && !this.jka.rolling && !this.jka.inSpecialJump));
     const faceCamera = (this.classId === 'bounty_hunter' && (this.gunReady || !this.hasGunClips)) || (fighting && !swingOnLegs) || (!this.grounded && this.jkaMode) || cam.firstPerson;
     const camYaw = Math.atan2(fwd.x, fwd.z);
     let legsOffset = 0;
@@ -1573,7 +1596,8 @@ export class Player {
       // swinging round, and turning the view alone would look back down into the neck.
       this.heading = camYaw;
     } else if (faceCamera) {
-      let diff = camYaw - this.heading;
+      // With a blaster up, the body also turns by what the aim's correction left over from the spine.
+      let diff = camYaw + this.aimBodyTurn - this.heading;
       diff = Math.atan2(Math.sin(diff), Math.cos(diff));
       this.heading += diff * Math.min(1, dt * 16);
     } else if (moving && directional) {
@@ -1598,8 +1622,11 @@ export class Player {
       const over = Math.abs(diff) - Math.PI / 4;
       if (over > 0) this.heading += Math.sign(diff) * over * Math.min(1, dt * 12);
     }
-    // How far the torso turns back towards the camera after the legs' angle.
-    this.torsoTwist = directional && this.grounded && !faceCamera && !this.lockedHeading ? Math.atan2(Math.sin(camYaw - this.heading), Math.cos(camYaw - this.heading)) : 0;
+    // How far the torso turns back towards the camera after the legs' angle: not all the way while moving,
+    // since the game keeps the torso a quarter of the legs' offset toward the way moved (CG_PlayerAngles:
+    // the legs at the movement offset, the torso at a quarter of it), so a strafe leans the shoulders a little.
+    const torsoWants = camYaw + legsOffset * 0.25;
+    this.torsoTwist = directional && this.grounded && !faceCamera && !this.lockedHeading ? Math.atan2(Math.sin(torsoWants - this.heading), Math.cos(torsoWants - this.heading)) : 0;
 
     this.moveAmount += ((moving ? Math.min(1, speed / RUN_SPEED) : 0) - this.moveAmount) * Math.min(1, dt * 10);
     this.phase += dt * speed * (moving ? 1.9 : 0);
@@ -1681,7 +1708,8 @@ export class Player {
     // A swing while moving, or in the air: the legs keep what they were doing (Jedi Academy's run,
     // walk, back-pedal or angled strafe, or the jump) under the swing on the upper body, the way
     // that game plays its torso and legs apart; standing still, the swing has the whole body.
-    if (rig.overridingJka && this.saber.busy && !this.jka.rolling && !this.jka.inSpecialJump && (moving || !this.grounded) && !this.mounted && !this.swimming) rig.overrideUpperOnly();
+    // The specials (katas, kicks, lunges, the jump attacks) move the legs themselves and keep the whole body.
+    if (rig.overridingJka && this.saber.busy && this.saber.current.kind !== 'special' && !this.jka.rolling && !this.jka.inSpecialJump && (moving || !this.grounded) && !this.mounted && !this.swimming) rig.overrideUpperOnly();
     if (this.mounted) {
       // Seated the way the game seats a rider on this vehicle: its rider pose's branch of the
       // riding loop (a speeder bike's crouch, a landspeeder's seat, the hover chair, the pilot's chair), else the default saddle.
@@ -1737,11 +1765,16 @@ export class Player {
     // game's aimed poses point the arm off to the left of the body; the legs keep facing the camera.
     const tune = this.gunTune[this.gunClass];
     const low = this.crouching || this.kneeling;
-    const wantedTwist = armedUp ? (this.aiming ? -(low ? tune.aimKneel : tune.aim) : this.gunReady ? -tune.ready : 0) * (Math.PI / 180) : 0;
+    // The tuned turn is the starting point only while the barrel is not measured (`aimFix.on` off).
+    const wantedTwist = armedUp && !this.aimFix.on ? (this.aiming ? -(low ? tune.aimKneel : tune.aim) : this.gunReady ? -tune.ready : 0) * (Math.PI / 180) : 0;
     this.aimTwist += (wantedTwist - this.aimTwist) * Math.min(1, dt * 10);
     // A whole-body Jedi Academy clip is left alone; a swing on the upper body alone takes the twist, so the torso faces the camera over angled legs.
     const wholeJka = rig.overridingJka && !rig.overridingUpperOnly;
-    rig.twistTorso(wholeJka ? 0 : this.torsoTwist + this.aimTwist, wholeJka ? 0 : this.torsoPitch);
+    // The measured correction: the spine takes the first part of it, the body's heading the rest (a kneeling
+    // shooter's pose is authored with the hips turned from the target, which a spine twist cannot give).
+    const spineFix = THREE.MathUtils.clamp(this.aimFix.yaw, -AIM_SPINE_MAX, AIM_SPINE_MAX);
+    rig.twistTorso(wholeJka ? 0 : this.torsoTwist + this.aimTwist + spineFix, wholeJka ? 0 : this.torsoPitch + this.aimFix.pitch);
+    this.correctAim(dt, gunUp);
     // The hilt turns in the hand to whichever convention poses the arms: the game's own clips
     // hold it their way, Jedi Academy's the way its swings were made for.
     // The hilt's axis: the solved one through Jedi Academy's one-off clips (its swings, katas, throws),
@@ -1780,7 +1813,45 @@ export class Player {
     }
   }
 
-  /** Play a one-off clip on the rig when it has it (jumps, landings). */
+  /**
+   * Measure the barrel (the rack gun's grip to its muzzle, or the placeholder rifle's) against where the
+   * camera looks, and fold the difference into the torso's turn and tilt for the next frame. Off, the
+   * correction eases away. A shot's recoil is not chased.
+   */
+  private correctAim(dt: number, gunUp: boolean): void {
+    const fix = this.aimFix;
+    if (!gunUp || this.mounted || !fix.on) {
+      fix.yaw += (0 - fix.yaw) * Math.min(1, dt * 8);
+      fix.pitch += (0 - fix.pitch) * Math.min(1, dt * 8);
+      return;
+    }
+    if (this.sinceShot < 0.35) return;
+    const right = this.reach.right;
+    if (right && this.held.right) {
+      right.near.getWorldPosition(barrelA);
+      right.far.getWorldPosition(barrelB);
+    } else {
+      this.parts.rifle.getWorldPosition(barrelA);
+      this.parts.muzzle.getWorldPosition(barrelB);
+    }
+    barrelB.sub(barrelA);
+    if (barrelB.lengthSq() < 1e-6) return;
+    barrelB.normalize();
+    const look = this.lookDir;
+    let dYaw = Math.atan2(look.x, look.z) - Math.atan2(barrelB.x, barrelB.z);
+    dYaw = Math.atan2(Math.sin(dYaw), Math.cos(dYaw));
+    const dPitch = Math.asin(THREE.MathUtils.clamp(look.y, -1, 1)) - Math.asin(THREE.MathUtils.clamp(barrelB.y, -1, 1));
+    // A turn to the left is positive; a tilt forward and down is positive, so the pitch runs the other way.
+    const gain = Math.min(1, dt * 12);
+    fix.yaw = THREE.MathUtils.clamp(fix.yaw + dYaw * gain, -2.2, 2.2);
+    fix.pitch = THREE.MathUtils.clamp(fix.pitch - dPitch * gain, -0.8, 0.8);
+  }
+
+  /** The part of the aim's correction the spine cannot take, turned into the whole body's facing. */
+  private get aimBodyTurn(): number {
+    return this.aimFix.yaw - THREE.MathUtils.clamp(this.aimFix.yaw, -AIM_SPINE_MAX, AIM_SPINE_MAX);
+  }
+
   /** The capsule shrinks to the crouch height while ducking (its feet stay where they are). */
   private setCrouchCollider(crouched: boolean): void {
     if (crouched === this.colliderCrouched) return;

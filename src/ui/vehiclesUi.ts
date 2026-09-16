@@ -1,6 +1,7 @@
 // The garage: the gallery's vehicles and the animal mounts, by the kind each handles as, with a
 // button to stand one beside you, and a way to try a model as another kind.
 import { SPAWNER_TABS, tabStrip, wireTabs } from './tabs';
+import { GroupState, escapeHtml, groupHtml } from './catalogue';
 import type { Garage, VehicleDef } from '../vehicles/garage';
 import type { VehicleKind } from '../vehicles/vehicle';
 
@@ -17,6 +18,8 @@ export class VehiclesUi {
   private readonly body: HTMLElement;
   private readonly count: HTMLElement;
   private garage: Garage | null = null;
+  private readonly groups = new GroupState();
+  private lastFind = '';
   open = false;
   /** A click on another tab: the game swaps the panels. */
   onTab: (id: string) => void = () => {};
@@ -67,20 +70,24 @@ export class VehiclesUi {
       return;
     }
     const find = (this.root.querySelector('.find') as HTMLInputElement).value.trim().toLowerCase();
+    if (find !== this.lastFind) this.groups.clear();
+    this.lastFind = find;
     const groups = g.byKind();
     const html: string[] = [];
     let shown = 0;
     for (const k of KINDS) {
-      const list = (groups.get(k.id) ?? []).filter((v) => !find || v.id.toLowerCase().includes(find));
+      const list = (groups.get(k.id) ?? []).filter((v) => !find || v.id.toLowerCase().includes(find) || v.label.toLowerCase().includes(find));
       if (!list.length) continue;
       shown += list.length;
-      html.push(`<h3 class="weapons-class">${k.label} <span>${list.length} · ${k.blurb}</span></h3>`);
-      for (const v of list) {
-        const other = KINDS.filter((o) => o.id !== v.kind).map((o) => `<option value="${o.id}">as ${o.label.toLowerCase()}</option>`).join('');
-        html.push(`<div class="weapons-row"><span class="name">${v.label}${v.inferred ? '' : ' <em>(kind guessed)</em>'}</span><span class="reach">${v.source}</span><button data-id="${v.id}">spawn</button><select data-id="${v.id}"><option value="">try it as...</option>${other}</select></div>`);
-      }
+      const items = list.map((v) => {
+        const other = KINDS.filter((o) => o.id !== v.kind).map((o) => `<option value="${o.id}">as ${escapeHtml(o.label.toLowerCase())}</option>`).join('');
+        const tags = [v.source === 'ship' ? '' : v.source, v.inferred ? '' : 'kind guessed'].filter(Boolean).join(' · ');
+        return `<div class="cat-item" title="${escapeHtml(v.id)}"><span class="cat-name">${escapeHtml(v.label)}${tags ? ` <small>${escapeHtml(tags)}</small>` : ''}</span><span class="cat-hands"><button data-id="${v.id}" title="stand one beside you">spawn</button><select data-id="${v.id}" title="try it as another kind"><option value="">as…</option>${other}</select></span></div>`;
+      });
+      html.push(groupHtml(k.id, k.label, list.length, k.blurb, this.groups.isOpen(k.id, !!find), items.join('')));
     }
     this.body.innerHTML = html.join('');
+    this.groups.wire(this.body);
     this.count.textContent = `${shown} of ${g.vehicles.length}`;
     for (const b of this.body.querySelectorAll<HTMLButtonElement>('button[data-id]')) {
       b.addEventListener('click', () => {

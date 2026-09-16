@@ -823,8 +823,8 @@ class App {
         this.player.refitGrip();
         return { ...this.player.gripTune, effective: { right: this.player.tunedGrip('right'), left: this.player.tunedGrip('left') }, axes: this.player.rig?.grip ?? null };
       },
-      /** The blaster in hand, 'pistol' or 'rifle': which of the game's carries play. `gun('carbine', { aim: 30, aimKneel: 30, ready: 30 })` sets how far right, in degrees, that kind's torso turns while aiming standing or moving, aiming kneeling or crouched, and in the hip-fire carry, so the pose's arm points at the crosshair; pistol, carbine, rifle and heavy each have their own. */
-      gun: (kind?: 'pistol' | 'carbine' | 'rifle' | 'heavy', tune?: { ready?: number; aim?: number; aimKneel?: number }) => {
+      /** The blaster in hand, 'pistol' or 'rifle': which of the game's carries play. `gun('carbine', { aim: 30, aimKneel: 30, ready: 30 })` sets how far right, in degrees, that kind's torso turns while aiming standing or moving, aiming kneeling or crouched, and in the hip-fire carry, as a starting point; the barrel is then measured against the crosshair every frame and the torso turned the rest of the way (`fix`, in degrees; `gun(undefined, { fix: false })` turns that off to see the poses bare). */
+      gun: (kind?: 'pistol' | 'carbine' | 'rifle' | 'heavy', tune?: { ready?: number; aim?: number; aimKneel?: number; fix?: boolean }) => {
         if (kind) {
           this.player.gunClass = kind;
           this.player.gunKind = kind === 'pistol' ? 'pistol' : 'rifle';
@@ -834,8 +834,10 @@ class App {
           if (tune.ready !== undefined) t.ready = tune.ready;
           if (tune.aim !== undefined) t.aim = tune.aim;
           if (tune.aimKneel !== undefined) t.aimKneel = tune.aimKneel;
+          if (tune.fix !== undefined) this.player.aimFix.on = tune.fix;
         }
-        return { kind: this.player.gunKind, class: this.player.gunClass, tune: this.player.gunTune, aiming: this.player.aiming, ready: this.player.gunReady, sinceShot: Number(this.player.sinceShot.toFixed(1)), clips: this.player.rig?.clipsMatching(/pistol|rifle/) ?? [] };
+        const fix = this.player.aimFix;
+        return { kind: this.player.gunKind, class: this.player.gunClass, tune: this.player.gunTune, fix: { on: fix.on, yaw: Number(((fix.yaw * 180) / Math.PI).toFixed(1)), pitch: Number(((fix.pitch * 180) / Math.PI).toFixed(1)) }, aiming: this.player.aiming, ready: this.player.gunReady, sinceShot: Number(this.player.sinceShot.toFixed(1)), clips: this.player.rig?.clipsMatching(/pistol|rifle/) ?? [] };
       },
       /** The saber defence rank (1..3): how bolts are turned away. */
       saberDefense: (rank?: number) => {

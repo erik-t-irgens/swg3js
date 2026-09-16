@@ -1,6 +1,7 @@
 // The NPC tab of the spawner (B): the blaster turrets and the planet's creatures, stood in front
 // of the player on demand rather than around the arrival point, with counts and a Remove all each.
 import { SPAWNER_TABS, tabStrip, wireTabs } from './tabs';
+import { escapeHtml, groupHtml } from './catalogue';
 
 export interface NpcKind {
   id: string;
@@ -52,12 +53,11 @@ export class NpcUi {
   }
 
   render(): void {
-    const html: string[] = [];
-    html.push(`<h3 class="weapons-class">NPCs <span>stood ahead of you, facing you; none appear on their own</span></h3>`);
-    for (const k of this.kinds) {
-      html.push(`<div class="weapons-row"><span class="name">${k.label} <em>${k.blurb}</em></span><span class="reach">${k.count()} out</span><button data-spawn="${k.id}">spawn</button><button data-clear="${k.id}">remove all</button></div>`);
-    }
-    this.body.innerHTML = html.join('');
+    const items = this.kinds.map((k) => {
+      const n = k.count();
+      return `<div class="cat-item${n ? ' held' : ''}" title="${escapeHtml(k.blurb)}"><span class="cat-name">${escapeHtml(k.label)} <small>${escapeHtml(k.blurb)}</small></span><span class="cat-hands">${n ? `<span class="cat-badge">${n} out</span>` : ''}<button data-spawn="${k.id}" title="stand one ahead of you">spawn</button>${n ? `<button data-clear="${k.id}" title="take every one away">clear</button>` : ''}</span></div>`;
+    });
+    this.body.innerHTML = groupHtml('npcs', 'NPCs', this.kinds.length, 'stood ahead of you, facing you; none appear on their own', true, items.join(''));
     this.count.textContent = `${this.kinds.reduce((n, k) => n + k.count(), 0) || 'none'} on the world`;
     for (const b of this.body.querySelectorAll<HTMLButtonElement>('button[data-spawn]')) {
       b.addEventListener('click', () => {

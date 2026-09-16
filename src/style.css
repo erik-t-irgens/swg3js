@@ -148,7 +148,7 @@ b { color: var(--accent); font-weight: 600; }
 
 /* --- wardrobe ----------------------------------------------------------------------------- */
 .wardrobe-panel {
-  width: min(760px, 94vw); max-height: 86vh; display: flex; flex-direction: column; overflow: hidden;
+  width: min(820px, 94vw); max-height: 86vh; display: flex; flex-direction: column; overflow: hidden;
   background: var(--panel); border: 1px solid var(--panel-border); border-radius: 8px;
 }
 .wardrobe-header { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--panel-border); }
@@ -219,6 +219,34 @@ b { color: var(--accent); font-weight: 600; }
 .blade-own input { width: 34px; height: 22px; padding: 0; border: 1px solid var(--panel-border); background: transparent; cursor: pointer; }
 .weapons-skipped div { padding: 4px 0 6px 12px; line-height: 1.5; }
 #weapons .hint { padding: 12px; font-size: 12px; color: var(--muted); }
+
+/* The catalogues (the rack, the garage, the NPCs): folding groups, a grid of short entries inside. */
+.in-hands { display: flex; gap: 16px; padding: 6px 0 2px; font-size: 12px; }
+.in-hands .hand-slot b { color: var(--muted); font-weight: 600; font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; margin-right: 4px; }
+.in-hands .hand-slot em { color: var(--muted); font-style: normal; }
+.cat-group { margin: 6px 0; border: 1px solid var(--panel-border); border-radius: 6px; background: rgba(0,0,0,0.18); }
+.cat-group summary { display: flex; align-items: baseline; gap: 8px; padding: 7px 10px; cursor: pointer; list-style: none; user-select: none; }
+.cat-group summary::-webkit-details-marker { display: none; }
+.cat-group summary::before { content: '▸'; color: var(--muted); font-size: 10px; width: 10px; flex: none; }
+.cat-group[open] summary::before { content: '▾'; }
+.cat-group summary:hover .cat-label { color: var(--text); }
+.cat-label { font-size: 12px; letter-spacing: 0.1em; font-weight: 600; color: var(--accent); text-transform: uppercase; }
+.cat-count { font-size: 10px; color: var(--text); background: rgba(45,127,214,0.3); border-radius: 8px; padding: 1px 7px; }
+.cat-note { font-size: 11px; color: var(--muted); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#weapons .wardrobe-panel, #garage .wardrobe-panel, #npcs .wardrobe-panel { width: min(1040px, 96vw); }
+.cat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 3px; padding: 2px 8px 8px; }
+.cat-grid .cat-wide { grid-column: 1 / -1; }
+.cat-item { display: flex; align-items: center; gap: 6px; padding: 3px 6px; font-size: 12px; border-radius: 4px; background: rgba(255,255,255,0.03); min-width: 0; }
+.cat-item:hover { background: rgba(255,255,255,0.07); }
+.cat-item.held { background: rgba(45,127,214,0.18); outline: 1px solid rgba(45,127,214,0.5); }
+.cat-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cat-name small { font-size: 9px; color: var(--muted); letter-spacing: 0.04em; margin-left: 3px; }
+.cat-hands { flex: none; display: flex; gap: 3px; align-items: center; }
+.cat-hands button { padding: 2px 6px; font-size: 10px; min-width: 22px; background: rgba(45,127,214,0.2); color: var(--text); border: 1px solid var(--panel-border); border-radius: 3px; cursor: pointer; }
+.cat-hands button:hover { border-color: var(--accent); }
+.cat-hands button.on { background: rgba(45,127,214,0.65); border-color: var(--accent); }
+.cat-hands select { font-size: 10px; padding: 2px 2px; max-width: 46px; background: rgba(0,0,0,0.3); color: var(--text); border: 1px solid var(--panel-border); border-radius: 3px; }
+.cat-badge { font-size: 10px; color: var(--accent); }
 #garage .wardrobe-header .find { flex: none; width: 140px; padding: 4px 8px; font-size: 11px; background: rgba(0,0,0,0.3); color: var(--text); border: 1px solid var(--panel-border); border-radius: 4px; }
 #garage .weapons-row select { flex: none; font-size: 10px; padding: 3px 4px; background: rgba(0,0,0,0.3); color: var(--text); border: 1px solid var(--panel-border); border-radius: 4px; }
 #garage .weapons-row em { color: var(--muted); font-style: normal; font-size: 10px; }

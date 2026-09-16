@@ -43,8 +43,8 @@ export interface WeaponsManifest {
 /** What each class fights like, when the manifest does not say. */
 export const FIGHTS: Record<WeaponClass, Fights> = { pistol: 'gun', carbine: 'gun', rifle: 'gun', heavy: 'gun', sword1h: 'single', knife: 'single', sword2h: 'single', polearm: 'staff', lightsaber: 'lightsaber', lightsaber2h: 'lightsaber', lightsaberStaff: 'lightsaber' };
 export const CLASS_LABELS: Record<WeaponClass, string> = { pistol: 'Pistols', carbine: 'Carbines', rifle: 'Rifles', heavy: 'Heavy weapons', sword1h: 'One-hand swords', knife: 'Knives', sword2h: 'Two-hand swords', polearm: 'Polearms and lances', lightsaber: 'Lightsabers', lightsaber2h: 'Two-hand lightsabers', lightsaberStaff: 'Double-bladed lightsabers' };
-/** Classes a left hand may hold (the dual style needs one of these in each hand). */
-export const ONE_HANDED = new Set<WeaponClass>(['sword1h', 'knife']);
+/** Classes a left hand may hold too: every blade but the double-bladed staff; one in each hand fights as the dual style. */
+export const OFF_HAND = new Set<WeaponClass>(['sword1h', 'knife', 'sword2h', 'polearm', 'lightsaber', 'lightsaber2h']);
 /** The blaster carries a class plays: the pistol's, or the rifle's (carbines and heavy weapons use the rifle set). */
 export function gunKindOf(cls: WeaponClass): 'pistol' | 'rifle' {
   return cls === 'pistol' ? 'pistol' : 'rifle';

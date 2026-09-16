@@ -1,15 +1,32 @@
 // The weapons rack: every converted weapon by class, a row each with a button per hand it can go
 // in. Picking one puts it in that hand and switches to the kit that fights with it.
 import { INVENTORY_TABS, tabStrip, wireTabs } from './tabs';
-import { CLASS_LABELS, ONE_HANDED, type WeaponCatalogue, type WeaponClass, type WeaponDef } from '../player/weapons';
+import { GroupState, escapeHtml, groupHtml, prettyName } from './catalogue';
+import { CLASS_LABELS, OFF_HAND, type WeaponCatalogue, type WeaponClass, type WeaponDef } from '../player/weapons';
 
-const ORDER: WeaponClass[] = ['pistol', 'carbine', 'rifle', 'heavy', 'sword1h', 'knife', 'sword2h', 'polearm', 'lightsaber', 'lightsaber2h', 'lightsaberStaff'];
+const ORDER: WeaponClass[] = ['lightsaber', 'lightsaber2h', 'lightsaberStaff', 'sword1h', 'knife', 'sword2h', 'polearm', 'pistol', 'carbine', 'rifle', 'heavy'];
+/** What a class fights like, for its heading. */
+const NOTES: Record<WeaponClass, string> = {
+  lightsaber: 'one hand: fast, medium and strong styles',
+  lightsaber2h: 'two hands: medium and strong',
+  lightsaberStaff: 'a blade from each end: the staff style',
+  sword1h: 'the single-blade styles; one in each hand fights dual',
+  knife: 'the single-blade styles; one in each hand fights dual',
+  sword2h: 'the single-blade styles; one in each hand fights dual',
+  polearm: 'the staff style',
+  pistol: "the bounty hunter's pistol carries",
+  carbine: "the rifle's carries",
+  rifle: "the rifle's carries",
+  heavy: "the rifle's carries",
+};
 
 export class WeaponsUi {
   readonly root: HTMLElement;
   private readonly body: HTMLElement;
   private readonly count: HTMLElement;
   private catalogue: WeaponCatalogue | null = null;
+  private readonly groups = new GroupState();
+  private lastFind = '';
   open = false;
   /** A click on another tab: the game swaps the panels. */
   onTab: (id: string) => void = () => {};
@@ -64,30 +81,42 @@ export class WeaponsUi {
       return;
     }
     const find = (this.root.querySelector('.find') as HTMLInputElement).value.trim().toLowerCase();
+    if (find !== this.lastFind) this.groups.clear();
+    this.lastFind = find;
     const groups = c.byClass();
     let shown = 0;
     const html: string[] = [];
+    // What is in the hands, first, so it can be read without hunting for the marked entries.
+    const inHands = [this.held.right, this.held.left].map((id, i) => {
+      const w = id ? c.weapons.find((x) => x.id === id) : null;
+      return `<span class="hand-slot"><b>${i ? 'left' : 'right'}</b> ${w ? escapeHtml(prettyName(w.id).name) : '<em>empty</em>'}</span>`;
+    });
+    html.push(`<div class="in-hands">${inHands.join('')}</div>`);
     // The blade: the game's own colours, and any colour at all.
     const colors = c.saberColors;
     html.push(`<h3 class="weapons-class">Blade colour <span>${colors.length ? `${colors.length} of the game's, or your own` : 'your own'}</span></h3><div class="blade-colours">${colors.map((h) => `<button class="swatch${h.toLowerCase() === this.saberColor.toLowerCase() ? ' on' : ''}" data-colour="${h}" style="background:${h}" title="${h}"></button>`).join('')}<label class="blade-own">own <input type="color" class="blade-custom" value="${this.saberColor}" /></label></div>`);
     for (const cls of ORDER) {
-      const list = (groups.get(cls) ?? []).filter((w) => !find || w.id.toLowerCase().includes(find));
+      const list = (groups.get(cls) ?? []).filter((w) => !find || w.id.toLowerCase().includes(find) || prettyName(w.id).name.toLowerCase().includes(find));
       if (!list.length) continue;
       shown += list.length;
-      html.push(`<h3 class="weapons-class">${CLASS_LABELS[cls]} <span>${list.length}</span></h3>`);
-      for (const w of list) {
+      const heldHere = list.some((w) => w.id === this.held.right || w.id === this.held.left);
+      const items = list.map((w) => {
         const inRight = this.held.right === w.id;
         const inLeft = this.held.left === w.id;
-        html.push(`<div class="weapons-row${inRight || inLeft ? ' held' : ''}"><span class="name">${w.id.replace(/_/g, ' ')}</span><span class="reach">${w.length.toFixed(2)} m</span><button data-id="${w.id}" data-hand="right"${inRight ? ' class="on"' : ''}>${inRight ? 'in right hand' : 'right hand'}</button>${ONE_HANDED.has(w.class) ? `<button data-id="${w.id}" data-hand="left"${inLeft ? ' class="on"' : ''}>${inLeft ? 'in left hand' : 'left hand'}</button>` : ''}</div>`);
-      }
+        const { name, tags } = prettyName(w.id);
+        const left = OFF_HAND.has(w.class) ? `<button data-id="${w.id}" data-hand="left"${inLeft ? ' class="on"' : ''} title="${inLeft ? 'in the left hand: click to empty it' : 'left hand'}">L</button>` : '';
+        return `<div class="cat-item${inRight || inLeft ? ' held' : ''}" title="${escapeHtml(w.id)} · ${w.length.toFixed(2)} m"><span class="cat-name">${escapeHtml(name)}${tags.length ? ` <small>${escapeHtml(tags.join(' '))}</small>` : ''}</span><span class="cat-hands"><button data-id="${w.id}" data-hand="right"${inRight ? ' class="on"' : ''} title="${inRight ? 'in the right hand: click to empty it' : 'right hand'}">R</button>${left}</span></div>`;
+      });
+      html.push(groupHtml(cls, CLASS_LABELS[cls], list.length, NOTES[cls], this.groups.isOpen(cls, !!find || heldHere), items.join('')));
     }
-    if (c.skipped.length) {
+    if (c.skipped.length && !find) {
       const why = new Map<string, string[]>();
       for (const s of c.skipped) (why.get(s.why) ?? why.set(s.why, []).get(s.why)!).push(s.template.replace(/^object\/weapon\//, ''));
-      html.push(`<h3 class="weapons-class">Not on the rack yet <span>${c.skipped.length}</span></h3>`);
-      for (const [reason, list] of why) html.push(`<details class="weapons-skipped"><summary>${reason} (${list.length})</summary><div>${list.join(', ')}</div></details>`);
+      const inner = [...why].map(([reason, list]) => `<details class="weapons-skipped"><summary>${escapeHtml(reason)} (${list.length})</summary><div>${escapeHtml(list.join(', '))}</div></details>`).join('');
+      html.push(groupHtml('skipped', 'Not on the rack yet', c.skipped.length, 'kinds the game does not play yet', this.groups.isOpen('skipped', false), `<div class="cat-wide">${inner}</div>`));
     }
     this.body.innerHTML = html.join('');
+    this.groups.wire(this.body);
     this.count.textContent = `${shown} of ${c.weapons.length} weapons`;
     for (const b of this.body.querySelectorAll<HTMLButtonElement>('button[data-colour]')) {
       b.addEventListener('click', () => {
