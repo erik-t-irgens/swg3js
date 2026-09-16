@@ -645,8 +645,10 @@ export class CharacterRig {
   }
 
   /** What plays now, for the console. */
-  describe(): { state: RigState | null; clip: string | null; upper: string | null; override: string | null; shot: string | null } {
-    return { state: this.state, clip: this.current?.getClip().name ?? null, upper: this.upperName, override: this.override?.getClip().name ?? null, shot: this.shotName ?? this.upperShot?.getClip().name.replace(/^upper:/, '') ?? null };
+  describe(): { state: RigState | null; clip: string | null; upper: string | null; override: string | null; shot: string | null; weights: Record<string, number> } {
+    const weights: Record<string, number> = {};
+    for (const a of [this.current, this.upper, this.override, this.upperShot]) if (a) weights[a.getClip().name] = Number(a.getEffectiveWeight().toFixed(2)) + (a.enabled ? 0 : -100);
+    return { state: this.state, clip: this.current?.getClip().name ?? null, upper: this.upperName, override: this.override?.getClip().name ?? null, shot: this.shotName ?? this.upperShot?.getClip().name.replace(/^upper:/, '') ?? null, weights };
   }
 
   /** Whether the torso is held steady over locomotion legs while a pose rides the upper body. */

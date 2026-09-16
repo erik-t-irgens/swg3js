@@ -262,6 +262,8 @@ export interface Selection {
   forceCost?: number;
 }
 
+/** Whether attack held through a roll stabs out of it; its clip comes out twisted, so not yet. */
+const ROLL_STAB_ON = false;
 /** The Force the special moves cost (SABER_ALT_ATTACK_POWER and its _FB and _LR variants). */
 export const ALT_ATTACK_POWER = { kata: 50, sideways: 10, forwardBack: 25 };
 
@@ -493,8 +495,10 @@ export class SaberCombat {
     const cur = this.move;
     const c = this.current;
     const force = input.force ?? 100;
-    // Out of a forward roll, attack stabs (PM_WeaponLightsaber's roll case).
-    if (input.rollEnding && input.attack && !c.kata && cur !== 'ROLL_STAB' && force >= ALT_ATTACK_POWER.forwardBack) {
+    // Out of a forward roll, attack stabs (PM_WeaponLightsaber's roll case). Off for now: the clip as
+    // converted kneels with the legs one way and the torso and blade the other, a body twisted ninety
+    // degrees, which is what a roll in combat showed; back on once the clip's import is looked at.
+    if (ROLL_STAB_ON && input.rollEnding && input.attack && !c.kata && cur !== 'ROLL_STAB' && force >= ALT_ATTACK_POWER.forwardBack) {
       return this.set('ROLL_STAB', clipDuration, null, ALT_ATTACK_POWER.forwardBack);
     }
     // A fresh press of jump with attack held: the style's leap attack, starting at once even in
@@ -526,6 +530,9 @@ export class SaberCombat {
     const wantAttack = input.attack || this.buffered;
     this.buffered = false;
     let sel: Selection;
+    // Rolling, or through a wall move, a chain ends where it is: no swing starts until the body is
+    // back on its feet, and the only attack out of a roll is its own stab (above).
+    if (input.inSpecialJump && c.kind !== 'ready' && c.kind !== 'special') return this.set(c.chainIdle, clipDuration);
     if (c.kind === 'ready') {
       if (!wantAttack || input.inSpecialJump) return null;
       sel = attackForMovement(this.style, input, cur);
