@@ -106,6 +106,7 @@ const HILT_TOP = 0.13;
 export const DEFAULT_SABER_COLOR = '#3aa0ff';
 const bladeBase = new THREE.Vector3();
 const bladeEnd = new THREE.Vector3();
+const hullInv = new THREE.Matrix4();
 /** How far the spine turns for the aim before the rest goes on the body's facing (radians). */
 const AIM_SPINE_MAX = 0.6;
 /** Whether an object is drawn: itself and every parent visible. */
@@ -1604,7 +1605,14 @@ export class Player {
       if (throwPressed && this.saberOn && !this.thrown.inFlight && this.saber.style !== 'staff' && !this.saber.busy && !si.attack && (this.force?.value ?? 100) >= THROW.cost && !this.swimming) {
         if (this.force) this.force.value -= THROW.cost;
         cam.camera.getWorldDirection(aim);
-        this.thrown.throw(this.handPosition(handPos), aim);
+        this.handPosition(handPos);
+        if (this.aboard) {
+          // Thrown aboard: in the hull's frame from the start.
+          hullInv.copy(this.aboard.vehicle.group.matrixWorld).invert();
+          handPos.applyMatrix4(hullInv);
+          aim.transformDirection(hullInv);
+        }
+        this.thrown.throw(handPos, aim);
         this.saber.holster();
         this.rig?.stopOverride();
       }
@@ -1980,10 +1988,23 @@ export class Player {
     this.handPosition(handPos);
     aimFrom.copy(this.pos).y += 1.5;
     cam.camera.getWorldDirection(aim);
-    const result = this.thrown.update(dt, handPos, aimFrom, aim, input.held('saberThrow'), (a, b) => this.physics.cameraBlock(a, b, this.body, this.inside) !== null);
+    const room = this.aboard;
+    if (room) {
+      // Aboard, the saber flies in the hull's frame (`pos` already is): the hand and the aim brought into it.
+      hullInv.copy(room.vehicle.group.matrixWorld).invert();
+      handPos.applyMatrix4(hullInv);
+      aim.transformDirection(hullInv);
+    }
+    const blocked = room ? (a: THREE.Vector3, b: THREE.Vector3) => room.physics.cameraBlock(a, b, null, true) !== null : (a: THREE.Vector3, b: THREE.Vector3) => this.physics.cameraBlock(a, b, this.body, this.inside) !== null;
+    const result = this.thrown.update(dt, handPos, aimFrom, aim, input.held('saberThrow'), blocked);
     if (result === 'caught') return;
-    this.flying.position.copy(this.thrown.pos);
-    this.flying.rotation.set(0, this.thrown.spin, 0);
+    if (room) {
+      this.flying.position.copy(this.thrown.pos).applyMatrix4(room.vehicle.group.matrixWorld);
+      this.flying.quaternion.copy(room.vehicle.group.quaternion).multiply(tmpQ.setFromAxisAngle(UP_AXIS, this.thrown.spin));
+    } else {
+      this.flying.position.copy(this.thrown.pos);
+      this.flying.rotation.set(0, this.thrown.spin, 0);
+    }
   }
 
   private flyUpdate(dt: number, input: Input, cam: ThirdPersonCamera): void {

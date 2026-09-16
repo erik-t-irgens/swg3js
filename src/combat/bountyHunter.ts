@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { RAPIER } from '../core/physics';
 import { GUNS, gunTypeFor, type FireMode, type GunProfile } from './guns';
+import type { BoltFrame } from './bolts';
 import type { Hittable, Kit, KitContext, KitSlot, Resource } from './kit';
 import type { EffectHandle } from '../world/particles';
 
@@ -29,6 +30,7 @@ const side = new THREE.Vector3();
 const lift = new THREE.Vector3();
 const placeQ = new THREE.Quaternion();
 const placeM = new THREE.Matrix4();
+const hullInverse = new THREE.Matrix4();
 const ONE = new THREE.Vector3(1, 1, 1);
 const Z = new THREE.Vector3(0, 0, 1);
 const UP = new THREE.Vector3(0, 1, 0);
@@ -227,18 +229,44 @@ export class BountyHunterKit implements Kit {
     return false;
   }
 
-  /** Where the muzzle is and which way a shot leaves it: at the crosshair's point, unless that is beside or behind the muzzle. */
+  /**
+   * Where the muzzle is and which way a shot leaves it: at the crosshair's point, unless that is beside
+   * or behind the muzzle. Aboard, the room's walls are what the crosshair finds, and the shot's frame is the hull's.
+   */
   private aim(ctx: KitContext): void {
     const { player, cam, physics } = ctx;
     cam.camera.getWorldDirection(dir);
     from.copy(cam.camera.position);
-    const ray = new RAPIER.Ray(from, dir);
-    const hit = physics.world.castRay(ray, 300, true, undefined, undefined, undefined, player.body);
-    end.copy(from).addScaledVector(dir, hit ? hit.timeOfImpact : 300);
     player.muzzle(muzzle);
+    const room = player.aboard;
+    if (room) {
+      // The crosshair's line and the muzzle into the hull's frame; the room's physics finds the wall.
+      hullInverse.copy(room.vehicle.group.matrixWorld).invert();
+      from.applyMatrix4(hullInverse);
+      dir.transformDirection(hullInverse);
+      muzzle.applyMatrix4(hullInverse);
+      const ray = new RAPIER.Ray(from, dir);
+      const hit = room.physics.world.castRay(ray, 60, true);
+      end.copy(from).addScaledVector(dir, hit ? hit.timeOfImpact : 60);
+    } else {
+      const ray = new RAPIER.Ray(from, dir);
+      const hit = physics.world.castRay(ray, 300, true, undefined, undefined, undefined, player.body);
+      end.copy(from).addScaledVector(dir, hit ? hit.timeOfImpact : 300);
+    }
     aimDir.copy(end).sub(muzzle);
     if (aimDir.lengthSq() < 1 || aimDir.dot(dir) < 0.5) aimDir.copy(dir);
     aimDir.normalize();
+  }
+
+  /** The frame a shot flies in: the hull's when aboard, else none (the world). */
+  private frameOf(ctx: KitContext): BoltFrame | null {
+    const room = ctx.player.aboard;
+    return room ? { matrix: room.vehicle.group.matrixWorld, physics: room.physics } : null;
+  }
+
+  /** The body a shot flies out through: the hull's when aboard (the room is not a target), else the player's. */
+  private excludeOf(ctx: KitContext): RAPIER.RigidBody {
+    return ctx.player.aboard ? ctx.player.aboard.vehicle.body : ctx.player.body;
   }
 
   /**
@@ -271,7 +299,8 @@ export class BountyHunterKit implements Kit {
       else {
         ctx.bolts.fire(muzzle, shotDir, {
           owner: 'player',
-          exclude: player.body,
+          exclude: this.excludeOf(ctx),
+          frame: this.frameOf(ctx),
           damage,
           speed: mode.speed,
           color: mode.color,
@@ -289,9 +318,12 @@ export class BountyHunterKit implements Kit {
         });
       }
     }
-    // The client's own muzzle flash when the pack has it, and the pooled light either way.
-    ctx.bolts.flash(fx?.fire, muzzle, aimDir);
-    effects.flash(muzzle, mode.color, 6 + 6 * mode.size, 6, 0.08);
+    // The client's own muzzle flash when the pack has it, and the pooled light either way (at the muzzle in the world).
+    player.muzzle(tmp);
+    tmp2.copy(aimDir);
+    if (player.aboard) tmp2.transformDirection(player.aboard.vehicle.group.matrixWorld);
+    ctx.bolts.flash(fx?.fire, tmp, tmp2);
+    effects.flash(tmp, mode.color, 6 + 6 * mode.size, 6, 0.08);
     player.shotFired();
     void world;
   }
@@ -299,10 +331,20 @@ export class BountyHunterKit implements Kit {
   /** A shot that lands the instant it is fired: what the line meets is hurt, and the line is drawn as a fading beam. */
   private hitscan(ctx: KitContext, mode: FireMode, at: THREE.Vector3, along: THREE.Vector3, damage: number, level: number): void {
     const { player, world, physics, effects } = ctx;
+    const room = player.aboard;
     const ray = new RAPIER.Ray(at, along);
-    const hit = physics.world.castRay(ray, 400, true, undefined, undefined, undefined, player.body);
-    const reach = hit ? hit.timeOfImpact : 400;
+    const hit = room ? room.physics.world.castRay(ray, 60, true) : physics.world.castRay(ray, 400, true, undefined, undefined, undefined, player.body);
+    const reach = hit ? hit.timeOfImpact : room ? 60 : 400;
     end.copy(at).addScaledVector(along, reach);
+    if (room) {
+      // Drawn where the hull carries the line; the room's walls are not targets.
+      const m = room.vehicle.group.matrixWorld;
+      tmp.copy(at).applyMatrix4(m);
+      tmp2.copy(end).applyMatrix4(m);
+      ctx.bolts.beam(tmp, tmp2, mode.color, 0.3 + level * 0.3, 1 + level * 1.5);
+      if (hit) effects.burst(tmp2, 0xffb070, 0.35, 0.12);
+      return;
+    }
     ctx.bolts.beam(at, end, mode.color, 0.3 + level * 0.3, 1 + level * 1.5);
     if (!hit) return;
     const target = world.hittableAt(hit.collider.handle);
@@ -464,7 +506,7 @@ export class BountyHunterKit implements Kit {
     for (const sp of world.vehicles) {
       tmp.copy(sp.pos).sub(at);
       const d = tmp.length();
-      if (d > radius * 1.5 || sp === player.mounted) continue;
+      if (d > radius * 1.5 || sp === player.mounted || sp === player.aboard?.vehicle) continue;
       const f = 1 - d / (radius * 1.5);
       const m = sp.body.mass();
       tmp.normalize();

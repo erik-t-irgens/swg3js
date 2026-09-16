@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { packIdOf, type PlanetDef } from '../data/planets';
 import type { Physics, RAPIER } from '../core/physics';
 import { CreatureManager } from './creatures';
+import { NpcManager, type NpcDeps } from './npcs';
 import { DayCycle } from './daycycle';
 import { SwgSky, type SkyLighting } from './sky';
 import { createWaterMaterial, emitRipple, Splashes, updateWaterDepth, type WaterMaterial } from './water';
@@ -179,6 +180,12 @@ export class World {
   planet!: PlanetDef;
   terrain!: Terrain;
   creatures!: CreatureManager;
+  /** The fighters stood to fight the player and each other, on this planet. */
+  npcs!: NpcManager;
+  /** What the fighters need from the game, kept across planets and given to each new manager. */
+  npcDeps: Partial<NpcDeps> = {};
+  /** The player as the fighters see them: where, how tall, and how to hurt them. */
+  private readonly playerFoe: Hittable = { pos: new THREE.Vector3(), halfHeight: 0.9, dead: false, damage: () => {} };
   /** Blaster turrets standing near where the player arrived. */
   turrets!: TurretManager;
   /** The gallery world's labels and animated mannequins, on that planet only. */
@@ -363,6 +370,8 @@ export class World {
     this.scene.add(this.creatures.group);
     this.turrets = new TurretManager(this.physics, this.terrain);
     this.scene.add(this.turrets.group);
+    this.npcs = new NpcManager(this.scene, this.physics, this.terrain, import.meta.env.BASE_URL);
+    this.npcs.attach(this.npcDeps);
     this.physics.setGravity(planet.gravity);
 
     const s = planet.sky;
@@ -600,6 +609,7 @@ export class World {
       this.scene.remove(this.creatures.group);
       this.creatures.dispose();
     }
+    this.npcs?.dispose();
     if (this.turrets) {
       this.scene.remove(this.turrets.group);
       this.turrets.dispose();
@@ -1711,7 +1721,7 @@ export class World {
 
   /** The creature, turret or vehicle a physics collider belongs to. */
   hittableAt(handle: number): Hittable | undefined {
-    return this.creatures.byCollider.get(handle) ?? this.turrets.byCollider.get(handle) ?? this.vehicles.find((v) => v.colliderHandles.includes(handle));
+    return this.creatures.byCollider.get(handle) ?? this.npcs.byCollider.get(handle) ?? this.turrets.byCollider.get(handle) ?? this.vehicles.find((v) => v.colliderHandles.includes(handle));
   }
 
   /** `target` is whom the turrets shoot at, or null while nothing should be shot (noclip, riding). */
@@ -1754,6 +1764,10 @@ export class World {
     this.sun.target.position.copy(playerPos);
     this.sun.position.copy(playerPos).addScaledVector(this.day.lightDir, 220);
     this.creatures.update(dt, playerPos, onAttack);
+    // The fighters see the player as one more foe to hurt.
+    this.playerFoe.pos.copy(playerPos);
+    this.playerFoe.damage = (amount) => onAttack(amount);
+    this.npcs.update(dt, this.playerFoe, this.bolts, this.camera);
     if (target) this.turrets.update(dt, target, this.bolts);
     this.gallery?.update(dt, playerPos);
   }

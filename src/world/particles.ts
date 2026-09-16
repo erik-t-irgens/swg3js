@@ -602,18 +602,27 @@ class EffectInstance {
     for (const e of this.emitters) e.restart();
   }
 
+  /** Seconds since placed, for a transient effect's own end. */
+  age = 0;
+
   update(dt: number, heightAt: ((x: number, z: number) => number) | null, distance: number): void {
+    this.age += dt;
     let allDone = this.emitters.length > 0;
     for (const e of this.emitters) {
       e.update(dt, heightAt, distance);
       if (!e.deletable) allDone = false;
     }
+    const transient = this.handle.transient;
     if (allDone) {
-      // The whole effect ran out: play again unless its own timing limits the loops.
+      // The whole effect ran out: play again unless its own timing limits the loops. A transient
+      // effect (a hit, a flash) plays once: many of the client's hit effects loop for ever on their own.
       this.loops++;
       const limit = this.def.timing ? randomInt(this.def.timing.loopCount) : -1;
-      if (limit === -1 || this.loops < limit) this.restart();
+      if (!transient && (limit === -1 || this.loops < limit)) this.restart();
       else this.finished = true;
+    } else if (transient && this.age > Math.max(this.maxLife, 0.5) * 2 + 1.5) {
+      // An emitter that never runs out (a steady spray) still ends a transient effect after one life.
+      this.finished = true;
     }
   }
 

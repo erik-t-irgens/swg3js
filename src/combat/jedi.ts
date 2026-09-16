@@ -185,8 +185,8 @@ export class JediKit implements Kit {
         this.sweep(ctx, a, b, 0.25, player.saberDamage, this.hitThisSwing, 4);
       }
     }
-    // The thrown saber cuts what it flies through, once on the way out and once on the way back.
-    if (player.thrown.inFlight) {
+    // The thrown saber cuts what it flies through, once on the way out and once on the way back (not aboard, where it flies in the hull's frame).
+    if (player.thrown.inFlight && !player.aboard) {
       if (player.thrown.legId !== this.lastLegId) {
         this.lastLegId = player.thrown.legId;
         this.hitThisLeg.clear();
@@ -409,7 +409,7 @@ export class JediKit implements Kit {
     for (const sp of world.vehicles) {
       tmp2.copy(sp.pos).sub(player.pos);
       const d = tmp2.length();
-      if (d > 12 || sp === player.mounted) continue;
+      if (d > 12 || sp === player.mounted || sp === player.aboard?.vehicle) continue;
       tmp2.normalize().multiplyScalar(sign);
       const m = sp.body.mass();
       sp.body.applyImpulse({ x: tmp2.x * m * 9 * (1 - d / 14), y: m * 4, z: tmp2.z * m * 9 * (1 - d / 14) }, true);
@@ -433,7 +433,7 @@ export class JediKit implements Kit {
     for (const sp of world.vehicles) {
       tmp2.copy(sp.pos).sub(player.pos);
       const d = tmp2.length();
-      if (d > 10 || sp === player.mounted) continue;
+      if (d > 10 || sp === player.mounted || sp === player.aboard?.vehicle) continue;
       tmp2.normalize();
       const m = sp.body.mass();
       sp.body.applyImpulse({ x: tmp2.x * m * 10 * (1 - d / 12), y: m * 5, z: tmp2.z * m * 10 * (1 - d / 12) }, true);
@@ -453,7 +453,8 @@ export class JediKit implements Kit {
       new RAPIER.Capsule(len / 2, radius),
       (collider) => {
         const c = world.hittableAt(collider.handle);
-        if (c && !already.has(c)) {
+        // Aboard, the hull around the rooms is not a target: a fight inside must not cut the ship down.
+        if (c && !already.has(c) && c !== player.aboard?.vehicle) {
           already.add(c);
           c.damage(damage, player.pos, push);
           tmp2.copy(c.pos).y += c.halfHeight;

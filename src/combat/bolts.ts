@@ -80,6 +80,18 @@ export interface BoltOptions {
   bounces?: number;
   /** The bolt turns toward this each frame (a homing rocket). */
   homing?: { pos: THREE.Vector3; dead?: boolean } | null;
+  /**
+   * Fired inside a ship's rooms: the bolt lives in the hull's frame (`from` and `dir` given in it), flies
+   * against the room's own physics, and is drawn where the hull's transform carries it, so the ship's
+   * motion is no part of its path.
+   */
+  frame?: BoltFrame | null;
+}
+
+export interface BoltFrame {
+  /** The hull's world matrix, read live. */
+  matrix: THREE.Matrix4;
+  physics: Physics;
 }
 
 export interface Bolt {
@@ -109,6 +121,8 @@ export interface Bolt {
   homing: { pos: THREE.Vector3; dead?: boolean } | null;
   /** The bolt's velocity as a vector when it falls or turns; `dir` and `speed` follow it. */
   vel: THREE.Vector3 | null;
+  /** The hull's frame the bolt lives in, aboard; null in the world. */
+  frame: BoltFrame | null;
 }
 
 /** A shot that landed the instant it was fired: its line, fading over its life. */
@@ -137,6 +151,7 @@ const hitPoint = new THREE.Vector3();
 const hitNormal = new THREE.Vector3();
 const bounce = new THREE.Vector3();
 const placeQ = new THREE.Quaternion();
+const frameQ = new THREE.Quaternion();
 const placeM = new THREE.Matrix4();
 const ONE = new THREE.Vector3(1, 1, 1);
 const Z = new THREE.Vector3(0, 0, 1);
@@ -177,7 +192,7 @@ export class Bolts {
   constructor(private readonly scene: THREE.Scene) {}
 
   /** Fire a bolt from `from` along `dir` (unit length). */
-  fire(from: THREE.Vector3, dir: THREE.Vector3, { owner, damage = BLASTER.damage, speed = BLASTER.velocity, metresPerSecond, inherit, life = BLASTER.life, color = 0xff4a2a, exclude, projectile, size = 1, push = BLASTER.push, onHit, gravity = 0, bounces = 0, homing = null }: BoltOptions): Bolt {
+  fire(from: THREE.Vector3, dir: THREE.Vector3, { owner, damage = BLASTER.damage, speed = BLASTER.velocity, metresPerSecond, inherit, life = BLASTER.life, color = 0xff4a2a, exclude, projectile, size = 1, push = BLASTER.push, onHit, gravity = 0, bounces = 0, homing = null, frame = null }: BoltOptions): Bolt {
     const [coreMat, glowMat] = this.materialsFor(color);
     const mesh = new THREE.Group();
     mesh.add(new THREE.Mesh(this.core, coreMat), new THREE.Mesh(this.glow, glowMat), new THREE.Mesh(this.head, glowMat));
@@ -196,7 +211,8 @@ export class Bolts {
     if (fx) mesh.visible = false;
     this.scene.add(mesh);
     markActor(mesh);
-    const bolt: Bolt = { pos: from.clone(), dir: heading, speed: s, damage, owner, exclude, age: 0, life, lead: fx && projectile ? projectile.reach : (LENGTH / 2) * mesh.scale.z, reflected: 0, mesh, fx, hitFx: fx ? (projectile?.hit ?? null) : null, fxPack: fx ? fxPlayer : null, push, onHit: onHit ?? null, gravity, bounces, homing, vel: gravity || homing ? vel.clone().multiplyScalar(s) : null };
+    const bolt: Bolt = { pos: from.clone(), dir: heading, speed: s, damage, owner, exclude, age: 0, life, lead: fx && projectile ? projectile.reach : (LENGTH / 2) * mesh.scale.z, reflected: 0, mesh, fx, hitFx: fx ? (projectile?.hit ?? null) : null, fxPack: fx ? fxPlayer : null, push, onHit: onHit ?? null, gravity, bounces, homing, vel: gravity || homing ? vel.clone().multiplyScalar(s) : null, frame };
+    if (frame) this.settle(bolt);
     this.bolts.push(bolt);
     this.fired[owner]++;
     return bolt;
@@ -271,6 +287,23 @@ export class Bolts {
         if (b.speed > 1e-6) b.dir.copy(b.vel).divideScalar(b.speed);
       }
       const step = b.speed * dt;
+      // Aboard, the bolt flies in the hull's frame against the room's own walls: nothing else is in there.
+      if (b.frame) {
+        const ray = new RAPIER.Ray(b.pos, b.dir);
+        const hit = b.frame.physics.world.castRayAndGetNormal(ray, step + b.lead, true, undefined, undefined, undefined, undefined);
+        if (!hit) {
+          b.pos.addScaledVector(b.dir, step);
+          this.settle(b);
+          continue;
+        }
+        const p = ray.pointAt(hit.timeOfImpact);
+        hitPoint.set(p.x, p.y, p.z).applyMatrix4(b.frame.matrix);
+        w.effects.burst(hitPoint, 0xffb070, 0.35, 0.12);
+        w.effects.flash(hitPoint, 0xff8a50, 6, 4, 0.08);
+        b.onHit?.(hitPoint, null);
+        this.remove(i);
+        continue;
+      }
       // The bolt's own length leads the way so it does not visibly poke through what it hits.
       const ray = new RAPIER.Ray(b.pos, b.dir);
       const hit = w.physics.world.castRayAndGetNormal(ray, step + b.lead, true, undefined, undefined, undefined, b.exclude);
@@ -340,9 +373,16 @@ export class Bolts {
 
   /** Put the bolt's mesh, or the effect carried in its place, where the bolt now is. */
   private settle(b: Bolt): void {
-    b.mesh.position.copy(b.pos);
-    b.mesh.quaternion.setFromUnitVectors(Z, b.dir);
-    if (b.fx && b.fxPack) b.fxPack.move(b.fx, placeM.compose(b.pos, b.mesh.quaternion, ONE));
+    if (b.frame) {
+      // Where the hull's transform carries the bolt's own place and heading.
+      b.mesh.position.copy(b.pos).applyMatrix4(b.frame.matrix);
+      frameQ.setFromRotationMatrix(b.frame.matrix);
+      b.mesh.quaternion.setFromUnitVectors(Z, b.dir).premultiply(frameQ);
+    } else {
+      b.mesh.position.copy(b.pos);
+      b.mesh.quaternion.setFromUnitVectors(Z, b.dir);
+    }
+    if (b.fx && b.fxPack) b.fxPack.move(b.fx, placeM.compose(b.mesh.position, b.mesh.quaternion, ONE));
   }
 
   /** Take every bolt out of the air (leaving a planet). */

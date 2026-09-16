@@ -75,6 +75,7 @@ const stats = { frameMs: 0, physicsMs: 0, renderMs: 0, rawDt: 0, grounded: false
 const tmp = new THREE.Vector3();
 const tmpQ = new THREE.Quaternion();
 const roomLightSpots: import('./vehicles/interior').RoomLight[] = [];
+const npcGlow = [0, 1, 2, 3].map(() => new THREE.Vector3());
 /** How near the controls in a ship's bridge E takes them, metres in the hull's frame. */
 const CONTROLS_RANGE = 2.5;
 /**
@@ -270,6 +271,9 @@ class App {
     void WeaponCatalogue.load(import.meta.env.BASE_URL).then((c) => {
       this.weapons = c;
       this.weaponsUi.attach(c);
+      this.world.npcDeps.weapons = c;
+      this.world.npcDeps.effects = this.effects;
+      this.world.npcs?.attach(this.world.npcDeps);
       if (c) console.info(`weapons: ${c.weapons.length} on the rack, ${c.skipped.length} left out`);
     });
     const galaxy = new GalaxyMap(
@@ -561,6 +565,7 @@ class App {
           this.stepVehicles(dt, true);
           if (!this.player.noclip && !this.player.mounted) this.world.turrets.update(dt, this.player, this.world.bolts);
           this.world.creatures.update(dt, this.player.worldPos, (dmg) => this.player.takeDamage(dmg));
+          this.world.npcs.update(dt, { pos: this.player.worldPos, halfHeight: 0.9, dead: false, damage: (dmg) => this.player.takeDamage(dmg) }, this.world.bolts, this.cam.camera);
           this.physics.step(dt);
           this.effects.update(dt);
           this.updateCamera(null);
@@ -863,6 +868,22 @@ class App {
         this.world.creatures.spawnAt(p.x + tmp.x * metres, p.z + tmp.z * metres);
         return list();
       },
+      /** Blow up the vehicle ridden, piloted or stood in (its health to nothing), to see the rider thrown or the crew put out. */
+      wreck: () => {
+        const v = this.player.mounted ?? this.player.piloting ?? this.player.aboard?.vehicle ?? null;
+        if (!v) return 'not on or in anything';
+        v.hp = 0;
+        return `${v.spec.id} wrecked`;
+      },
+      /** Stand `n` fighters ahead (random species, look and weapon; they fight you and each other), or with 0 list the ones out. */
+      fighter: (n = 1) => {
+        for (let i = 0; i < n; i++) {
+          this.cam.forward(tmp);
+          const d = 8 + Math.random() * 6;
+          this.world.npcs.spawnAt(this.player.pos.x + tmp.x * d + (Math.random() - 0.5) * 6, this.player.pos.z + tmp.z * d + (Math.random() - 0.5) * 6);
+        }
+        return this.world.npcs.npcs.map((f) => ({ name: f.name, arm: f.arm, weapon: f.weapon?.id ?? null, hp: Number(f.hp.toFixed(0)), dead: f.dead, dist: Number(f.pos.distanceTo(this.player.pos).toFixed(1)), rig: !!f.rig }));
+      },
       /** The gun in hand: its Jedi Academy type and numbers. */
       gunType: () => {
         const p = (this.kits.bounty_hunter as BountyHunterKit | undefined ?? new BountyHunterKit(this.scene)).profile({ player: this.player } as KitContext);
@@ -984,6 +1005,8 @@ class App {
     // world after. The species list is small and feeds both the creator and the console.
     void loadSpeciesIndex(import.meta.env.BASE_URL).then((list) => {
       this.speciesList = list;
+      this.world.npcDeps.species = list.map((s) => s.id);
+      this.world.npcs?.attach(this.world.npcDeps);
       this.appearanceUi.setSpecies(list, this.characterId);
     });
     this.appearanceUi.onSpecies = (id) => void this.switchCharacter(id);
@@ -1112,9 +1135,11 @@ class App {
     if (player.aboard || player.noclip || !player.saberOn) return;
     const n = player.saberSegments(this.bladeSegments);
     if (!n) return;
+    // Any mesh burns but flesh: the creatures and the fighters are skipped.
+    const flesh = (h: number) => this.world.creatures.byCollider.has(h) || this.world.npcs.byCollider.has(h);
     for (let i = 0; i < n; i++) {
       const seg = this.bladeSegments[i];
-      const hit = this.physics.surfaceHit(seg.a, seg.b, player.body, this.world.inside);
+      const hit = this.physics.surfaceHit(seg.a, seg.b, player.body, this.world.inside, flesh);
       if (!hit) continue;
       this.markPoint.fromArray(hit.point);
       this.markNormal.fromArray(hit.normal);
@@ -1683,6 +1708,8 @@ class App {
   /** Drive the ridden vehicle from the keys (the mouse or A/D steer, Alt frees the look, W/S throttle, Shift boost, Space hop, the view's tilt or Space and X climb and sink), step every vehicle, and seat the rider. */
   private stepVehicles(dt: number, simulate: boolean): void {
     const { player, input } = this;
+    // A hull removed with someone still in its rooms (the garage's clear, the console): out into the world first.
+    if (player.aboard && !this.world.vehicles.includes(player.aboard.vehicle)) this.thrownOutOfShip(player.aboard.vehicle);
     let drive: DriveInput | null = null;
     const pilot = player.mounted ?? player.piloting;
     if (simulate && pilot) {
@@ -1781,7 +1808,7 @@ class App {
           player.takeDamage(25);
           this.hud.hurt();
           this.hud.setPrompt('');
-        }
+        } else if (player.aboard?.vehicle === v) this.thrownOutOfShip(v);
         this.effects.ring(v.pos, 0xffa050, 6 + v.radius, 0.5);
         this.effects.burst(v.pos, 0xffc080, 2 + v.radius, 0.4);
         this.effects.flash(v.pos, 0xffa050, 60, 20, 0.35);
@@ -2081,6 +2108,18 @@ class App {
         },
         clear: () => this.world.creatures.removeAll(),
       },
+      {
+        id: 'fighter',
+        label: 'Fighter',
+        blurb: 'a humanoid of a random species with a random look and a lightsaber, sword or gun off the rack; fights you and the other fighters; 160 health',
+        count: () => this.world.npcs.npcs.filter((n) => !n.dead).length,
+        spawn: () => {
+          const p = ahead(8 + Math.random() * 4);
+          const n = this.world.npcs.spawnAt(p.x + (Math.random() - 0.5) * 4, p.z + (Math.random() - 0.5) * 4);
+          return `a ${n.name} ahead (${this.world.npcs.npcs.length} out)`;
+        },
+        clear: () => this.world.npcs.removeAll(),
+      },
     ];
   }
 
@@ -2258,6 +2297,25 @@ class App {
     this.hud.setPrompt(`aboard: <b>E</b> steps out · the room has physics of its own · <b>__debug.shipDrift(2, 0.4)</b> sets the hull adrift to test it`);
   }
 
+  /**
+   * The ship the player was aboard is gone (blown up, or removed): out of its rooms into the world where
+   * the hull was, with the hull's motion, adrift in space or falling on a planet. Also the guard for any
+   * path that removes a hull with someone still in it, so the body is never left in a freed room.
+   */
+  private thrownOutOfShip(v: Vehicle): void {
+    const p = this.player;
+    const room = p.aboard;
+    if (!room || room.vehicle !== v) return;
+    room.toWorld(p.pos, tmp);
+    const lv = v.body.linvel();
+    p.leave();
+    p.fling(tmp, tmp2.set(lv.x, lv.y, lv.z));
+    p.takeDamage(20);
+    this.hud.hurt();
+    this.hud.setPrompt('');
+    this.cam.setFrame(null);
+  }
+
   /** Out of a ship's room: beside the hull on the floor found there, or, having fallen out, where the hull's frame put the figure, with the hull's motion. */
   private leaveShip(fell: boolean): void {
     const p = this.player;
@@ -2396,6 +2454,9 @@ class App {
         player.update(dt, input, this.cam, this.world);
         // The thrown and orbiting sabers glow from the pooled flash lights, so no light comes or goes with them.
         for (const spot of player.lightSpots()) this.effects.flash(spot.pos, player.saberColor, spot.intensity, spot.distance, 0.08);
+        // The fighters' lit blades glow the same way.
+        const glows = this.world.npcs.lightSpots(npcGlow);
+        for (let i = 0; i < glows; i++) this.effects.flash(npcGlow[i], this.world.npcs.npcs[i]?.color.getHex() ?? 0x9fd4ff, 2, 5, 0.08);
         this.scorch(dt);
         // Aboard, the room's own lights, the nearest few, through the same pool (no new lights, so nothing recompiles).
         if (player.aboard) for (const l of player.aboard.roomLights(player.pos, 3, roomLightSpots)) this.effects.flash(l.pos, l.color, l.intensity, l.distance, 0.08);

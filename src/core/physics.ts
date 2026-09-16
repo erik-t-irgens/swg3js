@@ -154,7 +154,7 @@ export class Physics {
    * The first fixed surface a segment from `from` to `to` meets (the world, a building's shell or rooms,
    * never a moving body): where, and its normal. Null when the segment is clear.
    */
-  surfaceHit(from: { x: number; y: number; z: number }, to: { x: number; y: number; z: number }, excludeBody: RAPIER.RigidBody | null, inside: boolean): { point: [number, number, number]; normal: [number, number, number] } | null {
+  surfaceHit(from: { x: number; y: number; z: number }, to: { x: number; y: number; z: number }, excludeBody: RAPIER.RigidBody | null, inside: boolean, skip?: (colliderHandle: number) => boolean): { point: [number, number, number]; normal: [number, number, number] } | null {
     const dx = to.x - from.x;
     const dy = to.y - from.y;
     const dz = to.z - from.z;
@@ -162,10 +162,8 @@ export class Physics {
     if (len < 1e-4) return null;
     const ray = new RAPIER.Ray(from, { x: dx / len, y: dy / len, z: dz / len });
     const filter = groups(Group.all, inside ? Group.all & ~(Group.terrain | Group.exterior) : Group.all);
-    const hit = this.world.castRayAndGetNormal(ray, len, true, undefined, filter, undefined, excludeBody ?? undefined, (c) => {
-      const body = c.parent();
-      return !body || body.isFixed();
-    });
+    // Any surface but the ones the caller skips (creatures): walls, the ground, props, hulls.
+    const hit = this.world.castRayAndGetNormal(ray, len, true, undefined, filter, undefined, excludeBody ?? undefined, (c) => !skip?.(c.handle));
     if (!hit) return null;
     const t = hit.timeOfImpact;
     return { point: [from.x + ray.dir.x * t, from.y + ray.dir.y * t, from.z + ray.dir.z * t], normal: [hit.normal.x, hit.normal.y, hit.normal.z] };
