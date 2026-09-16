@@ -877,6 +877,8 @@ export function defaultJkaClips() {
   names.push('BOTH_JUMPATTACK6', 'BOTH_JUMPATTACK7', 'BOTH_ARIAL_LEFT', 'BOTH_ARIAL_RIGHT', 'BOTH_CARTWHEEL_LEFT', 'BOTH_CARTWHEEL_RIGHT', 'BOTH_BUTTERFLY_FL1', 'BOTH_BUTTERFLY_FR1', 'BOTH_BUTTERFLY_LEFT', 'BOTH_BUTTERFLY_RIGHT', 'BOTH_SPINATTACK6', 'BOTH_SPINATTACK7');
   for (const d of ['F', 'B', 'L', 'R']) names.push(`BOTH_A7_KICK_${d}`, `BOTH_A7_KICK_${d}_AIR`);
   names.push('BOTH_SABERPULL', 'BOTH_SABERTHROW1START', 'BOTH_SABERTHROW1STOP');
+  // Bare hands: the two punches (the kicks above serve both).
+  names.push('BOTH_MELEE1', 'BOTH_MELEE2');
   // Wall runs, wall flips, the backflip, wall rebounds and the force jump's flips.
   for (const side of ['LEFT', 'RIGHT']) names.push(`BOTH_WALL_RUN_${side}`, `BOTH_WALL_RUN_${side}_STOP`, `BOTH_WALL_RUN_${side}_FLIP`, `BOTH_WALL_FLIP_${side}`);
   names.push('BOTH_WALL_FLIP_BACK1', 'BOTH_FLIP_BACK1', 'BOTH_FORCEWALLRUNFLIP_START', 'BOTH_FORCEWALLRUNFLIP_END');

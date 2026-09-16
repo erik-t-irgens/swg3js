@@ -32,7 +32,7 @@
 //   node tools/swg/cli.mjs clips-apply <model.glb> <in.clips> [--drop=BOTH_]   put a bundle's animations back onto a model, joints matched by name
 //   node tools/swg/cli.mjs jka-clips <player.glb> <jka-dir> [--jka-anims=...]   re-import Jedi Academy's clips into a converted player GLB (no SWG archives needed)
 //   node tools/swg/cli.mjs jka-extract <jka-dir> <out-dir>                 copy the humanoid skeleton and animation.cfg out of the pk3 archives
-//   node tools/swg/cli.mjs gallery <swg-dir> <out-dir> [--jka=<dir>] [--only=houses,vehicles,weapons,anims] [--limit=N]
+//   node tools/swg/cli.mjs gallery <swg-dir> <out-dir> [--jka=<dir>] [--only=houses,vehicles,weapons,anims,interiors] [--limit=N]
 //                                                                  a flat development world under <out-dir>/gallery: every player house, vehicle and
 //                                                                  weapon in rows, and every animation from both games on a grid of player models
 //                                                                  (dressed in a shirt, trousers and shoes unless --wear says otherwise)
@@ -927,7 +927,7 @@ function customizationList(vfs, info) {
   return out.sort((a, b) => a.name.localeCompare(b.name));
 }
 
-/** --var=a=1,b=2 → Map of customization variable values (matched by full or short name). */
+/** --var=a=1,b=2 â†’ Map of customization variable values (matched by full or short name). */
 function customizationValues(spec) {
   const values = new Map();
   for (const part of (spec ?? '').split(',')) {
@@ -1484,7 +1484,7 @@ const CREATURE_CLIPS = 'idle,walk,run,cbt_stand_combat_attack_light,rea_stand_ge
 /** The player's clips: locomotion and posture by exact name (=), reactions by substring. */
 /** What the player wears when --wear is not given: a plain shirt, trousers and shoes. */
 const DEFAULT_WEAR = ['object/tangible/wearables/shirt/shared_shirt_s03.iff', 'object/tangible/wearables/pants/shared_pants_s01.iff', 'object/tangible/wearables/shoes/shared_shoes_s01.iff'];
-const PLAYER_CLIPS = '=idle,=walk,=run,=idle_combat,=walk_combat,=run_combat,=jump,strafe,backward,walk_back,run_back,loop_crouched,loop_kneeling,loop_prone,trn_standing_to_crouched,trn_crouched_to_standing,trn_standing_to_kneeling,trn_kneeling_to_standing,trn_crouched_to_kneeling,trn_kneeling_to_prone,trn_prone_to_kneeling,trn_standing_to_prone,trn_prone_to_standing,loop_pistol_standing,loop_rifle:,loop_pistol_riding,loop_rifle_riding,loop_riding,loop_ride,loop_combat_standing,loop_pistol_kneeling,loop_rifle_kneeling,loop_pistol_prone,loop_rifle_prone,loop_pistol_combat_prone,loop_rifle_combat_prone,add_pistol_fire,add_rifle_fire,pistol_combat_prone_fire,rifle_combat_prone_fire,pistol_reload,rifle_reload,loop_pistol_combat_standing,loop_rifle_combat_standing,loop_rifle_a_combat,loop_pistol_combat_kneeling,loop_rifle_combat_kneeling,loop_rifle_kneeling_combat,loop_pistol_kneeling_combat,pistol_combat_standing_fire,rifle_combat_standing_fire,rifle_standing_aimed_fire,pistol_standing_aimed_fire,pistol_combat_kneeling_fire,rifle_combat_kneeling_fire,pistol_kneeling_fire,rifle_kneeling_fire,trn_pistol_standing_to_pistol_combat,trn_rifle_a_standing,trn_pistol_combat_to_pistol_combat_aimed,trn_pistol_combat_standing_aimed_to,trn_pistol_combat_standing_to,trn_rifle_combat_standing_to,trn_rifle_combat_standing_aimed_to,trn_pistol_combat_kneeling,trn_rifle_combat_kneeling,trn_pistol_combat_prone_to,trn_rifle_combat_prone_to,trn_pistol_combat_prone_aimed_to,trn_rifle_combat_prone_aimed_to,loop_sitting_chair,loop_sitting_ground,trn_sitting_chair_to_standing,trn_standing_to_sitting_ground,=loop_swimming:speed0,=loop_swimming:speed1,=unarmed_standing_ready_punch,=sword_1h_standing_ready_hrz_slash_middle_r,=rea_get_hit_medium_mid_center,=trn_combat_standing_hit_to_incapacitated_face_up,=loop_incapacitated_face_up,=cbt_stand_combat_attack_light,=rea_stand_get_hit_light,=trn_stand_to_incapacitated,=loop_incapacitated' +
+const PLAYER_CLIPS = '=idle,=walk,=run,=idle_combat,=walk_combat,=run_combat,=jump,strafe,backward,walk_back,run_back,loop_crouched,loop_kneeling,loop_prone,trn_standing_to_crouched,trn_crouched_to_standing,trn_standing_to_kneeling,trn_kneeling_to_standing,trn_crouched_to_kneeling,trn_kneeling_to_prone,trn_prone_to_kneeling,trn_standing_to_prone,trn_prone_to_standing,loop_pistol_standing,loop_rifle:,loop_pistol_riding,loop_rifle_riding,loop_riding,loop_ride,loop_combat_standing,loop_pistol_kneeling,loop_rifle_kneeling,loop_pistol_prone,loop_rifle_prone,loop_pistol_combat_prone,loop_rifle_combat_prone,add_pistol_fire,add_rifle_fire,pistol_combat_prone_fire,rifle_combat_prone_fire,pistol_reload,rifle_reload,loop_pistol_combat_standing,loop_rifle_combat_standing,loop_rifle_a_combat,loop_pistol_combat_kneeling,loop_rifle_combat_kneeling,loop_rifle_kneeling_combat,loop_pistol_kneeling_combat,pistol_combat_standing_fire,rifle_combat_standing_fire,rifle_standing_aimed_fire,pistol_standing_aimed_fire,pistol_combat_kneeling_fire,rifle_combat_kneeling_fire,pistol_kneeling_fire,rifle_kneeling_fire,trn_pistol_standing_to_pistol_combat,trn_rifle_a_standing,trn_pistol_combat_to_pistol_combat_aimed,trn_pistol_combat_standing_aimed_to,trn_pistol_combat_standing_to,trn_rifle_combat_standing_to,trn_rifle_combat_standing_aimed_to,trn_pistol_combat_kneeling,trn_rifle_combat_kneeling,trn_pistol_combat_prone_to,trn_rifle_combat_prone_to,trn_pistol_combat_prone_aimed_to,trn_rifle_combat_prone_aimed_to,loop_sitting_chair,loop_sitting_ground,trn_sitting_chair_to_standing,trn_standing_to_sitting_ground,=loop_swimming:speed0,=loop_swimming:speed1,unarmed_standing_ready_,unarmed_combo_,trn_unarmed_standing_ready_to_standing,=sword_1h_standing_ready_hrz_slash_middle_r,=rea_get_hit_medium_mid_center,=trn_combat_standing_hit_to_incapacitated_face_up,=loop_incapacitated_face_up,=cbt_stand_combat_attack_light,=rea_stand_get_hit_light,=trn_stand_to_incapacitated,=loop_incapacitated' +
   // The emotes (every emt_ clip), the dances (loop_skill's speed2 branch is the dance and music
   // loops, one per style; skill_action_1..8 the flourishes, one per style each) and the sits.
   ',emt_,loop_skill:speed2,skill_action_,dance_';
@@ -2475,10 +2475,10 @@ switch (cmd) {
       // The reasons, most common first, so a bug that fails every item shows as one line rather than hiding behind the usual few.
       const reasons = new Map();
       for (const f of failed) {
-        const why = f.replace(/^[^:]*: /, '').replace(/[a-z0-9_/.]+\.(sat|iff|mgn|lmg|sht)/gi, '…');
+        const why = f.replace(/^[^:]*: /, '').replace(/[a-z0-9_/.]+\.(sat|iff|mgn|lmg|sht)/gi, 'â€¦');
         reasons.set(why, (reasons.get(why) ?? 0) + 1);
       }
-      console.log(`   ${failed.length} skipped: ${[...reasons].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([why, n]) => `${n} × ${why}`).join('; ')}`);
+      console.log(`   ${failed.length} skipped: ${[...reasons].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([why, n]) => `${n} Ã— ${why}`).join('; ')}`);
     }
     break;
   }
@@ -2872,7 +2872,7 @@ switch (cmd) {
         }
         // The hardpoint's own slot (weapon1 for weapon1_pos1) when the names carry one, else the
         // unnumbered ones; the lowest style (s01) of those; and every part of that style, since a
-        // gun comes as its parts (…_0, …_1) on the one hardpoint.
+        // gun comes as its parts (â€¦_0, â€¦_1) on the one hardpoint.
         const base = (t) => t.replace(/^.*\/shared_/, '').replace(/\.iff$/, '');
         const numbered = slot ? candidates.filter((t) => new RegExp(`${kind}${slot}(_|$)`, 'i').test(base(t))) : [];
         const pool = numbered.length ? numbered : candidates.filter((t) => !new RegExp(`${kind}\\d`, 'i').test(base(t)));
@@ -3045,19 +3045,21 @@ switch (cmd) {
   }
 
   case 'gallery': {
-    // <swg-dir> <out-dir> [--jka=<dir>] [--only=houses,vehicles,weapons,anims] [--limit=N]
+    // <swg-dir> <out-dir> [--jka=<dir>] [--only=houses,vehicles,weapons,anims,interiors] [--limit=N]
     if (!pos[2]) usage();
     const vfs = mount(pos[1]);
     const outDir = join(pos[2], 'gallery');
     mkdirSync(outDir, { recursive: true });
-    const { buildGallery, galleryTemplates } = await import('./gallery.mjs');
+    const { buildGallery, galleryTemplates, interiorLayouts, labelOf, GALLERY_SECTIONS } = await import('./gallery.mjs');
+    const { parsePob } = await import('./pob.mjs');
     const models = new Map();
     const cache = new Map();
-    const only = options.only ? options.only.split(',').map((s) => s.trim()) : ['houses', 'vehicles', 'weapons', 'anims'];
+    const only = options.only ? options.only.split(',').map((s) => s.trim()) : GALLERY_SECTIONS;
     const limit = options.limit ? Number(options.limit) : Infinity;
     // One template into the pack's models, as the snapshot does it (static, portal building, or a skeletal thing at its bind pose).
-    const convert = (template) => {
-      let r = resolveTemplateMesh(vfs, template, cache);
+    // With `appearance`, that file rather than the template's own: a station's portal layout, where the template names the hull.
+    const convert = (template, appearance = null) => {
+      let r = appearance ? resolveAppearanceToMesh(vfs, appearance) : resolveTemplateMesh(vfs, template, cache);
       if (r.skip) return { skip: r.skip };
       // A rideable vehicle's skeletal appearance (pv_<name>.sat) is a two-joint placeholder with a
       // 10 cm box for a mesh; the visible body is the static appearance of the same name, which the
@@ -3157,6 +3159,17 @@ switch (cmd) {
         for (const id of ids) if (!models.has(id) && existing?.models?.has(id)) models.set(id, existing.models.get(id));
       },
       templates: (prefix) => galleryTemplates(vfs, prefix),
+      // The structures with rooms: every building and ship template whose chain names a portal layout, one per layout.
+      interiors: () => {
+        const stringCache = new Map();
+        const list = [...galleryTemplates(vfs, 'object/building/'), ...galleryTemplates(vfs, 'object/ship/')];
+        const found = interiorLayouts(list, {
+          pobOf: (t) => resolveTemplateString(vfs, t, ['portalLayoutFilename'], stringCache),
+          cellsOf: (pob) => parsePob(parseIff(vfs.read(pob))).cells.map((c) => c.name),
+        });
+        console.log(`  interiors: ${found.length} layouts among ${list.length} templates, ${found.filter((f) => f.lifts.length).length} with lift cells (${found.filter((f) => f.lifts.length).map((f) => labelOf(f.template)).join(', ')})`);
+        return found;
+      },
       copySky: () => {
         try {
           exportSky(vfs, 'tatooine', outDir, { textureFor: (p) => textureFor(vfs, p), log: () => {} });

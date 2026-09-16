@@ -1,6 +1,6 @@
 // The gallery's sorting and layout, which need no archives.
 import assert from 'node:assert/strict';
-import { swgAnimCategory, jkaAnimCategory, groupByCategory, layOutRows, labelOf, buildGallery } from '../gallery.mjs';
+import { swgAnimCategory, jkaAnimCategory, groupByCategory, layOutRows, labelOf, buildGallery, interiorLayouts, isLiftCell } from '../gallery.mjs';
 
 let checks = 0;
 const ok = (cond: boolean, what: string) => {
@@ -54,4 +54,25 @@ const g2 = buildGallery({ log: () => {}, only: ['vehicles'], existing: { section
 ok(g2.sections.map((s: { id: string }) => s.id).join(',') === 'weapons,vehicles,houses', 'a vehicles-only build keeps the weapons and houses from the last one');
 ok(kept.includes('pistol_a') && kept.includes('house_a'), 'the kept sections ask for their models');
 ok(g2.anims.swg?.file === 'anims_swg.glb', 'the animation grid is kept too');
+// The interiors: one exhibit per portal layout, the player houses left to their section, lift cells labelled.
+const pobs: Record<string, string> = {
+  'object/building/tatooine/shared_cantina.iff': 'appearance/thm_tato_cantina.pob',
+  'object/building/naboo/shared_cantina.iff': 'appearance/thm_tato_cantina.pob',
+  'object/ship/shared_spacestation_stardestroyer.iff': 'appearance/thm_spc_star_destroyer_s01.pob',
+  'object/building/player/shared_house_a.iff': 'appearance/ply_house_a.pob',
+};
+const cellNames: Record<string, string[]> = { 'appearance/thm_spc_star_destroyer_s01.pob': ['exterior', 'mainhangar', 'elevator00', 'reactorlift'] };
+const interiors = interiorLayouts([...Object.keys(pobs), 'object/building/tatooine/shared_no_rooms.iff'], { pobOf: (t: string) => pobs[t] ?? null, cellsOf: (p: string) => cellNames[p] ?? ['exterior', 'room'] });
+ok(interiors.length === 2, 'two layouts: the cantina once (shared by two templates), the Star Destroyer; no player house, nothing without rooms');
+ok(interiors[0].shared.length === 1 && interiors[0].label === 'cantina', 'the shared layout lists its other templates and is labelled plainly');
+ok(interiors[1].lifts.length === 2 && interiors[1].label === 'spacestation_stardestroyer (lifts)', 'lift cells are counted and labelled');
+ok(isLiftCell('empelevator') && isLiftCell('reactorlift') && !isLiftCell('hallway01'), 'a lift cell is named for it');
+const g3 = buildGallery({ log: () => {}, only: ['interiors'] }, {
+  convert: (t: string, appearance?: string) => ({ model: labelOf(appearance ?? t).replace(/\.pob$/, ''), radius: 40, height: 20 }),
+  convertAnims: () => null,
+  templates: () => [],
+  interiors: () => interiors,
+});
+ok(g3.sections.length === 1 && g3.sections[0].id === 'interiors' && g3.sections[0].items.length === 2, 'the interiors section holds the layouts');
+ok(g3.sections[0].items[0].model === 'thm_tato_cantina' && g3.sections[0].items[1].lifts?.length === 2, 'each is converted from its layout file, the lifts carried');
 console.log(`${checks} checks passed`);

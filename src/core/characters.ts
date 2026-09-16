@@ -24,6 +24,8 @@ export interface SavedCharacter {
   saber?: { color: string };
   /** The Force powers in the number slots, by id; absent means the default four. */
   powers?: string[];
+  /** The Bounty Hunter's gadgets in the number slots, by id; absent means the default set. */
+  gadgets?: string[];
   planet: string;
   zone?: string;
   /** Where it last stood, and which way it faced; absent until it has been played. */

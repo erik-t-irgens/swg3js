@@ -1,8 +1,9 @@
 // The Force powers a Jedi can put in the number slots: what each is called, costs and does, in
 // words; the Jedi kit does them. The four the game started with, and more after Jedi Academy
 // (Pull, Grip, Heal, Protect, Drain, Rage), The Force Unleashed (Repulse) and Jedi: Survivor
-// (Slow). A tap power fires on the key; a hold power lasts while the key is down; a toggle stays
-// on until the key again, or the Force runs out.
+// (Slow), and bare hands. A tap power fires on the key; a hold power lasts while the key is
+// down; a toggle stays on until the key again, or the Force runs out. The Bounty Hunter's
+// gadgets (gadgets.ts) fill the same slots the same way.
 
 export type PowerKind = 'tap' | 'hold' | 'toggle';
 
@@ -28,7 +29,11 @@ export const POWERS: PowerDef[] = [
   { id: 'heal', name: 'Force Heal', cost: '30', kind: 'tap', blurb: 'Mends thirty-five health at once.' },
   { id: 'protect', name: 'Force Protect', cost: '5/s', kind: 'toggle', blurb: 'What hurts you counts for a third while it lasts.' },
   { id: 'rage', name: 'Force Rage', cost: 'health', kind: 'toggle', blurb: 'Ten seconds faster and half again as hard with the blade, at a cost in health; then a rest.' },
+  { id: 'fists', name: 'Bare Hands', cost: 'none', kind: 'toggle', blurb: 'The saber put away: punches on the left mouse, kicks on the right, brawling the way the game did.' },
 ];
+
+/** The number keys' actions, one per slot. */
+export const SLOT_ACTIONS = ['slot1', 'slot2', 'slot3', 'slot4', 'slot5', 'slot6'] as const;
 
 export const DEFAULT_LOADOUT = ['jump', 'speed', 'push', 'lightning'];
 /** How many number slots there are (1 to 6). */

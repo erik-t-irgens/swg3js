@@ -19,6 +19,7 @@ import { WardrobeUi } from './ui/wardrobeUi';
 import { WeaponsUi } from './ui/weaponsUi';
 import { ForceUi } from './ui/forceUi';
 import { DEFAULT_LOADOUT, POWERS } from './combat/forcePowers';
+import { DEFAULT_GADGETS, GADGETS } from './combat/gadgets';
 import { WeaponCatalogue, type WeaponDef } from './player/weapons';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { Hud } from './ui/hud';
@@ -237,17 +238,10 @@ class App {
     this.wardrobe = new WardrobeUi(this.ui, () => this.hud.setPrompt(''));
     this.wardrobe.setBaseUrl(import.meta.env.BASE_URL);
     this.weaponsUi = new WeaponsUi(this.ui, (def, hand) => void this.equip(def, hand));
-    // The Force tab: the powers in the number slots, given to the Jedi kit and kept with the character.
+    // The Skills tab: the Force powers or the gadgets in the number slots, given to the class's kit and kept with the character.
     this.forceUi = new ForceUi(this.ui);
     this.forceUi.loadout = [...DEFAULT_LOADOUT];
-    this.forceUi.onChange = (loadout) => {
-      this.jediKit().setLoadout(loadout);
-      if (this.kit.id === 'jedi') this.hud.setKit(this.kit);
-      if (this.current && !this.creating) {
-        this.current.powers = loadout.map((p) => p ?? '');
-        upsertCharacter(this.current);
-      }
-    };
+    this.forceUi.onChange = (loadout) => this.setSkills(this.kit.id, loadout);
     // A blade colour picked on the rack goes on the blades now and into the character's record.
     this.weaponsUi.onSaberColor = (hex) => {
       this.player.setSaberColor(hex);
@@ -325,9 +319,12 @@ class App {
     for (const [id, ui] of [['wardrobe', this.wardrobe], ['weapons', this.weaponsUi], ['garage', this.vehiclesUi], ['npcs', this.npcUi], ['appearance', this.appearanceUi]] as const) draggable(ui.root, '.wardrobe-panel', '.wardrobe-header', id);
     // Console hooks for driving the game from tests: window.__debug.teleport(x, z, yaw), .look(yaw, pitch), .cell().
     (window as unknown as { __debug: unknown }).__debug = {
-      teleport: (x: number, z: number, yaw?: number) => {
-        this.player.reset(new THREE.Vector3(x, this.world.terrain.heightAt(x, z) + 0.3, z));
+      /** Put the player at x, z on the ground (or at `y`); a point inside a building's room, once that building's interior is built, counts as being in it. Returns the cell. */
+      teleport: (x: number, z: number, yaw?: number, y?: number) => {
+        const at = new THREE.Vector3(x, y ?? this.world.terrain.heightAt(x, z) + 0.3, z);
+        this.player.reset(at);
         if (yaw !== undefined) this.cam.yaw = yaw;
+        return { cell: this.world.enterCellAt(at) };
       },
       /** Feed mouse movement to the real loop as if the pointer were locked (headless tests cannot lock it), and report the camera. */
       mouse: (dx = 0, dy = 0, wheel = 0) => {
@@ -856,8 +853,13 @@ class App {
       marks: () => this.marks.count(),
       /** The Force powers in the slots: `powers(['grip', 'pull', null, 'repulse'])` sets them (ids from forcePowers.ts), no argument lists them. */
       powers: (ids?: (string | null)[]) => {
-        if (ids) this.forceUi.onChange(ids);
+        if (ids) this.setSkills('jedi', ids);
         return { slots: this.jediKit().loadout, all: POWERS.map((p) => `${p.id}: ${p.name} (${p.kind}, ${p.cost})`) };
+      },
+      /** The Bounty Hunter's gadgets in the slots: `gadgets(['cryoban', 'trip_mine', 'det_pack'])` sets them (ids from gadgets.ts), no argument lists them. */
+      gadgets: (ids?: (string | null)[]) => {
+        if (ids) this.setSkills('bounty_hunter', ids);
+        return { slots: this.hunterKit().loadout, ...this.hunterKit().status(), all: GADGETS.map((p) => `${p.id}: ${p.name} (${p.kind}, ${p.cost})`) };
       },
       /** Stand a creature of the planet `metres` ahead, for trying the powers and guns on. */
       creature: (metres = 8) => {
@@ -1374,8 +1376,9 @@ class App {
       this.applyAppearance(character, c.appearance);
       await this.dress(character, c.outfit ?? []);
     }
-    // The character's Force powers in the slots (the default four for a character from before there was a choice).
+    // The character's Force powers and gadgets in the slots (the defaults for a character from before there was a choice).
     this.jediKit().setLoadout(c.powers?.length ? c.powers.map((p) => p || null) : [...DEFAULT_LOADOUT]);
+    this.hunterKit().setLoadout(c.gadgets?.length ? c.gadgets.map((p) => p || null) : [...DEFAULT_GADGETS]);
     this.forceUi.loadout = [...this.jediKit().loadout];
     this.setClass(c.class);
     const bladeColor = c.saber?.color ?? DEFAULT_SABER_COLOR;
@@ -2002,6 +2005,30 @@ class App {
     return this.kitFor('jedi') as JediKit;
   }
 
+  private hunterKit(): BountyHunterKit {
+    return this.kitFor('bounty_hunter') as BountyHunterKit;
+  }
+
+  /** Put skills in a class's slots (the Jedi's powers, the Bounty Hunter's gadgets), the HUD following, and keep them with the character. */
+  private setSkills(cls: ClassId, loadout: (string | null)[]): void {
+    if (cls === 'jedi') this.jediKit().setLoadout(loadout);
+    else this.hunterKit().setLoadout(loadout);
+    if (this.kit.id === cls) this.hud.setKit(this.kit);
+    if (this.current && !this.creating) {
+      if (cls === 'jedi') this.current.powers = loadout.map((p) => p ?? '');
+      else this.current.gadgets = loadout.map((p) => p ?? '');
+      upsertCharacter(this.current);
+    }
+  }
+
+  /** The Skills tab shown for the class in play: its skills on offer, and its slots. */
+  private showSkills(): void {
+    const jedi = this.kit.id === 'jedi';
+    this.forceUi.defs = jedi ? POWERS : GADGETS;
+    this.forceUi.loadout = [...(jedi ? this.jediKit().loadout : this.hunterKit().loadout)];
+    this.forceUi.show();
+  }
+
   private closePanels(): void {
     if (this.wardrobe.open) this.wardrobe.hide();
     if (this.appearanceUi.open) this.appearanceUi.hide();
@@ -2171,10 +2198,8 @@ class App {
       this.appearanceUi.show();
       if (character) this.appearanceUi.attach(character, import.meta.env.BASE_URL);
       else this.appearanceUi.explain('This character is a single model, not a set of parts, so there is nothing to shape. Convert it with <code>npm run swg -- species</code>.');
-    } else if (want === 'force') {
-      this.forceUi.loadout = [...this.jediKit().loadout];
-      this.forceUi.show();
-    } else {
+    } else if (want === 'force') this.showSkills();
+    else {
       this.weaponsUi.held = { right: this.player.equipped.right?.id ?? null, left: this.player.equipped.left?.id ?? null };
       this.weaponsUi.show();
     }
@@ -2194,9 +2219,24 @@ class App {
     }
   }
 
-  /** E at an elevator terminal: up for an up terminal, down for a down one, up then down for a plain one. */
+  /**
+   * E at an elevator terminal: up for an up terminal, down for a down one, up then down for a
+   * plain one; or in a lift shaft (a room the building or ship names for its elevator): up to
+   * the next floor of the shaft, or down from the top.
+   */
   private handleElevator(): boolean {
     const p = this.player;
+    const room = p.aboard;
+    if (room) {
+      // Aboard, the shaft's doorways are in the hull's frame, and so is the player's place already.
+      if (!room.inLift(p.pos)) return false;
+      const next = room.useLift(p.pos);
+      if (next) {
+        p.pos.copy(next);
+        p.vel.set(0, 0, 0);
+      }
+      return true;
+    }
     const near = this.world.elevatorsNear(p.pos, MOUNT_RANGE);
     if (!near.length) return false;
     const kind = near[0].kind;
@@ -2211,6 +2251,13 @@ class App {
     else if (kind === 'down') tryDir(false);
     else if (!tryDir(true)) tryDir(false);
     return true;
+  }
+
+  /** Whether the player stands in a lift shaft: a building's on the ground, or a ship's aboard. */
+  private inLift(): boolean {
+    const p = this.player;
+    if (p.aboard) return p.aboard.inLift(p.pos);
+    return this.world.elevatorsNear(p.pos, MOUNT_RANGE).length > 0;
   }
 
   private handleMount(): void {
@@ -2503,7 +2550,7 @@ class App {
       let prompt = '';
       if (player.noclip) prompt = `<b>NOCLIP</b> ${Math.round(player.noclipSpeed)} m/s · <b>WASD</b> fly · <b>Space</b> up · <b>Ctrl</b> down · <b>Shift</b> fast · <b>+</b>/<b>-</b> speed · <b>N</b> off`;
       else if (player.mounted) prompt = mountPrompt(player.mounted) + (player.mounted.spec.ship ? shipHint : '');
-      else if (this.world.elevatorsNear(player.pos, MOUNT_RANGE).length) prompt = `<b>E</b> elevator ${this.world.elevatorsNear(player.pos, MOUNT_RANGE)[0].kind === 'down' ? 'down' : 'up'}`;
+      else if (this.inLift()) prompt = `<b>E</b> elevator ${!player.aboard && this.world.elevatorsNear(player.pos, MOUNT_RANGE)[0]?.kind === 'down' ? 'down' : 'up (then down)'}`;
       else if (player.piloting) prompt = `at the controls of the ${player.piloting.spec.label} · <b>W</b>/<b>S</b> throttle · mouse steers · <b>Alt</b> looks around · <b>E</b> lets go · ${Math.round(Math.abs(player.piloting.speed) * 3.6)} km/h${shipHint}`;
       else if (player.aboard) prompt = (player.aboard.pilotSpot && player.pos.distanceTo(player.aboard.pilotSpot) < CONTROLS_RANGE ? `<b>E</b> take the controls` : `aboard ${player.aboard.vehicle.spec.label} · <b>E</b> step out`) + (this.world.planet.space ? ` · <b>${shipKey}</b> ship menu` : '');
       else if (player.eva) prompt = `adrift · <b>W/S</b> thrust ahead and back · <b>A/D</b> sideways · <b>Space/Ctrl</b> up and down · mouse turns · <b>Z/V</b> roll · <b>${keyName(input.bindings.brake[0] ?? '')}</b> brake · ${Math.round(player.vel.length() * 3.6)} km/h${this.nearestSpeederDistance() < MOUNT_RANGE ? (this.nearestHasRoom() ? ' · <b>E</b> board' : ' · <b>E</b> mount') : ''}`;

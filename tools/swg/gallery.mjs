@@ -1,5 +1,6 @@
 // The gallery: a flat development world with every animation from both games on a grid of
-// player models, every player house, every vehicle and every weapon, each labelled. This module
+// player models, every player house, every vehicle, every weapon and every structure with rooms
+// (the world's buildings, the stations, the ships with interiors), each labelled. This module
 // sorts the animations into categories, lays exhibits out in rows, and writes the gallery pack
 // (a manifest and layout the game loads like any planet pack, plus gallery.json for the labels
 // and the animation grid). The conversions themselves are the converter's usual ones, handed in
@@ -101,43 +102,88 @@ export function labelOf(template) {
   return template.replace(/^.*\//, '').replace(/^shared_/, '').replace(/\.iff$/, '');
 }
 
+/** Whether a portal cell's name marks it as a lift shaft (elevator1, reactorlift, empelevator, turbolift). */
+export function isLiftCell(name) {
+  return /elev|lift/i.test(name ?? '');
+}
+
 /**
- * Build the gallery pack. `deps.convert(template)` converts one template into the pack's models,
- * returning { model, radius, height } or { skip }; `deps.convertAnims(file, source)` writes the
- * animation model for 'swg' or 'jka' and returns its clip descriptions; `deps.copySky()` copies
- * the sky. Sections go one after another along +z from the origin, in SWG coordinates.
+ * The structures with rooms: every template (buildings, stations, the ships with interiors) whose
+ * chain names a portal layout, one exhibit per layout since the layouts are shared between
+ * templates (the same house on three planets, a station in every zone). `pobOf(template)` gives
+ * a template's layout file or null, `cellsOf(pob)` its cell names. The player houses are left to
+ * their own section unless `withHouses`. A layout with lift cells is labelled so, which is how
+ * the ones with elevators are found on the ground.
  */
-export function buildGallery({ log = () => {}, only = ['houses', 'vehicles', 'weapons', 'anims'], limit = Infinity, existing = null }, deps) {
+export function interiorLayouts(templates, { pobOf, cellsOf = () => [], withHouses = false }) {
+  const byPob = new Map();
+  for (const template of templates) {
+    if (!withHouses && /^object\/building\/player\//.test(template)) continue;
+    const pob = pobOf(template);
+    if (!pob) continue;
+    const key = pob.toLowerCase().replace(/\\/g, '/');
+    if (byPob.has(key)) {
+      byPob.get(key).shared.push(template);
+      continue;
+    }
+    let cells = [];
+    try {
+      cells = cellsOf(pob) ?? [];
+    } catch {
+      cells = [];
+    }
+    const lifts = cells.filter(isLiftCell);
+    byPob.set(key, { template, appearance: pob, label: `${labelOf(template)}${lifts.length ? ` (lift${lifts.length > 1 ? 's' : ''})` : ''}`, lifts, cells: cells.length, shared: [] });
+  }
+  return [...byPob.values()];
+}
+
+export const GALLERY_SECTIONS = ['houses', 'vehicles', 'weapons', 'anims', 'interiors'];
+
+/**
+ * Build the gallery pack. `deps.convert(template, appearance?)` converts one template into the
+ * pack's models (from the given appearance file rather than the template's own when one is
+ * named), returning { model, radius, height } or { skip }; `deps.convertAnims(file, source)`
+ * writes the animation model for 'swg' or 'jka' and returns its clip descriptions;
+ * `deps.interiors()` lists the structures with rooms (see interiorLayouts); `deps.copySky()`
+ * copies the sky. Sections go one after another along +z from the origin, in SWG coordinates.
+ */
+export function buildGallery({ log = () => {}, only = GALLERY_SECTIONS, limit = Infinity, existing = null }, deps) {
   const objects = [];
   const sections = [];
   let z = 0;
   // A section not being rebuilt keeps what the pack already has (its items and their models), so
   // `--only=vehicles` refreshes the vehicles without emptying the rest of the gallery.
-  const section = (id, title, templates, { gap, rowWidth, y = 0 }) => {
+  // Exhibits are templates, or { template, appearance, label } for one shown from a named file.
+  const section = (id, title, templates, { gap, rowWidth, y = 0, bigFirst = false }) => {
     const items = [];
     let skipped = 0;
     const reasons = new Map();
     const kept = !only.includes(id) ? existing?.sections?.find((s) => s.id === id) : null;
     if (!only.includes(id) && !kept) return;
     if (kept) {
-      for (const it of kept.items) items.push({ template: it.template, model: it.model, radius: it.radius, height: it.height, label: it.label ?? labelOf(it.template), ...(it.riderPose ? { riderPose: it.riderPose, seats: it.seats } : {}) });
+      for (const it of kept.items) items.push({ template: it.template, model: it.model, radius: it.radius, height: it.height, label: it.label ?? labelOf(it.template), ...(it.riderPose ? { riderPose: it.riderPose, seats: it.seats } : {}), ...(it.lifts ? { lifts: it.lifts } : {}) });
       deps.keepModels?.([...new Set(items.map((it) => it.model))]);
     } else {
-      for (const template of templates.slice(0, limit)) {
-        const r = deps.convert(template);
+      for (const entry of templates.slice(0, limit)) {
+        const it = typeof entry === 'string' ? { template: entry } : entry;
+        const r = deps.convert(it.template, it.appearance);
         if (!r || r.skip) {
           skipped++;
           const why = String(r?.skip ?? 'failed').replace(/:.*$/, '').slice(0, 60);
           reasons.set(why, (reasons.get(why) ?? 0) + 1);
           continue;
         }
-        // A vehicle carries how its rider sits (the mount tables' rider pose), for the riding clip.
-        items.push({ template, model: r.model, radius: r.radius, height: r.height, label: labelOf(template), ...(r.riderPose ? { riderPose: r.riderPose, seats: r.seats } : {}) });
+        // A vehicle carries how its rider sits (the mount tables' rider pose), for the riding clip; a structure its lift cells.
+        items.push({ template: it.template, model: r.model, radius: r.radius, height: r.height, label: it.label ?? labelOf(it.template), ...(r.riderPose ? { riderPose: r.riderPose, seats: r.seats } : {}), ...(it.lifts?.length ? { lifts: it.lifts } : {}) });
       }
     }
+    // A row is as deep as its deepest exhibit: with the structures sorted biggest first the giants
+    // share rows and the small ones pack close, rather than a hut beside a Star Destroyer in every row.
+    if (bigFirst) items.sort((a, b) => b.radius - a.radius);
     const { placed, depth } = layOutRows(items, { gap, rowWidth, startZ: z });
     for (const p of placed) objects.push({ template: p.template, model: p.model, x: p.x, y, z: p.z, q: [1, 0, 0, 0], radius: p.radius });
-    sections.push({ id, title, z, depth, items: placed.map((p) => ({ label: p.label, template: p.template, model: p.model, x: p.x, y, z: p.z, radius: p.radius, height: p.height, ...(p.riderPose ? { riderPose: p.riderPose, seats: p.seats } : {}) })) });
+    sections.push({ id, title, z, depth, items: placed.map((p) => ({ label: p.label, template: p.template, model: p.model, x: p.x, y, z: p.z, radius: p.radius, height: p.height, ...(p.riderPose ? { riderPose: p.riderPose, seats: p.seats } : {}), ...(p.lifts ? { lifts: p.lifts } : {}) })) });
     log(`${title}: ${placed.length} placed${kept ? ' (kept from the last build)' : ''}${skipped ? `, ${skipped} skipped (${[...reasons.entries()].map(([why, n]) => `${n} ${why}`).join('; ')})` : ''}, rows from z ${z} to ${Math.round(z + depth)}`);
     z += depth + 30;
   };
@@ -164,6 +210,11 @@ export function buildGallery({ log = () => {}, only = ['houses', 'vehicles', 'we
   section('weapons', 'Weapons', only.includes('weapons') ? deps.templates('object/weapon/') : [], { gap: 1.5, rowWidth: 120, y: 1.1 });
   section('vehicles', 'Vehicles', only.includes('vehicles') ? deps.templates('object/mobile/vehicle/') : [], { gap: 4, rowWidth: 200 });
   section('houses', 'Player houses', only.includes('houses') ? deps.templates('object/building/player/') : [], { gap: 8, rowWidth: 400 });
+  // Every other structure with rooms, one per layout: the world's buildings, the space stations
+  // and the ships with interiors, with the ones that have lift shafts labelled. The biggest
+  // (a Star Destroyer's rooms) are kilometres across, so the rows are two kilometres wide with
+  // the giants first, and the field runs a dozen kilometres south; the labels and the map find things.
+  section('interiors', 'Interiors: every structure with rooms', only.includes('interiors') ? (deps.interiors?.() ?? []) : [], { gap: 12, rowWidth: 2000, bigFirst: true });
   deps.copySky?.();
   return { objects, sections, anims };
 }

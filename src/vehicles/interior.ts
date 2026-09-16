@@ -11,12 +11,15 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { cleanTrimesh, Group, groups, Physics, RAPIER, TRIMESH_FLAGS } from '../core/physics';
 import { markActor } from '../world/portalRender';
+import { LIFT_CELL, liftStops, nextStop } from '../world/lifts';
 import type { Vehicle } from './vehicle';
 
 /** What the ships manifest says of an interior model: its cells and bounds, as a pack model carries them. */
 export interface InteriorDef {
   bounds?: { min: number[]; max: number[] };
-  cells?: { index: number; name: string; bounds: { min: number[]; max: number[] }; lights?: CellLight[] }[];
+  cells?: { index: number; name: string; bounds: { min: number[]; max: number[] }; lights?: CellLight[]; portals?: { geometry: number; target: number; passable?: boolean }[] }[];
+  /** The portal polygons in model space, which the cells' portals index: the lifts' stops are read off them. */
+  portals?: { v: number[][]; i: number[] }[];
 }
 
 /** A cell's light from the portal file: type 0 ambient, 1 parallel, 2 point; Direct3D attenuation constants. */
@@ -74,6 +77,8 @@ function hardpointNameOf(o: THREE.Object3D): string | null {
 const inverse = new THREE.Matrix4();
 const localA = new THREE.Vector3();
 const localB = new THREE.Vector3();
+const sizeTmp = new THREE.Vector3();
+export { LIFT_CELL };
 
 export class ShipInterior {
   /** The interior's own physics world, in the hull's frame. */
@@ -96,13 +101,18 @@ export class ShipInterior {
   /** The rooms' hardpoints, in the hull's frame: seats, terminals and the way in, by name. */
   readonly hardpoints: { cell: number; name: string; pos: THREE.Vector3 }[] = [];
   private entryBox = new THREE.Box3();
+  /** Each room's box in the hull's frame and its name from the model, for telling a lift shaft from a hallway. */
+  private readonly cellBoxes = new Map<number, THREE.Box3>();
+  private readonly cellNames = new Map<number, string>();
+  /** The manifest's frame to the hull's: the garage re-centres a hull model, so its rooms' portals sit off by this. */
+  private readonly modelOffset = new THREE.Vector3();
 
   /**
    * @param frame the object whose frame the room's physics is in: the hull's group.
    * @param meshes the room's meshes, each with its matrixWorld current.
    * @param owned whether the meshes are the interior's own model (removed and disposed with it) or the hull's.
    */
-  private constructor(readonly vehicle: Vehicle, group: THREE.Object3D, frame: THREE.Object3D, meshes: THREE.Mesh[], def: InteriorDef, gravity: number, private readonly owned: boolean) {
+  private constructor(readonly vehicle: Vehicle, group: THREE.Object3D, frame: THREE.Object3D, meshes: THREE.Mesh[], private readonly def: InteriorDef, gravity: number, private readonly owned: boolean) {
     this.physics = Physics.local(gravity);
     this.group = group;
     const w = this.physics.world;
@@ -110,7 +120,7 @@ export class ShipInterior {
     frame.updateMatrixWorld(true);
     const frameInverse = new THREE.Matrix4().copy(frame.matrixWorld).invert();
     const measured = new THREE.Box3();
-    const cellBoxes = new Map<number, THREE.Box3>();
+    const cellBoxes = this.cellBoxes;
     const corner = new THREE.Vector3();
     for (const m of meshes) {
       const posAttr = m.geometry.getAttribute('position');
@@ -161,7 +171,7 @@ export class ShipInterior {
     // The entry: a spot on the floor of the first room (an entry, lobby or airlock by name when
     // there is one, else the lowest-numbered), found in the room's own physics.
     const named = /entry|entrance|lobby|airlock|ramp|hall|corridor|foyer/i;
-    const cellNames = new Map<number, string>();
+    const cellNames = this.cellNames;
     for (const m of meshes) {
       const c = cellIndexOf(m);
       if (c > 0 && !cellNames.has(c)) cellNames.set(c, cellNameOf(m));
@@ -336,6 +346,7 @@ export class ShipInterior {
       // The model node the garage re-centred: its position is the offset from the manifest's frame.
       if (cell === -1 && o.parent === v.group && o.children.some((c) => cellIndexOf(c) >= 0)) modelOffset = o.position.clone();
     });
+    this.modelOffset.copy(modelOffset);
     const byCell = new Map<number, string[]>();
     for (const hp of this.hardpoints) (byCell.get(hp.cell) ?? byCell.set(hp.cell, []).get(hp.cell)!).push(hp.name);
     if (this.hardpoints.length) console.info(`ship interior hardpoints: ${[...byCell.entries()].map(([c, names]) => `cell ${c}: ${names.join(', ')}`).join('; ')}`);
@@ -380,6 +391,56 @@ export class ShipInterior {
   /** Whether a point in the hull's frame is still within the room. */
   contains(local: THREE.Vector3): boolean {
     return this.bounds.containsPoint(local);
+  }
+
+  /** The room a point in the hull's frame stands in (the smallest box holding it), or 0. */
+  cellAt(local: THREE.Vector3): number {
+    let best = 0;
+    let bestVolume = Infinity;
+    for (const [index, box] of this.cellBoxes) {
+      if (local.x < box.min.x - 0.3 || local.x > box.max.x + 0.3 || local.y < box.min.y - 0.5 || local.y > box.max.y + 0.5 || local.z < box.min.z - 0.3 || local.z > box.max.z + 0.3) continue;
+      const s = box.getSize(sizeTmp);
+      const v = s.x * s.y * s.z;
+      if (v < bestVolume) {
+        bestVolume = v;
+        best = index;
+      }
+    }
+    return best;
+  }
+
+  /**
+   * Whether a point in the hull's frame stands in a lift shaft: a room the model names for an
+   * elevator (elevator1, reactorlift, empelevator). The game's lifts were objects the server
+   * spawned in these shafts; here the shaft itself is the lift, and the floors on its vertical
+   * line are the stops.
+   */
+  inLift(local: THREE.Vector3): boolean {
+    const cell = this.cellAt(local);
+    return cell > 0 && LIFT_CELL.test(this.cellNames.get(cell) ?? '');
+  }
+
+  /**
+   * Ride the lift from a point in the shaft (hull frame): the spot through the doorway of the next
+   * level up, or down from the top, in the hull's frame; null when the shaft has no other level.
+   * The stops come from the model's portals, which are in the model's own frame: the hull's
+   * rooms are offset by the garage's re-centring, an interior model of its own is not.
+   */
+  useLift(local: THREE.Vector3): THREE.Vector3 | null {
+    const cell = this.cellAt(local);
+    if (cell <= 0 || !LIFT_CELL.test(this.cellNames.get(cell) ?? '')) return null;
+    const stops = liftStops(this.def, cell);
+    const stop = nextStop(stops, local.y - this.modelOffset.y);
+    if (!stop) {
+      // No doorways known (an older pack without portals): the floors on the vertical line, as a building's terminal does.
+      const box = this.cellBoxes.get(cell) ?? this.bounds;
+      const floors = this.physics.floorsAt(local.x, local.z, box.max.y + 0.5, box.min.y - 0.5);
+      let i = floors.findIndex((f) => Math.abs(f - local.y) < 1);
+      if (i < 0) i = floors.findIndex((f) => f < local.y);
+      const target = floors[i - 1] ?? floors[i + 1];
+      return target === undefined ? null : new THREE.Vector3(local.x, target + 0.1, local.z);
+    }
+    return stop.at.clone().add(this.modelOffset);
   }
 
   /** A world-space point in the hull's frame. */

@@ -17,7 +17,8 @@ ok(weaponClassOf('object/weapon/melee/polearm/shared_lance_staff_metal.iff').cls
 ok(weaponClassOf('object/weapon/melee/knife/shared_knife_survival.iff').cls === 'knife', 'a survival knife is a knife');
 ok(weaponClassOf('object/weapon/lightsaber/shared_lightsaber_one_handed_gen1.iff').cls === 'lightsaber', 'a lightsaber is a lightsaber');
 ok(weaponClassOf('object/weapon/melee/sword/crafted_saber/shared_sword_lightsaber_one_handed_gen1.iff').cls === 'lightsaber' && weaponClassOf('object/weapon/melee/2h_sword/crafted_saber/shared_sword_lightsaber_two_handed_gen1.iff').cls === 'lightsaber2h' && weaponClassOf('object/weapon/melee/polearm/crafted_saber/shared_sword_lightsaber_polearm_gen1.iff').cls === 'lightsaberStaff', 'the crafted sabers under the sword folders are lightsabers, by their hands');
-ok(!!weaponClassOf('object/weapon/ranged/thrown/shared_thrown_grenade_fragmentation.iff').skip, 'a grenade is left out');
+ok(weaponClassOf('object/weapon/ranged/grenade/shared_grenade_fragmentation.iff').cls === 'thrown', 'a grenade is a thrown weapon');
+ok(weaponClassOf('object/weapon/ranged/thrown/shared_thrown_grenade_fragmentation.iff').cls === 'thrown', 'the thrown folder too');
 ok(weaponClassOf('object/weapon/melee/baton/shared_baton_stun.iff').cls === 'sword1h' && weaponClassOf('object/weapon/melee/axe/shared_axe_vibroaxe.iff').cls === 'sword2h' && weaponClassOf('object/weapon/melee/special/shared_vibroknuckler.iff').cls === 'fist', 'a baton is a one-hand club, an axe two-handed, a knuckler a fist weapon');
 ok(!!weaponClassOf('object/weapon/melee/unarmed/shared_unarmed_default.iff').skip, 'the unarmed "weapon" is left out');
 ok(!!weaponClassOf('object/weapon/ranged/turret/shared_turret_heat.iff').skip, 'a turret is left out');

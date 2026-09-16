@@ -835,18 +835,20 @@ export class Player {
     const gunRight = !!rightWeapon && FIGHTS[rightWeapon.class] === 'gun';
     const on = this.saberOn && this.classId === 'jedi' && !meleeRight;
     const inHand = !this.thrown.inFlight && !this.orbiting;
-    p.saber.visible = this.classId === 'jedi' && !meleeRight;
+    // Bare hands: everything held is put away.
+    const bare = this.fists;
+    p.saber.visible = this.classId === 'jedi' && !meleeRight && !bare;
     p.hilt.visible = inHand && !saberRight;
     p.blade.visible = on && inHand;
     p.staffBlade.visible = on && inHand && this.saber.style === 'staff';
     // The left hand's saber: the placeholder in the dual style, or the rack's hilt there, with its blade.
     const leftSaber = this.saber.style === 'dual' && !this.orbiting && (!leftWeapon || saberLeft);
-    p.saber2.visible = this.classId === 'jedi' && leftSaber;
+    p.saber2.visible = this.classId === 'jedi' && leftSaber && !bare;
     p.hilt2.visible = !saberLeft;
     p.blade2.visible = on && leftSaber;
-    p.rifle.visible = this.classId === 'bounty_hunter' && !gunRight;
-    if (this.held.right) this.held.right.visible = inHand || gunRight;
-    if (this.held.left) this.held.left.visible = !this.orbiting;
+    p.rifle.visible = this.classId === 'bounty_hunter' && !gunRight && !bare;
+    if (this.held.right) this.held.right.visible = (inHand || gunRight) && !bare;
+    if (this.held.left) this.held.left.visible = !this.orbiting && !bare;
     for (const g of this.orbit) g.visible = this.orbiting;
     this.flying.visible = this.thrown.inFlight;
   }
@@ -1047,7 +1049,7 @@ export class Player {
 
   /** The combat carry is up: aiming, or within five seconds of a shot. */
   get gunReady(): boolean {
-    return this.aiming || this.sinceShot < GUN_READY_SECONDS;
+    return !this.fists && (this.aiming || this.sinceShot < GUN_READY_SECONDS);
   }
 
   /** A shot left the blaster: keep the combat carry up, and play the shot on the upper body when the rig has one. */
@@ -1178,6 +1180,14 @@ export class Player {
 
   /** What the blade does over its style's damage (Force Rage raises it). */
   damageBoost = 1;
+  /** Bare hands: the weapon put away and hidden, the mouse buttons brawling (the kits' bare-hands toggle). */
+  fists = false;
+  /** Whether the feet are moving, for a punch to ride the upper body over the run. */
+  get moving(): boolean {
+    return this.groundSpeed > 0.1;
+  }
+  /** A punch or kick under way, for the body to face the camera through it. */
+  fistsBusy = false;
   /** What hurts the player counts for this much (Force Protect lowers it). */
   damageTaken = 1;
 
@@ -1366,11 +1376,11 @@ export class Player {
       this.swing += dt / SWING_TIME;
       if (this.swing >= 1) this.swing = -1;
     }
-    this.blocking = this.classId === 'jedi' && this.saberOn && input.held('block') && !this.mounted && !this.noclip;
-    this.aiming = this.classId === 'bounty_hunter' && input.held('altAttack') && !this.mounted && !this.noclip && !this.swimming;
+    this.blocking = this.classId === 'jedi' && this.saberOn && input.held('block') && !this.mounted && !this.noclip && !this.fists;
+    this.aiming = this.classId === 'bounty_hunter' && input.held('altAttack') && !this.mounted && !this.noclip && !this.swimming && !this.fists;
     this.sinceShot += dt;
     cam.aim = this.aiming;
-    const fighting = this.swing >= 0 || this.saber.busy || this.thrown.inFlight || this.jka.inSpecialJump || this.jka.rolling;
+    const fighting = this.swing >= 0 || this.saber.busy || this.thrown.inFlight || this.jka.inSpecialJump || this.jka.rolling || this.fistsBusy;
     this.jkaMode = this.hasJkaClips && (this.blocking || fighting || !!this.rig?.overridingJka);
 
     if (this.mounted) {
@@ -1575,8 +1585,10 @@ export class Player {
     this.body.setNextKinematicTranslation({ x: this.pos.x, y: this.pos.y, z: this.pos.z });
 
     // Lightsaber: the first press draws it, then the direction keys pick the swing and holding
-    // attack chains the next one; the rig plays the move's clip when it has it.
-    if (this.classId === 'jedi') {
+    // attack chains the next one; the rig plays the move's clip when it has it. With bare hands
+    // on, the buttons are the kit's punches and kicks and the saber stays away.
+    if (this.classId === 'jedi' && this.fists && this.saberOn) this.toggleSaber();
+    if (this.classId === 'jedi' && !this.fists) {
       const attackPressed = input.pressedAction('attack');
       const blockPressed = input.pressedAction('block');
       const throwPressed = input.pressedAction('saberThrow');
@@ -1722,7 +1734,7 @@ export class Player {
     rig.prefer('walkSaber', style === 'staff' ? 'BOTH_WALK_STAFF' : style === 'dual' ? 'BOTH_WALK_DUAL' : 'BOTH_WALK2');
     // The kind of blaster picks its carries: the pistol's stand at the side, the rifle's across the chest.
     const gun = this.gunKind;
-    const armed = this.classId === 'bounty_hunter' && this.hasGunClips;
+    const armed = this.classId === 'bounty_hunter' && this.hasGunClips && !this.fists;
     for (const [state, n] of [['Idle', 0], ['Walk', 1], ['Run', 2]] as const) {
       rig.prefer(`gun${state}`, new RegExp(gun === 'pistol' ? `^loop_pistol_standing:speed${n}` : `^loop_rifle:speed${n}`));
     }
@@ -1828,7 +1840,7 @@ export class Player {
     this.group.updateMatrixWorld(true);
     // Always called: with no twist it puts the spine's clip pose back.
     // With a blaster up the torso also tilts to where the camera looks, so the barrel follows the crosshair.
-    const gunUp = this.classId === 'bounty_hunter' && !this.prone && !this.swimming && !this.mounted && (this.aiming || this.gunReady);
+    const gunUp = this.classId === 'bounty_hunter' && !this.prone && !this.swimming && !this.mounted && !this.fists && (this.aiming || this.gunReady);
     const wantedPitch = gunUp ? -Math.asin(THREE.MathUtils.clamp(this.lookDir.y, -1, 1)) : 0;
     this.torsoPitch += (wantedPitch - this.torsoPitch) * Math.min(1, dt * 10);
     // Aiming standing (not crouched, kneeling or prone) the torso also turns right by the tuned angle, since the

@@ -16,6 +16,8 @@ export const WEAPON_CLASSES = {
   lightsaber: { fights: 'lightsaber', hands: 'right', label: 'Lightsabers' },
   lightsaber2h: { fights: 'lightsaber', hands: 'right', label: 'Two-hand lightsabers' },
   lightsaberStaff: { fights: 'lightsaber', hands: 'right', label: 'Double-bladed lightsabers' },
+  // The grenades: not held, thrown by the gadget slots, which take their models from here.
+  thrown: { fights: 'thrown', hands: 'right', label: 'Grenades and thrown weapons' },
 };
 
 /** A melee folder's class when its weapon turns out to carry a lightsaber blade (the named sabers under sword/ and polearm/). */
@@ -28,7 +30,7 @@ export function saberClassFor(template) {
 
 /**
  * The class a weapon template belongs to from its path, or null with a reason for the ones the
- * game does not play yet (grenades, turrets, batons, the unarmed "weapons", mines and the like).
+ * game does not play yet (turrets, the unarmed "weapons", mines and the like).
  */
 export function weaponClassOf(template) {
   const t = template.toLowerCase();
@@ -42,7 +44,8 @@ export function weaponClassOf(template) {
   if (/\/ranged\/carbine\//.test(t)) return { cls: 'carbine' };
   if (/\/ranged\/rifle\//.test(t)) return { cls: 'rifle' };
   if (/\/ranged\/heavy\//.test(t)) return { cls: 'heavy' };
-  if (/\/ranged\/(thrown|grenade)\//.test(t)) return { skip: 'grenade or thrown weapon' };
+  // The grenades (fragmentation, thermal detonator, cryoban, glop, poison, proton, the Imperial detonator, the bug bomb) and the fun ones (snowballs).
+  if (/\/ranged\/(thrown|grenade)\//.test(t)) return { cls: 'thrown' };
   if (/\/ranged\/(turret|mine|trap)\//.test(t) || /\/trap\//.test(t)) return { skip: 'turret, mine or trap' };
   if (/\/melee\/2h_sword\//.test(t)) return { cls: 'sword2h' };
   // The game's axes (the vibro axe, the heavy-duty axe) are two-handed, its batons (the gaderiffi, the stun baton) one-handed clubs.

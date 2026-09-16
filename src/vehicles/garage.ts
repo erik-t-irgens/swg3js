@@ -17,8 +17,9 @@ export interface VehicleDef {
   source: 'gallery' | 'creature' | 'ship';
   /** A ship's interior, when it has one: the model, and what the manifest says of its cells and bounds. */
   interior?: { file: string; cells: number; def: import('./interior').InteriorDef } | null;
-  /** What the manifest says of the hull model's own cells, when it is a portal building (rooms, their lights). */
+  /** What the manifest says of the hull model's own cells, when it is a portal building (rooms, their lights), and its portal polygons. */
   cells?: NonNullable<import('./interior').InteriorDef['cells']>;
+  portals?: NonNullable<import('./interior').InteriorDef['portals']>;
   /**
    * What the ship's client data hangs on the hull: its wings (with the hinge each opens about,
    * as a position and yaw, pitch and roll in degrees, the angle it opens by and the seconds it
@@ -112,7 +113,8 @@ export class Garage {
         type Cells = NonNullable<import('./interior').InteriorDef['cells']>;
         type Attachment = NonNullable<VehicleDef['attachments']>[number];
         type Cockpit = NonNullable<VehicleDef['cockpit']>;
-        const manifest = (await res.json()) as { ships: { id: string; label: string; template: string; file: string; bounds?: VehicleSpec['bounds']; class: string; interior: { file?: string; cells?: number; failed?: string } | null; attachments?: Attachment[]; cockpit?: Cockpit | null; thrusters?: string[]; weapon?: ShipWeapon | null }[]; models?: { file: string; bounds?: { min: number[]; max: number[] }; cells?: Cells }[] };
+        type Portals = NonNullable<import('./interior').InteriorDef['portals']>;
+        const manifest = (await res.json()) as { ships: { id: string; label: string; template: string; file: string; bounds?: VehicleSpec['bounds']; class: string; interior: { file?: string; cells?: number; failed?: string } | null; attachments?: Attachment[]; cockpit?: Cockpit | null; thrusters?: string[]; weapon?: ShipWeapon | null }[]; models?: { file: string; bounds?: { min: number[]; max: number[] }; cells?: Cells; portals?: Portals }[] };
         const modelByFile = new Map((manifest.models ?? []).map((m) => [m.file, m]));
         for (const sh of manifest.ships) {
           const im = sh.interior?.file ? modelByFile.get(sh.interior.file) : undefined;
@@ -126,8 +128,9 @@ export class Garage {
             file: `assets-private/ships/${sh.file}`,
             template: sh.template,
             bounds: sh.bounds,
-            interior: sh.interior?.file ? { file: `assets-private/ships/${sh.interior.file}`, cells: sh.interior.cells ?? 0, def: { bounds: im?.bounds, cells: im?.cells } } : null,
+            interior: sh.interior?.file ? { file: `assets-private/ships/${sh.interior.file}`, cells: sh.interior.cells ?? 0, def: { bounds: im?.bounds, cells: im?.cells, portals: im?.portals } } : null,
             cells: hull?.cells,
+            portals: hull?.portals,
             attachments: (sh.attachments ?? []).map((a) => ({ ...a, file: `assets-private/ships/${a.file}` })),
             cockpit: sh.cockpit ? { ...sh.cockpit, file: `assets-private/ships/${sh.cockpit.file}` } : null,
             thrusters: sh.thrusters ?? [],

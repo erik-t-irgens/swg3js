@@ -9,6 +9,7 @@ import { CHUNK_SIZE } from './terrain';
 import type { Exclusion } from './props';
 import { ACTOR_LAYER, INTERIOR_LAYER, crossing } from './portalRender';
 import { mirroredTransform, type EffectHandle, type ParticleEffects } from './particles';
+import { LIFT_CELL } from './lifts';
 
 export const REGION = 256;
 
@@ -584,8 +585,13 @@ export class LayoutStreamer {
     return null;
   }
 
-  /** Elevator terminals within `range` of a point: 'up', 'down' or 'both' (plain elevator terminals). */
-  elevatorsNear(pos: THREE.Vector3, range: number): { kind: 'up' | 'down' | 'both'; d: number }[] {
+  /**
+   * Elevator terminals within `range` of a point: 'up', 'down' or 'both' (plain elevator
+   * terminals); and, standing in a room the building names as a lift shaft (elevator1,
+   * reactorlift), the shaft itself as a plain elevator: the game's lifts were objects the server
+   * spawned in those shafts, so the shaft's floors are the stops.
+   */
+  elevatorsNear(pos: THREE.Vector3, range: number, state: CellState | null = null): { kind: 'up' | 'down' | 'both'; d: number }[] {
     const out: { kind: 'up' | 'down' | 'both'; d: number }[] = [];
     for (const o of this.objects) {
       if (!o.template.includes('terminal_elevator')) continue;
@@ -593,7 +599,21 @@ export class LayoutStreamer {
       if (d > range || Math.abs(o.y - pos.y) > 3) continue;
       out.push({ kind: o.template.includes('_up') ? 'up' : o.template.includes('_down') ? 'down' : 'both', d });
     }
+    if (state && state.cell > 0) {
+      const cell = state.building.model.def.cells?.find((c) => c.index === state.cell);
+      if (cell && LIFT_CELL.test(cell.name)) out.push({ kind: 'both', d: 0 });
+    }
     return out.sort((a, b) => a.d - b.d);
+  }
+
+  /** The building and cell holding a world point, for a player put there without walking in (a teleport), or null. */
+  buildingAt(pos: THREE.Vector3): CellState | null {
+    for (const b of this.buildings) {
+      if (Math.abs(b.x - pos.x) > b.radius + 4 || Math.abs(b.z - pos.z) > b.radius + 4) continue;
+      const cell = this.cellAt(b, pos);
+      if (cell > 0) return { building: b, cell };
+    }
+    return null;
   }
 
   /** The cell of a building whose bounds hold a world point (smallest first), or 0 for none. */

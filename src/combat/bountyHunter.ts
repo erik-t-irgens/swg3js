@@ -4,19 +4,49 @@ import { GUNS, gunTypeFor, type FireMode, type GunProfile } from './guns';
 import type { BoltFrame } from './bolts';
 import type { Hittable, Kit, KitContext, KitSlot, Resource } from './kit';
 import type { EffectHandle } from '../world/particles';
+import { DEFAULT_GADGETS, GADGETS, gadgetById, type GadgetDef, type GrenadeSpec } from './gadgets';
+import { SLOT_ACTIONS, SLOT_COUNT } from './forcePowers';
+import { Unarmed } from './unarmed';
 
-interface Detonator {
-  mesh: THREE.Mesh;
-  body: RAPIER.RigidBody;
+/** A charge in the world: a thrown grenade or flechette mine on its fuse, a trip mine on its wall, a det pack waiting for the key. */
+interface Charge {
+  kind: 'grenade' | 'trip' | 'pack';
+  mesh: THREE.Object3D;
+  /** A thrown charge's body; a stuck one has none. */
+  body: RAPIER.RigidBody | null;
   fuse: number;
   damage: number;
   radius: number;
+  push: number;
+  color: number;
+  /** The flechette's mine mode, for its afflictions. */
   mode: FireMode | null;
+  spec: GrenadeSpec | null;
+  /** The trip mine's laser: from the mine to the wall it meets. */
+  laser?: { from: THREE.Vector3; to: THREE.Vector3; mesh: THREE.Mesh };
+  /** The blinking light on a fused charge. */
+  light: THREE.Object3D | null;
+  /** A grenade that goes off on its first touch: what it was thrown from, so it does not go off in the hand. */
+  armedAt: number;
 }
 
-const DET_COOLDOWN = 3;
-const STIM_COOLDOWN = 12;
+/** A cloud left where a poison grenade or bug bomb burst: whoever stands in it is afflicted while it lasts. */
+interface Cloud {
+  pos: THREE.Vector3;
+  radius: number;
+  spec: GrenadeSpec;
+  left: number;
+  tick: number;
+}
+
 const BLAST_RADIUS = 9;
+const TRIP_REACH = 4;
+const TRIP_LASER = 14;
+const TRIP_DAMAGE = 110;
+const TRIP_RADIUS = 5;
+const PACK_DAMAGE = 120;
+const PACK_RADIUS = 6;
+const MAX_PACKS = 6;
 
 const dir = new THREE.Vector3();
 const from = new THREE.Vector3();
@@ -36,38 +66,47 @@ const Z = new THREE.Vector3(0, 0, 1);
 const UP = new THREE.Vector3(0, 1, 0);
 
 /**
- * The bounty hunter: a gun with two triggers (see guns.ts for what each kind does on each), a thermal
- * detonator and a stim pack. A gun fires from its muzzle at what the crosshair is on; the client's own
- * shot, flash and hit effects are drawn when the pack has them.
+ * The bounty hunter: a gun with two triggers (see guns.ts for what each kind does on each), and the
+ * gadgets in the number slots (gadgets.ts: the game's grenades, Jedi Academy's trip mine and det
+ * pack, the stim pack, bare hands), picked on the inventory's Skills tab. A gun fires from its
+ * muzzle at what the crosshair is on; the client's own shot, flash and hit effects are drawn when
+ * the pack has them, and a grenade flies as the model the rack has for it.
  */
 export class BountyHunterKit implements Kit {
   readonly id = 'bounty_hunter' as const;
   readonly name = 'Bounty Hunter';
-  readonly slots: KitSlot[] = [
-    { key: '1', name: 'Thermal Detonator', cost: '3s' },
-    { key: '2', name: 'Stim Pack', cost: '12s' },
-  ];
+  /** The gadget in each number slot, by id (null for an empty slot); the HUD's slots follow it. */
+  loadout: (string | null)[] = [...DEFAULT_GADGETS];
   readonly help = [
     '<b>LMB</b> fire: from the hip it scatters, aimed it flies true · <b>RMB</b> hold to aim, the camera in close · <b>Middle mouse</b> or <b>Q</b> the gun\'s other trigger: a pistol\'s or sniper\'s charge, a rifle\'s rapid fire, a bowcaster\'s bouncing bolt, a repeater\'s concussive ball, a flechette\'s mines, a launcher\'s homing rocket, an ion blast, a fireball, a ball of lightning, a sonic pulse, an acid spray',
-    'Each kind of gun handles its own way: a flame thrower is a cone of flame that burns on, a lightning rifle a bolt held on what is ahead that jumps to what stands near, a slugthrower a fast slug that drops over distance, a crossbow an arc, carbonite a freezing bolt · <b>1</b> Thermal Detonator · <b>2</b> Stim Pack · <b>K</b> pistol or rifle · <b>V</b> kneel and <b>Z</b> prone',
+    'Each kind of gun handles its own way: a flame thrower is a cone of flame that burns on, a lightning rifle a bolt held on what is ahead that jumps to what stands near, a slugthrower a fast slug that drops over distance, a crossbow an arc, carbonite a freezing bolt · <b>K</b> pistol or rifle · <b>V</b> kneel and <b>Z</b> prone',
+    '<b>1</b> to <b>6</b> the gadgets in the slots: the inventory\'s Skills tab (<b>I</b>) picks which: the grenades (thermal, fragmentation, proton, Imperial, cryoban, glop, poison, the bug bomb), the trip mine, the det pack, the stim pack, and bare hands (punches on <b>LMB</b>, kicks on <b>RMB</b>)',
   ];
   readonly resource: Resource | null = null;
   /** Last gun change, for the HUD. */
   gunNote = '';
   private fireCd = 0;
   private altCd = 0;
-  private detCd = 0;
-  private stimCd = 0;
+  /** Seconds left before each gadget can be used again, by id. */
+  private readonly cds = new Map<string, number>();
   /** Which trigger is charging, and for how long. */
   private charging: 'primary' | 'alt' | null = null;
   private chargeTime = 0;
   private lastProfile: GunProfile | null = null;
   /** A stream's or beam's effect at the muzzle while the trigger is held. */
   private held: { fx: EffectHandle; which: 'primary' | 'alt' } | null = null;
-  private readonly detonators: Detonator[] = [];
+  private readonly charges: Charge[] = [];
+  private readonly clouds: Cloud[] = [];
+  private readonly unarmed = new Unarmed();
   private readonly detGeo = new THREE.SphereGeometry(0.16, 10, 8);
   private readonly detMat = new THREE.MeshStandardMaterial({ color: 0x3a3f45, roughness: 0.4, metalness: 0.7 });
   private readonly detLightMat = new THREE.MeshBasicMaterial({ color: 0xff3030, toneMapped: false });
+  private readonly packGeo = new THREE.BoxGeometry(0.22, 0.08, 0.16);
+  private readonly mineGeo = new THREE.CylinderGeometry(0.11, 0.13, 0.06, 12);
+  private readonly laserGeo = new THREE.CylinderGeometry(0.008, 0.008, 1, 6, 1, true);
+  private readonly laserMat = new THREE.MeshBasicMaterial({ color: 0xff2020, toneMapped: false, transparent: true, opacity: 0.85 });
+  /** The rack's grenade models, loaded once each and cloned per throw; 'loading' while on the way. */
+  private readonly models = new Map<string, THREE.Group | 'loading'>();
   private proto: THREE.Mesh | null = null;
 
   /** A detonator hidden in the scene, so the first one thrown finds its shaders compiled. */
@@ -75,6 +114,7 @@ export class BountyHunterKit implements Kit {
     if (this.proto) return;
     const mesh = new THREE.Mesh(this.detGeo, this.detMat);
     mesh.add(new THREE.Mesh(new THREE.SphereGeometry(0.05, 6, 4), this.detLightMat));
+    mesh.add(new THREE.Mesh(this.laserGeo, this.laserMat));
     mesh.visible = false;
     mesh.position.y = -900;
     this.scene.add(mesh);
@@ -83,7 +123,49 @@ export class BountyHunterKit implements Kit {
 
   constructor(private readonly scene: THREE.Scene) {}
 
-  slotActive(): boolean {
+  /** The slots as the HUD shows them: one per number key with a gadget in it. */
+  get slots(): KitSlot[] {
+    const out: KitSlot[] = [];
+    for (let i = 0; i < SLOT_COUNT; i++) {
+      const g = this.loadout[i] ? gadgetById(this.loadout[i]!) : null;
+      if (g) out.push({ key: String(i + 1), name: g.name, cost: g.cost });
+    }
+    return out;
+  }
+
+  /** Put gadgets in the slots (ids; unknown ones are dropped); bare hands go back in the pockets if they are no longer there. */
+  setLoadout(ids: (string | null)[]): void {
+    this.loadout = [];
+    for (let i = 0; i < SLOT_COUNT; i++) this.loadout.push(ids[i] && gadgetById(ids[i]!) ? ids[i]! : null);
+    if (!this.loadout.includes('fists')) this.fistsWanted = false;
+  }
+
+  /** Bare hands are on: the player's flag follows it every frame. */
+  private fistsWanted = false;
+
+  /** The charges in the world and the clouds hanging, for the console. */
+  status(): { charges: { kind: string; at: number[]; fuse: number }[]; clouds: { at: number[]; left: number }[]; fists: boolean; lastThrow: { from: number[]; dir: number[]; at: number[] } | null; note: string } {
+    const r2 = (a: number[]) => a.map((n) => Number(n.toFixed(2)));
+    return {
+      charges: this.charges.map((c) => ({ kind: c.spec ? c.spec.model : c.kind, at: r2(c.mesh.position.toArray()), fuse: Number(c.fuse.toFixed(2)) })),
+      clouds: this.clouds.map((c) => ({ at: r2(c.pos.toArray()), left: Number(c.left.toFixed(1)) })),
+      fists: this.fistsWanted,
+      lastThrow: this.lastThrow ? { from: r2(this.lastThrow.from), dir: r2(this.lastThrow.dir), at: r2(this.lastThrow.at) } : null,
+      note: this.gunNote,
+    };
+  }
+
+  /** The gadget behind the i-th HUD slot. */
+  private gadgetAtHud(i: number): GadgetDef | undefined {
+    const name = this.slots[i]?.name;
+    return GADGETS.find((g) => g.name === name);
+  }
+
+  slotActive(i: number): boolean {
+    const g = this.gadgetAtHud(i);
+    if (g?.id === 'fists') return this.fistsWanted;
+    if (g?.id === 'det_pack') return this.charges.some((c) => c.kind === 'pack');
+    if (g?.id === 'trip_mine') return this.charges.some((c) => c.kind === 'trip');
     return false;
   }
 
@@ -102,9 +184,9 @@ export class BountyHunterKit implements Kit {
   }
 
   slotCooldown(i: number): number {
-    if (i === 0) return this.detCd / DET_COOLDOWN;
-    if (i === 1) return this.stimCd / STIM_COOLDOWN;
-    return 0;
+    const g = this.gadgetAtHud(i);
+    if (!g || g.cooldown <= 0) return 0;
+    return (this.cds.get(g.id) ?? 0) / g.cooldown;
   }
 
   update(ctx: KitContext): void {
@@ -124,8 +206,7 @@ export class BountyHunterKit implements Kit {
     }
     this.fireCd = Math.max(0, this.fireCd - dt);
     this.altCd = Math.max(0, this.altCd - dt);
-    this.detCd = Math.max(0, this.detCd - dt);
-    this.stimCd = Math.max(0, this.stimCd - dt);
+    for (const [id, left] of this.cds) this.cds.set(id, Math.max(0, left - dt));
 
     const gun = this.profile(ctx);
     if (gun !== this.lastProfile) {
@@ -134,42 +215,151 @@ export class BountyHunterKit implements Kit {
       this.stopHeld(ctx);
       this.lastProfile = gun;
     }
-    const primary = onFoot && input.held('attack');
-    const alt = onFoot && input.held('altFire');
-    let heldNow = false;
-    heldNow = this.trigger(ctx, gun, gun.primary, primary, 'primary') || heldNow;
-    if (gun.alt) heldNow = this.trigger(ctx, gun, gun.alt, alt && !primary, 'alt') || heldNow;
-    if (!heldNow) this.stopHeld(ctx);
-
-    // 1: Thermal Detonator
-    if (onFoot && input.pressedAction('slot1') && this.detCd <= 0) {
-      this.detCd = DET_COOLDOWN;
-      this.throwMine(ctx, 17, 2.5, 130, BLAST_RADIUS, null);
+    // Bare hands: the gun is away, the mouse buttons brawl.
+    player.fists = this.fistsWanted && onFoot;
+    if (player.fists) {
+      this.stopHeld(ctx);
+      this.charging = null;
+      this.unarmed.update(ctx);
+      player.fistsBusy = this.unarmed.busy;
+    } else {
+      this.unarmed.reset();
+      player.fistsBusy = false;
+      const primary = onFoot && input.held('attack');
+      const alt = onFoot && input.held('altFire');
+      let heldNow = false;
+      heldNow = this.trigger(ctx, gun, gun.primary, primary, 'primary') || heldNow;
+      if (gun.alt) heldNow = this.trigger(ctx, gun, gun.alt, alt && !primary, 'alt') || heldNow;
+      if (!heldNow) this.stopHeld(ctx);
     }
-    for (let i = this.detonators.length - 1; i >= 0; i--) {
-      const d = this.detonators[i];
-      d.fuse -= dt;
-      const t = d.body.translation();
-      d.mesh.position.set(t.x, t.y, t.z);
-      const r = d.body.rotation();
-      d.mesh.quaternion.set(r.x, r.y, r.z, r.w);
-      d.mesh.children[0].visible = Math.sin(d.fuse * (d.fuse < 1 ? 60 : 18)) > 0;
-      // A mine goes off early when something walks up to it.
-      const near = d.mode && world.creatures.creatures.some((c) => !c.dead && c.pos.distanceTo(d.mesh.position) < 1.6);
-      if (d.fuse <= 0 || near) {
-        this.blast(ctx, d.mesh.position, d.damage, d.radius, d.mode);
-        this.scene.remove(d.mesh);
-        physics.world.removeRigidBody(d.body);
-        this.detonators.splice(i, 1);
+
+    // The gadgets in the slots.
+    for (let i = 0; i < SLOT_COUNT; i++) {
+      const id = this.loadout[i];
+      if (!id || !input.pressedAction(SLOT_ACTIONS[i])) continue;
+      const g = gadgetById(id);
+      if (!g) continue;
+      const ready = (this.cds.get(id) ?? 0) <= 0;
+      if (g.id === 'fists') {
+        this.fistsWanted = !this.fistsWanted;
+        continue;
+      }
+      if (!onFoot) continue;
+      const packs = this.charges.filter((c) => c.kind === 'pack');
+      if (g.id === 'det_pack' && packs.length) {
+        // The key again, at any time: every pack goes, farthest first so the nearer ones are seen going.
+        for (const c of packs.sort((a, b) => b.mesh.position.distanceTo(player.pos) - a.mesh.position.distanceTo(player.pos))) this.detonate(ctx, c);
+        this.cds.set(id, g.cooldown);
+        continue;
+      }
+      if (!ready) continue;
+      if (g.grenade) {
+        this.cds.set(id, g.cooldown);
+        this.throwGrenade(ctx, g.grenade);
+      } else if (g.id === 'trip_mine') {
+        if (this.placeTripMine(ctx)) this.cds.set(id, g.cooldown);
+      } else if (g.id === 'det_pack') {
+        if (this.placePack(ctx)) this.cds.set(id, g.cooldown);
+      } else if (g.id === 'stim') {
+        if (player.hp < player.maxHp) {
+          this.cds.set(id, g.cooldown);
+          player.heal(45);
+          effects.ring(player.pos, 0x7fff9f, 3, 0.6);
+        }
       }
     }
+    // A det pack beyond the first: no wait between placings, only between placing and the next after a blast.
+    this.stepCharges(ctx);
+    this.stepClouds(ctx);
+    void world;
+    void physics;
+  }
 
-    // 2: Stim Pack
-    if (input.pressedAction('slot2') && this.stimCd <= 0 && player.hp < player.maxHp) {
-      this.stimCd = STIM_COOLDOWN;
-      player.heal(45);
-      effects.ring(player.pos, 0x7fff9f, 3, 0.6);
+  /** Fly and watch every charge: fuses, first touches, the mines' lasers and what walks up to them. */
+  private stepCharges(ctx: KitContext): void {
+    const { dt, world, player, physics } = ctx;
+    for (let i = this.charges.length - 1; i >= 0; i--) {
+      const c = this.charges[i];
+      c.fuse -= dt;
+      if (c.body) {
+        const t = c.body.translation();
+        c.mesh.position.set(t.x, t.y, t.z);
+        const r = c.body.rotation();
+        c.mesh.quaternion.set(r.x, r.y, r.z, r.w);
+      }
+      if (c.light) c.light.visible = c.kind === 'pack' ? Math.sin(performance.now() * 0.006) > 0 : Math.sin(c.fuse * (c.fuse < 1 ? 60 : 18)) > 0;
+      let go = false;
+      if (c.kind === 'grenade') {
+        // A fused charge goes on its fuse; a flechette mine early when something walks up to it; an impact grenade on its first touch.
+        if (c.fuse <= 0) go = true;
+        else if (c.mode && this.targets(ctx).some((h) => !h.dead && h.pos.distanceTo(c.mesh.position) < 1.6)) go = true;
+        else if (c.spec && c.spec.fuse <= 0 && c.armedAt > 0.15 && c.body) {
+          c.armedAt += dt;
+          const v = c.body.linvel();
+          // Slowed by a touch (the velocity is no longer what it was thrown with): it has hit something.
+          if (Math.hypot(v.x, v.y, v.z) < c.spec.speed * 0.5) go = true;
+        } else c.armedAt += dt;
+      } else if (c.kind === 'trip' && c.laser) {
+        // Whatever crosses the beam sets it off: creatures, fighters, the player.
+        for (const h of this.targets(ctx)) {
+          if (h.dead) continue;
+          if (this.crossesBeam(h.pos, h.halfHeight, c.laser.from, c.laser.to)) go = true;
+        }
+        if (!player.mounted && this.crossesBeam(player.pos, 0.9, c.laser.from, c.laser.to)) go = true;
+        // Shot or blown up: a blast near it sets it off too.
+      }
+      if (go) this.detonate(ctx, c);
     }
+    void world;
+    void physics;
+  }
+
+  /** Whether a standing body (its feet at `pos`, `half` up to its middle) crosses the segment from a to b. */
+  private crossesBeam(pos: THREE.Vector3, half: number, a: THREE.Vector3, b: THREE.Vector3): boolean {
+    // The nearest point on the beam to the body's middle, then the body's radius about it.
+    tmp.copy(pos).y += half;
+    tmp2.copy(b).sub(a);
+    const len2 = tmp2.lengthSq();
+    const t = len2 > 0 ? THREE.MathUtils.clamp(tmp.clone().sub(a).dot(tmp2) / len2, 0, 1) : 0;
+    tmp2.multiplyScalar(t).add(a);
+    const dy = Math.abs(tmp2.y - tmp.y);
+    const dxz = Math.hypot(tmp2.x - tmp.x, tmp2.z - tmp.z);
+    // A body is about as wide as it is tall to the middle (a bantha's flank is a metre out).
+    return dxz < Math.max(0.45, half * 0.7) && dy < half + 0.1;
+  }
+
+  /** The clouds: whoever stands in one is afflicted every half second; a puff now and then shows where it hangs. */
+  private stepClouds(ctx: KitContext): void {
+    const { dt, effects } = ctx;
+    for (let i = this.clouds.length - 1; i >= 0; i--) {
+      const cl = this.clouds[i];
+      cl.left -= dt;
+      cl.tick -= dt;
+      if (cl.left <= 0) {
+        this.clouds.splice(i, 1);
+        continue;
+      }
+      if (cl.tick <= 0) {
+        cl.tick = 0.5;
+        for (const h of this.targets(ctx)) {
+          if (h.dead || h.pos.distanceTo(cl.pos) > cl.radius) continue;
+          if (cl.spec.dot) h.afflict?.(cl.spec.dot.dps, Math.min(cl.spec.dot.seconds, 3));
+          if (cl.spec.slow) h.slow?.(1);
+          h.damage(cl.spec.damage * 0.1);
+        }
+        const p = ctx.player;
+        if (!p.mounted && p.pos.distanceTo(cl.pos) < cl.radius * 0.8) p.takeDamage(cl.spec.dot ? cl.spec.dot.dps * 0.5 : 2);
+      }
+      if (Math.random() < dt * 12) {
+        tmp.set(cl.pos.x + (Math.random() - 0.5) * cl.radius * 1.4, cl.pos.y + Math.random() * 1.8, cl.pos.z + (Math.random() - 0.5) * cl.radius * 1.4);
+        effects.burst(tmp, cl.spec.color, 1.2 + Math.random() * 1.5, 0.8);
+      }
+    }
+  }
+
+  /** Everything a blast or a beam can hurt: the creatures and the fighters. */
+  private targets(ctx: KitContext): Hittable[] {
+    return [...ctx.world.creatures.creatures, ...ctx.world.npcs.npcs];
   }
 
   /** One trigger this frame: what its mode does with the button held or not. Returns whether it holds an effect at the muzzle. */
@@ -364,7 +554,7 @@ export class BountyHunterKit implements Kit {
     this.aim(ctx);
     const cone = mode.cone ?? { range: 5, angle: 20 };
     const cos = Math.cos((cone.angle * Math.PI) / 180);
-    for (const c of world.creatures.creatures) {
+    for (const c of this.targets(ctx)) {
       if (c.dead) continue;
       tmp.copy(c.pos).y += c.halfHeight;
       tmp.sub(muzzle);
@@ -373,10 +563,7 @@ export class BountyHunterKit implements Kit {
       if (d > 0.5 && tmp.divideScalar(d).dot(aimDir) < cos) continue;
       c.damage(mode.damage * dt);
       this.afflict(ctx, c, mode);
-      if (mode.push > 0 && Math.random() < dt * 2) {
-        tmp2.copy(c.pos).sub(player.pos).setY(0).normalize();
-        c.knock(tmp2, mode.push);
-      }
+      if (mode.push > 0 && Math.random() < dt * 2) c.damage(0, player.pos, mode.push);
     }
     for (const t of world.turrets.turrets) {
       tmp.copy(t.pos).sub(muzzle);
@@ -396,7 +583,7 @@ export class BountyHunterKit implements Kit {
 
   /** A line held on the nearest thing ahead (lightning): hurt each frame, staggered, and the shock jumps to what stands near it. */
   private beam(ctx: KitContext, mode: FireMode, which: 'primary' | 'alt'): void {
-    const { dt, player, world, effects } = ctx;
+    const { dt, player, effects } = ctx;
     this.aim(ctx);
     const cone = mode.cone ?? { range: 25, angle: 8 };
     const target = this.targetAhead(ctx, cone.range, Math.cos((cone.angle * Math.PI) / 180));
@@ -407,7 +594,7 @@ export class BountyHunterKit implements Kit {
       if (mode.chain) {
         let other: Hittable | null = null;
         let best = mode.chain.radius;
-        for (const c of world.creatures.creatures) {
+        for (const c of this.targets(ctx)) {
           if (c === target || c.dead) continue;
           const d = c.pos.distanceTo(target.pos);
           if (d < best) {
@@ -465,12 +652,11 @@ export class BountyHunterKit implements Kit {
     }
   }
 
-  /** The nearest living creature within `range` metres and the cone about the aim (`cos` at its edge). */
+  /** The nearest living creature or fighter within `range` metres and the cone about the aim (`cos` at its edge). */
   private targetAhead(ctx: KitContext, range: number, cos: number): Hittable | null {
-    const { world } = ctx;
     let best: Hittable | null = null;
     let bestD = range;
-    for (const c of world.creatures.creatures) {
+    for (const c of this.targets(ctx)) {
       if (c.dead) continue;
       tmp.copy(c.pos).y += c.halfHeight;
       tmp.sub(muzzle);
@@ -483,25 +669,33 @@ export class BountyHunterKit implements Kit {
     return best;
   }
 
-  /** A blast at a point: everything within `radius` metres hurt by up to `damage` and thrown outward, the player too when close. */
-  private blast(ctx: KitContext, at: THREE.Vector3, damage: number, radius: number, mode: FireMode | null, push = 10): void {
+  /**
+   * A blast at a point: everything within `radius` metres hurt by up to `damage` and thrown outward,
+   * the player too when close; vehicles and turrets by `machines` times as much (the proton grenade);
+   * `spec` adds the grenade's burn, freeze or stun to what it reached.
+   */
+  private blast(ctx: KitContext, at: THREE.Vector3, damage: number, radius: number, mode: FireMode | null, push = 10, color = 0xffa050, spec: GrenadeSpec | null = null): void {
     const { world, effects, player } = ctx;
-    effects.ring(at, mode?.color ?? 0xffa050, radius * 2.5, 0.4);
-    effects.burst(at, 0xffc080, radius * 0.6, 0.3);
-    effects.flash(at, mode?.color ?? 0xffa050, 30 + damage * 0.3, radius * 4, 0.25);
-    for (const c of world.creatures.creatures) {
+    effects.ring(at, mode?.color ?? color, radius * 2.5, 0.4);
+    effects.burst(at, spec ? color : 0xffc080, radius * 0.6, 0.3);
+    effects.flash(at, mode?.color ?? color, 30 + damage * 0.3, radius * 4, 0.25);
+    const machines = spec?.machines ?? 1;
+    for (const c of this.targets(ctx)) {
       tmp.copy(c.pos).sub(at);
       const d = tmp.length();
       if (d > radius) continue;
       const f = 1 - d / radius;
-      tmp.setY(0).normalize();
-      c.damage(damage * f + damage * 0.1);
-      c.knock(tmp, push * f + 4);
+      c.damage(damage * f + damage * 0.1, at, push * f + 4);
       if (mode) this.afflict(ctx, c, mode);
+      if (spec) {
+        if (spec.dot) c.afflict?.(spec.dot.dps, spec.dot.seconds);
+        if (spec.slow) c.slow?.(spec.slow);
+        if (spec.stun) c.stun?.(spec.stun);
+      }
     }
     for (const t of world.turrets.turrets) {
       const d = t.pos.distanceTo(at);
-      if (d <= radius) t.damage(damage * (1 - d / radius) + damage * 0.1);
+      if (d <= radius) t.damage((damage * (1 - d / radius) + damage * 0.1) * machines);
     }
     for (const sp of world.vehicles) {
       tmp.copy(sp.pos).sub(at);
@@ -510,42 +704,244 @@ export class BountyHunterKit implements Kit {
       const f = 1 - d / (radius * 1.5);
       const m = sp.body.mass();
       tmp.normalize();
-      sp.body.applyImpulse({ x: tmp.x * m * 6 * f, y: m * 4 * f, z: tmp.z * m * 6 * f }, true);
+      sp.body.applyImpulse({ x: tmp.x * m * 6 * f * machines, y: m * 4 * f * machines, z: tmp.z * m * 6 * f * machines }, true);
+      if (machines > 1) sp.damage(damage * f * machines);
     }
     const dp = player.pos.distanceTo(at);
     if (dp < radius * 0.7 && !player.mounted) player.takeDamage(damage * 0.35 * (1 - dp / (radius * 0.7)));
+    // A blast sets off the charges near it: a chain of mines, a det pack under a grenade.
+    for (const other of this.charges) {
+      if (other.kind !== 'grenade' && other.mesh.position.distanceTo(at) < radius * 0.8) other.fuse = Math.min(other.fuse, 0.15 + Math.random() * 0.1);
+    }
   }
 
-  /** Throw a charge ahead: a ball with a fuse that goes off as a blast (the thermal detonator, the flechette's mines). */
-  private throwMine(ctx: KitContext, speed: number, fuse: number, damage: number, radius: number, mode: FireMode | null): void {
-    const { player, cam, physics } = ctx;
-    cam.camera.getWorldDirection(dir);
-    player.muzzle(from);
+  /** A charge goes off where it is and is gone; a poison or bug cloud may stay. */
+  private detonate(ctx: KitContext, c: Charge): void {
+    const at = c.mesh.position;
+    this.blast(ctx, at, c.damage, c.radius, c.mode, c.push, c.color, c.spec);
+    if (c.spec?.cloud) this.clouds.push({ pos: at.clone(), radius: c.spec.radius * 0.8, spec: c.spec, left: c.spec.cloud, tick: 0 });
+    this.removeCharge(ctx, c);
+  }
+
+  private removeCharge(ctx: KitContext, c: Charge): void {
+    this.scene.remove(c.mesh);
+    if (c.laser) this.scene.remove(c.laser.mesh);
+    if (c.body) ctx.physics.world.removeRigidBody(c.body);
+    const i = this.charges.indexOf(c);
+    if (i >= 0) this.charges.splice(i, 1);
+  }
+
+  /**
+   * Where a throw starts and which way: from the hand, at the point under the crosshair (the
+   * camera's own line, from behind and above the body, would throw everything into the ground
+   * a few metres out), with a little lift for the arc.
+   */
+  private throwFrom(ctx: KitContext): void {
+    const { player } = ctx;
+    this.aim(ctx);
+    player.handPosition(from);
+    if (from.distanceTo(player.pos) > 1.6) from.copy(player.pos).setY(player.pos.y + 1.4);
+    if (player.aboard) from.applyMatrix4(hullInverse);
+    dir.copy(end).sub(from);
+    if (dir.lengthSq() < 1) dir.copy(aimDir);
+    // Lobbed: a level throw arcs up and comes down where it was aimed rather than skidding along the ground.
+    dir.normalize().y += 0.3;
+    dir.normalize();
+    if (player.aboard) {
+      // The charge is a world-space body: back into the world (the hull's frame is only for the aim).
+      const m = player.aboard.vehicle.group.matrixWorld;
+      from.applyMatrix4(m);
+      dir.transformDirection(m);
+    }
     from.addScaledVector(dir, 0.4);
+    this.lastThrow = { from: from.toArray(), dir: dir.toArray(), at: end.toArray() };
+  }
+
+  /** The last throw's start, direction and the crosshair point it was aimed at, for the console. */
+  private lastThrow: { from: number[]; dir: number[]; at: number[] } | null = null;
+
+  /** A thrown body with its ball collider, moving with the player's own speed. */
+  private throwBody(ctx: KitContext, speed: number, bounce: number, upward = 4): RAPIER.RigidBody {
+    const { player, physics } = ctx;
     const body = physics.world.createRigidBody(
       RAPIER.RigidBodyDesc.dynamic()
         .setTranslation(from.x, from.y, from.z)
-        .setLinvel(dir.x * speed + player.vel.x, dir.y * speed + 4, dir.z * speed + player.vel.z)
+        .setLinvel(dir.x * speed + player.vel.x, dir.y * speed + upward, dir.z * speed + player.vel.z)
         .setAngvel({ x: 6, y: 2, z: 4 })
         .setCcdEnabled(true),
     );
-    physics.world.createCollider(RAPIER.ColliderDesc.ball(0.16).setMass(0.6).setRestitution(mode ? 0.6 : 0.45).setFriction(0.7), body);
+    physics.world.createCollider(RAPIER.ColliderDesc.ball(0.14).setMass(0.6).setRestitution(bounce).setFriction(0.7), body);
+    return body;
+  }
+
+  /** The stand-in charge: a dark ball with a blinking light on top. */
+  private ballMesh(scale = 1): { mesh: THREE.Mesh; light: THREE.Object3D } {
     const mesh = new THREE.Mesh(this.detGeo, this.detMat);
     const light = new THREE.Mesh(new THREE.SphereGeometry(0.05, 6, 4), this.detLightMat);
     light.position.y = 0.16;
     mesh.add(light);
     mesh.castShadow = true;
-    if (mode) mesh.scale.setScalar(0.7);
+    mesh.scale.setScalar(scale);
     this.scene.add(mesh);
-    this.detonators.push({ mesh, body, fuse, damage, radius, mode });
+    return { mesh, light };
+  }
+
+  /**
+   * The rack's model for a grenade, cloned, once it has loaded; the first throw of each kind gets
+   * the stand-in ball while the model comes. A model is sized down to a hand's width if it came
+   * larger (some are authored at display size).
+   */
+  private grenadeModel(ctx: KitContext, spec: GrenadeSpec): THREE.Group | null {
+    const rack = ctx.weapons;
+    if (!rack) return null;
+    const have = this.models.get(spec.model);
+    if (have && have !== 'loading') return have.clone();
+    if (have === 'loading') return null;
+    const def = rack.find(spec.model);
+    if (!def || def.class !== 'thrown') {
+      this.models.set(spec.model, new THREE.Group());
+      return null;
+    }
+    this.models.set(spec.model, 'loading');
+    void rack
+      .model(def)
+      .then((g) => {
+        const box = new THREE.Box3().setFromObject(g);
+        const size = box.getSize(new THREE.Vector3());
+        const longest = Math.max(size.x, size.y, size.z, 0.01);
+        const wrap = new THREE.Group();
+        // Centred on its box so it tumbles about its middle.
+        g.position.sub(box.getCenter(new THREE.Vector3()));
+        wrap.add(g);
+        if (longest > 0.35) wrap.scale.setScalar(0.3 / longest);
+        this.models.set(spec.model, wrap);
+      })
+      .catch((err) => {
+        console.warn(`grenade model ${spec.model} failed`, err);
+        this.models.set(spec.model, new THREE.Group());
+      });
+    return null;
+  }
+
+  /** Throw one of the game's grenades: its model from the rack (or the stand-in), an arc that bounces, its fuse. */
+  private throwGrenade(ctx: KitContext, spec: GrenadeSpec): void {
+    this.throwFrom(ctx);
+    const body = this.throwBody(ctx, spec.speed, spec.bounce);
+    const model = this.grenadeModel(ctx, spec);
+    let mesh: THREE.Object3D;
+    let light: THREE.Object3D | null = null;
+    if (model && model.children.length) {
+      mesh = model;
+      mesh.traverse((o) => {
+        (o as THREE.Mesh).castShadow = true;
+      });
+      const l = new THREE.Mesh(new THREE.SphereGeometry(0.035, 6, 4), this.detLightMat);
+      l.position.y = 0.1;
+      mesh.add(l);
+      light = l;
+      this.scene.add(mesh);
+    } else {
+      const ball = this.ballMesh(0.9);
+      mesh = ball.mesh;
+      light = ball.light;
+    }
+    this.charges.push({ kind: 'grenade', mesh, body, fuse: spec.fuse > 0 ? spec.fuse : 30, damage: spec.damage, radius: spec.radius, push: spec.push, color: spec.color, mode: null, spec, light, armedAt: 0 });
+    ctx.player.shotFired();
+  }
+
+  /** Throw a charge ahead: a ball with a fuse that goes off as a blast (the flechette's mines). */
+  private throwMine(ctx: KitContext, speed: number, fuse: number, damage: number, radius: number, mode: FireMode | null): void {
+    this.throwFrom(ctx);
+    const body = this.throwBody(ctx, speed, mode ? 0.6 : 0.45);
+    const ball = this.ballMesh(mode ? 0.7 : 1);
+    this.charges.push({ kind: 'grenade', mesh: ball.mesh, body, fuse, damage, radius, push: 10, color: mode?.color ?? 0xffa050, mode, spec: null, light: ball.light, armedAt: 0 });
+  }
+
+  /** The surface under the crosshair within `reach` metres of the player (walls, floors, props, hulls; not creatures), with its normal. */
+  private surfaceAhead(ctx: KitContext, reach: number): { point: THREE.Vector3; normal: THREE.Vector3 } | null {
+    const { cam, physics, player, world } = ctx;
+    if (player.aboard) return null;
+    cam.camera.getWorldDirection(dir);
+    from.copy(cam.camera.position);
+    end.copy(from).addScaledVector(dir, 60);
+    const hit = physics.surfaceHit(from, end, player.body, player.inside, (h) => world.hittableAt(h) !== undefined);
+    if (!hit) return null;
+    const point = new THREE.Vector3(...hit.point);
+    tmp.copy(player.pos).y += 1;
+    if (point.distanceTo(tmp) > reach + 0.5) return null;
+    return { point, normal: new THREE.Vector3(...hit.normal) };
+  }
+
+  /** A trip mine on the surface ahead, its laser out along the surface's normal to whatever it meets. */
+  private placeTripMine(ctx: KitContext): boolean {
+    const at = this.surfaceAhead(ctx, TRIP_REACH);
+    if (!at) {
+      this.gunNote = 'a trip mine needs a wall or floor within four metres';
+      return false;
+    }
+    const mesh = new THREE.Mesh(this.mineGeo, this.detMat);
+    mesh.position.copy(at.point).addScaledVector(at.normal, 0.03);
+    mesh.quaternion.setFromUnitVectors(UP, at.normal);
+    const light = new THREE.Mesh(new THREE.SphereGeometry(0.03, 6, 4), this.detLightMat);
+    light.position.y = 0.05;
+    mesh.add(light);
+    mesh.castShadow = true;
+    this.scene.add(mesh);
+    // The beam: from the mine along its normal to the next surface, or its full reach.
+    const start = mesh.position.clone().addScaledVector(at.normal, 0.05);
+    const far = start.clone().addScaledVector(at.normal, TRIP_LASER);
+    const wall = ctx.physics.surfaceHit(start, far, ctx.player.body, ctx.player.inside, (h) => ctx.world.hittableAt(h) !== undefined);
+    const to = wall ? new THREE.Vector3(...wall.point) : far;
+    const laser = new THREE.Mesh(this.laserGeo, this.laserMat);
+    const len = start.distanceTo(to);
+    laser.position.copy(start).lerp(to, 0.5);
+    laser.quaternion.setFromUnitVectors(UP, tmp.copy(to).sub(start).normalize());
+    laser.scale.set(1, len, 1);
+    this.scene.add(laser);
+    this.charges.push({ kind: 'trip', mesh, body: null, fuse: 600, damage: TRIP_DAMAGE, radius: TRIP_RADIUS, push: 12, color: 0xff6040, mode: null, spec: null, laser: { from: start, to, mesh: laser }, light: null, armedAt: 0 });
+    return true;
+  }
+
+  /** A det pack stuck to the surface ahead, or thrown to lie where it lands when nothing is near; the key again sets them off. */
+  private placePack(ctx: KitContext): boolean {
+    if (this.charges.filter((c) => c.kind === 'pack').length >= MAX_PACKS) {
+      this.gunNote = `no more than ${MAX_PACKS} det packs at once`;
+      return false;
+    }
+    const at = this.surfaceAhead(ctx, TRIP_REACH);
+    const mesh = new THREE.Mesh(this.packGeo, this.detMat);
+    const light = new THREE.Mesh(new THREE.SphereGeometry(0.03, 6, 4), this.detLightMat);
+    light.position.y = 0.05;
+    mesh.add(light);
+    mesh.castShadow = true;
+    this.scene.add(mesh);
+    let body: RAPIER.RigidBody | null = null;
+    if (at) {
+      mesh.position.copy(at.point).addScaledVector(at.normal, 0.04);
+      mesh.quaternion.setFromUnitVectors(UP, at.normal);
+    } else {
+      this.throwFrom(ctx);
+      body = this.throwBody(ctx, 12, 0.1, 3);
+      ctx.player.shotFired();
+    }
+    this.charges.push({ kind: 'pack', mesh, body, fuse: 600, damage: PACK_DAMAGE, radius: PACK_RADIUS, push: 14, color: 0xffa050, mode: null, spec: null, light, armedAt: 0 });
+    return true;
   }
 
   dispose(): void {
     if (this.proto) this.scene.remove(this.proto);
-    for (const d of this.detonators) this.scene.remove(d.mesh);
-    this.detonators.length = 0;
+    for (const c of this.charges) {
+      this.scene.remove(c.mesh);
+      if (c.laser) this.scene.remove(c.laser.mesh);
+    }
+    this.charges.length = 0;
+    this.clouds.length = 0;
     this.detGeo.dispose();
     this.detMat.dispose();
     this.detLightMat.dispose();
+    this.packGeo.dispose();
+    this.mineGeo.dispose();
+    this.laserGeo.dispose();
+    this.laserMat.dispose();
   }
 }

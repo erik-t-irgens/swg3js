@@ -4,7 +4,7 @@ import { INVENTORY_TABS, tabStrip, wireTabs } from './tabs';
 import { GroupState, escapeHtml, groupHtml, prettyName } from './catalogue';
 import { CLASS_LABELS, OFF_HAND, type WeaponCatalogue, type WeaponClass, type WeaponDef } from '../player/weapons';
 
-const ORDER: WeaponClass[] = ['lightsaber', 'lightsaber2h', 'lightsaberStaff', 'sword1h', 'knife', 'fist', 'sword2h', 'polearm', 'pistol', 'carbine', 'rifle', 'heavy'];
+const ORDER: WeaponClass[] = ['lightsaber', 'lightsaber2h', 'lightsaberStaff', 'sword1h', 'knife', 'fist', 'sword2h', 'polearm', 'pistol', 'carbine', 'rifle', 'heavy', 'thrown'];
 /** What a class fights like, for its heading. */
 const NOTES: Record<WeaponClass, string> = {
   lightsaber: 'one hand: fast, medium and strong styles',
@@ -19,6 +19,7 @@ const NOTES: Record<WeaponClass, string> = {
   carbine: 'each fires as its kind: hover an entry for what it does',
   rifle: 'each fires as its kind: hover an entry for what it does',
   heavy: 'each fires as its kind: hover an entry for what it does',
+  thrown: 'not held: the Skills tab puts the grenades in the number slots, and each flies as its own model',
 };
 
 export class WeaponsUi {
@@ -106,7 +107,9 @@ export class WeaponsUi {
         const inLeft = this.held.left === w.id;
         const { name, tags } = prettyName(w.id);
         const left = OFF_HAND.has(w.class) ? `<button data-id="${w.id}" data-hand="left"${inLeft ? ' class="on"' : ''} title="${inLeft ? 'in the left hand: click to empty it' : 'left hand'}">L</button>` : '';
-        return `<div class="cat-item${inRight || inLeft ? ' held' : ''}" title="${escapeHtml(w.id)} · ${w.length.toFixed(2)} m"><span class="cat-name">${escapeHtml(name)}${tags.length ? ` <small>${escapeHtml(tags.join(' '))}</small>` : ''}</span><span class="cat-hands"><button data-id="${w.id}" data-hand="right"${inRight ? ' class="on"' : ''} title="${inRight ? 'in the right hand: click to empty it' : 'right hand'}">R</button>${left}</span></div>`;
+        // A grenade is thrown by its slot, not held: the row is a listing only.
+        const hands = w.class === 'thrown' ? '<small>slots</small>' : `<button data-id="${w.id}" data-hand="right"${inRight ? ' class="on"' : ''} title="${inRight ? 'in the right hand: click to empty it' : 'right hand'}">R</button>${left}`;
+        return `<div class="cat-item${inRight || inLeft ? ' held' : ''}" title="${escapeHtml(w.id)} · ${w.length.toFixed(2)} m"><span class="cat-name">${escapeHtml(name)}${tags.length ? ` <small>${escapeHtml(tags.join(' '))}</small>` : ''}</span><span class="cat-hands">${hands}</span></div>`;
       });
       html.push(groupHtml(cls, CLASS_LABELS[cls], list.length, NOTES[cls], this.groups.isOpen(cls, !!find || heldHere), items.join('')));
     }

@@ -16,6 +16,7 @@ import { Group, groups, RAPIER as R } from '../core/physics';
 import { CHUNK_RES, CHUNK_SIZE, Terrain } from './terrain';
 import { SwgTerrain, type BuildingLayerSource } from './swgTerrain';
 import { LayoutStreamer, type Building, type CellState, type PlacedObject } from './layoutStream';
+import { isLiftCell, liftStops, nextStop } from './lifts';
 import { ParticleEffects } from './particles';
 import { CSM } from 'three/examples/jsm/csm/CSM.js';
 import { ACTOR_LAYER, INTERIOR_LAYER, markActor, type PortalRenderer } from './portalRender';
@@ -1373,7 +1374,7 @@ export class World {
       }
     }
     // A hull that is itself a portal building (the yacht) has its rooms inside the hull model.
-    if (!v.interior) v.interior = ShipInterior.fromHull(v, gravity, { cells: def.cells });
+    if (!v.interior) v.interior = ShipInterior.fromHull(v, gravity, { cells: def.cells, portals: def.portals });
     return v;
   }
 
@@ -1439,9 +1440,21 @@ export class World {
     return this.chunks.size;
   }
 
-  /** Elevator terminals near the player, nearest first (empty outside buildings). */
+  /**
+   * A player put down somewhere without walking there (a teleport): stand them in whatever room
+   * holds the point, since no portal was crossed to get in. Returns the cell, or 0 outside.
+   */
+  enterCellAt(pos: THREE.Vector3): number {
+    if (!this.layoutStream) return 0;
+    const state = this.layoutStream.buildingAt(pos);
+    this.cellState = state;
+    this.prevPlayerPos.copy(pos);
+    return state?.cell ?? 0;
+  }
+
+  /** Elevator terminals near the player, nearest first, and the lift shaft the player stands in (empty outside buildings). */
   elevatorsNear(pos: THREE.Vector3, range: number): { kind: 'up' | 'down' | 'both'; d: number }[] {
-    return this.cellState && this.layoutStream ? this.layoutStream.elevatorsNear(pos, range) : [];
+    return this.cellState && this.layoutStream ? this.layoutStream.elevatorsNear(pos, range, this.cellState) : [];
   }
 
   /**
@@ -1452,6 +1465,18 @@ export class World {
   useElevator(pos: THREE.Vector3, up: boolean): THREE.Vector3 | null {
     const b = this.cellState?.building;
     if (!b || !this.layoutStream) return null;
+    // In a lift shaft the stops are its doorways (lifts.ts): out through the next level's, into the room beyond.
+    const shaft = this.cellState!.cell;
+    if (isLiftCell(b.model.def, shaft)) {
+      // The ride is always to the next level up, and down again from the top, whichever way was asked.
+      tmpV.copy(pos).applyMatrix4(b.inverse);
+      const stop = nextStop(liftStops(b.model.def, shaft), tmpV.y);
+      if (!stop) return null;
+      const next = stop.at.clone().applyMatrix4(b.matrix);
+      this.cellState = { building: b, cell: stop.cell };
+      this.prevPlayerPos.copy(next);
+      return next;
+    }
     const floors = this.physics.floorsAt(pos.x, pos.z, pos.y + 80, pos.y - 80);
     let i = floors.findIndex((f) => Math.abs(f - pos.y) < 1);
     if (i < 0) i = floors.findIndex((f) => f < pos.y);

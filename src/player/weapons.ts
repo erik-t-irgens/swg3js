@@ -3,7 +3,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 
-export type WeaponClass = 'pistol' | 'carbine' | 'rifle' | 'heavy' | 'sword1h' | 'knife' | 'sword2h' | 'polearm' | 'fist' | 'lightsaber' | 'lightsaber2h' | 'lightsaberStaff';
+export type WeaponClass = 'pistol' | 'carbine' | 'rifle' | 'heavy' | 'sword1h' | 'knife' | 'sword2h' | 'polearm' | 'fist' | 'lightsaber' | 'lightsaber2h' | 'lightsaberStaff' | 'thrown';
 
 /**
  * A gun's client effect: the family and index its template names into the client's weapon table
@@ -34,8 +34,8 @@ export interface BladeDef {
 export function isSaber(cls: WeaponClass | undefined | null): boolean {
   return cls === 'lightsaber' || cls === 'lightsaber2h' || cls === 'lightsaberStaff';
 }
-/** How a class fights: a blaster, a single-blade style (fast, medium, strong), the staff, or the lightsaber itself. */
-export type Fights = 'gun' | 'single' | 'staff' | 'lightsaber';
+/** How a class fights: a blaster, a single-blade style (fast, medium, strong), the staff, the lightsaber itself, or thrown (the grenades the gadget slots throw; not held). */
+export type Fights = 'gun' | 'single' | 'staff' | 'lightsaber' | 'thrown';
 
 export interface WeaponDef {
   id: string;
@@ -60,8 +60,8 @@ export interface WeaponsManifest {
 }
 
 /** What each class fights like, when the manifest does not say. */
-export const FIGHTS: Record<WeaponClass, Fights> = { pistol: 'gun', carbine: 'gun', rifle: 'gun', heavy: 'gun', sword1h: 'single', knife: 'single', sword2h: 'single', polearm: 'staff', fist: 'single', lightsaber: 'lightsaber', lightsaber2h: 'lightsaber', lightsaberStaff: 'lightsaber' };
-export const CLASS_LABELS: Record<WeaponClass, string> = { pistol: 'Pistols', carbine: 'Carbines', rifle: 'Rifles', heavy: 'Heavy weapons', sword1h: 'One-hand swords and clubs', knife: 'Knives', sword2h: 'Two-hand swords and axes', polearm: 'Polearms and lances', fist: 'Fist weapons', lightsaber: 'Lightsabers', lightsaber2h: 'Two-hand lightsabers', lightsaberStaff: 'Double-bladed lightsabers' };
+export const FIGHTS: Record<WeaponClass, Fights> = { pistol: 'gun', carbine: 'gun', rifle: 'gun', heavy: 'gun', sword1h: 'single', knife: 'single', sword2h: 'single', polearm: 'staff', fist: 'single', lightsaber: 'lightsaber', lightsaber2h: 'lightsaber', lightsaberStaff: 'lightsaber', thrown: 'thrown' };
+export const CLASS_LABELS: Record<WeaponClass, string> = { pistol: 'Pistols', carbine: 'Carbines', rifle: 'Rifles', heavy: 'Heavy weapons', sword1h: 'One-hand swords and clubs', knife: 'Knives', sword2h: 'Two-hand swords and axes', polearm: 'Polearms and lances', fist: 'Fist weapons', lightsaber: 'Lightsabers', lightsaber2h: 'Two-hand lightsabers', lightsaberStaff: 'Double-bladed lightsabers', thrown: 'Grenades and thrown weapons' };
 /** Classes a left hand may hold too: every blade but the double-bladed staff; one in each hand fights as the dual style. */
 export const OFF_HAND = new Set<WeaponClass>(['sword1h', 'knife', 'sword2h', 'polearm', 'fist', 'lightsaber', 'lightsaber2h']);
 /** The blaster carries a class plays: the pistol's, or the rifle's (carbines and heavy weapons use the rifle set). */

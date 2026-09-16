@@ -1,21 +1,17 @@
 import * as THREE from 'three';
-import { RAPIER } from '../core/physics';
 import type { Creature } from '../world/creatures';
 import { KICK_DAMAGE } from './saber';
 import { THROW } from './saberThrow';
-import { DEFAULT_LOADOUT, POWERS, SLOT_COUNT, powerById } from './forcePowers';
+import { DEFAULT_LOADOUT, POWERS, SLOT_ACTIONS, SLOT_COUNT, powerById } from './forcePowers';
 import type { Hittable, Kit, KitContext, KitSlot, Resource } from './kit';
-import type { Action } from '../core/input';
+import { sweepCapsule } from './sweep';
+import { Unarmed } from './unarmed';
 
 const tmp = new THREE.Vector3();
 const tmp2 = new THREE.Vector3();
 const a = new THREE.Vector3();
 const b = new THREE.Vector3();
-const mid = new THREE.Vector3();
-const quat = new THREE.Quaternion();
-const UP = new THREE.Vector3(0, 1, 0);
 const LIGHTNING_SEGMENTS = 14;
-const SLOT_ACTIONS: Action[] = ['slot1', 'slot2', 'slot3', 'slot4', 'slot5', 'slot6'];
 /** Rage lasts this long, then rests this long. */
 const RAGE_TIME = 10;
 const RAGE_REST = 20;
@@ -53,6 +49,9 @@ export class JediKit implements Kit {
   private readonly hitThisLeg = new Set<Hittable>();
   private lastLegId = -1;
   private orbitTimer = 0;
+  /** Bare hands on: the saber away, the buttons punching and kicking. */
+  fistsActive = false;
+  private readonly unarmed = new Unarmed();
   private readonly aura: THREE.Mesh<THREE.SphereGeometry, THREE.MeshBasicMaterial>;
   private readonly bolt: THREE.Line<THREE.BufferGeometry, THREE.LineBasicMaterial>;
   private readonly boltPositions = new Float32Array((LIGHTNING_SEGMENTS + 1) * 3);
@@ -89,6 +88,7 @@ export class JediKit implements Kit {
     if (!this.loadout.includes('speed')) this.speedActive = false;
     if (!this.loadout.includes('protect')) this.protectActive = false;
     if (!this.loadout.includes('rage')) this.rageLeft = 0;
+    if (!this.loadout.includes('fists')) this.fistsActive = false;
   }
 
   /** The slot index (0-based among the HUD's slots) for the i-th number key, or -1. */
@@ -118,6 +118,8 @@ export class JediKit implements Kit {
         return this.rageLeft > 0;
       case 'grip':
         return this.gripped !== null;
+      case 'fists':
+        return this.fistsActive;
       default:
         return false;
     }
@@ -158,6 +160,15 @@ export class JediKit implements Kit {
       this.hitThisSwing.clear();
     }
     if (player.swing === 0) this.hitThisSwing.clear();
+    // Bare hands: the saber is away and the buttons brawl.
+    player.fists = this.fistsActive && onFoot;
+    if (player.fists) {
+      this.unarmed.update(ctx);
+      player.fistsBusy = this.unarmed.busy;
+    } else {
+      this.unarmed.reset();
+      player.fistsBusy = false;
+    }
     // Every lit blade sweeps: the staff's second and the dual style's left-hand saber too.
     if (onFoot && player.saberOn && player.bladeActive) {
       for (let i = 0; i < player.bladeCount; i++) {
@@ -288,6 +299,9 @@ export class JediKit implements Kit {
             this.rageLeft = RAGE_TIME;
             effects.ring(player.pos, 0xff4040, 4, 0.5);
           }
+          break;
+        case 'fists':
+          if (pressed) this.fistsActive = !this.fistsActive;
           break;
       }
     }
@@ -440,34 +454,9 @@ export class JediKit implements Kit {
     }
   }
 
-  /** Hurt every creature a capsule between two points touches, each once per `already`. */
+  /** Hurt every creature a capsule between two points touches, each once per `already` (the damage is the style's, with the rage already in it). */
   private sweep(ctx: KitContext, from: THREE.Vector3, to: THREE.Vector3, radius: number, damage: number, already: Set<Hittable>, push = 5): void {
-    const { player, world, physics, effects } = ctx;
-    mid.copy(from).add(to).multiplyScalar(0.5);
-    tmp.copy(to).sub(from);
-    const len = Math.max(0.01, tmp.length());
-    quat.setFromUnitVectors(UP, tmp.normalize());
-    physics.world.intersectionsWithShape(
-      mid,
-      quat,
-      new RAPIER.Capsule(len / 2, radius),
-      (collider) => {
-        const c = world.hittableAt(collider.handle);
-        // Aboard, the hull around the rooms is not a target: a fight inside must not cut the ship down.
-        if (c && !already.has(c) && c !== player.aboard?.vehicle) {
-          already.add(c);
-          c.damage(damage, player.pos, push);
-          tmp2.copy(c.pos).y += c.halfHeight;
-          effects.burst(tmp2, 0x9fd4ff, 1.2, 0.2);
-          effects.flash(tmp2, 0x9fd4ff, 10, 8, 0.15);
-        }
-        return true;
-      },
-      undefined,
-      undefined,
-      undefined,
-      player.body,
-    );
+    sweepCapsule(ctx, from, to, radius, damage / ctx.player.damageBoost, already, push);
   }
 
   private drawBolt(from: THREE.Vector3, to: THREE.Vector3): void {
