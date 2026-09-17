@@ -140,10 +140,45 @@ export function parseEnvironmentFile(root) {
 }
 
 /**
- * Write the planet's sky data into the pack. `textureFor(shaderPath)` resolves a shader to
- * its main texture ({ png, alphaMode, hasAlpha }) the way meshes get theirs.
+ * The effects every planet pack carries so any kind of weather can be asked for, lightest first.
+ * A planet's own rows only name what its climate has; these let the game show rain on a desert.
  */
-export function exportSky(vfs, planet, outDir, { textureFor, log = console.error, space = null }) {
+export const FORCE_EFFECTS = {
+  rain: ['appearance/pt_rain_sheet_verylight.prt', 'appearance/pt_rain_sheet_light.prt', 'appearance/pt_rain_sheet_heavy.prt'],
+  dust: ['appearance/pt_dust_storm_light.prt', 'appearance/pt_dust_storm.prt', 'appearance/pt_dust_storm_heavy.prt'],
+  snow: ['appearance/pt_snow_lifeday.prt', 'appearance/pt_snow_storm_heavy.prt'],
+};
+
+/** What a camera effect is, from its file name: rain, snow, dust, fog, leaves, lightning, smoke or other. */
+export function cameraEffectKind(path) {
+  const n = String(path).replace(/^.*[\\/]/, '').toLowerCase();
+  if (/snow/.test(n)) return 'snow';
+  if (/rain/.test(n)) return 'rain';
+  if (/dust|sand/.test(n)) return 'dust';
+  if (/fog|mist/.test(n)) return 'fog';
+  if (/leaf|leaves/.test(n)) return 'leaves';
+  // The archives spell it both ways, and both must land here rather than reading as "light".
+  if (/lightning|lighting/.test(n)) return 'lightning';
+  if (/smoke|ash/.test(n)) return 'smoke';
+  return 'other';
+}
+
+/** How hard it falls, 0..1, from the name's "very light", "light" and "heavy". */
+export function cameraEffectStrength(path) {
+  const n = String(path).replace(/^.*[\\/]/, '').toLowerCase();
+  if (/verylight/.test(n)) return 0.35;
+  if (/_light(_|\.|$)/.test(n)) return 0.6;
+  if (/heavy/.test(n)) return 1;
+  return 0.7;
+}
+
+/**
+ * Write the planet's sky data into the pack. `textureFor(shaderPath)` resolves a shader to
+ * its main texture ({ png, alphaMode, hasAlpha }) the way meshes get theirs. `particleFor(prtPath)`
+ * converts a row's camera effect into the pack and returns { file } or { failed }; without it the
+ * rows still name their effect but no file is written.
+ */
+export function exportSky(vfs, planet, outDir, { textureFor, particleFor = null, log = console.error, space = null }) {
   const envPath = `terrain/environment/${planet}.iff`;
   const tablePath = `datatables/environment/${planet}.iff`;
   // A space zone's sky can stand on its terrain file alone (Kashyyyk's system has no environment file of its own).
@@ -250,7 +285,20 @@ export function exportSky(vfs, planet, outDir, { textureFor, log = console.error
     }
   };
 
-  const sky = { planet, cycleSeconds: 86400, dayNightSplit: 0.7, sunElevationDegrees: 67.5, sun: null, supplementalSun: null, moon: null, supplementalMoon: null, celestials: [], stars: null, nightSky: null, timeLock: null, skybox: null, distant: [], space: null, blocks: [] };
+  /** A row's camera particle effect, converted into the pack when the caller can convert one. */
+  const effect = (path) => {
+    if (!path) return null;
+    const source = clean(path);
+    let file = null;
+    if (particleFor) {
+      const r = particleFor(source);
+      if (r?.failed) notes.push(`${source}: ${r.failed}`);
+      else file = r?.file ?? null;
+    }
+    return { source, file, kind: cameraEffectKind(source), strength: cameraEffectStrength(source) };
+  };
+
+  const sky = { planet, cycleSeconds: 86400, dayNightSplit: 0.7, sunElevationDegrees: 67.5, sun: null, supplementalSun: null, moon: null, supplementalMoon: null, celestials: [], stars: null, nightSky: null, timeLock: null, skybox: null, distant: [], space: null, weather: null, blocks: [] };
   const celestial = (c) => (c ? { ...c, image: shaderImage(c.shader), glowImage: shaderImage(c.glowShader) } : null);
   if (vfs.has(envPath)) {
     const env = parseEnvironmentFile(parseIff(vfs.read(envPath)));
@@ -318,6 +366,7 @@ export function exportSky(vfs, planet, outDir, { textureFor, log = console.error
     for (const row of table.rows) {
       const v = (i) => row[c[i]];
       const str = (i) => (typeof v(i) === 'string' ? v(i) : '');
+      const sound = (i) => (str(i) ? clean(str(i)) : null);
       const block = {
         name: str(0),
         weatherIndex: Number(v(1)) || 0,
@@ -331,12 +380,23 @@ export function exportSky(vfs, planet, outDir, { textureFor, log = console.error
         dayEnvironment: sky.space?.environmentMap ?? cube(str(15)),
         nightEnvironment: sky.space?.environmentMap ?? cube(str(16)),
         windSpeedScale: Number(v(24)) || 1,
+        // What the row makes fall around the camera, and the sounds the area plays (no audio system yet).
+        cameraEffect: effect(str(14)),
+        sounds: { day: [sound(17), sound(18)], night: [sound(19), sound(20)], music: { first: sound(21), sunrise: sound(22), sunset: sound(23) } },
       };
       sky.blocks.push(block);
     }
   }
+  if (sky.blocks.length && !space) {
+    sky.weather = {
+      levels: Math.max(1, ...sky.blocks.map((b) => b.weatherIndex + 1)),
+      effects: Object.fromEntries(Object.entries(FORCE_EFFECTS).map(([kind, list]) => [kind, list.map((p) => (vfs.has(p) ? effect(p)?.file ?? null : null))])),
+    };
+  }
   writeFileSync(join(outDir, 'sky.json'), JSON.stringify(sky));
-  const parts = [`${sky.blocks.length} environment blocks`, sky.sun ? 'sun' : 'no sun', sky.moon ? 'moon' : 'no moon', sky.skybox ? 'skybox' : 'gradient sky', sky.stars ? `${sky.stars.count} stars` : 'no stars', ...(sky.space ? [`${sky.space.lights.length} space lights`, `${sky.space.celestials.length} star sprites`] : [])];
+  const cameraEffects = new Set(sky.blocks.map((b) => b.cameraEffect?.source).filter(Boolean));
+  const effectKinds = [...new Set(sky.blocks.map((b) => b.cameraEffect?.kind).filter(Boolean))];
+  const parts = [`${sky.blocks.length} environment blocks`, sky.sun ? 'sun' : 'no sun', sky.moon ? 'moon' : 'no moon', sky.skybox ? 'skybox' : 'gradient sky', sky.stars ? `${sky.stars.count} stars` : 'no stars', ...(sky.space ? [`${sky.space.lights.length} space lights`, `${sky.space.celestials.length} star sprites`] : []), ...(sky.blocks.length ? [`${cameraEffects.size} camera effect${cameraEffects.size === 1 ? '' : 's'}${effectKinds.length ? ` (${effectKinds.join(', ')})` : ''}`] : [])];
   log(`  sky: ${parts.join(', ')} -> sky.json${notes.length ? `; ${notes.length} problems: ${[...new Set(notes)].slice(0, 6).join('; ')}` : ''}`);
   return 'sky.json';
 }

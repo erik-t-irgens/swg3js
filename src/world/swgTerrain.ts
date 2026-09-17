@@ -3,7 +3,7 @@ import * as THREE from 'three';
 // Heights are sampled on the main thread from cached pole grids; grids are produced
 // ahead of time by a worker so streaming never stalls on generation.
 
-import { Layer } from '../swg/terrain/generator';
+import { Layer, type EnvironmentFamily } from '../swg/terrain/generator';
 import { attachBitmap, bitmapFiles, ORIGIN_OFFSET, parseLayerFile, parseTerrainTemplate, TerrainSampler, UPPER_PAD, waterTables, type PoleBlock, type TerrainTemplate, type WaterTable } from '../swg/terrain/trn';
 
 export interface BuildingLayerSource {
@@ -247,6 +247,52 @@ export class SwgTerrain {
     return this.sampler.shaderAt(this.toSwgX(gx), this.toSwgZ(gz));
   }
 
+  /** The environment families the terrain paints, by id: the areas the environment table names. */
+  get environmentFamilies(): ReadonlyMap<number, EnvironmentFamily> {
+    return this.template.generator.environmentGroup.families;
+  }
+
+  /**
+   * Environment family at a game-space point (0 = none), generating the covering block if it is
+   * not cached. With `season`, a seasonal area there wins over the place underneath.
+   */
+  environmentAt(gx: number, gz: number, season = false): number {
+    const x = this.toSwgX(gx);
+    const z = this.toSwgZ(gz);
+    const bw = this.sampler.blockWidth;
+    // Generating a block here costs a millisecond or more, so it counts as a stall like heightAt's.
+    if (!this.sampler.hasBlock(Math.floor(x / bw), Math.floor(z / bw))) this.syncGenerations++;
+    return this.sampler.environmentAt(x, z, season);
+  }
+
+  /** The same from a cached block only: null when the block covering the point is not generated yet. */
+  environmentIfCached(gx: number, gz: number, season = false): number | null {
+    const x = this.toSwgX(gx);
+    const z = this.toSwgZ(gz);
+    const bw = this.sampler.blockWidth;
+    if (!this.sampler.hasBlock(Math.floor(x / bw), Math.floor(z / bw))) return null;
+    return this.sampler.environmentAt(x, z, season);
+  }
+
+  /**
+   * Game-space centre of the first active area painting a family, seasonal or not, with a radius
+   * that stays inside it. Null when no active area names it. An area with no boundaries is the
+   * whole map. For the console's "take me to this area".
+   */
+  environmentAreaCentre(name: string): { x: number; z: number; radius: number } | null {
+    const key = name.toLowerCase();
+    for (const a of this.template.generator.environmentAreas()) {
+      if (!a.active || a.name.toLowerCase() !== key) continue;
+      const half = this.template.mapWidthInMeters / 2;
+      const r = a.extent ?? { x0: -half, y0: -half, x1: half, y1: half };
+      const cx = (r.x0 + r.x1) / 2;
+      const cz = (r.y0 + r.y1) / 2;
+      if (!Number.isFinite(cx) || !Number.isFinite(cz)) continue;
+      return { x: this.toGameX(cx), z: this.toGameZ(cz), radius: Math.min(Math.abs(r.x1 - r.x0), Math.abs(r.y1 - r.y0)) / 2 };
+    }
+    return null;
+  }
+
   private static farKey(gx0: number, gz0: number, size: number, res: number): string {
     return `f:${gx0},${gz0},${size},${res}`;
   }
@@ -267,7 +313,7 @@ export class SwgTerrain {
     this.worker!.postMessage({ type: 'generate', id, startX, startZ, n, step });
   }
 
-  private onMessage(msg: { type: string; id?: number; heights?: Float32Array; shaders?: Int32Array; excluded?: Uint8Array; floraCollidable?: Uint8Array; floraNonCollidable?: Uint8Array; info?: unknown; message?: string }): void {
+  private onMessage(msg: { type: string; id?: number; heights?: Float32Array; shaders?: Int32Array; excluded?: Uint8Array; floraCollidable?: Uint8Array; floraNonCollidable?: Uint8Array; environments?: Uint8Array; seasonal?: Uint8Array; info?: unknown; message?: string }): void {
     if (msg.type === 'ready') {
       this.workerReady = true;
       console.info('terrain worker ready', msg.info);
@@ -277,7 +323,7 @@ export class SwgTerrain {
         this.pending.delete(msg.id);
         this.requested.delete(p.key);
         const n = msg.heights.length;
-        p.resolve({ heights: msg.heights, shaders: msg.shaders ?? new Int32Array(n), excluded: msg.excluded ?? new Uint8Array(n), floraCollidable: msg.floraCollidable ?? new Uint8Array(n * 2), floraNonCollidable: msg.floraNonCollidable ?? new Uint8Array(n * 2) });
+        p.resolve({ heights: msg.heights, shaders: msg.shaders ?? new Int32Array(n), excluded: msg.excluded ?? new Uint8Array(n), floraCollidable: msg.floraCollidable ?? new Uint8Array(n * 2), floraNonCollidable: msg.floraNonCollidable ?? new Uint8Array(n * 2), environments: msg.environments ?? new Uint8Array(n), seasonal: msg.seasonal ?? new Uint8Array(n) });
       }
     } else if (msg.type === 'error') {
       console.warn('terrain worker:', msg.message);

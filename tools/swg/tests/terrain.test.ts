@@ -207,6 +207,62 @@ check('outside circle', near(s.heightAt(150, 100), expectAt(150, 100), 1e-3));
   check('coordinate hash', h >= 0 && h < 1 && hashTuple(1, 2) !== hashTuple(2, 1) && hashTuple(1, 2) === hashTuple(1, 2), String(h));
 }
 
+// --- environment families (EGRP) and the affectors that paint them (AENV), evaluated like
+//     shader constants: a base layer everywhere, a town circle, a seasonal circle inside it.
+{
+  const efam = (id: number, name: string, clamp: number) => form('EFAM', chunk('DATA', new W().i32(id).str(name).u8(1).u8(2).u8(3).f32(clamp).bytes()));
+  const egrp = form('EGRP', form('0002', efam(1, 'global', 1), efam(2, 'Town', 0.5), efam(3, 'LifeDay', 1)));
+  const aenv = (name: string, family: number, override = 0, clamp = 1) => form('AENV', form('0000', ihdr(name), chunk('DATA', new W().i32(family).i32(override).f32(clamp).bytes())));
+  const adta = () => chunk('ADTA', new W().i32(0).i32(0).i32(1).str('').bytes());
+  const circle = (name: string, x: number, z: number, r: number, feath: number) => form('BCIR', form('0002', ihdr(name), chunk('DATA', new W().f32(x).f32(z).f32(r).i32(0).f32(feath).bytes())));
+  const makeTrn = (townOverride: boolean) => {
+    const everywhere = form('LAYR', form('0003', ihdr('G'), adta(), aenv('base', 1)));
+    const town = form('LAYR', form('0003', ihdr('T'), adta(), circle('town', 100, 100, 40, 0.5), aenv('town', 2, townOverride ? 1 : 0, 1)));
+    const party = form('LAYR', form('0003', ihdr('L'), adta(), circle('party', 100, 100, 10, 0), aenv('party', 3)));
+    const bad = form('LAYR', form('0003', ihdr('X'), adta(), aenv('nonsense', 300)));
+    const tgenE = form('TGEN', form('0000', sgrp, form('FGRP', form('0008')), form('RGRP', form('0003')), egrp, mgrp, form('LYRS', everywhere, town, party, bad)));
+    return parseTerrainTemplate(encode(form('PTAT', form('0015', chunk('DATA', header), tgenE, form('BAKE')))));
+  };
+  const te = makeTrn(false);
+  const eg = te.generator.environmentGroup;
+  check('environment families parsed', eg.families.size === 3 && eg.byName('town')?.id === 2 && eg.isSeasonal(3) && !eg.isSeasonal(2) && eg.featherClamp(2) === 0.5, JSON.stringify([...eg.families.values()]));
+  {
+    // A family record that ends early must not read past it: without a guard the colour would be
+    // three undefined bytes in a triple typed as numbers.
+    const { EnvironmentGroup } = await import('../../../src/swg/terrain/generator.ts');
+    const { parseIff } = await import('../../../src/swg/terrain/iff.ts');
+    const g = new EnvironmentGroup();
+    g.load(parseIff(encode(form('EGRP', form('0002', form('EFAM', chunk('DATA', new W().i32(9).str('short').bytes())))))));
+    const fam = g.families.get(9);
+    check('a truncated environment family reads without undefined bytes', !!fam && fam.name === 'short' && fam.color.every((c) => Number.isFinite(c)) && fam.featherClamp === 1, JSON.stringify(fam));
+  }
+  const se = new TerrainSampler(te);
+  check('environment base layer covers the map', se.environmentAt(0, 0) === 1 && se.environmentAt(-400, 300) === 1, `${se.environmentAt(0, 0)} ${se.environmentAt(-400, 300)}`);
+  check('environment circle paints its family', se.environmentAt(100, 100) === 2 && se.environmentAt(120, 100) === 2, `${se.environmentAt(100, 100)} ${se.environmentAt(120, 100)}`);
+  check('seasonal area kept in its own map', se.environmentAt(100, 100, true) === 3 && se.environmentAt(100, 100) === 2 && se.environmentAt(120, 100, true) === 2, `${se.environmentAt(100, 100, true)} ${se.environmentAt(120, 100, true)}`);
+  check('feather under the family clamp leaves the pole alone', se.environmentAt(134, 100) === 1, String(se.environmentAt(134, 100)));
+  const so = new TerrainSampler(makeTrn(true));
+  check('feather clamp override narrows the area', so.environmentAt(120, 100) === 2 && so.environmentAt(130, 100) === 1, `${so.environmentAt(120, 100)} ${so.environmentAt(130, 100)}`);
+  check('an out-of-range family is noted once and paints nothing', te.generator.unknownTags.size === 1 && [...te.generator.unknownTags.keys()][0].includes('300'), JSON.stringify([...te.generator.unknownTags]));
+  check('environment affectors counted', te.generator.summary().AENV === 4, JSON.stringify(te.generator.summary()));
+  const described = te.generator.describe().filter((l) => l.includes('AENV'));
+  check('describe names the families', described.some((l) => l.includes('family 2=Town') && !l.includes('seasonal')) && described.some((l) => l.includes('family 3=LifeDay seasonal')), described.join(' | '));
+  const areas = te.generator.environmentAreas();
+  const townArea = areas.find((a) => a.name === 'Town');
+  check('environment areas report their extent', !!townArea && townArea.active && townArea.extent?.x0 === 60 && townArea.extent?.x1 === 140 && areas.some((a) => a.name === 'LifeDay' && a.seasonal) && areas.some((a) => a.name === 'global' && a.extent === null), JSON.stringify(areas));
+  // A building's own layer file carries its own family list, which nothing remaps onto the planet's,
+  // so its environment affector must be counted and then leave the planet's map alone.
+  {
+    const before = se.environmentAt(-300, -300);
+    const lay = encodeRoots([form('SGRP', form('0006')), form('FGRP', form('0008')), form('RGRP', form('0003')),
+      form('EGRP', form('0002', efam(2, 'the file\'s own family', 1))), form('MGRP', form('0000')),
+      form('LAYR', form('0003', ihdr('bld'), adta(), circle('bld', 0, 0, 40, 0), aenv('bld', 2)))]);
+    const layer = parseLayerFile(lay, te.generator)!;
+    se.addBuildingLayer(layer, -300, -300, 0);
+    check('a layer file\'s environment affector is counted and paints nothing', se.environmentAt(-300, -300) === before && before === 1 && te.generator.unknownTags.size === 2, `${se.environmentAt(-300, -300)} vs ${before}; ${JSON.stringify([...te.generator.unknownTags.keys()])}`);
+  }
+}
+
 const t0 = performance.now(); let c = 0;
   for (let cz = -5; cz < 5; cz++) for (let cx = -5; cx < 5; cx++) { s.generate(cx * 32 - 4, cz * 32 - 4, s.numberOfPoles, s.poleStep); c++; }
   console.log(`generated ${c} chunks in ${(performance.now() - t0).toFixed(1)} ms (${((performance.now() - t0) / c).toFixed(2)} ms/chunk, ${s.numberOfPoles}x${s.numberOfPoles} poles)`);

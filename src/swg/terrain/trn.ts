@@ -172,6 +172,10 @@ export function parseLayerFile(bytes: Uint8Array, generator: TerrainGenerator): 
     }
     if (map.size) remapShaderFamilies(layer, map);
   }
+  // A layer file's environment families are its own and are not matched to the planet's, so any
+  // environment affector it carries is counted and then made inert: painting its family id into
+  // the planet's map would give that id the planet's meaning.
+  generator.noteEnvironment([layer], true);
   return layer;
 }
 
@@ -186,6 +190,9 @@ export interface HeightGrid {
   excluded: Uint8Array;
   floraCollidable: Uint8Array;
   floraNonCollidable: Uint8Array;
+  /** Environment family id at each pole (0 = none) and the same for seasonal areas. */
+  environments: Uint8Array;
+  seasonal: Uint8Array;
 }
 
 /** A cached block of poles: heights plus the per-pole maps flora placement reads. */
@@ -196,6 +203,10 @@ export interface PoleBlock {
   excluded: Uint8Array;
   floraCollidable: Uint8Array;
   floraNonCollidable: Uint8Array;
+  /** Environment family id at each pole (0 = none): which area's environment rows apply there. */
+  environments: Uint8Array;
+  /** The same for seasonal areas, so the place underneath is still known out of season. */
+  seasonal: Uint8Array;
 }
 
 export class TerrainSampler {
@@ -231,9 +242,9 @@ export class TerrainSampler {
 
   /** Run the generator over an arbitrary pole grid (used for blocks and coarse far tiles). */
   generate(startX: number, startZ: number, n: number, step: number): HeightGrid {
-    const d: ChunkData = createChunkData(startX, startZ, n, step, this.generator.fractalGroup, this.generator.shaderGroup, this.generator.bitmapGroup, this.generator.floraGroup);
+    const d: ChunkData = createChunkData(startX, startZ, n, step, this.generator.fractalGroup, this.generator.shaderGroup, this.generator.bitmapGroup, this.generator.floraGroup, this.generator.environmentGroup);
     this.generator.generateChunk(d);
-    return { startX, startZ, n, step, heights: d.heightMap, shaders: d.shaderMap, excluded: d.excludeMap, floraCollidable: d.floraCollidable, floraNonCollidable: d.floraNonCollidable };
+    return { startX, startZ, n, step, heights: d.heightMap, shaders: d.shaderMap, excluded: d.excludeMap, floraCollidable: d.floraCollidable, floraNonCollidable: d.floraNonCollidable, environments: d.environmentMap, seasonal: d.seasonalMap };
   }
 
   /**
@@ -278,7 +289,7 @@ export class TerrainSampler {
     if (!b) {
       const s = this.blockStart(blockX, blockZ);
       const g = this.generate(s.x, s.z, this.numberOfPoles, this.poleStep);
-      b = { heights: g.heights, shaders: g.shaders, excluded: g.excluded, floraCollidable: g.floraCollidable, floraNonCollidable: g.floraNonCollidable };
+      b = { heights: g.heights, shaders: g.shaders, excluded: g.excluded, floraCollidable: g.floraCollidable, floraNonCollidable: g.floraNonCollidable, environments: g.environments, seasonal: g.seasonal };
       this.blocks.set(key, b);
     }
     return b;
@@ -316,6 +327,17 @@ export class TerrainSampler {
     const { block, index } = this.poleIndex(x, z);
     return block.shaders[index] ?? 0;
   }
+
+  /**
+   * Environment family at the pole a world point maps to (0 = none). With `season`, a seasonal
+   * area covering the point wins over the place underneath. Generates the block when not cached.
+   */
+  environmentAt(x: number, z: number, season = false): number {
+    const { block, index } = this.poleIndex(x, z);
+    const s = season ? block.seasonal?.[index] ?? 0 : 0;
+    return s || (block.environments?.[index] ?? 0);
+  }
+
   /** Whether the generator excluded flora at a world point (AEXC affectors). */
   excludedAt(x: number, z: number): boolean {
     const { block, index } = this.poleIndex(x, z);

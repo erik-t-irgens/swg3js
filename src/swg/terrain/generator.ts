@@ -263,6 +263,59 @@ export class ShaderGroup {
   }
 }
 
+export interface EnvironmentFamily {
+  id: number;
+  name: string;
+  /** The editor's colour for the family (0..255 each). */
+  color: [number, number, number];
+  /** How much of a boundary's feather must cover a pole before the family takes it. */
+  featherClamp: number;
+  /** An event's area: written to the seasonal map, so the family under it is still known out of season. */
+  seasonal: boolean;
+}
+
+/** Families whose name matches this belong to a seasonal event rather than the place itself. */
+export const SEASONAL_FAMILY = /lifeday/i;
+
+/** EGRP: the environment families an area can belong to, the environment table's rows keyed by name. */
+export class EnvironmentGroup {
+  readonly families = new Map<number, EnvironmentFamily>();
+
+  featherClamp(familyId: number): number {
+    return this.families.get(familyId)?.featherClamp ?? 1;
+  }
+
+  isSeasonal(familyId: number): boolean {
+    return this.families.get(familyId)?.seasonal ?? false;
+  }
+
+  /** Case-insensitive: one planet's terrain capitalises names its environment table spells in lower case. */
+  byName(name: string): EnvironmentFamily | undefined {
+    const key = name.toLowerCase();
+    for (const f of this.families.values()) if (f.name.toLowerCase() === key) return f;
+    return undefined;
+  }
+
+  /** Any version form; each child FORM EFAM > DATA: int32 id, name, three colour bytes, float feather clamp. */
+  load(form: IffForm | undefined): void {
+    if (!form) return;
+    const v = form.children[0];
+    if (!v || !isForm(v)) return;
+    for (const c of v.children) {
+      const data = isForm(c) ? chunkChild(c, 'DATA') : c;
+      if (!data) continue;
+      const r = new ChunkReader(data.data);
+      if (r.remaining < 5) continue;
+      const id = r.int32();
+      const name = r.string();
+      // A truncated family would read undefined past the end, so each read is asked for first.
+      const color: [number, number, number] = r.remaining >= 3 ? [r.uint8(), r.uint8(), r.uint8()] : [255, 255, 255];
+      const featherClamp = r.remaining >= 4 ? r.float() : 1;
+      this.families.set(id, { id, name, color, featherClamp, seasonal: SEASONAL_FAMILY.test(name) });
+    }
+  }
+}
+
 /** An 8-bit greyscale image, rows top-down, as the engine's Image holds terrain bitmaps. */
 export interface Bitmap {
   width: number;
@@ -332,13 +385,18 @@ export interface ChunkData {
   floraNonCollidable: Uint8Array;
   normalMap: Float32Array;
   normalsDirty: boolean;
+  /** Environment family id per pole (0 = none): which area's environment rows apply there. */
+  environmentMap: Uint8Array;
+  /** The same for seasonal areas, kept apart so the place underneath is still known out of season. */
+  seasonalMap: Uint8Array;
   fractalGroup: FractalGroup;
   shaderGroup: ShaderGroup;
   bitmapGroup: BitmapGroup;
   floraGroup: FloraGroup;
+  environmentGroup: EnvironmentGroup;
 }
 
-export function createChunkData(startX: number, startZ: number, numberOfPoles: number, distanceBetweenPoles: number, fractalGroup: FractalGroup, shaderGroup: ShaderGroup, bitmapGroup: BitmapGroup = new BitmapGroup(), floraGroup: FloraGroup = new FloraGroup()): ChunkData {
+export function createChunkData(startX: number, startZ: number, numberOfPoles: number, distanceBetweenPoles: number, fractalGroup: FractalGroup, shaderGroup: ShaderGroup, bitmapGroup: BitmapGroup = new BitmapGroup(), floraGroup: FloraGroup = new FloraGroup(), environmentGroup: EnvironmentGroup = new EnvironmentGroup()): ChunkData {
   const n = numberOfPoles * numberOfPoles;
   const size = (numberOfPoles - 1) * distanceBetweenPoles;
   return {
@@ -354,10 +412,13 @@ export function createChunkData(startX: number, startZ: number, numberOfPoles: n
     floraNonCollidable: new Uint8Array(n * 2),
     normalMap: new Float32Array(n * 3),
     normalsDirty: true,
+    environmentMap: new Uint8Array(n),
+    seasonalMap: new Uint8Array(n),
     fractalGroup,
     shaderGroup,
     bitmapGroup,
     floraGroup,
+    environmentGroup,
   };
 }
 
@@ -1202,7 +1263,7 @@ export abstract class Affector extends LayerItem {
   prepare(): void {}
 }
 
-/** Parsed but inert: colour, flora, environment and passable affectors do not change the ground. */
+/** Parsed but inert: colour, flora and passable affectors do not change the ground. */
 export class AffectorInert extends Affector {
   affect(): void {}
 
@@ -1491,6 +1552,53 @@ export class AffectorShaderReplace extends Affector {
     this.sourceFamilyId = r.int32();
     this.destinationFamilyId = r.int32();
     if (v.type === '0001') {
+      this.useFeatherClampOverride = r.int32() !== 0;
+      this.featherClampOverride = r.float();
+    }
+  }
+}
+
+/** AENV: marks poles with an environment family, exactly as ASCN marks them with a shader family. */
+export class AffectorEnvironment extends Affector {
+  familyId = 0;
+  useFeatherClampOverride = false;
+  featherClampOverride = 1;
+  /** What was wrong with the affector when it loaded, for the generator's diagnostics. */
+  loadNote: string | null = null;
+
+  constructor() {
+    super('AENV');
+  }
+
+  affect(_wx: number, _wz: number, x: number, z: number, amount: number, d: ChunkData): void {
+    if (amount <= 0 || this.familyId === 0) return;
+    const g = d.environmentGroup;
+    const fc = this.useFeatherClampOverride ? this.featherClampOverride : g.featherClamp(this.familyId);
+    if (amount < fc) return;
+    const i = z * d.numberOfPoles + x;
+    // A seasonal area goes to its own map; an ordinary area painted over it takes the pole back in
+    // both, so the last write wins as it does in the client.
+    if (g.isSeasonal(this.familyId)) d.seasonalMap[i] = this.familyId;
+    else {
+      d.environmentMap[i] = this.familyId;
+      d.seasonalMap[i] = 0;
+    }
+  }
+
+  load(form: IffForm): void {
+    const v = form.children[0] as IffForm;
+    this.loadHeader(v);
+    const data = chunkChild(v, 'DATA');
+    if (!data) return;
+    const r = new ChunkReader(data.data);
+    const family = r.int32();
+    if (family < 0 || family > 255) {
+      // The map holds a byte per pole, so a family outside that range would wrap onto another area.
+      this.loadNote = `AENV: family id ${family} out of range (area left unpainted)`;
+      return;
+    }
+    this.familyId = family;
+    if (r.remaining >= 8) {
       this.useFeatherClampOverride = r.int32() !== 0;
       this.featherClampOverride = r.float();
     }
@@ -2122,7 +2230,7 @@ export class Layer extends LayerItem {
   }
 }
 
-const INERT_AFFECTORS = new Set(['AENV', 'ACCN', 'ACRH', 'ACRF', 'AFCN', 'ARCN', 'AFDN', 'AFDF', 'ARIB', 'APAS']);
+const INERT_AFFECTORS = new Set(['ACCN', 'ACRH', 'ACRF', 'AFCN', 'ARCN', 'AFDN', 'AFDF', 'ARIB', 'APAS']);
 const SKIPPED = new Set(['BALL', 'BSPL', 'AHSM', 'AHBM', 'ACBM', 'ASBM', 'AFBM']);
 
 /** TerrainGeneratorLoader::loadLayerItem */
@@ -2191,6 +2299,10 @@ export function loadLayerItem(form: IffForm, group: FractalGroup): LayerItem | n
       item = new AffectorShaderReplace();
       (item as AffectorShaderReplace).load(form);
       break;
+    case 'AENV':
+      item = new AffectorEnvironment();
+      (item as AffectorEnvironment).load(form);
+      break;
     case 'AEXC':
       item = new AffectorExclude();
       (item as AffectorExclude).load(form);
@@ -2233,6 +2345,7 @@ export class TerrainGenerator {
   readonly fractalGroup = new FractalGroup();
   readonly bitmapGroup = new BitmapGroup();
   readonly floraGroup = new FloraGroup();
+  readonly environmentGroup = new EnvironmentGroup();
   layers: Layer[] = [];
   /** Names of layer item tags that were not understood, for diagnostics. */
   readonly unknownTags = new Map<string, number>();
@@ -2251,6 +2364,11 @@ export class TerrainGenerator {
     } catch (err) {
       this.unknownTags.set(`FGRP: ${(err as Error).message}`, 1);
     }
+    try {
+      this.environmentGroup.load(formChild(v, 'EGRP'));
+    } catch (err) {
+      this.unknownTags.set(`EGRP: ${(err as Error).message}`, 1);
+    }
     const lyrs = formChild(v, 'LYRS');
     if (lyrs) {
       for (const c of lyrs.children) {
@@ -2260,7 +2378,29 @@ export class TerrainGenerator {
         this.layers.push(layer);
       }
     }
+    this.noteEnvironment(this.layers);
     this.prepare();
+  }
+
+  /**
+   * Take up what the environment affectors in a tree of layers reported while loading. A layer
+   * file carries its own family list, which is not remapped onto the planet's, so its areas are
+   * counted and then cleared: a family id from the file would otherwise be painted into the
+   * planet's map with the planet's meaning.
+   */
+  noteEnvironment(layers: readonly Layer[], fromLayerFile = false): void {
+    const note = (key: string) => this.unknownTags.set(key, (this.unknownTags.get(key) ?? 0) + 1);
+    const walk = (l: Layer) => {
+      for (const a of l.affectors) {
+        if (!(a instanceof AffectorEnvironment)) continue;
+        if (fromLayerFile) {
+          note('AENV in a layer file (families not remapped)');
+          a.familyId = 0;
+        } else if (a.loadNote) note(a.loadNote);
+      }
+      for (const s of l.layers) walk(s);
+    };
+    for (const l of layers) walk(l);
   }
 
   prepare(): void {
@@ -2286,6 +2426,8 @@ export class TerrainGenerator {
     d.floraCollidable.fill(0);
     d.floraNonCollidable.fill(0);
     d.excludeMap.fill(0);
+    d.environmentMap.fill(0);
+    d.seasonalMap.fill(0);
     d.normalsDirty = true;
     const n = d.numberOfPoles;
     const amountMap = new Float32Array(n * n).fill(1);
@@ -2315,6 +2457,10 @@ export class TerrainGenerator {
       if (it instanceof AffectorHeightTerrace) return `AHTR ${it.name}${on} height ${num(it.height)} fraction ${num(it.fraction)}`;
       if (it instanceof AffectorRoad) return `AROA ${it.name}${on} ${it.points.length} pts width ${num(it.width)} heights ${it.heightData.segments.length} segs fixed ${it.hasFixedHeights} feather ${it.featherFunction}/${num(it.featherDistance)}`;
       if (it instanceof AffectorRiver) return `ARIV ${it.name}${on} ${it.points.length} pts width ${num(it.width)} trench ${num(it.trenchDepth)} heights ${it.heightData.segments.length} segs`;
+      if (it instanceof AffectorEnvironment) {
+        const fam = this.environmentGroup.families.get(it.familyId);
+        return `AENV ${it.name}${on} family ${it.familyId}=${fam?.name ?? '?'}${fam?.seasonal ? ' seasonal' : ''} override ${it.useFeatherClampOverride ? 1 : 0}/${num(it.useFeatherClampOverride ? it.featherClampOverride : this.environmentGroup.featherClamp(it.familyId))}`;
+      }
       if (it instanceof AffectorShaderConstant) return `ASCN ${it.name}${on} family ${it.familyId}`;
       if (it instanceof AffectorShaderReplace) return `ASRP ${it.name}${on} ${it.sourceFamilyId} -> ${it.destinationFamilyId}`;
       return `${it.tag} ${it.name}${on}`;
@@ -2328,6 +2474,28 @@ export class TerrainGenerator {
     };
     for (const l of this.layers) walk(l, 0);
     return lines;
+  }
+
+  /**
+   * Where each environment affector sits: its family, whether that family is seasonal, whether the
+   * affector and every layer enclosing it is active, the layer path holding it, and the extent of
+   * its nearest enclosing layer with boundaries (null when it covers the whole map). For the console.
+   */
+  environmentAreas(): { familyId: number; name: string; seasonal: boolean; active: boolean; layer: string; extent: Rect | null }[] {
+    const out: { familyId: number; name: string; seasonal: boolean; active: boolean; layer: string; extent: Rect | null }[] = [];
+    const walk = (l: Layer, path: string[], enclosing: Rect | null, active: boolean) => {
+      const here = [...path, l.name];
+      const on = active && l.active;
+      const extent = l.useExtent ? l.extent : enclosing;
+      for (const a of l.affectors) {
+        if (!(a instanceof AffectorEnvironment)) continue;
+        const fam = this.environmentGroup.families.get(a.familyId);
+        out.push({ familyId: a.familyId, name: fam?.name ?? '', seasonal: fam?.seasonal ?? false, active: on && a.active, layer: here.join(' > '), extent });
+      }
+      for (const s of l.layers) walk(s, here, extent, on);
+    };
+    for (const l of this.layers) walk(l, [], null, true);
+    return out;
   }
 
   /** Counts of every layer item by tag, for diagnostics. */

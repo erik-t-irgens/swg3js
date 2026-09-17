@@ -21,6 +21,8 @@
 //   node tools/swg/cli.mjs planets <swg-dir>                        list the world snapshots in the archives and where each would centre
 //   node tools/swg/cli.mjs pois <swg-dir> <planet>|all <out-dir>    (re)write just pois.json for packs converted already
 //   node tools/swg/cli.mjs creatures <swg-dir> <out-dir>              every planet's creature as a skinned GLB under <out-dir>/creatures/
+//   node tools/swg/cli.mjs mobiles <swg-dir> <out-dir> [--only=creatures,droids,npcs,dressed,specials] [--match=re] [--limit=N] [--skip-existing] [--core3=<dir>|none] [--max-variants=32] [--plan]
+//                                                                  every creature, droid and NPC for the spawner under <out-dir>/mobiles: models, shared animation packs, catalogue.json
 //   node tools/swg/cli.mjs sat <swg-dir> <x.sat | object/mobile/shared_x.iff> <out.glb> [--anim=all|idle,walk] [--var=skin_color=3,...] [--wear=object/tangible/wearables/...,...]
 //   node tools/swg/cli.mjs trt <swg-dir> <x.trt> <out.png> [--var=name=value,...]   bake a texture renderer blueprint (skin, hair) to a PNG
 //   node tools/swg/cli.mjs player <swg-dir> <out-dir> [--template=object/creature/player/shared_human_male.iff] [--wear=...|none] [--var=...]   the player's character as <out-dir>/player/<id>.glb + manifest.json
@@ -75,8 +77,8 @@
 //        --core3=<dir> (SWGEmu's MMOCoreORB/bin/scripts: place the static objects its screenplays spawn,
 //                       and write the creature and NPC spawns to <pack>/spawns.json; or set CORE3 in the environment)
 //        --no-flip (keep left-handed coordinates)  --no-textures (skip DDS decoding)
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join, relative } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join, relative, resolve } from 'node:path';
 import { resolveParts } from './appearance.mjs';
 import { decodeDds } from './dds.mjs';
 import { buildGlb } from './glb.mjs';
@@ -99,13 +101,15 @@ import { ImageRegistry, exportBlueprint, exportPalettes, exportShader, palettesO
 import { effectAlpha, alphaModeFor } from './eff.mjs';
 import { localize, parseDatatable } from './datatable.mjs';
 import { mountCreatures, riderPoseFor } from './mounts.mjs';
+import * as M from './mobiles.mjs';
+import * as MS from './mobilescan.mjs';
 import { createRequire } from 'node:module';
 
 /** Named places per planet (see regions/build.mjs). */
 const REGIONS = createRequire(import.meta.url)('./regions/regions.json');
 import { decodeTga, encodeHeightmap } from './tga.mjs';
 import { exportSky } from './sky.mjs';
-import { mobileTemplates, scanServerSpawns } from './spawns.mjs';
+import { core3MobileStats, mobileTemplates, scanServerSpawns } from './spawns.mjs';
 import { loadEffect } from './texrender.mjs';
 import { readTemplate, stringParam } from './objtemplate.mjs';
 import { openTre, openVfs, readHeader } from './tre.mjs';
@@ -419,9 +423,19 @@ function convertOne(vfs, appearancePath, outFile) {
   return { meshPath, mesh, flipX, tris, shaders, textured: textures.size, warnings: mesh.warnings, partCount, cells: cellInfo, portals, effects };
 }
 
-// Particle effects: converted once per .prt into <out-dir>/particles/, textures shared.
-const particleTextures = new Map();
-const particleEffects = new Map();
+// Particle effects: converted once per .prt into <out-dir>/particles/, textures shared within one
+// pack. Keying by pack matters: a run over several planets used to write a later planet's manifest
+// entries without its files, because the first planet's conversion had already cached the effect.
+const particleTextures = new Map(); // resolve(outDir) -> Map(shader -> entry)
+const particleEffects = new Map(); // `${resolve(outDir)}|${prt}` -> entry
+
+/** How many particle effects this run converted (or failed) into one pack. */
+function particleCountFor(outDir) {
+  const prefix = `${resolve(outDir)}|`;
+  let n = 0;
+  for (const k of particleEffects.keys()) if (k.startsWith(prefix)) n++;
+  return n;
+}
 
 /** The first fixed-function pass of a shader's effect, for its blend mode. */
 function passFor(vfs, shaderPath) {
@@ -436,14 +450,16 @@ function passFor(vfs, shaderPath) {
 
 /** Convert a particle effect into the pack (cached per file); returns its manifest entry or { failed }. */
 function convertParticle(vfs, prtPath, outDir) {
-  const key = prtPath.toLowerCase();
+  const pack = resolve(outDir);
+  const key = `${pack}|${prtPath.toLowerCase()}`;
   let entry = particleEffects.get(key);
   if (entry) return entry;
+  if (!particleTextures.has(pack)) particleTextures.set(pack, new Map());
   try {
     entry = exportParticle(vfs, prtPath, outDir, {
       textureFor: (shader) => textureFor(vfs, shader),
       passFor: (shader) => passFor(vfs, shader),
-      textures: particleTextures,
+      textures: particleTextures.get(pack),
       write: (file, bytes) => {
         mkdirSync(dirname(file), { recursive: true });
         writeFileSync(file, bytes);
@@ -502,7 +518,7 @@ async function copyTerrain(vfs, planet, outDir) {
     console.warn(`terrain bitmaps not converted: ${err.message}`);
   }
   if (lastTemplate) copyTerrainShaders(vfs, lastTemplate, outDir);
-  exportSky(vfs, planet, outDir, { textureFor: (p) => textureFor(vfs, p) });
+  exportSky(vfs, planet, outDir, { textureFor: (p) => textureFor(vfs, p), particleFor: (p) => convertParticle(vfs, p, outDir) });
   return 'terrain.trn';
 }
 
@@ -893,6 +909,59 @@ function writeSpeciesIndex(outRoot) {
   return index;
 }
 
+/**
+ * One worn mesh (a .lmg's finest present level, or a .mgn) as a wardrobe part GLB in outDir, with
+ * the live colour recipe for a shader whose look a colour changes; null when the mesh is missing
+ * or draws nothing.
+ */
+function convertWearableMesh(vfs, meshPath, { skeleton, skin, outDir, ctx, info, recipes, recipeKeys, registry }) {
+  let name = meshPath;
+  if (/\.lmg$/i.test(name)) {
+    if (!vfs.has(name)) return null;
+    const lods = parseLmg(readIff(vfs, name));
+    name = lods.find((l) => vfs.has(l)) ?? lods[0];
+  }
+  if (!name || !vfs.has(name)) return null;
+  const mgn = parseMgn(readIff(vfs, name));
+  const { groups } = skinnedPrimitives(mgn, skeleton);
+  const meshName = basename(name).replace(/\.[^.]+$/, '');
+  const textures = new Map();
+  const kept = [];
+  for (const g of groups) {
+    if (!g.primitives[0].indices.length) continue;
+    const t = skinnedTexture(vfs, g.shader, null, ctx, info, meshName);
+    if (t) textures.set(g.shader, t);
+    kept.push(g);
+    const rkey = `${g.shader}|${meshName}`;
+    if (!recipeKeys.has(rkey)) {
+      try {
+        const shader = loadShader(vfs, g.shader, ctx);
+        if (shader?.effect && shaderNeedsBake(shader)) {
+          recipeKeys.add(rkey);
+          recipes.push({ mesh: meshName, material: g.shader, kind: 'bake', baseTag: 'MAIN', shader: exportShader(shader, registry, (f) => loadImage(vfs, f, ctx.images)), slots: [] });
+        }
+      } catch (err) {
+        info.skipped.push(`${g.shader}: no live recipe (${err.message})`);
+      }
+    }
+  }
+  if (!kept.length) return null;
+  const file = `${meshName}.glb`;
+  writeFileSync(join(outDir, file), buildGlb([{ name: meshName, groups: kept, extras: { occlusionLayer: mgn.occlusionLayer, occludes: mgn.occludes, zoneNames: mgn.occlusionZones, zoneCombinations: mgn.zoneCombinations, fullyOccludedBy: mgn.fullyOccludedBy } }], { flipX: true, textures, skin, keepZones: true }));
+  return {
+    name: meshName,
+    file,
+    bytes: statSync(join(outDir, file)).size,
+    triangles: kept.reduce((a, g) => a + g.primitives[0].indices.length / 3, 0),
+    occlusionLayer: mgn.occlusionLayer,
+    occludes: mgn.occludes,
+    zoneNames: mgn.occlusionZones,
+    zoneCombinations: mgn.zoneCombinations,
+    fullyOccludedBy: mgn.fullyOccludedBy,
+    morphs: mgn.blendTargets.map((b) => b.name),
+  };
+}
+
 /** Remember a customization variable by name, with where it was met, for the structured manifest. */
 function noteVariables(info, list, source, mesh = null) {
   if (!info.variables) return;
@@ -979,6 +1048,7 @@ function skinnedTexture(vfs, shaderPath, slots, ctx, info, mesh = null) {
  * skin under the clothing culled away for good. `parts` instead writes each mesh as its own GLB
  * against the same skeleton, keeps every triangle, and carries the occlusion zones through, so
  * the game can dress and undress a character at run time rather than the converter deciding once.
+ * `animations: false` reads no animation table at all, for a model whose clips live in a shared pack.
  */
 function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80, variables = new Map(), wear = [], extraClips = null, parts = null, gender = null } = {}) {
   let satPath = path.replace(/\\/g, '/');
@@ -1175,7 +1245,11 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
     info.meshes.push({ file, shaders: kept.length, triangles: kept.reduce((a, g) => a + g.primitives[0].indices.length / 3, 0), hidden: hiddenTriangles, layer: mgn.occlusionLayer, occludes: mgn.occludes });
   }
   const clips = [];
-  const latFile = sat.animationTables.get(skeletonFile.toLowerCase()) ?? [...sat.animationTables.values()][0];
+  // `animations: false` leaves the table unread altogether: a mobile's model carries no clips of
+  // its own, because its pack is baked once for every appearance that shares its table.
+  const tableFile = sat.animationTables.get(skeletonFile.toLowerCase()) ?? [...sat.animationTables.values()][0];
+  if (animations === false && tableFile) info.animationTable = tableFile;
+  const latFile = animations === false ? null : tableFile;
   if (latFile && vfs.has(latFile)) {
     const lat = parseLat(readIff(vfs, latFile));
     info.animationTable = latFile;
@@ -1532,13 +1606,14 @@ function packStatus(dir) {
       pois ? `${(pois.pois ?? pois).length ?? 0} places` : 'no pois.json',
       terrain ? `terrain${layers ? ` + ${layers} building layers` : ''}` : 'NO TERRAIN',
       shaders ? `ground textures ${textured}/${shaders.families.length}` : 'NO GROUND TEXTURES',
-      sky ? `sky (${sky.blocks.length} blocks)` : 'NO SKY',
+      sky ? `sky (${sky.blocks.length} blocks${sky.weather ? `, weather ${new Set(sky.blocks.map((b) => b.cameraEffect?.file).filter(Boolean)).size} effects` : ', NO WEATHER'})` : 'NO SKY',
     ];
     console.log(`  ${planet}: ${parts.join(', ')}`);
     if (!objects) need(`snapshot <swg-dir> ${planet} ${packDir} --center=auto --radius=all --retail-only`, `${planet} has no objects`);
     if (!terrain) need(`snapshot <swg-dir> ${planet} ${packDir} --center=auto --radius=all --retail-only`, `${planet} has no terrain`);
     else if (!shaders) need(`terrain <swg-dir> all ${dir} --retail-only`, `${planet} has no ground textures`);
     else if (!sky) need(`sky <swg-dir> all ${dir} --retail-only`, `${planet} has no sky`);
+    else if (!sky.weather) need(`sky <swg-dir> all ${dir} --retail-only`, `${planet} sky has no weather effects`);
     if (!pois) need(`pois <swg-dir> all ${dir} --retail-only`, `${planet} has no pois.json`);
   }
   const creatures = readJson(join(dir, 'creatures/manifest.json'));
@@ -1608,6 +1683,61 @@ function packStatus(dir) {
   const ships = readJson(join(dir, 'ships/manifest.json'));
   if (!ships) need(`ships <swg-dir> ${dir} --retail-only`, 'no ships converted for the garage (B in game, at the bottom)');
   else console.log(`  ships: ${ships.ships.length} ships, ${ships.ships.filter((sh) => sh.interior && !sh.interior.failed).length} with an interior, ${ships.skipped.length} left out`);
+  const readQuiet = (file) => {
+    try {
+      return readJson(file);
+    } catch {
+      return null;
+    }
+  };
+  const mobiles = readQuiet(join(dir, 'mobiles/catalogue.json'));
+  if (!mobiles) {
+    console.log('  mobiles: none (the spawner has only the planet creatures)');
+    need(`mobiles <swg-dir> ${dir} --retail-only`, 'no creature, droid or NPC catalogue for the spawner');
+  } else {
+    const sizeOf = (p) => {
+      try {
+        return statSync(join(dir, p)).size;
+      } catch {
+        return null;
+      }
+    };
+    const code = mobilesCodeStamp();
+    const units = M.unitList(mobiles).map((u) => {
+      const record = readQuiet(join(dir, u.record));
+      return { ...u, record, state: M.unitState(record, { sig: u.sig, source: mobiles.options.source }, sizeOf) };
+    });
+    const usable = (u) => u.state === 'current' || u.state === 'stale';
+    const of = (kind) => {
+      const us = units.filter((u) => u.kind === kind);
+      return `${us.filter(usable).length}/${us.length}`;
+    };
+    const byKind = M.KINDS.map((k) => `${mobiles.entries.filter((e) => e.kind === k).length} ${k}`).join(', ');
+    const ready = mobiles.entries.filter((e) => e.ready).length;
+    const dressedWell = mobiles.entries.filter((e) => e.outfitReady).length;
+    const stale = units.filter((u) => u.state === 'stale').length;
+    console.log(`  mobiles: ${mobiles.entries.length} entries (${byKind}), ${ready} ready, ${dressedWell} with every outfit piece; models ${of('model')}, anims ${of('pack')}, wearables ${of('wearables')}${stale ? `, ${stale} out of date` : ''}${mobiles.failed.length ? `, ${mobiles.failed.length} failed` : ''}`);
+    const nonRetail = units.filter((u) => u.record?.source && !u.record.source.retailOnly).length;
+    const otherCode = units.filter((u) => u.record && u.record.code !== code).length;
+    if (nonRetail) console.log(`  mobiles: ${nonRetail} units were converted without --retail-only`);
+    if (otherCode) console.log(`  mobiles: ${otherCode} units were converted by other converter code of the same format (--skip-existing keeps them; run without it to redo them)`);
+    if (mobiles.format !== M.MOBILES_FORMAT) need(`mobiles <swg-dir> ${dir} --retail-only`, 'the mobile catalogue is from an older converter');
+    // The wardrobes the outfits wear from, each its own run; the Ithorian ones need species again after.
+    const absent = Object.entries(mobiles.wardrobes ?? {}).filter(([w, x]) => x.references && !existsSync(join(dir, 'wardrobe', w, 'wardrobe.json')));
+    for (const [w, x] of absent) if (w in M.WARDROBE_RUNS) need(`wardrobe <swg-dir> ${dir} --retail-only${M.WARDROBE_RUNS[w]}`, `${x.references} NPC outfit pieces wear from wardrobe/${w}`);
+    if (absent.some(([w]) => w.startsWith('ithorian'))) need(`species <swg-dir> ${dir} --retail-only`, 'after the Ithorian wardrobes, so the species index names them');
+    const noSpecies = [...new Set(mobiles.entries.filter((e) => e.kind === 'dressed' && !existsSync(join(dir, 'characters', e.species, 'parts.json'))).map((e) => e.species))];
+    if (noSpecies.length) need(`species <swg-dir> ${dir} --retail-only`, `dressed NPCs need the species ${noSpecies.join(', ')}`);
+    // Then the mobiles run that fills the rest; one command, with every reason it is needed.
+    const rerun = `mobiles <swg-dir> ${dir} --retail-only --skip-existing`;
+    const toDo = units.filter((u) => u.state !== 'current').length;
+    const o = mobiles.options;
+    const partial = [o.only && `--only=${o.only.join(',')}`, o.match && `--match=${o.match}`, o.limit && `--limit=${o.limit}`].filter(Boolean).join(' ');
+    if (absent.length) need(rerun, 'after the wardrobes, so the NPC outfits are matched to them');
+    if (nonRetail) need(rerun, `${nonRetail} mobile units came from archives outside the retail set`);
+    if (toDo && partial) need(rerun, `the last mobiles run converted only ${partial}; this converts the other ${toDo} units and keeps the rest`);
+    else if (toDo) need(rerun, `${toDo} mobile models, packs or wearable folders missing or out of date`);
+  }
   if (!todo.size) {
     console.log(`everything is in place: ${planets} planet packs, creatures and player`);
     return;
@@ -1852,7 +1982,7 @@ async function snapshotPlanet(vfs, planet, outDir) {
     const fx = manifest.categories.layout.filter((m) => m.particle);
     const attached = manifest.categories.layout.reduce((n, m) => n + (m.effects?.length ?? 0), 0);
     console.log(`layout: ${objects.length} objects, ${manifest.categories.layout.length} models -> ${join(outDir, 'layout.json')}`);
-    if (fx.length || attached) console.log(`particles: ${fx.length} effects placed on their own (${objects.filter((o) => fx.some((m) => m.id === o.model)).length} placements), ${attached} attached to models, ${particleTextures.size} textures`);
+    if (fx.length || attached) console.log(`particles: ${fx.length} effects placed on their own (${objects.filter((o) => fx.some((m) => m.id === o.model)).length} placements), ${attached} attached to models, ${particleTextures.get(resolve(outDir))?.size ?? 0} textures`);
     const withCells = manifest.categories.layout.filter((m) => m.cells);
     console.log(`buildings: ${withCells.length} models with cells, ${withCells.filter((m) => m.portals && m.portals.length).length} with portals`);
     console.log(`terrain: ${terrainFile ?? 'not found'}, ${objects.filter((o) => o.layer).length} objects with terrain modification layers (${new Set(objects.map((o) => o.layer).filter(Boolean)).size} files)`);
@@ -1861,6 +1991,146 @@ async function snapshotPlanet(vfs, planet, outDir) {
       for (const ex of [...(examples[reason] ?? [])].slice(0, 3)) console.log(`      e.g. ${ex}`);
     }
     printEffectSummary();
+}
+
+/** What the mobiles units' conversion code is, so a record written by other code is noticed. */
+function mobilesCodeStamp() {
+  const modules = ['mobiles.mjs', 'mobilescan.mjs', 'skeletal.mjs', 'glb.mjs', 'texrender.mjs', 'customize.mjs', 'sht.mjs', 'dds.mjs', 'tga.mjs', 'png.mjs', 'eff.mjs', 'iff.mjs', 'objtemplate.mjs', 'mounts.mjs'];
+  const texts = modules.map((f) => readFileSync(new URL(`./${f}`, import.meta.url), 'utf8'));
+  // cli.mjs changes for every command, so only the functions a unit runs are taken from it.
+  for (const fn of [convertSat, skinnedTexture, textureFor, normalFor, surfaceFor, alphaFromEffect, noteVariables, customizationList, convertWearableMesh]) texts.push(String(fn));
+  return M.codeStampOf(texts);
+}
+
+/** The disk a mobiles run writes to, as paths relative to <out-dir>. Writes are atomic. */
+function mobilesIo(outRoot) {
+  const at = (rel) => join(outRoot, rel);
+  const walk = (rel, out = []) => {
+    let names;
+    try {
+      names = readdirSync(at(rel), { withFileTypes: true });
+    } catch {
+      return out;
+    }
+    for (const e of names) {
+      const child = `${rel}/${e.name}`;
+      if (e.isDirectory()) walk(child, out);
+      else out.push(child);
+    }
+    return out;
+  };
+  const io = {
+    exists: (rel) => existsSync(at(rel)),
+    size: (rel) => {
+      try {
+        return statSync(at(rel)).size;
+      } catch {
+        return null;
+      }
+    },
+    readFile: (rel) => readFileSync(at(rel)),
+    readJson: (rel) => {
+      try {
+        return JSON.parse(readFileSync(at(rel), 'utf8'));
+      } catch {
+        return null;
+      }
+    },
+    writeFileAtomic: (rel, bytes) => {
+      mkdirSync(dirname(at(rel)), { recursive: true });
+      writeFileSync(`${at(rel)}.write`, bytes);
+      renameSync(`${at(rel)}.write`, at(rel));
+    },
+    writeJsonAtomic: (rel, value, indent = 1) => io.writeFileAtomic(rel, JSON.stringify(value, null, indent || undefined)),
+    remove: (rel) => rmSync(at(rel), { recursive: true, force: true }),
+    rename: (from, to) => {
+      mkdirSync(dirname(at(to)), { recursive: true });
+      rmSync(at(to), { recursive: true, force: true });
+      try {
+        renameSync(at(from), at(to));
+      } catch (err) {
+        if (err.code !== 'EPERM') throw err;
+        // Windows: something held it open for a moment (a file viewer, an unzip). One retry, then say so.
+        const until = Date.now() + 200;
+        while (Date.now() < until);
+        try {
+          renameSync(at(from), at(to));
+        } catch {
+          throw new Error(`could not replace ${to}: close anything holding it open (a file viewer, an unzip), then run again with --skip-existing`);
+        }
+      }
+    },
+    listFiles: (rel) => walk(rel),
+  };
+  return io;
+}
+
+/** The conversions a mobiles run needs: a plain model, a parts character, a wearable folder. */
+function mobilesConvert(vfs, outRoot) {
+  const at = (rel) => join(outRoot, rel);
+  const warningsOf = (info) => [...info.missing.map((m) => `missing ${m}`), ...info.skipped];
+  return {
+    model(sat, outRel, values) {
+      const info = convertSat(vfs, sat, at(outRel), { animations: false, variables: new Map(Object.entries(values)) });
+      if (!info.meshes.some((m) => m.shaders > 0)) throw new Error('no mesh survived');
+      return {
+        joints: info.joints,
+        triangles: info.meshes.reduce((a, m) => a + m.triangles, 0),
+        meshes: info.meshes.filter((m) => m.shaders > 0).map((m) => basename(m.file).replace(/\.[^.]+$/, '')),
+        bounds: info.bounds ?? null,
+        warnings: warningsOf(info),
+      };
+    },
+    parts(sat, dirRel, values, { id, anims, gender }) {
+      const info = convertSat(vfs, sat, null, { animations: false, variables: new Map(Object.entries(values)), parts: { dir: at(dirRel), rig: 'rig' } });
+      writeFileSync(join(at(dirRel), 'parts.json'), JSON.stringify({
+        id, species: null, gender, template: null, skeleton: info.skeleton, rig: info.rig, anims, joints: info.joints,
+        defaultWear: info.parts.filter((p) => p.occlusionLayer > 0).map((p) => p.name),
+        clips: [], clipSpeeds: {}, parts: info.parts,
+        customization: [...info.customization], variables: customizationList(vfs, info), values,
+      }, null, 2));
+      return {
+        joints: info.joints,
+        triangles: info.parts.reduce((a, p) => a + p.triangles, 0),
+        meshes: info.parts.map((p) => p.name),
+        bounds: info.bounds ?? null,
+        recipes: info.recipes ?? 0,
+        images: info.images ?? 0,
+        warnings: warningsOf(info),
+      };
+    },
+    wearables(dirRel, plan) {
+      const dir = at(dirRel);
+      mkdirSync(dir, { recursive: true });
+      const skeleton = MS.loadSkeletonSet(vfs, plan.skeletons);
+      const skin = skinData(skeleton, [], { flipX: true });
+      const recipes = [];
+      const recipeKeys = new Set();
+      const registry = new ImageRegistry((id, bytes) => {
+        mkdirSync(join(dir, 'customize'), { recursive: true });
+        writeFileSync(join(dir, 'customize', id), bytes);
+      });
+      const items = [];
+      const failed = [];
+      for (const { lmg, part } of plan.meshes) {
+        // A fresh render context per mesh, so the images one piece decoded are released before the next.
+        const info = { missing: [], skipped: [], customization: new Set(), variables: new Map(), textureRenderers: [], shaderNotes: new Set() };
+        const entry = convertWearableMesh(vfs, lmg, { skeleton, skin, outDir: dir, ctx: renderContext(), info, recipes, recipeKeys, registry });
+        if (!entry) {
+          failed.push(part);
+          continue;
+        }
+        items.push({ id: `npc_${entry.name.replace(/_l\d+$/, '')}`, template: '', kind: /hair/.test(lmg) ? 'hair' : 'wearables', sat: '', gender: plan.gender, parts: [entry], variables: customizationList(vfs, info) });
+      }
+      writeFileSync(join(dir, 'wardrobe.json'), JSON.stringify({ species: plan.folder, gender: plan.gender, skeleton: plan.skeleton, items }, null, 2));
+      if (recipes.length) writeFileSync(join(dir, 'customize.json'), JSON.stringify({ images: 'customize/', recipes, palettes: exportPalettes(vfs, recipes.flatMap((r) => palettesOf(r))) }, null, 1));
+      return { items: items.map((i) => i.id), failed };
+    },
+    clearCaches() {
+      textureCache.clear();
+      normalCache.clear();
+    },
+  };
 }
 
 switch (cmd) {
@@ -2270,6 +2540,44 @@ switch (cmd) {
     break;
   }
 
+  case 'mobiles': {
+    // <swg-dir> <out-dir> [--only=...] [--match=re] [--limit=N] [--skip-existing] [--core3=<dir>|none] [--max-variants=32] [--plan]
+    // Every creature, droid and person the mobile templates describe, into <out-dir>/mobiles/.
+    if (!pos[2]) usage();
+    const vfs = mount(pos[1]);
+    const outRoot = pos[2];
+    const source = M.sourceStampOf({ retailOnly: flags.has('--retail-only'), archives: vfs.archives.map((a) => [basename(a.path).toLowerCase(), statSync(a.path).size]) });
+    const core3Dir = options.core3 === 'none' ? null : options.core3 ?? process.env.CORE3 ?? null;
+    let core3Stats = null;
+    if (core3Dir) {
+      core3Stats = core3MobileStats(core3Dir);
+      if (!core3Stats.size) {
+        console.log(`core3: no scripts/mobile under ${core3Dir}; stats stay heuristic`);
+        core3Stats = null;
+      }
+    }
+    M.runMobiles({
+      vfs,
+      scan: MS,
+      io: mobilesIo(outRoot),
+      convert: mobilesConvert(vfs, outRoot),
+      source,
+      code: mobilesCodeStamp(),
+      core3Stats,
+      options: {
+        plan: flags.has('--plan'),
+        skipExisting: flags.has('--skip-existing'),
+        only: options.only ? options.only.split(',').map((k) => k.trim()).filter(Boolean) : null,
+        match: options.match ?? null,
+        limit: options.limit ? Number(options.limit) : null,
+        maxVariants: options['max-variants'] ? Number(options['max-variants']) : 32,
+        core3: options.core3 === 'none' ? 'none' : core3Dir ? 'read' : null,
+      },
+    });
+    printEffectSummary();
+    break;
+  }
+
   case 'sat': {
     // <swg-dir> <appearance/x.sat | object/mobile/shared_x.iff> <out.glb> [--anim=all|idle,walk,run]
     if (!pos[3]) usage();
@@ -2407,51 +2715,9 @@ switch (cmd) {
         const entries = [];
         // The item's variables (a shirt's colour 1 and 2), noted per mesh as its shaders are read.
         const info = { missing: [], skipped: [], customization: new Set(), variables: new Map(), textureRenderers: [], shaderNotes: new Set() };
-        for (let name of sat.meshes) {
-          if (/\.lmg$/i.test(name)) {
-            if (!vfs.has(name)) continue;
-            const lods = parseLmg(readIff(vfs, name));
-            name = lods.find((l) => vfs.has(l)) ?? lods[0];
-          }
-          if (!name || !vfs.has(name)) continue;
-          const mgn = parseMgn(readIff(vfs, name));
-          const { groups } = skinnedPrimitives(mgn, skeleton);
-          const meshName = basename(name).replace(/\.[^.]+$/, '');
-          const textures = new Map();
-          const kept = [];
-          for (const g of groups) {
-            if (!g.primitives[0].indices.length) continue;
-            const t = skinnedTexture(vfs, g.shader, null, ctx, info, meshName);
-            if (t) textures.set(g.shader, t);
-            kept.push(g);
-            const rkey = `${g.shader}|${meshName}`;
-            if (!recipeKeys.has(rkey)) {
-              try {
-                const shader = loadShader(vfs, g.shader, ctx);
-                if (shader?.effect && shaderNeedsBake(shader)) {
-                  recipeKeys.add(rkey);
-                  recipes.push({ mesh: meshName, material: g.shader, kind: 'bake', baseTag: 'MAIN', shader: exportShader(shader, registry, (f) => loadImage(vfs, f, ctx.images)), slots: [] });
-                }
-              } catch (err) {
-                info.skipped.push(`${g.shader}: no live recipe (${err.message})`);
-              }
-            }
-          }
-          if (!kept.length) continue;
-          const file = `${meshName}.glb`;
-          writeFileSync(join(outDir, file), buildGlb([{ name: meshName, groups: kept, extras: { occlusionLayer: mgn.occlusionLayer, occludes: mgn.occludes, zoneNames: mgn.occlusionZones, zoneCombinations: mgn.zoneCombinations, fullyOccludedBy: mgn.fullyOccludedBy } }], { flipX: true, textures, skin, keepZones: true }));
-          entries.push({
-            name: meshName,
-            file,
-            bytes: statSync(join(outDir, file)).size,
-            triangles: kept.reduce((a, g) => a + g.primitives[0].indices.length / 3, 0),
-            occlusionLayer: mgn.occlusionLayer,
-            occludes: mgn.occludes,
-            zoneNames: mgn.occlusionZones,
-            zoneCombinations: mgn.zoneCombinations,
-            fullyOccludedBy: mgn.fullyOccludedBy,
-            morphs: mgn.blendTargets.map((b) => b.name),
-          });
+        for (const name of sat.meshes) {
+          const entry = convertWearableMesh(vfs, name, { skeleton, skin, outDir, ctx, info, recipes, recipeKeys, registry });
+          if (entry) entries.push(entry);
         }
         if (!entries.length) throw new Error('no mesh survived');
         catalogue.push({ id, template: tpl, kind: tpl.split('/')[2], sat: satPath, gender: usedOtherGender ? (gender === 'm' ? 'f' : 'm') : gender, parts: entries, variables: customizationList(vfs, info) });
@@ -2755,7 +3021,7 @@ switch (cmd) {
     }
     const manifest = { classes: WEAPON_CLASSES, weapons, skipped, saberColors, effects };
     writeFileSync(join(outDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
-    console.log(`-> ${outDir}: ${weapons.length} weapons in ${models.size} models, ${skipped.length} left out (listed in manifest.json; I in game opens the rack, the Weapons tab); ${fxCache.size} weapon effect rows, ${particleEffects.size} particle effects`);
+    console.log(`-> ${outDir}: ${weapons.length} weapons in ${models.size} models, ${skipped.length} left out (listed in manifest.json; I in game opens the rack, the Weapons tab); ${fxCache.size} weapon effect rows, ${particleCountFor(outDir)} particle effects`);
     const unknown = skipped.filter((s) => /unknown|melee kind/.test(s.why));
     if (unknown.length) console.log(`   kinds without a style yet:\n${unknown.map((s) => `     ${s.template}  (${s.why})`).join('\n')}`);
     printEffectSummary();
@@ -3397,7 +3663,7 @@ switch (cmd) {
     for (const [planet, outDir] of targets) {
       mkdirSync(outDir, { recursive: true });
       console.log(`${planet}:`);
-      exportSky(vfs, planet, outDir, { textureFor: (p) => textureFor(vfs, p), log: console.log });
+      exportSky(vfs, planet, outDir, { textureFor: (p) => textureFor(vfs, p), particleFor: (p) => convertParticle(vfs, p, outDir), log: console.log });
     }
     printEffectSummary();
     break;
@@ -3501,7 +3767,7 @@ switch (cmd) {
       writeFileSync(join(outDir, 'manifest.json'), JSON.stringify({ planet: zone, categories: { layout: [...models.values()].filter((m) => !m.failed) } }, null, 2));
       writeFileSync(join(outDir, 'layout.json'), JSON.stringify({ planet: zone, center: { x: 0, z: 0 }, radius: null, objects, skipped: [] }));
       const env = parseSpaceEnvironment(trnRoot);
-      exportSky(vfs, zone, outDir, { textureFor: (p) => textureFor(vfs, p), log: console.log, space: env });
+      exportSky(vfs, zone, outDir, { textureFor: (p) => textureFor(vfs, p), particleFor: (p) => convertParticle(vfs, p, outDir), log: console.log, space: env });
       console.log(`-> ${outDir}: ${stations.length} stations, ${asteroids} asteroids in ${models.size} models, ${planets.length} planets and moons${env.skybox ? `, skybox ${env.skybox}` : ', no skybox named'}, ${env.lights.length} lights, ${env.celestials.length} star sprites, ${env.stars?.count ?? 0} stars, ${env.dust?.count ?? 0} dust`);
     }
     printEffectSummary();
