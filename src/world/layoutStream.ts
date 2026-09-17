@@ -9,7 +9,6 @@ import { CHUNK_SIZE } from './terrain';
 import type { Exclusion } from './props';
 import { ACTOR_LAYER, INTERIOR_LAYER, crossing } from './portalRender';
 import { mirroredTransform, type EffectHandle, type ParticleEffects } from './particles';
-import { LIFT_CELL } from './lifts';
 
 export const REGION = 256;
 
@@ -567,6 +566,9 @@ export class LayoutStreamer {
           return target === 0 ? null : { building: b, cell: target };
         }
       }
+      // Out of every room's box (a balcony past an outside door whose crossing was missed, a
+      // window): outside, or the outside stays hidden while the player walks on it.
+      if (!b.model.interiorBoxes.some((box) => box.clone().expandByScalar(1).containsPoint(localB))) return null;
       return state;
     }
     for (const b of this.buildings) {
@@ -585,13 +587,8 @@ export class LayoutStreamer {
     return null;
   }
 
-  /**
-   * Elevator terminals within `range` of a point: 'up', 'down' or 'both' (plain elevator
-   * terminals); and, standing in a room the building names as a lift shaft (elevator1,
-   * reactorlift), the shaft itself as a plain elevator: the game's lifts were objects the server
-   * spawned in those shafts, so the shaft's floors are the stops.
-   */
-  elevatorsNear(pos: THREE.Vector3, range: number, state: CellState | null = null): { kind: 'up' | 'down' | 'both'; d: number }[] {
+  /** Elevator terminals within `range` of a point: 'up', 'down' or 'both' (plain elevator terminals). The lift shafts themselves are lifts.ts. */
+  elevatorsNear(pos: THREE.Vector3, range: number): { kind: 'up' | 'down' | 'both'; d: number }[] {
     const out: { kind: 'up' | 'down' | 'both'; d: number }[] = [];
     for (const o of this.objects) {
       if (!o.template.includes('terminal_elevator')) continue;
@@ -599,11 +596,66 @@ export class LayoutStreamer {
       if (d > range || Math.abs(o.y - pos.y) > 3) continue;
       out.push({ kind: o.template.includes('_up') ? 'up' : o.template.includes('_down') ? 'down' : 'both', d });
     }
-    if (state && state.cell > 0) {
-      const cell = state.building.model.def.cells?.find((c) => c.index === state.cell);
-      if (cell && LIFT_CELL.test(cell.name)) out.push({ kind: 'both', d: 0 });
-    }
     return out.sort((a, b) => a.d - b.d);
+  }
+
+  /**
+   * A building with rooms beside a point (within its radius and a few metres) that cannot be
+   * walked into from there: no passable doorway from outside within a dozen metres of the point
+   * and near its height. The dungeons whose way in was a server object, the stations whose
+   * doors are up in the air. The nearest such, or null.
+   */
+  doorlessNear(pos: THREE.Vector3): Building | null {
+    let best: Building | null = null;
+    let bestD = Infinity;
+    for (const b of this.buildings) {
+      const d = Math.hypot(b.x - pos.x, b.z - pos.z);
+      if (d > b.radius + 6 || !(b.model.def.cells?.length)) continue;
+      const reachable = b.model.portals.some((p) => {
+        if (!p.passable || !p.links.some((l) => l.from === 0 || l.to === 0)) return false;
+        localA.set(0, 0, 0);
+        for (const v of p.verts) localA.add(v);
+        localA.divideScalar(Math.max(1, p.verts.length)).applyMatrix4(b.matrix);
+        return Math.hypot(localA.x - pos.x, localA.z - pos.z) < 12 && Math.abs(localA.y - pos.y) < 3;
+      });
+      if (reachable || d >= bestD) continue;
+      bestD = d;
+      best = b;
+    }
+    return best;
+  }
+
+  /** The buildings around a point and why each does or does not count as doorless, for the console. */
+  describeDoorless(pos: THREE.Vector3): { model: string; d: number; radius: number; built: boolean; cells: number; portals: number; outsideDoors: number }[] {
+    const out: { model: string; d: number; radius: number; built: boolean; cells: number; portals: number; outsideDoors: number }[] = [];
+    for (const b of this.buildings) {
+      const d = Math.hypot(b.x - pos.x, b.z - pos.z);
+      if (d > b.radius + 30) continue;
+      out.push({ model: b.model.def.id, d: Math.round(d), radius: Math.round(b.radius), built: b.interiorBuilt, cells: b.model.def.cells?.length ?? 0, portals: b.model.portals.length, outsideDoors: b.model.portals.filter((p) => p.passable && p.links.some((l) => l.from === 0 || l.to === 0)).length });
+    }
+    return out;
+  }
+
+  /**
+   * A way into a building for a player who cannot walk in: the room its outside doors open into
+   * (even shut ones), else the lowest-numbered room, and a standing spot on that room's floor.
+   */
+  entryOf(b: Building): { cell: number; at: THREE.Vector3 } | null {
+    this.buildInterior(b);
+    const cells = (b.model.def.cells ?? []).filter((c) => c.index > 0);
+    if (!cells.length) return null;
+    const doorway = b.model.portals.find((p) => p.links.some((l) => l.from === 0 || l.to === 0));
+    const link = doorway?.links.find((l) => l.from === 0 || l.to === 0);
+    const index = link ? (link.from === 0 ? link.to : link.from) : cells[0].index;
+    const cell = cells.find((c) => c.index === index) ?? cells[0];
+    const [x0, y0, z0] = cell.bounds.min;
+    const [x1, y1, z1] = cell.bounds.max;
+    localA.set((x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2).applyMatrix4(b.matrix);
+    // The room's lowest floor under its middle, in the world (the building may be turned, so the extent is the box's diagonal).
+    const half = Math.hypot(y1 - y0) / 2 + 0.5;
+    const floors = this.physics.floorsAt(localA.x, localA.z, localA.y + half, localA.y - half);
+    const y = floors.length ? floors[floors.length - 1] + 0.15 : localA.y - half + 0.5;
+    return { cell: cell.index, at: new THREE.Vector3(localA.x, y, localA.z) };
   }
 
   /** The building and cell holding a world point, for a player put there without walking in (a teleport), or null. */

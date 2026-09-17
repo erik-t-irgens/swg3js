@@ -16,7 +16,7 @@ import { Group, groups, RAPIER as R } from '../core/physics';
 import { CHUNK_RES, CHUNK_SIZE, Terrain } from './terrain';
 import { SwgTerrain, type BuildingLayerSource } from './swgTerrain';
 import { LayoutStreamer, type Building, type CellState, type PlacedObject } from './layoutStream';
-import { isLiftCell, liftStops, nextStop } from './lifts';
+import { isLiftCell, liftStops, stopAt, type LiftStop } from './lifts';
 import { ParticleEffects } from './particles';
 import { CSM } from 'three/examples/jsm/csm/CSM.js';
 import { ACTOR_LAYER, INTERIOR_LAYER, markActor, type PortalRenderer } from './portalRender';
@@ -1452,9 +1452,9 @@ export class World {
     return state?.cell ?? 0;
   }
 
-  /** Elevator terminals near the player, nearest first, and the lift shaft the player stands in (empty outside buildings). */
+  /** Elevator terminals near the player, nearest first (empty outside buildings). */
   elevatorsNear(pos: THREE.Vector3, range: number): { kind: 'up' | 'down' | 'both'; d: number }[] {
-    return this.cellState && this.layoutStream ? this.layoutStream.elevatorsNear(pos, range, this.cellState) : [];
+    return this.cellState && this.layoutStream ? this.layoutStream.elevatorsNear(pos, range) : [];
   }
 
   /**
@@ -1465,18 +1465,6 @@ export class World {
   useElevator(pos: THREE.Vector3, up: boolean): THREE.Vector3 | null {
     const b = this.cellState?.building;
     if (!b || !this.layoutStream) return null;
-    // In a lift shaft the stops are its doorways (lifts.ts): out through the next level's, into the room beyond.
-    const shaft = this.cellState!.cell;
-    if (isLiftCell(b.model.def, shaft)) {
-      // The ride is always to the next level up, and down again from the top, whichever way was asked.
-      tmpV.copy(pos).applyMatrix4(b.inverse);
-      const stop = nextStop(liftStops(b.model.def, shaft), tmpV.y);
-      if (!stop) return null;
-      const next = stop.at.clone().applyMatrix4(b.matrix);
-      this.cellState = { building: b, cell: stop.cell };
-      this.prevPlayerPos.copy(next);
-      return next;
-    }
     const floors = this.physics.floorsAt(pos.x, pos.z, pos.y + 80, pos.y - 80);
     let i = floors.findIndex((f) => Math.abs(f - pos.y) < 1);
     if (i < 0) i = floors.findIndex((f) => f < pos.y);
@@ -1487,6 +1475,57 @@ export class World {
     this.cellState = { building: b, cell: cell || this.cellState!.cell };
     this.prevPlayerPos.copy(next);
     return next;
+  }
+
+  /**
+   * The lift shaft the player stands in: the stops it reaches (its doorways and those of the
+   * shafts it opens into, lifts.ts), which one the player is at, and a title; null outside a shaft.
+   */
+  liftHere(pos: THREE.Vector3): { stops: LiftStop[]; current: number; title: string } | null {
+    const b = this.cellState?.building;
+    if (!b || !this.cellState || !isLiftCell(b.model.def, this.cellState.cell)) return null;
+    const stops = liftStops(b.model.def, this.cellState.cell);
+    if (stops.length < 2) return null;
+    tmpV.copy(pos).applyMatrix4(b.inverse);
+    const name = b.model.def.cells?.find((c) => c.index === this.cellState!.cell)?.name ?? 'lift';
+    return { stops, current: stopAt(stops, tmpV.y), title: `${b.model.def.id} · ${name.replace(/_/g, ' ')}` };
+  }
+
+  /** Ride the lift the player stands in to one of its stops: the spot through that doorway, in the world, and the room beyond becomes the cell. */
+  rideLift(stop: LiftStop): THREE.Vector3 | null {
+    const b = this.cellState?.building;
+    if (!b) return null;
+    const next = stop.at.clone().applyMatrix4(b.matrix);
+    this.cellState = { building: b, cell: stop.cell };
+    this.prevPlayerPos.copy(next);
+    return next;
+  }
+
+  /**
+   * A building beside the player whose rooms cannot be walked into (a dungeon whose way in was
+   * a server object, a station whose doors are up in the air): its name, so E can put the
+   * player inside; null when there is none, or the player is already in one.
+   */
+  doorlessNear(pos: THREE.Vector3): { label: string } | null {
+    if (this.cellState || !this.layoutStream) return null;
+    const b = this.layoutStream.doorlessNear(pos);
+    return b ? { label: b.model.def.id.replace(/_/g, ' ') } : null;
+  }
+
+  describeDoorless(pos: THREE.Vector3): ReturnType<LayoutStreamer['describeDoorless']> {
+    return this.layoutStream?.describeDoorless(pos) ?? [];
+  }
+
+  /** Put the player inside the doorless building beside them: a standing spot in its entry room, and the cell. */
+  enterDoorless(pos: THREE.Vector3): THREE.Vector3 | null {
+    if (!this.layoutStream) return null;
+    const b = this.layoutStream.doorlessNear(pos);
+    if (!b) return null;
+    const entry = this.layoutStream.entryOf(b);
+    if (!entry) return null;
+    this.cellState = { building: b, cell: entry.cell };
+    this.prevPlayerPos.copy(entry.at);
+    return entry.at;
   }
 
   /** Flora planted so far and the appearances the pack lacked (diagnostics). */

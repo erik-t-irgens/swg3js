@@ -11,7 +11,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { cleanTrimesh, Group, groups, Physics, RAPIER, TRIMESH_FLAGS } from '../core/physics';
 import { markActor } from '../world/portalRender';
-import { LIFT_CELL, liftStops, nextStop } from '../world/lifts';
+import { LIFT_CELL, liftStops, stopAt, type LiftStop } from '../world/lifts';
 import type { Vehicle } from './vehicle';
 
 /** What the ships manifest says of an interior model: its cells and bounds, as a pack model carries them. */
@@ -421,25 +421,21 @@ export class ShipInterior {
   }
 
   /**
-   * Ride the lift from a point in the shaft (hull frame): the spot through the doorway of the next
-   * level up, or down from the top, in the hull's frame; null when the shaft has no other level.
-   * The stops come from the model's portals, which are in the model's own frame: the hull's
-   * rooms are offset by the garage's re-centring, an interior model of its own is not.
+   * The lift shaft a point in the hull's frame stands in: the stops it reaches (its doorways and
+   * those of the shafts it opens into, lifts.ts), which one the point is at, and a title; null
+   * outside a shaft or in one with a single level. The stops are in the model's own frame: the
+   * hull's rooms are offset by the garage's re-centring, an interior model of its own is not.
    */
-  useLift(local: THREE.Vector3): THREE.Vector3 | null {
+  liftHere(local: THREE.Vector3): { stops: LiftStop[]; current: number; title: string } | null {
     const cell = this.cellAt(local);
     if (cell <= 0 || !LIFT_CELL.test(this.cellNames.get(cell) ?? '')) return null;
     const stops = liftStops(this.def, cell);
-    const stop = nextStop(stops, local.y - this.modelOffset.y);
-    if (!stop) {
-      // No doorways known (an older pack without portals): the floors on the vertical line, as a building's terminal does.
-      const box = this.cellBoxes.get(cell) ?? this.bounds;
-      const floors = this.physics.floorsAt(local.x, local.z, box.max.y + 0.5, box.min.y - 0.5);
-      let i = floors.findIndex((f) => Math.abs(f - local.y) < 1);
-      if (i < 0) i = floors.findIndex((f) => f < local.y);
-      const target = floors[i - 1] ?? floors[i + 1];
-      return target === undefined ? null : new THREE.Vector3(local.x, target + 0.1, local.z);
-    }
+    if (stops.length < 2) return null;
+    return { stops, current: stopAt(stops, local.y - this.modelOffset.y), title: `${this.vehicle.spec.label} · ${(this.cellNames.get(cell) ?? 'lift').replace(/_/g, ' ')}` };
+  }
+
+  /** Ride to one of a lift's stops: the spot through that doorway, in the hull's frame. */
+  rideLift(stop: LiftStop): THREE.Vector3 {
     return stop.at.clone().add(this.modelOffset);
   }
 

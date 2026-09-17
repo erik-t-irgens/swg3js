@@ -2,7 +2,8 @@
 // rig of a random species with a random look, a weapon off the rack (a lightsaber, a sword or a
 // gun) in its hand, and a body the blades and bolts can hurt. The mind is small: the nearest foe
 // within reach is the target, it runs to its weapon's range, and it swings or shoots on a timer.
-// A first pass: no cover, no dodging, no clothes of its own, the ground read from the terrain only.
+// A first pass: no cover, no dodging, the ground read from the terrain only. Its clothes come off
+// its species' wardrobe (a Wookiee's from the Wookiee pieces alone).
 import * as THREE from 'three';
 import { RAPIER, type Physics } from '../core/physics';
 import { CharacterRig, loadPlayerRig } from '../player/rig';
@@ -15,6 +16,7 @@ import type { Effects } from '../combat/effects';
 import type { Hittable } from '../combat/kit';
 import type { Terrain } from './terrain';
 import { markActor } from './portalRender';
+import { slotOf } from '../ui/wardrobeUi';
 
 /** What a fighter carries, and so how it fights. */
 type Arm = 'saber' | 'melee' | 'gun';
@@ -24,6 +26,30 @@ const SPECIES_FALLBACK = ['human_male', 'human_female', 'twilek_male', 'twilek_f
 const RUN_SPEED = 5.2;
 const SIGHT = 45;
 const HP = 160;
+
+/** The wearables a Wookiee wears, and nobody else: the Kashyyykian pieces, and the ones marked _wke. */
+const WOOKIEE_ONLY = /kashyyyk|(^|_)wke(_|$)/i;
+/** Pieces that are not clothes to be seen in: quest props, the new-player set. */
+const NOT_STREET = /_quest$|_npe$|_noob$|prison|slave/i;
+
+/**
+ * An outfit for a fighter off its species' wardrobe: something on the chest, the legs and the
+ * feet always, a hat, gloves or a back piece now and then, each a random piece of the slot for
+ * the species' gender. A Wookiee wears only the pieces made for Wookiees, and no one else wears those.
+ */
+export function pickOutfit(items: { id: string; kind: string; gender: string }[], species: string): string[] {
+  const wookiee = /^wookiee/i.test(species);
+  const gender = /female/.test(species) ? 'f' : 'm';
+  const pool = items.filter((i) => i.kind !== 'hair' && i.gender === gender && WOOKIEE_ONLY.test(i.id) === wookiee && !NOT_STREET.test(i.id));
+  const bySlot = new Map<string, string[]>();
+  for (const i of pool) (bySlot.get(slotOf(i.id)) ?? bySlot.set(slotOf(i.id), []).get(slotOf(i.id))!).push(i.id);
+  const pick = (slot: string, chance: number) => {
+    const list = bySlot.get(slot);
+    if (!list?.length || Math.random() > chance) return null;
+    return list[Math.floor(Math.random() * list.length)];
+  };
+  return [pick('chest', 1), pick('legs', 1), pick('feet', 1), pick('head', 0.3), pick('hands', 0.3), pick('back', 0.2), pick('waist', 0.4)].filter((s): s is string => !!s);
+}
 
 const tmp = new THREE.Vector3();
 const tmp2 = new THREE.Vector3();
@@ -55,6 +81,8 @@ export class Npc implements Hittable {
   arm: Arm = 'saber';
   weapon: WeaponDef | null = null;
   gun: GunProfile | null = null;
+  /** The pieces it dressed in, by catalogue id. */
+  outfit: string[] = [];
   private holder: THREE.Group | null = null;
   private hiltTop = 0.13;
   private blade: SaberBlade | null = null;
@@ -98,13 +126,21 @@ export class Npc implements Hittable {
     markActor(rig.root);
     this.rig = rig;
     rig.setState('idle');
-    // A random look: the height, and every colour and choice the pack lets vary, thrown.
+    // A random look: the height, and every colour and choice the pack lets vary, thrown; and
+    // clothes off the species' wardrobe.
     const c = rig.character;
     if (c) {
       const values: Record<string, number> = {};
       for (const [name] of Object.entries(c.variableValues())) if (c.canCustomize(name)) values[name] = Math.floor(Math.random() * 12);
+      let outfit: string[] = [];
       try {
-        await applyLook(c, { morphs: {}, values, height: 0.25 + Math.random() * 0.5, outfit: [] }, baseUrl);
+        outfit = pickOutfit((await c.catalogue(baseUrl)).items, this.species);
+      } catch {
+        outfit = [];
+      }
+      this.outfit = outfit;
+      try {
+        await applyLook(c, { morphs: {}, values, height: 0.25 + Math.random() * 0.5, outfit }, baseUrl);
       } catch {
         // A look that will not go on is no loss.
       }
@@ -363,9 +399,9 @@ export class NpcManager {
   }
 
   /** Stand one at a point on the ground, of a random species; it dresses and arms itself as its rig loads. */
-  spawnAt(x: number, z: number): Npc {
+  spawnAt(x: number, z: number, wanted?: string): Npc {
     const species = this.deps.species.length ? this.deps.species : SPECIES_FALLBACK;
-    const id = species[Math.floor(Math.random() * species.length)];
+    const id = (wanted && species.find((s) => s.includes(wanted))) ?? species[Math.floor(Math.random() * species.length)];
     const npc = new Npc(id, this.physics, x, this.terrain.heightAt(x, z), z);
     this.scene.add(npc.group);
     this.npcs.push(npc);

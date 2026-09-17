@@ -33,6 +33,8 @@ import { CharacterSelect } from './ui/characterSelect';
 import { CreatorBar } from './ui/creatorBar';
 import { Menu, keyName } from './ui/menu';
 import { ShipMenu, type ShipStatus } from './ui/shipMenu';
+import { LiftMenu } from './ui/liftMenu';
+import { stopLabel, type LiftStop } from './world/lifts';
 import { draggable } from './ui/drag';
 import { LoadingScreen } from './ui/loading';
 import { EmoteWheel } from './ui/emoteWheel';
@@ -149,6 +151,7 @@ class App {
   private readonly creatorBar: CreatorBar;
   private readonly menu: Menu;
   private readonly shipMenu: ShipMenu;
+  private readonly liftMenu: LiftMenu;
   private readonly loadingScreen: LoadingScreen;
   private readonly emoteWheel: EmoteWheel;
   /** Playing together: the relay's client and the other players it tells of. */
@@ -253,6 +256,13 @@ class App {
     this.vehiclesUi = new VehiclesUi(this.ui, (def, kind) => void this.spawnVehicle(def, kind), () => this.world.removeVehicles(this.player.mounted ?? this.player.aboard?.vehicle ?? null));
     this.shipMenu = new ShipMenu(this.ui, { status: () => this.shipStatus(), goToSpace: () => void this.goToSpace(), land: () => void this.landShip(), eject: () => void this.eject() }, () => keyName(this.input.bindings.ship[0] ?? ''));
     this.shipMenu.onClose = () => this.toggleShipMenu();
+    // The lift menu: E in a shaft lists its levels; a pick, or a number key, rides there.
+    this.liftMenu = new LiftMenu(this.ui);
+    this.liftMenu.onClose = () => {
+      this.liftMenu.hide();
+      this.freeMouse(false);
+    };
+    this.liftMenu.onPick = (i) => this.rideLift(i);
     this.npcUi = new NpcUi(this.ui);
     this.appearanceUi = new AppearanceUi(this.ui, () => this.saveAppearance());
     this.appearanceUi.onTab = (id) => this.toggleInventory(id as InventoryTab);
@@ -448,6 +458,8 @@ class App {
       shadowLook: (radius?: number, intensity?: number, mapSize?: number) => this.world.setShadowLook(radius, intensity, mapSize),
       /** Retune shadows: distance is how far the cascades reach, minRadius which objects cast. Shorter reach is cheaper and sharper. */
       shadows: (distance?: number, minRadius?: number) => this.world.setShadows(distance, minRadius),
+      /** The buildings around the player and whether each can be walked into (E offers a way into the ones that cannot). */
+      doorless: () => this.world.describeDoorless(this.player.pos),
       /** Building interiors: how many are built against how many every loaded building would hold. `force` builds them all to compare. */
       interiors: (force = false) => this.world.interiorStats(force),
       /** Draw calls of the whole frame, summed over the portal renderer's passes. */
@@ -878,13 +890,13 @@ class App {
         return `${v.spec.id} wrecked`;
       },
       /** Stand `n` fighters ahead (random species, look and weapon; they fight you and each other), or with 0 list the ones out. */
-      fighter: (n = 1) => {
+      fighter: (n = 1, species?: string) => {
         for (let i = 0; i < n; i++) {
           this.cam.forward(tmp);
           const d = 8 + Math.random() * 6;
-          this.world.npcs.spawnAt(this.player.pos.x + tmp.x * d + (Math.random() - 0.5) * 6, this.player.pos.z + tmp.z * d + (Math.random() - 0.5) * 6);
+          this.world.npcs.spawnAt(this.player.pos.x + tmp.x * d + (Math.random() - 0.5) * 6, this.player.pos.z + tmp.z * d + (Math.random() - 0.5) * 6, species);
         }
-        return this.world.npcs.npcs.map((f) => ({ name: f.name, arm: f.arm, weapon: f.weapon?.id ?? null, hp: Number(f.hp.toFixed(0)), dead: f.dead, dist: Number(f.pos.distanceTo(this.player.pos).toFixed(1)), rig: !!f.rig }));
+        return this.world.npcs.npcs.map((f) => ({ name: f.name, arm: f.arm, weapon: f.weapon?.id ?? null, outfit: f.outfit, hp: Number(f.hp.toFixed(0)), dead: f.dead, dist: Number(f.pos.distanceTo(this.player.pos).toFixed(1)), rig: !!f.rig }));
       },
       /** The gun in hand: its Jedi Academy type and numbers. */
       gunType: () => {
@@ -1998,7 +2010,7 @@ class App {
 
   /** The panels' open state moved to the tabs: closing one panel of a pair and opening the other keeps the mouse free. */
   private anyPanelOpen(): boolean {
-    return this.wardrobe.open || this.appearanceUi.open || this.weaponsUi.open || this.forceUi.open || this.vehiclesUi.open || this.npcUi.open || this.shipMenu.open || this.menu.open;
+    return this.wardrobe.open || this.appearanceUi.open || this.weaponsUi.open || this.forceUi.open || this.vehiclesUi.open || this.npcUi.open || this.shipMenu.open || this.liftMenu.open || this.menu.open;
   }
 
   private jediKit(): JediKit {
@@ -2037,6 +2049,7 @@ class App {
     if (this.vehiclesUi.open) this.vehiclesUi.hide();
     if (this.npcUi.open) this.npcUi.hide();
     if (this.shipMenu.open) this.shipMenu.hide();
+    if (this.liftMenu.open) this.liftMenu.hide();
   }
 
   /** P: the ship menu, for whoever is in a ship (at its controls, riding it, or aboard as a passenger). */
@@ -2220,44 +2233,72 @@ class App {
   }
 
   /**
-   * E at an elevator terminal: up for an up terminal, down for a down one, up then down for a
-   * plain one; or in a lift shaft (a room the building or ship names for its elevator): up to
-   * the next floor of the shaft, or down from the top.
+   * E in a lift shaft (a room the building or ship names for its elevator): the lift menu, the
+   * levels the shaft reaches by the rooms they open into; at an elevator terminal: up for an up
+   * terminal, down for a down one, up then down for a plain one; beside a building that cannot
+   * be walked into: inside it.
    */
   private handleElevator(): boolean {
     const p = this.player;
-    const room = p.aboard;
-    if (room) {
-      // Aboard, the shaft's doorways are in the hull's frame, and so is the player's place already.
-      if (!room.inLift(p.pos)) return false;
-      const next = room.useLift(p.pos);
-      if (next) {
-        p.pos.copy(next);
+    const lift = this.liftHere();
+    if (lift) {
+      this.liftNow = lift;
+      this.closePanels();
+      this.map.hide();
+      this.liftMenu.show(lift.title, lift.stops.map((s, i) => ({ label: stopLabel(lift.stops, i), current: i === lift.current })));
+      this.freeMouse(true);
+      return true;
+    }
+    if (p.aboard) return false;
+    const near = this.world.elevatorsNear(p.pos, MOUNT_RANGE);
+    if (near.length) {
+      const kind = near[0].kind;
+      const tryDir = (up: boolean) => {
+        const next = this.world.useElevator(p.pos, up);
+        if (!next) return false;
+        p.reset(next);
+        this.physics.world.step();
+        return true;
+      };
+      if (kind === 'up') tryDir(true);
+      else if (kind === 'down') tryDir(false);
+      else if (!tryDir(true)) tryDir(false);
+      return true;
+    }
+    if (this.world.doorlessNear(p.pos)) {
+      const at = this.world.enterDoorless(p.pos);
+      if (at) {
+        p.pos.copy(at);
         p.vel.set(0, 0, 0);
+        this.physics.world.step();
       }
       return true;
     }
-    const near = this.world.elevatorsNear(p.pos, MOUNT_RANGE);
-    if (!near.length) return false;
-    const kind = near[0].kind;
-    const tryDir = (up: boolean) => {
-      const next = this.world.useElevator(p.pos, up);
-      if (!next) return false;
-      p.reset(next);
-      this.physics.world.step();
-      return true;
-    };
-    if (kind === 'up') tryDir(true);
-    else if (kind === 'down') tryDir(false);
-    else if (!tryDir(true)) tryDir(false);
-    return true;
+    return false;
   }
 
-  /** Whether the player stands in a lift shaft: a building's on the ground, or a ship's aboard. */
-  private inLift(): boolean {
+  /** The lift shaft the player stands in, in a building or aboard a ship, with its stops. */
+  private liftHere(): { stops: LiftStop[]; current: number; title: string } | null {
     const p = this.player;
-    if (p.aboard) return p.aboard.inLift(p.pos);
-    return this.world.elevatorsNear(p.pos, MOUNT_RANGE).length > 0;
+    return p.aboard ? p.aboard.liftHere(p.pos) : this.world.liftHere(p.pos);
+  }
+
+  /** The lift the menu was opened for. */
+  private liftNow: { stops: LiftStop[]; current: number; title: string } | null = null;
+
+  /** A stop picked in the lift menu: the player steps out through that level's doorway. */
+  private rideLift(index: number): void {
+    const lift = this.liftNow;
+    const p = this.player;
+    const stop = lift?.stops[index];
+    this.liftMenu.hide();
+    this.freeMouse(false);
+    if (!stop) return;
+    const next = p.aboard ? p.aboard.rideLift(stop) : this.world.rideLift(stop);
+    if (!next) return;
+    p.pos.copy(next);
+    p.vel.set(0, 0, 0);
+    if (!p.aboard) this.physics.world.step();
   }
 
   private handleMount(): void {
@@ -2464,6 +2505,8 @@ class App {
       }
       const active = this.started && !this.traveling && !this.dying && !this.menu.open;
       if (active) this.savePlace();
+      // The lift menu takes the number keys while it is up, before the kit's slots see them.
+      if (this.liftMenu.open) for (let n = 1; n <= 9; n++) if (input.consumeKey(`Digit${n}`)) this.liftMenu.pickKey(n);
 
       if (active) {
         if (input.pressedAction('map')) this.toggleMap();
@@ -2548,9 +2591,13 @@ class App {
       const shipKey = keyName(input.bindings.ship[0] ?? '');
       const shipHint = this.spaceGate === 'up' ? ` · <b>at altitude for space: ${shipKey}</b> ship menu` : this.world.planet.space ? ` · <b>${shipKey}</b> ship menu` : '';
       let prompt = '';
+      let lift: ReturnType<App['liftHere']> = null;
+      let doorless: { label: string } | null = null;
       if (player.noclip) prompt = `<b>NOCLIP</b> ${Math.round(player.noclipSpeed)} m/s · <b>WASD</b> fly · <b>Space</b> up · <b>Ctrl</b> down · <b>Shift</b> fast · <b>+</b>/<b>-</b> speed · <b>N</b> off`;
       else if (player.mounted) prompt = mountPrompt(player.mounted) + (player.mounted.spec.ship ? shipHint : '');
-      else if (this.inLift()) prompt = `<b>E</b> elevator ${!player.aboard && this.world.elevatorsNear(player.pos, MOUNT_RANGE)[0]?.kind === 'down' ? 'down' : 'up (then down)'}`;
+      else if ((lift = this.liftHere())) prompt = `<b>E</b> lift: ${lift.stops.length} levels`;
+      else if (!player.aboard && this.world.elevatorsNear(player.pos, MOUNT_RANGE).length) prompt = `<b>E</b> elevator ${this.world.elevatorsNear(player.pos, MOUNT_RANGE)[0].kind === 'down' ? 'down' : 'up'}`;
+      else if (!player.aboard && (doorless = this.world.doorlessNear(player.pos))) prompt = `<b>E</b> enter ${doorless.label} (no way in on foot)`;
       else if (player.piloting) prompt = `at the controls of the ${player.piloting.spec.label} · <b>W</b>/<b>S</b> throttle · mouse steers · <b>Alt</b> looks around · <b>E</b> lets go · ${Math.round(Math.abs(player.piloting.speed) * 3.6)} km/h${shipHint}`;
       else if (player.aboard) prompt = (player.aboard.pilotSpot && player.pos.distanceTo(player.aboard.pilotSpot) < CONTROLS_RANGE ? `<b>E</b> take the controls` : `aboard ${player.aboard.vehicle.spec.label} · <b>E</b> step out`) + (this.world.planet.space ? ` · <b>${shipKey}</b> ship menu` : '');
       else if (player.eva) prompt = `adrift · <b>W/S</b> thrust ahead and back · <b>A/D</b> sideways · <b>Space/Ctrl</b> up and down · mouse turns · <b>Z/V</b> roll · <b>${keyName(input.bindings.brake[0] ?? '')}</b> brake · ${Math.round(player.vel.length() * 3.6)} km/h${this.nearestSpeederDistance() < MOUNT_RANGE ? (this.nearestHasRoom() ? ' · <b>E</b> board' : ' · <b>E</b> mount') : ''}`;
