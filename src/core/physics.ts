@@ -61,10 +61,42 @@ export const FIXED_DT = 1 / 60;
 export class Physics {
   readonly world: RAPIER.World;
   private acc = 0;
+  /** The ragdolls' colliders: they touch only what stands still, and never one another (see `hooks`). */
+  private readonly ragdolls = new Set<number>();
+  /**
+   * The contact filter the ragdolls ask for: a ragdoll piece meets the ground, a building, a
+   * room (colliders with no body, or a fixed one) and nothing that moves on its own: no player,
+   * creature, vehicle or other ragdoll, so a corpse never trips the living or stacks on another.
+   */
+  private readonly hooks: RAPIER.PhysicsHooks = {
+    filterContactPair: (c1, c2, b1, b2) => {
+      const r1 = this.ragdolls.has(c1);
+      const r2 = this.ragdolls.has(c2);
+      if (!r1 && !r2) return RAPIER.SolverFlags.COMPUTE_IMPULSE;
+      if (r1 && r2) return null;
+      const other = r1 ? b2 : b1;
+      const body = other === undefined || other === null ? null : this.world.getRigidBody(other);
+      return !body || body.isFixed() ? RAPIER.SolverFlags.COMPUTE_IMPULSE : null;
+    },
+    filterIntersectionPair: () => true,
+  };
 
   private constructor() {
     this.world = new RAPIER.World({ x: 0, y: -20, z: 0 });
     this.world.timestep = FIXED_DT;
+  }
+
+  markRagdoll(c: RAPIER.Collider): void {
+    this.ragdolls.add(c.handle);
+  }
+
+  unmarkRagdoll(c: RAPIER.Collider): void {
+    this.ragdolls.delete(c.handle);
+  }
+
+  /** Whether a collider is a ragdoll's, for the character controller and the sweeps to pass over. */
+  isRagdoll(handle: number): boolean {
+    return this.ragdolls.has(handle);
   }
 
   static async create(): Promise<Physics> {
@@ -87,7 +119,7 @@ export class Physics {
     this.acc += dt;
     let n = 0;
     while (this.acc >= FIXED_DT && n < 4) {
-      this.world.step();
+      this.world.step(undefined, this.hooks);
       this.acc -= FIXED_DT;
       n++;
     }

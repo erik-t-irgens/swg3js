@@ -147,6 +147,7 @@ class App {
   private spawnerTab: 'garage' | 'npcs' = 'garage';
   private weapons: WeaponCatalogue | null = null;
   private readonly fade: HTMLElement;
+  private readonly death: HTMLElement;
   private readonly select: CharacterSelect;
   private readonly creatorBar: CreatorBar;
   private readonly menu: Menu;
@@ -458,6 +459,13 @@ class App {
       shadowLook: (radius?: number, intensity?: number, mapSize?: number) => this.world.setShadowLook(radius, intensity, mapSize),
       /** Retune shadows: distance is how far the cascades reach, minRadius which objects cast. Shorter reach is cheaper and sharper. */
       shadows: (distance?: number, minRadius?: number) => this.world.setShadows(distance, minRadius),
+      /** Kill the player (the death card and the ragdoll), every creature, or every fighter, to see them fall. */
+      kill: (what: 'player' | 'creatures' | 'fighters' = 'player') => {
+        if (what === 'player') this.player.takeDamage(1e9);
+        else if (what === 'creatures') for (const c of this.world.creatures.creatures) c.damage(1e9);
+        else for (const f of this.world.npcs.npcs) f.damage(1e9);
+        return { player: this.player.hp, creatures: this.world.creatures.creatures.filter((c) => c.dead).length, fighters: this.world.npcs.npcs.filter((f) => f.dead).length };
+      },
       /** The buildings around the player and whether each can be walked into (E offers a way into the ones that cannot). */
       doorless: () => this.world.describeDoorless(this.player.pos),
       /** Building interiors: how many are built against how many every loaded building would hold. `force` builds them all to compare. */
@@ -933,6 +941,12 @@ class App {
     this.fade = document.createElement('div');
     this.fade.id = 'fade';
     this.ui.appendChild(this.fade);
+    // The death card: over the fallen body, with the way back.
+    this.death = document.createElement('div');
+    this.death.id = 'death';
+    this.death.innerHTML = `<div class="death-card"><h2>You have become one with the Force</h2><button class="respawn">Respawn</button></div>`;
+    this.death.querySelector('.respawn')!.addEventListener('click', () => this.respawn());
+    this.ui.appendChild(this.death);
     this.loadingScreen = new LoadingScreen(this.ui, import.meta.env.BASE_URL);
     this.emoteWheel = new EmoteWheel(this.ui);
     this.remotes = new RemotePlayers(this.scene, import.meta.env.BASE_URL, async () => {
@@ -1996,16 +2010,41 @@ class App {
     else this.postfx.set({ bloom: S.bloom, bloomStrength: S.bloomStrength, motionBlur: S.speedBlur, motionBlurStrength: S.motionBlur });
   }
 
-  private async die(): Promise<void> {
+  /**
+   * Death: the body falls where it stood and the camera stays on it, with the respawn a button
+   * away rather than a fade. A death without a rig (the placeholder figure) fades as before.
+   */
+  private die(): void {
+    if (this.dying) return;
     this.dying = true;
+    this.closePanels();
+    this.map.hide();
+    this.player.startRagdoll();
+    if (!this.player.ragdoll) {
+      void this.fadeAndRespawn();
+      return;
+    }
+    this.death.classList.add('on');
+    this.freeMouse(true);
+  }
+
+  private async fadeAndRespawn(): Promise<void> {
     this.fade.textContent = 'YOU HAVE BECOME ONE WITH THE FORCE';
     this.fade.classList.add('on');
     await new Promise((r) => setTimeout(r, 1400));
-    this.player.reset(this.spawn);
+    this.respawn();
     this.drawFrame();
     await new Promise((r) => setTimeout(r, 200));
     this.fade.classList.remove('on');
+  }
+
+  /** Back at the spawn, whole; the ragdoll is taken away. */
+  private respawn(): void {
+    this.death.classList.remove('on');
+    this.player.endRagdoll();
+    this.player.reset(this.spawn);
     this.dying = false;
+    this.freeMouse(false);
   }
 
   /** The panels' open state moved to the tabs: closing one panel of a pair and opening the other keeps the mouse free. */
@@ -2540,6 +2579,8 @@ class App {
       this.stepEmoteEnd();
 
       const simulate = active && !this.map.open && !this.anyPanelOpen();
+      // Dead: the body keeps falling and settling under the camera while the respawn waits.
+      if (this.dying && player.ragdoll) player.ragdollStep();
       if (simulate) {
         player.update(dt, input, this.cam, this.world);
         // The thrown and orbiting sabers glow from the pooled flash lights, so no light comes or goes with them.

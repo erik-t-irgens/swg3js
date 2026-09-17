@@ -101,6 +101,12 @@ b { color: var(--accent); font-weight: 600; }
 
 #fade { position: fixed; inset: 0; background: #000; opacity: 0; transition: opacity 0.45s ease; pointer-events: none; display: flex; align-items: center; justify-content: center; color: var(--accent); letter-spacing: 0.2em; font-size: 14px; }
 #fade.on { opacity: 1; pointer-events: auto !important; }
+#death { position: fixed; inset: 0; display: flex; align-items: flex-end; justify-content: center; padding-bottom: 12vh; pointer-events: none; opacity: 0; transition: opacity 0.6s ease; }
+#death.on { opacity: 1; pointer-events: auto; }
+.death-card { background: var(--panel); border: 1px solid var(--panel-border); border-radius: 10px; padding: 18px 28px; text-align: center; }
+.death-card h2 { margin: 0 0 12px; font-size: 14px; letter-spacing: 0.2em; color: var(--accent); font-weight: 500; text-transform: uppercase; }
+.death-card button { padding: 10px 26px; font-size: 13px; letter-spacing: 0.08em; background: rgba(45,127,214,0.3); color: var(--text); border: 1px solid var(--panel-border); border-radius: 6px; cursor: pointer; }
+.death-card button:hover { border-color: var(--accent); background: rgba(45,127,214,0.5); }
 
 /* v0.2 additions */
 .bar { position: relative; width: 320px; height: 14px; background: rgba(0,0,0,0.55); border: 1px solid var(--panel-border); border-radius: 7px; overflow: hidden; }

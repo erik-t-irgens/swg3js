@@ -10,6 +10,7 @@ import { CharacterRig, loadPlayerRig } from '../player/rig';
 import { applyLook } from '../player/look';
 import { FIGHTS, isSaber, type WeaponCatalogue, type WeaponDef } from '../player/weapons';
 import { SaberBlade } from '../combat/saberBlade';
+import { Ragdoll } from '../combat/ragdoll';
 import { GUNS, gunTypeFor, type GunProfile } from '../combat/guns';
 import type { Bolts } from '../combat/bolts';
 import type { Effects } from '../combat/effects';
@@ -229,11 +230,28 @@ export class Npc implements Hittable {
     this.deadTimer = 9;
     this.hitIn = -1;
     const rig = this.rig;
+    // The death clip plays out, then the body falls to the physics from its last frame.
+    this.ragdollIn = 0.6;
     if (rig) {
       const clip = rig.firstOf('trn_stand_to_incapacitated', 'BOTH_DEATH1', 'BOTH_DEATH4', 'BOTH_DEAD1');
-      if (clip) rig.play(clip, { fadeIn: 0.08, hold: true });
+      if (clip) {
+        rig.play(clip, { fadeIn: 0.08, hold: true });
+        this.ragdollIn = Math.min(3, (rig.clipDuration(clip) ?? 1) - 0.05);
+      }
     }
     this.physics.world.removeCollider(this.collider, false);
+  }
+
+  /** The body left to the physics once the death clip has played; the fighter is cleared ten seconds later. */
+  ragdoll: Ragdoll | null = null;
+  private ragdollIn = -1;
+
+  private startRagdoll(): void {
+    if (this.ragdoll || !this.rig) return;
+    this.group.updateMatrixWorld(true);
+    this.ragdoll = new Ragdoll(this.physics, this.rig.root, { velocity: this.push.clone() });
+    this.deadTimer = 10;
+    if (this.blade) this.blade.group.visible = false;
   }
 
   /** Where a gun's muzzle is: the far end of the model's long axis, as the rack reads it. */
@@ -262,7 +280,17 @@ export class Npc implements Hittable {
     const rig = this.rig;
     if (this.dead) {
       this.deadTimer -= dt;
+      if (this.ragdoll) {
+        this.ragdoll.update();
+        this.ragdoll.centre(this.pos);
+        return;
+      }
       rig?.update(dt);
+      this.ragdollIn -= dt;
+      if (this.ragdollIn <= 0 && this.ragdollIn > -100) {
+        this.ragdollIn = -1000;
+        this.startRagdoll();
+      }
       this.blade?.update(dt, base, tip, false, camera ?? new THREE.PerspectiveCamera(), 0, true);
       return;
     }
@@ -375,6 +403,8 @@ export class Npc implements Hittable {
   }
 
   dispose(scene: THREE.Scene): void {
+    this.ragdoll?.dispose();
+    this.ragdoll = null;
     if (!this.dead) this.physics.world.removeCollider(this.collider, false);
     this.physics.world.removeRigidBody(this.body);
     scene.remove(this.group);

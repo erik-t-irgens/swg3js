@@ -5,6 +5,7 @@ import type { PlanetDef } from '../data/planets';
 import { RAPIER, type Physics } from '../core/physics';
 import type { Terrain } from './terrain';
 import { ACTOR_LAYER } from './portalRender';
+import { Ragdoll } from '../combat/ragdoll';
 
 export type CreatureDef = PlanetDef['creatures'];
 
@@ -163,27 +164,51 @@ export class Creature {
     this.current = next;
   }
 
-  /** Play a clip once over the loop (attack, hit, death). */
-  private playOnce(name: string, hold = false): void {
+  /** Play a clip once over the loop (attack, hit, death); `then` runs as it ends. */
+  private playOnce(name: string, hold = false, then?: () => void): boolean {
     const a = this.action(name);
-    if (!a || !this.mixer) return;
+    if (!a || !this.mixer) return false;
     a.reset().setLoop(THREE.LoopOnce, 1);
     a.clampWhenFinished = hold;
     a.play();
-    if (this.current && !hold) {
-      const back = this.current;
+    const back = this.current && !hold ? this.current : null;
+    if (back || then) {
       const onDone = (e: { action: THREE.AnimationAction }) => {
         if (e.action !== a) return;
         this.mixer?.removeEventListener('finished', onDone);
-        back.reset().play();
+        back?.reset().play();
+        then?.();
       };
       this.mixer.addEventListener('finished', onDone);
     }
     this.oneShot = a;
+    return true;
+  }
+
+  /** The body left to the physics once the death clip has played; gone ten seconds later. */
+  ragdoll: Ragdoll | null = null;
+
+  /** Hand the skinned body to the physics from the pose it is in now; the creature's own body goes quiet. */
+  private startRagdoll(): void {
+    if (this.ragdoll || !this.model || !this.dead) return;
+    this.group.updateMatrixWorld(true);
+    const v = this.body.linvel();
+    this.ragdoll = new Ragdoll(this.physics, this.model, { velocity: new THREE.Vector3(v.x, v.y, v.z) });
+    this.body.setEnabled(false);
+    this.mixer?.stopAllAction();
+    this.deadTimer = 10;
+  }
+
+  private endRagdoll(): void {
+    if (!this.ragdoll) return;
+    this.ragdoll.dispose();
+    this.ragdoll = null;
+    this.body.setEnabled(true);
   }
 
   respawn(x: number, y: number, z: number): void {
     this.dead = false;
+    this.endRagdoll();
     if (this.model) {
       this.oneShot?.stop();
       this.oneShot = null;
@@ -275,10 +300,10 @@ export class Creature {
     this.dead = true;
     this.deadTimer = 9;
     if (this.model) {
-      // A real body plays its incapacitation and stays down; the boxes tumble.
+      // A real body plays its incapacitation, then falls to the physics from that pose; the boxes tumble.
       this.current?.stop();
       this.current = null;
-      this.playOnce('trn_stand_to_incapacitated', true);
+      if (!this.playOnce('trn_stand_to_incapacitated', true, () => this.startRagdoll())) this.startRagdoll();
       this.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
       return;
     }
@@ -291,6 +316,14 @@ export class Creature {
   }
 
   update(dt: number, terrain: Terrain, playerPos: THREE.Vector3, onAttack: (damage: number) => void): void {
+    if (this.ragdoll) {
+      // The physics has the body: the skin follows it, and the creature's place is where the trunk lies.
+      this.ragdoll.update();
+      this.ragdoll.centre(tmp);
+      this.pos.set(tmp.x, tmp.y - 0.3, tmp.z);
+      this.deadTimer -= dt;
+      return;
+    }
     const t = this.body.translation();
     this.pos.set(t.x, t.y - this.halfHeight, t.z);
     this.group.position.set(t.x, t.y, t.z);
@@ -401,6 +434,7 @@ export class Creature {
   }
 
   dispose(): void {
+    this.endRagdoll();
     this.physics.world.removeRigidBody(this.body);
     this.mixer?.stopAllAction();
     if (!this.model) {

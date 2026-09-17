@@ -8,6 +8,7 @@ import type { Vehicle } from '../vehicles/vehicle';
 import type { World } from '../world/world';
 import { STANCE_ANIM, STYLE_DAMAGE, SaberCombat, type Dir, type SaberInput } from '../combat/saber';
 import { SaberThrow, THROW } from '../combat/saberThrow';
+import { Ragdoll } from '../combat/ragdoll';
 import { canBlock, inFront, parryClip, parryZone, reflectDirection } from '../combat/deflect';
 import { JKA, JkaMovement, UNIT, type MoveCommand } from './jkaMove';
 import type { CharacterRig, RigState } from './rig';
@@ -543,6 +544,43 @@ export class Player {
       this.group.position.copy(this.pos);
       this.group.rotation.set(0, this.heading, 0);
     }
+  }
+
+  /** The body left to the physics after death, until the respawn. */
+  ragdoll: Ragdoll | null = null;
+
+  /**
+   * Die where standing: the rig's pose is handed to a ragdoll (in the room's physics when
+   * aboard, in the hull's frame) and the controller's body goes quiet until the respawn. The
+   * camera keeps following `pos`, which follows the body from now on.
+   */
+  startRagdoll(): void {
+    if (this.ragdoll || !this.rig) return;
+    this.saber.holster();
+    this.thrown.cancel();
+    this.rig.stopOverride(0);
+    this.group.updateMatrixWorld(true);
+    const frame = this.aboard ? this.aboard.vehicle.group.matrixWorld : null;
+    this.ragdoll = new Ragdoll(this.physics, this.rig.root, { frame, velocity: this.aboard ? null : this.vel });
+    this.body.setEnabled(false);
+    this.updateBlades();
+  }
+
+  /** The body follows the physics: the bones from the bodies, `pos` from the trunk (in the hull's frame aboard). */
+  ragdollStep(): void {
+    const r = this.ragdoll;
+    if (!r) return;
+    r.update();
+    r.centre(this.pos);
+    if (this.aboard) this.aboard.toLocal(this.pos, this.pos);
+  }
+
+  /** Back on their feet: the ragdoll is gone and the body enabled; the caller stands them somewhere. */
+  endRagdoll(): void {
+    if (!this.ragdoll) return;
+    this.ragdoll.dispose();
+    this.ragdoll = null;
+    this.body.setEnabled(true);
   }
 
   /** Stand the player somewhere, keeping health and the rest as they are (stepping off a ship). */
@@ -1369,6 +1407,11 @@ export class Player {
 
   update(dt: number, input: Input, cam: ThirdPersonCamera, world: World): void {
     this.world = world;
+    // Dead: the body is the physics' now, and nothing else moves.
+    if (this.ragdoll) {
+      this.ragdollStep();
+      return;
+    }
     this.regenDelay = Math.max(0, this.regenDelay - dt);
     if (this.regenDelay <= 0 && this.hp < this.maxHp) this.hp = Math.min(this.maxHp, this.hp + 4 * dt);
 
@@ -1559,7 +1602,8 @@ export class Player {
     if (this.vel.y > 0.5 || this.swimming) this.controller.disableSnapToGround();
     else this.controller.enableSnapToGround(0.35);
     const filter = this.inside ? groups(Group.all, Group.all & ~(Group.terrain | Group.exterior)) : groups(Group.all, Group.all);
-    this.controller.computeColliderMovement(this.collider, { x: this.vel.x * dt, y: this.vel.y * dt, z: this.vel.z * dt }, undefined, filter);
+    // The dead are walked through: a corpse is no wall.
+    this.controller.computeColliderMovement(this.collider, { x: this.vel.x * dt, y: this.vel.y * dt, z: this.vel.z * dt }, undefined, filter, (c) => !this.physics.isRagdoll(c.handle));
     const mv = this.controller.computedMovement();
     this.pos.x += mv.x;
     this.pos.y += mv.y;
@@ -1577,7 +1621,9 @@ export class Player {
     }
 
     const ground = this.aboard ? -1e9 : terrain.heightAt(this.pos.x, this.pos.z);
-    if (!this.aboard && this.pos.y < terrain.floor) {
+    // Fallen out of the world: back onto the ground. Not inside a building, whose rooms (a bunker's
+    // lowest landing, a dungeon under a mountain) go far below the terrain's floor.
+    if (!this.aboard && !this.inside && this.pos.y < terrain.floor) {
       this.pos.y = ground + 1;
       this.vel.set(0, 0, 0);
     }
