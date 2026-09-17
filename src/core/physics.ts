@@ -68,15 +68,25 @@ export class Physics {
    * room (colliders with no body, or a fixed one) and nothing that moves on its own: no player,
    * creature, vehicle or other ragdoll, so a corpse never trips the living or stacks on another.
    */
+  /** How often the hook ran and how many pairs it dropped, for the console. */
+  readonly hookStats = { calls: 0, dropped: 0 };
+  /** Nothing reads it, but the engine runs the contact hooks only on a step given a queue. */
+  private readonly events = new RAPIER.EventQueue(false);
   private readonly hooks: RAPIER.PhysicsHooks = {
     filterContactPair: (c1, c2, b1, b2) => {
+      this.hookStats.calls++;
       const r1 = this.ragdolls.has(c1);
       const r2 = this.ragdolls.has(c2);
       if (!r1 && !r2) return RAPIER.SolverFlags.COMPUTE_IMPULSE;
-      if (r1 && r2) return null;
+      if (r1 && r2) {
+        this.hookStats.dropped++;
+        return null;
+      }
       const other = r1 ? b2 : b1;
       const body = other === undefined || other === null ? null : this.world.getRigidBody(other);
-      return !body || body.isFixed() ? RAPIER.SolverFlags.COMPUTE_IMPULSE : null;
+      if (!body || body.isFixed()) return RAPIER.SolverFlags.COMPUTE_IMPULSE;
+      this.hookStats.dropped++;
+      return null;
     },
     filterIntersectionPair: () => true,
   };
@@ -84,6 +94,9 @@ export class Physics {
   private constructor() {
     this.world = new RAPIER.World({ x: 0, y: -20, z: 0 });
     this.world.timestep = FIXED_DT;
+    // More solver passes than the default four: a ragdoll is a chain of twenty jointed pieces
+    // against the ground, and with four they shiver where they lie.
+    this.world.integrationParameters.numSolverIterations = 8;
   }
 
   markRagdoll(c: RAPIER.Collider): void {
@@ -119,7 +132,8 @@ export class Physics {
     this.acc += dt;
     let n = 0;
     while (this.acc >= FIXED_DT && n < 4) {
-      this.world.step(undefined, this.hooks);
+      // The hooks run only on the step that takes an event queue; without one they are silently left out.
+      this.world.step(this.events, this.hooks);
       this.acc -= FIXED_DT;
       n++;
     }

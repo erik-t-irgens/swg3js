@@ -281,7 +281,7 @@ export class Npc implements Hittable {
     if (this.dead) {
       this.deadTimer -= dt;
       if (this.ragdoll) {
-        this.ragdoll.update();
+        this.ragdoll.update(dt);
         this.ragdoll.centre(this.pos);
         return;
       }

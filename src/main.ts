@@ -20,6 +20,7 @@ import { WeaponsUi } from './ui/weaponsUi';
 import { ForceUi } from './ui/forceUi';
 import { DEFAULT_LOADOUT, POWERS } from './combat/forcePowers';
 import { DEFAULT_GADGETS, GADGETS } from './combat/gadgets';
+import { RAGDOLL } from './combat/ragdoll';
 import { WeaponCatalogue, type WeaponDef } from './player/weapons';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { Hud } from './ui/hud';
@@ -459,6 +460,11 @@ class App {
       shadowLook: (radius?: number, intensity?: number, mapSize?: number) => this.world.setShadowLook(radius, intensity, mapSize),
       /** Retune shadows: distance is how far the cascades reach, minRadius which objects cast. Shorter reach is cheaper and sharper. */
       shadows: (distance?: number, minRadius?: number) => this.world.setShadows(distance, minRadius),
+      /** The ragdolls' numbers (springs, limits, sleep), changed live: `ragdoll({ stiffness: 80, springFade: 2 })`; no argument reads them, with every fallen body's state. */
+      ragdoll: (tune?: Partial<typeof RAGDOLL>) => {
+        if (tune) Object.assign(RAGDOLL, tune);
+        return { ...RAGDOLL, hooks: { ...this.physics.hookStats }, bodies: [...this.world.creatures.creatures.map((c) => c.ragdoll?.status ?? null), ...this.world.npcs.npcs.map((n) => n.ragdoll?.status ?? null), this.player.ragdoll?.status ?? null].filter(Boolean) };
+      },
       /** Kill the player (the death card and the ragdoll), every creature, or every fighter, to see them fall. */
       kill: (what: 'player' | 'creatures' | 'fighters' = 'player') => {
         if (what === 'player') this.player.takeDamage(1e9);
@@ -883,7 +889,7 @@ class App {
       },
       /** Stand a creature of the planet `metres` ahead, for trying the powers and guns on. */
       creature: (metres = 8) => {
-        const list = () => this.world.creatures.creatures.map((c) => ({ hp: Number(c.hp.toFixed(1)), at: c.pos.toArray().map((n) => Number(n.toFixed(2))), dist: Number(c.pos.distanceTo(this.player.pos).toFixed(2)), dead: c.dead, slowed: Number(c.slowed.toFixed(1)), held: c.held, grounded: c.grounded }));
+        const list = () => this.world.creatures.creatures.map((c) => ({ hp: Number(c.hp.toFixed(1)), at: c.pos.toArray().map((n) => Number(n.toFixed(2))), dist: Number(c.pos.distanceTo(this.player.pos).toFixed(2)), dead: c.dead, slowed: Number(c.slowed.toFixed(1)), held: c.held, grounded: c.grounded, ragdoll: c.ragdoll?.status ?? null }));
         if (metres <= 0) return list();
         const p = this.player.pos;
         this.cam.forward(tmp);

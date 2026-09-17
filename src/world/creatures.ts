@@ -318,7 +318,7 @@ export class Creature {
   update(dt: number, terrain: Terrain, playerPos: THREE.Vector3, onAttack: (damage: number) => void): void {
     if (this.ragdoll) {
       // The physics has the body: the skin follows it, and the creature's place is where the trunk lies.
-      this.ragdoll.update();
+      this.ragdoll.update(dt);
       this.ragdoll.centre(tmp);
       this.pos.set(tmp.x, tmp.y - 0.3, tmp.z);
       this.deadTimer -= dt;
