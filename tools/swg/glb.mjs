@@ -48,7 +48,14 @@ function hardpointRotation(m, flipX) {
   return [x / len, y / len, z / len, w / len];
 }
 
-export function buildGlb(meshes, { flipX = true, textures = new Map(), skin = null, animations = [], keepZones = false } = {}) {
+/** True when every key of a track holds the same values as `ref` (one key's worth), within eps.
+ *  Exported because anything that reports what compaction did must use the same tolerances. */
+export function everyKeyEquals(values, size, ref, eps) {
+  for (let i = 0; i < values.length; i += size) for (let k = 0; k < size; k++) if (Math.abs(values[i + k] - ref[k]) > eps) return false;
+  return true;
+}
+
+export function buildGlb(meshes, { flipX = true, textures = new Map(), skin = null, animations = [], keepZones = false, compactTracks = false } = {}) {
   const buffers = [];
   const bufferViews = [];
   const accessors = [];
@@ -249,13 +256,33 @@ export function buildGlb(meshes, { flipX = true, textures = new Map(), skin = nu
     gltfAnimations = [];
     for (const clip of animations) {
       const input = pushAccessor(clip.times, 'SCALAR', 5126, undefined, { bounds: true });
+      const n = clip.times.length;
+      // With compaction a joint that never leaves its bind translation gets no track at all (three
+      // blends a bone with no track toward its own value, which in these models is the bind pose),
+      // and a track that never changes becomes two keys over the clip. The additive reference clip
+      // keeps every track: makeClipAdditive skips a target track the reference has not got.
+      let ends = null;
+      const endsInput = () => (ends ??= pushAccessor(Float32Array.of(clip.times[0], clip.times[n - 1]), 'SCALAR', 5126, undefined, { bounds: true }));
       const samplers = [];
       const channels = [];
+      const add = (node, path, values, size, type, bind) => {
+        if (compactTracks) {
+          if (bind && !clip.keepAllTracks && everyKeyEquals(values, size, bind, 1e-5)) return;
+          if (n > 2 && everyKeyEquals(values, size, values.subarray(0, size), 1e-6)) {
+            const two = new Float32Array(size * 2);
+            two.set(values.subarray(0, size), 0);
+            two.set(values.subarray(0, size), size);
+            samplers.push({ input: endsInput(), output: pushAccessor(two, type, 5126), interpolation: 'LINEAR' });
+            channels.push({ sampler: samplers.length - 1, target: { node, path } });
+            return;
+          }
+        }
+        samplers.push({ input, output: pushAccessor(values, type, 5126), interpolation: 'LINEAR' });
+        channels.push({ sampler: samplers.length - 1, target: { node, path } });
+      };
       clip.tracks.forEach((t, i) => {
-        samplers.push({ input, output: pushAccessor(t.rotations, 'VEC4', 5126), interpolation: 'LINEAR' });
-        channels.push({ sampler: samplers.length - 1, target: { node: jointNodeIndex[i], path: 'rotation' } });
-        samplers.push({ input, output: pushAccessor(t.translations, 'VEC3', 5126), interpolation: 'LINEAR' });
-        channels.push({ sampler: samplers.length - 1, target: { node: jointNodeIndex[i], path: 'translation' } });
+        add(jointNodeIndex[i], 'rotation', t.rotations, 4, 'VEC4', null);
+        add(jointNodeIndex[i], 'translation', t.translations, 3, 'VEC3', skin.joints[i].translation);
       });
       gltfAnimations.push({ name: clip.name, samplers, channels });
     }

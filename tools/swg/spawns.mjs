@@ -126,3 +126,86 @@ export function mobileTemplates(scriptsDir, names) {
   }
   return out;
 }
+
+/** A named list of flags (`pvpBitmask = AGGRESSIVE + ATTACKABLE`), split on + or |. */
+function flagList(body, field) {
+  const m = new RegExp(String.raw`\b${field}\s*=\s*([A-Za-z_0-9 +|]+)`).exec(body);
+  return m ? m[1].split(/[+|]/).map((s) => s.trim()).filter(Boolean) : [];
+}
+
+/**
+ * Every `name = Creature:new { ... }` block in one Lua file of Core3's scripts/mobile, with the
+ * fields a stats override needs. Missing fields stay undefined, because these scripts have been
+ * written over many years and no field is on every mobile.
+ */
+export function parseCore3Mobiles(text, file = '') {
+  const out = [];
+  for (const m of text.matchAll(/^\s*([A-Za-z_]\w*)\s*=\s*Creature:new\s*\{([\s\S]*?)^\}/gm)) {
+    const body = m[2];
+    const num = (field) => {
+      const x = new RegExp(String.raw`\b${field}\s*=\s*(-?[\d.]+)`).exec(body);
+      return x ? Number(x[1]) : undefined;
+    };
+    const pair = (a, b) => {
+      const x = num(a);
+      const y = num(b);
+      return x === undefined && y === undefined ? undefined : [x ?? y ?? 0, y ?? x ?? 0];
+    };
+    const t = /templates\s*=\s*\{([^}]*)\}/.exec(body);
+    const weaponsList = /\bweapons\s*=\s*\{([^}]*)\}/.exec(body);
+    const weapons = weaponsList ? [...weaponsList[1].matchAll(/"([^"]+)"/g)].map((x) => x[1]) : [];
+    for (const field of ['primaryWeapon', 'secondaryWeapon']) {
+      const w = new RegExp(String.raw`\b${field}\s*=\s*"([^"]+)"`).exec(body)?.[1];
+      if (w && !weapons.includes(w)) weapons.push(w);
+    }
+    // The attack list is pairs of name and modifier; a merge() of other lists cannot be counted here.
+    const attackBlock = /\battacks\s*=\s*\{([\s\S]*?)\n\s*\}/.exec(body);
+    const attacks = attackBlock ? [...attackBlock[1].matchAll(/\{\s*"[^"]*"\s*,/g)].length : undefined;
+    const diet = /\bdiet\s*=\s*([A-Za-z_]+)/.exec(body)?.[1];
+    out.push({
+      name: m[1],
+      file,
+      level: num('level'),
+      chanceHit: num('chanceHit'),
+      damage: pair('damageMin', 'damageMax'),
+      ham: pair('baseHAM', 'baseHAMmax'),
+      armor: num('armor'),
+      ferocity: num('ferocity'),
+      scale: num('scale'),
+      pvp: flagList(body, 'pvpBitmask'),
+      creature: flagList(body, 'creatureBitmask'),
+      ...(diet ? { diet } : {}),
+      templates: t ? [...t[1].matchAll(/"([^"]+)"/g)].map((x) => sharedTemplate(x[1])) : [],
+      weapons,
+      ...(attacks !== undefined ? { attacks } : {}),
+      faction: /\bfaction\s*=\s*"([^"]+)"/.exec(body)?.[1],
+      socialGroup: /\bsocialGroup\s*=\s*"([^"]+)"/.exec(body)?.[1],
+    });
+  }
+  return out;
+}
+
+/**
+ * Every mobile under <scriptsDir>/mobile by the client template it draws as, lowest level first,
+ * so a template several level variants share is read as its weakest. Returns an empty map when
+ * there is no such folder, because Core3 is optional everywhere it is used.
+ */
+export function core3MobileStats(scriptsDir) {
+  const out = new Map();
+  const root = join(scriptsDir, 'mobile');
+  if (!existsSync(root)) return out;
+  for (const file of luaFiles(root)) {
+    let mobiles;
+    try {
+      mobiles = parseCore3Mobiles(readFileSync(file, 'utf8'), relative(scriptsDir, file).replace(/\\/g, '/'));
+    } catch {
+      continue;
+    }
+    for (const mob of mobiles) for (const template of mob.templates) {
+      const list = out.get(template) ?? out.set(template, []).get(template);
+      list.push(mob);
+    }
+  }
+  for (const list of out.values()) list.sort((a, b) => (a.level ?? 1e9) - (b.level ?? 1e9) || a.name.localeCompare(b.name));
+  return out;
+}

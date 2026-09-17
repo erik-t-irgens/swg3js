@@ -800,7 +800,9 @@ export function skinData(skeleton, animations, { flipX = true } = {}) {
     inverseBind.push(matInvertRigid(world[i]));
   });
   const clips = [];
-  for (const { name, animation } of animations) {
+  // `loop` says outright whether a clip closes its loop; without it the name decides, as before.
+  // A pack's clips are named by their animation file, which the name rule cannot read.
+  for (const { name, animation, loop } of animations) {
     const frames = Math.max(1, animation.frameCount);
     const times = new Float32Array(frames);
     const tracks = skeleton.joints.map(() => ({ rotations: new Float32Array(frames * 4), translations: new Float32Array(frames * 3) }));
@@ -817,7 +819,7 @@ export function skinData(skeleton, animations, { flipX = true } = {}) {
     }
     const clip = { name, times, tracks, duration: times[frames - 1] };
     // The game loops these; their last frame leads back to the first over one more interval.
-    if (LOOPING_CLIP.test(name) && frames > 1) closeLoop(clip, 0);
+    if ((loop ?? LOOPING_CLIP.test(name)) && frames > 1) closeLoop(clip, 0);
     clips.push(clip);
   }
   return { joints, inverseBind, clips };
