@@ -1252,14 +1252,45 @@ export class World {
     return [0];
   }
 
-  /** Compile some objects for every pass that draws them. */
-  private compileFor(r: THREE.WebGLRenderer, camera: THREE.Camera, objects: THREE.Object3D[], async: boolean): void {
+  /**
+   * The target frames are drawn into (the effects' scene target, or null for the canvas). A
+   * program's key carries the tone mapping and the colour space, and both depend on whether a
+   * target is bound, so a warm-up with the wrong one builds the variant that is never drawn and
+   * every first draw compiles again on the frame it is needed. The game points this at the
+   * effects' target.
+   */
+  compileTarget: () => THREE.WebGLRenderTarget | null = () => null;
+
+  private withTarget<T>(r: THREE.WebGLRenderer, target: THREE.WebGLRenderTarget | null, fn: () => T): T {
+    const prev = r.getRenderTarget();
+    if (prev === target) return fn();
+    const face = r.getActiveCubeFace();
+    const mip = r.getActiveMipmapLevel();
+    r.setRenderTarget(target);
+    try {
+      return fn();
+    } finally {
+      r.setRenderTarget(prev, face, mip);
+    }
+  }
+
+  /** Compile some objects for every pass that draws them, for the target they will be drawn into. */
+  private compileFor(r: THREE.WebGLRenderer, camera: THREE.Camera, objects: THREE.Object3D[], async: boolean, target: THREE.WebGLRenderTarget | null = this.compileTarget()): Promise<unknown>[] {
+    const jobs: Promise<unknown>[] = [];
     const byPass = new Map<number, THREE.Object3D[]>();
     for (const o of objects) for (const p of World.passesOf(o)) (byPass.get(p) ?? byPass.set(p, []).get(p)!).push(o);
     for (const [layer, list] of byPass) {
       const root = World.rootOf(list);
-      this.withLayers(camera, layer, () => (async ? r.compileAsync(root, camera, this.scene).catch(() => {}) : r.compile(root, camera, this.scene)));
+      this.withLayers(camera, layer, () =>
+        this.withTarget(r, target, () => {
+          // compileAsync builds the programs now and only waits on the driver's linking, so the
+          // target can go back as soon as the call returns.
+          if (async) jobs.push(r.compileAsync(root, camera, this.scene).catch(() => {}));
+          else r.compile(root, camera, this.scene);
+        }),
+      );
     }
+    return jobs;
   }
 
   /**
@@ -1275,9 +1306,12 @@ export class World {
     const meshes: THREE.Object3D[] = [];
     for (const o of objects) o.traverse((m) => ((m as THREE.Mesh).isMesh ? meshes.push(m) : undefined));
     for (const m of meshes) {
+      // The target is read for every mesh, so a switch part way through compiles the rest for the
+      // path the game will actually draw.
+      const target = this.compileTarget();
       for (const layer of World.passesOf(m)) {
         const root = World.rootOf([m]);
-        await this.withLayers(camera, layer, () => r.compileAsync(root, camera, this.scene).catch(() => {}));
+        await this.withLayers(camera, layer, () => this.withTarget(r, target, () => r.compileAsync(root, camera, this.scene).catch(() => {})));
       }
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
@@ -1306,12 +1340,18 @@ export class World {
    * a loading screen can show the count going up; the stall is spent behind the screen rather
    * than on the first shot or the first look at a building. Returns how many programs were made.
    */
-  async compileAllAsync(onProgress: (done: number, total: number) => void = () => {}): Promise<number> {
+  async compileAllAsync(
+    onProgress: (done: number, total: number) => void = () => {},
+    opts: { target?: THREE.WebGLRenderTarget | null; waitReady?: boolean; keepQueue?: boolean } = {},
+  ): Promise<number> {
     const r = this.renderer;
     const camera = this.camera;
     if (!r || !camera) return 0;
     this.setupShadowMaterials();
-    this.compileQueue.length = 0;
+    // Switching the effects compiles for the other path while the frames still draw the old one,
+    // so the queue it would otherwise be feeding is left alone.
+    const target = opts.target !== undefined ? opts.target : this.compileTarget();
+    if (!opts.keepQueue) this.compileQueue.length = 0;
     const objects: THREE.Object3D[] = [];
     this.scene.traverse((o) => {
       const m = o as THREE.Mesh;
@@ -1320,7 +1360,9 @@ export class World {
     const before = r.info.programs?.length ?? 0;
     const BATCH = 8;
     for (let i = 0; i < objects.length; i += BATCH) {
-      this.compileFor(r, camera, objects.slice(i, i + BATCH), false);
+      const jobs = this.compileFor(r, camera, objects.slice(i, i + BATCH), !!opts.waitReady, target);
+      // Waiting means the programs are linked when this returns, so the picture can change over.
+      if (opts.waitReady) await Promise.all(jobs);
       onProgress(Math.min(objects.length, i + BATCH), objects.length);
       // A tab in the background gets no animation frames, and its timers are throttled to one a
       // minute after a while; a message to itself is neither, so loading goes on unlooked-at.
@@ -1858,12 +1900,18 @@ export class World {
     this.gallery?.update(dt, playerPos);
   }
 
-  /** The sun as the effects want it: which way it lies, its colour, and how much daylight there is (0 at night, and in space). */
-  sunInfo(): SunInfo | null {
+  /**
+   * The sun as the effects want it: which way it lies, its colour, and how much daylight there is
+   * (0 at night, and in space). Filled into a record the caller keeps, so a frame allocates nothing.
+   */
+  sunInfo(out: SunInfo): SunInfo | null {
     if (!this.planet || this.planet.space) return null;
     tmpV.copy(this.sun.position).sub(this.sun.target.position);
     if (tmpV.lengthSq() < 1e-6 || this.day.sunDir.y <= 0.02) return null;
-    return { dir: tmpV.clone().normalize(), color: this.sun.color, intensity: this.day.daylight };
+    out.dir.copy(tmpV).normalize();
+    out.color.copy(this.sun.color);
+    out.intensity = this.day.daylight;
+    return out;
   }
 
   private applyLighting(): void {

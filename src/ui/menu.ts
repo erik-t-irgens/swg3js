@@ -2,6 +2,7 @@
 // and a secondary for every action, and the graphics, every knob the game has, applied live).
 import { DEFAULT_BINDINGS, type Action, type Input } from '../core/input';
 import { DEFAULT_SETTINGS, saveSettings, type Settings } from '../core/settings';
+import { FX_KNOBS, fxPassDef, fxProductDef } from '../core/fxRegistry.ts';
 
 type Page = 'main' | 'controls' | 'graphics' | 'emotes' | 'multiplayer';
 
@@ -97,9 +98,11 @@ interface Knob {
   step?: number;
   options?: { value: number; label: string }[];
   format?: (v: number) => string;
+  /** Greyed while any of these is off; still usable, so a strength can be set before its toggle. */
+  requires?: readonly (keyof Settings)[];
 }
 
-const GRAPHICS: { title: string; knobs: Knob[] }[] = [
+const GRAPHICS: { title: string; knobs: readonly Knob[] }[] = [
   {
     title: 'Picture',
     knobs: [
@@ -121,15 +124,10 @@ const GRAPHICS: { title: string; knobs: Knob[] }[] = [
     ],
   },
   {
+    // Straight from the effects registry, so a knob and its setting can never drift apart. An
+    // effect that is not written yet keeps its key but hides its knob.
     title: 'Effects',
-    knobs: [
-      { key: 'bloom', label: 'Bloom', hint: 'The bright parts spill over: engine glows, bolts, the suns. Turning it on or off recompiles every shader, a pause of a few seconds.', kind: 'toggle' },
-      { key: 'bloomStrength', label: 'Bloom strength', hint: '0.1 a touch, 0.5 a glow, 1 a haze.', kind: 'range', min: 0.05, max: 1.5, step: 0.05, format: (v) => v.toFixed(2) },
-      { key: 'speedBlur', label: 'Motion blur', hint: 'What the camera moves past smears along its movement: the ground under a ship at speed, a wall in a turn; what moves with you stays sharp (needs bloom on, which runs the picture through the effects).', kind: 'toggle' },
-      { key: 'motionBlur', label: 'Motion blur strength', hint: 'How much of a frame\'s movement is smeared: 0.2 a hint, 0.5 a film\'s, 1 the whole.', kind: 'range', min: 0.1, max: 1, step: 0.05, format: (v) => v.toFixed(2) },
-      { key: 'godRays', label: 'God rays', hint: 'Sunlight scattered towards you where the sky shows between trees, walls and hulls, drawn from the frame\'s own depth (needs bloom on).', kind: 'toggle' },
-      { key: 'godRayStrength', label: 'God ray strength', hint: '0.3 a hint, 0.6 a morning, 1.2 a blaze.', kind: 'range', min: 0.1, max: 1.5, step: 0.05, format: (v) => v.toFixed(2) },
-    ],
+    knobs: FX_KNOBS.filter((k) => (k.pass === null || fxPassDef(k.pass).live) && (!k.product || fxProductDef(k.product).live)),
   },
   {
     title: 'Distance and detail',
@@ -275,7 +273,7 @@ export class Menu {
     }
   }
 
-  private knobRows(knobs: Knob[]): string {
+  private knobRows(knobs: readonly Knob[]): string {
     return knobs
       .map((k) => {
         const v = this.settings[k.key];
@@ -283,9 +281,19 @@ export class Menu {
         if (k.kind === 'toggle') control = `<label class="switch"><input type="checkbox" data-key="${k.key}"${v ? ' checked' : ''} /><span></span></label>`;
         else if (k.kind === 'select') control = `<select data-key="${k.key}">${k.options!.map((o) => `<option value="${o.value}"${o.value === v ? ' selected' : ''}>${o.label}</option>`).join('')}</select>`;
         else control = `<input type="range" data-key="${k.key}" min="${k.min}" max="${k.max}" step="${k.step}" value="${v}" /><span class="value">${k.format ? k.format(v as number) : String(v)}</span>`;
-        return `<div class="knob"><div class="knob-label">${k.label}<small>${k.hint}</small></div><div class="knob-control">${control}</div></div>`;
+        // What this knob waits on: it is greyed, and says so, while any of them is off.
+        const off = k.requires?.filter((key) => !this.settings[key]) ?? [];
+        const labels = off.map((key) => this.labelOf(key));
+        const hint = labels.length ? `${k.hint} (off while ${labels.join(' and ')} ${labels.length > 1 ? 'are' : 'is'} off)` : k.hint;
+        return `<div class="knob${labels.length ? ' disabled' : ''}"><div class="knob-label">${k.label}<small>${hint}</small></div><div class="knob-control">${control}</div></div>`;
       })
       .join('');
+  }
+
+  /** The name a key is shown under, for the "off while X is off" note. */
+  private labelOf(key: keyof Settings): string {
+    for (const g of GRAPHICS) for (const k of g.knobs) if (k.key === key) return k.label;
+    return String(key);
   }
 
   private wireKnobs(body: HTMLElement): void {
@@ -297,6 +305,14 @@ export class Menu {
         this.setValue(knob.key, value);
         const out = el.parentElement?.querySelector<HTMLElement>('.value');
         if (out && typeof value === 'number') out.textContent = knob.format ? knob.format(value) : String(value);
+        // A switch other knobs wait on: draw the page again so they grey or come back. Ranges
+        // never do this, so a drag is never interrupted.
+        if (knob.kind === 'toggle' && all.some((k) => k.requires?.includes(knob.key))) {
+          const scroll = body.scrollTop;
+          this.showPage(this.page);
+          const again = this.root.querySelector<HTMLElement>('.menu-body');
+          if (again) again.scrollTop = scroll;
+        }
       };
       el.addEventListener(knob.kind === 'range' ? 'input' : 'change', on);
     }

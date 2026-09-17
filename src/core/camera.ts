@@ -47,6 +47,10 @@ export class ThirdPersonCamera {
   /** The field of view when not aiming, degrees. */
   baseFov = 60;
   private aimBlend = 0;
+  /** How far the aimed camera has eased in, 0 to 1: the effects narrow with it, not with the key. */
+  get aimAmount(): number {
+    return this.aimBlend;
+  }
   private readonly focus = new THREE.Vector3();
   private readonly desired = new THREE.Vector3();
   private readonly posDir = new THREE.Vector3();

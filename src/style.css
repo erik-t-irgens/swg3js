@@ -349,6 +349,11 @@ b { color: var(--accent); font-weight: 600; }
 .knob-control .switch span::before { content: ''; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: var(--muted); transition: transform 0.15s, background 0.15s; }
 .knob-control .switch input:checked + span { background: rgba(45,127,214,0.5); border-color: var(--accent); }
 .knob-control .switch input:checked + span::before { transform: translateX(20px); background: var(--accent); }
+/* A knob whose switch is off: still usable, so a strength can be set before its toggle. */
+.knob.disabled { opacity: 0.45; }
+/* Work going on in the background (the Effects switch compiling shaders): over the menu, under the loading screen. */
+.fx-notice { position: fixed; top: 14px; left: 50%; transform: translateX(-50%); z-index: 5; padding: 6px 14px; background: var(--panel); border: 1px solid var(--panel-border); border-radius: 6px; font-size: 12px; color: var(--text); pointer-events: none; }
+.fx-notice:empty { display: none; }
 .keys { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 24px; }
 .key-row { display: flex; align-items: center; gap: 6px; padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
 .key-row .key-label { flex: 1; font-size: 12px; color: var(--text); }

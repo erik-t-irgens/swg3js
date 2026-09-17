@@ -26,7 +26,10 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { Hud } from './ui/hud';
 import { specFor, type DriveInput } from './vehicles/vehicle';
 import { interceptTime, leadPoint } from './combat/intercept';
-import { PostFX } from './core/postfx';
+import { PostFX, type FxFrameInput, type SunInfo } from './core/postfx';
+import { isFxSettingKey, type FxPassId } from './core/fxRegistry.ts';
+import { installEffects } from './core/fx/install';
+import { Notice } from './ui/notice';
 import { VehiclesUi } from './ui/vehiclesUi';
 import { NpcUi } from './ui/npcUi';
 import { AppearanceUi } from './ui/appearanceUi';
@@ -172,8 +175,18 @@ class App {
   private readonly shipLead = new THREE.Vector3();
   private readonly shipAim = new THREE.Vector3();
   private shipLeadValid = false;
-  /** The picture's effects (bloom, the speed blur), when the settings ask for them. */
+  /** The picture's effects chain, while the Effects setting is on. */
   private postfx: PostFX | null = null;
+  /** What the effects are told about each frame, refilled in drawFrame rather than made again. */
+  private readonly fxInput: FxFrameInput = { camera: null as unknown as THREE.PerspectiveCamera, dt: 1 / 60, sun: null, portalView: false, inside: false, aboard: false, space: false, fog: null, daylight: 1, dayIndex: 0, lighting: null, planetId: '', aiming: false, aimAmount: 0, firstPerson: false };
+  private readonly fxSun: SunInfo = { dir: new THREE.Vector3(), color: new THREE.Color(), intensity: 0 };
+  /** What the debug mask draws: the player and whatever they ride or are aboard. */
+  private readonly fxMaskObjects: THREE.Object3D[] = [];
+  /** Work going on in the background: the Effects switch compiling every shader for the other path. */
+  private readonly notice = new Notice(this.ui);
+  private fxQueued = false;
+  private fxBusy = false;
+  private fxAgain = false;
   /** The ship last flown, spawned again on arriving in space (or back from it). */
   private lastShipDef: VehicleDef | null = null;
   /** The way between a planet and its space, offered on E: up near the top of the sky, down anywhere in space. */
@@ -201,7 +214,7 @@ class App {
     this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true, powerPreference: 'high-performance', stencil: true });
     // ?lowfx=1 is the cheap preset for this session; otherwise the settings kept in this browser.
     const lowfx = new URLSearchParams(location.search).get('lowfx') === '1';
-    if (lowfx) Object.assign(this.settings, { renderScale: 0.5, shadows: false });
+    if (lowfx) Object.assign(this.settings, { renderScale: 0.5, shadows: false, effects: false });
     const S = this.settings;
     this.renderer.setPixelRatio(S.renderScale);
     this.renderer.setSize(window.innerWidth, window.innerHeight);
@@ -210,7 +223,7 @@ class App {
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     World.anisotropy = Math.min(8, this.renderer.capabilities.getMaxAnisotropy());
     this.renderer.toneMappingExposure = S.exposure;
-    this.setPostFX();
+    if (S.effects) this.postfx = this.makePostFX();
 
     this.cam = new ThirdPersonCamera(window.innerWidth / window.innerHeight);
     this.cam.sensitivity = S.sensitivity;
@@ -221,6 +234,9 @@ class App {
     this.input = new Input(this.canvas);
     this.world = new World(this.scene, physics);
     this.world.renderer = this.renderer;
+    // Shaders are warmed for the target the frames are actually drawn into: with the effects on,
+    // a program compiled with nothing bound is the wrong variant and is thrown away on first use.
+    this.world.compileTarget = () => this.postfx?.compileTarget ?? null;
     this.world.userFog = S.fog;
     this.world.normalScale.set(S.normalStrength, -S.normalStrength);
     Character.normalScale.set(S.normalStrength, -S.normalStrength);
@@ -362,6 +378,48 @@ class App {
       },
       cell: () => (this.world.cellState ? { model: this.world.cellState.building.model.def.id, cell: this.world.cellState.cell } : null),
       passes: () => this.portals.passes,
+      /** The effects chain: every pass with its setting, whether it drew, why not, and what it cost. `postfx({ godRays: false })` forces one off, `{ godRays: null }` gives it back to the settings. */
+      postfx: (changes?: Partial<Record<FxPassId, boolean | null>>) => {
+        const fx = this.postfx;
+        if (!fx) return 'the effects are off; turn Effects on in the menu';
+        if (changes) for (const [id, value] of Object.entries(changes)) {
+          if (value === null) delete fx.override[id as FxPassId];
+          else fx.override[id as FxPassId] = value as boolean;
+        }
+        return fx.describe();
+      },
+      /** Start (true) or stop (false) timing every step of the chain on the GPU; with no argument, the report so far. */
+      fxTiming: (on?: boolean) => {
+        const fx = this.postfx;
+        if (!fx) return 'the effects are off; turn Effects on in the menu';
+        if (on === true) {
+          fx.timer.reset();
+          fx.timer.enabled = true;
+          return `timing started (GPU timing ${fx.timer.hasGpu ? 'on' : 'not available here'})`;
+        }
+        if (on === false) fx.timer.enabled = false;
+        return fx.timing();
+      },
+      /** Show one of the shared products instead of the picture: 'linearDepthHalf', 'normalsHalf', 'debugMask', 'depth', 'scene', or a pass's own texture as 'ssao.ao'. No argument puts the picture back. */
+      fxView: (name?: string | null) => {
+        const fx = this.postfx;
+        if (!fx) return 'the effects are off; turn Effects on in the menu';
+        // Putting the picture back answers null, which is not a failure: say so in words.
+        return fx.fxView(name ?? null) ?? 'the picture';
+      },
+      /** Draw one frame asking the driver for an error after every step: this is the test that no pass reads the depth of the target it is writing. */
+      fxCheck: () => {
+        const fx = this.postfx;
+        if (!fx) return 'the effects are off; turn Effects on in the menu';
+        fx.checkErrors = true;
+        this.drawFrame();
+        const errors = fx.lastCheck ?? [];
+        return { clean: errors.length === 0, errors };
+      },
+      /** Compile every pass and product material again and say how many programs that made; a second call should say 0. */
+      fxWarm: async () => (this.postfx ? await this.postfx.warmUp() : 'the effects are off; turn Effects on in the menu'),
+      /** What the card is holding: how the dispose is checked, since turning the effects off and on three times must leave the texture count where it was. */
+      renderInfo: () => ({ memory: { ...this.renderer.info.memory }, programs: this.renderer.info.programs?.length ?? 0, effects: !!this.postfx }),
       /** Every pass of the last frame: what it was and what it drew. */
       passLog: () => {
         const log = this.portals.passLog;
@@ -599,7 +657,7 @@ class App {
       },
       /** With the effects on: scan the frame for pixels that are not numbers (what the bloom smears into a black box) and name the object under the first one. */
       blackBox: () => {
-        if (!this.postfx) return 'the effects are off (turn bloom on): the scan reads their frame';
+        if (!this.postfx) return 'the effects are off (turn Effects on): the scan reads their frame';
         this.postfx.wantScan = true;
         this.drawFrame();
         const s = this.postfx.lastScan;
@@ -620,11 +678,11 @@ class App {
         }
         return { ...s, under };
       },
-      /** Draw `n` frames back to back with the GPU waited on after each, and report the milliseconds one takes; `bench(30, false)` first turns bloom (the effects) off, `bench(30, true)` on. */
-      bench: (n = 30, bloom?: boolean) => {
-        if (bloom !== undefined && bloom !== this.settings.bloom) {
-          this.settings.bloom = bloom;
-          this.setPostFX();
+      /** Draw `n` frames back to back with the GPU waited on after each, and report the milliseconds one takes; `await bench(30, false)` first turns the effects off, `bench(30, true)` on. */
+      bench: async (n = 30, effects?: boolean) => {
+        if (effects !== undefined && effects !== this.settings.effects) {
+          this.settings.effects = effects;
+          await this.reconcileEffects();
         }
         const gl = this.renderer.getContext();
         this.drawFrame();
@@ -1106,14 +1164,6 @@ class App {
       case 'exposure':
         this.renderer.toneMappingExposure = S.exposure;
         break;
-      case 'bloom':
-      case 'bloomStrength':
-      case 'speedBlur':
-      case 'motionBlur':
-      case 'godRays':
-      case 'godRayStrength':
-        this.setPostFX();
-        break;
       case 'fog':
         this.world.userFog = S.fog;
         break;
@@ -1143,6 +1193,11 @@ class App {
         break;
       case 'invertY':
         this.cam.invertY = S.invertY;
+        break;
+      default:
+        // Anything in the effects registry: the chain takes them all in one go on the next
+        // microtask, so resetting the graphics is one reconcile rather than two dozen.
+        if (isFxSettingKey(key)) this.queueEffects();
         break;
     }
   }
@@ -1464,6 +1519,12 @@ class App {
     this.effects.warmUp();
     this.world.bolts.warmUp();
     for (const id of ['jedi', 'bounty_hunter'] as ClassId[]) this.kitFor(id).warmUp?.();
+    // Every pass and product too, whether it is on or not, so turning one on later or the sun
+    // coming on screen for the first time never compiles on a live frame.
+    if (this.postfx) {
+      const warmed = await this.postfx.warmUp();
+      if (warmed) console.info(`effects: ${warmed} programs warmed`);
+    }
     const tCompile = performance.now();
     const compiled = await this.world.compileAllAsync((done, total) => this.loadingScreen.setWhat(`compiling shaders, ${done} of ${total} objects`));
     if (compiled) console.info(`shaders: ${compiled} programs compiled behind the loading screen in ${(performance.now() - tCompile).toFixed(0)} ms`);
@@ -1999,25 +2060,118 @@ class App {
     info.calls = 0;
     info.triangles = 0;
     // With the effects on, the passes draw into their target and the picture goes out through them.
-    this.postfx?.begin();
+    const postfx = this.postfx;
+    postfx?.begin();
     this.portals.render(this.scene, cam, view, this.world.buildings);
-    this.postfx?.end(cam, this.lastDt, this.world.sunInfo());
+    if (postfx) {
+      const f = this.fxInput;
+      f.camera = cam;
+      f.dt = this.lastDt;
+      f.sun = this.world.sunInfo(this.fxSun);
+      f.portalView = view !== null;
+      f.inside = this.world.inside;
+      f.aboard = !!this.player.aboard;
+      f.space = !!this.world.planet?.space;
+      f.fog = this.scene.fog instanceof THREE.FogExp2 ? this.scene.fog : null;
+      f.daylight = this.world.day.daylight;
+      f.dayIndex = this.world.day.colorIndex;
+      f.lighting = this.world.swgSky?.lighting ?? null;
+      f.planetId = this.world.planet?.id ?? '';
+      f.aiming = this.player.aiming;
+      f.aimAmount = this.cam.aimAmount;
+      f.firstPerson = this.cam.firstPerson;
+      postfx.end(f);
+    }
     this.frameCalls = info.calls;
     this.frameTriangles = info.triangles;
     this.renderer.info.autoReset = auto;
   }
 
-  /** The effects the settings ask for, made or dropped as they change; a change of them recompiles every shader. */
-  private setPostFX(): void {
-    const S = this.settings;
-    if (!S.bloom) {
-      this.postfx?.dispose();
-      this.postfx = null;
+  /** A new chain with every effect registered on it, ready to be warmed. */
+  private makePostFX(): PostFX {
+    const fx = new PostFX(this.renderer, this.settings);
+    fx.debugMaskObjects = () => {
+      const out = this.fxMaskObjects;
+      out.length = 0;
+      out.push(this.player.group);
+      const ridden = this.player.mounted ?? this.player.aboard?.vehicle ?? null;
+      if (ridden) out.push(ridden.group);
+      return out;
+    };
+    installEffects(fx, {});
+    return fx;
+  }
+
+  /** A setting in the effects registry moved: take all of them in one go on the next microtask. */
+  private queueEffects(): void {
+    if (this.fxQueued) return;
+    this.fxQueued = true;
+    queueMicrotask(() => {
+      this.fxQueued = false;
+      void this.reconcileEffects();
+    });
+  }
+
+  /**
+   * Bring the effects in line with the settings. Strengths and toggles are immediate. The master
+   * switch changes which variant of every material is drawn, so the other variant is compiled in
+   * the background with the frames still drawing the old way, and the picture changes over only
+   * when the programs are ready.
+   */
+  private async reconcileEffects(): Promise<void> {
+    if (this.fxBusy) {
+      this.fxAgain = true;
       return;
     }
-    const opts = { bloom: S.bloom, bloomStrength: S.bloomStrength, motionBlur: S.speedBlur, motionBlurStrength: S.motionBlur, godRays: S.godRays, godRayStrength: S.godRayStrength };
-    if (!this.postfx) this.postfx = new PostFX(this.renderer, opts);
-    else this.postfx.set(opts);
+    this.fxBusy = true;
+    try {
+      do {
+        this.fxAgain = false;
+        const S = this.settings;
+        this.postfx?.configure(S);
+        if (S.effects === !!this.postfx) continue;
+        if (!this.inWorld) {
+          // Nothing is being drawn: arriving compiles for whichever path is in force then.
+          if (S.effects) this.postfx = this.makePostFX();
+          else {
+            this.postfx?.dispose();
+            this.postfx = null;
+          }
+          continue;
+        }
+        const want = S.effects;
+        const next = want ? this.makePostFX() : null;
+        const label = want ? 'Effects on' : 'Effects off';
+        this.notice.set(`${label}: preparing shaders`);
+        // The notice has to be on the screen before the compiling starts: the chain's own shaders
+        // are built in one burst that holds the page, and awaiting only yields to microtasks, never
+        // to a paint. Two frames is one to draw the notice and one to know it was drawn; the timer
+        // is there because a hidden tab is given no frames at all.
+        await new Promise<void>((done) => {
+          const late = setTimeout(done, 100);
+          requestAnimationFrame(() => requestAnimationFrame(() => {
+            clearTimeout(late);
+            done();
+          }));
+        });
+        if (next) await next.warmUp();
+        await this.world.compileAllAsync((done, total) => this.notice.set(`${label}: shaders for ${done} of ${total} objects`), { target: next ? next.compileTarget : null, waitReady: true, keepQueue: true });
+        if (this.settings.effects !== want) {
+          // It moved again while we compiled: throw this one away and look at the settings afresh.
+          next?.dispose();
+          continue;
+        }
+        const old = this.postfx;
+        this.postfx = next;
+        next?.setSize();
+        next?.reset();
+        old?.dispose();
+      } while (this.fxAgain || this.settings.effects !== !!this.postfx);
+    } finally {
+      this.fxBusy = false;
+      this.notice.set(null);
+      this.lastPrograms = this.renderer.info.programs?.length ?? 0;
+    }
   }
 
   /**
@@ -2670,7 +2824,8 @@ class App {
       stats.frameMs = performance.now() - tFrame;
       // A shader compiled on a live frame is a stall: say which frame, and how many, so the cause can be found.
       const programs = this.renderer.info.programs?.length ?? 0;
-      if (programs > this.lastPrograms && this.lastPrograms > 0 && !this.traveling) console.info(`shaders: ${programs - this.lastPrograms} compiled during play (${stats.frameMs.toFixed(0)} ms frame, ${programs} programs in all)`);
+      // While the effects are switching over, programs are made on purpose and on frames that are not stalls.
+      if (programs > this.lastPrograms && this.lastPrograms > 0 && !this.traveling && !this.fxBusy) console.info(`shaders: ${programs - this.lastPrograms} compiled during play (${stats.frameMs.toFixed(0)} ms frame, ${programs} programs in all)`);
       this.lastPrograms = programs;
       stats.rawDt = rawDt;
       stats.grounded = player.grounded;

@@ -1,7 +1,9 @@
 // The player's settings, kept in this browser: how the mouse feels and what the graphics cost.
 // Every value has a default, a range and a live effect; the menu shows them, the game applies them.
+// The effects' own keys live in `fxRegistry.ts`, which the menu and a plain node test read as well.
+import { FX_DEFAULTS, type FxSettings } from './fxRegistry.ts';
 
-export interface Settings {
+export interface Settings extends FxSettings {
   /** Mouse look speed, 1 is the game's own. */
   sensitivity: number;
   invertY: boolean;
@@ -30,18 +32,6 @@ export interface Settings {
   terrainRadius: number;
   /** Coarse far tiles each way. */
   farRadius: number;
-  /** The bright parts of the picture spilling over (engine glows, bolts, the suns). */
-  bloom: boolean;
-  /** How much they spill: 0.1 a touch, 0.5 a glow, 1 a haze. */
-  bloomStrength: number;
-  /** A motion blur: what the camera moves past smears along its movement (the ground under a ship at speed). */
-  speedBlur: boolean;
-  /** How much of a frame's movement the blur smears: 0.2 a hint, 0.5 a film's, 1 the whole. */
-  motionBlur: number;
-  /** God rays: sunlight scattered towards the eye where the sky shows between what blocks it (needs bloom on). */
-  godRays: boolean;
-  /** How bright the rays are: 0.3 a hint, 0.6 a morning, 1.2 a blaze. */
-  godRayStrength: number;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -60,20 +50,33 @@ export const DEFAULT_SETTINGS: Settings = {
   objectReach: 1,
   terrainRadius: 6,
   farRadius: 6,
-  bloom: false,
-  bloomStrength: 0.35,
-  speedBlur: true,
-  motionBlur: 0.35,
-  godRays: true,
-  godRayStrength: 0.6,
+  ...FX_DEFAULTS,
 };
+
+/**
+ * Keys renamed when the effects got a registry of their own: a value kept under an old name moves
+ * to the new one, so a player who had turned the speed blur off still has it off. Old names are
+ * dropped here and never written again, since saving only walks the live object.
+ */
+export function migrateSettings(saved: Record<string, unknown>): Record<string, unknown> {
+  const out = { ...saved };
+  if (typeof out.motionBlur === 'number') {
+    out.motionBlurStrength ??= out.motionBlur;
+    delete out.motionBlur;
+  }
+  if (typeof out.speedBlur === 'boolean') {
+    out.motionBlur ??= out.speedBlur;
+    delete out.speedBlur;
+  }
+  return out;
+}
 
 const KEY = 'swg.settings';
 
 export function loadSettings(): Settings {
   const out = { ...DEFAULT_SETTINGS };
   try {
-    const saved = JSON.parse(localStorage.getItem(KEY) ?? '{}') as Partial<Settings>;
+    const saved = migrateSettings(JSON.parse(localStorage.getItem(KEY) ?? '{}') as Record<string, unknown>);
     for (const k of Object.keys(DEFAULT_SETTINGS) as (keyof Settings)[]) {
       const v = saved[k];
       if (typeof v === typeof DEFAULT_SETTINGS[k]) (out as unknown as Record<string, unknown>)[k] = v;
