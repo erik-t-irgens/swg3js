@@ -58,15 +58,52 @@ export interface SpeciesEntry {
   wardrobe: string | null;
 }
 
-/** The species index, or an empty list when the pack has none (only the one character converted by hand). */
-export async function loadSpeciesIndex(baseUrl: string): Promise<SpeciesEntry[]> {
-  try {
-    const res = await fetch(`${baseUrl}assets-private/characters/index.json`);
-    if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json')) return [];
-    return ((await res.json()) as { species: SpeciesEntry[] }).species ?? [];
-  } catch {
-    return [];
+const speciesIndex = new Map<string, Promise<SpeciesEntry[]>>();
+
+/** The species index, or an empty list when the pack has none (only the one character converted by hand); fetched once. */
+export function loadSpeciesIndex(baseUrl: string): Promise<SpeciesEntry[]> {
+  let p = speciesIndex.get(baseUrl);
+  if (!p) {
+    p = (async () => {
+      try {
+        const res = await fetch(`${baseUrl}assets-private/characters/index.json`);
+        if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json')) return [];
+        return ((await res.json()) as { species: SpeciesEntry[] }).species ?? [];
+      } catch {
+        return [];
+      }
+    })();
+    speciesIndex.set(baseUrl, p);
   }
+  return p;
+}
+
+/**
+ * A species' rig file is its animations alone, and hundreds of megabytes of them (twelve
+ * hundred clips); parsed once per file and shared, since clips are read-only data any number
+ * of mixers can play. Without this every fighter spawned parsed the whole file again.
+ */
+const rigClips = new Map<string, Promise<THREE.AnimationClip[]>>();
+/** The wardrobes' catalogues, one fetch per folder however many characters dress from it. */
+const wardrobes = new Map<string, Promise<(Wardrobe & { skeleton?: string }) | null>>();
+
+/** Re-point a skinned mesh's joint indices from its own skeleton's order to `target`'s, by joint name; a joint the target lacks goes to its root. */
+function remapSkin(s: THREE.SkinnedMesh, target: THREE.Skeleton): void {
+  const own = s.skeleton?.bones ?? [];
+  if (!own.length) return;
+  const index = new Map(target.bones.map((b, i) => [b.name, i]));
+  const map = own.map((b) => index.get(b.name) ?? -1);
+  if (map.every((v, i) => v === i)) return;
+  const missing = own.filter((_, i) => map[i] < 0).map((b) => b.name);
+  if (missing.length) console.info(`wearable ${s.name}: ${missing.length} joints this skeleton lacks (${missing.slice(0, 4).join(', ')}) ride its root`);
+  const attr = s.geometry.getAttribute('skinIndex');
+  if (!attr) return;
+  const out = new Uint16Array(attr.count * attr.itemSize);
+  for (let i = 0; i < attr.count * attr.itemSize; i++) {
+    const v = map[(attr.array as ArrayLike<number>)[i]] ?? -1;
+    out[i] = v < 0 ? 0 : v;
+  }
+  s.geometry.setAttribute('skinIndex', new THREE.BufferAttribute(out, attr.itemSize));
 }
 
 /** The blade's axis in a hand bone's own frame, for each hand. */
@@ -171,8 +208,14 @@ export class Character {
     // skeleton comes from the first part instead, where the loader makes a real one out of that
     // file's own inverse bind matrices. Every part carries the same matrices for the same joints
     // in the same order (the converter writes them from one skeleton), so one of them is the one.
-    const rig = await loader.loadAsync(dir + manifest.rig.file);
-    const character = new Character(manifest, rig.animations);
+    const rigUrl = dir + manifest.rig.file;
+    let clips = rigClips.get(rigUrl);
+    if (!clips) {
+      clips = loader.loadAsync(rigUrl).then((rig) => rig.animations);
+      rigClips.set(rigUrl, clips);
+      clips.catch(() => rigClips.delete(rigUrl));
+    }
+    const character = new Character(manifest, await clips);
     character.dir = dir;
     const dress = new Set(wear ?? manifest.defaultWear ?? []);
     const wanted = manifest.parts.filter((def) => def.occlusionLayer === 0 || dress.has(def.name));
@@ -241,8 +284,14 @@ export class Character {
     for (const s of meshes) {
       // Later parts drop their own copy of the bones and drive the shared ones. Their bind matrix
       // is their own: it says where the mesh sits relative to the skeleton, which the shared
-      // inverse bind matrices (identical across parts) then undo.
-      if (!first && this.skeleton) s.bind(this.skeleton, s.bindMatrix);
+      // inverse bind matrices (identical across parts) then undo. A piece made for another
+      // species' skeleton (a human's shirt on a Rodian) lists its joints in another order, or
+      // has some this skeleton lacks: its skin indices are re-pointed by joint name first, a
+      // missing joint going to the root, or the renderer meets an undefined bone and stops.
+      if (!first && this.skeleton) {
+        remapSkin(s, this.skeleton);
+        s.bind(this.skeleton, s.bindMatrix);
+      }
       s.castShadow = true;
       s.receiveShadow = true;
       s.frustumCulled = false;
@@ -361,11 +410,19 @@ export class Character {
     const gender = this.manifest.gender ?? (/female/.test(this.manifest.id) ? 'female' : 'male');
     let dir = '';
     let w: Wardrobe | null = null;
-    for (const cand of [this.manifest.id, `human_${gender}`]) {
+    // The species index says which wardrobe folder each species dresses from (its own, or the
+    // human one of its gender), so no folder that is not there is asked for; without an index
+    // the folders are tried in that order.
+    const listed = (await loadSpeciesIndex(baseUrl)).find((s) => s.id === this.manifest.id)?.wardrobe;
+    for (const cand of listed ? [listed] : [this.manifest.id, `human_${gender}`]) {
       const d = `${baseUrl}assets-private/wardrobe/${cand}/`;
-      const res = await fetch(`${d}wardrobe.json`);
-      if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json')) continue;
-      const found = (await res.json()) as Wardrobe & { skeleton?: string };
+      let p = wardrobes.get(d);
+      if (!p) {
+        p = fetch(`${d}wardrobe.json`).then(async (res) => (!res.ok || !(res.headers.get('content-type') ?? '').includes('json') ? null : ((await res.json()) as Wardrobe & { skeleton?: string })));
+        wardrobes.set(d, p);
+      }
+      const found = await p;
+      if (!found) continue;
       if (cand !== this.manifest.id && found.skeleton && found.skeleton.toLowerCase() !== this.manifest.skeleton.toLowerCase()) continue;
       dir = d;
       w = found;

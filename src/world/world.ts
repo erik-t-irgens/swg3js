@@ -1262,6 +1262,27 @@ export class World {
     }
   }
 
+  /**
+   * Compile some objects' shaders for every pass that draws them, one mesh at a time with a
+   * breath between, and resolve when they are ready to draw (a fighter dressed at run time).
+   * Making a program is work on the main thread even when its linking is left to the driver:
+   * a whole outfit at once was a four-second frame, a mesh at a time a few short ones.
+   */
+  async compileReady(objects: THREE.Object3D[]): Promise<void> {
+    const r = this.renderer;
+    const camera = this.camera;
+    if (!r || !camera) return;
+    const meshes: THREE.Object3D[] = [];
+    for (const o of objects) o.traverse((m) => ((m as THREE.Mesh).isMesh ? meshes.push(m) : undefined));
+    for (const m of meshes) {
+      for (const layer of World.passesOf(m)) {
+        const root = World.rootOf([m]);
+        await this.withLayers(camera, layer, () => r.compileAsync(root, camera, this.scene).catch(() => {}));
+      }
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  }
+
   /** A few queued objects a frame, asked for in the background; called once per frame. */
   private drainCompiles(): void {
     if (!this.compileQueue.length) return;

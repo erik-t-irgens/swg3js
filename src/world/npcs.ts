@@ -66,6 +66,8 @@ export interface NpcDeps {
   effects: Effects | null;
   /** The species the character packs hold, by id; the fallback list when none is known. */
   species: string[];
+  /** Compile an object's shaders in the background, resolving when it can be drawn without a stall. */
+  compile?: (objects: THREE.Object3D[]) => Promise<void>;
 }
 
 export class Npc implements Hittable {
@@ -123,6 +125,8 @@ export class Npc implements Hittable {
     }
     if (!rig || this.dead) return;
     rig.root.scale.setScalar(rig.scale);
+    // Hidden until its clothes are on and their shaders compiled, so the first sight of it is not a stall.
+    rig.root.visible = false;
     this.group.add(rig.root);
     markActor(rig.root);
     this.rig = rig;
@@ -147,6 +151,10 @@ export class Npc implements Hittable {
       }
     }
     await this.armUp(deps);
+    if (this.dead || !this.rig) return;
+    rig.root.updateMatrixWorld(true);
+    if (deps.compile) await deps.compile([rig.root]);
+    rig.root.visible = true;
   }
 
   /** A weapon off the rack: a lightsaber most often, else a sword or a gun, hung on the hand as the game hangs it. */

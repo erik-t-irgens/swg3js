@@ -279,6 +279,7 @@ class App {
       this.weaponsUi.attach(c);
       this.world.npcDeps.weapons = c;
       this.world.npcDeps.effects = this.effects;
+      this.world.npcDeps.compile = (objects) => this.world.compileReady(objects);
       this.world.npcs?.attach(this.world.npcDeps);
       if (c) console.info(`weapons: ${c.weapons.length} on the rack, ${c.skipped.length} left out`);
     });
