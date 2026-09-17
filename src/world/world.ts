@@ -17,6 +17,7 @@ import { CHUNK_RES, CHUNK_SIZE, Terrain } from './terrain';
 import { SwgTerrain, type BuildingLayerSource } from './swgTerrain';
 import { LayoutStreamer, type Building, type CellState, type PlacedObject } from './layoutStream';
 import { isLiftCell, liftStops, stopAt, type LiftStop } from './lifts';
+import type { SunInfo } from '../core/postfx';
 import { ParticleEffects } from './particles';
 import { CSM } from 'three/examples/jsm/csm/CSM.js';
 import { ACTOR_LAYER, INTERIOR_LAYER, markActor, type PortalRenderer } from './portalRender';
@@ -1834,6 +1835,14 @@ export class World {
     this.npcs.update(dt, this.playerFoe, this.bolts, this.camera);
     if (target) this.turrets.update(dt, target, this.bolts);
     this.gallery?.update(dt, playerPos);
+  }
+
+  /** The sun as the effects want it: which way it lies, its colour, and how much daylight there is (0 at night, and in space). */
+  sunInfo(): SunInfo | null {
+    if (!this.planet || this.planet.space) return null;
+    tmpV.copy(this.sun.position).sub(this.sun.target.position);
+    if (tmpV.lengthSq() < 1e-6 || this.day.sunDir.y <= 0.02) return null;
+    return { dir: tmpV.clone().normalize(), color: this.sun.color, intensity: this.day.daylight };
   }
 
   private applyLighting(): void {

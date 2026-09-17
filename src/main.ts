@@ -1103,6 +1103,8 @@ class App {
       case 'bloomStrength':
       case 'speedBlur':
       case 'motionBlur':
+      case 'godRays':
+      case 'godRayStrength':
         this.setPostFX();
         break;
       case 'fog':
@@ -1992,7 +1994,7 @@ class App {
     // With the effects on, the passes draw into their target and the picture goes out through them.
     this.postfx?.begin();
     this.portals.render(this.scene, cam, view, this.world.buildings);
-    this.postfx?.end(cam, this.lastDt);
+    this.postfx?.end(cam, this.lastDt, this.world.sunInfo());
     this.frameCalls = info.calls;
     this.frameTriangles = info.triangles;
     this.renderer.info.autoReset = auto;
@@ -2006,8 +2008,9 @@ class App {
       this.postfx = null;
       return;
     }
-    if (!this.postfx) this.postfx = new PostFX(this.renderer, { bloom: S.bloom, bloomStrength: S.bloomStrength, motionBlur: S.speedBlur, motionBlurStrength: S.motionBlur });
-    else this.postfx.set({ bloom: S.bloom, bloomStrength: S.bloomStrength, motionBlur: S.speedBlur, motionBlurStrength: S.motionBlur });
+    const opts = { bloom: S.bloom, bloomStrength: S.bloomStrength, motionBlur: S.speedBlur, motionBlurStrength: S.motionBlur, godRays: S.godRays, godRayStrength: S.godRayStrength };
+    if (!this.postfx) this.postfx = new PostFX(this.renderer, opts);
+    else this.postfx.set(opts);
   }
 
   /**

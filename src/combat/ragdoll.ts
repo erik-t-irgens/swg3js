@@ -2,9 +2,11 @@
 // a creature model) without a table of parts: every bone with a child long enough gets a capsule
 // from itself to its children, hinged on its nearest ancestor that got one by a ball joint, and
 // each frame the bones are posed from the bodies, so the skin follows. It starts from the pose
-// the last animation frame left, so a fall carries on from where the death clip ended. The
-// bodies touch only what stands still (the ground, buildings, a ship's rooms): the physics hooks
-// in physics.ts drop their contacts with players, creatures and vehicles, and with one another.
+// the last animation frame left, so a fall carries on from where the death clip ended, and the
+// joints are sprung towards that pose and limited about it, so a body sags and folds under its
+// weight rather than into a heap. The bodies touch only what stands still (the ground, buildings,
+// a ship's rooms): the physics hooks in physics.ts drop their contacts with players, creatures
+// and vehicles, and with one another.
 import * as THREE from 'three';
 import { Physics, RAPIER } from '../core/physics';
 
@@ -14,8 +16,18 @@ interface Part {
   collider: RAPIER.Collider;
   /** The bone's world scale, kept: the physics carries none. */
   scale: THREE.Vector3;
+  /** The bone's rotation at death, in the physics frame: the body starts unrotated and carries the capsule turned by this, so every joint rests at zero. */
+  rest: THREE.Quaternion;
   depth: number;
 }
+
+/**
+ * How far a joint bends from the pose it died in (radians about each axis), and the spring that
+ * holds it there: a body sags and folds under its weight, but never past what a body can do.
+ */
+const LIMIT = 0.9;
+const STIFFNESS = 45;
+const JOINT_DAMPING = 6;
 
 export interface RagdollOptions {
   /** The frame the physics world is in when it is a room's (a hull's live world matrix); null for the world. */
@@ -78,13 +90,15 @@ export class Ragdoll {
     for (const b of bones.sort((a, c) => a.depth - c.depth)) {
       if (!chosen.has(b.bone)) continue;
       m4.copy(this.frameInverse).multiply(b.bone.matrixWorld).decompose(p, q, s);
-      const body = w.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setTranslation(p.x, p.y, p.z).setRotation({ x: q.x, y: q.y, z: q.z, w: q.w }).setLinearDamping(0.6).setAngularDamping(4).setCcdEnabled(true));
-      // The capsule lies from the bone to its children, in the bone's own frame; a bone with none is a small ball.
+      // Every body starts unrotated, the bone's rotation folded into its capsule: so the joints'
+      // angles all read zero in the death pose, and the springs and limits work from there.
+      const body = w.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setTranslation(p.x, p.y, p.z).setLinearDamping(0.6).setAngularDamping(4).setCcdEnabled(true));
+      // The capsule lies from the bone to its children; a bone with none is a small ball.
       const length = Math.max(0.06, b.length || 0.1);
       const radius = THREE.MathUtils.clamp(length * 0.3, 0.05, 0.22);
       let desc: RAPIER.ColliderDesc;
       if (b.end) {
-        dir.copy(b.end).sub(b.pos).normalize().applyQuaternion(q.clone().invert());
+        dir.copy(b.end).sub(b.pos).normalize();
         const rot = new THREE.Quaternion().setFromUnitVectors(UP, dir);
         desc = RAPIER.ColliderDesc.capsule(Math.max(0.01, length / 2 - radius * 0.5), radius)
           .setTranslation(dir.x * (length / 2), dir.y * (length / 2), dir.z * (length / 2))
@@ -95,16 +109,20 @@ export class Ragdoll {
       physics.markRagdoll(collider);
       if (opts.velocity) body.setLinvel(this.toPhysicsDir(opts.velocity.clone()), true);
       bodyOf.set(b.bone, body);
-      this.parts.push({ bone: b.bone, body, collider, scale: s.clone(), depth: b.depth });
-      // Hinged on the nearest ancestor with a body, at this bone's own origin.
+      this.parts.push({ bone: b.bone, body, collider, scale: s.clone(), rest: q.clone(), depth: b.depth });
+      // Hinged on the nearest ancestor with a body, at this bone's own origin, held towards the
+      // pose it died in by a spring and kept within what a joint can bend.
       let anc: THREE.Object3D | null = b.bone.parent;
       while (anc && !(anc instanceof THREE.Bone && bodyOf.has(anc))) anc = anc.parent;
       if (anc instanceof THREE.Bone) {
         const parent = bodyOf.get(anc)!;
         const pp = info.get(anc)!.pos;
-        const pr = parent.rotation();
-        const local = p.clone().sub(pp).applyQuaternion(new THREE.Quaternion(pr.x, pr.y, pr.z, pr.w).invert());
-        w.createImpulseJoint(RAPIER.JointData.spherical({ x: local.x, y: local.y, z: local.z }, { x: 0, y: 0, z: 0 }), parent, body, true);
+        const joint = w.createImpulseJoint(RAPIER.JointData.spherical({ x: p.x - pp.x, y: p.y - pp.y, z: p.z - pp.z }, { x: 0, y: 0, z: 0 }), parent, body, true);
+        const raw = (joint as unknown as { rawSet: { jointSetLimits(h: number, axis: number, min: number, max: number): void; jointConfigureMotorPosition(h: number, axis: number, target: number, stiffness: number, damping: number): void } }).rawSet;
+        for (const axis of [RAPIER.JointAxis.AngX, RAPIER.JointAxis.AngY, RAPIER.JointAxis.AngZ]) {
+          raw.jointSetLimits(joint.handle, axis, -LIMIT, LIMIT);
+          raw.jointConfigureMotorPosition(joint.handle, axis, 0, STIFFNESS, JOINT_DAMPING);
+        }
       }
     }
   }
@@ -128,7 +146,7 @@ export class Ragdoll {
     for (const part of this.parts) {
       const t = part.body.translation();
       const r = part.body.rotation();
-      m4.compose(p.set(t.x, t.y, t.z), q.set(r.x, r.y, r.z, r.w), part.scale);
+      m4.compose(p.set(t.x, t.y, t.z), q.set(r.x, r.y, r.z, r.w).multiply(part.rest), part.scale);
       if (this.frame) m4.premultiply(this.frame);
       const parent = part.bone.parent;
       if (!parent) continue;

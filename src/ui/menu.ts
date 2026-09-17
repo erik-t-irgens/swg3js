@@ -127,6 +127,8 @@ const GRAPHICS: { title: string; knobs: Knob[] }[] = [
       { key: 'bloomStrength', label: 'Bloom strength', hint: '0.1 a touch, 0.5 a glow, 1 a haze.', kind: 'range', min: 0.05, max: 1.5, step: 0.05, format: (v) => v.toFixed(2) },
       { key: 'speedBlur', label: 'Motion blur', hint: 'What the camera moves past smears along its movement: the ground under a ship at speed, a wall in a turn; what moves with you stays sharp (needs bloom on, which runs the picture through the effects).', kind: 'toggle' },
       { key: 'motionBlur', label: 'Motion blur strength', hint: 'How much of a frame\'s movement is smeared: 0.2 a hint, 0.5 a film\'s, 1 the whole.', kind: 'range', min: 0.1, max: 1, step: 0.05, format: (v) => v.toFixed(2) },
+      { key: 'godRays', label: 'God rays', hint: 'Sunlight scattered towards you where the sky shows between trees, walls and hulls, drawn from the frame\'s own depth (needs bloom on).', kind: 'toggle' },
+      { key: 'godRayStrength', label: 'God ray strength', hint: '0.3 a hint, 0.6 a morning, 1.2 a blaze.', kind: 'range', min: 0.1, max: 1.5, step: 0.05, format: (v) => v.toFixed(2) },
     ],
   },
   {

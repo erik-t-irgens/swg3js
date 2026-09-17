@@ -38,6 +38,10 @@ export interface Settings {
   speedBlur: boolean;
   /** How much of a frame's movement the blur smears: 0.2 a hint, 0.5 a film's, 1 the whole. */
   motionBlur: number;
+  /** God rays: sunlight scattered towards the eye where the sky shows between what blocks it (needs bloom on). */
+  godRays: boolean;
+  /** How bright the rays are: 0.3 a hint, 0.6 a morning, 1.2 a blaze. */
+  godRayStrength: number;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -60,6 +64,8 @@ export const DEFAULT_SETTINGS: Settings = {
   bloomStrength: 0.35,
   speedBlur: true,
   motionBlur: 0.35,
+  godRays: true,
+  godRayStrength: 0.6,
 };
 
 const KEY = 'swg.settings';

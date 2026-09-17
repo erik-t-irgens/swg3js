@@ -82,6 +82,87 @@ const MOTION_BLUR = {
 };
 
 /**
+ * God rays: light from the sun scattered towards the eye, drawn from the frame's own depth. Where
+ * the depth says sky, the sun shines through; where it says a wall, a tree, a hull, it is blocked;
+ * the picture is marched towards the sun's place on the screen, summing the open sky along the
+ * way with a decay, and the sum tints the pixel with the sun's colour. Nothing is drawn twice.
+ */
+const GOD_RAYS = {
+  uniforms: {
+    tDiffuse: { value: null as THREE.Texture | null },
+    tDepth: { value: null as THREE.Texture | null },
+    /** The sun on the screen, in uv, and how much of it shows (0 behind the camera or under the horizon). */
+    uSun: { value: new THREE.Vector2(0.5, 0.5) },
+    uSunVisible: { value: 0 },
+    uColor: { value: new THREE.Color(1, 0.95, 0.85) },
+    uStrength: { value: 0.6 },
+    uAspect: { value: 1.6 },
+    uNearFar: { value: new THREE.Vector2(0.05, 9000) },
+    /** Depth past this distance counts as sky. */
+    uSkyDistance: { value: 2500 },
+  },
+  vertexShader: /* glsl */ `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: /* glsl */ `
+    uniform sampler2D tDiffuse;
+    uniform sampler2D tDepth;
+    uniform vec2 uSun;
+    uniform float uSunVisible;
+    uniform vec3 uColor;
+    uniform float uStrength;
+    uniform float uAspect;
+    uniform vec2 uNearFar;
+    uniform float uSkyDistance;
+    varying vec2 vUv;
+    float sky(vec2 uv) {
+      float ndcZ = texture2D(tDepth, uv).x * 2.0 - 1.0;
+      float dist = (2.0 * uNearFar.x * uNearFar.y) / (uNearFar.y + uNearFar.x - ndcZ * (uNearFar.y - uNearFar.x));
+      return step(uSkyDistance, dist);
+    }
+    void main() {
+      vec4 c = texture2D(tDiffuse, vUv);
+      if (uSunVisible <= 0.001 || uStrength <= 0.001) {
+        gl_FragColor = c;
+        return;
+      }
+      // The rays are strongest around the sun and fade across the screen.
+      vec2 toSun = (uSun - vUv) * vec2(uAspect, 1.0);
+      float falloff = smoothstep(1.6, 0.05, length(toSun));
+      if (falloff <= 0.0) {
+        gl_FragColor = c;
+        return;
+      }
+      const int N = 48;
+      vec2 step2 = (uSun - vUv) * (0.85 / float(N));
+      vec2 uv = vUv;
+      float illum = 1.0;
+      float acc = 0.0;
+      for (int i = 0; i < N; i++) {
+        uv += step2;
+        if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) break;
+        acc += sky(uv) * illum;
+        illum *= 0.965;
+      }
+      acc /= float(N);
+      c.rgb += uColor * (acc * acc * 1.4 + acc * 0.3) * uStrength * uSunVisible * falloff;
+      gl_FragColor = c;
+    }
+  `,
+};
+
+/** The sun for the god rays: which way it lies (world, towards it), its colour, and how strongly it shines (0 at night). */
+export interface SunInfo {
+  dir: THREE.Vector3;
+  color: THREE.Color;
+  intensity: number;
+}
+
+/**
  * A pixel that is not a number (a material that divided by zero: a degenerate tangent, a zero
  * roughness against a reflection) is black to the screen, and the bloom's blur spreads it into
  * a black box the size of its coarsest level. Such pixels are made black-and-opaque before the
@@ -122,6 +203,10 @@ export interface PostFXOptions {
   motionBlur: boolean;
   /** How much of a frame's movement is smeared: 0.2 a hint, 0.5 a film's, 1 the whole. */
   motionBlurStrength: number;
+  /** Sunlight scattered towards the eye where the sky shows between what blocks it. */
+  godRays: boolean;
+  /** How bright the rays are: 0.3 a hint, 0.6 a morning, 1.2 a blaze. */
+  godRayStrength: number;
 }
 
 /** The blur is scaled as if every frame lasted this long, so a slow frame is not a longer smear. */
@@ -161,10 +246,13 @@ export class PostFX {
     this.composer.setSize(this.size.x, this.size.y);
     this.bloom = new UnrealBloomPass(new THREE.Vector2(this.size.x / 2, this.size.y / 2), options.bloomStrength, 0.5, 0.85);
     this.blur = new ShaderPass(MOTION_BLUR);
+    this.rays = new ShaderPass(GOD_RAYS);
     this.output = new OutputPass();
     this.fxaa = new ShaderPass(FXAAShader);
     this.sanitize = new ShaderPass(SANITIZE);
     this.composer.addPass(this.sanitize);
+    // The rays before the bloom, so their light blooms as the sun's does.
+    this.composer.addPass(this.rays);
     this.composer.addPass(this.bloom);
     this.composer.addPass(this.blur);
     this.composer.addPass(this.output);
@@ -175,6 +263,8 @@ export class PostFX {
 
   private readonly fxaa: ShaderPass;
   private readonly sanitize: ShaderPass;
+  private readonly rays: ShaderPass;
+  private readonly sunClip = new THREE.Vector4();
   /** Set to scan the next frame's pixels before the effects; the result lands in `lastScan`. */
   wantScan = false;
   lastScan: BadPixels | null = null;
@@ -216,6 +306,7 @@ export class PostFX {
     this.bloom.enabled = this.options.bloom && this.options.bloomStrength > 0;
     this.bloom.strength = this.options.bloomStrength;
     this.blur.enabled = false;
+    this.rays.enabled = false;
   }
 
   /** The screen changed size or scale: the target and the passes follow the drawing buffer. */
@@ -238,13 +329,36 @@ export class PostFX {
     this.renderer.setRenderTarget(rt);
   }
 
-  /** After the frame's passes: the picture goes out through the effects, blurred by how the camera moved since the last frame (`dt` seconds ago). */
-  end(camera: THREE.Camera, dt: number): void {
+  /** After the frame's passes: the picture goes out through the effects, blurred by how the camera moved since the last frame (`dt` seconds ago), with the sun's rays when it is given. */
+  end(camera: THREE.Camera, dt: number, sun: SunInfo | null = null): void {
     if (this.wantScan) {
       this.wantScan = false;
       this.scan(this.composer.readBuffer);
     }
     this.renderer.setRenderTarget(null);
+    const raysOn = this.options.godRays && this.options.godRayStrength > 0 && !!sun && !!this.depth && sun.intensity > 0.01;
+    this.rays.enabled = raysOn;
+    if (raysOn && sun) {
+      // The sun's place on the screen: a point far along its direction, projected; behind the camera it shows nothing.
+      camera.updateMatrixWorld();
+      this.sunClip.set(sun.dir.x * 5000, sun.dir.y * 5000, sun.dir.z * 5000, 1).add(new THREE.Vector4(camera.position.x, camera.position.y, camera.position.z, 0)).applyMatrix4(camera.matrixWorldInverse).applyMatrix4(camera.projectionMatrix);
+      const u = this.rays.uniforms;
+      const behind = this.sunClip.w <= 0;
+      const sx = behind ? 0.5 : (this.sunClip.x / this.sunClip.w) * 0.5 + 0.5;
+      const sy = behind ? 0.5 : (this.sunClip.y / this.sunClip.w) * 0.5 + 0.5;
+      // Fade out as the sun leaves the screen, and as it nears the horizon.
+      const off = Math.max(0, Math.abs(sx - 0.5) - 0.5, Math.abs(sy - 0.5) - 0.5);
+      const visible = behind ? 0 : Math.max(0, 1 - off / 0.6) * THREE.MathUtils.clamp(sun.dir.y * 6, 0, 1) * Math.min(1, sun.intensity);
+      (u.uSun as { value: THREE.Vector2 }).value.set(sx, sy);
+      (u.uSunVisible as { value: number }).value = visible;
+      (u.uColor as { value: THREE.Color }).value.copy(sun.color);
+      (u.uStrength as { value: number }).value = this.options.godRayStrength;
+      (u.uAspect as { value: number }).value = this.size.x / Math.max(1, this.size.y);
+      (u.tDepth as { value: THREE.Texture | null }).value = this.depth;
+      const persp = camera as THREE.PerspectiveCamera;
+      if (persp.isPerspectiveCamera) (u.uNearFar as { value: THREE.Vector2 }).value.set(persp.near, persp.far);
+      this.rays.enabled = visible > 0;
+    }
     const on = this.options.motionBlur && this.options.motionBlurStrength > 0 && !!this.depth;
     this.blur.enabled = on;
     if (on) {
