@@ -1192,22 +1192,27 @@ export class Player {
     return true;
   }
 
-  /** Whether a creature or turret stands within `radius` metres of the body in a direction relative to its facing. */
+  /** Whether anything alive or a turret stands within `radius` metres of the body in a direction relative to its facing. */
   private enemyNear(dir: 'F' | 'B' | 'L' | 'R', radius: number): boolean {
-    const creatures = [...(this.world?.creatures.creatures ?? []), ...(this.world?.turrets.turrets ?? [])];
+    const world = this.world;
+    if (!world) return false;
     const sx = Math.sin(this.heading);
     const sz = Math.cos(this.heading);
     // Forward is (sin, cos) of the heading; right is turned a quarter round.
     const dx = dir === 'F' ? sx : dir === 'B' ? -sx : dir === 'R' ? sz : -sz;
     const dz = dir === 'F' ? sz : dir === 'B' ? -sz : dir === 'R' ? -sx : sx;
-    for (const c of creatures) {
-      if (c.dead) continue;
-      const ox = c.pos.x - this.pos.x;
-      const oz = c.pos.z - this.pos.z;
+    const near = (p: THREE.Vector3): boolean => {
+      const ox = p.x - this.pos.x;
+      const oz = p.z - this.pos.z;
       const along = ox * dx + oz * dz;
       const across = Math.abs(ox * dz - oz * dx);
-      if (along > 0 && along < radius + 0.5 && across < 0.8 && Math.abs(c.pos.y - this.pos.y) < 2) return true;
-    }
+      return along > 0 && along < radius + 0.5 && across < 0.8 && Math.abs(p.y - this.pos.y) < 2;
+    };
+    // Everything alive but the player itself, then the emplacements, which are not alive at all.
+    // Walked in place rather than joined into a list: this is asked several times a frame.
+    const me = world.playerTarget;
+    for (const c of world.targets()) if (c !== me && !c.dead && near(c.pos)) return true;
+    for (const t of world.turrets.turrets) if (!t.dead && near(t.pos)) return true;
     return false;
   }
 

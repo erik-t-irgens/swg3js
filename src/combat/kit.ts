@@ -35,12 +35,55 @@ export interface Hittable {
   readonly pos: THREE.Vector3;
   readonly halfHeight: number;
   dead: boolean;
-  /** Hurt it; with `from` and `push`, shove it away from there. */
-  damage(amount: number, from?: THREE.Vector3, push?: number): void;
+  /** Hurt it; with `from` and `push`, shove it away from there; `source` is who struck, so it can fight back. */
+  damage(amount: number, from?: THREE.Vector3, push?: number, source?: Living | null): void;
   /** Burn or corrode it for a while (a creature), stagger it, or slow it; the turrets and vehicles do without. */
   afflict?(dps: number, seconds: number): void;
   stun?(seconds: number): void;
   slow?(seconds: number): void;
+}
+
+/** Whose side a living thing is on; who picks a fight with whom is `hostileSides` in targets.ts. */
+export type Side = 'player' | 'fighter' | 'wild' | 'hostile' | 'imperial' | 'rebel' | 'civilian' | 'neutral';
+/** How readily it starts one, and what it does when it is hurt. */
+export type Aggression = 'aggressive' | 'defensive' | 'skittish' | 'passive';
+
+/** No living thing: never a key, so `targetKey || NOBODY` and `if (key)` both read correctly. */
+export const NOBODY = 0;
+/**
+ * The player's key. The one key that is a named constant, because the player is the only Living
+ * the game makes exactly one of; every other key comes from `nextLivingKey`, which starts at 2,
+ * so no key is ever 0 and a plain truthiness test on a key is still correct.
+ */
+export const PLAYER_KEY = 1;
+
+let livingKeys = PLAYER_KEY;
+/** The next key. Keys start at 2 and are never reused while the page lives. */
+export function nextLivingKey(): number {
+  return ++livingKeys;
+}
+
+/**
+ * Something alive that can be fought: the player, a creature, a fighter, a mobile. One list, one
+ * key each, one way to be hurt that carries where the blow came from, so a Force power reaches
+ * every kind of body and everything it touches knows who touched it.
+ */
+export interface Living extends Hittable {
+  /** Unique while it lives, for remembering a target or an attacker without holding the object. Always 1 or more. */
+  readonly key: number;
+  readonly label: string;
+  readonly side: Side;
+  readonly aggression: Aggression;
+  /** How far its body reaches toward a point, across the ground (a long body is not a circle). */
+  radiusToward(from: THREE.Vector3): number;
+  /** Whether it stands on something: a knock only throws what the ground can push back against. */
+  grounded?: boolean;
+  /** Shove it away along `dir` at `power` metres a second (a push, a repulse, a blast). */
+  knock?(dir: THREE.Vector3, power: number): void;
+  /** Hold it at a point in the air this frame (the Force grip); `dt` is the frame it is held for. */
+  holdAt?(point: THREE.Vector3, dt: number): void;
+  /** Let a held body go, thrown along `dir`. */
+  release?(dir: THREE.Vector3, power: number): void;
 }
 
 export interface Resource {

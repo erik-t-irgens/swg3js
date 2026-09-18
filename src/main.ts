@@ -646,8 +646,10 @@ class App {
           this.stepCombat(dt);
           this.stepVehicles(dt, true);
           if (!this.player.noclip && !this.player.mounted) this.world.turrets.update(dt, this.player, this.world.bolts);
-          this.world.creatures.update(dt, this.player.worldPos, (dmg) => this.player.takeDamage(dmg));
-          this.world.npcs.update(dt, { pos: this.player.worldPos, halfHeight: 0.9, dead: false, damage: (dmg) => this.player.takeDamage(dmg) }, this.world.bolts, this.cam.camera);
+          // Where the player stands first, then one step of everything alive: without the first,
+          // the brains would all chase where the player was when the helper was called.
+          this.world.setPlayerTarget(this.player.worldPos, !this.player.noclip && this.player.hp > 0, (dmg) => this.player.takeDamage(dmg));
+          this.world.stepLiving(dt, this.player.worldPos, this.cam.camera);
           this.physics.step(dt);
           this.effects.update(dt);
           this.updateCamera(null);
@@ -2034,6 +2036,8 @@ class App {
       effects: this.effects,
       hittableAt: (h) => this.world.hittableAt(h),
       player,
+      // A bolt the saber turns away becomes the player's: what it then hurts turns on them.
+      playerSource: this.world.playerTarget,
       block: (bolt, hit, out) => player.deflect(bolt.dir, hit, this.cam, out),
       onPlayerHit: (dmg) => {
         if (player.mounted || player.noclip) return;
@@ -2763,11 +2767,16 @@ class App {
 
       const fast = simulate && input.held('fastForward');
       for (const m of this.shown) m.update(dt);
-      this.world.update(dt, player.worldPos, this.cam.camera.position, fast, (dmg) => {
+      // Where the player stands, whether it may be attacked at all, and what a blow does: the one
+      // record everything alive fights over. Mounted stays targetable, as it always has -- the
+      // creatures chase a rider -- and the damage is dropped by the callback.
+      const hurt = (dmg: number) => {
         if (!simulate || player.mounted || player.noclip || player.aboard) return;
         player.takeDamage(dmg);
         this.hud.hurt();
-      }, simulate && !player.mounted && !player.noclip && !player.aboard ? player : null);
+      };
+      this.world.setPlayerTarget(player.worldPos, simulate && !player.noclip && !player.aboard && !this.dying && player.hp > 0, hurt);
+      this.world.update(dt, player.worldPos, this.cam.camera.position, fast, hurt, simulate && !player.mounted && !player.noclip && !player.aboard ? player : null);
       const tPhys = performance.now();
       this.physics.step(dt);
       stats.physicsMs = performance.now() - tPhys;

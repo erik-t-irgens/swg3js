@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { RAPIER } from '../core/physics';
 import { GUNS, gunTypeFor, type FireMode, type GunProfile } from './guns';
 import type { BoltFrame } from './bolts';
-import type { Hittable, Kit, KitContext, KitSlot, Resource } from './kit';
+import type { Hittable, Kit, KitContext, KitSlot, Living, Resource } from './kit';
 import type { EffectHandle } from '../world/particles';
 import { DEFAULT_GADGETS, GADGETS, gadgetById, type GadgetDef, type GrenadeSpec } from './gadgets';
 import { SLOT_ACTIONS, SLOT_COUNT } from './forcePowers';
@@ -345,7 +345,7 @@ export class BountyHunterKit implements Kit {
           if (h.dead || h.pos.distanceTo(cl.pos) > cl.radius) continue;
           if (cl.spec.dot) h.afflict?.(cl.spec.dot.dps, Math.min(cl.spec.dot.seconds, 3));
           if (cl.spec.slow) h.slow?.(1);
-          h.damage(cl.spec.damage * 0.1);
+          h.damage(cl.spec.damage * 0.1, cl.pos, 0, ctx.world.playerTarget);
         }
         const p = ctx.player;
         if (!p.mounted && p.pos.distanceTo(cl.pos) < cl.radius * 0.8) p.takeDamage(cl.spec.dot ? cl.spec.dot.dps * 0.5 : 2);
@@ -357,9 +357,19 @@ export class BountyHunterKit implements Kit {
     }
   }
 
-  /** Everything a blast or a beam can hurt: the creatures and the fighters. */
-  private targets(ctx: KitContext): Hittable[] {
-    return [...ctx.world.creatures.creatures, ...ctx.world.npcs.npcs];
+  /**
+   * Everything a blast or a beam can hurt: the one list of living things, less the player. One
+   * kept array rather than a copy a call, because a held trigger asks for this every frame over a
+   * list that grows with every body the planet puts out. The one rule it imposes: nothing may ask
+   * for it again while it is still walking the last answer, and nothing in this file does.
+   */
+  private readonly foes: Living[] = [];
+  private targets(ctx: KitContext): readonly Living[] {
+    const me = ctx.world.playerTarget;
+    const out = this.foes;
+    out.length = 0;
+    for (const t of ctx.world.targets()) if (t !== me) out.push(t);
+    return out;
   }
 
   /** One trigger this frame: what its mode does with the button held or not. Returns whether it holds an effect at the muzzle. */
@@ -489,6 +499,7 @@ export class BountyHunterKit implements Kit {
       else {
         ctx.bolts.fire(muzzle, shotDir, {
           owner: 'player',
+          source: ctx.world.playerTarget,
           exclude: this.excludeOf(ctx),
           frame: this.frameOf(ctx),
           damage,
@@ -540,7 +551,7 @@ export class BountyHunterKit implements Kit {
     const target = world.hittableAt(hit.collider.handle);
     if (target) {
       tmp.copy(at);
-      target.damage(damage, tmp, mode.push * (1 + level));
+      target.damage(damage, tmp, mode.push * (1 + level), world.playerTarget);
       this.afflict(ctx, target, mode);
       effects.burst(end, 0xffb070, 0.7, 0.15);
     } else effects.burst(end, 0xffb070, 0.35, 0.12);
@@ -561,9 +572,9 @@ export class BountyHunterKit implements Kit {
       const d = tmp.length();
       if (d > cone.range + c.halfHeight) continue;
       if (d > 0.5 && tmp.divideScalar(d).dot(aimDir) < cos) continue;
-      c.damage(mode.damage * dt);
+      c.damage(mode.damage * dt, player.pos, 0, world.playerTarget);
       this.afflict(ctx, c, mode);
-      if (mode.push > 0 && Math.random() < dt * 2) c.damage(0, player.pos, mode.push);
+      if (mode.push > 0 && Math.random() < dt * 2) c.damage(0, player.pos, mode.push, world.playerTarget);
     }
     for (const t of world.turrets.turrets) {
       tmp.copy(t.pos).sub(muzzle);
@@ -583,13 +594,13 @@ export class BountyHunterKit implements Kit {
 
   /** A line held on the nearest thing ahead (lightning): hurt each frame, staggered, and the shock jumps to what stands near it. */
   private beam(ctx: KitContext, mode: FireMode, which: 'primary' | 'alt'): void {
-    const { dt, player, effects } = ctx;
+    const { dt, player, effects, world } = ctx;
     this.aim(ctx);
     const cone = mode.cone ?? { range: 25, angle: 8 };
     const target = this.targetAhead(ctx, cone.range, Math.cos((cone.angle * Math.PI) / 180));
     if (target) {
       end.copy(target.pos).y += target.halfHeight;
-      target.damage(mode.damage * dt);
+      target.damage(mode.damage * dt, player.pos, 0, world.playerTarget);
       this.afflict(ctx, target, mode);
       if (mode.chain) {
         let other: Hittable | null = null;
@@ -603,7 +614,7 @@ export class BountyHunterKit implements Kit {
           }
         }
         if (other) {
-          other.damage(mode.damage * mode.chain.share * dt);
+          other.damage(mode.damage * mode.chain.share * dt, player.pos, 0, world.playerTarget);
           this.afflict(ctx, other, mode);
           tmp.copy(other.pos).y += other.halfHeight;
           ctx.bolts.beam(end, tmp, mode.color, 0.08, 0.7);
@@ -685,7 +696,7 @@ export class BountyHunterKit implements Kit {
       const d = tmp.length();
       if (d > radius) continue;
       const f = 1 - d / radius;
-      c.damage(damage * f + damage * 0.1, at, push * f + 4);
+      c.damage(damage * f + damage * 0.1, at, push * f + 4, world.playerTarget);
       if (mode) this.afflict(ctx, c, mode);
       if (spec) {
         if (spec.dot) c.afflict?.(spec.dot.dps, spec.dot.seconds);

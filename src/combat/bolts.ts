@@ -17,7 +17,7 @@ import { RAPIER, type Physics } from '../core/physics';
 import { markActor } from '../world/portalRender';
 import type { EffectHandle, ParticleEffects } from '../world/particles';
 import type { Effects } from './effects';
-import type { Hittable } from './kit';
+import type { Hittable, Living } from './kit';
 
 const UNIT = 0.0254;
 
@@ -86,6 +86,8 @@ export interface BoltOptions {
    * motion is no part of its path.
    */
   frame?: BoltFrame | null;
+  /** Who fired it, so whatever it hits knows who to turn on. */
+  source?: Living | null;
 }
 
 export interface BoltFrame {
@@ -123,6 +125,8 @@ export interface Bolt {
   vel: THREE.Vector3 | null;
   /** The hull's frame the bolt lives in, aboard; null in the world. */
   frame: BoltFrame | null;
+  /** Who fired it; a bolt turned away by the saber becomes the player's. */
+  source: Living | null;
 }
 
 /** A shot that landed the instant it was fired: its line, fading over its life. */
@@ -141,6 +145,8 @@ export interface BoltWorld {
   hittableAt(handle: number): Hittable | undefined;
   /** The player's body and collider, hit by other shooters' bolts. */
   player: { body: RAPIER.RigidBody; collider: RAPIER.Collider; pos: THREE.Vector3 };
+  /** The player as something that can be blamed: a bolt the saber turns away becomes theirs. */
+  playerSource?: Living | null;
   /** A bolt reached the player: return the way it leaves when blocked, or null to let it hurt. */
   block(bolt: Bolt, hit: THREE.Vector3, out: THREE.Vector3): boolean;
   onPlayerHit(damage: number, from: THREE.Vector3): void;
@@ -192,7 +198,7 @@ export class Bolts {
   constructor(private readonly scene: THREE.Scene) {}
 
   /** Fire a bolt from `from` along `dir` (unit length). */
-  fire(from: THREE.Vector3, dir: THREE.Vector3, { owner, damage = BLASTER.damage, speed = BLASTER.velocity, metresPerSecond, inherit, life = BLASTER.life, color = 0xff4a2a, exclude, projectile, size = 1, push = BLASTER.push, onHit, gravity = 0, bounces = 0, homing = null, frame = null }: BoltOptions): Bolt {
+  fire(from: THREE.Vector3, dir: THREE.Vector3, { owner, damage = BLASTER.damage, speed = BLASTER.velocity, metresPerSecond, inherit, life = BLASTER.life, color = 0xff4a2a, exclude, projectile, size = 1, push = BLASTER.push, onHit, gravity = 0, bounces = 0, homing = null, frame = null, source = null }: BoltOptions): Bolt {
     const [coreMat, glowMat] = this.materialsFor(color);
     const mesh = new THREE.Group();
     mesh.add(new THREE.Mesh(this.core, coreMat), new THREE.Mesh(this.glow, glowMat), new THREE.Mesh(this.head, glowMat));
@@ -211,7 +217,7 @@ export class Bolts {
     if (fx) mesh.visible = false;
     this.scene.add(mesh);
     markActor(mesh);
-    const bolt: Bolt = { pos: from.clone(), dir: heading, speed: s, damage, owner, exclude, age: 0, life, lead: fx && projectile ? projectile.reach : (LENGTH / 2) * mesh.scale.z, reflected: 0, mesh, fx, hitFx: fx ? (projectile?.hit ?? null) : null, fxPack: fx ? fxPlayer : null, push, onHit: onHit ?? null, gravity, bounces, homing, vel: gravity || homing ? vel.clone().multiplyScalar(s) : null, frame };
+    const bolt: Bolt = { pos: from.clone(), dir: heading, speed: s, damage, owner, exclude, age: 0, life, lead: fx && projectile ? projectile.reach : (LENGTH / 2) * mesh.scale.z, reflected: 0, mesh, fx, hitFx: fx ? (projectile?.hit ?? null) : null, fxPack: fx ? fxPlayer : null, push, onHit: onHit ?? null, gravity, bounces, homing, vel: gravity || homing ? vel.clone().multiplyScalar(s) : null, frame, source };
     if (frame) this.settle(bolt);
     this.bolts.push(bolt);
     this.fired[owner]++;
@@ -333,6 +339,8 @@ export class Bolts {
           // Turned away by the saber: it now belongs to the player and flies on from the block.
           b.owner = 'player';
           b.exclude = w.player.body;
+          // It is the player's shot now: whatever it goes on to hurt turns on them, not the shooter.
+          b.source = w.playerSource ?? null;
           b.reflected++;
           b.age = 0;
           b.dir.copy(bounce);
@@ -354,7 +362,7 @@ export class Bolts {
       b.onHit?.(hitPoint, target ?? null);
       if (target) {
         tmp.copy(b.pos).addScaledVector(b.dir, -1);
-        target.damage(b.damage, tmp, b.push);
+        target.damage(b.damage, tmp, b.push, b.source);
         w.effects.burst(hitPoint, 0xffb070, 0.7, 0.15);
         w.effects.flash(hitPoint, 0xff8a50, 10, 6, 0.1);
       } else {

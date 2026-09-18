@@ -29,7 +29,7 @@ import { Bolts } from '../combat/bolts';
 import { ShipInterior } from '../vehicles/interior';
 import { Gallery } from './gallery';
 import { TurretManager, type TurretTarget } from '../combat/turrets';
-import type { Hittable } from '../combat/kit';
+import { PLAYER_KEY, type Aggression, type Hittable, type Living, type Side } from '../combat/kit';
 
 const tmpQ = new THREE.Quaternion();
 const tmpV = new THREE.Vector3();
@@ -178,6 +178,40 @@ const SKY_FRAG = /* glsl */ `
   }
 `;
 
+/** The standing "nobody has said what a blow does yet" callback, so `update` can tell. */
+const NO_HURT = (): void => {};
+
+/** How many of an actor's textures are uploaded before the frame is given a turn (`prepareActor`). */
+const TEXTURES_PER_YIELD = 4;
+
+/**
+ * The player as one of the living: the only one the game makes exactly one of, so its key is a
+ * named constant. `main` fills in where it stands, whether it may be attacked at all (noclip,
+ * aboard, dead: not) and what a blow does, once a frame before everything alive is stepped.
+ */
+class PlayerTarget implements Living {
+  readonly key = PLAYER_KEY;
+  readonly label = 'you';
+  readonly side: Side = 'player';
+  readonly aggression: Aggression = 'aggressive';
+  readonly pos = new THREE.Vector3();
+  readonly halfHeight = 0.9;
+  /**
+   * False while the player may be attacked; true while noclipping, aboard, dead or not
+   * simulating. It starts true, so nothing can pick on a player at the origin before the loop
+   * has said where they are.
+   */
+  dead = true;
+  /** What the loop does with a blow: it filters mounted, noclip and aboard itself. */
+  hurt: (damage: number) => void = NO_HURT;
+  radiusToward(): number {
+    return 0.35;
+  }
+  damage(amount: number): void {
+    this.hurt(amount);
+  }
+}
+
 export class World {
   planet!: PlanetDef;
   terrain!: Terrain;
@@ -186,8 +220,18 @@ export class World {
   npcs!: NpcManager;
   /** What the fighters need from the game, kept across planets and given to each new manager. */
   npcDeps: Partial<NpcDeps> = {};
-  /** The player as the fighters see them: where, how tall, and how to hurt them. */
-  private readonly playerFoe: Hittable = { pos: new THREE.Vector3(), halfHeight: 0.9, dead: false, damage: () => {} };
+  /** The player as something that can be hurt and fought: its place and state are set each frame. */
+  readonly playerTarget = new PlayerTarget();
+  /**
+   * Seconds of simulated play since the world loaded: advanced by `stepLiving`, by dt, never from
+   * a wall clock, so `__debug.advance` exercises everything that runs on a timer.
+   */
+  simTime = 0;
+  /** Whether the caller has said where the player stands since the last `update`; see `update`. */
+  private playerTargetSet = false;
+  /** The one list handed round each frame, rebuilt only when a manager has gained or lost a body. */
+  private readonly livingList: Living[] = [];
+  private livingAt = { creatures: -1, npcs: -1, player: false };
   /** Blaster turrets standing near where the player arrived. */
   turrets!: TurretManager;
   /** The gallery world's labels and animated mannequins, on that planet only. */
@@ -374,6 +418,10 @@ export class World {
     this.scene.add(this.turrets.group);
     this.npcs = new NpcManager(this.scene, this.physics, this.terrain, import.meta.env.BASE_URL);
     this.npcs.attach(this.npcDeps);
+    // A fresh planet, a fresh clock and a fresh list of the living.
+    this.simTime = 0;
+    this.livingAt.creatures = -1;
+    this.livingAt.npcs = -1;
     this.physics.setGravity(planet.gravity);
 
     const s = planet.sky;
@@ -612,6 +660,10 @@ export class World {
       this.creatures.dispose();
     }
     this.npcs?.dispose();
+    // Nothing may hand out a body from the world that has just gone.
+    this.livingList.length = 0;
+    this.livingAt.creatures = -1;
+    this.livingAt.npcs = -1;
     if (this.turrets) {
       this.scene.remove(this.turrets.group);
       this.turrets.dispose();
@@ -825,7 +877,9 @@ export class World {
       if (speed > 1.6 && depth < 1.6) this.splashes.spawn(p.x, surface, p.z, Math.round(1 + Math.min(speed, 8) * 0.9 * strength), vx, vz);
     };
     touch(this, playerPos, 1);
-    for (const c of this.creatures.creatures) if (c.hp > 0) touch(c, c.pos, 0.9);
+    // Everything alive that wades or swims, whatever kind of body it is; the player's own ring
+    // was drawn above, so its entry in the list is passed over.
+    for (const t of this.targets()) if (!t.dead && t !== this.playerTarget) touch(t, t.pos, 0.9);
     // A vehicle stirs the water from its bow and its stern, harder the bigger it is, each point
     // wandering a little so the rings overlap unevenly rather than as one neat wake.
     for (const v of this.vehicles) {
@@ -1184,9 +1238,25 @@ export class World {
    * the first frame it is looked at, a stall of a good fraction of a second.
    */
   private setupShadowMaterials(): void {
+    const fresh = this.adoptMaterials(this.scene);
+    if (fresh.length) this.compileObjects(fresh);
+  }
+
+  /**
+   * Everything a material must join before it is drawn: the portal stencil scheme, the normal-map
+   * convention and the shadow cascades. Called over the whole scene by the quarter-second scan
+   * and over one root by `prepareActor`, so an actor made at run time is ready at once rather
+   * than at the next scan. Returns the objects whose materials were new, for the compile queue.
+   *
+   * The order is fixed and the cascades must come before any compile: `CSM.setupMaterial` sets
+   * `defines.USE_CSM` and an `onBeforeCompile`, both part of the program key, so compiling first
+   * builds a program that is never drawn. A material flagged `userData.unlit` is kept out of the
+   * cascades altogether, for the same reason in reverse.
+   */
+  private adoptMaterials(root: THREE.Object3D): THREE.Object3D[] {
     const csm = this.csm;
     const fresh: THREE.Object3D[] = [];
-    this.scene.traverse((o) => {
+    root.traverse((o) => {
       const mesh = o as THREE.Mesh;
       if (!(mesh.isMesh || (o as THREE.Line).isLine || (o as THREE.Points).isPoints || (o as THREE.Sprite).isSprite) || !mesh.material) return;
       const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
@@ -1199,13 +1269,68 @@ export class World {
           const std = m as THREE.MeshStandardMaterial;
           if (std.normalMap && std.normalScale) std.normalScale.copy(this.normalScale);
         }
-        if (this.csmMaterials.has(m) || (m as THREE.ShaderMaterial).isShaderMaterial || !csm) continue;
+        if (this.csmMaterials.has(m) || (m as THREE.ShaderMaterial).isShaderMaterial || m.userData.unlit === true || !csm) continue;
         csm.setupMaterial(m);
         this.csmMaterials.add(m);
+        // The weather design wraps its wetness in right here, immediately after the cascades'
+        // own hook (CSM.setupMaterial overwrites onBeforeCompile, so nothing may come before it).
       }
       if (isNew) fresh.push(o);
     });
-    if (fresh.length) this.compileObjects(fresh);
+    return fresh;
+  }
+
+  /**
+   * Make an actor ready to be shown without a stall: its materials join the portal stencil and
+   * the shadow cascades now rather than at the next quarter-second scan, its textures are
+   * uploaded a few a frame, and its programs are compiled for every pass that draws it.
+   *
+   * Every mesh under `root` is left casting and receiving, and never frustum-culled on its own:
+   * a converted actor's meshes sit wherever their GLB put them under the model root, so three's
+   * per-mesh sphere is not what anyone wants; the whole actor is culled as one group instead.
+   */
+  async prepareActor(root: THREE.Object3D): Promise<void> {
+    markActor(root);
+    this.adoptMaterials(root);
+    const textures = new Set<THREE.Texture>();
+    root.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      if (!mesh.isMesh || !mesh.material) return;
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      mesh.frustumCulled = false;
+      for (const m of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) {
+        for (const v of Object.values(m as unknown as Record<string, unknown>)) {
+          if (v && (v as THREE.Texture).isTexture) textures.add(v as THREE.Texture);
+        }
+      }
+    });
+    const r = this.renderer;
+    if (r) {
+      // A few a frame, not one a frame: an upload is cheap next to a program compile, and a tab
+      // that has been hidden five minutes gets one chained timer a minute, so a body with a dozen
+      // textures would otherwise take a dozen minutes to be ready in a headless test.
+      let n = 0;
+      for (const t of textures) {
+        r.initTexture(t);
+        if (++n % TEXTURES_PER_YIELD === 0) await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+    }
+    await this.compileReady([root]);
+  }
+
+  /**
+   * A disposed material leaves the portal renderer's set and the cascades' map, both of which
+   * are strong: the portal set is walked once per stencil change, about a dozen times a frame,
+   * and the cascades' map is a leak that shows as a stutter when the shadow distance moves.
+   */
+  forgetMaterials(materials: Iterable<THREE.Material>): void {
+    for (const m of materials) {
+      this.portals?.forget(m);
+      this.csm?.shaders.delete(m);
+      this.csmMaterials.delete(m);
+      this.compiledMaterials.delete(m);
+    }
   }
 
   /** Objects whose shaders are still to be asked for, a few per frame. */
@@ -1891,13 +2016,96 @@ export class World {
     }
     this.sun.target.position.copy(playerPos);
     this.sun.position.copy(playerPos).addScaledVector(this.day.lightDir, 220);
-    this.creatures.update(dt, playerPos, onAttack);
-    // The fighters see the player as one more foe to hurt.
-    this.playerFoe.pos.copy(playerPos);
-    this.playerFoe.damage = (amount) => onAttack(amount);
-    this.npcs.update(dt, this.playerFoe, this.bolts, this.camera);
+    // The loop has already said where the player stands and what a blow does; `onAttack` is kept
+    // as the fallback for a caller that has not (a test, an old call site), and the flag is asked
+    // every frame rather than once: a fallback that looked at `hurt` alone would fill the target
+    // in on the first frame and then leave the player standing wherever they were on it.
+    if (!this.playerTargetSet) this.setPlayerTarget(playerPos, true, onAttack);
+    this.playerTargetSet = false;
+    this.stepLiving(dt, playerPos, this.camera);
     if (target) this.turrets.update(dt, target, this.bolts);
     this.gallery?.update(dt, playerPos);
+  }
+
+  /**
+   * Everything alive, stepped once over one shared list of targets: the creatures, the fighters,
+   * and whatever else comes to live on it. The loop and `__debug.advance` both call this, and it
+   * is the only place the simulated clock moves -- not `performance.now()`, because `advance`
+   * runs ten simulated seconds in a fraction of one real one and every timer keys off `now`.
+   */
+  stepLiving(dt: number, playerPos: THREE.Vector3, camera: THREE.Camera | null): void {
+    this.simTime += dt;
+    const targets = this.targets(true);
+    this.creatures.update(dt, playerPos, this.hurtPlayer);
+    this.npcs.update(dt, targets, this.bolts, camera, this.simTime);
+  }
+
+  /** One kept callback rather than a fresh closure a frame; what it does is set by the loop. */
+  private readonly hurtPlayer = (damage: number): void => {
+    this.playerTarget.hurt(damage);
+  };
+
+  /**
+   * Everything alive right now: the player when it may be attacked, the creatures, the fighters.
+   * One kept array, rebuilt only when a manager has gained or lost a body (or when `stepLiving`
+   * asks for a fresh one), so a disposed body can never be handed out.
+   */
+  targets(fresh = false): readonly Living[] {
+    const at = this.livingAt;
+    const cv = this.creatures?.version ?? -1;
+    const nv = this.npcs?.version ?? -1;
+    const alive = !this.playerTarget.dead;
+    if (!fresh && cv === at.creatures && nv === at.npcs && alive === at.player) return this.livingList;
+    at.creatures = cv;
+    at.npcs = nv;
+    at.player = alive;
+    this.livingList.length = 0;
+    if (!this.playerTarget.dead) this.livingList.push(this.playerTarget);
+    if (this.creatures) for (const c of this.creatures.creatures) this.livingList.push(c);
+    if (this.npcs) for (const n of this.npcs.npcs) this.livingList.push(n);
+    return this.livingList;
+  }
+
+  /** Where the player stands, whether it may be attacked at all, and what a blow does to it. */
+  setPlayerTarget(pos: THREE.Vector3, targetable: boolean, hurt: (damage: number) => void): void {
+    this.playerTarget.pos.copy(pos);
+    this.playerTarget.dead = !targetable;
+    this.playerTarget.hurt = hurt;
+    this.playerTargetSet = true;
+  }
+
+  /**
+   * The ground under a point: through the physics when the body is inside a building (the floor,
+   * not the terrain under the building), and the terrain's own height outside. Null when nothing
+   * is under an indoor point.
+   */
+  groundAt(x: number, y: number, z: number, inside: boolean): number | null {
+    if (!inside) return this.terrain.heightAt(x, z);
+    const filter = groups(Group.all, Group.all & ~(Group.terrain | Group.exterior));
+    const d = this.physics.groundDistance(x, y + 0.2, z, 40, undefined, filter);
+    return d === null ? null : y + 0.2 - d;
+  }
+
+  /**
+   * A clear spot `distance` metres ahead of a point, or null. The ray starts three metres up and
+   * reaches thirty down, keeping only fixed or bodiless colliders, with the interior filter when
+   * inside; outside it falls back to the terrain's own height, which is arithmetic and needs no
+   * stepped physics (rapier's scene queries see nothing until the world has stepped once, and
+   * the arrival spawn runs before the loop's first step).
+   */
+  spawnSpot(from: THREE.Vector3, forward: THREE.Vector3, distance: number, inside: boolean): THREE.Vector3 | null {
+    const x = from.x + forward.x * distance;
+    const z = from.z + forward.z * distance;
+    const top = from.y + 3;
+    const filter = groups(Group.all, inside ? Group.all & ~(Group.terrain | Group.exterior) : Group.all);
+    const ray = new R.Ray({ x, y: top, z }, { x: 0, y: -1, z: 0 });
+    const hit = this.physics.world.castRay(ray, 30, true, undefined, filter, undefined, undefined, (c) => {
+      const body = c.parent();
+      return !body || body.isFixed();
+    });
+    if (hit) return new THREE.Vector3(x, top - hit.timeOfImpact, z);
+    if (inside) return null;
+    return new THREE.Vector3(x, this.terrain.heightAt(x, z), z);
   }
 
   /**

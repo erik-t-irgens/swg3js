@@ -66,6 +66,14 @@ export interface RagdollOptions {
   /** Bones shorter than this (metres, bone to its children) ride their parent's body. */
   minLength?: number;
   maxBodies?: number;
+  /** The widest a piece's capsule may be, 0.22 m by default; a huge body wants wider pieces than a person's. */
+  maxRadius?: number;
+  /**
+   * The ball each piece turns as if it were, 0.35 m by default (`RAGDOLL.inertiaRadius`). A
+   * three-metre bone's mass with a 0.35 m ball's inertia is the "every contact spins it wildly"
+   * case, so a big body scales this with its capsules.
+   */
+  inertiaRadius?: number;
 }
 
 const m4 = new THREE.Matrix4();
@@ -93,6 +101,8 @@ export class Ragdoll {
     this.frame = opts.frame ?? null;
     const minLength = opts.minLength ?? 0.12;
     const maxBodies = opts.maxBodies ?? 22;
+    const maxRadius = opts.maxRadius ?? 0.22;
+    const inertiaRadius = opts.inertiaRadius ?? RAGDOLL.inertiaRadius;
     root.updateMatrixWorld(true);
     if (this.frame) this.frameInverse.copy(this.frame).invert();
     // Every bone, with where it is and where its children are, in the physics world's frame.
@@ -131,7 +141,7 @@ export class Ragdoll {
       const body = w.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setTranslation(p.x, p.y, p.z).setLinearDamping(RAGDOLL.linearDamping).setAngularDamping(RAGDOLL.angularDamping));
       // The capsule lies from the bone to its children; a bone with none is a small ball.
       const length = Math.max(0.06, b.length || 0.1);
-      const radius = THREE.MathUtils.clamp(length * 0.3, 0.05, 0.22);
+      const radius = THREE.MathUtils.clamp(length * 0.3, 0.05, maxRadius);
       let desc: RAPIER.ColliderDesc;
       if (b.end) {
         dir.copy(b.end).sub(b.pos).normalize();
@@ -144,7 +154,7 @@ export class Ragdoll {
       // capsule: a thin capsule's true inertia is so small that every contact spins it wildly,
       // and a skeleton of such pieces shivers for ever.
       const mass = 4 + 10 * length;
-      const inertia = mass * RAGDOLL.inertiaRadius * RAGDOLL.inertiaRadius * 0.4;
+      const inertia = mass * inertiaRadius * inertiaRadius * 0.4;
       desc.setMassProperties(mass, { x: 0, y: 0, z: 0 }, { x: inertia, y: inertia, z: inertia }, { x: 0, y: 0, z: 0, w: 1 }).setFriction(RAGDOLL.friction).setRestitution(0).setActiveHooks(RAPIER.ActiveHooks.FILTER_CONTACT_PAIRS);
       const collider = w.createCollider(desc, body);
       physics.markRagdoll(collider);

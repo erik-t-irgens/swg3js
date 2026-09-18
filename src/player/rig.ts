@@ -216,7 +216,11 @@ export class CharacterRig {
     for (const clip of clips) {
       // The game's add_ clips (a blaster's shots) are deltas on whatever plays: made additive against the rest pose.
       if (isAdditive(clip.name)) {
-        additiveAgainstRest(clip, this.bones);
+        // makeClipAdditive rewrites a clip's values in place and leaves its blendMode behind as
+        // the mark: a clip shared between rigs (the species packs have been shared since the
+        // fighters stopped parsing them each) must only be converted once, or every rig after
+        // the first takes the delta of a delta.
+        if (clip.blendMode !== THREE.AdditiveAnimationBlendMode) additiveAgainstRest(clip, this.bones);
         this.additive.add(clip.name);
         this.actions.set(clip.name, this.mixer.clipAction(clip, undefined, THREE.AdditiveAnimationBlendMode));
       } else this.actions.set(clip.name, this.mixer.clipAction(clip));

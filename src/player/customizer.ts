@@ -205,9 +205,32 @@ export class Customizer {
         if (ms > 250) console.info(`customize: ${r.material} rendered in ${ms.toFixed(0)} ms (${img.width}x${img.height})`);
       }
     } finally {
+      // In the `finally`, not after it: a texture that will not load throws straight out of the
+      // loop, and a waiter left unwoken would hang for the life of the page (every caller is a
+      // bare `void this.run()`, so the throw itself is never seen).
       this.running = false;
+      const waiting = this.waiting;
+      this.waiting = [];
+      for (const resolve of waiting) resolve();
+      this.onRendered();
     }
-    this.onRendered();
+  }
+
+  /** Whoever is waiting on `settled`, woken when the queue empties. */
+  private waiting: (() => void)[] = [];
+
+  /**
+   * Resolves when nothing is queued and nothing is rendering: the look is finished. A dressed
+   * body must not be cloned as a prototype before its skin textures have been drawn, or every
+   * copy of it wears the pack's defaults.
+   */
+  settled(): Promise<void> {
+    if (!this.running && !this.queued.size) return Promise.resolve();
+    const done = new Promise<void>((resolve) => this.waiting.push(resolve));
+    // Queued but idle cannot normally happen (every add kicks the loop); kicking it again is
+    // free, and without it a waiter would hang for ever if it ever did.
+    if (!this.running) void this.run();
+    return done;
   }
 
   private put(r: Recipe, img: Img): void {

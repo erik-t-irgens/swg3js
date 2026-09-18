@@ -1,9 +1,9 @@
 import * as THREE from 'three';
-import type { Creature } from '../world/creatures';
 import { KICK_DAMAGE } from './saber';
 import { THROW } from './saberThrow';
 import { DEFAULT_LOADOUT, POWERS, SLOT_ACTIONS, SLOT_COUNT, powerById } from './forcePowers';
-import type { Hittable, Kit, KitContext, KitSlot, Resource } from './kit';
+import type { Hittable, Kit, KitContext, KitSlot, Living, Resource } from './kit';
+import { nearestInCone, type ConeQuery } from './targets';
 import { sweepCapsule } from './sweep';
 import { Unarmed } from './unarmed';
 
@@ -12,6 +12,9 @@ const tmp2 = new THREE.Vector3();
 const a = new THREE.Vector3();
 const b = new THREE.Vector3();
 const LIGHTNING_SEGMENTS = 14;
+/** The narrowings the powers ask `targetAhead` for, as kept predicates rather than a closure a frame. */
+const CAN_SLOW = (t: Living): boolean => !!t.slow;
+const CAN_HOLD = (t: Living): boolean => !!t.holdAt;
 /** Rage lasts this long, then rests this long. */
 const RAGE_TIME = 10;
 const RAGE_REST = 20;
@@ -35,8 +38,17 @@ export class JediKit implements Kit {
   /** Seconds of rage left, and of its rest after. */
   private rageLeft = 0;
   private rageRest = 0;
-  /** The creature held by the Force, while the grip lasts. */
-  private gripped: Creature | null = null;
+  /** Whatever the Force is holding, while the grip lasts: a creature, a fighter, anything alive. */
+  private gripped: Living | null = null;
+  /**
+   * One kept cone query and one kept test for `targetAhead`, which runs every frame lightning,
+   * drain or a grip is held: a fresh object literal and a fresh closure a frame is exactly what
+   * the rule against allocating inside a frame is about. The two fields are the test's inputs.
+   */
+  private aheadNeed: ((t: Living) => boolean) | null = null;
+  private aheadMe: Living | null = null;
+  private readonly aheadTest = (t: Living): boolean => t !== this.aheadMe && (!this.aheadNeed || this.aheadNeed(t));
+  private readonly aheadQuery: ConeQuery<Living> = { from: tmp, forward: tmp, range: 0, cone: 0, need: this.aheadTest };
   private healCd = 0;
   private repulseCd = 0;
   private slowCd = 0;
@@ -269,11 +281,11 @@ export class JediKit implements Kit {
           break;
         case 'slow':
           if (onFoot && pressed && res.value >= 25 && this.slowCd <= 0) {
-            const target = this.targetAhead(ctx, 24, 0.5);
+            const target = this.targetAhead(ctx, 24, 0.5, CAN_SLOW);
             if (target) {
               res.value -= 25;
               this.slowCd = 5;
-              target.slow(5);
+              target.slow?.(5);
               tmp.copy(target.pos).y += target.halfHeight;
               effects.ring(tmp, 0xc0a0ff, 3, 0.6);
               effects.flash(tmp, 0xc0a0ff, 12, 8, 0.3);
@@ -345,11 +357,13 @@ export class JediKit implements Kit {
       const target = this.targetAhead(ctx, 26, 0.45);
       if (target) {
         const hurt = (drain ? 20 : 30) * dt;
-        target.damage(hurt);
+        // The source is what makes it fight back: without it a defensive or skittish body would
+        // simply stand there while it was burned.
+        target.damage(hurt, player.pos, 0, world.playerTarget);
         if (drain) player.heal(hurt * 0.6);
         if (!drain && target.grounded && Math.random() < dt * 1.2) {
           tmp2.copy(target.pos).sub(player.pos).setY(0).normalize();
-          target.knock(tmp2, 4);
+          target.knock?.(tmp2, 4);
         }
       }
       const start = tmp2.copy(player.pos).addScaledVector(tmp, 0.4);
@@ -363,45 +377,45 @@ export class JediKit implements Kit {
       ctx.effects.flash(tmp2, drain ? 0xff6060 : 0x9fd4ff, 14 + Math.random() * 12, 18, 0.08);
     }
 
-    // Grip: the creature under the crosshair lifted and held ahead, choking; let go and it is thrown.
+    // Grip: whatever is under the crosshair lifted and held ahead, choking; let go and it is thrown.
     if (grip) {
-      if (!this.gripped || this.gripped.dead) this.gripped = this.targetAhead(ctx, 14, 0.7);
+      if (!this.gripped || this.gripped.dead) this.gripped = this.targetAhead(ctx, 14, 0.7, CAN_HOLD);
       const g = this.gripped;
       if (g) {
         res.value -= 12 * dt;
         cam.forward(tmp);
         tmp2.copy(player.pos).addScaledVector(tmp, 3.2 + g.halfHeight);
         tmp2.y = player.pos.y + 1.6 + g.halfHeight;
-        g.holdAt(tmp2, dt);
-        g.damage(6 * dt);
+        g.holdAt?.(tmp2, dt);
+        g.damage(6 * dt, player.pos, 0, world.playerTarget);
         tmp2.copy(g.pos).y += g.halfHeight;
         ctx.effects.flash(tmp2, 0xc0b0ff, 4, 5, 0.08);
       }
     } else if (this.gripped) {
       cam.forward(tmp);
-      this.gripped.release(tmp, 18);
+      this.gripped.release?.(tmp, 18);
       this.gripped = null;
     }
 
     res.value = Math.min(res.max, Math.max(0, res.value + 9 * dt));
   }
 
-  /** The nearest living creature within `range` metres and the cone about the view (`cone` is the cosine at its edge). */
-  private targetAhead(ctx: KitContext, range: number, cone: number): Creature | null {
+  /**
+   * The nearest living thing within `range` metres and the cone about the view (`cone` is the
+   * cosine at its edge), over everything alive but the player. `need` narrows it to what the
+   * power can actually do something with (a grip wants a body that can be held).
+   */
+  private targetAhead(ctx: KitContext, range: number, cone: number, need?: (t: Living) => boolean): Living | null {
     const { player, world, cam } = ctx;
     cam.forward(tmp);
-    let best: Creature | null = null;
-    let bestD = range;
-    for (const c of world.creatures.creatures) {
-      if (c.dead) continue;
-      tmp2.copy(c.pos).sub(player.pos);
-      const d = tmp2.length();
-      if (d >= bestD) continue;
-      if (tmp2.normalize().dot(tmp) < cone) continue;
-      bestD = d;
-      best = c;
-    }
-    return best;
+    const q = this.aheadQuery;
+    q.from = player.pos;
+    q.forward = tmp;
+    q.range = range;
+    q.cone = cone;
+    this.aheadNeed = need ?? null;
+    this.aheadMe = world.playerTarget;
+    return nearestInCone(world.targets(), q);
   }
 
   /** Push (`sign` 1) or Pull (-1): everything ahead thrown away from, or dragged toward, the player; vehicles too. */
@@ -409,16 +423,17 @@ export class JediKit implements Kit {
     const { player, world, cam, effects } = ctx;
     cam.forward(tmp);
     effects.ring(player.pos, sign > 0 ? 0xbfe0ff : 0xffd0a0, 12, 0.45);
-    for (const c of world.creatures.creatures) {
+    for (const c of world.targets()) {
+      if (c === world.playerTarget || c.dead) continue;
       tmp2.copy(c.pos).sub(player.pos);
       const d = tmp2.length();
       if (d > 16) continue;
       tmp2.normalize();
       if (d > 3 && tmp2.dot(tmp) < 0.35) continue;
-      c.damage(sign > 0 ? 10 : 4);
+      c.damage(sign > 0 ? 10 : 4, player.pos, 0, world.playerTarget);
       // Pulled, it comes to the player's feet: the shove scales with how far it is.
       tmp2.multiplyScalar(sign);
-      c.knock(tmp2, sign > 0 ? 22 * (1 - d / 18) + 6 : 4 + d * 1.1);
+      c.knock?.(tmp2, sign > 0 ? 22 * (1 - d / 18) + 6 : 4 + d * 1.1);
     }
     for (const sp of world.vehicles) {
       tmp2.copy(sp.pos).sub(player.pos);
@@ -436,13 +451,14 @@ export class JediKit implements Kit {
     effects.ring(player.pos, 0xbfe0ff, 18, 0.5);
     effects.burst(tmp.copy(player.pos).setY(player.pos.y + 1), 0xdfefff, 3, 0.3);
     effects.flash(tmp, 0xbfe0ff, 40, 14, 0.25);
-    for (const c of world.creatures.creatures) {
+    for (const c of world.targets()) {
+      if (c === world.playerTarget || c.dead) continue;
       tmp2.copy(c.pos).sub(player.pos);
       const d = tmp2.length();
       if (d > 10) continue;
       tmp2.setY(0).normalize();
-      c.damage(25 * (1 - d / 12) + 5);
-      c.knock(tmp2, 26 * (1 - d / 12) + 8);
+      c.damage(25 * (1 - d / 12) + 5, player.pos, 0, world.playerTarget);
+      c.knock?.(tmp2, 26 * (1 - d / 12) + 8);
     }
     for (const sp of world.vehicles) {
       tmp2.copy(sp.pos).sub(player.pos);

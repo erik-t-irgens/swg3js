@@ -27,7 +27,7 @@ export function sweepCapsule(ctx: KitContext, from: THREE.Vector3, to: THREE.Vec
       // Aboard, the hull around the rooms is not a target: a fight inside must not cut the ship down.
       if (c && !already.has(c) && c !== player.aboard?.vehicle) {
         already.add(c);
-        c.damage(damage * player.damageBoost, player.pos, push);
+        c.damage(damage * player.damageBoost, player.pos, push, world.playerTarget);
         tmp2.copy(c.pos).y += c.halfHeight;
         effects.burst(tmp2, color, 1.2, 0.2);
         effects.flash(tmp2, color, 10, 8, 0.15);

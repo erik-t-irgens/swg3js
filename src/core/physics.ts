@@ -226,10 +226,14 @@ export class Physics {
     this.world.removeCollider(c, false);
   }
 
-  /** Distance straight down to the nearest surface, or null if nothing within maxDist. */
-  groundDistance(x: number, y: number, z: number, maxDist: number, exclude?: RAPIER.RigidBody): number | null {
+  /**
+   * Distance straight down to the nearest surface, or null if nothing within maxDist.
+   * `filterGroups` narrows what counts (a body inside a building looks for the floor, not the
+   * ground under the building): pass `groups(Group.all, Group.all & ~(Group.terrain | Group.exterior))`.
+   */
+  groundDistance(x: number, y: number, z: number, maxDist: number, exclude?: RAPIER.RigidBody, filterGroups?: number): number | null {
     const ray = new RAPIER.Ray({ x, y, z }, { x: 0, y: -1, z: 0 });
-    const hit = this.world.castRay(ray, maxDist, true, undefined, undefined, undefined, exclude);
+    const hit = this.world.castRay(ray, maxDist, true, undefined, filterGroups, undefined, exclude);
     return hit ? hit.timeOfImpact : null;
   }
 }

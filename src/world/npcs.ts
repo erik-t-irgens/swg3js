@@ -14,7 +14,8 @@ import { Ragdoll } from '../combat/ragdoll';
 import { GUNS, gunTypeFor, type GunProfile } from '../combat/guns';
 import type { Bolts } from '../combat/bolts';
 import type { Effects } from '../combat/effects';
-import type { Hittable } from '../combat/kit';
+import { nextLivingKey, type Aggression, type Living, type Side } from '../combat/kit';
+import { hostileSides } from '../combat/targets';
 import type { Terrain } from './terrain';
 import { markActor } from './portalRender';
 import { slotOf } from '../ui/wardrobeUi';
@@ -70,12 +71,18 @@ export interface NpcDeps {
   compile?: (objects: THREE.Object3D[]) => Promise<void>;
 }
 
-export class Npc implements Hittable {
+export class Npc implements Living {
   readonly group = new THREE.Group();
   readonly pos = new THREE.Vector3();
   readonly body: RAPIER.RigidBody;
   readonly collider: RAPIER.Collider;
   readonly halfHeight = 0.9;
+  /** Its place in the one list of living things, for as long as it lives. */
+  readonly key = nextLivingKey();
+  readonly side: Side = 'fighter';
+  readonly aggression: Aggression = 'aggressive';
+  /** Standing on the ground: a fighter is, except while the Force has it off it. */
+  grounded = true;
   hp = HP;
   dead = false;
   deadTimer = 0;
@@ -90,7 +97,7 @@ export class Npc implements Hittable {
   private hiltTop = 0.13;
   private blade: SaberBlade | null = null;
   readonly color = new THREE.Color().setHSL(Math.random(), 0.9, 0.55);
-  private target: Hittable | null = null;
+  private target: Living | null = null;
   private retarget = 0;
   private attackCd = 1 + Math.random();
   /** A swing under way: seconds until its blade lands. */
@@ -110,6 +117,48 @@ export class Npc implements Hittable {
     markActor(this.group);
     this.body = physics.world.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(x, y + this.halfHeight, z));
     this.collider = physics.world.createCollider(RAPIER.ColliderDesc.capsule(this.halfHeight - 0.35, 0.35), this.body);
+  }
+
+  /** What to call it in the console and on a target reticle. */
+  get label(): string {
+    return this.name;
+  }
+
+  /** A person is a circle from above: the capsule's own radius, whichever way you come at it. */
+  radiusToward(): number {
+    return 0.35;
+  }
+
+  /** Where the world's simulated clock stood at this fighter's last step: the hold's grace keys off it. */
+  private now = 0;
+  /** Where the Force is holding it, and until when (seconds of that clock); null when free. */
+  private heldAt: THREE.Vector3 | null = null;
+  private heldUntil = 0;
+  /**
+   * Vertical speed while it is in the air after a throw or a knock; NaN while it is on the ground.
+   * Without it the ground clamp in `update` would drag a gripped fighter back down every frame
+   * and a thrown one would slide along the ground, so the powers would appear to do nothing.
+   */
+  private fallVy = Number.NaN;
+
+  /** Hold it at a point in the air this frame (the Force grip). */
+  holdAt(point: THREE.Vector3, dt: number): void {
+    if (this.dead) return;
+    (this.heldAt ??= new THREE.Vector3()).copy(point);
+    // A frame or two of grace, as the creatures use: the power sets this every frame it is held.
+    this.heldUntil = this.now + Math.max(0.05, dt * 3);
+    this.fallVy = 0;
+    this.grounded = false;
+    // Stunned while it hangs, as a held creature is: without it the chase step below keeps running
+    // and walks the body out of the hold while the lerp drags it back, which reads as a shiver.
+    this.stunned = Math.max(this.stunned, 0.3);
+  }
+
+  /** Let it go, thrown along `dir`: the push carries it out and the fall brings it down. */
+  release(dir: THREE.Vector3, power: number): void {
+    this.heldAt = null;
+    this.push.addScaledVector(dir, power);
+    this.fallVy = Math.max(this.fallVy || 0, power * 0.35);
   }
 
   /** The rig of its species with a random look, and its weapon in hand; the placeholder is nothing meanwhile. */
@@ -200,8 +249,16 @@ export class Npc implements Hittable {
     } else if (this.arm === 'gun') this.gun = GUNS[gunTypeFor(def, def.class)];
   }
 
-  damage(amount: number, from?: THREE.Vector3, push = 0): void {
+  /** Who hurt it last, and for how long it remembers; it turns on whoever struck. */
+  private provoked: Living | null = null;
+  private provokedFor = 0;
+
+  damage(amount: number, from?: THREE.Vector3, push = 0, source?: Living | null): void {
     if (this.dead) return;
+    if (source && source.key !== this.key && source.aggression !== 'passive') {
+      this.provoked = source;
+      this.provokedFor = 20;
+    }
     this.hp -= amount;
     this.stunned = Math.max(this.stunned, 0.2);
     if (from && push > 0) {
@@ -215,6 +272,12 @@ export class Npc implements Hittable {
     if (this.dead) return;
     this.push.addScaledVector(dir, power * 0.6);
     this.stunned = Math.max(this.stunned, 0.5);
+    // A real blow takes it off its feet: it rises and falls where it lands, rather than sliding
+    // along the ground. A bolt's or a blade's little shove (under six) leaves it standing.
+    if (power >= 6) {
+      this.fallVy = Math.max(Number.isNaN(this.fallVy) ? 0 : this.fallVy, Math.max(power * 0.35, 2));
+      this.grounded = false;
+    }
   }
 
   afflict(dps: number, seconds: number): void {
@@ -233,10 +296,15 @@ export class Npc implements Hittable {
     this.slowed = Math.max(this.slowed, seconds);
   }
 
+  /** The manager's collider map, so the entry goes at the moment the collider does (see `die`). */
+  byCollider: Map<number, Npc> | null = null;
+
   private die(): void {
     this.dead = true;
     this.deadTimer = 9;
     this.hitIn = -1;
+    this.heldAt = null;
+    this.provoked = null;
     const rig = this.rig;
     // The death clip plays out, then the body falls to the physics from its last frame.
     this.ragdollIn = 0.6;
@@ -247,6 +315,10 @@ export class Npc implements Hittable {
         this.ragdollIn = Math.min(3, (rig.clipDuration(clip) ?? 1) - 0.05);
       }
     }
+    // The handle goes out of the lookup at the moment the collider goes, not ten seconds later
+    // when the fighter is disposed: rapier recycles handles, so a fresh body landing on this one
+    // in the meantime would otherwise be found as this corpse.
+    this.byCollider?.delete(this.collider.handle);
     this.physics.world.removeCollider(this.collider, false);
   }
 
@@ -275,7 +347,9 @@ export class Npc implements Hittable {
     return h.localToWorld(out.set(0, 0, len * 0.55));
   }
 
-  update(dt: number, terrain: Terrain, foes: Hittable[], bolts: Bolts, effects: Effects | null, camera: THREE.Camera | null): void {
+  /** `now` is the world's simulated clock (`World.simTime`), so `__debug.advance` exercises the hold. */
+  update(dt: number, terrain: Terrain, foes: readonly Living[], bolts: Bolts, effects: Effects | null, camera: THREE.Camera | null, now: number): void {
+    this.now = now;
     // Slowed, everything of its own runs at a crawl; a burn eats in real time.
     this.slowed = Math.max(0, this.slowed - dt);
     const own = this.slowed > 0 ? 0.12 : 1;
@@ -306,16 +380,23 @@ export class Npc implements Hittable {
     this.stunned = Math.max(0, this.stunned - sdt);
     this.attackCd = Math.max(0, this.attackCd - sdt);
     this.retarget -= sdt;
+    // Whoever hurt it last outranks the nearest, whatever side they are on, until it forgets.
+    if (this.provoked) {
+      this.provokedFor -= sdt;
+      if (this.provokedFor <= 0 || this.provoked.dead) this.provoked = null;
+    }
     if (this.retarget <= 0) {
       this.retarget = 0.4 + Math.random() * 0.3;
-      let best: Hittable | null = null;
+      let best: Living | null = this.provoked;
       let bestD = SIGHT;
-      for (const f of foes) {
-        if (f === this || f.dead) continue;
-        const d = f.pos.distanceTo(this.pos);
-        if (d < bestD) {
-          bestD = d;
-          best = f;
+      if (!best) {
+        for (const f of foes) {
+          if (f.key === this.key || f.dead || !hostileSides(this, f)) continue;
+          const d = f.pos.distanceTo(this.pos);
+          if (d < bestD) {
+            bestD = d;
+            best = f;
+          }
         }
       }
       this.target = best;
@@ -351,7 +432,7 @@ export class Npc implements Hittable {
           tmp.y += (Math.random() - 0.5) * s;
           tmp.z += (Math.random() - 0.5) * s;
           tmp.normalize();
-          bolts.fire(tmp2, tmp, { owner: 'enemy', damage: Math.max(6, g.primary.damage * 0.6), speed: g.primary.speed || 2300, color: g.primary.color, size: g.primary.size, push: g.primary.push, exclude: this.body, life: 6 });
+          bolts.fire(tmp2, tmp, { owner: 'enemy', damage: Math.max(6, g.primary.damage * 0.6), speed: g.primary.speed || 2300, color: g.primary.color, size: g.primary.size, push: g.primary.push, exclude: this.body, life: 6, source: this });
           effects?.flash(tmp2, g.primary.color, 6, 5, 0.06);
           rig?.playUpper(rig.firstOf('rifle_combat_standing_fire_1', 'add_rifle_fire_1', 'pistol_combat_standing_fire_1') ?? '', 0.04);
         } else if (this.arm !== 'gun' && d < 2.6) {
@@ -367,7 +448,7 @@ export class Npc implements Hittable {
       if (this.hitIn < 0 && t) {
         tmp.copy(t.pos).sub(this.pos);
         if (tmp.length() < 2.8) {
-          t.damage(this.arm === 'saber' ? 32 : 18, this.pos, 4);
+          t.damage(this.arm === 'saber' ? 32 : 18, this.pos, 4, this);
           if (effects) {
             tmp2.copy(t.pos).y += t.halfHeight;
             effects.burst(tmp2, this.arm === 'saber' ? this.color.getHex() : 0xffd0a0, 1, 0.2);
@@ -380,7 +461,31 @@ export class Npc implements Hittable {
       this.pos.addScaledVector(this.push, sdt);
       this.push.multiplyScalar(Math.max(0, 1 - sdt * 4));
     }
-    this.pos.y = terrain.heightAt(this.pos.x, this.pos.z);
+    // Where the ground is, and whether the Force is keeping it off there. A kinematic body goes
+    // where it is put, so the hold and the fall have to be written here or the clamp undoes them
+    // every frame: a gripped fighter would be dragged down and a thrown one would slide.
+    const ground = terrain.heightAt(this.pos.x, this.pos.z);
+    if (this.heldAt && this.now < this.heldUntil) {
+      this.pos.lerp(this.heldAt, Math.min(1, sdt * 12));
+      this.fallVy = 0;
+      this.grounded = false;
+      // A blow that lifted it (fallVy above zero) starts the arc from the ground it is standing on.
+    } else if (!Number.isNaN(this.fallVy) && (this.pos.y > ground + 0.02 || this.fallVy > 0)) {
+      this.heldAt = null;
+      this.fallVy -= 18 * sdt;
+      this.pos.y += this.fallVy * sdt;
+      this.grounded = false;
+      if (this.pos.y <= ground) {
+        this.pos.y = ground;
+        this.fallVy = Number.NaN;
+        this.grounded = true;
+      }
+    } else {
+      this.heldAt = null;
+      this.fallVy = Number.NaN;
+      this.pos.y = ground;
+      this.grounded = true;
+    }
     this.body.setNextKinematicTranslation({ x: this.pos.x, y: this.pos.y + this.halfHeight, z: this.pos.z });
     this.group.position.copy(this.pos);
     this.group.quaternion.setFromAxisAngle(UP, this.heading);
@@ -413,7 +518,12 @@ export class Npc implements Hittable {
   dispose(scene: THREE.Scene): void {
     this.ragdoll?.dispose();
     this.ragdoll = null;
+    // Anything still holding this one reads it as dead from here on.
+    if (!this.dead) this.byCollider?.delete(this.collider.handle);
+    this.provoked = null;
+    this.target = null;
     if (!this.dead) this.physics.world.removeCollider(this.collider, false);
+    this.dead = true;
     this.physics.world.removeRigidBody(this.body);
     scene.remove(this.group);
     if (this.blade) {
@@ -426,6 +536,8 @@ export class Npc implements Hittable {
 export class NpcManager {
   readonly npcs: Npc[] = [];
   readonly byCollider = new Map<number, Npc>();
+  /** Bumped on every spawn and every removal, so the world's target list knows when to rebuild. */
+  version = 0;
   private deps: NpcDeps = { weapons: null, effects: null, species: [] };
   private disposed = false;
 
@@ -444,6 +556,8 @@ export class NpcManager {
     this.scene.add(npc.group);
     this.npcs.push(npc);
     this.byCollider.set(npc.collider.handle, npc);
+    npc.byCollider = this.byCollider;
+    this.version++;
     void npc.dress(this.baseUrl, this.deps).catch((err) => console.warn(`fighter ${id}: no rig`, err));
     return npc;
   }
@@ -453,6 +567,7 @@ export class NpcManager {
     for (const npc of this.npcs) npc.dispose(this.scene);
     this.npcs.length = 0;
     this.byCollider.clear();
+    this.version++;
     return n;
   }
 
@@ -463,16 +578,19 @@ export class NpcManager {
     return n;
   }
 
-  update(dt: number, player: Hittable, bolts: Bolts, camera: THREE.Camera | null): void {
+  /** `targets` is the world's one list of living things (the player, the creatures, the fighters). */
+  update(dt: number, targets: readonly Living[], bolts: Bolts, camera: THREE.Camera | null, now: number): void {
     if (this.disposed) return;
-    const foes: Hittable[] = [player, ...this.npcs];
     for (let i = this.npcs.length - 1; i >= 0; i--) {
       const npc = this.npcs[i];
-      npc.update(dt, this.terrain, foes, bolts, this.deps.effects, camera);
+      npc.update(dt, this.terrain, targets, bolts, this.deps.effects, camera, now);
       if (npc.dead && npc.deadTimer <= 0) {
+        // The collider handle went out of the lookup in `die`, at the moment the collider itself
+        // went. Deleting it again here would unregister whichever live body rapier has since
+        // given that recycled handle to, and that body would stop taking damage.
         npc.dispose(this.scene);
-        this.byCollider.delete(npc.collider.handle);
         this.npcs.splice(i, 1);
+        this.version++;
       }
     }
   }
