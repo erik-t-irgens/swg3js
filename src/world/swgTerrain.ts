@@ -25,6 +25,19 @@ interface Pending {
   resolve: (block: PoleBlock) => void;
 }
 
+/** A lake, pool or lava flow in game coordinates, with the terrain's shader key, water type and shader size. */
+export interface SwgWaterTable {
+  name: string;
+  points: { x: number; z: number }[];
+  height: number;
+  /** The shader as shaderKey gives it ("wter_spec"); '' when the terrain names none. */
+  shader: string;
+  /** 0 water, 1 lava. */
+  waterType: number;
+  /** Metres per repeat of the shader's textures. */
+  shaderSize: number;
+}
+
 /**
  * SWG terrain for one planet. Game coordinates are the layout centre mirrored in X:
  * gx = -(swgX - cx), gz = swgZ - cz.
@@ -42,8 +55,8 @@ export class SwgTerrain {
   private readonly farGrids = new Map<string, FarGrid>();
   /** How many chunk grids were generated synchronously on the main thread (diagnostics). */
   syncGenerations = 0;
-  /** Lakes and pools in game coordinates. */
-  readonly waterTables: { name: string; points: { x: number; z: number }[]; height: number }[] = [];
+  /** Lakes, pools and lava flows in game coordinates. */
+  readonly waterTables: SwgWaterTable[] = [];
 
   private constructor(trn: ArrayBuffer, layers: BuildingLayerSource[], bitmaps: { familyId: number; bytes: ArrayBuffer }[], centerX: number, centerZ: number) {
     this.template = parseTerrainTemplate(new Uint8Array(trn));
@@ -56,7 +69,7 @@ export class SwgTerrain {
       if (layer) this.sampler.addBuildingLayer(layer, l.x, l.z, l.yaw);
     }
     for (const w of waterTables(this.template.generator)) {
-      this.waterTables.push({ name: w.name, height: w.height, points: w.points.map((pt) => ({ x: this.toGameX(pt.x), z: this.toGameZ(pt.y) })) });
+      this.waterTables.push({ name: w.name, height: w.height, points: w.points.map((pt) => ({ x: this.toGameX(pt.x), z: this.toGameZ(pt.y) })), shader: w.shader, waterType: w.waterType, shaderSize: w.shaderSize });
     }
     if (typeof Worker !== 'undefined') {
       try {

@@ -209,6 +209,8 @@ const DOME_FRAG = /* glsl */ `
 
 const tmpVec = new THREE.Vector3();
 const tmpVec2 = new THREE.Vector3();
+/** Scratch for reading a ramp byte triple as a linear colour. */
+const tmpRampColor = new THREE.Color();
 
 export class SwgSky {
   readonly group = new THREE.Group();
@@ -567,6 +569,26 @@ export class SwgSky {
     const o = (row * 256 + index) * 4;
     return out.setRGB(r[o] / 255, r[o + 1] / 255, r[o + 2] / 255, THREE.SRGBColorSpace);
   }
+
+  /**
+   * The brightest the clear colour gets over the whole day (the ramp's clear row), as linear
+   * luminance; 0 without a ramp. A static reflection cube is dimmed against it at night, so it
+   * cannot go on glowing with a daytime sheen. Computed once per sky.
+   */
+  clearPeakLuminance(): number {
+    if (this.clearPeak !== null) return this.clearPeak;
+    const r = this.rampBytes(this.block);
+    let peak = 0;
+    if (r && this.block.ramp!.rows > Row.Clear) {
+      for (let i = 0; i < 256; i++) {
+        const o = (Row.Clear * 256 + i) * 4;
+        tmpRampColor.setRGB(r[o] / 255, r[o + 1] / 255, r[o + 2] / 255, THREE.SRGBColorSpace);
+        peak = Math.max(peak, 0.2126 * tmpRampColor.r + 0.7152 * tmpRampColor.g + 0.0722 * tmpRampColor.b);
+      }
+    }
+    return (this.clearPeak = peak);
+  }
+  private clearPeak: number | null = null;
 
   private rampAlpha(row: number, index: number, fallback = 1): number {
     const r = this.rampBytes(this.block);

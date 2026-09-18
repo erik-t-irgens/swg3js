@@ -234,6 +234,9 @@ class App {
     this.input = new Input(this.canvas);
     this.world = new World(this.scene, physics);
     this.world.renderer = this.renderer;
+    // Before any planet loads: every water body needs an environment of one size from the moment
+    // it exists, or the first real sky map to arrive recompiles its shader mid-play.
+    this.world.waterBodies.attach(this.renderer);
     // Shaders are warmed for the target the frames are actually drawn into: with the effects on,
     // a program compiled with nothing bound is the wrong variant and is thrown away on first use.
     this.world.compileTarget = () => this.postfx?.compileTarget ?? null;
@@ -590,6 +593,19 @@ class App {
         return out;
       },
       water: (x: number, z: number) => this.world.terrain.waterHeightAt(x, z),
+      /**
+       * Every water body with the shader it came from, its look, what it reflects and whether it
+       * is on screen. `waterFx({ env: 'shader' })` switches every body to its own shader's cube
+       * map, `{ env: 'sky' }` back to the area's day and night map; `{ envIntensity }` changes how
+       * hard the water mirrors. Use it as `await __debug.waterFx(...)`.
+       */
+      waterFx: async (opts?: { env?: 'sky' | 'shader'; envIntensity?: number }) => {
+        const bodies = this.world.waterBodies;
+        if (opts?.envIntensity !== undefined) bodies.envIntensity = opts.envIntensity;
+        if (opts?.env && opts.env !== bodies.envMode) await bodies.setEnvMode(opts.env);
+        else bodies.refresh();
+        return bodies.describe(this.cam.camera.position);
+      },
       /** Placed objects within r metres of the player: model, distance, tier, and whether the model and its region are loaded. */
       near: (r = 150) => {
         const list = this.world.objectsNear(this.player.pos.x, this.player.pos.z, r);
@@ -2065,6 +2081,9 @@ class App {
     info.triangles = 0;
     // With the effects on, the passes draw into their target and the picture goes out through them.
     const postfx = this.postfx;
+    // Decided before the scene is drawn, so the lit water and the reflections pass never disagree
+    // about who adds the water's environment term this frame.
+    this.world.beginWaterFrame(cam, false);
     postfx?.begin();
     this.portals.render(this.scene, cam, view, this.world.buildings);
     if (postfx) {

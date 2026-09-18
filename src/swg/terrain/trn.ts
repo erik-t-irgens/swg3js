@@ -5,6 +5,9 @@
 import { BoundaryPolygon, BoundaryRectangle, Layer, ShaderGroup, TerrainGenerator, createChunkData, parseHeightmapFile, remapShaderFamilies, type Bitmap, type ChunkData } from './generator.ts';
 import { PackedFixedPointMap, PackedIntegerMap } from './flora.ts';
 import { ChunkReader, chunkChild, formChild, isForm, parseIff, parseIffRoots, type IffForm } from './iff.ts';
+import { shaderKey } from './shaderKey.ts';
+
+export { shaderKey };
 
 export interface TerrainTemplate {
   name: string;
@@ -41,11 +44,17 @@ export interface FloraTiling {
   seed: number;
 }
 
-/** A lake or pool: a polygon (SWG coordinates) filled with water at one height. */
+/** A lake, pool or lava flow: a polygon (SWG coordinates) filled at one height, drawn with a water shader. */
 export interface WaterTable {
   name: string;
   points: { x: number; y: number }[];
   height: number;
+  /** The shader as shaderKey gives it ("wter_spec"); '' when the terrain names none. */
+  shader: string;
+  /** 0 water, 1 lava (BoundaryRectangle v4+, BoundaryPolygon v7+; 0 before). */
+  waterType: number;
+  /** Metres per repeat of the shader's textures. */
+  shaderSize: number;
 }
 
 /** Every local water table in the layer tree (rivers excluded). */
@@ -58,9 +67,9 @@ export function waterTables(generator: TerrainGenerator): WaterTable[] {
         if (!b.active) continue;
         if (b instanceof BoundaryRectangle && b.localWaterTable) {
           const r = b.rect;
-          out.push({ name: b.name, height: b.localWaterTableHeight, points: [{ x: r.x0, y: r.y0 }, { x: r.x1, y: r.y0 }, { x: r.x1, y: r.y1 }, { x: r.x0, y: r.y1 }] });
+          out.push({ name: b.name, height: b.localWaterTableHeight, points: [{ x: r.x0, y: r.y0 }, { x: r.x1, y: r.y0 }, { x: r.x1, y: r.y1 }, { x: r.x0, y: r.y1 }], shader: shaderKey(b.localWaterTableShaderTemplateName), waterType: b.waterType, shaderSize: b.localWaterTableShaderSize });
         } else if (b instanceof BoundaryPolygon && b.localWaterTable && b.points.length >= 3) {
-          out.push({ name: b.name, height: b.localWaterTableHeight, points: b.points.map((p) => ({ x: p.x, y: p.y })) });
+          out.push({ name: b.name, height: b.localWaterTableHeight, points: b.points.map((p) => ({ x: p.x, y: p.y })), shader: shaderKey(b.localWaterTableShaderTemplateName), waterType: b.waterType, shaderSize: b.localWaterTableShaderSize });
         }
       }
       walk(l.layers);
@@ -68,6 +77,49 @@ export function waterTables(generator: TerrainGenerator): WaterTable[] {
   };
   walk(generator.layers);
   return out;
+}
+
+/** One water shader a terrain uses, with how many local tables draw with it and which water types they are. */
+export interface WaterShaderUse {
+  /** The shader as shaderKey gives it. */
+  shader: string;
+  /** Every distinct water type of the tables using it, ascending (0 water, 1 lava). */
+  waterTypes: number[];
+  /** How many local tables use it (the global table is not counted here). */
+  tables: number;
+  /** Whether the terrain's global water table is drawn with it. */
+  global: boolean;
+}
+
+/**
+ * Every water shader the terrain uses: the global table's and each active local table's, keyed by
+ * shaderKey, with how many tables and which water types. Sorted by shader; names that key to '' are
+ * skipped, so the converter, the pack and the game always agree on one spelling.
+ */
+export function waterShaderUses(template: TerrainTemplate): WaterShaderUse[] {
+  const byKey = new Map<string, { shader: string; types: Set<number>; tables: number; global: boolean }>();
+  const entry = (key: string) => {
+    let e = byKey.get(key);
+    if (!e) byKey.set(key, (e = { shader: key, types: new Set<number>(), tables: 0, global: false }));
+    return e;
+  };
+  if (template.useGlobalWaterTable) {
+    const key = shaderKey(template.globalWaterTableShaderTemplateName);
+    if (key) {
+      const e = entry(key);
+      e.global = true;
+      e.types.add(0);
+    }
+  }
+  for (const w of waterTables(template.generator)) {
+    if (!w.shader) continue;
+    const e = entry(w.shader);
+    e.tables++;
+    e.types.add(w.waterType);
+  }
+  return [...byKey.values()]
+    .map((e) => ({ shader: e.shader, waterTypes: [...e.types].sort((a, b) => a - b), tables: e.tables, global: e.global }))
+    .sort((a, b) => (a.shader < b.shader ? -1 : a.shader > b.shader ? 1 : 0));
 }
 
 /** Client chunk sampling parameters (ClientProceduralTerrainAppearanceTemplate: originOffset 2, upperPad 2). */

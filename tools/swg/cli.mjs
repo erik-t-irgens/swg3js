@@ -52,6 +52,7 @@
 //                                                                  ("all": into every planet pack already under <out-dir>)
 //   node tools/swg/cli.mjs sky <swg-dir> <planet>|all <out-dir>      the planet's sky (sun, moons, colour ramps, skybox, reflection maps) into a pack
 //                                                                  (snapshot and terrain do this too)
+//   node tools/swg/cli.mjs water <swg-dir> <planet>|all <out-dir>   each planet's water shaders: colour, opacity, ripple, drift and cube map (terrain does this too)
 //   node tools/swg/cli.mjs space <swg-dir> <zone>|all <out-dir>     a space zone (space_tatooine, ...): its stations, asteroid fields, planets and sky
 //   node tools/swg/cli.mjs maps <swg-dir> <out-dir>                 the client's planet map image into every converted planet pack (map.png, map.json)
 //                                                                  as <out-dir>/<zone>, a pack the game flies through
@@ -109,6 +110,7 @@ import { createRequire } from 'node:module';
 const REGIONS = createRequire(import.meta.url)('./regions/regions.json');
 import { decodeTga, encodeHeightmap } from './tga.mjs';
 import { exportSky } from './sky.mjs';
+import { exportWater } from './water.mjs';
 import { core3MobileStats, mobileTemplates, scanServerSpawns } from './spawns.mjs';
 import { loadEffect } from './texrender.mjs';
 import { readTemplate, stringParam } from './objtemplate.mjs';
@@ -498,10 +500,15 @@ async function copyTerrain(vfs, planet, outDir) {
   if (!vfs.has(path)) return null;
   const bytes = vfs.read(path);
   writeFileSync(join(outDir, 'terrain.trn'), bytes);
+  // Reset first: under "terrain all" a planet whose parse throws would otherwise inherit the
+  // previous planet's template for its ground textures, its flora and its water.
+  lastTemplate = null;
+  let planetTemplate = null;
   try {
     const { parseTerrainTemplate, bitmapFiles } = await import('../../src/swg/terrain/trn.ts');
     const template = parseTerrainTemplate(new Uint8Array(bytes));
     lastTemplate = template;
+    planetTemplate = template;
     for (const b of bitmapFiles(template)) {
       const src = b.name.replace(/\\/g, '/').replace(/^\//, '');
       if (!vfs.has(src)) {
@@ -518,6 +525,17 @@ async function copyTerrain(vfs, planet, outDir) {
     console.warn(`terrain bitmaps not converted: ${err.message}`);
   }
   if (lastTemplate) copyTerrainShaders(vfs, lastTemplate, outDir);
+  // Its own try: a water shader that will not read must not be reported as the bitmaps failing,
+  // and must not cost the planet its heightmaps. A planet whose terrain does not parse gets no
+  // water.json at all, so `status` keeps asking for it; an empty file would hide the failure.
+  if (planetTemplate) {
+    try {
+      const { waterShaderUses } = await import('../../src/swg/terrain/trn.ts');
+      exportWater(vfs, planet, waterShaderUses(planetTemplate), planetTemplate, outDir);
+    } catch (err) {
+      console.warn(`water look not converted: ${err.message}`);
+    }
+  }
   exportSky(vfs, planet, outDir, { textureFor: (p) => textureFor(vfs, p), particleFor: (p) => convertParticle(vfs, p, outDir) });
   return 'terrain.trn';
 }
@@ -1600,6 +1618,7 @@ function packStatus(dir) {
     const textured = shaders ? shaders.families.filter((f) => f.file).length : 0;
     const layers = existsSync(join(packDir, 'terrain')) ? readdirSync(join(packDir, 'terrain')).filter((f) => f.endsWith('.lay')).length : 0;
     const sky = readJson(join(packDir, 'sky.json'));
+    const water = readJson(join(packDir, 'water.json'));
     const parts = [
       `${objects} objects`,
       `${flora} flora models`,
@@ -1607,13 +1626,16 @@ function packStatus(dir) {
       terrain ? `terrain${layers ? ` + ${layers} building layers` : ''}` : 'NO TERRAIN',
       shaders ? `ground textures ${textured}/${shaders.families.length}` : 'NO GROUND TEXTURES',
       sky ? `sky (${sky.blocks.length} blocks${sky.weather ? `, weather ${new Set(sky.blocks.map((b) => b.cameraEffect?.file).filter(Boolean)).size} effects` : ', NO WEATHER'})` : 'NO SKY',
-    ];
+      water ? `water (${Object.keys(water.shaders ?? {}).length} shaders)` : terrain ? 'NO WATER LOOK' : null,
+    ].filter(Boolean);
     console.log(`  ${planet}: ${parts.join(', ')}`);
     if (!objects) need(`snapshot <swg-dir> ${planet} ${packDir} --center=auto --radius=all --retail-only`, `${planet} has no objects`);
     if (!terrain) need(`snapshot <swg-dir> ${planet} ${packDir} --center=auto --radius=all --retail-only`, `${planet} has no terrain`);
     else if (!shaders) need(`terrain <swg-dir> all ${dir} --retail-only`, `${planet} has no ground textures`);
     else if (!sky) need(`sky <swg-dir> all ${dir} --retail-only`, `${planet} has no sky`);
     else if (!sky.weather) need(`sky <swg-dir> all ${dir} --retail-only`, `${planet} sky has no weather effects`);
+    // Its own `if`: exportWater always writes the file, so its existence is the whole test.
+    if (terrain && !water) need(`water <swg-dir> all ${dir} --retail-only`, `${planet} has no water.json`);
     if (!pois) need(`pois <swg-dir> all ${dir} --retail-only`, `${planet} has no pois.json`);
   }
   const creatures = readJson(join(dir, 'creatures/manifest.json'));
@@ -3666,6 +3688,34 @@ switch (cmd) {
       exportSky(vfs, planet, outDir, { textureFor: (p) => textureFor(vfs, p), particleFor: (p) => convertParticle(vfs, p, outDir), log: console.log });
     }
     printEffectSummary();
+    break;
+  }
+
+  case 'water': {
+    // <swg-dir> <planet>|all <out-dir>: each planet's water shaders (colour, opacity, ripple,
+    // drift and cube map) as water.json, plus the cube faces under water/.
+    if (!pos[3]) usage();
+    const vfs = mount(pos[1]);
+    const targets = pos[2] === 'all' ? GAME_PLANETS.filter((p) => existsSync(join(pos[3], p, 'manifest.json'))).map((p) => [p, join(pos[3], p)]) : [[pos[2], pos[3]]];
+    if (!targets.length) console.log(`no planet packs under ${pos[3]} yet; run snapshot first`);
+    const { parseTerrainTemplate, waterShaderUses } = await import('../../src/swg/terrain/trn.ts');
+    for (const [planet, outDir] of targets) {
+      const path = `terrain/${planet}.trn`;
+      if (!vfs.has(path)) {
+        console.log(`${planet}: no ${path}`);
+        continue;
+      }
+      let t;
+      try {
+        t = parseTerrainTemplate(new Uint8Array(vfs.read(path)));
+      } catch (err) {
+        console.log(`${planet}: terrain does not parse (${err.message}); no water.json`);
+        continue;
+      }
+      mkdirSync(outDir, { recursive: true });
+      console.log(`${planet}:`);
+      exportWater(vfs, planet, waterShaderUses(t), t, outDir, { log: console.log });
+    }
     break;
   }
 

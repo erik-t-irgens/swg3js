@@ -6,6 +6,8 @@ import { NpcManager, type NpcDeps } from './npcs';
 import { DayCycle } from './daycycle';
 import { SwgSky, type SkyLighting } from './sky';
 import { createWaterMaterial, emitRipple, Splashes, updateWaterDepth, type WaterMaterial } from './water';
+import { WaterBodies, type WaterBody } from './waterBodies';
+import { envLightFrom, isLavaWater, shaderKey, type WaterLook } from './waterLook';
 import { setEnvironment } from './envmap';
 import { PropFactory, type Collider, type Exclusion, type ScatterItem } from './props';
 import { FloraPlanter } from './flora';
@@ -317,6 +319,15 @@ export class World {
   private waterFar: THREE.Mesh | null = null;
   private waterTime = 0;
   private readonly waterMaterials: WaterMaterial[] = [];
+  /** Every water surface with the look its own terrain shader asks for, and what it reflects. */
+  readonly waterBodies = new WaterBodies();
+  private waterNear: WaterBody | null = null;
+  private waterFarBody: WaterBody | null = null;
+  /**
+   * Lava tables, drawn as they always were in the planet's own water colour with no body, no
+   * reflections and no environment, until the heat design draws lava as lava.
+   */
+  private readonly lavaWater: THREE.Mesh[] = [];
   /** Multiplier on the sky's fog density, for tuning from the console. */
   fogScale = 1;
   /** The player's own fog setting, over the planet's: 1 as the planet has it. */
@@ -439,7 +450,7 @@ export class World {
     this.hemi.color.set(planet.light.ambientSky);
     this.hemi.groundColor.set(planet.light.ambientGround);
 
-    if (planet.water) this.createGlobalWater(planet.water.color, planet.water.opacity, planet.water.level);
+    if (planet.water) this.createGlobalWater(this.waterBodies.lookFor(null, planet), planet.water.level);
 
     this.lastCx = Number.NaN;
     this.lastCz = Number.NaN;
@@ -516,6 +527,8 @@ export class World {
           const swg = await SwgTerrain.create(trn, layers, layout.center.x, layout.center.z, (file) => pack.bytes(file));
           if (token !== this.loadToken) return null;
           this.terrain.attachSwg(swg);
+          await this.waterBodies.load(pack, planet.id);
+          if (token !== this.loadToken) return null;
           this.applySwgWater(swg);
           this.packProgress = 0.55;
           console.info(`terrain: ${this.terrain.swg!.template.name} with ${layers.length} building layers loaded in ${(performance.now() - t0).toFixed(0)} ms`);
@@ -641,11 +654,18 @@ export class World {
     this.groundTextures?.dispose();
     this.groundTextures = null;
     this.dropSky();
+    this.waterBodies.clear();
+    this.waterNear = this.waterFarBody = null;
     for (const m of this.localWater) {
       this.scene.remove(m);
       m.geometry.dispose();
     }
     this.localWater.length = 0;
+    for (const m of this.lavaWater) {
+      this.scene.remove(m);
+      m.geometry.dispose();
+    }
+    this.lavaWater.length = 0;
     this.cellState = null;
     this.groundHiddenFor = null;
     this.prevPlayerPos.x = Number.NaN;
@@ -685,6 +705,10 @@ export class World {
       this.waterFar.geometry.dispose();
       this.waterFar = null;
     }
+    // One lit material per body now, so a planet leaves a couple of dozen behind rather than three:
+    // both the portal renderer's set and the cascades' map are strong, and the first is walked on
+    // every stencil change.
+    this.forgetMaterials(this.waterMaterials);
     for (const m of this.waterMaterials) m.dispose();
     this.waterMaterials.length = 0;
   }
@@ -693,19 +717,21 @@ export class World {
    * The sea: a finely divided plane around the player that swells, and a flat ring beyond it
    * out to the horizon. Both follow the player, the near plane snapping to its own cell size.
    */
-  private createGlobalWater(color: number, opacity: number, level: number): void {
-    const near = createWaterMaterial(color, opacity, true);
-    const far = createWaterMaterial(color, opacity, false);
-    this.waterMaterials.push(near, far);
-    this.water = new THREE.Mesh(new THREE.PlaneGeometry(WATER_NEAR, WATER_NEAR, WATER_SEGMENTS, WATER_SEGMENTS).rotateX(-Math.PI / 2), near);
+  private createGlobalWater(look: WaterLook, level: number): void {
+    this.water = new THREE.Mesh(new THREE.PlaneGeometry(WATER_NEAR, WATER_NEAR, WATER_SEGMENTS, WATER_SEGMENTS).rotateX(-Math.PI / 2));
+    this.water.name = 'water:sea';
     this.water.position.y = level;
     this.water.receiveShadow = true;
     this.water.frustumCulled = false;
+    this.waterNear = this.waterBodies.add(this.water, true, look, 'seaNear');
     this.scene.add(this.water);
-    this.waterFar = new THREE.Mesh(new THREE.RingGeometry(WATER_NEAR * 0.48, 9000, 96, 1).rotateX(-Math.PI / 2), far);
+    this.waterFar = new THREE.Mesh(new THREE.RingGeometry(WATER_NEAR * 0.48, 9000, 96, 1).rotateX(-Math.PI / 2));
+    this.waterFar.name = 'water:sea-far';
     this.waterFar.position.y = level - 0.05;
     this.waterFar.frustumCulled = false;
+    this.waterFarBody = this.waterBodies.add(this.waterFar, false, look, 'seaFar');
     this.scene.add(this.waterFar);
+    this.waterMaterials.push(this.waterNear.lit, this.waterFarBody.lit);
   }
 
   /** The planet's sky from its pack: replaces the procedural dome and drives the lights, fog and reflections. */
@@ -836,15 +862,18 @@ export class World {
     this.envTimer += dt;
     if (this.envTimer < 4) return;
     this.envTimer = 0;
-    const env = this.pmrem.fromScene(sky.domeScene, 0.04, 1, 20000).texture;
+    // Filtered from a 128 px cube like every other environment water may see, so swapping to it
+    // never changes a water material's program key (envMapCubeUVHeight is in that key).
+    const env = this.pmrem.fromScene(sky.domeScene, 0.04, 1, 20000, { size: 128 }).texture;
     this.envTexture?.dispose();
     this.envTexture = env;
     setEnvironment(env, 1);
   }
 
   /**
-   * Rings, wakes and splashes from whatever wades or swims: the player, the creatures and the
-   * speeders. Each mover's velocity through the water shapes its wake and throws spray when fast.
+   * Rings, wakes and splashes from whatever wades or swims: the player, everything alive (the
+   * creatures and the fighters both) and the speeders. Each mover's velocity through the water
+   * shapes its wake and throws spray when fast.
    */
   private emitRipples(dt: number, playerPos: THREE.Vector3): void {
     this.splashes.update(dt, (x, z) => this.terrain.waterHeightAt(x, z));
@@ -1029,11 +1058,20 @@ export class World {
     console.info(`flora: ${byAppearance.size} models for ${families} families`);
   }
 
-  /** Water where the terrain says it is: the global table's height, plus every lake and pool. */
+  /**
+   * Water where the terrain says it is: the global table's height, plus every lake and pool, each
+   * drawn with the look of the water shader its own table names.
+   */
   private applySwgWater(swg: SwgTerrain): void {
     const planet = this.planet;
+    const bodies = this.waterBodies;
     if (swg.template.useGlobalWaterTable) {
-      if (!this.water) this.createGlobalWater(planet.water?.color ?? 0x2e7fbb, planet.water?.opacity ?? 0.75, swg.template.globalWaterTableHeight);
+      const look = bodies.lookFor(shaderKey(swg.template.globalWaterTableShaderTemplateName) || null, planet);
+      if (!this.water) this.createGlobalWater(look, swg.template.globalWaterTableHeight);
+      else {
+        if (this.waterNear) bodies.restyle(this.waterNear, look);
+        if (this.waterFarBody) bodies.restyle(this.waterFarBody, look);
+      }
       this.water!.visible = true;
       this.water!.position.y = swg.template.globalWaterTableHeight;
       if (this.waterFar) {
@@ -1044,14 +1082,19 @@ export class World {
       this.water.visible = false;
       if (this.waterFar) this.waterFar.visible = false;
     }
-    // Lakes are triangulated outlines with no interior vertices, so they ripple but do not swell.
-    const material = createWaterMaterial(planet.water?.color ?? 0x2e7fbb, planet.water?.opacity ?? 0.75, false);
-    this.waterMaterials.push(material);
     for (const m of this.localWater) {
+      bodies.remove(m);
+      this.scene.remove(m);
+      m.geometry.dispose();
+    }
+    for (const m of this.lavaWater) {
       this.scene.remove(m);
       m.geometry.dispose();
     }
     this.localWater.length = 0;
+    this.lavaWater.length = 0;
+    let lavaMaterial: WaterMaterial | null = null;
+    const shaders = new Set<string>();
     for (const w of swg.waterTables) {
       const pts = w.points.map((p) => new THREE.Vector2(p.x, p.z));
       const tris = THREE.ShapeUtils.triangulateShape(pts, []);
@@ -1062,13 +1105,27 @@ export class World {
       g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
       g.setIndex(tris.flat());
       g.computeVertexNormals();
-      const mesh = new THREE.Mesh(g, material);
+      const mesh = new THREE.Mesh(g);
       mesh.receiveShadow = true;
       mesh.name = `water:${w.name}`;
+      if (isLavaWater(w.shader, w.waterType, bodies.data?.shaders[w.shader])) {
+        if (!lavaMaterial) {
+          lavaMaterial = createWaterMaterial(bodies.lookFor(null, planet), false, { reflective: false });
+          this.waterMaterials.push(lavaMaterial);
+        }
+        mesh.material = lavaMaterial;
+        this.lavaWater.push(mesh);
+      } else {
+        // Lakes are triangulated outlines with no interior vertices, so they ripple but do not swell.
+        const body = bodies.add(mesh, false, bodies.lookFor(w.shader || null, planet), 'lake');
+        this.waterMaterials.push(body.lit);
+        if (w.shader) shaders.add(w.shader);
+        this.localWater.push(mesh);
+      }
       this.scene.add(mesh);
-      this.localWater.push(mesh);
     }
-    if (swg.waterTables.length) console.info(`water: ${swg.waterTables.length} local tables${swg.template.useGlobalWaterTable ? `, global at ${swg.template.globalWaterTableHeight.toFixed(1)} m` : ', no global table'}`);
+    bodies.lavaTables = this.lavaWater.length;
+    if (swg.waterTables.length) console.info(`water: ${swg.waterTables.length} local tables (${this.localWater.length} water in ${shaders.size} shaders, ${this.lavaWater.length} lava)${swg.template.useGlobalWaterTable ? `, global at ${swg.template.globalWaterTableHeight.toFixed(1)} m` : ', no global table'}`);
   }
 
   /** Find a comfortable spot near the origin: dry, gentle slope. */
@@ -1998,6 +2055,7 @@ export class World {
       this.applySwgLighting(this.swgSky.update(this.day, camPos, dt), playerPos);
       this.refreshEnvironment(dt);
     } else this.applyLighting();
+    this.waterBodies.envLight = this.waterEnvLight();
     this.sky.position.copy(camPos);
     this.spaceBodies?.position.copy(camPos);
     this.waterTime += dt;
@@ -2120,6 +2178,33 @@ export class World {
     out.color.copy(this.sun.color);
     out.intensity = this.day.daylight;
     return out;
+  }
+
+  /**
+   * Before the frame is drawn: which water is worth drawing, whether the camera is inside the
+   * swell, and whether the effects' reflections take the water's environment term over this frame.
+   * The lit water and the reflections pass must agree, so the one decision is taken here.
+   */
+  beginWaterFrame(camera: THREE.PerspectiveCamera, reflectionsWanted: boolean): void {
+    const dry = !this.planet || !!this.planet.space;
+    const surface = dry ? -Infinity : this.terrain.waterHeightAt(camera.position.x, camera.position.z);
+    const onSea = !dry && !!this.water?.visible && surface === this.terrain.waterLevel;
+    const fog = this.scene.fog instanceof THREE.FogExp2 ? this.scene.fog.density : 0;
+    this.waterBodies.beginFrame(camera, surface, onSea, fog, reflectionsWanted);
+  }
+
+  /**
+   * How bright a static per-shader reflection cube may be at this hour: the sky's clear colour
+   * against the brightest it ever gets. Only matters while the water reflects its own cubes.
+   */
+  private waterEnvLight(): number {
+    if (this.planet?.space) return 1;
+    const sky = this.swgSky;
+    if (sky) {
+      const c = sky.lighting.clear;
+      return envLightFrom(0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b, sky.clearPeakLuminance());
+    }
+    return 0.15 + 0.85 * this.day.daylight;
   }
 
   private applyLighting(): void {

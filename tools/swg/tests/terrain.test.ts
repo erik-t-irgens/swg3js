@@ -207,6 +207,41 @@ check('outside circle', near(s.heightAt(150, 100), expectAt(150, 100), 1e-3));
   check('coordinate hash', h >= 0 && h < 1 && hashTuple(1, 2) !== hashTuple(2, 1) && hashTuple(1, 2) === hashTuple(1, 2), String(h));
 }
 
+// --- water tables: each one's own shader, water type and shader size, and the list of shaders a
+//     terrain draws water with (the global sea's and every lake's, keyed one way).
+{
+  const { waterTables, waterShaderUses, shaderKey } = await import('../../../src/swg/terrain/trn.ts');
+  type Item = ReturnType<typeof form>;
+  const waterHeader = (useGlobal: number, shader: string) => new W().str('test').f32(1024).f32(32).i32(8).i32(useGlobal).f32(9).f32(3).str(shader).f32(60)
+    .f32(0).f32(0).f32(0).f32(0).u32(0).f32(0).f32(0).f32(0).f32(0).u32(0).f32(0).f32(0).f32(0).f32(0).u32(0).f32(0).f32(0).f32(0).f32(0).u32(0).u8(0).bytes();
+  // BREC version 4: rect, feather, local water table, local-global flag, height, shader size, shader, water type.
+  const rect = (name: string, shader: string) => form('BREC', form('0004', ihdr(name), chunk('DATA', new W().f32(100).f32(100).f32(200).f32(200).i32(0).f32(0).i32(1).i32(0).f32(12).f32(2).str(shader).i32(0).bytes())));
+  // BPOL version 7: point count, points, feather, local water table, height, shader size, water type, shader.
+  const lavaPoly = form('BPOL', form('0007', ihdr('flow'), chunk('DATA', new W().i32(3).f32(0).f32(0).f32(40).f32(0).f32(0).f32(40).i32(0).f32(0).i32(1).f32(3).f32(4).i32(1).str('shader\\Wter_Lava_01_Still.sht').bytes())));
+  const layerOf = (name: string, item: Item) => form('LAYR', form('0003', ihdr(name), chunk('ADTA', new W().i32(0).i32(0).i32(1).str('').bytes()), item));
+  const build = (h: Uint8Array, ...layers: Item[]) => parseTerrainTemplate(encode(form('PTAT', form('0015', chunk('DATA', h),
+    form('TGEN', form('0000', sgrp, form('FGRP', form('0008')), form('RGRP', form('0003')), form('EGRP', form('0002')), mgrp, form('LYRS', ...layers))), form('BAKE')))));
+  const layers = [layerOf('a', rect('lake', 'shader\\Wter_Spec.sht')), layerOf('b', lavaPoly), layerOf('c', rect('nameless', ''))];
+  const tw = build(waterHeader(1, 'shader\\Wter_Spec.sht'), ...layers);
+  const tables = waterTables(tw.generator);
+  const lake = tables.find((t) => t.name === 'lake');
+  const flow = tables.find((t) => t.name === 'flow');
+  check('water tables carry their shader, type and size', tables.length === 3 && !!lake && lake.shader === 'wter_spec' && lake.waterType === 0 && lake.shaderSize === 2 && lake.height === 12, JSON.stringify(tables.map((t) => ({ n: t.name, s: t.shader, w: t.waterType, z: t.shaderSize }))));
+  check('a lava polygon reads its water type and shader size', !!flow && flow.shader === 'wter_lava_01_still' && flow.waterType === 1 && flow.shaderSize === 4 && flow.height === 3 && flow.points.length === 3, JSON.stringify(flow));
+  const uses = waterShaderUses(tw);
+  check('water shader uses are merged, sorted and keyed one way', JSON.stringify(uses) === JSON.stringify([
+    { shader: 'wter_lava_01_still', waterTypes: [1], tables: 1, global: false },
+    { shader: 'wter_spec', waterTypes: [0], tables: 1, global: true },
+  ]), JSON.stringify(uses));
+  const noGlobalName = waterShaderUses(build(waterHeader(1, ''), ...layers));
+  check('a global table with no shader name is left out', noGlobalName.length === 2 && noGlobalName.every((u) => !u.global), JSON.stringify(noGlobalName));
+  const noGlobal = waterShaderUses(build(waterHeader(0, 'shader\\Wter_Spec.sht'), ...layers));
+  check('a terrain that does not use its global table does not list its shader', noGlobal.length === 2 && !noGlobal.some((u) => u.global), JSON.stringify(noGlobal));
+  const dry = waterShaderUses(build(waterHeader(0, ''), layerOf('c', rect('nameless', ''))));
+  check('a terrain with no named water shader uses none', dry.length === 0, JSON.stringify(dry));
+  check('shaderKey strips the folder and the extension and lowers the case', [shaderKey('shader\\Wter_Spec.sht'), shaderKey('shader/x.sht'), shaderKey('WTER_SPEC'), shaderKey('')].join() === 'wter_spec,x,wter_spec,');
+}
+
 // --- environment families (EGRP) and the affectors that paint them (AENV), evaluated like
 //     shader constants: a base layer everywhere, a town circle, a seasonal circle inside it.
 {

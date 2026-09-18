@@ -78,7 +78,7 @@ For **Claude Code in VS Code**: `CLAUDE.md` at the repo root is the handoff, rea
 - **Real ground in private builds**: the terrain generator paints the game's shader families across the ground exactly where the original rules put them, and the ground material blends each family's texture (at its own world scale) across every triangle, so sand meets rock and grass the way it did in the game.
 - **Particle effects in private builds**: the game's own emitter descriptions (campfires, smoke, sparks, steam, candle flames, waterfall mist, Mustafar's lava plumes) play where the world snapshot places them, batched per texture and asleep beyond their range.
 - **Real creatures in private builds**: the converter turns the game's skeletal appearances (skinned meshes, skeletons, compressed keyframe animations) into skinned GLBs, and the planets' creatures walk, run, attack and fall with their own animations.
-- **Real flora and water in private builds**: the planet's own trees, rocks and plants grow where the terrain rules and the engine's seeded random numbers put them (the same spots on every server), and water sits at the terrain's global table height with every lake and pool from the terrain layers.
+- **Real flora and water in private builds**: the planet's own trees, rocks and plants grow where the terrain rules and the engine's seeded random numbers put them (the same spots on every server), and water sits at the terrain's global table height with every lake and pool from the terrain layers. Each lake and sea is drawn with the look of the water shader its own terrain rules name: its colour and opacity come from that shader's main texture (Lok's sea is sulphur yellow, Dathomir's near black, the misty falls pools a clear teal), how rippled it is from its normal map, and how fast those ripples drift from its scroll rate. A pack converted before this falls back to the planet's own colour and says so in the console.
 - **Real SWG terrain in private builds**: `src/swg/terrain/` is a port of the game's terrain generator (its seeded fractals, layer boundaries, filters and affectors, and the ground modifications buildings apply). When a converted pack carries the planet's `.trn`, chunks are generated from it in a Web Worker and the ground matches the original game to the centimetre, so snapshot buildings sit exactly on it.
 - **Props**: instanced trees (six styles: pine, round, palm, dead, giant, swamp) and rocks scattered deterministically per chunk, with cylinder colliders.
 - **Water**, per-planet gravity, a gradient sky shader with sun discs (Tatooine gets two), exponential fog, and shadow-casting sunlight.
@@ -376,6 +376,7 @@ npm run swg -- mobiles @SWG assets-private --retail-only                        
 npm run swg -- weapons @SWG assets-private --retail-only                         #    every weapon, for the rack on B
 npm run swg -- ships @SWG assets-private --retail-only                           #    every player ship, with its interior, for the garage on G
 npm run swg -- space @SWG all assets-private --retail-only                        #    every space zone: stations, asteroid fields, planets and sky, for flying up from a planet
+npm run swg -- water @SWG all assets-private --retail-only                        #    each planet's own water: the colour, opacity, ripples and drift of every lake and sea
 npm run swg -- status assets-private                                              # 8. what is in place, and the command for anything missing
 npm run dev                                                                       # 9. play
 ```
@@ -388,6 +389,7 @@ Step 3 also accepts one planet at a time (`snapshot @SWG tatooine assets-private
 | --- | --- |
 | Ground textures, terrain rules, building layers, the sky | `terrain @SWG all assets-private --retail-only` (refreshes every existing pack in seconds) |
 | Just the sky: sun, moons, stars, colour ramps, skybox, reflection maps, the weather effects and sounds | `sky @SWG all assets-private --retail-only` |
+| Just the water: each lake's and sea's colour, opacity, ripple, drift and reflection map | `water @SWG all assets-private --retail-only` (seconds; `terrain` does it too) |
 | Reflective metal and glass on buildings and props | `snapshot @SWG <planet> assets-private/<planet> --center=auto --radius=all --retail-only` (the shine is baked into each model's textures) |
 | Buildings, objects, flora, a new planet | `snapshot @SWG <planet> assets-private/<planet> --center=auto --radius=all --retail-only` |
 | Named places on the galaxy map | `pois @SWG all assets-private --retail-only` |

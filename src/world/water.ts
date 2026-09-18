@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { registerReflective } from './envmap';
+import type { WaterLook } from './waterLook';
 
 /**
  * Water: a physically based surface that reflects the sky's environment map, moved by a
@@ -8,9 +8,31 @@ import { registerReflective } from './envmap';
  * ripples bending the normal, foam on the steepest crests, and rings and wakes spreading from
  * whatever moves through it. Everything is evaluated in world space, so meshes tile without
  * seams and lakes share the same sea state as the ocean.
+ *
+ * Each body's colour, opacity and how hard and fast its ripples run come from the terrain's own
+ * water shader (`WaterLook`), so a sulphur sea and a clear pool are the same material with
+ * different numbers.
  */
+export interface WaterUniforms {
+  uTime: { value: number };
+  uWaveHeight: { value: number };
+  uRipple: { value: number };
+  uDrift: { value: number };
+  /** 0 while the reflections pass adds the environment term itself, 1 otherwise. Shared by every water material. */
+  uWaterEnvSpecular: { value: number };
+  [name: string]: { value: unknown };
+}
+
 export interface WaterMaterial extends THREE.MeshPhysicalMaterial {
-  userData: { uniforms: { uTime: { value: number }; uWaveHeight: { value: number }; uRipple: { value: number } } };
+  userData: { uniforms: WaterUniforms; look: WaterLook; variant: 'lit' | 'mask'; waves: boolean; water: true };
+}
+
+/** One value for every water material: the reflections pass takes the environment term over while it runs. */
+const WATER_ENV_SPECULAR = { value: 1 };
+
+/** 0 while the reflections pass adds the environment term itself, 1 otherwise. */
+export function setWaterEnvSpecular(value: 0 | 1): void {
+  WATER_ENV_SPECULAR.value = value;
 }
 
 const WAVE_COUNT = 8;
@@ -247,6 +269,7 @@ const WAVES_GLSL = /* glsl */ `
   uniform float uTime;
   uniform float uWaveHeight;
   uniform float uRipple;
+  uniform float uDrift;
   uniform vec4 uWaves[${WAVE_COUNT}];
   uniform float uOmega[${WAVE_COUNT}];
   uniform sampler2D uDetail;
@@ -313,9 +336,9 @@ const WAVES_GLSL = /* glsl */ `
   // Fine waves from the spectrum tile: two layers at different scales and headings, drifting
   // with the wind, their slopes added so neither tiling shows.
   vec2 detailSlope(vec2 p) {
-    vec2 a = p / uDetailSize + uTime * vec2(0.018, 0.007);
+    vec2 a = p / uDetailSize + uTime * uDrift * vec2(0.018, 0.007);
     vec2 pr = vec2(p.x * 0.83 - p.y * 0.56, p.x * 0.56 + p.y * 0.83);
-    vec2 b = pr / (uDetailSize * 0.47) - uTime * vec2(0.012, 0.02);
+    vec2 b = pr / (uDetailSize * 0.47) - uTime * uDrift * vec2(0.012, 0.02);
     vec3 na = texture2D(uDetail, a).xyz * vec3(2.0, 2.0, 1.0) - vec3(1.0, 1.0, 0.0);
     vec3 nb = texture2D(uDetail, b).xyz * vec3(2.0, 2.0, 1.0) - vec3(1.0, 1.0, 0.0);
     vec2 sa = na.xy / max(na.z, 0.2);
@@ -359,25 +382,28 @@ const WAVES_GLSL = /* glsl */ `
 `;
 
 /**
- * A water material. `waves` enables the vertex swell (only for finely divided meshes); lakes
- * with no interior vertices pass false and still ripple, foam and react.
+ * A water material drawn with one body's look. `waves` enables the vertex swell (only for finely
+ * divided meshes); lakes with no interior vertices pass false and still ripple, foam and react.
+ * `reflective: false` leaves the environment out altogether (the lava tables, until the heat
+ * design draws them itself).
  */
-export function createWaterMaterial(color: THREE.ColorRepresentation, opacity: number, waves: boolean, windAngle = 0.9, seed = 7): WaterMaterial {
+export function createWaterMaterial(look: WaterLook, waves: boolean, opts: { windAngle?: number; seed?: number; reflective?: boolean } = {}): WaterMaterial {
+  const { windAngle = 0.9, seed = 7, reflective = true } = opts;
   const mat = new THREE.MeshPhysicalMaterial({
-    color,
+    color: look.color,
     transparent: true,
-    opacity,
+    opacity: look.opacity,
     roughness: 0.16,
     metalness: 0,
     ior: 1.33,
     specularIntensity: 0.8,
     depthWrite: false,
     side: THREE.DoubleSide,
-    envMapIntensity: 0.55,
+    envMapIntensity: reflective ? 0.55 : 0,
   }) as WaterMaterial;
   const sea = seaState(seed, windAngle);
   detailTile ??= spectrumNormalTile(seed * 7919 + 13, windAngle, 6.5);
-  const uniforms = {
+  const uniforms: WaterUniforms = {
     uDepthTex: DEPTH.tex,
     uDepthOrigin: DEPTH.origin,
     uDepthSize: DEPTH.size,
@@ -385,15 +411,27 @@ export function createWaterMaterial(color: THREE.ColorRepresentation, opacity: n
     uDetailSize: { value: TILE_SIZE },
     uTime: { value: 0 },
     uWaveHeight: { value: waves ? 1 : 0 },
-    uRipple: { value: 1 },
+    uRipple: { value: look.ripple },
+    uDrift: { value: look.drift },
+    uWaterEnvSpecular: WATER_ENV_SPECULAR,
     uWaves: { value: sea.waves },
     uOmega: { value: sea.omega },
     uRings: RINGS,
     uRingMotion: RING_MOTION,
   };
-  mat.userData = { uniforms };
-  // Other systems (cascaded shadows, portals) assign their own compile hooks to every material
-  // in the scene; ours must survive that, so later assignments are composed in front of it.
+  mat.userData = { uniforms, look, variant: 'lit', waves, water: true };
+  installWaterHook(mat, uniforms, 'lit', waves);
+  return mat;
+}
+
+/**
+ * Give `mat` the water injections for its variant: an `onBeforeCompile` accessor that first runs
+ * whatever another system assigns to the material (cascaded shadows and the portal renderer assign
+ * their own hook to everything in the scene) and then ours, plus the program key. Each call makes
+ * its own closure and its own `external`, so one variant never runs another's hook; only the
+ * uniform objects are shared.
+ */
+function installWaterHook(mat: WaterMaterial, uniforms: WaterUniforms, variant: 'lit' | 'mask', waves: boolean): void {
   let external: ((shader: THREE.WebGLProgramParametersWithUniforms, renderer: THREE.WebGLRenderer) => void) | null = null;
   const ours = (shader: THREE.WebGLProgramParametersWithUniforms, renderer: THREE.WebGLRenderer) => {
     external?.call(mat, shader, renderer);
@@ -418,7 +456,14 @@ export function createWaterMaterial(color: THREE.ColorRepresentation, opacity: n
         }`,
       );
     shader.fragmentShader = shader.fragmentShader
-      .replace('#include <common>', `#include <common>\n${WAVES_GLSL}\nvarying vec2 vWaterXZ;\nvarying float vWaterDist;`)
+      .replace('#include <common>', `#include <common>\n${WAVES_GLSL}\nvarying vec2 vWaterXZ;\nvarying float vWaterDist;\nuniform float uWaterEnvSpecular;`)
+      .replace(
+        // Only the specular environment term: the irradiance and the multiscatter stay, so the
+        // water looks the same while the reflections pass adds this term back itself.
+        '#include <lights_fragment_maps>',
+        `#include <lights_fragment_maps>
+        radiance *= uWaterEnvSpecular;`,
+      )
       .replace(
         '#include <color_fragment>',
         `#include <color_fragment>
@@ -469,9 +514,21 @@ export function createWaterMaterial(color: THREE.ColorRepresentation, opacity: n
       external = fn;
     },
   });
-  mat.customProgramCacheKey = () => `swg-water-${waves ? 'waves' : 'flat'}-${external ? 'hooked' : 'plain'}`;
-  registerReflective(mat);
-  return mat;
+  mat.customProgramCacheKey = () => `swg-water-2-${variant}-${waves ? 'waves' : 'flat'}-${external ? 'hooked' : 'plain'}`;
+}
+
+/**
+ * How far the swell can lift the surface above its mean: the summed wave amplitudes times
+ * uWaveHeight (about 1.19 m for the sea's own seed and wind; 0 for a flat material). The camera
+ * is inside a crest within this much of the surface.
+ */
+export function waveReach(material: WaterMaterial): number {
+  const waves = material.userData.uniforms.uWaves?.value as THREE.Vector4[] | undefined;
+  const height = (material.userData.uniforms.uWaveHeight?.value as number | undefined) ?? 0;
+  if (!waves || !height) return 0;
+  let sum = 0;
+  for (const w of waves) sum += w.w;
+  return sum * height;
 }
 
 /**

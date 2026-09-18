@@ -50,7 +50,7 @@ class Cursor {
 }
 
 /** Mirror an RGBA image horizontally in place. */
-function mirrorX(rgba, width, height) {
+export function mirrorX(rgba, width, height) {
   const row = new Uint8Array(width * 4);
   for (let y = 0; y < height; y++) {
     const o = y * width * 4;
@@ -59,7 +59,8 @@ function mirrorX(rgba, width, height) {
   }
 }
 
-function halve(img) {
+/** An RGBA image at half the size, each output texel the mean of a 2x2 block. */
+export function halve(img) {
   const w = Math.max(1, img.width >> 1);
   const h = Math.max(1, img.height >> 1);
   const out = new Uint8Array(w * h * 4);
@@ -75,6 +76,31 @@ function halve(img) {
     }
   }
   return { width: w, height: h, rgba: out };
+}
+
+/**
+ * A DDS cube map as six RGBA faces in the game's order (+X -X +Y -Y +Z -Z), converted to the
+ * game's mirrored X axis (the two X faces swapped, every face flipped horizontally), alpha made
+ * opaque, and halved until no wider than `max`. Throws when the file is not a cube map.
+ *
+ * The sky and the water both write their cubes through this, so a reflection map means the same
+ * thing whichever command wrote it.
+ * Returns { faces: [{ suffix, img }], size, source }.
+ */
+export function cubeFaces(bytes, max) {
+  if (!isDdsCube(bytes)) throw new Error('not a cube map');
+  const { faces } = decodeDdsCube(bytes);
+  const order = [1, 0, 2, 3, 4, 5];
+  const names = ['px', 'nx', 'py', 'ny', 'pz', 'nz'];
+  const out = [];
+  for (let i = 0; i < 6; i++) {
+    let img = faces[order[i]];
+    while (img.width > max) img = halve(img);
+    mirrorX(img.rgba, img.width, img.height);
+    for (let k = 3; k < img.rgba.length; k += 4) img.rgba[k] = 255;
+    out.push({ suffix: names[i], img });
+  }
+  return { faces: out, size: Math.min(max, faces[0].width), source: faces[0].width };
 }
 
 /** The client environment file (FORM ENVM 0000) as plain data, or null when the planet has none. */
@@ -231,20 +257,8 @@ export function exportSky(vfs, planet, outDir, { textureFor, particleFor = null,
     let out = null;
     try {
       if (!vfs.has(p)) throw new Error(`${p} not in archives`);
-      const bytes = vfs.read(p);
-      if (!isDdsCube(bytes)) throw new Error(`${p} is not a cube map`);
-      const { faces } = decodeDdsCube(bytes);
-      const order = [1, 0, 2, 3, 4, 5];
-      const names = ['px', 'nx', 'py', 'ny', 'pz', 'nz'];
-      const files = [];
-      for (let i = 0; i < 6; i++) {
-        let img = faces[order[i]];
-        while (img.width > max) img = halve(img);
-        mirrorX(img.rgba, img.width, img.height);
-        for (let k = 3; k < img.rgba.length; k += 4) img.rgba[k] = 255;
-        files.push(write(fileName(p, `_${names[i]}`), img));
-      }
-      out = { faces: files, size: Math.min(max, faces[0].width) };
+      const { faces, size } = cubeFaces(vfs.read(p), max);
+      out = { faces: faces.map((f) => write(fileName(p, `_${f.suffix}`), f.img)), size };
     } catch (err) {
       notes.push(`${p}: ${err.message}`);
     }
