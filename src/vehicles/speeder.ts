@@ -3,6 +3,7 @@
 import * as THREE from 'three';
 import type { Physics } from '../core/physics';
 import { Vehicle, specFor, type DriveInput } from './vehicle';
+import { advanceEnginePhase, engineHeatOf } from './enginePlumes';
 
 export type { DriveInput };
 export type Speeder = Vehicle;
@@ -47,7 +48,13 @@ export function createPlaceholderSpeeder(physics: Physics, scene: THREE.Scene, x
   const spec = specFor('speederbike', 'placeholder_speeder', 'Placeholder speeder', { min: [-0.55, 0.1, -1.5], max: [0.55, 0.8, 1.5] });
   spec.seat = [0, 0.86, -0.35];
   const v = new Vehicle(spec, model, physics, scene, x, y, z, heading);
-  v.onUpdate = (_dt, self) => {
+  // The heat haze follows the two glowing discs at the nozzles, as it does a garage vehicle's glows.
+  glows.forEach((disc, i) => v.engines.push({ object: disc, size: 0.4, seed: (i * 0.618034) % 1 }));
+  v.onUpdate = (dt, self, drive) => {
+    const throttle = Math.max(0, drive?.throttle ?? 0);
+    const share = Math.min(1, Math.abs(self.speed) / self.spec.maxSpeed);
+    self.engineHeat = engineHeatOf(Math.abs(self.speed) > 1 || throttle > 0, share, throttle, self.boosting, false);
+    advanceEnginePhase(self, 0.4, dt);
     const glowScale = 0.6 + Math.min(1, Math.abs(self.speed) / 20) * 0.8 + (self.boosting ? 0.4 : 0);
     for (const gl of glows) gl.scale.setScalar(glowScale);
   };

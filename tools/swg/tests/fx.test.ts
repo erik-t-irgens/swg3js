@@ -125,6 +125,18 @@ for (const def of FX_PRODUCTS) ok(def.targets === undefined || (Number.isInteger
   ok(res!.options!.map((o) => o.value).join() === '0.5,1' && res!.requires.join() === 'effects,waterReflections', 'of half or full, greyed while the reflections are off');
 }
 
+// --- the heat haze ---
+
+{
+  const heat = fxProductDef('heat');
+  ok(heat.kind === 'depth' && heat.scale === 0.5 && heat.format === 'RGBA16F' && heat.needs.join() === 'linearDepthHalf', 'the heat is a half-size half-float depth product built on the half-resolution depth');
+  ok(FX_PRODUCTS.findIndex((d) => d.id === 'heat') > FX_PRODUCTS.findIndex((d) => d.id === 'linearDepthHalf'), 'the heat comes after the half-resolution depth it tests against');
+  ok(heat.owner === 'heatHaze' && heat.budgetMs === 0.08 && !heat.typical && heat.live, 'the heat belongs to the haze, costs 0.08 ms at most and is not in the typical frame');
+  const row = fxPassDef('heatHaze');
+  ok(row.needs.length === 2 && row.needs.includes('heat') && row.needs.includes('linearDepthHalf') && row.budgetMs === 0.16 && !row.canBeLast && row.live, 'the heat haze reads the heat and the half-resolution depth, 0.16 ms at most, never last');
+  ok(FX_LAYERS.heat === 30, 'the heat draws on layer 30');
+}
+
 // --- what a typical frame costs ---
 
 /** Products a typical pass may ask for that are still not computed in a typical frame. */

@@ -7,6 +7,7 @@ import type { Physics } from '../core/physics';
 import { ACTOR_LAYER } from '../world/portalRender';
 import { cellIndexOf } from './interior';
 import { EngineTrail } from './trail';
+import { advanceEnginePhase, engineHeatOf } from './enginePlumes';
 
 export interface VehicleDef {
   id: string;
@@ -631,6 +632,8 @@ function addEngineGlow(v: Vehicle, engines: THREE.Vector3[] = []): void {
   }
   // A ship's glow is sized by its hull's height, not its width: a fighter's wings make it wide, its engines are not.
   const size = ship ? Math.min(7, Math.max(0.5, h * 0.4)) : Math.min(1.6, 0.25 + w * 0.18);
+  // The heat haze follows the same glows: each one's place, base size and its own noise offset.
+  glows.forEach((g, i) => v.engines.push({ object: g, size, seed: (i * 0.618034) % 1 }));
   // A ship's exhaust leaves a ribbon behind it in flight, longer the faster it goes.
   if (ship) {
     const holder = v.group.parent ?? v.group;
@@ -649,6 +652,9 @@ function addEngineGlow(v: Vehicle, engines: THREE.Vector3[] = []): void {
     // The drive's own appearance while it runs; the cockpit frame and clear glass while someone is at the controls or aboard.
     const running = throttle > 0 || self.airborne || Math.abs(self.speed) > 1;
     for (const p of self.engineParts) p.visible = running;
+    // How hard the engines run, for the air shimmering behind them, and its noise flowing with it.
+    self.engineHeat = engineHeatOf(running, share, throttle, self.boosting, self.overheated > 0);
+    advanceEnginePhase(self, size, dt);
     if (self.cockpitFrame) self.cockpitFrame.visible = drive !== null;
     self.setGlassClear(drive !== null || self.occupied);
     const k = size * (0.35 + 0.65 * Math.min(1, Math.abs(self.speed) / self.spec.maxSpeed) + 0.4 * throttle + (self.boosting ? 0.6 : 0)) * (self.overheated > 0 ? 0.4 + 0.3 * Math.random() : 1);

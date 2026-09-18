@@ -28,6 +28,8 @@ export type HeatPlumeProvider = (sink: HeatPlumeSink) => void;
 interface ProviderEntry {
   fn: HeatPlumeProvider;
   dead: boolean;
+  /** Warned once already about a throw. */
+  warned?: boolean;
 }
 
 /** What gives off heat: the planet's lava tables and whoever pushes plumes. Lives as long as the App; the effects read it. */
@@ -57,7 +59,15 @@ export class HeatSources {
     let dead = false;
     for (let i = 0; i < list.length; i++) {
       const e = list[i];
-      if (!e.dead) e.fn(sink);
+      if (!e.dead) {
+        try {
+          e.fn(sink);
+        } catch (err) {
+          // One provider that throws loses its own plumes this frame, not every provider after it.
+          if (!e.warned) console.warn('heat haze: a plume provider failed', err);
+          e.warned = true;
+        }
+      }
       if (e.dead) dead = true;
     }
     if (!dead) return;

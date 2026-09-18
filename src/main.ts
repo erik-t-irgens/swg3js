@@ -37,6 +37,9 @@ import { PostFX, type FxFrameInput, type SunInfo } from './core/postfx';
 import { fxPassDef, isFxSettingKey, type FxPassId } from './core/fxRegistry.ts';
 import { installEffects } from './core/fx/install';
 import { addPointLight, createFxLights, setSpotLight } from './core/fx/lights';
+import { heatTuning, type HeatProduct } from './core/fx/heat';
+import { HeatSources, plumeNoiseFrequency } from './world/heatSources';
+import { vehiclePlumes } from './vehicles/enginePlumes';
 import { Notice } from './ui/notice';
 import { VehiclesUi } from './ui/vehiclesUi';
 import { NpcUi } from './ui/npcUi';
@@ -189,6 +192,11 @@ class App {
   private shipLeadValid = false;
   /** The picture's effects chain, while the Effects setting is on. */
   private postfx: PostFX | null = null;
+  /**
+   * What gives off heat for the heat haze: the planet's lava tables (World hands them over) and the
+   * plume providers. A field initialiser, so it exists before the constructor builds the effects chain.
+   */
+  private readonly heat = new HeatSources();
   /** The lit blades handed to the effects each frame (declared before fxInput, whose initialiser reads it). */
   private readonly fxBlades = createBladeList();
   /** The frame's lights handed to the effects, refilled in drawFrame (declared before fxInput, whose initialiser reads it). */
@@ -251,6 +259,15 @@ class App {
     this.input = new Input(this.canvas);
     this.world = new World(this.scene, physics);
     this.world.renderer = this.renderer;
+    // The lava tables World loads go to the heat haze from here on.
+    this.world.heat = this.heat;
+    // Plumes the heat haze draws, asked for once a frame from inside the effects chain (after the
+    // world is assigned, which the first provider reads): every running engine, and a flame thrower
+    // held this frame.
+    this.heat.addProvider((sink) => vehiclePlumes(this.world.vehicles, sink));
+    this.heat.addProvider((sink) => {
+      if (this.kit?.id === 'bounty_hunter') this.hunterKit().heatPlumes(sink, performance.now());
+    });
     // Before any planet loads: every water body needs an environment of one size from the moment
     // it exists, or the first real sky map to arrive recompiles its shader mid-play.
     this.world.waterBodies.attach(this.renderer);
@@ -677,6 +694,58 @@ class App {
       lava: (look?: { intensity?: number; glow?: number; glowFrom?: number; glowTo?: number; axes?: 'xyz' | 'xzy' }) => {
         if (look) this.world.setLavaLook(look);
         return this.world.lavaStatus;
+      },
+      /**
+       * The heat haze: what drew last frame and why it did not, with console tuning (`show` tints the
+       * hot air cyan, `clientOffset`, `gate`, `fadeStart`, `fadeEnd`, `lift`, `plumeRange`,
+       * `minPlumePixels`, `lavaNoiseRate`, `plumeNoiseRate`). Reads stored values only.
+       */
+      heat: (tune?: Partial<typeof heatTuning>) => {
+        if (tune) {
+          const into = heatTuning as Record<string, unknown>;
+          for (const [k, v] of Object.entries(tune)) {
+            // Only the known keys, each with a value of its own kind (a finite number where a number goes).
+            if (!(k in heatTuning) || typeof v !== typeof into[k] || (typeof v === 'number' && !Number.isFinite(v))) continue;
+            into[k] = v;
+          }
+        }
+        const S = this.settings;
+        const sources = { lavaTables: this.heat.lava.length, providers: this.heat.providerCount };
+        const fx = this.postfx;
+        if (!fx) return { effects: false, note: 'the heat haze is drawn by the effects chain; turn Effects on', setting: S.heatHaze, strength: S.heatHazeStrength, tuning: { ...heatTuning }, sources };
+        const product = fx.product<HeatProduct>('heat');
+        const row = fx.describe().passes.find((p) => p.id === 'heatHaze');
+        return {
+          effects: true,
+          setting: S.heatHaze,
+          strength: S.heatHazeStrength,
+          tuning: { ...heatTuning },
+          sources,
+          product: product ? product.describe() : null,
+          why: !product || !row ? 'the heat haze is not installed on this chain' : row.drewLastFrame ? null : (row.why ?? null),
+        };
+      },
+      /** A plume 5 m ahead of the camera, crossing the view left to right, for `seconds`: the haze without a vehicle or a gun. */
+      heatPlume: (seconds = 10) => {
+        const start = performance.now();
+        const cam = this.cam.camera;
+        const fwd = new THREE.Vector3();
+        const right = new THREE.Vector3();
+        const at = new THREE.Vector3();
+        let remove = () => {};
+        remove = this.heat.addProvider((sink) => {
+          const elapsed = (performance.now() - start) / 1000;
+          // The remover only marks it: the list drops it after the loop that is running.
+          if (!(elapsed <= seconds)) {
+            remove();
+            return;
+          }
+          cam.getWorldDirection(fwd);
+          right.setFromMatrixColumn(cam.matrixWorld, 0).normalize();
+          at.setFromMatrixPosition(cam.matrixWorld).addScaledVector(fwd, 5).addScaledVector(right, -3);
+          sink.push(at.x, at.y, at.z, right.x, right.y, right.z, 6, 0.3, 1.2, 1.4, (elapsed * 6 * plumeNoiseFrequency(1.2) + 0.25) % 1);
+        });
+        return { seconds, providers: this.heat.providerCount, effects: !!this.postfx, setting: this.settings.heatHaze };
       },
       /**
        * Every water body with the shader it came from, its look, what it reflects and whether it
@@ -2477,7 +2546,7 @@ class App {
       if (ridden) out.push(ridden.group);
       return out;
     };
-    installEffects(fx, { water: this.world.waterBodies });
+    installEffects(fx, { water: this.world.waterBodies, heat: this.heat });
     return fx;
   }
 

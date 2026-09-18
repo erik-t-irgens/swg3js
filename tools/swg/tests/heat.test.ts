@@ -6,6 +6,8 @@ import assert from 'node:assert/strict';
 import { HEAT_NOISE_SIZE, heatNoiseData, mulberry32 } from '../../../src/world/heatNoiseData.ts';
 import { decodeRamp, FALLBACK_LAVA_STYLE, groupLava, LAVA_TEXTURE_FACTOR, lavaFarValues, lavaStyleFor, noiseFits, readLavaInfo, standInRamp, type LavaStyle } from '../../../src/world/lavaStyle.ts';
 import { HeatSources, PLUME_MIN_RADIUS, PlumeBuffer, plumeNoiseFrequency, polygonDistance2 } from '../../../src/world/heatSources.ts';
+import { advanceEnginePhase, engineHeatOf, enginePlume, vehiclePlumes, type PlumeShape } from '../../../src/vehicles/enginePlumes.ts';
+import type { Vehicle, VehicleKind } from '../../../src/vehicles/vehicle.ts';
 
 let passed = 0;
 const ok = (cond: boolean, msg: string) => { assert.ok(cond, msg); passed++; console.log(`ok   ${msg}`); };
@@ -259,6 +261,104 @@ ok(plumeNoiseFrequency(0.01) === 1.5 && plumeNoiseFrequency(1) === 0.25, 'small 
     if (f < 0.25 || f > 1.5) inRange = false;
   }
   ok(inRange && plumeNoiseFrequency(Number.NaN) === 1.5, 'the frequency never leaves 0.25..1.5');
+}
+
+// --- the engines (src/vehicles/enginePlumes.ts) -------------------------------------------------
+
+{
+  ok(engineHeatOf(false, 1, 1, true, false) === 0, 'an engine that is not running gives no heat');
+  ok(near(engineHeatOf(true, 0, 0, false, false), 0.3, 1e-12), 'a running engine at rest idles at 0.3');
+  ok(near(engineHeatOf(true, 1, 1, true, false), 1.6, 1e-12), 'flat out and boosting is held to 1.6');
+  ok(near(engineHeatOf(true, 1, 1, true, true), 0.8, 1e-12), 'the same overheated is halved');
+  let rising = true;
+  let last = -1;
+  for (let s = 0; s <= 1.0001; s += 0.05) {
+    const h = engineHeatOf(true, s, 0.5, false, false);
+    if (h < last) rising = false;
+    last = h;
+  }
+  ok(rising, 'the heat never falls as the speed rises');
+  ok(engineHeatOf(true, 5, -3, false, false) === engineHeatOf(true, 1, 0, false, false), 'a share or throttle out of range is held to 0..1');
+}
+{
+  const out: PlumeShape = { length: 0, r0: 0, r1: 0, intensity: 0, flow: 0 };
+  const kinds: [VehicleKind, boolean, number, number][] = [
+    ['ship', true, 1.6, 12],
+    ['podracer', false, 1.2, 10],
+    ['speederbike', false, 0.6, 6],
+    ['flyer', false, 0.9, 6],
+    ['ground', false, 1.4, 6],
+  ];
+  for (const [kind, ship, size, cap] of kinds) {
+    let grows = true;
+    let prevLength = -1;
+    let prevIntensity = -1;
+    let under = true;
+    let radii = true;
+    for (let h = 0; h <= 1.6001; h += 0.05) {
+      for (const sz of [0.1, size, 7]) {
+        enginePlume(kind, ship, sz, h, out);
+        if (out.length > cap + 1e-9) under = false;
+        if (!(out.r1 > out.r0 && out.r0 > 0)) radii = false;
+      }
+      enginePlume(kind, ship, size, h, out);
+      if (out.length < prevLength - 1e-12 || out.intensity < prevIntensity - 1e-12) grows = false;
+      prevLength = out.length;
+      prevIntensity = out.intensity;
+    }
+    ok(grows, `${kind}: the plume's length and heat do not fall as the engine runs harder`);
+    ok(under, `${kind}: the plume is never longer than ${cap} m`);
+    ok(radii, `${kind}: the plume widens from a real nozzle (r1 > r0 > 0)`);
+  }
+  enginePlume('ship', true, 100, 1, out);
+  ok(out.r0 <= 6 && out.r1 <= 6, 'no radius passes 6 m, whatever the size');
+  enginePlume('speederbike', false, Number.NaN, Number.NaN, out);
+  ok([out.length, out.r0, out.r1, out.intensity, out.flow].every(Number.isFinite), 'a size or heat that is not a number gives a plume of numbers');
+}
+{
+  const stub = { spec: { kind: 'speederbike' as VehicleKind }, engineHeat: 1, enginePhase: 0.9 } as unknown as Vehicle;
+  const shape: PlumeShape = { length: 0, r0: 0, r1: 0, intensity: 0, flow: 0 };
+  enginePlume('speederbike', false, 0.4, 1, shape);
+  const dt = 0.016;
+  const expected = (0.9 + dt * shape.flow * plumeNoiseFrequency(shape.r1)) % 1;
+  advanceEnginePhase(stub, 0.4, dt);
+  ok(stub.enginePhase >= 0 && stub.enginePhase < 1 && near(stub.enginePhase, expected, 1e-12), `the exhaust phase moves by dt × flow × frequency, wrapped (${stub.enginePhase.toFixed(4)})`);
+  for (let i = 0; i < 1000; i++) advanceEnginePhase(stub, 0.4, 0.05);
+  ok(stub.enginePhase >= 0 && stub.enginePhase < 1, 'it stays in 0..1 however long it runs');
+  const before = stub.enginePhase;
+  advanceEnginePhase(stub, 0.4, Number.NaN);
+  ok(stub.enginePhase === before, 'a step that is not a number leaves it where it was');
+}
+{
+  // Stub vehicles: a group turned a quarter about Y (its -Z pointing along -X), glows at known places.
+  // Column-major, as three keeps it: +X goes to -Z and +Z to +X.
+  const quarter = [0, 0, -1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 10, 0, 20, 1];
+  const at = (x: number, y: number, z: number) => ({ matrixWorld: { elements: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, x, y, z, 1] } });
+  const bike = (heat: number, visible = true) =>
+    ({
+      spec: { kind: 'speederbike', ship: false },
+      engineHeat: heat,
+      enginePhase: 0.25,
+      group: { visible, matrixWorld: { elements: quarter } },
+      engines: [
+        { object: at(9, 1, 19), size: 0.5, seed: 0 },
+        { object: at(9, 1, 21), size: 0.5, seed: 0.618034 },
+      ],
+    }) as unknown as Vehicle;
+  const buf = new PlumeBuffer(8);
+  buf.reset(0, 0, 0);
+  vehiclePlumes([bike(1), bike(0.01), bike(1, false)], buf);
+  ok(buf.count === 2 && buf.pushed === 2, `only the running, visible vehicle's two engines give plumes (${buf.count})`);
+  ok(buf.origin[0] === 9 && buf.origin[1] === 1 && buf.origin[2] === 19, 'a plume leaves from its glow');
+  ok(near(buf.dir[0], -1, 1e-6) && near(buf.dir[1], 0, 1e-6) && near(buf.dir[2], 0, 1e-6), 'along the group\'s -Z, turned with it');
+  const shape: PlumeShape = { length: 0, r0: 0, r1: 0, intensity: 0, flow: 0 };
+  enginePlume('speederbike', false, 0.5, 1, shape);
+  ok(near(buf.origin[3], shape.length, 1e-6) && near(buf.shape[0], shape.r0, 1e-6) && near(buf.shape[1], shape.r1, 1e-6), 'with the shape its kind and heat give');
+  ok(near(buf.shape[4 + 3], (0.25 + 0.618034) % 1, 1e-6), 'each engine\'s phase is the vehicle\'s plus its own seed');
+  const full = new PlumeBuffer(1);
+  full.reset(0, 0, 0);
+  vehiclePlumes([bike(1), bike(1)], full);
+  ok(full.count === 1 && full.pushed === 2, 'a full buffer stops the walk at once');
 }
 
 console.log(`${passed} checks passed`);

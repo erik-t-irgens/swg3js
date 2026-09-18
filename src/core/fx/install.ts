@@ -10,10 +10,14 @@ import { ColorGradePass, GrainVignettePass } from './grade';
 import { BladeGlowPass } from './bladeGlow';
 import { installWaterReflections, type WaterFxSource } from './water';
 import { SsaoPass, ssaoHostFor } from './ssao';
+import { installHeatHaze } from './heat';
+import type { HeatSources } from '../../world/heatSources';
 
 export interface FxInstallDeps {
   /** The water bodies whose mask and reflections the effects draw (`World.waterBodies`). */
   water?: WaterFxSource;
+  /** The lava tables and plume providers the heat haze draws. */
+  heat?: HeatSources;
 }
 
 export function installEffects(postfx: PostFX, deps: FxInstallDeps = {}): void {
@@ -27,4 +31,6 @@ export function installEffects(postfx: PostFX, deps: FxInstallDeps = {}): void {
   postfx.registerPass(new BladeGlowPass());
   // The water mask and the reflections, when the game has water bodies to give them.
   if (deps.water) installWaterReflections(postfx, deps.water);
+  // The heat haze, when the game hands over what gives off heat.
+  if (deps.heat) installHeatHaze(postfx, deps.heat);
 }

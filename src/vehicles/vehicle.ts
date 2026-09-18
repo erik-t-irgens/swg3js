@@ -16,6 +16,16 @@ import { cellIndexOf } from './interior';
 
 export type VehicleKind = 'podracer' | 'speederbike' | 'ground' | 'flyer' | 'ship';
 
+/** One engine's glow, for the effects that follow the exhaust (the heat haze). */
+export interface EngineSpot {
+  /** The glow, a child of the vehicle's group at the nozzle: its world matrix is where the exhaust leaves. */
+  readonly object: THREE.Object3D;
+  /** The glow's base size in metres, the one its sprite is scaled from. */
+  readonly size: number;
+  /** A fixed 0..1 offset of this engine's noise phase, so side-by-side engines do not shimmer alike. */
+  readonly seed: number;
+}
+
 export interface DriveInput {
   throttle: number;
   /** Steering from the keys, -1 left to 1 right; added to any steering toward `heading`. */
@@ -283,6 +293,12 @@ export class Vehicle {
   engineParts: THREE.Object3D[] = [];
   /** The exhaust ribbons behind a ship in flight, in the world. */
   trails: import('./trail').EngineTrail[] = [];
+  /** The engines' glow spots (empty for an animal), for the heat haze. The exhaust leaves along the group's -Z, the nose being +Z. */
+  readonly engines: EngineSpot[] = [];
+  /** How hard the engines run this step: 0 off, 1 flat out, up to 1.6 boosting; halved while overheated. Set by the glow's update. */
+  engineHeat = 0;
+  /** The exhaust noise's flow phase, advanced with the plume's own flow (0..1). */
+  enginePhase = Math.random();
   /** A ship's guns: where each fires from and the way it points, in the model's frame, from the weapon hardpoints. */
   guns: { pos: THREE.Vector3; dir: THREE.Vector3 }[] = [];
   /** Seconds until the guns can fire again, and which gun fires next. */

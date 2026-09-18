@@ -179,8 +179,8 @@ export const FX_KNOBS: readonly FxKnobDef[] = [
   { key: 'bladeGlowShadows', pass: 'bladeGlow', label: 'Lightsaber glow stops at walls', kind: 'toggle', requires: ['effects', 'bladeGlow'], hint: 'The glow does not reach floors on the far side of a wall, crate or hull that is on screen. Off saves about 0.06 ms a frame.' },
   { key: 'waterReflections', pass: 'waterReflections', label: 'Water reflections', kind: 'toggle', requires: ['effects'], hint: 'Lakes and seas mirror the hills, buildings, ships and sky on screen; what is off screen comes from the sky\'s reflection map.' },
   { key: 'waterReflectionResolution', pass: 'waterReflections', label: 'Water reflection resolution', kind: 'select', options: half, requires: ['effects', 'waterReflections'], hint: 'Half traces a quarter of the pixels and smooths them back along the water; full is sharper and about three times the cost.' },
-  { key: 'heatHaze', pass: 'heatHaze', label: 'Heat haze', kind: 'toggle', requires: ['effects'], hint: 'The air over lava, engines and flame bends what is behind it.' },
-  { key: 'heatHazeStrength', pass: 'heatHaze', label: 'Heat haze strength', kind: 'range', min: 0, max: 2, step: 0.05, format: two, requires: ['effects', 'heatHaze'], hint: '0.5 a shimmer, 1 as measured, 2 a furnace.' },
+  { key: 'heatHaze', pass: 'heatHaze', label: 'Heat haze', kind: 'toggle', requires: ['effects'], hint: 'The air shimmers over lava, behind running engines and in front of a flame thrower, as the game drew it over Mustafar\'s lava.' },
+  { key: 'heatHazeStrength', pass: 'heatHaze', label: 'Heat haze strength', kind: 'range', min: 0, max: 2, step: 0.05, format: two, requires: ['effects', 'heatHaze'], hint: '1 is the shimmer the game drew; 2 moves the picture twice as far.' },
   { key: 'godRays', pass: 'godRays', label: 'God rays', kind: 'toggle', requires: ['effects'], hint: 'Sunlight scattered towards you where the sky shows between trees, walls and hulls.' },
   { key: 'godRayStrength', pass: 'godRays', label: 'God ray strength', kind: 'range', min: 0.1, max: 1.5, step: 0.05, format: two, requires: ['effects', 'godRays'], hint: '0.3 a hint, 0.6 a morning, 1.2 a blaze.' },
   { key: 'depthOfField', pass: 'depthOfField', label: 'Depth of field', kind: 'toggle', requires: ['effects'], hint: 'Aiming down the sights, what is not at the range you are aiming at softens.' },
@@ -210,7 +210,7 @@ export const FX_PASSES: readonly FxPassDef[] = [
   { id: 'ssao', stage: 'scene', toggles: ['ssao'], required: false, needs: ['linearDepthHalf', 'normalsHalf', 'waterMask'], budgetMs: 0.45, typical: true, canBeLast: false, live: true, why: 'Occlusion multiplies lit colour, so it comes before anything that adds light that must not be occluded, and before the heat haze, so the darkening travels with the pixels it belongs to.' },
   { id: 'bladeGlow', stage: 'scene', toggles: ['bladeGlow'], required: false, needs: [], budgetMs: 0.15, typical: false, canBeLast: false, live: true, why: 'Direct light added to surfaces: after SSAO, since ambient occlusion does not darken a direct light; before water reflections, heat haze, rays, depth of field, motion blur and bloom, so the pool is reflected, bent, blurred and bloomed like any lit surface. It reads the full-resolution scene depth itself, so it asks for no product.' },
   { id: 'waterReflections', stage: 'scene', toggles: ['waterReflections'], required: false, needs: ['linearDepthHalf', 'waterMask'], budgetMs: 0.6, typical: false, canBeLast: false, live: true, why: 'Adds reflected scene light on water pixels. After occlusion so the reflected ground carries it, before the lens so reflections shimmer, defocus, smear and bloom like anything seen directly.' },
-  { id: 'heatHaze', stage: 'scene', toggles: ['heatHaze'], required: false, needs: ['heat', 'linearDepthHalf'], budgetMs: 0.16, typical: false, canBeLast: false, live: false, why: 'Displaces what the surfaces look like, so it follows every surface pass; before the atmosphere and the lens, since the air and the glass sit between the heat and the eye.' },
+  { id: 'heatHaze', stage: 'scene', toggles: ['heatHaze'], required: false, needs: ['heat', 'linearDepthHalf'], budgetMs: 0.16, typical: false, canBeLast: false, live: true, why: 'Displaces what the surfaces look like, so it follows every surface pass; before the atmosphere and the lens, since the air and the glass sit between the heat and the eye.' },
   { id: 'lightShafts', stage: 'scene', toggles: [], required: false, needs: ['linearDepthHalf'], budgetMs: 0.3, typical: false, canBeLast: false, live: false, why: 'Daylight scattered in the air of a room, from its doorways and windows. Atmosphere: after the surfaces, before the lens, next to the god rays so the two share their march.' },
   { id: 'godRays', stage: 'scene', toggles: ['godRays'], required: false, needs: ['linearDepthHalf'], budgetMs: 0.25, typical: true, canBeLast: false, live: true, why: 'Scattered sunlight. Before depth of field, since rays are far light that should soften with the far background they overlay, and before the blur and the bloom so they smear and spill like the sun.' },
   { id: 'depthOfField', stage: 'lens', toggles: ['depthOfField'], required: false, needs: ['linearDepthHalf'], budgetMs: 0.35, typical: false, canBeLast: false, live: false, why: 'The aperture needs colour and depth still lined up, so it comes before the blur, which moves colour off its depth; before bloom so a softened highlight blooms as a disc rather than a point.' },
@@ -236,7 +236,7 @@ export const FX_WATER_NEEDS_FULL: readonly FxProductId[] = ['waterMask'];
 export const FX_PRODUCTS: readonly FxProductDef[] = [
   { id: 'linearDepthHalf', kind: 'depth', needs: [], scale: 0.5, format: 'R32F', budgetMs: 0.03, typical: true, owner: 'spine', live: true },
   { id: 'normalsHalf', kind: 'depth', needs: ['linearDepthHalf'], scale: 0.5, format: 'RGBA8', budgetMs: 0.06, typical: true, owner: 'spine', live: true },
-  { id: 'heat', kind: 'depth', needs: ['linearDepthHalf'], scale: 0.5, format: 'RGBA16F', budgetMs: 0.08, typical: false, owner: 'heatHaze', live: false },
+  { id: 'heat', kind: 'depth', needs: ['linearDepthHalf'], scale: 0.5, format: 'RGBA16F', budgetMs: 0.08, typical: false, owner: 'heatHaze', live: true },
   { id: 'debugMask', kind: 'geometry', needs: [], scale: 1, format: 'R8', budgetMs: 0.05, typical: false, owner: 'debugView', live: true },
   { id: 'waterMask', kind: 'geometry', needs: [], scale: 1, format: 'RGBA16F', targets: 3, budgetMs: 0.3, typical: false, owner: 'waterReflections', live: true },
   { id: 'velocity', kind: 'geometry', needs: [], scale: 1, format: 'RG16F', budgetMs: 0.1, typical: true, owner: 'motionBlur', live: false },
@@ -256,7 +256,7 @@ export const FX_TYPICAL_BUDGET_MS = 2.0;
  * 1 the rooms of a building and 31 the actors; 2 to 30 are free. This is the only place a layer is
  * named.
  */
-export const FX_LAYERS: Readonly<Record<string, number>> = {};
+export const FX_LAYERS = { heat: 30 } as const;
 
 const DEFAULT_KEYS = new Set(Object.keys(FX_DEFAULTS));
 

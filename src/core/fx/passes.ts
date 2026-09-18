@@ -367,6 +367,9 @@ const DEBUG_VIEW = {
         vec3 raw = texture2D(tScene, vUv).rgb;
         vec3 under = raw / (raw + vec3(1.0));
         c = s.a > 0.0 ? mix(under, vec3(s.rg * 0.5 + 0.5, 0.0), 0.8) : under;
+      } else if (uMode == 8) {
+        // The heat: intensity in red (2 is full), the intensity-weighted noise decoded into green and blue.
+        c = s.r > 0.001 ? vec3(min(s.r, 2.0) / 2.0, s.g / max(s.r, 1e-4), s.b / max(s.r, 1e-4)) : vec3(0.0);
       } else {
         c = vec3(greyDistance(fxViewZ(s.x, uNearFar.x, uNearFar.y)));
       }
@@ -379,7 +382,7 @@ const DEBUG_VIEW = {
 const PRODUCT_VIEW: Record<FxProductId, { mode: number; channel: number; scale: number }> = {
   linearDepthHalf: { mode: 1, channel: 0, scale: 1 },
   normalsHalf: { mode: 2, channel: 0, scale: 1 },
-  heat: { mode: 2, channel: 0, scale: 1 },
+  heat: { mode: 8, channel: 0, scale: 1 },
   debugMask: { mode: 3, channel: 0, scale: 1 },
   waterMask: { mode: 7, channel: 0, scale: 1 },
   velocity: { mode: 5, channel: 0, scale: 20 },
