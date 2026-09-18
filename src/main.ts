@@ -11,6 +11,11 @@ import { Physics } from './core/physics';
 import { PLANETS, packIdOf, planetById, spaceZoneOf, type PlanetDef } from './data/planets';
 import { DEFAULT_SABER_COLOR, Player } from './player/player';
 import { SaberMarks } from './combat/saberMarks';
+import { collectBlades, lightAt, litCeiling, type LitSources } from './combat/bladeLights';
+import { createBladeList } from './core/fx/bladeList';
+import { BLADE_GLOW_TUNE, segmentDistanceSq, type BladeGlowTune } from './core/fx/bladeGlowMath.ts';
+import { BLADE_GLOW_VIEWS, type BladeGlowPass } from './core/fx/bladeGlow';
+import type { FighterGlow } from './world/npcs';
 import { loadPlayerRig } from './player/rig';
 import { Character, loadSpeciesIndex, type SpeciesEntry } from './player/character';
 import { GalaxyMap, type Poi } from './ui/galaxyMap';
@@ -27,7 +32,7 @@ import { Hud } from './ui/hud';
 import { specFor, type DriveInput } from './vehicles/vehicle';
 import { interceptTime, leadPoint } from './combat/intercept';
 import { PostFX, type FxFrameInput, type SunInfo } from './core/postfx';
-import { isFxSettingKey, type FxPassId } from './core/fxRegistry.ts';
+import { fxPassDef, isFxSettingKey, type FxPassId } from './core/fxRegistry.ts';
 import { installEffects } from './core/fx/install';
 import { Notice } from './ui/notice';
 import { VehiclesUi } from './ui/vehiclesUi';
@@ -82,7 +87,9 @@ const stats = { frameMs: 0, physicsMs: 0, renderMs: 0, rawDt: 0, grounded: false
 const tmp = new THREE.Vector3();
 const tmpQ = new THREE.Quaternion();
 const roomLightSpots: import('./vehicles/interior').RoomLight[] = [];
-const npcGlow = [0, 1, 2, 3].map(() => new THREE.Vector3());
+/** The fighters' glows the pool is asked for when the effects do not light the blades: the nearest two, within 25 m of the camera. */
+const FIGHTER_GLOW_RANGE = 25;
+const npcGlow: FighterGlow[] = [0, 1].map(() => ({ pos: new THREE.Vector3(), color: 0, d2: 0 }));
 /** How near the controls in a ship's bridge E takes them, metres in the hull's frame. */
 const CONTROLS_RANGE = 2.5;
 /**
@@ -134,6 +141,8 @@ class App {
   private readonly bladeSegments = [0, 1, 2].map(() => ({ a: new THREE.Vector3(), b: new THREE.Vector3() }));
   private readonly markPoint = new THREE.Vector3();
   private readonly markNormal = new THREE.Vector3();
+  /** Console: give the blades their pooled flash lights back while the glow pass is on, to compare. */
+  private bladeGlowFlashes = false;
   private kit!: Kit;
   private readonly hud: Hud;
   private readonly map: MapUi;
@@ -177,8 +186,12 @@ class App {
   private shipLeadValid = false;
   /** The picture's effects chain, while the Effects setting is on. */
   private postfx: PostFX | null = null;
+  /** The lit blades handed to the effects each frame (declared before fxInput, whose initialiser reads it). */
+  private readonly fxBlades = createBladeList();
+  /** What the blades' light ceiling reads, kept and refilled each frame; the world and the pool are set in the constructor. */
+  private readonly litSources: LitSources = { world: null!, effects: null!, torch: null, eye: new THREE.Vector3() };
   /** What the effects are told about each frame, refilled in drawFrame rather than made again. */
-  private readonly fxInput: FxFrameInput = { camera: null as unknown as THREE.PerspectiveCamera, dt: 1 / 60, sun: null, portalView: false, cameraInHull: false, inside: false, aboard: false, space: false, fog: null, daylight: 1, dayIndex: 0, lighting: null, planetId: '', aiming: false, aimAmount: 0, firstPerson: false, waterInView: false };
+  private readonly fxInput: FxFrameInput = { camera: null as unknown as THREE.PerspectiveCamera, dt: 1 / 60, sun: null, portalView: false, cameraInHull: false, inside: false, aboard: false, space: false, fog: null, daylight: 1, dayIndex: 0, lighting: null, planetId: '', aiming: false, aimAmount: 0, firstPerson: false, waterInView: false, blades: this.fxBlades };
   private readonly fxSun: SunInfo = { dir: new THREE.Vector3(), color: new THREE.Color(), intensity: 0 };
   /** What the debug mask draws: the player and whatever they ride or are aboard. */
   private readonly fxMaskObjects: THREE.Object3D[] = [];
@@ -257,6 +270,8 @@ class App {
     if (!S.shadows) this.world.setShadowsEnabled(false);
     this.player = new Player(this.scene, physics);
     this.effects = new Effects(this.scene);
+    this.litSources.world = this.world;
+    this.litSources.effects = this.effects;
     this.scene.add(this.marks.mesh);
     this.hud = new Hud(this.ui);
     this.wardrobe = new WardrobeUi(this.ui, () => this.hud.setPrompt(''));
@@ -1028,6 +1043,80 @@ class App {
       },
       /** How many lightsaber burns are on the world's surfaces now. */
       marks: () => this.marks.count(),
+      /**
+       * The lightsaber glow. No argument: the blades lit now, whether the pass drew, the light ceiling and the flash pool.
+       * `show`: 'light' the added light over a dim picture, 'normals' the normals it lit with, 'rect' the box it worked in
+       * tinted, null the picture. Any number of BLADE_GLOW_TUNE (`power`, `core`, `knee`, `range`, `albedo`, `hue`,
+       * `glowDim`, `wrap`, `walls`, `far`, `fadeFrom`, `whiteness`, `marchMin`) retunes live, and `tune` in the result is
+       * what to bake. `flashes: true` gives the blades their pooled lights back to compare. `occlusion: false` turns the
+       * wall march off, `jitter: true` offsets its taps. `at: [x, y, z]` adds up, from the CPU copy of the shader without
+       * the march, the light a neutral surface there facing each blade gets.
+       */
+      bladeGlow: (opts?: { show?: 'light' | 'normals' | 'rect' | null; flashes?: boolean; occlusion?: boolean; jitter?: boolean; at?: [number, number, number] } & Partial<BladeGlowTune>) => {
+        const fx = this.postfx;
+        const pass = fx?.pass<BladeGlowPass>('bladeGlow') ?? null;
+        const notes: string[] = [];
+        const r3 = (v: number) => Number(v.toFixed(3));
+        if (opts) {
+          const live = (what: string, apply: (p: BladeGlowPass) => void) => (pass ? apply(pass) : notes.push(`${what}: the glow pass is not running (Effects off, or the pass not installed)`));
+          if (opts.show !== undefined) live('show', (p) => (p.debug = Math.max(0, BLADE_GLOW_VIEWS.indexOf(opts.show ?? 'picture'))));
+          if (opts.occlusion !== undefined) live('occlusion', (p) => (p.occlusion = !!opts.occlusion));
+          if (opts.jitter !== undefined) live('jitter', (p) => (p.jitter = !!opts.jitter));
+          if (opts.flashes !== undefined) this.bladeGlowFlashes = !!opts.flashes;
+          // Floors that keep the curve finite: a zero core or knee divides by zero at the blade.
+          const floor: Partial<Record<keyof BladeGlowTune, number>> = { core: 1e-4, knee: 1e-3, range: 0.01, power: 0, albedo: 0, far: 0.01 };
+          for (const key of Object.keys(BLADE_GLOW_TUNE) as (keyof BladeGlowTune)[]) {
+            const v = opts[key];
+            if (typeof v === 'number' && Number.isFinite(v)) BLADE_GLOW_TUNE[key] = Math.max(floor[key] ?? -Infinity, v);
+          }
+          if (BLADE_GLOW_TUNE.fadeFrom > BLADE_GLOW_TUNE.far - 0.01) BLADE_GLOW_TUNE.fadeFrom = BLADE_GLOW_TUNE.far - 0.01;
+        }
+        const raw = this.settings as unknown as Record<string, unknown>;
+        const strength = typeof raw.bladeGlowStrength === 'number' ? raw.bladeGlowStrength : null;
+        const eye = this.cam.camera.position;
+        const list = createBladeList();
+        collectBlades(list, this.player.saberBlades, this.world.npcs.npcs, eye);
+        const row = fx?.describe().passes.find((p) => p.id === 'bladeGlow') ?? null;
+        const seen = pass?.lastBlades ?? null;
+        const rect = pass?.lastRect ?? null;
+        let at: { point: number[]; perBlade: number[]; total: number } | null = null;
+        if (opts?.at) {
+          const per: number[] = [];
+          const total = lightAt(new THREE.Vector3(...opts.at), list, strength ?? 1, per);
+          at = { point: opts.at, perBlade: per.map(r3), total: r3(total) };
+        }
+        return {
+          effects: !!fx,
+          installed: !!pass,
+          setting: fxPassDef('bladeGlow').toggles.some((k) => !!this.settings[k]),
+          strength,
+          shadows: typeof raw.bladeGlowShadows === 'boolean' ? raw.bladeGlowShadows : null,
+          drewLastFrame: row?.drewLastFrame ?? false,
+          why: row ? (row.why ?? null) : fx ? 'the glow pass is not installed' : 'Effects are off',
+          ownsLight: this.bladeGlowOwnsLight(),
+          flashes: this.bladeGlowFlashes,
+          occlusion: pass?.occlusion ?? null,
+          jitter: pass?.jitter ?? null,
+          show: pass ? BLADE_GLOW_VIEWS[pass.debug] ?? pass.debug : null,
+          blades: list.items.slice(0, list.count).map((b) => ({
+            own: b.own,
+            from: b.a.toArray().map((v) => Number(v.toFixed(2))),
+            to: b.b.toArray().map((v) => Number(v.toFixed(2))),
+            ignition: r3(b.ignition),
+            intensity: r3(b.intensity),
+            color: `#${b.color.getHexString()}`,
+            distance: Number(Math.sqrt(segmentDistanceSq(eye, b.a, b.b)).toFixed(1)),
+          })),
+          rect: rect ? [rect.x0, rect.y0, rect.x1, rect.y1].map((v) => Number(v.toFixed(2))) : null,
+          litCeiling: seen ? r3(seen.litCeiling) : null,
+          up: seen ? seen.up.toArray().map(r3) : null,
+          pool: this.effects.poolState(),
+          gpuMs: row?.gpuMs ?? null,
+          tune: { ...BLADE_GLOW_TUNE },
+          at,
+          notes,
+        };
+      },
       /** The Force powers in the slots: `powers(['grip', 'pull', null, 'repulse'])` sets them (ids from forcePowers.ts), no argument lists them. */
       powers: (ids?: (string | null)[]) => {
         if (ids) this.setSkills('jedi', ids);
@@ -1306,6 +1395,23 @@ class App {
     this.current.appearance = this.appearanceOf(c);
     this.current.outfit = this.outfitOf(c);
     upsertCharacter(this.current);
+  }
+
+  /**
+   * Whether the effects light what is around the lit blades this frame. The blades then ask for no
+   * pooled flash lights, which stay with shots, hits and ship rooms. With Effects or the glow off,
+   * the blades glow from the pool as before. It follows the setting (or a console override), not
+   * whether a blade is on screen this frame, so a blade crossing the screen's edge never swaps one
+   * light for the other; and not the strength, since at 0 the owner asked for no glow at all.
+   */
+  private bladeGlowOwnsLight(): boolean {
+    const fx = this.postfx;
+    if (!fx || this.bladeGlowFlashes || !fx.pass('bladeGlow')) return false;
+    const forced = fx.override.bladeGlow;
+    if (forced !== undefined) return forced;
+    const toggles = fxPassDef('bladeGlow').toggles;
+    for (let i = 0; i < toggles.length; i++) if (this.settings[toggles[i]]) return true;
+    return false;
   }
 
   /**
@@ -2202,6 +2308,17 @@ class App {
       f.aimAmount = this.cam.aimAmount;
       f.firstPerson = this.cam.firstPerson;
       f.waterInView = this.world.waterBodies.inView;
+      // The lit blades as drawn this frame (drawBlades and the fighters' step have run), and how
+      // bright a surface near them can be from every other light; aboard, floors are the hull's.
+      const blades = this.fxBlades;
+      collectBlades(blades, this.player.saberBlades, this.world.npcs.npcs, cam.position);
+      const lit = this.litSources;
+      lit.torch = this.torchOn ? this.torch : null;
+      lit.eye.copy(cam.position);
+      blades.litCeiling = litCeiling(blades, lit);
+      const hull = this.player.aboard?.vehicle.group;
+      if (hull) blades.up.set(0, 1, 0).transformDirection(hull.matrixWorld);
+      else blades.up.set(0, 1, 0);
       postfx.end(f);
     }
     this.frameCalls = info.calls;
@@ -2876,14 +2993,10 @@ class App {
       if (this.dying && player.ragdoll) player.ragdollStep();
       if (simulate) {
         player.update(dt, input, this.cam, this.world);
-        // The thrown and orbiting sabers glow from the pooled flash lights, so no light comes or goes with them.
-        for (const spot of player.lightSpots()) this.effects.flash(spot.pos, player.saberColor, spot.intensity, spot.distance, 0.08);
-        // The fighters' lit blades glow the same way.
-        const glows = this.world.npcs.lightSpots(npcGlow);
-        for (let i = 0; i < glows; i++) this.effects.flash(npcGlow[i], this.world.npcs.npcs[i]?.color.getHex() ?? 0x9fd4ff, 2, 5, 0.08);
+        // The thrown and orbiting sabers and the hilt glow from the pooled flash lights (so no light comes
+        // or goes with them), unless the effects light what is around the blades.
+        if (!this.bladeGlowOwnsLight()) for (const spot of player.lightSpots()) this.effects.flash(spot.pos, player.saberColor, spot.intensity, spot.distance, 0.08);
         this.scorch(dt);
-        // Aboard, the room's own lights, the nearest few, through the same pool (no new lights, so nothing recompiles).
-        if (player.aboard) for (const l of player.aboard.roomLights(player.pos, 3, roomLightSpots)) this.effects.flash(l.pos, l.color, l.intensity, l.distance, 0.08);
         this.stepCombat(dt);
       }
 
@@ -2902,6 +3015,18 @@ class App {
       };
       this.world.setPlayerTarget(player.worldPos, simulate && !player.noclip && !player.aboard && !this.dying && player.hp > 0, hurt);
       this.world.update(dt, player.worldPos, this.cam.camera.position, fast, hurt, simulate && !player.mounted && !player.noclip && !player.aboard ? player : null);
+      // The pool serves the latest request first when it is full (flashes age only in effects.update),
+      // so the room lights go last and always keep their lights; the fighters' glows just before them,
+      // farthest first, so the nearest win; this frame's shots, powers and muzzle flashes came earlier
+      // and give way. Here the hull is where stepVehicles left it and the fighters where they moved to.
+      if (simulate) {
+        if (!this.bladeGlowOwnsLight()) {
+          const glows = this.world.npcs.lightSpots(npcGlow, this.cam.camera.position, FIGHTER_GLOW_RANGE);
+          for (let i = glows - 1; i >= 0; i--) this.effects.flash(npcGlow[i].pos, npcGlow[i].color, 2, 5, 0.08);
+        }
+        // Aboard, the room's own lights, the nearest few, through the same pool (no new lights, so nothing recompiles).
+        if (player.aboard) for (const l of player.aboard.roomLights(player.pos, 3, roomLightSpots)) this.effects.flash(l.pos, l.color, l.intensity, l.distance, 0.08);
+      }
       const tPhys = performance.now();
       this.physics.step(dt);
       stats.physicsMs = performance.now() - tPhys;

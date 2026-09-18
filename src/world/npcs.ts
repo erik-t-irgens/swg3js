@@ -10,6 +10,7 @@ import { CharacterRig, loadPlayerRig } from '../player/rig';
 import { applyLook } from '../player/look';
 import { FIGHTS, isSaber, type WeaponCatalogue, type WeaponDef } from '../player/weapons';
 import { SaberBlade } from '../combat/saberBlade';
+import { keepNearestGlow } from '../combat/bladeLights';
 import { Ragdoll } from '../combat/ragdoll';
 import { GUNS, gunTypeFor, type GunProfile } from '../combat/guns';
 import type { Bolts } from '../combat/bolts';
@@ -55,12 +56,20 @@ export function pickOutfit(items: { id: string; kind: string; gender: string }[]
 
 const tmp = new THREE.Vector3();
 const tmp2 = new THREE.Vector3();
-const base = new THREE.Vector3();
-const tip = new THREE.Vector3();
+/** What a blade faces while no camera is given (a dead fighter's retracting blade, a headless step). */
+const IDLE_CAMERA = new THREE.PerspectiveCamera();
+const spot = new THREE.Vector3();
 const UP = new THREE.Vector3(0, 1, 0);
 const Y = new THREE.Vector3(0, 1, 0);
 const Z = new THREE.Vector3(0, 0, 1);
 const tmpQ = new THREE.Quaternion();
+
+/** A fighter's lit blade wanting a pooled light this frame: where, in its colour, and how far from the eye (squared). */
+export interface FighterGlow {
+  readonly pos: THREE.Vector3;
+  color: number;
+  d2: number;
+}
 
 export interface NpcDeps {
   weapons: WeaponCatalogue | null;
@@ -96,6 +105,12 @@ export class Npc implements Living {
   private holder: THREE.Group | null = null;
   private hiltTop = 0.13;
   private blade: SaberBlade | null = null;
+  /**
+   * This fighter's blade emitter and full-length tip this frame, world space. Each fighter keeps
+   * its own: they were once shared by every fighter, and every glow sat at the last one's blade.
+   */
+  private readonly bladeBase = new THREE.Vector3();
+  private readonly bladeTip = new THREE.Vector3();
   readonly color = new THREE.Color().setHSL(Math.random(), 0.9, 0.55);
   private target: Living | null = null;
   private retarget = 0;
@@ -373,7 +388,7 @@ export class Npc implements Living {
         this.ragdollIn = -1000;
         this.startRagdoll();
       }
-      this.blade?.update(dt, base, tip, false, camera ?? new THREE.PerspectiveCamera(), 0, true);
+      this.blade?.update(dt, this.bladeBase, this.bladeTip, false, camera ?? IDLE_CAMERA, 0, true);
       return;
     }
     const sdt = dt * own;
@@ -499,19 +514,25 @@ export class Npc implements Living {
       rig.update(sdt);
       this.group.updateMatrixWorld(true);
     }
-    if (this.blade && this.holder && camera) {
+    if (this.blade && this.holder) {
       const len = this.blade.spec.length;
       this.holder.updateWorldMatrix(true, false);
-      this.holder.localToWorld(base.set(0, this.hiltTop, 0));
-      this.holder.localToWorld(tip.set(0, this.hiltTop + len, 0));
-      this.blade.update(dt, base, tip, !!t, camera, this.hitIn >= 0 ? 1 : this.moving ? 0.3 : 0);
+      this.holder.localToWorld(this.bladeBase.set(0, this.hiltTop, 0));
+      this.holder.localToWorld(this.bladeTip.set(0, this.hiltTop + len, 0));
+      this.blade.update(dt, this.bladeBase, this.bladeTip, !!t, camera ?? IDLE_CAMERA, this.hitIn >= 0 ? 1 : this.moving ? 0.3 : 0);
     }
   }
 
-  /** The point a light glows from, when a lit blade is out. */
+  /** The blade renderer when the weapon is a lightsaber: the light it throws is read from it. */
+  get saber(): SaberBlade | null {
+    return this.blade;
+  }
+
+  /** The middle of the lit blade, when there is one out this frame (igniting, lit or retracting). */
   glowAt(out: THREE.Vector3): boolean {
-    if (!this.blade || this.dead || !this.target) return false;
-    out.copy(base).lerp(tip, 0.5);
+    const b = this.blade;
+    if (this.dead || !b?.glowing) return false;
+    out.copy(b.drawnBase).lerp(b.drawnTip, 0.5);
     return true;
   }
 
@@ -571,10 +592,20 @@ export class NpcManager {
     return n;
   }
 
-  /** Where the lit blades want light this frame. */
-  lightSpots(out: THREE.Vector3[]): number {
+  /**
+   * The fighters' lit blades nearest `eye` within `maxDistance`, nearest first, each in its fighter's
+   * colour: where they want pooled light this frame. Fills `out` (kept entries, reordered in place)
+   * and returns how many.
+   */
+  lightSpots(out: FighterGlow[], eye: THREE.Vector3, maxDistance: number): number {
+    const max2 = maxDistance * maxDistance;
     let n = 0;
-    for (const npc of this.npcs) if (n < out.length && npc.glowAt(out[n])) n++;
+    for (const npc of this.npcs) {
+      if (!npc.glowAt(spot)) continue;
+      const d2 = spot.distanceToSquared(eye);
+      if (d2 > max2) continue;
+      n = keepNearestGlow(out, n, spot, npc.color.getHex(), d2);
+    }
     return n;
   }
 

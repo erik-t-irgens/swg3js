@@ -117,6 +117,27 @@ export class SaberBlade {
   private readonly frameInv = new THREE.Matrix4();
   private framed = false;
   spec: BladeSpec = { length: 1.1, width: 0.12, open: IGNITE, close: IGNITE };
+  /** The blade as drawn this frame, world space: the emitter, and the end of the part that is out. The light it throws is read from here. */
+  readonly drawnBase = new THREE.Vector3();
+  readonly drawnTip = new THREE.Vector3();
+  /** Whether `update` drew the blade this frame (cleared at the start of every update and by reset()). */
+  private drawn = false;
+
+  /** How far out the blade is, 0 to 1. */
+  get ignition(): number {
+    return this.lit;
+  }
+
+  /** Drawn this frame, with its group and every parent visible up to a scene: a blade that gives light. */
+  get glowing(): boolean {
+    if (!this.drawn) return false;
+    for (let o: THREE.Object3D | null = this.group; o; o = o.parent) {
+      if (!o.visible) return false;
+      if ((o as THREE.Scene).isScene) return true;
+    }
+    // Not in a scene: a fighter's blade whose group was never added.
+    return false;
+  }
 
   constructor() {
     this.setColor(this.color.getHex());
@@ -145,6 +166,7 @@ export class SaberBlade {
   /** Nothing drawn, and the swept history forgotten (a teleport, a holster). */
   reset(): void {
     this.lit = 0;
+    this.drawn = false;
     for (const h of this.history) h.age = Infinity;
     for (const m of [this.glow, this.core, this.smearGlow, this.smearCore]) m.visible = false;
   }
@@ -154,6 +176,8 @@ export class SaberBlade {
    * `on` ignites or retracts it; `swing` (0 to 1) is how hard it is being swung, which lengthens the smear.
    */
   update(dt: number, base: THREE.Vector3, tip: THREE.Vector3, on: boolean, camera: THREE.Camera, swing: number, snap = false, frame: THREE.Matrix4 | null = null): void {
+    // Retracted, or with no length, the early returns below leave this false: no light.
+    this.drawn = false;
     const openRate = 1 / Math.max(0.05, Math.min(IGNITE, this.spec.open));
     const closeRate = 1 / Math.max(0.05, Math.min(IGNITE, this.spec.close));
     this.lit = snap ? (on ? 1 : 0) : THREE.MathUtils.clamp(this.lit + (on ? openRate : -closeRate) * dt, 0, 1);
@@ -187,6 +211,9 @@ export class SaberBlade {
     this.ribbon(this.glow, base, end, this.spec.width * GLOW_WIDTH, camera);
     this.ribbon(this.core, base, end, this.spec.width * CORE_WIDTH, camera);
     this.glow.visible = this.core.visible = true;
+    this.drawnBase.copy(base);
+    this.drawnTip.copy(end);
+    this.drawn = true;
     // The sweep: this frame's blade in front, older ones behind it, fading with age.
     for (let i = HISTORY - 1; i > 0; i--) {
       this.history[i].a.copy(this.history[i - 1].a);

@@ -4,6 +4,7 @@
 import * as THREE from 'three';
 import { FX_PRODUCTS, type FxPassId, type FxProductId, type FxSettings } from '../fxRegistry.ts';
 import type { SkyLighting } from '../../world/sky';
+import { UNSET_BLADES, type FxBladeList } from './bladeList';
 
 /** The sun as the world knows it: which way it lies (towards it), its colour, and how much daylight there is (0 at night, and in space). */
 export interface SunInfo {
@@ -35,6 +36,8 @@ export interface FxFrameInput {
   firstPerson: boolean;
   /** Water shows on screen this frame: in the frustum within the fog's reach, and not found hidden by the occlusion probe. */
   waterInView: boolean;
+  /** The lit blades this frame, world space: the game's kept list, refilled in drawFrame. */
+  blades: FxBladeList;
 }
 
 /** The sun as the effects want it, with its place on the screen worked out. */
@@ -98,6 +101,8 @@ export interface FxFrameContext {
   firstPerson: boolean;
   /** Water shows on screen this frame (`WaterBodies.inView`); the occlusion reads the mask's coverage only then. */
   waterInView: boolean;
+  /** The lit blades this frame; a reference to the input's kept list. */
+  blades: FxBladeList;
   /** The pass whose own working texture the debug view is showing, so it keeps it this frame. */
   debugViewPass: FxPassId | null;
   /** The sun record `sun` points at, kept so a frame allocates nothing; never read it directly. */
@@ -152,6 +157,8 @@ export function createContext(renderer: THREE.WebGLRenderer, settings: FxSetting
     aimAmount: 0,
     firstPerson: false,
     waterInView: false,
+    // The unset list until the first frame hands the game's own; the glow pass warns if it never does.
+    blades: UNSET_BLADES,
     debugViewPass: null,
     sunStore: { dir: new THREE.Vector3(), color: new THREE.Color(), intensity: 0, screen: new THREE.Vector2(0.5, 0.5), behind: false, fade: 0 },
   };
@@ -216,4 +223,5 @@ export function updateContext(ctx: FxFrameContext, input: FxFrameInput, size: TH
   ctx.aimAmount = input.aimAmount;
   ctx.firstPerson = input.firstPerson;
   ctx.waterInView = input.waterInView;
+  ctx.blades = input.blades;
 }

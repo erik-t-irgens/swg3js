@@ -15,6 +15,11 @@ export interface FxSettings {
   /** How far the occlusion reaches, metres. */
   ssaoRadius: number;
   ssaoResolution: number;
+  /** A lit blade lights the ground, walls and bodies around it in its own colour. */
+  bladeGlow: boolean;
+  bladeGlowStrength: number;
+  /** The blade's light stops at walls, crates and hulls that are on screen. */
+  bladeGlowShadows: boolean;
   waterReflections: boolean;
   waterReflectionResolution: number;
   heatHaze: boolean;
@@ -130,6 +135,9 @@ export const FX_DEFAULTS: FxSettings = {
   ssaoStrength: 1,
   ssaoRadius: 1.2,
   ssaoResolution: 0.5,
+  bladeGlow: true,
+  bladeGlowStrength: 1,
+  bladeGlowShadows: true,
   waterReflections: true,
   waterReflectionResolution: 0.5,
   heatHaze: true,
@@ -166,6 +174,9 @@ export const FX_KNOBS: readonly FxKnobDef[] = [
   { key: 'ssaoStrength', pass: 'ssao', label: 'Occlusion strength', kind: 'range', min: 0, max: 2, step: 0.05, format: two, requires: ['effects', 'ssao'], hint: '0.5 a hint, 1 as measured, 2 heavy.' },
   { key: 'ssaoRadius', pass: 'ssao', label: 'Occlusion radius', kind: 'range', min: 0.3, max: 3, step: 0.1, format: (v) => `${v.toFixed(1)} m`, requires: ['effects', 'ssao'], hint: 'How far a surface looks around itself for what shades it. Small keeps to creases, large darkens whole hollows.' },
   { key: 'ssaoResolution', pass: 'ssao', label: 'Occlusion resolution', kind: 'select', options: half, requires: ['effects', 'ssao'], hint: 'Half is a quarter of the work, smoothed back up along edges.' },
+  { key: 'bladeGlow', pass: 'bladeGlow', label: 'Lightsaber glow', kind: 'toggle', requires: ['effects'], hint: 'A lit blade lights the ground, walls and bodies around it in its own colour. While it is on, the blades leave the pooled flash lights to shots, hits and ship rooms.' },
+  { key: 'bladeGlowStrength', pass: 'bladeGlow', label: 'Lightsaber glow strength', kind: 'range', min: 0, max: 2, step: 0.05, format: two, requires: ['effects', 'bladeGlow'], hint: '0.5 a hint, 1 as in the films, 2 a torch. At 0 there is no glow at all.' },
+  { key: 'bladeGlowShadows', pass: 'bladeGlow', label: 'Lightsaber glow stops at walls', kind: 'toggle', requires: ['effects', 'bladeGlow'], hint: 'The glow does not reach floors on the far side of a wall, crate or hull that is on screen. Off saves about 0.06 ms a frame.' },
   { key: 'waterReflections', pass: 'waterReflections', label: 'Water reflections', kind: 'toggle', requires: ['effects'], hint: 'Lakes and seas mirror the hills, buildings, ships and sky on screen; what is off screen comes from the sky\'s reflection map.' },
   { key: 'waterReflectionResolution', pass: 'waterReflections', label: 'Water reflection resolution', kind: 'select', options: half, requires: ['effects', 'waterReflections'], hint: 'Half traces a quarter of the pixels and smooths them back along the water; full is sharper and about three times the cost.' },
   { key: 'heatHaze', pass: 'heatHaze', label: 'Heat haze', kind: 'toggle', requires: ['effects'], hint: 'The air over lava, engines and flame bends what is behind it.' },
@@ -197,7 +208,7 @@ export const FX_KNOBS: readonly FxKnobDef[] = [
 export const FX_PASSES: readonly FxPassDef[] = [
   { id: 'sanitize', stage: 'scene', toggles: [], required: true, needs: [], budgetMs: 0.06, typical: true, canBeLast: false, live: true, why: 'The only pass that reads the scene target’s colour. Pixels that are not numbers become black before any blur can spread them into a box, and the brightest are held to a ceiling.' },
   { id: 'ssao', stage: 'scene', toggles: ['ssao'], required: false, needs: ['linearDepthHalf', 'normalsHalf', 'waterMask'], budgetMs: 0.45, typical: true, canBeLast: false, live: false, why: 'Occlusion multiplies lit colour, so it comes before anything that adds light that must not be occluded, and before the heat haze, so the darkening travels with the pixels it belongs to.' },
-  { id: 'bladeGlow', stage: 'scene', toggles: [], required: false, needs: ['linearDepthHalf', 'normalsHalf'], budgetMs: 0.15, typical: false, canBeLast: false, live: false, why: 'A lit blade lays its colour on the surfaces around it, after the occlusion that shades them and before the air and the lens.' },
+  { id: 'bladeGlow', stage: 'scene', toggles: ['bladeGlow'], required: false, needs: [], budgetMs: 0.15, typical: false, canBeLast: false, live: true, why: 'Direct light added to surfaces: after SSAO, since ambient occlusion does not darken a direct light; before water reflections, heat haze, rays, depth of field, motion blur and bloom, so the pool is reflected, bent, blurred and bloomed like any lit surface. It reads the full-resolution scene depth itself, so it asks for no product.' },
   { id: 'waterReflections', stage: 'scene', toggles: ['waterReflections'], required: false, needs: ['linearDepthHalf', 'waterMask'], budgetMs: 0.6, typical: false, canBeLast: false, live: true, why: 'Adds reflected scene light on water pixels. After occlusion so the reflected ground carries it, before the lens so reflections shimmer, defocus, smear and bloom like anything seen directly.' },
   { id: 'heatHaze', stage: 'scene', toggles: ['heatHaze'], required: false, needs: ['heat', 'linearDepthHalf'], budgetMs: 0.16, typical: false, canBeLast: false, live: false, why: 'Displaces what the surfaces look like, so it follows every surface pass; before the atmosphere and the lens, since the air and the glass sit between the heat and the eye.' },
   { id: 'lightShafts', stage: 'scene', toggles: [], required: false, needs: ['linearDepthHalf'], budgetMs: 0.3, typical: false, canBeLast: false, live: false, why: 'Daylight scattered in the air of a room, from its doorways and windows. Atmosphere: after the surfaces, before the lens, next to the god rays so the two share their march.' },

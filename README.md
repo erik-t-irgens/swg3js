@@ -269,7 +269,7 @@ From the console, `__debug.postfx()` lists every pass with its setting, whether 
 5. Heat haze over Mustafar's lava and behind engines and flame throwers (a screen distortion from a mask).
 6. Weather: rain, snow and sandstorms as particles around the camera, with the ground darkening as it wets; the environment tables name each planet's weather.
 7. Volumetric fog and light shafts from the rooms' own lights (a ray march over the cell's lights), and dust motes in the shafts.
-8. Shoreline foam from the water mask; the blades' and bolts' light on the ground already comes from the pooled lights, but a screen-space glow under a lit blade would finish it.
+8. Shoreline foam from the water mask; a lit blade's glow on the ground is the `bladeGlow` pass now, and the bolts' light still comes from the pooled lights.
 9. A blur for what moves on its own against a still camera (a ship crossing the view), which needs a velocity per object.
 
 ## Normal maps
@@ -305,6 +305,7 @@ Every converted model carries its normal map: the converter reads the shader's `
 | `connect('ws://host:8787')`, `disconnect()`, `peers()`, `status()` | The relay |
 | `particles(30, true)`, `water()`, `await waterFx({ env: 'shader' })`, `await waterFx({ view: 'envOnly' })`, `flora()`, `cell()`, `scene()`, `player()` | Effects; the water surface's height at a point; every water body with the shader it came from, its colour, opacity, ripple, drift, what it reflects and whether it is on screen (`waterFx({ env: 'shader' })` makes every body reflect its own shader's cube map, `{ env: 'sky' }` the area's day and night map, `{ envIntensity }` changes how hard it mirrors); with the effects on, `waterFx({ view })` shows what the reflections trace (`'confidence'`: red traced, blue fallback), add (`'added'`), fall back to (`'envOnly'`, which must look exactly like `postfx({ waterReflections: false })`) or trace alone (`'tracedOnly'`), `'off'` for the picture, and `{ maxDistance, thickness, thicknessPerMetre, minWeight, sky, strength }` tune the march; the result also says whether the pass drew and why not, and whether the mask holds its targets; flora, the portal cell you are in, the scene, the player's state |
 | `lava()`, `lava({ intensity, glow, glowFrom, glowTo, axes })` | The lava drawn now: tables, and each look with where its textures came from (`client`, `partial` when a piece fell back, `stand-in` for a pack converted before the lava look); with an argument, tunes the look every lava material shares (brightness, how far the veins glow, which veins glow) or reads the client's texture coordinate the other way round (`axes: 'xzy'`, `'xyz'` restores) |
+| `bladeGlow()`, `bladeGlow({ show: 'light' })`, `bladeGlow({ power: 3 })`, `bladeGlow({ occlusion: false })`, `bladeGlow({ flashes: true })`, `bladeGlow({ at: [x, y, z] })` | The light lit blades throw on what is around them: the blades counted now, whether the pass drew and why not, the light ceiling, the flash pool and the GPU time; the added light, normals or working box alone (`show: 'normals'`, `'rect'`, `null` back); live tuning of any `BLADE_GLOW_TUNE` number (the result's `tune` is what to bake); the wall march off; the old pooled lights back for comparison; and what a surface at a point gains from each blade |
 
 **Common problems.**
 

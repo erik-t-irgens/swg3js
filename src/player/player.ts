@@ -334,6 +334,12 @@ export class Player {
    * The frame's own visibility (through its parents) says whether the blade is out.
    */
   private readonly blades: { frame: THREE.Object3D; blade: SaberBlade; snap: boolean; hand: 'right' | 'left'; hiltTop: number }[] = [];
+  /**
+   * Every blade renderer the character has (the orbiting two, then right, staff, left, thrown): the
+   * light they throw is read from here, as each drew itself this frame. `saberSegments` is the wrong
+   * source for light: it skips the thrown and orbiting blades and ignores ignition.
+   */
+  readonly saberBlades: SaberBlade[] = [];
   /** The colour the pooled lights glow with around a lit blade: the blade's, softened toward white. */
   saberColor = new THREE.Color(DEFAULT_SABER_COLOR).getHex();
   /** The blade's own colour, as the glow draws it. */
@@ -444,6 +450,7 @@ export class Player {
     for (const b of this.blades) {
       scene.add(b.blade.group);
       markActor(b.blade.group);
+      this.saberBlades.push(b.blade);
     }
     this.setSaberColor(DEFAULT_SABER_COLOR);
     this.cmd.probe = (dir, dist) => this.probeWall(dir, dist);

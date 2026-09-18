@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { markActor } from '../world/portalRender';
+import { luminance, pointIrradiance } from '../core/fx/bladeGlowMath.ts';
 
 type RingMesh = THREE.Mesh<THREE.RingGeometry, THREE.MeshBasicMaterial>;
 type BurstMesh = THREE.Mesh<THREE.SphereGeometry, THREE.MeshBasicMaterial>;
@@ -91,6 +92,27 @@ export class Effects {
     light.distance = distance;
     light.position.copy(pos);
     this.flashes.push({ light, age: 0, life, intensity });
+  }
+
+  /**
+   * Irradiance luminance at a point from the pooled lights now lit, each taken no nearer than
+   * `reach` short of it: part of the brightest a surface near a lit blade can be from other lights.
+   */
+  litIrradianceNear(p: THREE.Vector3, reach: number): number {
+    let e = 0;
+    for (const l of this.lights) {
+      if (l.intensity <= 0) continue;
+      e += pointIrradiance(luminance(l.color.r, l.color.g, l.color.b), l.intensity, l.position.distanceTo(p), reach, l.decay);
+    }
+    return e;
+  }
+
+  /** For the console: each pooled light's colour, intensity, and the age of the flash holding it (null when free). Allocates. */
+  poolState(): { color: string; intensity: number; age: number | null }[] {
+    return this.lights.map((l) => {
+      const f = this.flashes.find((x) => x.light === l);
+      return { color: `#${l.color.getHexString()}`, intensity: Number(l.intensity.toFixed(2)), age: f ? Number(f.age.toFixed(3)) : null };
+    });
   }
 
   burst(pos: THREE.Vector3, color: number, size: number, life: number): void {

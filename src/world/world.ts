@@ -24,6 +24,7 @@ import { SwgTerrain, type BuildingLayerSource, type SwgWaterTable } from './swgT
 import { LayoutStreamer, type Building, type CellState, type PlacedObject } from './layoutStream';
 import { isLiftCell, liftStops, stopAt, type LiftStop } from './lifts';
 import type { SunInfo } from '../core/postfx';
+import { luminance, pointIrradiance } from '../core/fx/bladeGlowMath.ts';
 import { ParticleEffects } from './particles';
 import { CSM } from 'three/examples/jsm/csm/CSM.js';
 import { ACTOR_LAYER, INTERIOR_LAYER, markActor, type PortalRenderer } from './portalRender';
@@ -39,6 +40,7 @@ import { PLAYER_KEY, type Aggression, type Hittable, type Living, type Side } fr
 
 const tmpQ = new THREE.Quaternion();
 const tmpV = new THREE.Vector3();
+const lumOf = (c: THREE.Color): number => luminance(c.r, c.g, c.b);
 const tmpM = new THREE.Matrix4();
 /** How far out a space zone's planets hang, and the radius (metres) a planet of size 1 has there. */
 const SPACE_REACH = 3;
@@ -2305,6 +2307,22 @@ export class World {
     if (hit) return new THREE.Vector3(x, top - hit.timeOfImpact, z);
     if (inside) return null;
     return new THREE.Vector3(x, this.terrain.heightAt(x, z), z);
+  }
+
+  /**
+   * Irradiance luminance at a point from the world's lights: the sun or moon, the sky half of the
+   * hemisphere, the fill, and a building's room set while it is live (its points taken no nearer
+   * than `reach` short of the point). The blade glow's ceiling for a lit surface; an estimate that
+   * errs high. With the cascaded shadows on the sun is hidden, but its cascades carry its colour and
+   * intensity, so reading the sun is right either way.
+   */
+  litIrradianceNear(p: THREE.Vector3, reach: number): number {
+    let e = lumOf(this.sun.color) * this.sun.intensity + lumOf(this.hemi.color) * this.hemi.intensity + lumOf(this.fill.color) * this.fill.intensity;
+    if (this.interiorLightsFor) {
+      e += lumOf(this.interiorAmbient.color) * this.interiorAmbient.intensity + lumOf(this.interiorParallel.color) * this.interiorParallel.intensity;
+      for (const l of this.interiorPoints) if (l.intensity > 0) e += pointIrradiance(lumOf(l.color), l.intensity, l.position.distanceTo(p), reach, l.decay);
+    }
+    return e;
   }
 
   /**
