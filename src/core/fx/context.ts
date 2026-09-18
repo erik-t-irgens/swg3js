@@ -16,6 +16,15 @@ export interface SunInfo {
   intensity: number;
 }
 
+/** The weather as the effects see it (World.weather.fx): 0..1 each. */
+export interface FxWeather {
+  overcast: number;
+  rain: number;
+  snow: number;
+  dust: number;
+  wetness: number;
+}
+
 /** What the game tells the effects about the frame; one object the game keeps and refills in drawFrame. */
 export interface FxFrameInput {
   camera: THREE.PerspectiveCamera;
@@ -55,6 +64,8 @@ export interface FxFrameInput {
   lights: FxLights;
   /** RoomAir.frame: the room this frame is drawn from inside, or null. */
   room: RoomAirFrame | null;
+  /** World.weather.fx while the weather is on, else null. */
+  weather: FxWeather | null;
 }
 
 /** The sun as the effects want it, with its place on the screen worked out. */
@@ -131,6 +142,8 @@ export interface FxFrameContext {
   cameraUnderwater: boolean;
   /** The room this frame is drawn from inside (`RoomAir.frame`), or null. */
   room: RoomAirFrame | null;
+  /** The weather now; zeros when it is off (a kept record). */
+  readonly weather: FxWeather;
   /** The pass whose own working texture the debug view is showing, so it keeps it this frame. */
   debugViewPass: FxPassId | null;
   /** The sun record `sun` points at, kept so a frame allocates nothing; never read it directly. */
@@ -195,6 +208,7 @@ export function createContext(renderer: THREE.WebGLRenderer, settings: FxSetting
     cloudCount: 0,
     cameraUnderwater: false,
     room: null,
+    weather: { overcast: 0, rain: 0, snow: 0, dust: 0, wetness: 0 },
     debugViewPass: null,
     sunStore: { dir: new THREE.Vector3(), color: new THREE.Color(), intensity: 0, screen: new THREE.Vector2(0.5, 0.5), behind: false, fade: 0 },
   };
@@ -267,4 +281,10 @@ export function updateContext(ctx: FxFrameContext, input: FxFrameInput, size: TH
   ctx.cloudCount = input.cloudCount;
   ctx.cameraUnderwater = input.cameraUnderwater;
   ctx.room = input.room;
+  const w = input.weather;
+  ctx.weather.overcast = w ? w.overcast : 0;
+  ctx.weather.rain = w ? w.rain : 0;
+  ctx.weather.snow = w ? w.snow : 0;
+  ctx.weather.dust = w ? w.dust : 0;
+  ctx.weather.wetness = w ? w.wetness : 0;
 }

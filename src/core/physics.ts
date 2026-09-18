@@ -128,12 +128,19 @@ export class Physics {
     this.world.gravity = { x: 0, y: -g, z: 0 };
   }
 
+  /**
+   * Steps taken through `step` (not the raw `world.step` calls elsewhere): a scene query is only
+   * trusted after the world has stepped since its colliders were added, and this says when it has.
+   */
+  steps = 0;
+
   step(dt: number): void {
     this.acc += dt;
     let n = 0;
     while (this.acc >= FIXED_DT && n < 4) {
       // The hooks run only on the step that takes an event queue; without one they are silently left out.
       this.world.step(this.events, this.hooks);
+      this.steps++;
       this.acc -= FIXED_DT;
       n++;
     }
@@ -283,5 +290,20 @@ export class Physics {
     const ray = new RAPIER.Ray({ x, y, z }, { x: 0, y: -1, z: 0 });
     const hit = this.world.castRay(ray, maxDist, true, undefined, filterGroups, undefined, exclude);
     return hit ? hit.timeOfImpact : null;
+  }
+
+  private readonly downRay = new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: -1, z: 0 });
+
+  /**
+   * Height of the first surface straight down from (x, fromY, z) within maxDist, among colliders the
+   * groups and `include` accept, or null. Reuses one ray (the weather's roof grid casts dozens a frame).
+   */
+  topSurface(x: number, z: number, fromY: number, maxDist: number, filterGroups: number, include: (c: RAPIER.Collider) => boolean): number | null {
+    const o = this.downRay.origin;
+    o.x = x;
+    o.y = fromY;
+    o.z = z;
+    const hit = this.world.castRay(this.downRay, maxDist, true, undefined, filterGroups, undefined, undefined, include);
+    return hit ? fromY - hit.timeOfImpact : null;
   }
 }

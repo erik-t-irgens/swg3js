@@ -149,6 +149,24 @@ export interface ParticleKill {
   hull: { toLocal: THREE.Matrix4; min: THREE.Vector3; max: THREE.Vector3 } | null;
 }
 
+/** How far below its column's top a weather particle may reach before it dies (and its fragments are dropped). */
+export const KILL_SLACK = 0.15;
+
+/** A replacement for the stock particle shader (the weather's): same attributes, varyings and uniforms, plus its own. */
+export interface ParticleShader {
+  vertex: string;
+  fragment: string;
+  /** Joined by reference into every batch material's uniforms (shared objects, so one write reaches all). */
+  uniforms: Record<string, THREE.IUniform>;
+}
+
+export interface ParticleEffectsOptions {
+  /** Draw in every portal pass (true, as placed effects always have) or only where the owner draws the scene (false: the weather's own pass). */
+  actorLayer?: boolean;
+  /** Replace the stock vertex and fragment shaders for every batch. */
+  shader?: ParticleShader;
+}
+
 type HeightAt = ((x: number, z: number) => number) | null;
 
 const GLOBAL_LOD = [20, 200];
@@ -281,7 +299,30 @@ interface Batch {
   colors: Float32Array;
   uvs: Float32Array;
   /** Quads queued for this frame: particle, emitter. */
-  queue: { p: Particle; e: EmitterState; d: number }[];
+  queue: QueueEntry[];
+  /** The queue's entry records, kept and refilled so a frame makes none (only ever grows). */
+  entries: QueueEntry[];
+}
+
+interface QueueEntry {
+  p: Particle;
+  e: EmitterState;
+  d: number;
+}
+
+/** Farthest first, so alpha quads blend back to front; one function, not a closure a frame. */
+const byDistanceDesc = (x: QueueEntry, y: QueueEntry): number => y.d - x.d;
+
+/** Particles dropped by their emitters, taken again by the next spawn instead of making new ones. */
+const particlePool: Particle[] = [];
+const PARTICLE_POOL_MAX = 8192;
+
+function newParticle(): Particle {
+  return { pos: new THREE.Vector3(), prev: new THREE.Vector3(), vel: new THREE.Vector3(), up: new THREE.Vector3(0, 1, 0), side: new THREE.Vector3(1, 0, 0), age: 0, life: 1, weight: 0, r0: 0, r1: 0, r2: 0, r3: 0, initialRotation: 1, alive: true, reach: 0, extent: 0 };
+}
+
+function releaseParticle(p: Particle): void {
+  if (particlePool.length < PARTICLE_POOL_MAX) particlePool.push(p);
 }
 
 const VERT = /* glsl */ `
@@ -394,6 +435,7 @@ class EmitterState {
   }
 
   restart(): void {
+    for (const p of this.particles) releaseParticle(p);
     this.particles.length = 0;
     this.currentLoop = 0;
     this.loopCount = this.def.timing ? randomInt(this.def.timing.loopCount) : -1;
@@ -459,7 +501,24 @@ class EmitterState {
     tmpM3.setFromMatrix4(this.world);
     for (let i = 0; i < count; i++) {
       if (this.particles.length >= d.maxParticles) break;
-      const p: Particle = { pos: new THREE.Vector3(), prev: new THREE.Vector3(), vel: new THREE.Vector3(), up: new THREE.Vector3(0, 1, 0), side: new THREE.Vector3(1, 0, 0), age: 0, life: 1, weight: 0, r0: rand(), r1: rand(), r2: rand(), r3: rand(), initialRotation: 1, alive: true, reach: 0, extent: 0 };
+      // From the pool when it has one, every field set again as a new particle has it.
+      const p = particlePool.pop() ?? newParticle();
+      p.pos.set(0, 0, 0);
+      p.prev.set(0, 0, 0);
+      p.vel.set(0, 0, 0);
+      p.up.set(0, 1, 0);
+      p.side.set(1, 0, 0);
+      p.age = 0;
+      p.life = 1;
+      p.weight = 0;
+      p.r0 = rand();
+      p.r1 = rand();
+      p.r2 = rand();
+      p.r3 = rand();
+      p.initialRotation = 1;
+      p.alive = true;
+      p.reach = 0;
+      p.extent = 0;
       if (d.direction === 'directional') {
         const spread = (wave(d.spread, agePercent, rand()) * Math.PI) / 180;
         const r1 = rand() < 0.5 ? spread : -spread;
@@ -571,7 +630,11 @@ class EmitterState {
     this.frameFirst = createParticles ? false : this.frameFirst;
     for (const p of this.particles) if (p.alive) this.integrate(p, dt, heightAt, kill);
     let w = 0;
-    for (let i = 0; i < this.particles.length; i++) if (this.particles[i].alive) this.particles[w++] = this.particles[i];
+    for (let i = 0; i < this.particles.length; i++) {
+      const p = this.particles[i];
+      if (p.alive) this.particles[w++] = p;
+      else releaseParticle(p);
+    }
     this.particles.length = w;
     if (doLoop) {
       this.currentLoop++;
@@ -719,10 +782,58 @@ export class ParticleEffects {
   /** What kills particles early (the weather's); null for placed effects, and never applied to a framed effect. */
   kill: ParticleKill | null = null;
 
+  /** Whether batches draw in every portal pass (the actor layer) or only in the owner's own pass. */
+  private readonly actorLayer: boolean;
+  private readonly shader: ParticleShader | null;
+  /** Every batch material made so far (the weather pass sets its stencil on them). A kept array. */
+  readonly batchMaterials: THREE.ShaderMaterial[] = [];
+  /** Textures still loading, resolved when each has loaded or failed (what `prepare` waits on). */
+  private readonly textureReady = new Map<string, Promise<void>>();
+
   constructor(
     private readonly scene: THREE.Scene,
     private readonly baseUrl: string,
-  ) {}
+    options: ParticleEffectsOptions = {},
+  ) {
+    this.actorLayer = options.actorLayer ?? true;
+    this.shader = options.shader ?? null;
+  }
+
+  /** Quads queued in the last update. */
+  get quads(): number {
+    return this.quadCount;
+  }
+
+  /**
+   * Load an effect's description, make its batches now (hidden), and wait for their textures,
+   * uploading them when a renderer is given; so neither a program nor a texture upload waits for
+   * the first quad. Resolves false when the effect failed to load.
+   */
+  async prepare(file: string, renderer?: THREE.WebGLRenderer | null): Promise<boolean> {
+    const def = await this.load(file);
+    if (!def || this.disposed) return false;
+    const waits: Promise<void>[] = [];
+    for (const g of def.groups) {
+      for (const e of g.emitters) {
+        const tex = e.particle.quad?.texture;
+        if (!e.visible || e.particle.type !== 'quad' || !tex?.file || !tex.visible) continue;
+        this.batch(tex.file, tex.blend ?? 'alpha');
+        const ready = this.textureReady.get(tex.file);
+        if (ready) waits.push(ready);
+      }
+    }
+    await Promise.all(waits);
+    if (renderer && !this.disposed) {
+      for (const g of def.groups) {
+        for (const e of g.emitters) {
+          const f = e.particle.quad?.texture.file;
+          const t = f ? this.textures.get(f) : undefined;
+          if (t && f && !this.textureErrors.has(f)) renderer.initTexture(t);
+        }
+      }
+    }
+    return true;
+  }
 
   get status(): string {
     return `${this.instances.size} particle effects placed, ${this.activeCount} playing, ${this.quadCount} quads in ${this.batches.size} batches${this.textureErrors.size ? `, ${this.textureErrors.size} textures failed to load: ${[...this.textureErrors].join(', ')}` : ''}`;
@@ -756,6 +867,11 @@ export class ParticleEffects {
     this.instances.delete(handle);
   }
 
+  /** Live particles of one placed effect (0 while it is loading or asleep), for the console. */
+  particlesOf(handle: EffectHandle): number {
+    return this.instances.get(handle)?.particleCount ?? 0;
+  }
+
   /** Whether a placed effect is still to come or still playing. */
   playing(handle: EffectHandle): boolean {
     return this.pending.has(handle) || (this.instances.get(handle)?.finished === false);
@@ -783,9 +899,12 @@ export class ParticleEffects {
   private texture(file: string): THREE.Texture {
     let t = this.textures.get(file);
     if (!t) {
-      t = this.loader.load(this.baseUrl + file, undefined, undefined, () => {
+      let settle: () => void = () => {};
+      this.textureReady.set(file, new Promise<void>((resolve) => (settle = resolve)));
+      t = this.loader.load(this.baseUrl + file, () => settle(), undefined, () => {
         this.textureErrors.add(file);
         console.warn(`particle texture ${file} failed to load`);
+        settle();
       });
       t.colorSpace = THREE.SRGBColorSpace;
       t.flipY = false;
@@ -800,10 +919,14 @@ export class ParticleEffects {
     const key = `${file}|${blend}`;
     let b = this.batches.get(key);
     if (b) return b;
+    const shader = this.shader;
+    const uniforms: Record<string, THREE.IUniform> = { map: { value: this.texture(file) }, uFogColor: { value: this.fogColor }, uFogDensity: { value: this.fogDensity }, uAdditive: { value: blend === 'add' ? 1 : 0 } };
+    // The replacement's own uniforms are shared objects: one write reaches every batch.
+    if (shader) Object.assign(uniforms, shader.uniforms);
     const material = new THREE.ShaderMaterial({
-      vertexShader: VERT,
-      fragmentShader: FRAG,
-      uniforms: { map: { value: this.texture(file) }, uFogColor: { value: this.fogColor }, uFogDensity: { value: this.fogDensity }, uAdditive: { value: blend === 'add' ? 1 : 0 } },
+      vertexShader: shader?.vertex ?? VERT,
+      fragmentShader: shader?.fragment ?? FRAG,
+      uniforms,
       transparent: true,
       depthWrite: false,
       depthTest: true,
@@ -816,9 +939,12 @@ export class ParticleEffects {
     mesh.matrixAutoUpdate = false;
     // Smoke before glows, so fire shows through its own smoke the way the client sorts them.
     mesh.renderOrder = blend === 'add' ? 12 : 11;
-    mesh.layers.enable(ACTOR_LAYER);
+    if (this.actorLayer) mesh.layers.enable(ACTOR_LAYER);
+    // Hidden until it has quads (a batch made ahead by `prepare` draws nothing, but is compiled).
+    mesh.visible = false;
     this.scene.add(mesh);
-    b = { key, blend, mesh, material, capacity: 0, positions: new Float32Array(0), colors: new Float32Array(0), uvs: new Float32Array(0), queue: [] };
+    this.batchMaterials.push(material);
+    b = { key, blend, mesh, material, capacity: 0, positions: new Float32Array(0), colors: new Float32Array(0), uvs: new Float32Array(0), queue: [], entries: [] };
     this.grow(b, 256);
     this.batches.set(key, b);
     return b;
@@ -895,8 +1021,21 @@ export class ParticleEffects {
         const b = this.batch(tex.file!, tex.blend ?? 'alpha');
         const local = e.def.localSpace;
         // A framed effect's points are hull-local: it sorts as one, by its own distance.
-        if (framed) for (const p of e.particles) b.queue.push({ p, e, d: distance * distance });
-        else for (const p of e.particles) b.queue.push({ p, e, d: (local ? e.position : p.pos).distanceToSquared(camPos) });
+        for (let k = 0; k < e.particles.length; k++) {
+          const p = e.particles[k];
+          const d = framed ? distance * distance : (local ? e.position : p.pos).distanceToSquared(camPos);
+          const n = b.queue.length;
+          let q = b.entries[n];
+          if (q) {
+            q.p = p;
+            q.e = e;
+            q.d = d;
+          } else {
+            q = { p, e, d };
+            b.entries[n] = q;
+          }
+          b.queue.push(q);
+        }
       }
     }
     this.activeCount = active;
@@ -907,7 +1046,7 @@ export class ParticleEffects {
 
   private fill(b: Batch, drawnSoFar: number): number {
     const q = b.queue;
-    if (b.blend !== 'add') q.sort((x, y) => y.d - x.d);
+    if (b.blend !== 'add') q.sort(byDistanceDesc);
     let n = Math.min(q.length, MAX_QUADS - drawnSoFar);
     if (n < 0) n = 0;
     if (n > b.capacity) this.grow(b, Math.min(MAX_QUADS, Math.max(n, b.capacity * 2)));
@@ -1084,6 +1223,7 @@ export class ParticleEffects {
       b.material.dispose();
     }
     this.batches.clear();
+    this.batchMaterials.length = 0;
     for (const t of this.textures.values()) t.dispose();
     this.textures.clear();
     this.instances.clear();

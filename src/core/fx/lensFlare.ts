@@ -608,8 +608,7 @@ export class LensFlarePass implements FxPass {
     const lights = f.skyLights;
     const look = this.look;
     const strength = ctx.settings.lensFlareStrength;
-    // fx-weather 15.1: overcastFade(ctx.weather.overcast) once the weather is on the context.
-    const weatherFade = overcastFade(0);
+    const weatherFade = overcastFade(ctx.weather.overcast);
     const aspect = ctx.width / Math.max(1, ctx.height);
     const clouds = f.clouds;
     const cloudCount = clouds ? Math.min(f.cloudCount ?? 0, clouds.length, MAX_CLOUD_LAYERS) : 0;
@@ -822,8 +821,7 @@ export class LensFlarePass implements FxPass {
       strength: ctx.settings.lensFlareStrength,
       drewLastFrame: drew,
       why,
-      // fx-weather 15.1: the overcast factor from ctx.weather once it exists.
-      overcast: overcastFade(0),
+      overcast: overcastFade(ctx.weather.overcast),
       exposure: ctx.renderer.toneMappingExposure,
       underwater: !!f.cameraUnderwater,
       clouds: f.clouds ? Math.min(f.cloudCount ?? 0, f.clouds.length) : 0,

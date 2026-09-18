@@ -45,6 +45,12 @@ export class PortalRenderer {
   private readonly portalMeshes = new WeakMap<Building, THREE.Mesh[]>();
   /** Passes drawn last frame, for the stats overlay. */
   passes = 0;
+  /**
+   * Whether the shadow maps are worth drawing this frame: false while the weather has faded the
+   * cascades' intensity to nothing. Never the renderer's own shadowMap.enabled, which is in every
+   * program's key.
+   */
+  shadowsWanted = true;
   /** What each pass of the last frame drew, for the console hook. */
   readonly passLog: { label: string; calls: number; triangles: number }[] = [];
 
@@ -252,7 +258,8 @@ export class PortalRenderer {
    */
   private renderShadows(scene: THREE.Scene, view: Building | null): void {
     const r = this.renderer;
-    if (!r.shadowMap.enabled) return;
+    // Off, or faded to nothing by a storm (the cascades' intensity is 0, so the stale maps cannot show).
+    if (!r.shadowMap.enabled || !this.shadowsWanted) return;
     if (view) this.showInterior(view, true);
     r.shadowMap.needsUpdate = true;
     this.pass('shadows', scene, this.shadowProbe);

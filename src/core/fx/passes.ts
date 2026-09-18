@@ -16,6 +16,7 @@ import type { FxPassId, FxProductId, FxSettings } from '../fxRegistry.ts';
 import type { FxFrameContext } from './context';
 import { NO_PRODUCTS, ShaderFxPass, ThreePassAdapter, type FxDebugTexture, type FxWarmItem } from './pass';
 import { FX_FULLSCREEN_VERTEX, FX_LINEARIZE } from './glsl';
+import { overcastFade } from './flareMath';
 
 /** The blur is scaled as if every frame lasted this long, so a slow frame is not a longer smear. */
 const SHUTTER = 1 / 60;
@@ -190,13 +191,14 @@ export class GodRaysPass extends ShaderFxPass {
   }
 
   enabled(ctx: FxFrameContext): boolean {
-    return !!ctx.sun && ctx.sun.fade > 0 && ctx.settings.godRayStrength > 0;
+    return !!ctx.sun && ctx.sun.fade * overcastFade(ctx.weather.overcast) > 0.01 && ctx.settings.godRayStrength > 0;
   }
 
   reason(ctx: FxFrameContext): string | null {
     if (ctx.settings.godRayStrength <= 0) return 'god ray strength is zero';
     if (!ctx.sun) return 'no sun on this world';
     if (ctx.sun.fade <= 0) return ctx.sun.behind ? 'the sun is behind the camera' : 'no sun on screen';
+    if (ctx.sun.fade * overcastFade(ctx.weather.overcast) <= 0.01) return 'put out by overcast weather';
     return null;
   }
 
@@ -204,7 +206,7 @@ export class GodRaysPass extends ShaderFxPass {
     const sun = ctx.sun!;
     const u = this.material.uniforms;
     (u.uSun.value as THREE.Vector2).copy(sun.screen);
-    u.uSunVisible.value = sun.fade;
+    u.uSunVisible.value = sun.fade * overcastFade(ctx.weather.overcast);
     (u.uColor.value as THREE.Color).copy(sun.color);
     u.uStrength.value = ctx.settings.godRayStrength;
     u.uAspect.value = ctx.width / Math.max(1, ctx.height);

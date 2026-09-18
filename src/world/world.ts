@@ -8,6 +8,8 @@ import { MobileAssets } from './mobiles/assets';
 import { MobileCatalogue } from './mobiles/catalogue';
 import { DayCycle } from './daycycle';
 import { SwgSky, type SkyLighting } from './sky';
+import { Weather, type WeatherViewContext, type WeatherWorldContext } from './weather';
+import { WEATHER_UNIFORMS } from './wetness';
 import { emitRipple, Splashes, updateWaterDepth, type WaterMaterial } from './water';
 import { WaterBodies, type WaterBody } from './waterBodies';
 import { envLightFrom, isLavaWater, shaderKey, type WaterLook } from './waterLook';
@@ -330,11 +332,26 @@ export class World {
   }
   /** The planet's own sky when its pack carries one; the procedural dome is hidden while it is up. */
   swgSky: SwgSky | null = null;
+  /** Rain, dust storms and snow, and which area's rows the sky draws (weather.ts). Made in the constructor. */
+  readonly weather: Weather;
+  /** Set by main before update: the player is aboard a ship's rooms. */
+  aboard = false;
+  /** Set by main before update: the ship the player rides (its box keeps rain out of the canopy), or null. */
+  weatherHull: Vehicle | null = null;
+  /** Set by main before update: whatever the player rides (never a roof for the rain), or null. */
+  weatherRidden: Vehicle | null = null;
+  /** How far the weather has faded the cascades' shadows: 1 none, 0 a storm row that turns them off. */
+  private weatherShadowScale = 1;
+  private readonly groundAtCached = (x: number, z: number): number | null => this.terrain.heightIfCached(x, z, FAR_TILE, FAR_RES);
+  private readonly waterAtFn = (x: number, z: number): number => this.terrain.waterHeightAt(x, z);
   /** Set by main: needed to filter the sky into an environment map for reflective surfaces. */
   renderer: THREE.WebGLRenderer | null = null;
   private pmrem: THREE.PMREMGenerator | null = null;
   private envTexture: THREE.Texture | null = null;
-  private envFromCube: 'day' | 'night' | null = null;
+  /** The first face of the reflection cube wanted (loading or loaded), or null while the dome is filtered instead. */
+  private envWant: string | null = null;
+  /** First faces of cubes that failed to load: never asked for again on this sky. */
+  private readonly envFailed = new Set<string>();
   private envTimer = 99;
   private readonly fill = new THREE.DirectionalLight(0xffffff, 0);
   private waterFar: THREE.Mesh | null = null;
@@ -387,6 +404,8 @@ export class World {
   private readonly warmedFx = new Set<string>();
 
   constructor(readonly scene: THREE.Scene, readonly physics: Physics) {
+    // First: nothing below reads it, but main configures it right after constructing the world.
+    this.weather = new Weather(physics);
     this.bolts = new Bolts(scene);
     this.shipFx = new ParticleEffects(scene, `${import.meta.env.BASE_URL}assets-private/ships/`);
     this.weaponFx = new ParticleEffects(scene, `${import.meta.env.BASE_URL}assets-private/weapons/`);
@@ -593,7 +612,7 @@ export class World {
           await this.loadGroundTextures(pack);
           if (token !== this.loadToken) return null;
           this.packProgress = 0.85;
-          await this.loadSky(pack);
+          await this.loadSky(pack, spawn);
           if (token !== this.loadToken) return null;
           this.packProgress = 0.92;
         } catch (err) {
@@ -605,7 +624,7 @@ export class World {
     // A pack with a sky but no terrain (the gallery, a space zone) still gets its sky, and a space zone its planets.
     if (!layout?.terrain) {
       try {
-        await this.loadSky(pack);
+        await this.loadSky(pack, spawn);
         if (planet.space) await this.loadSpaceBodies(pack);
       } catch (err) {
         console.warn('sky: failed to load', err);
@@ -850,7 +869,8 @@ export class World {
     console.info(`space: ${group.children.length} planets and moons in the sky`);
   }
 
-  private async loadSky(pack: AssetPack): Promise<void> {
+  /** `spawn` is where the player arrives: the weather reads the area there, and its sky's textures load before the loading screen lifts. */
+  private async loadSky(pack: AssetPack, spawn: THREE.Vector3): Promise<void> {
     const token = this.loadToken;
     const sky = await SwgSky.load(pack);
     if (!sky) return;
@@ -869,7 +889,11 @@ export class World {
     this.day.fixed = sky.spaceLightDir;
     this.fogScale = this.planet.swgFogScale ?? DEFAULT_SWG_FOG_SCALE;
     this.envTimer = 99;
-    this.envFromCube = null;
+    this.envWant = null;
+    // The weather's effects are made and its arrival area's sky loaded inside the awaited loadPack,
+    // so the warm-up that follows compiles them and the first frame shows the area's own sky.
+    await this.weather.attach({ pack, sky, terrain: this.terrain, planet: this.planet, packId: this.packId, renderer: this.renderer, at: spawn });
+    if (token !== this.loadToken) return;
     console.info(`sky: ${sky.data.blocks.length} environment blocks, ${sky.hasGradient ? 'gradient sky' : sky.data.skybox ? 'skybox' : 'clear colour'}, ${sky.data.sun ? 'sun' : 'no sun'}, ${sky.data.moon ? 'moon' : 'no moon'}, ${sky.data.stars?.count ?? 0} stars, reflections from ${sky.environment.day ? 'the planet cube maps' : 'the sky'}`);
   }
 
@@ -884,7 +908,13 @@ export class World {
     this.fill.intensity = 0;
     this.envTexture?.dispose();
     this.envTexture = null;
-    this.envFromCube = null;
+    this.envWant = null;
+    this.envFailed.clear();
+    this.weather.detach();
+    // No sky, no storm: the shadows come back whole.
+    this.weatherShadowScale = 1;
+    for (const l of this.csm?.lights ?? []) l.shadow.intensity = this.shadowIntensity;
+    if (this.portals) this.portals.shadowsWanted = true;
     setEnvironment(null);
   }
 
@@ -896,15 +926,23 @@ export class World {
     const sky = this.swgSky;
     if (!sky || !this.renderer) return;
     this.pmrem ??= new THREE.PMREMGenerator(this.renderer);
+    // The heaviest block's cube for the hour (the weather's mix picks the block), by its first face:
+    // a new area or level with another cube loads that one; a cube that failed is never asked again.
     const cube = this.day.isDay ? sky.environment.day : sky.environment.night;
-    if (cube) {
-      const want = this.day.isDay ? 'day' : 'night';
-      if (this.envFromCube === want) return;
-      this.envFromCube = want;
+    const usable = cube && cube.faces.length && !this.envFailed.has(cube.faces[0]) ? cube : null;
+    if (usable) {
+      const want = usable.faces[0];
+      if (this.envWant === want) return;
+      this.envWant = want;
       const pmrem = this.pmrem;
       new THREE.CubeTextureLoader().load(
-        cube.faces.map((f) => this.pack!.url(f)),
+        usable.faces.map((f) => this.pack!.url(f)),
         (tex) => {
+          // Another cube was asked for (or the sky went) while this one came: not wanted any more.
+          if (this.swgSky !== sky || this.envWant !== want) {
+            tex.dispose();
+            return;
+          }
           tex.colorSpace = THREE.SRGBColorSpace;
           const env = pmrem.fromCubemap(tex).texture;
           tex.dispose();
@@ -914,13 +952,14 @@ export class World {
         },
         undefined,
         () => {
-          console.warn('sky: reflection cube map failed to load; reflecting the sky instead');
-          this.envFromCube = null;
-          sky.environment.day = sky.environment.night = null;
+          console.warn(`sky: reflection cube map ${want} failed to load; reflecting the sky instead`);
+          this.envFailed.add(want);
+          if (this.envWant === want) this.envWant = null;
         },
       );
       return;
     }
+    this.envWant = null;
     this.envTimer += dt;
     if (this.envTimer < 4) return;
     this.envTimer = 0;
@@ -1029,12 +1068,19 @@ export class World {
   private applySwgLighting(L: SkyLighting, playerPos: THREE.Vector3): void {
     this.sun.color.copy(L.main);
     this.sun.intensity = SWG_MAIN_LIGHT * L.mainScale;
+    // A storm row that turns shadows off fades them through the cascades' intensity (never a light,
+    // castShadow or shadowMap.enabled, all of which recompile), and the shadow pass is skipped at zero.
+    this.weatherShadowScale = this.weather.shadowFactor(L);
     if (this.csm) {
       for (const l of this.csm.lights) {
         l.color.copy(this.sun.color);
         l.intensity = this.sun.intensity;
+        l.shadow.intensity = this.shadowIntensity * this.weatherShadowScale;
       }
     }
+    if (this.portals) this.portals.shadowsWanted = this.weatherShadowScale > 0.001;
+    // What a wet surface reflects at a low angle: the sky's fog colour, a little dimmed.
+    WEATHER_UNIFORMS.uWetSky.value.copy(L.fog).multiplyScalar(0.9);
     // Sky above, ground bounce below: the two halves of the client's ambient. Both carry their
     // own scale in the ramp's alpha, so the colours go in as they are and the scales set the
     // light's strength; the bounce is the darker half, mixed toward the sky so it never blackens.
@@ -1426,7 +1472,8 @@ export class World {
       // Back to normalised depth, which is the unit three stores this one in.
       l.shadow.bias = -(SHADOW_BIAS_TEXELS * texel) / (cam.far - cam.near);
       l.shadow.radius = this.shadowRadius;
-      l.shadow.intensity = this.shadowIntensity;
+      // A retune keeps the weather's fade.
+      l.shadow.intensity = this.shadowIntensity * this.weatherShadowScale;
       if (l.shadow.mapSize.width !== size) {
         l.shadow.mapSize.set(size, size);
         // The render target is sized on creation, so drop it and let three make a new one.
@@ -1516,11 +1563,13 @@ export class World {
           const std = m as THREE.MeshStandardMaterial;
           if (std.normalMap && std.normalScale) std.normalScale.copy(this.normalScale);
         }
-        if (this.csmMaterials.has(m) || (m as THREE.ShaderMaterial).isShaderMaterial || m.userData.unlit === true || !csm) continue;
-        csm.setupMaterial(m);
-        this.csmMaterials.add(m);
-        // The weather design wraps its wetness in right here, immediately after the cascades'
-        // own hook (CSM.setupMaterial overwrites onBeforeCompile, so nothing may come before it).
+        if (csm && !this.csmMaterials.has(m) && !(m as THREE.ShaderMaterial).isShaderMaterial && m.userData.unlit !== true) {
+          csm.setupMaterial(m);
+          this.csmMaterials.add(m);
+        }
+        // The wet-surface wrap goes here, in this same iteration and after the cascades' own hook
+        // (CSM.setupMaterial overwrites onBeforeCompile, so nothing may come before it); every
+        // material reaches this point, and none may be wrapped before `csm` exists.
       }
       if (isNew) fresh.push(o);
     });
@@ -1745,6 +1794,11 @@ export class World {
         ch.port2.postMessage(0);
       });
     }
+    // The weather's falling effects draw in their own scene, with no lights and no fog: compiled
+    // against that scene (never this one, whose lights and fog are in the program key), for the
+    // same target, so the first rain compiles nothing.
+    const weatherDone = this.withTarget(r, target, () => this.weather.compile(r, camera, !!opts.waitReady));
+    if (opts.waitReady && weatherDone) await weatherDone;
     return (r.info.programs?.length ?? 0) - before;
   }
 
@@ -2090,6 +2144,8 @@ export class World {
     this.stream(center, Infinity);
     this.streamFar(center, Infinity);
     this.layoutStream?.update(center);
+    // The weather snaps to the new place: its area at once, and the roof grid from scratch.
+    this.weather.reset();
     this.cellState = null;
     this.prevPlayerPos.x = Number.NaN;
     for (const o of this.hiddenGround) o.visible = true;
@@ -2100,6 +2156,32 @@ export class World {
   get inside(): boolean {
     return this.cellState !== null;
   }
+
+  /** The ground is hidden under the building the player is below the terrain in (a basement or a dungeon). */
+  get underground(): boolean {
+    return this.groundHiddenFor !== null;
+  }
+
+  /**
+   * The camera-following half of the weather, after the camera has moved and physics has stepped
+   * (main calls it just before updateShadows): where the falling effect plays, the ridden ship's
+   * box, the roof grid's rays, and the particles.
+   */
+  updateWeatherView(dt: number): void {
+    if (!this.swgSky || !this.camera) return;
+    const v = this.weatherView;
+    v.inside = this.inside;
+    v.aboard = this.aboard;
+    v.underground = this.underground;
+    v.fog = this.scene.fog instanceof THREE.FogExp2 ? this.scene.fog : null;
+    v.hull = this.weatherHull;
+    v.ridden = this.weatherRidden;
+    this.weather.updateView(dt, this.camera, v);
+  }
+  /** What the weather's first half is told, kept and refilled. */
+  private readonly weatherWorld: WeatherWorldContext = { daylight: 1, groundAt: this.groundAtCached };
+  /** What the weather's second half is told, kept and refilled so a frame makes nothing. */
+  private readonly weatherView: WeatherViewContext = { inside: false, aboard: false, underground: false, fog: null, groundAt: this.groundAtCached, waterAt: this.waterAtFn, vehicles: this.vehicles, hull: null, ridden: null };
 
   /**
    * Follow the player through building portals, as the original client does. Inside a cell the
@@ -2248,6 +2330,9 @@ export class World {
     this.updateInterior(playerPos);
     this.day.update(dt, fastTime);
     if (this.swgSky) {
+      // What the sky needs from the weather (the area, the level, the blend, the wind) comes first.
+      this.weatherWorld.daylight = this.day.daylight;
+      this.weather.update(dt, playerPos, this.weatherWorld);
       this.applySwgLighting(this.swgSky.update(this.day, camPos, dt), playerPos);
       this.refreshEnvironment(dt);
     } else this.applyLighting();

@@ -32,6 +32,21 @@ export interface Settings extends FxSettings {
   terrainRadius: number;
   /** Coarse far tiles each way. */
   farRadius: number;
+  // The weather: scene content, not an effect, so these work with the effects off.
+  /** Rain, dust storms and snow as the planet's environment rows have them. */
+  weather: boolean;
+  /** How many sheets, clouds and flakes fall: 1 as the game has them (0.25 .. 1.5). */
+  weatherDensity: number;
+  /** Rain wets and glosses surfaces and leaves puddles; snow settles. */
+  wetSurfaces: boolean;
+  /** Storm rows that turn shadows off fade them out; clear rows always keep them. */
+  weatherShadows: boolean;
+  /** -1 the schedule; 0..4 hold that level of the area's own rows. */
+  weatherForce: number;
+  /** 0 the area's own effect; 1 rain, 2 dust storm, 3 snow in its place. */
+  weatherKind: number;
+  /** Life Day's areas: -1 in season (15 December to 5 January), 1 always, 0 never. */
+  lifeDay: number;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -50,6 +65,13 @@ export const DEFAULT_SETTINGS: Settings = {
   objectReach: 1,
   terrainRadius: 6,
   farRadius: 6,
+  weather: true,
+  weatherDensity: 1,
+  wetSurfaces: true,
+  weatherShadows: true,
+  weatherForce: -1,
+  weatherKind: 0,
+  lifeDay: -1,
   ...FX_DEFAULTS,
 };
 

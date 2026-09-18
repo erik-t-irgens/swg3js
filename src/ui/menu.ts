@@ -130,6 +130,19 @@ const GRAPHICS: { title: string; knobs: readonly Knob[] }[] = [
     knobs: FX_KNOBS.filter((k) => (k.pass === null || fxPassDef(k.pass).live) && (!k.product || fxProductDef(k.product).live)),
   },
   {
+    // Scene content, not an effect: it works with the effects off, and nothing here recompiles a shader.
+    title: 'Weather',
+    knobs: [
+      { key: 'weather', label: 'Weather', kind: 'toggle', requires: [], hint: 'Rain, dust storms and snow where and when the planet has them, from the game\'s own environment rows. It changes every so often, the same for everyone at the same moment. Off, the sky still follows the area you stand in.' },
+      { key: 'weatherDensity', label: 'Rain and dust density', kind: 'range', min: 0.25, max: 1.5, step: 0.05, format: (v) => `${v.toFixed(2)}×`, requires: ['weather'], hint: 'How much falls around you: 1 as the game has it. Heavy rain seen from below is the costliest thing the weather draws.' },
+      { key: 'wetSurfaces', label: 'Wet ground', kind: 'toggle', requires: ['weather'], hint: 'Rain darkens and glosses what it falls on, leaves puddles with rings, and dries slowly after. Snow settles on what faces up. Nothing under a roof gets wet.' },
+      { key: 'weatherShadows', label: 'Storms dim shadows', kind: 'toggle', requires: ['weather'], hint: 'Where the game\'s storm rows turn shadows off, they fade out as the storm comes. Clear weather always keeps them.' },
+      { key: 'weatherForce', label: 'Hold the weather', kind: 'select', requires: ['weather'], options: [{ value: -1, label: 'As the planet has it' }, { value: 0, label: 'Clear' }, { value: 1, label: 'Light' }, { value: 2, label: 'Moderate' }, { value: 3, label: 'Heavy' }, { value: 4, label: 'Storm' }], hint: 'Holds one level of the area\'s own rows (Mustafar has three). Others on the relay keep the shared schedule; the corner of the screen says it is held.' },
+      { key: 'weatherKind', label: 'Weather kind', kind: 'select', requires: ['weather'], options: [{ value: 0, label: 'The area\'s own' }, { value: 1, label: 'Rain' }, { value: 2, label: 'Dust storm' }, { value: 3, label: 'Snow' }], hint: 'Falls this kind instead of the area\'s own, at the same level: rain on Tatooine, snow anywhere. The sky and fog stay the area\'s own.' },
+      { key: 'lifeDay', label: 'Life Day', kind: 'select', requires: ['weather'], options: [{ value: -1, label: 'In season (15 Dec to 5 Jan)' }, { value: 1, label: 'Always' }, { value: 0, label: 'Never' }], hint: 'The Life Day areas (a snowy corner of Corellia around Doaba Guerfel) with their own sky and snow.' },
+    ],
+  },
+  {
     title: 'Distance and detail',
     knobs: [
       { key: 'objectReach', label: 'Object reach', hint: 'How far buildings and props load, over the game\'s own ranges. Less loads less and streams faster.', kind: 'range', min: 0.4, max: 1.6, step: 0.05, format: (v) => `${v.toFixed(2)}×` },

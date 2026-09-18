@@ -13,6 +13,8 @@ export class Hud {
   private readonly planetTag: HTMLElement;
   private readonly loc: HTMLElement;
   private readonly fps: HTMLElement;
+  /** A quiet line under the frame rate while the weather is not the shared schedule's. */
+  private readonly weatherNote: HTMLElement;
   private readonly clock: HTMLElement;
   private readonly className: HTMLElement;
   private readonly hpFill: HTMLElement;
@@ -56,6 +58,7 @@ export class Hud {
       <div class="panel top-right">
         <div class="clock"></div>
         <div class="fps"></div>
+        <div class="weather-note" style="font-size: 11px; opacity: 0.75" hidden></div>
         <div class="hint"><b>M</b> Map &nbsp; <b>I</b> Inventory &nbsp; <b>B</b> Spawner &nbsp; <b>H</b> Help</div>
       </div>
       <div class="crosshair"></div>
@@ -90,6 +93,7 @@ export class Hud {
     this.planetTag = q('.planet-tag');
     this.loc = q('.loc');
     this.fps = q('.fps');
+    this.weatherNote = q('.weather-note');
     this.clock = q('.clock');
     this.className = q('.class-name');
     this.hpFill = q('.hp .fill');
@@ -113,6 +117,13 @@ export class Hud {
     this.leadLine = q('.lead-line');
     this.leadCross = [...this.root.querySelectorAll<HTMLElement>('.lead-cross')];
     this.tlabel = q('.tlabel');
+  }
+
+  /** A quiet line when the weather is not the shared schedule's (held, swapped, forced); empty hides it. Cheap to call every frame. */
+  setWeatherNote(text: string): void {
+    if (this.weatherNote.textContent === text) return;
+    this.weatherNote.textContent = text;
+    this.weatherNote.hidden = text === '';
   }
 
   /**

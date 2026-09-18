@@ -207,7 +207,7 @@ class App {
   /** What the blades' light ceiling reads, kept and refilled each frame; the world and the pool are set in the constructor. */
   private readonly litSources: LitSources = { world: null!, effects: null!, torch: null, eye: new THREE.Vector3() };
   /** What the effects are told about each frame, refilled in drawFrame rather than made again. */
-  private readonly fxInput: FxFrameInput = { camera: null as unknown as THREE.PerspectiveCamera, dt: 1 / 60, sun: null, portalView: false, cameraInHull: false, inside: false, aboard: false, space: false, fog: null, daylight: 1, dayIndex: 0, lighting: null, planetId: '', aiming: false, aimAmount: 0, firstPerson: false, skyLights: createSkyLights(MAX_FLARE_SOURCES), skyLightCount: 0, clouds: createCloudLayers(MAX_CLOUD_LAYERS), cloudCount: 0, cameraUnderwater: false, waterInView: false, blades: this.fxBlades, lights: this.fxLights, room: null };
+  private readonly fxInput: FxFrameInput = { camera: null as unknown as THREE.PerspectiveCamera, dt: 1 / 60, sun: null, portalView: false, cameraInHull: false, inside: false, aboard: false, space: false, fog: null, daylight: 1, dayIndex: 0, lighting: null, planetId: '', aiming: false, aimAmount: 0, firstPerson: false, skyLights: createSkyLights(MAX_FLARE_SOURCES), skyLightCount: 0, clouds: createCloudLayers(MAX_CLOUD_LAYERS), cloudCount: 0, cameraUnderwater: false, waterInView: false, blades: this.fxBlades, lights: this.fxLights, room: null, weather: null };
   private readonly fxSun: SunInfo = { dir: new THREE.Vector3(), color: new THREE.Color(), intensity: 0 };
   /** What the debug mask draws: the player and whatever they ride or are aboard. */
   private readonly fxMaskObjects: THREE.Object3D[] = [];
@@ -290,6 +290,8 @@ class App {
     this.world.setShadowLook(S.shadowSoftness, undefined, S.shadowMapSize);
     this.world.setShadows(S.shadowDistance, S.shadowCasterRadius);
     this.world.setReach(S.objectReach, S.terrainRadius, S.farRadius);
+    // The weather's settings (the world made it; the HUD, made below, shows its note from the loop).
+    this.world.weather.configure(S);
     // A hand torch: a spot light carried at the camera, pointing where it looks. F toggles it.
     // Always in the scene and visible, turned up and down: a light that comes and goes changes the
     // light count, and that recompiles every shader in the world.
@@ -957,6 +959,48 @@ class App {
       },
       /** The converted sky's parts (the dome, the skybox faces, the stars, space dust, the sun and star sprites) and its lighting now; `sky('skybox')` and the like toggle a part to see what it contributes. */
       sky: (toggle?: 'dome' | 'skybox' | 'stars' | 'dust' | 'sprites') => this.world.swgSky?.describe(toggle) ?? 'no converted sky on this world',
+      /**
+       * The weather. No argument: the state (area, level, mix, effects, wetness, the roof grid, programs, cpuMs).
+       * A number holds a level; 'rain' | 'dust' | 'snow' (and a level, 3 by default) forces a kind; null returns
+       * to the schedule. An object: { level, kind, family, lifeDay, snap } force (merged with what is forced);
+       * { wetness, puddles, snowCover } set at once; { timeScale, skip } run or skip the schedule's clock
+       * (minutes); { find: 'moseisley' } where an area is (then __debug.teleport(x, z)); { windHeading } holds
+       * the wind (radians, null frees it); { emitters: true } adds the falling effects' emitter rows;
+       * { draw: false } skips the weather pass (to time it); { wrap: false | true } whether world materials
+       * get the wet wrap (read at load: reload to apply).
+       */
+      weather: (arg?: number | 'rain' | 'dust' | 'snow' | null | Record<string, unknown>, level?: number) => {
+        const w = this.world.weather;
+        let emitters = false;
+        if (arg === null) w.force(null);
+        else if (typeof arg === 'number') w.force({ ...(w.forcedNow ?? {}), level: arg });
+        else if (typeof arg === 'string') w.force({ ...(w.forcedNow ?? {}), kind: arg, level: level ?? 3 });
+        else if (arg && typeof arg === 'object') {
+          const o = arg as Record<string, unknown>;
+          if (typeof o.find === 'string') return this.world.terrain.swg?.environmentAreaCentre(o.find) ?? 'no such area';
+          if ('wrap' in o) {
+            try {
+              if (o.wrap === false) localStorage.setItem('swg.weather.wrap', '0');
+              else localStorage.removeItem('swg.weather.wrap');
+            } catch {
+              return 'no storage in this browser';
+            }
+            return 'reload to apply';
+          }
+          const patch: Record<string, unknown> = {};
+          for (const k of ['level', 'kind', 'family', 'lifeDay', 'snap']) if (k in o) patch[k] = o[k];
+          if (Object.keys(patch).length) w.force({ ...(w.forcedNow ?? {}), ...(patch as import('./world/weather').WeatherForce) });
+          const wet: Record<string, number> = {};
+          for (const k of ['wetness', 'puddles', 'snowCover']) if (typeof o[k] === 'number') wet[k] = o[k] as number;
+          if (Object.keys(wet).length) w.setWet(wet);
+          if (typeof o.timeScale === 'number' || typeof o.skip === 'number') w.setClock({ timeScale: typeof o.timeScale === 'number' ? o.timeScale : undefined, skipMinutes: typeof o.skip === 'number' ? o.skip : undefined });
+          if ('windHeading' in o) w.holdWind(typeof o.windHeading === 'number' ? o.windHeading : null);
+          if (typeof o.draw === 'boolean') w.drawPass = o.draw;
+          emitters = o.emitters === true;
+        }
+        this.hud.setWeatherNote(w.heldNote());
+        return w.describe({ emitters });
+      },
       /** The lens flare this frame: every source slot the sky has, whether it is on, its visibility ([smoothed, depth open, cloud transmittance]) and `turn`, the degrees right and up to face it whatever steers the view. */
       flare: () => {
         const fx = this.postfx;
@@ -1640,6 +1684,17 @@ class App {
         break;
       case 'invertY':
         this.cam.invertY = S.invertY;
+        break;
+      case 'weather':
+      case 'weatherDensity':
+      case 'wetSurfaces':
+      case 'weatherShadows':
+      case 'weatherForce':
+      case 'weatherKind':
+      case 'lifeDay':
+        // Uniforms and rates only: nothing here compiles a shader.
+        this.world.weather.configure(S);
+        this.hud.setWeatherNote(this.world.weather.heldNote());
         break;
       default:
         // Anything in the effects registry: the chain takes them all in one go on the next
@@ -2555,9 +2610,10 @@ class App {
     ra.cameraInHull = this.cameraInHull();
     ra.playerPos = this.player.pos;
     ra.sun = this.world.sunInfo(this.fxSun);
-    // The weather's overcast and dust, 0 to 1; none until the weather is drawn.
-    ra.overcast = 0;
-    ra.dust = 0;
+    // The weather's overcast and dust, 0 to 1 (0 while the weather is off).
+    const wfx = this.world.weather.state.enabled ? this.world.weather.fx : null;
+    ra.overcast = wfx ? wfx.overcast : 0;
+    ra.dust = wfx ? wfx.dust : 0;
     ra.bufferHeight = this.renderer.getDrawingBufferSize(this.roomAirBuffer).y;
     this.roomAir.update(ra);
     const info = this.renderer.info.render;
@@ -2573,6 +2629,8 @@ class App {
     this.world.beginWaterFrame(cam, this.postfx?.passWanted('waterReflections') ?? false);
     postfx?.begin();
     this.portals.render(this.scene, cam, view, this.world.buildings);
+    // The falling weather, into whatever the scene was drawn into; from inside, only through the exits.
+    this.world.weather.draw(this.renderer, cam, view !== null);
     if (postfx) {
       const f = this.fxInput;
       f.camera = cam;
@@ -2606,6 +2664,8 @@ class App {
       f.cameraUnderwater = this.world.cameraUnderwater(cam.position);
       // The room this frame is drawn from inside (RoomAir ran above, before the scene): the light shafts' input.
       f.room = this.roomAir.frame;
+      // The weather the effects fade by (the god rays and the flare in overcast), while it is on.
+      f.weather = wfx;
       // The lit blades as drawn this frame (drawBlades and the fighters' step have run), and how
       // bright a surface near them can be from every other light; aboard, floors are the hull's.
       const blades = this.fxBlades;
@@ -3315,6 +3375,11 @@ class App {
         player.takeDamage(dmg);
         this.hud.hurt();
       };
+      // The weather's view of the player: aboard rooms nothing falls; a ridden ship's box keeps rain out of its canopy.
+      this.world.aboard = !!player.aboard;
+      this.world.weatherHull = player.mounted?.spec.ship ? player.mounted : null;
+      this.world.weatherRidden = player.mounted;
+      this.hud.setWeatherNote(this.world.weather.heldNote());
       this.world.setPlayerTarget(player.worldPos, simulate && !player.noclip && !player.aboard && !this.dying && player.hp > 0, hurt);
       this.world.update(dt, player.worldPos, this.cam.camera.position, fast, hurt, simulate && !player.mounted && !player.noclip && !player.aboard ? player : null);
       // The pool serves the latest request first when it is full (flashes age only in effects.update),
@@ -3351,6 +3416,8 @@ class App {
         player.group.visible = true;
         parts.setHeadHidden(this.cam.firstPerson);
       } else player.group.visible = !this.cam.firstPerson;
+      // After the physics step and the camera: the falling weather around this frame's camera.
+      this.world.updateWeatherView(dt);
       this.world.updateShadows(performance.now());
 
       // The ship menu is where space is gone to and come back from; the prompt says when the ship is high enough.

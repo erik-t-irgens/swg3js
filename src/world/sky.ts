@@ -3,6 +3,7 @@ import type { AssetPack } from './assetPack';
 import type { DayCycle } from './daycycle';
 import { angularRadius, isFlareBody, rankStarGroups, tintScale, DISC_FILL, GLOW_FILL, MAX_FLARE_SOURCES, STAR_DISC_FILL, STAR_GLOW_FILL } from '../core/fx/flareMath';
 import type { FxCloudLayer, FxSkyLight } from '../core/fx/lensFlare';
+import { blockShadow, driftScroll, heaviestTwo, type ForcedKind, type WeatherKind } from './weatherSchedule';
 
 // The planet's sky as the original client draws it (see tools/swg/sky.mjs for the export):
 // a gradient sky texture whose columns are the time of day and rows run from the horizon up
@@ -27,16 +28,17 @@ interface Celestial {
   pitchDirection?: number;
   cycleTime?: number;
 }
-interface CloudLayer {
+export interface CloudLayer {
   file: string;
   size: number;
   speed: number;
 }
-interface CubeFaces {
+export interface CubeFaces {
   faces: string[];
   size: number;
 }
-interface SkyBlock {
+/** One row of the planet's environment table: an area (family) at one weather level. */
+export interface SkyBlock {
   name: string;
   weatherIndex: number;
   gradientSky: string | null;
@@ -48,6 +50,16 @@ interface SkyBlock {
   dayEnvironment: CubeFaces | null;
   nightEnvironment: CubeFaces | null;
   windSpeedScale: number;
+  /** The particle effect the row hangs on the camera (rain, a dust storm, snow), as the converter wrote it; absent in packs converted before. */
+  cameraEffect?: { source: string; file: string | null; kind: WeatherKind; strength: number } | null;
+  /** The row's ambient sounds and music (nothing plays them yet). */
+  sounds?: { day: (string | null)[]; night: (string | null)[]; music: Record<'first' | 'sunrise' | 'sunset', string | null> };
+}
+
+/** A block and its share of this frame's sky. */
+export interface SkyMixEntry {
+  block: SkyBlock;
+  weight: number;
 }
 export interface SkyData {
   planet: string;
@@ -64,6 +76,8 @@ export interface SkyData {
   /** A space zone's own environment, from its terrain file (see tools/swg/space.mjs). */
   space?: SpaceEnvironment | null;
   blocks: SkyBlock[];
+  /** How many weather levels the table has, and the effects any kind can be forced to (lightest first); absent in space and in packs converted before. */
+  weather?: { levels: number; effects: Record<ForcedKind, (string | null)[]> } | null;
 }
 
 /** A parallel light of a space zone: colours as the client stores them, and the frame it shines down. */
@@ -103,6 +117,10 @@ export interface SkyLighting {
   sunMoonAlpha: number;
   starAlpha: number;
   isDay: boolean;
+  /** 0..1: how much the blocks in the mix want shadows (a clear row always does; a storm row as the table says), weighted. */
+  shadowScale: number;
+  /** The mix's wind speed scale (clouds drift by it; the weather tilts rain by it). */
+  windSpeedScale: number;
 }
 
 /** Colour ramp rows, in the order the client reads them. */
@@ -192,15 +210,21 @@ const DOME_VERT = /* glsl */ `
 `;
 const DOME_FRAG = /* glsl */ `
   uniform sampler2D uGradient;
+  uniform sampler2D uGradient2;
   uniform float uTime;
   uniform float uHasGradient;
+  uniform float uHasGradient2;
+  uniform float uGradientMix;
   uniform vec3 uClear;
   uniform vec3 uHorizonFog;
   varying vec3 vDir;
   void main() {
     vec3 d = normalize(vDir);
     float up = clamp(d.y, 0.0, 0.999);
-    vec3 col = uHasGradient > 0.5 ? texture2D(uGradient, vec2(uTime, up)).rgb : uClear;
+    // Two gradients at most, crossfaded as the weather or the area changes; none is the ramp's clear colour.
+    vec3 g1 = uHasGradient > 0.5 ? texture2D(uGradient, vec2(uTime, up)).rgb : uClear;
+    vec3 g2 = uHasGradient2 > 0.5 ? texture2D(uGradient2, vec2(uTime, up)).rgb : uClear;
+    vec3 col = mix(g1, g2, uGradientMix);
     // Below the horizon the ground normally hides the dome; fade the last strip into the fog.
     col = mix(uHorizonFog, col, smoothstep(-0.03, 0.0, d.y));
     gl_FragColor = vec4(col, 1.0);
@@ -214,6 +238,21 @@ const tmpVec2 = new THREE.Vector3();
 /** Scratch for reading a ramp byte triple as a linear colour. */
 const tmpRampColor = new THREE.Color();
 const WHITE = new THREE.Color(1, 1, 1);
+/**
+ * What a sampler holds while its texture is not there (a gradient or a cloud image still loading):
+ * never null, so a program's sampler bindings never change. Shared by every sky and never disposed.
+ */
+const WHITE_TEX = (() => {
+  const t = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1, THREE.RGBAFormat);
+  t.needsUpdate = true;
+  return t;
+})();
+/** A block for a sky whose table has none. */
+const EMPTY_BLOCK: SkyBlock = { name: '_default', weatherIndex: 0, gradientSky: null, cloudBottom: null, cloudTop: null, ramp: null, shadows: true, fog: { enabled: false, min: 0, max: 0 }, dayEnvironment: null, nightEnvironment: null, windSpeedScale: 1 };
+/** What a texture is for, which decides how it wraps. */
+type TextureUse = 'gradient' | 'cloud' | 'plain';
+/** Most cloud images one altitude blends at once, and most gradient groups the dome weighs. */
+const MIX_MAX = 4;
 /**
  * The procedural dome's sun, as the lens flare sees it (world.ts's dome shader): its disc edge runs
  * from about 2.3 to 4 degrees and its glow, pow(c, 32), halves at about 12. Angular radii, radians.
@@ -251,9 +290,40 @@ export class SwgSky {
   private readonly stars: THREE.Points | null = null;
   /** Cloud sheets live outside the camera-following group: their altitude is fixed in the world. */
   readonly cloudGroup = new THREE.Group();
-  private readonly clouds: { mesh: THREE.Mesh<THREE.PlaneGeometry, THREE.ShaderMaterial>; layer: CloudLayer; altitude: number }[] = [];
+  /**
+   * A fixed pool of four sheets, bottom 0, bottom 1, top 0, top 1: each altitude blends the two
+   * heaviest cloud images of the blocks in the mix. `file` is the image a sheet shows this frame.
+   * Every sheet is built at load with the same program, so a new image never makes a material.
+   */
+  private readonly clouds: { mesh: THREE.Mesh<THREE.PlaneGeometry, THREE.ShaderMaterial>; altitude: number; file: string | null }[] = [];
+  /** Scroll of each cloud image, in texture repeats, integrated frame by frame and wrapped to [0, 1); `at` is the frame it last moved. */
+  private readonly cloudScroll = new Map<string, { s: THREE.Vector2; at: number }>();
+  /** Where the clouds drift toward (radians, 0 = +Z, turning toward +X). */
+  private windHeading = 0;
   private readonly ramps = new Map<SkyBlock, Uint8Array>();
-  private block: SkyBlock;
+  /** The table's weather-0 row (or first row): the sky before anyone sets a mix. */
+  private readonly defaultBlock: SkyBlock;
+  /** The blocks to blend this frame: `mixCount` of four kept entries, weights summing to 1. */
+  private readonly mix: SkyMixEntry[] = [];
+  private mixCount = 1;
+  /** Blocks of the table grouped by family name, lower-cased, in table order. */
+  readonly families = new Map<string, SkyBlock[]>();
+  /** Loads in flight by file, and files that failed (never asked for again). */
+  private readonly textureLoads = new Map<string, Promise<void>>();
+  private readonly failedTextures: Set<string>;
+  /** Uploads a texture as it arrives, when the weather has handed one over. */
+  private renderer: THREE.WebGLRenderer | null = null;
+  private disposed = false;
+  /** Frames drawn, so a cloud image shown at both altitudes drifts once a frame. */
+  private frameNo = 0;
+  /** Kept scratch for grouping the mix by gradient and by cloud image. */
+  private readonly groupFiles: (string | null)[] = [null, null, null, null];
+  private readonly groupWeights = new Float32Array(MIX_MAX);
+  private readonly groupLayers: (CloudLayer | null)[] = [null, null, null, null];
+  private readonly groupLayerWeights = new Float32Array(MIX_MAX);
+  /** The heaviest two groups (heaviestTwo's kept output). */
+  private readonly topTwo = new Int32Array(2);
+  private readonly cloudOrder = [0, 1, 2, 3];
   private time = 0;
   /** In space, the direction the main light comes from, fixed: the day cycle follows it instead of the sun's arc. */
   readonly spaceLightDir: THREE.Vector3 | null = null;
@@ -275,24 +345,40 @@ export class SwgSky {
     sunMoonAlpha: 1,
     starAlpha: 1,
     isDay: true,
+    shadowScale: 1,
+    windSpeedScale: 1,
   };
-  /** The cube map faces (already in this engine's handedness) the block names for reflections, by day and night. */
+  /** The cube map faces (already in this engine's handedness) the heaviest block names for reflections, by day and night; rewritten every frame. */
   readonly environment: { day: CubeFaces | null; night: CubeFaces | null };
-  readonly hasGradient: boolean;
+
+  /** Whether the heaviest block's gradient is up (a skybox planet, or one still loading, draws the clear colour). */
+  get hasGradient(): boolean {
+    const f = this.heaviest.gradientSky;
+    return !!f && this.textures.has(f);
+  }
 
   private constructor(
     readonly data: SkyData,
     private readonly textures: Map<string, THREE.Texture>,
+    private readonly pack: AssetPack,
+    failed: Set<string>,
   ) {
-    this.block = data.blocks.find((b) => b.weatherIndex === 0) ?? data.blocks[0] ?? { name: '_default', weatherIndex: 0, gradientSky: null, cloudBottom: null, cloudTop: null, ramp: null, shadows: true, fog: { enabled: false, min: 0, max: 0 }, dayEnvironment: null, nightEnvironment: null, windSpeedScale: 1 };
-    this.environment = { day: this.block.dayEnvironment, night: this.block.nightEnvironment };
-    const gradient = this.block.gradientSky ? textures.get(this.block.gradientSky) ?? null : null;
-    this.hasGradient = !!gradient;
-    if (gradient) {
-      // Columns wrap with the day; rows must not, or the zenith would wrap round to the horizon colour.
-      gradient.wrapS = THREE.RepeatWrapping;
-      gradient.wrapT = THREE.ClampToEdgeWrapping;
-      gradient.needsUpdate = true;
+    this.failedTextures = failed;
+    this.defaultBlock = data.blocks.find((b) => b.weatherIndex === 0) ?? data.blocks[0] ?? EMPTY_BLOCK;
+    for (let i = 0; i < MIX_MAX; i++) this.mix.push({ block: this.defaultBlock, weight: i === 0 ? 1 : 0 });
+    for (const b of data.blocks) {
+      const key = b.name.toLowerCase();
+      const list = this.families.get(key);
+      if (list) list.push(b);
+      else this.families.set(key, [b]);
+    }
+    this.environment = { day: this.defaultBlock.dayEnvironment, night: this.defaultBlock.nightEnvironment };
+    // What load() fetched for the default block wraps as its use asks.
+    const gradient = this.defaultBlock.gradientSky ? textures.get(this.defaultBlock.gradientSky) ?? null : null;
+    if (gradient) SwgSky.applyUse(gradient, 'gradient');
+    for (const layer of [this.defaultBlock.cloudBottom, this.defaultBlock.cloudTop]) {
+      const t = layer?.file ? textures.get(layer.file) : undefined;
+      if (t) SwgSky.applyUse(t, 'cloud');
     }
 
     // The dome: the gradient sky, or the ramp's clear colour when the planet has a skybox instead.
@@ -302,9 +388,12 @@ export class SwgSky {
         vertexShader: DOME_VERT,
         fragmentShader: DOME_FRAG,
         uniforms: {
-          uGradient: { value: gradient },
+          uGradient: { value: gradient ?? WHITE_TEX },
+          uGradient2: { value: WHITE_TEX },
           uTime: { value: 0 },
           uHasGradient: { value: gradient ? 1 : 0 },
+          uHasGradient2: { value: 0 },
+          uGradientMix: { value: 0 },
           uClear: { value: new THREE.Color(0.5, 0.5, 0.6) },
           uHorizonFog: { value: new THREE.Color(0.5, 0.5, 0.5) },
         },
@@ -539,18 +628,17 @@ export class SwgSky {
       this.group.add(this.stars);
     }
 
-    // Cloud layers: wide sheets at fixed altitudes, fading out long before their edges.
-    const cloud = (layer: CloudLayer | null, altitude: number) => {
-      const tex = layer ? textures.get(layer.file) : null;
-      if (!layer || !tex) return;
-      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+    // Cloud layers: wide sheets at fixed altitudes, fading out long before their edges. Four of
+    // them, two at each altitude, whatever the table holds: which image each shows, and how
+    // strongly, is the mix's business frame by frame (update), so none is ever made later.
+    const cloud = (altitude: number) => {
       const mat = new THREE.ShaderMaterial({
         vertexShader: CLOUD_VERT,
         fragmentShader: CLOUD_FRAG,
         uniforms: {
-          uMap: { value: tex },
+          uMap: { value: WHITE_TEX },
           uColor: { value: new THREE.Color(1, 1, 1) },
-          uOpacity: { value: 1 },
+          uOpacity: { value: 0 },
           uRepeat: { value: 1000 },
           uScroll: { value: new THREE.Vector2() },
           uCamera: { value: new THREE.Vector3() },
@@ -566,11 +654,113 @@ export class SwgSky {
       mesh.position.y = altitude;
       mesh.renderOrder = -4;
       mesh.frustumCulled = false;
+      mesh.visible = false;
       this.cloudGroup.add(mesh);
-      this.clouds.push({ mesh, layer, altitude });
+      this.clouds.push({ mesh, altitude, file: null });
     };
-    cloud(this.block.cloudBottom, CLOUD_ALTITUDES[0]);
-    cloud(this.block.cloudTop, CLOUD_ALTITUDES[1]);
+    cloud(CLOUD_ALTITUDES[0]);
+    cloud(CLOUD_ALTITUDES[0]);
+    cloud(CLOUD_ALTITUDES[1]);
+    cloud(CLOUD_ALTITUDES[1]);
+  }
+
+  /** How a texture wraps for its use: a gradient's columns wrap with the day and its rows must not; clouds tile. */
+  private static applyUse(t: THREE.Texture, use: TextureUse): void {
+    if (use === 'gradient') {
+      // Rows must not wrap, or the zenith would wrap round to the horizon colour.
+      t.wrapS = THREE.RepeatWrapping;
+      t.wrapT = THREE.ClampToEdgeWrapping;
+    } else if (use === 'cloud') t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    t.needsUpdate = true;
+  }
+
+  /** One of the sky's images, or null when it failed. */
+  private static async fetchTexture(loader: THREE.TextureLoader, pack: AssetPack, file: string): Promise<THREE.Texture | null> {
+    try {
+      const t = await loader.loadAsync(pack.url(file));
+      t.colorSpace = THREE.SRGBColorSpace;
+      t.anisotropy = 4;
+      return t;
+    } catch {
+      return null;
+    }
+  }
+
+  private readonly loader = new THREE.TextureLoader();
+
+  /** Fetch one image into the sky's set (once, however often asked); a failure is remembered and not asked for again. */
+  private loadTexture(file: string, use: TextureUse): Promise<void> {
+    if (this.textures.has(file) || this.failedTextures.has(file)) return Promise.resolve();
+    let p = this.textureLoads.get(file);
+    if (!p) {
+      p = SwgSky.fetchTexture(this.loader, this.pack, file).then((t) => {
+        this.textureLoads.delete(file);
+        if (!t) {
+          this.failedTextures.add(file);
+          console.warn(`sky: ${file} failed to load`);
+          return;
+        }
+        if (this.disposed) {
+          t.dispose();
+          return;
+        }
+        SwgSky.applyUse(t, use);
+        // Uploaded now, so no frame that draws it pays for it.
+        this.renderer?.initTexture(t);
+        this.textures.set(file, t);
+      });
+      this.textureLoads.set(file, p);
+    }
+    return p;
+  }
+
+  /** Whether a block's gradient and cloud images are loaded or have failed (a block without them is always ready). */
+  texturesReady(block: SkyBlock): boolean {
+    const done = (f: string | null | undefined) => !f || this.textures.has(f) || this.failedTextures.has(f);
+    return done(block.gradientSky) && done(block.cloudBottom?.file) && done(block.cloudTop?.file);
+  }
+
+  /** Load a block's gradient and clouds; resolves when each has loaded or failed. Each is uploaded as it arrives when a renderer is given. */
+  ensureTextures(block: SkyBlock, renderer: THREE.WebGLRenderer | null): Promise<void> {
+    if (renderer) this.renderer = renderer;
+    const jobs: Promise<void>[] = [];
+    if (block.gradientSky) jobs.push(this.loadTexture(block.gradientSky, 'gradient'));
+    if (block.cloudBottom?.file) jobs.push(this.loadTexture(block.cloudBottom.file, 'cloud'));
+    if (block.cloudTop?.file) jobs.push(this.loadTexture(block.cloudTop.file, 'cloud'));
+    return Promise.all(jobs).then(() => undefined);
+  }
+
+  /** The blocks to blend this frame (count <= 4, weights summing to 1). Copies; allocates nothing. None at all keeps the default block. */
+  setMix(blocks: readonly SkyBlock[], weights: ArrayLike<number>, count: number): void {
+    const n = Math.min(MIX_MAX, count);
+    if (n <= 0) {
+      this.mix[0].block = this.defaultBlock;
+      this.mix[0].weight = 1;
+      this.mixCount = 1;
+      return;
+    }
+    for (let i = 0; i < n; i++) {
+      this.mix[i].block = blocks[i];
+      this.mix[i].weight = weights[i];
+    }
+    this.mixCount = n;
+  }
+
+  /** Where the clouds drift toward (radians, 0 = +Z, turning toward +X). */
+  setWind(heading: number): void {
+    this.windHeading = heading;
+  }
+
+  /** Forget every cloud image's drift. */
+  resetClouds(): void {
+    this.cloudScroll.clear();
+  }
+
+  /** The heaviest block now, for the console, the environment map and the water's peak. */
+  get heaviest(): SkyBlock {
+    let best = this.mix[0];
+    for (let i = 1; i < this.mixCount; i++) if (this.mix[i].weight > best.weight) best = this.mix[i];
+    return best.block;
   }
 
   /** Load the pack's sky, or null when it has none. */
@@ -597,19 +787,18 @@ export class SwgSky {
     for (const f of data.skybox?.cube?.faces ?? []) if (f) files.add(f);
     const loader = new THREE.TextureLoader();
     const textures = new Map<string, THREE.Texture>();
+    const failed = new Set<string>();
     await Promise.all(
       [...files].map(async (f) => {
-        try {
-          const t = await loader.loadAsync(pack.url(f));
-          t.colorSpace = THREE.SRGBColorSpace;
-          t.anisotropy = 4;
-          textures.set(f, t);
-        } catch {
+        const t = await SwgSky.fetchTexture(loader, pack, f);
+        if (t) textures.set(f, t);
+        else {
+          failed.add(f);
           console.warn(`sky: ${f} failed to load`);
         }
       }),
     );
-    return new SwgSky(data, textures);
+    return new SwgSky(data, textures, pack, failed);
   }
 
   private rampBytes(block: SkyBlock): Uint8Array | null {
@@ -622,44 +811,68 @@ export class SwgSky {
     return r;
   }
 
+  /** A ramp colour, weighted over the mix in linear light: each block reads its own bytes (the fallback where it has no such row). */
   private rampColor(row: number, index: number, out: THREE.Color, fallback: number): THREE.Color {
-    const r = this.rampBytes(this.block);
-    if (!r || row >= this.block.ramp!.rows) return out.setScalar(fallback);
-    const o = (row * 256 + index) * 4;
-    return out.setRGB(r[o] / 255, r[o + 1] / 255, r[o + 2] / 255, THREE.SRGBColorSpace);
+    let r = 0;
+    let g = 0;
+    let b = 0;
+    for (let i = 0; i < this.mixCount; i++) {
+      const e = this.mix[i];
+      const bytes = this.rampBytes(e.block);
+      if (!bytes || row >= e.block.ramp!.rows) tmpRampColor.setScalar(fallback);
+      else {
+        const o = (row * 256 + index) * 4;
+        tmpRampColor.setRGB(bytes[o] / 255, bytes[o + 1] / 255, bytes[o + 2] / 255, THREE.SRGBColorSpace);
+      }
+      r += tmpRampColor.r * e.weight;
+      g += tmpRampColor.g * e.weight;
+      b += tmpRampColor.b * e.weight;
+    }
+    return out.setRGB(r, g, b);
   }
 
   /**
-   * The brightest the clear colour gets over the whole day (the ramp's clear row), as linear
-   * luminance; 0 without a ramp. A static reflection cube is dimmed against it at night, so it
-   * cannot go on glowing with a daytime sheen. Computed once per sky.
+   * The brightest the clear colour gets over the whole day (the heaviest block's clear row), as
+   * linear luminance; 0 without a ramp. A static reflection cube is dimmed against it at night, so
+   * it cannot go on glowing with a daytime sheen. Computed once per block.
    */
   clearPeakLuminance(): number {
-    if (this.clearPeak !== null) return this.clearPeak;
-    const r = this.rampBytes(this.block);
+    const block = this.heaviest;
+    const cached = this.clearPeaks.get(block);
+    if (cached !== undefined) return cached;
+    const r = this.rampBytes(block);
     let peak = 0;
-    if (r && this.block.ramp!.rows > Row.Clear) {
+    if (r && block.ramp!.rows > Row.Clear) {
       for (let i = 0; i < 256; i++) {
         const o = (Row.Clear * 256 + i) * 4;
         tmpRampColor.setRGB(r[o] / 255, r[o + 1] / 255, r[o + 2] / 255, THREE.SRGBColorSpace);
         peak = Math.max(peak, 0.2126 * tmpRampColor.r + 0.7152 * tmpRampColor.g + 0.0722 * tmpRampColor.b);
       }
     }
-    return (this.clearPeak = peak);
+    this.clearPeaks.set(block, peak);
+    return peak;
   }
-  private clearPeak: number | null = null;
+  private readonly clearPeaks = new Map<SkyBlock, number>();
 
   private rampAlpha(row: number, index: number, fallback = 1): number {
-    const r = this.rampBytes(this.block);
-    if (!r || row >= this.block.ramp!.rows) return fallback;
-    return r[(row * 256 + index) * 4 + 3] / 255;
+    let a = 0;
+    for (let i = 0; i < this.mixCount; i++) {
+      const e = this.mix[i];
+      const r = this.rampBytes(e.block);
+      a += (!r || row >= e.block.ramp!.rows ? fallback : r[(row * 256 + index) * 4 + 3] / 255) * e.weight;
+    }
+    return a;
   }
 
-  /** Light scale stored in a ramp row's alpha: 4 * (alpha - 128) / 128. */
+  /** Light scale stored in a ramp row's alpha: 4 * (alpha - 128) / 128, weighted over the mix. */
   private rampScale(row: number, index: number): number {
-    const r = this.rampBytes(this.block);
-    if (!r || row >= this.block.ramp!.rows) return 1;
-    return Math.max(0, (LIGHT_SCALE * (r[(row * 256 + index) * 4 + 3] - 128)) / 128);
+    let s = 0;
+    for (let i = 0; i < this.mixCount; i++) {
+      const e = this.mix[i];
+      const r = this.rampBytes(e.block);
+      s += (!r || row >= e.block.ramp!.rows ? 1 : Math.max(0, (LIGHT_SCALE * (r[(row * 256 + index) * 4 + 3] - 128)) / 128)) * e.weight;
+    }
+    return s;
   }
 
   /** Place a sky body's sprites along a direction from the camera. */
@@ -718,8 +931,25 @@ export class SwgSky {
     this.rampColor(Row.Fog, index, L.fog, 0.5);
     L.sunMoonAlpha = this.rampAlpha(Row.Clear, index, 1);
     L.starAlpha = this.rampAlpha(Row.Fog, index, day.isDay ? 0 : 1);
-    const fog = this.block.fog;
-    L.fogDensity = fog.enabled ? THREE.MathUtils.lerp(fog.min, fog.max, THREE.MathUtils.clamp((CLIENT_FAR_PLANE - 512) / (2048 - 512), 0, 1)) : 0;
+    // Fog, shadows and wind blend over the mix like the colours.
+    const farT = THREE.MathUtils.clamp((CLIENT_FAR_PLANE - 512) / (2048 - 512), 0, 1);
+    let fogDensity = 0;
+    let shadowScale = 0;
+    let wind = 0;
+    for (let i = 0; i < this.mixCount; i++) {
+      const e = this.mix[i];
+      const b = e.block;
+      if (b.fog.enabled) fogDensity += THREE.MathUtils.lerp(b.fog.min, b.fog.max, farT) * e.weight;
+      shadowScale += blockShadow(b.weatherIndex, b.shadows) * e.weight;
+      wind += b.windSpeedScale * e.weight;
+    }
+    L.fogDensity = fogDensity;
+    L.shadowScale = shadowScale;
+    L.windSpeedScale = wind;
+    // Reflections follow the heaviest block (World loads a cube by its first face).
+    const heavy = this.heaviest;
+    this.environment.day = heavy.dayEnvironment;
+    this.environment.night = heavy.nightEnvironment;
     const space = this.data.space;
     if (space) {
       // The zone's own lights, as its terrain file gives them, at every hour: no day here.
@@ -739,12 +969,16 @@ export class SwgSky {
       L.sunMoonAlpha = 0;
       L.starAlpha = 1;
       L.isDay = true;
+      L.shadowScale = 1;
+      L.windSpeedScale = 0;
     }
 
     const u = this.dome.material.uniforms;
     u.uTime.value = t;
     (u.uClear.value as THREE.Color).copy(L.clear);
     (u.uHorizonFog.value as THREE.Color).copy(L.fog);
+    this.updateGradients();
+    this.frameNo++;
 
     // The sun rides the main light by day, the moon by night; the other one waits below the horizon.
     const lightDir = day.lightDir;
@@ -806,21 +1040,134 @@ export class SwgSky {
       } else dust.last = camPos.clone();
     }
     this.cloudGroup.position.set(camPos.x, 0, camPos.z);
-    for (const c of this.clouds) {
+    this.updateClouds(0, L, day.isDay, camPos, dt);
+    this.updateClouds(1, L, day.isDay, camPos, dt);
+    return L;
+  }
+
+  /**
+   * The dome's two gradients: the mix grouped by gradient file (no gradient is a group of its own,
+   * drawn as the clear colour), the two heaviest groups crossfaded. A gradient still loading counts
+   * as the clear colour until it arrives, and its load is asked for.
+   */
+  private updateGradients(): void {
+    const files = this.groupFiles;
+    const w = this.groupWeights;
+    let n = 0;
+    for (let i = 0; i < this.mixCount; i++) {
+      const e = this.mix[i];
+      const f = e.block.gradientSky;
+      let k = 0;
+      while (k < n && files[k] !== f) k++;
+      if (k === n) {
+        files[n] = f;
+        w[n] = 0;
+        n++;
+      }
+      w[k] += e.weight;
+    }
+    const top = heaviestTwo(w, n, this.topTwo);
+    const a = top[0];
+    const b = top[1];
+    const u = this.dome.material.uniforms;
+    const ta = this.gradientTexture(a >= 0 ? files[a] : null);
+    const tb = this.gradientTexture(b >= 0 ? files[b] : null);
+    u.uGradient.value = ta ?? WHITE_TEX;
+    u.uHasGradient.value = ta ? 1 : 0;
+    u.uGradient2.value = tb ?? WHITE_TEX;
+    u.uHasGradient2.value = tb ? 1 : 0;
+    u.uGradientMix.value = b >= 0 && w[a] + w[b] > 0 ? w[b] / (w[a] + w[b]) : 0;
+  }
+
+  /** A gradient's texture when it is up; one still to come is asked for. */
+  private gradientTexture(f: string | null): THREE.Texture | null {
+    if (!f) return null;
+    const t = this.textures.get(f);
+    if (!t && !this.failedTextures.has(f) && !this.textureLoads.has(f)) void this.loadTexture(f, 'gradient');
+    return t ?? null;
+  }
+
+  /**
+   * One altitude's two sheets (slot 0 the lower, 1 the upper): the mix's cloud images there summed
+   * by weight, the heaviest on the first sheet and the next on the second, each at its summed
+   * weight. A block with no layer at this altitude adds nothing, so the clouds thin as a storm
+   * without clouds comes in. Each image drifts by its own integrated scroll, so a wind that
+   * strengthens speeds the clouds up without a jump, and two sheets swapping images keep theirs.
+   */
+  private updateClouds(slot: 0 | 1, L: SkyLighting, isDay: boolean, camPos: THREE.Vector3, dt: number): void {
+    const files = this.groupFiles;
+    const w = this.groupWeights;
+    const layers = this.groupLayers;
+    const lw = this.groupLayerWeights;
+    let n = 0;
+    for (let i = 0; i < this.mixCount; i++) {
+      const e = this.mix[i];
+      const layer = slot === 0 ? e.block.cloudBottom : e.block.cloudTop;
+      if (!layer?.file || !(e.weight > 0)) continue;
+      let k = 0;
+      while (k < n && files[k] !== layer.file) k++;
+      if (k === n) {
+        files[n] = layer.file;
+        w[n] = 0;
+        layers[n] = layer;
+        lw[n] = -1;
+        n++;
+      }
+      w[k] += e.weight;
+      // The image's repeat and speed come from the heaviest block that names it.
+      if (e.weight > lw[k]) {
+        lw[k] = e.weight;
+        layers[k] = layer;
+      }
+    }
+    const top = heaviestTwo(w, n, this.topTwo);
+    const a = top[0];
+    const b = top[1];
+    for (let m = 0; m < 2; m++) {
+      const c = this.clouds[slot * 2 + m];
       const u = c.mesh.material.uniforms;
-      const scale = (c.altitude / CLIENT_CLOUD_HEIGHT) * CLOUD_SIZE_TRIM;
-      const repeat = Math.max(1, c.layer.size || 8) * scale;
-      u.uRepeat.value = repeat;
-      // Drift in texture repeats per second: the client's wind, but never quite still.
-      const perSecond = Math.max((c.layer.speed * this.block.windSpeedScale) / Math.max(1, c.layer.size || 8), CLOUD_MIN_DRIFT);
-      const drift = this.time * perSecond;
-      (u.uScroll.value as THREE.Vector2).set(drift, drift * 0.35);
+      const k = m === 0 ? a : b;
+      if (k < 0) {
+        c.file = null;
+        c.mesh.visible = false;
+        u.uOpacity.value = 0;
+        u.uMap.value = WHITE_TEX;
+        continue;
+      }
+      const file = files[k]!;
+      const layer = layers[k]!;
+      c.file = file;
+      const tex = this.textures.get(file);
+      if (!tex) {
+        // Still coming: nothing shows until it has arrived.
+        if (!this.failedTextures.has(file) && !this.textureLoads.has(file)) void this.loadTexture(file, 'cloud');
+        c.mesh.visible = false;
+        u.uOpacity.value = 0;
+        u.uMap.value = WHITE_TEX;
+        continue;
+      }
+      const size = Math.max(1, layer.size || 8);
+      let scroll = this.cloudScroll.get(file);
+      if (!scroll) {
+        scroll = { s: new THREE.Vector2(), at: -1 };
+        this.cloudScroll.set(file, scroll);
+      }
+      if (scroll.at !== this.frameNo) {
+        // Drift in texture repeats per second: the client's wind, but never quite still.
+        scroll.at = this.frameNo;
+        const perSecond = Math.max((layer.speed * L.windSpeedScale) / size, CLOUD_MIN_DRIFT);
+        // Toward the wind's heading, as the rain leans and the dust blows.
+        driftScroll(scroll.s, this.windHeading, perSecond, dt);
+      }
+      u.uMap.value = tex;
+      u.uOpacity.value = w[k];
+      u.uRepeat.value = size * (c.altitude / CLIENT_CLOUD_HEIGHT) * CLOUD_SIZE_TRIM;
+      (u.uScroll.value as THREE.Vector2).copy(scroll.s);
       (u.uCamera.value as THREE.Vector3).copy(camPos);
       // White by day and grey by night in the client, lit by the main light's colour.
-      (u.uColor.value as THREE.Color).copy(L.main).multiplyScalar(day.isDay ? 1 : 0.5);
-      u.uOpacity.value = 1;
+      (u.uColor.value as THREE.Color).copy(L.main).multiplyScalar(isDay ? 1 : 0.5);
+      c.mesh.visible = w[k] > 0.002;
     }
-    return L;
   }
 
   /**
@@ -886,12 +1233,29 @@ export class SwgSky {
     return n;
   }
 
-  /** The cloud sheets drawn this frame (hidden or empty ones skipped), up to out.length; returns how many. Allocates nothing. */
+  private cloudOpacity(i: number): number {
+    return this.clouds[i].mesh.material.uniforms.uOpacity.value as number;
+  }
+
+  /** The cloud sheets drawn this frame, heaviest first (hidden or empty ones skipped), up to out.length; returns how many. Allocates nothing. */
   cloudLayers(out: readonly FxCloudLayer[]): number {
     if (!this.cloudGroup.visible) return 0;
+    // The pool's sheets by opacity, heaviest first (an insertion sort of four kept indices).
+    const order = this.cloudOrder;
+    for (let i = 0; i < order.length; i++) order[i] = i;
+    for (let i = 1; i < order.length; i++) {
+      const k = order[i];
+      const ok = this.cloudOpacity(k);
+      let j = i - 1;
+      while (j >= 0 && this.cloudOpacity(order[j]) < ok) {
+        order[j + 1] = order[j];
+        j--;
+      }
+      order[j + 1] = k;
+    }
     let n = 0;
-    for (let i = 0; i < this.clouds.length && n < out.length; i++) {
-      const mesh = this.clouds[i].mesh;
+    for (let i = 0; i < order.length && n < out.length; i++) {
+      const mesh = this.clouds[order[i]].mesh;
       const u = mesh.material.uniforms;
       const tex = u.uMap.value as THREE.Texture | null;
       const opacity = u.uOpacity.value as number;
@@ -922,9 +1286,21 @@ export class SwgSky {
       const img = map?.image as { width?: number; height?: number } | undefined;
       return `${img?.width ?? '?'}x${img?.height ?? '?'}${m.visible ? '' : ' hidden'}`;
     }) : [];
+    const du = this.dome.material.uniforms;
+    const gradientName = (tex: unknown, on: number) => {
+      if (!on) return null;
+      for (const [f, t] of this.textures) if (t === tex) return f;
+      return null;
+    };
+    const mix: string[] = [];
+    for (let i = 0; i < this.mixCount; i++) mix.push(`${this.mix[i].block.name} w${this.mix[i].block.weatherIndex} ${this.mix[i].weight.toFixed(2)}`);
+    const clouds = this.clouds.filter((c) => c.mesh.visible && c.file).map((c) => `${c.altitude === CLOUD_ALTITUDES[0] ? 'bottom' : 'top'} ${c.file!.replace(/^.*\//, '').replace(/\.\w+$/, '')} ${(c.mesh.material.uniforms.uOpacity.value as number).toFixed(2)}`);
     return {
-      block: this.block.name,
-      gradient: this.block.gradientSky,
+      mix,
+      gradients: [gradientName(du.uGradient.value, du.uHasGradient.value as number), gradientName(du.uGradient2.value, du.uHasGradient2.value as number), Number((du.uGradientMix.value as number).toFixed(2))],
+      clouds,
+      shadows: Number(this.lighting.shadowScale.toFixed(2)),
+      wind: Number(this.lighting.windSpeedScale.toFixed(2)),
       dome: this.dome.visible,
       skybox: this.skybox ? `${faces.length} faces: ${faces.join(', ')}${this.skybox.visible ? '' : ' (hidden)'}` : 'none',
       stars: this.stars ? `${(this.stars.geometry.getAttribute('position') as THREE.BufferAttribute).count}${this.stars.visible ? '' : ' hidden'}` : 'none',
@@ -937,6 +1313,8 @@ export class SwgSky {
   }
 
   dispose(scene: THREE.Scene): void {
+    // A texture still loading is thrown away when it lands.
+    this.disposed = true;
     scene.remove(this.group, this.cloudGroup);
     for (const c of this.clouds) {
       c.mesh.geometry.dispose();
