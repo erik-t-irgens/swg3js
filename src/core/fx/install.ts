@@ -13,6 +13,7 @@ import { SsaoPass, ssaoHostFor } from './ssao';
 import { installHeatHaze } from './heat';
 import type { HeatSources } from '../../world/heatSources';
 import { LensFlarePass } from './lensFlare';
+import { LightShaftsPass } from './lightShafts';
 
 export interface FxInstallDeps {
   /** The water bodies whose mask and reflections the effects draw (`World.waterBodies`). */
@@ -36,4 +37,6 @@ export function installEffects(postfx: PostFX, deps: FxInstallDeps = {}): void {
   if (deps.water) installWaterReflections(postfx, deps.water);
   // The heat haze, when the game hands over what gives off heat.
   if (deps.heat) installHeatHaze(postfx, deps.heat);
+  // The room's air needs nothing from the game here: it reads RoomAir's frame through the frame context.
+  postfx.registerPass(new LightShaftsPass());
 }

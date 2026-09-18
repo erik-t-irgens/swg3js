@@ -7,6 +7,7 @@ import type { SkyLighting } from '../../world/sky';
 import { UNSET_BLADES, type FxBladeList } from './bladeList';
 import { createFxLights, type FxLights } from './lights';
 import type { FxCloudLayer, FxSkyLight } from './lensFlare';
+import type { RoomAirFrame } from '../../world/roomAir';
 
 /** The sun as the world knows it: which way it lies (towards it), its colour, and how much daylight there is (0 at night, and in space). */
 export interface SunInfo {
@@ -52,6 +53,8 @@ export interface FxFrameInput {
   blades: FxBladeList;
   /** The frame's lights, both passes' sets (src/core/fx/lights.ts): the game's kept record, refilled in drawFrame after the scene is drawn. */
   lights: FxLights;
+  /** RoomAir.frame: the room this frame is drawn from inside, or null. */
+  room: RoomAirFrame | null;
 }
 
 /** The sun as the effects want it, with its place on the screen worked out. */
@@ -126,6 +129,8 @@ export interface FxFrameContext {
   clouds: readonly FxCloudLayer[];
   cloudCount: number;
   cameraUnderwater: boolean;
+  /** The room this frame is drawn from inside (`RoomAir.frame`), or null. */
+  room: RoomAirFrame | null;
   /** The pass whose own working texture the debug view is showing, so it keeps it this frame. */
   debugViewPass: FxPassId | null;
   /** The sun record `sun` points at, kept so a frame allocates nothing; never read it directly. */
@@ -189,6 +194,7 @@ export function createContext(renderer: THREE.WebGLRenderer, settings: FxSetting
     clouds: [],
     cloudCount: 0,
     cameraUnderwater: false,
+    room: null,
     debugViewPass: null,
     sunStore: { dir: new THREE.Vector3(), color: new THREE.Color(), intensity: 0, screen: new THREE.Vector2(0.5, 0.5), behind: false, fade: 0 },
   };
@@ -260,4 +266,5 @@ export function updateContext(ctx: FxFrameContext, input: FxFrameInput, size: TH
   ctx.clouds = input.clouds;
   ctx.cloudCount = input.cloudCount;
   ctx.cameraUnderwater = input.cameraUnderwater;
+  ctx.room = input.room;
 }

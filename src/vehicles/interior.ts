@@ -37,6 +37,8 @@ export interface RoomLight {
   color: number;
   intensity: number;
   distance: number;
+  /** The room the light belongs to, for keeping its glow inside that room; absent on the world-space copies `roomLights` returns. */
+  cell?: number;
 }
 
 /** What names the way in among a room's hardpoints. */
@@ -372,7 +374,7 @@ export class ShipInterior {
             break;
           }
         }
-        this.lights.push({ pos: new THREE.Vector3(l.position[0], l.position[1], l.position[2]).add(modelOffset), color: new THREE.Color(l.color[0], l.color[1], l.color[2]).getHex(), intensity: 9 * at3 * ROOM_LIGHT_SCALE, distance: range });
+        this.lights.push({ pos: new THREE.Vector3(l.position[0], l.position[1], l.position[2]).add(modelOffset), color: new THREE.Color(l.color[0], l.color[1], l.color[2]).getHex(), intensity: 9 * at3 * ROOM_LIGHT_SCALE, distance: range, cell: c.index });
       }
     }
     if (this.lights.length) console.info(`ship interior: ${this.lights.length} room lights`);
@@ -407,6 +409,23 @@ export class ShipInterior {
       }
     }
     return best;
+  }
+
+  /** A room's box in the hull's frame as measured from its meshes (the manifest's boxes are in the model's frame), or null. */
+  cellBox(index: number): THREE.Box3 | null {
+    return this.cellBoxes.get(index) ?? null;
+  }
+
+  /** The rooms a room opens onto, by the manifest's portals (both directions); none when the manifest has no portals. Allocates; callers keep the answer. */
+  neighbourCells(index: number): number[] {
+    const out: number[] = [];
+    for (const c of this.def.cells ?? []) {
+      for (const p of c.portals ?? []) {
+        if (c.index === index && p.target > 0 && p.target !== index && !out.includes(p.target)) out.push(p.target);
+        if (p.target === index && c.index > 0 && c.index !== index && !out.includes(c.index)) out.push(c.index);
+      }
+    }
+    return out;
   }
 
   /**

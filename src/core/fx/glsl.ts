@@ -130,3 +130,36 @@ export const FX_BILATERAL_UPSAMPLE = /* glsl */ `
     return (texelFetch(tHalf, t00, 0) * w.x + texelFetch(tHalf, t10, 0) * w.y + texelFetch(tHalf, t01, 0) * w.z + texelFetch(tHalf, t11, 0) * w.w) / sum;
   }
 `;
+
+/** fxSlab: [tmin, tmax] of o + s d inside the box lo..hi (empty when tmin >= tmax). */
+export const FX_SLAB = /* glsl */ `
+  vec2 fxSlab(vec3 o, vec3 d, vec3 lo, vec3 hi) {
+    vec3 safe = mix(d, vec3(1e-6), lessThan(abs(d), vec3(1e-6)));
+    vec3 inv = 1.0 / safe;
+    vec3 t0 = (lo - o) * inv, t1 = (hi - o) * inv;
+    vec3 tmin = min(t0, t1), tmax = max(t0, t1);
+    return vec2(max(max(tmin.x, tmin.y), tmin.z), min(min(tmax.x, tmax.y), tmax.z));
+  }
+`;
+
+/** fxSoftBand: 1 inside 0..1, easing to 0 across +-e at each end. */
+export const FX_SOFT_BAND = /* glsl */ `
+  float fxSoftBand(float x, float e) { return smoothstep(-e, e, x) * smoothstep(-e, e, 1.0 - x); }
+`;
+
+/** fxVnoise (needs FX_HASH): value noise, 0 to 1, mean 0.5. */
+export const FX_VNOISE = /* glsl */ `
+  float fxVnoise(vec2 p) {
+    vec2 i = floor(p), f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(fxHash(i), fxHash(i + vec2(1.0, 0.0)), f.x), mix(fxHash(i + vec2(0.0, 1.0)), fxHash(i + vec2(1.0, 1.0)), f.x), f.y);
+  }
+`;
+
+/** fxPhaseHG: Henyey-Greenstein without the 1/4pi, so it averages 1 over the sphere; cosT = 1 is forward scattering. */
+export const FX_PHASE_HG = /* glsl */ `
+  float fxPhaseHG(float cosT, float g) {
+    float g2 = g * g;
+    return (1.0 - g2) / pow(max(1.0 + g2 - 2.0 * g * cosT, 1e-4), 1.5);
+  }
+`;

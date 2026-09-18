@@ -215,6 +215,54 @@ export class Physics {
     return { point: [from.x + ray.dir.x * t, from.y + ray.dir.y * t, from.z + ray.dir.z * t], normal: [hit.normal.x, hit.normal.y, hit.normal.z] };
   }
 
+  /** The rays the room's air casts every frame, kept rather than made per call, and the one predicate both use. */
+  private readonly outdoorRay = new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: 1, z: 0 });
+  private readonly segmentRay = new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: 1, z: 0 });
+  private readonly fixedOnly = (c: RAPIER.Collider): boolean => {
+    const b = c.parent();
+    return !b || b.isFixed();
+  };
+
+  /**
+   * Whether something fixed outdoors (the ground, a building's shell, a placed object) lies along a
+   * ray, for whether a doorway is in the sun: rooms (Group.interior) are left out, since a room can
+   * reach outside its shell. Hits closer than `minToi` are ignored, so a ray starting on a wall's
+   * face does not count the wall. Nothing that moves ever shades. The engine still wraps the ray's
+   * vectors on every cast; this makes no objects of its own.
+   */
+  outdoorBlocked(from: { x: number; y: number; z: number }, dir: { x: number; y: number; z: number }, len: number, minToi = 0.05): boolean {
+    const r = this.outdoorRay;
+    r.origin.x = from.x + dir.x * minToi;
+    r.origin.y = from.y + dir.y * minToi;
+    r.origin.z = from.z + dir.z * minToi;
+    r.dir.x = dir.x;
+    r.dir.y = dir.y;
+    r.dir.z = dir.z;
+    return this.world.castRay(r, len, true, undefined, groups(Group.all, Group.terrain | Group.exterior), undefined, undefined, this.fixedOnly) !== null;
+  }
+
+  /**
+   * Whether a fixed collider lies on the segment between two points (never a moving body), for
+   * whether a lamp is in sight. With `inside`, the ground and building shells are ignored, as
+   * cameraBlock does for a camera inside a building. Makes no objects of its own.
+   */
+  segmentBlocked(from: { x: number; y: number; z: number }, to: { x: number; y: number; z: number }, inside: boolean): boolean {
+    const dx = to.x - from.x;
+    const dy = to.y - from.y;
+    const dz = to.z - from.z;
+    const len = Math.hypot(dx, dy, dz);
+    if (len < 1e-4) return false;
+    const r = this.segmentRay;
+    r.origin.x = from.x;
+    r.origin.y = from.y;
+    r.origin.z = from.z;
+    r.dir.x = dx / len;
+    r.dir.y = dy / len;
+    r.dir.z = dz / len;
+    const filter = inside ? groups(Group.all, Group.all & ~(Group.terrain | Group.exterior)) : groups(Group.all, Group.all);
+    return this.world.castRay(r, len, true, undefined, filter, undefined, undefined, this.fixedOnly) !== null;
+  }
+
   /** A static cylinder, or null for a degenerate one (the physics engine aborts on non-positive or NaN sizes). */
   createStaticCylinder(x: number, y: number, z: number, radius: number, halfHeight: number): RAPIER.Collider | null {
     if (![x, y, z, radius, halfHeight].every(Number.isFinite) || radius <= 0.01 || halfHeight <= 0.01) return null;

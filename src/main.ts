@@ -64,6 +64,7 @@ import { deleteCharacter, loadCharacters, newCharacterId, upsertCharacter, type 
 import { FRAME_NUDGE, Garage, type VehicleDef } from './vehicles/garage';
 import type { Vehicle, VehicleKind } from './vehicles/vehicle';
 import { World } from './world/world';
+import { RoomAir, type RoomAirDebugOptions, type RoomAirInput } from './world/roomAir';
 import { RANGE } from './world/gallery';
 
 /** The keys for the vehicle ridden, by its kind. */
@@ -206,7 +207,7 @@ class App {
   /** What the blades' light ceiling reads, kept and refilled each frame; the world and the pool are set in the constructor. */
   private readonly litSources: LitSources = { world: null!, effects: null!, torch: null, eye: new THREE.Vector3() };
   /** What the effects are told about each frame, refilled in drawFrame rather than made again. */
-  private readonly fxInput: FxFrameInput = { camera: null as unknown as THREE.PerspectiveCamera, dt: 1 / 60, sun: null, portalView: false, cameraInHull: false, inside: false, aboard: false, space: false, fog: null, daylight: 1, dayIndex: 0, lighting: null, planetId: '', aiming: false, aimAmount: 0, firstPerson: false, skyLights: createSkyLights(MAX_FLARE_SOURCES), skyLightCount: 0, clouds: createCloudLayers(MAX_CLOUD_LAYERS), cloudCount: 0, cameraUnderwater: false, waterInView: false, blades: this.fxBlades, lights: this.fxLights };
+  private readonly fxInput: FxFrameInput = { camera: null as unknown as THREE.PerspectiveCamera, dt: 1 / 60, sun: null, portalView: false, cameraInHull: false, inside: false, aboard: false, space: false, fog: null, daylight: 1, dayIndex: 0, lighting: null, planetId: '', aiming: false, aimAmount: 0, firstPerson: false, skyLights: createSkyLights(MAX_FLARE_SOURCES), skyLightCount: 0, clouds: createCloudLayers(MAX_CLOUD_LAYERS), cloudCount: 0, cameraUnderwater: false, waterInView: false, blades: this.fxBlades, lights: this.fxLights, room: null };
   private readonly fxSun: SunInfo = { dir: new THREE.Vector3(), color: new THREE.Color(), intensity: 0 };
   /** What the debug mask draws: the player and whatever they ride or are aboard. */
   private readonly fxMaskObjects: THREE.Object3D[] = [];
@@ -237,6 +238,10 @@ class App {
   /** Animation mixers of models shown through the debug hook. */
   private readonly shown: THREE.AnimationMixer[] = [];
   private readonly portals: PortalRenderer;
+  /** The air of the room the camera is in (daylight through its doorways, its lamps' glow, dust motes), and what it is told each frame. */
+  private readonly roomAir: RoomAir;
+  private readonly roomAirInput: RoomAirInput;
+  private readonly roomAirBuffer = new THREE.Vector2();
 
   constructor(private readonly physics: Physics) {
     this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true, powerPreference: 'high-performance', stencil: true });
@@ -296,6 +301,10 @@ class App {
     if (!S.shadows) this.world.setShadowsEnabled(false);
     this.player = new Player(this.scene, physics);
     this.effects = new Effects(this.scene);
+    // The room's air reads the world, the portal renderer and the player, all assigned above; its
+    // motes join the scene now, hidden, so the loading screen's warm-up compiles them.
+    this.roomAir = new RoomAir(this.scene, this.world, this.portals, this.settings);
+    this.roomAirInput = { dt: 0, camera: this.cam.camera, view: null, cell: null, aboard: null, cameraInHull: false, playerPos: this.player.pos, sun: null, overcast: 0, dust: 0, bufferHeight: 1 };
     this.litSources.world = this.world;
     this.litSources.effects = this.effects;
     this.scene.add(this.marks.mesh);
@@ -421,6 +430,12 @@ class App {
         this.cam.distance = distance;
       },
       cell: () => (this.world.cellState ? { model: this.world.cellState.building.model.def.id, cell: this.world.cellState.cell } : null),
+      /** The room's air (see the README): the room, its doorway beams, its lamps and motes. With options, retunes or switches the debug views first. */
+      roomAir: (opts?: RoomAirDebugOptions) => {
+        const d = opts ? this.roomAir.debug(opts) : this.roomAir.describe();
+        const pass = this.postfx?.describe().passes.find((p) => p.id === 'lightShafts') ?? null;
+        return { ...d, effects: !!this.postfx, pass };
+      },
       passes: () => this.portals.passes,
       /** The effects chain: every pass with its setting, whether it drew, why not, and what it cost. `postfx({ godRays: false })` forces one off, `{ godRays: null }` gives it back to the settings. */
       postfx: (changes?: Partial<Record<FxPassId, boolean | null>>) => {
@@ -2529,6 +2544,22 @@ class App {
     cam.updateMatrixWorld();
     const eye = this.player.pos.clone().setY(this.player.pos.y + 1.5);
     const view = this.portals.cameraBuilding(this.world.cellState, eye, cam.position, this.world.buildings);
+    // The room's air, before the scene is drawn (its motes are in it): which room this frame is
+    // drawn from, its doorway beams, its lamps and its motes. The effects read it after, in the fill below.
+    const ra = this.roomAirInput;
+    ra.dt = this.lastDt;
+    ra.camera = cam;
+    ra.view = view;
+    ra.cell = this.world.cellState;
+    ra.aboard = this.player.aboard;
+    ra.cameraInHull = this.cameraInHull();
+    ra.playerPos = this.player.pos;
+    ra.sun = this.world.sunInfo(this.fxSun);
+    // The weather's overcast and dust, 0 to 1; none until the weather is drawn.
+    ra.overcast = 0;
+    ra.dust = 0;
+    ra.bufferHeight = this.renderer.getDrawingBufferSize(this.roomAirBuffer).y;
+    this.roomAir.update(ra);
     const info = this.renderer.info.render;
     // Every renderer.render() resets these, so sum them as the passes go by.
     const auto = this.renderer.info.autoReset;
@@ -2573,6 +2604,8 @@ class App {
       f.skyLightCount = this.world.skyLights(f.skyLights, flareLook.nightSuns);
       f.cloudCount = this.world.cloudLayers(f.clouds);
       f.cameraUnderwater = this.world.cameraUnderwater(cam.position);
+      // The room this frame is drawn from inside (RoomAir ran above, before the scene): the light shafts' input.
+      f.room = this.roomAir.frame;
       // The lit blades as drawn this frame (drawBlades and the fighters' step have run), and how
       // bright a surface near them can be from every other light; aboard, floors are the hull's.
       const blades = this.fxBlades;

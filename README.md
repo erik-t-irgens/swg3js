@@ -268,15 +268,11 @@ From the console, `__debug.postfx()` lists every pass with its setting, whether 
 
 **Effects to do**, roughly in the order they would pay off:
 
-1. A vignette and a touch of film grain on the output pass, and a colour grade per planet (Tatooine warm, Dathomir cold) from the sky's own colour ramp.
-2. A sun glare and lens flare sprite when the sun is on screen and unblocked, read off the same depth.
-3. Screen-space ambient occlusion (a GTAO pass over depth and reconstructed normals) for the rooms and the undersides of ships.
-4. Depth of field while aiming down a rifle, and in the wardrobe preview.
-5. Heat haze over Mustafar's lava and behind engines and flame throwers (a screen distortion from a mask).
-6. Weather: rain, snow and sandstorms as particles around the camera, with the ground darkening as it wets; the environment tables name each planet's weather.
-7. Volumetric fog and light shafts from the rooms' own lights (a ray march over the cell's lights), and dust motes in the shafts.
-8. Shoreline foam from the water mask; a lit blade's glow on the ground is the `bladeGlow` pass now, and the bolts' light still comes from the pooled lights.
-9. A blur for what moves on its own against a still camera (a ship crossing the view), which needs a velocity per object.
+1. Depth of field while aiming down a rifle, and in the wardrobe preview.
+2. Weather: rain, snow and sandstorms as particles around the camera, with the ground darkening as it wets; the environment tables name each planet's weather.
+3. Shoreline foam from the water mask; a lit blade's glow on the ground is the `bladeGlow` pass now, and the bolts' light still comes from the pooled lights.
+4. A blur for what moves on its own against a still camera (a ship crossing the view), which needs a velocity per object.
+5. The sunlit patch where a doorway's beam lands: the light shafts already work it out, and its gain waits at 0 until it has been judged by eye.
 
 ## Normal maps
 
@@ -317,6 +313,7 @@ Every converted model carries its normal map: the converter reads the shader's `
 | `ssao()`, `ssao({ split: 0.5 })`, `ssao({ view: 'ao' })`, `ssao({ view: null, split: 0 })` | Ambient occlusion: the lights it read (`lights`), which set each region took (`lightSets`: `sky`, `rooms at 1` inside a building, or `rooms at 3` for rooms seen through a door from outside), whether water coverage was read, the values under the crosshair (`centre`: view depth, occlusion, ambient share, ceiling) and, while `fxTiming` is on, its GPU cost; `split: 0.5` shows the picture with occlusion on the left and without on the right; `view` shows the occlusion alone (`'ao'`: white open, grey shaded), `'fraction'` (how much of each surface's light is ambient: black sunlit, white shade), `'ceiling'` (the brightest a surface lit that way can be, on a log scale, mid-grey a ceiling of 1), `'region'` (where the rooms' lights are used, white, rather than the sky's) or `'multiplier'` (what the picture is multiplied by); `openBias`, `directShare`, `radius`, `power`, `fade: [start, end]`, `falloff`, `thin` and `region: false` tune it live for comparison, and null puts each back |
 | `heat()`, `heat({ show: true })`, `heatPlume(10)` | The heat haze: what it drew last frame and why not (`product`, `sources`, `why`); tuning `show` (tints hot air cyan), `gate`, `clientOffset`, `fadeStart`, `fadeEnd`, `lift`, `plumeRange`, `minPlumePixels`, `lavaNoiseRate`, `plumeNoiseRate`; `heatPlume(seconds)` puts a plume 5 m ahead of the camera, crossing the view, for that long, to show the haze with no vehicle or gun; `fxView('heat')` shows the heat buffer (red its intensity, green and blue the noise) |
 | `flare()`, `flareTune({ debugOnly: true })`, `flareTune('reset')`, `flareProbe()`, `faceSun(slot, offset)` | The lens flare: its sources this frame, their visibility (`[smoothed, depth open, cloud transmittance]`) and `turn`, the degrees right and up to face each (how to steer to a star when flying); its look, live until a reload, kept across the Effects switch and settable with the effects off (`{ debugOnly: true }` shows the flare alone on black, `{ nightSuns: false }` stops Mustafar's night sun flaring); pixels over white and over the flare's ceiling round the first sun on screen, before and after the flare (the counts must match); face a sun on foot or riding, by default the first one up (it refuses in flight, aboard and adrift) |
+| `roomAir()`, `roomAir({ view: 'haze' })`, `roomAir({ showPrisms: true })`, `roomAir({ sunInto: true })` | The room's air: which building or ship, whether this frame is drawn from inside it, the doorways casting beams (size, reach, how squarely they face the sun, how much of each is sunlit), the lamps glowing and whether each is in sight, and the motes; numbers retune it live (`scatter`, `soft`, `noise`, `patch`, `lampSigma`, `haze`, `moteSize`, `moteShaftGain`, ...); `view: 'haze' \| 'patch' \| null` shows the beams and glow alone, or the sunlit patch mask (the patch needs `patch` above 0); `showPrisms` draws the beam volumes as wireframes; `freeze: true` holds the selection; `sunInto: true` sets the time of day so the sun shines straight into the nearest doorway; `fxView('lightShafts.haze')` shows the half-resolution haze target |
 
 **Common problems.**
 

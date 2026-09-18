@@ -24,6 +24,14 @@ export interface FxSettings {
   waterReflectionResolution: number;
   heatHaze: boolean;
   heatHazeStrength: number;
+  /** Daylight through the doorways of the room the camera is in, and a glow around its lamps. */
+  lightShafts: boolean;
+  lightShaftStrength: number;
+  /** The haze around a room's lamps and in the depth of a lit hall. */
+  roomGlowStrength: number;
+  /** Dust drifting in rooms and aboard ships: scene content, drawn with the effects off too. */
+  roomMotes: boolean;
+  roomMoteAmount: number;
   godRays: boolean;
   godRayStrength: number;
   depthOfField: boolean;
@@ -109,7 +117,7 @@ export interface FxProductDef {
 
 export interface FxKnobDef {
   key: keyof FxSettings;
-  /** The pass the knob belongs to; null for the master and for knobs that are scene content. */
+  /** The pass the knob belongs to; null for the master and for effects drawn in the scene rather than by a pass (room motes). A null-pass knob is shown whenever its keys exist. */
   pass: FxPassId | null;
   /** Only worth showing once a product exists (objects smearing needs the velocity product). */
   product?: FxProductId;
@@ -142,6 +150,11 @@ export const FX_DEFAULTS: FxSettings = {
   waterReflectionResolution: 0.5,
   heatHaze: true,
   heatHazeStrength: 1,
+  lightShafts: true,
+  lightShaftStrength: 0.8,
+  roomGlowStrength: 0.5,
+  roomMotes: true,
+  roomMoteAmount: 1,
   godRays: true,
   godRayStrength: 0.6,
   depthOfField: true,
@@ -181,6 +194,11 @@ export const FX_KNOBS: readonly FxKnobDef[] = [
   { key: 'waterReflectionResolution', pass: 'waterReflections', label: 'Water reflection resolution', kind: 'select', options: half, requires: ['effects', 'waterReflections'], hint: 'Half traces a quarter of the pixels and smooths them back along the water; full is sharper and about three times the cost.' },
   { key: 'heatHaze', pass: 'heatHaze', label: 'Heat haze', kind: 'toggle', requires: ['effects'], hint: 'The air shimmers over lava, behind running engines and in front of a flame thrower, as the game drew it over Mustafar\'s lava.' },
   { key: 'heatHazeStrength', pass: 'heatHaze', label: 'Heat haze strength', kind: 'range', min: 0, max: 2, step: 0.05, format: two, requires: ['effects', 'heatHaze'], hint: '1 is the shimmer the game drew; 2 moves the picture twice as far.' },
+  { key: 'lightShafts', pass: 'lightShafts', label: 'Light shafts', kind: 'toggle', requires: ['effects'], hint: 'Daylight through the doorways of the room you are in: a beam in the dusty air and a bright patch where it lands; and a soft glow in the air around the room\'s own lamps.' },
+  { key: 'lightShaftStrength', pass: 'lightShafts', label: 'Light shaft strength', kind: 'range', min: 0, max: 1.5, step: 0.05, format: two, requires: ['effects', 'lightShafts'], hint: '0.4 clean air, 0.8 a dusty cantina, 1.2 a smoky hall.' },
+  { key: 'roomGlowStrength', pass: 'lightShafts', label: 'Lamp glow', kind: 'range', min: 0, max: 1.5, step: 0.05, format: two, requires: ['effects', 'lightShafts'], hint: 'The haze around a room\'s lamps and in the depth of a lit hall, in the room\'s own colours; 0 turns it off.' },
+  { key: 'roomMotes', pass: null, label: 'Dust motes', kind: 'toggle', requires: [], hint: 'Specks of dust drifting in rooms and aboard ships, glinting where daylight or a lamp catches them. Works with Effects off.' },
+  { key: 'roomMoteAmount', pass: null, label: 'Dust mote amount', kind: 'range', min: 0.25, max: 2, step: 0.05, format: (v) => `${Math.round(v * 1500)}`, requires: ['roomMotes'], hint: 'How many motes hang in the air around you.' },
   { key: 'godRays', pass: 'godRays', label: 'God rays', kind: 'toggle', requires: ['effects'], hint: 'Sunlight scattered towards you where the sky shows between trees, walls and hulls.' },
   { key: 'godRayStrength', pass: 'godRays', label: 'God ray strength', kind: 'range', min: 0.1, max: 1.5, step: 0.05, format: two, requires: ['effects', 'godRays'], hint: '0.3 a hint, 0.6 a morning, 1.2 a blaze.' },
   { key: 'depthOfField', pass: 'depthOfField', label: 'Depth of field', kind: 'toggle', requires: ['effects'], hint: 'Aiming down the sights, what is not at the range you are aiming at softens.' },
@@ -211,7 +229,7 @@ export const FX_PASSES: readonly FxPassDef[] = [
   { id: 'bladeGlow', stage: 'scene', toggles: ['bladeGlow'], required: false, needs: [], budgetMs: 0.15, typical: false, canBeLast: false, live: true, why: 'Direct light added to surfaces: after SSAO, since ambient occlusion does not darken a direct light; before water reflections, heat haze, rays, depth of field, motion blur and bloom, so the pool is reflected, bent, blurred and bloomed like any lit surface. It reads the full-resolution scene depth itself, so it asks for no product.' },
   { id: 'waterReflections', stage: 'scene', toggles: ['waterReflections'], required: false, needs: ['linearDepthHalf', 'waterMask'], budgetMs: 0.6, typical: false, canBeLast: false, live: true, why: 'Adds reflected scene light on water pixels. After occlusion so the reflected ground carries it, before the lens so reflections shimmer, defocus, smear and bloom like anything seen directly.' },
   { id: 'heatHaze', stage: 'scene', toggles: ['heatHaze'], required: false, needs: ['heat', 'linearDepthHalf'], budgetMs: 0.16, typical: false, canBeLast: false, live: true, why: 'Displaces what the surfaces look like, so it follows every surface pass; before the atmosphere and the lens, since the air and the glass sit between the heat and the eye.' },
-  { id: 'lightShafts', stage: 'scene', toggles: [], required: false, needs: ['linearDepthHalf'], budgetMs: 0.3, typical: false, canBeLast: false, live: false, why: 'Daylight scattered in the air of a room, from its doorways and windows. Atmosphere: after the surfaces, before the lens, next to the god rays so the two share their march.' },
+  { id: 'lightShafts', stage: 'scene', toggles: ['lightShafts'], required: false, needs: ['linearDepthHalf', 'normalsHalf'], budgetMs: 0.3, typical: false, canBeLast: false, live: true, why: 'Daylight scattered in the air of the room the camera is in, from its doorways, the sunlit patch where it lands, and the glow around the room\'s lamps. Evaluated per pixel along the view ray and stopped by the scene depth, which scene meshes cannot read. Atmosphere: after the surface passes (SSAO has darkened the corners the patch lands among), before god rays, depth of field, motion blur and bloom, so the beams defocus, smear and bloom with the room.' },
   { id: 'godRays', stage: 'scene', toggles: ['godRays'], required: false, needs: ['linearDepthHalf'], budgetMs: 0.25, typical: true, canBeLast: false, live: true, why: 'Scattered sunlight. Before depth of field, since rays are far light that should soften with the far background they overlay, and before the blur and the bloom so they smear and spill like the sun.' },
   { id: 'depthOfField', stage: 'lens', toggles: ['depthOfField'], required: false, needs: ['linearDepthHalf'], budgetMs: 0.35, typical: false, canBeLast: false, live: false, why: 'The aperture needs colour and depth still lined up, so it comes before the blur, which moves colour off its depth; before bloom so a softened highlight blooms as a disc rather than a point.' },
   { id: 'motionBlur', stage: 'lens', toggles: ['motionBlur'], required: false, needs: ['velocity'], budgetMs: 0.25, typical: true, canBeLast: false, live: true, why: 'The shutter after the aperture, and before bloom: bloom first would smear the halo around a near engine glow by the depth of the ground behind it.' },
