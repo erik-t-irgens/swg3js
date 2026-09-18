@@ -181,6 +181,20 @@ export class Garage {
     let p = this.models.get(def.file);
     if (!p) {
       p = this.loader.loadAsync(`${this.baseUrl}${def.file}`).then((gltf) => {
+        // A hull's rooms (cells past the shell) get their own copies of the materials they share
+        // with the shell, marked dry: rain never reaches a room, and marking the shared material
+        // would dry the hull too. Made once per model, before any instance reaches the scene; a
+        // copy keeps its original's userData (glass, invisible) and shares its program.
+        const roomCopies = new Map<THREE.Material, THREE.Material>();
+        const roomCopy = (mat: THREE.Material): THREE.Material => {
+          let c = roomCopies.get(mat);
+          if (!c) {
+            c = mat.clone();
+            c.userData.dry = true;
+            roomCopies.set(mat, c);
+          }
+          return c;
+        };
         gltf.scene.traverse((o) => {
           o.layers.enable(ACTOR_LAYER);
           const m = o as THREE.Mesh;
@@ -188,6 +202,10 @@ export class Garage {
             m.castShadow = true;
             m.frustumCulled = false;
             m.userData.shared = true;
+            if (cellIndexOf(o) > 0) m.material = Array.isArray(m.material) ? m.material.map(roomCopy) : roomCopy(m.material);
+            // A ship's own materials are dry whatever kind it is spawned as: the material scan
+            // judges a shared material once, by the first copy it meets, for every copy after.
+            if (def.kind === 'ship') markDry(m);
             // An invisible collidable surface (a room's window pane): not drawn, still a collider.
             const mats = Array.isArray(m.material) ? m.material : [m.material];
             if (mats.length && mats.every((mat) => mat.userData.invisible)) {
@@ -241,6 +259,9 @@ export class Garage {
       if (cellIndexOf(o) > 0) o.visible = false;
     });
     const holder = new THREE.Group();
+    // A ship is never wetted, parked or flying: its materials were marked dry when the model
+    // loaded (by the model's own kind), and another player's is held dry as well.
+    if (def.kind === 'ship') holder.userData.weatherDry = true;
     holder.add(model);
     return holder;
   }
@@ -257,6 +278,8 @@ export class Garage {
       try {
         const part = (await this.model({ file: a.file } as VehicleDef)).scene.clone();
         part.userData.attachment = a.kind;
+        // A ship's wings, engines and guns stay dry as its hull does (the clone shares the loaded materials).
+        if (def.kind === 'ship') markDry(part);
         const hp = a.hardpoint ? findHardpoint(model, a.hardpoint) : null;
         if (hp) {
           // At the hardpoint, turned its way (a gun points where its hardpoint does), in the model's frame.
@@ -383,6 +406,8 @@ export class Garage {
           const m = o as THREE.Mesh;
           if (m.isMesh) m.castShadow = false;
         });
+        // The instruments inside the canopy never weather.
+        markDry(frame);
         frame.position.copy(FRAME_NUDGE);
         frame.visible = false;
         model.add(frame);
@@ -605,6 +630,17 @@ function collectPanes(v: Vehicle): void {
       v.group.add(standIn);
     });
   }
+}
+
+/**
+ * Mark every material under a node (the node itself included) `userData.dry`, so the material
+ * scan never wets it. On a clone this marks the loaded model's shared materials, for every copy.
+ */
+function markDry(root: THREE.Object3D): void {
+  root.traverse((o) => {
+    const m = o as THREE.Mesh;
+    if (m.isMesh) for (const mat of Array.isArray(m.material) ? m.material : [m.material]) mat.userData.dry = true;
+  });
 }
 
 /**

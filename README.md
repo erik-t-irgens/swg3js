@@ -266,9 +266,11 @@ Turning Effects on or off no longer costs a pause. Tone mapping is applied by a 
 
 From the console, `__debug.postfx()` lists every pass with its setting, whether it drew last frame and why not, what it cost and which pass drew to the canvas; `__debug.postfx({ godRays: false })` forces one on or off (`null` hands it back to the settings); `__debug.fxTiming(true)` and then `__debug.fxTiming()` times every step on the GPU against its budget; `__debug.fxView('linearDepthHalf')` shows one of the pictures the effects work from — the distance to each pixel, the direction each surface faces, the mask of the player — instead of the picture, and `__debug.fxView()` puts it back; `__debug.fxWarm()` compiles every pass's shaders again, and a second call should say none were needed.
 
+**Wet ground.** Wetness rises while it rains and falls slowly in sunshine and wind, and every world material, the ground and the lakes read it: surfaces darken by how porous they look, turn glossy and reflect the sky at a low angle, flat ground near you gathers puddles that the rain rings, lakes ring too, and snow settles on what faces up. The rays that keep the rain off covered ground also tell the shading what is sheltered, so a floor under a roof stays dry and a wall is judged by the open air beside it. Rooms, ships, people and what they hold are never weathered. It is all compiled in once and moved by uniforms, so the weather never recompiles a shader; "Wet ground" in the weather settings turns it off.
+
 **Effects to do**, roughly in the order they would pay off:
 
-1. Wet ground: the weather falls and its wetness is tracked, but nothing darkens, glosses, puddles or settles snow yet, and the effects that are only particle attachments (the light dust storm, falling leaves, Mustafar's lightning) draw nothing.
+1. The effects that are only particle attachments (the light dust storm, falling leaves, Mustafar's lightning) draw nothing.
 2. Shoreline foam from the water mask; a lit blade's glow on the ground is the `bladeGlow` pass now, and the bolts' light still comes from the pooled lights.
 3. Limbs that blur on their own: moving things smear by their root's motion only, so a swinging arm, a ragdoll's fall and a peer's roll do not (a previous-bone texture per skeleton is the sketched fix).
 4. The sunlit patch where a doorway's beam lands: the light shafts already work it out, and its gain waits at 0 until it has been judged by eye.

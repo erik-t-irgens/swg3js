@@ -408,6 +408,8 @@ export class Player {
   constructor(scene: THREE.Scene, physics: Physics) {
     const { group, parts } = buildCharacter();
     this.group = group;
+    // The figure and whatever it holds are never weathered (the placeholder body is plain meshes).
+    group.userData.weatherDry = true;
     this.parts = parts;
     scene.add(group);
     markActor(group);
@@ -428,6 +430,7 @@ export class Player {
     // flash lights, which the game feeds from lightSpots() each frame.
     this.flying.add(flyHilt, flyBlade, blur);
     this.flying.visible = false;
+    this.flying.userData.weatherDry = true;
     scene.add(this.flying);
     markActor(this.flying);
     // Two more for the dual kata: the same spinning saber, one each side of the body.
@@ -440,6 +443,7 @@ export class Player {
       b.rotation.z = Math.PI / 2;
       g.add(h, b);
       g.visible = false;
+      g.userData.weatherDry = true;
       scene.add(g);
       markActor(g);
       this.orbit.push(g);

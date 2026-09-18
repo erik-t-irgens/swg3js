@@ -6,6 +6,7 @@
 import * as THREE from 'three';
 import type { CSM } from 'three/examples/jsm/csm/CSM.js';
 import type { AssetPack } from './assetPack';
+import { injectWetness } from './wetness';
 
 /** One entry of terrain/shaders.json written by the converter. */
 export interface ShaderFamilyDef {
@@ -134,8 +135,13 @@ export class TerrainTextures {
       shader.fragmentShader = shader.fragmentShader
         .replace('#include <common>', '#include <common>\nprecision highp sampler2DArray;\nuniform sampler2DArray uGround;\nuniform float uGroundLayer[TERRAIN_FAMILIES];\nuniform float uGroundSize[TERRAIN_FAMILIES];\nvarying vec3 vFamily;\nvarying vec3 vBary;\nvarying vec2 vGroundXZ;\nvec4 groundSample(float family) {\n  int id = clamp(int(family + 0.5), 0, TERRAIN_FAMILIES - 1);\n  return texture(uGround, vec3(vGroundXZ / uGroundSize[id], uGroundLayer[id]));\n}')
         .replace('#include <map_fragment>', '#include <map_fragment>\n{\n  vec3 w = vBary / max(vBary.x + vBary.y + vBary.z, 1e-4);\n  vec4 g = groundSample(vFamily.x) * w.x + groundSample(vFamily.y) * w.y + groundSample(vFamily.z) * w.z;\n  diffuseColor.rgb *= g.rgb;\n}');
+      // Rain, puddles and snow: after the blend (map_fragment), so wetness darkens the blended
+      // colour. Compiled in once and driven by the weather's shared uniforms.
+      injectWetness(shader, 'ground');
     };
-    mat.customProgramCacheKey = () => `swg-ground-${count}`;
+    // The ground carries its own wet injection; the material scan must not wrap it again.
+    mat.userData.wetBuiltIn = true;
+    mat.customProgramCacheKey = () => `swg-ground-wet-${count}`;
     this.material = mat;
     return mat;
   }

@@ -351,6 +351,9 @@ export class Vehicle {
 
   constructor(readonly spec: VehicleSpec, model: THREE.Object3D, physics: Physics, scene: THREE.Scene, x: number, y: number, z: number, heading: number) {
     this.group.add(model);
+    // Whether it weathers is not marked here: the spawn kind can differ from the model's (the
+    // garage's "as…"), and the material scan judges a shared material once for every copy, so the
+    // garage marks a ship's own materials dry when it loads the model, and a ground vehicle's stay wettable.
     const b = spec.bounds;
     const w = b.max[0] - b.min[0];
     const h = b.max[1] - b.min[1];

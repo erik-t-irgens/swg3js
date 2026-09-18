@@ -279,6 +279,13 @@ export class ShipInterior {
   /** Load an interior model and hang it inside a hull, with its own physics world at the planet's gravity. */
   static async load(vehicle: Vehicle, url: string, def: InteriorDef, gravity: number): Promise<ShipInterior> {
     const gltf = await new GLTFLoader().loadAsync(url);
+    // Rooms are never rained on: every material is marked dry before the scan can meet it (each
+    // load parses its own file, so nothing outside these rooms shares them).
+    gltf.scene.traverse((o) => {
+      const m = o as THREE.Mesh;
+      if (!m.isMesh) return;
+      for (const mat of Array.isArray(m.material) ? m.material : [m.material]) mat.userData.dry = true;
+    });
     // Inside the hull: the model's frame is the hull's, so the room moves, banks and rolls with it.
     vehicle.group.add(gltf.scene);
     markActor(gltf.scene);

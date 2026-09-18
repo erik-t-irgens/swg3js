@@ -12,7 +12,7 @@
     "swg": "node tools/swg/cli.mjs",
     "relay": "node server/relay.mjs",
     "test:terrain": "node tools/swg/tests/terrain.test.ts",
-    "test:weather": "node tools/swg/tests/weather.test.ts",
+    "test:weather": "node tools/swg/tests/weather.test.ts && node tools/swg/tests/wetness.test.ts",
     "test:water": "node tools/swg/tests/water.test.ts",
     "test:grade": "node tools/swg/tests/grade.test.ts",
     "test:heat": "node tools/swg/tests/heat.test.ts",

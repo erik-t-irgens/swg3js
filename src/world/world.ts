@@ -9,7 +9,7 @@ import { MobileCatalogue } from './mobiles/catalogue';
 import { DayCycle } from './daycycle';
 import { SwgSky, type SkyLighting } from './sky';
 import { Weather, type WeatherViewContext, type WeatherWorldContext } from './weather';
-import { WEATHER_UNIFORMS } from './wetness';
+import { WEATHER_UNIFORMS, WET_WRAP, wetWrap } from './wetness';
 import { emitRipple, Splashes, updateWaterDepth, type WaterMaterial } from './water';
 import { WaterBodies, type WaterBody } from './waterBodies';
 import { envLightFrom, isLavaWater, shaderKey, type WaterLook } from './waterLook';
@@ -1567,9 +1567,11 @@ export class World {
           csm.setupMaterial(m);
           this.csmMaterials.add(m);
         }
-        // The wet-surface wrap goes here, in this same iteration and after the cascades' own hook
-        // (CSM.setupMaterial overwrites onBeforeCompile, so nothing may come before it); every
-        // material reaches this point, and none may be wrapped before `csm` exists.
+        // The wet-surface wrap, in this same iteration and after the cascades' own hook
+        // (CSM.setupMaterial overwrites onBeforeCompile, so nothing may come before it), and so
+        // before the program is ever asked for: rain then moves uniforms and compiles nothing.
+        // Every material reaches this point; none is wrapped before `csm` exists.
+        if (csm && WET_WRAP) wetWrap(m, o);
       }
       if (isNew) fresh.push(o);
     });

@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import type { WaterLook } from './waterLook';
 import { GLSL_OCT_ENCODE } from '../core/glslOct';
+import { RAIN_RINGS_GLSL, WEATHER_PARS_GLSL, WEATHER_UNIFORMS } from './wetness';
 
 /**
  * Water: a physically based surface that reflects the sky's environment map, moved by a
@@ -479,7 +480,10 @@ export function createWaterMaterial(look: WaterLook, waves: boolean, opts: { win
     uOmega: { value: sea.omega },
     uRings: RINGS,
     uRingMotion: RING_MOTION,
+    // The weather's shared objects: rain rings the surface where it is open to the sky.
+    ...WEATHER_UNIFORMS,
   };
+  // `water` keeps the material scan's wet wrap off it: it carries its own rain.
   mat.userData = { uniforms, look, variant: 'lit', waves, water: true };
   installWaterHook(mat, uniforms, 'lit', waves);
   return mat;
@@ -547,7 +551,7 @@ function installWaterHook(mat: WaterMaterial, uniforms: WaterUniforms, variant: 
     external?.call(mat, shader, renderer);
     Object.assign(shader.uniforms, uniforms);
     shader.vertexShader = shader.vertexShader
-      .replace('#include <common>', `#include <common>\n${WAVES_GLSL}\nvarying vec2 vWaterXZ;\nvarying float vWaterDist;`)
+      .replace('#include <common>', `#include <common>\n${WAVES_GLSL}\nvarying vec2 vWaterXZ;\nvarying float vWaterDist;\nvarying vec3 vWetPos;\nvarying vec3 vWetUp;`)
       .replace(
         '#include <begin_vertex>',
         `#include <begin_vertex>
@@ -556,6 +560,9 @@ function installWaterHook(mat: WaterMaterial, uniforms: WaterUniforms, variant: 
           float dist = distance(wp.xyz, cameraPosition);
           vWaterDist = dist;
           vWaterLevel = wp.y;
+          // The weather's varyings, declared by its fragment chunk: written so both stages agree.
+          vWetPos = wp.xyz;
+          vWetUp = vec3(0.0, 1.0, 0.0);
           // The swell fades out where the mesh is too coarse to carry it (the far ring is flat),
           // and dies away in the shallows so the shoreline holds still.
           float fade = uWaveHeight * (1.0 - smoothstep(900.0, 1400.0, dist)) * smoothstep(0.3, 5.0, waterDepth(wp.xz));
@@ -566,7 +573,7 @@ function installWaterHook(mat: WaterMaterial, uniforms: WaterUniforms, variant: 
         }`,
       );
     shader.fragmentShader = shader.fragmentShader
-      .replace('#include <common>', `#include <common>\n${WAVES_GLSL}\nvarying vec2 vWaterXZ;\nvarying float vWaterDist;\n${MASK_PARS_GLSL}`)
+      .replace('#include <common>', `#include <common>\n${WAVES_GLSL}\nvarying vec2 vWaterXZ;\nvarying float vWaterDist;\n${MASK_PARS_GLSL}\n${WEATHER_PARS_GLSL}\n${RAIN_RINGS_GLSL}`)
       .replace(
         // Only the specular environment term: the irradiance and the multiscatter stay, so the
         // water looks the same while the reflections pass adds this term back itself. The mask
@@ -596,6 +603,9 @@ function installWaterHook(mat: WaterMaterial, uniforms: WaterUniforms, variant: 
           vec2 slope = detailSlope(vWaterXZ) * (0.35 + 0.65 * detail) * (0.5 + 0.5 * calm);
           float e = 0.06;
           slope += vec2(ringHeight(vWaterXZ + vec2(e, 0.0)) - ringHeight(vWaterXZ - vec2(e, 0.0)), ringHeight(vWaterXZ + vec2(0.0, e)) - ringHeight(vWaterXZ - vec2(0.0, e))) / (2.0 * e) * detail;
+          // Rain rings where the surface is open to the sky (the roof grid's top over a lake is the
+          // lake itself, so open water reads as open; under a pier or an overhang it does not ring).
+          if (uRain > 0.001) slope += rainRingSlope(vWaterXZ, uWeatherTime, uRain) * 1.2 * detail * (1.0 - weatherShelter(vec3(vWaterXZ.x, vWaterLevel, vWaterXZ.y), vec3(0.0, 1.0, 0.0)).x);
           waterNormalW = normalize(vec3(wn.x - slope.x, wn.y, wn.z - slope.y));
           // Foam on the steepest crests, faintly along fresh rings, and in a narrow lapping band at the shore.
           // The band runs right up to the water's edge: by distance where the slope is known, and
@@ -630,7 +640,7 @@ function installWaterHook(mat: WaterMaterial, uniforms: WaterUniforms, variant: 
       external = fn;
     },
   });
-  mat.customProgramCacheKey = () => `swg-water-2-${variant}-${waves ? 'waves' : 'flat'}-${external ? 'hooked' : 'plain'}`;
+  mat.customProgramCacheKey = () => `swg-water-2-${variant}-rain-${waves ? 'waves' : 'flat'}-${external ? 'hooked' : 'plain'}`;
 }
 
 /**
