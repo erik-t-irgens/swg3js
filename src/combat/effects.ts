@@ -135,6 +135,15 @@ export class Effects {
   }
 
   /**
+   * Bursts still bright (their first half: opacity fades from 0.9), for the depth of field's glow
+   * depth; a faded sphere listed would leave a sharp disc of background. Fills `out` from `n`.
+   */
+  glowMeshes(out: THREE.Object3D[], n: number): number {
+    for (const b of this.bursts) if (b.mesh.material.opacity > 0.45) out[n++] = b.mesh;
+    return n;
+  }
+
+  /**
    * One of each effect far below the world for a moment: their shaders compile with the first
    * draw, which the loading screen hides, rather than with the first shot or the first hit.
    */

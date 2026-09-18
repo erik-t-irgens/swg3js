@@ -85,7 +85,7 @@ export interface FxDescription {
 const TL_SCENE = 'scene';
 const EMPTY_OBJECTS: readonly THREE.Object3D[] = [];
 /** Bytes a pixel of each product format takes, for the memory listing. */
-const FORMAT_BYTES: Record<string, number> = { R32F: 4, RGBA8: 4, R8: 1, RG8: 2, RG16F: 4, RGBA16F: 8 };
+const FORMAT_BYTES: Record<string, number> = { R32F: 4, RGBA8: 4, R8: 1, RG8: 2, R16F: 2, RG16F: 4, RGBA16F: 8 };
 /** The meshes made to compile a pass's materials with; kept only so they can be let go. */
 const warmMeshes: THREE.Mesh[] = [];
 

@@ -172,6 +172,15 @@ export class SaberBlade {
   }
 
   /**
+   * The white core, when lit and drawn in a scene: the part of the blade that must stay a sharp line
+   * under the depth of field's lens (its glow depth). Fills `out` from `n`; returns the new count.
+   */
+  glowCore(out: THREE.Object3D[], n: number): number {
+    if (this.core.visible && this.glowing) out[n++] = this.core;
+    return n;
+  }
+
+  /**
    * Draw the blade from `base` (the hilt's emitter) toward `tip` (the full blade's end) this frame.
    * `on` ignites or retracts it; `swing` (0 to 1) is how hard it is being swung, which lengthens the smear.
    */

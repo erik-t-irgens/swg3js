@@ -8,6 +8,10 @@ export class AppearanceUi {
   readonly root: HTMLElement;
   private readonly body: HTMLElement;
   private readonly preview: CharacterPreview;
+  /** The doll, for the console (__debug.previewDof). */
+  get doll(): CharacterPreview {
+    return this.preview;
+  }
   private character: Character | null = null;
   open = false;
   /** A click on another tab: the game swaps the panels. */

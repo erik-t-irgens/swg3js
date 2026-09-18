@@ -359,6 +359,12 @@ export class Player {
     if (this.orbiting) for (const g of this.orbit) out.push({ pos: g.position, intensity: 2, distance: 5 });
     return out;
   }
+
+  /** Every blade's white core drawn this frame (in the hand, thrown, orbiting), for the depth of field's glow depth; returns the new count. */
+  glowCores(out: THREE.Object3D[], n: number): number {
+    for (const b of this.saberBlades) n = b.glowCore(out, n);
+    return n;
+  }
   private orbitAngle = 0;
   /**
    * The hilt's rotation in the hand for each source of arm poses: SWG's own clips hold the

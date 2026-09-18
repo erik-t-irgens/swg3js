@@ -9,8 +9,23 @@
 import * as THREE from 'three';
 import { clone as cloneSkinned } from 'three/examples/jsm/utils/SkeletonUtils.js';
 import type { Character } from '../player/character';
+import { PreviewDof, type PreviewEffects, type PreviewReport } from './previewDof';
+import { PREVIEW_DOF, previewGate, previewLensOn, previewSpan, type PreviewSpan } from '../core/fx/dofMath.ts';
 
 export class CharacterPreview {
+  /** What the settings ask of every doll: App keeps it in step with Effects and Depth of field (a change shows on the next frame). */
+  static effects: PreviewEffects = { on: false, strength: 1, view: 0 };
+  /** The doll's lens, made the first frame the effect is on; null while it is off. */
+  private dof: PreviewDof | null = null;
+  /** On the lens path this frame (with hysteresis). */
+  private lens = false;
+  private lastGate = 0;
+  /** The model both program variants were compiled for. */
+  private warmedFor: THREE.Object3D | null = null;
+  /** The clone's scale when modelSize was measured: follow() rescales the model afterwards (the height slider). */
+  private builtScale = 1;
+  private readonly bufferSize = new THREE.Vector2();
+  private readonly span: PreviewSpan = { focus: 0, nearest: 0, farthest: 0 };
   readonly canvas = document.createElement('canvas');
   private readonly renderer: THREE.WebGLRenderer;
   private readonly scene = new THREE.Scene();
@@ -138,6 +153,9 @@ export class CharacterPreview {
     });
     const box = meshBounds(copy);
     const size = box.getSize(new THREE.Vector3());
+    // meshBounds reads through matrixWorld, so the size already carries this scale: the lens's span
+    // takes only the change since (a height slider moved afterwards).
+    this.builtScale = copy.scale.y || 1;
     const centre = box.getCenter(new THREE.Vector3());
     // Stand the model in the middle of the view with its feet on the floor, so turning it spins
     // it about its own middle rather than about whatever corner the origin happens to sit in.
@@ -203,6 +221,10 @@ export class CharacterPreview {
     this.camera.updateProjectionMatrix();
     // The first real size arrives after the model, so the fit has to be redone once it does.
     if (shapeChanged && !this.userFramed) this.distance = this.fitDistance(this.modelSize);
+    if (this.dof) {
+      this.renderer.getDrawingBufferSize(this.bufferSize);
+      this.dof.setSize(this.bufferSize.x, this.bufferSize.y);
+    }
     this.dirty = true;
   }
 
@@ -225,9 +247,72 @@ export class CharacterPreview {
     const cp = Math.cos(this.pitch);
     this.camera.position.set(Math.sin(this.yaw) * cp * this.distance + this.pan.x, this.height + Math.sin(this.pitch) * this.distance + this.pan.y, Math.cos(this.yaw) * cp * this.distance + this.pan.z);
     this.camera.lookAt(this.pan.x, this.height + this.pan.y, this.pan.z);
-    this.renderer.render(this.scene, this.camera);
-    this.lastRender = { calls: this.renderer.info.render.calls, triangles: this.renderer.info.render.triangles, camera: this.camera.position.toArray().map((v) => Number(v.toFixed(2))) };
+    this.draw(this.model);
+    // On the lens path three's counts hold only its last render() (the quad): the lens keeps the frame's.
+    const lensed = this.lens && this.dof !== null;
+    this.lastRender = {
+      calls: lensed ? this.dof!.last.calls : this.renderer.info.render.calls,
+      triangles: lensed ? this.dof!.last.triangles : this.renderer.info.render.triangles,
+      camera: this.camera.position.toArray().map((v) => Number(v.toFixed(2))),
+      path: this.lens ? 'lens' : 'direct',
+    };
   };
+
+  /**
+   * Straight onto the canvas as always, or, with the depth of field on and the doll close enough for a
+   * lens to show on it (more than a pixel of blur, less than 0.7 px to go back), through its lens.
+   */
+  private draw(model: THREE.Object3D): void {
+    const fx = CharacterPreview.effects;
+    if (fx.on && fx.strength > 0 && PreviewDof.supported(this.renderer)) {
+      const dof = this.dofFor();
+      if (this.warmedFor !== model) {
+        this.warmedFor = model;
+        void dof.warm(this.scene, this.camera);
+      }
+      // The doll turns about the vertical axis at the origin (refresh centres it there); its
+      // front-to-back depth is the rest pose's, rescaled by the height slider since.
+      const k = model.scale.y / this.builtScale;
+      const r = Math.min(PREVIEW_DOF.halfDepthMax, Math.max(PREVIEW_DOF.halfDepthMin, 0.5 * this.modelSize.z * k));
+      previewSpan(this.distance, Math.hypot(this.camera.position.x, this.camera.position.z), r, this.camera.near, this.span);
+      this.lastGate = previewGate(this.renderer.getDrawingBufferSize(this.bufferSize).y, fx.strength, this.span);
+      this.lens = fx.view === 1 || previewLensOn(this.lens, this.lastGate);
+      if (this.lens) dof.render(this.scene, this.camera, this.span, this.lastGate, fx.strength, fx.view);
+      else this.renderer.render(this.scene, this.camera);
+      return;
+    }
+    this.lens = false;
+    this.lastGate = 0;
+    if (this.dof) {
+      this.dof.dispose();
+      this.dof = null;
+      this.warmedFor = null;
+    }
+    this.renderer.render(this.scene, this.camera);
+  }
+
+  /** The doll's lens, made and sized on first use. */
+  private dofFor(): PreviewDof {
+    if (!this.dof) {
+      this.dof = new PreviewDof(this.renderer);
+      this.renderer.getDrawingBufferSize(this.bufferSize);
+      this.dof.setSize(this.bufferSize.x, this.bufferSize.y);
+    }
+    return this.dof;
+  }
+
+  /** For __debug.previewDof: which path the doll draws by, and why. */
+  dofReport(): PreviewReport {
+    return {
+      running: this.running,
+      path: this.lens ? 'lens' : 'direct',
+      gate: Number(this.lastGate.toFixed(3)),
+      maxRadiusPx: this.dof ? Number(this.dof.last.maxRadiusPx.toFixed(2)) : 0,
+      span: { focus: Number(this.span.focus.toFixed(3)), nearest: Number(this.span.nearest.toFixed(3)), farthest: Number(this.span.farthest.toFixed(3)) },
+      size: this.dof?.last.size ? [this.dof.last.size[0], this.dof.last.size[1]] : null,
+      warmed: this.model !== null && this.warmedFor === this.model,
+    };
+  }
 
   frames = 0;
   lastRender: unknown = null;
@@ -246,11 +331,16 @@ export class CharacterPreview {
     if (this.running) return;
     this.running = true;
     this.dirty = true;
+    // The first frame after opening compiles both of the doll's program variants (direct and lens).
+    this.warmedFor = null;
     requestAnimationFrame(this.frame);
   }
 
   stop(): void {
     this.running = false;
+    // The lens target's memory goes back while the panel is shut; the next lens frame sizes it again.
+    this.dof?.release();
+    this.lens = false;
   }
 
   /** Drop the clone's own geometry; materials and textures belong to the character. */

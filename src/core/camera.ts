@@ -51,6 +51,8 @@ export class ThirdPersonCamera {
   get aimAmount(): number {
     return this.aimBlend;
   }
+  /** Metres from the camera to the orbit's centre this frame: the shooter's plane while aiming over the shoulder. 0 in first person and in a ship's chase. */
+  orbitDistance = 0;
   private readonly focus = new THREE.Vector3();
   private readonly desired = new THREE.Vector3();
   private readonly posDir = new THREE.Vector3();
@@ -96,6 +98,9 @@ export class ThirdPersonCamera {
    * looping with it. The orbit's yaw is kept at the ship's heading so leaving it is seamless.
    */
   chase(input: Input, dt: number, target: THREE.Vector3, attitude: THREE.Quaternion, heading: number, reach: number, cockpit: THREE.Vector3 | null): void {
+    this.orbitDistance = 0;
+    // The chase view never aims: let the blend settle so nothing reads a stale aim from before the controls were taken.
+    this.aimBlend += (0 - this.aimBlend) * 0.15;
     this.zoom(input, dt);
     this.yaw = heading + Math.PI;
     this.pitch = 0.32;
@@ -217,6 +222,7 @@ export class ThirdPersonCamera {
       if (eyes) this.focus.copy(eyes);
       this.camera.position.copy(this.focus).addScaledVector(this.dir, -0.12);
       this.camera.lookAt(this.desired.copy(this.camera.position).sub(this.dir));
+      this.orbitDistance = 0;
       return;
     }
 
@@ -236,6 +242,7 @@ export class ThirdPersonCamera {
       }
     }
     this.camera.position.copy(this.desired);
+    this.orbitDistance = dist;
     if (posPitch === this.pitch) this.camera.lookAt(this.focus);
     else this.camera.lookAt(this.lookTarget.copy(this.camera.position).addScaledVector(this.dir, -Math.max(dist, 1)));
   }

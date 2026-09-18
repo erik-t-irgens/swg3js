@@ -877,6 +877,12 @@ export class ParticleEffects {
     return this.pending.has(handle) || (this.instances.get(handle)?.finished === false);
   }
 
+  /** The additive batches drawing this frame (fill sets visible by quad count), for the depth of field's glow depth. Fills `out` from `n`; returns the new count. */
+  glowBatches(out: THREE.Object3D[], n: number): number {
+    for (const b of this.batches.values()) if (b.blend === 'add' && b.mesh.visible) out[n++] = b.mesh;
+    return n;
+  }
+
   private load(file: string): Promise<EffectDef | null> {
     let p = this.defs.get(file);
     if (!p) {

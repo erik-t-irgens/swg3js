@@ -46,6 +46,8 @@ export interface FxFrameInput {
   /** How far the aimed camera has eased in, 0 to 1. */
   aimAmount: number;
   firstPerson: boolean;
+  /** Metres from the camera to the orbit's centre (cam.orbitDistance): the shooter's plane while aiming over the shoulder; 0 in first person and in a ship's chase. */
+  orbitDistance: number;
   /** Water shows on screen this frame: in the frustum within the fog's reach, and not found hidden by the occlusion probe. */
   waterInView: boolean;
   /** The lens flare's sources: a kept array of MAX_FLARE_SOURCES records, refilled in drawFrame; entry i is flare slot i. */
@@ -135,6 +137,8 @@ export interface FxFrameContext {
   aiming: boolean;
   aimAmount: number;
   firstPerson: boolean;
+  /** Metres from the camera to the shooter's plane; 0 in first person and in a chase. */
+  orbitDistance: number;
   /** Water shows on screen this frame (`WaterBodies.inView`); the occlusion reads the mask's coverage only then. */
   waterInView: boolean;
   /** The lit blades this frame; a reference to the input's kept list. */
@@ -208,6 +212,7 @@ export function createContext(renderer: THREE.WebGLRenderer, settings: FxSetting
     aiming: false,
     aimAmount: 0,
     firstPerson: false,
+    orbitDistance: 0,
     waterInView: false,
     // The unset list until the first frame hands the game's own; the glow pass warns if it never does.
     blades: UNSET_BLADES,
@@ -286,6 +291,7 @@ export function updateContext(ctx: FxFrameContext, input: FxFrameInput, size: TH
   ctx.aiming = input.aiming;
   ctx.aimAmount = input.aimAmount;
   ctx.firstPerson = input.firstPerson;
+  ctx.orbitDistance = input.orbitDistance;
   ctx.waterInView = input.waterInView;
   ctx.blades = input.blades;
   ctx.lights = input.lights;

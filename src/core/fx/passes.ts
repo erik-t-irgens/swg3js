@@ -272,6 +272,9 @@ const DEBUG_VIEW = {
         vec3 raw = texture2D(tScene, vUv).rgb;
         vec3 under = raw / (raw + vec3(1.0));
         c = s.a > 0.0 ? mix(under, vec3(s.rg * 0.5 + 0.5, 0.0), 0.8) : under;
+      } else if (uMode == 10) {
+        // The glows' own depth (1/z of the nearest): 5 m reads 0.86, 25 m 0.33, no glow black.
+        c = vec3(1.0 - exp(-10.0 * s.r));
       } else if (uMode == 8) {
         // The heat: intensity in red (2 is full), the intensity-weighted noise decoded into green and blue.
         c = s.r > 0.001 ? vec3(min(s.r, 2.0) / 2.0, s.g / max(s.r, 1e-4), s.b / max(s.r, 1e-4)) : vec3(0.0);
@@ -297,6 +300,7 @@ const PRODUCT_VIEW: Record<FxProductId, { mode: number; channel: number; scale: 
   heat: { mode: 8, channel: 0, scale: 1 },
   debugMask: { mode: 3, channel: 0, scale: 1 },
   waterMask: { mode: 7, channel: 0, scale: 1 },
+  dofGlow: { mode: 10, channel: 0, scale: 1 },
   velocity: { mode: 5, channel: 0, scale: 20 },
 };
 const CHANNEL_INDEX: Record<string, number> = { r: 0, g: 1, b: 2, a: 3 };

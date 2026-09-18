@@ -211,7 +211,7 @@ class App {
   /** What the blades' light ceiling reads, kept and refilled each frame; the world and the pool are set in the constructor. */
   private readonly litSources: LitSources = { world: null!, effects: null!, torch: null, eye: new THREE.Vector3() };
   /** What the effects are told about each frame, refilled in drawFrame rather than made again. */
-  private readonly fxInput: FxFrameInput = { camera: null as unknown as THREE.PerspectiveCamera, dt: 1 / 60, sun: null, portalView: false, cameraInHull: false, inside: false, aboard: false, space: false, fog: null, daylight: 1, dayIndex: 0, lighting: null, planetId: '', aiming: false, aimAmount: 0, firstPerson: false, skyLights: createSkyLights(MAX_FLARE_SOURCES), skyLightCount: 0, clouds: createCloudLayers(MAX_CLOUD_LAYERS), cloudCount: 0, cameraUnderwater: false, waterInView: false, blades: this.fxBlades, lights: this.fxLights, room: null, followFar: 0, weather: null };
+  private readonly fxInput: FxFrameInput = { camera: null as unknown as THREE.PerspectiveCamera, dt: 1 / 60, sun: null, portalView: false, cameraInHull: false, inside: false, aboard: false, space: false, fog: null, daylight: 1, dayIndex: 0, lighting: null, planetId: '', aiming: false, aimAmount: 0, firstPerson: false, orbitDistance: 0, skyLights: createSkyLights(MAX_FLARE_SOURCES), skyLightCount: 0, clouds: createCloudLayers(MAX_CLOUD_LAYERS), cloudCount: 0, cameraUnderwater: false, waterInView: false, blades: this.fxBlades, lights: this.fxLights, room: null, followFar: 0, weather: null };
   private readonly fxSun: SunInfo = { dir: new THREE.Vector3(), color: new THREE.Color(), intensity: 0 };
   /** What the debug mask draws: the player and whatever they ride or are aboard. */
   private readonly fxMaskObjects: THREE.Object3D[] = [];
@@ -285,6 +285,8 @@ class App {
     // The effects chain is built only now: the water reflections pass is handed the world's water
     // bodies, so a chain made before the world exists throws on boot.
     if (S.effects) this.postfx = this.makePostFX();
+    // The wardrobe and creator dolls take their lens from the same settings (a static, so no panel need exist yet).
+    this.syncPreviewEffects();
     // Shaders are warmed for the target the frames are actually drawn into: with the effects on,
     // a program compiled with nothing bound is the wrong variant and is thrown away on first use.
     this.world.compileTarget = () => this.postfx?.compileTarget ?? null;
@@ -533,6 +535,27 @@ class App {
           centre: pass.probe(ctx),
           gpuMs: fx.timer.enabled ? (fx.timing().rows['pass:ssao']?.gpuMs ?? null) : null,
         };
+      },
+      /**
+       * Depth of field when aiming: live tuning of the lens (`aperture`, `apertureStop`, `maxCoc`, `keepShooterSharp`, `taps`, ...),
+       * `force: true` to draw as if aimed, `view: 'coc' | 'blur' | 'tiles' | 'focus' | 'glow' | null`, and the glow mask's `glowLevel`.
+       * Draws one frame, then reports the focus (one GPU read), the radii, the grid and the glow depth.
+       */
+      dof: (opts?: Partial<import('./core/fx/dofMath').DofTuning> & { force?: boolean; view?: import('./core/fx/dof').DofView; glowLevel?: number }) => {
+        const fx = this.postfx;
+        const pass = fx?.pass<import('./core/fx/dof').DepthOfFieldPass>('depthOfField');
+        if (!fx || !pass) return 'effects are off';
+        if (opts) pass.tune(opts);
+        this.drawFrame();
+        return pass.report(fx.ctx, fx.describe().passes.find((p) => p.id === 'depthOfField'));
+      },
+      /** The wardrobe and creator dolls' lens: `on`, `strength` for this session (a settings change resyncs), `view: 1` forces the lens and shows its CoC. */
+      previewDof: (opts?: { on?: boolean; strength?: number; view?: 0 | 1 }) => {
+        const fx = WardrobeUi.dollEffects;
+        if (typeof opts?.on === 'boolean') fx.on = opts.on;
+        if (typeof opts?.strength === 'number' && Number.isFinite(opts.strength)) fx.strength = Math.max(0, opts.strength);
+        if (opts?.view === 0 || opts?.view === 1) fx.view = opts.view;
+        return { effects: { ...fx }, wardrobe: this.wardrobe.doll.dofReport(), appearance: this.appearanceUi.doll.dofReport() };
       },
       /** Compile every pass and product material again and say how many programs that made; a second call should say 0. */
       fxWarm: async () => (this.postfx ? await this.postfx.warmUp() : 'the effects are off; turn Effects on in the menu'),
@@ -2640,6 +2663,30 @@ class App {
   private frameCalls = 0;
   private frameTriangles = 0;
 
+  /**
+   * What adds light at a shot and writes no depth, for the depth of field's glow depth: hit bursts and
+   * the blades' cores (the player's, the fighters'). A field initialiser, so it exists before the
+   * effects chain is built; it reads the world only when a frame asks, while the lens draws.
+   */
+  private readonly collectDofGlows = (out: THREE.Object3D[], n: number): number => {
+    // The guns' bolts, muzzle flashes and hit sparks, and the ships' bolts and their hits.
+    n = this.world.weaponFx.glowBatches(out, n);
+    n = this.world.shipFx.glowBatches(out, n);
+    n = this.effects.glowMeshes(out, n);
+    n = this.player.glowCores(out, n);
+    // The fighters exist once a planet has loaded.
+    if (this.world.npcs) n = this.world.npcs.glowCores(out, n);
+    return n;
+  };
+
+  /** The dolls follow the effects settings: Effects and Depth of field, and its strength; a change shows on their next frame. */
+  private syncPreviewEffects(): void {
+    const S = this.settings;
+    const fx = WardrobeUi.dollEffects;
+    fx.on = S.effects && S.depthOfField;
+    fx.strength = S.depthOfFieldStrength;
+  }
+
   private drawFrame(): void {
     const cam = this.cam.camera;
     cam.updateMatrixWorld();
@@ -2695,6 +2742,7 @@ class App {
       f.aiming = this.player.aiming;
       f.aimAmount = this.cam.aimAmount;
       f.firstPerson = this.cam.firstPerson;
+      f.orbitDistance = this.cam.orbitDistance;
       f.waterInView = this.world.waterBodies.inView;
       // The lights the frame was just drawn with (the shadow matrices are this frame's): the world's
       // two sets, the flash pool on the actor layer, and the torch.
@@ -2804,7 +2852,7 @@ class App {
       if (ridden) out.push(ridden.group);
       return out;
     };
-    installEffects(fx, { water: this.world.waterBodies, heat: this.heat, collectMovers: this.collectMovers });
+    installEffects(fx, { water: this.world.waterBodies, heat: this.heat, collectMovers: this.collectMovers, collectDofGlows: this.collectDofGlows });
     return fx;
   }
 
@@ -2835,6 +2883,7 @@ class App {
         this.fxAgain = false;
         const S = this.settings;
         this.postfx?.configure(S);
+        this.syncPreviewEffects();
         if (S.effects === !!this.postfx) continue;
         if (!this.inWorld) {
           // Nothing is being drawn: arriving compiles for whichever path is in force then.
@@ -3460,6 +3509,13 @@ class App {
       this.stepEmoteEnd();
 
       const simulate = active && !this.map.open && !this.anyPanelOpen();
+      // Nothing aims while the player is not simulated (dead, a panel, the map, the menu, travel):
+      // player.update, which reads the mouse, does not run, so the shoulder view and the lens would
+      // otherwise hold on under the death card. The next simulated frame reads the button afresh.
+      if (!simulate && (player.aiming || this.cam.aim)) {
+        player.aiming = false;
+        this.cam.aim = false;
+      }
       // Dead: the body keeps falling and settling under the camera while the respawn waits.
       if (this.dying && player.ragdoll) player.ragdollStep();
       if (simulate) {

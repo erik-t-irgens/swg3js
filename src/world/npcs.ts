@@ -536,6 +536,11 @@ export class Npc implements Living {
     return true;
   }
 
+  /** The blade's white core while it is drawn, for the depth of field's glow depth; returns the new count. */
+  glowCore(out: THREE.Object3D[], n: number): number {
+    return this.blade ? this.blade.glowCore(out, n) : n;
+  }
+
   dispose(scene: THREE.Scene): void {
     this.ragdoll?.dispose();
     this.ragdoll = null;
@@ -606,6 +611,12 @@ export class NpcManager {
       if (d2 > max2) continue;
       n = keepNearestGlow(out, n, spot, npc.color.getHex(), d2);
     }
+    return n;
+  }
+
+  /** Every fighter's drawn blade core, for the depth of field's glow depth: fills `out` from `n`, returns the new count. */
+  glowCores(out: THREE.Object3D[], n: number): number {
+    for (const npc of this.npcs) n = npc.glowCore(out, n);
     return n;
   }
 

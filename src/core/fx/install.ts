@@ -14,6 +14,8 @@ import { installHeatHaze } from './heat';
 import type { HeatSources } from '../../world/heatSources';
 import { LensFlarePass } from './lensFlare';
 import { LightShaftsPass } from './lightShafts';
+import { DepthOfFieldPass } from './dof';
+import { DofGlowProduct, type DofGlowCollector } from './dofGlow';
 import { VelocityProduct, type FxMoverList } from './velocity';
 import type { MotionBlurPass } from './motionBlur';
 
@@ -22,6 +24,8 @@ export interface FxInstallDeps {
   water?: WaterFxSource;
   /** The lava tables and plume providers the heat haze draws. */
   heat?: HeatSources;
+  /** What adds light at a shot and writes no depth (bolts, flashes, bursts, blade cores), for the depth of field's glow depth. */
+  collectDofGlows?: DofGlowCollector;
   /** Every object that moves on its own this frame (App.collectMovers). Without it there is no object blur. */
   collectMovers?: (out: FxMoverList) => void;
 }
@@ -43,6 +47,10 @@ export function installEffects(postfx: PostFX, deps: FxInstallDeps = {}): void {
   if (deps.heat) installHeatHaze(postfx, deps.heat);
   // The room's air needs nothing from the game here: it reads RoomAir's frame through the frame context.
   postfx.registerPass(new LightShaftsPass());
+  // The depth of field when aiming, with the glows' own depth when the game lists them.
+  const dofGlow = deps.collectDofGlows ? new DofGlowProduct(postfx, deps.collectDofGlows) : null;
+  if (dofGlow) postfx.registerProduct(dofGlow);
+  postfx.registerPass(new DepthOfFieldPass(dofGlow));
   // Object motion blur, when the game lists what moves: the velocity product, and the blur told to ask for it.
   if (deps.collectMovers) {
     postfx.registerProduct(new VelocityProduct(postfx, deps.collectMovers));

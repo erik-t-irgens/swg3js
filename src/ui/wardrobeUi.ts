@@ -8,6 +8,7 @@
 import type { Character, Wardrobe } from '../player/character';
 import { INVENTORY_TABS, tabStrip, wireTabs } from './tabs';
 import { CharacterPreview } from './characterPreview';
+import type { PreviewEffects } from './previewDof';
 
 /** Equipment slots, in the order they read down a body, and the id fragments that name them. */
 const SLOTS: { id: string; label: string; match: RegExp }[] = [
@@ -36,6 +37,17 @@ export class WardrobeUi {
   readonly root: HTMLElement;
   private readonly body: HTMLElement;
   private readonly preview: CharacterPreview;
+  /** The doll, for the console (__debug.previewDof). */
+  get doll(): CharacterPreview {
+    return this.preview;
+  }
+  /**
+   * The lens settings every doll draws with (the wardrobe's and the creator's alike): the game keeps
+   * them in step with Effects and Depth of field, reaching them through the panel it already has.
+   */
+  static get dollEffects(): PreviewEffects {
+    return CharacterPreview.effects;
+  }
   private character: Character | null = null;
   private catalogue: Wardrobe | null = null;
   open = false;
