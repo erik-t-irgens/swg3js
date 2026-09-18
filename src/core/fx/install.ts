@@ -6,11 +6,14 @@
 // optional and belongs to one effect: an effect whose field is missing installs without it, or not
 // at all, so a test may pass nothing.
 import type { PostFX } from '../postfx';
+import { ColorGradePass, GrainVignettePass } from './grade';
 
 export interface FxInstallDeps {
   // Nothing yet: each effect adds the one optional field it needs from the game here.
 }
 
-export function installEffects(_postfx: PostFX, _deps: FxInstallDeps = {}): void {
-  // Nothing beyond the spine yet.
+export function installEffects(postfx: PostFX, _deps: FxInstallDeps = {}): void {
+  // The colour grade needs nothing from the game: it reads the sky through the frame context.
+  postfx.registerPass(new ColorGradePass());
+  postfx.registerPass(new GrainVignettePass());
 }

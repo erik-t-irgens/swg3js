@@ -19,6 +19,8 @@ export interface FxFrameInput {
   sun: SunInfo | null;
   /** The camera is inside a portal building: the world shows only through its exits, at stencil 2. */
   portalView: boolean;
+  /** The camera is among the rooms of the ship the player is aboard: first person aboard, or inside the rooms' bounds in the hull's frame. */
+  cameraInHull: boolean;
   inside: boolean;
   aboard: boolean;
   space: boolean;
@@ -78,6 +80,8 @@ export interface FxFrameContext {
   readonly products: Record<FxProductId, THREE.Texture | null>;
   sun: FxSun | null;
   portalView: boolean;
+  /** The camera is among the rooms of the ship the player is aboard. */
+  cameraInHull: boolean;
   inside: boolean;
   aboard: boolean;
   space: boolean;
@@ -130,6 +134,7 @@ export function createContext(renderer: THREE.WebGLRenderer, settings: FxSetting
     products,
     sun: null,
     portalView: false,
+    cameraInHull: false,
     inside: false,
     aboard: false,
     space: false,
@@ -188,6 +193,7 @@ export function updateContext(ctx: FxFrameContext, input: FxFrameInput, size: TH
   }
 
   ctx.portalView = input.portalView;
+  ctx.cameraInHull = input.cameraInHull;
   ctx.inside = input.inside;
   ctx.aboard = input.aboard;
   ctx.space = input.space;

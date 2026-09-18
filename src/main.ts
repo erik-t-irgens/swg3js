@@ -178,7 +178,7 @@ class App {
   /** The picture's effects chain, while the Effects setting is on. */
   private postfx: PostFX | null = null;
   /** What the effects are told about each frame, refilled in drawFrame rather than made again. */
-  private readonly fxInput: FxFrameInput = { camera: null as unknown as THREE.PerspectiveCamera, dt: 1 / 60, sun: null, portalView: false, inside: false, aboard: false, space: false, fog: null, daylight: 1, dayIndex: 0, lighting: null, planetId: '', aiming: false, aimAmount: 0, firstPerson: false };
+  private readonly fxInput: FxFrameInput = { camera: null as unknown as THREE.PerspectiveCamera, dt: 1 / 60, sun: null, portalView: false, cameraInHull: false, inside: false, aboard: false, space: false, fog: null, daylight: 1, dayIndex: 0, lighting: null, planetId: '', aiming: false, aimAmount: 0, firstPerson: false };
   private readonly fxSun: SunInfo = { dir: new THREE.Vector3(), color: new THREE.Color(), intensity: 0 };
   /** What the debug mask draws: the player and whatever they ride or are aboard. */
   private readonly fxMaskObjects: THREE.Object3D[] = [];
@@ -695,6 +695,42 @@ class App {
           }
         }
         return { ...s, under };
+      },
+      /** The colour grade now: what the sky gave, the planet's look, the terms and parameters, how far it still lags the sky, and the room weight. `grade({ compare: 0.5 })` splits the screen (ungraded on the left), `grade({ look: { gloom: 0.3 } })` tries a look live and logs the line for the table, `grade({ look: {} })` shows the planet with none and `grade({ look: null })` puts it back; `freeze`, `params` and `room` force the rest. */
+      grade: (
+        opts: {
+          look?: import('./core/fx/gradeMath').GradeLook | null;
+          freeze?: boolean;
+          params?: Partial<import('./core/fx/gradeMath').GradeParams> | null;
+          compare?: number | null;
+          room?: number | null;
+        } = {},
+      ) => {
+        const pass = this.gradePass();
+        if (!this.postfx || !pass) return 'the effects are off (turn Effects on): the grade is one of their passes';
+        if ('look' in opts) {
+          pass.lookOverride = opts.look ?? null;
+          if (opts.look) console.info(`GRADE_LOOKS: ${this.world.planet?.id ?? ''}: ${JSON.stringify(opts.look)},`);
+        }
+        if ('freeze' in opts) pass.frozen = !!opts.freeze;
+        if ('params' in opts) pass.forcedParams = opts.params ?? null;
+        if ('compare' in opts) pass.compare = opts.compare ?? null;
+        if ('room' in opts) pass.forcedRoom = opts.room ?? null;
+        if (!this.settings.colorGrade) return 'the colour grade is off (Menu, Graphics, Effects)';
+        return pass.report(this.postfx.ctx);
+      },
+      /** Draw the grade's own shader over known colours and compare every texel with the JavaScript the node test sweeps: `ok` false means the two have drifted apart. */
+      gradeSelfTest: () => {
+        const pass = this.gradePass();
+        if (!pass) return 'the effects are off (turn Effects on): the self test draws the grade’s own shader';
+        return pass.selfTest(this.renderer);
+      },
+      /** An estimate of how far the grade moves the frame just drawn: `darkened` and `brightened` should both be 0. */
+      gradeCheck: () => {
+        const pass = this.gradePass();
+        if (!this.postfx || !pass) return 'the effects are off (turn Effects on): the check reads their frame';
+        this.drawFrame();
+        return pass.check(this.renderer, this.postfx.sceneTarget);
       },
       /** Draw `n` frames back to back with the GPU waited on after each, and report the milliseconds one takes; `await bench(30, false)` first turns the effects off, `bench(30, true)` on. */
       bench: async (n = 30, effects?: boolean) => {
@@ -1822,6 +1858,29 @@ class App {
     return this.eyePoint;
   }
 
+  private readonly hullLocal = new THREE.Vector3();
+  private readonly hullInverse = new THREE.Matrix4();
+
+  /**
+   * The camera is among the rooms of the ship the player is aboard: in first person there, or
+   * standing inside the rooms' bounds. False for the chase camera, for a free look zoomed out of
+   * the hull, and for a fighter's pilot, who is aboard no rooms at all. The effects take it to
+   * decide how much of the planet's colour grade the view keeps.
+   */
+  private cameraInHull(): boolean {
+    const room = this.player.aboard;
+    if (!room) return false;
+    if (this.cam.firstPerson) return true;
+    // Seating the figure has already brought the hull's world matrix up to date this frame.
+    this.hullInverse.copy(room.vehicle.group.matrixWorld).invert();
+    return room.contains(this.hullLocal.copy(this.cam.camera.position).applyMatrix4(this.hullInverse));
+  }
+
+  /** The colour grade on the live chain, so every console hook reads the same pass; null with the effects off. */
+  private gradePass(): import('./core/fx/grade').ColorGradePass | null {
+    return this.postfx?.pass<import('./core/fx/grade').ColorGradePass>('colorGrade') ?? null;
+  }
+
   /** Drive the ridden vehicle from the keys (the mouse or A/D steer, Alt frees the look, W/S throttle, Shift boost, Space hop, the view's tilt or Space and X climb and sink), step every vehicle, and seat the rider. */
   private stepVehicles(dt: number, simulate: boolean): void {
     const { player, input } = this;
@@ -2092,6 +2151,7 @@ class App {
       f.dt = this.lastDt;
       f.sun = this.world.sunInfo(this.fxSun);
       f.portalView = view !== null;
+      f.cameraInHull = this.cameraInHull();
       f.inside = this.world.inside;
       f.aboard = !!this.player.aboard;
       f.space = !!this.world.planet?.space;
@@ -2605,6 +2665,10 @@ class App {
   private boardShip(v: Vehicle): void {
     const room = v.interior;
     if (!room) return;
+    // The camera jumps into the rooms: the effects have no history across it, and the grade takes
+    // the rooms' share of the planet's look at once rather than easing into it. Below the guard,
+    // so E at a ship with no rooms does not throw a frame of history away for nothing.
+    this.postfx?.reset();
     room.reveal(true);
     this.player.board(room, room.entry.clone());
     this.cam.zoomTarget = Math.min(this.cam.zoomTarget, 4);
@@ -2635,6 +2699,9 @@ class App {
     const p = this.player;
     const room = p.aboard;
     if (!room) return;
+    // The figure is stood beside the hull, so this is a camera cut too. Below the guard: a call
+    // made with nobody aboard changes nothing and should cut nothing.
+    this.postfx?.reset();
     const v = room.vehicle;
     room.toWorld(p.pos, tmp);
     p.leave();

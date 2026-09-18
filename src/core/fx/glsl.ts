@@ -40,3 +40,18 @@ export const FX_VIEW_POS = /* glsl */ `
 export const FX_HASH = /* glsl */ `
   float fxHash(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
 `;
+
+/**
+ * fxPcg3d: a three-dimensional integer hash (Jarzynski and Olano). It needs GLSL ES 3.00, which is
+ * what three compiles a ShaderMaterial as, and high-precision int, which is the default prefix. A
+ * sine hash shows banded patterns at large screen coordinates on this driver; this one does not.
+ */
+export const FX_PCG3D = /* glsl */ `
+  uvec3 fxPcg3d(uvec3 v) {
+    v = v * 1664525u + 1013904223u;
+    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+    v ^= v >> 16u;
+    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+    return v;
+  }
+`;
