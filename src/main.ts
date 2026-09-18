@@ -236,7 +236,6 @@ class App {
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     World.anisotropy = Math.min(8, this.renderer.capabilities.getMaxAnisotropy());
     this.renderer.toneMappingExposure = S.exposure;
-    if (S.effects) this.postfx = this.makePostFX();
 
     this.cam = new ThirdPersonCamera(window.innerWidth / window.innerHeight);
     this.cam.sensitivity = S.sensitivity;
@@ -250,6 +249,9 @@ class App {
     // Before any planet loads: every water body needs an environment of one size from the moment
     // it exists, or the first real sky map to arrive recompiles its shader mid-play.
     this.world.waterBodies.attach(this.renderer);
+    // The effects chain is built only now: the water reflections pass is handed the world's water
+    // bodies, so a chain made before the world exists throws on boot.
+    if (S.effects) this.postfx = this.makePostFX();
     // Shaders are warmed for the target the frames are actually drawn into: with the effects on,
     // a program compiled with nothing bound is the wrong variant and is thrown away on first use.
     this.world.compileTarget = () => this.postfx?.compileTarget ?? null;
