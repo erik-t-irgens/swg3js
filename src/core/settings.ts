@@ -32,6 +32,10 @@ export interface Settings extends FxSettings {
   terrainRadius: number;
   /** Coarse far tiles each way. */
   farRadius: number;
+  /** How many creatures and NPCs the spawner may have out at once (the planet's own wildlife is not counted). */
+  mobileCap: number;
+  /** Metres past which a creature or NPC holds its pose until it comes nearer. */
+  mobileAnimRange: number;
   // The weather: scene content, not an effect, so these work with the effects off.
   /** Rain, dust storms and snow as the planet's environment rows have them. */
   weather: boolean;
@@ -65,6 +69,8 @@ export const DEFAULT_SETTINGS: Settings = {
   objectReach: 1,
   terrainRadius: 6,
   farRadius: 6,
+  mobileCap: 40,
+  mobileAnimRange: 160,
   weather: true,
   weatherDensity: 1,
   wetSurfaces: true,

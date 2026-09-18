@@ -5,7 +5,7 @@
 // A first pass: no cover, no dodging, the ground read from the terrain only. Its clothes come off
 // its species' wardrobe (a Wookiee's from the Wookiee pieces alone).
 import * as THREE from 'three';
-import { RAPIER, type Physics } from '../core/physics';
+import { Group, groups, RAPIER, type Physics } from '../core/physics';
 import { CharacterRig, loadPlayerRig } from '../player/rig';
 import { applyLook } from '../player/look';
 import { FIGHTS, isSaber, type WeaponCatalogue, type WeaponDef } from '../player/weapons';
@@ -20,11 +20,14 @@ import { hostileSides } from '../combat/targets';
 import type { Terrain } from './terrain';
 import { markActor } from './portalRender';
 import { slotOf } from '../ui/wardrobeUi';
+import type { CellState } from './layoutStream';
+import { SABER_SWINGS } from './mobiles/arms';
 
 /** What a fighter carries, and so how it fights. */
 type Arm = 'saber' | 'melee' | 'gun';
 
-const SWINGS = ['BOTH_A1_T__B_', 'BOTH_A1__L__R', 'BOTH_A1__R__L', 'BOTH_A1_TL_BR', 'BOTH_A1_TR_BL', 'BOTH_A2_T__B_', 'BOTH_A2__L__R', 'BOTH_A2_TL_BR', 'BOTH_A3_T__B_', 'BOTH_A3_TR_BL'];
+/** Jedi Academy's one-hand swings (the same list a lightsaber-armed person from the catalogue swings). */
+const SWINGS = SABER_SWINGS;
 const SPECIES_FALLBACK = ['human_male', 'human_female', 'twilek_male', 'twilek_female', 'zabrak_male', 'zabrak_female', 'rodian_male', 'bothan_male', 'trandoshan_male', 'moncal_female', 'sullustan_male', 'wookiee_male'];
 const RUN_SPEED = 5.2;
 const SIGHT = 45;
@@ -78,7 +81,24 @@ export interface NpcDeps {
   species: string[];
   /** Compile an object's shaders in the background, resolving when it can be drawn without a stall. */
   compile?: (objects: THREE.Object3D[]) => Promise<void>;
+  /** The room a fighter put down inside a building starts in. */
+  cellAt?: (p: THREE.Vector3) => CellState | null;
+  /** Follow a body through a building's portals, as the player is followed. */
+  followCell?: (state: CellState | null, prev: THREE.Vector3, pos: THREE.Vector3) => CellState | null;
 }
+
+/** How often (seconds of sim time) a fighter's room is followed, and how far it may go between. */
+const FOLLOW_EVERY = 0.25;
+const FOLLOW_STEP = 2;
+/** How far above its feet a fighter's floor ray starts inside: a stair's step, and less than a counter. */
+const FLOOR_STEP = 0.5;
+/** A floor inside a building: neither the terrain under it nor the building's outer shell. */
+const INSIDE_FILTER = groups(Group.all, Group.all & ~(Group.terrain | Group.exterior));
+/** Only what stands still is a floor. */
+const staticOnly = (c: RAPIER.Collider): boolean => {
+  const body = c.parent();
+  return !body || body.isFixed();
+};
 
 export class Npc implements Living {
   readonly group = new THREE.Group();
@@ -124,6 +144,11 @@ export class Npc implements Living {
   private readonly push = new THREE.Vector3();
   private moving = false;
   readonly name: string;
+  /** The building room it is in, followed through the portals by the manager; null outside. */
+  cell: CellState | null = null;
+  /** Where it stood when its room was last followed, and when (sim time). */
+  readonly cellFrom = new THREE.Vector3();
+  followAt = -Infinity;
 
   constructor(readonly species: string, private readonly physics: Physics, x: number, y: number, z: number) {
     this.name = `${species.replace(/_/g, ' ')} fighter`;
@@ -479,7 +504,12 @@ export class Npc implements Living {
     // Where the ground is, and whether the Force is keeping it off there. A kinematic body goes
     // where it is put, so the hold and the fall have to be written here or the clamp undoes them
     // every frame: a gripped fighter would be dragged down and a thrown one would slide.
-    const ground = terrain.heightAt(this.pos.x, this.pos.z);
+    // Inside a building the floor under it, by a ray from a step above its feet (a cantina's floor,
+    // not the ground under the building); outside, or with nothing under it, the terrain.
+    // Only what stands still counts: the ray starts inside the fighter's own capsule. From a step
+    // up, not a metre: a kinematic body walking into a counter or a table would pop onto its top.
+    const floor = this.cell ? this.physics.topSurface(this.pos.x, this.pos.z, this.pos.y + FLOOR_STEP, 40, INSIDE_FILTER, staticOnly) : null;
+    const ground = floor ?? terrain.heightAt(this.pos.x, this.pos.z);
     if (this.heldAt && this.now < this.heldUntil) {
       this.pos.lerp(this.heldAt, Math.min(1, sdt * 12));
       this.fallVy = 0;
@@ -574,11 +604,16 @@ export class NpcManager {
     this.deps = { ...this.deps, ...deps };
   }
 
-  /** Stand one at a point on the ground, of a random species; it dresses and arms itself as its rig loads. */
-  spawnAt(x: number, z: number, wanted?: string): Npc {
+  /**
+   * Stand one at a point on the ground, of a random species; it dresses and arms itself as its rig
+   * loads. `at.y` and `at.inside` put it on a building's floor, in the room the point is in.
+   */
+  spawnAt(x: number, z: number, wanted?: string, at: { y?: number; inside?: boolean } = {}): Npc {
     const species = this.deps.species.length ? this.deps.species : SPECIES_FALLBACK;
     const id = (wanted && species.find((s) => s.includes(wanted))) ?? species[Math.floor(Math.random() * species.length)];
-    const npc = new Npc(id, this.physics, x, this.terrain.heightAt(x, z), z);
+    const npc = new Npc(id, this.physics, x, at.y ?? this.terrain.heightAt(x, z), z);
+    npc.cellFrom.copy(npc.pos);
+    if (at.inside) npc.cell = this.deps.cellAt?.(npc.pos) ?? null;
     this.scene.add(npc.group);
     this.npcs.push(npc);
     this.byCollider.set(npc.collider.handle, npc);
@@ -623,8 +658,15 @@ export class NpcManager {
   /** `targets` is the world's one list of living things (the player, the creatures, the fighters). */
   update(dt: number, targets: readonly Living[], bolts: Bolts, camera: THREE.Camera | null, now: number): void {
     if (this.disposed) return;
+    const follow = this.deps.followCell;
     for (let i = this.npcs.length - 1; i >= 0; i--) {
       const npc = this.npcs[i];
+      // Its room, followed through the portals four times a second, and sooner when it has gone a couple of metres.
+      if (follow && !npc.dead && (now - npc.followAt >= FOLLOW_EVERY || npc.cellFrom.distanceToSquared(npc.pos) > FOLLOW_STEP * FOLLOW_STEP)) {
+        npc.followAt = now;
+        npc.cell = follow(npc.cell, npc.cellFrom, npc.pos);
+        npc.cellFrom.copy(npc.pos);
+      }
       npc.update(dt, this.terrain, targets, bolts, this.deps.effects, camera, now);
       if (npc.dead && npc.deadTimer <= 0) {
         // The collider handle went out of the lookup in `die`, at the moment the collider itself

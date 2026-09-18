@@ -148,6 +148,8 @@ const GRAPHICS: { title: string; knobs: readonly Knob[] }[] = [
       { key: 'objectReach', label: 'Object reach', hint: 'How far buildings and props load, over the game\'s own ranges. Less loads less and streams faster.', kind: 'range', min: 0.4, max: 1.6, step: 0.05, format: (v) => `${v.toFixed(2)}×` },
       { key: 'terrainRadius', label: 'Ground detail radius', hint: 'Detailed ground chunks each way around you. The coarse far ground continues past them.', kind: 'range', min: 3, max: 9, step: 1, format: (v) => `${v} chunks` },
       { key: 'farRadius', label: 'Far ground radius', hint: 'Coarse far tiles each way: the horizon.', kind: 'range', min: 3, max: 9, step: 1, format: (v) => `${v} tiles` },
+      { key: 'mobileCap', label: 'Spawned creatures and NPCs', hint: 'How many the spawner may have out at once. Each one is a body, a skeleton and its animation.', kind: 'range', min: 5, max: 150, step: 5, format: (v) => `${v}` },
+      { key: 'mobileAnimRange', label: 'Creature animation range', hint: 'Past this they hold their pose until they come nearer. Their shadows and their movement carry on.', kind: 'range', min: 60, max: 400, step: 20, format: (v) => `${v} m` },
     ],
   },
 ];

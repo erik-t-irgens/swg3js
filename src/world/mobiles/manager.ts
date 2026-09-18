@@ -15,8 +15,15 @@ import type { Terrain } from '../terrain';
 import type { Bolts } from '../../combat/bolts';
 import type { Effects } from '../../combat/effects';
 import type { Living } from '../../combat/kit';
-import { Mobile, type MobileContext, type MobileSpawn } from './mobile';
-import { MOBILE_CACHE, type MobileAssets, type ModelAsset, type PackAsset } from './assets';
+import { GUNS, gunTypeFor } from '../../combat/guns';
+import { Character } from '../../player/character';
+import type { WeaponCatalogue } from '../../player/weapons';
+import { Mobile, type MobileContext, type MobileEquipment, type MobileExtras, type MobileSpawn } from './mobile';
+import { MOBILE_CACHE, MobileAssets, type ModelAsset, type PackAsset } from './assets';
+import { armedRoles, armsFor as armsChoice, chooseWeapon, SABER_SWINGS } from './arms';
+import { isLook, lookKey } from './look';
+import { lookBounds, permanentGap } from './spawning';
+import type { PackSummary } from './types';
 import { CATALOGUE_COMMAND, type MobileCatalogue } from './catalogue';
 import { BRAIN_TUNE, type BrainTune } from './brain';
 import { GAIT_LIMITS, moveSpeeds, type GaitLimits } from './gait';
@@ -25,6 +32,8 @@ import { describeRoles, rolesFor } from './packClips';
 import type { BodyInput } from './shape';
 import type { MobileEntry } from './types';
 import type { CellState } from '../layoutStream';
+import type { FighterGlow } from '../npcs';
+import { keepNearestGlow } from '../../combat/bladeLights';
 
 export interface SpawnOpts {
   origin?: 'spawned' | 'ambient';
@@ -68,7 +77,19 @@ export interface MobileManagerDeps {
   refuse(): string | null;
   /** Whether shadows are on at all. */
   shadows(): boolean;
+  /** The weapons rack, once it has loaded (a person's gun or lightsaber comes off it); null until then, or without one. */
+  weapons?(): WeaponCatalogue | null;
 }
+
+/** What a person is armed with and played with, worked out while the model loads. */
+interface ArmsPlan {
+  equipment: MobileEquipment | null;
+  extras: MobileExtras | null;
+}
+
+/** The blade colours: a Sith's, a Dark Jedi's and an Inquisitor's red, anyone else's one of the Jedi's. */
+const DARK_BLADE = 0xff2a1a;
+const LIGHT_BLADES = [0x3aa0ff, 0x40e060, 0x3aa0ff, 0x8a5cff];
 
 /** What a group-wide or console spawn reports. */
 export interface SpawnResult {
@@ -146,14 +167,17 @@ export class MobileManager {
   whyNot(entry: MobileEntry, cat: MobileCatalogue, origin: 'spawned' | 'ambient' = 'spawned'): string | null {
     const where = this.deps.refuse();
     if (where) return where;
+    // The one model the game's own archives cannot give: said as what it is, not as a fault.
+    const gap = permanentGap(entry, cat.file.failed);
+    if (gap) return `${entry.name} (${entry.id}) is ${gap}`;
     const ready = cat.ready(entry);
     if (!ready.ok) return `${entry.name} (${entry.id}) is not ready: ${ready.why}`;
     const app = cat.appearanceOf(entry);
-    if (entry.kind === 'dressed') return `${entry.name} (${entry.id}) is a dressed NPC, stood through the fighters, which this spawner does not do yet`;
-    if (app?.form === 'parts') return `${entry.name} (${entry.id}) is a person on a parts body, whose clothes this spawner cannot put on yet`;
-    if (!app) return `${entry.name} (${entry.id}) names no appearance in the catalogue`;
-    if (!cat.modelFile(entry)) return `${entry.name} (${entry.id}) has no model file`;
-    const failed = this.deps.assets.failure(cat.modelFile(entry)!);
+    if (!app && entry.kind !== 'dressed') return `${entry.name} (${entry.id}) names no appearance in the catalogue`;
+    if (entry.kind === 'dressed' && !entry.species) return `${entry.name} (${entry.id}) is a dressed NPC that names no species to dress`;
+    const key = MobileAssets.modelKey(entry, cat);
+    if (!key) return `${entry.name} (${entry.id}) has no model file`;
+    const failed = this.deps.assets.failure(key);
     if (failed) return `${entry.name}: ${failed}`;
     if (origin === 'spawned' && this.spawnedCount() >= this.cap) return `${this.cap} are out already (Graphics, Distance and detail)`;
     const cost = this.deps.assets.wouldCost(entry, cat);
@@ -173,6 +197,34 @@ export class MobileManager {
     return n;
   }
 
+  /** How many stood by hand are out (what the cap counts; the planet's own wildlife is not). */
+  get spawnedOut(): number {
+    return this.spawnedCount();
+  }
+
+  /**
+   * The mobiles' lit blades nearest `eye` within `maxDistance`, nearest first, each in its blade's
+   * colour: where they want pooled light this frame, as `NpcManager.lightSpots`. Fills `out` (kept
+   * entries, reordered in place) after the `n` already there (the fighters'), keeping the nearest
+   * of them all, and returns how many.
+   */
+  lightSpots(out: FighterGlow[], eye: THREE.Vector3, maxDistance: number, n = 0): number {
+    const max2 = maxDistance * maxDistance;
+    for (const m of this.live) {
+      if (!m.glowAt(tmp)) continue;
+      const d2 = tmp.distanceToSquared(eye);
+      if (d2 > max2) continue;
+      n = keepNearestGlow(out, n, tmp, m.bladeColor, d2);
+    }
+    return n;
+  }
+
+  /** Every mobile's drawn blade core, for the depth of field's glow depth: fills `out` from `n`, returns the new count. */
+  glowCores(out: THREE.Object3D[], n: number): number {
+    for (const m of this.live) n = m.glowCore(out, n);
+    return n;
+  }
+
   /**
    * Stand one entry at a point (on the ground under it, or on the floor when inside). Returns the
    * mobile, whose model then loads behind it, or a sentence saying why not. The body exists at
@@ -188,7 +240,8 @@ export class MobileManager {
       this.lastNote = why;
       return why;
     }
-    const app = cat.appearanceOf(entry)!;
+    // A dressed NPC has no appearance of its own: it is planned from a person's box at its species' height.
+    const bounds = lookBounds(entry, cat.file.appearances);
     const pack = cat.packOf(entry);
     const inside = opts.inside ?? false;
     let y = at.y;
@@ -208,7 +261,7 @@ export class MobileManager {
       heading: at.heading ?? opts.heading ?? Math.random() * Math.PI * 2,
       origin,
       inside,
-      bounds: app.bounds,
+      bounds,
       hierarchy,
       scale: opts.scale,
       overrides: opts.overrides,
@@ -252,21 +305,26 @@ export class MobileManager {
   /** The model and the pack for a mobile, then the model hung on the body, unless it has gone meanwhile. */
   private async load(m: Mobile, held: Held, entry: MobileEntry, cat: MobileCatalogue): Promise<void> {
     const assets = this.deps.assets;
-    const file = cat.modelFile(entry)!;
-    const app = cat.appearanceOf(entry)!;
+    // A plain model's file, or a person's look (a parts body dressed from the entry), built once per entry.
+    const look = isLook(entry, cat);
+    const file = look ? lookKey(entry) : cat.modelFile(entry)!;
+    const bounds = lookBounds(entry, cat.file.appearances);
     const packInfo = cat.packOf(entry);
     const hologram = (entry.flags ?? []).includes('hologram');
     const before = assets.stats().models.length + assets.stats().packs.length;
     // Taken before the first await: a load in flight counts against the budget at its estimate from
     // this moment, so the next spawn in the same tick sees it (`referencedBytes`).
     const guess = assets.estimate(entry, cat);
-    const [model, pack] = await Promise.allSettled([
-      assets.acquireModel(file, { hologram, bounds: app.bounds, estimate: guess.model }),
+    const [model, pack, arms] = await Promise.allSettled([
+      assets.acquireModel(file, { hologram, bounds, estimate: guess.model, look: look ? { entry, cat } : undefined }),
       packInfo ? assets.acquirePack(packInfo.id, packInfo.file, packInfo.json, guess.pack) : Promise.resolve(null),
+      this.armsFor(entry, packInfo),
     ]);
     held.loading = false;
     const gotModel = model.status === 'fulfilled' ? model.value : null;
     const gotPack = pack.status === 'fulfilled' ? pack.value : null;
+    const plan = arms.status === 'fulfilled' ? arms.value : null;
+    if (arms.status === 'rejected') console.warn(`mobiles: ${entry.id} goes unarmed:`, arms.reason);
     const failure = model.status === 'rejected' ? model.reason : pack.status === 'rejected' ? pack.reason : null;
     if (failure || !gotModel) {
       if (gotModel) assets.release(gotModel);
@@ -283,12 +341,13 @@ export class MobileManager {
       if (gotPack) assets.release(gotPack);
       return;
     }
-    const r = m.attach(gotModel, gotPack);
+    const r = m.attach(gotModel, gotPack, plan?.extras ?? undefined);
     if (!r.ok) {
       assets.release(gotModel);
       if (gotPack) assets.release(gotPack);
       return;
     }
+    if (plan?.equipment && !m.equip(plan.equipment)) console.warn(`mobiles: ${entry.id} has no hand to hold ${plan.equipment.id}`);
     held.model = gotModel;
     held.pack = gotPack;
     // It is ready now: it joins the list of the living (a mobile still loading is left out of it).
@@ -300,6 +359,64 @@ export class MobileManager {
     // Something new came in: the cache may be over its budget with things nobody holds.
     const after = assets.stats().models.length + assets.stats().packs.length;
     if (after > before) assets.trim();
+  }
+
+  /** Weapon models already prepared (or being), by file: the rack's copies share their materials, so one preparation serves them all. */
+  private readonly preparedWeapons = new Map<string, Promise<void>>();
+
+  /**
+   * What a person holds and plays with (arms.ts): a gun off the rack with the pack's rifle carry
+   * when it is held as a rifle, or a lightsaber with Jedi Academy's swings when a species rig has
+   * already been parsed (the player's own always has; one is never fetched for this). The weapon
+   * is prepared before it is handed over, so holding it compiles nothing in play. Nothing for a
+   * creature, a droid or a hologram.
+   */
+  private async armsFor(entry: MobileEntry, packInfo: PackSummary | null): Promise<ArmsPlan | null> {
+    if (!packInfo || packInfo.hierarchy !== 'all_b') return null;
+    const json = await this.deps.assets.packJson(packInfo.id, packInfo.json);
+    const roles = rolesFor(json, entry.gender);
+    const choice = armsChoice(entry, packInfo.hierarchy, roles, json.roleSources);
+    if (!choice) return null;
+    let extras: MobileExtras | null = null;
+    if (choice.kind === 'gun') {
+      const over = armedRoles(json.clips ?? [], choice.carry);
+      if (Object.keys(over).length) extras = { roles: over };
+      else if (choice.carry === 'rifle' && !this.warned.has(`rifle:${packInfo.id}`)) {
+        // Said once a pack: the rifle is held in the pack's own (pistol) stance, which is the best it has.
+        this.warned.add(`rifle:${packInfo.id}`);
+        console.info(`mobiles: pack ${packInfo.id} has no rifle clips; ${entry.id} and the rest on it hold a rifle in its own stance`);
+      }
+    } else {
+      const rig = Character.parsedRigClips(entry.species ?? undefined);
+      const swings = new Map<string, THREE.AnimationClip>();
+      for (const c of rig ?? []) if (SABER_SWINGS.includes(c.name)) swings.set(c.name, c);
+      if (swings.size) extras = { clips: swings, roles: { attacks: [...swings.keys()] } };
+    }
+    const rack = this.deps.weapons?.() ?? null;
+    const def = rack ? chooseWeapon(choice, rack.weapons) : null;
+    if (!rack || !def) return { equipment: null, extras };
+    const model = await rack.model(def);
+    let ready = this.preparedWeapons.get(def.file);
+    if (!ready) {
+      ready = this.deps.assets.prepareRoot(model);
+      this.preparedWeapons.set(def.file, ready);
+    }
+    await ready;
+    const b = def.bounds;
+    const saber = choice.kind === 'saber';
+    return {
+      extras,
+      equipment: {
+        id: def.id,
+        model,
+        kind: saber ? 'saber' : 'gun',
+        gun: saber ? null : (GUNS[gunTypeFor(def, def.class)] ?? null),
+        length: def.length || 0.6,
+        hiltTop: b ? Math.abs(b.max[1] - b.min[1]) / 2 : 0.13,
+        blade: saber && def.blade ? { length: def.blade.length, width: def.blade.width, open: def.blade.open, close: def.blade.close } : null,
+        color: saber ? (/sith|dark|inquisitor/.test(entry.id) ? DARK_BLADE : LIGHT_BLADES[Math.floor(Math.random() * LIGHT_BLADES.length)]) : 0xffffff,
+      },
+    };
   }
 
   /**
@@ -314,8 +431,8 @@ export class MobileManager {
     fwd.normalize();
     const centre = new THREE.Vector3(from.x + fwd.x * distance, from.y, from.z + fwd.z * distance);
     const cat = this.deps.catalogue();
-    const app = cat?.appearanceOf(entry);
-    const size = app ? Math.max(Math.abs(app.bounds.max[0] - app.bounds.min[0]), Math.abs(app.bounds.max[2] - app.bounds.min[2])) : 1;
+    const box = cat ? lookBounds(entry, cat.file.appearances) : null;
+    const size = box ? Math.max(Math.abs(box.max[0] - box.min[0]), Math.abs(box.max[2] - box.min[2])) : 1;
     const ring = n > 1 ? Math.max(1.5, (size * n) / (2 * Math.PI) + size * 0.3) : 0;
     for (let i = 0; i < n; i++) {
       const a = (i / Math.max(1, n)) * Math.PI * 2;
@@ -480,6 +597,8 @@ export class MobileManager {
         held.cellFrom.copy(m.pos);
         m.room = held.cell?.cell ?? 0;
         m.setInside(held.cell !== null);
+        // Under the ground outside (the planet's heights came in after it was stood): back on top.
+        if (m.liftToGround()) held.cellFrom.copy(m.pos);
       }
       const tier = this.tierOf(m, camera, ctx.playerPos, shadows, tune, held.tier);
       // The whole cull: a group that is not visible is in no pass at all.

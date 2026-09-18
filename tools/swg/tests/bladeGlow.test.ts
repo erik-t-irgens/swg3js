@@ -179,7 +179,7 @@ ok(marchWeight(BLADE_GLOW_MARCH.nearFull) === 1, `light from ${BLADE_GLOW_MARCH.
   ok(marchVisibility(P, n, Q, 6, () => 9000, tan, nearPlane, 0.47) === 1 && marchVisibility(P, n, Q, 6, () => 9000, tan, nearPlane, -0.47) === 1, 'with the taps offset, open ground stays clear');
 }
 
-// --- gathering the blades: the player's first, then the fighters nearest the eye, eight at most ---
+// --- gathering the blades: the player's first, then the fighters and mobiles nearest the eye, eight at most ---
 
 {
   type FakeBlade = { glowing: boolean; drawnBase: THREE.Vector3; drawnTip: THREE.Vector3; ignition: number; color: THREE.Color };
@@ -222,6 +222,10 @@ ok(marchWeight(BLADE_GLOW_MARCH.nearFull) === 1, `light from ${BLADE_GLOW_MARCH.
   // Fighters with no saber or a dark one, and a list shorter than the last frame's.
   ok(collectBlades(out, [], fighters([null, blade(0, -4, 0xffffff, false)]), eye) === 0 && out.count === 0, 'no saber, or a dark one, gives nothing, and last frame\'s count is not kept');
   ok(collectBlades(out, [], [], eye) === 0, 'no blades at all is an empty list');
+
+  // The catalogue's people (mobiles) are gathered with the fighters, the nearest of either first.
+  collectBlades(out, [], fighters([blade(0, -9, 0xffffff), blade(0, -20, 0xffffff)]), eye, fighters([blade(0, -4, 0xff0000), null, blade(0, -15, 0xff0000)]));
+  ok(out.count === 4 && out.items.slice(0, out.count).map((e) => -e.a.z).join() === '4,9,15,20', "a mobile's lit blade joins the fighters', nearest first");
 }
 
 // --- the pooled lights the fighters' glows take with the glow pass off: the nearest two, nearest first ---

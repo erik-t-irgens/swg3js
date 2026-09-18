@@ -96,6 +96,20 @@ const BONE_ROLES: Record<BoneRole, (string | RegExp)[]> = {
   head: ['mixamorig:Head', 'mixamorigHead', /^head$/i, /head/i],
 };
 
+/**
+ * The bone playing a role in any skeleton, by the same names and patterns a rig uses: what a
+ * creature or NPC that is not a CharacterRig (a mobile on its own model) hangs a weapon on.
+ */
+export function boneForRole(bones: ReadonlyMap<string, THREE.Bone>, role: BoneRole): THREE.Bone | null {
+  for (const candidate of BONE_ROLES[role]) {
+    if (typeof candidate === 'string') {
+      const b = bones.get(candidate);
+      if (b) return b;
+    } else for (const [name, bone] of bones) if (candidate.test(name)) return bone;
+  }
+  return null;
+}
+
 export interface RigOptions {
   /** Movement speed each locomotion clip was animated at (m/s), from a converter manifest. */
   clipSpeeds?: Record<string, number>;
@@ -296,12 +310,7 @@ export class CharacterRig {
   /** The bone playing a role, matched by the first name or pattern that fits. */
   boneFor(role: BoneRole): THREE.Bone | null {
     if (this.roles.has(role)) return this.roles.get(role)!;
-    let found: THREE.Bone | null = null;
-    for (const candidate of BONE_ROLES[role]) {
-      if (typeof candidate === 'string') found = this.bones.get(candidate) ?? null;
-      else for (const [name, bone] of this.bones) if (candidate.test(name)) { found = bone; break; }
-      if (found) break;
-    }
+    const found = boneForRole(this.bones, role);
     this.roles.set(role, found);
     return found;
   }

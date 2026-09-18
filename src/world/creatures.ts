@@ -538,15 +538,28 @@ export class CreatureManager {
   version = 0;
   private readonly mat: THREE.MeshStandardMaterial;
   private model: CreatureModel | null = null;
+  /** Whether the converted model has been asked for: only once a creature of this kind is stood. */
+  private modelAsked = false;
   private disposed = false;
 
   constructor(private readonly planet: PlanetDef, private readonly terrain: Terrain, private readonly physics: Physics) {
     this.mat = new THREE.MeshStandardMaterial({ color: planet.creatures.color, flatShading: true, roughness: 0.9 });
-    void loadCreatureModel(planet.creatures.name).then((m) => {
+  }
+
+  /**
+   * Fetch and parse the converted model the first time one of these creatures is stood. When the
+   * catalogue stands the planet's wildlife (`World.ambientFromCatalogue`) nothing is added here,
+   * and a GLB for bodies that never stand is never downloaded.
+   */
+  private ensureModel(): void {
+    if (this.modelAsked) return;
+    this.modelAsked = true;
+    const name = this.planet.creatures.name;
+    void loadCreatureModel(name).then((m) => {
       if (!m || this.disposed) return;
       this.model = m;
       for (const c of this.creatures) c.setModel(m);
-      console.info(`creatures: ${planet.creatures.name} uses the converted model (${[...m.clips.keys()].join(', ')})`);
+      console.info(`creatures: ${name} uses the converted model (${[...m.clips.keys()].join(', ')})`);
     });
   }
 
@@ -565,6 +578,7 @@ export class CreatureManager {
   }
 
   private add(c: Creature): Creature {
+    this.ensureModel();
     if (this.model) c.setModel(this.model);
     c.alert = (self, source) => this.assist(self, source);
     this.creatures.push(c);

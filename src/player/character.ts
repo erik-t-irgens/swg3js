@@ -84,8 +84,27 @@ export function loadSpeciesIndex(baseUrl: string): Promise<SpeciesEntry[]> {
  * of mixers can play. Without this every fighter spawned parsed the whole file again.
  */
 const rigClips = new Map<string, Promise<THREE.AnimationClip[]>>();
+/** The same clips once parsed, by rig URL: what a caller that must not wait (a spawn) may borrow. */
+const rigClipsParsed = new Map<string, THREE.AnimationClip[]>();
 /** The wardrobes' catalogues, one fetch per folder however many characters dress from it. */
 const wardrobes = new Map<string, Promise<(Wardrobe & { skeleton?: string }) | null>>();
+
+/** How a character is loaded when it is not a player species as the game ships it. */
+export interface CharacterOptions {
+  /**
+   * The folder parts.json and its meshes live in, under assets-private/ (`mobiles/models/<app>/`,
+   * a creature or NPC's own parts); the species folder `characters/<id>/` when left out.
+   */
+  dir?: string;
+  /** Play these clips instead of fetching the manifest's rig (an animation pack's, renamed). */
+  clips?: THREE.AnimationClip[] | null;
+  /**
+   * Do not fetch the rig at all: the skeleton comes from the first part, as it always did, and the
+   * clips are `clips` or none. A species rig is two hundred megabytes of Jedi Academy and SWG
+   * clips; an NPC that plays its own animation pack must never pay for it.
+   */
+  skipRig?: boolean;
+}
 
 /** Re-point a skinned mesh's joint indices from its own skeleton's order to `target`'s, by joint name; a joint the target lacks goes to its root. */
 function remapSkin(s: THREE.SkinnedMesh, target: THREE.Skeleton): void {
@@ -198,8 +217,8 @@ export class Character {
    * Load a character's rig and its body and head. Worn items come later through `wear`, so a
    * naked character is cheap and dressing is a small download rather than another whole model.
    */
-  static async load(baseUrl: string, id = 'human_male', wear?: string[]): Promise<Character> {
-    const dir = `${baseUrl}assets-private/characters/${id}/`;
+  static async load(baseUrl: string, id = 'human_male', wear?: string[], opts: CharacterOptions = {}): Promise<Character> {
+    const dir = opts.dir ? `${baseUrl}assets-private/${opts.dir.replace(/\/?$/, '/')}` : `${baseUrl}assets-private/characters/${id}/`;
     const res = await fetch(`${dir}parts.json`);
     if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json')) throw new Error(`no parts for ${id}`);
     const manifest = (await res.json()) as PartsManifest;
@@ -208,14 +227,23 @@ export class Character {
     // skeleton comes from the first part instead, where the loader makes a real one out of that
     // file's own inverse bind matrices. Every part carries the same matrices for the same joints
     // in the same order (the converter writes them from one skeleton), so one of them is the one.
-    const rigUrl = dir + manifest.rig.file;
-    let clips = rigClips.get(rigUrl);
-    if (!clips) {
-      clips = loader.loadAsync(rigUrl).then((rig) => rig.animations);
-      rigClips.set(rigUrl, clips);
-      clips.catch(() => rigClips.delete(rigUrl));
+    let clipList: THREE.AnimationClip[];
+    if (opts.clips) clipList = opts.clips;
+    else if (opts.skipRig) clipList = [];
+    else {
+      const rigUrl = dir + manifest.rig.file;
+      let clips = rigClips.get(rigUrl);
+      if (!clips) {
+        clips = loader.loadAsync(rigUrl).then((rig) => {
+          rigClipsParsed.set(rigUrl, rig.animations);
+          return rig.animations;
+        });
+        rigClips.set(rigUrl, clips);
+        clips.catch(() => rigClips.delete(rigUrl));
+      }
+      clipList = await clips;
     }
-    const character = new Character(manifest, await clips);
+    const character = new Character(manifest, clipList);
     character.dir = dir;
     const dress = new Set(wear ?? manifest.defaultWear ?? []);
     const wanted = manifest.parts.filter((def) => def.occlusionLayer === 0 || dress.has(def.name));
@@ -231,6 +259,63 @@ export class Character {
     if (await customizer.addSource(dir)) character.customizer = customizer;
     else character.pendingCustomizer = customizer;
     return character;
+  }
+
+  /**
+   * A species rig's clips that have already been parsed, without waiting and without starting a
+   * fetch: the one whose URL holds `prefer` (a species id) when there is one, else any. The
+   * humanoid species share one skeleton, so any of them drives any other. Null when none is in.
+   */
+  static parsedRigClips(prefer?: string): THREE.AnimationClip[] | null {
+    let any: THREE.AnimationClip[] | null = null;
+    for (const [url, clips] of rigClipsParsed) {
+      if (prefer && url.includes(`/characters/${prefer}/`)) return clips;
+      any ??= clips;
+    }
+    return any;
+  }
+
+  /**
+   * The catalogue of a wardrobe folder (a full URL ending in `/`: a species' `wardrobe/<w>/`, or
+   * `mobiles/wearables/<folder>/`), fetched once per folder however many characters dress from
+   * it; null when the folder has none. Each item's meshes are marked as living beside it.
+   */
+  static wardrobeAt(dir: string): Promise<(Wardrobe & { skeleton?: string }) | null> {
+    let p = wardrobes.get(dir);
+    if (!p) {
+      p = fetch(`${dir}wardrobe.json`)
+        .then(async (res) => {
+          if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json')) return null;
+          const w = (await res.json()) as Wardrobe & { skeleton?: string };
+          // Each item's meshes live beside the catalogue, not in the character's own folder.
+          for (const item of w.items ?? []) for (const part of item.parts ?? []) part.dir ??= dir;
+          return w;
+        })
+        .catch(() => null);
+      wardrobes.set(dir, p);
+    }
+    return p;
+  }
+
+  /**
+   * Put on one item from a named wardrobe folder (a full URL ending in `/`): another species'
+   * wardrobe, or the wearables only NPCs wear. Found by its id, else by the part name it is worn
+   * under. The folder's colour recipes join the character's first, so a value set for the item
+   * after it is on renders it. False when the folder or the item is not there.
+   */
+  async wearItemFrom(dir: string, id: string, partName?: string): Promise<boolean> {
+    const w = await Character.wardrobeAt(dir);
+    if (!w) return false;
+    const item = w.items.find((i) => i.id === id) ?? (partName ? w.items.find((i) => i.parts.some((p) => p.name === partName)) : undefined);
+    if (!item || !item.parts.length) return false;
+    const cz = this.customizer ?? this.pendingCustomizer;
+    if (cz && (await cz.addSource(dir)) && !this.customizer) this.customizer = cz;
+    const key = item.id;
+    const existing = this.parts.get(key);
+    if (existing) existing.worn = true;
+    else await this.addPart(key, item.parts, true);
+    this.applyOcclusion();
+    return true;
   }
 
   /** Put on a worn item by part name, loading it the first time. */
@@ -416,12 +501,7 @@ export class Character {
     const listed = (await loadSpeciesIndex(baseUrl)).find((s) => s.id === this.manifest.id)?.wardrobe;
     for (const cand of listed ? [listed] : [this.manifest.id, `human_${gender}`]) {
       const d = `${baseUrl}assets-private/wardrobe/${cand}/`;
-      let p = wardrobes.get(d);
-      if (!p) {
-        p = fetch(`${d}wardrobe.json`).then(async (res) => (!res.ok || !(res.headers.get('content-type') ?? '').includes('json') ? null : ((await res.json()) as Wardrobe & { skeleton?: string })));
-        wardrobes.set(d, p);
-      }
-      const found = await p;
+      const found = await Character.wardrobeAt(d);
       if (!found) continue;
       if (cand !== this.manifest.id && found.skeleton && found.skeleton.toLowerCase() !== this.manifest.skeleton.toLowerCase()) continue;
       dir = d;

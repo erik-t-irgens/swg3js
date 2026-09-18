@@ -6,6 +6,28 @@ import * as THREE from 'three';
 import { type CustomizeFile, type Img, type Recipe, type Values, recipeNormal, recipeVariableDefs, recipeVariables, renderRecipe, variableKey } from './texrender';
 import { decodePng } from './png';
 
+/**
+ * Each pack folder's recipes, fetched and parsed once however many characters read them: a
+ * wardrobe's customize.json is 5 MB, and every dressed NPC's look builds a customizer of its own.
+ * Nothing writes to a parsed recipe or palette (the customizer keys its own maps by them, and
+ * renderRecipe writes only its own registers), so sharing one parse is safe. A failed fetch is
+ * not kept, so a later character tries again.
+ */
+const customizeFiles = new Map<string, Promise<CustomizeFile | null>>();
+function loadCustomizeFile(dir: string): Promise<CustomizeFile | null> {
+  let p = customizeFiles.get(dir);
+  if (!p) {
+    p = fetch(`${dir}customize.json`)
+      .then(async (res) => (!res.ok || !(res.headers.get('content-type') ?? '').includes('json') ? null : ((await res.json()) as CustomizeFile)))
+      .catch(() => null);
+    customizeFiles.set(dir, p);
+    void p.then((file) => {
+      if (!file) customizeFiles.delete(dir);
+    });
+  }
+  return p;
+}
+
 export class Customizer {
   readonly values: Values = new Map();
   private readonly images = new Map<string, Img | null>();
@@ -28,10 +50,8 @@ export class Customizer {
   async addSource(dir: string): Promise<boolean> {
     if (this.loaded.has(dir)) return true;
     try {
-      const res = await fetch(`${dir}customize.json`);
-      if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json')) return false;
-      const file = (await res.json()) as CustomizeFile;
-      if (!file.recipes?.length) return false;
+      const file = await loadCustomizeFile(dir);
+      if (!file?.recipes?.length) return false;
       this.loaded.add(dir);
       Object.assign(this.palettes, file.palettes);
       // The same piece may sit in two packs (the default shirt is in the parts pack and in the

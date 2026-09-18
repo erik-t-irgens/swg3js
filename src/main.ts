@@ -49,6 +49,8 @@ import { vehiclePlumes } from './vehicles/enginePlumes';
 import { Notice } from './ui/notice';
 import { VehiclesUi } from './ui/vehiclesUi';
 import { NpcUi } from './ui/npcUi';
+import { CATALOGUE_COMMAND } from './world/mobiles/catalogue';
+import { ambientOverrides, lookBounds, spawnDistance } from './world/mobiles/spawning';
 import { AppearanceUi } from './ui/appearanceUi';
 import { CharacterSelect } from './ui/characterSelect';
 import { CreatorBar } from './ui/creatorBar';
@@ -296,6 +298,8 @@ class App {
     this.world.setShadowLook(S.shadowSoftness, undefined, S.shadowMapSize);
     this.world.setShadows(S.shadowDistance, S.shadowCasterRadius);
     this.world.setReach(S.objectReach, S.terrainRadius, S.farRadius);
+    // The spawner's cap and the creatures' animation range, kept by the world for every planet's manager.
+    this.world.setMobileDetail(S.mobileCap, S.mobileAnimRange);
     // The weather's settings (the world made it; the HUD, made below, shows its note from the loop).
     this.world.weather.configure(S);
     // A hand torch: a spot light carried at the camera, pointing where it looks. F toggles it.
@@ -1380,7 +1384,7 @@ class App {
         const strength = typeof raw.bladeGlowStrength === 'number' ? raw.bladeGlowStrength : null;
         const eye = this.cam.camera.position;
         const list = createBladeList();
-        collectBlades(list, this.player.saberBlades, this.world.npcs.npcs, eye);
+        collectBlades(list, this.player.saberBlades, this.world.npcs.npcs, eye, this.world.mobiles?.live);
         const row = fx?.describe().passes.find((p) => p.id === 'bladeGlow') ?? null;
         const seen = pass?.lastBlades ?? null;
         const rect = pass?.lastRect ?? null;
@@ -1747,6 +1751,10 @@ class App {
       case 'terrainRadius':
       case 'farRadius':
         this.world.setReach(S.objectReach, S.terrainRadius, S.farRadius);
+        break;
+      case 'mobileCap':
+      case 'mobileAnimRange':
+        this.world.setMobileDetail(S.mobileCap, S.mobileAnimRange);
         break;
       case 'sensitivity':
         this.cam.sensitivity = S.sensitivity;
@@ -2676,6 +2684,8 @@ class App {
     n = this.player.glowCores(out, n);
     // The fighters exist once a planet has loaded.
     if (this.world.npcs) n = this.world.npcs.glowCores(out, n);
+    // The catalogue's people with a lightsaber (the dressed Jedi, Sith and Inquisitors).
+    if (this.world.mobiles) n = this.world.mobiles.glowCores(out, n);
     return n;
   };
 
@@ -2765,7 +2775,7 @@ class App {
       // The lit blades as drawn this frame (drawBlades and the fighters' step have run), and how
       // bright a surface near them can be from every other light; aboard, floors are the hull's.
       const blades = this.fxBlades;
-      collectBlades(blades, this.player.saberBlades, this.world.npcs.npcs, cam.position);
+      collectBlades(blades, this.player.saberBlades, this.world.npcs.npcs, cam.position, this.world.mobiles?.live);
       const lit = this.litSources;
       lit.torch = this.torchOn ? this.torch : null;
       lit.eye.copy(cam.position);
@@ -3069,13 +3079,115 @@ class App {
         });
       } else this.vehiclesUi.attach(this.garage);
     } else {
-      this.npcUi.attach(this.npcKinds());
+      this.npcUi.attach(this.spawnerDeps());
       this.npcUi.show();
     }
     this.freeMouse(true);
   }
 
-  /** What the NPC tab can stand in front of the player: a blaster turret, and the planet's creature. */
+  /**
+   * What the NPC tab spawns from and counts: the whole creature and NPC catalogue through the
+   * mobiles (a getter, since it may land after the tab is first opened), and the machines above it.
+   * Everything stands ahead of the player, on the floor when inside a building.
+   */
+  private spawnerDeps(): import('./ui/npcUi').SpawnerDeps {
+    return {
+      kinds: this.npcKinds(),
+      catalogue: () => this.world.mobileCatalogue,
+      counts: () => this.world.mobiles?.counts() ?? new Map(),
+      live: () => this.world.mobiles?.spawnedOut ?? 0,
+      cap: () => this.world.mobiles?.cap ?? this.settings.mobileCap,
+      spawn: (entry, n = 1) => {
+        const mobiles = this.world.mobiles;
+        const cat = this.world.mobileCatalogue;
+        if (!mobiles || !cat) return { spawned: 0, note: 'the creature and NPC catalogue has not loaded yet' };
+        this.cam.forward(tmp);
+        const bounds = lookBounds(entry, cat.file.appearances);
+        const scale = entry.size?.scale?.[1] ?? 1;
+        const inside = this.world.inside;
+        // Indoors it stands a few metres off (a cantina is small), on the floor under that spot.
+        const distance = inside ? Math.min(4, spawnDistance(bounds, scale)) : spawnDistance(bounds, scale);
+        let r = mobiles.spawnAhead(entry, this.player.pos, tmp, Math.max(1, n), distance, inside);
+        // A wall nearer than that (a room's floor ends at its walls): nearer, then at the player's feet.
+        for (const d of inside ? [1.5, 0.5] : []) {
+          if (r.spawned) break;
+          r = mobiles.spawnAhead(entry, this.player.pos, tmp, Math.max(1, n), d, inside);
+        }
+        return { spawned: r.spawned, note: r.note };
+      },
+      clear: (filter) => this.world.mobiles?.clear((m) => filter(m.entry)) ?? 0,
+      clearAll: () => (this.world.mobiles?.clear() ?? 0) + this.world.npcs.removeAll() + this.world.turrets.removeAll(),
+      missing: `No creature and NPC catalogue yet. It loads at start; if it never does, convert it with ${CATALOGUE_COMMAND}.`,
+    };
+  }
+
+  /**
+   * The HUD's "nearby": the nearest living thing's name within 40 m (a creature, a person, a
+   * fighter), else the planet's own species. Read from the world's kept list of the living, which
+   * is only rebuilt when something is added or taken away, so this walks a short array a frame.
+   */
+  private nearbyLabel(at: THREE.Vector3): string {
+    let best = 40 * 40;
+    let label: string | null = null;
+    for (const t of this.world.targets()) {
+      if (t.dead || t === this.world.playerTarget) continue;
+      const dx = t.pos.x - at.x;
+      const dz = t.pos.z - at.z;
+      const d2 = dx * dx + dz * dz;
+      if (d2 < best) {
+        best = d2;
+        label = t.label;
+      }
+    }
+    return label ?? this.world.planet.creatures.name;
+  }
+
+  /**
+   * This planet's creature on the NPC tab: the catalogue's own (its model, clips and brain, with the
+   * planet's health, blow and temper) when the catalogue has the species, else the old creature.
+   */
+  private planetCreatureKind(ahead: (distance: number) => { x: number; z: number; facing: number }): import('./ui/npcUi').NpcKind {
+    const def = this.world.planet.creatures;
+    const cat = this.world.mobileCatalogue;
+    const entry = cat?.resolve(def.name);
+    const temper = `${def.aggressive ? 'attacks on sight' : 'wanders, fights back when hit'}; ${def.hp} health`;
+    if (cat && entry && cat.ready(entry).ok && this.world.mobiles) {
+      return {
+        id: 'creature',
+        label: `${def.name} (this planet)`,
+        blurb: `${temper}; the catalogue's ${entry.id}`,
+        count: () => this.world.mobiles?.count(entry.id) ?? 0,
+        spawn: () => {
+          this.cam.forward(tmp);
+          tmp.y = 0;
+          tmp.normalize();
+          const inside = this.world.inside;
+          const distance = spawnDistance(lookBounds(entry, cat.file.appearances), entry.size?.scale?.[1] ?? 1);
+          const spot = this.world.spawnSpot(this.player.pos, tmp, inside ? Math.min(4, distance) : distance, inside);
+          if (!spot) return inside ? 'there is no floor under that spot' : 'no ground there';
+          const heading = Math.atan2(this.player.pos.x - spot.x, this.player.pos.z - spot.z);
+          // The planet's own health, blow and temper, as its wildlife has them; still one stood by hand.
+          const got = this.world.mobiles.spawn(entry, { x: spot.x, y: spot.y, z: spot.z, heading }, { inside, overrides: ambientOverrides(def) });
+          return typeof got === 'string' ? got : `a ${def.name} ahead (${this.world.mobiles.count(entry.id)} out)`;
+        },
+        clear: () => this.world.mobiles?.clear((m) => m.entry.id === entry.id) ?? 0,
+      };
+    }
+    return {
+      id: 'creature',
+      label: def.name,
+      blurb: temper,
+      count: () => this.world.creatures.creatures.length,
+      spawn: () => {
+        const p = ahead(12);
+        this.world.creatures.spawnAt(p.x, p.z);
+        return `a ${def.name} 12 m ahead (${this.world.creatures.creatures.length} out)`;
+      },
+      clear: () => this.world.creatures.removeAll(),
+    };
+  }
+
+  /** What the NPC tab can stand in front of the player: a blaster turret, a fighter, and the planet's creature. */
   private npcKinds(): import('./ui/npcUi').NpcKind[] {
     const ahead = (distance: number) => {
       this.cam.forward(tmp);
@@ -3094,26 +3206,34 @@ class App {
         },
         clear: () => this.world.turrets.removeAll(),
       },
-      {
-        id: 'creature',
-        label: this.world.planet.creatures.name,
-        blurb: `${this.world.planet.creatures.aggressive ? 'attacks on sight' : 'wanders, fights back when hit'}; ${this.world.planet.creatures.hp} health`,
-        count: () => this.world.creatures.creatures.length,
-        spawn: () => {
-          const p = ahead(12);
-          this.world.creatures.spawnAt(p.x, p.z);
-          return `a ${this.world.planet.creatures.name} 12 m ahead (${this.world.creatures.creatures.length} out)`;
-        },
-        clear: () => this.world.creatures.removeAll(),
-      },
+      this.planetCreatureKind(ahead),
       {
         id: 'fighter',
         label: 'Fighter',
         blurb: 'a humanoid of a random species with a random look and a lightsaber, sword or gun off the rack; fights you and the other fighters; 160 health',
         count: () => this.world.npcs.npcs.filter((n) => !n.dead).length,
         spawn: () => {
-          const p = ahead(8 + Math.random() * 4);
-          const n = this.world.npcs.spawnAt(p.x + (Math.random() - 0.5) * 4, p.z + (Math.random() - 0.5) * 4);
+          const inside = this.world.inside;
+          let x = 0;
+          let z = 0;
+          let spot: THREE.Vector3 | null = null;
+          if (inside) {
+            // Inside a building it stands on the floor a few metres ahead, or nearer when a wall is
+            // closer than that (a room's floor ends at its walls), in the room it is in.
+            for (const d of [3, 1.5, 0.5]) {
+              const p = ahead(d);
+              spot = this.world.spawnSpot(tmp.set(p.x, this.player.pos.y, p.z), tmp2.set(0, 0, 0), 0, true);
+              if (spot) break;
+            }
+            if (!spot) return 'there is no floor under that spot';
+            x = spot.x;
+            z = spot.z;
+          } else {
+            const p = ahead(8 + Math.random() * 4);
+            x = p.x + (Math.random() - 0.5) * 4;
+            z = p.z + (Math.random() - 0.5) * 4;
+          }
+          const n = this.world.npcs.spawnAt(x, z, undefined, spot ? { y: spot.y, inside: true } : {});
           return `a ${n.name} ahead (${this.world.npcs.npcs.length} out)`;
         },
         clear: () => this.world.npcs.removeAll(),
@@ -3554,7 +3674,9 @@ class App {
       if (simulate) {
         if (!this.bladeGlowOwnsLight()) {
           const glows = this.world.npcs.lightSpots(npcGlow, this.cam.camera.position, FIGHTER_GLOW_RANGE);
-          for (let i = glows - 1; i >= 0; i--) this.effects.flash(npcGlow[i].pos, npcGlow[i].color, 2, 5, 0.08);
+          // The catalogue's people's blades, merged into the same two nearest (keepNearestGlow keeps the list sorted).
+          const all = this.world.mobiles ? this.world.mobiles.lightSpots(npcGlow, this.cam.camera.position, FIGHTER_GLOW_RANGE, glows) : glows;
+          for (let i = all - 1; i >= 0; i--) this.effects.flash(npcGlow[i].pos, npcGlow[i].color, 2, 5, 0.08);
         }
         // Aboard, the room's own lights, the nearest few, through the same pool (no new lights, so nothing recompiles).
         if (player.aboard) for (const l of player.aboard.roomLights(player.pos, 3, roomLightSpots)) this.effects.flash(l.pos, l.color, l.intensity, l.distance, 0.08);
@@ -3606,7 +3728,7 @@ class App {
       const aimed = player.mounted ?? player.piloting;
       this.hud.setTarget(aimed?.spec.ship && aimed.airborne && !input.held('freeLook') ? this.targetHud(aimed) : null);
       const at = player.worldPos;
-      this.hud.update(dt, at.x, at.y, at.z, this.kit, player.hp, player.maxHp, this.world.day.clock(), this.world.planet.creatures.name, player.saberOn);
+      this.hud.update(dt, at.x, at.y, at.z, this.kit, player.hp, player.maxHp, this.world.day.clock(), this.nearbyLabel(at), player.saberOn);
 
       if (this.breakFrames) throw new Error('debug: the frame is broken on purpose');
       // The blades are drawn from where the hands ended up this frame, so they never trail the pose.

@@ -41,6 +41,17 @@ export function groupHtml(key: string, label: string, count: number, note: strin
   return `<details class="cat-group" data-key="${escapeHtml(key)}"${open ? ' open' : ''}><summary><span class="cat-label">${escapeHtml(label)}</span><span class="cat-count">${count}</span>${note ? `<span class="cat-note">${escapeHtml(note)}</span>` : ''}</summary><div class="cat-grid">${inner}</div></details>`;
 }
 
+/**
+ * A folding group whose entries are put in later: the heading with the count, a note and any
+ * buttons of its own (`actions`, markup that goes in the heading after the note), and an empty
+ * grid marked `data-body` for the caller to fill the first time it is opened. A list of thousands
+ * renders its headings alone and builds a group's rows only when someone looks.
+ */
+export function groupShell(key: string, label: string, count: number, note: string, open: boolean, actions = ''): string {
+  const k = escapeHtml(key);
+  return `<details class="cat-group" data-key="${k}"${open ? ' open' : ''}><summary><span class="cat-label">${escapeHtml(label)}</span><span class="cat-count">${count}</span>${note ? `<span class="cat-note">${escapeHtml(note)}</span>` : '<span class="cat-note"></span>'}${actions}</summary><div class="cat-grid" data-body="${k}"></div></details>`;
+}
+
 /** Which groups the player has opened or closed by hand, so a render keeps them that way. */
 export class GroupState {
   private readonly byHand = new Map<string, boolean>();

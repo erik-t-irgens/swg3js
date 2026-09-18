@@ -3,7 +3,7 @@
 // from every other light, which the glow pass needs to tell a lit surface from a glow.
 import * as THREE from 'three';
 import type { SaberBlade } from './saberBlade';
-import type { FighterGlow, Npc } from '../world/npcs';
+import type { FighterGlow } from '../world/npcs';
 import type { FxBladeList } from '../core/fx/bladeList';
 import { BLADE_GLOW_MAX, BLADE_GLOW_TUNE, distanceFade, luminance, radiance, segmentDistanceSq } from '../core/fx/bladeGlowMath.ts';
 
@@ -11,20 +11,15 @@ const WHITE = new THREE.Color(0xffffff);
 const mid = new THREE.Vector3();
 /** Fighters' lit blades gathered this frame, kept between frames (grows only when more fighters than ever have blades out). */
 const candidates: { blade: SaberBlade | null; d2: number }[] = [];
+/** Anything that may hold a lit blade: a fighter (`Npc`) or a person from the catalogue (`Mobile`). */
+export interface BladeHolder {
+  readonly saber: SaberBlade | null;
+}
+const NONE: readonly BladeHolder[] = [];
 
-/**
- * The lit blades for the effects, this frame: the player's first (all of them that glow), then the
- * fighters' nearest the eye, up to BLADE_GLOW_MAX, none farther than the tune's `far`. Each carries
- * its drawn segment, its colour a little toward white, its ignition, and its ignition times the
- * distance fade. No allocation once the candidate list has grown.
- */
-export function collectBlades(out: FxBladeList, own: readonly SaberBlade[], fighters: readonly Npc[], eye: THREE.Vector3): number {
-  const T = BLADE_GLOW_TUNE;
-  const far2 = T.far * T.far;
-  out.count = 0;
-  for (const blade of own) if (blade.glowing) put(out, blade, true, eye);
-  let n = 0;
-  for (const f of fighters) {
+/** Adds each holder's lit blade within `far2` of the eye to the candidates from `n`; returns the new count. */
+function gather(holders: readonly BladeHolder[], eye: THREE.Vector3, far2: number, n: number): number {
+  for (const f of holders) {
     const b = f.saber;
     if (!b?.glowing) continue;
     const d2 = segmentDistanceSq(eye, b.drawnBase, b.drawnTip);
@@ -34,6 +29,22 @@ export function collectBlades(out: FxBladeList, own: readonly SaberBlade[], figh
     c.d2 = d2;
     n++;
   }
+  return n;
+}
+
+/**
+ * The lit blades for the effects, this frame: the player's first (all of them that glow), then the
+ * fighters' and the catalogue people's (`more`) nearest the eye, up to BLADE_GLOW_MAX, none farther
+ * than the tune's `far`. Each carries its drawn segment, its colour a little toward white, its
+ * ignition, and its ignition times the distance fade. No allocation once the candidate list has grown.
+ */
+export function collectBlades(out: FxBladeList, own: readonly SaberBlade[], fighters: readonly BladeHolder[], eye: THREE.Vector3, more: readonly BladeHolder[] = NONE): number {
+  const T = BLADE_GLOW_TUNE;
+  const far2 = T.far * T.far;
+  out.count = 0;
+  for (const blade of own) if (blade.glowing) put(out, blade, true, eye);
+  let n = gather(fighters, eye, far2, 0);
+  n = gather(more, eye, far2, n);
   // The nearest into the room left: a selection, at most BLADE_GLOW_MAX passes over n.
   for (let k = 0; out.count < BLADE_GLOW_MAX && k < n; k++) {
     let best = k;

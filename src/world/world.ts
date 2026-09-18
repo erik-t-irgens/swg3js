@@ -6,6 +6,7 @@ import { NpcManager, type NpcDeps } from './npcs';
 import { MobileManager } from './mobiles/manager';
 import { MobileAssets } from './mobiles/assets';
 import { MobileCatalogue } from './mobiles/catalogue';
+import { ambientOverrides } from './mobiles/spawning';
 import { DayCycle } from './daycycle';
 import { SwgSky, type SkyLighting } from './sky';
 import { Weather, type WeatherViewContext, type WeatherWorldContext } from './weather';
@@ -496,6 +497,14 @@ export class World {
       spawnSpot: (from, forward, distance, inside) => this.spawnSpot(from, forward, distance, inside),
       refuse: () => (this.planet?.space ? 'nothing can be stood in space' : (this.refuseMobiles?.() ?? null)),
       shadows: () => this.renderer?.shadowMap.enabled ?? false,
+      // A getter: the rack arrives after the world is made, and a person spawned before it is unarmed.
+      weapons: () => this.npcDeps.weapons ?? null,
+    });
+    // The fighters stand on a building's floor as the mobiles do: their room followed through the
+    // portals (the floor under them is then found by a ray, the terrain outside).
+    this.npcs.attach({
+      cellAt: (p) => this.layoutStream?.buildingAt(p) ?? this.cellState,
+      followCell: (state, prev, pos) => (this.layoutStream ? this.layoutStream.trackCell(state, prev, pos) : null),
     });
     this.mobiles.cap = this.mobileDetail.cap;
     this.mobiles.animRange = this.mobileDetail.animRange;
@@ -1823,7 +1832,9 @@ export class World {
     this.exclusions = [{ x: center.x, z: center.z, r: 14 }];
     this.stream(center, Infinity);
     this.streamFar(center, Infinity);
-    this.creatures.spawnAround(center);
+    // The planet's own wildlife: through the catalogue (its own model, clips and brain) when it has
+    // landed and has the species, else the old creatures, which is also what a cold first load gets.
+    if (!this.ambientFromCatalogue(center)) this.creatures.spawnAround(center);
     markActor(this.creatures.group);
     // Turrets are spawned from the NPC tab (B) now, not stood around the arrival point.
     markActor(this.turrets.group);
@@ -1834,6 +1845,23 @@ export class World {
     const speeder = createPlaceholderSpeeder(this.physics, this.scene, sx, this.terrain.heightAt(sx, sz) + 1.2, sz, Math.PI * 0.75);
     markActor(speeder.group);
     this.vehicles.push(speeder);
+  }
+
+  /**
+   * The planet's species stood as the catalogue's mobiles, `count` of them about the arrival point,
+   * with the planet's own health, blow and temper. Never waits: the catalogue is read only if it has
+   * already landed (this runs at arrival, in a frame), and the spot is the terrain's own height,
+   * which needs no stepped physics. False when anything is missing, leaving it to the old path.
+   */
+  private ambientFromCatalogue(center: THREE.Vector3): boolean {
+    const def = this.planet.creatures;
+    if (!def.count || this.planet.space || !this.mobiles) return false;
+    const cat = MobileCatalogue.loaded(import.meta.env.BASE_URL);
+    const entry = cat?.resolve(def.name);
+    if (!cat || !entry || !cat.ready(entry).ok) return false;
+    const n = this.mobiles.spawnAmbient(entry, def.count, center, ambientOverrides(def));
+    if (n) console.info(`creatures: ${def.name} stood from the catalogue (${entry.id}), ${n} about`);
+    return n > 0;
   }
 
   /** Stand a vehicle from the garage on the ground in front of a point, facing away from it. */
@@ -2450,9 +2478,16 @@ export class World {
   groundAt(x: number, y: number, z: number, inside: boolean): number | null {
     if (!inside) return this.terrain.heightAt(x, z);
     const filter = groups(Group.all, Group.all & ~(Group.terrain | Group.exterior));
-    const d = this.physics.groundDistance(x, y + 0.2, z, 40, undefined, filter);
-    return d === null ? null : y + 0.2 - d;
+    // What stands still only: a ray from inside a body (the player's capsule, a fighter's, a
+    // creature's) would otherwise find that body and call its middle the floor.
+    return this.physics.topSurface(x, z, y + 0.2, 40, filter, World.staticOnly);
   }
+
+  /** A collider that is part of the world rather than of something that moves. */
+  private static readonly staticOnly = (c: R.Collider): boolean => {
+    const body = c.parent();
+    return !body || body.isFixed();
+  };
 
   /**
    * A clear spot `distance` metres ahead of a point, or null. The ray starts three metres up and

@@ -12,8 +12,11 @@ import { Group, groups, RAPIER, type Physics } from '../../core/physics';
 import type { Terrain } from '../terrain';
 import type { Bolts } from '../../combat/bolts';
 import type { Effects } from '../../combat/effects';
-import { GUNS } from '../../combat/guns';
+import { GUNS, type GunProfile } from '../../combat/guns';
 import { Ragdoll } from '../../combat/ragdoll';
+import { SaberBlade } from '../../combat/saberBlade';
+import { boneForRole } from '../../player/rig';
+import { MUZZLE_PATTERNS } from './arms';
 import { nextLivingKey, PLAYER_KEY, type Aggression, type Living, type Side } from '../../combat/kit';
 import { hostileSides, sideOf } from '../../combat/targets';
 import { markActor } from '../portalRender';
@@ -23,7 +26,7 @@ import { BRAIN_TUNE, decide, type BrainSelf, type BrainTarget, type Decision } f
 import { LOD_TUNE, type LodTier } from './lod';
 import { MobileAnimator, SHOT_PRIORITY } from './animator';
 import { describeRoles, rolesFor } from './packClips';
-import type { ModelAsset, PackAsset } from './assets';
+import type { PackAsset } from './assets';
 import type { Gait, MobileEntry, MobileState, Roles, Vec3 } from './types';
 
 export type { MobileState };
@@ -32,6 +35,39 @@ const tmp = new THREE.Vector3();
 const tmp2 = new THREE.Vector3();
 const tmpQ = new THREE.Quaternion();
 const UP = new THREE.Vector3(0, 1, 0);
+/** What a blade faces while no camera is given (a headless step). */
+const IDLE_CAMERA = new THREE.PerspectiveCamera();
+
+/** The body a mobile wears: a plain model's prototype, or a person's dressed look; cloned per mobile. */
+export interface MobileBody {
+  key: string;
+  scene: THREE.Object3D;
+}
+
+/** What the pack is played with beyond its own clips and roles: a Jedi's swings off a species rig, a rifle's stance. */
+export interface MobileExtras {
+  clips?: ReadonlyMap<string, THREE.AnimationClip>;
+  roles?: Partial<Roles>;
+}
+
+/** A weapon off the rack, loaded and prepared, for a person to hold. */
+export interface MobileEquipment {
+  /** The rack's id, for the console. */
+  id: string;
+  /** A fresh copy of the rack's model (its materials and geometry are the rack's, never disposed here). */
+  model: THREE.Object3D;
+  kind: 'gun' | 'saber';
+  /** The gun's bolt, for a gun. */
+  gun: GunProfile | null;
+  /** The model's length along its barrel, for the muzzle. */
+  length: number;
+  /** Half the hilt's height, where a lightsaber's blade starts. */
+  hiltTop: number;
+  /** The blade's spec, for a lightsaber. */
+  blade: { length: number; width: number; open: number; close: number } | null;
+  /** The blade's colour. */
+  color: number;
+}
 
 /** Collision filters: outdoors everything, a hull ball everything but the terrain, indoors neither the terrain nor the shells. */
 const OUTSIDE = groups(Group.all, Group.all);
@@ -42,8 +78,8 @@ const INSIDE = groups(Group.all, Group.all & ~(Group.terrain | Group.exterior));
 const BLOW_PUSH = { tiny: 1, small: 3, medium: 6, large: 10, huge: 16 } as const;
 /** A creature's spit: speed (m/s), colour, drop, and the acid burn it leaves (share of the blow a second, seconds). */
 const SPIT = { speed: 28, color: 0xb8e04a, gravity: 4, size: 1.2, burn: 0.15, burnFor: 3 };
-/** The bone a shot leaves from, in the order tried. */
-const MUZZLE_BONES = [/muzzle|barrel|gun|weapon|hold_r/i, /jaw|mouth|head/i];
+/** The bone a shot leaves from, in the order tried (arms.ts). */
+const MUZZLE_BONES = MUZZLE_PATTERNS;
 /** A knock at least this hard (after the size's resistance) knocks it down, when it has the clips. */
 const KNOCKDOWN_AT = 14;
 /** Seconds a knocked-down body lies before it gets up. */
@@ -188,6 +224,14 @@ export class Mobile implements Living {
   private swimming = false;
   private flyer: boolean;
   private muzzle: THREE.Object3D | null = null;
+  /** The weapon in the hand, when it holds one off the rack; its bolt when it is a gun. */
+  weapon: string | null = null;
+  private gun: GunProfile | null = null;
+  private holder: THREE.Group | null = null;
+  private blade: SaberBlade | null = null;
+  private hiltTop = 0.13;
+  private readonly bladeBase = new THREE.Vector3();
+  private readonly bladeTip = new THREE.Vector3();
   private readonly restPose = new Map<THREE.Object3D, { p: THREE.Vector3; q: THREE.Quaternion; s: THREE.Vector3 }>();
   private readonly memory = new Map<number, Grudge>();
   private targetKey: number | null = null;
@@ -299,7 +343,7 @@ export class Mobile implements Living {
    * model loaded; the caller then releases what it acquired. Returns a warning when the pack's
    * tracks mostly bind to nothing in this skeleton.
    */
-  attach(model: ModelAsset, pack: PackAsset | null): { ok: boolean; warning: string | null } {
+  attach(model: MobileBody, pack: PackAsset | null, extras?: MobileExtras): { ok: boolean; warning: string | null } {
     if (this.disposed || this.dead) return { ok: false, warning: null };
     const scene = cloneSkeleton(model.scene);
     const names = new Set<string>();
@@ -319,7 +363,10 @@ export class Mobile implements Living {
     let warning: string | null = null;
     if (pack) {
       this.roles = rolesFor(pack.json, this.entry.gender);
-      this.animator = new MobileAnimator(scene, pack.clips, pack.additive);
+      // A rifle's carry, a Jedi's swings: laid over the pack's roles, with any clips they name.
+      if (extras?.roles) Object.assign(this.roles, extras.roles);
+      const clips = extras?.clips?.size ? new Map([...pack.clips, ...extras.clips]) : pack.clips;
+      this.animator = new MobileAnimator(scene, clips, pack.additive);
       const probe = pack.clips.get(this.roles.idle ?? '') ?? pack.clips.values().next().value;
       if (probe && probe.tracks.length) {
         let unbound = 0;
@@ -346,6 +393,98 @@ export class Mobile implements Living {
     this.state = 'idle';
     this.animator?.loop(this.idleNow(), 1, 0);
     return { ok: true, warning };
+  }
+
+  /**
+   * Put a weapon off the rack in the right hand, as a fighter holds one: on the skeleton's weapon
+   * joint (`hold_r`), at world size whatever the body's scale. A gun's shots then leave from its
+   * muzzle with its own bolt; a lightsaber's hilt lies along the body's forward, as the game's
+   * clips hold it, and its blade is drawn from the hilt's top while the mobile is fighting. False
+   * when the body has no hand, or has gone.
+   */
+  equip(e: MobileEquipment): boolean {
+    if (this.disposed || this.dead || !this.model || this.holder) return false;
+    const bones = new Map<string, THREE.Bone>();
+    this.model.traverse((o) => {
+      if ((o as THREE.Bone).isBone) bones.set(o.name, o as THREE.Bone);
+    });
+    const hand = boneForRole(bones, 'rightHand');
+    if (!hand) return false;
+    this.group.updateMatrixWorld(true);
+    const holder = new THREE.Group();
+    holder.name = `mobile weapon:${e.id}`;
+    holder.add(e.model);
+    holder.scale.setScalar(1 / Math.max(hand.getWorldScale(tmp).x, 1e-6));
+    hand.add(holder);
+    markActor(holder);
+    e.model.traverse((o) => {
+      const m = o as THREE.Mesh;
+      if (!m.isMesh) return;
+      m.frustumCulled = false;
+      this.meshes.push(m);
+    });
+    this.holder = holder;
+    this.weapon = e.id;
+    if (e.kind === 'saber') {
+      tmp.set(0, 0, 1).applyQuaternion(this.model.getWorldQuaternion(tmpQ));
+      tmp.applyQuaternion(hand.getWorldQuaternion(tmpQ).invert()).normalize();
+      holder.quaternion.setFromUnitVectors(UP, tmp);
+      this.hiltTop = e.hiltTop;
+      const blade = new SaberBlade();
+      blade.setColor(e.color);
+      if (e.blade) blade.spec = { ...e.blade };
+      this.group.parent?.add(blade.group);
+      markActor(blade.group);
+      this.blade = blade;
+      // A blade is for closing in: no shots from the hand that holds it.
+      this.rangedRange = 0;
+    } else {
+      this.gun = e.gun;
+      const muzzle = new THREE.Object3D();
+      muzzle.name = 'muzzle';
+      muzzle.position.set(0, 0, e.length * 0.55);
+      holder.add(muzzle);
+      this.muzzle = muzzle;
+    }
+    return true;
+  }
+
+  /** The lit blade follows the hilt: drawn while it fights, retracted otherwise; hidden with the body. */
+  private updateBlade(dt: number, camera: THREE.Camera | null): void {
+    const b = this.blade;
+    const h = this.holder;
+    if (!b || !h) return;
+    const shown = this.group.visible && !this.ragdoll;
+    b.group.visible = shown;
+    if (!shown) return;
+    h.updateWorldMatrix(true, false);
+    h.localToWorld(this.bladeBase.set(0, this.hiltTop, 0));
+    h.localToWorld(this.bladeTip.set(0, this.hiltTop + b.spec.length, 0));
+    const on = !this.dead && this.fighting();
+    b.update(dt, this.bladeBase, this.bladeTip, on, camera ?? IDLE_CAMERA, this.swingAt > 0 ? 1 : this.speed > 0.5 ? 0.3 : 0, this.dead);
+  }
+
+  /** The blade renderer while it lives and holds a lightsaber: the blade glow reads its light from it, as from a fighter's. */
+  get saber(): SaberBlade | null {
+    return this.dead ? null : this.blade;
+  }
+
+  /** The middle of the lit blade, when there is one out this frame (igniting, lit or retracting), as `Npc.glowAt`. */
+  glowAt(out: THREE.Vector3): boolean {
+    const b = this.blade;
+    if (this.dead || !b?.glowing) return false;
+    out.copy(b.drawnBase).lerp(b.drawnTip, 0.5);
+    return true;
+  }
+
+  /** The blade's white core while it is drawn, for the depth of field's glow depth; returns the new count. */
+  glowCore(out: THREE.Object3D[], n: number): number {
+    return this.blade ? this.blade.glowCore(out, n) : n;
+  }
+
+  /** The blade's colour, for the pooled light it borrows. */
+  get bladeColor(): number {
+    return this.blade ? this.blade.color.getHex() : 0xffffff;
   }
 
   radiusToward(from: THREE.Vector3): number {
@@ -576,8 +715,11 @@ export class Mobile implements Living {
       const burn = this.blow * SPIT.burn;
       this.deps.bolts.fire(from, dir, { owner: 'enemy', damage: this.blow, metresPerSecond: SPIT.speed, color, size: SPIT.size * Math.max(0.6, Math.min(2, Math.sqrt(this.scale * this.plan.height / 2))), gravity: SPIT.gravity, push: 1, exclude: this.body, source: this, onHit: (_p, hit) => hit?.afflict?.(burn, SPIT.burnFor) });
     } else {
-      // A droid's or a person's own gun: the pistol's bolt for the one-frame pistol shots, the rifle's otherwise.
-      const g = (this.roles?.rangedAdditive && /pistol/i.test(this.roles.ranged ?? '') ? GUNS.bryar : GUNS.blaster).primary;
+      // The gun in its hand when it holds one off the rack; else a droid's or a person's own: the
+      // pistol's bolt for the one-frame pistol shots, the rifle's otherwise.
+      // (A beam or a flame has no bolt to fire: its holder shoots the rifle's.)
+      const held = this.gun && this.gun.primary.speed > 0 ? this.gun : null;
+      const g = (held ?? (this.roles?.rangedAdditive && /pistol/i.test(this.roles.ranged ?? '') ? GUNS.bryar : GUNS.blaster)).primary;
       color = g.color;
       this.deps.bolts.fire(from, dir, { owner: 'enemy', damage: this.blow, speed: g.speed, color, size: g.size, push: g.push, exclude: this.body, source: this });
     }
@@ -622,6 +764,7 @@ export class Mobile implements Living {
       this.ragdoll.centre(tmp);
       this.pos.set(tmp.x, tmp.y - Math.min(0.3, this.halfHeight * 0.3), tmp.z);
       this.deadTimer -= dt;
+      if (this.blade) this.blade.group.visible = false;
       return;
     }
     // 2. The body's place, and the heading it is held at.
@@ -656,6 +799,7 @@ export class Mobile implements Living {
         this.body.setLinvel({ x: v.x * 0.9, y: v.y * 0.8, z: v.z * 0.9 }, true);
       }
       this.animate(sdt, tier);
+      this.updateBlade(dt, ctx.camera);
       this.deadTimer -= dt;
       return;
     }
@@ -663,6 +807,7 @@ export class Mobile implements Living {
     // 6. Held by the Force: nothing of its own this frame.
     if (this.heldUntil > this.now) {
       this.animate(sdt, tier);
+      this.updateBlade(dt, ctx.camera);
       return;
     }
     // 7. Timers.
@@ -683,6 +828,7 @@ export class Mobile implements Living {
     this.act(sdt, ctx, tier);
     this.holdHeight(t);
     this.animate(sdt, tier);
+    this.updateBlade(dt, ctx.camera);
   }
 
   private checkGround(t: { x: number; y: number; z: number }): void {
@@ -838,7 +984,8 @@ export class Mobile implements Living {
     if (!tier.move || this.stunned > 0 || this.downPhase) pace = 'stand';
     if (!tier.move) {
       this.body.setLinvel({ x: 0, y: this.body.linvel().y, z: 0 }, false);
-      if (!this.body.isSleeping()) this.body.sleep();
+      // Only a body standing on something sleeps: one put to sleep in the air hangs there for good.
+      if (this.grounded && !this.body.isSleeping()) this.body.sleep();
     }
     let wanted = pace === 'run' ? this.speeds.run : pace === 'walk' ? this.speeds.walk : 0;
     if (moveTo && pace !== 'stand' && Math.hypot(moveTo.x - this.pos.x, moveTo.z - this.pos.z) < 0.5) wanted = 0;
@@ -978,6 +1125,25 @@ export class Mobile implements Living {
     this.animAcc = 0;
   }
 
+  /**
+   * Outdoors, a body found well under the terrain is put back on top of it. The ground can change
+   * under a mobile: the planet's own heights arrive after the arrival spawn (the wildlife is stood
+   * on the stand-in terrain behind the loading screen), and past the physics' reach there is no
+   * heightfield to stand on. Returns whether it moved it.
+   */
+  liftToGround(): boolean {
+    if (this.dead || this.disposed || this.inside || this.ragdoll || this.swimming || this.heldUntil > this.now) return false;
+    const ground = this.deps.terrain.heightAt(this.pos.x, this.pos.z);
+    if (this.pos.y > ground - 1) return false;
+    const t = this.body.translation();
+    this.body.setTranslation({ x: t.x, y: ground + this.plan.feet + 0.05 + (this.flyer ? this.plan.hover : 0), z: t.z }, true);
+    const v = this.body.linvel();
+    this.body.setLinvel({ x: v.x, y: 0, z: v.z }, true);
+    this.pos.y = ground;
+    this.grounded = true;
+    return true;
+  }
+
   /** A fresh life at a new spot: everything a body can carry is cleared, the bones put back to rest. */
   respawn(x: number, y: number, z: number): void {
     if (this.disposed) return;
@@ -1071,6 +1237,7 @@ export class Mobile implements Living {
       swimming: this.swimming,
       ragdoll: this.ragdoll?.status ?? null,
       ranged: this.rangedRange ? Number(this.rangedRange.toFixed(0)) : 0,
+      weapon: this.weapon,
       roles: r ? describeRoles(r) : null,
     };
   }
@@ -1086,6 +1253,15 @@ export class Mobile implements Living {
     this.deps.physics.world.removeRigidBody(this.body);
     this.animator?.dispose();
     this.animator = null;
+    if (this.blade) {
+      this.blade.group.parent?.remove(this.blade.group);
+      this.blade.dispose();
+      this.blade = null;
+    }
+    // The rack's copy shares its geometry and materials with the rack: it is let go, never disposed.
+    this.holder?.parent?.remove(this.holder);
+    this.holder = null;
+    this.gun = null;
     if (this.model) {
       this.model.traverse((o) => {
         const s = o as THREE.SkinnedMesh;

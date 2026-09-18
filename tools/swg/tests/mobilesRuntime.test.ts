@@ -12,7 +12,10 @@ import { GAIT_LIMITS, blendWeight, chooseGait, clampFades, moveSpeeds, oneShotWe
 import { BRAIN_TUNE, decide, hostile, wanderPoint, type BrainSelf, type BrainTarget } from '../../../src/world/mobiles/brain.ts';
 import { LOD_TUNE, lodTier, type LodInput } from '../../../src/world/mobiles/lod.ts';
 import { makeAdditiveOnce, missingRoles, rigClipsFromPack, rolesFor, type PackClipSource } from '../../../src/world/mobiles/packClips.ts';
-import type { AnimPack, MobileEntry, Roles } from '../../../src/world/mobiles/types.ts';
+import type { AnimPack, MobileAppearance, MobileEntry, Roles } from '../../../src/world/mobiles/types.ts';
+import { armedRoles, armsFor, chooseWeapon, gunKindForRoles, hintFor, hintForEntry, muzzleBone, SABER_SWINGS, wantsSaber } from '../../../src/world/mobiles/arms.ts';
+import { ambientOverrides, groupPicks, HUMANOID_BOUNDS, lookBounds, permanentGap, spawnDistance, speciesOf } from '../../../src/world/mobiles/spawning.ts';
+import type { WeaponClass } from '../../../src/player/weapons.ts';
 
 let checks = 0;
 const ok = (cond: boolean, what: string) => {
@@ -542,6 +545,167 @@ function lod(over: Partial<LodInput> = {}): LodInput {
   ok(rigClipsFromPack(pack, 'm') === rig, 'the aliases are made once per gender');
   ok(rigClipsFromPack(pack, 'f').find((c) => c.name === 'idle')!.tracks === clips.get('idle_f')!.tracks, "the female rig's idle is her own");
   ok(missingRoles(rolesFor(json, null), clips).length === 0 && missingRoles(roles({ idle: 'nope', attacks: ['idle_a', 'gone'] }), clips).join(',') === 'idle,walk,run,attacks[1]', 'missingRoles names what the GLB has not got');
+}
+
+// === People: what they hold, the box they are planned from, the spawner's small decisions =======
+
+// --- arms: the kind of gun a pack holds ------------------------------------------------------
+{
+  ok(gunKindForRoles({ ranged: 'add_pistol_fire_1' }, { ranged: 'all_b_cbt_pistol_fire_1_add' }) === 'pistol', 'add_pistol_fire_1 is a pistol');
+  ok(gunKindForRoles({ ranged: 'rifle_fire_1' }, { ranged: 'x' }) === 'rifle' && gunKindForRoles({ ranged: 'add_rifle_fire_1' }, { ranged: 'x' }) === 'rifle', 'rifle_* and add_rifle_* are a rifle');
+  ok(gunKindForRoles({ ranged: 'cbt_attack_ranged' }, { ranged: 'r2_cbt_attack_ranged' }) === 'own', "cbt_attack_ranged is the body's own (a droid's gun)");
+  ok(gunKindForRoles(undefined, { ranged: 'thing_pistol_shot' }) === 'pistol' && gunKindForRoles(undefined, { ranged: 'spit' }) === 'own', 'without a source the clip name is read the same way');
+  ok(gunKindForRoles({ ranged: 'add_pistol_fire_1' }, { ranged: null }) === null, 'no ranged clip, no gun');
+}
+
+// --- arms: who carries what ------------------------------------------------------------------
+{
+  const person = (id: string, over: Partial<MobileEntry> = {}) => entry(id, { kind: 'dressed', ...over, stats: { ...entry(id).stats, aggression: 'aggressive', ranged: { range: 20, additive: true }, ...(over.stats ?? {}) } });
+  const pistolRoles = { ranged: 'all_b_cbt_pistol_fire_1_add' };
+  const src = { ranged: 'add_pistol_fire_1' };
+  const trooper = armsFor(person('dressed_stormtrooper_m'), 'all_b', pistolRoles, src);
+  ok(trooper?.kind === 'gun' && trooper.carry === 'rifle' && trooper.prefer[0] === 'e11', 'a stormtrooper carries a rifle, an E-11 first');
+  const officer = armsFor(person('dressed_rebel_officer_m'), 'all_b', pistolRoles, src);
+  ok(officer?.kind === 'gun' && officer.carry === 'pistol', 'a rebel officer carries a sidearm, not the troops rifle');
+  ok(armsFor(person('dressed_rebel_trooper_m'), 'all_b', pistolRoles, src)?.kind === 'gun' && hintFor('dressed_rebel_trooper_m')!.carry === 'rifle', 'a rebel trooper carries a rifle');
+  const plain = armsFor(person('dressed_farmer_m'), 'all_b', pistolRoles, src);
+  ok(plain?.kind === 'gun' && plain.carry === 'pistol' && plain.prefer.length === 0, 'anyone else takes what the pack holds, a pistol, any one');
+  const jedi = armsFor(person('dressed_dark_jedi_elder_female_bothan_01'), 'all_b', pistolRoles, src);
+  ok(jedi?.kind === 'saber' && jedi.classes[0] === 'lightsaber', 'a Dark Jedi carries a lightsaber');
+  ok(wantsSaber('dressed_sith_shadow_male_01') && wantsSaber('jedi_trainer') && wantsSaber('npe/inquisitor') && !wantsSaber('sithspawn') && !wantsSaber('jedimaster_bust'), 'wantsSaber reads whole words only');
+  ok(armsFor(person('rancor'), 'creature_base', pistolRoles, src) === null, 'a creature is armed with nothing off the rack');
+  ok(armsFor(person('hologram/stormtrooper', { flags: ['hologram'] }), 'all_b', pistolRoles, src) === null, 'a hologram holds nothing');
+  ok(armsFor(person('dressed_vendor_m', { stats: { ...entry('v').stats, aggression: 'passive', ranged: { range: 20, additive: true } } }), 'all_b', pistolRoles, src) === null, 'a passive one holds nothing');
+  ok(armsFor(person('dressed_thug_m', { stats: { ...entry('v').stats, aggression: 'aggressive', ranged: null } }), 'all_b', pistolRoles, src) === null, 'no ranged attack in the catalogue, no gun');
+  ok(armsFor(person('r2d2'), 'all_b', { ranged: 'r2_attack' }, { ranged: 'cbt_attack_ranged' }) === null, "a body's own gun takes no model");
+  ok(armsFor(person('3po_protocol', { kind: 'droid', appearance: 'protocol_droid' }), 'all_b', pistolRoles, src) === null && armsFor(person('clone_droid', { kind: 'droid', appearance: 'droid_21b' }), 'all_b', pistolRoles, src) === null, 'a protocol or a surgical droid on the human skeleton holds nothing');
+  ok(armsFor(person('ig_88', { kind: 'droid', appearance: 'ig88' }), 'all_b', pistolRoles, src)?.kind === 'gun' && armsFor(person('warren_agro_droid_s03', { kind: 'droid', appearance: 'ig88' }), 'all_b', pistolRoles, src)?.kind === 'gun' && armsFor(person('4lom', { kind: 'droid', appearance: '4lom' }), 'all_b', pistolRoles, src)?.kind === 'gun', 'a combat droid (IG-88, its body under another name, 4-LOM) holds a gun');
+  const warrior = armsFor(person('dressed_ep3_forest_kerritamba_warrior', { species: 'wookiee_male' }), 'all_b', pistolRoles, src);
+  ok(warrior?.kind === 'gun' && warrior.carry === 'rifle' && warrior.prefer[0] === 'bowcaster', 'a Wookiee named for its job still carries a bowcaster, by its species');
+  const guard = armsFor(person('dressed_wookiee_guard', { species: 'wookiee_male' }), 'all_b', pistolRoles, src);
+  ok(guard?.kind === 'gun' && guard.prefer[0] === 'bowcaster', "a Wookiee's species wins over its job (a guard's rifle)");
+  ok(armsFor(person('dressed_rebel_officer_m', { species: 'human_male' }), 'all_b', pistolRoles, src)?.kind === 'gun' && hintForEntry({ id: 'dressed_rebel_officer_m', species: 'human_male', appearance: null })!.carry === 'pistol', 'a human species names no row: the id decides');
+}
+
+// --- arms: the weapon off the rack ------------------------------------------------------------
+{
+  const rack: { id: string; class: WeaponClass }[] = [
+    { id: 'rifle_e11', class: 'rifle' },
+    { id: 'rifle_e11_generic', class: 'rifle' },
+    { id: 'rifle_flame_thrower', class: 'rifle' },
+    { id: 'carbine_dh17', class: 'carbine' },
+    { id: 'pistol_dl44', class: 'pistol' },
+    { id: 'pistol_launcher', class: 'pistol' },
+    { id: 'pistol_scatter', class: 'pistol' },
+    { id: 'pistol_scatter_npe', class: 'pistol' },
+    { id: 'sword_lightsaber_one_handed_gen4', class: 'lightsaber' },
+    { id: 'quest_rifle_e11', class: 'rifle' },
+  ];
+  const first = () => 0;
+  const last = () => 0.999;
+  ok(chooseWeapon({ kind: 'gun', carry: 'rifle', classes: ['rifle', 'carbine'], prefer: ['e11'] }, rack, first)?.id === 'rifle_e11' && chooseWeapon({ kind: 'gun', carry: 'rifle', classes: ['rifle', 'carbine'], prefer: ['e11'] }, rack, last)?.id === 'rifle_e11_generic', 'a preferred fragment picks among the weapons that hold it, quest copies left out');
+  ok(chooseWeapon({ kind: 'gun', carry: 'rifle', classes: ['rifle', 'carbine'], prefer: ['nothing_has_this', 'dh17'] }, rack, first)?.id === 'carbine_dh17', 'the fragments are tried in order');
+  const anyPistol = new Set([0, 0.3, 0.6, 0.999].map((r) => chooseWeapon({ kind: 'gun', carry: 'pistol', classes: ['pistol'], prefer: [] }, rack, () => r)?.id));
+  ok(anyPistol.has('pistol_dl44') && anyPistol.has('pistol_scatter') && !anyPistol.has('pistol_launcher') && !anyPistol.has('pistol_scatter_npe'), 'a random pistol leaves out the launchers and the new-player copies');
+  ok(chooseWeapon({ kind: 'saber', classes: ['lightsaber'], prefer: ['one_handed_gen'] }, rack, first)?.id === 'sword_lightsaber_one_handed_gen4', 'a Jedi takes a lightsaber');
+  ok(chooseWeapon({ kind: 'gun', carry: 'rifle', classes: ['heavy'], prefer: [] }, rack) === null, 'nothing of the kind on the rack: null');
+}
+
+// --- arms: a rifle's carry and the muzzle bone ------------------------------------------------
+{
+  const packClips = [
+    { name: 'all_b_idl_breathe_normally', speed: 0 },
+    { name: 'all_b_cbt_rifle_a_standing_hold_idle', speed: 0 },
+    { name: 'all_b_cbt_rifle_a_run_held', speed: 4.8 },
+    { name: 'all_b_cbt_rifle_a_walk_hold', speed: 1.4 },
+    { name: 'all_b_cbt_rifle_fire_1_add', speed: 0, additive: true },
+  ];
+  const r = armedRoles(packClips, 'rifle');
+  ok(r.rangedStance === 'all_b_cbt_rifle_a_standing_hold_idle' && r.idleCombat === r.rangedStance, "a rifle stands in the pack's rifle stance");
+  ok(r.ranged === 'all_b_cbt_rifle_fire_1_add' && r.rangedAdditive === true, "... recoils with the rifle's own shot");
+  ok(r.gaitsCombat?.length === 2 && r.gaitsCombat[0].clip === 'all_b_cbt_rifle_a_walk_hold' && r.gaitsCombat[1].speed === 4.8, '... and walks and runs with it held, slowest first, at their own speeds');
+  ok(Object.keys(armedRoles(packClips, 'pistol')).length === 0, "a pistol keeps the pack's roles as they are");
+  ok(Object.keys(armedRoles([{ name: 'idle', speed: 0 }], 'rifle')).length === 0, 'a pack without rifle clips changes nothing');
+  ok(muzzleBone(['root', 'spine1', 'jaw', 'hold_r']) === 'hold_r' && muzzleBone(['root', 'jaw']) === 'jaw' && muzzleBone(['root']) === null, "the muzzle bone: a gun's joint first, then the mouth");
+  ok(SABER_SWINGS.length === 10 && SABER_SWINGS.every((s) => s.startsWith('BOTH_A')), "the swings are Jedi Academy's ten one-hand attacks");
+}
+
+// --- spawning: the box a person is planned from ------------------------------------------------
+{
+  const app = (id: string, pack: string, h: number, form: 'glb' | 'parts' = 'parts'): MobileAppearance => ({ id, form, file: `mobiles/models/${id}/parts.json`, pack, joints: 53, bounds: { min: [-0.5, 0, -0.15], max: [0.5, h, 0.15] }, sizeClass: 'small', riderPose: null, ready: true });
+  const apps: Record<string, MobileAppearance> = {
+    a: app('a', 'hum_m', 1.7),
+    b: app('b', 'hum_m', 1.8),
+    c: app('c', 'hum_m', 1.9),
+    tiny: app('tiny', 'hum_m', 0.3),
+    rancor: app('rancor', 'rancor', 6, 'glb'),
+  };
+  const own = lookBounds({ appearance: 'rancor', pack: 'rancor', species: null }, apps);
+  ok(own === apps.rancor.bounds, 'an entry on its own model takes its appearance box');
+  const human = lookBounds({ appearance: null, pack: 'hum_m', species: 'human_male' }, apps);
+  ok(human.max[1] === 1.8, 'a dressed human takes the median parts model on its pack (1.8 m), the odd tiny one left out');
+  const wookiee = lookBounds({ appearance: null, pack: 'wke_m', species: 'wookiee_male' }, apps);
+  ok(near(Math.abs(wookiee.max[1] - wookiee.min[1]), 2.2) && wookiee.max[0] > HUMANOID_BOUNDS.max[0], 'a Wookiee with nothing on its pack stands at 2.2 m, a person box scaled up');
+  const sullustan = lookBounds({ appearance: null, pack: 'hum_m', species: 'sullustan_female' }, apps);
+  ok(near(sullustan.max[1], 1.5), "a Sullustan on the human pack keeps its species' height");
+  const nothing = lookBounds({ appearance: null, pack: 'none', species: 'someone_male' }, apps);
+  ok(near(nothing.max[1], HUMANOID_BOUNDS.max[1]), 'an unknown species on an unknown pack is a person box');
+  ok(speciesOf('twilek_female') === 'twilek' && speciesOf(null) === '', 'speciesOf drops the gender');
+}
+
+// --- spawning: how far ahead, the planet's values, the permanent gap, one of each -------------
+{
+  ok(spawnDistance(HUMANOID_BOUNDS) === 8, 'a person stands eight metres off');
+  const krayt = { min: [-4, 0, -14], max: [4, 9, 14] } as { min: [number, number, number]; max: [number, number, number] };
+  ok(spawnDistance(krayt) === 33 && spawnDistance(krayt, 2) === 45, 'a krayt dragon far enough not to stand on you, never past 45 m');
+  ok(spawnDistance({ min: [4, 0, 14], max: [-4, 9, -14] }) === spawnDistance(krayt), 'swapped box corners give the same distance');
+  const o = ambientOverrides({ hp: 260, damage: 0, aggressive: false, speed: 2 });
+  ok(o.hp === 260 && o.damage === 8 && o.aggression === 'defensive', "a bantha's planet values: its health, a blow of its own, defensive");
+  ok(ambientOverrides({ hp: 90, damage: 0, aggressive: false, speed: 4.5 }).aggression === 'skittish' && ambientOverrides({ hp: 900, damage: 38, aggressive: true, speed: 3.5 }).aggression === 'aggressive', 'fast and peaceful is skittish; aggressive is aggressive');
+  const failed = [{ what: 'model', id: 'gubbur', why: 'no mesh survived' }];
+  const gap = permanentGap({ appearance: 'gubbur', name: 'Gubbur', id: 'gubbur' }, failed);
+  ok(!!gap && gap.startsWith('unavailable') && gap.includes('no mesh survived'), 'the permanent gap is said as unavailable, with the reason');
+  ok(permanentGap({ appearance: 'rancor', name: 'Rancor', id: 'rancor' }, failed) === null && permanentGap({ appearance: null, name: 'x', id: 'x' }, failed) === null, 'anything else is no gap');
+  const picks = groupPicks(['a', 'bad', 'b', 'c', 'd'], 3, (e) => e !== 'bad');
+  ok(picks.join(',') === 'a,b,c', 'one of each takes the first that can be stood, up to the count');
+}
+
+// --- The real catalogue: every person can be planned and armed, and the one gap is said as one ---
+{
+  const path = new URL('../../../assets-private/mobiles/catalogue.json', import.meta.url);
+  if (!existsSync(path)) console.log('skip the people checks on the real catalogue: assets-private/mobiles/catalogue.json is not converted here');
+  else {
+    const file = JSON.parse(readFileSync(path, 'utf8')) as { entries: MobileEntry[]; appearances: Record<string, MobileAppearance>; packs: Record<string, { hierarchy: string }>; failed?: { what: string; id: string; why: string }[] };
+    const dressed = file.entries.filter((e) => e.kind === 'dressed');
+    const heights = dressed.map((e) => Math.abs(lookBounds(e, file.appearances).max[1] - lookBounds(e, file.appearances).min[1]));
+    ok(dressed.length > 2000 && heights.every((h) => h > 1.3 && h < 2.5), `every one of the ${dressed.length} dressed entries is planned at a person's height`);
+    ok(dressed.every((e) => !!e.species && !!e.pack && file.packs[e.pack]?.hierarchy === 'all_b'), "every dressed entry names its species and plays an all_b pack (the hand's weapon joint)");
+    const gaps = file.entries.filter((e) => permanentGap(e, file.failed));
+    ok(gaps.length >= 1 && gaps.every((e) => !e.ready), `the permanent gap (${gaps.map((e) => e.id).join(', ')}) is an entry the converter marked not ready, and is said as unavailable`);
+    // Armed from its own pack's roles, as the manager arms it, not from roles made up here.
+    const packJson = (e: MobileEntry): AnimPack | null => {
+      const info = e.pack ? (file.packs[e.pack] as { hierarchy: string; json?: string } | undefined) : undefined;
+      const at = info?.json ? new URL(`../../../assets-private/${info.json}`, import.meta.url) : null;
+      return at && existsSync(at) ? (JSON.parse(readFileSync(at, 'utf8')) as AnimPack) : null;
+    };
+    const armed = (e: MobileEntry) => {
+      const json = packJson(e);
+      return json ? armsFor(e, file.packs[e.pack!].hierarchy, rolesFor(json, e.gender), json.roleSources) : null;
+    };
+    const trooper = file.entries.find((e) => e.id === 'dressed_stormtrooper_m');
+    if (trooper && packJson(trooper)) {
+      const a = armed(trooper);
+      ok(a?.kind === 'gun' && a.carry === 'rifle', `the dressed stormtrooper is armed with a rifle from its own pack (${trooper.pack})`);
+    }
+    const jedi = dressed.filter((e) => wantsSaber(e.id));
+    ok(jedi.length > 50, `${jedi.length} dressed Jedi, Sith and Inquisitors carry lightsabers`);
+    const protocol = file.entries.find((e) => e.id === '3po_protocol');
+    if (protocol && packJson(protocol)) ok(armed(protocol) === null, 'a protocol droid on the human skeleton holds nothing off the rack');
+    const ig88 = file.entries.find((e) => e.id === 'ig_88');
+    if (ig88 && packJson(ig88)) ok(armed(ig88)?.kind === 'gun', 'IG-88 carries a gun');
+    const wookiees = dressed.filter((e) => /^wookiee/.test(e.species ?? '') && packJson(e) && armed(e)?.kind === 'gun');
+    ok(wookiees.length > 20 && wookiees.every((e) => armed(e)!.prefer.includes('bowcaster')), `every one of the ${wookiees.length} armed dressed Wookiees reaches for a bowcaster, whatever its id says`);
+  }
 }
 
 console.log(`${checks} checks passed`);

@@ -14,6 +14,8 @@ import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.j
 import type { AnimPack, MobileEntry, Vec3 } from './types';
 import type { MobileCatalogue } from './catalogue';
 import { makeAdditiveOnce, missingRoles, rolesFor, type PackClipSource } from './packClips';
+import { makeHologram } from './hologram';
+import { buildLook, isLook, lookKey } from './look';
 
 /** The cache's numbers: the bytes it may hold, loads at once, and how long a failed file is not asked for again (ms). */
 export const MOBILE_CACHE = { budget: 180e6, concurrency: 2, failFor: 30_000 };
@@ -42,6 +44,10 @@ export interface ModelAsset {
   hologram: boolean;
   /** A hologram's plain asset, held for its life: its geometry and textures are that one's. */
   base: ModelAsset | null;
+  /** A look (a parts body dressed from the catalogue) rather than a model file; `file` is then its key. */
+  look?: boolean;
+  /** A look's outfit pieces that would not go on. */
+  missing?: string[];
 }
 
 export interface PackAsset extends PackClipSource {
@@ -62,36 +68,30 @@ export interface AssetStat {
   age: number;
 }
 
-/**
- * The look of a hologram, never put on a mesh itself: every hologram asset takes a clone, since
- * a material on an asset is disposed with that asset and a shared one disposed once would take
- * every hologram with it. Unlit (`userData.unlit`), so it is kept out of the shadow cascades and
- * compiles one small program.
- */
-const HOLOGRAM_TEMPLATE = new THREE.MeshBasicMaterial({
-  color: 0x6fc8ff,
-  transparent: true,
-  opacity: 0.42,
-  blending: THREE.AdditiveBlending,
-  depthWrite: false,
-  toneMapped: false,
-  side: THREE.DoubleSide,
-  name: 'hologram',
-});
-HOLOGRAM_TEMPLATE.userData.unlit = true;
+// The hologram's look lives in hologram.ts; re-exported for anything that took it from here.
+export { makeHologram };
 
-/** One fresh hologram material for this asset on every mesh of `scene`, casting nothing. Returns it as the asset's materials. */
-export function makeHologram(scene: THREE.Object3D): THREE.Material[] {
-  const m = HOLOGRAM_TEMPLATE.clone();
-  m.userData.unlit = true;
-  scene.traverse((o) => {
-    const mesh = o as THREE.Mesh;
-    if (!mesh.isMesh) return;
-    mesh.material = m;
-    mesh.castShadow = false;
-    mesh.receiveShadow = false;
-  });
-  return [m];
+/** What a look asset is built from: the entry (a dressed NPC, or a person on a parts model) and the catalogue it is in. */
+export interface LookSpec {
+  entry: MobileEntry;
+  cat: MobileCatalogue;
+}
+
+/**
+ * A dressed look's GPU bytes before it has been built: a species body and head, and each piece of
+ * the outfit, on disk (times DISK_TO_GPU). Measured in a browser, 19 human and Twi'lek looks of 3
+ * to 6 pieces weighed 8.3 to 14.1 MB; these give 9.1 to 13.3 MB for them. Once a species' look has
+ * been measured, its estimates are scaled by what the measured ones came to (`lookScale`).
+ */
+const LOOK_BODY_BYTES = 2.0e6;
+const LOOK_PIECE_BYTES = 0.3e6;
+/** The measured-over-guessed scale a species' dressed estimates take, never below or above these. */
+const LOOK_SCALE_MIN = 0.5;
+const LOOK_SCALE_MAX = 3;
+
+/** A dressed look's GPU bytes by the formula alone, before any of its species has been measured. */
+function dressedGuess(entry: MobileEntry): number {
+  return (LOOK_BODY_BYTES + LOOK_PIECE_BYTES * (entry.outfit?.length ?? 0)) * DISK_TO_GPU;
 }
 
 /** Every texture a material holds. */
@@ -160,6 +160,11 @@ export class MobileAssets {
   private readonly waiting: (() => void)[] = [];
   /** Packs whose roles name clips the GLB lacks, reported once each. */
   private readonly reported = new Set<string>();
+  /**
+   * Per species, what its dressed looks weighed against what `estimate` guessed for them (the
+   * largest ratio seen), so the budget check for the next look of that species is not too low.
+   */
+  private readonly lookScale = new Map<string, number>();
 
   private constructor(private readonly baseUrl: string) {}
 
@@ -207,7 +212,7 @@ export class MobileAssets {
    * A hologram is its own asset, `<file>#holo`, made from the plain one's parsed scene and never
    * fetched twice.
    */
-  acquireModel(file: string, opts: { hologram: boolean; bounds?: { min: Vec3; max: Vec3 }; estimate?: number }): Promise<ModelAsset> {
+  acquireModel(file: string, opts: { hologram: boolean; bounds?: { min: Vec3; max: Vec3 }; estimate?: number; look?: LookSpec }): Promise<ModelAsset> {
     const key = opts.hologram ? `${file}#holo` : file;
     const have = this.models.get(key);
     if (have) {
@@ -221,7 +226,7 @@ export class MobileAssets {
     if (!job) {
       // A hologram's own weight is its material; the plain asset it holds is a job of its own, with the model's estimate.
       const j = { promise: null as unknown as Promise<ModelAsset>, claims: 0, estimate: opts.hologram ? HOLOGRAM_BYTES : (opts.estimate ?? UNKNOWN_BYTES) };
-      j.promise = (opts.hologram ? this.loadHologram(file, opts.bounds, opts.estimate) : this.loadModel(file, opts.bounds)).then(
+      j.promise = (opts.hologram ? this.loadHologram(file, opts.bounds, opts.estimate, opts.look) : opts.look ? this.loadLook(file, opts.look, opts.bounds) : this.loadModel(file, opts.bounds)).then(
         (asset) => {
           // Everyone who asked while it loaded holds it from the moment it lands, before any
           // continuation runs, so a trim in between can never take it.
@@ -250,7 +255,14 @@ export class MobileAssets {
     } catch (err) {
       throw this.fail(file, err);
     }
-    const scene = gltf.scene;
+    const asset = MobileAssets.measure(file, gltf.scene, bounds);
+    asset.prepared = this.prepareRoot(asset.scene);
+    await asset.prepared;
+    return asset;
+  }
+
+  /** A fresh asset around a parsed scene: its meshes, materials and textures, and the GPU bytes they hold. */
+  private static measure(file: string, scene: THREE.Group, bounds?: { min: Vec3; max: Vec3 }): ModelAsset {
     const meshes: THREE.Mesh[] = [];
     const materials = new Set<THREE.Material>();
     const textures = new Set<THREE.Texture>();
@@ -271,7 +283,7 @@ export class MobileAssets {
     });
     for (const g of geometries) bytes += geometryBytes(g);
     for (const t of textures) bytes += textureBytes(t);
-    const asset: ModelAsset = {
+    return {
       kind: 'model',
       key: file,
       file,
@@ -288,14 +300,37 @@ export class MobileAssets {
       hologram: false,
       base: null,
     };
-    asset.prepared = this.prepareRoot(scene);
+  }
+
+  /**
+   * A person's look (look.ts): the parts body dressed and coloured from the entry, its textures
+   * drawn, then prepared exactly as a model is before anything clones it. Two slots are shared
+   * with the model loads, so a burst of dressed spawns cannot start a dozen builds at once.
+   */
+  private async loadLook(key: string, spec: LookSpec, bounds?: { min: Vec3; max: Vec3 }): Promise<ModelAsset> {
+    let built;
+    try {
+      built = await this.slot(() => buildLook(this.baseUrl, spec.entry, spec.cat));
+    } catch (err) {
+      throw this.fail(key, err);
+    }
+    const asset = MobileAssets.measure(key, built.scene, bounds);
+    asset.look = true;
+    if (spec.entry.kind === 'dressed' && spec.entry.species && asset.bytes > 0) {
+      const ratio = asset.bytes / dressedGuess(spec.entry);
+      const scale = THREE.MathUtils.clamp(Math.max(ratio, this.lookScale.get(spec.entry.species) ?? 0), LOOK_SCALE_MIN, LOOK_SCALE_MAX);
+      this.lookScale.set(spec.entry.species, scale);
+    }
+    asset.missing = built.missing;
+    if (built.missing.length) console.warn(`mobiles: ${spec.entry.id} wears ${built.missing.length} piece${built.missing.length === 1 ? '' : 's'} this pack has not got: ${built.missing.join(', ')}`);
+    asset.prepared = this.prepareRoot(asset.scene);
     await asset.prepared;
     return asset;
   }
 
-  private async loadHologram(file: string, bounds?: { min: Vec3; max: Vec3 }, estimate?: number): Promise<ModelAsset> {
-    // The plain asset first, held for the hologram's life.
-    const base = await this.acquireModel(file, { hologram: false, bounds, estimate });
+  private async loadHologram(file: string, bounds?: { min: Vec3; max: Vec3 }, estimate?: number, look?: LookSpec): Promise<ModelAsset> {
+    // The plain asset first (a model, or a look), held for the hologram's life.
+    const base = await this.acquireModel(file, { hologram: false, bounds, estimate, look });
     const scene = cloneSkeleton(base.scene) as THREE.Group;
     const materials = makeHologram(scene);
     const meshes: THREE.Mesh[] = [];
@@ -325,11 +360,22 @@ export class MobileAssets {
     return asset;
   }
 
-  private prepareRoot(root: THREE.Object3D): Promise<void> {
+  /** Make an object ready to be drawn without a stall, as every asset is before it is shown (a weapon a mobile will hold). */
+  prepareRoot(root: THREE.Object3D): Promise<void> {
     const prepare = this.prepare;
     const also = this.alsoPrepare;
     const first = prepare ? prepare(root).catch((err) => console.warn('mobiles: preparing a model failed', err)) : Promise.resolve();
     return also ? first.then(() => also(root)).catch((err) => console.warn('mobiles: the effects could not prepare a model', err)) : first;
+  }
+
+  /**
+   * What an entry's body is cached under: its model file (the colour variant's when it has one),
+   * or its look's key for a person on a parts body or a dressed NPC. Null when it has neither.
+   */
+  static modelKey(entry: MobileEntry, cat: MobileCatalogue): string | null {
+    const file = cat.modelFile(entry);
+    if (file) return file;
+    return isLook(entry, cat) ? lookKey(entry) : null;
   }
 
   /** A pack's JSON alone (roles, gaits, clip list), fetched once: what `mobileRoles` reads without loading the clips. */
@@ -475,7 +521,10 @@ export class MobileAssets {
   estimate(entry: MobileEntry, cat: MobileCatalogue): { model: number; pack: number } {
     const app = cat.appearanceOf(entry);
     const files = 1 + Object.values(app?.variants ?? {}).filter((v) => v.file && !v.same).length;
-    const model = app?.bytes ? (app.bytes / files) * DISK_TO_GPU : UNKNOWN_BYTES;
+    // A dressed look has no appearance of its own: a species body and head, and its outfit's pieces,
+    // scaled by what this species' looks have measured so far.
+    const dressed = entry.kind === 'dressed' ? dressedGuess(entry) * (this.lookScale.get(entry.species ?? '') ?? 1) : 0;
+    const model = dressed || (app?.bytes ? (app.bytes / files) * DISK_TO_GPU : UNKNOWN_BYTES);
     const info = cat.packOf(entry);
     return { model, pack: info ? (info.bytes ?? UNKNOWN_BYTES) : 0 };
   }
@@ -486,7 +535,7 @@ export class MobileAssets {
    */
   wouldCost(entry: MobileEntry, cat: MobileCatalogue): number {
     let bytes = 0;
-    const file = cat.modelFile(entry);
+    const file = MobileAssets.modelKey(entry, cat);
     const guess = this.estimate(entry, cat);
     if (file) {
       const plain = this.models.get(file);

@@ -256,6 +256,24 @@ b { color: var(--accent); font-weight: 600; }
 .cat-hands button.on { background: rgba(45,127,214,0.65); border-color: var(--accent); }
 .cat-hands select { font-size: 10px; padding: 2px 2px; max-width: 46px; background: rgba(0,0,0,0.3); color: var(--text); border: 1px solid var(--panel-border); border-radius: 3px; }
 .cat-badge { font-size: 10px; color: var(--accent); }
+/* The NPC tab: the find box, the category chips and the rows' states; group buttons in the heading. */
+#npcs .wardrobe-header { flex-wrap: wrap; row-gap: 6px; }
+#npcs .wardrobe-header .count { min-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#npcs .wardrobe-header .find { flex: none; width: 170px; padding: 4px 8px; font-size: 11px; background: rgba(0,0,0,0.3); color: var(--text); border: 1px solid var(--panel-border); border-radius: 4px; }
+#npcs .ready-only { flex: none; display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--muted); cursor: pointer; }
+.mob-chips { flex: 1 0 100%; display: flex; flex-wrap: wrap; gap: 3px; }
+#npcs .wardrobe-header .mob-chip { padding: 2px 9px; font-size: 10px; background: rgba(0,0,0,0.3); border-radius: 10px; color: var(--muted); }
+#npcs .wardrobe-header .mob-chip.on { background: rgba(45,127,214,0.55); color: var(--text); border-color: var(--accent); }
+.mob-missing { padding: 12px; font-size: 12px; color: var(--muted); }
+.cat-group summary .group-actions { flex: none; display: flex; align-items: center; gap: 4px; margin-left: auto; }
+.cat-group summary .group-actions button { padding: 1px 7px; font-size: 10px; background: rgba(45,127,214,0.2); color: var(--text); border: 1px solid var(--panel-border); border-radius: 3px; cursor: pointer; }
+.cat-group summary .group-actions button:hover { border-color: var(--accent); }
+.mob-row.unavailable .cat-name { color: var(--muted); opacity: 0.6; }
+.mob-row.unavailable button[data-spawn] { opacity: 0.55; }
+.mob-row .mob-tag { font-style: italic; color: #c9a45a; }
+.mob-row.unavailable .mob-tag { color: var(--muted); }
+.mob-more { display: flex; justify-content: center; padding: 4px 0; }
+.mob-more button { padding: 3px 12px; font-size: 11px; background: rgba(45,127,214,0.2); color: var(--text); border: 1px solid var(--panel-border); border-radius: 4px; cursor: pointer; }
 /* The Force tab: a row per power, the slot buttons at the right. */
 #force .wardrobe-panel { width: min(900px, 96vw); }
 .force-row { display: grid; grid-template-columns: 190px 1fr auto; align-items: center; gap: 12px; padding: 6px 8px; border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 12px; }
