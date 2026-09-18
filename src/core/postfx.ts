@@ -6,7 +6,8 @@
 //
 // Targets and depth
 //   R1. The scene is drawn only into `sceneTarget`. No pass or product writes its colour, depth or
-//       stencil.
+//       stencil. A product's probe may bind it to draw with colour, depth and stencil writes all off
+//       (an occlusion query), and for nothing else.
 //   R2. The two chain buffers are half-float colour with no depth and no stencil. Any pass may
 //       sample the scene's depth texture while drawing into them.
 //   R3. A geometry product draws into a colour target of its own that has the scene's depth
@@ -64,6 +65,10 @@ export interface FxProductReport {
   computedLastFrame: boolean;
   size: [number, number];
   format: string;
+  /** Colour targets written at once, each of `format`. */
+  targets: number;
+  /** False while a product that gives its storage back when unused holds none. */
+  allocated: boolean;
 }
 
 export interface FxDescription {
@@ -239,16 +244,18 @@ export class PostFX {
   }
 
   /**
-   * Would this pass draw? False when it is not registered at all, so an effect can skip the work it
-   * would only do for that pass. Asked before the frame, it answers from the frame just gone.
+   * Whether a pass's setting (or console override) asks for it, before the frame: the question a
+   * scene material must answer before it is drawn. False when the pass is not registered at all, so
+   * an effect can skip the work it would only do for that pass. It never asks the pass's own
+   * `enabled`: a pass whose `enabled` answers from a decision this question feeds (the water's) would
+   * otherwise be shut out for good the first frame it said no.
    */
   passWanted(id: FxPassId): boolean {
-    const pass = this.byPassId.get(id);
-    if (!pass) return false;
+    if (!this.byPassId.has(id)) return false;
     const def = fxPassDef(id);
     if (def.required) return true;
     const setting = def.toggles.length > 0 && anyOn(this.settings, def.toggles);
-    return (this.override[id] ?? setting) && pass.enabled(this.ctx);
+    return this.override[id] ?? setting;
   }
 
   /** Take the settings as they now are: flags and strengths, and a resize for a pass whose size is one of them. */
@@ -280,6 +287,15 @@ export class PostFX {
       drainErrors(r);
     }
     this.fillDebugView();
+
+    // 0. Probes: a product may ask a question of the finished frame before anyone decides (the
+    //    water's occlusion query). A probe binds the scene target only with every write off (R1).
+    for (let i = 0; i < this.productList.length; i++) {
+      const p = this.productList[i];
+      if (!p.probe) continue;
+      p.probe(ctx);
+      if (check) recordError(r, this.lastCheck!, `probe:${p.id}`);
+    }
 
     // 1. Who draws this frame, and what they need computed first.
     this.wanted.clear();
@@ -315,6 +331,7 @@ export class PostFX {
       const p = this.productList[i];
       if (!this.wanted.has(p.id)) {
         ctx.products[p.id] = null;
+        p.idle?.(ctx);
         continue;
       }
       this.timer.begin(p.timerLabel);
@@ -416,6 +433,8 @@ export class PostFX {
   fxView(name: string | null): string | null {
     const view = this.byPassId.get('debugView') as DebugViewPass | undefined;
     if (!view) return null;
+    // The water mask's environment term is the reflections pass's own working texture.
+    if (name === 'waterMaskEnv') name = 'waterReflections.env';
     if (this.showingPass) delete this.override[this.showingPass];
     this.showingPass = null;
     view.show = name;
@@ -476,6 +495,8 @@ export class PostFX {
         computedLastFrame: this.computed.has(p.id),
         size: [image?.width ?? 0, image?.height ?? 0],
         format: def.format,
+        targets: def.targets ?? 1,
+        allocated: p.allocated ?? true,
       };
     });
     return {
@@ -572,7 +593,9 @@ export class PostFX {
     for (let i = 0; i < this.productList.length; i++) {
       const def = this.productDefs[i];
       const scale = def.scale * def.scale;
-      bytes += px * scale * (FORMAT_BYTES[def.format] ?? 4);
+      // A product that has given its storage back holds nothing; one with several targets holds each.
+      if (this.productList[i].allocated === false) continue;
+      bytes += px * scale * (FORMAT_BYTES[def.format] ?? 4) * (def.targets ?? 1);
     }
     // The bloom's bright target and its ten blur levels, each half of the one before.
     if (this.byPassId.has('bloom')) bytes += px * 8 * 0.5;

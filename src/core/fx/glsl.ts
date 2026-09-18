@@ -1,5 +1,6 @@
 // Shader pieces more than one effect wants. One definition each, pasted into whichever shader
 // needs it, so two passes can never disagree about what a depth sample means.
+import { GLSL_OCT_DECODE, GLSL_OCT_ENCODE } from '../glslOct';
 
 /**
  * The vertex shader for a full-screen draw. The quad in `pass.ts` is a single triangle that
@@ -54,4 +55,17 @@ export const FX_PCG3D = /* glsl */ `
     v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
     return v;
   }
+`;
+
+/** fxOctEncode and fxOctDecode: a unit normal in two numbers, from the one copy the water material also writes with. */
+export const FX_OCT = GLSL_OCT_ENCODE + GLSL_OCT_DECODE;
+
+/** fxIgn: interleaved gradient noise, stable per pixel (no frame term: there is no temporal filter to hide it). */
+export const FX_IGN = /* glsl */ `
+  float fxIgn(vec2 p) { return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715)))); }
+`;
+
+/** fxEdgeFade: 0 at the screen's border, 1 beyond `w` inside it. */
+export const FX_EDGE_FADE = /* glsl */ `
+  float fxEdgeFade(vec2 uv, float w) { return smoothstep(0.0, w, min(min(uv.x, uv.y), min(1.0 - uv.x, 1.0 - uv.y))); }
 `;

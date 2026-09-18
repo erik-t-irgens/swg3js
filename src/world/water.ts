@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import type { WaterLook } from './waterLook';
+import { GLSL_OCT_ENCODE } from '../core/glslOct';
 
 /**
  * Water: a physically based surface that reflects the sky's environment map, moved by a
@@ -20,6 +21,10 @@ export interface WaterUniforms {
   uDrift: { value: number };
   /** 0 while the reflections pass adds the environment term itself, 1 otherwise. Shared by every water material. */
   uWaterEnvSpecular: { value: number };
+  /** The scene's FogExp2 density, so the mask weights what it writes as the lit water is fogged. Shared; the mask reads it. */
+  uFxFogDensity: { value: number };
+  /** The strength a traced reflection is given (the water's authored 0.55). Shared; the mask reads it. */
+  uFxTraced: { value: number };
   [name: string]: { value: unknown };
 }
 
@@ -34,6 +39,11 @@ const WATER_ENV_SPECULAR = { value: 1 };
 export function setWaterEnvSpecular(value: 0 | 1): void {
   WATER_ENV_SPECULAR.value = value;
 }
+
+/** The fog density the lit water is drawn under this frame; the mask fades what it writes the same way. */
+export const WATER_FX_FOG = { value: 0 };
+/** How strong a traced reflection is: the water's own reflection strength, so traced and fallback meet without a step. */
+export const WATER_FX_TRACED = { value: 0.55 };
 
 const WAVE_COUNT = 8;
 /** The detail tile: a Phillips-spectrum height field of this many samples across this many metres. */
@@ -382,6 +392,55 @@ const WAVES_GLSL = /* glsl */ `
 `;
 
 /**
+ * Declarations after the fragment's `#include <common>`. The mask writes a second target, so its
+ * extra output needs an explicit location (three declares location 0 itself); the lit water only
+ * needs the switch that hands its environment term to the reflections pass.
+ */
+const MASK_PARS_GLSL = /* glsl */ `
+  #ifdef WATER_FX_MASK
+    layout(location = 1) out highp vec4 fxEnvOut;
+    layout(location = 2) out highp vec4 fxTracedOut;
+    uniform float uFxFogDensity;
+    uniform float uFxTraced;
+    ${GLSL_OCT_ENCODE}
+  #else
+    uniform float uWaterEnvSpecular;
+  #endif
+`;
+
+/**
+ * In place of `#include <opaque_fragment>`. The lit water is unchanged. The mask writes, in target 0,
+ * the view normal, the view depth and 1 for coverage (and, with an alpha of 1, replaces what is
+ * there, so where layers stack it holds the last one drawn, not necessarily the nearest). In target 1 it writes exactly the light the lit water leaves out while the reflections
+ * pass runs: the lit water blends `dst (1 - a) + a [(1 - f)(diffuse + direct + multiscatter + R s)
+ * + f fog]`, so with its environment term R s taken out it is short by `a (1 - f) R s`, which goes
+ * into target 1's colour, with `a` as its alpha so the mask's own blend attenuates what lies behind
+ * exactly as the lit water's does. Target 2's red is the weight a traced colour gets in the same
+ * place, `a (1 - f) s` times the water's own reflection strength, blended the same way, so a traced
+ * reflection and the fallback carry the same Fresnel and meet without a step.
+ */
+const MASK_OUTPUT_GLSL = /* glsl */ `
+  #ifdef WATER_FX_MASK
+  {
+    vec3 fxSingle = vec3(0.0);
+    vec3 fxMulti = vec3(0.0);
+    // The split-sum term three's RE_IndirectSpecular_Physical weighs the environment by; with
+    // metalness 0 the dielectric half is the whole of it.
+    computeMultiscattering(geometryNormal, geometryViewDir, material.specularColor, material.specularF90, material.roughness, fxSingle, fxMulti);
+    // The FogExp2 the lit pass applies over the view depth, so the added reflection fades as the water does.
+    float fxFog = 1.0 - exp(-uFxFogDensity * uFxFogDensity * vViewPosition.z * vViewPosition.z);
+    float fxA = clamp(diffuseColor.a, 0.0, 1.0);
+    float fxW = fxA * (1.0 - fxFog);
+    gl_FragColor = vec4(fxOctEncode(normalize(normal)), vViewPosition.z, 1.0);
+    fxEnvOut = vec4(fxEnvRadiance * fxSingle * fxW, fxA);
+    fxTracedOut = vec4(max3(fxSingle) * fxW * uFxTraced, 0.0, 0.0, fxA);
+  }
+  #else
+  #include <opaque_fragment>
+  #endif
+`;
+
+/**
  * A water material drawn with one body's look. `waves` enables the vertex swell (only for finely
  * divided meshes); lakes with no interior vertices pass false and still ripple, foam and react.
  * `reflective: false` leaves the environment out altogether (the lava tables, until the heat
@@ -414,6 +473,8 @@ export function createWaterMaterial(look: WaterLook, waves: boolean, opts: { win
     uRipple: { value: look.ripple },
     uDrift: { value: look.drift },
     uWaterEnvSpecular: WATER_ENV_SPECULAR,
+    uFxFogDensity: WATER_FX_FOG,
+    uFxTraced: WATER_FX_TRACED,
     uWaves: { value: sea.waves },
     uOmega: { value: sea.omega },
     uRings: RINGS,
@@ -422,6 +483,55 @@ export function createWaterMaterial(look: WaterLook, waves: boolean, opts: { win
   mat.userData = { uniforms, look, variant: 'lit', waves, water: true };
   installWaterHook(mat, uniforms, 'lit', waves);
   return mat;
+}
+
+/**
+ * The mask twin of a lit water material, for the effects' water mask: the same waves, ripples,
+ * rings, foam, colour, opacity and environment, writing what the surface is instead of its light.
+ * Target 0 gets the view normal (octahedral), the view depth and coverage; target 1 the environment
+ * term the lit water leaves out while the reflections pass runs, weighted by the blend and the fog;
+ * target 2 the weight a traced colour gets there. It shares the lit material's uniform objects
+ * but has a hook of its own, and it is never put in the world's scene, so nothing else hooks it.
+ *
+ * One side only: a body has two twins, a `BackSide` one drawn just before a `FrontSide` one, which
+ * is the order three draws a double-sided transparent material in (back faces, then front faces).
+ * A single double-sided twin would draw the same, but three flips such a material's side and marks
+ * it for a program lookup twice every draw, which is most of the mask's CPU time.
+ */
+export function createWaterMaskMaterial(lit: WaterMaterial, side: typeof THREE.FrontSide | typeof THREE.BackSide): WaterMaterial {
+  const mask = new THREE.MeshPhysicalMaterial({
+    color: lit.color,
+    opacity: lit.opacity,
+    roughness: lit.roughness,
+    metalness: lit.metalness,
+    ior: lit.ior,
+    specularIntensity: lit.specularIntensity,
+    envMap: lit.envMap,
+    envMapIntensity: lit.envMapIntensity,
+    side,
+    // Blended exactly as the lit water blends, `src + dst (1 - a)`, and drawn in the same order
+    // (each body's back faces, then its front faces, bodies in the lit water's order), so where one
+    // view ray crosses the swell several times (the front of a crest, its back, the next crest)
+    // targets 1 and 2 sum every layer as the lit sea does. Target 0 writes an alpha of 1, so it is
+    // simply replaced: the last surface drawn is the one it keeps.
+    transparent: true,
+    blending: THREE.CustomBlending,
+    blendEquation: THREE.AddEquation,
+    blendSrc: THREE.OneFactor,
+    blendDst: THREE.OneMinusSrcAlphaFactor,
+    blendEquationAlpha: THREE.AddEquation,
+    blendSrcAlpha: THREE.OneFactor,
+    blendDstAlpha: THREE.OneMinusSrcAlphaFactor,
+    depthWrite: false,
+    depthTest: true,
+    depthFunc: THREE.LessEqualDepth,
+    fog: true,
+  }) as WaterMaterial;
+  // Added to STANDARD and PHYSICAL, which the physical material's constructor sets and needs.
+  mask.defines = { ...mask.defines, WATER_FX_MASK: '' };
+  mask.userData = { ...lit.userData, variant: 'mask' };
+  installWaterHook(mask, lit.userData.uniforms, 'mask', lit.userData.waves);
+  return mask;
 }
 
 /**
@@ -456,14 +566,20 @@ function installWaterHook(mat: WaterMaterial, uniforms: WaterUniforms, variant: 
         }`,
       );
     shader.fragmentShader = shader.fragmentShader
-      .replace('#include <common>', `#include <common>\n${WAVES_GLSL}\nvarying vec2 vWaterXZ;\nvarying float vWaterDist;\nuniform float uWaterEnvSpecular;`)
+      .replace('#include <common>', `#include <common>\n${WAVES_GLSL}\nvarying vec2 vWaterXZ;\nvarying float vWaterDist;\n${MASK_PARS_GLSL}`)
       .replace(
         // Only the specular environment term: the irradiance and the multiscatter stay, so the
-        // water looks the same while the reflections pass adds this term back itself.
+        // water looks the same while the reflections pass adds this term back itself. The mask
+        // keeps the term as it is, since the term is what it writes.
         '#include <lights_fragment_maps>',
         `#include <lights_fragment_maps>
-        radiance *= uWaterEnvSpecular;`,
+        #ifdef WATER_FX_MASK
+          vec3 fxEnvRadiance = radiance;
+        #else
+          radiance *= uWaterEnvSpecular;
+        #endif`,
       )
+      .replace('#include <opaque_fragment>', MASK_OUTPUT_GLSL)
       .replace(
         '#include <color_fragment>',
         `#include <color_fragment>

@@ -7,13 +7,17 @@
 // at all, so a test may pass nothing.
 import type { PostFX } from '../postfx';
 import { ColorGradePass, GrainVignettePass } from './grade';
+import { installWaterReflections, type WaterFxSource } from './water';
 
 export interface FxInstallDeps {
-  // Nothing yet: each effect adds the one optional field it needs from the game here.
+  /** The water bodies whose mask and reflections the effects draw (`World.waterBodies`). */
+  water?: WaterFxSource;
 }
 
-export function installEffects(postfx: PostFX, _deps: FxInstallDeps = {}): void {
+export function installEffects(postfx: PostFX, deps: FxInstallDeps = {}): void {
   // The colour grade needs nothing from the game: it reads the sky through the frame context.
   postfx.registerPass(new ColorGradePass());
   postfx.registerPass(new GrainVignettePass());
+  // The water mask and the reflections, when the game has water bodies to give them.
+  if (deps.water) installWaterReflections(postfx, deps.water);
 }

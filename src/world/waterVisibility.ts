@@ -3,6 +3,7 @@
 // water table the frustum test says "water in view" almost whenever the camera looks near the
 // horizon, even deep inland behind hills. A WebGL2 occlusion query around a colourless draw of the
 // water against the finished scene depth answers the real question, a frame or more later.
+// Below it, the order the mask draws the bodies' twins in (`sortByDraw`).
 //
 // No three import: a plain node test runs this against a fake context.
 
@@ -82,5 +83,52 @@ export class WaterVisibility {
     this.query = null;
     this.pending = false;
     this.state = 'unknown';
+  }
+}
+
+// --- the mask's draw order -----------------------------------------------------------------------
+//
+// The mask's environment and weight targets are blended as the lit water is, so where two bodies
+// overlap on screen (a lake over the sea, the near sea over the far ring) they must be drawn in the
+// order the lit ones were. The lit water is in three's transparent list with everything else; three
+// orders that list by group order, render order, the clip-space depth of the object's bounding
+// sphere centre (farther first), then object id (`reversePainterSortStable`). Every other object in
+// the list is irrelevant to the order of the water among itself, so reading the same four numbers
+// off each lit mesh and sorting the same way gives exactly the lit order, and the twins are given
+// render orders from it. Giving the lit meshes render orders instead would move them against every
+// other transparent object at render order 0.
+
+/** Where three's transparent list puts one lit body: the four numbers it sorts by. */
+export interface WaterDrawKey {
+  /** The render order of the nearest Group above the mesh (0 if none). */
+  group: number;
+  order: number;
+  /** Clip-space z of the geometry's bounding sphere centre, before the divide. */
+  z: number;
+  id: number;
+}
+
+/** Whether three's transparent list draws `a` before `b`. */
+export function drawsBefore(a: WaterDrawKey, b: WaterDrawKey): boolean {
+  if (a.group !== b.group) return a.group < b.group;
+  if (a.order !== b.order) return a.order < b.order;
+  if (a.z !== b.z) return a.z > b.z;
+  return a.id < b.id;
+}
+
+/**
+ * Put the first `n` of `list` in the order three draws them, in place. An insertion sort: the list
+ * is a handful of bodies, nearly always already in order from the frame before, and it allocates
+ * nothing.
+ */
+export function sortByDraw<T extends { readonly key: WaterDrawKey }>(list: T[], n: number): void {
+  for (let i = 1; i < n; i++) {
+    const item = list[i];
+    let j = i - 1;
+    while (j >= 0 && drawsBefore(item.key, list[j].key)) {
+      list[j + 1] = list[j];
+      j--;
+    }
+    list[j + 1] = item;
   }
 }

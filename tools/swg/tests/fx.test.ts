@@ -4,7 +4,7 @@
 // than the frame has. It also checks that a settings file saved before the effects had a registry
 // of their own still means what it did.
 import assert from 'node:assert/strict';
-import { FX_DEFAULTS, FX_KNOBS, FX_LAYERS, FX_PASSES, FX_PRODUCTS, FX_TYPICAL_BUDGET_MS, fxPassDef, fxPassIndex, fxProductDef, isFxSettingKey, type FxProductId, type FxSettings } from '../../../src/core/fxRegistry.ts';
+import { FX_DEFAULTS, FX_KNOBS, FX_LAYERS, FX_PASSES, FX_PRODUCTS, FX_TYPICAL_BUDGET_MS, FX_WATER_NEEDS_FULL, FX_WATER_NEEDS_HALF, fxPassDef, fxPassIndex, fxProductDef, isFxSettingKey, type FxProductId, type FxSettings } from '../../../src/core/fxRegistry.ts';
 import { DEFAULT_SETTINGS, migrateSettings } from '../../../src/core/settings.ts';
 
 let passed = 0;
@@ -102,6 +102,27 @@ for (const def of FX_PRODUCTS) {
 }
 for (const def of FX_PRODUCTS) {
   if (def.owner !== 'spine') ok(passIds.includes(def.owner), `the product "${def.id}" belongs to the pass "${def.owner}"`);
+}
+for (const def of FX_PRODUCTS) ok(def.targets === undefined || (Number.isInteger(def.targets) && def.targets >= 1 && def.targets <= 3), `the product "${def.id}" writes one to three colour targets`);
+
+// --- the water reflections ---
+
+{
+  const row = fxPassDef('waterReflections');
+  ok(row.needs.length === 2 && row.needs.includes('linearDepthHalf') && row.needs.includes('waterMask'), 'the water reflections read the half-resolution depth and the water mask, nothing else: the mask carries the surface normals');
+  const either = new Set<FxProductId>([...FX_WATER_NEEDS_HALF, ...FX_WATER_NEEDS_FULL]);
+  ok(either.size === row.needs.length && row.needs.every((n) => either.has(n)), 'what the pass asks for at half and at full resolution adds up to exactly its row');
+  ok(FX_WATER_NEEDS_HALF.every((n) => row.needs.includes(n)) && FX_WATER_NEEDS_FULL.every((n) => row.needs.includes(n)), 'and each resolution asks for part of the row');
+  ok(!FX_WATER_NEEDS_FULL.includes('linearDepthHalf'), 'the full-resolution trace marches the scene depth itself, not the half-resolution copy');
+  ok(row.live && !row.typical && !row.canBeLast && row.budgetMs === 0.6, 'the water reflections are written, 0.6 ms at most, not in the typical frame, and never last');
+  const mask = fxProductDef('waterMask');
+  ok(mask.kind === 'geometry' && mask.scale === 1 && mask.targets === 3 && mask.format === 'RGBA16F', 'the water mask is three full-size half-float targets sharing the scene depth: the surface, the environment term and the traced weight');
+  ok(mask.owner === 'waterReflections' && mask.budgetMs === 0.3 && !mask.typical && mask.live, 'the water mask belongs to the reflections, costs 0.3 ms at most and is not in the typical frame');
+  const on = FX_KNOBS.find((k) => k.key === 'waterReflections');
+  ok(on?.kind === 'toggle' && on.pass === 'waterReflections' && FX_DEFAULTS.waterReflections === true && on.requires.join() === 'effects', 'water reflections are a switch under Effects, on by default');
+  const res = FX_KNOBS.find((k) => k.key === 'waterReflectionResolution');
+  ok(res?.kind === 'select' && res.pass === 'waterReflections' && FX_DEFAULTS.waterReflectionResolution === 0.5, 'their resolution is a choice, half by default');
+  ok(res!.options!.map((o) => o.value).join() === '0.5,1' && res!.requires.join() === 'effects,waterReflections', 'of half or full, greyed while the reflections are off');
 }
 
 // --- what a typical frame costs ---

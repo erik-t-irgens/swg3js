@@ -2,9 +2,9 @@ import * as THREE from 'three';
 import type { AssetPack } from './assetPack';
 import type { PlanetDef } from '../data/planets';
 import { currentEnvironment, onEnvironment } from './envmap';
-import { createWaterMaterial, setWaterEnvSpecular, waveReach, type WaterMaterial } from './water';
+import { createWaterMaskMaterial, createWaterMaterial, setWaterEnvSpecular, WATER_FX_FOG, WATER_FX_TRACED, waveReach, type WaterMaterial } from './water';
 import { readWaterPack, waterLookFor, type WaterLook, type WaterPackData } from './waterLook';
-import { WaterVisibility, type WaterVisibilityState } from './waterVisibility';
+import { sortByDraw, WaterVisibility, type WaterDrawKey, type WaterVisibilityState } from './waterVisibility';
 
 /**
  * Every water surface in the world, with the look its terrain shader asks for and the environment
@@ -34,6 +34,16 @@ export interface WaterBody {
   /** In world.scene, layer 0, drawn with `lit`. */
   readonly mesh: THREE.Mesh;
   readonly lit: WaterMaterial;
+  /**
+   * The mask twins, back faces then front faces: in `maskScene`, the same geometry drawn with
+   * `masks`, placed from `mesh` each frame. Two one-sided twins draw exactly what three draws for
+   * the double-sided lit water, back faces then front faces, without flipping a material's side
+   * (and looking its program up again) twice every draw.
+   */
+  readonly twins: readonly [THREE.Mesh, THREE.Mesh];
+  readonly masks: readonly [WaterMaterial, WaterMaterial];
+  /** Where three's transparent list put `mesh` this frame; `syncTwins` refreshes it and orders the twins by it. */
+  readonly key: WaterDrawKey;
   readonly role: WaterRole;
   look: WaterLook;
   /** Local-space bounds: the geometry's box grown by the swell's reach up and down (0 for lakes and the far ring). */
@@ -75,6 +85,8 @@ export interface WaterFxDescription {
   bodies: WaterBodyDescription[];
   lava: number;
   cubes: number;
+  /** How many bodies the effects' water mask drew (each as its two twins) in the last whole frame (0 while it did not run). */
+  twinsDrawnLastFrame: number;
   notes: string[];
 }
 
@@ -82,6 +94,8 @@ const frustum = new THREE.Frustum();
 const tmpM = new THREE.Matrix4();
 const tmpBox = new THREE.Box3();
 const tmpV = new THREE.Vector3();
+const tmpV4 = new THREE.Vector4();
+const tmpProj = new THREE.Matrix4();
 
 export class WaterBodies {
   private readonly list: WaterBody[] = [];
@@ -96,6 +110,14 @@ export class WaterBodies {
   /** How many lava tables the world holds, for the description; World sets it. */
   lavaTables = 0;
   readonly visibility = new WaterVisibility();
+  /**
+   * The water's twins and nothing else, drawn by the effects' water mask and by the visibility
+   * probe: no lights (their count is in every program's key), no fog, no background, and no matrix
+   * updates, since each twin takes its mesh's world matrix as the portal renderer left it.
+   */
+  readonly maskScene = new THREE.Scene();
+  /** The probe's material: draws nothing at all (no colour, depth or stencil writes), so only the query sees it. */
+  readonly probeMaterial = new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false, depthTest: true, depthFunc: THREE.LessEqualDepth, side: THREE.DoubleSide, fog: false });
   /** Decided in beginFrame; read-only outside. */
   inFrustum = false;
   inView = false;
@@ -104,6 +126,15 @@ export class WaterBodies {
   active = false;
 
   private renderer: THREE.WebGLRenderer | null = null;
+  /** What the probe draws with, kept in fields so the kept closure below allocates nothing. */
+  private probeRenderer: THREE.WebGLRenderer | null = null;
+  private probeCamera: THREE.PerspectiveCamera | null = null;
+  private probeTarget: THREE.WebGLRenderTarget | null = null;
+  private readonly maskList: THREE.Material[] = [];
+  /** The bodies in the frustum this frame, in the lit water's draw order (the first `syncTwins` result). */
+  private readonly drawList: WaterBody[] = [];
+  private twinsThisFrame = 0;
+  private twinsLastFrame = 0;
   private standIn: THREE.Texture | null = null;
   private pack: AssetPack | null = null;
   /** Filtered per-shader cubes of the pack in place, keyed by the cube's first face. */
@@ -120,6 +151,9 @@ export class WaterBodies {
     this.unsubscribe = onEnvironment(() => {
       for (const b of this.list) this.assignEnvironment(b);
     });
+    this.maskScene.name = 'water:mask';
+    this.maskScene.matrixAutoUpdate = false;
+    this.maskScene.matrixWorldAutoUpdate = false;
   }
 
   get bodies(): readonly WaterBody[] {
@@ -179,7 +213,7 @@ export class WaterBodies {
     return waterLookFor(shader, this.data, planet?.water ?? null);
   }
 
-  /** Make the material for a mesh, assign it, and keep the mesh as a body. */
+  /** Make the lit and mask materials for a mesh, assign the lit one, add the twins, and keep the mesh as a body. */
   add(mesh: THREE.Mesh, waves: boolean, look: WaterLook, role: WaterRole): WaterBody {
     const lit = createWaterMaterial(look, waves);
     mesh.material = lit;
@@ -190,35 +224,56 @@ export class WaterBodies {
       bounds.min.y -= this.nearSwell;
       bounds.max.y += this.nearSwell;
     }
-    const body: WaterBody = { mesh, lit, role, look, bounds, inFrustum: false };
+    const masks = [createWaterMaskMaterial(lit, THREE.BackSide), createWaterMaskMaterial(lit, THREE.FrontSide)] as const;
+    const twins = [this.makeTwin(mesh, masks[0], 'back'), this.makeTwin(mesh, masks[1], 'front')] as const;
+    this.maskList.push(masks[0], masks[1]);
+    const body: WaterBody = { mesh, lit, twins, masks, key: { group: 0, order: 0, z: 0, id: mesh.id }, role, look, bounds, inFrustum: false };
     this.list.push(body);
     this.assignEnvironment(body);
     return body;
   }
 
+  private makeTwin(mesh: THREE.Mesh, mask: WaterMaterial, side: string): THREE.Mesh {
+    const twin = new THREE.Mesh(mesh.geometry, mask);
+    twin.name = `mask:${side}:${mesh.name}`;
+    twin.matrixAutoUpdate = false;
+    twin.matrixWorldAutoUpdate = false;
+    twin.frustumCulled = mesh.frustumCulled;
+    twin.visible = false;
+    this.maskScene.add(twin);
+    return twin;
+  }
+
   /** Give a body a new look (the pack arrived after the procedural sea was made). Uniforms and textures only. */
   restyle(body: WaterBody, look: WaterLook): void {
     body.look = look;
-    body.lit.color.set(look.color);
-    body.lit.opacity = look.opacity;
-    body.lit.userData.look = look;
+    for (const m of [body.lit, ...body.masks]) {
+      m.color.set(look.color);
+      m.opacity = look.opacity;
+      m.userData.look = look;
+    }
+    // The uniform objects are shared by the lit material and its mask.
     body.lit.userData.uniforms.uRipple.value = look.ripple;
     body.lit.userData.uniforms.uDrift.value = look.drift;
     this.assignEnvironment(body);
   }
 
-  /** Forget one mesh's body and dispose its material. No-op for a mesh that has none. */
+  /** Forget one mesh's body: its twin out of the mask scene, its materials disposed. No-op for a mesh that has none. */
   remove(mesh: THREE.Mesh): void {
     const i = this.list.findIndex((b) => b.mesh === mesh);
     if (i < 0) return;
-    this.list[i].lit.dispose();
+    this.forgetBody(this.list[i]);
     this.list.splice(i, 1);
+    // Rebuilt by the next syncTwins; emptied now so it holds no forgotten body.
+    this.drawList.length = 0;
   }
 
   /** Forget every body and the pack's cube environments. Meshes and geometry are the world's to remove. */
   clear(): void {
-    for (const b of this.list) b.lit.dispose();
+    for (const b of this.list) this.forgetBody(b);
     this.list.length = 0;
+    this.drawList.length = 0;
+    this.twinsThisFrame = this.twinsLastFrame = 0;
     this.disposeCubes();
     this.pack = null;
     this.data = null;
@@ -271,8 +326,128 @@ export class WaterBodies {
     this.wanted = wanted;
     this.active = wanted && this.inView && !this.underwater;
     setWaterEnvSpecular(this.active ? 0 : 1);
-    for (const b of this.list) b.lit.envMapIntensity = this.intensityFor(b);
+    // The mask fades what it writes as the lit water is fogged, and gives a traced colour the
+    // water's own strength, without the night factor a static cube needs: a traced colour is
+    // already the night scene.
+    WATER_FX_FOG.value = fogDensity;
+    WATER_FX_TRACED.value = this.envIntensity;
+    for (const b of this.list) {
+      const k = this.intensityFor(b);
+      b.lit.envMapIntensity = k;
+      b.masks[0].envMapIntensity = k;
+      b.masks[1].envMapIntensity = k;
+    }
+    this.twinsLastFrame = this.twinsThisFrame;
+    this.twinsThisFrame = 0;
     return this.inView;
+  }
+
+  /**
+   * After the scene is drawn with `camera`: every twin takes its mesh's world matrix (the portal
+   * renderer has just refreshed them) and is drawn only where its body was found in the frustum,
+   * and the drawn ones are given render orders that repeat the lit water's order: body by body as
+   * three's transparent list drew the lit meshes, each body's back twin just before its front twin.
+   * Returns how many bodies are drawn. Allocates nothing.
+   */
+  syncTwins(camera: THREE.Camera): number {
+    tmpProj.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+    const order = this.drawList;
+    let n = 0;
+    for (const b of this.list) {
+      const back = b.twins[0];
+      const front = b.twins[1];
+      back.matrixWorld.copy(b.mesh.matrixWorld);
+      front.matrixWorld.copy(b.mesh.matrixWorld);
+      back.visible = front.visible = b.inFrustum;
+      if (!b.inFrustum) continue;
+      readDrawKey(b.mesh, tmpProj, b.key);
+      order[n++] = b;
+    }
+    sortByDraw(order, n);
+    for (let i = 0; i < n; i++) {
+      order[i].twins[0].renderOrder = 2 * i;
+      order[i].twins[1].renderOrder = 2 * i + 1;
+    }
+    return n;
+  }
+
+  /** The effects' water mask drew `n` twins this frame (for the description). */
+  maskDrawn(n: number): void {
+    this.twinsThisFrame = n;
+  }
+
+  /**
+   * Ask whether any water in the frustum shows: the twins drawn flat with `probeMaterial` into
+   * `target`, which holds the finished frame's depth and stencil, inside an occlusion query. Nothing
+   * is written. Answered a frame or more later, through `beginFrame`. Returns whether it drew.
+   */
+  probe(renderer: THREE.WebGLRenderer, camera: THREE.PerspectiveCamera, target: THREE.WebGLRenderTarget): boolean {
+    if (!this.inFrustum) return false;
+    this.syncTwins(camera);
+    this.probeRenderer = renderer;
+    this.probeCamera = camera;
+    this.probeTarget = target;
+    try {
+      return this.visibility.measure(this.drawProbe);
+    } finally {
+      this.probeRenderer = null;
+      this.probeCamera = null;
+      this.probeTarget = null;
+    }
+  }
+
+  /** Made once, so a probe allocates nothing. */
+  private readonly drawProbe = (): void => {
+    const r = this.probeRenderer!;
+    const cam = this.probeCamera!;
+    r.setRenderTarget(this.probeTarget);
+    const layers = cam.layers.mask;
+    // The portal renderer leaves whichever layer its last pass drew; the water is on layer 0.
+    cam.layers.set(0);
+    this.maskScene.overrideMaterial = this.probeMaterial;
+    // The probe material is double-sided, so one twin a body covers the surface: the back twins
+    // sit this one out rather than draw every body's geometry twice.
+    for (const b of this.list) b.twins[0].visible = false;
+    try {
+      r.render(this.maskScene, cam);
+    } finally {
+      for (const b of this.list) b.twins[0].visible = b.inFrustum;
+      this.maskScene.overrideMaterial = null;
+      cam.layers.mask = layers;
+    }
+  };
+
+  /** Every mask material, so the effects can set their stencil for the frame. A kept array. */
+  maskMaterials(): readonly THREE.Material[] {
+    return this.maskList;
+  }
+
+  /**
+   * Objects to compile the mask and probe programs with before play: one per program the bodies of
+   * this planet will draw (each side of the mask is its own program), on each body's own geometry
+   * (its attributes are in the key), visible and outside any scene so a compile finds them. The
+   * probe is compiled against the same geometries.
+   */
+  warmObjects(): THREE.Object3D[] {
+    const out: THREE.Object3D[] = [];
+    const seen = new Set<string>();
+    for (const b of this.list) {
+      const attrs = Object.keys(b.mesh.geometry.attributes).sort().join(',');
+      for (const mask of b.masks) {
+        const key = `${mask.customProgramCacheKey()}|${mask.side}|${attrs}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const twin = new THREE.Mesh(b.mesh.geometry, mask);
+        twin.frustumCulled = false;
+        out.push(twin);
+      }
+      if (seen.has(`probe|${attrs}`)) continue;
+      seen.add(`probe|${attrs}`);
+      const probe = new THREE.Mesh(b.mesh.geometry, this.probeMaterial);
+      probe.frustumCulled = false;
+      out.push(probe);
+    }
+    return out;
   }
 
   describe(camera: THREE.Vector3): WaterFxDescription {
@@ -318,6 +493,7 @@ export class WaterBodies {
       bodies,
       lava: this.lavaTables,
       cubes: this.cubes.size,
+      twinsDrawnLastFrame: this.twinsLastFrame,
       notes,
     };
   }
@@ -326,8 +502,20 @@ export class WaterBodies {
     this.clear();
     this.unsubscribe();
     this.visibility.dispose();
+    this.probeMaterial.dispose();
     this.standIn?.dispose();
     this.standIn = null;
+  }
+
+  /** A body's twin out of the mask scene and both its materials disposed; the geometry is the world's. */
+  private forgetBody(body: WaterBody): void {
+    for (const twin of body.twins) this.maskScene.remove(twin);
+    for (const mask of body.masks) {
+      const i = this.maskList.indexOf(mask);
+      if (i >= 0) this.maskList.splice(i, 1);
+      mask.dispose();
+    }
+    body.lit.dispose();
   }
 
   /** Filter this pack's per-shader cubes into PMREMs. Only ever called in 'shader' mode. */
@@ -402,8 +590,11 @@ export class WaterBodies {
       this.warn('water: a body was made before the renderer was attached; its environment is set when the stand-in exists');
       return;
     }
-    body.lit.envMap = tex;
-    body.lit.envMapIntensity = this.intensityFor(body);
+    const k = this.intensityFor(body);
+    for (const m of [body.lit, ...body.masks]) {
+      m.envMap = tex;
+      m.envMapIntensity = k;
+    }
   }
 
   private warn(message: string): void {
@@ -446,6 +637,29 @@ function makeBlackEnvironment(renderer: THREE.WebGLRenderer): THREE.Texture {
 function envHeightOf(texture: THREE.Texture | null): number | null {
   const image = texture?.image as { height?: number } | undefined;
   return typeof image?.height === 'number' ? image.height : null;
+}
+
+/**
+ * The four numbers three's transparent list sorts `mesh` by, read the way `projectObject` reads
+ * them: the nearest Group's render order, the mesh's own, the clip-space z (before the divide) of
+ * its geometry's bounding sphere centre through `projScreen`, and its id.
+ */
+function readDrawKey(mesh: THREE.Mesh, projScreen: THREE.Matrix4, key: WaterDrawKey): void {
+  let group = 0;
+  for (let p = mesh.parent; p; p = p.parent) {
+    if ((p as THREE.Group).isGroup) {
+      group = p.renderOrder;
+      break;
+    }
+  }
+  const geometry = mesh.geometry;
+  if (!geometry.boundingSphere) geometry.computeBoundingSphere();
+  const c = geometry.boundingSphere!.center;
+  tmpV4.set(c.x, c.y, c.z, 1).applyMatrix4(mesh.matrixWorld).applyMatrix4(projScreen);
+  key.group = group;
+  key.order = mesh.renderOrder;
+  key.z = tmpV4.z;
+  key.id = mesh.id;
 }
 
 /** The mean of a lake's own outline points, which is where `__debug.teleport` should go. */

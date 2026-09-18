@@ -33,6 +33,8 @@ export interface FxFrameInput {
   /** How far the aimed camera has eased in, 0 to 1. */
   aimAmount: number;
   firstPerson: boolean;
+  /** Water shows on screen this frame: in the frustum within the fog's reach, and not found hidden by the occlusion probe. */
+  waterInView: boolean;
 }
 
 /** The sun as the effects want it, with its place on the screen worked out. */
@@ -94,6 +96,8 @@ export interface FxFrameContext {
   aiming: boolean;
   aimAmount: number;
   firstPerson: boolean;
+  /** Water shows on screen this frame (`WaterBodies.inView`); the occlusion reads the mask's coverage only then. */
+  waterInView: boolean;
   /** The pass whose own working texture the debug view is showing, so it keeps it this frame. */
   debugViewPass: FxPassId | null;
   /** The sun record `sun` points at, kept so a frame allocates nothing; never read it directly. */
@@ -147,6 +151,7 @@ export function createContext(renderer: THREE.WebGLRenderer, settings: FxSetting
     aiming: false,
     aimAmount: 0,
     firstPerson: false,
+    waterInView: false,
     debugViewPass: null,
     sunStore: { dir: new THREE.Vector3(), color: new THREE.Color(), intensity: 0, screen: new THREE.Vector2(0.5, 0.5), behind: false, fade: 0 },
   };
@@ -210,4 +215,5 @@ export function updateContext(ctx: FxFrameContext, input: FxFrameInput, size: TH
   ctx.aiming = input.aiming;
   ctx.aimAmount = input.aimAmount;
   ctx.firstPerson = input.firstPerson;
+  ctx.waterInView = input.waterInView;
 }

@@ -94,6 +94,8 @@ export interface FxProductDef {
   /** Half or all of the drawing buffer; a geometry product is always 1, since it shares the scene depth. */
   scale: 0.5 | 1;
   format: 'R32F' | 'RGBA8' | 'R8' | 'RG8' | 'RG16F' | 'RGBA16F';
+  /** Colour targets it writes at once, each of `format`; 1 when absent. */
+  targets?: number;
   budgetMs: number;
   typical: boolean;
   owner: 'spine' | FxPassId;
@@ -164,8 +166,8 @@ export const FX_KNOBS: readonly FxKnobDef[] = [
   { key: 'ssaoStrength', pass: 'ssao', label: 'Occlusion strength', kind: 'range', min: 0, max: 2, step: 0.05, format: two, requires: ['effects', 'ssao'], hint: '0.5 a hint, 1 as measured, 2 heavy.' },
   { key: 'ssaoRadius', pass: 'ssao', label: 'Occlusion radius', kind: 'range', min: 0.3, max: 3, step: 0.1, format: (v) => `${v.toFixed(1)} m`, requires: ['effects', 'ssao'], hint: 'How far a surface looks around itself for what shades it. Small keeps to creases, large darkens whole hollows.' },
   { key: 'ssaoResolution', pass: 'ssao', label: 'Occlusion resolution', kind: 'select', options: half, requires: ['effects', 'ssao'], hint: 'Half is a quarter of the work, smoothed back up along edges.' },
-  { key: 'waterReflections', pass: 'waterReflections', label: 'Water reflections', kind: 'toggle', requires: ['effects'], hint: 'What stands beside the water shows in it, traced through the picture itself.' },
-  { key: 'waterReflectionResolution', pass: 'waterReflections', label: 'Reflection resolution', kind: 'select', options: half, requires: ['effects', 'waterReflections'], hint: 'Half is a quarter of the work; reflections are soft anyway.' },
+  { key: 'waterReflections', pass: 'waterReflections', label: 'Water reflections', kind: 'toggle', requires: ['effects'], hint: 'Lakes and seas mirror the hills, buildings, ships and sky on screen; what is off screen comes from the sky\'s reflection map.' },
+  { key: 'waterReflectionResolution', pass: 'waterReflections', label: 'Water reflection resolution', kind: 'select', options: half, requires: ['effects', 'waterReflections'], hint: 'Half traces a quarter of the pixels and smooths them back along the water; full is sharper and about three times the cost.' },
   { key: 'heatHaze', pass: 'heatHaze', label: 'Heat haze', kind: 'toggle', requires: ['effects'], hint: 'The air over lava, engines and flame bends what is behind it.' },
   { key: 'heatHazeStrength', pass: 'heatHaze', label: 'Heat haze strength', kind: 'range', min: 0, max: 2, step: 0.05, format: two, requires: ['effects', 'heatHaze'], hint: '0.5 a shimmer, 1 as measured, 2 a furnace.' },
   { key: 'godRays', pass: 'godRays', label: 'God rays', kind: 'toggle', requires: ['effects'], hint: 'Sunlight scattered towards you where the sky shows between trees, walls and hulls.' },
@@ -196,7 +198,7 @@ export const FX_PASSES: readonly FxPassDef[] = [
   { id: 'sanitize', stage: 'scene', toggles: [], required: true, needs: [], budgetMs: 0.06, typical: true, canBeLast: false, live: true, why: 'The only pass that reads the scene target’s colour. Pixels that are not numbers become black before any blur can spread them into a box, and the brightest are held to a ceiling.' },
   { id: 'ssao', stage: 'scene', toggles: ['ssao'], required: false, needs: ['linearDepthHalf', 'normalsHalf', 'waterMask'], budgetMs: 0.45, typical: true, canBeLast: false, live: false, why: 'Occlusion multiplies lit colour, so it comes before anything that adds light that must not be occluded, and before the heat haze, so the darkening travels with the pixels it belongs to.' },
   { id: 'bladeGlow', stage: 'scene', toggles: [], required: false, needs: ['linearDepthHalf', 'normalsHalf'], budgetMs: 0.15, typical: false, canBeLast: false, live: false, why: 'A lit blade lays its colour on the surfaces around it, after the occlusion that shades them and before the air and the lens.' },
-  { id: 'waterReflections', stage: 'scene', toggles: ['waterReflections'], required: false, needs: ['linearDepthHalf', 'normalsHalf', 'waterMask'], budgetMs: 0.6, typical: false, canBeLast: false, live: false, why: 'Adds reflected scene light on water pixels. After occlusion so the reflected ground carries it, before the lens so reflections shimmer, defocus, smear and bloom like anything seen directly.' },
+  { id: 'waterReflections', stage: 'scene', toggles: ['waterReflections'], required: false, needs: ['linearDepthHalf', 'waterMask'], budgetMs: 0.6, typical: false, canBeLast: false, live: true, why: 'Adds reflected scene light on water pixels. After occlusion so the reflected ground carries it, before the lens so reflections shimmer, defocus, smear and bloom like anything seen directly.' },
   { id: 'heatHaze', stage: 'scene', toggles: ['heatHaze'], required: false, needs: ['heat', 'linearDepthHalf'], budgetMs: 0.16, typical: false, canBeLast: false, live: false, why: 'Displaces what the surfaces look like, so it follows every surface pass; before the atmosphere and the lens, since the air and the glass sit between the heat and the eye.' },
   { id: 'lightShafts', stage: 'scene', toggles: [], required: false, needs: ['linearDepthHalf'], budgetMs: 0.3, typical: false, canBeLast: false, live: false, why: 'Daylight scattered in the air of a room, from its doorways and windows. Atmosphere: after the surfaces, before the lens, next to the god rays so the two share their march.' },
   { id: 'godRays', stage: 'scene', toggles: ['godRays'], required: false, needs: ['linearDepthHalf'], budgetMs: 0.25, typical: true, canBeLast: false, live: true, why: 'Scattered sunlight. Before depth of field, since rays are far light that should soften with the far background they overlay, and before the blur and the bloom so they smear and spill like the sun.' },
@@ -211,13 +213,21 @@ export const FX_PASSES: readonly FxPassDef[] = [
   { id: 'debugView', stage: 'display', toggles: [], required: false, needs: ['linearDepthHalf', 'normalsHalf', 'heat', 'debugMask', 'waterMask', 'velocity'], budgetMs: 0.03, typical: false, canBeLast: true, live: true, why: 'Replaces the picture with one of the shared products for inspection. Only a console override turns it on.' },
 ];
 
+/**
+ * What the water reflections read each frame, by trace resolution: the half-resolution trace marches
+ * the half-resolution depth, the full one the scene's own. The row's `needs` is exactly their union,
+ * and the mask carries the surface normals, so neither asks for `normalsHalf`.
+ */
+export const FX_WATER_NEEDS_HALF: readonly FxProductId[] = ['linearDepthHalf', 'waterMask'];
+export const FX_WATER_NEEDS_FULL: readonly FxProductId[] = ['waterMask'];
+
 /** Compute order: everything derived from depth first, then the products drawn with the scene's own geometry. */
 export const FX_PRODUCTS: readonly FxProductDef[] = [
   { id: 'linearDepthHalf', kind: 'depth', needs: [], scale: 0.5, format: 'R32F', budgetMs: 0.03, typical: true, owner: 'spine', live: true },
   { id: 'normalsHalf', kind: 'depth', needs: ['linearDepthHalf'], scale: 0.5, format: 'RGBA8', budgetMs: 0.06, typical: true, owner: 'spine', live: true },
   { id: 'heat', kind: 'depth', needs: ['linearDepthHalf'], scale: 0.5, format: 'RGBA16F', budgetMs: 0.08, typical: false, owner: 'heatHaze', live: false },
   { id: 'debugMask', kind: 'geometry', needs: [], scale: 1, format: 'R8', budgetMs: 0.05, typical: false, owner: 'debugView', live: true },
-  { id: 'waterMask', kind: 'geometry', needs: [], scale: 1, format: 'RGBA16F', budgetMs: 0.3, typical: false, owner: 'waterReflections', live: false },
+  { id: 'waterMask', kind: 'geometry', needs: [], scale: 1, format: 'RGBA16F', targets: 3, budgetMs: 0.3, typical: false, owner: 'waterReflections', live: true },
   { id: 'velocity', kind: 'geometry', needs: [], scale: 1, format: 'RG16F', budgetMs: 0.1, typical: true, owner: 'motionBlur', live: false },
 ];
 

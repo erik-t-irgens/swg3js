@@ -15,7 +15,7 @@ import { shaderTextures } from '../sht.mjs';
 import { decodeDdsVolume } from '../dds.mjs';
 import { exportWater, isLavaEffect, lavaEntry, lavaParams, linearToSrgbHex, meanLinear, normalSlope, REFERENCE_SCROLL, REFERENCE_SLOPE, textureFactorOf, WATER_CUBE_SIZE } from '../water.mjs';
 import { envLightFrom, isLavaWater, readWaterPack, shaderKey, waterLookFor, type WaterShaderInfo } from '../../../src/world/waterLook.ts';
-import { WaterVisibility } from '../../../src/world/waterVisibility.ts';
+import { drawsBefore, sortByDraw, WaterVisibility, type WaterDrawKey } from '../../../src/world/waterVisibility.ts';
 
 let passed = 0;
 const ok = (cond: boolean, msg: string) => { assert.ok(cond, msg); passed++; console.log(`ok   ${msg}`); };
@@ -386,6 +386,31 @@ ok(envLightFrom(0.3, 0) === 1, 'without a ramp to compare against nothing is dim
   ok(v.measure(() => draws++) && draws === before + 1, 'a query that never answers (a lost context) is given up on and asked again');
   v.dispose();
   ok(v.state === 'unknown', 'disposing forgets the last answer');
+}
+
+// --- the order the mask draws the twins in (src/world/waterVisibility.ts) -----------------------
+
+{
+  // three's own transparent order (WebGLRenderLists.js, reversePainterSortStable), copied.
+  const three = (a: WaterDrawKey, b: WaterDrawKey) => (a.group !== b.group ? a.group - b.group : a.order !== b.order ? a.order - b.order : a.z !== b.z ? b.z - a.z : a.id - b.id);
+  let seed = 12345;
+  const rand = () => (seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) / 2 ** 32;
+  let agree = 0;
+  for (let trial = 0; trial < 500; trial++) {
+    const n = 1 + Math.floor(rand() * 12);
+    const list = Array.from({ length: n + 3 }, (_, i) => ({ key: { group: Math.floor(rand() * 2), order: Math.floor(rand() * 3), z: Math.floor(rand() * 4) / 4, id: 100 + ((i * 7) % (n + 3)) } }));
+    const tail = list.slice(n);
+    const want = list.slice(0, n).sort((a, b) => three(a.key, b.key));
+    sortByDraw(list, n);
+    if (want.every((w, i) => w === list[i]) && tail.every((t, i) => t === list[n + i])) agree++;
+  }
+  ok(agree === 500, 'the twins are put in exactly the order three draws the lit meshes (ties on depth broken by id), and nothing past the count is touched');
+  const sea = { key: { group: 0, order: 0, z: 0.99, id: 10 } };
+  const lake = { key: { group: 0, order: 0, z: 0.4, id: 11 } };
+  const pair = [lake, sea];
+  sortByDraw(pair, 2);
+  ok(pair[0] === sea && pair[1] === lake, 'a farther body is drawn first: the sea before a lake in front of it');
+  ok(!drawsBefore(lake.key, sea.key) && drawsBefore({ ...lake.key, order: -1 }, sea.key) && drawsBefore({ ...sea.key, group: -1 }, { ...lake.key, order: -5 }), 'a lower render order goes first whatever the depth, and a lower group order before that');
 }
 
 ok([shaderKey('shader\\Wter_Spec.sht'), shaderKey('shader/x.sht'), shaderKey('WTER_SPEC'), shaderKey('')].join() === 'wter_spec,x,wter_spec,', 'the converter and the game reduce a shader name to the same key');

@@ -362,6 +362,11 @@ const DEBUG_VIEW = {
         c = mix(texture2D(tDiffuse, vUv).rgb, s.rgb, clamp(s.a, 0.0, 1.0));
       } else if (uMode == 5) {
         c = vec3(0.5 + s.r * uScale, 0.5 + s.g * uScale, 0.5);
+      } else if (uMode == 7) {
+        // The water mask: its octahedral normal as colour wherever water shows, over the picture.
+        vec3 raw = texture2D(tScene, vUv).rgb;
+        vec3 under = raw / (raw + vec3(1.0));
+        c = s.a > 0.0 ? mix(under, vec3(s.rg * 0.5 + 0.5, 0.0), 0.8) : under;
       } else {
         c = vec3(greyDistance(fxViewZ(s.x, uNearFar.x, uNearFar.y)));
       }
@@ -376,7 +381,7 @@ const PRODUCT_VIEW: Record<FxProductId, { mode: number; channel: number; scale: 
   normalsHalf: { mode: 2, channel: 0, scale: 1 },
   heat: { mode: 2, channel: 0, scale: 1 },
   debugMask: { mode: 3, channel: 0, scale: 1 },
-  waterMask: { mode: 4, channel: 0, scale: 1 },
+  waterMask: { mode: 7, channel: 0, scale: 1 },
   velocity: { mode: 5, channel: 0, scale: 20 },
 };
 const CHANNEL_INDEX: Record<string, number> = { r: 0, g: 1, b: 2, a: 3 };

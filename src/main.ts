@@ -178,7 +178,7 @@ class App {
   /** The picture's effects chain, while the Effects setting is on. */
   private postfx: PostFX | null = null;
   /** What the effects are told about each frame, refilled in drawFrame rather than made again. */
-  private readonly fxInput: FxFrameInput = { camera: null as unknown as THREE.PerspectiveCamera, dt: 1 / 60, sun: null, portalView: false, cameraInHull: false, inside: false, aboard: false, space: false, fog: null, daylight: 1, dayIndex: 0, lighting: null, planetId: '', aiming: false, aimAmount: 0, firstPerson: false };
+  private readonly fxInput: FxFrameInput = { camera: null as unknown as THREE.PerspectiveCamera, dt: 1 / 60, sun: null, portalView: false, cameraInHull: false, inside: false, aboard: false, space: false, fog: null, daylight: 1, dayIndex: 0, lighting: null, planetId: '', aiming: false, aimAmount: 0, firstPerson: false, waterInView: false };
   private readonly fxSun: SunInfo = { dir: new THREE.Vector3(), color: new THREE.Color(), intensity: 0 };
   /** What the debug mask draws: the player and whatever they ride or are aboard. */
   private readonly fxMaskObjects: THREE.Object3D[] = [];
@@ -403,7 +403,7 @@ class App {
         if (on === false) fx.timer.enabled = false;
         return fx.timing();
       },
-      /** Show one of the shared products instead of the picture: 'linearDepthHalf', 'normalsHalf', 'debugMask', 'depth', 'scene', or a pass's own texture as 'ssao.ao'. No argument puts the picture back. */
+      /** Show one of the shared products instead of the picture: 'linearDepthHalf', 'normalsHalf', 'debugMask', 'waterMask' (the water's normals over the picture), 'waterMaskEnv' (the environment term the water hands the reflections), 'depth', 'scene', or a pass's own texture as 'ssao.ao'. No argument puts the picture back. */
       fxView: (name?: string | null) => {
         const fx = this.postfx;
         if (!fx) return 'the effects are off; turn Effects on in the menu';
@@ -607,14 +607,42 @@ class App {
        * Every water body with the shader it came from, its look, what it reflects and whether it
        * is on screen. `waterFx({ env: 'shader' })` switches every body to its own shader's cube
        * map, `{ env: 'sky' }` back to the area's day and night map; `{ envIntensity }` changes how
-       * hard the water mirrors. Use it as `await __debug.waterFx(...)`.
+       * hard the water mirrors. With the effects on, `{ view }` shows what the reflections pass
+       * traces ('confidence': red traced, blue fallback), adds ('added'), the fallback alone
+       * ('envOnly', which must look exactly like the pass off) or the traced part alone
+       * ('tracedOnly'); 'off' is the picture. The march takes `maxDistance`, `thickness`,
+       * `thicknessPerMetre`, `minWeight`, `sky` and `strength`. Use it as `await __debug.waterFx(...)`.
        */
-      waterFx: async (opts?: { env?: 'sky' | 'shader'; envIntensity?: number }) => {
+      waterFx: async (opts?: {
+        env?: 'sky' | 'shader';
+        envIntensity?: number;
+        view?: 'off' | 'confidence' | 'added' | 'envOnly' | 'tracedOnly';
+        maxDistance?: number;
+        thickness?: number;
+        thicknessPerMetre?: number;
+        minWeight?: number;
+        sky?: boolean;
+        strength?: number;
+      }) => {
         const bodies = this.world.waterBodies;
         if (opts?.envIntensity !== undefined) bodies.envIntensity = opts.envIntensity;
         if (opts?.env && opts.env !== bodies.envMode) await bodies.setEnvMode(opts.env);
         else bodies.refresh();
-        return bodies.describe(this.cam.camera.position);
+        const fx = this.postfx;
+        type Tune = { maxDistance: number; thickness: number; thicknessPerMetre: number; minWeight: number; sky: boolean; strength: number; view: number };
+        const pass = fx?.pass('waterReflections') as unknown as { tune: Tune; views: Record<string, number> } | undefined;
+        if (pass && opts) {
+          if (opts.view !== undefined) pass.tune.view = pass.views[opts.view] ?? 0;
+          for (const k of ['maxDistance', 'thickness', 'thicknessPerMetre', 'minWeight', 'strength'] as const) if (typeof opts[k] === 'number') pass.tune[k] = opts[k];
+          if (opts.sky !== undefined) pass.tune.sky = opts.sky;
+        }
+        const row = fx?.describe().passes.find((p) => p.id === 'waterReflections');
+        const mask = fx?.product('waterMask') as unknown as { allocated: boolean; drawn: number; idleFor(ctx: unknown): number } | undefined;
+        return {
+          ...bodies.describe(this.cam.camera.position),
+          pass: pass && row ? { drewLastFrame: row.drewLastFrame, why: row.why ?? null, gpuMs: row.gpuMs, tune: { ...pass.tune } } : null,
+          mask: mask && fx ? { allocated: mask.allocated, drawn: mask.drawn, idleSeconds: Number(mask.idleFor(fx.ctx).toFixed(1)) } : null,
+        };
       },
       /** Placed objects within r metres of the player: model, distance, tier, and whether the model and its region are loaded. */
       near: (r = 150) => {
@@ -2152,7 +2180,7 @@ class App {
     const postfx = this.postfx;
     // Decided before the scene is drawn, so the lit water and the reflections pass never disagree
     // about who adds the water's environment term this frame.
-    this.world.beginWaterFrame(cam, false);
+    this.world.beginWaterFrame(cam, this.postfx?.passWanted('waterReflections') ?? false);
     postfx?.begin();
     this.portals.render(this.scene, cam, view, this.world.buildings);
     if (postfx) {
@@ -2173,6 +2201,7 @@ class App {
       f.aiming = this.player.aiming;
       f.aimAmount = this.cam.aimAmount;
       f.firstPerson = this.cam.firstPerson;
+      f.waterInView = this.world.waterBodies.inView;
       postfx.end(f);
     }
     this.frameCalls = info.calls;
@@ -2191,7 +2220,7 @@ class App {
       if (ridden) out.push(ridden.group);
       return out;
     };
-    installEffects(fx, {});
+    installEffects(fx, { water: this.world.waterBodies });
     return fx;
   }
 

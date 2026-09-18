@@ -90,6 +90,16 @@ export interface FxProduct {
   setSize(width: number, height: number, settings: FxSettings): void;
   materials(): FxWarmItem[];
   dispose(): void;
+  /**
+   * Every frame, right after the context is updated and before any pass decides: a question asked of
+   * the finished scene (the water's occlusion query). It may bind the scene target only to draw with
+   * colour, depth and stencil writes all off.
+   */
+  probe?(ctx: FxFrameContext): void;
+  /** A frame nothing wants this product: its chance to give storage back after a while unused. */
+  idle?(ctx: FxFrameContext): void;
+  /** Whether its targets hold storage on the card now; absent means always. */
+  readonly allocated?: boolean;
 }
 
 /** A pass that is one full-screen draw of one shader. */
