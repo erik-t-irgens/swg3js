@@ -40,7 +40,11 @@ import { addPointLight, createFxLights, setSpotLight } from './core/fx/lights';
 import { createCloudLayers, createSkyLights, flareLook, tuneFlareLook } from './core/fx/lensFlare';
 import { MAX_CLOUD_LAYERS, MAX_FLARE_SOURCES } from './core/fx/flareMath';
 import { heatTuning, type HeatProduct } from './core/fx/heat';
+import { FIGURE_SPHERE, followDepth, measureLocalSphere, type FxMoverList, type LocalSphere, type VelocityProduct } from './core/fx/velocity';
+import { MOTION_TUNING, MOVER_LIMITS } from './core/fx/velocityMath.ts';
+import type { MotionBlurPass } from './core/fx/motionBlur';
 import { HeatSources, plumeNoiseFrequency } from './world/heatSources';
+import { MobileAssets } from './world/mobiles/assets';
 import { vehiclePlumes } from './vehicles/enginePlumes';
 import { Notice } from './ui/notice';
 import { VehiclesUi } from './ui/vehiclesUi';
@@ -207,7 +211,7 @@ class App {
   /** What the blades' light ceiling reads, kept and refilled each frame; the world and the pool are set in the constructor. */
   private readonly litSources: LitSources = { world: null!, effects: null!, torch: null, eye: new THREE.Vector3() };
   /** What the effects are told about each frame, refilled in drawFrame rather than made again. */
-  private readonly fxInput: FxFrameInput = { camera: null as unknown as THREE.PerspectiveCamera, dt: 1 / 60, sun: null, portalView: false, cameraInHull: false, inside: false, aboard: false, space: false, fog: null, daylight: 1, dayIndex: 0, lighting: null, planetId: '', aiming: false, aimAmount: 0, firstPerson: false, skyLights: createSkyLights(MAX_FLARE_SOURCES), skyLightCount: 0, clouds: createCloudLayers(MAX_CLOUD_LAYERS), cloudCount: 0, cameraUnderwater: false, waterInView: false, blades: this.fxBlades, lights: this.fxLights, room: null, weather: null };
+  private readonly fxInput: FxFrameInput = { camera: null as unknown as THREE.PerspectiveCamera, dt: 1 / 60, sun: null, portalView: false, cameraInHull: false, inside: false, aboard: false, space: false, fog: null, daylight: 1, dayIndex: 0, lighting: null, planetId: '', aiming: false, aimAmount: 0, firstPerson: false, skyLights: createSkyLights(MAX_FLARE_SOURCES), skyLightCount: 0, clouds: createCloudLayers(MAX_CLOUD_LAYERS), cloudCount: 0, cameraUnderwater: false, waterInView: false, blades: this.fxBlades, lights: this.fxLights, room: null, followFar: 0, weather: null };
   private readonly fxSun: SunInfo = { dir: new THREE.Vector3(), color: new THREE.Color(), intensity: 0 };
   /** What the debug mask draws: the player and whatever they ride or are aboard. */
   private readonly fxMaskObjects: THREE.Object3D[] = [];
@@ -350,7 +354,11 @@ class App {
       this.weaponsUi.attach(c);
       this.world.npcDeps.weapons = c;
       this.world.npcDeps.effects = this.effects;
-      this.world.npcDeps.compile = (objects) => this.world.compileReady(objects);
+      // Before a fighter is shown: its own shaders, then the motion blur's for its outfit's morph counts.
+      this.world.npcDeps.compile = async (objects) => {
+        await this.world.compileReady(objects);
+        await this.postfx?.product<VelocityProduct>('velocity')?.prepareRoots(objects);
+      };
       this.world.npcs?.attach(this.world.npcDeps);
       if (c) console.info(`weapons: ${c.weapons.length} on the rack, ${c.skipped.length} left out`);
     });
@@ -530,6 +538,40 @@ class App {
       fxWarm: async () => (this.postfx ? await this.postfx.warmUp() : 'the effects are off; turn Effects on in the menu'),
       /** What the card is holding: how the dispose is checked, since turning the effects off and on three times must leave the texture count where it was. */
       renderInfo: () => ({ memory: { ...this.renderer.info.memory }, programs: this.renderer.info.programs?.length ?? 0, effects: !!this.postfx }),
+      /** What the motion blur tracks this frame: every mover listed, what it drew and why not, the variants and the static cut. Null with the effects off. */
+      movers: (list = true) => this.postfx?.product<VelocityProduct>('velocity')?.stats(list) ?? null,
+      /** Draw a frame and read the blur's radius field at a pixel (from the top left; the crosshair by default): what a passing thing does, without a screenshot. */
+      motionProbe: (x?: number, y?: number) => {
+        const fx = this.postfx;
+        if (!fx) return { off: 'the effects are off; turn Effects on in the menu' };
+        const pass = fx.pass<MotionBlurPass>('motionBlur');
+        if (!pass || typeof pass.readField !== 'function') return { off: 'this chain has no motion blur with a radius field' };
+        this.drawFrame();
+        const row = fx.describe().passes.find((p) => p.id === 'motionBlur');
+        if (!row?.drewLastFrame) return { off: row?.why ?? 'the motion blur did not draw' };
+        const size = this.renderer.getDrawingBufferSize(new THREE.Vector2());
+        const read = pass.readField(this.renderer, x ?? size.x / 2, y ?? size.y / 2);
+        if (!read) return { off: 'the read failed' };
+        return { ...read, cut: [pass.lastCut.x, pass.lastCut.y] };
+      },
+      /** Retune the motion blur for this session: `{ nearCut: [8, 25], radiusOfHeight, samples, limits: { maxDraws } }`. Returns the values in force; nothing is saved. */
+      motionTune: (changes?: { nearCut?: [number, number]; radiusOfHeight?: number; samples?: number; limits?: Partial<typeof MOVER_LIMITS> }) => {
+        if (changes?.nearCut) {
+          const [a, b] = changes.nearCut;
+          if (!(Number.isFinite(a) && Number.isFinite(b) && a >= 0 && a < b)) return `nearCut must be two distances in metres, the first below the second (got ${JSON.stringify(changes.nearCut)})`;
+          MOTION_TUNING.nearCut = [a, b];
+        }
+        if (changes?.radiusOfHeight !== undefined && Number.isFinite(changes.radiusOfHeight) && changes.radiusOfHeight > 0) {
+          MOTION_TUNING.radiusOfHeight = changes.radiusOfHeight;
+          this.postfx?.pass<MotionBlurPass>('motionBlur')?.resizeTiles?.();
+        }
+        if (changes?.samples !== undefined && Number.isFinite(changes.samples)) MOTION_TUNING.samples = Math.min(32, Math.max(4, Math.round(changes.samples)));
+        if (changes?.limits) {
+          const L = MOVER_LIMITS as Record<string, number>;
+          for (const [k, v] of Object.entries(changes.limits)) if (k in L && typeof v === 'number' && Number.isFinite(v)) L[k] = v;
+        }
+        return { nearCut: [...MOTION_TUNING.nearCut], radiusOfHeight: MOTION_TUNING.radiusOfHeight, samples: MOTION_TUNING.samples, shutter: MOTION_TUNING.shutter, tileSize: this.postfx?.pass<MotionBlurPass>('motionBlur')?.tileSize ?? null, limits: { ...MOVER_LIMITS } };
+      },
       /** Every pass of the last frame: what it was and what it drew. */
       passLog: () => {
         const log = this.portals.passLog;
@@ -1502,6 +1544,10 @@ class App {
       this.world.garage ??= await Garage.load(import.meta.env.BASE_URL);
       return this.world.garage;
     });
+    // A peer dressed, or their look changed: the motion blur's shaders for their outfit, before it is drawn.
+    this.remotes.onDressed = (root) => void this.postfx?.product<VelocityProduct>('velocity')?.prepareRoots([root]);
+    // A new mobile prototype: the motion blur's shaders for its morph counts, after the world's own preparation.
+    MobileAssets.for(import.meta.env.BASE_URL).alsoPrepare = (root) => this.postfx?.product<VelocityProduct>('velocity')?.prepareRoots([root]) ?? Promise.resolve();
     this.net.onJoin = (peer) => this.remotes.add(peer.id, peer.hello);
     this.net.onHello = (peer) => this.remotes.hello(peer.id, peer.hello);
     this.net.onLeave = (id) => this.remotes.remove(id);
@@ -2664,6 +2710,8 @@ class App {
       f.cameraUnderwater = this.world.cameraUnderwater(cam.position);
       // The room this frame is drawn from inside (RoomAir ran above, before the scene): the light shafts' input.
       f.room = this.roomAir.frame;
+      // The far side of what the camera follows: nothing nearer smears with the camera.
+      f.followFar = this.followFar(cam);
       // The weather the effects fade by (the god rays and the flare in overcast), while it is on.
       f.weather = wfx;
       // The lit blades as drawn this frame (drawBlades and the fighters' step have run), and how
@@ -2684,6 +2732,67 @@ class App {
     this.renderer.info.autoReset = auto;
   }
 
+  /**
+   * Everything that moves on its own, for the motion blur, once a frame: the player and what they
+   * ride, fly or stand aboard (followed by the camera), other vehicles, the creatures, the fighters,
+   * the catalogue's mobiles and the other players. A field, so it exists before the chain is built;
+   * it reads the world only when called. Anything that moves and is not listed blurs with the camera only.
+   */
+  private readonly collectMovers = (out: FxMoverList): void => {
+    const p = this.player;
+    out.add(p.group, true, 'player');
+    const carrier = p.mounted ?? p.piloting ?? p.aboard?.vehicle ?? null;
+    // Its rooms are its children, so standing aboard is riding it.
+    if (carrier) out.add(carrier.group, true, 'ridden');
+    const w = this.world;
+    for (const v of w.vehicles) {
+      if (v === carrier) continue;
+      // A separate room model is always visible, but from outside it only shows through the hull, where it fails the depth test.
+      const rooms = v.interior && v.interior.group !== v.group ? v.interior.group : null;
+      out.add(v.group, false, 'vehicle', null, rooms);
+    }
+    if (w.creatures) for (const c of w.creatures.creatures) out.add(c.group, false, 'creature');
+    if (w.npcs) for (const n of w.npcs.npcs) out.add(n.group, false, 'npc');
+    if (w.mobiles) for (const m of w.mobiles.live) out.add(m.group, false, 'creature');
+    this.remotes.collectMovers(out);
+  };
+
+  /** The follow sphere of the vehicle followed now, and what it was measured from: dropped when nothing is followed. */
+  private followRoot: THREE.Object3D | null = null;
+  private readonly followSphere: LocalSphere = { centre: new THREE.Vector3(), radius: 0 };
+  private followChildren = -1;
+  private followRooms: THREE.Object3D | null = null;
+  private followAge = 0;
+
+  /** The view depth of the far side of what the camera follows: the figure, and what it rides, flies or stands aboard. Nothing nearer smears with the camera. */
+  private followFar(cam: THREE.PerspectiveCamera): number {
+    const p = this.player;
+    p.group.updateWorldMatrix(true, false);
+    let far = followDepth(cam.matrixWorldInverse, p.group.matrixWorld, FIGURE_SPHERE);
+    const v = p.mounted ?? p.piloting ?? p.aboard?.vehicle ?? null;
+    // Hidden in a cockpit with no frame: only the figure counts.
+    if (!v) {
+      // Nothing kept alive for a vehicle the player has left, which may be removed.
+      this.followRoot = null;
+      this.followRooms = null;
+    }
+    if (v && v.group.visible) {
+      // With a tenth and a metre spare for wings that open past the box; measured again when the model
+      // changes under it (rooms or attachments arriving after the first mount), and every 120 frames.
+      const rooms = v.interior?.group ?? null;
+      if (this.followRoot !== v.group || this.followChildren !== v.group.children.length || this.followRooms !== rooms || ++this.followAge >= 120) {
+        this.followRoot = v.group;
+        this.followChildren = v.group.children.length;
+        this.followRooms = rooms;
+        this.followAge = 0;
+        measureLocalSphere(v.group, this.followSphere, 1.1, 1);
+      }
+      v.group.updateWorldMatrix(true, false);
+      far = Math.max(far, followDepth(cam.matrixWorldInverse, v.group.matrixWorld, this.followSphere));
+    }
+    return far;
+  }
+
   /** A new chain with every effect registered on it, ready to be warmed. */
   private makePostFX(): PostFX {
     const fx = new PostFX(this.renderer, this.settings);
@@ -2695,7 +2804,7 @@ class App {
       if (ridden) out.push(ridden.group);
       return out;
     };
-    installEffects(fx, { water: this.world.waterBodies, heat: this.heat });
+    installEffects(fx, { water: this.world.waterBodies, heat: this.heat, collectMovers: this.collectMovers });
     return fx;
   }
 

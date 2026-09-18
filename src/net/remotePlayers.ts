@@ -7,6 +7,8 @@ import { isDanceClip, isFlourishClip, loopsEmote } from '../core/emotes';
 import type { Hello, PeerState, PeerVehicle } from './net';
 import type { Garage } from '../vehicles/garage';
 import { applyLook } from '../player/look';
+import type { FxMoverList } from '../core/fx/velocity';
+import { RELAY, stepRelayVelocity } from '../core/fx/velocityMath.ts';
 
 /** The vehicle a peer is on, as a picture: which, where it is heading to, and how it is turned. */
 interface RemoteVehicle {
@@ -15,6 +17,10 @@ interface RemoteVehicle {
   target: THREE.Vector3;
   targetQ: THREE.Quaternion;
   pose: string | null;
+  /** Its world velocity from the relay's messages (m/s): its glide between them is not its speed. */
+  vel: THREE.Vector3;
+  /** performance.now() of its last message; 0 before the first. */
+  heardAt: number;
 }
 
 interface Remote {
@@ -37,6 +43,10 @@ interface Remote {
   vehicle: RemoteVehicle | null;
   /** The look last put on the rig, so a repeated hello does not dress it again. */
   lookApplied: string | null;
+  /** Its world velocity from the relay's messages (m/s), for the motion blur: the glide pulses ten times a second. */
+  vel: THREE.Vector3;
+  /** performance.now() of its last state message. */
+  heardAt: number;
 }
 
 const STATES: Set<string> = new Set(['idle', 'walk', 'run', 'air', 'seated', 'swim', 'float', 'crouch', 'crouchWalk', 'crouchWalkBack', 'stance', 'strafeLeft', 'strafeRight', 'runBack', 'walkBack', 'runSaber', 'walkSaber', 'gunIdle', 'gunWalk', 'gunRun', 'gunReadyIdle', 'gunReadyWalk', 'gunReadyRun', 'gunAimIdle', 'gunAimWalk', 'gunAimRun', 'kneel', 'prone', 'proneMove']);
@@ -49,6 +59,9 @@ export class RemotePlayers {
 
   /** The garage, for the vehicles the peers ride (loaded the first time one is seen). */
   private garage: Promise<Garage> | null = null;
+
+  /** Called with a peer's rig once it is dressed, and again when their look changes: the motion blur prepares its shaders for it. */
+  onDressed: ((root: THREE.Object3D) => void) | null = null;
 
   constructor(
     private readonly scene: THREE.Scene,
@@ -84,7 +97,7 @@ export class RemotePlayers {
     group.add(label);
     this.scene.add(group);
     markActor(group);
-    const remote: Remote = { id, hello, group, rig: null, label, target: new THREE.Vector3(0, -1000, 0), heading: 0, targetQ: null, state: 'idle', speed: 0, saber: false, silent: 0, dance: null, vehicle: null, lookApplied: null };
+    const remote: Remote = { id, hello, group, rig: null, label, target: new THREE.Vector3(0, -1000, 0), heading: 0, targetQ: null, state: 'idle', speed: 0, saber: false, silent: 0, dance: null, vehicle: null, lookApplied: null, vel: new THREE.Vector3(), heardAt: 0 };
     this.remotes.set(id, remote);
     void this.dress(remote);
   }
@@ -101,6 +114,7 @@ export class RemotePlayers {
       remote.rig = rig;
       remote.rig.setState('idle');
       await this.applyLook(remote);
+      if (remote.rig === rig) this.onDressed?.(rig.root);
     } catch (err) {
       console.warn(`remote player ${remote.hello.name}: no rig for ${species}`, err);
     }
@@ -126,7 +140,10 @@ export class RemotePlayers {
     if (!r) return;
     const speciesChanged = r.hello.species !== hello.species;
     r.hello = hello;
-    if (!speciesChanged) void this.applyLook(r);
+    if (!speciesChanged)
+      void this.applyLook(r).then(() => {
+        if (r.rig) this.onDressed?.(r.rig.root);
+      });
     r.group.visible = this.sameWorld(hello);
     (r.label.material as THREE.SpriteMaterial).map?.dispose();
     r.group.remove(r.label);
@@ -144,6 +161,10 @@ export class RemotePlayers {
     const r = this.remotes.get(id);
     if (!r) return;
     const first = r.target.y < -900;
+    // Its speed from the messages themselves, smoothed: the glide below is a sawtooth around it.
+    const now = performance.now();
+    if (!first) stepRelayVelocity(r.vel, s.p[0] - r.target.x, s.p[1] - r.target.y, s.p[2] - r.target.z, (now - r.heardAt) / 1000);
+    r.heardAt = now;
     r.target.set(s.p[0], s.p[1], s.p[2]);
     if (first) r.group.position.copy(r.target);
     r.heading = s.h;
@@ -163,11 +184,14 @@ export class RemotePlayers {
     }
     if (!r.vehicle || r.vehicle.id !== veh.id) {
       this.dropVehicle(r);
-      const rv: RemoteVehicle = { id: veh.id, obj: null, target: new THREE.Vector3(veh.p[0], veh.p[1], veh.p[2]), targetQ: new THREE.Quaternion(veh.q[0], veh.q[1], veh.q[2], veh.q[3]), pose: veh.pose ?? null };
+      const rv: RemoteVehicle = { id: veh.id, obj: null, target: new THREE.Vector3(veh.p[0], veh.p[1], veh.p[2]), targetQ: new THREE.Quaternion(veh.q[0], veh.q[1], veh.q[2], veh.q[3]), pose: veh.pose ?? null, vel: new THREE.Vector3(), heardAt: 0 };
       r.vehicle = rv;
       void this.bringVehicle(r, rv);
     }
     const rv = r.vehicle;
+    const now = performance.now();
+    if (rv.heardAt > 0) stepRelayVelocity(rv.vel, veh.p[0] - rv.target.x, veh.p[1] - rv.target.y, veh.p[2] - rv.target.z, (now - rv.heardAt) / 1000);
+    rv.heardAt = now;
     rv.target.set(veh.p[0], veh.p[1], veh.p[2]);
     rv.targetQ.set(veh.q[0], veh.q[1], veh.q[2], veh.q[3]).normalize();
     rv.pose = veh.pose ?? null;
@@ -232,6 +256,12 @@ export class RemotePlayers {
       if (r.vehicle?.obj) r.vehicle.obj.visible = r.group.visible;
       if (!r.group.visible) continue;
       r.silent += dt;
+      // Gone quiet: the speed the messages gave fades rather than holding the blur on a still figure.
+      if (r.silent > RELAY.silentSeconds) {
+        const fade = Math.exp(-dt / 0.1);
+        r.vel.multiplyScalar(fade);
+        r.vehicle?.vel.multiplyScalar(fade);
+      }
       // Glide to the last place heard, a tenth of a second's worth at a time, so the figure moves
       // smoothly between the relay's few updates a second.
       const k = 1 - Math.exp(-dt / 0.1);
@@ -264,6 +294,16 @@ export class RemotePlayers {
         rig.setState(rig.hasState(state) ? state : 'idle', r.speed);
         rig.update(dt);
       }
+    }
+  }
+
+  /** The peers and what they ride, for the motion blur, with the relay's velocity: their glide between messages is not their speed. */
+  collectMovers(out: FxMoverList): void {
+    for (const r of this.remotes.values()) {
+      if (!r.group.visible) continue;
+      out.add(r.group, false, 'remote', r.vel);
+      // Added to the scene root, not under the figure.
+      if (r.vehicle?.obj) out.add(r.vehicle.obj, false, 'remoteVehicle', r.vehicle.vel);
     }
   }
 

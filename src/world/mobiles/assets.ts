@@ -141,6 +141,8 @@ export class MobileAssets {
   prepare: ((root: THREE.Object3D) => Promise<void>) | null = null;
   /** Set by the world: take disposed materials out of the portal set and the cascades' map. */
   forget: ((materials: readonly THREE.Material[]) => void) | null = null;
+  /** Set by the game once: what else must see a new prototype before it is shown, after `prepare` (the motion blur's shaders for its morph counts). */
+  alsoPrepare: ((root: THREE.Object3D) => Promise<void>) | null = null;
 
   private readonly models = new Map<string, ModelAsset>();
   private readonly packs = new Map<string, PackAsset>();
@@ -325,8 +327,9 @@ export class MobileAssets {
 
   private prepareRoot(root: THREE.Object3D): Promise<void> {
     const prepare = this.prepare;
-    if (!prepare) return Promise.resolve();
-    return prepare(root).catch((err) => console.warn('mobiles: preparing a model failed', err));
+    const also = this.alsoPrepare;
+    const first = prepare ? prepare(root).catch((err) => console.warn('mobiles: preparing a model failed', err)) : Promise.resolve();
+    return also ? first.then(() => also(root)).catch((err) => console.warn('mobiles: the effects could not prepare a model', err)) : first;
   }
 
   /** A pack's JSON alone (roles, gaits, clip list), fetched once: what `mobileRoles` reads without loading the clips. */

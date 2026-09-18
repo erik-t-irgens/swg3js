@@ -27,7 +27,7 @@
 //   R12. Nothing is multisampled: the renderer resolves a multisampled target at the end of every
 //        render call, and the portal renderer makes a dozen a frame.
 import * as THREE from 'three';
-import { FX_PASSES, FX_PRODUCTS, fxPassDef, fxPassIndex, fxProductDef, type FxPassDef, type FxPassId, type FxProductDef, type FxProductId, type FxSettings } from './fxRegistry.ts';
+import { FX_PASSES, FX_PRODUCTS, FX_TYPICAL_CPU_MS, fxPassDef, fxPassIndex, fxProductDef, type FxPassDef, type FxPassId, type FxProductDef, type FxProductId, type FxSettings } from './fxRegistry.ts';
 import { createContext, updateContext, type FxFrameContext, type FxFrameInput } from './fx/context';
 import type { FxPass, FxProduct, FxWarmItem } from './fx/pass';
 import { createFxQuad, FX_CAMERA } from './fx/pass';
@@ -69,6 +69,8 @@ export interface FxProductReport {
   targets: number;
   /** False while a product that gives its storage back when unused holds none. */
   allocated: boolean;
+  /** The product's own one-line account of its last frame. */
+  detail?: string;
 }
 
 export interface FxDescription {
@@ -337,7 +339,7 @@ export class PostFX {
       this.timer.begin(p.timerLabel);
       p.render(ctx);
       this.timer.end(p.timerLabel);
-      ctx.products[p.id] = p.texture;
+      ctx.products[p.id] = p.empty ? null : p.texture;
       this.computed.add(p.id);
       if (check) recordError(r, this.lastCheck!, p.timerLabel);
     }
@@ -362,6 +364,7 @@ export class PostFX {
     }
     r.setRenderTarget(null);
     ctx.prevViewProj.copy(ctx.viewProj);
+    ctx.prevView.copy(ctx.view);
     ctx.cameraCut = false;
     ctx.frame++;
     if (check) this.checkErrors = false;
@@ -379,6 +382,7 @@ export class PostFX {
   /** The camera jumped (a teleport, a new world, the effects switched in): the next frame has no history. */
   reset(): void {
     this.ctx.cameraCut = true;
+    for (const p of this.productList) p.reset?.();
   }
 
   /**
@@ -497,6 +501,7 @@ export class PostFX {
         format: def.format,
         targets: def.targets ?? 1,
         allocated: p.allocated ?? true,
+        ...(p.summary ? { detail: p.summary() } : {}),
       };
     });
     return {
@@ -514,7 +519,17 @@ export class PostFX {
     const by: Record<string, number> = {};
     for (const def of FX_PASSES) by[`pass:${def.id}`] = def.budgetMs;
     for (const def of FX_PRODUCTS) by[`product:${def.id}`] = def.budgetMs;
-    return this.timer.report(by);
+    const report = this.timer.report(by);
+    const cpu = (label: string, budget: number | undefined) => {
+      const row = report.rows[label];
+      if (!row || budget === undefined) return;
+      row.cpuBudgetMs = budget;
+      row.cpuOver = row.cpuMs > budget;
+    };
+    for (const def of FX_PASSES) cpu(`pass:${def.id}`, def.cpuBudgetMs);
+    for (const def of FX_PRODUCTS) cpu(`product:${def.id}`, def.cpuBudgetMs);
+    report.postCpuOver = report.postCpuMs > FX_TYPICAL_CPU_MS;
+    return report;
   }
 
   dispose(): void {

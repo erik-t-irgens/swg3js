@@ -18,9 +18,6 @@ import { NO_PRODUCTS, ShaderFxPass, ThreePassAdapter, type FxDebugTexture, type 
 import { FX_FULLSCREEN_VERTEX, FX_LINEARIZE } from './glsl';
 import { overcastFade } from './flareMath';
 
-/** The blur is scaled as if every frame lasted this long, so a slow frame is not a longer smear. */
-const SHUTTER = 1 / 60;
-
 /**
  * A pixel that is not a number (a material that divided by zero: a degenerate tangent, a zero
  * roughness against a reflection) is black on the screen, and the bloom's blur spreads it into a
@@ -108,68 +105,6 @@ const GOD_RAYS = {
   `,
 };
 
-/**
- * A camera motion blur from the depth buffer: each pixel's point is found in the world from its
- * depth, projected with the last frame's camera to see where it was on the screen, and the colour
- * is averaged along that movement. Nothing is stored per object, so what moves with the camera
- * (the ship flown) stays sharp, and what the camera moves past smears in proportion.
- */
-const MOTION_BLUR = {
-  uniforms: {
-    tDiffuse: { value: null as THREE.Texture | null },
-    tDepth: { value: null as THREE.Texture | null },
-    uInvViewProj: { value: new THREE.Matrix4() },
-    uPrevViewProj: { value: new THREE.Matrix4() },
-    /** How much of the movement is smeared (0 none, 1 the whole frame's). */
-    uStrength: { value: 0.5 },
-    /** The longest smear, as a share of the screen. */
-    uMaxLength: { value: 0.04 },
-    /** The camera's near and far planes, to turn depth into distance. */
-    uNearFar: { value: new THREE.Vector2(0.05, 9000) },
-    /** Nothing nearer than the first distance smears, everything past the second does: what moves with the camera (the ship flown, a cockpit) sits close and stays sharp. */
-    uNearCut: { value: new THREE.Vector2(25, 60) },
-  },
-  vertexShader: FX_FULLSCREEN_VERTEX,
-  fragmentShader: /* glsl */ `
-    uniform sampler2D tDiffuse;
-    uniform sampler2D tDepth;
-    uniform mat4 uInvViewProj;
-    uniform mat4 uPrevViewProj;
-    uniform float uStrength;
-    uniform float uMaxLength;
-    uniform vec2 uNearFar;
-    uniform vec2 uNearCut;
-    varying vec2 vUv;
-    ${FX_LINEARIZE}
-    void main() {
-      float depth = texture2D(tDepth, vUv).x;
-      float ndcZ = depth * 2.0 - 1.0;
-      vec4 clip = vec4(vUv * 2.0 - 1.0, ndcZ, 1.0);
-      vec4 world = uInvViewProj * clip;
-      world /= world.w;
-      vec4 prev = uPrevViewProj * world;
-      vec2 prevUv = prev.xy / prev.w * 0.5 + 0.5;
-      // How far away the point is: what is close moves with the camera (the hull, the cockpit) and is left sharp.
-      float dist = fxViewZ(depth, uNearFar.x, uNearFar.y);
-      vec2 v = (vUv - prevUv) * uStrength * smoothstep(uNearCut.x, uNearCut.y, dist);
-      float len = length(v);
-      if (len > uMaxLength) v *= uMaxLength / len;
-      // Nothing to do for a still pixel: the sharp picture as it is.
-      if (len < 0.0005) {
-        gl_FragColor = texture2D(tDiffuse, vUv);
-        return;
-      }
-      vec4 c = vec4(0.0);
-      const int N = 12;
-      for (int i = 0; i < N; i++) {
-        float t = float(i) / float(N - 1) - 0.5;
-        c += texture2D(tDiffuse, vUv + v * t);
-      }
-      gl_FragColor = c / float(N);
-    }
-  `,
-};
-
 export class SanitizePass extends ShaderFxPass {
   readonly id: FxPassId = 'sanitize';
 
@@ -211,38 +146,6 @@ export class GodRaysPass extends ShaderFxPass {
     u.uStrength.value = ctx.settings.godRayStrength;
     u.uAspect.value = ctx.width / Math.max(1, ctx.height);
     u.tDepth.value = ctx.depth;
-    (u.uNearFar.value as THREE.Vector2).set(ctx.near, ctx.far);
-  }
-}
-
-export class MotionBlurPass extends ShaderFxPass {
-  readonly id: FxPassId = 'motionBlur';
-
-  constructor() {
-    super(MOTION_BLUR);
-  }
-
-  enabled(ctx: FxFrameContext): boolean {
-    return ctx.settings.motionBlurStrength > 0 && !ctx.cameraCut;
-  }
-
-  reason(ctx: FxFrameContext): string | null {
-    if (ctx.settings.motionBlurStrength <= 0) return 'motion blur strength is zero';
-    if (ctx.cameraCut) return 'the camera jumped, so there is no history';
-    return null;
-  }
-
-  needs(_ctx: FxFrameContext): readonly FxProductId[] {
-    // Only the camera's own movement for now; the velocity product joins it with moving things.
-    return NO_PRODUCTS;
-  }
-
-  prepare(ctx: FxFrameContext): void {
-    const u = this.material.uniforms;
-    u.tDepth.value = ctx.depth;
-    (u.uInvViewProj.value as THREE.Matrix4).copy(ctx.invViewProj);
-    (u.uPrevViewProj.value as THREE.Matrix4).copy(ctx.prevViewProj);
-    u.uStrength.value = ctx.settings.motionBlurStrength * THREE.MathUtils.clamp(SHUTTER / Math.max(ctx.dt, 1e-3), 0.25, 2);
     (u.uNearFar.value as THREE.Vector2).set(ctx.near, ctx.far);
   }
 }
@@ -363,7 +266,7 @@ const DEBUG_VIEW = {
       } else if (uMode == 4) {
         c = mix(texture2D(tDiffuse, vUv).rgb, s.rgb, clamp(s.a, 0.0, 1.0));
       } else if (uMode == 5) {
-        c = vec3(0.5 + s.r * uScale, 0.5 + s.g * uScale, 0.5);
+        c = s.b > 0.5 ? vec3(0.5 + s.r * uScale, 0.5 + s.g * uScale, s.a) : vec3(0.0);
       } else if (uMode == 7) {
         // The water mask: its octahedral normal as colour wherever water shows, over the picture.
         vec3 raw = texture2D(tScene, vUv).rgb;
@@ -372,6 +275,13 @@ const DEBUG_VIEW = {
       } else if (uMode == 8) {
         // The heat: intensity in red (2 is full), the intensity-weighted noise decoded into green and blue.
         c = s.r > 0.001 ? vec3(min(s.r, 2.0) / 2.0, s.g / max(s.r, 1e-4), s.b / max(s.r, 1e-4)) : vec3(0.0);
+      } else if (uMode == 9) {
+        // A radius field in pixels (rg): hue by direction, brightness by length over 32 px, grey under half a pixel;
+        // a (a mover) lightens, unless the scale is 0, which marks a field with no alpha (an RG target reads 1 there).
+        float l = length(s.rg);
+        vec3 hue = clamp(abs(fract(atan(s.g, s.r) / 6.2831853 + vec3(0.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0) - 1.0, 0.0, 1.0);
+        c = l < 0.5 ? vec3(0.25) : hue * clamp(l / 32.0, 0.15, 1.0);
+        c = mix(c, vec3(1.0), 0.2 * step(0.5, s.a) * step(1e-6, uScale));
       } else {
         c = vec3(greyDistance(fxViewZ(s.x, uNearFar.x, uNearFar.y)));
       }
@@ -455,9 +365,11 @@ export class DebugViewPass extends ShaderFxPass {
       u.tShown.value = ctx.sceneColor;
       return;
     }
-    u.uMode.value = ext.channels === 'rgb' ? 2 : 3;
+    u.uMode.value = ext.channels === 'motion' ? 9 : ext.channels === 'rgb' ? 2 : 3;
     u.uChannel.value = CHANNEL_INDEX[ext.channels] ?? 0;
     u.uScale.value = ext.scale ?? 1;
     u.tShown.value = ext.texture;
   }
 }
+
+export { MotionBlurPass } from './motionBlur';

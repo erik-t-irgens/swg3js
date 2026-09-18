@@ -64,6 +64,8 @@ export interface FxFrameInput {
   lights: FxLights;
   /** RoomAir.frame: the room this frame is drawn from inside, or null. */
   room: RoomAirFrame | null;
+  /** The view depth (m) of the far side of what the camera follows (App.followFar), 0 when nothing: nothing nearer smears with the camera. */
+  followFar: number;
   /** World.weather.fx while the weather is on, else null. */
   weather: FxWeather | null;
 }
@@ -100,6 +102,12 @@ export interface FxFrameContext {
   readonly invViewProj: THREE.Matrix4;
   /** Last frame's viewProj; the same as this frame's after a cut. */
   readonly prevViewProj: THREE.Matrix4;
+  /** Last frame's view; this frame's after a cut. */
+  readonly prevView: THREE.Matrix4;
+  /** This frame's projection times last frame's view: a change of field of view (aiming) is not motion. */
+  readonly prevProjView: THREE.Matrix4;
+  /** The view depth (m) of the far side of what the camera follows; 0 when nothing. */
+  followFar: number;
   readonly cameraPos: THREE.Vector3;
   /** (tan(fov/2) x aspect, tan(fov/2)): a view position from a screen place and a distance. */
   readonly tanHalfFov: THREE.Vector2;
@@ -175,6 +183,9 @@ export function createContext(renderer: THREE.WebGLRenderer, settings: FxSetting
     viewProj: new THREE.Matrix4(),
     invViewProj: new THREE.Matrix4(),
     prevViewProj: new THREE.Matrix4(),
+    prevView: new THREE.Matrix4(),
+    prevProjView: new THREE.Matrix4(),
+    followFar: 0,
     cameraPos: new THREE.Vector3(),
     tanHalfFov: new THREE.Vector2(1, 1),
     cameraCut: true,
@@ -233,6 +244,9 @@ export function updateContext(ctx: FxFrameContext, input: FxFrameInput, size: TH
   const e = ctx.proj.elements;
   ctx.tanHalfFov.set(1 / e[0], 1 / e[5]);
   if (ctx.frame === 0 || ctx.cameraCut) ctx.prevViewProj.copy(ctx.viewProj);
+  if (ctx.frame === 0 || ctx.cameraCut) ctx.prevView.copy(ctx.view);
+  ctx.prevProjView.multiplyMatrices(ctx.proj, ctx.prevView);
+  ctx.followFar = input.followFar;
 
   const sun = input.sun;
   if (!sun) ctx.sun = null;

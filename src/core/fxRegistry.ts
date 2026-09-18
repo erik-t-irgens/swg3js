@@ -90,6 +90,8 @@ export interface FxPassDef {
   needs: readonly FxProductId[];
   /** Ceiling in GPU milliseconds at 2560x1440, render scale 1, on the frames it draws. */
   budgetMs: number;
+  /** Ceiling in main-thread milliseconds on the frames it draws, where it has one of its own; `fxTiming` flags `cpuOver` only where it is declared. */
+  cpuBudgetMs?: number;
   /** Counted in the typical outdoor daytime frame. */
   typical: boolean;
   /** Can be the last pass on, so it may draw to the canvas: warmed for both. */
@@ -110,6 +112,8 @@ export interface FxProductDef {
   /** Colour targets it writes at once, each of `format`; 1 when absent. */
   targets?: number;
   budgetMs: number;
+  /** Ceiling in main-thread milliseconds on the frames it is computed, where it has one of its own. */
+  cpuBudgetMs?: number;
   typical: boolean;
   owner: 'spine' | FxPassId;
   live: boolean;
@@ -204,8 +208,8 @@ export const FX_KNOBS: readonly FxKnobDef[] = [
   { key: 'depthOfField', pass: 'depthOfField', label: 'Depth of field', kind: 'toggle', requires: ['effects'], hint: 'Aiming down the sights, what is not at the range you are aiming at softens.' },
   { key: 'depthOfFieldStrength', pass: 'depthOfField', label: 'Depth of field strength', kind: 'range', min: 0, max: 2, step: 0.05, format: two, requires: ['effects', 'depthOfField'], hint: 'How wide the aperture is: 0.5 a touch, 1 a camera, 2 a long lens.' },
   { key: 'motionBlur', pass: 'motionBlur', label: 'Motion blur', kind: 'toggle', requires: ['effects'], hint: 'What the camera moves past smears along its movement: the ground under a ship at speed, a wall in a turn; what moves with you stays sharp.' },
-  { key: 'motionBlurStrength', pass: 'motionBlur', label: 'Motion blur strength', kind: 'range', min: 0.1, max: 1, step: 0.05, format: two, requires: ['effects', 'motionBlur'], hint: 'How much of a frame’s movement is smeared: 0.2 a hint, 0.5 a film’s, 1 the whole.' },
-  { key: 'motionBlurObjects', pass: 'motionBlur', product: 'velocity', label: 'Moving things smear', kind: 'toggle', requires: ['effects', 'motionBlur'], hint: 'A speeder crossing a still camera smears too, not only what the camera sweeps past.' },
+  { key: 'motionBlurStrength', pass: 'motionBlur', label: 'Motion blur strength', kind: 'range', min: 0.1, max: 1, step: 0.05, format: two, requires: ['effects', 'motionBlur'], hint: 'How much of a frame’s movement is smeared, for the camera and for moving things alike: 0.2 a hint, 0.35 a film’s, 1 the whole.' },
+  { key: 'motionBlurObjects', pass: 'motionBlur', product: 'velocity', label: 'Motion blur on moving things', kind: 'toggle', requires: ['effects', 'motionBlur'], hint: 'Ships, speeders, creatures and people smear by their own movement, not only the camera’s. Off: only the camera blurs the picture. What you ride, fly or stand in stays sharp either way.' },
   { key: 'bloom', pass: 'bloom', label: 'Bloom', kind: 'toggle', requires: ['effects'], hint: 'The bright parts spill over: engine glows, bolts, the suns.' },
   { key: 'bloomStrength', pass: 'bloom', label: 'Bloom strength', kind: 'range', min: 0.05, max: 1.5, step: 0.05, format: two, requires: ['effects', 'bloom'], hint: '0.1 a touch, 0.5 a glow, 1 a haze.' },
   { key: 'lensFlare', pass: 'lensFlare', label: 'Lens flare', kind: 'toggle', requires: ['effects'], hint: 'A glare and the lens’s reflections when you look towards the sun (in space, the brightest star). They fade as anything passes in front of it, and in cloud.' },
@@ -232,7 +236,7 @@ export const FX_PASSES: readonly FxPassDef[] = [
   { id: 'lightShafts', stage: 'scene', toggles: ['lightShafts'], required: false, needs: ['linearDepthHalf', 'normalsHalf'], budgetMs: 0.3, typical: false, canBeLast: false, live: true, why: 'Daylight scattered in the air of the room the camera is in, from its doorways, the sunlit patch where it lands, and the glow around the room\'s lamps. Evaluated per pixel along the view ray and stopped by the scene depth, which scene meshes cannot read. Atmosphere: after the surface passes (SSAO has darkened the corners the patch lands among), before god rays, depth of field, motion blur and bloom, so the beams defocus, smear and bloom with the room.' },
   { id: 'godRays', stage: 'scene', toggles: ['godRays'], required: false, needs: ['linearDepthHalf'], budgetMs: 0.25, typical: true, canBeLast: false, live: true, why: 'Scattered sunlight. Before depth of field, since rays are far light that should soften with the far background they overlay, and before the blur and the bloom so they smear and spill like the sun.' },
   { id: 'depthOfField', stage: 'lens', toggles: ['depthOfField'], required: false, needs: ['linearDepthHalf'], budgetMs: 0.35, typical: false, canBeLast: false, live: false, why: 'The aperture needs colour and depth still lined up, so it comes before the blur, which moves colour off its depth; before bloom so a softened highlight blooms as a disc rather than a point.' },
-  { id: 'motionBlur', stage: 'lens', toggles: ['motionBlur'], required: false, needs: ['velocity'], budgetMs: 0.25, typical: true, canBeLast: false, live: true, why: 'The shutter after the aperture, and before bloom: bloom first would smear the halo around a near engine glow by the depth of the ground behind it.' },
+  { id: 'motionBlur', stage: 'lens', toggles: ['motionBlur'], required: false, needs: ['velocity'], budgetMs: 0.25, cpuBudgetMs: 0.2, typical: true, canBeLast: false, live: true, why: 'The shutter after the aperture, and before bloom: bloom first would smear the halo around a near engine glow by the depth of the ground behind it.' },
   { id: 'bloom', stage: 'lens', toggles: ['bloom'], required: false, needs: [], budgetMs: 0.35, typical: true, canBeLast: false, live: true, why: 'Bright light scattering in the eye, so it needs the high range and must come before tone mapping, and after everything that adds or moves light so all of it spills. It composites in place.' },
   { id: 'lensFlare', stage: 'lens', toggles: ['lensFlare'], required: false, needs: [], budgetMs: 0.12, typical: true, canBeLast: false, live: true, why: 'Glare and ghosts are reflections inside the lens of the brightest sources. After bloom, so the flare is not thresholded and bloomed again and its ceiling sees the bloom it must not stack on; after the motion blur and depth of field, so it is neither smeared nor defocused; before grade and tone mapping, so it is graded and mapped with the picture.' },
   { id: 'colorGrade', stage: 'lens', toggles: ['colorGrade'], required: false, needs: [], budgetMs: 0.04, typical: true, canBeLast: false, live: true, why: 'Each planet’s white balance, tint, saturation and contrast in the linear high range, just before the tone curve, so the highlights roll off after grading rather than clipping.' },
@@ -257,7 +261,7 @@ export const FX_PRODUCTS: readonly FxProductDef[] = [
   { id: 'heat', kind: 'depth', needs: ['linearDepthHalf'], scale: 0.5, format: 'RGBA16F', budgetMs: 0.08, typical: false, owner: 'heatHaze', live: true },
   { id: 'debugMask', kind: 'geometry', needs: [], scale: 1, format: 'R8', budgetMs: 0.05, typical: false, owner: 'debugView', live: true },
   { id: 'waterMask', kind: 'geometry', needs: [], scale: 1, format: 'RGBA16F', targets: 3, budgetMs: 0.3, typical: false, owner: 'waterReflections', live: true },
-  { id: 'velocity', kind: 'geometry', needs: [], scale: 1, format: 'RG16F', budgetMs: 0.1, typical: true, owner: 'motionBlur', live: false },
+  { id: 'velocity', kind: 'geometry', needs: [], scale: 1, format: 'RGBA16F', budgetMs: 0.1, cpuBudgetMs: 0.12, typical: true, owner: 'motionBlur', live: true },
 ];
 
 /**
@@ -268,6 +272,13 @@ export const FX_PRODUCTS: readonly FxProductDef[] = [
  * milliseconds from the margin rather than from the total.
  */
 export const FX_TYPICAL_BUDGET_MS = 2.0;
+
+/**
+ * The effects' main-thread budget in a typical outdoor daytime frame: about 32 full-screen draws at
+ * 0.02-0.04 ms each and the velocity product's direct draws. `fxTiming` reports `postCpuOver` against
+ * it, and `npm run test:velocity` checks every declared `cpuBudgetMs` adds up to no more.
+ */
+export const FX_TYPICAL_CPU_MS = 0.9;
 
 /**
  * Camera layers an effect has claimed for itself, so no two claim the same one. 0 is the world,

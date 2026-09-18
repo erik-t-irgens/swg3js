@@ -87,6 +87,13 @@ export interface FxGeometryDrawer {
   drawObjects(ctx: FxFrameContext, objects: readonly THREE.Object3D[], override: THREE.Material | null, layersMask: number): void;
   /** Draw a scene the product owns: its own meshes, placed at their sources each frame, and no lights. */
   drawScene(ctx: FxFrameContext, scene: THREE.Scene): void;
+  /**
+   * Render the empty proxy scene with `run` as its onAfterRender, so `run` may call renderer.renderBufferDirect
+   * with a valid render state and no scene walk. Every mesh passed there must have been projected by the scene's
+   * passes on this frame and an earlier one (buffers uploaded, skeleton updated). `run` must not throw: an exception
+   * inside onAfterRender skips three's render-state pops.
+   */
+  drawDirect(ctx: FxFrameContext, run: (renderer: THREE.WebGLRenderer, scene: THREE.Scene, camera: THREE.Camera) => void): void;
 }
 
 /**
@@ -122,7 +129,24 @@ class ProxyDrawer implements FxGeometryDrawer {
   drawScene(ctx: FxFrameContext, scene: THREE.Scene): void {
     ctx.renderer.render(scene, ctx.camera);
   }
+
+  private readonly none: THREE.Object3D[] = [];
+
+  drawDirect(ctx: FxFrameContext, run: (renderer: THREE.WebGLRenderer, scene: THREE.Scene, camera: THREE.Camera) => void): void {
+    const kept = this.proxy.children;
+    this.proxy.children = this.none;
+    this.proxy.onAfterRender = run;
+    try {
+      ctx.renderer.render(this.proxy, ctx.camera);
+    } finally {
+      this.proxy.onAfterRender = NOOP;
+      this.proxy.children = kept;
+    }
+  }
 }
+
+/** Put back on the proxy after a direct draw; kept so the frame allocates nothing. */
+const NOOP = (): void => {};
 
 let drawer: ProxyDrawer | null = null;
 function sharedDrawer(): FxGeometryDrawer {
@@ -160,15 +184,19 @@ export abstract class GeometryProduct implements FxProduct {
   }
 
   render(ctx: FxFrameContext): void {
+    this.bindAndClear(ctx);
+    this.draw(ctx);
+  }
+
+  /** Bind the target and clear its colour only: the frame's depth and stencil are what makes this worth doing. */
+  protected bindAndClear(ctx: FxFrameContext): void {
     const r = ctx.renderer;
     r.setRenderTarget(this.target);
     r.getClearColor(savedColor);
     const savedAlpha = r.getClearAlpha();
     r.setClearColor(this.look.clear, this.look.clearAlpha);
-    // Colour only: the frame's depth and stencil are what makes this worth doing.
     r.clear(true, false, false);
     r.setClearColor(savedColor, savedAlpha);
-    this.draw(ctx);
   }
 
   protected abstract draw(ctx: FxFrameContext): void;

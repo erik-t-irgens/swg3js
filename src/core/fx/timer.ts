@@ -14,6 +14,8 @@ export interface FxTimingRow {
   calls: number;
   budgetMs?: number;
   over?: boolean;
+  cpuBudgetMs?: number;
+  cpuOver?: boolean;
 }
 
 export interface FxTimingReport {
@@ -23,6 +25,8 @@ export interface FxTimingReport {
   /** Everything but the scene, summed. */
   postGpuMs: number;
   postCpuMs: number;
+  /** The post chain's main-thread time is over FX_TYPICAL_CPU_MS. */
+  postCpuOver?: boolean;
 }
 
 interface Row {

@@ -50,7 +50,7 @@ export interface FxDebugTexture {
   name: string;
   texture: THREE.Texture | null;
   /** One channel shown as grey, or the three as colour. */
-  channels: 'r' | 'g' | 'b' | 'a' | 'rgb';
+  channels: 'r' | 'g' | 'b' | 'a' | 'rgb' | 'motion';
   /** Multiplied before it is shown, for values that do not sit in 0 to 1. */
   scale?: number;
 }
@@ -100,6 +100,12 @@ export interface FxProduct {
   idle?(ctx: FxFrameContext): void;
   /** Whether its targets hold storage on the card now; absent means always. */
   readonly allocated?: boolean;
+  /** Nothing was drawn this frame: the runner hands the passes null for it. */
+  readonly empty?: boolean;
+  /** Drop what it remembers across frames (a new world, a teleport): PostFX.reset calls it. */
+  reset?(): void;
+  /** One line of what it did last frame, for the chain's listing. */
+  summary?(): string;
 }
 
 /** A pass that is one full-screen draw of one shader. */
