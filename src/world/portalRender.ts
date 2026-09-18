@@ -254,53 +254,75 @@ export class PortalRenderer {
   }
 
   /**
+   * Walk the scene's matrices once a frame rather than once a pass. `renderer.render` begins by
+   * recomposing every node of the scene it is given, and a frame here is up to eight calls that
+   * take the whole scene (the shadows, the world, one interior per near building; three inside).
+   * Nothing moves between the passes of one frame, so after the first the scene's
+   * `matrixWorldAutoUpdate` is turned off, and put back when the frame is drawn. With a crowd out
+   * that was the largest thing it added. False draws the old way, for measuring the difference
+   * (`__debug.mobileTune({ passMatrices: 'every' })`).
+   */
+  matrixOnce = true;
+
+  /**
    * Draw the frame. `view` is the building the camera is in (null = outside); `buildings` are
    * the loaded portal buildings.
    */
   render(scene: THREE.Scene, camera: THREE.PerspectiveCamera, view: Building | null, buildings: Iterable<Building>): void {
     const r = this.renderer;
-    this.passes = 0;
-    this.passLog.length = 0;
-    projView.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
-    frustum.setFromProjectionMatrix(projView);
-    this.renderShadows(scene, view);
-    r.state.buffers.stencil.setClear(1);
-    r.clear(true, true, true);
-    this.setRef(1);
-
-    if (view) {
-      // Inside: the whole building fills the screen; the world only through its exits.
-      this.showInterior(view, true);
-      this.renderLayer(scene, camera, INTERIOR_LAYER);
-      this.showInterior(view, false);
-      const exits = this.exitPortals(view, camera);
-      if (!exits.length) return;
-      this.drawPortals(exits, camera, 1, true);
-      this.resetDepth(2, camera);
-      this.setRef(2);
-      this.renderLayer(scene, camera, 0);
-      return;
-    }
-
-    // Outside: the world, then each nearby building's interior through its doors.
-    this.renderLayer(scene, camera, 0);
-    const near: { b: Building; d: number }[] = [];
-    for (const b of buildings) {
-      const d = Math.hypot(b.x - camera.position.x, b.z - camera.position.z);
-      if (d < b.radius + PORTAL_RANGE) near.push({ b, d });
-    }
-    near.sort((a, c) => a.d - c.d);
-    for (const { b } of near.slice(0, MAX_BUILDINGS)) {
-      const doors = this.exitPortals(b, camera);
-      if (!doors.length) continue;
-      this.drawPortals(doors, camera, 1, true);
-      this.resetDepth(2, camera);
-      this.setRef(2);
-      this.showInterior(b, true);
-      this.renderLayer(scene, camera, INTERIOR_LAYER);
-      this.showInterior(b, false);
+    const auto = scene.matrixWorldAutoUpdate;
+    // Once a pass has taken the whole scene its matrices are fresh for the rest of the frame
+    // (turned off inline at each such pass, so no closure is made per frame).
+    try {
+      this.passes = 0;
+      this.passLog.length = 0;
+      projView.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+      frustum.setFromProjectionMatrix(projView);
+      this.renderShadows(scene, view);
+      // The shadow pass, when there is one, walked the scene.
+      if (this.passes > 0 && this.matrixOnce) scene.matrixWorldAutoUpdate = false;
+      r.state.buffers.stencil.setClear(1);
+      r.clear(true, true, true);
       this.setRef(1);
-      this.drawPortals(doors, camera, 1, false, true);
+
+      if (view) {
+        // Inside: the whole building fills the screen; the world only through its exits.
+        this.showInterior(view, true);
+        this.renderLayer(scene, camera, INTERIOR_LAYER);
+        if (this.matrixOnce) scene.matrixWorldAutoUpdate = false;
+        this.showInterior(view, false);
+        const exits = this.exitPortals(view, camera);
+        if (!exits.length) return;
+        this.drawPortals(exits, camera, 1, true);
+        this.resetDepth(2, camera);
+        this.setRef(2);
+        this.renderLayer(scene, camera, 0);
+        return;
+      }
+
+      // Outside: the world, then each nearby building's interior through its doors.
+      this.renderLayer(scene, camera, 0);
+      if (this.matrixOnce) scene.matrixWorldAutoUpdate = false;
+      const near: { b: Building; d: number }[] = [];
+      for (const b of buildings) {
+        const d = Math.hypot(b.x - camera.position.x, b.z - camera.position.z);
+        if (d < b.radius + PORTAL_RANGE) near.push({ b, d });
+      }
+      near.sort((a, c) => a.d - c.d);
+      for (const { b } of near.slice(0, MAX_BUILDINGS)) {
+        const doors = this.exitPortals(b, camera);
+        if (!doors.length) continue;
+        this.drawPortals(doors, camera, 1, true);
+        this.resetDepth(2, camera);
+        this.setRef(2);
+        this.showInterior(b, true);
+        this.renderLayer(scene, camera, INTERIOR_LAYER);
+        this.showInterior(b, false);
+        this.setRef(1);
+        this.drawPortals(doors, camera, 1, false, true);
+      }
+    } finally {
+      scene.matrixWorldAutoUpdate = auto;
     }
   }
 

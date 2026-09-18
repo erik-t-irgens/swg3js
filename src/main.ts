@@ -543,11 +543,15 @@ class App {
         return { ...RAGDOLL, hooks: { ...this.physics.hookStats }, bodies: [...this.world.creatures.creatures.map((c) => c.ragdoll?.status ?? null), ...this.world.npcs.npcs.map((n) => n.ragdoll?.status ?? null), this.player.ragdoll?.status ?? null].filter(Boolean) };
       },
       /** Kill the player (the death card and the ragdoll), every creature, or every fighter, to see them fall. */
-      kill: (what: 'player' | 'creatures' | 'fighters' = 'player') => {
+      kill: (what: 'player' | 'creatures' | 'fighters' | 'mobiles' | 'all' = 'player', filter?: string) => {
+        // `filter` is a substring of a mobile's entry id or name, a creature's name, or a fighter's species.
+        const f = filter?.toLowerCase();
+        const picks = (...names: string[]) => !f || names.some((n) => n.toLowerCase().includes(f));
         if (what === 'player') this.player.takeDamage(1e9);
-        else if (what === 'creatures') for (const c of this.world.creatures.creatures) c.damage(1e9);
-        else for (const f of this.world.npcs.npcs) f.damage(1e9);
-        return { player: this.player.hp, creatures: this.world.creatures.creatures.filter((c) => c.dead).length, fighters: this.world.npcs.npcs.filter((f) => f.dead).length };
+        if (what === 'creatures' || what === 'all') for (const c of this.world.creatures.creatures) if (picks(c.label)) c.damage(1e9);
+        if (what === 'fighters' || what === 'all') for (const n of this.world.npcs.npcs) if (picks(n.species, n.name)) n.damage(1e9);
+        if (what === 'mobiles' || what === 'all') for (const m of [...(this.world.mobiles?.live ?? [])]) if (picks(m.entry.id, m.entry.name)) m.damage(1e9);
+        return { player: this.player.hp, creatures: this.world.creatures.creatures.filter((c) => c.dead).length, fighters: this.world.npcs.npcs.filter((n) => n.dead).length, mobiles: (this.world.mobiles?.live ?? []).filter((m) => m.dead).length };
       },
       /** The buildings around the player and whether each can be walked into (E offers a way into the ones that cannot). */
       doorless: () => this.world.describeDoorless(this.player.pos),
@@ -1136,6 +1140,69 @@ class App {
         this.world.creatures.spawnAt(p.x + tmp.x * metres, p.z + tmp.z * metres);
         return list();
       },
+      /** Stand `n` of a catalogue entry `metres` ahead (an exact id or name, else the best find); waits for their models, so the answer says whether they are up. */
+      mobile: async (idOrFind: string, metres = 10, n = 1) => {
+        const mobiles = this.world.mobiles;
+        const cat = this.world.mobileCatalogue;
+        if (!mobiles) return 'no world loaded';
+        if (!cat) return 'the creature and NPC catalogue has not loaded yet (or is not converted: npm run swg -- mobiles @SWG assets-private --retail-only)';
+        if (this.player.aboard) return 'nothing can be stood aboard a ship’s rooms';
+        const exact = cat.byId(idOrFind) ?? cat.resolve(idOrFind);
+        const hits = exact ? [exact] : cat.search(idOrFind, { limit: 9 });
+        const e = hits[0];
+        if (!e) return `nothing in the catalogue matches "${idOrFind}"`;
+        this.cam.forward(tmp);
+        const r = mobiles.spawnAhead(e, this.player.pos, tmp, Math.max(1, Math.floor(n)), metres, this.world.inside);
+        await Promise.all(r.mobiles.map((m) => mobiles.loaded(m)));
+        return {
+          entry: { id: e.id, name: e.name, kind: e.kind, group: e.group, pack: e.pack, appearance: e.appearance },
+          spawned: r.spawned,
+          note: r.note,
+          matches: exact ? undefined : hits.slice(1).map((h) => h.id),
+          mobiles: r.mobiles.map((m) => ({ ...m.describe(this.player.pos), error: mobiles.loadError(m) })),
+        };
+      },
+      /** With no argument, every mobile out: state, health, distance, clip, target, tier, shadow. With a string, the catalogue search: the total and the first forty, with whether each can be stood and why not. */
+      mobiles: (find?: string) => {
+        const mobiles = this.world.mobiles;
+        if (find === undefined) return (mobiles?.live ?? []).map((m) => m.describe(this.player.pos));
+        const cat = this.world.mobileCatalogue;
+        if (!cat) return 'the creature and NPC catalogue has not loaded yet (or is not converted: npm run swg -- mobiles @SWG assets-private --retail-only)';
+        const all = cat.search(find, { limit: 100000 });
+        return {
+          total: all.length,
+          first: all.slice(0, 40).map((e) => {
+            const why = mobiles?.whyNot(e, cat) ?? null;
+            return { id: e.id, name: e.name, kind: e.kind, group: e.group, ready: cat.ready(e).ok, standable: !why, why };
+          }),
+        };
+      },
+      /** An entry's pack and its roles by name, the gait speeds, the template's, and the walk and run the game will use: the feet check without spawning. */
+      mobileRoles: async (id: string) => {
+        const cat = this.world.mobileCatalogue;
+        if (!cat || !this.world.mobiles) return 'the creature and NPC catalogue has not loaded yet';
+        const e = cat.byId(id) ?? cat.resolve(id) ?? cat.search(id, { limit: 1 })[0];
+        if (!e) return `nothing in the catalogue matches "${id}"`;
+        return this.world.mobiles.rolesReport(e);
+      },
+      /** The model and pack cache: what is held, by whom, how many bytes, the referenced total against the budget, loads in flight. `mobileAssets(true)` trims now. */
+      mobileAssets: (trim = false) => {
+        const mobiles = this.world.mobiles;
+        if (!mobiles) return 'no world loaded';
+        const trimmed = trim ? mobiles.assets.trim() : null;
+        const s = mobiles.assets.stats();
+        const mb = (n: number) => Number((n / 1e6).toFixed(1));
+        return { megabytes: mb(s.bytes), referencedMegabytes: mb(s.referenced), budgetMegabytes: mb(s.budget), loading: s.loading, failed: s.failed, trimmed, models: s.models, packs: s.packs };
+      },
+      /** Read or change live the brain's, the tiers' and the gaits' numbers, the cache budget (`{ budget: 260e6 }`), the cap and the animation range; `{ passMatrices: 'every' }` puts the portal renderer's scene walk back to once a pass, to measure what `'once'` saves. */
+      mobileTune: (tune?: Parameters<import('./world/mobiles/manager').MobileManager['tune']>[0] & { passMatrices?: 'once' | 'every' }) => {
+        if (tune?.passMatrices) this.portals.matrixOnce = tune.passMatrices === 'once';
+        const mobiles = this.world.mobiles;
+        if (!mobiles) return 'no world loaded';
+        return { ...mobiles.tune(tune), passMatrices: this.portals.matrixOnce ? 'once' : 'every' };
+      },
+      /** Every mobile's cull sphere, whether it is on and near the screen, whether it is drawn and casts, and its tier: the check that the one sphere is in the frame it claims. */
+      mobileCull: () => this.world.mobiles?.cullReport(this.cam.camera, this.player.pos) ?? 'no world loaded',
       /** Blow up the vehicle ridden, piloted or stood in (its health to nothing), to see the rider thrown or the crew put out. */
       wreck: () => {
         const v = this.player.mounted ?? this.player.piloting ?? this.player.aboard?.vehicle ?? null;
@@ -1283,6 +1350,13 @@ class App {
       this.world.npcs?.attach(this.world.npcDeps);
       this.appearanceUi.setSpecies(list, this.characterId);
     });
+    // The creature and NPC catalogue: about 8 MB, fetched and indexed once while the select
+    // screen is up. Nothing waits on it in a frame; until it lands a spawn says so.
+    void this.world.loadMobileCatalogue().then((c) => {
+      if (c) console.info(`mobiles: ${c.entries.length} in the catalogue`);
+    });
+    // Aboard a ship's rooms nothing is stood, whoever asks (the console, the spawner, the wildlife).
+    this.world.refuseMobiles = () => (this.player?.aboard ? 'nothing can be stood aboard a ship’s rooms' : null);
     this.appearanceUi.onSpecies = (id) => void this.switchCharacter(id);
     const params = new URLSearchParams(location.search);
     this.setClass(params.get('class') === 'bounty_hunter' ? 'bounty_hunter' : 'jedi');
@@ -1425,8 +1499,8 @@ class App {
     if (player.aboard || player.noclip || !player.saberOn) return;
     const n = player.saberSegments(this.bladeSegments);
     if (!n) return;
-    // Any mesh burns but flesh: the creatures and the fighters are skipped.
-    const flesh = (h: number) => this.world.creatures.byCollider.has(h) || this.world.npcs.byCollider.has(h);
+    // Any mesh burns but flesh: the creatures, the mobiles and the fighters are skipped.
+    const flesh = (h: number) => this.world.creatures.byCollider.has(h) || this.world.npcs.byCollider.has(h) || !!this.world.mobiles?.byCollider.has(h);
     for (let i = 0; i < n; i++) {
       const seg = this.bladeSegments[i];
       const hit = this.physics.surfaceHit(seg.a, seg.b, player.body, this.world.inside, flesh);

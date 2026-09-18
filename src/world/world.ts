@@ -3,6 +3,9 @@ import { packIdOf, type PlanetDef } from '../data/planets';
 import type { Physics, RAPIER } from '../core/physics';
 import { CreatureManager } from './creatures';
 import { NpcManager, type NpcDeps } from './npcs';
+import { MobileManager } from './mobiles/manager';
+import { MobileAssets } from './mobiles/assets';
+import { MobileCatalogue } from './mobiles/catalogue';
 import { DayCycle } from './daycycle';
 import { SwgSky, type SkyLighting } from './sky';
 import { emitRipple, Splashes, updateWaterDepth, type WaterMaterial } from './water';
@@ -226,6 +229,17 @@ export class World {
   creatures!: CreatureManager;
   /** The fighters stood to fight the player and each other, on this planet. */
   npcs!: NpcManager;
+  /** Everything stood from the creature and NPC catalogue on this planet (the `mobiles` pack). */
+  mobiles!: MobileManager;
+  /** How many may be spawned and how far their clips run: the settings, kept for the managers later loads make. */
+  private mobileDetail = { cap: 40, animRange: 160 };
+  /** The mobiles' version the target list was last built at. */
+  private mobilesAt = -1;
+  /**
+   * Set by the game: a sentence when the player is somewhere nothing may be stood (aboard a
+   * ship's rooms), else null. Asked by the mobiles' manager on every spawn, whoever calls it.
+   */
+  refuseMobiles: (() => string | null) | null = null;
   /** What the fighters need from the game, kept across planets and given to each new manager. */
   npcDeps: Partial<NpcDeps> = {};
   /** The player as something that can be hurt and fought: its place and state are set each frame. */
@@ -441,6 +455,32 @@ export class World {
     this.scene.add(this.turrets.group);
     this.npcs = new NpcManager(this.scene, this.physics, this.terrain, import.meta.env.BASE_URL);
     this.npcs.attach(this.npcDeps);
+    // The catalogue's mobiles. The asset cache outlives the planet; the catalogue is a getter,
+    // not a value, because on a cold first load it is usually still in flight here.
+    const mobileAssets = MobileAssets.for(import.meta.env.BASE_URL);
+    mobileAssets.prepare = (root) => this.prepareActor(root);
+    mobileAssets.forget = (mats) => this.forgetMaterials(mats);
+    this.mobiles = new MobileManager({
+      physics: this.physics,
+      terrain: this.terrain,
+      bolts: this.bolts,
+      assets: mobileAssets,
+      effects: () => this.npcDeps.effects ?? null,
+      catalogue: () => MobileCatalogue.loaded(import.meta.env.BASE_URL),
+      targets: () => this.targets(),
+      groundAt: (x, y, z, inside) => this.groundAt(x, y, z, inside),
+      // A mobile put down inside starts in the room whose box holds it (else the player's, who is
+      // inside when anything is), then is followed through the portals as the player is.
+      cellAt: (p) => this.layoutStream?.buildingAt(p) ?? this.cellState,
+      followCell: (state, prev, pos) => (this.layoutStream ? this.layoutStream.trackCell(state, prev, pos) : null),
+      spawnSpot: (from, forward, distance, inside) => this.spawnSpot(from, forward, distance, inside),
+      refuse: () => (this.planet?.space ? 'nothing can be stood in space' : (this.refuseMobiles?.() ?? null)),
+      shadows: () => this.renderer?.shadowMap.enabled ?? false,
+    });
+    this.mobiles.cap = this.mobileDetail.cap;
+    this.mobiles.animRange = this.mobileDetail.animRange;
+    this.scene.add(this.mobiles.group);
+    this.mobilesAt = -1;
     // A fresh planet, a fresh clock and a fresh list of the living.
     this.simTime = 0;
     this.livingAt.creatures = -1;
@@ -693,6 +733,14 @@ export class World {
       this.creatures.dispose();
     }
     this.npcs?.dispose();
+    // The spawned and ambient mobiles go with the planet (their ragdolls with them); their models
+    // stay in the cache, released, and anything held by nothing is trimmed to the budget.
+    if (this.mobiles) {
+      this.scene.remove(this.mobiles.group);
+      this.mobiles.dispose();
+    }
+    this.mobilesAt = -1;
+    MobileAssets.for(import.meta.env.BASE_URL).trim();
     // Nothing may hand out a body from the world that has just gone.
     this.livingList.length = 0;
     this.livingAt.creatures = -1;
@@ -2170,9 +2218,9 @@ export class World {
     return out;
   }
 
-  /** The creature, turret or vehicle a physics collider belongs to. */
+  /** The mobile, creature, fighter, turret or vehicle a physics collider belongs to (every collider of a long body is its own). */
   hittableAt(handle: number): Hittable | undefined {
-    return this.creatures.byCollider.get(handle) ?? this.npcs.byCollider.get(handle) ?? this.turrets.byCollider.get(handle) ?? this.vehicles.find((v) => v.colliderHandles.includes(handle));
+    return this.mobiles?.byCollider.get(handle) ?? this.creatures.byCollider.get(handle) ?? this.npcs.byCollider.get(handle) ?? this.turrets.byCollider.get(handle) ?? this.vehicles.find((v) => v.colliderHandles.includes(handle));
   }
 
   /** `target` is whom the turrets shoot at, or null while nothing should be shot (noclip, riding). */
@@ -2238,7 +2286,28 @@ export class World {
     this.simTime += dt;
     const targets = this.targets(true);
     this.creatures.update(dt, playerPos, this.hurtPlayer);
+    this.mobiles?.update(dt, { now: this.simTime, dt, camera, playerPos, targets });
     this.npcs.update(dt, targets, this.bolts, camera, this.simTime);
+  }
+
+  /** The spawner's cap and the mobiles' animation range (the settings), kept for the managers later planets make. */
+  setMobileDetail(cap: number, animRange: number): void {
+    this.mobileDetail.cap = cap;
+    this.mobileDetail.animRange = animRange;
+    if (this.mobiles) {
+      this.mobiles.cap = cap;
+      this.mobiles.animRange = animRange;
+    }
+  }
+
+  /** Start the creature and NPC catalogue's one fetch (at boot, beside the species index); it resolves to the catalogue, or null. */
+  loadMobileCatalogue(): Promise<MobileCatalogue | null> {
+    return MobileCatalogue.load(import.meta.env.BASE_URL);
+  }
+
+  /** The catalogue if it has landed, else null: nothing in a frame may wait on it. */
+  get mobileCatalogue(): MobileCatalogue | null {
+    return MobileCatalogue.loaded(import.meta.env.BASE_URL);
   }
 
   /** One kept callback rather than a fresh closure a frame; what it does is set by the loop. */
@@ -2247,7 +2316,7 @@ export class World {
   };
 
   /**
-   * Everything alive right now: the player when it may be attacked, the creatures, the fighters.
+   * Everything alive right now: the player when it may be attacked, the creatures, the mobiles, the fighters.
    * One kept array, rebuilt only when a manager has gained or lost a body (or when `stepLiving`
    * asks for a fresh one), so a disposed body can never be handed out.
    */
@@ -2255,14 +2324,18 @@ export class World {
     const at = this.livingAt;
     const cv = this.creatures?.version ?? -1;
     const nv = this.npcs?.version ?? -1;
+    const mv = this.mobiles?.version ?? -1;
     const alive = !this.playerTarget.dead;
-    if (!fresh && cv === at.creatures && nv === at.npcs && alive === at.player) return this.livingList;
+    if (!fresh && cv === at.creatures && nv === at.npcs && mv === this.mobilesAt && alive === at.player) return this.livingList;
     at.creatures = cv;
     at.npcs = nv;
+    this.mobilesAt = mv;
     at.player = alive;
     this.livingList.length = 0;
     if (!this.playerTarget.dead) this.livingList.push(this.playerTarget);
     if (this.creatures) for (const c of this.creatures.creatures) this.livingList.push(c);
+    // A mobile whose model is still loading neither thinks nor is fought over (the manager bumps its version when one is up).
+    if (this.mobiles) for (const m of this.mobiles.live) if (m.ready) this.livingList.push(m);
     if (this.npcs) for (const n of this.npcs.npcs) this.livingList.push(n);
     return this.livingList;
   }
