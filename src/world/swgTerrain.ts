@@ -36,6 +36,11 @@ export interface SwgWaterTable {
   waterType: number;
   /** Metres per repeat of the shader's textures. */
   shaderSize: number;
+  /** The outline's bounds in game coordinates, so a point far off is passed over without the polygon test. */
+  minX: number;
+  maxX: number;
+  minZ: number;
+  maxZ: number;
 }
 
 /**
@@ -69,7 +74,18 @@ export class SwgTerrain {
       if (layer) this.sampler.addBuildingLayer(layer, l.x, l.z, l.yaw);
     }
     for (const w of waterTables(this.template.generator)) {
-      this.waterTables.push({ name: w.name, height: w.height, points: w.points.map((pt) => ({ x: this.toGameX(pt.x), z: this.toGameZ(pt.y) })), shader: w.shader, waterType: w.waterType, shaderSize: w.shaderSize });
+      const points = w.points.map((pt) => ({ x: this.toGameX(pt.x), z: this.toGameZ(pt.y) }));
+      let minX = Infinity;
+      let maxX = -Infinity;
+      let minZ = Infinity;
+      let maxZ = -Infinity;
+      for (const p of points) {
+        minX = Math.min(minX, p.x);
+        maxX = Math.max(maxX, p.x);
+        minZ = Math.min(minZ, p.z);
+        maxZ = Math.max(maxZ, p.z);
+      }
+      this.waterTables.push({ name: w.name, height: w.height, points, shader: w.shader, waterType: w.waterType, shaderSize: w.shaderSize, minX, maxX, minZ, maxZ });
     }
     if (typeof Worker !== 'undefined') {
       try {
@@ -124,9 +140,20 @@ export class SwgTerrain {
   waterAt(gx: number, gz: number): number {
     let h = this.waterLevel;
     for (const w of this.waterTables) {
-      if (w.height > h && pointInPolygon(gx, gz, w.points)) h = w.height;
+      if (w.height > h && gx >= w.minX && gx <= w.maxX && gz >= w.minZ && gz <= w.maxZ && pointInPolygon(gx, gz, w.points)) h = w.height;
     }
     return h;
+  }
+
+  /** The highest table covering a game-space point, or null (dry, or only the global sea). */
+  waterTableAt(gx: number, gz: number): SwgWaterTable | null {
+    let best: SwgWaterTable | null = null;
+    for (const w of this.waterTables) {
+      if (best && w.height <= best.height) continue;
+      if (gx < w.minX || gx > w.maxX || gz < w.minZ || gz > w.maxZ) continue;
+      if (pointInPolygon(gx, gz, w.points)) best = w;
+    }
+    return best;
   }
 
   toSwgX(gx: number): number {

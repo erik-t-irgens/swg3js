@@ -1626,7 +1626,7 @@ function packStatus(dir) {
       terrain ? `terrain${layers ? ` + ${layers} building layers` : ''}` : 'NO TERRAIN',
       shaders ? `ground textures ${textured}/${shaders.families.length}` : 'NO GROUND TEXTURES',
       sky ? `sky (${sky.blocks.length} blocks${sky.weather ? `, weather ${new Set(sky.blocks.map((b) => b.cameraEffect?.file).filter(Boolean)).size} effects` : ', NO WEATHER'})` : 'NO SKY',
-      water ? `water (${Object.keys(water.shaders ?? {}).length} shaders)` : terrain ? 'NO WATER LOOK' : null,
+      water ? `water (${Object.keys(water.shaders ?? {}).length} shaders, ${Object.values(water.shaders ?? {}).filter((s) => s.kind === 'lava').length} lava)` : terrain ? 'NO WATER LOOK' : null,
     ].filter(Boolean);
     console.log(`  ${planet}: ${parts.join(', ')}`);
     if (!objects) need(`snapshot <swg-dir> ${planet} ${packDir} --center=auto --radius=all --retail-only`, `${planet} has no objects`);
@@ -1636,6 +1636,8 @@ function packStatus(dir) {
     else if (!sky.weather) need(`sky <swg-dir> all ${dir} --retail-only`, `${planet} sky has no weather effects`);
     // Its own `if`: exportWater always writes the file, so its existence is the whole test.
     if (terrain && !water) need(`water <swg-dir> all ${dir} --retail-only`, `${planet} has no water.json`);
+    // A lava entry written before the lava look has no `lava` block: the game draws it in a stand-in look.
+    else if (water && Object.values(water.shaders ?? {}).some((s) => s.kind === 'lava' && !s.missing && s.lava === undefined && /lava/i.test(s.effect ?? ''))) need(`water <swg-dir> all ${dir} --retail-only`, `${planet}'s water.json has no lava look`);
     if (!pois) need(`pois <swg-dir> all ${dir} --retail-only`, `${planet} has no pois.json`);
   }
   const creatures = readJson(join(dir, 'creatures/manifest.json'));
@@ -3693,7 +3695,8 @@ switch (cmd) {
 
   case 'water': {
     // <swg-dir> <planet>|all <out-dir>: each planet's water shaders (colour, opacity, ripple,
-    // drift and cube map) as water.json, plus the cube faces under water/.
+    // drift and cube map) as water.json, plus the cube faces under water/; each lava shader's look
+    // (flow, colour ramp, bloom factor) goes in its entry, its crust and noise volume under water/.
     if (!pos[3]) usage();
     const vfs = mount(pos[1]);
     const targets = pos[2] === 'all' ? GAME_PLANETS.filter((p) => existsSync(join(pos[3], p, 'manifest.json'))).map((p) => [p, join(pos[3], p)]) : [[pos[2], pos[3]]];

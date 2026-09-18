@@ -594,6 +594,16 @@ class App {
       },
       water: (x: number, z: number) => this.world.terrain.waterHeightAt(x, z),
       /**
+       * The lava drawn now (tables, and each look with where its textures came from: "client",
+       * "partial" or "stand-in") and the look every lava material shares. `lava({ intensity, glow,
+       * glowFrom, glowTo })` tunes the colour and which veins glow; `lava({ axes: 'xzy' })` reads the
+       * client's texture coordinate the other way round, `{ axes: 'xyz' }` restores it.
+       */
+      lava: (look?: { intensity?: number; glow?: number; glowFrom?: number; glowTo?: number; axes?: 'xyz' | 'xzy' }) => {
+        if (look) this.world.setLavaLook(look);
+        return this.world.lavaStatus;
+      },
+      /**
        * Every water body with the shader it came from, its look, what it reflects and whether it
        * is on screen. `waterFx({ env: 'shader' })` switches every body to its own shader's cube
        * map, `{ env: 'sky' }` back to the area's day and night map; `{ envIntensity }` changes how

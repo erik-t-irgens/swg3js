@@ -4,13 +4,16 @@
 // Also the game's own reader of what it writes (src/world/waterLook.ts) and the occlusion-query
 // state machine that decides whether any water is on screen (src/world/waterVisibility.ts).
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, existsSync, readdirSync } from 'node:fs';
+import { mkdtempSync, readFileSync, existsSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { inflateSync } from 'node:zlib';
 import { form, chunk, W, encode } from './iffWriter.ts';
 import { cubeFaces } from '../sky.mjs';
-import { exportWater, isLavaEffect, linearToSrgbHex, meanLinear, normalSlope, REFERENCE_SCROLL, REFERENCE_SLOPE, WATER_CUBE_SIZE } from '../water.mjs';
+import { findAll, parseIff } from '../iff.mjs';
+import { shaderTextures } from '../sht.mjs';
+import { decodeDdsVolume } from '../dds.mjs';
+import { exportWater, isLavaEffect, lavaEntry, lavaParams, linearToSrgbHex, meanLinear, normalSlope, REFERENCE_SCROLL, REFERENCE_SLOPE, textureFactorOf, WATER_CUBE_SIZE } from '../water.mjs';
 import { envLightFrom, isLavaWater, readWaterPack, shaderKey, waterLookFor, type WaterShaderInfo } from '../../../src/world/waterLook.ts';
 import { WaterVisibility } from '../../../src/world/waterVisibility.ts';
 
@@ -83,7 +86,32 @@ put('shader/wter_test.sht', sht('effect\\water.eft', [txm('MAIN', 'texture\\wter
 put('shader/wter_share.sht', sht('effect\\water.eft', [txm('MAIN', 'texture\\wter_main.dds'), txm('CUBE', 'texture\\env_test.dds')]));
 put('shader/wter_calm.sht', sht('effect\\water.eft', [txm('MAIN', 'texture\\wter_main.dds'), txm('NRML', 'texture\\wter_calm_n.dds')]));
 put('shader/wter_nocube.sht', sht('effect\\water.eft', [txm('MAIN', 'texture\\wter_main.dds'), txm('CUBE', 'texture\\texture\\env_missing.dds')]));
-put('shader/wter_lava_test.sht', sht('effect/water_lava_textured.eft', [txm('MAIN', 'texture\\wter_main.dds'), txm('CUBE', 'texture\\env_test.dds')]));
+/** An 8-bit luminance volume DDS (DDSCAPS2_VOLUME), or with other flags to see it refused. */
+function ddsVolume(width: number, height: number, depth: number, data: Uint8Array, opts: { pfFlags?: number; bitCount?: number; caps2?: number } = {}): Buffer {
+  const w = new W();
+  w.str('DDS').parts.pop();
+  w.u8(0x20);
+  w.u32(124).u32(0x1 | 0x2 | 0x4 | 0x1000 | 0x800000).u32(height).u32(width).u32(width).u32(depth).u32(1);
+  for (let i = 0; i < 11; i++) w.u32(0);
+  w.u32(32).u32(opts.pfFlags ?? 0x20000).u32(0).u32(opts.bitCount ?? 8).u32(0xff).u32(0).u32(0).u32(0);
+  w.u32(0x1000 | 0x8).u32(opts.caps2 ?? 0x200000).u32(0).u32(0).u32(0);
+  return Buffer.concat([Buffer.from(w.bytes()), Buffer.from(data)]);
+}
+/** A lava shader's MATS form: the MATL's four ARGB groups and a power, the third group loopTime and the flow, the fourth a, colorScale, colorBias, tcScale. */
+const mats = (): Item => {
+  const matl = new W();
+  for (const v of [1, 1, 1, 1, 1, 1, 1, 1, 100, 0, 0.03, 0.02, 1, 1.1, -0.23, 1.55, 0]) matl.f32(v);
+  return form('MATS', form('0000', chunk('TAG ', new Uint8Array([0x4e, 0x49, 0x41, 0x4d])), chunk('MATL', matl.bytes())));
+};
+/** FORM TFNS: one 8-byte entry, the tag BLUM stored reversed, then the ARGB value 0xff484848. */
+const tfns = (): Item => form('TFNS', chunk('0000', new Uint8Array([0x4d, 0x55, 0x4c, 0x42, 0x48, 0x48, 0x48, 0xff])));
+const findMatl = (p: string): Buffer => findAll(parseIff(vfs.read(p)), 'MATL')[0].data;
+const rampRgba = new Uint8Array([10, 0, 0, 20, 80, 10, 0, 100, 200, 60, 0, 180, 255, 140, 20, 250]);
+put('texture/lava_ramp_test.dds', dds(4, 1, [rampRgba]));
+put('texture/lava_mix_test.dds', dds(2, 2, [new Uint8Array([90, 36, 22, 0, 60, 20, 10, 0, 120, 50, 30, 128, 30, 10, 5, 0])]));
+put('texture/lava_noise_test.dds', ddsVolume(4, 4, 4, Uint8Array.from({ length: 64 }, (_, i) => i)));
+put('shader/wter_lava_test.sht', sht('effect/water_lava_textured.eft', [txm('MAIN', 'texture\\wter_main.dds'), txm('CUBE', 'texture\\env_test.dds'), txm('LKUP', 'texture\\lava_ramp_test.dds'), txm('TEXT', 'texture\\lava_mix_test.dds'), txm('NOIS', 'texture\\lava_noise_test.dds')], [mats(), tfns()]));
+put('shader/wter_lava_test2.sht', sht('effect/water_lava_textured.eft', [txm('LKUP', 'texture\\lava_ramp_test.dds'), txm('TEXT', 'texture\\absent.dds'), txm('NOIS', 'texture\\lava_noise_test.dds')], [mats()]));
 put('shader/wter_test_as_lava.sht', sht('effect\\water.eft', [txm('MAIN', 'texture\\wter_main.dds'), txm('NRML', 'texture\\wter_test_n.dds')]));
 
 const uses = [
@@ -93,6 +121,7 @@ const uses = [
   { shader: 'wter_nocube', waterTypes: [0], tables: 1, global: false },
   { shader: 'wter_lava_test', waterTypes: [0], tables: 1, global: false },
   { shader: 'wter_test_as_lava', waterTypes: [1], tables: 1, global: false },
+  { shader: 'wter_lava_test2', waterTypes: [1], tables: 1, global: false },
   { shader: 'wter_gone', waterTypes: [0], tables: 1, global: false },
   { shader: 'lava_gone', waterTypes: [0], tables: 1, global: false },
 ];
@@ -166,7 +195,59 @@ for (const id of ['wter_lava_test', 'wter_test_as_lava']) {
 }
 ok(pack.shaders.wter_gone.missing === true && pack.shaders.wter_gone.kind === 'water', 'a shader that is not in the archives is marked missing');
 ok(pack.shaders.lava_gone.missing === true && pack.shaders.lava_gone.kind === 'lava', 'a missing shader that names lava still reads as lava');
-ok(pack.notes.some((n: string) => n.includes('wter_gone')) && logs.some((l) => l.includes('8 shaders (5 water, 3 lava), 1 cubes')), `the log counts water, lava and cubes (${logs[0]})`);
+ok(pack.notes.some((n: string) => n.includes('wter_gone')) && logs.some((l) => l.includes('9 shaders (5 water, 4 lava), 1 cubes, lava files 2 -> water.json')), `the log counts water, lava, cubes and the lava files written (${logs[0]})`);
+
+// --- the lava look (the heat design's part of water.json) ---------------------------------------
+
+{
+  const matl = findMatl('shader/wter_lava_test.sht');
+  const p = lavaParams(matl)!;
+  ok(p.loopTime === 100 && p.flow.join() === '0,0.03,0.02' && Math.abs(p.colorScale - 1.1) < 1e-6 && Math.abs(p.colorBias + 0.23) < 1e-6 && Math.abs(p.tcScale - 1.55) < 1e-6, `the MATL's third and fourth groups are loopTime, the flow, colorScale, colorBias and tcScale (${JSON.stringify(p)})`);
+  ok(lavaParams(matl.subarray(0, 60)) === null && lavaParams(undefined) === null, 'a MATL shorter than 64 bytes, or none, gives no lava values');
+  const bad = Buffer.from(matl);
+  bad.writeFloatLE(Number.NaN, 13 * 4);
+  ok(lavaParams(bad) === null, 'a MATL with a value that is not a number gives none');
+  ok(Math.abs(textureFactorOf(parseIff(vfs.read('shader/wter_lava_test.sht')))! - 72 / 255) < 1e-6, 'the bloom factor is the red of the TFNS entry tagged BLUM (stored MULB)');
+  ok(textureFactorOf(parseIff(vfs.read('shader/wter_lava_test2.sht'))) === null, 'a shader with no TFNS has no bloom factor');
+}
+{
+  const vol = decodeDdsVolume(files.get('texture/lava_noise_test.dds')!);
+  ok(vol.width === 4 && vol.height === 4 && vol.depth === 4 && vol.data.length === 64 && vol.data.every((v: number, i: number) => v === i), 'a luminance volume reads as its bytes, x fastest');
+  const throws = (buf: Buffer) => { try { decodeDdsVolume(buf); return false; } catch { return true; } };
+  ok(throws(ddsVolume(4, 4, 4, new Uint8Array(256), { pfFlags: 0x41, bitCount: 32 })), 'a 32-bit volume is refused');
+  ok(throws(files.get('texture/lava_ramp_test.dds')!), 'a flat DDS is not a volume');
+  ok(throws(ddsVolume(4, 4, 4, new Uint8Array(63))), 'a volume one byte short is refused');
+}
+{
+  const lava = pack.shaders.wter_lava_test.lava;
+  ok(lava.loopTime === 100 && lava.flow.join() === '0,0.03,0.02' && lava.colorScale === 1.1 && lava.colorBias === -0.23 && lava.tcScale === 1.55, `the lava entry carries the MATL's values, rounded clean (${JSON.stringify({ s: lava.colorScale, b: lava.colorBias, t: lava.tcScale })})`);
+  ok(lava.textureFactor === 0.2824, `and the bloom factor to four places (${lava.textureFactor})`);
+  const ramp = Buffer.from(lava.ramp.rgba, 'base64');
+  ok(lava.ramp.width === 4 && ramp.length === 16 && ramp.every((v, i) => v === rampRgba[i]), 'the ramp goes inline, byte for byte, alpha and all');
+  ok(lava.mix === 'water/lava_mix_test.png', `the crust is written under water/ (${lava.mix})`);
+  const mix = decodePng(readFileSync(join(out, lava.mix)));
+  ok(mix.width === 2 && mix.height === 2 && [3, 7, 11, 15].every((i) => mix.rgba[i] === 255) && mix.rgba[0] === 90 && mix.rgba[8] === 120, 'the crust keeps its colours and is written opaque');
+  ok(JSON.stringify(lava.noise) === JSON.stringify({ file: 'water/lava_noise_test.r8', size: [4, 4, 4] }), `the noise volume is written with its size (${JSON.stringify(lava.noise)})`);
+  const r8 = readFileSync(join(out, lava.noise.file));
+  ok(r8.length === 64 && r8.every((v, i) => v === i), 'as its bytes, exactly');
+  const two = pack.shaders.wter_lava_test2.lava;
+  ok(two.mix === null && two.textureFactor === null && two.noise.file === lava.noise.file, 'a crust not in the archives is null, no TFNS is no factor, and the shared noise is the same file');
+  ok(pack.notes.some((n: string) => n.includes('texture/absent.dds')), 'and the missing crust is named in the notes');
+  ok(pack.shaders.wter_test_as_lava.kind === 'lava' && pack.shaders.wter_test_as_lava.lava === undefined, 'a type-1 table wearing a water shader is lava with no lava block (the game gives it the stand-in look)');
+}
+{
+  // A lava file is written once per planet: the second shader naming it finds it in `written`.
+  const once = mkdtempSync(join(tmpdir(), 'water-once-'));
+  const root = parseIff(vfs.read('shader/wter_lava_test.sht'));
+  const { slots } = shaderTextures(root);
+  const written = new Map();
+  const notes: string[] = [];
+  const first = lavaEntry(vfs, root, slots, once, written, notes);
+  ok(first.noise.file === 'water/lava_noise_test.r8' && existsSync(join(once, first.noise.file)), 'lavaEntry writes the noise the first time');
+  rmSync(join(once, first.noise.file));
+  const second = lavaEntry(vfs, root, slots, once, written, notes);
+  ok(JSON.stringify(second.noise) === JSON.stringify(first.noise) && !existsSync(join(once, first.noise.file)), 'and not again for the same planet');
+}
 
 {
   const empty = mkdtempSync(join(tmpdir(), 'water-dry-'));
@@ -176,13 +257,17 @@ ok(pack.notes.some((n: string) => n.includes('wter_gone')) && logs.some((l) => l
   ok(!existsSync(join(empty, 'water')), 'and no empty water folder is made for it');
 }
 {
-  // Lava carries no cube, so a planet whose every shader is lava writes no face and must be left
-  // without a water/ folder as well: the folder is made where the first face is written, not for
-  // the planet having shaders at all.
+  // Lava carries no cube, so a planet whose lava writes no file of its own must be left without a
+  // water/ folder as well: the folder is made where the first file is written, not for the planet
+  // having shaders at all.
   const molten = mkdtempSync(join(tmpdir(), 'water-lava-'));
-  exportWater(vfs, 'lavaplanet', [{ shader: 'wter_lava_test', waterTypes: [0], tables: 3, global: false }, { shader: 'lava_gone', waterTypes: [0], tables: 1, global: false }], template, molten, { log: () => {} });
+  exportWater(vfs, 'lavaplanet', [{ shader: 'wter_test_as_lava', waterTypes: [1], tables: 3, global: false }, { shader: 'lava_gone', waterTypes: [0], tables: 1, global: false }], template, molten, { log: () => {} });
   const all = JSON.parse(readFileSync(join(molten, 'water.json'), 'utf8'));
-  ok(all.shaders.wter_lava_test.kind === 'lava' && all.shaders.lava_gone.kind === 'lava' && !existsSync(join(molten, 'water')), 'a planet whose shaders are all lava gets its water.json and no empty water folder either');
+  ok(all.shaders.wter_test_as_lava.kind === 'lava' && all.shaders.lava_gone.kind === 'lava' && !existsSync(join(molten, 'water')), 'a planet whose shaders are all lava with nothing to write gets its water.json and no empty water folder either');
+  // A lava planet whose shaders have their look writes the crust and the noise there, and nothing else.
+  const lavaPlanet = mkdtempSync(join(tmpdir(), 'water-lava-look-'));
+  exportWater(vfs, 'lavaplanet', [{ shader: 'wter_lava_test', waterTypes: [0], tables: 3, global: false }], template, lavaPlanet, { log: () => {} });
+  ok(readdirSync(join(lavaPlanet, 'water')).sort().join() === 'lava_mix_test.png,lava_noise_test.r8', `a lava look's files are its crust and its noise (${readdirSync(join(lavaPlanet, 'water')).join()})`);
 }
 {
   // Every write goes through the injected writer, so the faces of a shared cube can be counted.
@@ -191,8 +276,10 @@ ok(pack.notes.some((n: string) => n.includes('wter_gone')) && logs.some((l) => l
   exportWater(vfs, 'testplanet', uses, template, counted, { log: () => {}, writeFile: (p: string) => wrote.push(p) });
   const faces = wrote.filter((p) => p.includes('env_test_'));
   ok(faces.length === 6, `a cube two shaders both name is written once (${faces.length} face writes)`);
-  ok(wrote.filter((p) => p.endsWith('water.json')).length === 1 && wrote.length === 7, `nothing else is written (${wrote.length} files)`);
-  ok(readdirSync(join(out, 'water')).length === 6, 'and only those six PNGs are on disk');
+  const lavaFiles = wrote.filter((p) => /lava_(mix|noise)_test/.test(p));
+  ok(lavaFiles.length === 2, `the crust and the noise two lava shaders share are written once each (${lavaFiles.length} writes)`);
+  ok(wrote.filter((p) => p.endsWith('water.json')).length === 1 && wrote.length === 9, `nothing else is written (${wrote.length} files)`);
+  ok(readdirSync(join(out, 'water')).length === 8, 'and only those six PNGs, the crust and the noise are on disk');
 }
 
 // --- the pieces the exporter is built from -----------------------------------------------------
@@ -213,7 +300,8 @@ ok(['effect/water_lava.eft', 'effect/water_lava_textured.eft', 'effect\\lava.eft
 ok(readWaterPack(null) === null && readWaterPack('x') === null && readWaterPack({}) === null, 'anything that is not a pack of shaders reads as null');
 {
   const read = readWaterPack(pack)!;
-  ok(read.version === 1 && Object.keys(read.shaders).length === 8 && read.global?.shader === 'wter_test', 'the game reads back every entry the converter wrote');
+  ok(read.version === 1 && Object.keys(read.shaders).length === 9 && read.global?.shader === 'wter_test', 'the game reads back every entry the converter wrote');
+  ok(JSON.stringify(read.shaders.wter_lava_test.lava) === JSON.stringify(pack.shaders.wter_lava_test.lava), 'and a lava block rides through as written');
   const junk = readWaterPack({ version: 1, shaders: { a: { kind: 'water', color: 5, opacity: 0.4, cube: { faces: ['x'] }, lava: { ramp: 'r' } }, b: { color: '#ffffff' }, c: 7 } })!;
   ok(Object.keys(junk.shaders).join() === 'a', 'an entry without a kind, and anything that is not an object, is dropped');
   ok(junk.shaders.a.color === undefined && junk.shaders.a.opacity === 0.4, 'a colour that is not #rrggbb is dropped and the rest of its entry kept');
@@ -228,6 +316,8 @@ ok(readWaterPack(null) === null && readWaterPack('x') === null && readWaterPack(
   ok(!isLavaWater('wter_lava_01_still', 0, water), 'an entry that says water wins over the name');
   ok(isLavaWater('wter_lava_01_still', 0, undefined), 'with no entry at all the name decides, so a pack converted before this still gets lava right');
   ok(!isLavaWater(null, 0, undefined), 'a table with no shader and no entry is water');
+  ok(!isLavaWater('lava_like', 0, water), 'a type-0 table whose entry says water is water, whatever its name');
+  ok(!isLavaWater('wter_spec', 0, undefined), 'a water shader with no entry is water');
 }
 {
   const read = readWaterPack(pack)!;

@@ -5,9 +5,13 @@ import { CreatureManager } from './creatures';
 import { NpcManager, type NpcDeps } from './npcs';
 import { DayCycle } from './daycycle';
 import { SwgSky, type SkyLighting } from './sky';
-import { createWaterMaterial, emitRipple, Splashes, updateWaterDepth, type WaterMaterial } from './water';
+import { emitRipple, Splashes, updateWaterDepth, type WaterMaterial } from './water';
 import { WaterBodies, type WaterBody } from './waterBodies';
 import { envLightFrom, isLavaWater, shaderKey, type WaterLook } from './waterLook';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { createLavaMaterial, LAVA_LOOK, lavaGeometry, lavaHeatTable, loadLavaTextures, refreshLavaFar, standInLavaTextures, type LavaMaterial, type LavaTextures } from './lava';
+import { FALLBACK_LAVA_STYLE, groupLava, lavaStyleFor, type LavaStyle } from './lavaStyle';
+import type { HeatSources, LavaHeatTable } from './heatSources';
 import { setEnvironment } from './envmap';
 import { PropFactory, type Collider, type Exclusion, type ScatterItem } from './props';
 import { FloraPlanter } from './flora';
@@ -16,7 +20,7 @@ import { AssetPack, type LoadedModel } from './assetPack';
 import { OUTPOSTS } from '../data/outposts';
 import { Group, groups, RAPIER as R } from '../core/physics';
 import { CHUNK_RES, CHUNK_SIZE, Terrain } from './terrain';
-import { SwgTerrain, type BuildingLayerSource } from './swgTerrain';
+import { SwgTerrain, type BuildingLayerSource, type SwgWaterTable } from './swgTerrain';
 import { LayoutStreamer, type Building, type CellState, type PlacedObject } from './layoutStream';
 import { isLiftCell, liftStops, stopAt, type LiftStop } from './lifts';
 import type { SunInfo } from '../core/postfx';
@@ -323,11 +327,17 @@ export class World {
   readonly waterBodies = new WaterBodies();
   private waterNear: WaterBody | null = null;
   private waterFarBody: WaterBody | null = null;
-  /**
-   * Lava tables, drawn as they always were in the planet's own water colour with no body, no
-   * reflections and no environment, until the heat design draws lava as lava.
-   */
-  private readonly lavaWater: THREE.Mesh[] = [];
+  /** Heat sources the effects read: the lava tables are handed over here (App sets it). */
+  heat: HeatSources | null = null;
+  /** Lava where the terrain puts it: one merged mesh per look (loadLava). */
+  private readonly localLava: THREE.Mesh[] = [];
+  private readonly lavaMaterials: LavaMaterial[] = [];
+  /** Per table (shared with the heat haze) and merged. */
+  private readonly lavaGeometries: THREE.BufferGeometry[] = [];
+  /** Owned by this planet: never the runtime noise or the stand-in ramp, which live for the app. */
+  private readonly lavaTextures: THREE.Texture[] = [];
+  private readonly lavaTables = new Set<SwgWaterTable>();
+  private lavaLooks: { style: string; tables: number; textures: LavaTextures['source'] }[] = [];
   /** Multiplier on the sky's fog density, for tuning from the console. */
   fogScale = 1;
   /** The player's own fog setting, over the planet's: 1 as the planet has it. */
@@ -530,6 +540,8 @@ export class World {
           await this.waterBodies.load(pack, planet.id);
           if (token !== this.loadToken) return null;
           this.applySwgWater(swg);
+          await this.loadLava(pack, swg); // never rejects; drops its own work if another load began meanwhile
+          if (token !== this.loadToken) return null;
           this.packProgress = 0.55;
           console.info(`terrain: ${this.terrain.swg!.template.name} with ${layers.length} building layers loaded in ${(performance.now() - t0).toFixed(0)} ms`);
           await this.loadFlora(pack, swg);
@@ -627,6 +639,9 @@ export class World {
 
   /** Leave the planet: everything it streamed goes, for the select screen to show over nothing. */
   leave(): void {
+    // No new load follows, so a lava (or sky) load still in flight must see its token go stale, or
+    // it would add to an empty scene behind the select screen.
+    this.loadToken++;
     this.unload();
   }
 
@@ -661,11 +676,7 @@ export class World {
       m.geometry.dispose();
     }
     this.localWater.length = 0;
-    for (const m of this.lavaWater) {
-      this.scene.remove(m);
-      m.geometry.dispose();
-    }
-    this.lavaWater.length = 0;
+    this.dropLava();
     this.cellState = null;
     this.groundHiddenFor = null;
     this.prevPlayerPos.x = Number.NaN;
@@ -883,6 +894,8 @@ export class World {
     const interval = this.rippleClock;
     this.rippleClock = 0;
     const touch = (key: object, p: THREE.Vector3, strength: number) => {
+      // Lava takes no rings and throws no spray.
+      if (this.lavaTables.size && this.lavaTables.has(this.terrain.swg?.waterTableAt(p.x, p.z) as SwgWaterTable)) return;
       const surface = this.terrain.waterHeightAt(p.x, p.z);
       const depth = surface - p.y;
       let last = this.lastSeen.get(key);
@@ -1087,15 +1100,16 @@ export class World {
       this.scene.remove(m);
       m.geometry.dispose();
     }
-    for (const m of this.lavaWater) {
-      this.scene.remove(m);
-      m.geometry.dispose();
-    }
     this.localWater.length = 0;
-    this.lavaWater.length = 0;
-    let lavaMaterial: WaterMaterial | null = null;
     const shaders = new Set<string>();
+    let lava = 0;
     for (const w of swg.waterTables) {
+      // Lava is never water: loadLava draws it with its own material, and it gets no body, no
+      // reflections, rings or splashes.
+      if (isLavaWater(w.shader, w.waterType, bodies.data?.shaders[w.shader])) {
+        lava++;
+        continue;
+      }
       const pts = w.points.map((p) => new THREE.Vector2(p.x, p.z));
       const tris = THREE.ShapeUtils.triangulateShape(pts, []);
       if (!tris.length) continue;
@@ -1108,24 +1122,149 @@ export class World {
       const mesh = new THREE.Mesh(g);
       mesh.receiveShadow = true;
       mesh.name = `water:${w.name}`;
-      if (isLavaWater(w.shader, w.waterType, bodies.data?.shaders[w.shader])) {
-        if (!lavaMaterial) {
-          lavaMaterial = createWaterMaterial(bodies.lookFor(null, planet), false, { reflective: false });
-          this.waterMaterials.push(lavaMaterial);
-        }
-        mesh.material = lavaMaterial;
-        this.lavaWater.push(mesh);
-      } else {
-        // Lakes are triangulated outlines with no interior vertices, so they ripple but do not swell.
-        const body = bodies.add(mesh, false, bodies.lookFor(w.shader || null, planet), 'lake');
-        this.waterMaterials.push(body.lit);
-        if (w.shader) shaders.add(w.shader);
-        this.localWater.push(mesh);
-      }
+      // Lakes are triangulated outlines with no interior vertices, so they ripple but do not swell.
+      const body = bodies.add(mesh, false, bodies.lookFor(w.shader || null, planet), 'lake');
+      this.waterMaterials.push(body.lit);
+      if (w.shader) shaders.add(w.shader);
+      this.localWater.push(mesh);
       this.scene.add(mesh);
     }
-    bodies.lavaTables = this.lavaWater.length;
-    if (swg.waterTables.length) console.info(`water: ${swg.waterTables.length} local tables (${this.localWater.length} water in ${shaders.size} shaders, ${this.lavaWater.length} lava)${swg.template.useGlobalWaterTable ? `, global at ${swg.template.globalWaterTableHeight.toFixed(1)} m` : ', no global table'}`);
+    bodies.lavaTables = lava;
+    if (swg.waterTables.length) console.info(`water: ${swg.waterTables.length} local tables (${this.localWater.length} water in ${shaders.size} shaders, ${lava} lava)${swg.template.useGlobalWaterTable ? `, global at ${swg.template.globalWaterTableHeight.toFixed(1)} m` : ', no global table'}`);
+  }
+
+  /** Lava where the terrain puts it: one merged mesh per look, the client's textures when the pack has them, the tables handed to the heat haze. */
+  private async loadLava(pack: AssetPack, swg: SwgTerrain): Promise<void> {
+    const token = this.loadToken;
+    const data = this.waterBodies.data;
+    const tables = swg.waterTables.filter((w) => isLavaWater(w.shader, w.waterType, data?.shaders[w.shader]));
+    if (!tables.length) {
+      this.heat?.setLava([]);
+      return;
+    }
+    if (!data) console.warn('lava: no water.json in this pack, drawn in the stand-in look (npm run swg -- water @SWG all assets-private --retail-only)');
+    else {
+      // An entry written before the lava look has no `lava` block (null is an unreadable MATL, which a reconversion does not mend).
+      const stale = [...new Set(tables.map((t) => t.shader))].filter((s) => { const e = data.shaders[s]; return e?.kind === 'lava' && !e.missing && e.lava === undefined && /lava/i.test(e.effect ?? ''); });
+      if (stale.length) console.warn(`lava: water.json has no lava look for ${stale.join(', ')}, drawn in the stand-in look (npm run swg -- water @SWG all assets-private --retail-only)`);
+    }
+    const owned: THREE.Texture[] = [];
+    const cache = new Map<string, THREE.Texture>();
+    const materials: LavaMaterial[] = [];
+    const geometries: THREE.BufferGeometry[] = [];
+    const meshes: THREE.Mesh[] = [];
+    const heatTables: LavaHeatTable[] = [];
+    const looks: { style: string; tables: number; textures: LavaTextures['source'] }[] = [];
+    const discard = () => {
+      for (const g of geometries) g.dispose();
+      for (const m of materials) m.dispose();
+      for (const t of owned) t.dispose();
+    };
+    for (const group of groupLava(tables).values()) {
+      const { shader, shaderSize } = group[0];
+      let style = lavaStyleFor(shader, data?.shaders[shader]);
+      let textures: LavaTextures;
+      try {
+        textures = await loadLavaTextures(pack, style, World.anisotropy, cache, owned);
+      } catch (err) {
+        // loadLavaTextures guards each piece; this is the last line.
+        console.warn(`lava: ${shader} textures failed, stand-in look`, err);
+        style = { ...FALLBACK_LAVA_STYLE, key: `stand-in:${shader}` };
+        textures = standInLavaTextures();
+      }
+      // Travelled while the textures came: touch nothing.
+      if (token !== this.loadToken) return discard();
+      this.buildLavaLook(group, style, shaderSize, textures, { materials, geometries, meshes, heatTables, looks });
+    }
+    if (token !== this.loadToken) return discard();
+    this.commitLava(tables, { materials, geometries, meshes, heatTables, looks, owned });
+  }
+
+  /** One look's tables as one merged mesh; a look that fails is left out on its own and never stops the rest. */
+  private buildLavaLook(group: SwgWaterTable[], style: LavaStyle, shaderSize: number, textures: LavaTextures, out: { materials: LavaMaterial[]; geometries: THREE.BufferGeometry[]; meshes: THREE.Mesh[]; heatTables: LavaHeatTable[]; looks: { style: string; tables: number; textures: LavaTextures['source'] }[] }): void {
+    const shader = group[0].shader;
+    try {
+      const material = createLavaMaterial(style, shaderSize, textures);
+      out.materials.push(material);
+      const parts = group.map((t) => lavaGeometry(t));
+      out.geometries.push(...parts);
+      const drawn = parts.filter((p) => p.index !== null);
+      if (!drawn.length) throw new Error('no table triangulates');
+      const merged = mergeGeometries(drawn);
+      if (!merged) throw new Error('geometries do not merge');
+      out.geometries.push(merged);
+      const mesh = new THREE.Mesh(merged, material);
+      mesh.name = `lava:${shader}`;
+      mesh.castShadow = false;
+      mesh.receiveShadow = false;
+      // Planet-wide bounds: never frustum-tested, and each draw is under a few thousand vertices.
+      mesh.frustumCulled = false;
+      out.meshes.push(mesh);
+      // Only what is drawn shimmers: a table that does not triangulate has nothing for the haze to trace.
+      group.forEach((t, i) => { if (parts[i].index) out.heatTables.push(lavaHeatTable(t, parts[i])); });
+      out.looks.push({ style: style.key, tables: group.length, textures: textures.source });
+    } catch (err) {
+      console.warn(`lava: ${shader} (${group.length} tables) not drawn`, err);
+    }
+  }
+
+  /** Put a finished lava load in the world. Nothing here awaits, so a load that got this far is whole. */
+  private commitLava(tables: SwgWaterTable[], built: { materials: LavaMaterial[]; geometries: THREE.BufferGeometry[]; meshes: THREE.Mesh[]; heatTables: LavaHeatTable[]; looks: { style: string; tables: number; textures: LavaTextures['source'] }[]; owned: THREE.Texture[] }): void {
+    this.dropLava();
+    for (const m of built.meshes) this.scene.add(m);
+    this.localLava.push(...built.meshes);
+    this.lavaMaterials.push(...built.materials);
+    this.lavaGeometries.push(...built.geometries);
+    this.lavaTextures.push(...built.owned);
+    for (const t of tables) this.lavaTables.add(t);
+    this.lavaLooks = built.looks;
+    this.heat?.setLava(built.heatTables);
+    console.info(`lava: ${tables.length} tables in ${built.looks.length} looks (${built.looks.map((l) => `${l.style} ×${l.tables}`).join(', ')})`);
+  }
+
+  /** Every lava piece this planet owns, gone; the heat haze lets go of the tables first, since their geometries go with them. */
+  private dropLava(): void {
+    this.heat?.setLava([]);
+    for (const m of this.localLava) this.scene.remove(m);
+    this.localLava.length = 0;
+    this.forgetMaterials(this.lavaMaterials);
+    for (const m of this.lavaMaterials) m.dispose();
+    this.lavaMaterials.length = 0;
+    for (const g of this.lavaGeometries) g.dispose();
+    this.lavaGeometries.length = 0;
+    // The runtime noise and the stand-in ramp are never in this list: they live for the app.
+    for (const t of this.lavaTextures) t.dispose();
+    this.lavaTextures.length = 0;
+    this.lavaTables.clear();
+    this.lavaLooks = [];
+  }
+
+  /** The lava drawn now and the look every lava material shares (`__debug.lava`). */
+  get lavaStatus(): { tables: number; looks: { style: string; tables: number; textures: LavaTextures['source'] }[]; intensity: number; glow: number; glowFrom: number; glowTo: number; axes: 'xyz' | 'xzy' } {
+    const e = LAVA_LOOK.axes.value.elements;
+    return {
+      tables: this.lavaTables.size,
+      looks: this.lavaLooks.map((l) => ({ ...l })),
+      intensity: LAVA_LOOK.intensity.value,
+      glow: LAVA_LOOK.glow.value,
+      glowFrom: LAVA_LOOK.glowFrom.value,
+      glowTo: LAVA_LOOK.glowTo.value,
+      axes: e[4] === 1 ? 'xyz' : 'xzy',
+    };
+  }
+
+  /** Writes LAVA_LOOK; a threshold change recomputes every lava material's far values. */
+  setLavaLook(look: { intensity?: number; glow?: number; glowFrom?: number; glowTo?: number; axes?: 'xyz' | 'xzy' }): void {
+    const num = (v: number | undefined) => v !== undefined && Number.isFinite(v);
+    if (num(look.intensity)) LAVA_LOOK.intensity.value = look.intensity!;
+    if (num(look.glow)) LAVA_LOOK.glow.value = look.glow!;
+    const thresholds = num(look.glowFrom) || num(look.glowTo);
+    if (num(look.glowFrom)) LAVA_LOOK.glowFrom.value = look.glowFrom!;
+    if (num(look.glowTo)) LAVA_LOOK.glowTo.value = look.glowTo!;
+    // Rows of the matrix: 'xzy' feeds the world's z to the noise's y and y to its z.
+    if (look.axes === 'xyz') LAVA_LOOK.axes.value.identity();
+    else if (look.axes === 'xzy') LAVA_LOOK.axes.value.set(1, 0, 0, 0, 0, 1, 0, 1, 0);
+    if (thresholds) for (const m of this.lavaMaterials) refreshLavaFar(m);
   }
 
   /** Find a comfortable spot near the origin: dry, gentle slope. */
@@ -2060,6 +2199,8 @@ export class World {
     this.spaceBodies?.position.copy(camPos);
     this.waterTime += dt;
     for (const m of this.waterMaterials) m.userData.uniforms.uTime.value = this.waterTime;
+    // Modulo the shader's own loop, whose flow × loopTime is whole: the noise wraps without a seam.
+    for (const m of this.lavaMaterials) m.uniforms.uFlowTime.value = this.waterTime % m.userData.loopTime;
     this.emitRipples(dt, playerPos);
     this.emitDust(dt);
     if (this.waterMaterials.length) updateWaterDepth(playerPos.x, playerPos.z, (x, z) => this.terrain.heightIfCached(x, z, FAR_TILE, FAR_RES));

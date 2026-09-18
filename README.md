@@ -304,6 +304,7 @@ Every converted model carries its normal map: the converter reads the shader's `
 | `bind('crouch', 'KeyV')`, `bindings()`, `resetBindings()` | Key bindings, kept in local storage |
 | `connect('ws://host:8787')`, `disconnect()`, `peers()`, `status()` | The relay |
 | `particles(30, true)`, `water()`, `await waterFx({ env: 'shader' })`, `flora()`, `cell()`, `scene()`, `player()` | Effects; the water surface's height at a point; every water body with the shader it came from, its colour, opacity, ripple, drift, what it reflects and whether it is on screen (`waterFx({ env: 'shader' })` makes every body reflect its own shader's cube map, `{ env: 'sky' }` the area's day and night map, `{ envIntensity }` changes how hard it mirrors); flora, the portal cell you are in, the scene, the player's state |
+| `lava()`, `lava({ intensity, glow, glowFrom, glowTo, axes })` | The lava drawn now: tables, and each look with where its textures came from (`client`, `partial` when a piece fell back, `stand-in` for a pack converted before the lava look); with an argument, tunes the look every lava material shares (brightness, how far the veins glow, which veins glow) or reads the client's texture coordinate the other way round (`axes: 'xzy'`, `'xyz'` restores) |
 
 **Common problems.**
 
@@ -377,7 +378,7 @@ npm run swg -- mobiles @SWG assets-private --retail-only                        
 npm run swg -- weapons @SWG assets-private --retail-only                         #    every weapon, for the rack on B
 npm run swg -- ships @SWG assets-private --retail-only                           #    every player ship, with its interior, for the garage on G
 npm run swg -- space @SWG all assets-private --retail-only                        #    every space zone: stations, asteroid fields, planets and sky, for flying up from a planet
-npm run swg -- water @SWG all assets-private --retail-only                        #    each planet's own water: the colour, opacity, ripples and drift of every lake and sea
+npm run swg -- water @SWG all assets-private --retail-only                        #    each planet's own water: the colour, opacity, ripples and drift of every lake and sea, and each lava shader's look
 npm run swg -- status assets-private                                              # 8. what is in place, and the command for anything missing
 npm run dev                                                                       # 9. play
 ```
@@ -390,7 +391,7 @@ Step 3 also accepts one planet at a time (`snapshot @SWG tatooine assets-private
 | --- | --- |
 | Ground textures, terrain rules, building layers, the sky | `terrain @SWG all assets-private --retail-only` (refreshes every existing pack in seconds) |
 | Just the sky: sun, moons, stars, colour ramps, skybox, reflection maps, the weather effects and sounds | `sky @SWG all assets-private --retail-only` |
-| Just the water: each lake's and sea's colour, opacity, ripple, drift and reflection map | `water @SWG all assets-private --retail-only` (seconds; `terrain` does it too) |
+| Just the water: each lake's and sea's colour, opacity, ripple, drift and reflection map, and each lava flow's look (a pack converted before the lava look draws a stand-in, and both the console and `status` ask for this command) | `water @SWG all assets-private --retail-only` (seconds; `terrain` does it too) |
 | Reflective metal and glass on buildings and props | `snapshot @SWG <planet> assets-private/<planet> --center=auto --radius=all --retail-only` (the shine is baked into each model's textures) |
 | Buildings, objects, flora, a new planet | `snapshot @SWG <planet> assets-private/<planet> --center=auto --radius=all --retail-only` |
 | Named places on the galaxy map | `pois @SWG all assets-private --retail-only` |

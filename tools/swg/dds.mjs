@@ -1,6 +1,6 @@
 // DirectDraw Surface decoder for the formats the SWG client uses:
 // DXT1/DXT3/DXT5 block compression and uncompressed masked RGB(A) / luminance.
-// Returns the top mip level as RGBA8.
+// Returns the top mip level as RGBA8; an 8-bit luminance volume comes back as its bytes (decodeDdsVolume).
 
 function rgb565(v) {
   return [((v >> 11) & 31) * 255 / 31, ((v >> 5) & 63) * 255 / 63, (v & 31) * 255 / 31];
@@ -93,6 +93,25 @@ export function decodeDdsCube(buf) {
   const faces = [];
   for (let f = 0; f < 6; f++) faces.push(decodeDds(buf, 128 + f * faceBytes));
   return { size: width, faces };
+}
+
+/**
+ * A volume texture's top level (DDSCAPS2_VOLUME): width × height × depth texels, x fastest, then y, then z,
+ * the order WebGL's texImage3D takes. Only 8-bit luminance is read (the client's noise volumes); anything else throws.
+ */
+export function decodeDdsVolume(buf) {
+  if (buf.length < 128 || buf.toString('latin1', 0, 4) !== 'DDS ') throw new Error('Not a DDS file');
+  if ((buf.readUInt32LE(112) & 0x200000) === 0) throw new Error('Not a volume DDS');
+  const pfFlags = buf.readUInt32LE(80);
+  const bitCount = buf.readUInt32LE(88);
+  if ((pfFlags & 0x20000) === 0 || bitCount !== 8) throw new Error(`Unsupported volume format (flags 0x${pfFlags.toString(16)}, ${bitCount}-bit); only 8-bit luminance is read`);
+  const height = buf.readUInt32LE(12);
+  const width = buf.readUInt32LE(16);
+  const depth = buf.readUInt32LE(24);
+  const bytes = width * height * depth;
+  if (!bytes) throw new Error(`Empty volume ${width}x${height}x${depth}`);
+  if (buf.length < 128 + bytes) throw new Error(`Volume ${width}x${height}x${depth} needs ${bytes} bytes, the file has ${buf.length - 128}`);
+  return { width, height, depth, data: new Uint8Array(buf.subarray(128, 128 + bytes)) };
 }
 
 export function decodeDds(buf, dataOffset = 128) {

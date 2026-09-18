@@ -13,6 +13,26 @@ export interface WaterCubeInfo {
   mean: string;
 }
 
+/** A lava shader's look as the converter wrote it (water.json, `lava`): the client's MATL and TFNS values and where its textures went. */
+export interface WaterLavaInfo {
+  /** Seconds; the flow's time is taken modulo this, and flow × loopTime is whole, so the loop has no seam. */
+  loopTime: number;
+  /** Noise texture units per second. */
+  flow: [number, number, number];
+  colorScale: number;
+  colorBias: number;
+  /** Noise repeats per shader size. */
+  tcScale: number;
+  /** The shader's bloom texture factor (red), or null when it had none. */
+  textureFactor: number | null;
+  /** The colour ramp's top row, RGBA bytes in base64. */
+  ramp: { width: number; rgba: string } | null;
+  /** The crust, a pack-relative PNG. */
+  mix: string | null;
+  /** The noise volume, a pack-relative file of width × height × depth bytes. */
+  noise: { file: string; size: [number, number, number] } | null;
+}
+
 /** One water shader as the converter read it. */
 export interface WaterShaderInfo {
   file?: string;
@@ -32,7 +52,12 @@ export interface WaterShaderInfo {
   cube?: WaterCubeInfo;
   cubeMissing?: string;
   missing?: boolean;
-  /** The heat design adds `lava` here; readWaterPack keeps unknown fields untouched. */
+  /**
+   * A lava shader's look, exactly as written (null when its MATL could not be read). readWaterPack
+   * does not check it: read it through lavaStyle.ts's readLavaInfo, which never throws.
+   */
+  lava?: WaterLavaInfo | null;
+  /** readWaterPack keeps unknown fields untouched. */
   [extra: string]: unknown;
 }
 
@@ -77,7 +102,7 @@ function readCube(v: unknown): WaterCubeInfo | undefined {
  * water.json read leniently, never throwing: null unless it is an object with an object `shaders`.
  * An entry is kept when it is an object whose `kind` is 'water' or 'lava'; a colour that is not
  * "#rrggbb", or a number that is not finite, is dropped from its entry; a cube without six string
- * faces is dropped. Unknown fields (the heat design's `lava`) are kept as they are.
+ * faces is dropped. The `lava` block and unknown fields are kept as they are.
  */
 export function readWaterPack(json: unknown): WaterPackData | null {
   if (!isObject(json) || !isObject(json.shaders)) return null;
@@ -85,8 +110,8 @@ export function readWaterPack(json: unknown): WaterPackData | null {
   for (const [key, raw] of Object.entries(json.shaders)) {
     if (!isObject(raw)) continue;
     if (raw.kind !== 'water' && raw.kind !== 'lava') continue;
-    // Unknown fields (the heat design's `lava`) ride along untouched; the known ones are re-read
-    // and dropped when they are the wrong shape.
+    // The lava block and any unknown fields ride along untouched (readLavaInfo checks the lava
+    // block where it is used); the known ones are re-read and dropped when they are the wrong shape.
     const out = { ...raw } as WaterShaderInfo;
     out.kind = raw.kind;
     out.waterTypes = Array.isArray(raw.waterTypes) ? raw.waterTypes.filter((t): t is number => typeof t === 'number' && Number.isFinite(t)) : [];
