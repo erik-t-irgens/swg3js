@@ -1079,6 +1079,44 @@ export function unitState(record, { sig, source }, sizeOf) {
   return record.sig !== sig ? 'stale' : 'current';
 }
 
+/**
+ * Why a model can fail that no run on the same archives can mend: the game's own appearance is
+ * stripped at every detail level, so there is nothing to convert. Every other reason (an unreadable
+ * file, an exception, a run stopped part way) may go the next time and stays work to do.
+ */
+export const PERMANENT_FAILURE = /^no mesh survived$/;
+
+/**
+ * The catalogue's model failures that no rerun on the same archives can mend, by appearance id:
+ * a reason `PERMANENT_FAILURE` names, for an appearance the catalogue still plans, recorded from the
+ * archives the catalogue was made from and (when the failure carries it) for the unit signature it
+ * plans now. A failure from other archives, or for other inputs, is not permanent: the archives or
+ * the appearance changed, and a run may convert it now. A failure written before failures carried
+ * their stamps is judged by the catalogue's own source, since every run writes the list afresh.
+ */
+export function permanentFailures(catalogue) {
+  const key = catalogue?.options?.source?.key ?? null;
+  const out = new Map();
+  if (!key) return out;
+  for (const f of catalogue?.failed ?? []) {
+    if (f?.what !== 'model' || !PERMANENT_FAILURE.test(String(f.why ?? ''))) continue;
+    const app = catalogue.appearances?.[f.id];
+    if (!app) continue;
+    if ((f.source ?? key) !== key) continue;
+    if (f.sig !== undefined && f.sig !== null && f.sig !== app.sig) continue;
+    out.set(f.id, f);
+  }
+  return out;
+}
+
+/**
+ * The units a status count takes as work to do: every unit not current, except a model that is
+ * missing because it is a permanent failure (listed apart, so it is not hidden).
+ */
+export function unitsToDo(units, permanent) {
+  return units.filter((u) => u.state !== 'current' && !(u.kind === 'model' && u.state === 'missing' && permanent.has(u.id)));
+}
+
 /** Every unit a catalogue names, with the record that says whether it is current. */
 export function unitList(catalogue) {
   const out = [];
@@ -1615,7 +1653,9 @@ export function runMobiles(ctx) {
         log(`  parts ${id}: ${info.meshes.length} meshes, ${info.recipes ?? 0} colour recipes, ${mb(bytes)}`);
       }
     } catch (err) {
-      failed.push({ what: 'model', id, why: err.message });
+      // With the unit's signature and the archives it was tried on, so a permanent failure
+      // (`permanentFailures`) is only taken as one for the same inputs from the same archives.
+      failed.push({ what: 'model', id, why: err.message, sig: a.sig, source: plan.source?.key ?? null });
       warn(`  model ${id}: ${err.message}`);
     }
     convert.clearCaches();

@@ -29,6 +29,7 @@ import type { PostFX } from '../postfx';
 import { createFxQuad, FX_CAMERA, NO_PRODUCTS, type FxDebugTexture, type FxPass, type FxWarmItem } from './pass';
 import { applyFxStencil, GeometryProduct } from './geometry';
 import { FX_EDGE_FADE, FX_IGN, FX_LINEARIZE, FX_OCT, FX_VIEW_POS } from './glsl';
+import { waterReflectionsWhy } from './waterMath';
 
 /** Effects time with no draw after which the mask's full-size targets are given back. */
 const MASK_RELEASE_SECONDS = 10;
@@ -104,6 +105,11 @@ export class WaterMaskProduct extends GeometryProduct {
   /** r the weight a traced colour gets. */
   get traced(): THREE.Texture {
     return this.target.textures[2];
+  }
+
+  /** Whether the reflections' setting (or a console override) asks for them now. */
+  get reflectionsWanted(): boolean {
+    return this.postfx.passWanted('waterReflections');
   }
 
   /** Whether the targets hold storage on the card now. */
@@ -536,12 +542,9 @@ export class WaterReflectionsPass implements FxPass {
   }
 
   reason(_ctx: FxFrameContext): string | null {
-    // Its setting (or a console override) is off: the chain's own words say so.
-    if (!this.source.wanted) return null;
-    if (this.source.underwater) return 'camera under water';
-    if (!this.source.inView) return 'no water in view';
-    if (!this.source.active) return 'not wanted when the frame began';
-    return null;
+    // Null only while its setting (or a console override) is off: the chain's own words say so.
+    const s = this.source;
+    return waterReflectionsWhy({ wantedNow: this.mask.reflectionsWanted, wanted: s.wanted, underwater: s.underwater, inView: s.inView, active: s.active });
   }
 
   prepare(ctx: FxFrameContext): void {

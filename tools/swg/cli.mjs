@@ -104,6 +104,7 @@ import { localize, parseDatatable } from './datatable.mjs';
 import { mountCreatures, riderPoseFor } from './mounts.mjs';
 import * as M from './mobiles.mjs';
 import * as MS from './mobilescan.mjs';
+import { finestLevelWithGeometry } from './lmglevel.mjs';
 import { createRequire } from 'node:module';
 
 /** Named places per planet (see regions/build.mjs). */
@@ -934,13 +935,14 @@ function writeSpeciesIndex(outRoot) {
  */
 function convertWearableMesh(vfs, meshPath, { skeleton, skin, outDir, ctx, info, recipes, recipeKeys, registry }) {
   let name = meshPath;
+  let parsed = null;
   if (/\.lmg$/i.test(name)) {
     if (!vfs.has(name)) return null;
-    const lods = parseLmg(readIff(vfs, name));
-    name = lods.find((l) => vfs.has(l)) ?? lods[0];
+    // The finest level with geometry: a level the game's own archives hold stripped is passed over.
+    ({ file: name, mgn: parsed } = finestLevelWithGeometry(parseLmg(readIff(vfs, name)), { has: (l) => vfs.has(l), load: (l) => parseMgn(readIff(vfs, l)) }));
   }
   if (!name || !vfs.has(name)) return null;
-  const mgn = parseMgn(readIff(vfs, name));
+  const mgn = parsed ?? parseMgn(readIff(vfs, name));
   const { groups } = skinnedPrimitives(mgn, skeleton);
   const meshName = basename(name).replace(/\.[^.]+$/, '');
   const textures = new Map();
@@ -1144,20 +1146,21 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
   for (const source of sources) {
     for (const name of source.sat.meshes) {
       let file = name;
+      let parsed = null;
       if (/\.lmg$/i.test(file)) {
         if (!vfs.has(file)) {
           info.missing.push(file);
           continue;
         }
-        const lods = parseLmg(readIff(vfs, file));
-        file = lods.find((l) => vfs.has(l)) ?? lods[0];
+        // The finest level with geometry: a level the game's own archives hold stripped is passed over.
+        ({ file, mgn: parsed } = finestLevelWithGeometry(parseLmg(readIff(vfs, file)), { has: (l) => vfs.has(l), load: (l) => parseMgn(readIff(vfs, l)) }));
       }
       if (!file || !vfs.has(file)) {
         info.missing.push(file ?? name);
         continue;
       }
       try {
-        loaded.push({ mgn: parseMgn(readIff(vfs, file)), file, body: source.body });
+        loaded.push({ mgn: parsed ?? parseMgn(readIff(vfs, file)), file, body: source.body });
       } catch (err) {
         info.skipped.push(`${file}: ${err.message}`);
       }
@@ -1754,7 +1757,10 @@ function packStatus(dir) {
     if (noSpecies.length) need(`species <swg-dir> ${dir} --retail-only`, `dressed NPCs need the species ${noSpecies.join(', ')}`);
     // Then the mobiles run that fills the rest; one command, with every reason it is needed.
     const rerun = `mobiles <swg-dir> ${dir} --retail-only --skip-existing`;
-    const toDo = units.filter((u) => u.state !== 'current').length;
+    // A model the game's own archives cannot give fails again on every rerun: listed, never counted as work.
+    const permanent = M.permanentFailures(mobiles);
+    if (permanent.size) console.log(`  mobiles: ${permanent.size} model${permanent.size === 1 ? '' : 's'} the game's own archives cannot give, not counted as work: ${[...permanent.values()].map((f) => `${f.id} (${f.why})`).join(', ')}`);
+    const toDo = M.unitsToDo(units, permanent).length;
     const o = mobiles.options;
     const partial = [o.only && `--only=${o.only.join(',')}`, o.match && `--match=${o.match}`, o.limit && `--limit=${o.limit}`].filter(Boolean).join(' ');
     if (absent.length) need(rerun, 'after the wardrobes, so the NPC outfits are matched to them');

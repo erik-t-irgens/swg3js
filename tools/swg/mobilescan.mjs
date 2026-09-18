@@ -5,6 +5,7 @@
 import { childOf, childrenOf, isForm, parseIff } from './iff.mjs';
 import { R, mergeSkeletons, parseAnimation, parseLmg, parseMgn, parseSat, parseSkeleton, readIff } from './skeletal.mjs';
 import { readTemplate, stringParam } from './objtemplate.mjs';
+import { finestLevelWithGeometry } from './lmglevel.mjs';
 import { parseStringTable } from './datatable.mjs';
 import { parseBlueprint } from './texrender.mjs';
 import { riderPoseFor } from './mounts.mjs';
@@ -236,13 +237,16 @@ export function scanAppearance(vfs, satPath, caches = {}) {
   let any = false;
   for (const name of sat.meshes) {
     let file = norm(name);
+    let parsed = null;
     if (/\.lmg$/.test(file)) {
       if (!vfs.has(file)) {
         out.missing.push(file);
         continue;
       }
-      const lods = parseLmg(readIff(vfs, file));
-      file = norm(lods.find((l) => vfs.has(l)) ?? lods[0] ?? '');
+      // The level the conversion takes: the finest with geometry (`lmglevel.mjs`).
+      const pick = finestLevelWithGeometry(parseLmg(readIff(vfs, file)), { has: (l) => vfs.has(l), load: (l) => parseMgn(readIff(vfs, l)) });
+      file = norm(pick.file ?? '');
+      parsed = pick.mgn;
     }
     if (!file || !vfs.has(file)) {
       out.missing.push(file || name);
@@ -250,7 +254,7 @@ export function scanAppearance(vfs, satPath, caches = {}) {
     }
     let mgn;
     try {
-      mgn = parseMgn(readIff(vfs, file));
+      mgn = parsed ?? parseMgn(readIff(vfs, file));
     } catch (err) {
       out.missing.push(`${file}: ${err.message}`);
       continue;
