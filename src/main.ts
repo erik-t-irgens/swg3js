@@ -1891,6 +1891,8 @@ class App {
   }
 
   private setClass(id: ClassId): void {
+    // Leaving the Bounty Hunter: a flame held at the switch stops, heat and effect, since its kit stops updating.
+    if (this.kit?.id === 'bounty_hunter' && id !== 'bounty_hunter') this.hunterKit().coolDown();
     this.kit = this.kitFor(id);
     this.player.setClass(id);
     this.player.speedMultiplier = 1;
@@ -2981,6 +2983,8 @@ class App {
     room.toWorld(p.pos, tmp);
     const lv = v.body.linvel();
     p.leave();
+    // A flame held in the room lived in the hull's frame, which may be gone: its heat and its effect stop.
+    (this.kits.bounty_hunter as BountyHunterKit | undefined)?.coolDown();
     p.fling(tmp, tmp2.set(lv.x, lv.y, lv.z));
     p.takeDamage(20);
     this.hud.hurt();
@@ -2999,6 +3003,8 @@ class App {
     const v = room.vehicle;
     room.toWorld(p.pos, tmp);
     p.leave();
+    // A flame held in the room lived in the hull's frame: it stops, and a trigger still held places it again outside.
+    (this.kits.bounty_hunter as BountyHunterKit | undefined)?.coolDown();
     room.reveal(false);
     if (!fell) {
       v.quaternion(tmpQ);

@@ -3,7 +3,8 @@ import { RAPIER } from '../core/physics';
 import { GUNS, gunTypeFor, type FireMode, type GunProfile } from './guns';
 import type { BoltFrame } from './bolts';
 import type { Hittable, Kit, KitContext, KitSlot, Living, Resource } from './kit';
-import type { EffectHandle } from '../world/particles';
+import type { EffectHandle, ParticleEffects } from '../world/particles';
+import { plumeNoiseFrequency, type HeatPlumeSink } from '../world/heatSources';
 import { DEFAULT_GADGETS, GADGETS, gadgetById, type GadgetDef, type GrenadeSpec } from './gadgets';
 import { SLOT_ACTIONS, SLOT_COUNT } from './forcePowers';
 import { Unarmed } from './unarmed';
@@ -64,6 +65,13 @@ const hullInverse = new THREE.Matrix4();
 const ONE = new THREE.Vector3(1, 1, 1);
 const Z = new THREE.Vector3(0, 0, 1);
 const UP = new THREE.Vector3(0, 1, 0);
+/** A hull-frame point and direction carried into the world (`toWorld`, `heatPlumes`). */
+const worldAt = new THREE.Vector3();
+const worldAlong = new THREE.Vector3();
+/** How fast the air in a flame thrower's cone flows out from the muzzle, metres a second: the heat haze's noise follows it. */
+const FLAME_FLOW = 7;
+/** A held flame not stamped within this many milliseconds gives no heat: the step that held it did not run. */
+const FLAME_STALE_MS = 100;
 
 /**
  * The bounty hunter: a gun with two triggers (see guns.ts for what each kind does on each), and the
@@ -93,8 +101,14 @@ export class BountyHunterKit implements Kit {
   private charging: 'primary' | 'alt' | null = null;
   private chargeTime = 0;
   private lastProfile: GunProfile | null = null;
-  /** A stream's or beam's effect at the muzzle while the trigger is held. */
-  private held: { fx: EffectHandle; which: 'primary' | 'alt' } | null = null;
+  /** A stream's or beam's effect at the muzzle while the trigger is held, and the effects it was placed in (so it can be dropped without a frame's context). */
+  private held: { fx: EffectHandle; which: 'primary' | 'alt'; owner: ParticleEffects } | null = null;
+  /**
+   * The held flame thrower's cone, for the heat haze: where it leaves and which way (in the hull's
+   * frame aboard, `frame` being that hull's live matrix), how far and wide it reaches, its noise
+   * phase, and `stamp`, performance.now() of the last stream() that held it.
+   */
+  private readonly flame = { active: false, stamp: 0, at: new THREE.Vector3(), along: new THREE.Vector3(), frame: null as THREE.Matrix4 | null, range: 6, width: 1.3, phase: 0 };
   private readonly charges: Charge[] = [];
   private readonly clouds: Cloud[] = [];
   private readonly unarmed = new Unarmed();
@@ -413,7 +427,16 @@ export class BountyHunterKit implements Kit {
       case 'blast':
         if (held && ready) {
           tmp.copy(player.pos).y += 1;
-          this.blast(ctx, tmp, mode.splash?.damage ?? mode.damage, mode.splash?.radius ?? 5, mode, mode.push);
+          const room = player.aboard;
+          if (room) {
+            // Aboard, `pos` is in the hull's frame: the pulse is drawn and lit where the hull carries it,
+            // and nothing is swept, since nothing in the room is a target (as with a shot fired aboard).
+            tmp.applyMatrix4(room.vehicle.group.matrixWorld);
+            const radius = mode.splash?.radius ?? 5;
+            effects.ring(tmp, mode.color, radius * 2.5, 0.4);
+            effects.burst(tmp, 0xffc080, radius * 0.6, 0.3);
+            effects.flash(tmp, mode.color, 30 + (mode.splash?.damage ?? mode.damage) * 0.3, radius * 4, 0.25);
+          } else this.blast(ctx, tmp, mode.splash?.damage ?? mode.damage, mode.splash?.radius ?? 5, mode, mode.push);
           cool(mode.fireTime);
         }
         return false;
@@ -559,44 +582,119 @@ export class BountyHunterKit implements Kit {
     effects.flash(end, mode.color, 10, 6, 0.1);
   }
 
-  /** A cone of harm ahead while the trigger is held (a flame, an acid spray): what stands in it is hurt each frame and burns on. */
+  /** A hull-frame point and direction (aim()'s) carried into the world, into `worldAt` and `worldAlong`: unchanged on foot. */
+  private toWorld(ctx: KitContext, at: THREE.Vector3, along: THREE.Vector3): void {
+    worldAt.copy(at);
+    worldAlong.copy(along);
+    const room = ctx.player.aboard;
+    if (room) {
+      const m = room.vehicle.group.matrixWorld;
+      worldAt.applyMatrix4(m);
+      worldAlong.transformDirection(m);
+    }
+  }
+
+  /**
+   * A cone of harm ahead while the trigger is held (a flame, an acid spray): what stands in it is hurt
+   * each frame and burns on. Aboard, the cone is in the hull's frame and nothing in the room is a
+   * target (the same rule as a hitscan shot); the pack's effect is placed in that frame and the light
+   * and the puffs are carried out of it.
+   */
   private stream(ctx: KitContext, mode: FireMode, which: 'primary' | 'alt'): void {
     const { dt, player, world, effects } = ctx;
     this.aim(ctx);
     const cone = mode.cone ?? { range: 5, angle: 20 };
     const cos = Math.cos((cone.angle * Math.PI) / 180);
-    for (const c of this.targets(ctx)) {
-      if (c.dead) continue;
-      tmp.copy(c.pos).y += c.halfHeight;
-      tmp.sub(muzzle);
-      const d = tmp.length();
-      if (d > cone.range + c.halfHeight) continue;
-      if (d > 0.5 && tmp.divideScalar(d).dot(aimDir) < cos) continue;
-      c.damage(mode.damage * dt, player.pos, 0, world.playerTarget);
-      this.afflict(ctx, c, mode);
-      if (mode.push > 0 && Math.random() < dt * 2) c.damage(0, player.pos, mode.push, world.playerTarget);
-    }
-    for (const t of world.turrets.turrets) {
-      tmp.copy(t.pos).sub(muzzle);
-      const d = tmp.length();
-      if (d > cone.range || (d > 0.5 && tmp.divideScalar(d).dot(aimDir) < cos)) continue;
-      t.damage(mode.damage * dt);
+    if (!player.aboard) {
+      for (const c of this.targets(ctx)) {
+        if (c.dead) continue;
+        tmp.copy(c.pos).y += c.halfHeight;
+        tmp.sub(muzzle);
+        const d = tmp.length();
+        if (d > cone.range + c.halfHeight) continue;
+        if (d > 0.5 && tmp.divideScalar(d).dot(aimDir) < cos) continue;
+        c.damage(mode.damage * dt, player.pos, 0, world.playerTarget);
+        this.afflict(ctx, c, mode);
+        if (mode.push > 0 && Math.random() < dt * 2) c.damage(0, player.pos, mode.push, world.playerTarget);
+      }
+      for (const t of world.turrets.turrets) {
+        tmp.copy(t.pos).sub(muzzle);
+        const d = tmp.length();
+        if (d > cone.range || (d > 0.5 && tmp.divideScalar(d).dot(aimDir) < cos)) continue;
+        t.damage(mode.damage * dt);
+      }
     }
     this.holdEffect(ctx, mode, which, muzzle, aimDir);
+    this.toWorld(ctx, muzzle, aimDir);
     // Without the pack's flame, the stream is puffs of light along the cone.
     if (!this.held) {
-      tmp.copy(muzzle).addScaledVector(aimDir, 1 + Math.random() * (cone.range - 1));
+      tmp.copy(worldAt).addScaledVector(worldAlong, 1 + Math.random() * (cone.range - 1));
       effects.burst(tmp, mode.color, 0.5 + Math.random() * 0.6, 0.25);
     }
-    effects.flash(muzzle, mode.color, 10, 6, 0.06);
+    effects.flash(worldAt, mode.color, 10, 6, 0.06);
     player.shotFired();
+    // The flame's cone for the heat haze, stamped so a step that does not run leaves it cold.
+    const f = this.flame;
+    if (mode.effect === 'flame') {
+      f.active = true;
+      f.stamp = performance.now();
+      f.at.copy(muzzle);
+      f.along.copy(aimDir);
+      f.frame = player.aboard ? player.aboard.vehicle.group.matrixWorld : null;
+      f.range = cone.range;
+      f.width = Math.min(1.6, cone.range * Math.tan((cone.angle * Math.PI) / 180) * 0.55);
+      f.phase = (f.phase + dt * FLAME_FLOW * plumeNoiseFrequency(f.width)) % 1;
+    } else f.active = false;
+  }
+
+  /**
+   * The flame held this frame as a plume, carried out of the hull's frame aboard at the moment it is
+   * drawn. A flame not held within the last 100 ms gives nothing: the step that fires and the frame
+   * that draws run together, so a held flame is under a millisecond old when asked, and a frame that
+   * does not simulate (a menu, the map, a panel, dying) leaves the stamp behind at once, as does
+   * travel, whose hull may be gone.
+   */
+  heatPlumes(sink: HeatPlumeSink, now: number): void {
+    const f = this.flame;
+    if (!f.active || now - f.stamp > FLAME_STALE_MS) return;
+    worldAt.copy(f.at);
+    worldAlong.copy(f.along);
+    if (f.frame) {
+      worldAt.applyMatrix4(f.frame);
+      worldAlong.transformDirection(f.frame);
+    }
+    sink.push(worldAt.x, worldAt.y, worldAt.z, worldAlong.x, worldAlong.y, worldAlong.z, f.range * 1.15, 0.12, f.width, 1.4, f.phase);
+  }
+
+  /** Forget the flame (a class switch, leaving a ship): the heat stops and the held effect goes, even if no stream() comes to stop them. */
+  coolDown(): void {
+    this.flame.active = false;
+    this.flame.frame = null;
+    this.dropHeldEffect();
   }
 
   /** A line held on the nearest thing ahead (lightning): hurt each frame, staggered, and the shock jumps to what stands near it. */
   private beam(ctx: KitContext, mode: FireMode, which: 'primary' | 'alt'): void {
     const { dt, player, effects, world } = ctx;
+    // Only one trigger runs a frame, so a flame let go for the lightning is cold at once, not 100 ms later.
+    this.flame.active = false;
     this.aim(ctx);
     const cone = mode.cone ?? { range: 25, angle: 8 };
+    const room = player.aboard;
+    if (room) {
+      // Aboard: the line runs to the room's own wall (nothing in the room is a target, and nothing
+      // jumps), in the hull's frame, and is drawn and lit where the hull carries it.
+      const hit = room.physics.world.castRay(new RAPIER.Ray(muzzle, aimDir), cone.range, true);
+      end.copy(muzzle).addScaledVector(aimDir, hit ? hit.timeOfImpact : cone.range);
+      const m = room.vehicle.group.matrixWorld;
+      worldAt.copy(muzzle).applyMatrix4(m);
+      tmp.copy(end).applyMatrix4(m);
+      ctx.bolts.beam(worldAt, tmp, mode.color, 0.08, 1);
+      this.holdEffect(ctx, mode, which, muzzle, aimDir);
+      effects.flash(tmp, mode.color, 12, 8, 0.06);
+      player.shotFired();
+      return;
+    }
     const target = this.targetAhead(ctx, cone.range, Math.cos((cone.angle * Math.PI) / 180));
     if (target) {
       end.copy(target.pos).y += target.halfHeight;
@@ -628,23 +726,39 @@ export class BountyHunterKit implements Kit {
     player.shotFired();
   }
 
-  /** The pack's effect for a held trigger, placed at the muzzle facing `along` and kept there while it lasts. */
+  /**
+   * The pack's effect for a held trigger, placed at the muzzle facing `along` and kept there while it
+   * lasts. `at` and `along` are aim()'s: in the hull's frame aboard, where the effect is placed with
+   * that hull's matrix as its frame, so it stays in the room while the ship flies. Boarding or stepping
+   * out with the trigger held places it again in the new frame.
+   */
   private holdEffect(ctx: KitContext, mode: FireMode, which: 'primary' | 'alt', at: THREE.Vector3, along: THREE.Vector3): void {
     const file = mode.effect ? ctx.weapons?.effect(mode.effect) : null;
     if (!file) return;
-    // The client's beam effects run along their own Y: stood up, they point where the muzzle does.
+    const fxs = ctx.world.weaponFx;
+    const frame = ctx.player.aboard ? ctx.player.aboard.vehicle.group.matrixWorld : null;
+    // The client's beam effects run along their own Y: stood up, they point where the muzzle does
+    // (in the hull's frame aboard, UP being the hull's up).
     placeQ.setFromUnitVectors(UP, along);
     placeM.compose(at, placeQ, ONE);
-    if (this.held && this.held.which === which) ctx.world.weaponFx.move(this.held.fx, placeM);
+    const held = this.held;
+    if (held && held.which === which && held.owner === fxs && held.fx.frame === frame) fxs.move(held.fx, placeM);
     else {
-      this.stopHeld(ctx);
-      this.held = { fx: ctx.world.weaponFx.place(file, placeM, false, false), which };
+      this.dropHeldEffect();
+      this.held = { fx: fxs.place(file, placeM, false, false, frame), which, owner: fxs };
     }
   }
 
-  private stopHeld(ctx: KitContext): void {
+  /** The trigger is let go (or the gun changed): the flame's heat and the held effect both stop. */
+  private stopHeld(_ctx: KitContext): void {
+    // The flame first: without a pack effect `held` is null, and the heat must stop all the same.
+    this.flame.active = false;
+    this.dropHeldEffect();
+  }
+
+  private dropHeldEffect(): void {
     if (!this.held) return;
-    ctx.world.weaponFx.remove(this.held.fx);
+    this.held.owner.remove(this.held.fx);
     this.held = null;
   }
 

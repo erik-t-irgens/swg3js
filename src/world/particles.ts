@@ -126,7 +126,30 @@ export interface EffectHandle {
    * rather than run ahead, never put to sleep for distance, and dropped once it has played out.
    */
   readonly transient: boolean;
+  /**
+   * A frame the effect lives in (a hull's live matrixWorld, by reference), or null for the world. A
+   * framed effect's matrix is in that frame; its particles move in it (gravity is the hull's down)
+   * and are carried into the world when their quads are built, so an effect aboard stays in the room
+   * while the ship flies.
+   */
+  readonly frame: THREE.Matrix4 | null;
+  /** Multiplies every emitter's rate; 0 stops new particles (a one-shot does not fire). Mutable. */
+  rateScale: number;
 }
+
+/**
+ * What kills particles before their time (the weather's roofs and hulls); null for placed effects.
+ * A framed effect is never given one: its particles live in a hull's frame, not the world's.
+ */
+export interface ParticleKill {
+  /** Top surface at x, z (a roof, the ground, a lake's surface): a particle whose quad lies wholly below it, less `slack`, dies. */
+  topAt(x: number, z: number): number;
+  slack: number;
+  /** Particles inside this box (in the hull's own frame, grown by each quad's size) die; null when off. */
+  hull: { toLocal: THREE.Matrix4; min: THREE.Vector3; max: THREE.Vector3 } | null;
+}
+
+type HeightAt = ((x: number, z: number) => number) | null;
 
 const GLOBAL_LOD = [20, 200];
 /** How far past its LOD range an effect keeps simulating before it goes dormant. */
@@ -242,6 +265,10 @@ interface Particle {
   r3: number;
   initialRotation: number;
   alive: boolean;
+  /** The quad's vertical half-extent as last drawn (|length·up.y| + |width·side.y|), for the kill test; 0 before it is first drawn. */
+  reach: number;
+  /** The quad's larger half-size as last drawn, for the kill test's hull box. */
+  extent: number;
 }
 
 interface Batch {
@@ -311,6 +338,9 @@ const camY = new THREE.Vector3();
 const camZ = new THREE.Vector3();
 const camPos = new THREE.Vector3();
 const ONE = new THREE.Vector3(1, 1, 1);
+const tmpKill = new THREE.Vector3();
+const tmpWhere = new THREE.Vector3();
+const tmpRel = new THREE.Matrix4();
 
 /** Mirror a 3x4 row-major transform for the game's X-flipped coordinates (S M S with S = diag(-1,1,1)). */
 export function mirroredTransform(t: number[] | undefined, out: THREE.Matrix4): THREE.Matrix4 {
@@ -345,12 +375,22 @@ class EmitterState {
   constructor(
     readonly def: EmitterDef,
     readonly effect: EffectDef,
-    readonly placement: THREE.Matrix4,
+    readonly handle: EffectHandle,
   ) {
     const rr = def.particle.relativeRotation;
     this.usesRelativeRotation = !!rr && !(isFlatZero(rr[0]) && isFlatZero(rr[1]) && isFlatZero(rr[2]));
     this.maxLife = waveMax(def.lifeTime);
     this.restart();
+  }
+
+  /** Where the effect is placed: the handle's matrix, in the world or in its frame. */
+  get placement(): THREE.Matrix4 {
+    return this.handle.matrix;
+  }
+
+  /** The hull frame the effect lives in, or null for the world. */
+  get frame(): THREE.Matrix4 | null {
+    return this.handle.frame;
   }
 
   restart(): void {
@@ -410,7 +450,7 @@ class EmitterState {
     if (this.frameFirst) this.worldPrev.copy(this.world);
   }
 
-  spawn(count: number, dtSpread: number, heightAt: ((x: number, z: number) => number) | null): void {
+  spawn(count: number, dtSpread: number, heightAt: HeightAt, kill: ParticleKill | null): void {
     const d = this.def;
     const s = this.effect.scale;
     const agePercent = d.oneShot ? 0 : this.agePercent;
@@ -419,7 +459,7 @@ class EmitterState {
     tmpM3.setFromMatrix4(this.world);
     for (let i = 0; i < count; i++) {
       if (this.particles.length >= d.maxParticles) break;
-      const p: Particle = { pos: new THREE.Vector3(), prev: new THREE.Vector3(), vel: new THREE.Vector3(), up: new THREE.Vector3(0, 1, 0), side: new THREE.Vector3(1, 0, 0), age: 0, life: 1, weight: 0, r0: rand(), r1: rand(), r2: rand(), r3: rand(), initialRotation: 1, alive: true };
+      const p: Particle = { pos: new THREE.Vector3(), prev: new THREE.Vector3(), vel: new THREE.Vector3(), up: new THREE.Vector3(0, 1, 0), side: new THREE.Vector3(1, 0, 0), age: 0, life: 1, weight: 0, r0: rand(), r1: rand(), r2: rand(), r3: rand(), initialRotation: 1, alive: true, reach: 0, extent: 0 };
       if (d.direction === 'directional') {
         const spread = (wave(d.spread, agePercent, rand()) * Math.PI) / 180;
         const r1 = rand() < 0.5 ? spread : -spread;
@@ -468,11 +508,11 @@ class EmitterState {
       }
       this.particles.push(p);
       // New particles start part-way through the frame, so a stream stays even at low frame rates.
-      if (dtSpread > 0) this.integrate(p, dtSpread * rand(), heightAt);
+      if (dtSpread > 0) this.integrate(p, dtSpread * rand(), heightAt, kill);
     }
   }
 
-  integrate(p: Particle, dt: number, heightAt: ((x: number, z: number) => number) | null): void {
+  integrate(p: Particle, dt: number, heightAt: HeightAt, kill: ParticleKill | null): void {
     const d = this.def;
     p.age += dt;
     if (p.age > p.life) p.age = p.life;
@@ -496,10 +536,21 @@ class EmitterState {
     } else p.vel.y += fall;
     if ((d.orientation === 'velocity' || d.orientation === 'velocityBank') && p.vel.lengthSq() > 1e-10) p.up.copy(p.vel).normalize();
     if (p.age >= p.life) p.alive = false;
+    // Killed early: wholly under the surface above the ground there (a roof, the ground), or inside a hull's box.
+    if (kill && !d.localSpace && !d.snapToTerrain) {
+      if (p.pos.y + p.reach < kill.topAt(p.pos.x, p.pos.z) - kill.slack) p.alive = false;
+      else if (kill.hull) {
+        tmpKill.copy(p.pos).applyMatrix4(kill.hull.toLocal);
+        const g = p.extent;
+        const lo = kill.hull.min;
+        const hi = kill.hull.max;
+        if (tmpKill.x > lo.x - g && tmpKill.x < hi.x + g && tmpKill.y > lo.y - g && tmpKill.y < hi.y + g && tmpKill.z > lo.z - g && tmpKill.z < hi.z + g) p.alive = false;
+      }
+    }
   }
 
   /** Advance the emitter by `dt` seconds; returns false once it is finished and empty. */
-  update(dt: number, heightAt: ((x: number, z: number) => number) | null, distanceToCamera: number): void {
+  update(dt: number, heightAt: HeightAt, distanceToCamera: number, kill: ParticleKill | null): void {
     const d = this.def;
     this.timeElapsed += dt;
     let createParticles = false;
@@ -516,9 +567,9 @@ class EmitterState {
       }
     } else if (this.frameFirst) this.updateTransform(0);
     this.updateLod(distanceToCamera);
-    if (createParticles) this.createNewParticles(dt, heightAt);
+    if (createParticles) this.createNewParticles(dt, heightAt, kill);
     this.frameFirst = createParticles ? false : this.frameFirst;
-    for (const p of this.particles) if (p.alive) this.integrate(p, dt, heightAt);
+    for (const p of this.particles) if (p.alive) this.integrate(p, dt, heightAt, kill);
     let w = 0;
     for (let i = 0; i < this.particles.length; i++) if (this.particles[i].alive) this.particles[w++] = this.particles[i];
     this.particles.length = w;
@@ -542,9 +593,16 @@ class EmitterState {
     this.lodPercent = span <= 0 ? (distance < max ? 1 : 0) : clamp01(1 - (distance - min) / span);
   }
 
-  private createNewParticles(dt: number, heightAt: ((x: number, z: number) => number) | null): void {
+  private createNewParticles(dt: number, heightAt: HeightAt, kill: ParticleKill | null): void {
     const d = this.def;
     const agePercent = this.agePercent;
+    const scale = this.handle.rateScale;
+    // Stopped: nothing new, a one-shot included; what is already flying lives out its life.
+    if (!(scale > 0)) {
+      this.newParticles = 0;
+      this.accumulatedDistance = 0;
+      return;
+    }
     if (d.oneShot) {
       if (this.particles.length === 0 || d.loopImmediately) {
         const n = randomInt(d.oneShotCount);
@@ -552,16 +610,16 @@ class EmitterState {
       }
     } else {
       const rate = wave(d.rate, agePercent, rand());
-      if (d.generation === 'rate') this.newParticles += dt * this.lodPercent * rate;
+      if (d.generation === 'rate') this.newParticles += dt * this.lodPercent * rate * scale;
       else if (rate > 0) {
-        this.newParticles += Math.sqrt(this.accumulatedDistance / (rate * rate * this.effect.scale)) * this.lodPercent;
+        this.newParticles += Math.sqrt(this.accumulatedDistance / (rate * rate * this.effect.scale)) * this.lodPercent * scale;
         this.accumulatedDistance = 0;
       }
     }
     if (d.firstImmediately && this.frameFirst && this.newParticles < 1) this.newParticles += 1;
     const count = Math.floor(this.newParticles);
     if (count > 0) {
-      this.spawn(count, d.oneShot || (d.firstImmediately && this.frameFirst) ? 0 : dt, heightAt);
+      this.spawn(count, d.oneShot || (d.firstImmediately && this.frameFirst) ? 0 : dt, heightAt, kill);
       this.newParticles -= count;
     }
   }
@@ -588,7 +646,7 @@ class EffectInstance {
     for (const g of def.groups) {
       for (const e of g.emitters) {
         if (!e.visible || e.particle.type !== 'quad' || !e.particle.quad?.texture.file || !e.particle.quad.texture.visible) continue;
-        this.emitters.push(new EmitterState(e, def, handle.matrix));
+        this.emitters.push(new EmitterState(e, def, handle));
         const [lo, hi] = e.lod;
         reach = Math.max(reach, (lo >= -1 && lo < 0) || (hi >= -1 && hi < 0) ? GLOBAL_LOD[1] : lo < 1 || hi < 1 ? GLOBAL_LOD[1] : hi);
         life = Math.max(life, waveMax(e.lifeTime));
@@ -605,11 +663,11 @@ class EffectInstance {
   /** Seconds since placed, for a transient effect's own end. */
   age = 0;
 
-  update(dt: number, heightAt: ((x: number, z: number) => number) | null, distance: number): void {
+  update(dt: number, heightAt: HeightAt, distance: number, kill: ParticleKill | null): void {
     this.age += dt;
     let allDone = this.emitters.length > 0;
     for (const e of this.emitters) {
-      e.update(dt, heightAt, distance);
+      e.update(dt, heightAt, distance, kill);
       if (!e.deletable) allDone = false;
     }
     const transient = this.handle.transient;
@@ -631,6 +689,14 @@ class EffectInstance {
     for (const e of this.emitters) n += e.particles.length;
     return n;
   }
+
+  /** Where the effect stands in the world: its position, carried out of its hull's frame when it has one. */
+  worldPosition(out: THREE.Vector3): THREE.Vector3 {
+    out.copy(this.position);
+    const frame = this.handle.frame;
+    if (frame) out.applyMatrix4(frame);
+    return out;
+  }
 }
 
 /** Plays converted particle effects at placed positions, batching their quads per texture. */
@@ -650,6 +716,8 @@ export class ParticleEffects {
   private disposed = false;
   /** Terrain height lookup for particles that bounce or snap to the ground. */
   heightAt: ((x: number, z: number) => number) | null = null;
+  /** What kills particles early (the weather's); null for placed effects, and never applied to a framed effect. */
+  kill: ParticleKill | null = null;
 
   constructor(
     private readonly scene: THREE.Scene,
@@ -663,10 +731,12 @@ export class ParticleEffects {
   /**
    * Place an effect; `matrix` is its world transform. Returns a handle for `remove` and `move`.
    * A `transient` effect (a bolt, a hit) plays from its start when placed, is never put to sleep
-   * for distance, and is dropped by itself once it has played out.
+   * for distance, and is dropped by itself once it has played out. With a `frame` (a hull's live
+   * matrixWorld, kept by reference) `matrix` is in that frame, and the effect simulates there and is
+   * carried into the world as it is drawn: something played aboard stays in the room while the ship flies.
    */
-  place(file: string, matrix: THREE.Matrix4, contained: boolean, transient = false): EffectHandle {
-    const handle: EffectHandle = { file, matrix: matrix.clone(), contained, transient };
+  place(file: string, matrix: THREE.Matrix4, contained: boolean, transient = false, frame: THREE.Matrix4 | null = null): EffectHandle {
+    const handle: EffectHandle = { file, matrix: matrix.clone(), contained, transient, frame, rateScale: 1 };
     this.pending.add(handle);
     void this.load(file).then((def) => {
       if (this.disposed || !this.pending.delete(handle) || !def) return;
@@ -790,7 +860,11 @@ export class ParticleEffects {
     }
     let active = 0;
     for (const [handle, inst] of this.instances) {
-      const distance = inst.position.distanceTo(camPos);
+      const framed = handle.frame !== null;
+      const distance = inst.worldPosition(tmpWhere).distanceTo(camPos);
+      // A framed effect's particles are in a hull's frame: the planet's ground and the weather's kill mean nothing there.
+      const heightAt = framed ? null : this.heightAt;
+      const kill = framed ? null : this.kill;
       const transient = handle.transient;
       if (!transient && distance > inst.sleepDistance) {
         if (inst.active) {
@@ -806,11 +880,11 @@ export class ParticleEffects {
           // Woken: run the effect ahead so a smoke column is already standing when it comes into view.
           const warm = Math.min(10, inst.maxLife);
           const steps = Math.ceil(warm / MAX_STEP);
-          for (let i = 0; i < steps; i++) inst.update(warm / steps, this.heightAt, distance);
+          for (let i = 0; i < steps; i++) inst.update(warm / steps, heightAt, distance, kill);
         }
       }
       active++;
-      inst.update(dt * (inst.def.playbackRate || 1), this.heightAt, distance);
+      inst.update(dt * (inst.def.playbackRate || 1), heightAt, distance, kill);
       if (transient && inst.finished) {
         // A hit that has played out: gone, so a fight does not pile up spent effects.
         this.instances.delete(handle);
@@ -820,7 +894,9 @@ export class ParticleEffects {
         const tex = e.def.particle.quad!.texture;
         const b = this.batch(tex.file!, tex.blend ?? 'alpha');
         const local = e.def.localSpace;
-        for (const p of e.particles) b.queue.push({ p, e, d: (local ? e.position : p.pos).distanceToSquared(camPos) });
+        // A framed effect's points are hull-local: it sorts as one, by its own distance.
+        if (framed) for (const p of e.particles) b.queue.push({ p, e, d: distance * distance });
+        else for (const p of e.particles) b.queue.push({ p, e, d: (local ? e.position : p.pos).distanceToSquared(camPos) });
       }
     }
     this.activeCount = active;
@@ -859,6 +935,9 @@ export class ParticleEffects {
         tmpM3Local.setFromMatrix4(e.world);
         tmpPos.copy(p.pos).applyMatrix4(e.world);
       } else tmpPos.copy(p.pos);
+      // An effect in a hull's frame is carried into the world here, as the quad is built.
+      const hull = e.frame;
+      if (hull) tmpPos.applyMatrix4(hull);
       switch (d.orientation) {
         case 'velocity': {
           tmpUp.subVectors(p.pos, p.prev);
@@ -867,11 +946,16 @@ export class ParticleEffects {
           tmpUp.normalize();
           tmpSide.copy(p.side);
           if (local) tmpSide.applyMatrix3(tmpM3Local).normalize();
+          if (hull) {
+            tmpUp.transformDirection(hull);
+            tmpSide.transformDirection(hull);
+          }
           break;
         }
         case 'velocityBank': {
           tmpUp.copy(p.up);
           if (local) tmpUp.applyMatrix3(tmpM3Local).normalize();
+          if (hull) tmpUp.transformDirection(hull);
           tmpSide.crossVectors(tmpUp, tmpV.subVectors(camPos, tmpPos));
           if (tmpSide.lengthSq() < 1e-12) tmpSide.copy(camX);
           tmpSide.normalize();
@@ -889,11 +973,14 @@ export class ParticleEffects {
         tmpV2.crossVectors(tmpSide, tmpUp);
         tmpM.makeBasis(tmpSide, tmpV2, tmpUp);
         tmpE.set(wave(rr[0], t, p.r3) * TWO_PI, wave(rr[1], t, p.r3) * TWO_PI, wave(rr[2], t, p.r3) * TWO_PI, 'YXZ');
-        tmpM.multiply(new THREE.Matrix4().makeRotationFromEuler(tmpE));
+        tmpM.multiply(tmpRel.makeRotationFromEuler(tmpE));
         tmpM3.setFromMatrix4(tmpM);
         tmpUp.set(0, 0, 1).applyMatrix3(tmpM3);
         tmpSide.set(1, 0, 0).applyMatrix3(tmpM3);
       }
+      // What the kill test reads next step: how far the quad reaches up and down, and its larger half-size.
+      p.reach = Math.abs(length * tmpUp.y) + Math.abs(width * tmpSide.y);
+      p.extent = Math.max(Math.abs(length), Math.abs(width));
       tmpUp.multiplyScalar(length);
       tmpSide.multiplyScalar(width);
       const o = i * 12;
@@ -950,7 +1037,8 @@ export class ParticleEffects {
     const out: Record<string, unknown>[] = [];
     const cam = this.lastCamera;
     for (const inst of this.instances.values()) {
-      const d = Math.hypot(inst.position.x - x, inst.position.z - z);
+      const at = inst.worldPosition(tmpWhere);
+      const d = Math.hypot(at.x - x, at.z - z);
       if (d > r) continue;
       for (const e of inst.emitters) {
         const tex = e.def.particle.quad!.texture;
@@ -964,7 +1052,10 @@ export class ParticleEffects {
           rampColor(e.def.particle.color, e.def.particle.color.sample === 1 ? p.r3 : t, tmpColor);
           row.first = { x: Math.round(p.pos.x * 10) / 10, y: Math.round(p.pos.y * 10) / 10, z: Math.round(p.pos.z * 10) / 10, age: Math.round(t * 100) / 100, halfLength: Math.round(length * 100) / 100, halfWidth: Math.round((quad.linked ? length : wave(quad.width, t, p.r2) * e.effect.scale) * 100) / 100, alpha: Math.round(wave(e.def.particle.alpha, t, p.r0) * 100) / 100, color: tmpColor.getHexString() };
           if (cam) {
-            tmpV.copy(p.pos).project(cam);
+            tmpV.copy(p.pos);
+            if (e.def.localSpace) tmpV.applyMatrix4(e.world);
+            if (e.frame) tmpV.applyMatrix4(e.frame);
+            tmpV.project(cam);
             (row.first as Record<string, unknown>).screen = tmpV.z < 1 ? `${Math.round((tmpV.x + 1) * 50)}%,${Math.round((1 - tmpV.y) * 50)}%` : 'behind camera';
           }
         }
@@ -978,8 +1069,8 @@ export class ParticleEffects {
   describeNear(x: number, z: number, r: number): { file: string; d: number; x: number; y: number; z: number; playing: boolean; particles: number }[] {
     const out: { file: string; d: number; x: number; y: number; z: number; playing: boolean; particles: number }[] = [];
     for (const inst of this.instances.values()) {
-      const d = Math.hypot(inst.position.x - x, inst.position.z - z);
-      const p = inst.position;
+      const p = inst.worldPosition(tmpWhere);
+      const d = Math.hypot(p.x - x, p.z - z);
       if (d <= r) out.push({ file: inst.handle.file, d: Math.round(d), x: Math.round(p.x * 10) / 10, y: Math.round(p.y * 10) / 10, z: Math.round(p.z * 10) / 10, playing: inst.active, particles: inst.particleCount });
     }
     return out.sort((a, b) => a.d - b.d);
