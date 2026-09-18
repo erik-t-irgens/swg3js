@@ -152,4 +152,71 @@ assert.equal(blendFor(null), 'opaque');
   assert.equal(e.particle.mesh.rotation.length, 3);
 }
 
+// --- attachments: the effects a particle carries --------------------------------------------
+{
+  // A particle that draws nothing and carries appearance\child.prt from 20-40% of its life, killed with it.
+  const patt = form('PATT', form('0001', chunk('0000', new W().str('appearance\\child.prt').f32(0.2).f32(0.4).u8(1).u32(2).bytes())));
+  const carrier = form('PTCL', form('0003', chunk('0000', new W().str('carrier').u8(0).i32(0).bytes()), ramp([[0, 1, 1, 1]]), flat(1), flat(1), flat(0), flat(0), flat(0), patt));
+  const quadCarrier = form('PTQD', carrier, form('0001', flat(0), flat(0.2), flat(0.2), texture(''), chunk('0000', new W().u8(0).bytes())));
+  const parent = effect(emitterV14('trail', quadCarrier));
+  const child = effect(emitterV14('wisp', quad('wisp', 'particle_smoke.sht')));
+  const files: Record<string, Buffer> = { 'appearance/parent.prt': parent, 'appearance/child.prt': child };
+  const vfs = { has: (p: string) => p in files, read: (p: string) => files[p] };
+  const fx = parseParticleEffect(parseIff(parent));
+  const a = fx.groups[0].emitters[0].particle.attachments[0];
+  assert.deepEqual(a, { path: 'appearance/child.prt', startPercent: [0.2, 0.4], killWithParticle: true, spawn: 'percent' });
+
+  const opts = (written: Map<string, string | Uint8Array>) => ({
+    textureFor: (sh: string) => (sh === 'shader/particle_smoke.sht' ? { path: 'texture/particle_smoke.dds', png: new Uint8Array([1]) } : null),
+    passFor: () => ({ alphaBlend: true, blendSrc: 4, blendDst: 5 }),
+    write: (f: string, b: Uint8Array | string) => written.set(f, b),
+  });
+
+  // With `attach`: the child is converted through it and its file lands on the attachment.
+  const written = new Map<string, string | Uint8Array>();
+  const asked: string[] = [];
+  const entry = exportParticle(vfs, 'appearance/parent.prt', '/out', {
+    ...opts(written),
+    attach: (p: string) => {
+      asked.push(p);
+      return exportParticle(vfs, p, '/out', opts(written));
+    },
+  });
+  assert.deepEqual(asked, ['appearance/child.prt']);
+  assert.equal(entry.attached, 1);
+  const json = JSON.parse(written.get('/out/particles/fx_parent.json') as string);
+  const att = json.groups[0].emitters[0].particle.attachments[0];
+  assert.equal(att.file, 'particles/fx_child.json');
+  assert.equal(att.path, 'appearance/child.prt');
+  assert.equal(att.failed, undefined);
+  assert.ok(written.has('/out/particles/fx_child.json'), 'the child effect is written into the same pack');
+  // The carrier draws nothing: its quad names no shader, so no texture and nothing missing.
+  assert.equal(json.groups[0].emitters[0].particle.quad.texture.file, undefined);
+  assert.deepEqual(entry.missingTextures, []);
+
+  // Without `attach`: nothing is converted and the attachment keeps only its path.
+  const plain = new Map<string, string | Uint8Array>();
+  const e2 = exportParticle(vfs, 'appearance/parent.prt', '/out', opts(plain));
+  assert.equal(e2.attached, undefined);
+  const j2 = JSON.parse(plain.get('/out/particles/fx_parent.json') as string);
+  assert.equal(j2.groups[0].emitters[0].particle.attachments[0].file, undefined);
+  assert.ok(!plain.has('/out/particles/fx_child.json'));
+
+  // A child that fails is noted on the attachment, not thrown; one still converting (a cycle) is left bare.
+  const failed = new Map<string, string | Uint8Array>();
+  exportParticle(vfs, 'appearance/parent.prt', '/out', { ...opts(failed), attach: () => ({ failed: 'Not in archives: appearance/child.prt' }) });
+  const j3 = JSON.parse(failed.get('/out/particles/fx_parent.json') as string);
+  assert.equal(j3.groups[0].emitters[0].particle.attachments[0].failed, 'Not in archives: appearance/child.prt');
+  assert.equal(j3.groups[0].emitters[0].particle.attachments[0].file, undefined);
+  const pending = new Map<string, string | Uint8Array>();
+  exportParticle(vfs, 'appearance/parent.prt', '/out', { ...opts(pending), attach: () => ({ pending: true }) });
+  const j4 = JSON.parse(pending.get('/out/particles/fx_parent.json') as string);
+  assert.equal(j4.groups[0].emitters[0].particle.attachments[0].file, undefined);
+  assert.equal(j4.groups[0].emitters[0].particle.attachments[0].failed, undefined);
+  // An attach callback that throws is a failure on that attachment, not of the parent.
+  const threw = new Map<string, string | Uint8Array>();
+  exportParticle(vfs, 'appearance/parent.prt', '/out', { ...opts(threw), attach: () => { throw new Error('bad child'); } });
+  assert.equal(JSON.parse(threw.get('/out/particles/fx_parent.json') as string).groups[0].emitters[0].particle.attachments[0].failed, 'bad child');
+}
+
 console.log('particle: ok');

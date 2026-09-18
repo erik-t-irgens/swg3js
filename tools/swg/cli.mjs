@@ -458,18 +458,23 @@ function convertParticle(vfs, prtPath, outDir) {
   let entry = particleEffects.get(key);
   if (entry) return entry;
   if (!particleTextures.has(pack)) particleTextures.set(pack, new Map());
+  // A placeholder while this one converts: an effect that carries itself, however far down its
+  // attachments, gets the placeholder back instead of recursing for ever.
+  particleEffects.set(key, { pending: true });
   try {
     entry = exportParticle(vfs, prtPath, outDir, {
       textureFor: (shader) => textureFor(vfs, shader),
       passFor: (shader) => passFor(vfs, shader),
       textures: particleTextures.get(pack),
+      // The effects its particles carry, converted into the same pack and cached like any other.
+      attach: (p) => convertParticle(vfs, p.replace(/\\/g, '/'), outDir),
       write: (file, bytes) => {
         mkdirSync(dirname(file), { recursive: true });
         writeFileSync(file, bytes);
       },
       log: (m) => console.error(m),
     });
-    console.error(`  ${entry.id}: particle effect, ${entry.quads} quad emitter(s)${entry.meshes ? `, ${entry.meshes} mesh emitter(s) (not drawn yet)` : ''}${entry.missingTextures.length ? `, textures missing: ${entry.missingTextures.join(', ')}` : ''}`);
+    console.error(`  ${entry.id}: particle effect, ${entry.quads} quad emitter(s)${entry.meshes ? `, ${entry.meshes} mesh emitter(s) (not drawn yet)` : ''}${entry.attached ? `, ${entry.attached} carried effect(s)` : ''}${entry.missingTextures.length ? `, textures missing: ${entry.missingTextures.join(', ')}` : ''}`);
   } catch (err) {
     entry = { failed: err.message };
   }
@@ -1594,6 +1599,30 @@ const GAME_PLANETS = ['tatooine', 'naboo', 'corellia', 'dantooine', 'lok', 'endo
  * Report what the packs under <dir> hold (planets, creatures, player) and which command
  * would fill each gap, so a fresh checkout or a second machine knows what to run.
  */
+/**
+ * How many of a sky's effects (its weather and its blocks' camera effects) carry an effect the pack
+ * has nothing to play for: an attachment with neither a converted `file` nor a reason it `failed`,
+ * and no converted effect of that name in the pack. That is a sky converted before the converter
+ * converted what particles carry (a light dust storm, falling leaves, Mustafar's lightning).
+ */
+function skyEffectsUncarried(packDir, sky) {
+  const files = new Set();
+  for (const list of Object.values(sky.weather?.effects ?? {})) for (const f of list ?? []) if (f) files.add(f);
+  for (const b of sky.blocks ?? []) if (b.cameraEffect?.file) files.add(b.cameraEffect.file);
+  let n = 0;
+  for (const f of files) {
+    let effect;
+    try {
+      effect = JSON.parse(readFileSync(join(packDir, f), 'utf8'));
+    } catch {
+      continue;
+    }
+    const bare = (a) => a?.path && !a.file && !a.failed && !existsSync(join(packDir, 'particles', `fx_${basename(a.path.replace(/\\/g, '/')).replace(/\.prt$/i, '')}.json`));
+    if ((effect.groups ?? []).some((g) => (g.emitters ?? []).some((e) => (e.particle?.attachments ?? []).some(bare)))) n++;
+  }
+  return n;
+}
+
 function packStatus(dir) {
   const readJson = (file) => (existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : null);
   const todo = new Map();
@@ -1637,6 +1666,7 @@ function packStatus(dir) {
     else if (!shaders) need(`terrain <swg-dir> all ${dir} --retail-only`, `${planet} has no ground textures`);
     else if (!sky) need(`sky <swg-dir> all ${dir} --retail-only`, `${planet} has no sky`);
     else if (!sky.weather) need(`sky <swg-dir> all ${dir} --retail-only`, `${planet} sky has no weather effects`);
+    else if (skyEffectsUncarried(packDir, sky)) need(`sky <swg-dir> all ${dir} --retail-only`, `${planet} sky's effects were converted before the effects their particles carry`);
     // Its own `if`: exportWater always writes the file, so its existence is the whole test.
     if (terrain && !water) need(`water <swg-dir> all ${dir} --retail-only`, `${planet} has no water.json`);
     // A lava entry written before the lava look has no `lava` block: the game draws it in a stand-in look.

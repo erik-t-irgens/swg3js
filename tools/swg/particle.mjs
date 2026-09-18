@@ -397,9 +397,13 @@ export function blendFor(pass) {
  * Convert one particle effect into the pack: particles/<id>.json plus the textures its quads
  * draw, as PNGs under particles/. `textureFor(shaderPath)` supplies { path, png } for a shader
  * and `passFor(shaderPath)` its effect's first fixed-function pass (for the blend mode).
+ * `attach(prtPath)`, when given, converts an effect a particle carries (a PATT) and returns its
+ * manifest entry ({ file } once converted, { failed } when it could not be, anything else while
+ * it is still being converted further up the chain); its `file` is written onto the attachment,
+ * which is what the game plays. Without it attachments keep only their path, as before.
  * Returns the manifest entry.
  */
-export function exportParticle(vfs, prtPath, outDir, { textureFor, passFor, textures = new Map(), write, log = () => {} }) {
+export function exportParticle(vfs, prtPath, outDir, { textureFor, passFor, textures = new Map(), write, log = () => {}, attach = null }) {
   const path = prtPath.replace(/\\/g, '/');
   if (!vfs.has(path)) throw new Error(`Not in archives: ${path}`);
   const effect = parseParticleEffect(parseIff(vfs.read(path)));
@@ -407,8 +411,29 @@ export function exportParticle(vfs, prtPath, outDir, { textureFor, passFor, text
   let quads = 0;
   let meshes = 0;
   const missing = [];
+  let attached = 0;
   for (const g of effect.groups) {
     for (const e of g.emitters) {
+      // The effects each particle carries (a trailing dust wisp, a falling leaf, the next link of a
+      // lightning chain): converted into the same pack, their file noted for the game to play.
+      if (attach) {
+        for (const a of e.particle.attachments ?? []) {
+          if (!a.path) continue;
+          let r = null;
+          try {
+            r = attach(a.path.replace(/\\/g, '/'));
+          } catch (err) {
+            r = { failed: err.message };
+          }
+          if (r?.file) {
+            a.file = r.file;
+            attached++;
+          } else if (r?.failed) {
+            a.failed = r.failed;
+            log(`  attached effect ${a.path} skipped: ${r.failed}`);
+          }
+        }
+      }
       if (e.particle.type !== 'quad') {
         meshes++;
         continue;
@@ -440,5 +465,5 @@ export function exportParticle(vfs, prtPath, outDir, { textureFor, passFor, text
   }
   const radius = round(effectRadius(effect));
   write(`${outDir}/particles/${id}.json`, JSON.stringify(effect));
-  return { id, source: path, file: `particles/${id}.json`, particle: true, bounds: { min: [-radius, 0, -radius], max: [radius, radius, radius] }, triangles: 0, emitters: quads + meshes, quads, meshes, missingTextures: missing };
+  return { id, source: path, file: `particles/${id}.json`, particle: true, bounds: { min: [-radius, 0, -radius], max: [radius, radius, radius] }, triangles: 0, emitters: quads + meshes, quads, meshes, missingTextures: missing, ...(attached ? { attached } : {}) };
 }

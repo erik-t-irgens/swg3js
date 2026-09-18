@@ -427,7 +427,7 @@ export class Weather {
     });
     this.seed = seedOf(opts.packId);
     this.weights = climateFor(opts.packId, this.levels);
-    if (!data.weather) console.info('weather: sky.json has no camera effects; run: npm run swg -- sky @SWG assets-private all --retail-only');
+    if (!data.weather) console.info('weather: sky.json has no camera effects; run: npm run swg -- sky @SWG all assets-private --retail-only');
     else {
       // Every effect any row or any forced kind may play, made and uploaded now, so a storm that
       // arrives in play finds its batches, textures and (after the warm-up) programs ready.

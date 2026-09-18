@@ -55,6 +55,23 @@ export interface ParticleTiming {
   loopCount: number[];
 }
 
+/**
+ * An effect a particle carries (the converter's PATT): started as `spawn` says, where the particle
+ * is, following it while it lives, and stopped when it dies if `killWithParticle`.
+ */
+export interface ParticleAttachmentDef {
+  /** The game's path (appearance/<name>.prt). */
+  path: string;
+  /** Pack-relative JSON, once the converter has converted it (the game plays nothing without it). */
+  file?: string;
+  /** Why the converter could not convert it. */
+  failed?: string;
+  /** Where in the particle's life a 'percent' attachment starts, 0..1: a range, one draw per particle. */
+  startPercent: number[];
+  killWithParticle: boolean;
+  spawn: 'created' | 'dies' | 'percent' | 'collision';
+}
+
 export interface EmitterDef {
   name: string;
   timing: ParticleTiming | null;
@@ -105,6 +122,8 @@ export interface EmitterDef {
     relativeRotation: WaveForm[] | null;
     quad?: { rotation: WaveForm; length: WaveForm; width: WaveForm; texture: ParticleTextureDef; linked: boolean };
     mesh?: { path: string; scale: WaveForm; rotation: WaveForm[] };
+    /** Effects each particle carries; only those with a `file` are played. */
+    attachments?: ParticleAttachmentDef[];
   };
 }
 
@@ -135,6 +154,8 @@ export interface EffectHandle {
   readonly frame: THREE.Matrix4 | null;
   /** Multiplies every emitter's rate; 0 stops new particles (a one-shot does not fire). Mutable. */
   rateScale: number;
+  /** 0 for a placed effect; one more for each level of effects carried by particles (capped at MAX_ATTACH_DEPTH). */
+  readonly depth?: number;
 }
 
 /**
@@ -176,6 +197,14 @@ const MAX_QUADS = 6000;
 const MAX_STEP = 0.1;
 const TWO_PI = Math.PI * 2;
 const GRAVITY = 9.8;
+/**
+ * Effects carried by particles, live at once per ParticleEffects; a spawn beyond it is skipped and
+ * counted. Measured on the converted effects, Mustafar's lightning peaks at 75 to 140 and a light
+ * dust storm at about 75, and the weather plays both from one set.
+ */
+const MAX_CHILDREN = 256;
+/** How many levels of carried effects deep (Mustafar's lightning chain is eleven). */
+const MAX_ATTACH_DEPTH = 12;
 
 const rand = Math.random;
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
@@ -287,6 +316,27 @@ interface Particle {
   reach: number;
   /** The quad's larger half-size as last drawn, for the kill test's hull box. */
   extent: number;
+  /** The effects this particle carries, playing now; null when none. */
+  children: CarriedEffect[] | null;
+  /** One draw per particle for where in its life each 'percent' attachment starts. */
+  attachRand: number;
+  /** Which of its emitter's attachments this particle has started, a bit each. */
+  attachDone: number;
+  /** It met the ground this life (for 'collision' attachments). */
+  hit: boolean;
+}
+
+/** An effect a particle carries, and whether it stops when the particle dies. */
+interface CarriedEffect {
+  handle: EffectHandle;
+  kill: boolean;
+}
+
+/** What an emitter needs to play the effects its particles carry: the ParticleEffects that owns it. */
+interface AttachmentHost {
+  /** Place a carried effect (transient, in the parent's frame), or null past the caps. */
+  spawnChild(file: string, matrix: THREE.Matrix4, parent: EffectHandle): EffectHandle | null;
+  move(handle: EffectHandle, matrix: THREE.Matrix4): void;
 }
 
 interface Batch {
@@ -318,10 +368,11 @@ const particlePool: Particle[] = [];
 const PARTICLE_POOL_MAX = 8192;
 
 function newParticle(): Particle {
-  return { pos: new THREE.Vector3(), prev: new THREE.Vector3(), vel: new THREE.Vector3(), up: new THREE.Vector3(0, 1, 0), side: new THREE.Vector3(1, 0, 0), age: 0, life: 1, weight: 0, r0: 0, r1: 0, r2: 0, r3: 0, initialRotation: 1, alive: true, reach: 0, extent: 0 };
+  return { pos: new THREE.Vector3(), prev: new THREE.Vector3(), vel: new THREE.Vector3(), up: new THREE.Vector3(0, 1, 0), side: new THREE.Vector3(1, 0, 0), age: 0, life: 1, weight: 0, r0: 0, r1: 0, r2: 0, r3: 0, initialRotation: 1, alive: true, reach: 0, extent: 0, children: null, attachRand: 0, attachDone: 0, hit: false };
 }
 
 function releaseParticle(p: Particle): void {
+  p.children = null;
   if (particlePool.length < PARTICLE_POOL_MAX) particlePool.push(p);
 }
 
@@ -382,6 +433,8 @@ const ONE = new THREE.Vector3(1, 1, 1);
 const tmpKill = new THREE.Vector3();
 const tmpWhere = new THREE.Vector3();
 const tmpRel = new THREE.Matrix4();
+const tmpCarry = new THREE.Matrix4();
+const tmpCarryPos = new THREE.Vector3();
 
 /** Mirror a 3x4 row-major transform for the game's X-flipped coordinates (S M S with S = diag(-1,1,1)). */
 export function mirroredTransform(t: number[] | undefined, out: THREE.Matrix4): THREE.Matrix4 {
@@ -412,12 +465,16 @@ class EmitterState {
   upKeep = 1;
   readonly usesRelativeRotation: boolean;
   readonly maxLife: number;
+  /** The converted effects this emitter's particles carry (none without a host); at most 31, a bit each. */
+  readonly attachments: ParticleAttachmentDef[];
 
   constructor(
     readonly def: EmitterDef,
     readonly effect: EffectDef,
     readonly handle: EffectHandle,
+    private readonly host: AttachmentHost | null = null,
   ) {
+    this.attachments = host ? (def.particle.attachments ?? []).filter((a) => !!a.file).slice(0, 31) : [];
     const rr = def.particle.relativeRotation;
     this.usesRelativeRotation = !!rr && !(isFlatZero(rr[0]) && isFlatZero(rr[1]) && isFlatZero(rr[2]));
     this.maxLife = waveMax(def.lifeTime);
@@ -434,9 +491,17 @@ class EmitterState {
     return this.handle.frame;
   }
 
-  restart(): void {
-    for (const p of this.particles) releaseParticle(p);
+  /** Drop every particle now (asleep, removed, restarted): what they carry stops as each attachment asks. */
+  clear(): void {
+    for (const p of this.particles) {
+      this.dropChildren(p);
+      releaseParticle(p);
+    }
     this.particles.length = 0;
+  }
+
+  restart(): void {
+    this.clear();
     this.currentLoop = 0;
     this.loopCount = this.def.timing ? randomInt(this.def.timing.loopCount) : -1;
     this.frameFirst = true;
@@ -519,6 +584,10 @@ class EmitterState {
       p.alive = true;
       p.reach = 0;
       p.extent = 0;
+      p.children = null;
+      p.attachRand = rand();
+      p.attachDone = 0;
+      p.hit = false;
       if (d.direction === 'directional') {
         const spread = (wave(d.spread, agePercent, rand()) * Math.PI) / 180;
         const r1 = rand() < 0.5 ? spread : -spread;
@@ -585,6 +654,7 @@ class EmitterState {
       if (p.pos.y >= ground) p.vel.y += fall;
       if (p.pos.y <= ground) {
         if (p.prev.y >= ground) {
+          p.hit = true;
           p.pos.y = ground;
           p.vel.y = Math.abs(p.vel.y) * this.upKeep;
           p.vel.x *= this.forwardKeep;
@@ -629,11 +699,17 @@ class EmitterState {
     if (createParticles) this.createNewParticles(dt, heightAt, kill);
     this.frameFirst = createParticles ? false : this.frameFirst;
     for (const p of this.particles) if (p.alive) this.integrate(p, dt, heightAt, kill);
+    // What the particles carry: started as each attachment asks, and moved along with its particle.
+    const carries = this.attachments.length > 0;
+    if (carries) for (const p of this.particles) if (p.alive) this.carry(p);
     let w = 0;
     for (let i = 0; i < this.particles.length; i++) {
       const p = this.particles[i];
       if (p.alive) this.particles[w++] = p;
-      else releaseParticle(p);
+      else {
+        if (carries) this.letGo(p);
+        releaseParticle(p);
+      }
     }
     this.particles.length = w;
     if (doLoop) {
@@ -641,6 +717,60 @@ class EmitterState {
       if (this.loopCount === -1 || this.currentLoop <= this.loopCount) this.loop();
       else this.finished = true;
     }
+  }
+
+  /**
+   * Start what a live particle carries once each attachment is due ('created' at once, 'percent'
+   * when its age passes the drawn start, 'collision' when it has met the ground), then move every
+   * effect it carries to where it is now.
+   */
+  private carry(p: Particle): void {
+    const list = this.attachments;
+    for (let i = 0; i < list.length; i++) {
+      const bit = 1 << i;
+      if (p.attachDone & bit) continue;
+      const a = list[i];
+      const due = a.spawn === 'created' || (a.spawn === 'percent' && p.age >= p.life * lerp(a.startPercent[0], a.startPercent[1], p.attachRand)) || (a.spawn === 'collision' && p.hit);
+      if (!due) continue;
+      p.attachDone |= bit;
+      const child = this.host!.spawnChild(a.file!, this.matrixAt(p), this.handle);
+      if (child) (p.children ??= []).push({ handle: child, kill: a.killWithParticle });
+    }
+    if (p.children) {
+      const m = this.matrixAt(p);
+      for (const c of p.children) this.host!.move(c.handle, m);
+    }
+  }
+
+  /**
+   * A particle has died: what it carried stops if it asked to, and what it spawns on death (or on
+   * the ground contact that killed it) starts where it ended, to play out on its own.
+   */
+  private letGo(p: Particle): void {
+    this.dropChildren(p);
+    const list = this.attachments;
+    for (let i = 0; i < list.length; i++) {
+      if (p.attachDone & (1 << i)) continue;
+      const a = list[i];
+      if (a.spawn !== 'dies' && !(a.spawn === 'collision' && p.hit)) continue;
+      p.attachDone |= 1 << i;
+      this.host!.spawnChild(a.file!, this.matrixAt(p), this.handle);
+    }
+  }
+
+  /** Stop the effects a particle carries that end with it (they stop spawning and play out), and forget them all. */
+  private dropChildren(p: Particle): void {
+    const children = p.children;
+    if (!children) return;
+    for (const c of children) if (c.kill) c.handle.rateScale = 0;
+    p.children = null;
+  }
+
+  /** Where a carried effect hangs: the particle's place (through the emitter for a local-space one) with the emitter's turn. */
+  private matrixAt(p: Particle): THREE.Matrix4 {
+    tmpCarryPos.copy(p.pos);
+    if (this.def.localSpace) tmpCarryPos.applyMatrix4(this.world);
+    return tmpCarry.copy(this.world).setPosition(tmpCarryPos);
   }
 
   private updateLod(distance: number): void {
@@ -702,14 +832,20 @@ class EffectInstance {
   constructor(
     readonly handle: EffectHandle,
     readonly def: EffectDef,
+    host: AttachmentHost | null = null,
   ) {
     this.position.setFromMatrixPosition(handle.matrix);
     let reach = 0;
     let life = 0;
     for (const g of def.groups) {
       for (const e of g.emitters) {
-        if (!e.visible || e.particle.type !== 'quad' || !e.particle.quad?.texture.file || !e.particle.quad.texture.visible) continue;
-        this.emitters.push(new EmitterState(e, def, handle));
+        // Kept when it draws (a quad with a texture), or when it draws nothing itself but its
+        // particles carry converted effects (a light dust storm's wisps, a lightning chain).
+        const tex = e.particle.type === 'quad' ? e.particle.quad?.texture : undefined;
+        const drawn = !!tex?.file && tex.visible;
+        const carries = !!host && !!e.particle.attachments?.some((a) => a.file);
+        if (!e.visible || !(drawn || carries)) continue;
+        this.emitters.push(new EmitterState(e, def, handle, host));
         const [lo, hi] = e.lod;
         reach = Math.max(reach, (lo >= -1 && lo < 0) || (hi >= -1 && hi < 0) ? GLOBAL_LOD[1] : lo < 1 || hi < 1 ? GLOBAL_LOD[1] : hi);
         life = Math.max(life, waveMax(e.lifeTime));
@@ -721,6 +857,11 @@ class EffectInstance {
 
   restart(): void {
     for (const e of this.emitters) e.restart();
+  }
+
+  /** Drop every particle now; what they carry stops as each attachment asks. */
+  clear(): void {
+    for (const e of this.emitters) e.clear();
   }
 
   /** Seconds since placed, for a transient effect's own end. */
@@ -741,6 +882,9 @@ class EffectInstance {
       const limit = this.def.timing ? randomInt(this.def.timing.loopCount) : -1;
       if (!transient && (limit === -1 || this.loops < limit)) this.restart();
       else this.finished = true;
+    } else if (transient && !(this.handle.rateScale > 0) && this.particleCount === 0) {
+      // A transient told to stop (a carried effect whose particle has died) ends once what it spawned is gone.
+      this.finished = true;
     } else if (transient && this.age > Math.max(this.maxLife, 0.5) * 2 + 1.5) {
       // An emitter that never runs out (a steady spray) still ends a transient effect after one life.
       this.finished = true;
@@ -789,6 +933,15 @@ export class ParticleEffects {
   readonly batchMaterials: THREE.ShaderMaterial[] = [];
   /** Textures still loading, resolved when each has loaded or failed (what `prepare` waits on). */
   private readonly textureReady = new Map<string, Promise<void>>();
+  /** Effects particles carry, placed and not yet played out (at most MAX_CHILDREN). */
+  private readonly children = new Set<EffectHandle>();
+  /** Carried effects not placed because of the caps, since this set was made. */
+  private childrenSkipped = 0;
+  /** Handed to every emitter, to play the effects its particles carry. */
+  private readonly host: AttachmentHost = {
+    spawnChild: (file, matrix, parent) => this.placeChild(file, matrix, parent),
+    move: (handle, matrix) => this.move(handle, matrix),
+  };
 
   constructor(
     private readonly scene: THREE.Scene,
@@ -809,12 +962,16 @@ export class ParticleEffects {
    * uploading them when a renderer is given; so neither a program nor a texture upload waits for
    * the first quad. Resolves false when the effect failed to load.
    */
-  async prepare(file: string, renderer?: THREE.WebGLRenderer | null): Promise<boolean> {
+  async prepare(file: string, renderer?: THREE.WebGLRenderer | null, seen: Set<string> = new Set()): Promise<boolean> {
+    // The effects particles carry are prepared too, all the way down the chain, once each.
+    if (seen.has(file)) return true;
+    seen.add(file);
     const def = await this.load(file);
     if (!def || this.disposed) return false;
-    const waits: Promise<void>[] = [];
+    const waits: Promise<unknown>[] = [];
     for (const g of def.groups) {
       for (const e of g.emitters) {
+        if (e.visible) for (const a of e.particle.attachments ?? []) if (a.file) waits.push(this.prepare(a.file, renderer, seen));
         const tex = e.particle.quad?.texture;
         if (!e.visible || e.particle.type !== 'quad' || !tex?.file || !tex.visible) continue;
         this.batch(tex.file, tex.blend ?? 'alpha');
@@ -836,7 +993,7 @@ export class ParticleEffects {
   }
 
   get status(): string {
-    return `${this.instances.size} particle effects placed, ${this.activeCount} playing, ${this.quadCount} quads in ${this.batches.size} batches${this.textureErrors.size ? `, ${this.textureErrors.size} textures failed to load: ${[...this.textureErrors].join(', ')}` : ''}`;
+    return `${this.instances.size} particle effects placed, ${this.activeCount} playing, ${this.children.size} carried by particles${this.childrenSkipped ? ` (${this.childrenSkipped} skipped at the caps)` : ''}, ${this.quadCount} quads in ${this.batches.size} batches${this.textureErrors.size ? `, ${this.textureErrors.size} textures failed to load: ${[...this.textureErrors].join(', ')}` : ''}`;
   }
 
   /**
@@ -847,12 +1004,36 @@ export class ParticleEffects {
    * carried into the world as it is drawn: something played aboard stays in the room while the ship flies.
    */
   place(file: string, matrix: THREE.Matrix4, contained: boolean, transient = false, frame: THREE.Matrix4 | null = null): EffectHandle {
-    const handle: EffectHandle = { file, matrix: matrix.clone(), contained, transient, frame, rateScale: 1 };
+    return this.start({ file, matrix: matrix.clone(), contained, transient, frame, rateScale: 1, depth: 0 });
+  }
+
+  /** Load a handle's effect and play it once loaded, unless it was removed meanwhile. */
+  private start(handle: EffectHandle): EffectHandle {
     this.pending.add(handle);
-    void this.load(file).then((def) => {
-      if (this.disposed || !this.pending.delete(handle) || !def) return;
-      this.instances.set(handle, new EffectInstance(handle, def));
+    void this.load(handle.file).then((def) => {
+      const wanted = this.pending.delete(handle);
+      if (this.disposed || !wanted || !def) {
+        this.children.delete(handle);
+        return;
+      }
+      this.instances.set(handle, new EffectInstance(handle, def, this.host));
     });
+    return handle;
+  }
+
+  /**
+   * An effect a particle carries: transient (it plays once and ends by itself), in its parent's
+   * frame and building, one level deeper. Past MAX_ATTACH_DEPTH levels or MAX_CHILDREN live at
+   * once it is skipped, and counted in `status`.
+   */
+  private placeChild(file: string, matrix: THREE.Matrix4, parent: EffectHandle): EffectHandle | null {
+    const depth = (parent.depth ?? 0) + 1;
+    if (this.disposed || depth > MAX_ATTACH_DEPTH || this.children.size >= MAX_CHILDREN) {
+      this.childrenSkipped++;
+      return null;
+    }
+    const handle = this.start({ file, matrix: matrix.clone(), contained: parent.contained, transient: true, frame: parent.frame, rateScale: 1, depth });
+    this.children.add(handle);
     return handle;
   }
 
@@ -864,7 +1045,9 @@ export class ParticleEffects {
 
   remove(handle: EffectHandle): void {
     this.pending.delete(handle);
+    this.instances.get(handle)?.clear();
     this.instances.delete(handle);
+    this.children.delete(handle);
   }
 
   /** Live particles of one placed effect (0 while it is loading or asleep), for the console. */
@@ -1001,7 +1184,7 @@ export class ParticleEffects {
       if (!transient && distance > inst.sleepDistance) {
         if (inst.active) {
           inst.active = false;
-          for (const e of inst.emitters) e.particles.length = 0;
+          inst.clear();
         }
         continue;
       }
@@ -1019,12 +1202,16 @@ export class ParticleEffects {
       inst.update(dt * (inst.def.playbackRate || 1), heightAt, distance, kill);
       if (transient && inst.finished) {
         // A hit that has played out: gone, so a fight does not pile up spent effects.
+        inst.clear();
         this.instances.delete(handle);
+        this.children.delete(handle);
         continue;
       }
       for (const e of inst.emitters) {
-        const tex = e.def.particle.quad!.texture;
-        const b = this.batch(tex.file!, tex.blend ?? 'alpha');
+        // An emitter that only carries other effects draws nothing of its own.
+        const tex = e.def.particle.quad?.texture;
+        if (!tex?.file || !tex.visible) continue;
+        const b = this.batch(tex.file, tex.blend ?? 'alpha');
         const local = e.def.localSpace;
         // A framed effect's points are hull-local: it sorts as one, by its own distance.
         for (let k = 0; k < e.particles.length; k++) {
@@ -1186,11 +1373,15 @@ export class ParticleEffects {
       const d = Math.hypot(at.x - x, at.z - z);
       if (d > r) continue;
       for (const e of inst.emitters) {
-        const tex = e.def.particle.quad!.texture;
-        const img = this.textures.get(tex.file!)?.image as { width?: number; height?: number } | undefined;
+        // An emitter that only carries other effects has no texture: it says so, and how many it carries.
+        const quadTex = e.def.particle.quad?.texture;
+        const tex = quadTex?.file && quadTex.visible ? quadTex : null;
+        const img = tex ? (this.textures.get(tex.file!)?.image as { width?: number; height?: number } | undefined) : undefined;
         const p = e.particles[0];
-        const row: Record<string, unknown> = { effect: inst.handle.file.replace(/^particles\/|\.json$/g, ''), emitter: e.def.name, d: Math.round(d), texture: tex.file, blend: tex.blend, textureLoaded: img?.width ? `${img.width}x${img.height}` : this.textureErrors.has(tex.file!) ? 'FAILED' : 'pending', playing: inst.active, lod: Math.round(e.lodPercent * 100) / 100, particles: e.particles.length, max: e.def.maxParticles, rate: Math.round(waveMax(e.def.rate) * 10) / 10, life: Math.round(e.maxLife * 10) / 10, scale: e.effect.scale, emitterLife: e.def.emitterLife.join('..'), orientation: e.def.orientation };
-        if (p) {
+        let carried = 0;
+        for (const q of e.particles) carried += q.children?.length ?? 0;
+        const row: Record<string, unknown> = { effect: inst.handle.file.replace(/^particles\/|\.json$/g, ''), emitter: e.def.name, d: Math.round(d), texture: tex?.file ?? null, blend: tex?.blend ?? null, textureLoaded: !tex ? 'none' : img?.width ? `${img.width}x${img.height}` : this.textureErrors.has(tex.file!) ? 'FAILED' : 'pending', playing: inst.active, lod: Math.round(e.lodPercent * 100) / 100, particles: e.particles.length, max: e.def.maxParticles, rate: Math.round(waveMax(e.def.rate) * 10) / 10, life: Math.round(e.maxLife * 10) / 10, scale: e.effect.scale, emitterLife: e.def.emitterLife.join('..'), orientation: e.def.orientation, attachments: e.attachments.length, carried };
+        if (p && tex) {
           const t = p.age / p.life;
           const quad = e.def.particle.quad!;
           const length = wave(quad.length, t, p.r1) * e.effect.scale;
@@ -1234,6 +1425,7 @@ export class ParticleEffects {
     this.textures.clear();
     this.instances.clear();
     this.pending.clear();
+    this.children.clear();
   }
 }
 
