@@ -34,6 +34,11 @@ export class Effects {
 
   private readonly lights: THREE.PointLight[] = [];
 
+  /** The flash lights, for the effects' light estimate; never add or remove them. */
+  get lightPool(): readonly THREE.PointLight[] {
+    return this.lights;
+  }
+
   constructor(private readonly scene: THREE.Scene) {
     for (let i = 0; i < FLASH_POOL; i++) {
       // Always in the scene and always visible: three.js counts the visible lights when it

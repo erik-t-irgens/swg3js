@@ -187,14 +187,20 @@ export class PortalRenderer {
 
   /**
    * Stencil portal polygons: where the region value equals `from` (and the polygon is visible),
-   * increment it. `restore` instead writes 1 everywhere the polygons cover, undoing a pass.
+   * increment it. `restore` instead moves the region these polygons opened (2) on to 3, undoing a
+   * pass while marking where rooms were drawn.
    */
   private drawPortals(meshes: THREE.Mesh[], camera: THREE.Camera, from: number, depthTest: boolean, restore = false): void {
     const m = this.portalMat;
     if (restore) {
-      m.stencilFunc = THREE.AlwaysStencilFunc;
-      m.stencilRef = 1;
-      m.stencilZPass = THREE.ReplaceStencilOp;
+      // Leave the doors' rooms region at 3 instead of writing 1 back: a later building's doors
+      // (which need 1) and its depth reset and rooms (which need 2) still skip it, and the effects
+      // can tell rooms seen through a door from the world around them (the ambient occlusion lights
+      // them with the rooms' lights). The Equal 2 test increments each pixel once however many
+      // polygons cover it.
+      m.stencilFunc = THREE.EqualStencilFunc;
+      m.stencilRef = 2;
+      m.stencilZPass = THREE.IncrementStencilOp;
     } else {
       m.stencilFunc = THREE.EqualStencilFunc;
       m.stencilRef = from;

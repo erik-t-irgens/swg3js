@@ -9,6 +9,7 @@ import type { PostFX } from '../postfx';
 import { ColorGradePass, GrainVignettePass } from './grade';
 import { BladeGlowPass } from './bladeGlow';
 import { installWaterReflections, type WaterFxSource } from './water';
+import { SsaoPass, ssaoHostFor } from './ssao';
 
 export interface FxInstallDeps {
   /** The water bodies whose mask and reflections the effects draw (`World.waterBodies`). */
@@ -16,6 +17,9 @@ export interface FxInstallDeps {
 }
 
 export function installEffects(postfx: PostFX, deps: FxInstallDeps = {}): void {
+  // Ambient occlusion reads the frame's lights from the context and makes its region target (sharing
+  // the scene's depth-stencil) from the chain: nothing from the game.
+  postfx.registerPass(new SsaoPass(ssaoHostFor(postfx)));
   // The colour grade needs nothing from the game: it reads the sky through the frame context.
   postfx.registerPass(new ColorGradePass());
   postfx.registerPass(new GrainVignettePass());

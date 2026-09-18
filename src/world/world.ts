@@ -28,6 +28,7 @@ import { LayoutStreamer, type Building, type CellState, type PlacedObject } from
 import { isLiftCell, liftStops, stopAt, type LiftStop } from './lifts';
 import type { SunInfo } from '../core/postfx';
 import { luminance, pointIrradiance } from '../core/fx/bladeGlowMath.ts';
+import { addPointLight, fillCascades, luminanceOf, resetFxLights, setDirectional, type FxLights } from '../core/fx/lights';
 import { ParticleEffects } from './particles';
 import { CSM } from 'three/examples/jsm/csm/CSM.js';
 import { ACTOR_LAYER, INTERIOR_LAYER, markActor, type PortalRenderer } from './portalRender';
@@ -2053,7 +2054,12 @@ export class World {
     return n;
   }
 
-  /** Turn the sun's shadows on or off, live: every material takes the change on its next draw. */
+  /**
+   * Turn the sun's shadows on or off, live: every material takes the change on its next draw. Only
+   * the renderer's switch flips: the cascade lights keep castShadow, because with no shadow-casting
+   * directional light the cascade shader lights every surface with all three cascade lights
+   * unshadowed (three suns). With castShadow kept and the map off it takes its one-light branch.
+   */
   setShadowsEnabled(on: boolean): void {
     const r = this.renderer;
     if (!r || r.shadowMap.enabled === on) return;
@@ -2063,7 +2069,6 @@ export class World {
       if (!m) return;
       for (const mat of Array.isArray(m) ? m : [m]) mat.needsUpdate = true;
     });
-    if (this.csm) for (const l of this.csm.lights) l.castShadow = on;
   }
 
   /**
@@ -2129,6 +2134,7 @@ export class World {
     if ((want?.building ?? null) === (have?.building ?? null) && (want?.cell ?? -1) === (have?.cell ?? -1)) return;
     this.interiorLightsFor = want;
     for (const l of this.interiorPoints) l.intensity = 0;
+    this.fxLampCells.fill(-1);
     this.interiorParallel.intensity = 0;
     this.interiorAmbient.intensity = 0;
     if (!want) return;
@@ -2173,6 +2179,7 @@ export class World {
             break;
           }
         }
+        this.fxLampCells[points] = index;
         const light = this.interiorPoints[points++];
         light.color.copy(color);
         light.intensity = 9 * at3 * INTERIOR_LIGHT_SCALE;
@@ -2411,6 +2418,48 @@ export class World {
     out.intensity = this.day.daylight;
     return out;
   }
+
+  /**
+   * The lights the frame was drawn with, as the effects read them: the world pass's (the sky's set)
+   * and the interior pass's (the rooms'), each room lamp with the cell it came from. Call it after
+   * the scene is drawn, so the shadow matrices are this frame's. The caller adds the flash pool and
+   * the torch. Allocates nothing.
+   */
+  fillFxLights(out: FxLights): void {
+    resetFxLights(out);
+    const sky = out.sky;
+    sky.hemiSky.copy(this.hemi.color).multiplyScalar(this.hemi.intensity);
+    sky.hemiGround.copy(this.hemi.groundColor).multiplyScalar(this.hemi.intensity);
+    sky.hemiSkyLuminance = luminanceOf(this.hemi.color, this.hemi.intensity);
+    sky.hemiGroundLuminance = luminanceOf(this.hemi.groundColor, this.hemi.intensity);
+    setDirectional(sky.fill, this.fill);
+    const csm = this.csm;
+    if (csm && csm.lights.length) {
+      // The plain sun is hidden once the cascades exist; they carry its colour and intensity.
+      const l = csm.lights[0];
+      const on = l.visible && l.intensity > 0;
+      sky.sun.direction.copy(csm.lightDirection).negate().normalize();
+      sky.sun.color.copy(l.color).multiplyScalar(on ? l.intensity : 0);
+      sky.sun.luminance = on ? luminanceOf(l.color, l.intensity) : 0;
+      const cam = this.camera;
+      if (this.renderer && cam) fillCascades(sky.cascades, this.renderer, csm.lights, csm.breaks, Math.min(cam.far, csm.maxFar) - cam.near, csm.fade);
+    } else {
+      setDirectional(sky.sun, this.sun);
+    }
+    const lit = this.interiorLightsFor;
+    if (!lit || !(this.interiorAmbient.intensity > 0)) return;
+    const rooms = out.rooms;
+    rooms.lit = true;
+    rooms.building = lit.building;
+    rooms.cell = lit.cell;
+    rooms.ambient.copy(this.interiorAmbient.color).multiplyScalar(this.interiorAmbient.intensity);
+    rooms.ambientLuminance = luminanceOf(this.interiorAmbient.color, this.interiorAmbient.intensity);
+    setDirectional(rooms.parallel, this.interiorParallel);
+    for (let i = 0; i < this.interiorPoints.length; i++) rooms.pointCount = addPointLight(rooms.points, rooms.pointCount, this.interiorPoints[i], this.fxLampCells[i]);
+  }
+
+  /** The cell each pooled room lamp was lit from (-1 unlit), written by updateInteriorLights as it hands the lamps out; read by fillFxLights. */
+  private readonly fxLampCells: number[] = new Array(INTERIOR_LIGHT_CAP).fill(-1);
 
   /**
    * Before the frame is drawn: which water is worth drawing, whether the camera is inside the

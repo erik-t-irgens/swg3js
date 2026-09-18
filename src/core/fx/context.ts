@@ -5,6 +5,7 @@ import * as THREE from 'three';
 import { FX_PRODUCTS, type FxPassId, type FxProductId, type FxSettings } from '../fxRegistry.ts';
 import type { SkyLighting } from '../../world/sky';
 import { UNSET_BLADES, type FxBladeList } from './bladeList';
+import { createFxLights, type FxLights } from './lights';
 
 /** The sun as the world knows it: which way it lies (towards it), its colour, and how much daylight there is (0 at night, and in space). */
 export interface SunInfo {
@@ -38,6 +39,8 @@ export interface FxFrameInput {
   waterInView: boolean;
   /** The lit blades this frame, world space: the game's kept list, refilled in drawFrame. */
   blades: FxBladeList;
+  /** The frame's lights, both passes' sets (src/core/fx/lights.ts): the game's kept record, refilled in drawFrame after the scene is drawn. */
+  lights: FxLights;
 }
 
 /** The sun as the effects want it, with its place on the screen worked out. */
@@ -103,6 +106,8 @@ export interface FxFrameContext {
   waterInView: boolean;
   /** The lit blades this frame; a reference to the input's kept list. */
   blades: FxBladeList;
+  /** The frame's lights; a reference to the input's kept record. */
+  lights: FxLights;
   /** The pass whose own working texture the debug view is showing, so it keeps it this frame. */
   debugViewPass: FxPassId | null;
   /** The sun record `sun` points at, kept so a frame allocates nothing; never read it directly. */
@@ -159,6 +164,7 @@ export function createContext(renderer: THREE.WebGLRenderer, settings: FxSetting
     waterInView: false,
     // The unset list until the first frame hands the game's own; the glow pass warns if it never does.
     blades: UNSET_BLADES,
+    lights: createFxLights(),
     debugViewPass: null,
     sunStore: { dir: new THREE.Vector3(), color: new THREE.Color(), intensity: 0, screen: new THREE.Vector2(0.5, 0.5), behind: false, fade: 0 },
   };
@@ -224,4 +230,5 @@ export function updateContext(ctx: FxFrameContext, input: FxFrameInput, size: TH
   ctx.firstPerson = input.firstPerson;
   ctx.waterInView = input.waterInView;
   ctx.blades = input.blades;
+  ctx.lights = input.lights;
 }

@@ -15,6 +15,8 @@ import { collectBlades, lightAt, litCeiling, type LitSources } from './combat/bl
 import { createBladeList } from './core/fx/bladeList';
 import { BLADE_GLOW_TUNE, segmentDistanceSq, type BladeGlowTune } from './core/fx/bladeGlowMath.ts';
 import { BLADE_GLOW_VIEWS, type BladeGlowPass } from './core/fx/bladeGlow';
+import { SSAO_TUNE_DEFAULTS, type SsaoPass } from './core/fx/ssao';
+import { SSAO_BASE_POWER } from './core/fx/ssaoMath.ts';
 import type { FighterGlow } from './world/npcs';
 import { loadPlayerRig } from './player/rig';
 import { Character, loadSpeciesIndex, type SpeciesEntry } from './player/character';
@@ -34,6 +36,7 @@ import { interceptTime, leadPoint } from './combat/intercept';
 import { PostFX, type FxFrameInput, type SunInfo } from './core/postfx';
 import { fxPassDef, isFxSettingKey, type FxPassId } from './core/fxRegistry.ts';
 import { installEffects } from './core/fx/install';
+import { addPointLight, createFxLights, setSpotLight } from './core/fx/lights';
 import { Notice } from './ui/notice';
 import { VehiclesUi } from './ui/vehiclesUi';
 import { NpcUi } from './ui/npcUi';
@@ -188,10 +191,12 @@ class App {
   private postfx: PostFX | null = null;
   /** The lit blades handed to the effects each frame (declared before fxInput, whose initialiser reads it). */
   private readonly fxBlades = createBladeList();
+  /** The frame's lights handed to the effects, refilled in drawFrame (declared before fxInput, whose initialiser reads it). */
+  private readonly fxLights = createFxLights();
   /** What the blades' light ceiling reads, kept and refilled each frame; the world and the pool are set in the constructor. */
   private readonly litSources: LitSources = { world: null!, effects: null!, torch: null, eye: new THREE.Vector3() };
   /** What the effects are told about each frame, refilled in drawFrame rather than made again. */
-  private readonly fxInput: FxFrameInput = { camera: null as unknown as THREE.PerspectiveCamera, dt: 1 / 60, sun: null, portalView: false, cameraInHull: false, inside: false, aboard: false, space: false, fog: null, daylight: 1, dayIndex: 0, lighting: null, planetId: '', aiming: false, aimAmount: 0, firstPerson: false, waterInView: false, blades: this.fxBlades };
+  private readonly fxInput: FxFrameInput = { camera: null as unknown as THREE.PerspectiveCamera, dt: 1 / 60, sun: null, portalView: false, cameraInHull: false, inside: false, aboard: false, space: false, fog: null, daylight: 1, dayIndex: 0, lighting: null, planetId: '', aiming: false, aimAmount: 0, firstPerson: false, waterInView: false, blades: this.fxBlades, lights: this.fxLights };
   private readonly fxSun: SunInfo = { dir: new THREE.Vector3(), color: new THREE.Color(), intensity: 0 };
   /** What the debug mask draws: the player and whatever they ride or are aboard. */
   private readonly fxMaskObjects: THREE.Object3D[] = [];
@@ -435,6 +440,55 @@ class App {
         this.drawFrame();
         const errors = fx.lastCheck ?? [];
         return { clean: errors.length === 0, errors };
+      },
+      /**
+       * Ambient occlusion: tune it live and report the lights it read and the values under the crosshair. `{ split: 0.5 }` left
+       * half with it, right half without; `{ view: 'ao' | 'fraction' | 'ceiling' | 'multiplier' | 'region' }` shows its working
+       * texture (null the picture); `radius`, `power`, `fade: [start, end]`, `falloff`, `thin`, `openBias`, `directShare` and
+       * `region: false` (the sky's lights everywhere) compare. Null puts an option back.
+       */
+      ssao: (opts?: { split?: number | null; view?: 'ao' | 'fraction' | 'ceiling' | 'multiplier' | 'region' | null; radius?: number | null; power?: number | null; fade?: [number, number] | null; falloff?: number | null; thin?: number | null; openBias?: number | null; directShare?: number | null; region?: boolean | null }) => {
+        const fx = this.postfx;
+        if (!fx) return 'the effects are off; turn Effects on in the menu';
+        const pass = fx.pass<SsaoPass>('ssao');
+        if (!pass) return 'the ambient occlusion pass is not installed on this chain';
+        const t = pass.tune;
+        const D = SSAO_TUNE_DEFAULTS;
+        if (opts) {
+          if ('split' in opts) t.split = opts.split ?? 0;
+          if ('radius' in opts) t.radius = opts.radius ?? null;
+          if ('power' in opts) t.power = opts.power ?? null;
+          if ('fade' in opts) [t.fadeStart, t.fadeEnd] = opts.fade ?? [D.fadeStart, D.fadeEnd];
+          if ('falloff' in opts) t.falloff = opts.falloff ?? D.falloff;
+          if ('thin' in opts) t.thin = opts.thin ?? D.thin;
+          if ('openBias' in opts) t.openBias = opts.openBias ?? D.openBias;
+          if ('directShare' in opts) t.directShare = opts.directShare ?? D.directShare;
+          if ('region' in opts) t.region = opts.region ?? D.region;
+          if ('view' in opts) {
+            const v = opts.view ?? null;
+            pass.setMultiplierView(v === 'multiplier');
+            fx.fxView(v ? `ssao.${v}` : null);
+          }
+        }
+        const ctx = fx.ctx;
+        const row = fx.describe().passes.find((p) => p.id === 'ssao');
+        return {
+          on: row?.setting ?? false,
+          drewLastFrame: pass.drewLastFrame(ctx),
+          why: row?.why ?? null,
+          resolution: pass.aoSize,
+          radius: t.radius ?? ctx.settings.ssaoRadius,
+          strength: ctx.settings.ssaoStrength,
+          power: t.power ?? SSAO_BASE_POWER * Math.max(ctx.settings.ssaoStrength, 1),
+          fade: [t.fadeStart, t.fadeEnd],
+          openBias: t.openBias,
+          directShare: t.directShare,
+          lightSets: pass.last.lightSets,
+          lights: pass.lightsReport(ctx),
+          water: { inView: ctx.waterInView, mask: pass.last.waterMask },
+          centre: pass.probe(ctx),
+          gpuMs: fx.timer.enabled ? (fx.timing().rows['pass:ssao']?.gpuMs ?? null) : null,
+        };
       },
       /** Compile every pass and product material again and say how many programs that made; a second call should say 0. */
       fxWarm: async () => (this.postfx ? await this.postfx.warmUp() : 'the effects are off; turn Effects on in the menu'),
@@ -2384,6 +2438,14 @@ class App {
       f.aimAmount = this.cam.aimAmount;
       f.firstPerson = this.cam.firstPerson;
       f.waterInView = this.world.waterBodies.inView;
+      // The lights the frame was just drawn with (the shadow matrices are this frame's): the world's
+      // two sets, the flash pool on the actor layer, and the torch.
+      const L = this.fxLights;
+      this.world.fillFxLights(L);
+      const pool = this.effects.lightPool;
+      for (let i = 0; i < pool.length; i++) L.flashCount = addPointLight(L.flash, L.flashCount, pool[i]);
+      setSpotLight(L.sky.torch, this.torchOn ? this.torch : null);
+      f.lights = L;
       // The lit blades as drawn this frame (drawBlades and the fighters' step have run), and how
       // bright a surface near them can be from every other light; aboard, floors are the hull's.
       const blades = this.fxBlades;

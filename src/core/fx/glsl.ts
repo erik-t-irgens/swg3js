@@ -69,3 +69,64 @@ export const FX_IGN = /* glsl */ `
 export const FX_EDGE_FADE = /* glsl */ `
   float fxEdgeFade(vec2 uv, float w) { return smoothstep(0.0, w, min(min(uv.x, uv.y), min(1.0 - uv.x, 1.0 - uv.y))); }
 `;
+
+/** fxLuma: Rec. 709 luminance of linear colour. */
+export const FX_LUMA = /* glsl */ `
+  float fxLuma(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+`;
+
+/**
+ * Half-resolution textures brought back to a full-resolution pixel (needs FX_VIEW_POS).
+ *
+ * fxHalfTaps: the four half-resolution texels around a full-resolution pixel and their bilinear
+ * weights. The half-resolution depth (`LinearDepthHalf`) samples half texel i at full texel 2i + 1,
+ * so its centre sits at full coordinate 2i + 1.5.
+ *
+ * fxDepthWeights: the four taps' bilinear weights times how close each tap's depth is to this
+ * pixel's, normalised. Cheaper than the plane weights, which need the normals: for what has no
+ * surface of its own to keep to (the room's haze).
+ *
+ * fxPlaneWeight: 1 when this pixel's surface point lies on the tap's plane (the tap's view position
+ * and view normal), falling to 0 at `tolerance` metres off it; 0 for a sky texel.
+ *
+ * fxBilateralUpsample: a half-resolution texture at a full-resolution pixel, blending only taps whose
+ * surface this pixel lies on; `fallback` when none does (a feature thinner than a half texel).
+ */
+export const FX_BILATERAL_UPSAMPLE = /* glsl */ `
+  void fxHalfTaps(vec2 fragCoord, ivec2 halfSize, out ivec2 t00, out ivec2 t10, out ivec2 t01, out ivec2 t11, out vec4 w) {
+    vec2 h = (fragCoord - 1.5) * 0.5;
+    ivec2 b = ivec2(floor(h));
+    vec2 f = h - vec2(b);
+    ivec2 hi = halfSize - 1;
+    t00 = clamp(b, ivec2(0), hi); t10 = clamp(b + ivec2(1, 0), ivec2(0), hi);
+    t01 = clamp(b + ivec2(0, 1), ivec2(0), hi); t11 = clamp(b + ivec2(1, 1), ivec2(0), hi);
+    w = vec4((1.0 - f.x) * (1.0 - f.y), f.x * (1.0 - f.y), (1.0 - f.x) * f.y, f.x * f.y);
+  }
+  vec4 fxDepthWeights(highp sampler2D tLinearHalf, ivec2 t00, ivec2 t10, ivec2 t01, ivec2 t11, vec4 w, float fullZ) {
+    vec4 z = vec4(texelFetch(tLinearHalf, t00, 0).r, texelFetch(tLinearHalf, t10, 0).r, texelFetch(tLinearHalf, t01, 0).r, texelFetch(tLinearHalf, t11, 0).r);
+    vec4 ww = w / (0.02 + abs(z - fullZ) / max(fullZ, 0.05)) + 1e-5;
+    return ww / (ww.x + ww.y + ww.z + ww.w);
+  }
+  float fxPlaneWeight(highp sampler2D tLinearHalf, sampler2D tNormalHalf, ivec2 t, vec3 pFull, vec2 fullSize, vec2 tanHalfFov, float tolerance) {
+    vec4 ne = texelFetch(tNormalHalf, t, 0);
+    if (ne.a < 0.5) return 0.0;
+    vec3 n = ne.xyz * 2.0 - 1.0;
+    vec3 p = fxViewPos((vec2(t) * 2.0 + 1.5) / fullSize, texelFetch(tLinearHalf, t, 0).r, tanHalfFov);
+    return clamp(1.0 - abs(dot(n, pFull - p)) / (tolerance * max(length(n), 0.5)), 0.0, 1.0);
+  }
+  vec4 fxBilateralUpsample(sampler2D tHalf, highp sampler2D tLinearHalf, sampler2D tNormalHalf, vec2 fragCoord, vec2 fullSize, vec2 tanHalfFov, float zFull, vec4 fallback) {
+    ivec2 t00, t10, t01, t11;
+    vec4 w;
+    fxHalfTaps(fragCoord, textureSize(tHalf, 0), t00, t10, t01, t11, w);
+    vec3 p = fxViewPos(fragCoord / fullSize, zFull, tanHalfFov);
+    // upsampleTolerance in ssaoMath.ts: 1% of the depth plus 3 cm.
+    float tolerance = zFull * 0.01 + 0.03;
+    w.x *= fxPlaneWeight(tLinearHalf, tNormalHalf, t00, p, fullSize, tanHalfFov, tolerance);
+    w.y *= fxPlaneWeight(tLinearHalf, tNormalHalf, t10, p, fullSize, tanHalfFov, tolerance);
+    w.z *= fxPlaneWeight(tLinearHalf, tNormalHalf, t01, p, fullSize, tanHalfFov, tolerance);
+    w.w *= fxPlaneWeight(tLinearHalf, tNormalHalf, t11, p, fullSize, tanHalfFov, tolerance);
+    float sum = w.x + w.y + w.z + w.w;
+    if (sum < 1e-3) return fallback;
+    return (texelFetch(tHalf, t00, 0) * w.x + texelFetch(tHalf, t10, 0) * w.y + texelFetch(tHalf, t01, 0) * w.z + texelFetch(tHalf, t11, 0) * w.w) / sum;
+  }
+`;
