@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import type { AssetPack } from './assetPack';
 import type { DayCycle } from './daycycle';
+import { angularRadius, isFlareBody, rankStarGroups, tintScale, DISC_FILL, GLOW_FILL, MAX_FLARE_SOURCES, STAR_DISC_FILL, STAR_GLOW_FILL } from '../core/fx/flareMath';
+import type { FxCloudLayer, FxSkyLight } from '../core/fx/lensFlare';
 
 // The planet's sky as the original client draws it (see tools/swg/sky.mjs for the export):
 // a gradient sky texture whose columns are the time of day and rows run from the horizon up
@@ -211,6 +213,27 @@ const tmpVec = new THREE.Vector3();
 const tmpVec2 = new THREE.Vector3();
 /** Scratch for reading a ramp byte triple as a linear colour. */
 const tmpRampColor = new THREE.Color();
+const WHITE = new THREE.Color(1, 1, 1);
+/**
+ * The procedural dome's sun, as the lens flare sees it (world.ts's dome shader): its disc edge runs
+ * from about 2.3 to 4 degrees and its glow, pow(c, 32), halves at about 12. Angular radii, radians.
+ */
+const PROCEDURAL_DISC = 0.06;
+const PROCEDURAL_GLOW = 0.2;
+
+/** A glowing body the lens flare follows: its sprites, as place() (or, in space, the constructor) left them. */
+interface FlareBody {
+  /** The glow and disc sprites of a sun, or every sprite of a star group. */
+  readonly sprites: readonly THREE.Sprite[];
+  readonly discRadius: number;
+  readonly glowRadius: number;
+  readonly weight: number;
+  readonly star: boolean;
+  /** Fixed tint (space stars); null: this frame's main light colour. */
+  readonly color: THREE.Color | null;
+  /** The moon slot carrying a sun (Mustafar): a night sun. */
+  readonly night: boolean;
+}
 
 export class SwgSky {
   readonly group = new THREE.Group();
@@ -223,6 +246,8 @@ export class SwgSky {
   private readonly moon: THREE.Sprite[] = [];
   private readonly supplementalMoon: THREE.Sprite[] = [];
   private readonly celestials: { sprites: THREE.Sprite[]; data: Celestial }[] = [];
+  /** What the lens flare follows: at most MAX_FLARE_SOURCES, index = flare slot, fixed for the life of the sky. */
+  private readonly flareBodies: FlareBody[] = [];
   private readonly stars: THREE.Points | null = null;
   /** Cloud sheets live outside the camera-following group: their altitude is fixed in the world. */
   readonly cloudGroup = new THREE.Group();
@@ -395,19 +420,53 @@ export class SwgSky {
     this.supplementalMoon.push(...body(data.supplementalMoon));
     for (const c of data.celestials) this.celestials.push({ sprites: body(c), data: c });
 
+    // The lens flare's sources over a planet: every sun-shaded body with a glow whose two sprites
+    // both loaded (not Yavin 4's gas giant, not a moon; Mustafar's moon slot is a second sun), the
+    // heaviest glow first, each in a slot it keeps for the life of the sky.
+    if (!data.space) {
+      const slots: [Celestial | null, THREE.Sprite[], boolean][] = [
+        [data.sun, this.sun, false],
+        [data.supplementalSun, this.supplementalSun, false],
+        [data.moon, this.moon, true],
+        [data.supplementalMoon, this.supplementalMoon, true],
+      ];
+      let glowMax = 0;
+      for (const [c] of slots) if (c && isFlareBody(c)) glowMax = Math.max(glowMax, c.glowSize);
+      for (const [c, sprites, night] of slots) {
+        if (!c || !isFlareBody(c) || sprites.length < 2) continue;
+        this.flareBodies.push({ sprites, discRadius: angularRadius(c.size, DISC_FILL), glowRadius: angularRadius(c.glowSize, GLOW_FILL), weight: c.glowSize / glowMax, star: false, color: null, night });
+      }
+      // Stable: sun, second sun, moon slot, second moon slot among equals.
+      this.flareBodies.sort((a, b) => b.weight - a.weight);
+      if (this.flareBodies.length > MAX_FLARE_SOURCES) this.flareBodies.length = MAX_FLARE_SOURCES;
+    }
+
     // A space zone: its star sprites hang where its terrain file turns them, for good; its main
     // light comes from a fixed direction; and dust drifts past the camera.
     const space = data.space;
     if (space) {
+      const made: { c: SpaceEnvironment['celestials'][number]; s: THREE.Sprite }[] = [];
       for (const c of space.celestials) {
         const additive = c.image?.alphaMode !== 'BLEND';
         const s = sprite(c.image, c.size, additive);
         if (!s) continue;
         s.position.copy(SwgSky.direction(c.yaw, THREE.MathUtils.degToRad(c.pitch), tmpVec)).multiplyScalar(SKY_RADIUS);
         s.material.rotation = THREE.MathUtils.degToRad(c.roll);
+        made.push({ c, s });
       }
       const main = space.lights[0];
       if (main) this.spaceLightDir = SwgSky.direction(main.yaw, THREE.MathUtils.degToRad(main.pitch), new THREE.Vector3());
+      // The lens flare's sources in space: the brightest star sprite groups (the sprites are what
+      // the eye sees; the zone's lights mostly point elsewhere), tinted halfway to white by the main light.
+      for (const g of rankStarGroups(made.map((m) => m.c))) {
+        const color = new THREE.Color(1, 1, 1);
+        if (main) {
+          color.setRGB(main.diffuse[0], main.diffuse[1], main.diffuse[2], THREE.SRGBColorSpace).lerp(WHITE, 0.5);
+          color.multiplyScalar(tintScale(color.r, color.g, color.b));
+        }
+        const sprites = made.filter((m) => m.c.yaw === g.yaw && m.c.pitch === g.pitch).map((m) => m.s);
+        this.flareBodies.push({ sprites, discRadius: angularRadius(Math.max(g.backSize, g.glowSize), STAR_DISC_FILL), glowRadius: angularRadius(g.glowSize, STAR_GLOW_FILL), weight: g.weight, star: true, color, night: false });
+      }
       if (space.dust && space.dust.count > 0) {
         const n = Math.min(space.dust.count, 4000);
         const r = Math.max(8, space.dust.radius);
@@ -764,6 +823,92 @@ export class SwgSky {
     return L;
   }
 
+  /**
+   * The glowing suns (in space, the brightest stars) as this frame's sky shows them, one fixed slot
+   * each; fills `out` and returns the number of slots. A body not drawn this frame (below, hidden, a
+   * night sun with nightSuns false) has alpha 0 and keeps its last direction. Reads the sprites as
+   * place() (or, in space, the constructor) left them; allocates nothing.
+   */
+  flareLights(out: readonly FxSkyLight[], nightSuns = true): number {
+    const n = Math.min(out.length, this.flareBodies.length);
+    // Linear: the ramp's bytes are read as sRGB (rampColor).
+    const main = this.lighting.main;
+    const k = tintScale(main.r, main.g, main.b);
+    for (let i = 0; i < n; i++) {
+      const b = this.flareBodies[i];
+      const o = out[i];
+      let lit: THREE.Sprite | null = null;
+      for (let j = 0; j < b.sprites.length; j++) {
+        if (b.sprites[j].visible) {
+          lit = b.sprites[j];
+          break;
+        }
+      }
+      // place() put it at dir x SKY_RADIUS in the camera-following group.
+      if (lit) o.dir.copy(lit.position).multiplyScalar(1 / SKY_RADIUS);
+      o.alpha = lit && this.group.visible && !(b.night && !nightSuns) ? lit.material.opacity : 0;
+      o.discRadius = b.discRadius;
+      o.glowRadius = b.glowRadius;
+      o.weight = b.weight;
+      o.star = b.star;
+      o.skyDistance = SKY_RADIUS;
+      if (b.color) o.color.copy(b.color);
+      else o.color.copy(main).multiplyScalar(k);
+    }
+    return n;
+  }
+
+  /**
+   * The procedural dome's suns for the lens flare, when a world has no converted sky: the dome
+   * shader draws the sun at `sunDir` and, with two suns, a second one turned 0.12 rad about Y with
+   * its height scaled by 0.8. The dome is drawn first and writes no depth, so anything drawn covers
+   * it (skyDistance Infinity). Returns the number of slots; they stay, dark, at night.
+   */
+  static proceduralFlareLights(out: readonly FxSkyLight[], sunDir: THREE.Vector3, sunColor: THREE.Color, suns: number): number {
+    const k = tintScale(sunColor.r, sunColor.g, sunColor.b);
+    const n = Math.min(out.length, suns >= 2 ? 2 : 1);
+    const alpha = THREE.MathUtils.smoothstep(sunDir.y, 0, 0.06);
+    const c = Math.cos(0.12);
+    const s = Math.sin(0.12);
+    for (let i = 0; i < n; i++) {
+      const o = out[i];
+      // A turn about Y keeps the length, and the height scaled by 0.8 leaves a non-zero vector to normalise.
+      if (i === 0) o.dir.copy(sunDir);
+      else o.dir.set(sunDir.x * c + sunDir.z * s, sunDir.y * 0.8, -sunDir.x * s + sunDir.z * c).normalize();
+      o.color.copy(sunColor).multiplyScalar(k);
+      o.alpha = alpha;
+      o.discRadius = PROCEDURAL_DISC;
+      o.glowRadius = PROCEDURAL_GLOW;
+      o.weight = i === 0 ? 1 : 0.9;
+      o.star = false;
+      o.skyDistance = Infinity;
+    }
+    return n;
+  }
+
+  /** The cloud sheets drawn this frame (hidden or empty ones skipped), up to out.length; returns how many. Allocates nothing. */
+  cloudLayers(out: readonly FxCloudLayer[]): number {
+    if (!this.cloudGroup.visible) return 0;
+    let n = 0;
+    for (let i = 0; i < this.clouds.length && n < out.length; i++) {
+      const mesh = this.clouds[i].mesh;
+      const u = mesh.material.uniforms;
+      const tex = u.uMap.value as THREE.Texture | null;
+      const opacity = u.uOpacity.value as number;
+      if (!mesh.visible || !tex || !(opacity > 0.002)) continue;
+      const o = out[n++];
+      o.texture = tex;
+      // The cloud group sits at y 0, so a sheet's own height is its altitude.
+      o.altitude = mesh.position.y;
+      o.repeat = u.uRepeat.value as number;
+      o.scroll.copy(u.uScroll.value as THREE.Vector2);
+      o.opacity = Math.min(1, opacity);
+      o.fade.copy(u.uFade.value as THREE.Vector2);
+      o.texels = (tex.image as { width?: number } | null)?.width ?? 256;
+    }
+    return n;
+  }
+
   /** What the sky is made of, for the console; naming a part toggles it, to see what each contributes. */
   describe(toggle?: 'dome' | 'skybox' | 'stars' | 'dust' | 'sprites'): Record<string, unknown> {
     const sprites = [...this.sun, ...this.supplementalSun, ...this.moon, ...this.supplementalMoon, ...this.celestials.flatMap((c) => c.sprites)];
@@ -786,6 +931,7 @@ export class SwgSky {
       dust: this.dust ? `${(this.dust.points.geometry.getAttribute('position') as THREE.BufferAttribute).count} within ${this.dust.radius} m${this.dust.points.visible ? '' : ' hidden'}` : 'none',
       sprites: `${sprites.length}, ${this.group.children.filter((s) => s instanceof THREE.Sprite && s.visible).length} visible`,
       spaceLight: this.spaceLightDir ? this.spaceLightDir.toArray().map((v) => Number(v.toFixed(2))) : null,
+      flare: this.flareBodies.map((b, slot) => ({ slot, star: b.star, night: b.night, weight: Number(b.weight.toFixed(2)), sprites: b.sprites.length, visible: b.sprites.some((s) => s.visible), discDeg: Number(THREE.MathUtils.radToDeg(b.discRadius).toFixed(2)), glowDeg: Number(THREE.MathUtils.radToDeg(b.glowRadius).toFixed(2)) })),
       lighting: { main: `#${this.lighting.main.getHexString()} x${this.lighting.mainScale.toFixed(2)}`, ambient: `#${this.lighting.ambient.getHexString()} x${this.lighting.ambientScale.toFixed(2)}`, clear: `#${this.lighting.clear.getHexString()}`, fog: this.lighting.fogDensity },
     };
   }

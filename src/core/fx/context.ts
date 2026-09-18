@@ -6,6 +6,7 @@ import { FX_PRODUCTS, type FxPassId, type FxProductId, type FxSettings } from '.
 import type { SkyLighting } from '../../world/sky';
 import { UNSET_BLADES, type FxBladeList } from './bladeList';
 import { createFxLights, type FxLights } from './lights';
+import type { FxCloudLayer, FxSkyLight } from './lensFlare';
 
 /** The sun as the world knows it: which way it lies (towards it), its colour, and how much daylight there is (0 at night, and in space). */
 export interface SunInfo {
@@ -37,6 +38,16 @@ export interface FxFrameInput {
   firstPerson: boolean;
   /** Water shows on screen this frame: in the frustum within the fog's reach, and not found hidden by the occlusion probe. */
   waterInView: boolean;
+  /** The lens flare's sources: a kept array of MAX_FLARE_SOURCES records, refilled in drawFrame; entry i is flare slot i. */
+  skyLights: readonly FxSkyLight[];
+  /** Slots this sky has (0, 1 or 2); a slot not drawn this frame has alpha 0. */
+  skyLightCount: number;
+  /** The cloud sheets drawn this frame: a kept array of MAX_CLOUD_LAYERS records. */
+  clouds: readonly FxCloudLayer[];
+  /** Sheets listed this frame (0..4). */
+  cloudCount: number;
+  /** The camera is under a water surface: nothing beyond the water is seen as sky. */
+  cameraUnderwater: boolean;
   /** The lit blades this frame, world space: the game's kept list, refilled in drawFrame. */
   blades: FxBladeList;
   /** The frame's lights, both passes' sets (src/core/fx/lights.ts): the game's kept record, refilled in drawFrame after the scene is drawn. */
@@ -108,6 +119,13 @@ export interface FxFrameContext {
   blades: FxBladeList;
   /** The frame's lights; a reference to the input's kept record. */
   lights: FxLights;
+  /** The lens flare's sources; a reference to the input's kept list (entry i is flare slot i). */
+  skyLights: readonly FxSkyLight[];
+  skyLightCount: number;
+  /** The cloud sheets drawn this frame; a reference to the input's kept list. */
+  clouds: readonly FxCloudLayer[];
+  cloudCount: number;
+  cameraUnderwater: boolean;
   /** The pass whose own working texture the debug view is showing, so it keeps it this frame. */
   debugViewPass: FxPassId | null;
   /** The sun record `sun` points at, kept so a frame allocates nothing; never read it directly. */
@@ -165,6 +183,12 @@ export function createContext(renderer: THREE.WebGLRenderer, settings: FxSetting
     // The unset list until the first frame hands the game's own; the glow pass warns if it never does.
     blades: UNSET_BLADES,
     lights: createFxLights(),
+    // Empty until the first frame hands the game's own lists; the flare says so rather than drawing.
+    skyLights: [],
+    skyLightCount: 0,
+    clouds: [],
+    cloudCount: 0,
+    cameraUnderwater: false,
     debugViewPass: null,
     sunStore: { dir: new THREE.Vector3(), color: new THREE.Color(), intensity: 0, screen: new THREE.Vector2(0.5, 0.5), behind: false, fade: 0 },
   };
@@ -231,4 +255,9 @@ export function updateContext(ctx: FxFrameContext, input: FxFrameInput, size: TH
   ctx.waterInView = input.waterInView;
   ctx.blades = input.blades;
   ctx.lights = input.lights;
+  ctx.skyLights = input.skyLights;
+  ctx.skyLightCount = input.skyLightCount;
+  ctx.clouds = input.clouds;
+  ctx.cloudCount = input.cloudCount;
+  ctx.cameraUnderwater = input.cameraUnderwater;
 }

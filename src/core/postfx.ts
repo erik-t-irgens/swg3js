@@ -599,6 +599,8 @@ export class PostFX {
     }
     // The bloom's bright target and its ten blur levels, each half of the one before.
     if (this.byPassId.has('bloom')) bytes += px * 8 * 0.5;
+    // The lens flare's half-size element target (its two 2x1 visibility targets are too small to count).
+    if (this.byPassId.has('lensFlare')) bytes += px * 8 * 0.25;
     return Math.round(bytes / (1024 * 1024));
   }
 

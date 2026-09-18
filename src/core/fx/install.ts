@@ -12,6 +12,7 @@ import { installWaterReflections, type WaterFxSource } from './water';
 import { SsaoPass, ssaoHostFor } from './ssao';
 import { installHeatHaze } from './heat';
 import type { HeatSources } from '../../world/heatSources';
+import { LensFlarePass } from './lensFlare';
 
 export interface FxInstallDeps {
   /** The water bodies whose mask and reflections the effects draw (`World.waterBodies`). */
@@ -29,6 +30,8 @@ export function installEffects(postfx: PostFX, deps: FxInstallDeps = {}): void {
   postfx.registerPass(new GrainVignettePass());
   // The blades' light needs nothing from the game either: it reads the blades from the frame input.
   postfx.registerPass(new BladeGlowPass());
+  // The lens flare needs nothing from the game either: it reads the sky's suns and clouds from the frame input.
+  postfx.registerPass(new LensFlarePass(postfx.ctx.renderer));
   // The water mask and the reflections, when the game has water bodies to give them.
   if (deps.water) installWaterReflections(postfx, deps.water);
   // The heat haze, when the game hands over what gives off heat.

@@ -37,6 +37,8 @@ import { PostFX, type FxFrameInput, type SunInfo } from './core/postfx';
 import { fxPassDef, isFxSettingKey, type FxPassId } from './core/fxRegistry.ts';
 import { installEffects } from './core/fx/install';
 import { addPointLight, createFxLights, setSpotLight } from './core/fx/lights';
+import { createCloudLayers, createSkyLights, flareLook, tuneFlareLook } from './core/fx/lensFlare';
+import { MAX_CLOUD_LAYERS, MAX_FLARE_SOURCES } from './core/fx/flareMath';
 import { heatTuning, type HeatProduct } from './core/fx/heat';
 import { HeatSources, plumeNoiseFrequency } from './world/heatSources';
 import { vehiclePlumes } from './vehicles/enginePlumes';
@@ -204,7 +206,7 @@ class App {
   /** What the blades' light ceiling reads, kept and refilled each frame; the world and the pool are set in the constructor. */
   private readonly litSources: LitSources = { world: null!, effects: null!, torch: null, eye: new THREE.Vector3() };
   /** What the effects are told about each frame, refilled in drawFrame rather than made again. */
-  private readonly fxInput: FxFrameInput = { camera: null as unknown as THREE.PerspectiveCamera, dt: 1 / 60, sun: null, portalView: false, cameraInHull: false, inside: false, aboard: false, space: false, fog: null, daylight: 1, dayIndex: 0, lighting: null, planetId: '', aiming: false, aimAmount: 0, firstPerson: false, waterInView: false, blades: this.fxBlades, lights: this.fxLights };
+  private readonly fxInput: FxFrameInput = { camera: null as unknown as THREE.PerspectiveCamera, dt: 1 / 60, sun: null, portalView: false, cameraInHull: false, inside: false, aboard: false, space: false, fog: null, daylight: 1, dayIndex: 0, lighting: null, planetId: '', aiming: false, aimAmount: 0, firstPerson: false, skyLights: createSkyLights(MAX_FLARE_SOURCES), skyLightCount: 0, clouds: createCloudLayers(MAX_CLOUD_LAYERS), cloudCount: 0, cameraUnderwater: false, waterInView: false, blades: this.fxBlades, lights: this.fxLights };
   private readonly fxSun: SunInfo = { dir: new THREE.Vector3(), color: new THREE.Color(), intensity: 0 };
   /** What the debug mask draws: the player and whatever they ride or are aboard. */
   private readonly fxMaskObjects: THREE.Object3D[] = [];
@@ -940,6 +942,56 @@ class App {
       },
       /** The converted sky's parts (the dome, the skybox faces, the stars, space dust, the sun and star sprites) and its lighting now; `sky('skybox')` and the like toggle a part to see what it contributes. */
       sky: (toggle?: 'dome' | 'skybox' | 'stars' | 'dust' | 'sprites') => this.world.swgSky?.describe(toggle) ?? 'no converted sky on this world',
+      /** The lens flare this frame: every source slot the sky has, whether it is on, its visibility ([smoothed, depth open, cloud transmittance]) and `turn`, the degrees right and up to face it whatever steers the view. */
+      flare: () => {
+        const fx = this.postfx;
+        const pass = fx?.pass<import('./core/fx/lensFlare').LensFlarePass>('lensFlare');
+        if (!fx) return 'the effects are off: the flare is one of them';
+        if (!pass) return 'the lens flare is not registered on this chain';
+        this.drawFrame();
+        return { ...pass.report(fx.ctx), visibility: pass.readVisibility(), sky: this.world.swgSky?.describe().flare ?? null };
+      },
+      /** Change the flare's look live (`{ streak: 0.5 }`, `{ debugOnly: true }` for the flare alone on black, `{ nightSuns: false }`), or `'reset'`; kept across the Effects switch until a reload, never saved. */
+      flareTune: (patch?: Partial<import('./core/fx/flareMath').FlareLook> | 'reset') => {
+        // The module's live look: tuned with the effects off too, and read by the pass when they come on.
+        return tuneFlareLook(patch);
+      },
+      /** Measure the next frame round the first sun on screen: pixels over white and over the flare's ceiling, before and after it (the counts must match). */
+      flareProbe: () => {
+        const fx = this.postfx;
+        const pass = fx?.pass<import('./core/fx/lensFlare').LensFlarePass>('lensFlare');
+        if (!fx || !pass) return 'the effects are off: the flare is one of them';
+        pass.probeWanted = true;
+        this.drawFrame();
+        if (pass.probeWanted) {
+          pass.probeWanted = false;
+          return { error: `the flare did not draw: ${pass.reason(fx.ctx) ?? 'switched off'}` };
+        }
+        return pass.lastProbe;
+      },
+      /** Point the camera at sun `i` (by default the first one up: Mustafar's night sun is slot 1), `offset` radians of yaw aside so the head does not hide it; on foot or riding only (flying, aboard and adrift, steer by `flare().sources[i].turn`). */
+      faceSun: (slot?: number, offset = 0.25) => {
+        const p = this.player;
+        const flown = p.mounted ?? p.piloting;
+        const steer = `turn by hand: __debug.flare().sources[${slot ?? 0}].turn says how far right and up`;
+        if (flown?.spec.ship && flown.airborne) return `flying: the view follows the ship; ${steer}`;
+        if (p.aboard) return `aboard a ship: the view is in the hull's frame; ${steer}`;
+        if (p.eva) return `adrift: the view is in the body's frame; ${steer}`;
+        // The frame input's kept list, which drawFrame refills every frame: the effects need not be on.
+        const lights = this.fxInput.skyLights;
+        const n = this.world.skyLights(lights, flareLook.nightSuns);
+        const up = (k: number) => k >= 0 && k < n && lights[k].alpha > 0.002;
+        let i = 0;
+        if (slot === undefined) {
+          while (i < n && !up(i)) i++;
+          if (i >= n) return `no sun up now (${n} flare slots)`;
+        } else if (!Number.isInteger(slot) || !up(slot)) return `no sun ${slot} up now (${n} flare slots, numbered from 0)`;
+        else i = slot;
+        const d = lights[i].dir;
+        this.cam.yaw = Math.atan2(-d.x, -d.z) + offset;
+        this.cam.pitch = THREE.MathUtils.clamp(-Math.asin(THREE.MathUtils.clamp(d.y, -1, 1)), -1.25, 1.4);
+        return { slot: i, direction: d.toArray().map((v) => Number(v.toFixed(3))), yaw: Number(this.cam.yaw.toFixed(3)), pitch: Number(this.cam.pitch.toFixed(3)) };
+      },
       /** Bolts in the air: whose, where, which way, how fast, whether drawn as the game's projectile effect, how many have flown and been blocked, and the ship effects' state. */
       bolts: () => ({ fired: { ...this.world.bolts.fired }, blocked: this.player.blocks, inFlight: this.world.bolts.bolts.map((b) => ({ owner: b.owner, reflected: b.reflected, at: b.pos.toArray().map((v) => Number(v.toFixed(1))), dir: b.dir.toArray().map((v) => Number(v.toFixed(2))), speed: Math.round(b.speed), effect: b.fx?.file ?? null })), shipEffects: this.world.shipFx.status, target: this.shipTarget?.spec.id ?? null, lead: this.shipLeadValid ? this.shipLead.toArray().map((v) => Number(v.toFixed(1))) : null }),
       /** The turrets: where each stands, its health, whether it is down, and its shots. */
@@ -2517,6 +2569,10 @@ class App {
       for (let i = 0; i < pool.length; i++) L.flashCount = addPointLight(L.flash, L.flashCount, pool[i]);
       setSpotLight(L.sky.torch, this.torchOn ? this.torch : null);
       f.lights = L;
+      // The suns (in space, the stars) the sky drew this frame, its cloud sheets, and whether the camera is under water: the lens flare's sources.
+      f.skyLightCount = this.world.skyLights(f.skyLights, flareLook.nightSuns);
+      f.cloudCount = this.world.cloudLayers(f.clouds);
+      f.cameraUnderwater = this.world.cameraUnderwater(cam.position);
       // The lit blades as drawn this frame (drawBlades and the fighters' step have run), and how
       // bright a surface near them can be from every other light; aboard, floors are the hull's.
       const blades = this.fxBlades;

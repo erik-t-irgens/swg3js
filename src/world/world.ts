@@ -2419,6 +2419,30 @@ export class World {
     return out;
   }
 
+  /** What the lens flare follows this frame, one fixed slot per body: the sky's glowing suns (a space zone's brightest stars). Allocates nothing. */
+  skyLights(out: readonly import('../core/fx/lensFlare').FxSkyLight[], nightSuns = true): number {
+    if (!this.planet) return 0;
+    if (this.swgSky) return this.swgSky.flareLights(out, nightSuns);
+    if (this.planet.space) return 0;
+    // The procedural dome's sun (and Tatooine's second); dark at night, the slots kept.
+    return SwgSky.proceduralFlareLights(out, this.day.sunDir, this.sun.color, this.planet.sky.suns);
+  }
+
+  /** The converted sky's cloud sheets for the flare's occlusion; none on a procedural sky. */
+  cloudLayers(out: readonly import('../core/fx/lensFlare').FxCloudLayer[]): number {
+    return this.swgSky ? this.swgSky.cloudLayers(out) : 0;
+  }
+
+  /**
+   * The camera is under a water surface (lakes included): the sky is not seen through it. The water
+   * bodies' own test this frame (beginWaterFrame, with the swell's reach over the sea), or the plain
+   * one of the surface plus 0.3 m, so the flare and the reflections agree and neither shows through a lake.
+   */
+  cameraUnderwater(p: THREE.Vector3): boolean {
+    if (!this.planet || this.planet.space || this.inside) return false;
+    return this.waterBodies.underwater || p.y < this.terrain.waterHeightAt(p.x, p.z) + 0.3;
+  }
+
   /**
    * The lights the frame was drawn with, as the effects read them: the world pass's (the sky's set)
    * and the interior pass's (the rooms'), each room lamp with the cell it came from. Call it after
