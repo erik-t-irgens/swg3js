@@ -1764,6 +1764,7 @@ class App {
         break;
       case 'weather':
       case 'weatherDensity':
+      case 'rainOpacity':
       case 'wetSurfaces':
       case 'weatherShadows':
       case 'weatherForce':

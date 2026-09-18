@@ -300,6 +300,8 @@ export class SwgSky {
   private readonly cloudScroll = new Map<string, { s: THREE.Vector2; at: number }>();
   /** Where the clouds drift toward (radians, 0 = +Z, turning toward +X). */
   private windHeading = 0;
+  /** The weather's overcast, 0 to 1 (setOvercast). */
+  private overcast = 0;
   private readonly ramps = new Map<SkyBlock, Uint8Array>();
   /** The table's weather-0 row (or first row): the sky before anyone sets a mix. */
   private readonly defaultBlock: SkyBlock;
@@ -751,6 +753,15 @@ export class SwgSky {
     this.windHeading = heading;
   }
 
+  /**
+   * How overcast the weather is (0 clear, 1 a full storm): the sun and moon fade out behind it. The
+   * body's own alpha stays up until it meets the horizon, so without this a storm at noon still
+   * showed a full sun, and the lens flare, which follows the sprite's opacity, with it.
+   */
+  setOvercast(overcast: number): void {
+    this.overcast = THREE.MathUtils.clamp(overcast, 0, 1);
+  }
+
   /** Forget every cloud image's drift. */
   resetClouds(): void {
     this.cloudScroll.clear();
@@ -984,7 +995,8 @@ export class SwgSky {
     const lightDir = day.lightDir;
     // The ramp's alpha fades the body around its rise and set; the disc itself stays until it
     // actually meets the horizon, then goes over the last few degrees.
-    const alpha = Math.max(L.sunMoonAlpha, THREE.MathUtils.clamp(lightDir.y / 0.08, 0, 1));
+    // Weather covers them: a full storm hides the disc entirely, a light shower dims it.
+    const alpha = Math.max(L.sunMoonAlpha, THREE.MathUtils.clamp(lightDir.y / 0.08, 0, 1)) * (1 - this.overcast);
     if (space) {
       // The environment file's sun and moon stay away: the zone's own star sprites are the suns here.
       this.place(this.sun, tmpVec2.set(0, -1, 0), 0);

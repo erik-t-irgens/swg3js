@@ -154,6 +154,8 @@ export interface EffectHandle {
   readonly frame: THREE.Matrix4 | null;
   /** Multiplies every emitter's rate; 0 stops new particles (a one-shot does not fire). Mutable. */
   rateScale: number;
+  /** Multiplies every particle's alpha as its quad is built (the weather thins its rain with it); absent is 1. Mutable. */
+  alphaScale?: number;
   /** 0 for a placed effect; one more for each level of effects carried by particles (capped at MAX_ATTACH_DEPTH). */
   readonly depth?: number;
 }
@@ -1257,7 +1259,7 @@ export class ParticleEffects {
       let alpha = wave(d.particle.alpha, t, p.r0);
       rampColor(d.particle.color, d.particle.color.sample === 1 ? p.r3 : t, tmpColor);
       if (d.timeOfDayColor > 0) tmpColor.lerp(this.fogColor, d.timeOfDayColor);
-      alpha = clamp01(alpha);
+      alpha = clamp01(alpha) * (e.handle.alphaScale ?? 1);
       let rotation = (p.initialRotation + wave(quad.rotation, t, p.r2)) * TWO_PI;
       if (p.initialRotation < 0) rotation = -rotation;
       // A particle carried by its emitter is put into the world here: its place through the

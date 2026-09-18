@@ -41,6 +41,8 @@ export interface Settings extends FxSettings {
   weather: boolean;
   /** How many sheets, clouds and flakes fall: 1 as the game has them (0.25 .. 1.5). */
   weatherDensity: number;
+  /** How solid the falling rain looks: 1 is the game's own sheets, lower lets more through (0.1 .. 1). */
+  rainOpacity: number;
   /** Rain wets and glosses surfaces and leaves puddles; snow settles. */
   wetSurfaces: boolean;
   /** Storm rows that turn shadows off fade them out; clear rows always keep them. */
@@ -73,6 +75,7 @@ export const DEFAULT_SETTINGS: Settings = {
   mobileAnimRange: 160,
   weather: true,
   weatherDensity: 1,
+  rainOpacity: 0.55,
   wetSurfaces: true,
   weatherShadows: true,
   weatherForce: -1,

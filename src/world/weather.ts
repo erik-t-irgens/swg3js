@@ -49,6 +49,7 @@ import { OPEN_ROOF_GRID, OPEN_ROOF_MAP, WEATHER_UNIFORMS } from './wetness';
 export interface WeatherSettings {
   weather: boolean;
   weatherDensity: number;
+  rainOpacity: number;
   wetSurfaces: boolean;
   weatherShadows: boolean;
   weatherForce: number;
@@ -280,7 +281,7 @@ export class Weather {
   /** Console: false skips the weather pass (to time it). */
   drawPass = true;
 
-  private settings: WeatherSettings = { weather: true, weatherDensity: 1, wetSurfaces: true, weatherShadows: true, weatherForce: -1, weatherKind: 0, lifeDay: -1 };
+  private settings: WeatherSettings = { weather: true, weatherDensity: 1, rainOpacity: 0.55, wetSurfaces: true, weatherShadows: true, weatherForce: -1, weatherKind: 0, lifeDay: -1 };
   private forced: WeatherForce | null = null;
   /** A force asked to jump there at once; used on the next update. */
   private forceSnap = false;
@@ -516,7 +517,7 @@ export class Weather {
     // Weather switched back on: the schedule's level arrives as quickly as a release, not over minutes.
     if (!this.settings.weather && settings.weather) this.releasing = true;
     if (settings.lifeDay !== this.settings.lifeDay) this.familyTimer = 0;
-    this.settings = { weather: settings.weather, weatherDensity: settings.weatherDensity, wetSurfaces: settings.wetSurfaces, weatherShadows: settings.weatherShadows, weatherForce: settings.weatherForce, weatherKind: settings.weatherKind, lifeDay: settings.lifeDay };
+    this.settings = { weather: settings.weather, weatherDensity: settings.weatherDensity, rainOpacity: settings.rainOpacity, wetSurfaces: settings.wetSurfaces, weatherShadows: settings.weatherShadows, weatherForce: settings.weatherForce, weatherKind: settings.weatherKind, lifeDay: settings.lifeDay };
     this.updateHeldNote();
   }
 
@@ -721,6 +722,7 @@ export class Weather {
     const sky = this.sky;
     if (!sky || this.reason || !this.current) {
       this.rain = this.snow = this.dust = this.overcast = 0;
+      sky?.setOvercast(0);
       this.wantCount = 0;
       this.kind = 'clear';
       this.copyState(false);
@@ -783,6 +785,7 @@ export class Weather {
     // What falls.
     this.collect(active);
     this.overcast = clamp01(Math.max(1 - sky.lighting.shadowScale, this.rain, this.snow, this.dust));
+    sky.setOvercast(this.overcast);
 
     // How wet: arriving, as the last twenty minutes of the schedule would have left it.
     if (snap && this.seedWetPending) {
@@ -939,6 +942,8 @@ export class Weather {
     for (let i = this.channels.length - 1; i >= 0; i--) {
       const ch = this.channels[i];
       ch.handle.rateScale = active ? ch.weight * density * this.outside : 0;
+      // The game's rain sheets are near solid; the setting thins rain alone, never dust or snow.
+      ch.handle.alphaScale = ch.kind === 'rain' ? THREE.MathUtils.clamp(this.settings.rainOpacity, 0, 1) : 1;
       // Only an effect with particles of its own: the attachment-only ones (the light dust storm,
       // falling leaves, Mustafar's lightning) draw nothing yet and need no roofs.
       if (ch.handle.rateScale > 0 && fx.particlesOf(ch.handle) > 0) falling = true;
