@@ -595,11 +595,33 @@ export function fitRgba(img, max) {
 /** The glow images of one texture are capped at this size; its lit image with them, texel for texel. */
 export const GLOW_MAX = 512;
 
+/** A main image handed in by deps.mainImage, as decodeDds gives one: `hasAlpha` from the answer, else read from its pixels. */
+function paintedImage(img) {
+  let hasAlpha = img.hasAlpha;
+  if (typeof hasAlpha !== 'boolean') {
+    hasAlpha = false;
+    for (let i = 3; i < img.rgba.length; i += 4) {
+      if (img.rgba[i] !== 255) {
+        hasAlpha = true;
+        break;
+      }
+    }
+  }
+  return { width: img.width, height: img.height, rgba: img.rgba, hasAlpha };
+}
+
 /**
  * The whole texture entry for one shader: what textureFor returned before, plus the new fields.
  * deps: { cache, decodeDds, encodePng, alphaFromEffect(effect, fallback), surfaceFor(effect, slots, dds, alphaMode, { alphaIsEmissive }),
- *         normalFor(path), glassNamed: RegExp, byName(effect), log, thumb?(width, height, rgba) }.
+ *         normalFor(path), glassNamed: RegExp, byName(effect), log, thumb?(width, height, rgba),
+ *         mainImage?(shaderPath) -> { path, width, height, rgba, hasAlpha? } | null }.
  * With `thumb`, the entry carries a non-enumerable `thumb` made from the unsplit main image.
+ * With `mainImage` answering (a customizable shader baked at its defaults, the ships command's paint),
+ * that image replaces the main texture before every later step (the gloss mask, the glow split, the
+ * opaque copy, the thumbnail) and the entry's path is the answer's, so a painted hull glows where its
+ * painted colour does; answering null leaves the shader as its main texture has it. The answer's alpha
+ * is the gloss mask (and a MAIN-alpha glow's mask), so it should be the chosen pattern's own alpha, as
+ * the ships command's paint hands it. A flip-book is never painted: its answer is dropped with a note.
  */
 export function surfaceTexture(vfs, shaderPath, deps) {
   const log = deps.log ?? (() => {});
@@ -607,15 +629,24 @@ export function surfaceTexture(vfs, shaderPath, deps) {
   // 1. An invisible collidable surface: drawn as nothing, kept for the colliders built from it.
   if (/invisible/i.test(d.effect ?? '')) return { path: shaderPath, invisible: true, alphaMode: 'BLEND', opacity: 0, hasAlpha: false };
   if (d.flip?.missing.length) log(`flip-book ${shaderPath}: base ${d.base ?? '(none)'}, ${d.flip.missing.length} of ${d.flip.frames} frames missing`);
+  // A painted main stands in for the shader's own texture, never for a shader the archives lack. A
+  // flip-book keeps its own frames: the bake is of one image, and painting frame 1 alone would flicker
+  // between the painted and the plain (no retail paint shader is a flip-book).
+  let painted = d.kind ? deps.mainImage?.(shaderPath) ?? null : null;
+  if (painted && d.anim) {
+    log(`paint ${shaderPath} is a flip-book: drawn with its own frames, unpainted`);
+    painted = null;
+  }
   // 2. No main texture: drawn untextured, as before.
-  if (!d.main || !vfs.has(d.main)) return null;
+  if (!painted && (!d.main || !vfs.has(d.main))) return null;
   const decode = (p) => deps.decodeDds(vfs.read(p));
   const png = (img) => deps.encodePng(img.width, img.height, img.rgba);
-  const main = decode(d.main);
+  const main = painted ? paintedImage(painted) : decode(d.main);
+  const mainPath = painted ? painted.path : d.main;
   const pass = d.pass;
   // 3. alphaMode keeps its meaning: the effect's own reading (any implementation's first pass).
   const alphaMode = d.inline ? alphaModeFor({ alphaBlend: !!pass?.anyBlend, alphaTest: !!pass?.anyTest }) : deps.alphaFromEffect(d.effect, deps.byName(d.effect));
-  const result = { path: d.main, png: png(main), hasAlpha: main.hasAlpha, alphaMode };
+  const result = { path: mainPath, png: png(main), hasAlpha: main.hasAlpha, alphaMode };
   if (deps.glassNamed?.test(`${shaderPath} ${d.main}`)) result.glass = true;
 
   // 4. Additive: unlit, and opaque when the source factor is One or SrcColor (three's additive is SrcAlpha/One).
@@ -642,7 +673,7 @@ export function surfaceTexture(vfs, shaderPath, deps) {
     else glow = { own, channel: em.channel, path: slotPath, image: own ? null : decode(slotPath), keepAlpha: !(own && em.channel === 'a') };
   }
   // Each image (the main, then every flip-book frame) gets the same treatment.
-  const frames = d.anim ? d.anim.frames.map((p, i) => ({ path: p, image: i === 0 ? main : decode(p) })) : [{ path: d.main, image: main }];
+  const frames = d.anim ? d.anim.frames.map((p, i) => (i === 0 ? { path: mainPath, image: main } : { path: p, image: decode(p) })) : [{ path: mainPath, image: main }];
   let masks = null;
   if (glow) {
     masks = frames.map((f) => {
@@ -671,7 +702,7 @@ export function surfaceTexture(vfs, shaderPath, deps) {
   };
   Object.assign(result, treat(frames[0], 0));
   // 7. Split alpha: an opaque colour image and the alpha as grey, each scrolled on its own.
-  if (d.split) result.alphaImage = { path: `${d.main}#alpha`, png: png(alphaAsGrey(main)) };
+  if (d.split) result.alphaImage = { path: `${mainPath}#alpha`, png: png(alphaAsGrey(main)) };
   // 8. Scroll, and no shadow for anything blended.
   if (d.scroll) result.scroll = { map: [...d.scroll.map], alpha: d.scroll.alpha ? [...d.scroll.alpha] : null };
   if (result.blend || result.translucent) result.noShadow = true;

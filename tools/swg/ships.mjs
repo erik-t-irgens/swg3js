@@ -3,6 +3,7 @@
 // alongside as a portal building), sorted into a class by its name. The conversions themselves
 // are handed in so this stays testable without the archives.
 import { hungSummary } from './shipparts.mjs';
+import { fitSummary } from './shipfit.mjs';
 
 /** The classes a ship falls in, from its template name. */
 export const SHIP_CLASSES = {
@@ -77,7 +78,8 @@ export function boltReach(effect) {
  * returning { file, cells } or { skip }; `deps.extrasOf(template)` converts what the ship's client
  * data hangs on the hull (wings, an engine appearance) and its cockpit frame, returning
  * { attachments, thrusters, contrails, cockpit, notes } (and, once assembled by shipparts.mjs,
- * `chassis` and `wingOpenSpeedFactor`); `deps.weaponOf(id)` names the weapon the ship
+ * `chassis` and `wingOpenSpeedFactor`; once the chassis tables are read for customization, `fit`,
+ * copied onto the ship when set, null for a ship with no tables); `deps.weaponOf(id)` names the weapon the ship
  * fires as { name, projectile, speed, range } or null. Ships whose exterior fails are listed with why.
  */
 export function buildShips(templates, deps, { log = () => {}, limit = Infinity } = {}) {
@@ -103,9 +105,11 @@ export function buildShips(templates, deps, { log = () => {}, limit = Infinity }
     const weapon = deps.weaponOf?.(id) ?? null;
     // `chassis` (null when the ship has none) is on every ship whose parts were assembled as a tree
     // (shipparts.mjs): status tells a ship converted before by its absence.
-    ships.push({ id, label: id.replace(/_/g, ' '), template, class: shipClassOf(`${template} ${r.model}`), file: r.file, model: r.model, bounds: b, length: Number(length.toFixed(2)), interior, ...(extras.chassis !== undefined ? { chassis: extras.chassis, wingOpenSpeedFactor: extras.wingOpenSpeedFactor ?? 1 } : {}), attachments: extras.attachments, thrusters: extras.thrusters, contrails: extras.contrails, cockpit: extras.cockpit, weapon, ...(extras.damage ? { damage: extras.damage } : {}), ...(extras.destroyed ? { destroyed: extras.destroyed } : {}), ...(extras.notes.length ? { notes: extras.notes } : {}) });
+    ships.push({ id, label: id.replace(/_/g, ' '), template, class: shipClassOf(`${template} ${r.model}`), file: r.file, model: r.model, bounds: b, length: Number(length.toFixed(2)), interior, ...(extras.chassis !== undefined ? { chassis: extras.chassis, wingOpenSpeedFactor: extras.wingOpenSpeedFactor ?? 1 } : {}), attachments: extras.attachments, thrusters: extras.thrusters, contrails: extras.contrails, cockpit: extras.cockpit, weapon, ...(extras.fit ? { fit: extras.fit } : {}), ...(extras.damage ? { damage: extras.damage } : {}), ...(extras.destroyed ? { destroyed: extras.destroyed } : {}), ...(extras.notes.length ? { notes: extras.notes } : {}) });
     const hung = extras.attachments.length ? `, ${hungSummary(extras.attachments)}` : '';
-    log(`${id}: ${SHIP_CLASSES[shipClassOf(template)]}, ${length.toFixed(1)} m${interior ? interior.failed ? `, interior ${pob} failed: ${interior.failed}` : interior.hull ? `, ${interior.cells} rooms in the hull model` : `, interior ${pob}: ${interior.cells} cells` : ', no interior named by its template'}${hung}${extras.thrusters.length ? `, thrusters at ${extras.thrusters.join(' ')}` : ''}${extras.cockpit ? ', cockpit frame' : ''}${weapon ? `, fires ${weapon.name} (projectile ${weapon.projectile}, ${weapon.speed} m/s to ${weapon.range} m)` : ''}${extras.notes.length ? `\n   ${extras.notes.join('\n   ')}` : ''}`);
+    // The slots, looks, droid socket and paint, once the converter reads the chassis tables for them.
+    const fitted = extras.fit !== undefined ? `, ${fitSummary(extras.fit)}` : '';
+    log(`${id}: ${SHIP_CLASSES[shipClassOf(template)]}, ${length.toFixed(1)} m${interior ? interior.failed ? `, interior ${pob} failed: ${interior.failed}` : interior.hull ? `, ${interior.cells} rooms in the hull model` : `, interior ${pob}: ${interior.cells} cells` : ', no interior named by its template'}${hung}${fitted}${extras.thrusters.length ? `, thrusters at ${extras.thrusters.join(' ')}` : ''}${extras.cockpit ? ', cockpit frame' : ''}${weapon ? `, fires ${weapon.name} (projectile ${weapon.projectile}, ${weapon.speed} m/s to ${weapon.range} m)` : ''}${extras.notes.length ? `\n   ${extras.notes.join('\n   ')}` : ''}`);
   }
   ships.sort((a, b) => a.class.localeCompare(b.class) || a.id.localeCompare(b.id));
   return { ships, skipped };

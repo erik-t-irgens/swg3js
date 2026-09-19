@@ -8,7 +8,9 @@
 //   node tools/swg/cli.mjs dump <file.iff> | <swg-dir> <path-in-archive> [--strings] [--hex]   print an IFF tree (--strings lists every readable string in each chunk, --hex every chunk's bytes with the floats they would be)
 //   node tools/swg/cli.mjs weapons <swg-dir> <out-dir> [--limit=N] [--no-icons]   every weapon the game can hold, with its class, name, hands and picture, under <out-dir>/weapons
 //   node tools/swg/cli.mjs ships <swg-dir> <out-dir> [--limit=N] [--match=yacht] [--glass=<regex>]   every ship a player can fly, with its interior when it has one, under <out-dir>/ships (--match redoes those ships only; --glass=<regex> marks more shaders as glass);
-//                                                                  also the game's projectile table with every bolt and hit effect as projectiles.json
+//                                                                  also the game's projectile table with every bolt and hit effect as projectiles.json,
+//                                                                  every component a hull's slots take and the droids as components.json, and the paint
+//                                                                  recipes as customize.json (images in customize/)
 //   node tools/swg/cli.mjs species <swg-dir> <out-dir> [--only=human,twilek_female] [--var=...]   every playable species and gender as parts, with characters/index.json for the character creator
 //   node tools/swg/cli.mjs ash <swg-dir> <appearance/x.sat | object/.../shared_x.iff> [--find=pistol]   the animation state hierarchy behind a skeletal appearance, with its strings
 //   node tools/swg/cli.mjs shader <swg-dir> <shader/x.sht>        list a shader's texture slots
@@ -106,8 +108,13 @@ import { MATERIAL_FORMAT, describeLines, describeSurface, surfaceCounts, surface
 import { localize, parseDatatable } from './datatable.mjs';
 import { mountCreatures, riderPoseFor } from './mounts.mjs';
 import { pickSaddleHardpoint, saddleEntry, saddleStatus, satHardpoints } from './saddles.mjs';
-import { assembleShip, assemblyStatus, clientChildren, partFamilyOf, SHIP_ASSEMBLY_FORMAT } from './shipparts.mjs';
-import { chassisNameFor, modalLooks, wingOpenSpeedFactorOf } from './shipfit.mjs';
+import { assembleShip, assemblyStatus, clientChildren, expandPart, partFamilyOf, SHIP_ASSEMBLY_FORMAT } from './shipparts.mjs';
+import {
+  buildDroids, buildSlots, chassisNameFor, componentKey, componentList, droidHeadRows, fitStatus, hullTokens, isPaintShader, loadoutsLine, mergePaintVariables,
+  mergeRecipes, modalLooks, paintedMainImage, paintGlow, pickStock, recipeImages, SHIP_FIT_FORMAT, stockPairs, stockWeapon, trimPaintShader, wingOpenSpeedFactorOf,
+} from './shipfit.mjs';
+import { resolveTemplateParam } from './objtemplate.mjs';
+import { setStringId } from './items.mjs';
 import * as M from './mobiles.mjs';
 import * as MS from './mobilescan.mjs';
 import { finestLevelWithGeometry } from './lmglevel.mjs';
@@ -234,10 +241,57 @@ function surfaceDeps(vfs) {
 }
 
 /**
+ * What the paint shaders load through: their static shaders, effects, palettes and the images their
+ * default patterns bind, with no customization values, so each is read at the shader's own defaults.
+ * The ships command's recipes load through it too.
+ */
+const paintContext = renderContext();
+
+const customizableCache = new Map();
+/**
+ * Whether a shader file is a customizable one (FORM CSHD), read from its top form alone, so that only
+ * those are loaded into paintContext, which keeps every image it loads for the whole run.
+ */
+function isCustomizableShader(vfs, shaderPath) {
+  const file = shaderPath.replace(/\\/g, '/');
+  if (!customizableCache.has(file)) {
+    let yes = false;
+    try {
+      yes = vfs.has(file) && parseIff(vfs.read(file)).type === 'CSHD';
+    } catch {
+      yes = false;
+    }
+    customizableCache.set(file, yes);
+  }
+  return customizableCache.get(file);
+}
+
+/**
+ * A ship paint shader (a customizable shader, shipfit.mjs isPaintShader) baked at its defaults, every
+ * pass (the colours are passes two and three, which a first-pass check misses), as the main image
+ * surfaceTexture takes in place of the shader's own texture: the bake's colour with the chosen pattern's
+ * own alpha (its gloss mask, and a MAIN-alpha glow's mask, as the game's repaint reads them; the bake's
+ * alpha is the first pass's, opaque), named for the chosen pattern's MAIN and the shader, since two
+ * paint shaders on one pattern differ by their colours (shipfit.mjs paintedMainImage). Null for anything else.
+ */
+function paintedMain(vfs, shaderPath) {
+  if (!isCustomizableShader(vfs, shaderPath)) return null;
+  let shader = null;
+  try {
+    shader = loadShader(vfs, shaderPath, paintContext);
+  } catch (err) {
+    console.error(`  paint ${shaderPath} unreadable: ${err.message}`);
+    return null;
+  }
+  return paintedMainImage(shader, shaderPath, bakeShader);
+}
+
+/**
  * A shader's texture entry (surface.mjs `surfaceTexture`): the main image and its alpha mode as
  * before, plus flip-book frames, scroll rates, split alpha, the unlit and additive flags and the
  * lit and glow images of a glowing texture. An invisible collidable surface (the pane in a room's
  * window opening, a rail you cannot cross) is drawn as nothing and kept for its colliders.
+ * With `opts.paint` (the ships command), a paint shader's main image is its bake at its defaults.
  */
 function textureFor(vfs, shaderPath, opts = {}) {
   if (flags.has('--no-textures')) return null;
@@ -246,7 +300,7 @@ function textureFor(vfs, shaderPath, opts = {}) {
   if (textureCache.has(key)) result = textureCache.get(key);
   else {
     try {
-      result = surfaceTexture(vfs, shaderPath, { ...surfaceDeps(vfs), thumb: wantThumbs ? thumbTexture : undefined });
+      result = surfaceTexture(vfs, shaderPath, { ...surfaceDeps(vfs), thumb: wantThumbs ? thumbTexture : undefined, mainImage: opts.paint ? (p) => paintedMain(vfs, p) : undefined });
     } catch (err) {
       console.error(`  texture for ${shaderPath} skipped: ${err.message}`);
     }
@@ -424,11 +478,12 @@ function loadAppearanceMesh(vfs, appearancePath) {
   return { mesh: merged, meshPath: meshParts === 1 ? parts.find((p) => p.mesh).mesh : appearancePath, partCount: meshParts, cells: cellList.length > 1 ? cellList : null, portalGeometry, effects };
 }
 
-function convertOne(vfs, appearancePath, outFile) {
+/** `opts.paint`: paint shaders are baked at their defaults (textureFor), for the ships command. */
+function convertOne(vfs, appearancePath, outFile, opts = {}) {
   const { mesh, meshPath, partCount, cells, portalGeometry, effects } = loadAppearanceMesh(vfs, appearancePath);
   const textures = new Map();
   for (const g of mesh.groups) {
-    const t = textureFor(vfs, g.shader);
+    const t = textureFor(vfs, g.shader, opts);
     if (t) textures.set(g.shader, t);
     if (t && surfaceUse) surfaceUse.add(t);
   }
@@ -1827,8 +1882,21 @@ function packStatus(dir) {
     // What hangs on the ships, decided per ship (a ship converted before has no `chassis`), so neither a
     // --match run nor a hand-merged manifest can hide an old one.
     const parts = assemblyStatus(ships);
-    console.log(`  ships: ${ships.ships.length} ships, ${ships.ships.filter((sh) => sh.interior && !sh.interior.failed).length} with an interior, ${ships.skipped.length} left out; ${parts.hung} parts hung, ${parts.winged} with wings that open`);
+    // The loadouts and paint (components.json, customize.json and each ship's `fit`), and the astromechs
+    // the ships command links from the mobiles pack.
+    let comps = null;
+    try {
+      comps = readJson(join(dir, 'ships/components.json'));
+    } catch {
+      comps = null;
+    }
+    const fits = fitStatus(ships, comps);
+    const astromechModels = existsSync(join(dir, 'mobiles/models/astromech_r2.glb'));
+    const droidNote = !fits.astromechs && comps && !astromechModels ? ' (the mobiles pack has no astromech models: run this command again after the mobiles)' : '';
+    console.log(`  ships: ${ships.ships.length} ships, ${ships.ships.filter((sh) => sh.interior && !sh.interior.failed).length} with an interior, ${ships.skipped.length} left out; ${parts.hung} parts hung, ${parts.winged} with wings that open; loadouts for ${fits.fitted}, paint on ${fits.painted}, ${fits.astromechs} astromechs${droidNote}`);
     if (parts.old) need(`ships <swg-dir> ${dir} --retail-only`, `${parts.old} ships' parts do not ride their wings (converted before wings and attachments were assembled)`);
+    if (fits.old || !comps || !existsSync(join(dir, 'ships/customize.json'))) need(`ships <swg-dir> ${dir} --retail-only`, 'the ships have no loadouts or paint (converted before ship customization)');
+    else if (!fits.astromechs && astromechModels) need(`ships <swg-dir> ${dir} --retail-only`, 'the astromechs were converted after the ships; the ships command links them');
   }
   if (ships && (ships.materialFormat ?? 1) < MATERIAL_FORMAT) need(`ships <swg-dir> ${dir} --retail-only`, "ships' models were converted before animated and glowing surfaces");
   const gallery = readJson(join(dir, 'gallery/manifest.json'));
@@ -2533,7 +2601,11 @@ switch (cmd) {
         const invisible = /invisible/i.test(effect ?? '');
         const decided = invisible ? 'invisible (collision only)' : `${byEffect}${GLASS_NAMED.test(`${shader} ${main ?? ''}`) ? ' (glass by name: casts no shadow, clears while someone is aboard)' : ''}`;
         line += `\n      effect ${effect ?? (described.inline ? '(inline)' : '(none)')}  texture ${main ?? '(none)'}${hasAlpha === null ? '' : hasAlpha ? ' with alpha' : ' no alpha'}  -> ${decided}`;
-        if (!invisible) line += `\n      surface: ${surfaceLine(textureFor(vfs, shader), described)}`;
+        // A ship's paint shaders are drawn as the ships command bakes them: every pass at the shader's defaults.
+        if (!invisible) line += `\n      surface: ${surfaceLine(textureFor(vfs, shader, { paint: !!options.ship }), described)}`;
+        const painted = options.ship && isCustomizableShader(vfs, shader) ? loadShader(vfs, shader, paintContext) : null;
+        // One line per variable: a pattern's TX1D operations (MAIN and HUEB) each name the same one.
+        if (isPaintShader(painted)) line += `\n      paint: baked at its defaults (${painted.textureFiles.get('MAIN')}), ${[...new Set(describeVariables(painted.variables))].join('; ')}`;
       } catch (err) {
         line += `\n      unreadable: ${err.message}`;
       }
@@ -3359,6 +3431,8 @@ switch (cmd) {
     const { galleryTemplates } = await import('./gallery.mjs');
     const models = new Map();
     const cache = new Map();
+    // Every model's shaders (the GLB's material names), for the paint: which of them a customization repaints.
+    const modelShaders = new Map();
     const convert = (template) => {
       const r = resolveTemplateMesh(vfs, template, cache);
       if (r.skip) return { skip: r.skip };
@@ -3368,7 +3442,9 @@ switch (cmd) {
       const id = familyOf(single ? r.parts[0].mesh : r.appearance);
       if (!models.has(id)) {
         try {
-          const conv = convertOne(vfs, single ? r.parts[0].mesh : r.appearance, join(outDir, `${id}.glb`));
+          // Paint shaders are baked at their defaults (every pass), as the client draws a ship nobody painted.
+          const conv = convertOne(vfs, single ? r.parts[0].mesh : r.appearance, join(outDir, `${id}.glb`), { paint: true });
+          modelShaders.set(`${id}.glb`, conv.shaders);
           const b = conv.mesh.bounds ?? { min: [0, 0, 0], max: [0, 0, 0] };
           const bounds = conv.flipX ? { min: [-b.max[0], b.min[1], b.min[2]], max: [-b.min[0], b.max[1], b.max[2]] } : b;
           const effects = attachedEffects(vfs, conv.effects, outDir);
@@ -3398,7 +3474,7 @@ switch (cmd) {
       }
       if (!models.has(id)) {
         try {
-          const conv = convertOne(vfs, pob, join(outDir, `${id}.glb`));
+          const conv = convertOne(vfs, pob, join(outDir, `${id}.glb`), { paint: true });
           models.set(id, { id, file: `${id}.glb`, triangles: conv.tris, textured: conv.textured, shaders: conv.shaders.length, cells: conv.cells, portals: conv.portals ?? [], interior: true, ...(conv.tris ? {} : { failed: 'no triangles' }) });
         } catch (err) {
           models.set(id, { id, failed: err.message });
@@ -3413,11 +3489,39 @@ switch (cmd) {
     // What hangs on a hull and on what (shipparts.mjs): the ship's own client data, each part's own in
     // turn, and the stock parts from the hull's chassis looks table (shipfit.mjs).
     let chassisRows = new Map();
+    let slotNames = [];
     try {
-      chassisRows = new Map(parseDatatable(parseIff(vfs.read('datatables/space/ship_chassis.iff'))).rows.map((r) => [r.name, r]));
+      const chassisTable = parseDatatable(parseIff(vfs.read('datatables/space/ship_chassis.iff')));
+      chassisRows = new Map(chassisTable.rows.map((r) => [r.name, r]));
+      // name, flyby_sound, hit_sound_group, wing_open_speed_factor, then each slot with its hit weight and whether it is targetable.
+      slotNames = chassisTable.columns.slice(4).filter((c) => !/_hitweight$|_targetable$/.test(c));
     } catch (err) {
       console.error(`chassis table not read (${err.message}): parts are found by name as before`);
     }
+    // The customization tables (shipfit.mjs): every component with its type, class and name
+    // (ship_components; the name is space/space_item:<name>_n, else the template's objectName, else made
+    // from the key) and each gun's bolt (ship_weapon_components). Without them no ship gets a fit, and
+    // the stock parts are each slot's most common look as before.
+    const labelCache = new Map();
+    const paramCache = new Map();
+    let weaponRows = new Map();
+    let components = null;
+    try {
+      weaponRows = new Map(parseDatatable(parseIff(vfs.read('datatables/space/ship_weapon_components.iff'))).rows.map((r) => [componentKey(r.name), r]));
+      const labelOf = (name, row) => {
+        const own = localize(vfs, `space/space_item:${name}_n`, labelCache);
+        if (own) return own;
+        const template = String(row.shared_object_template ?? '').trim().replace(/\\/g, '/');
+        const sid = template ? resolveTemplateParam(vfs, template, 'objectName', setStringId, paramCache) : null;
+        return sid ? localize(vfs, `${sid.table}:${sid.key}`, labelCache) : null;
+      };
+      components = componentList(parseDatatable(parseIff(vfs.read('datatables/space/ship_components.iff'))).rows, { labelOf, weaponRow: (n) => weaponRows.get(n) ?? null });
+    } catch (err) {
+      console.error(`ship component tables not read (${err.message}): no loadouts or paint, stock parts by the most common look`);
+      components = null;
+    }
+    const weaponNames = [...weaponRows.keys()];
+    const projectileOf = (name) => weaponRows.get(name)?.projectile_index;
     const attachmentTemplates = new Map(vfs.list('object/tangible/ship/attachment/').filter((f) => f.startsWith('object/tangible/ship/attachment/') && f.endsWith('.iff')).map((f) => [f.replace(/^.*\/shared_/, '').replace(/\.iff$/, ''), f]));
     const childrenCache = new Map();
     /**
@@ -3464,7 +3568,8 @@ switch (cmd) {
       if (!models.has(id)) {
         try {
           if (!vfs.has(path)) throw new Error(`Not in archives: ${path}`);
-          const conv = convertOne(vfs, path, join(outDir, `${id}.glb`));
+          const conv = convertOne(vfs, path, join(outDir, `${id}.glb`), { paint: true });
+          modelShaders.set(`${id}.glb`, conv.shaders);
           models.set(id, { id, file: `${id}.glb`, triangles: conv.tris, textured: conv.textured, shaders: conv.shaders.length, parts: conv.partCount, hardpoints: conv.mesh.hardpoints.map((h) => h.name), ...(conv.tris ? {} : { failed: 'no triangles' }) });
         } catch (err) {
           models.set(id, { id, failed: err.message });
@@ -3530,6 +3635,180 @@ switch (cmd) {
       }
       return out;
     };
+    // Ship customization (shipfit.mjs): each hull's chassis slots with the components the game lets
+    // each take, grouped by the model each shows on this hull; the stock component per slot; the droid
+    // socket; and the paint, a recipe per customizable hull shader for the game to render again with
+    // other values. The fits by ship id, for the gun each fires as sold.
+    const fits = new Map();
+    /** A hull's slots with their stock: the bolt it was always given (defaultWeaponFor) preferred in the gun slots. */
+    const slotsOf = (id, chassis, hullTable) => {
+      const slots = buildSlots(chassisRows.get(chassis), slotNames, hullTable, components);
+      const tokens = hullTokens(chassis);
+      const preferName = shipsModule.defaultWeaponFor(id, weaponNames);
+      const preferProjectile = preferName ? projectileOf(preferName) ?? null : null;
+      for (const s of slots) s.stock = pickStock(s, components, /^weapon_/.test(s.slot) ? { tokens, preferName, preferProjectile, weaponOf: projectileOf } : { tokens });
+      return slots;
+    };
+    // The paint recipes (customize.json), one per paint shader, with their images under customize/.
+    const recipes = new Map();
+    const paintShaders = new Map();
+    // Each paint shader's variables, kept from its first load: paintContext is emptied after every
+    // ship's fit, so the images the bakes decoded are not held for the whole run.
+    const paintVariables = new Map();
+    const customizeDir = join(outDir, 'customize');
+    const paint = { images: 0, bytes: 0, registry: null };
+    const NO_IMAGE = {};
+    /** An image for the recipes' registry: read afresh (never kept), or nothing when the registry has written it already. */
+    const imageLoad = (file) => (paint.registry?.ids.has(file.toLowerCase()) ? NO_IMAGE : loadImage(vfs, file, new Map()));
+    const registryFor = () => {
+      if (paint.registry) return paint.registry;
+      mkdirSync(customizeDir, { recursive: true });
+      paint.registry = new ImageRegistry((file, bytes) => {
+        writeFileSync(join(customizeDir, file), bytes);
+        paint.images++;
+        paint.bytes += bytes.length;
+      });
+      // A --match run adds to the recipes already there: its images are numbered past every one those
+      // name, so none of theirs is overwritten.
+      if (options.match) {
+        let highest = -1;
+        try {
+          const old = JSON.parse(readFileSync(join(outDir, 'customize.json'), 'utf8'));
+          for (const f of recipeImages(old.recipes)) highest = Math.max(highest, Number(/_(\d+)\.png$/.exec(f)?.[1] ?? -1));
+        } catch {
+          /* no recipes yet */
+        }
+        for (let i = 0; i <= highest; i++) paint.registry.ids.set(`\0kept:${i}`, null);
+      }
+      return paint.registry;
+    };
+    /** The static shader's own MAIN under a customizable one: the look before customization, kept for the game to show on request. */
+    const staticMainOf = (shaderPath) => {
+      try {
+        const v = parseIff(vfs.read(shaderPath.replace(/\\/g, '/'))).children.find(isForm);
+        const base = v?.children.find((c) => (isForm(c) ? c.type === 'SSHT' : c.tag === 'NAME'));
+        if (!base) return null;
+        return loadShader(vfs, isForm(base) ? base : readCString(base.data).value.replace(/\\/g, '/'), paintContext)?.textureFiles.get('MAIN') ?? null;
+      } catch {
+        return null;
+      }
+    };
+    /**
+     * Whether a model's shader is ship paint; the first time one is, its recipe: the shader trimmed to
+     * the textures its passes read (and a glow's mask), every pattern and palette its variables choose
+     * from, the static MAIN, and how it glows (describeSurface), so a repaint splits the glow from the
+     * painted colour. A glow is written only when the converted material glows (its mask is not too
+     * faint to split): the game puts a repaint's glow on the material's own emissive map, and a
+     * material without one would need a new program. A shader whose recipe cannot be written is not
+     * counted as paint.
+     */
+    const isPaint = (shaderPath) => {
+      if (paintShaders.has(shaderPath)) return paintShaders.get(shaderPath);
+      let yes = false;
+      try {
+        const loaded = isCustomizableShader(vfs, shaderPath) ? loadShader(vfs, shaderPath, paintContext) : null;
+        if (isPaintShader(loaded)) {
+          const glow = textureFor(vfs, shaderPath, { paint: true })?.emissive ? paintGlow(describeSurface(vfs, shaderPath, surfaceCache)) : null;
+          const t = trimPaintShader(loaded, { staticMain: staticMainOf(shaderPath), keep: glow ? [glow.maskTag] : [] });
+          const registry = registryFor();
+          recipes.set(shaderPath, { mesh: 'ship', material: shaderPath, kind: 'bake', baseTag: 'MAIN', shader: exportShader(t.shader, registry, imageLoad), slots: [], staticMain: t.staticMain ? registry.idFor(t.staticMain, imageLoad(t.staticMain)) : null, ...(glow ? { glow } : {}) });
+          paintVariables.set(shaderPath, loaded.variables);
+          yes = true;
+        }
+      } catch (err) {
+        console.error(`  paint recipe for ${shaderPath} not written: ${err.message}`);
+      }
+      paintShaders.set(shaderPath, yes);
+      return yes;
+    };
+    const paletteSizes = new Map();
+    const paletteSize = (p) => {
+      if (!paletteSizes.has(p)) {
+        let n = 0;
+        try {
+          n = vfs.has(p) ? parsePalette(vfs.read(p)).length : 0;
+        } catch {
+          n = 0;
+        }
+        paletteSizes.set(p, n);
+      }
+      return paletteSizes.get(p);
+    };
+    /**
+     * A ship's fit (the manifest's `fit`): its slots, each look's parts converted with `children`, the
+     * part's own subtree (expandPart: parents relative to the part, and by name what the part does not
+     * carry, hung over the whole ship once the ship's parts are on); the droid socket (an astromech on a
+     * hull with `hp:astromech`, else a flight computer); and the paint (every paint shader on the hull,
+     * what the assembly hung and every look's parts, with one variable list). `built` is the stock
+     * assembly, whose `carried` hardpoints bound where a by-name child may go.
+     */
+    const fitOf = (chassis, slots, hull, built, deps, notes) => {
+      const seen = new Set();
+      const note = (n) => {
+        if (!seen.has(n)) {
+          seen.add(n);
+          notes.push(n);
+        }
+      };
+      const partHardpoints = new Map();
+      // Every look's pairs as parts; a pair whose template names no model (the TIE engines) is left out.
+      const resolved = slots.map((s) =>
+        s.looks.map((l) => {
+          const parts = [];
+          for (const p of l.pairs) {
+            const template = attachmentTemplates.get(p.attachment);
+            if (!template) {
+              note(`look ${s.slot}: ${p.attachment} has no template`);
+              continue;
+            }
+            const m = modelOf({ template });
+            if (m.skip) {
+              note(`look ${s.slot}: ${p.attachment}: ${m.skip}`);
+              continue;
+            }
+            partHardpoints.set(m.file, m.hardpoints ?? []);
+            parts.push({ file: m.file, hardpoint: p.hardpoint, template });
+          }
+          return parts;
+        }),
+      );
+      const expand = (part, slot, shipHardpoints) => expandPart(part.template, partHardpoints.get(part.file) ?? [], deps, { slot, hardpoint: part.hardpoint || null, shipHardpoints });
+      // Every hardpoint the ship can carry: the hull and what the stock assembly hung, every look's
+      // parts, and what each of those carries in turn.
+      const carried = new Set(built.carried);
+      for (const hps of partHardpoints.values()) for (const h of hps) carried.add(h);
+      slots.forEach((s, i) => resolved[i].forEach((parts) => parts.forEach((part) => expand(part, s.slot, null).carried.forEach((h) => carried.add(h)))));
+      const shipHardpoints = [...carried];
+      const fitSlots = slots.map((s, i) => ({
+        slot: s.slot,
+        compat: s.compat,
+        looks: s.looks.map((l, j) => {
+          const parts = resolved[i][j].map((part) => {
+            const kids = expand(part, s.slot, shipHardpoints);
+            for (const n of kids.notes) if (!/hung by name$/.test(n)) note(`look part ${part.file}: ${n}`);
+            return kids.attachments.length ? { ...part, children: kids.attachments } : part;
+          });
+          return { parts, components: l.components, ...(parts.length ? {} : { noModel: true }) };
+        }),
+        stock: s.stock ?? null,
+        ...(s.fixed ? { fixed: true } : {}),
+      }));
+      const files = new Set([hull?.file, ...built.attachments.map((a) => a.file)]);
+      for (const s of fitSlots) for (const l of s.looks) for (const p of l.parts) for (const f of [p.file, ...(p.children ?? []).map((c) => c.file)]) files.add(f);
+      const shaders = [];
+      for (const f of files) for (const sh of modelShaders.get(f) ?? []) if (!shaders.includes(sh) && isPaint(sh)) shaders.push(sh);
+      let painted = null;
+      if (shaders.length) {
+        const merged = mergePaintVariables(shaders.map((p) => ({ path: p, variables: paintVariables.get(p) ?? [] })), paletteSize);
+        for (const n of merged.notes) note(`paint: ${n}`);
+        painted = { shaders, variables: merged.variables };
+      }
+      // Every bake and recipe of this ship's paint is done (textureFor and isPaint keep their answers),
+      // so the images paintContext decoded for them are let go rather than held to the end of the run.
+      paintContext.images.clear();
+      paintContext.shaders.clear();
+      return { chassis, openSpeedFactor: wingOpenSpeedFactorOf(chassisRows.get(chassis)), droid: (hull?.hardpoints ?? []).includes('astromech') ? 'astromech' : 'computer', slots: fitSlots, paint: painted };
+    };
     // What the ship's client data hangs on the hull, and its cockpit frame: the wings (templates
     // of their own, their appearances converted like the hull), an appearance shown while the
     // drive runs, the thruster and contrail hardpoints, and the cockpit's frame with its offsets.
@@ -3554,21 +3833,35 @@ switch (cmd) {
         }
       }
       // Everything the game hangs on the hull, as a tree (shipparts.mjs): the ship's own client data,
-      // each part's own in turn, and the stock parts, each slot's most common look in the hull's
-      // chassis looks table (never a modification column's one reward look).
+      // each part's own in turn, and the stock parts. With the component tables those are the fit's
+      // stock (each slot's pickStock, whose look is the one the most compatible components show; a
+      // modification slot starts empty, its one reward look never the ship as sold); without them, each
+      // slot's most common look in the hull's chassis looks table, modifications left out.
       const { shipLabelOf } = shipsModule;
+      const id = shipLabelOf(template);
       const base = template.replace(/^.*\/shared_/, '').replace(/\.iff$/, '');
       const chassis = chassisNameFor(base, (n) => chassisRows.has(n));
       const looksPath = chassis ? `datatables/space/ship_chassis_${chassis}.iff` : null;
-      let stock = null;
+      let hullTable = null;
       if (looksPath && vfs.has(looksPath)) {
         try {
-          stock = modalLooks(parseDatatable(parseIff(vfs.read(looksPath)))).flatMap((l) => l.pairs.map((p) => ({ slot: l.slot, ...p })));
+          hullTable = parseDatatable(parseIff(vfs.read(looksPath)));
         } catch (err) {
           out.notes.push(`chassis looks ${looksPath}: ${err.message}`);
         }
       }
-      const built = assembleShip({ hardpoints: hull?.hardpoints ?? [] }, childrenOf(template, true), stock ?? [], { childrenOf: (t) => childrenOf(t), model: modelOf, templateOf: (n) => attachmentTemplates.get(n) ?? null });
+      let slots = null;
+      if (chassis && components) {
+        try {
+          slots = slotsOf(id, chassis, hullTable);
+        } catch (err) {
+          out.notes.push(`chassis slots ${chassis}: ${err.message}`);
+        }
+      }
+      let stock = null;
+      if (hullTable) stock = slots ? stockPairs(slots, components, hullTable.columns) : modalLooks(hullTable).flatMap((l) => l.pairs.map((p) => ({ slot: l.slot, ...p })));
+      const partDeps = { childrenOf: (t) => childrenOf(t), model: modelOf, templateOf: (n) => attachmentTemplates.get(n) ?? null };
+      const built = assembleShip({ hardpoints: hull?.hardpoints ?? [] }, childrenOf(template, true), stock ?? [], partDeps);
       out.attachments.push(...built.attachments);
       out.notes.push(...built.notes);
       // No looks table: the old guess by name, written without `parent`, so the game hangs these by
@@ -3576,6 +3869,20 @@ switch (cmd) {
       if (!stock) out.attachments.push(...componentsFor(shipLabelOf(template), built.carried, out.notes));
       out.chassis = chassis;
       out.wingOpenSpeedFactor = chassis ? wingOpenSpeedFactorOf(chassisRows.get(chassis)) : 1;
+      // The loadout and paint the Edit page offers (null for a hull with no chassis row); none at all
+      // when the component tables could not be read.
+      if (components) {
+        out.fit = null;
+        if (slots) {
+          try {
+            out.fit = fitOf(chassis, slots, hull, built, partDeps, out.notes);
+          } catch (err) {
+            out.notes.push(`fit ${chassis}: ${err.message}`);
+            console.error(`  fit of ${id} not written: ${err.stack ?? err.message}`);
+          }
+        }
+        fits.set(id, out.fit);
+      }
       const cockpit = resolveTemplateString(vfs, template, ['cockpitFilename'], cache);
       if (cockpit && !/noframe/i.test(cockpit)) {
         const cpPath = cockpit.replace(/\\/g, '/').replace(/^\//, '');
@@ -3646,16 +3953,66 @@ switch (cmd) {
     } catch (err) {
       console.error(`projectiles not converted: ${err.message}`);
     }
+    // The gun a ship fires as sold: its fit's first stock bolt, else the old guess by name.
     const weaponOf = (id) => {
+      const stock = fits.get(id) ? stockWeapon(fits.get(id), components) : null;
+      if (stock) return stock;
       const name = defaultWeaponFor(id, weapons.map((w) => w.name));
       const w = weapons.find((x) => x.name === name);
       return w ? { name: w.name, projectile: w.projectile, speed: w.speed, range: w.range } : null;
     };
     const limit = options.limit ? Number(options.limit) : Infinity;
     const match = options.match ? new RegExp(options.match, 'i') : null;
-    const templates = galleryTemplates(vfs, 'object/ship/player/').filter((t) => !match || match.test(t));
+    const allTemplates = galleryTemplates(vfs, 'object/ship/player/');
+    const templates = allTemplates.filter((t) => !match || match.test(t));
     const { ships, skipped } = buildShips(templates, { convert, interiorOf, convertInterior, extrasOf, weaponOf }, { log: console.log, limit });
-    const manifest = { classes: SHIP_CLASSES, ships, skipped, models: [...models.values()].filter((m) => !m.failed), materialFormat: MATERIAL_FORMAT, assembly: SHIP_ASSEMBLY_FORMAT };
+    // components.json: every component a slot can take (with its name and, for a gun, its bolt), and the
+    // droids: the flight computers, and each astromech the mobiles pack holds, with the heads a hull draws
+    // it as instead (the N-1's), converted here with the ships (so before the manifest's models are listed).
+    let droids = [];
+    if (components) {
+      let droidTemplates = [];
+      let headRows = [];
+      try {
+        droidTemplates = parseDatatable(parseIff(vfs.read('datatables/space_command/programmable_droids.iff'))).rows.map((r) => r.object_template);
+      } catch (err) {
+        console.error(`droid table not read (${err.message}): no droids or flight computers`);
+      }
+      try {
+        headRows = parseDatatable(parseIff(vfs.read('datatables/space/ship_droid_appearance_override.iff'))).rows;
+      } catch (err) {
+        console.error(`droid appearance table not read (${err.message}): astromechs keep their own look on every hull`);
+      }
+      const heads = droidHeadRows(headRows, allTemplates, shipsModule.shipLabelOf);
+      const built = buildDroids(droidTemplates, {
+        appearanceOf: (t) => resolveTemplateString(vfs, t, ['appearanceFilename'], cache),
+        localize: (sid) => localize(vfs, sid, labelCache),
+        hasModel: (p) => existsSync(join(pos[2], p)),
+        headsFor: (appearance) => {
+          const out = {};
+          for (const h of heads.get(appearance) ?? []) {
+            const m = convertAppearance(h.appearance);
+            if (m.skip) console.error(`  droid head ${h.appearance}: ${m.skip}`);
+            else out[h.ship] = `ships/${m.file}`;
+          }
+          return out;
+        },
+      });
+      droids = built.droids;
+      for (const n of built.notes) console.log(`   droids: ${n}`);
+      writeFileSync(join(outDir, 'components.json'), JSON.stringify({ format: SHIP_FIT_FORMAT, components, droids }, null, 1));
+      // The paint recipes; a --match run keeps the other materials' recipes already there.
+      let list = [...recipes.values()];
+      if (match) {
+        try {
+          list = mergeRecipes(JSON.parse(readFileSync(join(outDir, 'customize.json'), 'utf8')).recipes, list);
+        } catch {
+          /* no recipes yet */
+        }
+      }
+      writeFileSync(join(outDir, 'customize.json'), JSON.stringify({ images: 'customize/', recipes: list, palettes: exportPalettes(vfs, list.flatMap((r) => palettesOf(r))) }, null, 1));
+    }
+    const manifest = { classes: SHIP_CLASSES, ships, skipped, models: [...models.values()].filter((m) => !m.failed), materialFormat: MATERIAL_FORMAT, assembly: SHIP_ASSEMBLY_FORMAT, ...(components ? { fitFormat: SHIP_FIT_FORMAT } : {}) };
     if (projectiles.length) writeFileSync(join(outDir, 'projectiles.json'), JSON.stringify({ projectiles, weapons }, null, 2));
     if (match) {
       // A matched run redoes some ships: the rest keep their place in the manifest.
@@ -3671,6 +4028,11 @@ switch (cmd) {
         // Ships kept from an older manifest keep its format: a partial run never marks them current.
         const kept = manifest.ships.length - ships.length;
         manifest.assembly = kept === 0 || old.assembly === SHIP_ASSEMBLY_FORMAT ? SHIP_ASSEMBLY_FORMAT : (old.assembly ?? 1);
+        // Likewise the loadouts: the ships kept keep whatever fit (or none) they were converted with.
+        if (manifest.fitFormat !== undefined && kept && old.fitFormat !== SHIP_FIT_FORMAT) {
+          if (old.fitFormat === undefined) delete manifest.fitFormat;
+          else manifest.fitFormat = old.fitFormat;
+        }
         console.log(`(--match: ${ships.length} ships redone, ${manifest.ships.length - ships.length} kept from the manifest as they were)`);
       } catch {
         /* no manifest yet: this run's ships are all of it */
@@ -3680,6 +4042,7 @@ switch (cmd) {
     const withInterior = ships.filter((sh) => sh.interior && !sh.interior.failed).length;
     console.log(`-> ${outDir}: ${ships.length} ships in ${models.size} models, ${withInterior} with an interior, ${skipped.length} left out (listed in manifest.json; B in game opens the garage, ships at the bottom)`);
     if (skipped.length) console.log(`   left out:\n${skipped.map((sk) => `     ${sk.template}  (${sk.why})`).join('\n')}`);
+    if (components) console.log(loadoutsLine([...fits.values()], droids, { shaders: recipes.size, images: paint.images, bytes: paint.bytes }));
     printEffectSummary();
     break;
   }

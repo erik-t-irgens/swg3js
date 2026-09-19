@@ -446,6 +446,43 @@ const T = (shader: string, d: any = deps) => surfaceTexture(vfs, shader, d);
   ok(T('shader/decal_emismap.sht').thumb === undefined, 'without the hook there is no thumb');
 }
 {
+  // The paint hook: a painted main image replaces the texture before the gloss mask, the glow split,
+  // the opaque copy and the thumbnail, and the entry is named for it.
+  const paintTexels = [200, 40, 40, 0, 40, 200, 40, 128, 40, 40, 200, 255, 90, 90, 90, 128];
+  const painted = { path: 'texture/glow.dds#paint:shader/decal_emismap.sht', width: 2, height: 2, rgba: Uint8Array.from(paintTexels) };
+  const seenMain: any[] = [];
+  let thumbOf: any = null;
+  const withPaint = makeDeps({
+    mainImage: (shader: string) => (shader === 'shader/decal_emismap.sht' || shader === 'shader/decal_emis_slot.sht' || shader === 'shader/waterfall_scroll.sht' || shader === 'shader/nowhere.sht' ? { ...painted, path: `texture/x.dds#paint:${shader}` } : null),
+    surfaceFor: (_e: string | null, _s: any, img: any) => { seenMain.push(img); return {}; },
+    thumb: (w: number, h: number, rgba: Uint8Array) => { thumbOf = [...rgba]; return { width: w, height: h, rgba }; },
+  });
+  const g = T('shader/decal_emismap.sht', withPaint);
+  ok(g.path === 'texture/x.dds#paint:shader/decal_emismap.sht' && [...readPng(g.png).rgba].join() === paintTexels.join(), "the entry's main image is the painted one, under the painted path");
+  ok(g.hasAlpha === true && seenMain[seenMain.length - 1].rgba === painted.rgba, 'its alpha is read from the painted pixels (the chosen pattern\'s own alpha, as the ships command hands it), and surfaceFor (the gloss mask) is handed the painted image');
+  const lit = readPng(g.lit.png);
+  const emis = readPng(g.emissive.png);
+  let sumOk = true;
+  for (let i = 0; i < 4; i++) for (let c = 0; c < 3; c++) if (Math.abs(enc(dec(lit.rgba[i * 4 + c]) + dec(emis.rgba[i * 4 + c])) - paintTexels[i * 4 + c]) > 1) sumOk = false;
+  ok(sumOk && emis.rgba[0] === 0 && emis.rgba[8] === 40 && emis.rgba[10] === 200, 'the glow is split from the painted colour by the painted alpha: lit + glow is the painted texel, black where its alpha is 0, all of it where 255');
+  ok(g.lit.path === 'texture/x.dds#paint:shader/decal_emismap.sht#lit:texture/x.dds#paint:shader/decal_emismap.sht:a', 'the glow images are named for the painted image');
+  ok(thumbOf.join() === paintTexels.join(), 'the thumbnail is made from the painted image');
+  const e = T('shader/decal_emis_slot.sht', withPaint);
+  const eEmis = readPng(e.emissive.png);
+  ok(e.emissive.path === 'texture/x.dds#paint:shader/decal_emis_slot.sht#emis:texture/emis_mask.dds:a' && eEmis.rgba[0] === 200 && eEmis.rgba[4] === 0 && readPng(e.lit.png).rgba[7] === 128, "with an EMIS mask the painted colour glows where the mask says, and the lit image keeps the painted alpha");
+  const w = T('shader/waterfall_scroll.sht', withPaint);
+  ok(w.rgb.path === 'texture/x.dds#paint:shader/waterfall_scroll.sht#rgb' && readPng(w.rgb.png).rgba[0] === 200 && w.alphaImage.path.endsWith('#paint:shader/waterfall_scroll.sht#alpha'), 'an opaque copy and a split alpha are made from the painted image too');
+  const none = T('shader/plain.sht', withPaint);
+  ok(JSON.stringify(none) === JSON.stringify(T('shader/plain.sht')), 'a shader the hook does not answer for comes out exactly as without it');
+  ok(T('shader/nowhere.sht', withPaint) === null, 'a shader not in the archives is still untextured, whatever the hook says');
+  put('shader/lost_main.sht', ssht('effect/a_simple.eft', [form('TXMS', txm('MAIN', 'texture/lost.dds'))]));
+  const lost = T('shader/lost_main.sht', makeDeps({ mainImage: () => painted }));
+  ok(lost?.path === painted.path && T('shader/lost_main.sht') === null, 'a painted image stands in for a main texture the archives lack');
+  const flipLog: string[] = [];
+  const flip = T('shader/anim_sign.sht', makeDeps({ mainImage: () => painted, log: (m: string) => flipLog.push(m) }));
+  ok(JSON.stringify(flip) === JSON.stringify(T('shader/anim_sign.sht')) && flipLog.some((m) => /anim_sign\.sht is a flip-book: drawn with its own frames, unpainted/.test(m)), 'a flip-book is never painted (one frame painted would flicker): its answer is dropped with a note');
+}
+{
   const c = surfaceCounts([T('shader/anim_screen.sht'), T('shader/waterfall_scroll.sht'), T('shader/fence_add.sht'), T('shader/decal_emismap.sht'), T('shader/anim_sign.sht'), null]);
   ok(c.flipBooks === 2 && c.scrolling === 1 && c.unlit === 1 && c.additive === 1 && c.glowing === 2 && c.glowBytes > 0, 'surfaceCounts counts flip-books, scrolls, unlit, additive and glowing entries');
   ok(/^surfaces: 2 flip-books, 1 scrolling, 1 unlit, 1 additive, 2 glowing \(\d+\.\d MB of glow images\)$/.test(surfaceCountsLine(c)), 'and the snapshot line reads as designed');
