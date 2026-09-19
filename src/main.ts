@@ -24,6 +24,10 @@ import { GalaxyMap, type Poi } from './ui/galaxyMap';
 import { MapUi } from './ui/mapUi';
 import { WardrobeUi } from './ui/wardrobeUi';
 import { WeaponsUi } from './ui/weaponsUi';
+import { BackpackUi, type BackpackCell } from './ui/backpackUi';
+import { Equipment } from './player/equipment';
+import { itemInfo, WEAPON_ORDER, type ItemContext } from './player/items';
+import { OFF_HAND_CLASSES, normalizeOwned, slotRank, slotWords, speciesWords } from './core/inventory';
 import { ForceUi } from './ui/forceUi';
 import { DEFAULT_LOADOUT, POWERS } from './combat/forcePowers';
 import { DEFAULT_GADGETS, GADGETS } from './combat/gadgets';
@@ -94,7 +98,7 @@ function mountPrompt(v: import('./vehicles/vehicle').Vehicle): string {
 }
 
 const MOUNT_RANGE = 3.6;
-type InventoryTab = 'wardrobe' | 'appearance' | 'weapons' | 'force';
+type InventoryTab = 'backpack' | 'wardrobe' | 'appearance' | 'weapons' | 'force';
 /** The camera pitch a flyer holds its height at: the default view, a little above level. */
 const CAMERA_REST_PITCH = 0.32;
 
@@ -175,7 +179,15 @@ class App {
   private characterId = 'human_male';
   private speciesList: SpeciesEntry[] = [];
   private breakFrames = false;
-  private inventoryTab: InventoryTab = 'wardrobe';
+  private inventoryTab: InventoryTab = 'backpack';
+  /** What the character owns, wears and holds, and the one way anything goes on or in hand (the backpack, the give tabs, the console). */
+  private readonly equipment: Equipment;
+  /** The backpack panel, the inventory's first tab. */
+  private readonly backpack: BackpackUi;
+  /** The weapons rack as it loads (null when none is converted); the equipment waits on it. */
+  private weaponsLoaded!: Promise<WeaponCatalogue | null>;
+  /** The hello resend after a change of clothes or weapon, debounced so several pieces send one. */
+  private helloTimer = 0;
   private spawnerTab: 'garage' | 'npcs' = 'garage';
   private weapons: WeaponCatalogue | null = null;
   private readonly fade: HTMLElement;
@@ -328,8 +340,27 @@ class App {
     this.wardrobe = new WardrobeUi(this.ui, () => this.hud.setPrompt(''));
     this.wardrobe.setBaseUrl(import.meta.env.BASE_URL);
     this.weaponsUi = new WeaponsUi(this.ui, (def, hand) => void this.equip(def, hand));
+    // The equipment: its deps are closures read only when an operation runs (after the constructor); the
+    // one value it holds is the player, assigned above.
+    this.equipment = new Equipment({
+      character: () => this.player.rig?.character ?? null,
+      player: this.player,
+      weaponsLoaded: () => this.weaponsLoaded ?? Promise.resolve(null),
+      prepare: (root) => this.prepareRoot(root),
+      record: () => (this.creating ? null : this.current),
+      persist: (c) => {
+        upsertCharacter(c);
+      },
+      changed: (what) => this.onEquipmentChanged(what),
+      baseUrl: import.meta.env.BASE_URL,
+    });
     // The Skills tab: the Force powers or the gadgets in the number slots, given to the class's kit and kept with the character.
     this.forceUi = new ForceUi(this.ui);
+    // The backpack: a double-click uses an item, Destroy (twice) destroys it; its tabs swap the inventory's panels.
+    this.backpack = new BackpackUi(this.ui);
+    this.backpack.onTab = (id) => this.toggleInventory(id as InventoryTab);
+    this.backpack.onUse = (key, hand) => void this.useItem(key, hand);
+    this.backpack.onDestroy = (key) => void this.destroyItem(key);
     this.forceUi.loadout = [...DEFAULT_LOADOUT];
     this.forceUi.onChange = (loadout) => this.setSkills(this.kit.id, loadout);
     // A blade colour picked on the rack goes on the blades now and into the character's record.
@@ -355,11 +386,17 @@ class App {
     this.appearanceUi.onTab = (id) => this.toggleInventory(id as InventoryTab);
     // The tabs: a click on the other tab of a panel swaps to it, the key toggles whichever was last open.
     this.wardrobe.onTab = (id) => this.toggleInventory(id as InventoryTab);
+    // The Clothes (give) tab dresses through the equipment: the game's slots, the compile before the
+    // piece shows, and in the world the piece given. In the creator nothing is given (no record).
+    this.wardrobe.onWear = (id) => this.equipment.wear(id, { give: true, force: true }).then((note) => !/cannot|not in|no wardrobe|single model|dropped|could not/.test(note));
+    this.wardrobe.onRemove = (parts) => this.equipment.takeOffParts(parts);
     this.weaponsUi.onTab = (id) => this.toggleInventory(id as InventoryTab);
     this.forceUi.onTab = (id) => this.toggleInventory(id as InventoryTab);
     this.vehiclesUi.onTab = (id) => this.toggleSpawner(id as 'garage' | 'npcs');
     this.npcUi.onTab = (id) => this.toggleSpawner(id as 'garage' | 'npcs');
-    void WeaponCatalogue.load(import.meta.env.BASE_URL).then((c) => {
+    // Kept as a promise: the equipment waits on it (a weapon restored at play() before the rack is in).
+    this.weaponsLoaded = WeaponCatalogue.load(import.meta.env.BASE_URL);
+    void this.weaponsLoaded.then((c) => {
       this.weapons = c;
       this.weaponsUi.attach(c);
       this.world.npcDeps.weapons = c;
@@ -371,6 +408,8 @@ class App {
       };
       this.world.npcs?.attach(this.world.npcDeps);
       if (c) console.info(`weapons: ${c.weapons.length} on the rack, ${c.skipped.length} left out`);
+      // The peers' weapons waiting for the rack go in their hands now (remotes is assigned later in the constructor).
+      this.remotes?.refreshHeld();
     });
     const galaxy = new GalaxyMap(
       this.ui,
@@ -418,7 +457,7 @@ class App {
     // Every panel moves by its header and stays put; the overlay round it is clear, so the world shows behind.
     draggable(this.map.root, '.map-panel', '.map-header', 'map');
     draggable(this.shipMenu.root, '.ship-panel', '.ship-header', 'ship');
-    for (const [id, ui] of [['wardrobe', this.wardrobe], ['weapons', this.weaponsUi], ['garage', this.vehiclesUi], ['npcs', this.npcUi], ['appearance', this.appearanceUi]] as const) draggable(ui.root, '.wardrobe-panel', '.wardrobe-header', id);
+    for (const [id, ui] of [['wardrobe', this.wardrobe], ['weapons', this.weaponsUi], ['garage', this.vehiclesUi], ['npcs', this.npcUi], ['appearance', this.appearanceUi], ['backpack', this.backpack]] as const) draggable(ui.root, '.wardrobe-panel', '.wardrobe-header', id);
     // Console hooks for driving the game from tests: window.__debug.teleport(x, z, yaw), .look(yaw, pitch), .cell().
     (window as unknown as { __debug: unknown }).__debug = {
       /** Put the player at x, z on the ground (or at `y`); a point inside a building's room, once that building's interior is built, counts as being in it. Returns the cell. */
@@ -1421,6 +1460,51 @@ class App {
         const def = this.weapons?.find(name);
         return def ? this.equip(def, hand) : `no weapon matches ${name}`;
       },
+      /** The backpack's state: what is owned (with the game's name, where it is and the species' verdict), worn and held, what is being put on, the record's `inv`. */
+      items: () => {
+        const snap = this.equipment.snapshot();
+        const ctx = this.equipment.lastContext;
+        const where = (kind: 'wear' | 'weapon', id: string) => (kind === 'weapon' ? (snap.held.right === id ? 'right' : snap.held.left === id ? 'left' : 'pack') : id in snap.worn ? 'worn' : 'pack');
+        return {
+          inv: snap.inv,
+          record: snap.record,
+          species: snap.species,
+          wardrobe: snap.wardrobe,
+          weapons: snap.weapons,
+          owned: snap.owned.map((o) => {
+            const info = ctx ? itemInfo(o.kind, o.id, ctx) : null;
+            return { id: o.id, kind: o.kind, name: info?.name ?? o.id, where: where(o.kind, o.id), fit: info?.fit ?? null, missing: info?.missing ?? null };
+          }),
+          worn: snap.worn,
+          held: snap.held,
+          busy: snap.busy,
+        };
+      },
+      /** Give an item: `give('wear', 'jacket_s02')`, `give('weapon', 'baton_stun')`. It goes in the backpack, not on. */
+      give: async (kind: 'wear' | 'weapon', id: string) => {
+        if (kind !== 'wear' && kind !== 'weapon') return "kind is 'wear' or 'weapon'";
+        const ctx = await this.equipment.itemContext();
+        const info = itemInfo(kind, id, ctx);
+        if (info.missing) return kind === 'wear' ? `${id} is not in this character's wardrobe` : `${id} is not on the weapons rack`;
+        if (!this.current || this.creating) return 'no character is being played';
+        return this.equipment.give(kind, id) ? `${info.name} is in the backpack` : `${info.name} is owned already`;
+      },
+      /** Use an item as a double-click does (on or off, in hand or put away); `use('sword_lightsaber_training', 'left')` for the left hand. */
+      use: async (id: string, hand?: 'left') => {
+        const kind = await this.kindOf(id);
+        if (!kind) return `${id} is neither on the rack nor in the wardrobe`;
+        return this.useItem(`${kind}:${id}`, hand);
+      },
+      /** Destroy an owned item (taken off or put away first). */
+      destroy: async (id: string) => {
+        const owned = this.equipment.owned().find((o) => o.id === id);
+        if (!owned) return `${id} is not owned`;
+        return this.destroyItem(`${owned.kind}:${id}`);
+      },
+      /** The backpack panel's state: open, how many cells, selected, how many without a picture. */
+      backpack: () => this.backpack.state(),
+      /** The kit a class would get, resolved against this character's catalogues; nothing is given. */
+      startingKit: (cls?: ClassId) => this.equipment.kit(cls ?? this.current?.class ?? this.kit.id),
       /** Whether the torso is held steady over running legs while a pose rides the upper body (on by default). */
       steady: (on?: boolean) => {
         if (this.player.rig && on !== undefined) this.player.rig.steady = on;
@@ -1677,6 +1761,9 @@ class App {
     });
     // A peer dressed, or their look changed: the motion blur's shaders for their outfit, before it is drawn.
     this.remotes.onDressed = (root) => void this.postfx?.product<VelocityProduct>('velocity')?.prepareRoots([root]);
+    // A peer's weapons come off the same rack, and anything of theirs is compiled before it shows.
+    this.remotes.weapons = () => this.weapons;
+    this.remotes.prepare = (root) => this.prepareRoot(root);
     // A new mobile prototype: the motion blur's shaders for its morph counts, after the world's own preparation.
     MobileAssets.for(import.meta.env.BASE_URL).alsoPrepare = (root) => this.postfx?.product<VelocityProduct>('velocity')?.prepareRoots([root]) ?? Promise.resolve();
     this.net.onJoin = (peer) => this.remotes.add(peer.id, peer.hello);
@@ -1799,6 +1886,8 @@ class App {
     this.savePlace(true);
     this.menu.hide();
     this.closePanels();
+    // The hands are emptied on the way out, or the next character played (of the same species) would start with this one's weapon.
+    this.equipment.reset();
     this.map.hide();
     if (this.player.mounted) this.handleMount();
     // Off the ship before its room's physics world goes with the world.
@@ -1971,7 +2060,139 @@ class App {
   /** Who and where this player is, for the relay, and how they look, so the others draw them as they are. */
   private helloNow(): Hello {
     const c = this.current;
-    return { name: c?.name ?? 'someone', species: this.characterId, class: this.kit?.id ?? 'jedi', planet: this.world.planet?.id ?? '', zone: this.zone, look: c ? packLook(c.appearance, c.outfit ?? []) : undefined };
+    // The weapons in hand, so the others see them (the outfit is the record's, which the equipment keeps current).
+    const r = this.player.equipped.right?.id;
+    const l = this.player.equipped.left?.id;
+    const held = r || l ? { ...(r ? { r } : {}), ...(l ? { l } : {}) } : undefined;
+    return { name: c?.name ?? 'someone', species: this.characterId, class: this.kit?.id ?? 'jedi', planet: this.world.planet?.id ?? '', zone: this.zone, look: c ? packLook(c.appearance, c.outfit ?? []) : undefined, held };
+  }
+
+  /** Send the hello again shortly (dressing several pieces sends one): a change of clothes or weapon reaches the others. */
+  private queueHello(): void {
+    if (!this.net.online) return;
+    window.clearTimeout(this.helloTimer);
+    this.helloTimer = window.setTimeout(() => {
+      if (this.net.online && this.current) this.net.setHello(this.helloNow());
+    }, 400);
+  }
+
+  /**
+   * Compile something of the player's (or a peer's) before it is shown: the world's actor preparation,
+   * then the motion blur's. Outside the world nothing is drawn by the main renderer, and arriving
+   * compiles the whole scene behind the loading screen, so there is nothing to do.
+   */
+  private async prepareRoot(root: THREE.Object3D): Promise<void> {
+    if (!this.inWorld) return;
+    await this.world.prepareActor(root);
+    await this.postfx?.product<VelocityProduct>('velocity')?.prepareRoots([root]);
+  }
+
+  /** The equipment changed what is owned, worn or held (or what is being put on): the panels follow, and the others are told. */
+  private onEquipmentChanged(what: 'owned' | 'worn' | 'held' | 'busy'): void {
+    if (this.backpack.open) void this.refreshBackpack();
+    if (what === 'busy') return;
+    this.weaponsUi.held = { right: this.player.equipped.right?.id ?? null, left: this.player.equipped.left?.id ?? null };
+    if (this.weaponsUi.open) this.weaponsUi.render();
+    if (this.wardrobe.open && what === 'worn') this.wardrobe.refresh();
+    this.queueHello();
+  }
+
+  /** Whether an id is a weapon or a wardrobe item: owned first, then the rack, then the wardrobe. */
+  private async kindOf(id: string): Promise<'wear' | 'weapon' | null> {
+    const owned = this.equipment.owned().find((o) => o.id === id);
+    if (owned) return owned.kind;
+    const ctx = await this.equipment.itemContext();
+    if (!itemInfo('weapon', id, ctx).missing) return 'weapon';
+    if (!itemInfo('wear', id, ctx).missing) return 'wear';
+    return null;
+  }
+
+  /** The backpack's double-click (or Enter, or the console): on or off, in hand or put away; a weapon may switch the kit. */
+  private async useItem(key: string, hand?: 'left'): Promise<string> {
+    const i = key.indexOf(':');
+    const kind = key.slice(0, i);
+    const id = key.slice(i + 1);
+    if (kind !== 'wear' && kind !== 'weapon') return `no item ${key}`;
+    const r = await this.equipment.use(kind, id, hand);
+    if (r.wants && r.wants !== this.kit.id && this.inWorld) this.setClass(r.wants);
+    if (r.note !== 'dropped') this.hud.setPrompt(r.note);
+    return r.note;
+  }
+
+  /** Destroy an owned item for good. */
+  private async destroyItem(key: string): Promise<string> {
+    const i = key.indexOf(':');
+    const kind = key.slice(0, i);
+    const id = key.slice(i + 1);
+    if (kind !== 'wear' && kind !== 'weapon') return `no item ${key}`;
+    const note = await this.equipment.destroy(kind, id);
+    if (note !== 'dropped') this.hud.setPrompt(note);
+    return note;
+  }
+
+  /** What the class fights with while a hand is empty, for the backpack's hand cells. */
+  private standIns(): { right: string | null; left: string | null } {
+    const p = this.player;
+    if (p.fists) return { right: null, left: null };
+    if (this.kit?.id === 'bounty_hunter') return { right: 'the plain rifle', left: null };
+    return { right: 'the plain saber', left: p.saber.style === 'dual' ? 'the plain saber' : null };
+  }
+
+  /** Build the backpack from the equipment's snapshot and what the game says about each item. */
+  private async refreshBackpack(): Promise<void> {
+    const ctx: ItemContext = await this.equipment.itemContext();
+    if (!this.backpack.open) return;
+    const snap = this.equipment.snapshot();
+    const now = Date.now();
+    const busy = new Set(snap.busy);
+    const newest = snap.owned.reduce((m, o) => Math.max(m, o.got), 0);
+    const character = this.player.rig?.character ?? null;
+    const cell = (kind: 'wear' | 'weapon', id: string, got: number): BackpackCell => {
+      const info = itemInfo(kind, id, ctx);
+      const where: BackpackCell['where'] = kind === 'weapon' ? (snap.held.right === id ? 'right' : snap.held.left === id ? 'left' : 'pack') : id in snap.worn ? 'worn' : 'pack';
+      const first = info.slots?.[0];
+      const slotsText = kind === 'weapon' ? (first ? slotWords(first) : '') : info.slots?.length ? `takes: ${info.slots.map((a) => slotWords(a)).join(' or ')}` : '';
+      const classRank = info.cls ? WEAPON_ORDER.indexOf(info.cls) : WEAPON_ORDER.length;
+      const order = where === 'worn' ? slotRank(first?.[0]) : kind === 'weapon' ? classRank : 100 + slotRank(first?.[0]);
+      const fitNote = info.missing
+        ? kind === 'weapon'
+          ? 'not on this machine\'s weapons rack'
+          : "not in this character's wardrobe"
+        : info.fit === 'block'
+          ? `${speciesWords(ctx.species, true)} cannot wear this`
+          : info.fit === 'hide' || info.unseen
+            ? `worn unseen on ${speciesWords(ctx.species, false)}`
+            : undefined;
+      return {
+        key: info.key,
+        kind,
+        id,
+        name: info.name,
+        icon: info.icon,
+        where,
+        fit: info.fit,
+        missing: info.missing,
+        unseen: info.unseen,
+        busy: busy.has(info.key),
+        isNew: got > 0 && got === newest && now - got < 2000,
+        kindText: info.kindText,
+        slotsText,
+        description: info.description,
+        canLeft: kind === 'weapon' && !!info.cls && OFF_HAND_CLASSES.has(info.cls),
+        order,
+        fitNote,
+      };
+    };
+    const cells = snap.owned.map((o) => cell(o.kind, o.id, o.got));
+    // Anything worn or held that is not owned (it should not happen once a record is played) is shown all the same, so the panel matches the body.
+    for (const id of Object.keys(snap.worn)) if (!cells.some((c) => c.kind === 'wear' && c.id === id)) cells.push(cell('wear', id, 0));
+    for (const id of [snap.held.right, snap.held.left]) if (id && !cells.some((c) => c.kind === 'weapon' && c.id === id)) cells.push(cell('weapon', id, 0));
+    this.backpack.render({
+      cells,
+      standIn: this.standIns(),
+      noWardrobe: !!character && !ctx.wardrobe,
+      note: !character ? 'this character is a single model: clothes cannot change' : !ctx.weapons ? 'no weapons converted' : undefined,
+    });
   }
 
   /** Tell the relay where this player is, a few times a second, and move the others along. */
@@ -2075,6 +2296,8 @@ class App {
       this.current.outfit = this.outfitOf(character);
       upsertCharacter(this.current);
     }
+    // The new rig's worn pieces become owned, and the saved hands go back in the new rig's hands.
+    if (!this.creating && this.current) await this.equipment.resync();
     if (this.wardrobe.open) void this.wardrobe.attach(character, import.meta.env.BASE_URL).catch((err) => console.warn('wardrobe', err));
     if (this.appearanceUi.open) this.appearanceUi.attach(character, import.meta.env.BASE_URL);
     if (this.inWorld) this.hud.setPrompt(`now playing as ${id.replace(/_/g, ' ')}`);
@@ -2102,6 +2325,8 @@ class App {
     this.creatorBar.show();
     const species = this.speciesList.find((s) => s.id === this.characterId)?.id ?? this.speciesList[0]?.id ?? 'human_male';
     const character = await this.useSpecies(species);
+    // Whoever was played last leaves their weapons behind, even when the species is the same.
+    this.equipment.reset();
     if (!this.creating) return;
     if (character) this.applyAppearance(character, this.legacyAppearance(species));
     this.showCreatorTab('appearance');
@@ -2118,6 +2343,8 @@ class App {
       if (character) this.appearanceUi.attach(character, import.meta.env.BASE_URL);
       else this.appearanceUi.explain('No parts pack for the player: run <code>npm run swg -- species @SWG assets-private --retail-only</code> and reload.');
     } else {
+      // In the creator the Clothes tab only dresses: nothing is given (there is no record yet).
+      this.wardrobe.developer = false;
       this.wardrobe.show();
       if (character) void this.wardrobe.attach(character, import.meta.env.BASE_URL).catch((err) => console.warn('wardrobe', err));
       else this.wardrobe.explain('No parts pack for the player: run the converter\'s <code>species</code> command and reload.');
@@ -2130,20 +2357,30 @@ class App {
     this.creatorBar.hide();
     this.wardrobe.root.classList.remove('creation');
     this.appearanceUi.root.classList.remove('creation');
+    // The first I after making a character opens the backpack, not the creator's last tab.
+    this.inventoryTab = 'backpack';
   }
 
   private async finishCreation(name: string, cls: ClassId, planet: string): Promise<void> {
     const c = this.player.rig?.character;
+    // The class's starting kit, and what the creator dressed the character in, are its first items;
+    // the kit's weapon goes in its hand when it arrives.
+    const kit = await this.equipment.kit(cls);
+    const outfit = c ? this.outfitOf(c) : [];
+    const worn = outfit.map((part) => this.equipment.itemIdOf(part)).filter((id): id is string => !!id).map((id) => ({ id, kind: 'wear' as const, got: Date.now() }));
     const record: SavedCharacter = {
       id: newCharacterId(),
       name,
       species: this.characterId,
       class: cls,
       appearance: c ? this.appearanceOf(c) : { morphs: {}, values: {}, height: 0.5 },
-      outfit: c ? this.outfitOf(c) : [],
+      outfit,
       planet,
       created: Date.now(),
       played: 0,
+      items: normalizeOwned([...worn, ...kit.items]),
+      held: kit.held,
+      inv: 1,
     };
     if (!upsertCharacter(record)) {
       this.creatorBar.note('No room for another character: delete one first.');
@@ -2167,6 +2404,9 @@ class App {
       this.applyAppearance(character, c.appearance);
       await this.dress(character, c.outfit ?? []);
     }
+    // What the character owns (a record from before the backpack is given what it wears and the kit),
+    // with the hands emptied of whoever was played before; outside the `if`, so a single model gets its weapons too.
+    await this.equipment.load(c);
     // The character's Force powers and gadgets in the slots (the defaults for a character from before there was a choice).
     this.jediKit().setLoadout(c.powers?.length ? c.powers.map((p) => p || null) : [...DEFAULT_LOADOUT]);
     this.hunterKit().setLoadout(c.gadgets?.length ? c.gadgets.map((p) => p || null) : [...DEFAULT_GADGETS]);
@@ -2175,6 +2415,9 @@ class App {
     const bladeColor = c.saber?.color ?? DEFAULT_SABER_COLOR;
     this.player.setSaberColor(bladeColor);
     this.weaponsUi.saberColor = bladeColor;
+    // The weapons in hand at logout, back in the same hands, blade unlit; behind the loading screen,
+    // where arriving compiles the whole scene, the held models included.
+    await this.equipment.restoreHeld();
     this.loadingScreen.setProgress(0.04);
     this.arrive(planet, c.zone, c.pos ? new THREE.Vector3(c.pos[0], c.pos[1], c.pos[2]) : undefined);
     if (c.heading !== undefined) {
@@ -2271,6 +2514,11 @@ class App {
     this.player.speedMultiplier = 1;
     this.hud.setKit(this.kit);
     this.updateUrl();
+    // The class is kept with the character, so the weapon saved in its hand comes back with the kit that fights with it.
+    if (this.current && this.inWorld && !this.creating && this.current.class !== id) {
+      this.current.class = id;
+      upsertCharacter(this.current);
+    }
   }
 
   private updateUrl(): void {
@@ -3191,7 +3439,7 @@ class App {
 
   /** The panels' open state moved to the tabs: closing one panel of a pair and opening the other keeps the mouse free. */
   private anyPanelOpen(): boolean {
-    return this.wardrobe.open || this.appearanceUi.open || this.weaponsUi.open || this.forceUi.open || this.vehiclesUi.open || this.npcUi.open || this.shipMenu.open || this.liftMenu.open || this.menu.open;
+    return this.backpack.open || this.wardrobe.open || this.appearanceUi.open || this.weaponsUi.open || this.forceUi.open || this.vehiclesUi.open || this.npcUi.open || this.shipMenu.open || this.liftMenu.open || this.menu.open;
   }
 
   private jediKit(): JediKit {
@@ -3223,6 +3471,7 @@ class App {
   }
 
   private closePanels(): void {
+    if (this.backpack.open) this.backpack.hide();
     if (this.wardrobe.open) this.wardrobe.hide();
     if (this.appearanceUi.open) this.appearanceUi.hide();
     if (this.weaponsUi.open) this.weaponsUi.hide();
@@ -3465,28 +3714,23 @@ class App {
 
   /** Put a weapon from the rack in a hand (null empties it), switching to the kit that fights with it. */
   async equip(def: WeaponDef | null, hand: 'right' | 'left'): Promise<string> {
-    if (!def) {
-      this.player.unequip(hand);
-      this.weaponsUi.held[hand] = null;
-      return `${hand} hand empty`;
-    }
+    if (!def) return this.equipment.stow(hand);
     if (!this.weapons) return 'no weapons converted';
-    const model = await this.weapons.model(def);
-    const wants = this.player.equip(def, model, hand);
-    this.weaponsUi.held = { right: this.player.equipped.right?.id ?? null, left: this.player.equipped.left?.id ?? null };
-    if (wants !== this.kit.id) this.setClass(wants);
-    this.hud.setPrompt(`${def.id} in the ${hand} hand (${def.class}, ${this.player.saber.style})`);
-    return `${def.id} in the ${hand} hand`;
+    // Through the equipment: the hands' rules, the model compiled before it is in hand, and the weapon given.
+    const r = await this.equipment.hold(def, hand, { give: true });
+    if (r.wants && r.wants !== this.kit.id) this.setClass(r.wants);
+    if (r.note !== 'dropped') this.hud.setPrompt(r.wants ? `${r.note} (${def.class}, ${this.player.saber.style})` : r.note);
+    return r.note;
   }
 
-  /** I: the inventory, the wardrobe or the weapons tab; the key toggles the last tab used, a tab click swaps. */
+  /** I: the inventory (the backpack, the appearance, the skills and the give tabs); the key toggles the last tab used, a tab click swaps. */
   private toggleInventory(tab?: InventoryTab): void {
     if (this.creating) {
       if (tab === 'appearance' || tab === 'wardrobe') this.showCreatorTab(tab);
       return;
     }
     const want = tab ?? this.inventoryTab;
-    const wasOpen = tab === undefined && (this.wardrobe.open || this.appearanceUi.open || this.weaponsUi.open || this.forceUi.open);
+    const wasOpen = tab === undefined && (this.backpack.open || this.wardrobe.open || this.appearanceUi.open || this.weaponsUi.open || this.forceUi.open);
     this.closePanels();
     if (wasOpen) {
       this.freeMouse(false);
@@ -3494,7 +3738,12 @@ class App {
     }
     this.inventoryTab = want;
     const character = this.player.rig?.character ?? null;
-    if (want === 'wardrobe') {
+    if (want === 'backpack') {
+      this.backpack.show();
+      void this.refreshBackpack();
+    } else if (want === 'wardrobe') {
+      // In the world the Clothes tab is a developer's give tool.
+      this.wardrobe.developer = true;
       this.wardrobe.show();
       if (character) void this.wardrobe.attach(character, import.meta.env.BASE_URL).catch((err) => console.warn('wardrobe', err));
       else this.wardrobe.explain('This character is a single model, not a set of parts, so there is nothing to change. Convert it with <code>npm run swg -- parts</code>.');

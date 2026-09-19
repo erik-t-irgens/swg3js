@@ -3,6 +3,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { surfaces } from '../world/surfaces';
+import { OFF_HAND_CLASSES } from '../core/inventory.ts';
 
 export type WeaponClass = 'pistol' | 'carbine' | 'rifle' | 'heavy' | 'sword1h' | 'knife' | 'sword2h' | 'polearm' | 'fist' | 'lightsaber' | 'lightsaber2h' | 'lightsaberStaff' | 'thrown';
 
@@ -48,6 +49,13 @@ export interface WeaponDef {
   length: number;
   blade?: BladeDef;
   fx?: GunFx;
+  /** The game's name and description (null when its string tables lack them); absent on a pack converted before they were read. */
+  name?: string | null;
+  description?: string | null;
+  /** The hands it takes (the game's arrangement: `[['hold_r']]`, `[['hold_r', 'hold_l']]`). */
+  slots?: string[][] | null;
+  /** Its picture, relative to the weapons folder. */
+  icon?: string | null;
 }
 
 export interface WeaponsManifest {
@@ -63,8 +71,8 @@ export interface WeaponsManifest {
 /** What each class fights like, when the manifest does not say. */
 export const FIGHTS: Record<WeaponClass, Fights> = { pistol: 'gun', carbine: 'gun', rifle: 'gun', heavy: 'gun', sword1h: 'single', knife: 'single', sword2h: 'single', polearm: 'staff', fist: 'single', lightsaber: 'lightsaber', lightsaber2h: 'lightsaber', lightsaberStaff: 'lightsaber', thrown: 'thrown' };
 export const CLASS_LABELS: Record<WeaponClass, string> = { pistol: 'Pistols', carbine: 'Carbines', rifle: 'Rifles', heavy: 'Heavy weapons', sword1h: 'One-hand swords and clubs', knife: 'Knives', sword2h: 'Two-hand swords and axes', polearm: 'Polearms and lances', fist: 'Fist weapons', lightsaber: 'Lightsabers', lightsaber2h: 'Two-hand lightsabers', lightsaberStaff: 'Double-bladed lightsabers', thrown: 'Grenades and thrown weapons' };
-/** Classes a left hand may hold too: every blade but the double-bladed staff; one in each hand fights as the dual style. */
-export const OFF_HAND = new Set<WeaponClass>(['sword1h', 'knife', 'sword2h', 'polearm', 'fist', 'lightsaber', 'lightsaber2h']);
+/** Classes a left hand may hold too: every blade but the double-bladed staff; one in each hand fights as the dual style (the backpack's rules own the list). */
+export const OFF_HAND = OFF_HAND_CLASSES as ReadonlySet<WeaponClass>;
 /** The blaster carries a class plays: the pistol's, or the rifle's (carbines and heavy weapons use the rifle set). */
 export function gunKindOf(cls: WeaponClass): 'pistol' | 'rifle' {
   return cls === 'pistol' ? 'pistol' : 'rifle';
@@ -102,6 +110,11 @@ export class WeaponCatalogue {
     return this.manifest.effects?.[name] ?? null;
   }
 
+  /** A weapon's picture as a full URL, or null when the pack drew none. */
+  iconUrl(def: WeaponDef): string | null {
+    return def.icon ? `${this.baseUrl}${def.icon}` : null;
+  }
+
   find(id: string): WeaponDef | undefined {
     const lower = id.toLowerCase();
     return this.weapons.find((w) => w.id.toLowerCase() === lower) ?? this.weapons.find((w) => w.id.toLowerCase().includes(lower));
@@ -132,4 +145,28 @@ export class WeaponCatalogue {
     }
     return (await p).clone();
   }
+}
+
+const holdScale = new THREE.Vector3();
+const holdDir = new THREE.Vector3();
+const holdQ = new THREE.Quaternion();
+const HOLD_UP = new THREE.Vector3(0, 1, 0);
+
+/**
+ * A weapon hung on another figure's hand bone, as the fighters hang theirs: the holder undoes the
+ * bone's world scale, and a lightsaber's hilt is turned along the character's forward, as the game's
+ * clips hold it. The caller adds it to the bone once its programs are ready.
+ */
+export function weaponHolder(rigRoot: THREE.Object3D, hand: THREE.Bone, def: WeaponDef, model: THREE.Object3D): THREE.Group {
+  const holder = new THREE.Group();
+  holder.name = `weapon:${def.id}`;
+  holder.add(model);
+  holder.scale.setScalar(1 / Math.max(hand.getWorldScale(holdScale).x, 1e-6));
+  if (isSaber(def.class)) {
+    rigRoot.updateWorldMatrix(true, true);
+    holdDir.set(0, 0, 1).applyQuaternion(rigRoot.getWorldQuaternion(holdQ));
+    holdDir.applyQuaternion(hand.getWorldQuaternion(holdQ).invert()).normalize();
+    holder.quaternion.setFromUnitVectors(HOLD_UP, holdDir);
+  }
+  return holder;
 }

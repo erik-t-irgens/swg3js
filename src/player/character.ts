@@ -10,6 +10,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { Customizer } from './customizer';
 import { markActor } from '../world/portalRender';
 import { HeadSplitView, SHADOW_ONLY_MASK, countSet, cullIndex, headBoneFlags, headRule, headTriangleFlags, partitionHead, splitsMesh, type HeadRule, type HeadStatusRow } from './headHide.ts';
+import { fitFor, packPartOf, type ItemFit } from '../core/inventory.ts';
 
 /** A mesh's occlusion data, as the converter carried it out of the mesh generator. */
 interface PartDef {
@@ -165,7 +166,24 @@ export interface PartsManifest {
 export interface Wardrobe {
   species: string;
   gender: string;
-  items: { id: string; kind: string; gender: string; template: string; parts: PartDef[] }[];
+  items: {
+    id: string;
+    kind: string;
+    gender: string;
+    template: string;
+    parts: PartDef[];
+    /** The game's name and description (null when its string tables lack them); absent on a pack converted before they were read. */
+    name?: string | null;
+    description?: string | null;
+    /** The body slots it takes: alternatives, each a list of slots (the game's arrangement); null when none. */
+    slots?: string[][] | null;
+    /** Its picture, relative to the wardrobe folder. */
+    icon?: string | null;
+    /** Species that cannot wear it or wear it unseen (the client's appearance table), by species id. */
+    fit?: ItemFit;
+    /** The appearance converted; null on a worn-unseen entry (no meshes). */
+    sat?: string | null;
+  }[];
 }
 
 /** What first person does with one part, worked out once (Character.prepareHead) from its data and its skin. */
@@ -399,6 +417,8 @@ export class Character {
       s.castShadow = true;
       s.receiveShadow = true;
       s.frustumCulled = false;
+      // A piece loaded to be put on later (loadPiece) must never show before it is prepared.
+      s.visible = worn;
       const idx = s.geometry.getIndex();
       fullIndices.push(idx ? Uint32Array.from(idx.array as ArrayLike<number>) : new Uint32Array(0));
       if (s.morphTargetDictionary) {
@@ -417,17 +437,18 @@ export class Character {
     // head and hands, which the body's own mesh carries).
     for (const sc of scenes) markActor(sc);
     for (const m of meshes) markActor(m);
-    // The outermost def decides how the whole item occludes.
-    const outer = defs.reduce((a, b) => (b.occlusionLayer > a.occlusionLayer ? b : a));
+    // The outermost def decides how the whole item occludes. No defs is a worn-unseen item: it takes
+    // its slots and draws nothing.
+    const outer = defs.length ? defs.reduce((a, b) => (b.occlusionLayer > a.occlusionLayer ? b : a)) : null;
     this.parts.set(key, {
       key,
       defs,
       meshes,
       fullIndices,
       worn,
-      layer: outer.occlusionLayer,
-      occludes: outer.occludes ?? [],
-      body: !!outer.body,
+      layer: outer?.occlusionLayer ?? 0,
+      occludes: outer?.occludes ?? [],
+      body: !!outer?.body,
       meta: { kind: meta.kind ?? (/^hair_/.test(key) ? 'hair' : undefined), template: meta.template },
       head: null,
     });
@@ -630,21 +651,109 @@ export class Character {
     // Each item's meshes live beside the catalogue, not in the character's own folder.
     for (const item of w.items) for (const part of item.parts) part.dir = dir;
     this.wardrobe = w;
+    this.wardrobeDirUrl = dir;
     return w;
+  }
+
+  private wardrobeDirUrl: string | null = null;
+
+  /** The wardrobe folder `catalogue()` settled on (a full URL ending in '/'), which the items' pictures are relative to; null before. */
+  get wardrobeDir(): string | null {
+    return this.wardrobeDirUrl;
+  }
+
+  /** The species pack's own worn pieces: its non-body part names (`shirt_s03_m_l0`, `trn_boot_m_l0`). */
+  get packParts(): string[] {
+    return this.manifest.parts.filter((p) => !p.body && p.occlusionLayer > 0).map((p) => p.name);
+  }
+
+  /** The pack part that is this catalogue item (`shirt_s03` is the pack's `shirt_s03_m_l0`), or null. */
+  packPartOf(id: string): string | null {
+    return packPartOf(id, this.packParts);
+  }
+
+  /**
+   * Whether a catalogue item goes on as an empty part: its species wears it unseen (the appearance
+   * table's `:hide`), or it is a worn-unseen entry with no meshes. It takes its slots and draws nothing.
+   */
+  private wornUnseen(item: Wardrobe['items'][number]): boolean {
+    return fitFor(item.fit, this.manifest.id, false) === 'hide' || !item.parts.length;
   }
 
   /** Put on a catalogue item by its template id, loading its meshes the first time. */
   async wearItem(id: string, baseUrl: string): Promise<boolean> {
     const w = await this.catalogue(baseUrl);
     const item = w.items.find((i) => i.id === id);
-    if (!item || !item.parts.length) return false;
+    if (!item) return false;
     const existing = this.parts.get(id);
     // One entry per catalogue item, holding every mesh it contributes. Two items that happen to
     // share a mesh stay two items, each with its own copy, and neither can be mistaken for the other.
+    // A piece this species wears unseen is an empty part, so every path that dresses agrees on it.
     if (existing) existing.worn = true;
-    else await this.addPart(id, item.parts, true, { kind: item.kind, template: item.template });
+    else await this.addPart(id, this.wornUnseen(item) ? [] : item.parts, true, { kind: item.kind, template: item.template });
     this.applyOcclusion();
     return true;
+  }
+
+  /** Pieces being loaded by loadPiece, so two asks for one key load it once. */
+  private readonly loading = new Map<string, Promise<void>>();
+
+  /**
+   * Make a piece ready without putting it on: loaded, hidden, registered (a pack part by its name, or a
+   * catalogue item by its id). An existing part costs nothing. `found` is false when neither the pack
+   * nor the wardrobe has it, or there is no wardrobe. The meshes are what the caller prepares (compiles)
+   * before `putOn` shows them.
+   */
+  async loadPiece(key: string, baseUrl: string): Promise<{ found: boolean; meshes: THREE.Object3D[] }> {
+    const found = () => ({ found: true, meshes: [...(this.parts.get(key)?.meshes ?? [])] as THREE.Object3D[] });
+    const pending = this.loading.get(key);
+    if (pending) await pending.catch(() => {});
+    if (this.parts.has(key)) return found();
+    let make: () => Promise<void>;
+    const def = this.manifest.parts.find((p) => p.name === key);
+    if (def) make = () => this.addPart(key, [def], false);
+    else {
+      let w: Wardrobe;
+      try {
+        w = await this.catalogue(baseUrl);
+      } catch {
+        return { found: false, meshes: [] };
+      }
+      const item = w.items.find((i) => i.id === key);
+      if (!item) return { found: false, meshes: [] };
+      make = () => this.addPart(key, this.wornUnseen(item) ? [] : item.parts, false, { kind: item.kind, template: item.template });
+    }
+    // Checked again after the catalogue's await: another ask may have loaded it, or be loading it.
+    if (this.parts.has(key)) return found();
+    let load = this.loading.get(key);
+    if (!load) {
+      const started = make();
+      load = started;
+      this.loading.set(key, started);
+      const done = () => {
+        if (this.loading.get(key) === started) this.loading.delete(key);
+      };
+      started.then(done, done);
+    }
+    await load;
+    return found();
+  }
+
+  /**
+   * Take `off` off and put `on` on (each loaded already, by loadPiece or before), in one synchronous
+   * step, so what comes off and what goes on change in the same frame. The body never comes off, and
+   * an unknown key is skipped. The occlusion is worked out once, ending in first person's head layers.
+   */
+  putOn(on: readonly string[], off: readonly string[] = []): void {
+    for (const key of off) {
+      const part = this.parts.get(key);
+      if (part && !part.body) part.worn = false;
+    }
+    for (const key of on) {
+      const part = this.parts.get(key);
+      if (part) part.worn = true;
+    }
+    this.applyOcclusion();
   }
 
   /** The meshes on show: the body's and every worn piece's, so colours are offered only for what is worn. */

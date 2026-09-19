@@ -1,4 +1,4 @@
-// A tab strip for the panels that share a key: the inventory on I (wardrobe, weapons) and the
+// A tab strip for the panels that share a key: the inventory on I (backpack, appearance, skills and the give tabs) and the
 // spawner on B (garage, NPCs). Each panel draws the strip in its header with its own tab lit and
 // hands a click on another tab to the game, which swaps the panels.
 
@@ -22,11 +22,13 @@ export function wireTabs(root: HTMLElement, current: string, onPick: (id: string
   }
 }
 
+/** The inventory's tabs: the backpack first; the old wardrobe and weapons panels stay as developer tools that give what they put on. */
 export const INVENTORY_TABS: TabDef[] = [
-  { id: 'wardrobe', label: 'Wardrobe' },
+  { id: 'backpack', label: 'Backpack' },
   { id: 'appearance', label: 'Appearance' },
-  { id: 'weapons', label: 'Weapons' },
   { id: 'force', label: 'Skills' },
+  { id: 'wardrobe', label: 'Clothes (give)' },
+  { id: 'weapons', label: 'Weapons (give)' },
 ];
 
 export const SPAWNER_TABS: TabDef[] = [

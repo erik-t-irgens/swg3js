@@ -9,29 +9,15 @@ import type { Character, Wardrobe } from '../player/character';
 import { INVENTORY_TABS, tabStrip, wireTabs } from './tabs';
 import { CharacterPreview } from './characterPreview';
 import type { PreviewEffects } from './previewDof';
+import { OTHER_GROUP, SLOT_GROUPS, fitFor, slotGroupOf } from '../core/inventory';
+import { escapeHtml } from './catalogue';
 
-/** Equipment slots, in the order they read down a body, and the id fragments that name them. */
-const SLOTS: { id: string; label: string; match: RegExp }[] = [
-  { id: 'head', label: 'Head', match: /helmet|_hat|^hat_|goggles|headwrap|mask|headdress|bonnet/ },
-  { id: 'neck', label: 'Neck', match: /necklace|choker|pendant/ },
-  { id: 'chest', label: 'Chest', match: /chest_plate|chest_armor|^shirt|_shirt|jacket|robe|vest|dress|bodysuit|bikini|apron|tunic|blouse|coat/ },
-  { id: 'back', label: 'Back', match: /backpack|cape|bandolier|_pack/ },
-  { id: 'bicep_l', label: 'Left bicep', match: /bicep_l$|bicep_left/ },
-  { id: 'bicep_r', label: 'Right bicep', match: /bicep_r$|bicep_right/ },
-  { id: 'bracer_l', label: 'Left bracer', match: /bracer_l$|bracer_left|wrist_l$/ },
-  { id: 'bracer_r', label: 'Right bracer', match: /bracer_r$|bracer_right|wrist_r$/ },
-  { id: 'hands', label: 'Hands', match: /glove/ },
-  { id: 'waist', label: 'Waist', match: /^belt|_belt|sash/ },
-  { id: 'legs', label: 'Legs', match: /leggings|^pants|_pants|skirt|kilt|shorts/ },
-  { id: 'feet', label: 'Feet', match: /boots|shoes|sandals/ },
-];
-const OTHER = { id: 'other', label: 'Other', match: /.*/ };
+/** Equipment slots, in the order they read down a body, and the id fragments that name them (the backpack's rules own the list). */
+const SLOTS = SLOT_GROUPS;
+const OTHER = OTHER_GROUP;
 
 /** The slot an item belongs in, by the first pattern its id fits. */
-export function slotOf(id: string): string {
-  for (const s of SLOTS) if (s.match.test(id)) return s.id;
-  return OTHER.id;
-}
+export const slotOf = slotGroupOf;
 
 export class WardrobeUi {
   readonly root: HTMLElement;
@@ -53,6 +39,17 @@ export class WardrobeUi {
   open = false;
   /** A click on another tab: the game swaps the panels. */
   onTab: (id: string) => void = () => {};
+  /**
+   * Put a piece on through the game's equipment (the slot rules, the compile before it shows, and in the
+   * world the piece given): true when it went on. Without it the panel dresses the character directly.
+   */
+  onWear: ((id: string) => Promise<boolean>) | null = null;
+  /** Take worn parts off through the game's equipment, all in one step (saved with the character once); a note back. */
+  onRemove: ((parts: string[]) => string) | null = null;
+  /** In the world the panel is a developer's give tool; in the creator it only dresses. */
+  developer = false;
+  /** A pick of the panel's own is going through the equipment: it rebuilds once at the end, so `refresh` waits for it. */
+  private picking = false;
 
   constructor(parent: HTMLElement, private readonly onChange: () => void) {
     this.root = document.createElement('div');
@@ -64,6 +61,7 @@ export class WardrobeUi {
           ${tabStrip(INVENTORY_TABS, 'wardrobe')}
           <span class="count"></span>
           <label class="mixed-label" title="Pieces authored for the other gender's body share the skeleton, not the shape: some fit, some do not"><input type="checkbox" class="mixed" /> other gender's pieces too</label>
+          <label class="mixed-label" title="The game's appearance table says this species cannot wear them; a pick here puts one on all the same"><input type="checkbox" class="blocked" /> pieces this species cannot wear</label>
           <button class="strip">Take everything off</button>
           <button class="close">Close <b>I</b></button>
         </div>
@@ -79,6 +77,7 @@ export class WardrobeUi {
     this.root.querySelector('.close')!.addEventListener('click', () => this.hide());
     this.root.querySelector('.strip')!.addEventListener('click', () => void this.stripAll());
     this.root.querySelector('.mixed')!.addEventListener('change', () => this.build());
+    this.root.querySelector('.blocked')!.addEventListener('change', () => this.build());
     wireTabs(this.root, 'wardrobe', (id) => this.onTab(id));
     // A click on the backdrop closes it; one inside must not.
     this.root.addEventListener('click', (e) => {
@@ -141,26 +140,50 @@ export class WardrobeUi {
     // share a skeleton, not a shape), so those stay out of the lists unless asked for.
     const own = (this.character?.manifest.gender ?? (/female/.test(this.character?.manifest.id ?? '') ? 'female' : 'male')).charAt(0);
     const mixed = this.root.querySelector<HTMLInputElement>('.mixed')?.checked ?? false;
+    // Pieces the game's appearance table says this species cannot wear stay out unless asked for
+    // (a piece the species' own pack carries is always wearable: it is worn as that part).
+    const showBlocked = this.root.querySelector<HTMLInputElement>('.blocked')?.checked ?? false;
+    const species = this.character?.manifest.id ?? '';
     let hidden = 0;
-    const bySlot = new Map<string, { id: string; label: string }[]>();
+    let blocked = 0;
+    const seen = new Set<string>();
+    const bySlot = new Map<string, { id: string; label: string; title: string }[]>();
     for (const item of w.items) {
       if (item.kind === 'hair' || /^hair_/.test(item.id)) continue; // the appearance tab's
+      // A repeated id is one item: the first entry is the one the game dresses.
+      if (seen.has(item.id)) continue;
+      seen.add(item.id);
       const other = !!item.gender && item.gender.charAt(0) !== own;
       if (other && !mixed && !worn.has(item.id)) {
         hidden++;
         continue;
       }
+      const cannot = fitFor(item.fit, species, this.character?.packPartOf(item.id) != null) === 'block';
+      if (cannot && !showBlocked && !worn.has(item.id)) {
+        blocked++;
+        continue;
+      }
       const slot = slotOf(item.id);
-      (bySlot.get(slot) ?? bySlot.set(slot, []).get(slot)!).push({ id: item.id, label: `${prettyName(item.id)}${other ? ` (${item.gender === 'f' ? "women's" : "men's"})` : ''}` });
+      const name = item.name?.trim() || prettyName(item.id);
+      const label = `${name}${other ? ` (${item.gender === 'f' ? "women's" : "men's"})` : ''}${cannot ? ' (cannot wear)' : ''}`;
+      (bySlot.get(slot) ?? bySlot.set(slot, []).get(slot)!).push({ id: item.id, label, title: item.description ? `${item.id}: ${item.description}` : item.id });
     }
-    for (const list of bySlot.values()) list.sort((a, b) => a.label.localeCompare(b.label));
-    this.root.querySelector<HTMLElement>('.count')!.textContent = `${w.items.length - hidden} items${hidden ? ` · ${hidden} of the other gender's hidden` : ''}`;
+    // The game gives many items one name ("Plain Shirt" twice, "Helmet" seven times): those carry their id too.
+    for (const list of bySlot.values()) {
+      const count = new Map<string, number>();
+      for (const i of list) count.set(i.label, (count.get(i.label) ?? 0) + 1);
+      for (const i of list) if ((count.get(i.label) ?? 0) > 1) i.label = `${i.label} [${i.id}]`;
+      list.sort((a, b) => a.label.localeCompare(b.label));
+    }
+    this.hiddenNote = [hidden ? `${hidden} of the other gender's hidden` : '', blocked ? `${blocked} this species cannot wear hidden` : ''].filter(Boolean).join(' · ');
+    this.shownCount = seen.size - hidden - blocked;
+    this.note('');
     const rows: string[] = [];
     for (const slot of [...SLOTS, OTHER]) {
       const list = bySlot.get(slot.id);
       if (!list?.length) continue;
       const current = equipped.get(slot.id) ?? '';
-      const options = [`<option value="">— none —</option>`, ...list.map((i) => `<option value="${i.id}"${i.id === current ? ' selected' : ''}>${i.label}</option>`)];
+      const options = [`<option value="">— none —</option>`, ...list.map((i) => `<option value="${escapeHtml(i.id)}" title="${escapeHtml(i.title)}"${i.id === current ? ' selected' : ''}>${escapeHtml(i.label)}</option>`)];
       rows.push(`<label class="wardrobe-slot"><span class="slot-label">${slot.label}</span><select data-slot="${slot.id}">${options.join('')}</select><span class="slot-count">${list.length}</span></label>`);
     }
     this.body.innerHTML = rows.join('');
@@ -174,6 +197,26 @@ export class WardrobeUi {
   private async choose(slot: string, id: string): Promise<void> {
     const c = this.character;
     if (!c) return;
+    if (this.onWear && this.onRemove) {
+      // Through the game's equipment: the arrangement rule takes off what the piece displaces (not
+      // the dropdown's group), and "none" takes off every worn piece of this group.
+      const refused: string[] = [];
+      this.picking = true;
+      try {
+        if (id) {
+          if (!(await this.onWear(id))) refused.push(id);
+        } else {
+          const parts = [...this.wornItems()].filter(([part, itemId]) => !/^hair_/.test(part) && slotOf(itemId) === slot).map(([part]) => part);
+          if (parts.length) this.onRemove(parts);
+        }
+      } finally {
+        this.picking = false;
+      }
+      this.build();
+      this.note(refused.length ? `could not put on: ${refused.join(', ')}` : '');
+      this.onChange();
+      return;
+    }
     const previous = this.equippedNow().get(slot);
     const refused: string[] = [];
     if (previous && previous !== id) {
@@ -201,22 +244,52 @@ export class WardrobeUi {
     if (!c) return;
     // Everything the character is actually wearing, not everything this panel put on.
     const refused: string[] = [];
-    for (const part of c.status()) {
-      if (part.body || !part.worn) continue;
-      if (!c.remove(part.name)) refused.push(part.name);
-    }
+    const worn = c.status().filter((part) => !part.body && part.worn).map((part) => part.name);
+    if (this.onRemove) {
+      // Through the equipment in one step: one save and one rebuild, not one per piece.
+      this.picking = true;
+      try {
+        if (worn.length) this.onRemove(worn);
+      } finally {
+        this.picking = false;
+      }
+    } else for (const name of worn) if (!c.remove(name)) refused.push(name);
     this.build();
     this.note(refused.length ? `could not take off: ${refused.join(', ')}` : '');
     this.onChange();
   }
 
+  /** The worn pieces (not the body) with the catalogue id each is, by part name. */
+  private wornItems(): Map<string, string> {
+    const out = new Map<string, string>();
+    const c = this.character;
+    if (!c) return out;
+    const ids = new Set(this.catalogue?.items.map((i) => i.id) ?? []);
+    for (const part of c.status()) {
+      if (part.body || !part.worn) continue;
+      const stripped = part.name.replace(/_[fm]_l\d+$/, '');
+      out.set(part.name, ids.has(part.name) ? part.name : ids.has(stripped) ? stripped : part.name);
+    }
+    return out;
+  }
+
+  /** How many items the lists show, and what they leave out, for the header. */
+  private shownCount = 0;
+  private hiddenNote = '';
+
   /** A line under the header when something did not go as asked. */
   private note(text: string): void {
     const el = this.root.querySelector<HTMLElement>('.count');
     if (!el) return;
-    const total = this.catalogue ? `${this.catalogue.items.length} items` : '';
-    el.textContent = text ? `${total} · ${text}` : total;
+    const parts = [this.catalogue ? `${this.shownCount || this.catalogue.items.length} items` : '', this.hiddenNote, this.developer ? 'developer: a pick gives the piece and puts it on' : '', text].filter(Boolean);
+    el.textContent = parts.join(' · ');
     el.classList.toggle('warn', !!text);
+  }
+
+  /** Build the lists again from the character (the equipment changed what is worn); a pick of the panel's own rebuilds at its end instead. */
+  refresh(): void {
+    if (this.picking) return;
+    this.build();
   }
 
   /** A thing is taken off by the same name it was put on by. */

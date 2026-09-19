@@ -22,6 +22,13 @@ const NOTES: Record<WeaponClass, string> = {
   thrown: 'not held: the Skills tab puts the grenades in the number slots, and each flies as its own model',
 };
 
+/** A weapon's label: the game's own name when the pack carries it (the variant tags from the id beside it), else words from the id. */
+function labelOf(w: WeaponDef): { name: string; tags: string[] } {
+  const made = prettyName(w.id);
+  const name = w.name?.trim();
+  return name ? { name, tags: made.tags } : made;
+}
+
 export class WeaponsUi {
   readonly root: HTMLElement;
   private readonly body: HTMLElement;
@@ -42,6 +49,7 @@ export class WeaponsUi {
         <div class="wardrobe-header">
           ${tabStrip(INVENTORY_TABS, 'weapons')}
           <span class="count"></span>
+          <span class="dev-note" title="The backpack (the first tab) is where owned weapons are taken up and put away">developer: a pick gives the weapon and puts it in that hand</span>
           <input class="find" placeholder="find" />
           <button class="empty">Empty hands</button>
           <button class="close">Close <b>I</b></button>
@@ -91,25 +99,25 @@ export class WeaponsUi {
     // What is in the hands, first, so it can be read without hunting for the marked entries.
     const inHands = [this.held.right, this.held.left].map((id, i) => {
       const w = id ? c.weapons.find((x) => x.id === id) : null;
-      return `<span class="hand-slot"><b>${i ? 'left' : 'right'}</b> ${w ? escapeHtml(prettyName(w.id).name) : '<em>empty</em>'}</span>`;
+      return `<span class="hand-slot"><b>${i ? 'left' : 'right'}</b> ${w ? escapeHtml(labelOf(w).name) : '<em>empty</em>'}</span>`;
     });
     html.push(`<div class="in-hands">${inHands.join('')}</div>`);
     // The blade: the game's own colours, and any colour at all.
     const colors = c.saberColors;
     html.push(`<h3 class="weapons-class">Blade colour <span>${colors.length ? `${colors.length} of the game's, or your own` : 'your own'}</span></h3><div class="blade-colours">${colors.map((h) => `<button class="swatch${h.toLowerCase() === this.saberColor.toLowerCase() ? ' on' : ''}" data-colour="${h}" style="background:${h}" title="${h}"></button>`).join('')}<label class="blade-own">own <input type="color" class="blade-custom" value="${this.saberColor}" /></label></div>`);
     for (const cls of ORDER) {
-      const list = (groups.get(cls) ?? []).filter((w) => !find || w.id.toLowerCase().includes(find) || prettyName(w.id).name.toLowerCase().includes(find));
+      const list = (groups.get(cls) ?? []).filter((w) => !find || w.id.toLowerCase().includes(find) || labelOf(w).name.toLowerCase().includes(find));
       if (!list.length) continue;
       shown += list.length;
       const heldHere = list.some((w) => w.id === this.held.right || w.id === this.held.left);
       const items = list.map((w) => {
         const inRight = this.held.right === w.id;
         const inLeft = this.held.left === w.id;
-        const { name, tags } = prettyName(w.id);
+        const { name, tags } = labelOf(w);
         const left = OFF_HAND.has(w.class) ? `<button data-id="${w.id}" data-hand="left"${inLeft ? ' class="on"' : ''} title="${inLeft ? 'in the left hand: click to empty it' : 'left hand'}">L</button>` : '';
         // A grenade is thrown by its slot, not held: the row is a listing only.
         const hands = w.class === 'thrown' ? '<small>slots</small>' : `<button data-id="${w.id}" data-hand="right"${inRight ? ' class="on"' : ''} title="${inRight ? 'in the right hand: click to empty it' : 'right hand'}">R</button>${left}`;
-        return `<div class="cat-item${inRight || inLeft ? ' held' : ''}" title="${escapeHtml(w.id)} · ${w.length.toFixed(2)} m"><span class="cat-name">${escapeHtml(name)}${tags.length ? ` <small>${escapeHtml(tags.join(' '))}</small>` : ''}</span><span class="cat-hands">${hands}</span></div>`;
+        return `<div class="cat-item${inRight || inLeft ? ' held' : ''}" title="${escapeHtml(w.id)} · ${w.length.toFixed(2)} m${w.description ? `\n${escapeHtml(w.description)}` : ''}"><span class="cat-name">${escapeHtml(name)}${tags.length ? ` <small>${escapeHtml(tags.join(' '))}</small>` : ''}</span><span class="cat-hands">${hands}</span></div>`;
       });
       html.push(groupHtml(cls, CLASS_LABELS[cls], list.length, NOTES[cls], this.groups.isOpen(cls, !!find || heldHere), items.join('')));
     }

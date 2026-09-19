@@ -11,6 +11,8 @@ export interface Hello {
   zone?: string;
   /** How the character looks: shape, height, colours and outfit, so the others draw it as it is. */
   look?: Look;
+  /** The weapons in hand, by weapon id: right and left. */
+  held?: { r?: string; l?: string };
 }
 
 /** The vehicle a peer is on: which (a garage id), where it is and how it is turned, and how the peer is in it. */

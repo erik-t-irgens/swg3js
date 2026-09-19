@@ -6,7 +6,8 @@ import { markActor } from '../world/portalRender';
 import { isDanceClip, isFlourishClip, loopsEmote } from '../core/emotes';
 import type { Hello, PeerState, PeerVehicle } from './net';
 import type { Garage } from '../vehicles/garage';
-import { applyLook } from '../player/look';
+import { applyLookPrepared } from '../player/look';
+import { weaponHolder, type WeaponCatalogue } from '../player/weapons';
 import type { FxMoverList } from '../core/fx/velocity';
 import { RELAY, stepRelayVelocity } from '../core/fx/velocityMath.ts';
 
@@ -43,6 +44,12 @@ interface Remote {
   vehicle: RemoteVehicle | null;
   /** The look last put on the rig, so a repeated hello does not dress it again. */
   lookApplied: string | null;
+  /** The dress of `lookApplied` while it goes on (resolved once it is on, or given up for a newer one); null before any. */
+  lookPending: Promise<void> | null;
+  /** The weapons last hung in its hands (`right|left` ids), or null when they are still to be (the rack was not in yet). */
+  heldApplied: string | null;
+  /** The holders hung on its hand bones. */
+  heldModels: THREE.Object3D[];
   /** Its world velocity from the relay's messages (m/s), for the motion blur: the glide pulses ten times a second. */
   vel: THREE.Vector3;
   /** performance.now() of its last state message. */
@@ -62,6 +69,10 @@ export class RemotePlayers {
 
   /** Called with a peer's rig once it is dressed, and again when their look changes: the motion blur prepares its shaders for it. */
   onDressed: ((root: THREE.Object3D) => void) | null = null;
+  /** The weapons rack, for the weapons the peers hold (null until it is in). */
+  weapons: (() => WeaponCatalogue | null) | null = null;
+  /** Compile something of a peer's before it is shown (the world's actor preparation and the motion blur's). */
+  prepare: ((root: THREE.Object3D) => Promise<void>) | null = null;
 
   constructor(
     private readonly scene: THREE.Scene,
@@ -97,7 +108,7 @@ export class RemotePlayers {
     group.add(label);
     this.scene.add(group);
     markActor(group);
-    const remote: Remote = { id, hello, group, rig: null, label, target: new THREE.Vector3(0, -1000, 0), heading: 0, targetQ: null, state: 'idle', speed: 0, saber: false, silent: 0, dance: null, vehicle: null, lookApplied: null, vel: new THREE.Vector3(), heardAt: 0 };
+    const remote: Remote = { id, hello, group, rig: null, label, target: new THREE.Vector3(0, -1000, 0), heading: 0, targetQ: null, state: 'idle', speed: 0, saber: false, silent: 0, dance: null, vehicle: null, lookApplied: null, lookPending: null, heldApplied: null, heldModels: [], vel: new THREE.Vector3(), heardAt: 0 };
     this.remotes.set(id, remote);
     void this.dress(remote);
   }
@@ -109,30 +120,106 @@ export class RemotePlayers {
       const rig = await loadPlayerRig(this.baseUrl, species);
       if (this.remotes.get(remote.id) !== remote || remote.hello.species !== species) return;
       rig.root.scale.setScalar(rig.scale);
+      // Hidden until its look is on and its shaders compiled, as a fighter is: the first sight of a
+      // peer must not be a stall.
+      rig.root.visible = false;
       remote.group.add(rig.root);
       markActor(rig.root);
       remote.rig = rig;
+      // A new rig wears nothing of the old one's: its look goes on afresh, even when the look is the same.
+      remote.lookApplied = null;
+      remote.lookPending = null;
+      remote.heldApplied = null;
+      remote.heldModels = [];
       remote.rig.setState('idle');
-      await this.applyLook(remote);
-      if (remote.rig === rig) this.onDressed?.(rig.root);
+      try {
+        await this.applyLook(remote);
+        // A newer look that arrived meanwhile is still going on (the first gave way to it): the rig
+        // waits for the last one, or it would show in the pack's default dress for a moment.
+        await this.lookSettled(remote, rig);
+        if (remote.rig === rig) await (this.prepare ?? noPrepare)(rig.root);
+      } finally {
+        rig.root.visible = true;
+      }
+      if (remote.rig !== rig) return;
+      this.onDressed?.(rig.root);
+      await this.applyHeld(remote);
     } catch (err) {
       console.warn(`remote player ${remote.hello.name}: no rig for ${species}`, err);
     }
   }
 
-  /** The peer's look on its rig: shape, height, colours and outfit, as their hello gives it (once per look). */
-  private async applyLook(r: Remote): Promise<void> {
+  /**
+   * The peer's look on its rig: shape, height, colours and outfit, as their hello gives it (once per
+   * look). A change of clothes goes on as the player's own does: loaded hidden, compiled, then shown,
+   * and a newer look arriving meanwhile wins. The same look asked for again answers with the dress
+   * already going, so whoever waits on it waits until it is on.
+   */
+  private applyLook(r: Remote): Promise<void> {
     const c = r.rig?.character;
     const look = r.hello.look;
-    if (!c || !look) return;
+    if (!c || !look) return Promise.resolve();
     const key = JSON.stringify(look);
-    if (r.lookApplied === key) return;
+    if (r.lookApplied === key) return r.lookPending ?? Promise.resolve();
     r.lookApplied = key;
-    try {
-      await applyLook(c, look, this.baseUrl);
-    } catch (err) {
+    const alive = () => this.remotes.get(r.id) === r && r.rig?.character === c && r.lookApplied === key;
+    const pending = applyLookPrepared(c, look, this.baseUrl, this.prepare ?? noPrepare, alive).catch((err) => {
       console.warn(`remote player ${r.hello.name}: their look did not go on`, err);
+    });
+    r.lookPending = pending;
+    return pending;
+  }
+
+  /** Until the last look asked for on this rig has gone on (each one started meanwhile is waited for in turn), or the rig is gone. */
+  private async lookSettled(r: Remote, rig: CharacterRig): Promise<void> {
+    for (;;) {
+      const pending = r.lookPending;
+      if (pending) await pending;
+      if (this.remotes.get(r.id) !== r || r.rig !== rig || r.lookPending === pending) return;
     }
+  }
+
+  /**
+   * The weapons in the peer's hands, as their hello names them: each model prepared before it is hung on
+   * the hand bone (every time, as the player's own are). The rack not in yet: tried again by refreshHeld.
+   */
+  private async applyHeld(r: Remote): Promise<void> {
+    const rig = r.rig;
+    if (!rig) return;
+    const held = r.hello.held;
+    const key = `${held?.r ?? ''}|${held?.l ?? ''}`;
+    if (r.heldApplied === key) return;
+    const cat = this.weapons?.() ?? null;
+    if ((held?.r || held?.l) && !cat) {
+      r.heldApplied = null;
+      return;
+    }
+    r.heldApplied = key;
+    for (const m of r.heldModels) m.removeFromParent();
+    r.heldModels = [];
+    if (!cat) return;
+    for (const [role, id] of [['rightHand', held?.r], ['leftHand', held?.l]] as const) {
+      if (!id) continue;
+      const def = cat.weapons.find((w) => w.id === id);
+      const bone = rig.boneFor(role);
+      if (!def || !bone) continue;
+      try {
+        const model = await cat.model(def);
+        const holder = weaponHolder(rig.root, bone, def, model);
+        await (this.prepare ?? noPrepare)(holder);
+        if (this.remotes.get(r.id) !== r || r.rig !== rig || r.heldApplied !== key) return;
+        bone.add(holder);
+        markActor(holder);
+        r.heldModels.push(holder);
+      } catch (err) {
+        console.warn(`remote player ${r.hello.name}: their ${id} did not load`, err);
+      }
+    }
+  }
+
+  /** The weapons rack came in: every peer whose weapons were waiting for it is armed. */
+  refreshHeld(): void {
+    for (const r of this.remotes.values()) if (r.rig && r.heldApplied === null) void this.applyHeld(r);
   }
 
   hello(id: number, hello: Hello): void {
@@ -142,7 +229,9 @@ export class RemotePlayers {
     r.hello = hello;
     if (!speciesChanged)
       void this.applyLook(r).then(() => {
-        if (r.rig) this.onDressed?.(r.rig.root);
+        if (!r.rig) return;
+        this.onDressed?.(r.rig.root);
+        void this.applyHeld(r);
       });
     r.group.visible = this.sameWorld(hello);
     (r.label.material as THREE.SpriteMaterial).map?.dispose();
@@ -311,6 +400,9 @@ export class RemotePlayers {
     for (const id of [...this.remotes.keys()]) this.remove(id);
   }
 }
+
+/** No preparation to wait for (the game has not given one). */
+const noPrepare = (): Promise<void> => Promise.resolve();
 
 /** A name over the head: text on a small canvas, as a sprite that faces the camera. */
 function makeLabel(name: string): THREE.Sprite {

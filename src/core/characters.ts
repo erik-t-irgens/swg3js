@@ -1,6 +1,7 @@
 // The characters kept in this browser: up to five, each with its species, class, look, outfit
 // and where it last stood, so logging back in puts it back there. Stored in localStorage.
 import type { ClassId } from '../combat/kit';
+import type { OwnedItem } from './inventory';
 
 export const MAX_CHARACTERS = 5;
 const KEY = 'swg.characters';
@@ -33,6 +34,12 @@ export interface SavedCharacter {
   heading?: number;
   created: number;
   played: number;
+  /** Everything the character owns, worn and held included, by catalogue id. Absent on a record from before the backpack. */
+  items?: OwnedItem[];
+  /** The weapons in hand when last played, by weapon id. */
+  held?: { right?: string; left?: string };
+  /** 1 once the record has been given its items (migrateInventory). */
+  inv?: 1;
 }
 
 export function loadCharacters(): SavedCharacter[] {
