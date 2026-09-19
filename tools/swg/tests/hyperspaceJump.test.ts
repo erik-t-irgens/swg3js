@@ -178,7 +178,8 @@ function makeWorld(opts: Opts = {}) {
         next.pos.copy(pose.pos);
         next.group.position.copy(pose.pos);
         next.group.quaternion.copy(pose.quaternion);
-        // Spawned held and ghosted where it arrives, for the jump to release (App.arriveInShip with hold).
+        // Spawned held and ghosted where it arrives, for the jump to release (App.arriveInShip with hold, which launches it at 0).
+        next.cruise = 0;
         next.held = true;
         next.setGhost(true);
         alive.add(next);
@@ -236,6 +237,8 @@ async function untilPhase(h: Hyperspace, w: ReturnType<typeof makeWorld>, phase:
 
 const S = sceneOf(PACKS.space_a);
 const FAR_POINT = dest('space_a', 'space_a_1', [0, 0, 6000]); // game (0, 0, 6000): 6 km ahead of a ship at the origin, facing the station at game (3000, 0, 0)
+/** describe().cruise on every frame of the exit inside a system (section 3), which the exit into another system must match (section 4). */
+const inSystemExit: (number | null)[] = [];
 
 // 1. The countdown's banner: once per whole second, not at all while the menu is open (and it does not advance).
 {
@@ -307,10 +310,13 @@ const FAR_POINT = dest('space_a', 'space_a_1', [0, 0, 6000]); // game (0, 0, 600
   let releasedAt = -1;
   let brakeEnd: number | null = null;
   const posAtRelease = new THREE.Vector3();
+  const tunnel: (number | null)[] = [];
   while (h.phase === 'exit') {
     const wasHeld = hull.held;
+    if (wasHeld) tunnel.push(h.describe().cruise);
     await frame(h, w);
     e += DT;
+    inSystemExit.push(h.describe().cruise);
     if (wasHeld && !hull.held && heldUntil < 0) heldUntil = e;
     if (releasedAt < 0 && !h.locksControls) {
       releasedAt = e;
@@ -319,6 +325,7 @@ const FAR_POINT = dest('space_a', 'space_a_1', [0, 0, 6000]); // game (0, 0, 600
     if (brakeEnd === null && h.describe().lastArrivalError !== null) brakeEnd = h.describe().lastArrivalError;
   }
   ok(Math.abs(heldUntil - brakeAt(S)) <= DT * 1.5 && hull.launches[0] === S.speed, `held in the tunnel until the brake (${heldUntil.toFixed(3)} s, wanted ${brakeAt(S)}), then launched at the scene's speed`);
+  ok(tunnel.length > 0 && tunnel.every((c) => c === S.speed), `through the exit tunnel the jump's cruise reads the scene's speed (${[...new Set(tunnel)].join(', ')})`);
   ok(brakeEnd !== null && brakeEnd < 2, `at the brake's end the hull is within 2 m of the arrival (${brakeEnd?.toFixed(3)} m)`);
   ok(Math.abs(releasedAt - releaseAt(S)) <= DT * 1.5, `control returns at releaseAt (${releasedAt.toFixed(3)} s, wanted ${releaseAt(S)})`);
   // Where the hull really is, against the point itself: at the brake's end it is on the point, and from there to the
@@ -349,8 +356,19 @@ const FAR_POINT = dest('space_a', 'space_a_1', [0, 0, 6000]); // game (0, 0, 600
   const next = w.rec.spawned[0];
   ok(!!next && w.rec.cross === 1, 'the hull spawned there is flown out');
   ok(h.drives(next) && !h.drives(w.first), 'the exit flies the new hull, not the old one');
-  await untilPhase(h, w, 'idle');
-  ok(next.released && (h.describe().lastArrivalError ?? 99) < 2, `the new hull is released on its arrival (${h.describe().lastArrivalError} m)`);
+  ok(next.jumpCruise === S.speed && h.describe().cruise === S.speed, `the hull spawned there (at 0, held) takes the jump's cruise through the tunnel (${h.describe().cruise})`);
+  const across: (number | null)[] = [];
+  const tunnel: (number | null)[] = [];
+  let lastError: number | null = null;
+  while (h.phase === 'exit') {
+    if (next.held) tunnel.push(h.describe().cruise);
+    await frame(h, w);
+    across.push(h.describe().cruise);
+    if (h.describe().lastArrivalError !== null) lastError = h.describe().lastArrivalError;
+  }
+  ok(tunnel.length > 0 && tunnel.every((c) => c === S.speed), `through the exit tunnel it reads the scene's speed, as inside a system (${[...new Set(tunnel)].join(', ')})`);
+  ok(across.length === inSystemExit.length && across.every((c, i) => c === inSystemExit[i]), `the exit into another system reads the same cruise on every frame as the exit inside one (${across.length} frames against ${inSystemExit.length}; first difference at ${across.findIndex((c, i) => c !== inSystemExit[i])})`);
+  ok(next.released && (lastError ?? 99) < 2, `the new hull is released on its arrival (${lastError} m)`);
 }
 
 // 5. Every early end releases the hull: an abort in each phase, the hull lost, a crossing that comes back empty or fails, a late crossing.

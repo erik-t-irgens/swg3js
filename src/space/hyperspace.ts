@@ -108,6 +108,8 @@ export class Hyperspace {
   /** The cruise when the jump began, and the one the ship arrives at. */
   private c0 = 0;
   private exitCruise = EXIT_CRUISE_MIN;
+  /** The jump's cruise as the enter stage left it (the scene's speed): the hull keeps it through the tunnel, the one spawned in another system too. */
+  private tunnelCruise = 0;
   /** Bumped by every abort: a transit's late result is dropped when its token has gone stale. */
   private token = 0;
   private enterFx: EffectHandle | null = null;
@@ -342,6 +344,7 @@ export class Hyperspace {
     if (this.t >= transitAt(s)) {
       this.phase = 'transit';
       this.t = 0;
+      this.tunnelCruise = hull.jumpCruise ?? s.speed;
       void this.transit(this.token);
     }
   }
@@ -381,6 +384,9 @@ export class Hyperspace {
         // The old hull went with the old world; null means nothing to fly (the abort below lifts the veil).
         this.hull = next;
         if (next) {
+          // Spawned held with no jump cruise of its own (App.arriveInShip launches it at 0): it takes the one the old
+          // hull had through the tunnel, so the exit reads and flies the same as inside a system.
+          next.jumpCruise = this.tunnelCruise;
           const ready = await host.readyAround(this.startAt, s.limit * 1000);
           if (this.token !== mine) return;
           if (!ready) console.warn('hyperspace: the destination was not ready in time');
