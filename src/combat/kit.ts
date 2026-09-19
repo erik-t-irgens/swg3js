@@ -37,6 +37,11 @@ export interface Hittable {
   dead: boolean;
   /** Hurt it; with `from` and `push`, shove it away from there; `source` is who struck, so it can fight back. */
   damage(amount: number, from?: THREE.Vector3, push?: number, source?: Living | null): void;
+  /**
+   * A bolt struck it at `point`: take it whole and return 'shown' when it placed its own hit effect, or
+   * 'taken' when it placed none and the bolt's own hit effect should play; false to be hurt the plain way.
+   */
+  takeBolt?(bolt: import('./bolts').Bolt, point: THREE.Vector3, normal: THREE.Vector3): false | 'taken' | 'shown';
   /** Burn or corrode it for a while (a creature), stagger it, or slow it; the turrets and vehicles do without. */
   afflict?(dps: number, seconds: number): void;
   stun?(seconds: number): void;

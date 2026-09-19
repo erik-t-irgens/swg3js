@@ -181,6 +181,12 @@ export class Bolts {
   visuals: ParticleEffects | null = null;
   /** The weapons pack's, for the guns' own shot, flash and hit effects. */
   weaponVisuals: ParticleEffects | null = null;
+  /**
+   * The world ray's filter: a collider in no collision group is a ghosted hull (a ship in a jump, or a
+   * ship's hull still being prepared before it joins the world's vehicles), and a bolt flies through it.
+   * `Vehicle.setGhost` is the only thing that empties a collider's groups. Made once, not per ray.
+   */
+  private readonly passable = (c: RAPIER.Collider): boolean => c.collisionGroups() !== 0;
 
   /** The effects player for a visual's pack. */
   private playerFor(v: ProjectileVisual | null | undefined): ParticleEffects | null {
@@ -312,7 +318,7 @@ export class Bolts {
       }
       // The bolt's own length leads the way so it does not visibly poke through what it hits.
       const ray = new RAPIER.Ray(b.pos, b.dir);
-      const hit = w.physics.world.castRayAndGetNormal(ray, step + b.lead, true, undefined, undefined, undefined, b.exclude);
+      const hit = w.physics.world.castRayAndGetNormal(ray, step + b.lead, true, undefined, undefined, undefined, b.exclude, this.passable);
       if (!hit) {
         b.pos.addScaledVector(b.dir, step);
         this.settle(b);
@@ -360,6 +366,23 @@ export class Bolts {
       }
       const target = w.hittableAt(hit.collider.handle);
       b.onHit?.(hitPoint, target ?? null);
+      // A ship with a fight takes the bolt whole: its shields, armour and parts, and the game's hit effect for the layer struck.
+      if (target?.takeBolt) {
+        if (hitNormal.lengthSq() < 1e-6) hitNormal.copy(b.dir).negate();
+        const took = target.takeBolt(b, hitPoint, hitNormal.normalize());
+        if (took) {
+          // No layer effect placed (no combat file, or none for that layer): the burst and the bolt's own hit effect, as before ships had a fight.
+          if (took === 'taken') {
+            w.effects.burst(hitPoint, 0xffb070, 0.7, 0.15);
+            if (b.hitFx && b.fxPack) {
+              placeQ.setFromUnitVectors(Y, hitNormal);
+              b.fxPack.place(b.hitFx, placeM.compose(hitPoint, placeQ, ONE), false, true);
+            }
+          }
+          this.remove(i);
+          continue;
+        }
+      }
       if (target) {
         tmp.copy(b.pos).addScaledVector(b.dir, -1);
         target.damage(b.damage, tmp, b.push, b.source);

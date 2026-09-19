@@ -45,6 +45,11 @@ export interface DriveInput {
   lookDY?: number;
   /** A hovering ship: sideways, -1 left to 1 right, as a VTOL slides. */
   strafe?: number;
+  /** An autopilot's stick, held where it is put (-1..1): x turns right, y pushes the nose down; the mouse's deltas are ignored while it is given. */
+  stickX?: number;
+  stickY?: number;
+  /** An autopilot's wanted cruise (m/s): the cruise eases toward it rather than following W and S. */
+  cruise?: number;
 }
 
 export interface VehicleSpec {
@@ -431,6 +436,14 @@ export class Vehicle {
   get ghosted(): boolean {
     return this.ghost;
   }
+  /** A ship's fight (shields, armour, parts, chassis), once the world's ship contacts adopt it; null for anything else. */
+  combat: import('../space/shipCombat').ShipCombat | null = null;
+  /** What flies it when nobody does (an NPC ship's brain): its drive is read in place of a pilot's. Null for any other vehicle. */
+  autopilot: { readonly drive: DriveInput } | null = null;
+  /** Set first thing in `dispose`: whoever holds the vehicle drops it. */
+  disposed = false;
+  /** Materials made for this vehicle alone (its glow sprite's, each trail's, each clear pane's): World.disposeVehicle forgets and disposes them. */
+  readonly ownedMaterials: THREE.Material[] = [];
 
   constructor(readonly spec: VehicleSpec, model: THREE.Object3D, physics: Physics, scene: THREE.Scene, x: number, y: number, z: number, heading: number) {
     this.hull = model;
@@ -510,11 +523,30 @@ export class Vehicle {
     return this.destroyed;
   }
 
-  /** A bolt's hit: the hull takes it (a vehicle is too heavy for a bolt to shove). */
-  damage(amount: number): void {
+  /**
+   * A blow (a saber, a blast, a bolt the plain way): the hull takes it, through its shields and armour when
+   * it has a fight (`combat`), and `source` is remembered there; a vehicle is too heavy for it to shove.
+   */
+  damage(amount: number, from?: THREE.Vector3, _push?: number, source?: import('../combat/kit').Living | null): void {
     if (this.destroyed) return;
-    this.hp = Math.max(0, this.hp - amount);
     this.struck += amount;
+    if (this.combat) this.combat.take(amount, from, source ?? null);
+    else this.hp = Math.max(0, this.hp - amount);
+  }
+
+  /** A bolt struck the hull at `point` (the Hittable contract): a ship with a fight takes it whole ('shown' when its layer's hit effect played, 'taken' when the bolt's own should); false lets the bolt hurt it the plain way. */
+  takeBolt(bolt: import('../combat/bolts').Bolt, point: THREE.Vector3, normal: THREE.Vector3): false | 'taken' | 'shown' {
+    if (!this.combat) return false;
+    if (this.destroyed) return 'taken';
+    this.struck += bolt.damage;
+    return this.combat.takeBolt(bolt, point, normal);
+  }
+
+  /** A collision's damage: onto the armour of a ship with a fight, else straight off the hull. */
+  private hurtHull(amount: number): void {
+    if (amount <= 0) return;
+    if (this.combat) this.combat.collide(amount);
+    else this.hp = Math.max(0, this.hp - amount);
   }
 
   /**
@@ -755,6 +787,12 @@ export class Vehicle {
     for (const t of this.trails) t.clear();
   }
 
+  /** Back from a pause (`held`): flight goes on at the cruise it had, and the first step is not taken for a collision. */
+  resumeFlight(): void {
+    this.held = false;
+    this.commandedValid = false;
+  }
+
   /**
    * Where the first-person view sits, in the model's frame: the cockpit point with the cockpit file's offset. For a ship
    * from the ships pack with a cockpit frame this is the frame's own camera point plus 1OFF, the one eye used hovering
@@ -848,7 +886,7 @@ export class Vehicle {
       const lost = this.prevVel.distanceTo(lv);
       if (lost > HIT_THRESHOLD) {
         this.justHit = lost;
-        this.hp = Math.max(0, this.hp - (lost - HIT_THRESHOLD) * HIT_DAMAGE);
+        this.hurtHull((lost - HIT_THRESHOLD) * HIT_DAMAGE);
       }
     }
     this.skipHitCheck = false;
@@ -904,7 +942,7 @@ export class Vehicle {
           body.setTranslation({ x: this.pos.x, y: this.pos.y, z: this.pos.z }, true);
           if (lv.y < -HIT_THRESHOLD) {
             this.justHit = Math.max(this.justHit, -lv.y);
-            this.hp = Math.max(0, this.hp - (-lv.y - HIT_THRESHOLD) * HIT_DAMAGE);
+            this.hurtHull((-lv.y - HIT_THRESHOLD) * HIT_DAMAGE);
           }
           if (lv.y < 0) {
             lv.y = 0;
@@ -1117,7 +1155,7 @@ export class Vehicle {
       const lost = Math.hypot(this.commanded.x - lv.x, this.commanded.y - lv.y, this.commanded.z - lv.z);
       if (lost > SHIP_HIT_LOSS) {
         this.justHit = lost;
-        this.hp = Math.max(0, this.hp - (lost - SHIP_HIT_LOSS) * HIT_DAMAGE);
+        this.hurtHull((lost - SHIP_HIT_LOSS) * HIT_DAMAGE);
         this.cruise = Math.min(this.cruise, Math.max(4, this.cruise * 0.3));
         this.hitCooldown = SHIP_HIT_FREE;
       }
@@ -1127,7 +1165,11 @@ export class Vehicle {
     // With the wings open, a chassis with a wing_open_speed_factor pays it off the top (eased in as they open).
     const top = (drive?.boost ? s.boostSpeed : s.maxSpeed) * (this.space ? 2 : 1) * wingTopFactor(this.wingOpenFactor, this.wings.progress);
     this.boosting = !!drive?.boost && throttle > 0;
-    if (throttle > 0) this.cruise = Math.min(top, this.cruise + s.accel * dt);
+    if (drive?.cruise !== undefined) {
+      // An autopilot asks for a speed: the cruise eases toward it at the engines' own rates, within the top speed.
+      const want = Math.max(0, Math.min(top, drive.cruise));
+      this.cruise = this.cruise < want ? Math.min(want, this.cruise + s.accel * dt) : Math.max(want, this.cruise - s.brake * dt);
+    } else if (throttle > 0) this.cruise = Math.min(top, this.cruise + s.accel * dt);
     else if (throttle < 0) this.cruise = Math.max(0, this.cruise - s.brake * dt);
     else if (!drive) this.cruise = Math.max(0, this.cruise - s.brake * 0.5 * dt);
     // Open wings cost their share of the top speed with W up as well (a ship launched at full speed, its wings then
@@ -1165,11 +1207,16 @@ export class Vehicle {
     const stick = this.stick;
     const dx = drive?.lookDX ?? 0;
     const dy = drive?.lookDY ?? 0;
-    stick.x = THREE.MathUtils.clamp(stick.x + dx * 0.004, -1, 1);
-    stick.y = THREE.MathUtils.clamp(stick.y + dy * 0.004, -1, 1);
-    const centre = Math.min(1, 2.5 * dt);
-    if (!dx) stick.x -= stick.x * centre;
-    if (!dy) stick.y -= stick.y * centre;
+    if (drive?.stickX !== undefined) {
+      // An autopilot holds the stick where it puts it; the mouse is not read.
+      stick.set(THREE.MathUtils.clamp(drive.stickX, -1, 1), THREE.MathUtils.clamp(drive.stickY ?? 0, -1, 1));
+    } else {
+      stick.x = THREE.MathUtils.clamp(stick.x + dx * 0.004, -1, 1);
+      stick.y = THREE.MathUtils.clamp(stick.y + dy * 0.004, -1, 1);
+      const centre = Math.min(1, 2.5 * dt);
+      if (!dx) stick.x -= stick.x * centre;
+      if (!dy) stick.y -= stick.y * centre;
+    }
     const wantYaw = -stick.x * rate * 1.5;
     const wantPitch = stick.y * rate * 1.5 - ((drive?.up ? 1 : 0) - (drive?.down ? 1 : 0)) * rate;
     const wantRoll = (drive?.steer ?? 0) * rate * 1.6;
@@ -1261,6 +1308,10 @@ export class Vehicle {
   }
 
   dispose(physics: Physics, scene: THREE.Scene): void {
+    // First, so whoever holds the vehicle (an NPC ship's manager, the ship contacts) drops it.
+    this.disposed = true;
+    this.combat?.dispose();
+    this.combat = null;
     this.interior?.dispose();
     this.interior = null;
     // A parked glow's trail (a refit left it spare) is disposed with the live ones.
