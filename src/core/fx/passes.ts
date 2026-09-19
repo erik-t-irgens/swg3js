@@ -17,6 +17,7 @@ import type { FxFrameContext } from './context';
 import { NO_PRODUCTS, ShaderFxPass, ThreePassAdapter, type FxDebugTexture, type FxWarmItem } from './pass';
 import { FX_FULLSCREEN_VERTEX, FX_LINEARIZE } from './glsl';
 import { overcastFade } from './flareMath';
+import { skyDistanceFor } from '../../space/suns';
 
 /**
  * A pixel that is not a number (a material that divided by zero: a degenerate tangent, a zero
@@ -55,7 +56,7 @@ const GOD_RAYS = {
     uStrength: { value: 0.6 },
     uAspect: { value: 1.6 },
     uNearFar: { value: new THREE.Vector2(0.05, 9000) },
-    /** Depth past this distance counts as sky. */
+    /** Depth past this distance counts as sky (GROUND_SKY_DISTANCE, or in space a share of the far plane). */
     uSkyDistance: { value: 2500 },
   },
   vertexShader: FX_FULLSCREEN_VERTEX,
@@ -118,6 +119,14 @@ export class SanitizePass extends ShaderFxPass {
   }
 }
 
+/**
+ * Over a planet, depth past 2.5 km is the sky: the far terrain and the dome stand there. In space
+ * nothing stands anywhere, so the test moves out to a share of the far plane (src/space/suns.ts),
+ * where a station or an asteroid six kilometres off blocks the rays instead of shining through
+ * them, and a planet's depth stand-in stops them too. It is a uniform, so nothing recompiles.
+ */
+const GROUND_SKY_DISTANCE = 2500;
+
 export class GodRaysPass extends ShaderFxPass {
   readonly id: FxPassId = 'godRays';
 
@@ -147,6 +156,7 @@ export class GodRaysPass extends ShaderFxPass {
     u.uAspect.value = ctx.width / Math.max(1, ctx.height);
     u.tDepth.value = ctx.depth;
     (u.uNearFar.value as THREE.Vector2).set(ctx.near, ctx.far);
+    u.uSkyDistance.value = skyDistanceFor(ctx.space, ctx.far, GROUND_SKY_DISTANCE);
   }
 }
 

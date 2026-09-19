@@ -43,6 +43,7 @@ import { installEffects } from './core/fx/install';
 import { addPointLight, createFxLights, setSpotLight } from './core/fx/lights';
 import { createCloudLayers, createSkyLights, flareLook, tuneFlareLook } from './core/fx/lensFlare';
 import { MAX_CLOUD_LAYERS, MAX_FLARE_SOURCES } from './core/fx/flareMath';
+import { SPACE_SKY_TUNE, tuneSpaceSky, type SunRule } from './space/suns';
 import { heatTuning, type HeatProduct } from './core/fx/heat';
 import { FIGURE_SPHERE, followDepth, measureLocalSphere, type FxMoverList, type LocalSphere, type VelocityProduct } from './core/fx/velocity';
 import { MOTION_TUNING, MOVER_LIMITS } from './core/fx/velocityMath.ts';
@@ -1284,6 +1285,36 @@ class App {
       },
       /** The converted sky's parts (the dome, the skybox faces, the stars, space dust, the sun and star sprites) and its lighting now; `sky('skybox')` and the like toggle a part to see what it contributes. */
       sky: (toggle?: 'dome' | 'skybox' | 'stars' | 'dust' | 'sprites') => this.world.swgSky?.describe(toggle) ?? 'no converted sky on this world',
+      /**
+       * Which star lights this space zone, and what stops its rays. No argument: the pick, every
+       * star the zone has, and how far the zone file's own light points from the one chosen.
+       * `suns({ rule: 'disc' })` lights it from the largest disc instead of the brightest glow and
+       * `{ rule: 'glow' }` puts it back, both at once, with the shadows, the flare and the rays
+       * following. `{ companionDegrees }` changes how near a second star must be to flare beside the
+       * sun, `{ skyShare }` where the rays count a pixel as open sky (a share of the far plane), and
+       * `{ standInDistance }` how far out, in metres, a planet writes the depth that stops them,
+       * which is read when a zone's bodies are built, so it shows on the next arrival. Nothing
+       * here is saved.
+       */
+      suns: (opts?: { rule?: SunRule; companionDegrees?: number; skyShare?: number; standInDistance?: number }) => {
+        const sky = this.world.swgSky;
+        if (opts && (opts.companionDegrees !== undefined || opts.skyShare !== undefined || opts.standInDistance !== undefined)) tuneSpaceSky(opts);
+        // Any of them can change which star keeps the sun company, so the pick is made again.
+        if (opts) sky?.setSunRule(opts.rule ?? (sky.sunStar?.chosenBy === 'disc' ? 'disc' : 'glow'));
+        const pick = sky?.sunStar ?? null;
+        if (!pick) return { sun: 'no space zone here: a planet is lit by its day cycle', rays: { ...SPACE_SKY_TUNE } };
+        return {
+          rule: pick.chosenBy,
+          ours: 'the game says nothing about which star is the sun; this rule is ours',
+          sun: pick.sun ? { at: [pick.sun.yaw, pick.sun.pitch], disc: pick.sun.discSize, glow: pick.sun.glowSize } : null,
+          companion: pick.companion ? { at: [pick.companion.yaw, pick.companion.pitch], glow: pick.companion.glowSize } : null,
+          secondFlare: pick.second ? { at: [pick.second.yaw, pick.second.pitch], glow: pick.second.glowSize } : null,
+          degreesFromFileLight: pick.lightOffDegrees === null ? null : Number(pick.lightOffDegrees.toFixed(1)),
+          stars: pick.groups.length,
+          lightDir: sky?.spaceLightDir?.toArray().map((v) => Number(v.toFixed(3))) ?? null,
+          rays: { ...SPACE_SKY_TUNE },
+        };
+      },
       /**
        * The weather. No argument: the state (area, level, mix, effects, wetness, the roof grid, programs, cpuMs).
        * A number holds a level; 'rain' | 'dust' | 'snow' (and a level, 3 by default) forces a kind; null returns

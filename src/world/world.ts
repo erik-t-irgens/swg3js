@@ -38,6 +38,7 @@ import { loadSpacePack, type SpacePack } from '../space/spaceData.ts';
 import { ShipContacts } from '../space/contacts';
 import { NpcShipManager } from '../space/npcShips';
 import { ZONE_TIER } from '../space/roster';
+import { spaceBodyStandIn } from '../space/suns';
 import { CSM } from 'three/examples/jsm/csm/CSM.js';
 import { ACTOR_LAYER, INTERIOR_LAYER, markActor, type PortalRenderer } from './portalRender';
 import { createPlaceholderSpeeder } from '../vehicles/speeder';
@@ -61,6 +62,12 @@ const tmpM = new THREE.Matrix4();
 const SPACE_REACH = 3;
 const SPACE_BODY_DISTANCE = 2600;
 const SPACE_BODY_SIZE = 240;
+/**
+ * Segments round a sky body's depth stand-in. Its vertices sit on the sphere, so its rim polygon
+ * falls inside the true rim by the cosine of half a segment, which the cap's angle is widened by:
+ * the stand-in then covers the body's disc and no more than a hundredth of a degree beside it.
+ */
+const STAND_IN_SEGMENTS = 48;
 /** Detailed ground chunks each way, by default; the settings move it (World.viewRadius). */
 const VIEW_RADIUS = 6;
 const STREAM_BUDGET = 3;
@@ -966,6 +973,16 @@ export class World {
     const group = new THREE.Group();
     const loader = new THREE.TextureLoader();
     const discs: { dir: THREE.Vector3; cos: number }[] = [];
+    // One material for every body's depth stand-in, so the zone pays for one program, compiled with
+    // the rest behind the loading screen. Unlit: kept out of the shadow cascades, whose defines are
+    // part of a program's key, and it has no colour to light anyway. Back side, because every
+    // stand-in is a piece of a sphere the camera sits inside.
+    const depthStandIn = new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: true, transparent: false, fog: false, side: THREE.BackSide });
+    depthStandIn.userData.unlit = true;
+    /** The axis a sphere cap is built about, before it is turned onto a body's direction. */
+    const capAxis = new THREE.Vector3(0, 1, 0);
+    /** How far out the last stand-in stood, for the console line alone. */
+    let standAt = 0;
     for (const p of data.planets) {
       // The direction is in the game's own coordinates, mirrored in X like everything converted.
       const dir = new THREE.Vector3(-p.direction[0], p.direction[1], p.direction[2]);
@@ -979,13 +996,31 @@ export class World {
         return;
       }
       if (tex) tex.colorSpace = THREE.SRGBColorSpace;
-      const mesh = new THREE.Mesh(new THREE.SphereGeometry(SPACE_BODY_SIZE * p.size, 48, 32), new THREE.MeshLambertMaterial({ map: tex ?? undefined, color: tex ? 0xffffff : 0x8a97a6, fog: false, depthWrite: false }));
+      const radius = SPACE_BODY_SIZE * p.size;
+      const mesh = new THREE.Mesh(new THREE.SphereGeometry(radius, 48, 32), new THREE.MeshLambertMaterial({ map: tex ?? undefined, color: tex ? 0xffffff : 0x8a97a6, fog: false, depthWrite: false }));
       mesh.position.copy(dir).multiplyScalar(SPACE_BODY_DISTANCE);
       mesh.renderOrder = -4;
       mesh.frustumCulled = false;
       group.add(mesh);
+      // A depth stand-in: the body's own disc on the sky, far out, writing depth and no colour. A
+      // planet here is a picture with no true distance and writes none itself, so without this the
+      // god rays shone straight through it, and so would anything else that reads the frame's
+      // depth. It is a cap of a sphere centred where this group is, which is the camera: every
+      // point of it is the same distance off in every direction, and it covers exactly the body's
+      // own angle and nothing else on the screen.
+      const stand = spaceBodyStandIn(radius, SPACE_BODY_DISTANCE);
+      standAt = stand.distance;
+      const rings = Math.max(4, Math.round(STAND_IN_SEGMENTS / 4));
+      const angle = Math.min(Math.PI, stand.halfAngle / Math.cos(Math.PI / STAND_IN_SEGMENTS));
+      const cap = new THREE.Mesh(new THREE.SphereGeometry(stand.distance, STAND_IN_SEGMENTS, rings, 0, Math.PI * 2, 0, angle), depthStandIn);
+      // The cap is built about +Y and turned onto the body's direction; it stands at the group's
+      // own origin, which every frame puts back on the camera.
+      cap.quaternion.setFromUnitVectors(capAxis, dir);
+      cap.renderOrder = -4;
+      cap.frustumCulled = false;
+      group.add(cap);
       // The disc it covers on the sky, for the lens flare (SwgSky.setSpaceOccluders).
-      const sin = Math.min(1, (SPACE_BODY_SIZE * p.size) / SPACE_BODY_DISTANCE);
+      const sin = Math.min(1, radius / SPACE_BODY_DISTANCE);
       discs.push({ dir: dir.clone(), cos: Math.sqrt(1 - sin * sin) });
     }
     // Only one set of bodies is ever in the sky: one left from an earlier load of this zone goes first.
@@ -996,22 +1031,25 @@ export class World {
     this.spaceBodies = group;
     this.scene.add(group);
     markActor(group);
-    // A star behind a planet must not flare through it: the bodies write no depth for the flare to see.
+    // A star behind a planet must not flare through it: the body itself writes no depth, and its
+    // stand-in stands far beyond the sky the flare's occlusion measures, so the flare cannot see it.
     this.swgSky?.setSpaceOccluders(discs);
-    console.info(`space: ${group.children.length} planets and moons in the sky`);
+    console.info(`space: ${discs.length} planets and moons in the sky, each writing its depth ${Math.round(standAt)} m out`);
   }
 
   /** A set of space bodies taken out of the world for good: their materials forgotten, then everything they own freed. */
   private disposeSpaceBodies(group: THREE.Group): void {
-    const materials: THREE.MeshLambertMaterial[] = [];
+    // A set, because every body's depth stand-in shares one material.
+    const materials = new Set<THREE.Material & { map?: THREE.Texture | null }>();
     for (const o of group.children) {
-      const mesh = o as THREE.Mesh<THREE.BufferGeometry, THREE.MeshLambertMaterial>;
+      const mesh = o as THREE.Mesh<THREE.BufferGeometry, THREE.Material & { map?: THREE.Texture | null }>;
       if (!mesh.isMesh) continue;
       mesh.geometry.dispose();
-      materials.push(mesh.material);
+      materials.add(mesh.material);
     }
-    this.forgetMaterials(materials);
-    for (const m of materials) {
+    const list = [...materials];
+    this.forgetMaterials(list);
+    for (const m of list) {
       m.map?.dispose();
       m.dispose();
     }
@@ -1024,7 +1062,7 @@ export class World {
     if (!sky) return;
     // Another world was loaded while the textures came: this sky is not wanted any more.
     if (token !== this.loadToken) {
-      sky.dispose(this.scene);
+      sky.dispose(this.scene, (m) => this.forgetMaterials(m));
       return;
     }
     this.dropSky();
@@ -1047,7 +1085,7 @@ export class World {
 
   private dropSky(): void {
     if (this.swgSky) {
-      this.swgSky.dispose(this.scene);
+      this.swgSky.dispose(this.scene, (m) => this.forgetMaterials(m));
       this.swgSky = null;
     }
     this.sky.visible = true;
@@ -3029,15 +3067,22 @@ export class World {
 
   /**
    * The sun as the effects want it: which way it lies, its colour, and how much daylight there is
-   * (0 at night, and in space). Filled into a record the caller keeps, so a frame allocates nothing.
+   * (0 at night; a full 1 in space, where the zone's star never sets). Filled into a record the
+   * caller keeps, so a frame allocates nothing.
    */
   sunInfo(out: SunInfo): SunInfo | null {
-    if (!this.planet || this.planet.space) return null;
+    if (!this.planet) return null;
     tmpV.copy(this.sun.position).sub(this.sun.target.position);
-    if (tmpV.lengthSq() < 1e-6 || this.day.sunDir.y <= 0.02) return null;
+    if (tmpV.lengthSq() < 1e-6) return null;
+    // In space the zone's star lights the ship from wherever it hangs, above or below the ship's
+    // horizontal alike: there is no ground for it to go behind, so its height says nothing. The
+    // test belongs to a planet's day, where a sun under the horizon is a sun that has set, and
+    // where it also decides how much daylight there is.
+    const space = this.planet.space;
+    if (!space && this.day.sunDir.y <= 0.02) return null;
     out.dir.copy(tmpV).normalize();
     out.color.copy(this.sun.color);
-    out.intensity = this.day.daylight;
+    out.intensity = space ? 1 : this.day.daylight;
     return out;
   }
 

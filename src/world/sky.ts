@@ -1,7 +1,8 @@
 import * as THREE from 'three';
 import type { AssetPack } from './assetPack';
 import type { DayCycle } from './daycycle';
-import { angularRadius, isFlareBody, rankStarGroups, tintScale, DISC_FILL, GLOW_FILL, MAX_FLARE_SOURCES, STAR_DISC_FILL, STAR_GLOW_FILL } from '../core/fx/flareMath';
+import { angularRadius, isFlareBody, tintScale, DISC_FILL, GLOW_FILL, MAX_FLARE_SOURCES, STAR_DISC_FILL, STAR_GLOW_FILL } from '../core/fx/flareMath';
+import { environmentBodies, pickSuns, starQuadTurn, sunDirection, type SunPick, type SunRule, type SunStarSprite } from '../space/suns';
 import type { FxCloudLayer, FxSkyLight } from '../core/fx/lensFlare';
 import { blockShadow, driftScroll, heaviestTwo, type ForcedKind, type WeatherKind } from './weatherSchedule';
 
@@ -260,10 +261,20 @@ const MIX_MAX = 4;
 const PROCEDURAL_DISC = 0.06;
 const PROCEDURAL_GLOW = 0.2;
 
+/**
+ * A drawn piece of a sky body: a THREE.Sprite over a planet, where the body rides the light's
+ * direction and a sprite's upright-on-screen habit is what the client did too; a fixed quad in
+ * space, where a sprite rolled the star's spikes with the camera while the sky stayed put. Both
+ * carry a material with an opacity, which is all the lens flare reads.
+ */
+type SkyPiece = THREE.Object3D & { readonly material: { opacity: number } };
+/** A space zone's star, drawn as a quad turned once to face the camera. */
+type StarQuad = THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
+
 /** A glowing body the lens flare follows: its sprites, as place() (or, in space, the constructor) left them. */
 interface FlareBody {
-  /** The glow and disc sprites of a sun, or every sprite of a star group. */
-  readonly sprites: readonly THREE.Sprite[];
+  /** The glow and disc sprites of a sun, or every piece of a star group. */
+  readonly sprites: readonly SkyPiece[];
   readonly discRadius: number;
   readonly glowRadius: number;
   readonly weight: number;
@@ -329,8 +340,24 @@ export class SwgSky {
   private readonly topTwo = new Int32Array(2);
   private readonly cloudOrder = [0, 1, 2, 3];
   private time = 0;
-  /** In space, the direction the main light comes from, fixed: the day cycle follows it instead of the sun's arc. */
+  /**
+   * In space, the direction the main light comes from, fixed: the day cycle follows it instead of
+   * the sun's arc. It is the star our own rule picks (src/space/suns.ts), not the zone file's first
+   * light, which in most zones points at empty sky. The world holds this very vector as
+   * `DayCycle.fixed`, so `setSunRule` writes into it rather than making a new one.
+   */
   readonly spaceLightDir: THREE.Vector3 | null = null;
+  /** A space zone's stars, each turned once at build time; the group never turns, so they never roll with the camera. */
+  private readonly starQuads: { data: SpaceEnvironment['celestials'][number]; quad: StarQuad }[] = [];
+  /** Which star is the sun here, by which rule, with its companion: null over a planet. Assigned by applySunPick(). */
+  private sunPick: SunPick | null = null;
+  private sunRule: SunRule = 'glow';
+  /** The planets' discs the world last handed over (setSpaceOccluders), kept so a new sun pick can be judged against them again. */
+  private spaceDiscs: readonly { readonly dir: THREE.Vector3; readonly cos: number }[] = [];
+  /** How many bodies of the environment file this sky left unbuilt (a space zone's ground-sky placeholder). */
+  private envBodiesLeftOut = 0;
+  /** How many of those were ever on the screen: the sun and the moons among them were already placed at no opacity. */
+  private envPicturesGone = 0;
   /** Space dust: points fixed in the world within a radius of the camera, wrapped round as it moves, so speed can be seen against nothing. */
   private readonly dust: { points: THREE.Points; radius: number; last: THREE.Vector3 | null } | null = null;
   readonly lighting: SkyLighting = {
@@ -486,18 +513,12 @@ export class SwgSky {
       this.group.add(box);
     }
 
-    // `opaqueList` (a space zone's star sprites): the sprite is drawn in three's opaque list, before
-    // the planets (renderOrder -4 there, writing no depth), so a planet covers the stars behind it.
-    // Three turns blending off only for Normal on a material that is not transparent, so an alpha
-    // image blends through the same factors as Custom.
-    const sprite = (image: CelestialImage | null, size: number, additive: boolean, opaqueList = false): THREE.Sprite | null => {
+    // A planet's own sky bodies: sprites, as the client drew them, riding the light's direction.
+    // (A space zone's stars are quads instead: they never move, and a sprite rolled them with the camera.)
+    const sprite = (image: CelestialImage | null, size: number, additive: boolean): THREE.Sprite | null => {
       const tex = image ? textures.get(image.file) : null;
       if (!tex || size <= 0) return null;
-      const mat = opaqueList
-        ? additive
-          ? new THREE.SpriteMaterial({ map: tex, transparent: false, depthWrite: false, fog: false, blending: THREE.AdditiveBlending })
-          : new THREE.SpriteMaterial({ map: tex, transparent: false, depthWrite: false, fog: false, blending: THREE.CustomBlending, blendEquation: THREE.AddEquation, blendSrc: THREE.SrcAlphaFactor, blendDst: THREE.OneMinusSrcAlphaFactor })
-        : new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false, fog: false, blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending });
+      const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false, fog: false, blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending });
       const s = new THREE.Sprite(mat);
       const width = (2 * size * SKY_RADIUS) / CELESTIAL_DISTANCE;
       s.scale.set(width, width, 1);
@@ -515,11 +536,23 @@ export class SwgSky {
       if (disc) out.push(disc);
       return out;
     };
-    this.sun.push(...body(data.sun));
-    this.supplementalSun.push(...body(data.supplementalSun));
-    this.moon.push(...body(data.moon));
-    this.supplementalMoon.push(...body(data.supplementalMoon));
-    for (const c of data.celestials) this.celestials.push({ sprites: body(c), data: c });
+    // Over a planet, the environment file's own bodies. In space they are left unbuilt: every space
+    // zone's environment file is the same 348-byte ground sky, a sun, two moons and two planet
+    // pictures copied into 23 files byte for byte (the later Kashyyyk orbit has none at all), and
+    // a sprite among them hung a moon and a red planet in every orbit that rolled with the camera.
+    // Nothing is placed and nothing is compiled; `describe().envBodiesLeftOut` counts what was left.
+    const env = environmentBodies(!!data.space, [data.sun, data.supplementalSun, data.moon, data.supplementalMoon, ...data.celestials]);
+    this.envBodiesLeftOut = env.leftOut;
+    // Of those, only the extra celestials were ever seen: the sun and the two moons were placed at
+    // no opacity at all in space, so what leaves the screen here is the pictures among them.
+    this.envPicturesGone = data.space ? data.celestials.length : 0;
+    if (env.build) {
+      this.sun.push(...body(data.sun));
+      this.supplementalSun.push(...body(data.supplementalSun));
+      this.moon.push(...body(data.moon));
+      this.supplementalMoon.push(...body(data.supplementalMoon));
+      for (const c of data.celestials) this.celestials.push({ sprites: body(c), data: c });
+    }
 
     // The lens flare's sources over a planet: every sun-shaded body with a glow whose two sprites
     // both loaded (not Yavin 4's gas giant, not a moon; Mustafar's moon slot is a second sun), the
@@ -542,32 +575,44 @@ export class SwgSky {
       if (this.flareBodies.length > MAX_FLARE_SOURCES) this.flareBodies.length = MAX_FLARE_SOURCES;
     }
 
-    // A space zone: its star sprites hang where its terrain file turns them, for good; its main
-    // light comes from a fixed direction; and dust drifts past the camera.
+    // A space zone: its stars, the star among them that lights it, and the dust that drifts past.
     const space = data.space;
     if (space) {
-      const made: { c: SpaceEnvironment['celestials'][number]; s: THREE.Sprite }[] = [];
+      // A star hangs where the zone's terrain file turns it, for good, so it is drawn as a quad
+      // turned once here rather than as a THREE.Sprite: a sprite is always upright on the screen,
+      // which rolled every star's spikes with the camera while the sky itself stayed put. The group
+      // follows the camera's place and never turns, so a quad facing the group's origin faces the
+      // camera exactly, for nothing per frame, and keeps the file's roll in the sky.
       for (const c of space.celestials) {
+        const tex = c.image ? textures.get(c.image.file) : null;
+        if (!tex || c.size <= 0) continue;
         const additive = c.image?.alphaMode !== 'BLEND';
-        const s = sprite(c.image, c.size, additive, true);
-        if (!s) continue;
-        s.position.copy(SwgSky.direction(c.yaw, THREE.MathUtils.degToRad(c.pitch), tmpVec)).multiplyScalar(SKY_RADIUS);
-        s.material.rotation = THREE.MathUtils.degToRad(c.roll);
-        made.push({ c, s });
+        // As the sprites blended: additive for a glow, source alpha for a blended disc. Three turns
+        // blending off only for Normal on a material that is not transparent, so an alpha image
+        // blends through the same factors as Custom, and the quad stays in the opaque list -- drawn
+        // before the planets (renderOrder -4), which therefore cover the stars behind them.
+        const mat = additive
+          ? new THREE.MeshBasicMaterial({ map: tex, transparent: false, depthWrite: false, fog: false, blending: THREE.AdditiveBlending })
+          : new THREE.MeshBasicMaterial({ map: tex, transparent: false, depthWrite: false, fog: false, blending: THREE.CustomBlending, blendEquation: THREE.AddEquation, blendSrc: THREE.SrcAlphaFactor, blendDst: THREE.OneMinusSrcAlphaFactor });
+        // A star is unlit: kept out of the shadow cascades, whose defines are part of a program's key.
+        mat.userData.unlit = true;
+        const width = (2 * c.size * SKY_RADIUS) / CELESTIAL_DISTANCE;
+        const quad: StarQuad = new THREE.Mesh(new THREE.PlaneGeometry(width, width), mat);
+        // Where it hangs and how it stands, both from src/space/suns.ts, so the star, the light it
+        // may become and the test all read one piece of arithmetic. (`sunDirection` is the same
+        // yaw-then-pitch convention as `SwgSky.direction` above.)
+        const dir = sunDirection(c.yaw, c.pitch);
+        quad.position.set(dir.x, dir.y, dir.z).multiplyScalar(SKY_RADIUS);
+        const turn = starQuadTurn(dir, c.roll);
+        quad.quaternion.set(turn[0], turn[1], turn[2], turn[3]);
+        quad.renderOrder = -5;
+        this.group.add(quad);
+        this.starQuads.push({ data: c, quad });
       }
-      const main = space.lights[0];
-      if (main) this.spaceLightDir = SwgSky.direction(main.yaw, THREE.MathUtils.degToRad(main.pitch), new THREE.Vector3());
-      // The lens flare's sources in space: the brightest star sprite groups (the sprites are what
-      // the eye sees; the zone's lights mostly point elsewhere), tinted halfway to white by the main light.
-      for (const g of rankStarGroups(made.map((m) => m.c))) {
-        const color = new THREE.Color(1, 1, 1);
-        if (main) {
-          color.setRGB(main.diffuse[0], main.diffuse[1], main.diffuse[2], THREE.SRGBColorSpace).lerp(WHITE, 0.5);
-          color.multiplyScalar(tintScale(color.r, color.g, color.b));
-        }
-        const sprites = made.filter((m) => m.c.yaw === g.yaw && m.c.pitch === g.pitch).map((m) => m.s);
-        this.flareBodies.push({ sprites, discRadius: angularRadius(Math.max(g.backSize, g.glowSize), STAR_DISC_FILL), glowRadius: angularRadius(g.glowSize, STAR_GLOW_FILL), weight: g.weight, star: true, color, night: false, occluded: false });
-      }
+      // Which star is this zone's sun is ours to decide (src/space/suns.ts): it sets the main
+      // light's direction and the flare's sources together, so they can never disagree.
+      this.spaceLightDir = new THREE.Vector3(0, 0, -1);
+      this.applySunPick();
       if (space.dust && space.dust.count > 0) {
         const n = Math.min(space.dust.count, 4000);
         const r = Math.max(8, space.dust.radius);
@@ -1009,11 +1054,8 @@ export class SwgSky {
     // Weather covers them: a full storm hides the disc entirely, a light shower dims it.
     const alpha = Math.max(L.sunMoonAlpha, THREE.MathUtils.clamp(lightDir.y / 0.08, 0, 1)) * (1 - this.overcast);
     if (space) {
-      // The environment file's sun and moon stay away: the zone's own star sprites are the suns here.
-      this.place(this.sun, tmpVec2.set(0, -1, 0), 0);
-      this.place(this.supplementalSun, tmpVec2, 0);
-      this.place(this.moon, tmpVec2, 0);
-      this.place(this.supplementalMoon, tmpVec2, 0);
+      // Nothing to place: the environment file's bodies were never built here (the constructor), and
+      // the zone's own stars are quads that have stood where the file turns them since it loaded.
     } else if (day.isDay) {
       this.place(this.sun, lightDir, alpha);
       if (this.data.supplementalSun) this.place(this.supplementalSun, SwgSky.offset(lightDir, this.data.supplementalSun.yaw, this.data.supplementalSun.pitch, tmpVec), alpha);
@@ -1207,7 +1249,7 @@ export class SwgSky {
     for (let i = 0; i < n; i++) {
       const b = this.flareBodies[i];
       const o = out[i];
-      let lit: THREE.Sprite | null = null;
+      let lit: SkyPiece | null = null;
       for (let j = 0; j < b.sprites.length; j++) {
         if (b.sprites[j].visible) {
           lit = b.sprites[j];
@@ -1236,11 +1278,63 @@ export class SwgSky {
    * bodies are built; allocates nothing afterwards.
    */
   setSpaceOccluders(discs: readonly { readonly dir: THREE.Vector3; readonly cos: number }[]): void {
+    // Kept, so that changing which star is the sun can judge the new sources against them again.
+    this.spaceDiscs = discs;
     for (const b of this.flareBodies) {
       if (!b.star || b.sprites.length === 0) continue;
       const d = tmpVec.copy(b.sprites[0].position).normalize();
       b.occluded = discs.some((disc) => d.dot(disc.dir) > disc.cos);
     }
+  }
+
+  /**
+   * Pick this zone's sun and build everything that follows from it: the direction the main light
+   * comes from (written into the very vector the world holds as the day cycle's fixed light, so the
+   * shadows turn with it), and the lens flare's sources -- the sun first, then its companion where
+   * it has one, else the next star bright enough to have flared before.
+   *
+   * Space only. Called from the constructor once the star quads are up, and again by `setSunRule`.
+   */
+  private applySunPick(): void {
+    const space = this.data.space;
+    if (!space) return;
+    const sprites: SunStarSprite[] = this.starQuads.map((s) => ({ shader: s.data.shader, size: s.data.size, yaw: s.data.yaw, pitch: s.data.pitch, hasImage: true }));
+    const pick = pickSuns(sprites, space.lights, this.sunRule);
+    this.sunPick = pick;
+    this.spaceLightDir?.set(pick.dir.x, pick.dir.y, pick.dir.z).normalize();
+    // A star's tint for the flare: the zone's main light halfway to white, as it has always been.
+    const main = space.lights[0];
+    const color = new THREE.Color(1, 1, 1);
+    if (main) {
+      color.setRGB(main.diffuse[0], main.diffuse[1], main.diffuse[2], THREE.SRGBColorSpace).lerp(WHITE, 0.5);
+      color.multiplyScalar(tintScale(color.r, color.g, color.b));
+    }
+    this.flareBodies.length = 0;
+    for (const g of [pick.sun, pick.companion ?? pick.second]) {
+      // A star with no glow lights the zone but has nothing for the flare to draw.
+      if (!g || g.glowSize <= 0 || this.flareBodies.length >= MAX_FLARE_SOURCES) continue;
+      const pieces = this.starQuads.filter((s) => s.data.yaw === g.yaw && s.data.pitch === g.pitch).map((s) => s.quad);
+      if (!pieces.length) continue;
+      this.flareBodies.push({ sprites: pieces, discRadius: angularRadius(Math.max(g.discSize, g.glowSize), STAR_DISC_FILL), glowRadius: angularRadius(g.glowSize, STAR_GLOW_FILL), weight: g.weight, star: true, color: color.clone(), night: false, occluded: false });
+    }
+    this.setSpaceOccluders(this.spaceDiscs);
+  }
+
+  /**
+   * Switch which star this zone is lit by (`__debug.suns`): the shadows, the flare and the god rays
+   * follow on the next frame, since they all read this one pick. Null over a planet, which has a
+   * day cycle instead. Nothing is built or compiled: the stars are all up already.
+   */
+  setSunRule(rule: SunRule): SunPick | null {
+    if (!this.data.space) return null;
+    this.sunRule = rule;
+    this.applySunPick();
+    return this.sunPick;
+  }
+
+  /** Which star lights this zone and how it was chosen; null over a planet. */
+  get sunStar(): SunPick | null {
+    return this.sunPick;
   }
 
   /**
@@ -1318,7 +1412,10 @@ export class SwgSky {
     if (toggle === 'skybox' && this.skybox) this.skybox.visible = !this.skybox.visible;
     if (toggle === 'stars' && this.stars) this.stars.visible = !this.stars.visible;
     if (toggle === 'dust' && this.dust) this.dust.points.visible = !this.dust.points.visible;
-    if (toggle === 'sprites') for (const s of this.group.children) if (s instanceof THREE.Sprite) s.visible = !s.visible;
+    if (toggle === 'sprites') {
+      for (const s of this.group.children) if (s instanceof THREE.Sprite) s.visible = !s.visible;
+      for (const s of this.starQuads) s.quad.visible = !s.quad.visible;
+    }
     const faces = this.skybox ? this.skybox.children.map((m) => {
       const map = ((m as THREE.Mesh).material as THREE.MeshBasicMaterial).map;
       const img = map?.image as { width?: number; height?: number } | undefined;
@@ -1344,25 +1441,52 @@ export class SwgSky {
       stars: this.stars ? `${(this.stars.geometry.getAttribute('position') as THREE.BufferAttribute).count}${this.stars.visible ? '' : ' hidden'}` : 'none',
       dust: this.dust ? `${(this.dust.points.geometry.getAttribute('position') as THREE.BufferAttribute).count} within ${this.dust.radius} m${this.dust.points.visible ? '' : ' hidden'}` : 'none',
       sprites: `${sprites.length}, ${this.group.children.filter((s) => s instanceof THREE.Sprite && s.visible).length} visible`,
+      starQuads: this.starQuads.length ? `${this.starQuads.length}, ${this.starQuads.filter((s) => s.quad.visible).length} visible (fixed in the sky, never rolling with the camera)` : 'none',
+      // The ground sky every space zone's environment file carries, which nothing here builds.
+      envBodiesLeftOut: this.envBodiesLeftOut,
+      /** Of those, the ones that were really on the screen before: the rest were placed at no opacity. */
+      envPicturesGone: this.envPicturesGone,
+      sun: this.sunPick
+        ? {
+            rule: this.sunPick.chosenBy,
+            ours: true,
+            at: this.sunPick.sun ? [this.sunPick.sun.yaw, this.sunPick.sun.pitch] : null,
+            companion: this.sunPick.companion ? [this.sunPick.companion.yaw, this.sunPick.companion.pitch] : null,
+            secondFlare: this.sunPick.second ? [this.sunPick.second.yaw, this.sunPick.second.pitch] : null,
+            starsHere: this.sunPick.groups.length,
+            degreesFromFileLight: this.sunPick.lightOffDegrees === null ? null : Number(this.sunPick.lightOffDegrees.toFixed(1)),
+          }
+        : null,
       spaceLight: this.spaceLightDir ? this.spaceLightDir.toArray().map((v) => Number(v.toFixed(2))) : null,
       flare: this.flareBodies.map((b, slot) => ({ slot, star: b.star, night: b.night, weight: Number(b.weight.toFixed(2)), sprites: b.sprites.length, visible: b.sprites.some((s) => s.visible), discDeg: Number(THREE.MathUtils.radToDeg(b.discRadius).toFixed(2)), glowDeg: Number(THREE.MathUtils.radToDeg(b.glowRadius).toFixed(2)) })),
       lighting: { main: `#${this.lighting.main.getHexString()} x${this.lighting.mainScale.toFixed(2)}`, ambient: `#${this.lighting.ambient.getHexString()} x${this.lighting.ambientScale.toFixed(2)}`, clear: `#${this.lighting.clear.getHexString()}`, fog: this.lighting.fogDensity },
     };
   }
 
-  dispose(scene: THREE.Scene): void {
+  /**
+   * Everything this sky owns, freed. `forget` is `World.forgetMaterials`: a disposed material must
+   * leave the portal renderer's set, which is walked once per stencil change, and the shadow
+   * cascades' map, which is a leak that shows as a stutter when the shadow distance changes. Every
+   * material here has been through `adoptMaterials`, and a space zone's stars are a dozen and more
+   * of them per zone. It is optional only so that a caller with no world can still free a sky.
+   */
+  dispose(scene: THREE.Scene, forget?: (materials: Iterable<THREE.Material>) => void): void {
     // A texture still loading is thrown away when it lands.
     this.disposed = true;
     scene.remove(this.group, this.cloudGroup);
+    const materials: THREE.Material[] = [];
     for (const c of this.clouds) {
       c.mesh.geometry.dispose();
-      c.mesh.material.dispose();
+      materials.push(c.mesh.material);
     }
     this.group.traverse((o) => {
-      if (o instanceof THREE.Mesh || o instanceof THREE.Points) o.geometry.dispose();
-      if (o instanceof THREE.Sprite) o.material.dispose();
-      if (o instanceof THREE.Mesh || o instanceof THREE.Points) (o.material as THREE.Material).dispose();
+      if (o instanceof THREE.Mesh || o instanceof THREE.Points) {
+        o.geometry.dispose();
+        materials.push(o.material as THREE.Material);
+      } else if (o instanceof THREE.Sprite) materials.push(o.material);
     });
+    forget?.(materials);
+    for (const m of materials) m.dispose();
     for (const t of this.textures.values()) t.dispose();
   }
 }

@@ -267,9 +267,12 @@ export function updateContext(ctx: FxFrameContext, input: FxFrameInput, size: TH
     const sx = behind ? 0.5 : (sunClip.x / sunClip.w) * 0.5 + 0.5;
     const sy = behind ? 0.5 : (sunClip.y / sunClip.w) * 0.5 + 0.5;
     s.screen.set(sx, sy);
-    // Fade out as it leaves the screen, and as it nears the horizon.
+    // Fade out as it leaves the screen, and as it nears the horizon. In space there is no horizon
+    // and no ground for the star to set behind, so its height says nothing about it and the fade
+    // belongs to a planet's day: applied in orbit it would dim the zone's star for good.
     const off = Math.max(0, Math.abs(sx - 0.5) - 0.5, Math.abs(sy - 0.5) - 0.5);
-    s.fade = behind ? 0 : Math.max(0, 1 - off / 0.6) * clamp(sun.dir.y * 6, 0, 1) * Math.min(1, sun.intensity);
+    const height = input.space ? 1 : clamp(sun.dir.y * 6, 0, 1);
+    s.fade = behind ? 0 : Math.max(0, 1 - off / 0.6) * height * Math.min(1, sun.intensity);
     ctx.sun = s;
   }
 
