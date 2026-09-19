@@ -14,7 +14,7 @@ import { chunk, encode, form, W } from './iffWriter.ts';
 import { PLANETS, planetBelow, spaceZoneOf } from '../../../src/data/planets.ts';
 import {
   ALREADY_THERE, arrivalPose, brakeAt, distanceText, enterSpeed, EXIT_BRAKE, exitDistance, exitEnd, exitSpeed, exitTravelled, FALLBACK_SCENE, lookRotation, releaseAt,
-  sceneOf, STATION_STANDOFF, toGame, trackedCruise, transitAt, veilUpAt, type JumpScene,
+  sceneOf, STATION_STANDOFF, toGame, trackedCruise, transitAt, tunnelClosingAt, tunnelOpeningAt, type JumpScene,
 } from '../../../src/space/hyperspaceMath.ts';
 import { arrivalAt, destinationsOf, HyperspaceCatalogue, landmarksOf, loadSpacePack, type SpacePack, type Vec3 } from '../../../src/space/spaceData.ts';
 import { splitTrimesh } from '../../../src/world/trimeshPieces.ts';
@@ -196,7 +196,7 @@ for (const u of [0.1, 0.3, 0.6, 1, 1.7]) {
 ok(near(exitDistance(60, synth), exitTravelled(EXIT_BRAKE, 60, synth)), 'the whole brake\'s distance');
 ok(near(trackedCruise(0.5, exitTravelled(0.5, 60, synth), 60, synth), exitSpeed(0.5, 60, synth)) && trackedCruise(0.5, 1e6, 60, synth) === 0, 'on the curve the tracked cruise is the curve\'s; far ahead of it, nothing');
 for (const s of [FALLBACK_SCENE, synth]) {
-  ok(veilUpAt(s) < transitAt(s) && brakeAt(s) + EXIT_BRAKE <= releaseAt(s) && releaseAt(s) <= exitEnd(s), `the timeline is in order (${s === synth ? 'a scene' : 'the fallback'})`);
+  ok(tunnelClosingAt(s) < transitAt(s) && tunnelOpeningAt(s) < brakeAt(s) && brakeAt(s) + EXIT_BRAKE <= releaseAt(s) && releaseAt(s) <= exitEnd(s), `the timeline is in order (${s === synth ? 'a scene' : 'the fallback'})`);
 }
 const pack0 = null;
 ok(JSON.stringify(sceneOf(pack0)) === JSON.stringify(FALLBACK_SCENE), 'no pack: the fallback scene');

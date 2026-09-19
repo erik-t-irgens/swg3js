@@ -64,6 +64,7 @@ import { Menu, keyName } from './ui/menu';
 import { ShipMenu, type ShipStatus } from './ui/shipMenu';
 import { HyperspaceUi } from './ui/hyperspaceUi';
 import { Hyperspace } from './space/hyperspace';
+import { HyperspaceTunnel } from './space/hyperspaceTunnel';
 import { ShipHud } from './ui/shipHud';
 import { TargetFx } from './space/targetFx';
 import { FACTION_COLOR, FACTION_LABEL, shipStanding, type ShipFaction } from './space/factions';
@@ -74,7 +75,7 @@ import { componentLine } from './space/shipStats';
 import { targetable } from './space/shipCombat';
 import type { ShipSpawner } from './ui/npcUi';
 import { HyperspaceCatalogue, arrivalAt, landmarksOf, loadSpacePack, type Destination } from './space/spaceData';
-import { arrivalPose, lookRotation, sceneOf, toGame } from './space/hyperspaceMath';
+import { TUNNEL_TIMES, arrivalPose, jumpChaseBack, lookRotation, sceneOf, toGame, tunnelCameraFar, tunnelSize } from './space/hyperspaceMath';
 import { LiftMenu } from './ui/liftMenu';
 import { stopLabel, type LiftStop } from './world/lifts';
 import { draggable } from './ui/drag';
@@ -159,10 +160,8 @@ interface ShipCrossing {
   speed: number;
   height: number;
   crew?: ShipCrew | null;
-  /** Where the ship comes out and which way it faces (a jump's arrival, game frame), instead of over the spawn at heading π. */
+  /** Where the ship comes out and which way it faces (game frame), instead of over the spawn at heading π. */
   arrival?: { pos: THREE.Vector3; quaternion: THREE.Quaternion } | null;
-  /** Held and ghosted where it arrives, for the jump to release. */
-  hold?: boolean;
   /** The ship's fight as it left (shields, armour, chassis, parts down, boost, as shares), put on the new hull once it is adopted; null or absent: whole. */
   condition?: import('./space/shipCombat').CarriedCondition | null;
 }
@@ -245,10 +244,18 @@ class App {
   private readonly creatorBar: CreatorBar;
   private readonly menu: Menu;
   private readonly shipMenu: ShipMenu;
-  /** The System Map (the destinations of a jump), the white veil and the countdown line. */
+  /** The System Map (the destinations of a jump) and the countdown line. */
   private readonly hyperspaceUi: HyperspaceUi;
   /** The jump: its countdown, its phases, and the hull it flies. */
   private readonly hyperspace: Hyperspace;
+  /** The tunnel the jump flies through (one mesh for the session, in the scene hidden). */
+  private readonly jumpTunnel: HyperspaceTunnel;
+  /** The hull whose rooms the player stood in as the jump began: kept aboard it until the jump ends. */
+  private jumpCrew: Vehicle | null = null;
+  /** The zoom the pilot had before the jump's view took it (put back after), and the camera's far plane while the tunnel hides the world. */
+  private jumpZoomKept: number | null = null;
+  private jumpFarKept: number | null = null;
+  private jumpTunnelFar = 0;
   /** Every space zone's pack and destinations, fetched on the first opening of the System Map (or the first `__debug.jumps`). */
   private hyperspaceCatalogue: Promise<HyperspaceCatalogue> | null = null;
   /** The same catalogue once it has arrived, for the jump's own reads (null until then). */
@@ -468,14 +475,17 @@ class App {
     this.shipMenu = new ShipMenu(this.ui, { status: () => this.shipStatus(), goToSpace: () => void this.goToSpace(), land: () => void this.landShip(), eject: () => void this.eject(), hyperspace: () => this.hyperspaceButton() }, () => keyName(this.input.bindings.ship[0] ?? ''));
     this.shipMenu.onClose = () => this.toggleShipMenu();
     // The System Map and the jump. What these read is assigned above: this.ui (a field initialiser),
-    // this.input, this.world, this.cam, this.player; this.postfx may be null and is read with ?. at call
-    // time; this.loadingScreen (assigned later) is only touched inside travel, which crossZone calls
-    // during a jump, never from a constructor. Neither constructor calls anything on the host, and the
-    // catalogue is fetched on the panel's first opening. Assigned here, anyPanelOpen and closePanels
-    // (which read hyperspaceUi.open) are safe from now on.
+    // this.input, this.world, this.cam, this.player, this.scene (a field initialiser, where the tunnel
+    // goes); this.postfx may be null and is read with ?. at call time. Neither constructor calls anything
+    // on the host, and the catalogue is fetched on the panel's first opening. Assigned here, anyPanelOpen
+    // and closePanels (which read hyperspaceUi.open) are safe from now on.
     this.hyperspaceUi = new HyperspaceUi(this.ui, () => keyName(this.input.bindings.ship[0] ?? ''));
     this.hyperspaceUi.onClose = () => this.toggleShipMenu();
     this.hyperspaceUi.onJump = (d) => this.startJump(d);
+    // The jump's tunnel, in the scene for the whole session and hidden: every loading screen's compile
+    // (settle's compileAllAsync walks hidden objects too) builds its program, so no jump ever does.
+    this.jumpTunnel = new HyperspaceTunnel();
+    this.scene.add(this.jumpTunnel.mesh);
     this.hyperspace = new Hyperspace({
       zone: () => this.world.planet.id,
       ship: () => this.pilotedShip(),
@@ -487,12 +497,39 @@ class App {
       effects: () => this.world.hyperspaceEffects(),
       moveWorld: (to) => this.world.jumpTo(to),
       readyAround: (to, ms) => this.world.readyAround(to, ms),
+      settleCarried: (to, envMs, ms) => this.world.settleCarried(to, envMs, ms),
       afterTeleport: (at) => {
         this.cam.release();
         this.postfx?.reset();
         this.spawn.copy(at);
       },
-      crossZone: (zone, pose) => this.crossZone(zone, pose),
+      crossZone: (zone, hull, pose) => this.carryAcross(zone, hull as Vehicle, pose),
+      holdCrew: (hull) => {
+        // Whoever stands in this hull's rooms as the jump begins is kept aboard until it ends.
+        const v = hull as Vehicle | null;
+        this.jumpCrew = v && this.player.aboard?.vehicle === v ? v : null;
+      },
+      keepCrew: () => this.keepJumpCrew(),
+      prepareTunnel: () => {
+        void this.world.prepareExtras([this.jumpTunnel.mesh]).catch((err) => console.warn('hyperspace: the tunnel could not be prepared', err));
+      },
+      programs: () => this.renderer.info.programs?.length ?? 0,
+      tunnel: {
+        attach: (hull) => {
+          const back = jumpChaseBack(hull.radius);
+          const size = tunnelSize(hull.radius, back, this.jumpTunnel.look);
+          this.jumpTunnel.attach(hull.group, size);
+          this.jumpTunnelFar = tunnelCameraFar(size, back, hull.radius);
+        },
+        set: (cover, opening, dt) => {
+          this.jumpTunnel.set(cover, opening);
+          this.jumpTunnel.step(dt);
+        },
+        detach: () => {
+          this.jumpTunnel.detach();
+          this.restoreJumpFar();
+        },
+      },
       closePanels: () => {
         const was = this.anyPanelOpen() || this.map.open;
         this.closePanels();
@@ -1441,8 +1478,13 @@ class App {
         }
         return opts.now ? 'jumping' : 'counting down';
       },
-      /** The jump now: its phase, time in it, destination, the cruise it commands, the hull's ghosting, hits taken (should be 0), how far off the arrival was, the worst frame seen outside the white. */
-      jumpState: () => this.hyperspace.describe(),
+      /**
+       * The jump now: its phase, time in it, destination, the cruise it commands, the hull's ghosting, how closed the tunnel
+       * is (`tunnel` 0..1, `covered` when closed), whether the others are told not to show the ship (`hidden`), whether the
+       * hull came through another system itself (`carried`), programs made while the tunnel was closed, hits taken (should
+       * be 0), how far off the arrival was, the worst frame seen while the tunnel was not closed; and the camera's far plane.
+       */
+      jumpState: () => ({ ...this.hyperspace.describe(), far: this.cam.camera.far, crew: this.jumpCrew ? (this.player.aboard?.vehicle === this.jumpCrew ? 'aboard' : 'outside') : null }),
       /**
        * The NPC ships: the cap and how many are out, the anchors (name, side, distance, their groups' states), the groups
        * (side, formation, members: type, tier, state, target, shields/armour/hull, shots, hits, distance, ready, paused),
@@ -1523,11 +1565,32 @@ class App {
         this.shipHud.say(type.name, text, FACTION_COLOR[faction]);
         return `${type.name} (${type.taunts}): ${text}`;
       },
-      /** The warp effects' turn about the hull's Y (degrees) and how far ahead of the hull they are placed (metres along the nose), for checking by eye; the next jump uses them. */
-      jumpFx: (opts: { turn?: number; ahead?: number } = {}) => {
-        if (typeof opts.turn === 'number' && Number.isFinite(opts.turn)) this.hyperspace.fxTurn = opts.turn;
-        if (typeof opts.ahead === 'number' && Number.isFinite(opts.ahead)) this.hyperspace.fxAhead = opts.ahead;
-        return { ...this.world.hyperspaceEffects(), turn: this.hyperspace.fxTurn, ahead: this.hyperspace.fxAhead };
+      /**
+       * The warp effects' turn about the hull's Y (degrees) and how far ahead of the hull they are placed (metres along the
+       * nose), for checking by eye; the next jump uses them. The tunnel's look, all invented and live: `radius` (over the
+       * jump camera's distance behind the ship), `minRadius` (hull radii), `length` (half-length in radii; these three at
+       * the next jump), `spin` (turns a second), `speed` (the streaks' run), `glow`, and `cull` (false: the camera's far
+       * plane is left alone while the tunnel is closed, so the world is drawn behind it). The timing, invented and live:
+       * `close` and `open` (seconds the tunnel takes to close round the ship and to open ahead of it), `min` (the least
+       * seconds inside it) and `zoom` (the pilot's held view, 0.7 to 24; 7 is the camera's default).
+       */
+      jumpFx: (opts: { turn?: number; ahead?: number; radius?: number; minRadius?: number; length?: number; spin?: number; speed?: number; glow?: number; cull?: boolean; close?: number; open?: number; min?: number; zoom?: number } = {}) => {
+        const num = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+        if (num(opts.turn)) this.hyperspace.fxTurn = opts.turn;
+        if (num(opts.ahead)) this.hyperspace.fxAhead = opts.ahead;
+        const look = this.jumpTunnel.look;
+        for (const k of ['radius', 'minRadius', 'length', 'spin', 'speed', 'glow'] as const) {
+          const v = opts[k];
+          if (num(v)) look[k] = v;
+        }
+        if (typeof opts.cull === 'boolean') look.cull = opts.cull;
+        const times = TUNNEL_TIMES;
+        for (const k of ['close', 'open', 'min'] as const) {
+          const v = opts[k];
+          if (num(v)) times[k] = Math.max(0, v);
+        }
+        if (num(opts.zoom)) times.zoom = Math.min(24, Math.max(0.7, opts.zoom));
+        return { ...this.world.hyperspaceEffects(), turn: this.hyperspace.fxTurn, ahead: this.hyperspace.fxAhead, times: { ...times }, tunnel: { ...look, size: { ...this.jumpTunnel.size }, far: this.jumpTunnelFar, shown: this.jumpTunnel.shown } };
       },
       /**
        * Nudge the ridden vehicle's seat by metres in its own frame (right, up, forward) and report where it now is, with the pose
@@ -2938,11 +3001,12 @@ class App {
    * out of it, is spawned again over the arrival point at `height` and launched at `speed`, and
    * whoever was aboard its rooms stands in the new hull where they stood in the old (`crew`). A
    * space zone is always arrived at in a ship (the one last flown or fitted ship last stood out, else an X-wing).
-   * `fromJump` is the jump's own crossing (it is not aborted by it); the ship arrived in is returned, or null.
+   * A jump in flight ends first (a jump to another system does not come here: `carryAcross`). The ship arrived in is
+   * returned, or null.
    */
-  private async travel(planet: PlanetDef, zoneId?: string, ship?: ShipCrossing, fromJump = false): Promise<Vehicle | null> {
+  private async travel(planet: PlanetDef, zoneId?: string, ship?: ShipCrossing): Promise<Vehicle | null> {
     if (this.traveling) return null;
-    if (!fromJump) this.hyperspace.abort('travel');
+    this.hyperspace.abort('travel');
     this.traveling = true;
     this.map.hide();
     this.closePanels();
@@ -2963,7 +3027,7 @@ class App {
     if (p.mounted) p.dismount(p.pos.clone());
     // A jump's arrival (or the zone's, above) is where the world streams from, not the zone's spawn.
     this.arrive(planet, zoneId, ship?.arrival?.pos ?? (spaceArrival ? new THREE.Vector3(spaceArrival[0], spaceArrival[1], spaceArrival[2]) : undefined));
-    const arrived = ship ? await this.arriveInShip(ship.def, ship.speed, ship.height, ship.crew, ship.arrival ?? null, ship.hold ?? false, ship.condition ?? null) : planet.space ? await this.arriveInSpace() : null;
+    const arrived = ship ? await this.arriveInShip(ship.def, ship.speed, ship.height, ship.crew, ship.arrival ?? null, ship.condition ?? null) : planet.space ? await this.arriveInSpace() : null;
     await this.settle();
     this.savePlace(true);
     await this.loadingScreen.hide();
@@ -2999,11 +3063,10 @@ class App {
    * Spawn a ship over the arrival point, put the player in it and launch it, on the way into or
    * out of space. A ship with rooms is boarded: where the crew record says, at the controls if
    * they were there, else at its pilot's spot; a fighter is sat in. With `arrival` it comes out there, facing that way,
-   * and a death afterwards respawns there (in Ord Mantell the zone's origin is inside its station); with `hold` it is left
-   * still and ghosted where it came out, for the jump that carried it to release. With `condition` the new hull arrives
-   * as damaged as the one that left (World.spawnVehicle has adopted its fight by the time it returns).
+   * and a death afterwards respawns there (in Ord Mantell the zone's origin is inside its station). With `condition` the
+   * new hull arrives as damaged as the one that left (World.spawnVehicle has adopted its fight by the time it returns).
    */
-  private async arriveInShip(def: VehicleDef, speed: number, height: number, crew: ShipCrew | null = null, arrival: { pos: THREE.Vector3; quaternion: THREE.Quaternion } | null = null, hold = false, condition: import('./space/shipCombat').CarriedCondition | null = null): Promise<Vehicle> {
+  private async arriveInShip(def: VehicleDef, speed: number, height: number, crew: ShipCrew | null = null, arrival: { pos: THREE.Vector3; quaternion: THREE.Quaternion } | null = null, condition: import('./space/shipCombat').CarriedCondition | null = null): Promise<Vehicle> {
     const p = this.player;
     const at = arrival ? arrival.pos.clone() : this.spawn.clone();
     at.y += height;
@@ -3029,12 +3092,7 @@ class App {
       this.cam.distance = Math.max(this.cam.distance, 9.5);
     }
     this.lastShipDef = def;
-    if (hold) {
-      // In flight but still, and out of every collision group, until the jump lets go of it.
-      v.launch(0);
-      v.held = true;
-      v.setGhost(true);
-    } else v.launch(speed);
+    v.launch(speed);
     this.physics.world.step();
     return v;
   }
@@ -3136,13 +3194,127 @@ class App {
   }
 
   /**
-   * A jump to another system: the flown ship is carried across as a crossing (everyone aboard standing where they stood),
-   * spawned held and ghosted at the arrival `pose` for the jump to release. The hull spawned there, or null.
+   * A jump to another system, called by the jump inside its closed tunnel: the world is swapped for the zone's with the hull
+   * carried across it untouched (World.loadCarrying: its body, its rooms and whoever stands in them or sits in it), and
+   * the hull put at the arrival's start `pose`, still held and ghosted. What `arrive` does for a zone, without a loading
+   * screen and without standing the player anywhere: `traveling` is never set, so the frames go on (the tunnel draws, the
+   * crew walks the rooms) while the pack loads; the jump then waits on `readyAround` as it does inside a system. The same
+   * hull, or null when it cannot be carried (gone from the world, destroyed, or another travel under way).
    */
-  private async crossZone(zone: string, pose: { pos: THREE.Vector3; quaternion: THREE.Quaternion }): Promise<Vehicle | null> {
-    const ship = this.pilotedShip();
-    if (!ship || ship.destroyed) return null;
-    return this.travel(planetById(zone), undefined, { def: ship.def!, speed: 0, height: 0, crew: this.crewRecord(), arrival: pose, hold: true, condition: this.conditionRecord(ship) }, true);
+  private async carryAcross(zone: string, hull: Vehicle, pose: { pos: THREE.Vector3; quaternion: THREE.Quaternion }): Promise<Vehicle | null> {
+    if (hull.destroyed || hull.disposed || this.traveling || !this.world.vehicles.includes(hull)) return null;
+    const planet = planetById(zone);
+    this.zone = planet.zones?.length ? planet.zones[0].id : undefined;
+    this.postfx?.reset();
+    this.marks.clear();
+    // No pilot's line, ship status or target from the world left behind.
+    this.shipHud.clear();
+    this.shipTarget = null;
+    this.targetFx.select(null, false, null);
+    this.world.loadCarrying(hull, planet, packIdOf(planet, this.zone));
+    if (!this.world.vehicles.includes(hull)) return null;
+    // At the arrival's start, facing the arrival, before anything streams: the world streams round where the hull is.
+    hull.teleport(pose.pos, pose.quaternion, 0);
+    hull.held = true;
+    this.spawn.copy(pose.pos);
+    const p = this.player;
+    if (p.aboard) p.placeVisual();
+    else if (p.mounted) p.syncMount();
+    this.world.warmUp(pose.pos);
+    this.physics.world.step();
+    this.hud.setPlanet(planet);
+    this.map.setCurrent(planet.id, this.zone);
+    this.updateUrl();
+    this.remotes.setWorld(planet.id, this.zone);
+    this.net.setHello(this.helloNow());
+    await this.world.loadPack(pose.pos);
+    if (this.world.planet !== planet || !this.world.vehicles.includes(hull)) return null;
+    this.savePlace(true);
+    return hull;
+  }
+
+  /**
+   * E while a jump flies the ship: nothing, except in the closed tunnel for whoever stands in the hull's rooms, where it
+   * works the lifts and takes or lets go of the controls, never the door (outside is the tunnel, or no world at all).
+   */
+  private pressJumpE(): void {
+    const p = this.player;
+    const room = p.aboard;
+    if (!this.hyperspace.crewFree || !room) return;
+    if (this.handleElevator()) return;
+    if (p.piloting || (room.pilotSpot && p.pos.distanceTo(room.pilotSpot) < CONTROLS_RANGE)) this.handleMount();
+  }
+
+  /** The prompt line in a jump: the countdown, "jumping", or in the tunnel what the crew can do; null outside a jump. */
+  private jumpPrompt(inLift: boolean): string | null {
+    const hs = this.hyperspace;
+    const line = hs.prompt;
+    const p = this.player;
+    const room = p.aboard;
+    if (!line || !hs.crewFree || !room) return line;
+    if (inLift) return 'in hyperspace · <b>E</b> lift';
+    if (p.piloting) return 'in hyperspace · the ship comes out when the way ahead is ready · <b>E</b> lets go of the controls';
+    if (room.pilotSpot && p.pos.distanceTo(room.pilotSpot) < CONTROLS_RANGE) return 'in hyperspace · <b>E</b> take the controls';
+    return 'in hyperspace · the ship comes out when the way ahead is ready';
+  }
+
+  /** The jump's crew kept aboard: someone who stepped out of the rooms in the tunnel (through a door) is boarded again at the entry. */
+  private keepJumpCrew(): void {
+    const v = this.jumpCrew;
+    const p = this.player;
+    const room = v?.interior;
+    if (!v || !room || p.aboard || p.mounted || this.dying || !this.world.vehicles.includes(v)) return;
+    this.postfx?.reset();
+    room.reveal(true);
+    p.board(room, room.entry.clone());
+    this.cam.setFrame(v.group.quaternion);
+  }
+
+  /**
+   * The jump's view for the pilot (`Hyperspace.holdsView`): the flight chase behind the ship at a fixed distance, the wheel
+   * spent, whatever zoom they had (first person included) kept and put back when control returns. Allocates nothing.
+   */
+  private holdJumpZoom(on: boolean): void {
+    const cam = this.cam;
+    if (on) {
+      if (this.jumpZoomKept === null) this.jumpZoomKept = cam.zoomTarget;
+      cam.zoomTarget = TUNNEL_TIMES.zoom;
+      cam.distance = TUNNEL_TIMES.zoom;
+      this.input.wheel = 0;
+    } else if (this.jumpZoomKept !== null) {
+      cam.zoomTarget = this.jumpZoomKept;
+      this.jumpZoomKept = null;
+    }
+  }
+
+  /**
+   * While the jump's tunnel is closed the world beyond it is not drawn: the camera's far plane comes in to just past the
+   * tunnel's tip (three culls everything beyond), and goes back the frame it starts to open. `__debug.jumpFx({ cull: false })`
+   * leaves the far plane alone.
+   */
+  private jumpFar(): void {
+    const tunnel = this.jumpTunnel;
+    if (!(this.hyperspace.covered && tunnel.shown && tunnel.look.cull && this.jumpTunnelFar > 0)) {
+      this.restoreJumpFar();
+      return;
+    }
+    const cam = this.cam.camera;
+    if (this.jumpFarKept === null) this.jumpFarKept = cam.far;
+    const far = Math.min(this.jumpFarKept, this.jumpTunnelFar);
+    if (cam.far !== far) {
+      cam.far = far;
+      cam.updateProjectionMatrix();
+    }
+  }
+
+  /** The camera's own far plane back (and the cascades told, as after a resize). */
+  private restoreJumpFar(): void {
+    if (this.jumpFarKept === null) return;
+    const cam = this.cam.camera;
+    cam.far = this.jumpFarKept;
+    this.jumpFarKept = null;
+    cam.updateProjectionMatrix();
+    this.world.onCameraResized();
   }
 
   /** Jump to a place on the map: travel first when it is on another planet. */
@@ -3181,6 +3353,10 @@ class App {
   /** The camera after everything has moved: chasing a ship in flight in its own frame, the cockpit, else orbiting the player. */
   private updateCamera(blocked: import('./core/camera').CameraBlocker | null, dt = 1 / 60): void {
     this.placeCamera(blocked, dt);
+    // The jump's tunnel on the hull where this frame's step left it (after the physics, before the draw), and the world
+    // beyond it not drawn while it is closed.
+    this.jumpTunnel.follow();
+    this.jumpFar();
     // The body's place in a cockpit depends on whether the view is inside it: re-seat on the frame that changes, after the
     // camera has decided, so the frame drawn has the body where that view wants it.
     const p = this.player;
@@ -3207,7 +3383,10 @@ class App {
       this.hullHidden.group.visible = true;
       this.hullHidden = null;
     }
-    const free = input.held('freeLook');
+    // A jump flying this ship: its pilot's view is the chase behind it at a fixed distance, as the client's was, with no free look.
+    const jumpView = !!ship && this.hyperspace.holdsView(ship);
+    this.holdJumpZoom(jumpView);
+    const free = input.held('freeLook') && !jumpView;
     // Seated by the eye in a ship (not a bridge pilot): the cockpit view when zoomed all the way in, hovering or flying.
     const seated = ship && player.mounted === ship && ship.eyeSeat ? ship : null;
     const inCockpit = !!seated && this.cam.firstPerson;
@@ -3846,6 +4025,8 @@ class App {
       v.group.updateWorldMatrix(true, false);
       far = Math.max(far, followDepth(cam.matrixWorldInverse, v.group.matrixWorld, this.followSphere));
     }
+    // The jump's tunnel goes with the hull the camera follows: nothing nearer than its far end smears with the camera.
+    if (this.jumpTunnel.shown) far = Math.max(far, this.jumpTunnel.farDepth(cam.matrixWorldInverse));
     return far;
   }
 
@@ -4950,7 +5131,8 @@ class App {
       if (this.liftMenu.open) for (let n = 1; n <= 9; n++) if (input.consumeKey(`Digit${n}`)) this.liftMenu.pickKey(n);
 
       if (active) {
-        if (input.pressedAction('map')) this.toggleMap();
+        // Not while a jump flies the ship: the map's teleport would abort it half way into another system's load.
+        if (input.pressedAction('map') && !this.hyperspace.locksControls) this.toggleMap();
         // I and B wait out a jump from its countdown until control returns: closing the ship edit page refits the hull,
         // which would build parts (and maybe programs) on a live frame and could hand the ghosted hull live colliders.
         const jumpBusy = this.hyperspace.phase === 'countdown' || this.hyperspace.locksControls;
@@ -4961,9 +5143,14 @@ class App {
         if (!this.map.open && !this.anyPanelOpen()) {
           if (input.pressedAction('saberToggle') && this.kit.id === 'jedi' && !player.mounted) player.toggleSaber();
           if (input.pressedAction('switchClass')) this.setClass(this.kit.id === 'jedi' ? 'bounty_hunter' : 'jedi');
-          // Locked from the jump's enter stage until control returns (the key only: leaving for the select screen and the map's teleport abort the jump first).
-          if (input.pressedAction('mount') && !player.noclip && !this.hyperspace.locksControls && !this.handleElevator()) this.handleMount();
-          if (input.pressedAction('noclip') && !player.mounted) player.toggleNoclip();
+          // Locked from the jump's enter stage until control returns, but for the crew in the tunnel (`pressJumpE`); the key only:
+          // leaving for the select screen and the map's teleport abort the jump first.
+          if (input.pressedAction('mount') && !player.noclip) {
+            if (!this.hyperspace.locksControls) {
+              if (!this.handleElevator()) this.handleMount();
+            } else this.pressJumpE();
+          }
+          if (input.pressedAction('noclip') && !player.mounted && !this.hyperspace.locksControls) player.toggleNoclip();
           if (player.noclip && input.pressedAction('noclipFaster')) player.noclipSpeed = Math.min(2000, player.noclipSpeed * 1.5);
           if (player.noclip && input.pressedAction('noclipSlower')) player.noclipSpeed = Math.max(2, player.noclipSpeed / 1.5);
           if (input.pressedAction('flashlight')) this.torchOn = !this.torchOn;
@@ -5084,8 +5271,8 @@ class App {
       else if (player.aboard) prompt = (player.aboard.pilotSpot && player.pos.distanceTo(player.aboard.pilotSpot) < CONTROLS_RANGE ? `<b>E</b> take the controls` : `aboard ${player.aboard.vehicle.spec.label} · <b>E</b> step out`) + (this.world.planet.space ? ` · <b>${shipKey}</b> ship menu` : '');
       else if (player.eva) prompt = `adrift · <b>W/S</b> thrust ahead and back · <b>A/D</b> sideways · <b>Space/Ctrl</b> up and down · mouse turns · <b>Z/V</b> roll · <b>${keyName(input.bindings.brake[0] ?? '')}</b> brake · ${Math.round(player.vel.length() * 3.6)} km/h${this.nearestSpeederDistance() < MOUNT_RANGE ? (this.nearestHasRoom() ? ' · <b>E</b> board' : ' · <b>E</b> mount') : ''}`;
       else if (this.nearestSpeederDistance() < MOUNT_RANGE) prompt = this.nearestHasRoom() ? '<b>E</b> board' : this.nearestVehicle()?.upsideDown ? '<b>E</b> flip it upright' : '<b>E</b> mount';
-      // A jump's countdown, then "jumping", over whatever the prompt would say.
-      prompt = this.hyperspace.prompt ?? prompt;
+      // A jump's countdown, then "jumping", over whatever the prompt would say; in the tunnel, the crew's lifts and controls.
+      prompt = this.jumpPrompt(lift !== null) ?? prompt;
       this.hud.setPrompt(prompt);
       const flying = player.mounted?.spec.ship && player.mounted.airborne && !input.held('freeLook') ? player.mounted : null;
       this.hud.setFlight(flying ? flying.stick : null);
@@ -5112,7 +5299,7 @@ class App {
       const programs = this.renderer.info.programs?.length ?? 0;
       // While the effects are switching over, programs are made on purpose and on frames that are not stalls.
       // Under the jump's white, the destination's programs are made on purpose (World.readyAround), unseen.
-      if (programs > this.lastPrograms && this.lastPrograms > 0 && !this.traveling && !this.fxBusy && !this.hyperspace.veiled) console.info(`shaders: ${programs - this.lastPrograms} compiled during play (${stats.frameMs.toFixed(0)} ms frame, ${programs} programs in all)`);
+      if (programs > this.lastPrograms && this.lastPrograms > 0 && !this.traveling && !this.fxBusy && !this.hyperspace.covered) console.info(`shaders: ${programs - this.lastPrograms} compiled during play (${stats.frameMs.toFixed(0)} ms frame, ${programs} programs in all)`);
       this.lastPrograms = programs;
       stats.rawDt = rawDt;
       stats.grounded = player.grounded;

@@ -1,10 +1,13 @@
 // The hyperspace jump itself: a short countdown, then the game's own three stages timed from its
-// files (scene/hyperspace.iff and the two warp effects, as the converter wrote them into space.json).
-// Enter: the hull speeds up to the scene's speed while the warp streaks and the dark tunnel play
-// framed on it; the white veil (ours) comes up as the streaks peak. Transit (under the white): the
-// hull is moved, inside the system at once, or to another system through the game's travel, and the
-// world there is loaded and compiled before anything is seen. Exit: the white lifts onto the exit
-// effect's own tunnel, the hull waits in it, then brakes onto the arrival and is handed back.
+// files (scene/hyperspace.iff and the two warp effects, as the converter wrote them into space.json),
+// with a tunnel of our own in place of the client's (hyperspaceTunnel.ts).
+// Enter: the ship vanishes for the others, the hull speeds up to the scene's speed while the game's warp
+// streaks play framed on it, and the tunnel closes round it from the tip back as the streaks peak.
+// Transit (inside the closed tunnel, the world not drawn): the hull is held still and whoever is aboard
+// its rooms may walk; inside the system it is moved at once, to another system the world is swapped
+// under it with the hull, its rooms and its crew carried across; the world there is loaded and compiled
+// while the tunnel runs, for at least TUNNEL_TIMES.min seconds. Exit: the tunnel opens from the tip, the
+// others see the ship again, the hull brakes onto the arrival and is handed back.
 //
 // No DOM and no world here: everything goes through the host (App) and the hull (Vehicle), so a node
 // test can drive the phases against fakes. Imports three and the pure math only.
@@ -13,21 +16,25 @@ import type { Destination, HyperspaceCatalogue, SpacePack, Vec3 } from './spaceD
 import type { EffectHandle } from '../world/particles';
 import {
   ALREADY_THERE,
+  ENVIRONMENT_WAIT,
   EXIT_BRAKE,
   JUMP_COUNTDOWN,
+  TUNNEL_TIMES,
   arrivalPose,
   brakeAt,
   enterSpeed,
   exitEnd,
   exitTravelled,
+  hiddenToPeers,
   lookRotation,
   releaseAt,
   sceneOf,
   toGame,
   trackedCruise,
   transitAt,
-  veilUpAt,
+  tunnelCover,
   type JumpScene,
+  type TunnelCover,
 } from './hyperspaceMath.ts';
 import { arrivalAt, landmarksOf } from './spaceData.ts';
 
@@ -35,7 +42,7 @@ export type JumpPhase = 'idle' | 'countdown' | 'enter' | 'transit' | 'exit';
 
 /** What the jump touches on a hull; `Vehicle` satisfies it, the test's fake does too. */
 export interface JumpHull {
-  /** Its matrixWorld frames the effects. */
+  /** Its matrixWorld frames the effects; the tunnel follows it. */
   readonly group: THREE.Object3D;
   /** Where it is, in the world (the game frame). */
   readonly pos: THREE.Vector3;
@@ -54,10 +61,19 @@ export interface JumpHull {
   readonly justHit: number;
 }
 
-/** The veil (a white div over the canvas, ours) and the countdown line. */
+/** The countdown line in the middle of the screen. */
 export interface HyperspaceUiPort {
-  veil(on: boolean, seconds: number): void;
   banner(text: string | null): void;
+}
+
+/** The tunnel round the hull (the App's HyperspaceTunnel, sized for the hull and the jump camera). */
+export interface TunnelPort {
+  /** Round this hull from now on, hidden until a cover is set. */
+  attach(hull: JumpHull): void;
+  /** This frame's cover (0 none, 1 closed round the ship), whether it is opening, and the seconds its clock runs on. */
+  set(cover: number, opening: boolean, dt: number): void;
+  /** Gone: hidden, following nothing, the camera's far plane back. */
+  detach(): void;
 }
 
 export interface HyperspaceHost {
@@ -71,7 +87,7 @@ export interface HyperspaceHost {
   catalogue(): HyperspaceCatalogue | null;
   /** This zone's pack (world.spaceData). */
   packHere(): SpacePack | null;
-  /** World.placeZoneEffect: transient, `solid`, `local` in the hull's frame `frame` (kept by reference). */
+  /** World.placeZoneEffect: transient, `local` in the hull's frame `frame` (kept by reference); the untextured quads are not drawn. */
   placeEffect(file: string, local: THREE.Matrix4, frame: THREE.Matrix4): EffectHandle | null;
   removeEffect(h: EffectHandle): void;
   /** World.hyperspaceEffects. */
@@ -80,11 +96,29 @@ export interface HyperspaceHost {
   moveWorld(to: THREE.Vector3): void;
   /** World.readyAround. */
   readyAround(to: THREE.Vector3, timeoutMs: number): Promise<boolean>;
+  /**
+   * World.settleCarried, after a jump to another system is ready round `to`: the new zone's reflections waited for (at most
+   * `envMs`), then every material in the scene compiled once more, as a loading screen's settle does, so a program whose
+   * key changed when the reflections came is built under the closed tunnel and not on the frame it opens.
+   */
+  settleCarried(to: THREE.Vector3, envMs: number, timeoutMs: number): Promise<boolean>;
   /** After the hull was moved: the camera let go of its old place, the effects' history reset, the respawn point moved. */
   afterTeleport(at: THREE.Vector3): void;
-  /** App.travel with a held crossing: the hull spawned in the other zone, held and ghosted at `pose`, or null. */
-  crossZone(zone: string, pose: { pos: THREE.Vector3; quaternion: THREE.Quaternion }): Promise<JumpHull | null>;
+  /**
+   * App.carryAcross: the world swapped for `zone`'s with this hull carried across it (its body, its rooms, whoever is in
+   * them), put at `pose` still held and ghosted. The hull (the same one), or null when it could not be carried.
+   */
+  crossZone(zone: string, hull: JumpHull, pose: { pos: THREE.Vector3; quaternion: THREE.Quaternion }): Promise<JumpHull | null>;
+  /** Whoever is aboard this hull's rooms now is its crew for the jump (null: the jump is over, nobody is kept). */
+  holdCrew(hull: JumpHull | null): void;
+  /** The crew held, stepped out of the rooms since (through a door in the tunnel), is put back aboard at the entry. */
+  keepCrew(): void;
+  /** The tunnel's program made ready before the jump (a key lookup unless something marked it for a rebuild). */
+  prepareTunnel(): void;
+  /** How many programs the renderer has (for the count made while the tunnel was closed), or 0. */
+  programs(): number;
   closePanels(): void;
+  tunnel: TunnelPort;
   ui: HyperspaceUiPort;
 }
 
@@ -105,18 +139,23 @@ export class Hyperspace {
   private dest: Destination | null = null;
   private destPack: SpacePack | null = null;
   private scene: JumpScene | null = null;
-  /** The hull the jump flies: taken at the start of enter, swapped for the one spawned in another system. */
+  /** The hull the jump flies: taken at the start of enter; carried to another system, it is the same one. */
   private hull: JumpHull | null = null;
   /** The cruise when the jump began, and the one the ship arrives at. */
   private c0 = 0;
   private exitCruise = EXIT_CRUISE_MIN;
-  /** The jump's cruise as the enter stage left it (the scene's speed): the hull keeps it through the tunnel, the one spawned in another system too. */
+  /** The jump's cruise as the enter stage left it (the scene's speed): the hull keeps it through the tunnel. */
   private tunnelCruise = 0;
   /** Bumped by every abort: a transit's late result is dropped when its token has gone stale. */
   private token = 0;
   private enterFx: EffectHandle | null = null;
   private exitFx: EffectHandle | null = null;
-  private veilOn = false;
+  /** The destination is loaded round the arrival: the exit begins once the tunnel has run its least time. */
+  private ready = false;
+  /** The hull came through a change of system the same hull (its rooms and crew with it). */
+  private carried = false;
+  /** This frame's tunnel, as last handed to the host. */
+  private cover = 0;
   private braking = false;
   /** The exit stage's time on the frame the brake began. */
   private brakeFrom = 0;
@@ -129,6 +168,9 @@ export class Hyperspace {
   private lastArrivalError: number | null = null;
   private worstVisibleFrameMs = 0;
   private sameZone = false;
+  /** The renderer's programs when the tunnel closed (-1 while it is not closed), and how many were made while it was. */
+  private programsAtClose = -1;
+  private tunnelPrograms = 0;
 
   // Kept scratch objects: nothing is allocated per frame.
   /** Where the hull appears (so that braking brings it to `end`), where the jump ends, and the way it faces, game frame. */
@@ -139,6 +181,7 @@ export class Hyperspace {
   private readonly local = new THREE.Matrix4();
   private readonly ahead = new THREE.Matrix4();
   private readonly along = new THREE.Vector3();
+  private readonly coverOut: TunnelCover = { cover: 0, opening: false };
 
   constructor(host: HyperspaceHost) {
     // Stored only: nothing on the host is called from here (it is built in App's constructor).
@@ -156,6 +199,8 @@ export class Hyperspace {
     this.t = Math.max(0, countdown);
     this.shownSecond = -1;
     this.showCount();
+    // The tunnel's program is in the cache from the loading screen; this only builds it if something marked it since.
+    this.host.prepareTunnel();
     return null;
   }
 
@@ -192,16 +237,12 @@ export class Hyperspace {
     if (why) console.info(`hyperspace: cancelled (${why})`);
   }
 
-  /** At any phase: remove the effects, lift the veil, release the hull, go idle, and drop any transit's late result. */
+  /** At any phase: remove the effects and the tunnel, release the hull, go idle, and drop any transit's late result. */
   abort(why: string): void {
     if (this.phase === 'idle') return;
     const counting = this.phase === 'countdown';
     this.token++;
     this.removeEffects();
-    if (this.veilOn) {
-      this.veilOn = false;
-      this.host.ui.veil(false, this.scene?.fade ?? 0.3);
-    }
     this.host.ui.banner(null);
     const hull = this.hull;
     // A hull no longer in the world has had its body removed: there is nothing to release, and touching it throws.
@@ -229,6 +270,10 @@ export class Hyperspace {
         return;
       case 'transit':
         this.t += dt;
+        this.showTunnel(dt);
+        this.host.keepCrew();
+        // Loaded round the arrival and inside long enough: out through the far end on this frame.
+        if (this.ready && this.t >= TUNNEL_TIMES.min) this.beginExit();
         return;
       case 'exit':
         this.updateExit(dt, rawDt);
@@ -243,14 +288,29 @@ export class Hyperspace {
     return (this.phase === 'enter' || this.phase === 'exit') && !this.released && v === this.hull;
   }
 
-  /** Enter, transit and exit up to the release: E, P and the ship menu do nothing. */
+  /** Enter, transit and exit up to the release: P and the ship menu do nothing, and E only what `crewFree` allows. */
   get locksControls(): boolean {
     return this.phase === 'enter' || this.phase === 'transit' || (this.phase === 'exit' && !this.released);
   }
 
-  /** The white veil is up (the frame log of programs made is quiet then). */
-  get veiled(): boolean {
-    return this.veilOn;
+  /** In the closed tunnel, whoever is aboard may walk the rooms, work the lifts and take or let go of the controls (never the door). */
+  get crewFree(): boolean {
+    return this.phase === 'transit';
+  }
+
+  /** Whether the view of this vehicle's pilot is the jump's (behind the ship, fixed): the hull the jump flies, until control returns. */
+  holdsView(v: unknown): boolean {
+    return v !== null && v !== undefined && v === this.hull && this.locksControls;
+  }
+
+  /** The tunnel is closed round the ship: the world is not drawn, and programs made now are the destination's, made on purpose. */
+  get covered(): boolean {
+    return this.phase !== 'idle' && this.phase !== 'countdown' && this.cover >= 1;
+  }
+
+  /** Whether the others should not see the ship now (the relay's jumping flag): from the enter stage until the tunnel opens. */
+  get hiddenToPeers(): boolean {
+    return !!this.scene && hiddenToPeers(this.phase, this.t, this.scene);
   }
 
   /** The countdown or "jumping" for the prompt line, or null. */
@@ -259,7 +319,7 @@ export class Hyperspace {
     return this.locksControls ? 'jumping' : null;
   }
 
-  describe(): { phase: JumpPhase; t: number; dest: string | null; cruise: number | null; ghost: boolean; hits: number; lastArrivalError: number | null; worstVisibleFrameMs: number } {
+  describe(): { phase: JumpPhase; t: number; dest: string | null; cruise: number | null; ghost: boolean; tunnel: number; covered: boolean; hidden: boolean; carried: boolean; tunnelPrograms: number; hits: number; lastArrivalError: number | null; worstVisibleFrameMs: number } {
     const hull = this.hull;
     return {
       phase: this.phase,
@@ -268,6 +328,11 @@ export class Hyperspace {
       cruise: hull ? Math.round(hull.jumpCruise ?? hull.cruise) : null,
       // Read from the hull, not inferred from the phase, so a hull left ghosted (or never ghosted) shows.
       ghost: !!(hull ?? this.host.ship())?.ghosted,
+      tunnel: Math.round(this.cover * 100) / 100,
+      covered: this.covered,
+      hidden: this.hiddenToPeers,
+      carried: this.carried,
+      tunnelPrograms: this.tunnelPrograms,
       hits: this.hits,
       lastArrivalError: this.lastArrivalError === null ? null : Math.round(this.lastArrivalError * 100) / 100,
       worstVisibleFrameMs: Math.round(this.worstVisibleFrameMs * 10) / 10,
@@ -290,7 +355,7 @@ export class Hyperspace {
     this.host.ui.banner(this.countText);
   }
 
-  /** The countdown ran out: the pilot's controls go, the hull is ghosted, the enter effect plays framed on it. */
+  /** The countdown ran out: the pilot's controls go, the hull is ghosted, the enter effect plays framed on it, the tunnel is readied round it. */
   private beginEnter(): void {
     const host = this.host;
     const dest = this.dest;
@@ -319,12 +384,18 @@ export class Hyperspace {
     this.hits = 0;
     this.lastArrivalError = null;
     this.worstVisibleFrameMs = 0;
-    this.veilOn = false;
+    this.ready = false;
+    this.carried = false;
+    this.cover = 0;
+    this.programsAtClose = -1;
+    this.tunnelPrograms = 0;
     this.braking = false;
     this.brakeDone = false;
     this.released = false;
     hull.setGhost(true);
     hull.jumpCruise = this.c0;
+    host.holdCrew(hull);
+    host.tunnel.attach(hull);
     this.enterFx = this.placeOn(hull, host.effects().enter);
     this.phase = 'enter';
     this.t = 0;
@@ -338,25 +409,27 @@ export class Hyperspace {
       return;
     }
     this.watch(hull, rawDt);
+    // Someone who walks out of a door while the hull speeds up is put back at once, not a second later at 900 m/s.
+    this.host.keepCrew();
     this.t += dt;
     hull.jumpCruise = enterSpeed(this.t, this.c0, s);
-    if (!this.veilOn && this.t >= veilUpAt(s)) {
-      this.veilOn = true;
-      this.host.ui.veil(true, s.fade);
-    }
     if (this.t >= transitAt(s)) {
       this.phase = 'transit';
       this.t = 0;
       this.tunnelCruise = hull.jumpCruise ?? s.speed;
+      this.showTunnel(dt);
       void this.transit(this.token);
+      return;
     }
+    this.showTunnel(dt);
   }
 
   /**
-   * The move, under the white, once per jump. Inside a system the hull is put at the arrival's start and
-   * the world streamed there; to another system the game travels (the loading screen comes between) and
-   * spawns the hull there held. Either way the world round the start is loaded and compiled before the
-   * exit shows it. A stale token (an abort meanwhile) drops the result; an exception aborts.
+   * The move, inside the closed tunnel, once per jump. The hull is held still (the crew walk a still room). Inside a system
+   * it is put at the arrival's start and the world streamed there; to another system the world is swapped under it, the
+   * hull carried across with its rooms and its crew and put at the start there. Either way the world round the start is
+   * loaded and compiled before the tunnel opens (the exit waits for `ready`). A stale token (an abort meanwhile) drops the
+   * result; an exception aborts.
    */
   private async transit(mine: number): Promise<void> {
     const host = this.host;
@@ -364,58 +437,65 @@ export class Hyperspace {
     const dest = this.dest!;
     try {
       this.removeEnter();
+      const hull = this.hull!;
+      // Nobody left outside a door before anything moves.
+      host.keepCrew();
+      hull.held = true;
       if (this.sameZone) {
-        const hull = this.hull!;
-        hull.held = true;
         hull.teleport(this.startAt, this.turn, 0);
         host.afterTeleport(this.startAt);
         host.moveWorld(this.startAt);
-        const ready = await host.readyAround(this.startAt, s.limit * 1000);
-        if (this.token !== mine) return;
-        if (!ready) console.warn('hyperspace: the destination was not ready in time');
       } else {
-        const old = this.hull;
-        const next = await host.crossZone(dest.zone, { pos: this.startAt, quaternion: this.turn });
+        // Between frames, not inside the one that began the transit: the world is swapped with nothing half-stepped on it.
+        await Promise.resolve();
+        if (this.token !== mine) return;
+        const next = await host.crossZone(dest.zone, hull, { pos: this.startAt, quaternion: this.turn });
         if (this.token !== mine) {
-          // Aborted while travelling: the hull spawned held there is let go, not left hanging.
+          // Aborted while crossing: a hull that came back is let go, not left held (the abort released the one it had).
           if (next && host.alive(next)) this.releaseHull(next);
           return;
         }
-        // No hull came back. If the crossing never travelled (nobody at the controls), the old hull is still in
-        // the world, ghosted and at jump speed: let it go here, since the abort below only looks at `this.hull`.
-        if (!next && old && host.alive(old)) this.releaseHull(old);
-        // The old hull went with the old world; null means nothing to fly (the abort below lifts the veil).
-        this.hull = next;
-        if (next) {
-          // Spawned held with no jump cruise of its own (App.arriveInShip launches it at 0): it takes the one the old
-          // hull had through the tunnel, so the exit reads and flies the same as inside a system.
-          next.jumpCruise = this.tunnelCruise;
-          const ready = await host.readyAround(this.startAt, s.limit * 1000);
-          if (this.token !== mine) return;
-          if (!ready) console.warn('hyperspace: the destination was not ready in time');
+        if (!next) {
+          // Not carried: the abort below releases the hull if it is still in the world, and takes the tunnel down.
+          this.abort('the ship could not be carried across');
+          return;
         }
+        this.carried = next === hull;
+        this.hull = next;
+        // Held, with the cruise the tunnel had, so the exit reads and flies the same as inside a system.
+        next.held = true;
+        next.jumpCruise = this.tunnelCruise;
+        host.tunnel.attach(next);
+        host.afterTeleport(this.startAt);
       }
+      const t0 = performance.now();
+      let ready = await host.readyAround(this.startAt, s.limit * 1000);
+      if (this.token !== mine) return;
+      if (!this.sameZone) {
+        // The new zone's reflections come after its first compiles: everything compiled once more under the tunnel.
+        const left = Math.max(1000, s.limit * 1000 - (performance.now() - t0));
+        ready = (await host.settleCarried(this.startAt, ENVIRONMENT_WAIT * 1000, left)) && ready;
+        if (this.token !== mine) return;
+      }
+      if (!ready) console.warn('hyperspace: the destination was not ready in time');
       if (!this.hull || !host.alive(this.hull)) {
         this.abort('the ship was lost');
         return;
       }
-      this.beginExit();
+      this.ready = true;
     } catch (err) {
       console.warn('hyperspace: the jump failed', err);
     } finally {
-      if (this.token === mine && this.phase === 'transit') this.abort('the jump failed');
+      if (this.token === mine && this.phase === 'transit' && !this.ready) this.abort('the jump failed');
     }
   }
 
-  /** The white lifts onto the exit effect's own white tunnel, the hull held at the start in it. */
+  /** Out of the transit: the exit effect placed on the hull, still held in the closed tunnel until it opens ahead. */
   private beginExit(): void {
     const hull = this.hull!;
-    const s = this.scene!;
     this.phase = 'exit';
     this.t = 0;
     this.exitFx = this.placeOn(hull, this.host.effects().exit);
-    this.veilOn = false;
-    this.host.ui.veil(false, s.fade);
   }
 
   private updateExit(dt: number, rawDt: number): void {
@@ -427,8 +507,10 @@ export class Hyperspace {
     }
     this.watch(hull, rawDt);
     this.t += dt;
+    this.showTunnel(dt);
+    if (!this.released) this.host.keepCrew();
     if (!this.braking && this.t >= brakeAt(s)) {
-      // Out of the tunnel at the scene's speed, braking onto the arrival as the stars burst past. The
+      // Out of the opened tunnel at the scene's speed, braking onto the arrival as the stars burst past. The
       // brake's clock starts on this frame, so the curve begins where the hull does.
       this.braking = true;
       this.brakeFrom = this.t;
@@ -450,7 +532,7 @@ export class Hyperspace {
       }
     }
     if (!this.released && this.t >= releaseAt(s)) {
-      // Control comes back as the tunnel starts to dissolve.
+      // Control comes back as the game's exit tunnel starts to dissolve.
       this.released = true;
       if (!this.brakeDone) {
         this.brakeDone = true;
@@ -465,11 +547,25 @@ export class Hyperspace {
     }
   }
 
-  /** The hits (none, a ghosted hull skips the test) and the worst frame seen while not veiled. */
+  /** This frame's tunnel to the host (the cover from the phase and its clock), and the programs made while it is closed. */
+  private showTunnel(dt: number): void {
+    const s = this.scene;
+    if (!s) return;
+    const c = tunnelCover(this.phase, this.t, s, this.coverOut);
+    this.cover = c.cover;
+    this.host.tunnel.set(c.cover, c.opening, dt);
+    if (c.cover >= 1) {
+      const n = this.host.programs();
+      if (this.programsAtClose < 0) this.programsAtClose = n;
+      else this.tunnelPrograms = Math.max(this.tunnelPrograms, n - this.programsAtClose);
+    }
+  }
+
+  /** The hits (none, a ghosted hull skips the test) and the worst frame seen while the tunnel is not closed. */
   private watch(hull: JumpHull, rawDt: number): void {
     if (hull.justHit > 0) this.hits++;
     const ms = rawDt * 1000;
-    if (!this.veilOn && ms > 16 && ms > this.worstVisibleFrameMs) this.worstVisibleFrameMs = ms;
+    if (this.cover < 1 && ms > 16 && ms > this.worstVisibleFrameMs) this.worstVisibleFrameMs = ms;
   }
 
   /** One of the jump's effects, framed on the hull: turned `fxTurn` about its Y and `fxAhead` along its nose. */
@@ -500,15 +596,19 @@ export class Hyperspace {
     h.cruise = this.exitCruise;
   }
 
-  /** Back to idle (the hull, if any, already released). */
+  /** Back to idle (the hull, if any, already released): the tunnel taken down, nobody held aboard. */
   private finish(): void {
+    this.host.tunnel.detach();
+    this.host.holdCrew(null);
     this.phase = 'idle';
     this.t = 0;
     this.hull = null;
     this.dest = null;
     this.destPack = null;
     this.countText = null;
-    this.veilOn = false;
+    this.cover = 0;
+    this.ready = false;
+    this.programsAtClose = -1;
     this.enterFx = null;
     this.exitFx = null;
   }

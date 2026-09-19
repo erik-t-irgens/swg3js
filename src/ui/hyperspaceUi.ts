@@ -5,9 +5,9 @@
 // window's words ("System Map", "Selected point", "Travel information") are the client's, written here
 // in our own code.
 //
-// Also the jump's two pieces of screen furniture, both plain elements (no pass, no program, nothing to
-// compile): the white veil over the moment the hull and the world are moved (ours; the client covered
-// it with its tunnel), and the countdown line in the middle of the screen.
+// Also the jump's one piece of screen furniture, a plain element (no pass, no program, nothing to
+// compile): the countdown line in the middle of the screen. The move itself is covered by the tunnel
+// (hyperspaceTunnel.ts), drawn in the world.
 
 import type * as THREE from 'three';
 import type { HyperspaceUiPort } from '../space/hyperspace';
@@ -39,7 +39,6 @@ export class HyperspaceUi implements HyperspaceUiPort {
   onJump: (dest: Destination) => void = () => {};
   onClose: () => void = () => {};
   private readonly keyLabel: () => string;
-  private readonly veilEl: HTMLElement;
   private readonly countEl: HTMLElement;
   private readonly titleEl: HTMLElement;
   private readonly systemsEl: HTMLElement;
@@ -61,7 +60,6 @@ export class HyperspaceUi implements HyperspaceUiPort {
   /** A refusal from the last press of Hyperspace, shown until the pick changes. */
   private refusal: string | null = null;
   private lastBanner: string | null = null;
-  private veilOn = false;
 
   constructor(parent: HTMLElement, keyLabel: () => string) {
     this.keyLabel = keyLabel;
@@ -91,16 +89,12 @@ export class HyperspaceUi implements HyperspaceUiPort {
     this.infoEl = this.root.querySelector('.hs-info')!;
     this.closeEl = this.root.querySelector<HTMLButtonElement>('.close')!;
     this.closeEl.addEventListener('click', () => this.onClose());
-    // The white goes first in the UI layer, so every later positioned child (the HUD, the prompt line,
-    // every panel, the Escape menu, the death card, the loading screen) is drawn over it; the countdown
-    // line goes right after it.
-    this.veilEl = document.createElement('div');
-    this.veilEl.id = 'hyperspace-veil';
-    parent.prepend(this.veilEl);
+    // The countdown line goes first in the UI layer, so every later positioned child (the HUD, the prompt
+    // line, every panel, the Escape menu, the death card, the loading screen) is drawn over it.
     this.countEl = document.createElement('div');
     this.countEl.id = 'hyperspace-count';
     this.countEl.className = 'hidden';
-    this.veilEl.after(this.countEl);
+    parent.prepend(this.countEl);
     window.addEventListener('keydown', (e) => this.onKey(e));
   }
 
@@ -152,15 +146,6 @@ export class HyperspaceUi implements HyperspaceUiPort {
   note(text: string): void {
     this.refusal = text;
     this.refresh();
-  }
-
-  /** The white: on fades up over `seconds`, off fades down. A div, not a pass: nothing compiles. */
-  veil(on: boolean, seconds: number): void {
-    if (on === this.veilOn) return;
-    this.veilOn = on;
-    // The new length is set before the opacity, so this change runs over it.
-    this.veilEl.style.setProperty('--veil-s', `${Math.max(0, seconds)}s`);
-    this.veilEl.style.opacity = on ? '1' : '0';
   }
 
   /** The countdown line in the middle of the screen, or none. Written only when it changes. */

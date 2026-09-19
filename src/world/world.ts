@@ -694,12 +694,13 @@ export class World {
       this.particles.heightAt = (x, z) => this.terrain.heightAt(x, z);
       // The gallery is one long walk of exhibits with nothing else to draw: everything loads from anywhere on it.
       this.layoutStream = new LayoutStreamer(this.scene, this.physics, pack, layout, this.particles, { reach: planet.id === 'gallery' ? 4 : this.streamReach(), hugeColliders: !!planet.space });
-      // A space zone's hyperspace effects are made ready now (their batches, the flat-colour one among them,
-      // hidden in the scene, their textures uploaded), so settle() compiles them behind the loading screen
-      // and no jump builds a program on a live frame. `spaceData` was set by loadSpaceBodies above.
+      // A space zone's hyperspace effects are made ready now (their textured batches hidden in the scene, their
+      // textures uploaded), so settle() compiles them behind the loading screen and no jump builds a program on a
+      // live frame. Not `solid`: the jump places them without it (placeZoneEffect). `spaceData` was set by
+      // loadSpaceBodies above.
       if (planet.space) {
         const fx = this.particles;
-        for (const f of Object.values(this.hyperspaceEffects())) if (f) await fx.prepare(f, this.renderer, undefined, true);
+        for (const f of Object.values(this.hyperspaceEffects())) if (f) await fx.prepare(f, this.renderer);
         if (token !== this.loadToken) return null;
       }
       // Placed objects pull the procedural ground up to their feet, so buildings stand on it;
@@ -930,10 +931,12 @@ export class World {
 
   /**
    * Place one of the jump's effects framed on a hull (`frame`, its live matrixWorld, `local` in that frame):
-   * transient, and `solid` so its untextured tunnel quads draw as flat colour. Null outside a pack.
+   * transient, and not `solid`, so only its textured streaks and stars draw. Its untextured quads (the enter's
+   * 90 m black drop, the exit's white-to-blue backdrop) were made for the client's camera fixed behind the ship
+   * and showed as flat boxes in space from ours; the jump's own tunnel covers the move. Null outside a pack.
    */
   placeZoneEffect(file: string, local: THREE.Matrix4, frame: THREE.Matrix4): EffectHandle | null {
-    return this.particles?.place(file, local, false, true, frame, true) ?? null;
+    return this.particles?.place(file, local, false, true, frame, false) ?? null;
   }
 
   /** Take one of the jump's effects away (nothing happens if the world it was placed in has gone). */
@@ -2564,8 +2567,8 @@ export class World {
    * loaded, the huge objects' collider pieces built, the materials that came with them adopted
    * (cascades before compile), and every queued or fresh object's programs made and linked
    * (compileReady, a mesh at a time). Polls once a drawn frame (a message to itself when the tab is
-   * hidden). False after `timeoutMs`. Runs only under the jump's veil or a loading screen, so what it
-   * allocates is no frame's cost.
+   * hidden). False after `timeoutMs`. Runs only inside the jump's closed tunnel or under a loading screen,
+   * so what it allocates is no frame's cost.
    */
   async readyAround(pos: THREE.Vector3, timeoutMs: number): Promise<boolean> {
     const t0 = performance.now();
@@ -2581,12 +2584,68 @@ export class World {
       }
       if (performance.now() - t0 > timeoutMs) return false;
       // Hidden, no frame comes and `update` (which streams) does not run: poll on a timer rather than spin on
-      // messages to itself (throttled timers only make this slower, and it runs under a veil or a loading screen).
+      // messages to itself (throttled timers only make this slower, and it runs in the tunnel or under a loading screen).
       if (document.hidden) {
         // Nor are a huge object's collider pieces built by `update` there: build them here.
         ls?.buildHuge();
         await new Promise<void>((r) => setTimeout(r, 50));
       } else await this.nextFrame();
+    }
+  }
+
+  /**
+   * Load another world with one vehicle carried across it untouched (a hyperspace jump to another system): its body stays
+   * in the one physics world the session has, its rooms in their own with whoever stands in them, its model, trails and
+   * materials in the scene and the material sets, none of which the unload touches. The unload does two things to a
+   * vehicle, dispose every one in `vehicles` and drop every ship's fight (`ships.clear`), so the vehicle is taken out of
+   * the list first, its fight's shares read, and afterwards it is put back and adopted again with those shares. The
+   * caller keeps the player aboard or seated (CLAUDE.md's unload rule is set aside on purpose here: the rooms are carried)
+   * and moves the vehicle to where it arrives. Synchronous: no frame sees the world without it. If the load throws, the
+   * vehicle is put back first (still ghosted and held, with the player aboard), so the jump's abort can release it.
+   */
+  loadCarrying(v: Vehicle, planet: PlanetDef, packId: string): void {
+    const condition = v.combat ? v.combat.shares() : null;
+    const i = this.vehicles.indexOf(v);
+    if (i >= 0) this.vehicles.splice(i, 1);
+    try {
+      this.load(planet, packId);
+    } finally {
+      if (!v.disposed && !this.vehicles.includes(v)) this.vehicles.push(v);
+    }
+    if (v.disposed) return;
+    v.space = !!planet.space;
+    if (v.spec.ship) {
+      const combat = this.ships.adopt(v, { faction: 'neutral' });
+      if (condition) combat.restore(condition);
+      this.warmShipFx(v);
+    }
+  }
+
+  /**
+   * After a jump to another system is ready round `pos`, still under the closed tunnel: what a loading screen's settle did
+   * for a crossing. The zone's reflections arrive after its first compiles (their cube loads on its own), and a reflective
+   * material compiled before them is rebuilt when they land, which with the tunnel open would be on a frame in view; so
+   * they are waited for (at most `envMs`), the ship effects made ready, every material in the scene compiled once more
+   * (eight objects a frame, the tunnel drawing between), and anything streamed in meanwhile readied. False when that last
+   * wait ran out.
+   */
+  async settleCarried(pos: THREE.Vector3, envMs: number, timeoutMs: number): Promise<boolean> {
+    const t0 = performance.now();
+    await this.environmentReady(envMs);
+    if (this.renderer) await this.ships.prepareEffects(this.renderer);
+    // Hidden, the programs are compiled at once rather than waited on: compileAsync polls the linking on a chained
+    // timer, which a hidden tab holds to one a minute, and the tunnel would stay shut for half an hour.
+    await this.compileAllAsync(() => {}, { waitReady: !document.hidden, keepQueue: true });
+    return this.readyAround(pos, Math.max(1000, timeoutMs - (performance.now() - t0)));
+  }
+
+  /** Resolve once the sky's reflections are in (or there is no sky to give any), or after `ms`. */
+  private async environmentReady(ms: number): Promise<void> {
+    const t0 = performance.now();
+    while (this.swgSky && !this.envTexture && performance.now() - t0 < ms) {
+      // Hidden, no frame runs `update` (which loads them): a timer, not messages to itself.
+      if (document.hidden) await new Promise<void>((r) => setTimeout(r, 50));
+      else await this.nextFrame();
     }
   }
 

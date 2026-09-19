@@ -26,11 +26,11 @@ export interface JumpScene {
   exitSeconds: number;
   /** STG2's speed reading: what the ship leaves at, m/s. */
   speed: number;
-  /** STG2's fade reading: the white's rise and fall, seconds. */
+  /** STG2's fade reading, seconds: the hand-over from the enter streaks' peak to the transit (the tunnel is closed by its end). */
   fade: number;
   /** STG2's limit reading: the longest wait for the destination, seconds. */
   limit: number;
-  /** The enter streaks' brightest stretch ends (the white may come up). */
+  /** The enter streaks' brightest stretch ends (the tunnel closes over it). */
   enterPeak: number;
   /** The exit's stars burst past. */
   exitBurstAt: number;
@@ -69,11 +69,7 @@ export function toGame(p: Vec3): Vec3 {
 
 const clamp01 = (x: number) => (x <= 0 ? 0 : x >= 1 ? 1 : x);
 
-/** When the white comes up, seconds into the enter stage. */
-export function veilUpAt(s: JumpScene): number {
-  return s.enterPeak;
-}
-/** When the transit (the move) starts, seconds into the enter stage: the white is up by then. */
+/** When the transit (the move) starts, seconds into the enter stage: the tunnel is closed by then. */
 export function transitAt(s: JumpScene): number {
   return s.enterPeak + s.fade;
 }
@@ -88,6 +84,120 @@ export function releaseAt(s: JumpScene): number {
 /** When the exit stage is over, seconds into it. */
 export function exitEnd(s: JumpScene): number {
   return Math.max(s.exitSeconds, releaseAt(s));
+}
+
+// ---- The tunnel (ours: the client covered the move with its own tunnel, drawn for a camera fixed behind the ship) ----
+
+/**
+ * The tunnel's timing and the jump camera's zoom, all invented and live through `__debug.jumpFx({ close, open, min, zoom })`:
+ * the seconds it takes to close round the ship (ending as the transit begins), the seconds it takes to open ahead of it
+ * (ending as the brake begins), the least seconds spent inside it closed (the transit), and the zoom the pilot's view is
+ * held at (the wheel's distance the chase is scaled by; 7 is the camera's own default). A change to `close` or `open`
+ * in the middle of a jump moves its cover at once; `min` and `zoom` are read every frame.
+ */
+export const TUNNEL_TIMES = { close: 1.2, open: 1.0, min: 4, zoom: 7 };
+
+/**
+ * The tunnel's size and look, live through `__debug.jumpFx` (all invented): its radius over the jump camera's distance
+ * behind the ship, and at least `minRadius` hull radii; its half-length in radii; its turn about the axis (turns a
+ * second); how fast its streaks run back past the ship (cells a second); its brightness; and whether the camera's far
+ * plane is brought in while it is closed, so the world beyond it is not drawn.
+ */
+export const TUNNEL_LOOK = { radius: 1.6, minRadius: 3, length: 5, spin: 0.05, speed: 5, glow: 1, cull: true };
+export type TunnelLook = typeof TUNNEL_LOOK;
+
+/**
+ * The margins the tunnel's size and the far plane are given, all invented: the least hull radius a tunnel is sized for
+ * (metres); how far behind the ship the camera may be over the jump camera's own distance, and in hull radii (a walker
+ * aboard is inside the hull); the far plane's stretch past the tunnel's tip, and metres added to that.
+ */
+export const TUNNEL_MARGINS = { minHull: 0.5, chase: 1.2, hull: 2, stretch: 1.05, pad: 10 };
+
+/** Seconds a jump to another system waits for the new zone's reflections before its last compile under the closed tunnel; invented. */
+export const ENVIRONMENT_WAIT = 5;
+
+/** The phases as `Hyperspace` names them (kept here so the pure functions below can take them). */
+export type JumpPhaseName = 'idle' | 'countdown' | 'enter' | 'transit' | 'exit';
+
+/** When the tunnel starts to close, seconds into the enter stage. */
+export function tunnelClosingAt(s: JumpScene): number {
+  return Math.max(0, transitAt(s) - Math.max(0, TUNNEL_TIMES.close));
+}
+/** When the tunnel starts to open, seconds into the exit stage: it is open as the brake begins. */
+export function tunnelOpeningAt(s: JumpScene): number {
+  return Math.max(0, brakeAt(s) - Math.max(0, TUNNEL_TIMES.open));
+}
+
+/** A tunnel's cover for one frame, filled in place by `tunnelCover` (the caller keeps one, so a frame makes nothing). */
+export interface TunnelCover {
+  cover: number;
+  opening: boolean;
+}
+
+/**
+ * How much of the tunnel stands (0 none, 1 closed round the ship) and whether it is opening, for a phase and the
+ * seconds into it: closing through the end of the enter stage, closed through the transit, opening before the brake.
+ * Written into `out`, which is returned.
+ */
+export function tunnelCover(phase: JumpPhaseName, t: number, s: JumpScene, out: TunnelCover): TunnelCover {
+  switch (phase) {
+    case 'enter': {
+      const from = tunnelClosingAt(s);
+      const span = transitAt(s) - from;
+      out.cover = span > 0 ? clamp01((t - from) / span) : t >= from ? 1 : 0;
+      out.opening = false;
+      return out;
+    }
+    case 'transit':
+      out.cover = 1;
+      out.opening = false;
+      return out;
+    case 'exit': {
+      const from = tunnelOpeningAt(s);
+      const span = brakeAt(s) - from;
+      out.cover = 1 - (span > 0 ? clamp01((t - from) / span) : t >= from ? 1 : 0);
+      out.opening = true;
+      return out;
+    }
+    default:
+      out.cover = 0;
+      out.opening = false;
+      return out;
+  }
+}
+
+/** Whether the others should not see the ship: from the start of the enter stage until the tunnel starts to open. */
+export function hiddenToPeers(phase: JumpPhaseName, t: number, s: JumpScene): boolean {
+  return phase === 'enter' || phase === 'transit' || (phase === 'exit' && t < tunnelOpeningAt(s));
+}
+
+/**
+ * How far behind the ship the jump camera sits, metres: the flight chase's own distance (`ThirdPersonCamera.chase`:
+ * reach x (0.35 + zoom / 12), up by 0.32 of it) for the reach the game gives it (6 + 2.2 hull radii, `placeCamera`).
+ */
+export function jumpChaseBack(hullRadius: number, zoom = TUNNEL_TIMES.zoom): number {
+  const reach = 6 + hullRadius * 2.2;
+  const d = reach * (0.35 + zoom / 12);
+  return d * Math.hypot(1, 0.32);
+}
+
+/** The tunnel round a hull: its radius across and half-length along the nose, metres. */
+export function tunnelSize(hullRadius: number, chaseBack: number, look: TunnelLook = TUNNEL_LOOK): { radius: number; length: number } {
+  const r = Math.max(TUNNEL_MARGINS.minHull, hullRadius);
+  const radius = Math.max(r * look.minRadius, chaseBack * look.radius + r);
+  return { radius, length: radius * Math.max(1, look.length) };
+}
+
+/** The camera's far plane while the tunnel is closed: past its tip from anywhere the jump camera or a walker's can be (margins in `TUNNEL_MARGINS`). */
+export function tunnelCameraFar(size: { radius: number; length: number }, chaseBack: number, hullRadius: number): number {
+  const m = TUNNEL_MARGINS;
+  return (size.length + Math.max(chaseBack * m.chase, hullRadius * m.hull)) * m.stretch + m.pad;
+}
+
+/** Whether a point in the hull's frame (metres, nose +Z) is inside the tunnel's ellipsoid, by a margin of `margin` of it. */
+export function insideTunnel(p: Vec3, size: { radius: number; length: number }, margin = 0.9): boolean {
+  const q = (p[0] / size.radius) ** 2 + (p[1] / size.radius) ** 2 + (p[2] / size.length) ** 2;
+  return q < margin * margin;
 }
 
 /** The enter stage's speed `t` seconds in, from the ship's own `from` up to the leaving speed. */

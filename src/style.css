@@ -407,8 +407,7 @@ b { color: var(--accent); font-weight: 600; }
 .hs-travel { margin: 10px 0 6px; font-size: 12px; color: var(--text); }
 .hs-info .ship-action button { flex: 0 0 160px; }
 .hs-empty { font-size: 12px; color: var(--muted); padding: 6px 2px; }
-/* The white over the hand-over of a jump (ours: the client's tunnel covered it), under every panel and the loading screen; and the countdown line. */
-#hyperspace-veil { position: fixed; inset: 0; background: #eaf4ff; opacity: 0; transition: opacity var(--veil-s, 0.4s) linear; z-index: 0; pointer-events: none; }
+/* The countdown line of a jump, under every panel and the loading screen. */
 #hyperspace-count { position: fixed; top: 22%; left: 50%; transform: translateX(-50%); z-index: 0; pointer-events: none; font-size: 22px; font-weight: 600; letter-spacing: 0.16em; color: var(--accent); text-shadow: 0 0 12px rgba(0,0,0,0.9), 0 1px 2px #000; white-space: nowrap; }
 
 /* Space combat: the target box by what the target is to the pilot, the NPC pilots' comms at the top, the flown ship's condition over the health bar, the NPC tab's tier picker. */
