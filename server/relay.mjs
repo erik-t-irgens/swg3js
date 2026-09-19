@@ -13,7 +13,8 @@
 //   { t: 'state', p: [x, y, z], h, s, v, m, sab, q?, veh? }   position, heading, rig state, speed, mounted, saber lit,
 //                                                          the whole turn as a quaternion (aboard, adrift), the vehicle
 //                                                          ridden { id, p, q, role: ride|pilot|aboard, pose, w }
-//                                                          (w: a winged ship's wings, 1 open or opening, 0 closed)
+//                                                          (w: a winged ship's wings, 1 open or opening, 0 closed);
+//                                                          j: 1 while in a hyperspace jump (not shown until it clears)
 //   { t: 'emote', clip }
 // Relay to client:
 //   { t: 'welcome', id, peers: [{ id, hello, state }] }
@@ -138,6 +139,8 @@ function onMessage(c, text) {
     const quat = (q) => (Array.isArray(q) && q.length === 4 && q.every((v) => Number.isFinite(Number(v))) ? q.map(Number) : null);
     const q = quat(msg.q);
     if (q) c.state.q = q;
+    // In a hyperspace jump: the others hide this player and their ship until a state comes without it.
+    if (msg.j === 1) c.state.j = 1;
     const veh = msg.veh;
     if (veh && typeof veh === 'object' && typeof veh.id === 'string') {
       const vp = Array.isArray(veh.p) && veh.p.length === 3 ? veh.p.map(Number) : null;

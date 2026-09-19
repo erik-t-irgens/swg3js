@@ -46,6 +46,8 @@ export interface PeerState {
   q?: [number, number, number, number];
   /** The vehicle the peer is on, when they are on one. */
   veh?: PeerVehicle;
+  /** In a hyperspace jump, from its start until its tunnel opens at the far end: the peer and their ship are not shown. */
+  j?: 1;
 }
 
 export interface Peer {
@@ -222,7 +224,7 @@ export class Net {
       case 'state':
         if (msg.id !== undefined && msg.p) {
           const peer = this.peers.get(msg.id);
-          const state: PeerState = { p: msg.p, h: msg.h ?? 0, s: msg.s ?? 'idle', v: msg.v ?? 0, m: !!msg.m, sab: !!msg.sab, q: msg.q, veh: msg.veh };
+          const state: PeerState = { p: msg.p, h: msg.h ?? 0, s: msg.s ?? 'idle', v: msg.v ?? 0, m: !!msg.m, sab: !!msg.sab, q: msg.q, veh: msg.veh, ...(msg.j === 1 ? { j: 1 as const } : {}) };
           if (peer) peer.state = state;
           this.onState(msg.id, state);
         }

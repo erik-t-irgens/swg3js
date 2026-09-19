@@ -69,6 +69,8 @@ interface Remote {
   vel: THREE.Vector3;
   /** performance.now() of its last state message. */
   heardAt: number;
+  /** In a hyperspace jump (the relay's `j`): neither the figure nor the ship is shown until a state comes without it. */
+  jumping: boolean;
 }
 
 const STATES: Set<string> = new Set(['idle', 'walk', 'run', 'air', 'seated', 'swim', 'float', 'crouch', 'crouchWalk', 'crouchWalkBack', 'stance', 'strafeLeft', 'strafeRight', 'runBack', 'walkBack', 'runSaber', 'walkSaber', 'gunIdle', 'gunWalk', 'gunRun', 'gunReadyIdle', 'gunReadyWalk', 'gunReadyRun', 'gunAimIdle', 'gunAimWalk', 'gunAimRun', 'kneel', 'prone', 'proneMove']);
@@ -111,11 +113,16 @@ export class RemotePlayers {
   setWorld(planet: string, zone: string | undefined): void {
     this.planet = planet;
     this.zone = zone;
-    for (const r of this.remotes.values()) r.group.visible = this.sameWorld(r.hello);
+    for (const r of this.remotes.values()) r.group.visible = this.shown(r);
   }
 
   private sameWorld(h: Hello): boolean {
     return h.planet === this.planet && (h.zone ?? undefined) === this.zone;
+  }
+
+  /** Shown: on this world and not in a jump. */
+  private shown(r: Remote): boolean {
+    return !r.jumping && this.sameWorld(r.hello);
   }
 
   add(id: number, hello: Hello): void {
@@ -127,7 +134,7 @@ export class RemotePlayers {
     group.add(label);
     this.scene.add(group);
     markActor(group);
-    const remote: Remote = { id, hello, group, rig: null, label, target: new THREE.Vector3(0, -1000, 0), heading: 0, targetQ: null, state: 'idle', speed: 0, saber: false, silent: 0, dance: null, vehicle: null, lookApplied: null, lookPending: null, heldApplied: null, heldModels: [], vel: new THREE.Vector3(), heardAt: 0 };
+    const remote: Remote = { id, hello, group, rig: null, label, target: new THREE.Vector3(0, -1000, 0), heading: 0, targetQ: null, state: 'idle', speed: 0, saber: false, silent: 0, dance: null, vehicle: null, lookApplied: null, lookPending: null, heldApplied: null, heldModels: [], vel: new THREE.Vector3(), heardAt: 0, jumping: false };
     this.remotes.set(id, remote);
     void this.dress(remote);
   }
@@ -252,7 +259,8 @@ export class RemotePlayers {
         this.onDressed?.(r.rig.root);
         void this.applyHeld(r);
       });
-    r.group.visible = this.sameWorld(hello);
+    // A peer in a jump that moved them to this world stays hidden until their state says the tunnel has opened.
+    r.group.visible = this.shown(r);
     // Their ship's fit changed (they closed its Edit page): the picture of it is repainted or refitted in place. A
     // ship other than the one they ride now changes nothing yet; its fit applies when that ship appears.
     const rv = r.vehicle;
@@ -286,6 +294,24 @@ export class RemotePlayers {
     r.saber = s.sab;
     r.silent = 0;
     this.vehicleState(r, s.veh);
+    // In a jump they vanish; out of it they appear where they are now, not gliding across the distance jumped.
+    const jumping = s.j === 1;
+    if (jumping !== r.jumping) {
+      r.jumping = jumping;
+      r.group.visible = this.shown(r);
+      if (!jumping) {
+        r.group.position.copy(r.target);
+        r.vel.set(0, 0, 0);
+        const rv = r.vehicle;
+        if (rv) {
+          rv.vel.set(0, 0, 0);
+          if (rv.obj) {
+            rv.obj.position.copy(rv.target);
+            rv.obj.quaternion.copy(rv.targetQ);
+          }
+        }
+      }
+    }
   }
 
   /** The vehicle a peer is on: brought in when first seen (or changed), moved along after, taken away when they are off it. */
