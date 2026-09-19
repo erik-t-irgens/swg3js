@@ -106,6 +106,8 @@ import { MATERIAL_FORMAT, describeLines, describeSurface, surfaceCounts, surface
 import { localize, parseDatatable } from './datatable.mjs';
 import { mountCreatures, riderPoseFor } from './mounts.mjs';
 import { pickSaddleHardpoint, saddleEntry, saddleStatus, satHardpoints } from './saddles.mjs';
+import { assembleShip, assemblyStatus, clientChildren, partFamilyOf, SHIP_ASSEMBLY_FORMAT } from './shipparts.mjs';
+import { chassisNameFor, modalLooks, wingOpenSpeedFactorOf } from './shipfit.mjs';
 import * as M from './mobiles.mjs';
 import * as MS from './mobilescan.mjs';
 import { finestLevelWithGeometry } from './lmglevel.mjs';
@@ -1821,7 +1823,13 @@ function packStatus(dir) {
   else need(`species <swg-dir> ${dir} --retail-only`, 'no species index: only the one character can be played');
   const ships = readJson(join(dir, 'ships/manifest.json'));
   if (!ships) need(`ships <swg-dir> ${dir} --retail-only`, 'no ships converted for the garage (B in game, at the bottom)');
-  else console.log(`  ships: ${ships.ships.length} ships, ${ships.ships.filter((sh) => sh.interior && !sh.interior.failed).length} with an interior, ${ships.skipped.length} left out`);
+  else {
+    // What hangs on the ships, decided per ship (a ship converted before has no `chassis`), so neither a
+    // --match run nor a hand-merged manifest can hide an old one.
+    const parts = assemblyStatus(ships);
+    console.log(`  ships: ${ships.ships.length} ships, ${ships.ships.filter((sh) => sh.interior && !sh.interior.failed).length} with an interior, ${ships.skipped.length} left out; ${parts.hung} parts hung, ${parts.winged} with wings that open`);
+    if (parts.old) need(`ships <swg-dir> ${dir} --retail-only`, `${parts.old} ships' parts do not ride their wings (converted before wings and attachments were assembled)`);
+  }
   if (ships && (ships.materialFormat ?? 1) < MATERIAL_FORMAT) need(`ships <swg-dir> ${dir} --retail-only`, "ships' models were converted before animated and glowing surfaces");
   const gallery = readJson(join(dir, 'gallery/manifest.json'));
   if (gallery && (gallery.materialFormat ?? 1) < MATERIAL_FORMAT) need(`gallery <swg-dir> ${dir} --retail-only`, "the gallery's models were converted before animated and glowing surfaces");
@@ -3402,6 +3410,54 @@ switch (cmd) {
     };
     // A model of an appearance for something that hangs on a hull (a wing, an engine, a cockpit frame).
     const { parseClientData, parseCockpit, parseClientEffect } = await import('./shipdata.mjs');
+    // What hangs on a hull and on what (shipparts.mjs): the ship's own client data, each part's own in
+    // turn, and the stock parts from the hull's chassis looks table (shipfit.mjs).
+    let chassisRows = new Map();
+    try {
+      chassisRows = new Map(parseDatatable(parseIff(vfs.read('datatables/space/ship_chassis.iff'))).rows.map((r) => [r.name, r]));
+    } catch (err) {
+      console.error(`chassis table not read (${err.message}): parts are found by name as before`);
+    }
+    const attachmentTemplates = new Map(vfs.list('object/tangible/ship/attachment/').filter((f) => f.startsWith('object/tangible/ship/attachment/') && f.endsWith('.iff')).map((f) => [f.replace(/^.*\/shared_/, '').replace(/\.iff$/, ''), f]));
+    const childrenCache = new Map();
+    /**
+     * A template's client data as assembly children: wings, then carriers in file order, then on/off
+     * appearances. `quiet`: a missing file is not printed (a hull's, which extrasOf notes in the ship's notes).
+     */
+    const childrenOf = (template, quiet = false) => {
+      const cdf = resolveTemplateString(vfs, template, ['clientDataFile'], cache);
+      if (!cdf) return [];
+      const path = cdf.replace(/\\/g, '/').replace(/^\//, '');
+      if (!childrenCache.has(path)) {
+        let kids = [];
+        if (!vfs.has(path)) {
+          if (!quiet) console.error(`  client data ${path} (of ${template}) not in the archives`);
+        }
+        else {
+          try {
+            kids = clientChildren(parseClientData(parseIff(vfs.read(path))));
+          } catch (err) {
+            console.error(`  client data ${path}: ${err.message}`);
+          }
+        }
+        childrenCache.set(path, kids);
+      }
+      return childrenCache.get(path);
+    };
+    /** A part's model in the pack, from its appearance or its template's (convertAppearance, below, at call time). */
+    const modelOf = (desc) => {
+      let app = desc.appearance ?? null;
+      if (!app && desc.template) {
+        const r = resolveTemplateMesh(vfs, desc.template, cache);
+        if (r.skip) return { skip: String(r.skip).replace(/ \(params: .*$/, '') };
+        if (r.particle) return { skip: 'particle effect' };
+        app = r.appearance ?? null;
+      }
+      if (!app) return { skip: 'no appearance' };
+      if (/\.prt$/i.test(app)) return { skip: 'particle effect' };
+      const m = convertAppearance(app);
+      return m.skip ? m : { file: m.file, hardpoints: m.hardpoints, appearance: app.replace(/\\/g, '/').replace(/^\//, '') };
+    };
     const convertAppearance = (appearance, suffix = '') => {
       const path = appearance.replace(/\\/g, '/').replace(/^\//, '');
       const id = `${familyOf(path)}${suffix}`;
@@ -3417,6 +3473,7 @@ switch (cmd) {
       const def = models.get(id);
       return !def || def.failed ? { skip: def?.failed ?? 'failed' } : { file: def.file, hardpoints: def.hardpoints ?? [] };
     };
+    // Only for a hull with no chassis looks table (none of the retail ships), the old guess by name.
     // The components a ship is fitted with: the game's engines, guns and boosters are objects of
     // their own (object/tangible/ship/components/), hung on the hull's and wings' hardpoints named
     // for them (engine_pos1, weapon1_neg1, booster_pos1). The first of the components made for
@@ -3428,7 +3485,7 @@ switch (cmd) {
     const componentKinds = { engine: /(^|_)(eng|engine|engines)(_|$|\d)/i, weapon: /(^|_)(wpn|weapon|weapons|gun|guns|cannon|blaster)(_|$|\d)/i, booster: /(^|_)(bst|booster|boosters)(_|$|\d)/i };
     const componentsFor = (id, hardpoints, notes) => {
       const out = [];
-      const family = id.replace(/^(advanced|basic|prototype|player)_/, '').replace(/_modified$|_imperial_guard$|_longprobe$/, '');
+      const family = partFamilyOf(id);
       for (const hp of hardpoints) {
         const m = /^(engine|weapon|booster)(\d*)_?([a-z]+)?_?(\d*)$/i.exec(hp);
         if (!m) continue;
@@ -3478,34 +3535,15 @@ switch (cmd) {
     // drive runs, the thruster and contrail hardpoints, and the cockpit's frame with its offsets.
     const extrasOf = (template, hull) => {
       const out = { attachments: [], thrusters: [], contrails: [], cockpit: null, notes: [] };
-      const hardpoints = [...(hull?.hardpoints ?? [])];
       const cdf = resolveTemplateString(vfs, template, ['clientDataFile'], cache);
       if (cdf) {
         const cdfPath = cdf.replace(/\\/g, '/').replace(/^\//, '');
         if (!vfs.has(cdfPath)) out.notes.push(`client data ${cdfPath} not in archives`);
         else {
           try {
+            // The wings, carriers and on/off appearances are assembled below with the stock parts; the
+            // hull's own client data gives the thrusters, contrails, damage and destruction here.
             const data = parseClientData(parseIff(vfs.read(cdfPath)));
-            for (const wing of data.wings) {
-              const r = resolveTemplateMesh(vfs, wing.template, cache);
-              if (r.skip || !r.appearance) {
-                out.notes.push(`wing ${wing.template}: ${r.skip ?? 'no appearance'}`);
-                continue;
-              }
-              const m = convertAppearance(r.appearance);
-              if (m.skip) out.notes.push(`wing ${wing.template}: ${m.skip}`);
-              else {
-                // A wing sits in the hull's frame at its origin; PSOR is the hinge it opens about,
-                // not a place for it: the hinge's position and its yaw, pitch and roll (degrees).
-                out.attachments.push({ kind: 'wing', file: m.file, template: wing.template, transform: null, hinge: wing.hinge, angle: wing.angle, time: wing.time, sound: wing.sounds[0] ?? null });
-                hardpoints.push(...m.hardpoints);
-              }
-            }
-            for (const on of data.onOff) {
-              const m = convertAppearance(on.appearance);
-              if (m.skip) out.notes.push(`engine appearance ${on.appearance}: ${m.skip}`);
-              else out.attachments.push({ kind: 'engine', file: m.file, hardpoint: on.hardpoint || null });
-            }
             out.thrusters = data.thrusters.map((t) => t.hardpoint).filter(Boolean);
             out.contrails = data.contrails.map((c) => c.hardpoint).filter(Boolean);
             if (data.damage.length) out.damage = data.damage.map((d) => ({ from: d.from, to: d.to, hardpoint: d.hardpoint, position: d.transform ? d.transform.slice(0, 3) : null, particle: d.appearance || null }));
@@ -3515,9 +3553,29 @@ switch (cmd) {
           }
         }
       }
-      // The engines, guns and boosters on the hull's and wings' hardpoints.
+      // Everything the game hangs on the hull, as a tree (shipparts.mjs): the ship's own client data,
+      // each part's own in turn, and the stock parts, each slot's most common look in the hull's
+      // chassis looks table (never a modification column's one reward look).
       const { shipLabelOf } = shipsModule;
-      out.attachments.push(...componentsFor(shipLabelOf(template), hardpoints, out.notes));
+      const base = template.replace(/^.*\/shared_/, '').replace(/\.iff$/, '');
+      const chassis = chassisNameFor(base, (n) => chassisRows.has(n));
+      const looksPath = chassis ? `datatables/space/ship_chassis_${chassis}.iff` : null;
+      let stock = null;
+      if (looksPath && vfs.has(looksPath)) {
+        try {
+          stock = modalLooks(parseDatatable(parseIff(vfs.read(looksPath)))).flatMap((l) => l.pairs.map((p) => ({ slot: l.slot, ...p })));
+        } catch (err) {
+          out.notes.push(`chassis looks ${looksPath}: ${err.message}`);
+        }
+      }
+      const built = assembleShip({ hardpoints: hull?.hardpoints ?? [] }, childrenOf(template, true), stock ?? [], { childrenOf: (t) => childrenOf(t), model: modelOf, templateOf: (n) => attachmentTemplates.get(n) ?? null });
+      out.attachments.push(...built.attachments);
+      out.notes.push(...built.notes);
+      // No looks table: the old guess by name, written without `parent`, so the game hangs these by
+      // name. None of the 63 retail ships takes this path.
+      if (!stock) out.attachments.push(...componentsFor(shipLabelOf(template), built.carried, out.notes));
+      out.chassis = chassis;
+      out.wingOpenSpeedFactor = chassis ? wingOpenSpeedFactorOf(chassisRows.get(chassis)) : 1;
       const cockpit = resolveTemplateString(vfs, template, ['cockpitFilename'], cache);
       if (cockpit && !/noframe/i.test(cockpit)) {
         const cpPath = cockpit.replace(/\\/g, '/').replace(/^\//, '');
@@ -3597,7 +3655,7 @@ switch (cmd) {
     const match = options.match ? new RegExp(options.match, 'i') : null;
     const templates = galleryTemplates(vfs, 'object/ship/player/').filter((t) => !match || match.test(t));
     const { ships, skipped } = buildShips(templates, { convert, interiorOf, convertInterior, extrasOf, weaponOf }, { log: console.log, limit });
-    const manifest = { classes: SHIP_CLASSES, ships, skipped, models: [...models.values()].filter((m) => !m.failed), materialFormat: MATERIAL_FORMAT };
+    const manifest = { classes: SHIP_CLASSES, ships, skipped, models: [...models.values()].filter((m) => !m.failed), materialFormat: MATERIAL_FORMAT, assembly: SHIP_ASSEMBLY_FORMAT };
     if (projectiles.length) writeFileSync(join(outDir, 'projectiles.json'), JSON.stringify({ projectiles, weapons }, null, 2));
     if (match) {
       // A matched run redoes some ships: the rest keep their place in the manifest.
@@ -3610,6 +3668,9 @@ switch (cmd) {
         manifest.ships = [...(old.ships ?? []).filter((sh) => !done.has(sh.id) && !match.test(sh.template)), ...ships].sort((a, b) => a.class.localeCompare(b.class) || a.id.localeCompare(b.id));
         manifest.skipped = [...(old.skipped ?? []).filter((sk) => !match.test(sk.template)), ...skipped];
         manifest.models = [...(old.models ?? []).filter((m) => !files.has(m.file)), ...manifest.models];
+        // Ships kept from an older manifest keep its format: a partial run never marks them current.
+        const kept = manifest.ships.length - ships.length;
+        manifest.assembly = kept === 0 || old.assembly === SHIP_ASSEMBLY_FORMAT ? SHIP_ASSEMBLY_FORMAT : (old.assembly ?? 1);
         console.log(`(--match: ${ships.length} ships redone, ${manifest.ships.length - ships.length} kept from the manifest as they were)`);
       } catch {
         /* no manifest yet: this run's ships are all of it */
