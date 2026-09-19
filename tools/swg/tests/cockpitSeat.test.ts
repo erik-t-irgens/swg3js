@@ -5,6 +5,7 @@ import {
   COCKPIT_LEAD,
   COCKPIT_OFFSET_SHARE,
   EYE_OVER_PELVIS,
+  SEAT_RULE,
   FIRST_PERSON_RAISE_MAX,
   LIFT_LIMIT,
   PELVIS_OVER_SEAT,
@@ -23,6 +24,7 @@ import {
   pelvisOnSeat,
   riderOrigin,
   seatDropBelow,
+  seatDropUsed,
   viewEye,
   type Quat,
   type Vec3,
@@ -197,5 +199,48 @@ ok(nearV(SEATED_EYE_FALLBACK.map((n, i) => n - SEATED_PELVIS_FALLBACK[i]), EYE_O
 ok(offsetShare('assets-private/ships/bwing_cockpit_cockpit.glb') === 0.5 && offsetShare('xwing_cockpit_cockpit.glb') === 1 && offsetShare(null) === 1, "the B-wing's frame takes half its 1OFF, any other frame all of it");
 ok(Object.values(COCKPIT_OFFSET_SHARE).every((s) => s >= 0 && s <= 1), 'every listed share is within 0..1');
 ok(nearV(viewEye([1, 2, 3], mirroredOffset([0, 0.14, 0.1]), 0.5), [1, 2.07, 3.05], 1e-12), "the B-wing's view eye is the camera point plus half of 1OFF");
+
+// The seat rule: the eyes on the eye leave no cushion to place the body by; the cushion rule keeps the measured one.
+ok(seatDropUsed(0.7, 'eyes') === null && seatDropUsed(0.7, 'cushion') === 0.7 && seatDropUsed(null, 'cushion') === null, "the 'eyes' rule places by no cushion, the 'cushion' rule by the one measured");
+ok(SEAT_RULE.place === 'eyes' && seatDropUsed(0.557) === null, "the default rule is the owner's: the eyes on the eye");
+
+// The placement, as Player.syncMount does it for a ship seated by the eye: the eye it hangs the body from is the view's
+// own cockpitEye() (camera + share x offset) less the whole offset plus the frame file's 1OFF (mirrored), and the body
+// goes eye - q*(seatedEye - nudge - lift). With the eyes on the eye (lift 0, no nudge) the figure's seated eyes land on
+// the view eye exactly, for any share, turn, figure size and seated pose, in first and third person alike.
+// Player.syncMount's formula is mirrored here, not imported (it lives in a class that needs a scene and a rig): this
+// guards viewEye, seatDropUsed and what the garage stores, and a change to syncMount's own arithmetic must be copied in.
+{
+  let good = true;
+  let worst = 0;
+  for (let i = 0; i < 40; i++) {
+    const q = randQuat();
+    const camera = randVec(8);
+    const authored: Vec3 = [(rand() - 0.5) * 0.4, rand() * 0.3, rand() * 0.3];
+    const off = mirroredOffset(authored);
+    const share = [0, 0.5, 1, rand()][i % 4];
+    const view = viewEye(camera, off, share);
+    // Player.syncMount's eye: cockpitEye() - cockpitOffset + (f with X mirrored).
+    const hang: Vec3 = [view[0] - off[0] - authored[0], view[1] - off[1] + authored[1], view[2] - off[2] + authored[2]];
+    const scale = 0.85 + rand() * 0.3;
+    const seatedEye: Vec3 = [SEATED_EYE_FALLBACK[0] * scale, SEATED_EYE_FALLBACK[1] * scale, SEATED_EYE_FALLBACK[2] * scale];
+    for (const firstPerson of [false, true]) {
+      const lift = bodyLift(seatDropUsed(0.3 + rand()), EYE_OVER_PELVIS[1] * scale, scale, firstPerson);
+      if (lift !== 0) good = false;
+      const origin = riderOrigin(hang, [seatedEye[0], seatedEye[1] - lift, seatedEye[2]], q);
+      const r = rotate(q, seatedEye);
+      const eyesAt: Vec3 = [origin[0] + r[0], origin[1] + r[1], origin[2] + r[2]];
+      worst = Math.max(worst, Math.hypot(eyesAt[0] - view[0], eyesAt[1] - view[1], eyesAt[2] - view[2]));
+    }
+  }
+  ok(good && worst < 1e-9, `the seated eyes land on the view eye for forty ships, shares 0 to 1, both views (worst ${worst.toExponential(1)} m)`);
+}
+// The cushion rule, kept for a comparison: the same arithmetic lifts the body by bodyLift, so its eyes leave the eye by it.
+{
+  const drop = 0.557;
+  const lift = bodyLift(seatDropUsed(drop, 'cushion'), EYE_OVER_PELVIS[1], 1, false);
+  const origin = riderOrigin([0, 2, 0], [SEATED_EYE_FALLBACK[0], SEATED_EYE_FALLBACK[1] - lift, SEATED_EYE_FALLBACK[2]], [0, 0, 0, 1]);
+  ok(near(origin[1] + SEATED_EYE_FALLBACK[1] - 2, lift, 1e-12) && near(lift, 0.251, 1e-12), "under the cushion rule a TIE's seated eyes stand 0.251 over the eye, as before");
+}
 
 console.log(`${checks} checks passed`);

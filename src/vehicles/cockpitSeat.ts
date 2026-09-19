@@ -1,8 +1,10 @@
 // Where a ship's pilot looks from and sits: plain numbers, so the node tests can run it.
 //
 // The eye is the cockpit frame's own camera point (its one hardpoint, `camera`) with the cockpit
-// file's first-person offset (all of it, or a hull's share of it); the body hangs under it as the seated clip's first frame has it,
-// then moves up or down onto the seat cushion one downward ray through the frame's triangles finds.
+// file's first-person offset (all of it, or a hull's share of it); the body hangs under it with the
+// seated clip's eyes exactly on it, in first and third person alike. The seat cushion one downward
+// ray through the frame's triangles finds is still measured, for the console and for the older rule
+// that moved the body onto it (`SEAT_RULE`).
 export type Vec3 = [number, number, number];
 export type Quat = [number, number, number, number]; // x, y, z, w
 
@@ -40,6 +42,13 @@ export const COCKPIT_LEAD = 0.6;
  */
 export const COCKPIT_BODY_NUDGE: Readonly<Record<string, Vec3>> = {};
 /**
+ * How a ship's seated pilot is placed under the eye. `eyes`: the seated clip's eyes exactly on the first-person eye (the
+ * owner's call: the head lines up with the view, which also looks right from outside), whatever cushion is under it.
+ * `cushion`: the older rule, the body moved up or down onto the cushion the frame's triangles give (bodyLift). Mutable so
+ * `__debug.cockpit({ cushion: true })` can compare the two live.
+ */
+export const SEAT_RULE: { place: 'eyes' | 'cushion' } = { place: 'eyes' };
+/**
  * The share of the cockpit file's first-person offset (1OFF) the view takes, by cockpit frame file (the key
  * COCKPIT_BODY_NUDGE uses); a frame not listed takes all of it. INVENTED: the B-wing's full 1OFF (0.14 up, 0.10 ahead)
  * framed the instruments better for fighting and none looked more real, so the owner asked for the difference split.
@@ -56,6 +65,11 @@ export function offsetShare(file: string | null | undefined): number {
 /** The first-person eye in the hull's frame: the camera point plus the share of the (mirrored) 1OFF. */
 export function viewEye(camera: Vec3, offset: Vec3, share: number): Vec3 {
   return [camera[0] + offset[0] * share, camera[1] + offset[1] * share, camera[2] + offset[2] * share];
+}
+
+/** The cushion drop the body is placed by: none (the eyes go on the eye) under the 'eyes' rule, else the one measured. */
+export function seatDropUsed(cushion: number | null, place: 'eyes' | 'cushion' = SEAT_RULE.place): number | null {
+  return place === 'eyes' ? null : cushion;
 }
 
 /** A cockpit frame's file name without its folder ('tie_fighter_cockpit_cockpit.glb'), the key of COCKPIT_BODY_NUDGE and COCKPIT_OFFSET_SHARE. */

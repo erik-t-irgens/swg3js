@@ -7,7 +7,7 @@ import type { Physics } from '../core/physics';
 import { ACTOR_LAYER } from '../world/portalRender';
 import { surfaces } from '../world/surfaces';
 import { cellIndexOf } from './interior';
-import { COCKPIT_BODY_NUDGE, EYE_OVER_PELVIS, bodyLift, frameFileName, isEyeHardpoint, isSeatHardpoint, mirroredOffset, offsetShare, pelvisOnSeat, seatDropBelow, viewEye, type Vec3 } from './cockpitSeat';
+import { COCKPIT_BODY_NUDGE, EYE_OVER_PELVIS, bodyLift, frameFileName, isEyeHardpoint, isSeatHardpoint, mirroredOffset, offsetShare, pelvisOnSeat, seatDropBelow, seatDropUsed, viewEye, type Vec3 } from './cockpitSeat';
 import { EngineTrail } from './trail';
 import { advanceEnginePhase, engineHeatOf } from './enginePlumes';
 import { planSeat, hangSaddle, type SaddleDef, type SeatPlan } from './saddle';
@@ -954,12 +954,16 @@ export class Garage {
           });
           seatDrop = seatDropBelow(tris, eye[0], eye[1], eye[2] - EYE_OVER_PELVIS[2]);
           // The pelvis for the logs and the spawn report, at scale 1 wheeled out; the rider is placed by the eye.
-          spec.seat = pelvisOnSeat(eye, seatDrop);
+          const used = seatDropUsed(seatDrop);
+          spec.seat = pelvisOnSeat(eye, used);
           const n2 = (a: readonly number[]) => a.map((n) => n.toFixed(2)).join(',');
-          const up = bodyLift(seatDrop, EYE_OVER_PELVIS[1], 1, false);
-          const upFirst = bodyLift(seatDrop, EYE_OVER_PELVIS[1], 1, true);
+          const up = bodyLift(used, EYE_OVER_PELVIS[1], 1, false);
+          const upFirst = bodyLift(used, EYE_OVER_PELVIS[1], 1, true);
           const moved = (n: number) => `${n < 0 ? 'lowered' : 'raised'} ${Math.abs(n).toFixed(2)}`;
-          console.info(`garage: ${def.id} cockpit: eye at ${eyeFrom} ${n2(camera)} (+1OFF ${n2(offset)}${eyeShare !== 1 ? ` times ${eyeShare}` : ''}) in the hull's frame; ${seatDrop !== null ? `seat ${seatDrop.toFixed(2)} m under it, the body ${moved(up)} (${upFirst.toFixed(2)} in first person)` : 'no seat under it (only steep surfaces): the body hangs from the eye'}`);
+          // With the eyes on the eye, the pelvis stands EYE_OVER_PELVIS under it: how far that is over the cushion, for the console.
+          const gap = seatDrop !== null ? seatDrop - EYE_OVER_PELVIS[1] : null;
+          const body = seatDrop === null ? 'no seat under it (only steep surfaces): the body hangs from the eye' : used === null ? `seat ${seatDrop.toFixed(2)} m under it; the seated eyes are on the eye, the pelvis ${gap! >= 0 ? `${gap!.toFixed(2)} m over` : `${(-gap!).toFixed(2)} m under`} the cushion` : `seat ${seatDrop.toFixed(2)} m under it, the body ${moved(up)} (${upFirst.toFixed(2)} in first person)`;
+          console.info(`garage: ${def.id} cockpit: eye at ${eyeFrom} ${n2(camera)} (+1OFF ${n2(offset)}${eyeShare !== 1 ? ` times ${eyeShare}` : ''}) in the hull's frame; ${body}`);
         }
       } catch (err) {
         console.warn(`garage: ${def.id}: its cockpit frame did not load`, err);
@@ -1008,7 +1012,8 @@ export class Garage {
       v.cockpitFrame = frame;
       v.cockpitOffset = mirroredOffset(def.cockpit?.firstOffset);
       v.cockpitShare = eyeShare;
-      v.seatDrop = seatDrop;
+      v.cushionDrop = seatDrop;
+      v.seatDrop = seatDropUsed(seatDrop);
       const nudge = COCKPIT_BODY_NUDGE[frameFileName(def.cockpit?.file)];
       if (nudge) {
         v.bodyNudge[0] = nudge[0];

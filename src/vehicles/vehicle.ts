@@ -339,8 +339,10 @@ export class Vehicle {
   eyeSeat = false;
   /** Where the cockpit eye came from, for the console: 'hp:camera', 'frame middle', 'bridge', 'hardpoint <name>' or 'hull'. */
   eyeSource = 'hull';
-  /** How far under the cockpit eye (with 1OFF) the frame's seat cushion is, metres; null: none found, the body hangs from the eye. */
+  /** How far under the cockpit eye the frame's seat cushion is (metres) as the body is placed by it: null under SEAT_RULE's 'eyes' (the eyes on the eye), or with no cushion found. */
   seatDrop: number | null = null;
+  /** The cushion measured under the cockpit eye (metres), whatever the rule; null when none was found. For the console and a switch of SEAT_RULE. */
+  cushionDrop: number | null = null;
   /** A seated rider not drawn: a ship without a cockpit frame, where the game never drew a pilot. */
   riderHidden = false;
   /** A correction of the body under the eye, in the hull's frame: the frame's COCKPIT_BODY_NUDGE, then __debug.seat's. The eye stays put. Lost when the hull is spawned again (travel, respawn). */

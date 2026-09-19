@@ -89,7 +89,7 @@ import { deleteCharacter, loadCharacters, newCharacterId, upsertCharacter, type 
 import { FRAME_NUDGE, Garage, type VehicleDef } from './vehicles/garage';
 import { WING_RULE } from './vehicles/wings';
 import type { Vehicle, VehicleKind } from './vehicles/vehicle';
-import { HEAD_TO_EYE, SEATED_EYE_FALLBACK, cockpitYawStep, frameFileName, mirroredOffset } from './vehicles/cockpitSeat';
+import { HEAD_TO_EYE, SEATED_EYE_FALLBACK, SEAT_RULE, cockpitYawStep, frameFileName, mirroredOffset, seatDropUsed } from './vehicles/cockpitSeat';
 import { World } from './world/world';
 import { RoomAir, type RoomAirDebugOptions, type RoomAirInput } from './world/roomAir';
 import { RANGE } from './world/gallery';
@@ -1613,15 +1613,20 @@ class App {
        * and how far the figure's eyes are from the camera, the view in use. `cockpit({ offset: false })` takes the cockpit
        * file's first-person offset off the view (true puts it back; the body stays where the whole offset puts it),
        * `cockpit({ share: 0.5 })` sets the share of that offset the view and the seated eyes take (COCKPIT_OFFSET_SHARE, this
-       * ship until it is spawned again), `cockpit({ bridgeHull: false })` hides the hull around a bridge pilot flying in
+       * ship until it is spawned again), `cockpit({ cushion: true })` seats every ship's pilot on the cushion under the eye as
+       * before (false: the eyes on the eye), `cockpit({ bridgeHull: false })` hides the hull around a bridge pilot flying in
        * first person (true shows it again).
        */
-      cockpit: (opts: { offset?: boolean; share?: number; bridgeHull?: boolean } = {}) => {
+      cockpit: (opts: { offset?: boolean; share?: number; cushion?: boolean; bridgeHull?: boolean } = {}) => {
         const p = this.player;
         const v = p.mounted ?? p.piloting;
         if (!v || !v.spec.ship) return 'not seated in a ship';
         if (opts.offset !== undefined) v.cockpitOffset = opts.offset ? mirroredOffset(v.def?.cockpit?.firstOffset) : [0, 0, 0];
         if (typeof opts.share === 'number' && Number.isFinite(opts.share)) v.cockpitShare = THREE.MathUtils.clamp(opts.share, 0, 1);
+        if (opts.cushion !== undefined) {
+          SEAT_RULE.place = opts.cushion ? 'cushion' : 'eyes';
+          for (const o of this.world.vehicles) if (o.eyeSeat) o.seatDrop = seatDropUsed(o.cushionDrop);
+        }
         if (opts.bridgeHull !== undefined) this.bridgeHullInFlight = opts.bridgeHull;
         p.syncMount();
         const n3 = (n: number) => Number(n.toFixed(3));
@@ -1636,7 +1641,7 @@ class App {
         const off = v.def?.cockpit?.firstOffset ?? null;
         const want = mirroredOffset(off);
         const offsetOn = !!off && v.cockpitOffset.every((n, i) => Math.abs(n - want[i]) < 1e-9) && want.some((n) => n !== 0);
-        const base = { ship: v.spec.id, seated, source: v.eyeSource, eye: v3(eyeLocal), authored: v3(authored), firstOffset: off ? [...off].map(n3) : null, offsetOn, share: n3(v.cockpitShare), view, locked: view === 'cockpit' && !v.airborne, bridgeHull: this.bridgeHullInFlight };
+        const base = { ship: v.spec.id, seated, source: v.eyeSource, eye: v3(eyeLocal), authored: v3(authored), firstOffset: off ? [...off].map(n3) : null, offsetOn, share: n3(v.cockpitShare), seatRule: SEAT_RULE.place, view, locked: view === 'cockpit' && !v.airborne, bridgeHull: this.bridgeHullInFlight };
         if (!seated) return { ...base, seatDrop: null, lift: null, scale: null, bodyNudge: null, seatGap: null, eyeGapClip: null, eyeGapLive: null };
         const r = p.seatReport;
         const camEye = this.shipEyeWorld(v, new THREE.Vector3());
@@ -1663,7 +1668,9 @@ class App {
           lift: n3(r.lift),
           scale: n3(r.scale),
           bodyNudge: v.bodyNudge.map(n3),
-          seatGap: v.seatDrop === null ? null : n3(v.seatDrop - r.eyeOverPelvis + r.lift + v.bodyNudge[1]),
+          // How far the pelvis sits over the cushion measured under the eye (negative: in it), whichever rule placed the body.
+          cushion: v.cushionDrop === null ? null : n3(v.cushionDrop),
+          seatGap: v.cushionDrop === null ? null : n3(v.cushionDrop - r.eyeOverPelvis + r.lift + v.bodyNudge[1]),
           eyeGapClip: camEye ? n3(camEye.distanceTo(clipEye)) : null,
           eyeGapLive: camEye && liveEye ? n3(camEye.distanceTo(liveEye)) : null,
           clip: r.clip,
