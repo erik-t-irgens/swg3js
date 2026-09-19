@@ -7,15 +7,48 @@ import type { Physics } from '../core/physics';
 import { ACTOR_LAYER } from '../world/portalRender';
 import { surfaces } from '../world/surfaces';
 import { cellIndexOf } from './interior';
-import { COCKPIT_BODY_NUDGE, EYE_OVER_PELVIS, GUN_MOUNT, GUN_MUZZLE, addVec, bodyLift, frameFileName, isEyeHardpoint, isSeatHardpoint, mirroredOffset, pelvisOnSeat, seatDropBelow, type Vec3 } from './cockpitSeat';
+import { COCKPIT_BODY_NUDGE, EYE_OVER_PELVIS, addVec, bodyLift, frameFileName, isEyeHardpoint, isSeatHardpoint, mirroredOffset, pelvisOnSeat, seatDropBelow, type Vec3 } from './cockpitSeat';
 import { EngineTrail } from './trail';
 import { advanceEnginePhase, engineHeatOf } from './enginePlumes';
 import { planSeat, hangSaddle, type SaddleDef, type SeatPlan } from './saddle';
-import { PART_LIMIT, collectGuns, frameExtents, hangAttachments, hardpointName, partOf, underPivot, wingDrop, type AttachmentDef, type Assembly } from './shipAssembly';
-import { WING_DROP_MIN, WING_TIP_ROOM, type WingSet } from './wings';
+import { PART_LIMIT, applyPlace, frameExtents, hangAttachments, hardpointName, partOf, underPivot, wingDrop, type AttachmentDef, type Assembly } from './shipAssembly';
+import { WING_DROP_MIN, WING_TIP_ROOM, WingSet, type Wing } from './wings';
+import { boltSlotOf, changedSlots, componentIndex, gunWeapon, partsOf, resolveFit, samePaint, type ComponentDef, type DroidDef, type FitDef, type PlacedPart, type ResolvedFit, type ShipFit } from './shipFit';
+import { collectMounts, countSpotHardpoints, dropWingsUnder, engineSpotsOf, fitTree, hangParts, onModel, rebindGlows, recordHung, refitSwap, splitPartChildren, stageRefit, type Mounts, type PendingPart, type ShipBuild, type SpareGlows, type StandIn, type SwapResult } from './shipMounts';
+import { ShipPaint } from './shipPaint';
+import { renderPaint } from './paintRender';
 
 // Moved to shipAssembly.ts (node-testable); every existing import from here keeps working.
 export { hardpointName } from './shipAssembly';
+
+/** A spawn dropped because the world it was asked for went while the ship was being prepared. */
+export class SpawnCancelled extends Error {
+  constructor(readonly id: string) {
+    super(`garage: ${id}: the world changed while it was being prepared; not spawned`);
+    this.name = 'SpawnCancelled';
+  }
+}
+
+/** A refit's new parts, loaded, painted and compiled in a detached group; `commit` swaps them in, in one synchronous step. */
+export interface Staged {
+  /** The slots whose look changes ('droid' when the droid does). */
+  slots: string[];
+  parts: PendingPart[];
+  group: THREE.Group;
+  commit: () => SwapResult;
+}
+
+/** What a refit did. */
+export interface RefitReport {
+  slots: string[];
+  /** Parts staged and hung. */
+  parts: number;
+  /** Parts still waiting for a carrier (label and hardpoint). */
+  waiting: string[];
+  repainted: boolean;
+  weaponsChanged: boolean;
+  ms: number;
+}
 
 export interface VehicleDef {
   id: string;
@@ -55,6 +88,8 @@ export interface VehicleDef {
   clipSpeeds?: Record<string, number>;
   /** A mount's saddle from the creatures pack: its model, the joint the creature's own hardpoint hangs it from, and its rider point. */
   saddle?: SaddleDef | null;
+  /** A ship's chassis slots with the components each takes and the parts each shows, its droid socket and its paint; absent on a pack converted before (or without components.json). */
+  fit?: FitDef | null;
 }
 
 export interface ShipWeapon {
@@ -80,8 +115,16 @@ interface GalleryIndex {
 
 /** What a spawn may be given to do before the vehicle is shown. */
 export interface BuildOptions {
+  /** The fit to build (a ship with `fit`); null or absent: the stock fit. */
+  fit?: ResolvedFit | null;
   /** Join the world's material schemes and compile, a mesh at a time, before the model is shown. */
   prepare?: (roots: THREE.Object3D[]) => Promise<void>;
+  /** Take materials out of the world's sets (the paint's own copies, when they are disposed). */
+  forget?: (materials: THREE.Material[]) => void;
+  /** The longest wait for custom paint before the model is shown (ms); 3000 by default. */
+  paintWait?: number;
+  /** Checked just before the vehicle is made: false drops the spawn (SpawnCancelled; the world unloaded meanwhile). */
+  alive?: () => boolean;
 }
 
 /** The engine glows made before a vehicle exists (so the preparation compiles them with it), wired to it once it does. */
@@ -90,12 +133,19 @@ interface EngineGlow {
   sprites: THREE.Sprite[];
   trails: EngineTrail[];
   size: number;
+  color: number;
+  /** The nodes the sprites hang on, sprite i on spot i (hardpoints, or glow spots at the rear of the box). */
+  spots: THREE.Object3D[];
 }
 
 export class Garage {
   readonly vehicles: VehicleDef[] = [];
   /** The game's projectiles, by index, when the ships pack carries them. */
   readonly projectiles = new Map<number, ProjectileDef>();
+  /** The pack's ship components (components.json), by index (what a fit's looks list), and by name; the droids and flight computers. */
+  readonly components: ComponentDef[] = [];
+  readonly componentByName = new Map<string, number>();
+  readonly droids: DroidDef[] = [];
   private readonly loader = surfaces.withPlugin(new GLTFLoader());
   private readonly models = new Map<string, Promise<{ scene: THREE.Group; animations: THREE.AnimationClip[] }>>();
 
@@ -133,13 +183,25 @@ export class Garage {
       console.warn('garage: no creatures', err);
     }
     try {
-      const res = await fetch(`${baseUrl}assets-private/ships/manifest.json`);
+      // The ship components (components.json) beside the manifest: without them a fit cannot be resolved,
+      // and the ships are built as their manifest's stock tree (as a pack converted before).
+      const [res, comps] = await Promise.all([fetch(`${baseUrl}assets-private/ships/manifest.json`), fetch(`${baseUrl}assets-private/ships/components.json`).catch(() => null)]);
+      if (comps?.ok && (comps.headers.get('content-type') ?? '').includes('json')) {
+        try {
+          const file = (await comps.json()) as { format?: number; components?: ComponentDef[]; droids?: DroidDef[] };
+          g.components.push(...(file.components ?? []));
+          for (const [name, i] of componentIndex(g.components)) g.componentByName.set(name, i);
+          g.droids.push(...(file.droids ?? []));
+        } catch (err) {
+          console.warn('garage: components.json did not read; ships are built stock', err);
+        }
+      }
       if (res.ok && (res.headers.get('content-type') ?? '').includes('json')) {
         type Cells = NonNullable<import('./interior').InteriorDef['cells']>;
         type Attachment = NonNullable<VehicleDef['attachments']>[number];
         type Cockpit = NonNullable<VehicleDef['cockpit']>;
         type Portals = NonNullable<import('./interior').InteriorDef['portals']>;
-        const manifest = (await res.json()) as { ships: { id: string; label: string; template: string; file: string; bounds?: VehicleSpec['bounds']; class: string; interior: { file?: string; cells?: number; failed?: string } | null; attachments?: Attachment[]; cockpit?: Cockpit | null; thrusters?: string[]; weapon?: ShipWeapon | null; chassis?: string | null; wingOpenSpeedFactor?: number }[]; models?: { file: string; bounds?: { min: number[]; max: number[] }; cells?: Cells; portals?: Portals }[] };
+        const manifest = (await res.json()) as { ships: { id: string; label: string; template: string; file: string; bounds?: VehicleSpec['bounds']; class: string; interior: { file?: string; cells?: number; failed?: string } | null; attachments?: Attachment[]; cockpit?: Cockpit | null; thrusters?: string[]; weapon?: ShipWeapon | null; chassis?: string | null; wingOpenSpeedFactor?: number; fit?: FitDef | null }[]; models?: { file: string; bounds?: { min: number[]; max: number[] }; cells?: Cells; portals?: Portals }[] };
         const modelByFile = new Map((manifest.models ?? []).map((m) => [m.file, m]));
         for (const sh of manifest.ships) {
           const im = sh.interior?.file ? modelByFile.get(sh.interior.file) : undefined;
@@ -164,6 +226,8 @@ export class Garage {
             weapon: sh.weapon ?? null,
             // A pilot sits as the game's pilot chairs seat one (space_sitting), the one riding pose that is a chair.
             riderPose: 'space_sitting',
+            // Only with the components to resolve it against: a fit whose names cannot be looked up would hang nothing.
+            fit: sh.fit && g.components.length ? sh.fit : null,
           });
         }
       }
@@ -201,6 +265,270 @@ export class Garage {
     const out = new Map<VehicleKind, VehicleDef[]>();
     for (const v of this.vehicles) (out.get(v.kind) ?? out.set(v.kind, []).get(v.kind)!).push(v);
     return out;
+  }
+
+  /** A saved fit checked against a ship's chassis (resolveFit with this pack's tables); null for a def without `fit`. */
+  resolve(def: VehicleDef, saved: ShipFit | null): ResolvedFit | null {
+    if (!def.fit) return null;
+    return resolveFit(def.fit, this.components, this.componentByName, this.droids, saved);
+  }
+
+  /**
+   * Stage a change of fit on a built model (a spawned ship's, the preview's, a peer's picture): the parts of
+   * every slot whose look changes (and the droid) are loaded and hung with their own children in a detached
+   * group, with the stand-in of any slot that may be left empty; they are prepared in their own materials,
+   * then tracked by the paint (which, while custom, puts the ship's copies on them, and those are prepared
+   * too); then the paint is applied when it changed, or its renders for the new parts are waited for (3 s at
+   * most). Nothing in the scene changes until `commit`, which is one synchronous step: the swap
+   * (`swapParts`, the stand-ins decided again), the paint forgetting what was taken down, and `wings` (the
+   * model's own set, when given) losing any wing on a part taken down and gaining the wings the new parts
+   * brought.
+   */
+  async restage(def: VehicleDef, build: ShipBuild, fit: ResolvedFit, next: ResolvedFit, paint: ShipPaint | null, prepare: (roots: THREE.Object3D[]) => Promise<void>, wings?: WingSet): Promise<Staged> {
+    return this.stage(def, build, fit, next, paint, prepare, null, wings);
+  }
+
+  /** `restage`, with `extra` adding to the staging group (and naming more roots to prepare) before the prepare: a refit's spare glows. */
+  private async stage(def: VehicleDef, build: ShipBuild, fit: ResolvedFit, next: ResolvedFit, paint: ShipPaint | null, prepare: (roots: THREE.Object3D[]) => Promise<void>, extra: ((group: THREE.Group, parts: PendingPart[]) => THREE.Object3D[]) | null, wings?: WingSet): Promise<Staged> {
+    if (!def.fit) throw new Error(`garage: ${def.id} has no fit to change`);
+    const slots = changedSlots(def.fit, fit, next);
+    const changing = new Set(slots);
+    const placed = partsOf(def.fit, def.id, next, this.droids).filter((p) => changing.has(p.slot));
+    // The new parts' wings join the model's set only at the swap: until then they are in a detached group.
+    const staging = new WingSet();
+    const built = await this.buildPlaced(def, placed, staging);
+    for (const note of built.unresolved) console.warn(`garage: ${def.id}: ${note}`);
+    // A stand-in whose slot changes may be wanted after the swap: loaded now, so the staging prepares it.
+    await this.loadStandIns(def, build, slots);
+    const parts = built.parts;
+    const staged = await stageRefit(build, slots, parts, {
+      track: paint ? (n) => paint.track(n) : undefined,
+      untrack: paint ? (n) => paint.untrack(n) : undefined,
+      prepare,
+      extra: extra ?? undefined,
+      after: paint ? () => (!samePaint(fit, next) ? paint.apply(next.paint, 3000) : paint.custom ? paint.settled(3000) : Promise.resolve()) : undefined,
+    });
+    const commit = (): SwapResult => {
+      const r = staged.commit();
+      if (wings) {
+        dropWingsUnder(wings, r.removed);
+        for (const w of staging.list) if (onModel(w.pivot, build.root)) wings.add(w);
+      }
+      for (const s of r.standIns?.missing ?? []) console.warn(`garage: ${def.id}: ${s.label} stands in for an empty ${s.standsFor}, but ${!s.node || !s.ready ? 'it did not load' : `nothing carries its hardpoint ${s.def.hardpoint}`}; left off`);
+      return r;
+    };
+    return { slots, parts, group: staged.group, commit };
+  }
+
+  /** Load (once) the stand-in of every slot among `slots`, marked as hangAttachments marks a part and stood at its place; not hung, not prepared (the staging does that). A model that fails is warned of and stays unloaded. */
+  private async loadStandIns(def: VehicleDef, build: ShipBuild, slots: string[]): Promise<void> {
+    const want = (build.standIns ?? []).filter((s) => !s.node && slots.some((k) => k === s.standsFor || k.startsWith(`${s.standsFor}_`)));
+    if (!want.length) return;
+    const load = this.partLoader(def);
+    await Promise.all(
+      want.map(async (s) => {
+        try {
+          // The def is the garage's own (its file already under assets-private/ships/).
+          s.node = standInNode(s.def, await load(s.def.file));
+          s.ready = false;
+        } catch (err) {
+          console.warn(`garage: ${def.id}: the stand-in ${s.label} did not load`, err);
+        }
+      }),
+    );
+  }
+
+  /**
+   * Refit a spawned ship in place. The new parts are staged, painted and compiled first (with spare glow
+   * sprites and trails for any engine spots they bring, so those compile too); then, in one synchronous
+   * step: every glow sprite to the vehicle's group (none left under a part about to go), the swap, the fit,
+   * the guns measured again (each with what its slot fires), the glows re-hung on the engine spots now there,
+   * and the "on" appearances collected again. Colliders, bounds, seat and cockpit stay as spawned.
+   */
+  async refit(v: Vehicle, next: ResolvedFit, prepare: (roots: THREE.Object3D[]) => Promise<void>): Promise<RefitReport> {
+    const began = performance.now();
+    const def = v.def;
+    if (!def?.fit || !v.build || !v.fit) throw new Error(`garage: ${v.spec.id} has no fit to change`);
+    const was = v.fit;
+    const weaponsChanged = Object.keys({ ...was.components, ...next.components }).some((s) => s.startsWith('weapon') && (was.components[s] ?? null) !== (next.components[s] ?? null));
+    const repainted = !samePaint(was, next);
+    const thrusters = def.thrusters ?? [];
+    const spare: SpareGlows = { sprites: [], trails: [] };
+    // A change of look can move the engine spots even with no new part (an engine slot emptied falls back to the hull's thrusters).
+    const looksChange = changedSlots(def.fit, was, next).length > 0;
+    const s = await this.stage(def, v.build, was, next, v.paint, prepare, (group, parts) => {
+      // As many spare glows as the ship could want after the swap, beyond the sprites it has.
+      if (!v.glowMaterial || !looksChange) return [];
+      const root = v.build!.root;
+      let could = countSpotHardpoints(root, thrusters);
+      for (const p of parts) could += countSpotHardpoints(p.node, thrusters);
+      for (const si of v.build!.standIns ?? []) if (si.node && !onModel(si.node, root)) could += countSpotHardpoints(si.node, thrusters);
+      const n = Math.max(0, could - v.glows.length);
+      for (let i = 0; i < n; i++) {
+        const sp = new THREE.Sprite(v.glowMaterial);
+        sp.scale.setScalar(0.2);
+        group.add(sp);
+        spare.sprites.push(sp);
+        if (v.spec.ship) spare.trails.push(new EngineTrail(v.glowColor, sp));
+      }
+      return spare.trails.map((t) => t.mesh);
+    }, v.wings);
+    if (!v.group.parent) {
+      // The ship went while its parts were staged: nothing to swap into.
+      for (const t of spare.trails) t.dispose(v.group);
+      for (const p of s.parts) v.paint?.untrack(p.node);
+      return { slots: [], parts: 0, waiting: [], repainted: false, weaponsChanged: false, ms: performance.now() - began };
+    }
+    // The swap: one synchronous step, nothing awaited (glows off the parts, the swap, the mounts measured, the glows re-hung).
+    const r = refitSwap(v, s.commit, v.build.root, thrusters, v.wings, v.spec.ship ? (sp) => new EngineTrail(v.glowColor, sp) : null, spare);
+    v.fit = next;
+    this.fitGuns(v, def, next, r.mounts);
+    collectOnParts(v, v.build.root);
+    const waiting = r.waiting.map((p) => `${p.label} waits for hardpoint ${p.hardpoint}`);
+    for (const w of waiting) console.warn(`garage: ${def.id}: ${w}, which nothing on the model carries`);
+    const hung = s.parts.filter((p) => !r.waiting.includes(p)).length;
+    const standIns = r.standIns && (r.standIns.up.length || r.standIns.down.length) ? `, stand-ins ${r.standIns.up.length} up and ${r.standIns.down.length} down` : '';
+    console.info(`garage: ${def.id} refitted: ${s.slots.length ? s.slots.join(', ') : 'no parts changed'}${repainted ? ', repainted' : ''}; ${hung} parts hung${standIns}, ${v.guns.length} guns, ${v.engines.length} glows (${(performance.now() - began).toFixed(0)} ms)`);
+    return { slots: s.slots, parts: hung, waiting, repainted, weaponsChanged, ms: performance.now() - began };
+  }
+
+  /** A ship's guns from its measured mounts: with a fit, each fires its slot's component (a gun on the hull, the first bolt slot's) and a gun whose slot fires nothing is left out; without, the ship's one weapon. */
+  private fitGuns(v: Vehicle, def: VehicleDef, fit: ResolvedFit | null, m: Mounts): void {
+    const fitted = !!def.fit && !!fit;
+    const fallback = fitted ? boltSlotOf(this.components, this.componentByName, fit!) : null;
+    v.guns = m.guns
+      .map((g) => ({
+        pos: g.pos,
+        dir: g.dir.z > 0.5 ? g.dir : new THREE.Vector3(0, 0, 1),
+        node: g.node,
+        hardpoint: g.hardpoint,
+        turret: g.turret,
+        slot: g.slot,
+        ...(fitted ? { weapon: gunWeapon(this.components, this.componentByName, fit!, g.slot, fallback) } : {}),
+      }))
+      .filter((g) => !fitted || g.weapon !== null);
+    v.weapon = fitted ? (v.guns[0]?.weapon ?? def.weapon ?? null) : (def.weapon ?? null);
+  }
+
+  /** The paint a fitted hull wears (null for one with nothing to paint), rendered in the paint worker. */
+  private paintFor(def: VehicleDef, opts: BuildOptions): ShipPaint | null {
+    if (!def.fit?.paint) return null;
+    return new ShipPaint(def.fit.paint, `${this.baseUrl}assets-private/ships/`, { prepare: opts.prepare ?? noPrepare, forget: opts.forget ?? noForget, render: renderPaint });
+  }
+
+  /** A fitted part's model: loaded once per file, cloned (a skinned droid with its own skeleton), dry, and marked with its slot and hardpoint. */
+  private async fitPart(def: VehicleDef, p: PlacedPart): Promise<THREE.Object3D> {
+    const loaded = await this.model({ file: `assets-private/${p.path}` } as VehicleDef);
+    const node = p.skinned ? cloneSkinned(loaded.scene) : loaded.scene.clone();
+    if (def.kind === 'ship') markDry(node);
+    const u = node.userData;
+    u.attachment = 'component';
+    u.slot = p.slot;
+    u.hangsOn = p.hardpoint || null;
+    u.fitPart = true;
+    if (p.skinned) {
+      // A droid in its socket stands in its skeleton's rest pose; its skinned mesh is no collider (its rest vertices are not where it is drawn).
+      u.droid = true;
+      node.traverse((o) => {
+        if ((o as THREE.Mesh).isMesh) o.userData.noCollider = true;
+      });
+    }
+    return node;
+  }
+
+  /** A part def's model, as hangAttachments loads one (a ship's stay dry). */
+  private partLoader(def: VehicleDef): (file: string) => Promise<THREE.Object3D> {
+    return async (file) => {
+      const part = (await this.model({ file } as VehicleDef)).scene.clone();
+      if (def.kind === 'ship') markDry(part);
+      return part;
+    };
+  }
+
+  /**
+   * Load placed parts and make each ready to hang: its model, its own children whose chain ends at it hung
+   * on it (hangAttachments on the part), and each child it does not carry (no parent: the Y-wing engine's
+   * "on" appearance on the hull's engine1) made into a pending part of its own, with its descendants, to be
+   * hung by name over the whole ship after the parts. Any wing among them joins `wings`.
+   */
+  private async buildPlaced(def: VehicleDef, placed: PlacedPart[], wings: WingSet): Promise<{ parts: PendingPart[]; unresolved: string[]; hung: number }> {
+    const load = this.partLoader(def);
+    const withPack = (d: AttachmentDef): AttachmentDef => ({ ...d, file: `assets-private/${d.file}` });
+    const loaded = await Promise.all(placed.map((p) => this.fitPart(def, p).then((node) => ({ node, error: null as unknown }), (error: unknown) => ({ node: null, error }))));
+    const parts: PendingPart[] = [];
+    const unresolved: string[] = [];
+    let hung = 0;
+    for (let i = 0; i < placed.length; i++) {
+      const p = placed[i];
+      const label = `${p.slot} ${fileName(p.path)}`;
+      const node = loaded[i].node;
+      if (!node) {
+        const err = loaded[i].error;
+        unresolved.push(`${label}: did not load (${err instanceof Error ? err.message : String(err)})`);
+        continue;
+      }
+      const { local, byName } = splitPartChildren(p.children ?? []);
+      if (local.length) {
+        const sub = await hangAttachments(node, local.map(withPack), load);
+        for (const w of sub.wings.list) wings.add(w);
+        unresolved.push(...sub.unresolved.map((u) => `${label}: ${u}`));
+        hung += sub.hung;
+      }
+      parts.push({ node, slot: p.slot, hardpoint: p.hardpoint, label, key: p.path });
+      for (const b of byName) {
+        const made = await this.byNamePart(def, withPack(b.root), b.descendants.map(withPack), p.slot, load, wings);
+        if (made.part) parts.push(made.part);
+        unresolved.push(...made.unresolved.map((u) => `${label}: ${u}`));
+        hung += made.hung;
+      }
+    }
+    return { parts, unresolved, hung };
+  }
+
+  /** A child a part does not carry, made ready to hang by name: its model marked as hangAttachments marks one, at its place, with its own descendants hung on it. */
+  private async byNamePart(def: VehicleDef, root: AttachmentDef, descendants: AttachmentDef[], slot: string, load: (file: string) => Promise<THREE.Object3D>, wings: WingSet): Promise<{ part: PendingPart | null; unresolved: string[]; hung: number }> {
+    const label = `${root.kind} ${fileName(root.file)}`;
+    let part: THREE.Object3D;
+    try {
+      part = await load(root.file);
+    } catch (err) {
+      return { part: null, unresolved: [`${label}: did not load (${err instanceof Error ? err.message : String(err)})`], hung: 0 };
+    }
+    const u = part.userData;
+    u.attachment = root.kind;
+    u.hangsOn = root.hardpoint ?? null;
+    if (root.on) u.on = root.on;
+    u.slot = slot;
+    let top: THREE.Object3D = part;
+    const place = root.place ?? null;
+    if (root.kind === 'wing' && root.turn?.angle) {
+      const pivot = new THREE.Group();
+      pivot.name = 'wing:by-name';
+      pivot.userData.wingPivot = true;
+      pivot.add(part);
+      const w: Wing = { pivot, angle: -THREE.MathUtils.degToRad(root.turn.angle), time: Number.isFinite(root.turn.time) && root.turn.time > 0 ? root.turn.time : 3, open: 0, label: fileName(root.file) };
+      wings.add(w);
+      top = pivot;
+    }
+    if (place) {
+      const mount = new THREE.Group();
+      mount.name = 'mount:by-name';
+      mount.userData.mountOf = -1;
+      applyPlace(mount, place);
+      mount.add(top);
+      top = mount;
+    }
+    let unresolved: string[] = [];
+    let hung = 1;
+    if (descendants.length) {
+      const sub = await hangAttachments(part, descendants, load);
+      for (const w of sub.wings.list) wings.add(w);
+      unresolved = sub.unresolved;
+      hung += sub.hung;
+    }
+    // Owned by its part: taken down with it (the same slot), hung again by name when a part it rides goes.
+    // Hung by name after every fitted part is on (hangParts' second round).
+    return { part: { node: top, slot, hardpoint: root.hardpoint ?? '', label: `${slot} ${label}`, key: `${root.file}|${place ? place.join(',') : ''}`, byName: true }, unresolved, hung };
   }
 
   private model(def: VehicleDef): Promise<{ scene: THREE.Group; animations: THREE.AnimationClip[] }> {
@@ -288,35 +616,48 @@ export class Garage {
       if ((o as THREE.SkinnedMesh).isSkinnedMesh) skinned = true;
     });
     const model = skinned ? cloneSkinned(loaded.scene) : loaded.scene.clone();
-    const a = await this.assemble(def, model);
+    // A fitted ship is built from its fit (the stock one when none is given).
+    const fit = def.fit ? (opts.fit ?? this.resolve(def, null)) : null;
+    const a = await this.assemble(def, model, fit);
+    // Its paint notes the meshes wearing a paint shader now; copies only come with custom paint.
+    const paint = this.paintFor(def, opts);
+    paint?.track(model);
     const bounds = this.frameModel(def, model);
     // How far the open wings reach under the closed belly, on the real vertices (a portal hull's rooms left out).
     const drop = a.wings.length ? wingDrop(model, a.wings, (o) => cellIndexOf(o) <= 0) : 0;
     const hardpoints: string[] = [];
-    return this.finishSpawn(def, model, a, drop, bounds, hardpoints, loaded.animations, saddle, physics, scene, x, y, z, heading, kind, place, opts);
+    return this.finishSpawn(def, model, a, drop, bounds, hardpoints, loaded.animations, saddle, physics, scene, x, y, z, heading, kind, place, opts, fit, paint);
   }
 
   /**
    * A vehicle as a picture only, for another player's ride seen across the relay: the model with
-   * its parts hung on it and framed as a spawned one is, its rooms hidden, with no physics.
+   * its parts hung on it and framed as a spawned one is, its rooms hidden, with no physics. A custom
+   * paint's copies ride on the holder's `userData.paint`, for whoever drops the picture to dispose.
    */
   async visual(def: VehicleDef, opts: BuildOptions = {}): Promise<THREE.Object3D> {
-    return (await this.visualParts(def, opts)).holder;
+    const r = await this.visualParts(def, opts);
+    if (r.paint) r.holder.userData.paint = r.paint;
+    return r.holder;
   }
 
   /**
    * Another player's ride as a picture (`visual`), with its wings, which the relay's word moves
-   * (RemotePlayers steps them), and what could not be hung. Prepared (`opts.prepare`) before it is
-   * handed back, so it compiles nothing once shown.
+   * (RemotePlayers steps them), and what could not be hung; for a fitted ship also its build (for a
+   * restage), its paint (the caller disposes it with the picture) and the fit it was built from.
+   * Prepared (`opts.prepare`) and painted (`opts.fit`'s paint, waited for up to `opts.paintWait`) before
+   * it is handed back, so it compiles nothing once shown.
    */
-  async visualParts(def: VehicleDef, opts: BuildOptions = {}): Promise<{ holder: THREE.Object3D; wings: WingSet; unresolved: string[] }> {
+  async visualParts(def: VehicleDef, opts: BuildOptions = {}): Promise<{ holder: THREE.Object3D; wings: WingSet; unresolved: string[]; build: ShipBuild; paint: ShipPaint | null; fit: ResolvedFit | null }> {
     const [loaded, saddle] = await Promise.all([this.model(def), this.saddleFor(def)]);
     let skinned = false;
     loaded.scene.traverse((o) => {
       if ((o as THREE.SkinnedMesh).isSkinnedMesh) skinned = true;
     });
     const model = skinned ? cloneSkinned(loaded.scene) : loaded.scene.clone();
-    const a = await this.assemble(def, model);
+    const fit = def.fit ? (opts.fit ?? this.resolve(def, null)) : null;
+    const a = await this.assemble(def, model, fit);
+    const paint = this.paintFor(def, opts);
+    paint?.track(model);
     this.frameModel(def, model);
     model.traverse((o) => {
       if (cellIndexOf(o) > 0) o.visible = false;
@@ -344,8 +685,14 @@ export class Garage {
       hangSaddle(model, planSeat(hardpoints, def.saddle), saddle, findHardpoint, holder, null);
     }
     // Compiled before it is shown, saddle and parts included (the holder carries everything).
-    if (opts.prepare) await opts.prepare([holder]);
-    return { holder, wings: a.wings, unresolved: a.unresolved };
+    try {
+      if (opts.prepare) await opts.prepare([holder]);
+      if (paint && fit?.painted) await paint.apply(fit.paint, opts.paintWait ?? 3000);
+    } catch (err) {
+      paint?.dispose();
+      throw err;
+    }
+    return { holder, wings: a.wings, unresolved: a.unresolved, build: a.build, paint, fit };
   }
 
   /**
@@ -353,17 +700,96 @@ export class Garage {
    * (its parent part's hardpoint, or its origin at its place), a wing under a pivot that turns it,
    * so a part on a wing rides it (hangAttachments, shipAssembly.ts). The parts are part of the
    * ship's box and its collision, and their hardpoints (glows, muzzles) count with the hull's.
+   *
+   * A fitted ship (`def.fit` and a resolved `fit`) is hung in one tree with its fit's parts: the
+   * manifest's tree without its stock components, without what they produced (`owner`) and without the
+   * stand-in of a slot the fit fills, a def whose parent was left out becoming one hung by name after
+   * the fit (fitTree, shipMounts.ts); then the fit's parts (partsOf) by hardpoint name over the ship
+   * (hangParts, repeated passes, never at the origin), each with its own children (those it carries hung on
+   * it; the rest by name, in hangParts' second round, after every fitted part is on); then the defs hung by
+   * name; then a left-out stand-in again if no part of its slot hung after all. Every stand-in is recorded
+   * in the build (`standIns`), so a refit takes it down or hangs it again as its slot fills or empties.
    */
-  private async assemble(def: VehicleDef, model: THREE.Object3D): Promise<Assembly> {
-    const a = await hangAttachments(model, def.attachments ?? [], async (file) => {
-      const part = (await this.model({ file } as VehicleDef)).scene.clone();
-      // A ship's wings, engines and guns stay dry as its hull does (the clone shares the loaded materials).
-      if (def.kind === 'ship') markDry(part);
-      return part;
-    });
+  private async assemble(def: VehicleDef, model: THREE.Object3D, fit: ResolvedFit | null = null): Promise<Assembly & { build: ShipBuild }> {
+    const build: ShipBuild = { root: model, fitParts: new Map(), pending: [] };
+    const load = this.partLoader(def);
+    const fitted = !!def.fit && !!fit;
+    const defs = def.attachments ?? [];
+    const placed = fitted ? partsOf(def.fit!, def.id, fit!, this.droids) : [];
+    // The tree kept whole, and what hung on something left out (hung by name, after the fit's parts): fitTree.
+    // Without a fit, the whole tree as it is (wave 3's path).
+    const tree = fitted ? fitTree(defs, new Set(placed.map((p) => p.slot))) : null;
+    const main = tree ? tree.main : [...defs];
+    const retry = tree ? tree.retry : [];
+    const a = await hangAttachments(model, main, load);
+    const unresolved = [...a.unresolved];
+    let hung = a.hung;
+    if (fitted) {
+      // The fit's parts, their own children, and the droid, hung by hardpoint name over the whole ship.
+      const built = await this.buildPlaced(def, placed, a.wings);
+      unresolved.push(...built.unresolved);
+      hung += built.hung;
+      const waiting = hangParts(model, built.parts);
+      recordHung(build, built.parts, waiting);
+      build.pending = waiting;
+      hung += built.parts.length - waiting.length;
+      for (const p of waiting) unresolved.push(`${p.label} waits for hardpoint ${p.hardpoint}, which nothing on the model carries`);
+      if (retry.length) {
+        const r = await hangAttachments(model, retry, load);
+        unresolved.push(...r.unresolved);
+        hung += r.hung;
+        for (const w of r.wings.list) a.wings.add(w);
+        // Each one hung by name is the ship's own, hung again wherever its hardpoint is when a part it rides goes.
+        const shipNodes: PendingPart[] = [];
+        retry.forEach((d, i) => {
+          const part = r.parts[i];
+          if (!part || d.parent !== undefined) return;
+          let top = part;
+          while (top.parent && top.parent !== model && (top.parent.userData.mountOf !== undefined || top.parent.userData.wingPivot === true)) top = top.parent;
+          const pp: PendingPart = { node: top, slot: '', hardpoint: d.hardpoint ?? '', label: `${d.kind} ${fileName(d.file)}`, key: `${d.file}|${d.place ? d.place.join(',') : ''}`, byName: true };
+          top.userData.fitPending = pp;
+          top.userData.fitSlots = [''];
+          shipNodes.push(pp);
+        });
+        recordHung(build, shipNodes, []);
+      }
+      // The stand-ins, recorded so a refit decides them again: one kept (its slot left empty) is on the model
+      // already; one left out is hung after all when none of its slot's parts hung (its model failed, or its
+      // hardpoint is missing), and otherwise waits unloaded until a refit may want it.
+      const standIns: StandIn[] = [];
+      const topOf = (node: THREE.Object3D): THREE.Object3D => {
+        let top = node;
+        while (top.parent && top.parent !== model && top.parent.userData.mountOf !== undefined) top = top.parent;
+        return top;
+      };
+      for (const i of tree!.standIns) {
+        const d = defs[i];
+        const rec: StandIn = { standsFor: d.standInFor!, def: d, label: `${d.kind} ${fileName(d.file)}`, node: null, ready: false };
+        standIns.push(rec);
+        if (!tree!.dropped[i]) {
+          const at = tree!.mainIndex.get(i);
+          const node = at === undefined ? null : a.parts[at];
+          if (node) {
+            rec.node = topOf(node);
+            rec.ready = true;
+          }
+          continue;
+        }
+        const hungFor = [...build.fitParts.keys()].some((s) => s === d.standInFor || s.startsWith(`${d.standInFor}_`));
+        if (hungFor) continue;
+        const s = await hangAttachments(model, [{ ...d, parent: d.parent === null ? null : undefined }], load);
+        unresolved.push(...s.unresolved);
+        hung += s.hung;
+        if (s.parts[0]) {
+          rec.node = topOf(s.parts[0]);
+          rec.ready = true;
+        }
+      }
+      build.standIns = standIns;
+    }
     // A hull with more parts than the physics and the shadow pass want (the Star Destroyer's 207):
     // its parts are pictures only, culled one by one, casting nothing.
-    if (a.hung > PART_LIMIT) {
+    if (hung > PART_LIMIT) {
       model.traverse((o) => {
         const m = o as THREE.Mesh;
         if (!m.isMesh || !partOf(o, model)) return;
@@ -372,8 +798,8 @@ export class Garage {
         m.frustumCulled = true;
       });
     }
-    if (a.unresolved.length) console.warn(`garage: ${def.id}: left off: ${a.unresolved.join('; ')}`);
-    return a;
+    if (unresolved.length) console.warn(`garage: ${def.id}: left off: ${unresolved.join('; ')}`);
+    return { wings: a.wings, parts: a.parts, unresolved, hung, build };
   }
 
   /**
@@ -417,11 +843,12 @@ export class Garage {
     return bounds ?? { min: [-0.5, 0, -1], max: [0.5, 1, 1] };
   }
 
-  private async finishSpawn(def: VehicleDef, model: THREE.Object3D, a: Assembly, drop: number, bounds: VehicleSpec['bounds'], hardpoints: string[], animations: THREE.AnimationClip[], saddle: THREE.Object3D | null, physics: Physics, scene: THREE.Scene, x: number, y: number, z: number, heading: number, kind: VehicleKind, place?: (bounds: VehicleSpec['bounds']) => [number, number, number], opts: BuildOptions = {}): Promise<Vehicle> {
+  private async finishSpawn(def: VehicleDef, model: THREE.Object3D, a: Assembly & { build: ShipBuild }, drop: number, bounds: VehicleSpec['bounds'], hardpoints: string[], animations: THREE.AnimationClip[], saddle: THREE.Object3D | null, physics: Physics, scene: THREE.Scene, x: number, y: number, z: number, heading: number, kind: VehicleKind, place?: (bounds: VehicleSpec['bounds']) => [number, number, number], opts: BuildOptions = {}, fit: ResolvedFit | null = null, paint: ShipPaint | null = null): Promise<Vehicle> {
     // Where the engines glow, by what the hardpoints are called, best first: the engine parts'
-    // own glow points, the client data's thruster points, any exhaust, any numbered engine. The
-    // nodes themselves: a glow hung on one rides whatever carries it (an engine on a wing).
-    const engineSpots: { glow: THREE.Object3D[]; thruster: THREE.Object3D[]; exhaust: THREE.Object3D[]; engine: THREE.Object3D[] } = { glow: [], thruster: [], exhaust: [], engine: [] };
+    // own glow points, the client data's thruster points, any exhaust, any numbered engine
+    // (engineSpotsOf, the list a refit makes again). The nodes themselves: a glow hung on one rides
+    // whatever carries it (an engine on a wing).
+    const engines = engineSpotsOf(model, def.thrusters ?? []);
     const seat = { point: null as THREE.Vector3 | null, cockpit: null as THREE.Vector3 | null };
     let cockpitName = '';
     // The game's hardpoints ride along as hp:<name> nodes; a rider's, saddle's or seat's places the seat.
@@ -436,11 +863,6 @@ export class Garage {
       const hull = !partOf(o, model);
       // A gun is never a seat or an eye (the gunboats' pilotmuzzle1 is a gun).
       if (hull && !seat.point && isSeatHardpoint(name)) seat.point = local();
-      // Not the "engine on" appearance's or the engine sound's hardpoints, which sit at the hull's origin, and not the boosters'.
-      if (/engine_glow/i.test(name)) engineSpots.glow.push(o);
-      else if (def.thrusters?.includes(name)) engineSpots.thruster.push(o);
-      else if (/exhaust|thrust/i.test(name)) engineSpots.exhaust.push(o);
-      else if (/^engine\d*$|(^|[_:])eng\d/i.test(name)) engineSpots.engine.push(o);
       if (hull && !seat.cockpit && isEyeHardpoint(name)) {
         seat.cockpit = local();
         cockpitName = name;
@@ -549,16 +971,27 @@ export class Garage {
       }
     }
     // The glows and trails are made now, on their nodes, so the preparation below compiles them too.
-    const engines = engineSpots.glow.length ? engineSpots.glow : engineSpots.thruster.length ? engineSpots.thruster : engineSpots.exhaust.length ? engineSpots.exhaust : engineSpots.engine;
     const glow = def.source !== 'creature' ? makeEngineGlow(spec, model, engines) : null;
-    // The whole assembly (parts, cockpit frame, glows, trails) joins the world's material schemes and is compiled
-    // before the vehicle exists, so nothing compiles once it is shown.
-    if (opts.prepare) {
-      const began = performance.now();
-      await opts.prepare([model, ...(glow?.trails.map((t) => t.mesh) ?? [])]);
-      // A big hull (hundreds of drawables, rooms included) takes seconds to appear: said, so the wait is not a mystery.
-      const took = performance.now() - began;
-      if (took > 1000) console.info(`garage: ${def.id}: prepared in ${(took / 1000).toFixed(1)} s before it was shown`);
+    try {
+      // The whole assembly (parts, cockpit frame, glows, trails) joins the world's material schemes and is compiled
+      // before the vehicle exists, so nothing compiles once it is shown.
+      if (opts.prepare) {
+        const began = performance.now();
+        await opts.prepare([model, ...(glow?.trails.map((t) => t.mesh) ?? [])]);
+        // A big hull (hundreds of drawables, rooms included) takes seconds to appear: said, so the wait is not a mystery.
+        const took = performance.now() - began;
+        if (took > 1000) console.info(`garage: ${def.id}: prepared in ${(took / 1000).toFixed(1)} s before it was shown`);
+      }
+      // A custom paint: the copies made, prepared and rendered (in the paint worker) before the ship is shown, 3 s at most.
+      if (paint && fit?.painted) await paint.apply(fit.paint, opts.paintWait ?? 3000);
+      // The world the spawn was asked for may have gone meanwhile (a travel): nothing is made for the next one.
+      if (opts.alive && !opts.alive()) throw new SpawnCancelled(def.id);
+    } catch (err) {
+      paint?.dispose();
+      if (glow) opts.forget?.([glow.mat, ...glow.trails.map((t) => t.mesh.material as THREE.Material)]);
+      for (const t of glow?.trails ?? []) t.dispose(scene);
+      glow?.mat.dispose();
+      throw err;
     }
     // The ground is read when the vehicle is made, after the preparation's wait.
     if (place) [x, y, z] = place(bounds);
@@ -598,31 +1031,27 @@ export class Garage {
       console.info(`garage: ${def.id} cockpit guessed at ${v.podSeat.map((n) => n.toFixed(2)).join(',')} from the mesh (its origin sits at ${model.position.toArray().map((n) => n.toFixed(2)).join(',')} in its box)`);
     }
     v.def = def;
+    // The fit it was built from, its parts per slot (for a refit) and its paint.
+    v.build = a.build;
+    v.fit = fit;
+    v.paint = paint;
     // The "on" appearances: an engine's while the drive runs, a booster's only while boosting.
-    model.traverse((o) => {
-      if (o.userData.attachment !== 'engine') return;
-      o.visible = false;
-      (o.userData.on === 'booster' ? v.boosterParts : v.engineParts).push(o);
-    });
+    collectOnParts(v, model);
     if (glow) wireEngineGlow(v, glow);
     if (spec.ship) {
       // The guns are their muzzle nodes, read live at each shot (Vehicle.muzzle): a gun on a wing fires from where the
-      // wing has turned it. The place and the way at spawn stay for the vehicle's frame; a gun that points nowhere
-      // useful (a hardpoint with no turn of its own) fires along the nose.
-      v.group.updateMatrixWorld(true);
-      const toGroup = new THREE.Matrix4().copy(v.group.matrixWorld).invert();
-      const groupTurn = v.group.getWorldQuaternion(new THREE.Quaternion()).invert();
-      v.guns = collectGuns(model, (n) => GUN_MUZZLE.test(n), (n) => GUN_MOUNT.test(n)).map((g) => {
-        const pos = g.node.getWorldPosition(new THREE.Vector3()).applyMatrix4(toGroup);
-        const dir = new THREE.Vector3(0, 0, 1).applyQuaternion(groupTurn.clone().multiply(g.node.getWorldQuaternion(new THREE.Quaternion()))).normalize();
-        return { pos, dir: dir.z > 0.5 ? dir : new THREE.Vector3(0, 0, 1), node: g.node, hardpoint: g.hardpoint, turret: g.turret };
-      });
+      // wing has turned it. The place and the way (in the vehicle's frame, wings closed) stay for the frame; a gun that
+      // points nowhere useful (a hardpoint with no turn of its own) fires along the nose. A fitted ship's gun fires its
+      // own slot's component, and a gun whose slot fires nothing (a launcher, countermeasures, empty) is left out.
+      this.fitGuns(v, def, fit, collectMounts(model, v.group, def.thrusters ?? [], v.wings));
       v.boltColor = /(^|_)tie|imperial|lambda|star_destroyer|decimator/i.test(def.id) ? 0x3af06a : 0xff4a2a;
-      v.weapon = def.weapon ?? null;
-      if (v.guns.length) console.info(`garage: ${def.id} guns: ${v.guns.length}${v.weapon ? `, firing ${v.weapon.name} (projectile ${v.weapon.projectile}${this.projectiles.has(v.weapon.projectile) ? '' : ', not in the pack: drawn as a blaster bolt'}, ${v.weapon.speed} m/s to ${v.weapon.range} m)` : ', no weapon in the manifest: a blaster bolt'}`);
+      if (v.guns.length) {
+        const fires = [...new Set(v.guns.map((g) => g.weapon ?? v.weapon).filter((w): w is NonNullable<typeof w> => !!w).map((w) => `${w.name} (projectile ${w.projectile}${this.projectiles.has(w.projectile) ? '' : ', not in the pack: drawn as a blaster bolt'}, ${w.speed} m/s to ${w.range} m)`))];
+        console.info(`garage: ${def.id} guns: ${v.guns.length}${fires.length ? `, firing ${fires.join('; ')}` : ', no weapon in the manifest: a blaster bolt'}`);
+      }
     }
     if (a.hung || a.wings.length) {
-      const hungParts = new Set(a.parts.filter((p): p is THREE.Object3D => !!p));
+      const hungParts = new Set([...a.parts.filter((p): p is THREE.Object3D => !!p), ...[...a.build.fitParts.values()].flat()]);
       const onWings = [...hungParts].filter((p) => p.userData.attachment !== 'wing' && underPivot(p, model)).length;
       const opening = a.wings.list.map((w) => `${Math.round(-THREE.MathUtils.radToDeg(w.angle))}° in ${w.time} s`).join(', ');
       console.info(`garage: ${def.id} parts: ${a.hung} hung (${onWings} on wings)${opening ? `, wings that open: ${opening}, reaching ${drop.toFixed(1)} m under the belly` : ''}`);
@@ -836,48 +1265,53 @@ function makeEngineGlow(spec: VehicleSpec, model: THREE.Object3D, spots: THREE.O
   const sprites: THREE.Sprite[] = [];
   // At the engine hardpoints when the model has them (a ship's engine is a part a player fits,
   // so the hull carries only the socket), else at the rear of the box (in the vehicle's frame,
-  // taken into the model's: the model only ever moves, never turns, when it is framed).
-  if (spots.length) {
-    for (const spot of spots) {
-      const sp = new THREE.Sprite(mat);
-      sp.scale.setScalar(0.2);
-      spot.add(sp);
-      sprites.push(sp);
-    }
-  } else {
+  // taken into the model's: the model only ever moves, never turns, when it is framed), on spot
+  // nodes of their own (`userData.glowSpot`), so a refit finds them as it finds hardpoints.
+  const at = spots.length ? spots : [];
+  if (!at.length) {
     for (const x of w > 1.2 ? [-w * 0.28, w * 0.28] : [0]) {
-      const sp = new THREE.Sprite(mat);
-      sp.position.set(x, b.min[1] + h * 0.45, b.min[2] - 0.05).sub(model.position);
-      sp.scale.setScalar(0.2);
-      model.add(sp);
-      sprites.push(sp);
+      const spot = new THREE.Object3D();
+      spot.name = 'glow spot';
+      spot.userData.glowSpot = true;
+      spot.position.set(x, b.min[1] + h * 0.45, b.min[2] - 0.05).sub(model.position);
+      model.add(spot);
+      at.push(spot);
     }
+  }
+  for (const spot of at) {
+    const sp = new THREE.Sprite(mat);
+    sp.scale.setScalar(0.2);
+    spot.add(sp);
+    sprites.push(sp);
   }
   // A ship's glow is sized by its hull's height, not its width: a fighter's wings make it wide, its engines are not.
   const size = ship ? Math.min(7, Math.max(0.5, h * 0.4)) : Math.min(1.6, 0.25 + w * 0.18);
   // A ship's exhaust leaves a ribbon behind it in flight, longer the faster it goes; each follows its glow wherever that is carried.
   const trails = ship ? sprites.map((sp) => new EngineTrail(color, sp)) : [];
-  return { mat, sprites, trails, size };
+  trails.forEach((t, i) => (sprites[i].userData.trail = t));
+  return { mat, sprites, trails, size, color, spots: at };
 }
 
 /**
  * The glows made by makeEngineGlow, wired to the vehicle once it exists (synchronously: nothing is
- * awaited after `new Vehicle`): the heat haze reads each glow, the trails go into the world, and
- * the update scales the glows, runs the trails and shows the "on" appearances.
+ * awaited after `new Vehicle`): the glow state goes on the vehicle (`glows`, `glowMaterial`,
+ * `glowSize`, `glowColor`), `rebindGlows` fills the heat haze's list and the trails (their ribbons
+ * into the world), and the update scales the live glows, runs the trails and shows the "on"
+ * appearances. The update reads the vehicle's state, not locals, so a refit's glows grow and fade
+ * with the rest.
  */
 function wireEngineGlow(v: Vehicle, glow: EngineGlow): void {
-  const { mat, sprites: glows, size } = glow;
-  const ship = !!v.spec.ship;
+  v.glows = glow.sprites;
+  v.glowMaterial = glow.mat;
+  v.glowSize = glow.size;
+  v.glowColor = glow.color;
   // The heat haze follows the same glows: each one's place, base size and its own noise offset.
-  glows.forEach((g, i) => v.engines.push({ object: g, size, seed: (i * 0.618034) % 1 }));
-  const holder = v.group.parent ?? v.group;
-  for (const trail of glow.trails) {
-    holder.add(trail.mesh);
-    v.trails.push(trail);
-  }
+  rebindGlows(v, glow.spots, null);
+  const ship = !!v.spec.ship;
   const base = v.onUpdate;
   v.onUpdate = (dt, self, drive) => {
     base?.(dt, self, drive);
+    const size = self.glowSize;
     const throttle = drive ? Math.max(0, drive.throttle) : 0;
     const share = Math.min(1, Math.abs(self.speed) / self.spec.maxSpeed);
     for (const t of self.trails) t.update(dt, self.airborne && Math.abs(self.speed) > 6 ? 0.5 * (0.3 + 0.7 * share + 0.3 * throttle) : 0, size * (0.015 + 0.0225 * share));
@@ -891,10 +1325,44 @@ function wireEngineGlow(v: Vehicle, glow: EngineGlow): void {
     if (self.cockpitFrame) self.cockpitFrame.visible = drive !== null;
     self.setGlassClear(drive !== null || self.occupied);
     const k = size * (0.35 + 0.65 * Math.min(1, Math.abs(self.speed) / self.spec.maxSpeed) + 0.4 * throttle + (self.boosting ? 0.6 : 0)) * (self.overheated > 0 ? 0.4 + 0.3 * Math.random() : 1);
-    for (const g of glows) g.scale.set(k, k, 1);
-    mat.opacity = (ship ? 0.35 : 0.55) + 0.45 * Math.min(1, Math.abs(self.speed) / 8 + throttle);
+    // The live glows only (a refit's spare ones are parked, hidden).
+    for (const e of self.engines) e.object.scale.set(k, k, 1);
+    if (self.glowMaterial) self.glowMaterial.opacity = (ship ? 0.35 : 0.55) + 0.45 * Math.min(1, Math.abs(self.speed) / 8 + throttle);
   };
 }
+
+/** The "on" appearances of a model (an engine's while the drive runs, a booster's only while boosting), collected afresh (a refit brings its own). */
+function collectOnParts(v: Vehicle, model: THREE.Object3D): void {
+  v.engineParts.length = 0;
+  v.boosterParts.length = 0;
+  model.traverse((o) => {
+    if (o.userData.attachment !== 'engine') return;
+    o.visible = false;
+    (o.userData.on === 'booster' ? v.boosterParts : v.engineParts).push(o);
+  });
+}
+
+/** A part file's name, for the console. */
+const fileName = (file: string): string => file.replace(/^.*[\\/]/, '');
+
+/** A stand-in's model made ready to hang as hangAttachments would hang it: marked as a part of its kind, under a mount at its place when it has one. Returns the top node. */
+function standInNode(d: AttachmentDef, part: THREE.Object3D): THREE.Object3D {
+  const u = part.userData;
+  u.attachment = d.kind;
+  u.hangsOn = d.hardpoint ?? null;
+  if (d.on) u.on = d.on;
+  if (d.slot) u.slot = d.slot;
+  if (!d.place) return part;
+  const mount = new THREE.Group();
+  mount.name = 'mount:stand-in';
+  mount.userData.mountOf = -1;
+  applyPlace(mount, d.place);
+  mount.add(part);
+  return mount;
+}
+/** No preparation or forgetting given (a picture made with no world). */
+const noPrepare = (): Promise<void> => Promise.resolve();
+const noForget = (): void => {};
 
 let glowTex: THREE.Texture | null = null;
 function glowTexture(): THREE.Texture {

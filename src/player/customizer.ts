@@ -3,8 +3,16 @@
 // A change re-renders only the recipes that read the variable, off the main thread's critical
 // path in idle time, one after another, so a slider that moves fast lands on its last value.
 import * as THREE from 'three';
-import { type CustomizeFile, type Img, type Recipe, type Values, recipeNormal, recipeVariableDefs, recipeVariables, renderRecipe, variableKey } from './texrender';
-import { decodePng } from './png';
+// The two imports carry their extensions so the node tests can load this module (a ship's paint uses it).
+import { type CustomizeFile, type Img, type Recipe, type Values, recipeNormal, recipeVariableDefs, recipeVariables, renderRecipe, variableKey } from './texrender.ts';
+import { decodePng } from './png.ts';
+
+/**
+ * A renderer that makes a recipe's texture somewhere else (a ship's paint renders in a worker): the
+ * recipe, a copy of the values in force, the palettes its shader names, and the folder its images are
+ * in. Null when the render was dropped (a newer paint won), and nothing is put then.
+ */
+export type RecipeRender = (r: Recipe, values: Values, palettes: Record<string, number[][]>, imageDir: string) => Promise<Img | null>;
 
 /**
  * Each pack folder's recipes, fetched and parsed once however many characters read them: a
@@ -14,7 +22,7 @@ import { decodePng } from './png';
  * not kept, so a later character tries again.
  */
 const customizeFiles = new Map<string, Promise<CustomizeFile | null>>();
-function loadCustomizeFile(dir: string): Promise<CustomizeFile | null> {
+export function loadCustomizeFile(dir: string): Promise<CustomizeFile | null> {
   let p = customizeFiles.get(dir);
   if (!p) {
     p = fetch(`${dir}customize.json`)
@@ -45,6 +53,16 @@ export class Customizer {
   materialsFor: (name: string) => THREE.Material[] = () => [];
   /** Called when a render lands, so a preview can redraw. */
   onRendered: () => void = () => {};
+  /** Asked just before a render's texture goes on: false drops it (a ship's paint that changed while it rendered). */
+  accept: (r: Recipe, img: Img) => boolean = () => true;
+  /** Called in the same step a render's texture went on the materials (a ship's paint puts its glow beside it). */
+  onPut: (r: Recipe, img: Img) => void = () => {};
+  /** Where recipes render when not here (a worker); null renders them on this thread, between frames. */
+  private readonly renderOff: RecipeRender | null;
+
+  constructor(renderOff: RecipeRender | null = null) {
+    this.renderOff = renderOff;
+  }
 
   /** The recipes of a pack folder, added to what is already here; false when the folder has none. */
   async addSource(dir: string): Promise<boolean> {
@@ -210,6 +228,13 @@ export class Customizer {
       while (this.queued.size) {
         const r = this.queued.values().next().value!;
         this.queued.delete(r);
+        if (this.renderOff) {
+          // Rendered elsewhere: this thread only posts and puts. No normal map is rendered this way (no ship
+          // recipe chooses one, and a normal map arriving on a material that had none would change its program).
+          const img = await this.renderOff(r, new Map(this.values), this.palettesOf(r), this.dirOf.get(r) ?? '');
+          if (img) this.put(r, img);
+          continue;
+        }
         await this.loadImagesFor(r);
         // Between recipes the frame gets a turn, so a whole re-render does not freeze the game.
         await new Promise((resolve) => setTimeout(resolve, 0));
@@ -253,7 +278,23 @@ export class Customizer {
     return done;
   }
 
+  /** Only the palettes a recipe's shaders name (what a render elsewhere needs sent). */
+  private palettesOf(r: Recipe): Record<string, number[][]> {
+    const out: Record<string, number[][]> = {};
+    const fromShader = (s: Recipe['shader']) => {
+      for (const p of s?.palettes ?? []) if (this.palettes[p.palette]) out[p.palette] = this.palettes[p.palette];
+    };
+    fromShader(r.shader);
+    for (const slot of r.slots) {
+      for (const s of slot.blueprint.shaders) fromShader(s);
+      for (const v of slot.blueprint.variables) if (v.palette && this.palettes[v.palette]) out[v.palette] = this.palettes[v.palette];
+      for (const op of slot.blueprint.prepare) if (op.kind === 'palette' && this.palettes[op.palette]) out[op.palette] = this.palettes[op.palette];
+    }
+    return out;
+  }
+
   private put(r: Recipe, img: Img): void {
+    if (!this.accept(r, img)) return;
     let tex = this.textures.get(r.material);
     if (!tex || tex.image.width !== img.width || tex.image.height !== img.height) {
       tex?.dispose();
@@ -275,6 +316,12 @@ export class Customizer {
         std.needsUpdate = true;
       }
     }
+    this.onPut(r, img);
+  }
+
+  /** The texture a recipe last rendered to (its material's), or undefined before its first render. */
+  textureOf(material: string): THREE.DataTexture | undefined {
+    return this.textures.get(material);
   }
 
   /** How the normal maps are read: their strength, and green flipped, since the game's maps are Direct3D's (green down) and the renderer's are green up; the same flip the glTF loader applies to the converted models. */
@@ -415,6 +462,8 @@ export class Customizer {
   }
 
   dispose(): void {
+    // Nothing more is rendered for a dropped customizer: a loop mid-queue ends after the render in hand.
+    this.queued.clear();
     for (const t of this.textures.values()) t.dispose();
     this.textures.clear();
   }

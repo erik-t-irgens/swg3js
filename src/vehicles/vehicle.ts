@@ -93,6 +93,10 @@ export interface ShipGun {
   hardpoint?: string;
   /** A turret's muzzle (fired along the nose, as the turrets do not turn). */
   turret?: boolean;
+  /** The chassis slot whose component the gun belongs to (weapon_0), or null for a gun on the hull itself. */
+  slot?: string | null;
+  /** What this gun fires, from its slot's component (a fitted ship); absent: the ship's `weapon`. */
+  weapon?: { name: string; projectile: number; speed: number; range: number } | null;
 }
 
 /** The kind a vehicle is, from its name (the game's template or model name). Null when nothing fits. */
@@ -386,6 +390,17 @@ export class Vehicle {
   boosterParts: THREE.Object3D[] = [];
   /** What the garage could not hang, for the console. */
   unhung: string[] = [];
+  /** A ship's fitted components, droid and paint, resolved against its chassis; null for anything else (and a pack without fits). */
+  fit: import('./shipFit').ResolvedFit | null = null;
+  /** The model and the fitted parts hung on it per slot, for a refit; null for anything else. */
+  build: import('./shipMounts').ShipBuild | null = null;
+  /** The ship's paint (its own copies of the paint materials once it is given custom paint), or null. */
+  paint: import('./shipPaint').ShipPaint | null = null;
+  /** The engine glow sprites (a refit re-hangs them; the ones past the live spots are parked, hidden, under the group), their shared material, base size and colour. */
+  glows: THREE.Sprite[] = [];
+  glowMaterial: THREE.SpriteMaterial | null = null;
+  glowSize = 1;
+  glowColor = 0x9fd8ff;
   /** Hull colliders under a wing's pivot, moved with it. Must stay a field initialiser: hullColliders fills it from the constructor. */
   private readonly movingPieces: { collider: RAPIER.Collider; mesh: THREE.Object3D }[] = [];
   /** The model the constructor was given (the hull, with its parts hung on it), for the wings' report. */
@@ -1161,8 +1176,17 @@ export class Vehicle {
   dispose(physics: Physics, scene: THREE.Scene): void {
     this.interior?.dispose();
     this.interior = null;
+    // A parked glow's trail (a refit left it spare) is disposed with the live ones.
+    for (const g of this.glows) {
+      const t = g.userData.trail as import('./trail').EngineTrail | undefined;
+      if (t && !this.trails.includes(t)) t.dispose(scene);
+    }
     for (const t of this.trails) t.dispose(scene);
     this.trails = [];
+    this.glows = [];
+    // The paint's own copies leave the world's material sets (its `forget`) and are disposed; the GLB's materials stay.
+    this.paint?.dispose();
+    this.paint = null;
     physics.world.removeRigidBody(this.body);
     scene.remove(this.group);
     this.group.traverse((o) => {

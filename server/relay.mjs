@@ -6,8 +6,10 @@
 //   node server/relay.mjs [port]      (default 8787)
 //
 // Messages, JSON, client to relay:
-//   { t: 'hello', name, species, class, planet, zone, look, held }   who, where and how they look (shape, height, colours, outfit)
-//                                                          and the weapons in hand { r, l } by id; sent on joining, on travel and on a change
+//   { t: 'hello', name, species, class, planet, zone, look, held, ship }   who, where and how they look (shape, height, colours, outfit),
+//                                                          the weapons in hand { r, l } by id, and the ship they fly
+//                                                          { id, fit: { components, paint, droid } } (shipWire.mjs);
+//                                                          sent on joining, on travel and on a change
 //   { t: 'state', p: [x, y, z], h, s, v, m, sab, q?, veh? }   position, heading, rig state, speed, mounted, saber lit,
 //                                                          the whole turn as a quaternion (aboard, adrift), the vehicle
 //                                                          ridden { id, p, q, role: ride|pilot|aboard, pose, w }
@@ -19,6 +21,7 @@
 //   { t: 'hello', id, hello }  (a peer moved to another world)
 import { createServer } from 'node:http';
 import { createHash } from 'node:crypto';
+import { cleanShip } from './shipWire.mjs';
 
 const PORT = Number(process.argv[2] ?? process.env.PORT ?? 8787);
 const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
@@ -119,6 +122,9 @@ function onMessage(c, text) {
       if (typeof held.l === 'string' && held.l) h.l = held.l.slice(0, 80);
       if (h.r || h.l) hello.held = h;
     }
+    // The ship they fly, with its fit: names and numbers checked and kept within their limits.
+    const ship = cleanShip(msg.ship);
+    if (ship) hello.ship = ship;
     const first = !c.hello;
     c.hello = hello;
     broadcast({ t: first ? 'join' : 'hello', id: c.id, hello }, c);

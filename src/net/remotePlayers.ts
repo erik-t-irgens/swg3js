@@ -7,6 +7,9 @@ import { isDanceClip, isFlourishClip, loopsEmote } from '../core/emotes';
 import type { Hello, PeerState, PeerVehicle } from './net';
 import type { Garage } from '../vehicles/garage';
 import type { WingSet } from '../vehicles/wings';
+import { changedSlots, fitKey, type ResolvedFit, type ShipFit } from '../vehicles/shipFit';
+import type { ShipBuild } from '../vehicles/shipMounts';
+import type { ShipPaint } from '../vehicles/shipPaint';
 import { applyLookPrepared } from '../player/look';
 import { weaponHolder, type WeaponCatalogue } from '../player/weapons';
 import type { FxMoverList } from '../core/fx/velocity';
@@ -27,6 +30,13 @@ interface RemoteVehicle {
   wings: WingSet | null;
   /** Whether the pilot's wings are open or opening: the relay's `w`, else (a peer on an older build) whether it is moving. */
   wingsWant: boolean;
+  /** A fitted ship's build (its parts per slot, for a restage), its paint (disposed with the picture) and the fit it shows; null before the picture is in, or for a ride without a fit. */
+  build: ShipBuild | null;
+  paint: ShipPaint | null;
+  fit: ResolvedFit | null;
+  /** A refit of the picture under way, and the newest fit asked for meanwhile (the running pass takes it up when it ends). */
+  busy: Promise<void> | null;
+  want: ShipFit | null;
 }
 
 interface Remote {
@@ -80,6 +90,8 @@ export class RemotePlayers {
   prepare: ((root: THREE.Object3D) => Promise<void>) | null = null;
   /** Compile a peer's ride before it is shown (the world's vehicle preparation); set by the game after construction, read when a ride arrives. */
   prepareVehicle: ((roots: THREE.Object3D[]) => Promise<void>) | null = null;
+  /** Take a peer's ship's paint copies out of the world's material sets when they go (World.forgetMaterials); set by the game after construction, read when a paint is made. */
+  forget: ((materials: THREE.Material[]) => void) | null = null;
 
   constructor(
     private readonly scene: THREE.Scene,
@@ -241,6 +253,10 @@ export class RemotePlayers {
         void this.applyHeld(r);
       });
     r.group.visible = this.sameWorld(hello);
+    // Their ship's fit changed (they closed its Edit page): the picture of it is repainted or refitted in place. A
+    // ship other than the one they ride now changes nothing yet; its fit applies when that ship appears.
+    const rv = r.vehicle;
+    if (rv && hello.ship && hello.ship.id === rv.id) void this.refitRemote(r, rv, hello.ship.fit);
     (r.label.material as THREE.SpriteMaterial).map?.dispose();
     r.group.remove(r.label);
     r.label = makeLabel(hello.name);
@@ -280,7 +296,7 @@ export class RemotePlayers {
     }
     if (!r.vehicle || r.vehicle.id !== veh.id) {
       this.dropVehicle(r);
-      const rv: RemoteVehicle = { id: veh.id, obj: null, target: new THREE.Vector3(veh.p[0], veh.p[1], veh.p[2]), targetQ: new THREE.Quaternion(veh.q[0], veh.q[1], veh.q[2], veh.q[3]), pose: veh.pose ?? null, vel: new THREE.Vector3(), heardAt: 0, wings: null, wingsWant: veh.w === 1 };
+      const rv: RemoteVehicle = { id: veh.id, obj: null, target: new THREE.Vector3(veh.p[0], veh.p[1], veh.p[2]), targetQ: new THREE.Quaternion(veh.q[0], veh.q[1], veh.q[2], veh.q[3]), pose: veh.pose ?? null, vel: new THREE.Vector3(), heardAt: 0, wings: null, wingsWant: veh.w === 1, build: null, paint: null, fit: null, busy: null, want: null };
       r.vehicle = rv;
       void this.bringVehicle(r, rv);
     }
@@ -308,28 +324,84 @@ export class RemotePlayers {
         console.warn(`remote player ${r.hello.name} rides a ${rv.id} the garage does not know`);
         return;
       }
-      // Prepared before it is shown, so the first sight of it compiles nothing.
-      const { holder: obj, wings } = await g.visualParts(def, { prepare: this.prepareVehicle ?? undefined });
-      if (r.vehicle !== rv) return;
+      // Its fit, as their hello gives it (stock when the hello names another ship, or none).
+      const asked = r.hello.ship?.id === def.id ? r.hello.ship.fit : null;
+      const fit = def.fit ? g.resolve(def, asked) : null;
+      // Prepared (and painted) before it is shown, so the first sight of it compiles nothing.
+      const { holder: obj, wings, build, paint } = await g.visualParts(def, { fit, prepare: this.prepareVehicle ?? undefined, forget: this.forget ?? undefined });
+      if (r.vehicle !== rv) {
+        paint?.dispose();
+        return;
+      }
+      rv.build = def.fit ? build : null;
+      rv.paint = paint;
+      rv.fit = fit;
       obj.position.copy(rv.target);
       obj.quaternion.copy(rv.targetQ);
       obj.visible = r.group.visible;
       // A ship first seen in flight arrives with its wings where they are, not closed and opening.
-      if (wings.length) {
-        wings.snap(rv.wingsWant);
-        rv.wings = wings;
-      }
+      if (wings.length) wings.snap(rv.wingsWant);
+      // A fitted ship keeps its set even while empty: a part a refit brings may carry a wing (stepping an empty set is free).
+      if (wings.length || def.fit) rv.wings = wings;
       this.scene.add(obj);
       markActor(obj);
       rv.obj = obj;
+      // A hello that came while the picture was being built: its fit now.
+      const latest = r.hello.ship;
+      if (latest && latest.id === rv.id && latest.fit !== asked) void this.refitRemote(r, rv, latest.fit);
     } catch (err) {
       console.warn(`remote player ${r.hello.name}: their ${rv.id} did not load`, err);
     }
   }
 
+  /**
+   * A peer's ship picture brought to a new fit in place, never rebuilt: only a repaint when no slot's look
+   * changes, else the new parts staged, prepared and painted, then swapped in one step (Garage.restage).
+   * Coalesced: a fit asked for while one is going waits, and only the newest is done when it ends.
+   */
+  private refitRemote(r: Remote, rv: RemoteVehicle, want: ShipFit): Promise<void> {
+    rv.want = want;
+    if (rv.busy) return rv.busy;
+    const run = async () => {
+      while (rv.want) {
+        const asked = rv.want;
+        rv.want = null;
+        if (r.vehicle !== rv || !rv.build || !rv.fit) return;
+        this.garage ??= this.loadGarage();
+        const g = await this.garage;
+        const def = g.find(rv.id);
+        const next = def ? g.resolve(def, asked) : null;
+        if (!def?.fit || !next || fitKey(next) === fitKey(rv.fit)) continue;
+        const slots = changedSlots(def.fit, rv.fit, next);
+        if (!slots.length) await rv.paint?.apply(next.paint);
+        else {
+          // Its wings set too: a wing a new part brings opens with the pilot's, and one on a part taken down leaves it.
+          const s = await g.restage(def, rv.build, rv.fit, next, rv.paint, this.prepareVehicle ?? noPrepareRoots, rv.wings ?? undefined);
+          if (r.vehicle !== rv) {
+            for (const p of s.parts) rv.paint?.untrack(p.node);
+            return;
+          }
+          s.commit();
+        }
+        if (r.vehicle !== rv) return;
+        rv.fit = next;
+      }
+    };
+    rv.busy = run()
+      .catch((err) => console.warn(`remote player ${r.hello.name}: their ${rv.id} could not be refitted`, err))
+      .finally(() => {
+        rv.busy = null;
+      });
+    return rv.busy;
+  }
+
   private dropVehicle(r: Remote): void {
     if (!r.vehicle) return;
     if (r.vehicle.obj) this.scene.remove(r.vehicle.obj);
+    // Its paint's copies leave the world's material sets with it.
+    r.vehicle.paint?.dispose();
+    r.vehicle.paint = null;
+    r.vehicle.want = null;
     r.vehicle = null;
   }
 
@@ -423,6 +495,7 @@ export class RemotePlayers {
 
 /** No preparation to wait for (the game has not given one). */
 const noPrepare = (): Promise<void> => Promise.resolve();
+const noPrepareRoots = (_roots: THREE.Object3D[]): Promise<void> => Promise.resolve();
 
 /** A name over the head: text on a small canvas, as a sprite that faces the camera. */
 function makeLabel(name: string): THREE.Sprite {

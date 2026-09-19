@@ -38,7 +38,9 @@ import { CSM } from 'three/examples/jsm/csm/CSM.js';
 import { ACTOR_LAYER, INTERIOR_LAYER, markActor, type PortalRenderer } from './portalRender';
 import { createPlaceholderSpeeder } from '../vehicles/speeder';
 import { Dust } from '../vehicles/dust';
-import { Garage, type VehicleDef } from '../vehicles/garage';
+import { Garage, SpawnCancelled, type RefitReport, type VehicleDef } from '../vehicles/garage';
+import { fitKey, type ResolvedFit } from '../vehicles/shipFit';
+import { inTurn } from '../vehicles/shipMounts';
 import { Vehicle, type VehicleKind, type VehicleSpec } from '../vehicles/vehicle';
 import { Bolts } from '../combat/bolts';
 import { ShipInterior } from '../vehicles/interior';
@@ -718,7 +720,11 @@ export class World {
     this.unload();
   }
 
+  /** Moved on by every unload: a vehicle being prepared for the world that went is not made (spawnVehicle's `alive`). */
+  private loadGeneration = 0;
+
   private unload(): void {
+    this.loadGeneration++;
     for (const c of this.chunks.values()) this.disposeChunk(c);
     this.chunks.clear();
     for (const t of this.farTiles.values()) {
@@ -785,7 +791,7 @@ export class World {
     this.gallery?.dispose();
     this.gallery = null;
     this.spaceStations = [];
-    for (const sp of this.vehicles) sp.dispose(this.physics, this.scene);
+    for (const sp of [...this.vehicles]) this.disposeVehicle(sp);
     this.vehicles.length = 0;
     this.props?.dispose();
     if (this.water) {
@@ -1957,18 +1963,27 @@ export class World {
   }
 
   /** Stand a vehicle from the garage on the ground in front of a point, facing away from it. */
-  async spawnVehicle(def: VehicleDef, at: THREE.Vector3, heading: number, kind?: VehicleKind, airborne = false): Promise<Vehicle> {
+  async spawnVehicle(def: VehicleDef, at: THREE.Vector3, heading: number, kind?: VehicleKind, airborne = false, fit: ResolvedFit | null = null): Promise<Vehicle> {
+    // The world it was asked for: `unload` moves the generation on (and `load` makes a new Terrain for every
+    // planet or zone), so a travel during the model loads, the preparation or the paint is seen before the
+    // vehicle is made, and nothing is left in the next world.
+    const gen = this.loadGeneration;
+    const terrain = this.terrain;
     this.garage ??= await Garage.load(import.meta.env.BASE_URL);
     // In space, or arriving in the air, the vehicle stands exactly where it is asked to.
     const space = !!this.planet.space;
     const place = airborne || space ? (b: VehicleSpec['bounds']) => [at.x, at.y + b.min[1], at.z] as [number, number, number] : (b: VehicleSpec['bounds']) => this.clearGround(b, at, heading, def.source === 'creature');
-    // The world it was asked for: `load` makes a new Terrain for every planet or zone, so a travel during the
-    // model loads and the preparation shows as a different one, and the vehicle is not left in the next world.
-    const terrain = this.terrain;
-    const v = await this.garage.spawn(def, this.physics, this.scene, at.x, at.y, at.z, heading, kind, place, { prepare: (r) => this.vehiclePrepare(r) });
-    if (this.terrain !== terrain) {
-      v.dispose(this.physics, this.scene);
-      throw new Error(`garage: ${def.id}: the world changed while it was being made; not spawned`);
+    let v: Vehicle;
+    try {
+      v = await this.garage.spawn(def, this.physics, this.scene, at.x, at.y, at.z, heading, kind, place, {
+        fit,
+        prepare: (r) => this.vehiclePrepare(r),
+        forget: (m) => this.forgetMaterials(m),
+        alive: () => gen === this.loadGeneration && this.terrain === terrain,
+      });
+    } catch (err) {
+      if (err instanceof SpawnCancelled) throw new Error('the world changed while the vehicle was being prepared');
+      throw err;
     }
     v.space = space;
     markActor(v.group);
@@ -1983,17 +1998,8 @@ export class World {
       void this.prepareActor(saddle).catch((err) => console.warn(`garage: ${id}: its saddle's warm-up failed; shown anyway`, err)).finally(() => this.revealSaddle(id, saddle));
     }
     this.vehicles.push(v);
-    // The ship's bolt and hit effects, played once far below the world, so the first shot finds
-    // their shaders compiled rather than stalling the frame.
-    const p = v.weapon ? this.garage.projectileFor(v.weapon.projectile) : null;
-    if (p) {
-      for (const file of [p.effect, p.hit]) {
-        if (!file || this.warmedFx.has(file)) continue;
-        this.warmedFx.add(file);
-        const h = this.shipFx.place(file, tmpM.makeTranslation(at.x, -900, at.z), false, true);
-        window.setTimeout(() => this.shipFx.remove(h), 4000);
-      }
-    }
+    // The ship's bolt and hit effects, every one its guns fire, played once far below the world.
+    this.warmShipFx(v);
     const gravity = -this.physics.world.gravity.y;
     if (def.interior) {
       try {
@@ -2048,13 +2054,77 @@ export class World {
     return [at.x + Math.sin(heading) * first, floorAt(at.x, at.z), at.z + Math.cos(heading) * first];
   }
 
+  /**
+   * Warm a ship's bolt and hit effects: every distinct projectile its guns fire (a fitted ship's guns may fire
+   * several) and its own weapon's, each played once far below the world, so the first shot finds their shaders
+   * compiled rather than stalling the frame. An effect already warmed is not played again.
+   */
+  warmShipFx(v: Vehicle): void {
+    if (!this.garage) return;
+    const projectiles = new Set<number>();
+    for (const g of v.guns) if (g.weapon) projectiles.add(g.weapon.projectile);
+    if (v.weapon) projectiles.add(v.weapon.projectile);
+    for (const index of projectiles) {
+      const p = this.garage.projectileFor(index);
+      if (!p) continue;
+      for (const file of [p.effect, p.hit]) {
+        if (!file || this.warmedFx.has(file)) continue;
+        this.warmedFx.add(file);
+        const h = this.shipFx.place(file, tmpM.makeTranslation(v.pos.x, -900, v.pos.z), false, true);
+        window.setTimeout(() => this.shipFx.remove(h), 4000);
+      }
+    }
+  }
+
+  /** Take a vehicle out of the world: its body, its model, its trails and its paint's own copies (out of the material sets, through the paint's `forget`). */
+  disposeVehicle(v: Vehicle): void {
+    v.dispose(this.physics, this.scene);
+    const i = this.vehicles.indexOf(v);
+    if (i >= 0) this.vehicles.splice(i, 1);
+  }
+
+  /** The refit of each vehicle under way, so the next waits for it (inTurn). */
+  private readonly refits = new WeakMap<Vehicle, Promise<unknown>>();
+
+  /**
+   * Refit a spawned ship in place (Garage.refit, its new parts prepared as a vehicle is), then warm the bolts its
+   * guns now fire. One vehicle's refits run one after another, each checked and started from the fit the last
+   * one left (`Garage.refit` reads `v.fit` when its turn comes): two staged from the same fit would leave the
+   * model showing one part while `v.fit` names another. A fit the ship already wears changes nothing.
+   */
+  refitVehicle(v: Vehicle, next: ResolvedFit): Promise<RefitReport> {
+    return inTurn(this.refits, v, async () => {
+      if (!this.garage) throw new Error('garage: not loaded');
+      if (!this.vehicles.includes(v)) throw new Error(`garage: ${v.spec.id} is not in the world`);
+      if (v.fit && fitKey(v.fit) === fitKey(next)) return { slots: [], parts: 0, waiting: [], repainted: false, weaponsChanged: false, ms: 0 };
+      const report = await this.garage.refit(v, next, (r) => this.vehiclePrepare(r));
+      if (report.weaponsChanged && this.vehicles.includes(v)) this.warmShipFx(v);
+      return report;
+    });
+  }
+
+  /**
+   * Keep the shadow cascades' records of some materials across a compile in another WebGL context (the ship
+   * edit page's preview). CSM keeps one shader record per material, the last compiled in any context, and
+   * moves the cascades' uniforms in that one only, so a second renderer compiling a material the world set
+   * up would take them from the world's program. Returns the function that puts the records back.
+   */
+  keepShadowRecords(materials: THREE.Material[]): () => void {
+    const csm = this.csm;
+    if (!csm) return () => {};
+    const kept: [THREE.Material, string][] = [];
+    for (const m of materials) if (csm.shaders.has(m)) kept.push([m, csm.shaders.get(m) as string]);
+    return () => {
+      for (const [m, s] of kept) if (csm.shaders.has(m)) csm.shaders.set(m, s);
+    };
+  }
+
   /** Take every spawned vehicle away but the one ridden. */
   removeVehicles(keep: Vehicle | null): number {
     let n = 0;
     for (const v of [...this.vehicles]) {
       if (v === keep) continue;
-      v.dispose(this.physics, this.scene);
-      this.vehicles.splice(this.vehicles.indexOf(v), 1);
+      this.disposeVehicle(v);
       n++;
     }
     return n;

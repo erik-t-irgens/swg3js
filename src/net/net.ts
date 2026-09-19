@@ -2,6 +2,7 @@
 // few times a second and brings back everyone else's, with a reconnect when the line drops.
 
 import type { Look } from '../player/look';
+import type { ShipFit } from '../vehicles/shipFit';
 
 export interface Hello {
   name: string;
@@ -13,6 +14,8 @@ export interface Hello {
   look?: Look;
   /** The weapons in hand, by weapon id: right and left. */
   held?: { r?: string; l?: string };
+  /** The ship this player flies (or last flew), with its components, droid and paint (server/shipWire.mjs checks it). */
+  ship?: { id: string; fit: ShipFit };
 }
 
 /** The vehicle a peer is on: which (a garage id), where it is and how it is turned, and how the peer is in it. */

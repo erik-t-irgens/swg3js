@@ -2,6 +2,7 @@
 // and where it last stood, so logging back in puts it back there. Stored in localStorage.
 import type { ClassId } from '../combat/kit';
 import type { OwnedItem } from './inventory';
+import type { ShipFit } from '../vehicles/shipFit';
 
 export const MAX_CHARACTERS = 5;
 const KEY = 'swg.characters';
@@ -40,6 +41,8 @@ export interface SavedCharacter {
   held?: { right?: string; left?: string };
   /** 1 once the record has been given its items (migrateInventory). */
   inv?: 1;
+  /** The ships' fits by garage id (a component per chassis slot, paint values, the droid); a ship absent is stock. */
+  ships?: Record<string, ShipFit>;
 }
 
 export function loadCharacters(): SavedCharacter[] {
