@@ -200,6 +200,8 @@ const tmp2 = new THREE.Vector3();
 const AXIS_X = new THREE.Vector3(1, 0, 0);
 const AXIS_Y = new THREE.Vector3(0, 1, 0);
 const AXIS_Z = new THREE.Vector3(0, 0, 1);
+/** No motion, for a held hull's velocities (Rapier reads it and keeps nothing). */
+const STILL = { x: 0, y: 0, z: 0 } as const;
 const torque = new THREE.Vector3();
 /** Scratch for the wings' colliders and the live muzzles: nothing is allocated per frame. */
 const noseTmp = new THREE.Vector3();
@@ -417,6 +419,18 @@ export class Vehicle {
   private glassClear = false;
   /** Let go: no springs, no righting, no gravity; the body keeps whatever motion it was given (for testing the room inside). */
   drift = false;
+  /** The jump holds the hull where it is: no motion, no flight. */
+  held = false;
+  /** The cruise a jump commands (m/s), over the throttle; null when no jump is flying the hull. */
+  jumpCruise: number | null = null;
+  /** The hull's colliders are in no group while a jump flies it (`setGhost`). */
+  private ghost = false;
+  /** Each collider's groups as they were when the hull was ghosted, restored exactly. */
+  private readonly groupsBeforeGhost: number[] = [];
+  /** Ghosted by a jump: not there for bolts, targets or the hit test. */
+  get ghosted(): boolean {
+    return this.ghost;
+  }
 
   constructor(readonly spec: VehicleSpec, model: THREE.Object3D, physics: Physics, scene: THREE.Scene, x: number, y: number, z: number, heading: number) {
     this.hull = model;
@@ -686,6 +700,62 @@ export class Vehicle {
   }
 
   /**
+   * The hull's colliders in no group (the jump flies through what is ahead, as the client's did), or
+   * back in exactly the groups each had before (parts hung on the hull keep their own). Trails muted
+   * meanwhile. A collider added while ghosted keeps whatever groups it was made with.
+   */
+  setGhost(on: boolean): void {
+    if (on === this.ghost) return;
+    const body = this.body;
+    if (!body.isValid()) {
+      // The body was removed (the hull disposed): its colliders are gone, and asking for them throws.
+      this.ghost = on;
+      this.groupsBeforeGhost.length = 0;
+      return;
+    }
+    const n = body.numColliders();
+    if (on) {
+      this.groupsBeforeGhost.length = 0;
+      for (let i = 0; i < n; i++) {
+        const c = body.collider(i);
+        this.groupsBeforeGhost.push(c.collisionGroups());
+        c.setCollisionGroups(0);
+      }
+    } else {
+      const kept = Math.min(n, this.groupsBeforeGhost.length);
+      for (let i = 0; i < kept; i++) body.collider(i).setCollisionGroups(this.groupsBeforeGhost[i]);
+      this.groupsBeforeGhost.length = 0;
+    }
+    this.ghost = on;
+    for (const t of this.trails) t.muted = on;
+  }
+
+  /** Put the hull somewhere else at once, facing `quaternion`, flying at `speed` along its nose; trails and hit memory cleared. Nothing allocated. */
+  teleport(pos: THREE.Vector3, quaternion: THREE.Quaternion, speed: number): void {
+    const body = this.body;
+    body.setTranslation({ x: pos.x, y: pos.y, z: pos.z }, true);
+    body.setRotation({ x: quaternion.x, y: quaternion.y, z: quaternion.z, w: quaternion.w }, true);
+    body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+    this.attitude.copy(quaternion);
+    this.pos.copy(pos);
+    // The drawn hull, its rooms and anything framed on it follow at once, not on the next update.
+    this.group.position.copy(pos);
+    this.group.quaternion.copy(quaternion);
+    this.group.updateMatrixWorld(true);
+    this.stick.set(0, 0);
+    this.spin.set(0, 0, 0);
+    this.commandedValid = false;
+    this.skipHitCheck = true;
+    this.hitCooldown = 0;
+    this.prevVelValid = false;
+    fwd.set(0, 0, 1).applyQuaternion(quaternion).multiplyScalar(speed);
+    body.setLinvel({ x: fwd.x, y: fwd.y, z: fwd.z }, true);
+    this.cruise = speed;
+    this.speed = speed;
+    for (const t of this.trails) t.clear();
+  }
+
+  /**
    * Where the first-person view sits, in the model's frame: the cockpit point with the cockpit file's offset. For a ship
    * from the ships pack with a cockpit frame this is the frame's own camera point plus 1OFF, the one eye used hovering
    * and flying alike (the seated pilot's eyes are placed on it, and the body under them).
@@ -736,6 +806,20 @@ export class Vehicle {
     const body = this.body;
     body.resetForces(true);
     body.resetTorques(true);
+    if (this.held) {
+      // A jump holds the hull still where it is (in the tunnel, or waiting for the world ahead): no flight, no wings.
+      body.setLinvel(STILL, true);
+      body.setAngvel(STILL, true);
+      const t = body.translation();
+      this.pos.set(t.x, t.y, t.z);
+      this.quaternion(q);
+      this.justHit = 0;
+      this.commandedValid = false;
+      this.group.position.copy(this.pos);
+      this.group.quaternion.copy(q);
+      this.onUpdate?.(dt, this, null);
+      return;
+    }
     this.hopCd = Math.max(0, this.hopCd - dt);
     this.updateWings(dt);
     if (s.ship && this.flyShip(dt, drive, groundAt, waterAt)) {
@@ -1027,7 +1111,8 @@ export class Vehicle {
     // push it clear rather than the throttle driving it deeper in, which wedged it there.
     this.justHit = 0;
     this.hitCooldown = Math.max(0, this.hitCooldown - dt);
-    if (this.airborne && this.commandedValid && this.hitCooldown <= 0) {
+    // A hull in a jump (ghosted) is not tested: at jump speed a slow frame's damping alone reads as a crash.
+    if (this.airborne && this.commandedValid && this.hitCooldown <= 0 && !this.ghost) {
       const lv = body.linvel();
       const lost = Math.hypot(this.commanded.x - lv.x, this.commanded.y - lv.y, this.commanded.z - lv.z);
       if (lost > SHIP_HIT_LOSS) {
@@ -1049,6 +1134,8 @@ export class Vehicle {
     // opening): a cruise between the open top and the closed one eases down at the brake. A coast above the closed
     // top after a boost is left as it always was.
     if (throttle === 0 && drive && !drive.boost && this.wingOpenFactor < 1 && this.cruise > top && this.cruise <= s.maxSpeed * (this.space ? 2 : 1)) this.cruise = Math.max(top, this.cruise - s.brake * dt);
+    // A jump's cruise over all of that: not clamped to the ship's top speed, not bled by the idle brake.
+    if (this.jumpCruise !== null) this.cruise = this.jumpCruise;
     this.speed = this.cruise;
     const wasAirborne = this.airborne;
     this.airborne = this.cruise > 4 || (wasAirborne && h > s.fly!.floor + 1);

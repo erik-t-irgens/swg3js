@@ -23,6 +23,11 @@ export class EngineTrail {
   private readonly color = new THREE.Color();
   private width = 0.5;
   private time = 0;
+  /**
+   * Hidden whatever the engines do (a hull in a hyperspace jump): `update` takes the strength as 0.
+   * At jump speed a 0.9 s ribbon would reach hundreds of metres back past the camera.
+   */
+  muted = false;
 
   constructor(color: number, private readonly source: THREE.Object3D) {
     const geo = new THREE.BufferGeometry();
@@ -53,6 +58,7 @@ export class EngineTrail {
 
   /** Once a frame: a new sample where the exhaust is now, the old ones ageing out. `strength` 0 hides the trail. */
   update(dt: number, strength: number, width: number): void {
+    if (this.muted) strength = 0;
     this.time += dt;
     this.width = width;
     const cutoff = this.time - SPAN;
@@ -67,6 +73,11 @@ export class EngineTrail {
     }
     (this.mesh.material as THREE.MeshBasicMaterial).opacity = Math.min(1, strength);
     this.mesh.visible = this.points.length > 1 && strength > 0;
+  }
+
+  /** Forget where the exhaust has been (the hull was moved at once): the ribbon starts again from the nozzle. */
+  clear(): void {
+    this.points.length = 0;
   }
 
   private lay(camera: THREE.Camera): void {

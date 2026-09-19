@@ -3,7 +3,8 @@
 // far away, small props up close), and exact trimesh collision follows the player.
 
 import * as THREE from 'three';
-import { Group, groups, RAPIER as R, type Physics } from '../core/physics';
+import { cleanTrimesh, Group, groups, RAPIER as R, TRIMESH_FLAGS, type Physics } from '../core/physics';
+import { splitTrimesh } from './trimeshPieces.ts';
 import type { AssetPack, Layout, LoadedModel } from './assetPack';
 import { CHUNK_SIZE } from './terrain';
 import type { Exclusion } from './props';
@@ -30,6 +31,24 @@ const INTERIOR_RANGE = 160;
 const INTERIOR_DROP = 220;
 const COLLIDER_RANGE = 170;
 const COLLIDER_MIN_RADIUS = 1.5;
+/**
+ * The widest radius the collider sweep reaches for. An object wider than this (the Star Destroyer,
+ * whose radius counts from a model origin that is not its middle) is "huge": its collision is built
+ * with its tier, whatever the player's distance, a piece at a time.
+ */
+const COLLIDER_RADIUS_CAP = 600;
+/** A huge object's collision is built in pieces of at most this many triangles (about 2 ms each with TRIMESH_FLAGS). */
+const HUGE_PIECE_TRIANGLES = 4000;
+/** Milliseconds of huge-object pieces built per update (at least one piece a call). */
+const HUGE_BUILD_MS = 3;
+
+/** A huge object's collision being built: which primitive, its pieces once split, and the next piece. */
+interface HugeJob {
+  o: PlacedObject;
+  prim: number;
+  pieces: { vertices: Float32Array; indices: Uint32Array }[] | null;
+  next: number;
+}
 /**
  * Model radius below which a placed object does not cast a shadow. Shadow casters are culled
  * against the light's frustum rather than the camera's, so every small prop in the cascades'
@@ -103,6 +122,10 @@ export class LayoutStreamer {
   private readonly regions = new Map<string, Region>();
   private readonly exclusionCells = new Map<string, Exclusion[]>();
   private readonly colliders = new Map<PlacedObject, R.Collider[]>();
+  /** Objects wider than COLLIDER_RADIUS_CAP. Must stay a field initialiser: the constructor's loop fills it. */
+  private readonly huge = new Set<PlacedObject>();
+  /** Huge objects whose collision is still being built, a few pieces an update. A field initialiser, as `huge`. */
+  private readonly hugeQueue: HugeJob[] = [];
   private loads = 0;
   private readonly failed = new Set<string>();
   /** The widest object's radius, which widens the region sweep for colliders. */
@@ -125,9 +148,13 @@ export class LayoutStreamer {
     private readonly pack: AssetPack,
     layout: Layout,
     private readonly effects: ParticleEffects | null = null,
-    options: { reach?: number } = {},
+    options: { reach?: number; hugeColliders?: boolean } = {},
   ) {
     this.ranges = TIERS.map((t) => t.range * (options.reach ?? 1));
+    // Only a space pack's radii are the models' own (the space command measures them): a planet's
+    // snapshot gives thousands of ordinary objects a radius of 1024 m or more, which must not all be
+    // built tier-wide as huge.
+    const hugeColliders = options.hugeColliders ?? false;
     for (const o of layout.objects) {
       // Snapshot space is mirrored in X and centred on the layout centre.
       const gx = -(o.x - layout.center.x);
@@ -145,7 +172,8 @@ export class LayoutStreamer {
       }
       region.objects[p.tier].push(p);
       if (p.radius >= 1 && !p.contained) this.addExclusion({ x: gx, z: gz, r: p.radius + 2 });
-      if (!p.contained) this.largestRadius = Math.max(this.largestRadius, Math.min(p.radius, 600));
+      if (!p.contained) this.largestRadius = Math.max(this.largestRadius, Math.min(p.radius, COLLIDER_RADIUS_CAP));
+      if (hugeColliders && !p.contained && p.radius > COLLIDER_RADIUS_CAP) this.huge.add(p);
     }
   }
 
@@ -248,11 +276,98 @@ export class LayoutStreamer {
       this.lastColliderZ = pz;
       this.updateColliders(px, pz);
     }
+    this.buildHuge();
   }
 
   /** Scale the ranges the tiers load out to; what is now out of range drops on the next update, what is in loads. */
   setReach(scale: number): void {
     this.ranges = TIERS.map((t) => t.range * scale);
+  }
+
+  /**
+   * Whether every tier that loads at a point (its region within the tier's own range) is loaded:
+   * `update`'s own range test, with nothing loading or still to load. What a hyperspace arrival
+   * waits for. Nothing allocated.
+   */
+  loadedAround(px: number, pz: number): boolean {
+    if (this.disposed) return true;
+    for (const region of this.regions.values()) {
+      const dx = Math.max(0, Math.abs(px - region.cx) - REGION / 2);
+      const dz = Math.max(0, Math.abs(pz - region.cz) - REGION / 2);
+      const d = Math.hypot(dx, dz);
+      for (let t = 0; t < TIERS.length; t++) {
+        if (!region.objects[t].length || d > this.ranges[t]) continue;
+        const state = region.tiers[t];
+        if (state === null || state === 'loading') return false;
+      }
+    }
+    return true;
+  }
+
+  /** Huge objects' collider pieces still to build (what the loading screen and a jump wait for). */
+  get collidersPending(): number {
+    return this.hugeQueue.length;
+  }
+
+  /** A huge object's collision, to be built a piece at a time; marked as having colliders so nothing builds it twice. */
+  private queueHuge(o: PlacedObject): void {
+    this.colliders.set(o, []);
+    this.hugeQueue.push({ o, prim: 0, pieces: null, next: 0 });
+  }
+
+  /**
+   * Build huge objects' collision for up to HUGE_BUILD_MS (at least one piece a call): each primitive
+   * split once into pieces of HUGE_PIECE_TRIANGLES, each piece cleaned and built with TRIMESH_FLAGS
+   * where the object stands, in the exterior group as `addColliders` does. An object whose model is
+   * no longer loaded, or whose tier went (its colliders removed), is dropped from the queue. Called from
+   * `update`; the world also calls it while it waits in a hidden tab, where no frame runs `update`.
+   */
+  buildHuge(): void {
+    const queue = this.hugeQueue;
+    if (!queue.length) return;
+    const t0 = performance.now();
+    let built = 0;
+    while (queue.length && (built === 0 || performance.now() - t0 < HUGE_BUILD_MS)) {
+      const job = queue[0];
+      const o = job.o;
+      const model = this.pack.loaded(o.model);
+      const cols = this.colliders.get(o);
+      if (!model || !cols || job.prim >= model.primitives.length) {
+        queue.shift();
+        continue;
+      }
+      const prim = model.primitives[job.prim];
+      if (!job.pieces) {
+        const posAttr = prim.geometry.getAttribute('position');
+        if (!posAttr || posAttr.count < 3 || posAttr.itemSize !== 3 || (posAttr as THREE.InterleavedBufferAttribute).isInterleavedBufferAttribute) {
+          job.prim++;
+          continue;
+        }
+        const idx = prim.geometry.getIndex();
+        const indices = idx ? new Uint32Array(idx.array as ArrayLike<number>) : Uint32Array.from({ length: posAttr.count - (posAttr.count % 3) }, (_, i) => i);
+        job.pieces = splitTrimesh(new Float32Array(posAttr.array as ArrayLike<number>), indices, HUGE_PIECE_TRIANGLES);
+        job.next = 0;
+        built++;
+        continue;
+      }
+      if (job.next >= job.pieces.length) {
+        job.prim++;
+        job.pieces = null;
+        continue;
+      }
+      const piece = job.pieces[job.next++];
+      const clean = cleanTrimesh(piece.vertices, piece.indices);
+      if (clean) {
+        const desc = R.ColliderDesc.trimesh(clean.vertices, clean.indices, TRIMESH_FLAGS)
+          .setTranslation(o.x, o.y, o.z)
+          .setRotation({ x: o.q.x, y: o.q.y, z: o.q.z, w: o.q.w })
+          .setFriction(0.8);
+        if (prim.cell === 0) desc.setCollisionGroups(groups(Group.exterior, Group.all));
+        else if (prim.cell > 0) desc.setCollisionGroups(groups(Group.interior, Group.all));
+        cols.push(this.physics.world.createCollider(desc));
+      }
+      built++;
+    }
   }
 
   /** How much of what `settled` waits for is in, 0 to 1 (1 with nothing to wait for). */
@@ -320,6 +435,8 @@ export class LayoutStreamer {
       if (region.tiers[tier] !== 'loading') return;
       const loaded = this.instance(objects, models);
       region.tiers[tier] = loaded;
+      // A huge object's collision comes with its tier, a few pieces an update, never keyed on the player's distance.
+      for (const o of objects) if (this.huge.has(o) && !this.colliders.has(o)) this.queueHuge(o);
       // A region that arrives already under the player's nose needs its interiors now.
       for (const b of loaded.buildings) {
         if (Math.hypot(b.x - this.lastInteriorX, b.z - this.lastInteriorZ) - b.radius <= INTERIOR_RANGE) this.buildInterior(b);
@@ -484,6 +601,12 @@ export class LayoutStreamer {
     }
     for (const b of t.buildings) this.buildings.delete(b);
     for (const o of t.objects) this.removeColliders(o);
+    // A huge object whose pieces were still being built stops being built.
+    if (this.hugeQueue.length) {
+      let keep = 0;
+      for (const job of this.hugeQueue) if (!t.objects.includes(job.o)) this.hugeQueue[keep++] = job;
+      this.hugeQueue.length = keep;
+    }
     if (this.effects) for (const h of t.effects) this.effects.remove(h);
     this.loadedInstances -= t.objects.length;
     region.tiers[tier] = null;
@@ -494,6 +617,8 @@ export class LayoutStreamer {
     // Distances count from an object's edge, not its centre: a palace is wider than the range,
     // and its collision must stay while the player walks its far wings.
     for (const [o] of this.colliders) {
+      // A huge object's collision comes and goes with its tier, not with the player's distance.
+      if (this.huge.has(o)) continue;
       if (Math.hypot(o.x - px, o.z - pz) - o.radius > COLLIDER_RANGE * UNLOAD_SLACK) this.removeColliders(o);
     }
     const reach = COLLIDER_RANGE + this.largestRadius;
@@ -508,7 +633,7 @@ export class LayoutStreamer {
         for (const t of region.tiers) {
           if (!t || t === 'loading') continue;
           for (const o of t.objects) {
-            if (o.contained || o.radius < COLLIDER_MIN_RADIUS || this.colliders.has(o)) continue;
+            if (o.contained || o.radius < COLLIDER_MIN_RADIUS || this.colliders.has(o) || this.huge.has(o)) continue;
             if (Math.hypot(o.x - px, o.z - pz) - o.radius > COLLIDER_RANGE) continue;
             this.addColliders(o);
           }
@@ -701,6 +826,7 @@ export class LayoutStreamer {
     for (const b of this.buildings) this.dropInterior(b);
     for (const region of this.regions.values()) for (let t = 0; t < TIERS.length; t++) this.unloadTier(region, t);
     for (const o of [...this.colliders.keys()]) this.removeColliders(o);
+    this.hugeQueue.length = 0;
     this.buildings.clear();
   }
 }

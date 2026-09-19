@@ -158,6 +158,8 @@ export interface EffectHandle {
   alphaScale?: number;
   /** 0 for a placed effect; one more for each level of effects carried by particles (capped at MAX_ATTACH_DEPTH). */
   readonly depth?: number;
+  /** Draw untextured quad emitters as flat colour (the hyperspace tunnel); no other effect asks. */
+  readonly solid?: boolean;
 }
 
 /**
@@ -469,6 +471,8 @@ class EmitterState {
   readonly maxLife: number;
   /** The converted effects this emitter's particles carry (none without a host); at most 31, a bit each. */
   readonly attachments: ParticleAttachmentDef[];
+  /** An untextured quad emitter drawn as flat colour, because its handle asked for it (`solid`). */
+  readonly solid: boolean;
 
   constructor(
     readonly def: EmitterDef,
@@ -476,6 +480,7 @@ class EmitterState {
     readonly handle: EffectHandle,
     private readonly host: AttachmentHost | null = null,
   ) {
+    this.solid = !!handle.solid && def.particle.type === 'quad' && !def.particle.quad?.texture.shader && def.visible;
     this.attachments = host ? (def.particle.attachments ?? []).filter((a) => !!a.file).slice(0, 31) : [];
     const rr = def.particle.relativeRotation;
     this.usesRelativeRotation = !!rr && !(isFlatZero(rr[0]) && isFlatZero(rr[1]) && isFlatZero(rr[2]));
@@ -844,7 +849,8 @@ class EffectInstance {
         // Kept when it draws (a quad with a texture), or when it draws nothing itself but its
         // particles carry converted effects (a light dust storm's wisps, a lightning chain).
         const tex = e.particle.type === 'quad' ? e.particle.quad?.texture : undefined;
-        const drawn = !!tex?.file && tex.visible;
+        // An untextured quad (the hyperspace tunnel) draws only for a handle placed `solid`.
+        const drawn = (!!tex?.file && tex.visible) || (!!handle.solid && e.particle.type === 'quad' && !tex?.shader);
         const carries = !!host && !!e.particle.attachments?.some((a) => a.file);
         if (!e.visible || !(drawn || carries)) continue;
         this.emitters.push(new EmitterState(e, def, handle, host));
@@ -964,7 +970,7 @@ export class ParticleEffects {
    * uploading them when a renderer is given; so neither a program nor a texture upload waits for
    * the first quad. Resolves false when the effect failed to load.
    */
-  async prepare(file: string, renderer?: THREE.WebGLRenderer | null, seen: Set<string> = new Set()): Promise<boolean> {
+  async prepare(file: string, renderer?: THREE.WebGLRenderer | null, seen: Set<string> = new Set(), solid = false): Promise<boolean> {
     // The effects particles carry are prepared too, all the way down the chain, once each.
     if (seen.has(file)) return true;
     seen.add(file);
@@ -974,6 +980,11 @@ export class ParticleEffects {
     for (const g of def.groups) {
       for (const e of g.emitters) {
         if (e.visible) for (const a of e.particle.attachments ?? []) if (a.file) waits.push(this.prepare(a.file, renderer, seen));
+        // An effect to be placed `solid` draws its untextured quads in the flat-colour batch: made now, hidden, like the rest.
+        if (solid && e.visible && e.particle.type === 'quad' && !e.particle.quad?.texture.shader) {
+          this.solidBatch();
+          if (renderer) renderer.initTexture(this.white);
+        }
         const tex = e.particle.quad?.texture;
         if (!e.visible || e.particle.type !== 'quad' || !tex?.file || !tex.visible) continue;
         this.batch(tex.file, tex.blend ?? 'alpha');
@@ -1005,8 +1016,8 @@ export class ParticleEffects {
    * matrixWorld, kept by reference) `matrix` is in that frame, and the effect simulates there and is
    * carried into the world as it is drawn: something played aboard stays in the room while the ship flies.
    */
-  place(file: string, matrix: THREE.Matrix4, contained: boolean, transient = false, frame: THREE.Matrix4 | null = null): EffectHandle {
-    return this.start({ file, matrix: matrix.clone(), contained, transient, frame, rateScale: 1, depth: 0 });
+  place(file: string, matrix: THREE.Matrix4, contained: boolean, transient = false, frame: THREE.Matrix4 | null = null, solid = false): EffectHandle {
+    return this.start({ file, matrix: matrix.clone(), contained, transient, frame, rateScale: 1, depth: 0, solid });
   }
 
   /** Load a handle's effect and play it once loaded, unless it was removed meanwhile. */
@@ -1106,12 +1117,24 @@ export class ParticleEffects {
     return t;
   }
 
-  private batch(file: string, blend: NonNullable<ParticleTextureDef['blend']>): Batch {
+  /** A 1-texel white texture: the flat-colour batch's map, so its quads draw in their own colour on the shared program. */
+  private readonly white = (() => {
+    const t = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1);
+    t.needsUpdate = true;
+    return t;
+  })();
+
+  /** The batch the `solid` handles' untextured quads draw in: under smoke (11) and glows (12), so streaks show over the tunnel. */
+  private solidBatch(): Batch {
+    return this.batch('@solid', 'alpha', this.white, 10);
+  }
+
+  private batch(file: string, blend: NonNullable<ParticleTextureDef['blend']>, map?: THREE.Texture, order?: number): Batch {
     const key = `${file}|${blend}`;
     let b = this.batches.get(key);
     if (b) return b;
     const shader = this.shader;
-    const uniforms: Record<string, THREE.IUniform> = { map: { value: this.texture(file) }, uFogColor: { value: this.fogColor }, uFogDensity: { value: this.fogDensity }, uAdditive: { value: blend === 'add' ? 1 : 0 } };
+    const uniforms: Record<string, THREE.IUniform> = { map: { value: map ?? this.texture(file) }, uFogColor: { value: this.fogColor }, uFogDensity: { value: this.fogDensity }, uAdditive: { value: blend === 'add' ? 1 : 0 } };
     // The replacement's own uniforms are shared objects: one write reaches every batch.
     if (shader) Object.assign(uniforms, shader.uniforms);
     const material = new THREE.ShaderMaterial({
@@ -1129,7 +1152,7 @@ export class ParticleEffects {
     mesh.frustumCulled = false;
     mesh.matrixAutoUpdate = false;
     // Smoke before glows, so fire shows through its own smoke the way the client sorts them.
-    mesh.renderOrder = blend === 'add' ? 12 : 11;
+    mesh.renderOrder = order ?? (blend === 'add' ? 12 : 11);
     if (this.actorLayer) mesh.layers.enable(ACTOR_LAYER);
     // Hidden until it has quads (a batch made ahead by `prepare` draws nothing, but is compiled).
     mesh.visible = false;
@@ -1210,10 +1233,11 @@ export class ParticleEffects {
         continue;
       }
       for (const e of inst.emitters) {
-        // An emitter that only carries other effects draws nothing of its own.
+        // An emitter that only carries other effects draws nothing of its own; an untextured one only for a `solid` handle.
         const tex = e.def.particle.quad?.texture;
-        if (!tex?.file || !tex.visible) continue;
-        const b = this.batch(tex.file, tex.blend ?? 'alpha');
+        const solid = e.solid;
+        if (!solid && (!tex?.file || !tex.visible)) continue;
+        const b = solid ? this.solidBatch() : this.batch(tex!.file!, tex!.blend ?? 'alpha');
         const local = e.def.localSpace;
         // A framed effect's points are hull-local: it sorts as one, by its own distance.
         for (let k = 0; k < e.particles.length; k++) {
@@ -1331,6 +1355,12 @@ export class ParticleEffects {
         col[co + k * 4 + 2] = tmpColor.b;
         col[co + k * 4 + 3] = alpha;
       }
+      const uo = i * 8;
+      if (e.solid) {
+        // Flat colour: the white texel's middle, whatever frame fields an untextured emitter carries.
+        for (let k = 0; k < 8; k++) uv[uo + k] = 0.5;
+        continue;
+      }
       // Texture frame: over the particle's life, or at a fixed rate.
       const tex = quad.texture;
       const used = Math.max(1, tex.frameEnd + 1 - tex.frameStart);
@@ -1342,7 +1372,6 @@ export class ParticleEffects {
       const size = tex.frameUVSize || 1;
       const cu = (frame % perColumn) * size;
       const cv = Math.floor(frame / perColumn) * size;
-      const uo = i * 8;
       uv[uo] = cu + size; uv[uo + 1] = cv + size;
       uv[uo + 2] = cu + size; uv[uo + 3] = cv;
       uv[uo + 4] = cu; uv[uo + 5] = cv;
@@ -1425,6 +1454,7 @@ export class ParticleEffects {
     this.batchMaterials.length = 0;
     for (const t of this.textures.values()) t.dispose();
     this.textures.clear();
+    this.white.dispose();
     this.instances.clear();
     this.pending.clear();
     this.children.clear();

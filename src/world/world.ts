@@ -33,7 +33,8 @@ import type { SunInfo } from '../core/postfx';
 import { luminance, pointIrradiance } from '../core/fx/bladeGlowMath.ts';
 import { isShadowOnly } from '../core/fxRegistry.ts';
 import { addPointLight, fillCascades, luminanceOf, resetFxLights, setDirectional, type FxLights } from '../core/fx/lights';
-import { ParticleEffects } from './particles';
+import { ParticleEffects, type EffectHandle } from './particles';
+import { loadSpacePack, type SpacePack } from '../space/spaceData.ts';
 import { CSM } from 'three/examples/jsm/csm/CSM.js';
 import { ACTOR_LAYER, INTERIOR_LAYER, markActor, type PortalRenderer } from './portalRender';
 import { createPlaceholderSpeeder } from '../vehicles/speeder';
@@ -657,7 +658,15 @@ export class World {
       this.particles = new ParticleEffects(this.scene, pack.url(''));
       this.particles.heightAt = (x, z) => this.terrain.heightAt(x, z);
       // The gallery is one long walk of exhibits with nothing else to draw: everything loads from anywhere on it.
-      this.layoutStream = new LayoutStreamer(this.scene, this.physics, pack, layout, this.particles, { reach: planet.id === 'gallery' ? 4 : this.streamReach() });
+      this.layoutStream = new LayoutStreamer(this.scene, this.physics, pack, layout, this.particles, { reach: planet.id === 'gallery' ? 4 : this.streamReach(), hugeColliders: !!planet.space });
+      // A space zone's hyperspace effects are made ready now (their batches, the flat-colour one among them,
+      // hidden in the scene, their textures uploaded), so settle() compiles them behind the loading screen
+      // and no jump builds a program on a live frame. `spaceData` was set by loadSpaceBodies above.
+      if (planet.space) {
+        const fx = this.particles;
+        for (const f of Object.values(this.hyperspaceEffects())) if (f) await fx.prepare(f, this.renderer, undefined, true);
+        if (token !== this.loadToken) return null;
+      }
       // Placed objects pull the procedural ground up to their feet, so buildings stand on it;
       // in space nothing stands on anything, and an anchor would raise a needle of ground three
       // kilometres tall under every asteroid.
@@ -791,6 +800,7 @@ export class World {
     this.gallery?.dispose();
     this.gallery = null;
     this.spaceStations = [];
+    this.spaceData = null;
     for (const sp of [...this.vehicles]) this.disposeVehicle(sp);
     this.vehicles.length = 0;
     this.props?.dispose();
@@ -837,35 +847,70 @@ export class World {
   /** A space zone's planets and moons: textured spheres hung far out in the directions the zone's terrain file gives, riding with the camera like the sky. */
   private spaceBodies: THREE.Group | null = null;
 
-  /** The zone's stations by name, in the game's coordinates, for the map. */
-  private spaceStations: { name: string; x: number; z: number }[] = [];
+  /** The zone's stations by name (the game's title when the pack has one), in the game's coordinates, for the map. */
+  private spaceStations: { name: string; title: string | null; x: number; z: number }[] = [];
 
-  /** The name of the station standing at a point (the nearest within a kilometre), else a plain word. */
+  /** The space zone's whole pack (space.json), null on a ground planet and before it loads. Public, read-only by convention. */
+  spaceData: SpacePack | null = null;
+
+  /** The name of the station standing at a point (the nearest within a kilometre): its title from the game's strings, else one made from its name, else a plain word. */
   stationNameAt(x: number, z: number): string {
-    let best: string | null = null;
+    let best: { name: string; title: string | null } | null = null;
     let bestD = 1000;
     for (const s of this.spaceStations) {
       const d = Math.hypot(s.x - x, s.z - z);
       if (d < bestD) {
         bestD = d;
+        best = s;
+      }
+    }
+    if (!best) return 'station';
+    return best.title ?? `station ${best.name.replace(/^station_/, '').replace(/_/g, ' ')}`;
+  }
+
+  /** The name of the scenery at a point (the Star Destroyer): the nearest whose radius plus a kilometre covers it, or null. Game frame. */
+  sceneryNameAt(x: number, z: number): string | null {
+    let best: string | null = null;
+    let bestD = Infinity;
+    for (const s of this.spaceData?.scenery ?? []) {
+      const d = Math.hypot(-s.x - x, s.z - z);
+      if (d < s.radius + 1000 && d < bestD) {
+        bestD = d;
         best = s.name;
       }
     }
-    return best ? `station ${best.replace(/^station_/, '').replace(/_/g, ' ')}` : 'station';
+    return best;
+  }
+
+  /** The jump's two converted warp effects (pack-relative particle JSON), from the zone's pack; null where there is none. */
+  hyperspaceEffects(): { enter: string | null; exit: string | null } {
+    const fx = this.spaceData?.hyperspace?.effects;
+    return { enter: fx?.enter ?? null, exit: fx?.exit ?? null };
+  }
+
+  /**
+   * Place one of the jump's effects framed on a hull (`frame`, its live matrixWorld, `local` in that frame):
+   * transient, and `solid` so its untextured tunnel quads draw as flat colour. Null outside a pack.
+   */
+  placeZoneEffect(file: string, local: THREE.Matrix4, frame: THREE.Matrix4): EffectHandle | null {
+    return this.particles?.place(file, local, false, true, frame, true) ?? null;
+  }
+
+  /** Take one of the jump's effects away (nothing happens if the world it was placed in has gone). */
+  removeZoneEffect(h: EffectHandle): void {
+    this.particles?.remove(h);
   }
 
   private async loadSpaceBodies(pack: AssetPack): Promise<void> {
-    type SpaceData = { planets: { direction: number[]; size: number; texture: string | null }[]; stations?: { name: string; x: number; y: number; z: number }[] };
-    let data: SpaceData | null = null;
-    try {
-      const res = await fetch(pack.url('space.json'));
-      if (res.ok && (res.headers.get('content-type') ?? '').includes('json')) data = (await res.json()) as SpaceData;
-    } catch {
-      data = null;
-    }
+    const token = this.loadToken;
+    // The whole pack, fetched once per zone and shared with the System Map's catalogue (the same promise).
+    const data = await loadSpacePack(import.meta.env.BASE_URL, this.packId);
+    if (token !== this.loadToken) return;
+    this.spaceData = data;
     if (!data) return;
-    // The stations' names, at the game's mirrored X.
-    this.spaceStations = (data.stations ?? []).map((s) => ({ name: s.name, x: -s.x, z: s.z }));
+    // The stations' names (and the game's titles), at the game's mirrored X.
+    // A pack converted before titles were written has none, and `normalise` fills the title with the raw name: that is no title.
+    this.spaceStations = (data.stations ?? []).map((s) => ({ name: s.name, title: s.title && s.title !== s.name ? s.title : null, x: -s.x, z: s.z }));
     const group = new THREE.Group();
     const loader = new THREE.TextureLoader();
     for (const p of data.planets) {
@@ -1668,6 +1713,26 @@ export class World {
   /** How a vehicle is prepared before it is shown: `prepareVehicle`, which the game may widen (the motion blur's own variants). Read at call time. */
   vehiclePrepare: (roots: THREE.Object3D[]) => Promise<void> = (roots) => this.prepareVehicle(roots);
 
+  /**
+   * Wait for the next drawn frame. A tab in the background gets no animation frames, and its timers
+   * are throttled to one a minute after a while; a message to itself is neither, so loading goes on
+   * unlooked-at. Unlike `breath` (a yield between compile steps), this waits for a frame when one can come.
+   */
+  private nextFrame(): Promise<void> {
+    return new Promise<void>((resolve) => {
+      if (!document.hidden) {
+        requestAnimationFrame(() => resolve());
+        return;
+      }
+      const ch = new MessageChannel();
+      ch.port1.onmessage = () => {
+        ch.port1.close();
+        resolve();
+      };
+      ch.port2.postMessage(0);
+    });
+  }
+
   /** A yield between compile steps: a message to itself when the tab is hidden (never throttled), else a zero timer. */
   private breath(): Promise<void> {
     return new Promise<void>((resolve) => {
@@ -1894,14 +1959,7 @@ export class World {
       // Waiting means the programs are linked when this returns, so the picture can change over.
       if (opts.waitReady) await Promise.all(jobs);
       onProgress(Math.min(objects.length, i + BATCH), objects.length);
-      // A tab in the background gets no animation frames, and its timers are throttled to one a
-      // minute after a while; a message to itself is neither, so loading goes on unlooked-at.
-      await new Promise<void>((resolve) => {
-        if (!document.hidden) return requestAnimationFrame(() => resolve());
-        const ch = new MessageChannel();
-        ch.port1.onmessage = () => resolve();
-        ch.port2.postMessage(0);
-      });
+      await this.nextFrame();
     }
     // The weather's falling effects draw in their own scene, with no lights and no fog: compiled
     // against that scene (never this one, whose lights and fog are in the program key), for the
@@ -2275,7 +2333,8 @@ export class World {
       if (this.chunks.has(`${pcx + dx},${pcz + dz}`)) have++;
     }
     const ground = need && !this.planet.space ? have / need : 1;
-    const objects = this.layoutStream ? this.layoutStream.progress(pos.x, pos.z) : this.packProgress < 1 ? 0 : 1;
+    // In space every tier within its own range counts (a zone is a few hundred objects, and a landmark 2 km off must not stream in after the screen lifts).
+    const objects = this.layoutStream ? this.layoutStream.progress(pos.x, pos.z, this.planet.space ? Infinity : undefined) : this.packProgress < 1 ? 0 : 1;
     const total = this.packProgress * 0.45 + ground * 0.2 + objects * 0.35;
     const stage = this.packProgress < 0.12 ? 'the planet\'s pack' : this.packProgress < 0.55 ? 'the terrain' : this.packProgress < 0.92 ? 'the flora, the ground and the sky' : ground < 1 ? 'the ground underfoot' : objects < 1 ? 'the buildings and the props' : 'the last of it';
     return { total, stage };
@@ -2344,7 +2403,13 @@ export class World {
     const pcx = Math.floor(pos.x / CHUNK_SIZE);
     const pcz = Math.floor(pos.z / CHUNK_SIZE);
     if (!this.planet.space) for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) if (!this.chunks.has(`${pcx + dx},${pcz + dz}`)) return false;
-    if (this.layoutStream && !this.layoutStream.settled(pos.x, pos.z)) return false;
+    // In space, every tier within its own range (not 220 m round the point); anywhere, a huge object's collider pieces.
+    if (this.layoutStream && !this.layoutStream.settled(pos.x, pos.z, this.planet.space ? Infinity : undefined)) return false;
+    if (this.layoutStream && this.layoutStream.collidersPending > 0) {
+      // Hidden, no frame runs `update`, which is what builds the pieces: the loading screen's poll builds them instead.
+      if (document.hidden) this.layoutStream.buildHuge();
+      return false;
+    }
     return true;
   }
 
@@ -2360,6 +2425,37 @@ export class World {
     for (const o of this.hiddenGround) o.visible = true;
     this.hiddenGround.length = 0;
     this.groundHiddenFor = null;
+  }
+
+  /**
+   * Resolve when the world around a point is ready to be seen: every region tier within its load range
+   * loaded, the huge objects' collider pieces built, the materials that came with them adopted
+   * (cascades before compile), and every queued or fresh object's programs made and linked
+   * (compileReady, a mesh at a time). Polls once a drawn frame (a message to itself when the tab is
+   * hidden). False after `timeoutMs`. Runs only under the jump's veil or a loading screen, so what it
+   * allocates is no frame's cost.
+   */
+  async readyAround(pos: THREE.Vector3, timeoutMs: number): Promise<boolean> {
+    const t0 = performance.now();
+    for (;;) {
+      const ls = this.layoutStream;
+      if (this.packStatus !== 'loading' && (!ls || (ls.loadedAround(pos.x, pos.z) && ls.collidersPending === 0))) {
+        // Cascades and the wet wrap first, then the programs: the queue drainCompiles would have fired without waiting, and anything new.
+        const fresh = this.adoptMaterials(this.scene);
+        const pending = this.compileQueue.splice(0);
+        if (!fresh.length && !pending.length) return true;
+        await this.compileReady([...pending, ...fresh]);
+        continue;
+      }
+      if (performance.now() - t0 > timeoutMs) return false;
+      // Hidden, no frame comes and `update` (which streams) does not run: poll on a timer rather than spin on
+      // messages to itself (throttled timers only make this slower, and it runs under a veil or a loading screen).
+      if (document.hidden) {
+        // Nor are a huge object's collider pieces built by `update` there: build them here.
+        ls?.buildHuge();
+        await new Promise<void>((r) => setTimeout(r, 50));
+      } else await this.nextFrame();
+    }
   }
 
   get inside(): boolean {

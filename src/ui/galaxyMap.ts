@@ -1,4 +1,5 @@
-import { PLANETS, type PlanetDef } from '../data/planets';
+import { PLANETS, planetBelow, type PlanetDef } from '../data/planets';
+import { loadSpacePack } from '../space/spaceData';
 
 /** A named place from a converted pack's pois.json, in SWG coordinates. */
 export interface Poi {
@@ -40,7 +41,7 @@ export class GalaxyMap {
           <h3>${p.name}</h3>
           <div class="tag">${p.tagline}</div>
           <p>${p.description}</p>
-          <div class="meta">${p.space ? 'Orbit · no gravity · flown in a ship' : `Gravity ${p.gravity} m/s² · ${p.creatures.name} country`}</div>
+          <div class="meta">${p.space ? (planetBelow(p) ? 'Orbit · no gravity · flown in a ship' : 'Deep space · no gravity · flown in a ship') : `Gravity ${p.gravity} m/s² · ${p.creatures.name} country`}<span class="space-missing"></span></div>
           <div class="pois"></div>
         </div>`;
       card.addEventListener('click', () => {
@@ -149,6 +150,25 @@ export class GalaxyMap {
 
   show(): void {
     this.root.classList.remove('hidden');
+    this.markUnconverted();
+  }
+
+  /**
+   * A space system with no pack at all (Kessel, Ord Mantell and Deep Space before the `space` run) would be travelled to
+   * behind the loading screen into an empty zone: its card says so, with the command. Asked on every showing, since
+   * `loadSpacePack` keeps no missing pack, so a conversion mid-session clears the note; a pack from before hyperspace
+   * still flies and is not marked.
+   */
+  private markUnconverted(): void {
+    for (const p of PLANETS) {
+      if (!p.space) continue;
+      const note = this.root.querySelector<HTMLElement>(`.planet-card[data-id="${p.id}"] .space-missing`);
+      if (!note) continue;
+      void loadSpacePack(import.meta.env.BASE_URL, p.id).then((pack) => {
+        const text = pack ? '' : ` · not converted: npm run swg -- space @SWG all assets-private --retail-only`;
+        if (note.textContent !== text) note.textContent = text;
+      });
+    }
   }
 
   hide(): void {

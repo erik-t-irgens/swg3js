@@ -8,7 +8,7 @@ import { ThirdPersonCamera } from './core/camera';
 import { PortalRenderer } from './world/portalRender';
 import { Input, type Action } from './core/input';
 import { Physics } from './core/physics';
-import { PLANETS, packIdOf, planetById, spaceZoneOf, type PlanetDef } from './data/planets';
+import { PLANETS, packIdOf, planetBelow, planetById, spaceZoneOf, type PlanetDef } from './data/planets';
 import { DEFAULT_SABER_COLOR, Player } from './player/player';
 import { SaberMarks } from './combat/saberMarks';
 import { collectBlades, lightAt, litCeiling, type LitSources } from './combat/bladeLights';
@@ -62,6 +62,10 @@ import { CharacterSelect } from './ui/characterSelect';
 import { CreatorBar } from './ui/creatorBar';
 import { Menu, keyName } from './ui/menu';
 import { ShipMenu, type ShipStatus } from './ui/shipMenu';
+import { HyperspaceUi } from './ui/hyperspaceUi';
+import { Hyperspace } from './space/hyperspace';
+import { HyperspaceCatalogue, arrivalAt, landmarksOf, loadSpacePack, type Destination } from './space/spaceData';
+import { arrivalPose, lookRotation, sceneOf, toGame } from './space/hyperspaceMath';
 import { LiftMenu } from './ui/liftMenu';
 import { stopLabel, type LiftStop } from './world/lifts';
 import { draggable } from './ui/drag';
@@ -143,6 +147,10 @@ interface ShipCrossing {
   speed: number;
   height: number;
   crew?: ShipCrew | null;
+  /** Where the ship comes out and which way it faces (a jump's arrival, game frame), instead of over the spawn at heading π. */
+  arrival?: { pos: THREE.Vector3; quaternion: THREE.Quaternion } | null;
+  /** Held and ghosted where it arrives, for the jump to release. */
+  hold?: boolean;
 }
 const tmp2 = new THREE.Vector3();
 const boltFrom = new THREE.Vector3();
@@ -219,6 +227,14 @@ class App {
   private readonly creatorBar: CreatorBar;
   private readonly menu: Menu;
   private readonly shipMenu: ShipMenu;
+  /** The System Map (the destinations of a jump), the white veil and the countdown line. */
+  private readonly hyperspaceUi: HyperspaceUi;
+  /** The jump: its countdown, its phases, and the hull it flies. */
+  private readonly hyperspace: Hyperspace;
+  /** Every space zone's pack and destinations, fetched on the first opening of the System Map (or the first `__debug.jumps`). */
+  private hyperspaceCatalogue: Promise<HyperspaceCatalogue> | null = null;
+  /** The same catalogue once it has arrived, for the jump's own reads (null until then). */
+  private loadedCatalogue: HyperspaceCatalogue | null = null;
   private readonly liftMenu: LiftMenu;
   private readonly loadingScreen: LoadingScreen;
   private readonly emoteWheel: EmoteWheel;
@@ -416,8 +432,42 @@ class App {
     this.shipEdit.onTab = (id) => this.toggleSpawner(id as 'garage' | 'npcs');
     // A fit changed in the last 300 ms is written before the page goes.
     window.addEventListener('beforeunload', () => this.flushFits());
-    this.shipMenu = new ShipMenu(this.ui, { status: () => this.shipStatus(), goToSpace: () => void this.goToSpace(), land: () => void this.landShip(), eject: () => void this.eject() }, () => keyName(this.input.bindings.ship[0] ?? ''));
+    this.shipMenu = new ShipMenu(this.ui, { status: () => this.shipStatus(), goToSpace: () => void this.goToSpace(), land: () => void this.landShip(), eject: () => void this.eject(), hyperspace: () => this.hyperspaceButton() }, () => keyName(this.input.bindings.ship[0] ?? ''));
     this.shipMenu.onClose = () => this.toggleShipMenu();
+    // The System Map and the jump. What these read is assigned above: this.ui (a field initialiser),
+    // this.input, this.world, this.cam, this.player; this.postfx may be null and is read with ?. at call
+    // time; this.loadingScreen (assigned later) is only touched inside travel, which crossZone calls
+    // during a jump, never from a constructor. Neither constructor calls anything on the host, and the
+    // catalogue is fetched on the panel's first opening. Assigned here, anyPanelOpen and closePanels
+    // (which read hyperspaceUi.open) are safe from now on.
+    this.hyperspaceUi = new HyperspaceUi(this.ui, () => keyName(this.input.bindings.ship[0] ?? ''));
+    this.hyperspaceUi.onClose = () => this.toggleShipMenu();
+    this.hyperspaceUi.onJump = (d) => this.startJump(d);
+    this.hyperspace = new Hyperspace({
+      zone: () => this.world.planet.id,
+      ship: () => this.pilotedShip(),
+      alive: (h) => this.world.vehicles.includes(h as Vehicle),
+      catalogue: () => this.loadedCatalogue,
+      packHere: () => this.world.spaceData,
+      placeEffect: (file, local, frame) => this.world.placeZoneEffect(file, local, frame),
+      removeEffect: (h) => this.world.removeZoneEffect(h),
+      effects: () => this.world.hyperspaceEffects(),
+      moveWorld: (to) => this.world.jumpTo(to),
+      readyAround: (to, ms) => this.world.readyAround(to, ms),
+      afterTeleport: (at) => {
+        this.cam.release();
+        this.postfx?.reset();
+        this.spawn.copy(at);
+      },
+      crossZone: (zone, pose) => this.crossZone(zone, pose),
+      closePanels: () => {
+        const was = this.anyPanelOpen() || this.map.open;
+        this.closePanels();
+        this.map.hide();
+        if (was && !this.menu.open) this.freeMouse(false);
+      },
+      ui: this.hyperspaceUi,
+    });
     // The lift menu: E in a shaft lists its levels; a pick, or a number key, rides there.
     this.liftMenu = new LiftMenu(this.ui);
     this.liftMenu.onClose = () => {
@@ -501,6 +551,7 @@ class App {
     // Every panel moves by its header and stays put; the overlay round it is clear, so the world shows behind.
     draggable(this.map.root, '.map-panel', '.map-header', 'map');
     draggable(this.shipMenu.root, '.ship-panel', '.ship-header', 'ship');
+    draggable(this.hyperspaceUi.root, '.ship-panel', '.ship-header', 'hyperspace');
     for (const [id, ui] of [['wardrobe', this.wardrobe], ['weapons', this.weaponsUi], ['garage', this.vehiclesUi], ['npcs', this.npcUi], ['appearance', this.appearanceUi], ['backpack', this.backpack], ['shipedit', this.shipEdit]] as const) draggable(ui.root, '.wardrobe-panel', '.wardrobe-header', id);
     // Console hooks for driving the game from tests: window.__debug.teleport(x, z, yaw), .look(yaw, pitch), .cell().
     (window as unknown as { __debug: unknown }).__debug = {
@@ -1038,6 +1089,8 @@ class App {
           this.player.update(dt, this.input, this.cam, this.world);
           this.scorch(dt);
           this.stepCombat(dt);
+          // The jump's clock (its countdown and phases); the transit itself waits on drawn frames and streaming, which this does not give.
+          if (!this.traveling) this.hyperspace.update(dt, dt, false);
           this.stepVehicles(dt, true);
           if (!this.player.noclip && !this.player.mounted) this.world.turrets.update(dt, this.player, this.world.bolts);
           // Where the player stands first, then one step of everything alive: without the first,
@@ -1314,6 +1367,54 @@ class App {
       travel: (id: string) => {
         void this.travel(planetById(id));
         return `travelling to ${id}`;
+      },
+      /**
+       * The System Map's lists (`await jumps()` for the zone flown in, `jumps('space_light1')` for another): every system's title,
+       * and the zone's destinations with their keys for `jump`, how far each is from the ship (km, this zone only), whether it is
+       * made up, and why it cannot be jumped to now.
+       */
+      jumps: async (zone?: string) => {
+        const cat = await this.catalogue();
+        const here = zone ?? this.world.planet.id;
+        const sys = cat.systems.find((s) => s.id === here);
+        const ship = this.pilotedShip();
+        return {
+          systems: cat.systems.map((s) => `${s.title}${s.pack?.hyperspace ? '' : ' (not converted)'}`),
+          here,
+          destinations: (sys?.destinations ?? []).map((d) => {
+            let km: number | null = null;
+            if (ship && d.zone === this.world.planet.id) {
+              const g = toGame(d.at);
+              km = Number((Math.hypot(g[0] - ship.pos.x, g[1] - ship.pos.y, g[2] - ship.pos.z) / 1000).toFixed(2));
+            }
+            return { key: d.key, name: d.name, kind: d.kind, km, invented: d.invented, why: this.hyperspace.why(d) };
+          }),
+        };
+      },
+      /**
+       * Start a jump to a destination by its key (`jump('space_tatooine:space_tatooine_2')`); `{ now: true }` skips the countdown.
+       * Answers why it cannot, or that it has begun: 'jumping' with `now` means the enter stage starts on the next frame (in a
+       * hidden tab, the next `advance`), so `jumpState()` read at once still says `countdown`.
+       */
+      jump: async (key: string, opts: { now?: boolean } = {}) => {
+        const cat = await this.catalogue();
+        const d = cat.find(key);
+        if (!d) return `no destination ${key}: see __debug.jumps(zone) for the keys`;
+        const why = this.hyperspace.start(d, opts.now ? 0 : undefined);
+        if (why !== null) return why;
+        if (this.hyperspaceUi.open) {
+          this.hyperspaceUi.hide();
+          this.freeMouse(false);
+        }
+        return opts.now ? 'jumping' : 'counting down';
+      },
+      /** The jump now: its phase, time in it, destination, the cruise it commands, the hull's ghosting, hits taken (should be 0), how far off the arrival was, the worst frame seen outside the white. */
+      jumpState: () => this.hyperspace.describe(),
+      /** The warp effects' turn about the hull's Y (degrees) and how far ahead of the hull they are placed (metres along the nose), for checking by eye; the next jump uses them. */
+      jumpFx: (opts: { turn?: number; ahead?: number } = {}) => {
+        if (typeof opts.turn === 'number' && Number.isFinite(opts.turn)) this.hyperspace.fxTurn = opts.turn;
+        if (typeof opts.ahead === 'number' && Number.isFinite(opts.ahead)) this.hyperspace.fxAhead = opts.ahead;
+        return { ...this.world.hyperspaceEffects(), turn: this.hyperspace.fxTurn, ahead: this.hyperspace.fxAhead };
       },
       /**
        * Nudge the ridden vehicle's seat by metres in its own frame (right, up, forward) and report where it now is, with the pose
@@ -1974,6 +2075,8 @@ class App {
 
   /** Back to the select screen: the place is written, the world unloaded, nothing streams until a character is chosen. */
   private switchToSelect(): void {
+    // A jump lets go of everything it holds (the hull, the white, its effects) before the ship is left.
+    this.hyperspace.abort('leaving');
     this.savePlace(true);
     this.menu.hide();
     this.closePanels();
@@ -2524,8 +2627,8 @@ class App {
       this.player.heading = c.heading;
       this.cam.yaw = c.heading + Math.PI;
     }
-    // Space is never stood in: a character who was last there comes back flying a ship.
-    if (planet.space) await this.arriveInSpace();
+    // Space is never stood in: a character who was last there comes back flying a ship, where it was.
+    if (planet.space) await this.arriveInSpace(c.pos ? new THREE.Vector3(c.pos[0], c.pos[1], c.pos[2]) : undefined);
     this.inWorld = true;
     this.started = true;
     await this.settle();
@@ -2548,9 +2651,10 @@ class App {
    */
   private async settle(timeoutMs = 30000): Promise<void> {
     const t0 = performance.now();
+    // The world position: aboard a hull's rooms `player.pos` is in the hull's frame, near its origin, not where the hull is.
     while (performance.now() - t0 < timeoutMs) {
-      if (this.world.settled(this.player.pos)) break;
-      const { total, stage } = this.world.progress(this.player.pos);
+      if (this.world.settled(this.player.worldPos)) break;
+      const { total, stage } = this.world.progress(this.player.worldPos);
       // The picture fills to 96% on the world's word; the last of it is the frame drawn below.
       this.loadingScreen.setProgress(0.04 + total * 0.92);
       this.loadingScreen.setWhat(`loading ${stage}`);
@@ -2671,9 +2775,11 @@ class App {
    * out of it, is spawned again over the arrival point at `height` and launched at `speed`, and
    * whoever was aboard its rooms stands in the new hull where they stood in the old (`crew`). A
    * space zone is always arrived at in a ship (the one last flown or fitted ship last stood out, else an X-wing).
+   * `fromJump` is the jump's own crossing (it is not aborted by it); the ship arrived in is returned, or null.
    */
-  private async travel(planet: PlanetDef, zoneId?: string, ship?: ShipCrossing): Promise<void> {
-    if (this.traveling) return;
+  private async travel(planet: PlanetDef, zoneId?: string, ship?: ShipCrossing, fromJump = false): Promise<Vehicle | null> {
+    if (this.traveling) return null;
+    if (!fromJump) this.hyperspace.abort('travel');
     this.traveling = true;
     this.map.hide();
     this.closePanels();
@@ -2682,6 +2788,9 @@ class App {
     console.info(`travel: to ${planet.name}${zone ? ` (${zone.name})` : ''}${ship ? ` flying the ${ship.def.id}${ship.crew ? ` from its rooms${ship.crew.piloting ? ' at the controls' : ''}` : ''}` : ''}`);
     this.loadingScreen.show(planet, zone ? `${planet.name}: ${zone.name}` : planet.name, 'travelling');
     await new Promise((r) => setTimeout(r, 400));
+    // Into space with no ship carried (the galaxy map): arriveInSpace puts the ship at the zone's own arrival, so the world
+    // streams from there. Read before anyone leaves a ship, so nothing waits between the leave and the unload.
+    const spaceArrival = !ship && planet.space ? arrivalAt(await loadSpacePack(import.meta.env.BASE_URL, packIdOf(planet, zoneId))) : null;
     const p = this.player;
     // Off the ship before the world it stands in goes: its room's physics world goes with it.
     if (p.aboard) {
@@ -2689,20 +2798,31 @@ class App {
       p.leave();
     }
     if (p.mounted) p.dismount(p.pos.clone());
-    this.arrive(planet, zoneId);
-    if (ship) await this.arriveInShip(ship.def, ship.speed, ship.height, ship.crew);
-    else if (planet.space) await this.arriveInSpace();
+    // A jump's arrival (or the zone's, above) is where the world streams from, not the zone's spawn.
+    this.arrive(planet, zoneId, ship?.arrival?.pos ?? (spaceArrival ? new THREE.Vector3(spaceArrival[0], spaceArrival[1], spaceArrival[2]) : undefined));
+    const arrived = ship ? await this.arriveInShip(ship.def, ship.speed, ship.height, ship.crew, ship.arrival ?? null, ship.hold ?? false) : planet.space ? await this.arriveInSpace() : null;
     await this.settle();
     this.savePlace(true);
     await this.loadingScreen.hide();
     this.traveling = false;
     this.input.requestLock();
+    return arrived;
   }
 
-  /** Arrive in space without a ship carried up: seated in the one last flown or fitted ship last stood out, else the default, moving off gently. */
-  private async arriveInSpace(): Promise<void> {
+  /**
+   * Arrive in space without a ship carried up: seated in the one last flown or fitted ship last stood out, else the default,
+   * moving off gently. It comes out at `at` (where a character saved in space was), else the zone's own arrival (a planet's
+   * launch point, or a system's first hyperspace point), facing the nearest station or landmark as a jump's arrival does.
+   */
+  private async arriveInSpace(at?: THREE.Vector3): Promise<Vehicle | null> {
     const def = this.lastShipDef ?? (await this.defaultShipDef());
-    if (def) await this.arriveInShip(def, 40, 0);
+    if (!def) return null;
+    const pack = await loadSpacePack(import.meta.env.BASE_URL, this.world.packId);
+    const arrival = arrivalAt(pack);
+    const pos = at ? at.clone() : arrival ? new THREE.Vector3(arrival[0], arrival[1], arrival[2]) : this.spawn.clone();
+    const pose = arrivalPose({ kind: 'point', at: [pos.x, pos.y, pos.z], radius: 0 }, pack ? landmarksOf(pack) : [], null, 40, sceneOf(pack));
+    const q = lookRotation(pose.forward);
+    return this.arriveInShip(def, 40, 0, null, { pos, quaternion: new THREE.Quaternion(q[0], q[1], q[2], q[3]) });
   }
 
   /** A ship to arrive in space with when none was flown: the first X-wing the garage has, else its first ship. */
@@ -2715,13 +2835,20 @@ class App {
   /**
    * Spawn a ship over the arrival point, put the player in it and launch it, on the way into or
    * out of space. A ship with rooms is boarded: where the crew record says, at the controls if
-   * they were there, else at its pilot's spot; a fighter is sat in.
+   * they were there, else at its pilot's spot; a fighter is sat in. With `arrival` it comes out there, facing that way,
+   * and a death afterwards respawns there (in Ord Mantell the zone's origin is inside its station); with `hold` it is left
+   * still and ghosted where it came out, for the jump that carried it to release.
    */
-  private async arriveInShip(def: VehicleDef, speed: number, height: number, crew: ShipCrew | null = null): Promise<void> {
+  private async arriveInShip(def: VehicleDef, speed: number, height: number, crew: ShipCrew | null = null, arrival: { pos: THREE.Vector3; quaternion: THREE.Quaternion } | null = null, hold = false): Promise<Vehicle> {
     const p = this.player;
-    const at = this.spawn.clone();
+    const at = arrival ? arrival.pos.clone() : this.spawn.clone();
     at.y += height;
     const v = await this.world.spawnVehicle(def, at, Math.PI, def.kind, true, this.fitFor(def));
+    // Turned to the arrival's facing before anyone is put in it, so the rooms and the seat follow the hull's final frame.
+    if (arrival) {
+      v.teleport(at, arrival.quaternion, 0);
+      this.spawn.copy(at);
+    }
     const room = v.interior;
     if (room && (crew || room.pilotSpot)) {
       room.reveal(true);
@@ -2734,8 +2861,14 @@ class App {
       this.cam.distance = Math.max(this.cam.distance, 9.5);
     }
     this.lastShipDef = def;
-    v.launch(speed);
+    if (hold) {
+      // In flight but still, and out of every collision group, until the jump lets go of it.
+      v.launch(0);
+      v.held = true;
+      v.setGhost(true);
+    } else v.launch(speed);
     this.physics.world.step();
+    return v;
   }
 
   /** The ship the player flies, from its seat or its bridge, when it is one the garage knows and can spawn again. */
@@ -2760,26 +2893,87 @@ class App {
     await this.travel(zone, undefined, { def: ship.def!, speed: Math.max(60, ship.speed), height: 0, crew: this.crewRecord() });
   }
 
-  /** The ship menu's way down: the flown ship leaves orbit for the planet below, with everyone aboard. */
+  /** The ship menu's way down: the flown ship leaves orbit for the planet below, with everyone aboard. A system with no planet below has no way down. */
   private async landShip(): Promise<void> {
     const ship = this.pilotedShip();
-    const below = this.world.planet.space;
+    const below = planetBelow(this.world.planet);
     if (!ship || !below || this.traveling) return;
     this.closePanels();
-    await this.travel(planetById(below), undefined, { def: ship.def!, speed: 90, height: SPACE_ARRIVAL_HEIGHT, crew: this.crewRecord() });
+    await this.travel(below, undefined, { def: ship.def!, speed: 90, height: SPACE_ARRIVAL_HEIGHT, crew: this.crewRecord() });
   }
 
   /** The ship menu's way off: whoever is in a ship in space goes down to the planet on foot, the ship left behind. */
   private async eject(): Promise<void> {
     const p = this.player;
-    const below = this.world.planet.space;
+    const below = planetBelow(this.world.planet);
     if (!below || this.traveling || !(p.mounted || p.aboard)) return;
     this.closePanels();
-    await this.travel(planetById(below));
+    await this.travel(below);
+  }
+
+  /** The ship menu's Hyperspace row: cancels a countdown, else opens the System Map in place of the ship menu. */
+  private hyperspaceButton(): void {
+    if (this.hyperspace.phase === 'countdown') {
+      this.hyperspace.cancel('cancelled');
+      return;
+    }
+    if (this.hyperspace.locksControls || !this.world.planet.space || !this.pilotedShip()) return;
+    this.shipMenu.hide();
+    this.hyperspaceUi.show({
+      here: this.world.planet.id,
+      catalogue: () => this.catalogue(),
+      shipAt: () => this.pilotedShip()?.pos ?? null,
+      why: (d) => this.hyperspace.why(d),
+    });
+    // The ship menu freed the mouse; the map keeps it free.
+    this.freeMouse(true);
+  }
+
+  /** The System Map's Hyperspace: the countdown begins and the map closes, or the refusal is shown on it. */
+  private startJump(d: Destination): void {
+    const why = this.hyperspace.start(d);
+    if (why === null) {
+      this.hyperspaceUi.hide();
+      this.freeMouse(false);
+    } else this.hyperspaceUi.note(why);
+  }
+
+  /**
+   * Every space zone's pack and destinations, fetched once and kept. A zone not yet converted for hyperspace makes the
+   * next call build the catalogue again, and `loadSpacePack` keeps neither a missing pack nor one from before hyperspace,
+   * so those zones are fetched again and a reconversion mid-session shows on the System Map without a reload.
+   */
+  private catalogue(): Promise<HyperspaceCatalogue> {
+    if (!this.hyperspaceCatalogue) {
+      const systems = PLANETS.filter((p) => p.space).map((p) => ({ id: p.id, name: p.name, below: planetBelow(p)?.name ?? null }));
+      const loading = HyperspaceCatalogue.load(import.meta.env.BASE_URL, systems);
+      this.hyperspaceCatalogue = loading;
+      loading.then(
+        (c) => {
+          this.loadedCatalogue = c;
+          if (this.hyperspaceCatalogue === loading && c.systems.some((s) => !s.pack?.hyperspace)) this.hyperspaceCatalogue = null;
+        },
+        () => {
+          if (this.hyperspaceCatalogue === loading) this.hyperspaceCatalogue = null;
+        },
+      );
+    }
+    return this.hyperspaceCatalogue;
+  }
+
+  /**
+   * A jump to another system: the flown ship is carried across as a crossing (everyone aboard standing where they stood),
+   * spawned held and ghosted at the arrival `pose` for the jump to release. The hull spawned there, or null.
+   */
+  private async crossZone(zone: string, pose: { pos: THREE.Vector3; quaternion: THREE.Quaternion }): Promise<Vehicle | null> {
+    const ship = this.pilotedShip();
+    if (!ship) return null;
+    return this.travel(planetById(zone), undefined, { def: ship.def!, speed: 0, height: 0, crew: this.crewRecord(), arrival: pose, hold: true }, true);
   }
 
   /** Jump to a place on the map: travel first when it is on another planet. */
   private async teleport(planet: PlanetDef, poi: Poi, zoneId?: string): Promise<void> {
+    this.hyperspace.abort('teleport');
     if (this.traveling) return;
     if (planet.id !== this.world.planet.id || (planet.zones?.length && zoneId && zoneId !== this.zone)) {
       await this.travel(planet, zoneId);
@@ -3026,9 +3220,11 @@ class App {
         lookDY,
       };
     }
+    // A ship in a jump is flown by the jump (its cruise is `jumpCruise`), whether or not a panel is open: the pilot's keys do nothing.
+    if (pilot && this.hyperspace.drives(pilot)) drive = null;
     // A ship's target and guns: the guns lead the target when it sits within their cone, else
     // fire along the nose; the bolts are the game's own and strike what a blaster's would, ships included.
-    if (simulate && pilot?.spec.ship) this.aimShip(pilot, dt);
+    if (simulate && pilot?.spec.ship && !this.hyperspace.drives(pilot)) this.aimShip(pilot, dt);
     else this.shipLeadValid = false;
     const terrain = this.world.terrain;
     for (const v of this.world.vehicles) {
@@ -3513,6 +3709,7 @@ class App {
    * away rather than a fade. A death without a rig (the placeholder figure) fades as before.
    */
   private die(): void {
+    this.hyperspace.abort('died');
     if (this.dying) return;
     this.dying = true;
     this.closePanels();
@@ -3547,7 +3744,7 @@ class App {
 
   /** The panels' open state moved to the tabs: closing one panel of a pair and opening the other keeps the mouse free. */
   private anyPanelOpen(): boolean {
-    return this.backpack.open || this.wardrobe.open || this.appearanceUi.open || this.weaponsUi.open || this.forceUi.open || this.vehiclesUi.open || this.shipEdit.open || this.npcUi.open || this.shipMenu.open || this.liftMenu.open || this.menu.open;
+    return this.backpack.open || this.wardrobe.open || this.appearanceUi.open || this.weaponsUi.open || this.forceUi.open || this.vehiclesUi.open || this.shipEdit.open || this.npcUi.open || this.shipMenu.open || this.hyperspaceUi.open || this.liftMenu.open || this.menu.open;
   }
 
   private jediKit(): JediKit {
@@ -3589,11 +3786,23 @@ class App {
     if (this.shipEdit.open) this.shipEdit.hide();
     if (this.npcUi.open) this.npcUi.hide();
     if (this.shipMenu.open) this.shipMenu.hide();
+    if (this.hyperspaceUi.open) this.hyperspaceUi.hide();
     if (this.liftMenu.open) this.liftMenu.hide();
   }
 
   /** P: the ship menu, for whoever is in a ship (at its controls, riding it, or aboard as a passenger). */
   private toggleShipMenu(): void {
+    // From the jump's enter stage until control returns, P does nothing but say so.
+    if (this.hyperspace.locksControls) {
+      this.hud.setPrompt('jumping');
+      return;
+    }
+    // The System Map is a page of the ship menu: the same key closes it.
+    if (this.hyperspaceUi.open) {
+      this.hyperspaceUi.hide();
+      this.freeMouse(false);
+      return;
+    }
     if (this.shipMenu.open) {
       this.shipMenu.hide();
       this.freeMouse(false);
@@ -3612,15 +3821,25 @@ class App {
     const ship = p.mounted ?? p.piloting ?? p.aboard?.vehicle ?? null;
     if (!ship?.spec.ship) return null;
     const inSpace = !!this.world.planet.space;
+    const role = ship === p.mounted || ship === p.piloting ? 'pilot' : 'passenger';
+    const hs = this.hyperspace;
+    const counting = hs.phase === 'countdown';
     return {
       ship: ship.spec.label,
-      role: ship === p.mounted || ship === p.piloting ? 'pilot' : 'passenger',
+      role,
       inSpace,
       flying: ship.airborne,
       altitude: inSpace ? null : ship.pos.y - this.world.terrain.heightAt(ship.pos.x, ship.pos.z),
       gateHeight: SPACE_GATE_HEIGHT,
       spaceName: spaceZoneOf(this.world.planet)?.name ?? null,
-      planetName: inSpace ? planetById(this.world.planet.space!).name : null,
+      // A system that is no planet's orbit (Kessel, Ord Mantell, Deep Space) has no planet below and is named for itself.
+      planetName: inSpace ? (planetBelow(this.world.planet)?.name ?? null) : null,
+      zoneName: inSpace ? (this.world.spaceData?.title && this.world.spaceData.title !== this.world.planet.id ? this.world.spaceData.title : this.world.planet.name) : null,
+      jump: {
+        canJump: !inSpace ? 'only in space' : role !== 'pilot' || !ship.def ? "the pilot's call" : null,
+        counting: counting ? (hs.prompt ?? 'counting down') : null,
+        busy: hs.phase !== 'idle' && !counting,
+      },
       speed: Math.round(Math.abs(ship.speed) * 3.6),
     };
   }
@@ -4457,19 +4676,25 @@ class App {
       }
       const active = this.started && !this.traveling && !this.dying && !this.menu.open;
       if (active) this.savePlace();
+      // The jump's countdown (held still while the Escape menu is open) and its phases; during a crossing's travel it waits.
+      if (!this.traveling) this.hyperspace.update(dt, rawDt, this.menu.open);
       // The lift menu takes the number keys while it is up, before the kit's slots see them.
       if (this.liftMenu.open) for (let n = 1; n <= 9; n++) if (input.consumeKey(`Digit${n}`)) this.liftMenu.pickKey(n);
 
       if (active) {
         if (input.pressedAction('map')) this.toggleMap();
-        if (input.pressedAction('inventory')) this.toggleInventory();
-        if (input.pressedAction('spawner')) this.toggleSpawner();
+        // I and B wait out a jump from its countdown until control returns: closing the ship edit page refits the hull,
+        // which would build parts (and maybe programs) on a live frame and could hand the ghosted hull live colliders.
+        const jumpBusy = this.hyperspace.phase === 'countdown' || this.hyperspace.locksControls;
+        if (input.pressedAction('inventory') && !jumpBusy) this.toggleInventory();
+        if (input.pressedAction('spawner') && !jumpBusy) this.toggleSpawner();
         if (input.pressedAction('ship')) this.toggleShipMenu();
         if (input.pressedAction('help')) this.hud.toggleHelp();
         if (!this.map.open && !this.anyPanelOpen()) {
           if (input.pressedAction('saberToggle') && this.kit.id === 'jedi' && !player.mounted) player.toggleSaber();
           if (input.pressedAction('switchClass')) this.setClass(this.kit.id === 'jedi' ? 'bounty_hunter' : 'jedi');
-          if (input.pressedAction('mount') && !player.noclip && !this.handleElevator()) this.handleMount();
+          // Locked from the jump's enter stage until control returns (the key only: leaving for the select screen and the map's teleport abort the jump first).
+          if (input.pressedAction('mount') && !player.noclip && !this.hyperspace.locksControls && !this.handleElevator()) this.handleMount();
           if (input.pressedAction('noclip') && !player.mounted) player.toggleNoclip();
           if (player.noclip && input.pressedAction('noclipFaster')) player.noclipSpeed = Math.min(2000, player.noclipSpeed * 1.5);
           if (player.noclip && input.pressedAction('noclipSlower')) player.noclipSpeed = Math.max(2, player.noclipSpeed / 1.5);
@@ -4586,11 +4811,13 @@ class App {
       else if (player.aboard) prompt = (player.aboard.pilotSpot && player.pos.distanceTo(player.aboard.pilotSpot) < CONTROLS_RANGE ? `<b>E</b> take the controls` : `aboard ${player.aboard.vehicle.spec.label} · <b>E</b> step out`) + (this.world.planet.space ? ` · <b>${shipKey}</b> ship menu` : '');
       else if (player.eva) prompt = `adrift · <b>W/S</b> thrust ahead and back · <b>A/D</b> sideways · <b>Space/Ctrl</b> up and down · mouse turns · <b>Z/V</b> roll · <b>${keyName(input.bindings.brake[0] ?? '')}</b> brake · ${Math.round(player.vel.length() * 3.6)} km/h${this.nearestSpeederDistance() < MOUNT_RANGE ? (this.nearestHasRoom() ? ' · <b>E</b> board' : ' · <b>E</b> mount') : ''}`;
       else if (this.nearestSpeederDistance() < MOUNT_RANGE) prompt = this.nearestHasRoom() ? '<b>E</b> board' : this.nearestVehicle()?.upsideDown ? '<b>E</b> flip it upright' : '<b>E</b> mount';
+      // A jump's countdown, then "jumping", over whatever the prompt would say.
+      prompt = this.hyperspace.prompt ?? prompt;
       this.hud.setPrompt(prompt);
       const flying = player.mounted?.spec.ship && player.mounted.airborne && !input.held('freeLook') ? player.mounted : null;
       this.hud.setFlight(flying ? flying.stick : null);
       const aimed = player.mounted ?? player.piloting;
-      this.hud.setTarget(aimed?.spec.ship && aimed.airborne && !input.held('freeLook') ? this.targetHud(aimed) : null);
+      this.hud.setTarget(aimed?.spec.ship && aimed.airborne && !input.held('freeLook') && !this.hyperspace.drives(aimed) ? this.targetHud(aimed) : null);
       const at = player.worldPos;
       this.hud.update(dt, at.x, at.y, at.z, this.kit, player.hp, player.maxHp, this.world.day.clock(), this.nearbyLabel(at), player.saberOn);
 
@@ -4604,7 +4831,8 @@ class App {
       // A shader compiled on a live frame is a stall: say which frame, and how many, so the cause can be found.
       const programs = this.renderer.info.programs?.length ?? 0;
       // While the effects are switching over, programs are made on purpose and on frames that are not stalls.
-      if (programs > this.lastPrograms && this.lastPrograms > 0 && !this.traveling && !this.fxBusy) console.info(`shaders: ${programs - this.lastPrograms} compiled during play (${stats.frameMs.toFixed(0)} ms frame, ${programs} programs in all)`);
+      // Under the jump's white, the destination's programs are made on purpose (World.readyAround), unseen.
+      if (programs > this.lastPrograms && this.lastPrograms > 0 && !this.traveling && !this.fxBusy && !this.hyperspace.veiled) console.info(`shaders: ${programs - this.lastPrograms} compiled during play (${stats.frameMs.toFixed(0)} ms frame, ${programs} programs in all)`);
       this.lastPrograms = programs;
       stats.rawDt = rawDt;
       stats.grounded = player.grounded;
