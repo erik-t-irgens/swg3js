@@ -7,6 +7,7 @@ import type { Physics } from '../core/physics';
 import { ACTOR_LAYER } from '../world/portalRender';
 import { surfaces } from '../world/surfaces';
 import { cellIndexOf } from './interior';
+import { COCKPIT_BODY_NUDGE, EYE_OVER_PELVIS, GUN_MOUNT, GUN_MUZZLE, addVec, bodyLift, frameFileName, isEyeHardpoint, isSeatHardpoint, mirroredOffset, pelvisOnSeat, seatDropBelow, type Vec3 } from './cockpitSeat';
 import { EngineTrail } from './trail';
 import { advanceEnginePhase, engineHeatOf } from './enginePlumes';
 import { planSeat, hangSaddle, type SaddleDef, type SeatPlan } from './saddle';
@@ -406,6 +407,7 @@ export class Garage {
     // own glow points, the client data's thruster points, any exhaust, any numbered engine.
     const engineSpots: { glow: THREE.Vector3[]; thruster: THREE.Vector3[]; exhaust: THREE.Vector3[]; engine: THREE.Vector3[] } = { glow: [], thruster: [], exhaust: [], engine: [] };
     const seat = { point: null as THREE.Vector3 | null, cockpit: null as THREE.Vector3 | null };
+    let cockpitName = '';
     // The game's hardpoints ride along as hp:<name> nodes; a rider's, saddle's or seat's places the seat.
     // The loader strips the colon from a node's name ("hp:engine" arrives as "hpengine") and
     // keeps the original in userData, which is where the hardpoints are read.
@@ -415,15 +417,19 @@ export class Garage {
       hardpoints.push(name);
       const local = () => o.getWorldPosition(new THREE.Vector3()).sub(model.getWorldPosition(new THREE.Vector3())).add(model.position);
       const pointing = () => new THREE.Vector3(0, 0, 1).applyQuaternion(model.getWorldQuaternion(new THREE.Quaternion()).invert().multiply(o.getWorldQuaternion(new THREE.Quaternion()))).normalize();
-      if (/muzzle|barrel|(^|_)fire|flash/i.test(name)) guns.muzzle.push({ pos: local(), dir: pointing() });
-      else if (/^weapon\d*(_[a-z]+)?\d*$|^gun\d*(_[a-z]+)?\d*$/i.test(name)) guns.mount.push({ pos: local(), dir: pointing() });
-      if (!seat.point && /rider|saddle|seat|driver|pilot|passenger|player|mount/i.test(name)) seat.point = local();
+      if (GUN_MUZZLE.test(name)) guns.muzzle.push({ pos: local(), dir: pointing() });
+      else if (GUN_MOUNT.test(name)) guns.mount.push({ pos: local(), dir: pointing() });
+      // A gun is never a seat or an eye (the gunboats' pilotmuzzle1 is a gun).
+      if (!seat.point && isSeatHardpoint(name)) seat.point = local();
       // Not the "engine on" appearance's or the engine sound's hardpoints, which sit at the hull's origin, and not the boosters'.
       if (/engine_glow/i.test(name)) engineSpots.glow.push(local());
       else if (def.thrusters?.includes(name)) engineSpots.thruster.push(local());
       else if (/exhaust|thrust/i.test(name)) engineSpots.exhaust.push(local());
       else if (/^engine\d*$|(^|[_:])eng\d/i.test(name)) engineSpots.engine.push(local());
-      if (!seat.cockpit && /cockpit|canopy|camera|view|pilot/i.test(name)) seat.cockpit = local();
+      if (!seat.cockpit && isEyeHardpoint(name)) {
+        seat.cockpit = local();
+        cockpitName = name;
+      }
     });
     if (hardpoints.length) console.info(`garage: ${def.id} hardpoints: ${hardpoints.join(', ')}`);
     if (place) [x, y, z] = place(bounds);
@@ -442,12 +448,18 @@ export class Garage {
       // stands on the vehicle's origin, so the authored origin is where the model now sits.
       spec.seat = [model.position.x, model.position.y, model.position.z];
     } else if (seat.point) spec.seat = [seat.point.x, seat.point.y, seat.point.z];
+    // Only the ships pack's ships sit by the cockpit eye: a speeder or a creature spawned "as a ship" keeps its own seat.
+    const shipPack = !!spec.ship && def.source === 'ship';
+    let eye: Vec3 | null = null;
+    let eyeFrom = 'hull';
+    let seatDrop: number | null = null;
     // The cockpit frame (the game's cockpit file): the instruments and canopy around the pilot,
     // authored in the ship's own space, so it hangs on the model at its origin and lands in the
-    // canopy by itself. The game never drew a pilot in a fighter, so the seat comes from the
-    // frame: a little below and behind its middle. A ship flown from its rooms has a bridge, not a frame.
+    // canopy by itself. Its one hardpoint, camera, is the game's first-person eye; the game never
+    // drew a pilot, so the body hangs under that eye and sits on the cushion found under it in the
+    // frame's own triangles. A ship flown from its rooms has a bridge, not a frame.
     let frame: THREE.Object3D | null = null;
-    if (spec.ship && def.cockpit && !(def.cells ?? []).some((c) => c.index > 0)) {
+    if (shipPack && def.cockpit && !(def.cells ?? []).some((c) => c.index > 0)) {
       try {
         frame = (await this.model({ file: def.cockpit.file } as VehicleDef)).scene.clone();
         frame.traverse((o) => {
@@ -461,27 +473,78 @@ export class Garage {
         frame.visible = false;
         model.add(frame);
         model.updateMatrixWorld(true);
-        const box = new THREE.Box3().setFromObject(frame);
-        if (!box.isEmpty() && !seat.point) {
-          // The frame's middle in the hull's frame (the model carries the re-centring).
-          const middle = box.getCenter(new THREE.Vector3()).sub(model.getWorldPosition(new THREE.Vector3())).add(model.position);
-          spec.seat = [middle.x + SEAT_FROM_FRAME.x, middle.y + SEAT_FROM_FRAME.y, middle.z + SEAT_FROM_FRAME.z];
-          console.info(`garage: ${def.id} cockpit frame: middle at ${middle.toArray().map((n) => n.toFixed(2)).join(',')} in the hull's frame, the seat under it at ${spec.seat.map((n) => n.toFixed(2)).join(',')}`);
+        // In the hull's frame, as the traverse's hardpoints are (the model carries the re-centring; FRAME_NUDGE is included).
+        const modelAt = model.getWorldPosition(new THREE.Vector3());
+        const hullLocal = (p: THREE.Vector3) => p.sub(modelAt).add(model.position);
+        let camera: Vec3 | null = null;
+        const hp = findHardpoint(frame, 'camera');
+        if (hp) {
+          const at = hullLocal(hp.getWorldPosition(new THREE.Vector3()));
+          camera = [at.x, at.y, at.z];
+          eyeFrom = 'hp:camera';
+          const along = new THREE.Vector3(0, 0, 1).applyQuaternion(model.getWorldQuaternion(new THREE.Quaternion()).invert().multiply(hp.getWorldQuaternion(new THREE.Quaternion()))).normalize();
+          const off = THREE.MathUtils.radToDeg(Math.acos(THREE.MathUtils.clamp(along.z, -1, 1)));
+          if (off > 2) console.warn(`garage: ${def.id}: the cockpit's camera point looks ${off.toFixed(1)}° off the nose; the view is kept along the nose`);
+        } else {
+          // No camera point (none of the game's frames lacks one): a seated pilot's eyes over the old guess from the frame's middle.
+          const box = new THREE.Box3().setFromObject(frame);
+          if (!box.isEmpty()) {
+            const middle = hullLocal(box.getCenter(new THREE.Vector3()));
+            camera = [middle.x + SEAT_FROM_FRAME.x + EYE_OVER_PELVIS[0], middle.y + SEAT_FROM_FRAME.y + EYE_OVER_PELVIS[1], middle.z + SEAT_FROM_FRAME.z + EYE_OVER_PELVIS[2]];
+            eyeFrom = 'frame middle';
+          }
+        }
+        if (camera) {
+          const offset = mirroredOffset(def.cockpit.firstOffset);
+          eye = addVec(camera, offset);
+          // The seat: one ray straight down through the frame's own triangles, from the eye at the seated pelvis's depth.
+          // Spawn-time arithmetic on a few thousand triangles; nothing is kept.
+          const tris: number[] = [];
+          const p = new THREE.Vector3();
+          frame.traverse((o) => {
+            const m = o as THREE.Mesh;
+            if (!m.isMesh) return;
+            const pos = m.geometry.getAttribute('position');
+            if (!pos) return;
+            const index = m.geometry.getIndex();
+            const count = index ? index.count : pos.count;
+            for (let i = 0; i + 2 < count; i += 3) {
+              for (let k = 0; k < 3; k++) {
+                hullLocal(p.fromBufferAttribute(pos, index ? index.getX(i + k) : i + k).applyMatrix4(m.matrixWorld));
+                tris.push(p.x, p.y, p.z);
+              }
+            }
+          });
+          seatDrop = seatDropBelow(tris, eye[0], eye[1], eye[2] - EYE_OVER_PELVIS[2]);
+          // The pelvis for the logs and the spawn report, at scale 1 wheeled out; the rider is placed by the eye.
+          spec.seat = pelvisOnSeat(eye, seatDrop);
+          const n2 = (a: readonly number[]) => a.map((n) => n.toFixed(2)).join(',');
+          const up = bodyLift(seatDrop, EYE_OVER_PELVIS[1], 1, false);
+          const upFirst = bodyLift(seatDrop, EYE_OVER_PELVIS[1], 1, true);
+          const moved = (n: number) => `${n < 0 ? 'lowered' : 'raised'} ${Math.abs(n).toFixed(2)}`;
+          console.info(`garage: ${def.id} cockpit: eye at ${eyeFrom} ${n2(camera)} (+1OFF ${n2(offset)}) in the hull's frame; ${seatDrop !== null ? `seat ${seatDrop.toFixed(2)} m under it, the body ${moved(up)} (${upFirst.toFixed(2)} in first person)` : 'no seat under it (only steep surfaces): the body hangs from the eye'}`);
         }
       } catch (err) {
         console.warn(`garage: ${def.id}: its cockpit frame did not load`, err);
         frame = null;
+        eye = null;
+        eyeFrom = 'hull';
+        seatDrop = null;
       }
     }
     // Nothing may be awaited in finishSpawn after this line: the body is live, falling and unsprung until the world adds the vehicle.
     const v = new Vehicle(spec, model, physics, scene, x, y - bounds.min[1] + spec.hover, z, heading);
-    // A pilot's seat from the cockpit frame names where the pelvis goes; the pilot's chair pose
-    // has its origin half a metre under it, which the game takes off when it seats the rider.
-    if (spec.ship && frame) v.seatPelvis = true;
+    // A ship's pilot is placed by the eye (Vehicle.eyeSeat), not by a pelvis seat: seatPelvis stays for the vehicles that use it.
     if (frame) {
       v.cockpitFrame = frame;
-      const off = def.cockpit?.firstOffset;
-      if (off && off.length >= 3) v.cockpitOffset = [off[0], off[1], off[2]];
+      v.cockpitOffset = mirroredOffset(def.cockpit?.firstOffset);
+      v.seatDrop = seatDrop;
+      const nudge = COCKPIT_BODY_NUDGE[frameFileName(def.cockpit?.file)];
+      if (nudge) {
+        v.bodyNudge[0] = nudge[0];
+        v.bodyNudge[1] = nudge[1];
+        v.bodyNudge[2] = nudge[2];
+      }
     }
     v.hardpoints = hardpoints;
     v.riderPose = def.riderPose ?? null;
@@ -516,9 +579,22 @@ export class Garage {
       if (v.guns.length) console.info(`garage: ${def.id} guns: ${v.guns.length}${v.weapon ? `, firing ${v.weapon.name} (projectile ${v.weapon.projectile}${this.projectiles.has(v.weapon.projectile) ? '' : ', not in the pack: drawn as a blaster bolt'}, ${v.weapon.speed} m/s to ${v.weapon.range} m)` : ', no weapon in the manifest: a blaster bolt'}`);
       if (wings.length) console.info(`garage: ${def.id} wings that open: ${wings.map((w) => `${Math.round(THREE.MathUtils.radToDeg(-w.angle))}° in ${w.time} s`).join(', ')}`);
     }
-    // The cockpit view: the model's own point when it names one, else the seated pilot's eyes over the seat, else forward of the middle at eye height.
-    // The cockpit view: the model's own point when it names one, else the seated pilot's eyes over the seat (a hardpoint's, or the kind's own place, where the rider is drawn).
-    if (spec.ship) v.cockpit = seat.cockpit ? [seat.cockpit.x, seat.cockpit.y, seat.cockpit.z] : [spec.seat[0], spec.seat[1] + SEATED_EYE, spec.seat[2]];
+    // The cockpit view: the frame's own camera point (cockpitEye() adds 1OFF back, so __debug.cockpit({ offset: false }) can
+    // drop it), else a hull hardpoint's that is not a gun's, else the seated pilot's eyes over the seat.
+    if (spec.ship) {
+      // Only the ships pack's ships sit by the eye: a speeder or a creature spawned "as a ship" keeps its own seat and rider.
+      v.eyeSeat = shipPack;
+      if (eye) {
+        v.cockpit = [eye[0] - v.cockpitOffset[0], eye[1] - v.cockpitOffset[1], eye[2] - v.cockpitOffset[2]];
+        v.eyeSource = eyeFrom;
+      } else {
+        // No frame: the eye is a hull hardpoint's (never a gun's), else a seated eye over the kind's seat, until the rooms'
+        // bridge gives the pilot's place. A room ship from the pack has no pilot drawn, as the game never drew one.
+        v.cockpit = seat.cockpit ? [seat.cockpit.x, seat.cockpit.y, seat.cockpit.z] : [spec.seat[0], spec.seat[1] + SEATED_EYE, spec.seat[2]];
+        v.eyeSource = seat.cockpit ? `hardpoint ${cockpitName}` : 'hull';
+        v.riderHidden = shipPack && !frame;
+      }
+    }
     if (def.source !== 'creature') collectPanes(v);
     if (def.source === 'creature' && !animations.length) seatRider(def, v, model, hardpoints, saddle);
     if (animations.length) {
@@ -628,9 +704,13 @@ function findHardpoint(model: THREE.Object3D, name: string): THREE.Object3D | nu
   return found;
 }
 
-/** A seated pilot's eyes over the seat point, metres. */
+/** A seated pilot's eyes over the seat point, metres: the eye of a ship without a cockpit frame until its bridge is known. */
 const SEATED_EYE = 1.0;
-/** Where the pilot's pelvis sits from the cockpit frame's middle: a little below and behind it, found by eye in the X-wing (with the default saddle pose, whose pelvis is 0.16 m over the rider's origin). */
+/**
+ * Where the pilot's pelvis sits from the cockpit frame's middle: a little below and behind it, found by eye in the X-wing
+ * (with the default saddle pose, whose pelvis is 0.16 m over the rider's origin). Only the fallback for a frame without
+ * its camera point, which none of the game's frames lacks.
+ */
 const SEAT_FROM_FRAME = new THREE.Vector3(0, -0.29, -0.32);
 /** A live adjustment of where the cockpit frame sits in the hull, for checking it (__debug.cockpitFrame). */
 export const FRAME_NUDGE = new THREE.Vector3();

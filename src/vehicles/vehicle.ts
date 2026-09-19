@@ -287,8 +287,18 @@ export class Vehicle {
   interior: import('./interior').ShipInterior | null = null;
   /** The cockpit frame drawn around the pilot (the game's cockpit file), hung in the hull at the cockpit point; shown while someone is at the controls. */
   cockpitFrame: THREE.Object3D | null = null;
-  /** The first-person view's offset from the cockpit point, from the cockpit file. */
+  /** The first-person view's offset from the cockpit point, from the cockpit file (its 1OFF, X mirrored as the converter mirrors the model). */
   cockpitOffset: [number, number, number] = [0, 0, 0];
+  /** A ship from the ships pack: the pilot's eyes go to the cockpit eye (cockpitEye()) and the body sits on the seat under it. */
+  eyeSeat = false;
+  /** Where the cockpit eye came from, for the console: 'hp:camera', 'frame middle', 'bridge', 'hardpoint <name>' or 'hull'. */
+  eyeSource = 'hull';
+  /** How far under the cockpit eye (with 1OFF) the frame's seat cushion is, metres; null: none found, the body hangs from the eye. */
+  seatDrop: number | null = null;
+  /** A seated rider not drawn: a ship without a cockpit frame, where the game never drew a pilot. */
+  riderHidden = false;
+  /** A correction of the body under the eye, in the hull's frame: the frame's COCKPIT_BODY_NUDGE, then __debug.seat's. The eye stays put. Lost when the hull is spawned again (travel, respawn). */
+  readonly bodyNudge: [number, number, number] = [0, 0, 0];
   /** Appearances shown only while the drive runs (the game's "engine on" attachments). */
   engineParts: THREE.Object3D[] = [];
   /** The exhaust ribbons behind a ship in flight, in the world. */
@@ -518,7 +528,11 @@ export class Vehicle {
     this.body.setLinvel({ x: fwd.x, y: fwd.y, z: fwd.z }, true);
   }
 
-  /** Where the first-person view sits, in the model's frame: the cockpit point with the cockpit file's offset. */
+  /**
+   * Where the first-person view sits, in the model's frame: the cockpit point with the cockpit file's offset. For a ship
+   * from the ships pack with a cockpit frame this is the frame's own camera point plus 1OFF, the one eye used hovering
+   * and flying alike (the seated pilot's eyes are placed on it, and the body under them).
+   */
   cockpitEye(out: THREE.Vector3): THREE.Vector3 | null {
     if (!this.cockpit) return null;
     return out.set(this.cockpit[0] + this.cockpitOffset[0], this.cockpit[1] + this.cockpitOffset[1], this.cockpit[2] + this.cockpitOffset[2]);

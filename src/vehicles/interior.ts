@@ -236,6 +236,7 @@ export class ShipInterior {
     this.pilotSpot = spot;
     // The view from the controls: standing eyes over the spot.
     this.vehicle.cockpit = [spot.x, spot.y + 1.55, spot.z];
+    this.vehicle.eyeSource = 'bridge';
     console.info(`ship interior: the controls are at the front of "${names.get(bridge)}", ${spot.toArray().map((n) => n.toFixed(1)).join(',')}`);
   }
 

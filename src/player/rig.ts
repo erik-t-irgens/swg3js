@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { Character, type GripAxes } from './character';
 import { HeadHider, type HeadStatusRow } from './headHide.ts';
+import { chainPoint, clipLinks, HEAD_TO_EYE, type Quat, type Vec3 } from '../vehicles/cockpitSeat';
 
 export type RigState = 'idle' | 'walk' | 'run' | 'air' | 'seated' | 'swim' | 'float' | 'crouch' | 'crouchWalk' | 'crouchWalkBack' | 'stance' | 'strafeLeft' | 'strafeRight' | 'runBack' | 'walkBack' | 'runSaber' | 'walkSaber' | 'gunIdle' | 'gunWalk' | 'gunRun' | 'gunReadyIdle' | 'gunReadyWalk' | 'gunReadyRun' | 'gunAimIdle' | 'gunAimWalk' | 'gunAimRun' | 'kneel' | 'prone' | 'proneMove' | 'gunProneIdle' | 'gunProneMove' | 'gunProneReadyIdle' | 'gunProneReadyMove' | 'gunProneAimIdle' | 'gunProneAimMove';
 
@@ -161,6 +162,12 @@ export class CharacterRig {
   private readonly hold: Set<string>;
   /** Every bone's rest rotation under its parent, for holding the torso steady over running legs. */
   private readonly restLocal = new Map<THREE.Bone, THREE.Quaternion>();
+  /** Every bone's rest position under its parent, for composing a clip's first frame without posing the skeleton. */
+  private readonly restPosition = new Map<THREE.Bone, THREE.Vector3>();
+  /** Every bone's rest scale, so a measurement never depends on whatever pose the skeleton happens to hold when first asked. */
+  private readonly restScale = new Map<THREE.Bone, THREE.Vector3>();
+  /** Where each measured clip's first frame puts the eyes and the pelvis, in the rig root's unscaled frame (null: it cannot say). */
+  private readonly seatedCache = new Map<string, { eye: THREE.Vector3; pelvis: THREE.Vector3 } | null>();
   /** Clips that add to the pose underneath instead of replacing it (the game's add_ shots). */
   private readonly additive = new Set<string>();
   readonly grip: GripAxes | null;
@@ -226,6 +233,8 @@ export class CharacterRig {
       if (o instanceof THREE.Bone) {
         this.bones.set(o.name, o);
         this.restLocal.set(o, o.quaternion.clone());
+        this.restPosition.set(o, o.position.clone());
+        this.restScale.set(o, o.scale.clone());
       }
     });
     for (const clip of clips) {
@@ -389,6 +398,84 @@ export class CharacterRig {
     const track = a.getClip().tracks.find((t) => t.name === `${root!.name}.position`);
     if (!track || track.values.length < 3) return null;
     return out.set(track.values[0], track.values[1], track.values[2]).multiplyScalar(this.scale);
+  }
+
+  /**
+   * Where a clip's first frame puts the eyes (the middle of the eye joints, else the head joint plus HEAD_TO_EYE) and
+   * the pelvis (the root joint), in the frame the rig hangs in (the figure's, its scale and height slider included).
+   * Worked out once per clip from the clip's own tracks, not the live pose, so a fidget never moves them. False without
+   * the clip, a head, or with a scaled node on a chain (none in the packs).
+   */
+  seatedPoints(clip: string, eye: THREE.Vector3, pelvis: THREE.Vector3): boolean {
+    let found = this.seatedCache.get(clip);
+    if (found === undefined) {
+      found = this.measureSeated(clip);
+      this.seatedCache.set(clip, found);
+      if (found) {
+        const e = found.eye, p = found.pelvis;
+        console.info(`rig: ${clip} puts the eyes ${e.y.toFixed(2)} m over the figure's origin, ${e.z.toFixed(2)} ahead, ${(e.y - p.y).toFixed(2)} over the pelvis`);
+      } else console.info(`rig: ${clip} cannot say where the seated eyes are (no clip, no head, or a scaled joint): the stock seated figure stands in`);
+    }
+    if (!found) return false;
+    this.root.updateMatrix();
+    eye.copy(found.eye).applyMatrix4(this.root.matrix);
+    pelvis.copy(found.pelvis).applyMatrix4(this.root.matrix);
+    return true;
+  }
+
+  /** The measurement behind seatedPoints, in the rig root's own (unscaled) frame. */
+  private measureSeated(clip: string): { eye: THREE.Vector3; pelvis: THREE.Vector3 } | null {
+    const action = this.actions.get(clip);
+    if (!action) return null;
+    const tracks = new Map<string, ArrayLike<number>>();
+    for (const t of action.getClip().tracks) tracks.set(t.name, t.values);
+    const unit = (x: number) => Math.abs(x - 1) < 1e-4;
+    // A joint's point: the chain from the root's child down to it, parent first, composed at the clip's first frame.
+    const pointOf = (joint: THREE.Object3D, local: Vec3): Vec3 | null => {
+      const chain: { name: string; restP: Vec3; restQ: Quat }[] = [];
+      for (let o: THREE.Object3D | null = joint; o !== this.root; o = o.parent) {
+        if (!o) return null; // not under the rig's root
+        const bone = o as THREE.Bone;
+        // The rest scale and the clip's first-frame scale, never the live pose, so the answer (cached, null included)
+        // is the same whichever frame first asks.
+        const scaleKey = tracks.get(`${o.name}.scale`);
+        const s = (bone.isBone ? this.restScale.get(bone) : null) ?? o.scale;
+        if (scaleKey && scaleKey.length >= 3) {
+          if (!(unit(scaleKey[0]) && unit(scaleKey[1]) && unit(scaleKey[2]))) return null;
+        } else if (!unit(s.x) || !unit(s.y) || !unit(s.z)) return null;
+        const p = (bone.isBone ? this.restPosition.get(bone) : null) ?? o.position;
+        const q = (bone.isBone ? this.restLocal.get(bone) : null) ?? o.quaternion;
+        chain.push({ name: o.name, restP: [p.x, p.y, p.z], restQ: [q.x, q.y, q.z, q.w] });
+      }
+      chain.reverse();
+      return chainPoint(clipLinks(chain, tracks), local);
+    };
+    let root: THREE.Bone | null = null;
+    for (const b of this.bones.values()) if (!(b.parent instanceof THREE.Bone)) { root = b; break; }
+    if (!root) return null;
+    const pelvis = pointOf(root, [0, 0, 0]);
+    if (!pelvis) return null;
+    let left: THREE.Bone | null = null;
+    let right: THREE.Bone | null = null;
+    for (const [name, b] of this.bones) {
+      if (!/^[lr]_?eye$/i.test(name)) continue;
+      if (/^l/i.test(name)) left ??= b;
+      else right ??= b;
+    }
+    let eye: Vec3 | null = null;
+    if (left && right) {
+      const l = pointOf(left, [0, 0, 0]);
+      const r = pointOf(right, [0, 0, 0]);
+      if (l && r) eye = [(l[0] + r[0]) / 2, (l[1] + r[1]) / 2, (l[2] + r[2]) / 2];
+    }
+    if (!eye) {
+      // No eye joints (the rodian, mon calamari and ithorian): the head joint plus a human's head-to-eye, in the figure's frame.
+      const head = this.boneFor('head');
+      const h = head ? pointOf(head, [0, 0, 0]) : null;
+      if (!h) return null;
+      eye = [h[0] + HEAD_TO_EYE[0], h[1] + HEAD_TO_EYE[1], h[2] + HEAD_TO_EYE[2]];
+    }
+    return { eye: new THREE.Vector3(eye[0], eye[1], eye[2]), pelvis: new THREE.Vector3(pelvis[0], pelvis[1], pelvis[2]) };
   }
 
   /** The clip posing the arms right now: a shot on the upper body, a one-off, the upper layer, else the state clip. */

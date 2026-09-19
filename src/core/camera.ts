@@ -103,7 +103,8 @@ export class ThirdPersonCamera {
     this.aimBlend += (0 - this.aimBlend) * 0.15;
     this.zoom(input, dt);
     this.yaw = heading + Math.PI;
-    this.pitch = 0.32;
+    // Level in the cockpit, so Alt and the hovering cockpit start from the nose; tilted behind the ship otherwise.
+    this.pitch = this.firstPerson ? 0 : 0.32;
     // The camera's frame follows the ship's with a lag (a quarter of a second to catch up), so a
     // turn shows the ship swinging and banking against the view before the view comes round.
     if (!this.chasing) {
@@ -125,6 +126,25 @@ export class ThirdPersonCamera {
       this.camera.quaternion.copy(this.chaseFrame).multiply(FLIP).multiply(chaseTilt);
     }
     this.focus.copy(target);
+  }
+
+  /**
+   * Seated in a ship's cockpit, not flying: at the eye, looking down the hull's nose and turned with it. The wheel still
+   * zooms out, unless `zoom` is false (the frame on which the orbit has just zoomed in, drawn here instead).
+   */
+  cockpit(input: Input, dt: number, eye: THREE.Vector3, hull: THREE.Quaternion, heading: number, zoom = true): void {
+    this.orbitDistance = 0;
+    this.aimBlend += (0 - this.aimBlend) * 0.15;
+    if (zoom) this.zoom(input, dt);
+    // The orbit's yaw kept at the hull's heading and its pitch level, so zooming out starts behind the nose.
+    this.yaw = heading + Math.PI;
+    this.pitch = 0;
+    input.mouseDX = 0;
+    input.mouseDY = 0;
+    this.camera.position.copy(eye);
+    // Cameras look down their own -Z; the hull's nose is its +Z.
+    this.camera.quaternion.copy(hull).multiply(FLIP);
+    this.focus.copy(eye);
   }
 
   /** Back to orbiting: the next chase starts from the ship's frame afresh. */
@@ -179,8 +199,9 @@ export class ThirdPersonCamera {
    * @param eyes     where the character's eyes are this frame, for the first-person view; the standing eye height over `target` otherwise
    * @param scale    the orbit's distance over the wheel's, for orbiting something larger than a figure (a ship)
    * @param eyeHeight  how high over `target` the view centres: the posture's eye height
+   * @param eyeAhead   how far ahead of the eyes along the view first person sits (0: at the eye itself, a ship's cockpit eye)
    */
-  update(input: Input, target: THREE.Vector3, blocked: CameraBlocker | null, dt = 1 / 60, eyes: THREE.Vector3 | null = null, scale = 1, eyeHeight = EYE_HEIGHT): void {
+  update(input: Input, target: THREE.Vector3, blocked: CameraBlocker | null, dt = 1 / 60, eyes: THREE.Vector3 | null = null, scale = 1, eyeHeight = EYE_HEIGHT, eyeAhead = 0.12): void {
     if (input.locked) {
       const k = 0.0025 * this.sensitivity;
       this.yaw -= input.mouseDX * k;
@@ -220,7 +241,7 @@ export class ThirdPersonCamera {
       // From the eyes as the animation carries them (a crouch, a jump, a run's bob), a touch
       // forward of the head's joint so the neck is not in the picture.
       if (eyes) this.focus.copy(eyes);
-      this.camera.position.copy(this.focus).addScaledVector(this.dir, -0.12);
+      this.camera.position.copy(this.focus).addScaledVector(this.dir, -eyeAhead);
       this.camera.lookAt(this.desired.copy(this.camera.position).sub(this.dir));
       this.orbitDistance = 0;
       return;

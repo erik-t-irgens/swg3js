@@ -5,6 +5,7 @@ import type { Input } from '../core/input';
 import { Group, groups, RAPIER, type Physics } from '../core/physics';
 import { markActor } from '../world/portalRender';
 import type { Vehicle } from '../vehicles/vehicle';
+import { SEATED_EYE_FALLBACK, SEATED_PELVIS_FALLBACK, bodyLift } from '../vehicles/cockpitSeat';
 import type { World } from '../world/world';
 import { STANCE_ANIM, STYLE_DAMAGE, SaberCombat, type Dir, type SaberInput } from '../combat/saber';
 import { SaberThrow, THROW } from '../combat/saberThrow';
@@ -52,6 +53,11 @@ const EVA_ROLL_RATE = 1.6;
 const FLING_UP = 6;
 const seatOffset = new THREE.Vector3();
 const seatLocal = new THREE.Vector3();
+/** Seating a ship's pilot by the eye: the eye in the hull's frame, the seated clip's eyes and pelvis, and the body's move under the eye. */
+const eyeLocal = new THREE.Vector3();
+const seatedEye = new THREE.Vector3();
+const seatedPelvis = new THREE.Vector3();
+const bodyOffset = new THREE.Vector3();
 const armDir = new THREE.Vector3();
 const barrelA = new THREE.Vector3();
 const barrelB = new THREE.Vector3();
@@ -319,6 +325,13 @@ export class Player {
   aboard: import('../vehicles/interior').ShipInterior | null = null;
   /** The ship flown from inside its rooms (standing at its controls, still aboard). */
   piloting: Vehicle | null = null;
+  /** Set by the App each frame: the view is inside the cockpit (first person, seated in a ship), so the body rises no more than the collar allows. */
+  firstPersonSeat = false;
+  /** What the last seating did, for __debug.cockpit: the eyes over the pelvis by the clip, the lift applied, the clip measured. */
+  readonly seatReport = { eyeOverPelvis: 0, lift: 0, scale: 1, clip: '' as string | null };
+  private seatedClipOf: Vehicle | null = null;
+  private seatedClipRig: CharacterRig | null = null;
+  private seatedClipName: string | null = null;
   /** The world's own body, collider and controller, kept while aboard a ship and taken back on leaving. */
   private worldBody: { physics: Physics; body: RAPIER.RigidBody; collider: RAPIER.Collider; controller: RAPIER.KinematicCharacterController } | null = null;
   private world: World | null = null;
@@ -1290,6 +1303,9 @@ export class Player {
     this.swing = -1;
     this.eva = false;
     this.flung = false;
+    // The rider starts straight: no twist toward the view or aim carried over from on foot (nor back onto the ground after).
+    this.torsoTwist = 0;
+    this.aimTwist = 0;
     // The saber goes away for the ride: lit, it is in the way of everything.
     if (this.saberOn) this.toggleSaber();
   }
@@ -1393,10 +1409,56 @@ export class Player {
     this.grounded = true;
   }
 
+  /** The riding loop's branch for the vehicle ridden (its rider pose's), or null for the plain default. Resolved once per vehicle and rig. */
+  private seatedClip(): string | null {
+    const v = this.mounted, rig = this.rig;
+    if (!v || !rig) return null;
+    if (v !== this.seatedClipOf || rig !== this.seatedClipRig) {
+      const clip = rig.variant('loop_riding', v.riderPose ?? `vehicle_${v.spec.id.replace(/^pv_/, '')}`);
+      this.seatedClipName = clip && clip !== 'loop_riding' ? clip : null;
+      this.seatedClipOf = v;
+      this.seatedClipRig = rig;
+    }
+    return this.seatedClipName;
+  }
+
   /** Pin the model to the speeder seat. Call after the speeder has updated. */
   syncMount(): void {
     if (!this.mounted) return;
     this.mounted.group.updateMatrixWorld(true);
+    const v = this.mounted;
+    // A ship's pilot sits by the eye: the cockpit's own camera point is where the eyes go, the body hangs under it as the
+    // seated pose has it, then moves up or down onto the seat found under it (less far up in first person), so the view is
+    // the same point hovering and flying and the figure sits on the cushion.
+    if (v.eyeSeat && v.cockpitEye(eyeLocal)) {
+      // The body hangs from the eye the seat was measured from: the camera point with the cockpit file's 1OFF, whatever
+      // the view's own offset is now (__debug.cockpit({ offset: false }) moves the view alone).
+      const f = v.cockpitFrame ? v.def?.cockpit?.firstOffset : null;
+      if (f && f.length >= 3) eyeLocal.set(eyeLocal.x - v.cockpitOffset[0] - f[0], eyeLocal.y - v.cockpitOffset[1] + f[1], eyeLocal.z - v.cockpitOffset[2] + f[2]);
+      v.quaternion(tmpQ);
+      const rig = this.rig;
+      const scale = rig ? rig.root.scale.y : 1;
+      const clip = this.seatedClip();
+      if (!(clip && rig?.seatedPoints(clip, seatedEye, seatedPelvis))) {
+        seatedEye.fromArray(SEATED_EYE_FALLBACK).multiplyScalar(scale);
+        seatedPelvis.fromArray(SEATED_PELVIS_FALLBACK).multiplyScalar(scale);
+      }
+      const eyeOverPelvis = seatedEye.y - seatedPelvis.y;
+      const lift = bodyLift(v.seatDrop, eyeOverPelvis, scale, this.firstPersonSeat);
+      const r = this.seatReport;
+      r.eyeOverPelvis = eyeOverPelvis;
+      r.lift = lift;
+      r.scale = scale;
+      r.clip = clip;
+      bodyOffset.set(v.bodyNudge[0], v.bodyNudge[1] + lift, v.bodyNudge[2]);
+      seatedEye.sub(bodyOffset).applyQuaternion(tmpQ);
+      this.pos.copy(eyeLocal).applyMatrix4(v.group.matrixWorld).sub(seatedEye);
+      this.group.position.copy(this.pos);
+      this.group.quaternion.copy(tmpQ);
+      this.heading = 2 * Math.atan2(tmpQ.y, tmpQ.w);
+      this.group.updateMatrixWorld(true);
+      return;
+    }
     this.mounted.seat.getWorldPosition(this.pos);
     // A seat riding an animal's back turns with it: the rider sways with the gait.
     if (this.mounted.seatFollows) this.mounted.seat.getWorldQuaternion(tmpQ);
@@ -1408,7 +1470,6 @@ export class Player {
     if (this.mounted.seatPelvis && root) this.pos.sub(seatOffset.applyQuaternion(tmpQ));
     // A pod whose game seat puts the pelvis outside its own box (an unfinished model, its origin
     // nowhere near the cockpit): the pelvis goes to the cockpit guessed from the mesh instead.
-    const v = this.mounted;
     if (v.podSeat && root && !v.seatPelvis) {
       const b = v.spec.bounds;
       const local = seatLocal.set(v.spec.seat[0] + root.x, v.spec.seat[1] + root.y, v.spec.seat[2] + root.z);
@@ -1865,9 +1926,7 @@ export class Player {
     if (this.mounted) {
       // Seated the way the game seats a rider on this vehicle: its rider pose's branch of the
       // riding loop (a speeder bike's crouch, a landspeeder's seat, the hover chair, the pilot's chair), else the default saddle.
-      const pose = this.mounted.riderPose ?? `vehicle_${this.mounted.spec.id.replace(/^pv_/, '')}`;
-      const clip = rig.variant('loop_riding', pose);
-      rig.prefer('seated', clip && clip !== 'loop_riding' ? clip : null);
+      rig.prefer('seated', this.seatedClip());
       rig.setState('seated');
     }
     // Swimming with the block held: the stance on the torso and arms over the swimming legs.
@@ -1925,7 +1984,9 @@ export class Player {
     // The measured correction: the spine takes the first part of it, the body's heading the rest (a kneeling
     // shooter's pose is authored with the hips turned from the target, which a spine twist cannot give).
     const spineFix = THREE.MathUtils.clamp(this.aimFix.yaw, -AIM_SPINE_MAX, AIM_SPINE_MAX);
-    rig.twistTorso(wholeJka ? 0 : this.torsoTwist + this.aimTwist + spineFix, wholeJka ? 0 : this.torsoPitch + this.aimFix.pitch);
+    // Seated, the spine keeps the clip's own pose: no view-following twist or aim tilt carried over from on foot.
+    const straight = wholeJka || !!this.mounted;
+    rig.twistTorso(straight ? 0 : this.torsoTwist + this.aimTwist + spineFix, straight ? 0 : this.torsoPitch + this.aimFix.pitch);
     this.correctAim(dt, gunUp);
     // The hilt turns in the hand to whichever convention poses the arms: the game's own clips
     // hold it their way, Jedi Academy's the way its swings were made for.

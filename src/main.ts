@@ -69,6 +69,7 @@ import { loadSettings, type Settings } from './core/settings';
 import { deleteCharacter, loadCharacters, newCharacterId, upsertCharacter, type Appearance, type SavedCharacter } from './core/characters';
 import { FRAME_NUDGE, Garage, type VehicleDef } from './vehicles/garage';
 import type { Vehicle, VehicleKind } from './vehicles/vehicle';
+import { HEAD_TO_EYE, SEATED_EYE_FALLBACK, cockpitYawStep, frameFileName, mirroredOffset } from './vehicles/cockpitSeat';
 import { World } from './world/world';
 import { RoomAir, type RoomAirDebugOptions, type RoomAirInput } from './world/roomAir';
 import { RANGE } from './world/gallery';
@@ -1231,16 +1232,31 @@ class App {
         void this.travel(planetById(id));
         return `travelling to ${id}`;
       },
-      /** Nudge the ridden vehicle's seat by metres in its own frame (right, up, forward) and report where it now is, with the pose playing and its root offset, for finding a seat by eye. */
+      /**
+       * Nudge the ridden vehicle's seat by metres in its own frame (right, up, forward) and report where it now is, with the pose
+       * playing and its root offset, for finding a seat by eye. In a ship seated by its cockpit eye the body moves under the eye
+       * and the view stays put; `paste` is the line for COCKPIT_BODY_NUDGE in cockpitSeat.ts.
+       */
       seat: (dx = 0, dy = 0, dz = 0) => {
         const v = this.player.mounted;
         if (!v) return 'not riding anything';
+        if (v.eyeSeat) {
+          v.bodyNudge[0] += dx;
+          v.bodyNudge[1] += dy;
+          v.bodyNudge[2] += dz;
+          this.player.syncMount();
+          const r = this.player.seatReport;
+          const frame = frameFileName(v.def?.cockpit?.file);
+          const eye = v.cockpitEye(tmp);
+          const n3 = (n: number) => Number(n.toFixed(3));
+          return { vehicle: v.spec.id, frame: frame || null, eye: eye ? eye.toArray().map(n3) : null, eyeSource: v.eyeSource, bodyNudge: v.bodyNudge.map(n3), seatDrop: v.seatDrop === null ? null : n3(v.seatDrop), lift: n3(r.lift), riderPose: v.riderPose, clip: r.clip, paste: `'${frame}': [${v.bodyNudge.map((n) => n3(n)).join(', ')}],` };
+        }
         v.seat.position.x += dx;
         v.seat.position.y += dy;
         v.seat.position.z += dz;
         const clip = this.player.rig?.currentClip ?? null;
         const root = clip ? this.player.rig?.rootOffset(clip, tmp) : null;
-        return { vehicle: v.spec.id, seat: v.seat.position.toArray().map((n) => Number(n.toFixed(2))), seatIsPelvis: v.seatPelvis, riderPose: v.riderPose, clip, clipRoot: root ? root.toArray().map((n) => Number(n.toFixed(2))) : null };
+        return { vehicle: v.spec.id, seat: v.seat.position.toArray().map((n) => Number(n.toFixed(2))), seatIsPelvis: v.seatPelvis, riderPose: v.riderPose, seatFrom: v.seatFrom, saddle: !!v.saddle, clip, clipRoot: root ? root.toArray().map((n) => Number(n.toFixed(2))) : null };
       },
       /** The garage: `vehicles('speeder')` lists what can be spawned; `spawn('speeder_ab1')` or `spawn('bantha', 'ground')` stands one in front of you; `vehicles.clear` is the panel's Remove all. */
       vehicles: (find?: string) => {
@@ -1272,8 +1288,72 @@ class App {
         FRAME_NUDGE.y += dy;
         FRAME_NUDGE.z += dz;
         const v = this.player.mounted;
-        if (v?.cockpitFrame) v.cockpitFrame.position.add(new THREE.Vector3(dx, dy, dz));
+        if (v?.cockpitFrame) {
+          v.cockpitFrame.position.add(new THREE.Vector3(dx, dy, dz));
+          // The frame's eye moves with it (its seat does too, so the seat's drop under the eye is unchanged).
+          if (v.cockpit) v.cockpit = [v.cockpit[0] + dx, v.cockpit[1] + dy, v.cockpit[2] + dz];
+          this.player.syncMount();
+        }
         return `frame nudge ${FRAME_NUDGE.toArray().map((n) => n.toFixed(2)).join(', ')} (right, up, forward)`;
+      },
+      /**
+       * The cockpit of the ship ridden or piloted: where the eye is and where it came from, the seat under it, the body's lift
+       * and how far the figure's eyes are from the camera, the view in use. `cockpit({ offset: false })` takes the cockpit
+       * file's first-person offset off the view (true puts it back; the body stays), `cockpit({ bridgeHull: false })` hides
+       * the hull around a bridge pilot flying in first person (true shows it again).
+       */
+      cockpit: (opts: { offset?: boolean; bridgeHull?: boolean } = {}) => {
+        const p = this.player;
+        const v = p.mounted ?? p.piloting;
+        if (!v || !v.spec.ship) return 'not seated in a ship';
+        if (opts.offset !== undefined) v.cockpitOffset = opts.offset ? mirroredOffset(v.def?.cockpit?.firstOffset) : [0, 0, 0];
+        if (opts.bridgeHull !== undefined) this.bridgeHullInFlight = opts.bridgeHull;
+        p.syncMount();
+        const n3 = (n: number) => Number(n.toFixed(3));
+        const v3 = (a: THREE.Vector3 | readonly number[] | null) => (a ? (Array.isArray(a) ? a : (a as THREE.Vector3).toArray()).map(n3) : null);
+        const seated = p.mounted === v && v.eyeSeat;
+        const free = this.input.held('freeLook');
+        const inCockpit = seated && this.cam.firstPerson;
+        const view = free && (v.airborne || inCockpit) ? 'free look' : v.airborne ? 'chase' : inCockpit ? 'cockpit' : 'orbit';
+        const eyeLocal = this.shipEyeLocal(v, new THREE.Vector3());
+        const model = v.group.children[0];
+        const authored = eyeLocal && model ? eyeLocal.clone().sub(model.position) : null;
+        const off = v.def?.cockpit?.firstOffset ?? null;
+        const want = mirroredOffset(off);
+        const offsetOn = !!off && v.cockpitOffset.every((n, i) => Math.abs(n - want[i]) < 1e-9) && want.some((n) => n !== 0);
+        const base = { ship: v.spec.id, seated, source: v.eyeSource, eye: v3(eyeLocal), authored: v3(authored), firstOffset: off ? [...off].map(n3) : null, offsetOn, view, locked: view === 'cockpit' && !v.airborne, bridgeHull: this.bridgeHullInFlight };
+        if (!seated) return { ...base, seatDrop: null, lift: null, scale: null, bodyNudge: null, seatGap: null, eyeGapClip: null, eyeGapLive: null };
+        const r = p.seatReport;
+        const camEye = this.shipEyeWorld(v, new THREE.Vector3());
+        // Where the seated clip's eyes land: the figure's matrix over the clip's first frame (or the stock seated figure).
+        p.group.updateMatrixWorld(true);
+        const clipEye = new THREE.Vector3();
+        const clipPelvis = new THREE.Vector3();
+        if (!(r.clip && p.rig?.seatedPoints(r.clip, clipEye, clipPelvis))) clipEye.fromArray(SEATED_EYE_FALLBACK).multiplyScalar(r.scale);
+        clipEye.applyMatrix4(p.group.matrixWorld);
+        // The live eyes: the eye joints' middle, else the head joint plus the head-to-eye step, scaled and turned with the figure.
+        let liveEye: THREE.Vector3 | null = null;
+        const rig = p.rig;
+        if (rig) {
+          const eyeBones = rig.boneNames.filter((n) => /^[lr]_?eye$/i.test(n)).map((n) => rig.bone(n)!);
+          if (eyeBones.length >= 2) liveEye = eyeBones[0].getWorldPosition(new THREE.Vector3()).add(eyeBones[1].getWorldPosition(new THREE.Vector3())).multiplyScalar(0.5);
+          else {
+            const head = rig.boneFor('head');
+            if (head) liveEye = head.getWorldPosition(new THREE.Vector3()).add(new THREE.Vector3(...HEAD_TO_EYE).multiplyScalar(r.scale).applyQuaternion(p.group.quaternion));
+          }
+        }
+        return {
+          ...base,
+          seatDrop: v.seatDrop === null ? null : n3(v.seatDrop),
+          lift: n3(r.lift),
+          scale: n3(r.scale),
+          bodyNudge: v.bodyNudge.map(n3),
+          seatGap: v.seatDrop === null ? null : n3(v.seatDrop - r.eyeOverPelvis + r.lift + v.bodyNudge[1]),
+          eyeGapClip: camEye ? n3(camEye.distanceTo(clipEye)) : null,
+          eyeGapLive: camEye && liveEye ? n3(camEye.distanceTo(liveEye)) : null,
+          clip: r.clip,
+          firstPersonSeat: p.firstPersonSeat,
+        };
       },
       /** Shadow casting by every mesh of the ship you are aboard (or the nearest ship): off, to see whether its own geometry is what keeps the sun out of the rooms. */
       shipShadows: (on = true) => {
@@ -2382,37 +2462,111 @@ class App {
     this.input.requestLock();
   }
 
-  /** The camera after everything has moved: chasing a ship in flight in its own frame, else orbiting the player. */
+  /** The camera after everything has moved: chasing a ship in flight in its own frame, the cockpit, else orbiting the player. */
   private updateCamera(blocked: import('./core/camera').CameraBlocker | null, dt = 1 / 60): void {
-    const { player, input } = this;
-    const flown = player.mounted ?? player.piloting;
-    const ship = flown?.spec.ship && flown.airborne && !input.held('freeLook') ? flown : null;
-    if (flown?.spec.ship && flown.airborne && input.held('freeLook')) {
-      // Alt in flight: looking around from the pilot's own head, in the ship's frame, and the
-      // wheel zooms out from there, in steps sized to the ship.
-      this.cam.release();
-      this.cam.setFrame(flown.group.quaternion);
-      const eye = player.piloting ? this.eyes() : flown.cockpitEye(tmp) ? flown.group.localToWorld(tmp.clone()) : null;
-      const head = eye ?? flown.pos;
-      // The orbit's centre is the standing eye height under the head, the way the figure's camera is placed.
-      const under = head.clone().addScaledVector(tmp2.set(0, 1, 0).applyQuaternion(flown.group.quaternion), -1.5);
-      this.cam.update(input, under, null, dt, eye ? head.clone() : null, Math.max(1, (6 + flown.radius * 2.2) / 6));
-      flown.group.visible = true;
-      return;
-    }
-    if (ship) {
-      this.cam.chase(input, dt, ship.pos, ship.attitude, ship.heading, 6 + ship.radius * 2.2, ship.cockpitEye(tmp));
-      // In the cockpit the hull would fill the view: it is hidden until the camera comes back out,
-      // unless the ship has a cockpit frame, when the view is from inside it and the hull stays.
-      ship.group.visible = !this.cam.firstPerson || !!ship.cockpitFrame;
-    } else {
-      this.cam.release();
-      if (player.mounted?.spec.ship) player.mounted.group.visible = true;
-      // Aboard a ship the view is upright in the hull's frame, as the body is; adrift in space, in the body's own.
-      this.cam.setFrame(player.aboard ? player.aboard.vehicle.group.quaternion : player.eva ? player.evaFrame : null);
-      this.cam.update(input, player.worldPos, blocked, dt, this.eyes(), 1, player.eyeHeight);
+    this.placeCamera(blocked, dt);
+    // The body's place in a cockpit depends on whether the view is inside it: re-seat on the frame that changes, after the
+    // camera has decided, so the frame drawn has the body where that view wants it.
+    const p = this.player;
+    const fp = !!p.mounted?.eyeSeat && this.cam.firstPerson;
+    if (fp !== p.firstPersonSeat) {
+      p.firstPersonSeat = fp;
+      p.syncMount();
     }
   }
+
+  /**
+   * Where the camera goes this frame. Seated in a ship's cockpit (by its eye) the first-person view is the cockpit eye,
+   * hovering (locked to the hull, `cam.cockpit`) and flying (`cam.chase`) alike, so lift-off never moves it; Alt looks
+   * round from that same eye. A bridge pilot's first person is their own eyes. Allocates nothing.
+   */
+  private placeCamera(blocked: import('./core/camera').CameraBlocker | null, dt: number): void {
+    const { player, input } = this;
+    const flown = player.mounted ?? player.piloting;
+    // Off every vehicle: the next ride's hovering cockpit starts its heading target afresh, even on the same hull.
+    if (!flown) this.cockpitYawOf = null;
+    const ship = flown?.spec.ship ? flown : null;
+    // A hull this view hid is shown again once it is no longer the one flown (landed and let go, left, travelled).
+    if (this.hullHidden && this.hullHidden !== ship) {
+      this.hullHidden.group.visible = true;
+      this.hullHidden = null;
+    }
+    const free = input.held('freeLook');
+    // Seated by the eye in a ship (not a bridge pilot): the cockpit view when zoomed all the way in, hovering or flying.
+    const seated = ship && player.mounted === ship && ship.eyeSeat ? ship : null;
+    const inCockpit = !!seated && this.cam.firstPerson;
+    if (ship && (ship.airborne || inCockpit) && free) {
+      // Alt: looking round from the cockpit eye (a bridge pilot's own eyes) in the ship's frame, starting at the nose, from the
+      // eye itself (no step ahead); the wheel zooms out from there in steps sized to the ship.
+      this.cam.release();
+      this.cam.setFrame(ship.group.quaternion);
+      if (!this.altLooking) {
+        this.cam.yaw = Math.PI;
+        this.cam.pitch = 0;
+        this.altLooking = true;
+      }
+      const eye = this.shipEyeWorld(ship, this.shipEyeW);
+      const head = eye ?? ship.pos;
+      // The orbit's centre is the standing eye height under the head, the way the figure's camera is placed.
+      this.orbitUnder.copy(head).addScaledVector(tmp2.set(0, 1, 0).applyQuaternion(ship.group.quaternion), -1.5);
+      this.cam.update(input, this.orbitUnder, null, dt, eye, Math.max(1, (6 + ship.radius * 2.2) / 6), 1.5, 0);
+      this.showHull(ship, true);
+      return;
+    }
+    this.altLooking = false;
+    if (ship?.airborne) {
+      this.cam.chase(input, dt, ship.pos, ship.attitude, ship.heading, 6 + ship.radius * 2.2, this.shipEyeLocal(ship, this.shipEye));
+      // Seated in the cockpit the hull would fill the view unless a frame is drawn there; a bridge pilot keeps the rooms
+      // (unless __debug.cockpit({ bridgeHull: false }) asks for the hull hidden around them).
+      this.showHull(ship, !this.cam.firstPerson || !!ship.cockpitFrame || (player.piloting === ship && this.bridgeHullInFlight));
+      return;
+    }
+    if (inCockpit && seated) {
+      this.cam.release();
+      this.cam.setFrame(null);
+      const eye = this.shipEyeWorld(seated, this.shipEyeW) ?? seated.pos;
+      this.cam.cockpit(input, dt, eye, seated.group.quaternion, seated.heading);
+      if (this.cam.firstPerson) {
+        this.showHull(seated, !!seated.cockpitFrame);
+        return;
+      }
+      // Wheeled out on this very frame: the head shows again and the body rises, so this frame is drawn from the orbit
+      // below, never from the eye inside the skull. The orbit's own zoom finds the wheel already spent.
+    }
+    this.cam.release();
+    // Mounted or piloted, a ship out of the cockpit and the chase is always drawn.
+    if (ship) this.showHull(ship, true);
+    // Aboard a ship the view is upright in the hull's frame, as the body is; adrift in space, in the body's own.
+    this.cam.setFrame(player.aboard ? player.aboard.vehicle.group.quaternion : player.eva ? player.evaFrame : null);
+    // Seated in a ship the first-person eye is the cockpit's, so zooming in lands there.
+    const eyes = seated ? this.shipEyeWorld(seated, this.shipEyeW) : this.eyes();
+    this.cam.update(input, player.worldPos, blocked, dt, eyes, 1, player.eyeHeight);
+    // The frame on which the wheel has just brought the orbit in is drawn as the cockpit, not from the orbit's tilt.
+    if (seated && eyes && this.cam.firstPerson) {
+      this.cam.cockpit(input, dt, eyes, seated.group.quaternion, seated.heading, false);
+      this.showHull(seated, !!seated.cockpitFrame);
+    }
+  }
+
+  /** Show or hide a flown hull for the view, remembering one left hidden so that it is shown again when the view moves on. */
+  private showHull(v: Vehicle, shown: boolean): void {
+    v.group.visible = shown;
+    this.hullHidden = shown ? null : v;
+  }
+
+  /** The hovering cockpit's heading target (the mouse's sideways movement, kept near the hull), or null when not steering that way. */
+  private cockpitYaw: number | null = null;
+  /** The vehicle cockpitYaw was taken for. */
+  private cockpitYawOf: Vehicle | null = null;
+  /** Alt is held for looking round from a ship's eye: the look starts at the nose once per press. */
+  private altLooking = false;
+  /** A bridge pilot flying in first person keeps the hull and its rooms drawn (false: hidden around them, as before). */
+  private bridgeHullInFlight = true;
+  /** The flown hull placeCamera last hid (a frameless cockpit, or a bridge pilot's hull with bridgeHull off); shown again when no longer flown. */
+  private hullHidden: Vehicle | null = null;
+  private readonly shipEye = new THREE.Vector3();
+  private readonly shipEyeW = new THREE.Vector3();
+  private readonly orbitUnder = new THREE.Vector3();
 
   private readonly eyePoint = new THREE.Vector3();
 
@@ -2425,6 +2579,24 @@ class App {
     // The joint sits at the skull's base; the eyes are a hand up and ahead in the head's own frame.
     this.eyePoint.add(tmp.set(0, 0.12, 0.09).applyQuaternion(this.player.group.quaternion));
     return this.eyePoint;
+  }
+
+  /** Where first person looks from in a ship, in the hull's frame: the cockpit eye for a seated pilot, a bridge pilot's own eyes. */
+  private shipEyeLocal(v: Vehicle, out: THREE.Vector3): THREE.Vector3 | null {
+    if (this.player.piloting === v) {
+      const e = this.eyes();
+      if (e) return v.group.worldToLocal(out.copy(e)); // worldToLocal uses a module temp: no allocation
+    }
+    return v.cockpitEye(out);
+  }
+
+  /** The same in the world. */
+  private shipEyeWorld(v: Vehicle, out: THREE.Vector3): THREE.Vector3 | null {
+    if (this.player.piloting === v) {
+      const e = this.eyes();
+      if (e) return out.copy(e);
+    }
+    return v.cockpitEye(out) ? v.group.localToWorld(out) : null;
   }
 
   private readonly hullLocal = new THREE.Vector3();
@@ -2476,11 +2648,27 @@ class App {
       // do, and A and D slide it sideways rather than turning it; in flight the keys roll it.
       const hovering = !!pilot.spec.ship && !pilot.airborne;
       const keys = (input.held('right') ? 1 : 0) - (input.held('left') ? 1 : 0);
+      // Seated in a ship's cockpit and hovering: the view is the hull's, so the mouse's sideways movement moves a heading target
+      // (as the orbit's yaw would) that the hull turns toward; up and down do nothing. At a bridge's controls hovering, the same
+      // sideways steering (the view is in the hull's frame and turns with it; up and down still tilt it). Alt frees the view.
+      // (`cam.firstPerson` is last frame's, the view being drawn; the cockpit spends the mouse again on its own frame.)
+      const cockpitLocked = pilot.eyeSeat && pilot === player.mounted && !pilot.airborne && this.cam.firstPerson && !free;
+      const bridgeSteer = !!pilot.spec.ship && pilot === player.piloting && !pilot.airborne && !free;
+      // A target left from another ride (or from before a dismount) is never carried onto this one.
+      if (this.cockpitYawOf !== pilot) {
+        this.cockpitYaw = null;
+        this.cockpitYawOf = pilot;
+      }
+      if (cockpitLocked || bridgeSteer) {
+        this.cockpitYaw = cockpitYawStep(this.cockpitYaw, pilot.heading, input.locked ? input.mouseDX : 0, 0.0025 * this.cam.sensitivity);
+        input.mouseDX = 0;
+        if (cockpitLocked) input.mouseDY = 0;
+      } else this.cockpitYaw = null;
       drive = {
         throttle: (input.held('forward') ? 1 : 0) - (input.held('back') ? 1 : 0),
         steer: hovering ? 0 : keys,
         strafe: hovering ? keys : 0,
-        heading: free ? null : this.cam.yaw + Math.PI,
+        heading: free ? null : this.cockpitYaw ?? this.cam.yaw + Math.PI,
         boost: input.held('walk'),
         hop: input.pressedAction('jump'),
         up: input.held('jump'),
@@ -3457,6 +3645,8 @@ class App {
 
   /** Off the vehicle onto the floor beside it (in space, adrift beside it with its motion). */
   private dismountBeside(sp: Vehicle): void {
+    // A frameless hull hidden by the cockpit or the flight chase must not stay hidden once no one is in it.
+    sp.group.visible = true;
     const p = this.player;
     sp.quaternion(tmpQ);
     tmp.set(-(sp.spec.bounds.max[0] - sp.spec.bounds.min[0]) / 2 - 1.0, 0, 0).applyQuaternion(tmpQ).add(sp.pos);
@@ -3727,6 +3917,8 @@ class App {
         player.group.visible = true;
         player.rig.setHeadHidden(this.fpHeadForce ?? this.cam.firstPerson);
       } else player.group.visible = !this.cam.firstPerson; // the primitive placeholder body, before any rig
+      // Seated in a ship without a cockpit frame the game drew no pilot: the whole figure, shadow included, is hidden.
+      if (player.mounted?.riderHidden) player.group.visible = false;
       // After the physics step and the camera: the falling weather around this frame's camera.
       this.world.updateWeatherView(dt);
       this.world.updateShadows(performance.now());
