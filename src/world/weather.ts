@@ -45,6 +45,7 @@ import {
   type WindNow,
 } from './weatherSchedule';
 import { OPEN_ROOF_GRID, OPEN_ROOF_MAP, WEATHER_UNIFORMS } from './wetness';
+import { WATER_WIND, WATER_WIND_FULL } from './water';
 
 export interface WeatherSettings {
   weather: boolean;
@@ -781,6 +782,11 @@ export class Weather {
     this.windHeading = this.heldHeading ?? this.wind.heading;
     this.windSpeed = sky.lighting.windSpeedScale * this.wind.gust;
     sky.setWind(this.windHeading);
+    // The heading as a direction in XZ, the way the sky and the falling effects read it (0 is +Z,
+    // turning toward +X), so the surface runs with the clouds and the rain's lean, not across them.
+    WATER_WIND.value
+      .set(Math.sin(this.windHeading), Math.cos(this.windHeading))
+      .multiplyScalar(Math.min(this.windSpeed / WATER_WIND_FULL, 1));
 
     // What falls.
     this.collect(active);

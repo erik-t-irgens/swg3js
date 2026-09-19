@@ -26,6 +26,8 @@ export interface WaterUniforms {
   uFxFogDensity: { value: number };
   /** The strength a traced reflection is given (the water's authored 0.55). Shared; the mask reads it. */
   uFxTraced: { value: number };
+  /** The wind that drives the surface flow, as a vector. Shared by every water material. */
+  uWind: { value: THREE.Vector2 };
   [name: string]: { value: unknown };
 }
 
@@ -45,6 +47,20 @@ export function setWaterEnvSpecular(value: 0 | 1): void {
 export const WATER_FX_FOG = { value: 0 };
 /** How strong a traced reflection is: the water's own reflection strength, so traced and fallback meet without a step. */
 export const WATER_FX_TRACED = { value: 0.55 };
+/**
+ * The wind over every water surface: its heading as a unit vector, scaled by how hard it blows
+ * (0 dead calm, 1 at a full gale). The weather sets it each frame beside the heading it gives the
+ * sky; the surface detail rides it, turned aside by whatever bank it runs into.
+ */
+export const WATER_WIND = { value: new THREE.Vector2(0, 0) };
+/** The wind speed the flow reaches its full rate at (m/s); the weather divides by this. */
+export const WATER_WIND_FULL = 12;
+/** Metres of tile the detail layer is carried per second at a full wind, before uDrift scales it. */
+const DETAIL_FLOW = 0.06;
+/** Cycles per second of the flow's two-phase crossfade: the tile is never carried further than half a cycle. */
+const DETAIL_CYCLE = 0.09;
+/** Metres of depth the shore turns the wind aside over; deeper than this the flow is the free wind. */
+const FLOW_SHORE_BAND = 12;
 
 const WAVE_COUNT = 8;
 /** The detail tile: a Phillips-spectrum height field of this many samples across this many metres. */
@@ -281,6 +297,7 @@ const WAVES_GLSL = /* glsl */ `
   uniform float uWaveHeight;
   uniform float uRipple;
   uniform float uDrift;
+  uniform vec2 uWind;
   uniform vec4 uWaves[${WAVE_COUNT}];
   uniform float uOmega[${WAVE_COUNT}];
   uniform sampler2D uDetail;
@@ -344,22 +361,34 @@ const WAVES_GLSL = /* glsl */ `
     crest = sumAmp > 1e-4 ? height / sumAmp : 0.0;
   }
 
-  // Fine waves from the spectrum tile: two layers at different scales and headings, drifting
-  // with the wind, their slopes added so neither tiling shows.
-  vec2 detailSlope(vec2 p) {
-    vec2 a = p / uDetailSize + uTime * uDrift * vec2(0.018, 0.007);
+  // One layer of the spectrum tile, as a slope.
+  vec2 layerSlope(vec2 uv) {
+    vec3 n = texture2D(uDetail, uv).xyz * vec3(2.0, 2.0, 1.0) - vec3(1.0, 1.0, 0.0);
+    return n.xy / max(n.z, 0.2);
+  }
+
+  // Fine waves from the spectrum tile: two layers at different scales and headings, their slopes
+  // added so neither tiling shows. The first rides the flow, sampled at two phases half a cycle
+  // apart and crossfaded so it never stretches away from the tile; the second keeps a free scroll,
+  // since two flowing layers cycle together and the crossfade shows as a pulse across the surface.
+  vec2 detailSlope(vec2 p, vec2 flow) {
+    vec2 uvA = p / uDetailSize;
+    // Not named 'step': that is a GLSL built-in, and shadowing it upsets some drivers.
+    vec2 carry = flow * uDrift * ${DETAIL_FLOW.toFixed(3)} / uDetailSize;
+    float t = fract(uTime * ${DETAIL_CYCLE.toFixed(3)});
+    // Each phase is weighted 1 where its own distortion is 0.
+    float w = 1.0 - abs(t * 2.0 - 1.0);
+    vec2 sa = mix(layerSlope(uvA - carry * t), layerSlope(uvA - carry * fract(t + 0.5)), w);
     vec2 pr = vec2(p.x * 0.83 - p.y * 0.56, p.x * 0.56 + p.y * 0.83);
-    vec2 b = pr / (uDetailSize * 0.47) - uTime * uDrift * vec2(0.012, 0.02);
-    vec3 na = texture2D(uDetail, a).xyz * vec3(2.0, 2.0, 1.0) - vec3(1.0, 1.0, 0.0);
-    vec3 nb = texture2D(uDetail, b).xyz * vec3(2.0, 2.0, 1.0) - vec3(1.0, 1.0, 0.0);
-    vec2 sa = na.xy / max(na.z, 0.2);
-    vec2 sb = nb.xy / max(nb.z, 0.2);
+    vec2 sb = layerSlope(pr / (uDetailSize * 0.47) - uTime * uDrift * vec2(0.012, 0.02));
     return (sa * 0.8 + sb * 0.55) * uRipple;
   }
 
   // Metres to the shore, from the depth and how fast it changes: a band of foam the same
-  // width on a beach and on a steep bank.
-  float shoreDistance(vec2 p, float depth) {
+  // width on a beach and on a steep bank. The gradient comes back out as well: it points out to
+  // sea, and is zero wherever the distance has no verdict.
+  float shoreDistance(vec2 p, float depth, out vec2 grad) {
+    grad = vec2(0.0);
     float e = 4.0;
     float dxp = waterDepth(p + vec2(e, 0.0));
     float dxm = waterDepth(p - vec2(e, 0.0));
@@ -367,8 +396,19 @@ const WAVES_GLSL = /* glsl */ `
     float dzm = waterDepth(p - vec2(0.0, e));
     // No verdict next to cells the window has not filled yet.
     if (depth >= 99.0 || max(max(dxp, dxm), max(dzp, dzm)) >= 99.0) return 100.0;
-    vec2 grad = vec2(dxp - dxm, dzp - dzm) / (2.0 * e);
+    grad = vec2(dxp - dxm, dzp - dzm) / (2.0 * e);
     return depth / max(length(grad), 0.02);
+  }
+
+  // Where the surface runs: the wind out in open water, and near a bank the wind with the part of
+  // it that would blow into the ground taken out, so the water sweeps along the shore rather than
+  // through it. The gradient is shoreDistance's; a zero one means no bank is known here.
+  vec2 flowAt(vec2 grad, float depth) {
+    float g = length(grad);
+    if (g < 1e-4 || depth >= 99.0) return uWind;
+    vec2 n = grad / g;
+    float near = 1.0 - smoothstep(0.0, ${FLOW_SHORE_BAND.toFixed(1)}, depth);
+    return uWind - n * min(0.0, dot(uWind, n)) * near;
   }
 
   // Rings and wakes: a damped packet spreading from each source, stronger ahead of a moving one.
@@ -473,6 +513,7 @@ export function createWaterMaterial(look: WaterLook, waves: boolean, opts: { win
     uWaveHeight: { value: waves ? 1 : 0 },
     uRipple: { value: look.ripple },
     uDrift: { value: look.drift },
+    uWind: WATER_WIND,
     uWaterEnvSpecular: WATER_ENV_SPECULAR,
     uFxFogDensity: WATER_FX_FOG,
     uFxTraced: WATER_FX_TRACED,
@@ -600,7 +641,13 @@ function installWaterHook(mat: WaterMaterial, uniforms: WaterUniforms, variant: 
           float calm = smoothstep(0.15, 3.0, depth);
           gerstner(vWaterXZ, calm, disp, wn, crest);
           float detail = 1.0 - smoothstep(120.0, 700.0, vWaterDist);
-          vec2 slope = detailSlope(vWaterXZ) * (0.35 + 0.65 * detail) * (0.5 + 0.5 * calm);
+          // The shore's own gradient, taken before the detail so the ripples can run along the
+          // bank: the band's width below reads the same distance back.
+          // The band runs right up to the water's edge: by distance where the slope is known, and
+          // by depth alone in the last hand's breadth, where the coarse depth grid can misjudge it.
+          vec2 shoreGrad;
+          float toShore = min(shoreDistance(vWaterXZ, depth, shoreGrad), depth * 6.0);
+          vec2 slope = detailSlope(vWaterXZ, flowAt(shoreGrad, depth)) * (0.35 + 0.65 * detail) * (0.5 + 0.5 * calm);
           float e = 0.06;
           slope += vec2(ringHeight(vWaterXZ + vec2(e, 0.0)) - ringHeight(vWaterXZ - vec2(e, 0.0)), ringHeight(vWaterXZ + vec2(0.0, e)) - ringHeight(vWaterXZ - vec2(0.0, e))) / (2.0 * e) * detail;
           // Rain rings where the surface is open to the sky (the roof grid's top over a lake is the
@@ -608,9 +655,6 @@ function installWaterHook(mat: WaterMaterial, uniforms: WaterUniforms, variant: 
           if (uRain > 0.001) slope += rainRingSlope(vWaterXZ, uWeatherTime, uRain) * 1.2 * detail * (1.0 - weatherShelter(vec3(vWaterXZ.x, vWaterLevel, vWaterXZ.y), vec3(0.0, 1.0, 0.0)).x);
           waterNormalW = normalize(vec3(wn.x - slope.x, wn.y, wn.z - slope.y));
           // Foam on the steepest crests, faintly along fresh rings, and in a narrow lapping band at the shore.
-          // The band runs right up to the water's edge: by distance where the slope is known, and
-          // by depth alone in the last hand's breadth, where the coarse depth grid can misjudge it.
-          float toShore = min(shoreDistance(vWaterXZ, depth), depth * 6.0);
           float lap = vnoise(vWaterXZ * 1.7 + vec2(uTime * 0.35, -uTime * 0.22)) * 0.6 + vnoise(vWaterXZ * 6.0 - vec2(uTime * 0.5, uTime * 0.4)) * 0.4;
           float band = 1.0 - smoothstep(0.35, 1.5, toShore);
           float shore = band * mix(1.0, smoothstep(0.35, 0.8, lap), smoothstep(0.0, 1.0, toShore));
@@ -640,7 +684,7 @@ function installWaterHook(mat: WaterMaterial, uniforms: WaterUniforms, variant: 
       external = fn;
     },
   });
-  mat.customProgramCacheKey = () => `swg-water-2-${variant}-rain-${waves ? 'waves' : 'flat'}-${external ? 'hooked' : 'plain'}`;
+  mat.customProgramCacheKey = () => `swg-water-3-${variant}-rain-${waves ? 'waves' : 'flat'}-${external ? 'hooked' : 'plain'}`;
 }
 
 /**
