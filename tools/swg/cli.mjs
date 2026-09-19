@@ -65,6 +65,9 @@
 //                                                                  also written to <out-dir>/audit.txt
 //   node tools/swg/cli.mjs extras <swg-dir>                       what the archives outside the retail manifests add or replace, by category
 //                                                                  (a listing only; nothing from them is converted)
+//   node tools/swg/cli.mjs sounds <swg-dir> <out-dir> [--only=<text>] [--no-samples]
+//                                                                  every sound the game can play, the samples they name, and where each one is
+//                                                                  used, as <out-dir>/sounds
 //   node tools/swg/cli.mjs status <out-dir>                        what the packs under <out-dir> hold and which commands would fill the gaps
 //   node tools/swg/cli.mjs terrain-check <out-dir> [--limit=n] [--layers] [--at=x,z]
 //                                                                  generate terrain at every snapshot object and compare with its height;
@@ -129,6 +132,7 @@ const REGIONS = createRequire(import.meta.url)('./regions/regions.json');
 import { decodeTga, encodeHeightmap } from './tga.mjs';
 import { exportSky } from './sky.mjs';
 import { exportWater } from './water.mjs';
+import { convertSounds, soundStatus } from './sound.mjs';
 import { core3MobileStats, mobileTemplates, scanServerSpawns } from './spawns.mjs';
 import { loadEffect } from './texrender.mjs';
 import { readTemplate, stringParam } from './objtemplate.mjs';
@@ -1984,6 +1988,10 @@ function packStatus(dir) {
     if (toDo && partial) need(rerun, `the last mobiles run converted only ${partial}; this converts the other ${toDo} units and keeps the rest`);
     else if (toDo) need(rerun, `${toDo} mobile models, packs or wearable folders missing or out of date`);
   }
+  // The sound bank: every sound the game may play, the samples, and where each one is used.
+  const sound = soundStatus(dir, readJson);
+  console.log(sound.line);
+  if (sound.need) need(`sounds <swg-dir> ${dir} --retail-only`, sound.need);
   if (!todo.size) {
     console.log(`everything is in place: ${planets} planet packs, creatures and player`);
     return;
@@ -5005,6 +5013,20 @@ switch (cmd) {
       show('replaced', g.replaced);
       show('new', g.added);
     }
+    break;
+  }
+
+  case 'sounds': {
+    // <swg-dir> <out-dir>: the sound bank. Every sound template the game may play (all but the
+    // background music and the instrument parts, plus the music the world places in a room), the
+    // samples they name copied as they are, the client data that says which sound belongs to which
+    // event, and the tables that put a sound in a room, on a door, on a melee or ranged weapon, on a
+    // ship's power and its flyby, and under a foot. --only=<text> converts just the templates whose
+    // path holds that text and --no-samples writes the JSON without the audio, both for quick checks.
+    if (!pos[2]) usage();
+    const vfs = mount(pos[1]);
+    mkdirSync(pos[2], { recursive: true });
+    convertSounds(vfs, pos[2], { only: options.only ?? null, samples: !flags.has('--no-samples'), log: console.log });
     break;
   }
 

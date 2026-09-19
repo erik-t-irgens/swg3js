@@ -420,6 +420,7 @@ npm run swg -- weapons @SWG assets-private --retail-only                        
 npm run swg -- ships @SWG assets-private --retail-only                           #    every player ship, with its interior, the components its slots take, its droid and its paint, for the garage on G; and the NPC ships (combat.json)
 npm run swg -- space @SWG all assets-private --retail-only                        #    every space zone: stations, asteroid fields, planets, sky and hyperspace points; Kessel, Ord Mantell and Deep Space
 npm run swg -- water @SWG all assets-private --retail-only                        #    each planet's own water: the colour, opacity, ripples and drift of every lake and sea, and each lava shader's look
+npm run swg -- sounds @SWG assets-private --retail-only                           #    every sound the game can play, the samples they name and where each one is used (about 856 MB)
 npm run swg -- status assets-private                                              # 8. what is in place, and the command for anything missing
 npm run dev                                                                       # 9. play
 ```
@@ -442,6 +443,7 @@ Step 3 also accepts one planet at a time (`snapshot @SWG tatooine assets-private
 | The spawner's creatures, droids and NPCs: models, animations, names, stats, outfits | `mobiles @SWG assets-private --retail-only --skip-existing` (redoes only what changed; `--match=rancor` redoes some and keeps the rest) |
 | How a rider sits on a vehicle | `gallery @SWG assets-private --retail-only --only=vehicles` |
 | The NPC ships: their types, tier fits, formations, taunts and hit, target and explosion effects (`combat.json`; without it the NPC tab offers no starships) | `ships @SWG assets-private --retail-only` |
+| Sound: every sound template, the samples they name, and the client data and tables that say where each one is used (without the bank the game is silent and `__debug.audio().bank.available` is false) | `sounds @SWG assets-private --retail-only` (about 856 MB; a second run copies nothing) |
 
 Two optional sources add what the client files alone do not place. `--events` on `snapshot` includes buildout areas the game only shows during an event (`planets` lists which planets have any, with the event each needs). `--core3=<path to Core3/MMOCoreORB/bin/scripts>` reads the SWGEmu server scripts: the static objects its screenplays place go into the pack, and every creature and NPC spawn point is written to the pack's `spawns.json` for later use. `--core3` on `mobiles` also reads each mobile's level, health, damage and aggression from its scripts and puts them in the spawner catalogue in place of the estimates made from size and name. A later `mobiles` run without it keeps those stats; `--core3=none` drops them.
 
