@@ -1,7 +1,7 @@
 // Where a ship's pilot looks from and sits: plain numbers, so the node tests can run it.
 //
 // The eye is the cockpit frame's own camera point (its one hardpoint, `camera`) with the cockpit
-// file's first-person offset; the body hangs under it as the seated clip's first frame has it,
+// file's first-person offset (all of it, or a hull's share of it); the body hangs under it as the seated clip's first frame has it,
 // then moves up or down onto the seat cushion one downward ray through the frame's triangles finds.
 export type Vec3 = [number, number, number];
 export type Quat = [number, number, number, number]; // x, y, z, w
@@ -39,8 +39,26 @@ export const COCKPIT_LEAD = 0.6;
  * frame's file name ('tie_fighter_cockpit_cockpit.glb'): where the owner's reports from __debug.seat land. Empty to start.
  */
 export const COCKPIT_BODY_NUDGE: Readonly<Record<string, Vec3>> = {};
+/**
+ * The share of the cockpit file's first-person offset (1OFF) the view takes, by cockpit frame file (the key
+ * COCKPIT_BODY_NUDGE uses); a frame not listed takes all of it. INVENTED: the B-wing's full 1OFF (0.14 up, 0.10 ahead)
+ * framed the instruments better for fighting and none looked more real, so the owner asked for the difference split.
+ * Tunable live with `__debug.cockpit({ share })`.
+ */
+export const COCKPIT_OFFSET_SHARE: Readonly<Record<string, number>> = { 'bwing_cockpit_cockpit.glb': 0.5 };
 
-/** A cockpit frame's file name without its folder ('tie_fighter_cockpit_cockpit.glb'), the key of COCKPIT_BODY_NUDGE. */
+/** A cockpit frame's share of its 1OFF (COCKPIT_OFFSET_SHARE, else 1), kept within 0..1. */
+export function offsetShare(file: string | null | undefined): number {
+  const s = COCKPIT_OFFSET_SHARE[frameFileName(file)];
+  return typeof s === 'number' && Number.isFinite(s) ? Math.min(1, Math.max(0, s)) : 1;
+}
+
+/** The first-person eye in the hull's frame: the camera point plus the share of the (mirrored) 1OFF. */
+export function viewEye(camera: Vec3, offset: Vec3, share: number): Vec3 {
+  return [camera[0] + offset[0] * share, camera[1] + offset[1] * share, camera[2] + offset[2] * share];
+}
+
+/** A cockpit frame's file name without its folder ('tie_fighter_cockpit_cockpit.glb'), the key of COCKPIT_BODY_NUDGE and COCKPIT_OFFSET_SHARE. */
 export function frameFileName(file: string | null | undefined): string {
   return (file ?? '').replace(/^.*[\\/]/, '');
 }

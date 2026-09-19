@@ -1611,14 +1611,17 @@ class App {
       /**
        * The cockpit of the ship ridden or piloted: where the eye is and where it came from, the seat under it, the body's lift
        * and how far the figure's eyes are from the camera, the view in use. `cockpit({ offset: false })` takes the cockpit
-       * file's first-person offset off the view (true puts it back; the body stays), `cockpit({ bridgeHull: false })` hides
-       * the hull around a bridge pilot flying in first person (true shows it again).
+       * file's first-person offset off the view (true puts it back; the body stays where the whole offset puts it),
+       * `cockpit({ share: 0.5 })` sets the share of that offset the view and the seated eyes take (COCKPIT_OFFSET_SHARE, this
+       * ship until it is spawned again), `cockpit({ bridgeHull: false })` hides the hull around a bridge pilot flying in
+       * first person (true shows it again).
        */
-      cockpit: (opts: { offset?: boolean; bridgeHull?: boolean } = {}) => {
+      cockpit: (opts: { offset?: boolean; share?: number; bridgeHull?: boolean } = {}) => {
         const p = this.player;
         const v = p.mounted ?? p.piloting;
         if (!v || !v.spec.ship) return 'not seated in a ship';
         if (opts.offset !== undefined) v.cockpitOffset = opts.offset ? mirroredOffset(v.def?.cockpit?.firstOffset) : [0, 0, 0];
+        if (typeof opts.share === 'number' && Number.isFinite(opts.share)) v.cockpitShare = THREE.MathUtils.clamp(opts.share, 0, 1);
         if (opts.bridgeHull !== undefined) this.bridgeHullInFlight = opts.bridgeHull;
         p.syncMount();
         const n3 = (n: number) => Number(n.toFixed(3));
@@ -1633,7 +1636,7 @@ class App {
         const off = v.def?.cockpit?.firstOffset ?? null;
         const want = mirroredOffset(off);
         const offsetOn = !!off && v.cockpitOffset.every((n, i) => Math.abs(n - want[i]) < 1e-9) && want.some((n) => n !== 0);
-        const base = { ship: v.spec.id, seated, source: v.eyeSource, eye: v3(eyeLocal), authored: v3(authored), firstOffset: off ? [...off].map(n3) : null, offsetOn, view, locked: view === 'cockpit' && !v.airborne, bridgeHull: this.bridgeHullInFlight };
+        const base = { ship: v.spec.id, seated, source: v.eyeSource, eye: v3(eyeLocal), authored: v3(authored), firstOffset: off ? [...off].map(n3) : null, offsetOn, share: n3(v.cockpitShare), view, locked: view === 'cockpit' && !v.airborne, bridgeHull: this.bridgeHullInFlight };
         if (!seated) return { ...base, seatDrop: null, lift: null, scale: null, bodyNudge: null, seatGap: null, eyeGapClip: null, eyeGapLive: null };
         const r = p.seatReport;
         const camEye = this.shipEyeWorld(v, new THREE.Vector3());

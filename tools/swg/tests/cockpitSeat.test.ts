@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict';
 import {
   COCKPIT_LEAD,
+  COCKPIT_OFFSET_SHARE,
   EYE_OVER_PELVIS,
   FIRST_PERSON_RAISE_MAX,
   LIFT_LIMIT,
@@ -18,9 +19,11 @@ import {
   isGunHardpoint,
   isSeatHardpoint,
   mirroredOffset,
+  offsetShare,
   pelvisOnSeat,
   riderOrigin,
   seatDropBelow,
+  viewEye,
   type Quat,
   type Vec3,
 } from '../../../src/vehicles/cockpitSeat.ts';
@@ -189,5 +192,10 @@ ok(frameFileName('assets-private/ships/tie_fighter_cockpit_cockpit.glb') === 'ti
 
 // The constants agree.
 ok(nearV(SEATED_EYE_FALLBACK.map((n, i) => n - SEATED_PELVIS_FALLBACK[i]), EYE_OVER_PELVIS, 1e-12), 'SEATED_EYE_FALLBACK - SEATED_PELVIS_FALLBACK equals EYE_OVER_PELVIS');
+
+// The share of 1OFF a frame's view takes: the B-wing's half, all of it elsewhere.
+ok(offsetShare('assets-private/ships/bwing_cockpit_cockpit.glb') === 0.5 && offsetShare('xwing_cockpit_cockpit.glb') === 1 && offsetShare(null) === 1, "the B-wing's frame takes half its 1OFF, any other frame all of it");
+ok(Object.values(COCKPIT_OFFSET_SHARE).every((s) => s >= 0 && s <= 1), 'every listed share is within 0..1');
+ok(nearV(viewEye([1, 2, 3], mirroredOffset([0, 0.14, 0.1]), 0.5), [1, 2.07, 3.05], 1e-12), "the B-wing's view eye is the camera point plus half of 1OFF");
 
 console.log(`${checks} checks passed`);

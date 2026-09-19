@@ -7,7 +7,7 @@ import type { Physics } from '../core/physics';
 import { ACTOR_LAYER } from '../world/portalRender';
 import { surfaces } from '../world/surfaces';
 import { cellIndexOf } from './interior';
-import { COCKPIT_BODY_NUDGE, EYE_OVER_PELVIS, addVec, bodyLift, frameFileName, isEyeHardpoint, isSeatHardpoint, mirroredOffset, pelvisOnSeat, seatDropBelow, type Vec3 } from './cockpitSeat';
+import { COCKPIT_BODY_NUDGE, EYE_OVER_PELVIS, bodyLift, frameFileName, isEyeHardpoint, isSeatHardpoint, mirroredOffset, offsetShare, pelvisOnSeat, seatDropBelow, viewEye, type Vec3 } from './cockpitSeat';
 import { EngineTrail } from './trail';
 import { advanceEnginePhase, engineHeatOf } from './enginePlumes';
 import { planSeat, hangSaddle, type SaddleDef, type SeatPlan } from './saddle';
@@ -887,6 +887,7 @@ export class Garage {
     let eye: Vec3 | null = null;
     let eyeFrom = 'hull';
     let seatDrop: number | null = null;
+    let eyeShare = 1;
     // The cockpit frame (the game's cockpit file): the instruments and canopy around the pilot,
     // authored in the ship's own space, so it hangs on the model at its origin and lands in the
     // canopy by itself. Its one hardpoint, camera, is the game's first-person eye; the game never
@@ -930,7 +931,9 @@ export class Garage {
         }
         if (camera) {
           const offset = mirroredOffset(def.cockpit.firstOffset);
-          eye = addVec(camera, offset);
+          // The view takes the frame's share of 1OFF (the B-wing's half); the seated eyes go on that same point.
+          eyeShare = offsetShare(def.cockpit.file);
+          eye = viewEye(camera, offset, eyeShare);
           // The seat: one ray straight down through the frame's own triangles, from the eye at the seated pelvis's depth.
           // Spawn-time arithmetic on a few thousand triangles; nothing is kept.
           const tris: number[] = [];
@@ -956,7 +959,7 @@ export class Garage {
           const up = bodyLift(seatDrop, EYE_OVER_PELVIS[1], 1, false);
           const upFirst = bodyLift(seatDrop, EYE_OVER_PELVIS[1], 1, true);
           const moved = (n: number) => `${n < 0 ? 'lowered' : 'raised'} ${Math.abs(n).toFixed(2)}`;
-          console.info(`garage: ${def.id} cockpit: eye at ${eyeFrom} ${n2(camera)} (+1OFF ${n2(offset)}) in the hull's frame; ${seatDrop !== null ? `seat ${seatDrop.toFixed(2)} m under it, the body ${moved(up)} (${upFirst.toFixed(2)} in first person)` : 'no seat under it (only steep surfaces): the body hangs from the eye'}`);
+          console.info(`garage: ${def.id} cockpit: eye at ${eyeFrom} ${n2(camera)} (+1OFF ${n2(offset)}${eyeShare !== 1 ? ` times ${eyeShare}` : ''}) in the hull's frame; ${seatDrop !== null ? `seat ${seatDrop.toFixed(2)} m under it, the body ${moved(up)} (${upFirst.toFixed(2)} in first person)` : 'no seat under it (only steep surfaces): the body hangs from the eye'}`);
         }
       } catch (err) {
         console.warn(`garage: ${def.id}: its cockpit frame did not load`, err);
@@ -964,6 +967,7 @@ export class Garage {
         eye = null;
         eyeFrom = 'hull';
         seatDrop = null;
+        eyeShare = 1;
       }
     }
     // The glows and trails are made now, on their nodes, so the preparation below compiles them too.
@@ -1003,6 +1007,7 @@ export class Garage {
     if (frame) {
       v.cockpitFrame = frame;
       v.cockpitOffset = mirroredOffset(def.cockpit?.firstOffset);
+      v.cockpitShare = eyeShare;
       v.seatDrop = seatDrop;
       const nudge = COCKPIT_BODY_NUDGE[frameFileName(def.cockpit?.file)];
       if (nudge) {
@@ -1057,7 +1062,8 @@ export class Garage {
       // Only the ships pack's ships sit by the eye: a speeder or a creature spawned "as a ship" keeps its own seat and rider.
       v.eyeSeat = shipPack;
       if (eye) {
-        v.cockpit = [eye[0] - v.cockpitOffset[0], eye[1] - v.cockpitOffset[1], eye[2] - v.cockpitOffset[2]];
+        const k = v.cockpitShare;
+        v.cockpit = [eye[0] - v.cockpitOffset[0] * k, eye[1] - v.cockpitOffset[1] * k, eye[2] - v.cockpitOffset[2] * k];
         v.eyeSource = eyeFrom;
       } else {
         // No frame: the eye is a hull hardpoint's (never a gun's), else a seated eye over the kind's seat, until the rooms'

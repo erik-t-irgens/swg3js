@@ -329,6 +329,12 @@ export class Vehicle {
   cockpitFrame: THREE.Object3D | null = null;
   /** The first-person view's offset from the cockpit point, from the cockpit file (its 1OFF, X mirrored as the converter mirrors the model). */
   cockpitOffset: [number, number, number] = [0, 0, 0];
+  /**
+   * The share of `cockpitOffset` the view takes (COCKPIT_OFFSET_SHARE: the B-wing's half, 1 elsewhere). The seated body
+   * follows it: Player.syncMount hangs the body from cockpitEye() less the whole offset plus the file's own 1OFF, which is
+   * this same point while `cockpitOffset` is the whole 1OFF.
+   */
+  cockpitShare = 1;
   /** A ship from the ships pack: the pilot's eyes go to the cockpit eye (cockpitEye()) and the body sits on the seat under it. */
   eyeSeat = false;
   /** Where the cockpit eye came from, for the console: 'hp:camera', 'frame middle', 'bridge', 'hardpoint <name>' or 'hull'. */
@@ -843,12 +849,13 @@ export class Vehicle {
 
   /**
    * Where the first-person view sits, in the model's frame: the cockpit point with the cockpit file's offset. For a ship
-   * from the ships pack with a cockpit frame this is the frame's own camera point plus 1OFF, the one eye used hovering
-   * and flying alike (the seated pilot's eyes are placed on it, and the body under them).
+   * from the ships pack with a cockpit frame this is the frame's own camera point plus 1OFF (the hull's share of it,
+   * `cockpitShare`), the one eye used hovering and flying alike (the seated pilot's eyes are placed on it, and the body under them).
    */
   cockpitEye(out: THREE.Vector3): THREE.Vector3 | null {
     if (!this.cockpit) return null;
-    return out.set(this.cockpit[0] + this.cockpitOffset[0], this.cockpit[1] + this.cockpitOffset[1], this.cockpit[2] + this.cockpitOffset[2]);
+    const k = this.cockpitShare;
+    return out.set(this.cockpit[0] + this.cockpitOffset[0] * k, this.cockpit[1] + this.cockpitOffset[1] * k, this.cockpit[2] + this.cockpitOffset[2] * k);
   }
 
   /** Swap the hull's glass between the game's solid pane and the clear copy (a material swap, nothing to compile). */
