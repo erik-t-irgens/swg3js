@@ -14,7 +14,7 @@ import { buildGlb } from '../glb.mjs';
 import { parseIff } from '../iff.mjs';
 import { readGlb, skinJoints } from '../glbclips.mjs';
 import { pickSaddleHardpoint, saddleEntry, saddleStatus, satHardpoints } from '../saddles.mjs';
-import { SADDLE_PLAYER, hangSaddle, hangOnBack, planSeat, posedBack, type SeatTarget } from '../../../src/vehicles/saddle.ts';
+import { SADDLE_PLAYER, hangSaddle, hangOnBack, offBack, planSeat, posedBack, type SeatTarget } from '../../../src/vehicles/saddle.ts';
 
 let checks = 0;
 const ok = (cond: boolean, what: string) => {
@@ -344,6 +344,73 @@ const skinnedBox = (boneName = 'spine') => {
   const q = posedBack(plainModel, plainFrame);
   ok(q !== null && near(q.y, 1, 1e-4) && near(q.z, 0, 1e-4), "a plain mesh's back is its attribute's own top");
   ok(posedBack(new THREE.Group(), new THREE.Group()) === null, 'a model with no vertices has no back');
+}
+{
+  // 10b. A neck held up over the middle of the body (the ronto's, bolle bol's and sharnaff's idles) is never the back: the
+  // top is the body's, and the ear flap's rule (a bone under the head or a neck, whatever its name) applies to vertices too.
+  const frame = new THREE.Group();
+  const model = new THREE.Group();
+  frame.add(model);
+  const body = new THREE.BoxGeometry(1, 1, 3, 4, 4, 4);
+  body.translate(0, 1.5, 0); // the back's top at y 2
+  const neck = new THREE.BoxGeometry(0.3, 3, 0.3, 1, 4, 1);
+  neck.translate(0, 3.5, 0); // a column over the middle, up to y 5
+  const flap = new THREE.BoxGeometry(0.2, 0.2, 0.2);
+  flap.translate(0.1, 2.6, 0.1); // a vertex group on a bone under the neck, named for nothing
+  const parts = [body, neck, flap];
+  const geo = new THREE.BufferGeometry();
+  const pos: number[] = [];
+  const skinIndex: number[] = [];
+  const skinWeight: number[] = [];
+  parts.forEach((g, bone) => {
+    const p = g.getAttribute('position');
+    for (let i = 0; i < p.count; i++) {
+      pos.push(p.getX(i), p.getY(i), p.getZ(i));
+      // The body's vertices lean a little on the neck too: the heaviest bone decides.
+      if (bone === 0) skinIndex.push(0, 1, 0, 0), skinWeight.push(0.7, 0.3, 0, 0);
+      else skinIndex.push(bone, 0, 0, 0), skinWeight.push(0.8, 0.2, 0, 0);
+    }
+  });
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(skinIndex, 4));
+  geo.setAttribute('skinWeight', new THREE.Float32BufferAttribute(skinWeight, 4));
+  const mesh = new THREE.SkinnedMesh(geo, new THREE.MeshBasicMaterial());
+  const spine = new THREE.Bone();
+  spine.name = 'Spine2';
+  const neckBone = new THREE.Bone();
+  neckBone.name = 'Neck1';
+  const flapBone = new THREE.Bone();
+  flapBone.name = 'LFlapBase';
+  spine.add(neckBone);
+  neckBone.add(flapBone);
+  mesh.add(spine);
+  model.add(mesh);
+  frame.updateMatrixWorld(true);
+  mesh.bind(new THREE.Skeleton([spine, neckBone, flapBone]));
+  frame.updateMatrixWorld(true);
+  const p = posedBack(model, frame);
+  ok(p !== null && near(p.y, 2, 1e-4), `a neck standing over the middle is not the back: the saddle goes on the body's top (y ${p?.y.toFixed(3)}, the neck reaches 5)`);
+  ok(offBack(flapBone, model) && offBack(neckBone, model) && !offBack(spine, model), 'offBack: a neck, and a bone under it named for nothing, are off the back; the spine is not');
+  // With nothing but a neck in the strip, its top is taken rather than nothing.
+  const lone = new THREE.Group();
+  const loneFrame = new THREE.Group();
+  loneFrame.add(lone);
+  const g2 = new THREE.BoxGeometry(0.3, 3, 0.3, 2, 4, 2); // a vertex on the middle line, inside the 0.1 m strip
+  g2.translate(0, 1.5, 0);
+  const n2 = g2.getAttribute('position').count;
+  g2.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(new Uint16Array(n2 * 4), 4));
+  const w2 = new Float32Array(n2 * 4);
+  for (let i = 0; i < n2; i++) w2[i * 4] = 1;
+  g2.setAttribute('skinWeight', new THREE.Float32BufferAttribute(w2, 4));
+  const m2 = new THREE.SkinnedMesh(g2, new THREE.MeshBasicMaterial());
+  const b2 = new THREE.Bone();
+  b2.name = 'neck';
+  m2.add(b2);
+  lone.add(m2);
+  loneFrame.updateMatrixWorld(true);
+  m2.bind(new THREE.Skeleton([b2]));
+  loneFrame.updateMatrixWorld(true);
+  ok(near(posedBack(lone, loneFrame)?.y ?? Number.NaN, 3, 1e-4), 'a strip holding only the neck: its top, as before');
 }
 {
   // 9, guess: a new node on the bone nearest the posed back, at posedBack's point, carrying the saddle

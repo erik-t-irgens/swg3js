@@ -61,7 +61,12 @@ export function planSeat(hardpoints: readonly string[], saddle: SaddleDef | null
  * The top of the body as it stands now (posed, skinned vertices) over the middle of its posed
  * length, in `frame`'s space: the highest vertex within a strip round the posed box's centre line
  * (half-width 12% of the box's width, half-length 8% of its length, at least 0.1 m each, the
- * constants `backHeight` uses). Null when the model has no vertices. Computed once, at spawn.
+ * constants `backHeight` uses) that is the back's: a skinned vertex weighted most to the head, a
+ * neck, a tail or a limb (`offBack`, the rule hangOnBack uses for bones) is never the back. The
+ * ronto, bolle bol and sharnaff hold their necks up over the middle of the body, and the highest
+ * vertex there was the neck's, 2.3 to 2.8 m over the back (a saddle on top of the head); a spider's
+ * or a kliknik's head stands over the middle too. With no back vertex in the strip the highest of
+ * any is taken, as before. Null when the model has no vertices. Computed once, at spawn.
  */
 export function posedBack(model: THREE.Object3D, frame: THREE.Object3D): THREE.Vector3 | null {
   // The frame's ancestors, then everything under it (the model and its bones), not the whole scene;
@@ -82,19 +87,45 @@ export function posedBack(model: THREE.Object3D, frame: THREE.Object3D): THREE.V
   // Skinned vertices through the bones as they stand (getVertexPosition applies the bone matrices
   // and any morphs, in the mesh's own space), then into the frame's space.
   const points = new Float32Array(count * 3);
+  // 1 where the vertex may be the back: a plain mesh's always, a skinned one's unless its heaviest bone is off the back.
+  const back = new Uint8Array(count);
+  const offBackOf = new Map<THREE.Bone, boolean>();
   const toFrame = new THREE.Matrix4();
   const p = new THREE.Vector3();
   const box = new THREE.Box3();
   let k = 0;
+  let v = 0;
   for (const m of meshes) {
     toFrame.multiplyMatrices(inv, m.matrixWorld);
     const n = m.geometry.getAttribute('position').count;
-    for (let i = 0; i < n; i++) {
+    const skin = (m as THREE.SkinnedMesh).isSkinnedMesh ? (m as THREE.SkinnedMesh) : null;
+    const index = skin ? skin.geometry.getAttribute('skinIndex') : undefined;
+    const weight = skin ? skin.geometry.getAttribute('skinWeight') : undefined;
+    const bones = skin?.skeleton?.bones;
+    for (let i = 0; i < n; i++, v++) {
       m.getVertexPosition(i, p).applyMatrix4(toFrame);
       points[k++] = p.x;
       points[k++] = p.y;
       points[k++] = p.z;
       box.expandByPoint(p);
+      back[v] = 1;
+      if (index && weight && bones) {
+        let heaviest = -1;
+        let w = -1;
+        for (let c = 0; c < index.itemSize; c++) {
+          const wc = weight.getComponent(i, c);
+          if (wc > w) {
+            w = wc;
+            heaviest = index.getComponent(i, c);
+          }
+        }
+        const bone = bones[heaviest];
+        if (bone) {
+          let off = offBackOf.get(bone);
+          if (off === undefined) offBackOf.set(bone, (off = offBack(bone, model)));
+          if (off) back[v] = 0;
+        }
+      }
     }
   }
   const halfW = Math.max(0.1, (box.max.x - box.min.x) * 0.12);
@@ -102,12 +133,28 @@ export function posedBack(model: THREE.Object3D, frame: THREE.Object3D): THREE.V
   const cx = (box.min.x + box.max.x) / 2;
   const cz = (box.min.z + box.max.z) / 2;
   let top = -Infinity;
-  for (let i = 0; i < points.length; i += 3) {
-    if (Math.abs(points[i] - cx) <= halfW && Math.abs(points[i + 2] - cz) <= halfL && points[i + 1] > top) top = points[i + 1];
+  let anyTop = -Infinity;
+  for (let i = 0, j = 0; i < points.length; i += 3, j++) {
+    if (Math.abs(points[i] - cx) > halfW || Math.abs(points[i + 2] - cz) > halfL) continue;
+    const y = points[i + 1];
+    if (y > anyTop) anyTop = y;
+    if (back[j] && y > top) top = y;
   }
-  // Nothing in the strip (a body hollow down its middle): most of the way up the box, as the old guess did.
+  // No back vertex in the strip: the highest of any there; nothing at all (a body hollow down its middle): most of the
+  // way up the box, as the old guess did.
+  if (!Number.isFinite(top)) top = anyTop;
   if (!Number.isFinite(top)) top = box.min.y + (box.max.y - box.min.y) * 0.92;
   return new THREE.Vector3(cx, top, cz);
+}
+
+/**
+ * Whether a bone is the head's, a neck's, a tail's or a limb's (never the back): its own name says so, or any bone's
+ * above it below `model` does.
+ */
+export function offBack(bone: THREE.Object3D, model: THREE.Object3D): boolean {
+  if (NOT_BACK.test(bone.name.toLowerCase())) return true;
+  for (let up = bone.parent; up && up !== model; up = up.parent) if ((up as THREE.Bone).isBone && NOT_BACK.test(up.name.toLowerCase())) return true;
+  return false;
 }
 
 /** The head, tail and limbs are never the back. */
@@ -138,8 +185,7 @@ export function hangOnBack(model: THREE.Object3D, node: THREE.Object3D): { bone:
     const bone = o as THREE.Bone;
     if (!bone.isBone) return;
     const name = bone.name.toLowerCase();
-    if (NOT_BACK.test(name)) return;
-    for (let up = bone.parent; up && up !== model; up = up.parent) if ((up as THREE.Bone).isBone && NOT_BACK.test(up.name.toLowerCase())) return;
+    if (offBack(bone, model)) return;
     bone.getWorldPosition(at);
     const distance = at.distanceTo(want);
     const d = distance * (BACK.test(name) ? 0.7 : 1);
