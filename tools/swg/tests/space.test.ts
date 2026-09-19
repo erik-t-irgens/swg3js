@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
-  dockEffects, fieldShapes, hardpointTurn, INVENTED_BODY_SIZE, laneNodes, parsePlanetAppearance, parseSpaceEnvironment, parseSpacePlanets,
+  dockEffects, fieldShapes, galaxyData, galaxyStatus, hardpointTurn, INVENTED_BODY_SIZE, laneNodes, parsePlanetAppearance, parseSpaceEnvironment, parseSpacePlanets,
   scatterField, seeded, SPACE_BODY_FRAME, spaceBody, spaceZoneStatus, stationTemplate, ZONE_MAP_ICONS, zoneIconPaths,
 } from '../space.mjs';
 import { parseIff } from '../iff.mjs';
@@ -232,6 +232,20 @@ ok(!('reload' in fx) && 'repair' in fx && 'release' in fx, 'an effect the archiv
 
 // The zone map's icons.
 ok(ZONE_MAP_ICONS.length === 6 && zoneIconPaths('nebula').texture.endsWith('ui_space_zone_nebula.dds') && zoneIconPaths('nebula').file === 'space_ui/zone_nebula.png', 'the six zone-map icons, each from its own texture into the shared folder');
+
+// galaxy.json: the shuttle routes and the planet widths, from the travel tables.
+const travel = [
+  { Planet: 'alpha', alpha: 100, beta: 500, gamma: 0 },
+  { Planet: 'beta', alpha: 700, beta: 100, gamma: 0 },
+  { Planet: 'gamma', alpha: 0, beta: 0, gamma: 100 },
+];
+const galaxy = galaxyData(travel, [{ Planet: 'alpha', Width: 16384 }, { Planet: 'beta', Width: 8000 }, { Planet: 'delta', Width: 4096 }]);
+ok(galaxy.routes.length === 2 && galaxy.routes.map((r) => `${r.from}>${r.to}:${r.price}`).join(',') === 'alpha>beta:500,beta>alpha:700', 'every non-zero cell is a route with its price, both ways where the table gives both');
+ok(galaxy.local.alpha === 100 && galaxy.local.beta === 100 && galaxy.local.gamma === 100, 'a planet\'s own cell is the price of travelling within it, kept apart from the routes');
+ok(galaxy.planets.find((p) => p.id === 'alpha')!.width === 16384 && galaxy.planets.find((p) => p.id === 'gamma')!.width === null, 'each planet carries its ground width, null where the width table has none');
+ok(galaxy.planets.some((p) => p.id === 'delta'), 'a planet only the width table knows is still listed');
+ok(!galaxyStatus(galaxy).stale && galaxyStatus(galaxy).line.includes('2 shuttle routes'), 'the status line counts the routes');
+ok(galaxyStatus(null).stale && galaxyStatus({ version: 0, routes: [] }).stale, 'a missing or older galaxy.json asks for the maps command');
 
 // A zone converted before the nebulae asks for the space command again; one with them says what it has.
 const full = {

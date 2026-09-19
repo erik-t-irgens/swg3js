@@ -108,7 +108,7 @@ import { ImageRegistry, exportBlueprint, exportPalettes, exportShader, palettesO
 import { effectAlpha, alphaModeFor } from './eff.mjs';
 import { MATERIAL_FORMAT, describeLines, describeSurface, surfaceCounts, surfaceCountsLine, surfaceLine, surfaceTexture } from './surface.mjs';
 import { localize, parseDatatable, parseStringTable } from './datatable.mjs';
-import { SPACE_PACK_VERSION, SPACE_ZONES, spaceZoneStatus } from './space.mjs';
+import { galaxyData, galaxyStatus, SPACE_PACK_VERSION, SPACE_ZONES, spaceZoneStatus } from './space.mjs';
 import { mountCreatures, riderPoseFor } from './mounts.mjs';
 import { pickSaddleHardpoint, saddleEntry, saddleStatus, satHardpoints } from './saddles.mjs';
 import { assembleShip, assemblyStatus, clientChildren, expandPart, partFamilyOf, SHIP_ASSEMBLY_FORMAT } from './shipparts.mjs';
@@ -1930,6 +1930,9 @@ function packStatus(dir) {
     if (s.stale) staleSpace.push(zone);
   }
   if (staleSpace.length) need(`space <swg-dir> all ${dir} --retail-only`, `space zones missing, or converted before the nebulae, the fields and the docking lanes (${staleSpace.join(', ')})`);
+  const galaxyLine = galaxyStatus(readQuiet(join(dir, 'galaxy.json')));
+  console.log(`  ${galaxyLine.line}`);
+  if (galaxyLine.stale) need(`maps <swg-dir> ${dir} --retail-only`, 'the galaxy map has no shuttle routes (galaxy.json)');
   const mobiles = readQuiet(join(dir, 'mobiles/catalogue.json'));
   if (!mobiles) {
     console.log('  mobiles: none (the spawner has only the planet creatures)');
@@ -4885,6 +4888,12 @@ switch (cmd) {
       console.log(`${planet}: ${texture} ${img.width}x${img.height} over ${width} m -> ${join(outDir, 'map.png')}`);
       done++;
     }
+    // galaxy.json: the game's own shuttle routes and each planet's ground width, for the galaxy map.
+    // Where a system hangs in the galaxy is not in the archives and is not written here.
+    const travelTable = (p) => (vfs.has(p) ? parseDatatable(parseIff(vfs.read(p))).rows : []);
+    const galaxy = galaxyData(travelTable('datatables/travel/travel.iff'), travelTable('datatables/travel/planet_width.iff'));
+    writeFileSync(join(pos[2], 'galaxy.json'), JSON.stringify(galaxy, null, 2));
+    console.log(`galaxy.json: ${galaxy.planets.length} planets, ${galaxy.routes.length} shuttle routes -> ${join(pos[2], 'galaxy.json')}`);
     console.log(`${done} planet maps written`);
     break;
   }

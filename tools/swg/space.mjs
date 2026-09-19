@@ -864,6 +864,53 @@ export function fieldShapes(rows) {
   return out;
 }
 
+// ---------------------------------------------------------------------------------------------
+// The galaxy. The archives hold no galaxy map, but they do hold the shuttle routes between the
+// ground planets (datatables/travel/travel.iff: a row and a column per planet, the ticket price in
+// each cell and 0 where there is no route) and each planet's width (datatables/travel/planet_width.iff).
+// Both are the game's own data, so the maps command writes them into the owner's pack as galaxy.json
+// and nothing about them is ever typed into the game's code. Where each system hangs in the galaxy is
+// not in the archives at all and does not come from here.
+
+/** galaxy.json's layout version. */
+export const GALAXY_VERSION = 1;
+
+/**
+ * galaxy.json from the two travel tables' rows: every planet with its ground width in metres, and
+ * every route as `{ from, to, price }` (the non-zero cells, a planet's own cell left out: that is the
+ * price of travelling within the planet, kept apart as `local`). The names are the tables' own, which
+ * are also the names the planet packs carry.
+ */
+export function galaxyData(travelRows, widthRows) {
+  const widths = new Map((widthRows ?? []).map((r) => [String(r.Planet ?? ''), Math.round(Number(r.Width) || 0)]).filter(([id]) => id));
+  const planets = [];
+  const routes = [];
+  const local = {};
+  for (const row of travelRows ?? []) {
+    const from = String(row.Planet ?? '');
+    if (!from) continue;
+    planets.push({ id: from, width: widths.get(from) ?? null });
+    for (const [to, cell] of Object.entries(row)) {
+      if (to === 'Planet') continue;
+      const price = Math.round(Number(cell) || 0);
+      if (!price) continue;
+      if (to === from) local[from] = price;
+      else routes.push({ from, to, price });
+    }
+  }
+  // A planet the width table knows and the travel table does not (none in the retail archives).
+  for (const [id, width] of widths) if (!planets.some((p) => p.id === id)) planets.push({ id, width });
+  routes.sort((a, b) => (a.from === b.from ? (a.to < b.to ? -1 : 1) : a.from < b.from ? -1 : 1));
+  return { version: GALAXY_VERSION, source: 'datatables/travel/travel.iff', planets, routes, local };
+}
+
+/** The `status` line for galaxy.json, and whether the maps command should be run again. */
+export function galaxyStatus(galaxy) {
+  if (!galaxy || !Array.isArray(galaxy.routes)) return { line: 'galaxy: no galaxy.json (the galaxy map draws no shuttle routes)', stale: true };
+  if ((galaxy.version ?? 0) < GALAXY_VERSION) return { line: `galaxy: galaxy.json is older than version ${GALAXY_VERSION}`, stale: true };
+  return { line: `galaxy: ${galaxy.planets?.length ?? 0} planets, ${galaxy.routes.length} shuttle routes`, stale: false };
+}
+
 /**
  * How far a point ({ x, y, z } or [x, y, z]) is from the nearest placed object's surface (its centre's
  * distance less its radius), leaving out `except`; Infinity when there is nothing else.
