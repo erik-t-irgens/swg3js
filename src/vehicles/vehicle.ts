@@ -41,12 +41,12 @@ export interface DriveInput {
   up: boolean;
   down: boolean;
   vertical?: number;
-  /** Ships: the mouse's movement this step (pixels), which pitches and turns the ship directly. */
-  lookDX?: number;
-  lookDY?: number;
   /** A hovering ship: sideways, -1 left to 1 right, as a VTOL slides. */
   strafe?: number;
-  /** An autopilot's stick, held where it is put (-1..1): x turns right, y pushes the nose down; the mouse's deltas are ignored while it is given. */
+  /**
+   * A ship in flight: the stick, held where it is put for as long as it is given (-1..1): x turns right, y pushes the nose
+   * down. The player's mouse cursor gives it (space/mouseFlight.ts), an NPC pilot's hand; absent, it comes back to the middle.
+   */
   stickX?: number;
   stickY?: number;
   /** An autopilot's wanted cruise (m/s): the cruise eases toward it rather than following W and S. */
@@ -1199,8 +1199,8 @@ export class Vehicle {
   }
 
   /**
-   * A ship's flight, a first model: W builds speed and S bleeds it, the mouse's heading turns the
-   * ship and its tilt pitches it, A/D roll; the body is flown by hand (no gravity, its velocity
+   * A ship's flight, a first model: W builds speed and S bleeds it, the stick (the mouse's cursor)
+   * turns and pitches the ship, A/D roll; the body is flown by hand (no gravity, its velocity
    * and attitude set each step) and stays above the ground. Below a few metres a second with the
    * gear near the ground it lands and is a flyer on its springs again. Returns whether it flew.
    */
@@ -1279,24 +1279,20 @@ export class Vehicle {
       this.stick.set(0, 0);
       this.spin.set(0, 0, 0);
     }
-    // Flown like a flight sim: the mouse moves a virtual stick that centres itself when it stops,
-    // the stick asks for turning rates about the ship's own axes, and the ship's inertia lets those
-    // rates build up and die away over a moment, so a turn carries on a little after the mouse
-    // stops and a freighter takes longer to answer than a fighter. A and D roll, Space and X
+    // Flown like a flight sim: the stick asks for turning rates about the ship's own axes, and the
+    // ship's inertia lets those rates build up and die away over a moment, so a turn carries on a
+    // little after the stick comes back and a freighter takes longer to answer than a fighter. The
+    // stick is held where the drive puts it (the player's mouse cursor, an NPC pilot's hand) for as
+    // long as it is given; with none given it comes back to the middle. A and D roll, Space and X
     // pitch, and nothing levels it out: it can fly on its back and loop.
     const rate = s.turnRate;
     const stick = this.stick;
-    const dx = drive?.lookDX ?? 0;
-    const dy = drive?.lookDY ?? 0;
     if (drive?.stickX !== undefined) {
-      // An autopilot holds the stick where it puts it; the mouse is not read.
       stick.set(THREE.MathUtils.clamp(drive.stickX, -1, 1), THREE.MathUtils.clamp(drive.stickY ?? 0, -1, 1));
     } else {
-      stick.x = THREE.MathUtils.clamp(stick.x + dx * 0.004, -1, 1);
-      stick.y = THREE.MathUtils.clamp(stick.y + dy * 0.004, -1, 1);
       const centre = Math.min(1, 2.5 * dt);
-      if (!dx) stick.x -= stick.x * centre;
-      if (!dy) stick.y -= stick.y * centre;
+      stick.x -= stick.x * centre;
+      stick.y -= stick.y * centre;
     }
     const wantYaw = -stick.x * rate * 1.5;
     const wantPitch = stick.y * rate * 1.5 - ((drive?.up ? 1 : 0) - (drive?.down ? 1 : 0)) * rate;

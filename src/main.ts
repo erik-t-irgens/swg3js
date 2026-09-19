@@ -69,6 +69,7 @@ import { ShipHud } from './ui/shipHud';
 import { TargetFx } from './space/targetFx';
 import { FACTION_COLOR, FACTION_LABEL, shipStanding, type ShipFaction } from './space/factions';
 import { NpcBrain } from './space/npcBrain';
+import { MOUSE_FLIGHT, aimCursor, circleRadius, coneClamp, flightTune, gunAim, hullRay, insideCircle, moveCursor, ringRadius, stickFromCursor, type Cursor, type FlightStick, type FlightTuneInput } from './space/mouseFlight';
 import { ZONE_TIER } from './space/roster';
 import { fillTaunt, pickLine } from './space/taunts';
 import { componentLine } from './space/shipStats';
@@ -106,7 +107,7 @@ function mountPrompt(v: import('./vehicles/vehicle').Vehicle, wingsKey: string =
   if (k === 'ship') {
     // Hovering, the ship is a VTOL: it holds still until the throttle opens, rises and sinks on the keys, slides sideways. In flight the mouse flies it.
     const hover = `<b>W</b> throttle up into flight · mouse turns · <b>Space</b>/<b>Ctrl</b> rise and sink · <b>A/D</b> slide`;
-    const flight = `<b>W</b>/<b>S</b> throttle up and down · mouse pitches and turns (loops and rolls allowed) · <b>A/D</b> roll · <b>Space</b>/<b>X</b> pitch`;
+    const flight = `<b>W</b>/<b>S</b> throttle up and down · mouse: in the circle aims the guns, out of it keeps turning the ship · <b>A/D</b> roll · <b>Space</b>/<b>X</b> pitch`;
     // A ship whose wings open: the wings key and which way a press would take the pilot's choice; an open chosen while a
     // low wing waits for room says so.
     const wings = v.wings.length ? ` · <b>${keyName(wingsKey)}</b> ${v.wings.chosen ? 'close' : 'open'} the wings${v.wings.pilot && !v.wings.target ? ' (they open with room under them)' : ''}` : '';
@@ -279,6 +280,30 @@ class App {
   private readonly shipLead = new THREE.Vector3();
   private readonly shipAim = new THREE.Vector3();
   private shipLeadValid = false;
+  /**
+   * Mouse flight (space/mouseFlight.ts): the cursor the mouse moves under pointer lock, in half-heights from the hull's
+   * boresight, which stays where it is left; the stick it asks for; the flown hull it was started for (another hull, the
+   * ground or a loose pointer puts it back in the middle).
+   */
+  private readonly flightCursor: Cursor = { x: 0, y: 0 };
+  private readonly flightStick: FlightStick = { x: 0, y: 0, turn: 0 };
+  private flightCursorOf: Vehicle | null = null;
+  /** The guns aim through the cursor this frame (a ship in flight, the pointer locked, Alt not held). */
+  private flightAiming = false;
+  /**
+   * This frame's aim: the cursor kept to the circle, the pilot's eye it is measured from (world), the ray through it about
+   * the hull's nose (world), the nose, how far out the guns cross, and whether it sits on the target's lead.
+   */
+  private readonly flightAimCursor: Cursor = { x: 0, y: 0 };
+  private readonly flightEye = new THREE.Vector3();
+  private readonly flightRay = new THREE.Vector3();
+  private readonly flightNose = new THREE.Vector3();
+  private flightRange = 0;
+  private flightOnLead = false;
+  /** What the HUD's flight display is handed, kept and refilled; and its scratch for projecting the boresight and the cursor. */
+  private readonly flightView = { ox: 0, oy: 0, cx: 0, cy: 0, circle: 0, ring: 0, turn: 0, onLead: false, inside: true };
+  private readonly flightShow = new THREE.Vector3();
+  private readonly flightShowEye = new THREE.Vector3();
   /** Whether the ship targeted is one that attacks the pilot, as the target effects were last told (they change on a change). */
   private shipTargetHostile = false;
   /** The game's targeting effects on the ship targeted. Made right after the world, whose ship effects it places. */
@@ -1551,6 +1576,14 @@ class App {
         const hit = opts.hit ? combat.forceHit(opts.hit, THREE.MathUtils.clamp(opts.amount ?? 1, 0, 1)) : null;
         return { ship: v.spec.id, ...(hit ? { hit: { ...hit } } : {}), ...combat.report(), speed: Math.round(v.spec.maxSpeed * (v.space ? 2 : 1)), cruise: Math.round(v.cruise), hp: Math.round(v.hp) };
       },
+      /**
+       * Mouse flight and the NPC pilots' skill, live (every number invented): `flight({ circleDeg: 6 })` and any of ringDeg,
+       * deadZone, curve, snapDeg, convergeM, nearestM, speed; `flight({ npc: { 1: { stickMax: 0.8, response: 0.3 } } })` and
+       * any of a tier's reaction, scatterDeg, gunConeDeg, lead, breakRange, evadeChance, stickMax, response. Returns them
+       * all, with the cursor (half-heights from the boresight), the stick, and whether the guns aim through the cursor and
+       * sit on the lead now.
+       */
+      flight: (opts: FlightTuneInput = {}) => ({ ...flightTune(opts), cursor: { ...this.flightCursor }, stick: { ...this.flightStick }, aiming: this.flightAiming, onLead: this.flightOnLead, range: Math.round(this.flightRange) }),
       /** Show an NPC pilot's line: `taunt('imperial', 'entercombat')` (a table that names you), `taunt('pirate', 'death')`. */
       taunt: (faction: ShipFaction = 'imperial', event: 'entercombat' | 'gothit' | 'hityou' | 'death' = 'entercombat') => {
         const data = this.world.ships.data;
@@ -3539,12 +3572,32 @@ class App {
       const vertical = free ? 0 : Math.sign(tilt) * THREE.MathUtils.clamp((Math.abs(tilt) - 0.12) / 0.45, 0, 1);
       // A ship in flight takes the mouse itself (the camera chases it); Alt hands it back to the orbit.
       const shipFlying = !!pilot.spec.ship && pilot.airborne && !free && input.locked;
-      const lookDX = shipFlying ? input.mouseDX : 0;
-      const lookDY = shipFlying ? input.mouseDY : 0;
+      // Mouse flight (space/mouseFlight.ts): the mouse moves a cursor over the view that stays where it is left; inside the
+      // aim circle it aims the guns and the ship holds its course, outside it the ship keeps turning toward it, harder the
+      // further out, for as long as it is held there. Another hull, the ground, a loose pointer or a jump puts it back in the
+      // middle; Alt leaves it where it is and holds the stick in the middle while the view looks round.
+      const inFlight = !!pilot.spec.ship && pilot.airborne;
+      if (this.flightCursorOf !== pilot || !inFlight || !input.locked || this.hyperspace.drives(pilot)) {
+        this.flightCursor.x = 0;
+        this.flightCursor.y = 0;
+        this.flightCursorOf = pilot;
+      }
+      const steering = shipFlying && !this.hyperspace.drives(pilot);
+      if (steering) {
+        const tanHalf = Math.tan(THREE.MathUtils.degToRad(this.cam.camera.fov) / 2);
+        moveCursor(this.flightCursor, input.mouseDX, input.mouseDY, window.innerHeight / 2, this.cam.sensitivity, this.cam.invertY, tanHalf);
+        stickFromCursor(this.flightCursor, tanHalf, this.flightStick);
+      } else {
+        this.flightStick.x = 0;
+        this.flightStick.y = 0;
+        this.flightStick.turn = 0;
+      }
+      // The mouse is the ship's in flight (the chase camera spends none of it), a jump's included.
       if (shipFlying) {
         input.mouseDX = 0;
         input.mouseDY = 0;
       }
+      this.flightAiming = steering;
       // A ship not yet in flight hovers as a VTOL: the view's tilt does not lift it, Space and X
       // do, and A and D slide it sideways rather than turning it; in flight the keys roll it.
       const hovering = !!pilot.spec.ship && !pilot.airborne;
@@ -3576,8 +3629,10 @@ class App {
         up: input.held('jump'),
         down: input.held('crouch'),
         vertical: pilot.spec.ship ? 0 : vertical,
-        lookDX,
-        lookDY,
+        // In flight the stick is the cursor's, held for as long as it is left out (in the middle while Alt looks round or
+        // the pointer is loose); flyShip reads a given stick as held, never drifting back.
+        stickX: inFlight ? this.flightStick.x : undefined,
+        stickY: inFlight ? this.flightStick.y : undefined,
       };
     }
     // A ship in a jump is flown by the jump (its cruise is `jumpCruise`), whether or not a panel is open: the pilot's keys do nothing.
@@ -3744,6 +3799,25 @@ class App {
         this.shipLeadValid = true;
       }
     }
+    // Mouse flight: the guns aim through the cursor, kept to the aim circle, measured about the hull's nose from the
+    // pilot's eye (never from the chase camera, which lags a turn by up to a quarter of a second and looks a little under
+    // the hull), and cross where the target's lead is, or where the target is, or MOUSE_FLIGHT.convergeM out; within
+    // MOUSE_FLIGHT.snapDeg of the lead they take it exactly. Allocates nothing. (The eye first: `eyes()` spends `tmp`.)
+    this.flightOnLead = false;
+    if (this.flightAiming) {
+      const tanHalf = Math.tan(THREE.MathUtils.degToRad(this.cam.camera.fov) / 2);
+      const eye = this.shipEyeWorld(pilot, this.flightEye) ?? this.flightEye.copy(pilot.pos);
+      this.flightNose.set(0, 0, 1).applyQuaternion(pilot.group.quaternion);
+      aimCursor(this.flightCursor, tanHalf, this.flightAimCursor);
+      hullRay(this.flightAimCursor, tanHalf, this.flightRay).applyQuaternion(pilot.group.quaternion);
+      const far = this.shipLeadValid ? eye.distanceTo(this.shipLead) : t ? eye.distanceTo(t.pos) : MOUSE_FLIGHT.convergeM;
+      this.flightRange = Math.max(MOUSE_FLIGHT.nearestM, far);
+      if (this.shipLeadValid) {
+        tmp2.copy(this.shipLead).sub(eye);
+        const d = tmp2.length();
+        this.flightOnLead = d > 1e-6 && tmp2.dot(this.flightRay) >= d * Math.cos(THREE.MathUtils.degToRad(MOUSE_FLIGHT.snapDeg));
+      }
+    }
     if (!pilot.guns.length) return;
     pilot.gunCooldown = Math.max(0, pilot.gunCooldown - dt);
     const combat = pilot.combat;
@@ -3763,9 +3837,15 @@ class App {
     // From the muzzle as it stands now (a gun on a wing fires from where the wing has turned it).
     const from = pilot.muzzle(g, shotFrom, shotDir);
     const dir = shotDir;
-    // Led onto the target when it sits within the guns' cone: the lead is what the ship's frame
-    // sees, so the bolt's own velocity (the muzzle's plus the ship's) meets the target there.
-    if (this.shipLeadValid && Math.acos(THREE.MathUtils.clamp(this.shipAim.dot(nose), -1, 1)) < SHIP_GUN_CONE) dir.copy(this.shipAim);
+    // In mouse flight the gun swings toward the cursor (every gun's bolt crossing under it), onto the lead when the cursor
+    // is on it, and never further off the nose than the guns' cone (a gun far out on a wing crossing near the nose, a lead
+    // snapped at the rim). Otherwise (hovering, Alt, a loose pointer) led onto the target when it sits within the guns'
+    // cone. The lead is what the ship's frame sees, so the bolt's own velocity (the muzzle's plus the ship's) meets the
+    // target there.
+    if (this.flightAiming) {
+      gunAim(from, this.flightEye, this.flightRay, this.flightRange, this.shipLeadValid ? this.shipLead : null, THREE.MathUtils.degToRad(MOUSE_FLIGHT.snapDeg), dir);
+      coneClamp(dir, this.flightNose, SHIP_GUN_CONE);
+    } else if (this.shipLeadValid && Math.acos(THREE.MathUtils.clamp(this.shipAim.dot(nose), -1, 1)) < SHIP_GUN_CONE) dir.copy(this.shipAim);
     from.addScaledVector(dir, 1.2);
     // What this gun fires: its own component's bolt on a fitted ship, else the ship's one weapon; with a fight, its combat's stat (invented damage).
     const w = g.weapon ?? pilot.weapon;
@@ -3803,7 +3883,7 @@ class App {
       label = `${c.type?.name ?? t.spec.label} · ${FACTION_LABEL[c.faction]}${c.type ? ` · tier ${c.type.tier}` : ''} · ${range} m${s ? ` · shields ${targetPct(s.shield)} · armour ${targetPct(s.armour)} · hull ${targetPct(s.hull)}` : ` · ${hull}`}`;
     }
     const kind = this.shipTargetHostile ? 'enemy' : c && shipStanding(c.faction) === 'friend' ? 'friend' : 'neutral';
-    return { x: at.x, y: at.y, onScreen: at.on, leadX: lead.x, leadY: lead.y, leadOnScreen: lead.on, label, kind };
+    return { x: at.x, y: at.y, onScreen: at.on, leadX: lead.x, leadY: lead.y, leadOnScreen: lead.on, label, kind, onLead: this.flightOnLead && this.world.simulating };
   }
 
   /** Whether a ship may be picked as a target now (`targetable`: alive and not in a jump); a ship without a contact yet, by its ghosting alone. */
@@ -5275,8 +5355,50 @@ class App {
       // A jump's countdown, then "jumping", over whatever the prompt would say; in the tunnel, the crew's lifts and controls.
       prompt = this.jumpPrompt(lift !== null) ?? prompt;
       this.hud.setPrompt(prompt);
-      const flying = player.mounted?.spec.ship && player.mounted.airborne && !input.held('freeLook') ? player.mounted : null;
-      this.hud.setFlight(flying ? flying.stick : null);
+      // Mouse flight's display (seated or at a bridge's controls, in flight, Alt not held): the aim circle, the ring and the
+      // cursor, in pixels, at this frame's field of view. The cursor is the hull's (about its nose, from the pilot's eye), so
+      // the circle is drawn where the boresight lands on this camera's screen at the guns' range, and the cursor where its
+      // own direction lands: in the cockpit that is the middle; in the chase view it drifts off the middle while the view
+      // catches a turn up, and sits a little under it (the view looks under the hull). Unsimulated (a panel, the map,
+      // death), nothing is on the lead. Allocates nothing.
+      const flownShip = player.mounted ?? player.piloting;
+      // Nothing flown: the cursor's hull is let go (a disposed hull is not kept), and the next one starts in the middle.
+      if (!flownShip) this.flightCursorOf = null;
+      const flying = !!flownShip?.spec.ship && flownShip.airborne && !input.held('freeLook') && !this.hyperspace.drives(flownShip);
+      if (flying && flownShip) {
+        const cam = this.cam.camera;
+        cam.updateMatrixWorld();
+        const halfW = window.innerWidth / 2;
+        const half = window.innerHeight / 2;
+        const tanHalf = Math.tan(THREE.MathUtils.degToRad(cam.fov) / 2);
+        const fv = this.flightView;
+        const q = flownShip.group.quaternion;
+        const eye = this.shipEyeWorld(flownShip, this.flightShowEye) ?? this.flightShowEye.copy(flownShip.pos);
+        const range = this.flightRange > 0 ? this.flightRange : MOUSE_FLIGHT.convergeM;
+        // The boresight at the guns' range; the circle's scale is the eye's distance over the camera's (the chase view
+        // sits behind the eye, so the circle there shows a little smaller).
+        const p = this.flightShow.set(0, 0, 1).applyQuaternion(q).multiplyScalar(range).add(eye);
+        const scale = range / Math.max(1e-3, cam.position.distanceTo(p));
+        p.project(cam);
+        const centred = p.z > 1 || !Number.isFinite(p.x);
+        fv.ox = centred ? 0 : p.x * halfW;
+        fv.oy = centred ? 0 : -p.y * half;
+        const s = centred ? 1 : scale;
+        fv.circle = circleRadius(tanHalf) * half * s;
+        fv.ring = ringRadius(tanHalf) * half * s;
+        hullRay(this.flightCursor, tanHalf, p).applyQuaternion(q).multiplyScalar(range).add(eye).project(cam);
+        if (centred || p.z > 1 || !Number.isFinite(p.x)) {
+          fv.cx = this.flightCursor.x * half * s;
+          fv.cy = this.flightCursor.y * half * s;
+        } else {
+          fv.cx = p.x * halfW - fv.ox;
+          fv.cy = -p.y * half - fv.oy;
+        }
+        fv.inside = insideCircle(this.flightCursor, tanHalf);
+        fv.turn = this.flightStick.turn;
+        fv.onLead = this.flightOnLead && this.world.simulating;
+      }
+      this.hud.setFlight(flying ? this.flightView : null);
       const aimed = player.mounted ?? player.piloting;
       const showTarget = aimed?.spec.ship && aimed.airborne && !input.held('freeLook') && !this.hyperspace.drives(aimed);
       this.hud.setTarget(showTarget ? this.targetHud(aimed) : null);

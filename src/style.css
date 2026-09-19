@@ -119,10 +119,9 @@ b { color: var(--accent); font-weight: 600; }
 .slot { position: relative; overflow: hidden; }
 .slot .cd { position: absolute; left: 0; right: 0; bottom: 0; height: 0; background: rgba(0,0,0,0.55); pointer-events: none; }
 .slot > span { position: relative; }
-/* The flight display: a ring for the stick's reach, a dead band, a crosshair, and the stick as an arrow or a dot. */
+/* The flight display: the aim circle, the cursor's ring, a crosshair, and the cursor as an arrow or a pip. */
 .flight { position: absolute; left: 50%; top: 50%; margin: -160px 0 0 -160px; pointer-events: none; }
 .flight .ring { fill: none; stroke: rgba(127,215,255,0.22); stroke-width: 1; }
-.flight .dead { fill: none; stroke: rgba(127,215,255,0.5); stroke-width: 1; }
 .flight .cross { stroke: var(--accent); stroke-width: 2; filter: drop-shadow(0 0 3px rgba(127,215,255,0.8)); }
 .flight .stick-line { stroke: #ffffff; stroke-width: 2.5; stroke-linecap: round; filter: drop-shadow(0 0 3px rgba(0,0,0,0.8)); }
 .flight .stick-head { fill: #ffffff; filter: drop-shadow(0 0 3px rgba(0,0,0,0.8)); }

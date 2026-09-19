@@ -27,9 +27,16 @@ export class Hud {
   private readonly chargeEl: HTMLElement;
   private readonly flight: HTMLElement;
   private flying = false;
+  private readonly flightCentre: HTMLElement;
+  private readonly flightRing: HTMLElement;
+  private readonly aimCircle: HTMLElement;
   private readonly stickLine: HTMLElement;
   private readonly stickHead: HTMLElement;
-  private readonly stickDot: HTMLElement;
+  private readonly pip: HTMLElement;
+  /** What the flight display last wrote, so an attribute is set only when it changes. */
+  private readonly flightDrawn = { w: -1, h: -1, ox: NaN, oy: NaN, circle: -1, ring: -1, onLead: false, inside: true, cx: NaN, cy: NaN, turn: -1 };
+  /** The lead reticle's state as last written: on the cursor or not. */
+  private leadOn = false;
   private readonly mouseFree: HTMLElement;
   private readonly prompt: HTMLElement;
   private readonly hurtEl: HTMLElement;
@@ -65,14 +72,19 @@ export class Hud {
       </div>
       <div class="crosshair"></div>
       <div class="charge" hidden><div class="fill"></div></div>
-      <svg class="flight hidden" viewBox="-160 -160 320 320" width="320" height="320">
-        <circle class="ring" r="120" />
-        <circle class="dead" r="12" />
-        <line class="cross" x1="-24" y1="0" x2="-14" y2="0" /><line class="cross" x1="14" y1="0" x2="24" y2="0" />
-        <line class="cross" x1="0" y1="-24" x2="0" y2="-14" /><line class="cross" x1="0" y1="14" x2="0" y2="24" />
-        <line class="stick-line" x1="0" y1="0" x2="0" y2="0" />
-        <polygon class="stick-head" points="0,0 0,0 0,0" />
-        <circle class="stick-dot" r="5" />
+      <svg class="flight hidden" style="left: 0; top: 0; margin: 0; width: 100%; height: 100%; overflow: visible">
+        <g class="flight-centre">
+          <circle class="ring" r="0" />
+          <circle class="aim-circle" r="0" style="fill: none; stroke: rgba(127,215,255,0.6); stroke-width: 1.5; filter: drop-shadow(0 0 2px rgba(0,0,0,0.8))" />
+          <line class="cross" x1="-9" y1="0" x2="-4" y2="0" /><line class="cross" x1="4" y1="0" x2="9" y2="0" />
+          <line class="cross" x1="0" y1="-9" x2="0" y2="-4" /><line class="cross" x1="0" y1="4" x2="0" y2="9" />
+          <line class="stick-line" x1="0" y1="0" x2="0" y2="0" style="display: none" />
+          <polygon class="stick-head" points="0,0 0,0 0,0" style="display: none" />
+          <g class="pip">
+            <circle r="7" style="fill: none; stroke: #ffffff; stroke-width: 1.5; filter: drop-shadow(0 0 2px rgba(0,0,0,0.8))" />
+            <circle class="stick-dot" r="1.8" />
+          </g>
+        </g>
       </svg>
       <svg class="targets hidden">
         <rect class="tbox" width="34" height="34" rx="2" />
@@ -107,9 +119,12 @@ export class Hud {
     this.crosshair = q('.crosshair');
     this.chargeEl = q('.charge');
     this.flight = q('.flight');
+    this.flightCentre = q('.flight-centre');
+    this.flightRing = q('.flight .ring');
+    this.aimCircle = q('.aim-circle');
     this.stickLine = q('.stick-line');
     this.stickHead = q('.stick-head');
-    this.stickDot = q('.stick-dot');
+    this.pip = q('.pip');
     this.mouseFree = q('.mouse-free');
     this.prompt = q('.prompt');
     this.hurtEl = q('.hurt');
@@ -131,11 +146,20 @@ export class Hud {
   /**
    * The ship's target in flight: a box on the target where it shows on screen, its name, range
    * and hull under it, and the lead reticle where the guns must point for a bolt fired now to
-   * meet it, joined to the box by a line. Nothing while there is no target.
+   * meet it, joined to the box by a line (green while the guns' cursor is on it). Nothing while
+   * there is no target.
    */
-  setTarget(t: { x: number; y: number; onScreen: boolean; leadX: number; leadY: number; leadOnScreen: boolean; label: string; kind?: 'enemy' | 'friend' | 'neutral' } | null): void {
+  setTarget(t: { x: number; y: number; onScreen: boolean; leadX: number; leadY: number; leadOnScreen: boolean; label: string; kind?: 'enemy' | 'friend' | 'neutral'; onLead?: boolean } | null): void {
     this.targets.classList.toggle('hidden', !t);
     if (!t) return;
+    // The lead reticle lights while the guns' cursor sits on it (the bolts take the lead exactly).
+    const on = !!t.onLead;
+    if (on !== this.leadOn) {
+      this.leadOn = on;
+      const stroke = on ? '#7dff9a' : '';
+      this.lead.style.stroke = stroke;
+      for (const c of this.leadCross) c.style.stroke = stroke;
+    }
     // The box's colour says what the target is to the pilot: red an enemy, green a friend, white neither.
     const kind = t.kind ?? 'neutral';
     if (kind !== this.targetKind) {
@@ -201,32 +225,84 @@ export class Hud {
   }
 
   /**
-   * The flight display, in a ship in flight only: a crosshair at the centre and the virtual stick
-   * the mouse moves, an arrow from the centre toward it, or a dot when it sits in the dead band.
+   * The flight display, in a ship in flight only (the DOM, so nothing compiles): a small crosshair on the boresight, the
+   * aim circle about it, a faint ring for the cursor's reach, and the cursor. Inside the circle the cursor is the guns'
+   * pip, and the circle lights when it sits on the target's lead; outside it an arrow runs from the circle's rim to the
+   * cursor, which stays where it was left, brighter the harder the ship turns. `ox`/`oy` is where the boresight shows, in
+   * pixels from the middle of the window (0, 0 in the cockpit; off the middle while a chase view catches a turn up);
+   * `cx`/`cy` the cursor in pixels from there, `circle` and `ring` radii in pixels, `inside` whether the cursor is in the
+   * circle (the hull's own reckoning). An attribute is written only when it changes.
    */
-  setFlight(stick: { x: number; y: number } | null): void {
-    this.flying = !!stick;
-    this.flight.classList.toggle('hidden', !stick);
-    if (!stick) return;
-    const r = 120;
-    const x = stick.x * r;
-    const y = stick.y * r;
+  setFlight(view: { ox: number; oy: number; cx: number; cy: number; circle: number; ring: number; turn: number; onLead: boolean; inside: boolean } | null): void {
+    this.flying = !!view;
+    this.flight.classList.toggle('hidden', !view);
+    if (!view) return;
+    const d = this.flightDrawn;
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    const ox = Math.round(view.ox * 2) / 2;
+    const oy = Math.round(view.oy * 2) / 2;
+    if (w !== d.w || h !== d.h || ox !== d.ox || oy !== d.oy) {
+      d.w = w;
+      d.h = h;
+      d.ox = ox;
+      d.oy = oy;
+      this.flightCentre.setAttribute('transform', `translate(${w / 2 + ox} ${h / 2 + oy})`);
+    }
+    const circle = Math.round(view.circle * 2) / 2;
+    if (circle !== d.circle) {
+      d.circle = circle;
+      this.aimCircle.setAttribute('r', String(circle));
+      // The arrow's shaft starts at the rim: drawn again when the rim moves (a resize, a change of view or of the tune).
+      d.cx = NaN;
+    }
+    const ring = Math.round(view.ring * 2) / 2;
+    if (ring !== d.ring) {
+      d.ring = ring;
+      this.flightRing.setAttribute('r', String(ring));
+    }
+    if (view.onLead !== d.onLead) {
+      d.onLead = view.onLead;
+      this.aimCircle.style.stroke = view.onLead ? 'rgba(125,255,154,0.95)' : 'rgba(127,215,255,0.6)';
+    }
+    const x = Math.round(view.cx * 2) / 2;
+    const y = Math.round(view.cy * 2) / 2;
+    const turn = Math.round(view.turn * 20) / 20;
     const len = Math.hypot(x, y);
-    const centred = len < 12;
-    this.stickDot.setAttribute('cx', String(x));
-    this.stickDot.setAttribute('cy', String(y));
-    this.stickDot.style.display = centred ? '' : 'none';
-    this.stickLine.style.display = centred ? 'none' : '';
-    this.stickHead.style.display = centred ? 'none' : '';
-    if (centred) return;
+    // The pip while the hull reckons the cursor inside, and while it is drawn inside the rim (a near range's parallax), so
+    // the arrow never points back into the circle.
+    const inside = view.inside || len <= circle;
+    if (inside !== d.inside) {
+      d.inside = inside;
+      d.cx = NaN;
+      this.pip.style.display = inside ? '' : 'none';
+      this.stickLine.style.display = inside ? 'none' : '';
+      this.stickHead.style.display = inside ? 'none' : '';
+    }
+    if (x === d.cx && y === d.cy && turn === d.turn) return;
+    d.cx = x;
+    d.cy = y;
+    d.turn = turn;
+    if (inside) {
+      this.pip.setAttribute('transform', `translate(${x} ${y})`);
+      return;
+    }
     const ux = x / len;
     const uy = y / len;
-    // The shaft stops short of the head; the head is a little triangle pointing on.
+    // The shaft from just outside the rim to short of the head; the head a little triangle at the cursor, pointing on.
     const hx = x - ux * 10;
     const hy = y - uy * 10;
+    const from = Math.min(circle + 3, len - 10);
+    const sx = ux * from;
+    const sy = uy * from;
+    this.stickLine.setAttribute('x1', String(sx));
+    this.stickLine.setAttribute('y1', String(sy));
     this.stickLine.setAttribute('x2', String(hx));
     this.stickLine.setAttribute('y2', String(hy));
     this.stickHead.setAttribute('points', `${x},${y} ${hx - uy * 6},${hy + ux * 6} ${hx + uy * 6},${hy - ux * 6}`);
+    const o = (0.45 + 0.55 * turn).toFixed(2);
+    this.stickLine.style.opacity = o;
+    this.stickHead.style.opacity = o;
   }
 
   setPrompt(text: string): void {
