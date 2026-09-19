@@ -6,7 +6,7 @@
 //   node tools/swg/cli.mjs list <swg-dir> [filter]                list files across archives (search priority applied)
 //   node tools/swg/cli.mjs extract <swg-dir> <path-in-archive> <out-file>
 //   node tools/swg/cli.mjs dump <file.iff> | <swg-dir> <path-in-archive> [--strings] [--hex]   print an IFF tree (--strings lists every readable string in each chunk, --hex every chunk's bytes with the floats they would be)
-//   node tools/swg/cli.mjs weapons <swg-dir> <out-dir> [--limit=N]       every weapon the game can hold, with its class, under <out-dir>/weapons
+//   node tools/swg/cli.mjs weapons <swg-dir> <out-dir> [--limit=N] [--no-icons]   every weapon the game can hold, with its class, name, hands and picture, under <out-dir>/weapons
 //   node tools/swg/cli.mjs ships <swg-dir> <out-dir> [--limit=N] [--match=yacht] [--glass=<regex>]   every ship a player can fly, with its interior when it has one, under <out-dir>/ships (--match redoes those ships only; --glass=<regex> marks more shaders as glass);
 //                                                                  also the game's projectile table with every bolt and hit effect as projectiles.json
 //   node tools/swg/cli.mjs species <swg-dir> <out-dir> [--only=human,twilek_female] [--var=...]   every playable species and gender as parts, with characters/index.json for the character creator
@@ -28,7 +28,7 @@
 //   node tools/swg/cli.mjs player <swg-dir> <out-dir> [--template=object/creature/player/shared_human_male.iff] [--wear=...|none] [--var=...]   the player's character as <out-dir>/player/<id>.glb + manifest.json
 //                                                               [--jka=<Jedi Academy GameData or base dir>] [--jka-anims=BOTH_A1_T__B_,...]  adds Jedi Academy's saber attacks, jumps and rolls, retargeted
 //   node tools/swg/cli.mjs loading <swg-dir> <out-dir> [--match=ui_load] [--list]   the game's loading-screen pictures, one per planet, as <out-dir>/loading/<planet>.png
-//   node tools/swg/cli.mjs wardrobe <swg-dir> <out-dir> [--gender=male|female] [--kind=wearables,hair] [--match=...] [--limit=N]   every wearable and hairstyle as parts
+//   node tools/swg/cli.mjs wardrobe <swg-dir> <out-dir> [--gender=male|female] [--kind=wearables,hair] [--match=...] [--limit=N] [--no-icons]   every wearable and hairstyle as parts, with names, slots, species rules and pictures
 //   node tools/swg/cli.mjs parts <swg-dir> <out-dir> [--template=...] [--wear=...]   body, head and worn items as separate GLBs on one shared skeleton
 //   node tools/swg/cli.mjs clips-save <model.glb> <out.clips> [--only=BOTH_]   lift a model's animations into a bundle that survives re-conversion
 //   node tools/swg/cli.mjs clips-apply <model.glb> <in.clips> [--drop=BOTH_]   put a bundle's animations back onto a model, joints matched by name
@@ -96,6 +96,8 @@ import { defaultJkaClips, importJkaClips } from './jka.mjs';
 import { extractClips, readGlb, replaceClips, skinJoints } from './glbclips.mjs';
 import { packClips, retargetClips, unpackClips } from './clipbundle.mjs';
 import { encodePng } from './png.mjs';
+import { describeItem, itemPackStatus, newItemCaches, parseSlotDescriptor, readAppearanceTable, speciesColumn, wardrobeChoice, wardrobeFit, PLAYER_SLOTS } from './items.mjs';
+import { iconMeshes, renderThumbnail, thumbTexture } from './thumbnail.mjs';
 import { effectAlphaMode, shaderTextures } from './sht.mjs';
 import { bakeShader, describeShader, describeVariables, loadImage, loadShader, parseBlueprint, parsePalette, preparedShaders, renderBlueprint, renderContext, shaderNeedsBake } from './texrender.mjs';
 import { ImageRegistry, exportBlueprint, exportPalettes, exportShader, palettesOf } from './customize.mjs';
@@ -163,6 +165,13 @@ function mount(dir) {
 const textureCache = new Map();
 const effectCache = new Map();
 const effectUse = new Map();
+
+/**
+ * Whether texture entries carry a reduced copy of their picture for the item icons (`thumb`, not
+ * enumerable, so no JSON or GLB writer sees it; tools/swg/thumbnail.mjs). Only the weapons and
+ * wardrobe commands draw icons and set it, so the snapshot, gallery and ships runs make none.
+ */
+let wantThumbs = false;
 
 /** Alpha mode from the effect file's first pass; falls back to the name heuristic. */
 function alphaFromEffect(vfs, effect, fallback) {
@@ -234,7 +243,7 @@ function textureFor(vfs, shaderPath, opts = {}) {
   if (textureCache.has(key)) result = textureCache.get(key);
   else {
     try {
-      result = surfaceTexture(vfs, shaderPath, surfaceDeps(vfs));
+      result = surfaceTexture(vfs, shaderPath, { ...surfaceDeps(vfs), thumb: wantThumbs ? thumbTexture : undefined });
     } catch (err) {
       console.error(`  texture for ${shaderPath} skipped: ${err.message}`);
     }
@@ -957,7 +966,7 @@ function writeSpeciesIndex(outRoot) {
  * the live colour recipe for a shader whose look a colour changes; null when the mesh is missing
  * or draws nothing.
  */
-function convertWearableMesh(vfs, meshPath, { skeleton, skin, outDir, ctx, info, recipes, recipeKeys, registry }) {
+function convertWearableMesh(vfs, meshPath, { skeleton, skin, outDir, ctx, info, recipes, recipeKeys, registry, onMesh }) {
   let name = meshPath;
   let parsed = null;
   if (/\.lmg$/i.test(name)) {
@@ -992,6 +1001,8 @@ function convertWearableMesh(vfs, meshPath, { skeleton, skin, outDir, ctx, info,
   }
   if (!kept.length) return null;
   const file = `${meshName}.glb`;
+  // The wardrobe's icon draws every mesh of the item: the groups kept and their textures.
+  onMesh?.(meshName, kept, textures);
   writeFileSync(join(outDir, file), buildGlb([{ name: meshName, groups: kept, extras: { occlusionLayer: mgn.occlusionLayer, occludes: mgn.occludes, zoneNames: mgn.occlusionZones, zoneCombinations: mgn.zoneCombinations, fullyOccludedBy: mgn.fullyOccludedBy } }], { flipX: true, textures, skin, keepZones: true }));
   return {
     name: meshName,
@@ -1083,7 +1094,10 @@ function skinnedTexture(vfs, shaderPath, slots, ctx, info, mesh = null) {
   if (image.hasAlpha === undefined) for (let i = 3; i < image.rgba.length; i += 4) if (image.rgba[i] !== 255) { hasAlpha = true; break; }
   const normalFile = shader?.textureFiles?.get('CNRM') ?? shader?.textureFiles?.get('NRML') ?? shader?.textureFiles?.get('DOT3') ?? null;
   const normal = normalFile ? normalFor(vfs, normalFile) : null;
-  return { path: `${shaderPath}#${rendered ? basename(rendered.file) : 'baked'}`, png: encodePng(image.width, image.height, image.rgba), hasAlpha, alphaMode, ...(normal ? { normal } : {}) };
+  const result = { path: `${shaderPath}#${rendered ? basename(rendered.file) : 'baked'}`, png: encodePng(image.width, image.height, image.rgba), hasAlpha, alphaMode, ...(normal ? { normal } : {}) };
+  // The icon's copy of the baked texture, reduced (the item pictures never decode a PNG just encoded).
+  if (wantThumbs) Object.defineProperty(result, 'thumb', { value: thumbTexture(image.width, image.height, image.rgba), enumerable: false });
+  return result;
 }
 
 /**
@@ -1755,7 +1769,28 @@ function packStatus(dir) {
   if (!weapons) {
     console.log('  weapons: none (the placeholder saber and rifle are used)');
     need(`weapons <swg-dir> ${dir} --retail-only`, 'no weapons converted for the rack (I in game, the Weapons tab)');
-  } else console.log(`  weapons: ${weapons.weapons?.length ?? 0} on the rack, ${weapons.skipped?.length ?? 0} left out`);
+  } else {
+    const items = itemPackStatus(weapons.weapons);
+    console.log(`  weapons: ${weapons.weapons?.length ?? 0} on the rack, ${weapons.skipped?.length ?? 0} left out; ${items.named} named, ${items.slotted} with slots, ${items.iconed} icons`);
+    if (items.missingKeys) need(`weapons <swg-dir> ${dir} --retail-only`, 'the weapons carry no names, slots or icons (the backpack needs them)');
+  }
+  // The wardrobe folders (optional, as the README says): what the backpack can show of each; the to-do comes from
+  // the same table the mobiles block uses, so the two can never ask for different commands.
+  const wardrobeRoot = join(dir, 'wardrobe');
+  if (existsSync(wardrobeRoot)) {
+    for (const folder of readdirSync(wardrobeRoot).sort()) {
+      let wardrobe = null;
+      try {
+        wardrobe = readJson(join(wardrobeRoot, folder, 'wardrobe.json'));
+      } catch {
+        wardrobe = null;
+      }
+      if (!wardrobe) continue;
+      const items = itemPackStatus(wardrobe.items);
+      console.log(`  wardrobe ${folder}: ${items.items} items (${items.named} named, ${items.slotted} with slots, ${items.iconed} icons, ${items.fitted} with species rules, ${items.unseen} worn unseen)`);
+      if (items.missingKeys && folder in M.WARDROBE_RUNS) need(`wardrobe <swg-dir> ${dir} --retail-only${M.WARDROBE_RUNS[folder]}`, `wardrobe/${folder} has no item names, slots or icons (the backpack needs them)`);
+    }
+  }
   const speciesIndex = readJson(join(dir, 'characters/index.json'));
   if (speciesIndex?.species?.length) console.log(`  species: ${speciesIndex.species.map((sp) => `${sp.id} (${sp.morphs.length} sliders, ${sp.variables.length} variables${sp.jkaClips ? '' : ', NO Jedi Academy clips'})`).join(', ')}`);
   else need(`species <swg-dir> ${dir} --retail-only`, 'no species index: only the one character can be played');
@@ -2794,33 +2829,107 @@ switch (cmd) {
       mkdirSync(join(outDir, 'customize'), { recursive: true });
       writeFileSync(join(outDir, 'customize', id), bytes);
     });
+    // What the backpack shows of each item (its name, description, body slots and picture) and who may wear it:
+    // the client's appearance table, a column per species and gender, read for this folder's own column (a
+    // species' own cut of an item is converted for it) and recorded for the others as `fit`.
+    const itemCaches = newItemCaches();
+    const appearanceTable = readAppearanceTable(vfs);
+    const column = speciesColumn(Object.keys(appearanceTable.values().next().value ?? {}), speciesId);
+    if (appearanceTable.size && !column) console.log(`   the appearance table has no column for ${speciesId}: every item is worn as its template says`);
+    const has = (p) => vfs.has(p);
+    const icons = !flags.has('--no-icons');
+    // The texture entries carry a reduced copy of their picture only while pictures are drawn.
+    wantThumbs = icons;
+    if (icons) mkdirSync(join(outDir, 'icons'), { recursive: true });
+    const seenIds = new Set();
+    const arrangementSlots = new Set();
+    let took = 0, tableMissing = 0, unconverted = 0, unseen = 0, duplicates = 0;
     let done = 0;
     for (const tpl of templates) {
       if (done >= limit) break;
       const id = basename(tpl).replace(/^shared_/, '').replace(/\.[^.]+$/, '');
       if (match && !match.test(tpl)) continue;
+      const kind = tpl.split('/')[2];
+      const desc = describeItem(vfs, tpl, id, itemCaches);
+      for (const alt of desc.slots ?? []) for (const slot of alt) arrangementSlots.add(slot);
+      const row = appearanceTable.get(`shared_${id}`) ?? null;
       try {
         let satPath = resolveTemplateString(vfs, tpl, ['appearanceFilename'], new Map());
         if (!satPath) throw new Error('no appearance in its template chain');
         satPath = satPath.replace(/\\/g, '/').replace(/^\//, '');
-        // A template names one gender's appearance; the client swaps the suffix for the other.
-        // Take the wearer's if it exists, and note when only the other was authored.
-        const wanted = satPath.replace(/_[fm](\.sat)$/i, `_${gender}$1`);
-        let usedOtherGender = false;
-        if (wanted !== satPath && vfs.has(wanted)) satPath = wanted;
-        else if (/_[fm]\.sat$/i.test(satPath) && !satPath.toLowerCase().endsWith(`_${gender}.sat`)) usedOtherGender = true;
-        if (!vfs.has(satPath)) throw new Error(`${satPath} not in archives`);
-        const sat = parseSat(readIff(vfs, satPath));
-        if (!sat.skeletons.some((k) => allowed.has(k.file.toLowerCase()))) throw new Error(`built for ${sat.skeletons.map((k) => basename(k.file)).join(', ') || 'no skeleton'}`);
-        const entries = [];
-        // The item's variables (a shirt's colour 1 and 2), noted per mesh as its shaders are read.
-        const info = { missing: [], skipped: [], customization: new Set(), variables: new Map(), textureRenderers: [], shaderNotes: new Set() };
-        for (const name of sat.meshes) {
-          const entry = convertWearableMesh(vfs, name, { skeleton, skin, outDir, ctx, info, recipes, recipeKeys, registry });
-          if (entry) entries.push(entry);
+        // The gender swap below, as the template alone would have had it: what "took the table's appearance" counts against.
+        const ownWanted = satPath.replace(/_[fm](\.sat)$/i, `_${gender}$1`);
+        const ownChoice = ownWanted !== satPath && vfs.has(ownWanted) ? ownWanted : satPath;
+        const wantIcon = icons && kind !== 'hair' && !seenIds.has(id);
+        // One appearance converted for this folder: the gender swap, the skeleton test, every mesh.
+        const wearFrom = (path) => {
+          let satPath = path;
+          // A template names one gender's appearance; the client swaps the suffix for the other.
+          // Take the wearer's if it exists, and note when only the other was authored.
+          const wanted = satPath.replace(/_[fm](\.sat)$/i, `_${gender}$1`);
+          let usedOtherGender = false;
+          if (wanted !== satPath && vfs.has(wanted)) satPath = wanted;
+          else if (/_[fm]\.sat$/i.test(satPath) && !satPath.toLowerCase().endsWith(`_${gender}.sat`)) usedOtherGender = true;
+          if (!vfs.has(satPath)) throw new Error(`${satPath} not in archives`);
+          const sat = parseSat(readIff(vfs, satPath));
+          if (!sat.skeletons.some((k) => allowed.has(k.file.toLowerCase()))) throw new Error(`built for ${sat.skeletons.map((k) => basename(k.file)).join(', ') || 'no skeleton'}`);
+          const entries = [];
+          // The item's variables (a shirt's colour 1 and 2), noted per mesh as its shaders are read.
+          const info = { missing: [], skipped: [], customization: new Set(), variables: new Map(), textureRenderers: [], shaderNotes: new Set() };
+          // Every mesh's groups and textures, for the picture; hair gets none (it is chosen on the Appearance tab).
+          const drawn = { groups: [], textures: new Map() };
+          const onMesh = wantIcon ? (_name, kept, textures) => {
+            drawn.groups.push(...kept);
+            for (const [shader, t] of textures) drawn.textures.set(shader, t);
+          } : undefined;
+          for (const name of sat.meshes) {
+            const entry = convertWearableMesh(vfs, name, { skeleton, skin, outDir, ctx, info, recipes, recipeKeys, registry, onMesh });
+            if (entry) entries.push(entry);
+          }
+          if (!entries.length) throw new Error('no mesh survived');
+          return { satPath, usedOtherGender, entries, info, drawn };
+        };
+        // The table's verdict for this folder's own column (items.mjs wardrobeChoice): a species' own cut wins over the
+        // template (the men's bracelets, the Ithorian pieces); a path the archives lack, or misspelt, is the template's
+        // own; a cut that will not convert (six Ithorian camouflage pieces whose meshes the archives hold stripped) is
+        // worn as the template names it; an item that cannot be built where the column says ':hide' is worn unseen.
+        const choice = wardrobeChoice(column ? row?.[column] : undefined, satPath, ownChoice, has, wearFrom);
+        if (choice.missing) tableMissing++;
+        if (choice.unseen) {
+          // Worn unseen: this species takes the item's slots and nothing is drawn (the Ithorians' 172, built for the
+          // humanoid skeleton), so the entry is written with no meshes rather than left out.
+          catalogue.push({ id, template: tpl, kind, sat: null, gender, name: desc.name, description: desc.description, slots: desc.slots, icon: null, fit: { hide: [speciesId] }, parts: [], variables: [] });
+          if (seenIds.has(id)) duplicates++;
+          seenIds.add(id);
+          unseen++;
+          done++;
+          continue;
         }
-        if (!entries.length) throw new Error('no mesh survived');
-        catalogue.push({ id, template: tpl, kind: tpl.split('/')[2], sat: satPath, gender: usedOtherGender ? (gender === 'm' ? 'f' : 'm') : gender, parts: entries, variables: customizationList(vfs, info) });
+        if (choice.error) throw choice.error;
+        const made = choice.made;
+        if (choice.fellBack) unconverted++;
+        // Counted against what the template alone gave: the table took over only where the mesh changed.
+        if (choice.took) took++;
+        const { entries, info, drawn, usedOtherGender } = made;
+        satPath = made.satPath;
+        // One picture per id: a repeated id (five templates are appearance_invisible_s01) keeps the first entry's.
+        let icon = null;
+        if (seenIds.has(id)) duplicates++;
+        else if (wantIcon) {
+          try {
+            const pic = renderThumbnail(iconMeshes(drawn.groups, drawn.textures), { view: 'wear' });
+            if (pic) {
+              writeFileSync(join(outDir, 'icons', `${id}.png`), encodePng(pic.width, pic.height, pic.rgba));
+              icon = `icons/${id}.png`;
+            }
+          } catch (err) {
+            console.log(`   ${id}: no picture (${err.message})`);
+          }
+        }
+        seenIds.add(id);
+        // The rest of the gender's species; this folder's own wears the entry's `sat`, whatever its cell names.
+        const fit = wardrobeFit(row, gender, satPath, has, speciesId);
+        catalogue.push({ id, template: tpl, kind, sat: satPath, gender: usedOtherGender ? (gender === 'm' ? 'f' : 'm') : gender, name: desc.name, description: desc.description, slots: desc.slots, icon, ...(fit ? { fit } : {}), parts: entries, variables: customizationList(vfs, info) });
         done++;
         if (done % 50 === 0) console.log(`  ${done} converted...`);
       } catch (err) {
@@ -2837,6 +2946,18 @@ switch (cmd) {
     const withMorphs = catalogue.filter((c) => c.parts.some((p) => p.morphs.length)).length;
     const otherGender = catalogue.filter((c) => c.gender !== gender).length;
     console.log(`   ${withMorphs} carry body-shape morphs; ${otherGender} exist only in the other gender's mesh`);
+    const counted = itemPackStatus(catalogue);
+    console.log(`   ${counted.named} named, ${counted.slotted} with slots, ${counted.iconed} icons, ${counted.fitted} with species rules, ${unseen} worn unseen, ${took} took the table's appearance (${tableMissing} of its paths missing, ${unconverted} would not convert), ${duplicates} repeated ids`);
+    // Slots the arrangements name that the player has not (a door or a strut in a file that is no garment).
+    try {
+      if (vfs.has(PLAYER_SLOTS)) {
+        const playerSlots = new Set(parseSlotDescriptor(parseIff(vfs.read(PLAYER_SLOTS))));
+        const foreign = [...arrangementSlots].filter((s) => !playerSlots.has(s)).sort();
+        if (foreign.length) console.log(`   slots the arrangements name that the player has not: ${foreign.join(', ')}`);
+      }
+    } catch (err) {
+      console.log(`   the player's slot descriptor did not read: ${err.message}`);
+    }
     if (failed.length) {
       // The reasons, most common first, so a bug that fails every item shows as one line rather than hiding behind the usual few.
       const reasons = new Map();
@@ -3022,6 +3143,12 @@ switch (cmd) {
     const outDir = join(pos[2], 'weapons');
     mkdirSync(outDir, { recursive: true });
     const { buildWeapons, WEAPON_CLASSES } = await import('./weapons.mjs');
+    // The backpack's names, descriptions, hands and pictures (items.mjs, thumbnail.mjs); --no-icons draws none, and
+    // then no texture entry carries the reduced copy the pictures are drawn from.
+    const itemCaches = newItemCaches();
+    const icons = !flags.has('--no-icons');
+    wantThumbs = icons;
+    if (icons) mkdirSync(join(outDir, 'icons'), { recursive: true });
     const { galleryTemplates } = await import('./gallery.mjs');
     const models = new Map();
     const cache = new Map();
@@ -3037,14 +3164,33 @@ switch (cmd) {
           const conv = convertOne(vfs, single ? r.parts[0].mesh : r.appearance, join(outDir, `${id}.glb`));
           const b = conv.mesh.bounds ?? { min: [0, 0, 0], max: [0, 0, 0] };
           const bounds = conv.flipX ? { min: [-b.max[0], b.min[1], b.min[2]], max: [-b.min[0], b.max[1], b.max[2]] } : b;
-          models.set(id, { id, file: `${id}.glb`, bounds, triangles: conv.tris, textured: conv.textured, shaders: conv.shaders.length, ...(conv.tris ? {} : { failed: 'no triangles' }) });
+          // The backpack's picture of the model, side on with its far end up and to the right.
+          let icon = null;
+          if (icons && conv.tris) {
+            try {
+              const textures = new Map();
+              for (const g of conv.mesh.groups) {
+                const t = textureFor(vfs, g.shader);
+                if (t) textures.set(g.shader, t);
+              }
+              // Drawn in the frame the GLB was written in (--no-flip keeps the client's own), never its mirror.
+              const pic = renderThumbnail(iconMeshes(conv.mesh.groups, textures), { view: 'weapon', flipX: conv.flipX });
+              if (pic) {
+                writeFileSync(join(outDir, 'icons', `${id}.png`), encodePng(pic.width, pic.height, pic.rgba));
+                icon = `icons/${id}.png`;
+              }
+            } catch (err) {
+              console.log(`   ${id}: no picture (${err.message})`);
+            }
+          }
+          models.set(id, { id, file: `${id}.glb`, bounds, triangles: conv.tris, textured: conv.textured, shaders: conv.shaders.length, icon, ...(conv.tris ? {} : { failed: 'no triangles' }) });
         } catch (err) {
           models.set(id, { id, failed: err.message });
         }
       }
       const def = models.get(id);
       if (!def || def.failed) return { skip: def?.failed ?? 'failed' };
-      return { model: id, file: def.file, bounds: def.bounds, blade: r.saber ?? null };
+      return { model: id, file: def.file, bounds: def.bounds, blade: r.saber ?? null, icon: def.icon ?? null };
     };
     // The client's weapon effects: each gun's template names a family (bolt, rocket, projectile_rifle,
     // ...) and an index into datatables/weapon/weapon.iff, whose row names the shot's particle
@@ -3103,7 +3249,7 @@ switch (cmd) {
       return out;
     };
     const limit = options.limit ? Number(options.limit) : Infinity;
-    const { weapons, skipped } = buildWeapons(galleryTemplates(vfs, 'object/weapon/'), { convert, fxFor }, { log: console.log, limit });
+    const { weapons, skipped } = buildWeapons(galleryTemplates(vfs, 'object/weapon/'), { convert, fxFor, describe: (template, id) => describeItem(vfs, template, id, itemCaches) }, { log: console.log, limit });
     // Effects the new gun types need beyond their own rows: the flame thrower's and the lightning rifle's beams, the lightning's muzzle.
     const effects = {};
     for (const [name, prt] of [['flame', 'appearance/pt_beam_flame_thrower.prt'], ['lightning', 'appearance/pt_beam_lightning.prt'], ['lightningMuzzle', 'appearance/pt_muzzle_lightning.prt'], ['acid', 'appearance/pt_beam_acid.prt'], ['ice', 'appearance/pt_beam_ice.prt']]) {
@@ -3121,7 +3267,7 @@ switch (cmd) {
     }
     const manifest = { classes: WEAPON_CLASSES, weapons, skipped, saberColors, effects };
     writeFileSync(join(outDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
-    console.log(`-> ${outDir}: ${weapons.length} weapons in ${models.size} models, ${skipped.length} left out (listed in manifest.json; I in game opens the rack, the Weapons tab); ${fxCache.size} weapon effect rows, ${particleCountFor(outDir)} particle effects`);
+    console.log(`-> ${outDir}: ${weapons.length} weapons in ${models.size} models, ${skipped.length} left out (listed in manifest.json; I in game opens the rack, the Weapons tab); ${fxCache.size} weapon effect rows, ${particleCountFor(outDir)} particle effects; ${weapons.filter((w) => w.name).length} named, ${weapons.filter((w) => w.icon).length} with icons`);
     const unknown = skipped.filter((s) => /unknown|melee kind/.test(s.why));
     if (unknown.length) console.log(`   kinds without a style yet:\n${unknown.map((s) => `     ${s.template}  (${s.why})`).join('\n')}`);
     printEffectSummary();

@@ -388,12 +388,12 @@ npm run swg -- clips-save assets-private/player/human_male.glb assets-private/pl
 npm run swg -- clips-apply assets-private/characters/human_male/rig.glb assets-private/player/jka.clips   #    carry the Jedi Academy clips onto the parts rig
 npm run swg -- species @SWG assets-private --retail-only                         # 6b. every playable species and gender as parts, with the character creator's index
 npm run swg -- loading @SWG assets-private --retail-only                         #    the game's own loading-screen pictures, one per planet (without them a planet is drawn from its sky colours); --list shows what the archives hold
-npm run swg -- wardrobe @SWG assets-private --retail-only                        # 7. every wearable and hairstyle, for the wardrobe on I (optional, long)
+npm run swg -- wardrobe @SWG assets-private --retail-only                        # 7. every wearable and hairstyle, with the game's names, body slots, species rules and a picture each, for the wardrobe on I (optional, long)
 npm run swg -- wardrobe @SWG assets-private --retail-only --gender=female        #    ... and the women's (wardrobe/human_female); every humanoid species of a gender shares it
-npm run swg -- wardrobe @SWG assets-private --retail-only --template=object/creature/player/shared_ithorian_male.iff                    #    the Ithorians have a skeleton of their own: their wardrobes (150 pieces each)
+npm run swg -- wardrobe @SWG assets-private --retail-only --template=object/creature/player/shared_ithorian_male.iff                    #    the Ithorians have a skeleton of their own: their wardrobes (about 520 pieces each, their own cuts included, 172 of them worn unseen)
 npm run swg -- wardrobe @SWG assets-private --retail-only --template=object/creature/player/shared_ithorian_female.iff --gender=female  #    (run `species` again after, so the index names them)
 npm run swg -- mobiles @SWG assets-private --retail-only                         # 7b. every creature, droid and NPC for the spawner (B, the NPCs tab): models, shared animation packs, names, stats and the NPCs' outfits; after wardrobe and species (about 5 minutes and 1 GB; add --skip-existing to resume a run that stopped)
-npm run swg -- weapons @SWG assets-private --retail-only                         #    every weapon, for the rack on B
+npm run swg -- weapons @SWG assets-private --retail-only                         #    every weapon, with its name, hands and picture, for the rack on B
 npm run swg -- ships @SWG assets-private --retail-only                           #    every player ship, with its interior, for the garage on G
 npm run swg -- space @SWG all assets-private --retail-only                        #    every space zone: stations, asteroid fields, planets and sky, for flying up from a planet
 npm run swg -- water @SWG all assets-private --retail-only                        #    each planet's own water: the colour, opacity, ripples and drift of every lake and sea, and each lava shader's look

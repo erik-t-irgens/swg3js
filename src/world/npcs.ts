@@ -43,10 +43,11 @@ const NOT_STREET = /_quest$|_npe$|_noob$|prison|slave/i;
  * feet always, a hat, gloves or a back piece now and then, each a random piece of the slot for
  * the species' gender. A Wookiee wears only the pieces made for Wookiees, and no one else wears those.
  */
-export function pickOutfit(items: { id: string; kind: string; gender: string }[], species: string): string[] {
+export function pickOutfit(items: { id: string; kind: string; gender: string; parts?: unknown[] }[], species: string): string[] {
   const wookiee = /^wookiee/i.test(species);
   const gender = /female/.test(species) ? 'f' : 'm';
-  const pool = items.filter((i) => i.kind !== 'hair' && i.gender === gender && WOOKIEE_ONLY.test(i.id) === wookiee && !NOT_STREET.test(i.id));
+  // A worn-unseen entry (no meshes: the Ithorians' :hide items) dresses nothing, so it is never picked.
+  const pool = items.filter((i) => i.kind !== 'hair' && i.gender === gender && (i.parts?.length ?? 1) > 0 && WOOKIEE_ONLY.test(i.id) === wookiee && !NOT_STREET.test(i.id));
   const bySlot = new Map<string, string[]>();
   for (const i of pool) (bySlot.get(slotOf(i.id)) ?? bySlot.set(slotOf(i.id), []).get(slotOf(i.id))!).push(i.id);
   const pick = (slot: string, chance: number) => {

@@ -74,7 +74,8 @@ export function weaponLength(bounds) {
 
 /**
  * Build the weapons pack: every weapon template sorted into a class, converted by `deps.convert`
- * (returns { model, file, bounds } or { skip }), the unplayable ones listed with why.
+ * (returns { model, file, bounds, icon? } or { skip }), the unplayable ones listed with why.
+ * `deps.describe(template, id)`, when given, answers { name, description, slots } (items.mjs).
  */
 export function buildWeapons(templates, deps, { log = () => {}, limit = Infinity } = {}) {
   const weapons = [];
@@ -94,6 +95,10 @@ export function buildWeapons(templates, deps, { log = () => {}, limit = Infinity
     // A weapon with a blade file is a lightsaber whatever folder it sits in (the named sabers under sword/ and polearm/).
     const cls = r.blade ? saberClassFor(template) : c.cls;
     const entry = { id: weaponLabel(template), template, class: cls, model: r.model, file: r.file, bounds: r.bounds, length: Number(weaponLength(r.bounds).toFixed(2)) };
+    // What the backpack shows: the game's own name and description, the hands its arrangement takes, and the picture.
+    const d = deps.describe?.(template, entry.id);
+    if (d) Object.assign(entry, { name: d.name, description: d.description, slots: d.slots });
+    if (r.icon !== undefined) entry.icon = r.icon;
     // A lightsaber: the blade the client draws from its hilt, and the light it casts.
     if (r.blade) entry.blade = { length: Number(r.blade.length.toFixed(3)), width: Number(r.blade.width.toFixed(3)), open: r.blade.open, close: r.blade.close, ...(r.blade.light ? { light: r.blade.light } : {}) };
     // A gun: the client's weapon effect (its family and index into the weapon table), with the shot, muzzle flash and hit effects converted.
