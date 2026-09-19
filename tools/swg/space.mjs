@@ -4,7 +4,8 @@
 // a seed and a style table naming the asteroid appearances with their likelihoods, or a spline
 // the field follows), and its sky from its terrain file (terrain/<zone>.trn: the skybox, the
 // lights, the star field, the dust, the star sprites, and the planets and moons in the picture
-// as PLAN forms, the planet appearance then eight floats). The pure parts live here, for the tests.
+// as PLAN forms, the planet appearance then eight floats and a byte; each body's radius is its
+// planet appearance's). The pure parts live here, for the tests.
 import { findAll, readCString } from './iff.mjs';
 
 /**
@@ -55,8 +56,15 @@ export function stationTemplate(name) {
 
 /**
  * The planets and moons a zone's terrain file draws: each PLAN form's chunk is the planet
- * appearance's path, then eight floats, read as a direction (the first three: where in the sky
- * it hangs, the client scaling it out to the sky's distance), three angles, a spare, and a size.
+ * appearance's path, then eight floats and a byte, the layout the ground's environment files give
+ * their planets too (sky.mjs): the body's place (x, y, z: where it hangs from the camera, in the
+ * same metres as its appearance's radius), three angles in degrees (its own turn), the halo's roll
+ * in degrees and the halo's scale, and a byte (0 on every retail body). The chunk holds no size:
+ * that is the planet appearance's radius (parsePlanetAppearance), seen from the place's distance
+ * (spaceBody). The eighth float, once read as a size, is the halo's scale in the ground reader's
+ * layout: it is 0 on all of Ord Mantell's bodies and on Kashyyyk's planet, which the old reading
+ * turned into size 0. It does not follow the appearance's HALO chunk (Dathomir and
+ * tatooine_moon_03 have none and a non-zero value there; Ord Mantell's haloed moon has 0).
  */
 export function parseSpacePlanets(root) {
   const out = [];
@@ -65,11 +73,86 @@ export function parseSpacePlanets(root) {
     if (!c) continue;
     const { value, next } = readCString(c.data, 0);
     const f = [];
-    for (let o = next; o + 4 <= c.data.length; o += 4) f.push(c.data.readFloatLE(o));
+    for (let o = next; o + 4 <= c.data.length && f.length < 8; o += 4) f.push(c.data.readFloatLE(o));
     if (!value || f.length < 8) continue;
-    out.push({ appearance: value.replace(/\\/g, '/'), direction: [f[0], f[1], f[2]], angles: [f[3], f[4], f[5]], size: f[7] });
+    const flag = next + 32 < c.data.length ? c.data[next + 32] : 0;
+    out.push({ appearance: value.replace(/\\/g, '/'), direction: [f[0], f[1], f[2]], angles: [f[3], f[4], f[5]], haloRoll: f[6], haloScale: f[7], flag });
   }
   return out;
+}
+
+/**
+ * A planet appearance (FORM PLNT > FORM 0000), the parts that size and paint it: SURF is a float
+ * (unresolved: 0.005 to 1.15, some negative, read as a spin), the surface shader, the body's radius
+ * (metres in the frame the terrain file's PLAN places it in: 390 for Tatooine, 1 to 4 for Ord
+ * Mantell's small moons) and four floats (unresolved); CLOD, when there is one, the same float, the
+ * cloud shader, the cloud shell's radius (a little over the surface's) and two floats (unresolved);
+ * HALO, when there is one, the halo shader and a float (read as its own scale; null if a chunk ever
+ * stopped after the shader, which none of the 15 retail HALO chunks does). INIT (two integers,
+ * read as the sphere's segments) is not needed. Null for anything else, or without a readable SURF.
+ */
+export function parsePlanetAppearance(root) {
+  if (!root || root.tag !== 'FORM' || root.type !== 'PLNT') return null;
+  const v = (root.children ?? []).find((c) => c.tag === 'FORM');
+  if (!v) return null;
+  const chunk = (tag) => v.children.find((c) => c.tag === tag)?.data ?? null;
+  const round = (x) => Math.round(x * 10000) / 10000;
+  const layer = (b) => {
+    if (!b || b.length < 5) return null;
+    const { value, next } = readCString(b, 4);
+    if (!value || next + 4 > b.length) return null;
+    return { shader: slashes(value), radius: round(b.readFloatLE(next)) };
+  };
+  const surface = layer(chunk('SURF'));
+  if (!surface) return null;
+  const halo = (() => {
+    const b = chunk('HALO');
+    if (!b) return null;
+    const { value, next } = readCString(b, 0);
+    return value ? { shader: slashes(value), scale: next + 4 <= b.length ? round(b.readFloatLE(next)) : null } : null;
+  })();
+  return { shader: surface.shader, radius: surface.radius, clouds: layer(chunk('CLOD')), halo };
+}
+
+/**
+ * What the game draws a space body with (src/world/world.ts): a body of size 1 is a sphere of this
+ * radius in metres (`radius`) hung this far out (`distance`), riding with the camera. The pack's
+ * `size` is in that unit. These two mirror world.ts's SPACE_BODY_SIZE and SPACE_BODY_DISTANCE, and
+ * the space test checks that they still agree.
+ */
+export const SPACE_BODY_FRAME = { distance: 2600, radius: 240 };
+
+/**
+ * Invented, not the client's: the size a body is given when its appearance is missing or names no
+ * radius (none of the retail zones' bodies). 1 is what every body was drawn at before the sizes were
+ * read, a disc about ten degrees across.
+ */
+export const INVENTED_BODY_SIZE = 1;
+
+/**
+ * One body's space.json entry from its PLAN (parseSpacePlanets) and its appearance
+ * (parsePlanetAppearance, or null): the place as `direction`, its `distance` from the camera, the
+ * appearance's `radius`, and `size`, the radius over the distance in the game's unit (SPACE_BODY_FRAME),
+ * so the body covers as much of the sky as the client's does wherever the game hangs it. `sizeFrom` is
+ * 'appearance', or 'invented' when there was no radius (INVENTED_BODY_SIZE). `halo` is the PLAN's roll
+ * and scale with the appearance's halo shader, or null when the appearance has no halo or the scale is 0.
+ */
+export function spaceBody(plan, look, texture = null) {
+  const r2 = (x) => Math.round(x * 100) / 100;
+  const distance = Math.hypot(...plan.direction);
+  const radius = look && Number.isFinite(look.radius) && look.radius > 0 ? look.radius : null;
+  const size = radius !== null && distance > 0 ? (radius / distance) * (SPACE_BODY_FRAME.distance / SPACE_BODY_FRAME.radius) : INVENTED_BODY_SIZE;
+  return {
+    appearance: plan.appearance,
+    direction: plan.direction.map(r2),
+    distance: r2(distance),
+    radius,
+    size: Math.round(size * 10000) / 10000,
+    sizeFrom: radius !== null && distance > 0 ? 'appearance' : 'invented',
+    angles: plan.angles.map(r2),
+    halo: look?.halo && plan.haloScale > 0 ? { shader: look.halo.shader, roll: r2(plan.haloRoll), scale: r2(plan.haloScale) } : null,
+    texture,
+  };
 }
 
 /**
@@ -584,6 +667,8 @@ export function spaceZoneStatus(zone, pack, objects) {
   const stations = pack.stations?.length ?? 0;
   const counts = `${stations} station${stations === 1 ? '' : 's'}${pack.scenery?.length ? `, ${pack.scenery.length} scenery` : ''}, ${objects ?? 0} objects`;
   if ((pack.version ?? 1) < SPACE_PACK_VERSION || !pack.hyperspace?.points) return { line: `${zone}: ${counts}, converted before hyperspace`, stale: true };
+  // A body with no `radius` at all (null is an appearance that names none) was sized from the halo's scale.
+  if ((pack.planets ?? []).some((p) => p && p.radius === undefined)) return { line: `${zone}: ${counts}, planets converted before their sizes were read`, stale: true };
   const points = pack.hyperspace.points;
   const by = (source) => points.filter((p) => p.source === source).length;
   const notes = [by('invented') && `${by('invented')} invented`, by('borrowed') && `${by('borrowed')} borrowed`].filter(Boolean);

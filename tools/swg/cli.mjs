@@ -1929,7 +1929,7 @@ function packStatus(dir) {
     console.log(`  ${s.line}`);
     if (s.stale) staleSpace.push(zone);
   }
-  if (staleSpace.length) need(`space <swg-dir> all ${dir} --retail-only`, `space zones missing or converted before hyperspace (${staleSpace.join(', ')})`);
+  if (staleSpace.length) need(`space <swg-dir> all ${dir} --retail-only`, `space zones missing, or converted before hyperspace or before the planets' sizes (${staleSpace.join(', ')})`);
   const mobiles = readQuiet(join(dir, 'mobiles/catalogue.json'));
   if (!mobiles) {
     console.log('  mobiles: none (the spawner has only the planet creatures)');
@@ -4589,7 +4589,7 @@ switch (cmd) {
     if (!pos[3]) usage();
     const vfs = mount(pos[1]);
     const {
-      stationTemplate, parseSpacePlanets, parseSpaceEnvironment, scatterField, parseHyperspaceScene, warpTimings, cleanText, cleanZoneTitle, stationStrings,
+      stationTemplate, parseSpacePlanets, parsePlanetAppearance, spaceBody, parseSpaceEnvironment, scatterField, parseHyperspaceScene, warpTimings, cleanText, cleanZoneTitle, stationStrings,
       INVENTED_FIELDS, INVENTED_SCENERY, hyperspacePoints, placeScenery, arrivalOf, stationApproachEnd, checkPointFrame, nearestObject,
     } = await import('./space.mjs');
     const zones = pos[2] === 'all' ? Object.keys(SPACE_ZONES).filter((z) => vfs.has(`terrain/${z}.trn`)) : [pos[2]];
@@ -4725,12 +4725,12 @@ switch (cmd) {
       const trnRoot = parseIff(vfs.read(`terrain/${zone}.trn`));
       for (const p of parseSpacePlanets(trnRoot)) {
         let texture = null;
+        let look = null;
         try {
           if (vfs.has(p.appearance)) {
-            // A planet appearance: its SURF chunk is a float then the surface shader.
-            const surf = find(parseIff(vfs.read(p.appearance)), 'SURF');
-            const shader = surf ? readCString(surf.data, 4).value.replace(/\\/g, '/') : null;
-            const t = shader ? textureFor(vfs, shader) : null;
+            // A planet appearance: its surface shader and its radius, the body's size (parsePlanetAppearance).
+            look = parsePlanetAppearance(parseIff(vfs.read(p.appearance)));
+            const t = look ? textureFor(vfs, look.shader) : null;
             if (t?.png) {
               texture = `space/${basename(p.appearance).replace(/\.pln$/i, '')}.png`;
               writeFileSync(join(outDir, texture), t.png);
@@ -4739,8 +4739,10 @@ switch (cmd) {
         } catch (err) {
           console.log(`  planet ${p.appearance}: ${err.message}`);
         }
-        planets.push({ appearance: p.appearance, direction: p.direction.map((v) => Math.round(v * 100) / 100), size: Math.round(p.size * 1000) / 1000, texture });
-        console.log(`  planet ${basename(p.appearance)}: toward ${p.direction.map((v) => v.toFixed(0)).join(', ')}, size ${p.size}${texture ? '' : ', no surface texture'}`);
+        const body = spaceBody(p, look, texture);
+        planets.push(body);
+        const inside = body.radius !== null && body.radius >= body.distance ? ', WARNING: the camera is inside it' : '';
+        console.log(`  planet ${basename(p.appearance)}: toward ${body.direction.map((v) => v.toFixed(0)).join(', ')}, ${body.radius === null ? 'no radius in its appearance' : `radius ${body.radius} at ${body.distance}`}, size ${body.size}${body.sizeFrom === 'invented' ? ' (invented)' : ''}${body.halo ? `, halo ${body.halo.scale}` : ''}${texture ? '' : ', no surface texture'}${inside}`);
       }
       const hyperspace = {
         points,
