@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { Character, type GripAxes } from './character';
+import { HeadHider, type HeadStatusRow } from './headHide.ts';
 
 export type RigState = 'idle' | 'walk' | 'run' | 'air' | 'seated' | 'swim' | 'float' | 'crouch' | 'crouchWalk' | 'crouchWalkBack' | 'stance' | 'strafeLeft' | 'strafeRight' | 'runBack' | 'walkBack' | 'runSaber' | 'walkSaber' | 'gunIdle' | 'gunWalk' | 'gunRun' | 'gunReadyIdle' | 'gunReadyWalk' | 'gunReadyRun' | 'gunAimIdle' | 'gunAimWalk' | 'gunAimRun' | 'kneel' | 'prone' | 'proneMove' | 'gunProneIdle' | 'gunProneMove' | 'gunProneReadyIdle' | 'gunProneReadyMove' | 'gunProneAimIdle' | 'gunProneAimMove';
 
@@ -293,6 +294,30 @@ export class CharacterRig {
 
   /** The parts this rig was assembled from, when it came from a parts pack. */
   character: Character | null = null;
+
+  /** First person on a model not assembled from parts; a parts character keeps its own. */
+  private headHider: HeadHider | null = null;
+
+  /** Work out, once, what first person hides: called for the local player's rig only (Player.attachRig). */
+  prepareHeadHiding(): void {
+    const head = this.boneFor('head');
+    if (this.character) this.character.prepareHead(head);
+    else this.headHider ??= HeadHider.forModel(this.root, head);
+  }
+
+  /** Out of the eyes: the head, hair and headwear draw into the shadows only. */
+  setHeadHidden(hidden: boolean): void {
+    if (this.character) this.character.setHeadHidden(hidden);
+    else {
+      if (hidden && !this.headHider) this.prepareHeadHiding();
+      this.headHider?.set(hidden);
+    }
+  }
+
+  /** What first person does with each worn part (or each mesh of a single model), for `__debug.fpHead()`. */
+  headStatus(): HeadStatusRow[] {
+    return this.character ? this.character.headStatus() : (this.headHider?.rows ?? []);
+  }
 
   /** Every bone name, for finding out what a converted skeleton calls things. */
   get boneNames(): string[] {

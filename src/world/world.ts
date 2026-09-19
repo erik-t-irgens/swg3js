@@ -31,6 +31,7 @@ import { LayoutStreamer, type Building, type CellState, type PlacedObject } from
 import { isLiftCell, liftStops, stopAt, type LiftStop } from './lifts';
 import type { SunInfo } from '../core/postfx';
 import { luminance, pointIrradiance } from '../core/fx/bladeGlowMath.ts';
+import { isShadowOnly } from '../core/fxRegistry.ts';
 import { addPointLight, fillCascades, luminanceOf, resetFxLights, setDirectional, type FxLights } from '../core/fx/lights';
 import { ParticleEffects } from './particles';
 import { CSM } from 'three/examples/jsm/csm/CSM.js';
@@ -1682,7 +1683,8 @@ export class World {
   /** Which passes draw an object: the world's, an interior's, or both for an actor. */
   private static passesOf(o: THREE.Object3D): number[] {
     const interior = o.layers.isEnabled(INTERIOR_LAYER);
-    const actor = o.layers.isEnabled(ACTOR_LAYER);
+    // What first person hides of the player is drawn in every pass once it is shown again: warmed for both.
+    const actor = o.layers.isEnabled(ACTOR_LAYER) || isShadowOnly(o.layers.mask);
     const world = o.layers.isEnabled(0);
     if (actor) return [0, INTERIOR_LAYER];
     if (interior && !world) return [INTERIOR_LAYER];

@@ -50,6 +50,8 @@ export class CharacterPreview {
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.shadowMap.enabled = false;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    // The doll shows everything worn, including what first person keeps on the shadow layer at the moment (a clone copies layers).
+    this.camera.layers.enableAll();
     this.scene.add(this.pivot);
     // Three-point lighting of its own, so a character looks the same at midnight as at noon.
     const key = new THREE.DirectionalLight(0xfff4e2, 2.6);

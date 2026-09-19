@@ -18,7 +18,7 @@
 // of the frame), and a mesh is drawn only after it passed the check on an earlier frame, since a
 // mesh three never projected has no buffers and drawing it would save a broken vertex array for good.
 import * as THREE from 'three';
-import type { FxProductId } from '../fxRegistry.ts';
+import { isShadowOnly, type FxProductId } from '../fxRegistry.ts';
 import type { FxFrameContext } from './context';
 import { FX_CAMERA, NO_PRODUCTS, type FxWarmItem } from './pass';
 import { GeometryProduct, geometryMaterialDefaults, type FxGeometryDrawer } from './geometry';
@@ -784,7 +784,8 @@ export class VelocityProduct extends GeometryProduct {
     }
     s.draws.length = s.drawCount;
     if (s.drawCount === 0) return;
-    if (import.meta.env.DEV && !rec.warned && !mesh.layers.isEnabled(ACTOR_LAYER)) {
+    // What first person keeps on the shadow layer (the player's head) is off the actor layer on purpose.
+    if (import.meta.env.DEV && !rec.warned && !mesh.layers.isEnabled(ACTOR_LAYER) && !isShadowOnly(mesh.layers.mask)) {
       rec.warned = true;
       console.warn(`velocity: ${mesh.name || mesh.type} under ${rec.name || rec.root.type} is not on the actor layer, so it is never drawn and blurs with the camera only`);
     }

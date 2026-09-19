@@ -9,6 +9,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { Customizer } from './customizer';
 import { markActor } from '../world/portalRender';
+import { HeadSplitView, SHADOW_ONLY_MASK, countSet, cullIndex, headBoneFlags, headRule, headTriangleFlags, partitionHead, splitsMesh, type HeadRule, type HeadStatusRow } from './headHide.ts';
 
 /** A mesh's occlusion data, as the converter carried it out of the mesh generator. */
 interface PartDef {
@@ -167,8 +168,19 @@ export interface Wardrobe {
   items: { id: string; kind: string; gender: string; template: string; parts: PartDef[] }[];
 }
 
-/** What is on or of the head: the head itself, hair, and headwear, hidden from a view out of the eyes. */
-const HEAD_PART = /head|hair|face|mouth|eye|beard|helmet|helm|hat\b|hood|mask|goggle|cap\b|visor|crown|tiara|headband|headdress/i;
+/** What first person does with one part, worked out once (Character.prepareHead) from its data and its skin. */
+interface PartHead {
+  rule: HeadRule;
+  why: string;
+  triangles: number;
+  headTriangles: number;
+  /** Each mesh's layers outside first person (the actor layer included). */
+  masks: number[];
+  /** Per mesh, the triangle in `fullIndices` its head starts at; the triangle count when it has none. */
+  headFrom: number[];
+  /** The split meshes' draw hooks; null for a mesh that is not split. */
+  views: (HeadSplitView | null)[];
+}
 
 /** One loaded part: its meshes, bound to the shared skeleton, and what it hides. */
 interface Part {
@@ -191,6 +203,10 @@ interface Part {
   layer: number;
   occludes: string[];
   body: boolean;
+  /** A catalogue item's kind and template (none for the pack's own parts), for what first person does with it. */
+  meta: { kind?: string; template?: string };
+  /** What first person does with it, once the character has been prepared (prepareHead); null before. */
+  head: PartHead | null;
 }
 
 export class Character {
@@ -313,7 +329,7 @@ export class Character {
     const key = item.id;
     const existing = this.parts.get(key);
     if (existing) existing.worn = true;
-    else await this.addPart(key, item.parts, true);
+    else await this.addPart(key, item.parts, true, { kind: item.kind, template: item.template });
     this.applyOcclusion();
     return true;
   }
@@ -345,8 +361,11 @@ export class Character {
     return true;
   }
 
-  /** Load every mesh of one thing -- an item or a base part -- and register it under `key`. */
-  private async addPart(key: string, defs: PartDef[], worn: boolean): Promise<void> {
+  /**
+   * Load every mesh of one thing -- an item or a base part -- and register it under `key`. `meta` is a
+   * catalogue item's kind and template (the pack's own parts have none; hair is known by its key).
+   */
+  private async addPart(key: string, defs: PartDef[], worn: boolean, meta: { kind?: string; template?: string } = {}): Promise<void> {
     const meshes: THREE.SkinnedMesh[] = [];
     const fullIndices: Uint32Array[] = [];
     const scenes: THREE.Object3D[] = [];
@@ -409,10 +428,112 @@ export class Character {
       layer: outer.occlusionLayer,
       occludes: outer.occludes ?? [],
       body: !!outer.body,
+      meta: { kind: meta.kind ?? (/^hair_/.test(key) ? 'hair' : undefined), template: meta.template },
+      head: null,
     });
+    // Put on after the character was prepared for first person: worked out now (after markActor
+    // above, so the masks it saves carry the actor layer).
+    if (this.headPrepared) this.prepareHeadOf(this.parts.get(key)!);
     // A part loaded after a colour changed takes the rendered texture too (once it is registered,
     // so its materials are found), and one that reads a chosen colour is rendered in it.
     this.customizer?.reapply();
+  }
+
+  /** First person: read by the split meshes' draw hooks, so it is an object they hold, not a field of this. */
+  private readonly fp = { hidden: false };
+  /** 1 for each bone of the shared skeleton that is the head or below it; set by prepareHead. */
+  private headFlags: Uint8Array | null = null;
+  private headPrepared = false;
+
+  /**
+   * Work out once which triangles are the head (the local player only: Player.attachRig, through the
+   * rig). Everything put on afterwards is worked out as it goes on. `head` is the rig's head bone; the
+   * skeleton's `Head` when null.
+   */
+  prepareHead(head: THREE.Bone | null): void {
+    if (this.headPrepared || !this.skeleton) return;
+    this.headPrepared = true;
+    const bone = head ?? this.skeleton.bones.find((b) => /^head$/i.test(b.name)) ?? null;
+    this.headFlags = headBoneFlags(this.skeleton.bones, bone);
+    for (const part of this.parts.values()) this.prepareHeadOf(part);
+    this.applyOcclusion();
+  }
+
+  /** What first person does with one part: the rule, and for a split one its index reordered with the head last. */
+  private prepareHeadOf(part: Part): void {
+    // A worn-unseen item (an empty part) draws nothing, so first person has nothing to hide of it.
+    if (part.meshes.length === 0) {
+      part.head = { rule: 'none', why: 'no meshes', triangles: 0, headTriangles: 0, masks: [], headFrom: [], views: [] };
+      return;
+    }
+    const inHead = this.headFlags!;
+    const perMesh: Uint8Array[] = [];
+    let triangles = 0;
+    let headTriangles = 0;
+    part.meshes.forEach((mesh, i) => {
+      const full = part.fullIndices[i];
+      const tris = full.length / 3;
+      const g = mesh.geometry;
+      const si = g.getAttribute('skinIndex');
+      const sw = g.getAttribute('skinWeight');
+      const flags = tris && si && sw ? headTriangleFlags(full, tris, si, sw, inHead) : new Uint8Array(tris);
+      perMesh.push(flags);
+      triangles += tris;
+      headTriangles += countSet(flags);
+    });
+    const { rule, why } = headRule({ kind: part.meta.kind, template: part.meta.template, body: part.body, defs: part.defs, triangles, headTriangles });
+    const head: PartHead = { rule, why, triangles, headTriangles, masks: part.meshes.map((m) => m.layers.mask), headFrom: [], views: [] };
+    part.meshes.forEach((mesh, i) => {
+      const full = part.fullIndices[i];
+      const flags = perMesh[i];
+      if (!splitsMesh(rule, countSet(flags), mesh.geometry.groups.length)) {
+        head.headFrom.push(full.length / 3);
+        head.views.push(null);
+        return;
+      }
+      const p = partitionHead(full, flags, readZones(mesh));
+      part.fullIndices[i] = p.index;
+      if (p.zones) mesh.geometry.userData.zones = p.zones;
+      mesh.geometry.setIndex(new THREE.BufferAttribute(p.index, 1));
+      head.headFrom.push(p.headFrom);
+      head.views.push(new HeadSplitView(mesh, this.fp));
+    });
+    part.head = head;
+  }
+
+  /** The whole-hidden parts' layers for the view out of the eyes or not; nothing else changes on a toggle. */
+  private applyHeadLayers(): void {
+    for (const part of this.parts.values()) {
+      const h = part.head;
+      if (h?.rule !== 'whole') continue;
+      part.meshes.forEach((m, i) => (m.layers.mask = this.fp.hidden ? SHADOW_ONLY_MASK : h.masks[i]));
+    }
+  }
+
+  /** What first person does with each worn part, for `__debug.fpHead()`. */
+  headStatus(): HeadStatusRow[] {
+    return [...this.parts.values()]
+      .filter((p) => p.worn)
+      .map((p) => ({
+        name: p.key,
+        rule: p.head?.rule ?? 'none',
+        why: p.head ? p.head.why : 'not prepared',
+        triangles: p.head?.triangles ?? 0,
+        headTriangles: p.head?.headTriangles ?? 0,
+        // A split part hides something only where a mesh of it was split.
+        hiddenNow: this.fp.hidden && !!p.head && (p.head.rule === 'whole' || p.head.views.some((v) => v !== null)),
+      }));
+  }
+
+  /**
+   * Out of the eyes: the head, the hair and anything worn on the head draw into the shadows only
+   * (headHide.ts). A toggle writes a few layer masks and nothing else: no re-cull, no allocation.
+   */
+  setHeadHidden(hidden: boolean): void {
+    if (this.fp.hidden === hidden) return;
+    this.fp.hidden = hidden;
+    if (hidden && !this.headPrepared) this.prepareHead(null);
+    this.applyHeadLayers();
   }
 
   /**
@@ -420,24 +541,11 @@ export class Character {
    * hides "chest" removes exactly the body triangles the mesh marked as chest -- the original
    * client's own scheme, applied per frame's worth of dressing rather than at conversion time.
    */
-  /** In first person the head and what sits on it are out of the picture; the body and its animation stay. */
-  private headHidden = false;
-
-  /** Hide or show the head, the hair and anything worn on the head, for a view from the eyes. */
-  setHeadHidden(hidden: boolean): void {
-    if (this.headHidden === hidden) return;
-    this.headHidden = hidden;
-    this.applyOcclusion();
-  }
-
-  private onHead(part: Part, mesh: THREE.Object3D): boolean {
-    return HEAD_PART.test(part.key) || HEAD_PART.test(mesh.name);
-  }
-
   private applyOcclusion(): void {
     this.customizer?.invalidate();
-    // What is on is visible to start with; culling below may then hide a whole mesh.
-    for (const part of this.parts.values()) for (const m of part.meshes) m.visible = part.worn && !(this.headHidden && this.onHead(part, m));
+    // What is on is visible to start with; culling below may then hide a whole mesh. Visibility is
+    // the wardrobe's alone: first person uses layers, so the shadow keeps the head.
+    for (const part of this.parts.values()) for (const m of part.meshes) m.visible = part.worn;
     // Outermost layers hide the zones of everything under them, and a layer's hiding only takes
     // effect below it -- two garments on the same layer do not cut holes in each other.
     const byLayer = [...this.parts.values()].filter((p) => p.worn).sort((a, b) => b.layer - a.layer);
@@ -453,6 +561,8 @@ export class Character {
       this.cull(part, hidden);
       for (const z of part.occludes) pending.add(z);
     }
+    // Last, over every part: what first person keeps on the shadow layer at the moment.
+    this.applyHeadLayers();
   }
 
   /** Drop the triangles of `part` whose zone combination is entirely covered. */
@@ -465,22 +575,27 @@ export class Character {
       const covered = combos.map((zones) => zones.length > 0 && zones.every((z) => hidden.has(z)));
       const whole = (def.fullyOccludedBy ?? []).length > 0 && def.fullyOccludedBy!.every((z) => hidden.has(z));
       const full = part.fullIndices[i];
+      // A mesh first person splits: its head triangles are last in `full`, from `headFrom` on.
+      const view = part.head?.views[i] ?? null;
+      const headFrom = part.head?.headFrom[i] ?? full.length / 3;
       if (whole) {
         mesh.visible = false;
         return;
       }
       const zones = (mesh.geometry.userData.zones ?? (mesh.geometry.userData.zones = readZones(mesh))) as number[] | null;
       if (!zones || !covered.some(Boolean)) {
-        if (mesh.geometry.getIndex()?.count !== full.length) mesh.geometry.setIndex(new THREE.BufferAttribute(full, 1));
+        // A split mesh's partitioned index has the loader's count in another order, so only identity
+        // says it is in place. Every other mesh keeps the count test: `fullIndices` is always a copy,
+        // and an identity test would swap every loader index for the copy on first use.
+        const idx = mesh.geometry.getIndex();
+        if (view ? idx?.array !== full : idx?.count !== full.length) mesh.geometry.setIndex(new THREE.BufferAttribute(full, 1));
+        if (view) view.count = headFrom * 3;
         return;
       }
-      const keep: number[] = [];
-      for (let t = 0; t < full.length / 3; t++) {
-        const c = zones[t];
-        if (c !== undefined && c >= 0 && covered[c]) continue;
-        keep.push(full[t * 3], full[t * 3 + 1], full[t * 3 + 2]);
-      }
-      mesh.geometry.setIndex(new THREE.BufferAttribute(Uint32Array.from(keep), 1));
+      // cullIndex keeps the order, so the head triangles still kept are still last.
+      const c = cullIndex(full, zones, covered, headFrom);
+      mesh.geometry.setIndex(new THREE.BufferAttribute(c.index, 1));
+      if (view) view.count = c.body * 3;
     });
   }
 
@@ -527,7 +642,7 @@ export class Character {
     // One entry per catalogue item, holding every mesh it contributes. Two items that happen to
     // share a mesh stay two items, each with its own copy, and neither can be mistaken for the other.
     if (existing) existing.worn = true;
-    else await this.addPart(id, item.parts, true);
+    else await this.addPart(id, item.parts, true, { kind: item.kind, template: item.template });
     this.applyOcclusion();
     return true;
   }
@@ -642,7 +757,7 @@ export class Character {
   }
 
   /** What is on, what is off, and what each part costs. */
-  status(): { name: string; meshNames: string[]; worn: boolean; body: boolean; layer: number; triangles: number; drawn: number }[] {
+  status(): { name: string; meshNames: string[]; worn: boolean; body: boolean; layer: number; triangles: number; drawn: number; fp: HeadRule | null }[] {
     return [...this.parts.values()].map((p) => ({
       name: p.key,
       meshNames: p.meshes.map((m) => m.name),
@@ -651,6 +766,7 @@ export class Character {
       layer: p.layer,
       triangles: p.defs.reduce((a, d) => a + (d.triangles ?? 0), 0),
       drawn: p.meshes.reduce((a, m) => a + (m.visible ? (m.geometry.getIndex()?.count ?? 0) / 3 : 0), 0),
+      fp: p.head?.rule ?? null,
     }));
   }
 }

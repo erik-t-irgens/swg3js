@@ -667,6 +667,8 @@ export class Player {
     rig.root.scale.setScalar(rig.scale);
     this.group.add(rig.root);
     markActor(rig.root);
+    // What first person hides, worked out now while the character loads (the masks saved include the actor layer just set).
+    rig.prepareHeadHiding();
     this.group.updateMatrixWorld(true);
     const hand = rig.boneFor('rightHand');
     const fore = rig.boneFor('rightForeArm');

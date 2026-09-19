@@ -159,6 +159,8 @@ class App {
   private readonly markNormal = new THREE.Vector3();
   /** Console: give the blades their pooled flash lights back while the glow pass is on, to compare. */
   private bladeGlowFlashes = false;
+  /** __debug.fpHead(true/false) holds the head hidden or shown whatever the camera; null follows it. */
+  private fpHeadForce: boolean | null = null;
   private kit!: Kit;
   private readonly hud: Hud;
   private readonly map: MapUi;
@@ -695,6 +697,11 @@ class App {
       },
       /** The wardrobe doll: what the last clone produced and how big its canvas is. */
       preview: () => this.wardrobe.previewState(),
+      /** First person's head: what each worn part does (whole, split, none) and why; `fpHead(true)` hides it from any camera to look at, `fpHead(null)` follows the camera again. */
+      fpHead: (force?: boolean | null) => {
+        if (force !== undefined) this.fpHeadForce = force;
+        return { firstPerson: this.cam.firstPerson, forced: this.fpHeadForce, parts: this.player.rig?.headStatus() ?? [] };
+      },
       /** The converted wardrobe: every wearable and hairstyle. `find` narrows by id or category. */
       closet: async (find?: string) => {
         const c = this.player.rig?.character;
@@ -3715,12 +3722,11 @@ class App {
         this.cam.camera.getWorldDirection(torchDir);
         this.torch.target.position.copy(this.cam.camera.position).addScaledVector(torchDir, 12);
       }
-      // First person from a parts character keeps the body in the picture, headless; a single model hides whole.
-      const parts = player.rig?.character;
-      if (parts) {
+      // Out of the eyes the body stays in the picture and the head, hair and headwear draw into the shadows only (headHide.ts).
+      if (player.rig) {
         player.group.visible = true;
-        parts.setHeadHidden(this.cam.firstPerson);
-      } else player.group.visible = !this.cam.firstPerson;
+        player.rig.setHeadHidden(this.fpHeadForce ?? this.cam.firstPerson);
+      } else player.group.visible = !this.cam.firstPerson; // the primitive placeholder body, before any rig
       // After the physics step and the camera: the falling weather around this frame's camera.
       this.world.updateWeatherView(dt);
       this.world.updateShadows(performance.now());

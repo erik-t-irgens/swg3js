@@ -12,6 +12,7 @@
 
 import * as THREE from 'three';
 import type { Building, CellState } from './layoutStream';
+import { isShadowOnly } from '../core/fxRegistry.ts';
 
 export const ACTOR_LAYER = 31;
 export const INTERIOR_LAYER = 1;
@@ -20,9 +21,14 @@ const MAX_BUILDINGS = 6;
 /** Doorways count as reaching this far above their polygon when deciding which side the camera is on. */
 const DOOR_HEADROOM = 4;
 
-/** Actors are visible from inside and outside alike. */
+/**
+ * Actors are visible from inside and outside alike; what first person has put on the shadow-only
+ * layer stays there, so nothing that prepares or marks the player brings the hidden head back into view.
+ */
 export function markActor(o: THREE.Object3D): void {
-  o.traverse((x) => x.layers.enable(ACTOR_LAYER));
+  o.traverse((x) => {
+    if (!isShadowOnly(x.layers.mask)) x.layers.enable(ACTOR_LAYER);
+  });
 }
 
 const tmpV = new THREE.Vector3();

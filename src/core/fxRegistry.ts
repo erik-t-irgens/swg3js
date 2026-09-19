@@ -285,8 +285,17 @@ export const FX_TYPICAL_CPU_MS = 0.9;
  * Camera layers an effect has claimed for itself, so no two claim the same one. 0 is the world,
  * 1 the rooms of a building and 31 the actors; 2 to 30 are free. This is the only place a layer is
  * named.
+ *
+ * `shadowOnly`: drawn into the shadow maps and in no view pass (the portal renderer's shadow camera
+ * sees every layer; its view passes see 0 or 1 plus 31): what first person hides of the player
+ * (`src/player/headHide.ts`).
  */
-export const FX_LAYERS = { heat: 30 } as const;
+export const FX_LAYERS = { heat: 30, shadowOnly: 29 } as const;
+
+/** A mask first person has put on the shadow-only layer: markActor leaves it, passesOf warms it as an actor's. */
+export function isShadowOnly(mask: number): boolean {
+  return (mask & (1 << FX_LAYERS.shadowOnly)) !== 0;
+}
 
 const DEFAULT_KEYS = new Set(Object.keys(FX_DEFAULTS));
 
