@@ -5,6 +5,8 @@
 // and airspeeders as aircraft) climb and sink on Space and Ctrl and hold their height over the ground.
 import * as THREE from 'three';
 import { cleanTrimesh, Group, groups, RAPIER, TRIMESH_FLAGS, type Physics } from '../core/physics';
+import { WING_RULE, WingSet, easeWing, wingTopFactor, wingsWanted } from './wings';
+import { hardpointName, partOf, underPivot } from './shipAssembly';
 
 /**
  * A vehicle's hull meets everything but the ground: the springs hold it off the terrain from
@@ -78,6 +80,19 @@ export interface VehicleSpec {
   inertia?: number;
   /** Where the rider sits, in the model's frame. */
   seat: [number, number, number];
+  /** The vehicle's own half-size for the chase camera and the boarding range when its bounds are wider than it (a ship framed on its hull, whose bounds reach its farthest wing either side). */
+  reach?: number;
+}
+
+/** A ship's gun: where it fires from and which way in the vehicle's frame at spawn, and the muzzle node it is read from live (a wing that turned carries it). */
+export interface ShipGun {
+  pos: THREE.Vector3;
+  dir: THREE.Vector3;
+  node?: THREE.Object3D;
+  /** The hardpoint the gun's part hangs on (weapon1_pos1), else its muzzle's own name. */
+  hardpoint?: string;
+  /** A turret's muzzle (fired along the nose, as the turrets do not turn). */
+  turret?: boolean;
 }
 
 /** The kind a vehicle is, from its name (the game's template or model name). Null when nothing fits. */
@@ -182,7 +197,14 @@ const AXIS_X = new THREE.Vector3(1, 0, 0);
 const AXIS_Y = new THREE.Vector3(0, 1, 0);
 const AXIS_Z = new THREE.Vector3(0, 0, 1);
 const torque = new THREE.Vector3();
-const wingTurn = new THREE.Matrix4();
+/** Scratch for the wings' colliders and the live muzzles: nothing is allocated per frame. */
+const noseTmp = new THREE.Vector3();
+const muzzleQ = new THREE.Quaternion();
+const wingInv = new THREE.Matrix4();
+const wingRel = new THREE.Matrix4();
+const wingP = new THREE.Vector3();
+const wingQ = new THREE.Quaternion();
+const wingS = new THREE.Vector3();
 const wantUp = new THREE.Vector3();
 const right = new THREE.Vector3();
 /** Velocity lost in one step past which a vehicle has hit something (m/s), and the hull taken per m/s beyond it. */
@@ -309,8 +331,8 @@ export class Vehicle {
   engineHeat = 0;
   /** The exhaust noise's flow phase, advanced with the plume's own flow (0..1). */
   enginePhase = Math.random();
-  /** A ship's guns: where each fires from and the way it points, in the model's frame, from the weapon hardpoints. */
-  guns: { pos: THREE.Vector3; dir: THREE.Vector3 }[] = [];
+  /** A ship's guns: each one's muzzle node (read live by `muzzle`), and where it fired from and the way it pointed at spawn, in the vehicle's frame. */
+  guns: ShipGun[] = [];
   /** Seconds until the guns can fire again, and which gun fires next. */
   gunCooldown = 0;
   gunNext = 0;
@@ -342,14 +364,32 @@ export class Vehicle {
   readonly colliderHandles: number[] = [];
   /** Damage taken from bolts since the game last looked (read once by the game, for the pilot's jolt). */
   struck = 0;
-  /**
-   * Wings that open: the game's fighters carry them as separate objects modelled in the hull's
-   * frame, turned about a hinge by an angle when the ship flies. Each keeps its node's resting
-   * matrix, the hinge's frame and its inverse, and how far and how fast it opens.
-   */
-  readonly wings: { node: THREE.Object3D; base: THREE.Matrix4; hinge: THREE.Matrix4; hingeInverse: THREE.Matrix4; angle: number; time: number }[] = [];
-  /** How far the wings are open, 0 closed to 1 open; open in flight, closed on the ground. */
-  wingsOpen = 0;
+  /** The wings that open, each on its own clock (the garage fills it). */
+  wings = new WingSet();
+  /** How open the wings are on average, for the console. */
+  get wingsOpen(): number {
+    return this.wings.progress;
+  }
+  /** The chassis's wing_open_speed_factor (0.95 on the X-wing, advanced X-wing, B-wing, V-wing; 1 elsewhere). */
+  wingOpenFactor = 1;
+  /** Metres the open wings reach below the closed belly (0 when under WING_DROP_MIN). */
+  wingDrop = 0;
+  /** Metres of air a planet must leave under the closed belly before the wings open: wingDrop + WING_TIP_ROOM, or 0. */
+  wingClearance = 0;
+  /** Metres from the closed belly to the ground this step (ships; set by flyShip every step). */
+  aboveGround = Infinity;
+  /** How far the wings hang below the closed belly now (their drop times how far they have swung). */
+  get wingBelow(): number {
+    return this.wingDrop * this.wings.reach;
+  }
+  /** Appearances shown only while boosting (a booster's ONOF). */
+  boosterParts: THREE.Object3D[] = [];
+  /** What the garage could not hang, for the console. */
+  unhung: string[] = [];
+  /** Hull colliders under a wing's pivot, moved with it. Must stay a field initialiser: hullColliders fills it from the constructor. */
+  private readonly movingPieces: { collider: RAPIER.Collider; mesh: THREE.Object3D }[] = [];
+  /** The model the constructor was given (the hull, with its parts hung on it), for the wings' report. */
+  private readonly hull: THREE.Object3D;
   /** Whether someone is in the hull's rooms; with a pilot at the controls, what clears the glass. */
   occupied = false;
   /**
@@ -364,6 +404,7 @@ export class Vehicle {
   drift = false;
 
   constructor(readonly spec: VehicleSpec, model: THREE.Object3D, physics: Physics, scene: THREE.Scene, x: number, y: number, z: number, heading: number) {
+    this.hull = model;
     this.group.add(model);
     // Whether it weathers is not marked here: the spawn kind can differ from the model's (the
     // garage's "as…"), and the material scan judges a shared material once for every copy, so the
@@ -401,7 +442,7 @@ export class Vehicle {
     const cy = (b.min[1] + b.max[1]) / 2;
     const cz = (b.min[2] + b.max[2]) / 2;
     this.centre = new THREE.Vector3(cx, cy, cz);
-    this.radius = Math.max(w, l) / 2;
+    this.radius = spec.reach ?? Math.max(w, l) / 2;
     // A box's inertia, on extents no smaller than a bike's, so a tiny or a mis-measured model
     // still turns like a vehicle rather than a top.
     const ew = fw;
@@ -448,27 +489,116 @@ export class Vehicle {
   }
 
   /**
-   * The wings open in flight and close on the ground, each turned about its hinge's Z by its
-   * angle over its time, the way the client turns the wing objects it hangs on the hull.
+   * The wings open in flight with room under them and close on the ground (the flight rule,
+   * `wingsWanted`, on last step's height), each turned about its own Z over its own time, the way
+   * the client turns the wing objects it hangs on the hull. Positional, nothing allocated.
    */
   private updateWings(dt: number): void {
     if (!this.wings.length) return;
-    const want = this.airborne ? 1 : 0;
-    if (this.wingsOpen === want && this.wingsSettled) return;
-    for (const w of this.wings) {
-      const rate = dt / Math.max(0.1, w.time);
-      this.wingsOpen += THREE.MathUtils.clamp(want - this.wingsOpen, -rate, rate);
-      wingTurn.makeRotationZ(w.angle * this.wingsOpen);
-      w.node.matrix.copy(w.hinge).multiply(wingTurn).multiply(w.hingeInverse).multiply(w.base);
-      w.node.matrixWorldNeedsUpdate = true;
-    }
-    this.wingsSettled = this.wingsOpen === want;
+    const w = this.wings;
+    w.want = wingsWanted(this.airborne, this.space, this.aboveGround, this.wingClearance, Math.abs(this.speed), this.spec.maxSpeed * (this.space ? 2 : 1), this.wingOpenFactor, w.want);
+    if (w.step(dt)) this.followWings();
   }
-  private wingsSettled = false;
+
+  /** The hull colliders under a wing's pivot, moved to where their meshes now stand in the vehicle's frame. */
+  private followWings(): void {
+    if (!this.movingPieces.length) return;
+    this.group.updateMatrixWorld(true);
+    wingInv.copy(this.group.matrixWorld).invert();
+    for (const p of this.movingPieces) {
+      wingRel.multiplyMatrices(wingInv, p.mesh.matrixWorld).decompose(wingP, wingQ, wingS);
+      p.collider.setTranslationWrtParent(wingP);
+      p.collider.setRotationWrtParent(wingQ);
+    }
+  }
+
+  /**
+   * Where a gun fires from and which way, in the world, now: its node's place and +Z (a wing that turned carries it),
+   * else its place from the spawn; a gun pointing away from the nose fires along it. Allocation-free; call after
+   * `group.updateMatrixWorld(true)`.
+   */
+  muzzle(g: ShipGun, outPos: THREE.Vector3, outDir: THREE.Vector3): THREE.Vector3 {
+    noseTmp.set(0, 0, 1).applyQuaternion(this.group.quaternion);
+    if (g.node) {
+      g.node.getWorldPosition(outPos);
+      outDir.set(0, 0, 1).applyQuaternion(g.node.getWorldQuaternion(muzzleQ));
+    } else {
+      outPos.copy(g.pos).applyMatrix4(this.group.matrixWorld);
+      outDir.copy(g.dir).applyQuaternion(this.group.quaternion);
+    }
+    outDir.normalize();
+    if (outDir.dot(noseTmp) < 0.5) outDir.copy(noseTmp);
+    return outPos;
+  }
+
+  /**
+   * The wings, their rule and their colliders, for the console (__debug.wings; allocates, console only): each wing's
+   * share open and angle now (the client's degrees) and the hull hardpoint its mount stands nearest; each moving
+   * collider's distance from its mesh, in the body's frame (`off`, 0.00 once followWings has run) and in the world
+   * (`world`: 0.00 parked; in flight the body leads the drawn group by up to a step); the guns and where each fires from now.
+   */
+  wingReport(): Record<string, unknown> {
+    const n2 = (n: number) => Number(n.toFixed(2));
+    const s = this.spec;
+    const model = this.hull;
+    this.group.updateMatrixWorld(true);
+    const hullPoints: { name: string; at: THREE.Vector3 }[] = [];
+    model.traverse((o) => {
+      const name = hardpointName(o);
+      if (name !== null && !partOf(o, model)) hullPoints.push({ name, at: o.getWorldPosition(new THREE.Vector3()) });
+    });
+    const wings = this.wings.list.map((w) => {
+      const mount = w.pivot.parent ?? w.pivot;
+      const at = mount.getWorldPosition(new THREE.Vector3());
+      let best: { name: string; d: number } | null = null;
+      for (const h of hullPoints) {
+        const d = h.at.distanceTo(at);
+        if (!best || d < best.d) best = { name: h.name, d };
+      }
+      return { file: w.label, open: n2(w.open), deg: n2(-THREE.MathUtils.radToDeg(w.angle) * easeWing(w.open)), stands: best ? `${best.name} (${best.d.toFixed(2)} m)` : 'no hull hardpoint' };
+    });
+    wingInv.copy(this.group.matrixWorld).invert();
+    const colliders = this.movingPieces.map((p) => {
+      wingRel.multiplyMatrices(wingInv, p.mesh.matrixWorld).decompose(wingP, wingQ, wingS);
+      const t = p.collider.translationWrtParent();
+      const off = t ? Math.hypot(t.x - wingP.x, t.y - wingP.y, t.z - wingP.z) : NaN;
+      // In the world as well: the collider where the body puts it against the mesh where the group draws it, which
+      // also catches a body and a group that disagree (`off` is only the last pose followWings gave it).
+      const w = p.collider.translation();
+      const mw = p.mesh.getWorldPosition(new THREE.Vector3());
+      return { mesh: p.mesh.name || p.mesh.parent?.name || 'unnamed', off: n2(off), world: n2(Math.hypot(w.x - mw.x, w.y - mw.y, w.z - mw.z)) };
+    });
+    const from = new THREE.Vector3();
+    const dir = new THREE.Vector3();
+    const guns = this.guns.map((g) => ({ hardpoint: g.hardpoint ?? null, turret: !!g.turret, at: this.muzzle(g, from, dir).toArray().map(n2) }));
+    const top = s.maxSpeed * (this.space ? 2 : 1);
+    return {
+      ship: s.id,
+      rule: WING_RULE.speed,
+      factor: this.wingOpenFactor,
+      topNow: n2(top * wingTopFactor(this.wingOpenFactor, this.wings.progress)),
+      drop: n2(this.wingDrop),
+      clearance: n2(this.wingClearance),
+      aboveGround: Number.isFinite(this.aboveGround) ? n2(this.aboveGround) : null,
+      below: n2(this.wingBelow),
+      speed: n2(Math.abs(this.speed)),
+      airborne: this.airborne,
+      want: this.wings.want,
+      target: this.wings.target,
+      forced: this.wings.force,
+      wings,
+      colliders,
+      guns,
+      unhung: this.unhung,
+    };
+  }
 
   /**
    * Trimesh colliders on the body from the model's meshes in the vehicle's frame: every mesh of a
-   * plain model, and of a portal building only the shell's (cell 0). Returns how many were made.
+   * plain model, and of a portal building only the shell's (cell 0), less those marked
+   * `noCollider` (the parts of a hull with more than PART_LIMIT). Built in the closed pose; a mesh
+   * under a wing's pivot is a moving piece that `followWings` moves with it, and the mass goes on
+   * the first piece that never moves. Returns how many were made.
    */
   private hullColliders(model: THREE.Object3D, world: RAPIER.World, mass: { m: number; inertia: THREE.Vector3; centre: { x: number; y: number; z: number } }): number {
     this.group.updateMatrixWorld(true);
@@ -478,15 +608,21 @@ export class Vehicle {
     const sc = new THREE.Vector3();
     let pieces = 0;
     let triangles = 0;
+    const meshes: { mesh: THREE.Mesh; moving: boolean }[] = [];
     model.traverse((o) => {
       const mesh = o as THREE.Mesh;
-      if (!mesh.isMesh || (mesh as THREE.SkinnedMesh).isSkinnedMesh || cellIndexOf(o) > 0) return;
+      if (!mesh.isMesh || (mesh as THREE.SkinnedMesh).isSkinnedMesh || cellIndexOf(o) > 0 || mesh.userData.noCollider) return;
+      meshes.push({ mesh, moving: underPivot(o, model) });
+    });
+    // Still pieces first (a stable sort), so the mass lands on one that never moves.
+    meshes.sort((a, b) => Number(a.moving) - Number(b.moving));
+    for (const { mesh, moving } of meshes) {
       const posAttr = mesh.geometry.getAttribute('position');
-      if (!posAttr || posAttr.count < 3 || posAttr.itemSize !== 3 || (posAttr as THREE.InterleavedBufferAttribute).isInterleavedBufferAttribute) return;
+      if (!posAttr || posAttr.count < 3 || posAttr.itemSize !== 3 || (posAttr as THREE.InterleavedBufferAttribute).isInterleavedBufferAttribute) continue;
       const idx = mesh.geometry.getIndex();
       const raw = idx ? new Uint32Array(idx.array as ArrayLike<number>) : Uint32Array.from({ length: posAttr.count - (posAttr.count % 3) }, (_, i) => i);
       const clean = cleanTrimesh(new Float32Array(posAttr.array as ArrayLike<number>), raw);
-      if (!clean) return;
+      if (!clean) continue;
       const indices = clean.indices;
       new THREE.Matrix4().copy(groupInverse).multiply(mesh.matrixWorld).decompose(p, q, sc);
       let vertices = clean.vertices;
@@ -501,15 +637,18 @@ export class Vehicle {
       }
       const desc = RAPIER.ColliderDesc.trimesh(vertices, indices, TRIMESH_FLAGS).setTranslation(p.x, p.y, p.z).setRotation({ x: q.x, y: q.y, z: q.z, w: q.w }).setFriction(0.4).setRestitution(0.1).setCollisionGroups(HULL_GROUPS);
       // The mass properties are in the collider's own frame: the box's centre, moved back into it.
+      // Only a hull made of nothing but wings would put them on a piece that moves.
       if (pieces === 0) {
         const c = new THREE.Vector3(mass.centre.x, mass.centre.y, mass.centre.z).sub(p).applyQuaternion(q.clone().invert());
         desc.setMassProperties(mass.m, { x: c.x, y: c.y, z: c.z }, { x: mass.inertia.x, y: mass.inertia.y, z: mass.inertia.z }, { x: 0, y: 0, z: 0, w: 1 });
       } else desc.setDensity(0);
-      this.colliderHandles.push(world.createCollider(desc, this.body).handle);
+      const collider = world.createCollider(desc, this.body);
+      this.colliderHandles.push(collider.handle);
+      if (moving) this.movingPieces.push({ collider, mesh });
       pieces++;
       triangles += indices.length / 3;
-    });
-    if (pieces) console.info(`${this.spec.id}: hull collision from ${pieces} meshes, ${triangles} triangles`);
+    }
+    if (pieces) console.info(`${this.spec.id}: hull collision from ${pieces} meshes${this.movingPieces.length ? ` (${this.movingPieces.length} riding the wings)` : ''}, ${triangles} triangles`);
     return pieces;
   }
 
@@ -519,6 +658,9 @@ export class Vehicle {
     this.cruise = speed;
     this.speed = speed;
     this.airborne = true;
+    // Arriving in flight, the wings already stand as the flight rule has them (the ground is not read yet: all the room in the world).
+    this.wings.snap(wingsWanted(true, this.space, Infinity, this.wingClearance, speed, this.spec.maxSpeed * (this.space ? 2 : 1), this.wingOpenFactor, false));
+    this.followWings();
     this.body.setGravityScale(0, true);
     this.quaternion(this.attitude);
     this.stick.set(0, 0);
@@ -859,6 +1001,10 @@ export class Vehicle {
     this.quaternion(q);
     const floor = Math.max(groundAt ? groundAt(this.pos.x, this.pos.z) : -Infinity, waterAt ? waterAt(this.pos.x, this.pos.z) : -Infinity);
     const h = this.pos.y - s.bounds.min[1] - floor;
+    // The wings' rule reads the closed belly's height; the ground easing and the slow hold read the
+    // lowest point of the wings as they hang now (`hw`). The crash and the landing stay on the belly.
+    this.aboveGround = h;
+    const hw = h - this.wingBelow;
     const throttle = drive?.throttle ?? 0;
     // Something solid was hit: the step took speed off the hull that the last frame commanded
     // (a building, an asteroid, a station). The hull bounces off with most of its speed gone
@@ -878,11 +1024,16 @@ export class Vehicle {
     }
     this.commandedValid = false;
     // Space has the room for twice the speed the ground shows.
-    const top = (drive?.boost ? s.boostSpeed : s.maxSpeed) * (this.space ? 2 : 1);
+    // With the wings open, a chassis with a wing_open_speed_factor pays it off the top (eased in as they open).
+    const top = (drive?.boost ? s.boostSpeed : s.maxSpeed) * (this.space ? 2 : 1) * wingTopFactor(this.wingOpenFactor, this.wings.progress);
     this.boosting = !!drive?.boost && throttle > 0;
     if (throttle > 0) this.cruise = Math.min(top, this.cruise + s.accel * dt);
     else if (throttle < 0) this.cruise = Math.max(0, this.cruise - s.brake * dt);
     else if (!drive) this.cruise = Math.max(0, this.cruise - s.brake * 0.5 * dt);
+    // Open wings cost their share of the top speed with W up as well (a ship launched at full speed, its wings then
+    // opening): a cruise between the open top and the closed one eases down at the brake. A coast above the closed
+    // top after a boost is left as it always was.
+    if (throttle === 0 && drive && !drive.boost && this.wingOpenFactor < 1 && this.cruise > top && this.cruise <= s.maxSpeed * (this.space ? 2 : 1)) this.cruise = Math.max(top, this.cruise - s.brake * dt);
     this.speed = this.cruise;
     const wasAirborne = this.airborne;
     this.airborne = this.cruise > 4 || (wasAirborne && h > s.fly!.floor + 1);
@@ -939,16 +1090,16 @@ export class Vehicle {
     // present course the nose is eased toward the horizon, gently and only while the stick is
     // slack, so a pilot who keeps pushing can fly into it; the ceiling is eased the same way.
     const minH = s.fly!.floor + 2;
-    let toGround = fwd.y < -0.02 ? h / (-fwd.y * Math.max(this.cruise, 1)) : Infinity;
+    let toGround = fwd.y < -0.02 ? hw / (-fwd.y * Math.max(this.cruise, 1)) : Infinity;
     // The ground ahead as well as below: a slope or a cliff on the course, within a couple of
     // seconds' flying, counts as ground coming up, so the nose is eased over it.
     if (!this.space && groundAt && this.cruise > 4) {
       const ahead = Math.min(2.5 * this.cruise, 200);
       const gAhead = groundAt(this.pos.x + fwd.x * ahead, this.pos.z + fwd.z * ahead);
-      const belly = this.pos.y + s.bounds.min[1] + fwd.y * ahead;
+      const belly = this.pos.y + s.bounds.min[1] - this.wingBelow + fwd.y * ahead;
       if (gAhead + minH > belly) toGround = Math.min(toGround, THREE.MathUtils.clamp(((belly - gAhead) / minH) * 2.5, 0, 2.5));
     }
-    const tooLow = !this.space && (h < minH || toGround < 2.5);
+    const tooLow = !this.space && (hw < minH || toGround < 2.5);
     const tooHigh = !this.space && h > s.fly!.ceiling;
     const slack = Math.abs(stick.y) < 0.15;
     if (((tooLow && fwd.y < 0.1) || (tooHigh && fwd.y > 0)) && slack) {
@@ -987,7 +1138,7 @@ export class Vehicle {
     a.normalize();
     tmp.copy(fwd).multiplyScalar(this.cruise);
     // Slow, the ship holds a few metres up; with the throttle off it settles down and lands.
-    if (this.cruise < 8) tmp.y += this.cruise < 2 ? -1.5 : THREE.MathUtils.clamp((minH - h) * 1.5, -2, 4);
+    if (this.cruise < 8) tmp.y += this.cruise < 2 ? -1.5 : THREE.MathUtils.clamp((minH - hw) * 1.5, -2, 4);
     if (h < s.fly!.floor + 0.5 && tmp.y < 0) tmp.y = 0;
     if (this.hitCooldown > 0) {
       // Just hit: the contacts have the hull for a moment; the attitude follows where they leave it.

@@ -10,7 +10,8 @@
 //                                                          and the weapons in hand { r, l } by id; sent on joining, on travel and on a change
 //   { t: 'state', p: [x, y, z], h, s, v, m, sab, q?, veh? }   position, heading, rig state, speed, mounted, saber lit,
 //                                                          the whole turn as a quaternion (aboard, adrift), the vehicle
-//                                                          ridden { id, p, q, role: ride|pilot|aboard, pose }
+//                                                          ridden { id, p, q, role: ride|pilot|aboard, pose, w }
+//                                                          (w: a winged ship's wings, 1 open or opening, 0 closed)
 //   { t: 'emote', clip }
 // Relay to client:
 //   { t: 'welcome', id, peers: [{ id, hello, state }] }
@@ -135,7 +136,7 @@ function onMessage(c, text) {
     if (veh && typeof veh === 'object' && typeof veh.id === 'string') {
       const vp = Array.isArray(veh.p) && veh.p.length === 3 ? veh.p.map(Number) : null;
       const vq = quat(veh.q);
-      if (vp && !vp.some((v) => !Number.isFinite(v)) && vq) c.state.veh = { id: veh.id.slice(0, 48), p: vp, q: vq, role: ['ride', 'pilot', 'aboard'].includes(veh.role) ? veh.role : 'ride', pose: typeof veh.pose === 'string' ? veh.pose.slice(0, 48) : undefined };
+      if (vp && !vp.some((v) => !Number.isFinite(v)) && vq) c.state.veh = { id: veh.id.slice(0, 48), p: vp, q: vq, role: ['ride', 'pilot', 'aboard'].includes(veh.role) ? veh.role : 'ride', pose: typeof veh.pose === 'string' ? veh.pose.slice(0, 48) : undefined, ...(veh.w === 0 || veh.w === 1 ? { w: veh.w } : {}) };
     }
     broadcast({ t: 'state', id: c.id, ...c.state }, c);
   } else if (msg.t === 'emote') {

@@ -72,6 +72,7 @@ import { danceOf, defaultEmotes, emoteChoices, FLOURISHES, isDanceClip, isFlouri
 import { loadSettings, type Settings } from './core/settings';
 import { deleteCharacter, loadCharacters, newCharacterId, upsertCharacter, type Appearance, type SavedCharacter } from './core/characters';
 import { FRAME_NUDGE, Garage, type VehicleDef } from './vehicles/garage';
+import { WING_RULE } from './vehicles/wings';
 import type { Vehicle, VehicleKind } from './vehicles/vehicle';
 import { HEAD_TO_EYE, SEATED_EYE_FALLBACK, cockpitYawStep, frameFileName, mirroredOffset } from './vehicles/cockpitSeat';
 import { World } from './world/world';
@@ -143,6 +144,9 @@ interface ShipCrossing {
 }
 const tmp2 = new THREE.Vector3();
 const boltFrom = new THREE.Vector3();
+/** A ship's shot: where it leaves and which way (bolts.fire and effects.flash copy what they are given). */
+const shotFrom = new THREE.Vector3();
+const shotDir = new THREE.Vector3();
 
 class App {
   private torch!: THREE.SpotLight;
@@ -1336,6 +1340,24 @@ class App {
         return `frame nudge ${FRAME_NUDGE.toArray().map((n) => n.toFixed(2)).join(', ')} (right, up, forward)`;
       },
       /**
+       * The wings of the ship ridden, piloted or aboard (else the nearest ship): `wings('open')` / `wings('closed')` holds
+       * them, `wings('auto')` gives them back to the flight rule, `wings('multiplier')` / `wings('threshold')` picks how
+       * every ship reads its chassis's speed factor. Returns the report: the rule, the top speed now, the drop and the
+       * clearance, each wing's share open and the hull hardpoint its mount stands on, each moving collider's distance from
+       * its mesh, the guns and what was left off.
+       */
+      wings: (mode?: 'open' | 'closed' | 'auto' | 'multiplier' | 'threshold') => {
+        const p = this.player;
+        const v = p.mounted ?? p.piloting ?? p.aboard?.vehicle ?? [...this.world.vehicles].filter((o) => o.spec.ship).sort((a, b) => a.pos.distanceTo(p.pos) - b.pos.distanceTo(p.pos))[0];
+        if (!v) return 'no ship: spawn one (spawn(\'xwing\')) or board one';
+        if (mode === 'open' || mode === 'closed') v.wings.force = mode;
+        else if (mode === 'auto') v.wings.force = null;
+        else if (mode === 'multiplier' || mode === 'threshold') WING_RULE.speed = mode;
+        else if (mode !== undefined) return `wings: '${String(mode)}' is none of open, closed, auto, multiplier, threshold`;
+        if (mode === 'open' && !v.airborne && v.wingDrop > 0) console.warn(`wings: forced open on the ground: they reach ${v.wingDrop.toFixed(1)} m under the belly and may stand in the terrain (the game never opens them there)`);
+        return v.wingReport();
+      },
+      /**
        * The cockpit of the ship ridden or piloted: where the eye is and where it came from, the seat under it, the body's lift
        * and how far the figure's eyes are from the camera, the view in use. `cockpit({ offset: false })` takes the cockpit
        * file's first-person offset off the view (true puts it back; the body stays), `cockpit({ bridgeHull: false })` hides
@@ -1764,6 +1786,8 @@ class App {
     // A peer's weapons come off the same rack, and anything of theirs is compiled before it shows.
     this.remotes.weapons = () => this.weapons;
     this.remotes.prepare = (root) => this.prepareRoot(root);
+    // A peer's ride is compiled before it shows, parts, glows and all (this.world was assigned in the constructor, long before).
+    this.remotes.prepareVehicle = (roots) => this.world.vehiclePrepare(roots);
     // A new mobile prototype: the motion blur's shaders for its morph counts, after the world's own preparation.
     MobileAssets.for(import.meta.env.BASE_URL).alsoPrepare = (root) => this.postfx?.product<VelocityProduct>('velocity')?.prepareRoots([root]) ?? Promise.resolve();
     this.net.onJoin = (peer) => this.remotes.add(peer.id, peer.hello);
@@ -2210,7 +2234,7 @@ class App {
     // The vehicle this player is on, so the others see it with them on it; and the figure's
     // whole turn where a heading is not enough (aboard a banked hull, adrift in space).
     const v = p.mounted ?? p.piloting ?? p.aboard?.vehicle ?? null;
-    const veh: PeerVehicle | undefined = v ? { id: v.def?.id ?? v.spec.id, p: [n2(v.pos.x), n2(v.pos.y), n2(v.pos.z)], q: v.quaternion(tmpQ).toArray().map(n3) as [number, number, number, number], role: p.mounted ? 'ride' : p.piloting ? 'pilot' : 'aboard', pose: v.riderPose ?? undefined } : undefined;
+    const veh: PeerVehicle | undefined = v ? { id: v.def?.id ?? v.spec.id, p: [n2(v.pos.x), n2(v.pos.y), n2(v.pos.z)], q: v.quaternion(tmpQ).toArray().map(n3) as [number, number, number, number], role: p.mounted ? 'ride' : p.piloting ? 'pilot' : 'aboard', pose: v.riderPose ?? undefined, ...(v.wings.length ? { w: v.wings.target ? 1 : 0 } as const : {}) } : undefined;
     const q = p.aboard || p.eva ? (p.group.quaternion.toArray().map(n3) as [number, number, number, number]) : undefined;
     this.net.sendState({ p: [n2(at.x), n2(at.y), n2(at.z)], h: n3(p.heading), s: p.mounted ? 'seated' : (rig?.describe().state ?? 'idle'), v: n2(Math.hypot(p.vel.x, p.vel.z)), m: !!p.mounted, sab: p.saberOn, q, veh });
   }
@@ -3077,8 +3101,9 @@ class App {
     pilot.gunNext++;
     pilot.gunCooldown = SHIP_GUN_INTERVAL / Math.max(1, Math.min(4, pilot.guns.length / 2));
     pilot.group.updateMatrixWorld(true);
-    const from = pilot.group.localToWorld(g.pos.clone());
-    const dir = g.dir.clone().applyQuaternion(pilot.group.quaternion).normalize();
+    // From the muzzle as it stands now (a gun on a wing fires from where the wing has turned it).
+    const from = pilot.muzzle(g, shotFrom, shotDir);
+    const dir = shotDir;
     // Led onto the target when it sits within the guns' cone: the lead is what the ship's frame
     // sees, so the bolt's own velocity (the muzzle's plus the ship's) meets the target there.
     if (this.shipLeadValid && Math.acos(THREE.MathUtils.clamp(this.shipAim.dot(nose), -1, 1)) < SHIP_GUN_CONE) dir.copy(this.shipAim);

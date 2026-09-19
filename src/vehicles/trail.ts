@@ -44,6 +44,9 @@ export class EngineTrail {
     this.mesh.receiveShadow = false;
     this.color.set(color);
     markActor(this.mesh);
+    // Its vertices are laid out in the world's own frame, not under the vehicle, and its layers are
+    // set here: the world's vehicle preparation compiles it without marking it again.
+    this.mesh.userData.worldPass = true;
     // The ribbon is laid out toward whichever camera draws it.
     this.mesh.onBeforeRender = (_r, _s, camera) => this.lay(camera);
   }

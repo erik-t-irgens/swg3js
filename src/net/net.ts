@@ -24,6 +24,8 @@ export interface PeerVehicle {
   role: 'ride' | 'pilot' | 'aboard';
   /** The riding pose's name, for the rider's clip. */
   pose?: string;
+  /** A ship with wings that open: 1 while the pilot's are open or opening, 0 while closed or closing. */
+  w?: 0 | 1;
 }
 
 export interface PeerState {

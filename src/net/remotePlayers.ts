@@ -6,6 +6,7 @@ import { markActor } from '../world/portalRender';
 import { isDanceClip, isFlourishClip, loopsEmote } from '../core/emotes';
 import type { Hello, PeerState, PeerVehicle } from './net';
 import type { Garage } from '../vehicles/garage';
+import type { WingSet } from '../vehicles/wings';
 import { applyLookPrepared } from '../player/look';
 import { weaponHolder, type WeaponCatalogue } from '../player/weapons';
 import type { FxMoverList } from '../core/fx/velocity';
@@ -22,6 +23,10 @@ interface RemoteVehicle {
   vel: THREE.Vector3;
   /** performance.now() of its last message; 0 before the first. */
   heardAt: number;
+  /** Its wings that open, once the picture is in (moved as the pilot's are); null before, or for a ride with none. */
+  wings: WingSet | null;
+  /** Whether the pilot's wings are open or opening: the relay's `w`, else (a peer on an older build) whether it is moving. */
+  wingsWant: boolean;
 }
 
 interface Remote {
@@ -73,6 +78,8 @@ export class RemotePlayers {
   weapons: (() => WeaponCatalogue | null) | null = null;
   /** Compile something of a peer's before it is shown (the world's actor preparation and the motion blur's). */
   prepare: ((root: THREE.Object3D) => Promise<void>) | null = null;
+  /** Compile a peer's ride before it is shown (the world's vehicle preparation); set by the game after construction, read when a ride arrives. */
+  prepareVehicle: ((roots: THREE.Object3D[]) => Promise<void>) | null = null;
 
   constructor(
     private readonly scene: THREE.Scene,
@@ -273,7 +280,7 @@ export class RemotePlayers {
     }
     if (!r.vehicle || r.vehicle.id !== veh.id) {
       this.dropVehicle(r);
-      const rv: RemoteVehicle = { id: veh.id, obj: null, target: new THREE.Vector3(veh.p[0], veh.p[1], veh.p[2]), targetQ: new THREE.Quaternion(veh.q[0], veh.q[1], veh.q[2], veh.q[3]), pose: veh.pose ?? null, vel: new THREE.Vector3(), heardAt: 0 };
+      const rv: RemoteVehicle = { id: veh.id, obj: null, target: new THREE.Vector3(veh.p[0], veh.p[1], veh.p[2]), targetQ: new THREE.Quaternion(veh.q[0], veh.q[1], veh.q[2], veh.q[3]), pose: veh.pose ?? null, vel: new THREE.Vector3(), heardAt: 0, wings: null, wingsWant: veh.w === 1 };
       r.vehicle = rv;
       void this.bringVehicle(r, rv);
     }
@@ -284,6 +291,8 @@ export class RemotePlayers {
     rv.target.set(veh.p[0], veh.p[1], veh.p[2]);
     rv.targetQ.set(veh.q[0], veh.q[1], veh.q[2], veh.q[3]).normalize();
     rv.pose = veh.pose ?? null;
+    // The pilot's wings as they send them; a peer on an older build sends none, and its wings open while it moves.
+    rv.wingsWant = veh.w !== undefined ? veh.w === 1 : rv.vel.length() > 4;
     if (rv.obj && rv.obj.position.y < -900) {
       rv.obj.position.copy(rv.target);
       rv.obj.quaternion.copy(rv.targetQ);
@@ -299,11 +308,17 @@ export class RemotePlayers {
         console.warn(`remote player ${r.hello.name} rides a ${rv.id} the garage does not know`);
         return;
       }
-      const obj = await g.visual(def);
+      // Prepared before it is shown, so the first sight of it compiles nothing.
+      const { holder: obj, wings } = await g.visualParts(def, { prepare: this.prepareVehicle ?? undefined });
       if (r.vehicle !== rv) return;
       obj.position.copy(rv.target);
       obj.quaternion.copy(rv.targetQ);
       obj.visible = r.group.visible;
+      // A ship first seen in flight arrives with its wings where they are, not closed and opening.
+      if (wings.length) {
+        wings.snap(rv.wingsWant);
+        rv.wings = wings;
+      }
       this.scene.add(obj);
       markActor(obj);
       rv.obj = obj;
@@ -367,6 +382,11 @@ export class RemotePlayers {
       if (rv?.obj) {
         rv.obj.position.lerp(rv.target, k);
         rv.obj.quaternion.slerp(rv.targetQ, k);
+        // The wings open and close as the pilot's do, each on its own clock (nothing moves once they have settled).
+        if (rv.wings) {
+          rv.wings.want = rv.wingsWant;
+          rv.wings.step(dt);
+        }
       }
       const rig = r.rig;
       if (rig) {

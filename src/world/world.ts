@@ -1604,31 +1604,78 @@ export class World {
   async prepareActor(root: THREE.Object3D): Promise<void> {
     markActor(root);
     this.adoptMaterials(root);
-    const textures = new Set<THREE.Texture>();
     root.traverse((o) => {
       const mesh = o as THREE.Mesh;
       if (!mesh.isMesh || !mesh.material) return;
       mesh.castShadow = true;
       mesh.receiveShadow = true;
       mesh.frustumCulled = false;
-      for (const m of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) {
-        for (const v of Object.values(m as unknown as Record<string, unknown>)) {
-          if (v && (v as THREE.Texture).isTexture) textures.add(v as THREE.Texture);
-        }
-      }
     });
-    const r = this.renderer;
-    if (r) {
-      // A few a frame, not one a frame: an upload is cheap next to a program compile, and a tab
-      // that has been hidden five minutes gets one chained timer a minute, so a body with a dozen
-      // textures would otherwise take a dozen minutes to be ready in a headless test.
-      let n = 0;
-      for (const t of textures) {
-        r.initTexture(t);
-        if (++n % TEXTURES_PER_YIELD === 0) await new Promise((resolve) => setTimeout(resolve, 0));
-      }
-    }
+    await this.uploadTextures([root]);
     await this.compileReady([root]);
+  }
+
+  /**
+   * Upload every texture the drawables under some roots use, a few per breath: an upload is cheap
+   * next to a program compile, so a body with a dozen textures is ready in a few short steps, and
+   * a hidden tab (a scripted check) is not held to one chained timer a minute (`breath`).
+   */
+  private async uploadTextures(roots: THREE.Object3D[]): Promise<void> {
+    const r = this.renderer;
+    if (!r) return;
+    const textures = new Set<THREE.Texture>();
+    for (const root of roots) {
+      root.traverse((o) => {
+        const mesh = o as THREE.Mesh;
+        if (!(mesh.isMesh || (o as THREE.Sprite).isSprite || (o as THREE.Points).isPoints || (o as THREE.Line).isLine) || !mesh.material) return;
+        for (const m of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) {
+          for (const v of Object.values(m as unknown as Record<string, unknown>)) {
+            if (v && (v as THREE.Texture).isTexture) textures.add(v as THREE.Texture);
+          }
+        }
+      });
+    }
+    let n = 0;
+    for (const t of textures) {
+      r.initTexture(t);
+      if (++n % TEXTURES_PER_YIELD === 0) await this.breath();
+    }
+  }
+
+  /**
+   * Make a vehicle ready to be shown without a stall (the garage calls it through `vehiclePrepare` before the vehicle
+   * exists): its materials join the portal stencil scheme and the shadow cascades, its textures are uploaded, and its
+   * programs are compiled a drawable at a time (the model with its parts and cockpit frame, the engine glows, the
+   * trails). Unlike `prepareActor` it leaves `castShadow`, `receiveShadow` and `frustumCulled` as the garage set them
+   * (a vehicle's glass casts no shadow, invisible panes stay hidden, the Star Destroyer's parts are culled), and it does
+   * not mark a root flagged `userData.worldPass` (a trail, which sets its own layers).
+   */
+  async prepareVehicle(roots: THREE.Object3D[]): Promise<void> {
+    for (const root of roots) {
+      if (!root.userData.worldPass) markActor(root);
+      this.adoptMaterials(root);
+    }
+    await this.uploadTextures(roots);
+    await this.compileReady(roots);
+  }
+
+  /** How a vehicle is prepared before it is shown: `prepareVehicle`, which the game may widen (the motion blur's own variants). Read at call time. */
+  vehiclePrepare: (roots: THREE.Object3D[]) => Promise<void> = (roots) => this.prepareVehicle(roots);
+
+  /** A yield between compile steps: a message to itself when the tab is hidden (never throttled), else a zero timer. */
+  private breath(): Promise<void> {
+    return new Promise<void>((resolve) => {
+      if (typeof document === 'undefined' || !document.hidden) {
+        setTimeout(resolve, 0);
+        return;
+      }
+      const ch = new MessageChannel();
+      ch.port1.onmessage = () => {
+        ch.port1.close();
+        resolve();
+      };
+      ch.port2.postMessage(0);
+    });
   }
 
   /**
@@ -1761,26 +1808,36 @@ export class World {
   }
 
   /**
-   * Compile some objects' shaders for every pass that draws them, one mesh at a time with a
-   * breath between, and resolve when they are ready to draw (a fighter dressed at run time).
-   * Making a program is work on the main thread even when its linking is left to the driver:
-   * a whole outfit at once was a four-second frame, a mesh at a time a few short ones.
+   * Compile some objects' shaders for every pass that draws them, one drawable at a time with a
+   * breath between, and resolve when they are ready to draw (a fighter dressed at run time, a
+   * vehicle with its glows and trails). Making a program is work on the main thread even when its
+   * linking is left to the driver: a whole outfit at once was a four-second frame, a mesh at a
+   * time a few short ones. Every drawable with a material counts (meshes, sprites, points,
+   * lines), as `compileAllAsync` walks them.
    */
   async compileReady(objects: THREE.Object3D[]): Promise<void> {
     const r = this.renderer;
     const camera = this.camera;
     if (!r || !camera) return;
     const meshes: THREE.Object3D[] = [];
-    for (const o of objects) o.traverse((m) => ((m as THREE.Mesh).isMesh ? meshes.push(m) : undefined));
+    for (const o of objects) {
+      o.traverse((m) => {
+        if (((m as THREE.Mesh).isMesh || (m as THREE.Sprite).isSprite || (m as THREE.Points).isPoints || (m as THREE.Line).isLine) && (m as THREE.Mesh).material) meshes.push(m);
+      });
+    }
     for (const m of meshes) {
       // The target is read for every mesh, so a switch part way through compiles the rest for the
       // path the game will actually draw.
       const target = this.compileTarget();
+      // A hidden tab compiles at once: compileAsync waits on the linking with a chained timer, which a
+      // hidden tab holds to one a second, then one a minute, and a hidden tab draws nothing to stall.
+      const hidden = typeof document !== 'undefined' && document.hidden;
       for (const layer of World.passesOf(m)) {
         const root = World.rootOf([m]);
-        await this.withLayers(camera, layer, () => this.withTarget(r, target, () => r.compileAsync(root, camera, this.scene).catch(() => {})));
+        if (hidden) this.withLayers(camera, layer, () => this.withTarget(r, target, () => r.compile(root, camera, this.scene)));
+        else await this.withLayers(camera, layer, () => this.withTarget(r, target, () => r.compileAsync(root, camera, this.scene).catch(() => {})));
       }
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await this.breath();
     }
   }
 
@@ -1905,7 +1962,14 @@ export class World {
     // In space, or arriving in the air, the vehicle stands exactly where it is asked to.
     const space = !!this.planet.space;
     const place = airborne || space ? (b: VehicleSpec['bounds']) => [at.x, at.y + b.min[1], at.z] as [number, number, number] : (b: VehicleSpec['bounds']) => this.clearGround(b, at, heading, def.source === 'creature');
-    const v = await this.garage.spawn(def, this.physics, this.scene, at.x, at.y, at.z, heading, kind, place);
+    // The world it was asked for: `load` makes a new Terrain for every planet or zone, so a travel during the
+    // model loads and the preparation shows as a different one, and the vehicle is not left in the next world.
+    const terrain = this.terrain;
+    const v = await this.garage.spawn(def, this.physics, this.scene, at.x, at.y, at.z, heading, kind, place, { prepare: (r) => this.vehiclePrepare(r) });
+    if (this.terrain !== terrain) {
+      v.dispose(this.physics, this.scene);
+      throw new Error(`garage: ${def.id}: the world changed while it was being made; not spawned`);
+    }
     v.space = space;
     markActor(v.group);
     // A mount's saddle is shown once its programs exist: prepareActor joins it to the portal scheme and
