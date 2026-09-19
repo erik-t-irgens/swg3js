@@ -305,6 +305,13 @@ export function buildGlb(meshes, { flipX = true, textures = new Map(), skin = nu
       if (j.parent >= 0) (nodes[jointNodeIndex[j.parent]].children ??= []).push(jointNodeIndex[i]);
       else rootNodes.push(jointNodeIndex[i]);
     });
+    // The skeleton's hardpoints (a mount's saddle), as hp:<name> nodes under their joints: no
+    // skin joint, no scene root, no channel's target, and after the joints so no index shifts.
+    for (const hp of skin.hardpoints ?? []) {
+      const r = hp.rotation;
+      nodes.push({ name: `hp:${hp.name}`, translation: [...hp.translation], rotation: [r[1], r[2], r[3], r[0]] });
+      (nodes[jointNodeIndex[hp.joint]].children ??= []).push(nodes.length - 1);
+    }
     const ibm = new Float32Array(skin.inverseBind.length * 16);
     skin.inverseBind.forEach((m, i) => ibm.set(m, i * 16));
     const skeletonRoot = skin.joints.findIndex((j) => j.parent < 0);

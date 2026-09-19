@@ -9,6 +9,7 @@ import { surfaces } from '../world/surfaces';
 import { cellIndexOf } from './interior';
 import { EngineTrail } from './trail';
 import { advanceEnginePhase, engineHeatOf } from './enginePlumes';
+import { planSeat, hangSaddle, type SaddleDef, type SeatPlan } from './saddle';
 
 export interface VehicleDef {
   id: string;
@@ -41,6 +42,8 @@ export interface VehicleDef {
   bounds?: VehicleSpec['bounds'];
   /** A creature's locomotion clip speeds, for its mixer. */
   clipSpeeds?: Record<string, number>;
+  /** A mount's saddle from the creatures pack: its model, the joint the creature's own hardpoint hangs it from, and its rider point. */
+  saddle?: SaddleDef | null;
 }
 
 export interface ShipWeapon {
@@ -102,9 +105,11 @@ export class Garage {
     try {
       const res = await fetch(`${baseUrl}assets-private/creatures/manifest.json`);
       if (res.ok && (res.headers.get('content-type') ?? '').includes('json')) {
-        const manifest = (await res.json()) as { creatures: { id: string; file: string; clipSpeeds?: Record<string, number>; bounds?: VehicleSpec['bounds']; riderPose?: string; mount?: boolean }[] };
+        type Saddle = { appearance: string; file: string | null; joint: string | null; from: string | null; player: [number, number, number] | null };
+        const manifest = (await res.json()) as { creatures: { id: string; file: string; clipSpeeds?: Record<string, number>; bounds?: VehicleSpec['bounds']; riderPose?: string; mount?: boolean; hardpoints?: string[]; saddle?: Saddle }[] };
         // The mounts the game sold (the saddle map's creatures) come first; the planets' other creatures can be ridden too, as a wild thing.
-        for (const c of manifest.creatures) g.vehicles.push({ id: c.id, label: `${c.id.replace(/_/g, ' ')} (${c.mount ? 'mount' : 'wild'})`, kind: 'ground', inferred: true, source: 'creature', file: `assets-private/${c.file}`, bounds: c.bounds, clipSpeeds: c.clipSpeeds, riderPose: c.riderPose ?? null });
+        // A mount's saddle is the one the mount tables name; a pack converted before saddles has none.
+        for (const c of manifest.creatures) g.vehicles.push({ id: c.id, label: `${c.id.replace(/_/g, ' ')} (${c.mount ? 'mount' : 'wild'})`, kind: 'ground', inferred: true, source: 'creature', file: `assets-private/${c.file}`, bounds: c.bounds, clipSpeeds: c.clipSpeeds, riderPose: c.riderPose ?? null, saddle: c.saddle ? { file: c.saddle.file ? `assets-private/${c.saddle.file}` : null, joint: c.saddle.joint ?? null, player: c.saddle.player ?? null } : null });
       }
     } catch (err) {
       console.warn('garage: no creatures', err);
@@ -226,9 +231,35 @@ export class Garage {
     return p;
   }
 
+  /** Saddle files that failed to load, so each is warned of once. */
+  private readonly saddleFailed = new Set<string>();
+
+  /**
+   * A copy of a mount's saddle model (loaded once per file, sharing its geometry and materials,
+   * on the actor layer and casting shadows; not a ship's, so rain wets the leather), or null when
+   * it does not load. Never throws.
+   */
+  private async saddleModel(file: string): Promise<THREE.Object3D | null> {
+    try {
+      return (await this.model({ file } as VehicleDef)).scene.clone();
+    } catch (err) {
+      if (!this.saddleFailed.has(file)) {
+        this.saddleFailed.add(file);
+        console.warn(`garage: the saddle ${file} did not load; its mounts are seated without it`, err);
+      }
+      return null;
+    }
+  }
+
+  /** A mount's saddle model, fetched beside the creature's own (null when it has none): it must be in hand before the vehicle is built. */
+  private saddleFor(def: VehicleDef): Promise<THREE.Object3D | null> {
+    return def.source === 'creature' && def.saddle?.file ? this.saddleModel(def.saddle.file) : Promise.resolve(null);
+  }
+
   /** Stand a vehicle on the ground at a point, facing a heading, and hand it back to drive. */
   async spawn(def: VehicleDef, physics: Physics, scene: THREE.Scene, x: number, y: number, z: number, heading: number, kind: VehicleKind = def.kind, place?: (bounds: VehicleSpec['bounds']) => [number, number, number]): Promise<Vehicle> {
-    const loaded = await this.model(def);
+    // A mount's saddle loads beside it, before the body exists: nothing may be awaited once it does.
+    const [loaded, saddle] = await Promise.all([this.model(def), this.saddleFor(def)]);
     // A skinned model (a creature, a walker, a pod racer built on a skeleton) needs a skeleton of
     // its own: a plain clone shares the loaded scene's bones, and its mesh then draws where that
     // scene stands, at the origin, however the vehicle moves.
@@ -240,7 +271,7 @@ export class Garage {
     const wings = await this.attachParts(def, model);
     const bounds = this.frameModel(def, model);
     const hardpoints: string[] = [];
-    return this.finishSpawn(def, model, wings, bounds, hardpoints, loaded.animations, physics, scene, x, y, z, heading, kind, place);
+    return this.finishSpawn(def, model, wings, bounds, hardpoints, loaded.animations, saddle, physics, scene, x, y, z, heading, kind, place);
   }
 
   /**
@@ -248,7 +279,7 @@ export class Garage {
    * its parts hung on it and framed as a spawned one is, its rooms hidden, with no physics.
    */
   async visual(def: VehicleDef): Promise<THREE.Object3D> {
-    const loaded = await this.model(def);
+    const [loaded, saddle] = await Promise.all([this.model(def), this.saddleFor(def)]);
     let skinned = false;
     loaded.scene.traverse((o) => {
       if ((o as THREE.SkinnedMesh).isSkinnedMesh) skinned = true;
@@ -264,6 +295,23 @@ export class Garage {
     // loaded (by the model's own kind), and another player's is held dry as well.
     if (def.kind === 'ship') holder.userData.weatherDry = true;
     holder.add(model);
+    if (def.source === 'creature') {
+      // Posed as it stands in its idle before anything is measured or hung (its rest pose can stand
+      // metres from it), so another player's mount wears its saddle where the rider's own does.
+      const idle = loaded.animations.find((a) => a.name === 'idle' || a.name === 'loop_stand:speed0') ?? loaded.animations[0];
+      if (idle) {
+        const mixer = new THREE.AnimationMixer(model);
+        mixer.clipAction(idle).play();
+        // Posed once; the mixer is dropped, not stopped (stopping would restore the rest pose).
+        mixer.update(0);
+      }
+      const hardpoints: string[] = [];
+      model.traverse((o) => {
+        const n = hardpointName(o);
+        if (n !== null) hardpoints.push(n);
+      });
+      hangSaddle(model, planSeat(hardpoints, def.saddle), saddle, findHardpoint, holder, null);
+    }
     return holder;
   }
 
@@ -350,7 +398,7 @@ export class Garage {
     return bounds ?? { min: [-0.5, 0, -1], max: [0.5, 1, 1] };
   }
 
-  private async finishSpawn(def: VehicleDef, model: THREE.Object3D, wings: Vehicle['wings'], bounds: VehicleSpec['bounds'], hardpoints: string[], animations: THREE.AnimationClip[], physics: Physics, scene: THREE.Scene, x: number, y: number, z: number, heading: number, kind: VehicleKind, place?: (bounds: VehicleSpec['bounds']) => [number, number, number]): Promise<Vehicle> {
+  private async finishSpawn(def: VehicleDef, model: THREE.Object3D, wings: Vehicle['wings'], bounds: VehicleSpec['bounds'], hardpoints: string[], animations: THREE.AnimationClip[], saddle: THREE.Object3D | null, physics: Physics, scene: THREE.Scene, x: number, y: number, z: number, heading: number, kind: VehicleKind, place?: (bounds: VehicleSpec['bounds']) => [number, number, number]): Promise<Vehicle> {
     // The guns: a gun part's own muzzle when it names one, else the weapon hardpoint it hangs on,
     // each firing the way its hardpoint points (forward, for a fixed gun).
     const guns: { muzzle: { pos: THREE.Vector3; dir: THREE.Vector3 }[]; mount: { pos: THREE.Vector3; dir: THREE.Vector3 }[] } = { muzzle: [], mount: [] };
@@ -425,6 +473,7 @@ export class Garage {
         frame = null;
       }
     }
+    // Nothing may be awaited in finishSpawn after this line: the body is live, falling and unsprung until the world adds the vehicle.
     const v = new Vehicle(spec, model, physics, scene, x, y - bounds.min[1] + spec.hover, z, heading);
     // A pilot's seat from the cockpit frame names where the pelvis goes; the pilot's chair pose
     // has its origin half a metre under it, which the game takes off when it seats the rider.
@@ -471,7 +520,7 @@ export class Garage {
     // The cockpit view: the model's own point when it names one, else the seated pilot's eyes over the seat (a hardpoint's, or the kind's own place, where the rider is drawn).
     if (spec.ship) v.cockpit = seat.cockpit ? [seat.cockpit.x, seat.cockpit.y, seat.cockpit.z] : [spec.seat[0], spec.seat[1] + SEATED_EYE, spec.seat[2]];
     if (def.source !== 'creature') collectPanes(v);
-    if (def.source === 'creature' && !animations.length) attachSeatToBack(v, model);
+    if (def.source === 'creature' && !animations.length) seatRider(def, v, model, hardpoints, saddle);
     if (animations.length) {
       // Its own idle, walk and run, picked by speed: an animal's, or a walker's from its animation table.
       const mixer = new THREE.AnimationMixer(model);
@@ -492,7 +541,7 @@ export class Garage {
           current.reset().setEffectiveWeight(1).play();
           mixer.update(0);
         }
-        attachSeatToBack(v, model);
+        seatRider(def, v, model, hardpoints, saddle);
       }
       v.onUpdate = (dt, self) => {
         const s = Math.abs(self.speed);
@@ -515,37 +564,35 @@ export class Garage {
 }
 
 /**
- * Hang a mount's seat on the bone of its skeleton nearest the saddle (a spine bone over the back),
- * keeping where the seat is, so the rider rises and sways with the animal's walk and run rather
- * than sitting still over a body that moves under them. A model with no skeleton keeps the fixed seat.
+ * Seat a mount's rider (synchronous, once the idle has posed the skeleton): the game's saddle on
+ * the creature's saddle hardpoint with the pelvis on the saddle's player point, the creature's own
+ * player point, a saddle on the back where the idle stands it, or a bare seat on the back
+ * (`hangSaddle`, src/vehicles/saddle.ts). The seat and saddle ride the skeleton, so the rider sways
+ * with the gait.
  */
-function attachSeatToBack(v: Vehicle, model: THREE.Object3D): void {
-  model.traverse((o) => {
-    const sm = o as THREE.SkinnedMesh;
-    if (sm.isSkinnedMesh) sm.skeleton.bones.forEach((b) => b.updateMatrixWorld(true));
-  });
-  v.group.updateMatrixWorld(true);
-  const seatAt = v.seat.getWorldPosition(new THREE.Vector3());
-  let best: THREE.Bone | null = null;
-  let bestD = Infinity;
-  const at = new THREE.Vector3();
-  model.traverse((o) => {
-    const bone = o as THREE.Bone;
-    if (!bone.isBone) return;
-    // The head, tail, legs and the root are not the back: a spine bone is, or failing a name, the nearest.
-    const name = bone.name.toLowerCase();
-    if (/head|neck|jaw|tail|leg|foot|toe|knee|thigh|calf|shin|ankle|ear|eye|tongue|wing|arm|hand|finger/.test(name)) return;
-    bone.getWorldPosition(at);
-    const d = at.distanceTo(seatAt) * (/spine|back|pelvis|hip|body|torso|chest/.test(name) ? 0.7 : 1);
-    if (d < bestD) {
-      bestD = d;
-      best = bone;
-    }
-  });
-  if (!best) return;
-  (best as THREE.Bone).attach(v.seat);
-  v.seatFollows = true;
-  console.info(`garage: ${v.spec.id}: the seat rides the ${(best as THREE.Bone).name} bone, ${bestD.toFixed(2)} m from the saddle`);
+function seatRider(def: VehicleDef, v: Vehicle, model: THREE.Object3D, hardpoints: string[], saddle: THREE.Object3D | null): void {
+  const plan = planSeat(hardpoints, def.saddle);
+  const hung = hangSaddle(model, plan, saddle, findHardpoint, v.group, v);
+  console.info(`garage: ${def.id}: ${describeSeat(v, hung, plan)}`);
+}
+
+/** What the log says of how a mount's rider was seated. */
+function describeSeat(v: Vehicle, hung: { node: THREE.Object3D; from: string } | null, plan: SeatPlan): string {
+  const boneOf = (o: THREE.Object3D | null | undefined) => o?.name || 'unnamed';
+  if (v.seatFrom === 'saddle' && hung) {
+    const where = `the saddle hangs on its ${boneOf(hung.node.parent)} joint (the game's hardpoint)`;
+    if (v.saddle) return `${where}; the rider's pelvis on the saddle's player point`;
+    return `${where}; ${plan.saddleFile ? 'its model did not load, so ' : 'no saddle model in the pack, so '}the rider's pelvis sits where the saddle's player point would be`;
+  }
+  if (v.seatFrom === 'rider') return "the rider's pelvis on its own player point";
+  if (v.seatFrom === 'guess' && hung) {
+    const bone = hung.node.parent;
+    const on = bone && (bone as THREE.Bone).isBone ? `hung on the ${boneOf(bone)} bone` : 'fixed to the body (no skeleton)';
+    if (v.saddle) return `a saddle on its back where the idle stands it (guessed), ${on}`;
+    return `a seat on its back where the idle stands it (guessed; ${plan.saddleFile ? 'its saddle model did not load' : 'no saddle model in the pack'}), ${on}`;
+  }
+  const bone = v.seat.parent;
+  return v.seatFollows && bone ? `the seat on its back where the idle stands it, on the ${boneOf(bone)} bone` : 'the seat on its back where the idle stands it, fixed to the body (no skeleton)';
 }
 
 /**

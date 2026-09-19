@@ -35,4 +35,5 @@ const luke = riderPoseFromTables('appearance/pv_landspeeder_luke.sat', 2, tables
 ok(luke?.pose === 'vehicle_landspeeder_passenger' && luke.seats === 2, 'the second seat of a two-seater is the passenger pose');
 ok(riderPoseFromTables('appearance/pv_landspeeder_luke.sat', 9, tables)?.pose === 'vehicle_landspeeder', 'a seat the table lacks falls back to the first');
 ok(riderPoseFromTables('appearance/unknown.sat', 1, tables) === null, 'an appearance outside the tables has no pose');
+ok(riderPoseFromTables('appearance/bantha.sat', 1, tables)?.sat === 'appearance/bantha_hue.sat', "the table's own listing comes back, for reading its hardpoints");
 console.log(`${checks} checks passed`);

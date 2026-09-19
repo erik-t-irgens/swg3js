@@ -105,6 +105,7 @@ import { effectAlpha, alphaModeFor } from './eff.mjs';
 import { MATERIAL_FORMAT, describeLines, describeSurface, surfaceCounts, surfaceCountsLine, surfaceLine, surfaceTexture } from './surface.mjs';
 import { localize, parseDatatable } from './datatable.mjs';
 import { mountCreatures, riderPoseFor } from './mounts.mjs';
+import { pickSaddleHardpoint, saddleEntry, saddleStatus, satHardpoints } from './saddles.mjs';
 import * as M from './mobiles.mjs';
 import * as MS from './mobilescan.mjs';
 import { finestLevelWithGeometry } from './lmglevel.mjs';
@@ -1109,7 +1110,7 @@ function skinnedTexture(vfs, shaderPath, slots, ctx, info, mesh = null) {
  * the game can dress and undress a character at run time rather than the converter deciding once.
  * `animations: false` reads no animation table at all, for a model whose clips live in a shared pack.
  */
-function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80, variables = new Map(), wear = [], extraClips = null, parts = null, gender = null } = {}) {
+function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80, variables = new Map(), wear = [], extraClips = null, parts = null, gender = null, hardpoints = false, extraHardpoints = [] } = {}) {
   let satPath = path.replace(/\\/g, '/');
   if (/\.iff$/i.test(satPath)) {
     const cache = new Map();
@@ -1207,7 +1208,10 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
   }
   // In parts mode nothing is hidden at conversion time: the zones travel with the mesh instead.
   const composed = parts ? loaded.map((l) => ({ ...l, hiddenTriangles: 0 })) : composeMeshes(loaded);
+  // The body's hardpoints (a mount's saddle, the basilisk's rider point), for `hardpoints`.
+  const bodyHardpoints = [];
   for (const { mgn, file, body, hiddenTriangles } of composed) {
+    if (hardpoints && body) bodyHardpoints.push(...(mgn.hardpoints ?? []));
     const { groups, unknownTransforms, unknownNames } = skinnedPrimitives(mgn, skeleton);
     info.unknownTransforms += unknownTransforms;
     for (const n of unknownNames) (info.unknownJoints ??= new Set()).add(n);
@@ -1386,7 +1390,23 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
       console.warn(`   ${cut.length} wanted clips left out by the --max-anims cap of ${maxAnimations}: ${cut.slice(0, 8).join(', ')}${cut.length > 8 ? ', ...' : ''}; raise --max-anims to keep them`);
     }
   } else if (latFile) info.missing.push(latFile);
-  const skin = skinData(skeleton, clips, { flipX: true });
+  // The body's hardpoints ride their joints as hp:<name> nodes; the mount tables' own appearance
+  // adds its saddle when this one lacks it (`extraHardpoints`). The first of a name wins.
+  const wantedHardpoints = [];
+  if (hardpoints) {
+    const seen = new Set();
+    for (const hp of [...bodyHardpoints, ...extraHardpoints]) {
+      const key = String(hp.name).toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      wantedHardpoints.push(hp);
+    }
+  }
+  const skin = skinData(skeleton, clips, { flipX: true, hardpoints: wantedHardpoints });
+  if (hardpoints) {
+    info.hardpoints = skin.hardpoints.map((h) => ({ name: h.name, joint: skin.joints[h.joint].name }));
+    for (const name of skin.droppedHardpoints) info.skipped.push(`hardpoint ${name}: its joint is not in the skeleton`);
+  }
   if (extraClips) {
     // Clips from elsewhere (Jedi Academy's), already retargeted onto this skeleton's joints.
     const extra = extraClips(skin.joints, info);
@@ -1718,6 +1738,11 @@ function packStatus(dir) {
     const missing = Object.keys(CREATURES).filter((id) => !have.has(id));
     console.log(`  creatures: ${have.size} (${[...have].join(', ')})${missing.length ? `; missing ${missing.join(', ')}` : ''}`);
     if (missing.length) need(`creatures <swg-dir> ${dir} --retail-only`, `creatures missing: ${missing.join(', ')}`);
+    // The mounts' saddles: hung on the creature's own saddle hardpoint, on the back where it is guessed, on its own rider point, or none in the tables.
+    const saddles = saddleStatus(creatures.creatures, (f) => existsSync(join(dir, f)));
+    console.log(`  saddles: ${saddles.onHardpoint} on the creature's own hardpoint, ${saddles.guessed} where the back is guessed, ${saddles.rider} on its own rider point, ${saddles.none} with none in the tables`);
+    if (saddles.stale.length) need(`creatures <swg-dir> ${dir} --retail-only`, 'the mounts carry no saddles: converted before saddles were');
+    if (saddles.missingFiles.length) need(`creatures <swg-dir> ${dir} --retail-only`, `saddle models missing: ${saddles.missingFiles.join(', ')}`);
   }
   const player = readJson(join(dir, 'player/manifest.json'));
   if (!player || !player.players?.length) {
@@ -2638,8 +2663,11 @@ switch (cmd) {
     const vfs = mount(pos[1]);
     // <swg-dir> <out-dir> [--no-mounts] [--match=bantha]: the planets' creatures, then every
     // creature the game's saddle map lists as mountable (the banthas, dewbacks, kaadu, cu pa,
-    // varactyls, tauntauns and the rest), each converted with the clips the game drives.
+    // varactyls, tauntauns and the rest), each converted with the clips the game drives and the
+    // hardpoints its body carries (a mount's saddle point, under its joint), and every saddle the
+    // mount tables name into <out-dir>/creatures/saddles/, once each.
     const outDir = join(pos[2], 'creatures');
+    const saddlesDone = new Map(); // saddle appearance (lower-cased) -> { file, player }
     mkdirSync(outDir, { recursive: true });
     const wanted = Object.entries(CREATURES).map(([id, template]) => ({ id, template, mount: false }));
     const mounts = flags.has('--no-mounts') ? [] : mountCreatures(vfs);
@@ -2660,11 +2688,48 @@ switch (cmd) {
       }
       const out = join(outDir, `${id}.glb`);
       try {
-        const info = convertSat(vfs, template, out, { animations: CREATURE_CLIPS });
-        // How a rider sits on it, from the mount tables (the saddle its body takes), for the riding clip.
-        const ride = info.sat ? riderPoseFor(vfs, info.sat) : null;
-        list.push({ id, file: `creatures/${id}.glb`, template, clips: info.animations, clipSpeeds: info.clipSpeeds ?? {}, bounds: info.bounds, ...(ride ? { riderPose: ride.pose } : {}), ...(mount ? { mount: true } : {}) });
-        console.log(`${id}: ${info.joints} joints, ${info.meshes.reduce((a, m) => a + m.triangles, 0)} tris, clips ${info.animations.join(', ')}${info.missing.length ? `, missing ${info.missing.length}` : ''}${ride ? `, ridden as ${ride.pose}` : ', not in the mount tables'}${mount ? ' (a mount)' : ''}`);
+        // How a rider sits on it, from the mount tables: the saddle its body takes, the riding clip's pose.
+        const satRaw = resolveTemplateString(vfs, template, ['appearanceFilename'], new Map());
+        const satPath = satRaw ? satRaw.replace(/\\/g, '/').replace(/^\//, '') : null;
+        const ride = satPath ? riderPoseFor(vfs, satPath) : null;
+        // Where its saddle hangs: its own mesh's saddle hardpoint, else the one the appearance the
+        // tables list carries (bantha_hue.sat for bantha.sat) when both are built on one skeleton.
+        let pick = null;
+        if (satPath && vfs.has(satPath)) {
+          const own = satHardpoints(vfs, satPath);
+          const listedSat = ride?.sat ? String(ride.sat).replace(/\\/g, '/').replace(/^\//, '') : null;
+          const listed = !own.hardpoints.some((h) => h.name.toLowerCase() === 'saddle') && listedSat && listedSat.toLowerCase() !== satPath.toLowerCase() && vfs.has(listedSat) ? satHardpoints(vfs, listedSat) : null;
+          pick = pickSaddleHardpoint({ own: own.hardpoints, ownSkeleton: own.skeleton, ownSat: satPath, listed: listed?.hardpoints ?? [], listedSkeleton: listed?.skeleton ?? '', listedSat });
+        }
+        const info = convertSat(vfs, template, out, { animations: CREATURE_CLIPS, hardpoints: true, extraHardpoints: pick && pick.from !== satPath ? [pick.hardpoint] : [] });
+        const hardpointNames = (info.hardpoints ?? []).map((h) => h.name);
+        const onJoint = (info.hardpoints ?? []).find((h) => h.name.toLowerCase() === 'saddle') ?? null;
+        // The saddle the tables name (an .apt; the basilisk's is its own .sat), converted once per run.
+        let saddle = null;
+        if (ride?.saddle && /\.apt$/i.test(ride.saddle)) {
+          const appearance = String(ride.saddle).replace(/\\/g, '/').replace(/^\//, '');
+          let conv = saddlesDone.get(appearance.toLowerCase());
+          if (!conv) {
+            conv = { file: null, player: null };
+            const name = basename(appearance).replace(/\.[^.]+$/, '');
+            if (!vfs.has(appearance)) console.warn(`${id}: its saddle ${appearance} is not in the archives`);
+            else {
+              try {
+                const r = convertOne(vfs, appearance, join(outDir, 'saddles', `${name}.glb`));
+                // Where the rider's pelvis goes, in the saddle's own frame (the game's space; saddleEntry mirrors it).
+                conv = { file: `creatures/saddles/${name}.glb`, player: r.mesh.hardpoints.find((h) => String(h.name).toLowerCase() === 'player')?.position ?? null };
+                console.log(`  saddle ${appearance}: ${r.tris} tris, ${conv.player ? `rider point ${conv.player.map((n) => n.toFixed(3)).join(', ')}` : 'NO RIDER POINT'}`);
+              } catch (err) {
+                console.warn(`${id}: its saddle ${appearance} did not convert: ${err.message}`);
+              }
+            }
+            saddlesDone.set(appearance.toLowerCase(), conv);
+          }
+          saddle = saddleEntry({ appearance, file: conv.file, player: conv.player, joint: onJoint?.joint ?? null, from: onJoint ? (pick?.from ?? info.sat) : null });
+        }
+        list.push({ id, file: `creatures/${id}.glb`, template, clips: info.animations, clipSpeeds: info.clipSpeeds ?? {}, bounds: info.bounds, ...(ride ? { riderPose: ride.pose } : {}), ...(mount ? { mount: true } : {}), hardpoints: hardpointNames, ...(saddle ? { saddle } : {}) });
+        const seated = saddle?.joint ? `, saddle on its ${saddle.joint} joint` : saddle ? ', saddle where the back is guessed' : hardpointNames.some((n) => n.toLowerCase() === 'player') ? ', rides its own player point' : '';
+        console.log(`${id}: ${info.joints} joints, ${info.meshes.reduce((a, m) => a + m.triangles, 0)} tris, clips ${info.animations.join(', ')}${info.missing.length ? `, missing ${info.missing.length}` : ''}${ride ? `, ridden as ${ride.pose}` : ', not in the mount tables'}${mount ? ' (a mount)' : ''}${seated}`);
       } catch (err) {
         console.warn(`${id}: ${err.message}`);
       }

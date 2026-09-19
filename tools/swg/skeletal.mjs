@@ -298,7 +298,22 @@ export function parseMgn(root) {
       textureRenderers.push({ file, slots });
     }
   }
-  return { version, maxTransformsPerVertex, maxTransformsPerShader, skeletons, transforms, positions, weightCounts, weightStart, weightTransform, weightValue, normals, shaders, blendTargetCount, blendTargets, occlusionZones, zoneCombinations, fullyOccludedBy, occludes, occlusionLayer, textureRenderers };
+  // Hardpoints riding the skeleton (a mount's saddle, the basilisk's rider): FORM HPTS holds a
+  // STAT chunk and a "DYN " one (tag with a trailing space), each an i16 count and then per
+  // hardpoint its name, its parent joint's name, a quaternion (w, x, y, z) and a position, both
+  // in that joint's frame. Every one in the retail archives parses to the byte this way.
+  const hardpoints = [];
+  const hpts = childOf(v, 'HPTS');
+  if (hpts && isForm(hpts)) {
+    for (const c of hpts.children) {
+      if (isForm(c) || (c.tag !== 'STAT' && c.tag !== 'DYN ')) continue;
+      const r = new R(c.data);
+      if (r.remaining < 2) continue;
+      const n = r.i16();
+      for (let i = 0; i < n && r.remaining > 0; i++) hardpoints.push({ name: r.str(), parent: r.str(), rotation: r.quat(), position: r.vec(), dynamic: c.tag === 'DYN ' });
+    }
+  }
+  return { version, maxTransformsPerVertex, maxTransformsPerShader, skeletons, transforms, positions, weightCounts, weightStart, weightTransform, weightValue, normals, shaders, blendTargetCount, blendTargets, occlusionZones, zoneCombinations, fullyOccludedBy, occludes, occlusionLayer, textureRenderers, hardpoints };
 }
 
 /**
@@ -789,7 +804,14 @@ export function closeLoop(clip, wrapFrame = 0) {
   return clip;
 }
 
-export function skinData(skeleton, animations, { flipX = true } = {}) {
+/**
+ * `hardpoints` (parseMgn's, name/parent/rotation/position in the parent joint's frame) come back
+ * as `hardpoints: [{ name, joint, rotation, translation }]` on their joint's index, mirrored
+ * exactly as the joints are (a mirror is its own inverse, so M(AB)M = (MAM)(MBM)), for buildGlb to
+ * write as hp:<name> nodes under that joint; one naming a joint the skeleton lacks is left out and
+ * named in `droppedHardpoints`. Without them both lists are empty and nothing else changes.
+ */
+export function skinData(skeleton, animations, { flipX = true, hardpoints = [] } = {}) {
   const bind = poseAtFrame(skeleton, null, 0);
   const joints = skeleton.joints.map((j, i) => ({ name: j.name, parent: j.parent, rotation: flipX ? mirrorQ(bind[i].rotation) : bind[i].rotation, translation: flipX ? mirrorT(bind[i].translation) : bind[i].translation }));
   const world = [];
@@ -822,7 +844,19 @@ export function skinData(skeleton, animations, { flipX = true } = {}) {
     if ((loop ?? LOOPING_CLIP.test(name)) && frames > 1) closeLoop(clip, 0);
     clips.push(clip);
   }
-  return { joints, inverseBind, clips };
+  const jointIndex = new Map(skeleton.joints.map((j, i) => [j.name.toLowerCase(), i]));
+  const skinHardpoints = [];
+  const droppedHardpoints = [];
+  for (const hp of hardpoints) {
+    const joint = jointIndex.get(String(hp.parent ?? '').toLowerCase());
+    if (joint === undefined) {
+      droppedHardpoints.push(hp.name);
+      continue;
+    }
+    const q = qnorm(hp.rotation);
+    skinHardpoints.push({ name: hp.name, joint, rotation: flipX ? mirrorQ(q) : q, translation: flipX ? mirrorT(hp.position) : [...hp.position] });
+  }
+  return { joints, inverseBind, clips, hardpoints: skinHardpoints, droppedHardpoints };
 }
 
 /** Vertex streams for one mesh generator's shader groups, as buildGlb primitives with skin data. */

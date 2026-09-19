@@ -21,7 +21,9 @@ export function riderPoseFromTables(satPath, seat, { logical, saddles, poses }) 
   const s = saddles.find((r) => norm(r.logical_saddle_name) === norm(l.logical_saddle_name));
   if (!s) return null;
   const p = poses.find((r) => norm(r.saddle_appearance_name) === norm(s.saddle_appearance_name) && Number(r.seat_index) === seat) ?? poses.find((r) => norm(r.saddle_appearance_name) === norm(s.saddle_appearance_name));
-  return p ? { pose: p.rider_pose, seats: Number(s.saddle_capacity) || 1, saddle: s.saddle_appearance_name } : null;
+  // `sat` is the table's own listing (bantha_hue.sat for a template's bantha.sat): the appearance
+  // whose meshes carry the saddle hardpoint when the plain one lacks it.
+  return p ? { pose: p.rider_pose, seats: Number(s.saddle_capacity) || 1, saddle: s.saddle_appearance_name, sat: l.sat_name } : null;
 }
 
 const cache = new WeakMap();

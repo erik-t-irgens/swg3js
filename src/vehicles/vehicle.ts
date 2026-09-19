@@ -322,6 +322,10 @@ export class Vehicle {
   seatPelvis = false;
   /** The seat rides a bone of the model's skeleton (an animal's back), so the rider moves with its gait; its world turn is then the rider's. */
   seatFollows = false;
+  /** A mount's saddle model, hung on the creature (hidden by the world until its shaders are ready). */
+  saddle: THREE.Object3D | null = null;
+  /** How the rider's seat was found (a creature's): its saddle hardpoint, its own rider point, a guessed saddle, or the back alone. */
+  seatFrom: import('./saddle').SeatFrom | null = null;
   /** The gun a ship fires, from the game's weapon table: its projectile (an index into the projectile table), speed and range in metres. */
   weapon: { name: string; projectile: number; speed: number; range: number } | null = null;
   /** The handles of the body's colliders, so a bolt's hit can be traced back to the vehicle. */

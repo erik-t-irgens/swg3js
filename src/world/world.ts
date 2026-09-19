@@ -1632,6 +1632,34 @@ export class World {
   }
 
   /**
+   * Show a mount's saddle once prepareActor has built it, and say how ready it was: how many of its
+   * materials had programs beforehand, and the program count across the first frame drawn with it
+   * (two nested animation frames, so at least one whole frame; a hidden tab draws none and logs nothing).
+   */
+  private revealSaddle(id: string, saddle: THREE.Object3D): void {
+    const r = this.renderer;
+    let ready = 0;
+    let total = 0;
+    saddle.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      if (!mesh.isMesh || !mesh.material) return;
+      for (const m of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) {
+        total++;
+        const programs = r && r.properties.has(m) ? (r.properties.get(m) as { programs?: Map<unknown, unknown> }).programs : undefined;
+        if ((programs?.size ?? 0) > 0) ready++;
+      }
+    });
+    const before = r?.info.programs?.length ?? 0;
+    saddle.visible = true;
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => {
+        const now = this.renderer?.info.programs?.length ?? 0;
+        console.info(`garage: ${id}: the saddle is shown, ${ready}/${total} of its materials built beforehand; programs ${before} -> ${now} over its first frame`);
+      }),
+    );
+  }
+
+  /**
    * A disposed material leaves the portal renderer's set and the cascades' map, both of which
    * are strong: the portal set is walked once per stencil change, about a dozen times a frame,
    * and the cascades' map is a leak that shows as a stutter when the shadow distance moves.
@@ -1880,6 +1908,16 @@ export class World {
     const v = await this.garage.spawn(def, this.physics, this.scene, at.x, at.y, at.z, heading, kind, place);
     v.space = space;
     markActor(v.group);
+    // A mount's saddle is shown once its programs exist: prepareActor joins it to the portal scheme and
+    // the cascades before any compile, uploads its textures and builds its programs a mesh at a time.
+    // Nothing else is needed: a static, unskinned, unmorphed mesh's motion-blur variant is one of the
+    // warm ones compiled at startup (velocityMath.ts WARM_VARIANTS), so npcDeps.compile is not called.
+    if (v.saddle) {
+      const saddle = v.saddle;
+      const id = v.spec.id;
+      saddle.visible = false;
+      void this.prepareActor(saddle).catch((err) => console.warn(`garage: ${id}: its saddle's warm-up failed; shown anyway`, err)).finally(() => this.revealSaddle(id, saddle));
+    }
     this.vehicles.push(v);
     // The ship's bolt and hit effects, played once far below the world, so the first shot finds
     // their shaders compiled rather than stalling the frame.
