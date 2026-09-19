@@ -14,26 +14,14 @@ import { RAPIER, type Physics } from '../core/physics';
 import type { DriveInput } from '../vehicles/vehicle';
 import { ShipContact, type ShipContacts } from './contacts';
 import { shipHostile } from './factions';
-import { aimPoint, formationPoint, slotCruise, steerToward, toLocal, type Stick } from './pilot';
+import { PILOT_SKILL, aimPoint, formationPoint, skillOfTier, skillStick, slotCruise, steerToward, toLocal, type PilotSkill, type Stick } from './pilot';
 import { targetable } from './shipCombat';
 import type { NpcShip } from './npcShips';
 
 export type BrainState = 'patrol' | 'formation' | 'engage' | 'breakoff' | 'evade' | 'flee' | 'return';
 
-/**
- * How well a tier flies and shoots (invented): seconds between target choices, the scatter of a shot and
- * the cone it fires within (degrees), the share of the full lead it takes, how near it lets a target come
- * before it breaks off (metres, over both hulls' radii), and the chance it jinks when shot from behind.
- */
-export const SKILL: Record<number, { reaction: number; scatterDeg: number; gunConeDeg: number; lead: number; breakRange: number; evadeChance: number }> = {
-  // The NPC's shot goes at its aim (as the player's guns lead within their 12 degrees), so the cone only says how far
-  // off the nose that aim may be for it to pull the trigger; the scatter and the lead are what make a tier miss.
-  1: { reaction: 0.9, scatterDeg: 1.6, gunConeDeg: 14, lead: 0.7, breakRange: 140, evadeChance: 0.2 },
-  2: { reaction: 0.7, scatterDeg: 1.3, gunConeDeg: 13, lead: 0.8, breakRange: 120, evadeChance: 0.3 },
-  3: { reaction: 0.5, scatterDeg: 1.0, gunConeDeg: 12, lead: 0.9, breakRange: 100, evadeChance: 0.45 },
-  4: { reaction: 0.35, scatterDeg: 0.8, gunConeDeg: 12, lead: 0.95, breakRange: 90, evadeChance: 0.6 },
-  5: { reaction: 0.25, scatterDeg: 0.6, gunConeDeg: 12, lead: 1, breakRange: 80, evadeChance: 0.75 },
-};
+/** How well a tier flies and shoots: invented, kept with the pilot's other numbers in pilot.ts (PILOT_SKILL). */
+export const SKILL = PILOT_SKILL;
 /** How far a pilot sees a ship it would attack (metres), in space and near a planet (invented). */
 export const DETECT = { space: 1500, planet: 800 };
 /** How far from its anchor (or where it was stood) a pilot chases before it turns back (invented). */
@@ -154,8 +142,10 @@ export class NpcBrain {
   readonly drive: DriveInput = { throttle: 0, steer: 0, heading: null, boost: false, hop: false, up: false, down: false, stickX: 0, stickY: 0, cruise: 0 };
   /** Shots fired, for the console. */
   shots = 0;
-  private readonly skill: (typeof SKILL)[number];
+  private readonly skill: PilotSkill;
+  /** The stick the pilot wants (steerToward's), and the one its hand holds (capped and eased by its skill). */
   private readonly stick: Stick = { x: 0, y: 0, roll: 0 };
+  private readonly held: Stick = { x: 0, y: 0, roll: 0 };
   private nextPick: number;
   private nextRay: number;
   private stateUntil = 0;
@@ -184,7 +174,7 @@ export class NpcBrain {
     private readonly ship: NpcShip,
     private readonly rng: () => number,
   ) {
-    this.skill = SKILL[Math.min(5, Math.max(1, Math.round(ship.type.tier)))] ?? SKILL[1];
+    this.skill = skillOfTier(ship.type.tier);
     // Staggered, so a group does not all choose and look on the same frame.
     this.nextPick = rng() * this.skill.reaction;
     this.nextRay = rng() * TUNE.rayEvery;
@@ -367,8 +357,10 @@ export class NpcBrain {
 
     // Always: an obstacle ahead, another ship too near, the ground too near.
     this.lookAhead(now, v, ctx);
-    if (now < this.avoidUntil) want.addScaledVector(this.avoid, 2).normalize();
-    this.keepApart(v, ctx);
+    // Any of these pulls is flown with the whole stick at once (skillStick's `urgent`), as before the tiers had a hand.
+    let urgent = now < this.avoidUntil;
+    if (urgent) want.addScaledVector(this.avoid, 2).normalize();
+    if (this.keepApart(v, ctx)) urgent = true;
     if (!space && ctx.groundAt) {
       const g = ctx.groundAt(pos.x, pos.z);
       const gAhead = ctx.groundAt(pos.x + vel.x * TUNE.rayAhead, pos.z + vel.z * TUNE.rayAhead);
@@ -376,6 +368,7 @@ export class NpcBrain {
       if (h < MIN_ALTITUDE) {
         want.y += 1 + (MIN_ALTITUDE - h) / MIN_ALTITUDE;
         want.normalize();
+        urgent = true;
       }
     }
 
@@ -384,18 +377,19 @@ export class NpcBrain {
     toLocal(attitude, want, local);
     const level = space ? null : toLocal(attitude, WORLD_UP, localUp);
     steerToward(local, TUNE.bankBeyond, level, this.stick);
+    // The hand: the tier's cap on the stick and how quickly it gets there (all of it at once while pulling away from something).
+    skillStick(this.stick, this.skill, dt, this.held, urgent);
     const canBoost = boost && !!combat && combat.boostLeft > 0;
     const cruise = canBoost ? Math.max(speed, top * 1.05) : Math.min(speed, top);
     const d = this.drive;
-    d.stickX = this.stick.x;
-    d.stickY = this.stick.y;
-    d.steer = this.stick.roll;
+    d.stickX = this.held.x;
+    d.stickY = this.held.y;
+    d.steer = this.held.roll;
     d.cruise = cruise;
     d.throttle = v.cruise < cruise - 1 ? 1 : 0;
     d.boost = canBoost;
 
     if (firing && target && ctx.mayFire) this.fire(target, targetDist, v, ctx);
-    void dt;
   }
 
   /** The target, chosen: who struck in the last 20 s (never its own side), the leader's, the nearest it would attack, or for a hand-stood hostile group the player's ship. */
@@ -494,10 +488,11 @@ export class NpcBrain {
   /**
    * Other ships: one within the separation distance is turned away from, and one on a collision course (its closest
    * approach within `collideSeconds`, nearer than the hulls and a margin) is dodged, away from where that approach is.
-   * Every ship's velocity is its nose times its speed, so nothing is asked of the physics.
+   * Every ship's velocity is its nose times its speed, so nothing is asked of the physics. Says whether it pulled at all.
    */
-  private keepApart(v: NpcShip['vehicle'], ctx: BrainContext): void {
+  private keepApart(v: NpcShip['vehicle'], ctx: BrainContext): boolean {
     const me = this.ship.contact;
+    let pulled = false;
     for (const c of ctx.ships.list) {
       if (c === me || c.vehicle.disposed) continue;
       const other = c.vehicle;
@@ -506,6 +501,7 @@ export class NpcBrain {
       if (d2 < gap * gap && d2 > 1e-6) {
         const d = Math.sqrt(d2);
         want.addScaledVector(tmp.copy(pos).sub(other.pos).divideScalar(d), 3 * (1 - d / gap)).normalize();
+        pulled = true;
       }
       if (d2 > TUNE.dodgeLook * TUNE.dodgeLook) continue;
       // The closest approach: its time from the relative motion, and how near it passes.
@@ -523,7 +519,9 @@ export class NpcBrain {
       if (miss < 1e-3) tmp.set(0, 1, 0).applyQuaternion(v.group.quaternion);
       else tmp.divideScalar(-miss);
       want.addScaledVector(tmp, 4 * (1 - miss / room)).normalize();
+      pulled = true;
     }
+    return pulled;
   }
 
   /** Within range and inside the gun cone of the aim: the next gun fires, scattered by the skill. */

@@ -6,7 +6,7 @@
 // nose toward -Y, down) and rolls at `steer` about +Z (steer > 0 takes +Y toward -X, the right wing down).
 //
 // Pure: no three, no rapier; node's tests import it straight from source. Every function fills an
-// `out` and allocates nothing.
+// `out` and allocates nothing. The tiers' skill lives here too, so the duel tests can fly it.
 import { interceptTime } from '../combat/intercept.ts';
 
 export interface V3 {
@@ -29,7 +29,82 @@ export interface Stick {
 /** How hard the stick answers an error (per radian), and how far a roll error rolls (invented). */
 export const STICK_GAIN = { yaw: 3, pitch: 3, roll: 2.5, level: 1.5 };
 
+/** How well an NPC tier flies and shoots. */
+export interface PilotSkill {
+  /** Seconds between target choices. */
+  reaction: number;
+  /** The scatter of a shot and the cone off the nose it fires within (degrees). */
+  scatterDeg: number;
+  gunConeDeg: number;
+  /** The share of the full lead it takes. */
+  lead: number;
+  /** How near it lets a target come before it breaks off (metres, over both hulls' radii). */
+  breakRange: number;
+  /** The chance it jinks when shot from behind. */
+  evadeChance: number;
+  /** The most of the stick it ever uses (0..1): a tier-1 pilot never pulls as hard as the ship can turn. */
+  stickMax: number;
+  /** Seconds its hand takes to move the stick from the middle to full on an axis (0: at once). */
+  response: number;
+}
+
+/**
+ * Every tier's skill, all INVENTED (the server flew the game's NPCs and none of it shipped). Kept together to be tuned,
+ * and live through `__debug.flight({ npc: { 1: { stickMax: 0.8 } } })`: each brain holds its tier's object, so a change
+ * reaches the pilots already flying. The shot goes at the pilot's aim (as the player's guns take the lead), so the cone
+ * only says how far off the nose that aim may be for it to pull the trigger; the scatter and the lead are what make a
+ * tier miss. The stick's cap and its response make a low tier turn wider and later than its hull could, so a player who
+ * keeps the cursor on it can out-turn it (the owner found them "incredibly good pilots" with neither).
+ */
+export const PILOT_SKILL: Record<number, PilotSkill> = {
+  1: { reaction: 0.9, scatterDeg: 2.4, gunConeDeg: 14, lead: 0.6, breakRange: 140, evadeChance: 0.2, stickMax: 0.7, response: 0.35 },
+  2: { reaction: 0.7, scatterDeg: 2.0, gunConeDeg: 13, lead: 0.7, breakRange: 120, evadeChance: 0.3, stickMax: 0.76, response: 0.3 },
+  3: { reaction: 0.5, scatterDeg: 1.6, gunConeDeg: 12, lead: 0.8, breakRange: 100, evadeChance: 0.45, stickMax: 0.82, response: 0.24 },
+  4: { reaction: 0.35, scatterDeg: 1.2, gunConeDeg: 12, lead: 0.88, breakRange: 90, evadeChance: 0.6, stickMax: 0.88, response: 0.18 },
+  5: { reaction: 0.25, scatterDeg: 0.9, gunConeDeg: 12, lead: 0.95, breakRange: 80, evadeChance: 0.75, stickMax: 0.94, response: 0.12 },
+};
+
+/** A tier's skill (clamped to 1..5, rounded). */
+export function skillOfTier(tier: number): PilotSkill {
+  return PILOT_SKILL[Math.min(5, Math.max(1, Math.round(tier)))] ?? PILOT_SKILL[1];
+}
+
 const clamp1 = (n: number): number => (n > 1 ? 1 : n < -1 ? -1 : n);
+
+/**
+ * The pilot's hand on the stick: `want` (steerToward's) capped to the skill's `stickMax`, and `held` (the stick as it
+ * stands, kept by the caller) moved toward that at no more than full travel in the skill's `response` seconds on each
+ * axis. Fills and returns `held`.
+ *
+ * The hand is a limit on how fast the stick moves, not a lag: a first-order lag inside the steering loop (steerToward's
+ * gain, flyShip's inertia) took the loop's phase margin to nothing, and a tier-1 pilot holding a heading swung 15 degrees
+ * either side of it for as long as it flew. A rate limit only slows the big moves, and the loop settles as it did.
+ *
+ * The cap is on the turn's whole reach, not each axis: steerToward fills yaw and pitch to 1 each, so a turn off both
+ * axes was 1.41 of the hull's rate. The player's stick was clamped per axis as well, so a diagonal was theirs too; capped
+ * by its length, a pilot's diagonal is no faster than its straight turn, as the player's cursor now is.
+ *
+ * `urgent` (pulling out of a collision or off the ground): the whole stick at once, uncapped, as every pilot flew before
+ * the tiers had a hand, so no tier flies into what it is avoiding any later than it did.
+ */
+export function skillStick(want: Stick, skill: PilotSkill, dt: number, held: Stick, urgent = false): Stick {
+  const x = clamp1(want.x);
+  const y = clamp1(want.y);
+  if (urgent) {
+    held.x = x;
+    held.y = y;
+    held.roll = clamp1(want.roll);
+    return held;
+  }
+  const cap = Math.max(0, Math.min(1, skill.stickMax));
+  const step = skill.response > 1e-4 ? dt / skill.response : Infinity;
+  const len = Math.hypot(x, y);
+  const s = len > cap && len > 0 ? cap / len : 1;
+  held.x += Math.max(-step, Math.min(step, x * s - held.x));
+  held.y += Math.max(-step, Math.min(step, y * s - held.y));
+  held.roll += Math.max(-step, Math.min(step, clamp1(want.roll) * cap - held.roll));
+  return held;
+}
 
 /** v rotated by the quaternion (x, y, z, w), or by its inverse with `sign` -1. */
 function rotate(q: Q4, sign: 1 | -1, v: V3, out: V3): V3 {
