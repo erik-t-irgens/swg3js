@@ -47,6 +47,8 @@ export interface JumpHull {
   setGhost(on: boolean): void;
   /** Whether the hull is ghosted now, as the hull itself says (`Vehicle.ghosted`), for `describe`. */
   readonly ghosted?: boolean;
+  /** Destroyed (`Vehicle.destroyed`): a destroyed ship cannot jump. */
+  readonly destroyed?: boolean;
   teleport(pos: THREE.Vector3, quaternion: THREE.Quaternion, speed: number): void;
   launch(speed: number): void;
   readonly justHit: number;
@@ -165,6 +167,7 @@ export class Hyperspace {
     if (!inSpace) return 'only in space';
     const ship = host.ship();
     if (!ship) return "the pilot's call";
+    if (ship.destroyed) return 'the ship is destroyed';
     if (this.phase !== 'idle') return 'already jumping';
     const pack = this.packOf(dest.zone);
     if (!pack || (pack.version ?? 1) < 2 || !pack.hyperspace) return 'convert the space zones again: npm run swg -- space @SWG all assets-private --retail-only';

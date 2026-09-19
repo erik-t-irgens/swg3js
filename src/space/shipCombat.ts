@@ -14,8 +14,13 @@ import { NOBODY, PLAYER_KEY, type Living } from '../combat/kit.ts';
 import type { Bolt } from '../combat/bolts';
 import type { CombatFile, CombatLayer, HullFx } from './combatData.ts';
 import type { ShipContact } from './contacts';
-import { applyCollision, applyHit, createCondition, isDown, newHitResult, regenerate, rescaleCondition, type HitResult, type ShipCondition } from './shipDamage.ts';
+import { applyCollision, applyHit, applyShares, createCondition, isDown, newHitResult, regenerate, rescaleCondition, sharesOf, type ConditionShares, type HitResult, type ShipCondition } from './shipDamage.ts';
 import { CLASS_BASE, COLLISION_BOUT, COLLISION_CAP_SHARE, statsFor, type Handling, type ShipStats, type StatInput, type WeaponStat } from './shipStats.ts';
+
+/** What a zone crossing carries of a ship's fight onto the hull spawned on the other side: its condition's shares and its boost's. */
+export interface CarriedCondition extends ConditionShares {
+  boost: number;
+}
 
 /**
  * Whether a ship may be picked, followed or fired at: alive, and not in a jump (a ghosted hull's
@@ -330,6 +335,28 @@ export class ShipCombat {
     applyCollision(this.cond, this.stats, take, 0, this.last);
     this.afterBlow();
     return take;
+  }
+
+  /** The condition as shares and the boost's share, for a zone crossing to carry (a fresh object: once per crossing). */
+  shares(): CarriedCondition {
+    const s = this.stats;
+    return { ...sharesOf(this.cond, s), boost: s.boostSeconds > 0 ? this.boostLeft / s.boostSeconds : 1 };
+  }
+
+  /**
+   * A carried condition put on this ship (the hull spawned on the other side of a crossing, once adopted): each
+   * layer and part the share it had, onto this ship's own maxima, what was down down again; the spec, the damage
+   * bands and `hull.hp` follow. A share of nothing left in the chassis is not carried (a destroyed ship cannot cross).
+   */
+  restore(c: CarriedCondition): void {
+    const s = this.stats;
+    applyShares(this.cond, s, c);
+    if (this.cond.chassis <= 0) this.cond.chassis = Math.min(s.chassisMax, 1);
+    this.boostLeft = s.boostSeconds * (Number.isFinite(c.boost) ? Math.max(0, Math.min(1, c.boost)) : 1);
+    this.low = this.cond.chassis < 0.25 * s.chassisMax;
+    this.refreshDown();
+    this.writeSpec();
+    this.mirror();
   }
 
   /** The layers, the effects, the attacker, the hooks. `roll` over COMPONENT_CHANCE keeps components out (the console's layer hits). */

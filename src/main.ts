@@ -160,6 +160,8 @@ interface ShipCrossing {
   arrival?: { pos: THREE.Vector3; quaternion: THREE.Quaternion } | null;
   /** Held and ghosted where it arrives, for the jump to release. */
   hold?: boolean;
+  /** The ship's fight as it left (shields, armour, chassis, parts down, boost, as shares), put on the new hull once it is adopted; null or absent: whole. */
+  condition?: import('./space/shipCombat').CarriedCondition | null;
 }
 const tmp2 = new THREE.Vector3();
 const boltFrom = new THREE.Vector3();
@@ -2917,7 +2919,7 @@ class App {
     if (p.mounted) p.dismount(p.pos.clone());
     // A jump's arrival (or the zone's, above) is where the world streams from, not the zone's spawn.
     this.arrive(planet, zoneId, ship?.arrival?.pos ?? (spaceArrival ? new THREE.Vector3(spaceArrival[0], spaceArrival[1], spaceArrival[2]) : undefined));
-    const arrived = ship ? await this.arriveInShip(ship.def, ship.speed, ship.height, ship.crew, ship.arrival ?? null, ship.hold ?? false) : planet.space ? await this.arriveInSpace() : null;
+    const arrived = ship ? await this.arriveInShip(ship.def, ship.speed, ship.height, ship.crew, ship.arrival ?? null, ship.hold ?? false, ship.condition ?? null) : planet.space ? await this.arriveInSpace() : null;
     await this.settle();
     this.savePlace(true);
     await this.loadingScreen.hide();
@@ -2954,13 +2956,18 @@ class App {
    * out of space. A ship with rooms is boarded: where the crew record says, at the controls if
    * they were there, else at its pilot's spot; a fighter is sat in. With `arrival` it comes out there, facing that way,
    * and a death afterwards respawns there (in Ord Mantell the zone's origin is inside its station); with `hold` it is left
-   * still and ghosted where it came out, for the jump that carried it to release.
+   * still and ghosted where it came out, for the jump that carried it to release. With `condition` the new hull arrives
+   * as damaged as the one that left (World.spawnVehicle has adopted its fight by the time it returns).
    */
-  private async arriveInShip(def: VehicleDef, speed: number, height: number, crew: ShipCrew | null = null, arrival: { pos: THREE.Vector3; quaternion: THREE.Quaternion } | null = null, hold = false): Promise<Vehicle> {
+  private async arriveInShip(def: VehicleDef, speed: number, height: number, crew: ShipCrew | null = null, arrival: { pos: THREE.Vector3; quaternion: THREE.Quaternion } | null = null, hold = false, condition: import('./space/shipCombat').CarriedCondition | null = null): Promise<Vehicle> {
     const p = this.player;
     const at = arrival ? arrival.pos.clone() : this.spawn.clone();
     at.y += height;
     const v = await this.world.spawnVehicle(def, at, Math.PI, def.kind, true, this.fitFor(def));
+    if (condition) {
+      if (v.combat) v.combat.restore(condition);
+      else console.warn(`travel: the ${def.id} arrived with no fight to carry its damage onto`);
+    }
     // Turned to the arrival's facing before anyone is put in it, so the rooms and the seat follow the hull's final frame.
     if (arrival) {
       v.teleport(at, arrival.quaternion, 0);
@@ -3001,22 +3008,28 @@ class App {
     return p.aboard ? { local: p.pos.clone(), heading: p.heading, piloting: !!p.piloting } : null;
   }
 
+  /** The ship's fight as it stands, to put on the hull spawned on the other side of a crossing; null for a ship with none. */
+  private conditionRecord(ship: Vehicle): import('./space/shipCombat').CarriedCondition | null {
+    return ship.combat ? ship.combat.shares() : null;
+  }
+
   /** The ship menu's way up: the flown ship, high enough over a planet with an orbit, goes into it with everyone aboard. */
   private async goToSpace(): Promise<void> {
     const ship = this.pilotedShip();
     const zone = spaceZoneOf(this.world.planet);
-    if (!ship || !zone || this.traveling || this.spaceGate !== 'up') return;
+    // A destroyed ship crosses nowhere.
+    if (!ship || ship.destroyed || !zone || this.traveling || this.spaceGate !== 'up') return;
     this.closePanels();
-    await this.travel(zone, undefined, { def: ship.def!, speed: Math.max(60, ship.speed), height: 0, crew: this.crewRecord() });
+    await this.travel(zone, undefined, { def: ship.def!, speed: Math.max(60, ship.speed), height: 0, crew: this.crewRecord(), condition: this.conditionRecord(ship) });
   }
 
   /** The ship menu's way down: the flown ship leaves orbit for the planet below, with everyone aboard. A system with no planet below has no way down. */
   private async landShip(): Promise<void> {
     const ship = this.pilotedShip();
     const below = planetBelow(this.world.planet);
-    if (!ship || !below || this.traveling) return;
+    if (!ship || ship.destroyed || !below || this.traveling) return;
     this.closePanels();
-    await this.travel(below, undefined, { def: ship.def!, speed: 90, height: SPACE_ARRIVAL_HEIGHT, crew: this.crewRecord() });
+    await this.travel(below, undefined, { def: ship.def!, speed: 90, height: SPACE_ARRIVAL_HEIGHT, crew: this.crewRecord(), condition: this.conditionRecord(ship) });
   }
 
   /** The ship menu's way off: whoever is in a ship in space goes down to the planet on foot, the ship left behind. */
@@ -3084,8 +3097,8 @@ class App {
    */
   private async crossZone(zone: string, pose: { pos: THREE.Vector3; quaternion: THREE.Quaternion }): Promise<Vehicle | null> {
     const ship = this.pilotedShip();
-    if (!ship) return null;
-    return this.travel(planetById(zone), undefined, { def: ship.def!, speed: 0, height: 0, crew: this.crewRecord(), arrival: pose, hold: true }, true);
+    if (!ship || ship.destroyed) return null;
+    return this.travel(planetById(zone), undefined, { def: ship.def!, speed: 0, height: 0, crew: this.crewRecord(), arrival: pose, hold: true, condition: this.conditionRecord(ship) }, true);
   }
 
   /** Jump to a place on the map: travel first when it is on another planet. */

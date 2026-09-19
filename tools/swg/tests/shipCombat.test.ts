@@ -426,6 +426,39 @@ const boltAt = (damage: number, dir = new THREE.Vector3(0, 0, -1)) => ({ damage,
   sz.repair();
   ok(near(sz.collide(1e6, other), cap, 1e-6), 'ShipCombat.repair ends the bout');
 
+  // A zone crossing carries the condition: its shares, what is down, the boost, the quiet since the last hit.
+  const from = new ShipCombat(stubHull(), contactStub, input, null, null, null);
+  from.rng = () => 0.99;
+  from.takeBolt(boltAt(ks.shieldMax[0] + ks.armourMax[0] / 2), p, n);
+  from.takeBolt(boltAt(ks.shieldMax[1] / 4, new THREE.Vector3(0, 0, 1)), p, n);
+  from.forceHit('engine', 1);
+  from.forceHit('reactor', 0.5);
+  from.collide(20);
+  from.forceHit('chassis', 0.2);
+  from.update(1.5, 0, true);
+  const carried = from.shares();
+  const tier4 = inputFor(tieFit, 'jedi_starfighter', 4, stockOf(tieFit));
+  const hullB = stubHull();
+  const to = new ShipCombat(hullB, contactStub, tier4, null, null, null);
+  to.restore(carried);
+  const ts = to.stats;
+  const fs = from.stats;
+  ok(near(to.cond.shield[0], 0) && near(to.cond.shield[1] / ts.shieldMax[1], from.cond.shield[1] / fs.shieldMax[1]) && near(to.cond.armour[0] / ts.armourMax[0], from.cond.armour[0] / fs.armourMax[0]) && near(to.cond.chassis / ts.chassisMax, from.cond.chassis / fs.chassisMax), 'ShipCombat.restore: shields, armour and chassis arrive as the shares they left with, on the new ship\'s own maxima');
+  const partShare = (c: ShipCombat, slot: string) => {
+    const q = c.cond.parts.find((x) => x.slot === slot)!;
+    return q.hp / q.max;
+  };
+  ok(to.down.includes('engine') && near(hullB.spec.maxSpeed, ts.handling.maxSpeed * 0.35) && near(partShare(to, 'reactor'), 0.5), 'ShipCombat.restore: a part down arrives down (the spec written with it), a part half gone arrives half gone');
+  ok(near(hullB.hp, 100 * (to.cond.chassis / ts.chassisMax), 1e-6) && hullB.hp < 100, 'ShipCombat.restore: the hull\'s hp mirrors the carried chassis');
+  ok(near(to.boostLeft / ts.boostSeconds, from.boostLeft / fs.boostSeconds) && near(to.cond.sinceHit, from.cond.sinceHit), 'ShipCombat.restore: the boost and the time since the last hit are carried');
+  const whole = new ShipCombat(stubHull(), contactStub, input, null, null, null);
+  const same = new ShipCombat(stubHull(), contactStub, input, null, null, null);
+  same.restore(whole.shares());
+  ok(same.cond.chassis === same.stats.chassisMax && same.down.length === 0 && same.hull.hp === 100, 'ShipCombat.restore: a whole ship arrives whole');
+  const dead = new ShipCombat(stubHull(), contactStub, input, null, null, null);
+  dead.restore({ ...whole.shares(), chassis: 0 });
+  ok(dead.cond.chassis > 0 && dead.hull.hp > 0, 'ShipCombat.restore: a chassis share of nothing is never put on (a destroyed ship does not cross)');
+
   // The hit effects: placed in the hull's frame at the true point, reported 'shown'; with no effect for the layer, 'taken'.
   const placed: { file: string; at: THREE.Vector3; frame: THREE.Matrix4 | null }[] = [];
   const fxRec = {

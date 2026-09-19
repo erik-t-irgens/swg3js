@@ -83,6 +83,49 @@ export function rescaleCondition(c: ShipCondition, from: ShipStats, to: ShipStat
   }
 }
 
+/** A condition as shares of its maxima (0..1), to carry a ship's damage onto another hull of it (a zone crossing spawns a new one). */
+export interface ConditionShares {
+  shield: [number, number];
+  armour: [number, number];
+  chassis: number;
+  /** Each part by slot: the share it has left, and whether it is down. */
+  parts: { slot: string; share: number; down: boolean }[];
+  /** Seconds since the last hit, so the shields' delay runs on where it left off. */
+  sinceHit: number;
+}
+
+/** The condition's shares now (a fresh object: made once per crossing). */
+export function sharesOf(c: ShipCondition, stats: ShipStats): ConditionShares {
+  return {
+    shield: [shareOf(c.shield[0], stats.shieldMax[0]), shareOf(c.shield[1], stats.shieldMax[1])],
+    armour: [shareOf(c.armour[0], stats.armourMax[0]), shareOf(c.armour[1], stats.armourMax[1])],
+    chassis: shareOf(c.chassis, stats.chassisMax),
+    parts: c.parts.map((p) => ({ slot: p.slot, share: p.down ? 0 : shareOf(p.hp, p.max), down: p.down })),
+    sinceHit: c.sinceHit,
+  };
+}
+
+/**
+ * Carried shares put onto a condition with its own maxima: each layer's value is its share of this ship's maximum,
+ * each part matched by slot (a part down stays down; a slot the shares do not name is left as it is). Shares out of
+ * 0..1, or not numbers, are clamped or read as whole.
+ */
+export function applyShares(c: ShipCondition, stats: ShipStats, s: ConditionShares): void {
+  const clamp01 = (n: number): number => (Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : 1);
+  for (const i of [0, 1] as const) {
+    c.shield[i] = stats.shieldMax[i] * clamp01(s.shield[i]);
+    c.armour[i] = stats.armourMax[i] * clamp01(s.armour[i]);
+  }
+  c.chassis = stats.chassisMax * clamp01(s.chassis);
+  for (const p of c.parts) {
+    const was = s.parts.find((o) => o.slot === p.slot);
+    if (!was) continue;
+    p.down = !!was.down;
+    p.hp = p.down ? 0 : p.max * clamp01(was.share);
+  }
+  c.sinceHit = Number.isFinite(s.sinceHit) ? Math.max(0, Math.min(LONG_AGO, s.sinceHit)) : LONG_AGO;
+}
+
 function reset(out: HitResult, facing: 0 | 1): void {
   out.layer = 'shield';
   out.facing = facing;

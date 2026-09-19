@@ -76,6 +76,7 @@ class FakeHull implements JumpHull {
   readonly launches: number[] = [];
   /** Dropped from the fake world: like a disposed Vehicle, whose removed Rapier body throws `unreachable` when touched. */
   disposed = false;
+  destroyed = false;
   setGhost(on: boolean): void {
     if (this.disposed) throw new Error('unreachable');
     this.ghostCalls.push(on);
@@ -471,6 +472,9 @@ const inSystemExit: (number | null)[] = [];
   w.state.ship = null;
   ok(h.why(FAR_POINT) === "the pilot's call", 'no ship at the controls: refused');
   w.state.ship = w.first;
+  w.first.destroyed = true;
+  ok(h.why(FAR_POINT) === 'the ship is destroyed' && h.start(FAR_POINT) === 'the ship is destroyed' && h.phase === 'idle', 'a destroyed ship cannot jump');
+  w.first.destroyed = false;
   w.state.packHere = null;
   w.state.catalogue = null;
   w.state.zone = 'tatooine';
