@@ -5,7 +5,7 @@
 // and airspeeders as aircraft) climb and sink on Space and Ctrl and hold their height over the ground.
 import * as THREE from 'three';
 import { cleanTrimesh, Group, groups, RAPIER, TRIMESH_FLAGS, type Physics } from '../core/physics';
-import { WING_RULE, WingSet, easeWing, wingTopFactor, wingsWanted } from './wings';
+import { WING_RULE, WingSet, easeWing, pilotWings, wingTopFactor, wingsWanted } from './wings';
 import { hardpointName, partOf, underPivot } from './shipAssembly';
 import { partnerLoss } from '../space/shipDamage';
 
@@ -613,7 +613,11 @@ export class Vehicle {
   private updateWings(dt: number): void {
     if (!this.wings.length) return;
     const w = this.wings;
-    w.want = wingsWanted(this.airborne, this.space, this.aboveGround, this.wingClearance, Math.abs(this.speed), this.spec.maxSpeed * (this.space ? 2 : 1), this.wingOpenFactor, w.want);
+    // The pilot's choice from the wings key, while there is one; else the flight rule.
+    w.want =
+      w.pilot !== null
+        ? pilotWings(w.pilot, this.airborne, this.space, this.aboveGround, this.wingClearance, w.want)
+        : wingsWanted(this.airborne, this.space, this.aboveGround, this.wingClearance, Math.abs(this.speed), this.spec.maxSpeed * (this.space ? 2 : 1), this.wingOpenFactor, w.want);
     if (w.step(dt)) this.followWings();
   }
 
@@ -703,6 +707,7 @@ export class Vehicle {
       want: this.wings.want,
       target: this.wings.target,
       forced: this.wings.force,
+      pilot: this.wings.pilot,
       wings,
       colliders,
       guns,
@@ -775,8 +780,9 @@ export class Vehicle {
     this.cruise = speed;
     this.speed = speed;
     this.airborne = true;
-    // Arriving in flight, the wings already stand as the flight rule has them (the ground is not read yet: all the room in the world).
-    this.wings.snap(wingsWanted(true, this.space, Infinity, this.wingClearance, speed, this.spec.maxSpeed * (this.space ? 2 : 1), this.wingOpenFactor, false));
+    // Arriving in flight, the wings already stand as the pilot's choice or the flight rule has them (the ground is not read yet: all the room in the world).
+    const w = this.wings;
+    w.snap(w.pilot !== null ? pilotWings(w.pilot, true, this.space, Infinity, this.wingClearance, false) : wingsWanted(true, this.space, Infinity, this.wingClearance, speed, this.spec.maxSpeed * (this.space ? 2 : 1), this.wingOpenFactor, false));
     this.followWings();
     this.body.setGravityScale(0, true);
     this.quaternion(this.attitude);

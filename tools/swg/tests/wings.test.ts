@@ -3,7 +3,7 @@
 // framed on. Synthetic models only; no pack is read.
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
-import { WING_HYSTERESIS, WING_ROOM_BAND, WING_RULE, WingSet, easeWing, poseWing, wingTopFactor, wingsWanted, type Wing } from '../../../src/vehicles/wings.ts';
+import { WINGS_KEY, WING_HYSTERESIS, WING_ROOM_BAND, WING_RULE, WingSet, dropPilotChoices, easeWing, pilotWings, poseWing, wingTopFactor, wingsWanted, type Wing } from '../../../src/vehicles/wings.ts';
 import {
   MAX_PILOT_GUNS,
   PLACE_SIGN,
@@ -203,6 +203,58 @@ const find = (root: THREE.Object3D, name: string) => anyHardpoint(root, name)!;
   ok(wingTopFactor(0.95, 1) === 1 && wingTopFactor(0.95, 0.3) === 1, 'threshold: no top-speed cost');
   WING_RULE.speed = saved;
   WING_RULE.speed = 'multiplier';
+}
+
+// 6b. The wings key: the pilot's own choice over the flight rule.
+{
+  ok(WINGS_KEY === 'KeyU', 'the wings key is U');
+  ok(!pilotWings(false, true, true, 100, 0, true) && !pilotWings(false, true, false, 100, 15, true), 'pilot closed: closed, in space and on a planet, however much room');
+  ok(pilotWings(true, true, true, 0, 15, false) && pilotWings(true, false, true, 0, 15, false), 'pilot open in space: open, even hovering, whatever hangs below');
+  ok(pilotWings(true, false, false, 0, 0, false) && pilotWings(true, true, false, 0.2, 0, false), 'pilot open on a planet with nothing swinging below the belly: open on the ground too');
+  ok(!pilotWings(true, false, false, 100, 15, true), 'pilot open, a wing that swings below the belly: landed, it folds');
+  ok(!pilotWings(true, true, false, 15.9, 15, false) && pilotWings(true, true, false, 16.1, 15, false), `pilot open, a low wing: opens only above clearance + ${WING_ROOM_BAND} m`);
+  ok(pilotWings(true, true, false, 15.1, 15, true) && !pilotWings(true, true, false, 14.9, 15, true), 'pilot open, a low wing: open, it folds only under the clearance');
+  // At full throttle under the threshold reading the rule wants them shut; the pilot's choice holds them open.
+  const saved = WING_RULE.speed;
+  WING_RULE.speed = 'threshold';
+  ok(!wingsWanted(true, false, 100, 0, 140, 140, 0.95, true) && pilotWings(true, true, false, 100, 0, true), "threshold at top speed: the rule shuts them, the pilot's open holds");
+  WING_RULE.speed = saved;
+  const mk = (): Wing => ({ pivot: new THREE.Object3D(), angle: 1, time: 1, open: 0, label: 'w' });
+  const set = new WingSet();
+  set.add(mk());
+  set.add(mk());
+  ok(set.pilot === null && !set.target, 'a new set: no choice, the rule says closed');
+  ok(set.toggle() === true && set.pilot === true, 'the key on closed wings chooses open');
+  // As Vehicle.updateWings does: the choice (with room) is the want, and the step follows it.
+  set.want = pilotWings(set.pilot!, true, true, Infinity, 0, set.want);
+  for (let i = 0; i < 70; i++) set.step(1 / 60);
+  ok(set.target && set.list.every((w) => w.open === 1), 'chosen open: they open over their time and the target (what the relay sends) says open');
+  ok(set.toggle() === false && set.pilot === false, 'the key again chooses closed');
+  set.want = pilotWings(set.pilot!, true, true, Infinity, 0, set.want);
+  ok(!set.target, 'chosen closed: the target says closed');
+  set.force = 'open';
+  ok(set.toggle() === false && set.target, "the console's hold is over the pilot's choice, and the key flips from where the wings are going");
+  set.force = null;
+  // A B-wing on the ground: the key chooses open, but the low wing waits for room, so the target stays closed. The prompt
+  // shows the choice, and a second press takes the waiting open back rather than choosing open again.
+  const low = new WingSet();
+  low.add(mk());
+  ok(low.toggle() === true && low.chosen, 'on the ground, the key chooses open');
+  low.want = pilotWings(low.pilot!, false, false, 0, 15, low.want);
+  ok(!low.target && low.pilot === true && low.chosen, 'the chosen open waits for room: the target (and the relay) says closed, the prompt says the choice is open');
+  ok(low.toggle() === false && low.pilot === false && !low.chosen, 'a second press while the open waits takes it back (closed chosen)');
+  ok(low.toggle() === true && low.pilot === true, 'and a third chooses open again');
+  // Leaving the seat: every set but the flown ship's goes back to the rule (the loop main.ts runs each frame).
+  const a = { wings: new WingSet() };
+  const b = { wings: new WingSet() };
+  const c = { wings: new WingSet() };
+  a.wings.pilot = true;
+  b.wings.pilot = false;
+  c.wings.pilot = true;
+  dropPilotChoices([a, b, c], b);
+  ok(a.wings.pilot === null && c.wings.pilot === null && b.wings.pilot === false, "dropPilotChoices: every ship but the one flown loses the pilot's choice; the flown one keeps it");
+  dropPilotChoices([a, b, c], null);
+  ok(b.wings.pilot === null, 'dropPilotChoices with nobody flying: every choice dropped');
 }
 
 // 7. Which muzzles are the pilot's guns (by the garage's own patterns).

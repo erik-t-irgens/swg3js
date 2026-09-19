@@ -43,10 +43,16 @@ export function poseWing(w: Wing, open: number): void {
 /** A ship's wings, stepped together, each at its own pace. */
 export class WingSet {
   readonly list: Wing[] = [];
-  /** The flight rule's last answer (true: open), kept for its hysteresis. Never the forced value. */
+  /** The last answer of the flight rule, or of the pilot's choice while there is one (true: open), kept for the rule's hysteresis. Never the forced value. */
   want = false;
   /** Held by the console: 'open', 'closed', or null for the flight rule. */
   force: 'open' | 'closed' | null = null;
+  /**
+   * The pilot's own choice from the wings key (true: open, false: closed), or null: the flight rule decides. Held until the
+   * key is pressed again or the pilot leaves the seat; an open choice still waits for room under a wing that swings below
+   * the belly (`pilotWings`), so landing folds it.
+   */
+  pilot: boolean | null = null;
   /** The goal of the last step, and whether every wing stood at it then (nothing to do until the goal changes). */
   private goal = 0;
   private settled = true;
@@ -59,6 +65,22 @@ export class WingSet {
 
   get length(): number {
     return this.list.length;
+  }
+
+  /**
+   * The wings key: the pilot's choice flips. With a choice already made it flips that choice, not where the wings are now:
+   * an open chosen on the ground under a B-wing waits for room with `target` still closed, and a second press must take
+   * it back. With none (or the console holding the wings), it becomes the opposite of where the wings are going. Returns
+   * the choice.
+   */
+  toggle(): boolean {
+    this.pilot = this.force ? !this.target : !(this.pilot ?? this.target);
+    return this.pilot;
+  }
+
+  /** What the pilot has chosen, as the wings key shows it: the console's hold when held, else the choice, else where the rule has them going. */
+  get chosen(): boolean {
+    return this.force ? this.target : (this.pilot ?? this.target);
   }
 
   /** Mean linear share open, for the console and the top-speed factor. */
@@ -139,6 +161,33 @@ export function wingsWanted(airborne: boolean, space: boolean, aboveGround: numb
   if (WING_RULE.speed === 'multiplier') return true;
   const limit = factor * top;
   return wasOpen ? speed <= limit + WING_HYSTERESIS : speed < limit - WING_HYSTERESIS;
+}
+
+/**
+ * Whether a ship's wings stand open on the pilot's choice (positional, allocation-free). Closed stays closed. Open is
+ * open at any speed, in the air or on the ground, except on a planet when a wing swings below the belly (a clearance):
+ * then only airborne with the flight rule's room and band, so landing still folds that wing (the B-wing's) and it opens
+ * again once there is room.
+ */
+export function pilotWings(open: boolean, airborne: boolean, space: boolean, aboveGround: number, clearance: number, wasOpen: boolean): boolean {
+  if (!open) return false;
+  if (space || clearance <= 0) return true;
+  if (!airborne) return false;
+  return wasOpen ? aboveGround >= clearance : aboveGround > clearance + WING_ROOM_BAND;
+}
+
+/** The key that opens and closes the wings of the ship flown (KeyboardEvent.code): U, bound to nothing else. */
+export const WINGS_KEY = 'KeyU';
+
+/**
+ * The pilot's choice lasts only while they fly that ship: every set but the flown ship's goes back to the flight rule
+ * (a pilot who left the seat, a ship nobody flies). Allocation-free, run each frame the keys are read.
+ */
+export function dropPilotChoices(list: readonly { readonly wings: WingSet }[], flown: unknown): void {
+  for (let i = 0; i < list.length; i++) {
+    const o = list[i];
+    if (o !== flown && o.wings.pilot !== null) o.wings.pilot = null;
+  }
 }
 
 /** The share of top speed the ship may fly at now: 'multiplier' eases from 1 to factor as the wings open; 'threshold' is always 1. */

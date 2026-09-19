@@ -87,7 +87,7 @@ import { danceOf, defaultEmotes, emoteChoices, FLOURISHES, isDanceClip, isFlouri
 import { loadSettings, type Settings } from './core/settings';
 import { deleteCharacter, loadCharacters, newCharacterId, upsertCharacter, type Appearance, type SavedCharacter } from './core/characters';
 import { FRAME_NUDGE, Garage, type VehicleDef } from './vehicles/garage';
-import { WING_RULE } from './vehicles/wings';
+import { WINGS_KEY, WING_RULE, dropPilotChoices } from './vehicles/wings';
 import type { Vehicle, VehicleKind } from './vehicles/vehicle';
 import { HEAD_TO_EYE, SEATED_EYE_FALLBACK, SEAT_RULE, cockpitYawStep, frameFileName, mirroredOffset, seatDropUsed } from './vehicles/cockpitSeat';
 import { World } from './world/world';
@@ -96,7 +96,7 @@ import { RANGE } from './world/gallery';
 import { castsShadow, surfaces } from './world/surfaces';
 
 /** The keys for the vehicle ridden, by its kind. */
-function mountPrompt(v: import('./vehicles/vehicle').Vehicle): string {
+function mountPrompt(v: import('./vehicles/vehicle').Vehicle, wingsKey: string = WINGS_KEY): string {
   const k = v.spec.kind;
   const bar = (f: number) => '▮'.repeat(Math.round(f * 8)) + '▯'.repeat(8 - Math.round(f * 8));
   const boost = v.spec.boost === 'heat' ? ` · <b>Shift</b> boost · heat ${bar(v.meter)}${v.overheated > 0 ? ' BURNT OUT' : ''}` : v.spec.boost === 'burst' ? ` · <b>Shift</b> boost ${bar(v.meter)}` : '';
@@ -106,7 +106,10 @@ function mountPrompt(v: import('./vehicles/vehicle').Vehicle): string {
     // Hovering, the ship is a VTOL: it holds still until the throttle opens, rises and sinks on the keys, slides sideways. In flight the mouse flies it.
     const hover = `<b>W</b> throttle up into flight · mouse turns · <b>Space</b>/<b>Ctrl</b> rise and sink · <b>A/D</b> slide`;
     const flight = `<b>W</b>/<b>S</b> throttle up and down · mouse pitches and turns (loops and rolls allowed) · <b>A/D</b> roll · <b>Space</b>/<b>X</b> pitch`;
-    return `<b>E</b> leave · ${v.airborne ? flight : hover} · <b>wheel</b> zoom, all the way in for the cockpit · <b>Alt</b> look around${v.guns.length ? ' · <b>click</b> fires · <b>Tab</b> next target' : ''} · <b>Shift</b> burn · ${v.airborne ? 'flying' : 'hovering'} · ${Math.round(Math.abs(v.speed) * 3.6)} km/h${v.hp < v.maxHp ? ` · hull ${Math.round((v.hp / v.maxHp) * 100)}%` : ''}`;
+    // A ship whose wings open: the wings key and which way a press would take the pilot's choice; an open chosen while a
+    // low wing waits for room says so.
+    const wings = v.wings.length ? ` · <b>${keyName(wingsKey)}</b> ${v.wings.chosen ? 'close' : 'open'} the wings${v.wings.pilot && !v.wings.target ? ' (they open with room under them)' : ''}` : '';
+    return `<b>E</b> leave · ${v.airborne ? flight : hover} · <b>wheel</b> zoom, all the way in for the cockpit · <b>Alt</b> look around${v.guns.length ? ' · <b>click</b> fires · <b>Tab</b> next target' : ''}${wings} · <b>Shift</b> burn · ${v.airborne ? 'flying' : 'hovering'} · ${Math.round(Math.abs(v.speed) * 3.6)} km/h${v.hp < v.maxHp ? ` · hull ${Math.round((v.hp / v.maxHp) * 100)}%` : ''}`;
   }
   const turn = k === 'ground' ? 'mouse or <b>A/D</b> turn' : 'mouse or <b>A/D</b> steer';
   const hull = v.hp < v.maxHp ? ` · hull ${Math.round((v.hp / v.maxHp) * 100)}%${v.hp / v.maxHp < 0.34 ? ' LIMPING' : v.hp / v.maxHp < 0.67 ? ' smoking' : ''}` : '';
@@ -1592,19 +1595,23 @@ class App {
       },
       /**
        * The wings of the ship ridden, piloted or aboard (else the nearest ship): `wings('open')` / `wings('closed')` holds
-       * them, `wings('auto')` gives them back to the flight rule, `wings('multiplier')` / `wings('threshold')` picks how
-       * every ship reads its chassis's speed factor. Returns the report: the rule, the top speed now, the drop and the
-       * clearance, each wing's share open and the hull hardpoint its mount stands on, each moving collider's distance from
-       * its mesh, the guns and what was left off.
+       * them, `wings('toggle')` does what the wings key (U) does (the pilot's own choice, flipped), `wings('auto')` gives
+       * them back to the flight rule (the console's hold and the pilot's choice both dropped), `wings('multiplier')` /
+       * `wings('threshold')` picks how every ship reads its chassis's speed factor. Returns the report: the rule, the top
+       * speed now, the drop and the clearance, each wing's share open and the hull hardpoint its mount stands on, each
+       * moving collider's distance from its mesh, the guns and what was left off.
        */
-      wings: (mode?: 'open' | 'closed' | 'auto' | 'multiplier' | 'threshold') => {
+      wings: (mode?: 'open' | 'closed' | 'toggle' | 'auto' | 'multiplier' | 'threshold') => {
         const p = this.player;
         const v = p.mounted ?? p.piloting ?? p.aboard?.vehicle ?? [...this.world.vehicles].filter((o) => o.spec.ship && !o.autopilot).sort((a, b) => a.pos.distanceTo(p.pos) - b.pos.distanceTo(p.pos))[0];
         if (!v) return 'no ship: spawn one (spawn(\'xwing\')) or board one';
         if (mode === 'open' || mode === 'closed') v.wings.force = mode;
-        else if (mode === 'auto') v.wings.force = null;
-        else if (mode === 'multiplier' || mode === 'threshold') WING_RULE.speed = mode;
-        else if (mode !== undefined) return `wings: '${String(mode)}' is none of open, closed, auto, multiplier, threshold`;
+        else if (mode === 'toggle') v.wings.toggle();
+        else if (mode === 'auto') {
+          v.wings.force = null;
+          v.wings.pilot = null;
+        } else if (mode === 'multiplier' || mode === 'threshold') WING_RULE.speed = mode;
+        else if (mode !== undefined) return `wings: '${String(mode)}' is none of open, closed, toggle, auto, multiplier, threshold`;
         if (mode === 'open' && !v.airborne && v.wingDrop > 0) console.warn(`wings: forced open on the ground: they reach ${v.wingDrop.toFixed(1)} m under the belly and may stand in the terrain (the game never opens them there)`);
         return v.wingReport();
       },
@@ -4933,6 +4940,11 @@ class App {
           if (player.noclip && input.pressedAction('noclipFaster')) player.noclipSpeed = Math.min(2000, player.noclipSpeed * 1.5);
           if (player.noclip && input.pressedAction('noclipSlower')) player.noclipSpeed = Math.max(2, player.noclipSpeed / 1.5);
           if (input.pressedAction('flashlight')) this.torchOn = !this.torchOn;
+          // The wings key: the pilot of a ship whose wings open picks open or closed over the flight rule, held until the key
+          // is pressed again or the seat is left (a ship nobody flies goes back to the rule). Locked while a jump flies the ship.
+          const wingsOf = player.mounted ?? player.piloting;
+          if (input.pressedAction('wings') && wingsOf?.spec.ship && wingsOf.wings.length && !this.hyperspace.locksControls) wingsOf.wings.toggle();
+          dropPilotChoices(this.world.vehicles, wingsOf);
           // The emote wheel: held open, the mouse picks, the key's release plays; the arrows play the first four outright.
           if (input.pressedAction('emoteWheel') && !player.mounted) this.emoteWheel.show(this.emotes);
           this.stepEmoteKeys();
@@ -5037,7 +5049,7 @@ class App {
       let lift: ReturnType<App['liftHere']> = null;
       let doorless: { label: string } | null = null;
       if (player.noclip) prompt = `<b>NOCLIP</b> ${Math.round(player.noclipSpeed)} m/s · <b>WASD</b> fly · <b>Space</b> up · <b>Ctrl</b> down · <b>Shift</b> fast · <b>+</b>/<b>-</b> speed · <b>N</b> off`;
-      else if (player.mounted) prompt = mountPrompt(player.mounted) + (player.mounted.spec.ship ? shipHint : '');
+      else if (player.mounted) prompt = mountPrompt(player.mounted, input.bindings.wings[0] ?? WINGS_KEY) + (player.mounted.spec.ship ? shipHint : '');
       else if ((lift = this.liftHere())) prompt = `<b>E</b> lift: ${lift.stops.length} levels`;
       else if (!player.aboard && this.world.elevatorsNear(player.pos, MOUNT_RANGE).length) prompt = `<b>E</b> elevator ${this.world.elevatorsNear(player.pos, MOUNT_RANGE)[0].kind === 'down' ? 'down' : 'up'}`;
       else if (!player.aboard && (doorless = this.world.doorlessNear(player.pos))) prompt = `<b>E</b> enter ${doorless.label} (no way in on foot)`;

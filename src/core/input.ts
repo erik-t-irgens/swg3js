@@ -43,7 +43,9 @@ export type Action =
   | 'emote4'
   | 'brake'
   | 'rollLeft'
-  | 'rollRight';
+  | 'rollRight'
+  // A ship whose wings open: the pilot opens and closes them.
+  | 'wings';
 
 /**
  * Default bindings, as KeyboardEvent codes and `Mouse<button>`. Crouch has X beside Ctrl
@@ -96,6 +98,7 @@ export const DEFAULT_BINDINGS: Record<Action, string[]> = {
   brake: ['KeyQ'],
   rollLeft: ['KeyZ'],
   rollRight: ['KeyV'],
+  wings: ['KeyU'],
 };
 const STORAGE_KEY = 'swg3js.bindings';
 

@@ -67,6 +67,7 @@ const ACTION_LABELS: Record<Action, string> = {
   brake: 'Brake (adrift in space)',
   rollLeft: 'Roll left (adrift in space)',
   rollRight: 'Roll right (adrift in space)',
+  wings: 'Open and close the wings (flying a ship)',
 };
 
 /** "KeyW" reads as "W", "Mouse0" as "Left mouse", "ControlLeft" as "Left Ctrl". */
