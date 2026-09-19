@@ -228,6 +228,12 @@ const GLIDE_LIFT = 0.5;
 const GLIDE_FALL = 5;
 const GLIDE_CEILING = 30;
 const SHIP_HIT_LOSS = 5;
+/**
+ * The fastest the physics engine moves a body: Rapier cuts every linear velocity to 400 m/s (times its
+ * integrationParameters.lengthUnit, 1 here; measured). A velocity asked past it is cut each step, which the hit test
+ * reads as a crash. 399 keeps an invented metre a second under it.
+ */
+const BODY_SPEED_CAP = 399;
 const SHIP_HIT_FREE = 0.4;
 /** How much of the ground's slope a hover kind takes on: 1 lies flat on it, 0 stays level. */
 const SLOPE_FOLLOW = 0.85;
@@ -1254,7 +1260,8 @@ export class Vehicle {
     if (this.jumpCruise !== null) this.cruise = this.jumpCruise;
     this.speed = this.cruise;
     const wasAirborne = this.airborne;
-    this.airborne = this.cruise > 4 || (wasAirborne && h > s.fly!.floor + 1);
+    // In space a ship once flying stays in flight however slow (nothing to land on: see the floor below).
+    this.airborne = this.cruise > 4 || (wasAirborne && (this.space || h > s.fly!.floor + 1));
     if (!this.airborne) {
       if (wasAirborne) {
         // Down on the gear: level, keeping the heading, and back on the springs.
@@ -1361,8 +1368,13 @@ export class Vehicle {
     a.normalize();
     tmp.copy(fwd).multiplyScalar(this.cruise);
     // Slow, the ship holds a few metres up; with the throttle off it settles down and lands.
-    if (this.cruise < 8) tmp.y += this.cruise < 2 ? -1.5 : THREE.MathUtils.clamp((minH - hw) * 1.5, -2, 4);
-    if (h < s.fly!.floor + 0.5 && tmp.y < 0) tmp.y = 0;
+    // Space has no ground: its procedural ground is a plane at the zone's base, 3 km down, never built but still what
+    // `groundAt` answers, and holding a slow ship over it or stopping a sinking one there made an invisible floor with
+    // half the stations under it. There a slow or stopped ship hangs where it is.
+    if (this.cruise < 8 && !this.space) tmp.y += this.cruise < 2 ? -1.5 : THREE.MathUtils.clamp((minH - hw) * 1.5, -2, 4);
+    if (!this.space && h < s.fly!.floor + 0.5 && tmp.y < 0) tmp.y = 0;
+    // Never ask the engine for more than it will move a body (a boost in space asks 440): the cut would read as a hit.
+    if (tmp.lengthSq() > BODY_SPEED_CAP * BODY_SPEED_CAP) tmp.setLength(BODY_SPEED_CAP);
     if (this.hitCooldown > 0) {
       // Just hit: the contacts have the hull for a moment; the attitude follows where they leave it.
       this.quaternion(q);
