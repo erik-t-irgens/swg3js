@@ -52,6 +52,8 @@ import { MobileAssets } from './world/mobiles/assets';
 import { vehiclePlumes } from './vehicles/enginePlumes';
 import { Notice } from './ui/notice';
 import { VehiclesUi } from './ui/vehiclesUi';
+import { ShipEditUi } from './ui/shipEditUi';
+import { fitKey, packFit, partsOf, slotLabel, stockFit, type ResolvedFit, type ShipFit } from './vehicles/shipFit';
 import { NpcUi } from './ui/npcUi';
 import { CATALOGUE_COMMAND } from './world/mobiles/catalogue';
 import { ambientOverrides, lookBounds, spawnDistance } from './world/mobiles/spawning';
@@ -148,6 +150,11 @@ const boltFrom = new THREE.Vector3();
 const shotFrom = new THREE.Vector3();
 const shotDir = new THREE.Vector3();
 
+/** A kept ship fit copied, so a change is made on the copy and handed to saveFit whole. */
+function copyShipFit(f: ShipFit): ShipFit {
+  return { components: { ...f.components }, paint: { ...f.paint }, ...(f.droid ? { droid: f.droid } : {}) };
+}
+
 class App {
   private torch!: THREE.SpotLight;
   private torchOn = false;
@@ -177,6 +184,18 @@ class App {
   private readonly weaponsUi: WeaponsUi;
   private readonly forceUi: ForceUi;
   private readonly vehiclesUi: VehiclesUi;
+  /** A ship's edit page, opened from the garage's edit button (components, droid and paint). */
+  private readonly shipEdit: ShipEditUi;
+  /** The garage as it loads, so the panel, the edit page and the console share one load. */
+  private garageLoading: Promise<Garage> | null = null;
+  /** The ship whose fit the last hello carried ('' none): a change of ship sends the hello again. */
+  private helloShipId = '';
+  /** Garage ids being prepared for a spawn: a second press waits for the first. */
+  private readonly spawning = new Set<string>();
+  /** The debounced write of the ships' fits (the edit page saves on every change). */
+  private fitSaveTimer = 0;
+  /** Each spawned ship's refit in flight: the next waits for it, so two never stage from the same fit. */
+  private readonly refitting = new Map<Vehicle, Promise<unknown>>();
   private garage: Garage | null = null;
   private npcUi: NpcUi;
   private appearanceUi: AppearanceUi;
@@ -312,6 +331,12 @@ class App {
     // Shaders are warmed for the target the frames are actually drawn into: with the effects on,
     // a program compiled with nothing bound is the wrong variant and is thrown away on first use.
     this.world.compileTarget = () => this.postfx?.compileTarget ?? null;
+    // A vehicle (a spawn, a refit's parts, a ship's paint copies, a peer's ride) is prepared by the world
+    // and then for the motion blur's variants (the skinned droid needs its own); postfx is read at call time.
+    this.world.vehiclePrepare = async (roots) => {
+      await this.world.prepareVehicle(roots);
+      await this.postfx?.product<VelocityProduct>('velocity')?.prepareRoots(roots);
+    };
     this.world.userFog = S.fog;
     this.world.normalScale.set(S.normalStrength, -S.normalStrength);
     Character.normalScale.set(S.normalStrength, -S.normalStrength);
@@ -376,6 +401,21 @@ class App {
       }
     };
     this.vehiclesUi = new VehiclesUi(this.ui, (def, kind) => void this.spawnVehicle(def, kind), () => this.world.removeVehicles(this.player.mounted ?? this.player.aboard?.vehicle ?? null));
+    // The ship's edit page: DOM only here (its preview's WebGL context is made the first time it opens);
+    // every dependency is an arrow read at click time, after the constructor.
+    this.shipEdit = new ShipEditUi(this.ui, {
+      garage: () => this.loadGarage(),
+      saved: (id) => this.savedFit(id),
+      save: (id, fit) => this.saveFit(id, fit),
+      spawn: (def) => void this.spawnVehicle(def),
+      closed: (def) => void this.refitSpawned(def),
+      // The preview's compile of a garage material the world set up for its shadow cascades must not take the cascades' record from the world's program.
+      keepShadows: (mats) => this.world.keepShadowRecords(mats),
+    });
+    this.vehiclesUi.onEdit = (def) => this.openShipEdit(def);
+    this.shipEdit.onTab = (id) => this.toggleSpawner(id as 'garage' | 'npcs');
+    // A fit changed in the last 300 ms is written before the page goes.
+    window.addEventListener('beforeunload', () => this.flushFits());
     this.shipMenu = new ShipMenu(this.ui, { status: () => this.shipStatus(), goToSpace: () => void this.goToSpace(), land: () => void this.landShip(), eject: () => void this.eject() }, () => keyName(this.input.bindings.ship[0] ?? ''));
     this.shipMenu.onClose = () => this.toggleShipMenu();
     // The lift menu: E in a shaft lists its levels; a pick, or a number key, rides there.
@@ -461,7 +501,7 @@ class App {
     // Every panel moves by its header and stays put; the overlay round it is clear, so the world shows behind.
     draggable(this.map.root, '.map-panel', '.map-header', 'map');
     draggable(this.shipMenu.root, '.ship-panel', '.ship-header', 'ship');
-    for (const [id, ui] of [['wardrobe', this.wardrobe], ['weapons', this.weaponsUi], ['garage', this.vehiclesUi], ['npcs', this.npcUi], ['appearance', this.appearanceUi], ['backpack', this.backpack]] as const) draggable(ui.root, '.wardrobe-panel', '.wardrobe-header', id);
+    for (const [id, ui] of [['wardrobe', this.wardrobe], ['weapons', this.weaponsUi], ['garage', this.vehiclesUi], ['npcs', this.npcUi], ['appearance', this.appearanceUi], ['backpack', this.backpack], ['shipedit', this.shipEdit]] as const) draggable(ui.root, '.wardrobe-panel', '.wardrobe-header', id);
     // Console hooks for driving the game from tests: window.__debug.teleport(x, z, yaw), .look(yaw, pitch), .cell().
     (window as unknown as { __debug: unknown }).__debug = {
       /** Put the player at x, z on the ground (or at `y`); a point inside a building's room, once that building's interior is built, counts as being in it. Returns the cell. */
@@ -1465,10 +1505,35 @@ class App {
         return this.world.vehicles.length;
       },
       spawn: async (name: string, kind?: VehicleKind) => {
-        this.garage ??= await Garage.load(import.meta.env.BASE_URL);
-        this.world.garage = this.garage;
-        const def = this.garage.find(name);
+        const def = (await this.loadGarage()).find(name);
         return def ? this.spawnVehicle(def, kind) : `no vehicle matches ${name}`;
+      },
+      /**
+       * A ship's fit: `shipFit()` the ship ridden, flown or boarded (else the nearest spawned), as it stands: each slot's
+       * component, its look of how many, the parts hung and those waiting for a carrier, the droid, the paint, and each
+       * gun's slot, bolt and whether its muzzle is live; `shipFit('xwing')` a garage id's stock fit and its parts, with
+       * what the character keeps.
+       */
+      shipFit: (id?: string) => this.shipFitReport(id),
+      /**
+       * Refit the ship ridden (else the nearest): `refit('engine', '<component>')`, `refit('weapon_0', 'wpn_light_blaster_green')`,
+       * `refit('droid', 'r2')`; '' empties the slot. Kept with the character. Returns the refit's report and the programs the
+       * swap made (`compiledOnSwap`, read two frames later, must be 0).
+       */
+      refit: (slot: string, component: string) => this.debugRefit(slot, component),
+      /**
+       * Repaint the ship ridden (else the nearest): `paint({ index_color_1: 20, index_texture_1: 2 })`, kept with the character;
+       * `paint('static')` shows each shader's own texture from before customization, `paint('custom')` goes back. Returns the
+       * same shape as `refit`.
+       */
+      paint: (values: Record<string, number> | 'static' | 'custom') => this.debugPaint(values),
+      /** Open a ship's edit page: `shipEdit('xwing')`; `shipEdit()` reports what the page shows. */
+      shipEdit: async (id?: string) => {
+        if (!id) return this.shipEdit.report();
+        const def = (await this.loadGarage()).find(id);
+        if (!def) return `no vehicle matches ${id}`;
+        this.openShipEdit(def);
+        return def.fit ? `editing the ${def.label}` : `${def.id} has no fit in this pack (converted before ship customization); the page says so`;
       },
       /** The weapons rack: `weapons('dl44')` lists matches; `equip('dl44')` or `equip('dl44', 'left')` puts one in a hand, `equip(null, 'left')` empties it. */
       weapons: (find?: string) => {
@@ -1788,6 +1853,8 @@ class App {
     this.remotes.prepare = (root) => this.prepareRoot(root);
     // A peer's ride is compiled before it shows, parts, glows and all (this.world was assigned in the constructor, long before).
     this.remotes.prepareVehicle = (roots) => this.world.vehiclePrepare(roots);
+    // A peer's painted ship owns copies of its materials: out of the world's sets when they go (read at call time).
+    this.remotes.forget = (m) => this.world.forgetMaterials(m);
     // A new mobile prototype: the motion blur's shaders for its morph counts, after the world's own preparation.
     MobileAssets.for(import.meta.env.BASE_URL).alsoPrepare = (root) => this.postfx?.product<VelocityProduct>('velocity')?.prepareRoots([root]) ?? Promise.resolve();
     this.net.onJoin = (peer) => this.remotes.add(peer.id, peer.hello);
@@ -2088,7 +2155,10 @@ class App {
     const r = this.player.equipped.right?.id;
     const l = this.player.equipped.left?.id;
     const held = r || l ? { ...(r ? { r } : {}), ...(l ? { l } : {}) } : undefined;
-    return { name: c?.name ?? 'someone', species: this.characterId, class: this.kit?.id ?? 'jedi', planet: this.world.planet?.id ?? '', zone: this.zone, look: c ? packLook(c.appearance, c.outfit ?? []) : undefined, held };
+    // The ship this player flies (or last flew or stood out), with its components, droid and paint.
+    const ship = this.helloShip();
+    if (ship) this.helloShipId = ship.id;
+    return { name: c?.name ?? 'someone', species: this.characterId, class: this.kit?.id ?? 'jedi', planet: this.world.planet?.id ?? '', zone: this.zone, look: c ? packLook(c.appearance, c.outfit ?? []) : undefined, held, ship };
   }
 
   /** Send the hello again shortly (dressing several pieces sends one): a change of clothes or weapon reaches the others. */
@@ -2234,6 +2304,12 @@ class App {
     // The vehicle this player is on, so the others see it with them on it; and the figure's
     // whole turn where a heading is not enough (aboard a banked hull, adrift in space).
     const v = p.mounted ?? p.piloting ?? p.aboard?.vehicle ?? null;
+    // Another fitted ship taken: the hello (with that ship's fit) goes again once, debounced. Two strings compared, nothing allocated.
+    const shipId = v?.def?.fit ? v.def.id : this.helloShipId;
+    if (shipId !== this.helloShipId) {
+      this.helloShipId = shipId;
+      this.queueHello();
+    }
     const veh: PeerVehicle | undefined = v ? { id: v.def?.id ?? v.spec.id, p: [n2(v.pos.x), n2(v.pos.y), n2(v.pos.z)], q: v.quaternion(tmpQ).toArray().map(n3) as [number, number, number, number], role: p.mounted ? 'ride' : p.piloting ? 'pilot' : 'aboard', pose: v.riderPose ?? undefined, ...(v.wings.length ? { w: v.wings.target ? 1 : 0 } as const : {}) } : undefined;
     const q = p.aboard || p.eva ? (p.group.quaternion.toArray().map(n3) as [number, number, number, number]) : undefined;
     this.net.sendState({ p: [n2(at.x), n2(at.y), n2(at.z)], h: n3(p.heading), s: p.mounted ? 'seated' : (rig?.describe().state ?? 'idle'), v: n2(Math.hypot(p.vel.x, p.vel.z)), m: !!p.mounted, sab: p.saberOn, q, veh });
@@ -2594,7 +2670,7 @@ class App {
    * Go to another world. With `ship`, arrive flying it: the ship carried up into space, or down
    * out of it, is spawned again over the arrival point at `height` and launched at `speed`, and
    * whoever was aboard its rooms stands in the new hull where they stood in the old (`crew`). A
-   * space zone is always arrived at in a ship (the one last flown, else an X-wing).
+   * space zone is always arrived at in a ship (the one last flown or fitted ship last stood out, else an X-wing).
    */
   private async travel(planet: PlanetDef, zoneId?: string, ship?: ShipCrossing): Promise<void> {
     if (this.traveling) return;
@@ -2623,7 +2699,7 @@ class App {
     this.input.requestLock();
   }
 
-  /** Arrive in space without a ship carried up: seated in the one last flown, else the default, moving off gently. */
+  /** Arrive in space without a ship carried up: seated in the one last flown or fitted ship last stood out, else the default, moving off gently. */
   private async arriveInSpace(): Promise<void> {
     const def = this.lastShipDef ?? (await this.defaultShipDef());
     if (def) await this.arriveInShip(def, 40, 0);
@@ -2645,7 +2721,7 @@ class App {
     const p = this.player;
     const at = this.spawn.clone();
     at.y += height;
-    const v = await this.world.spawnVehicle(def, at, Math.PI, def.kind, true);
+    const v = await this.world.spawnVehicle(def, at, Math.PI, def.kind, true, this.fitFor(def));
     const room = v.interior;
     if (room && (crew || room.pilotSpot)) {
       room.reveal(true);
@@ -3017,8 +3093,8 @@ class App {
         this.effects.ring(v.pos, 0xffa050, 6 + v.radius, 0.5);
         this.effects.burst(v.pos, 0xffc080, 2 + v.radius, 0.4);
         this.effects.flash(v.pos, 0xffa050, 60, 20, 0.35);
-        v.dispose(this.physics, this.scene);
-        this.world.vehicles.splice(this.world.vehicles.indexOf(v), 1);
+        // Through the world, so a painted ship's own material copies leave the portal set and the cascades with it.
+        this.world.disposeVehicle(v);
       }
     }
     // The way up and the way down, for whoever flies the ship: near the top of a planet's sky its
@@ -3077,8 +3153,11 @@ class App {
       const i = this.shipTarget ? ahead.findIndex((a) => a.v === this.shipTarget) : -1;
       this.shipTarget = ahead[(i + 1) % ahead.length].v;
     } else if (!this.shipTarget && ahead.length) this.shipTarget = ahead[0].v;
-    const speed = pilot.weapon?.speed ?? SHIP_BOLT_SPEED;
-    const range = pilot.weapon?.range ?? SHIP_BOLT_RANGE;
+    // The lead is worked out for the gun that fires next: a fitted ship's guns may fire different bolts.
+    const nextGun = pilot.guns.length ? pilot.guns[pilot.gunNext % pilot.guns.length] : undefined;
+    const lw = nextGun?.weapon ?? pilot.weapon;
+    const speed = lw?.speed ?? SHIP_BOLT_SPEED;
+    const range = lw?.range ?? SHIP_BOLT_RANGE;
     const own = pilot.body.linvel();
     this.shipLeadValid = false;
     const t = this.shipTarget;
@@ -3108,8 +3187,12 @@ class App {
     // sees, so the bolt's own velocity (the muzzle's plus the ship's) meets the target there.
     if (this.shipLeadValid && Math.acos(THREE.MathUtils.clamp(this.shipAim.dot(nose), -1, 1)) < SHIP_GUN_CONE) dir.copy(this.shipAim);
     from.addScaledVector(dir, 1.2);
-    const projectile = pilot.weapon ? this.world.garage?.projectileFor(pilot.weapon.projectile) ?? null : null;
-    this.world.bolts.fire(from, dir, { owner: 'player', damage: SHIP_GUN_DAMAGE, metresPerSecond: speed, inherit: new THREE.Vector3(own.x, own.y, own.z), life: range / speed + 0.05, color: pilot.boltColor, exclude: pilot.body, projectile });
+    // What this gun fires: its own component's bolt on a fitted ship, else the ship's one weapon.
+    const w = g.weapon ?? pilot.weapon;
+    const gunSpeed = w?.speed ?? SHIP_BOLT_SPEED;
+    const gunRange = w?.range ?? SHIP_BOLT_RANGE;
+    const projectile = w ? this.world.garage?.projectileFor(w.projectile) ?? null : null;
+    this.world.bolts.fire(from, dir, { owner: 'player', damage: SHIP_GUN_DAMAGE, metresPerSecond: gunSpeed, inherit: new THREE.Vector3(own.x, own.y, own.z), life: gunRange / gunSpeed + 0.05, color: pilot.boltColor, exclude: pilot.body, projectile });
     this.effects.flash(from, pilot.boltColor, 5, 6, 0.06);
   }
 
@@ -3464,7 +3547,7 @@ class App {
 
   /** The panels' open state moved to the tabs: closing one panel of a pair and opening the other keeps the mouse free. */
   private anyPanelOpen(): boolean {
-    return this.backpack.open || this.wardrobe.open || this.appearanceUi.open || this.weaponsUi.open || this.forceUi.open || this.vehiclesUi.open || this.npcUi.open || this.shipMenu.open || this.liftMenu.open || this.menu.open;
+    return this.backpack.open || this.wardrobe.open || this.appearanceUi.open || this.weaponsUi.open || this.forceUi.open || this.vehiclesUi.open || this.shipEdit.open || this.npcUi.open || this.shipMenu.open || this.liftMenu.open || this.menu.open;
   }
 
   private jediKit(): JediKit {
@@ -3502,6 +3585,8 @@ class App {
     if (this.weaponsUi.open) this.weaponsUi.hide();
     if (this.forceUi.open) this.forceUi.hide();
     if (this.vehiclesUi.open) this.vehiclesUi.hide();
+    // Closing the edit page writes the fits, refits the spawned ships of that id and tells the others.
+    if (this.shipEdit.open) this.shipEdit.hide();
     if (this.npcUi.open) this.npcUi.hide();
     if (this.shipMenu.open) this.shipMenu.hide();
     if (this.liftMenu.open) this.liftMenu.hide();
@@ -3549,7 +3634,7 @@ class App {
   /** B: the spawner, the garage or the NPCs tab; the key toggles the last tab used, a tab click swaps. */
   private toggleSpawner(tab?: 'garage' | 'npcs'): void {
     const want = tab ?? this.spawnerTab;
-    const wasOpen = tab === undefined && (this.vehiclesUi.open || this.npcUi.open);
+    const wasOpen = tab === undefined && (this.vehiclesUi.open || this.npcUi.open || this.shipEdit.open);
     this.closePanels();
     if (wasOpen) {
       this.freeMouse(false);
@@ -3558,13 +3643,8 @@ class App {
     this.spawnerTab = want;
     if (want === 'garage') {
       this.vehiclesUi.show();
-      if (!this.garage) {
-        void Garage.load(import.meta.env.BASE_URL).then((g) => {
-          this.garage = g;
-          this.world.garage = g;
-          this.vehiclesUi.attach(g);
-        });
-      } else this.vehiclesUi.attach(this.garage);
+      if (!this.garage) void this.loadGarage().then((g) => this.vehiclesUi.attach(g));
+      else this.vehiclesUi.attach(this.garage);
     } else {
       this.npcUi.attach(this.spawnerDeps());
       this.npcUi.show();
@@ -3730,11 +3810,305 @@ class App {
 
   /** Spawn a vehicle from the garage in front of the player, as its own kind or one chosen for the test. */
   async spawnVehicle(def: VehicleDef, kind?: VehicleKind): Promise<string> {
-    const v = await this.world.spawnVehicle(def, this.player.pos, this.player.heading, kind);
-    const b = v.spec.bounds;
-    const size = [b.max[0] - b.min[0], b.max[1] - b.min[1], b.max[2] - b.min[2]].map((n) => n.toFixed(1)).join('×');
-    this.hud.setPrompt(`${def.label}: a ${v.spec.kind}, ${size} m (E to ride)`);
-    return `${def.id} spawned as a ${v.spec.kind}: ${size} m at ${v.pos.toArray().map((n) => n.toFixed(1)).join(',')}, ${v.pos.distanceTo(this.player.pos).toFixed(1)} m away, seat ${v.spec.seat.map((n) => n.toFixed(2)).join(',')}, hardpoints: ${v.hardpoints.join(' ') || 'none'}, seated from ${v.seatFrom ?? 'its kind'}`;
+    // One ship at a time per garage id: it is prepared (and painted) before it stands, which can take a moment.
+    // Creatures and speeders spawn as many as are asked for, as before.
+    const guard = def.kind === 'ship';
+    if (guard && this.spawning.has(def.id)) return `already preparing the ${def.label}`;
+    if (guard) this.spawning.add(def.id);
+    this.hud.setPrompt(`preparing the ${def.label}…`);
+    // The fit the edit page kept in the last few hundred milliseconds is written before it is read.
+    this.flushFits();
+    try {
+      const v = await this.world.spawnVehicle(def, this.player.pos, this.player.heading, kind, false, this.fitFor(def));
+      // A fitted ship stood out is the one the others are told of while none is flown.
+      if (v.spec.ship && def.fit) this.lastShipDef = def;
+      const b = v.spec.bounds;
+      const size = [b.max[0] - b.min[0], b.max[1] - b.min[1], b.max[2] - b.min[2]].map((n) => n.toFixed(1)).join('×');
+      this.hud.setPrompt(`${def.label}: a ${v.spec.kind}, ${size} m (E to ride)`);
+      return `${def.id} spawned as a ${v.spec.kind}: ${size} m at ${v.pos.toArray().map((n) => n.toFixed(1)).join(',')}, ${v.pos.distanceTo(this.player.pos).toFixed(1)} m away, seat ${v.spec.seat.map((n) => n.toFixed(2)).join(',')}, hardpoints: ${v.hardpoints.join(' ') || 'none'}, seated from ${v.seatFrom ?? 'its kind'}`;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`spawn: ${def.id}:`, err);
+      this.hud.setPrompt(msg);
+      return msg;
+    } finally {
+      if (guard) this.spawning.delete(def.id);
+    }
+  }
+
+  /** The garage, loaded once whichever asks first (the panel, the edit page, the world or the console), and the world given the same one. */
+  private loadGarage(): Promise<Garage> {
+    const have = this.garage ?? this.world.garage;
+    if (have) {
+      this.garage = have;
+      this.world.garage = have;
+      return Promise.resolve(have);
+    }
+    this.garageLoading ??= Garage.load(import.meta.env.BASE_URL).then((g) => {
+      // Something else may have loaded one meanwhile (a peer's ride, the world's own spawn): the first stays.
+      const keep = this.garage ?? this.world.garage ?? g;
+      this.garage = keep;
+      this.world.garage = keep;
+      this.garageLoading = null;
+      return keep;
+    });
+    return this.garageLoading;
+  }
+
+  /** The fit kept with the character for a garage id, or null (stock). Outside the world there is no record. */
+  private savedFit(id: string): ShipFit | null {
+    return this.current?.ships?.[id] ?? null;
+  }
+
+  /** Keep a ship's fit with the character (a stock one is dropped: absent is stock), written on a 300 ms debounce. */
+  private saveFit(id: string, fit: ShipFit): void {
+    const c = this.current;
+    if (!c || this.creating) return;
+    const packed = packFit(fit);
+    const ships = { ...(c.ships ?? {}) };
+    if (!Object.keys(packed.components).length && !Object.keys(packed.paint).length && !packed.droid) delete ships[id];
+    else ships[id] = packed;
+    c.ships = ships;
+    window.clearTimeout(this.fitSaveTimer);
+    this.fitSaveTimer = window.setTimeout(() => this.flushFits(), 300);
+  }
+
+  /** Write a fit still waiting on the debounce now (closing the page, a spawn, leaving the page). */
+  private flushFits(): void {
+    if (!this.fitSaveTimer) return;
+    window.clearTimeout(this.fitSaveTimer);
+    this.fitSaveTimer = 0;
+    if (this.current && !this.creating) upsertCharacter(this.current);
+  }
+
+  /** A ship's fit as the character keeps it, resolved against its chassis (null for anything without a fit). */
+  private fitFor(def: VehicleDef): ResolvedFit | null {
+    if (!def.fit) return null;
+    const g = this.world.garage ?? this.garage;
+    return g?.resolve(def, this.savedFit(def.id)) ?? null;
+  }
+
+  /** The garage's edit button: the page, over the world, with the mouse free. */
+  private openShipEdit(def: VehicleDef): void {
+    this.closePanels();
+    void this.shipEdit.show(def).catch((err) => console.warn(`ship edit: ${def.id}`, err));
+    this.freeMouse(true);
+  }
+
+  /**
+   * The edit page closed: the fit written, every spawned ship of that id refitted in place (parts
+   * staged, compiled and painted before one swap), and the others told once (the hello's debounce)
+   * when it is the ship this player is known by.
+   */
+  private async refitSpawned(def: VehicleDef): Promise<void> {
+    this.flushFits();
+    const next = this.fitFor(def);
+    // Leaving the world refits nothing: its vehicles are about to go. A character switch closes the panels
+    // first and leaves the world in the same step, so the check waits that step out.
+    await Promise.resolve();
+    if (next && this.inWorld && !this.traveling) {
+      const key = fitKey(next);
+      for (const v of [...this.world.vehicles]) {
+        if (v.def?.id !== def.id || !v.fit || fitKey(v.fit) === key || !this.world.vehicles.includes(v)) continue;
+        try {
+          // After any refit of this ship still in flight, to the fit kept when its turn comes.
+          await this.queueRefit(v, async () => {
+            const now = this.fitFor(def);
+            if (!now || !v.fit || fitKey(v.fit) === fitKey(now) || !this.world.vehicles.includes(v)) return;
+            const r = await this.world.refitVehicle(v, now);
+            if (r.waiting.length) console.info(`ship edit: ${def.id}: waiting for a mount: ${r.waiting.join('; ')}`);
+          });
+        } catch (err) {
+          console.warn(`ship edit: ${def.id}: the spawned ship could not be refitted`, err);
+        }
+      }
+    }
+    if (def.id === this.helloShipId) this.queueHello();
+  }
+
+  /**
+   * Run a refit of one spawned ship after any still in flight for it. `Garage.refit` stages from the ship's
+   * fit as it stands and only sets the new one at the swap, so two staged from the same fit could leave the
+   * model showing one part and `v.fit` naming another; one after the other, each starts from the last.
+   */
+  private queueRefit<T>(v: Vehicle, work: () => Promise<T>): Promise<T> {
+    const before = this.refitting.get(v) ?? Promise.resolve();
+    const run = before.catch(() => {}).then(work);
+    this.refitting.set(v, run);
+    void run
+      .catch(() => {})
+      .finally(() => {
+        if (this.refitting.get(v) === run) this.refitting.delete(v);
+      });
+    return run;
+  }
+
+  /** The ship this player is known by on the relay: the one ridden, flown or aboard, else the last fitted one stood out or flown, with its fit. */
+  private helloShip(): { id: string; fit: ShipFit } | undefined {
+    const p = this.player;
+    const v = p.mounted ?? p.piloting ?? p.aboard?.vehicle ?? null;
+    const def = v?.def?.fit ? v.def : this.lastShipDef?.fit ? this.lastShipDef : null;
+    if (!def) return undefined;
+    return { id: def.id, fit: packFit(this.savedFit(def.id) ?? stockFit()) };
+  }
+
+  /** The ship ridden, flown or boarded, else the nearest ship spawned, for the console. */
+  private nearShip(): Vehicle | null {
+    const p = this.player;
+    const own = p.mounted ?? p.piloting ?? p.aboard?.vehicle ?? null;
+    if (own?.spec.ship) return own;
+    let best: Vehicle | null = null;
+    let bestD = Infinity;
+    for (const v of this.world.vehicles) {
+      if (!v.spec.ship) continue;
+      const d = v.pos.distanceTo(p.worldPos);
+      if (d < bestD) {
+        bestD = d;
+        best = v;
+      }
+    }
+    return best;
+  }
+
+  /** Up to `n` drawn frames (a hidden tab draws none: the wait ends after `timeoutMs`); how many were seen. */
+  private waitFrames(n: number, timeoutMs = 2000): Promise<number> {
+    return new Promise((resolve) => {
+      let seen = 0;
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        resolve(seen);
+      };
+      const step = () => {
+        if (done) return;
+        if (++seen >= n) finish();
+        else requestAnimationFrame(step);
+      };
+      requestAnimationFrame(step);
+      window.setTimeout(finish, timeoutMs);
+    });
+  }
+
+  /**
+   * Run a refit or repaint of a ship and count the programs made by its swap over the two frames after it.
+   * `compiledOnSwap` counts only the new programs that belong to what the ship draws (its model, parts,
+   * glows and trails): a change of gun also warms the new bolt's fire and hit effects far below the world
+   * (`World.warmShipFx`), which compile on those same frames and are the warm-up doing its work, not the
+   * swap; they are in `programsAfter - programsBefore` and `warmed` says a warm-up was started.
+   */
+  private async measureSwap<T>(v: Vehicle, work: () => Promise<T>): Promise<{ report: T; programsBefore: number; programsAfter: number; compiledOnSwap: number; warmed: boolean; frames: number }> {
+    const report = await work();
+    const r = this.renderer;
+    const programsBefore = r.info.programs?.length ?? 0;
+    const known = new Set(r.info.programs ?? []);
+    const frames = await this.waitFrames(2);
+    const programsAfter = r.info.programs?.length ?? 0;
+    // The ship's materials now (the swap's parts, the paint's copies, the glows and the trails' ribbons).
+    const mats = new Set<THREE.Material>();
+    const collect = (o: THREE.Object3D) => {
+      const m = (o as THREE.Mesh).material;
+      if (!m) return;
+      for (const x of Array.isArray(m) ? m : [m]) mats.add(x);
+    };
+    v.group.traverse(collect);
+    for (const t of v.trails) t.mesh.traverse(collect);
+    const made = new Set<unknown>();
+    for (const m of mats) {
+      if (!r.properties.has(m)) continue;
+      const programs = (r.properties.get(m) as { programs?: Map<string, unknown> }).programs;
+      for (const p of programs?.values() ?? []) if (!known.has(p as THREE.WebGLProgram)) made.add(p);
+    }
+    const warmed = !!(report as { weaponsChanged?: boolean } | null)?.weaponsChanged;
+    return { report, programsBefore, programsAfter, compiledOnSwap: made.size, warmed, frames };
+  }
+
+  /** The console's refit: a slot's component ('' empties it) or the droid, kept with the character, on the ship ridden (else the nearest). */
+  private async debugRefit(slot: string, component: string): Promise<unknown> {
+    const v = this.nearShip();
+    const def = v?.def;
+    if (!v || !def?.fit || !v.fit) return v ? `${v.spec.id} has no fit (a pack converted before ship customization)` : "no ship: spawn one (spawn('xwing')) or board one";
+    const s = slot === 'droid' ? null : def.fit.slots.find((x) => x.slot === slot);
+    if (slot !== 'droid' && (!s || s.fixed)) return `${def.id} has no slot ${slot} to fit; its slots: ${def.fit.slots.filter((x) => !x.fixed).map((x) => x.slot).join(', ')}, droid`;
+    const fit = copyShipFit(this.savedFit(def.id) ?? stockFit());
+    if (slot === 'droid') {
+      if (component) fit.droid = component;
+      else delete fit.droid;
+    } else if (component === (s!.stock ?? '')) delete fit.components[slot];
+    else fit.components[slot] = component;
+    this.saveFit(def.id, fit);
+    this.flushFits();
+    const next = this.fitFor(def);
+    if (!next) return 'the garage is not loaded';
+    // After any refit of this ship still in flight (the page's close, an earlier call).
+    const out = await this.queueRefit(v, () => this.measureSwap(v, () => this.world.refitVehicle(v, this.fitFor(def) ?? next)));
+    // The other spawned ships of that id follow, and the others are told.
+    void this.refitSpawned(def);
+    return { ...out, fitted: slot === 'droid' ? next.droid : (next.components[slot] ?? null), notes: next.notes };
+  }
+
+  /** The console's repaint: paint values kept with the character (a repaint in place), or each shader's own texture ('static') and back ('custom'). */
+  private async debugPaint(values: Record<string, number> | 'static' | 'custom'): Promise<unknown> {
+    const v = this.nearShip();
+    const def = v?.def;
+    if (!v || !def?.fit || !v.fit) return v ? `${v.spec.id} has no fit (a pack converted before ship customization)` : "no ship: spawn one (spawn('xwing')) or board one";
+    if (!v.paint || !def.fit.paint) return `${def.id}'s paint is fixed in the game: its shaders take no colours`;
+    const paint = v.paint;
+    if (values === 'static' || values === 'custom') return this.queueRefit(v, () => this.measureSwap(v, () => paint.showStatic(values === 'static')));
+    const fit = copyShipFit(this.savedFit(def.id) ?? stockFit());
+    for (const [k, n] of Object.entries(values)) fit.paint[k] = n;
+    this.saveFit(def.id, fit);
+    this.flushFits();
+    const next = this.fitFor(def);
+    if (!next) return 'the garage is not loaded';
+    const out = await this.queueRefit(v, () => this.measureSwap(v, () => this.world.refitVehicle(v, this.fitFor(def) ?? next)));
+    void this.refitSpawned(def);
+    return { ...out, paint: next.paint, painted: next.painted, custom: paint.custom };
+  }
+
+  /** The console's view of a fit: a spawned ship's as it stands (parts hung, waiting, guns), or a garage id's stock. */
+  private async shipFitReport(id?: string): Promise<unknown> {
+    const g = await this.loadGarage();
+    const describe = (def: VehicleDef, fit: ResolvedFit) => {
+      const fd = def.fit!;
+      const labelOf = (name: string | null | undefined) => (name ? (g.components[g.componentByName.get(name) ?? -1]?.label ?? name) : null);
+      return {
+        chassis: fd.chassis,
+        slots: fd.slots.filter((s) => !s.fixed).map((s) => ({ slot: s.slot, label: slotLabel(s), component: fit.components[s.slot] ?? null, name: labelOf(fit.components[s.slot]), look: fit.looks[s.slot] ?? -1, looks: s.looks.length, stock: s.stock })),
+        fixed: fd.slots.filter((s) => s.fixed).length,
+        droid: fit.droid,
+        socket: fd.droid,
+        paint: fit.paint,
+        painted: fit.painted,
+        notes: fit.notes,
+      };
+    };
+    if (id) {
+      const def = g.find(id);
+      if (!def) return `no vehicle matches ${id}`;
+      if (!def.fit) return `${def.id} has no fit in this pack (converted before ship customization): npm run swg -- ships @SWG assets-private --retail-only`;
+      const stock = g.resolve(def, null);
+      if (!stock) return `${def.id}: the garage could not resolve its fit`;
+      const parts = partsOf(def.fit, def.id, stock, g.droids);
+      return { ship: def.id, fit: 'stock', ...describe(def, stock), parts: parts.map((p) => `${p.slot}: ${p.path.replace(/^.*\//, '')} on ${p.hardpoint || 'the origin'}`), partCount: parts.length, kept: this.savedFit(def.id) };
+    }
+    const v = this.nearShip();
+    if (!v) return "no ship: spawn one, board one, or give a garage id (shipFit('xwing'))";
+    const def = v.def;
+    if (!def?.fit || !v.fit) return `${v.spec.id} has no fit (a pack converted before ship customization)`;
+    const parts: string[] = [];
+    for (const [slot, roots] of v.build?.fitParts ?? []) for (const r of roots) parts.push(`${slot}: ${r.name || r.userData.name || '(part)'}`);
+    return {
+      ship: def.id,
+      fit: 'spawned',
+      ...describe(def, v.fit),
+      parts,
+      partCount: parts.length,
+      pending: (v.build?.pending ?? []).map((p) => `${p.slot}: ${p.label} waits for hardpoint ${p.hardpoint}`),
+      custom: v.paint?.custom ?? false,
+      guns: v.guns.map((gun) => ({ slot: gun.slot ?? null, hardpoint: gun.hardpoint ?? null, weapon: (gun.weapon ?? v.weapon)?.name ?? null, projectile: (gun.weapon ?? v.weapon)?.projectile ?? null, live: !!gun.node?.parent })),
+      kept: this.savedFit(def.id),
+    };
   }
 
   /** Put a weapon from the rack in a hand (null empties it), switching to the kit that fights with it. */

@@ -23,6 +23,8 @@ export class VehiclesUi {
   open = false;
   /** A click on another tab: the game swaps the panels. */
   onTab: (id: string) => void = () => {};
+  /** A ship's edit button: the game opens its edit page (components, droid and paint). */
+  onEdit: (def: VehicleDef) => void = () => {};
 
   constructor(parent: HTMLElement, private readonly onSpawn: (def: VehicleDef, kind?: VehicleKind) => void, private readonly onClear: () => number) {
     this.root = document.createElement('div');
@@ -82,7 +84,9 @@ export class VehiclesUi {
       const items = list.map((v) => {
         const other = KINDS.filter((o) => o.id !== v.kind).map((o) => `<option value="${o.id}">as ${escapeHtml(o.label.toLowerCase())}</option>`).join('');
         const tags = [v.source === 'ship' ? '' : v.source, v.inferred ? '' : 'kind guessed'].filter(Boolean).join(' · ');
-        return `<div class="cat-item" title="${escapeHtml(v.id)}"><span class="cat-name">${escapeHtml(v.label)}${tags ? ` <small>${escapeHtml(tags)}</small>` : ''}</span><span class="cat-hands"><button data-id="${v.id}" title="stand one beside you">spawn</button><select data-id="${v.id}" title="try it as another kind"><option value="">as…</option>${other}</select></span></div>`;
+        // A ship the pack gave a fit has an edit page; one converted before shows the spawn button only.
+        const edit = v.kind === 'ship' && v.fit ? `<button data-edit="${v.id}" title="components, droid and paint">edit</button>` : '';
+        return `<div class="cat-item" title="${escapeHtml(v.id)}"><span class="cat-name">${escapeHtml(v.label)}${tags ? ` <small>${escapeHtml(tags)}</small>` : ''}</span><span class="cat-hands">${edit}<button data-id="${v.id}" title="stand one beside you">spawn</button><select data-id="${v.id}" title="try it as another kind"><option value="">as…</option>${other}</select></span></div>`;
       });
       html.push(groupHtml(k.id, k.label, list.length, k.blurb, this.groups.isOpen(k.id, !!find), items.join('')));
     }
@@ -93,6 +97,12 @@ export class VehiclesUi {
       b.addEventListener('click', () => {
         const def = g.vehicles.find((v) => v.id === b.dataset.id);
         if (def) this.onSpawn(def);
+      });
+    }
+    for (const b of this.body.querySelectorAll<HTMLButtonElement>('button[data-edit]')) {
+      b.addEventListener('click', () => {
+        const def = g.vehicles.find((v) => v.id === b.dataset.edit);
+        if (def) this.onEdit(def);
       });
     }
     for (const sel of this.body.querySelectorAll<HTMLSelectElement>('select[data-id]')) {
