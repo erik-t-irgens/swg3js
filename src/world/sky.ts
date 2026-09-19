@@ -272,6 +272,8 @@ interface FlareBody {
   readonly color: THREE.Color | null;
   /** The moon slot carrying a sun (Mustafar): a night sun. */
   readonly night: boolean;
+  /** A space star group whose direction lies inside a planet's disc (setSpaceOccluders): never flares. */
+  occluded: boolean;
 }
 
 export class SwgSky {
@@ -484,10 +486,18 @@ export class SwgSky {
       this.group.add(box);
     }
 
-    const sprite = (image: CelestialImage | null, size: number, additive: boolean): THREE.Sprite | null => {
+    // `opaqueList` (a space zone's star sprites): the sprite is drawn in three's opaque list, before
+    // the planets (renderOrder -4 there, writing no depth), so a planet covers the stars behind it.
+    // Three turns blending off only for Normal on a material that is not transparent, so an alpha
+    // image blends through the same factors as Custom.
+    const sprite = (image: CelestialImage | null, size: number, additive: boolean, opaqueList = false): THREE.Sprite | null => {
       const tex = image ? textures.get(image.file) : null;
       if (!tex || size <= 0) return null;
-      const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false, fog: false, blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending });
+      const mat = opaqueList
+        ? additive
+          ? new THREE.SpriteMaterial({ map: tex, transparent: false, depthWrite: false, fog: false, blending: THREE.AdditiveBlending })
+          : new THREE.SpriteMaterial({ map: tex, transparent: false, depthWrite: false, fog: false, blending: THREE.CustomBlending, blendEquation: THREE.AddEquation, blendSrc: THREE.SrcAlphaFactor, blendDst: THREE.OneMinusSrcAlphaFactor })
+        : new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false, fog: false, blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending });
       const s = new THREE.Sprite(mat);
       const width = (2 * size * SKY_RADIUS) / CELESTIAL_DISTANCE;
       s.scale.set(width, width, 1);
@@ -525,7 +535,7 @@ export class SwgSky {
       for (const [c] of slots) if (c && isFlareBody(c)) glowMax = Math.max(glowMax, c.glowSize);
       for (const [c, sprites, night] of slots) {
         if (!c || !isFlareBody(c) || sprites.length < 2) continue;
-        this.flareBodies.push({ sprites, discRadius: angularRadius(c.size, DISC_FILL), glowRadius: angularRadius(c.glowSize, GLOW_FILL), weight: c.glowSize / glowMax, star: false, color: null, night });
+        this.flareBodies.push({ sprites, discRadius: angularRadius(c.size, DISC_FILL), glowRadius: angularRadius(c.glowSize, GLOW_FILL), weight: c.glowSize / glowMax, star: false, color: null, night, occluded: false });
       }
       // Stable: sun, second sun, moon slot, second moon slot among equals.
       this.flareBodies.sort((a, b) => b.weight - a.weight);
@@ -539,7 +549,7 @@ export class SwgSky {
       const made: { c: SpaceEnvironment['celestials'][number]; s: THREE.Sprite }[] = [];
       for (const c of space.celestials) {
         const additive = c.image?.alphaMode !== 'BLEND';
-        const s = sprite(c.image, c.size, additive);
+        const s = sprite(c.image, c.size, additive, true);
         if (!s) continue;
         s.position.copy(SwgSky.direction(c.yaw, THREE.MathUtils.degToRad(c.pitch), tmpVec)).multiplyScalar(SKY_RADIUS);
         s.material.rotation = THREE.MathUtils.degToRad(c.roll);
@@ -556,7 +566,7 @@ export class SwgSky {
           color.multiplyScalar(tintScale(color.r, color.g, color.b));
         }
         const sprites = made.filter((m) => m.c.yaw === g.yaw && m.c.pitch === g.pitch).map((m) => m.s);
-        this.flareBodies.push({ sprites, discRadius: angularRadius(Math.max(g.backSize, g.glowSize), STAR_DISC_FILL), glowRadius: angularRadius(g.glowSize, STAR_GLOW_FILL), weight: g.weight, star: true, color, night: false });
+        this.flareBodies.push({ sprites, discRadius: angularRadius(Math.max(g.backSize, g.glowSize), STAR_DISC_FILL), glowRadius: angularRadius(g.glowSize, STAR_GLOW_FILL), weight: g.weight, star: true, color, night: false, occluded: false });
       }
       if (space.dust && space.dust.count > 0) {
         const n = Math.min(space.dust.count, 4000);
@@ -623,7 +633,8 @@ export class SwgSky {
       const g = new THREE.BufferGeometry();
       g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
       g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
-      const mat = new THREE.PointsMaterial({ size: 2.2, sizeAttenuation: false, vertexColors: true, transparent: true, depthWrite: false, fog: false, blending: THREE.AdditiveBlending });
+      // In space the field is drawn in the opaque list (additive all the same), before the planets, which cover it.
+      const mat = new THREE.PointsMaterial({ size: 2.2, sizeAttenuation: false, vertexColors: true, transparent: !space, depthWrite: false, fog: false, blending: THREE.AdditiveBlending });
       this.stars = new THREE.Points(g, mat);
       this.stars.renderOrder = -6;
       this.stars.frustumCulled = false;
@@ -1205,7 +1216,7 @@ export class SwgSky {
       }
       // place() put it at dir x SKY_RADIUS in the camera-following group.
       if (lit) o.dir.copy(lit.position).multiplyScalar(1 / SKY_RADIUS);
-      o.alpha = lit && this.group.visible && !(b.night && !nightSuns) ? lit.material.opacity : 0;
+      o.alpha = lit && this.group.visible && !b.occluded && !(b.night && !nightSuns) ? lit.material.opacity : 0;
       o.discRadius = b.discRadius;
       o.glowRadius = b.glowRadius;
       o.weight = b.weight;
@@ -1215,6 +1226,21 @@ export class SwgSky {
       else o.color.copy(main).multiplyScalar(k);
     }
     return n;
+  }
+
+  /**
+   * A space zone's planets and moons as discs on the sky (a unit direction in the scene's frame and
+   * the cosine of the disc's angular radius), fixed for the zone since they ride the camera as the
+   * star sprites do: a star group whose direction lies inside one is behind that body and never
+   * flares (the flare's occlusion reads depth, and the bodies write none). Called once, after the
+   * bodies are built; allocates nothing afterwards.
+   */
+  setSpaceOccluders(discs: readonly { readonly dir: THREE.Vector3; readonly cos: number }[]): void {
+    for (const b of this.flareBodies) {
+      if (!b.star || b.sprites.length === 0) continue;
+      const d = tmpVec.copy(b.sprites[0].position).normalize();
+      b.occluded = discs.some((disc) => d.dot(disc.dir) > disc.cos);
+    }
   }
 
   /**

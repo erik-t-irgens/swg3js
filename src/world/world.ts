@@ -961,6 +961,7 @@ export class World {
     this.spaceStations = (data.stations ?? []).map((s) => ({ name: s.name, title: s.title && s.title !== s.name ? s.title : null, x: -s.x, z: s.z }));
     const group = new THREE.Group();
     const loader = new THREE.TextureLoader();
+    const discs: { dir: THREE.Vector3; cos: number }[] = [];
     for (const p of data.planets) {
       // The direction is in the game's own coordinates, mirrored in X like everything converted.
       const dir = new THREE.Vector3(-p.direction[0], p.direction[1], p.direction[2]);
@@ -973,10 +974,15 @@ export class World {
       mesh.renderOrder = -4;
       mesh.frustumCulled = false;
       group.add(mesh);
+      // The disc it covers on the sky, for the lens flare (SwgSky.setSpaceOccluders).
+      const sin = Math.min(1, (SPACE_BODY_SIZE * p.size) / SPACE_BODY_DISTANCE);
+      discs.push({ dir: dir.clone(), cos: Math.sqrt(1 - sin * sin) });
     }
     this.spaceBodies = group;
     this.scene.add(group);
     markActor(group);
+    // A star behind a planet must not flare through it: the bodies write no depth for the flare to see.
+    this.swgSky?.setSpaceOccluders(discs);
     console.info(`space: ${group.children.length} planets and moons in the sky`);
   }
 
