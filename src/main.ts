@@ -622,24 +622,51 @@ class App {
       },
       center: () => this.world.layoutCenter,
       pois: (id) => galaxy.loadPois(id),
-      objects: () =>
-        this.world.placedObjects.map((o) => {
-          const station = o.template.includes('spacestation');
-          return { x: o.x, y: o.y, z: o.z, radius: o.radius, station, name: station ? this.world.stationNameAt(o.x, o.z) : undefined };
-        }),
-      ships: () => {
-        const p = this.player;
-        const mine = p.mounted ?? p.piloting ?? p.aboard?.vehicle ?? null;
-        const out = this.world.vehicles
-          .filter((v) => v.spec.ship)
-          .map((v) => ({ x: v.pos.x, y: v.pos.y, z: v.pos.z, quaternion: v.quaternion(new THREE.Quaternion()), mine: v === mine, label: v === mine ? 'your ship' : `a ship (${v.spec.label})` }))
-          .sort((a, b) => (b.mine ? 1 : 0) - (a.mine ? 1 : 0));
-        // On foot (adrift), the player is the mark the view centres on.
-        if (!mine) {
-          const at = p.worldPos;
-          out.unshift({ x: at.x, y: at.y, z: at.z, quaternion: p.eva ? p.evaFrame.clone() : new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), p.heading), mine: true, label: 'you' });
-        }
-        return out;
+      // The zone's placed things, read once per zone into the list the map owns: its stations and the
+      // rest of what it shows are marks from the pack, so only the rocks are wanted here.
+      objects: (out) => {
+        for (const o of this.world.placedObjects) out.add(o.x, o.y, o.z, o.radius, o.template.includes('spacestation'));
+      },
+      // The ships, written into the entries the map owns: this runs every frame the map draws, so it
+      // makes no array, no quaternion and no label of its own.
+      ships: (() => {
+        const q = new THREE.Quaternion();
+        const up = new THREE.Vector3(0, 1, 0);
+        const labels = new Map<string, string>();
+        return (out: import('./ui/spaceMapLayers.ts').ShipList) => {
+          const p = this.player;
+          const mine = p.mounted ?? p.piloting ?? p.aboard?.vehicle ?? null;
+          // On foot (adrift), the player is the mark the view follows.
+          if (!mine) {
+            const at = p.worldPos;
+            if (p.eva) q.copy(p.evaFrame);
+            else q.setFromAxisAngle(up, p.heading);
+            out.add(at.x, at.y, at.z, q.x, q.y, q.z, q.w, true, 'you');
+          }
+          for (const v of this.world.vehicles) {
+            if (!v.spec.ship) continue;
+            v.quaternion(q);
+            const isMine = v === mine;
+            let label = labels.get(v.spec.label);
+            if (!label) {
+              label = `a ship (${v.spec.label})`;
+              labels.set(v.spec.label, label);
+            }
+            out.add(v.pos.x, v.pos.y, v.pos.z, q.x, q.y, q.z, q.w, isMine, isMine ? 'your ship' : label);
+          }
+        };
+      })(),
+      pack: () => this.world.spaceData,
+      piloting: () => !!this.world.planet.space && !!this.pilotedShip(),
+      // The map's Hyperspace button: the map closes and the System Map opens on this system, where
+      // the place picked on the map is in the list. The System Map has no "pick this one" of its
+      // own yet, so it opens with the first place in that list picked and the map's pick is not
+      // carried. Closing the map asks for the mouse back and the System Map frees it again in the
+      // same click: that is deliberate, because the Hyperspace row refuses the jump in several
+      // cases (a countdown, no ship's controls) and the mouse must be right either way.
+      onHyperspace: () => {
+        if (this.map.open) this.toggleMap();
+        this.hyperspaceButton();
       },
       onTeleport: (poi) => void this.teleport(this.world.planet, poi, this.zone),
     });

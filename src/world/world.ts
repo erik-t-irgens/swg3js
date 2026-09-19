@@ -843,7 +843,6 @@ export class World {
     this.bolts.clear();
     this.gallery?.dispose();
     this.gallery = null;
-    this.spaceStations = [];
     this.spaceData = null;
     // The NPC ships go with the world: the manager forgets them (its spawns still being built throw theirs
     // away), the contacts are dropped, and the loop below disposes their vehicles with every other one.
@@ -896,26 +895,8 @@ export class World {
   /** A space zone's planets and moons: textured spheres hung far out in the directions the zone's terrain file gives, riding with the camera like the sky. */
   private spaceBodies: THREE.Group | null = null;
 
-  /** The zone's stations by name (the game's title when the pack has one), in the game's coordinates, for the map. */
-  private spaceStations: { name: string; title: string | null; x: number; z: number }[] = [];
-
   /** The space zone's whole pack (space.json), null on a ground planet and before it loads. Public, read-only by convention. */
   spaceData: SpacePack | null = null;
-
-  /** The name of the station standing at a point (the nearest within a kilometre): its title from the game's strings, else one made from its name, else a plain word. */
-  stationNameAt(x: number, z: number): string {
-    let best: { name: string; title: string | null } | null = null;
-    let bestD = 1000;
-    for (const s of this.spaceStations) {
-      const d = Math.hypot(s.x - x, s.z - z);
-      if (d < bestD) {
-        bestD = d;
-        best = s;
-      }
-    }
-    if (!best) return 'station';
-    return best.title ?? `station ${best.name.replace(/^station_/, '').replace(/_/g, ' ')}`;
-  }
 
   /** The name of the scenery at a point (the Star Destroyer): the nearest whose radius plus a kilometre covers it, or null. Game frame. */
   sceneryNameAt(x: number, z: number): string | null {
@@ -967,9 +948,6 @@ export class World {
       console.warn('npc ships: no anchors', err);
     }
     if (!data) return;
-    // The stations' names (and the game's titles), at the game's mirrored X.
-    // A pack converted before titles were written has none, and `normalise` fills the title with the raw name: that is no title.
-    this.spaceStations = (data.stations ?? []).map((s) => ({ name: s.name, title: s.title && s.title !== s.name ? s.title : null, x: -s.x, z: s.z }));
     const group = new THREE.Group();
     const loader = new THREE.TextureLoader();
     const discs: { dir: THREE.Vector3; cos: number }[] = [];
