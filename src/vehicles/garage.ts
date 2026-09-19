@@ -90,6 +90,8 @@ export interface VehicleDef {
   saddle?: SaddleDef | null;
   /** A ship's chassis slots with the components each takes and the parts each shows, its droid socket and its paint; absent on a pack converted before (or without components.json). */
   fit?: FitDef | null;
+  /** The manifest's class for a ship ('fighter', 'bomber', 'freighter', 'gunship', 'shuttle', 'other'). */
+  class?: string;
 }
 
 export interface ShipWeapon {
@@ -214,6 +216,7 @@ export class Garage {
             source: 'ship',
             file: `assets-private/ships/${sh.file}`,
             template: sh.template,
+            class: sh.class,
             bounds: sh.bounds,
             interior: sh.interior?.file ? { file: `assets-private/ships/${sh.interior.file}`, cells: sh.interior.cells ?? 0, def: { bounds: im?.bounds, cells: im?.cells, portals: im?.portals } } : null,
             cells: hull?.cells,
@@ -369,7 +372,7 @@ export class Garage {
         sp.scale.setScalar(0.2);
         group.add(sp);
         spare.sprites.push(sp);
-        if (v.spec.ship) spare.trails.push(new EngineTrail(v.glowColor, sp));
+        if (v.spec.ship) spare.trails.push(ownTrail(v, sp));
       }
       return spare.trails.map((t) => t.mesh);
     }, v.wings);
@@ -380,7 +383,7 @@ export class Garage {
       return { slots: [], parts: 0, waiting: [], repainted: false, weaponsChanged: false, ms: performance.now() - began };
     }
     // The swap: one synchronous step, nothing awaited (glows off the parts, the swap, the mounts measured, the glows re-hung).
-    const r = refitSwap(v, s.commit, v.build.root, thrusters, v.wings, v.spec.ship ? (sp) => new EngineTrail(v.glowColor, sp) : null, spare);
+    const r = refitSwap(v, s.commit, v.build.root, thrusters, v.wings, v.spec.ship ? (sp) => ownTrail(v, sp) : null, spare);
     v.fit = next;
     this.fitGuns(v, def, next, r.mounts);
     collectOnParts(v, v.build.root);
@@ -1227,11 +1230,16 @@ function collectPanes(v: Vehicle): void {
       clear.transparent = true;
       clear.opacity = Math.min(mat.transparent ? mat.opacity : 1, CLEAR_PANE);
       clear.depthWrite = false;
+      // This vehicle's alone: World.disposeVehicle forgets and disposes it.
+      v.ownedMaterials.push(clear);
       v.panes.push({ mesh: m, index: i, solid: mat, clear });
       const standIn = new THREE.Mesh(m.geometry, clear);
       standIn.visible = false;
       standIn.castShadow = false;
       standIn.layers.enable(ACTOR_LAYER);
+      // It shares the cached hull's geometry, which Vehicle.dispose must leave alone; the mark lets a spawn find it to compile.
+      standIn.userData.shared = true;
+      standIn.userData.paneStandIn = true;
       v.group.add(standIn);
     });
   }
@@ -1305,6 +1313,9 @@ function wireEngineGlow(v: Vehicle, glow: EngineGlow): void {
   v.glowMaterial = glow.mat;
   v.glowSize = glow.size;
   v.glowColor = glow.color;
+  // The glow's material and each trail's are this vehicle's alone: World.disposeVehicle forgets and disposes them.
+  v.ownedMaterials.push(glow.mat);
+  for (const t of glow.trails) v.ownedMaterials.push(t.mesh.material as THREE.Material);
   // The heat haze follows the same glows: each one's place, base size and its own noise offset.
   rebindGlows(v, glow.spots, null);
   const ship = !!v.spec.ship;
@@ -1314,7 +1325,10 @@ function wireEngineGlow(v: Vehicle, glow: EngineGlow): void {
     const size = self.glowSize;
     const throttle = drive ? Math.max(0, drive.throttle) : 0;
     const share = Math.min(1, Math.abs(self.speed) / self.spec.maxSpeed);
-    for (const t of self.trails) t.update(dt, self.airborne && Math.abs(self.speed) > 6 ? 0.5 * (0.3 + 0.7 * share + 0.3 * throttle) : 0, size * (0.015 + 0.0225 * share));
+    // An NPC ship not drawn (hidden by distance) draws no ribbon out of nothing. Only an autopilot's: the flown
+    // hull hidden in first person keeps its trails running, so zooming out shows no gap.
+    const shown = !self.autopilot || self.group.visible;
+    for (const t of self.trails) t.update(dt, shown && self.airborne && Math.abs(self.speed) > 6 ? 0.5 * (0.3 + 0.7 * share + 0.3 * throttle) : 0, size * (0.015 + 0.0225 * share));
     // The drive's own appearance while it runs; the cockpit frame and clear glass while someone is at the controls or aboard.
     const running = throttle > 0 || self.airborne || Math.abs(self.speed) > 1;
     for (const p of self.engineParts) p.visible = running;
@@ -1322,13 +1336,22 @@ function wireEngineGlow(v: Vehicle, glow: EngineGlow): void {
     // How hard the engines run, for the air shimmering behind them, and its noise flowing with it.
     self.engineHeat = engineHeatOf(running, share, throttle, self.boosting, self.overheated > 0);
     advanceEnginePhase(self, size, dt);
-    if (self.cockpitFrame) self.cockpitFrame.visible = drive !== null;
-    self.setGlassClear(drive !== null || self.occupied);
+    // An autopilot (an NPC ship) is nobody behind the canopy: the game's own solid glass, no frame.
+    const piloted = drive !== null && !self.autopilot;
+    if (self.cockpitFrame) self.cockpitFrame.visible = piloted;
+    self.setGlassClear(piloted || self.occupied);
     const k = size * (0.35 + 0.65 * Math.min(1, Math.abs(self.speed) / self.spec.maxSpeed) + 0.4 * throttle + (self.boosting ? 0.6 : 0)) * (self.overheated > 0 ? 0.4 + 0.3 * Math.random() : 1);
     // The live glows only (a refit's spare ones are parked, hidden).
     for (const e of self.engines) e.object.scale.set(k, k, 1);
     if (self.glowMaterial) self.glowMaterial.opacity = (ship ? 0.35 : 0.55) + 0.45 * Math.min(1, Math.abs(self.speed) / 8 + throttle);
   };
+}
+
+/** A trail for one of a vehicle's glows (a refit's), its material the vehicle's own: World.disposeVehicle forgets and disposes it. */
+function ownTrail(v: Vehicle, sprite: THREE.Sprite): EngineTrail {
+  const t = new EngineTrail(v.glowColor, sprite);
+  v.ownedMaterials.push(t.mesh.material as THREE.Material);
+  return t;
 }
 
 /** The "on" appearances of a model (an engine's while the drive runs, a booster's only while boosting), collected afresh (a refit brings its own). */

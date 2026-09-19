@@ -33,10 +33,29 @@ export interface SpawnReport {
   note: string;
 }
 
+/**
+ * The starships of the NPC tab: the NPC ship families by faction (one row per hull family, with the tiers it
+ * has), stood ahead of the view one at a time or three in their faction's formation. Built by the game at
+ * click time; `missing` is the sentence to show instead when the ships pack has no combat file.
+ */
+export interface ShipSpawner {
+  families(): { faction: string; label: string; rows: { family: string; label: string; tiers: number[] }[] }[];
+  /** The tier a row starts at: the zone's (3 on a planet). */
+  defaultTier(): number;
+  /** Stand one, or three in formation; resolves to the sentence for the count line. */
+  spawn(family: string, tier: number, count: 1 | 3): Promise<string>;
+  /** Take away the NPC ships of a family (every one with none); returns how many. */
+  clear(family?: string): number;
+  count(family: string): number;
+  missing: string | null;
+}
+
 /** What the panel needs from the game. The catalogue is a getter: it may land after the tab is first opened. */
 export interface SpawnerDeps {
   /** The machines of the old tab: the turret, the fighter, this planet's creature. */
   kinds: NpcKind[];
+  /** The NPC starships, when the game offers them. */
+  ships?: ShipSpawner;
   catalogue(): MobileCatalogue | null;
   /** Out and loading, by entry id. */
   counts(): Map<string, { out: number; loading: number }>;
@@ -81,6 +100,8 @@ export class NpcUi {
   private refreshTimer = 0;
   /** The last thing said on the count line, kept until the next action. */
   private note = '';
+  /** Each starship row's chosen tier, by family, kept across renders (the catalogue landing redraws the body). */
+  private readonly shipTiers = new Map<string, number>();
   open = false;
   /** A click on another tab: the game swaps the panels. */
   onTab: (id: string) => void = () => {};
@@ -132,6 +153,13 @@ export class NpcUi {
     });
     // One listener for every button in the body, by what it is for.
     this.body.addEventListener('click', (e) => this.onClick(e));
+    // A starship row's tier, kept by family.
+    this.body.addEventListener('change', (e) => {
+      const sel = e.target as HTMLSelectElement;
+      if (sel?.tagName !== 'SELECT' || sel.dataset.shipTier === undefined) return;
+      const tier = Number(sel.value);
+      if (Number.isFinite(tier)) this.shipTiers.set(sel.dataset.shipTier, tier);
+    });
     // A group opened for the first time builds its rows ('toggle' does not bubble: caught on the way down).
     this.body.addEventListener(
       'toggle',
@@ -172,7 +200,7 @@ export class NpcUi {
     this.drawnFor = cat;
     this.groupsByKey.clear();
     this.drawn.clear();
-    const parts: string[] = [this.kindsHtml(deps)];
+    const parts: string[] = [this.kindsHtml(deps), this.shipsHtml(deps)];
     const query = this.find.value.trim();
     if (!cat) {
       parts.push(`<div class="mob-missing">${escapeHtml(deps.missing)}</div>`);
@@ -194,6 +222,47 @@ export class NpcUi {
   private kindsHtml(deps: SpawnerDeps): string {
     const rows = deps.kinds.map((k) => `<div class="cat-item" title="${escapeHtml(k.blurb)}"><span class="cat-name">${escapeHtml(k.label)} <small>${escapeHtml(k.blurb)}</small></span><span class="cat-hands"><span class="cat-badge" data-kind-count="${escapeHtml(k.id)}"></span><button data-kind-spawn="${escapeHtml(k.id)}" title="stand one ahead of you">spawn</button><button data-kind-clear="${escapeHtml(k.id)}" title="take every one away">clear</button></span></div>`);
     return groupHtml('kinds', 'Machines and fighters', deps.kinds.length, 'stood ahead of you, facing you', this.groups.isOpen('kinds', true), rows.join(''));
+  }
+
+  /**
+   * The starships: a folding group per faction, a row per hull family with its tier picker, its count and
+   * one, patrol and clear. No element here carries `data-count`, which `refresh` rewrites for the catalogue's rows.
+   * With no combat file, one line with the command that makes it.
+   */
+  private shipsHtml(deps: SpawnerDeps): string {
+    const ships = deps.ships;
+    if (!ships) return '';
+    if (ships.missing) return `<div class="mob-missing">${escapeHtml(ships.missing)}</div>`;
+    const note = 'flies at you from about 700 m ahead; hostile ones attack your ship; nothing moves while this panel is open';
+    const start = ships.defaultTier();
+    const out: string[] = [];
+    for (const g of ships.families()) {
+      if (!g.rows.length) continue;
+      const rows = g.rows.map((r) => {
+        const fam = escapeHtml(r.family);
+        const style = /_(s\d\d)$/.exec(r.family)?.[1];
+        const tiers = r.tiers.length ? r.tiers : [1];
+        const kept = this.shipTiers.get(r.family);
+        // The zone's tier, or the family's nearest to it.
+        const want = kept !== undefined && tiers.includes(kept) ? kept : tiers.reduce((best, t) => (Math.abs(t - start) < Math.abs(best - start) ? t : best), tiers[0]);
+        const options = tiers.map((t) => `<option${t === want ? ' selected' : ''}>${t}</option>`).join('');
+        return `<div class="cat-item ship-row" data-ship-row="${fam}" title="${fam}"><span class="cat-name">${escapeHtml(r.label)}${style ? ` <small>${escapeHtml(style)}</small>` : ''}</span><span class="cat-hands"><select class="ship-tier" data-ship-tier="${fam}" title="tier">${options}</select><span class="cat-badge" data-ship-count="${fam}"></span><button data-ship-one="${fam}" title="stand one ahead of you">one</button><button data-ship-patrol="${fam}" title="stand three in formation ahead of you">patrol</button><button data-ship-clear="${fam}" title="take away every one of this family, a patrol's too (a patrol comes back later)">clear</button></span></div>`;
+      });
+      const key = `ships:${g.faction}`;
+      out.push(groupHtml(key, g.label, g.rows.length, note, this.groups.isOpen(key, false), rows.join('')));
+    }
+    return out.join('');
+  }
+
+  /** The tier a starship row has picked (its select, else the kept one, else the zone's). */
+  private shipTier(family: string): number {
+    for (const el of this.body.querySelectorAll<HTMLSelectElement>('select[data-ship-tier]')) {
+      if (el.dataset.shipTier === family) {
+        const n = Number(el.value);
+        if (Number.isFinite(n)) return n;
+      }
+    }
+    return this.shipTiers.get(family) ?? this.deps?.ships?.defaultTier() ?? 1;
   }
 
   /** A group's heading with its buttons, its rows left to `fill`. */
@@ -310,6 +379,16 @@ export class NpcUi {
       this.say(`${deps.clear((e) => ids.has(e.id))} taken away`);
     } else if (d.more !== undefined) {
       this.fill(d.more);
+    } else if ((d.shipOne !== undefined || d.shipPatrol !== undefined) && deps.ships) {
+      const family = (d.shipOne ?? d.shipPatrol)!;
+      const count: 1 | 3 = d.shipOne !== undefined ? 1 : 3;
+      this.say(`standing ${count === 1 ? 'one' : 'a patrol'}…`);
+      void deps.ships.spawn(family, this.shipTier(family), count).then(
+        (s) => this.say(s),
+        (err: unknown) => this.say(`not stood: ${err instanceof Error ? err.message : String(err)}`),
+      );
+    } else if (d.shipClear !== undefined && deps.ships) {
+      this.say(`${deps.ships.clear(d.shipClear)} taken away`);
     }
   }
 
@@ -346,6 +425,15 @@ export class NpcUi {
       const n = k?.count() ?? 0;
       const text = n ? `${n} out` : '';
       if (el.textContent !== text) el.textContent = text;
+    }
+    // The starships' own badges, in a loop of their own.
+    const ships = deps.ships;
+    if (ships) {
+      for (const el of this.body.querySelectorAll<HTMLElement>('[data-ship-count]')) {
+        const n = ships.count(el.dataset.shipCount ?? '');
+        const text = n ? `${n} out` : '';
+        if (el.textContent !== text) el.textContent = text;
+      }
     }
   }
 

@@ -39,6 +39,8 @@ export class Hud {
   private readonly leadLine: HTMLElement;
   private readonly leadCross: HTMLElement[];
   private readonly tlabel: HTMLElement;
+  /** The target box's class as last written ('' before the first target), so it is set only on a change. */
+  private targetKind = '';
   private slots: HTMLElement[] = [];
   private hurtLevel = 0;
   private lastFps = performance.now();
@@ -131,9 +133,15 @@ export class Hud {
    * and hull under it, and the lead reticle where the guns must point for a bolt fired now to
    * meet it, joined to the box by a line. Nothing while there is no target.
    */
-  setTarget(t: { x: number; y: number; onScreen: boolean; leadX: number; leadY: number; leadOnScreen: boolean; label: string } | null): void {
+  setTarget(t: { x: number; y: number; onScreen: boolean; leadX: number; leadY: number; leadOnScreen: boolean; label: string; kind?: 'enemy' | 'friend' | 'neutral' } | null): void {
     this.targets.classList.toggle('hidden', !t);
     if (!t) return;
+    // The box's colour says what the target is to the pilot: red an enemy, green a friend, white neither.
+    const kind = t.kind ?? 'neutral';
+    if (kind !== this.targetKind) {
+      this.targetKind = kind;
+      this.tbox.setAttribute('class', `tbox ${kind}`);
+    }
     const w = window.innerWidth;
     const h = window.innerHeight;
     // A target off the screen is kept at its edge, so the pilot knows which way to turn.

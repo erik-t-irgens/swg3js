@@ -411,6 +411,18 @@ b { color: var(--accent); font-weight: 600; }
 #hyperspace-veil { position: fixed; inset: 0; background: #eaf4ff; opacity: 0; transition: opacity var(--veil-s, 0.4s) linear; z-index: 0; pointer-events: none; }
 #hyperspace-count { position: fixed; top: 22%; left: 50%; transform: translateX(-50%); z-index: 0; pointer-events: none; font-size: 22px; font-weight: 600; letter-spacing: 0.16em; color: var(--accent); text-shadow: 0 0 12px rgba(0,0,0,0.9), 0 1px 2px #000; white-space: nowrap; }
 
+/* Space combat: the target box by what the target is to the pilot, the NPC pilots' comms at the top, the flown ship's condition over the health bar, the NPC tab's tier picker. */
+.targets .tbox.enemy { stroke: #ff5a4a; }
+.targets .tbox.friend { stroke: #6adf7a; }
+.targets .tbox.neutral { stroke: #ffffff; }
+#ship-hud { position: absolute; inset: 0; pointer-events: none; }
+#ship-hud .comms { position: absolute; top: 14px; left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 4px; max-width: min(760px, 80vw); }
+#ship-hud .comms-line { padding: 4px 12px; background: var(--panel); border: 1px solid var(--panel-border); border-radius: 5px; font-size: 13px; line-height: 1.4; text-align: center; text-shadow: 0 1px 2px #000; }
+#ship-hud .comms-line .who { font-weight: 600; }
+#ship-hud .status { position: absolute; left: 50%; bottom: 128px; transform: translateX(-50%); padding: 3px 10px; background: var(--panel); border: 1px solid var(--panel-border); border-radius: 5px; font-family: ui-monospace, Menlo, monospace; font-size: 11px; white-space: nowrap; }
+.cat-hands select.ship-tier { max-width: 40px; }
+.ship-row .cat-name small { color: var(--muted); }
+
 /* The Escape menu: a nav down the left, a page on the right. */
 #menu .menu-panel { width: min(1040px, 94vw); height: min(720px, 90vh); display: flex; background: var(--panel); border: 1px solid var(--panel-border); border-radius: 10px; overflow: hidden; }
 .menu-nav { flex: 0 0 200px; display: flex; flex-direction: column; gap: 4px; padding: 18px 12px; border-right: 1px solid var(--panel-border); background: rgba(0,0,0,0.25); }

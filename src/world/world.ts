@@ -35,6 +35,9 @@ import { isShadowOnly } from '../core/fxRegistry.ts';
 import { addPointLight, fillCascades, luminanceOf, resetFxLights, setDirectional, type FxLights } from '../core/fx/lights';
 import { ParticleEffects, type EffectHandle } from './particles';
 import { loadSpacePack, type SpacePack } from '../space/spaceData.ts';
+import { ShipContacts } from '../space/contacts';
+import { NpcShipManager } from '../space/npcShips';
+import { ZONE_TIER } from '../space/roster';
 import { CSM } from 'three/examples/jsm/csm/CSM.js';
 import { ACTOR_LAYER, INTERIOR_LAYER, markActor, type PortalRenderer } from './portalRender';
 import { createPlaceholderSpeeder } from '../vehicles/speeder';
@@ -273,6 +276,16 @@ export class World {
   /** Every vehicle on the world: the placeholder bike and whatever the garage (B) spawned. */
   readonly vehicles: Vehicle[] = [];
   garage: Garage | null = null;
+  /**
+   * The ships that fight (NPC ships, the player's, idle garage ships), beside the living list and not in it.
+   * Assigned in the constructor right after `bolts.visuals` (it reads `shipFx` and `bolts`, both made there).
+   */
+  readonly ships: ShipContacts;
+  /** This world's NPC ships (patrols and the NPC tab's), made by `load`; null before the first load. */
+  npcShips: NpcShipManager | null = null;
+  /** The ship the player flies or is aboard, and whether play is simulated: both set by the game's `stepVehicles` every step. */
+  playerShip: Vehicle | null = null;
+  simulating = true;
   private props!: PropFactory;
   private readonly chunks = new Map<string, Chunk>();
   private readonly farTiles = new Map<string, THREE.Mesh>();
@@ -417,6 +430,11 @@ export class World {
     this.weaponFx = new ParticleEffects(scene, `${import.meta.env.BASE_URL}assets-private/weapons/`);
     this.bolts.weaponVisuals = this.weaponFx;
     this.bolts.visuals = this.shipFx;
+    // The ships that fight: here, since shipFx and bolts are made just above. npcDeps is a field initialiser (so
+    // it exists), and the garage is read when a combat is made, not now.
+    this.ships = new ShipContacts(this.shipFx, this.bolts, () => this.npcDeps.effects ?? null, () => this.garage ?? null);
+    this.ships.onShipDown = (v) => this.npcShips?.destroyed(v, this.simTime);
+    void this.ships.load(import.meta.env.BASE_URL);
     scene.add(this.chunkRoot, this.sun, this.sun.target, this.hemi, this.fill, this.fill.target, this.splashes.points, this.dust.points);
     markActor(this.splashes.points);
     markActor(this.dust.points);
@@ -510,6 +528,23 @@ export class World {
     this.npcs.attach({
       cellAt: (p) => this.layoutStream?.buildingAt(p) ?? this.cellState,
       followCell: (state, prev, pos) => (this.layoutStream ? this.layoutStream.trackCell(state, prev, pos) : null),
+    });
+    // The NPC ships of this world (unload disposed the last one's). `this.terrain` is assigned above and
+    // `this.playerTarget` is a field initialiser; everything else is an arrow read when it is called.
+    this.npcShips = new NpcShipManager({
+      bolts: this.bolts,
+      ships: this.ships,
+      vehicles: this.vehicles,
+      garage: async () => (this.garage ??= await Garage.load(import.meta.env.BASE_URL)),
+      spawnHull: (def, fit, at, heading) => this.spawnHull(def, fit, at, heading),
+      prepareExtras: (objects) => this.prepareExtras(objects),
+      dispose: (v) => this.disposeVehicle(v),
+      effects: () => this.npcDeps.effects ?? null,
+      physics: this.physics,
+      groundAt: planet.space ? null : (x, z) => this.terrain.heightAt(x, z),
+      space: !!planet.space,
+      zoneTier: ZONE_TIER[planet.id] ?? 3,
+      playerPos: this.playerTarget.pos,
     });
     this.mobiles.cap = this.mobileDetail.cap;
     this.mobiles.animRange = this.mobileDetail.animRange;
@@ -801,6 +836,11 @@ export class World {
     this.gallery = null;
     this.spaceStations = [];
     this.spaceData = null;
+    // The NPC ships go with the world: the manager forgets them (its spawns still being built throw theirs
+    // away), the contacts are dropped, and the loop below disposes their vehicles with every other one.
+    this.npcShips?.dispose();
+    this.npcShips = null;
+    this.ships.clear();
     for (const sp of [...this.vehicles]) this.disposeVehicle(sp);
     this.vehicles.length = 0;
     this.props?.dispose();
@@ -903,10 +943,18 @@ export class World {
 
   private async loadSpaceBodies(pack: AssetPack): Promise<void> {
     const token = this.loadToken;
+    // This zone's NPC ship manager, captured before the wait: a zone left meanwhile is not given anchors.
+    const mgr = this.npcShips;
     // The whole pack, fetched once per zone and shared with the System Map's catalogue (the same promise).
     const data = await loadSpacePack(import.meta.env.BASE_URL, this.packId);
     if (token !== this.loadToken) return;
     this.spaceData = data;
+    // The patrols' anchors (stations, hyperspace points, the arrival lane); they never stop the sky loading.
+    try {
+      if (mgr && mgr === this.npcShips) mgr.setAnchors(data);
+    } catch (err) {
+      console.warn('npc ships: no anchors', err);
+    }
     if (!data) return;
     // The stations' names (and the game's titles), at the game's mirrored X.
     // A pack converted before titles were written has none, and `normalise` fills the title with the raw name: that is no title.
@@ -2056,6 +2104,8 @@ export class World {
       void this.prepareActor(saddle).catch((err) => console.warn(`garage: ${id}: its saddle's warm-up failed; shown anyway`, err)).finally(() => this.revealSaddle(id, saddle));
     }
     this.vehicles.push(v);
+    // A player's ship fights too: its combat from its fit (neutral until someone flies it; sync marks the player's).
+    if (v.spec.ship) this.ships.adopt(v, { faction: 'neutral' });
     // The ship's bolt and hit effects, every one its guns fire, played once far below the world.
     this.warmShipFx(v);
     const gravity = -this.physics.world.gravity.y;
@@ -2069,6 +2119,57 @@ export class World {
     // A hull that is itself a portal building (the yacht) has its rooms inside the hull model.
     if (!v.interior) v.interior = ShipInterior.fromHull(v, gravity, { cells: def.cells, portals: def.portals });
     return v;
+  }
+
+  /**
+   * An NPC ship's hull: built through the garage with its fit and prepared as a player's ship is (`vehiclePrepare`,
+   * the motion blur's variants included), stood exactly at `at` facing `heading`, then at once, with nothing awaited
+   * in between (so no frame sees it), marked, hidden, held, weightless and ghosted (`setGhost`: its colliders in no
+   * group until the manager shows it). It is NOT put in `vehicles`: the NPC ship manager puts
+   * it there once its contact, combat and brain exist. A world left while it was being prepared throws
+   * (SpawnCancelled) before the vehicle is made, so nothing is left in the next world.
+   */
+  async spawnHull(def: VehicleDef, fit: ResolvedFit | null, at: THREE.Vector3, heading: number): Promise<Vehicle> {
+    const gen = this.loadGeneration;
+    const terrain = this.terrain;
+    const g = (this.garage ??= await Garage.load(import.meta.env.BASE_URL));
+    if (gen !== this.loadGeneration || this.terrain !== terrain) throw new SpawnCancelled(def.id);
+    const v = await g.spawn(def, this.physics, this.scene, at.x, at.y, at.z, heading, 'ship', (b) => [at.x, at.y + b.min[1], at.z], {
+      fit,
+      prepare: (roots) => this.vehiclePrepare(roots),
+      forget: (m) => this.forgetMaterials(m),
+      alive: () => gen === this.loadGeneration && this.terrain === terrain,
+    });
+    v.space = !!this.planet.space;
+    markActor(v.group);
+    v.group.visible = false;
+    for (const t of v.trails) t.mesh.visible = false;
+    v.held = true;
+    // Not in the list, nothing steps it: until it is shown its body must neither fall nor be met (its colliders
+    // in no group, as a jump's hull), or it drops through the frames its extras take to compile.
+    v.body.setGravityScale(0, true);
+    v.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+    v.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+    v.setGhost(true);
+    // Its bolt and hit effects, as a player's ship's: a session with no ship spawned yet has warmed none of them.
+    this.warmShipFx(v);
+    return v;
+  }
+
+  /**
+   * What a vehicle makes after it exists (an NPC ship's clear glass stand-ins; its glows and trails were compiled
+   * with the hull and cost a key lookup): the materials join the portal stencil and the cascades before any compile,
+   * then the programs are built a drawable at a time. No shadow flag is changed (a trail must not cast), unlike
+   * `prepareActor`.
+   */
+  async prepareExtras(objects: THREE.Object3D[]): Promise<void> {
+    for (const o of objects) this.adoptMaterials(o);
+    await this.compileReady(objects);
+  }
+
+  /** The portal renderer's material set and the shadow cascades' shader records, by size: a ship that leaks its materials shows as growth. Read-only. */
+  materialCounts(): { portal: number; cascades: number } {
+    return { portal: this.portals?.materials.size ?? 0, cascades: this.csm?.shaders.size ?? 0 };
   }
 
   /** Stand a ready-made model as a vehicle on clear ground ahead of a point (the garage's placement, for a model that is not in it). */
@@ -2134,9 +2235,21 @@ export class World {
     }
   }
 
-  /** Take a vehicle out of the world: its body, its model, its trails and its paint's own copies (out of the material sets, through the paint's `forget`). */
+  /**
+   * Take a vehicle out of the world: its body, its model, its trails and its paint's own copies (out of the material
+   * sets, through the paint's `forget`), and the materials made for it alone (`ownedMaterials`: its glow sprite's,
+   * each trail's, each clear pane's) forgotten by the portal renderer and the cascades, then disposed. Every way a
+   * vehicle goes comes here. A hull still being prepared (an NPC ship, not yet in the list) is disposed all the same.
+   */
   disposeVehicle(v: Vehicle): void {
-    v.dispose(this.physics, this.scene);
+    // Once: a second removal of its body would be a use after free (a destroyed NPC ship the manager also clears).
+    if (!v.disposed) {
+      v.dispose(this.physics, this.scene);
+      this.forgetMaterials(v.ownedMaterials);
+      // A trail's material is disposed twice (with its trail too): harmless.
+      for (const m of v.ownedMaterials) m.dispose();
+      v.ownedMaterials.length = 0;
+    }
     const i = this.vehicles.indexOf(v);
     if (i >= 0) this.vehicles.splice(i, 1);
   }
@@ -2155,8 +2268,21 @@ export class World {
       if (!this.garage) throw new Error('garage: not loaded');
       if (!this.vehicles.includes(v)) throw new Error(`garage: ${v.spec.id} is not in the world`);
       if (v.fit && fitKey(v.fit) === fitKey(next)) return { slots: [], parts: 0, waiting: [], repainted: false, weaponsChanged: false, ms: 0 };
-      const report = await this.garage.refit(v, next, (r) => this.vehiclePrepare(r));
+      let report: RefitReport;
+      try {
+        report = await this.garage.refit(v, next, (r) => this.vehiclePrepare(r));
+      } finally {
+        // The ship went while its parts were staged: the spare trails' materials were put on its list after
+        // disposeVehicle had emptied it, and were adopted by the preparation, so they leave the sets here.
+        if (v.disposed && v.ownedMaterials.length) {
+          this.forgetMaterials(v.ownedMaterials);
+          for (const m of v.ownedMaterials) m.dispose();
+          v.ownedMaterials.length = 0;
+        }
+      }
       if (report.weaponsChanged && this.vehicles.includes(v)) this.warmShipFx(v);
+      // Its combat's stats from the new fit (the condition keeps its shares).
+      if (this.vehicles.includes(v)) this.ships.refit(v);
       return report;
     });
   }
@@ -2177,11 +2303,11 @@ export class World {
     };
   }
 
-  /** Take every spawned vehicle away but the one ridden. */
+  /** Take every spawned vehicle away but the one ridden, and the NPC ships (the NPC tab's clear takes those). */
   removeVehicles(keep: Vehicle | null): number {
     let n = 0;
     for (const v of [...this.vehicles]) {
-      if (v === keep) continue;
+      if (v === keep || v.autopilot) continue;
       this.disposeVehicle(v);
       n++;
     }
@@ -2686,6 +2812,11 @@ export class World {
     this.creatures.update(dt, playerPos, this.hurtPlayer);
     this.mobiles?.update(dt, { now: this.simTime, dt, camera, playerPos, targets });
     this.npcs.update(dt, targets, this.bolts, camera, this.simTime);
+    // The ships that fight: the contacts in step with the vehicles (the player's ship marked), the NPC ships'
+    // brains (held, thinking nothing, while play is paused), then every combat's shields, boost and damage bands.
+    this.ships.sync(this.vehicles, this.playerShip, this.playerTarget, this.simTime);
+    this.npcShips?.update(dt, this.simTime, this.simulating);
+    this.ships.update(dt, this.simTime, this.simulating);
   }
 
   /** The spawner's cap and the mobiles' animation range (the settings), kept for the managers later planets make. */

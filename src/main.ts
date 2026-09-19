@@ -64,6 +64,15 @@ import { Menu, keyName } from './ui/menu';
 import { ShipMenu, type ShipStatus } from './ui/shipMenu';
 import { HyperspaceUi } from './ui/hyperspaceUi';
 import { Hyperspace } from './space/hyperspace';
+import { ShipHud } from './ui/shipHud';
+import { TargetFx } from './space/targetFx';
+import { FACTION_COLOR, FACTION_LABEL, shipStanding, type ShipFaction } from './space/factions';
+import { NpcBrain } from './space/npcBrain';
+import { ZONE_TIER } from './space/roster';
+import { fillTaunt, pickLine } from './space/taunts';
+import { componentLine } from './space/shipStats';
+import { targetable } from './space/shipCombat';
+import type { ShipSpawner } from './ui/npcUi';
 import { HyperspaceCatalogue, arrivalAt, landmarksOf, loadSpacePack, type Destination } from './space/spaceData';
 import { arrivalPose, lookRotation, sceneOf, toGame } from './space/hyperspaceMath';
 import { LiftMenu } from './ui/liftMenu';
@@ -157,6 +166,10 @@ const boltFrom = new THREE.Vector3();
 /** A ship's shot: where it leaves and which way (bolts.fire and effects.flash copy what they are given). */
 const shotFrom = new THREE.Vector3();
 const shotDir = new THREE.Vector3();
+/** A target's share as a whole percentage, or a dash where it has none (the target box's label). */
+function targetPct(n: number): string {
+  return Number.isFinite(n) ? `${Math.round(n * 100)}%` : '–';
+}
 
 /** A kept ship fit copied, so a change is made on the copy and handed to saveFit whole. */
 function copyShipFit(f: ShipFit): ShipFit {
@@ -254,6 +267,12 @@ class App {
   private readonly shipLead = new THREE.Vector3();
   private readonly shipAim = new THREE.Vector3();
   private shipLeadValid = false;
+  /** Whether the ship targeted is one that attacks the pilot, as the target effects were last told (they change on a change). */
+  private shipTargetHostile = false;
+  /** The game's targeting effects on the ship targeted. Made right after the world, whose ship effects it places. */
+  private readonly targetFx: TargetFx;
+  /** The NPC pilots' comms and the flown ship's condition. Made right after the HUD. */
+  private readonly shipHud: ShipHud;
   /** The picture's effects chain, while the Effects setting is on. */
   private postfx: PostFX | null = null;
   /**
@@ -326,6 +345,8 @@ class App {
     this.cam.camera.updateProjectionMatrix();
     this.input = new Input(this.canvas);
     this.world = new World(this.scene, physics);
+    // The target effects place the world's ship effects (made in the World constructor).
+    this.targetFx = new TargetFx(this.world.shipFx);
     this.world.renderer = this.renderer;
     // The lava tables World loads go to the heat haze from here on.
     this.world.heat = this.heat;
@@ -374,6 +395,8 @@ class App {
     if (!S.shadows) this.world.setShadowsEnabled(false);
     this.player = new Player(this.scene, physics);
     this.effects = new Effects(this.scene);
+    // The ships' muzzle and hit flashes borrow the pool from here on, without waiting for the weapons rack (which sets it again).
+    this.world.npcDeps.effects = this.effects;
     // The room's air reads the world, the portal renderer and the player, all assigned above; its
     // motes join the scene now, hidden, so the loading screen's warm-up compiles them.
     this.roomAir = new RoomAir(this.scene, this.world, this.portals, this.settings);
@@ -382,6 +405,9 @@ class App {
     this.litSources.effects = this.effects;
     this.scene.add(this.marks.mesh);
     this.hud = new Hud(this.ui);
+    // The comms and the ship's status line; the world (assigned above) hands the taunts over.
+    this.shipHud = new ShipHud(this.ui);
+    this.world.ships.onTaunt = (who, text, faction) => this.shipHud.say(who, text, FACTION_COLOR[faction]);
     this.wardrobe = new WardrobeUi(this.ui, () => this.hud.setPrompt(''));
     this.wardrobe.setBaseUrl(import.meta.env.BASE_URL);
     this.weaponsUi = new WeaponsUi(this.ui, (def, hand) => void this.equip(def, hand));
@@ -428,6 +454,8 @@ class App {
       // The preview's compile of a garage material the world set up for its shadow cascades must not take the cascades' record from the world's program.
       keepShadows: (mats) => this.world.keepShadowRecords(mats),
     });
+    // Each component's stats on the edit page (invented numbers, shipStats.ts); pure, read when the page draws.
+    this.shipEdit.statsFor = (slot, c) => componentLine(slot, c);
     this.vehiclesUi.onEdit = (def) => this.openShipEdit(def);
     this.shipEdit.onTab = (id) => this.toggleSpawner(id as 'garage' | 'npcs');
     // A fit changed in the last 300 ms is written before the page goes.
@@ -1410,6 +1438,86 @@ class App {
       },
       /** The jump now: its phase, time in it, destination, the cruise it commands, the hull's ghosting, hits taken (should be 0), how far off the arrival was, the worst frame seen outside the white. */
       jumpState: () => this.hyperspace.describe(),
+      /**
+       * The NPC ships: the cap and how many are out, the anchors (name, side, distance, their groups' states), the groups
+       * (side, formation, members: type, tier, state, target, shields/armour/hull, shots, hits, distance, ready, paused),
+       * NPC bolts in the air, the programs, the portal set's and the cascades' sizes (`materials`, the leak check), and
+       * `ms: { think, physics }`. `{ patrols: false }` stops the patrols streaming in, `{ passive: true }` every NPC's fire,
+       * `{ clear: true }` takes every NPC ship away.
+       */
+      npcShips: (opts: { patrols?: boolean; passive?: boolean; clear?: boolean } = {}) => {
+        const mgr = this.world.npcShips;
+        const data = this.world.ships.data;
+        let cleared: number | null = null;
+        if (mgr) {
+          if (typeof opts.patrols === 'boolean') mgr.patrols = opts.patrols;
+          if (typeof opts.passive === 'boolean') mgr.passive = opts.passive;
+          if (opts.clear) cleared = mgr.clear();
+        }
+        return {
+          combat: data ? { ...(data.file.counts ?? { types: data.file.types.length }) } : "no combat.json in the ships pack: no NPC ships (npm run swg -- ships '@SWG' assets-private --retail-only)",
+          ...(cleared !== null ? { cleared } : {}),
+          ...(mgr ? mgr.report() : { live: 0, note: 'no world loaded' }),
+          contacts: this.world.ships.list.map((c) => `${c.label || c.vehicle.spec.id} (${c.faction}${c === this.world.ships.playerShip ? ', yours' : ''}${c.targetable ? '' : ', not targetable'})`),
+          target: this.targetFx.describe(),
+          programs: this.renderer.info.programs?.length ?? 0,
+          materials: this.world.materialCounts(),
+          ms: { think: Number((mgr?.ms.think ?? 0).toFixed(3)), physics: Number(stats.physicsMs.toFixed(3)) },
+        };
+      },
+      /**
+       * Stand NPC ships ahead of the view: `await npcShip('tiefighter_tier1', { distance: 400 })` one of a type, or a family
+       * with `{ tier, count: 3 }` for a patrol in formation; 700 m ahead by default, facing you. Returns the sentence.
+       */
+      npcShip: async (what = 'tiefighter', opts: { tier?: number; count?: 1 | 3; distance?: number } = {}) => {
+        const mgr = this.world.npcShips;
+        const data = this.world.ships.data;
+        if (!mgr) return 'no world loaded';
+        if (!data) return "no combat.json in the ships pack: convert the ships again (npm run swg -- ships '@SWG' assets-private --retail-only)";
+        const type = data.typeById(what);
+        const family = type ? type.family : what;
+        const tier = opts.tier ?? type?.tier ?? (this.world.planet.space ? (ZONE_TIER[this.world.planet.id] ?? 3) : 3);
+        const p = this.player;
+        const flown = p.mounted ?? p.piloting ?? p.aboard?.vehicle ?? null;
+        const from = (flown ? flown.pos : p.worldPos).clone();
+        const dir = this.cam.camera.getWorldDirection(new THREE.Vector3());
+        return mgr.spawnFamily(family, tier, opts.count === 3 ? 3 : 1, from, dir, opts.distance ?? 700);
+      },
+      /**
+       * The flown ship's fight (or with `target: true` the target's): its stats, condition, components with grades, what is
+       * down, and its top speed (`speed`, m/s where it flies). `{ hit: 'shield' | 'armor' | 'chassis' | '<slot>', amount: 0..1 }`
+       * strikes it through the same path as a bolt; `{ repair: true }`; `{ god: true | false }` (it takes no damage);
+       * `{ stats: { refire: 0.3 } }` overrides its numbers live.
+       */
+      shipCombat: (opts: { target?: boolean; hit?: string; amount?: number; repair?: boolean; god?: boolean; stats?: Record<string, number> } = {}) => {
+        const p = this.player;
+        const v = opts.target ? this.shipTarget : (p.mounted ?? p.piloting ?? p.aboard?.vehicle ?? null);
+        if (!v) return opts.target ? 'no target: Tab onto a ship first' : 'not in a ship';
+        const combat = v.combat;
+        if (!combat) return `${v.spec.id} has no fight (a ship gets one when it is spawned; is there a combat.json?)`;
+        if (opts.repair) combat.repair();
+        if (typeof opts.god === 'boolean') combat.god = opts.god;
+        if (opts.stats) {
+          const s = combat.stats as unknown as Record<string, unknown>;
+          for (const [k, n] of Object.entries(opts.stats)) if (typeof n === 'number' && Number.isFinite(n) && typeof s[k] === 'number') s[k] = n;
+        }
+        const hit = opts.hit ? combat.forceHit(opts.hit, THREE.MathUtils.clamp(opts.amount ?? 1, 0, 1)) : null;
+        return { ship: v.spec.id, ...(hit ? { hit: { ...hit } } : {}), ...combat.report(), speed: Math.round(v.spec.maxSpeed * (v.space ? 2 : 1)), cruise: Math.round(v.cruise), hp: Math.round(v.hp) };
+      },
+      /** Show an NPC pilot's line: `taunt('imperial', 'entercombat')` (a table that names you), `taunt('pirate', 'death')`. */
+      taunt: (faction: ShipFaction = 'imperial', event: 'entercombat' | 'gothit' | 'hityou' | 'death' = 'entercombat') => {
+        const data = this.world.ships.data;
+        if (!data) return 'no combat.json in the ships pack';
+        // A type of that side from tier 3 up (the tiers 1 and 2 tables name nobody), picked at random.
+        const types = data.file.types.filter((t) => t.faction === faction && t.tier >= 3 && data.taunts(t.taunts));
+        const type = types[Math.floor(Math.random() * types.length)];
+        const lines = type ? data.taunts(type.taunts)?.[event] ?? [] : [];
+        const line = pickLine(lines, Math.random);
+        if (!type || !line) return `no ${event} line for ${faction}`;
+        const text = fillTaunt(line, this.world.ships.playerName);
+        this.shipHud.say(type.name, text, FACTION_COLOR[faction]);
+        return `${type.name} (${type.taunts}): ${text}`;
+      },
       /** The warp effects' turn about the hull's Y (degrees) and how far ahead of the hull they are placed (metres along the nose), for checking by eye; the next jump uses them. */
       jumpFx: (opts: { turn?: number; ahead?: number } = {}) => {
         if (typeof opts.turn === 'number' && Number.isFinite(opts.turn)) this.hyperspace.fxTurn = opts.turn;
@@ -1489,7 +1597,7 @@ class App {
        */
       wings: (mode?: 'open' | 'closed' | 'auto' | 'multiplier' | 'threshold') => {
         const p = this.player;
-        const v = p.mounted ?? p.piloting ?? p.aboard?.vehicle ?? [...this.world.vehicles].filter((o) => o.spec.ship).sort((a, b) => a.pos.distanceTo(p.pos) - b.pos.distanceTo(p.pos))[0];
+        const v = p.mounted ?? p.piloting ?? p.aboard?.vehicle ?? [...this.world.vehicles].filter((o) => o.spec.ship && !o.autopilot).sort((a, b) => a.pos.distanceTo(p.pos) - b.pos.distanceTo(p.pos))[0];
         if (!v) return 'no ship: spawn one (spawn(\'xwing\')) or board one';
         if (mode === 'open' || mode === 'closed') v.wings.force = mode;
         else if (mode === 'auto') v.wings.force = null;
@@ -1560,7 +1668,7 @@ class App {
       /** Shadow casting by every mesh of the ship you are aboard (or the nearest ship): off, to see whether its own geometry is what keeps the sun out of the rooms. */
       shipShadows: (on = true) => {
         const p = this.player;
-        const v = p.aboard?.vehicle ?? this.world.vehicles.filter((x) => x.spec.ship).sort((a, b) => a.pos.distanceTo(p.worldPos) - b.pos.distanceTo(p.worldPos))[0];
+        const v = p.aboard?.vehicle ?? this.world.vehicles.filter((x) => x.spec.ship && !x.autopilot).sort((a, b) => a.pos.distanceTo(p.worldPos) - b.pos.distanceTo(p.worldPos))[0];
         if (!v) return 'no ship';
         let n = 0;
         const changed: string[] = [];
@@ -1582,7 +1690,7 @@ class App {
       },
       shipDrift: (speed = 2, spin = 0.4) => {
         const p = this.player;
-        const v = p.aboard?.vehicle ?? this.world.vehicles.filter((x) => x.spec.ship).sort((a, b) => a.pos.distanceTo(p.worldPos) - b.pos.distanceTo(p.worldPos))[0];
+        const v = p.aboard?.vehicle ?? this.world.vehicles.filter((x) => x.spec.ship && !x.autopilot).sort((a, b) => a.pos.distanceTo(p.worldPos) - b.pos.distanceTo(p.worldPos))[0];
         if (!v) return 'no ship';
         v.drift = speed !== 0 || spin !== 0;
         v.body.setGravityScale(v.drift ? 0 : 1, true);
@@ -2092,6 +2200,7 @@ class App {
     this.current = null;
     this.net.disconnect();
     this.world.leave();
+    this.shipHud.clear();
     this.hud.setPrompt('');
     this.hud.setMouseFree(false);
     this.input.captured = false;
@@ -2598,6 +2707,8 @@ class App {
   private async play(c: SavedCharacter): Promise<void> {
     this.select.hide();
     this.current = c;
+    // The NPC pilots' taunts name the character played.
+    this.world.ships.playerName = c.name;
     this.traveling = true;
     this.input.captured = false;
     const planet = PLANETS.find((p) => p.id === c.planet) ?? PLANETS[0];
@@ -2673,6 +2784,10 @@ class App {
       const warmed = await this.postfx.warmUp();
       if (warmed) console.info(`effects: ${warmed} programs warmed`);
     }
+    // Space combat's effects (hits, target brackets, explosions, damage bands, every projectile): their batches
+    // made hidden and their textures uploaded, so the first hit neither compiles nor uploads.
+    this.loadingScreen.setWhat('preparing ship effects');
+    await this.world.ships.prepareEffects(this.renderer);
     const tCompile = performance.now();
     const compiled = await this.world.compileAllAsync((done, total) => this.loadingScreen.setWhat(`compiling shaders, ${done} of ${total} objects`));
     if (compiled) console.info(`shaders: ${compiled} programs compiled behind the loading screen in ${(performance.now() - tCompile).toFixed(0)} ms`);
@@ -2739,6 +2854,8 @@ class App {
     this.zone = planet.zones?.length ? (planet.zones.find((z) => z.id === zoneId) ?? planet.zones[0]).id : undefined;
     this.postfx?.reset();
     this.marks.clear();
+    // No pilot's line or ship status from the world left behind.
+    this.shipHud.clear();
     this.world.load(planet, packIdOf(planet, this.zone));
     this.spawn = this.world.spawnPoint();
     const stand = at ?? this.spawn;
@@ -3167,10 +3284,15 @@ class App {
   /** Drive the ridden vehicle from the keys (the mouse or A/D steer, Alt frees the look, W/S throttle, Shift boost, Space hop, the view's tilt or Space and X climb and sink), step every vehicle, and seat the rider. */
   private stepVehicles(dt: number, simulate: boolean): void {
     const { player, input } = this;
+    // Whether play runs, and the ship the player flies or is aboard: what the world's ship contacts and NPC ships
+    // read in stepLiving, which runs after this in the loop and in __debug.advance alike.
+    this.world.simulating = simulate;
     // A hull removed with someone still in its rooms (the garage's clear, the console): out into the world first.
     if (player.aboard && !this.world.vehicles.includes(player.aboard.vehicle)) this.thrownOutOfShip(player.aboard.vehicle);
     let drive: DriveInput | null = null;
     const pilot = player.mounted ?? player.piloting;
+    const playerHull = pilot ?? player.aboard?.vehicle ?? null;
+    this.world.playerShip = playerHull?.spec.ship ? playerHull : null;
     if (simulate && pilot) {
       // The mouse steers: the vehicle turns toward where the camera looks, and a flyer climbs or
       // sinks as the view tilts up or down past a dead band around level. Alt frees the camera
@@ -3211,7 +3333,8 @@ class App {
         steer: hovering ? 0 : keys,
         strafe: hovering ? keys : 0,
         heading: free ? null : this.cockpitYaw ?? this.cam.yaw + Math.PI,
-        boost: input.held('walk'),
+        // A ship with a fight boosts on its booster's energy.
+        boost: input.held('walk') && (pilot.combat ? pilot.combat.boostLeft > 0 : true),
         hop: input.pressedAction('jump'),
         up: input.held('jump'),
         down: input.held('crouch'),
@@ -3228,7 +3351,8 @@ class App {
     else this.shipLeadValid = false;
     const terrain = this.world.terrain;
     for (const v of this.world.vehicles) {
-      if (!v.drift) v.update(dt, this.physics, v === pilot ? drive : null, (x, z) => terrain.heightAt(x, z), (x, z) => terrain.waterHeightAt(x, z));
+      // An NPC ship flies on its brain's drive while play runs (held, it goes nowhere anyway).
+      if (!v.drift) v.update(dt, this.physics, v === pilot ? drive : simulate && v.autopilot ? v.autopilot.drive : null, (x, z) => terrain.heightAt(x, z), (x, z) => terrain.waterHeightAt(x, z));
       else {
         const t = v.body.translation();
         v.pos.set(t.x, t.y, t.z);
@@ -3261,15 +3385,17 @@ class App {
         }
       }
       if (v.struck > 0) {
-        // Bolts in the hull: a jolt to whoever is at the controls, a little of it as hurt.
+        // Bolts in the hull: a jolt to whoever is at the controls, a little of it as hurt. A ship with a fight
+        // takes them in its shields and armour: the pilot is jolted and keeps their health until it is destroyed.
         if (v === player.mounted || v === player.piloting) {
-          player.takeDamage(Math.round(Math.min(12, v.struck * 0.2)));
+          if (!v.combat) player.takeDamage(Math.round(Math.min(12, v.struck * 0.2)));
           this.hud.hurt();
         }
         v.struck = 0;
       }
       const condition = v.hp / v.maxHp;
-      if (condition < 0.67 && condition > 0 && Math.random() < dt * (condition < 0.34 ? 9 : 3)) {
+      // A ship whose combat plays its own damage bands (the game's smoke and fire) shows no stand-in smoke.
+      if (condition < 0.67 && condition > 0 && !(v.combat && (this.world.ships.data?.hullFx(v.spec.id)?.damage.length ?? 0) > 0) && Math.random() < dt * (condition < 0.34 ? 9 : 3)) {
         tmp.copy(v.pos).y += (v.spec.bounds.max[1] - v.spec.bounds.min[1]) * 0.4;
         tmp.x += (Math.random() - 0.5) * v.radius;
         tmp.z += (Math.random() - 0.5) * v.radius;
@@ -3277,6 +3403,9 @@ class App {
         if (condition < 0.34 && Math.random() < 0.3) this.effects.tracer(tmp, tmp.clone().add(new THREE.Vector3((Math.random() - 0.5) * 1.5, Math.random() * 0.8, (Math.random() - 0.5) * 1.5)), 0xffd080, 0.12);
       }
       if (v.destroyed) {
+        // The game's own explosion, the death taunt for the player's kill, the NPC ships told; then the rest as before.
+        this.world.ships.onDestroyed(v);
+        if (v === this.shipTarget) this.shipTarget = null;
         if (v === player.mounted) {
           // Blown up under the rider: thrown clear with its speed and a kick upward, flailing, down prone.
           const lv = v.body.linvel();
@@ -3333,24 +3462,33 @@ class App {
    */
   private aimShip(pilot: Vehicle, dt: number): void {
     const { input } = this;
-    if (this.shipTarget && (this.shipTarget.destroyed || this.shipTarget === pilot || !this.world.vehicles.includes(this.shipTarget))) this.shipTarget = null;
+    // A target gone, destroyed, the pilot's own, or not to be picked now (a ship in a jump) is let go.
+    if (this.shipTarget && (this.shipTarget.destroyed || this.shipTarget === pilot || !this.world.vehicles.includes(this.shipTarget) || !this.shipPickable(this.shipTarget))) this.shipTarget = null;
     const nose = tmp.set(0, 0, 1).applyQuaternion(pilot.group.quaternion);
-    const ahead: { v: Vehicle; off: number }[] = [];
+    const ahead: { v: Vehicle; off: number; hostile: boolean }[] = [];
     for (const v of this.world.vehicles) {
-      if (v === pilot || !v.spec.ship || v.destroyed) continue;
+      if (v === pilot || !v.spec.ship || v.destroyed || !this.shipPickable(v)) continue;
       tmp2.copy(v.pos).sub(pilot.pos);
       const d = tmp2.length();
       if (d > SHIP_TARGET_RANGE || d < 1) continue;
       const off = Math.acos(THREE.MathUtils.clamp(tmp2.dot(nose) / d, -1, 1));
-      if (off < SHIP_TARGET_CONE) ahead.push({ v, off });
+      if (off < SHIP_TARGET_CONE) ahead.push({ v, off, hostile: this.shipHostileToPilot(pilot, v) });
     }
     ahead.sort((a, b) => a.off - b.off);
+    // With nothing picked, the ships that attack the pilot come first (Tab and the pick alike), then the nearest to the nose.
+    let first = 0;
+    while (first < ahead.length && !ahead[first].hostile) first++;
+    if (first >= ahead.length) first = 0;
     if (input.pressedAction('target') && ahead.length) {
       const i = this.shipTarget ? ahead.findIndex((a) => a.v === this.shipTarget) : -1;
-      this.shipTarget = ahead[(i + 1) % ahead.length].v;
-    } else if (!this.shipTarget && ahead.length) this.shipTarget = ahead[0].v;
+      this.shipTarget = ahead[i < 0 ? first : (i + 1) % ahead.length].v;
+    } else if (!this.shipTarget && ahead.length) this.shipTarget = ahead[first].v;
+    // The game's target effects follow the pick (and its standing): a change places them, the same pick does nothing.
+    this.shipTargetHostile = this.shipTarget ? this.shipHostileToPilot(pilot, this.shipTarget) : false;
+    this.targetFx.select(this.shipTarget, this.shipTargetHostile, this.world.ships.data);
     // The lead is worked out for the gun that fires next: a fitted ship's guns may fire different bolts.
-    const nextGun = pilot.guns.length ? pilot.guns[pilot.gunNext % pilot.guns.length] : undefined;
+    const nextIndex = pilot.guns.length ? (pilot.combat ? pilot.combat.nextGun : pilot.gunNext) % pilot.guns.length : -1;
+    const nextGun = nextIndex >= 0 ? pilot.guns[nextIndex] : undefined;
     const lw = nextGun?.weapon ?? pilot.weapon;
     const speed = lw?.speed ?? SHIP_BOLT_SPEED;
     const range = lw?.range ?? SHIP_BOLT_RANGE;
@@ -3371,10 +3509,19 @@ class App {
     }
     if (!pilot.guns.length) return;
     pilot.gunCooldown = Math.max(0, pilot.gunCooldown - dt);
-    if (!(input.held('attack') && input.locked && pilot.gunCooldown <= 0)) return;
-    const g = pilot.guns[pilot.gunNext % pilot.guns.length];
-    pilot.gunNext++;
-    pilot.gunCooldown = SHIP_GUN_INTERVAL / Math.max(1, Math.min(4, pilot.guns.length / 2));
+    const combat = pilot.combat;
+    if (!(input.held('attack') && input.locked && (combat || pilot.gunCooldown <= 0))) return;
+    // A ship with a fight fires on its combat's turn and refire (its capacitor's, its live guns'); else the old interval.
+    let gi: number;
+    if (combat) {
+      gi = combat.takeShot();
+      if (gi < 0) return;
+    } else {
+      gi = pilot.gunNext % pilot.guns.length;
+      pilot.gunNext++;
+      pilot.gunCooldown = SHIP_GUN_INTERVAL / Math.max(1, Math.min(4, pilot.guns.length / 2));
+    }
+    const g = pilot.guns[gi];
     pilot.group.updateMatrixWorld(true);
     // From the muzzle as it stands now (a gun on a wing fires from where the wing has turned it).
     const from = pilot.muzzle(g, shotFrom, shotDir);
@@ -3383,12 +3530,15 @@ class App {
     // sees, so the bolt's own velocity (the muzzle's plus the ship's) meets the target there.
     if (this.shipLeadValid && Math.acos(THREE.MathUtils.clamp(this.shipAim.dot(nose), -1, 1)) < SHIP_GUN_CONE) dir.copy(this.shipAim);
     from.addScaledVector(dir, 1.2);
-    // What this gun fires: its own component's bolt on a fitted ship, else the ship's one weapon.
+    // What this gun fires: its own component's bolt on a fitted ship, else the ship's one weapon; with a fight, its combat's stat (invented damage).
     const w = g.weapon ?? pilot.weapon;
-    const gunSpeed = w?.speed ?? SHIP_BOLT_SPEED;
-    const gunRange = w?.range ?? SHIP_BOLT_RANGE;
-    const projectile = w ? this.world.garage?.projectileFor(w.projectile) ?? null : null;
-    this.world.bolts.fire(from, dir, { owner: 'player', damage: SHIP_GUN_DAMAGE, metresPerSecond: gunSpeed, inherit: new THREE.Vector3(own.x, own.y, own.z), life: gunRange / gunSpeed + 0.05, color: pilot.boltColor, exclude: pilot.body, projectile });
+    const cw = combat ? combat.weaponOfGun(gi) : null;
+    const gunSpeed = cw?.speed ?? w?.speed ?? SHIP_BOLT_SPEED;
+    const gunRange = cw?.range ?? w?.range ?? SHIP_BOLT_RANGE;
+    const projectileIndex = cw?.projectile ?? w?.projectile;
+    const projectile = projectileIndex !== undefined ? this.world.garage?.projectileFor(projectileIndex) ?? null : null;
+    // The shot is the pilot's ship's: whatever it hurts remembers that ship (and through it the player).
+    this.world.bolts.fire(from, dir, { owner: 'player', damage: cw ? cw.damage : SHIP_GUN_DAMAGE, metresPerSecond: gunSpeed, inherit: new THREE.Vector3(own.x, own.y, own.z), life: gunRange / gunSpeed + 0.05, color: pilot.boltColor, exclude: pilot.body, projectile, source: this.world.ships.of(pilot) });
     this.effects.flash(from, pilot.boltColor, 5, 6, 0.06);
   }
 
@@ -3407,7 +3557,33 @@ class App {
     const at = toScreen(t.pos);
     const lead = this.shipLeadValid ? toScreen(this.shipLead) : { x: 0, y: 0, on: false };
     const range = Math.round(t.pos.distanceTo(pilot.pos));
-    return { x: at.x, y: at.y, onScreen: at.on, leadX: lead.x, leadY: lead.y, leadOnScreen: lead.on, label: `${t.spec.label} · ${range} m · hull ${Math.round((t.hp / t.maxHp) * 100)}%` };
+    const c = this.world.ships.of(t);
+    const hull = `hull ${Math.round((t.hp / t.maxHp) * 100)}%`;
+    let label = `${t.spec.label} · ${range} m · ${hull}`;
+    if (c) {
+      // Its name, side and tier, then the shields and armour of the face turned to the pilot.
+      const s = c.combat?.summary(pilot.pos) ?? null;
+      label = `${c.type?.name ?? t.spec.label} · ${FACTION_LABEL[c.faction]}${c.type ? ` · tier ${c.type.tier}` : ''} · ${range} m${s ? ` · shields ${targetPct(s.shield)} · armour ${targetPct(s.armour)} · hull ${targetPct(s.hull)}` : ` · ${hull}`}`;
+    }
+    const kind = this.shipTargetHostile ? 'enemy' : c && shipStanding(c.faction) === 'friend' ? 'friend' : 'neutral';
+    return { x: at.x, y: at.y, onScreen: at.on, leadX: lead.x, leadY: lead.y, leadOnScreen: lead.on, label, kind };
+  }
+
+  /** Whether a ship may be picked as a target now (`targetable`: alive and not in a jump); a ship without a contact yet, by its ghosting alone. */
+  private shipPickable(v: Vehicle): boolean {
+    const c = this.world.ships.of(v);
+    return c ? targetable(c) : !v.ghosted && !v.destroyed;
+  }
+
+  /** Whether a ship attacks the pilot: its side does on sight, its brain has the pilot's ship as its target, or it struck that ship in the last 20 s. */
+  private shipHostileToPilot(pilot: Vehicle, v: Vehicle): boolean {
+    const c = this.world.ships.of(v);
+    if (!c) return false;
+    if (shipStanding(c.faction) === 'enemy') return true;
+    const mine = this.world.ships.of(pilot);
+    if (!mine) return false;
+    if (v.autopilot instanceof NpcBrain && v.autopilot.target === mine) return true;
+    return mine.lastAttacker === c.key && this.world.simTime - mine.lastAttackedAt < 20;
   }
 
   /** The class's weapon and abilities, then the bolts in the air (a bolt reaching the player meets the saber first). */
@@ -3902,8 +4078,40 @@ class App {
         return { spawned: r.spawned, note: r.note };
       },
       clear: (filter) => this.world.mobiles?.clear((m) => filter(m.entry)) ?? 0,
-      clearAll: () => (this.world.mobiles?.clear() ?? 0) + this.world.npcs.removeAll() + this.world.turrets.removeAll(),
+      clearAll: () => (this.world.mobiles?.clear() ?? 0) + this.world.npcs.removeAll() + this.world.turrets.removeAll() + (this.world.npcShips?.clear() ?? 0),
+      ships: this.shipSpawner(),
       missing: `No creature and NPC catalogue yet. It loads at start; if it never does, convert it with ${CATALOGUE_COMMAND}.`,
+    };
+  }
+
+  /**
+   * The NPC tab's starships: the combat file's families by faction, stood 700 m ahead of the view (from the flown
+   * ship, else the player), facing back; on a planet at least 150 m over the ground (the manager raises them).
+   * Built when the tab opens; every call reads the world's manager then, so a travel between is followed.
+   */
+  private shipSpawner(): ShipSpawner {
+    const labels: Record<ShipFaction, string> = { imperial: 'Imperial starships', rebel: 'Rebel starships', blacksun: 'Black Sun starships', pirate: 'Pirate starships', neutral: 'Other starships', player: 'Other starships' };
+    const order: ShipFaction[] = ['imperial', 'rebel', 'blacksun', 'pirate', 'neutral'];
+    const data = this.world.ships.data;
+    return {
+      missing: data ? null : "The ships pack has no combat.json (NPC ships and space combat): convert the ships again with npm run swg -- ships '@SWG' assets-private --retail-only",
+      families: () => {
+        const fams = this.world.ships.data?.families() ?? [];
+        return order.map((f) => ({ faction: f, label: labels[f], rows: fams.filter((x) => (x.faction as ShipFaction) === f).map((x) => ({ family: x.family, label: x.name, tiers: x.tiers })) })).filter((g) => g.rows.length);
+      },
+      // The zone's tier in space (the roster's invented table), 3 on a planet.
+      defaultTier: () => (this.world.planet.space ? (ZONE_TIER[this.world.planet.id] ?? 3) : 3),
+      spawn: async (family, tier, count) => {
+        const mgr = this.world.npcShips;
+        if (!mgr) return 'no world to stand them in';
+        const p = this.player;
+        const flown = p.mounted ?? p.piloting ?? p.aboard?.vehicle ?? null;
+        const from = (flown ? flown.pos : p.worldPos).clone();
+        const dir = this.cam.camera.getWorldDirection(new THREE.Vector3());
+        return mgr.spawnFamily(family, tier, count, from, dir);
+      },
+      clear: (family) => this.world.npcShips?.clear(family ? (s) => s.type.family === family : undefined) ?? 0,
+      count: (family) => this.world.npcShips?.count(family) ?? 0,
     };
   }
 
@@ -4128,7 +4336,8 @@ class App {
     if (next && this.inWorld && !this.traveling) {
       const key = fitKey(next);
       for (const v of [...this.world.vehicles]) {
-        if (v.def?.id !== def.id || !v.fit || fitKey(v.fit) === key || !this.world.vehicles.includes(v)) continue;
+        // An NPC ship's def is a copy of the garage hull's: it keeps its own tier fit, never the player's.
+        if (v.autopilot || v.def?.id !== def.id || !v.fit || fitKey(v.fit) === key || !this.world.vehicles.includes(v)) continue;
         try {
           // After any refit of this ship still in flight, to the fit kept when its turn comes.
           await this.queueRefit(v, async () => {
@@ -4179,7 +4388,7 @@ class App {
     let best: Vehicle | null = null;
     let bestD = Infinity;
     for (const v of this.world.vehicles) {
-      if (!v.spec.ship) continue;
+      if (!v.spec.ship || v.autopilot) continue;
       const d = v.pos.distanceTo(p.worldPos);
       if (d < bestD) {
         bestD = d;
@@ -4635,6 +4844,8 @@ class App {
 
   /** How far a vehicle's side is from the player across the ground, or far when it is well above or below them (a flyer overhead, a bike up a cliff). */
   private vehicleReach(v: Vehicle): number {
+    // An NPC ship is never mounted or boarded: this one test feeds E, the prompts and every "nearest".
+    if (v.autopilot) return Infinity;
     const p = this.player.pos;
     const dy = Math.abs(v.pos.y - p.y);
     if (dy > 4) return Infinity;
@@ -4817,7 +5028,14 @@ class App {
       const flying = player.mounted?.spec.ship && player.mounted.airborne && !input.held('freeLook') ? player.mounted : null;
       this.hud.setFlight(flying ? flying.stick : null);
       const aimed = player.mounted ?? player.piloting;
-      this.hud.setTarget(aimed?.spec.ship && aimed.airborne && !input.held('freeLook') && !this.hyperspace.drives(aimed) ? this.targetHud(aimed) : null);
+      const showTarget = aimed?.spec.ship && aimed.airborne && !input.held('freeLook') && !this.hyperspace.drives(aimed);
+      this.hud.setTarget(showTarget ? this.targetHud(aimed) : null);
+      // The target effects stand on the target while it is shown, and follow it; out of the ship they go.
+      if (!aimed?.spec.ship) this.targetFx.select(null, false, null);
+      this.targetFx.update();
+      // The flown ship's shields, armour, hull, boost and what is down; the comms fading.
+      this.shipHud.setStatus(aimed?.combat ? aimed.combat.status() : null, aimed?.combat?.stats);
+      this.shipHud.update(dt);
       const at = player.worldPos;
       this.hud.update(dt, at.x, at.y, at.z, this.kit, player.hp, player.maxHp, this.world.day.clock(), this.nearbyLabel(at), player.saberOn);
 
