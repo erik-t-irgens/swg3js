@@ -293,6 +293,7 @@ Every converted model carries its normal map: the converter reads the shader's `
 | Helper | What it does |
 | --- | --- |
 | `teleport(x, z)`, `time(0.5)`, `fog(1)`, `advance(seconds, ['KeyW'])` | Move, set the time of day, scale the fog, simulate play with keys held |
+| `teleportSwg(x, z)`, `animTex()`, `animTex('mission')`, `animTex({ freeze: true, speed: 4 })` | Move to a point in the game's own coordinates (the inverse of `swg()`); the animated surfaces: flip-book screens (frame, mode, seconds) and scrolling falls (rate, offset) whose material name holds the string, the counts, uploads still pending and the renderer's program count; freeze or speed up their clock |
 | `near(30)`, `find('name')`, `passes()`, `passLog()`, `drawCalls()`, `interiors()` | What is placed around you, what the portal renderer drew this frame and what it cost |
 | `shadows(distance, minRadius)`, `shadowLook(radius, intensity)`, `ambient(row)`, `normals(1, -1)` | Retune shadows, ambient light and normal maps live |
 | `appearance()`, `recipe('head')`, `morph('blend_fat', 1)`, `species('twilek_female')`, `wardrobe()`, `wear`/`remove`, `preview()` | The character's live customization, textures, shape and clothes |

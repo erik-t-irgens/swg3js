@@ -5,6 +5,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { Vehicle, specFor, vehicleKindOf, type VehicleKind, type VehicleSpec } from './vehicle';
 import type { Physics } from '../core/physics';
 import { ACTOR_LAYER } from '../world/portalRender';
+import { surfaces } from '../world/surfaces';
 import { cellIndexOf } from './interior';
 import { EngineTrail } from './trail';
 import { advanceEnginePhase, engineHeatOf } from './enginePlumes';
@@ -74,7 +75,7 @@ export class Garage {
   readonly vehicles: VehicleDef[] = [];
   /** The game's projectiles, by index, when the ships pack carries them. */
   readonly projectiles = new Map<number, ProjectileDef>();
-  private readonly loader = new GLTFLoader();
+  private readonly loader = surfaces.withPlugin(new GLTFLoader());
   private readonly models = new Map<string, Promise<{ scene: THREE.Group; animations: THREE.AnimationClip[] }>>();
 
   private constructor(private readonly baseUrl: string) {}
@@ -215,7 +216,7 @@ export class Garage {
             // Glass casts no shadow: the shadow pass draws depth whatever the opacity, and a pane
             // that did would keep the sun out of the room behind it. The converter marks glass by
             // name; a hull's windows are drawn opaque and reflective as the game draws them.
-            if (mats.some((mat) => mat.userData.glass || (mat.transparent && mat.opacity < 1))) m.castShadow = false;
+            if (mats.some((mat) => mat.userData.glass || (mat.transparent && mat.opacity < 1) || mat.userData.noShadow)) m.castShadow = false;
           }
         });
         return { scene: gltf.scene, animations: gltf.animations };

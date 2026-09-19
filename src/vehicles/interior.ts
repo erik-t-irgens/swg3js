@@ -11,6 +11,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { cleanTrimesh, Group, groups, Physics, RAPIER, TRIMESH_FLAGS } from '../core/physics';
 import { markActor } from '../world/portalRender';
+import { surfaces } from '../world/surfaces';
 import { LIFT_CELL, liftStops, stopAt, type LiftStop } from '../world/lifts';
 import type { Vehicle } from './vehicle';
 
@@ -278,7 +279,7 @@ export class ShipInterior {
 
   /** Load an interior model and hang it inside a hull, with its own physics world at the planet's gravity. */
   static async load(vehicle: Vehicle, url: string, def: InteriorDef, gravity: number): Promise<ShipInterior> {
-    const gltf = await new GLTFLoader().loadAsync(url);
+    const gltf = await surfaces.withPlugin(new GLTFLoader()).loadAsync(url);
     // Rooms are never rained on: every material is marked dry before the scan can meet it (each
     // load parses its own file, so nothing outside these rooms shares them).
     gltf.scene.traverse((o) => {
@@ -487,6 +488,8 @@ export class ShipInterior {
 
   dispose(): void {
     if (this.owned) {
+      // These rooms' materials are this spawn's alone and nothing disposes them: their animated surfaces go now.
+      surfaces.forgetUnder(this.group);
       this.vehicle.group.remove(this.group);
       this.group.traverse((o) => {
         const m = o as THREE.Mesh;

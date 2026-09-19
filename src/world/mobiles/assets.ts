@@ -10,6 +10,7 @@
 // compiled a mesh at a time), so only the first of a species ever waits and no first sight stalls.
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { surfaces } from '../surfaces';
 import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js';
 import type { AnimPack, MobileEntry, Vec3 } from './types';
 import type { MobileCatalogue } from './catalogue';
@@ -155,7 +156,7 @@ export class MobileAssets {
   private readonly packJobs = new Map<string, { promise: Promise<PackAsset>; claims: number; estimate: number }>();
   private readonly jsons = new Map<string, Promise<AnimPack>>();
   private readonly failures = new Map<string, { at: number; message: string }>();
-  private readonly loader = new GLTFLoader();
+  private readonly loader = surfaces.withPlugin(new GLTFLoader());
   private active = 0;
   private readonly waiting: (() => void)[] = [];
   /** Packs whose roles name clips the GLB lacks, reported once each. */

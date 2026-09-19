@@ -42,6 +42,7 @@ import { Vehicle, type VehicleKind, type VehicleSpec } from '../vehicles/vehicle
 import { Bolts } from '../combat/bolts';
 import { ShipInterior } from '../vehicles/interior';
 import { Gallery } from './gallery';
+import { surfaces } from './surfaces';
 import { TurretManager, type TurretTarget } from '../combat/turrets';
 import { PLAYER_KEY, type Aggression, type Hittable, type Living, type Side } from '../combat/kit';
 
@@ -755,6 +756,7 @@ export class World {
     for (const c of this.structureColliders) this.physics.removeCollider(c);
     this.structureColliders = [];
     this.pack?.dispose();
+    surfaces.sweep();
     this.pack = null;
     this.packStatus = 'no pack';
     if (this.creatures) {
@@ -1571,6 +1573,8 @@ export class World {
           isNew = true;
           const std = m as THREE.MeshStandardMaterial;
           if (std.normalMap && std.normalScale) std.normalScale.copy(this.normalScale);
+          // The only place an animated surface is joined: this material is in the scene now.
+          if (m.userData.swgTrack || m.userData.swgScroll) surfaces.adopt(m);
         }
         if (csm && !this.csmMaterials.has(m) && !(m as THREE.ShaderMaterial).isShaderMaterial && m.userData.unlit !== true) {
           csm.setupMaterial(m);
@@ -1637,6 +1641,7 @@ export class World {
       this.csm?.shaders.delete(m);
       this.csmMaterials.delete(m);
       this.compiledMaterials.delete(m);
+      surfaces.forget(m);
     }
   }
 
@@ -2406,6 +2411,7 @@ export class World {
    */
   stepLiving(dt: number, playerPos: THREE.Vector3, camera: THREE.Camera | null): void {
     this.simTime += dt;
+    surfaces.update(this.simTime, this.renderer);
     const targets = this.targets(true);
     this.creatures.update(dt, playerPos, this.hurtPlayer);
     this.mobiles?.update(dt, { now: this.simTime, dt, camera, playerPos, targets });

@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { isReflective, registerReflective } from './envmap';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { surfaces } from './surfaces';
 
 export interface CellLight {
   type: number;
@@ -100,7 +101,7 @@ export interface Portal {
 
 /** Converted SWG content for one planet, loaded from the private assets folder. */
 export class AssetPack {
-  private readonly loader = new GLTFLoader();
+  private readonly loader = surfaces.withPlugin(new GLTFLoader());
   private readonly cache = new Map<string, Promise<LoadedModel>>();
   private readonly ready = new Map<string, LoadedModel>();
   private readonly bytesCache = new Map<string, Promise<ArrayBuffer | null>>();

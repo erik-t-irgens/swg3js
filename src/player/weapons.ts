@@ -2,6 +2,7 @@
 // kind fights like, so a weapon put in a hand picks the carries, the style and the blade's reach.
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { surfaces } from '../world/surfaces';
 
 export type WeaponClass = 'pistol' | 'carbine' | 'rifle' | 'heavy' | 'sword1h' | 'knife' | 'sword2h' | 'polearm' | 'fist' | 'lightsaber' | 'lightsaber2h' | 'lightsaberStaff' | 'thrown';
 
@@ -72,7 +73,7 @@ export function gunKindOf(cls: WeaponClass): 'pistol' | 'rifle' {
 export class WeaponCatalogue {
   readonly weapons: WeaponDef[];
   readonly skipped: { template: string; why: string }[];
-  private readonly loader = new GLTFLoader();
+  private readonly loader = surfaces.withPlugin(new GLTFLoader());
   private readonly models = new Map<string, Promise<THREE.Group>>();
 
   private constructor(readonly manifest: WeaponsManifest, private readonly baseUrl: string) {

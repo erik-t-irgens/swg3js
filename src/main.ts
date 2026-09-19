@@ -72,6 +72,7 @@ import type { Vehicle, VehicleKind } from './vehicles/vehicle';
 import { World } from './world/world';
 import { RoomAir, type RoomAirDebugOptions, type RoomAirInput } from './world/roomAir';
 import { RANGE } from './world/gallery';
+import { castsShadow, surfaces } from './world/surfaces';
 
 /** The keys for the vehicle ridden, by its kind. */
 function mountPrompt(v: import('./vehicles/vehicle').Vehicle): string {
@@ -424,6 +425,22 @@ class App {
         if (yaw !== undefined) this.cam.yaw = yaw;
         return { cell: this.world.enterCellAt(at) };
       },
+      /** Teleport to a point in the original game's coordinates (the inverse of `swg()`); null when no layout is loaded. */
+      teleportSwg: (x: number, z: number, yaw?: number) => {
+        const c = this.world.layoutCenter;
+        if (!c) return null;
+        // Through `teleport` itself (the entry above, on this same object), so a change to it reaches this too.
+        const dbg = (window as unknown as { __debug: { teleport(x: number, z: number, yaw?: number): { cell: unknown } } }).__debug;
+        return dbg.teleport(c.x - x, z - c.z, yaw);
+      },
+      /** The animated surfaces (flip-book screens, scrolling falls): counts and the records whose material name holds the string; `{ speed, freeze }` retunes the clock first. */
+      animTex: (arg?: string | { speed?: number; freeze?: boolean }) => {
+        if (arg && typeof arg === 'object') {
+          if (typeof arg.speed === 'number' && Number.isFinite(arg.speed)) surfaces.speed = arg.speed;
+          if (typeof arg.freeze === 'boolean') surfaces.frozen = arg.freeze;
+        }
+        return { ...surfaces.describe(typeof arg === 'string' ? arg : undefined), programs: this.renderer.info.programs?.length ?? 0 };
+      },
       /** Feed mouse movement to the real loop as if the pointer were locked (headless tests cannot lock it), and report the camera. */
       mouse: (dx = 0, dy = 0, wheel = 0) => {
         this.input.locked = true;
@@ -730,7 +747,7 @@ class App {
       show: async (file: string, clip?: string) => {
         let gltf;
         try {
-          gltf = await new GLTFLoader().loadAsync(`${import.meta.env.BASE_URL}assets-private/${file}`);
+          gltf = await surfaces.withPlugin(new GLTFLoader()).loadAsync(`${import.meta.env.BASE_URL}assets-private/${file}`);
         } catch (err) {
           console.error('show: failed to load', file, err);
           throw err;
@@ -743,7 +760,7 @@ class App {
           o.layers.enable(31);
           const m = o as THREE.Mesh;
           if (m.isMesh) {
-            m.castShadow = true;
+            m.castShadow = castsShadow(m.material);
             m.frustumCulled = false;
           }
         });

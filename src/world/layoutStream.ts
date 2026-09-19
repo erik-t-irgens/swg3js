@@ -9,6 +9,7 @@ import { CHUNK_SIZE } from './terrain';
 import type { Exclusion } from './props';
 import { ACTOR_LAYER, INTERIOR_LAYER, crossing } from './portalRender';
 import { mirroredTransform, type EffectHandle, type ParticleEffects } from './particles';
+import { castsShadow, drawsAfterWater } from './surfaces';
 
 export const REGION = 256;
 
@@ -378,7 +379,10 @@ export class LayoutStreamer {
         });
         // Objects placed inside buildings draw in every pass, like actors, so they show with the room.
         if (instanced.some((p) => p.contained)) mesh.layers.enable(ACTOR_LAYER);
-        mesh.castShadow = model.radius >= SHADOW_MIN_RADIUS;
+        mesh.castShadow = model.radius >= SHADOW_MIN_RADIUS && castsShadow(prim.material);
+        // A translucent fall or screen draws after the terrain water, which follows the player and
+        // so always sorts nearer than this mesh's centre of all its placements.
+        if (drawsAfterWater(prim.material)) mesh.renderOrder = 3;
         mesh.receiveShadow = true;
         mesh.instanceMatrix.needsUpdate = true;
         mesh.computeBoundingSphere();
@@ -405,7 +409,8 @@ export class LayoutStreamer {
       mesh.matrixAutoUpdate = false;
       mesh.matrix.copy(b.matrix);
       mesh.matrixWorld.copy(b.matrix);
-      mesh.castShadow = true;
+      mesh.castShadow = castsShadow(prim.material);
+      if (drawsAfterWater(prim.material)) mesh.renderOrder = 3;
       mesh.receiveShadow = true;
       mesh.visible = false;
       mesh.layers.set(INTERIOR_LAYER);
