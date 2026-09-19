@@ -168,7 +168,7 @@ export class Menu {
   onResume: () => void = () => {};
   onSwitchCharacter: () => void = () => {};
   /** A setting moved: the game applies it. */
-  onSetting: (key: keyof Settings, value: number | boolean) => void = () => {};
+  onSetting: (key: keyof Settings, value: number | boolean | string) => void = () => {};
 
   /** The emotes page's source, given by the game once a character is up. */
   emotes: EmoteSource | null = null;
@@ -335,7 +335,7 @@ export class Menu {
     }
   }
 
-  private setValue(key: keyof Settings, value: number | boolean): void {
+  private setValue(key: keyof Settings, value: number | boolean | string): void {
     (this.settings as unknown as Record<string, unknown>)[key] = value;
     saveSettings(this.settings);
     this.onSetting(key, value);

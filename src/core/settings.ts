@@ -53,6 +53,32 @@ export interface Settings extends FxSettings {
   weatherKind: number;
   /** Life Day's areas: -1 in season (15 December to 5 January), 1 always, 0 never. */
   lifeDay: number;
+  // Sound. One slider for everything and one per layer, so a bed can be turned down without
+  // losing the footsteps; the switches are the things a player may simply not want.
+  /** Everything, 0 to 1. */
+  soundMaster: number;
+  /** The area beds, the room beds and the world's placed emitters. */
+  soundAmbience: number;
+  /** Weapons, explosions, machines and items. */
+  soundEffects: number;
+  /** Creatures, people and droids, and the emote voices. */
+  soundVoices: number;
+  /** Feet, on any surface. */
+  soundFootsteps: number;
+  /** Speeders, ships and their engines. */
+  soundVehicles: number;
+  /** The panels' own clicks. */
+  soundInterface: number;
+  /** Music; nothing plays on it until the music pass, so the menu does not show it yet. */
+  soundMusic: number;
+  /** Head-related panning, which places a sound around the head rather than across the speakers. */
+  soundHeadphones: boolean;
+  /** A little echo in rooms and halls. The amounts are ours; the client's are not in the archives. */
+  soundRoomEcho: boolean;
+  /** Keep playing while the tab is in the background. */
+  soundInBackground: boolean;
+  /** Which lightsaber sounds: 'jka' Jedi Academy's, 'swg' the game's own. */
+  soundSabers: string;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -81,6 +107,18 @@ export const DEFAULT_SETTINGS: Settings = {
   weatherForce: -1,
   weatherKind: 0,
   lifeDay: -1,
+  soundMaster: 0.8,
+  soundAmbience: 1,
+  soundEffects: 1,
+  soundVoices: 1,
+  soundFootsteps: 1,
+  soundVehicles: 1,
+  soundInterface: 0.7,
+  soundMusic: 1,
+  soundHeadphones: false,
+  soundRoomEcho: true,
+  soundInBackground: false,
+  soundSabers: 'jka',
   ...FX_DEFAULTS,
 };
 

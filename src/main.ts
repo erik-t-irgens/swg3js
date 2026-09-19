@@ -94,6 +94,8 @@ import { WINGS_KEY, WING_RULE, dropPilotChoices } from './vehicles/wings';
 import type { Vehicle, VehicleKind } from './vehicles/vehicle';
 import { HEAD_TO_EYE, SEATED_EYE_FALLBACK, SEAT_RULE, cockpitYawStep, frameFileName, mirroredOffset, seatDropUsed } from './vehicles/cockpitSeat';
 import { World } from './world/world';
+import { AudioSystem, type ListenerPose } from './audio/audio.ts';
+import { OUTSIDE } from './audio/distance.ts';
 import { RoomAir, type RoomAirDebugOptions, type RoomAirInput } from './world/roomAir';
 import { RANGE } from './world/gallery';
 import { castsShadow, surfaces } from './world/surfaces';
@@ -339,6 +341,16 @@ class App {
   /** The way between a planet and its space, offered on E: up near the top of the sky, down anywhere in space. */
   private spaceGate: 'up' | 'down' | null = null;
   private readonly settings: Settings = loadSettings();
+  /**
+   * The mixer. Declared after `settings`, whose value its constructor reads, and assigned at the
+   * top of the constructor so anything made later can ask it to play. Its context is made
+   * suspended and unlocked on the first press, as browsers require.
+   */
+  private readonly audio: AudioSystem;
+  /** The listener handed to the mixer each frame, refilled rather than made. */
+  private readonly listenerPose: ListenerPose = { x: 0, y: 0, z: 0, fx: 0, fy: 0, fz: -1, ux: 0, uy: 1, uz: 0, space: { building: OUTSIDE.building, cell: OUTSIDE.cell } };
+  private readonly listenerDir = new THREE.Vector3();
+  private readonly listenerUp = new THREE.Vector3();
   /** The character being played, as kept in this browser; null on the select screen and in the creator. */
   private current: SavedCharacter | null = null;
   /** The creator is up: the appearance and wardrobe panels at full size over no world at all. */
@@ -367,6 +379,11 @@ class App {
     const lowfx = new URLSearchParams(location.search).get('lowfx') === '1';
     if (lowfx) Object.assign(this.settings, { renderScale: 0.5, shadows: false, effects: false });
     const S = this.settings;
+    // The mixer first, so everything built after it can ask for a sound. Its context is made
+    // suspended: the browser lets nothing sound until the first press, which the unlock below
+    // catches. Until then the beds keep their own clocks and come in where they have reached.
+    this.audio = new AudioSystem(import.meta.env.BASE_URL, S);
+    this.audio.install();
     this.renderer.setPixelRatio(S.renderScale);
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.renderer.shadowMap.enabled = S.shadows;
@@ -1178,6 +1195,53 @@ class App {
       /** Every action and the keys bound to it. */
       bindings: () => ({ ...this.input.bindings }),
       resetBindings: () => this.input.resetBindings(),
+      /**
+       * The mixer, and its live numbers. Nothing can be heard from a driven tab, so this is how
+       * sound is checked headless: the context's state (`suspended` means nobody has clicked yet),
+       * every voice with its layer, priority, slot and the gain the listener would hear it at, the
+       * voices refused a slot, the grid's pass, the bank (templates, samples, memory) and the last
+       * dozen sounds asked for with what became of each. With an object it also tunes, live:
+       * `{ distance: { audible: 12 } }`, `{ voices: { positional: 24 } }`, `{ grid: { rate: 2 } }`
+       * and `{ mixer: { writeRate: 60 } }`, each merged into the invented numbers of its kind.
+       */
+      audio: (opts: { distance?: Record<string, number>; voices?: Record<string, number>; grid?: Record<string, number>; mixer?: Record<string, number> } = {}) => {
+        if (opts.distance) Object.assign(this.audio.distance, opts.distance);
+        if (opts.grid) Object.assign(this.audio.grid.tune, opts.grid);
+        if (opts.mixer) Object.assign(this.audio.tune, opts.mixer);
+        // A source's reach and its cell are worked out when it is filed, so moving either the
+        // audible radius or the cell edge has to file everything again or the change reaches
+        // nothing already in the grid.
+        if (opts.distance || opts.grid) this.audio.grid.rebuild();
+        if (opts.voices) console.warn('audio: the voice pools are sized when the mixer is made; reload after changing them in voices.ts');
+        return { ...this.audio.status(), tune: { distance: { ...this.audio.distance }, grid: { ...this.audio.grid.tune }, mixer: { ...this.audio.tune } } };
+      },
+      /**
+       * Play one of the game's sound templates by its archive path, at the player (`sound(id)`),
+       * at a point (`sound(id, [x, y, z])`) or with no place at all (`sound(id, false)`). Returns
+       * the voice's key, or 0 with the reason in `audio().recent`.
+       */
+      sound: (id: string, where?: [number, number, number] | false) => {
+        if (where === false) return this.audio.play(id);
+        const at = where ?? this.player.worldPos.toArray();
+        return this.audio.play(id, { x: at[0], y: at[1], z: at[2] });
+      },
+      /**
+       * The per-category multiplier over the game's own volumes (an invented knob, 1 by default),
+       * for settling how the very quiet one-shot beds are meant to read against their bed. The
+       * categories are the game's own: 0 ambient, 1 explosion, 2 item, 3 movement, 4 interface,
+       * 5 vehicle, 6 vocalization, 7 weapon, 10 machine, 13 voice-over. No argument lists them.
+       */
+      soundGain: (category?: number, value?: number) => {
+        if (category !== undefined && value !== undefined && category >= 0 && category < this.audio.categoryGain.length) this.audio.categoryGain[category] = value;
+        return [...this.audio.categoryGain];
+      },
+      /**
+       * Renders a known sound through an offline context and checks it came out at the gain the
+       * master and the Effects slider ask for: the one check of the audio path that needs neither a
+       * click nor the sound pack. `ok` false with `peak` 0 is a broken chain; `suspended` in
+       * `audio().state` is only an unlock, which this does not need.
+       */
+      audioSelfTest: () => this.audio.selfTest(),
       /** The saber system's state: style, current move, chain count, whether the rig has Jedi Academy's clips, the special jump in progress, and the thrown saber's flight. */
       saber: () => ({ blade: (() => { const a = new THREE.Vector3(); const b = new THREE.Vector3(); this.player.bladeSegmentAt(0, a, b); return { hilt: a.toArray().map((v) => Number(v.toFixed(3))), tip: b.toArray().map((v) => Number(v.toFixed(3))) }; })(), blade2: (() => { if (this.player.bladeCount < 2) return null; const a = new THREE.Vector3(); const b = new THREE.Vector3(); this.player.bladeSegmentAt(1, a, b); return { hilt: a.toArray().map((v) => Number(v.toFixed(3))), tip: b.toArray().map((v) => Number(v.toFixed(3))) }; })(), style: this.player.saber.style, move: this.player.saber.move, chain: this.player.saber.chainCount, timer: Number(this.player.saber.timer.toFixed(2)), jkaClips: this.player.hasJkaClips, on: this.player.saberOn, special: this.player.jka.specialJump, thrown: this.player.thrown.inFlight ? { returning: this.player.thrown.returning, at: this.player.thrown.pos.toArray().map((v) => Number(v.toFixed(2))) } : null }),
       /** Particle effects within r metres of the player: file, distance, whether playing, live particles. With `verbose`, every emitter: texture, blend, whether the texture loaded, and the first particle's size, alpha, colour and screen position. */
@@ -1206,24 +1270,31 @@ class App {
       advance: (seconds: number, keys: string[] = [], hold = false) => {
         for (const k of keys) this.input.force(k, true);
         const dt = 1 / 60;
-        for (let i = 0; i < Math.round(seconds / dt); i++) {
-          this.stepEmoteKeys();
-          this.stepEmoteEnd();
-          this.player.update(dt, this.input, this.cam, this.world);
-          this.scorch(dt);
-          this.stepCombat(dt);
-          // The jump's clock (its countdown and phases); the transit itself waits on drawn frames and streaming, which this does not give.
-          if (!this.traveling) this.hyperspace.update(dt, dt, false);
-          this.stepVehicles(dt, true);
-          if (!this.player.noclip && !this.player.mounted) this.world.turrets.update(dt, this.player, this.world.bolts);
-          // Where the player stands first, then one step of everything alive: without the first,
-          // the brains would all chase where the player was when the helper was called.
-          this.world.setPlayerTarget(this.player.worldPos, !this.player.noclip && this.player.hp > 0, (dmg) => this.player.takeDamage(dmg));
-          this.world.stepLiving(dt, this.player.worldPos, this.cam.camera);
-          this.physics.step(dt);
-          this.effects.update(dt);
-          this.updateCamera(null);
-          this.input.endFrame();
+        // Ten simulated seconds run in a fraction of a real one: whatever they would have sounded
+        // is recorded and nothing is started, or a visible tab would burst with a minute of noise.
+        this.audio.advancing = true;
+        try {
+          for (let i = 0; i < Math.round(seconds / dt); i++) {
+            this.stepEmoteKeys();
+            this.stepEmoteEnd();
+            this.player.update(dt, this.input, this.cam, this.world);
+            this.scorch(dt);
+            this.stepCombat(dt);
+            // The jump's clock (its countdown and phases); the transit itself waits on drawn frames and streaming, which this does not give.
+            if (!this.traveling) this.hyperspace.update(dt, dt, false);
+            this.stepVehicles(dt, true);
+            if (!this.player.noclip && !this.player.mounted) this.world.turrets.update(dt, this.player, this.world.bolts);
+            // Where the player stands first, then one step of everything alive: without the first,
+            // the brains would all chase where the player was when the helper was called.
+            this.world.setPlayerTarget(this.player.worldPos, !this.player.noclip && this.player.hp > 0, (dmg) => this.player.takeDamage(dmg));
+            this.world.stepLiving(dt, this.player.worldPos, this.cam.camera);
+            this.physics.step(dt);
+            this.effects.update(dt);
+            this.updateCamera(null);
+            this.input.endFrame();
+          }
+        } finally {
+          this.audio.advancing = false;
         }
         if (!hold) for (const k of keys) this.input.force(k, false);
       },
@@ -2342,6 +2413,15 @@ class App {
       this.world.onCameraResized();
     });
 
+    // Sound starts on the first press, which is what browsers require; the game already needs a
+    // click for the pointer lock, so nothing extra is asked of the player. Both listeners are
+    // passive and stay on, since `unlock` after the first time does nothing.
+    const unlock = () => this.audio.unlock();
+    window.addEventListener('pointerdown', unlock, { capture: true, passive: true });
+    window.addEventListener('keydown', unlock, { capture: true, passive: true });
+    // Away to another tab: silent, and the context stopped, unless the player asked otherwise.
+    document.addEventListener('visibilitychange', () => this.audio.setHidden(document.hidden));
+
     // Nothing loads until a character is chosen: the select screen first, the creator or the
     // world after. The species list is small and feeds both the creator and the console.
     void loadSpeciesIndex(import.meta.env.BASE_URL).then((list) => {
@@ -2385,6 +2465,9 @@ class App {
   private switchToSelect(): void {
     // A jump lets go of everything it holds (the hull, the white, its effects) before the ship is left.
     this.hyperspace.abort('leaving');
+    // Every voice and every looping source goes with the world, or a planet's beds would follow
+    // the player onto the select screen and into the next character's world.
+    this.audio.stopAll();
     this.savePlace(true);
     this.menu.hide();
     this.closePanels();
@@ -2470,12 +2553,77 @@ class App {
         this.world.weather.configure(S);
         this.hud.setWeatherNote(this.world.weather.heldNote());
         break;
+      case 'soundMaster':
+      case 'soundAmbience':
+      case 'soundEffects':
+      case 'soundVoices':
+      case 'soundFootsteps':
+      case 'soundVehicles':
+      case 'soundInterface':
+      case 'soundMusic':
+      case 'soundHeadphones':
+      case 'soundRoomEcho':
+      case 'soundInBackground':
+      case 'soundSabers':
+        // Gains only: nothing here rebuilds the graph, and nothing compiles.
+        this.audio.apply(S);
+        break;
       default:
         // Anything in the effects registry: the chain takes them all in one go on the next
         // microtask, so resetting the graphics is one reconcile rather than two dozen.
         if (isFxSettingKey(key)) this.queueEffects();
         break;
     }
+  }
+
+  // ---- Sound. ----
+
+  /**
+   * A number per space the ear or a sound can be in, so "are these two in the same room" is one
+   * comparison and nothing holds a reference to a building that the world may unload: -1 is the
+   * open world, and every building and every boarded hull gets a number of its own the first time
+   * it is met. The map is weak, so an unloaded building's number simply goes with it.
+   */
+  private readonly spaceIds = new WeakMap<object, number>();
+  private nextSpaceId = 1;
+
+  private spaceIdOf(of: object | null | undefined): number {
+    if (!of) return -1;
+    let id = this.spaceIds.get(of);
+    if (id === undefined) {
+      id = this.nextSpaceId++;
+      this.spaceIds.set(of, id);
+    }
+    return id;
+  }
+
+  /**
+   * The ear at the camera, and the mixer's own step. Called after the frame's last camera move, so
+   * a cockpit view hears from the cockpit and a chase view from behind the hull. Nothing is
+   * allocated: the pose and the two vectors are fields.
+   */
+  private stepAudio(dt: number): void {
+    const cam = this.cam.camera;
+    cam.updateMatrixWorld();
+    const pose = this.listenerPose;
+    pose.x = cam.matrixWorld.elements[12];
+    pose.y = cam.matrixWorld.elements[13];
+    pose.z = cam.matrixWorld.elements[14];
+    // Three's camera looks down its own -Z, and its +Y is up.
+    this.listenerDir.set(-cam.matrixWorld.elements[8], -cam.matrixWorld.elements[9], -cam.matrixWorld.elements[10]).normalize();
+    this.listenerUp.set(cam.matrixWorld.elements[4], cam.matrixWorld.elements[5], cam.matrixWorld.elements[6]).normalize();
+    pose.fx = this.listenerDir.x;
+    pose.fy = this.listenerDir.y;
+    pose.fz = this.listenerDir.z;
+    pose.ux = this.listenerUp.x;
+    pose.uy = this.listenerUp.y;
+    pose.uz = this.listenerUp.z;
+    const aboard = this.player.aboard;
+    const cell = this.world.cellState;
+    pose.space.building = aboard ? this.spaceIdOf(aboard.vehicle) : this.spaceIdOf(cell?.building ?? null);
+    // Which room of a hull the player stands in is not tracked yet; a building's is.
+    pose.space.cell = aboard ? -1 : (cell?.cell ?? -1);
+    this.audio.update(dt, pose);
   }
 
   /** The look of the character as it is now. */
@@ -4408,6 +4556,7 @@ class App {
     const want = tab ?? this.spawnerTab;
     const wasOpen = tab === undefined && (this.vehiclesUi.open || this.npcUi.open || this.shipEdit.open);
     this.closePanels();
+    this.audio.ui.play(wasOpen ? 'panelClose' : tab !== undefined ? 'select' : 'panelOpen');
     if (wasOpen) {
       this.freeMouse(false);
       return;
@@ -4936,6 +5085,8 @@ class App {
     const want = tab ?? this.inventoryTab;
     const wasOpen = tab === undefined && (this.backpack.open || this.wardrobe.open || this.appearanceUi.open || this.weaponsUi.open || this.forceUi.open);
     this.closePanels();
+    // The backpack's own open and close, from the game's interface table.
+    this.audio.ui.play(wasOpen ? 'panelClose' : tab !== undefined ? 'select' : 'panelOpen');
     if (wasOpen) {
       this.freeMouse(false);
       return;
@@ -5259,6 +5410,9 @@ class App {
       // On the select screen and in the creator there is no world: nothing streams, nothing draws
       // but the panels, and the frame costs nothing.
       if (!this.inWorld) {
+        // The mixer still steps: the select screen and the creator have their own clicks, and the
+        // bank's slices and the loops' clocks must go on whether a world is up or not.
+        this.stepAudio(dt);
         input.endFrame();
         return;
       }
@@ -5378,6 +5532,9 @@ class App {
       player.inside = this.world.inside || !!player.aboard;
       const room = player.aboard;
       this.updateCamera(player.noclip ? null : room ? (from, to) => room.cameraBlock(from, to) : (from, to) => this.physics.cameraBlock(from, to, player.body, this.world.inside), dt);
+      // The ear sits at the camera, set after the frame's last camera move: aboard a ship, in the
+      // cockpit or on foot, what is heard is what the picture is drawn from.
+      this.stepAudio(dt);
       this.torch.intensity = this.torchOn ? 260 : 0;
       if (this.torchOn) {
         this.torch.position.copy(this.cam.camera.position);
