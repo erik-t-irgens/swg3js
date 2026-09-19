@@ -4,7 +4,7 @@ import { DEFAULT_BINDINGS, type Action, type Input } from '../core/input';
 import { DEFAULT_SETTINGS, saveSettings, type Settings } from '../core/settings';
 import { FX_KNOBS, fxPassDef, fxProductDef } from '../core/fxRegistry.ts';
 
-type Page = 'main' | 'controls' | 'graphics' | 'emotes' | 'multiplayer';
+type Page = 'main' | 'controls' | 'graphics' | 'sound' | 'emotes' | 'multiplayer';
 
 /** What the multiplayer page needs from the game: the relay's address and state, and who is here. */
 export interface NetSource {
@@ -93,11 +93,13 @@ interface Knob {
   key: keyof Settings;
   label: string;
   hint: string;
-  kind: 'range' | 'toggle' | 'select';
+  /** `choice` is a select whose values are words rather than numbers. */
+  kind: 'range' | 'toggle' | 'select' | 'choice';
   min?: number;
   max?: number;
   step?: number;
   options?: { value: number; label: string }[];
+  choices?: { value: string; label: string }[];
   format?: (v: number) => string;
   /** Greyed while any of these is off; still usable, so a strength can be set before its toggle. */
   requires?: readonly (keyof Settings)[];
@@ -156,6 +158,36 @@ const GRAPHICS: { title: string; knobs: readonly Knob[] }[] = [
   },
 ];
 
+/**
+ * Sound. A master and a slider per layer, so the beds can be turned down without losing the feet,
+ * and the switches are the things a player may simply not want at all. Sound starts on the first
+ * click, which the browser requires; until then the beds keep their own clocks and come in where
+ * they have reached.
+ */
+const SOUND: { title: string; knobs: readonly Knob[] }[] = [
+  {
+    title: 'Volume',
+    knobs: [
+      { key: 'soundMaster', label: 'Master', kind: 'range', min: 0, max: 1, step: 0.01, format: (v) => `${Math.round(v * 100)}%`, hint: 'Everything. At 0 the game is silent.' },
+      { key: 'soundAmbience', label: 'Ambience', kind: 'range', min: 0, max: 1, step: 0.01, format: (v) => `${Math.round(v * 100)}%`, requires: ['soundMaster'], hint: 'The area\'s own day and night beds, the rooms\' beds, and the sounds the game places in the world: crowds, cantina bands, fires, waterfalls, machinery.' },
+      { key: 'soundEffects', label: 'Effects', kind: 'range', min: 0, max: 1, step: 0.01, format: (v) => `${Math.round(v * 100)}%`, requires: ['soundMaster'], hint: 'Weapons, explosions, machines and things you use.' },
+      { key: 'soundVoices', label: 'Creatures and voices', kind: 'range', min: 0, max: 1, step: 0.01, format: (v) => `${Math.round(v * 100)}%`, requires: ['soundMaster'], hint: 'Creatures, people and droids, and your own emotes.' },
+      { key: 'soundFootsteps', label: 'Footsteps', kind: 'range', min: 0, max: 1, step: 0.01, format: (v) => `${Math.round(v * 100)}%`, requires: ['soundMaster'], hint: 'Feet on sand, rock, metal, wood, snow and water, yours and everyone else\'s.' },
+      { key: 'soundVehicles', label: 'Vehicles and ships', kind: 'range', min: 0, max: 1, step: 0.01, format: (v) => `${Math.round(v * 100)}%`, requires: ['soundMaster'], hint: 'Speeder and ship engines, and the sounds a ship makes around you.' },
+      { key: 'soundInterface', label: 'Interface', kind: 'range', min: 0, max: 1, step: 0.01, format: (v) => `${Math.round(v * 100)}%`, requires: ['soundMaster'], hint: 'The panels\' own clicks, from the game\'s own interface table. These never give way to a fight.' },
+    ],
+  },
+  {
+    title: 'How it sounds',
+    knobs: [
+      { key: 'soundHeadphones', label: 'Headphones', kind: 'toggle', hint: 'Places each sound around your head rather than across two speakers. It costs a little more, and it is worth it on headphones only.' },
+      { key: 'soundRoomEcho', label: 'Room echo', kind: 'toggle', hint: 'A little echo indoors, stronger in the tall halls. The game marks which rooms are halls; how much echo they get is ours, so turn it off if it sounds wrong.' },
+      { key: 'soundInBackground', label: 'Keep playing in the background', kind: 'toggle', hint: 'Off, the game falls silent when you switch to another tab and picks up where it was when you come back.' },
+      { key: 'soundSabers', label: 'Lightsaber sounds', kind: 'choice', choices: [{ value: 'jka', label: 'Jedi Academy\'s' }, { value: 'swg', label: 'The game\'s own' }], hint: 'Which hums, ignitions and swings the blades use. Both are converted.' },
+    ],
+  },
+];
+
 const CONTROLS: Knob[] = [
   { key: 'sensitivity', label: 'Mouse sensitivity', hint: 'Look speed; 1 is the game\'s own.', kind: 'range', min: 0.2, max: 3, step: 0.05, format: (v) => `${v.toFixed(2)}×` },
   { key: 'invertY', label: 'Invert mouse Y', hint: 'Push forward to look down.', kind: 'toggle' },
@@ -169,6 +201,8 @@ export class Menu {
   onSwitchCharacter: () => void = () => {};
   /** A setting moved: the game applies it. */
   onSetting: (key: keyof Settings, value: number | boolean | string) => void = () => {};
+  /** A panel's own click, played by the game's interface sounds. */
+  onUiSound: (action: 'panelOpen' | 'panelClose' | 'confirm' | 'select' | 'rollover' | 'increment') => void = () => {};
 
   /** The emotes page's source, given by the game once a character is up. */
   emotes: EmoteSource | null = null;
@@ -186,6 +220,7 @@ export class Menu {
           <button data-page="main" class="on">Menu</button>
           <button data-page="controls">Controls</button>
           <button data-page="graphics">Graphics</button>
+          <button data-page="sound">Sound</button>
           <button data-page="emotes">Emotes</button>
           <button data-page="multiplayer">Multiplayer</button>
           <div class="menu-spacer"></div>
@@ -195,9 +230,16 @@ export class Menu {
       </div>`;
     parent.appendChild(this.root);
     for (const b of this.root.querySelectorAll<HTMLButtonElement>('.menu-nav button[data-page]')) {
-      b.addEventListener('click', () => this.showPage(b.dataset.page as Page));
+      b.addEventListener('click', () => {
+        this.onUiSound('select');
+        this.showPage(b.dataset.page as Page);
+      });
+      b.addEventListener('pointerenter', () => this.onUiSound('rollover'));
     }
-    this.root.querySelector('.resume-nav')!.addEventListener('click', () => this.onResume());
+    this.root.querySelector('.resume-nav')!.addEventListener('click', () => {
+      this.onUiSound('confirm');
+      this.onResume();
+    });
     // Key capture for the bindings: the next key or mouse button pressed is the one.
     window.addEventListener('keydown', (e) => this.onKey(e), true);
     window.addEventListener('mousedown', (e) => this.onMouse(e), true);
@@ -211,13 +253,17 @@ export class Menu {
   }
 
   show(page: Page = 'main'): void {
+    const was = this.open;
     this.root.classList.remove('hidden');
     this.showPage(page);
+    if (!was) this.onUiSound('panelOpen');
   }
 
   hide(): void {
+    const was = this.open;
     this.cancelCapture();
     this.root.classList.add('hidden');
+    if (was) this.onUiSound('panelClose');
   }
 
   private showPage(page: Page): void {
@@ -233,13 +279,25 @@ export class Menu {
           <button class="big switch">Switch character</button>
           <button class="big" data-page="controls">Controls</button>
           <button class="big" data-page="graphics">Graphics</button>
+          <button class="big" data-page="sound">Sound</button>
           <button class="big" data-page="emotes">Emotes</button>
           <button class="big" data-page="multiplayer">Multiplayer</button>
         </div>
         <p class="menu-hint">The world keeps turning behind this; the character stands still. Settings are kept in this browser.</p>`;
-      body.querySelector('.resume')!.addEventListener('click', () => this.onResume());
-      body.querySelector('.switch')!.addEventListener('click', () => this.onSwitchCharacter());
-      for (const b of body.querySelectorAll<HTMLButtonElement>('button[data-page]')) b.addEventListener('click', () => this.showPage(b.dataset.page as Page));
+      body.querySelector('.resume')!.addEventListener('click', () => {
+        this.onUiSound('confirm');
+        this.onResume();
+      });
+      body.querySelector('.switch')!.addEventListener('click', () => {
+        this.onUiSound('confirm');
+        this.onSwitchCharacter();
+      });
+      for (const b of body.querySelectorAll<HTMLButtonElement>('button[data-page]')) {
+        b.addEventListener('click', () => {
+          this.onUiSound('select');
+          this.showPage(b.dataset.page as Page);
+        });
+      }
     } else if (page === 'controls') {
       body.innerHTML = `<h2>Controls</h2>${this.knobRows(CONTROLS)}<h3>Keys <span>click a key to change it · Backspace clears it · Esc keeps it</span></h3><div class="keys">${this.keyRows()}</div><div class="menu-actions"><button class="reset-keys">Reset keys to defaults</button></div>`;
       this.wireKnobs(body);
@@ -267,6 +325,13 @@ export class Menu {
       });
       input.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') body.querySelector<HTMLButtonElement>('.connect')!.click();
+      });
+    } else if (page === 'sound') {
+      body.innerHTML = `<h2>Sound</h2><p class="menu-hint">Sound starts on your first click, as browsers require. Every sample, and every volume, pitch and gap inside it, is the game's own; how loudness falls off with distance, how many sounds play at once and the room echo are ours.</p>${SOUND.map((g) => `<h3>${g.title}</h3>${this.knobRows(g.knobs)}`).join('')}<div class="menu-actions"><button class="reset-sound">Reset sound to defaults</button></div>`;
+      this.wireKnobs(body);
+      body.querySelector('.reset-sound')!.addEventListener('click', () => {
+        for (const g of SOUND) for (const k of g.knobs) this.setValue(k.key, DEFAULT_SETTINGS[k.key] as number | boolean | string);
+        this.showPage('sound');
       });
     } else if (page === 'emotes') {
       const src = this.emotes;
@@ -297,6 +362,7 @@ export class Menu {
         let control: string;
         if (k.kind === 'toggle') control = `<label class="switch"><input type="checkbox" data-key="${k.key}"${v ? ' checked' : ''} /><span></span></label>`;
         else if (k.kind === 'select') control = `<select data-key="${k.key}">${k.options!.map((o) => `<option value="${o.value}"${o.value === v ? ' selected' : ''}>${o.label}</option>`).join('')}</select>`;
+        else if (k.kind === 'choice') control = `<select data-key="${k.key}">${k.choices!.map((o) => `<option value="${o.value}"${o.value === v ? ' selected' : ''}>${o.label}</option>`).join('')}</select>`;
         else control = `<input type="range" data-key="${k.key}" min="${k.min}" max="${k.max}" step="${k.step}" value="${v}" /><span class="value">${k.format ? k.format(v as number) : String(v)}</span>`;
         // What this knob waits on: it is greyed, and says so, while any of them is off.
         const off = k.requires?.filter((key) => !this.settings[key]) ?? [];
@@ -309,16 +375,16 @@ export class Menu {
 
   /** The name a key is shown under, for the "off while X is off" note. */
   private labelOf(key: keyof Settings): string {
-    for (const g of GRAPHICS) for (const k of g.knobs) if (k.key === key) return k.label;
+    for (const g of [...GRAPHICS, ...SOUND]) for (const k of g.knobs) if (k.key === key) return k.label;
     return String(key);
   }
 
   private wireKnobs(body: HTMLElement): void {
-    const all = [...CONTROLS, ...GRAPHICS.flatMap((g) => g.knobs)];
+    const all = [...CONTROLS, ...GRAPHICS.flatMap((g) => g.knobs), ...SOUND.flatMap((g) => g.knobs)];
     for (const el of body.querySelectorAll<HTMLInputElement | HTMLSelectElement>('[data-key]')) {
       const knob = all.find((k) => k.key === el.dataset.key)!;
       const on = () => {
-        const value = knob.kind === 'toggle' ? (el as HTMLInputElement).checked : Number(el.value);
+        const value = knob.kind === 'toggle' ? (el as HTMLInputElement).checked : knob.kind === 'choice' ? el.value : Number(el.value);
         this.setValue(knob.key, value);
         const out = el.parentElement?.querySelector<HTMLElement>('.value');
         if (out && typeof value === 'number') out.textContent = knob.format ? knob.format(value) : String(value);
@@ -332,6 +398,9 @@ export class Menu {
         }
       };
       el.addEventListener(knob.kind === 'range' ? 'input' : 'change', on);
+      // A slider's own tick, from the game's own table. It is on `change`, not `input`: `input`
+      // fires for every pixel of a drag, and the row is the one the game used for a single step.
+      if (knob.kind === 'range') el.addEventListener('change', () => this.onUiSound('increment'));
     }
   }
 

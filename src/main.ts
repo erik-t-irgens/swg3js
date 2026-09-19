@@ -2376,6 +2376,8 @@ class App {
     };
     this.menu.onResume = () => this.resume();
     this.menu.onSwitchCharacter = () => this.switchToSelect();
+    // The menu's own clicks, from the game's interface table.
+    this.menu.onUiSound = (action) => void this.audio.ui.play(action);
     this.menu.onSetting = (key) => this.applySetting(key);
     // Escape: in the world it opens the menu (the browser drops the pointer lock on it, which is
     // caught below); with the menu up it resumes; with a panel or the map up it closes that.
