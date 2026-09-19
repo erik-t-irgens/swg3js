@@ -787,6 +787,7 @@ export class World {
     this.particles = null;
     if (this.spaceBodies) {
       this.scene.remove(this.spaceBodies);
+      this.disposeSpaceBodies(this.spaceBodies);
       this.spaceBodies = null;
     }
     this.flora = null;
@@ -971,6 +972,12 @@ export class World {
       if (dir.lengthSq() < 1) continue;
       dir.normalize();
       const tex = p.texture ? await loader.loadAsync(pack.url(p.texture)).catch(() => null) : null;
+      // A travel or a jump while the pictures load: this zone's bodies must never land in the next one's sky.
+      if (token !== this.loadToken) {
+        tex?.dispose();
+        this.disposeSpaceBodies(group);
+        return;
+      }
       if (tex) tex.colorSpace = THREE.SRGBColorSpace;
       const mesh = new THREE.Mesh(new THREE.SphereGeometry(SPACE_BODY_SIZE * p.size, 48, 32), new THREE.MeshLambertMaterial({ map: tex ?? undefined, color: tex ? 0xffffff : 0x8a97a6, fog: false, depthWrite: false }));
       mesh.position.copy(dir).multiplyScalar(SPACE_BODY_DISTANCE);
@@ -981,12 +988,33 @@ export class World {
       const sin = Math.min(1, (SPACE_BODY_SIZE * p.size) / SPACE_BODY_DISTANCE);
       discs.push({ dir: dir.clone(), cos: Math.sqrt(1 - sin * sin) });
     }
+    // Only one set of bodies is ever in the sky: one left from an earlier load of this zone goes first.
+    if (this.spaceBodies) {
+      this.scene.remove(this.spaceBodies);
+      this.disposeSpaceBodies(this.spaceBodies);
+    }
     this.spaceBodies = group;
     this.scene.add(group);
     markActor(group);
     // A star behind a planet must not flare through it: the bodies write no depth for the flare to see.
     this.swgSky?.setSpaceOccluders(discs);
     console.info(`space: ${group.children.length} planets and moons in the sky`);
+  }
+
+  /** A set of space bodies taken out of the world for good: their materials forgotten, then everything they own freed. */
+  private disposeSpaceBodies(group: THREE.Group): void {
+    const materials: THREE.MeshLambertMaterial[] = [];
+    for (const o of group.children) {
+      const mesh = o as THREE.Mesh<THREE.BufferGeometry, THREE.MeshLambertMaterial>;
+      if (!mesh.isMesh) continue;
+      mesh.geometry.dispose();
+      materials.push(mesh.material);
+    }
+    this.forgetMaterials(materials);
+    for (const m of materials) {
+      m.map?.dispose();
+      m.dispose();
+    }
   }
 
   /** `spawn` is where the player arrives: the weather reads the area there, and its sky's textures load before the loading screen lifts. */
