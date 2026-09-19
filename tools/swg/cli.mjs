@@ -10,7 +10,8 @@
 //   node tools/swg/cli.mjs ships <swg-dir> <out-dir> [--limit=N] [--match=yacht] [--glass=<regex>]   every ship a player can fly, with its interior when it has one, under <out-dir>/ships (--match redoes those ships only; --glass=<regex> marks more shaders as glass);
 //                                                                  also the game's projectile table with every bolt and hit effect as projectiles.json,
 //                                                                  every component a hull's slots take and the droids as components.json, and the paint
-//                                                                  recipes as customize.json (images in customize/)
+//                                                                  recipes as customize.json (images in customize/), and the NPC ship types with
+//                                                                  their tier fits, formations, taunts and hit effects as combat.json (--verbose lists its notes)
 //   node tools/swg/cli.mjs species <swg-dir> <out-dir> [--only=human,twilek_female] [--var=...]   every playable species and gender as parts, with characters/index.json for the character creator
 //   node tools/swg/cli.mjs ash <swg-dir> <appearance/x.sat | object/.../shared_x.iff> [--find=pistol]   the animation state hierarchy behind a skeletal appearance, with its strings
 //   node tools/swg/cli.mjs shader <swg-dir> <shader/x.sht>        list a shader's texture slots
@@ -115,6 +116,7 @@ import {
   buildDroids, buildSlots, chassisNameFor, componentKey, componentList, droidHeadRows, fitStatus, hullTokens, isPaintShader, loadoutsLine, mergePaintVariables,
   mergeRecipes, modalLooks, paintedMainImage, paintGlow, pickStock, recipeImages, SHIP_FIT_FORMAT, stockPairs, stockWeapon, trimPaintShader, wingOpenSpeedFactorOf,
 } from './shipfit.mjs';
+import { buildCombat, combatCounts, combatLine, combatStatus, FORMATIONS, TAUNT_TABLES } from './npcships.mjs';
 import { resolveTemplateParam } from './objtemplate.mjs';
 import { setStringId } from './items.mjs';
 import * as M from './mobiles.mjs';
@@ -1895,10 +1897,19 @@ function packStatus(dir) {
     const fits = fitStatus(ships, comps);
     const astromechModels = existsSync(join(dir, 'mobiles/models/astromech_r2.glb'));
     const droidNote = !fits.astromechs && comps && !astromechModels ? ' (the mobiles pack has no astromech models: run this command again after the mobiles)' : '';
-    console.log(`  ships: ${ships.ships.length} ships, ${ships.ships.filter((sh) => sh.interior && !sh.interior.failed).length} with an interior, ${ships.skipped.length} left out; ${parts.hung} parts hung, ${parts.winged} with wings that open; loadouts for ${fits.fitted}, paint on ${fits.painted}, ${fits.astromechs} astromechs${droidNote}`);
+    // The NPC ships and space combat (combat.json, written by the same command).
+    let combatFile = null;
+    try {
+      combatFile = readJson(join(dir, 'ships/combat.json'));
+    } catch {
+      combatFile = null;
+    }
+    const combat = combatStatus(combatFile);
+    console.log(`  ships: ${ships.ships.length} ships, ${ships.ships.filter((sh) => sh.interior && !sh.interior.failed).length} with an interior, ${ships.skipped.length} left out; ${parts.hung} parts hung, ${parts.winged} with wings that open; loadouts for ${fits.fitted}, paint on ${fits.painted}, ${fits.astromechs} astromechs${droidNote}; ${combat.clause}`);
     if (parts.old) need(`ships <swg-dir> ${dir} --retail-only`, `${parts.old} ships' parts do not ride their wings (converted before wings and attachments were assembled)`);
     if (fits.old || !comps || !existsSync(join(dir, 'ships/customize.json'))) need(`ships <swg-dir> ${dir} --retail-only`, 'the ships have no loadouts or paint (converted before ship customization)');
     else if (!fits.astromechs && astromechModels) need(`ships <swg-dir> ${dir} --retail-only`, 'the astromechs were converted after the ships; the ships command links them');
+    if (combat.stale) need(`ships <swg-dir> ${dir} --retail-only`, combat.why);
   }
   if (ships && (ships.materialFormat ?? 1) < MATERIAL_FORMAT) need(`ships <swg-dir> ${dir} --retail-only`, "ships' models were converted before animated and glowing surfaces");
   const gallery = readJson(join(dir, 'gallery/manifest.json'));
@@ -3746,21 +3757,13 @@ switch (cmd) {
       return paletteSizes.get(p);
     };
     /**
-     * A ship's fit (the manifest's `fit`): its slots, each look's parts converted with `children`, the
-     * part's own subtree (expandPart: parents relative to the part, and by name what the part does not
-     * carry, hung over the whole ship once the ship's parts are on); the droid socket (an astromech on a
-     * hull with `hp:astromech`, else a flight computer); and the paint (every paint shader on the hull,
-     * what the assembly hung and every look's parts, with one variable list). `built` is the stock
-     * assembly, whose `carried` hardpoints bound where a by-name child may go.
+     * A fit's slots from buildSlots' slots (with their stock): each look's parts converted with
+     * `children`, the part's own subtree (expandPart: parents relative to the part, and by name what the
+     * part does not carry, hung over the whole ship once the ship's parts are on). `carriedBy` is every
+     * hardpoint the stock assembly carries, which bounds where a by-name child may go; `note` records a
+     * note once. A player hull's fit (fitOf) and an NPC tier chassis's fit (combat.json) are both made here.
      */
-    const fitOf = (chassis, slots, hull, built, deps, notes) => {
-      const seen = new Set();
-      const note = (n) => {
-        if (!seen.has(n)) {
-          seen.add(n);
-          notes.push(n);
-        }
-      };
+    const looksToParts = (slots, carriedBy, deps, note) => {
       const partHardpoints = new Map();
       // Every look's pairs as parts; a pair whose template names no model (the TIE engines) is left out.
       const resolved = slots.map((s) =>
@@ -3786,11 +3789,11 @@ switch (cmd) {
       const expand = (part, slot, shipHardpoints) => expandPart(part.template, partHardpoints.get(part.file) ?? [], deps, { slot, hardpoint: part.hardpoint || null, shipHardpoints });
       // Every hardpoint the ship can carry: the hull and what the stock assembly hung, every look's
       // parts, and what each of those carries in turn.
-      const carried = new Set(built.carried);
+      const carried = new Set(carriedBy);
       for (const hps of partHardpoints.values()) for (const h of hps) carried.add(h);
       slots.forEach((s, i) => resolved[i].forEach((parts) => parts.forEach((part) => expand(part, s.slot, null).carried.forEach((h) => carried.add(h)))));
       const shipHardpoints = [...carried];
-      const fitSlots = slots.map((s, i) => ({
+      return slots.map((s, i) => ({
         slot: s.slot,
         compat: s.compat,
         looks: s.looks.map((l, j) => {
@@ -3804,6 +3807,22 @@ switch (cmd) {
         stock: s.stock ?? null,
         ...(s.fixed ? { fixed: true } : {}),
       }));
+    };
+    /**
+     * A ship's fit (the manifest's `fit`): its slots (looksToParts); the droid socket (an astromech on a
+     * hull with `hp:astromech`, else a flight computer); and the paint (every paint shader on the hull,
+     * what the assembly hung and every look's parts, with one variable list). `built` is the stock
+     * assembly, whose `carried` hardpoints bound where a by-name child may go.
+     */
+    const fitOf = (chassis, slots, hull, built, deps, notes) => {
+      const seen = new Set();
+      const note = (n) => {
+        if (!seen.has(n)) {
+          seen.add(n);
+          notes.push(n);
+        }
+      };
+      const fitSlots = looksToParts(slots, built.carried, deps, note);
       const files = new Set([hull?.file, ...built.attachments.map((a) => a.file)]);
       for (const s of fitSlots) for (const l of s.looks) for (const p of l.parts) for (const f of [p.file, ...(p.children ?? []).map((c) => c.file)]) files.add(f);
       const shaders = [];
@@ -4054,6 +4073,105 @@ switch (cmd) {
     console.log(`-> ${outDir}: ${ships.length} ships in ${models.size} models, ${withInterior} with an interior, ${skipped.length} left out (listed in manifest.json; B in game opens the garage, ships at the bottom)`);
     if (skipped.length) console.log(`   left out:\n${skipped.map((sk) => `     ${sk.template}  (${sk.why})`).join('\n')}`);
     if (components) console.log(loadoutsLine([...fits.values()], droids, { shaders: recipes.size, images: paint.images, bytes: paint.bytes }));
+    // NPC ships and space combat (combat.json, npcships.mjs): every tiered NPC ship type a garage hull
+    // draws (its template has the hull's appearance) with its name and faction; a fit per tier chassis,
+    // made as a player hull's is (buildSlots, pickStock with the gun the hull fires as sold, looksToParts)
+    // but with no paint, since an NPC wears the stock paint baked into the models; the formation and
+    // taunt tables; the hit, target, damage and explosion effects, converted. It reads the manifest as
+    // written (a --match run's merged one). A --limit run's manifest has only some hulls, so it writes none
+    // and keeps the file there; a failure leaves the ships as they are and removes combat.json, which would
+    // index the components.json this run wrote (the pack then has no NPC ships and status asks for this command).
+    if (Number.isFinite(limit) && !match) {
+      console.log('combat: not written with --limit (every NPC type needs its hull in the manifest); the combat.json there is kept');
+    } else {
+      try {
+        const npcNotes = [];
+        const tableRows = (path) => {
+          try {
+            return vfs.has(path) ? parseDatatable(parseIff(vfs.read(path))).rows : null;
+          } catch (err) {
+            npcNotes.push(`${path}: ${err.message}`);
+            return null;
+          }
+        };
+        const tauntTables = {};
+        for (const t of TAUNT_TABLES) {
+          const path = `string/en/space/taunts/${t}.stf`;
+          try {
+            if (vfs.has(path)) tauntTables[t] = parseStringTable(vfs.read(path));
+          } catch (err) {
+            npcNotes.push(`${path}: ${err.message}`);
+          }
+        }
+        const combat = buildCombat({
+          templates: vfs.list('object/ship/shared_').filter((p) => /^object\/ship\/shared_[^/]+_tier\d+\.iff$/.test(p)),
+          appearanceOf: (t) => resolveTemplateString(vfs, t, ['appearanceFilename'], cache),
+          ships: manifest.ships,
+          chassisRows,
+          slotNames,
+          nameOf: (id) => localize(vfs, `space/space_mobile_type:${id}`, labelCache),
+          formations: Object.fromEntries(FORMATIONS.map((n) => [n, tableRows(`datatables/space/formation/${n}.iff`)])),
+          taunts: tauntTables,
+          hitEffectRows: tableRows('datatables/space/ship_hit_effects.iff'),
+          hitSoundRows: tableRows('datatables/space/ship_hit_sounds.iff'),
+          targetRows: tableRows('datatables/space/ship_target_appearance.iff'),
+          particle: (prt) => particleFile(prt),
+          effect: (cef) => particleFile(effectOf(cef).particle),
+        });
+        npcNotes.push(...combat.notes);
+        // The tier fits. A tier chassis's looks table is the same at every tier and lists every component
+        // that shows a model; which ones an NPC carries is the game's pick at run time, so the fit is the
+        // whole table, with each slot's stock as the fallback. By-name children are bounded by what every
+        // hull flying the chassis carries (the Black Sun styles share one chassis).
+        if (components) {
+          const shipById = new Map(manifest.ships.map((sh) => [sh.id, sh]));
+          const modelByFile = new Map(manifest.models.map((m) => [m.file, m]));
+          const npcDeps = { childrenOf: (t) => childrenOf(t), model: modelOf, templateOf: (n) => attachmentTemplates.get(n) ?? null };
+          for (const [name, hullIds] of combat.chassisWanted) {
+            const record = combat.file.chassis[name];
+            const hullShips = hullIds.map((id) => shipById.get(id)).filter(Boolean);
+            if (!record || !hullShips.length) continue;
+            const seen = new Set();
+            const note = (n) => {
+              if (!seen.has(n)) {
+                seen.add(n);
+                npcNotes.push(`${name}: ${n}`);
+              }
+            };
+            try {
+              const looksPath = `datatables/space/ship_chassis_${name}.iff`;
+              const table = vfs.has(looksPath) ? parseDatatable(parseIff(vfs.read(looksPath))) : null;
+              const row = chassisRows.get(name);
+              const slots = buildSlots(row, slotNames, table, components);
+              const gun = hullShips[0].weapon ?? null;
+              const tokens = hullTokens(name);
+              for (const s of slots) s.stock = pickStock(s, components, /^weapon_/.test(s.slot) ? { tokens, preferName: gun?.name ?? null, preferProjectile: gun?.projectile ?? null, weaponOf: projectileOf } : { tokens });
+              const stock = table ? stockPairs(slots, components, table.columns) : [];
+              const carried = new Set();
+              for (const sh of hullShips) {
+                const b = assembleShip({ hardpoints: modelByFile.get(sh.file)?.hardpoints ?? [] }, childrenOf(sh.template, true), stock, npcDeps);
+                for (const h of b.carried) carried.add(h);
+              }
+              const droid = (modelByFile.get(hullShips[0].file)?.hardpoints ?? []).includes('astromech') ? 'astromech' : 'computer';
+              record.fit = { chassis: name, openSpeedFactor: wingOpenSpeedFactorOf(row), droid, slots: looksToParts(slots, [...carried], npcDeps, note), paint: null };
+            } catch (err) {
+              npcNotes.push(`${name}: fit not built (${err.message})`);
+            }
+            // As after a player hull's fit: the images the bakes decoded are let go.
+            paintContext.images.clear();
+            paintContext.shaders.clear();
+          }
+        }
+        combat.file.counts = combatCounts(combat.file);
+        writeFileSync(join(outDir, 'combat.json'), JSON.stringify(combat.file));
+        console.log(combatLine(combat.file));
+        if (args.includes('--verbose')) for (const n of [...npcNotes, ...combat.skipped.map((s) => `left out ${s.id}: ${s.why}`)]) console.log(`   ${n}`);
+        else if (npcNotes.length) console.log(`   ${npcNotes.length} notes on the NPC ships (--verbose lists them, and the types left out)`);
+      } catch (err) {
+        rmSync(join(outDir, 'combat.json'), { force: true });
+        console.error(`combat: not written (${err.stack ?? err.message})`);
+      }
+    }
     printEffectSummary();
     break;
   }
