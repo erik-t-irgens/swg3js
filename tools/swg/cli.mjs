@@ -1929,7 +1929,7 @@ function packStatus(dir) {
     console.log(`  ${s.line}`);
     if (s.stale) staleSpace.push(zone);
   }
-  if (staleSpace.length) need(`space <swg-dir> all ${dir} --retail-only`, `space zones missing, or converted before hyperspace or before the planets' sizes (${staleSpace.join(', ')})`);
+  if (staleSpace.length) need(`space <swg-dir> all ${dir} --retail-only`, `space zones missing, or converted before the nebulae, the fields and the docking lanes (${staleSpace.join(', ')})`);
   const mobiles = readQuiet(join(dir, 'mobiles/catalogue.json'));
   if (!mobiles) {
     console.log('  mobiles: none (the spawner has only the planet creatures)');
@@ -4591,7 +4591,10 @@ switch (cmd) {
     const {
       stationTemplate, parseSpacePlanets, parsePlanetAppearance, spaceBody, parseSpaceEnvironment, scatterField, parseHyperspaceScene, warpTimings, cleanText, cleanZoneTitle, stationStrings,
       INVENTED_FIELDS, INVENTED_SCENERY, hyperspacePoints, placeScenery, arrivalOf, stationApproachEnd, checkPointFrame, nearestObject,
+      dockEffects, fieldShapes, laneNodes, ZONE_MAP_ICONS, zoneIconPaths,
     } = await import('./space.mjs');
+    const { LIGHTNING_IMAGE, NEBULA_SHADERS, lightningFilesOf, nebulaLook, nebulaSummary, nebulaTableFor, parseLightning, parseNebulaTable } = await import('./nebula.mjs');
+    const { parseClientEffect } = await import('./shipdata.mjs');
     const zones = pos[2] === 'all' ? Object.keys(SPACE_ZONES).filter((z) => vfs.has(`terrain/${z}.trn`)) : [pos[2]];
     // What every zone shares: the hyperspace table, the point and zone names, the jump scene and its warp effects.
     const shared = (p) => (vfs.has(p) ? parseDatatable(parseIff(vfs.read(p))).rows : []);
@@ -4612,6 +4615,31 @@ switch (cmd) {
     };
     const timing = hsScene ? warpTimings(warpFx(hsScene.enter.particle), warpFx(hsScene.exit.particle)) : null;
     console.log(`hyperspace: ${hsRows.length} table points, ${pointNames.size} point names; ${hsScene ? `the jump scene: enter ${hsScene.enter.seconds} s, exit ${hsScene.exit.seconds} s, leaving at ${hsScene.transit.speed} m/s` : 'no jump scene (scene/hyperspace.iff)'}${timing ? `; warp timings: peak ${timing.enterPeak} s, tunnel ${timing.tunnelAt} s, burst ${timing.exitBurstAt} s, clear ${timing.exitClearAt} s` : ''}`);
+    // The zone map's own icons, once for the whole run: every zone's map shows the same six.
+    let icons = 0;
+    for (const name of ZONE_MAP_ICONS) {
+      const { texture, file } = zoneIconPaths(name);
+      if (!vfs.has(texture)) {
+        console.log(`zone map icon ${name}: no ${texture} in the archives`);
+        continue;
+      }
+      const img = decodeDds(vfs.read(texture));
+      mkdirSync(join(pos[3], dirname(file)), { recursive: true });
+      writeFileSync(join(pos[3], file), encodePng(img.width, img.height, img.rgba));
+      icons++;
+    }
+    console.log(`zone map icons: ${icons} of ${ZONE_MAP_ICONS.length} into ${join(pos[3], 'space_ui')}`);
+    // What every dock plays. Each of these client effects names a sound and no particle at all.
+    const dockFx = dockEffects((p) => {
+      if (!vfs.has(p)) return null;
+      try {
+        return parseClientEffect(parseIff(vfs.read(p)));
+      } catch (err) {
+        console.log(`dock effect ${p}: ${err.message}`);
+        return null;
+      }
+    });
+    console.log(`dock effects: ${Object.entries(dockFx).map(([part, fx]) => `${part} ${fx.sound ?? 'no sound'}`).join(', ')}`);
     for (const zone of zones) {
       if (!vfs.has(`terrain/${zone}.trn`)) {
         console.log(`${zone}: no terrain/${zone}.trn in the archives`);
@@ -4621,6 +4649,10 @@ switch (cmd) {
       mkdirSync(join(outDir, 'space'), { recursive: true });
       console.log(`${zone}:`);
       const models = new Map();
+      // The docking lanes, drydocks and hangar mouths each converted model carries, by model id: a
+      // placed object is drawn as an instanced mesh with no hardpoint nodes, so they have to be in
+      // the pack.
+      const lanes = {};
       const cache = new Map();
       const convert = (template) => {
         const r = resolveTemplateMesh(vfs, template, cache);
@@ -4634,6 +4666,13 @@ switch (cmd) {
             const b = conv.mesh.bounds ?? { min: [0, 0, 0], max: [0, 0, 0] };
             const bounds = conv.flipX ? { min: [-b.max[0], b.min[1], b.min[2]], max: [-b.min[0], b.max[1], b.max[2]] } : b;
             models.set(id, { id, file: `${id}.glb`, bounds, triangles: conv.tris, ...(conv.cells ? { cells: conv.cells, portals: conv.portals ?? [] } : {}), ...(conv.tris ? {} : { failed: 'no triangles' }) });
+            const lane = laneNodes(conv.mesh.hardpoints, conv.flipX);
+            if (lane) {
+              lanes[id] = lane;
+              const bays = lane.bays.length ? `, ${lane.bays.length} hangar mouth${lane.bays.length === 1 ? '' : 's'}` : '';
+              const dry = lane.drydocks.length ? `, ${lane.drydocks.length} drydocks` : '';
+              console.log(`  ${id}: ${lane.lanes.length} docking lane${lane.lanes.length === 1 ? '' : 's'}${lane.lanes.length ? ` (${lane.lanes.map((l) => `${l.lane}: ${l.approach.length} in, ${l.exit.length} out${l.dock ? '' : ', no dock'}`).join('; ')})` : ''}${dry}${bays}`);
+            }
           } catch (err) {
             models.set(id, { id, failed: err.message });
           }
@@ -4744,6 +4783,54 @@ switch (cmd) {
         const inside = body.radius !== null && body.radius >= body.distance ? ', WARNING: the camera is inside it' : '';
         console.log(`  planet ${basename(p.appearance)}: toward ${body.direction.map((v) => v.toFixed(0)).join(', ')}, ${body.radius === null ? 'no radius in its appearance' : `radius ${body.radius} at ${body.distance}`}, size ${body.size}${body.sizeFrom === 'invented' ? ' (invented)' : ''}${body.halo ? `, halo ${body.halo.scale}` : ''}${texture ? '' : ', no surface texture'}${inside}`);
       }
+      // The zone's nebulae, the one lightning appearance they name, and the look the two kinds of
+      // sheet are drawn with. Both `_no_z` shell shaders name the same texture as their sheet
+      // shader, so a pack writes one image per kind and the shell points at it.
+      const nebulae = parseNebulaTable(table(nebulaTableFor(zone)) ?? []);
+      const nebulaImage = (kind) => {
+        const s = NEBULA_SHADERS[kind];
+        const t = textureFor(vfs, s.sheet);
+        if (!t?.png) return null;
+        mkdirSync(join(outDir, 'nebula'), { recursive: true });
+        writeFileSync(join(outDir, s.image), t.png);
+        return s.image;
+      };
+      const shaderEffect = (path) => {
+        try {
+          return shaderTextures(parseIff(vfs.read(path))).effect?.replace(/\\/g, '/') ?? null;
+        } catch {
+          return null;
+        }
+      };
+      const look = nebulae.length ? nebulaLook({ image: nebulaImage, effect: shaderEffect }) : null;
+      let lightning = null;
+      const ltnFiles = lightningFilesOf(nebulae);
+      if (ltnFiles.length) {
+        const first = ltnFiles[0];
+        const ltn = vfs.has(first) ? parseLightning(parseIff(vfs.read(first))) : null;
+        if (!ltn) console.log(`  lightning ${first}: not read`);
+        else {
+          let image = null;
+          const t = ltn.texture ? textureFor(vfs, ltn.texture.shader) : null;
+          if (t?.png) {
+            mkdirSync(join(outDir, 'nebula'), { recursive: true });
+            writeFileSync(join(outDir, LIGHTNING_IMAGE), t.png);
+            image = LIGHTNING_IMAGE;
+          }
+          const prt = (p) => {
+            if (!p) return null;
+            const e = convertParticle(vfs, p, outDir);
+            if (e.failed) console.log(`  lightning effect ${p}: ${e.failed}`);
+            return e.file ?? null;
+          };
+          lightning = { source: first, flipbook: ltn.texture, texture: image, waveforms: ltn.waveforms, value: ltn.value, start: prt(ltn.start), end: prt(ltn.end), trailingBytes: ltn.trailingBytes };
+          if (ltnFiles.length > 1) console.log(`  lightning: ${ltnFiles.length} appearances named; ${first} converted, the rest share it`);
+        }
+      }
+      const nsum = nebulaSummary(nebulae);
+      console.log(`  nebulae: ${nsum.count} (${nsum.glow} glow, ${nsum.mist} mist), ${nsum.striking} with lightning, shake up to ${nsum.jitter}, farthest edge ${(nsum.farthest / 1000).toFixed(1)} km${lightning ? `; lightning ${lightning.flipbook?.frames ?? '?'} frames at ${lightning.flipbook?.fps ?? '?'}/s` : ''}`);
+      // The fields' shapes (the map draws these; the asteroids themselves are in layout.json).
+      const fields = fieldShapes(fieldRows);
       const hyperspace = {
         points,
         scene: hsScene ? { source: 'scene/hyperspace.iff', ...hsScene } : null,
@@ -4751,7 +4838,7 @@ switch (cmd) {
         messages: { alreadyAtPoint: cleanText(refusals.get('already_at_point') ?? '') || null },
         frameCheck,
       };
-      writeFileSync(join(outDir, 'space.json'), JSON.stringify({ version: SPACE_PACK_VERSION, zone, planet: SPACE_ZONES[zone] ?? null, title, stations, scenery, planets, arrival, hyperspace }, null, 2));
+      writeFileSync(join(outDir, 'space.json'), JSON.stringify({ version: SPACE_PACK_VERSION, zone, planet: SPACE_ZONES[zone] ?? null, title, stations, scenery, planets, arrival, hyperspace, nebulae, nebulaLook: look, lightning, fields, lanes, dockEffects: dockFx }, null, 2));
       writeFileSync(join(outDir, 'manifest.json'), JSON.stringify({ planet: zone, categories: { layout: [...models.values()].filter((m) => !m.failed) } }, null, 2));
       writeFileSync(join(outDir, 'layout.json'), JSON.stringify({ planet: zone, center: { x: 0, z: 0 }, radius: null, objects, skipped: [] }));
       const env = parseSpaceEnvironment(trnRoot);
@@ -4759,7 +4846,7 @@ switch (cmd) {
       const made = points.filter((p) => p.source === 'invented').length;
       const borrowed = points.filter((p) => p.source === 'borrowed').length;
       const pointNotes = [made && `${made} invented`, borrowed && `${borrowed} borrowed`].filter(Boolean).join(', ');
-      console.log(`-> ${outDir}: ${title}, ${stations.length} station${stations.length === 1 ? '' : 's'}, ${asteroids} asteroids in ${models.size} models, ${planets.length} planets and moons${env.skybox ? `, skybox ${env.skybox}` : ', no skybox named'}, ${env.lights.length} lights, ${env.celestials.length} star sprites, ${env.stars?.count ?? 0} stars, ${env.dust?.count ?? 0} dust${scenery.length ? `, ${scenery.length} scenery` : ''}, ${points.length} hyperspace points${pointNotes ? ` (${pointNotes})` : ''}, arrival at ${arrival.kind === 'launch' ? 'launch point' : `point ${arrival.point ?? 'the origin'}`}`);
+      console.log(`-> ${outDir}: ${title}, ${stations.length} station${stations.length === 1 ? '' : 's'}, ${asteroids} asteroids in ${models.size} models, ${planets.length} planets and moons${env.skybox ? `, skybox ${env.skybox}` : ', no skybox named'}, ${env.lights.length} lights, ${env.celestials.length} star sprites, ${env.stars?.count ?? 0} stars, ${env.dust?.count ?? 0} dust${scenery.length ? `, ${scenery.length} scenery` : ''}, ${nebulae.length} nebulae, ${fields.length} fields, ${Object.values(lanes).reduce((n, l) => n + l.lanes.length, 0)} docking lanes, ${points.length} hyperspace points${pointNotes ? ` (${pointNotes})` : ''}, arrival at ${arrival.kind === 'launch' ? 'launch point' : `point ${arrival.point ?? 'the origin'}`}`);
     }
     printEffectSummary();
     break;

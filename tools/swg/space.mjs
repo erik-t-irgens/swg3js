@@ -28,8 +28,12 @@ export const SPACE_ZONES = {
   space_heavy1: null,
 };
 
-/** space.json's layout version: 2 adds the title, the arrival, the scenery and the hyperspace block. */
-export const SPACE_PACK_VERSION = 2;
+/**
+ * space.json's layout version: 2 adds the title, the arrival, the scenery and the hyperspace block;
+ * 3 adds the zone's nebulae with their lightning, its asteroid fields as the map wants them, the
+ * stations' docking lanes and the dock effects.
+ */
+export const SPACE_PACK_VERSION = 3;
 
 /**
  * The station drawn for each station the zone tables name: the tables carry the server's names,
@@ -633,6 +637,233 @@ export function checkPointFrame(points, stations) {
   };
 }
 
+// ---------------------------------------------------------------------------------------------
+// Docking lanes. A station and a capital ship carry their lanes as hardpoints on the model:
+// approach_<lane>_<n>, dock_<lane>, dockradius_<lane>, exit_<lane>_<n>, the drydocks beside them
+// (drydock1..4 on one station, drydock_1..4 on others) and the hangar mouths. Placed objects are
+// drawn as instanced meshes with no hardpoint nodes, and a station's detail tier may not even be
+// loaded at a kilometre and a half, so all of this is written into the pack rather than read from
+// the model at run time.
+//
+// The client has no docking procedure in the archives at all, so what a lane's numbers mean is read
+// off the points themselves. Measured on all five models that carry lanes: within one path the
+// number rises with distance from its dock, for approaches and exits alike (on one station lane a's
+// approaches stand 52, 98, 153 and 233 m out as 1, 2, 3, 4). So a lane is flown from its farthest
+// approach point inward to the dock, and out from the dock along its exit numbers.
+//
+// What the numbering does NOT promise is one path per letter. On the neutral station lane a's nine
+// approach points lie along more than one path: 10 is 76 m from dock_a on the dock's own side, 2, 3
+// and 4 continue that side at 226, 429 and 576 m, 6, 7, 8 and 9 run 114 to 589 m along the far side,
+// and 5 stands 575 m out over the next dock. Flying "10 down to 1" there would start a ship at the
+// dock's doorstep and then send it half a kilometre away. Which points make one path is therefore
+// the runtime's reading, not the converter's: the numbers are passed through untouched and each
+// point carries `fromDock`, its distance from its own dock, so a reader can group and order them
+// without the dock's position to hand.
+
+/**
+ * A hardpoint's turn as a quaternion [w, x, y, z] from its row-major 3x4 matrix, mirrored with the
+ * model when X is flipped (R' = M R M for the mirror M), which is exactly what the GLB writer does to
+ * the same hardpoint. The identity is [1, 0, 0, 0].
+ *
+ * This is the same arithmetic as `hardpointRotation` in glb.mjs, which that module does not export,
+ * so the two are kept in step by hand and must be changed together: a lane point only sits where the
+ * drawn model puts it while they agree. space.test.ts pins this one against the mirror worked out
+ * from first principles, so a wrong edit to either shows up as a wrong turn rather than as silence.
+ */
+export function hardpointTurn(m, flipX = true) {
+  if (!m || m.length < 12) return [1, 0, 0, 0];
+  const sgn = flipX ? [-1, 1, 1] : [1, 1, 1];
+  const r = (i, j) => sgn[i] * m[i * 4 + j] * sgn[j];
+  const r00 = r(0, 0), r01 = r(0, 1), r02 = r(0, 2), r10 = r(1, 0), r11 = r(1, 1), r12 = r(1, 2), r20 = r(2, 0), r21 = r(2, 1), r22 = r(2, 2);
+  const trace = r00 + r11 + r22;
+  let x, y, z, w;
+  if (trace > 0) {
+    const sq = 0.5 / Math.sqrt(trace + 1);
+    w = 0.25 / sq;
+    x = (r21 - r12) * sq;
+    y = (r02 - r20) * sq;
+    z = (r10 - r01) * sq;
+  } else if (r00 > r11 && r00 > r22) {
+    const sq = 2 * Math.sqrt(1 + r00 - r11 - r22);
+    w = (r21 - r12) / sq;
+    x = 0.25 * sq;
+    y = (r01 + r10) / sq;
+    z = (r02 + r20) / sq;
+  } else if (r11 > r22) {
+    const sq = 2 * Math.sqrt(1 + r11 - r00 - r22);
+    w = (r02 - r20) / sq;
+    x = (r01 + r10) / sq;
+    y = 0.25 * sq;
+    z = (r12 + r21) / sq;
+  } else {
+    const sq = 2 * Math.sqrt(1 + r22 - r00 - r11);
+    w = (r10 - r01) / sq;
+    x = (r02 + r20) / sq;
+    y = (r12 + r21) / sq;
+    z = 0.25 * sq;
+  }
+  const len = Math.hypot(x, y, z, w) || 1;
+  const q4 = (v) => Math.round((v / len) * 10000) / 10000;
+  return [q4(w), q4(x), q4(y), q4(z)];
+}
+
+/** A hardpoint's own forward (its matrix's Z axis), mirrored with the model. */
+function hardpointForward(m, flipX) {
+  if (!m || m.length < 12) return [0, 0, 1];
+  const s = flipX ? -1 : 1;
+  const r3 = (v) => Math.round(v * 10000) / 10000;
+  return [r3(s * m[2]), r3(m[6]), r3(m[10])];
+}
+
+/**
+ * A model's docking lanes from its mesh hardpoints, in the model's own frame with X mirrored exactly
+ * as the GLB's meshes and hardpoints are, so a lane point sits where the drawn model puts it. Null
+ * when the model carries no lane points at all.
+ *
+ * Each lane is `{ lane, dock, dockRadius, approach, exit }`: `dock` is `{ at, q, forward }` or null,
+ * `dockRadius` the distance from the dock to its `dockradius_<lane>` point (null without one), and
+ * `approach` and `exit` lists of `{ n, fromDock, at, q, forward }` sorted by the number in the
+ * hardpoint's name, `fromDock` being the metres from that lane's dock (null where the lane has no
+ * dock). The numbers are kept rather than closed up: on one retail station a single letter covers
+ * more than one path, so which points make one path is the runtime's reading and `fromDock` is what
+ * it groups and orders them by.
+ *
+ * `drydocks` are the parking points beside the lanes, which nothing uses yet, and `bays` the hangar
+ * mouths a model carries (one on the capital ship, several on two of the stations): the only thing
+ * in the archives that says where a hull opens, and unrecoverable once the model is an instanced
+ * mesh. The `<name>_damage<n>` points are left out of both, because every part of these models has a
+ * set of them (the bridge, the reactor, the shields, the engines): they mark where a damage effect
+ * plays, not a second hangar.
+ */
+export function laneNodes(hardpoints, flipX = true) {
+  const at = (hp) => {
+    const [x, y, z] = hp.position ?? [0, 0, 0];
+    const r2 = (v) => Math.round(v * 100) / 100;
+    return [r2(flipX ? (x === 0 ? 0 : -x) : x), r2(y), r2(z)];
+  };
+  const node = (hp) => ({ at: at(hp), q: hardpointTurn(hp.matrix, flipX), forward: hardpointForward(hp.matrix, flipX) });
+  const lanes = new Map();
+  const lane = (letter) => {
+    const key = letter.toLowerCase();
+    if (!lanes.has(key)) lanes.set(key, { lane: key, dock: null, dockRadius: null, approach: [], exit: [] });
+    return lanes.get(key);
+  };
+  const drydocks = [];
+  const bays = [];
+  const radiusOf = new Map();
+  let found = 0;
+  for (const hp of hardpoints ?? []) {
+    const name = String(hp.name ?? '').toLowerCase();
+    let m;
+    if ((m = /^(approach|exit)_([a-z0-9]+)_(\d+)$/.exec(name))) {
+      lane(m[2])[m[1] === 'approach' ? 'approach' : 'exit'].push({ n: Number(m[3]), fromDock: null, ...node(hp) });
+      found++;
+    } else if ((m = /^dockradius_([a-z0-9]+)$/.exec(name))) {
+      radiusOf.set(m[1], at(hp));
+      found++;
+    } else if ((m = /^dock_([a-z0-9]+)$/.exec(name))) {
+      lane(m[1]).dock = node(hp);
+      found++;
+    } else if (/^drydock_?\d+$/.test(name)) {
+      drydocks.push({ name, ...node(hp) });
+      found++;
+    } else if (/hangar/.test(name) && !/_damage\d*$/.test(name)) {
+      bays.push({ name, ...node(hp) });
+      found++;
+    }
+  }
+  if (!found) return null;
+  const metres = (a, b) => Math.round(Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]) * 10) / 10;
+  for (const [key, point] of radiusOf) {
+    // A `dockradius` with no `dock_<lane>` of its own (no retail model has one) must not conjure a
+    // lane that nothing can be docked at, so the lane is looked up rather than made.
+    const l = lanes.get(key);
+    if (l?.dock) l.dockRadius = metres(point, l.dock.at);
+  }
+  const byNumber = (a, b) => a.n - b.n;
+  const out = [...lanes.values()].sort((a, b) => (a.lane < b.lane ? -1 : a.lane > b.lane ? 1 : 0));
+  for (const l of out) {
+    l.approach.sort(byNumber);
+    l.exit.sort(byNumber);
+    if (l.dock) for (const p of [...l.approach, ...l.exit]) p.fromDock = metres(p.at, l.dock.at);
+  }
+  drydocks.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  bays.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  return { lanes: out, drydocks, bays };
+}
+
+/**
+ * The client effects a dock plays, by the part they play: every one of them names a sound and no
+ * particle at all in the retail archives, so there is nothing to draw and the pack carries the sound
+ * for whatever comes to play it. `read` gives one file's `{ particles, sounds }`, or null.
+ */
+export const DOCK_EFFECTS = {
+  harddock: 'clienteffect/space_command/shp_dock_harddock.cef',
+  release: 'clienteffect/space_command/shp_dock_release.cef',
+  reload: 'clienteffect/space_command/shp_dock_reload.cef',
+  repairGroup: 'clienteffect/space_command/shp_dock_repair_group.cef',
+  repair: 'clienteffect/ship_dock_repair_01.cef',
+  repairAlt: 'clienteffect/ship_dock_repair_02.cef',
+};
+
+/** The pack's `dockEffects` block from a reader over DOCK_EFFECTS; an unreadable one is left out. */
+export function dockEffects(read) {
+  const out = {};
+  for (const [part, source] of Object.entries(DOCK_EFFECTS)) {
+    const fx = read(source);
+    if (!fx) continue;
+    out[part] = { source, particle: fx.particles?.[0] ?? null, sound: fx.sounds?.[0] ?? null };
+  }
+  return out;
+}
+
+/**
+ * The zone map's own icons, which the game's zone map drew its layers with. The `space` command
+ * writes them once per out-dir, under `space_ui/`, since every zone's map shows the same six.
+ */
+export const ZONE_MAP_ICONS = ['asteroids', 'hyperspace', 'nebula', 'ship', 'spacestation', 'waypoint'];
+
+/** One icon's place in the archives and in a pack. */
+export const zoneIconPaths = (name) => ({ texture: `texture/ui_space_zone_${name}.dds`, file: `space_ui/zone_${name}.png` });
+
+/**
+ * A zone's asteroid fields as the map wants them: the shape rather than the asteroids. Each is
+ * `{ name, kind, at, radius, spline, count, sound, viewFrom, viewAll, flattenDepth, faceTowards,
+ * invented }`, with `at` and every spline point mirrored to the game's frame.
+ *
+ * `name` is the table's own `Name`, which is filled on 70 of the 214 retail rows and is a designer's
+ * note as often as a label ("old tie patrol route attacked so much by nym that its no longer used",
+ * "midpoint:poi field", "quad1_corkscrew"): it is carried because it is what the table says, but
+ * anything that shows a field to a player should treat it as a hint and name the field itself.
+ *
+ * `viewFrom` and `viewAll` are the table's two view distances and are null where the column is
+ * absent (the made-up fields carry no view distance, and 0 would read as "never draw this");
+ * `FlattenDepth` and `FaceTowards` are kept as the table has them. Nothing reads any of the four
+ * yet: they are carried so the pack says what the table held.
+ */
+export function fieldShapes(rows) {
+  const out = [];
+  const distance = (v) => (v === undefined || v === null || v === '' ? null : Math.round(Number(v) || 0));
+  for (const [row, invented] of rows ?? []) {
+    const spline = Number(row.Type) === 2 ? parseSpline(row.SplineControlPoints) : [];
+    out.push({
+      name: String(row.Name ?? '').trim() || null,
+      kind: spline.length >= 2 ? 'spline' : 'sphere',
+      at: [row.CenterLocationX === 0 ? 0 : -(Number(row.CenterLocationX) || 0), Number(row.CenterLocationY) || 0, Number(row.CenterLocationZ) || 0],
+      radius: Math.round(Number(row.Radius) || 0),
+      spline: spline.map(([x, y, z]) => [x === 0 ? 0 : -x, y, z]),
+      count: Math.round(Number(row.NumAsteroids) || 0),
+      sound: String(row.SoundEffect ?? '').replace(/\\/g, '/') || null,
+      viewFrom: distance(row.MaxViewableDistance),
+      viewAll: distance(row.ViewAllDistance),
+      flattenDepth: Number(row.FlattenDepth) || 0,
+      faceTowards: String(row.FaceTowards ?? '') || null,
+      invented: !!invented,
+    });
+  }
+  return out;
+}
+
 /**
  * How far a point ({ x, y, z } or [x, y, z]) is from the nearest placed object's surface (its centre's
  * distance less its radius), leaving out `except`; Infinity when there is nothing else.
@@ -666,7 +897,8 @@ export function spaceZoneStatus(zone, pack, objects) {
   if (!pack) return { line: `${zone}: no pack`, stale: true };
   const stations = pack.stations?.length ?? 0;
   const counts = `${stations} station${stations === 1 ? '' : 's'}${pack.scenery?.length ? `, ${pack.scenery.length} scenery` : ''}, ${objects ?? 0} objects`;
-  if ((pack.version ?? 1) < SPACE_PACK_VERSION || !pack.hyperspace?.points) return { line: `${zone}: ${counts}, converted before hyperspace`, stale: true };
+  if ((pack.version ?? 1) < 2 || !pack.hyperspace?.points) return { line: `${zone}: ${counts}, converted before hyperspace`, stale: true };
+  if ((pack.version ?? 1) < SPACE_PACK_VERSION) return { line: `${zone}: ${counts}, converted before the nebulae, the fields and the docking lanes`, stale: true };
   // A body with no `radius` at all (null is an appearance that names none) was sized from the halo's scale.
   if ((pack.planets ?? []).some((p) => p && p.radius === undefined)) return { line: `${zone}: ${counts}, planets converted before their sizes were read`, stale: true };
   const points = pack.hyperspace.points;
@@ -677,8 +909,12 @@ export function spaceZoneStatus(zone, pack, objects) {
   const f = pack.hyperspace.frameCheck;
   const frame = f && f.mirroredCloser > f.sameCloser ? `; WARNING: ${f.mirroredCloser} of ${f.checked} described distances fit the mirrored pairing` : '';
   const fx = pack.hyperspace.effects?.enter && pack.hyperspace.effects?.exit ? '' : ', no warp effects';
+  const nebulae = pack.nebulae?.length ?? 0;
+  const striking = (pack.nebulae ?? []).filter((n) => n && n.lightning).length;
+  const laneCount = Object.values(pack.lanes ?? {}).reduce((n, l) => n + (l?.lanes?.length ?? 0), 0);
+  const extras = `, ${nebulae} nebula${nebulae === 1 ? '' : 'e'}${nebulae ? ` (${striking} with lightning)` : ''}, ${pack.fields?.length ?? 0} fields, ${laneCount} docking lane${laneCount === 1 ? '' : 's'}`;
   return {
-    line: `${zone}: ${pack.title || zone}, ${counts}, ${points.length} hyperspace point${points.length === 1 ? '' : 's'}${notes.length ? ` (${notes.join(', ')})` : ''}, ${arrival}${fx}${frame}`,
+    line: `${zone}: ${pack.title || zone}, ${counts}${extras}, ${points.length} hyperspace point${points.length === 1 ? '' : 's'}${notes.length ? ` (${notes.join(', ')})` : ''}, ${arrival}${fx}${frame}`,
     stale: false,
   };
 }

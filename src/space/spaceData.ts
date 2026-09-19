@@ -1,7 +1,14 @@
-// A space zone's pack (space.json, version 2) as the converter writes it, the fetch that reads it, and
+// A space zone's pack (space.json, version 3) as the converter writes it, the fetch that reads it, and
 // the destinations a hyperspace jump can pick. Pure: no three, no DOM, no import.meta.env; the node
 // tests import it. Every coordinate in a pack is in the client's frame (X not mirrored); `landmarksOf`
 // and `arrivalAt` return the game's frame, (-X, Y, Z), as the streamer places the zone's objects.
+//
+// The exceptions, which are in the GAME's frame already and say so on their type, are what version 3
+// added: the nebulae, the asteroid fields and the docking lanes. They are drawn rather than jumped to,
+// so they are mirrored once by the converter instead of by every reader.
+//
+// A pack written before version 3 has no nebulae, fields, lanes, lightning or dock effects; `normalise`
+// fills them in empty, so everything reads an older pack without asking what version it is.
 //
 // Some of what a pack holds is made up rather than read from the client's files (Kessel's and Deep
 // Space's point positions, Deep Space's fields and its Star Destroyer): such points carry
@@ -97,6 +104,136 @@ export interface SpaceHyperspace {
   frameCheck: { checked: number; sameCloser: number; mirroredCloser: number; meanErrorSame: number; meanErrorMirrored: number };
 }
 
+/** A colour as the nebula table stores it: alpha, red, green, blue, each 0 to 1. */
+export type NebulaColour = [number, number, number, number];
+
+export interface NebulaLightningRow {
+  /** The .ltn the row names; the pack converts one of them into `SpacePack.lightning`. */
+  appearance: string;
+  /** The table's `lightningFrequency`. Read as strikes a second, which is OUR reading. */
+  every: number;
+  maxSeconds: number;
+  /** The table's damage band, [min, max]. What it does to a ship here is the game's decision, not the table's. */
+  damage: [number, number];
+  colour: NebulaColour;
+  ramp: NebulaColour;
+  sounds: { strike: string | null; loop: string | null };
+  hit: { client: string | null; server: string | null };
+}
+
+export interface Nebula {
+  name: string;
+  /** GAME frame, mirrored by the converter. */
+  at: Vec3;
+  radius: number;
+  density: number;
+  /** The table's `facingPercent`, read as the share of sheets that turn to face the camera (ours). */
+  facingShare: number;
+  facing: { colour: NebulaColour; ramp: NebulaColour };
+  oriented: { colour: NebulaColour; ramp: NebulaColour };
+  /** The camera shake inside; non-zero in two zones only. */
+  jitter: number;
+  /** Which sheet look the row's `shaderIndex` picks. Inferred from the client's shader list, not read. */
+  shader: 'glow' | 'mist';
+  shaderIndex: number;
+  sound: { ambient: string | null; volume: number };
+  lightning: NebulaLightningRow | null;
+  /** Columns that are 0 or empty on every retail row, kept so the pack says what the table held. */
+  unused: Record<string, number | string | null>;
+}
+
+export interface NebulaSheetLook {
+  shader: string;
+  effect: string | null;
+  blend: 'add' | 'alpha';
+  /** The pack-relative image, or null when the converter could not write it. */
+  texture: string | null;
+  /** The near shell's look: a different effect over the same image. */
+  shell: { shader: string; effect: string | null; texture: string | null };
+}
+
+export interface NebulaLightningLook {
+  source: string;
+  /** The flip-book the .ltn's particle texture describes. */
+  flipbook: { shader: string; frames: number; frameStart: number; frameEnd: number; uvSize: number; perColumn: number; fps: number; visible: boolean } | null;
+  /** The pack-relative image for the beam. */
+  texture: string | null;
+  /** The .ltn's two waveforms, in the particle reader's shape. Read as the beam's width and alpha, which is OUR reading. */
+  waveforms: { interp: number; sample: number; min?: number; max?: number; points: number[][] }[];
+  /** The float the data chunk opens with; its meaning is not known. */
+  value: number;
+  /** The effects played where a bolt starts and ends, as pack-relative particle files (null when they did not convert). */
+  start: string | null;
+  end: string | null;
+  /** Bytes after the two effect names that the converter does not read. */
+  trailingBytes: number;
+}
+
+export interface AsteroidFieldShape {
+  /**
+   * The table's own Name, filled on 70 of the 214 retail rows and null on the rest. It is a
+   * designer's note as often as a label, so anything shown to a player should name the field itself
+   * and treat this as a hint.
+   */
+  name: string | null;
+  kind: 'sphere' | 'spline';
+  /** GAME frame. */
+  at: Vec3;
+  radius: number;
+  /** GAME frame; empty for a sphere field. */
+  spline: Vec3[];
+  count: number;
+  sound: string | null;
+  /** The table's two view distances, null where the column is absent (the made-up fields). Unread. */
+  viewFrom: number | null;
+  viewAll: number | null;
+  flattenDepth: number;
+  faceTowards: string | null;
+  invented: boolean;
+}
+
+/** A point on a station's docking lane, in the MODEL's frame with X mirrored as the model's meshes are. */
+export interface LanePoint {
+  at: Vec3;
+  /** Its turn as [w, x, y, z]. */
+  q: [number, number, number, number];
+  /** Its own forward (the hardpoint's Z axis). */
+  forward: Vec3;
+}
+
+export interface DockLane {
+  lane: string;
+  dock: LanePoint | null;
+  /** Metres from the dock to its `dockradius` point; null without one. */
+  dockRadius: number | null;
+  /**
+   * The numbers the hardpoints carry are kept, gaps and all, and the number rises with `fromDock`
+   * along one path. A lane may hold more than one path (one retail station's does), so grouping them
+   * is the reader's job and `fromDock` (metres from this lane's dock, null without one) is what to
+   * group and order by. Never assume the numbers run 1 upward from the dock.
+   */
+  approach: (LanePoint & { n: number; fromDock: number | null })[];
+  exit: (LanePoint & { n: number; fromDock: number | null })[];
+}
+
+export interface ModelLanes {
+  lanes: DockLane[];
+  drydocks: (LanePoint & { name: string })[];
+  /**
+   * The model's hangar mouths, the only record in the client's files of where a hull opens: one on
+   * the capital ship, seven and two on two of the stations, none on the rest. Empty on a pack
+   * converted before they were carried.
+   */
+  bays: (LanePoint & { name: string })[];
+}
+
+export interface DockEffect {
+  source: string;
+  particle: string | null;
+  /** Every dock effect in the retail archives names a sound and no particle. */
+  sound: string | null;
+}
+
 export interface SpacePack {
   /** 1 for a pack converted before hyperspace (no title, arrival, scenery or hyperspace in the file). */
   version: number;
@@ -112,6 +249,21 @@ export interface SpacePack {
   arrival: SpaceArrival | null;
   /** Null on an older pack: nothing to jump to. */
   hyperspace: SpaceHyperspace | null;
+  // The six below are version 3. They are optional so that a `SpacePack` written out by hand
+  // anywhere else (a test's fixture) does not have to carry them, but `normalise` always fills them,
+  // so a pack that came through `loadSpacePack` has every one.
+  /** Version 3. Empty on an older pack. */
+  nebulae?: Nebula[];
+  /** Version 3: the two sheet looks and their near shells. Null on an older pack. */
+  nebulaLook?: { glow: NebulaSheetLook; mist: NebulaSheetLook } | null;
+  /** Version 3: the one lightning appearance the zone's rows name. Null on an older pack, or where nothing strikes. */
+  lightning?: NebulaLightningLook | null;
+  /** Version 3: the asteroid fields' shapes, for the map. Empty on an older pack. */
+  fields?: AsteroidFieldShape[];
+  /** Version 3: docking lanes by model id, so a station or scenery entry finds its own through `model`. Empty on an older pack. */
+  lanes?: Record<string, ModelLanes>;
+  /** Version 3: what a dock plays, by the part it plays. Empty on an older pack. */
+  dockEffects?: Record<string, DockEffect>;
 }
 
 /** A pack as the file has it, filled out so every field of `SpacePack` is there (an older pack has fewer). */
@@ -137,7 +289,21 @@ function normalise(zone: string, raw: Partial<SpacePack> & { stations?: Partial<
     planets: raw.planets ?? [],
     arrival: raw.arrival ?? null,
     hyperspace: raw.hyperspace?.points ? raw.hyperspace : null,
+    nebulae: Array.isArray(raw.nebulae) ? raw.nebulae : [],
+    nebulaLook: raw.nebulaLook ?? null,
+    lightning: raw.lightning ?? null,
+    fields: Array.isArray(raw.fields) ? raw.fields : [],
+    lanes: raw.lanes && typeof raw.lanes === 'object' ? raw.lanes : {},
+    dockEffects: raw.dockEffects && typeof raw.dockEffects === 'object' ? raw.dockEffects : {},
   };
+}
+
+/** The empty answer, shared: the map asks per station per frame and nothing may allocate there. */
+const NO_LANES: ModelLanes = Object.freeze({ lanes: Object.freeze([]), drydocks: Object.freeze([]), bays: Object.freeze([]) }) as unknown as ModelLanes;
+
+/** The docking lanes of a station or piece of scenery, through the model it is drawn with; empty without any. */
+export function lanesOfPlaced(pack: SpacePack | null, model: string): ModelLanes {
+  return pack?.lanes?.[model] ?? NO_LANES;
 }
 
 const packs = new Map<string, Promise<SpacePack | null>>();

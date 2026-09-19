@@ -174,7 +174,7 @@ for (const [id, planet] of Object.entries(SPACE_ZONES)) {
   else ok(!!z.space && planetBelow(z) === null && !PLANETS.some((p) => p.id === z.space), `${id} is a system with nothing below`);
 }
 ok(planetBelow(PLANETS.find((p) => p.id === 'tatooine')!) === null, 'a ground planet has nothing below it');
-ok(SPACE_PACK_VERSION === 2, 'space.json is version 2');
+ok(SPACE_PACK_VERSION === 3, 'space.json is version 3');
 
 // 11. The runtime arithmetic.
 ok(toGame([12, -3, 4]).join(',') === '-12,-3,4' && Object.is(toGame([0, 1, 2])[0], 0), 'toGame mirrors X only');
@@ -227,7 +227,7 @@ ok(distanceText(850) === '850 m' && distanceText(12345) === '12.3 km' && ALREADY
 
 // 12. Destinations and landmarks from a pack.
 const pack: SpacePack = {
-  version: 2,
+  version: 3,
   zone: 'space_test',
   planet: 'tatooine',
   title: 'Test System',
@@ -275,7 +275,7 @@ ok(arrivalAt(pack)!.join(',') === '0,0,0' && arrivalAt(null) === null, 'the arri
 const cat = new HyperspaceCatalogue([{ id: 'space_test', name: 'Test orbit', title: 'Test System', pack, destinations: dests }]);
 ok(cat.find('space_test:station_test')?.name === 'Test Space Station' && cat.find('nope') === null && cat.pack('space_test') === pack && cat.pack('other') === null, 'the catalogue finds a destination by key and a pack by zone');
 const status = spaceZoneStatus('space_test', pack, 12);
-ok(!status.stale && status.line === 'space_test: Test System, 1 station, 1 scenery, 12 objects, 2 hyperspace points (1 invented), arrival at launch point, no warp effects', 'the status line of a converted zone');
+ok(!status.stale && status.line === 'space_test: Test System, 1 station, 1 scenery, 12 objects, 0 nebulae, 0 fields, 0 docking lanes, 2 hyperspace points (1 invented), arrival at launch point, no warp effects', 'the status line of a converted zone');
 ok(spaceZoneStatus('space_old', { zone: 'space_old', stations: [] }, 3).stale && spaceZoneStatus('space_none', null, 0).stale, 'a missing pack or one converted before hyperspace wants the command');
 
 // 14. The huge collider's pieces.
