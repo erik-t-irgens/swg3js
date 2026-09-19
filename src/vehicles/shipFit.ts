@@ -160,6 +160,35 @@ export function partsOf(def: FitDef, garageId: string, fit: ResolvedFit, droids:
   return out;
 }
 
+/**
+ * How much of an astromech stands out of its socket: the top share of the droid's height (its model's box, the droid
+ * standing on the socket's `astromech` hardpoint, which every socketed hull puts at its top surface), the rest sunk
+ * into the hull, so the dome and the top of the body show. INVENTED, all of them: 0.35 by default (an R2's dome and
+ * shoulders are about the top third of it); per hull (the garage id) where the socket lies otherwise: the V-wing's
+ * hardpoint is 0.21 m under its hull's top, so more is shown to clear that by as much (0.54); the Jedi starfighter's
+ * sits in a wing 0.67 m thick, so more is shown and the feet stay inside the wing (0.45). The N-1's socket takes the
+ * game's own droid head, which is never sunk. Tunable live: `__debug.droid({ shown, hull })`.
+ */
+export const DROID_SHOWN = { share: 0.35 };
+export const DROID_SHOWN_BY_HULL: Record<string, number> = { vwing: 0.54, jedi_starfighter: 0.45 };
+
+/** The share of a droid shown over its socket on a hull (DROID_SHOWN_BY_HULL, else DROID_SHOWN), within 0..1. */
+export function droidShown(garageId: string): number {
+  const s = DROID_SHOWN_BY_HULL[garageId] ?? DROID_SHOWN.share;
+  return Number.isFinite(s) ? Math.min(1, Math.max(0, s)) : 1;
+}
+
+/**
+ * How far a droid standing on its socket is lowered (metres, along the socket's down), from its model's box in its
+ * own frame (lowest and highest Y): its point `shown` of the height down from the top lands on the hardpoint, so
+ * shown = 1 leaves a droid whose feet are at its origin standing where it was.
+ */
+export function droidSink(minY: number, maxY: number, shown: number): number {
+  if (!Number.isFinite(minY) || !Number.isFinite(maxY) || maxY <= minY) return 0;
+  const s = Math.min(1, Math.max(0, shown));
+  return maxY - s * (maxY - minY);
+}
+
 /** The slots whose look differs between two fits of one hull, then 'droid' when the droid does: what a refit takes down and hangs. */
 export function changedSlots(def: FitDef, a: ResolvedFit, b: ResolvedFit): string[] {
   const out: string[] = [];

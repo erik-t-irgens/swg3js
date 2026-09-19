@@ -53,7 +53,7 @@ import { vehiclePlumes } from './vehicles/enginePlumes';
 import { Notice } from './ui/notice';
 import { VehiclesUi } from './ui/vehiclesUi';
 import { ShipEditUi } from './ui/shipEditUi';
-import { fitKey, packFit, partsOf, slotLabel, stockFit, type ResolvedFit, type ShipFit } from './vehicles/shipFit';
+import { DROID_SHOWN, DROID_SHOWN_BY_HULL, droidShown, droidSink, fitKey, packFit, partsOf, slotLabel, stockFit, type ResolvedFit, type ShipFit } from './vehicles/shipFit';
 import { NpcUi } from './ui/npcUi';
 import { CATALOGUE_COMMAND } from './world/mobiles/catalogue';
 import { ambientOverrides, lookBounds, spawnDistance } from './world/mobiles/spawning';
@@ -1614,6 +1614,33 @@ class App {
         else if (mode !== undefined) return `wings: '${String(mode)}' is none of open, closed, toggle, auto, multiplier, threshold`;
         if (mode === 'open' && !v.airborne && v.wingDrop > 0) console.warn(`wings: forced open on the ground: they reach ${v.wingDrop.toFixed(1)} m under the belly and may stand in the terrain (the game never opens them there)`);
         return v.wingReport();
+      },
+      /**
+       * The astromechs in their sockets: `droid({ shown: 0.4 })` sets the share of a droid's height shown over its socket
+       * for every hull without its own, `droid({ shown: 0.5, hull: 'vwing' })` one hull's own (DROID_SHOWN and
+       * DROID_SHOWN_BY_HULL in shipFit.ts); every droid on the world is sunk again at once. Returns each: its hull, the
+       * share, how far it is sunk and its height.
+       */
+      droid: (opts: { shown?: number; hull?: string } = {}) => {
+        if (typeof opts.shown === 'number' && Number.isFinite(opts.shown)) {
+          if (opts.hull) DROID_SHOWN_BY_HULL[opts.hull] = opts.shown;
+          else DROID_SHOWN.share = opts.shown;
+        }
+        const n3 = (n: number) => Number(n.toFixed(3));
+        const out: { ship: string; shown: number; sunk: number; height: number }[] = [];
+        for (const v of this.world.vehicles) {
+          const id = v.def?.id;
+          if (!id) continue;
+          v.group.traverse((o) => {
+            const span = o.userData.droidSpan as [number, number] | undefined;
+            if (!o.userData.droid || !Array.isArray(span)) return;
+            const shown = droidShown(id);
+            const sunk = droidSink(span[0], span[1], shown);
+            o.position.y = -sunk;
+            out.push({ ship: id, shown: n3(shown), sunk: n3(sunk), height: n3(span[1] - span[0]) });
+          });
+        }
+        return out.length ? out : 'no droid in a socket on the world: edit a ship with a socket (the X-wing), pick R2, spawn it';
       },
       /**
        * The cockpit of the ship ridden or piloted: where the eye is and where it came from, the seat under it, the body's lift

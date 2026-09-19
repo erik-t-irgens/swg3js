@@ -2,11 +2,18 @@
 // saved fit against a hull, the parts it hangs, what changes between two fits, what each gun fires, the
 // page's labels, and the limits a fit is packed to and the relay checks. Synthetic tables only.
 import assert from 'node:assert/strict';
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
+  DROID_SHOWN,
+  DROID_SHOWN_BY_HULL,
   FIT_LIMITS,
   boltSlotOf,
   changedSlots,
   componentIndex,
+  droidShown,
+  droidSink,
   fitKey,
   gunWeapon,
   isDefaultPaint,
@@ -223,6 +230,67 @@ const droids: DroidDef[] = [
   const c = resolveFit(def, components, index, droids, { components: { engine: 'eng_s02', weapon_0: 'wpn_green' }, paint: { index_color_1: 4, index_texture_1: 1 } });
   const d = resolveFit(def, components, index, droids, { components: { engine: 'eng_s02', weapon_0: 'wpn_green' }, paint: { index_color_1: 3, index_texture_1: 1 }, droid: 'r2' });
   ok(fitKey(a) !== fitKey(c) && fitKey(a) !== fitKey(d), '10: fitKey differs when a value or the droid differs');
+}
+
+// --- 11: an astromech sunk in its socket ------------------------------------------------------------
+const near = (a: number, b: number, e = 1e-9) => Math.abs(a - b) <= e;
+const pack = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'assets-private');
+{
+  ok(droidSink(0, 1.064, 1) === 0 && near(droidSink(0, 1.064, 0.35), 1.064 * 0.65, 1e-12) && near(droidSink(0, 1.064, 0), 1.064, 1e-12), '11: shown 1 leaves the droid standing, 0.35 sinks it 65% of its height, 0 sinks it whole');
+  ok(near(droidSink(-0.2, 0.8, 0.5), 0.3, 1e-12), '11: a droid whose origin is not at its feet: its middle lands on the hardpoint at shown 0.5');
+  ok(droidSink(0, 1, 1.5) === 0 && near(droidSink(0, 1, -1), 1, 1e-12) && droidSink(1, 1, 0.5) === 0 && droidSink(Number.NaN, 1, 0.5) === 0, '11: the share is kept within 0..1, and an empty or broken box sinks nothing');
+  ok(droidShown('xwing') === DROID_SHOWN.share && droidShown('vwing') === DROID_SHOWN_BY_HULL.vwing && droidShown('jedi_starfighter') === DROID_SHOWN_BY_HULL.jedi_starfighter, '11: a hull without its own share takes the default');
+  // The top share shows: the droid's top stands shown x height over the hardpoint.
+  const h = 1.064;
+  const top = h - droidSink(0, h, droidShown('xwing'));
+  ok(near(top, droidShown('xwing') * h, 1e-12) && top > 0.3 && top < 0.45, `11: an R2 in an X-wing shows ${top.toFixed(2)} m over its socket, its dome and shoulders`);
+}
+{
+  // With the packs: every hull with a socket keeps a sunk R2 or R4 inside its own box, and shows the share over the hardpoint.
+  const ships = join(pack, 'ships', 'manifest.json');
+  const r4 = join(pack, 'mobiles', 'models', 'astromech_r4.glb');
+  if (!existsSync(ships) || !existsSync(r4)) console.log('skip the socket checks: no ships pack or no astromech models');
+  else {
+    const glb = (file: string) => {
+      const b = readFileSync(file);
+      return JSON.parse(b.subarray(20, 20 + b.readUInt32LE(12)).toString('utf8')) as { nodes: { name?: string; extras?: { name?: string }; translation?: number[]; children?: number[]; mesh?: number }[]; meshes: { primitives: { attributes: { POSITION: number } }[] }[]; accessors: { min?: number[]; max?: number[] }[] };
+    };
+    const span = (g: ReturnType<typeof glb>) => {
+      let lo = Infinity;
+      let hi = -Infinity;
+      for (const m of g.meshes) for (const p of m.primitives) {
+        const a = g.accessors[p.attributes.POSITION];
+        if (a.min && a.max) {
+          lo = Math.min(lo, a.min[1]);
+          hi = Math.max(hi, a.max[1]);
+        }
+      }
+      return [lo, hi] as [number, number];
+    };
+    const tallest = span(glb(r4));
+    const list = (JSON.parse(readFileSync(ships, 'utf8')) as { ships: { id: string; file: string; fit?: { droid?: string } | null }[] }).ships.filter((s) => s.fit?.droid === 'astromech');
+    ok(list.length === 8, `11: eight hulls take an astromech (${list.map((s) => s.id).join(', ')})`);
+    const comps = join(pack, 'ships', 'components.json');
+    const packDroids = existsSync(comps) ? ((JSON.parse(readFileSync(comps, 'utf8')) as { droids?: DroidDef[] }).droids ?? []).filter((d) => d.kind === 'astromech') : [];
+    for (const s of list) {
+      // A hull with the game's own head for every droid (the N-1) shows that head, which is never sunk.
+      if (packDroids.length && packDroids.every((d) => d.heads?.[s.id])) {
+        ok(true, `11: ${s.id} shows the game's own droid head for every droid: not sunk`);
+        continue;
+      }
+      const g = glb(join(pack, 'ships', s.file));
+      const node = g.nodes.find((n) => (n.extras?.name ?? n.name) === 'hp:astromech' || n.name === 'hpastromech');
+      if (!node) {
+        ok(false, `11: ${s.id} has hp:astromech`);
+        continue;
+      }
+      // Hardpoints hang at the scene's root in these hulls (their parents carry no transform).
+      const y = node.translation?.[1] ?? 0;
+      const [hullLo] = span(g);
+      const feet = y - droidSink(tallest[0], tallest[1], droidShown(s.id));
+      ok(feet >= hullLo, `11: ${s.id}: a sunk R4's feet (${feet.toFixed(2)}) stay above the hull's bottom (${hullLo.toFixed(2)})`);
+    }
+  }
 }
 
 console.log(`shipFitRuntime: ${checks} checks passed`);

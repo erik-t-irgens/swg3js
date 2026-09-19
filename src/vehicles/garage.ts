@@ -13,7 +13,7 @@ import { advanceEnginePhase, engineHeatOf } from './enginePlumes';
 import { planSeat, hangSaddle, type SaddleDef, type SeatPlan } from './saddle';
 import { PART_LIMIT, applyPlace, frameExtents, hangAttachments, hardpointName, partOf, underPivot, wingDrop, type AttachmentDef, type Assembly } from './shipAssembly';
 import { WING_DROP_MIN, WING_TIP_ROOM, WingSet, type Wing } from './wings';
-import { boltSlotOf, changedSlots, componentIndex, gunWeapon, partsOf, resolveFit, samePaint, type ComponentDef, type DroidDef, type FitDef, type PlacedPart, type ResolvedFit, type ShipFit } from './shipFit';
+import { boltSlotOf, changedSlots, componentIndex, droidShown, droidSink, gunWeapon, partsOf, resolveFit, samePaint, type ComponentDef, type DroidDef, type FitDef, type PlacedPart, type ResolvedFit, type ShipFit } from './shipFit';
 import { collectMounts, countSpotHardpoints, dropWingsUnder, engineSpotsOf, fitTree, hangParts, onModel, rebindGlows, recordHung, refitSwap, splitPartChildren, stageRefit, type Mounts, type PendingPart, type ShipBuild, type SpareGlows, type StandIn, type SwapResult } from './shipMounts';
 import { ShipPaint } from './shipPaint';
 import { renderPaint } from './paintRender';
@@ -435,9 +435,22 @@ export class Garage {
       node.traverse((o) => {
         if ((o as THREE.Mesh).isMesh) o.userData.noCollider = true;
       });
+      // Sunk into its socket so only the dome and the top of the body show: its posed box once per file, the share per hull.
+      let span = this.droidSpans.get(p.path);
+      if (!span) {
+        node.updateMatrixWorld(true);
+        const box = new THREE.Box3().setFromObject(node, true);
+        span = box.isEmpty() ? [0, 0] : [box.min.y, box.max.y];
+        this.droidSpans.set(p.path, span);
+      }
+      u.droidSpan = [span[0], span[1]];
+      node.position.y = -droidSink(span[0], span[1], droidShown(def.id));
     }
     return node;
   }
+
+  /** Each droid model's lowest and highest point in its own frame, posed as it stands in a socket (fitPart), by file. */
+  private readonly droidSpans = new Map<string, [number, number]>();
 
   /** A part def's model, as hangAttachments loads one (a ship's stay dry). */
   private partLoader(def: VehicleDef): (file: string) => Promise<THREE.Object3D> {
