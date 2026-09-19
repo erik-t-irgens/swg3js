@@ -8,8 +8,8 @@
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
 import { FACTION_LABEL, aggressionOfFaction, shipHostile, shipStanding, sideOfFaction, type ShipFaction } from '../../../src/space/factions.ts';
-import { componentLine, familyOf, gradeOf, hullClassOf, speedScale, statsFor, type Handling, type StatInput } from '../../../src/space/shipStats.ts';
-import { COMPONENT_CHANCE, applyCollision, applyHit, createCondition, isDown, newHitResult, regenerate, rescaleCondition, weightOf } from '../../../src/space/shipDamage.ts';
+import { COLLISION_BOUT, COLLISION_CAP_SHARE, componentLine, familyOf, gradeOf, hullClassOf, speedScale, statsFor, type Handling, type StatInput } from '../../../src/space/shipStats.ts';
+import { COMPONENT_CHANCE, applyCollision, applyHit, createCondition, isDown, newHitResult, partnerLoss, regenerate, rescaleCondition, weightOf } from '../../../src/space/shipDamage.ts';
 import { NPC_NEVER, TIER_GRADE, accepts, pickLoadout, seeded } from '../../../src/space/loadout.ts';
 import { anchorRecipes, anchorsOf, groupTypes, stationFaction, type SpacePackLike } from '../../../src/space/roster.ts';
 import { TAUNT_ANY_GAP, TAUNT_SHIP_GAP, TauntGate, fillTaunt, pickLine } from '../../../src/space/taunts.ts';
@@ -385,6 +385,46 @@ const boltAt = (damage: number, dir = new THREE.Vector3(0, 0, -1)) => ({ damage,
   const ks = sk.stats;
   sk.collide(ks.armourMax[0] / (ks.chassisMax / 100) + 25);
   ok(sk.cond.armour[0] === 0 && near(sk.cond.chassis, ks.chassisMax * 0.75, 1e-6) && near(sk.hull.hp, 75, 1e-6) && sk.cond.shield[0] === ks.shieldMax[0], 'ShipCombat.collide: in hp points, scaled to the chassis, armour first, the shield untouched');
+
+  // One collision with another ship is capped below what destroys the ship at full health; contacts with the same
+  // ship within COLLISION_BOUT seconds are that one collision; another ship, or later, is a new one. Anything that
+  // is not a ship (null) is not capped.
+  const cap = COLLISION_CAP_SHARE * (ks.armourMax[0] + ks.chassisMax);
+  ok(COLLISION_CAP_SHARE > 0 && COLLISION_CAP_SHARE < 1, `COLLISION_CAP_SHARE is under 1 (${COLLISION_CAP_SHARE})`);
+  const other = 7;
+  const sx = new ShipCombat(stubHull(), contactStub, input, null, null, null);
+  const took = sx.collide(1e6, other);
+  ok(near(took, cap, 1e-6) && sx.cond.chassis > 0 && sx.hull.hp > 0 && sx.cond.shield[0] === ks.shieldMax[0], `ShipCombat.collide: a crash at any speed takes at most ${COLLISION_CAP_SHARE} of the front armour and chassis, and a whole ship lives (took ${took.toFixed(1)} of ${(ks.armourMax[0] + ks.chassisMax).toFixed(1)})`);
+  sx.update(COLLISION_BOUT * 0.5, 0);
+  ok(sx.collide(1e6, other) === 0 && near(sx.cond.chassis + sx.cond.armour[0], ks.armourMax[0] + ks.chassisMax - cap, 1e-6), 'ShipCombat.collide: the same hull met again within the bout adds nothing past the cap (two hulls wedged together)');
+  sx.update(COLLISION_BOUT * 0.9, 0);
+  ok(sx.collide(1e6, other) === 0, 'ShipCombat.collide: every contact keeps the bout going');
+  sx.update(COLLISION_BOUT + 0.1, 0);
+  const again = sx.collide(1e6, other);
+  ok(again > 0 && sx.cond.chassis === 0 && sx.hull.hp === 0, 'ShipCombat.collide: past the bout it is a new collision, which a ship already down to 40% does not live through');
+  const sy = new ShipCombat(stubHull(), contactStub, input, null, null, null);
+  sy.collide(1e6, other);
+  ok(sy.collide(1e6, null) > 0, 'ShipCombat.collide: something else met within the bout (a station after a hull) is a collision of its own');
+  const sw = new ShipCombat(stubHull(), contactStub, input, null, null, null);
+  sw.collide(1e6, null);
+  ok(sw.cond.chassis === 0 && sw.hull.hp === 0, 'ShipCombat.collide: a station, an asteroid or the ground is not capped (a crash hard enough destroys a whole ship)');
+  const sv = new ShipCombat(stubHull(), contactStub, input, null, null, null);
+  const strike = (ks.armourMax[0] + ks.chassisMax) / 4 / (ks.chassisMax / 100);
+  for (let i = 0; i < 5; i++) {
+    sv.collide(strike, null);
+    sv.update(0.5, 0);
+  }
+  ok(sv.cond.chassis === 0, 'ShipCombat.collide: a ship held into a station face, striking again every half second, is destroyed (no bout for what is not a ship)');
+  const s0 = new ShipCombat(stubHull(), contactStub, input, null, null, null);
+  s0.collide(1e6, 0);
+  ok(s0.cond.chassis > 0 && near(s0.collide(1e6, 0), 0, 1e-9), 'ShipCombat.collide: a ship whose key is 0 is a ship (capped), not nothing');
+  ok(near(partnerLoss(10, 9000, 9000), 10, 1e-9) && near(partnerLoss(10, 9000, 18000), 5, 1e-9) && near(partnerLoss(10, 18000, 9000), 20, 1e-9), 'partnerLoss: the other ship loses this loss times this mass over its own (the momentum moved is the same both ways)');
+  ok(partnerLoss(0, 9000, 9000) === 0 && partnerLoss(10, 0, 9000) === 0 && Number.isFinite(partnerLoss(10, 9000, 0)), 'partnerLoss: nothing lost or no mass moves nothing, and a massless partner gives a finite number');
+  const sz = new ShipCombat(stubHull(), contactStub, input, null, null, null);
+  const small = sz.collide(10, other);
+  ok(near(small, 10 * (ks.chassisMax / 100), 1e-6) && near(sz.collide(10, other), 10 * (ks.chassisMax / 100), 1e-6), 'ShipCombat.collide: under the cap each contact takes all it costs');
+  sz.repair();
+  ok(near(sz.collide(1e6, other), cap, 1e-6), 'ShipCombat.repair ends the bout');
 
   // The hit effects: placed in the hull's frame at the true point, reported 'shown'; with no effect for the layer, 'taken'.
   const placed: { file: string; at: THREE.Vector3; frame: THREE.Matrix4 | null }[] = [];

@@ -195,6 +195,15 @@ export function applyCollision(c: ShipCondition, stats: ShipStats, amount: numbe
   return out;
 }
 
+/**
+ * The speed the other ship lost in a contact one ship measured (`lost`, m/s): the momentum the contact moved is the
+ * same both ways, so the other's loss is this one's times this mass over the other's. Zero for a massless pair.
+ */
+export function partnerLoss(lost: number, mass: number, otherMass: number): number {
+  if (!(lost > 0) || !(mass > 0)) return 0;
+  return (lost * mass) / Math.max(1e-6, otherMass);
+}
+
 /** Shields back after a quiet spell; nothing while the generator or the reactor is down. */
 export function regenerate(c: ShipCondition, stats: ShipStats, generatorUp: boolean, reactorUp: boolean, dt: number): void {
   c.sinceHit = Math.min(LONG_AGO, c.sinceHit + dt);

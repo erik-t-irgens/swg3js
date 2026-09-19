@@ -15,7 +15,7 @@ import type { Bolt } from '../combat/bolts';
 import type { CombatFile, CombatLayer, HullFx } from './combatData.ts';
 import type { ShipContact } from './contacts';
 import { applyCollision, applyHit, createCondition, isDown, newHitResult, regenerate, rescaleCondition, type HitResult, type ShipCondition } from './shipDamage.ts';
-import { CLASS_BASE, statsFor, type Handling, type ShipStats, type StatInput, type WeaponStat } from './shipStats.ts';
+import { CLASS_BASE, COLLISION_BOUT, COLLISION_CAP_SHARE, statsFor, type Handling, type ShipStats, type StatInput, type WeaponStat } from './shipStats.ts';
 
 /**
  * Whether a ship may be picked, followed or fired at: alive, and not in a jump (a ghosted hull's
@@ -159,6 +159,12 @@ export class ShipCombat {
   private bandShare = -1;
   /** The chassis has fallen under a quarter once (its event effect played). */
   private low = false;
+  /** Simulated seconds this fight has run (`update`), which the collision bouts are timed on. */
+  private clock = 0;
+  /** The collision with another ship under way: that ship's key (its body's handle; a number, so a removed ship is not kept alive), when it last touched, and what it has taken so far. */
+  private boutWith: number | null = null;
+  private boutAt = -Infinity;
+  private boutTaken = 0;
   private readonly downList: string[] = [];
   private readonly statusOut: CombatStatus = { shield: [1, 1], armour: [1, 1], hull: 1, boost: 1, down: [] };
   private readonly summaryOut: CombatSummary = { shield: 1, armour: 1, hull: 1 };
@@ -298,14 +304,32 @@ export class ShipCombat {
   /**
    * A collision's damage (the speed lost past the threshold, as flyShip counts it, in the hull's `hp`
    * points), onto the front's armour (a ship mostly meets what is ahead of it), then the chassis. It is
-   * taken as the same share of the chassis it took of `hp` before ships had a fight, so a crash costs what
-   * it did (the armour now takes the first of it). The scale is a choice, not the client's.
+   * taken as the same share of the chassis it took of `hp` before ships had a fight (the armour taking the
+   * first of it), a choice, not the client's. `other` is the key of the other ship it met (its body's handle),
+   * or null for anything else. Only a collision with another ship is capped: contacts with the same ship within
+   * COLLISION_BOUT seconds of the last are one collision, which takes at most COLLISION_CAP_SHARE of this ship's
+   * full front armour and chassis, so a ship at full health lives through meeting another. Anything else (a
+   * station, an asteroid, the Star Destroyer, the ground) takes all it costs, every time, so a ship held into a
+   * station face is still destroyed. Returns what it took, in the stats' points.
    */
-  collide(amount: number): void {
-    if (this.cond.chassis <= 0 || this.god) return;
+  collide(amount: number, other: number | null = null): number {
+    if (this.cond.chassis <= 0 || this.god || !(amount > 0)) return 0;
     const scale = this.hull.maxHp > 0 ? this.stats.chassisMax / this.hull.maxHp : 1;
-    applyCollision(this.cond, this.stats, amount * scale, 0, this.last);
+    let take = amount * scale;
+    if (other !== null) {
+      if (other !== this.boutWith || this.clock - this.boutAt > COLLISION_BOUT) {
+        this.boutWith = other;
+        this.boutTaken = 0;
+      }
+      this.boutAt = this.clock;
+      const cap = COLLISION_CAP_SHARE * (this.stats.armourMax[0] + this.stats.chassisMax);
+      take = Math.min(take, Math.max(0, cap - this.boutTaken));
+      if (!(take > 0)) return 0;
+      this.boutTaken += take;
+    }
+    applyCollision(this.cond, this.stats, take, 0, this.last);
     this.afterBlow();
+    return take;
   }
 
   /** The layers, the effects, the attacker, the hooks. `roll` over COMPONENT_CHANCE keeps components out (the console's layer hits). */
@@ -365,6 +389,7 @@ export class ShipCombat {
   /** Shields back after a quiet spell, boost energy (`boosting` spends it), cooldown, and the damage-band effects. */
   update(dt: number, now: number, boosting = false): void {
     void now;
+    this.clock += dt;
     this.cooldown = Math.max(0, this.cooldown - dt);
     const s = this.stats;
     if (s.boostSeconds > 0 && !isDown(this.cond, 'booster') && !isDown(this.cond, 'engine')) {
@@ -551,6 +576,9 @@ export class ShipCombat {
     }
     c.sinceHit = 1e9;
     this.low = false;
+    this.boutWith = null;
+    this.boutAt = -Infinity;
+    this.boutTaken = 0;
     this.boostLeft = s.boostSeconds;
     this.refreshDown();
     this.writeSpec();

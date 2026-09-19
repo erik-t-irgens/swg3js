@@ -7,6 +7,7 @@ import * as THREE from 'three';
 import { cleanTrimesh, Group, groups, RAPIER, TRIMESH_FLAGS, type Physics } from '../core/physics';
 import { WING_RULE, WingSet, easeWing, wingTopFactor, wingsWanted } from './wings';
 import { hardpointName, partOf, underPivot } from './shipAssembly';
+import { partnerLoss } from '../space/shipDamage';
 
 /**
  * A vehicle's hull meets everything but the ground: the springs hold it off the terrain from
@@ -230,6 +231,8 @@ const SHIP_HIT_LOSS = 5;
 const SHIP_HIT_FREE = 0.4;
 /** How much of the ground's slope a hover kind takes on: 1 lies flat on it, 0 stays level. */
 const SLOPE_FOLLOW = 0.85;
+/** Every vehicle's colliders by handle, so a hull that hit something can tell another ship from a station. Filled by the constructor, emptied by dispose. */
+const HULLS = new Map<number, Vehicle>();
 
 export class Vehicle {
   readonly group = new THREE.Group();
@@ -296,6 +299,10 @@ export class Vehicle {
   private commandedValid = false;
   /** Seconds left in which the contacts, not the throttle, have the hull after a hit. */
   private hitCooldown = 0;
+  /** A collision another ship found first and worked out for this one (m/s lost), shown as this hull's `justHit` on its next step when it had not stepped yet this frame. */
+  private keptHit = 0;
+  /** `Physics.steps` when this vehicle last stepped: whether it has stepped in the frame another ship's collision is found. */
+  private steppedAt = -1;
   /** At no hull left: the game blows it up and takes the rider off. */
   get destroyed(): boolean {
     return this.hp <= 0;
@@ -511,6 +518,7 @@ export class Vehicle {
       );
       this.colliderHandles.push(box.handle);
     }
+    for (const h of this.colliderHandles) HULLS.set(h, this);
     this.pos.set(x, y, z);
   }
 
@@ -542,11 +550,51 @@ export class Vehicle {
     return this.combat.takeBolt(bolt, point, normal);
   }
 
-  /** A collision's damage: onto the armour of a ship with a fight, else straight off the hull. */
-  private hurtHull(amount: number): void {
+  /** A collision's damage: onto the armour of a ship with a fight (with `other`, the ship it met, if it met one: only that is capped), else straight off the hull. */
+  private hurtHull(amount: number, other: Vehicle | null = null): void {
     if (amount <= 0) return;
-    if (this.combat) this.combat.collide(amount);
+    if (this.combat) this.combat.collide(amount, other ? other.body.handle : null);
     else this.hp = Math.max(0, this.hp - amount);
+  }
+
+  /**
+   * The ship whose hull this one's touched in the last step (a contact with points between their colliders), or
+   * null: a station, an asteroid or anything else is not a ship, and a ghosted or disposed hull is left out. Asked
+   * only on a hit, so the closures it makes are not per frame.
+   */
+  private shipTouched(world: RAPIER.World): Vehicle | null {
+    const body = this.body;
+    let found: Vehicle | null = null;
+    for (let i = 0, n = body.numColliders(); i < n && !found; i++) {
+      const mine = body.collider(i);
+      world.contactPairsWith(mine, (other) => {
+        if (found) return;
+        const v = HULLS.get(other.handle);
+        if (!v || v === this || !v.spec.ship || v.ghost || v.disposed || !v.body.isValid() || other.parent()?.handle !== v.body.handle) return;
+        let touching = false;
+        world.contactPair(mine, other, (m) => {
+          if (m.numContacts() > 0) touching = true;
+        });
+        if (touching) found = v;
+      });
+    }
+    return found;
+  }
+
+  /**
+   * A collision another ship found first, in which this hull lost `lost` m/s (worked out by the one that found it):
+   * hurt as by its own hit test, given the contacts' moment, and not measured again by its own test this frame.
+   * `steps` is `Physics.steps` now: a hull that has stepped this frame shows the hit at once, one that has not on its
+   * step. A ghosted, disposed or destroyed hull takes nothing.
+   */
+  private rammed(by: Vehicle, lost: number, steps: number): void {
+    if (lost <= SHIP_HIT_LOSS || this.ghost || this.disposed || this.destroyed) return;
+    this.commandedValid = false;
+    this.hitCooldown = SHIP_HIT_FREE;
+    if (this.airborne) this.cruise = Math.min(this.cruise, Math.max(4, this.cruise * 0.3));
+    this.hurtHull((lost - SHIP_HIT_LOSS) * HIT_DAMAGE, by);
+    if (this.steppedAt === steps) this.justHit = Math.max(this.justHit, lost);
+    else this.keptHit = Math.max(this.keptHit, lost);
   }
 
   /**
@@ -844,6 +892,10 @@ export class Vehicle {
     const body = this.body;
     body.resetForces(true);
     body.resetTorques(true);
+    // A collision another ship found before this one stepped is shown as this step's hit.
+    const kept = this.keptHit;
+    this.keptHit = 0;
+    this.steppedAt = physics.steps;
     if (this.held) {
       // A jump holds the hull still where it is (in the tunnel, or waiting for the world ahead): no flight, no wings.
       body.setLinvel(STILL, true);
@@ -851,7 +903,7 @@ export class Vehicle {
       const t = body.translation();
       this.pos.set(t.x, t.y, t.z);
       this.quaternion(q);
-      this.justHit = 0;
+      this.justHit = kept;
       this.commandedValid = false;
       this.group.position.copy(this.pos);
       this.group.quaternion.copy(q);
@@ -860,7 +912,8 @@ export class Vehicle {
     }
     this.hopCd = Math.max(0, this.hopCd - dt);
     this.updateWings(dt);
-    if (s.ship && this.flyShip(dt, drive, groundAt, waterAt)) {
+    if (s.ship && this.flyShip(dt, drive, physics, groundAt, waterAt)) {
+      if (kept > this.justHit) this.justHit = kept;
       this.group.position.copy(this.pos);
       this.group.quaternion.copy(q);
       this.onUpdate?.(dt, this, drive);
@@ -881,7 +934,7 @@ export class Vehicle {
     // A hard hit: the velocity lost since the last step beyond what braking or a slope can take
     // off in one, read as damage by the speed lost. A step that started an impulse of its own
     // (a hop, the first after a spawn) is let by.
-    this.justHit = 0;
+    this.justHit = kept;
     if (this.prevVelValid && !this.skipHitCheck && !s.ship) {
       const lost = this.prevVel.distanceTo(lv);
       if (lost > HIT_THRESHOLD) {
@@ -1130,7 +1183,7 @@ export class Vehicle {
    * and attitude set each step) and stays above the ground. Below a few metres a second with the
    * gear near the ground it lands and is a flyer on its springs again. Returns whether it flew.
    */
-  private flyShip(dt: number, drive: DriveInput | null, groundAt?: (x: number, z: number) => number, waterAt?: (x: number, z: number) => number): boolean {
+  private flyShip(dt: number, drive: DriveInput | null, physics: Physics, groundAt?: (x: number, z: number) => number, waterAt?: (x: number, z: number) => number): boolean {
     const s = this.spec;
     const body = this.body;
     const t = body.translation();
@@ -1155,9 +1208,15 @@ export class Vehicle {
       const lost = Math.hypot(this.commanded.x - lv.x, this.commanded.y - lv.y, this.commanded.z - lv.z);
       if (lost > SHIP_HIT_LOSS) {
         this.justHit = lost;
-        this.hurtHull((lost - SHIP_HIT_LOSS) * HIT_DAMAGE);
+        // Another ship's hull, if that is what it met: that one is hurt too, by what it lost, which the momentum the
+        // contact moved gives from this hull's loss (times this mass over that one's), whether or not it can measure
+        // its own (held by a pause, in its own hit's moment, hovering on its springs). Anything else (a station, an
+        // asteroid, the Star Destroyer) hurts only this hull, uncapped. A collision between two ships is capped by each ship's own stats.
+        const other = this.shipTouched(physics.world);
+        this.hurtHull((lost - SHIP_HIT_LOSS) * HIT_DAMAGE, other);
         this.cruise = Math.min(this.cruise, Math.max(4, this.cruise * 0.3));
         this.hitCooldown = SHIP_HIT_FREE;
+        if (other) other.rammed(this, partnerLoss(lost, body.mass(), other.body.mass()), physics.steps);
       }
     }
     this.commandedValid = false;
@@ -1310,6 +1369,7 @@ export class Vehicle {
   dispose(physics: Physics, scene: THREE.Scene): void {
     // First, so whoever holds the vehicle (an NPC ship's manager, the ship contacts) drops it.
     this.disposed = true;
+    for (const h of this.colliderHandles) if (HULLS.get(h) === this) HULLS.delete(h);
     this.combat?.dispose();
     this.combat = null;
     this.interior?.dispose();

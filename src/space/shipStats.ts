@@ -67,6 +67,17 @@ export const SHIELD_DELAY = 4;
 /** Boost seconds at grade 2 (scaled by the booster's grade) and the share of a full boost recharged a second. */
 export const BOOST_SECONDS = 6;
 export const BOOST_RECHARGE = 0.25;
+/**
+ * The most one collision with another ship may take, as a share of the ship's own full front armour and chassis (a
+ * collision skips the shield), so a ship at full health always lives through meeting another, whatever its class,
+ * tier or speed. A station, an asteroid or the ground is not capped. Invented.
+ */
+export const COLLISION_CAP_SHARE = 0.6;
+/**
+ * Seconds within which contacts with the same ship count as one collision under that cap: two hulls wedged
+ * into each other meet again every time the contacts let one go. Invented.
+ */
+export const COLLISION_BOUT = 2;
 /** The slots whose component is a part that can be hit and go down. */
 export const PART_SLOTS = /^(reactor|engine|shield_0|capacitor|booster|droid_interface|weapon_\d+)$/;
 
