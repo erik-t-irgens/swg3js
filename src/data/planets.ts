@@ -16,7 +16,12 @@ export interface PlanetDef {
   seed: number;
   /** Zones with their own terrain; the first is where travel lands. Absent for single-terrain planets. */
   zones?: PlanetZone[];
-  /** A space zone: the id of the planet it is the orbit of. No ground, no gravity, flown in a ship. */
+  /**
+   * A space zone: the system it is. When a planet's id, the zone is that planet's orbit (Land and Eject
+   * go down to it, `planetBelow`); Kessel, Ord Mantell and Deep Space carry names of their own and have
+   * nothing below. No ground, no gravity, flown in a ship. Everything that treats a world as space tests
+   * this being truthy.
+   */
   space?: string;
   /** Downward acceleration in m/s². Real planets vary; SWG feel is snappier than Earth. */
   gravity: number;
@@ -317,9 +322,70 @@ for (const z of SPACE_ZONES) {
   });
 }
 
+/**
+ * The space systems that are no planet's orbit (the converter's `space` command converts them like the
+ * orbits): nothing below them to land on. Their `space` is a name of their own, never a planet's id, so
+ * `planetBelow` finds nothing. The palette only colours the loading screen's fallback globe (the ground
+ * is never built in space).
+ */
+const SYSTEMS: { id: string; system: string; name: string; tagline: string; description: string; seed: number; palette: PlanetDef['palette'] }[] = [
+  {
+    id: 'space_light1',
+    system: 'kessel',
+    name: 'Kessel',
+    tagline: 'Spice mines and a maze of rocks',
+    description: 'The Kessel system: bands and clusters of asteroids round the spice world and its moons. Reached by hyperspace; its four jump points are placed by us, since the game kept them on its servers.',
+    seed: 5101,
+    palette: { low: 0x2a2638, mid: 0x6f6a86, high: 0xb9b4c9, slope: 0x2a2638, shore: 0x6f6a86 },
+  },
+  {
+    id: 'space_ord_mantell',
+    system: 'ord_mantell',
+    name: 'Ord Mantell',
+    tagline: 'A station in a belt of iron',
+    description: 'Ord Mantell: a lone station in the Masulivis Belt, among mining and cargo lanes. Its one jump point is the Nova Orion point the game gave the same sector.',
+    seed: 5102,
+    palette: { low: 0x1d3a3f, mid: 0x4f8a8c, high: 0xa9d2cf, slope: 0x1d3a3f, shore: 0x4f8a8c },
+  },
+  {
+    id: 'space_heavy1',
+    system: 'deep_space',
+    name: 'Deep Space',
+    tagline: 'The Unknown Regions, and a Star Destroyer',
+    description: 'Deep Space, in the Unknown Regions: a Star Destroyer hangs near the first jump point with wreckage beside it. Its places are made up (the game kept them on its servers): the jump points, the fields and where the Star Destroyer sits.',
+    seed: 5103,
+    palette: { low: 0x1a1426, mid: 0x4a3a6a, high: 0x9a8cc0, slope: 0x1a1426, shore: 0x4a3a6a },
+  },
+];
+for (const s of SYSTEMS) {
+  PLANETS.push({
+    id: s.id,
+    name: s.name,
+    tagline: s.tagline,
+    description: s.description,
+    seed: s.seed,
+    gravity: 0,
+    // Truthy: everything that treats a world as space sees a space zone; no planet has this id.
+    space: s.system,
+    sky: { top: 0x000000, horizon: 0x000000, sunColor: 0xffffff, suns: 1, sunElevation: 0.9, sunAzimuth: 1.2 },
+    fog: { color: 0x000000, density: 0 },
+    swgFogScale: 0,
+    light: { sunIntensity: 2.2, ambientSky: 0x9fb0c8, ambientGround: 0x303848, ambientIntensity: 0.8 },
+    terrain: { base: -3000, amplitude: 0, frequency: 0.004, octaves: 1, ridged: 0, flatten: 1, detail: 0 },
+    palette: s.palette,
+    props: { treeDensity: 0, rockDensity: 0, treeStyle: 'none', canopy: 0x000000, trunk: 0x000000, rock: 0x000000, treeScale: 1 },
+    creatures: { name: 'Nothing', count: 0, color: 0x000000, size: 1, speed: 0, hp: 1, aggressive: false, damage: 0 },
+  });
+}
+
 /** The space zone above a planet, when the game has one. */
 export function spaceZoneOf(planet: PlanetDef): PlanetDef | null {
   return PLANETS.find((p) => p.space === planet.id) ?? null;
+}
+
+/** The planet a space zone is the orbit of, or null (a ground planet, or a system with nothing below: Kessel, Ord Mantell, Deep Space). */
+export function planetBelow(zone: PlanetDef): PlanetDef | null {
+  return PLANETS.find((p) => p.id === zone.space && !p.space) ?? null;
 }
 
 export function planetById(id: string): PlanetDef {

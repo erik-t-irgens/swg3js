@@ -55,7 +55,8 @@
 //   node tools/swg/cli.mjs sky <swg-dir> <planet>|all <out-dir>      the planet's sky (sun, moons, colour ramps, skybox, reflection maps) into a pack
 //                                                                  (snapshot and terrain do this too)
 //   node tools/swg/cli.mjs water <swg-dir> <planet>|all <out-dir>   each planet's water shaders: colour, opacity, ripple, drift and cube map (terrain does this too)
-//   node tools/swg/cli.mjs space <swg-dir> <zone>|all <out-dir>     a space zone (space_tatooine, ...): its stations, asteroid fields, planets and sky
+//   node tools/swg/cli.mjs space <swg-dir> <zone>|all <out-dir>     a space zone (space_tatooine, ..., space_light1 Kessel, space_heavy1 Deep Space,
+//                                                                  space_ord_mantell): its stations, asteroid fields, planets, sky and hyperspace points
 //   node tools/swg/cli.mjs maps <swg-dir> <out-dir>                 the client's planet map image into every converted planet pack (map.png, map.json)
 //                                                                  as <out-dir>/<zone>, a pack the game flies through
 //   node tools/swg/cli.mjs audit <swg-dir> <out-dir> [planet] [--limit=n]   every object the archives place on each converted planet against its pack:
@@ -105,7 +106,8 @@ import { bakeShader, describeShader, describeVariables, loadImage, loadShader, p
 import { ImageRegistry, exportBlueprint, exportPalettes, exportShader, palettesOf } from './customize.mjs';
 import { effectAlpha, alphaModeFor } from './eff.mjs';
 import { MATERIAL_FORMAT, describeLines, describeSurface, surfaceCounts, surfaceCountsLine, surfaceLine, surfaceTexture } from './surface.mjs';
-import { localize, parseDatatable } from './datatable.mjs';
+import { localize, parseDatatable, parseStringTable } from './datatable.mjs';
+import { SPACE_PACK_VERSION, SPACE_ZONES, spaceZoneStatus } from './space.mjs';
 import { mountCreatures, riderPoseFor } from './mounts.mjs';
 import { pickSaddleHardpoint, saddleEntry, saddleStatus, satHardpoints } from './saddles.mjs';
 import { assembleShip, assemblyStatus, clientChildren, expandPart, partFamilyOf, SHIP_ASSEMBLY_FORMAT } from './shipparts.mjs';
@@ -1908,6 +1910,15 @@ function packStatus(dir) {
       return null;
     }
   };
+  // The space zones, one line each (stations, scenery, objects, hyperspace points, arrival), and one to-do for
+  // every zone missing or converted before hyperspace.
+  const staleSpace = [];
+  for (const zone of Object.keys(SPACE_ZONES)) {
+    const s = spaceZoneStatus(zone, readQuiet(join(dir, zone, 'space.json')), readQuiet(join(dir, zone, 'layout.json'))?.objects?.length ?? 0);
+    console.log(`  ${s.line}`);
+    if (s.stale) staleSpace.push(zone);
+  }
+  if (staleSpace.length) need(`space <swg-dir> all ${dir} --retail-only`, `space zones missing or converted before hyperspace (${staleSpace.join(', ')})`);
   const mobiles = readQuiet(join(dir, 'mobiles/catalogue.json'));
   if (!mobiles) {
     console.log('  mobiles: none (the spawner has only the planet creatures)');
@@ -4450,11 +4461,39 @@ switch (cmd) {
     // (scattered from each field's seed through its style table), the planets and moons its
     // terrain file hangs in the sky (as space.json, with each one's surface texture), and its
     // sky from the same file (the six-sided nebula skybox, the lights, the star field, the dust
-    // and the star sprites) into sky.json with the environment tables' blocks.
+    // and the star sprites) into sky.json with the environment tables' blocks. space.json (version
+    // 2) also carries the system's title, its hyperspace points with their names and descriptions,
+    // the stations' titles, the zone's arrival and the jump scene with its warp effects' timings,
+    // and the frame check of the points against the stations. Kessel (space_light1), Deep Space
+    // (space_heavy1) and Ord Mantell are systems of their own; what the client never had (Kessel's
+    // and Deep Space's point positions, Deep Space's fields and its Star Destroyer) is made up in
+    // space.mjs's INVENTED_* tables and marked as such in the pack.
     if (!pos[3]) usage();
     const vfs = mount(pos[1]);
-    const { SPACE_ZONES, stationTemplate, parseSpacePlanets, parseSpaceEnvironment, scatterField } = await import('./space.mjs');
+    const {
+      stationTemplate, parseSpacePlanets, parseSpaceEnvironment, scatterField, parseHyperspaceScene, warpTimings, cleanText, cleanZoneTitle, stationStrings,
+      INVENTED_FIELDS, INVENTED_SCENERY, hyperspacePoints, placeScenery, arrivalOf, stationApproachEnd, checkPointFrame, nearestObject,
+    } = await import('./space.mjs');
     const zones = pos[2] === 'all' ? Object.keys(SPACE_ZONES).filter((z) => vfs.has(`terrain/${z}.trn`)) : [pos[2]];
+    // What every zone shares: the hyperspace table, the point and zone names, the jump scene and its warp effects.
+    const shared = (p) => (vfs.has(p) ? parseDatatable(parseIff(vfs.read(p))).rows : []);
+    const stf = (name) => (vfs.has(`string/en/${name}.stf`) ? parseStringTable(vfs.read(`string/en/${name}.stf`)) : new Map());
+    const hsRows = shared('datatables/space/hyperspace/hyperspace_locations.iff');
+    const pointNames = stf('hyperspace_points_n');
+    const pointDescs = stf('hyperspace_points_d');
+    const zoneNames = stf('planet_n');
+    const refusals = stf('shared_hyperspace');
+    const hsScene = vfs.has('scene/hyperspace.iff') ? parseHyperspaceScene(parseIff(vfs.read('scene/hyperspace.iff'))) : null;
+    const warpFx = (p) => {
+      try {
+        return p && vfs.has(p) ? parseParticleEffect(parseIff(vfs.read(p))) : null;
+      } catch (err) {
+        console.log(`hyperspace: ${p}: ${err.message}`);
+        return null;
+      }
+    };
+    const timing = hsScene ? warpTimings(warpFx(hsScene.enter.particle), warpFx(hsScene.exit.particle)) : null;
+    console.log(`hyperspace: ${hsRows.length} table points, ${pointNames.size} point names; ${hsScene ? `the jump scene: enter ${hsScene.enter.seconds} s, exit ${hsScene.exit.seconds} s, leaving at ${hsScene.transit.speed} m/s` : 'no jump scene (scene/hyperspace.iff)'}${timing ? `; warp timings: peak ${timing.enterPeak} s, tunnel ${timing.tunnelAt} s, burst ${timing.exitBurstAt} s, clear ${timing.exitClearAt} s` : ''}`);
     for (const zone of zones) {
       if (!vfs.has(`terrain/${zone}.trn`)) {
         console.log(`${zone}: no terrain/${zone}.trn in the archives`);
@@ -4493,6 +4532,8 @@ switch (cmd) {
       };
       const objects = [];
       const stations = [];
+      // Each station's own object, so its approach's clearance leaves the station itself out.
+      const stationObjects = new Map();
       for (const row of table(`datatables/space/spacestation/${zone}.iff`) ?? []) {
         const template = stationTemplate(row.Name);
         const r = convert(template);
@@ -4500,12 +4541,17 @@ switch (cmd) {
           console.log(`  station ${row.Name}: ${template}: ${r.skip}`);
           continue;
         }
-        objects.push({ template, model: r.model, x: row.LocationX, y: row.LocationY, z: row.LocationZ, q: [1, 0, 0, 0], radius: r.radius });
-        stations.push({ name: row.Name, model: r.model, x: row.LocationX, y: row.LocationY, z: row.LocationZ, radius: r.radius });
-        console.log(`  station ${row.Name}: ${template.replace(/^.*\//, '')} at ${row.LocationX}, ${row.LocationY}, ${row.LocationZ} (${Math.round(r.radius)} m across)`);
+        const o = { template, model: r.model, x: row.LocationX, y: row.LocationY, z: row.LocationZ, q: [1, 0, 0, 0], radius: r.radius };
+        objects.push(o);
+        const s = { name: row.Name, ...stationStrings(row.Name, pointNames, pointDescs), model: r.model, x: row.LocationX, y: row.LocationY, z: row.LocationZ, radius: r.radius, approachClearance: null };
+        stations.push(s);
+        stationObjects.set(s, o);
+        console.log(`  station ${row.Name} ("${s.title}"): ${template.replace(/^.*\//, '')} at ${row.LocationX}, ${row.LocationY}, ${row.LocationZ} (${Math.round(r.radius)} m across)`);
       }
+      // The zone's own fields, then any made up for it (Deep Space has no field table).
+      const fieldRows = [...(table(`datatables/space/asteroidfield/${zone}.iff`) ?? []).map((row) => [row, false]), ...(INVENTED_FIELDS[zone] ?? []).map((row) => [row, true])];
       let asteroids = 0;
-      for (const row of table(`datatables/space/asteroidfield/${zone}.iff`) ?? []) {
+      for (const [row, invented] of fieldRows) {
         const styles = table(row.FieldStyleTable) ?? [];
         let kept = 0;
         for (const a of scatterField(row, styles)) {
@@ -4515,8 +4561,48 @@ switch (cmd) {
           kept++;
         }
         asteroids += kept;
-        console.log(`  field "${row.Name}": ${kept} of ${row.NumAsteroids} asteroids${styles.length ? '' : ` (no style table ${row.FieldStyleTable})`}${Number(row.Type) === 2 ? ', along a spline' : ''}, radius ${row.Radius} m at ${row.CenterLocationX}, ${row.CenterLocationY}, ${row.CenterLocationZ}`);
+        console.log(`  field "${row.Name}"${invented ? ' (invented)' : ''}: ${kept} of ${row.NumAsteroids} asteroids${styles.length ? '' : ` (no style table ${row.FieldStyleTable})`}${Number(row.Type) === 2 ? ', along a spline' : ''}, radius ${row.Radius} m at ${row.CenterLocationX}, ${row.CenterLocationY}, ${row.CenterLocationZ}`);
       }
+      // The hyperspace points: the table's, any borrowed from a sister scene, any made up.
+      const points = hyperspacePoints(zone, hsRows, pointNames, pointDescs);
+      const pointById = new Map(points.map((p) => [p.id, p]));
+      // Scenery (made up): a model near a point, broadside to a ship arriving there.
+      const scenery = [];
+      for (const s of INVENTED_SCENERY[zone] ?? []) {
+        const p = pointById.get(s.near);
+        const r = p ? convert(s.template) : { skip: `no point ${s.near}` };
+        if (r.skip) {
+          console.log(`  scenery ${s.name}: ${s.template}: ${r.skip}`);
+          continue;
+        }
+        const at = placeScenery(p, s, r.radius);
+        objects.push({ template: s.template, model: r.model, x: at.x, y: at.y, z: at.z, q: at.q, radius: r.radius });
+        scenery.push({ name: s.name, template: s.template, model: r.model, x: at.x, y: at.y, z: at.z, q: at.q, radius: Math.round(r.radius), near: s.near, invented: true });
+        console.log(`  scenery ${s.name} (invented): ${s.template.replace(/^.*\//, '')} at ${at.x}, ${at.y}, ${at.z}, ${Math.round(r.radius)} m round, near ${s.near}`);
+      }
+      // The jump's two warp effects, converted into the pack (cached per pack) for the game to play.
+      const warpFile = (p) => {
+        if (!p) return null;
+        const e = convertParticle(vfs, p, outDir);
+        if (e.failed) console.log(`  warp effect ${p}: ${e.failed}`);
+        return e.file ?? null;
+      };
+      const effects = { enter: warpFile(hsScene?.enter.particle), exit: warpFile(hsScene?.exit.particle), timing };
+      const arrival = arrivalOf(zone, SPACE_ZONES[zone] ?? null, points);
+      // Clearances: how far each point, the arrival and each station's approach end are from anything placed.
+      const clear = (label, at, except = null) => {
+        const { object, clearance } = nearestObject(at, objects, except);
+        if (object && clearance < 300) console.log(`  warning: ${label} is ${Math.round(clearance)} m from ${object.template}`);
+        return Number.isFinite(clearance) ? Math.round(clearance) : null;
+      };
+      for (const p of points) p.clearance = clear(p.id, p);
+      if (arrival.kind === 'launch') clear('the arrival (launch point)', arrival);
+      for (const s of stations) s.approachClearance = clear(`${s.name}'s approach end`, stationApproachEnd(s, arrival), stationObjects.get(s));
+      // The frame check: the table's points against the stations, by the distances their descriptions give.
+      const frameCheck = checkPointFrame(points.filter((p) => p.source === 'table'), stations);
+      if (frameCheck.checked) console.log(`  hyperspace frame: ${frameCheck.sameCloser} of ${frameCheck.checked} distances fit the unmirrored pairing (mean ${frameCheck.meanErrorSame} m; mirrored ${frameCheck.meanErrorMirrored} m)`);
+      if (frameCheck.mirroredCloser > frameCheck.sameCloser) console.log(`  warning: ${frameCheck.mirroredCloser} of ${frameCheck.checked} described distances fit the points with X mirrored: the hyperspace table is not in the stations' frame here`);
+      const title = cleanZoneTitle(zoneNames.get(zone) ?? '') || zone;
       const planets = [];
       const trnRoot = parseIff(vfs.read(`terrain/${zone}.trn`));
       for (const p of parseSpacePlanets(trnRoot)) {
@@ -4538,12 +4624,22 @@ switch (cmd) {
         planets.push({ appearance: p.appearance, direction: p.direction.map((v) => Math.round(v * 100) / 100), size: Math.round(p.size * 1000) / 1000, texture });
         console.log(`  planet ${basename(p.appearance)}: toward ${p.direction.map((v) => v.toFixed(0)).join(', ')}, size ${p.size}${texture ? '' : ', no surface texture'}`);
       }
-      writeFileSync(join(outDir, 'space.json'), JSON.stringify({ zone, planet: SPACE_ZONES[zone] ?? null, stations, planets }, null, 2));
+      const hyperspace = {
+        points,
+        scene: hsScene ? { source: 'scene/hyperspace.iff', ...hsScene } : null,
+        effects,
+        messages: { alreadyAtPoint: cleanText(refusals.get('already_at_point') ?? '') || null },
+        frameCheck,
+      };
+      writeFileSync(join(outDir, 'space.json'), JSON.stringify({ version: SPACE_PACK_VERSION, zone, planet: SPACE_ZONES[zone] ?? null, title, stations, scenery, planets, arrival, hyperspace }, null, 2));
       writeFileSync(join(outDir, 'manifest.json'), JSON.stringify({ planet: zone, categories: { layout: [...models.values()].filter((m) => !m.failed) } }, null, 2));
       writeFileSync(join(outDir, 'layout.json'), JSON.stringify({ planet: zone, center: { x: 0, z: 0 }, radius: null, objects, skipped: [] }));
       const env = parseSpaceEnvironment(trnRoot);
       exportSky(vfs, zone, outDir, { textureFor: (p) => textureFor(vfs, p), particleFor: (p) => convertParticle(vfs, p, outDir), log: console.log, space: env });
-      console.log(`-> ${outDir}: ${stations.length} stations, ${asteroids} asteroids in ${models.size} models, ${planets.length} planets and moons${env.skybox ? `, skybox ${env.skybox}` : ', no skybox named'}, ${env.lights.length} lights, ${env.celestials.length} star sprites, ${env.stars?.count ?? 0} stars, ${env.dust?.count ?? 0} dust`);
+      const made = points.filter((p) => p.source === 'invented').length;
+      const borrowed = points.filter((p) => p.source === 'borrowed').length;
+      const pointNotes = [made && `${made} invented`, borrowed && `${borrowed} borrowed`].filter(Boolean).join(', ');
+      console.log(`-> ${outDir}: ${title}, ${stations.length} station${stations.length === 1 ? '' : 's'}, ${asteroids} asteroids in ${models.size} models, ${planets.length} planets and moons${env.skybox ? `, skybox ${env.skybox}` : ', no skybox named'}, ${env.lights.length} lights, ${env.celestials.length} star sprites, ${env.stars?.count ?? 0} stars, ${env.dust?.count ?? 0} dust${scenery.length ? `, ${scenery.length} scenery` : ''}, ${points.length} hyperspace points${pointNotes ? ` (${pointNotes})` : ''}, arrival at ${arrival.kind === 'launch' ? 'launch point' : `point ${arrival.point ?? 'the origin'}`}`);
     }
     printEffectSummary();
     break;

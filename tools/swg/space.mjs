@@ -7,7 +7,10 @@
 // as PLAN forms, the planet appearance then eight floats). The pure parts live here, for the tests.
 import { findAll, readCString } from './iff.mjs';
 
-/** The space zones the game flies, and the planet each is the sky of. */
+/**
+ * The space zones the game flies, and the planet each is the sky of. The last three are systems of
+ * their own, no planet's orbit: nothing below them to land on or eject to.
+ */
 export const SPACE_ZONES = {
   space_tatooine: 'tatooine',
   space_naboo: 'naboo',
@@ -18,7 +21,14 @@ export const SPACE_ZONES = {
   space_dathomir: 'dathomir',
   space_yavin4: 'yavin4',
   space_kashyyyk: 'kashyyyk',
+  // Systems that are no planet's orbit: nothing to land on.
+  space_ord_mantell: null,
+  space_light1: null,
+  space_heavy1: null,
 };
+
+/** space.json's layout version: 2 adds the title, the arrival, the scenery and the hyperspace block. */
+export const SPACE_PACK_VERSION = 2;
 
 /**
  * The station drawn for each station the zone tables name: the tables carry the server's names,
@@ -201,4 +211,389 @@ export function scatterField(row, styles, cap = 400) {
     out.push({ template: String(template).replace(/\\/g, '/'), x: at[0], y: at[1], z: at[2], q: q.map((v) => Math.round(v * 10000) / 10000), scale: smin + (smax - smin) * rng() });
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Hyperspace. The client's point table (datatables/space/hyperspace/hyperspace_locations.iff:
+// HYPERSPACE_POINT_NAME, SCENE, X, Y, Z) is in the same frame as the station tables: each point's
+// description gives its distance to its system's stations, and those distances fit the unmirrored
+// pairing (checkPointFrame repeats that on every conversion). The jump itself is scene/hyperspace.iff
+// (three stages) and the two warp particle effects it names.
+
+const slashes = (p) => String(p ?? '').replace(/\\/g, '/');
+
+/**
+ * scene/hyperspace.iff: HYPR > 0000 > DATA (a float, unresolved), STG1 and STG3 (the stage's seconds,
+ * the warp .prt, a .cef, a float that is unresolved, a .snd) and STG2 (three floats, read as the
+ * longest wait for the new scene, the speed the ship leaves at and the hand-over fade, and a .snd).
+ * Null for anything else. The chunks are found by tag over the version form's children.
+ */
+export function parseHyperspaceScene(root) {
+  if (!root || root.tag !== 'FORM' || root.type !== 'HYPR') return null;
+  const v = (root.children ?? []).find((c) => c.tag === 'FORM' && c.type === '0000');
+  if (!v) return null;
+  const chunk = (tag) => v.children.find((c) => c.tag === tag)?.data ?? null;
+  const data = chunk('DATA');
+  const s1 = chunk('STG1');
+  const s2 = chunk('STG2');
+  const s3 = chunk('STG3');
+  if (!s1 || !s2 || !s3) return null;
+  const round = (x) => Math.round(x * 10000) / 10000;
+  const stage = (b) => {
+    let o = 0;
+    const f = () => {
+      const x = o + 4 <= b.length ? b.readFloatLE(o) : 0;
+      o += 4;
+      return round(x);
+    };
+    const s = () => {
+      const { value, next } = readCString(b, o);
+      o = next;
+      return slashes(value);
+    };
+    const seconds = f();
+    const particle = s();
+    const clientEffect = s();
+    const value = f();
+    const sound = s();
+    return { seconds, particle, clientEffect, value, sound };
+  };
+  const transit = (() => {
+    const f = (o) => (o + 4 <= s2.length ? round(s2.readFloatLE(o)) : 0);
+    return { limit: f(0), speed: f(4), fade: f(8), sound: slashes(readCString(s2, 12).value) };
+  })();
+  return { scale: data && data.length >= 4 ? round(data.readFloatLE(0)) : 1, enter: stage(s1), transit, exit: stage(s3) };
+}
+
+/** Every emitter of a parsed particle effect, with the second its first particle can appear (the group's and its own start delay, at their longest). */
+function emittersOf(effect) {
+  const out = [];
+  for (const g of effect?.groups ?? []) {
+    const gs = g.timing?.startDelay?.[1] ?? 0;
+    for (const e of g.emitters ?? []) out.push({ e, start: gs + (e.timing?.startDelay?.[1] ?? 0) });
+  }
+  return out;
+}
+
+/** The largest value a waveform's keys take (their own values, not the random band). */
+const keysMax = (wf) => Math.max(0, ...(wf?.points ?? []).map((p) => p[1]));
+
+/** The time (0..1 of a life) of the last key at or above `level`; 0 when none. */
+const lastKeyAtOrAbove = (wf, level) => {
+  let t = 0;
+  for (const p of wf?.points ?? []) if (p[1] >= level - 1e-6) t = p[0];
+  return t;
+};
+
+/**
+ * The jump's timings from the two parsed warp effects (parseParticleEffect's output):
+ * { enterPeak, tunnelAt, exitBurstAt, exitClearAt }, each null when the effect has no emitter of that kind.
+ * - enterPeak: over the enter effect's textured one-shot quad emitters, the largest start + life x (the
+ *   time of the alpha ramp's last key at its maximum): the end of the streaks' brightest stretch.
+ * - tunnelAt: the smallest start of the enter effect's untextured quad emitters (the dark tunnel).
+ * - exitBurstAt: the smallest start of the exit effect's textured one-shot emitters (the stars bursting past).
+ * - exitClearAt: over the exit effect's untextured one-shot quad emitters, the largest start + life x (the
+ *   time of the alpha ramp's last key at or above half its maximum): when the tunnel starts to dissolve.
+ * "Textured" is a quad whose texture names a shader; "untextured" one whose shader is empty; both must be
+ * visible. A start is the timing's longest start delay, a life the largest value of the life-time keys.
+ */
+export function warpTimings(enter, exit) {
+  const quads = (effect, textured) =>
+    emittersOf(effect).filter(({ e }) => e.visible !== false && e.particle?.type === 'quad' && !!e.particle.quad?.texture?.shader === textured);
+  const life = (e) => keysMax(e.lifeTime);
+  const round = (x) => (x === null ? null : Math.round(x * 1000) / 1000);
+  const most = (xs) => (xs.length ? Math.max(...xs) : null);
+  const least = (xs) => (xs.length ? Math.min(...xs) : null);
+  const enterStreaks = quads(enter, true).filter(({ e }) => e.oneShot);
+  const enterPeak = most(enterStreaks.map(({ e, start }) => start + life(e) * lastKeyAtOrAbove(e.particle.alpha, keysMax(e.particle.alpha))));
+  const tunnelAt = least(quads(enter, false).map(({ start }) => start));
+  const exitBurstAt = least(quads(exit, true).filter(({ e }) => e.oneShot).map(({ start }) => start));
+  const exitTunnels = quads(exit, false).filter(({ e }) => e.oneShot);
+  const exitClearAt = most(exitTunnels.map(({ e, start }) => start + life(e) * lastKeyAtOrAbove(e.particle.alpha, keysMax(e.particle.alpha) / 2)));
+  return { enterPeak: round(enterPeak), tunnelAt: round(tunnelAt), exitBurstAt: round(exitBurstAt), exitClearAt: round(exitClearAt) };
+}
+
+/** A string from the tables without its colour codes (`\#pcontrast3 `) and stray backslashes; line breaks kept. */
+export function cleanText(text) {
+  return String(text ?? '')
+    .replace(/\\#[0-9A-Za-z]+ ?/g, '')
+    .replace(/\\+/g, '')
+    .trim();
+}
+
+/** A zone's system name, without the server's "(PvP Enabled)" or "(RESTRICTED)". */
+export function cleanZoneTitle(text) {
+  return cleanText(text)
+    .replace(/\s*\((?:PvP Enabled|RESTRICTED)\)\s*$/i, '')
+    .trim();
+}
+
+/** "a_b_c" as "A b c". */
+const sentenceCase = (s) => {
+  const t = String(s).replace(/_/g, ' ').trim();
+  return t ? t[0].toUpperCase() + t.slice(1) : t;
+};
+
+/** "a_b_c" as "A B C". */
+const titleCase = (s) =>
+  String(s)
+    .split('_')
+    .filter(Boolean)
+    .map((w) => w[0].toUpperCase() + w.slice(1))
+    .join(' ');
+
+/**
+ * A station's title and description from the point tables (<planet>_station_0 for station_<planet>),
+ * else a title made from its name ("station_kashyyyk" is "Kashyyyk Space Station",
+ * "spacestation_imperial" is "Imperial station"). The descriptions' "Land Here" promises a landing that
+ * is not built: that clause is dropped ("Space Station, Land Here." is "Space Station";
+ * "Lok Space Station. Land Here" is "Lok Space Station."). A description left empty is the title.
+ */
+export function stationStrings(name, names, descs) {
+  const n = String(name ?? '');
+  const m = /^station_(.+)$/.exec(n);
+  const key = m ? `${m[1]}_station_0` : null;
+  const own = key ? cleanText(names?.get(key) ?? '') : '';
+  const title = own || (m ? `${titleCase(m[1])} Space Station` : /^spacestation_(.+)$/.test(n) ? `${sentenceCase(n.replace(/^spacestation_/, ''))} station` : sentenceCase(n));
+  const raw = key ? cleanText(descs?.get(key) ?? '') : '';
+  const description = raw.replace(/[,;]?[ \t]*\bland here\b[.!]?/gi, '').trim();
+  return { title, description: description || title };
+}
+
+/**
+ * Made up here, not in the client's files: the client names Kessel's and Deep Space's four points
+ * (hyperspace_points_n) but the table places none of them (the server kept them). Client frame, as the
+ * table's rows are. Kessel's are clear of its asteroid fields (1.4 to 4.7 km from the nearest asteroid).
+ */
+export const INVENTED_POINTS = {
+  space_light1_0: [-5200, -800, 5600], // Kessel: Quadrant I
+  space_light1_1: [5800, -1200, -5400], // Kessel: Quadrant IV
+  space_light1_2: [6200, 1500, 4600], // Kessel: Quadrant III
+  space_light1_3: [-5600, 900, -4800], // Kessel: Quadrant II
+  space_heavy1_0: [4800, 400, 5200], // Deep Space: Quadrant I (the Star Destroyer's)
+  space_heavy1_1: [5400, -600, -4800], // Deep Space: Quadrant IV
+  space_heavy1_2: [-5000, 300, -5400], // Deep Space: Quadrant III
+  space_heavy1_3: [-5600, -400, 4600], // Deep Space: Quadrant II
+};
+
+/**
+ * A zone that takes another scene's rows: Ord Mantell has no row of its own, and its one point is its
+ * sister scene's (space_nova_orion has the same station, fields and sky).
+ */
+export const BORROWED_POINTS = { space_ord_mantell: ['space_nova_orion_0'] };
+
+/**
+ * Deep Space's contents, made up (the client has no field table for it): rows in the asteroid field
+ * table's own columns, scattered like the real ones by scatterField.
+ */
+export const INVENTED_FIELDS = {
+  space_heavy1: [
+    { Name: 'Unknown Regions wreckage (invented)', Type: 1, SplineControlPoints: '', CenterLocationX: 1000, CenterLocationY: 300, CenterLocationZ: 5600, Radius: 500, NumAsteroids: 60, RandomSeed: 1701, ScaleMin: 1, ScaleMax: 1, FieldStyleTable: 'datatables/space/asteroidfield/fieldstyle/debris_xwingvstie.iff' },
+    { Name: 'Unknown Regions belt (invented)', Type: 1, SplineControlPoints: '', CenterLocationX: -2500, CenterLocationY: 800, CenterLocationZ: 1500, Radius: 1100, NumAsteroids: 140, RandomSeed: 4242, ScaleMin: 1, ScaleMax: 1, FieldStyleTable: 'datatables/space/asteroidfield/fieldstyle/asteroid_basic_large.iff' },
+  ],
+};
+
+/**
+ * Scenery, made up: a model hung near a point, toward the zone's middle, broadside to it. The Star
+ * Destroyer is the plain ship template (the exterior only; the spacestation_stardestroyer template
+ * adds its 59-cell interior, which is not boarded).
+ */
+export const INVENTED_SCENERY = {
+  space_heavy1: [{ name: 'Star Destroyer', template: 'object/ship/shared_star_destroyer.iff', near: 'space_heavy1_0', distance: 2200, rise: 250 }],
+};
+
+/** The scene a point id belongs to: "space_tatooine_2" is space_tatooine's. */
+const sceneOfPoint = (id) => String(id).replace(/_\d+$/, '');
+
+/**
+ * A zone's hyperspace points: its own table rows, any it borrows, and any made up; sorted by id. Each
+ * is { id, name, description, x, y, z, source: 'table' | 'borrowed' | 'invented', from? } in the
+ * client frame. Names and descriptions come from the string maps through cleanText (a name kept as the
+ * table has it, "Deep Space: Unknown Regions / Quadrant I"); a missing name falls back to the id, a
+ * missing description to the name. A named id with no row (and not made up) is not a point.
+ */
+export function hyperspacePoints(zone, rows, names, descs) {
+  const strings = (id) => {
+    const name = cleanText(names?.get(id) ?? '') || id;
+    return { name, description: cleanText(descs?.get(id) ?? '') || name };
+  };
+  const out = [];
+  const seen = new Set();
+  const num = (v) => Number(v) || 0;
+  for (const r of rows ?? []) {
+    if (r.SCENE !== zone || seen.has(r.HYPERSPACE_POINT_NAME)) continue;
+    seen.add(r.HYPERSPACE_POINT_NAME);
+    out.push({ id: r.HYPERSPACE_POINT_NAME, ...strings(r.HYPERSPACE_POINT_NAME), x: num(r.X), y: num(r.Y), z: num(r.Z), source: 'table' });
+  }
+  for (const id of BORROWED_POINTS[zone] ?? []) {
+    const r = (rows ?? []).find((row) => row.HYPERSPACE_POINT_NAME === id);
+    if (!r || seen.has(id)) continue;
+    seen.add(id);
+    out.push({ id, ...strings(id), x: num(r.X), y: num(r.Y), z: num(r.Z), source: 'borrowed', from: r.SCENE });
+  }
+  for (const [id, [x, y, z]] of Object.entries(INVENTED_POINTS)) {
+    if (sceneOfPoint(id) !== zone || seen.has(id)) continue;
+    seen.add(id);
+    out.push({ id, ...strings(id), x, y, z, source: 'invented' });
+  }
+  return out.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+}
+
+/**
+ * Where scenery goes: `distance` from its point toward the zone's origin, measured across (at least
+ * `radius + 400`, so no model can reach within 400 m of the point whatever its size), `rise` metres
+ * above the point, turned about Y so its long axis (Z) lies across the line from the point: broadside
+ * to a ship arriving there. Returns { x, y, z, q: [w, x, y, z] } in the client frame.
+ */
+export function placeScenery(point, spec, radius) {
+  const d = Math.max(Number(spec.distance) || 0, (Number(radius) || 0) + 400);
+  let dx = -point.x;
+  let dz = -point.z;
+  const len = Math.hypot(dx, dz);
+  if (len < 1e-6) {
+    dx = 0;
+    dz = 1;
+  } else {
+    dx /= len;
+    dz /= len;
+  }
+  // The model's Z turned onto (dz, -dx), which is square to the line (dx, dz).
+  const yaw = Math.atan2(dz, -dx);
+  const r4 = (v) => Math.round(v * 10000) / 10000;
+  return {
+    x: Math.round(point.x + dx * d),
+    y: Math.round(point.y + (Number(spec.rise) || 0)),
+    z: Math.round(point.z + dz * d),
+    q: [r4(Math.cos(yaw / 2)), 0, r4(Math.sin(yaw / 2)), 0],
+  };
+}
+
+/**
+ * The zone's arrival: an orbit's is the origin, where a ship climbing out of the planet's sky comes out
+ * (kind 'launch'); any other system's is its first point (kind 'point'), else the origin.
+ */
+export function arrivalOf(zone, planet, points) {
+  void zone;
+  if (planet) return { x: 0, y: 0, z: 0, kind: 'launch', planet };
+  const p = points?.[0];
+  if (p) return { x: p.x, y: p.y, z: p.z, kind: 'point', point: p.id };
+  return { x: 0, y: 0, z: 0, kind: 'point' };
+}
+
+/** How far short of a station's centre a jump to it stops: its radius and this much more. */
+export const STATION_STANDOFF = 400;
+
+/**
+ * Where a ship jumping to a station from the zone's arrival stops (the runtime's arrivalPose rule, in
+ * the client frame): radius + 400 short of the station on the line from the arrival; straight along +Z
+ * from the station when the station sits on the arrival. Returns [x, y, z].
+ */
+export function stationApproachEnd(station, arrival) {
+  const off = (Number(station.radius) || 0) + STATION_STANDOFF;
+  const dx = arrival.x - station.x;
+  const dy = arrival.y - station.y;
+  const dz = arrival.z - station.z;
+  const len = Math.hypot(dx, dy, dz);
+  if (len < 1e-3) return [station.x, station.y, station.z + off];
+  return [station.x + (dx / len) * off, station.y + (dy / len) * off, station.z + (dz / len) * off];
+}
+
+/**
+ * The station distances a point's description gives: "Distance to Tatooine Space Station: 15144m" is
+ * [{ station: 'station_tatooine', metres: 15144, rough: false }]; "~9.5km" is 9500 and rough. The
+ * station's table name is made from the words before "Space Station" ("Yavin 4" is station_yavin4).
+ */
+export function describedDistances(description) {
+  const out = [];
+  const re = /Distance to ([^:\n]+?)\s*:\s*(~?)\s*([\d.]+)\s*(km|m)\b/gi;
+  let m;
+  while ((m = re.exec(String(description ?? '')))) {
+    const words = m[1].replace(/\bspace station\b/i, '').replace(/\s+/g, '').toLowerCase();
+    const metres = Number(m[3]) * (m[4].toLowerCase() === 'km' ? 1000 : 1);
+    if (!words || !Number.isFinite(metres)) continue;
+    out.push({ station: `station_${words}`, metres, rough: m[2] === '~' });
+  }
+  return out;
+}
+
+/**
+ * The frame check over a zone's table points: for every exact distance a point's description gives to
+ * a station of the zone, which pairing fits (the point as it is, or with its X mirrored). Rough
+ * distances are skipped. Returns { checked, sameCloser, mirroredCloser, meanErrorSame, meanErrorMirrored }.
+ */
+export function checkPointFrame(points, stations) {
+  let checked = 0;
+  let sameCloser = 0;
+  let mirroredCloser = 0;
+  let errSame = 0;
+  let errMirrored = 0;
+  for (const p of points ?? []) {
+    for (const d of describedDistances(p.description)) {
+      if (d.rough) continue;
+      const s = (stations ?? []).find((st) => String(st.name).toLowerCase() === d.station);
+      if (!s) continue;
+      const same = Math.abs(Math.hypot(p.x - s.x, p.y - s.y, p.z - s.z) - d.metres);
+      const mirrored = Math.abs(Math.hypot(-p.x - s.x, p.y - s.y, p.z - s.z) - d.metres);
+      checked++;
+      if (same <= mirrored) sameCloser++;
+      else mirroredCloser++;
+      errSame += same;
+      errMirrored += mirrored;
+    }
+  }
+  return {
+    checked,
+    sameCloser,
+    mirroredCloser,
+    meanErrorSame: checked ? Math.round(errSame / checked) : 0,
+    meanErrorMirrored: checked ? Math.round(errMirrored / checked) : 0,
+  };
+}
+
+/**
+ * How far a point ({ x, y, z } or [x, y, z]) is from the nearest placed object's surface (its centre's
+ * distance less its radius), leaving out `except`; Infinity when there is nothing else.
+ */
+export function clearanceOf(point, objects, except = null) {
+  return nearestObject(point, objects, except).clearance;
+}
+
+/** The placed object whose surface is nearest a point, and how far that is: { object, clearance } (null and Infinity with nothing else). */
+export function nearestObject(point, objects, except = null) {
+  const [x, y, z] = Array.isArray(point) ? point : [point.x, point.y, point.z];
+  let clearance = Infinity;
+  let object = null;
+  for (const o of objects ?? []) {
+    if (o === except) continue;
+    const c = Math.hypot(o.x - x, o.y - y, o.z - z) - (Number(o.radius) || 0);
+    if (c < clearance) {
+      clearance = c;
+      object = o;
+    }
+  }
+  return { object, clearance };
+}
+
+/**
+ * The `status` line for one space zone's pack (its space.json and the number of objects its layout
+ * places), and whether the pack wants the space command again (missing, or converted before
+ * hyperspace). `pack` is null when there is none.
+ */
+export function spaceZoneStatus(zone, pack, objects) {
+  if (!pack) return { line: `${zone}: no pack`, stale: true };
+  const stations = pack.stations?.length ?? 0;
+  const counts = `${stations} station${stations === 1 ? '' : 's'}${pack.scenery?.length ? `, ${pack.scenery.length} scenery` : ''}, ${objects ?? 0} objects`;
+  if ((pack.version ?? 1) < SPACE_PACK_VERSION || !pack.hyperspace?.points) return { line: `${zone}: ${counts}, converted before hyperspace`, stale: true };
+  const points = pack.hyperspace.points;
+  const by = (source) => points.filter((p) => p.source === source).length;
+  const notes = [by('invented') && `${by('invented')} invented`, by('borrowed') && `${by('borrowed')} borrowed`].filter(Boolean);
+  const a = pack.arrival;
+  const arrival = !a ? 'no arrival' : a.kind === 'launch' ? 'arrival at launch point' : `arrival at point ${a.point ?? 'the origin'}`;
+  const f = pack.hyperspace.frameCheck;
+  const frame = f && f.mirroredCloser > f.sameCloser ? `; WARNING: ${f.mirroredCloser} of ${f.checked} described distances fit the mirrored pairing` : '';
+  const fx = pack.hyperspace.effects?.enter && pack.hyperspace.effects?.exit ? '' : ', no warp effects';
+  return {
+    line: `${zone}: ${pack.title || zone}, ${counts}, ${points.length} hyperspace point${points.length === 1 ? '' : 's'}${notes.length ? ` (${notes.join(', ')})` : ''}, ${arrival}${fx}${frame}`,
+    stale: false,
+  };
 }
