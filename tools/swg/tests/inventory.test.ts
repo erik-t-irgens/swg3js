@@ -14,7 +14,7 @@ const ok = (cond: boolean, what: string) => {
 };
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 
-// The game's own arrangements (dumped from the archives, inventory design 3.2).
+// The game's own arrangements (dumped from the archives).
 const SHIRT = [['chest1']];
 const JACKET = [['chest2', 'bicep_l', 'bicep_r', 'bracer_upper_l', 'bracer_upper_r', 'bracer_lower_l', 'bracer_lower_r']];
 const PADAWAN = [['chest2', 'chest3_l', 'chest3_r', 'bicep_l', 'bicep_r', 'bracer_lower_l', 'bracer_lower_r', 'bracer_upper_l', 'bracer_upper_r', 'cloak', 'pants1', 'pants2', 'shoes']];

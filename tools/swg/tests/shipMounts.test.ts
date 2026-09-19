@@ -435,7 +435,7 @@ function fakeTrail(): EngineTrail & { calls: number[]; dts: number[] } {
   ok(dropWingsUnder(set, [partRoot]) === 1 && set.list.length === 1 && set.list[0] === own, "a wing under a part taken down leaves the ship's set; the hull's own stays");
 }
 
-// --- 6g: the fitted tree on the committed X-wing and YT-1300 trees (copied from the wave 3 ships manifest) ---------
+// --- 6g: the fitted tree on the committed X-wing and YT-1300 trees (copied from a ships manifest) ------------------
 {
   const xwing: AttachmentDef[] = [
     { kind: 'wing', source: 'WING', file: 'xwing_wing_pos.glb', parent: null, hardpoint: null, place: [0, 0, 0, 0, 0, 0], turn: { angle: -14, time: 3 } },

@@ -313,7 +313,7 @@ const find = (root: THREE.Object3D, name: string) => anyHardpoint(root, name)!;
   ok(frameExtents(group(new THREE.Object3D()), () => true) === null, 'framing: nothing included, no box');
 }
 
-// R4: a stand-in is left off when a component fills its slot, and hung when none does; a tree def never falls to the origin.
+// A stand-in is left off when a component fills its slot, and hung when none does; a tree def never falls to the origin.
 {
   const model = group(box(-2, 2, 0, 1, -4, 4), hp('engine1', 0, 0.5, -4));
   const models = { none: () => group(box(-1, 1, 0, 1, -5, -3)), engine: () => group(box(-1, 1, 0, 1, -5, -3)) };

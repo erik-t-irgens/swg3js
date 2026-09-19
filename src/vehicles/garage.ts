@@ -454,13 +454,12 @@ export class Garage {
    * "on" appearance on the hull's engine1) made into a pending part of its own, with its descendants, to be
    * hung by name over the whole ship after the parts. Any wing among them joins `wings`.
    */
-  private async buildPlaced(def: VehicleDef, placed: PlacedPart[], wings: WingSet): Promise<{ parts: PendingPart[]; unresolved: string[]; hung: number }> {
+  private async buildPlaced(def: VehicleDef, placed: PlacedPart[], wings: WingSet): Promise<{ parts: PendingPart[]; unresolved: string[] }> {
     const load = this.partLoader(def);
     const withPack = (d: AttachmentDef): AttachmentDef => ({ ...d, file: `assets-private/${d.file}` });
     const loaded = await Promise.all(placed.map((p) => this.fitPart(def, p).then((node) => ({ node, error: null as unknown }), (error: unknown) => ({ node: null, error }))));
     const parts: PendingPart[] = [];
     const unresolved: string[] = [];
-    let hung = 0;
     for (let i = 0; i < placed.length; i++) {
       const p = placed[i];
       const label = `${p.slot} ${fileName(p.path)}`;
@@ -475,27 +474,25 @@ export class Garage {
         const sub = await hangAttachments(node, local.map(withPack), load);
         for (const w of sub.wings.list) wings.add(w);
         unresolved.push(...sub.unresolved.map((u) => `${label}: ${u}`));
-        hung += sub.hung;
       }
       parts.push({ node, slot: p.slot, hardpoint: p.hardpoint, label, key: p.path });
       for (const b of byName) {
         const made = await this.byNamePart(def, withPack(b.root), b.descendants.map(withPack), p.slot, load, wings);
         if (made.part) parts.push(made.part);
         unresolved.push(...made.unresolved.map((u) => `${label}: ${u}`));
-        hung += made.hung;
       }
     }
-    return { parts, unresolved, hung };
+    return { parts, unresolved };
   }
 
   /** A child a part does not carry, made ready to hang by name: its model marked as hangAttachments marks one, at its place, with its own descendants hung on it. */
-  private async byNamePart(def: VehicleDef, root: AttachmentDef, descendants: AttachmentDef[], slot: string, load: (file: string) => Promise<THREE.Object3D>, wings: WingSet): Promise<{ part: PendingPart | null; unresolved: string[]; hung: number }> {
+  private async byNamePart(def: VehicleDef, root: AttachmentDef, descendants: AttachmentDef[], slot: string, load: (file: string) => Promise<THREE.Object3D>, wings: WingSet): Promise<{ part: PendingPart | null; unresolved: string[] }> {
     const label = `${root.kind} ${fileName(root.file)}`;
     let part: THREE.Object3D;
     try {
       part = await load(root.file);
     } catch (err) {
-      return { part: null, unresolved: [`${label}: did not load (${err instanceof Error ? err.message : String(err)})`], hung: 0 };
+      return { part: null, unresolved: [`${label}: did not load (${err instanceof Error ? err.message : String(err)})`] };
     }
     const u = part.userData;
     u.attachment = root.kind;
@@ -522,16 +519,14 @@ export class Garage {
       top = mount;
     }
     let unresolved: string[] = [];
-    let hung = 1;
     if (descendants.length) {
       const sub = await hangAttachments(part, descendants, load);
       for (const w of sub.wings.list) wings.add(w);
       unresolved = sub.unresolved;
-      hung += sub.hung;
     }
     // Owned by its part: taken down with it (the same slot), hung again by name when a part it rides goes.
     // Hung by name after every fitted part is on (hangParts' second round).
-    return { part: { node: top, slot, hardpoint: root.hardpoint ?? '', label: `${slot} ${label}`, key: `${root.file}|${place ? place.join(',') : ''}`, byName: true }, unresolved, hung };
+    return { part: { node: top, slot, hardpoint: root.hardpoint ?? '', label: `${slot} ${label}`, key: `${root.file}|${place ? place.join(',') : ''}`, byName: true }, unresolved };
   }
 
   private model(def: VehicleDef): Promise<{ scene: THREE.Group; animations: THREE.AnimationClip[] }> {
@@ -720,27 +715,23 @@ export class Garage {
     const defs = def.attachments ?? [];
     const placed = fitted ? partsOf(def.fit!, def.id, fit!, this.droids) : [];
     // The tree kept whole, and what hung on something left out (hung by name, after the fit's parts): fitTree.
-    // Without a fit, the whole tree as it is (wave 3's path).
+    // Without a fit, the whole tree as it is.
     const tree = fitted ? fitTree(defs, new Set(placed.map((p) => p.slot))) : null;
     const main = tree ? tree.main : [...defs];
     const retry = tree ? tree.retry : [];
     const a = await hangAttachments(model, main, load);
     const unresolved = [...a.unresolved];
-    let hung = a.hung;
     if (fitted) {
       // The fit's parts, their own children, and the droid, hung by hardpoint name over the whole ship.
       const built = await this.buildPlaced(def, placed, a.wings);
       unresolved.push(...built.unresolved);
-      hung += built.hung;
       const waiting = hangParts(model, built.parts);
       recordHung(build, built.parts, waiting);
       build.pending = waiting;
-      hung += built.parts.length - waiting.length;
       for (const p of waiting) unresolved.push(`${p.label} waits for hardpoint ${p.hardpoint}, which nothing on the model carries`);
       if (retry.length) {
         const r = await hangAttachments(model, retry, load);
         unresolved.push(...r.unresolved);
-        hung += r.hung;
         for (const w of r.wings.list) a.wings.add(w);
         // Each one hung by name is the ship's own, hung again wherever its hardpoint is when a part it rides goes.
         const shipNodes: PendingPart[] = [];
@@ -782,7 +773,6 @@ export class Garage {
         if (hungFor) continue;
         const s = await hangAttachments(model, [{ ...d, parent: d.parent === null ? null : undefined }], load);
         unresolved.push(...s.unresolved);
-        hung += s.hung;
         if (s.parts[0]) {
           rec.node = topOf(s.parts[0]);
           rec.ready = true;
@@ -790,6 +780,9 @@ export class Garage {
       }
       build.standIns = standIns;
     }
+    // Every part counted once, on the model itself: a part hung by name and each part on it once each, a part
+    // merged into an identical one once (one node for its slots), a part still waiting for its carrier not at all.
+    const hung = hungParts(model).length;
     // A hull with more parts than the physics and the shadow pass want (the Star Destroyer's 207):
     // its parts are pictures only, culled one by one, casting nothing.
     if (hung > PART_LIMIT) {
@@ -1054,8 +1047,7 @@ export class Garage {
       }
     }
     if (a.hung || a.wings.length) {
-      const hungParts = new Set([...a.parts.filter((p): p is THREE.Object3D => !!p), ...[...a.build.fitParts.values()].flat()]);
-      const onWings = [...hungParts].filter((p) => p.userData.attachment !== 'wing' && underPivot(p, model)).length;
+      const onWings = hungParts(model).filter((p) => p.userData.attachment !== 'wing' && underPivot(p, model)).length;
       const opening = a.wings.list.map((w) => `${Math.round(-THREE.MathUtils.radToDeg(w.angle))}° in ${w.time} s`).join(', ');
       console.info(`garage: ${def.id} parts: ${a.hung} hung (${onWings} on wings)${opening ? `, wings that open: ${opening}, reaching ${drop.toFixed(1)} m under the belly` : ''}`);
     }
@@ -1367,6 +1359,19 @@ function collectOnParts(v: Vehicle, model: THREE.Object3D): void {
 
 /** A part file's name, for the console. */
 const fileName = (file: string): string => file.replace(/^.*[\\/]/, '');
+
+/**
+ * The parts hung on a model, each once: every node under it that the hanging marked as a part
+ * (`userData.attachment`: hangAttachments' parts, a fitted part, a part hung by name). A part merged into an
+ * identical one already there is no node of its own, and one still waiting for its carrier is not on the model.
+ */
+function hungParts(model: THREE.Object3D): THREE.Object3D[] {
+  const out: THREE.Object3D[] = [];
+  model.traverse((o) => {
+    if (o !== model && o.userData.attachment !== undefined) out.push(o);
+  });
+  return out;
+}
 
 /** A stand-in's model made ready to hang as hangAttachments would hang it: marked as a part of its kind, under a mount at its place when it has one. Returns the top node. */
 function standInNode(d: AttachmentDef, part: THREE.Object3D): THREE.Object3D {

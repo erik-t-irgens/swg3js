@@ -435,7 +435,7 @@ const T = (shader: string, d: any = deps) => surfaceTexture(vfs, shader, d);
   ok(tr.translucent && tr.unlit && tr.noShadow, 'an unlit alpha screen that flips is translucent');
 }
 {
-  // R1: the thumbnail hook sees the texture as the game shows it, before the glow split.
+  // The thumbnail hook sees the texture as the game shows it, before the glow split.
   let seen: any = null;
   const withThumb = makeDeps({ thumb: (w: number, h: number, rgba: Uint8Array) => { seen = { w, h, rgba }; return { width: 1, height: 1, rgba: Uint8Array.of(1, 2, 3, 4) }; } });
   const t = T('shader/decal_emismap.sht', withThumb);
