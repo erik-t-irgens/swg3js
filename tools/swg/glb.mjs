@@ -98,15 +98,34 @@ export function buildGlb(meshes, { flipX = true, textures = new Map(), skin = nu
     return accessors.length - 1;
   };
 
-  const imageFor = (tex) => {
-    if (!imageIndex.has(tex.path)) {
-      const view = pushView(tex.png);
-      images.push({ name: tex.path, mimeType: 'image/png', bufferView: view });
-      gltfTextures.push({ source: images.length - 1, sampler: 0 });
-      imageIndex.set(tex.path, gltfTextures.length - 1);
+  // One image per path; one glTF texture per image and sampler. Sampler 0 is shared; a scrolling
+  // surface gets a copy of it, because GLTFLoader makes one Texture per image and sampler and a
+  // scroll moves its Texture's offset: two falls on one image would otherwise scroll together.
+  const textureSamplers = [{ magFilter: 9729, minFilter: 9987, wrapS: 10497, wrapT: 10497 }];
+  const textureIndex = new Map();
+  const extensionsUsed = new Set();
+  const textureOf = (img, own = false) => {
+    let image = imageIndex.get(img.path);
+    if (image === undefined) {
+      const view = pushView(img.png);
+      images.push({ name: img.path, mimeType: 'image/png', bufferView: view });
+      image = images.length - 1;
+      imageIndex.set(img.path, image);
     }
-    return imageIndex.get(tex.path);
+    let sampler = 0;
+    if (own) {
+      textureSamplers.push({ ...textureSamplers[0] });
+      sampler = textureSamplers.length - 1;
+    }
+    const key = `${image}|${sampler}`;
+    if (!textureIndex.has(key)) {
+      gltfTextures.push({ source: image, sampler });
+      textureIndex.set(key, gltfTextures.length - 1);
+    }
+    return textureIndex.get(key);
   };
+  const imageFor = (tex) => textureOf(tex);
+  const round4 = (v) => Math.round(v * 1e4) / 1e4;
 
   const materialFor = (shader) => {
     if (!materialIndex.has(shader)) {
@@ -118,13 +137,34 @@ export function buildGlb(meshes, { flipX = true, textures = new Map(), skin = nu
         mat.pbrMetallicRoughness.baseColorFactor = [0, 0, 0, 0];
         mat.extras = { invisible: true };
       } else if (tex) {
-        mat.pbrMetallicRoughness.baseColorTexture = { index: imageFor(tex) };
+        // The base colour: the lit half of a glowing texture, the opaque colour of a split or
+        // additive one, or the texture itself.
+        const baseColor = textureOf(tex.lit ?? tex.rgb ?? tex, !!tex.scroll);
+        mat.pbrMetallicRoughness.baseColorTexture = { index: baseColor };
         if (tex.metallic !== undefined) mat.pbrMetallicRoughness.metallicFactor = tex.metallic;
         if (tex.roughness !== undefined) mat.pbrMetallicRoughness.roughnessFactor = tex.roughness;
         if (tex.mr) mat.pbrMetallicRoughness.metallicRoughnessTexture = { index: imageFor({ path: `${tex.path}#mr`, png: tex.mr.png }) };
         if (tex.normal) mat.normalTexture = { index: imageFor({ path: tex.normal.path, png: tex.normal.png }) };
+        // Unlit screens and additive glows: GLTFLoader makes them MeshBasicMaterial, and
+        // `userData.unlit` keeps them out of the shadow cascades.
+        if (tex.unlit) {
+          mat.extensions = { KHR_materials_unlit: {} };
+          extensionsUsed.add('KHR_materials_unlit');
+          mat.extras = { ...(mat.extras ?? {}), unlit: true };
+        }
+        let emissive;
+        if (tex.emissive) {
+          emissive = textureOf(tex.emissive);
+          mat.emissiveTexture = { index: emissive };
+          mat.emissiveFactor = [1, 1, 1];
+        }
         const mode = tex.alphaMode ?? 'OPAQUE';
-        if (mode === 'MASK' && tex.hasAlpha) {
+        if (tex.blend || tex.translucent) {
+          // Additive and translucent surfaces blend whatever the effect's alpha mode says (the sky
+          // reads alphaMode for its celestial sprites, so the decision lives in its own fields).
+          mat.alphaMode = 'BLEND';
+          mat.doubleSided = true;
+        } else if (mode === 'MASK' && tex.hasAlpha) {
           mat.alphaMode = 'MASK';
           mat.alphaCutoff = 0.5;
           mat.doubleSided = true;
@@ -136,6 +176,23 @@ export function buildGlb(meshes, { flipX = true, textures = new Map(), skin = nu
         }
         // Glass by name is marked for the runtime: it casts no shadow and clears while someone is aboard.
         if (tex.glass) mat.extras = { ...(mat.extras ?? {}), glass: true };
+        if (tex.noShadow) mat.extras = { ...(mat.extras ?? {}), noShadow: true };
+        // What the game animates or sets up per material (src/world/surfaces.ts reads it).
+        const swg = {};
+        if (tex.anim?.frames?.length > 1) {
+          const frames = tex.anim.frames;
+          swg.anim = {
+            mode: tex.anim.mode,
+            seconds: tex.anim.seconds.map(round4),
+            map: frames.map((f, i) => (i === 0 ? baseColor : textureOf(f.lit ?? f.rgb ?? f))),
+          };
+          if (emissive !== undefined && frames.every((f, i) => i === 0 || f.emissive)) swg.anim.emissive = frames.map((f, i) => (i === 0 ? emissive : textureOf(f.emissive)));
+        }
+        if (tex.scroll) swg.scroll = { map: tex.scroll.map.map(round4), alpha: tex.scroll.alpha ? tex.scroll.alpha.map(round4) : null };
+        if (tex.alphaImage) swg.alphaMap = textureOf(tex.alphaImage, !!tex.scroll?.alpha);
+        if (tex.alphaTest) swg.alphaTest = round4(tex.alphaTest);
+        if (tex.blend) swg.blend = tex.blend;
+        if (Object.keys(swg).length) mat.extras = { ...(mat.extras ?? {}), swg };
       } else {
         mat.pbrMetallicRoughness.baseColorFactor = [0.8, 0.8, 0.8, 1];
       }
@@ -304,8 +361,9 @@ export function buildGlb(meshes, { flipX = true, textures = new Map(), skin = nu
   if (images.length) {
     json.images = images;
     json.textures = gltfTextures;
-    json.samplers = [{ magFilter: 9729, minFilter: 9987, wrapS: 10497, wrapT: 10497 }];
+    json.samplers = textureSamplers;
   }
+  if (extensionsUsed.size) json.extensionsUsed = [...extensionsUsed];
   const jsonBytes = Buffer.from(JSON.stringify(json));
   const jsonPadded = align4(jsonBytes.length);
   const bin = Buffer.concat(buffers);

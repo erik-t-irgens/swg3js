@@ -96,10 +96,11 @@ import { defaultJkaClips, importJkaClips } from './jka.mjs';
 import { extractClips, readGlb, replaceClips, skinJoints } from './glbclips.mjs';
 import { packClips, retargetClips, unpackClips } from './clipbundle.mjs';
 import { encodePng } from './png.mjs';
-import { shaderTextures } from './sht.mjs';
+import { effectAlphaMode, shaderTextures } from './sht.mjs';
 import { bakeShader, describeShader, describeVariables, loadImage, loadShader, parseBlueprint, parsePalette, preparedShaders, renderBlueprint, renderContext, shaderNeedsBake } from './texrender.mjs';
 import { ImageRegistry, exportBlueprint, exportPalettes, exportShader, palettesOf } from './customize.mjs';
 import { effectAlpha, alphaModeFor } from './eff.mjs';
+import { MATERIAL_FORMAT, describeLines, describeSurface, surfaceCounts, surfaceCountsLine, surfaceLine, surfaceTexture } from './surface.mjs';
 import { localize, parseDatatable } from './datatable.mjs';
 import { mountCreatures, riderPoseFor } from './mounts.mjs';
 import * as M from './mobiles.mjs';
@@ -197,32 +198,48 @@ function printEffectSummary() {
  */
 const GLASS_NAMED = new RegExp(options.glass ? `glass|window|windshield|canopy|transparen|viewport|pane|${options.glass}` : 'glass|window|windshield|canopy|transparen|viewport|pane', 'i');
 
-function textureFor(vfs, shaderPath) {
+/** What surface.mjs has read of each shader (and its effects' passes and programs), for this run. */
+const surfaceCache = new Map();
+/** The texture entries of the pack a snapshot is converting, for its `surfaces:` line; null otherwise. */
+let surfaceUse = null;
+
+/** What surfaceTexture needs from this file: the effect and gloss readers, the normal maps, the log. */
+function surfaceDeps(vfs) {
+  return {
+    cache: surfaceCache,
+    decodeDds,
+    encodePng,
+    alphaFromEffect: (effect, fallback) => alphaFromEffect(vfs, effect, fallback),
+    surfaceFor: (effect, slots, dds, alphaMode, opts) => surfaceFor(vfs, effect, slots, dds, alphaMode, opts),
+    normalFor: (path) => normalFor(vfs, path),
+    // Glass by name is drawn as its effect says (a name told nothing about transparency: a
+    // fuselage texture called cockpit blended at a fixed share looked like a ghost ship), only
+    // marked so the runtime lets the sun through it and clears it while someone is aboard.
+    glassNamed: GLASS_NAMED,
+    byName: effectAlphaMode,
+    log: (message) => console.error(`  ${message}`),
+  };
+}
+
+/**
+ * A shader's texture entry (surface.mjs `surfaceTexture`): the main image and its alpha mode as
+ * before, plus flip-book frames, scroll rates, split alpha, the unlit and additive flags and the
+ * lit and glow images of a glowing texture. An invisible collidable surface (the pane in a room's
+ * window opening, a rail you cannot cross) is drawn as nothing and kept for its colliders.
+ */
+function textureFor(vfs, shaderPath, opts = {}) {
   if (flags.has('--no-textures')) return null;
-  if (textureCache.has(shaderPath)) return textureCache.get(shaderPath);
+  const key = `${shaderPath}${opts.paint ? '|paint' : ''}`;
   let result = null;
-  try {
-    const { main, slots, alphaMode, effect } = shaderTextures(parseIff(vfs.read(shaderPath)));
-    if (/invisible/i.test(effect ?? '')) {
-      // An invisible collidable surface (the pane in a room's window opening, a rail you cannot
-      // cross): drawn as nothing, kept in the mesh for the colliders built from it.
-      result = { path: shaderPath, invisible: true, alphaMode: 'BLEND', opacity: 0, hasAlpha: false };
-    } else if (main && vfs.has(main)) {
-      const dds = decodeDds(vfs.read(main));
-      result = { path: main, png: encodePng(dds.width, dds.height, dds.rgba), hasAlpha: dds.hasAlpha, alphaMode: alphaFromEffect(vfs, effect, alphaMode) };
-      // Glass by name is drawn as its effect says (a name told nothing about transparency: a
-      // fuselage texture called cockpit blended at a fixed share looked like a ghost ship), only
-      // marked so the runtime lets the sun through it and clears it while someone is aboard.
-      if (GLASS_NAMED.test(`${shaderPath} ${main}`)) result.glass = true;
-      Object.assign(result, surfaceFor(vfs, effect, slots, dds, result.alphaMode));
-      const normalSlot = (slots ?? []).find((s) => /^(CNRM|NRML|DOT3)$/.test(s.slot));
-      const normal = normalSlot ? normalFor(vfs, normalSlot.path) : null;
-      if (normal) result.normal = normal;
+  if (textureCache.has(key)) result = textureCache.get(key);
+  else {
+    try {
+      result = surfaceTexture(vfs, shaderPath, surfaceDeps(vfs));
+    } catch (err) {
+      console.error(`  texture for ${shaderPath} skipped: ${err.message}`);
     }
-  } catch (err) {
-    console.error(`  texture for ${shaderPath} skipped: ${err.message}`);
+    textureCache.set(key, result);
   }
-  textureCache.set(shaderPath, result);
   return result;
 }
 
@@ -281,7 +298,7 @@ const surfaceEffects = new Map();
  * shaders carry an environment cube map (slot ENVM) that the scene's own environment replaces.
  * Returns glTF metallic/roughness factors and, where a mask exists, a metallicRoughness image.
  */
-function surfaceFor(vfs, effect, slots, dds, alphaMode) {
+function surfaceFor(vfs, effect, slots, dds, alphaMode, { alphaIsEmissive = false } = {}) {
   const name = (effect ?? '').toLowerCase();
   let tags = surfaceEffects.get(name);
   if (!tags) {
@@ -298,7 +315,8 @@ function surfaceFor(vfs, effect, slots, dds, alphaMode) {
   const reflective = slotTags.has('ENVM') || tags.has('ENVM') || /env|chrome|mirror|refl/.test(name);
   const specular = reflective || slotTags.has('SPEC') || tags.has('SPEC') || /spec|gloss|shin|metal|glass/.test(name);
   if (!specular) return {};
-  const masked = dds.hasAlpha && alphaMode === 'OPAQUE';
+  // A glowing texture's alpha is its glow mask, not a gloss mask.
+  const masked = dds.hasAlpha && alphaMode === 'OPAQUE' && !alphaIsEmissive;
   if (!masked) return { metallic: reflective ? 0.6 : 0, roughness: reflective ? 0.3 : 0.45 };
   // Roughness in green, metalness in blue, both from the mask.
   const mr = new Uint8Array(dds.width * dds.height * 4);
@@ -400,6 +418,7 @@ function convertOne(vfs, appearancePath, outFile) {
   for (const g of mesh.groups) {
     const t = textureFor(vfs, g.shader);
     if (t) textures.set(g.shader, t);
+    if (t && surfaceUse) surfaceUse.add(t);
   }
   const flipX = !flags.has('--no-flip');
   const baseName = basename(meshPath).replace(/\.[^.]+$/, '');
@@ -956,6 +975,7 @@ function convertWearableMesh(vfs, meshPath, { skeleton, skin, outDir, ctx, info,
     if (!g.primitives[0].indices.length) continue;
     const t = skinnedTexture(vfs, g.shader, null, ctx, info, meshName);
     if (t) textures.set(g.shader, t);
+    if (t && surfaceUse) surfaceUse.add(t);
     kept.push(g);
     const rkey = `${g.shader}|${meshName}`;
     if (!recipeKeys.has(rkey)) {
@@ -1223,6 +1243,7 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
       const t = skinnedTexture(vfs, g.shader, slots, ctx, info, meshName);
       if (slots) g.shader = `${g.shader}@${meshName}`; // its own material: the rendered texture is this mesh's
       if (t) textures.set(g.shader, t);
+      if (t && surfaceUse) surfaceUse.add(t);
       kept.push(g);
       // For a parts pack: how this material's texture is made, so the game can make it again with
       // other colours and choices (a rendered blueprint, a shader baked over one, or a shader
@@ -1672,6 +1693,7 @@ function packStatus(dir) {
     // A lava entry written before the lava look has no `lava` block: the game draws it in a stand-in look.
     else if (water && Object.values(water.shaders ?? {}).some((s) => s.kind === 'lava' && !s.missing && s.lava === undefined && /lava/i.test(s.effect ?? ''))) need(`water <swg-dir> all ${dir} --retail-only`, `${planet}'s water.json has no lava look`);
     if (!pois) need(`pois <swg-dir> all ${dir} --retail-only`, `${planet} has no pois.json`);
+    if (objects && (manifest.materialFormat ?? 1) < MATERIAL_FORMAT) need(`snapshot <swg-dir> all ${dir} --radius=all --retail-only`, `${planet}'s models were converted before animated and glowing surfaces`);
   }
   const creatures = readJson(join(dir, 'creatures/manifest.json'));
   if (!creatures) {
@@ -1740,6 +1762,9 @@ function packStatus(dir) {
   const ships = readJson(join(dir, 'ships/manifest.json'));
   if (!ships) need(`ships <swg-dir> ${dir} --retail-only`, 'no ships converted for the garage (B in game, at the bottom)');
   else console.log(`  ships: ${ships.ships.length} ships, ${ships.ships.filter((sh) => sh.interior && !sh.interior.failed).length} with an interior, ${ships.skipped.length} left out`);
+  if (ships && (ships.materialFormat ?? 1) < MATERIAL_FORMAT) need(`ships <swg-dir> ${dir} --retail-only`, "ships' models were converted before animated and glowing surfaces");
+  const gallery = readJson(join(dir, 'gallery/manifest.json'));
+  if (gallery && (gallery.materialFormat ?? 1) < MATERIAL_FORMAT) need(`gallery <swg-dir> ${dir} --retail-only`, "the gallery's models were converted before animated and glowing surfaces");
   const readQuiet = (file) => {
     try {
       return readJson(file);
@@ -1917,6 +1942,7 @@ function writePois(vfs, planet, snap, entries, cx, cz, outDir) {
 
 /** Convert one planet's snapshot (see the snapshot command). */
 async function snapshotPlanet(vfs, planet, outDir) {
+    surfaceUse = new Set();
     const radius = options.radius === 'all' ? Infinity : Number(options.radius ?? 400);
     const max = Number(options.max ?? Infinity);
     const wsPath = `snapshot/${planet}.ws`;
@@ -2035,6 +2061,7 @@ async function snapshotPlanet(vfs, planet, outDir) {
     const manifestPath = join(outDir, 'manifest.json');
     const manifest = existsSync(manifestPath) ? JSON.parse(readFileSync(manifestPath, 'utf8')) : { planet, categories: {} };
     manifest.categories.layout = [...models.values()].filter((m) => m && !m.failed);
+    manifest.materialFormat = MATERIAL_FORMAT;
     const flora = lastTemplate ? convertFlora(vfs, lastTemplate, outDir, manifest) : { models: 0, missing: 0, families: 0 };
     writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
     console.log(`flora: ${flora.models} models for ${flora.families} families${flora.missing ? `, ${flora.missing} appearances missing` : ''}${flora.particles ? `, ${flora.particles} particle effects skipped` : ''}`);
@@ -2042,6 +2069,8 @@ async function snapshotPlanet(vfs, planet, outDir) {
     const fx = manifest.categories.layout.filter((m) => m.particle);
     const attached = manifest.categories.layout.reduce((n, m) => n + (m.effects?.length ?? 0), 0);
     console.log(`layout: ${objects.length} objects, ${manifest.categories.layout.length} models -> ${join(outDir, 'layout.json')}`);
+    console.log(surfaceCountsLine(surfaceCounts(surfaceUse)));
+    surfaceUse = null;
     if (fx.length || attached) console.log(`particles: ${fx.length} effects placed on their own (${objects.filter((o) => fx.some((m) => m.id === o.model)).length} placements), ${attached} attached to models, ${particleTextures.get(resolve(outDir))?.size ?? 0} textures`);
     const withCells = manifest.categories.layout.filter((m) => m.cells);
     console.log(`buildings: ${withCells.length} models with cells, ${withCells.filter((m) => m.portals && m.portals.length).length} with portals`);
@@ -2188,6 +2217,7 @@ function mobilesConvert(vfs, outRoot) {
     },
     clearCaches() {
       textureCache.clear();
+      surfaceCache.clear();
       normalCache.clear();
     },
   };
@@ -2426,12 +2456,16 @@ switch (cmd) {
     for (const [shader, u] of [...use.entries()].sort((a, b) => b[1].tris - a[1].tris)) {
       let line = `  ${shader}  ${u.tris} tris`;
       try {
-        const { main, alphaMode, effect } = shaderTextures(parseIff(vfs.read(shader)));
+        // A flip-book's texture is its first frame and its effect its base's; an inline effect is read too.
+        const described = describeSurface(vfs, shader, surfaceCache);
+        const main = described.main;
+        const effect = described.effect;
         const hasAlpha = main && vfs.has(main) ? decodeDds(vfs.read(main)).hasAlpha : null;
-        const byEffect = alphaFromEffect(vfs, effect, alphaMode);
+        const byEffect = described.inline ? alphaModeFor({ alphaBlend: !!described.pass?.anyBlend, alphaTest: !!described.pass?.anyTest }) : alphaFromEffect(vfs, effect, effectAlphaMode(effect));
         const invisible = /invisible/i.test(effect ?? '');
         const decided = invisible ? 'invisible (collision only)' : `${byEffect}${GLASS_NAMED.test(`${shader} ${main ?? ''}`) ? ' (glass by name: casts no shadow, clears while someone is aboard)' : ''}`;
-        line += `\n      effect ${effect ?? '(none)'}  texture ${main ?? '(none)'}${hasAlpha === null ? '' : hasAlpha ? ' with alpha' : ' no alpha'}  -> ${decided}`;
+        line += `\n      effect ${effect ?? (described.inline ? '(inline)' : '(none)')}  texture ${main ?? '(none)'}${hasAlpha === null ? '' : hasAlpha ? ' with alpha' : ' no alpha'}  -> ${decided}`;
+        if (!invisible) line += `\n      surface: ${surfaceLine(textureFor(vfs, shader), described)}`;
       } catch (err) {
         line += `\n      unreadable: ${err.message}`;
       }
@@ -2450,6 +2484,12 @@ switch (cmd) {
     const { main, slots, effect, alphaMode } = shaderTextures(parseIff(vfs.read(pos[2])));
     console.log(`effect: ${effect ?? '(none)'}  alpha by name: ${alphaMode}  alpha by effect file: ${alphaFromEffect(vfs, effect, alphaMode)}`);
     for (const s of slots) console.log(`${s.slot}  ${s.path}${s.path === main ? '  (main)' : ''}`);
+    // What the shader's forms and its effect's first pass say (flip-books, scroll, split alpha,
+    // glow), and what the converter makes of it.
+    const described = describeSurface(vfs, pos[2], surfaceCache);
+    for (const l of describeLines(described)) console.log(l);
+    const entry = textureFor(vfs, pos[2]);
+    console.log(`decision: ${entry ? `${entry.alphaMode}; ${surfaceLine(entry, described)}` : 'no texture: drawn untextured'}`);
     break;
   }
   case 'loading': {
@@ -3346,12 +3386,14 @@ switch (cmd) {
     const match = options.match ? new RegExp(options.match, 'i') : null;
     const templates = galleryTemplates(vfs, 'object/ship/player/').filter((t) => !match || match.test(t));
     const { ships, skipped } = buildShips(templates, { convert, interiorOf, convertInterior, extrasOf, weaponOf }, { log: console.log, limit });
-    const manifest = { classes: SHIP_CLASSES, ships, skipped, models: [...models.values()].filter((m) => !m.failed) };
+    const manifest = { classes: SHIP_CLASSES, ships, skipped, models: [...models.values()].filter((m) => !m.failed), materialFormat: MATERIAL_FORMAT };
     if (projectiles.length) writeFileSync(join(outDir, 'projectiles.json'), JSON.stringify({ projectiles, weapons }, null, 2));
     if (match) {
       // A matched run redoes some ships: the rest keep their place in the manifest.
       try {
         const old = JSON.parse(readFileSync(join(outDir, 'manifest.json'), 'utf8'));
+        // The ships this run did not redo keep the material format they were converted with.
+        manifest.materialFormat = old.materialFormat ?? 1;
         const done = new Set(ships.map((sh) => sh.id));
         const files = new Set(manifest.models.map((m) => m.file));
         manifest.ships = [...(old.ships ?? []).filter((sh) => !done.has(sh.id) && !match.test(sh.template)), ...ships].sort((a, b) => a.class.localeCompare(b.class) || a.id.localeCompare(b.id));
@@ -3505,7 +3547,16 @@ switch (cmd) {
       },
     });
     writeFileSync(join(outDir, 'layout.json'), JSON.stringify({ planet: 'gallery', center: { x: 0, z: 0 }, radius: null, objects: g.objects }));
-    writeFileSync(join(outDir, 'manifest.json'), JSON.stringify({ planet: 'gallery', categories: { layout: [...models.values()].filter((m) => m && !m.failed) } }, null, 2));
+    // A run of some sections keeps the others' models as they were, so it keeps their material format too.
+    let galleryFormat = MATERIAL_FORMAT;
+    if (options.only) {
+      try {
+        galleryFormat = JSON.parse(readFileSync(join(outDir, 'manifest.json'), 'utf8')).materialFormat ?? 1;
+      } catch {
+        galleryFormat = 1;
+      }
+    }
+    writeFileSync(join(outDir, 'manifest.json'), JSON.stringify({ planet: 'gallery', materialFormat: galleryFormat, categories: { layout: [...models.values()].filter((m) => m && !m.failed) } }, null, 2));
     writeFileSync(join(outDir, 'gallery.json'), JSON.stringify({ sections: g.sections, anims: g.anims }));
     console.log(`-> ${outDir}: ${g.objects.length} exhibits, ${models.size} models; play it with ?planet=gallery`);
     printEffectSummary();
