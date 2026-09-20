@@ -30,6 +30,8 @@ interface RemoteVehicle {
   wings: WingSet | null;
   /** Whether the pilot's wings are open or opening: the relay's `w`, else (a peer on an older build) whether it is moving. */
   wingsWant: boolean;
+  /** Set down on the ground (the relay's `landed`): the picture is put exactly where it is said to be, with no glide. */
+  landed: boolean;
   /** A fitted ship's build (its parts per slot, for a restage), its paint (disposed with the picture) and the fit it shows; null before the picture is in, or for a ride without a fit. */
   build: ShipBuild | null;
   paint: ShipPaint | null;
@@ -322,7 +324,7 @@ export class RemotePlayers {
     }
     if (!r.vehicle || r.vehicle.id !== veh.id) {
       this.dropVehicle(r);
-      const rv: RemoteVehicle = { id: veh.id, obj: null, target: new THREE.Vector3(veh.p[0], veh.p[1], veh.p[2]), targetQ: new THREE.Quaternion(veh.q[0], veh.q[1], veh.q[2], veh.q[3]), pose: veh.pose ?? null, vel: new THREE.Vector3(), heardAt: 0, wings: null, wingsWant: veh.w === 1, build: null, paint: null, fit: null, busy: null, want: null };
+      const rv: RemoteVehicle = { id: veh.id, obj: null, target: new THREE.Vector3(veh.p[0], veh.p[1], veh.p[2]), targetQ: new THREE.Quaternion(veh.q[0], veh.q[1], veh.q[2], veh.q[3]), pose: veh.pose ?? null, vel: new THREE.Vector3(), heardAt: 0, wings: null, wingsWant: veh.w === 1, landed: veh.landed === 1, build: null, paint: null, fit: null, busy: null, want: null };
       r.vehicle = rv;
       void this.bringVehicle(r, rv);
     }
@@ -335,6 +337,15 @@ export class RemotePlayers {
     rv.pose = veh.pose ?? null;
     // The pilot's wings as they send them; a peer on an older build sends none, and its wings open while it moves.
     rv.wingsWant = veh.w !== undefined ? veh.w === 1 : rv.vel.length() > 4;
+    // Set down on the ground: it stands exactly where it is said to stand, and its glide is dropped.
+    rv.landed = veh.landed === 1;
+    if (rv.landed) {
+      rv.vel.set(0, 0, 0);
+      if (rv.obj) {
+        rv.obj.position.copy(rv.target);
+        rv.obj.quaternion.copy(rv.targetQ);
+      }
+    }
     if (rv.obj && rv.obj.position.y < -900) {
       rv.obj.position.copy(rv.target);
       rv.obj.quaternion.copy(rv.targetQ);
@@ -478,8 +489,14 @@ export class RemotePlayers {
       }
       const rv = r.vehicle;
       if (rv?.obj) {
-        rv.obj.position.lerp(rv.target, k);
-        rv.obj.quaternion.slerp(rv.targetQ, k);
+        // Landed, it is still: the glide would leave it creeping toward each message, and its springs' bob is not sent.
+        if (rv.landed) {
+          rv.obj.position.copy(rv.target);
+          rv.obj.quaternion.copy(rv.targetQ);
+        } else {
+          rv.obj.position.lerp(rv.target, k);
+          rv.obj.quaternion.slerp(rv.targetQ, k);
+        }
         // The wings open and close as the pilot's do, each on its own clock (nothing moves once they have settled).
         if (rv.wings) {
           rv.wings.want = rv.wingsWant;

@@ -12,8 +12,9 @@
 //                                                          sent on joining, on travel and on a change
 //   { t: 'state', p: [x, y, z], h, s, v, m, sab, q?, veh? }   position, heading, rig state, speed, mounted, saber lit,
 //                                                          the whole turn as a quaternion (aboard, adrift), the vehicle
-//                                                          ridden { id, p, q, role: ride|pilot|aboard, pose, w }
-//                                                          (w: a winged ship's wings, 1 open or opening, 0 closed);
+//                                                          ridden { id, p, q, role: ride|pilot|aboard, pose, w, landed }
+//                                                          (w: a winged ship's wings, 1 open or opening, 0 closed;
+//                                                          landed: 1 while a ship is set down on the ground; vehicleWire.mjs);
 //                                                          j: 1 while in a hyperspace jump (not shown until it clears)
 //   { t: 'emote', clip }
 // Relay to client:
@@ -23,6 +24,7 @@
 import { createServer } from 'node:http';
 import { createHash } from 'node:crypto';
 import { cleanShip } from './shipWire.mjs';
+import { cleanVehicle, quat } from './vehicleWire.mjs';
 
 const PORT = Number(process.argv[2] ?? process.env.PORT ?? 8787);
 const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
@@ -135,18 +137,13 @@ function onMessage(c, text) {
     const p = Array.isArray(msg.p) && msg.p.length === 3 ? msg.p.map(Number) : null;
     if (!p || p.some((v) => !Number.isFinite(v))) return;
     c.state = { p, h: Number(msg.h) || 0, s: typeof msg.s === 'string' ? msg.s.slice(0, 32) : 'idle', v: Number(msg.v) || 0, m: !!msg.m, sab: !!msg.sab };
-    // The figure's whole turn, and the vehicle it is on: numbers checked, names kept short.
-    const quat = (q) => (Array.isArray(q) && q.length === 4 && q.every((v) => Number.isFinite(Number(v))) ? q.map(Number) : null);
+    // The figure's whole turn, and the vehicle it is on: numbers checked, names kept short (vehicleWire.mjs).
     const q = quat(msg.q);
     if (q) c.state.q = q;
     // In a hyperspace jump: the others hide this player and their ship until a state comes without it.
     if (msg.j === 1) c.state.j = 1;
-    const veh = msg.veh;
-    if (veh && typeof veh === 'object' && typeof veh.id === 'string') {
-      const vp = Array.isArray(veh.p) && veh.p.length === 3 ? veh.p.map(Number) : null;
-      const vq = quat(veh.q);
-      if (vp && !vp.some((v) => !Number.isFinite(v)) && vq) c.state.veh = { id: veh.id.slice(0, 48), p: vp, q: vq, role: ['ride', 'pilot', 'aboard'].includes(veh.role) ? veh.role : 'ride', pose: typeof veh.pose === 'string' ? veh.pose.slice(0, 48) : undefined, ...(veh.w === 0 || veh.w === 1 ? { w: veh.w } : {}) };
-    }
+    const veh = cleanVehicle(msg.veh);
+    if (veh) c.state.veh = veh;
     broadcast({ t: 'state', id: c.id, ...c.state }, c);
   } else if (msg.t === 'emote') {
     if (!c.hello || typeof msg.clip !== 'string') return;

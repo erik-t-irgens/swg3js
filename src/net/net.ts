@@ -29,6 +29,8 @@ export interface PeerVehicle {
   pose?: string;
   /** A ship with wings that open: 1 while the pilot's are open or opening, 0 while closed or closing. */
   w?: 0 | 1;
+  /** 1 while the ship is set down on the ground: the picture of it stands still rather than gliding to each message. */
+  landed?: 0 | 1;
 }
 
 export interface PeerState {
