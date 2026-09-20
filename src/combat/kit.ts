@@ -101,6 +101,12 @@ export interface Resource {
 export interface Kit {
   readonly id: ClassId;
   readonly name: string;
+  /**
+   * The abilities in the number slots, as the display shows them. It is walked every frame, so it
+   * must be one array a kit keeps and fills again when its loadout changes, never a getter that
+   * builds one: a getter here put five arrays and sixteen objects into every frame, and the loop
+   * that read it asked for a new one on each turn of the loop.
+   */
   readonly slots: KitSlot[];
   readonly help: string[];
   /** The pool the abilities draw on, shown as the second bar; a kit without one shows none. */

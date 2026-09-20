@@ -6,7 +6,7 @@ import type { BoltFrame } from './bolts';
 import type { Hittable, Kit, KitContext, KitSlot, Living, Resource } from './kit';
 import type { EffectHandle, ParticleEffects } from '../world/particles';
 import { plumeNoiseFrequency, type HeatPlumeSink } from '../world/heatSources';
-import { DEFAULT_GADGETS, GADGETS, gadgetById, type GadgetDef, type GrenadeSpec } from './gadgets';
+import { DEFAULT_GADGETS, gadgetById, type GadgetDef, type GrenadeSpec } from './gadgets';
 import { SLOT_ACTIONS, SLOT_COUNT } from './forcePowers';
 import { Unarmed } from './unarmed';
 
@@ -101,8 +101,19 @@ const FLAME_STALE_MS = 100;
 export class BountyHunterKit implements Kit {
   readonly id = 'bounty_hunter' as const;
   readonly name = 'Bounty Hunter';
-  /** The gadget in each number slot, by id (null for an empty slot); the HUD's slots follow it. */
-  loadout: (string | null)[] = [...DEFAULT_GADGETS];
+  /**
+   * The gadget in each number slot, by id (null for an empty slot); the HUD's slots follow it. One
+   * array for the life of the kit, emptied and filled again by `setLoadout`.
+   */
+  readonly loadout: (string | null)[] = [];
+  /**
+   * The slots as the display shows them: one per number key with a gadget in it. One array, built
+   * only when the loadout changes, because the display walks it every frame and a getter that
+   * returned a fresh array of fresh objects was building five arrays and sixteen objects a frame.
+   */
+  readonly slots: KitSlot[] = [];
+  /** The gadget behind each of those slots, in the same order, so nothing has to search for it by name. */
+  private readonly slotGadgets: GadgetDef[] = [];
   readonly help = [
     '<b>LMB</b> fire: from the hip it scatters, aimed it flies true · <b>RMB</b> hold to aim, the camera in close · <b>Middle mouse</b> or <b>Q</b> the gun\'s other trigger: a pistol\'s or sniper\'s charge, a rifle\'s rapid fire, a bowcaster\'s bouncing bolt, a repeater\'s concussive ball, a flechette\'s mines, a launcher\'s homing rocket, an ion blast, a fireball, a ball of lightning, a sonic pulse, an acid spray',
     'Each kind of gun handles its own way: a flame thrower is a cone of flame that burns on, a lightning rifle a bolt held on what is ahead that jumps to what stands near, a slugthrower a fast slug that drops over distance, a crossbow an arc, carbonite a freezing bolt · <b>K</b> pistol or rifle · <b>V</b> kneel and <b>Z</b> prone',
@@ -153,22 +164,24 @@ export class BountyHunterKit implements Kit {
     this.proto = mesh;
   }
 
-  constructor(private readonly scene: THREE.Scene) {}
-
-  /** The slots as the HUD shows them: one per number key with a gadget in it. */
-  get slots(): KitSlot[] {
-    const out: KitSlot[] = [];
-    for (let i = 0; i < SLOT_COUNT; i++) {
-      const g = this.loadout[i] ? gadgetById(this.loadout[i]!) : null;
-      if (g) out.push({ key: String(i + 1), name: g.name, cost: g.cost });
-    }
-    return out;
+  constructor(private readonly scene: THREE.Scene) {
+    // The slots are filled the one way they are ever filled, so the array the display walks exists
+    // and agrees with the loadout from the first frame.
+    this.setLoadout(DEFAULT_GADGETS);
   }
 
   /** Put gadgets in the slots (ids; unknown ones are dropped); bare hands go back in the pockets if they are no longer there. */
   setLoadout(ids: (string | null)[]): void {
-    this.loadout = [];
-    for (let i = 0; i < SLOT_COUNT; i++) this.loadout.push(ids[i] && gadgetById(ids[i]!) ? ids[i]! : null);
+    this.loadout.length = 0;
+    this.slots.length = 0;
+    this.slotGadgets.length = 0;
+    for (let i = 0; i < SLOT_COUNT; i++) {
+      const g = ids[i] ? gadgetById(ids[i]!) : undefined;
+      this.loadout.push(g ? ids[i]! : null);
+      if (!g) continue;
+      this.slots.push({ key: String(i + 1), name: g.name, cost: g.cost });
+      this.slotGadgets.push(g);
+    }
     if (!this.loadout.includes('fists')) this.fistsWanted = false;
   }
 
@@ -187,17 +200,27 @@ export class BountyHunterKit implements Kit {
     };
   }
 
-  /** The gadget behind the i-th HUD slot. */
+  /** The gadget behind the i-th slot of the display's row. */
   private gadgetAtHud(i: number): GadgetDef | undefined {
-    const name = this.slots[i]?.name;
-    return GADGETS.find((g) => g.name === name);
+    return this.slotGadgets[i];
   }
 
+  /** Whether a charge of a kind is out in the world; a plain loop, since this is asked every frame. */
+  private anyCharge(kind: Charge['kind']): boolean {
+    for (let i = 0; i < this.charges.length; i++) if (this.charges[i].kind === kind) return true;
+    return false;
+  }
+
+  /**
+   * Whether the i-th slot of the display's row is lit, asked once per slot on every frame: the two
+   * searches walk the charges by hand rather than with `some`, whose callback is a fresh closure
+   * every time it is asked, and both gadgets are in the row by default.
+   */
   slotActive(i: number): boolean {
-    const g = this.gadgetAtHud(i);
-    if (g?.id === 'fists') return this.fistsWanted;
-    if (g?.id === 'det_pack') return this.charges.some((c) => c.kind === 'pack');
-    if (g?.id === 'trip_mine') return this.charges.some((c) => c.kind === 'trip');
+    const id = this.gadgetAtHud(i)?.id;
+    if (id === 'fists') return this.fistsWanted;
+    if (id === 'det_pack') return this.anyCharge('pack');
+    if (id === 'trip_mine') return this.anyCharge('trip');
     return false;
   }
 

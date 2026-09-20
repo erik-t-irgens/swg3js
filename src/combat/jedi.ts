@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { KICK_DAMAGE } from './saber';
 import { THROW } from './saberThrow';
-import { DEFAULT_LOADOUT, POWERS, SLOT_ACTIONS, SLOT_COUNT, powerById } from './forcePowers';
+import { DEFAULT_LOADOUT, SLOT_ACTIONS, SLOT_COUNT, powerById, type PowerDef } from './forcePowers';
 import { sabers } from '../audio/saberSounds.ts';
 import type { Hittable, Kit, KitContext, KitSlot, Living, Resource } from './kit';
 import { nearestInCone, type ConeQuery } from './targets';
@@ -29,8 +29,19 @@ const KEPT_POWERS = { speed: powerById('speed'), protect: powerById('protect'), 
 export class JediKit implements Kit {
   readonly id = 'jedi' as const;
   readonly name = 'Jedi';
-  /** The power in each number slot, by id (null for an empty slot); the HUD's slots follow it. */
-  loadout: (string | null)[] = [...DEFAULT_LOADOUT];
+  /**
+   * The power in each number slot, by id (null for an empty slot); the HUD's slots follow it. One
+   * array for the life of the kit, emptied and filled again by `setLoadout`.
+   */
+  readonly loadout: (string | null)[] = [];
+  /**
+   * The slots as the display shows them: one per number key with a power in it. One array, built
+   * only when the loadout changes, because the display walks it every frame and a getter that
+   * returned a fresh array of fresh objects was building five arrays and sixteen objects a frame.
+   */
+  readonly slots: KitSlot[] = [];
+  /** The power behind each of those slots, in the same order, so neither test below has to search for it by name. */
+  private readonly slotPowers: PowerDef[] = [];
   readonly help = [
     '<b>LMB</b> saber swing (hold to chain, direction keys pick the swing) · <b>RMB</b> hold to block: the stance comes up and bolts are turned away · <b>LMB+RMB</b> kata · <b>R</b> throw the saber (staff: kick) · <b>K</b> style (fast, medium, strong, dual, staff) · <b>L</b> saber on/off',
     '<b>Jump</b> + direction + <b>LMB</b> flip and jump attacks · <b>Ctrl</b> + forward + <b>LMB</b> lunge or spin · <b>Jump</b> beside a wall: wall run (strafe + forward) or wall flip (strafe) · <b>Jump</b> at a wall: run up and flip back · back + <b>Jump</b>: backflip',
@@ -90,22 +101,23 @@ export class JediKit implements Kit {
     this.bolt.visible = false;
     this.bolt.frustumCulled = false;
     scene.add(this.aura, this.bolt);
-  }
-
-  /** The slots as the HUD shows them: one per number key with a power in it. */
-  get slots(): KitSlot[] {
-    const out: KitSlot[] = [];
-    for (let i = 0; i < SLOT_COUNT; i++) {
-      const p = this.loadout[i] ? powerById(this.loadout[i]!) : null;
-      if (p) out.push({ key: String(i + 1), name: p.name, cost: p.cost });
-    }
-    return out;
+    // The slots are filled the one way they are ever filled, so the array the display walks exists
+    // and agrees with the loadout from the first frame.
+    this.setLoadout(DEFAULT_LOADOUT);
   }
 
   /** Put powers in the slots (ids; unknown ones are dropped), keeping toggles that are no longer there off. */
   setLoadout(ids: (string | null)[]): void {
-    this.loadout = [];
-    for (let i = 0; i < SLOT_COUNT; i++) this.loadout.push(ids[i] && powerById(ids[i]!) ? ids[i]! : null);
+    this.loadout.length = 0;
+    this.slots.length = 0;
+    this.slotPowers.length = 0;
+    for (let i = 0; i < SLOT_COUNT; i++) {
+      const p = ids[i] ? powerById(ids[i]!) : undefined;
+      this.loadout.push(p ? ids[i]! : null);
+      if (!p) continue;
+      this.slots.push({ key: String(i + 1), name: p.name, cost: p.cost });
+      this.slotPowers.push(p);
+    }
     if (!this.loadout.includes('speed')) this.speedActive = false;
     if (!this.loadout.includes('protect')) this.protectActive = false;
     if (!this.loadout.includes('rage')) this.rageLeft = 0;
@@ -124,9 +136,7 @@ export class JediKit implements Kit {
   }
 
   slotActive(i: number): boolean {
-    const id = this.slots[i]?.name;
-    const p = POWERS.find((x) => x.name === id);
-    switch (p?.id) {
+    switch (this.slotPowers[i]?.id) {
       case 'speed':
         return this.speedActive;
       case 'lightning':
@@ -147,9 +157,7 @@ export class JediKit implements Kit {
   }
 
   slotCooldown(i: number): number {
-    const name = this.slots[i]?.name;
-    const p = POWERS.find((x) => x.name === name);
-    switch (p?.id) {
+    switch (this.slotPowers[i]?.id) {
       case 'heal':
         return this.healCd / 6;
       case 'repulse':
