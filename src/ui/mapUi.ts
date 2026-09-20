@@ -264,7 +264,10 @@ export class MapUi {
     this.buildSelectBox();
     this.hereBody.appendChild(this.tip);
     this.ctx = this.canvas2d.getContext('2d')!;
-    // The galaxy tab's body: the cards, made by the galaxy map into the panel.
+    // The galaxy tab's body, made by the galaxy map into the panel. The 3D canvas is shared with the
+    // space view and moved between the two bodies as the tabs change, so the window keeps one
+    // renderer and the game one map context; the galaxy takes the mouse through a layer of its own
+    // over the canvas, so the space view's own listeners never see a galaxy drag.
     galaxy.root.remove();
     panel.appendChild(galaxy.root);
     for (const b of this.root.querySelectorAll<HTMLButtonElement>('.tabs .tab')) b.addEventListener('click', () => this.showTab(b.dataset.tab as Tab));
@@ -469,6 +472,9 @@ export class MapUi {
     this.root.classList.add('hidden');
     cancelAnimationFrame(this.raf);
     this.raf = 0;
+    // The galaxy tab reads the jump's refusals on a clock of its own while it shows: closing the
+    // window on that tab stops it, and opening it again starts it.
+    this.galaxy.hide();
   }
 
   setCurrent(id: string, zone?: string): void {
@@ -479,21 +485,42 @@ export class MapUi {
     this.tab = tab;
     for (const b of this.root.querySelectorAll<HTMLButtonElement>('.tabs .tab')) b.classList.toggle('on', b.dataset.tab === tab);
     this.hereBody.hidden = tab !== 'here';
-    if (tab === 'galaxy') this.galaxy.show();
-    else this.galaxy.hide();
+    if (tab === 'galaxy') {
+      // The one 3D canvas goes to whichever tab is drawing. It keeps its context across the move, and
+      // the renderer is sized from whatever holds it on the next frame.
+      this.canvas3d.hidden = false;
+      this.galaxy.attachCanvas(this.canvas3d);
+      this.galaxy.show();
+    } else {
+      this.hereBody.insertBefore(this.canvas3d, this.labelLayer);
+      this.galaxy.hide();
+    }
     this.readout.textContent = '';
     // The space view only writes the line when what it says has changed, so emptying it here has to
     // forget what it last said or it would never be written again.
     this.said.objects = -1;
     cancelAnimationFrame(this.raf);
     this.raf = 0;
-    if (tab === 'here') this.loop();
+    this.loop();
   }
 
   private loop(): void {
-    if (!this.open || this.tab !== 'here') return;
-    this.draw();
+    if (!this.open) return;
+    if (this.tab === 'galaxy') this.galaxy.drawView(this.mapRenderer());
+    else this.draw();
     this.raf = requestAnimationFrame(() => this.loop());
+  }
+
+  /**
+   * The map window's own renderer, made on the first frame that wants it. The space view makes the
+   * same one where it draws first; whichever tab is opened first builds it, and both draw with it.
+   */
+  private mapRenderer(): THREE.WebGLRenderer {
+    if (!this.renderer3d) {
+      this.renderer3d = new THREE.WebGLRenderer({ canvas: this.canvas3d, antialias: true, alpha: true });
+      this.renderer3d.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    }
+    return this.renderer3d;
   }
 
   private draw(): void {

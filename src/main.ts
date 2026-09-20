@@ -622,6 +622,13 @@ class App {
       this.ui,
       (p, zone) => void this.travel(p, zone),
       (p, poi, zone) => void this.teleport(p, poi, zone),
+      {
+        baseUrl: import.meta.env.BASE_URL,
+        piloting: () => !!this.world.planet.space && !!this.pilotedShip(),
+        catalogue: () => this.catalogue(),
+        why: (d) => this.hyperspace.why(d),
+        onHyperspace: (d) => this.jumpFromGalaxy(d),
+      },
     );
     // The map window: the world here (the planet's own map, or the space zone in three axes) and the galaxy to travel.
     this.map = new MapUi(this.ui, galaxy, {
@@ -3401,6 +3408,17 @@ class App {
     });
     // The ship menu freed the mouse; the map keeps it free.
     this.freeMouse(true);
+  }
+
+  /**
+   * The galaxy map's "Hyperspace to orbit": the same jump the System Map starts, from the other tab of
+   * the map window. The map closes only once the countdown has begun, so a refusal is read where it
+   * was asked for; the panel shows what comes back.
+   */
+  private jumpFromGalaxy(d: Destination): string | null {
+    const why = this.hyperspace.start(d);
+    if (why === null && this.map.open) this.toggleMap();
+    return why;
   }
 
   /** The System Map's Hyperspace: the countdown begins and the map closes, or the refusal is shown on it. */
