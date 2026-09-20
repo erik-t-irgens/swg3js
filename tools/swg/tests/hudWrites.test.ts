@@ -20,7 +20,14 @@ import assert from 'node:assert/strict';
 const count = { writes: 0, width: 0, transform: 0, readHtml: 0, readText: 0 };
 
 function styleBag(): Record<string, string> {
-  const bag: Record<string, string> = {};
+  // A custom property is a write like any other: the ability cells' cooldown is one number on the
+  // cell, so `setProperty` has to be here or the count would miss it.
+  const bag: Record<string, any> = {
+    setProperty(name: string, value: string) {
+      count.writes++;
+      bag[name] = String(value);
+    },
+  };
   return new Proxy(bag, {
     set(t, k, v) {
       count.writes++;
@@ -30,9 +37,10 @@ function styleBag(): Record<string, string> {
       return true;
     },
     get(t, k) {
-      return t[String(k)] ?? '';
+      const v = t[String(k)];
+      return v === undefined ? '' : v;
     },
-  });
+  }) as Record<string, string>;
 }
 
 /** An element: every write counted, every element with its own cache of what a selector found. */
@@ -175,16 +183,26 @@ frame();
 count.width = 0;
 count.transform = 0;
 {
+  // The on-foot bars carry the ghost the rest of the interface's bars carry: a fall leaves it where
+  // the bar was and the stylesheet walks it down, which is what makes the size of a blow legible.
+  // So a fall costs four writes -- the ghost off its snap, the ghost's own value, the fill and the
+  // number -- and every frame after it costs nothing, which is the half that matters.
   const made = writes(() => frame(99));
-  ok(made === 2, `a point of health off is one bar write and one number write (wrote ${made})`);
+  ok(made === 4, `a point of health off is the ghost off its snap, the ghost, the bar and the number (wrote ${made})`);
   ok(count.transform > 0, 'the bar moved by a transform');
   ok(count.width === 0, 'and never by a width');
-  ok(writes(() => { for (let i = 0; i < 30; i++) frame(99); }) === 0, 'and holding there writes nothing more');
-  // A fifth of a point moves the bar by a pixel of its own length but leaves the number alone.
-  ok(writes(() => frame(98.8)) === 1, 'the bar and its number are guarded apart');
+  ok(writes(() => { for (let i = 0; i < 30; i++) frame(99); }) === 0, 'and holding there writes nothing more, the easing ghost included');
+  // A fifth of a point moves the bar by a pixel of its own length but leaves the number alone; the
+  // ghost is already off its snap, so this fall is the bar and the ghost and nothing else.
+  ok(writes(() => frame(98.8)) === 2, 'the bar and its number are guarded apart');
   ok(writes(() => frame(98.799)) === 0, 'a change under a pixel of the bar leaves both alone');
+  // The ease ending puts the ghost back behind the fill: one class, and no value, because a fall
+  // wrote the ghost to where the bar was going and it is already there.
+  const settle = writes(() => { for (let i = 0; i < 45; i++) frame(98.799); });
+  ok(settle === 1, `a ghost's ease ending writes once and no more (wrote ${settle})`);
+  ok(writes(() => { for (let i = 0; i < 30; i++) frame(98.799); }) === 0, 'and the bar is steady again');
   kit.resource.value = 60;
-  ok(writes(() => frame(98.799)) === 2, 'the class pool falling is a bar write and a number write');
+  ok(writes(() => frame(98.799)) === 4, 'the class pool falling is its ghost off its snap, its ghost, its bar and its number');
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -202,10 +220,16 @@ count.transform = 0;
   ok(writes(() => { for (let i = 0; i < 10; i++) frame(98.799); }) === 0, 'a slot row that has not changed writes nothing');
   kit.lit = true;
   ok(writes(() => frame(98.799)) === 1, 'a power coming on lights its cell with one write');
+  // A cooldown is one number on the cell, which the stylesheet draws as a wedge: the cell loses its
+  // ready mark and takes that number, and nothing else on the page hears about it.
   kit.cd = 0.5;
-  ok(writes(() => frame(98.799)) === 1, 'a cooldown starting shades its cell with one write');
+  ok(writes(() => frame(98.799)) === 2, 'a cooldown starting is the ready mark off the cell and the number the wedge is drawn from');
   kit.cd = 0.5004;
-  ok(writes(() => frame(98.799)) === 0, 'and a change under the cooldown step writes nothing');
+  ok(writes(() => frame(98.799)) === 0, 'and a cooldown that has not moved by a step of its own writes nothing at all');
+  kit.cd = 0.46;
+  ok(writes(() => frame(98.799)) === 1, 'a step of it writes that one number and nothing more');
+  kit.cd = 0;
+  ok(writes(() => frame(98.799)) === 2, 'and coming back ready is the mark and the number going to nothing');
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -79,6 +79,8 @@ export class Creature implements Living {
   /** Told the manager who struck, so the herd may turn together. */
   alert: ((self: Creature, source: Living) => void) | null = null;
   hp: number;
+  /** What it started with, so a readout can show its health as a share of it. */
+  readonly maxHp: number;
   dead = false;
   deadTimer = 0;
   stunned = 0;
@@ -102,6 +104,7 @@ export class Creature implements Living {
   constructor(readonly def: CreatureDef, mat: THREE.Material, private readonly physics: Physics, x: number, y: number, z: number) {
     const s = def.size;
     this.hp = def.hp;
+    this.maxHp = def.hp;
     this.halfHeight = 0.5 * s;
     this.label = def.name;
     // The planet's own values read as an aggression: it hunts, it bolts, or it stands its ground.

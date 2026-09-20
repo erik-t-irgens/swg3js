@@ -1,0 +1,244 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The interface's glyphs. Every one of them is drawn here, by hand, for this game: nothing on this
+  sheet comes from anywhere else, and no picture from the archives is used anywhere in the interface.
+
+  One `<symbol>` per glyph on a 24 by 24 box, stroked and never filled, so one glyph reads at 10 px
+  on a message line and at 40 px in an ability cell and takes its colour from whatever it is put in
+  (`stroke="currentColor"`). The four drawing attributes sit on each `<symbol>` rather than on the
+  root: a `<use>` clones the symbol's own subtree, and what the root of this file says would be left
+  behind.
+
+  It is fetched once at boot by `src/ui/hudIcons.ts` and put in a hidden corner of the page; every
+  use on the screen is `<svg class="ic"><use href="#ic-force-speed"/></svg>`, which is static markup
+  and costs nothing per frame. A glyph that cannot be read at a glance is one path in this file.
+
+  The stroke is 1.75 at 24, which is the one width everything here is drawn at, so no glyph looks
+  heavier than its neighbour in a row. Nothing is drawn to the edge of the box: 3 to 21 is the field,
+  which leaves room for the dark under-stroke the rest of the interface is drawn with.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="0" height="0" style="position:absolute;width:0;height:0;overflow:hidden" aria-hidden="true">
+
+  <!-- ===== the Force powers ==================================================================== -->
+
+  <!-- A leap: an arrow up off a line. -->
+  <symbol id="ic-force-jump" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 16V4"/>
+    <path d="M7.5 8.5 12 4l4.5 4.5"/>
+    <path d="M4.5 20h15"/>
+  </symbol>
+
+  <!-- Speed: a trail of chevrons, the last one shorter, so it reads as moving away. -->
+  <symbol id="ic-force-speed" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M4 6.5 9.5 12 4 17.5"/>
+    <path d="M11 6.5 16.5 12 11 17.5"/>
+    <path d="M18 9 21 12l-3 3"/>
+  </symbol>
+
+  <!-- Push: a flat palm with the air going away from it. -->
+  <symbol id="ic-force-push" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M5 5.5v13"/>
+    <path d="M10 8.5a5 5 0 0 1 0 7"/>
+    <path d="M14.5 6.5a9 9 0 0 1 0 11"/>
+    <path d="M18.5 4.5a13 13 0 0 1 0 15"/>
+  </symbol>
+
+  <!-- Pull: the same air, bowed the other way, with an arrow coming back to the palm. -->
+  <symbol id="ic-force-pull" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M19 5.5v13"/>
+    <path d="M14 8.5a5 5 0 0 0 0 7"/>
+    <path d="M9.5 6.5a9 9 0 0 0 0 11"/>
+    <path d="M4.5 12h5"/>
+    <path d="M7 9.5 9.5 12 7 14.5"/>
+  </symbol>
+
+  <!-- Lightning: a forked bolt. -->
+  <symbol id="ic-force-lightning" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M13.5 3 7 13h4.5L10 21l7-10.5h-4.5z"/>
+  </symbol>
+
+  <!-- Drain: a spiral wound into a point. Four half-turns of falling radius about the middle line,
+       each about three units inside the one before it, so no two windings touch at 28 px. The first
+       drawing wound the other way and its last sweep left the box on the left. -->
+  <symbol id="ic-force-drain" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M3.5 12a7.75 7.75 0 0 1 15.5 0 6.25 6.25 0 0 1-12.5 0 4.5 4.5 0 0 1 9 0 2.75 2.75 0 0 1-5.5 0"/>
+  </symbol>
+
+  <!-- Grip: two claws closing on a body. -->
+  <symbol id="ic-force-grip" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M7.5 4.5a9.5 9.5 0 0 0 0 15"/>
+    <path d="M16.5 4.5a9.5 9.5 0 0 1 0 15"/>
+    <circle cx="12" cy="12" r="1.75"/>
+  </symbol>
+
+  <!-- Repulse: rings thrown out from where you stand. -->
+  <symbol id="ic-force-repulse" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="12" cy="12" r="1.75"/>
+    <circle cx="12" cy="12" r="5.5"/>
+    <circle cx="12" cy="12" r="8.75"/>
+  </symbol>
+
+  <!-- Slow: a clock. -->
+  <symbol id="ic-force-slow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="12" cy="12" r="8.5"/>
+    <path d="M12 7v5.5l3.5 2"/>
+  </symbol>
+
+  <!-- Heal: a cross in a ring. -->
+  <symbol id="ic-force-heal" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="12" cy="12" r="8.5"/>
+    <path d="M12 7.5v9"/>
+    <path d="M7.5 12h9"/>
+  </symbol>
+
+  <!-- Protect: a shield. -->
+  <symbol id="ic-force-protect" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 3.2 19.5 6v6c0 4.7-3.2 7.6-7.5 9-4.3-1.4-7.5-4.3-7.5-9V6z"/>
+  </symbol>
+
+  <!-- Rage: a barbed arrow driven upward. -->
+  <symbol id="ic-force-rage" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 21V4.5"/>
+    <path d="M6.5 10 12 4.5l5.5 5.5"/>
+    <path d="M8 15.5 12 11.5l4 4"/>
+  </symbol>
+
+  <!-- Bare hands: a fist. -->
+  <symbol id="ic-fists" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M5.5 10h11.5a2.5 2.5 0 0 1 2.5 2.5v2a4.5 4.5 0 0 1-4.5 4.5h-7A4.5 4.5 0 0 1 3.5 14.5v-2A2.5 2.5 0 0 1 6 10z"/>
+    <path d="M7 13.5h9"/>
+    <path d="M6 10V8a2.5 2.5 0 0 1 2.5-2.5h5A2.5 2.5 0 0 1 16 8v2"/>
+  </symbol>
+
+  <!-- ===== the gadgets ========================================================================= -->
+
+  <!-- A grenade: a body with a cap and a lever. -->
+  <symbol id="ic-grenade" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="11.5" cy="14.5" r="5.75"/>
+    <path d="M9.5 8.5V6.5h4v2"/>
+    <path d="M13.5 6.5h4l1.5 3.5"/>
+  </symbol>
+
+  <!-- A detonator: a sphere with an equator and a stud. -->
+  <symbol id="ic-detonator" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="12" cy="13.5" r="6.75"/>
+    <path d="M5.5 13.5h13"/>
+    <path d="M10.5 6.9V4.5h3v2.4"/>
+  </symbol>
+
+  <!-- A mine on a wall, its beam across the way. -->
+  <symbol id="ic-mine" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M4 4.5v15"/>
+    <circle cx="7.5" cy="12" r="2.75"/>
+    <path d="M10.5 12h10.5" stroke-dasharray="2 2.75"/>
+  </symbol>
+
+  <!-- A charge pack: a block, a wire and a stud. -->
+  <symbol id="ic-pack" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="4" y="9" width="11" height="8" rx="1.5"/>
+    <path d="M15 13h3"/>
+    <circle cx="19.5" cy="13" r="1.5"/>
+    <path d="M7 9V6.5"/>
+  </symbol>
+
+  <!-- A stim: a flask with a cross. -->
+  <symbol id="ic-stim" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M9.5 3.5h5"/>
+    <path d="M10.5 3.5v5l-3.4 8.6A2.6 2.6 0 0 0 9.5 20.5h5a2.6 2.6 0 0 0 2.4-3.4L13.5 8.5v-5"/>
+    <path d="M12 12.5v4"/>
+    <path d="M10 14.5h4"/>
+  </symbol>
+
+  <!-- A flame. -->
+  <symbol id="ic-flame" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 3.5c3.6 4 5.5 6.5 5.5 9.6a5.5 5.5 0 0 1-11 0c0-2 1-3.7 2.5-5.3 0 1.8.9 2.8 2 2.8 1.4 0 2.2-1.2 2.2-2.9 0-1.3-.4-2.7-1.2-4.2z"/>
+  </symbol>
+
+  <!-- A net. -->
+  <symbol id="ic-net" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 3.5 20.5 12 12 20.5 3.5 12z"/>
+    <path d="M7.75 7.75 16.25 16.25"/>
+    <path d="M16.25 7.75 7.75 16.25"/>
+    <path d="M3.5 12h17"/>
+    <path d="M12 3.5v17"/>
+  </symbol>
+
+  <!-- A scanner: a sweep from where you stand. -->
+  <symbol id="ic-scanner" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M3.5 17.5a9.5 9.5 0 0 1 17 0"/>
+    <path d="M12 17.5 18 9"/>
+    <circle cx="12" cy="17.5" r="1.5"/>
+  </symbol>
+
+  <!-- ===== the wings ============================================================================
+       Seen from behind: the hull as a post, the wings as what crosses it. -->
+
+  <symbol id="ic-wing-closed" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 4v16"/>
+    <path d="M3 12h18"/>
+  </symbol>
+
+  <symbol id="ic-wing-opening" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 4v16"/>
+    <path d="M3.5 9 20.5 15"/>
+    <path d="M3.5 15 20.5 9"/>
+  </symbol>
+
+  <symbol id="ic-wing-open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 4v16"/>
+    <path d="M4 5.5 20 18.5"/>
+    <path d="M4 18.5 20 5.5"/>
+  </symbol>
+
+  <!-- Chosen open and waiting for room: the shallow pair, with the ground under it. -->
+  <symbol id="ic-wing-held" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 3v13"/>
+    <path d="M4 7 20 12.5"/>
+    <path d="M4 12.5 20 7"/>
+    <path d="M3 20.5h18"/>
+  </symbol>
+
+  <!-- ===== what is in a hand ==================================================================== -->
+
+  <!-- A lightsaber: the hilt, its guard, and the blade out of it. -->
+  <symbol id="ic-saber" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M4.5 19.5 8.5 15.5"/>
+    <path d="M6.6 14.4 9.6 17.4"/>
+    <path d="M10.5 13.5 20 4"/>
+  </symbol>
+
+  <!-- A blaster. -->
+  <symbol id="ic-blaster" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M3.5 9h14.5v4h-4l-1.8 6H8.8l1-6H3.5z"/>
+    <path d="M18 11h2.5"/>
+    <path d="M14 9V7"/>
+  </symbol>
+
+  <!-- An open hand: what a hand holds when it holds nothing. -->
+  <symbol id="ic-hand" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M8.5 12.5V5.5a1.6 1.6 0 0 1 3.2 0v5"/>
+    <path d="M11.7 10.5V4.2a1.6 1.6 0 0 1 3.2 0v6.3"/>
+    <path d="M14.9 11V6.6a1.6 1.6 0 0 1 3.2 0v7.9a6 6 0 0 1-6 6h-1a5 5 0 0 1-4.1-2.2l-2.1-3a1.7 1.7 0 0 1 2.6-2.1l1.5 1.5"/>
+  </symbol>
+
+  <!-- ===== the marks ===========================================================================
+       A part knocked out wears no mark from here: the cross on its pip is two strokes the stylesheet
+       draws itself (`.hud-pip.down`), which is cheaper than a glyph and needs no sheet to arrive. -->
+
+  <!-- A blow landed: a chevron. -->
+  <symbol id="ic-hit" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M8.5 4.5 16 12l-7.5 7.5"/>
+  </symbol>
+
+  <!-- The game speaking: a dot in a ring. -->
+  <symbol id="ic-system" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="12" cy="12" r="8"/>
+    <circle cx="12" cy="12" r="1.6"/>
+  </symbol>
+
+  <!-- Somebody speaking. -->
+  <symbol id="ic-speech" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M20 15a2.5 2.5 0 0 1-2.5 2.5H9.5L5 21V6.5A2.5 2.5 0 0 1 7.5 4h10A2.5 2.5 0 0 1 20 6.5z"/>
+  </symbol>
+
+</svg>

@@ -125,6 +125,8 @@ export class Npc implements Living {
   /** Standing on the ground: a fighter is, except while the Force has it off it. */
   grounded = true;
   hp = HP;
+  /** What it started with, so a readout can show its health as a share of it. */
+  readonly maxHp = HP;
   dead = false;
   deadTimer = 0;
   heading = Math.random() * Math.PI * 2;

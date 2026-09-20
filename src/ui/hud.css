@@ -107,7 +107,10 @@
 .hud-bar > .ghost {
   z-index: 1;
   background: color-mix(in srgb, var(--muted) 40%, transparent);
-  transition: transform 0.6s ease-out;
+  /* How long the walk down takes is `HUD_SIZES.ghostSeconds`, written here as a property by the
+     display at boot, so the timer that holds the ghost and the ease that draws it are one number and
+     cannot drift when it is tried at the console. The fallback is that same number. */
+  transition: transform var(--hud-ghost, 0.6s) ease-out;
 }
 /* A bar that rises — a repair, a shield recharging — must not have its ghost crawl up behind it: the
    ease is for a drop only. The consumer adds `snap` for the frame it sets a ghost that is going up and
@@ -363,8 +366,119 @@
   color: var(--accent);
 }
 
+/* --- our own glyphs --------------------------------------------------------------------------------
+ * One sheet, `src/ui/hud.svg`, hand-drawn for this game; nothing on the screen is a picture from the
+ * archives. A glyph takes its colour from whatever it is put in, so a cell's own colour is the only
+ * thing that decides what its mark looks like, and nothing about a mark is ever written again. */
+.ic {
+  display: block;
+  width: 1em;
+  height: 1em;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.75;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  /* Rule 2, for a shape that carries meaning on its own: the same dark under it that every canvas
+     stroke gets, so a light glyph reads over sand as well as over space. */
+  filter: drop-shadow(0 0 1px var(--void)) drop-shadow(0 0 1px var(--void));
+}
+/* The sheet itself is a store and never a thing on screen. */
+#hud-icons { position: absolute; width: 0; height: 0; overflow: hidden; pointer-events: none; }
+
+/* --- the body block: the bars, the number row, the hands ------------------------------------------
+ * The block keeps its place at the bottom middle (`.bottom` in `src/style.css`) and stands down while
+ * the player is at a ship's controls, where the ship's own condition takes its place. */
+.hud-body {
+  display: flex;
+  flex-direction: column;
+  gap: calc(4px * var(--hud-scale));
+}
+.hud-brow {
+  display: flex;
+  align-items: center;
+  gap: calc(8px * var(--hud-scale));
+  font-family: var(--hud-font);
+  font-stretch: var(--hud-stretch);
+  font-variant-numeric: tabular-nums;
+  font-size: calc(11px * var(--hud-scale));
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+}
+.hud-brow[hidden] { display: none; }
+.hud-brow .val {
+  flex: none;
+  width: calc(76px * var(--hud-scale));
+  color: var(--muted);
+  text-shadow: 1px 0 0 var(--void), -1px 0 0 var(--void), 0 1px 0 var(--void), 0 -1px 0 var(--void);
+}
+.hud-brow .hud-bar.hp {
+  flex: none;
+  width: calc(160px * var(--hud-scale));
+  height: calc(10px * var(--hud-scale));
+}
+.hud-brow .hud-bar.pool {
+  flex: none;
+  width: calc(160px * var(--hud-scale));
+  height: calc(6px * var(--hud-scale));
+}
+
+/* The number row and the hands, side by side under the bars. */
+.hud-kit {
+  display: flex;
+  align-items: flex-end;
+  gap: calc(14px * var(--hud-scale));
+}
+.hud-hands {
+  display: flex;
+  gap: calc(6px * var(--hud-scale));
+  font-family: var(--hud-font);
+  font-stretch: var(--hud-stretch);
+  font-size: calc(11px * var(--hud-scale));
+}
+.hud-hand {
+  display: flex;
+  align-items: center;
+  gap: calc(5px * var(--hud-scale));
+  box-sizing: border-box;
+  height: calc(40px * var(--hud-scale));
+  max-width: calc(150px * var(--hud-scale));
+  padding: 0 calc(7px * var(--hud-scale));
+  background: var(--plate);
+  border: 1px solid var(--edge);
+  border-radius: calc(3px * var(--hud-scale));
+  color: var(--ink);
+}
+.hud-hand[hidden] { display: none; }
+.hud-hand .pic {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: calc(22px * var(--hud-scale));
+  height: calc(22px * var(--hud-scale));
+  color: var(--accent);
+  font-size: calc(22px * var(--hud-scale));
+}
+.hud-hand .pic img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  image-rendering: auto;
+}
+.hud-hand .name {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  text-shadow: 1px 0 0 var(--void), -1px 0 0 var(--void), 0 1px 0 var(--void), 0 -1px 0 var(--void);
+}
+/* The left hand is the quieter of the two: what is in the main hand is what is being used. */
+.hud-hand.left { color: var(--muted); }
+.hud-hand.left .pic { color: var(--muted); }
+
 /* --- the look-at nameplate ------------------------------------------------------------------------
  * Pooled eight, moved by `translate3d` only, on nothing but its own shadow. */
+.hud-plates { position: absolute; inset: 0; pointer-events: none; }
 .hud-plate {
   position: absolute;
   left: 0;
@@ -407,27 +521,83 @@
  * they keep working exactly as they did until the code that uses them goes. The one change is rule 1
  * of the design: nothing is drawn in pure white, so `#ffffff` is `--ink`. */
 
-/* The ability slot row. */
-.slots { display: flex; gap: 4px; }
+/* The ability cells: one square each, our own mark in the middle, the key you have bound in the
+ * corner, and what it costs under it. A cell's border says whether the ability is ready; how far
+ * through a cooldown it is, is the wedge below, drawn by the page from one number (`--cool`) the
+ * display writes on the cell only when it has moved by a step of its own.
+ *
+ * Not on the overlay: the overlay is the first child of `#ui` so that every panel draws over it, and
+ * with neither of them carrying a `z-index` the cell — which is positioned, and is painted later in
+ * the tree — paints over the canvas. A sweep drawn there would sit under a cell whose own background
+ * is nearly opaque, which is to say nowhere. */
+.slots {
+  display: flex;
+  gap: calc(4px * var(--hud-scale));
+}
 .slot {
   position: relative;
-  overflow: hidden;
+  box-sizing: border-box;
   display: flex;
-  flex-direction: column;
   align-items: center;
-  width: 72px;
-  padding: 4px 3px;
-  background: var(--panel);
-  border: 1px solid var(--edge);
-  border-radius: 5px;
-  font-size: 9px;
+  justify-content: center;
+  width: calc(40px * var(--hud-scale));
+  height: calc(40px * var(--hud-scale));
+  background: var(--plate);
+  /* Not ready: the border and the mark fall back to the secondary colour, under the sweep the
+     overlay draws over the cell. */
+  border: 1px solid color-mix(in srgb, var(--muted) 40%, transparent);
+  border-radius: calc(3px * var(--hud-scale));
+  color: var(--muted);
+  font-family: var(--hud-font);
+  font-stretch: var(--hud-stretch);
+  font-variant-numeric: tabular-nums;
+  transition: border-color 0.12s linear, color 0.12s linear;
 }
-.slot .key { font-weight: 700; color: var(--accent); font-size: 11px; }
-.slot .name { white-space: nowrap; }
-.slot .cost { color: var(--muted); font-size: 9px; }
-.slot.active { border-color: var(--accent); box-shadow: 0 0 12px rgba(127, 215, 255, 0.5); background: rgba(45, 127, 214, 0.35); }
-.slot .cd { position: absolute; left: 0; right: 0; bottom: 0; height: 0; background: color-mix(in srgb, var(--void) 55%, transparent); pointer-events: none; }
-.slot > span { position: relative; }
+.slot[hidden] { display: none; }
+/* The cooldown: a dark wedge turning clockwise from twelve, over the mark and under the key-cap, and
+   nothing at all at `--cool: 0`, which is what a cell with no cooldown carries. */
+.slot::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background: conic-gradient(color-mix(in srgb, var(--void) 60%, transparent) calc(var(--cool, 0) * 360deg), transparent 0);
+}
+/* The mark: 28 px in a 40 px cell at scale 1, in the cell's own colour. */
+.slot .ic {
+  width: calc(28px * var(--hud-scale));
+  height: calc(28px * var(--hud-scale));
+}
+.slot .key {
+  position: absolute;
+  top: calc(1px * var(--hud-scale));
+  left: calc(3px * var(--hud-scale));
+  font-size: calc(10px * var(--hud-scale));
+  font-weight: 700;
+  color: var(--accent);
+  text-shadow: 1px 0 0 var(--void), -1px 0 0 var(--void), 0 1px 0 var(--void), 0 -1px 0 var(--void);
+}
+.slot .cost {
+  position: absolute;
+  bottom: calc(1px * var(--hud-scale));
+  right: calc(3px * var(--hud-scale));
+  font-size: calc(9px * var(--hud-scale));
+  color: var(--muted);
+}
+/* Ready: the border takes the instrument's own colour and the mark comes up to full. */
+.slot.ready { border-color: var(--accent); color: var(--ink); }
+/* On: a toggle that is running, or a power holding. */
+.slot.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  box-shadow: 0 0 calc(10px * var(--hud-scale)) color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+/* With the overlay attached the crosshair and the charge are drawn on it, and these two — the
+   display's own stand-ins for as long as there is no canvas — go off the screen for good. */
+#hud.drawn .crosshair,
+#hud.drawn .charge { display: none !important; }
 
 /* The flight display: the aim circle, the cursor's ring, a crosshair, and the cursor as an arrow or a pip. */
 .flight { position: absolute; left: 50%; top: 50%; margin: -160px 0 0 -160px; pointer-events: none; }
