@@ -98,8 +98,16 @@ export interface Settings extends FxSettings {
   hudMessages: boolean;
   /** How many of those lines stand at once, 3 to 8. */
   hudMessageLines: number;
-  /** The long line under the display that names every key. On while it is the only place they are named. */
+  /** The long line under the display that names every key. Off: the action bar names the keys now. */
   hudFullPrompts: boolean;
+  /** The arc on the side a blow came from. The red flash underneath it is not switched off by this. */
+  hudDamageArc: boolean;
+  /** Small numbers rising where a blow lands. Off: the game said its results in words, not numbers. */
+  hudDamageNumbers: boolean;
+  /** The name and the health of whatever the crosshair is on, drawn over its head. */
+  hudNameplate: boolean;
+  /** A crosshair for a Jedi as well as a Bounty Hunter, since a Force power is aimed too. */
+  hudJediCrosshair: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -148,7 +156,20 @@ export const DEFAULT_SETTINGS: Settings = {
   hudArcs: true,
   hudMessages: true,
   hudMessageLines: 8,
-  hudFullPrompts: true,
+  // Invented, and off: the short action bar now puts the key you have bound on every action it
+  // offers, so the long line is no longer the only place a key is named. It stays as a switch so
+  // that the short bar can be judged against it -- turn it on, and whatever the bar has hidden is
+  // the thing to say -- but it is not on by default, or both are on the screen at once and there is
+  // nothing to compare.
+  hudFullPrompts: false,
+  // Invented, like every other default in this block: the arc, the nameplate and the Jedi's
+  // crosshair start on because they say something the screen otherwise does not say at all, and the
+  // floating numbers start off because the game put its combat results in words and the message line
+  // is where those words go. All four are switches on the Interface page.
+  hudDamageArc: true,
+  hudDamageNumbers: false,
+  hudNameplate: true,
+  hudJediCrosshair: true,
   ...FX_DEFAULTS,
 };
 

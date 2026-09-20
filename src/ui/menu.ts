@@ -3,8 +3,13 @@
 import { DEFAULT_BINDINGS, type Action, type Input } from '../core/input';
 import { DEFAULT_SETTINGS, saveSettings, type Settings } from '../core/settings';
 import { FX_KNOBS, fxPassDef, fxProductDef } from '../core/fxRegistry.ts';
+import { INTERFACE, notifyBindingsChanged, type Knob } from './hudPage.ts';
 
-type Page = 'main' | 'controls' | 'graphics' | 'sound' | 'emotes' | 'multiplayer';
+// The Interface page's knobs and the rebind note live in `hudPage.ts` so that a node test can read
+// them without a browser; they are theirs to change and everything else's to import from here.
+export { onBindingsChanged, notifyBindingsChanged } from './hudPage.ts';
+
+type Page = 'main' | 'controls' | 'graphics' | 'interface' | 'sound' | 'emotes' | 'multiplayer';
 
 /** What the multiplayer page needs from the game: the relay's address and state, and who is here. */
 export interface NetSource {
@@ -93,22 +98,6 @@ export function keyName(code: string): string {
   m = /^Arrow(.+)$/.exec(code);
   if (m) return `${m[1]} arrow`;
   return KEY_NAMES[code] ?? code;
-}
-
-interface Knob {
-  key: keyof Settings;
-  label: string;
-  hint: string;
-  /** `choice` is a select whose values are words rather than numbers. */
-  kind: 'range' | 'toggle' | 'select' | 'choice';
-  min?: number;
-  max?: number;
-  step?: number;
-  options?: { value: number; label: string }[];
-  choices?: { value: string; label: string }[];
-  format?: (v: number) => string;
-  /** Greyed while any of these is off; still usable, so a strength can be set before its toggle. */
-  requires?: readonly (keyof Settings)[];
 }
 
 const GRAPHICS: { title: string; knobs: readonly Knob[] }[] = [
@@ -233,6 +222,7 @@ export class Menu {
           <button data-page="main" class="on">Menu</button>
           <button data-page="controls">Controls</button>
           <button data-page="graphics">Graphics</button>
+          <button data-page="interface">Interface</button>
           <button data-page="sound">Sound</button>
           <button data-page="emotes">Emotes</button>
           <button data-page="multiplayer">Multiplayer</button>
@@ -292,6 +282,7 @@ export class Menu {
           <button class="big switch">Switch character</button>
           <button class="big" data-page="controls">Controls</button>
           <button class="big" data-page="graphics">Graphics</button>
+          <button class="big" data-page="interface">Interface</button>
           <button class="big" data-page="sound">Sound</button>
           <button class="big" data-page="emotes">Emotes</button>
           <button class="big" data-page="multiplayer">Multiplayer</button>
@@ -317,6 +308,7 @@ export class Menu {
       this.wireKeys(body);
       body.querySelector('.reset-keys')!.addEventListener('click', () => {
         this.input.resetBindings();
+        notifyBindingsChanged();
         this.showPage('controls');
       });
     } else if (page === 'multiplayer') {
@@ -345,6 +337,13 @@ export class Menu {
       body.querySelector('.reset-sound')!.addEventListener('click', () => {
         for (const g of SOUND) for (const k of g.knobs) this.setValue(k.key, DEFAULT_SETTINGS[k.key] as number | boolean | string);
         this.showPage('sound');
+      });
+    } else if (page === 'interface') {
+      body.innerHTML = `<h2>Interface</h2><p class="menu-hint">None of the game's own interface is used: every line, arc, bar, square and glyph on the screen is drawn here, and every number on this page is ours. The keys a slot or an action shows are the keys you have bound, which you set under Controls.</p>${INTERFACE.map((g) => `<h3>${g.title}</h3>${this.knobRows(g.knobs)}`).join('')}<div class="menu-actions"><button class="reset-hud">Reset the display to defaults</button></div>`;
+      this.wireKnobs(body);
+      body.querySelector('.reset-hud')!.addEventListener('click', () => {
+        for (const g of INTERFACE) for (const k of g.knobs) this.setValue(k.key, DEFAULT_SETTINGS[k.key] as number | boolean | string);
+        this.showPage('interface');
       });
     } else if (page === 'emotes') {
       const src = this.emotes;
@@ -388,12 +387,12 @@ export class Menu {
 
   /** The name a key is shown under, for the "off while X is off" note. */
   private labelOf(key: keyof Settings): string {
-    for (const g of [...GRAPHICS, ...SOUND]) for (const k of g.knobs) if (k.key === key) return k.label;
+    for (const g of [...GRAPHICS, ...SOUND, ...INTERFACE]) for (const k of g.knobs) if (k.key === key) return k.label;
     return String(key);
   }
 
   private wireKnobs(body: HTMLElement): void {
-    const all = [...CONTROLS, ...GRAPHICS.flatMap((g) => g.knobs), ...SOUND.flatMap((g) => g.knobs)];
+    const all = [...CONTROLS, ...GRAPHICS.flatMap((g) => g.knobs), ...SOUND.flatMap((g) => g.knobs), ...INTERFACE.flatMap((g) => g.knobs)];
     for (const el of body.querySelectorAll<HTMLInputElement | HTMLSelectElement>('[data-key]')) {
       const knob = all.find((k) => k.key === el.dataset.key)!;
       const on = () => {
@@ -472,6 +471,9 @@ export class Menu {
       }
     }
     this.input.bind(c.action, kept.filter(Boolean));
+    // The key moved: the display's slot row and the action bar show the key you have bound, so they
+    // are told once, here, rather than reading the bindings on the frame path.
+    notifyBindingsChanged();
     this.showPage('controls');
   }
 

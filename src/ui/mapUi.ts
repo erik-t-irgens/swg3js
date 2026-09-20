@@ -124,22 +124,22 @@ const LAYER_CSS: Record<LayerId, string> = { stations: '#ffd27f', points: '#9fe8
 
 /** The space view's own styles, added once so nothing outside this file has to carry them. */
 const SPACE_MAP_CSS = `
-.map-layers { position: absolute; left: 10px; top: 10px; display: flex; flex-direction: column; gap: 3px; padding: 8px 10px; font-size: 11px; color: var(--text); background: rgba(8,14,24,0.72); border: 1px solid var(--panel-border); border-radius: 6px; }
+.map-layers { position: absolute; left: 10px; top: 10px; display: flex; flex-direction: column; gap: 3px; padding: 8px 10px; font-size: 11px; color: var(--text); background: color-mix(in srgb, var(--void) 72%, transparent); border: 1px solid var(--panel-border); border-radius: 6px; }
 .map-layers[hidden] { display: none; }
 .map-layers label { display: flex; align-items: center; gap: 6px; cursor: pointer; white-space: nowrap; }
-.map-layers .follow { margin-top: 5px; padding: 3px 8px; font-size: 11px; background: rgba(45,127,214,0.35); color: var(--text); border: 1px solid var(--accent); border-radius: 4px; cursor: pointer; }
-.map-layers .follow.on { background: rgba(45,127,214,0.7); }
+.map-layers .follow { margin-top: 5px; padding: 3px 8px; font-size: 11px; background: color-mix(in srgb, var(--pool) 35%, transparent); color: var(--text); border: 1px solid var(--accent); border-radius: 4px; cursor: pointer; }
+.map-layers .follow.on { background: color-mix(in srgb, var(--pool) 70%, transparent); }
 .map-labels { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
 .map-labels[hidden] { display: none; }
-.map-label { position: absolute; left: 0; top: 0; display: flex; align-items: center; gap: 4px; padding: 1px 5px 1px 3px; font-size: 11px; color: var(--text); text-shadow: 0 1px 2px #000; white-space: nowrap; }
+.map-label { position: absolute; left: 0; top: 0; display: flex; align-items: center; gap: 4px; padding: 1px 5px 1px 3px; font-size: 11px; color: var(--text); text-shadow: 0 1px 2px var(--void); white-space: nowrap; }
 .map-label[hidden] { display: none; }
 .map-label i { display: block; width: 14px; height: 14px; background: no-repeat center / contain; border-radius: 2px; }
 .map-label i.plain { width: 6px; height: 6px; margin: 0 4px; background: currentColor; }
-.map-select { position: absolute; right: 10px; top: 10px; width: 230px; padding: 9px 11px; font-size: 11px; color: var(--text); background: rgba(8,14,24,0.82); border: 1px solid var(--panel-border); border-radius: 6px; }
+.map-select { position: absolute; right: 10px; top: 10px; width: 230px; padding: 9px 11px; font-size: 11px; color: var(--text); background: color-mix(in srgb, var(--void) 82%, transparent); border: 1px solid var(--panel-border); border-radius: 6px; }
 .map-select[hidden] { display: none; }
 .map-select h4 { margin: 0 0 3px; font-size: 13px; color: var(--accent); }
 .map-select p { margin: 0 0 6px; color: var(--muted); line-height: 1.45; max-height: 7.5em; overflow: hidden; }
-.map-select button { margin-right: 5px; padding: 3px 8px; font-size: 11px; background: rgba(45,127,214,0.35); color: var(--text); border: 1px solid var(--accent); border-radius: 4px; cursor: pointer; }
+.map-select button { margin-right: 5px; padding: 3px 8px; font-size: 11px; background: color-mix(in srgb, var(--pool) 35%, transparent); color: var(--text); border: 1px solid var(--accent); border-radius: 4px; cursor: pointer; }
 .map-select button[disabled] { opacity: 0.4; cursor: default; }
 `;
 
