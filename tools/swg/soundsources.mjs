@@ -65,7 +65,10 @@ export function floatParam(buf) {
   return buf && buf.length >= 6 && buf[0] === 1 ? buf.readFloatLE(2) : null;
 }
 
-const path = (s) => (s ? slash(s) : null);
+// Some cells of the interior table carry a trailing space inside the sound's own name (eleven rooms
+// of the tutorial station do). It is not part of the file name, and left on it the bank has no entry
+// for that bed and the room falls back to the shared default.
+const path = (s) => (s && s.trim() ? slash(s.trim()) : null);
 
 /**
  * The sound in one client data file, or null when it holds none. Everything is kept as

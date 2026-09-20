@@ -65,9 +65,10 @@
 //                                                                  also written to <out-dir>/audit.txt
 //   node tools/swg/cli.mjs extras <swg-dir>                       what the archives outside the retail manifests add or replace, by category
 //                                                                  (a listing only; nothing from them is converted)
-//   node tools/swg/cli.mjs sounds <swg-dir> <out-dir> [--only=<text>] [--no-samples]
+//   node tools/swg/cli.mjs sounds <swg-dir> <out-dir> [planet|all] [--only=<text>] [--no-samples]
 //                                                                  every sound the game can play, the samples they name, and where each one is
-//                                                                  used, as <out-dir>/sounds
+//                                                                  used, as <out-dir>/sounds; a planet (or all) also writes that planet's own
+//                                                                  placed emitters, room beds and surfaces as <out-dir>/<planet>/sounds.json
 //   node tools/swg/cli.mjs status <out-dir>                        what the packs under <out-dir> hold and which commands would fill the gaps
 //   node tools/swg/cli.mjs terrain-check <out-dir> [--limit=n] [--layers] [--at=x,z]
 //                                                                  generate terrain at every snapshot object and compare with its height;
@@ -133,6 +134,7 @@ import { decodeTga, encodeHeightmap } from './tga.mjs';
 import { exportSky } from './sky.mjs';
 import { exportWater } from './water.mjs';
 import { convertSounds, soundStatus } from './sound.mjs';
+import { convertSoundPlaces, placesStatus } from './soundplaces.mjs';
 import { core3MobileStats, mobileTemplates, scanServerSpawns } from './spawns.mjs';
 import { loadEffect } from './texrender.mjs';
 import { readTemplate, stringParam } from './objtemplate.mjs';
@@ -1992,6 +1994,10 @@ function packStatus(dir) {
   const sound = soundStatus(dir, readJson);
   console.log(sound.line);
   if (sound.need) need(`sounds <swg-dir> ${dir} --retail-only`, sound.need);
+  // Where each planet's sounds are: its placed emitters, its buildings' room beds and its surfaces.
+  const places = placesStatus(dir, GAME_PLANETS, readJson);
+  if (places.line) console.log(places.line);
+  if (places.need) need(`sounds <swg-dir> ${dir} all --retail-only`, places.need);
   if (!todo.size) {
     console.log(`everything is in place: ${planets} planet packs, creatures and player`);
     return;
@@ -5017,7 +5023,7 @@ switch (cmd) {
   }
 
   case 'sounds': {
-    // <swg-dir> <out-dir>: the sound bank. Every sound template the game may play (all but the
+    // <swg-dir> <out-dir> [planet|all]: the sound bank. Every sound template the game may play (all but the
     // background music and the instrument parts, plus the music the world places in a room), the
     // samples they name copied as they are, the client data that says which sound belongs to which
     // event, and the tables that put a sound in a room, on a door, on a melee or ranged weapon, on a
@@ -5026,7 +5032,12 @@ switch (cmd) {
     if (!pos[2]) usage();
     const vfs = mount(pos[1]);
     mkdirSync(pos[2], { recursive: true });
-    convertSounds(vfs, pos[2], { only: options.only ?? null, samples: !flags.has('--no-samples'), log: console.log });
+        convertSounds(vfs, pos[2], { only: options.only ?? null, samples: !flags.has('--no-samples'), log: console.log });
+    // A planet argument (or `all`) also writes where that planet's sounds are: the emitters its
+    // world places, the room beds of the buildings it places, and what is underfoot on each of them.
+    // A name that is not a planet is a typo, not a planet with nothing in it, so it says so.
+    if (pos[3] && pos[3] !== 'all' && !GAME_PLANETS.includes(pos[3])) usage();
+    if (pos[3]) convertSoundPlaces(vfs, pos[2], { planets: pos[3] === 'all' ? GAME_PLANETS : [pos[3]], log: console.log });
     break;
   }
 

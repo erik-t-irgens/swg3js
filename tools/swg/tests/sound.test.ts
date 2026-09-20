@@ -5,9 +5,11 @@ import assert from 'node:assert/strict';
 import { chunk, encode, encodeRoots, form, W } from './iffWriter.ts';
 import { CATEGORIES, MUSIC_CATEGORIES, SOUND_FORMAT, convertSounds, iffRoots, packSoundNames, parseSoundTemplate, readMp3, readPackJson, readWav, resolveSample, soundStatus, templateEntry } from '../sound.mjs';
 import { floatParam, parseClientDataSounds, parseSurfaceTemplate, readClientData, readClientEffects, readSceneSounds, readSoundTables, roomRows, soundsOfClientData } from '../soundsources.mjs';
+import { PLACES_FORMAT, SURFACE_TYPES, convertSoundPlaces, placedSounds, placesStatus, pobNameOf, roomsFor } from '../soundplaces.mjs';
+import { flattenWithWorldTransforms, parseSnapshot } from '../ws.mjs';
 import { parseIff } from '../iff.mjs';
 import { parseDatatable } from '../datatable.mjs';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -298,6 +300,132 @@ try {
   }
 } finally {
   rmSync(dir, { recursive: true, force: true });
+}
+
+// ------------------------------------------------- where a planet's sounds are (soundplaces.mjs)
+
+// A synthetic world: a cantina with a sound object in one of its cells and a band that carries its
+// own cell index, a torch standing on its own, a wooden catwalk, a rock, a sound object whose
+// client data names an effect instead of a sound, a torch in a cell with no building over it, one
+// buried deeper than the container walk goes, and one whose place is not a number. Nothing here
+// needs the archives. Every name in this section is prefixed, because later waves append sections
+// of their own to this file and a second `const world` would be a syntax error, not a red check.
+const placesParams = (...params: ReturnType<typeof chunk>[]) => form('SHOT', form('0000', chunk('PCNT', new W().i32(params.length).bytes()), ...params));
+const placesStr = (name: string, value: string) => chunk('XXXX', new Uint8Array([...cstrs(name), 1, ...cstrs(value)]));
+const placesNum = (name: string, value: number) => chunk('XXXX', new Uint8Array([...cstrs(name), 1, 0x20, ...new W().i32(value).bytes()]));
+/** A snapshot NODE: its id, its container, which template, which cell, and where. Children nest inside it. */
+const placesNode = (id: number, containedBy: number, templateIndex: number, cellIndex: number, pos: number[], children: ReturnType<typeof form>[] = []) =>
+  form('NODE', form('0000', chunk('DATA', new W().i32(id).i32(containedBy).i32(templateIndex).i32(cellIndex).f32(1).f32(0).f32(0).f32(0).f32(pos[0]).f32(pos[1]).f32(pos[2]).f32(4).u32(0).bytes()), ...children));
+const placesOtnl = (names: string[]) => {
+  const w = new W().i32(names.length);
+  for (const n of names) w.str(n);
+  return chunk('OTNL', w.bytes());
+};
+
+const placesFiles = new Map<string, Buffer>();
+const placesPut = (p: string, node: ReturnType<typeof form>) => placesFiles.set(p, buf(encode(node)));
+const PLACES_CANTINA = 'object/building/tatooine/shared_cantina.iff';
+const PLACES_CELL = 'object/cell/shared_cell.iff';
+const PLACES_SOUNDOBJ = 'object/soundobject/shared_soundobject_cantina_large.iff';
+const PLACES_BAND = 'object/soundobject/shared_soundobject_band.iff';
+const PLACES_TORCH = 'object/tangible/furniture/all/shared_frn_all_tiki_torch_s1.iff';
+const PLACES_CATWALK = 'object/static/structure/general/shared_catwalk.iff';
+const PLACES_ROCK = 'object/static/shared_rock.iff';
+const PLACES_BROKEN = 'object/soundobject/shared_soundobject_broken.iff';
+const placesTemplates = [PLACES_CANTINA, PLACES_CELL, PLACES_SOUNDOBJ, PLACES_TORCH, PLACES_CATWALK, PLACES_ROCK, PLACES_BROKEN, PLACES_BAND];
+placesPut(PLACES_CANTINA, placesParams(placesStr('portalLayoutFilename', 'appearance/thm_tato_cantina.pob')));
+placesPut(PLACES_CELL, placesParams(placesNum('surfaceType', 0)));
+placesPut(PLACES_SOUNDOBJ, placesParams(placesStr('clientDataFile', 'clientdata/soundobject/shared_soundobject_cantina_large.cdf')));
+placesPut(PLACES_BAND, placesParams(placesStr('clientDataFile', 'clientdata/soundobject/shared_soundobject_band.cdf')));
+placesPut(PLACES_TORCH, placesParams(placesStr('clientDataFile', 'clientdata/furniture/shared_frn_all_tiki_torch_s1.cdf'), placesNum('surfaceType', 0)));
+placesPut(PLACES_CATWALK, placesParams(placesNum('surfaceType', 3)));
+placesPut(PLACES_ROCK, placesParams(placesNum('surfaceType', 0)));
+placesPut(PLACES_BROKEN, placesParams(placesStr('clientDataFile', 'clientdata/soundobject/shared_soundobject_broken.cdf')));
+placesPut('clientdata/soundobject/shared_soundobject_cantina_large.cdf', form('CLDF', form('0000', chunk('ASND', cstrs('sound/amb_cantina_large_lp.snd')))));
+placesPut('clientdata/soundobject/shared_soundobject_band.cdf', form('CLDF', form('0000', chunk('ASND', cstrs('sound/amb_band_lp.snd')))));
+placesPut('clientdata/furniture/shared_frn_all_tiki_torch_s1.cdf', form('CLDF', form('0000', chunk('ASND', cstrs('sound\\item_tiki_torch.snd')))));
+placesPut('clientdata/soundobject/shared_soundobject_broken.cdf', form('CLDF', form('0000', chunk('ASND', cstrs('clienteffect/not_a_sound.cef')))));
+// A torch nine containers deep inside a second cantina, which is further than the walk goes.
+let placesDeep = placesNode(30, 29, 3, 0, [0, 0, 1]);
+for (let i = 29; i >= 21; i--) placesDeep = placesNode(i, i - 1, 5, 0, [0, 0, 0], [placesDeep]);
+placesPut('snapshot/testland.ws', form('WSNP', form('0001',
+  form('NODS',
+    placesNode(1, 0, 0, 0, [100, 5, 200], [placesNode(2, 1, 1, 3, [0, 0, 0], [placesNode(3, 2, 2, 0, [1, 0.5, 2]), placesNode(8, 2, 7, 3, [2, 0.5, 3])])]),
+    placesNode(4, 0, 3, 0, [10, 0, 20]),
+    placesNode(5, 0, 4, 0, [30, 0, 40]),
+    placesNode(6, 0, 5, 0, [50, 0, 60]),
+    placesNode(7, 0, 6, 0, [70, 0, 80]),
+    placesNode(9, 0, 1, 2, [500, 0, 500], [placesNode(10, 9, 3, 0, [1, 0, 1])]),
+    placesNode(20, 0, 0, 0, [900, 0, 900], [placesDeep]),
+    placesNode(40, 0, 3, 0, [NaN, 0, 5]),
+  ),
+  placesOtnl(placesTemplates),
+)));
+placesPut('datatables/interior/interior.iff', dt(
+  ['PobName', 'Cell Name', 'Day sound/ambient Sound (2d .snd)', 'Night sound/ambient Sound (2d .snd)', 'First Music (2d .snd)', 'Surface Type', 'Room Type'],
+  ['s', 's', 's', 's', 's', 's', 'i'],
+  [
+    ['default', 'default', 'sound/default_interior.snd', 'sound/default_interior.snd', '', 'rock', 22],
+    ['thm_tato_cantina', 'default', 'sound/amb_cantina_large_lp.snd', 'sound/amb_cantina_large_lp.snd', '', 'stone', 7],
+    ['thm_tato_cantina', 'stage', 'sound/amb_cantina_large_lp.snd', '', 'sound/music_figrin_dan_song_1.snd', 'wood', 7],
+    ['mun_nboo_theed_palace', 'lobby', 'sound/amb_palace_lp.snd', '', '', 'stone', 22],
+  ],
+));
+const placesVfs = { has: (p: string) => placesFiles.has(p), read: (p: string) => placesFiles.get(p)!, list: (t: string) => [...placesFiles.keys()].filter((k) => k.includes(t)) };
+
+ok(pobNameOf('appearance/mun_tato_capitol_s01.pob') === 'mun_tato_capitol_s01' && pobNameOf('appearance\\thm_tato_cantina.pob') === 'thm_tato_cantina' && pobNameOf(null) === null, 'a portal layout file gives the room table\'s key: its name without its folder or its extension');
+ok(SURFACE_TYPES[1] === 'metal' && SURFACE_TYPES[2] === 'stone' && SURFACE_TYPES[3] === 'wood' && SURFACE_TYPES[0] === undefined, 'the surfaces a planet can place are named as a body\'s own steps name them, and 0 is no surface of its own');
+
+const placesSnap = parseSnapshot(parseIff(placesVfs.read('snapshot/testland.ws')));
+const placesFound = placedSounds(placesVfs, placesSnap, flattenWithWorldTransforms(placesSnap));
+ok(placesFound.emitters.length === 5, 'every placed object whose client data names its own looping sound is an emitter, and nothing else is');
+const placesInCantina = placesFound.emitters.find((e) => e.template === PLACES_SOUNDOBJ)!;
+ok(placesInCantina.p[0] === 101 && placesInCantina.p[1] === 5.5 && placesInCantina.p[2] === 202, 'an emitter inside a building is placed in the world, through its cell and its building');
+ok(placesInCantina.pob === 'thm_tato_cantina' && placesInCantina.cell === 3 && placesInCantina.bp![0] === 100, 'it carries the building it is in, which of its cells, and where that building stands');
+const placesBand = placesFound.emitters.find((e) => e.template === PLACES_BAND)!;
+ok(placesBand.cell === 3 && placesBand.pob === 'thm_tato_cantina', 'one that carries a room of its own is in that room, which is the room its cell object gives as well');
+const placesTorch = placesFound.emitters.find((e) => e.p[0] === 10)!;
+ok(placesTorch.sound === 'sound/item_tiki_torch.snd' && placesTorch.pob === undefined && placesTorch.cell === undefined, 'one standing out in the world carries no building, and its path\'s backslashes come out as slashes');
+const placesOrphan = placesFound.emitters.find((e) => e.p[0] === 501)!;
+ok(placesOrphan.cell === 2 && placesOrphan.pob === undefined, 'one in a room whose building the world does not name keeps its room and is counted as having no building');
+const placesBuried = placesFound.emitters.find((e) => e.p[0] === 900)!;
+ok(placesBuried.pob === undefined && placesBuried.cell === undefined, 'one buried deeper in containers than the walk goes is written where it stands, with no building guessed for it');
+ok(!placesFound.emitters.some((e) => !Number.isFinite(e.p[0])), 'one whose place is not a number is left out rather than stood at the world\'s origin');
+ok(placesFound.emitters.slice(0, 2).every((e) => e.template.startsWith('object/soundobject/')) && !placesFound.emitters[2].template.startsWith('object/soundobject/'), 'the objects placed for their sound alone come first, so a game that can hold only so many holds those');
+ok(!placesFound.emitters.some((e) => e.template === PLACES_BROKEN), 'an object whose own loop names something that is not a sound template is left out');
+ok(placesFound.pobs[PLACES_CANTINA] === 'thm_tato_cantina' && Object.keys(placesFound.pobs).length === 1, 'every placed building names its portal layout, which is how its rooms are found');
+ok(placesFound.surfaces[PLACES_CATWALK] === 'wood' && placesFound.surfaces[PLACES_ROCK] === undefined && placesFound.surfaces[PLACES_TORCH] === undefined, 'a template with a surface of its own is written, and the ones with none are not');
+
+const placesRooms = roomsFor(roomRows(parseDatatable(parseIff(placesVfs.read('datatables/interior/interior.iff')))), new Set(['thm_tato_cantina']));
+ok(placesRooms['thm_tato_cantina|stage'].surface === 'wood' && placesRooms['thm_tato_cantina|stage'].music === 'sound/music_figrin_dan_song_1.snd' && placesRooms['thm_tato_cantina|default'].room === 7, 'the room rows of the buildings a planet places come with it, keyed by building and cell');
+ok(placesRooms['default|default'] !== undefined && placesRooms['mun_nboo_theed_palace|lobby'] === undefined, 'the table\'s own fallback row comes too, and a building this planet does not place does not');
+ok(placesRooms['thm_tato_cantina|stage'].night === undefined, 'an empty cell in the table is left out rather than written as an empty path');
+
+const placesDir = mkdtempSync(join(tmpdir(), 'swg-places-'));
+try {
+  mkdirSync(join(placesDir, 'testland'), { recursive: true });
+  writeFileSync(join(placesDir, 'testland', 'manifest.json'), JSON.stringify({ planet: 'testland' }));
+  mkdirSync(join(placesDir, 'nowhere'), { recursive: true });
+  writeFileSync(join(placesDir, 'nowhere', 'manifest.json'), JSON.stringify({ planet: 'nowhere' }));
+  const written = convertSoundPlaces(placesVfs, placesDir, { planets: ['testland', 'nowhere', 'unconverted'], log: () => {} });
+  ok(written.length === 1 && written[0].planet === 'testland' && written[0].emitters === 5, 'a planet the archives place nothing for is passed over rather than written empty');
+  ok(!existsSync(join(placesDir, 'unconverted')), 'and a planet with no pack of its own is given neither a file nor a directory');
+  const pack = JSON.parse(readFileSync(join(placesDir, 'testland', 'sounds.json'), 'utf8'));
+  ok(pack.format === PLACES_FORMAT && pack.planet === 'testland' && pack.frame === 'snapshot', 'the planet\'s sounds are written with their format and the frame their places are in');
+  ok(pack.emitters.length === 5 && pack.soundObjects === 2 && pack.rooms['thm_tato_cantina|stage'] !== undefined && pack.surfaces[PLACES_CATWALK] === 'wood', 'the file holds the emitters, how many of them were placed for their sound alone, the rooms of the buildings placed and what is underfoot');
+
+  mkdirSync(join(placesDir, 'elsewhere'), { recursive: true });
+  writeFileSync(join(placesDir, 'elsewhere', 'manifest.json'), JSON.stringify({ planet: 'elsewhere' }));
+  const st = placesStatus(placesDir, ['testland', 'elsewhere', 'unconverted'], readPackJson);
+  ok(st.need!.includes('elsewhere') && !st.need!.includes('testland') && !st.need!.includes('unconverted'), 'status asks for a planet that has a pack and no placed sounds, and says nothing about one with no pack at all');
+  writeFileSync(join(placesDir, 'elsewhere', 'sounds.json'), JSON.stringify({ format: 0, planet: 'elsewhere', emitters: [] }));
+  ok(placesStatus(placesDir, ['testland', 'elsewhere'], readPackJson).need!.includes('older'), 'and asks again for one written before the converter changed shape');
+  writeFileSync(join(placesDir, 'elsewhere', 'sounds.json'), JSON.stringify({ format: PLACES_FORMAT, planet: 'elsewhere', emitters: [] }));
+  ok(placesStatus(placesDir, ['testland', 'elsewhere'], readPackJson).need === null, 'and is happy once both are there');
+  const many = placesStatus(placesDir, ['testland', 'a', 'b', 'c', 'd', 'e', 'f'], (p: string) => (p.endsWith('manifest.json') || readPackJson(p) ? { planet: 'x' } : null));
+  ok(many.need!.includes('and 2 more') && !many.need!.includes(', f'), 'a fresh tree asks for the first few planets by name and counts the rest');
+} finally {
+  rmSync(placesDir, { recursive: true, force: true });
 }
 
 console.log(`${checks} checks passed`);
