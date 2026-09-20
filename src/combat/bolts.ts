@@ -13,6 +13,7 @@
 // Activision, (C) 2013 OpenJK contributors, and is used under the GNU General Public License
 // version 2 (see LICENSES/OpenJK-GPL-2.0.txt).
 import * as THREE from 'three';
+import { combatSounds, GENERIC_GUN, SILENT_GUN, type GunSound } from '../audio/combatSounds';
 import { RAPIER, type Physics } from '../core/physics';
 import { markActor } from '../world/portalRender';
 import type { EffectHandle, ParticleEffects } from '../world/particles';
@@ -88,6 +89,13 @@ export interface BoltOptions {
   frame?: BoltFrame | null;
   /** Who fired it, so whatever it hits knows who to turn on. */
   source?: Living | null;
+  /**
+   * The gun's own sounds: its shot, what it sounds like striking each surface, and what it sounds
+   * like coming to nothing. Every caller passes its gun's set; a bolt with none but a ship's
+   * projectile takes that projectile's, and one with neither is silent at the muzzle and takes the
+   * plain blaster's where it lands.
+   */
+  sound?: GunSound | null;
 }
 
 export interface BoltFrame {
@@ -127,6 +135,10 @@ export interface Bolt {
   frame: BoltFrame | null;
   /** Who fired it; a bolt turned away by the saber becomes the player's. */
   source: Living | null;
+  /** The gun's own sounds, carried so that where it lands sounds like what fired it. */
+  sound: GunSound | null;
+  /** It has already whined past the ear, so a slow bolt alongside does not whine every frame. */
+  flew: boolean;
 }
 
 /** A shot that landed the instant it was fired: its line, fading over its life. */
@@ -153,6 +165,10 @@ export interface BoltWorld {
 }
 
 const tmp = new THREE.Vector3();
+/** Where a shot or a strike is heard; a module vector, so firing ten times a second allocates nothing. */
+const soundAt = new THREE.Vector3();
+/** The stretch a bolt covers this frame, in the world, for the whine as it goes by. */
+const flyStep = new THREE.Vector3();
 const hitPoint = new THREE.Vector3();
 const hitNormal = new THREE.Vector3();
 const bounce = new THREE.Vector3();
@@ -204,7 +220,7 @@ export class Bolts {
   constructor(private readonly scene: THREE.Scene) {}
 
   /** Fire a bolt from `from` along `dir` (unit length). */
-  fire(from: THREE.Vector3, dir: THREE.Vector3, { owner, damage = BLASTER.damage, speed = BLASTER.velocity, metresPerSecond, inherit, life = BLASTER.life, color = 0xff4a2a, exclude, projectile, size = 1, push = BLASTER.push, onHit, gravity = 0, bounces = 0, homing = null, frame = null, source = null }: BoltOptions): Bolt {
+  fire(from: THREE.Vector3, dir: THREE.Vector3, { owner, damage = BLASTER.damage, speed = BLASTER.velocity, metresPerSecond, inherit, life = BLASTER.life, color = 0xff4a2a, exclude, projectile, size = 1, push = BLASTER.push, onHit, gravity = 0, bounces = 0, homing = null, frame = null, source = null, sound = null }: BoltOptions): Bolt {
     const [coreMat, glowMat] = this.materialsFor(color);
     const mesh = new THREE.Group();
     mesh.add(new THREE.Mesh(this.core, coreMat), new THREE.Mesh(this.glow, glowMat), new THREE.Mesh(this.head, glowMat));
@@ -223,17 +239,30 @@ export class Bolts {
     if (fx) mesh.visible = false;
     this.scene.add(mesh);
     markActor(mesh);
-    const bolt: Bolt = { pos: from.clone(), dir: heading, speed: s, damage, owner, exclude, age: 0, life, lead: fx && projectile ? projectile.reach : (LENGTH / 2) * mesh.scale.z, reflected: 0, mesh, fx, hitFx: fx ? (projectile?.hit ?? null) : null, fxPack: fx ? fxPlayer : null, push, onHit: onHit ?? null, gravity, bounces, homing, vel: gravity || homing ? vel.clone().multiplyScalar(s) : null, frame, source };
+    // Which gun this is, for everything it will be heard doing: the caller's own set, or, for a
+    // ship's bolt fired by something that does not carry one, the set of the projectile it draws,
+    // and failing both the plain blaster, so a bolt is never silent leaving and loud landing.
+    const gun = sound ?? (projectile ? combatSounds.projectileGun(projectile.effect) : null) ?? GENERIC_GUN;
+    const bolt: Bolt = { pos: from.clone(), dir: heading, speed: s, damage, owner, exclude, age: 0, life, lead: fx && projectile ? projectile.reach : (LENGTH / 2) * mesh.scale.z, reflected: 0, mesh, fx, hitFx: fx ? (projectile?.hit ?? null) : null, fxPack: fx ? fxPlayer : null, push, onHit: onHit ?? null, gravity, bounces, homing, vel: gravity || homing ? vel.clone().multiplyScalar(s) : null, frame, source, sound: gun, flew: false };
     if (frame) this.settle(bolt);
     this.bolts.push(bolt);
     this.fired[owner]++;
+    // The shot itself, from the one place every bolt in the game passes through. Aboard, the muzzle
+    // is in the hull's frame and the ear is in the world, so it is carried out before it is heard.
+    // Who fired matters as much as what: a volley is one shot per shooter, and a squad carrying one
+    // kind of rifle is several. The shooter is its own body where it has no key of its own (a
+    // turret), so every emplacement of a field is still itself.
+    if (frame) soundAt.copy(from).applyMatrix4(frame.matrix);
+    else soundAt.copy(from);
+    combatSounds.fire(gun, soundAt.x, soundAt.y, soundAt.z, source?.key ?? exclude?.handle ?? 0);
     return bolt;
   }
 
   /** A bolt of each colour far below the world, gone on the next update, so the first real shot finds its shaders compiled. */
   warmUp(colors: number[] = [0xff4a2a, 0x3af06a]): void {
     for (const color of colors) {
-      const b = this.fire(new THREE.Vector3(0, -900, 0), new THREE.Vector3(0, -1, 0), { owner: 'enemy', color, speed: 0 });
+      // Not really a shot: the set that names nothing, so the warm-up is heard no more than it is seen.
+      const b = this.fire(new THREE.Vector3(0, -900, 0), new THREE.Vector3(0, -1, 0), { owner: 'enemy', color, speed: 0, sound: SILENT_GUN });
       b.age = BLASTER.life;
       this.fired.enemy--;
     }
@@ -279,6 +308,9 @@ export class Bolts {
       const b = this.bolts[i];
       b.age += dt;
       if (b.age > b.life) {
+        // It reached the end of its flight without striking anything: the weapon table's own
+        // "hit nothing" sound, which most guns have and the plain blaster has not.
+        if (b.sound) combatSounds.miss(b.sound, b.mesh.position.x, b.mesh.position.y, b.mesh.position.z, 'nothing');
         this.remove(i);
         continue;
       }
@@ -299,6 +331,16 @@ export class Bolts {
         if (b.speed > 1e-6) b.dir.copy(b.vel).divideScalar(b.speed);
       }
       const step = b.speed * dt;
+      // Past the ear, over the stretch it covers this frame rather than at the one point it was
+      // drawn at: a bolt crosses 20 to 40 metres in a frame and would otherwise slip past the ear
+      // unheard five times out of six. The mesh's place is where it was drawn, in the world; aboard,
+      // its heading is in the hull's frame and is carried out to match.
+      if (!b.flew && b.sound) {
+        flyStep.copy(b.dir);
+        if (b.frame) flyStep.transformDirection(b.frame.matrix);
+        flyStep.multiplyScalar(step);
+        b.flew = combatSounds.flyPast(b.mesh.position.x, b.mesh.position.y, b.mesh.position.z, flyStep.x, flyStep.y, flyStep.z, b.sound.ship);
+      }
       // Aboard, the bolt flies in the hull's frame against the room's own walls: nothing else is in there.
       if (b.frame) {
         const ray = new RAPIER.Ray(b.pos, b.dir);
@@ -310,6 +352,9 @@ export class Bolts {
         }
         const p = ray.pointAt(hit.timeOfImpact);
         hitPoint.set(p.x, p.y, p.z).applyMatrix4(b.frame.matrix);
+        // A hull's rooms are the hull: its walls and its deck sound like metal, and no ray of the
+        // planet's physics reaches in there to say otherwise.
+        combatSounds.hit(b.sound, hitPoint.x, hitPoint.y, hitPoint.z, 'ship');
         w.effects.burst(hitPoint, 0xffb070, 0.35, 0.12);
         w.effects.flash(hitPoint, 0xff8a50, 6, 4, 0.08);
         b.onHit?.(hitPoint, null);
@@ -337,6 +382,10 @@ export class Bolts {
         }
         b.pos.copy(hitPoint).addScaledVector(b.dir, 0.05 + b.lead * 0.5);
         this.settle(b);
+        // Off a wall: the weapon table's own ricochet where the gun has one, else what it sounds
+        // like striking whatever it glanced off.
+        if (b.sound?.ricochet) combatSounds.ricochet(b.sound, hitPoint.x, hitPoint.y, hitPoint.z);
+        else combatSounds.hit(b.sound, hitPoint.x, hitPoint.y, hitPoint.z, null, hit.collider.handle);
         w.effects.burst(hitPoint, 0xffb070, 0.3, 0.1);
         continue;
       }
@@ -358,6 +407,7 @@ export class Bolts {
         }
         if (b.owner !== 'player') {
           w.onPlayerHit(b.damage, b.pos);
+          combatSounds.hit(b.sound, hitPoint.x, hitPoint.y, hitPoint.z, 'creature');
           w.effects.burst(hitPoint, 0xff8060, 0.5, 0.15);
         }
         b.onHit?.(hitPoint, null);
@@ -371,6 +421,8 @@ export class Bolts {
         if (hitNormal.lengthSq() < 1e-6) hitNormal.copy(b.dir).negate();
         const took = target.takeBolt(b, hitPoint, hitNormal.normalize());
         if (took) {
+          // Whatever layer it went through, it struck a hull: the gun's own sound for metal.
+          combatSounds.hit(b.sound, hitPoint.x, hitPoint.y, hitPoint.z, 'ship');
           // No layer effect placed (no combat file, or none for that layer): the burst and the bolt's own hit effect, as before ships had a fight.
           if (took === 'taken') {
             w.effects.burst(hitPoint, 0xffb070, 0.7, 0.15);
@@ -386,9 +438,16 @@ export class Bolts {
       if (target) {
         tmp.copy(b.pos).addScaledVector(b.dir, -1);
         target.damage(b.damage, tmp, b.push, b.source);
+        combatSounds.hit(b.sound, hitPoint.x, hitPoint.y, hitPoint.z, 'creature');
         w.effects.burst(hitPoint, 0xffb070, 0.7, 0.15);
         w.effects.flash(hitPoint, 0xff8a50, 10, 6, 0.1);
       } else {
+        // Nothing alive: the water, the bare ground, or something standing there. What it struck is
+        // asked for by the collider that stopped it, which is the one thing that knows -- a mark on
+        // a wall is metres above anything a ray down from it could name.
+        const missed = combatSounds.missKindAt(hitPoint.x, hitPoint.y, hitPoint.z, hit.collider.handle);
+        if (missed) combatSounds.miss(b.sound, hitPoint.x, hitPoint.y, hitPoint.z, missed);
+        else combatSounds.hit(b.sound, hitPoint.x, hitPoint.y, hitPoint.z, null, hit.collider.handle);
         w.effects.burst(hitPoint, 0xffb070, 0.35, 0.12);
         w.effects.flash(hitPoint, 0xff8a50, 6, 4, 0.08);
       }

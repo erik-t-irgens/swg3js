@@ -104,6 +104,7 @@ import { OUTSIDE, type SoundSpace } from './audio/distance.ts';
 import type { AmbienceTune } from './audio/ambience.ts';
 import type { WorldSourceTune } from './audio/emitters.ts';
 import { BodySounds, type BodyLists, type FootTune, type PlayerBody } from './audio/footsteps.ts';
+import { combatSounds, GENERIC_GUN, type CombatTables, type CombatTune } from './audio/combatSounds.ts';
 import { sabers } from './audio/saberSounds.ts';
 import { CLIP_EVENT_TUNE, type ClipEventTune } from './audio/clipEvents.ts';
 import { FAMILY_TUNE } from './world/terrain';
@@ -152,6 +153,8 @@ const tmpQ = new THREE.Quaternion();
 const roomLightSpots: import('./vehicles/interior').RoomLight[] = [];
 /** Handed to the feet where a manager has no list yet, so no frame makes an empty array of its own. */
 const EMPTY_BODIES: readonly never[] = [];
+/** Where a fighter's blade is heard swinging or striking; one kept record, refilled per event. */
+const saberAt = { x: 0, y: 0, z: 0 };
 /** The fighters' glows the pool is asked for when the effects do not light the blades: the nearest two, within 25 m of the camera. */
 const FIGHTER_GLOW_RANGE = 25;
 const npcGlow: FighterGlow[] = [0, 1].map(() => ({ pos: new THREE.Vector3(), color: 0, d2: 0 }));
@@ -453,6 +456,9 @@ class App {
     // land nothing has feet, which is what a game with no sound pack does anyway.
     this.feet = new BodySounds(this.audio, import.meta.env.BASE_URL);
     this.feet.load();
+    // The guns. Every place a bolt is fired reaches this through the module it lives in, so a shot
+    // deep in a creature's brain or a turret's aim needs no mixer of its own to be heard.
+    combatSounds.attach(this.audio, import.meta.env.BASE_URL);
     this.renderer.setPixelRatio(S.renderScale);
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.renderer.shadowMap.enabled = S.shadows;
@@ -479,11 +485,30 @@ class App {
     // Where the feet ask what they have landed on: the water, the room, the thing stood on and the
     // ground, all of which only the world can say.
     this.feet.attachWorld(this.world.footSurfaces);
+    // A bolt asks the same four questions of the world a foot does: what it struck is what a foot
+    // landing there would have landed on.
+    combatSounds.attachWorld(this.world.footSurfaces);
     // The blades: the mixer they play through, the clip events that say which frames of a move
     // whoosh (the feet already read them, so the same index is shared rather than fetched twice),
     // and the world, which is asked only what room the ear is in and whether it is raining on the
     // blade or the blade is under water.
     sabers.attach(this.audio, { clips: this.feet.index, world: this.world, baseUrl: import.meta.env.BASE_URL });
+    // A fighter's blade is the sabers' to speak for: the guns hold the hook and the fighters ask
+    // through it, so nothing in the world has to know what a lit blade sounds like.
+    combatSounds.useSaber({
+      swing: (style, x, y, z, clip) => {
+        saberAt.x = x;
+        saberAt.y = y;
+        saberAt.z = z;
+        sabers.swing(style, saberAt, clip ?? undefined);
+      },
+      contact: (kind, x, y, z) => {
+        saberAt.x = x;
+        saberAt.y = y;
+        saberAt.z = z;
+        sabers.contact(kind, saberAt);
+      },
+    });
     // The lava tables World loads go to the heat haze from here on.
     this.world.heat = this.heat;
     // Plumes the heat haze draws, asked for once a frame from inside the effects chain (after the
@@ -725,6 +750,9 @@ class App {
     this.weaponsLoaded = WeaponCatalogue.load(import.meta.env.BASE_URL);
     void this.weaponsLoaded.then((c) => {
       this.weapons = c;
+      // The rack, so that something holding a weapon by its id alone (a person from the catalogue,
+      // whose hands are given a copy of the model and not the record) is heard with its own gun.
+      combatSounds.useCatalogue(c?.weapons ?? null);
       this.weaponsUi.attach(c);
       this.world.npcDeps.weapons = c;
       this.world.npcDeps.effects = this.effects;
@@ -1427,6 +1455,40 @@ class App {
         return { ...this.feet.status(), ground: { familyChunksHeld: this.inWorld ? this.world.terrain.familyChunks : 0, familyChunks: FAMILY_TUNE.familyChunks }, recent: log };
       },
       /**
+       * The guns, headless: the last shots, hits, misses, flybys, blows and blasts as a table, each
+       * with the gun it came from, the surface it was taken to have struck and the voice it got
+       * (`key` 0 means the mixer refused it, and `audio().recent` says why). Beside them: the two
+       * tables the sounds are looked up in, whether the planet's own surfaces and the projectile
+       * table have landed, whether the sabers have installed their hooks, and the counts (`fires`
+       * against `firesPlayed`, `volleys` swallowed as one shot, `hits`, `misses`, `flybys`).
+       *
+       * With a gun's id (`gunSounds('carbine_dc15')`) it prints that weapon's whole set instead --
+       * its shot, its five hit surfaces, its three misses -- which is how a gun that sounds wrong is
+       * traced to the row it came from. With an object it retunes the invented numbers live:
+       * `flyby` and `flybyGap` (how near a bolt must pass to whine, and how often), `volley` (how
+       * close together two shots of one gun are one shot), `blast` (the radii at which an explosion
+       * is small, medium or large) and `heldFade`. The ray that asks what a bolt struck is the
+       * feet's own, tuned by `footsteps({ probe, reach })`: it is the same ray asking the same
+       * question.
+       */
+      gunSounds: (which?: string | Partial<CombatTune>, n = 12) => {
+        if (typeof which === 'object') {
+          const unknown: string[] = [];
+          for (const [key, value] of Object.entries(which)) {
+            if (key in combatSounds.tune) (combatSounds.tune as unknown as Record<string, unknown>)[key] = value;
+            else unknown.push(key);
+          }
+          if (unknown.length) console.warn(`gunSounds: nothing here is tuned by ${unknown.join(', ')}`);
+        } else if (typeof which === 'string') {
+          const def = this.weapons?.weapons.find((w) => w.id === which) ?? null;
+          if (!def) return { ok: false, why: `the rack has no ${which}` };
+          return { weapon: def.id, template: def.template, class: def.class, sound: combatSounds.gunOf(def) };
+        }
+        const log = combatSounds.log.slice(-Math.max(1, n));
+        console.table(log);
+        return { ...combatSounds.status(), recent: log };
+      },
+      /**
        * What is under a point right now and which of the four sources says so: with no argument the
        * player's own feet, else a point. This is how a surface that sounds wrong is tracked down --
        * it names the room's row, the object template under the foot and the terrain's own surface
@@ -1740,7 +1802,8 @@ class App {
         boltFrom.copy(this.player.pos).addScaledVector(tmp, distance);
         boltFrom.y += 1.15;
         tmp.negate();
-        this.world.bolts.fire(boltFrom, tmp, { owner: 'enemy', damage: 15 });
+        // No gun stands behind it, so it is the plain blaster's: a test shot sounds like a shot.
+        this.world.bolts.fire(boltFrom, tmp, { owner: 'enemy', damage: 15, sound: GENERIC_GUN });
         return this.world.bolts.bolts.length;
       },
       /** Full health, for tests that stand in front of the turrets. */
@@ -2948,6 +3011,9 @@ class App {
     // walking into a cantina crossfades the street away rather than cutting it off at the door.
     this.world.listenerSpace.building = pose.space.building;
     this.world.listenerSpace.cell = pose.space.cell;
+    // The guns' own ear: a bolt whines past where the camera is, and a shot belongs to the room the
+    // camera stands in unless the world can name a nearer one.
+    combatSounds.setListener(pose.x, pose.y, pose.z, pose.space);
     // Feet and voices before the mixer's own step, so a step that lands this frame is given a voice
     // on the same frame it lands rather than the next.
     this.stepFeet(dt, pose.x, pose.y, pose.z);
@@ -2960,6 +3026,11 @@ class App {
    * field, so this allocates nothing.
    */
   private stepFeet(dt: number, lx: number, ly: number, lz: number): void {
+    // The guns' own clock, stepped here beside the feet's rather than with the shooting, because
+    // this is the one thing both the frame loop and `__debug.advance` run every step. Stepped with
+    // the shooting it would stand still while the player is dead, in a panel or in the map, and
+    // every shot fired at them in that time after the first would be swallowed as one volley.
+    combatSounds.update(dt);
     // A planet handed over once, and taken away on the way out: the feet fetch what that planet's
     // own objects are made of.
     const pack = this.inWorld ? this.world.packId : '';
@@ -2967,6 +3038,9 @@ class App {
       this.feetPack = pack;
       if (pack) this.feet.begin(pack);
       else this.feet.leave();
+      // The guns ask the same planet what its things are made of, and let go of the last one's.
+      if (pack) combatSounds.begin(pack);
+      else combatSounds.leave();
     }
     // The shared table that names the nine terrain surfaces arrives with the sound bank, some
     // frames after the game starts. Handed over when it changes rather than read through a cast,
@@ -2975,6 +3049,9 @@ class App {
     if (tables !== this.feetTables) {
       this.feetTables = tables;
       this.feet.setSurfaceTable(tables?.surfaces as Record<string, { type?: string }> | undefined);
+      // The guns' two tables come out of the same file: what each weapon's muzzle and blow sound
+      // like, and the nine terrain surfaces, which is what tells a bolt's stone from its sand.
+      combatSounds.setTables(tables as CombatTables | null);
     }
     const player = this.player;
     const rig = player.rig;
@@ -3046,6 +3123,8 @@ class App {
 
   /** Where the ear is, for the feet; a field, so the frame allocates nothing. */
   private readonly listenerAt = { x: 0, y: 0, z: 0 };
+  /** The weapon last seen in the right hand, so its sounds are asked for once when it is taken up. */
+  private heldGun: WeaponDef | null = null;
   /** The space the player's own feet and voice belong to while aboard a hull; a kept record. */
   private readonly footSpace: SoundSpace = { building: OUTSIDE.building, cell: OUTSIDE.cell };
 
@@ -4539,7 +4618,9 @@ class App {
     const projectileIndex = cw?.projectile ?? w?.projectile;
     const projectile = projectileIndex !== undefined ? this.world.garage?.projectileFor(projectileIndex) ?? null : null;
     // The shot is the pilot's ship's: whatever it hurts remembers that ship (and through it the player).
-    this.world.bolts.fire(from, dir, { owner: 'player', damage: cw ? cw.damage : SHIP_GUN_DAMAGE, metresPerSecond: gunSpeed, inherit: new THREE.Vector3(own.x, own.y, own.z), life: gunRange / gunSpeed + 0.05, color: pilot.boltColor, exclude: pilot.body, projectile, source: this.world.ships.of(pilot) });
+    // The gun's own sound is the projectile table's row for the bolt this gun fires, which is the
+    // ship's own gun (the X-wing's, the TIE's) and not the bolt's colour.
+    this.world.bolts.fire(from, dir, { owner: 'player', damage: cw ? cw.damage : SHIP_GUN_DAMAGE, metresPerSecond: gunSpeed, inherit: new THREE.Vector3(own.x, own.y, own.z), life: gunRange / gunSpeed + 0.05, color: pilot.boltColor, exclude: pilot.body, projectile, source: this.world.ships.of(pilot), sound: combatSounds.shipGun(projectileIndex) });
     this.effects.flash(from, pilot.boltColor, 5, 6, 0.06);
   }
 
@@ -4590,6 +4671,12 @@ class App {
   /** The class's weapon and abilities, then the bolts in the air (a bolt reaching the player meets the saber first). */
   private stepCombat(dt: number): void {
     const player = this.player;
+    // The weapon in hand changed: ask the bank for its sounds now rather than when it is first
+    // fired, so the shot that waits for them is never a shot the player hears. Never awaited.
+    if (player.equipped.right !== this.heldGun) {
+      this.heldGun = player.equipped.right;
+      combatSounds.prepareGun(this.heldGun);
+    }
     const ctx: KitContext = { dt, input: this.input, player, world: this.world, cam: this.cam, physics: this.physics, effects: this.effects, bolts: this.world.bolts, weapons: this.weapons };
     this.kit.update(ctx);
     this.world.bolts.update(dt, {

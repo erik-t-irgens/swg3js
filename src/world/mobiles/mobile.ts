@@ -8,6 +8,7 @@
 // and kill a mobile whose model is still loading, and a body with no model is simply not drawn.
 import * as THREE from 'three';
 import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js';
+import { combatSounds, type GunSound } from '../../audio/combatSounds';
 import { Group, groups, RAPIER, type Physics } from '../../core/physics';
 import type { Terrain } from '../terrain';
 import type { Bolts } from '../../combat/bolts';
@@ -78,6 +79,25 @@ const INSIDE = groups(Group.all, Group.all & ~(Group.terrain | Group.exterior));
 const BLOW_PUSH = { tiny: 1, small: 3, medium: 6, large: 10, huge: 16 } as const;
 /** A creature's spit: speed (m/s), colour, drop, and the acid burn it leaves (share of the blow a second, seconds). */
 const SPIT = { speed: 28, color: 0xb8e04a, gravity: 4, size: 1.2, burn: 0.15, burnFor: 3 };
+/**
+ * INVENTED, from the game's own names: a spitting creature is no weapon any table names, and the
+ * game carries exactly two sounds for it, one leaving and one landing. The same sound lands on
+ * every surface, since nothing says a mouthful of acid hits stone differently from wood.
+ */
+const SPIT_SOUND: GunSound = {
+  key: 'spit',
+  fire: 'sound/cr_spit_fire.snd',
+  hit: { creature: 'sound/cr_spit_impact.snd', metal: 'sound/cr_spit_impact.snd', stone: 'sound/cr_spit_impact.snd', wood: 'sound/cr_spit_impact.snd', other: 'sound/cr_spit_impact.snd' },
+  miss: { water: null, terrain: 'sound/cr_spit_impact.snd', nothing: null },
+  ricochet: null,
+  ship: false,
+};
+/**
+ * INVENTED: what a person or droid with nothing off the rack in its hands shoots like. Its bolt is
+ * already the game's plain pistol or rifle bolt, and these are the plain pistol and rifle rows of
+ * the game's own ranged table, chosen the same way the bolt is.
+ */
+const OWN_GUN = { pistol: { id: 'npc_pistol', class: 'pistol' }, rifle: { id: 'npc_rifle', class: 'rifle' } };
 /** The bone a shot leaves from, in the order tried (arms.ts). */
 const MUZZLE_BONES = MUZZLE_PATTERNS;
 /** A knock at least this hard (after the size's resistance) knocks it down, when it has the clips. */
@@ -720,15 +740,18 @@ export class Mobile implements Living {
     if (beast) {
       color = SPIT.color;
       const burn = this.blow * SPIT.burn;
-      this.deps.bolts.fire(from, dir, { owner: 'enemy', damage: this.blow, metresPerSecond: SPIT.speed, color, size: SPIT.size * Math.max(0.6, Math.min(2, Math.sqrt(this.scale * this.plan.height / 2))), gravity: SPIT.gravity, push: 1, exclude: this.body, source: this, onHit: (_p, hit) => hit?.afflict?.(burn, SPIT.burnFor) });
+      this.deps.bolts.fire(from, dir, { owner: 'enemy', damage: this.blow, metresPerSecond: SPIT.speed, color, size: SPIT.size * Math.max(0.6, Math.min(2, Math.sqrt(this.scale * this.plan.height / 2))), gravity: SPIT.gravity, push: 1, exclude: this.body, source: this, sound: SPIT_SOUND, onHit: (_p, hit) => hit?.afflict?.(burn, SPIT.burnFor) });
     } else {
       // The gun in its hand when it holds one off the rack; else a droid's or a person's own: the
       // pistol's bolt for the one-frame pistol shots, the rifle's otherwise.
       // (A beam or a flame has no bolt to fire: its holder shoots the rifle's.)
       const held = this.gun && this.gun.primary.speed > 0 ? this.gun : null;
-      const g = (held ?? (this.roles?.rangedAdditive && /pistol/i.test(this.roles.ranged ?? '') ? GUNS.bryar : GUNS.blaster)).primary;
+      const pistol = !!this.roles?.rangedAdditive && /pistol/i.test(this.roles.ranged ?? '');
+      const g = (held ?? (pistol ? GUNS.bryar : GUNS.blaster)).primary;
       color = g.color;
-      this.deps.bolts.fire(from, dir, { owner: 'enemy', damage: this.blow, speed: g.speed, color, size: g.size, push: g.push, exclude: this.body, source: this });
+      // The weapon in its hand is known here by the rack's id alone (the hands are given a copy of
+      // the model, not the record), which is all its sounds need: every id is its template's name.
+      this.deps.bolts.fire(from, dir, { owner: 'enemy', damage: this.blow, speed: g.speed, color, size: g.size, push: g.push, exclude: this.body, source: this, sound: (held ? combatSounds.gunById(this.weapon) : null) ?? combatSounds.gunOf(pistol ? OWN_GUN.pistol : OWN_GUN.rifle) });
     }
     // The flash is a pooled light shared by everything; only a near shot may borrow one.
     if (this.tier?.name === 'near' && cameraDist < LOD_TUNE.near) this.deps.effects()?.flash(from, color, 5, 6, 0.06);

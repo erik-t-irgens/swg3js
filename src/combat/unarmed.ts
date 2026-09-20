@@ -4,6 +4,7 @@
 // blow, on whatever the fist or foot reaches ahead of the chest. Both kits keep one of these and
 // run it while their bare-hands toggle is on.
 import * as THREE from 'three';
+import { combatSounds } from '../audio/combatSounds';
 import type { Hittable, KitContext } from './kit';
 import { sweepCapsule } from './sweep';
 
@@ -47,7 +48,11 @@ export class Unarmed {
         b.set(a.x + Math.sin(player.heading) * spec.reach, a.y - (this.blow.kind === 'kick' ? 0.3 : 0), a.z + Math.cos(player.heading) * spec.reach);
         this.hit.clear();
         const n = sweepCapsule(ctx, a, b, spec.radius, spec.damage, this.hit, spec.push, 0xffd0a0);
-        if (n) effects.flash(b, 0xffd0a0, 6, 5, 0.1);
+        // Where the fist or the boot arrived, when it arrived on something.
+        if (n) {
+          combatSounds.melee(null, true, b.x, b.y, b.z);
+          effects.flash(b, 0xffd0a0, 6, 5, 0.1);
+        }
       }
       if (t >= 1) this.blow = null;
     }
@@ -71,6 +76,9 @@ export class Unarmed {
       duration = d ? Math.min(d, 1.1) : FALLBACK_TIME;
       rig.play(clip, { fadeIn: 0.06, upperOnly: kind === 'punch' && ctx.player.moving });
     }
+    // The swing itself, from the melee table's bare-hands row, where the player stands.
+    const at = ctx.player.worldPos;
+    combatSounds.melee(null, false, at.x, at.y + 1.2, at.z);
     this.blow = { kind, duration, at: 0, landed: false };
   }
 

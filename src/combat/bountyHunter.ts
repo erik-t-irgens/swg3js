@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { combatSounds, COMBAT_TUNE } from '../audio/combatSounds';
 import { RAPIER } from '../core/physics';
 import { GUNS, gunTypeFor, type FireMode, type GunProfile } from './guns';
 import type { BoltFrame } from './bolts';
@@ -29,6 +30,10 @@ interface Charge {
   light: THREE.Object3D | null;
   /** A grenade that goes off on its first touch: what it was thrown from, so it does not go off in the hand. */
   armedAt: number;
+  /** It has touched down once, so it is heard landing once and not on every bounce after. */
+  landed?: boolean;
+  /** How fast it was going last step, so a sudden loss of speed can be told from the top of a throw. */
+  lastSpeed?: number;
 }
 
 /** A cloud left where a poison grenade or bug bomb burst: whoever stands in it is afflicted while it lasts. */
@@ -68,6 +73,19 @@ const UP = new THREE.Vector3(0, 1, 0);
 /** A hull-frame point and direction carried into the world (`toWorld`, `heatPlumes`). */
 const worldAt = new THREE.Vector3();
 const worldAlong = new THREE.Vector3();
+/** Where a held trigger's loop sounds from, in the world; its own vector, so a held frame allocates nothing. */
+const heldAt = new THREE.Vector3();
+/**
+ * INVENTED, from the game's own names: the loop a held trigger makes. The flame thrower's is the
+ * one sound the game keeps a loop of (`_lp`); the beams' are its one-shot sets of four samples,
+ * which the mixer runs one after another while the trigger is down, as a continuous beam wants.
+ * These are the three held triggers the guns have; anything else held makes no loop at all.
+ */
+const HELD_LOOPS: Record<string, string> = {
+  flame: 'sound/wep_flamethrower_shoot_lp.snd',
+  lightning: 'sound/wep_rifle_lightning.snd',
+  acid: 'sound/wep_rifle_acid_beam.snd',
+};
 /** How fast the air in a flame thrower's cone flows out from the muzzle, metres a second: the heat haze's noise follows it. */
 const FLAME_FLOW = 7;
 /** A held flame not stamped within this many milliseconds gives no heat: the step that held it did not run. */
@@ -304,6 +322,21 @@ export class BountyHunterKit implements Kit {
       if (c.light) c.light.visible = c.kind === 'pack' ? Math.sin(performance.now() * 0.006) > 0 : Math.sin(c.fuse * (c.fuse < 1 ? 60 : 18)) > 0;
       let go = false;
       if (c.kind === 'grenade') {
+        // Its first touch: thrown at a known speed, so it has landed as soon as it is no longer
+        // going at it and has lost that speed in one step rather than over a long climb. Thrown
+        // steeply a grenade is nearly still at the top of its arc, and without the second half of
+        // the test it would knock on the ground up there. It is heard whether or not the touch is
+        // what sets it off -- on the ground, or in the water it fell into.
+        if (!c.landed && c.body && c.armedAt > 0.15) {
+          const v = c.body.linvel();
+          const speed = Math.hypot(v.x, v.y, v.z);
+          const was = c.lastSpeed ?? speed;
+          c.lastSpeed = speed;
+          if (speed < (c.spec?.speed ?? 12) * 0.5 && was - speed > COMBAT_TUNE.grenadeKnock) {
+            c.landed = true;
+            combatSounds.grenade(c.spec?.model ?? null, 'land', c.mesh.position.x, c.mesh.position.y, c.mesh.position.z);
+          }
+        }
         // A fused charge goes on its fuse; a flechette mine early when something walks up to it; an impact grenade on its first touch.
         if (c.fuse <= 0) go = true;
         else if (c.mode && this.targets(ctx).some((h) => !h.dead && h.pos.distanceTo(c.mesh.position) < 1.6)) go = true;
@@ -510,6 +543,8 @@ export class BountyHunterKit implements Kit {
     lift.crossVectors(side, aimDir);
     const fx = player.equipped.right?.fx;
     const own = mode.ownShot && fx?.shot ? { effect: fx.shot, reach: fx.reach ?? 0.5, hit: fx.hit ?? null, pack: 'weapons' as const } : null;
+    // The weapon in hand: its shot, and what its bolts sound like landing. Built once per weapon.
+    const gunSound = combatSounds.gunOf(player.equipped.right);
     // A homing rocket follows what was under the crosshair when it left.
     const mark = mode.homing ? this.targetAhead(ctx, 60, 0.9) : null;
     for (let i = 0; i < count; i++) {
@@ -535,6 +570,7 @@ export class BountyHunterKit implements Kit {
           gravity: mode.gravity,
           bounces: mode.bounces,
           homing: mark ? { pos: mark.pos, dead: mark.dead } : null,
+          sound: gunSound,
           onHit: (p, target) => {
             if (mode.splash) this.blast(ctx, p, mode.splash.damage, mode.splash.radius, mode);
             if (target) this.afflict(ctx, target, mode);
@@ -544,6 +580,10 @@ export class BountyHunterKit implements Kit {
     }
     // The client's own muzzle flash when the pack has it, and the pooled light either way (at the muzzle in the world).
     player.muzzle(tmp);
+    // The shot a bolt cannot make for itself: a disruptor's line lands the instant it is fired and
+    // there is no bolt to sound it. Every other mode is heard from inside `Bolts.fire`, once for
+    // the whole trigger pull, since a scattergun's pellets are one shot.
+    if (mode.speed <= 0) combatSounds.fire(gunSound, tmp.x, tmp.y, tmp.z);
     tmp2.copy(aimDir);
     if (player.aboard) tmp2.transformDirection(player.aboard.vehicle.group.matrixWorld);
     ctx.bolts.flash(fx?.fire, tmp, tmp2);
@@ -566,18 +606,30 @@ export class BountyHunterKit implements Kit {
       tmp.copy(at).applyMatrix4(m);
       tmp2.copy(end).applyMatrix4(m);
       ctx.bolts.beam(tmp, tmp2, mode.color, 0.3 + level * 0.3, 1 + level * 1.5);
-      if (hit) effects.burst(tmp2, 0xffb070, 0.35, 0.12);
+      // A hull's rooms are the hull: what a shot fired in one strikes is metal.
+      if (hit) {
+        combatSounds.hit(combatSounds.gunOf(player.equipped.right), tmp2.x, tmp2.y, tmp2.z, 'ship');
+        effects.burst(tmp2, 0xffb070, 0.35, 0.12);
+      }
       return;
     }
     ctx.bolts.beam(at, end, mode.color, 0.3 + level * 0.3, 1 + level * 1.5);
     if (!hit) return;
     const target = world.hittableAt(hit.collider.handle);
+    // Where the line landed, by the same rules a bolt's landing takes.
+    const gun = combatSounds.gunOf(player.equipped.right);
     if (target) {
       tmp.copy(at);
       target.damage(damage, tmp, mode.push * (1 + level), world.playerTarget);
       this.afflict(ctx, target, mode);
+      combatSounds.hit(gun, end.x, end.y, end.z, 'creature');
       effects.burst(end, 0xffb070, 0.7, 0.15);
-    } else effects.burst(end, 0xffb070, 0.35, 0.12);
+    } else {
+      const missed = combatSounds.missKindAt(end.x, end.y, end.z);
+      if (missed) combatSounds.miss(gun, end.x, end.y, end.z, missed);
+      else combatSounds.hit(gun, end.x, end.y, end.z, null);
+      effects.burst(end, 0xffb070, 0.35, 0.12);
+    }
     if (mode.splash) this.blast(ctx, end, mode.splash.damage, mode.splash.radius, mode);
     effects.flash(end, mode.color, 10, 6, 0.1);
   }
@@ -671,6 +723,7 @@ export class BountyHunterKit implements Kit {
     this.flame.active = false;
     this.flame.frame = null;
     this.dropHeldEffect();
+    combatSounds.hold(null, 0, 0, 0);
   }
 
   /** A line held on the nearest thing ahead (lightning): hurt each frame, staggered, and the shock jumps to what stands near it. */
@@ -733,6 +786,12 @@ export class BountyHunterKit implements Kit {
    * out with the trigger held places it again in the new frame.
    */
   private holdEffect(ctx: KitContext, mode: FireMode, which: 'primary' | 'alt', at: THREE.Vector3, along: THREE.Vector3): void {
+    // The loop the trigger holds, at the muzzle in the world. It is asked for here, before the
+    // pack's own effect, so a flame is heard even where the pack has no flame to draw.
+    heldAt.copy(at);
+    const aboard = ctx.player.aboard;
+    if (aboard) heldAt.applyMatrix4(aboard.vehicle.group.matrixWorld);
+    combatSounds.hold((mode.effect && HELD_LOOPS[mode.effect]) || null, heldAt.x, heldAt.y, heldAt.z);
     const file = mode.effect ? ctx.weapons?.effect(mode.effect) : null;
     if (!file) return;
     const fxs = ctx.world.weaponFx;
@@ -754,6 +813,8 @@ export class BountyHunterKit implements Kit {
     // The flame first: without a pack effect `held` is null, and the heat must stop all the same.
     this.flame.active = false;
     this.dropHeldEffect();
+    // And its loop, which is held whether or not the pack had an effect to draw.
+    combatSounds.hold(null, 0, 0, 0);
   }
 
   private dropHeldEffect(): void {
@@ -843,6 +904,7 @@ export class BountyHunterKit implements Kit {
   /** A charge goes off where it is and is gone; a poison or bug cloud may stay. */
   private detonate(ctx: KitContext, c: Charge): void {
     const at = c.mesh.position;
+    combatSounds.blast(c.radius, at.x, at.y, at.z, c.spec?.model ?? null);
     this.blast(ctx, at, c.damage, c.radius, c.mode, c.push, c.color, c.spec);
     if (c.spec?.cloud) this.clouds.push({ pos: at.clone(), radius: c.spec.radius * 0.8, spec: c.spec, left: c.spec.cloud, tick: 0 });
     this.removeCharge(ctx, c);
@@ -971,6 +1033,9 @@ export class BountyHunterKit implements Kit {
       light = ball.light;
     }
     this.charges.push({ kind: 'grenade', mesh, body, fuse: spec.fuse > 0 ? spec.fuse : 30, damage: spec.damage, radius: spec.radius, push: spec.push, color: spec.color, mode: null, spec, light, armedAt: 0 });
+    // Armed as it leaves the hand, at the hand: the three grenades the game gives a sound of their
+    // own take it and the rest take the plain one.
+    combatSounds.grenade(spec.model, 'arm', mesh.position.x, mesh.position.y, mesh.position.z);
     ctx.player.shotFired();
   }
 

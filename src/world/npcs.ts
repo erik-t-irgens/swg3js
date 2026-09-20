@@ -5,6 +5,7 @@
 // A first pass: no cover, no dodging, the ground read from the terrain only. Its clothes come off
 // its species' wardrobe (a Wookiee's from the Wookiee pieces alone).
 import * as THREE from 'three';
+import { combatSounds } from '../audio/combatSounds';
 import { Group, groups, RAPIER, type Physics } from '../core/physics';
 import { CharacterRig, loadPlayerRig } from '../player/rig';
 import { applyLook } from '../player/look';
@@ -28,6 +29,16 @@ type Arm = 'saber' | 'melee' | 'gun';
 
 /** Jedi Academy's one-hand swings (the same list a lightsaber-armed person from the catalogue swings). */
 const SWINGS = SABER_SWINGS;
+
+/**
+ * Which style a swing is swung in, for its whoosh. Jedi Academy names its three styles' attacks
+ * `BOTH_A1`, `BOTH_A2` and `BOTH_A3`, which is exactly the list above, so the clip says it.
+ */
+function swingStyle(clip: string): 'fast' | 'medium' | 'strong' {
+  if (clip.startsWith('BOTH_A1')) return 'fast';
+  if (clip.startsWith('BOTH_A3')) return 'strong';
+  return 'medium';
+}
 const SPECIES_FALLBACK = ['human_male', 'human_female', 'twilek_male', 'twilek_female', 'zabrak_male', 'zabrak_female', 'rodian_male', 'bothan_male', 'trandoshan_male', 'moncal_female', 'sullustan_male', 'wookiee_male'];
 const RUN_SPEED = 5.2;
 const SIGHT = 45;
@@ -481,7 +492,8 @@ export class Npc implements Living {
           tmp.y += (Math.random() - 0.5) * s;
           tmp.z += (Math.random() - 0.5) * s;
           tmp.normalize();
-          bolts.fire(tmp2, tmp, { owner: 'enemy', damage: Math.max(6, g.primary.damage * 0.6), speed: g.primary.speed || 2300, color: g.primary.color, size: g.primary.size, push: g.primary.push, exclude: this.body, life: 6, source: this });
+          // Its own gun off the rack, so an enemy's shot sounds like the weapon in its hands.
+          bolts.fire(tmp2, tmp, { owner: 'enemy', damage: Math.max(6, g.primary.damage * 0.6), speed: g.primary.speed || 2300, color: g.primary.color, size: g.primary.size, push: g.primary.push, exclude: this.body, life: 6, source: this, sound: combatSounds.gunOf(this.weapon) });
           effects?.flash(tmp2, g.primary.color, 6, 5, 0.06);
           rig?.playUpper(rig.firstOf('rifle_combat_standing_fire_1', 'add_rifle_fire_1', 'pistol_combat_standing_fire_1') ?? '', 0.04);
         } else if (this.arm !== 'gun' && d < 2.6) {
@@ -489,6 +501,20 @@ export class Npc implements Living {
           this.hitIn = 0.32;
           const swing = SWINGS[Math.floor(Math.random() * SWINGS.length)];
           if (rig?.has(swing)) rig.play(swing, { fadeIn: 0.06 });
+          // A blade's own whoosh is the sabers' to make (the clip it plays may mark its own); a
+          // sword or a club takes the melee table's row for what it is.
+          // Jedi Academy's three styles are its A1, A2 and A3 swings, which is the list above.
+          // A blade is heard along the blade, not at the hips: the middle of the blade as it was
+          // last drawn, which is where its own light is read from too. Before the first frame that
+          // drew it there is no blade to speak of, and the body stands in.
+          if (this.arm === 'saber') {
+            const drawn = this.bladeTip.lengthSq() > 1e-6;
+            const bx = drawn ? (this.bladeBase.x + this.bladeTip.x) * 0.5 : this.pos.x;
+            const by = drawn ? (this.bladeBase.y + this.bladeTip.y) * 0.5 : this.pos.y + 1.2;
+            const bz = drawn ? (this.bladeBase.z + this.bladeTip.z) * 0.5 : this.pos.z;
+            combatSounds.saberSwing(swingStyle(swing), bx, by, bz, swing);
+          }
+          else combatSounds.melee(this.weapon, false, this.pos.x, this.pos.y + 1.2, this.pos.z);
         }
       }
     }
@@ -498,10 +524,11 @@ export class Npc implements Living {
         tmp.copy(t.pos).sub(this.pos);
         if (tmp.length() < 2.8) {
           t.damage(this.arm === 'saber' ? 32 : 18, this.pos, 4, this);
-          if (effects) {
-            tmp2.copy(t.pos).y += t.halfHeight;
-            effects.burst(tmp2, this.arm === 'saber' ? this.color.getHex() : 0xffd0a0, 1, 0.2);
-          }
+          // Where the blow landed: a blade's is the sabers' own contact, a sword's the melee table's.
+          tmp2.copy(t.pos).y += t.halfHeight;
+          if (this.arm === 'saber') combatSounds.saberContact('body', tmp2.x, tmp2.y, tmp2.z);
+          else combatSounds.melee(this.weapon, true, tmp2.x, tmp2.y, tmp2.z);
+          if (effects) effects.burst(tmp2, this.arm === 'saber' ? this.color.getHex() : 0xffd0a0, 1, 0.2);
         }
       }
     }

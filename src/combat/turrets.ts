@@ -2,6 +2,7 @@
 // them, so there is something to dodge and something to send a bolt back at. They aim where the
 // target is now, not where it will be, so a running target is missed and a standing one is hit.
 import * as THREE from 'three';
+import { combatSounds, type GunLike } from '../audio/combatSounds';
 import { RAPIER, type Physics } from '../core/physics';
 import type { Terrain } from '../world/terrain';
 import { markActor } from '../world/portalRender';
@@ -26,6 +27,13 @@ export const TURRET = {
   /** Where on the target it aims: chest height above the feet. */
   aimHeight: 1.15,
 };
+
+/**
+ * INVENTED: an emplacement is no weapon the game's tables name, so it fires as a heavy weapon
+ * does -- the heaviest of the four plain rows of `combat_effects_ranged.iff`. One record, so its
+ * sounds are worked out once for every turret there is.
+ */
+const TURRET_GUN: GunLike = { id: 'turret', class: 'heavy' };
 
 /** The player as the turrets see it. */
 export interface TurretTarget {
@@ -158,7 +166,7 @@ export class Turret implements Hittable {
     right.crossVectors(tmp, UP).normalize();
     up.crossVectors(right, tmp);
     tmp.addScaledVector(right, Math.tan((Math.random() * 2 - 1) * s)).addScaledVector(up, Math.tan((Math.random() * 2 - 1) * s)).normalize();
-    bolts.fire(from, tmp, { owner: 'enemy', damage: TURRET.damage, speed: BLASTER.velocity, color: 0xff3a2a, exclude: this.body });
+    bolts.fire(from, tmp, { owner: 'enemy', damage: TURRET.damage, speed: BLASTER.velocity, color: 0xff3a2a, exclude: this.body, sound: combatSounds.gunOf(TURRET_GUN) });
   }
 
   dispose(): void {

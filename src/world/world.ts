@@ -693,6 +693,12 @@ export class World {
     },
     groundTemplate: (x: number, z: number): string | null => this.terrain?.surfaceAt(x, z) ?? null,
     space: (x: number, y: number, z: number): SoundSpace | null => this.ambience?.sources.spaceAt?.(x, y, z) ?? null,
+    /**
+     * What a collider belongs to. A foot lands on whatever a short ray down from it finds; a bolt is
+     * stopped by the thing it struck and knows which, and the mark it leaves on a wall is metres
+     * above anything a ray down from it could name.
+     */
+    templateOfCollider: (handle: number): string | null => this.layoutStream?.templateOfCollider(handle) ?? null,
   };
 
   /** The pack directory this planet (or zone) loads from. */
