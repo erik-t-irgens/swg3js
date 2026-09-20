@@ -41,6 +41,7 @@ import type { LoopHost } from '../audio/emitters.ts';
 import { loadSpacePack, type SpacePack } from '../space/spaceData.ts';
 import { Nebulae, installNebulaDebug } from '../space/nebulae.ts';
 import { liveSettings } from '../core/settings.ts';
+import { peerBodies, type RemoteBodies } from '../net/remoteBodies.ts';
 import { ShipContacts } from '../space/contacts';
 import { NpcShipManager } from '../space/npcShips';
 import { ZONE_TIER } from '../space/roster';
@@ -294,7 +295,7 @@ export class World {
   private playerTargetSet = false;
   /** The one list handed round each frame, rebuilt only when a manager has gained or lost a body. */
   private readonly livingList: Living[] = [];
-  private livingAt = { creatures: -1, npcs: -1, player: false };
+  private livingAt = { creatures: -1, npcs: -1, peers: -1, player: false };
   /** Who is told when the player lands a blow (`watchPlayerHits`), and which bodies already tell them. */
   private hitWatch: PlayerHitWatch | null = null;
   private readonly hitWatched = new WeakSet<Living>();
@@ -2812,10 +2813,13 @@ export class World {
       // A vehicle spawned this same frame is not in the physics queries yet, so those are checked by distance.
       let blocked = this.vehicles.some((v) => Math.hypot(v.pos.x - x, v.pos.z - z) < v.radius + Math.max(w, l) / 2 + 0.5);
       if (!blocked) {
+        // With a group: a query that passes none is not group-tested at all, and would find the
+        // things that are meant to be found only by what is aimed at them -- another player's body,
+        // and the box round the hull they ride.
         this.physics.world.intersectionsWithShape({ x, y: y - b.min[1] + h / 2 + 0.5, z }, rot, shape, () => {
           blocked = true;
           return false;
-        });
+        }, undefined, groups(Group.all, Group.all));
       }
       if (!blocked) return [x, y, z];
     }
@@ -3466,9 +3470,20 @@ export class World {
     return out;
   }
 
-  /** The mobile, creature, fighter, turret or vehicle a physics collider belongs to (every collider of a long body is its own). */
+  /**
+   * The other players' bodies (src/net/remoteBodies.ts), bound to this world's physics the first
+   * time anything asks. With no relay it holds nothing and costs one map lookup that misses; the
+   * peers themselves make and move the bodies, and everything in the game finds them here.
+   */
+  private peerLink: RemoteBodies | null = null;
+
+  private peers(): RemoteBodies {
+    return (this.peerLink ??= peerBodies().bind(this.physics));
+  }
+
+  /** The mobile, creature, fighter, turret, other player or vehicle a physics collider belongs to (every collider of a long body is its own). */
   hittableAt(handle: number): Hittable | undefined {
-    return this.mobiles?.byCollider.get(handle) ?? this.creatures.byCollider.get(handle) ?? this.npcs.byCollider.get(handle) ?? this.turrets.byCollider.get(handle) ?? this.vehicles.find((v) => v.colliderHandles.includes(handle));
+    return this.mobiles?.byCollider.get(handle) ?? this.creatures.byCollider.get(handle) ?? this.npcs.byCollider.get(handle) ?? this.turrets.byCollider.get(handle) ?? this.peers().byCollider.get(handle) ?? this.vehicles.find((v) => v.colliderHandles.includes(handle));
   }
 
   /** `target` is whom the turrets shoot at, or null while nothing should be shot (noclip, riding). */
@@ -3625,24 +3640,28 @@ export class World {
   };
 
   /**
-   * Everything alive right now: the player when it may be attacked, the creatures, the mobiles, the fighters.
-   * One kept array, rebuilt only when a manager has gained or lost a body (or when `stepLiving`
-   * asks for a fresh one), so a disposed body can never be handed out.
+   * Everything alive right now: the player when it may be attacked, the creatures, the mobiles, the
+   * fighters, and the other players on this world. One kept array, rebuilt only when a manager has
+   * gained or lost a body (or when `stepLiving` asks for a fresh one), so a disposed body can never
+   * be handed out.
    */
   targets(fresh = false): readonly Living[] {
     const at = this.livingAt;
     const cv = this.creatures?.version ?? -1;
     const nv = this.npcs?.version ?? -1;
     const mv = this.mobiles?.version ?? -1;
+    const peers = this.peers();
+    const pv = peers.version;
     const alive = !this.playerTarget.dead;
-    if (!fresh && cv === at.creatures && nv === at.npcs && mv === this.mobilesAt && alive === at.player) return this.livingList;
+    if (!fresh && cv === at.creatures && nv === at.npcs && mv === this.mobilesAt && pv === at.peers && alive === at.player) return this.livingList;
     // Whether anything has come or gone since the last build, which is the only time a new body can
     // need watching. `stepLiving` asks for a fresh list every frame, so this must not be the rebuild
     // itself: it is the version change, and in a steady frame it is false and nothing is scanned.
-    const gained = cv !== at.creatures || nv !== at.npcs || mv !== this.mobilesAt || alive !== at.player;
+    const gained = cv !== at.creatures || nv !== at.npcs || mv !== this.mobilesAt || pv !== at.peers || alive !== at.player;
     at.creatures = cv;
     at.npcs = nv;
     this.mobilesAt = mv;
+    at.peers = pv;
     at.player = alive;
     this.livingList.length = 0;
     if (!this.playerTarget.dead) this.livingList.push(this.playerTarget);
@@ -3650,6 +3669,8 @@ export class World {
     // A mobile whose model is still loading neither thinks nor is fought over (the manager bumps its version when one is up).
     if (this.mobiles) for (const m of this.mobiles.live) if (m.ready) this.livingList.push(m);
     if (this.npcs) for (const n of this.npcs.npcs) this.livingList.push(n);
+    // The other players: on this world, with a body made, whatever they are standing in or riding.
+    for (const p of peers.living) this.livingList.push(p);
     if (this.hitWatch && gained) this.watchHits();
     return this.livingList;
   }

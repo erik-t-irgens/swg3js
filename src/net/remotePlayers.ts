@@ -12,9 +12,76 @@ import { changedSlots, fitKey, type ResolvedFit, type ShipFit } from '../vehicle
 import type { ShipBuild } from '../vehicles/shipMounts';
 import type { ShipPaint } from '../vehicles/shipPaint';
 import { applyLookPrepared } from '../player/look';
-import { weaponHolder, type WeaponCatalogue } from '../player/weapons';
+import { weaponHolder, type WeaponCatalogue, type WeaponDef } from '../player/weapons';
 import type { FxMoverList } from '../core/fx/velocity';
 import { RELAY, stepRelayVelocity } from '../core/fx/velocityMath.ts';
+import { measureBox, peerBodies, type PeerBlow, type PeerBox } from './remoteBodies.ts';
+
+/**
+ * One peer, as everything that hangs something on a peer sees them: their body in the physics, a
+ * blade in their hand, a shot of theirs. It is the whole of what those packages need and none of
+ * what they do not, so nothing of them reaches into the peers' own record.
+ *
+ * The object handed to a watcher is refilled, one per peer, and is never made in a frame: read what
+ * is wanted in the call and key anything kept on `id`, never on the view itself.
+ */
+export interface PeerView {
+  /** Their relay id, which is the name everything else knows them by. */
+  id: number;
+  name: string;
+  /** Drawn here at all: on this world, and not in a hyperspace jump. */
+  shown: boolean;
+  /** The group their figure is drawn under: its origin is their feet, its turn is theirs. */
+  group: THREE.Object3D;
+  /** Their rig, once it has loaded and dressed; null before. */
+  rig: CharacterRig | null;
+  /** The picture of the ride they are on, and its box in that picture's own frame; null for neither. */
+  ship: THREE.Object3D | null;
+  shipBox: PeerBox | null;
+  /** Their health as their own browser last said it; nothing here ever takes anything off it. */
+  hp: number;
+  maxHp: number;
+  /** Down: their own browser said they died, and the figure is playing the death clip. */
+  down: boolean;
+  /** Their blade is lit, and the colour they lit it. */
+  saber: boolean;
+  saberColor: number;
+  /**
+   * What hangs on their hand bones now: the holder in the scene, what the rack says it is, and
+   * which hand it is on. The hand is named because this list skips an empty hand, so its order is
+   * not the hands'. A lightsaber here is what a blade is drawn from, and its class says whether
+   * there is a second blade down the other end of the hilt, so nothing about the style has to go
+   * over the wire.
+   */
+  hands: readonly { node: THREE.Object3D; def: WeaponDef; hand: 'right' | 'left' }[];
+  /** Their blade out of their hand and spinning through the air, in world space; null when it is in it. */
+  saberThrown: { x: number; y: number; z: number; spin: number } | null;
+  /**
+   * The live matrix of the hull they are standing in, when they are in one: a blade's smear is
+   * remembered in that frame, and a blade they throw in a banked hull is turned by it. Null outside.
+   */
+  hullFrame: THREE.Matrix4 | null;
+}
+
+/** What a watcher is told. Every one of them is optional; nothing is called for a peer that has gone. */
+export interface PeerWatcher {
+  peerAdded?(p: PeerView): void;
+  /** Once a frame, after the figure and the picture of their ride have been put where they are drawn. */
+  peerMoved?(p: PeerView): void;
+  peerRemoved?(id: number): void;
+}
+
+/** Everything listening to the peers. Module-level, because the peers themselves are one set for the page. */
+const watchers: PeerWatcher[] = [];
+
+/** Listen to the peers; the answer stops listening again. */
+export function watchPeers(w: PeerWatcher): () => void {
+  watchers.push(w);
+  return () => {
+    const i = watchers.indexOf(w);
+    if (i >= 0) watchers.splice(i, 1);
+  };
+}
 
 /** The vehicle a peer is on, as a picture: which, where it is heading to, and how it is turned. */
 interface RemoteVehicle {
@@ -31,6 +98,8 @@ interface RemoteVehicle {
   wings: WingSet | null;
   /** Whether the pilot's wings are open or opening: the relay's `w`, else (a peer on an older build) whether it is moving. */
   wingsWant: boolean;
+  /** Its wings were moving on the last frame, so the picture's box is measured again when they stop. */
+  wingsMoved: boolean;
   /** Set down on the ground (the relay's `landed`): the picture is put exactly where it is said to be, with no glide. */
   landed: boolean;
   /**
@@ -41,6 +110,12 @@ interface RemoteVehicle {
   dock: { to: number; p: THREE.Vector3; q: THREE.Quaternion } | null;
   /** Its hull's box and bounding radius from the garage, for anything that must know how big it is; null before the picture is in. */
   size: { label: string; bounds: { min: number[]; max: number[] }; radius: number } | null;
+  /**
+   * The picture's own box, measured off its drawn meshes once when it came in, for the body that
+   * makes it something a bolt can stop against. It is not `size`, which is the pack's own bounds
+   * for how big a hull is judged to be from outside: this is where the picture's triangles are.
+   */
+  box: PeerBox | null;
   /** A fitted ship's build (its parts per slot, for a restage), its paint (disposed with the picture) and the fit it shows; null before the picture is in, or for a ride without a fit. */
   build: ShipBuild | null;
   paint: ShipPaint | null;
@@ -95,15 +170,40 @@ interface Remote {
   lookPending: Promise<void> | null;
   /** The weapons last hung in its hands (`right|left` ids), or null when they are still to be (the rack was not in yet). */
   heldApplied: string | null;
-  /** The holders hung on its hand bones. */
-  heldModels: THREE.Object3D[];
+  /** The holders hung on its hand bones, with what the rack says each one is and which hand it is on. */
+  heldModels: { node: THREE.Object3D; def: WeaponDef; hand: 'right' | 'left' }[];
   /** Its world velocity from the relay's messages (m/s), for the motion blur: the glide pulses ten times a second. */
   vel: THREE.Vector3;
   /** performance.now() of its last state message. */
   heardAt: number;
   /** In a hyperspace jump (the relay's `j`): neither the figure nor the ship is shown until a state comes without it. */
   jumping: boolean;
+  /**
+   * Their health, and whether they are down, exactly as their own browser said. Nothing on this
+   * side ever takes a number off them: the player who was shot is the only one who does that, and
+   * what comes back is what is shown. 100 of 100 and standing until anything says otherwise, which
+   * is what a peer on an older build stays.
+   */
+  hp: number;
+  maxHp: number;
+  down: boolean;
+  /** The colour their blade is lit in; the game's own default until their own browser says. */
+  saberColor: number;
+  /** Their blade when it is out of their hand: where it is in the world and how far it has spun. */
+  thrown: { x: number; y: number; z: number; spin: number } | null;
+  /** The one view handed to the watchers, refilled each frame rather than made. */
+  view: PeerView;
 }
+
+/**
+ * The blade colour a peer is drawn with until their own browser has said otherwise: the game's own
+ * default, `DEFAULT_SABER_COLOR` in `src/player/player.ts`, written here as its hex rather than
+ * imported. This file is reached from the network side of the game and that one pulls in the saber,
+ * the throw, the ragdoll, the deflection and the movement port; a value read out of it while the
+ * module is still loading would be silently wrong rather than loudly missing. The test compares the
+ * two sources so they cannot drift apart.
+ */
+const DEFAULT_PEER_SABER = 0x3aa0ff;
 
 const STATES: Set<string> = new Set(['idle', 'walk', 'run', 'air', 'seated', 'swim', 'float', 'crouch', 'crouchWalk', 'crouchWalkBack', 'stance', 'strafeLeft', 'strafeRight', 'runBack', 'walkBack', 'runSaber', 'walkSaber', 'gunIdle', 'gunWalk', 'gunRun', 'gunReadyIdle', 'gunReadyWalk', 'gunReadyRun', 'gunAimIdle', 'gunAimWalk', 'gunAimRun', 'kneel', 'prone', 'proneMove']);
 
@@ -215,9 +315,125 @@ export class RemotePlayers {
     group.add(label);
     this.scene.add(group);
     markActor(group);
-    const remote: Remote = { id, hello, group, rig: null, label, target: new THREE.Vector3(0, -1000, 0), heading: 0, targetQ: null, state: 'idle', speed: 0, saber: false, silent: 0, dance: null, vehicle: null, aboard: null, lookApplied: null, lookPending: null, heldApplied: null, heldModels: [], vel: new THREE.Vector3(), heardAt: 0, jumping: false };
+    const view: PeerView = { id, name: hello.name, shown: group.visible, group, rig: null, ship: null, shipBox: null, hp: 100, maxHp: 100, down: false, saber: false, saberColor: DEFAULT_PEER_SABER, hands: [], saberThrown: null, hullFrame: null };
+    const remote: Remote = { id, hello, group, rig: null, label, target: new THREE.Vector3(0, -1000, 0), heading: 0, targetQ: null, state: 'idle', speed: 0, saber: false, silent: 0, dance: null, vehicle: null, aboard: null, lookApplied: null, lookPending: null, heldApplied: null, heldModels: [], vel: new THREE.Vector3(), heardAt: 0, jumping: false, hp: 100, maxHp: 100, down: false, saberColor: DEFAULT_PEER_SABER, thrown: null, view };
     this.remotes.set(id, remote);
+    // Told before the rig is fetched: what hangs on a peer decides for itself how much of them it
+    // needs, and a body is made on the first frame they are drawn, not here at the origin.
+    for (const w of watchers) w.peerAdded?.(this.viewOf(remote));
     void this.dress(remote);
+  }
+
+  /** The view of a peer, refilled: it is one object per peer and is never made in a frame. */
+  private viewOf(r: Remote): PeerView {
+    const v = r.view;
+    v.name = r.hello.name;
+    // Drawn here, and heard from at least once: before their first state a peer's group still sits
+    // at the world's origin, and a body or a blade made for them there would stand in the middle of
+    // the map waiting to be shot at.
+    v.shown = r.group.visible && r.heardAt > 0;
+    v.rig = r.rig;
+    v.ship = r.vehicle?.obj ?? null;
+    v.shipBox = r.vehicle?.box ?? null;
+    v.hp = r.hp;
+    v.maxHp = r.maxHp;
+    v.down = r.down;
+    v.saber = r.saber && !r.down;
+    v.saberColor = r.saberColor;
+    // In `viewOf`, beside the other fields. `dockPos`/`dockQuat` are the module scratch this file
+    // already has: `viewOf` runs after `placeAboard` in the same `update`, so nothing else is using
+    // them at this point.
+    v.hands = r.heldModels;
+    v.saberThrown = r.thrown;
+    v.hullFrame = r.aboard && this.carrierShown(r.aboard.ship) && this.carrierAt(r.aboard.ship, dockPos, dockQuat) ? hullMatrix.compose(dockPos, dockQuat, ONE) : null;
+    return v;
+  }
+
+  /**
+   * Their health, as their own browser said it. Nothing on this side subtracts anything: the
+   * shooter's browser decides a hit and the player who was shot is the only one who takes the
+   * number off, so this is where the answer lands and the only place it changes.
+   */
+  setHealth(id: number, hp: number, maxHp = 100): void {
+    const r = this.remotes.get(id);
+    if (!r || !Number.isFinite(hp) || !Number.isFinite(maxHp)) return;
+    r.hp = Math.max(0, Math.min(maxHp, hp));
+    r.maxHp = Math.max(1, maxHp);
+    peerBodies().setHealth(id, r.hp, r.maxHp);
+  }
+
+  /**
+   * The same, as the share of themselves they have left, which is what the wire carries: every
+   * player's maximum is their own business and no message says what it is. Here so that whoever
+   * reads the wire never has to guess whether this side wants a share or a number -- read as a
+   * number, a peer at full health would show as 1 of 100 the moment their first message arrived.
+   */
+  setHealthShare(id: number, share: number): void {
+    const r = this.remotes.get(id);
+    if (!r || !Number.isFinite(share)) return;
+    this.setHealth(id, Math.max(0, Math.min(1, share)) * r.maxHp, r.maxHp);
+  }
+
+  /**
+   * They died, or came back. A peer's death is a clip and never a ragdoll: nothing carries bone
+   * motion across, so a ragdoll here would end in a different heap from the one on their own
+   * screen and on everyone else's. The fighters' own death clip is what plays, held on its last
+   * frame; standing up again is an ordinary state.
+   */
+  setDown(id: number, down: boolean): void {
+    const r = this.remotes.get(id);
+    if (!r || r.down === down) return;
+    r.down = down;
+    const rig = r.rig;
+    // No rig yet: the flag is kept and the clip goes on at the end of `dress`, or a peer whose death
+    // reached this browser before their body did would stand up looking alive for the rest of the
+    // page while nothing here could hit them.
+    if (!rig) return;
+    if (!down) {
+      rig.stopOverride(0.2);
+      r.dance = null;
+      return;
+    }
+    this.playDeath(r, 0.08);
+  }
+
+  /** The fighters' own death clip, held on its last frame. Nothing else is asked of the figure after it. */
+  private playDeath(r: Remote, fadeIn: number): void {
+    const rig = r.rig;
+    if (!rig) return;
+    r.dance = null;
+    const clip = rig.firstOf('trn_stand_to_incapacitated', 'BOTH_DEATH1', 'BOTH_DEATH4', 'BOTH_DEAD1');
+    if (clip) rig.play(clip, { fadeIn, hold: true });
+  }
+
+  /** The colour their blade is lit in, as their own browser said it. */
+  setSaberColor(id: number, color: number): void {
+    const r = this.remotes.get(id);
+    if (r && Number.isFinite(color)) r.saberColor = color >>> 0;
+  }
+
+  /**
+   * Where a blow struck here against another player goes, and whether it could take anything off
+   * them at all. Both belong to whoever reads the wire, and both are here rather than on the bodies
+   * themselves so that the wiring needs nothing of the physics: one call, at the end of the game's
+   * own network wiring, and every bolt, blade, blast and power that lands on a peer crosses.
+   *
+   * `hand` is told of each blow and sends what it chooses to send. `may` answers, per peer and as
+   * often as every frame, whether a blow could reach them at all -- the server's damage switch, or a
+   * duel. It is what keeps the local wildlife from abandoning the player to mob the picture of a
+   * friend it can never finish: a peer joins the one list of the living only while it says yes.
+   * Called with nothing (no server, an older relay) puts the game back as it is with no wiring.
+   */
+  sendBlowsTo(hand: ((blow: PeerBlow) => void) | null, may: ((id: number) => boolean) | null = null): void {
+    const b = peerBodies();
+    b.onBlow = hand;
+    b.mayHurt = may;
+  }
+
+  /** Their health and whether they are down, for a roster row or a plate; null when they are nobody here. */
+  healthOf(id: number): { hp: number; maxHp: number; down: boolean } | null {
+    const r = this.remotes.get(id);
+    return r ? { hp: r.hp, maxHp: r.maxHp, down: r.down } : null;
   }
 
   /** The rig of the peer's species, put under its group once it loads (the placeholder is nothing meanwhile). */
@@ -251,6 +467,9 @@ export class RemotePlayers {
       if (remote.rig !== rig) return;
       this.onDressed?.(rig.root);
       await this.applyHeld(remote);
+      // They died while their rig was still on its way: it lands playing the death clip rather than
+      // standing about, which is what the rest of the game already believes of them.
+      if (remote.rig === rig && remote.down) this.playDeath(remote, 0);
     } catch (err) {
       console.warn(`remote player ${remote.hello.name}: no rig for ${species}`, err);
     }
@@ -302,7 +521,7 @@ export class RemotePlayers {
       return;
     }
     r.heldApplied = key;
-    for (const m of r.heldModels) m.removeFromParent();
+    for (const m of r.heldModels) m.node.removeFromParent();
     r.heldModels = [];
     if (!cat) return;
     for (const [role, id] of [['rightHand', held?.r], ['leftHand', held?.l]] as const) {
@@ -317,7 +536,7 @@ export class RemotePlayers {
         if (this.remotes.get(r.id) !== r || r.rig !== rig || r.heldApplied !== key) return;
         bone.add(holder);
         markActor(holder);
-        r.heldModels.push(holder);
+        r.heldModels.push({ node: holder, def, hand: role === 'rightHand' ? 'right' : 'left' });
       } catch (err) {
         console.warn(`remote player ${r.hello.name}: their ${id} did not load`, err);
       }
@@ -334,6 +553,8 @@ export class RemotePlayers {
     if (!r) return;
     const speciesChanged = r.hello.species !== hello.species;
     r.hello = hello;
+    // The colour they lit it in; a browser built before this sends none and keeps the game's own blue.
+    if (typeof hello.saber === 'number') this.setSaberColor(id, hello.saber);
     if (!speciesChanged)
       void this.applyLook(r).then(() => {
         if (!r.rig) return;
@@ -373,6 +594,9 @@ export class RemotePlayers {
     r.state = STATES.has(s.s) ? s.s : 'idle';
     r.speed = s.v;
     r.saber = s.sab;
+    // Their blade out of their hand. Nothing here draws it; what hangs on a peer reads it off the view.
+    const tb = s.tb;
+    r.thrown = tb && tb.length === 4 && tb.every((v) => Number.isFinite(v)) ? { x: tb[0], y: tb[1], z: tb[2], spin: tb[3] } : null;
     r.silent = 0;
     this.rideState(r, s.veh, s.in);
     // In a jump they vanish; out of it they appear where they are now, not gliding across the distance jumped.
@@ -436,7 +660,7 @@ export class RemotePlayers {
     }
     if (!r.vehicle || r.vehicle.id !== veh.id) {
       this.dropVehicle(r);
-      const rv: RemoteVehicle = { id: veh.id, obj: null, target: new THREE.Vector3(veh.p[0], veh.p[1], veh.p[2]), targetQ: new THREE.Quaternion(veh.q[0], veh.q[1], veh.q[2], veh.q[3]), pose: veh.pose ?? null, vel: new THREE.Vector3(), heardAt: 0, wings: null, wingsWant: veh.w === 1, landed: veh.landed === 1, dock: null, size: null, build: null, paint: null, fit: null, busy: null, want: null };
+      const rv: RemoteVehicle = { id: veh.id, obj: null, target: new THREE.Vector3(veh.p[0], veh.p[1], veh.p[2]), targetQ: new THREE.Quaternion(veh.q[0], veh.q[1], veh.q[2], veh.q[3]), pose: veh.pose ?? null, vel: new THREE.Vector3(), heardAt: 0, wings: null, wingsWant: veh.w === 1, wingsMoved: false, landed: veh.landed === 1, dock: null, size: null, box: null, build: null, paint: null, fit: null, busy: null, want: null };
       r.vehicle = rv;
       void this.bringVehicle(r, rv);
     }
@@ -505,9 +729,16 @@ export class RemotePlayers {
       }
       obj.position.copy(rv.target);
       obj.quaternion.copy(rv.targetQ);
-      obj.visible = r.group.visible;
       // A ship first seen in flight arrives with its wings where they are, not closed and opening.
       if (wings.length) wings.snap(rv.wingsWant);
+      // Its box, measured after the wings are where they stand and not before: a ship first seen in
+      // flight has them open, and on the fighters that fold their foils the open span is metres more
+      // hull than the closed one -- metres a bolt would fly straight through. It is the picture's own
+      // frame, so it holds wherever the ship goes; it is taken again when the wings settle, and again
+      // after a refit. Before the picture is hidden, too: a hull whose rider is on another world is
+      // not drawn, and the measure is of the drawn meshes.
+      rv.box = measureBox(obj);
+      obj.visible = r.group.visible;
       // A fitted ship keeps its set even while empty: a part a refit brings may carry a wing (stepping an empty set is free).
       if (wings.length || def.fit) rv.wings = wings;
       this.scene.add(obj);
@@ -549,6 +780,9 @@ export class RemotePlayers {
             return;
           }
           s.commit();
+          // The parts changed, so the picture's own box did: measured again, and the body round it
+          // is made again from the new one on the next frame.
+          if (rv.obj) rv.box = measureBox(rv.obj) ?? rv.box;
         }
         if (r.vehicle !== rv) return;
         rv.fit = next;
@@ -569,6 +803,7 @@ export class RemotePlayers {
     r.vehicle.paint?.dispose();
     r.vehicle.paint = null;
     r.vehicle.want = null;
+    r.vehicle.box = null;
     r.vehicle = null;
   }
 
@@ -592,6 +827,9 @@ export class RemotePlayers {
     this.dropVehicle(r);
     this.scene.remove(r.group);
     (r.label.material as THREE.SpriteMaterial).map?.dispose();
+    // Last, so whatever a watcher holds of them (a body in the physics, a blade) goes with them and
+    // never outlives the peer or the world it was made in.
+    for (const w of watchers) w.peerRemoved?.(id);
   }
 
   update(dt: number): void {
@@ -647,11 +885,23 @@ export class RemotePlayers {
         // The wings open and close as the pilot's do, each on its own clock (nothing moves once they have settled).
         if (rv.wings) {
           rv.wings.want = rv.wingsWant;
-          rv.wings.step(dt);
+          const moving = rv.wings.step(dt);
+          if (moving) rv.wingsMoved = true;
+          else if (rv.wingsMoved) {
+            // They have just stopped: the picture is a different shape from the one the body round it
+            // was made from, so it is measured once more here. Not per frame -- this is the one frame
+            // in a swing that the wings settle on -- and the body itself is rebuilt only when the
+            // numbers really differ, which is the comparison the bodies already make.
+            rv.wingsMoved = false;
+            rv.box = measureBox(rv.obj) ?? rv.box;
+          }
         }
       }
       const rig = r.rig;
-      if (rig) {
+      if (rig && r.down) {
+        // Down: the death clip holds on its last frame and nothing else is asked of the figure.
+        rig.update(dt);
+      } else if (rig) {
         // A flourish over, the dance goes on.
         if (r.dance && !rig.overriding) rig.play(r.dance, { fadeIn: 0.15, loop: true });
         const moving = r.silent < 0.6 && r.group.position.distanceTo(r.target) > 0.05;
@@ -670,6 +920,15 @@ export class RemotePlayers {
     // After the clamped pictures, never before: the hull a passenger stands in may itself be
     // clamped onto another, and its own pose is only right once that pass has put it there.
     if (anyAboard) this.placeAboard();
+    // Last of all: every figure and every picture is now where it is drawn this frame, which is
+    // where a body of theirs belongs. A watcher told any sooner would follow a pose that the
+    // clamped and the aboard passes were about to move.
+    if (watchers.length) {
+      for (const r of this.remotes.values()) {
+        const v = this.viewOf(r);
+        for (const w of watchers) w.peerMoved?.(v);
+      }
+    }
   }
 
   /**
@@ -846,6 +1105,9 @@ const aboardTurn = new THREE.Quaternion();
 /** The knob's own, so reading a report between frames cannot tread on the scratch a frame is using. */
 const reportPos = new THREE.Vector3();
 const reportQuat = new THREE.Quaternion();
+/** The hull a passenger stands in, as a matrix, for anything of theirs that lives in that frame. */
+const hullMatrix = new THREE.Matrix4();
+const ONE = new THREE.Vector3(1, 1, 1);
 
 /**
  * The invented numbers of standing in somebody else's hull, both live through `__aboard()`.
@@ -865,6 +1127,11 @@ export const ABOARD_TUNE = {
 
 /** The one set of peers, so the knob can report them; set when the game builds it, let go on dispose. */
 let thePeers: RemotePlayers | null = null;
+
+// The peers' bodies listen like anything else: made when a peer is first drawn, moved with the
+// picture, taken down when they go. It is registered here, once for the page, so that nothing in
+// the game has to be wired up for another player to become something a bolt can stop against.
+watchPeers(peerBodies());
 
 /**
  * The live knob, on the window as `__aboard()`: what this browser last said about the hull it

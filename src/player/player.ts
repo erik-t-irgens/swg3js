@@ -491,6 +491,13 @@ export class Player {
     this.controller = made.controller;
   }
 
+  /**
+   * What the character controller walks straight through: a corpse (a ragdoll is no wall) and
+   * another player's body (it comes off the wire and teleports, so it must never climb, shove or
+   * trap you). One kept predicate rather than a closure made on every step.
+   */
+  private readonly walkPast = (c: RAPIER.Collider): boolean => !this.physics.isRagdoll(c.handle) && !this.physics.isPeer(c.handle);
+
   /** A kinematic capsule with its character controller, in a physics world: the player's in the world, or in a ship's room. */
   private static makeBody(world: RAPIER.World): { body: RAPIER.RigidBody; collider: RAPIER.Collider; controller: RAPIER.KinematicCharacterController } {
     const body = world.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased());
@@ -1382,9 +1389,10 @@ export class Player {
       if (speed > 0) this.vel.multiplyScalar(Math.max(0, speed - EVA_BRAKE * dt) / speed);
     }
     if (this.vel.length() > EVA_MAX_SPEED) this.vel.setLength(EVA_MAX_SPEED);
-    // Move with the collider: a hull or a rock in the way stops the drift into it.
+    // Move with the collider: a hull or a rock in the way stops the drift into it. A corpse and
+    // another player are not in the way of it, as on foot.
     this.controller.disableSnapToGround();
-    this.controller.computeColliderMovement(this.collider, { x: this.vel.x * dt, y: this.vel.y * dt, z: this.vel.z * dt }, undefined, groups(Group.all, Group.all));
+    this.controller.computeColliderMovement(this.collider, { x: this.vel.x * dt, y: this.vel.y * dt, z: this.vel.z * dt }, undefined, groups(Group.all, Group.all), this.walkPast);
     const mv = this.controller.computedMovement();
     const wanted = this.vel.lengthSq() * dt * dt;
     const got = mv.x * mv.x + mv.y * mv.y + mv.z * mv.z;
@@ -1691,8 +1699,11 @@ export class Player {
     if (this.vel.y > 0.5 || this.swimming) this.controller.disableSnapToGround();
     else this.controller.enableSnapToGround(0.35);
     const filter = this.inside ? groups(Group.all, Group.all & ~(Group.terrain | Group.exterior)) : groups(Group.all, Group.all);
-    // The dead are walked through: a corpse is no wall.
-    this.controller.computeColliderMovement(this.collider, { x: this.vel.x * dt, y: this.vel.y * dt, z: this.vel.z * dt }, undefined, filter, (c) => !this.physics.isRagdoll(c.handle));
+    // The dead are walked through: a corpse is no wall. So is another player: their body comes off
+    // the wire and teleports between messages, and one walked into must never climb, shove or trap
+    // you. Their collision groups already keep them out of a filtered query like this one; the
+    // predicate is what keeps it true if that filter is ever widened.
+    this.controller.computeColliderMovement(this.collider, { x: this.vel.x * dt, y: this.vel.y * dt, z: this.vel.z * dt }, undefined, filter, this.walkPast);
     const mv = this.controller.computedMovement();
     this.pos.x += mv.x;
     this.pos.y += mv.y;

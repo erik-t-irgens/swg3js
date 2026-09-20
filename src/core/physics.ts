@@ -4,8 +4,14 @@ import RAPIER from '@dimforge/rapier3d-compat';
  * Collision group bits. Everything is in `all` by default; terrain and building shells get
  * their own bits so a character standing inside a building can ignore both (the game only
  * collides with a building's interior cells while you are in them, and never with the ground).
+ *
+ * `peer` is another player's body, which is in a group of its own and collides with nothing: its
+ * colliders are made with membership `peer` and a filter of zero, so every query that passes an
+ * interaction group misses them (the character controller, a ship's set-down probe, the weather's
+ * roof grid, the camera's block ray) while a query that passes none is not group-tested at all and
+ * finds them (a bolt's ray, a blade's sweep, an aiming ray). See src/net/remoteBodies.ts.
  */
-export const Group = { terrain: 0x0001, exterior: 0x0002, interior: 0x0004, all: 0xffff } as const;
+export const Group = { terrain: 0x0001, exterior: 0x0002, interior: 0x0004, peer: 0x0008, all: 0xffff } as const;
 
 /** Rapier interaction groups: membership in the high half, filter in the low half. */
 export const groups = (membership: number, filter: number): number => ((membership << 16) | filter) >>> 0;
@@ -111,6 +117,31 @@ export class Physics {
   isRagdoll(handle: number): boolean {
     return this.ragdolls.has(handle);
   }
+
+  /**
+   * The other players' bodies (src/net/remoteBodies.ts). Their collision groups already keep them
+   * out of everything that passes one, so this is what the few calls that pass none use to pass over
+   * them all the same: the character controller (belt and braces, and it stays right if a filter is
+   * ever widened) and `groundDistance`, which casts with no filter at all and would otherwise make a
+   * peer standing under a speeder into its road.
+   */
+  private readonly peers = new Set<number>();
+
+  markPeer(c: RAPIER.Collider): void {
+    this.peers.add(c.handle);
+  }
+
+  unmarkPeer(c: RAPIER.Collider): void {
+    this.peers.delete(c.handle);
+  }
+
+  /** Whether a collider is another player's body. */
+  isPeer(handle: number): boolean {
+    return this.peers.has(handle);
+  }
+
+  /** Kept, not made per call: a vehicle casts one of these per wheel per step. */
+  private readonly notPeer = (c: RAPIER.Collider): boolean => !this.peers.has(c.handle);
 
   static async create(): Promise<Physics> {
     await RAPIER.init();
@@ -286,9 +317,14 @@ export class Physics {
    * `filterGroups` narrows what counts (a body inside a building looks for the floor, not the
    * ground under the building): pass `groups(Group.all, Group.all & ~(Group.terrain | Group.exterior))`.
    */
+  /**
+   * Most callers pass no groups at all, and with none the engine does no group test, so another
+   * player's body would be found here however its own groups are set. Nobody stands on a peer:
+   * they are passed over.
+   */
   groundDistance(x: number, y: number, z: number, maxDist: number, exclude?: RAPIER.RigidBody, filterGroups?: number): number | null {
     const ray = new RAPIER.Ray({ x, y, z }, { x: 0, y: -1, z: 0 });
-    const hit = this.world.castRay(ray, maxDist, true, undefined, filterGroups, undefined, exclude);
+    const hit = this.world.castRay(ray, maxDist, true, undefined, filterGroups, undefined, exclude, this.notPeer);
     return hit ? hit.timeOfImpact : null;
   }
 

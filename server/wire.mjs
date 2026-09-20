@@ -116,6 +116,10 @@ export function cleanHello(x) {
     if (h.r || h.l) hello.held = h;
   }
   // The ship they fly, with its fit: names and numbers checked and kept within their limits.
+  // The colour their blade is lit in: a colour and nothing else, so a client on another build
+  // cannot put a string, a huge number or a fraction of one through as one.
+  const saber = Number(x.saber);
+  if (Number.isFinite(saber) && saber >= 0 && saber <= 0xffffff) hello.saber = Math.round(saber) >>> 0;
   const ship = cleanShip(x.ship);
   if (ship) hello.ship = ship;
   return hello;
@@ -142,6 +146,13 @@ export function cleanState(x, self = 0) {
   if (q) state.q = q;
   // In a hyperspace jump: the others hide this player and their ship until a state comes without it.
   if (x.j === 1) state.j = 1;
+  // Their blade out of their hand: where it is and how far it has spun, kept only when all four
+  // numbers are real. It is a place in the world, so it is not otherwise bounded -- a hull's frame
+  // and a clamp's place already are not.
+  if (Array.isArray(x.tb) && x.tb.length === 4) {
+    const tb = x.tb.map(Number);
+    if (!tb.some((v) => !Number.isFinite(v))) state.tb = tb;
+  }
   // The vehicle they ride or fly, or the hull of somebody else's ship they are standing in, never
   // both: whoever flies a hull is the one who sends it, so a watcher draws one hull with people in
   // it rather than one hull per person aboard.

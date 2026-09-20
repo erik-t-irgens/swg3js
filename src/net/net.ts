@@ -19,6 +19,8 @@ export interface Hello {
   held?: { r?: string; l?: string };
   /** The ship this player flies (or last flew), with its components, droid and paint (server/shipWire.mjs checks it). */
   ship?: { id: string; fit: ShipFit };
+  /** The colour their lightsaber's blade is lit in, as hex; left out by a browser built before this. */
+  saber?: number;
 }
 
 /** The vehicle a peer is on: which (a garage id), where it is and how it is turned, and how the peer is in it. */
@@ -64,6 +66,12 @@ export interface PeerState {
   m: boolean;
   /** The saber is lit. */
   sab: boolean;
+  /**
+   * Their blade out of their hand: where it is in the world and how far it has spun, sent only
+   * while it is in the air. A blade is a thing in flight with a place of its own, and nothing else
+   * on the wire says where it is; on the other side it is drawn from a copy of their own hilt.
+   */
+  tb?: [number, number, number, number];
   /** The figure's whole turn (aboard a banked hull, adrift in space), when a heading is not enough. */
   q?: [number, number, number, number];
   /** The vehicle the peer is on, when they are on one. Never sent with `in`: one or the other. */

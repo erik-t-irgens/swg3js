@@ -3,7 +3,7 @@
 // target is now, not where it will be, so a running target is missed and a standing one is hit.
 import * as THREE from 'three';
 import { combatSounds, type GunLike } from '../audio/combatSounds';
-import { RAPIER, type Physics } from '../core/physics';
+import { Group, groups, RAPIER, type Physics } from '../core/physics';
 import type { Terrain } from '../world/terrain';
 import { markActor } from '../world/portalRender';
 import { BLASTER, type Bolts } from './bolts';
@@ -142,7 +142,10 @@ export class Turret implements Hittable {
     tmp.divideScalar(dist);
     // Line of sight from the muzzle: anything but the target in the way keeps it quiet.
     const ray = new RAPIER.Ray(from, tmp);
-    const hit = this.physics.world.castRay(ray, dist + 0.5, true, undefined, undefined, undefined, this.body);
+    // With a group, not without one: a query that passes none is not group-tested at all, and the
+    // things that are meant to be found only by what is aimed at them -- another player's body --
+    // would then stand in this line and quiet the turret.
+    const hit = this.physics.world.castRay(ray, dist + 0.5, true, undefined, groups(Group.all, Group.all), undefined, this.body);
     if (!hit || hit.collider.handle !== target.collider.handle) return;
 
     const wantYaw = Math.atan2(tmp.x, tmp.z);
