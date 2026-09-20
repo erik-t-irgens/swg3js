@@ -23,6 +23,7 @@
 // `none`, `gone` and `refused`, and every chat line comes back from the server, the speaker's own
 // included, so that everyone reads the same words in the same order.
 
+import { combatNow } from './combatNet.ts';
 import type { Authority } from './session.ts';
 
 /**
@@ -597,10 +598,26 @@ export class Groups {
         this.decline();
         return '';
       case 'trade':
-      case 'duel':
-        return `${line.command} comes later; it is not in the game yet`;
+        return 'trading comes later; it is not in the game yet';
+      // The game's own words for agreeing to fight and for calling it off, at the game's own
+      // distances. Who may hurt whom is the server's, and this only asks.
+      case 'duel': {
+        const fight = combatNow();
+        if (!fight) return 'there is nobody to fight';
+        if (fight.asked) {
+          fight.acceptDuel();
+          return '';
+        }
+        if (!line.arg) return 'who? (/duel <name>)';
+        const id = this.idByName(line.arg);
+        if (!id) return `nobody here is called ${line.arg}`;
+        return fight.askDuel(id);
+      }
+      case 'peace':
+        combatNow()?.peace();
+        return '';
       case 'help':
-        return 'chat: type to say it aloud, /g <words> to the group. /invite <name>, /accept, /decline, /leave, /promote <name>, /kick <name>, /who.';
+        return 'chat: type to say it aloud, /g <words> to the group. /invite <name>, /accept, /decline, /leave, /promote <name>, /kick <name>, /who, /duel <name>, /peace.';
       default:
         return `there is no /${line.command}`;
     }

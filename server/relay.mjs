@@ -42,6 +42,23 @@
 //                                                          the group to is the member id the roster gives, and a trip
 //                                                          is the world the leader is going to
 //   { t: 'chat', scope: say|group, text }                    a line, to everyone on this world or to the group
+//   { t: 'shot', n, p, d, s, l, c, z, g?, a?, b?, fx?, rc?, hx?, pk?, in? }
+//                                                          a bolt that left this player's gun (combatWire.mjs): its
+//                                                          own number, where it left and which way, how fast, how
+//                                                          long it lives, its colour and size, the fall on it, what
+//                                                          it would take and the walls it may still glance off, the
+//                                                          game's own projectile effect it is drawn as, and whose
+//                                                          hull's rooms it is flying inside. Every other browser
+//                                                          flies a copy that hurts nothing
+//   { t: 'end', n, at }                                     that shot stopped here: the copies are cut short at the
+//                                                          same point, so the mark is in one place on every screen
+//   { t: 'hit', to, a, at, w? }                             the shooter says it struck that player for that much
+//   { t: 'blocked', of, n, at }                             a lit blade turned that shot away here
+//   { t: 'health', hp, d? }                                 how much of this player is left, and whether they are down
+//   { t: 'died', by? }                                      the one who fell says so, and who struck the blow
+//   { t: 'duel', do: ask|accept|decline|end, to? }           the game's own COMBAT_DUEL and COMBAT_PEACE, at its own
+//                                                          128 m: how two players agree to fight where the server's
+//                                                          switch for it is off
 // Server to browser:
 //   { t: 'hail', v, now, epoch, dayMs, nonce, word, ff }     sent the instant the socket opens, before anything is said
 //   { t: 'claimed', you, keep }   { t: 'denied', why }   { t: 'refused', why }   { t: 'taken', by }
@@ -64,6 +81,10 @@
 //   { t: 'group', do: 'none', why }   (you are in no group now)   { t: 'group', do: 'gone' }   (the invitation has)
 //   { t: 'group', do: 'refused', why }   (to whoever asked, and to nobody else)
 //   { t: 'chat', id, from, scope, text }
+//   { t: 'shot', id, ... }   { t: 'end', id, n, at }   { t: 'blocked', id, of, n, at }
+//   { t: 'health', id, hp, d? }   { t: 'died', id, by? }
+//   { t: 'hurt', id, a, at, w? }   (to the one hurt and to nobody else, and only where they may be hurt)
+//   { t: 'duel', do: asked|sent|on|off|declined|refused, id?, why? }
 //
 // Everything but the claim, the ping and the ask goes to the world the player is on and no further
 // (rooms.mjs). Before this, a browser was told about people on other planets and dressed them,
@@ -80,6 +101,7 @@ import { WorldClock, DAY_MS } from './clock.mjs';
 import { STORE_TUNING, openStore } from './store.mjs';
 import { Sessions, checkClaim, makeNonce, summaryOf } from './identity.mjs';
 import { GROUP_RANGES, GROUP_TUNING, Groups, cleanChat, cleanGroup } from './groups.mjs';
+import { COMBAT_WIRE, Duels, cleanBlocked, cleanDied, cleanDuel, cleanEnd, cleanHealth, cleanHit, cleanShot, mayHurt } from './combatWire.mjs';
 
 /** What this server speaks. A browser that hears no hail is talking to the relay that came before. */
 const WIRE_VERSION = 2;
@@ -159,6 +181,7 @@ for (let i = 0; i < args.length; i++) {
   if (has(TUNING, name)) TUNING[name] = value;
   else if (name.startsWith('wire.') && has(WIRE, name.slice(5))) WIRE[name.slice(5)] = value;
   else if (name.startsWith('group.') && has(GROUP_TUNING, name.slice(6))) GROUP_TUNING[name.slice(6)] = value;
+  else if (name.startsWith('combat.') && has(COMBAT_WIRE, name.slice(7))) COMBAT_WIRE[name.slice(7)] = value;
   else console.log(`  --set ${name}: there is no such number, and it has been ignored`);
 }
 
@@ -185,6 +208,12 @@ const sessions = new Sessions();
 // claiming the same character picks it up again. They are not written to disk -- a group is a thing
 // people are doing together this evening, not a thing the world remembers.
 const groups = new Groups({ tuning: GROUP_TUNING });
+// Who has agreed to fight whom. With the server's own switch off -- which is how it starts -- this
+// is the only way one player's shot may take another player's health, and it is the game's own word
+// at the game's own distance, so the range comes from the table the groups already read. Like a
+// group, a duel is a thing two people are doing this minute: it is held by connection and nothing
+// of it is written to disk.
+const duels = new Duels({ range: GROUP_RANGES.duel, seconds: COMBAT_WIRE.duel });
 const settings = { friendlyFire: FRIENDLY_FIRE, word: WORD ? 1 : 0, dayMs: DAY };
 const had = store.data.settings ?? {};
 if (had.friendlyFire !== settings.friendlyFire || had.word !== settings.word || had.dayMs !== settings.dayMs) store.change({ t: 'settings', settings });
@@ -278,6 +307,17 @@ function deliver(result) {
       if (session) send(clients.get(session), line.msg);
     }
   }
+}
+
+/**
+ * The same for words that name a connection rather than a member of a group: the duels. A duel dies
+ * with the line either side of it is on, so there is no key here that outlives one and nothing to
+ * look up -- an id that has gone is simply not written to.
+ */
+function deliverTo(result) {
+  const tell = result?.tell;
+  if (!tell?.length) return;
+  for (const line of tell) send(clients.get(line.to), line.msg);
 }
 
 /**
@@ -519,7 +559,12 @@ function onMessage(c, text, trimmed = false) {
   // tighter limit of its own already, so anything arriving here in that state is a browser shouting.
   // What a group is asked for is not: those are rare, they are decisions rather than news, and one
   // lost would leave the two sides disagreeing about who is in.
-  if (trimmed && (msg.t === 'state' || msg.t === 'emote' || msg.t === 'ask' || msg.t === 'chat')) return;
+  // A shot goes with the news for the same reason: one nobody sees is a picture missing. Where that
+  // shot stopped does not: it is the word that puts the mark in the same place on every screen, and
+  // a copy that never hears it flies its whole life out and bursts wherever this browser's own
+  // streamed world happened to stop it -- which is the one thing this is all for. A hit, a block, a
+  // health and a death are decisions too, and leave the two sides disagreeing for good if lost.
+  if (trimmed && (msg.t === 'state' || msg.t === 'emote' || msg.t === 'ask' || msg.t === 'chat' || msg.t === 'shot')) return;
   if (msg.t === 'claim') {
     onClaim(c, msg);
     return;
@@ -650,6 +695,76 @@ function onMessage(c, text, trimmed = false) {
     } else {
       sendToRoom(rooms.keyOf(c.id), line);
     }
+  } else if (msg.t === 'shot') {
+    // A bolt that left somebody's gun. It goes to the world they are on and no further, and every
+    // browser there flies a copy of it that hurts nothing: the one that fired it is the only one
+    // whose bolt is real, so nothing can be hurt twice by one shot.
+    if (!c.hello) return;
+    const shot = cleanShot(msg);
+    if (!shot) return;
+    sendToRoom(rooms.keyOf(c.id), { t: 'shot', id: c.id, ...shot }, c.id, true);
+  } else if (msg.t === 'end') {
+    // Where that bolt stopped. Each browser traces its own streamed world, so a copy cannot be
+    // relied on to stop in the same place: this is what puts the mark and the burst in one place on
+    // every screen rather than in a place each browser guessed for itself.
+    if (!c.hello) return;
+    const end = cleanEnd(msg);
+    if (!end) return;
+    // Never dropped, however far behind a browser is: it is a few dozen bytes once per shot, and it
+    // is a decision rather than news. A shot that is dropped is a picture missing; an end that is
+    // dropped leaves that picture flying on and bursting somewhere nobody else saw.
+    sendToRoom(rooms.keyOf(c.id), { t: 'end', id: c.id, ...end }, c.id);
+  } else if (msg.t === 'hit') {
+    // The shooter says it struck somebody. The server checks the one named is here, is on this same
+    // world and may be hurt at all; it does not check the shot, because it does not fly bolts. The
+    // one hurt is the only place a number is ever taken off, and their own health message is what
+    // everyone else reads, so two browsers can never come to disagree about it.
+    if (!c.hello) return;
+    const hit = cleanHit(msg);
+    if (!hit) return;
+    const to = clients.get(hit.to);
+    if (!to || to === c || !to.hello) return;
+    if (rooms.keyOf(to.id) !== rooms.keyOf(c.id)) return;
+    if (!mayHurt(FRIENDLY_FIRE, duels, c.id, to.id)) return;
+    duels.touch(c.id, to.id);
+    send(to, { t: 'hurt', id: c.id, a: hit.a, at: hit.at, ...(hit.w ? { w: hit.w } : {}) });
+  } else if (msg.t === 'blocked') {
+    // A lit blade turned a bolt away. It reaches the whole world including whoever fired, since
+    // theirs is the one real bolt and it has to stop where the blade met it; whoever blocked it
+    // announces a shot of their own, which crosses as any other shot does.
+    if (!c.hello) return;
+    const blocked = cleanBlocked(msg);
+    if (!blocked) return;
+    sendToRoom(rooms.keyOf(c.id), { t: 'blocked', id: c.id, ...blocked }, c.id);
+  } else if (msg.t === 'health') {
+    // How much of this player is left. It is sent when it changes and at no other time, and it is
+    // also what fills the health bar on a group's roster, which until now had nothing to show.
+    if (!c.hello) return;
+    const health = cleanHealth(msg);
+    if (!health) return;
+    sendToRoom(rooms.keyOf(c.id), { t: 'health', id: c.id, ...health }, c.id);
+    if (c.member && holdsMember(c)) deliver(groups.note(c.member, { hp: health.hp }));
+  } else if (msg.t === 'died') {
+    if (!c.hello) return;
+    const died = cleanDied(msg);
+    if (!died) return;
+    sendToRoom(rooms.keyOf(c.id), { t: 'died', id: c.id, ...died }, c.id);
+  } else if (msg.t === 'duel') {
+    // The game's own words: asking for a duel and calling it off, at the client's own distance. It
+    // is the way two players may hurt each other on a server whose switch for that is off.
+    if (!c.hello) return;
+    const duel = cleanDuel(msg);
+    if (!duel) return;
+    if (duel.do === 'ask') {
+      const to = duel.to ? clients.get(duel.to) : null;
+      if (!to || to === c || !to.hello) {
+        deliverTo(duels.refuse(c.id, 'there is nobody there to fight'));
+        return;
+      }
+      deliverTo(duels.ask(c.id, to.id, metresBetween(c, to)));
+    } else if (duel.do === 'accept') deliverTo(duels.accept(c.id));
+    else if (duel.do === 'decline') deliverTo(duels.decline(c.id));
+    else if (duel.do === 'end') deliverTo(duels.end(c.id));
   }
 }
 
@@ -677,6 +792,7 @@ const server = createServer((req, res) => {
         connected: clients.size,
         rooms: rooms.describe(),
         groups: groups.describe(),
+        duels: duels.describe(),
         clock: clock.describe(),
         world: store.describe(),
         joinWord: WORD ? 'set' : 'none',
@@ -688,6 +804,7 @@ const server = createServer((req, res) => {
         tuning: TUNING,
         caps: WIRE,
         group: GROUP_TUNING,
+        combat: COMBAT_WIRE,
         // The distances a group works to, which are the client's own and not this server's to pick:
         // they are printed here so what is being enforced can be read off without reading the code.
         ranges: GROUP_RANGES,
@@ -783,6 +900,9 @@ server.on('upgrade', (req, socket) => {
     // while, so a reload does not cost anybody their group and the leader does not change hands
     // over one. It is `tick` that gives a place up when nobody comes back for it.
     deliver(groups.absent(c.id));
+    // A duel does not wait for anybody: whoever they were fighting is told it is over, rather than
+    // being left in a fight with a line that has closed.
+    deliverTo(duels.drop(c.id));
     console.log(`- ${c.id} ${who(c)} left${key ? ` ${roomLabel(key)}` : ''} (${clients.size} connected)`);
     // Everyone who was ever told about this browser is told it has gone, wherever they are standing
     // now: a browser holds on to a peer it has met while that peer is on another world, so the news
@@ -818,6 +938,10 @@ setInterval(() => {
 // nobody grouped and nobody asked it walks two empty tables a second and writes nothing.
 setInterval(() => deliver(groups.tick()), GROUP_TUNING.tick);
 
+// A duel nobody answered, and one nobody has landed a blow in for an hour, both end on their own.
+// It is a slow clock on purpose: with nobody fighting it walks two empty tables once a minute.
+setInterval(() => deliverTo(duels.tick()), COMBAT_WIRE.tick);
+
 let closing = false;
 const shutDown = (why) => {
   if (closing) return;
@@ -837,7 +961,7 @@ server.listen(PORT, () => {
   console.log(`  ${clock.describe()}`);
   console.log(`  the world is kept in ${DATA}: ${store.describe()}`);
   console.log(`  ${WORD ? 'a join word is set: a browser must carry it in its address, and one that cannot is turned away' : 'no join word: anyone who can reach this port can join (--word=<something> sets one)'}`);
-  console.log(`  damage between players is ${FRIENDLY_FIRE ? 'on' : 'off (--friendly-fire turns it on)'}`);
+  console.log(`  damage between players is ${FRIENDLY_FIRE ? 'on' : `off (--friendly-fire turns it on); with it off, two players may still agree to a duel, which reaches ${GROUP_RANGES.duel} m -- the client's own distance`}`);
   console.log(`  a group holds ${GROUP_TUNING.members}, an invitation reaches ${GROUP_RANGES.invite} m (the client's own distance), and a place is held for ${Math.round(GROUP_TUNING.hold / 1000)} s while someone reloads`);
   console.log(`  a browser built before this one plays as it always has; http://localhost:${PORT}/ says what is going on`);
 });

@@ -502,6 +502,16 @@ export class Net {
         break;
       case 'group':
       case 'chat':
+      // The fight between players: the bolts that cross, where each one landed, a blade turning one
+      // away, health, death and the duel. Handed over whole, as the group's words are, because what
+      // they mean belongs to src/net/combatNet.ts and not here.
+      case 'shot':
+      case 'end':
+      case 'hurt':
+      case 'blocked':
+      case 'health':
+      case 'died':
+      case 'duel':
         // The group and the words players type: handed over whole to whoever owns them. Nothing is
         // read here, so this switch does not have to grow a case for every word a group can say.
         this.onWord(msg as unknown as Record<string, unknown>);

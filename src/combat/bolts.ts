@@ -96,6 +96,20 @@ export interface BoltOptions {
    * plain blaster's where it lands.
    */
   sound?: GunSound | null;
+  /**
+   * A picture of somebody else's bolt: it flies, is drawn, is heard and leaves its mark, and it
+   * hurts nothing at all. A shot fired on one screen is flown again on every other, so without this
+   * one trigger pull would take health three times over; the browser that fired is the only one
+   * whose bolt is real.
+   */
+  inert?: boolean;
+  /**
+   * Which shot this is, when it is one that crosses between browsers: a number made by whoever is
+   * keeping them, 0 for a bolt that is nobody's business but this browser's. It is what lets a shot
+   * be cut short where the one who fired it says it landed, and what makes a blade's block a word
+   * rather than a second bolt.
+   */
+  wire?: number;
 }
 
 export interface BoltFrame {
@@ -139,6 +153,18 @@ export interface Bolt {
   sound: GunSound | null;
   /** It has already whined past the ear, so a slow bolt alongside does not whine every frame. */
   flew: boolean;
+  /**
+   * What it looks like, kept on the bolt rather than only in the options it was built from: a bolt
+   * that is fired again from somewhere else -- turned away by a blade, or flown again on another
+   * browser -- is then the same bolt to look at and not a plain one of roughly the right colour.
+   */
+  color: number;
+  size: number;
+  projectile: ProjectileVisual | null;
+  /** A picture of somebody else's shot: it hurts nothing (`BoltOptions.inert`). */
+  inert: boolean;
+  /** Which shot it is where shots cross between browsers, 0 where they do not (`BoltOptions.wire`). */
+  wire: number;
 }
 
 /** A shot that landed the instant it was fired: its line, fading over its life. */
@@ -203,6 +229,17 @@ export class Bolts {
    * `Vehicle.setGhost` is the only thing that empties a collider's groups. Made once, not per ray.
    */
   private readonly passable = (c: RAPIER.Collider): boolean => c.collisionGroups() !== 0;
+  /**
+   * The same for a picture of somebody else's bolt, with every other player's body passed over as
+   * well. Such a copy is fired from the very muzzle it left on the other screen, and that muzzle is
+   * inside the shooter's own body here -- inside the one box a hull of theirs is -- so a ray that
+   * could find it would stop the copy dead at the gun and nothing would ever be seen to fly. It is
+   * also not this browser's business whether the shot hit anybody: the one who fired says where it
+   * stopped, and the copy is cut short there.
+   */
+  private readonly passableNotPeer = (c: RAPIER.Collider): boolean => c.collisionGroups() !== 0 && !this.peers?.isPeer(c.handle);
+  /** The physics of the world being flown through, for the filter above; set at the top of every update. */
+  private peers: Physics | null = null;
 
   /** The effects player for a visual's pack. */
   private playerFor(v: ProjectileVisual | null | undefined): ParticleEffects | null {
@@ -219,8 +256,29 @@ export class Bolts {
 
   constructor(private readonly scene: THREE.Scene) {}
 
+  /**
+   * Every bolt that leaves a muzzle, whoever fired it. It is the one place a shot can be picked up
+   * and sent to the other browsers; nothing here decides which shots are worth sending, because only
+   * the game knows which of them are this player's. Everything such a shot is made of is on the bolt
+   * itself, so nothing has to be carried alongside it.
+   */
+  onFire: ((bolt: Bolt) => void) | null = null;
+  /**
+   * Every bolt as it leaves the air, with the point it struck or null when it simply reached the end
+   * of its flight. What crosses is that point: each browser traces its own streamed world, so a
+   * picture of a shot cannot be relied on to stop where the shot did.
+   */
+  onGone: ((bolt: Bolt, at: THREE.Vector3 | null) => void) | null = null;
+  /**
+   * A lit blade turned away a bolt that came off the wire. True when it was taken over -- the bolt
+   * is then cut here and whoever blocked it announces a shot of their own -- and false to turn it
+   * away the way a bolt fired on this browser is turned away.
+   */
+  onBlocked: ((bolt: Bolt, at: THREE.Vector3, out: THREE.Vector3) => boolean) | null = null;
+
   /** Fire a bolt from `from` along `dir` (unit length). */
-  fire(from: THREE.Vector3, dir: THREE.Vector3, { owner, damage = BLASTER.damage, speed = BLASTER.velocity, metresPerSecond, inherit, life = BLASTER.life, color = 0xff4a2a, exclude, projectile, size = 1, push = BLASTER.push, onHit, gravity = 0, bounces = 0, homing = null, frame = null, source = null, sound = null }: BoltOptions): Bolt {
+  fire(from: THREE.Vector3, dir: THREE.Vector3, o: BoltOptions): Bolt {
+    const { owner, damage = BLASTER.damage, speed = BLASTER.velocity, metresPerSecond, inherit, life = BLASTER.life, color = 0xff4a2a, exclude, projectile, size = 1, push = BLASTER.push, onHit, gravity = 0, bounces = 0, homing = null, frame = null, source = null, sound = null, inert = false, wire = 0 } = o;
     const [coreMat, glowMat] = this.materialsFor(color);
     const mesh = new THREE.Group();
     mesh.add(new THREE.Mesh(this.core, coreMat), new THREE.Mesh(this.glow, glowMat), new THREE.Mesh(this.head, glowMat));
@@ -243,7 +301,7 @@ export class Bolts {
     // ship's bolt fired by something that does not carry one, the set of the projectile it draws,
     // and failing both the plain blaster, so a bolt is never silent leaving and loud landing.
     const gun = sound ?? (projectile ? combatSounds.projectileGun(projectile.effect) : null) ?? GENERIC_GUN;
-    const bolt: Bolt = { pos: from.clone(), dir: heading, speed: s, damage, owner, exclude, age: 0, life, lead: fx && projectile ? projectile.reach : (LENGTH / 2) * mesh.scale.z, reflected: 0, mesh, fx, hitFx: fx ? (projectile?.hit ?? null) : null, fxPack: fx ? fxPlayer : null, push, onHit: onHit ?? null, gravity, bounces, homing, vel: gravity || homing ? vel.clone().multiplyScalar(s) : null, frame, source, sound: gun, flew: false };
+    const bolt: Bolt = { pos: from.clone(), dir: heading, speed: s, damage, owner, exclude, age: 0, life, lead: fx && projectile ? projectile.reach : (LENGTH / 2) * mesh.scale.z, reflected: 0, mesh, fx, hitFx: fx ? (projectile?.hit ?? null) : null, fxPack: fx ? fxPlayer : null, push, onHit: onHit ?? null, gravity, bounces, homing, vel: gravity || homing ? vel.clone().multiplyScalar(s) : null, frame, source, sound: gun, flew: false, color, size, projectile: projectile ?? null, inert, wire };
     if (frame) this.settle(bolt);
     this.bolts.push(bolt);
     this.fired[owner]++;
@@ -255,6 +313,11 @@ export class Bolts {
     if (frame) soundAt.copy(from).applyMatrix4(frame.matrix);
     else soundAt.copy(from);
     combatSounds.fire(gun, soundAt.x, soundAt.y, soundAt.z, source?.key ?? exclude?.handle ?? 0);
+    // Last, with the bolt whole and already in the air: whoever is carrying shots to the other
+    // browsers reads what it needs off it. A shot made in answer to this one (a picture of it)
+    // comes back through here and is known by having no shooter of its own, so nothing can send a
+    // shot round for ever.
+    this.onFire?.(bolt);
     return bolt;
   }
 
@@ -289,6 +352,7 @@ export class Bolts {
 
   /** Fly every bolt on by `dt` and settle what each one struck. */
   update(dt: number, w: BoltWorld): void {
+    this.peers = w.physics;
     for (let i = this.beams.length - 1; i >= 0; i--) {
       const b = this.beams[i];
       b.age += dt;
@@ -357,13 +421,16 @@ export class Bolts {
         combatSounds.hit(b.sound, hitPoint.x, hitPoint.y, hitPoint.z, 'ship');
         w.effects.burst(hitPoint, 0xffb070, 0.35, 0.12);
         w.effects.flash(hitPoint, 0xff8a50, 6, 4, 0.08);
-        b.onHit?.(hitPoint, null);
-        this.remove(i);
+        // Nothing a picture of a bolt lands on is told about it: whatever the shot did is the
+        // business of the browser that fired it, and this is one of the three ways a bolt in this
+        // file can pass something on.
+        if (!b.inert) b.onHit?.(hitPoint, null);
+        this.remove(i, hitPoint);
         continue;
       }
       // The bolt's own length leads the way so it does not visibly poke through what it hits.
       const ray = new RAPIER.Ray(b.pos, b.dir);
-      const hit = w.physics.world.castRayAndGetNormal(ray, step + b.lead, true, undefined, undefined, undefined, b.exclude, this.passable);
+      const hit = w.physics.world.castRayAndGetNormal(ray, step + b.lead, true, undefined, undefined, undefined, b.exclude, b.inert ? this.passableNotPeer : this.passable);
       if (!hit) {
         b.pos.addScaledVector(b.dir, step);
         this.settle(b);
@@ -391,6 +458,16 @@ export class Bolts {
       }
       if (hit.collider.handle === w.player.collider.handle) {
         if (b.owner !== 'player' && w.block(b, hitPoint, bounce)) {
+          // A bolt somebody else fired cannot simply become this player's: the browser that fired it
+          // is watching its own copy fly, and the blade is not in that world at all. It is a word
+          // instead -- that shot stops here, on every screen including the shooter's, and the one who
+          // blocked it announces a shot of their own from the same point. One bolt in, one bolt out.
+          if (b.wire && this.onBlocked?.(b, hitPoint, bounce)) {
+            w.effects.burst(hitPoint, 0xbfe6ff, 0.6, 0.15);
+            w.effects.flash(hitPoint, 0x9fd4ff, 14, 7, 0.12);
+            this.remove(i, hitPoint);
+            continue;
+          }
           // Turned away by the saber: it now belongs to the player and flies on from the block.
           b.owner = 'player';
           b.exclude = w.player.body;
@@ -406,20 +483,31 @@ export class Bolts {
           continue;
         }
         if (b.owner !== 'player') {
-          w.onPlayerHit(b.damage, b.pos);
+          // A picture of somebody else's bolt stops here and is heard and seen doing it, and takes
+          // nothing: the browser that fired it is the one that says whether it hit, and what it
+          // takes comes back from there.
+          if (!b.inert) w.onPlayerHit(b.damage, b.pos);
           combatSounds.hit(b.sound, hitPoint.x, hitPoint.y, hitPoint.z, 'creature');
           w.effects.burst(hitPoint, 0xff8060, 0.5, 0.15);
         }
-        b.onHit?.(hitPoint, null);
-        this.remove(i);
+        if (!b.inert) b.onHit?.(hitPoint, null);
+        this.remove(i, hitPoint);
         continue;
       }
-      const target = w.hittableAt(hit.collider.handle);
-      b.onHit?.(hitPoint, target ?? null);
+      // What it struck, and what may be taken off it: a picture of somebody else's bolt is seen and
+      // heard striking a creature, a hull or a wall exactly as the real one is, and takes nothing
+      // from any of them. Read both ways round, a copy striking a person looked and sounded like a
+      // bolt going into the dirt.
+      const struck = w.hittableAt(hit.collider.handle);
+      const target = b.inert ? undefined : struck;
+      if (!b.inert) b.onHit?.(hitPoint, target ?? null);
       // A ship with a fight takes the bolt whole: its shields, armour and parts, and the game's hit effect for the layer struck.
-      if (target?.takeBolt) {
+      if (struck?.takeBolt) {
         if (hitNormal.lengthSq() < 1e-6) hitNormal.copy(b.dir).negate();
-        const took = target.takeBolt(b, hitPoint, hitNormal.normalize());
+        hitNormal.normalize();
+        // The picture is not handed to the hull's own fight: it is drawn and heard striking it, as
+        // a hull with nothing to say about the layer struck already is.
+        const took = target?.takeBolt ? target.takeBolt(b, hitPoint, hitNormal) : 'taken';
         if (took) {
           // Whatever layer it went through, it struck a hull: the gun's own sound for metal.
           combatSounds.hit(b.sound, hitPoint.x, hitPoint.y, hitPoint.z, 'ship');
@@ -431,13 +519,15 @@ export class Bolts {
               b.fxPack.place(b.hitFx, placeM.compose(hitPoint, placeQ, ONE), false, true);
             }
           }
-          this.remove(i);
+          this.remove(i, hitPoint);
           continue;
         }
       }
-      if (target) {
-        tmp.copy(b.pos).addScaledVector(b.dir, -1);
-        target.damage(b.damage, tmp, b.push, b.source);
+      if (struck) {
+        if (target) {
+          tmp.copy(b.pos).addScaledVector(b.dir, -1);
+          target.damage(b.damage, tmp, b.push, b.source);
+        }
         combatSounds.hit(b.sound, hitPoint.x, hitPoint.y, hitPoint.z, 'creature');
         w.effects.burst(hitPoint, 0xffb070, 0.7, 0.15);
         w.effects.flash(hitPoint, 0xff8a50, 10, 6, 0.1);
@@ -457,8 +547,22 @@ export class Bolts {
         placeQ.setFromUnitVectors(Y, hitNormal.normalize());
         b.fxPack.place(b.hitFx, placeM.compose(hitPoint, placeQ, ONE), false, true);
       }
-      this.remove(i);
+      this.remove(i, hitPoint);
     }
+  }
+
+  /**
+   * End a bolt where somebody else says it landed, with the mark and the burst there. It is how a
+   * picture of a shot is brought into line with the shot it copies, and how the one real bolt is
+   * stopped when a blade somewhere else turned it away. A bolt that has already gone is no error:
+   * the word and the flight are two clocks, and either may come first.
+   */
+  cutShort(bolt: Bolt, at: THREE.Vector3, effects: Effects | null = null): boolean {
+    const i = this.bolts.indexOf(bolt);
+    if (i < 0) return false;
+    effects?.burst(at, 0xffb070, 0.35, 0.12);
+    this.remove(i, null);
+    return true;
   }
 
   /** Put the bolt's mesh, or the effect carried in its place, where the bolt now is. */
@@ -480,11 +584,16 @@ export class Bolts {
     for (let i = this.bolts.length - 1; i >= 0; i--) this.remove(i);
   }
 
-  private remove(i: number): void {
+  /** `at` is where it struck, or null when it reached the end of its flight or was cut short by a word. */
+  private remove(i: number, at: THREE.Vector3 | null = null): void {
     const b = this.bolts[i];
     this.scene.remove(b.mesh);
     if (b.fx && b.fxPack) b.fxPack.remove(b.fx);
     this.bolts.splice(i, 1);
+    // Whoever is carrying shots between browsers hears about every one of them leaving the air, so
+    // nothing it is holding outlives the bolt it is about. The point is the one it is holding while
+    // it settles what was struck, so it is read now or not at all.
+    this.onGone?.(b, at);
   }
 
   private materialsFor(color: number): [THREE.MeshBasicMaterial, THREE.MeshBasicMaterial] {

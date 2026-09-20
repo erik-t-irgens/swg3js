@@ -106,6 +106,8 @@ import { sharedClock } from './world/sharedClock.ts';
 import { GROUP_RANGE, GROUP_TUNE, Groups, tuneGroups } from './net/groups.ts';
 import { GROUP_UI_TUNE, GroupUi, tuneGroupUi } from './ui/groupUi.ts';
 import { CHAT_TUNE, ChatUi, tuneChat } from './ui/chatUi.ts';
+import { COMBAT_TUNE, CombatNet, tuneCombat } from './net/combatNet.ts';
+import type { Bolt } from './combat/bolts';
 import { applyAppearance, dress, packLook } from './player/look';
 import { RemotePlayers } from './net/remotePlayers';
 import { danceOf, defaultEmotes, emoteChoices, FLOURISHES, isDanceClip, isFlourishClip, loadEmotes, loopsEmote, saveEmotes } from './core/emotes';
@@ -3293,6 +3295,214 @@ class App {
     // Where the display's roster reads the group from. The same array between changes, so nothing is
     // allocated to read it, and the roster writes only the values that have moved.
     this.roster.source = () => (groups.roster ? groups.roster.members : null);
+
+    // ---- Shots, hits and health between players. ----
+    //
+    // A shot fired on one screen is flown again on every other one, as a picture that hurts nothing:
+    // the browser that fired is the only one whose bolt is real, and it is the one that says where
+    // that bolt landed, so the mark is in the same place everywhere rather than in a place each
+    // browser guessed from its own streamed world. Who decides a hit is the shooter; the one hit is
+    // the only place a number is ever taken off, and their own health is what everyone else reads.
+    // Whether one player may hurt another at all is the server's switch, off unless it was started
+    // with it, with the game's own duel inside it.
+    //
+    // Everything here asks the session, never the socket, so with no address set -- or against the
+    // relay that came before -- nothing is sent, no bolt crosses, nobody can be hurt and the game is
+    // exactly what it is today. Nothing of it runs in a frame: a shot is an event, and this player's
+    // own health is looked at ten times a second and sent only when it has moved.
+    const combat = new CombatNet();
+    combat.send = (msg) => this.net.sendWord(msg);
+    combat.authority = () => this.net.session.authority;
+    combat.selfId = () => this.net.id;
+    combat.friendlyFire = () => this.net.session.friendlyFire;
+    combat.peerName = (id) => this.remotes.peerName(id);
+    // Whose shots cross: this player's own, on foot and in the ship they fly. Everything else in the
+    // air here -- a creature's spit, a fighter's rifle, a turret, another browser's bolt flown again
+    // -- is this browser's own business and is not sent. Blame is compared by key, which is what
+    // every other part of the game remembers a shooter by.
+    combat.isMine = (bolt) => {
+      const key = bolt.source?.key ?? 0;
+      if (!key) return false;
+      if (key === this.world.playerTarget.key) return true;
+      const ship = this.pilotedShip();
+      return !!ship && key === (this.world.ships.of(ship)?.key ?? 0);
+    };
+    // Whose hull's rooms this player is standing in: their own while they fly it, the carrier's while
+    // they are a passenger, and 0 in the open world. A bolt fired in a hull's rooms flies in that
+    // hull's frame, so it is only a shot for somebody standing in the same hull.
+    combat.hullNow = () => {
+      const room = this.player.aboard;
+      if (!room) return 0;
+      return this.remotes.hullCarrier(room.vehicle.group) || this.net.id;
+    };
+    // Out of the world -- the select screen, the creator, a travel under way -- a player is neither
+    // hurt nor dead, whatever the figure standing in the scene happens to say.
+    combat.healthNow = () => (this.started && this.inWorld ? { hp: this.player.hp / Math.max(1, this.player.maxHp), down: this.dying || this.player.hp <= 0 } : { hp: 1, down: false });
+    // The frame a picture of somebody else's bolt flies in, and the vectors it is fired from: module
+    // fields, so a fight allocates nothing per shot. `fire` copies both.
+    const shotFrom = new THREE.Vector3();
+    const shotAlong = new THREE.Vector3();
+    const shotAt = new THREE.Vector3();
+    combat.fly = (shot) => {
+      if (!this.started || !this.inWorld || this.traveling) return null;
+      const room = shot.in ? this.player.aboard : null;
+      if (shot.in && !room) return null;
+      shotFrom.set(shot.p[0], shot.p[1], shot.p[2]);
+      shotAlong.set(shot.d[0], shot.d[1], shot.d[2]);
+      return this.world.bolts.fire(shotFrom, shotAlong, {
+        owner: 'enemy',
+        // The whole of it: it is drawn, it is heard, it can be turned away by a blade, and it takes
+        // nothing from anybody. Without this one flag, one trigger pull would be paid for twice.
+        inert: true,
+        // What it carries is not what it takes: an inert bolt never reaches anything that could be
+        // hurt. It is read in one place only -- a blade here turning it away fires one back in its
+        // place, and that one is a real bolt and must hit as hard as the one that came in.
+        damage: shot.a ?? 0,
+        metresPerSecond: shot.s,
+        life: shot.l,
+        color: shot.c,
+        size: shot.z,
+        gravity: shot.g ?? 0,
+        bounces: shot.b ?? 0,
+        projectile: shot.fx ? { effect: shot.fx, reach: shot.rc ?? 0, hit: shot.hx ?? null, pack: shot.pk ?? 'ships' } : null,
+        frame: room ? { matrix: room.vehicle.group.matrixWorld, physics: room.physics } : null,
+        source: null,
+      });
+    };
+    // Whether a peer's weapon can be drawn as the game's own effect yet. A weapon nobody here has
+    // fired has never had its effect loaded or its batch made, and both are main-thread work: asked
+    // for on the frame a stranger's bolt arrives, they are a stutter in the middle of a fight. So
+    // the first such bolt is flown as a plain one (the same two materials every bolt here already
+    // uses) while the effect is made ready behind it, and every bolt after it is the real thing.
+    const fxKnown = new Set<string>();
+    const fxWarming = new Set<string>();
+    combat.fxReady = (file, pack) => {
+      const key = `${pack}/${file}`;
+      if (fxKnown.has(key)) return true;
+      if (fxWarming.has(key)) return false;
+      const fxPack = pack === 'weapons' ? this.world.bolts.weaponVisuals : this.world.bolts.visuals;
+      if (!fxPack) return false;
+      fxWarming.add(key);
+      void fxPack
+        .prepare(file, this.renderer)
+        .then((ok) => {
+          fxWarming.delete(key);
+          if (ok) fxKnown.add(key);
+        })
+        .catch(() => fxWarming.delete(key));
+      return false;
+    };
+    // What the fight is holding is the very bolt the game gave it: the shape it travels as leaves
+    // three.js out so the rules can be run by a test that has none of it.
+    combat.cut = (bolt, x, y, z) => {
+      this.world.bolts.cutShort(bolt as unknown as Bolt, shotAt.set(x, y, z), this.effects);
+    };
+    // Somebody hurt this player. It is the only place a number comes off, which is what keeps two
+    // browsers from ever disagreeing about how much of anybody is left.
+    combat.onHurt = (amount, x, y, z, from, what) => {
+      const p = this.player;
+      if (!this.started || !this.inWorld || p.noclip || this.dying) return;
+      // Struck on the hull rather than on the person: a bolt that met the ship this player is flying
+      // takes it off the ship, through its shields and armour, exactly as one fired here would.
+      const ship = what === 'ship' ? (this.pilotedShip() ?? p.mounted ?? null) : null;
+      if (ship && !ship.disposed) {
+        ship.damage(amount, shotAt.set(x, y, z), 0, null);
+        return;
+      }
+      p.takeDamage(amount);
+      this.hurtFrom(shotAt.set(x, y, z));
+      void from;
+    };
+    // A peer's health, as their own browser said it: nothing on this side ever subtracts anything,
+    // so this is the only way the figure standing over there knows how much of them is left. Their
+    // health is a share of the whole on the wire and a number out of a hundred here, which is what
+    // everything that draws a peer is built on.
+    combat.onPeerHealth = (id, hp, down) => {
+      this.remotes.setHealthShare(id, hp);
+      this.remotes.setDown(id, down);
+    };
+    // A peer died. The figure goes down and plays the clip rather than falling in a heap, which is
+    // the owner's decision: nothing carries bone motion across, so a ragdoll would end up in a
+    // different heap on every screen. Setting it here as well as from their health means a death
+    // that arrives ahead of the next look at their health still puts them down at once.
+    combat.onPeerDied = (id, by) => {
+      this.remotes.setDown(id, true);
+      const name = this.remotes.peerName(id);
+      this.messages.system(by ? (by === this.net.id ? `you killed ${name}` : `${name} was killed by ${this.remotes.peerName(by)}`) : `${name} died`);
+    };
+    combat.onNote = (text) => this.messages.system(text);
+    // Everything this browser lands on another player goes out from here, and nothing whatever is
+    // taken off on this side: the player who was shot is the only one who subtracts, which is what
+    // keeps two screens from ever disagreeing about how much of anybody is left. Only this player's
+    // own blows cross -- a creature of this browser's mauling somebody is this browser's business,
+    // and a message about it would carry this player's name. The second arrow is what decides
+    // whether anything here may pick a fight with a peer at all: with damage between players
+    // switched off and no duel on, a peer is solid to a bolt and is nobody for the local wildlife
+    // to chase, since nothing here could ever finish them.
+    this.remotes.sendBlowsTo(
+      (blow) => {
+        const key = blow.source?.key ?? 0;
+        if (!key) return;
+        const ship = this.pilotedShip();
+        if (key !== this.world.playerTarget.key && !(ship && key === (this.world.ships.of(ship)?.key ?? 0))) return;
+        combat.sendHit(blow.id, blow.amount, blow.from?.x ?? 0, blow.from?.y ?? 0, blow.from?.z ?? 0, blow.what);
+      },
+      (id) => combat.mayHurt(id),
+    );
+    // Somebody arrived. Nothing they are told about the people already here carries health -- not
+    // the greeting, not the states -- so everyone says theirs again at the next look and the newcomer
+    // reads them as they are rather than as whole. It is one small message per player per arrival.
+    const combatJoinWas = this.net.onJoin;
+    this.net.onJoin = (peer) => {
+      combatJoinWas(peer);
+      combat.announceHealth();
+    };
+    // Every bolt in the air passes through these three: one as it leaves a muzzle, one as it leaves
+    // the air, and one where a lit blade turns one away. The fight decides which of them are worth a
+    // word; a bolt that is nobody else's business costs a comparison and nothing more.
+    this.world.bolts.onFire = (bolt) => combat.fired(bolt);
+    this.world.bolts.onGone = (bolt, at) => combat.ended(bolt, at);
+    this.world.bolts.onBlocked = (bolt, at, out) => {
+      if (!combat.blockedHere(bolt, at.x, at.y, at.z)) return false;
+      // The blocker's own shot from the block point, which crosses as any other shot of theirs does.
+      // One bolt in, one bolt out: the one that came in is ending on every screen, this one's word
+      // is on its way, and neither browser has to guess what the other did with it.
+      this.world.bolts.fire(at, out, { owner: 'player', damage: bolt.damage, metresPerSecond: bolt.speed, life: bolt.life, color: bolt.color, size: bolt.size, projectile: bolt.projectile, exclude: this.player.aboard ? this.player.aboard.vehicle.body : this.player.body, frame: this.player.aboard ? { matrix: this.player.aboard.vehicle.group.matrixWorld, physics: this.player.aboard.physics } : null, source: this.world.playerTarget });
+      return true;
+    };
+    // This player's own health is looked at ten times a second and sent at `healthHz`, which is why
+    // that number is held at ten or under; a death is said once. It is a clock of its own and not
+    // the frame's: a tab that is not being drawn stops its frames and keeps its timers, so a player
+    // who walked away is still seen to be where and how they are.
+    window.setInterval(() => combat.step(0.1), 100);
+    // The group's words are read first and the fight takes what is left, so neither unplugs the other.
+    const combatWordWas = this.net.onWord;
+    this.net.onWord = (msg) => {
+      combatWordWas(msg);
+      combat.handle(msg);
+    };
+    // A line that dropped, was put down or was taken over leaves nothing behind: no duel outlives a
+    // line, and nothing is left being held for a bolt that belongs to a world that has gone.
+    const combatStatusWas = this.net.onStatus;
+    this.net.onStatus = (status, detail) => {
+      combatStatusWas(status, detail);
+      if (status !== 'online') combat.clear();
+    };
+    if (debugRoot) {
+      // `__debug.combat()` reads what is crossing and `__debug.combat({ shotsPerSecond: 30 })` sets
+      // one of this side's own numbers. The duel is the game's own word at the game's own distance:
+      // `{ ask: <the relay id of a player> }` asks for one, `{ accept: true }` takes one up and
+      // `{ peace: true }` ends every one, which is how a script with no keyboard tries the whole path.
+      debugRoot.combat = (o?: Partial<typeof COMBAT_TUNE> & { ask?: number; accept?: boolean; decline?: boolean; peace?: boolean }) => {
+        if (o) tuneCombat(o);
+        let answer = '';
+        if (typeof o?.ask === 'number') answer = combat.askDuel(o.ask);
+        if (o?.accept) combat.acceptDuel();
+        if (o?.decline) combat.declineDuel();
+        if (o?.peace) combat.peace();
+        return { ...combat.debug(), answer, tune: COMBAT_TUNE, duelRange: GROUP_RANGE.duel };
+      };
+    }
 
     this.select = new CharacterSelect(this.ui);
     this.select.onPlay = (c) => void this.play(c).catch((err) => console.warn('could not enter the world', err));
