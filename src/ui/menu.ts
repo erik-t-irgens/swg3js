@@ -147,6 +147,13 @@ const GRAPHICS: { title: string; knobs: readonly Knob[] }[] = [
     ],
   },
   {
+    // Space: scene content again, and nothing here recompiles a shader.
+    title: 'Space',
+    knobs: [
+      { key: 'nebulaLightningDamage', label: 'Nebula lightning damages ships', kind: 'toggle', hint: 'A strike inside a nebula takes shields and armour off the ship it hits, at a quarter of the numbers the game\'s own tables carry. Off, lightning only flashes.' },
+    ],
+  },
+  {
     title: 'Distance and detail',
     knobs: [
       { key: 'objectReach', label: 'Object reach', hint: 'How far buildings and props load, over the game\'s own ranges. Less loads less and streams faster.', kind: 'range', min: 0.4, max: 1.6, step: 0.05, format: (v) => `${v.toFixed(2)}×` },
