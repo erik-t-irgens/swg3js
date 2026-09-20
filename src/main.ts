@@ -37,7 +37,7 @@ import { DEFAULT_GADGETS, GADGETS } from './combat/gadgets';
 import { RAGDOLL } from './combat/ragdoll';
 import { WeaponCatalogue, type WeaponDef } from './player/weapons';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { Hud, hudBindingsChanged } from './ui/hud';
+import { Hud, hudBindingsChanged, Roster, ROSTER_TUNE } from './ui/hud';
 import { specFor, type DriveInput } from './vehicles/vehicle';
 import { interceptTime, leadPoint } from './combat/intercept';
 import { PostFX, type FxFrameInput, type SunInfo } from './core/postfx';
@@ -424,6 +424,12 @@ class App {
    * frame. A field initialiser, because the panels built in the constructor already say things.
    */
   private readonly messages = new MessageLine(this.ui);
+  /**
+   * The group down the side of the display. A field initialiser beside the message line, so it
+   * exists before anything in the constructor could ask for it; until the group wiring gives it
+   * somewhere to read the group from it pulls nothing, and with no group it stands down.
+   */
+  private readonly roster = new Roster(this.ui);
   /**
    * The line keeps a lifetime count of its DOM writes; the other two displays report a rate. These
    * sample it once a second into the same unit, so `__debug.hud().lineWrites.lastSecond` can be read
@@ -3261,6 +3267,10 @@ class App {
       };
     }
 
+    // Where the display's roster reads the group from. The same array between changes, so nothing is
+    // allocated to read it, and the roster writes only the values that have moved.
+    this.roster.source = () => (groups.roster ? groups.roster.members : null);
+
     this.select = new CharacterSelect(this.ui);
     this.select.onPlay = (c) => void this.play(c).catch((err) => console.warn('could not enter the world', err));
     this.select.onCreate = () => void this.openCreator().catch((err) => console.warn('creator', err));
@@ -3413,6 +3423,10 @@ class App {
     if (this.player.aboard) this.leaveShip(true);
     this.player.noclip = false;
     this.inWorld = false;
+    // The world is going and the group with it: the strip comes down here, because the frame that
+    // would notice stops being run the moment there is no world, and a roster left standing behind
+    // the select screen is last night's group with last night's distances on it.
+    this.roster.clear();
     this.started = false;
     this.current = null;
     this.net.disconnect();
@@ -7473,6 +7487,10 @@ class App {
       // be standing there when the panel closes, and under a long stall a clamped delta would hold
       // every line far past its eight seconds.
       this.messages.update(rawDt);
+      // The group's roster: it takes the list from the group module itself and writes only what has
+      // changed — eight rows of number comparisons, nothing allocated, and nothing written at all
+      // while nobody has moved.
+      this.roster.update();
       // The line's write counter is a lifetime total; it is sampled here into the per-second rate the
       // other two displays report. Nothing is allocated, and the sample is taken once a second.
       this.lineWriteWindow += rawDt;

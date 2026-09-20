@@ -1,6 +1,8 @@
 import type { Kit } from '../combat/kit';
-import type { PlanetDef } from '../data/planets';
-import { HUD_SIZES } from './hudMath.ts';
+// The game's own table of worlds, so a roster row names a planet and a zone the way the rest of the
+// game names them rather than inventing words from an id. It is plain data and imports nothing.
+import { PLANETS, type PlanetDef } from '../data/planets.ts';
+import { HUD_SIZES, barBand, clamp01 } from './hudMath.ts';
 import { glyphFor, handGlyph, iconCount, installIcons } from './hudIcons.ts';
 
 /**
@@ -1004,4 +1006,712 @@ function wordsOf(id: string): string {
 /** Anything that goes into markup: the five characters that would otherwise close a tag. */
 function esc(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+// ===================================================================================================
+// The group's roster.
+//
+// The people you are grouped with, down the right-hand side under the corner block: a name, a health
+// bar, and on the right either how far away they are, or where they are when that is not this world,
+// or nothing at all while the group has not heard from them. It is built the way the rest of this
+// file is built — a pool of rows made once and never grown, every value compared against what the
+// row is showing and written only when it has changed — so a frame in which nothing has moved writes
+// nothing at all and allocates nothing, and the node test measures both rather than taking their
+// word for it.
+//
+// What somebody says is not here. The message line in the bottom left already holds a line for eight
+// seconds and fades it, and the chat page already routes what was said on to it; a second log beside
+// it would put every line up twice.
+
+/**
+ * Every number the roster runs on. All of them are INVENTED except the row count, which is the
+ * group's own cap, and they are live through `Roster.tune` so one can be tried without a reload.
+ * None of them decides what is shown, only how finely a value is compared before it is written and
+ * where the block sits, so the worst a wrong one can do is cost a write or move the block.
+ *
+ * `rows` is read once, when the roster is built: the rows are made then and never grown, as the
+ * message line's pool is. `barPixels` is how finely a row's health bar is compared, in steps of the
+ * bar's own length. `metreStep`, `coarseFrom` and `farStep` are how finely a distance is compared —
+ * a metre while someone is close, and 25 m once they are 200 m off, where a metre either way is not
+ * worth a write — and `kmFrom` is where the distance reads in kilometres instead, rounded to a
+ * tenth, which is what the comparison uses above it so the number compared and the words written can
+ * never disagree. `top`, `side` and `width` are the block's placement in CSS pixels; `top` is a plain
+ * number because the corner block it sits under is placed in plain pixels too, while the block's own
+ * insides follow `--hud-scale` like the rest of the instrument. `showAlone` is 1 to keep the roster
+ * up while you are the only one in it, which is how to look at it without a second browser.
+ */
+export const ROSTER_TUNE = {
+  /** The group's cap, which is the owner's decision and not ours: up to eight. */
+  rows: 8,
+  barPixels: 160,
+  metreStep: 1,
+  coarseFrom: 200,
+  farStep: 25,
+  kmFrom: 1000,
+  top: 96,
+  side: 12,
+  width: 168,
+  showAlone: 0,
+};
+
+/** The keys `Roster.tune` takes; anything else is a mistake at the console and is said out loud. */
+const ROSTER_KEYS = ['rows', 'barPixels', 'metreStep', 'coarseFrom', 'farStep', 'kmFrom', 'top', 'side', 'width', 'showAlone'] as const;
+
+/**
+ * The steps above that may be 0. `showAlone` is a switch: 0 hides the roster while you are alone in
+ * it, 1 keeps it up. `top` and `side` are placements in pixels, and 0 is a perfectly good answer for
+ * either — flush against the corner — so they are not held above zero the way a step that divides is.
+ * `width` is not here: a block no pixels wide is a mistake, not a placement.
+ */
+const ROSTER_ZERO_OK: readonly string[] = ['showAlone', 'top', 'side'];
+
+/**
+ * A member of the group as the roster shows them, declared structurally: it is the shape the group
+ * itself keeps, so the display is handed that list and adapts nothing. This file works out nothing
+ * about anybody — it writes what it is given.
+ *
+ * `distance` below zero is not by itself "another world". The group sets it below zero for three
+ * different reasons — they are elsewhere, their browser has gone quiet, or nothing has been heard of
+ * them yet — and only the first of those is a world worth naming. So the row that is marked `me`
+ * carries the world this browser is on, and a member is shown as elsewhere only when their own
+ * `planet` and `zone` differ from it; the rest stand under one plain word. A `hp` below zero is a
+ * health nothing carries yet, and the bar stands empty rather than reading as a member at death's
+ * door.
+ */
+export interface RosterMember {
+  /** Who the row is, as the group names them; never drawn. */
+  readonly id: number | string;
+  readonly name: string;
+  /** Health as a share of their own full, 0 to 1, or below zero while nothing carries it. */
+  readonly hp: number;
+  /** The world they are on: a planet's id, and the zone's when they are in one. */
+  readonly planet: string;
+  readonly zone: string;
+  /** Whoever leads. */
+  readonly leader: boolean;
+  /** This browser's own row, which is also where the world everyone else is compared against comes from. */
+  readonly me: boolean;
+  /** Metres away, or below zero; see above for the three things below zero can mean. */
+  readonly distance: number;
+  /**
+   * Their line is open. The group's own field: false is a browser that is reloading or has gone
+   * quiet, which keeps its place in the group and its row on the display, dimmed. Nothing has to
+   * carry it — a list without it is read as everyone being here.
+   */
+  readonly here?: boolean;
+  /** The same thing said outright, for anything that would rather say it that way than through `here`. */
+  readonly away?: boolean;
+}
+
+/**
+ * Which of the four things a row's right-hand column is saying. It is compared as a number and not
+ * as the words themselves, so a row whose reading has not changed builds no string at all.
+ * `AT_NOTHING` is your own row, which is not a distance from anywhere, and it is also what a row
+ * starts as — a fresh row's column is empty, so a roster whose first group is only you writes
+ * nothing into it.
+ */
+const AT_NOTHING = 0;
+const AT_METRES = 1;
+const AT_WORLD = 2;
+const AT_AWAY = 3;
+
+/**
+ * A value let go when a step it was drawn through changed, so that the next group round writes it
+ * again. It is -2 because nothing a row can really be showing is: a quantised distance is never
+ * below zero and a health in steps of the bar never is either. A reading taken in the gap before
+ * that next round says so with a question mark rather than printing it.
+ */
+const AT_RESET = -2;
+
+/** What a row is showing, so nothing is ever read back off the page to find out. */
+interface RosterRow {
+  root: HTMLElement;
+  nameEl: HTMLElement;
+  atEl: HTMLElement;
+  bar: HTMLElement;
+  fill: HTMLElement;
+  name: string;
+  /** Which of the four readings the right-hand column is showing. */
+  atMode: number;
+  /** The distance as last written, quantised, while the reading is a distance. */
+  atNum: number;
+  /**
+   * The world whose words were written, as the group handed it over, while the reading is a world.
+   * Two fields rather than one joined key: joining them would be a string built on the frame path
+   * only to be compared and thrown away.
+   */
+  atPlanet: string;
+  atZone: string;
+  /** The health bar as last written, in steps of `barPixels`; `AT_RESET` is "nothing written yet". */
+  health: number;
+  band: string;
+  shown: boolean;
+  leader: boolean;
+  you: boolean;
+  away: boolean;
+}
+
+/** What `Roster.report()` hands back, filled in place so asking for it allocates nothing but its words. */
+export interface RosterReport {
+  /** Rows standing now, and how many members were handed over but had no row left. */
+  rows: number;
+  over: number;
+  /** Writes in the last full second, and so far in the one being counted. */
+  writes: number;
+  writesNow: number;
+  /** Whether the roster's own rules reached the page at all. */
+  styled: boolean;
+  /** The roster as words, oldest row first, which is how it is read from a tab nobody can see. */
+  lines: string;
+}
+
+/** The word a member stands under when the group knows nothing better about where they are. */
+const ROSTER_AWAY_WORD = 'away';
+
+/**
+ * The healths a made-up group wears, as a ramp the row's place along the block is read through.
+ * Every number here is INVENTED and none of them is ever seen in play: they exist so that a group
+ * conjured at the console shows all three of the bar's bands however many rows were asked for, which
+ * is what tells the owner the bands are working. They are anchors, not a straight line, because the
+ * bands are nothing like equal — `barBand` calls a third and up good and a sixth and up warn — and a
+ * straight line from full to nearly nothing steps clean over the warn band on a group of four,
+ * which is exactly what made a working display look broken.
+ *
+ * The block is read in thirds: the first third of the rows falls through the good band, the second
+ * through the warn band and the last through the bad one, each one ending a little inside its band
+ * so that the rounding the row does on the way to the screen cannot tip it into the next.
+ */
+const STAND_IN_HEALTHS = { goodTop: 1, goodLow: 0.4, warnTop: 0.3, warnLow: 0.2, badTop: 0.14, badLow: 0.04 };
+
+/** One row's made-up health: `at` is 0 at the top of the block and 1 at the bottom. */
+function standInHealth(at: number): number {
+  const h = STAND_IN_HEALTHS;
+  if (at <= 1 / 3) return h.goodTop + (h.goodLow - h.goodTop) * (at * 3);
+  if (at <= 2 / 3) return h.warnTop + (h.warnLow - h.warnTop) * ((at - 1 / 3) * 3);
+  return h.badTop + (h.badLow - h.badTop) * ((at - 2 / 3) * 3);
+}
+
+/**
+ * The roster's `source` until the wiring gives it one. It is a named function and not a fresh
+ * closure so that "nobody has told me where the group is" can be told from "the group is empty"
+ * without a second flag: a roster with no source pulls nothing, and one whose source answers null
+ * stands down.
+ */
+const NO_SOURCE = (): readonly RosterMember[] | null => null;
+
+/**
+ * The roster's own rules. They are here rather than in `hud.css` so that this block carries its own
+ * look wherever it is put, and they are written to the page once, when the first roster is built.
+ *
+ * Not one colour is written down here: every one of them is a palette name and nothing else, with no
+ * value behind it, because `:root` in `src/style.css` is the one home for every value on the screen
+ * and a copy of those values here is a copy that no test guards and that a repaint would leave
+ * behind. `--hud-scale`, `--hud-font` and `--hud-stretch` are read the same way. The three
+ * placements are the roster's own and are the only names with a value behind them, since the block
+ * is in the page for an instant before `place()` writes them. The bar is the interface's `.hud-bar`
+ * from `hud.css`, so a row's health wears exactly the shape and the bands every other bar wears.
+ */
+const ROSTER_CSS = `
+.hud-roster {
+  position: absolute;
+  top: var(--hud-roster-top, 96px);
+  right: var(--hud-roster-side, 12px);
+  width: var(--hud-roster-w, 168px);
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: calc(4px * var(--hud-scale));
+  font-family: var(--hud-font);
+  font-stretch: var(--hud-stretch);
+  font-variant-numeric: tabular-nums;
+  font-size: calc(11px * var(--hud-scale));
+  letter-spacing: 0.04em;
+  pointer-events: none;
+}
+.hud-roster.hidden { display: none; }
+.hud-rrow {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: calc(3px * var(--hud-scale));
+  padding: calc(3px * var(--hud-scale)) calc(6px * var(--hud-scale));
+  background: var(--plate);
+  border: 1px solid var(--edge);
+  border-left-width: calc(2px * var(--hud-scale));
+  border-left-color: var(--muted);
+  border-radius: calc(3px * var(--hud-scale));
+  color: var(--ink);
+}
+.hud-rrow[hidden] { display: none; }
+.hud-rrow .top { display: flex; align-items: baseline; justify-content: space-between; gap: calc(6px * var(--hud-scale)); }
+.hud-rrow .name {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  text-shadow: 1px 0 0 var(--void), -1px 0 0 var(--void), 0 1px 0 var(--void), 0 -1px 0 var(--void);
+}
+.hud-rrow .at {
+  flex: none;
+  color: var(--muted);
+  text-shadow: 1px 0 0 var(--void), -1px 0 0 var(--void), 0 1px 0 var(--void), 0 -1px 0 var(--void);
+}
+.hud-rrow .hud-bar { width: 100%; height: calc(5px * var(--hud-scale)); }
+.hud-rrow.leader { border-left-color: var(--accent); }
+.hud-rrow.leader .name { color: var(--accent); }
+.hud-rrow.you .name { font-weight: 600; }
+.hud-rrow.away { opacity: 0.45; }
+`;
+
+/** The one element the roster's rules are written into, so two rosters share one stylesheet. */
+const ROSTER_STYLE_ID = 'hud-roster-style';
+
+/**
+ * The roster's rules on to the page, once. A page that has them already, and a stand-in for the page
+ * in a test that has no head to put them in, both answer without writing anything; a roster whose
+ * rules never landed still works, and says so through `report().styled`.
+ */
+function installRosterStyle(): boolean {
+  try {
+    const doc = typeof document !== 'undefined' ? (document as unknown as Record<string, any>) : null;
+    if (!doc || !doc.head || typeof doc.createElement !== 'function') return false;
+    if (typeof doc.getElementById === 'function' && doc.getElementById(ROSTER_STYLE_ID)) return true;
+    const el = doc.createElement('style');
+    el.id = ROSTER_STYLE_ID;
+    el.textContent = ROSTER_CSS;
+    doc.head.appendChild(el);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The group's members down the side of the display. Give it the group whenever it changes, or every
+ * frame if that is easier — the two are the same cost, because a row writes nothing while nothing it
+ * shows has changed, and the comparison is numbers and string identities, never a string built to be
+ * thrown away.
+ *
+ * The list handed over must be one the caller keeps and refills, not a new array each time: this
+ * side never allocates, and the frame path must not either.
+ */
+export class Roster {
+  /**
+   * Where the group comes from, set by the wiring in the same breath as everything else the group
+   * module is given. With one, `update` takes the list from it each frame and the caller never has
+   * to call `set` at all; without one, nothing is pulled and `set` is the way in. Either way the
+   * list must be the caller's own kept array.
+   */
+  source: () => readonly RosterMember[] | null = NO_SOURCE;
+  readonly root: HTMLElement;
+  private readonly rows: RosterRow[] = [];
+  /** Whether the roster's own rules reached the page. */
+  readonly styled: boolean;
+  private hiddenNow = true;
+  private shownRows = 0;
+  private over = 0;
+  /** DOM writes: this second so far, and the last full second. */
+  private writes = 0;
+  private windowStart = performance.now();
+  private lastWrites = 0;
+  /**
+   * The placement as the page was last told it, so a live change reaches it and nothing else does.
+   * Three numbers rather than one string: `place` is called every frame, and a key built to be
+   * compared and thrown away would be an allocation on the frame path.
+   */
+  private placedTop = NaN;
+  private placedSide = NaN;
+  private placedWidth = NaN;
+  private readonly statsOut: HudStats = { writes: 0, byDesign: 0, seconds: 0, writesNow: 0, byDesignNow: 0 };
+  private readonly reportOut: RosterReport = { rows: 0, over: 0, writes: 0, writesNow: 0, styled: false, lines: '' };
+  /** The console's made-up group, kept and refilled rather than built again on every call. */
+  private readonly madeUp: { -readonly [K in keyof RosterMember]: RosterMember[K] }[] = [];
+  /** While a made-up group is up, the frame's pull stands aside so the real one cannot write over it. */
+  private holding = false;
+  private readonly tuneOut: typeof ROSTER_TUNE = { ...ROSTER_TUNE };
+
+  constructor(parent: HTMLElement) {
+    this.styled = installRosterStyle();
+    this.root = document.createElement('div');
+    this.root.className = 'hud-roster hidden';
+    parent.appendChild(this.root);
+    const count = Math.max(1, Math.round(ROSTER_TUNE.rows));
+    for (let i = 0; i < count; i++) {
+      const el = document.createElement('div');
+      el.className = 'hud-rrow';
+      el.hidden = true;
+      el.innerHTML = '<div class="top"><span class="name"></span><span class="at"></span></div><div class="hud-bar good"><div class="fill"></div></div>';
+      this.root.appendChild(el);
+      const q = (sel: string) => el.querySelector<HTMLElement>(sel) ?? el;
+      this.rows.push({
+        root: el,
+        nameEl: q('.name'),
+        atEl: q('.at'),
+        bar: q('.hud-bar'),
+        fill: q('.fill'),
+        name: '',
+        atMode: AT_NOTHING,
+        atNum: -1,
+        atPlanet: '',
+        atZone: '',
+        health: AT_RESET,
+        band: 'good',
+        shown: false,
+        leader: false,
+        you: false,
+        away: false,
+      });
+    }
+    this.place();
+    // Building the block is not what the count is about: it counts what the roster writes while the
+    // game is running, and a display that counted its own construction would never read 0.
+    this.writes = 0;
+  }
+
+  /** How many rows the pool holds: fixed when the roster was built. */
+  get size(): number {
+    return this.rows.length;
+  }
+
+  /**
+   * The group as it stands. Nothing but the rows that have changed is written; a group of one is not
+   * a group, so the block stands down unless `showAlone` is on, and an empty list takes it away.
+   *
+   * Your own row is found first, because it is what everybody else's world is compared against: the
+   * same list carries it, so nothing extra has to cross the wire for the display to tell "they are
+   * on another planet" from "we are standing together and nothing has been heard of them".
+   */
+  set(members: readonly RosterMember[] | null): void {
+    const n = members ? members.length : 0;
+    const cap = this.rows.length;
+    const take = n > cap ? cap : n;
+    this.over = n - take;
+    const wanted = take > 1 || (take === 1 && ROSTER_TUNE.showAlone > 0);
+    if (!wanted) {
+      this.showRoot(false);
+      // The rows are put away as well, so the block that comes back is not wearing the last group.
+      for (let i = 0; i < cap; i++) this.hideRow(this.rows[i]);
+      this.shownRows = 0;
+      return;
+    }
+    // Over the whole list, not just the rows that fit, so a ninth member does not take the world
+    // this browser is on away from the eight that are shown.
+    let mine: RosterMember | null = null;
+    for (let i = 0; i < n; i++) {
+      if (members![i].me) {
+        mine = members![i];
+        break;
+      }
+    }
+    for (let i = 0; i < take; i++) this.writeRow(this.rows[i], members![i], mine);
+    for (let i = take; i < cap; i++) this.hideRow(this.rows[i]);
+    this.shownRows = take;
+    this.showRoot(true);
+  }
+
+  /**
+   * The group is gone: the block goes with it, and a made-up group put up at the console is let go
+   * as well — leaving it held would stop the frame ever pulling the real group again.
+   */
+  clear(): void {
+    this.holding = false;
+    this.set(null);
+  }
+
+  /**
+   * A made-up group, for looking at the block with nobody else connected — the console's call, never
+   * the game's. The rows are kept and refilled, so asking again allocates nothing, and the group
+   * handed over is the roster's own array, which is exactly how a caller is asked to feed it.
+   *
+   * The names and the distances are stand-ins with no meaning; `showAlone` is what to turn on to see
+   * a single row this way. The healths come off the ramp above, so that however many rows are asked
+   * for the three bands are all on the screen at once — a made-up group of four that came out all
+   * green had the owner looking for a fault in the bands that was not there. The worlds are real ids
+   * from the game's own table, so what the block reads is what it would read in play.
+   *
+   * While one is up the frame's own pull stands aside, so the real group cannot write over it a
+   * frame later; `standIn(0)` puts the block down and hands it back.
+   */
+  standIn(n: number): readonly RosterMember[] {
+    const want = Math.max(0, Math.min(this.rows.length, Math.round(n)));
+    this.holding = want > 0;
+    const made = this.madeUp;
+    while (made.length < want) {
+      const i = made.length;
+      made.push({ id: i + 1, name: `Member ${i + 1}`, hp: 1, planet: '', zone: '', distance: 0, leader: false, me: false, here: true, away: false });
+    }
+    for (let i = 0; i < want; i++) {
+      const m = made[i];
+      // Full at the top down to nearly nothing at the bottom, through each band in turn, so the
+      // good, the warn and the bad are all shown whether three rows were asked for or eight.
+      m.hp = want > 1 ? standInHealth(i / (want - 1)) : STAND_IN_HEALTHS.goodTop;
+      // The last of four or more stands on another world and the one before it has gone quiet, so
+      // all three readings of the right-hand column can be seen at once.
+      const elsewhere = want >= 4 && i === want - 1;
+      const quiet = want >= 4 && i === want - 2;
+      m.distance = elsewhere || quiet ? -1 : 12 + i * 63;
+      m.planet = elsewhere ? 'naboo' : 'tatooine';
+      m.zone = '';
+      m.leader = i === 0;
+      m.me = i === 1;
+      m.here = !quiet;
+      m.away = false;
+    }
+    made.length = want;
+    this.set(made);
+    return made;
+  }
+
+  /**
+   * Once a frame, or as often as suits. With a `source` it takes the group from it and writes
+   * whatever has changed — eight rows of number comparisons, and nothing at all while nobody has
+   * moved. It also closes the second the writes are counted in and carries a placement changed at
+   * the console to the page. It ages nothing: there is nothing here that fades.
+   */
+  update(): void {
+    const from = this.source;
+    if (!this.holding && from !== NO_SOURCE) this.set(from());
+    const now = performance.now();
+    if (now - this.windowStart >= 1000) {
+      this.lastWrites = this.writes;
+      this.writes = 0;
+      this.windowStart = now;
+    }
+    this.place();
+  }
+
+  /** The same two counts the rest of the display answers with, filled in place. */
+  stats(): HudStats {
+    const s = this.statsOut;
+    s.writes = this.lastWrites;
+    s.byDesign = 0;
+    s.seconds = (performance.now() - this.windowStart) / 1000;
+    s.writesNow = this.writes;
+    s.byDesignNow = 0;
+    return s;
+  }
+
+  /**
+   * What the roster is showing, in words as well as in numbers, because the session that works on
+   * this file cannot see the screen: `lines` is each row as it reads, in order, which is the only
+   * way to check a name, a health bar and a distance from a tab nobody is looking at.
+   */
+  report(): RosterReport {
+    const o = this.reportOut;
+    o.rows = this.shownRows;
+    o.over = this.over;
+    o.writes = this.lastWrites;
+    o.writesNow = this.writes;
+    o.styled = this.styled;
+    let lines = '';
+    for (let i = 0; i < this.shownRows; i++) {
+      const r = this.rows[i];
+      const marks = `${r.leader ? ' (leader)' : ''}${r.you ? ' (you)' : ''}${r.away ? ' (away)' : ''}`;
+      // A value let go by a live change of step and not yet written again reads as a question, so
+      // that a reading taken in that one gap is never a number the row is not showing.
+      const at = r.atNum === AT_RESET ? '?' : this.atWords(r.atMode, r.atNum, r.atPlanet, r.atZone);
+      const share = r.band === 'none' ? '—' : r.health === AT_RESET ? '?' : `${Math.round((r.health / Math.max(1, ROSTER_TUNE.barPixels)) * 100)}%`;
+      lines += `${lines ? ' | ' : ''}${r.name}${marks} ${share}${at ? ` ${at}` : ''}`;
+    }
+    o.lines = lines;
+    return o;
+  }
+
+  /**
+   * Try one of the invented steps live; with nothing given it only reports them. `rows` is taken and
+   * reported but changes nothing until a fresh roster is built, exactly as the message line's pool
+   * is, because the rows are made once. What comes back is a copy, so the console holds a reading
+   * and not the table.
+   */
+  tune(next?: Partial<typeof ROSTER_TUNE>): typeof ROSTER_TUNE {
+    let took = false;
+    if (next) {
+      for (const key of Object.keys(next)) {
+        const value = (next as Record<string, unknown>)[key];
+        if (!(ROSTER_KEYS as readonly string[]).includes(key)) {
+          console.warn(`roster.tune: no step called ${key}; the steps are ${ROSTER_KEYS.join(', ')}`);
+          continue;
+        }
+        const floor = ROSTER_ZERO_OK.includes(key) ? 0 : 1e-9;
+        if (typeof value !== 'number' || !Number.isFinite(value) || value < floor) {
+          console.warn(`roster.tune: ${key} wants a number ${floor > 0 ? 'above zero' : 'of zero or more'}, not ${String(value)}`);
+          continue;
+        }
+        ROSTER_TUNE[key as keyof typeof ROSTER_TUNE] = value;
+        took = true;
+      }
+    }
+    if (took) {
+      // Whatever was drawn through the old steps is drawn again through the new ones, the next time
+      // the group comes round. Only the two values a step touches are let go: the bar, and a
+      // distance. A world's name and the plain word do not go through a step at all, so they are
+      // left standing and the row goes on saying what it is really saying.
+      for (const row of this.rows) {
+        row.health = AT_RESET;
+        if (row.atMode === AT_METRES) row.atNum = AT_RESET;
+      }
+      this.place();
+    }
+    const out = this.tuneOut;
+    for (const key of ROSTER_KEYS) out[key] = ROSTER_TUNE[key];
+    return out;
+  }
+
+  // --- the writing --------------------------------------------------------------------------------
+
+  private writeRow(row: RosterRow, m: RosterMember, mine: RosterMember | null): void {
+    if (!row.shown) {
+      row.shown = true;
+      row.root.hidden = false;
+      this.writes++;
+    }
+    if (m.name !== row.name) {
+      row.name = m.name;
+      row.nameEl.textContent = m.name;
+      this.writes++;
+    }
+    // Their browser has gone quiet — reloading, or shut. The group keeps their place and this keeps
+    // their row, dimmed; what it must not do is read as "they are on another planet", because their
+    // world is still the one you are standing on.
+    const gone = m.away === true || m.here === false;
+    // The right-hand column, as one of four readings. Your own row has none: a distance from
+    // yourself is zero and says nothing. A distance below zero is a world only when their world is
+    // genuinely not yours; otherwise they are here somewhere and nothing has been heard of them, and
+    // the row says that in one plain word rather than naming the planet you are both standing on.
+    let mode = AT_AWAY;
+    let atNum = -1;
+    let atPlanet = '';
+    let atZone = '';
+    if (m.me) {
+      mode = AT_NOTHING;
+    } else if (m.distance >= 0) {
+      mode = AT_METRES;
+      atNum = quantiseMetres(m.distance);
+    } else if (!gone && (!mine || m.planet !== mine.planet || m.zone !== mine.zone) && (m.planet || m.zone)) {
+      mode = AT_WORLD;
+      atPlanet = m.planet;
+      atZone = m.zone;
+    }
+    // What is compared is the reading, the number its words are built from and the world as it was
+    // handed over — never the words — so a string is built only when what it would say has changed.
+    if (mode !== row.atMode || atNum !== row.atNum || atPlanet !== row.atPlanet || atZone !== row.atZone) {
+      row.atMode = mode;
+      row.atNum = atNum;
+      row.atPlanet = atPlanet;
+      row.atZone = atZone;
+      row.atEl.textContent = this.atWords(mode, atNum, atPlanet, atZone);
+      this.writes++;
+    }
+    // The health bar, in steps of its own length, and its band, which is the interface's own. A
+    // health nothing carries yet stands empty in the band for a bar with nothing behind it, rather
+    // than reading as a member about to die.
+    const px = Math.max(1, Math.round(ROSTER_TUNE.barPixels));
+    const known = m.hp >= 0;
+    const share = known ? clamp01(m.hp) : 0;
+    const steps = Math.round(share * px);
+    if (steps !== row.health) {
+      row.health = steps;
+      row.fill.style.transform = `scaleX(${steps / px})`;
+      this.writes++;
+    }
+    const band = known ? barBand(share) : 'none';
+    if (band !== row.band) {
+      row.bar.classList.toggle(row.band, false);
+      row.bar.classList.toggle(band, true);
+      row.band = band;
+      this.writes += 2;
+    }
+    this.flag(row, 'leader', !!m.leader);
+    this.flag(row, 'you', !!m.me);
+    this.flag(row, 'away', gone);
+  }
+
+  /** One reading of the right-hand column as it reads. The one place a string is built for it. */
+  private atWords(mode: number, atNum: number, planet: string, zone: string): string {
+    if (mode === AT_METRES) return distanceWords(atNum);
+    if (mode === AT_WORLD) return worldWords(planet, zone);
+    if (mode === AT_AWAY) return ROSTER_AWAY_WORD;
+    return '';
+  }
+
+  private flag(row: RosterRow, name: 'leader' | 'you' | 'away', on: boolean): void {
+    if (row[name] === on) return;
+    row[name] = on;
+    row.root.classList.toggle(name, on);
+    this.writes++;
+  }
+
+  private hideRow(row: RosterRow): void {
+    if (!row.shown) return;
+    row.shown = false;
+    row.root.hidden = true;
+    this.writes++;
+  }
+
+  private showRoot(on: boolean): void {
+    const hide = !on;
+    if (hide === this.hiddenNow) return;
+    this.hiddenNow = hide;
+    this.root.classList.toggle('hidden', hide);
+    this.writes++;
+  }
+
+  /**
+   * Where the block sits, as three properties the rules read. One write at boot, and one more only
+   * when a placement is changed at the console, so the numbers above and the block on the screen can
+   * never say different things.
+   */
+  private place(): void {
+    if (ROSTER_TUNE.top === this.placedTop && ROSTER_TUNE.side === this.placedSide && ROSTER_TUNE.width === this.placedWidth) return;
+    this.placedTop = ROSTER_TUNE.top;
+    this.placedSide = ROSTER_TUNE.side;
+    this.placedWidth = ROSTER_TUNE.width;
+    setVar(this.root, '--hud-roster-top', `${ROSTER_TUNE.top}px`);
+    setVar(this.root, '--hud-roster-side', `${ROSTER_TUNE.side}px`);
+    setVar(this.root, '--hud-roster-w', `${ROSTER_TUNE.width}px`);
+    this.writes += 3;
+  }
+}
+
+/**
+ * A distance rounded to what the words it becomes can tell apart: a metre while someone is close, 25
+ * m once they are `coarseFrom` off, and a hundred once it reads in kilometres. Two distances that
+ * would read the same round to the same number, which is what lets the roster compare numbers and
+ * still never write the same words twice.
+ */
+export function quantiseMetres(d: number): number {
+  const v = Number.isFinite(d) && d > 0 ? d : 0;
+  if (v >= ROSTER_TUNE.kmFrom) return Math.round(v / 100) * 100;
+  const step = Math.max(1e-9, v >= ROSTER_TUNE.coarseFrom ? ROSTER_TUNE.farStep : ROSTER_TUNE.metreStep);
+  return Math.round(v / step) * step;
+}
+
+/** A quantised distance as it reads: metres, and kilometres to a tenth from `kmFrom` up. */
+export function distanceWords(metres: number): string {
+  if (metres >= ROSTER_TUNE.kmFrom) return `${(metres / 1000).toFixed(1)} km`;
+  return `${Math.round(metres)} m`;
+}
+
+/**
+ * A world as the game itself names it, from the game's own table: the planet's name, and the zone's
+ * after it when they are in one, which is the same pair `main.ts` puts in the corner block. An id
+ * off the wire is looked up and never trusted — `PLANETS.find`, not `planetById`, which throws on an
+ * id it does not know — so a build that sends a world this one has never heard of reads as the id
+ * tidied up rather than taking the display down.
+ *
+ * The tidying is what this used to do on its own, and on its own it was wrong: the ids that really
+ * cross are `space_light1` for Kessel, `yavin4` for Yavin 4, and `kashyyyk` with a zone of `main`
+ * for Kachirho, none of which tidy into anything a player would recognise.
+ */
+export function worldWords(planet: string, zone: string): string {
+  const def = planet ? PLANETS.find((p) => p.id === planet) : undefined;
+  if (!def) return tidyId(zone || planet);
+  const z = zone && def.zones ? def.zones.find((x) => x.id === zone) : undefined;
+  return z ? `${def.name}: ${z.name}` : def.name;
+}
+
+/** A world the table cannot name, made readable: underscores out, first letter up. */
+function tidyId(id: string): string {
+  const words = id.replace(/_/g, ' ').trim();
+  if (!words) return ROSTER_AWAY_WORD;
+  return words.charAt(0).toUpperCase() + words.slice(1);
 }
