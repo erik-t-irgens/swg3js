@@ -97,6 +97,8 @@ import { HEAD_TO_EYE, SEATED_EYE_FALLBACK, SEAT_RULE, cockpitYawStep, frameFileN
 import { World } from './world/world';
 import { AudioSystem, type ListenerPose } from './audio/audio.ts';
 import { OUTSIDE } from './audio/distance.ts';
+import type { AmbienceTune } from './audio/ambience.ts';
+import type { WorldSourceTune } from './audio/emitters.ts';
 import { RoomAir, type RoomAirDebugOptions, type RoomAirInput } from './world/roomAir';
 import { RANGE } from './world/gallery';
 import { castsShadow, surfaces } from './world/surfaces';
@@ -411,6 +413,10 @@ class App {
     // The target effects place the world's ship effects (made in the World constructor).
     this.targetFx = new TargetFx(this.world.shipFx);
     this.world.renderer = this.renderer;
+    // The sound of the place: the area's beds, the game's placed sound objects and the loops its
+    // particle effects name. The numbering of buildings and boarded hulls is this class's, so that a
+    // sound and the ear agree on what counts as the same room.
+    this.world.attachAudio(this.audio, (of) => this.spaceIdOf(of));
     // The lava tables World loads go to the heat haze from here on.
     this.world.heat = this.heat;
     // Plumes the heat haze draws, asked for once a frame from inside the effects chain (after the
@@ -1249,6 +1255,35 @@ class App {
       soundGain: (category?: number, value?: number) => {
         if (category !== undefined && value !== undefined && category >= 0 && category < this.audio.categoryGain.length) this.audio.categoryGain[category] = value;
         return [...this.audio.categoryGain];
+      },
+      /**
+       * The sound of the place, headless: which of the sky's own rows are playing and at what share
+       * of the frame, the day fraction the beds are crossfaded by, how much of the frame the room
+       * the player is in has taken and which of the interior table's rows that is, the planet's
+       * placed sound objects (how many the pack holds, how many are within earshot, how many hold a
+       * voice), the loops its particle effects name, and each weather channel's own sound.
+       *
+       * With an object it tunes, live: `{ dayFade: 5 }` and `{ roomFade: 0.2 }` make the two
+       * crossfades quick enough to see in one walk, and `{ weatherParticles: true }` adds the
+       * thunder the rain sheets carry to the thunder the storm rows already play (the owner's
+       * decision 5, which is off by default so the two do not double). The placed sound objects'
+       * own three numbers (`cap`, `spaceTries`, `spaceGiveUp`) go in the same object and take from
+       * the next grid pass; `cap` is read when a planet's places are put down, so it takes on the
+       * next arrival.
+       */
+      ambience: (opts: Partial<AmbienceTune & WorldSourceTune> = {}) => {
+        const a = this.world.ambience;
+        if (!a) return { ok: false, why: 'the world has no mixer' };
+        // Each number goes to the tune it belongs to: the two are separate objects, one on the
+        // ambience and one on its sources, and a key named in neither is said rather than dropped.
+        const unknown: string[] = [];
+        for (const [key, value] of Object.entries(opts)) {
+          if (key in a.tune) (a.tune as unknown as Record<string, unknown>)[key] = value;
+          else if (key in a.sources.tune) (a.sources.tune as unknown as Record<string, unknown>)[key] = value;
+          else unknown.push(key);
+        }
+        if (unknown.length) console.warn(`ambience: nothing here is tuned by ${unknown.join(', ')}`);
+        return { ...a.status(), tune: { ...a.tune, ...a.sources.tune } };
       },
       /**
        * Renders a known sound through an offline context and checks it came out at the gain the
@@ -2667,6 +2702,10 @@ class App {
     pose.space.building = aboard ? this.spaceIdOf(aboard.vehicle) : this.spaceIdOf(cell?.building ?? null);
     // Which room of a hull the player stands in is not tracked yet; a building's is.
     pose.space.cell = aboard ? -1 : (cell?.cell ?? -1);
+    // The world's own sound reads the same two numbers: its beds sit wherever the ear does, so
+    // walking into a cantina crossfades the street away rather than cutting it off at the door.
+    this.world.listenerSpace.building = pose.space.building;
+    this.world.listenerSpace.cell = pose.space.cell;
     this.audio.update(dt, pose);
   }
 

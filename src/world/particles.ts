@@ -112,6 +112,12 @@ export interface EmitterDef {
   alignToTerrain: boolean;
   snapHeight: number;
   firstImmediately: boolean;
+  /**
+   * A sound template the emitter names (`sound/item_sparks.snd`), from emitter version 5 on: the
+   * waterfalls, fires, steam vents and sparks the game places, and the thunder its rain sheets
+   * carry. Absent in packs converted before the converter read it.
+   */
+  sound?: string;
   particle: {
     type: 'quad' | 'mesh';
     name: string;
@@ -160,6 +166,28 @@ export interface EffectHandle {
   readonly depth?: number;
   /** Draw untextured quad emitters as flat colour (the hyperspace tunnel); no other effect asks. */
   readonly solid?: boolean;
+  /**
+   * False keeps the effect silent whatever its emitters name. The weather passes it: its channels'
+   * own sound is played at the channel's share of the mix, which no handle here can know, so a
+   * voice must never start behind its back.
+   */
+  readonly sound?: boolean;
+}
+
+/**
+ * What the world's sound does with a placed effect. Nothing here plays anything: the effects only
+ * say which sounds their emitters name and where they are, and the mixer decides the rest. Left
+ * null (the gallery, the ship preview, a test) and the effects are silent as they always were.
+ */
+export interface EffectSounds {
+  /** The looping sounds this effect's emitters name, and where it stands. Only called when there are any. */
+  start(handle: EffectHandle, sounds: readonly string[], x: number, y: number, z: number): void;
+  /** Where it stands now, its frame already applied. Only for effects that named a sound. */
+  move(handle: EffectHandle, x: number, y: number, z: number): void;
+  /** A passing effect (a hit, a flash, a burst) whose emitters name a sound: played once, there. */
+  once(handle: EffectHandle, sound: string, x: number, y: number, z: number): void;
+  /** It has gone: removed, played out, or asleep because nobody is near it. */
+  stop(handle: EffectHandle): void;
 }
 
 /**
@@ -436,6 +464,10 @@ const camPos = new THREE.Vector3();
 const ONE = new THREE.Vector3(1, 1, 1);
 const tmpKill = new THREE.Vector3();
 const tmpWhere = new THREE.Vector3();
+/** Where an effect's own sound is placed, worked out only when its description has just loaded. */
+const tmpSound = new THREE.Vector3();
+/** What `soundsOf` hands back for the great majority, which name no sound: one shared empty list. */
+const EMPTY_SOUNDS: readonly string[] = [];
 const tmpRel = new THREE.Matrix4();
 const tmpCarry = new THREE.Matrix4();
 const tmpCarryPos = new THREE.Vector3();
@@ -931,6 +963,12 @@ export class ParticleEffects {
   private disposed = false;
   /** Terrain height lookup for particles that bounce or snap to the ground. */
   heightAt: ((x: number, z: number) => number) | null = null;
+  /** What the world's sound does with these effects; null when the game has no mixer (a test, a preview). */
+  sounds: EffectSounds | null = null;
+  /** The sounds each playing effect's emitters name; only effects that name one are in it. */
+  private readonly effectSounds = new Map<EffectHandle, string[]>();
+  /** Effects whose loops are running, so `move` is called for those and nothing else. */
+  private readonly sounding = new Set<EffectHandle>();
   /** What kills particles early (the weather's); null for placed effects, and never applied to a framed effect. */
   kill: ParticleKill | null = null;
 
@@ -1016,8 +1054,8 @@ export class ParticleEffects {
    * matrixWorld, kept by reference) `matrix` is in that frame, and the effect simulates there and is
    * carried into the world as it is drawn: something played aboard stays in the room while the ship flies.
    */
-  place(file: string, matrix: THREE.Matrix4, contained: boolean, transient = false, frame: THREE.Matrix4 | null = null, solid = false): EffectHandle {
-    return this.start({ file, matrix: matrix.clone(), contained, transient, frame, rateScale: 1, depth: 0, solid });
+  place(file: string, matrix: THREE.Matrix4, contained: boolean, transient = false, frame: THREE.Matrix4 | null = null, solid = false, options: { sound?: boolean } = {}): EffectHandle {
+    return this.start({ file, matrix: matrix.clone(), contained, transient, frame, rateScale: 1, depth: 0, solid, sound: options.sound });
   }
 
   /** Load a handle's effect and play it once loaded, unless it was removed meanwhile. */
@@ -1030,8 +1068,55 @@ export class ParticleEffects {
         return;
       }
       this.instances.set(handle, new EffectInstance(handle, def, this.host));
+      this.noteSounds(handle, def);
     });
     return handle;
+  }
+
+  /**
+   * The sounds a placed effect's emitters name, once its description has loaded; empty before that
+   * and for the great majority, which name none. The weather reads it to play its channels' own
+   * sound at the channel's share of the mix.
+   */
+  soundsOf(handle: EffectHandle): readonly string[] {
+    return this.effectSounds.get(handle) ?? EMPTY_SOUNDS;
+  }
+
+  /**
+   * Which sounds this effect names, and what to do about them: a passing effect (a hit, a burst)
+   * plays each once where it was placed, and a standing one (a waterfall, a fire, a steam vent)
+   * keeps a loop that follows it while it is awake.
+   */
+  private noteSounds(handle: EffectHandle, def: EffectDef): void {
+    let list: string[] | null = null;
+    for (const g of def.groups) {
+      for (const e of g.emitters) {
+        if (!e.sound) continue;
+        // Named once however many emitters name it: several emitters of one effect usually carry
+        // the same sound (a sheet of rain's thunder is on both its halves), and a passing effect
+        // would otherwise fire it twice at the same point.
+        if (list?.includes(e.sound)) continue;
+        (list ??= []).push(e.sound);
+      }
+    }
+    if (!list) return;
+    // Recorded even for a handle placed `sound: false`, because that is how its owner reads what it
+    // named: the weather plays its channels' own sound at the channel's share of the mix.
+    this.effectSounds.set(handle, list);
+    const sounds = this.sounds;
+    if (!sounds || handle.sound === false) return;
+    // A standing effect's loop is not started here: an effect is placed asleep, and its own wake
+    // in `update` is what starts it, so a waterfall placed a kilometre off holds no voice until
+    // somebody is near enough for it to be drawn.
+    if (!handle.transient) return;
+    const where = this.instances.get(handle)?.worldPosition(tmpSound) ?? tmpSound.setFromMatrixPosition(handle.matrix);
+    for (const id of list) sounds.once(handle, id, where.x, where.y, where.z);
+  }
+
+  /** The loop of an effect that has gone, played out or fallen asleep. */
+  private endSound(handle: EffectHandle): void {
+    if (!this.sounding.delete(handle)) return;
+    this.sounds?.stop(handle);
   }
 
   /**
@@ -1045,7 +1130,9 @@ export class ParticleEffects {
       this.childrenSkipped++;
       return null;
     }
-    const handle = this.start({ file, matrix: matrix.clone(), contained: parent.contained, transient: true, frame: parent.frame, rateScale: 1, depth });
+    // `sound` is carried down with the frame and the building: an effect whose owner asked for
+    // silence (the weather's channels) must not be given a voice by something its particles spawn.
+    const handle = this.start({ file, matrix: matrix.clone(), contained: parent.contained, transient: true, frame: parent.frame, rateScale: 1, depth, sound: parent.sound });
     this.children.add(handle);
     return handle;
   }
@@ -1061,6 +1148,8 @@ export class ParticleEffects {
     this.instances.get(handle)?.clear();
     this.instances.delete(handle);
     this.children.delete(handle);
+    this.endSound(handle);
+    this.effectSounds.delete(handle);
   }
 
   /** Live particles of one placed effect (0 while it is loading or asleep), for the console. */
@@ -1210,6 +1299,10 @@ export class ParticleEffects {
         if (inst.active) {
           inst.active = false;
           inst.clear();
+          // Asleep because nobody is near it: its loop goes with its particles, and comes back with
+          // them. The mixer would have kept it as a virtual voice anyway, but a sleeping effect is
+          // one nothing is drawing, so it is simply let go.
+          this.endSound(handle);
         }
         continue;
       }
@@ -1221,15 +1314,24 @@ export class ParticleEffects {
           const warm = Math.min(10, inst.maxLife);
           const steps = Math.ceil(warm / MAX_STEP);
           for (let i = 0; i < steps; i++) inst.update(warm / steps, heightAt, distance, kill);
+          const list = handle.sound === false ? null : this.effectSounds.get(handle);
+          if (list && this.sounds && !this.sounding.has(handle)) {
+            this.sounds.start(handle, list, tmpWhere.x, tmpWhere.y, tmpWhere.z);
+            this.sounding.add(handle);
+          }
         }
       }
       active++;
+      // `tmpWhere` is this effect's world place, worked out for the distance above.
+      if (this.sounding.has(handle)) this.sounds?.move(handle, tmpWhere.x, tmpWhere.y, tmpWhere.z);
       inst.update(dt * (inst.def.playbackRate || 1), heightAt, distance, kill);
       if (transient && inst.finished) {
         // A hit that has played out: gone, so a fight does not pile up spent effects.
         inst.clear();
         this.instances.delete(handle);
         this.children.delete(handle);
+        this.endSound(handle);
+        this.effectSounds.delete(handle);
         continue;
       }
       for (const e of inst.emitters) {
@@ -1458,6 +1560,11 @@ export class ParticleEffects {
     this.instances.clear();
     this.pending.clear();
     this.children.clear();
+    // Every loop let go before the records that named it: a voice left behind would follow a point
+    // in a world that has gone.
+    for (const handle of this.sounding) this.sounds?.stop(handle);
+    this.sounding.clear();
+    this.effectSounds.clear();
   }
 }
 

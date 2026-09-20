@@ -53,7 +53,7 @@ export interface SkyBlock {
   windSpeedScale: number;
   /** The particle effect the row hangs on the camera (rain, a dust storm, snow), as the converter wrote it; absent in packs converted before. */
   cameraEffect?: { source: string; file: string | null; kind: WeatherKind; strength: number } | null;
-  /** The row's ambient sounds and music (nothing plays them yet). */
+  /** The row's ambient sounds, which the world plays as its beds, and its music, which nothing plays yet. */
   sounds?: { day: (string | null)[]; night: (string | null)[]; music: Record<'first' | 'sunrise' | 'sunset', string | null> };
 }
 
@@ -802,6 +802,25 @@ export class SwgSky {
       this.mix[i].weight = weights[i];
     }
     this.mixCount = n;
+  }
+
+  /**
+   * This frame's mix, read-only, for anything that must follow the sky exactly rather than guess at
+   * it: the ambience plays each blended row's own ambient sounds at the very weight the row's
+   * clouds and gradient are drawn at, so a storm's bed rises with the storm and a walk over an area
+   * boundary crossfades in sound as it does in sight. Three accessors rather than a list, so a
+   * reader allocates nothing and nothing outside can hold or change a mix entry.
+   */
+  get mixLength(): number {
+    return this.mixCount;
+  }
+
+  mixBlock(i: number): SkyBlock | null {
+    return i >= 0 && i < this.mixCount ? this.mix[i].block : null;
+  }
+
+  mixWeight(i: number): number {
+    return i >= 0 && i < this.mixCount ? this.mix[i].weight : 0;
   }
 
   /** Where the clouds drift toward (radians, 0 = +Z, turning toward +X). */

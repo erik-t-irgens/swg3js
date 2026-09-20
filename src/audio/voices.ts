@@ -20,7 +20,7 @@ export interface VoiceTune {
   ui: number;
 }
 
-export const VOICE_TUNE: VoiceTune = { positional: 40, flat: 8, ui: 4 };
+export const VOICE_TUNE: VoiceTune = { positional: 40, flat: 16, ui: 4 };
 
 /** Which pool a want goes in. */
 export type VoicePool = 'positional' | 'flat' | 'ui';

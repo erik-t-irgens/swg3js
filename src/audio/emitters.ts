@@ -8,10 +8,13 @@
  * kept in a short list of its own and looked at on every pass, so a 2.5 km radius never makes the
  * grid walk half a planet's cells.
  *
- * This wave has no sources in it: the grid, its cadence and its report exist, and the world's
- * emitters, particles and engines join later.
+ * Below the grid sits `WorldEmitters`: the world's own looping sources, which are the game's placed
+ * sound objects and the loops a particle effect's emitters name. Each is one voice that lives as
+ * long as the planet does; the grid decides four times a second which of them are close enough to
+ * be worth a slot, and the mixer keeps the rest as virtual voices on their own clocks.
  */
-import { audibleRadius, flatRadius, type DistanceTune, DISTANCE_TUNE, type SoundSpace } from './distance.ts';
+import { audibleRadius, flatRadius, type DistanceTune, DISTANCE_TUNE, OUTSIDE, type SoundSpace } from './distance.ts';
+import type { SoundSources } from './bank.ts';
 
 export interface GridTune {
   /** INVENTED: the cell edge, metres. */
@@ -229,5 +232,307 @@ export class EmitterGrid {
     const i = list.indexOf(s.key);
     if (i >= 0) list.splice(i, 1);
     if (!list.length) this.cells.delete(s.cell);
+  }
+}
+
+/**
+ * The part of the mixer the world's own sources use. It is written out rather than imported as a
+ * class so that a node test can drive every source below with a few lines of bookkeeping, and so
+ * that nothing here can reach into the mixer's own state.
+ */
+export interface LoopHost {
+  readonly grid: EmitterGrid;
+  readonly bank: { available: boolean; sources: SoundSources | null; template(id: string): unknown };
+  play(id: string, options?: { x?: number; y?: number; z?: number; space?: SoundSpace; loop?: boolean; gain?: number; pitch?: number }): number;
+  loop(id: string, options?: { x?: number; y?: number; z?: number; space?: SoundSpace; gain?: number; pitch?: number }): number;
+  stop(key: number, fade?: number): void;
+  move(key: number, x: number, y: number, z: number): void;
+  setGain(key: number, gain: number): void;
+  setSpace(key: number, space: SoundSpace): void;
+  isPlaying(key: number): boolean;
+  prepare(ids: Iterable<string>): void;
+}
+
+export interface WorldSourceTune {
+  /** INVENTED: the most placed emitters one planet may hold at once, so a town cannot fill the mixer. */
+  cap: number;
+  /** INVENTED: how many sources look for the room they stand in on one grid pass. */
+  spaceTries: number;
+  /** INVENTED: passes a source keeps looking for its room before it settles for the open world. */
+  spaceGiveUp: number;
+}
+
+/**
+ * INVENTED, all three. The busiest planet places 919 of them (108 objects put down for their sound
+ * alone and 811 props that hum), so the cap is above that and low enough that a pack with a mistake
+ * in it cannot swamp the voice pools; a source over the cap costs nothing but its record, since the
+ * grid looks at them four times a second and only the near ones ever hold a voice. Looking for the room a source stands in costs one walk of the streamed
+ * buildings, so it is done for a few near sources a pass and given up on after ten seconds.
+ */
+export const WORLD_SOURCE_TUNE: WorldSourceTune = { cap: 1024, spaceTries: 4, spaceGiveUp: 40 };
+
+/** One looping sound the world holds: a placed sound object, or a particle effect's own loop. */
+interface WorldLoop {
+  sound: string;
+  /** The mixer's key, or 0 while the bank has nothing to start it from. */
+  key: number;
+  x: number;
+  y: number;
+  z: number;
+  /** The building and cell it sits in; -1 is the open world. */
+  readonly space: SoundSpace;
+  /**
+   * The snapshot put it inside a building, so the building under it is looked for whenever it is
+   * within earshot. It stays true for the life of the source: the game numbers a building by the
+   * object the streamer made for it, and the streamer makes a new one every time the tile comes
+   * back, so an answer taken once and kept would name a building that no longer exists after the
+   * first walk out of the town and back.
+   */
+  pending: boolean;
+  /** It has been in a room at least once, so it is no longer looking for its first answer. */
+  found: boolean;
+  tries: number;
+}
+
+/**
+ * The world's looping sources. A source is added once, when the planet loads or when an effect is
+ * placed, and then simply exists: the grid decides whether it is close enough to be worth a slot,
+ * the mixer keeps its clock while it is not, and nothing here runs per frame except one bounded
+ * walk on a grid pass for the sources the snapshot put inside a building, which keep track of the
+ * room they stand in.
+ */
+export class WorldEmitters {
+  readonly tune: WorldSourceTune;
+  /** The building and cell under a point, or null when nothing has been streamed there yet. Set by the world. */
+  spaceAt: ((x: number, y: number, z: number) => SoundSpace | null) | null = null;
+  /** Counters a tab that can hear nothing reads instead. */
+  readonly counts = { placed: 0, attached: 0, refused: 0, missing: 0, overCap: 0, resolved: 0, gaveUp: 0 };
+  /** The sounds the bank turned out not to hold at all, for the report; each is named once. */
+  readonly missing = new Set<string>();
+
+  private readonly host: LoopHost;
+  private readonly placed: WorldLoop[] = [];
+  private readonly attached = new Map<object, WorldLoop>();
+  /** Sources still looking for their room, walked a few at a time. */
+  private readonly pending: WorldLoop[] = [];
+  private cursor = 0;
+  /** Something here has no voice because the bank had nothing to start it from; `retry` clears it. */
+  private silent = false;
+
+  constructor(host: LoopHost, tune: WorldSourceTune = WORLD_SOURCE_TUNE) {
+    this.host = host;
+    this.tune = tune;
+  }
+
+  get size(): number {
+    return this.placed.length + this.attached.size;
+  }
+
+  /** Every sound the sources name, so the bank can fetch them behind a loading screen. */
+  prepare(sounds: Iterable<string>): void {
+    this.host.prepare(sounds);
+  }
+
+  /**
+   * One of the game's placed sound objects. `inside` says the snapshot put it in a building, so its
+   * room is looked for whenever it is near enough for that building to have been streamed; anything
+   * in the open is filed outside at once and never looked for again.
+   *
+   * False means only that the cap is reached and no further emitter will be taken, which is the one
+   * answer a caller placing a whole planet's worth can act on. A source the mixer would not start
+   * (the bank has still to land, the template is not in it, the game is stepping simulated seconds)
+   * is taken all the same and kept silent: `retry` starts it when the bank is in, and dropping the
+   * rest of the pack over one such source would lose a town's crowds to one missing sample.
+   */
+  addPlaced(sound: string, x: number, y: number, z: number, inside: boolean): boolean {
+    if (this.placed.length >= this.tune.cap) {
+      this.counts.overCap++;
+      return false;
+    }
+    const loop = this.make(sound, x, y, z, inside);
+    this.placed.push(loop);
+    this.counts.placed++;
+    return true;
+  }
+
+  /** A looping sound a particle effect's emitter names, which follows the effect while it plays. */
+  attach(owner: object, sound: string, x: number, y: number, z: number, inside: boolean): void {
+    if (this.attached.has(owner)) return;
+    const loop = this.make(sound, x, y, z, inside);
+    this.attached.set(owner, loop);
+    this.counts.attached++;
+  }
+
+  moveAttached(owner: object, x: number, y: number, z: number): void {
+    const loop = this.attached.get(owner);
+    if (!loop) return;
+    loop.x = x;
+    loop.y = y;
+    loop.z = z;
+    if (loop.key) this.host.move(loop.key, x, y, z);
+  }
+
+  detach(owner: object): void {
+    const loop = this.attached.get(owner);
+    if (!loop) return;
+    this.attached.delete(owner);
+    this.drop(loop);
+  }
+
+  /**
+   * On a grid pass: start anything the bank could not start before, and let a few near sources look
+   * for the room they stand in. Called from the world's own update with the grid's pass flag, so it
+   * costs nothing on the frames between passes.
+   */
+  update(pass: boolean): void {
+    if (!pass || !this.pending.length) return;
+    const tries = Math.max(1, this.tune.spaceTries);
+    let looked = 0;
+    // At most one turn round the ring a pass, and at most `spaceTries` real lookups in it: a source
+    // out of earshot is skipped without spending a try, or a town with sixty sources inside it and
+    // ten of them near would take a minute to ask about the ten.
+    for (let scanned = this.pending.length; scanned > 0 && looked < tries && this.pending.length; scanned--) {
+      if (this.cursor >= this.pending.length) this.cursor = 0;
+      const loop = this.pending[this.cursor];
+      // Only a source the listener can hear is worth looking for: the building it stands in is not
+      // streamed until someone is near it, and a source out of earshot is not played either way.
+      // One with no voice at all has not been started yet (the bank had nothing); it waits too,
+      // rather than spending its tries where nothing could be found.
+      if (!loop.key || !this.host.grid.isNear(loop.key)) {
+        this.cursor++;
+        continue;
+      }
+      looked++;
+      const found = this.spaceAt?.(loop.x, loop.y, loop.z) ?? null;
+      loop.tries++;
+      if (found) {
+        // Asked again for the life of the planet, not once: the number a building is known by
+        // belongs to the object the streamer made for it, and walking out of the town and back
+        // makes a new one. Only a changed answer is written down, so the usual pass costs the one
+        // lookup and nothing else.
+        if (loop.space.building !== found.building || loop.space.cell !== found.cell) {
+          loop.space.building = found.building;
+          loop.space.cell = found.cell;
+          if (loop.key) this.host.setSpace(loop.key, loop.space);
+          this.counts.resolved++;
+        }
+        loop.found = true;
+        this.cursor++;
+      } else if (loop.found) {
+        // Its building has been streamed out from under it. The number it holds names an object
+        // that is gone, so it belongs to no room the ear can be in either: it is left as it is and
+        // asked again, which is what puts it back in its room when the tile comes back.
+        this.cursor++;
+      } else if (loop.tries >= this.tune.spaceGiveUp) {
+        // Nothing under it after ten seconds within earshot and never anything since it was placed:
+        // it is taken to stand in the open, which is what it sounds like anyway, and it is never
+        // looked for again.
+        this.settle(loop);
+        this.counts.gaveUp++;
+      } else this.cursor++;
+    }
+  }
+
+  /**
+   * Whether one of the game's own sound objects stands in this very room and is close enough to be
+   * heard. The interior table and the snapshot often both give a room a sound -- the cantinas are
+   * the plain case -- and playing the two together plays the same chatter over itself, so the
+   * placed one, which is the more particular of the two, wins. Walked on a grid pass, not a frame.
+   */
+  hasEmitterIn(space: SoundSpace): boolean {
+    if (space.building < 0) return false;
+    for (const loop of this.placed) {
+      // A source that has never found a room is still filed outside, so the building compare below
+      // leaves it out on its own; nothing here asks whether it is still looking.
+      if (!loop.key) continue;
+      if (loop.space.building !== space.building) continue;
+      // A room's own sound object, or one standing in the building at large (its cell unknown).
+      if (loop.space.cell >= 0 && space.cell >= 0 && loop.space.cell !== space.cell) continue;
+      if (this.host.grid.isNear(loop.key)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * A source the bank could not start when it was added (the pack had not landed yet): tried again.
+   * The flag means a planet whose sources all started walks nothing at all here.
+   */
+  retry(): void {
+    if (!this.silent || !this.host.bank.available) return;
+    this.silent = false;
+    for (const loop of this.placed) if (!loop.key && !this.missing.has(loop.sound)) this.start(loop);
+    for (const loop of this.attached.values()) if (!loop.key && !this.missing.has(loop.sound)) this.start(loop);
+  }
+
+  /** The planet is going: every voice let go, every record dropped. */
+  clear(): void {
+    for (const loop of this.placed) this.drop(loop);
+    for (const loop of this.attached.values()) this.drop(loop);
+    this.placed.length = 0;
+    this.attached.clear();
+    this.pending.length = 0;
+    this.cursor = 0;
+    this.silent = false;
+    this.missing.clear();
+  }
+
+  status(): Record<string, unknown> {
+    let playing = 0;
+    let near = 0;
+    let silent = 0;
+    for (const loop of this.placed) {
+      if (!loop.key) {
+        silent++;
+        continue;
+      }
+      if (this.host.isPlaying(loop.key)) playing++;
+      if (this.host.grid.isNear(loop.key)) near++;
+    }
+    let effects = 0;
+    for (const loop of this.attached.values()) if (loop.key && this.host.grid.isNear(loop.key)) effects++;
+    let looking = 0;
+    let inRooms = 0;
+    for (const loop of this.pending) {
+      if (loop.found) inRooms++;
+      else looking++;
+    }
+    return { placed: this.placed.length, placedNear: near, placedLive: playing, placedSilent: silent, effectLoops: this.attached.size, effectsNear: effects, inARoom: inRooms, lookingForARoom: looking, missingSounds: [...this.missing], counts: { ...this.counts } };
+  }
+
+  private make(sound: string, x: number, y: number, z: number, inside: boolean): WorldLoop {
+    const loop: WorldLoop = { sound, key: 0, x, y, z, space: { building: OUTSIDE.building, cell: OUTSIDE.cell }, pending: inside, found: false, tries: 0 };
+    this.start(loop);
+    if (inside) this.pending.push(loop);
+    return loop;
+  }
+
+  private start(loop: WorldLoop): void {
+    if (!this.host.bank.available) {
+      this.silent = true;
+      return;
+    }
+    loop.key = this.host.loop(loop.sound, { x: loop.x, y: loop.y, z: loop.z, space: loop.space });
+    if (loop.key) return;
+    this.counts.refused++;
+    // The bank is in and it still would not start. Either the bank does not hold that template at
+    // all, which no amount of asking again will mend, or the mixer is running simulated seconds
+    // (`__debug.advance` records rather than plays), which the next pass's retry gets.
+    if (this.host.bank.template(loop.sound)) this.silent = true;
+    else if (!this.missing.has(loop.sound)) {
+      this.missing.add(loop.sound);
+      this.counts.missing++;
+    }
+  }
+
+  private settle(loop: WorldLoop): void {
+    loop.pending = false;
+    const i = this.pending.indexOf(loop);
+    if (i >= 0) this.pending.splice(i, 1);
+    if (this.cursor > i && i >= 0) this.cursor--;
+  }
+
+  private drop(loop: WorldLoop): void {
+    if (loop.key) this.host.stop(loop.key, 0.1);
+    loop.key = 0;
   }
 }

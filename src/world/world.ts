@@ -33,7 +33,10 @@ import type { SunInfo } from '../core/postfx';
 import { luminance, pointIrradiance } from '../core/fx/bladeGlowMath.ts';
 import { isShadowOnly } from '../core/fxRegistry.ts';
 import { addPointLight, fillCascades, luminanceOf, resetFxLights, setDirectional, type FxLights } from '../core/fx/lights';
-import { ParticleEffects, type EffectHandle } from './particles';
+import { ParticleEffects, type EffectHandle, type EffectSounds } from './particles';
+import { Ambience, type AmbienceContext, type BedRow, type RoomRow } from '../audio/ambience.ts';
+import { OUTSIDE, type SoundSpace } from '../audio/distance.ts';
+import type { LoopHost } from '../audio/emitters.ts';
 import { loadSpacePack, type SpacePack } from '../space/spaceData.ts';
 import { Nebulae, installNebulaDebug } from '../space/nebulae.ts';
 import { liveSettings } from '../core/settings.ts';
@@ -493,6 +496,150 @@ export class World {
     markActor(this.sky);
   }
 
+  // ---- The sound the world makes. ----
+
+  /**
+   * The area's beds, the room's bed, the game's placed sound objects and the loops a particle
+   * effect names. Null until the game hands its mixer over, which is what a gallery, a preview or a
+   * node test does not do: the world then runs exactly as it did before there was any sound.
+   */
+  ambience: Ambience | null = null;
+  /** Where the ear is, written by the game after its camera's last move; -1 is the open world. */
+  readonly listenerSpace: SoundSpace = { building: OUTSIDE.building, cell: OUTSIDE.cell };
+  private audio: LoopHost | null = null;
+  /** The game's own numbering of buildings and boarded hulls, so a sound and the ear agree on "the same room". */
+  private spaceId: (of: object | null) => number = () => -1;
+  /** The sky and the effects this planet's sound has already been wired to (both arrive with the pack). */
+  private soundSky: SwgSky | null = null;
+  private soundParticles: ParticleEffects | null = null;
+  private soundPack: AssetPack | null = null;
+  /** The sound pack's own tables, once the bank has them; handed to the ambience for the room beds. */
+  private soundTables: object | null = null;
+  /** The grid pass count the last update saw, so the sources' own bounded work runs on the grid's beat. */
+  private soundPass = -1;
+  /** This frame's sky rows for the beds; a kept array, refilled, so a frame allocates nothing. */
+  private readonly bedRows: BedRow[] = [{ sounds: null, weight: 0 }, { sounds: null, weight: 0 }, { sounds: null, weight: 0 }, { sounds: null, weight: 0 }];
+  private bedRowCount = 0;
+  /** The interior row for the room the player is in, kept while the room is the same. */
+  private roomRow: RoomRow | null = null;
+  private roomFor: object | null = null;
+  private roomForCell = -1;
+  /** Which version of the interior tables that row was looked up in; both tables arrive late. */
+  private roomForTables = -1;
+  /** Handed to WorldEmitters; a kept object, since the emitters copy the two numbers out of it. */
+  private readonly foundSpace: SoundSpace = { building: -1, cell: -1 };
+  /** Handed to the ambience every frame; a kept object, refilled, so a frame allocates nothing. */
+  private readonly bedContext: AmbienceContext = { rows: this.bedRows, rowCount: 0, daylight: 1, room: null, space: this.listenerSpace, pass: false };
+
+  /**
+   * The mixer, and the game's own numbering of the spaces a sound or the ear can be in. Called once,
+   * before any planet loads.
+   */
+  attachAudio(audio: LoopHost, spaceIdOf: (of: object | null) => number): void {
+    this.audio = audio;
+    this.spaceId = spaceIdOf;
+    this.ambience = new Ambience(audio, import.meta.env.BASE_URL);
+    this.ambience.sources.spaceAt = (x, y, z) => {
+      const state = this.layoutStream?.buildingAt(tmpV.set(x, y, z));
+      if (!state) return null;
+      this.foundSpace.building = this.spaceId(state.building);
+      this.foundSpace.cell = state.cell;
+      return this.foundSpace;
+    };
+  }
+
+  /**
+   * One of the game's sounds played once, at a point or (with no point) at the ear. The one way in
+   * for everything the world does that is not a bed or a standing emitter -- a client effect's own
+   * `PSND`, a lift, a hit. Returns the voice's key, or 0 when there is no mixer, no such template or
+   * no free voice; `__debug.audio().recent` says which.
+   */
+  playSound(id: string, x?: number, y?: number, z?: number, space?: SoundSpace): number {
+    return this.audio?.play(id, { x, y, z, space }) ?? 0;
+  }
+
+  /**
+   * What the world's sound does with a placed particle effect: a standing one (a waterfall, a fire,
+   * a steam vent) keeps a loop that follows it, and a passing one (a hit, a burst) plays each sound
+   * it names once where it plays. Kept, so nothing is allocated when an effect is placed.
+   */
+  private readonly effectSounds: EffectSounds = {
+    start: (handle, sounds, x, y, z) => {
+      if (sounds[0]) this.ambience?.sources.attach(handle, sounds[0], x, y, z, handle.contained);
+    },
+    move: (handle, x, y, z) => this.ambience?.sources.moveAttached(handle, x, y, z),
+    once: (handle, sound, x, y, z) => {
+      const space = handle.contained ? (this.ambience?.sources.spaceAt?.(x, y, z) ?? undefined) : undefined;
+      this.playSound(sound, x, y, z, space);
+    },
+    stop: (handle) => this.ambience?.sources.detach(handle),
+  };
+
+  /**
+   * The beds this planet can play asked for, the placed effects wired to the mixer, and the weather
+   * given somewhere to send its channels' sounds. The sky and the effects both arrive inside
+   * `loadPack`, which runs after `warmUp`, so this is called from both and does its work on the
+   * first call that finds them -- still behind the loading screen, which does not lift until the
+   * pack is in and its programs are built.
+   */
+  private readySound(): void {
+    const a = this.ambience;
+    if (!a) return;
+    if (this.weather.audio !== a) this.weather.audio = a;
+    // The shared interior table comes with the sound pack, some frames after the game starts; the
+    // rooms it names are the same on every planet, so it is handed over once and then kept.
+    const tables = this.audio?.bank.sources ?? null;
+    if (tables !== this.soundTables) {
+      this.soundTables = tables;
+      a.setRooms((tables?.rooms as RoomRow[] | undefined) ?? null);
+    }
+    if (this.pack !== this.soundPack) {
+      this.soundPack = this.pack;
+      // The emitters' places are the snapshot's own, so they need the layout's centre to be put
+      // down, exactly as every other placed object does. A pack with no layout has no emitters, and
+      // its centre is nothing either way.
+      if (this.pack) this.ambience?.setFrame(this.pack.layout?.center.x ?? 0, this.pack.layout?.center.z ?? 0);
+    }
+    if (this.particles !== this.soundParticles) {
+      this.soundParticles = this.particles;
+      if (this.particles) this.particles.sounds = this.effectSounds;
+    }
+    if (this.swgSky === this.soundSky) return;
+    this.soundSky = this.swgSky;
+    if (!this.swgSky) return;
+    const buildings: string[] = [];
+    for (const m of this.pack?.category('layout') ?? []) if ((m.cells?.length ?? 0) > 1) buildings.push(m.id);
+    a.prepare(this.swgSky.data.blocks, buildings);
+  }
+
+  /** The interior table's row for the room the player stands in, or null in the open. */
+  private roomRowNow(): RoomRow | null {
+    const state = this.cellState;
+    if (!state) {
+      this.roomFor = null;
+      this.roomForCell = -1;
+      this.roomRow = null;
+      return null;
+    }
+    const def = state.building.model.def;
+    // The tables' version is part of the key: the shared interior table arrives some frames after
+    // the game starts and a planet's own rows with its pack, and a row looked up before either
+    // landed is the table's fallback. Standing in the room as the pack lands would otherwise keep
+    // that answer until the player changed cell.
+    const tables = this.ambience?.tableVersion ?? -1;
+    if (def === this.roomFor && state.cell === this.roomForCell && tables === this.roomForTables) return this.roomRow;
+    this.roomFor = def;
+    this.roomForCell = state.cell;
+    this.roomForTables = tables;
+    let name = 'default';
+    for (const c of def.cells ?? []) if (c.index === state.cell) name = c.name;
+    // A building's model key is the portal layout's own name, which is what the interior table keys
+    // its rows on: the 166 buildings it names match the packs' model ids, and the rest fall through
+    // to the table's `default` row as they did in the client.
+    this.roomRow = this.ambience?.roomRow(def.id, name) ?? null;
+    return this.roomRow;
+  }
+
   /** The pack directory this planet (or zone) loads from. */
   packId = '';
 
@@ -589,6 +736,10 @@ export class World {
     this.lastTz = Number.NaN;
     this.exclusions = [];
     this.loadToken++;
+    // The planet's places (its sound objects, its own interior rows) start coming now. Nothing waits
+    // on them: a pack that lands after the player has arrived simply adds its emitters then, and a
+    // planet whose places have not been converted at all still sounds, from its sky's own rows.
+    this.ambience?.begin(packId);
     this.day.update(0, false);
     this.applyLighting();
   }
@@ -775,8 +926,10 @@ export class World {
   /** Leave the planet: everything it streamed goes, for the select screen to show over nothing. */
   leave(): void {
     // No new load follows, so a lava (or sky) load still in flight must see its token go stale, or
-    // it would add to an empty scene behind the select screen.
+    // it would add to an empty scene behind the select screen. The planet's places are the same: a
+    // sound pack still in flight would otherwise start a town's emitters over the select screen.
     this.loadToken++;
+    this.ambience?.leave();
     this.unload();
   }
 
@@ -785,6 +938,17 @@ export class World {
 
   private unload(): void {
     this.loadGeneration++;
+    // Every bed, emitter and weather channel let go before the things they follow are disposed: the
+    // particle effects go a few lines down, and a loop left on one would follow a point in a world
+    // that has gone. The sky and the effects are wired again on the next planet's first frames.
+    this.ambience?.leave();
+    this.soundSky = null;
+    this.soundParticles = null;
+    this.soundPack = null;
+    this.roomFor = null;
+    this.roomForCell = -1;
+    this.roomForTables = -1;
+    this.roomRow = null;
     for (const c of this.chunks.values()) this.disposeChunk(c);
     this.chunks.clear();
     for (const t of this.farTiles.values()) {
@@ -2170,6 +2334,10 @@ export class World {
   /** Generate every chunk in view immediately (used when arriving on a planet). */
   warmUp(center: THREE.Vector3): void {
     this.exclusions = [{ x: center.x, z: center.z, r: 14 }];
+    // The sound of the place, as early as it can be had: on an arrival this runs before the pack is
+    // in, so it usually only hands the weather its channel sink and the first frames of `update` do
+    // the rest, still behind the loading screen.
+    this.readySound();
     this.stream(center, Infinity);
     this.streamFar(center, Infinity);
     // The planet's own wildlife: through the catalogue (its own model, clips and brain) when it has
@@ -3121,6 +3289,44 @@ export class World {
     this.stepLiving(dt, playerPos, this.camera);
     if (target) this.turrets.update(dt, target, this.bolts);
     this.gallery?.update(dt, playerPos);
+    this.updateAmbience(dt);
+  }
+
+  /**
+   * The sound of the place: the sky's own rows played at the sky's own weights, the room's bed while
+   * the player is in one, and the placed emitters' own bounded pass.
+   *
+   * It runs last, after the sky's mix has been set for this frame, so the beds never lag the clouds
+   * by a frame. The mixer itself steps after the camera has moved (the game's loop does that), so
+   * the grid's pass is read here as "has the count moved since the last frame", which is what keeps
+   * the emitters' room lookups on the grid's own beat rather than on every frame.
+   */
+  private updateAmbience(dt: number): void {
+    const a = this.ambience;
+    if (!a) return;
+    this.readySound();
+    const sky = this.swgSky;
+    let n = 0;
+    if (sky) {
+      for (let i = 0; i < sky.mixLength && n < this.bedRows.length; i++) {
+        const block = sky.mixBlock(i);
+        if (!block) continue;
+        const row = this.bedRows[n++];
+        row.sounds = block.sounds ?? null;
+        row.weight = sky.mixWeight(i);
+      }
+    }
+    this.bedRowCount = n;
+    const passes = this.audio?.grid.counts.passes ?? 0;
+    const pass = passes !== this.soundPass;
+    this.soundPass = passes;
+    // The one context object, refilled: `rows` and `space` are the kept ones it was built with.
+    const ctx = this.bedContext;
+    ctx.rowCount = this.bedRowCount;
+    ctx.daylight = this.day.daylight;
+    ctx.room = this.roomRowNow();
+    ctx.pass = pass;
+    a.update(dt, ctx);
   }
 
   /**

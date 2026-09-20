@@ -274,6 +274,13 @@ export class Weather {
     underwater: false,
     hull: null,
   };
+  /**
+   * Where a channel's own sound goes. The weather never plays anything itself: it says which sound
+   * the channel's effect names and what share of the mix that channel has, and the mixer decides
+   * the rest (by default nothing at all, since the storm rows already carry the thunder as their
+   * own one-shot bed). Null with no mixer, which is how it ran before there was one.
+   */
+  audio: { weatherChannel(file: string, sound: string | null, weight: number): void } | null = null;
   /** The falling effects' own scene: never a light, never fog, never in the world's scene. */
   readonly scene = new THREE.Scene();
   readonly roofs: RoofGrid;
@@ -478,7 +485,10 @@ export class Weather {
   /** The world is going: drop the channels and the effects, reset the grid, and point the roof uniforms back at the open map. */
   detach(): void {
     this.token++;
-    for (const ch of this.channels) this.fxEffects?.remove(ch.handle);
+    for (const ch of this.channels) {
+      this.fxEffects?.remove(ch.handle);
+      this.audio?.weatherChannel(ch.file, null, 0);
+    }
     this.channels.length = 0;
     this.fxEffects?.dispose();
     this.fxEffects = null;
@@ -924,7 +934,10 @@ export class Weather {
 
     // The channels: one placed effect per file the mix wants, at its share of the mix.
     if (this.replaceChannels) {
-      for (const ch of this.channels) fx.remove(ch.handle);
+      for (const ch of this.channels) {
+        fx.remove(ch.handle);
+        this.audio?.weatherChannel(ch.file, null, 0);
+      }
       this.channels.length = 0;
       this.replaceChannels = false;
     }
@@ -938,7 +951,10 @@ export class Weather {
         const kind = this.wantKind[i];
         const sideways = kind === 'dust' || /storm/i.test(file);
         this.placement(kind, sideways, cam, matrix);
-        ch = { file, kind, sideways, handle: fx.place(file, matrix, false, false), weight: 0, idle: 0, matrix };
+        // `sound: false`: a channel's effect sits on the camera and its rate is the channel's share
+        // of the mix, which the effect itself cannot know, so its own sound is never started behind
+        // the weather's back. The loop below plays it at the channel's weight instead.
+        ch = { file, kind, sideways, handle: fx.place(file, matrix, false, false, null, false, { sound: false }), weight: 0, idle: 0, matrix };
         this.channels.push(ch);
       }
       ch.weight = this.wantWeight[i];
@@ -953,9 +969,14 @@ export class Weather {
       // Only an effect with particles of its own: the attachment-only ones (the light dust storm,
       // falling leaves, Mustafar's lightning) draw nothing yet and need no roofs.
       if (ch.handle.rateScale > 0 && fx.particlesOf(ch.handle) > 0) falling = true;
+      // The channel's own sound at the very weight its particles fall at, so a storm's thunder
+      // comes in and goes out with the storm. What its effect names arrives with the effect's
+      // description, a moment after it is placed, and is a lookup rather than a search.
+      this.audio?.weatherChannel(ch.file, fx.soundsOf(ch.handle)[0] ?? null, ch.handle.rateScale);
       if (ch.weight > 0) ch.idle = 0;
       else if ((ch.idle += dt) > CHANNEL_IDLE) {
         fx.remove(ch.handle);
+        this.audio?.weatherChannel(ch.file, null, 0);
         this.channels[i] = this.channels[this.channels.length - 1];
         this.channels.pop();
         continue;
