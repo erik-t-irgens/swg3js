@@ -1,8 +1,11 @@
 // The ship menu: what a pilot or a passenger can do with the ship they are in that no key does.
 // Aboard a multi-crew ship E takes and leaves the controls and steps out, so the way into space
 // and back is chosen here, and the passengers' way off the ship in space; the pilot's jump to
-// hyperspace starts here (the System Map) and is cancelled here during its countdown. Docking will
-// go here too.
+// hyperspace starts here (the System Map) and is cancelled here during its countdown; a station's
+// dock is asked for and left here, and where there is one, the ultra cruise is switched on here.
+//
+// The menu itself knows nothing about any of them: every row is a label, a reason it cannot be
+// pressed and a line of its own from `ShipStatus`, and one call back on `ShipSource`.
 
 /** Where the player stands with the ship, read afresh every half second while the menu is open. */
 export interface ShipStatus {
@@ -25,8 +28,33 @@ export interface ShipStatus {
    * countdown's words while one counts down (the row then cancels it), and whether a jump is running.
    */
   jump?: { canJump: string | null; counting: string | null; busy: boolean };
+  /**
+   * The docking row: what the button says now (Dock at a named station, Launch, Break off), why it
+   * cannot be pressed, and a line about what is happening. Absent while nothing can dock at all.
+   */
+  dock?: DockRow;
+  /** The ultra cruise row, filled by whatever owns the cruise; absent where there is none. */
+  cruise?: DockRow;
   /** km/h. */
   speed: number;
+}
+
+/** A row that names itself: what the button says, why it is dead, and a line under it. */
+export interface DockRow {
+  label: string;
+  why: string | null;
+  note: string | null;
+}
+
+/**
+ * The ultra cruise, as the ship menu asks for it. Whatever owns the cruise sets one of these on the
+ * game; without one the row says the cruise is not built.
+ */
+export interface ShipCruise {
+  /** What the row says now: its label, and why it cannot be pressed. */
+  available(): DockRow;
+  /** The row was pressed: start the cruise, or let go of it. */
+  toggle(): void;
 }
 
 export interface ShipSource {
@@ -36,9 +64,13 @@ export interface ShipSource {
   eject(): void;
   /** The hyperspace row: opens the System Map, or cancels a countdown. */
   hyperspace?(): void;
+  /** The docking row: ask for a dock, leave one, or break off a lane, whichever the row offers. */
+  dock?(): void;
+  /** The cruise row. */
+  cruise?(): void;
 }
 
-type Row = 'space' | 'land' | 'eject' | 'hyperspace';
+type Row = 'space' | 'land' | 'eject' | 'hyperspace' | 'dock' | 'cruise';
 
 export class ShipMenu {
   readonly root: HTMLElement;
@@ -65,8 +97,9 @@ export class ShipMenu {
           <div class="ship-action"><button data-do="land">Land</button><span class="why"></span></div>
           <div class="ship-action"><button data-do="eject">Eject</button><span class="why"></span></div>
           <div class="ship-action"><button data-do="hyperspace">Hyperspace…</button><span class="why"></span></div>
-          <div class="ship-action"><button disabled>Dock</button><span class="why">not built yet: two ships alongside in space, and a way across between them</span></div>
-          <p class="menu-hint">The ship holds still while this is open. Everyone aboard goes with the ship into space and back, standing where they stood. Hyperspace jumps to a point, a station or a planet's launch point, in this system or another.</p>
+          <div class="ship-action"><button data-do="dock">Dock</button><span class="why"></span></div>
+          <div class="ship-action"><button data-do="cruise">Cruise</button><span class="why"></span></div>
+          <p class="menu-hint">The ship holds still while this is open. Everyone aboard goes with the ship into space and back, standing where they stood. Hyperspace jumps to a point, a station or a planet's launch point, in this system or another. Docking flies the ship in along the station's own lane and puts it right, free; touching the controls breaks it off.</p>
         </div>
       </div>`;
     parent.appendChild(this.root);
@@ -76,7 +109,7 @@ export class ShipMenu {
       const button = this.root.querySelector<HTMLButtonElement>(`button[data-do="${key}"]`)!;
       return { button, why: button.parentElement!.querySelector<HTMLElement>('.why')! };
     };
-    this.rows = { space: row('space'), land: row('land'), eject: row('eject'), hyperspace: row('hyperspace') };
+    this.rows = { space: row('space'), land: row('land'), eject: row('eject'), hyperspace: row('hyperspace'), dock: row('dock'), cruise: row('cruise') };
     this.rows.space.button.addEventListener('click', () => this.source.goToSpace());
     this.rows.land.button.addEventListener('click', () => this.source.land());
     this.rows.eject.button.addEventListener('click', () => this.source.eject());
@@ -85,6 +118,13 @@ export class ShipMenu {
       this.source.hyperspace?.();
       if (this.open) this.update();
     });
+    // Docking and the cruise change what their own row says the moment they are pressed, as the jump does.
+    for (const key of ['dock', 'cruise'] as const) {
+      this.rows[key].button.addEventListener('click', () => {
+        this.source[key]?.();
+        if (this.open) this.update();
+      });
+    }
     this.root.querySelector('.close')!.addEventListener('click', () => this.onClose());
   }
 
@@ -123,6 +163,8 @@ export class ShipMenu {
       set('land', 'Land', 'not in a ship');
       set('eject', 'Eject', 'not in a ship');
       set('hyperspace', 'Hyperspace…', 'not in a ship');
+      set('dock', 'Dock', 'not in a ship');
+      set('cruise', 'Cruise', 'not in a ship');
       return;
     }
     this.title.textContent = `${s.ship} · ${s.role === 'pilot' ? 'at the controls' : 'aboard as a passenger'}`;
@@ -149,5 +191,12 @@ export class ShipMenu {
       set('hyperspace', 'Cancel the jump', null);
       this.rows.hyperspace.why.textContent = jump.counting;
     } else set('hyperspace', 'Hyperspace…', jump.canJump);
+    // The dock and the cruise say what they can do themselves; a row nobody filled says it is not built.
+    const dock = s.dock ?? { label: 'Dock', why: 'not built in this world', note: null };
+    set('dock', dock.label, dock.why);
+    if (dock.why === null && dock.note) this.rows.dock.why.textContent = dock.note;
+    const cruise = s.cruise ?? { label: 'Cruise', why: 'not built yet: a sandbox system to fly across at speed', note: null };
+    set('cruise', cruise.label, cruise.why);
+    if (cruise.why === null && cruise.note) this.rows.cruise.why.textContent = cruise.note;
   }
 }
