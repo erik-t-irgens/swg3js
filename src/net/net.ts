@@ -31,7 +31,16 @@ export interface PeerVehicle {
   w?: 0 | 1;
   /** 1 while the ship is set down on the ground: the picture of it stands still rather than gliding to each message. */
   landed?: 0 | 1;
+  /**
+   * This ship clamped onto another player's: whose (`to`, their relay id) and where it rests in that
+   * ship's own frame. The picture of it is drawn from the carrier's pose times this, so it stays put on
+   * the hull between messages instead of gliding about on it.
+   */
+  dock?: { to: number; p: [number, number, number]; q: [number, number, number, number] };
 }
+
+/** The words two browsers pass about one ship clamped onto another (server/vehicleWire.mjs). */
+export type AskWord = 'dock' | 'allow' | 'refuse' | 'undock';
 
 export interface PeerState {
   p: [number, number, number];
@@ -77,6 +86,8 @@ export class Net {
   onHello: (peer: Peer) => void = () => {};
   onState: (id: number, state: PeerState) => void = () => {};
   onEmote: (id: number, clip: string) => void = () => {};
+  /** A word meant for this player alone: one ship asking another's pilot for room on their hull, and the answer. */
+  onAsk: (from: number, word: AskWord) => void = () => {};
   onStatus: (status: Status, detail: string) => void = () => {};
 
   /** The server kept in this browser, or the one in ?server=, or none. */
@@ -185,8 +196,13 @@ export class Net {
     if (this.online) this.send({ t: 'emote', clip });
   }
 
+  /** A word to one other player: the relay passes it to them and to nobody else. */
+  sendAsk(to: number, word: AskWord): void {
+    if (this.online && to > 0) this.send({ t: 'ask', to, word });
+  }
+
   private receive(text: string): void {
-    let msg: { t: string; id?: number; hello?: Hello; peers?: Peer[]; clip?: string } & Partial<PeerState>;
+    let msg: { t: string; id?: number; hello?: Hello; peers?: Peer[]; clip?: string; word?: string } & Partial<PeerState>;
     try {
       msg = JSON.parse(text);
     } catch {
@@ -234,6 +250,10 @@ export class Net {
       case 'emote':
         // An empty clip is the end of a dance or a sit: the figure goes back to what it was doing.
         if (msg.id !== undefined && typeof msg.clip === 'string') this.onEmote(msg.id, msg.clip);
+        break;
+      case 'ask':
+        // Checked here as well as at the relay: a word is acted on, and an unknown one must do nothing.
+        if (msg.id !== undefined && (msg.word === 'dock' || msg.word === 'allow' || msg.word === 'refuse' || msg.word === 'undock')) this.onAsk(msg.id, msg.word);
         break;
     }
   }

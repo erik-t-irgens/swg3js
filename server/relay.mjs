@@ -12,19 +12,24 @@
 //                                                          sent on joining, on travel and on a change
 //   { t: 'state', p: [x, y, z], h, s, v, m, sab, q?, veh? }   position, heading, rig state, speed, mounted, saber lit,
 //                                                          the whole turn as a quaternion (aboard, adrift), the vehicle
-//                                                          ridden { id, p, q, role: ride|pilot|aboard, pose, w, landed }
+//                                                          ridden { id, p, q, role: ride|pilot|aboard, pose, w, landed, dock }
 //                                                          (w: a winged ship's wings, 1 open or opening, 0 closed;
-//                                                          landed: 1 while a ship is set down on the ground; vehicleWire.mjs);
+//                                                          landed: 1 while a ship is set down on the ground;
+//                                                          dock: { to, p, q } while this ship is clamped onto the ship
+//                                                          player `to` is on, at that pose in its frame; vehicleWire.mjs);
 //                                                          j: 1 while in a hyperspace jump (not shown until it clears)
 //   { t: 'emote', clip }
+//   { t: 'ask', to, word: dock|allow|refuse|undock }         the one message meant for a single other player: asking
+//                                                          their pilot for room on their hull, and the answer
 // Relay to client:
 //   { t: 'welcome', id, peers: [{ id, hello, state }] }
 //   { t: 'join', id, hello }   { t: 'leave', id }   { t: 'state', id, ... }   { t: 'emote', id, clip }
 //   { t: 'hello', id, hello }  (a peer moved to another world)
+//   { t: 'ask', id, word }     (from the player who sent it, to the one it was addressed to, and to nobody else)
 import { createServer } from 'node:http';
 import { createHash } from 'node:crypto';
 import { cleanShip } from './shipWire.mjs';
-import { cleanVehicle, quat } from './vehicleWire.mjs';
+import { cleanAsk, cleanVehicle, quat } from './vehicleWire.mjs';
 
 const PORT = Number(process.argv[2] ?? process.env.PORT ?? 8787);
 const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
@@ -148,6 +153,16 @@ function onMessage(c, text) {
   } else if (msg.t === 'emote') {
     if (!c.hello || typeof msg.clip !== 'string') return;
     broadcast({ t: 'emote', id: c.id, clip: msg.clip.slice(0, 48) }, c);
+  } else if (msg.t === 'ask') {
+    // The one directed message: it goes to the player named and to nobody else. A word for a player who
+    // is not here, or who has not said who they are yet, is simply dropped -- the asker's own timeout is
+    // what tells them nothing came back, so there is nothing for the relay to answer with.
+    if (!c.hello) return;
+    const ask = cleanAsk(msg);
+    if (!ask) return;
+    const to = clients.get(ask.to);
+    if (!to || to === c || !to.hello) return;
+    send(to, { t: 'ask', id: c.id, word: ask.word });
   }
 }
 

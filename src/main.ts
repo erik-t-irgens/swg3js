@@ -2635,6 +2635,21 @@ class App {
     this.net.onLeave = (id) => this.remotes.remove(id);
     this.net.onState = (id, state) => this.remotes.state(id, state);
     this.net.onEmote = (id, clip) => this.remotes.emote(id, clip);
+    // One ship clamped onto another, across the relay: the word meant for this player alone (a pilot
+    // asking for room on this hull, and the answer), the peers a clamp may hold to, and the way out to
+    // one of them. `carrierPose` answers for this player's own ship, which is no peer's picture: a peer
+    // docked onto the ship this player is on hangs from where that hull really is.
+    this.net.onAsk = (from, word) => this.docking.clamp.heard(from, word, this.pilotedShip());
+    this.docking.clamp.peers = this.remotes;
+    this.docking.clamp.link = { id: () => this.net.id, send: (to, word) => this.net.sendAsk(to, word) };
+    this.remotes.carrierPose = (to, pos, quat) => {
+      const p = this.player;
+      const v = to === this.net.id ? p.mounted ?? p.piloting ?? p.aboard?.vehicle ?? null : null;
+      if (!v || v.disposed) return false;
+      pos.copy(v.pos);
+      v.quaternion(quat);
+      return true;
+    };
     this.net.onStatus = (status, detail) => {
       this.netStatus = detail ? `${status} (${detail})` : status;
       if (status === 'online') this.hud.setPrompt('connected to the relay');
@@ -3274,7 +3289,10 @@ class App {
       this.helloShipId = shipId;
       this.queueHello();
     }
-    const veh: PeerVehicle | undefined = v ? { id: v.def?.id ?? v.spec.id, p: [n2(v.pos.x), n2(v.pos.y), n2(v.pos.z)], q: v.quaternion(tmpQ).toArray().map(n3) as [number, number, number, number], role: p.mounted ? 'ride' : p.piloting ? 'pilot' : 'aboard', pose: v.riderPose ?? undefined, ...(v.wings.length ? { w: v.wings.target ? 1 : 0 } as const : {}), ...(v.landed ? { landed: 1 } as const : {}) } : undefined;
+    // Clamped onto another ship: whose, and where on it. The others then hang the picture of this hull
+    // from that ship's own pose rather than gliding it about on the hull it rides.
+    const dock = v ? this.docking.clamp.wire(v) : null;
+    const veh: PeerVehicle | undefined = v ? { id: v.def?.id ?? v.spec.id, p: [n2(v.pos.x), n2(v.pos.y), n2(v.pos.z)], q: v.quaternion(tmpQ).toArray().map(n3) as [number, number, number, number], role: p.mounted ? 'ride' : p.piloting ? 'pilot' : 'aboard', pose: v.riderPose ?? undefined, ...(v.wings.length ? { w: v.wings.target ? 1 : 0 } as const : {}), ...(v.landed ? { landed: 1 } as const : {}), ...(dock ? { dock } : {}) } : undefined;
     const q = p.aboard || p.eva ? (p.group.quaternion.toArray().map(n3) as [number, number, number, number]) : undefined;
     // In a jump, from its start until the tunnel opens, the others do not see this player or the ship
     // (`j`). An ultra cruise is hidden the same way and for the same reason: at kilometres a second a

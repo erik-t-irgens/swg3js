@@ -32,6 +32,14 @@ interface RemoteVehicle {
   wingsWant: boolean;
   /** Set down on the ground (the relay's `landed`): the picture is put exactly where it is said to be, with no glide. */
   landed: boolean;
+  /**
+   * Clamped onto another player's ship (the relay's `dock`): whose, and where it rests in that ship's
+   * frame. The picture is then drawn from the carrier's pose times this rather than glided to each
+   * message, so it sits still on the hull it rides however the hull moves.
+   */
+  dock: { to: number; p: THREE.Vector3; q: THREE.Quaternion } | null;
+  /** Its hull's box and bounding radius from the garage, for anything that must know how big it is; null before the picture is in. */
+  size: { label: string; bounds: { min: number[]; max: number[] }; radius: number } | null;
   /** A fitted ship's build (its parts per slot, for a restage), its paint (disposed with the picture) and the fit it shows; null before the picture is in, or for a ride without a fit. */
   build: ShipBuild | null;
   paint: ShipPaint | null;
@@ -96,6 +104,12 @@ export class RemotePlayers {
   prepareVehicle: ((roots: THREE.Object3D[]) => Promise<void>) | null = null;
   /** Take a peer's ship's paint copies out of the world's material sets when they go (World.forgetMaterials); set by the game after construction, read when a paint is made. */
   forget: ((materials: THREE.Material[]) => void) | null = null;
+  /**
+   * Where the ship of the player with this relay id stands, for a picture clamped onto it. The game
+   * answers for its own id (a peer docked onto the ship this player is on, which is no peer's picture);
+   * false for anyone else, and the peers' own pictures are used instead.
+   */
+  carrierPose: ((to: number, pos: THREE.Vector3, quat: THREE.Quaternion) => boolean) | null = null;
 
   constructor(
     private readonly scene: THREE.Scene,
@@ -324,7 +338,7 @@ export class RemotePlayers {
     }
     if (!r.vehicle || r.vehicle.id !== veh.id) {
       this.dropVehicle(r);
-      const rv: RemoteVehicle = { id: veh.id, obj: null, target: new THREE.Vector3(veh.p[0], veh.p[1], veh.p[2]), targetQ: new THREE.Quaternion(veh.q[0], veh.q[1], veh.q[2], veh.q[3]), pose: veh.pose ?? null, vel: new THREE.Vector3(), heardAt: 0, wings: null, wingsWant: veh.w === 1, landed: veh.landed === 1, build: null, paint: null, fit: null, busy: null, want: null };
+      const rv: RemoteVehicle = { id: veh.id, obj: null, target: new THREE.Vector3(veh.p[0], veh.p[1], veh.p[2]), targetQ: new THREE.Quaternion(veh.q[0], veh.q[1], veh.q[2], veh.q[3]), pose: veh.pose ?? null, vel: new THREE.Vector3(), heardAt: 0, wings: null, wingsWant: veh.w === 1, landed: veh.landed === 1, dock: null, size: null, build: null, paint: null, fit: null, busy: null, want: null };
       r.vehicle = rv;
       void this.bringVehicle(r, rv);
     }
@@ -337,6 +351,13 @@ export class RemotePlayers {
     rv.pose = veh.pose ?? null;
     // The pilot's wings as they send them; a peer on an older build sends none, and its wings open while it moves.
     rv.wingsWant = veh.w !== undefined ? veh.w === 1 : rv.vel.length() > 4;
+    // Clamped onto another player's ship: kept in that ship's own frame, and placed from it each frame.
+    if (veh.dock) {
+      rv.dock ??= { to: 0, p: new THREE.Vector3(), q: new THREE.Quaternion() };
+      rv.dock.to = veh.dock.to;
+      rv.dock.p.set(veh.dock.p[0], veh.dock.p[1], veh.dock.p[2]);
+      rv.dock.q.set(veh.dock.q[0], veh.dock.q[1], veh.dock.q[2], veh.dock.q[3]).normalize();
+    } else rv.dock = null;
     // Set down on the ground: it stands exactly where it is said to stand, and its glide is dropped.
     rv.landed = veh.landed === 1;
     if (rv.landed) {
@@ -373,6 +394,17 @@ export class RemotePlayers {
       rv.build = def.fit ? build : null;
       rv.paint = paint;
       rv.fit = fit;
+      // How big the hull is, for anything that must judge it from outside (whether it could carry
+      // another ship, and how far off it a ship it has let go of has to be). The radius is measured
+      // exactly as a hull of this world measures its own (`Vehicle.radius`): half the footprint's
+      // longer side. Two measures would make "50 m from the hull" mean one thing for a ship standing
+      // here and another for a picture of one.
+      if (def.bounds) {
+        const b = def.bounds;
+        const w = Math.abs(b.max[0] - b.min[0]);
+        const l = Math.abs(b.max[2] - b.min[2]);
+        rv.size = { label: def.label, bounds: { min: [...b.min], max: [...b.max] }, radius: Math.max(w, l) / 2 };
+      }
       obj.position.copy(rv.target);
       obj.quaternion.copy(rv.targetQ);
       obj.visible = r.group.visible;
@@ -465,6 +497,7 @@ export class RemotePlayers {
   }
 
   update(dt: number): void {
+    let anyDocked = false;
     for (const r of this.remotes.values()) {
       if (r.vehicle?.obj) r.vehicle.obj.visible = r.group.visible;
       if (!r.group.visible) continue;
@@ -489,8 +522,11 @@ export class RemotePlayers {
       }
       const rv = r.vehicle;
       if (rv?.obj) {
+        // Clamped onto another ship: placed from that ship's own pose after this pass, so the hull it
+        // rides has been moved first whatever order the peers come in.
+        if (rv.dock) anyDocked = true;
         // Landed, it is still: the glide would leave it creeping toward each message, and its springs' bob is not sent.
-        if (rv.landed) {
+        else if (rv.landed) {
           rv.obj.position.copy(rv.target);
           rv.obj.quaternion.copy(rv.targetQ);
         } else {
@@ -519,6 +555,78 @@ export class RemotePlayers {
         rig.update(dt);
       }
     }
+    if (anyDocked) this.placeDocked();
+  }
+
+  /**
+   * Every picture clamped onto another ship, put where the hull it rides puts it: the carrier's pose
+   * times the pose the relay gave, so it sits still on the hull rather than gliding about on it. It
+   * runs after every picture has been moved, so the order the peers come in never matters. The carrier
+   * may be the ship this player is on, which is no peer's picture: `carrierPose` answers for that.
+   * Nothing is allocated; a picture whose carrier is not here is left where it was.
+   */
+  private placeDocked(): void {
+    for (const r of this.remotes.values()) {
+      const rv = r.vehicle;
+      if (!rv?.obj || !rv.dock || !r.group.visible) continue;
+      // The hull it rides is not here (they are on another world, or their picture has not come in):
+      // it is put where the relay says it is in the world, which is what any other ship would get.
+      if (!this.carrierAt(rv.dock.to, dockPos, dockQuat)) {
+        rv.obj.position.copy(rv.target);
+        rv.obj.quaternion.copy(rv.targetQ);
+      } else {
+        rv.obj.quaternion.copy(dockQuat).multiply(rv.dock.q);
+        rv.obj.position.copy(rv.dock.p).applyQuaternion(dockQuat).add(dockPos);
+      }
+      // The figure rides the same snap. Its own glide is a tenth of a second behind the messages, and
+      // the hull it is sitting in is now placed exactly, so left to itself the pilot swims out of their
+      // own cockpit at speed: it is put where it stands in the hull's frame (its offset from where the
+      // relay says the hull is), carried onto where the hull has just been put.
+      dockOff.copy(r.target).sub(rv.target);
+      dockInv.copy(rv.targetQ).invert();
+      r.group.position.copy(dockOff).applyQuaternion(dockInv).applyQuaternion(rv.obj.quaternion).add(rv.obj.position);
+      if (r.targetQ) r.group.quaternion.copy(rv.obj.quaternion).multiply(dockInv.multiply(r.targetQ));
+    }
+  }
+
+  /** Where the ship of the player with this relay id stands: the game's own answer first, then the peers' pictures. */
+  private carrierAt(to: number, pos: THREE.Vector3, quat: THREE.Quaternion): boolean {
+    if (this.carrierPose?.(to, pos, quat)) return true;
+    const carrier = this.remotes.get(to)?.vehicle;
+    if (!carrier?.obj) return false;
+    pos.copy(carrier.obj.position);
+    quat.copy(carrier.obj.quaternion);
+    return true;
+  }
+
+  // --- what a clamp needs of the peers (src/space/docking.ts's ClampPeers) --------------------------
+
+  /** Every peer here who is on a ship whose picture is in, filled into `out` (cleared first). */
+  shipPeers(out: number[]): number[] {
+    out.length = 0;
+    for (const r of this.remotes.values()) if (r.group.visible && r.vehicle?.obj && r.vehicle.size) out.push(r.id);
+    return out;
+  }
+
+  /** The pose and velocity of the ship that peer is on; false when they are on none, or are elsewhere. */
+  vehiclePose(id: number, pos: THREE.Vector3, quat: THREE.Quaternion, vel: THREE.Vector3): boolean {
+    const r = this.remotes.get(id);
+    const rv = r?.vehicle;
+    if (!r?.group.visible || !rv?.obj) return false;
+    pos.copy(rv.obj.position);
+    quat.copy(rv.obj.quaternion);
+    vel.copy(rv.vel);
+    return true;
+  }
+
+  /** That ship's name, box and bounding radius; null before its picture is in. */
+  vehicleOf(id: number): { label: string; bounds: { min: number[]; max: number[] }; radius: number } | null {
+    return this.remotes.get(id)?.vehicle?.size ?? null;
+  }
+
+  /** What to call the player, for the rows. */
+  peerName(id: number): string {
+    return this.remotes.get(id)?.hello.name ?? 'someone';
   }
 
   /** The peers and what they ride, for the motion blur, with the relay's velocity: their glide between messages is not their speed. */
@@ -535,6 +643,12 @@ export class RemotePlayers {
     for (const id of [...this.remotes.keys()]) this.remove(id);
   }
 }
+
+/** Scratch for placing a clamped picture, and its rider, on the hull it rides; nothing is allocated per frame. */
+const dockPos = new THREE.Vector3();
+const dockQuat = new THREE.Quaternion();
+const dockOff = new THREE.Vector3();
+const dockInv = new THREE.Quaternion();
 
 /** No preparation to wait for (the game has not given one). */
 const noPrepare = (): Promise<void> => Promise.resolve();
