@@ -101,14 +101,40 @@ export const COMPANION_DEGREES = 6;
  * plane by far more than the depth buffer's step out there (about 70 m a step at 24 bits with a
  * 0.05 m near plane), so a planet always stops the rays; and inside the far plane, so it is drawn.
  */
-export const SPACE_SKY_TUNE = { companionDegrees: COMPANION_DEGREES, skyShare: 0.92, standInDistance: 7500 };
+/**
+ * `quadAt`, `quadTan`, `quadMargin`: metres and two ratios, all three INVENTED, for the depth
+ * stand-in of a body that stands somewhere rather than hanging on the sky. Such a body's angle grows
+ * as a ship closes on it, so geometry built for one angle cannot follow it and its stand-in is a flat
+ * quad turned square to it, hung `quadAt` from the camera: near enough that however wide it has to be
+ * its corners stay well inside the far plane, far enough to be clear of the near plane and of
+ * anything drawn in the cockpit. `quadTan` caps how wide it may be asked to be (the tangent of the
+ * body's half-angle runs away at a right angle, and the cap is reached only from inside about a
+ * hundredth of the body's own radius of its surface, where nothing puts a ship). `quadMargin` is the
+ * little over the disc's own width that keeps the traced limb inside the quad's edge rather than on
+ * it -- the number to turn if the limb ever shows a seam.
+ */
+export const SPACE_SKY_TUNE = { companionDegrees: COMPANION_DEGREES, skyShare: 0.92, standInDistance: 7500, quadAt: 20, quadTan: 40, quadMargin: 1.06 };
 
 /** Tune them live (`__debug.suns`); every one is held where it cannot break the band the stand-in sits in. */
-export function tuneSpaceSky(patch: { companionDegrees?: number; skyShare?: number; standInDistance?: number }): typeof SPACE_SKY_TUNE {
+export function tuneSpaceSky(patch: { companionDegrees?: number; skyShare?: number; standInDistance?: number; quadAt?: number; quadTan?: number; quadMargin?: number }): typeof SPACE_SKY_TUNE {
   if (patch.companionDegrees !== undefined) SPACE_SKY_TUNE.companionDegrees = clamp(patch.companionDegrees, 0, 90);
   if (patch.skyShare !== undefined) SPACE_SKY_TUNE.skyShare = clamp(patch.skyShare, 0.2, 0.9999);
   if (patch.standInDistance !== undefined) SPACE_SKY_TUNE.standInDistance = clamp(patch.standInDistance, 100, 100000);
+  if (patch.quadAt !== undefined) SPACE_SKY_TUNE.quadAt = clamp(patch.quadAt, 1, 500);
+  if (patch.quadTan !== undefined) SPACE_SKY_TUNE.quadTan = clamp(patch.quadTan, 1, 1000);
+  if (patch.quadMargin !== undefined) SPACE_SKY_TUNE.quadMargin = clamp(patch.quadMargin, 1, 4);
   return SPACE_SKY_TUNE;
+}
+
+/**
+ * The deepest a standing body's stand-in may write, in metres: inside the far plane, and under the
+ * depth past which a pixel counts as open sky by the same margin the sky's own stand-ins keep, so a
+ * planet always stops the god rays rather than reading as sky on the rounding. The rays' test is an
+ * equality-inclusive step against `skyDistanceFor`, so a depth clamped exactly there would count as
+ * sky; `standInDistance` is the number already chosen to sit clear of it.
+ */
+export function standingBodyMaxDepth(far: number): number {
+  return Math.min(SPACE_SKY_TUNE.standInDistance, skyDistanceFor(true, far, 0));
 }
 
 /** Depth past which a pixel counts as open sky, in metres: the far plane's share in space, the far terrain's distance over a planet. */
@@ -142,6 +168,62 @@ export function spaceBodyStandIn(radius: number, distance: number): { distance: 
  */
 export function standInViewDepth(distance: number, angleOffAxis: number): number {
   return distance * Math.cos(clamp(angleOffAxis, 0, Math.PI / 2));
+}
+
+/** Where a body that stands somewhere is drawn this frame, and what its stand-in needs. */
+export interface StandingBodyPlace {
+  /** How far out the picture is drawn, and the scale that keeps the angle it covers exact. */
+  drawnAt: number;
+  scale: number;
+  /** The tangent of the body's own half-angle, held to `tanCap`; how wide the stand-in's quad is at 1 m. */
+  tan: number;
+  /** Drawn depth times this is true depth: the shader traces the drawn sphere, which a float can hold. */
+  depthScale: number;
+}
+
+/**
+ * A body that stands somewhere in the zone, rather than hanging on the sky, placed for one frame.
+ *
+ * It is drawn at its true direction and pulled in to no further than `pullTo`, scaled by the same
+ * ratio, so radius over distance -- the angle it covers on the screen -- is exactly what it truly
+ * is at any distance, and it grows with true parallax as a ship closes on it. Nothing is allocated:
+ * the answer is written into `out`.
+ *
+ * `tanCap` holds how wide its depth stand-in's quad may be asked to be. The quad only has to cover
+ * the body's disc, and the tangent runs away at a right angle; the cap is reached only from inside
+ * about a hundredth of the body's own radius of its surface, which nothing puts a ship inside.
+ */
+export function standingBodyPlace(radius: number, distance: number, pullTo: number, tanCap: number, out: StandingBodyPlace): StandingBodyPlace {
+  const d = Math.max(1e-3, distance);
+  out.drawnAt = Math.min(d, pullTo);
+  out.scale = out.drawnAt / d;
+  out.depthScale = 1 / out.scale;
+  const sin = clamp(radius / d, 0, 0.9999);
+  out.tan = Math.min(tanCap, sin / Math.sqrt(1 - sin * sin));
+  return out;
+}
+
+/**
+ * The depth a standing body's stand-in writes for a ray `angleOffAxis` from the body's middle: the
+ * true surface under that pixel along the camera's forward axis, held under `maxDepth` so it always
+ * stays inside the far plane; null where the ray misses the body and the stand-in writes nothing.
+ *
+ * This is what the shader works out, in the same steps: the pixel's ray against the sphere, the
+ * nearer crossing, then that point's depth along the view axis. The shader traces the drawn sphere
+ * and multiplies by `depthScale`, which is the same number, only small enough for a float.
+ */
+export function standingBodyDepth(radius: number, distance: number, angleOffAxis: number, maxDepth: number): number | null {
+  const a = clamp(angleOffAxis, 0, Math.PI);
+  const b = distance * Math.cos(a);
+  const c = distance * distance - radius * radius;
+  const disc = b * b - c;
+  if (disc < 0) return null;
+  const root = Math.sqrt(disc);
+  let t = b - root;
+  if (t < 0) t = b + root;
+  if (t < 0) return null;
+  // The hit's distance along the view axis, not from the camera.
+  return Math.min(maxDepth, Math.max(0.1, t * Math.cos(a)));
 }
 
 /**

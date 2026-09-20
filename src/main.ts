@@ -1481,9 +1481,11 @@ class App {
        * which is read when a zone's bodies are built, so it shows on the next arrival. Nothing
        * here is saved.
        */
-      suns: (opts?: { rule?: SunRule; companionDegrees?: number; skyShare?: number; standInDistance?: number }) => {
+      suns: (opts?: { rule?: SunRule; companionDegrees?: number; skyShare?: number; standInDistance?: number; quadAt?: number; quadTan?: number; quadMargin?: number }) => {
         const sky = this.world.swgSky;
-        if (opts && (opts.companionDegrees !== undefined || opts.skyShare !== undefined || opts.standInDistance !== undefined)) tuneSpaceSky(opts);
+        // `quadAt`, `quadTan` and `quadMargin` are the depth stand-in of a body that stands somewhere
+        // in the zone rather than hanging on the sky; they take effect on the next frame drawn.
+        if (opts && (opts.companionDegrees !== undefined || opts.skyShare !== undefined || opts.standInDistance !== undefined || opts.quadAt !== undefined || opts.quadTan !== undefined || opts.quadMargin !== undefined)) tuneSpaceSky(opts);
         // Any of them can change which star keeps the sun company, so the pick is made again.
         if (opts) sky?.setSunRule(opts.rule ?? (sky.sunStar?.chosenBy === 'disc' ? 'disc' : 'glow'));
         const pick = sky?.sunStar ?? null;

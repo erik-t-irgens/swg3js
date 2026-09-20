@@ -43,7 +43,7 @@ import { liveSettings } from '../core/settings.ts';
 import { ShipContacts } from '../space/contacts';
 import { NpcShipManager } from '../space/npcShips';
 import { ZONE_TIER } from '../space/roster';
-import { spaceBodyStandIn } from '../space/suns';
+import { SPACE_SKY_TUNE, spaceBodyStandIn, standingBodyMaxDepth, standingBodyPlace, type StandingBodyPlace } from '../space/suns';
 import { CSM } from 'three/examples/jsm/csm/CSM.js';
 import { ACTOR_LAYER, INTERIOR_LAYER, markActor, type PortalRenderer } from './portalRender';
 import { createPlaceholderSpeeder } from '../vehicles/speeder';
@@ -74,6 +74,10 @@ const SPACE_BODY_SIZE = 240;
  * the stand-in then covers the body's disc and no more than a hundredth of a degree beside it.
  */
 const STAND_IN_SEGMENTS = 48;
+/** The axis a plane is built about, before it is turned square to a body's direction. */
+const QUAD_AXIS = new THREE.Vector3(0, 0, 1);
+/** One record the per-frame placement of the standing bodies writes into, so no frame allocates. */
+const standPlace: StandingBodyPlace = { drawnAt: 0, scale: 1, tan: 0, depthScale: 1 };
 /** Detailed ground chunks each way, by default; the settings move it (World.viewRadius). */
 const VIEW_RADIUS = 6;
 const STREAM_BUDGET = 3;
@@ -1124,6 +1128,77 @@ export class World {
     return fx.sound ? this.playSound(fx.sound, x, y, z) !== 0 : false;
   }
 
+  /**
+   * A body that stands somewhere: its own copy of the depth stand-in's material. The program is one
+   * for all of them (three keys a shader material's program on its source), so a zone pays for one
+   * however many bodies it has, and it is built with the rest behind the loading screen.
+   *
+   * It writes the depth of the true surface under each pixel and no colour at all. The sphere it
+   * traces is the DRAWN one -- pulled in to the sky's reach and scaled by the same ratio -- and the
+   * depth it finds is multiplied back out by `uDepthScale`: a true middle two hundred kilometres
+   * out, squared in the maths, is past what a float in a shader can hold, and the drawn one is not.
+   */
+  private makeWorldBodyStandIn(): THREE.ShaderMaterial {
+    const m = new THREE.ShaderMaterial({
+      uniforms: {
+        uCentre: { value: new THREE.Vector3() },
+        uRadius: { value: 1 },
+        uDepthScale: { value: 1 },
+        uMaxDepth: { value: 1 },
+        uProjZ: { value: new THREE.Vector2() },
+        uProjW: { value: new THREE.Vector2() },
+      },
+      vertexShader: /* glsl */ `
+        varying vec3 vView;
+        void main() {
+          vec4 mv = modelViewMatrix * vec4(position, 1.0);
+          vView = mv.xyz;
+          gl_Position = projectionMatrix * mv;
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        uniform vec3 uCentre;
+        uniform float uRadius;
+        uniform float uDepthScale;
+        uniform float uMaxDepth;
+        uniform vec2 uProjZ;
+        uniform vec2 uProjW;
+        varying vec3 vView;
+        void main() {
+          vec3 ray = normalize(vView);
+          float b = dot(ray, uCentre);
+          float c = dot(uCentre, uCentre) - uRadius * uRadius;
+          float disc = b * b - c;
+          if (disc < 0.0) discard;
+          float root = sqrt(disc);
+          float t = b - root;
+          if (t < 0.0) t = b + root;
+          if (t < 0.0) discard;
+          // The depth buffer holds distance along the camera's forward axis, not from the camera.
+          float depth = clamp(-(ray.z * t) * uDepthScale, 0.1, uMaxDepth);
+          float viewZ = -depth;
+          gl_FragDepthEXT = (uProjZ.x * viewZ + uProjZ.y) / (uProjW.x * viewZ + uProjW.y) * 0.5 + 0.5;
+          gl_FragColor = vec4(0.0);
+        }
+      `,
+      side: THREE.DoubleSide,
+      fog: false,
+    });
+    m.colorWrite = false;
+    m.depthWrite = true;
+    m.depthTest = true;
+    // Unlit: kept out of the shadow cascades, whose defines are part of a program's key.
+    m.userData.unlit = true;
+    return m;
+  }
+
+  /**
+   * A body the pack stands somewhere rather than hanging on the sky, and everything the per-frame
+   * placement needs of it. `at` is the world place (the game frame), `radius` its true radius; the
+   * mesh and the stand-in are both children of the group that rides the camera.
+   */
+  private readonly spaceWorldBodies: { mesh: THREE.Mesh; stand: THREE.Mesh; at: THREE.Vector3; radius: number; material: THREE.ShaderMaterial }[] = [];
+
   private async loadSpaceBodies(pack: AssetPack): Promise<void> {
     const token = this.loadToken;
     // This zone's NPC ship manager, captured before the wait: a zone left meanwhile is not given anchors.
@@ -1152,6 +1227,8 @@ export class World {
     const capAxis = new THREE.Vector3(0, 1, 0);
     /** How far out the last stand-in stood, for the console line alone. */
     let standAt = 0;
+    /** The bodies that stand somewhere, kept here until this set of bodies is the one in the sky. */
+    const standing: { mesh: THREE.Mesh; stand: THREE.Mesh; at: THREE.Vector3; radius: number; material: THREE.ShaderMaterial }[] = [];
     for (const p of data.planets) {
       // The direction is in the game's own coordinates, mirrored in X like everything converted.
       const dir = new THREE.Vector3(-p.direction[0], p.direction[1], p.direction[2]);
@@ -1165,12 +1242,43 @@ export class World {
         return;
       }
       if (tex) tex.colorSpace = THREE.SRGBColorSpace;
-      const radius = SPACE_BODY_SIZE * p.size;
+      // A body that stands somewhere (a made-up system's) is built at its true size and moved every
+      // frame; one hung on the sky is built at the sky's reach and never moves again.
+      const stands = p.place === 'world' && Array.isArray(p.at) && typeof p.radius === 'number' && p.radius > 0;
+      const radius = stands ? (p.radius as number) : SPACE_BODY_SIZE * p.size;
       const mesh = new THREE.Mesh(new THREE.SphereGeometry(radius, 48, 32), new THREE.MeshLambertMaterial({ map: tex ?? undefined, color: tex ? 0xffffff : 0x8a97a6, fog: false, depthWrite: false }));
       mesh.position.copy(dir).multiplyScalar(SPACE_BODY_DISTANCE);
       mesh.renderOrder = -4;
       mesh.frustumCulled = false;
       group.add(mesh);
+      if (stands) {
+        const at = p.at as [number, number, number];
+        const material = this.makeWorldBodyStandIn();
+        material.uniforms.uMaxDepth.value = standingBodyMaxDepth(this.camera?.far ?? 9000);
+        const stand = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), material);
+        // After the body's own picture, which writes no depth: at a stand-off of a kilometre or two
+        // the depth written is nearer than the picture is drawn, and the picture would fail its own
+        // test and vanish.
+        stand.renderOrder = -3;
+        stand.frustumCulled = false;
+        stand.onBeforeRender = (_r, _s, cam) => {
+          const e = (cam as THREE.PerspectiveCamera).projectionMatrix.elements;
+          material.uniforms.uProjZ.value.set(e[10], e[14]);
+          material.uniforms.uProjW.value.set(e[11], e[15]);
+          // The DRAWN SPHERE's middle in view space, read off the matrix the frame already built:
+          // the picture's, never the quad's. The quad is only the surface the ray is cast from, hung
+          // a few metres away; the sphere the shader traces stands where the picture is drawn, and
+          // its radius is that picture's. Reading the quad's place instead traced a sphere round the
+          // camera: the depth came out kilometres wrong and no pixel ever fell outside the disc, so
+          // the limb was the quad's square edge rather than the body's.
+          material.uniforms.uCentre.value.setFromMatrixPosition(mesh.matrixWorld).applyMatrix4(cam.matrixWorldInverse);
+        };
+        group.add(stand);
+        standing.push({ mesh, stand, at: new THREE.Vector3(at[0], at[1], at[2]), radius, material });
+        // It is placed before the first frame draws, so nothing is ever seen at the sky's reach.
+        standAt = radius;
+        continue;
+      }
       // A depth stand-in: the body's own disc on the sky, far out, writing depth and no colour. A
       // planet here is a picture with no true distance and writes none itself, so without this the
       // god rays shone straight through it, and so would anything else that reads the frame's
@@ -1198,6 +1306,9 @@ export class World {
       this.disposeSpaceBodies(this.spaceBodies);
     }
     this.spaceBodies = group;
+    // The standing bodies are this set's, and only now that this set is the one in the sky.
+    this.spaceWorldBodies.length = 0;
+    for (const b of standing) this.spaceWorldBodies.push(b);
     this.scene.add(group);
     markActor(group);
     // A star behind a planet must not flare through it: the body itself writes no depth, and its
@@ -1206,8 +1317,41 @@ export class World {
     console.info(`space: ${discs.length} planets and moons in the sky, each writing its depth ${Math.round(standAt)} m out`);
   }
 
+  /**
+   * The bodies that stand somewhere, placed for this frame. Each one is drawn at its true direction
+   * from the camera, pulled in to no further than the sky's own reach and scaled by the same ratio,
+   * so it covers exactly the angle it truly covers and grows with true parallax as a ship closes on
+   * it; its stand-in then writes the depth of its true surface, so anything beyond it is hidden and
+   * anything in front of it draws over.
+   *
+   * A few vector operations per body, nothing allocated, and nothing that could make a program.
+   */
+  private placeStandingBodies(camPos: THREE.Vector3): void {
+    for (const b of this.spaceWorldBodies) {
+      tmpV.subVectors(b.at, camPos);
+      const d = Math.max(1, tmpV.length());
+      tmpV.multiplyScalar(1 / d);
+      const place = standingBodyPlace(b.radius, d, SPACE_BODY_DISTANCE, SPACE_SKY_TUNE.quadTan, standPlace);
+      b.mesh.position.copy(tmpV).multiplyScalar(place.drawnAt);
+      b.mesh.scale.setScalar(place.scale);
+      // The stand-in is a quad square to the body, near the camera and just wide enough for its disc.
+      // Its three numbers are ours and live (`__debug.suns`), read here rather than kept, so a turn
+      // of the knob shows on the next frame.
+      b.stand.position.copy(tmpV).multiplyScalar(SPACE_SKY_TUNE.quadAt);
+      b.stand.quaternion.setFromUnitVectors(QUAD_AXIS, tmpV);
+      const across = 2 * SPACE_SKY_TUNE.quadAt * place.tan * SPACE_SKY_TUNE.quadMargin;
+      b.stand.scale.set(across, across, 1);
+      // The sphere the shader traces is the drawn one; what it finds is multiplied back out.
+      b.material.uniforms.uRadius.value = b.radius * place.scale;
+      b.material.uniforms.uDepthScale.value = place.depthScale;
+    }
+  }
+
   /** A set of space bodies taken out of the world for good: their materials forgotten, then everything they own freed. */
   private disposeSpaceBodies(group: THREE.Group): void {
+    // Nothing standing survives the set it belonged to, so the per-frame placement never reaches a
+    // mesh whose geometry has been freed.
+    if (this.spaceWorldBodies.some((b) => b.mesh.parent === group)) this.spaceWorldBodies.length = 0;
     // A set, because every body's depth stand-in shares one material.
     const materials = new Set<THREE.Material & { map?: THREE.Texture | null }>();
     for (const o of group.children) {
@@ -3275,6 +3419,7 @@ export class World {
     this.waterBodies.envLight = this.waterEnvLight();
     this.sky.position.copy(camPos);
     this.spaceBodies?.position.copy(camPos);
+    if (this.spaceWorldBodies.length) this.placeStandingBodies(camPos);
     // The nebulae: where the camera is inside them, the haze, the sheets' order and the strikes.
     if (this.nebulae && this.camera) this.nebulae.update(dt, this.camera);
     this.waterTime += dt;
