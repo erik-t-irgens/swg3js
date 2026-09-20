@@ -10,6 +10,7 @@
 // Imports `three`, the pure modules with `.ts`, and only types from the runtime, so node's tests load it.
 // Nothing here allocates per frame or per hit (a hit's effect handle is the particle system's own).
 import * as THREE from 'three';
+import { layerColours } from '../core/palette.ts';
 import { NOBODY, PLAYER_KEY, type Living } from '../combat/kit.ts';
 import type { Bolt } from '../combat/bolts';
 import type { CombatFile, CombatLayer, HullFx } from './combatData.ts';
@@ -98,8 +99,8 @@ export interface CombatSummary {
   hull: number;
 }
 
-/** Hit-effect flash colours per layer (the effect's own light, CLGT, is not decoded). */
-export const LAYER_FLASH: Record<CombatLayer, number> = { shield: 0x9fd8ff, armor: 0xffb070, component: 0xff8a50, chassis: 0xff8a50 };
+/** Hit-effect flash colours per layer, ours (the effect's own light, CLGT, is not decoded): the palette's own four, read from there rather than written again here, so the hull flashes in the colour the layer's bar and its pip wear and a part hit no longer looks like a hull hit. Read as this module loads, which is before the stylesheet is: that is the palette's fallback table, which `palette.test.ts` pins to `:root` value for value, so the two cannot differ while the tests pass. */
+export const LAYER_FLASH: Record<CombatLayer, number> = layerColours();
 
 /**
  * What a part going down does (invented): an engine down flies at ENGINE_DOWN_SPEED of the top speed and
