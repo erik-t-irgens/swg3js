@@ -124,6 +124,12 @@ export class LayoutStreamer {
   private readonly regions = new Map<string, Region>();
   private readonly exclusionCells = new Map<string, Exclusion[]>();
   private readonly colliders = new Map<PlacedObject, R.Collider[]>();
+  /**
+   * Which object template each collider belongs to, so a ray that hits something can say what it is
+   * made of (every template carries a surface type, and the planet's sound pack keeps the ones that
+   * are not the default). Filled and emptied in the same two places the colliders themselves are.
+   */
+  private readonly colliderTemplate = new Map<number, string>();
   /** Objects wider than COLLIDER_RADIUS_CAP. Must stay a field initialiser: the constructor's loop fills it. */
   private readonly huge = new Set<PlacedObject>();
   /** Huge objects whose collision is still being built, a few pieces an update. A field initialiser, as `huge`. */
@@ -366,7 +372,9 @@ export class LayoutStreamer {
           .setFriction(0.8);
         if (prim.cell === 0) desc.setCollisionGroups(groups(Group.exterior, Group.all));
         else if (prim.cell > 0) desc.setCollisionGroups(groups(Group.interior, Group.all));
-        cols.push(this.physics.world.createCollider(desc));
+        const col = this.physics.world.createCollider(desc);
+        cols.push(col);
+        this.colliderTemplate.set(col.handle, o.template);
       }
       built++;
     }
@@ -660,7 +668,9 @@ export class LayoutStreamer {
       // Building shells and interiors get their own collision groups so someone inside ignores the shell.
       if (prim.cell === 0) desc.setCollisionGroups(groups(Group.exterior, Group.all));
       else if (prim.cell > 0) desc.setCollisionGroups(groups(Group.interior, Group.all));
-      cols.push(this.physics.world.createCollider(desc));
+      const col = this.physics.world.createCollider(desc);
+      cols.push(col);
+      this.colliderTemplate.set(col.handle, o.template);
     }
     this.colliders.set(o, cols);
   }
@@ -668,8 +678,19 @@ export class LayoutStreamer {
   private removeColliders(o: PlacedObject): void {
     const cols = this.colliders.get(o);
     if (!cols) return;
-    for (const c of cols) this.physics.removeCollider(c);
+    for (const c of cols) {
+      this.colliderTemplate.delete(c.handle);
+      this.physics.removeCollider(c);
+    }
     this.colliders.delete(o);
+  }
+
+  /**
+   * The object template a collider belongs to, or null for anything else the ray can find (the
+   * ground, a building's interior shell, a body). The handle is the physics engine's own.
+   */
+  templateOfCollider(handle: number): string | null {
+    return this.colliderTemplate.get(handle) ?? null;
   }
 
   get colliderCount(): number {

@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import type { PlanetDef } from '../data/planets';
 import { FBM, hash2 } from './noise';
 import type { FarGrid, SwgTerrain } from './swgTerrain';
+import { sampleFamily, type FamilyGrid } from '../audio/footsteps.ts';
 
 export const CHUNK_SIZE = 64;
 
@@ -14,6 +15,20 @@ export interface Anchor { x: number; z: number; y: number; r: number }
 const ANCHOR_CELL = 256;
 const reachOf = (a: Anchor) => a.r * 2.5 + 40;
 export const CHUNK_RES = 32;
+
+/**
+ * INVENTED: how many chunks' shader-family grids are kept, for reading what the ground is made of
+ * under a foot. A grid is 35 x 35 int32s, about 4.9 KB, so this is under a megabyte; the view holds
+ * a hundred or so chunks at most, and the oldest go first. They are the same arrays the ground
+ * meshes were built from, held rather than copied. Live through
+ * `__debug.footsteps({ familyChunks: n })`, which reports how many are held beside it.
+ */
+export const FAMILY_TUNE = { familyChunks: 192 };
+
+// The grid itself and the lookup into it live beside the footsteps that read them: this module
+// cannot be loaded by the node tests (its imports carry no extensions and its constructor takes a
+// parameter property), and a rule about what is underfoot that nothing can check is the kind that
+// quietly goes wrong.
 
 const tmpA = new THREE.Color();
 const tmpB = new THREE.Color();
@@ -70,6 +85,8 @@ export class Terrain {
   detachSwg(): void {
     this.swg?.dispose();
     this.swg = null;
+    // The families belong to that generator's own shader group; nothing may read them against another.
+    this.chunkFamilies.clear();
     this.waterLevel = this.planet.water ? this.planet.water.level : -Infinity;
     this.floor = this.planet.terrain.base - this.planet.terrain.amplitude - 30;
   }
@@ -196,7 +213,51 @@ export class Terrain {
 
   buildChunk(cx: number, cz: number): { geometry: THREE.BufferGeometry; heights: Float32Array } {
     const r = this.buildGrid(cx * CHUNK_SIZE, cz * CHUNK_SIZE, CHUNK_SIZE, CHUNK_RES, { skirt: 8, wantHeights: true });
+    // The family of every sample the ground was painted from, kept for what is underfoot. It is the
+    // array the mesh was built from, held rather than copied, and the oldest chunk's goes when the
+    // map is full: a body walking a planet all day keeps a bounded handful.
+    if (r.families) {
+      const key = `${cx},${cz}`;
+      this.chunkFamilies.delete(key);
+      this.chunkFamilies.set(key, { fams: r.families, ox: cx * CHUNK_SIZE, oz: cz * CHUNK_SIZE, step: CHUNK_SIZE / CHUNK_RES, w: CHUNK_RES + 3 });
+      while (this.chunkFamilies.size > FAMILY_TUNE.familyChunks) {
+        const oldest = this.chunkFamilies.keys().next().value as string | undefined;
+        if (oldest === undefined) break;
+        this.chunkFamilies.delete(oldest);
+      }
+    }
     return { geometry: r.geometry, heights: r.heights! };
+  }
+
+  /** The chunks' family grids, newest last; a planet's own, so a travel takes them with the terrain. */
+  private readonly chunkFamilies = new Map<string, FamilyGrid>();
+
+  /**
+   * The shader family the ground is painted with at a point, 0 for none and null where no chunk has
+   * been built yet. It reads the nearest sample of the chunk under the point -- never the terrain
+   * sampler, whose main-thread cache is mostly empty and would generate a whole block to answer.
+   */
+  familyAt(x: number, z: number): number | null {
+    const g = this.chunkFamilies.get(`${Math.floor(x / CHUNK_SIZE)},${Math.floor(z / CHUNK_SIZE)}`);
+    return g ? sampleFamily(g, x, z) : null;
+  }
+
+  /**
+   * What the ground is made of at a point: the surface template the shader family names
+   * (`abstract/terrain_surface/sand.iff`), or null where no chunk covers it, the planet has no
+   * converted terrain, or the family names none (Mustafar's do not).
+   */
+  surfaceAt(x: number, z: number): string | null {
+    const swg = this.swg;
+    if (!swg) return null;
+    const family = this.familyAt(x, z);
+    if (!family) return null;
+    return swg.template.generator.shaderGroup.families.get(family)?.surface || null;
+  }
+
+  /** How many chunks' families are held, for the console. */
+  get familyChunks(): number {
+    return this.chunkFamilies.size;
   }
 
   /**
@@ -226,7 +287,7 @@ export class Terrain {
     this.swg?.evict(center.x, center.z, Math.ceil((chunkRadius * CHUNK_SIZE) / this.swg.sampler.blockWidth) + 2);
   }
 
-  private buildGrid(ox: number, oz: number, size: number, n: number, opts: { skirt: number; yOffset?: number; wantHeights: boolean }, samples?: FarGrid): { geometry: THREE.BufferGeometry; heights: Float32Array | null } {
+  private buildGrid(ox: number, oz: number, size: number, n: number, opts: { skirt: number; yOffset?: number; wantHeights: boolean }, samples?: FarGrid): { geometry: THREE.BufferGeometry; heights: Float32Array | null; families: Int32Array | null } {
     const step = size / n;
     const yOff = opts.yOffset ?? 0;
     const w = n + 3;
@@ -384,13 +445,13 @@ export class Terrain {
       geo.setIndex(new THREE.BufferAttribute(identity, 1));
       geo.computeBoundingSphere();
       if (opts.skirt === 0) geo.userData = { fullIndex: identity.slice(), n, ox, oz, step };
-      return { geometry: geo, heights: physHeights };
+      return { geometry: geo, heights: physHeights, families: fams };
     }
     geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     geo.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
     geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
     geo.setIndex(indices);
     geo.computeBoundingSphere();
-    return { geometry: geo, heights: physHeights };
+    return { geometry: geo, heights: physHeights, families: fams };
   }
 }

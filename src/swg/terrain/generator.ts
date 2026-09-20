@@ -205,6 +205,13 @@ export interface ShaderFamily {
   featherClamp: number;
   shaderSize: number;
   children: { name: string; weight: number }[];
+  /**
+   * The surface template the family paints the ground with, from version 6 on
+   * (`abstract/terrain_surface/sand.iff`), which is what a foot landing on it sounds like. Empty on
+   * a family that names none: a quarter of Kashyyyk's and all of Mustafar's, which fall back to the
+   * body's plain footstep.
+   */
+  surface: string;
 }
 
 export class ShaderGroup {
@@ -240,10 +247,10 @@ export class ShaderGroup {
       if (isForm(c) || c.tag !== 'SFAM') continue;
       const r = new ChunkReader(c.data);
       const id = r.int32();
-      const fam: ShaderFamily = { id, name: 'null', featherClamp: 1, shaderSize: 2, children: [] };
+      const fam: ShaderFamily = { id, name: 'null', featherClamp: 1, shaderSize: 2, children: [], surface: '' };
       if (version >= 1) {
         fam.name = r.string();
-        if (version >= 6) r.string();
+        if (version >= 6) fam.surface = r.string();
         r.uint8();
         r.uint8();
         r.uint8();

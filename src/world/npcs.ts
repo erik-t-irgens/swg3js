@@ -165,6 +165,14 @@ export class Npc implements Living {
     return this.name;
   }
 
+  /**
+   * Whether it has something alive it means to fight. Read by what gives it a voice: a fighter
+   * standing about with nothing to fight calls out at nothing.
+   */
+  get hunting(): boolean {
+    return !this.dead && !!this.target && !this.target.dead;
+  }
+
   /** A person is a circle from above: the capsule's own radius, whichever way you come at it. */
   radiusToward(): number {
     return 0.35;

@@ -8,6 +8,7 @@
 // behind this code's back, and a gait started again keeps its phase.
 import * as THREE from 'three';
 import { blendWeight, clampFades, oneShotWeight } from './gait';
+import type { ActiveClip } from '../../audio/clipEvents.ts';
 
 /** One-shot priorities: a lower one is refused while a higher one plays. */
 export const SHOT_PRIORITY = { emote: 0, hit: 1, attack: 2, down: 3 } as const;
@@ -177,6 +178,54 @@ export class MobileAnimator {
 
   get shot(): string | null {
     return this.shotAction ? this.shotName : null;
+  }
+
+  /** The three slots `activeClips` reads, kept so that reading them makes no array of its own. */
+  private readonly clipSlots: (THREE.AnimationAction | null)[] = [null, null, null];
+
+  /**
+   * The actions this animator is playing, for whatever reads a clip's own event markers: the loop,
+   * the one it is fading out of, and the one-shot over them. A mobile blends a walk into a run, so
+   * two of them can carry foot events at once and the reader picks the heavier.
+   *
+   * `out` is the caller's own array, filled in place, and the count is returned: nothing is
+   * allocated. The additive pulses are left out -- they are one-frame recoils, not clips with
+   * events of their own.
+   */
+  activeClips(out: ActiveClip[]): number {
+    let n = 0;
+    // Refilled into a kept array rather than listed in a literal, which would make one per call,
+    // and this runs for every body in earshot every frame.
+    const slots = this.clipSlots;
+    slots[0] = this.to;
+    slots[1] = this.from;
+    slots[2] = this.shotAction;
+    for (const action of slots) {
+      if (!action || !action.enabled || !action.isRunning()) continue;
+      // The loop and the one it fades out of are the same action for a frame when a gait is asked
+      // for again; listing it twice would let one clip's feet outvote themselves.
+      let already = false;
+      for (let i = 0; i < n; i++) if (out[i].token === action) already = true;
+      if (already) continue;
+      const weight = action.getEffectiveWeight();
+      if (weight <= 0) continue;
+      const clip = action.getClip();
+      let row = out[n];
+      if (!row) {
+        row = { name: '', half: 'whole', time: 0, duration: 0, timeScale: 1, weight: 0, looping: false, token: action };
+        out[n] = row;
+      }
+      row.name = clip.name;
+      row.half = 'whole';
+      row.time = action.time;
+      row.duration = clip.duration;
+      row.timeScale = action.timeScale;
+      row.weight = weight;
+      row.looping = action.loop === THREE.LoopRepeat;
+      row.token = action;
+      n++;
+    }
+    return n;
   }
 
   /** Let the one-shot go, fading back to the loop over `fade`. */

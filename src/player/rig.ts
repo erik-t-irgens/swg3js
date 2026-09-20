@@ -3,6 +3,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { Character, type GripAxes } from './character';
 import { HeadHider, type HeadStatusRow } from './headHide.ts';
 import { chainPoint, clipLinks, HEAD_TO_EYE, type Quat, type Vec3 } from '../vehicles/cockpitSeat';
+import type { ActiveClip, ClipHalf } from '../audio/clipEvents.ts';
 
 export type RigState = 'idle' | 'walk' | 'run' | 'air' | 'seated' | 'swim' | 'float' | 'crouch' | 'crouchWalk' | 'crouchWalkBack' | 'stance' | 'strafeLeft' | 'strafeRight' | 'runBack' | 'walkBack' | 'runSaber' | 'walkSaber' | 'gunIdle' | 'gunWalk' | 'gunRun' | 'gunReadyIdle' | 'gunReadyWalk' | 'gunReadyRun' | 'gunAimIdle' | 'gunAimWalk' | 'gunAimRun' | 'kneel' | 'prone' | 'proneMove' | 'gunProneIdle' | 'gunProneMove' | 'gunProneReadyIdle' | 'gunProneReadyMove' | 'gunProneAimIdle' | 'gunProneAimMove';
 
@@ -142,6 +143,22 @@ const restWorld = new THREE.Vector3();
 const dirWorld = new THREE.Vector3();
 const tmpA = new THREE.Vector3();
 const tmpB = new THREE.Vector3();
+
+/**
+ * A half's clip is named `upper:<clip>` or `lower:<clip>`, and a clip's event markers are listed
+ * under the bare name. Cut once per name and kept: `activeClips` runs every frame for every body in
+ * earshot, and slicing there would make a string a frame per half the player's body is playing.
+ * Bounded by the number of half clips a session ever plays, a few dozen.
+ */
+const bareNames = new Map<string, string>();
+function bareClipName(name: string): string {
+  let bare = bareNames.get(name);
+  if (bare === undefined) {
+    bare = name.slice(6);
+    bareNames.set(name, bare);
+  }
+  return bare;
+}
 
 /** A skinned GLTF character with an animation mixer and bones found by role. */
 export class CharacterRig {
@@ -774,6 +791,53 @@ export class CharacterRig {
     const weights: Record<string, number> = {};
     for (const a of [this.current, this.upper, this.override, this.upperShot]) if (a) weights[a.getClip().name] = Number(a.getEffectiveWeight().toFixed(2)) + (a.enabled ? 0 : -100);
     return { state: this.state, clip: this.current?.getClip().name ?? null, upper: this.upperName, override: this.override?.getClip().name ?? null, shot: this.shotName ?? this.upperShot?.getClip().name.replace(/^upper:/, '') ?? null, weights };
+  }
+
+  /** The four slots `activeClips` reads, kept so that reading them makes no array of its own. */
+  private readonly clipSlots: (THREE.AnimationAction | null)[] = [null, null, null, null];
+
+  /**
+   * The actions this rig is playing, for whatever reads a clip's own event markers: the state's
+   * clip (or its lower half while something rides the upper body), the upper layer, a one-off and a
+   * shot. Those four are the whole of it -- nothing else is ever started here -- so this costs four
+   * lookups rather than a walk of the twelve hundred clips a species pack holds.
+   *
+   * `out` is the caller's own array, filled in place and never replaced, and the count is returned:
+   * a frame allocates nothing. A record's `token` is the action itself, which is how the reader
+   * remembers where each one had got to.
+   */
+  activeClips(out: ActiveClip[]): number {
+    let n = 0;
+    // The four are refilled into a kept array rather than listed in a literal, which would make one
+    // per call, and this is called for every body in earshot every frame.
+    const slots = this.clipSlots;
+    slots[0] = this.current;
+    slots[1] = this.upper;
+    slots[2] = this.override;
+    slots[3] = this.upperShot;
+    for (const action of slots) {
+      if (!action || !action.enabled || !action.isRunning()) continue;
+      const weight = action.getEffectiveWeight();
+      if (weight <= 0) continue;
+      const clip = action.getClip();
+      const name = clip.name;
+      const half: ClipHalf = name.startsWith('upper:') ? 'upper' : name.startsWith('lower:') ? 'lower' : 'whole';
+      let row = out[n];
+      if (!row) {
+        row = { name: '', half: 'whole', time: 0, duration: 0, timeScale: 1, weight: 0, looping: false, token: action };
+        out[n] = row;
+      }
+      row.name = half === 'whole' ? name : bareClipName(name);
+      row.half = half;
+      row.time = action.time;
+      row.duration = clip.duration;
+      row.timeScale = action.timeScale;
+      row.weight = weight;
+      row.looping = action.loop === THREE.LoopRepeat;
+      row.token = action;
+      n++;
+    }
+    return n;
   }
 
   /** Whether the torso is held steady over locomotion legs while a pose rides the upper body. */

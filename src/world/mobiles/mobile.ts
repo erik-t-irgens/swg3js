@@ -186,6 +186,12 @@ export class Mobile implements Living {
   meshes: THREE.Mesh[] = [];
   model: THREE.Object3D | null = null;
   animator: MobileAnimator | null = null;
+  /**
+   * The clip pack the animator plays, kept so that what listens to a clip's own event markers can
+   * find the animation each clip was baked from (the pack's JSON names the source `.ans` per clip).
+   * The asset itself is shared by every mobile using it and is never disposed here.
+   */
+  animPack: PackAsset | null = null;
   roles: Roles | null = null;
   speeds = { walk: 0, run: 0 };
   /** The tier the manager gave it last, for the console. */
@@ -367,6 +373,7 @@ export class Mobile implements Living {
       if (extras?.roles) Object.assign(this.roles, extras.roles);
       const clips = extras?.clips?.size ? new Map([...pack.clips, ...extras.clips]) : pack.clips;
       this.animator = new MobileAnimator(scene, clips, pack.additive);
+      this.animPack = pack;
       const probe = pack.clips.get(this.roles.idle ?? '') ?? pack.clips.values().next().value;
       if (probe && probe.tracks.length) {
         let unbound = 0;
@@ -1253,6 +1260,8 @@ export class Mobile implements Living {
     this.deps.physics.world.removeRigidBody(this.body);
     this.animator?.dispose();
     this.animator = null;
+    // The pack itself belongs to the asset cache, which the caller releases; only the hold on it goes.
+    this.animPack = null;
     if (this.blade) {
       this.blade.group.parent?.remove(this.blade.group);
       this.blade.dispose();

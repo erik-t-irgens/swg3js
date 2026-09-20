@@ -299,6 +299,15 @@ export class Ambience {
     return roomRowFor(this.planetRooms, pob, cell, can) ?? roomRowFor(this.rooms, pob, cell, can);
   }
 
+  /**
+   * The interior row a room's floor is read from. The same lookup as `roomRow` without the "can the
+   * bank play its bed" test: twelve of the table's 265 rows name a bed the bank has no entry for,
+   * and for those `roomRow` falls through to a less specific row, whose floor is not this room's.
+   */
+  roomSurfaceFor(pob: string, cell: string): string | null {
+    return (roomRowFor(this.planetRooms, pob, cell) ?? roomRowFor(this.rooms, pob, cell))?.surface ?? null;
+  }
+
   /** Whether the bank holds this sound at all; kept, so asking costs no closure. */
   private readonly playable = (id: string): boolean => !!this.host.bank.template(id);
 

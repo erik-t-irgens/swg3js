@@ -76,6 +76,20 @@ const t = parseTerrainTemplate(trn);
 check('header', t.name === 'test' && t.mapWidthInMeters === 1024 && t.chunkWidthInMeters === 32 && t.numberOfTilesPerChunk === 8 && t.tileWidthInMeters === 4);
 check('summary', JSON.stringify(t.generator.summary()) === JSON.stringify({ LAYR: 3, AHFR: 1, BCIR: 1, AHCN: 2, BREC: 1, FSLP: 1, ASCN: 1 }), JSON.stringify(t.generator.summary()));
 check('shader family', t.generator.shaderGroup.featherClamp(1) === 0.5);
+check('a family that names no surface keeps an empty one', t.generator.shaderGroup.families.get(1)?.surface === '');
+// The second string of a version-6 family is the surface template the ground is painted with,
+// which is what a foot landing on it sounds like. It was read and thrown away until now.
+{
+  const withSurface = encode(form('PTAT', form('0015', chunk('DATA', header), form('TGEN', form('0000',
+    form('SGRP', form('0006', chunk('SFAM', new W().i32(3).str('desert').str('abstract/terrain_surface/sand.iff').u8(1).u8(2).u8(3).f32(2).f32(0.5).i32(1).str('shader/x.sht').f32(1).bytes()))),
+    form('FGRP', form('0008')), form('RGRP', form('0003')), form('EGRP', form('0002')), form('MGRP', form('0000')), form('LYRS'))), form('BAKE'))));
+  const ts = parseTerrainTemplate(withSurface);
+  const fam3 = ts.generator.shaderGroup.families.get(3);
+  check('a shader family keeps its surface template', fam3?.name === 'desert' && fam3?.surface === 'abstract/terrain_surface/sand.iff', `${fam3?.name} / ${fam3?.surface}`);
+  check('and the rest of the family still reads past it', fam3?.featherClamp === 0.5 && fam3?.children.length === 1 && fam3?.children[0].name === 'shader/x.sht');
+}
+// (What a chunk's family grid says under a point is checked in audioRuntime.test.ts, with the
+// footsteps that read it: this module's own imports cannot be loaded by node.)
 const fam = t.generator.fractalGroup.get(1)!;
 check('fractal family', fam.numberOfOctaves === 3 && near(fam.scaleX, 0.02) && fam.seed === 1337);
 

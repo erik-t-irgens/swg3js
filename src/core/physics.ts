@@ -306,4 +306,28 @@ export class Physics {
     const hit = this.world.castRay(this.downRay, maxDist, true, undefined, filterGroups, undefined, undefined, include);
     return hit ? fromY - hit.timeOfImpact : null;
   }
+
+  /** The one answer `topHit` hands back, refilled each call: the caller reads it and does not keep it. */
+  private readonly downHit = { y: 0, handle: -1 };
+
+  /**
+   * The same ray as `topSurface`, but it also says which collider it found, so the caller can ask
+   * what that thing is made of (a foot landing on a metal catwalk rather than the sand under it).
+   * Null when nothing is within `maxDist`.
+   *
+   * The result object is reused: read `y` and `handle` at once. Cast with a fixed-or-bodiless
+   * predicate for a floor -- from inside a capsule an unfiltered ray finds that capsule and calls
+   * its middle the ground.
+   */
+  topHit(x: number, z: number, fromY: number, maxDist: number, filterGroups: number | undefined, include: (c: RAPIER.Collider) => boolean): { y: number; handle: number } | null {
+    const o = this.downRay.origin;
+    o.x = x;
+    o.y = fromY;
+    o.z = z;
+    const hit = this.world.castRay(this.downRay, maxDist, true, undefined, filterGroups, undefined, undefined, include);
+    if (!hit) return null;
+    this.downHit.y = fromY - hit.timeOfImpact;
+    this.downHit.handle = hit.collider.handle;
+    return this.downHit;
+  }
 }

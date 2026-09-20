@@ -36,6 +36,7 @@ import { addPointLight, fillCascades, luminanceOf, resetFxLights, setDirectional
 import { ParticleEffects, type EffectHandle, type EffectSounds } from './particles';
 import { Ambience, type AmbienceContext, type BedRow, type RoomRow } from '../audio/ambience.ts';
 import { OUTSIDE, type SoundSpace } from '../audio/distance.ts';
+import { FOOT_TUNE } from '../audio/footsteps.ts';
 import type { LoopHost } from '../audio/emitters.ts';
 import { loadSpacePack, type SpacePack } from '../space/spaceData.ts';
 import { Nebulae, installNebulaDebug } from '../space/nebulae.ts';
@@ -643,6 +644,56 @@ export class World {
     this.roomRow = this.ambience?.roomRow(def.id, name) ?? null;
     return this.roomRow;
   }
+
+  /**
+   * What a foot lands on, as the world alone can say it: the water over a point, the interior
+   * table's surface for the room it is in, the object template of whatever it is standing on, and
+   * the surface the terrain paints there. The words are none of this file's business -- the sound
+   * side turns the templates into `metal`, `sand` and the rest -- and the whole of it is one kept
+   * object, so nothing is allocated when a foot lands.
+   *
+   * The ray is cast from a little above the foot and keeps only what stands still: from inside a
+   * body's own capsule an unfiltered ray finds that capsule and calls its middle the floor.
+   */
+  readonly footSurfaces = {
+    waterTop: (x: number, z: number): number => {
+      // Lava is water to the terrain and is not to a foot: the lava planet's global sea is hidden
+      // and every one of its tables is lava, so without this a step over a flow reads as wading.
+      if (this.lavaTables.size && this.lavaTables.has(this.terrain?.swg?.waterTableAt(x, z) as SwgWaterTable)) return -Infinity;
+      return this.terrain?.waterHeightAt(x, z) ?? -Infinity;
+    },
+    /**
+     * The room the player is in, from the cell the frame already tracked. The floor is asked for by
+     * itself rather than taken off the bed's own row: `roomRow` steps over a row whose bed the bank
+     * has not got, which is right for the bed and wrong for the floor, since the less specific row it
+     * then falls to has a floor that is not this room's.
+     */
+    playerRoom: (): string | null => {
+      const state = this.cellState;
+      if (!state) return null;
+      const def = state.building.model.def;
+      let name = 'default';
+      for (const c of def.cells ?? []) if (c.index === state.cell) name = c.name;
+      return this.ambience?.roomSurfaceFor(def.id, name) ?? null;
+    },
+    roomSurface: (x: number, y: number, z: number): string | null => {
+      const state = this.layoutStream?.buildingAt(tmpV.set(x, y, z));
+      if (!state) return null;
+      const def = state.building.model.def;
+      let name = 'default';
+      for (const c of def.cells ?? []) if (c.index === state.cell) name = c.name;
+      return this.ambience?.roomSurfaceFor(def.id, name) ?? null;
+    },
+    objectTemplate: (x: number, y: number, z: number, inside: boolean): string | null => {
+      const stream = this.layoutStream;
+      if (!stream) return null;
+      const filter = inside ? groups(Group.all, Group.all & ~(Group.terrain | Group.exterior)) : undefined;
+      const hit = this.physics.topHit(x, z, y + FOOT_TUNE.probe, FOOT_TUNE.reach, filter, World.staticOnly);
+      return hit ? stream.templateOfCollider(hit.handle) : null;
+    },
+    groundTemplate: (x: number, z: number): string | null => this.terrain?.surfaceAt(x, z) ?? null,
+    space: (x: number, y: number, z: number): SoundSpace | null => this.ambience?.sources.spaceAt?.(x, y, z) ?? null,
+  };
 
   /** The pack directory this planet (or zone) loads from. */
   packId = '';

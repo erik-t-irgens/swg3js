@@ -15,6 +15,8 @@ import { SoundBank, planEviction, type SoundIndex } from '../../../src/audio/ban
 import { isSilentPcm, parseWav } from '../../../src/audio/wavWorker.ts';
 import { UI_NO_CALLER, UI_ROWS, UI_THROTTLE, UiSounds, type UiAction } from '../../../src/audio/uiSounds.ts';
 import { AudioSystem, GROUP_OF_CATEGORY, SOUND_GROUPS, type AudioSettings } from '../../../src/audio/audio.ts';
+import { ClipEventIndex, ClipWatcher, crossed, type ActiveClip, type ClipHalf } from '../../../src/audio/clipEvents.ts';
+import { BodySounds, FOOT_TUNE, resolveSurface, sampleFamily, surfaceWord } from '../../../src/audio/footsteps.ts';
 
 let passed = 0;
 const ok = (cond: boolean, msg: string) => {
@@ -44,6 +46,64 @@ const plain = (over: Partial<SoundTemplate> = {}): SoundTemplate => ({
 });
 
 const noVariation = (value: number): Variation => ({ mode: 0, range: [value, value], period: 0, glide: 0 });
+
+// ---- the feet's own fixtures ----
+
+/** One event at a fraction of a clip, in the shape a pack writes. */
+const foot = (f: number) => ({ name: 'footstep', f, kind: 'foot' as const });
+
+/** One action, as a rig reports it; the token is what the watcher remembers it by. */
+const clip = (name: string, half: ClipHalf, time: number, duration: number, weight: number): ActiveClip => ({ name, half, time, duration, timeScale: 1, weight, looping: true, token: { name, half } });
+
+/** A rig or animator that plays one clip, whose time the test moves by hand. */
+class FakeClips {
+  name: string;
+  duration: number;
+  time: number;
+  private readonly token = {};
+  constructor(name: string, duration: number, time: number) {
+    this.name = name;
+    this.duration = duration;
+    this.time = time;
+  }
+  activeClips(out: ActiveClip[]): number {
+    out[0] = { name: this.name, half: 'whole', time: this.time, duration: this.duration, timeScale: 1, weight: 1, looping: true, token: this.token };
+    return 1;
+  }
+}
+
+/** The mixer as the feet use it: every call is written down and nothing makes a sound. */
+class FakeHost {
+  readonly played: { id: string; x?: number; y?: number; z?: number; space?: { building: number; cell: number } }[] = [];
+  readonly loops: { id: string; key: number }[] = [];
+  readonly stopped: number[] = [];
+  readonly moved: { key: number; x: number }[] = [];
+  private next = 1;
+  readonly grid = { isNear: () => true };
+  readonly bank = { available: true, sources: null, template: () => ({}) };
+  play(id: string, options: { x?: number; y?: number; z?: number; space?: { building: number; cell: number } } = {}): number {
+    // The space is a record the caller keeps and refills, so it is copied out rather than held.
+    this.played.push({ id, ...options, space: options.space ? { ...options.space } : undefined });
+    return this.next++;
+  }
+  loop(id: string): number {
+    const key = this.next++;
+    this.loops.push({ id, key });
+    return key;
+  }
+  stop(key: number): void {
+    this.stopped.push(key);
+  }
+  move(key: number, x: number): void {
+    this.moved.push({ key, x });
+  }
+  setGain(): void {}
+  setSpace(): void {}
+  isPlaying(key: number): boolean {
+    return !this.stopped.includes(key);
+  }
+  prepare(): void {}
+}
 
 // ---- distance: the one number the game gives, and everything past it that is ours ----
 {
@@ -676,6 +736,356 @@ const noVariation = (value: number): Variation => ({ mode: 0, range: [value, val
   const settings: AudioSettings = { soundMaster: 1, soundAmbience: 1, soundEffects: 1, soundVoices: 1, soundFootsteps: 1, soundVehicles: 1, soundInterface: 1, soundMusic: 1, soundHeadphones: false, soundRoomEcho: false, soundInBackground: false, soundSabers: 'jka' };
   const result = await new AudioSystem('', settings).selfTest();
   ok(result.ok === false && typeof result.why === 'string', 'where there is no offline context the self test says so plainly instead of throwing or reading as a broken chain');
+}
+
+// ================================ feet, surfaces and voices ================================
+// A clip's own event markers read against a playing action, and what a foot landing is taken to
+// have landed on. Both are pure: the mistakes they can make are silent feet, doubled feet and a
+// step on the wrong surface, and all three read as numbers here.
+
+// ---- which events a step over a clip crossed ----
+{
+  const hits: number[] = [];
+  const events = [foot(0.1), foot(0.6)];
+  ok(crossed(events, 0, 0.5, 1, true, false, hits) === 1 && hits[0] === 0, 'a step forwards crosses the events inside it');
+  ok(crossed(events, 0.5, 0.5, 1, true, false, hits) === 0, 'a frame of no length crosses nothing, so a paused game never steps');
+  ok(crossed(events, 0.1, 0.6, 1, true, false, hits) === 1 && hits[0] === 1, 'the span is open at the start and closed at the end, so an event on a frame boundary fires once rather than twice');
+  ok(crossed(events, 0.8, 0.2, 1, true, false, hits) === 1 && hits[0] === 0, "a loop's wrap crosses the end and then the beginning");
+  ok(crossed(events, 0.8, 0.7, 1, true, false, hits) === 2 && hits[0] === 0 && hits[1] === 1, 'and a whole turn round the loop crosses both, in the order they happen');
+  ok(crossed(events, 0.7, 0.05, 1, false, false, hits) === 0, 'an action started again from nothing fires only what it has passed since');
+  ok(crossed(events, 0.5, 0.05, 1, true, true, hits) === 1 && hits[0] === 0, 'played backwards it crosses the same marks the other way');
+  // A clip the pack scaled in time: the marks are fractions, so they land at the same share of it.
+  ok(crossed(events, 0, 0.3, 2, true, false, hits) === 1, 'a clip of twice the length steps at the same fraction of it, not at the same second');
+  ok(crossed(events, 0, 1, 0, true, false, hits) === 0, 'a clip with no length says nothing rather than throwing');
+  // A clip shorter than a second: the ends of a wrap are fractions, so the far end is 1 and never
+  // the duration in seconds. Read as seconds, every mark past the duration was dropped, and 712 of
+  // the 2,350 clips in the first sixty animation packs are shorter than a second.
+  const short = [foot(0.2), foot(0.95)];
+  ok(crossed(short, 0.45, 0.15, 0.5, true, false, hits) === 2 && hits[0] === 1 && hits[1] === 0, 'a looping clip shorter than a second crosses the marks near its end, which are fractions of it and not seconds');
+  ok(crossed(short, 0.15, 0.45, 0.5, true, true, hits) === 2, 'and the same the other way round, played backwards');
+  // A mark written on the very first frame.
+  const first = [foot(0), foot(0.5)];
+  ok(crossed(first, 0.9, 0.1, 1, true, false, hits) === 1 && hits[0] === 0, 'a mark on the first frame is crossed once each time round the loop rather than never');
+  ok(crossed(first, 0.1, 0.6, 1, true, false, hits) === 1 && hits[0] === 1, 'and not again in the middle of the same turn');
+}
+
+// ---- the pack, in the shape the converter writes ----
+{
+  const index = new ClipEventIndex();
+  index.adopt({
+    format: 1,
+    clips: { 'appearance/animation/all_b_loc_run.ans': { frames: 20, fps: 30, events: [{ name: 'event_footstep', frame: 2, f: 0.1 }, { name: 'event_vocalize', frame: 10, f: 0.5 }] } },
+    jka: { clips: { BOTH_RUN2: { frames: 24, fps: 20, upper: [{ type: 'voice', voice: 'pain25', frame: 3, f: 0.125, chance: 1 }], lower: [{ type: 'footstep', foot: 'l', heavy: false, chance: 1, frame: 8, f: 0.333 }] } } },
+    species: { tables: { 'appearance/all_b.lat': { run: 'appearance/animation/all_b_loc_run.ans' } }, species: { human_male: { template: 'object/creature/player/shared_human_male.iff', table: 'appearance/all_b.lat', clientData: 'clientdata/player/client_shared_player_human_m.cdf' } } },
+    mobiles: { 'object/mobile/shared_bantha.iff': 'clientdata/creature/client_shared_cr_bantha.cdf' },
+  });
+  const own = index.eventsFor('appearance/animation/all_b_loc_run.ans', 'whole', null);
+  ok(own?.length === 2 && own[0].kind === 'foot' && own[0].name === 'footstep', "a mobile's clip is found by the animation it was baked from, and the event_ prefix is taken off for the client data lookup");
+  ok(index.eventsFor('run', 'whole', 'human_male')?.length === 2, "a species clip is found by name through its own animation table, which the species packs do not carry");
+  ok(index.eventsFor('run', 'whole', 'wookiee_male') === null, 'and a species with no table of its own finds nothing rather than another skeleton’s clip');
+  const lower = index.eventsFor('BOTH_RUN2', 'lower', null);
+  ok(lower?.length === 1 && lower[0].kind === 'foot', "Jedi Academy's legs block gives the feet");
+  const upper = index.eventsFor('BOTH_RUN2', 'upper', null);
+  ok(upper?.length === 1 && upper[0].kind === 'voice' && upper[0].name === '*pain25', 'its torso block gives the voice lines, which are the character’s own set rather than a file');
+  const whole = index.eventsFor('BOTH_RUN2', 'whole', null);
+  ok(whole?.length === 2 && whole[0].f < whole[1].f, 'and a clip played over the whole body speaks both blocks, in order, so a death’s cry is not lost under its own footsteps');
+  ok(index.clientDataForSpecies('human_male') === 'clientdata/player/client_shared_player_human_m.cdf', 'the species map says which client data a body speaks from');
+  ok(index.clientDataForTemplate('object/mobile/shared_bantha.iff') === 'clientdata/creature/client_shared_cr_bantha.cdf', 'and the mobile map does the same for a creature, which only its template chain could say');
+}
+
+// ---- which action speaks ----
+{
+  const index = new ClipEventIndex();
+  index.adopt({ clips: { walk: { events: [{ name: 'event_footstep', f: 0.5 }] }, run: { events: [{ name: 'event_footstep', f: 0.5 }] }, swing: { events: [{ name: 'event_attackheavy', f: 0.5 }] } } });
+  const watcher = new ClipWatcher();
+  const heard: string[] = [];
+  const sink = (e: { name: string }, c: { name: string }) => heard.push(`${c.name}:${e.name}`);
+  // A walk blending into a run: both carry the same foot event at the same fraction.
+  const walk = clip('walk', 'whole', 0.4, 1, 0.55);
+  const run = clip('run', 'whole', 0.4, 1, 0.45);
+  watcher.step([walk, run], 2, index, null, sink);
+  walk.time = 0.6;
+  run.time = 0.6;
+  watcher.step([walk, run], 2, index, null, sink);
+  ok(heard.length === 1 && heard[0] === 'walk:footstep', 'a body blending a walk into a run steps once, from whichever of the two carries the weight');
+  heard.length = 0;
+  // The same clip as the legs' half, with a swing riding the upper body.
+  const legs = clip('run', 'lower', 0.4, 1, 1);
+  const swing = clip('swing', 'upper', 0.4, 1, 1);
+  watcher.step([legs, swing], 2, index, null, sink);
+  legs.time = 0.6;
+  swing.time = 0.6;
+  watcher.step([legs, swing], 2, index, null, sink);
+  ok(heard.includes('run:footstep') && heard.includes('swing:attackheavy'), 'the legs step and the torso speaks, which is how the player’s body plays its two halves');
+  heard.length = 0;
+  // An upper half never steps, however heavy it is.
+  const upperWalk = clip('walk', 'upper', 0.4, 1, 1);
+  watcher.step([upperWalk], 1, index, null, sink);
+  upperWalk.time = 0.6;
+  watcher.step([upperWalk], 1, index, null, sink);
+  ok(heard.length === 0, 'a clip riding the upper body alone never puts a foot down');
+  heard.length = 0;
+  // A pose fading out does not grunt on its way.
+  const faint = clip('swing', 'whole', 0.4, 1, 0.2);
+  watcher.step([faint], 1, index, null, sink);
+  faint.time = 0.6;
+  watcher.step([faint], 1, index, null, sink);
+  ok(heard.length === 0, 'an action under half the weight speaks nothing but its feet');
+  heard.length = 0;
+  // A new action, and one met again after the body was out of range, pick their clock up in silence.
+  const fresh = clip('walk', 'whole', 0.9, 1, 1);
+  watcher.step([fresh], 1, index, null, sink);
+  ok(heard.length === 0, 'an action met for the first time speaks nothing: its clock is picked up where it stands');
+  fresh.time = 0.1;
+  watcher.forget();
+  watcher.step([fresh], 1, index, null, sink);
+  ok(heard.length === 0, 'and a body that walked out of earshot and back fires nothing for the steps it took meanwhile');
+  // A jump across most of the clip is not believed.
+  heard.length = 0;
+  const jumpy = clip('walk', 'whole', 0.01, 1, 1);
+  watcher.step([jumpy], 1, index, null, sink);
+  jumpy.time = 0.99;
+  watcher.step([jumpy], 1, index, null, sink);
+  ok(heard.length === 0 && watcher.counts.skippedBigStep === 1, 'a frame that crossed most of a clip (a tab that was away) moves the clock on without firing');
+}
+
+// ---- what a foot lands on ----
+{
+  // The planet's pack names only what has a surface of its own; everything else answers nothing.
+  const names = { object: (t: string) => (t === 'catwalk' ? 'wood' : t === 'plaza' ? 'stone' : null), ground: (t: string) => surfaceWord(t, { 'abstract/terrain_surface/sand.iff': { type: 'sand' } }) };
+  const world = {
+    water: -Infinity,
+    room: null as string | null,
+    object: null as string | null,
+    ground: 'abstract/terrain_surface/sand.iff' as string | null,
+    waterTop(): number {
+      return this.water;
+    },
+    roomSurface(): string | null {
+      return this.room;
+    },
+    objectTemplate(): string | null {
+      return this.object;
+    },
+    groundTemplate(): string | null {
+      return this.ground;
+    },
+    space(): null {
+      return null;
+    },
+  };
+  const at = (over: Partial<{ inside: boolean; player: boolean; last: string | null; deck: string | null; y: number }> = {}) => resolveSurface({ x: 0, y: over.y ?? 0, z: 0, inside: over.inside ?? false, player: over.player ?? true, last: over.last ?? null, deck: over.deck ?? null }, world, names, FOOT_TUNE);
+  ok(at().surface === 'sand' && at().from === 'terrain', 'in the open it is whatever the terrain is painted with there');
+  world.object = 'catwalk';
+  ok(at().surface === 'wood' && at().from === 'object', 'standing on something, that thing’s own template decides: a catwalk is wood over sand');
+  world.object = 'plaza';
+  ok(at().surface === 'stone' && at().from === 'object', 'and a paved one is stone, which the pack names outright');
+  world.object = 'a_rock';
+  ok(at().surface === 'sand' && at().from === 'terrain', 'an object the planet’s pack does not name has no surface of its own, which is the converter’s rule: the ground underneath answers, so a rock in the desert is sand');
+  world.object = null;
+  world.room = 'carpet';
+  ok(at().surface === 'sand' && at({ inside: true }).surface === 'carpet', 'a room’s own surface is used only for a body that is in one');
+  // The player's room is the cell the game already tracks; everything else asks by the point.
+  ok(at({ inside: true, player: true }).surface === 'carpet', 'without a tracked cell the player falls back on the room the point is in');
+  const tracked = { ...world, playerRoom: () => 'metal' };
+  ok(resolveSurface({ x: 0, y: 0, z: 0, inside: true, player: true, last: null, deck: null }, tracked, names, FOOT_TUNE).surface === 'metal', 'and with one it takes that room’s floor rather than working the point out again');
+  ok(resolveSurface({ x: 0, y: 0, z: 0, inside: true, player: false, last: null, deck: null }, tracked, names, FOOT_TUNE).surface === 'carpet', 'a body that is not the player never takes the player’s room');
+  ok(at({ inside: true, deck: 'metal' }).surface === 'metal', 'and a ship’s deck is handed in, since its rooms are a physics world of their own');
+  world.water = 0.4;
+  ok(at({ player: true }).surface === 'water' && at({ player: false }).surface === 'surf', 'feet under water splash: the player wades and everything else surfs, which is what each one’s own map holds');
+  ok(at({ inside: true }).surface === 'water', 'water wins over the room, so wading through a flooded cellar still splashes');
+  world.water = 2;
+  ok(at().surface === null && at().from === 'water', 'chest deep it is swimming, which has a voice of its own and no feet at all');
+  world.water = -Infinity;
+  world.ground = null;
+  ok(at({ last: 'rock' }).surface === 'rock' && at({ last: 'rock' }).from === 'last', 'off the built ground it keeps whatever it last stood on');
+  ok(at().surface === FOOT_TUNE.fallback && at().from === 'default', 'and with nothing at all to go on it falls back on one surface rather than going silent');
+  ok(surfaceWord('abstract/terrain_surface/snow.iff', null) === 'snow', 'a surface template with no table to read it by is named after its own file');
+}
+
+// ---- the ground's own family grid, as a chunk built it ----
+{
+  // A chunk at (0, 0), 64 m across, sampled every 2 m, with one sample of overhang on each side.
+  const w = 35;
+  const fams = new Int32Array(w * w);
+  const put = (i: number, j: number, v: number) => (fams[j * w + i] = v);
+  put(1, 1, 7); // the chunk's first corner, at (0, 0)
+  put(6, 3, 9); // (10, 4)
+  const grid = { fams, ox: 0, oz: 0, step: 2, w };
+  ok(sampleFamily(grid, 0, 0) === 7, "a chunk's first corner reads the sample the ground was painted from");
+  ok(sampleFamily(grid, 10.8, 4.4) === 9 && sampleFamily(grid, 9.4, 3.2) === 9, 'a point between samples takes the nearest, as the ground does');
+  ok(sampleFamily(grid, 200, 0) === null && sampleFamily(grid, 0, -40) === null, 'a point the grid does not cover has no answer at all, so the foot keeps what it last stood on');
+  ok(sampleFamily(grid, 30, 30) === 0, 'and one it covers but nothing painted is family 0, which is a surface of none rather than a missing chunk');
+}
+
+// ---- a body walking, from its clips to the mixer ----
+{
+  const host = new FakeHost();
+  const feet = new BodySounds(host as never, '');
+  feet.adoptEvents({
+    clientData: {
+      'clientdata/player/client_shared_player_human_m.cdf': { events: { footstep: 'clienteffect/e3_player_footstep.cef', footstep_sand: 'sound/fs_out_sand_crunch.snd', footstep_metal: 'sound/fs_in_metal_floor.snd', hitlight: 'sound/voice_hum_m_light.snd' } },
+      'clientdata/creature/client_shared_cr_bantha.cdf': { events: { footstep: 'clienteffect/cr_footstep_large.cef', vocalize: 'sound/cr_bantha_vocalize.snd', hitground: 'sound/cr_bantha_fall.snd' }, ambient: 'sound/cr_bantha_idle_breathe.snd' },
+    },
+    clientEffects: { 'clienteffect/e3_player_footstep.cef': { sounds: ['sound/fs_out_sand_crunch.snd'] }, 'clienteffect/cr_footstep_large.cef': { sounds: ['sound/cr_generic_large_fs_walk.snd'] }, 'clienteffect/e3_creature_footstep_small.cef': { sounds: ['sound/cr_generic_small_fs_walk.snd'] } },
+  });
+  feet.index.adopt({
+    clips: { 'appearance/animation/all_b_loc_run.ans': { events: [{ name: 'event_footstep', f: 0.5 }] }, 'appearance/animation/bantha_walk.ans': { events: [{ name: 'event_footstep', f: 0.5 }] } },
+    species: { tables: { table: { run: 'appearance/animation/all_b_loc_run.ans' } }, species: { human_male: { template: 'object/creature/player/shared_human_male.iff', table: 'table', clientData: 'clientdata/player/client_shared_player_human_m.cdf' }, bothan_male: { template: 'object/creature/player/shared_bothan_male.iff', table: 'table', clientData: 'clientdata/player/client_shared_player_human_m.cdf' } } },
+    mobiles: { 'object/mobile/shared_bantha.iff': 'clientdata/creature/client_shared_cr_bantha.cdf' },
+  });
+  const ground = { surface: 'abstract/terrain_surface/sand.iff' as string | null };
+  feet.setSurfaceTable({ 'abstract/terrain_surface/sand.iff': { type: 'sand' } });
+  feet.attachWorld({
+    waterTop: () => -Infinity,
+    roomSurface: () => null,
+    objectTemplate: () => null,
+    groundTemplate: () => ground.surface,
+    space: () => null,
+  });
+  const rig = new FakeClips('run', 1, 0.4);
+  const player = { x: 0, y: 0, z: 0, inside: false, deck: null as string | null, space: null as { building: number; cell: number } | null, dead: false, species: 'human_male', activeClips: (out: ActiveClip[]) => rig.activeClips(out) };
+  const lists = { player, mobiles: [] as never[], fighters: [] as never[] };
+  const ear = { x: 0, y: 0, z: 0 };
+  feet.update(1 / 60, ear, lists);
+  rig.time = 0.6;
+  feet.update(1 / 60, ear, lists);
+  ok(host.played.length === 1 && host.played[0].id === 'sound/fs_out_sand_crunch.snd', 'the player walking on sand plays the sand step its own species names');
+  ok(feet.log.at(-1)?.from === 'terrain' && feet.log.at(-1)?.surface === 'sand', 'and the report says which of the four sources decided it');
+  // The same walk indoors on a metal floor.
+  host.played.length = 0;
+  feet.attachWorld({ waterTop: () => -Infinity, roomSurface: () => 'metal', objectTemplate: () => null, groundTemplate: () => ground.surface, space: () => null });
+  player.inside = true;
+  rig.time = 0.4;
+  feet.update(1 / 60, ear, lists);
+  rig.time = 0.6;
+  feet.update(1 / 60, ear, lists);
+  ok(host.played.at(-1)?.id === 'sound/fs_in_metal_floor.snd', 'the same body on a room’s metal floor plays its metal step');
+  // Aboard a hull there is no streamed building at the point, so the game hands the space over: a
+  // step that came out as "outside" would be low-passed while the ear was inside the hull.
+  host.played.length = 0;
+  player.deck = 'metal';
+  player.space = { building: 12, cell: -1 };
+  rig.time = 0.4;
+  feet.update(1 / 60, ear, lists);
+  rig.time = 0.6;
+  feet.update(1 / 60, ear, lists);
+  ok(host.played.at(-1)?.space?.building === 12, 'a step taken aboard a hull is played in that hull’s own space, so the mixer does not muffle the player’s own boots');
+  player.deck = null;
+  player.space = null;
+  // A Bothan: the archives give it no client data of its own and its template names the human files.
+  host.played.length = 0;
+  player.species = 'bothan_male';
+  player.inside = false;
+  rig.time = 0.4;
+  feet.update(1 / 60, ear, lists);
+  rig.time = 0.6;
+  feet.update(1 / 60, ear, lists);
+  ok(host.played.at(-1)?.id === 'sound/fs_out_sand_crunch.snd', 'a Bothan, which has no client data of its own, walks on the human files its template names');
+  // A creature: one footstep effect for every surface, as the game had it.
+  host.played.length = 0;
+  lists.player = null as never;
+  const anim = new FakeClips('appearance/animation/bantha_walk.ans', 1, 0.4);
+  const bantha = { key: 7, label: 'bantha', dead: false, removed: false, ready: true, state: 'idle', inside: false, scale: 1, pos: { x: 2, y: 0, z: 0 }, entry: { id: 'bantha', template: 'object/mobile/shared_bantha.iff', kind: 'creature', appearance: 'bantha', stats: { sizeClass: 'large' } }, animator: anim, animPack: { id: 'bantha', json: { clips: [] } } };
+  (lists as { mobiles: unknown[] }).mobiles = [bantha];
+  feet.update(0.3, ear, lists);
+  anim.time = 0.6;
+  feet.update(1 / 60, ear, lists);
+  ok(host.played.some((p) => p.id === 'sound/cr_generic_large_fs_walk.snd'), 'a creature steps with its size’s own effect, whatever it is walking on');
+  ok(host.loops.some((l) => l.id === 'sound/cr_bantha_idle_breathe.snd'), 'and its idle breath is a looping voice at the body, which the emitter grid looks at four times a second');
+  // It turns hostile: it calls out, and goes on calling while it hunts.
+  host.played.length = 0;
+  bantha.state = 'chase';
+  feet.update(0.3, ear, lists);
+  feet.update(FOOT_TUNE.call[1] + 1, ear, lists);
+  ok(host.played.some((p) => p.id === 'sound/cr_bantha_vocalize.snd'), 'a creature that has turned on something calls out while it hunts');
+  // It dies: the fall plays once, and its loop goes.
+  host.played.length = 0;
+  bantha.dead = true;
+  // In frames, not in one jump: the update clamps a step to a quarter second, as the game's own
+  // frame does, so a test that asked for a whole second at once would move the clock by a quarter.
+  for (let i = 0; i < 8; i++) feet.update(0.2, ear, lists);
+  ok(host.played.filter((p) => p.id === 'sound/cr_bantha_fall.snd').length === 1, 'a death hits the ground once, since its own clip marked no fall');
+  ok(host.stopped.length >= 1, 'and the body’s idle breath is let go with it');
+  // A death whose own clip marks the thud: the mark plays it and the timer is dropped, so a fall
+  // marked late in a long clip is not heard twice.
+  {
+    const marked = new BodySounds(host as never, '');
+    marked.adoptEvents({ clientData: { 'clientdata/creature/client_shared_cr_bantha.cdf': { events: { hitground: 'sound/cr_bantha_fall.snd' } } } });
+    marked.index.adopt({ clips: { 'appearance/animation/bantha_death.ans': { events: [{ name: 'event_hitground', f: 0.9 }] } }, mobiles: { 'object/mobile/shared_bantha.iff': 'clientdata/creature/client_shared_cr_bantha.cdf' } });
+    marked.attachWorld({ waterTop: () => -Infinity, roomSurface: () => null, objectTemplate: () => null, groundTemplate: () => null, space: () => null });
+    const death = new FakeClips('appearance/animation/bantha_death.ans', 4, 0.1);
+    const body = { ...bantha, dead: false, state: 'idle', animator: death };
+    const only = { player: null, mobiles: [body], fighters: [] };
+    host.played.length = 0;
+    marked.update(1 / 60, ear, only as never);
+    body.dead = true;
+    for (let i = 0; i < 12; i++) {
+      death.time = Math.min(3.9, death.time + 0.2 * 4);
+      marked.update(0.2, ear, only as never);
+    }
+    ok(host.played.filter((p) => p.id === 'sound/cr_bantha_fall.snd').length === 1, 'a death clip that marks its own thud plays it once, from the mark and not from the timer as well');
+  }
+  const status = feet.status() as { counts: { steps: number; stepsPlayed: number } };
+  ok(status.counts.steps >= 4 && status.counts.stepsPlayed >= 4, 'every step counted was a step that reached the mixer, which is how feet are checked in a tab that can hear nothing');
+}
+
+// ---- which client data a body speaks from, and what it does when there is none ----
+{
+  const host = new FakeHost();
+  const feet = new BodySounds(host as never, '');
+  feet.adoptEvents({
+    clientData: {
+      'clientdata/npc/client_shared_npc_dressed_ackbar.cdf': { events: { footstep: 'sound/fs_person.snd', vocalize: 'sound/v_ackbar.snd' } },
+      'clientdata/player/client_shared_player_human_m.cdf': { events: { footstep: 'sound/fs_human.snd', hitlight: 'sound/v_human_hurt.snd' } },
+    },
+    clientEffects: { 'clienteffect/e3_creature_footstep_medium.cef': { sounds: ['sound/fs_medium.snd'] } },
+  });
+  feet.index.adopt({ clips: { walk: { events: [{ name: 'event_footstep', f: 0.5 }] } } });
+  feet.attachWorld({ waterTop: () => -Infinity, roomSurface: () => null, objectTemplate: () => null, groundTemplate: () => null, space: () => null });
+  const ear = { x: 0, y: 0, z: 0 };
+  const body = (id: string, kind: string, template: string) => ({ key: 2, label: id, dead: false, removed: false, ready: true, state: 'idle', inside: false, scale: 1, pos: { x: 0, y: 0, z: 0 }, entry: { id, template, kind, appearance: null, stats: { sizeClass: 'medium' } }, animator: new FakeClips('walk', 1, 0.4), animPack: null });
+  const walk = (feet2: BodySounds, b: ReturnType<typeof body>) => {
+    const lists = { player: null, mobiles: [b], fighters: [] };
+    feet2.update(1 / 60, ear, lists as never);
+    b.animator.time = 0.6;
+    feet2.update(1 / 60, ear, lists as never);
+  };
+  // A dressed NPC: the archives put it under `clientdata/npc/` with the `npc_dressed_` prefix, and
+  // leaving that folder out sent 2,117 of the catalogue's 2,888 dressed bodies to the human files.
+  walk(feet, body('ackbar', 'npc', 'object/mobile/shared_ackbar.iff'));
+  ok(host.played.some((p) => p.id === 'sound/fs_person.snd'), 'a dressed NPC is found in the npc folder under the prefix the archives use, rather than falling back on the human files');
+  // A droid with nothing of its own: its size's step, and no voice at all.
+  host.played.length = 0;
+  const droids = new BodySounds(host as never, '');
+  droids.adoptEvents({ clientData: { 'clientdata/player/client_shared_player_human_m.cdf': { events: { footstep: 'sound/fs_human.snd', hitground: 'sound/v_human_die.snd' } } }, clientEffects: { 'clienteffect/e3_creature_footstep_medium.cef': { sounds: ['sound/fs_medium.snd'] } } });
+  droids.index.adopt({ clips: { walk: { events: [{ name: 'event_footstep', f: 0.5 }] } } });
+  droids.attachWorld({ waterTop: () => -Infinity, roomSurface: () => null, objectTemplate: () => null, groundTemplate: () => null, space: () => null });
+  const droid = body('a_droid', 'droid', 'object/mobile/shared_a_droid.iff');
+  walk(droids, droid);
+  ok(host.played.some((p) => p.id === 'sound/fs_medium.snd') && !host.played.some((p) => p.id === 'sound/fs_human.snd'), 'a droid with no client data of its own steps with its size’s effect rather than borrowing a man’s boots');
+  // The search is run once per body, not once per event: the sentinel is what makes `noData` a
+  // count of speechless bodies and keeps the twenty guesses off every frame.
+  for (let i = 0; i < 6; i++) walk(droids, droid);
+  const counts = (droids.status() as { counts: { noData: number } }).counts;
+  ok(counts.noData === 1, 'a body whose client data was not found remembers that it was not, so the guess list runs once and the count is of bodies rather than of lookups');
+}
+
+// ---- a fighter only calls out when it has something to fight ----
+{
+  const host = new FakeHost();
+  const feet = new BodySounds(host as never, '');
+  feet.adoptEvents({ clientData: { 'clientdata/player/client_shared_player_human_m.cdf': { events: { vocalize: 'sound/v_shout.snd' } } }, species: { 'object/creature/player/shared_human_male.iff': 'clientdata/player/client_shared_player_human_m.cdf' } });
+  feet.index.adopt({ clips: {} });
+  feet.attachWorld({ waterTop: () => -Infinity, roomSurface: () => null, objectTemplate: () => null, groundTemplate: () => null, space: () => null });
+  const ear = { x: 0, y: 0, z: 0 };
+  const fighter = { key: 3, name: 'a fighter', dead: false, hunting: false, species: 'human_male', pos: { x: 0, y: 0, z: 0 }, cell: null, rig: null };
+  const lists = { player: null, mobiles: [], fighters: [fighter] };
+  for (let i = 0; i < 5; i++) feet.update(0.25, ear, lists as never);
+  ok(host.played.length === 0, 'a fighter standing about with nothing to fight never calls out');
+  fighter.hunting = true;
+  feet.update(0.25, ear, lists as never);
+  ok(host.played.some((p) => p.id === 'sound/v_shout.snd'), 'and one that has turned on something calls out at once');
 }
 
 console.log(`\n${passed} checks passed`);

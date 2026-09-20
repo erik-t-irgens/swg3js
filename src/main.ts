@@ -100,9 +100,12 @@ import type { Vehicle, VehicleKind } from './vehicles/vehicle';
 import { HEAD_TO_EYE, SEATED_EYE_FALLBACK, SEAT_RULE, cockpitYawStep, frameFileName, mirroredOffset, seatDropUsed } from './vehicles/cockpitSeat';
 import { World } from './world/world';
 import { AudioSystem, type ListenerPose } from './audio/audio.ts';
-import { OUTSIDE } from './audio/distance.ts';
+import { OUTSIDE, type SoundSpace } from './audio/distance.ts';
 import type { AmbienceTune } from './audio/ambience.ts';
 import type { WorldSourceTune } from './audio/emitters.ts';
+import { BodySounds, type BodyLists, type FootTune, type PlayerBody } from './audio/footsteps.ts';
+import { CLIP_EVENT_TUNE, type ClipEventTune } from './audio/clipEvents.ts';
+import { FAMILY_TUNE } from './world/terrain';
 import { RoomAir, type RoomAirDebugOptions, type RoomAirInput } from './world/roomAir';
 import { RANGE } from './world/gallery';
 import { castsShadow, surfaces } from './world/surfaces';
@@ -146,6 +149,8 @@ const stats = { frameMs: 0, physicsMs: 0, renderMs: 0, rawDt: 0, grounded: false
 const tmp = new THREE.Vector3();
 const tmpQ = new THREE.Quaternion();
 const roomLightSpots: import('./vehicles/interior').RoomLight[] = [];
+/** Handed to the feet where a manager has no list yet, so no frame makes an empty array of its own. */
+const EMPTY_BODIES: readonly never[] = [];
 /** The fighters' glows the pool is asked for when the effects do not light the blades: the nearest two, within 25 m of the camera. */
 const FIGHTER_GLOW_RANGE = 25;
 const npcGlow: FighterGlow[] = [0, 1].map(() => ({ pos: new THREE.Vector3(), color: 0, d2: 0 }));
@@ -380,6 +385,30 @@ class App {
    * suspended and unlocked on the first press, as browsers require.
    */
   private readonly audio: AudioSystem;
+  /**
+   * Feet and voices: what every body's own animation marks, what it is standing on, and the sounds
+   * its client data gives it. Made with the mixer and handed the world's surfaces once there is a
+   * world; it reads the lists below and nothing in the world knows it exists.
+   */
+  private readonly feet: BodySounds;
+  /** The player as the feet see it, refilled each frame rather than made. */
+  private readonly footPlayer: PlayerBody = {
+    x: 0,
+    y: 0,
+    z: 0,
+    inside: false,
+    deck: null,
+    space: null,
+    dead: false,
+    species: '',
+    activeClips: (out) => this.player.rig?.activeClips(out) ?? 0,
+  };
+  /** The three lists handed over each frame; the arrays are the managers' own. */
+  private readonly footBodies: BodyLists = { player: null, mobiles: [], fighters: [] };
+  /** The planet the feet were last told about, so a travel hands them the new one. */
+  private feetPack = '';
+  /** The bank's own tables the feet were last given, so the surface table is handed over once. */
+  private feetTables: object | null = null;
   /** The listener handed to the mixer each frame, refilled rather than made. */
   private readonly listenerPose: ListenerPose = { x: 0, y: 0, z: 0, fx: 0, fy: 0, fz: -1, ux: 0, uy: 1, uz: 0, space: { building: OUTSIDE.building, cell: OUTSIDE.cell } };
   private readonly listenerDir = new THREE.Vector3();
@@ -419,6 +448,10 @@ class App {
     // catches. Until then the beds keep their own clocks and come in where they have reached.
     this.audio = new AudioSystem(import.meta.env.BASE_URL, S);
     this.audio.install();
+    // The clip events and every body's client data, fetched once and never awaited: until they
+    // land nothing has feet, which is what a game with no sound pack does anyway.
+    this.feet = new BodySounds(this.audio, import.meta.env.BASE_URL);
+    this.feet.load();
     this.renderer.setPixelRatio(S.renderScale);
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.renderer.shadowMap.enabled = S.shadows;
@@ -442,6 +475,9 @@ class App {
     // particle effects name. The numbering of buildings and boarded hulls is this class's, so that a
     // sound and the ear agree on what counts as the same room.
     this.world.attachAudio(this.audio, (of) => this.spaceIdOf(of));
+    // Where the feet ask what they have landed on: the water, the room, the thing stood on and the
+    // ground, all of which only the world can say.
+    this.feet.attachWorld(this.world.footSurfaces);
     // The lava tables World loads go to the heat haze from here on.
     this.world.heat = this.heat;
     // Plumes the heat haze draws, asked for once a frame from inside the effects chain (after the
@@ -1356,6 +1392,44 @@ class App {
        * `audio().state` is only an unlock, which this does not need.
        */
       audioSelfTest: () => this.audio.selfTest(),
+      /**
+       * Feet and voices, headless: the last foot events with the clip that marked each, what the
+       * foot was taken to have landed on and which of the four sources said so (water, room,
+       * object, terrain), the sound that was chosen and whether it got a voice; then which bodies
+       * are being watched, which client data each speaks from, and how many events have been
+       * crossed at all. `footsteps(n)` prints the last n as a table.
+       *
+       * With an object it tunes, live, every invented number of its kind: the watching range
+       * (`range`), the idle loops' range (`loopRange`), the wading depths (`wade`, `swim`), the
+       * ray that finds what is stood on (`probe`, `reach`, which the world reads from the same
+       * object), the hunting call's spread (`call`), the fall after a death (`deathFall`) and the
+       * default surface (`fallback`); the clip reader's own three (`maxStep`, `speakWeight`,
+       * `footWeight`); and how many chunks' ground families are kept (`familyChunks`, reported
+       * beside it as `ground`). A key named in none of the three is said rather than dropped.
+       */
+      footsteps: (n = 12, opts: Partial<FootTune & ClipEventTune & typeof FAMILY_TUNE> = {}) => {
+        const unknown: string[] = [];
+        for (const [key, value] of Object.entries(opts)) {
+          if (key in this.feet.tune) (this.feet.tune as unknown as Record<string, unknown>)[key] = value;
+          else if (key in CLIP_EVENT_TUNE) (CLIP_EVENT_TUNE as unknown as Record<string, unknown>)[key] = value;
+          else if (key in FAMILY_TUNE) (FAMILY_TUNE as unknown as Record<string, unknown>)[key] = value;
+          else unknown.push(key);
+        }
+        if (unknown.length) console.warn(`footsteps: nothing here is tuned by ${unknown.join(', ')}`);
+        const log = this.feet.log.slice(-Math.max(1, n));
+        console.table(log);
+        return { ...this.feet.status(), ground: { familyChunksHeld: this.inWorld ? this.world.terrain.familyChunks : 0, familyChunks: FAMILY_TUNE.familyChunks }, recent: log };
+      },
+      /**
+       * What is under a point right now and which of the four sources says so: with no argument the
+       * player's own feet, else a point. This is how a surface that sounds wrong is tracked down --
+       * it names the room's row, the object template under the foot and the terrain's own surface
+       * template, so the answer can be told from the data it came from.
+       */
+      surface: (at?: [number, number, number]) => {
+        const p = at ? { x: at[0], y: at[1], z: at[2] } : this.player.worldPos;
+        return this.feet.probe(p.x, p.y, p.z, at ? this.world.inside : this.world.inside || !!this.player.aboard);
+      },
       /** The saber system's state: style, current move, chain count, whether the rig has Jedi Academy's clips, the special jump in progress, and the thrown saber's flight. */
       saber: () => ({ blade: (() => { const a = new THREE.Vector3(); const b = new THREE.Vector3(); this.player.bladeSegmentAt(0, a, b); return { hilt: a.toArray().map((v) => Number(v.toFixed(3))), tip: b.toArray().map((v) => Number(v.toFixed(3))) }; })(), blade2: (() => { if (this.player.bladeCount < 2) return null; const a = new THREE.Vector3(); const b = new THREE.Vector3(); this.player.bladeSegmentAt(1, a, b); return { hilt: a.toArray().map((v) => Number(v.toFixed(3))), tip: b.toArray().map((v) => Number(v.toFixed(3))) }; })(), style: this.player.saber.style, move: this.player.saber.move, chain: this.player.saber.chainCount, timer: Number(this.player.saber.timer.toFixed(2)), jkaClips: this.player.hasJkaClips, on: this.player.saberOn, special: this.player.jka.specialJump, thrown: this.player.thrown.inFlight ? { returning: this.player.thrown.returning, at: this.player.thrown.pos.toArray().map((v) => Number(v.toFixed(2))) } : null }),
       /** Particle effects within r metres of the player: file, distance, whether playing, live particles. With `verbose`, every emitter: texture, blend, whether the texture loaded, and the first particle's size, alpha, colour and screen position. */
@@ -1408,6 +1482,10 @@ class App {
             this.physics.step(dt);
             this.effects.update(dt);
             this.updateCamera(null);
+            // The feet step with the simulation: the mixer is recording rather than playing, so a
+            // helper can count the steps a walk took without the tab bursting into noise.
+            const eye = this.cam.camera.position;
+            this.stepFeet(dt, eye.x, eye.y, eye.z);
             this.input.endFrame();
           }
         } finally {
@@ -2847,8 +2925,106 @@ class App {
     // walking into a cantina crossfades the street away rather than cutting it off at the door.
     this.world.listenerSpace.building = pose.space.building;
     this.world.listenerSpace.cell = pose.space.cell;
+    // Feet and voices before the mixer's own step, so a step that lands this frame is given a voice
+    // on the same frame it lands rather than the next.
+    this.stepFeet(dt, pose.x, pose.y, pose.z);
     this.audio.update(dt, pose);
   }
+
+  /**
+   * What every body's clips marked since the last frame: the feet, the voices, and the loops a
+   * standing body makes. The three lists are the managers' own arrays and the player's record is a
+   * field, so this allocates nothing.
+   */
+  private stepFeet(dt: number, lx: number, ly: number, lz: number): void {
+    // A planet handed over once, and taken away on the way out: the feet fetch what that planet's
+    // own objects are made of.
+    const pack = this.inWorld ? this.world.packId : '';
+    if (pack !== this.feetPack) {
+      this.feetPack = pack;
+      if (pack) this.feet.begin(pack);
+      else this.feet.leave();
+    }
+    // The shared table that names the nine terrain surfaces arrives with the sound bank, some
+    // frames after the game starts. Handed over when it changes rather than read through a cast,
+    // so a rename in the bank is a type error here and not a silent fall back to file names.
+    const tables = this.audio.bank.sources;
+    if (tables !== this.feetTables) {
+      this.feetTables = tables;
+      this.feet.setSurfaceTable(tables?.surfaces as Record<string, { type?: string }> | undefined);
+    }
+    const player = this.player;
+    const rig = player.rig;
+    const lists = this.footBodies;
+    if (rig && this.inWorld && !this.creating) {
+      const p = this.footPlayer;
+      const at = player.worldPos;
+      p.x = at.x;
+      p.y = at.y;
+      p.z = at.z;
+      p.inside = this.world.inside || (!!player.aboard && !isSurfaceRoom(player.aboard));
+      // A ship's rooms are a physics world of their own that no ray of the planet's reaches, and
+      // the interior table gives a hull's rooms metal: INVENTED only in that it is not looked up.
+      // Standing on a surface with the boots on is not a deck: the world's own ray answers there,
+      // so a rock stays a rock.
+      const hull = player.aboard && !isSurfaceRoom(player.aboard) ? player.aboard : null;
+      p.deck = hull ? 'metal' : null;
+      // Aboard, the body's own sounds belong to the hull the ear is in. Without this the muffling
+      // rule puts a low-pass over every step the player takes on the deck, because there is no
+      // streamed building at the point and the world would answer "outside".
+      this.footSpace.building = hull ? this.spaceIdOf(hull.vehicle) : OUTSIDE.building;
+      this.footSpace.cell = OUTSIDE.cell;
+      p.space = hull ? this.footSpace : null;
+      p.dead = this.dying || player.hp <= 0;
+      p.species = this.characterId;
+      this.feet.playerTemplate = rig.character?.manifest.template ?? null;
+      lists.player = p;
+    } else lists.player = null;
+    lists.mobiles = this.inWorld && this.world.mobiles ? this.world.mobiles.live : EMPTY_BODIES;
+    lists.fighters = this.inWorld ? this.world.npcs.npcs : EMPTY_BODIES;
+    this.listenerAt.x = lx;
+    this.listenerAt.y = ly;
+    this.listenerAt.z = lz;
+    this.feet.update(dt, this.listenerAt, lists);
+    this.stepRideSounds();
+  }
+
+  /**
+   * Getting on and off. The game has three sounds of its own for it and nothing in the archives
+   * says which goes where, so the reading is ours: climbing onto a mount or a speeder is
+   * `pl_all_mount`, stepping aboard a ship's rooms is `pl_all_embark`, and leaving either is
+   * `pl_all_disembark`. Watched as a change rather than called from the mount code, so every way on
+   * and off (the key, the menu, a travel, a death) sounds the same.
+   */
+  private stepRideSounds(): void {
+    const on = !!this.player.mounted;
+    const aboard = !!this.player.aboard;
+    if (on !== this.rodeLast) {
+      this.rodeLast = on;
+      if (this.started) this.playAtPlayer(on ? 'sound/pl_all_mount.snd' : 'sound/pl_all_disembark.snd');
+    }
+    if (aboard !== this.aboardLast) {
+      this.aboardLast = aboard;
+      if (this.started) this.playAtPlayer(aboard ? 'sound/pl_all_embark.snd' : 'sound/pl_all_disembark.snd');
+    }
+  }
+
+  private rodeLast = false;
+  private aboardLast = false;
+
+  /**
+   * One of the game's sounds where the player stands, in whatever space the player is in: stepping
+   * aboard a hull is heard from inside it, not through the muffle the mixer puts over another room.
+   */
+  private playAtPlayer(id: string): void {
+    const at = this.player.worldPos;
+    this.audio.play(id, { x: at.x, y: at.y, z: at.z, space: this.listenerPose.space });
+  }
+
+  /** Where the ear is, for the feet; a field, so the frame allocates nothing. */
+  private readonly listenerAt = { x: 0, y: 0, z: 0 };
+  /** The space the player's own feet and voice belong to while aboard a hull; a kept record. */
+  private readonly footSpace: SoundSpace = { building: OUTSIDE.building, cell: OUTSIDE.cell };
 
   /** The look of the character as it is now. */
   private appearanceOf(c: Character): Appearance {
