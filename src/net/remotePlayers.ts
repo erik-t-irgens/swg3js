@@ -5,6 +5,7 @@ import { CharacterRig, loadPlayerRig, type RigState } from '../player/rig';
 import { markActor } from '../world/portalRender';
 import { isDanceClip, isFlourishClip, loopsEmote } from '../core/emotes';
 import type { Hello, PeerState, PeerVehicle } from './net';
+import { easeInHull, MIN_GLIDE_SECONDS, peerAboard, placeInHull } from './aboardMath.ts';
 import type { Garage } from '../vehicles/garage';
 import type { WingSet } from '../vehicles/wings';
 import { changedSlots, fitKey, type ResolvedFit, type ShipFit } from '../vehicles/shipFit';
@@ -49,6 +50,25 @@ interface RemoteVehicle {
   want: ShipFit | null;
 }
 
+/**
+ * A peer standing in a hull somebody else flies: whose (their relay id), where in that hull's own
+ * frame the messages put them, and where the glide has got to. The place is eased in the hull's
+ * frame and the figure is then carried onto the hull's live pose, so it keeps its seat however the
+ * hull moves; a world place eased on its own would swim about the cabin, because the figure and
+ * the hull come from two players' messages on two clocks.
+ */
+interface RemoteAboard {
+  ship: number;
+  /** Where the last message put them, in the hull's frame, and which way they faced. */
+  target: THREE.Vector3;
+  heading: number;
+  /** Where the glide has got to, in the same frame. */
+  at: THREE.Vector3;
+  turn: number;
+  /** Before the first message of this hull: the glide starts where they are rather than crossing the cabin. */
+  first: boolean;
+}
+
 interface Remote {
   id: number;
   hello: Hello;
@@ -67,6 +87,8 @@ interface Remote {
   /** The dance loop playing, to come back to after a flourish. */
   dance: string | null;
   vehicle: RemoteVehicle | null;
+  /** In a hull somebody else flies; null when they are not. It and `vehicle` are never both set. */
+  aboard: RemoteAboard | null;
   /** The look last put on the rig, so a repeated hello does not dress it again. */
   lookApplied: string | null;
   /** The dress of `lookApplied` while it goes on (resolved once it is on, or given up for a newer one); null before any. */
@@ -115,7 +137,50 @@ export class RemotePlayers {
     private readonly scene: THREE.Scene,
     private readonly baseUrl: string,
     private readonly loadGarage: () => Promise<Garage>,
-  ) {}
+  ) {
+    // The knob at the foot of this file has no other way to reach the peers; there is one set.
+    thePeers = this;
+  }
+
+  /** What the last state said about the hull this player stands in; written once per message at most, never in a frame. */
+  private readonly sentAboard = { carrier: 0, p: [0, 0, 0], h: 0, at: 0 };
+
+  /**
+   * The game says what its last state carried about standing in somebody's hull, so the knob can
+   * report it. Nothing else reads it, and it is called once per message sent, never in a frame.
+   */
+  noteAboardSent(carrier: number, x: number, y: number, z: number, h: number): void {
+    const s = this.sentAboard;
+    s.carrier = carrier;
+    s.p[0] = x;
+    s.p[1] = y;
+    s.p[2] = z;
+    s.h = h;
+    s.at = Date.now();
+  }
+
+  /**
+   * What this browser last said about the hull it stands in, and who else says they stand in one:
+   * whose hull, whether that hull is here to put them in, and where in it they are standing. For
+   * `__aboard()` and nothing else, so it allocates freely and reads its own scratch rather than the
+   * scratch a frame is using.
+   */
+  aboardDebug(): Record<string, unknown> {
+    const peers: { id: number; name: string; ship: number; here: boolean; at: number[] }[] = [];
+    for (const r of this.remotes.values()) {
+      const a = r.aboard;
+      if (!a) continue;
+      peers.push({ id: r.id, name: r.hello.name, ship: a.ship, here: this.carrierShown(a.ship) && this.carrierAt(a.ship, reportPos, reportQuat), at: a.at.toArray().map((n) => Number(n.toFixed(2))) });
+    }
+    const s = this.sentAboard;
+    return {
+      // A forced carrier is said to be forced: it is a test override, and a player whose own ship
+      // has stopped crossing because they left it on must be able to see why in one word.
+      sending: s.carrier > 0 ? (ABOARD_TUNE.carrier > 0 ? 'in (forced)' : 'in') : 'veh',
+      sent: { carrier: s.carrier, p: s.p.map((n) => Number(n.toFixed(2))), h: Number(s.h.toFixed(3)), secondsAgo: s.at ? Number(((Date.now() - s.at) / 1000).toFixed(1)) : null },
+      peers,
+    };
+  }
 
   get count(): number {
     return this.remotes.size;
@@ -150,7 +215,7 @@ export class RemotePlayers {
     group.add(label);
     this.scene.add(group);
     markActor(group);
-    const remote: Remote = { id, hello, group, rig: null, label, target: new THREE.Vector3(0, -1000, 0), heading: 0, targetQ: null, state: 'idle', speed: 0, saber: false, silent: 0, dance: null, vehicle: null, lookApplied: null, lookPending: null, heldApplied: null, heldModels: [], vel: new THREE.Vector3(), heardAt: 0, jumping: false };
+    const remote: Remote = { id, hello, group, rig: null, label, target: new THREE.Vector3(0, -1000, 0), heading: 0, targetQ: null, state: 'idle', speed: 0, saber: false, silent: 0, dance: null, vehicle: null, aboard: null, lookApplied: null, lookPending: null, heldApplied: null, heldModels: [], vel: new THREE.Vector3(), heardAt: 0, jumping: false };
     this.remotes.set(id, remote);
     void this.dress(remote);
   }
@@ -309,7 +374,7 @@ export class RemotePlayers {
     r.speed = s.v;
     r.saber = s.sab;
     r.silent = 0;
-    this.vehicleState(r, s.veh);
+    this.rideState(r, s.veh, s.in);
     // In a jump they vanish; out of it they appear where they are now, not gliding across the distance jumped.
     const jumping = s.j === 1;
     if (jumping !== r.jumping) {
@@ -327,6 +392,39 @@ export class RemotePlayers {
           }
         }
       }
+    }
+  }
+
+  /**
+   * What a peer is on: a vehicle of their own, which everyone draws, or the hull of somebody else's
+   * ship, which only the player who flies it sends. One or the other, never both -- that is the
+   * whole point of it. Two people crewing one ship both sending the hull had everyone else build
+   * two of it in the same place, fighting for the same pixels, with two sets of engine glows and
+   * trails and both handed to the motion blur.
+   */
+  private rideState(r: Remote, veh: PeerVehicle | undefined, said: unknown): void {
+    // Checked here as well as where the message was read: a state also arrives straight out of the
+    // roster a server sends on joining, which no live message has been through, and a hull with no
+    // place in it would be indexed below.
+    const aboard = peerAboard(said);
+    if (!aboard) {
+      r.aboard = null;
+      this.vehicleState(r, veh);
+      return;
+    }
+    // In somebody else's hull: no picture of a hull of their own, whatever they may also have sent.
+    this.dropVehicle(r);
+    const a = (r.aboard ??= { ship: 0, target: new THREE.Vector3(), heading: 0, at: new THREE.Vector3(), turn: 0, first: true });
+    if (a.ship !== aboard.ship) {
+      a.ship = aboard.ship;
+      a.first = true;
+    }
+    a.target.set(aboard.p[0], aboard.p[1], aboard.p[2]);
+    a.heading = aboard.h;
+    if (a.first) {
+      a.at.copy(a.target);
+      a.turn = a.heading;
+      a.first = false;
     }
   }
 
@@ -498,9 +596,15 @@ export class RemotePlayers {
 
   update(dt: number): void {
     let anyDocked = false;
+    let anyAboard = false;
     for (const r of this.remotes.values()) {
       if (r.vehicle?.obj) r.vehicle.obj.visible = r.group.visible;
-      if (!r.group.visible) continue;
+      if (!r.group.visible) {
+        // Away (another world, or a jump): the glide inside a hull does not run, so when they come
+        // back the next message puts them where they stand rather than walking them across the cabin.
+        if (r.aboard) r.aboard.first = true;
+        continue;
+      }
       r.silent += dt;
       // Gone quiet: the speed the messages gave fades rather than holding the blur on a still figure.
       if (r.silent > RELAY.silentSeconds) {
@@ -519,6 +623,13 @@ export class RemotePlayers {
         let diff = r.heading - r.group.rotation.y;
         diff = Math.atan2(Math.sin(diff), Math.cos(diff));
         r.group.rotation.set(0, r.group.rotation.y + diff * k, 0);
+      }
+      // In somebody else's hull: the glide is taken in that hull's own frame, at the same rate as
+      // every other glide, and the figure is carried onto the hull's live pose after this pass.
+      const ab = r.aboard;
+      if (ab) {
+        anyAboard = true;
+        ab.turn = easeInHull(ab.at, ab.target, ab.turn, ab.heading, dt, ABOARD_TUNE.glideSeconds);
       }
       const rv = r.vehicle;
       if (rv?.obj) {
@@ -556,6 +667,66 @@ export class RemotePlayers {
       }
     }
     if (anyDocked) this.placeDocked();
+    // After the clamped pictures, never before: the hull a passenger stands in may itself be
+    // clamped onto another, and its own pose is only right once that pass has put it there.
+    if (anyAboard) this.placeAboard();
+  }
+
+  /**
+   * Every peer standing in somebody else's hull, put where that hull puts them: the hull's live
+   * pose times where the messages say they stand in it. It runs after every picture has been moved
+   * (and after the clamped ones have been placed on the hulls they ride), so the order the peers
+   * come in never matters. The hull may be the ship this player is on, which is no peer's picture:
+   * `carrierPose` answers for that, exactly as it does for a clamp. Nothing is allocated.
+   */
+  private placeAboard(): void {
+    for (const r of this.remotes.values()) {
+      const a = r.aboard;
+      if (!a || !r.group.visible) continue;
+      // The hull is not here to put them in -- they are on another world, the player who flies it
+      // has gone, its picture has not come in yet, or it is not shown itself (away, or in a jump,
+      // where its pose is the last one heard before it went). The figure keeps the glide through
+      // the world its own `p` gave it, which is what any other peer gets and is today's behaviour.
+      if (!this.carrierShown(a.ship) || !this.carrierAt(a.ship, dockPos, dockQuat)) continue;
+      placeInHull(dockPos, dockQuat, a.at, a.turn, r.group.position, aboardTurn);
+      r.group.quaternion.copy(aboardTurn);
+    }
+  }
+
+  /**
+   * Whether the hull of that relay id is one to stand somebody in this frame. The game's own hull
+   * always is (it is here, being flown); a peer's only while that peer is shown, since a picture
+   * that is away or in a jump keeps the last pose it was heard at and would hold a passenger
+   * visible inside a hull nobody can see.
+   */
+  private carrierShown(to: number): boolean {
+    const c = this.remotes.get(to);
+    return !c || c.group.visible;
+  }
+
+  /**
+   * Whose hull an object of the scene stands in: the relay id of the peer whose picture of a ship
+   * it is or hangs under, and 0 when it is nobody's -- this player's own ship, or a hull no peer
+   * sends. It is what tells a passenger to send `in` rather than a copy of the hull.
+   *
+   * Nothing answers anything but 0 yet: a hull somebody else flies is not a place you can stand in
+   * here (src/space/docking.ts refuses a crossing into one, in those words), and making one is work
+   * still to come. When a boardable room is hung on the peer's own picture -- which it must be,
+   * since the picture is the only thing carrying the hull's pose off the wire -- this answers on
+   * its own with nothing more to wire up.
+   *
+   * Called once per state sent, ten times a second at most, never in a frame; it allocates nothing.
+   */
+  hullCarrier(node: THREE.Object3D | null | undefined): number {
+    // Forced by the knob, for trying the whole path with two browsers before a friend's hull is a
+    // place you can board. It holds only while that player is really here, so a line that dropped,
+    // a travel or a reconnect (where a server hands out its ids afresh) lets go of it by itself
+    // rather than leaving this browser claiming to be inside somebody who is no longer there.
+    if (ABOARD_TUNE.carrier > 0) return this.remotes.has(ABOARD_TUNE.carrier) ? ABOARD_TUNE.carrier : 0;
+    for (let o: THREE.Object3D | null = node ?? null; o; o = o.parent) {
+      for (const r of this.remotes.values()) if (r.vehicle?.obj === o) return r.id;
+    }
+    return 0;
   }
 
   /**
@@ -641,6 +812,9 @@ export class RemotePlayers {
 
   dispose(): void {
     for (const id of [...this.remotes.keys()]) this.remove(id);
+    // The knob's one reference to this, let go with it: it is a strong hold on every peer's group,
+    // rig, label and ship picture, and through them on the scene.
+    if (thePeers === this) thePeers = null;
   }
 }
 
@@ -649,6 +823,50 @@ const dockPos = new THREE.Vector3();
 const dockQuat = new THREE.Quaternion();
 const dockOff = new THREE.Vector3();
 const dockInv = new THREE.Quaternion();
+/**
+ * The same, for a passenger's turn inside the hull they stand in. It is written field by field and
+ * copied onto the figure, so the quaternion that tells the figure it turned is told once.
+ */
+const aboardTurn = new THREE.Quaternion();
+/** The knob's own, so reading a report between frames cannot tread on the scratch a frame is using. */
+const reportPos = new THREE.Vector3();
+const reportQuat = new THREE.Quaternion();
+
+/**
+ * The invented numbers of standing in somebody else's hull, both live through `__aboard()`.
+ *
+ * `carrier` is a test override and is 0 in play. It is here because a hull somebody else flies is
+ * not yet a place you can stand in, so without it there is no way at all to try this end to end
+ * with two browsers: set to another player's relay id, this browser reports the hull it is really
+ * standing in as that player's, stops sending a copy of it, and is drawn inside their ship. It
+ * changes nothing about what is checked, sent or placed -- only the answer to "whose hull is this".
+ */
+export const ABOARD_TUNE = {
+  /** Invented, and a test override only: 0 is off, and is what every reading of it is in play. */
+  carrier: 0,
+  /** Invented: the same tenth of a second every other glide here uses, so a passenger moves no differently from anyone else. */
+  glideSeconds: 0.1,
+};
+
+/** The one set of peers, so the knob can report them; set when the game builds it, let go on dispose. */
+let thePeers: RemotePlayers | null = null;
+
+/**
+ * The live knob, on the window as `__aboard()`: what this browser last said about the hull it
+ * stands in, which peers say they stand in somebody's hull and whether that hull is here to put
+ * them in, and the two numbers above. Reading it costs nothing and it never runs in a frame.
+ */
+export function aboardKnob(opts?: { carrier?: number; glideSeconds?: number }): Record<string, unknown> {
+  if (opts) {
+    if (opts.carrier !== undefined && Number.isFinite(opts.carrier)) ABOARD_TUNE.carrier = Math.max(0, Math.round(opts.carrier));
+    if (opts.glideSeconds !== undefined && Number.isFinite(opts.glideSeconds)) ABOARD_TUNE.glideSeconds = Math.max(MIN_GLIDE_SECONDS, opts.glideSeconds);
+  }
+  return { ...(thePeers ? thePeers.aboardDebug() : { sending: 'veh', sent: null, peers: [] }), tune: { ...ABOARD_TUNE } };
+}
+
+// Reachable wherever there is a console: this has no panel of its own, and a browser driven by a
+// script is hidden, so the only way to see what it decided is to ask it in numbers.
+(globalThis as unknown as { __aboard?: typeof aboardKnob }).__aboard = aboardKnob;
 
 /** No preparation to wait for (the game has not given one). */
 const noPrepare = (): Promise<void> => Promise.resolve();

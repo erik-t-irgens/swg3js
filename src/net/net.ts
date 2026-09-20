@@ -5,6 +5,7 @@ import type { Look } from '../player/look';
 import type { ShipFit } from '../vehicles/shipFit';
 import { sharedClock } from '../world/sharedClock.ts';
 import { SESSION, Session, WIRE_VERSION, type CharacterSummary, type Settlement } from './session.ts';
+import { rideFields, type PeerAboard } from './aboardMath.ts';
 
 export interface Hello {
   name: string;
@@ -41,6 +42,14 @@ export interface PeerVehicle {
   dock?: { to: number; p: [number, number, number]; q: [number, number, number, number] };
 }
 
+/**
+ * A player who is in a hull somebody else flies, and the rule that it takes the place of the
+ * vehicle they ride. Both live in `./aboardMath.ts`, which nothing of three.js or the page reaches
+ * into, so the node test can run the rule and the maths that go with it; the shape is passed on
+ * from here because a peer's state is what carries it.
+ */
+export type { PeerAboard } from './aboardMath.ts';
+
 /** The words two browsers pass about one ship clamped onto another (server/vehicleWire.mjs). */
 export type AskWord = 'dock' | 'allow' | 'refuse' | 'undock';
 
@@ -57,8 +66,10 @@ export interface PeerState {
   sab: boolean;
   /** The figure's whole turn (aboard a banked hull, adrift in space), when a heading is not enough. */
   q?: [number, number, number, number];
-  /** The vehicle the peer is on, when they are on one. */
+  /** The vehicle the peer is on, when they are on one. Never sent with `in`: one or the other. */
   veh?: PeerVehicle;
+  /** The hull of another player's ship the peer is in, when they are in one: it replaces `veh`. */
+  in?: PeerAboard;
   /** In a hyperspace jump, from its start until its tunnel opens at the far end: the peer and their ship are not shown. */
   j?: 1;
 }
@@ -446,7 +457,12 @@ export class Net {
       case 'state':
         if (msg.id !== undefined && msg.p) {
           const peer = this.peers.get(msg.id);
-          const state: PeerState = { p: msg.p, h: msg.h ?? 0, s: msg.s ?? 'idle', v: msg.v ?? 0, m: !!msg.m, sab: !!msg.sab, q: msg.q, veh: msg.veh, ...(msg.j === 1 ? { j: 1 as const } : {}) };
+          // `veh` and `in` never both: the server keeps one or the other (server/vehicleWire.mjs's
+          // `cleanRide`), and `rideFields` is that rule on this side, over a field that is checked
+          // rather than trusted -- a far end on another build can send a hull with no place in it,
+          // and a throw here would cost every message after it. A state also arrives this way from
+          // the roster a server sends on joining, which no live message has been through.
+          const state: PeerState = { p: msg.p, h: msg.h ?? 0, s: msg.s ?? 'idle', v: msg.v ?? 0, m: !!msg.m, sab: !!msg.sab, q: msg.q, ...rideFields(msg.in, msg.veh), ...(msg.j === 1 ? { j: 1 as const } : {}) };
           if (peer) peer.state = state;
           this.onState(msg.id, state);
         }

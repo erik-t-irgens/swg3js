@@ -25,10 +25,14 @@
 //                                                          { r, l } by id, and the ship they fly
 //                                                          { id, fit: { components, paint, droid } } (shipWire.mjs);
 //                                                          sent on joining, on travel and on a change
-//   { t: 'state', p: [x, y, z], h, s, v, m, sab, q?, veh? }   position, heading, rig state, speed, mounted, saber lit,
+//   { t: 'state', p: [x, y, z], h, s, v, m, sab, q?, veh? | in? }   position, heading, rig state, speed, mounted, saber lit,
 //                                                          the whole turn as a quaternion (aboard, adrift), the vehicle
 //                                                          ridden { id, p, q, role: ride|pilot|aboard, pose, w, landed, dock }
-//                                                          (vehicleWire.mjs); j: 1 while in a hyperspace jump
+//                                                          (vehicleWire.mjs); or, standing in a hull somebody else flies,
+//                                                          in { ship, p, h } -- whose hull and where in that hull's own
+//                                                          frame, which takes the place of veh so that a watcher draws
+//                                                          one hull with people in it and not one hull per person;
+//                                                          j: 1 while in a hyperspace jump
 //   { t: 'emote', clip }
 //   { t: 'ask', to, word: dock|allow|refuse|undock }         the one message meant for a single other player: asking
 //                                                          their pilot for room on their hull, and the answer
@@ -577,7 +581,7 @@ function onMessage(c, text, trimmed = false) {
     }
   } else if (msg.t === 'state') {
     if (!c.hello) return;
-    const state = cleanState(msg);
+    const state = cleanState(msg, c.id);
     if (!state) return;
     c.state = state;
     sendToRoom(rooms.keyOf(c.id), { t: 'state', id: c.id, ...state }, c.id, true);

@@ -3,6 +3,13 @@
 // whether it is set down on the ground. Dependency-free, shared by the relay and the tests.
 // Everything is checked and kept small; anything else is dropped, so a client on another build
 // can neither grow a message nor put anything unexpected through the relay.
+//
+// A player who is in a hull somebody else flies says so instead (`in`): whose hull, and where they
+// stand in that hull's own frame. Two people crewing one ship each sending a copy of the hull would
+// have everyone else build two of it, one inside the other -- doubled geometry fighting for the
+// same pixels, doubled engine glows and trails, and both handed to the motion blur. One of them
+// sends the hull and the rest say which hull they are in, so a watcher draws one hull with people
+// in it. `cleanRide` is the rule in one place: a state may carry one or the other, never both.
 
 const VEHICLE_ID = /^[A-Za-z0-9_.\- ]+$/;
 const ROLES = ['ride', 'pilot', 'aboard'];
@@ -62,6 +69,59 @@ export function cleanDock(x) {
   const q = quat(x.q);
   if (!p || !q) return undefined;
   return { to, p, q };
+}
+
+/**
+ * A cleaned copy of a state's `in`, or undefined when it is not one: `{ ship, p, h }`, where `ship`
+ * is the relay id of the player whose hull this one is in, and `p` and `h` are where they stand and
+ * which way they face **in that hull's own frame**. The watcher places them from the hull's live
+ * pose, so a passenger keeps their seat however the hull moves instead of gliding through the walls
+ * toward a world place that was true a tenth of a second ago on somebody else's clock.
+ *
+ * `ship` is a whole number above zero (the relay's own ids start at 1), so a client cannot name
+ * nobody and cannot name half a player. The place is finite and otherwise unbounded, exactly as a
+ * clamp's place in a hull's frame already is: a hull is as big as it is, and the frame is the
+ * hull's own.
+ */
+export function cleanAboard(x, self = 0) {
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return undefined;
+  const ship = Number(x.ship);
+  if (!Number.isInteger(ship) || ship <= 0) return undefined;
+  // Nobody stands in their own hull: that hull is theirs to send, and a watcher told otherwise would
+  // have a figure and no ship to put it in. A caller that knows who is speaking says so; one that
+  // does not (a caller on an older build) passes nothing and this is not asked.
+  if (self > 0 && ship === self) return undefined;
+  const p = vec3(x.p);
+  if (!p) return undefined;
+  const h = Number(x.h);
+  return { ship, p, h: Number.isFinite(h) ? h : 0 };
+}
+
+/**
+ * What a player is on, from the whole state: either the vehicle they ride or fly (`veh`, a hull of
+ * their own that everyone draws) or the hull of another player's ship they are in (`in`, which is
+ * nobody's to draw but the player who flies it). Never both, and a client that sends both is taken
+ * at its word about the hull it is in -- its own copy of that hull is the one thing that must not
+ * go out, since somebody else is already sending it.
+ *
+ * The answer is a small object rather than two calls so that the rule lives here, beside the two
+ * checkers, and is tested here; the caller copies across whichever field came back.
+ *
+ * `self` is who is speaking, when the caller knows: a hull that names the speaker is refused, and
+ * the vehicle they sent with it stands. Left out, nothing about the speaker is asked, so a caller
+ * that has no id to hand behaves exactly as before.
+ */
+export function cleanRide(x, self = 0) {
+  const out = {};
+  if (!x || typeof x !== 'object') return out;
+  const aboard = cleanAboard(x.in, self);
+  if (aboard) {
+    out.in = aboard;
+    return out;
+  }
+  const veh = cleanVehicle(x.veh);
+  if (veh) out.veh = veh;
+  return out;
 }
 
 /**

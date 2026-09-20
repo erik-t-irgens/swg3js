@@ -4085,23 +4085,39 @@ class App {
     // Standing on a surface is not being aboard a ship: peers would otherwise draw the figure inside a hull
     // it is merely beside. The whole turn goes over as it already does for anyone adrift.
     const v = p.mounted ?? p.piloting ?? (isSurfaceRoom(p.aboard) ? null : p.aboard?.vehicle) ?? null;
+    // Standing in a hull somebody else flies: say which hull and where in it, and send no copy of
+    // the hull at all. Otherwise two people crewing one ship each send their own, and everyone else
+    // builds two of it in the same place. The place is the hull's own frame, which is where `pos`
+    // already is aboard; a world place would be glided on this browser's clock and the hull on
+    // theirs, and the passenger would swim about the cabin and out through its walls. Naming
+    // yourself is nobody's hull to draw, so it is refused here.
+    const room = !p.mounted && !p.piloting && p.aboard && !isSurfaceRoom(p.aboard) ? p.aboard : null;
+    const carrierId = room ? this.remotes.hullCarrier(room.vehicle.group) : 0;
+    const inHull = room && carrierId > 0 && carrierId !== this.net.id ? { ship: carrierId, p: [n2(p.pos.x), n2(p.pos.y), n2(p.pos.z)] as [number, number, number], h: n3(p.heading) } : undefined;
+    this.remotes.noteAboardSent(inHull ? inHull.ship : 0, p.pos.x, p.pos.y, p.pos.z, p.heading);
+    // A hull you are only standing in is neither a ship you fly nor a ship to send: it is decided
+    // first, so that nothing below asks about a hull that is somebody else's. Sending it is what
+    // drew two of it; naming it in the hello would have every peer refit their picture of this
+    // player's own ship with the fit of the ship they are a passenger in.
+    const own = inHull ? null : v;
     // Another fitted ship taken: the hello (with that ship's fit) goes again once, debounced. Two strings compared, nothing allocated.
-    const shipId = v?.def?.fit ? v.def.id : this.helloShipId;
+    const shipId = own?.def?.fit ? own.def.id : this.helloShipId;
     if (shipId !== this.helloShipId) {
       this.helloShipId = shipId;
       this.queueHello();
     }
     // Clamped onto another ship: whose, and where on it. The others then hang the picture of this hull
     // from that ship's own pose rather than gliding it about on the hull it rides.
-    const dock = v ? this.docking.clamp.wire(v) : null;
-    const veh: PeerVehicle | undefined = v ? { id: v.def?.id ?? v.spec.id, p: [n2(v.pos.x), n2(v.pos.y), n2(v.pos.z)], q: v.quaternion(tmpQ).toArray().map(n3) as [number, number, number, number], role: p.mounted ? 'ride' : p.piloting ? 'pilot' : 'aboard', pose: v.riderPose ?? undefined, ...(v.wings.length ? { w: v.wings.target ? 1 : 0 } as const : {}), ...(v.landed ? { landed: 1 } as const : {}), ...(dock ? { dock } : {}) } : undefined;
+    const dock = own ? this.docking.clamp.wire(own) : null;
+    const veh: PeerVehicle | undefined = own ? { id: own.def?.id ?? own.spec.id, p: [n2(own.pos.x), n2(own.pos.y), n2(own.pos.z)], q: own.quaternion(tmpQ).toArray().map(n3) as [number, number, number, number], role: p.mounted ? 'ride' : p.piloting ? 'pilot' : 'aboard', pose: own.riderPose ?? undefined, ...(own.wings.length ? { w: own.wings.target ? 1 : 0 } as const : {}), ...(own.landed ? { landed: 1 } as const : {}), ...(dock ? { dock } : {}) } : undefined;
     const q = p.aboard || p.eva ? (p.group.quaternion.toArray().map(n3) as [number, number, number, number]) : undefined;
     // In a jump, from its start until the tunnel opens, the others do not see this player or the ship
     // (`j`). An ultra cruise is hidden the same way and for the same reason: at kilometres a second a
     // peer would be handed a place a kilometre from the last one ten times a second, which their side
     // glides through as a teleport and hands to their motion blur as a screen-wide smear.
     const hidden = this.hyperspace.hiddenToPeers || this.ultraCruise.running;
-    this.net.sendState({ p: [n2(at.x), n2(at.y), n2(at.z)], h: n3(p.heading), s: p.mounted ? 'seated' : (rig?.describe().state ?? 'idle'), v: n2(Math.hypot(p.vel.x, p.vel.z)), m: !!p.mounted, sab: p.saberOn, q, veh, ...(hidden ? { j: 1 as const } : {}) });
+    // One or the other, never both: the hull a passenger stands in is sent by whoever flies it.
+    this.net.sendState({ p: [n2(at.x), n2(at.y), n2(at.z)], h: n3(p.heading), s: p.mounted ? 'seated' : (rig?.describe().state ?? 'idle'), v: n2(Math.hypot(p.vel.x, p.vel.z)), m: !!p.mounted, sab: p.saberOn, q, ...(inHull ? { in: inHull } : { veh }), ...(hidden ? { j: 1 as const } : {}) });
   }
 
   /** The wheel's slots from the rig's own emotes when none were kept yet, and the menu's Emotes page fed from it. */
