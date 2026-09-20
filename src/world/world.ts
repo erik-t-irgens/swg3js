@@ -966,6 +966,8 @@ export class World {
     this.structures.length = 0;
     this.layoutStream?.dispose();
     this.layoutStream = null;
+    // A hold belongs to the world it was taken out on: nothing may carry one into the next one.
+    this.streamHold = false;
     this.particles?.dispose();
     this.particles = null;
     if (this.spaceBodies) {
@@ -1077,6 +1079,12 @@ export class World {
 
   /** The zone's nebulae while a space zone is loaded: its sheets, the haze inside one and its lightning. */
   nebulae: Nebulae | null = null;
+
+  /**
+   * Hold the placed-object streamer where it is: no tier loaded, none dropped. Set while something
+   * moves the player faster than the streamer can usefully follow, and cleared by whatever set it.
+   */
+  streamHold = false;
 
   /** The name of the scenery at a point (the Star Destroyer): the nearest whose radius plus a kilometre covers it, or null. Game frame. */
   sceneryNameAt(x: number, z: number): string | null {
@@ -3398,7 +3406,11 @@ export class World {
     this.streamFar(playerPos, 1);
     if (this.layoutStream) {
       // The building the player is in keeps its interior however far its wings reach.
-      this.layoutStream.update(playerPos, this.cellState?.building ?? null);
+      // Held: nothing is loaded and nothing is dropped. An ultra-fast cruise crosses a region every
+      // few dozen milliseconds, and a tier built at that speed would be a collider and a program on
+      // a live frame for something already kilometres behind. Whatever holds it frees it again, and
+      // waits for what stands round where it stopped before the ship is handed back.
+      if (!this.streamHold) this.layoutStream.update(playerPos, this.cellState?.building ?? null);
       this.packStatus = `${this.packBase}; ${this.layoutStream.status}${this.particles ? `; ${this.particles.status}` : ''}`;
     }
     if (this.particles && this.camera) this.particles.update(dt, this.camera, this.scene.fog instanceof THREE.FogExp2 ? this.scene.fog : null);
@@ -3505,7 +3517,11 @@ export class World {
     // The ships that fight: the contacts in step with the vehicles (the player's ship marked), the NPC ships'
     // brains (held, thinking nothing, while play is paused), then every combat's shields, boost and damage bands.
     this.ships.sync(this.vehicles, this.playerShip, this.playerTarget, this.simTime);
-    this.npcShips?.update(dt, this.simTime, this.simulating);
+    // The hold covers the patrols too, and held they are exactly as a panel holds them. They stream
+    // themselves in: a group asleep within a few kilometres of the player wakes, spawns its hulls and
+    // compiles their programs on a live frame. At kilometres a second that distance is a fraction of
+    // a second, so a held run would otherwise sweep every anchor in the zone and wake all of them.
+    this.npcShips?.update(dt, this.simTime, this.simulating && !this.streamHold);
     this.ships.update(dt, this.simTime, this.simulating);
   }
 

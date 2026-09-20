@@ -11,6 +11,31 @@
 //
 // Nothing here imports anything.
 
+/**
+ * A step of the camera's that must not read as motion: last frame's view is moved by it before the
+ * reprojection, so a world that stands still reprojects onto itself and only turning smears.
+ *
+ * It is set by the one thing that carries the camera faster than the blur can mean anything -- an
+ * ultra-fast cruise, kilometres a frame, where every pixel's velocity would run clean off the screen
+ * and the picture would be a wash rather than a sense of speed. Everything else leaves it at zero.
+ * It is module state because there is one camera, and whatever sets it clears it again when it is
+ * done. `velocity.ts` turns these three numbers into the matrix it multiplies by.
+ */
+const carry = { x: 0, y: 0, z: 0, on: false };
+
+/** Move last frame's view by this world-space step before the reprojection; (0, 0, 0) turns it off. */
+export function setReprojectionCarry(x: number, y: number, z: number): void {
+  carry.x = x;
+  carry.y = y;
+  carry.z = z;
+  carry.on = x !== 0 || y !== 0 || z !== 0;
+}
+
+/** What the reprojection is being moved by now; the record is shared and read-only to callers. */
+export function reprojectionCarry(): Readonly<{ x: number; y: number; z: number; on: boolean }> {
+  return carry;
+}
+
 /** Who a mover is, which decides its jump limit and how it is reported. */
 export type FxMoverKind = 'player' | 'ridden' | 'vehicle' | 'creature' | 'npc' | 'remote' | 'remoteVehicle';
 

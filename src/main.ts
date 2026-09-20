@@ -67,6 +67,7 @@ import { Docking } from './space/docking';
 import { DOCK_TUNE } from './space/dockingMath';
 import { HyperspaceUi } from './ui/hyperspaceUi';
 import { Hyperspace } from './space/hyperspace';
+import { CRUISE_KEY, CRUISE_TUNE, Cruise, tuneCruise } from './space/cruise';
 import { HyperspaceTunnel } from './space/hyperspaceTunnel';
 import { ShipHud } from './ui/shipHud';
 import { TargetFx } from './space/targetFx';
@@ -278,6 +279,8 @@ class App {
    * does, the row says the cruise is not built.
    */
   cruiseControl: ShipCruise | null = null;
+  /** The ultra cruise itself: a straight run at kilometres a second, only where a system is big enough for one. */
+  private readonly ultraCruise: Cruise;
   /** The System Map (the destinations of a jump) and the countdown line. */
   private readonly hyperspaceUi: HyperspaceUi;
   /** The jump: its countdown, its phases, and the hull it flies. */
@@ -632,6 +635,30 @@ class App {
       },
       ui: this.hyperspaceUi,
     });
+    // The ultra cruise: a straight run at kilometres a second, in a system big enough to need one.
+    // It reads the same things the jump does and writes nothing the jump writes, so the two can
+    // never both have the hull: each asks whether the other is flying it before it starts.
+    this.ultraCruise = new Cruise({
+      zone: () => this.world.planet.id,
+      packHere: () => this.world.spaceData,
+      ship: () => this.pilotedShip(),
+      alive: (h) => this.world.vehicles.includes(h as Vehicle),
+      jumping: () => this.hyperspace.phase !== 'idle',
+      // A jump only counting down has not touched the hull yet, and would not release it if it were
+      // called off; from the enter phase on it holds and ghosts the hull itself.
+      jumpHasHull: () => this.hyperspace.phase !== 'idle' && this.hyperspace.phase !== 'countdown',
+      holdStream: (on) => {
+        this.world.streamHold = on;
+      },
+      note: (text) => this.hud.setPrompt(text),
+      readyAround: (at, ms) => this.world.readyAround(at, ms),
+      effects: () => this.world.hyperspaceEffects(),
+      placeEffect: (file, local, frame) => this.world.placeZoneEffect(file, local, frame),
+      removeEffect: (h) => this.world.removeZoneEffect(h),
+      programs: () => this.renderer.info.programs?.length ?? 0,
+    });
+    // The ship menu's own row, which the menu asks for by this shape.
+    this.cruiseControl = this.ultraCruise;
     // The lift menu: E in a shaft lists its levels; a pick, or a number key, rides there.
     this.liftMenu = new LiftMenu(this.ui);
     this.liftMenu.onClose = () => {
@@ -1369,6 +1396,9 @@ class App {
             this.stepCombat(dt);
             // The jump's clock (its countdown and phases); the transit itself waits on drawn frames and streaming, which this does not give.
             if (!this.traveling) this.hyperspace.update(dt, dt, false);
+            // The ultra cruise's own clock, before the hulls step, as the frame loop has it: a run
+            // can be started and watched to its stop with no frames drawn at all.
+            this.ultraCruise.update(dt);
             this.stepVehicles(dt, true);
             if (!this.player.noclip && !this.player.mounted) this.world.turrets.update(dt, this.player, this.world.bolts);
             // Where the player stands first, then one step of everything alive: without the first,
@@ -1481,6 +1511,20 @@ class App {
        * which is read when a zone's bodies are built, so it shows on the next arrival. Nothing
        * here is saved.
        */
+      /**
+       * The ultra cruise. No argument: the run's state, its speed, how far it has gone, how many
+       * stops it is watching, whether a program was built during the last run (which must be 0) and
+       * why it cannot run here when it cannot. `'toggle'` starts a run or lets go of one, the same
+       * as the key. An object tunes it live and nothing is saved: `{ top }` the top speed in m/s,
+       * `{ spinUp, brake }` the seconds up and down, `{ standOff }` how far short of a planet's
+       * surface it stops, `{ edge }` how far the system reaches, `{ countdown, settleWait }` the
+       * two waits, `{ fxAhead, fxTurn }` where the streaks sit on the hull.
+       */
+      cruise: (arg?: 'toggle' | Partial<typeof CRUISE_TUNE>) => {
+        if (arg === 'toggle') return this.ultraCruise.toggle();
+        if (arg && typeof arg === 'object') tuneCruise(arg);
+        return this.ultraCruise.describe();
+      },
       suns: (opts?: { rule?: SunRule; companionDegrees?: number; skyShare?: number; standInDistance?: number; quadAt?: number; quadTan?: number; quadMargin?: number }) => {
         const sky = this.world.swgSky;
         // `quadAt`, `quadTan` and `quadMargin` are the depth stand-in of a body that stands somewhere
@@ -2636,6 +2680,8 @@ class App {
   private switchToSelect(): void {
     // A jump lets go of everything it holds (the hull, the white, its effects) before the ship is left.
     this.hyperspace.abort('leaving');
+    // So does a run: it holds the hull and the streamer, and both would be left behind.
+    this.ultraCruise.abort();
     // Every voice and every looping source goes with the world, or a planet's beds would follow
     // the player onto the select screen and into the next character's world.
     this.audio.stopAll();
@@ -3052,8 +3098,12 @@ class App {
     }
     const veh: PeerVehicle | undefined = v ? { id: v.def?.id ?? v.spec.id, p: [n2(v.pos.x), n2(v.pos.y), n2(v.pos.z)], q: v.quaternion(tmpQ).toArray().map(n3) as [number, number, number, number], role: p.mounted ? 'ride' : p.piloting ? 'pilot' : 'aboard', pose: v.riderPose ?? undefined, ...(v.wings.length ? { w: v.wings.target ? 1 : 0 } as const : {}), ...(v.landed ? { landed: 1 } as const : {}) } : undefined;
     const q = p.aboard || p.eva ? (p.group.quaternion.toArray().map(n3) as [number, number, number, number]) : undefined;
-    // In a jump, from its start until the tunnel opens, the others do not see this player or the ship (`j`).
-    this.net.sendState({ p: [n2(at.x), n2(at.y), n2(at.z)], h: n3(p.heading), s: p.mounted ? 'seated' : (rig?.describe().state ?? 'idle'), v: n2(Math.hypot(p.vel.x, p.vel.z)), m: !!p.mounted, sab: p.saberOn, q, veh, ...(this.hyperspace.hiddenToPeers ? { j: 1 as const } : {}) });
+    // In a jump, from its start until the tunnel opens, the others do not see this player or the ship
+    // (`j`). An ultra cruise is hidden the same way and for the same reason: at kilometres a second a
+    // peer would be handed a place a kilometre from the last one ten times a second, which their side
+    // glides through as a teleport and hands to their motion blur as a screen-wide smear.
+    const hidden = this.hyperspace.hiddenToPeers || this.ultraCruise.running;
+    this.net.sendState({ p: [n2(at.x), n2(at.y), n2(at.z)], h: n3(p.heading), s: p.mounted ? 'seated' : (rig?.describe().state ?? 'idle'), v: n2(Math.hypot(p.vel.x, p.vel.z)), m: !!p.mounted, sab: p.saberOn, q, veh, ...(hidden ? { j: 1 as const } : {}) });
   }
 
   /** The wheel's slots from the rig's own emotes when none were kept yet, and the menu's Emotes page fed from it. */
@@ -3427,6 +3477,7 @@ class App {
   private async travel(planet: PlanetDef, zoneId?: string, ship?: ShipCrossing): Promise<Vehicle | null> {
     if (this.traveling) return null;
     this.hyperspace.abort('travel');
+    this.ultraCruise.abort();
     this.traveling = true;
     this.map.hide();
     this.closePanels();
@@ -3769,6 +3820,10 @@ class App {
   /** Jump to a place on the map: travel first when it is on another planet. */
   private async teleport(planet: PlanetDef, poi: Poi, zoneId?: string): Promise<void> {
     this.hyperspace.abort('teleport');
+    // A teleport within the same zone changes no zone, destroys no hull and starts no jump, so a run
+    // would notice nothing: it would carry the empty ship off and keep the streamer frozen where the
+    // player no longer is.
+    this.ultraCruise.abort();
     if (this.traveling) return;
     if (planet.id !== this.world.planet.id || (planet.zones?.length && zoneId && zoneId !== this.zone)) {
       await this.travel(planet, zoneId);
@@ -4638,6 +4693,7 @@ class App {
    */
   private die(): void {
     this.hyperspace.abort('died');
+    this.ultraCruise.abort();
     if (this.dying) return;
     this.dying = true;
     this.closePanels();
@@ -5851,6 +5907,9 @@ class App {
           // The same key out in space, where there is nothing to cut the engines over: set the hull down on
           // whatever is under it, and, once it is down, lift it off along that face's own up.
           if (input.justPressed(CUT_ENGINES_KEY) && wingsOf?.spec.ship && !this.hyperspace.locksControls && this.world.planet.space) wingsOf.askSetDown();
+          // The ultra cruise: the same key starts a run and lets go of one. It says for itself where
+          // it may run at all, so the only thing asked here is that a jump is not flying the hull.
+          if (input.justPressed(CRUISE_KEY) && !this.hyperspace.locksControls) this.ultraCruise.toggle();
           dropPilotChoices(this.world.vehicles, wingsOf);
           // The emote wheel: held open, the mouse picks, the key's release plays; the arrows play the first four outright.
           if (input.pressedAction('emoteWheel') && !player.mounted) this.emoteWheel.show(this.emotes);
@@ -5888,6 +5947,9 @@ class App {
         this.stepCombat(dt);
       }
 
+      // Before the hulls step: a run writes its hull's pose, and the hull's own update writes the
+      // same pose again on the same frame, so nothing ever lags a step.
+      this.ultraCruise.update(dt);
       this.stepVehicles(dt, simulate);
       this.stepNet(dt);
 

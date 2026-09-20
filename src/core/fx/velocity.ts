@@ -24,7 +24,7 @@ import { FX_CAMERA, NO_PRODUCTS, type FxWarmItem } from './pass';
 import { GeometryProduct, geometryMaterialDefaults, type FxGeometryDrawer } from './geometry';
 import type { PostFX } from '../postfx';
 import { ACTOR_LAYER } from '../../world/portalRender';
-import { MOVER_LIMITS, WARM_VARIANTS, classifyMover, drawableSince, moverPriority, movingWeight, shownSince, staticCut, takeByBudget, variantKey, type BudgetTotals, type FxMoverKind, type MoverFacts, type MoverResult, type VariantKeyParts } from './velocityMath.ts';
+import { MOVER_LIMITS, WARM_VARIANTS, classifyMover, drawableSince, moverPriority, movingWeight, reprojectionCarry, shownSince, staticCut, takeByBudget, variantKey, type BudgetTotals, type FxMoverKind, type MoverFacts, type MoverResult, type VariantKeyParts } from './velocityMath.ts';
 
 export type { FxMoverKind } from './velocityMath.ts';
 
@@ -175,13 +175,38 @@ interface MotionHistory {
 const histories = new WeakMap<FxFrameContext, MotionHistory>();
 
 /**
+ * The world-space translation by the carried step (`setReprojectionCarry` in velocityMath.ts),
+ * rebuilt only when the step changes, and where it is applied to a previous view the spine handed
+ * over: neither is ever allocated per frame.
+ */
+const carryMatrix = new THREE.Matrix4();
+const carriedGiven = new THREE.Matrix4();
+let carryX = Number.NaN;
+let carryY = Number.NaN;
+let carryZ = Number.NaN;
+
+/** The matrix that moves last frame's view by the carried step, or null while nothing carries it. */
+function carryNow(): THREE.Matrix4 | null {
+  const c = reprojectionCarry();
+  if (!c.on) return null;
+  if (carryX !== c.x || carryY !== c.y || carryZ !== c.z) {
+    carryMatrix.makeTranslation(-c.x, -c.y, -c.z);
+    carryX = c.x;
+    carryY = c.y;
+    carryZ = c.z;
+  }
+  return carryMatrix;
+}
+
+/**
  * This frame's projection times last frame's view: a change of field of view (aiming) is not motion,
  * so it never smears. The frame context carries it once the spine keeps the previous view; until then
  * it is kept here, one record per context, and a frame whose last frame was not seen reads as still.
  */
 export function prevProjViewOf(ctx: FxFrameContext): THREE.Matrix4 {
   const given = (ctx as { prevProjView?: THREE.Matrix4 }).prevProjView;
-  if (given) return given;
+  const carry = carryNow();
+  if (given) return carry ? carriedGiven.copy(given).multiply(carry) : given;
   let h = histories.get(ctx);
   if (!h) {
     h = { view: new THREE.Matrix4(), prevProjView: new THREE.Matrix4(), frame: -2, at: -2 };
@@ -190,6 +215,8 @@ export function prevProjViewOf(ctx: FxFrameContext): THREE.Matrix4 {
   if (h.at !== ctx.frame) {
     const prevView = h.frame === ctx.frame - 1 && !ctx.cameraCut ? h.view : ctx.view;
     h.prevProjView.multiplyMatrices(ctx.proj, prevView);
+    // The carried step goes on the world side, so a point that stood still lands where it now is.
+    if (carry) h.prevProjView.multiply(carry);
     h.view.copy(ctx.view);
     h.frame = ctx.frame;
     h.at = ctx.frame;
