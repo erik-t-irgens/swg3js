@@ -109,6 +109,8 @@ const tmpV = new THREE.Vector3();
 const ONE = new THREE.Vector3(1, 1, 1);
 const localA = new THREE.Vector3();
 const localB = new THREE.Vector3();
+/** The padded box a cell-follow tests a point against: one scratch, since a ship is followed as often as the player. */
+const tmpBox = new THREE.Box3();
 
 /** Where the player is: outside (cell 0 of no building) or in a cell of a building. */
 export interface CellState {
@@ -680,14 +682,28 @@ export class LayoutStreamer {
    * `prev` and `pos` are the player's feet positions this frame and last.
    */
   trackCell(state: CellState | null, prev: THREE.Vector3, pos: THREE.Vector3): CellState | null {
+    return this.followThrough(state, prev, pos, 0.9, 25);
+  }
+
+  /**
+   * The same for a vehicle, from a point taken as it is given (a hull's middle, not a walker's chest):
+   * a ship flies in and out of a hangar through the same doorways. It is followed on its own clock, so
+   * the step between two samples can be longer than a walker's; `maxJump` is how far it may have gone
+   * before the path is taken for a teleport.
+   */
+  trackVehicleCell(state: CellState | null, prev: THREE.Vector3, pos: THREE.Vector3, maxJump: number): CellState | null {
+    return this.followThrough(state, prev, pos, 0, maxJump * maxJump);
+  }
+
+  private followThrough(state: CellState | null, prev: THREE.Vector3, pos: THREE.Vector3, lift: number, maxJumpSq: number): CellState | null {
     const jump = prev.distanceToSquared(pos);
-    if (jump > 25) return null; // teleport (noclip, travel): start over outside
+    if (jump > maxJumpSq) return null; // teleport (noclip, travel): start over outside
     if (state) {
       const b = state.building;
-      localA.copy(prev).setY(prev.y + 0.9).applyMatrix4(b.inverse);
-      localB.copy(pos).setY(pos.y + 0.9).applyMatrix4(b.inverse);
+      localA.copy(prev).setY(prev.y + lift).applyMatrix4(b.inverse);
+      localB.copy(pos).setY(pos.y + lift).applyMatrix4(b.inverse);
       // Left the building entirely (fell out of a window, no-clipped): back outside.
-      if (!b.model.bounds.clone().expandByScalar(3).containsPoint(localB)) return null;
+      if (!tmpBox.copy(b.model.bounds).expandByScalar(3).containsPoint(localB)) return null;
       for (const portal of b.model.portals) {
         const link = portal.links.find((l) => l.from === state.cell) ?? portal.links.find((l) => l.to === state.cell);
         if (!link || !portal.passable) continue;
@@ -698,13 +714,13 @@ export class LayoutStreamer {
       }
       // Out of every room's box (a balcony past an outside door whose crossing was missed, a
       // window): outside, or the outside stays hidden while the player walks on it.
-      if (!b.model.interiorBoxes.some((box) => box.clone().expandByScalar(1).containsPoint(localB))) return null;
+      if (!b.model.interiorBoxes.some((box) => tmpBox.copy(box).expandByScalar(1).containsPoint(localB))) return null;
       return state;
     }
     for (const b of this.buildings) {
       if (Math.abs(b.x - pos.x) > b.radius + 4 || Math.abs(b.z - pos.z) > b.radius + 4) continue;
-      localA.copy(prev).setY(prev.y + 0.9).applyMatrix4(b.inverse);
-      localB.copy(pos).setY(pos.y + 0.9).applyMatrix4(b.inverse);
+      localA.copy(prev).setY(prev.y + lift).applyMatrix4(b.inverse);
+      localB.copy(pos).setY(pos.y + lift).applyMatrix4(b.inverse);
       for (const portal of b.model.portals) {
         const link = portal.links.find((l) => l.from === 0) ?? portal.links.find((l) => l.to === 0);
         if (!link || !portal.passable) continue;

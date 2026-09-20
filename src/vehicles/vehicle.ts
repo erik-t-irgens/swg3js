@@ -6,8 +6,9 @@
 import * as THREE from 'three';
 import { cleanTrimesh, Group, groups, RAPIER, TRIMESH_FLAGS, type Physics } from '../core/physics';
 import { WING_RULE, WingSet, easeWing, pilotWings, wingTopFactor, wingsWanted } from './wings';
-import { hardpointName, partOf, underPivot } from './shipAssembly';
+import { hardpointName, ownHardpoint, partOf, underPivot } from './shipAssembly';
 import { partnerLoss } from '../space/shipDamage';
+import { LANDING, SHIP_GROUND, SHIP_ROOM, catchDistance, fitFloor, floorUnder, heldPose, landingFoot, restPose, settleEase, withFilter, type FloorPlane } from './landing';
 
 /**
  * A vehicle's hull meets everything but the ground: the springs hold it off the terrain from
@@ -15,6 +16,23 @@ import { partnerLoss } from '../space/shipDamage';
  * feet into every slope the springs did not pitch it to, snagging and jolting there.
  */
 const HULL_GROUPS = groups(Group.all, Group.all & ~Group.terrain);
+/**
+ * A hull standing in a building's rooms, the filter the mobiles use inside: the shells go too, since
+ * a room is often larger than the hull around it and a ship in a hangar would wedge on the shell
+ * wherever the room pokes through it.
+ */
+const HULL_INSIDE = groups(Group.all, Group.all & ~(Group.terrain | Group.exterior));
+/** What a floor ray may find: everything outside, and neither the terrain nor a building's shell inside. */
+const FLOOR_OUTSIDE = groups(Group.all, Group.all);
+const FLOOR_INSIDE = groups(Group.all, Group.all & ~(Group.terrain | Group.exterior));
+/**
+ * The floor under a body is only what stands still: cast from inside a hull, a ray that took moving
+ * bodies would find the hull itself, or another ship, and call it the ground.
+ */
+const standsStill = (c: RAPIER.Collider): boolean => {
+  const b = c.parent();
+  return !b || b.isFixed();
+};
 import { cellIndexOf } from './interior';
 
 export type VehicleKind = 'podracer' | 'speederbike' | 'ground' | 'flyer' | 'ship';
@@ -219,6 +237,13 @@ const wingQ = new THREE.Quaternion();
 const wingS = new THREE.Vector3();
 const wantUp = new THREE.Vector3();
 const right = new THREE.Vector3();
+/** Scratch for the landing: the floor samples, the plane fitted to them, and the pose it gives. */
+const floorSamples = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+const floorTaken: THREE.Vector3[] = [];
+const floorPlane: FloorPlane = { a: 0, b: 0, c: 0 };
+const footWorld = new THREE.Vector3();
+const holdWorld = new THREE.Vector3();
+const holdTurn = new THREE.Quaternion();
 /** Velocity lost in one step past which a vehicle has hit something (m/s), and the hull taken per m/s beyond it. */
 const HIT_THRESHOLD = 6;
 const HIT_DAMAGE = 4;
@@ -447,6 +472,159 @@ export class Vehicle {
   drift = false;
   /** The jump holds the hull where it is: no motion, no flight. */
   held = false;
+  /** A ship set down: held at its rest pose on the ground, springs off, until the throttle or Space lifts it. */
+  landed = false;
+  /** A ship's engines: cut, nothing holds it up and it comes down. The throttle or Space starts them again. */
+  powered = true;
+  /** Why the last put-down was refused (too steep), for the prompt; cleared when the ship lifts off or lands. */
+  landNote = '';
+  /** Metres from the foot to the floor under it, as the last step read it (Infinity with no floor found). */
+  footGap = Infinity;
+  /** The settle onto the rest pose: seconds left of it, and where it is going. */
+  private settleLeft = 0;
+  private readonly restAt = new THREE.Vector3();
+  private readonly restTurn = new THREE.Quaternion();
+  private readonly settleFrom = new THREE.Vector3();
+  private readonly settleFromTurn = new THREE.Quaternion();
+  /** Seconds the pilot has held the ship down at the bottom of its hover band. */
+  private downFor = 0;
+  /** Where the hull rests on the ground, in the hull's frame (a ship's landing point, or its underside); null for anything else. */
+  readonly foot: THREE.Vector3 | null = null;
+  /** Whether that foot is the model's own landing point rather than the middle of its underside (for the report). */
+  private footFromPoint = false;
+  /** In a building's rooms: the floor is a ray among what stands still, and the hull ignores the shells. */
+  inRoom = false;
+  /** The physics and the terrain of the step now running, so a floor ray can be cast from the ground functions. */
+  private stepPhysics: Physics | null = null;
+  private stepGround: ((x: number, z: number) => number) | null = null;
+  /** The floor under a point while the vehicle stands in a room: a ray among what stands still. A field, so no closure is made per step. */
+  private readonly roomFloorAt = (x: number, z: number): number => this.floorRay(x, z);
+  /** A hold on the hull: it is written to this pose before every step, in a frame (a live matrix) or in the world. */
+  private holdOn = false;
+  private holdFrame: THREE.Matrix4 | null = null;
+  private readonly holdPos = new THREE.Vector3();
+  private readonly holdQuat = new THREE.Quaternion();
+  /** Whether something holds the hull at a pose of its own (a landing, and later a dock or a carrier). */
+  get holding(): boolean {
+    return this.holdOn;
+  }
+
+  /**
+   * Fix the hull at a pose, in `frame` (another object's live matrix, read every step) or in the world when it is
+   * null. Call it again to move it: the pose is written before the physics step, so nothing lags a frame. The hull
+   * keeps its colliders, so a body may still walk on it; `setGhost` is the separate question of what may hit it.
+   */
+  hold(frame: THREE.Matrix4 | null, pos: THREE.Vector3, quat: THREE.Quaternion): void {
+    this.holdFrame = frame;
+    this.holdPos.copy(pos);
+    this.holdQuat.copy(quat);
+    if (!this.holdOn) {
+      this.holdOn = true;
+      if (this.body.isValid()) this.body.setGravityScale(0, true);
+    }
+    this.writeHold();
+  }
+
+  /** Let go of a held hull, flying on at `velocity` (nothing given: standing still). */
+  release(velocity?: THREE.Vector3 | null): void {
+    if (!this.holdOn) return;
+    this.holdOn = false;
+    this.holdFrame = null;
+    if (!this.body.isValid()) return;
+    this.body.setGravityScale(1, true);
+    this.body.setLinvel(velocity ? { x: velocity.x, y: velocity.y, z: velocity.z } : STILL, true);
+    this.body.setAngvel(STILL, true);
+    this.commandedValid = false;
+    this.skipHitCheck = true;
+  }
+
+  /** Write the held pose onto the body and the drawn group: the frame's matrix now, times the pose. */
+  private writeHold(): void {
+    const body = this.body;
+    if (!body.isValid()) return;
+    heldPose(this.holdFrame, this.holdPos, this.holdQuat, holdWorld, holdTurn);
+    body.setTranslation({ x: holdWorld.x, y: holdWorld.y, z: holdWorld.z }, true);
+    body.setRotation({ x: holdTurn.x, y: holdTurn.y, z: holdTurn.z, w: holdTurn.w }, true);
+    body.setLinvel(STILL, true);
+    body.setAngvel(STILL, true);
+    this.pos.copy(holdWorld);
+    this.group.position.copy(holdWorld);
+    this.group.quaternion.copy(holdTurn);
+    this.speed = 0;
+    this.commandedValid = false;
+  }
+
+  /**
+   * In a building's rooms or out of them: the hull's colliders take the inside filter (no terrain, no shells)
+   * or the outside one, and its floor becomes a ray in the room rather than the terrain. Nothing is rebuilt.
+   */
+  setInRoom(inside: boolean): void {
+    if (inside === this.inRoom) return;
+    this.inRoom = inside;
+    // Only the filter half is written: each collider keeps the memberships it was made with, which is
+    // what `setGhost` promises to put back and what a part with groups of its own would rely on.
+    const want = inside ? HULL_INSIDE : HULL_GROUPS;
+    if (!this.body.isValid()) return;
+    const n = this.body.numColliders();
+    // Ghosted (a jump): the colliders are in no group at all, so the new filter goes into what is restored.
+    if (this.ghost) {
+      for (let i = 0; i < this.groupsBeforeGhost.length; i++) this.groupsBeforeGhost[i] = withFilter(this.groupsBeforeGhost[i], want);
+      return;
+    }
+    for (let i = 0; i < n; i++) {
+      const c = this.body.collider(i);
+      c.setCollisionGroups(withFilter(c.collisionGroups(), want));
+    }
+  }
+
+  /** Cut a ship's engines: nothing holds it up, and it comes down under its own weight (the crash rules apply to what follows). */
+  cutEngines(): void {
+    if (!this.spec.ship || this.landed) return;
+    this.powered = false;
+    this.jumpCruise = null;
+  }
+
+  /** The engines again (the throttle, Space, or a lift-off). */
+  enginesOn(): void {
+    this.powered = true;
+  }
+
+  /** Off the ground again: the hold goes, the springs take the hull back, and it flies as before. */
+  liftOff(): void {
+    if (!this.landed && this.settleLeft <= 0) {
+      this.powered = true;
+      return;
+    }
+    this.landed = false;
+    this.settleLeft = 0;
+    this.downFor = 0;
+    this.powered = true;
+    this.landNote = '';
+    this.release(null);
+    if (this.spec.fly) this.altitude = this.spec.fly.floor;
+    this.skipHitCheck = true;
+  }
+
+  /** How the ship stands on the ground now, for the console and the prompt. */
+  landReport(): Record<string, unknown> {
+    const n2 = (n: number) => Number(n.toFixed(2));
+    return {
+      ship: this.spec.id,
+      rule: SHIP_GROUND.rule,
+      landed: this.landed,
+      settling: n2(this.settleLeft),
+      powered: this.powered,
+      holding: this.holdOn,
+      inRoom: this.inRoom,
+      foot: this.foot ? this.foot.toArray().map(n2) : null,
+      footFrom: this.foot ? (this.footFromPoint ? 'its landing point' : 'its underside') : null,
+      standsOff: this.foot ? n2(Math.min(this.spec.bounds.min[1], this.spec.bounds.max[1]) - this.foot.y) : null,
+      gap: Number.isFinite(this.footGap) ? n2(this.footGap) : null,
+      airborne: this.airborne,
+      note: this.landNote,
+      tune: { ...LANDING, room: { ...SHIP_ROOM } },
+    };
+  }
   /** The cruise a jump commands (m/s), over the throttle; null when no jump is flying the hull. */
   jumpCruise: number | null = null;
   /** The hull's colliders are in no group while a jump flies it (`setGhost`). */
@@ -534,6 +712,190 @@ export class Vehicle {
     }
     for (const h of this.colliderHandles) HULLS.set(h, this);
     this.pos.set(x, y, z);
+    // Where the hull will rest on the ground: the game's own point under it (its own, never a part's),
+    // read in the hull's frame once, since nothing on the hull moves it afterwards.
+    if (spec.ship) {
+      const node = ownHardpoint(model, 'landing1');
+      let point: THREE.Vector3 | null = null;
+      if (node) {
+        this.group.updateMatrixWorld(true);
+        point = node.getWorldPosition(new THREE.Vector3()).applyMatrix4(new THREE.Matrix4().copy(this.group.matrixWorld).invert());
+      }
+      this.foot = landingFoot(point, b, new THREE.Vector3());
+      this.footFromPoint = !!node;
+    }
+  }
+
+  /**
+   * The floor straight down from a point, for a hull standing in a building's rooms: the nearest surface
+   * that stands still, the room's own and not the terrain under the building. -Infinity when nothing is
+   * under it, which reads as "no ground" everywhere the height is used.
+   */
+  private floorRay(x: number, z: number): number {
+    const ph = this.stepPhysics;
+    if (!ph) return -Infinity;
+    const from = this.pos.y + this.centre.y;
+    const hit = ph.topSurface(x, z, from, LANDING.floorReach, this.inRoom ? FLOOR_INSIDE : FLOOR_OUTSIDE, standsStill);
+    return hit ?? -Infinity;
+  }
+
+  /**
+   * The floor under the foot now, for the put-down: a ray among what stands still, and the terrain under
+   * it outside (a hull outside a room may stand on the open ground, where there is no collider to find
+   * until the terrain's own chunk is in).
+   */
+  private floorUnder(x: number, z: number): number {
+    return floorUnder(this.inRoom, this.floorRay(x, z), this.stepGround?.(x, z) ?? -Infinity);
+  }
+
+  /** The foot's place in the world now (the hull's pose times the foot), with the hull's turn `q`. */
+  private footAt(turn: THREE.Quaternion, out: THREE.Vector3): THREE.Vector3 {
+    return out.copy(this.foot!).applyQuaternion(turn).add(this.pos);
+  }
+
+  /**
+   * Put the ship down where it stands: five floor samples round the foot fitted to a plane, the hull turned
+   * onto it with its heading kept, and an ease onto that pose. A slope past `LANDING.tilt` is refused
+   * (`clamp` for a hull with its engines cut, which has nowhere else to go). Returns whether it is coming down.
+   */
+  private beginLanding(clamp: boolean, impact: number): boolean {
+    const s = this.spec;
+    if (!this.foot) return false;
+    this.quaternion(q);
+    this.footAt(q, footWorld);
+    const w = Math.max(1, (s.bounds.max[0] - s.bounds.min[0]) * LANDING.spread);
+    const l = Math.max(1, (s.bounds.max[2] - s.bounds.min[2]) * LANDING.spread);
+    fwd.set(Math.sin(this.heading), 0, Math.cos(this.heading));
+    right.crossVectors(WORLD_UP, fwd);
+    floorTaken.length = 0;
+    // Five samples: the foot and one out each way. Invented, and the fit takes however many find a floor.
+    for (let i = 0; i < floorSamples.length; i++) {
+      const along = i === 1 ? l : i === 2 ? -l : 0;
+      const across = i === 3 ? w : i === 4 ? -w : 0;
+      const x = footWorld.x + fwd.x * along + right.x * across;
+      const z = footWorld.z + fwd.z * along + right.z * across;
+      const y = this.floorUnder(x, z);
+      if (!Number.isFinite(y)) continue;
+      floorTaken.push(floorSamples[i].set(x, y, z));
+    }
+    if (!floorTaken.length) return false;
+    fitFloor(floorTaken, floorPlane);
+    const tilt = restPose(floorPlane, this.foot, this.pos.x, this.pos.z, this.heading, THREE.MathUtils.degToRad(LANDING.tilt), this.restAt, this.restTurn, clamp);
+    if (tilt === null) {
+      this.landNote = 'too steep to set down here';
+      this.downFor = 0;
+      return false;
+    }
+    this.landNote = '';
+    this.settleFrom.copy(this.pos);
+    this.settleFromTurn.copy(q);
+    this.settleLeft = LANDING.settle;
+    this.airborne = false;
+    this.cruise = 0;
+    this.speed = 0;
+    this.commandedValid = false;
+    // Down hard: the hull takes it as a crash, as flying into the ground does.
+    if (impact > LANDING.hard) {
+      this.crashed = Math.max(this.crashed, impact);
+      this.justHit = Math.max(this.justHit, impact);
+      this.hurtHull((impact - LANDING.hard) * HIT_DAMAGE);
+      this.landNote = 'a hard landing';
+    }
+    return true;
+  }
+
+  /** One step of the settle onto the rest pose; the hull is held there from the moment it arrives. */
+  private stepSettle(dt: number): void {
+    this.settleLeft = Math.max(0, this.settleLeft - dt);
+    const k = settleEase(1 - this.settleLeft / Math.max(0.001, LANDING.settle));
+    tmp.copy(this.settleFrom).lerp(this.restAt, k);
+    qTmp.copy(this.settleFromTurn).slerp(this.restTurn, k);
+    this.hold(null, tmp, qTmp);
+    if (this.settleLeft <= 0) {
+      this.landed = true;
+      this.powered = false;
+      this.wings.snap(false);
+      this.followWings();
+    }
+  }
+
+  /**
+   * A ship meeting the ground on a planet, under the landing rule: the hold while it is down, the ease while
+   * it comes down, the fall with the engines cut, and the put-down itself. Returns whether it took this step;
+   * false leaves the hull hovering on its springs, as it always did.
+   */
+  private groundShip(dt: number, drive: DriveInput | null): boolean {
+    const s = this.spec;
+    // The older springs rule put back under a ship that is already down: let go of the hull at once.
+    // Nothing else would, and it would be held at its rest pose with no way off the ground.
+    if (SHIP_GROUND.rule !== 'landing') {
+      if (this.landed || this.settleLeft > 0) this.liftOff();
+      return false;
+    }
+    if (!this.foot || this.space) return false;
+    const wantsUp = !!drive && (drive.throttle > 0 || drive.up);
+    if (this.landed) {
+      if (wantsUp) {
+        this.liftOff();
+        return false;
+      }
+      this.writeHold();
+      this.groundedPoints = 4;
+      this.airborne = false;
+      return true;
+    }
+    if (this.settleLeft > 0) {
+      // Called off: the pilot opened up again before it was down.
+      if (wantsUp) {
+        this.settleLeft = 0;
+        this.release(null);
+        this.powered = true;
+        return false;
+      }
+      this.stepSettle(dt);
+      return true;
+    }
+    if (wantsUp) this.powered = true;
+    const t = this.body.translation();
+    this.pos.set(t.x, t.y, t.z);
+    this.quaternion(q);
+    this.footAt(q, footWorld);
+    const floor = this.floorUnder(footWorld.x, footWorld.z);
+    this.footGap = Number.isFinite(floor) ? footWorld.y - floor : Infinity;
+    const lv = this.body.linvel();
+    if (!this.powered) {
+      // The engines are cut: gravity and the contacts have the hull, and it is caught as the floor comes up.
+      this.airborne = false;
+      this.body.setGravityScale(1, true);
+      // What it arrives with is its whole speed, not only its fall. Nothing flies a hull with its
+      // engines out and nothing bleeds its speed off, and the flight model's own crash test is not
+      // running, so a hull still travelling fast is flying into the ground: that is a crash.
+      const impact = Math.hypot(lv.x, lv.y, lv.z);
+      if (this.footGap <= catchDistance(-lv.y) && this.beginLanding(true, impact)) {
+        // Held from this step on, so no step passes with neither the springs nor the hold under it.
+        this.stepSettle(0);
+        return true;
+      }
+      this.groundedPoints = 0;
+      this.cruise = 0;
+      this.speed = 0;
+      // The drawn hull follows the body down (nothing after this writes it this step).
+      this.group.position.copy(this.pos);
+      this.group.quaternion.copy(q);
+      return true;
+    }
+    // Powered: the pilot holds it down at the bottom of its band until it sets down.
+    const atBottom = !!s.fly && this.altitude <= s.fly.floor + LANDING.bandSlack;
+    const down = !!drive?.down && atBottom && !this.airborne;
+    this.downFor = down ? this.downFor + dt : 0;
+    // A refusal is the answer to one attempt: it goes as soon as the pilot stops asking for down,
+    // or "too steep to set down here" would follow the ship about until it next landed somewhere.
+    if (!drive?.down && this.landNote) this.landNote = '';
+    if (this.downFor >= LANDING.hold && this.footGap <= LANDING.reach && this.beginLanding(false, 0)) {
+      this.stepSettle(0);
+      return true;
+    }
+    return false;
   }
 
   /** Half the hull's height, as a bolt's target (the Hittable contract). */
@@ -783,6 +1145,8 @@ export class Vehicle {
   /** Put a ship straight into flight at `speed` metres a second, on its present heading: arriving from another world in the air. */
   launch(speed: number): void {
     if (!this.spec.ship) return;
+    // Off the ground it goes: nothing holds a hull that is launched into flight.
+    if (this.landed || this.settleLeft > 0) this.liftOff();
     this.cruise = speed;
     this.speed = speed;
     this.airborne = true;
@@ -832,6 +1196,9 @@ export class Vehicle {
 
   /** Put the hull somewhere else at once, facing `quaternion`, flying at `speed` along its nose; trails and hit memory cleared. Nothing allocated. */
   teleport(pos: THREE.Vector3, quaternion: THREE.Quaternion, speed: number): void {
+    // Moved somewhere else: whatever held it on the ground lets go, or the hold would put it back.
+    if (this.landed || this.settleLeft > 0) this.liftOff();
+    else if (this.holdOn) this.release(null);
     const body = this.body;
     body.setTranslation({ x: pos.x, y: pos.y, z: pos.z }, true);
     body.setRotation({ x: quaternion.x, y: quaternion.y, z: quaternion.z, w: quaternion.w }, true);
@@ -888,6 +1255,21 @@ export class Vehicle {
     return out.set(r.x, r.y, r.z, r.w);
   }
 
+  /**
+   * Turn a standing hull to face a heading, upright: the body, the flight attitude and the drawn group
+   * together. For the moment a vehicle is stood (a ship turned along the room it was spawned in); it is
+   * not for a hull in flight, which turns through its own controls.
+   */
+  faceHeading(heading: number): void {
+    e.set(0, heading, 0, 'YXZ');
+    q.setFromEuler(e);
+    this.body.setRotation({ x: q.x, y: q.y, z: q.z, w: q.w }, true);
+    this.body.setAngvel(STILL, true);
+    this.attitude.copy(q);
+    this.group.quaternion.copy(q);
+    this.group.updateMatrixWorld(true);
+  }
+
   /** The way the vehicle faces (rad): 0 along +z, growing toward +x, as the player's heading; a ship's is its nose's bearing whatever its bank. */
   get heading(): number {
     const r = this.body.rotation();
@@ -917,6 +1299,27 @@ export class Vehicle {
     const kept = this.keptHit;
     this.keptHit = 0;
     this.steppedAt = physics.steps;
+    // The floor this step: the terrain outside, the room's own surfaces while the vehicle stands in a
+    // building (a room overhangs its shell, so the terrain under it is not its floor, and the terrain's
+    // own reset must not fire there). The room's is a bound field, so no closure is made per step.
+    this.stepPhysics = physics;
+    this.stepGround = groundAt ?? null;
+    const ground = this.inRoom ? this.roomFloorAt : groundAt;
+    const water = this.inRoom ? undefined : waterAt;
+    // A ship that is down, or coming down, is the landing rule's before anything else reads the hull;
+    // it gives the hull back (false) when the pilot opens up again.
+    if (s.ship && (this.landed || this.settleLeft > 0) && this.groundShip(dt, drive)) {
+      this.justHit = kept;
+      this.onUpdate?.(dt, this, drive);
+      return;
+    }
+    if (this.holdOn) {
+      // Something else holds the hull at a pose of its own: written before the step, so nothing lags a frame.
+      this.writeHold();
+      this.justHit = kept;
+      this.onUpdate?.(dt, this, drive);
+      return;
+    }
     if (this.held) {
       // A jump holds the hull still where it is (in the tunnel, or waiting for the world ahead): no flight, no wings.
       body.setLinvel(STILL, true);
@@ -933,10 +1336,19 @@ export class Vehicle {
     }
     this.hopCd = Math.max(0, this.hopCd - dt);
     this.updateWings(dt);
-    if (s.ship && this.flyShip(dt, drive, physics, groundAt, waterAt)) {
+    // With its engines cut there is nothing to fly it with: gravity and the contacts have the hull.
+    const cutOut = !!s.ship && !this.powered && !this.space && SHIP_GROUND.rule === 'landing';
+    if (s.ship && !cutOut && this.flyShip(dt, drive, physics, ground, water)) {
       if (kept > this.justHit) this.justHit = kept;
       this.group.position.copy(this.pos);
       this.group.quaternion.copy(q);
+      this.onUpdate?.(dt, this, drive);
+      return;
+    }
+    // Not flying: the landing rule puts it down when the pilot asks, and catches a hull coming down
+    // with its engines cut. It gives the hull back (false) to hover on its springs as it always did.
+    if (s.ship && this.groundShip(dt, drive)) {
+      this.justHit = kept;
       this.onUpdate?.(dt, this, drive);
       return;
     }
@@ -978,19 +1390,20 @@ export class Vehicle {
     // The water is a floor too: a machine rides on it, an animal sinks in to its chest.
     const height = s.bounds.max[1] - s.bounds.min[1];
     const floorAt = (x: number, z: number) => {
-      const ground = groundAt ? groundAt(x, z) : -Infinity;
-      const water = waterAt ? waterAt(x, z) : -Infinity;
-      return Math.max(ground, s.animal ? water - height * 0.55 : water);
+      const solid = ground ? ground(x, z) : -Infinity;
+      const wet = water ? water(x, z) : -Infinity;
+      return Math.max(solid, s.animal ? wet - height * 0.55 : wet);
     };
-    this.onWater = !!waterAt && !!groundAt && waterAt(this.pos.x, this.pos.z) > groundAt(this.pos.x, this.pos.z) + 0.05 && this.pos.y - s.bounds.min[1] < waterAt(this.pos.x, this.pos.z) + ride * 1.6 + 0.3;
+    this.onWater = !!water && !!ground && water(this.pos.x, this.pos.z) > ground(this.pos.x, this.pos.z) + 0.05 && this.pos.y - s.bounds.min[1] < water(this.pos.x, this.pos.z) + ride * 1.6 + 0.3;
     if (!flying) {
       for (const hp of this.hoverPoints) {
         p.copy(hp).applyQuaternion(q).add(this.pos);
         // The ray starts at the collider's centre height over the corner, so a corner pushed
         // into the ground still reads a (negative) distance and is lifted out.
-        const hit = physics.groundDistance(p.x, p.y + drop, p.z, drop + ride * 2.2 + 0.5, body);
+        // Inside a building the shells and the terrain are not its floor, as they are not the mobiles'.
+        const hit = physics.groundDistance(p.x, p.y + drop, p.z, drop + ride * 2.2 + 0.5, body, this.inRoom ? FLOOR_INSIDE : undefined);
         let dist = hit === null ? null : hit - drop;
-        if (waterAt) {
+        if (water) {
           const toWater = p.y - floorAt(p.x, p.z);
           if (dist === null || toWater < dist) dist = toWater;
         }
@@ -1005,11 +1418,12 @@ export class Vehicle {
       }
       // The ground is a hard floor: a corner that has got under it is lifted out at once, and
       // the speed it went in at is a hit, so a hull cannot sink into a slope as into water.
-      if (groundAt && !s.animal) {
+      if (ground && !s.animal) {
         let under = 0;
         for (const hp of this.hoverPoints) {
           p.copy(hp).applyQuaternion(q).add(this.pos);
-          under = Math.max(under, groundAt(p.x, p.z) - p.y);
+          const floor = ground(p.x, p.z);
+          if (Number.isFinite(floor)) under = Math.max(under, floor - p.y);
         }
         if (under > 0.08) {
           this.pos.y += under + 0.02;
@@ -1025,19 +1439,19 @@ export class Vehicle {
           }
         }
       }
-    } else if (groundAt) {
-      const ground = floorAt(this.pos.x, this.pos.z);
-      const h = this.pos.y - s.bounds.min[1] - ground;
+    } else if (ground) {
+      const floor = floorAt(this.pos.x, this.pos.z);
+      const h = this.pos.y - s.bounds.min[1] - floor;
       const f = m * (g + 6 * (this.altitude - h) - 3.5 * lv.y);
-      body.addForce({ x: 0, y: f, z: 0 }, true);
+      if (Number.isFinite(f)) body.addForce({ x: 0, y: f, z: 0 }, true);
       this.groundedPoints = 4;
     }
     // The terrain's own height is a floor under everything: a fast vehicle can outrun the physics
     // ground being streamed in, and a spawn can land a hair inside a slope. Near or below that
     // height with nothing under the corners, hold the ride height off the terrain instead of falling.
-    if (groundAt && this.groundedPoints < 2) {
-      const ground = floorAt(this.pos.x, this.pos.z);
-      const h = this.pos.y - s.bounds.min[1] - ground;
+    if (ground && this.groundedPoints < 2) {
+      const floor = floorAt(this.pos.x, this.pos.z);
+      const h = this.pos.y - s.bounds.min[1] - floor;
       if (h < ride * 1.6 + 0.3) {
         const f = m * THREE.MathUtils.clamp(g + 6 * (ride - h) - 3.5 * lv.y, 0, g * 3.5);
         body.addForce({ x: 0, y: f, z: 0 }, true);
@@ -1047,7 +1461,7 @@ export class Vehicle {
     // Off the ground, a repulsor still fights gravity: past its cushion the machine sinks at a
     // walking pace rather than dropping, so a ramp gives a glide. Never more than its weight,
     // and only near the ground, so it is not a flyer.
-    if (groundAt && !flying && !s.animal && s.hover >= 0.3 && this.groundedPoints < 2) {
+    if (ground && !flying && !s.animal && s.hover >= 0.3 && this.groundedPoints < 2) {
       const h = this.pos.y - s.bounds.min[1] - floorAt(this.pos.x, this.pos.z);
       if (h < GLIDE_CEILING) {
         let f = m * g * GLIDE_LIFT;
@@ -1081,18 +1495,18 @@ export class Vehicle {
     // A hover kind pitches and rolls to the ground under it, as its cushion does: the ground a
     // length ahead and behind, and a width either side, give the slope, so a rise ahead lifts the
     // nose before the hull meets it rather than the nose ploughing in.
-    if (groundAt && grounded && !flying && !s.animal && s.kind !== 'ground') {
+    if (ground && grounded && !flying && !s.animal && s.kind !== 'ground') {
       const L = Math.max(1.2, (s.bounds.max[2] - s.bounds.min[2]) * 0.6);
       const W = Math.max(0.8, (s.bounds.max[0] - s.bounds.min[0]) * 0.6);
       right.crossVectors(fwd, WORLD_UP).normalize();
-      const ahead = groundAt(this.pos.x + fwd.x * L, this.pos.z + fwd.z * L);
-      const behind = groundAt(this.pos.x - fwd.x * L, this.pos.z - fwd.z * L);
-      const toRight = groundAt(this.pos.x + right.x * W, this.pos.z + right.z * W);
-      const toLeft = groundAt(this.pos.x - right.x * W, this.pos.z - right.z * W);
+      const ahead = ground(this.pos.x + fwd.x * L, this.pos.z + fwd.z * L);
+      const behind = ground(this.pos.x - fwd.x * L, this.pos.z - fwd.z * L);
+      const toRight = ground(this.pos.x + right.x * W, this.pos.z + right.z * W);
+      const toLeft = ground(this.pos.x - right.x * W, this.pos.z - right.z * W);
       const pitch = THREE.MathUtils.clamp((ahead - behind) / (2 * L), -0.7, 0.7);
       const roll = THREE.MathUtils.clamp((toRight - toLeft) / (2 * W), -0.7, 0.7);
-      // The surface normal, tilted back from level by the slopes.
-      wantUp.addScaledVector(fwd, -pitch * SLOPE_FOLLOW).addScaledVector(right, -roll * SLOPE_FOLLOW).normalize();
+      // The surface normal, tilted back from level by the slopes (a room's floor may answer with nothing).
+      if (Number.isFinite(pitch) && Number.isFinite(roll)) wantUp.addScaledVector(fwd, -pitch * SLOPE_FOLLOW).addScaledVector(right, -roll * SLOPE_FOLLOW).normalize();
     }
     // A pod racer on the keys yaws hard, its nose swinging round the way a Racer pod's does
     // under the air brakes, banking further and sliding wide while it does; the mouse steers it
@@ -1367,7 +1781,12 @@ export class Vehicle {
     // Space has no ground: its procedural ground is a plane at the zone's base, 3 km down, never built but still what
     // `groundAt` answers, and holding a slow ship over it or stopping a sinking one there made an invisible floor with
     // half the stations under it. There a slow or stopped ship hangs where it is.
-    if (this.cruise < 8 && !this.space) tmp.y += this.cruise < 2 ? -1.5 : THREE.MathUtils.clamp((minH - hw) * 1.5, -2, 4);
+    // Stopped with the engines running, a ship holds the height it is at rather than sinking (the landing
+    // rule), but the pilot still flies it up and down by hand at the rate it always sank at: Ctrl sinks
+    // it, which is what brings it down to where it can be set down, and Space lifts it. With the engines
+    // out, and under the older springs rule, it sinks as it always did.
+    const vtol = SHIP_GROUND.rule === 'landing' && this.powered ? (drive?.down ? -1.5 : drive?.up ? 1.5 : 0) : -1.5;
+    if (this.cruise < 8 && !this.space) tmp.y += this.cruise < 2 ? vtol : THREE.MathUtils.clamp((minH - hw) * 1.5, -2, 4);
     if (!this.space && h < s.fly!.floor + 0.5 && tmp.y < 0) tmp.y = 0;
     // Never ask the engine for more than it will move a body (a boost in space asks 440): the cut would read as a hit.
     if (tmp.lengthSq() > BODY_SPEED_CAP * BODY_SPEED_CAP) tmp.setLength(BODY_SPEED_CAP);
@@ -1392,6 +1811,11 @@ export class Vehicle {
   dispose(physics: Physics, scene: THREE.Scene): void {
     // First, so whoever holds the vehicle (an NPC ship's manager, the ship contacts) drops it.
     this.disposed = true;
+    // The step's physics and terrain are kept only for the length of a step: held on a disposed hull
+    // they would keep a whole world and its terrain alive behind it.
+    this.stepPhysics = null;
+    this.stepGround = null;
+    this.holdFrame = null;
     for (const h of this.colliderHandles) if (HULLS.get(h) === this) HULLS.delete(h);
     this.combat?.dispose();
     this.combat = null;

@@ -91,6 +91,7 @@ import { loadSettings, type Settings } from './core/settings';
 import { deleteCharacter, loadCharacters, newCharacterId, upsertCharacter, type Appearance, type SavedCharacter } from './core/characters';
 import { FRAME_NUDGE, Garage, type VehicleDef } from './vehicles/garage';
 import { WINGS_KEY, WING_RULE, dropPilotChoices } from './vehicles/wings';
+import { CUT_ENGINES_KEY, LANDING, SHIP_GROUND, SHIP_ROOM } from './vehicles/landing';
 import type { Vehicle, VehicleKind } from './vehicles/vehicle';
 import { HEAD_TO_EYE, SEATED_EYE_FALLBACK, SEAT_RULE, cockpitYawStep, frameFileName, mirroredOffset, seatDropUsed } from './vehicles/cockpitSeat';
 import { World } from './world/world';
@@ -108,13 +109,18 @@ function mountPrompt(v: import('./vehicles/vehicle').Vehicle, wingsKey: string =
   const hop = v.spec.hop ? ' · <b>Space</b> hop' : '';
   const fly = v.spec.fly ? ' · look up/down or <b>Space</b>/<b>X</b> to climb and sink' : '';
   if (k === 'ship') {
+    // Down on the ground: what gets it up again, and why a put-down was refused.
+    if (v.landed) return `landed · <b>W</b> or <b>Space</b> lifts off · <b>E</b> leave${v.landNote ? ` · ${v.landNote}` : ''}`;
+    if (v.holding) return 'setting down…';
     // Hovering, the ship is a VTOL: it holds still until the throttle opens, rises and sinks on the keys, slides sideways. In flight the mouse flies it.
-    const hover = `<b>W</b> throttle up into flight · mouse turns · <b>Space</b>/<b>Ctrl</b> rise and sink · <b>A/D</b> slide`;
-    const flight = `<b>W</b>/<b>S</b> throttle up and down · mouse: in the circle aims the guns, out of it keeps turning the ship · <b>A/D</b> roll · <b>Space</b>/<b>X</b> pitch`;
+    const down = SHIP_GROUND.rule === 'landing' ? ` · <b>Ctrl</b> brings it down, held at the bottom to set it down · <b>${keyName(CUT_ENGINES_KEY)}</b> cuts the engines` : '';
+    const hover = `<b>W</b> throttle up into flight · mouse turns · <b>Space</b>/<b>Ctrl</b> rise and sink · <b>A/D</b> slide${down}`;
+    // Stopped in the air the ship holds its height, so the way down belongs on the flight line too.
+    const flight = `<b>W</b>/<b>S</b> throttle up and down · mouse: in the circle aims the guns, out of it keeps turning the ship · <b>A/D</b> roll · <b>Space</b>/<b>X</b> pitch${v.powered ? '' : ' · <b>ENGINES CUT</b>'}${Math.abs(v.speed) < 2 ? down : ''}`;
     // A ship whose wings open: the wings key and which way a press would take the pilot's choice; an open chosen while a
     // low wing waits for room says so.
     const wings = v.wings.length ? ` · <b>${keyName(wingsKey)}</b> ${v.wings.chosen ? 'close' : 'open'} the wings${v.wings.pilot && !v.wings.target ? ' (they open with room under them)' : ''}` : '';
-    return `<b>E</b> leave · ${v.airborne ? flight : hover} · <b>wheel</b> zoom, all the way in for the cockpit · <b>Alt</b> look around${v.guns.length ? ' · <b>click</b> fires · <b>Tab</b> next target' : ''}${wings} · <b>Shift</b> burn · ${v.airborne ? 'flying' : 'hovering'} · ${Math.round(Math.abs(v.speed) * 3.6)} km/h${v.hp < v.maxHp ? ` · hull ${Math.round((v.hp / v.maxHp) * 100)}%` : ''}`;
+    return `<b>E</b> leave · ${v.airborne ? flight : hover} · <b>wheel</b> zoom, all the way in for the cockpit · <b>Alt</b> look around${v.guns.length ? ' · <b>click</b> fires · <b>Tab</b> next target' : ''}${wings} · <b>Shift</b> burn · ${v.airborne ? 'flying' : 'hovering'} · ${Math.round(Math.abs(v.speed) * 3.6)} km/h${v.hp < v.maxHp ? ` · hull ${Math.round((v.hp / v.maxHp) * 100)}%` : ''}${v.landNote ? ` · ${v.landNote}` : ''}`;
   }
   const turn = k === 'ground' ? 'mouse or <b>A/D</b> turn' : 'mouse or <b>A/D</b> steer';
   const hull = v.hp < v.maxHp ? ` · hull ${Math.round((v.hp / v.maxHp) * 100)}%${v.hp / v.maxHp < 0.34 ? ' LIMPING' : v.hp / v.maxHp < 0.67 ? ' smoking' : ''}` : '';
@@ -372,6 +378,8 @@ class App {
   private readonly roomAir: RoomAir;
   private readonly roomAirInput: RoomAirInput;
   private readonly roomAirBuffer = new THREE.Vector2();
+  /** The eye in the world, for the camera's building choice each frame (nothing cloned per frame). */
+  private readonly cameraEye = new THREE.Vector3();
 
   constructor(private readonly physics: Physics) {
     this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true, powerPreference: 'high-performance', stencil: true });
@@ -1846,6 +1854,33 @@ class App {
         else if (mode !== undefined) return `wings: '${String(mode)}' is none of open, closed, toggle, auto, multiplier, threshold`;
         if (mode === 'open' && !v.airborne && v.wingDrop > 0) console.warn(`wings: forced open on the ground: they reach ${v.wingDrop.toFixed(1)} m under the belly and may stand in the terrain (the game never opens them there)`);
         return v.wingReport();
+      },
+      /**
+       * How the ship ridden, piloted or nearest stands on the ground: `landing()` reports it, `landing({ gap: 0.1 })`
+       * sets any of the invented numbers (LANDING in vehicles/landing.ts: gap, tilt, settle, reach, catchLead, hold,
+       * hard, floorReach, spread, bandSlack) and `landing({ room: { spare: 4 } })` the ones for a ship in a building's
+       * rooms (SHIP_ROOM: every, step, spare). `landing({ rule: 'springs' })` puts the older hover-only ride back for
+       * every ship, `landing({ cut: true })` cuts its engines, so it comes down and settles where it stands (false
+       * starts them again), and `landing({ up: true })` lifts it off. `__debug.advance` steps all of it, so a settle
+       * can be watched from a hidden tab: `__debug.landing({ cut: true }); __debug.advance(4); __debug.landing()`.
+       */
+      landing: (opts: { rule?: 'landing' | 'springs'; cut?: boolean; up?: boolean; room?: Partial<typeof SHIP_ROOM> } & Partial<typeof LANDING> = {}) => {
+        const p = this.player;
+        const v = p.mounted ?? p.piloting ?? p.aboard?.vehicle ?? [...this.world.vehicles].filter((o) => o.spec.ship && !o.autopilot).sort((a, b) => a.pos.distanceTo(p.pos) - b.pos.distanceTo(p.pos))[0];
+        if (opts.rule === 'landing' || opts.rule === 'springs') SHIP_GROUND.rule = opts.rule;
+        for (const k of Object.keys(LANDING) as (keyof typeof LANDING)[]) {
+          const n = opts[k];
+          if (typeof n === 'number' && Number.isFinite(n)) LANDING[k] = n;
+        }
+        for (const k of Object.keys(SHIP_ROOM) as (keyof typeof SHIP_ROOM)[]) {
+          const n = opts.room?.[k];
+          if (typeof n === 'number' && Number.isFinite(n)) SHIP_ROOM[k] = n;
+        }
+        if (!v) return 'no ship: spawn one (spawn(\'xwing\')) or board one';
+        if (opts.cut === true) v.cutEngines();
+        if (opts.cut === false) v.enginesOn();
+        if (opts.up) v.liftOff();
+        return v.landReport();
       },
       /**
        * The astromechs in their sockets: `droid({ shown: 0.4 })` sets the share of a droid's height shown over its socket
@@ -3869,6 +3904,9 @@ class App {
     else this.shipLeadValid = false;
     const terrain = this.world.terrain;
     for (const v of this.world.vehicles) {
+      // Which building room the ship stands in, followed through the portals before it steps: in one, its
+      // floor is the room's and its hull ignores the terrain and the shells.
+      this.world.trackVehicleRoom(v, dt);
       // An NPC ship flies on its brain's drive while play runs (held, it goes nowhere anyway).
       if (!v.drift) v.update(dt, this.physics, v === pilot ? drive : simulate && v.autopilot ? v.autopilot.drive : null, (x, z) => terrain.heightAt(x, z), (x, z) => terrain.waterHeightAt(x, z));
       else {
@@ -4184,7 +4222,11 @@ class App {
   private drawFrame(): void {
     const cam = this.cam.camera;
     cam.updateMatrixWorld();
-    const eye = this.player.pos.clone().setY(this.player.pos.y + 1.5);
+    // The eye in the world: aboard a ship's rooms `pos` is in the hull's frame, and the building the
+    // camera is in must be walked from where the figure really stands. Kept in a field, so nothing is
+    // cloned per frame.
+    const at = this.player.worldPos;
+    const eye = this.cameraEye.set(at.x, at.y + 1.5, at.z);
     const view = this.portals.cameraBuilding(this.world.cellState, eye, cam.position, this.world.buildings);
     // The room's air, before the scene is drawn (its motes are in it): which room this frame is
     // drawn from, its doorway beams, its lamps and its motes. The effects read it after, in the fill below.
@@ -5471,6 +5513,12 @@ class App {
           // is pressed again or the seat is left (a ship nobody flies goes back to the rule). Locked while a jump flies the ship.
           const wingsOf = player.mounted ?? player.piloting;
           if (input.pressedAction('wings') && wingsOf?.spec.ship && wingsOf.wings.length && !this.hyperspace.locksControls) wingsOf.wings.toggle();
+          // Cut the engines: nothing holds the ship up, and it comes down and settles on the ground.
+          // Not while a jump flies it, and not on the ground, where the throttle is what lifts it off.
+          if (input.justPressed(CUT_ENGINES_KEY) && wingsOf?.spec.ship && !this.hyperspace.locksControls && !this.world.planet.space) {
+            if (wingsOf.powered) wingsOf.cutEngines();
+            else wingsOf.enginesOn();
+          }
           dropPilotChoices(this.world.vehicles, wingsOf);
           // The emote wheel: held open, the mouse picks, the key's release plays; the arrows play the first four outright.
           if (input.pressedAction('emoteWheel') && !player.mounted) this.emoteWheel.show(this.emotes);
@@ -5583,7 +5631,7 @@ class App {
       else if ((lift = this.liftHere())) prompt = `<b>E</b> lift: ${lift.stops.length} levels`;
       else if (!player.aboard && this.world.elevatorsNear(player.pos, MOUNT_RANGE).length) prompt = `<b>E</b> elevator ${this.world.elevatorsNear(player.pos, MOUNT_RANGE)[0].kind === 'down' ? 'down' : 'up'}`;
       else if (!player.aboard && (doorless = this.world.doorlessNear(player.pos))) prompt = `<b>E</b> enter ${doorless.label} (no way in on foot)`;
-      else if (player.piloting) prompt = `at the controls of the ${player.piloting.spec.label} · <b>W</b>/<b>S</b> throttle · mouse steers · <b>Alt</b> looks around · <b>E</b> lets go · ${Math.round(Math.abs(player.piloting.speed) * 3.6)} km/h${shipHint}`;
+      else if (player.piloting) prompt = `at the controls of the ${player.piloting.spec.label} · ${player.piloting.landed ? `landed · <b>W</b> or <b>Space</b> lifts off` : `<b>W</b>/<b>S</b> throttle · mouse steers${player.piloting.spec.ship && SHIP_GROUND.rule === 'landing' ? ` · hold <b>Ctrl</b> to set down · <b>${keyName(CUT_ENGINES_KEY)}</b> cuts the engines` : ''}`} · <b>Alt</b> looks around · <b>E</b> lets go · ${Math.round(Math.abs(player.piloting.speed) * 3.6)} km/h${shipHint}${player.piloting.landNote ? ` · ${player.piloting.landNote}` : ''}`;
       else if (player.aboard) prompt = (player.aboard.pilotSpot && player.pos.distanceTo(player.aboard.pilotSpot) < CONTROLS_RANGE ? `<b>E</b> take the controls` : `aboard ${player.aboard.vehicle.spec.label} · <b>E</b> step out`) + (this.world.planet.space ? ` · <b>${shipKey}</b> ship menu` : '');
       else if (player.eva) prompt = `adrift · <b>W/S</b> thrust ahead and back · <b>A/D</b> sideways · <b>Space/Ctrl</b> up and down · mouse turns · <b>Z/V</b> roll · <b>${keyName(input.bindings.brake[0] ?? '')}</b> brake · ${Math.round(player.vel.length() * 3.6)} km/h${this.nearestSpeederDistance() < MOUNT_RANGE ? (this.nearestHasRoom() ? ' · <b>E</b> board' : ' · <b>E</b> mount') : ''}`;
       else if (this.nearestSpeederDistance() < MOUNT_RANGE) prompt = this.nearestHasRoom() ? '<b>E</b> board' : this.nearestVehicle()?.upsideDown ? '<b>E</b> flip it upright' : '<b>E</b> mount';

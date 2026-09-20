@@ -49,6 +49,7 @@ import { Garage, SpawnCancelled, type RefitReport, type VehicleDef } from '../ve
 import { fitKey, type ResolvedFit } from '../vehicles/shipFit';
 import { inTurn } from '../vehicles/shipMounts';
 import { Vehicle, type VehicleKind, type VehicleSpec } from '../vehicles/vehicle';
+import { SHIP_ROOM } from '../vehicles/landing';
 import { Bolts } from '../combat/bolts';
 import { ShipInterior } from '../vehicles/interior';
 import { Gallery } from './gallery';
@@ -2203,6 +2204,41 @@ export class World {
     return n > 0;
   }
 
+  /** Each ship followed through a building's rooms: where it was last sampled, its room, and the wait until the next sample. */
+  private readonly vehicleRooms = new WeakMap<Vehicle, { cell: CellState | null; from: THREE.Vector3; due: number }>();
+
+  /**
+   * Follow a ship through a building's portals, as a mobile is followed: four times a second, and sooner
+   * once it has gone a couple of metres, from the hull's middle. While it is in a room its hull ignores the
+   * terrain and the building's shells and its floor is the room's own (`Vehicle.setInRoom`); rooms are
+   * bigger than the hull around them, so this is never read from the rooms' boxes. Nothing is allocated
+   * per call once the ship has been seen once.
+   */
+  trackVehicleRoom(v: Vehicle, dt: number): void {
+    if (!v.spec.ship || v.disposed) return;
+    const stream = this.layoutStream;
+    if (!stream || this.planet.space) {
+      if (v.inRoom) v.setInRoom(false);
+      return;
+    }
+    const b = v.spec.bounds;
+    const mid = tmpV.set(0, (b.min[1] + b.max[1]) / 2, 0).applyQuaternion(v.quaternion(tmpQ)).add(v.pos);
+    let held = this.vehicleRooms.get(v);
+    if (!held) {
+      held = { cell: stream.buildingAt(mid), from: mid.clone(), due: 0 };
+      this.vehicleRooms.set(v, held);
+      v.setInRoom(held.cell !== null);
+      return;
+    }
+    held.due -= dt;
+    if (held.due > 0 && held.from.distanceToSquared(mid) < SHIP_ROOM.step * SHIP_ROOM.step) return;
+    held.due = SHIP_ROOM.every;
+    // The step between samples is at most the distance that triggered it, plus what a frame at speed adds.
+    held.cell = stream.trackVehicleCell(held.cell, held.from, mid, SHIP_ROOM.step * 3);
+    held.from.copy(mid);
+    v.setInRoom(held.cell !== null);
+  }
+
   /** Stand a vehicle from the garage on the ground in front of a point, facing away from it. */
   async spawnVehicle(def: VehicleDef, at: THREE.Vector3, heading: number, kind?: VehicleKind, airborne = false, fit: ResolvedFit | null = null): Promise<Vehicle> {
     // The world it was asked for: `unload` moves the generation on (and `load` makes a new Terrain for every
@@ -2213,7 +2249,32 @@ export class World {
     this.garage ??= await Garage.load(import.meta.env.BASE_URL);
     // In space, or arriving in the air, the vehicle stands exactly where it is asked to.
     const space = !!this.planet.space;
-    const place = airborne || space ? (b: VehicleSpec['bounds']) => [at.x, at.y + b.min[1], at.z] as [number, number, number] : (b: VehicleSpec['bounds']) => this.clearGround(b, at, heading, def.source === 'creature');
+    // Standing in a building's room: a ship flown from a cockpit is stood on that room's floor, turned
+    // along it. A ship with rooms of its own is stood outside for now, since boarding one inside a
+    // building would put two sets of rooms in play at once.
+    const shipKind = kind === 'ship' || (!kind && def.source === 'ship');
+    const ownRooms = !!def.interior || (def.cells ?? []).some((c) => c.index > 0);
+    const room = !space && !airborne && shipKind && this.cellState ? this.cellState : null;
+    if (room && ownRooms) console.info(`garage: ${def.id} has rooms of its own, so it is stood outside the building's rooms for now`);
+    const inRoom = room && !ownRooms ? room : null;
+    // The way a ship stood in a room faces is that room's own axis, but only once it is known that the
+    // ship fits in it: its box is not known until the model is loaded, so the turn is taken then and
+    // made after the spawn. A ship stood outside keeps the heading it was asked for.
+    let placedInRoom = false;
+    let roomTurn: number | null = null;
+    const place = airborne || space
+      ? (b: VehicleSpec['bounds']) => [at.x, at.y + b.min[1], at.z] as [number, number, number]
+      : (b: VehicleSpec['bounds']) => {
+          const turn = inRoom ? this.roomHeading(inRoom, heading) : heading;
+          const spot = inRoom ? this.roomSpot(inRoom, b, at, turn) : null;
+          if (spot) {
+            placedInRoom = true;
+            roomTurn = turn;
+            return spot;
+          }
+          if (inRoom) console.info(`garage: ${def.id} does not fit in this room with room to spare: it is stood on the ground instead`);
+          return this.clearGround(b, at, heading, def.source === 'creature');
+        };
     let v: Vehicle;
     try {
       v = await this.garage.spawn(def, this.physics, this.scene, at.x, at.y, at.z, heading, kind, place, {
@@ -2227,6 +2288,13 @@ export class World {
       throw err;
     }
     v.space = space;
+    // Stood in a room: its filter and its floor are the room's from the start, and the tracker begins there.
+    if (placedInRoom && inRoom) {
+      if (roomTurn !== null) v.faceHeading(roomTurn);
+      v.setInRoom(true);
+      this.vehicleRooms.set(v, { cell: inRoom, from: v.pos.clone(), due: SHIP_ROOM.every });
+      console.info(`garage: ${def.id} stood on the floor of room ${inRoom.cell} of ${inRoom.building.model.def.id}`);
+    }
     markActor(v.group);
     // A mount's saddle is shown once its programs exist: prepareActor joins it to the portal scheme and
     // the cascades before any compile, uploads its textures and builds its programs a mesh at a time.
@@ -2346,6 +2414,69 @@ export class World {
       if (!blocked) return [x, y, z];
     }
     return [at.x + Math.sin(heading) * first, floorAt(at.x, at.z), at.z + Math.cos(heading) * first];
+  }
+
+  /** The cell of a room state, or null when the building no longer has it. */
+  private cellOf(state: CellState): { index: number; bounds: { min: number[]; max: number[] } } | null {
+    return (state.building.model.def.cells ?? []).find((c) => c.index === state.cell) ?? null;
+  }
+
+  /**
+   * The way a ship stood in a room faces: along the room's longer floor axis, whichever way of the two
+   * the player is looking. A hangar is a long room with its door at one end, so this points a ship out of it.
+   */
+  private roomHeading(state: CellState, heading: number): number {
+    const cell = this.cellOf(state);
+    if (!cell) return heading;
+    const [x0, , z0] = cell.bounds.min;
+    const [x1, , z1] = cell.bounds.max;
+    const alongX = Math.abs(x1 - x0) > Math.abs(z1 - z0);
+    // The room's axis in the world (the building is turned, so the axis is turned with it).
+    tmpV.set(alongX ? 1 : 0, 0, alongX ? 0 : 1).transformDirection(state.building.matrix);
+    if (tmpV.lengthSq() < 1e-6) return heading;
+    const forward = tmpV.x * Math.sin(heading) + tmpV.z * Math.cos(heading);
+    if (forward < 0) tmpV.multiplyScalar(-1);
+    return Math.atan2(tmpV.x, tmpV.z);
+  }
+
+  /**
+   * A spot on a room's floor for a ship to stand: ahead of the player by the ship's own length, kept
+   * inside the room's box with `SHIP_ROOM.spare` all round, on the floor they are standing on. Null
+   * when the room does not hold the ship's box with that much to spare, so the caller stands it outside.
+   */
+  private roomSpot(state: CellState, b: VehicleSpec['bounds'], at: THREE.Vector3, heading: number): [number, number, number] | null {
+    const cell = this.cellOf(state);
+    if (!cell) return null;
+    const x0 = Math.min(cell.bounds.min[0], cell.bounds.max[0]);
+    const x1 = Math.max(cell.bounds.min[0], cell.bounds.max[0]);
+    const y0 = Math.min(cell.bounds.min[1], cell.bounds.max[1]);
+    const y1 = Math.max(cell.bounds.min[1], cell.bounds.max[1]);
+    const z0 = Math.min(cell.bounds.min[2], cell.bounds.max[2]);
+    const z1 = Math.max(cell.bounds.min[2], cell.bounds.max[2]);
+    // The box's own extents, however the corners are stored (a pack converted before the BOX fix swaps them).
+    const w = Math.abs(b.max[0] - b.min[0]);
+    const h = Math.abs(b.max[1] - b.min[1]);
+    const l = Math.abs(b.max[2] - b.min[2]);
+    // The ship may be turned any way in the room, so its footprint is taken as its longer side both ways.
+    const across = Math.max(w, l);
+    if (x1 - x0 < across + SHIP_ROOM.spare * 2 || z1 - z0 < across + SHIP_ROOM.spare * 2 || y1 - y0 < h + SHIP_ROOM.spare) return null;
+    // Ahead of the player by half the ship's length and a stride more (3 m, invented), so it is stood
+    // clear of where they are standing however long it is.
+    const ahead = l / 2 + 3;
+    tmpV.set(at.x + Math.sin(heading) * ahead, at.y, at.z + Math.cos(heading) * ahead).applyMatrix4(state.building.inverse);
+    tmpV.x = THREE.MathUtils.clamp(tmpV.x, x0 + across / 2 + SHIP_ROOM.spare, x1 - across / 2 - SHIP_ROOM.spare);
+    tmpV.z = THREE.MathUtils.clamp(tmpV.z, z0 + across / 2 + SHIP_ROOM.spare, z1 - across / 2 - SHIP_ROOM.spare);
+    // The player's own level, kept inside the room: the spot was taken from their feet, so this is
+    // still their height, not the middle of a box that may run through several decks.
+    tmpV.y = THREE.MathUtils.clamp(tmpV.y, y0, y1);
+    tmpV.applyMatrix4(state.building.matrix);
+    // The floor they are standing on, under that spot: the highest of the room's own surfaces at or
+    // just over their feet (a step's worth, 0.5 m, invented), never the terrain under the building and
+    // never a deck further down, which a room whose box runs through several of them would give.
+    // `floorsAt` answers highest first, so the first of them is the one wanted.
+    const floors = this.physics.floorsAt(tmpV.x, tmpV.z, tmpV.y + 0.5, tmpV.y - Math.abs(y1 - y0) - 0.5);
+    const y = floors.length ? floors[0] : tmpV.y;
+    return [tmpV.x, y, tmpV.z];
   }
 
   /**
