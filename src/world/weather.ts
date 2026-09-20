@@ -25,6 +25,7 @@ import {
   SNAP_WAIT_SECONDS,
   FAMILY_FADE_SECONDS,
   climateFor,
+  consoleClock,
   createMixOut,
   effectFor,
   lifeDayOn,
@@ -46,6 +47,7 @@ import {
 } from './weatherSchedule';
 import { OPEN_ROOF_GRID, OPEN_ROOF_MAP, WEATHER_UNIFORMS } from './wetness';
 import { WATER_WIND, WATER_WIND_FULL } from './water';
+import { sharedClock, sharedNote } from './sharedClock.ts';
 
 export interface WeatherSettings {
   weather: boolean;
@@ -296,6 +298,10 @@ export class Weather {
   /** The level is heading back to the schedule after a hold or a force: fast until it gets there. */
   private releasing = false;
   private heldText = '';
+  /** The day's half of the note as it was last joined, and the joined line: neither is built per frame. */
+  private dayText = '';
+  private noteText = '';
+  private noteDirty = true;
 
   // What the world handed over at attach.
   private sky: SwgSky | null = null;
@@ -568,7 +574,9 @@ export class Weather {
       this.releasing = true;
     } else if (opts.timeScale !== undefined && Number.isFinite(opts.timeScale) && opts.timeScale >= 0) {
       this.clockBase = this.clockSeconds() - this.offsetSeconds;
-      this.realBase = Date.now() / 1000;
+      // Measured from the same clock the schedule reads, or the console's own scale would jump by
+      // the server's offset the moment it was switched on.
+      this.realBase = sharedClock.walkSeconds();
       this.timeScale = opts.timeScale;
     }
     if (opts.skipMinutes !== undefined && Number.isFinite(opts.skipMinutes)) this.offsetSeconds += opts.skipMinutes * 60;
@@ -586,9 +594,19 @@ export class Weather {
     return this.settings.weatherShadows ? clamp01(L.shadowScale) : 1;
   }
 
-  /** One line for the heads-up display when the weather is not the shared schedule's; '' otherwise. Kept: cheap to ask every frame. */
+  /**
+   * One line for the heads-up display when the weather or the day is not the shared schedule's; ''
+   * otherwise. The day's half comes from the shared clock, and the two are joined only when either
+   * changes: asking every frame allocates nothing.
+   */
   heldNote(): string {
-    return this.heldText;
+    const day = sharedNote();
+    if (this.noteDirty || day !== this.dayText) {
+      this.dayText = day;
+      this.noteText = day ? (this.heldText ? `${this.heldText} · ${day}` : day) : this.heldText;
+      this.noteDirty = false;
+    }
+    return this.noteText;
   }
 
   private updateHeldNote(): void {
@@ -604,13 +622,22 @@ export class Weather {
       if (this.timeScale !== 1 || this.offsetSeconds !== 0) parts.push('Weather clock moved from the console');
     }
     this.heldText = parts.join(' · ');
+    // The next ask joins the two halves afresh.
+    this.noteDirty = true;
   }
 
-  /** The schedule's clock, seconds: the wall clock unless the console has moved it. */
+  /**
+   * The schedule's clock, seconds: the clock every player shares unless the console has moved it.
+   * That is the server's clock when one is answering, the last offset it gave while a connection is
+   * down, and this machine's own wall clock when no server address is set -- which is what the
+   * schedule has always run on, so nothing changes for a player on their own.
+   *
+   * It is the walked reading rather than the stepped one: the schedule has no easing of its own, so
+   * a clock put right in one step would turn the wind, the rain's lean and the clouds' drift in a
+   * single frame and move the step of the schedule with them.
+   */
   private clockSeconds(): number {
-    const now = Date.now() / 1000;
-    if (this.timeScale === 1 && this.clockBase === 0) return now + this.offsetSeconds;
-    return this.clockBase + (now - this.realBase) * this.timeScale + this.offsetSeconds;
+    return consoleClock(sharedClock.walkSeconds(), this.clockBase, this.realBase, this.timeScale, this.offsetSeconds);
   }
 
   /** The whole level wanted now: the console's, the held setting's, or the schedule's. */

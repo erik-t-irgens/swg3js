@@ -157,6 +157,18 @@ export function scheduledLevel(seed: number, weights: readonly number[], clockSe
   return o;
 }
 
+/**
+ * The clock the schedule walks from, seconds. `shared` is the clock every player has (the server's
+ * when one is answering, this machine's wall clock otherwise); the rest is the console's own hold:
+ * `scale` runs it faster or slower from `base` at `realBase`, and `offset` skips it ahead. With the
+ * console untouched (scale 1, base 0) it is the shared clock and a skip, which is what every player
+ * walks on together.
+ */
+export function consoleClock(shared: number, base: number, realBase: number, scale: number, offset: number): number {
+  if (scale === 1 && base === 0) return shared + offset;
+  return base + (shared - realBase) * scale + offset;
+}
+
 /** 1-D value noise, smoothstepped between integer knots. */
 function valueNoise(seed: number, salt: number, x: number): number {
   const i = Math.floor(x);

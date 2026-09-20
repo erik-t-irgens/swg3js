@@ -98,6 +98,7 @@ import { draggable } from './ui/drag';
 import { LoadingScreen } from './ui/loading';
 import { EmoteWheel } from './ui/emoteWheel';
 import { Net, type Hello, type PeerVehicle } from './net/net';
+import { clockKnob } from './world/sharedClock.ts';
 import { applyAppearance, dress, packLook } from './player/look';
 import { RemotePlayers } from './net/remotePlayers';
 import { danceOf, defaultEmotes, emoteChoices, FLOURISHES, isDanceClip, isFlourishClip, loadEmotes, loopsEmote, saveEmotes } from './core/emotes';
@@ -1710,6 +1711,8 @@ class App {
         const L = this.world.swgSky?.lighting;
         return { time: this.world.day.time, clock: this.world.day.clock(), swg: this.world.day.swg, isDay: this.world.day.isDay, index: this.world.day.colorIndex, light: this.world.day.lightDir.toArray().map((v) => Number(v.toFixed(2))), lighting: L ? { main: L.main.getHexString(), mainScale: Number(L.mainScale.toFixed(2)), ambient: L.ambient.getHexString(), fog: L.fog.getHexString(), fogDensity: L.fogDensity, sunMoonAlpha: L.sunMoonAlpha, starAlpha: L.starAlpha } : null };
       },
+      /** The clock the world shares and what the day is doing with it; see `__sharedDay`. */
+      day: (opts?: Parameters<typeof clockKnob>[0]) => clockKnob(opts),
       /** Simulate `seconds` of play at 60 Hz with the given keys held (KeyboardEvent codes or Mouse0..2), without waiting on real frames: movement, the weapons, the bolts and the turrets. With `hold`, the keys stay down afterwards (a later call without it releases them), so a key is not pressed afresh each call. */
       advance: (seconds: number, keys: string[] = [], hold = false) => {
         for (const k of keys) this.input.force(k, true);
