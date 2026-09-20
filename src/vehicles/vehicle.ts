@@ -8,7 +8,7 @@ import { cleanTrimesh, Group, groups, RAPIER, TRIMESH_FLAGS, type Physics } from
 import { WING_RULE, WingSet, easeWing, pilotWings, wingTopFactor, wingsWanted } from './wings';
 import { hardpointName, ownHardpoint, partOf, underPivot } from './shipAssembly';
 import { partnerLoss } from '../space/shipDamage';
-import { LANDING, SHIP_GROUND, SHIP_ROOM, catchDistance, fitFloor, floorUnder, heldPose, landingFoot, restPose, settleEase, withFilter, type FloorPlane } from './landing';
+import { LANDING, SHIP_GROUND, SHIP_ROOM, SPACE_LANDING, catchDistance, fitFloor, floorUnder, heldPose, landingFoot, poseInFrame, restPose, settleEase, surfacePose, surfaceUp, withFilter, type FloorPlane } from './landing';
 
 /**
  * A vehicle's hull meets everything but the ground: the springs hold it off the terrain from
@@ -244,6 +244,22 @@ const floorPlane: FloorPlane = { a: 0, b: 0, c: 0 };
 const footWorld = new THREE.Vector3();
 const holdWorld = new THREE.Vector3();
 const holdTurn = new THREE.Quaternion();
+/**
+ * Scratch for a set-down in space, where the surface has an up of its own: the one ray every look re-uses,
+ * the points it found under the hull, and the vectors the pose is built from. Nothing is allocated per step.
+ */
+const spaceRay = new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: -1, z: 0 });
+const spaceSamples = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+const spaceTaken: THREE.Vector3[] = [];
+const spaceDown = new THREE.Vector3();
+const spaceNose = new THREE.Vector3();
+const spaceAcross = new THREE.Vector3();
+const spaceUp = new THREE.Vector3();
+const spacePoint = new THREE.Vector3();
+const spaceFrom = new THREE.Vector3();
+const spaceHit = new THREE.Vector3();
+const spaceNormal = new THREE.Vector3();
+const ONE_SCALE = new THREE.Vector3(1, 1, 1);
 /** Velocity lost in one step past which a vehicle has hit something (m/s), and the hull taken per m/s beyond it. */
 const HIT_THRESHOLD = 6;
 const HIT_DAMAGE = 4;
@@ -492,6 +508,18 @@ export class Vehicle {
   readonly foot: THREE.Vector3 | null = null;
   /** Whether that foot is the model's own landing point rather than the middle of its underside (for the report). */
   private footFromPoint = false;
+  /**
+   * In space: something under the hull to set down on, as the last look saw it, for the prompt. Out there
+   * "under" is the hull's own down, so any face of a rock will do, and the hull lands on whichever it is over.
+   */
+  setDownNear = false;
+  /** A set-down asked for out in space, taken on the next step that finds a surface; a second ask while down lifts off. */
+  private setDownAsked = false;
+  /** What a hull set down in space stands on: its live frame, so a surface that moves carries the hull with it. */
+  private landedOn: RAPIER.RigidBody | null = null;
+  private readonly landedFrame = new THREE.Matrix4();
+  private readonly landedAt = new THREE.Vector3();
+  private readonly landedTurn = new THREE.Quaternion();
   /** In a building's rooms: the floor is a ray among what stands still, and the hull ignores the shells. */
   inRoom = false;
   /** The physics and the terrain of the step now running, so a floor ray can be cast from the ground functions. */
@@ -622,7 +650,10 @@ export class Vehicle {
       gap: Number.isFinite(this.footGap) ? n2(this.footGap) : null,
       airborne: this.airborne,
       note: this.landNote,
-      tune: { ...LANDING, room: { ...SHIP_ROOM } },
+      // What it is standing on, not what the last look happened to find: every probe writes `landedOn`,
+      // including the one a merely-slow hull runs each step, so it means nothing until the hull is down.
+      space: this.space ? { near: this.setDownNear, asked: this.settingDown, on: !this.landed && this.settleLeft <= 0 ? null : this.landedOn ? 'something that can move' : 'the world' } : null,
+      tune: { ...LANDING, room: { ...SHIP_ROOM }, space: { ...SPACE_LANDING } },
     };
   }
   /** The cruise a jump commands (m/s), over the throttle; null when no jump is flying the hull. */
@@ -832,7 +863,9 @@ export class Vehicle {
       if (this.landed || this.settleLeft > 0) this.liftOff();
       return false;
     }
-    if (!this.foot || this.space) return false;
+    // Out in space there is no ground and no up: the surface under the hull is whatever it is over.
+    if (this.space) return this.groundSpace(dt, drive);
+    if (!this.foot) return false;
     const wantsUp = !!drive && (drive.throttle > 0 || drive.up);
     if (this.landed) {
       if (wantsUp) {
@@ -896,6 +929,207 @@ export class Vehicle {
       return true;
     }
     return false;
+  }
+
+  /**
+   * The pilot's ask, out in space: set the hull down on whatever is under it, or, once it is down, lift it
+   * off again along the surface's own up. It is taken on a step that finds something within reach; the ask
+   * is dropped if nothing is found, so a press over empty space does not wait about.
+   */
+  askSetDown(): void {
+    if (!this.spec.ship || !this.space) return;
+    if (this.landed || this.settleLeft > 0) {
+      this.liftFromSurface();
+      return;
+    }
+    this.setDownAsked = true;
+  }
+
+  /** Whether a set-down is being asked for now, for the prompt. */
+  get settingDown(): boolean {
+    return this.setDownAsked || this.settleLeft > 0;
+  }
+
+  /**
+   * What lies along a direction from a point, for a set-down in space: the first thing that is neither this
+   * hull nor a corpse. The hit's place goes in `spacePoint` and its normal in `spaceUp`; the answer is the
+   * distance, or -1 for nothing within reach. One ray, re-used, so nothing is allocated per step.
+   */
+  private lookAlong(physics: Physics, from: THREE.Vector3, dir: THREE.Vector3, reach: number): number {
+    spaceRay.origin.x = from.x;
+    spaceRay.origin.y = from.y;
+    spaceRay.origin.z = from.z;
+    spaceRay.dir.x = dir.x;
+    spaceRay.dir.y = dir.y;
+    spaceRay.dir.z = dir.z;
+    const hit = physics.world.castRayAndGetNormal(spaceRay, reach, true, undefined, groups(Group.all, Group.all), undefined, this.body, (c) => !physics.isRagdoll(c.handle));
+    if (!hit) return -1;
+    const t = hit.timeOfImpact;
+    spacePoint.set(from.x + dir.x * t, from.y + dir.y * t, from.z + dir.z * t);
+    spaceUp.set(hit.normal.x, hit.normal.y, hit.normal.z);
+    if (spaceUp.lengthSq() < 1e-6) spaceUp.copy(dir).negate();
+    if (spaceUp.dot(dir) > 0) spaceUp.negate();
+    this.landedOn = hit.collider.parent();
+    return t;
+  }
+
+  /**
+   * A ship meeting a surface in space: the hold while it is down, the ease onto it, and the put-down itself.
+   * Nothing is under it unless the hull is over something within reach, and nothing happens until the pilot
+   * asks. Returns whether it took this step; false leaves the hull to the flight model as before.
+   */
+  private groundSpace(dt: number, drive: DriveInput | null): boolean {
+    if (!this.foot) return false;
+    const physics = this.stepPhysics;
+    const wantsUp = !!drive && drive.throttle > 0;
+    if (this.landed) {
+      this.setDownNear = false;
+      if (wantsUp) {
+        this.liftFromSurface();
+        return false;
+      }
+      this.holdOnSurface();
+      this.airborne = false;
+      this.groundedPoints = 4;
+      return true;
+    }
+    if (this.settleLeft > 0) {
+      if (wantsUp) {
+        this.settleLeft = 0;
+        this.landedOn = null;
+        this.release(null);
+        return false;
+      }
+      this.stepSettle(dt);
+      // Down: from here the hull is held in the surface's own frame, so one that moves carries it.
+      if (this.landed) this.keepSurfacePose();
+      return true;
+    }
+    // A set-down is only ever offered to a hull that has nearly stopped; NPC ships never slow down this far.
+    this.setDownNear = false;
+    if (!physics || Math.abs(this.speed) > SPACE_LANDING.speed) {
+      this.setDownAsked = false;
+      return false;
+    }
+    // Read the hull where the body has it, as the planet's own path does above: this runs before the flight
+    // model writes `pos`, so without it the looks would start from where the hull was a step ago.
+    const t = this.body.translation();
+    this.pos.set(t.x, t.y, t.z);
+    this.quaternion(q);
+    spaceDown.set(0, -1, 0).applyQuaternion(q);
+    this.footAt(q, footWorld);
+    const found = this.lookAlong(physics, footWorld, spaceDown, SPACE_LANDING.reach);
+    this.footGap = found < 0 ? Infinity : found;
+    this.setDownNear = found >= 0;
+    if (found < 0) {
+      this.setDownAsked = false;
+      this.landNote = '';
+      this.landedOn = null;
+      return false;
+    }
+    // Nothing is being stood on until something is: the look above writes what it found, and a hull merely
+    // hovering near a rock would otherwise go on reporting it as the thing it is resting on.
+    if (!this.setDownAsked) {
+      this.landedOn = null;
+      return false;
+    }
+    this.setDownAsked = false;
+    if (!this.beginSpaceLanding(physics, found)) return false;
+    // Held from this step on, so no step passes with nothing under the hull.
+    this.stepSettle(0);
+    return true;
+  }
+
+  /**
+   * Put the ship down on the face under it: five looks along the hull's own down, fitted to a surface the way
+   * a floor is fitted on the ground, the hull turned so its up is that face's, and an ease onto the pose. The
+   * hit's own normal stands in when too few looks find anything. Returns whether it is coming down.
+   */
+  private beginSpaceLanding(physics: Physics, centre: number): boolean {
+    const s = this.spec;
+    // The first look's own place and normal, kept: every look after this one writes over them.
+    spaceHit.copy(spacePoint);
+    spaceNormal.copy(spaceUp);
+    const stoodOn = this.landedOn;
+    const w = Math.max(1, (s.bounds.max[0] - s.bounds.min[0]) * SPACE_LANDING.spread);
+    const l = Math.max(1, (s.bounds.max[2] - s.bounds.min[2]) * SPACE_LANDING.spread);
+    spaceNose.set(0, 0, 1).applyQuaternion(q);
+    spaceAcross.set(1, 0, 0).applyQuaternion(q);
+    spaceTaken.length = 0;
+    spaceTaken.push(spaceSamples[0].copy(spaceHit));
+    // Four more looks round the foot, each along the hull's own down; the fit takes whichever found a face.
+    for (let i = 1; i < spaceSamples.length; i++) {
+      const along = i === 1 ? l : i === 2 ? -l : 0;
+      const across = i === 3 ? w : i === 4 ? -w : 0;
+      spaceFrom.copy(footWorld).addScaledVector(spaceNose, along).addScaledVector(spaceAcross, across);
+      const d = this.lookAlong(physics, spaceFrom, spaceDown, SPACE_LANDING.reach + Math.abs(along) + Math.abs(across));
+      if (d < 0) continue;
+      spaceTaken.push(spaceSamples[i].copy(spacePoint));
+    }
+    // The face the hull will stand on: fitted to what the looks found, or the first one's own normal.
+    this.landedOn = stoodOn;
+    if (!surfaceUp(spaceTaken, q, spaceUp)) spaceUp.copy(spaceNormal);
+    if (spaceUp.dot(spaceNormal) < 0) spaceUp.negate();
+    if (!surfacePose(spaceHit, spaceUp, spaceNose, this.foot!, this.restAt, this.restTurn)) return false;
+    this.landNote = '';
+    this.settleFrom.copy(this.pos);
+    this.settleFromTurn.copy(q);
+    this.settleLeft = LANDING.settle;
+    this.airborne = false;
+    this.cruise = 0;
+    this.speed = 0;
+    this.footGap = centre;
+    this.commandedValid = false;
+    return true;
+  }
+
+  /** The pose a hull set down in space keeps, in the frame of what it stands on, so a surface that moves carries it. */
+  private keepSurfacePose(): void {
+    const on = this.landedOn;
+    if (!on || !on.isValid()) {
+      this.landedOn = null;
+      this.landedAt.copy(this.restAt);
+      this.landedTurn.copy(this.restTurn);
+      return;
+    }
+    const t = on.translation();
+    const r = on.rotation();
+    this.landedFrame.compose(tmp.set(t.x, t.y, t.z), qTmp.set(r.x, r.y, r.z, r.w), ONE_SCALE);
+    poseInFrame(this.landedFrame, this.restAt, this.restTurn, this.landedAt, this.landedTurn);
+  }
+
+  /** One step of the hold on a surface: the frame is read again, so the hull rides whatever it is standing on. */
+  private holdOnSurface(): void {
+    const on = this.landedOn;
+    if (!on || !on.isValid()) {
+      this.writeHold();
+      return;
+    }
+    const t = on.translation();
+    const r = on.rotation();
+    this.landedFrame.compose(tmp.set(t.x, t.y, t.z), qTmp.set(r.x, r.y, r.z, r.w), ONE_SCALE);
+    this.hold(this.landedFrame, this.landedAt, this.landedTurn);
+  }
+
+  /** Off a surface in space: the hold goes and the hull leaves along the face's own up, so it clears what it stood on. */
+  private liftFromSurface(): void {
+    if (!this.landed && this.settleLeft <= 0) return;
+    this.quaternion(q);
+    up.copy(WORLD_UP).applyQuaternion(q);
+    const on = this.landedOn;
+    this.landedOn = null;
+    this.liftOff();
+    // Whatever it stood on was doing, plus the push off it: a hull leaving something that moves keeps up with it.
+    tmp.copy(up).multiplyScalar(SPACE_LANDING.clear);
+    if (on && on.isValid()) {
+      const lv = on.linvel();
+      tmp.x += lv.x;
+      tmp.y += lv.y;
+      tmp.z += lv.z;
+    }
+    if (this.body.isValid()) this.body.setLinvel({ x: tmp.x, y: tmp.y, z: tmp.z }, true);
+    this.airborne = true;
+    this.setDownNear = false;
   }
 
   /** Half the hull's height, as a bolt's target (the Hittable contract). */
@@ -1338,6 +1572,13 @@ export class Vehicle {
     this.updateWings(dt);
     // With its engines cut there is nothing to fly it with: gravity and the contacts have the hull.
     const cutOut = !!s.ship && !this.powered && !this.space && SHIP_GROUND.rule === 'landing';
+    // Out in space a ship once flying stays flying however slow, so the set-down is asked before the flight
+    // model runs; it says no to everything except a hull that has nearly stopped over something within reach.
+    if (s.ship && this.space && SHIP_GROUND.rule === 'landing' && this.groundShip(dt, drive)) {
+      this.justHit = kept;
+      this.onUpdate?.(dt, this, drive);
+      return;
+    }
     if (s.ship && !cutOut && this.flyShip(dt, drive, physics, ground, water)) {
       if (kept > this.justHit) this.justHit = kept;
       this.group.position.copy(this.pos);

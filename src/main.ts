@@ -91,7 +91,7 @@ import { loadSettings, type Settings } from './core/settings';
 import { deleteCharacter, loadCharacters, newCharacterId, upsertCharacter, type Appearance, type SavedCharacter } from './core/characters';
 import { FRAME_NUDGE, Garage, type VehicleDef } from './vehicles/garage';
 import { WINGS_KEY, WING_RULE, dropPilotChoices } from './vehicles/wings';
-import { CUT_ENGINES_KEY, LANDING, SHIP_GROUND, SHIP_ROOM } from './vehicles/landing';
+import { CUT_ENGINES_KEY, LANDING, SHIP_GROUND, SHIP_ROOM, SPACE_LANDING } from './vehicles/landing';
 import { SURFACE_ROOM, SurfaceRoom, isSurfaceRoom, probeSurface, roomFrame, roomTurn } from './vehicles/surfaceRoom';
 import type { Vehicle, VehicleKind } from './vehicles/vehicle';
 import { HEAD_TO_EYE, SEATED_EYE_FALLBACK, SEAT_RULE, cockpitYawStep, frameFileName, mirroredOffset, seatDropUsed } from './vehicles/cockpitSeat';
@@ -113,13 +113,15 @@ function mountPrompt(v: import('./vehicles/vehicle').Vehicle, wingsKey: string =
   const fly = v.spec.fly ? ' · look up/down or <b>Space</b>/<b>X</b> to climb and sink' : '';
   if (k === 'ship') {
     // Down on the ground: what gets it up again, and why a put-down was refused.
-    if (v.landed) return `landed · <b>W</b> or <b>Space</b> lifts off · <b>E</b> leave${v.landNote ? ` · ${v.landNote}` : ''}`;
+    if (v.landed) return `${v.space ? 'set down · <b>W</b> lifts off along the surface' : 'landed · <b>W</b> or <b>Space</b> lifts off'} · <b>E</b> leave${v.space ? ' (the boots take hold of what it stands on)' : ''}${v.landNote ? ` · ${v.landNote}` : ''}`;
     if (v.holding) return 'setting down…';
     // Hovering, the ship is a VTOL: it holds still until the throttle opens, rises and sinks on the keys, slides sideways. In flight the mouse flies it.
     const down = SHIP_GROUND.rule === 'landing' ? ` · <b>Ctrl</b> brings it down, held at the bottom to set it down · <b>${keyName(CUT_ENGINES_KEY)}</b> cuts the engines` : '';
-    const hover = `<b>W</b> throttle up into flight · mouse turns · <b>Space</b>/<b>Ctrl</b> rise and sink · <b>A/D</b> slide${down}`;
+    // Out in space there is no ground: the same key sets the hull down on whatever it has come to a stop over.
+    const setDown = v.space && SHIP_GROUND.rule === 'landing' ? (v.setDownNear ? ` · <b>${keyName(CUT_ENGINES_KEY)}</b> sets it down on what is under you` : Math.abs(v.speed) <= SPACE_LANDING.speed ? ' · nothing under it to set down on' : '') : '';
+    const hover = `<b>W</b> throttle up into flight · mouse turns · <b>Space</b>/<b>Ctrl</b> rise and sink · <b>A/D</b> slide${v.space ? setDown : down}`;
     // Stopped in the air the ship holds its height, so the way down belongs on the flight line too.
-    const flight = `<b>W</b>/<b>S</b> throttle up and down · mouse: in the circle aims the guns, out of it keeps turning the ship · <b>A/D</b> roll · <b>Space</b>/<b>X</b> pitch${v.powered ? '' : ' · <b>ENGINES CUT</b>'}${Math.abs(v.speed) < 2 ? down : ''}`;
+    const flight = `<b>W</b>/<b>S</b> throttle up and down · mouse: in the circle aims the guns, out of it keeps turning the ship · <b>A/D</b> roll · <b>Space</b>/<b>X</b> pitch${v.powered ? '' : ' · <b>ENGINES CUT</b>'}${v.space ? setDown : Math.abs(v.speed) < 2 ? down : ''}`;
     // A ship whose wings open: the wings key and which way a press would take the pilot's choice; an open chosen while a
     // low wing waits for room says so.
     const wings = v.wings.length ? ` · <b>${keyName(wingsKey)}</b> ${v.wings.chosen ? 'close' : 'open'} the wings${v.wings.pilot && !v.wings.target ? ' (they open with room under them)' : ''}` : '';
@@ -1906,8 +1908,11 @@ class App {
        * every ship, `landing({ cut: true })` cuts its engines, so it comes down and settles where it stands (false
        * starts them again), and `landing({ up: true })` lifts it off. `__debug.advance` steps all of it, so a settle
        * can be watched from a hidden tab: `__debug.landing({ cut: true }); __debug.advance(4); __debug.landing()`.
+       * Out in space `landing({ down: true })` asks the ship to set down on whatever is under it (and, once it
+       * is down, to lift off again), and `landing({ space: { reach: 60 } })` sets the invented numbers for it
+       * (SPACE_LANDING: reach, speed, spread, clear). The report's `space` block says whether anything is under it.
        */
-      landing: (opts: { rule?: 'landing' | 'springs'; cut?: boolean; up?: boolean; room?: Partial<typeof SHIP_ROOM> } & Partial<typeof LANDING> = {}) => {
+      landing: (opts: { rule?: 'landing' | 'springs'; cut?: boolean; up?: boolean; down?: boolean; room?: Partial<typeof SHIP_ROOM>; space?: Partial<typeof SPACE_LANDING> } & Partial<typeof LANDING> = {}) => {
         const p = this.player;
         const v = p.mounted ?? p.piloting ?? p.aboard?.vehicle ?? [...this.world.vehicles].filter((o) => o.spec.ship && !o.autopilot).sort((a, b) => a.pos.distanceTo(p.pos) - b.pos.distanceTo(p.pos))[0];
         if (opts.rule === 'landing' || opts.rule === 'springs') SHIP_GROUND.rule = opts.rule;
@@ -1919,10 +1924,15 @@ class App {
           const n = opts.room?.[k];
           if (typeof n === 'number' && Number.isFinite(n)) SHIP_ROOM[k] = n;
         }
+        for (const k of Object.keys(SPACE_LANDING) as (keyof typeof SPACE_LANDING)[]) {
+          const n = opts.space?.[k];
+          if (typeof n === 'number' && Number.isFinite(n)) SPACE_LANDING[k] = n;
+        }
         if (!v) return 'no ship: spawn one (spawn(\'xwing\')) or board one';
         if (opts.cut === true) v.cutEngines();
         if (opts.cut === false) v.enginesOn();
         if (opts.up) v.liftOff();
+        if (opts.down) v.askSetDown();
         return v.landReport();
       },
       /**
@@ -5508,6 +5518,12 @@ class App {
       p.dismount(tmp);
       const lv = sp.body.linvel();
       p.vel.set(lv.x, lv.y, lv.z);
+      // Out of a ship set down on something: the boots take hold of it, so the pilot stands on it rather
+      // than floating off the moment they climb out. The hull's own down is the way to look first.
+      if (sp.landed) {
+        sp.quaternion(tmpQ);
+        this.bootsTake(tmp2.set(0, -1, 0).applyQuaternion(tmpQ), tmp);
+      }
       return;
     }
     const hit = this.physics.groundDistance(tmp.x, from, tmp.z, 12, sp.body);
@@ -5592,14 +5608,25 @@ class App {
       v.quaternion(tmpQ);
       tmp.set(-(v.spec.bounds.max[0] - v.spec.bounds.min[0]) / 2 - 1.2, 0, 0).applyQuaternion(tmpQ).add(v.pos);
       const from = v.pos.y + 0.5;
-      const hit = this.physics.groundDistance(tmp.x, from, tmp.z, 20, v.body);
-      tmp.y = hit !== null ? from - hit + 0.15 : this.world.terrain.heightAt(tmp.x, tmp.z) + 0.3;
+      // In space there is no ground under the hull: the spot beside it is where the figure goes, boots and all.
+      if (!this.world.planet.space) {
+        const hit = this.physics.groundDistance(tmp.x, from, tmp.z, 20, v.body);
+        tmp.y = hit !== null ? from - hit + 0.15 : this.world.terrain.heightAt(tmp.x, tmp.z) + 0.3;
+      }
     }
     p.stand(tmp);
     if (fell) {
       const lv = v.body.linvel();
       p.vel.set(lv.x, lv.y, lv.z);
       p.grounded = false;
+    }
+    // Out of a ship set down on something in space: the boots take hold of what it is standing on.
+    if (!fell && this.world.planet.space && v.landed) {
+      const lv = v.body.linvel();
+      p.vel.set(lv.x, lv.y, lv.z);
+      p.grounded = false;
+      v.quaternion(tmpQ);
+      this.bootsTake(tmp2.set(0, -1, 0).applyQuaternion(tmpQ), tmp);
     }
     this.hud.setPrompt('');
   }
@@ -5724,6 +5751,9 @@ class App {
             if (wingsOf.powered) wingsOf.cutEngines();
             else wingsOf.enginesOn();
           }
+          // The same key out in space, where there is nothing to cut the engines over: set the hull down on
+          // whatever is under it, and, once it is down, lift it off along that face's own up.
+          if (input.justPressed(CUT_ENGINES_KEY) && wingsOf?.spec.ship && !this.hyperspace.locksControls && this.world.planet.space) wingsOf.askSetDown();
           dropPilotChoices(this.world.vehicles, wingsOf);
           // The emote wheel: held open, the mouse picks, the key's release plays; the arrows play the first four outright.
           if (input.pressedAction('emoteWheel') && !player.mounted) this.emoteWheel.show(this.emotes);

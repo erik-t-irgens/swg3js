@@ -64,6 +64,21 @@ export const SHIP_ROOM = {
   spare: 2,
 };
 
+/**
+ * Setting a hull down where there is no ground and no up: on an asteroid, a station's hull, a wreck. Every
+ * number here is invented, ours, kept beside the ground's above, and live through `__debug.landing({ space: { … } })`.
+ * - `reach`: how far along the hull's own down the set-down rays look (m).
+ * - `speed`: the most a hull may be doing for a set-down to be offered (m/s).
+ * - `spread`: the share of the footprint the four outer rays stand out at, as on the ground.
+ * - `clear`: the push along the surface's own up a hull leaves with when it lifts off (m/s), so it clears what it stood on.
+ */
+export const SPACE_LANDING = {
+  reach: 40,
+  speed: 8,
+  spread: 0.45,
+  clear: 4,
+};
+
 /** A hull's extents as the spec carries them (the model's box). */
 export interface HullBounds {
   min: readonly number[];
@@ -257,6 +272,76 @@ export function heldPose(frame: THREE.Matrix4 | null, pos: THREE.Vector3, quat: 
   outPos.copy(pos).applyMatrix4(frame);
   frame.decompose(framePos, frameTurn, frameScale);
   outQuat.copy(frameTurn).multiply(quat);
+}
+
+/**
+ * A pose read back out of a frame: the inverse of `heldPose`, for taking a hull that stands somewhere in the
+ * world and holding it there in something else's frame (a surface that moves). The frame's scale is left out
+ * of the turn, as `heldPose` leaves it out, so the two are exact inverses for any frame without one.
+ */
+export function poseInFrame(frame: THREE.Matrix4 | null, pos: THREE.Vector3, quat: THREE.Quaternion, outPos: THREE.Vector3, outQuat: THREE.Quaternion): void {
+  if (!frame) {
+    outPos.copy(pos);
+    outQuat.copy(quat);
+    return;
+  }
+  frameInverse.copy(frame).invert();
+  outPos.copy(pos).applyMatrix4(frameInverse);
+  frame.decompose(framePos, frameTurn, frameScale);
+  outQuat.copy(frameTurn).invert().multiply(quat);
+}
+
+const frameInverse = new THREE.Matrix4();
+const localTurn = new THREE.Quaternion();
+const localPlane: FloorPlane = { a: 0, b: 0, c: 0 };
+const localSamples = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+const localTaken: THREE.Vector3[] = [];
+
+/**
+ * Which way is up on the surface under a hull in space: the samples (world points a ray found under it) are
+ * read in the hull's own frame, where its own down is the way they were cast, fitted there as a floor is
+ * fitted on the ground, and the fit's up is turned back into the world. False with fewer than three samples,
+ * where there is no surface to read and the caller keeps the one normal its ray gave it.
+ */
+export function surfaceUp(samples: readonly THREE.Vector3[], turn: THREE.Quaternion, out: THREE.Vector3): boolean {
+  if (samples.length < 3) return false;
+  localTurn.copy(turn).invert();
+  localTaken.length = 0;
+  for (let i = 0; i < samples.length && i < localSamples.length; i++) localTaken.push(localSamples[i].copy(samples[i]).applyQuaternion(localTurn));
+  if (!fitFloor(localTaken, localPlane)) return false;
+  planeUp(localPlane, out).applyQuaternion(turn);
+  return out.lengthSq() > 0.5;
+}
+
+/**
+ * Where a hull comes to rest on a surface with an up of its own: its own up turned onto the surface's, its
+ * nose kept as near the way it was pointing as the surface allows, and its foot set on the point. There is no
+ * tilt limit out here: any face of a rock is as good as any other. False when the surface has no direction.
+ */
+export function surfacePose(
+  point: THREE.Vector3,
+  up: THREE.Vector3,
+  nose: THREE.Vector3,
+  foot: THREE.Vector3,
+  outPos: THREE.Vector3,
+  outQuat: THREE.Quaternion,
+): boolean {
+  if (up.lengthSq() < 1e-9) return false;
+  upTmp.copy(up).normalize();
+  fwdTmp.copy(nose).addScaledVector(upTmp, -nose.dot(upTmp));
+  // The nose straight along the surface's up (flying at the rock head on): any heading on it will do.
+  if (fwdTmp.lengthSq() < 1e-6) {
+    fwdTmp.set(1, 0, 0).addScaledVector(upTmp, -upTmp.x);
+    if (fwdTmp.lengthSq() < 1e-6) fwdTmp.set(0, 0, 1).addScaledVector(upTmp, -upTmp.z);
+  }
+  fwdTmp.normalize();
+  rightTmp.crossVectors(upTmp, fwdTmp).normalize();
+  fwdTmp.crossVectors(rightTmp, upTmp).normalize();
+  basis.makeBasis(rightTmp, upTmp, fwdTmp);
+  outQuat.setFromRotationMatrix(basis);
+  footTmp.copy(foot).applyQuaternion(outQuat);
+  outPos.copy(point).sub(footTmp);
+  return true;
 }
 
 /** The ease a settle follows, 0 to 1: still at both ends, so nothing jerks as the hull comes down. */
