@@ -105,6 +105,7 @@ import type { AmbienceTune } from './audio/ambience.ts';
 import type { WorldSourceTune } from './audio/emitters.ts';
 import { BodySounds, type BodyLists, type FootTune, type PlayerBody } from './audio/footsteps.ts';
 import { combatSounds, GENERIC_GUN, type CombatTables, type CombatTune } from './audio/combatSounds.ts';
+import { vehicleSounds, type SoundVehicle, type VehicleTables, type VehicleTune } from './audio/vehicleSounds.ts';
 import { sabers } from './audio/saberSounds.ts';
 import { CLIP_EVENT_TUNE, type ClipEventTune } from './audio/clipEvents.ts';
 import { FAMILY_TUNE } from './world/terrain';
@@ -155,6 +156,8 @@ const roomLightSpots: import('./vehicles/interior').RoomLight[] = [];
 const EMPTY_BODIES: readonly never[] = [];
 /** Where a fighter's blade is heard swinging or striking; one kept record, refilled per event. */
 const saberAt = { x: 0, y: 0, z: 0 };
+/** Where a lift's own sound is heard: the stop the player was put at, in the world. */
+const liftAt = new THREE.Vector3();
 /** The fighters' glows the pool is asked for when the effects do not light the blades: the nearest two, within 25 m of the camera. */
 const FIGHTER_GLOW_RANGE = 25;
 const npcGlow: FighterGlow[] = [0, 1].map(() => ({ pos: new THREE.Vector3(), color: 0, d2: 0 }));
@@ -459,6 +462,9 @@ class App {
     // The guns. Every place a bolt is fired reaches this through the module it lives in, so a shot
     // deep in a creature's brain or a turret's aim needs no mixer of its own to be heard.
     combatSounds.attach(this.audio, import.meta.env.BASE_URL);
+    // The machines. A hull struck, a hull blown up and a hull in hyperspace are three different
+    // systems away from here, so they reach the same module rather than carrying a mixer down.
+    vehicleSounds.attach(this.audio, import.meta.env.BASE_URL);
     this.renderer.setPixelRatio(S.renderScale);
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.renderer.shadowMap.enabled = S.shadows;
@@ -1491,6 +1497,40 @@ class App {
         return { ...combatSounds.status(), recent: log };
       },
       /**
+       * The machines, headless: every vehicle in the world with the engine sounds it chose and where
+       * they came from (`part` the fitted engine part's own client data, `hull ASND` or `VSND` the
+       * hull's, `flyby family` the run loop of the family its chassis's flyby names, `none` nothing
+       * at all), its wing, flyby and hit-sound rows, and the last few things that sounded.
+       * `from: 'none'` on a ship you can hear is the one number that says a hull is silent, and
+       * `counts.silent` how many machines in the world now are. `voices` is what each of a
+       * machine's three is playing at this moment and on which key, which is the only way to see
+       * that a voice is holding the sound it was started with rather than the one wanted now.
+       *
+       * With an object it retunes the invented numbers live: `crossAt` (the share of top speed the
+       * run loop is full at), `open`/`close` (the throttle's two edges), `pitchSpan`, `doppler` and
+       * `soundSpeed` (the Doppler's arithmetic), `flyby`, `flybySpeed` and `flybyGap`, `parkedGain`,
+       * `water`, the `swapUp`/`swapDown` band an unflown ship changes loop at, `swapFade`, `retry`
+       * (how long a voice the mixer had none free for waits), `moveStep` (how far a machine moves
+       * before its voice's place is written again), `lockGap` (how soon the lock tone may sound
+       * again) and `liftLevel` (how far apart two lift stops must be for the pick to be a ride).
+       * A number that changes how a voice sounds takes effect on that voice's next loop.
+       */
+      vehicleSounds: (tune?: Partial<VehicleTune>, n = 12) => {
+        if (tune) {
+          const unknown: string[] = [];
+          for (const [key, value] of Object.entries(tune)) {
+            if (key in vehicleSounds.tune) (vehicleSounds.tune as unknown as Record<string, unknown>)[key] = value;
+            else unknown.push(key);
+          }
+          if (unknown.length) console.warn(`vehicleSounds: nothing here is tuned by ${unknown.join(', ')}`);
+        }
+        const status = vehicleSounds.status();
+        console.table(status.machines as Record<string, unknown>[]);
+        const log = vehicleSounds.log.slice(-Math.max(1, n));
+        console.table(log);
+        return { ...status, recent: log };
+      },
+      /**
        * What is under a point right now and which of the four sources says so: with no argument the
        * player's own feet, else a point. This is how a surface that sounds wrong is tracked down --
        * it names the room's row, the object template under the foot and the terrain's own surface
@@ -1556,6 +1596,10 @@ class App {
             // helper can count the steps a walk took without the tab bursting into noise.
             const eye = this.cam.camera.position;
             this.stepFeet(dt, eye.x, eye.y, eye.z);
+            // The machines step with them, for the same reason: a driven tab draws no frames at all,
+            // so without this `vehicleSounds()` would list nothing after a simulated minute of flight.
+            vehicleSounds.setListener(eye.x, eye.y, eye.z, this.listenerPose.space);
+            this.stepVehicleSounds(dt);
             this.input.endFrame();
           }
         } finally {
@@ -3016,9 +3060,13 @@ class App {
     // The guns' own ear: a bolt whines past where the camera is, and a shot belongs to the room the
     // camera stands in unless the world can name a nearer one.
     combatSounds.setListener(pose.x, pose.y, pose.z, pose.space);
+    // The machines hear from the same place, and a ship's own engine belongs to whatever room the ear
+    // is in: aboard a hull that is the hull, so the engine is not muffled by its own walls.
+    vehicleSounds.setListener(pose.x, pose.y, pose.z, pose.space);
     // Feet and voices before the mixer's own step, so a step that lands this frame is given a voice
     // on the same frame it lands rather than the next.
     this.stepFeet(dt, pose.x, pose.y, pose.z);
+    this.stepVehicleSounds(dt);
     this.audio.update(dt, pose);
   }
 
@@ -3065,12 +3113,12 @@ class App {
       p.y = at.y;
       p.z = at.z;
       p.inside = this.world.inside || (!!player.aboard && !isSurfaceRoom(player.aboard));
-      // A ship's rooms are a physics world of their own that no ray of the planet's reaches, and
-      // the interior table gives a hull's rooms metal: INVENTED only in that it is not looked up.
-      // Standing on a surface with the boots on is not a deck: the world's own ray answers there,
-      // so a rock stays a rock.
+      // A ship's rooms are a physics world of their own that no ray of the planet's reaches, so the
+      // deck is the interior table's own floor for that hull, and metal where the table names no row
+      // for it (it names three, two of them metal and the third carpet). Standing on a surface with
+      // the boots on is not a deck: the world's own ray answers there, so a rock stays a rock.
       const hull = player.aboard && !isSurfaceRoom(player.aboard) ? player.aboard : null;
-      p.deck = hull ? 'metal' : null;
+      p.deck = hull ? (vehicleSounds.deckSurface(hull.vehicle.def?.id ?? hull.vehicle.spec.id) ?? 'metal') : null;
       // Aboard, the body's own sounds belong to the hull the ear is in. Without this the muffling
       // rule puts a low-pass over every step the player takes on the deck, because there is no
       // streamed building at the point and the world would answer "outside".
@@ -3113,6 +3161,38 @@ class App {
 
   private rodeLast = false;
   private aboardLast = false;
+  /** The ship tables from `sounds/sources.json` as the machines last had them. */
+  private vehicleTables: unknown = undefined;
+
+  /**
+   * Every machine in the world this frame. The vehicles are the world's own list and the two the
+   * player is on are fields, so nothing is allocated; outside a world the whole thing is let go, or
+   * the next planet would start with the last one's engines still running.
+   */
+  private stepVehicleSounds(dt: number): void {
+    if (!this.inWorld) {
+      if (this.vehicleTables !== undefined) {
+        vehicleSounds.leave();
+        this.vehicleTables = undefined;
+      }
+      return;
+    }
+    // The chassis tables (each hull's flyby, its hit-sound group, the power sets and the interior
+    // table's rooms) come out of the same shared file the feet and the guns read.
+    const tables = this.audio.bank.sources;
+    if (tables !== this.vehicleTables) {
+      this.vehicleTables = tables;
+      vehicleSounds.setTables(tables as VehicleTables | null);
+    }
+    const p = this.player;
+    // Standing on a hull with the boots on is out of doors, not aboard: the ear is beside a rock and
+    // the hull under it is one more machine in the world, with its flyby, its Doppler and its one
+    // voice. Only a hull whose rooms the player is inside is theirs, and only those rooms hum.
+    const inHull = p.aboard && !isSurfaceRoom(p.aboard) ? p.aboard.vehicle : null;
+    // What the player is on: the mount, the ship they fly, or the hull whose rooms they stand in.
+    const own = (p.mounted ?? p.piloting ?? inHull ?? null) as SoundVehicle | null;
+    vehicleSounds.update(dt, this.world.vehicles as readonly SoundVehicle[], own, inHull as SoundVehicle | null);
+  }
 
   /**
    * One of the game's sounds where the player stands, in whatever space the player is in: stepping
@@ -4564,6 +4644,10 @@ class App {
         this.shipLeadValid = true;
       }
     }
+    // The game's own target tones, from the combat data: one when a ship is picked and one when the
+    // pick goes. The "acquired" tone goes to the moment the guns first have a firing solution on it,
+    // which is ours -- nothing in this game locks a missile -- and the data's is the game's.
+    vehicleSounds.target(this.world.ships.data?.file.target?.sounds, this.shipTarget, this.shipLeadValid);
     // Mouse flight: the guns aim through the cursor, kept to the aim circle, measured about the hull's nose from the
     // pilot's eye (never from the chase camera, which lags a turn by up to a quarter of a second and looks a little under
     // the hull), and cross where the target's lead is, or where the target is, or MOUSE_FLIGHT.convergeM out; within
@@ -5798,8 +5882,16 @@ class App {
     if (!stop) return;
     const next = p.aboard ? p.aboard.rideLift(stop) : this.world.rideLift(stop);
     if (!next) return;
+    // Which way the car went, before the player is moved: the level picked against the one they
+    // stood at. A stop at the level they are already on is a step out, and is silent.
+    const from = lift?.stops[lift.current]?.level;
     p.pos.copy(next);
     p.vel.set(0, 0, 0);
+    if (from !== undefined && Math.abs(stop.level - from) > vehicleSounds.tune.liftLevel) {
+      // Aboard, the place is in the hull's frame: the sound belongs where the player now stands.
+      const at = p.aboard ? p.aboard.toWorld(p.pos, liftAt) : liftAt.copy(p.pos);
+      vehicleSounds.lift(stop.level > from, at.x, at.y, at.z, this.listenerPose.space);
+    }
     if (!p.aboard) this.physics.world.step();
   }
 

@@ -17,6 +17,7 @@ import { shipHostile } from './factions';
 import { PILOT_SKILL, aimPoint, formationPoint, skillOfTier, skillStick, slotCruise, steerToward, toLocal, type PilotSkill, type Stick } from './pilot';
 import { targetable } from './shipCombat';
 import type { NpcShip } from './npcShips';
+import { combatSounds } from '../audio/combatSounds';
 
 export type BrainState = 'patrol' | 'formation' | 'engage' | 'breakoff' | 'evade' | 'flee' | 'return';
 
@@ -556,6 +557,10 @@ export class NpcBrain {
       exclude: v.body,
       projectile: ctx.projectileFor(w.projectile),
       source: this.ship.contact,
+      // Its own gun's sounds, not the bolt's: three of the projectile table's bolt effects are shared
+      // by several hulls, each with a shot of its own, and without this row a red bolt would be heard
+      // as whichever hull fires that effect first.
+      sound: combatSounds.shipGun(w.projectile),
     });
     ctx.effects()?.flash(shotFrom, v.boltColor, 5, 6, 0.06);
     this.shots++;

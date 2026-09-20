@@ -13,6 +13,7 @@ import * as THREE from 'three';
 import { NOBODY, PLAYER_KEY, type Living } from '../combat/kit.ts';
 import type { Bolt } from '../combat/bolts';
 import type { CombatFile, CombatLayer, HullFx } from './combatData.ts';
+import { vehicleSounds } from '../audio/vehicleSounds.ts';
 import type { ShipContact } from './contacts';
 import { applyCollision, applyHit, applyShares, createCondition, isDown, newHitResult, regenerate, rescaleCondition, sharesOf, type ConditionShares, type HitResult, type ShipCondition } from './shipDamage.ts';
 import { CLASS_BASE, COLLISION_BOUT, COLLISION_CAP_SHARE, statsFor, type Handling, type ShipStats, type StatInput, type WeaponStat } from './shipStats.ts';
@@ -155,6 +156,8 @@ export class ShipCombat {
   rng: () => number = Math.random;
   /** Whether the last blow placed the game's hit effect for its layer (false: the combat file has none for it, or there is no combat file), so the bolt's own hit effect can stand in. */
   shown = false;
+  /** The chassis row this hull flies as, which is what the game keys its hit and power sounds on; null: the fallback row. Set by whoever adopts the combat, which is the only place the chassis is known. */
+  soundChassis: string | null = null;
   /** The handling as the vehicle had it before the combat wrote its spec: every restat starts from this. */
   private readonly base: Handling;
   private readonly fx: CombatFx | null;
@@ -387,6 +390,9 @@ export class ShipCombat {
    * same matrix the frame is, so the effect starts exactly at the point however stale that matrix is.
    */
   private effects(point: THREE.Vector3, normal: THREE.Vector3, r: HitResult): void {
+    // The blow's own sound for the layer it reached, and the game's power-down when the blow took a
+    // part with it. Before the effects, because a ship with no effects to place still sounds.
+    vehicleSounds.shipHit(this.soundChassis, r.layer, point.x, point.y, point.z, r.partDown ? r.part : null);
     const fx = this.fx;
     if (!fx) return;
     placeQ.setFromUnitVectors(UP, normal);

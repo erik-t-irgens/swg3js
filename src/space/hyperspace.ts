@@ -37,6 +37,7 @@ import {
   type TunnelCover,
 } from './hyperspaceMath.ts';
 import { arrivalAt, landmarksOf } from './spaceData.ts';
+import { vehicleSounds } from '../audio/vehicleSounds.ts';
 
 export type JumpPhase = 'idle' | 'countdown' | 'enter' | 'transit' | 'exit';
 
@@ -397,8 +398,20 @@ export class Hyperspace {
     host.holdCrew(hull);
     host.tunnel.attach(hull);
     this.enterFx = this.placeOn(hull, host.effects().enter);
+    this.jumpSound('enter', hull);
     this.phase = 'enter';
     this.t = 0;
+  }
+
+  /**
+   * One stage's sound, from the pack's own reading of `scene/hyperspace.iff`. The file is one file
+   * for the whole galaxy, so either pack answers; the zone being left is asked first, since that is
+   * where the ship still is.
+   */
+  private jumpSound(stage: 'enter' | 'transit' | 'exit', hull: JumpHull): void {
+    const scene = (this.host.packHere() ?? this.destPack)?.hyperspace?.scene;
+    const sound = stage === 'enter' ? scene?.enter?.sound : stage === 'transit' ? scene?.transit?.sound : scene?.exit?.sound;
+    vehicleSounds.jump(stage, sound, hull.pos.x, hull.pos.y, hull.pos.z);
   }
 
   private updateEnter(dt: number, rawDt: number): void {
@@ -416,6 +429,7 @@ export class Hyperspace {
     if (this.t >= transitAt(s)) {
       this.phase = 'transit';
       this.t = 0;
+      this.jumpSound('transit', hull);
       this.tunnelCruise = hull.jumpCruise ?? s.speed;
       this.showTunnel(dt);
       void this.transit(this.token);
@@ -496,6 +510,7 @@ export class Hyperspace {
     this.phase = 'exit';
     this.t = 0;
     this.exitFx = this.placeOn(hull, this.host.effects().exit);
+    this.jumpSound('exit', hull);
   }
 
   private updateExit(dt: number, rawDt: number): void {

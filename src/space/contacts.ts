@@ -17,6 +17,7 @@ import { ShipCombat, blameKey, blamed, stockFor, targetable, type CombatFx, type
 import type { HitResult } from './shipDamage.ts';
 import { familyOf, hullClassOf, type Handling, type StatInput } from './shipStats.ts';
 import { TauntGate, fillTaunt, pickLine, type TauntEvent } from './taunts.ts';
+import { vehicleSounds } from '../audio/vehicleSounds.ts';
 
 /** The slots a ship is given when neither its fit nor combat.json says (an older pack): a fighter's systems, each weighing 10. */
 const DEFAULT_SLOTS: StatInput['slots'] = {
@@ -236,6 +237,9 @@ export class ShipContacts {
     const hullFx = this.data?.hullFx(v.def?.id ?? v.spec.id) ?? null;
     const combat = new ShipCombat(v, contact, this.inputFor(v, type), this.fx, hullFx, this.data?.file.hitEffects ?? null);
     combat.hooks = this.hooks;
+    // The chassis row it flies as, which is the only place that knows it: the sound of a blow on this
+    // hull and of one of its systems going down is keyed on it.
+    combat.soundChassis = this.chassisNameOf(v, type);
     contact.combat = combat;
     v.combat = combat;
     this.list.push(contact);
@@ -252,8 +256,7 @@ export class ShipContacts {
     // The manifest's class: VehicleDef.class, else the "(class)" the garage writes after a ship's label.
     const cls = (def as { class?: string } | null)?.class ?? /\((\w+)\)\s*$/.exec(def?.label ?? '')?.[1];
     const fitDef = (type ? this.data?.chassis(type.chassis)?.fit : null) ?? def?.fit ?? null;
-    const chassisName = type ? type.chassis : (def?.fit?.chassis ?? `player_${id}`);
-    const rows = this.data?.chassis(chassisName)?.slots ?? {};
+    const rows = this.data?.chassis(this.chassisNameOf(v, type))?.slots ?? {};
     const slots: StatInput['slots'] = {};
     for (const s of fitDef?.slots ?? []) slots[s.slot] = { compat: s.compat, hitweight: rows[s.slot]?.hitweight ?? 10, targetable: rows[s.slot]?.targetable ?? false };
     for (const [slot, r] of Object.entries(rows)) if (!slots[slot]) slots[slot] = { compat: r.compat ?? [], hitweight: r.hitweight, targetable: r.targetable };
@@ -276,6 +279,11 @@ export class ShipContacts {
     };
   }
 
+  /** The chassis table row a hull flies as: an NPC's tier chassis, else the hull's own fit, else the player row named after it. */
+  private chassisNameOf(v: Vehicle, type: NpcTypeDef | null): string {
+    return type ? type.chassis : (v.def?.fit?.chassis ?? `player_${v.def?.id ?? v.spec.id}`);
+  }
+
   /** Stats again after a refit (World.refitVehicle calls it). */
   refit(v: Vehicle): void {
     const c = this.byVehicle.get(v);
@@ -285,6 +293,9 @@ export class ShipContacts {
   /** A ship has just been destroyed: its explosion, the death taunt (only for the player's kill), then onShipDown. */
   onDestroyed(v: Vehicle): void {
     const c = this.byVehicle.get(v);
+    // The blast the hull's own client data names it destroyed by carries sounds as well as a
+    // particle, and the particle is all the combat file keeps: the sounds are looked up beside it.
+    vehicleSounds.shipDown(v.def?.id ?? v.spec.id, v.def?.template ?? null, v.pos.x, v.pos.y, v.pos.z);
     const file = this.data?.hullFx(v.def?.id ?? v.spec.id)?.destroyed;
     if (file) {
       v.group.updateMatrixWorld(true);
