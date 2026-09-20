@@ -334,13 +334,29 @@
 .hud-acts {
   position: absolute;
   left: 50%;
-  bottom: calc(52px * var(--hud-scale));
+  /* Clear of whichever block stands under it, at every scale the settings allow. On foot that is
+   * `.bottom` in `src/style.css`, which starts 14px up and stacks the class name, the two bars and
+   * the 40px ability cells: about 33px + 74px per scale. At a ship's controls the on-foot block is
+   * down and the ship's condition is up instead, which starts 96px per scale off the floor and is
+   * about 49px per scale tall, so it reaches 145px per scale -- the taller of the two at every scale
+   * the settings allow, and so the one that decides this number. 155 clears it by 4px at 0.75, 10px
+   * at 1 and 15px at 1.5. Invented, kept beside the other placements in `HUD_SIZES`
+   * (`actionBottom`), and the one number to change if the bar reads too high or too low. */
+  bottom: calc(155px * var(--hud-scale));
   transform: translateX(-50%);
   display: flex;
   gap: calc(14px * var(--hud-scale));
   font-family: var(--hud-font);
   font-size: calc(13px * var(--hud-scale));
   white-space: nowrap;
+}
+/* A window too short to hold the bar up there at all -- a docked devtools, a phone laid on its side:
+ * it goes back under the block, where it sat before there was anything under it to clear. The same
+ * two numbers are `HUD_SIZES.actionLow` and `actionShortH`. */
+@media (max-height: 269px) {
+  .hud-acts { bottom: calc(52px * var(--hud-scale)); }
+  /* The long line comes down with it, since it stands above the bar. */
+  .prompt { bottom: calc(88px * var(--hud-scale)); }
 }
 .hud-act {
   display: flex;
@@ -622,7 +638,11 @@
 .prompt {
   position: absolute;
   left: 50%;
-  bottom: 150px;
+  /* The long line of every key is on while the short bar is judged against it, so it has to stand
+   * clear of the bar at every scale rather than at one: the bar's top is 155px + its own 24px per
+   * scale, and 190 clears that by 11px at 0.75, 11px at 1 and 16px at 1.5. Invented, and it goes
+   * with the long line whenever the long line goes. */
+  bottom: calc(190px * var(--hud-scale));
   transform: translateX(-50%);
   padding: 6px 14px;
   background: var(--panel);

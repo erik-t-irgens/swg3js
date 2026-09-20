@@ -147,8 +147,21 @@ export const HUD_SIZES = {
   messageBottom: 14,
   messageW: 420,
   messageLineH: 22,
-  /** The action bar, bottom centre. */
-  actionBottom: 52,
+  /**
+   * The action bar, bottom centre, this far up from the floor at the scale. It clears whichever
+   * block stands under it: the on-foot one, or the ship's condition, which is the taller of the two
+   * at every scale the settings allow. `hud.css` states it again and `hudMath.test.ts` checks the
+   * two agree.
+   */
+  actionBottom: 155,
+  /**
+   * Where the bar goes on a window too short to hold it above the block: back under the block, which
+   * is where it sat before there was anything under it to clear. Both numbers are invented and both
+   * are stated again in `hud.css`, the second inside a height query.
+   */
+  actionLow: 52,
+  /** A window shorter than this cannot hold the bar above the block even at the smallest scale. */
+  actionShortH: 270,
   actionW: 420,
   actionH: 24,
   /** The gap kept between the message line and the condition block, so they can never touch. */
@@ -316,11 +329,14 @@ export function layout(w: number, h: number, scale: number, out: HudLayout): Hud
   out.condition.x = Math.round((w - out.condition.w) / 2);
   out.condition.y = Math.round(h - S.conditionUp * s - condH);
 
-  // The action bar, bottom centre, under the condition block.
+  // The action bar, bottom centre, clear of the block under it. On a window too short to hold it up
+  // there it goes back under the block instead of climbing off the top, which is the same rule the
+  // stylesheet states again in a height query.
   out.action.w = Math.min(S.actionW * s, w - S.blockMargin * s);
   out.action.h = S.actionH * s;
   out.action.x = Math.round((w - out.action.w) / 2);
-  out.action.y = Math.round(h - S.actionBottom * s - out.action.h);
+  const up = (h < S.actionShortH ? S.actionLow : S.actionBottom) * s;
+  out.action.y = Math.round(h - up - out.action.h);
 
   // The message line, bottom left. It is narrowed before it can reach either of the centred blocks,
   // and on a window too cramped for even the narrowest column it climbs above them instead, so the
