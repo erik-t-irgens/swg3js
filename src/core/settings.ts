@@ -81,6 +81,25 @@ export interface Settings extends FxSettings {
   soundSabers: string;
   /** A nebula's lightning takes shields and armour off a ship it strikes; off, a strike only flashes. */
   nebulaLightningDamage: boolean;
+  // The screen's own display. Every number here is ours -- the game's own interface is not read for
+  // any of it -- and every one of them is invented; they are kept together so they can be judged
+  // together, and `__debug.hud({ ... })` moves the first two live without opening the menu.
+  /** How large the display is drawn, 0.75 small to 1.5 large; 1 is what it was designed at. */
+  hudScale: number;
+  /** Device pixels per screen pixel on the overlay: 1 cheap, 2 sharper hairlines on a dense screen. */
+  hudDpr: number;
+  /** The flown ship's shields, armour, hull and its row of part squares. */
+  hudShipCondition: boolean;
+  /** The bracket, the name, the range and the bars on the ship targeted. */
+  hudTargetBlock: boolean;
+  /** The speed, gun and booster arcs around the reticle in flight. */
+  hudArcs: boolean;
+  /** The bottom-left line where everything that happens is said. */
+  hudMessages: boolean;
+  /** How many of those lines stand at once, 3 to 8. */
+  hudMessageLines: number;
+  /** The long line under the display that names every key. On while it is the only place they are named. */
+  hudFullPrompts: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -122,8 +141,21 @@ export const DEFAULT_SETTINGS: Settings = {
   soundInBackground: false,
   soundSabers: 'jka',
   nebulaLightningDamage: true,
+  hudScale: 1,
+  hudDpr: 1,
+  hudShipCondition: true,
+  hudTargetBlock: true,
+  hudArcs: true,
+  hudMessages: true,
+  hudMessageLines: 8,
+  hudFullPrompts: true,
   ...FX_DEFAULTS,
 };
+
+/** What the display's scale and its sharpness may be set to; the menu and `__debug.hud` clamp to these. */
+export const HUD_SCALE_RANGE = { min: 0.75, max: 1.5 } as const;
+export const HUD_DPR_RANGE = { min: 1, max: 2 } as const;
+export const HUD_LINES_RANGE = { min: 3, max: 8 } as const;
 
 /**
  * The settings this session is playing with: the object `loadSettings` last returned, which the

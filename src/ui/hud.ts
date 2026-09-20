@@ -7,6 +7,54 @@ const COMMON_HELP = [
   '<b>M</b> galaxy map · <b>I</b> inventory (wardrobe, appearance, weapons) · <b>B</b> spawner (garage, NPCs) · <b>H</b> help · <b>N</b> noclip fly · <b>Esc</b> free the mouse',
 ];
 
+/**
+ * How finely a value has to change before the display writes it to the DOM, and what a bar's fill is
+ * measured in. Every number here is INVENTED; they are kept together so there is one place to look,
+ * and they are live through `Hud.tune` so a value can be tried without a reload. None of them decides
+ * what is drawn, only how often a write happens: the worst a wrong one can do is cost a write, or
+ * hold a value one step longer than it might have.
+ *
+ * `barPixels` is the on-foot bars' own width, `.bar { width: 320px }` at `src/style.css:146`, so a
+ * share is compared at the finest step the bar can actually show; if that rule's width changes, or
+ * the bars move behind `--hud-scale` in `src/ui/hud.css`, this follows it. The rest are the steps the
+ * display already rounded to before (`toFixed(0)` on a percentage is a step of 100, `toFixed(2)` on
+ * the hurt fade a step of 100), so what reaches the screen is what reached it before.
+ */
+export const HUD_TUNE = {
+  barPixels: 320,
+  cooldownSteps: 100,
+  chargeSteps: 100,
+  hurtSteps: 100,
+};
+
+/**
+ * The keys `tune` takes. A key that is not one of these is a mistake at the console, and saying so is
+ * worth more than quietly accepting it: `Object.assign` took `{ barPixel: 1 }` without a word.
+ */
+const TUNE_KEYS = ['barPixels', 'cooldownSteps', 'chargeSteps', 'hurtSteps'] as const;
+
+/** What `Hud.stats()` reports, filled in place so asking for it allocates nothing. */
+export interface HudStats {
+  /** DOM writes in the last full second that were not by design: 0 in a steady frame. */
+  writes: number;
+  /** DOM writes in the last full second that are meant to happen: the 4 Hz clock, /loc and frame rate, and a rebuild of the slot row. */
+  byDesign: number;
+  /** How far into the second now being counted. */
+  seconds: number;
+  /** The same two counts so far in the second now being counted. */
+  writesNow: number;
+  byDesignNow: number;
+}
+
+/**
+ * The slow half of the head-up display: the planet block, the clock and the frame rate, the weather
+ * note, the on-foot bars, the number slots, the crosshair and its charge, the prompt, the hurt fade,
+ * the help block and the mouse-free line. The flight display -- the reticle, the aim circle and the
+ * target's bracket -- is `ShipHud`'s, drawn on the overlay canvas; nothing here knows about flying.
+ *
+ * Every value is written to the DOM only when what it shows has changed, and what was last written is
+ * held in a field here rather than read back off the element.
+ */
 export class Hud {
   private readonly root: HTMLElement;
   private readonly planetName: HTMLElement;
@@ -15,43 +63,63 @@ export class Hud {
   private readonly fps: HTMLElement;
   /** A quiet line under the frame rate while the weather is not the shared schedule's. */
   private readonly weatherNote: HTMLElement;
+  /** What that line holds, kept here rather than read back off the element. */
+  private weatherNoteText = '';
   private readonly clock: HTMLElement;
   private readonly className: HTMLElement;
   private readonly hpFill: HTMLElement;
   private readonly hpText: HTMLElement;
+  private readonly resBar: HTMLElement;
   private readonly resFill: HTMLElement;
   private readonly resText: HTMLElement;
   private readonly slotsEl: HTMLElement;
   private readonly help: HTMLElement;
   private readonly crosshair: HTMLElement;
   private readonly chargeEl: HTMLElement;
-  private readonly flight: HTMLElement;
-  private flying = false;
-  private readonly flightCentre: HTMLElement;
-  private readonly flightRing: HTMLElement;
-  private readonly aimCircle: HTMLElement;
-  private readonly stickLine: HTMLElement;
-  private readonly stickHead: HTMLElement;
-  private readonly pip: HTMLElement;
-  /** What the flight display last wrote, so an attribute is set only when it changes. */
-  private readonly flightDrawn = { w: -1, h: -1, ox: NaN, oy: NaN, circle: -1, ring: -1, onLead: false, inside: true, cx: NaN, cy: NaN, turn: -1 };
-  /** The lead reticle's state as last written: on the cursor or not. */
-  private leadOn = false;
+  private readonly chargeFill: HTMLElement;
   private readonly mouseFree: HTMLElement;
+  private mouseFreeDrawn = false;
   private readonly prompt: HTMLElement;
+  /** What the prompt holds, kept here rather than read back off the element: reading `innerHTML` serialises the whole subtree. */
+  private promptText = '';
   private readonly hurtEl: HTMLElement;
-  private readonly targets: HTMLElement;
-  private readonly tbox: HTMLElement;
-  private readonly lead: HTMLElement;
-  private readonly leadLine: HTMLElement;
-  private readonly leadCross: HTMLElement[];
-  private readonly tlabel: HTMLElement;
-  /** The target box's class as last written ('' before the first target), so it is set only on a change. */
-  private targetKind = '';
   private slots: HTMLElement[] = [];
+  /** Each slot's cooldown shade, its lit state and its shade's height as last written, beside the slot row itself. */
+  private slotCds: HTMLElement[] = [];
+  private slotLit: boolean[] = [];
+  private slotShade: number[] = [];
+  /** How many of the slot row's cells are the kit's own powers; the one after them is the saber. */
+  private kitSlotCount = 0;
+  private saberEl: HTMLElement | null = null;
+  private saberCost: HTMLElement | null = null;
+  private saberLit = false;
+  private saberCostText = '';
+  /**
+   * The bars and the charge as last written, in the steps of `HUD_TUNE`. `NaN` is "nothing written
+   * yet", because it is the one value that is never equal to itself: -1 is a number a health that
+   * has gone below zero really rounds to, and that reading would then never be written.
+   */
+  private hpDrawn = NaN;
+  private hpTextDrawn = NaN;
+  private resShown = true;
+  private resDrawn = NaN;
+  private resTextDrawn = NaN;
+  private resLabelDrawn = '';
+  private chargeShown = false;
+  private chargeDrawn = NaN;
   private hurtLevel = 0;
+  private hurtDrawn = NaN;
   private lastFps = performance.now();
   private frames = 0;
+  /** DOM writes counted for `__debug`: this second so far, and the last full second. */
+  private writes = 0;
+  private byDesign = 0;
+  private windowStart = performance.now();
+  private lastWrites = 0;
+  private lastByDesign = 0;
+  private readonly statsOut: HudStats = { writes: 0, byDesign: 0, seconds: 0, writesNow: 0, byDesignNow: 0 };
+  /** What `tune` hands back: a copy, filled in place, so the console cannot hold the live table. */
+  private readonly tuneOut: typeof HUD_TUNE = { ...HUD_TUNE };
 
   constructor(parent: HTMLElement) {
     this.root = document.createElement('div');
@@ -72,27 +140,6 @@ export class Hud {
       </div>
       <div class="crosshair"></div>
       <div class="charge" hidden><div class="fill"></div></div>
-      <svg class="flight hidden" style="left: 0; top: 0; margin: 0; width: 100%; height: 100%; overflow: visible">
-        <g class="flight-centre">
-          <circle class="ring" r="0" />
-          <circle class="aim-circle" r="0" style="fill: none; stroke: rgba(127,215,255,0.6); stroke-width: 1.5; filter: drop-shadow(0 0 2px rgba(0,0,0,0.8))" />
-          <line class="cross" x1="-9" y1="0" x2="-4" y2="0" /><line class="cross" x1="4" y1="0" x2="9" y2="0" />
-          <line class="cross" x1="0" y1="-9" x2="0" y2="-4" /><line class="cross" x1="0" y1="4" x2="0" y2="9" />
-          <line class="stick-line" x1="0" y1="0" x2="0" y2="0" style="display: none" />
-          <polygon class="stick-head" points="0,0 0,0 0,0" style="display: none" />
-          <g class="pip">
-            <circle r="7" style="fill: none; stroke: #ffffff; stroke-width: 1.5; filter: drop-shadow(0 0 2px rgba(0,0,0,0.8))" />
-            <circle class="stick-dot" r="1.8" />
-          </g>
-        </g>
-      </svg>
-      <svg class="targets hidden">
-        <rect class="tbox" width="34" height="34" rx="2" />
-        <line class="lead-line" x1="0" y1="0" x2="0" y2="0" />
-        <circle class="lead" r="7" />
-        <line class="lead-cross" x1="0" y1="0" x2="0" y2="0" /><line class="lead-cross" x1="0" y1="0" x2="0" y2="0" />
-        <text class="tlabel"></text>
-      </svg>
       <div class="mouse-free hidden">Mouse free · <b>click</b> to look again</div>
       <div class="prompt"></div>
       <div class="bottom">
@@ -112,215 +159,175 @@ export class Hud {
     this.className = q('.class-name');
     this.hpFill = q('.hp .fill');
     this.hpText = q('.hp .text');
+    this.resBar = q('.bar.res');
     this.resFill = q('.res .fill');
     this.resText = q('.res .text');
     this.slotsEl = q('.slots');
     this.help = q('.help');
     this.crosshair = q('.crosshair');
     this.chargeEl = q('.charge');
-    this.flight = q('.flight');
-    this.flightCentre = q('.flight-centre');
-    this.flightRing = q('.flight .ring');
-    this.aimCircle = q('.aim-circle');
-    this.stickLine = q('.stick-line');
-    this.stickHead = q('.stick-head');
-    this.pip = q('.pip');
+    this.chargeFill = q('.charge .fill');
     this.mouseFree = q('.mouse-free');
     this.prompt = q('.prompt');
     this.hurtEl = q('.hurt');
-    this.targets = q('.targets');
-    this.tbox = q('.tbox');
-    this.lead = q('.lead');
-    this.leadLine = q('.lead-line');
-    this.leadCross = [...this.root.querySelectorAll<HTMLElement>('.lead-cross')];
-    this.tlabel = q('.tlabel');
+    // A bar's fill grows by a transform rather than by its width: a width is laid out again every time
+    // it changes, a scale is not. The fill is left at its full length and squeezed from the left, which
+    // paints exactly what a part-width fill painted, gradient and all.
+    for (const fill of [this.hpFill, this.resFill]) {
+      fill.style.width = '100%';
+      fill.style.transformOrigin = 'left center';
+      fill.style.transform = 'scaleX(0)';
+      fill.style.transition = 'transform 0.08s linear';
+    }
   }
 
   /** A quiet line when the weather is not the shared schedule's (held, swapped, forced); empty hides it. Cheap to call every frame. */
   setWeatherNote(text: string): void {
-    if (this.weatherNote.textContent === text) return;
+    // Compared against what was written, not against the element: this is called every frame, and an
+    // object that remembers what it put somewhere need never ask for it back.
+    if (this.weatherNoteText === text) return;
+    this.weatherNoteText = text;
     this.weatherNote.textContent = text;
     this.weatherNote.hidden = text === '';
-  }
-
-  /**
-   * The ship's target in flight: a box on the target where it shows on screen, its name, range
-   * and hull under it, and the lead reticle where the guns must point for a bolt fired now to
-   * meet it, joined to the box by a line (green while the guns' cursor is on it). Nothing while
-   * there is no target.
-   */
-  setTarget(t: { x: number; y: number; onScreen: boolean; leadX: number; leadY: number; leadOnScreen: boolean; label: string; kind?: 'enemy' | 'friend' | 'neutral'; onLead?: boolean } | null): void {
-    this.targets.classList.toggle('hidden', !t);
-    if (!t) return;
-    // The lead reticle lights while the guns' cursor sits on it (the bolts take the lead exactly).
-    const on = !!t.onLead;
-    if (on !== this.leadOn) {
-      this.leadOn = on;
-      const stroke = on ? '#7dff9a' : '';
-      this.lead.style.stroke = stroke;
-      for (const c of this.leadCross) c.style.stroke = stroke;
-    }
-    // The box's colour says what the target is to the pilot: red an enemy, green a friend, white neither.
-    const kind = t.kind ?? 'neutral';
-    if (kind !== this.targetKind) {
-      this.targetKind = kind;
-      this.tbox.setAttribute('class', `tbox ${kind}`);
-    }
-    const w = window.innerWidth;
-    const h = window.innerHeight;
-    // A target off the screen is kept at its edge, so the pilot knows which way to turn.
-    const clampEdge = (x: number, y: number, on: boolean) => (on ? { x, y } : { x: Math.min(w - 20, Math.max(20, x)), y: Math.min(h - 20, Math.max(20, y)) });
-    const box = clampEdge(t.x, t.y, t.onScreen);
-    this.tbox.setAttribute('x', String(box.x - 17));
-    this.tbox.setAttribute('y', String(box.y - 17));
-    this.tbox.style.opacity = t.onScreen ? '1' : '0.45';
-    this.tlabel.setAttribute('x', String(box.x));
-    this.tlabel.setAttribute('y', String(box.y + 32));
-    if (this.tlabel.textContent !== t.label) this.tlabel.textContent = t.label;
-    const showLead = t.onScreen && t.leadOnScreen;
-    this.lead.style.display = showLead ? '' : 'none';
-    this.leadLine.style.display = showLead ? '' : 'none';
-    for (const c of this.leadCross) c.style.display = showLead ? '' : 'none';
-    if (!showLead) return;
-    this.lead.setAttribute('cx', String(t.leadX));
-    this.lead.setAttribute('cy', String(t.leadY));
-    this.leadCross[0].setAttribute('x1', String(t.leadX - 11));
-    this.leadCross[0].setAttribute('x2', String(t.leadX + 11));
-    this.leadCross[0].setAttribute('y1', String(t.leadY));
-    this.leadCross[0].setAttribute('y2', String(t.leadY));
-    this.leadCross[1].setAttribute('x1', String(t.leadX));
-    this.leadCross[1].setAttribute('x2', String(t.leadX));
-    this.leadCross[1].setAttribute('y1', String(t.leadY - 11));
-    this.leadCross[1].setAttribute('y2', String(t.leadY + 11));
-    this.leadLine.setAttribute('x1', String(box.x));
-    this.leadLine.setAttribute('y1', String(box.y));
-    this.leadLine.setAttribute('x2', String(t.leadX));
-    this.leadLine.setAttribute('y2', String(t.leadY));
+    this.writes += 2;
   }
 
   setPlanet(p: PlanetDef): void {
     this.planetName.textContent = p.name;
     this.planetTag.textContent = p.tagline;
+    this.byDesign += 2;
   }
 
+  /**
+   * The class in play: its name, its number slots, its help. A rebuild of the row, so every write
+   * here is counted apart as one that is meant to happen -- counted where each one is made, so the
+   * figure is the number and not an estimate of it.
+   */
   setKit(kit: Kit): void {
     this.className.textContent = kit.name;
     this.slotsEl.innerHTML = '';
+    this.byDesign += 2;
     this.slots = [];
+    this.slotCds = [];
+    this.slotLit = [];
+    this.slotShade = [];
     for (const s of kit.slots) {
       const el = document.createElement('div');
       el.className = 'slot';
       el.innerHTML = `<div class="cd"></div><span class="key">${s.key}</span><span class="name">${s.name}</span><span class="cost">${s.cost}</span>`;
       this.slotsEl.appendChild(el);
+      this.byDesign += 3;
       this.slots.push(el);
+      this.slotCds.push(el.firstElementChild as HTMLElement);
+      this.slotLit.push(false);
+      this.slotShade.push(0);
     }
+    this.kitSlotCount = this.slots.length;
     const saber = document.createElement('div');
     saber.className = 'slot saber';
     saber.innerHTML = `<div class="cd"></div><span class="key">L</span><span class="name">Lightsaber</span><span class="cost">off</span>`;
     saber.hidden = kit.id !== 'jedi';
     this.slotsEl.appendChild(saber);
+    this.byDesign += 4;
     this.slots.push(saber);
+    this.slotCds.push(saber.firstElementChild as HTMLElement);
+    this.slotLit.push(false);
+    this.slotShade.push(0);
+    this.saberEl = saber;
+    this.saberCost = saber.querySelector<HTMLElement>('.cost');
+    this.saberLit = false;
+    this.saberCostText = 'off';
     this.help.innerHTML = [...COMMON_HELP, ...kit.help].map((l) => `<div>${l}</div>`).join('');
-    this.crosshair.hidden = kit.id !== 'bounty_hunter' || this.flying;
-  }
-
-  /**
-   * The flight display, in a ship in flight only (the DOM, so nothing compiles): a small crosshair on the boresight, the
-   * aim circle about it, a faint ring for the cursor's reach, and the cursor. Inside the circle the cursor is the guns'
-   * pip, and the circle lights when it sits on the target's lead; outside it an arrow runs from the circle's rim to the
-   * cursor, which stays where it was left, brighter the harder the ship turns. `ox`/`oy` is where the boresight shows, in
-   * pixels from the middle of the window (0, 0 in the cockpit; off the middle while a chase view catches a turn up);
-   * `cx`/`cy` the cursor in pixels from there, `circle` and `ring` radii in pixels, `inside` whether the cursor is in the
-   * circle (the hull's own reckoning). An attribute is written only when it changes.
-   */
-  setFlight(view: { ox: number; oy: number; cx: number; cy: number; circle: number; ring: number; turn: number; onLead: boolean; inside: boolean } | null): void {
-    this.flying = !!view;
-    this.flight.classList.toggle('hidden', !view);
-    if (!view) return;
-    const d = this.flightDrawn;
-    const w = window.innerWidth;
-    const h = window.innerHeight;
-    const ox = Math.round(view.ox * 2) / 2;
-    const oy = Math.round(view.oy * 2) / 2;
-    if (w !== d.w || h !== d.h || ox !== d.ox || oy !== d.oy) {
-      d.w = w;
-      d.h = h;
-      d.ox = ox;
-      d.oy = oy;
-      this.flightCentre.setAttribute('transform', `translate(${w / 2 + ox} ${h / 2 + oy})`);
-    }
-    const circle = Math.round(view.circle * 2) / 2;
-    if (circle !== d.circle) {
-      d.circle = circle;
-      this.aimCircle.setAttribute('r', String(circle));
-      // The arrow's shaft starts at the rim: drawn again when the rim moves (a resize, a change of view or of the tune).
-      d.cx = NaN;
-    }
-    const ring = Math.round(view.ring * 2) / 2;
-    if (ring !== d.ring) {
-      d.ring = ring;
-      this.flightRing.setAttribute('r', String(ring));
-    }
-    if (view.onLead !== d.onLead) {
-      d.onLead = view.onLead;
-      this.aimCircle.style.stroke = view.onLead ? 'rgba(125,255,154,0.95)' : 'rgba(127,215,255,0.6)';
-    }
-    const x = Math.round(view.cx * 2) / 2;
-    const y = Math.round(view.cy * 2) / 2;
-    const turn = Math.round(view.turn * 20) / 20;
-    const len = Math.hypot(x, y);
-    // The pip while the hull reckons the cursor inside, and while it is drawn inside the rim (a near range's parallax), so
-    // the arrow never points back into the circle.
-    const inside = view.inside || len <= circle;
-    if (inside !== d.inside) {
-      d.inside = inside;
-      d.cx = NaN;
-      this.pip.style.display = inside ? '' : 'none';
-      this.stickLine.style.display = inside ? 'none' : '';
-      this.stickHead.style.display = inside ? 'none' : '';
-    }
-    if (x === d.cx && y === d.cy && turn === d.turn) return;
-    d.cx = x;
-    d.cy = y;
-    d.turn = turn;
-    if (inside) {
-      this.pip.setAttribute('transform', `translate(${x} ${y})`);
-      return;
-    }
-    const ux = x / len;
-    const uy = y / len;
-    // The shaft from just outside the rim to short of the head; the head a little triangle at the cursor, pointing on.
-    const hx = x - ux * 10;
-    const hy = y - uy * 10;
-    const from = Math.min(circle + 3, len - 10);
-    const sx = ux * from;
-    const sy = uy * from;
-    this.stickLine.setAttribute('x1', String(sx));
-    this.stickLine.setAttribute('y1', String(sy));
-    this.stickLine.setAttribute('x2', String(hx));
-    this.stickLine.setAttribute('y2', String(hy));
-    this.stickHead.setAttribute('points', `${x},${y} ${hx - uy * 6},${hy + ux * 6} ${hx + uy * 6},${hy - ux * 6}`);
-    const o = (0.45 + 0.55 * turn).toFixed(2);
-    this.stickLine.style.opacity = o;
-    this.stickHead.style.opacity = o;
+    // The crosshair is the Bounty Hunter's. Whether it is wanted while a ship is flown is the flight
+    // display's business, not this file's: nothing here knows that a ship is being flown.
+    this.crosshair.hidden = kit.id !== 'bounty_hunter';
+    this.byDesign += 2;
+    // A new kit's bars and charge are written again whatever they held for the last one.
+    this.hpDrawn = NaN;
+    this.hpTextDrawn = NaN;
+    this.resDrawn = NaN;
+    this.resTextDrawn = NaN;
+    this.resLabelDrawn = '';
+    this.chargeDrawn = NaN;
   }
 
   setPrompt(text: string): void {
-    if (this.prompt.innerHTML !== text) this.prompt.innerHTML = text;
+    // What the prompt holds is remembered here: reading it back off the element serialises the whole
+    // subtree to a string, which is a good deal dearer than the comparison it was there to save.
+    if (this.promptText === text) return;
+    this.promptText = text;
+    this.prompt.innerHTML = text;
+    this.writes++;
   }
 
   /** A quiet note that the pointer is loose, instead of a menu over the whole game. */
   setMouseFree(free: boolean): void {
+    if (free === this.mouseFreeDrawn) return;
+    this.mouseFreeDrawn = free;
     this.mouseFree.classList.toggle('hidden', !free);
     this.crosshair.classList.toggle('hidden', free);
+    this.writes += 2;
   }
 
   toggleHelp(): void {
     this.help.classList.toggle('hidden');
+    this.byDesign++;
   }
 
   hurt(): void {
     this.hurtLevel = 1;
+  }
+
+  /**
+   * What the display wrote to the DOM in the last full second, for `__debug`: `writes` is what a
+   * steady frame should not be doing at all and reads 0 when nothing on the screen has changed;
+   * `byDesign` is the four-times-a-second clock, `/loc` and frame-rate lines and a rebuild of the
+   * slot row, which are meant to happen. The object is filled in place and handed back, so asking
+   * costs nothing.
+   */
+  stats(): HudStats {
+    const s = this.statsOut;
+    s.writes = this.lastWrites;
+    s.byDesign = this.lastByDesign;
+    s.seconds = (performance.now() - this.windowStart) / 1000;
+    s.writesNow = this.writes;
+    s.byDesignNow = this.byDesign;
+    return s;
+  }
+
+  /**
+   * Try one of the invented write steps live; with nothing given it only reports them. Only the
+   * four names above are taken, and anything else is said out loud rather than swallowed; what comes
+   * back is a copy, filled in place, so the console holds a reading and not the table itself.
+   */
+  tune(next?: Partial<typeof HUD_TUNE>): typeof HUD_TUNE {
+    let took = false;
+    if (next) {
+      for (const key of Object.keys(next)) {
+        const value = (next as Record<string, unknown>)[key];
+        if (!(TUNE_KEYS as readonly string[]).includes(key)) {
+          console.warn(`hud.tune: no step called ${key}; the steps are ${TUNE_KEYS.join(', ')}`);
+          continue;
+        }
+        if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+          console.warn(`hud.tune: ${key} wants a number above zero, not ${String(value)}`);
+          continue;
+        }
+        HUD_TUNE[key as keyof typeof HUD_TUNE] = value;
+        took = true;
+      }
+    }
+    // Whatever was drawn at the old steps is written again at the new ones.
+    if (took) {
+      this.hpDrawn = NaN;
+      this.resDrawn = NaN;
+      this.chargeDrawn = NaN;
+      this.hurtDrawn = NaN;
+      for (let i = 0; i < this.slotShade.length; i++) this.slotShade[i] = NaN;
+    }
+    const out = this.tuneOut;
+    for (const key of TUNE_KEYS) out[key] = HUD_TUNE[key];
+    return out;
   }
 
   update(dt: number, x: number, y: number, z: number, kit: Kit, hp: number, maxHp: number, clock: string, creatureName: string, saberOn: boolean): void {
@@ -333,33 +340,111 @@ export class Hud {
       this.loc.textContent = `/loc ${x.toFixed(0)}, ${y.toFixed(0)}, ${z.toFixed(0)} · nearby: ${creatureName}`;
       this.clock.textContent = clock;
       this.frames = 0;
+      this.byDesign += 3;
     }
-    this.hpFill.style.width = `${((hp / maxHp) * 100).toFixed(1)}%`;
-    this.hpText.textContent = `Health ${Math.ceil(hp)}`;
+    if (now - this.windowStart >= 1000) {
+      this.lastWrites = this.writes;
+      this.lastByDesign = this.byDesign;
+      this.writes = 0;
+      this.byDesign = 0;
+      this.windowStart = now;
+    }
+    // A bar is written only when its share has moved by a pixel of the bar's own length, and its
+    // number only when the number itself has changed.
+    const px = HUD_TUNE.barPixels;
+    // The share is held between none and all: a bar told a share outside that wrote a length the
+    // browser threw away, which left the last one on the screen.
+    const hpShare = maxHp > 0 ? Math.max(0, Math.min(1, hp / maxHp)) : 0;
+    const hpSteps = Math.round(hpShare * px);
+    if (hpSteps !== this.hpDrawn) {
+      this.hpDrawn = hpSteps;
+      this.hpFill.style.transform = `scaleX(${hpSteps / px})`;
+      this.writes++;
+    }
+    const hpShown = Math.ceil(hp);
+    if (hpShown !== this.hpTextDrawn) {
+      this.hpTextDrawn = hpShown;
+      this.hpText.textContent = `Health ${hpShown}`;
+      this.writes++;
+    }
     const r = kit.resource;
-    const bar = this.resFill.parentElement;
-    if (bar) bar.hidden = !r;
-    if (r) {
-      this.resFill.style.width = `${((r.value / r.max) * 100).toFixed(1)}%`;
-      this.resText.textContent = `${r.label} ${Math.round(r.value)}`;
+    if (!!r !== this.resShown) {
+      this.resShown = !!r;
+      this.resBar.hidden = !r;
+      this.writes++;
     }
-    for (let i = 0; i < kit.slots.length; i++) {
-      const el = this.slots[i];
-      el.classList.toggle('active', kit.slotActive(i));
-      (el.firstElementChild as HTMLElement).style.height = `${(kit.slotCooldown(i) * 100).toFixed(0)}%`;
+    if (r) {
+      const share = r.max > 0 ? Math.max(0, Math.min(1, r.value / r.max)) : 0;
+      const steps = Math.round(share * px);
+      if (steps !== this.resDrawn) {
+        this.resDrawn = steps;
+        this.resFill.style.transform = `scaleX(${steps / px})`;
+        this.writes++;
+      }
+      const shown = Math.round(r.value);
+      if (shown !== this.resTextDrawn || r.label !== this.resLabelDrawn) {
+        this.resTextDrawn = shown;
+        this.resLabelDrawn = r.label;
+        this.resText.textContent = `${r.label} ${shown}`;
+        this.writes++;
+      }
+    }
+    // The slot row: `kit.slots` is the kit's own array and is not rebuilt here, and the row's own
+    // count is used rather than the kit's, so a loadout changed without the row being rebuilt cannot
+    // reach past the end of it.
+    const steps = HUD_TUNE.cooldownSteps;
+    for (let i = 0; i < this.kitSlotCount; i++) {
+      const lit = kit.slotActive(i);
+      if (lit !== this.slotLit[i]) {
+        this.slotLit[i] = lit;
+        this.slots[i].classList.toggle('active', lit);
+        this.writes++;
+      }
+      const shade = Math.round(kit.slotCooldown(i) * steps);
+      if (shade !== this.slotShade[i]) {
+        this.slotShade[i] = shade;
+        this.slotCds[i].style.height = `${(shade / steps) * 100}%`;
+        this.writes++;
+      }
     }
     // A charging shot: a bar filling under the crosshair.
     const charge = kit.charge?.() ?? 0;
-    this.chargeEl.hidden = charge <= 0;
-    if (charge > 0) (this.chargeEl.firstElementChild as HTMLElement).style.width = `${(charge * 100).toFixed(0)}%`;
-    const saber = this.slots[kit.slots.length];
+    const charging = charge > 0;
+    if (charging !== this.chargeShown) {
+      this.chargeShown = charging;
+      this.chargeEl.hidden = charge <= 0;
+      this.writes++;
+    }
+    if (charging) {
+      const filled = Math.round(charge * HUD_TUNE.chargeSteps);
+      if (filled !== this.chargeDrawn) {
+        this.chargeDrawn = filled;
+        this.chargeFill.style.width = `${(filled / HUD_TUNE.chargeSteps) * 100}%`;
+        this.writes++;
+      }
+    }
+    const saber = this.saberEl;
     if (saber && !saber.hidden) {
-      saber.classList.toggle('active', saberOn);
-      saber.querySelector('.cost')!.textContent = saberOn ? 'on' : 'off';
+      if (saberOn !== this.saberLit) {
+        this.saberLit = saberOn;
+        saber.classList.toggle('active', saberOn);
+        this.writes++;
+      }
+      const cost = saberOn ? 'on' : 'off';
+      if (this.saberCost && cost !== this.saberCostText) {
+        this.saberCostText = cost;
+        this.saberCost.textContent = cost;
+        this.writes++;
+      }
     }
     if (this.hurtLevel > 0) {
       this.hurtLevel = Math.max(0, this.hurtLevel - dt * 2);
-      this.hurtEl.style.opacity = this.hurtLevel.toFixed(2);
+      const shown = Math.round(this.hurtLevel * HUD_TUNE.hurtSteps);
+      if (shown !== this.hurtDrawn) {
+        this.hurtDrawn = shown;
+        this.hurtEl.style.opacity = `${shown / HUD_TUNE.hurtSteps}`;
+        this.writes++;
+      }
     }
   }
 }

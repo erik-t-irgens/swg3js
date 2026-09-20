@@ -1,4 +1,7 @@
 import * as THREE from 'three';
+// The display's own rules, apart from the panels'. The stylesheet in index.html carries the named
+// colours on `:root`; this one carries what is drawn from them.
+import './ui/hud.css';
 const torchDir = new THREE.Vector3();
 import { BountyHunterKit } from './combat/bountyHunter';
 import { Effects } from './combat/effects';
@@ -52,6 +55,10 @@ import { HeatSources, plumeNoiseFrequency } from './world/heatSources';
 import { MobileAssets } from './world/mobiles/assets';
 import { vehiclePlumes } from './vehicles/enginePlumes';
 import { Notice } from './ui/notice';
+import { MESSAGES, MessageLine, plain, tuneMessages } from './ui/messages';
+import { COL, colourOf } from './core/palette';
+import { HudCanvas } from './ui/hudCanvas';
+import { layout, makeLayout, type HudLayout } from './ui/hudMath';
 import { VehiclesUi } from './ui/vehiclesUi';
 import { ShipEditUi } from './ui/shipEditUi';
 import { DROID_SHOWN, DROID_SHOWN_BY_HULL, droidShown, droidSink, fitKey, packFit, partsOf, slotLabel, stockFit, type ResolvedFit, type ShipFit } from './vehicles/shipFit';
@@ -69,7 +76,7 @@ import { HyperspaceUi } from './ui/hyperspaceUi';
 import { Hyperspace } from './space/hyperspace';
 import { CRUISE_KEY, CRUISE_TUNE, Cruise, tuneCruise } from './space/cruise';
 import { HyperspaceTunnel } from './space/hyperspaceTunnel';
-import { ShipHud } from './ui/shipHud';
+import { STAND_ENEMY, STAND_FRIEND, STAND_NEUTRAL, ShipHud, WING_CLOSED, WING_HELD, WING_NONE, WING_OPEN, WING_OPENING, newFlightView, newTargetView, type FlightTune, type FlightView, type MessageKind as ShipMessageKind, type TargetView } from './ui/shipHud';
 import { TargetFx } from './space/targetFx';
 import { FACTION_COLOR, FACTION_LABEL, shipStanding, type ShipFaction } from './space/factions';
 import { NpcBrain } from './space/npcBrain';
@@ -77,7 +84,7 @@ import { MOUSE_FLIGHT, aimCursor, circleRadius, coneClamp, flightTune, gunAim, h
 import { ZONE_TIER } from './space/roster';
 import { fillTaunt, pickLine } from './space/taunts';
 import { componentLine } from './space/shipStats';
-import { targetable } from './space/shipCombat';
+import { targetable, type CombatStatus } from './space/shipCombat';
 import type { ShipSpawner } from './ui/npcUi';
 import { HyperspaceCatalogue, arrivalAt, landmarksOf, loadSpacePack, type Destination } from './space/spaceData';
 import { TUNNEL_TIMES, arrivalPose, jumpChaseBack, lookRotation, sceneOf, toGame, tunnelCameraFar, tunnelSize } from './space/hyperspaceMath';
@@ -90,7 +97,7 @@ import { Net, type Hello, type PeerVehicle } from './net/net';
 import { applyAppearance, dress, packLook } from './player/look';
 import { RemotePlayers } from './net/remotePlayers';
 import { danceOf, defaultEmotes, emoteChoices, FLOURISHES, isDanceClip, isFlourishClip, loadEmotes, loopsEmote, saveEmotes } from './core/emotes';
-import { loadSettings, type Settings } from './core/settings';
+import { HUD_DPR_RANGE, HUD_LINES_RANGE, HUD_SCALE_RANGE, loadSettings, type Settings } from './core/settings';
 import { deleteCharacter, loadCharacters, newCharacterId, upsertCharacter, type Appearance, type SavedCharacter } from './core/characters';
 import { FRAME_NUDGE, Garage, type VehicleDef } from './vehicles/garage';
 import { WINGS_KEY, WING_RULE, dropPilotChoices } from './vehicles/wings';
@@ -145,6 +152,19 @@ const MOUNT_RANGE = 3.6;
 type InventoryTab = 'backpack' | 'wardrobe' | 'appearance' | 'weapons' | 'force';
 /** The camera pitch a flyer holds its height at: the default view, a little above level. */
 const CAMERA_REST_PITCH = 0.32;
+
+/**
+ * The two readings the display's flight struct needs that no file of the game's carries. Both are
+ * invented, both are kept here together, and both are live through `__debug.hud({ wiring: { ... } })`.
+ *
+ * `gunBits` is how many gun slots can be marked down at once: the struct carries them as a bitfield
+ * and a bitwise operand is 32 bits wide, so 32 is the ceiling rather than a judgement (no hull in
+ * the archives fits more than eight). `heatIsHeadroom` is a reading of a hull with no fight of its
+ * own, whose single meter is either a burst that fills as it charges or a heat gauge that fills as
+ * it overheats: true shows the heat gauge as the booster's headroom, so a full arc means "ready" on
+ * both kinds. Flip it to see the gauge itself.
+ */
+const HUD_WIRING = { gunBits: 32, heatIsHeadroom: true };
 
 /** Debug counters, readable from the console as window.__stats. */
 const stats = { frameMs: 0, physicsMs: 0, renderMs: 0, rawDt: 0, grounded: false, vel: [0, 0, 0] as number[], calls: 0, triangles: 0, pack: '', terrain: '', chunks: 0 };
@@ -207,11 +227,6 @@ const boltFrom = new THREE.Vector3();
 /** A ship's shot: where it leaves and which way (bolts.fire and effects.flash copy what they are given). */
 const shotFrom = new THREE.Vector3();
 const shotDir = new THREE.Vector3();
-/** A target's share as a whole percentage, or a dash where it has none (the target box's label). */
-function targetPct(n: number): string {
-  return Number.isFinite(n) ? `${Math.round(n * 100)}%` : '–';
-}
-
 /** A kept ship fit copied, so a change is made on the copy and handed to saveFit whole. */
 function copyShipFit(f: ShipFit): ShipFit {
   return { components: { ...f.components }, paint: { ...f.paint }, ...(f.droid ? { droid: f.droid } : {}) };
@@ -349,11 +364,14 @@ class App {
   private flightRange = 0;
   private flightOnLead = false;
   /** What the HUD's flight display is handed, kept and refilled; and its scratch for projecting the boresight and the cursor. */
-  private readonly flightView = { ox: 0, oy: 0, cx: 0, cy: 0, circle: 0, ring: 0, turn: 0, onLead: false, inside: true };
+  private readonly flightView: FlightView = newFlightView();
   private readonly flightShow = new THREE.Vector3();
   private readonly flightShowEye = new THREE.Vector3();
   /** Whether the ship targeted is one that attacks the pilot, as the target effects were last told (they change on a change). */
   private shipTargetHostile = false;
+  /** The target block handed over every frame, refilled in place, and the ship its two strings were joined for. */
+  private readonly targetView: TargetView = newTargetView();
+  private targetWordsOf: Vehicle | null = null;
   /** The game's targeting effects on the ship targeted. Made right after the world, whose ship effects it places. */
   private readonly targetFx: TargetFx;
   /** The NPC pilots' comms and the flown ship's condition. Made right after the HUD. */
@@ -378,6 +396,27 @@ class App {
   private readonly fxMaskObjects: THREE.Object3D[] = [];
   /** Work going on in the background: the Effects switch compiling every shader for the other path. */
   private readonly notice = new Notice(this.ui);
+  /**
+   * Everything the game says once, bottom left, held long enough to be read. Until now these went to
+   * the prompt, which the frame loop rewrites from outside every guard, so each of them lived one
+   * frame. A field initialiser, because the panels built in the constructor already say things.
+   */
+  private readonly messages = new MessageLine(this.ui);
+  /**
+   * The line keeps a lifetime count of its DOM writes; the other two displays report a rate. These
+   * sample it once a second into the same unit, so `__debug.hud().lineWrites.lastSecond` can be read
+   * beside them and a line's fade can be told from a session's history.
+   */
+  private lineWriteMark = 0;
+  private lineWriteWindow = 0;
+  private lineWritesLast = 0;
+  /**
+   * The overlay the display's shapes are drawn on, over the picture and under every panel. A plain 2D
+   * canvas: it touches no WebGL context, so nothing compiles because of it.
+   */
+  private readonly overlay = new HudCanvas(this.ui);
+  /** Where every piece of the display sits, refilled on a resize or a change of scale and never in a frame. */
+  private readonly hudLayout: HudLayout = makeLayout();
   private fxQueued = false;
   private fxBusy = false;
   private fxAgain = false;
@@ -574,8 +613,14 @@ class App {
     this.hud = new Hud(this.ui);
     // The comms and the ship's status line; the world (assigned above) hands the taunts over.
     this.shipHud = new ShipHud(this.ui);
+    // Its shapes go on the overlay, in the palette's own colours; its one-shot lines and the pilots'
+    // taunts go to the message line, which is where everything that happens once is said.
+    this.shipHud.attach(this.overlay, COL);
+    this.shipHud.messages = (kind, text, colour) => this.sayShipLine(kind, text, colour);
     this.world.ships.onTaunt = (who, text, faction) => this.shipHud.say(who, text, FACTION_COLOR[faction]);
-    this.wardrobe = new WardrobeUi(this.ui, () => this.hud.setPrompt(''));
+    // The wardrobe says what it refused in its own panel; the line it used to clear here was rewritten
+    // by the frame loop before anyone could see either it or the clear, so there is nothing to clear.
+    this.wardrobe = new WardrobeUi(this.ui, () => {});
     this.wardrobe.setBaseUrl(import.meta.env.BASE_URL);
     this.weaponsUi = new WeaponsUi(this.ui, (def, hand) => void this.equip(def, hand));
     // The equipment: its deps are closures read only when an operation runs (after the constructor); the
@@ -723,7 +768,9 @@ class App {
       holdStream: (on) => {
         this.world.streamHold = on;
       },
-      note: (text) => this.hud.setPrompt(text),
+      // The run's own notices: why it would not start, that it is running, why it stopped. Every one of
+      // them was said once and gone the same frame before the message line existed.
+      note: (text) => this.messages.system(plain(text)),
       readyAround: (at, ms) => this.world.readyAround(at, ms),
       effects: () => this.world.hyperspaceEffects(),
       placeEffect: (file, local, frame) => this.world.placeZoneEffect(file, local, frame),
@@ -2032,6 +2079,100 @@ class App {
         return { ship: v.spec.id, ...(hit ? { hit: { ...hit } } : {}), ...combat.report(), speed: Math.round(v.spec.maxSpeed * (v.space ? 2 : 1)), cruise: Math.round(v.cruise), hp: Math.round(v.hp) };
       },
       /**
+       * The head-up display: what the overlay costs, what it drew last frame, and the DOM writes of
+       * the last full second that were not by design — the number to look for is 0, and the 4 Hz
+       * clock, `/loc` and frame-rate lines are counted apart as `byDesign`.
+       *
+       * `{ overlay: false }` turns the canvas off for a baseline and `{ overlay: true }` back on;
+       * `{ scale: 1.25 }` and `{ dpr: 2 }` try the size and the sharper canvas at once (they move the
+       * live settings, and are saved only if the menu is then touched); `{ boxes: true }` outlines
+       * the region the overlay clears, which is how to see whether the union clear is doing its job.
+       * Each piece is a switch of its own: `{ condition, target, arcs, line, fullPrompts }`, and
+       * `{ lines: 4 }` is how many message lines stand at once. The three sets of invented numbers
+       * are reachable as well: `{ flight: { arcRadius: 150 } }` for the reticle and the arcs,
+       * `{ tune: { barPixels: 200 } }` for the on-foot write steps, `{ messages: { seconds: 3 } }`
+       * for the message line, and `{ wiring: { heatIsHeadroom: false } }` for the two readings this
+       * file invents on the way into the flight struct.
+       *
+       * `overlay.ops` is the canvas's own count and is what the budget is written against;
+       * `overlay.shapes` is the flight display's count of its own calls, a different unit, reported
+       * beside it. `lineWrites` is the message line's, counted apart because a line said or fading
+       * is a write that is meant to happen.
+       */
+      hud: (opts: { overlay?: boolean; scale?: number; dpr?: number; boxes?: boolean; condition?: boolean; target?: boolean; arcs?: boolean; line?: boolean; lines?: number; fullPrompts?: boolean; flight?: Partial<FlightTune>; tune?: Parameters<Hud['tune']>[0]; messages?: Partial<typeof MESSAGES>; wiring?: Partial<typeof HUD_WIRING> } = {}) => {
+        const S = this.settings;
+        let sized = false;
+        // Clamped here, at the door, and not only on the way to the canvas: whatever is typed in the
+        // console is written into the live settings, and the menu saves the live settings, so an
+        // unclamped value tried once would be kept for good the next time a switch was touched.
+        const clamp = (v: number, r: { min: number; max: number }) => Math.max(r.min, Math.min(r.max, v));
+        if (typeof opts.scale === 'number' && Number.isFinite(opts.scale)) {
+          S.hudScale = clamp(opts.scale, HUD_SCALE_RANGE);
+          sized = true;
+        }
+        if (typeof opts.dpr === 'number' && Number.isFinite(opts.dpr)) {
+          S.hudDpr = clamp(opts.dpr, HUD_DPR_RANGE);
+          sized = true;
+        }
+        // The pieces, as the Escape menu will set them: the live settings, applied the same way.
+        if (typeof opts.condition === 'boolean') S.hudShipCondition = opts.condition;
+        if (typeof opts.target === 'boolean') S.hudTargetBlock = opts.target;
+        if (typeof opts.arcs === 'boolean') S.hudArcs = opts.arcs;
+        if (typeof opts.line === 'boolean') {
+          S.hudMessages = opts.line;
+          sized = true;
+        }
+        if (typeof opts.lines === 'number' && Number.isFinite(opts.lines)) {
+          S.hudMessageLines = clamp(Math.round(opts.lines), HUD_LINES_RANGE);
+          sized = true;
+        }
+        if (typeof opts.fullPrompts === 'boolean') {
+          S.hudFullPrompts = opts.fullPrompts;
+          sized = true;
+        }
+        if (sized) this.applyHudSettings();
+        if (typeof opts.overlay === 'boolean') this.overlay.setEnabled(opts.overlay);
+        if (typeof opts.boxes === 'boolean') this.overlay.setBoxes(opts.boxes);
+        if (opts.flight) this.shipHud.tune(opts.flight);
+        if (opts.tune) this.hud.tune(opts.tune);
+        if (opts.messages) tuneMessages(opts.messages);
+        if (opts.wiring) {
+          if (typeof opts.wiring.gunBits === 'number' && Number.isFinite(opts.wiring.gunBits)) HUD_WIRING.gunBits = Math.max(1, Math.min(32, Math.round(opts.wiring.gunBits)));
+          if (typeof opts.wiring.heatIsHeadroom === 'boolean') HUD_WIRING.heatIsHeadroom = opts.wiring.heatIsHeadroom;
+        }
+        const c = this.overlay.stats;
+        const body = this.hud.stats();
+        const ship = this.shipHud.report();
+        const line = this.messages.debug();
+        const L = this.hudLayout;
+        return {
+          // `ops` is the canvas's own count of everything drawn through it, the display's strokes
+          // included, and is the figure the budget is written against; `shapes` is the display's own
+          // count of the calls it made, which is a different unit and is reported beside, not added.
+          overlay: { ms: Math.round(c.ms * 1000) / 1000, ops: c.ops, shapes: ship.ops, enabled: c.enabled, attached: ship.attached, dpr: c.dpr, clear: [c.clearX, c.clearY, c.clearW, c.clearH] },
+          // Writes that should be 0 in a steady frame, and the ones that are meant to happen. Both
+          // are the last full second's. The message line is counted apart: it writes only when
+          // something was said or is fading, which is by design, and its own counter is a lifetime
+          // total, so adding it here would put a rising number where a 0 is meant to stand.
+          writes: body.writes + ship.writes,
+          byDesign: body.byDesign,
+          lineWrites: { lastSecond: this.lineWritesLast, total: line.writes },
+          scale: L.scale,
+          layout: { arcR: Math.round(L.arcR), aimMax: Math.round(L.aimMax), condition: [L.condition.x, L.condition.y, L.condition.w, L.condition.h], message: [L.message.x, L.message.y, L.message.w, L.message.h] },
+          pips: ship.pips,
+          messages: { lines: line.lines, fading: line.fading, said: line.said, merged: line.merged, dropped: line.dropped, kept: MESSAGES.kept, styled: !this.messages.styleless },
+          shows: { condition: S.hudShipCondition, target: S.hudTargetBlock, arcs: S.hudArcs, line: S.hudMessages, fullPrompts: S.hudFullPrompts },
+          bodyBars: this.bodyShown,
+          wiring: { ...HUD_WIRING },
+        };
+      },
+      /** Say a line on the message line by hand, to see a kind's colour and the fade: `say('hit you', 'test')`. */
+      say: (kind: ShipMessageKind = 'system', text = 'a test line') => {
+        // The speaker's colour comes from the palette, not from a literal: no value has a second home.
+        this.sayShipLine(kind, text, colourOf(COL.component));
+        return this.messages.textAt(this.messages.debug().lines - 1);
+      },
+      /**
        * Mouse flight and the NPC pilots' skill, live (every number invented): `flight({ circleDeg: 6 })` and any of ringDeg,
        * deadZone, curve, snapDeg, convergeM, nearestM, speed; `flight({ npc: { 1: { stickMax: 0.8, response: 0.3 } } })` and
        * any of a tier's reaction, scatterDeg, gunConeDeg, lead, breakRange, evadeChance, stickMax, response. Returns them
@@ -2767,7 +2908,7 @@ class App {
     };
     this.net.onStatus = (status, detail) => {
       this.netStatus = detail ? `${status} (${detail})` : status;
-      if (status === 'online') this.hud.setPrompt('connected to the relay');
+      if (status === 'online') this.messages.system('connected to the relay');
     };
 
     this.select = new CharacterSelect(this.ui);
@@ -2836,7 +2977,13 @@ class App {
       this.cam.camera.aspect = window.innerWidth / window.innerHeight;
       this.cam.camera.updateProjectionMatrix();
       this.world.onCameraResized();
+      // The overlay sizes its own canvas on the same event; its layout is worked out here, once,
+      // rather than by every frame that reads it.
+      this.hudLayoutFor(this.hudLayout.scale);
     });
+    // The display's own settings, before the first frame: the scale on `:root` and in the layout, the
+    // overlay's backing store, and how many message lines stand.
+    this.applyHudSettings();
 
     // Sound starts on the first press, which is what browsers require; the game already needs a
     // click for the pointer lock, so nothing extra is asked of the player. Both listeners are
@@ -2911,6 +3058,10 @@ class App {
     this.net.disconnect();
     this.world.leave();
     this.shipHud.clear();
+    this.messages.clear();
+    // No frame runs outside the world, so the overlay is taken off here rather than waiting for one.
+    this.overlay.idle();
+    this.showBodyBlock(true);
     this.hud.setPrompt('');
     this.hud.setMouseFree(false);
     this.input.captured = false;
@@ -2995,12 +3146,85 @@ class App {
         // Gains only: nothing here rebuilds the graph, and nothing compiles.
         this.audio.apply(S);
         break;
+      case 'hudScale':
+      case 'hudDpr':
+      case 'hudShipCondition':
+      case 'hudTargetBlock':
+      case 'hudArcs':
+      case 'hudMessages':
+      case 'hudMessageLines':
+      case 'hudFullPrompts':
+        // A size, a backing store and a few switches: no shader and no element is made.
+        this.applyHudSettings();
+        break;
       default:
         // Anything in the effects registry: the chain takes them all in one go on the next
         // microtask, so resetting the graphics is one reconcile rather than two dozen.
         if (isFxSettingKey(key)) this.queueEffects();
         break;
     }
+  }
+
+  /**
+   * The display's own settings, all at once: the overlay's size and backing store, how many message
+   * lines stand and whether they stand at all, and the long prompt line. Called whenever one of them
+   * changes and once at boot; it moves numbers and toggles classes, and nothing in it compiles.
+   */
+  private applyHudSettings(): void {
+    const S = this.settings;
+    const scale = Math.max(HUD_SCALE_RANGE.min, Math.min(HUD_SCALE_RANGE.max, S.hudScale));
+    document.documentElement.style.setProperty('--hud-scale', String(scale));
+    this.overlay.setScale(scale);
+    this.overlay.setDpr(Math.max(HUD_DPR_RANGE.min, Math.min(HUD_DPR_RANGE.max, S.hudDpr)));
+    this.shipHud.setScale(scale);
+    this.hudLayoutFor(scale);
+    MESSAGES.kept = Math.max(HUD_LINES_RANGE.min, Math.min(HUD_LINES_RANGE.max, Math.round(S.hudMessageLines)));
+    this.messages.setEnabled(S.hudMessages);
+    // Turned off, the long line would otherwise stand at whatever it last said: the frame loop stops
+    // writing it, so it is emptied here.
+    if (!S.hudFullPrompts) this.hud.setPrompt('');
+  }
+
+  /**
+   * A line from the flight display. Its kinds are spelled its own way (two words with a space), so
+   * they are turned into the message line's names here; a spoken line comes joined as "who: words"
+   * and is split back, so the speaker keeps the faction's colour.
+   */
+  private sayShipLine(kind: ShipMessageKind, text: string, colour?: string): void {
+    if (kind === 'spatial') {
+      const i = text.indexOf(': ');
+      if (i > 0) this.messages.spatial(text.slice(0, i), text.slice(i + 2), colour ?? '');
+      else this.messages.say('spatial', text, undefined, colour);
+      return;
+    }
+    if (kind === 'you hit') this.messages.youHit(text);
+    else if (kind === 'hit you') this.messages.hitYou(text);
+    else if (kind === 'note') this.messages.note(text);
+    else this.messages.system(text);
+  }
+
+  /** The overlay's layout at a scale, worked out on a resize or a change of scale and never in a frame. */
+  private hudLayoutFor(scale: number): void {
+    layout(window.innerWidth, window.innerHeight, scale, this.hudLayout);
+  }
+
+  /**
+   * One call a frame, after the world is drawn: every shape of the display, on the overlay. It draws
+   * nothing at all and takes what it drew off the canvas once while the game is not simulating, and
+   * it allocates nothing — the primitives take numbers and colour indices only.
+   */
+  private drawOverlay(simulate: boolean): void {
+    const o = this.overlay;
+    // Both counters go to nothing on a frame that draws nothing, the canvas's own and the display's
+    // shape count: left at the last flying frame's, the console would say the overlay was busy over
+    // an open panel, the map or the death card, which is the one thing it is meant to prove it is not.
+    if (!simulate || !o.begin()) {
+      o.idle();
+      this.shipHud.idle();
+      return;
+    }
+    this.shipHud.draw();
+    o.end();
   }
 
   // ---- Sound. ----
@@ -3353,7 +3577,7 @@ class App {
     if (kind !== 'wear' && kind !== 'weapon') return `no item ${key}`;
     const r = await this.equipment.use(kind, id, hand);
     if (r.wants && r.wants !== this.kit.id && this.inWorld) this.setClass(r.wants);
-    if (r.note !== 'dropped') this.hud.setPrompt(r.note);
+    if (r.note !== 'dropped') this.messages.note(r.note);
     return r.note;
   }
 
@@ -3364,7 +3588,7 @@ class App {
     const id = key.slice(i + 1);
     if (kind !== 'wear' && kind !== 'weapon') return `no item ${key}`;
     const note = await this.equipment.destroy(kind, id);
-    if (note !== 'dropped') this.hud.setPrompt(note);
+    if (note !== 'dropped') this.messages.note(note);
     return note;
   }
 
@@ -3490,7 +3714,7 @@ class App {
     const rig = this.player.rig;
     if (!clip || !rig || this.player.mounted) return;
     if (rig.play(clip, { fadeIn: 0.15, loop: loopsEmote(clip) }) === null) {
-      this.hud.setPrompt(`the rig has no clip ${clip}`);
+      this.messages.system(`the rig has no clip ${clip}`);
       return;
     }
     this.emoting = true;
@@ -3532,7 +3756,7 @@ class App {
       if (!this.input.consumeKey(`Digit${i}`)) continue;
       const clip = style ? rig.variant(`skill_action_${i}`, style) : null;
       if (clip) this.playEmote(clip);
-      else this.hud.setPrompt(`this dance has no flourish ${i}`);
+      else this.messages.system(`this dance has no flourish ${i}`);
     }
     if (!rig.overriding) rig.play(this.dance, { fadeIn: 0.15, loop: true });
   }
@@ -3554,7 +3778,7 @@ class App {
     if (!this.creating && this.current) await this.equipment.resync();
     if (this.wardrobe.open) void this.wardrobe.attach(character, import.meta.env.BASE_URL).catch((err) => console.warn('wardrobe', err));
     if (this.appearanceUi.open) this.appearanceUi.attach(character, import.meta.env.BASE_URL);
-    if (this.inWorld) this.hud.setPrompt(`now playing as ${id.replace(/_/g, ' ')}`);
+    if (this.inWorld) this.messages.system(`now playing as ${id.replace(/_/g, ' ')}`);
     return `playing as ${id}`;
   }
 
@@ -3996,7 +4220,7 @@ class App {
     // by its own row as well as the ship menu, so the refusal lives here rather than on the label.
     const why = this.dockRefusal();
     if (why) {
-      this.hud.setPrompt(why);
+      this.messages.system(why);
       return;
     }
     this.shipMenu.hide();
@@ -4511,7 +4735,7 @@ class App {
         this.dismountBeside(v);
         player.takeDamage(10);
         this.hud.hurt();
-        this.hud.setPrompt('thrown off: the speeder is on its back');
+        this.messages.hitYou('thrown off: the speeder is on its back');
       }
       if (v.justHit > 0) {
         this.effects.burst(v.pos, 0xffc070, 0.4 + Math.min(2, v.justHit * 0.08), 0.2);
@@ -4550,7 +4774,6 @@ class App {
           player.fling(tmp, tmp2.set(lv.x, lv.y, lv.z));
           player.takeDamage(25);
           this.hud.hurt();
-          this.hud.setPrompt('');
         } else if (player.aboard?.vehicle === v) this.thrownOutOfShip(v);
         this.effects.ring(v.pos, 0xffa050, 6 + v.radius, 0.5);
         this.effects.burst(v.pos, 0xffc080, 2 + v.radius, 0.4);
@@ -4583,7 +4806,7 @@ class App {
         this.hud.hurt();
         this.effects.burst(m.pos, 0xffb070, 3 + m.radius, 0.35);
         this.effects.flash(m.pos, 0xff8a50, 20, 25, 0.3);
-        this.hud.setPrompt(`crashed at ${Math.round(m.crashed * 3.6)} km/h: ${dmg} damage`);
+        this.messages.hitYou(`crashed at ${Math.round(m.crashed * 3.6)} km/h: ${dmg} damage`);
         m.crashed = 0;
       }
     }
@@ -4710,31 +4933,128 @@ class App {
     this.effects.flash(from, pilot.boltColor, 5, 6, 0.06);
   }
 
-  /** The target display for the HUD: where the target and its lead show on screen, in pixels, and what to call it. */
-  private targetHud(pilot: Vehicle): Parameters<Hud['setTarget']>[0] {
+  /**
+   * The target block, filled into the one kept struct: where the target shows on screen and how wide
+   * it projects, what to call it, and the shields, armour and hull of the face turned toward the
+   * pilot. Nothing here is made afresh — the two strings are joined only when the target itself
+   * changes, so following one costs no allocation at all.
+   */
+  private targetHud(pilot: Vehicle): TargetView | null {
     const t = this.shipTarget;
-    if (!t) return null;
+    if (!t) {
+      this.targetWordsOf = null;
+      return null;
+    }
     const cam = this.cam.camera;
     const w = window.innerWidth;
     const h = window.innerHeight;
-    const toScreen = (p: THREE.Vector3) => {
-      tmp2.copy(p).project(cam);
-      const behind = tmp2.z > 1;
-      return { x: ((behind ? -tmp2.x : tmp2.x) + 1) * 0.5 * w, y: (1 - (behind ? -tmp2.y : tmp2.y)) * 0.5 * h, on: !behind && Math.abs(tmp2.x) <= 1 && Math.abs(tmp2.y) <= 1 };
-    };
-    const at = toScreen(t.pos);
-    const lead = this.shipLeadValid ? toScreen(this.shipLead) : { x: 0, y: 0, on: false };
-    const range = Math.round(t.pos.distanceTo(pilot.pos));
+    const tv = this.targetView;
+    // The projection exactly as it comes: behind the camera it is mirrored, and the display mirrors
+    // it back itself before clamping the arrow to the edge, so nothing is corrected here.
+    tmp2.copy(t.pos).project(cam);
+    tv.behind = tmp2.z > 1;
+    tv.x = (tmp2.x + 1) * 0.5 * w;
+    tv.y = (1 - tmp2.y) * 0.5 * h;
+    // How wide the hull projects: its own radius at its distance, through this frame's field of view.
+    const dist = Math.max(1, t.pos.distanceTo(cam.position));
+    const tanHalf = Math.tan(THREE.MathUtils.degToRad(cam.fov) / 2);
+    tv.size = (t.radius * h) / Math.max(1e-3, tanHalf * dist);
+    tv.range = Math.round(t.pos.distanceTo(pilot.pos));
+    tv.active = this.shipPickable(t);
     const c = this.world.ships.of(t);
-    const hull = `hull ${Math.round((t.hp / t.maxHp) * 100)}%`;
-    let label = `${t.spec.label} · ${range} m · ${hull}`;
-    if (c) {
-      // Its name, side and tier, then the shields and armour of the face turned to the pilot.
-      const s = c.combat?.summary(pilot.pos) ?? null;
-      label = `${c.type?.name ?? t.spec.label} · ${FACTION_LABEL[c.faction]}${c.type ? ` · tier ${c.type.tier}` : ''} · ${range} m${s ? ` · shields ${targetPct(s.shield)} · armour ${targetPct(s.armour)} · hull ${targetPct(s.hull)}` : ` · ${hull}`}`;
+    tv.standing = this.shipTargetHostile ? STAND_ENEMY : c && shipStanding(c.faction) === 'friend' ? STAND_FRIEND : STAND_NEUTRAL;
+    // The words: the name, and the side and tier under it. Joined once per target, not once a frame.
+    // A side or a tier that changed under a target already held would keep the old words until the
+    // target was switched; neither changes in play, and joining them every frame is a string a frame.
+    if (t !== this.targetWordsOf) {
+      this.targetWordsOf = t;
+      tv.name = c?.type?.name ?? t.spec.label;
+      tv.kind = c ? `${FACTION_LABEL[c.faction]}${c.type ? ` · tier ${c.type.tier}` : ''}` : t.spec.kind;
     }
-    const kind = this.shipTargetHostile ? 'enemy' : c && shipStanding(c.faction) === 'friend' ? 'friend' : 'neutral';
-    return { x: at.x, y: at.y, onScreen: at.on, leadX: lead.x, leadY: lead.y, leadOnScreen: lead.on, label, kind, onLead: this.flightOnLead && this.world.simulating };
+    // The face turned toward the pilot, where the target has a fight of its own; else its plain hull.
+    const s = c?.combat?.summary(pilot.pos) ?? null;
+    tv.shield = s ? s.shield : NaN;
+    tv.armour = s ? s.armour : NaN;
+    tv.hull = s ? s.hull : t.hp / Math.max(1, t.maxHp);
+    return tv;
+  }
+
+  /**
+   * The rest of the flight view: the speeds the arc is scaled to, the guns' refire clock and which
+   * slots are down, the booster and the wings. Every number is one the hull already carries; this
+   * writes them into the kept struct and makes nothing. The fight's status comes in already filled,
+   * so it is asked for once a frame and no more.
+   */
+  private fillFlightNumbers(v: Vehicle, fv: FlightView, st: CombatStatus | null): void {
+    // Out in space a hull flies at twice its atmospheric top, which is what the arc must be scaled to.
+    const over = v.space ? 2 : 1;
+    fv.speed = Math.abs(v.speed);
+    fv.topSpeed = v.spec.maxSpeed * over;
+    fv.boostTop = Math.max(fv.topSpeed, v.spec.boostSpeed * over);
+    fv.wingFactor = v.wings.length ? v.wingOpenFactor : 1;
+    fv.boosting = v.boosting;
+    const c = v.combat;
+    fv.gunSlots = Math.min(HUD_WIRING.gunBits, v.guns.length);
+    // The arc drains on a shot and fills again on the refire: the fight's own clock where there is
+    // one (its capacitor's and its live guns'), else the plain interval the hull fires on.
+    if (c && st) {
+      const interval = Math.max(1e-3, c.interval());
+      fv.gunReady = 1 - Math.max(0, Math.min(1, c.cooldown / interval));
+      let bits = 0;
+      for (let i = 0; i < fv.gunSlots; i++) {
+        const slot = c.gunSlot(i);
+        if (slot && st.down.includes(slot)) bits |= 1 << i;
+      }
+      fv.gunsDown = bits;
+      fv.boostShare = st.boost;
+      fv.hasBooster = c.stats.boostSeconds > 0;
+    } else {
+      fv.gunReady = 1 - Math.max(0, Math.min(1, v.gunCooldown / SHIP_GUN_INTERVAL));
+      fv.gunsDown = 0;
+      // No fight: the hull's own meter is the burst or the heat, which is the only booster it has.
+      fv.boostShare = v.spec.boost === 'none' ? 0 : v.spec.boost === 'heat' && HUD_WIRING.heatIsHeadroom ? 1 - v.meter : v.meter;
+      fv.hasBooster = v.spec.boost !== 'none';
+    }
+    // Closed, opening, open, or held shut because a low wing has no room under it yet.
+    if (!v.wings.length) fv.wings = WING_NONE;
+    else if (v.wings.pilot && !v.wings.target) fv.wings = WING_HELD;
+    else {
+      const open = v.wingsOpen;
+      fv.wings = open >= 0.999 ? WING_OPEN : open <= 0.001 ? WING_CLOSED : WING_OPENING;
+    }
+  }
+
+  /**
+   * The body's bars and the class's slot row, shown or hidden, and with them the on-foot dot, which
+   * would otherwise sit inside the reticle's own boresight. Both are found the first time they are
+   * asked for, because the display builds its own markup in the constructor, and written only on a
+   * change; shown again, the dot takes the rule it always had — it is the Bounty Hunter's.
+   */
+  private bodyBlock: HTMLElement | null = null;
+  private crosshairEl: HTMLElement | null = null;
+  private crosshairLooked = false;
+  private bodyShown = true;
+
+  private showBodyBlock(show: boolean): void {
+    // The dot is judged afresh every call, not only when the block moves, because a class swapped in
+    // flight writes it again from the class's own rule and would put it back inside the reticle.
+    const dot = show && this.kit.id === 'bounty_hunter';
+    if (show !== this.bodyShown) {
+      this.bodyShown = show;
+      if (!this.bodyBlock) this.bodyBlock = this.ui.querySelector<HTMLElement>('#hud .bottom');
+      // The class, not the attribute: the block declares `display: flex` of its own, and an author
+      // declaration beats the browser's `[hidden] { display: none }` whatever the specificity, so
+      // setting `hidden` on it changes nothing at all. `.hidden` carries the `!important`.
+      if (this.bodyBlock) this.bodyBlock.classList.toggle('hidden', !show);
+    }
+    // The dot is compared against the element rather than against a belief of our own: the class's
+    // own rule writes the same property (a class swapped in flight), so a remembered value would
+    // say "already right" about a dot that had been put back on the screen behind us.
+    if (!this.crosshairLooked) {
+      this.crosshairLooked = true;
+      this.crosshairEl = this.ui.querySelector<HTMLElement>('#hud .crosshair');
+    }
+    if (this.crosshairEl && this.crosshairEl.hidden === dot) this.crosshairEl.hidden = !dot;
   }
 
   /** Whether a ship may be picked as a target now (`targetable`: alive and not in a jump); a ship without a contact yet, by its ghosting alone. */
@@ -5153,7 +5473,7 @@ class App {
   private toggleShipMenu(): void {
     // From the jump's enter stage until control returns, P does nothing but say so.
     if (this.hyperspace.locksControls) {
-      this.hud.setPrompt('jumping');
+      this.messages.system('jumping');
       return;
     }
     // The System Map is a page of the ship menu: the same key closes it.
@@ -5222,7 +5542,7 @@ class App {
   /** The same refusal, said in the head-up display, for a row that has no words of its own. */
   private refuseWhileDocked(): boolean {
     const why = this.dockRefusal();
-    if (why) this.hud.setPrompt(why);
+    if (why) this.messages.system(why);
     return why !== null;
   }
 
@@ -5233,7 +5553,7 @@ class App {
     const ship = p.mounted ?? p.piloting ?? null;
     if (!ship?.spec.ship) return;
     const said = this.docking.act(ship);
-    if (said) this.hud.setPrompt(said);
+    if (said) this.messages.system(said);
   }
 
   private freeMouse(free: boolean): void {
@@ -5459,7 +5779,7 @@ class App {
     const guard = def.kind === 'ship';
     if (guard && this.spawning.has(def.id)) return `already preparing the ${def.label}`;
     if (guard) this.spawning.add(def.id);
-    this.hud.setPrompt(`preparing the ${def.label}…`);
+    this.messages.note(`preparing the ${def.label}…`);
     // The fit the edit page kept in the last few hundred milliseconds is written before it is read.
     this.flushFits();
     try {
@@ -5468,12 +5788,12 @@ class App {
       if (v.spec.ship && def.fit) this.lastShipDef = def;
       const b = v.spec.bounds;
       const size = [b.max[0] - b.min[0], b.max[1] - b.min[1], b.max[2] - b.min[2]].map((n) => n.toFixed(1)).join('×');
-      this.hud.setPrompt(`${def.label}: a ${v.spec.kind}, ${size} m (E to ride)`);
+      this.messages.note(`${def.label}: a ${v.spec.kind}, ${size} m (E to ride)`);
       return `${def.id} spawned as a ${v.spec.kind}: ${size} m at ${v.pos.toArray().map((n) => n.toFixed(1)).join(',')}, ${v.pos.distanceTo(this.player.pos).toFixed(1)} m away, seat ${v.spec.seat.map((n) => n.toFixed(2)).join(',')}, hardpoints: ${v.hardpoints.join(' ') || 'none'}, seated from ${v.seatFrom ?? 'its kind'}`;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.warn(`spawn: ${def.id}:`, err);
-      this.hud.setPrompt(msg);
+      this.messages.system(msg);
       return msg;
     } finally {
       if (guard) this.spawning.delete(def.id);
@@ -5763,7 +6083,7 @@ class App {
     // Through the equipment: the hands' rules, the model compiled before it is in hand, and the weapon given.
     const r = await this.equipment.hold(def, hand, { give: true });
     if (r.wants && r.wants !== this.kit.id) this.setClass(r.wants);
-    if (r.note !== 'dropped') this.hud.setPrompt(r.wants ? `${r.note} (${def.class}, ${this.player.saber.style})` : r.note);
+    if (r.note !== 'dropped') this.messages.note(r.wants ? `${r.note} (${def.class}, ${this.player.saber.style})` : r.note);
     return r.note;
   }
 
@@ -5916,13 +6236,12 @@ class App {
         // Letting go of the controls, in flight too: the ship carries on as it was (there is no
         // landing place in space), and the room stays a still room around whoever is aboard.
         p.piloting = null;
-        this.hud.setPrompt('');
         return;
       }
       if (room.pilotSpot && p.pos.distanceTo(room.pilotSpot) < CONTROLS_RANGE) {
         p.piloting = v;
         this.cam.zoomTarget = Math.max(this.cam.zoomTarget, 6);
-        this.hud.setPrompt(`at the controls of the ${v.spec.label} · <b>W</b>/<b>S</b> throttle · mouse steers · <b>E</b> lets go`);
+        this.messages.note(`at the controls of the ${v.spec.label}`);
         return;
       }
       // The two hulls are clamped together and this walker stands at the room's own way in: E crosses
@@ -5972,6 +6291,12 @@ class App {
   /** A note the boots left (why they would not take hold), shown in the prompt for a moment. */
   private bootsNote = '';
   private bootsNoteAt = 0;
+  /**
+   * Why a landing was refused is a state string the hull rewrites every step, not an event: what was
+   * said last is kept here so it is said once when it changes. Without this it lives only inside the
+   * long prompt, which is behind a setting.
+   */
+  private landNoteSaid = '';
 
   /** The vehicle within arm's reach of someone standing on a surface, measured in the world, since `pos` is the room's there. */
   private reachFromBoots(): Vehicle | null {
@@ -6001,6 +6326,9 @@ class App {
     const note = (why: string): false => {
       this.bootsNote = why;
       this.bootsNoteAt = performance.now();
+      // Said once, where it can be read: interpolated into the long prompt it is behind a setting,
+      // and with that setting off why the boots would not hold had nowhere on the screen to go.
+      this.messages.system(why);
       return false;
     };
     if (!this.world.planet.space) return note('the boots only hold where there is no gravity');
@@ -6090,7 +6418,7 @@ class App {
     room.reveal(true);
     this.player.board(room, room.entry.clone());
     this.cam.zoomTarget = Math.min(this.cam.zoomTarget, 4);
-    this.hud.setPrompt(`across in the ${to.spec.label} · <b>E</b> at the way in crosses back · <b>E</b> anywhere else steps out`);
+    this.messages.note(`across in the ${to.spec.label}: E at the way in crosses back, E anywhere else steps out`);
   }
 
   /** Step into a ship's room, at its entry. The seat inside is not there yet: E again steps out. */
@@ -6104,7 +6432,7 @@ class App {
     room.reveal(true);
     this.player.board(room, room.entry.clone());
     this.cam.zoomTarget = Math.min(this.cam.zoomTarget, 4);
-    this.hud.setPrompt(`aboard: <b>E</b> steps out · the room has physics of its own · <b>__debug.shipDrift(2, 0.4)</b> sets the hull adrift to test it`);
+    this.messages.note('aboard: E steps out, and the room has physics of its own');
   }
 
   /**
@@ -6133,7 +6461,6 @@ class App {
     p.fling(tmp, tmp2.set(lv.x, lv.y, lv.z));
     p.takeDamage(20);
     this.hud.hurt();
-    this.hud.setPrompt('');
     this.cam.setFrame(null);
   }
 
@@ -6163,7 +6490,6 @@ class App {
       p.vel.copy(tmp2);
       p.grounded = false;
       surface.dispose();
-      this.hud.setPrompt('');
       return;
     }
     if (!fell) {
@@ -6190,7 +6516,6 @@ class App {
       v.quaternion(tmpQ);
       this.bootsTake(tmp2.set(0, -1, 0).applyQuaternion(tmpQ), tmp);
     }
-    this.hud.setPrompt('');
   }
 
   /** Whether the nearest vehicle in reach has a room to step into. */
@@ -6424,12 +6749,19 @@ class App {
       this.world.updateShadows(performance.now());
 
       // The ship menu is where space is gone to and come back from; the prompt says when the ship is high enough.
-      const shipKey = keyName(input.bindings.ship[0] ?? '');
-      const shipHint = this.spaceGate === 'up' ? ` · <b>at altitude for space: ${shipKey}</b> ship menu` : this.world.planet.space ? ` · <b>${shipKey}</b> ship menu` : '';
+      // The long line of every key is what it always was, but it is now a setting, and the setting is
+      // worth having: the *conditions* are its cost, not the words. Writing it asks the world for the
+      // lift underfoot, the elevators near, the doorless building near and the nearest vehicle, every
+      // frame. With the line off none of that is asked for; only the lift stays, because the jump's
+      // own line says whether there is one.
+      const full = this.settings.hudFullPrompts;
+      const shipKey = full ? keyName(input.bindings.ship[0] ?? '') : '';
+      const shipHint = !full ? '' : this.spaceGate === 'up' ? ` · <b>at altitude for space: ${shipKey}</b> ship menu` : this.world.planet.space ? ` · <b>${shipKey}</b> ship menu` : '';
       let prompt = '';
       let lift: ReturnType<App['liftHere']> = null;
       let doorless: { label: string } | null = null;
-      if (player.noclip) prompt = `<b>NOCLIP</b> ${Math.round(player.noclipSpeed)} m/s · <b>WASD</b> fly · <b>Space</b> up · <b>Ctrl</b> down · <b>Shift</b> fast · <b>+</b>/<b>-</b> speed · <b>N</b> off`;
+      if (!full) lift = this.liftHere();
+      else if (player.noclip) prompt = `<b>NOCLIP</b> ${Math.round(player.noclipSpeed)} m/s · <b>WASD</b> fly · <b>Space</b> up · <b>Ctrl</b> down · <b>Shift</b> fast · <b>+</b>/<b>-</b> speed · <b>N</b> off`;
       else if (player.mounted) prompt = mountPrompt(player.mounted, input.bindings.wings[0] ?? WINGS_KEY) + (player.mounted.spec.ship ? shipHint : '');
       else if ((lift = this.liftHere())) prompt = `<b>E</b> lift: ${lift.stops.length} levels`;
       else if (!player.aboard && this.world.elevatorsNear(player.pos, MOUNT_RANGE).length) prompt = `<b>E</b> elevator ${this.world.elevatorsNear(player.pos, MOUNT_RANGE)[0].kind === 'down' ? 'down' : 'up'}`;
@@ -6450,6 +6782,10 @@ class App {
       // catches a turn up, and sits a little under it (the view looks under the hull). Unsimulated (a panel, the map,
       // death), nothing is on the lead. Allocates nothing.
       const flownShip = player.mounted ?? player.piloting;
+      // One call a frame: `status` refills one kept object, and both the arcs' numbers and the
+      // condition block are filled from this one fill rather than asking the fight twice.
+      const flownFight = flownShip?.combat ?? null;
+      const flownStatus = flownFight ? flownFight.status() : null;
       // Nothing flown: the cursor's hull is let go (a disposed hull is not kept), and the next one starts in the middle.
       if (!flownShip) this.flightCursorOf = null;
       const flying = !!flownShip?.spec.ship && flownShip.airborne && !input.held('freeLook') && !this.hyperspace.drives(flownShip);
@@ -6485,17 +6821,51 @@ class App {
         fv.inside = insideCircle(this.flightCursor, tanHalf);
         fv.turn = this.flightStick.turn;
         fv.onLead = this.flightOnLead && this.world.simulating;
+        // The lead marker, in pixels from the middle of the window, and the hull's own numbers.
+        if (this.shipLeadValid) {
+          tmp2.copy(this.shipLead).project(cam);
+          fv.leadOn = tmp2.z <= 1 && Math.abs(tmp2.x) <= 1 && Math.abs(tmp2.y) <= 1;
+          fv.leadX = tmp2.x * halfW;
+          fv.leadY = -tmp2.y * half;
+        } else fv.leadOn = false;
+        this.fillFlightNumbers(flownShip, fv, flownStatus);
       }
-      this.hud.setFlight(flying ? this.flightView : null);
-      const aimed = player.mounted ?? player.piloting;
+      const aimed = flownShip;
+      this.shipHud.setFlight(flying && this.settings.hudArcs ? this.flightView : null);
       const showTarget = aimed?.spec.ship && aimed.airborne && !input.held('freeLook') && !this.hyperspace.drives(aimed);
-      this.hud.setTarget(showTarget ? this.targetHud(aimed) : null);
+      this.shipHud.setTarget(showTarget && this.settings.hudTargetBlock ? this.targetHud(aimed) : null);
       // The target effects stand on the target while it is shown, and follow it; out of the ship they go.
       if (!aimed?.spec.ship) this.targetFx.select(null, false, null);
       this.targetFx.update();
-      // The flown ship's shields, armour, hull, boost and what is down; the comms fading.
-      this.shipHud.setStatus(aimed?.combat ? aimed.combat.status() : null, aimed?.combat?.stats);
+      // The flown ship's shields, armour, hull, boost, its parts and what is down; the comms fading.
+      const fight = flownFight;
+      const condition = fight && this.settings.hudShipCondition ? fight : null;
+      this.shipHud.setStatus(condition ? flownStatus : null, condition?.stats, condition ? condition.cond.parts : null);
+      // The body's own bars and the class's slot row stand down while the ship's condition is in their
+      // place: a health bar that cannot change in flight read as a second, broken one.
+      this.showBodyBlock(!condition);
+      // Why a landing was refused, said once when it changes: on the hull it is a state string the
+      // long prompt interpolated, and the long prompt is now a setting.
+      const landNote = aimed ? aimed.landNote : '';
+      if (landNote !== this.landNoteSaid) {
+        this.landNoteSaid = landNote;
+        if (landNote) this.messages.note(landNote);
+      }
       this.shipHud.update(dt);
+      // The message line ages on the real clock, not the simulation's — `rawDt`, not the step's
+      // clamped `dt`: a notice sent as a panel opened must still fade while it is open, or it would
+      // be standing there when the panel closes, and under a long stall a clamped delta would hold
+      // every line far past its eight seconds.
+      this.messages.update(rawDt);
+      // The line's write counter is a lifetime total; it is sampled here into the per-second rate the
+      // other two displays report. Nothing is allocated, and the sample is taken once a second.
+      this.lineWriteWindow += rawDt;
+      if (this.lineWriteWindow >= 1) {
+        const made = this.messages.debug().writes;
+        this.lineWritesLast = made - this.lineWriteMark;
+        this.lineWriteMark = made;
+        this.lineWriteWindow = 0;
+      }
       const at = player.worldPos;
       this.hud.update(dt, at.x, at.y, at.z, this.kit, player.hp, player.maxHp, this.world.day.clock(), this.nearbyLabel(at), player.saberOn);
 
@@ -6505,6 +6875,10 @@ class App {
       const tRender = performance.now();
       this.drawFrame();
       stats.renderMs = performance.now() - tRender;
+      // The display's shapes, over the picture and under every panel. Nothing is drawn and the canvas
+      // is cleared once whenever the game is not simulating, so no reticle stands frozen over the
+      // death card, an open panel or the map.
+      this.drawOverlay(simulate);
       stats.frameMs = performance.now() - tFrame;
       // A shader compiled on a live frame is a stall: say which frame, and how many, so the cause can be found.
       const programs = this.renderer.info.programs?.length ?? 0;
