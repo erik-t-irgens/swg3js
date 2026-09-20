@@ -6,6 +6,8 @@ import { chunk, encode, encodeRoots, form, W } from './iffWriter.ts';
 import { CATEGORIES, MUSIC_CATEGORIES, SOUND_FORMAT, convertSounds, iffRoots, packSoundNames, parseSoundTemplate, readMp3, readPackJson, readWav, resolveSample, soundStatus, templateEntry } from '../sound.mjs';
 import { floatParam, parseClientDataSounds, parseSurfaceTemplate, readClientData, readClientEffects, readSceneSounds, readSoundTables, roomRows, soundsOfClientData } from '../soundsources.mjs';
 import { PLACES_FORMAT, SURFACE_TYPES, convertSoundPlaces, placedSounds, placesStatus, pobNameOf, roomsFor } from '../soundplaces.mjs';
+import { LIFT_SOUNDS, SHIP_SOUND_FORMAT, bodySounds, convertShipSounds, engineNames, hitEffectSoundCount, hitEffectSounds, partSounds, powerSetOf, shipSoundStatus, vehicleClientData } from '../shipsounds.mjs';
+import { parseClientEffect } from '../shipdata.mjs';
 import { flattenWithWorldTransforms, parseSnapshot } from '../ws.mjs';
 import { parseIff } from '../iff.mjs';
 import { parseDatatable } from '../datatable.mjs';
@@ -426,6 +428,174 @@ try {
   ok(many.need!.includes('and 2 more') && !many.need!.includes(', f'), 'a fresh tree asks for the first few planets by name and counts the rest');
 } finally {
   rmSync(placesDir, { recursive: true, force: true });
+}
+
+// ------------------------------------------ what a ship, a part and a vehicle sound like (shipsounds.mjs)
+
+// A synthetic fleet: one hull whose engine is a part of its own, one whose engine is part of the
+// hull mesh (its looks table names an engine attachment the ships pack hangs no model for, as every
+// TIE does), a booster part, a vehicle reached through the two mount tables, the hit effect table
+// and the elevator sounds. Names are prefixed, as the section above says.
+const shipFiles = new Map<string, Buffer>();
+const shipPut = (p: string, node: ReturnType<typeof form>) => shipFiles.set(p, buf(encode(node)));
+const shipRaw = (p: string) => shipFiles.set(p, Buffer.alloc(4));
+const shipParams = (...params: ReturnType<typeof chunk>[]) => form('SHOT', form('0000', chunk('PCNT', new W().i32(params.length).bytes()), ...params));
+const shipStr = (name: string, value: string) => chunk('XXXX', new Uint8Array([...cstrs(name), 1, ...cstrs(value)]));
+const shipDerived = (base: string, ...params: ReturnType<typeof chunk>[]) => form('SHOT', form('DERV', chunk('XXXX', cstrs(base))), form('0000', chunk('PCNT', new W().i32(params.length).bytes()), ...params));
+const shipEngs = (slot: string, ...sounds: string[]) =>
+  form('ENGS', ...sounds.map((s) => form('INTS', chunk('INFO', new Uint8Array([...cstrs(slot, s), ...new W().f32(0.7).f32(1).f32(-16).f32(0).f32(0.3).f32(0.3).bytes()])))));
+const shipInts = (slot: string, sound: string) => form('INTS', chunk('INFO', new Uint8Array([...cstrs(slot, sound), ...new W().f32(0.5).f32(1).f32(-16).f32(0).f32(2).f32(1).bytes()])));
+
+const SHIP_ENGINE_PART = 'object/tangible/ship/attachment/engine/shared_wing_engine_s01.iff';
+const SHIP_BUILT_IN_ENGINE = 'object/tangible/ship/attachment/engine/shared_pod_engine_s01.iff';
+const SHIP_BOOSTER_PART = 'object/tangible/ship/attachment/booster/shared_wing_booster_s01.iff';
+const SHIP_QUIET_PART = 'object/tangible/ship/attachment/weapon/shared_wing_weapon_s01.iff';
+const SHIP_VEHICLE = 'object/mobile/vehicle/shared_testbike.iff';
+shipPut(SHIP_ENGINE_PART, shipParams(shipStr('clientDataFile', 'clientdata/ship/component/eng_wing_s01.cdf')));
+shipPut(SHIP_BUILT_IN_ENGINE, shipParams(shipStr('clientDataFile', 'clientdata/ship/component/eng_pod_s01.cdf')));
+shipPut(SHIP_BOOSTER_PART, shipParams(shipStr('clientDataFile', 'clientdata/ship/component/bst_wing_s01.cdf')));
+shipPut(SHIP_QUIET_PART, shipParams(shipStr('clientDataFile', 'clientdata/ship/component/wpn_wing_s01.cdf')));
+shipPut('clientdata/ship/component/eng_wing_s01.cdf', form('CLDF', form('0000',
+  shipEngs('engine_sound1', 'sound/eng_run_testwing.snd', 'sound/eng_run_dmg25_lp.snd', 'sound/eng_run_dmg50_lp.snd', 'sound/eng_run_dmg75_lp.snd'),
+  form('DSTR', chunk('INFO', cstrs('clienteffect/combat_ship_hit_component.cef'))))));
+shipPut('clientdata/ship/component/eng_pod_s01.cdf', form('CLDF', form('0000', shipEngs('engine_glow1', 'sound/eng_run_testpod.snd'))));
+shipPut('clientdata/ship/component/bst_wing_s01.cdf', form('CLDF', form('0000', shipInts('booster_on1', 'sound/shp_booster_rocket_lp.snd'))));
+shipPut('clientdata/ship/component/wpn_wing_s01.cdf', form('CLDF', form('0000', chunk('CSSI', cstrs('/private/index_color_1')))));
+shipPut('clientdata/ship/client_shared_testwing.cdf', form('CLDF', form('0000',
+  // The sound its wings open with, which no chunk of this file claims and the ships manifest
+  // already carries: the hull half is expected to take it back out of the sweep.
+  chunk('WING', cstrs('sound/wings_open_testwing.snd')),
+  form('DSTR', chunk('INFO', cstrs('clienteffect/cbt_explode_testwing.cef'))))));
+// The other three ways a hull can come by an engine: its own thruster set, its own looping
+// ambient, and the engine part the ships pack hung on it when its looks table names none.
+shipPut('clientdata/ship/client_shared_testcruiser.cdf', form('CLDF', form('0000',
+  form('VTHR', chunk('INFO', new W().f32(0).bytes()), chunk('VSND', cstrs('engine_sound', '', '', '', 'sound/eng_run_testcruiser.snd', '', '', '', ''))))));
+shipPut('clientdata/ship/client_shared_testbarge.cdf', form('CLDF', form('0000', chunk('ASND', cstrs('sound/veh_testbarge_run_lp.snd')))));
+shipPut('object/ship/player/shared_player_testcruiser.iff', shipParams(shipStr('clientDataFile', 'clientdata/ship/client_shared_testcruiser.cdf')));
+shipPut('object/ship/player/shared_player_testbarge.iff', shipParams(shipStr('clientDataFile', 'clientdata/ship/client_shared_testbarge.cdf')));
+shipPut('object/ship/player/shared_player_testskiff.iff', shipParams(shipStr('objectName', 'skiff')));
+shipPut('clientdata/ship/client_shared_testpod.cdf', form('CLDF', form('0000',
+  shipInts('engine_sound1', 'sound/shp_booster_rocket_lp.snd'),
+  form('DSEF', form('ASNL', chunk('SDAS', cstrs('sound/shp_capital_destruction_lp.snd')))))));
+shipPut('object/ship/player/shared_player_testwing.iff', shipParams(shipStr('clientDataFile', 'clientdata/ship/client_shared_testwing.cdf')));
+shipPut('object/ship/player/shared_player_testpod.iff', shipParams(shipStr('clientDataFile', 'clientdata/ship/client_shared_testpod.cdf')));
+shipPut('clienteffect/cbt_explode_testwing.cef', form('CLEF', form('0001', chunk('PSND', cstrs('sound/cbt_explode_testwing.snd')), chunk('CPAP', cstrs('appearance/pt_explosion.prt')))));
+shipPut('clienteffect/combat_ship_hit_component.cef', form('CLEF', form('0001', chunk('PSND', cstrs('sound/shp_hit_chassis.snd')))));
+shipPut('clienteffect/cbt_hit_ship_shield_lt.cef', form('CLEF', form('0001', chunk('CPAP', cstrs('appearance/pt_shield.prt')))));
+shipPut('datatables/space/ship_chassis.iff', dt(['name', 'flyby_sound', 'hit_sound_group'], ['s', 's', 's'], [['player_testwing', 'sound/eng_flyby_testwing.snd', 'testwing'], ['player_testpod', '', ''], ['player_testcruiser', '', 'tie'], ['player_testbarge', '', '']]));
+shipPut('datatables/space/ship_chassis_player_testwing.iff', dt(['component', 'engine', 'booster'], ['s', 's', 's'], [
+  ['eng_a', 'wing_engine_s01:engine1', 'wing_booster_s01:booster1'],
+  ['eng_b', 'wing_engine_s01:engine1', 'wing_booster_s01:booster1'],
+]));
+// The pod's engine hangs at the hull's own origin, so the ships pack keeps no part for it.
+shipPut('datatables/space/ship_chassis_player_testpod.iff', dt(['component', 'engine'], ['s', 's'], [['eng_a', 'pod_engine_s01:'], ['eng_b', 'pod_engine_s01:']]));
+shipPut('datatables/space/ship_hit_effects.iff', dt(['type', 'hit_light', 'hit_medium', 'hit_heavy', 'event_light', 'event_medium', 'event_heavy'], ['s', 's', 's', 's', 's', 's', 's'], [
+  ['shield', 'clienteffect/cbt_hit_ship_shield_lt.cef', '', '', '', '', ''],
+  ['component', 'clienteffect/combat_ship_hit_component.cef', '', '', '', '', ''],
+]));
+shipPut('datatables/mount/logical_saddle_name_map.iff', dt(['sat_name', 'logical_saddle_name'], ['s', 's'], [['appearance/pv_testbike.sat', 'lookup/testbike'], ['appearance/bantha_hue.sat', 'lookup/mnt_saddle_body2_wide_s01']]));
+shipPut('datatables/mount/saddle_appearance_map.iff', dt(['logical_saddle_name', 'saddle_capacity', 'saddle_appearance_name', 'client_data_filename'], ['s', 'i', 's', 's'], [
+  ['lookup/testbike', 1, 'appearance/testbike.apt', 'clientdata/vehicle/test_bike.iff'],
+  ['lookup/mnt_saddle_body2_wide_s01', 1, 'appearance/mnt_saddle_body2_wide_s01.apt', ''],
+]));
+shipPut(SHIP_VEHICLE, shipDerived('object/mobile/vehicle/shared_vehicle_base.iff', shipStr('appearanceFilename', 'appearance/pv_testbike.sat')));
+shipPut('object/mobile/vehicle/shared_vehicle_base.iff', shipParams(shipStr('objectName', 'vehicle')));
+shipPut('clientdata/vehicle/test_bike.iff', form('CLDF', form('0000',
+  form('VTHR', chunk('INFO', new W().f32(0).bytes()), chunk('VSND', cstrs('engine_sound', 'sound/veh_testbike_idle_lp.snd', '', '', 'sound/eng_run_testbike.snd', '', '', '', ''))),
+  form('VGEF', chunk('INFO', new Uint8Array([1, ...cstrs('sound/amb_river_large_lp.snd', 'ground_effect_0', 'appearance/pt_vehicle_water_trail.prt')]))))));
+for (const s of ['sound/eng_run_testwing.snd', 'sound/eng_idle_testwing.snd', 'sound/eng_accel_testwing.snd', 'sound/eng_decel_testwing.snd', 'sound/eng_run_dmg25_lp.snd', 'sound/eng_run_dmg50_lp.snd', 'sound/eng_run_dmg75_lp.snd', 'sound/eng_run_testpod.snd', 'sound/shp_booster_rocket_lp.snd', 'sound/cbt_explode_testwing.snd', 'sound/shp_hit_chassis.snd', 'sound/eng_flyby_testwing.snd', 'sound/shp_capital_destruction_lp.snd', 'sound/veh_testbike_idle_lp.snd', 'sound/eng_run_testbike.snd', 'sound/eng_accel_testbike.snd', 'sound/amb_river_large_lp.snd', 'sound/wings_open_testwing.snd', 'sound/eng_run_testcruiser.snd', 'sound/eng_idle_testcruiser.snd', 'sound/veh_testbarge_run_lp.snd', 'sound/veh_testbarge_idle_lp.snd', ...Object.values(LIFT_SOUNDS)]) shipRaw(s);
+const shipVfs = { has: (p: string) => shipFiles.has(p), read: (p: string) => shipFiles.get(p)!, list: (t: string) => [...shipFiles.keys()].filter((k) => k.includes(t)) };
+const shipHas = (p: string) => shipFiles.has(p);
+
+ok(engineNames('sound/eng_run_testwing.snd', shipHas).idle === 'sound/eng_idle_testwing.snd' && engineNames('sound/eng_run_testwing.snd', shipHas).decel === 'sound/eng_decel_testwing.snd', 'the idle, speed-up and slow-down sounds are the run loop\'s own family, which no table names');
+ok(engineNames('sound/eng_run_testbike.snd', shipHas).accel === 'sound/eng_accel_testbike.snd' && engineNames('sound/eng_run_testbike.snd', shipHas).idle === undefined, 'a family with only some of the three gets those and nothing made up for the rest');
+ok(Object.keys(engineNames('sound/shp_eng_jedi_starfighter.snd', shipHas)).length === 0, 'a run loop that is not named after a family gets no set at all rather than a guess');
+ok(engineNames('sound/eng_run_testpod_lp.snd', (p: string) => p === 'sound/eng_idle_testpod.snd').idle === 'sound/eng_idle_testpod.snd', 'a family written with a trailing _lp on one sound and not the other still finds it');
+ok(engineNames('sound/veh_testbike_run_lp.snd', shipHas).idle === 'sound/veh_testbike_idle_lp.snd', 'and a loop that keeps the family first and the word last, as every ground vehicle\'s does, is read the same way');
+
+const shipPartOf = (file: string, kind: string) => partSounds(parseClientDataSounds(parseIff(shipFiles.get(file)!)), { kind, clientData: file, names: (r: string) => engineNames(r, shipHas) });
+const shipEngine = shipPartOf('clientdata/ship/component/eng_wing_s01.cdf', 'engine')!;
+ok(shipEngine.engine!.run === 'sound/eng_run_testwing.snd' && shipEngine.engine!.hardpoint === 'engine_sound1' && shipEngine.engine!.damaged!.length === 3, 'an engine part carries its run loop and the three damage loops at the hardpoint its own client data names');
+ok(shipEngine.engine!.idle === 'sound/eng_idle_testwing.snd' && shipEngine.destroyed === 'clienteffect/combat_ship_hit_component.cef', 'and the rest of its set by name, and the effect it is destroyed by');
+const shipBooster = shipPartOf('clientdata/ship/component/bst_wing_s01.cdf', 'booster')!;
+ok(shipBooster.booster!.loop === 'sound/shp_booster_rocket_lp.snd' && shipBooster.booster!.hardpoint === 'booster_on1' && !shipBooster.engine, 'a top-level INTS is the booster\'s rocket loop at its hardpoint, not an engine');
+ok(shipPartOf('clientdata/ship/component/wpn_wing_s01.cdf', 'weapon') === null, 'a part whose client data names no sound is left out');
+
+const shipBody = bodySounds(parseClientDataSounds(parseIff(shipFiles.get('clientdata/vehicle/test_bike.iff')!)), { names: (r: string) => engineNames(r, shipHas) })!;
+ok(shipBody.thrusters!.length === 1 && shipBody.thrusters![0].run === 'sound/eng_run_testbike.snd' && shipBody.thrusters![0].idle === 'sound/veh_testbike_idle_lp.snd', 'a body\'s thruster set is its idle, speed-up, slow-down and run loops per damage state');
+ok(shipBody.thrusters![0].accel === 'sound/eng_accel_testbike.snd', 'a set the client data leaves empty is filled from the run loop\'s family where the archives have one');
+ok(shipBody.water === 'sound/amb_river_large_lp.snd', 'and the sound it drives over water with');
+const shipCapital = bodySounds(parseClientDataSounds(parseIff(shipFiles.get('clientdata/ship/client_shared_testpod.cdf')!)))!;
+ok(shipCapital.extra!.includes('sound/shp_capital_destruction_lp.snd') && shipCapital.booster!.loop === 'sound/shp_booster_rocket_lp.snd', 'a sound no chunk of its own claims (a capital ship breaking up) is kept beside the ones that are read');
+
+const shipHitRows = parseDatatable(parseIff(shipFiles.get('datatables/space/ship_hit_effects.iff')!)).rows;
+const shipHits = hitEffectSounds(shipHitRows, (cef: string) => (shipFiles.has(cef) ? parseClientEffect(parseIff(shipFiles.get(cef)!)).sounds : []));
+ok(shipHits.component.hit[0]!.sounds![0] === 'sound/shp_hit_chassis.snd' && shipHits.component.hit[1] === null, 'the hit effect table is read per layer, light, medium and heavy in its own order');
+ok(shipHits.shield.hit[0]!.effect === 'clienteffect/cbt_hit_ship_shield_lt.cef' && shipHits.shield.hit[0]!.sounds === undefined, 'an effect that plays no sound keeps its name, so nobody reads the table again to find that out');
+ok(hitEffectSoundCount(shipHits) === 1, 'and the count says how many sounds the whole table holds');
+
+const shipSaddleTables = { logical: parseDatatable(parseIff(shipFiles.get('datatables/mount/logical_saddle_name_map.iff')!)).rows, saddles: parseDatatable(parseIff(shipFiles.get('datatables/mount/saddle_appearance_map.iff')!)).rows };
+ok(vehicleClientData('appearance/pv_testbike.sat', shipSaddleTables)!.file === 'clientdata/vehicle/test_bike.iff', 'a vehicle reaches its client data through the two mount tables, which is the only place in the archives that says so');
+ok(vehicleClientData('appearance/bantha.sat', shipSaddleTables) === null, 'a saddle row with no client data of its own gives none, and a creature is not a vehicle');
+ok(vehicleClientData('appearance/pv_nothing.sat', shipSaddleTables) === null, 'and an appearance no table lists gives none');
+ok(powerSetOf('cruiser player_cruiser', 'tie') === 'tie' && powerSetOf('tiefighter player_tiefighter', 'yt1300') === 'default', 'which power chime a hull uses is chosen by its chassis row\'s hit-sound group, two of whose values are the power table\'s own two named rows');
+ok(powerSetOf('tiefighter player_tiefighter') === 'tie' && powerSetOf('xwing player_xwing', '') === 'xwing' && powerSetOf('yt1300 player_yt1300') === 'default', 'and only a hull whose row names no group at all falls back on the name it is known by, which is ours and is the only thing the three rows differ by');
+
+const shipDir = mkdtempSync(join(tmpdir(), 'swg-shipsound-'));
+try {
+  mkdirSync(join(shipDir, 'ships'), { recursive: true });
+  // A bank with nothing in it: the ship half says nothing at all until the bank itself is there,
+  // since that run writes both and one line asking for it is enough.
+  mkdirSync(join(shipDir, 'sounds'), { recursive: true });
+  writeFileSync(join(shipDir, 'sounds', 'sounds.json'), JSON.stringify({ format: SOUND_FORMAT, templates: {} }));
+  const shipManifest = { ships: [
+    { id: 'testwing', template: 'object/ship/player/shared_player_testwing.iff', chassis: 'player_testwing', attachments: [{ kind: 'component', slot: 'engine', template: SHIP_ENGINE_PART }, { kind: 'wing', sound: 'sound/wings_open_testwing.snd' }] },
+    { id: 'testpod', template: 'object/ship/player/shared_player_testpod.iff', chassis: 'player_testpod', attachments: [] },
+    { id: 'testcruiser', template: 'object/ship/player/shared_player_testcruiser.iff', chassis: 'player_testcruiser', attachments: [] },
+    { id: 'testbarge', template: 'object/ship/player/shared_player_testbarge.iff', chassis: 'player_testbarge', attachments: [] },
+    { id: 'testskiff', template: 'object/ship/player/shared_player_testskiff.iff', attachments: [{ kind: 'component', slot: 'engine', template: SHIP_ENGINE_PART }] },
+  ] };
+  writeFileSync(join(shipDir, 'ships', 'manifest.json'), JSON.stringify(shipManifest));
+  const built = convertShipSounds(shipVfs, shipDir, { log: () => {} });
+  ok(built.counts.parts === 3 && built.counts.engines === 2 && built.counts.boosters === 1, 'the command writes every attachment whose own client data names a sound, and counts the engines and boosters among them');
+  ok(built.parts[SHIP_ENGINE_PART].kind === 'engine' && !(SHIP_QUIET_PART in built.parts), 'each part is keyed by the template the fit and the manifest both keep, which is what hangs on the ship');
+  ok(built.hulls.testwing.engine!.from === 'chassis' && built.hulls.testwing.engine!.part === SHIP_ENGINE_PART, 'a hull takes its engine from its own looks table, which is the game\'s own answer');
+  ok(built.hulls.testpod.engine!.run === 'sound/eng_run_testpod.snd' && built.hulls.testpod.engine!.part === SHIP_BUILT_IN_ENGINE, 'including a hull whose engine hangs at its origin, for which the ships pack hangs no part at all');
+  ok(built.hulls.testskiff.engine!.from === 'part' && built.hulls.testskiff.engine!.part === SHIP_ENGINE_PART, 'a hull whose looks table names no engine falls back on the engine part the ships pack hung on it');
+  ok(built.hulls.testcruiser.engine!.from === 'hull' && built.hulls.testcruiser.engine!.idle === 'sound/eng_idle_testcruiser.snd', 'a hull with a thruster set of its own runs on that, with the rest of the set by name');
+  ok(built.hulls.testbarge.engine!.from === 'ambient' && built.hulls.testbarge.engine!.idle === 'sound/veh_testbarge_idle_lp.snd', 'and a hull with nothing but a looping ambient is read as running on that, which is a reading and not the game saying so');
+  ok(built.hulls.testwing.extra === undefined && built.hulls.testpod.extra!.includes('sound/shp_capital_destruction_lp.snd'), 'the sound a hull\'s wings open with is taken out of the sweep, since the ships manifest carries it, and what a capital ship breaks up with stays');
+  ok(built.hulls.testwing.destroyed!.sounds![0] === 'sound/cbt_explode_testwing.snd', 'a hull\'s destruction effect is written with the sounds it plays, since the ships pack keeps only its particle');
+  ok(built.hulls.testwing.flyby === 'sound/eng_flyby_testwing.snd' && built.hulls.testwing.hitSounds === 'testwing' && built.hulls.testpod.flyby === undefined, 'and its chassis row\'s flyby sound and hit sound group, where it has them');
+  ok(built.vehicles[SHIP_VEHICLE].clientData === 'clientdata/vehicle/test_bike.iff' && built.vehicles[SHIP_VEHICLE].water === 'sound/amb_river_large_lp.snd', 'a vehicle is keyed by its template, with the appearance and saddle it was reached through');
+  ok(built.counts.vehicleTemplates === 1, 'the base templates the vehicles inherit from are not counted as vehicles with no sound');
+  ok(built.counts.dangling === 0 && built.lifts.rise === LIFT_SOUNDS.rise, 'every sound it writes is one the archives hold, and the lift sounds are checked the same way');
+  ok(built.merged === false && built.joins.hulls.testwing === 'clientdata/ship/client_shared_testwing.cdf', 'the joins are worked out whether or not there is an events.json to put them in');
+  ok(built.joins.engines[SHIP_ENGINE_PART] === 'clientdata/ship/component/eng_wing_s01.cdf' && built.joins.engines.wing_engine_s01 === 'clientdata/ship/component/eng_wing_s01.cdf', 'each join is written under the whole template and under the file\'s own name, because the game asks with whichever it holds');
+  ok(built.joins.vehicles.testbike === 'clientdata/vehicle/test_bike.iff' && built.joins.combat.hulls.testwing[0] === 'sound/cbt_explode_testwing.snd', 'a vehicle by its garage name, and each hull\'s destruction sounds by its id');
+  ok(built.joins.shipEngines.testpod === 'clientdata/ship/component/eng_pod_s01.cdf' && built.joins.shipEngines.player_testpod === 'clientdata/ship/component/eng_pod_s01.cdf', 'a hull whose engines are part of its own mesh is joined to the engine part\'s client data as well, since nothing on the ship itself names it');
+  ok(!('testcruiser' in built.joins.shipEngines) && !('testbarge' in built.joins.shipEngines), 'and a hull whose loop is its own is not, since its own client data is already joined and two answers is one too many');
+  ok(built.joins.power.testcruiser === 'tie' && built.joins.power.testwing === 'default', 'which power chime a hull uses goes in the joins too, so that one rule decides it and not one in each language');
+  ok(built.joins.kin['sound/eng_run_testwing.snd'].decel === 'sound/eng_decel_testwing.snd' && built.joins.lifts.rise === LIFT_SOUNDS.rise, 'and so do every run loop\'s own family and the lift sounds');
+  ok(built.parts[SHIP_ENGINE_PART].destroyed!.sounds![0] === 'sound/shp_hit_chassis.snd', 'a part\'s destruction effect is written with its sounds, as a hull\'s and a vehicle\'s are');
+  ok(built.vehicles[SHIP_VEHICLE].seats === 1, 'and a vehicle carries how many the saddle table says it seats');
+  ok(built.joins.combat.hitEffects!.component_hit_light[0] === 'sound/shp_hit_chassis.snd', 'a hit effect that does play a sound is keyed by its layer, whether it is a hit or an event, and how hard (on the game\'s own archives not one of the 24 plays any, and the whole map is left out)');
+  writeFileSync(join(shipDir, 'sounds', 'events.json'), JSON.stringify({ format: SOUND_FORMAT, clientData: { keep: { ambient: 'sound/x.snd' } } }));
+  const remerged = convertShipSounds(shipVfs, shipDir, { log: () => {} });
+  const shipEvents = JSON.parse(readFileSync(join(shipDir, 'sounds', 'events.json'), 'utf8'));
+  ok(remerged.merged === true && shipEvents.ships.hulls.testwing === 'clientdata/ship/client_shared_testwing.cdf' && shipEvents.clientData.keep !== undefined, 'and they go into the bank\'s own events.json beside the client data they point at, leaving the rest of that file alone');
+  const shipPack = JSON.parse(readFileSync(join(shipDir, 'sounds', 'ships.json'), 'utf8'));
+  ok(shipPack.format === SHIP_SOUND_FORMAT && shipPack.hulls.testwing.power === 'default' && shipPack.counts.hitEffectSounds === 1, 'the file carries its format, the power set of each hull and how many sounds the hit table found');
+  ok(shipSoundStatus(shipDir, readPackJson).need === null && shipSoundStatus(shipDir, readPackJson, { ships: shipManifest }).need === null, 'status is happy once it is written, and happier still when it can see the ships pack these were made from');
+  ok(shipSoundStatus(shipDir, readPackJson, { ships: { ships: [...shipManifest.ships, { id: 'testlaunch' }] } }).need!.includes('testlaunch'), 'and asks for the sounds again when the ships pack has a hull they were written before');
+  writeFileSync(join(shipDir, 'sounds', 'ships.json'), JSON.stringify({ ...shipPack, format: 0 }));
+  ok(shipSoundStatus(shipDir, readPackJson).need!.includes('older'), 'and asks again for one written before the converter changed shape');
+  rmSync(join(shipDir, 'sounds', 'ships.json'));
+  ok(shipSoundStatus(shipDir, readPackJson).need!.includes('no engines'), 'and for one that is not there at all');
+  rmSync(join(shipDir, 'sounds', 'sounds.json'));
+  ok(shipSoundStatus(shipDir, readPackJson).line === null, 'and says nothing at all while there is no sound bank to hold it, which is one ask, not two');
+} finally {
+  rmSync(shipDir, { recursive: true, force: true });
 }
 
 console.log(`${checks} checks passed`);

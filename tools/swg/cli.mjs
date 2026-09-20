@@ -74,7 +74,8 @@
 //                                                                  used, as <out-dir>/sounds; a planet (or all) also writes that planet's own
 //                                                                  placed emitters, room beds and surfaces as <out-dir>/<planet>/sounds.json;
 //                                                                  --jka also takes Jedi Academy's saber sounds and the frames its animations
-//                                                                  mark, from its GameData folder
+//                                                                  mark, from its GameData folder; the ships pack, where it is converted, also
+//                                                                  gets its hulls', parts' and vehicles' own sounds as <out-dir>/sounds/ships.json
 //   node tools/swg/cli.mjs status <out-dir>                        what the packs under <out-dir> hold and which commands would fill the gaps
 //   node tools/swg/cli.mjs terrain-check <out-dir> [--limit=n] [--layers] [--at=x,z]
 //                                                                  generate terrain at every snapshot object and compare with its height;
@@ -144,6 +145,7 @@ import { convertSounds, soundStatus } from './sound.mjs';
 import { convertSoundPlaces, placesStatus } from './soundplaces.mjs';
 import { clipEventStatus, convertClipEvents } from './clipevents.mjs';
 import { convertJkaSounds, jkaSoundStatus } from './jkasound.mjs';
+import { convertShipSounds, shipSoundStatus } from './shipsounds.mjs';
 import { nameLocomotion } from './clipnames.mjs';
 import { core3MobileStats, mobileTemplates, scanServerSpawns } from './spawns.mjs';
 import { loadEffect } from './texrender.mjs';
@@ -1945,6 +1947,12 @@ function packStatus(dir) {
   const jkaSounds = jkaSoundStatus(dir, readJson);
   if (jkaSounds.line) console.log(jkaSounds.line);
   if (jkaSounds.need) need(`sounds <swg-dir> ${dir} --retail-only --jka=<jedi-academy-gamedata>`, jkaSounds.need);
+  // What each ship, ship part and vehicle sounds like, joined to the client data that speaks for it.
+  // The ships manifest goes with it, since the hull half is keyed by the ids that manifest gives and
+  // a ships pack converted since would otherwise leave these behind in silence.
+  const shipSounds = shipSoundStatus(dir, readJson, { ships });
+  if (shipSounds.line) console.log(shipSounds.line);
+  if (shipSounds.need) need(`sounds <swg-dir> ${dir} --retail-only`, shipSounds.need);
   if (!todo.size) {
     console.log(`everything is in place: ${planets} planet packs, creatures and player`);
     return;
@@ -5126,6 +5134,10 @@ switch (cmd) {
     // When each of the game's own animations marks a footstep, a voice or a blow landing, which
     // animation each species' clips play, and which client data each body reads its events from.
     convertClipEvents(vfs, pos[2], { jka: jkaSounds, log: console.log });
+    // What a ship, a ship part and a vehicle sound like: the engine loop the fitted engine part
+    // carries, the booster, a hull's own thrusters and the sound it blows up with, and every
+    // vehicle's idle, run and water sounds, each joined to the client data that speaks for it.
+    convertShipSounds(vfs, pos[2], { log: console.log });
     // A planet argument (or `all`) also writes where that planet's sounds are: the emitters its
     // world places, the room beds of the buildings it places, and what is underfoot on each of them.
     // A name that is not a planet is a typo, not a planet with nothing in it, so it says so.
