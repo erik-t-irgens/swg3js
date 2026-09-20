@@ -100,6 +100,11 @@ import { EmoteWheel } from './ui/emoteWheel';
 import { Net, type Hello, type PeerVehicle } from './net/net';
 import { SESSION, Session, tuneSession } from './net/session.ts';
 import { clockKnob } from './world/sharedClock.ts';
+// The group and the chat: the browser's half of what the server holds, and the two panels over it.
+import { sharedClock } from './world/sharedClock.ts';
+import { GROUP_RANGE, GROUP_TUNE, Groups, tuneGroups } from './net/groups.ts';
+import { GROUP_UI_TUNE, GroupUi, tuneGroupUi } from './ui/groupUi.ts';
+import { CHAT_TUNE, ChatUi, tuneChat } from './ui/chatUi.ts';
 import { applyAppearance, dress, packLook } from './player/look';
 import { RemotePlayers } from './net/remotePlayers';
 import { danceOf, defaultEmotes, emoteChoices, FLOURISHES, isDanceClip, isFlourishClip, loadEmotes, loopsEmote, saveEmotes } from './core/emotes';
@@ -3113,6 +3118,148 @@ class App {
     // are not here; they are `__debug.day()`'s.
     const debugRoot = (window as unknown as { __debug?: Record<string, unknown> }).__debug;
     if (debugRoot) debugRoot.session = (o?: Partial<typeof SESSION>) => (o ? { ...tuneSession(o), ...this.net.session.debug() } : this.net.session.debug());
+
+    // ---- The group and the words players type at each other. ----
+    //
+    // The server holds who is in a group and who hears what; this side shows it and asks for things.
+    // Everything below asks the session, never the socket, so with no address set -- or against the
+    // relay that came before -- the group is empty, the chat sends nothing, no panel opens and the
+    // game is exactly what it is without a server. The panels are made here and nothing of them runs
+    // in a frame: the roster changes when the server says so, the distances are worked out four times
+    // a second, and the only loop is the one that carries a bubble over a speaker's head, which runs
+    // while there is a bubble and stops when there is not.
+    const groups = new Groups();
+    groups.send = (msg) => this.net.sendWord(msg);
+    groups.authority = () => this.net.session.authority;
+    groups.selfId = () => this.net.id;
+    // The countdowns on an invitation are the server's own clock, which the shared clock estimates:
+    // two machines with a minute between their own clocks would otherwise show two different waits.
+    groups.serverNow = () => sharedClock.now();
+    groups.meAt = (out) => {
+      const at = this.player?.worldPos;
+      if (!at) return false;
+      out.x = at.x;
+      out.y = at.y;
+      out.z = at.z;
+      return true;
+    };
+    // Where a member's figure last was: their own state, which is a world place whatever they are in
+    // or on. A member on another world has no distance worth showing, and says so by answering false.
+    const onThisWorld = (hello: Hello): boolean => (hello.planet ?? '') === (this.world.planet?.id ?? '') && (hello.zone ?? '') === (this.zone ?? '');
+    groups.peerAt = (id, out) => {
+      const peer = this.net.peers.get(id);
+      const s = peer?.state;
+      if (!peer || !s || !onThisWorld(peer.hello)) return false;
+      out.x = s.p[0];
+      out.y = s.p[1];
+      out.z = s.p[2];
+      return true;
+    };
+    groups.peerByName = (name) => {
+      const want = name.toLowerCase();
+      for (const peer of this.net.peers.values()) if (onThisWorld(peer.hello) && peer.hello.name.toLowerCase() === want) return peer.id;
+      for (const peer of this.net.peers.values()) if (onThisWorld(peer.hello) && peer.hello.name.toLowerCase().startsWith(want)) return peer.id;
+      return 0;
+    };
+    groups.onNote = (text) => this.messages.system(text);
+    // Travelling together is another wave's: the word is carried and said, and nobody is moved by it.
+    groups.onTravel = (where) => this.messages.system(`the group is going to ${where.planet || 'another world'}; going with them comes later`);
+    // Whatever else reads the server's own words reads them first and this takes what is left, so a
+    // later wave hanging its own words on the same hook does not unplug the group's.
+    const wordWas = this.net.onWord;
+    this.net.onWord = (msg) => {
+      wordWas(msg);
+      groups.handle(msg);
+    };
+    // A line that dropped, was put down or was taken over leaves nothing of the group behind: the
+    // server is what holds it, and a roster left on the screen with no line under it is a lie. The
+    // handler the relay wiring set is kept and called first, so nothing it does is lost.
+    const statusWas = this.net.onStatus;
+    this.net.onStatus = (status, detail) => {
+      statusWas(status, detail);
+      if (status !== 'online') groups.clear();
+    };
+    // Where a peer's figure is *drawn* this frame, which is not where their last message put them:
+    // the figure glides toward that point over the tenth of a second between messages, and a
+    // passenger in somebody else's hull is drawn from the carrier's own pose. A label over a head has
+    // to hang on the drawn place or it swims and snaps ten times a second; the distances and the 90 m
+    // check read the message's own place, where that lag does not matter. `peerAnchor` is
+    // `RemotePlayers`', and while it is not there yet this falls back on the message's place, which
+    // is what the labels used before.
+    const drawnAt = this.remotes as RemotePlayers & { peerAnchor?: (id: number, out: { x: number; y: number; z: number }) => boolean };
+    const peerAnchor = (id: number, out: { x: number; y: number; z: number }): boolean => (drawnAt.peerAnchor ? drawnAt.peerAnchor(id, out) : groups.peerAt(id, out));
+    const chatUi = new ChatUi(this.ui, {
+      groups,
+      say: (speaker, text, colour) => (speaker ? this.messages.spatial(speaker, text, colour) : this.messages.note(text)),
+      project: (x, y, z, out) => this.projectToScreen(x, y, z, out),
+      anchor: peerAnchor,
+      meAt: (out) => groups.meAt(out),
+      canOpen: () => this.started && this.inWorld && !this.traveling && !this.menu.open && !this.map.open && !this.anyPanelOpen(),
+      // Typing takes the keyboard from the game without taking the mouse: the field has the keys (the
+      // game's own input stands aside for a field), and the view is not thrown out of its lock for a
+      // line of chat. `captured` is also what keeps the Escape that closes the line from opening the menu.
+      typing: (on) => {
+        this.input.captured = on;
+      },
+      // Escape shuts the line, and the browser takes the pointer lock back on the same press: ask for
+      // it again. `requestLock` already knows a browser refuses one straight after Escape and asks
+      // again a moment later, so this is the whole of it.
+      relock: () => this.input.requestLock(),
+    });
+    const groupUi = new GroupUi(this.ui, {
+      groups,
+      note: (text) => this.messages.system(text),
+      project: (x, y, z, out) => this.projectToScreen(x, y, z, out),
+      anchor: peerAnchor,
+      // Where the eye is and which way it looks, out of the camera's own matrix: column 3 is where it
+      // stands and column 2 negated is where it looks, as the nameplates already read it.
+      view: (eye, dir) => {
+        const pm = this.cam.camera.matrixWorld.elements;
+        eye.x = pm[12];
+        eye.y = pm[13];
+        eye.z = pm[14];
+        dir.x = -pm[8];
+        dir.y = -pm[9];
+        dir.z = -pm[10];
+        return this.started && this.inWorld;
+      },
+      peersHere: (out) => {
+        let n = 0;
+        for (const peer of this.net.peers.values()) {
+          const s = peer.state;
+          if (!s || !onThisWorld(peer.hello)) continue;
+          const slot = out[n] ?? (out[n] = { id: 0, name: '', x: 0, y: 0, z: 0 });
+          slot.id = peer.id;
+          slot.name = peer.hello.name;
+          slot.x = s.p[0];
+          slot.y = s.p[1];
+          slot.z = s.p[2];
+          n++;
+        }
+        return n;
+      },
+      canOpen: () => this.started && this.inWorld && !this.traveling && !this.menu.open && !this.map.open && !this.anyPanelOpen(),
+      freeMouse: (free) => this.freeMouse(free),
+    });
+    if (debugRoot) {
+      // `__debug.group()` reads what the group is doing and `__debug.group({ chevron: 60 })` sets one
+      // of this side's own numbers; `{ ui: { panelKey: 'KeyY' } }` sets the panel's. The distances an
+      // invitation, a trade and a duel reach are the game's own table's and are printed, not settable.
+      debugRoot.group = (o?: Partial<typeof GROUP_TUNE> & { ui?: Partial<typeof GROUP_UI_TUNE> }) => {
+        if (o?.ui) tuneGroupUi(o.ui);
+        if (o) tuneGroups(o);
+        return { ...groups.debug(), roster: groups.roster, tune: GROUP_TUNE, ui: { ...GROUP_UI_TUNE, ...groupUi.debug() }, ranges: GROUP_RANGE };
+      };
+      // `__debug.chat()` reads the line and the bubbles; `__debug.chat({ bubbleWidth: 320 })` sets one;
+      // `__debug.chat({ open: true })` opens the line, which is how a script with no keyboard types.
+      debugRoot.chat = (o?: Partial<typeof CHAT_TUNE> & { open?: boolean; send?: string; scope?: 'say' | 'group' }) => {
+        if (o) tuneChat(o);
+        if (o?.open === true) chatUi.show(o.scope);
+        if (o?.open === false) chatUi.close();
+        const answer = typeof o?.send === 'string' ? groups.type(o.send, o.scope ?? 'say') : '';
+        return { ...chatUi.debug(), answer, tune: CHAT_TUNE, log: groups.log.map((l) => `${l.scope === 'group' ? '[group] ' : ''}${l.name}: ${l.text}`) };
+      };
+    }
 
     this.select = new CharacterSelect(this.ui);
     this.select.onPlay = (c) => void this.play(c).catch((err) => console.warn('could not enter the world', err));

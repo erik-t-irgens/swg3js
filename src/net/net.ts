@@ -161,6 +161,13 @@ export class Net {
   onStatus: (status: Status, detail: string) => void = () => {};
   /** Something the player has to read: joining, being taken over, a refusal. The message line takes it. */
   onNotice: (text: string) => void = () => {};
+  /**
+   * A word from a server that holds the world which this socket does not read itself: a group's
+   * roster and its news, and a line of chat. It is handed over as it arrived, whole, because what it
+   * means belongs to the module that asked for it (src/net/groups.ts) and not here. An old relay
+   * never sends any of these, so with one this is never called.
+   */
+  onWord: (msg: Record<string, unknown>) => void = () => {};
 
   /** The server kept in this browser, or the one in ?server=, or none. */
   static savedUrl(): string {
@@ -333,6 +340,16 @@ export class Net {
     if (this.online && to > 0) this.send({ t: 'ask', to, word });
   }
 
+  /**
+   * A word for a server that holds the world, made up by whoever owns that kind of word (a group
+   * being asked for, a line of chat). It goes out as it is given, once the handshake has settled: a
+   * server started with a join word listens to nothing before that, and an old relay drops anything
+   * it does not know, so nothing has to ask which kind of far end it is talking to.
+   */
+  sendWord(msg: Record<string, unknown>): void {
+    if (this.online && this.greeted) this.send(msg);
+  }
+
   private receive(text: string): void {
     let msg: { t: string; id?: number; hello?: Hello; peers?: Peer[]; clip?: string; word?: string } & Partial<PeerState>;
     try {
@@ -474,6 +491,12 @@ export class Net {
       case 'ask':
         // Checked here as well as at the relay: a word is acted on, and an unknown one must do nothing.
         if (msg.id !== undefined && (msg.word === 'dock' || msg.word === 'allow' || msg.word === 'refuse' || msg.word === 'undock')) this.onAsk(msg.id, msg.word);
+        break;
+      case 'group':
+      case 'chat':
+        // The group and the words players type: handed over whole to whoever owns them. Nothing is
+        // read here, so this switch does not have to grow a case for every word a group can say.
+        this.onWord(msg as unknown as Record<string, unknown>);
         break;
     }
   }

@@ -796,6 +796,21 @@ export class RemotePlayers {
   }
 
   /** What to call the player, for the rows. */
+  /**
+   * Where a peer's figure is being drawn this frame, for a label that has to hang over their head.
+   * It is not where their last message put them: the figure glides toward that point between
+   * messages, and one riding in somebody else's hull is placed from the carrier's own live pose, so
+   * a label hung on the message's place swims off the head and snaps back ten times a second.
+   */
+  peerAnchor(id: number, out: { x: number; y: number; z: number }): boolean {
+    const r = this.remotes.get(id);
+    if (!r || !r.group.visible) return false;
+    out.x = r.group.position.x;
+    out.y = r.group.position.y;
+    out.z = r.group.position.z;
+    return true;
+  }
+
   peerName(id: number): string {
     return this.remotes.get(id)?.hello.name ?? 'someone';
   }
