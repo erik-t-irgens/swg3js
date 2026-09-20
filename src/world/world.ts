@@ -35,6 +35,8 @@ import { isShadowOnly } from '../core/fxRegistry.ts';
 import { addPointLight, fillCascades, luminanceOf, resetFxLights, setDirectional, type FxLights } from '../core/fx/lights';
 import { ParticleEffects, type EffectHandle } from './particles';
 import { loadSpacePack, type SpacePack } from '../space/spaceData.ts';
+import { Nebulae, installNebulaDebug } from '../space/nebulae.ts';
+import { liveSettings } from '../core/settings.ts';
 import { ShipContacts } from '../space/contacts';
 import { NpcShipManager } from '../space/npcShips';
 import { ZONE_TIER } from '../space/roster';
@@ -709,6 +711,11 @@ export class World {
         const fx = this.particles;
         for (const f of Object.values(this.hyperspaceEffects())) if (f) await fx.prepare(f, this.renderer);
         if (token !== this.loadToken) return null;
+        // The zone's nebulae, once the particles exist (a strike plays two of the game's own
+        // effects): built into the scene here, so the warm-up compiles every one of their
+        // materials behind the loading screen and nothing of theirs is ever made on a live frame.
+        await this.loadNebulae(pack);
+        if (token !== this.loadToken) return null;
       }
       // Placed objects pull the procedural ground up to their feet, so buildings stand on it;
       // in space nothing stands on anything, and an anchor would raise a needle of ground three
@@ -797,6 +804,7 @@ export class World {
       this.disposeSpaceBodies(this.spaceBodies);
       this.spaceBodies = null;
     }
+    this.dropNebulae();
     this.flora = null;
     this.groundTextures?.dispose();
     this.groundTextures = null;
@@ -897,6 +905,9 @@ export class World {
 
   /** The space zone's whole pack (space.json), null on a ground planet and before it loads. Public, read-only by convention. */
   spaceData: SpacePack | null = null;
+
+  /** The zone's nebulae while a space zone is loaded: its sheets, the haze inside one and its lightning. */
+  nebulae: Nebulae | null = null;
 
   /** The name of the scenery at a point (the Star Destroyer): the nearest whose radius plus a kilometre covers it, or null. Game frame. */
   sceneryNameAt(x: number, z: number): string | null {
@@ -1031,6 +1042,77 @@ export class World {
       m.map?.dispose();
       m.dispose();
     }
+  }
+
+  /**
+   * What the nebulae need of the world: the effects a strike plays, a pooled light for its flash,
+   * where the player's ship is and how to hurt it, and whether the player lets lightning hurt a
+   * ship at all. One kept record, so a load allocates nothing and a strike allocates nothing.
+   */
+  private readonly nebulaDeps = {
+    place: (file: string, matrix: THREE.Matrix4): unknown | null => this.particles?.place(file, matrix, false, true) ?? null,
+    remove: (handle: unknown): void => this.particles?.remove(handle as EffectHandle),
+    flash: (at: THREE.Vector3, colour: number, intensity: number, distance: number, seconds: number): void => {
+      this.npcDeps.effects?.flash(at, colour, intensity, distance, seconds);
+    },
+    shipAt: (out: THREE.Vector3): number => {
+      const contact = this.ships.playerShip;
+      const v = contact?.vehicle;
+      // A ship in a jump is ghosted and nothing may strike it, as nothing else may.
+      if (!contact || !v || contact.dead || contact.ghosted) return 0;
+      out.copy(v.pos);
+      return Math.max(1, v.radius);
+    },
+    hurtShip: (amount: number, from: THREE.Vector3): void => {
+      const contact = this.ships.playerShip;
+      if (!contact || contact.dead || contact.ghosted) return;
+      // The ship's own damage path, so the layers, the game's hit effect and the retaliation memory
+      // are the same as for a bolt; nobody struck, so nothing is blamed for it.
+      contact.combat?.take(amount, from, null);
+    },
+    damageEnabled: (): boolean => liveSettings().nebulaLightningDamage,
+    now: (): number => Date.now(),
+  };
+
+  /**
+   * The zone's nebulae. Built after the particles exist and before the warm-up, so every material
+   * they own is compiled behind the loading screen; a travel or a jump part way through leaves
+   * nothing behind (the build is dropped and freed where it stands).
+   */
+  private async loadNebulae(pack: AssetPack): Promise<void> {
+    const token = this.loadToken;
+    const data = this.spaceData;
+    // The console hook answers in every zone, including one whose table has no nebulae at all.
+    installNebulaDebug();
+    if (!data) return;
+    const fx = this.particles;
+    const built = await Nebulae.build(
+      this.nebulaDeps,
+      data,
+      (file) => pack.url(file),
+      async (file) => {
+        await fx?.prepare(file, this.renderer);
+      },
+      () => token === this.loadToken,
+    );
+    if (!built) return;
+    if (token !== this.loadToken) {
+      built.dispose((m) => this.forgetMaterials(m));
+      return;
+    }
+    this.dropNebulae();
+    this.nebulae = built;
+    this.scene.add(built.group);
+    console.info(`space: ${built.status}`);
+  }
+
+  /** The nebulae taken out of the world for good: their materials forgotten (both registers are strong), then freed. */
+  private dropNebulae(): void {
+    const nebulae = this.nebulae;
+    if (!nebulae) return;
+    this.nebulae = null;
+    this.scene.remove(nebulae.group);
+    nebulae.dispose((m) => this.forgetMaterials(m));
   }
 
   /** `spawn` is where the player arrives: the weather reads the area there, and its sky's textures load before the loading screen lifts. */
@@ -2879,6 +2961,8 @@ export class World {
     this.waterBodies.envLight = this.waterEnvLight();
     this.sky.position.copy(camPos);
     this.spaceBodies?.position.copy(camPos);
+    // The nebulae: where the camera is inside them, the haze, the sheets' order and the strikes.
+    if (this.nebulae && this.camera) this.nebulae.update(dt, this.camera);
     this.waterTime += dt;
     for (const m of this.waterMaterials) m.userData.uniforms.uTime.value = this.waterTime;
     // Modulo the shader's own loop, whose flow × loopTime is whole: the noise wraps without a seam.
@@ -3060,14 +3144,23 @@ export class World {
     if (!space && this.day.sunDir.y <= 0.02) return null;
     out.dir.copy(tmpV).normalize();
     out.color.copy(this.sun.color);
-    out.intensity = space ? 1 : this.day.daylight;
+    // Deep inside a nebula the star is behind a wall of gas: the god rays read this, and the sky
+    // lights below carry the same dimming to the lens flare, so the two never disagree.
+    out.intensity = space ? (this.nebulae?.rayDim ?? 1) : this.day.daylight;
     return out;
   }
 
   /** What the lens flare follows this frame, one fixed slot per body: the sky's glowing suns (a space zone's brightest stars). Allocates nothing. */
   skyLights(out: readonly import('../core/fx/lensFlare').FxSkyLight[], nightSuns = true): number {
     if (!this.planet) return 0;
-    if (this.swgSky) return this.swgSky.flareLights(out, nightSuns);
+    if (this.swgSky) {
+      const count = this.swgSky.flareLights(out, nightSuns);
+      // Inside a nebula the gas stands between the camera and the star: the flare fades with how
+      // deep in the camera is, by the same reading the god rays take in `sunInfo`.
+      const dim = this.nebulae?.flareDim ?? 1;
+      if (dim < 1) for (let i = 0; i < count; i++) out[i].alpha *= dim;
+      return count;
+    }
     if (this.planet.space) return 0;
     // The procedural dome's sun (and Tatooine's second); dark at night, the slots kept.
     return SwgSky.proceduralFlareLights(out, this.day.sunDir, this.sun.color, this.planet.sky.suns);

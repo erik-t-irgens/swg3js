@@ -79,6 +79,8 @@ export interface Settings extends FxSettings {
   soundInBackground: boolean;
   /** Which lightsaber sounds: 'jka' Jedi Academy's, 'swg' the game's own. */
   soundSabers: string;
+  /** A nebula's lightning takes shields and armour off a ship it strikes; off, a strike only flashes. */
+  nebulaLightningDamage: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -119,8 +121,21 @@ export const DEFAULT_SETTINGS: Settings = {
   soundRoomEcho: true,
   soundInBackground: false,
   soundSabers: 'jka',
+  nebulaLightningDamage: true,
   ...FX_DEFAULTS,
 };
+
+/**
+ * The settings this session is playing with: the object `loadSettings` last returned, which the
+ * game keeps and the menu writes into, so anything that reads through here sees a switch the
+ * moment it is flicked. Before the game has loaded any (a node test), it is the defaults.
+ */
+let live: Settings = DEFAULT_SETTINGS;
+
+/** The live settings; never replace what it returns, only read it. */
+export function liveSettings(): Settings {
+  return live;
+}
 
 /**
  * Keys renamed when the effects got a registry of their own: a value kept under an old name moves
@@ -153,6 +168,7 @@ export function loadSettings(): Settings {
   } catch {
     /* none saved, or not ours */
   }
+  live = out;
   return out;
 }
 

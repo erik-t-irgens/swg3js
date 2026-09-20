@@ -1,7 +1,35 @@
 import * as THREE from 'three';
 import type { Input } from './input';
+import { shakeAt, type ViewShake } from '../space/nebulaMath.ts';
 
 const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v));
+
+/**
+ * How hard the view is being shaken, 0 to 1, and for how long it has been: there is one view, so
+ * one register for it. Whatever shakes the camera writes the amount every frame (`setViewShake`)
+ * and the camera spends it wherever it put itself that frame -- orbiting, behind a ship, or in a
+ * cockpit -- so nothing that places the camera has to know about it. An amount that stops being
+ * written dies on its own: `update`, `chase` and `cockpit` fade it as they use it, so the view
+ * settles within a fraction of a second of the last ask.
+ */
+const viewShake = { amount: 0, seconds: 0 };
+/** Seconds an unrepeated ask takes to fade to nothing. INVENTED, and small enough not to be a lag. */
+const SHAKE_HOLD = 0.15;
+const shakeValues: ViewShake = { yaw: 0, pitch: 0, roll: 0, x: 0, y: 0 };
+const shakeQuat = new THREE.Quaternion();
+const shakeEuler = new THREE.Euler();
+const shakeRight = new THREE.Vector3();
+const shakeUp = new THREE.Vector3();
+
+/** Shake the view this frame by `amount` (0 to 1); called every frame by whatever is shaking it. */
+export function setViewShake(amount: number): void {
+  viewShake.amount = Math.max(viewShake.amount, clamp(amount, 0, 1));
+}
+
+/** How hard the view is shaking right now: for the console, and for anything that wants to know. */
+export function viewShakeAmount(): number {
+  return viewShake.amount;
+}
 
 /** Distance along from->to at which the world blocks the camera, or null when clear. */
 export type CameraBlocker = (from: THREE.Vector3, to: THREE.Vector3) => number | null;
@@ -126,6 +154,7 @@ export class ThirdPersonCamera {
       this.camera.quaternion.copy(this.chaseFrame).multiply(FLIP).multiply(chaseTilt);
     }
     this.focus.copy(target);
+    this.applyShake(dt);
   }
 
   /**
@@ -145,6 +174,29 @@ export class ThirdPersonCamera {
     // Cameras look down their own -Z; the hull's nose is its +Z.
     this.camera.quaternion.copy(hull).multiply(FLIP);
     this.focus.copy(eye);
+    this.applyShake(dt);
+  }
+
+  /**
+   * Spend this frame's shake on wherever the camera has just put itself: a small turn in its own
+   * axes and a small shift across its view. It is taken at the end of every way the camera is
+   * placed, and what was asked for fades as it is taken, so the shake lasts as long as something
+   * keeps asking for it and settles when nothing does. Nothing is allocated.
+   */
+  private applyShake(dt: number): void {
+    const amount = viewShake.amount;
+    // What was asked for fades rather than being spent outright: the view is placed twice on the
+    // frame a ship's cockpit takes it over, while the ask arrives once, and a writer that stops
+    // (leaving a nebula) should let the view settle rather than cut.
+    viewShake.amount = Math.max(0, amount - dt / SHAKE_HOLD);
+    viewShake.seconds += dt;
+    if (!(amount > 0)) return;
+    const s = shakeAt(viewShake.seconds, amount, shakeValues);
+    shakeEuler.set(s.pitch, s.yaw, s.roll, 'YXZ');
+    this.camera.quaternion.multiply(shakeQuat.setFromEuler(shakeEuler));
+    shakeRight.set(1, 0, 0).applyQuaternion(this.camera.quaternion);
+    shakeUp.set(0, 1, 0).applyQuaternion(this.camera.quaternion);
+    this.camera.position.addScaledVector(shakeRight, s.x).addScaledVector(shakeUp, s.y);
   }
 
   /** Back to orbiting: the next chase starts from the ship's frame afresh. */
@@ -244,6 +296,7 @@ export class ThirdPersonCamera {
       this.camera.position.copy(this.focus).addScaledVector(this.dir, -eyeAhead);
       this.camera.lookAt(this.desired.copy(this.camera.position).sub(this.dir));
       this.orbitDistance = 0;
+      this.applyShake(dt);
       return;
     }
 
@@ -266,5 +319,6 @@ export class ThirdPersonCamera {
     this.orbitDistance = dist;
     if (posPitch === this.pitch) this.camera.lookAt(this.focus);
     else this.camera.lookAt(this.lookTarget.copy(this.camera.position).addScaledVector(this.dir, -Math.max(dist, 1)));
+    this.applyShake(dt);
   }
 }
