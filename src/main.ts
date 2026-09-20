@@ -64,7 +64,7 @@ import { CreatorBar } from './ui/creatorBar';
 import { Menu, keyName } from './ui/menu';
 import { ShipMenu, type ShipCruise, type ShipStatus } from './ui/shipMenu';
 import { Docking } from './space/docking';
-import { DOCK_TUNE } from './space/dockingMath';
+import { CLAMP_TUNE, DOCK_TUNE } from './space/dockingMath';
 import { HyperspaceUi } from './ui/hyperspaceUi';
 import { Hyperspace } from './space/hyperspace';
 import { CRUISE_KEY, CRUISE_TUNE, Cruise, tuneCruise } from './space/cruise';
@@ -2121,9 +2121,11 @@ class App {
        * bearings that decide whether a lane can be reached from where the ship stands without crossing
        * the hull: at -1 both are off and the row offers a lane from anywhere, as it used to.
        * `dock({ go: true })` asks for a lane in the ship flown, `{ go: false }` launches or breaks off.
+       * `dock({ clamp: { gap: 3 } })` sets the ship-to-ship clamp's own numbers (CLAMP_TUNE, all invented)
+       * and `dock({ allow: false })` turns away another player asking for room on this hull.
        * `__debug.advance` steps it, so a whole approach can be watched from a hidden tab.
        */
-      dock: (opts: { go?: boolean; face?: 'auto' | 'hardpoint' | 'lane' } & Partial<typeof DOCK_TUNE> = {}) => {
+      dock: (opts: { go?: boolean; face?: 'auto' | 'hardpoint' | 'lane'; clamp?: Partial<typeof CLAMP_TUNE>; allow?: boolean } & Partial<typeof DOCK_TUNE> = {}) => {
         const p = this.player;
         const v = p.mounted ?? p.piloting ?? null;
         const out = this.docking.tune(opts);
@@ -5015,7 +5017,7 @@ class App {
    */
   private dockRefusal(of?: Vehicle | null): string | null {
     const ship = of ?? this.pilotedShip();
-    if (this.docking.docked(ship)) return 'undock first';
+    if (this.docking.docked(ship)) return this.docking.clamp.carries(ship) ? 'let the other ship go first' : 'undock first';
     if (this.docking.flying(ship)) return "on the station's lane";
     return null;
   }
@@ -5718,6 +5720,14 @@ class App {
         this.hud.setPrompt(`at the controls of the ${v.spec.label} · <b>W</b>/<b>S</b> throttle · mouse steers · <b>E</b> lets go`);
         return;
       }
+      // The two hulls are clamped together and this walker stands at the room's own way in: E crosses
+      // into the other ship's rooms rather than stepping out of a door that opens onto the hull it
+      // rides. Anywhere else in the room E steps out as it always did.
+      const across = this.docking.clamp.crossing(v, p.pos);
+      if (across) {
+        this.crossToShip(room, across.to);
+        return;
+      }
       this.leaveShip(false);
       return;
     }
@@ -5858,6 +5868,24 @@ class App {
     const hit = this.physics.groundDistance(tmp.x, from, tmp.z, 12, sp.body);
     tmp.y = hit !== null ? from - hit + 0.15 : Math.max(this.world.terrain.heightAt(tmp.x, tmp.z), this.world.terrain.waterLevel - 1) + 0.3;
     p.dismount(tmp);
+  }
+
+  /**
+   * Out of one clamped ship's rooms and into the other's, at its way in. The body leaves the room it
+   * was in before it is put in the next (`Player.board` does that itself), so it is never left in a
+   * physics world nothing steps; a flame held in the old hull's frame goes out with it.
+   */
+  private crossToShip(from: import('./vehicles/surfaceRoom').WalkableRoom, to: Vehicle): void {
+    const room = to.interior;
+    if (!room) return;
+    // The camera steps from one hull's frame into another's: the effects have no history across it.
+    this.postfx?.reset();
+    (this.kits.bounty_hunter as BountyHunterKit | undefined)?.coolDown();
+    from.reveal(false);
+    room.reveal(true);
+    this.player.board(room, room.entry.clone());
+    this.cam.zoomTarget = Math.min(this.cam.zoomTarget, 4);
+    this.hud.setPrompt(`across in the ${to.spec.label} · <b>E</b> at the way in crosses back · <b>E</b> anywhere else steps out`);
   }
 
   /** Step into a ship's room, at its entry. The seat inside is not there yet: E again steps out. */

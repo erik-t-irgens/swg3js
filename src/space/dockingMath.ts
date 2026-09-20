@@ -682,3 +682,154 @@ export class LaneClaims {
     return this.held.size;
   }
 }
+
+// ---------------------------------------------------------------------------------------------------
+// One ship clamped onto another
+//
+// A station's lanes are the client's own; nothing of this is. The client has no ship-to-ship docking at
+// all -- no hardpoint names it, no table holds it, and the one `canDock` string in the executable is
+// read by nothing the archives carry -- so every rule and every number below is ours, and each says so.
+//
+// A clamped ship is not simulated in the carrier's frame: it is written to a pose in that frame before
+// every step and ghosted, which is why it is the light form of carrying a ship. Everything here is pure
+// and fills objects the caller owns.
+
+/**
+ * INVENTED, every one of them: see the note above. Live through `__debug.dock({ clamp: { ... } })`,
+ * under `clamp` because the station's own numbers have an `ask` and a `settle` of their own.
+ * - `ask`: how near the clamp spot a ship may ask to be carried (m).
+ * - `carrier`: how many times the asking ship's longest side the carrier's must be. Two, so a fighter
+ *   rides a freighter and nothing rides its own size.
+ * - `slow`: the fastest the asking ship may be going when it asks (m/s), so a clamp is a manoeuvre
+ *   rather than a collision.
+ * - `settle`: how long the ease onto the clamp spot takes (s).
+ * - `gap`: how far the carried hull's belly stands off the carrier's skin (m). It is a clamp, not a
+ *   landing: the gap is what the arms would be.
+ * - `clear`: how many of the carried ship's own radii clear of the carrier's it must be before its
+ *   colliders come back, so an undock never ends with the two wedged together.
+ * - `push`: how fast an undock leaves along the carrier's own up (m/s), on top of the carrier's motion.
+ * - `cross`: how near the room's own way in a walker must stand for the crossing to be offered (m).
+ * - `lapse`: how long a request to another player's pilot stands before it lapses (s of flying: the
+ *   clock is the step's, so it stops while the menu that answers the request is open).
+ * - `lead`: how much of a step ahead the carrier's pose is read at (1 is a whole step, 0 none). The
+ *   clamp is written before the carrier has stepped, so without this the carried hull would ride a step
+ *   behind the hull it is on -- a constant few metres back at cruising speed, and a visible swing in a
+ *   turn. `__debug.dock({ clamp: { lead: 0 } })` turns it off to compare.
+ */
+export const CLAMP_TUNE = {
+  ask: 50,
+  carrier: 2,
+  slow: 25,
+  settle: 1.5,
+  gap: 1.5,
+  clear: 1.5,
+  push: 6,
+  cross: 6,
+  lapse: 20,
+  lead: 1,
+};
+
+/** A model's box as the garage keeps one: two corners, in either order (a mesh's BOX chunk holds the larger first). */
+export interface BoundsLike {
+  readonly min: readonly number[];
+  readonly max: readonly number[];
+}
+
+/** How far a box reaches along an axis. Which corner holds the larger value is never trusted. */
+export function extent(b: BoundsLike, axis: number): number {
+  return Math.abs((b.max[axis] ?? 0) - (b.min[axis] ?? 0));
+}
+
+/** The lower of a box's two corners along an axis, whichever corner that is. */
+export function lowSide(b: BoundsLike, axis: number): number {
+  return Math.min(b.min[axis] ?? 0, b.max[axis] ?? 0);
+}
+
+/** The higher of a box's two corners along an axis. */
+export function highSide(b: BoundsLike, axis: number): number {
+  return Math.max(b.min[axis] ?? 0, b.max[axis] ?? 0);
+}
+
+/** A box's longest side: what "how big is this hull" means here. */
+export function hullLength(b: BoundsLike): number {
+  return Math.max(extent(b, 0), extent(b, 1), extent(b, 2));
+}
+
+/**
+ * Whether a hull is big enough to carry another: its longest side at least `carrier` times the other's.
+ * Ours, and the one rule that decides what may be a carrier at all.
+ */
+export function carrierEnough(carrier: BoundsLike, ship: BoundsLike, tune = CLAMP_TUNE): boolean {
+  const s = hullLength(ship);
+  return s > 1e-3 && hullLength(carrier) >= s * tune.carrier;
+}
+
+/**
+ * Where a clamped ship rests, in the carrier's own frame: over the middle of the carrier's box, with
+ * its own belly `gap` above the top of that box. The box's top is always outside the hull, so this is
+ * the spot before anything has looked at the skin; `clampOnSkin` lowers it onto what a ray down finds.
+ */
+export function clampLocal(carrier: BoundsLike, ship: BoundsLike, out: V3, tune = CLAMP_TUNE): V3 {
+  out.x = (lowSide(carrier, 0) + highSide(carrier, 0)) / 2;
+  out.z = (lowSide(carrier, 2) + highSide(carrier, 2)) / 2;
+  out.y = highSide(carrier, 1) + tune.gap - lowSide(ship, 1);
+  return out;
+}
+
+/**
+ * The height of the clamp spot once a ray straight down the carrier's back has found its skin at
+ * `hitY` (in the carrier's frame): the carried ship's belly `gap` above it. A spine or a mast can
+ * stand well above the deck the ray finds, so this is only ever used with the ray's own answer.
+ */
+export function clampOnSkin(hitY: number, ship: BoundsLike, tune = CLAMP_TUNE): number {
+  return hitY + tune.gap - lowSide(ship, 1);
+}
+
+/** Whether a ship that has let go is far enough off the carrier to be given its colliders back. */
+export function clampClear(shipPos: V3, carrierPos: V3, shipRadius: number, carrierRadius: number, tune = CLAMP_TUNE): boolean {
+  const dx = shipPos.x - carrierPos.x;
+  const dy = shipPos.y - carrierPos.y;
+  const dz = shipPos.z - carrierPos.z;
+  return Math.hypot(dx, dy, dz) > carrierRadius + shipRadius * tune.clear;
+}
+
+/**
+ * Whether a walker standing at `at` in a hull's frame is at the room's own way in, which is where a
+ * crossing to the other ship is offered.
+ */
+export function atTheDoor(at: V3, entry: V3, tune = CLAMP_TUNE): boolean {
+  return Math.hypot(at.x - entry.x, at.y - entry.y, at.z - entry.z) <= tune.cross;
+}
+
+/**
+ * A carrier's pose `lead` steps on from where it is and what it is doing, into `outPos`/`outQ`: what a
+ * clamped hull is written against. The clamp is written before the carrier has taken its own step, so
+ * without this the carried hull rides a step behind it. `lead` 0 gives the pose as it stands.
+ */
+export function leadPose(pos: V3, q: Q4, linvel: V3, angvel: V3, dt: number, lead: number, outPos: V3, outQ: Q4): void {
+  const t = dt * lead;
+  outPos.x = pos.x + linvel.x * t;
+  outPos.y = pos.y + linvel.y * t;
+  outPos.z = pos.z + linvel.z * t;
+  // The first-order advance of a turn by an angular velocity: q + (dt/2) * omega * q, normalised.
+  const h = t / 2;
+  const wx = angvel.x * h;
+  const wy = angvel.y * h;
+  const wz = angvel.z * h;
+  const x = q.x + (wy * q.z - wz * q.y + q.w * wx);
+  const y = q.y + (wz * q.x - wx * q.z + q.w * wy);
+  const z = q.z + (wx * q.y - wy * q.x + q.w * wz);
+  const w = q.w - (wx * q.x + wy * q.y + wz * q.z);
+  const l = Math.hypot(x, y, z, w);
+  if (l < 1e-9) {
+    outQ.x = q.x;
+    outQ.y = q.y;
+    outQ.z = q.z;
+    outQ.w = q.w;
+    return;
+  }
+  outQ.x = x / l;
+  outQ.y = y / l;
+  outQ.z = z / l;
+  outQ.w = w / l;
+}

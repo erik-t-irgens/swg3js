@@ -13,21 +13,32 @@
 import * as THREE from 'three';
 import type { PlacedObject } from '../world/layoutStream.ts';
 import type { SpacePack } from './spaceData.ts';
+import type { Physics } from '../core/physics.ts';
 import type { DriveInput, Vehicle } from '../vehicles/vehicle.ts';
+import { probeSurface } from '../vehicles/surfaceRoom.ts';
 import {
+  CLAMP_TUNE,
   DOCK_FACE,
   DOCK_TUNE,
   LaneClaims,
   approachRun,
+  atTheDoor,
+  carrierEnough,
+  clampClear,
+  clampLocal,
+  clampOnSkin,
   dockPose,
   exitRun,
   flownBy,
   laneCruise,
   laneDrive,
   lanesOf,
+  leadPose,
+  lowSide,
   newLaneDrive,
   reached,
   settleEase,
+  type BoundsLike,
   type LanePlan,
   type LaneRun,
 } from './dockingMath.ts';
@@ -40,6 +51,10 @@ export interface DockWorld {
   readonly planet: { readonly space?: string };
   readonly spaceData: SpacePack | null;
   readonly placedObjects: readonly PlacedObject[];
+  /** Every hull in this world: where a carrier to clamp onto is looked for. */
+  readonly vehicles: readonly Vehicle[];
+  /** The world's own physics, for the one ray that lowers a clamp spot onto a carrier's skin. */
+  readonly physics: Physics;
   dockEffect(part: DockPart, x: number, y: number, z: number): boolean;
 }
 
@@ -64,6 +79,8 @@ const ONE = new THREE.Vector3(1, 1, 1);
 export class Docking {
   /** Who holds which lane. Local today, a server's answer later; the shape does not change. */
   readonly claims = new LaneClaims();
+  /** One ship carried on another's hull: the same row asks for it, and the same step writes its pose. */
+  readonly clamp: ShipClamp;
   phase: DockPhase = 'idle';
   /** What the menu says under the row, and what a break-off left behind. */
   note = '';
@@ -114,6 +131,7 @@ export class Docking {
 
   constructor(world: DockWorld) {
     this.world = world;
+    this.clamp = new ShipClamp(world);
   }
 
   /** In a space zone: everything here is for space, and a planet's structures have no lanes. */
@@ -126,8 +144,15 @@ export class Docking {
     return this.phase === 'idle' ? null : this.ship;
   }
 
-  /** Whether this hull is held at a dock (the jump and the crossings ask, and refuse). */
+  /**
+   * Whether this hull is held at a dock, or clamped onto another ship (the jump and the crossings ask,
+   * and refuse). A carried hull is not its pilot's to take anywhere until it has let go.
+   */
   docked(ship: Vehicle | null): boolean {
+    // Both hulls of a clamp, not just the one being carried: a carrier flying off with a ship on its
+    // back would take it through a zone change nothing carries it across, and the ship would simply
+    // vanish when the old world's vehicles went. Carrying two ships across is its own piece of work.
+    if (this.clamp.carrying(ship) || this.clamp.carries(ship)) return true;
     return !!ship && ship === this.ship && (this.phase === 'settle' || this.phase === 'repair' || this.phase === 'docked');
   }
 
@@ -231,6 +256,11 @@ export class Docking {
 
   /** The row the ship menu shows: what the button says, why it cannot be pressed, and what is happening. */
   menuRow(ship: Vehicle | null, role: 'pilot' | 'passenger', inSpace: boolean): { label: string; why: string | null; note: string | null } {
+    // A ship already carried on another's hull, or a request from another player: the clamp has the row,
+    // since there is nothing about a station this pilot could do until the hull is theirs again. A
+    // carrier merely standing near is offered further down, where a station's own lane always wins.
+    const carried = this.clamp.row(ship, role);
+    if (carried && (this.phase === 'idle' || ship !== this.ship)) return carried;
     if (this.phase !== 'idle' && ship === this.ship) {
       if (this.phase === 'approach') return { label: 'Break off', why: role === 'pilot' ? null : "the pilot's call", note: this.note };
       if (this.phase === 'settle') return { label: 'Launch', why: 'coming alongside', note: this.note };
@@ -243,22 +273,35 @@ export class Docking {
     if (role !== 'pilot') return { label: 'Dock', why: "the pilot's call", note: null };
     if (ship.held || ship.holding) return { label: 'Dock', why: 'the ship is not yours to fly just now', note: null };
     if (ship.landed) return { label: 'Dock', why: 'lift off first', note: null };
+    // A carrier within reach: offered wherever a station has nothing, and in space alone. A hull
+    // clamped onto another is held out of its own flight entirely, which over ground would mean no
+    // crash, no wings and no landing, so a planet is not where one ship rides another.
+    const onto = this.clamp.offerRow(ship, role);
     // Nothing in the zone to dock at is not the same as nothing near: a pack written before the lanes
     // were converted carries none at all, and two of the systems the game shipped have none either.
     if (!this.list().length) {
+      if (onto) return onto;
       const old = (this.world.spaceData?.version ?? 0) < 3;
       return { label: 'Dock', why: old ? 'this system\'s pack is older than docking: convert it again' : 'nothing in this system has a dock', note: null };
     }
     const near = this.offer(ship);
-    if (!near) return { label: 'Dock', why: `no station within ${Math.round(DOCK_TUNE.ask)} m`, note: this.note || null };
+    if (!near) return onto ?? { label: 'Dock', why: `no station within ${Math.round(DOCK_TUNE.ask)} m`, note: this.note || null };
     if (this.phase !== 'idle') return { label: 'Dock', why: 'another ship is on the lane', note: null };
-    if (!near.lane) return { label: 'Dock', why: near.why, note: this.note || null };
+    if (!near.lane) return onto ?? { label: 'Dock', why: near.why, note: this.note || null };
     return { label: `Dock at ${near.target.label}`, why: null, note: this.note || null };
   }
 
   /** The menu's Dock or Launch button: whichever this ship can do now. */
   act(ship: Vehicle | null): string {
     if (!ship) return 'not in a ship';
+    // A clamp answers first where it has an answer: a request from another player, an undock, or a
+    // carrier in reach. It returns null when the press is not its own. A station's own lane wins over a
+    // carrier standing near, so the last of those is only offered where the station has nothing.
+    const lane = this.phase === 'idle' && this.inSpace ? this.offer(ship)?.lane ?? null : null;
+    // A clamp is only ever started in space, as its row is only offered there; an undock and an answer
+    // to another player are not gated that way, so a hull carried into a planet's sky still lets go.
+    const onto = this.clamp.act(this.phase === 'idle' || ship !== this.ship ? ship : null, this.inSpace && !lane);
+    if (onto !== null) return onto;
     if (ship === this.ship && (this.phase === 'approach' || this.phase === 'launch')) {
       this.breakOff('broken off by the pilot');
       return this.note;
@@ -363,6 +406,7 @@ export class Docking {
    */
   leave(): void {
     if (this.ship) this.breakOff('the zone was left');
+    this.clamp.leave();
     this.claims.clear();
     this.candidates = [];
     this.candidatesFor = null;
@@ -390,6 +434,10 @@ export class Docking {
    * own vehicle pass, so `__debug.advance` steps a dock as the loop does.
    */
   step(pilot: Vehicle | null, dt: number, drive: DriveInput | null): DriveInput | null {
+    // A clamped hull is written to its pose in the carrier's frame before anything has stepped, whether
+    // or not a station dock is running, and the pilot's own drive is passed through untouched (the hold
+    // is what stops the hull from flying, so nothing has to take the controls away).
+    this.clamp.step(dt);
     if (this.phase === 'idle') return drive;
     // A different pack under a running dock is a travel: an identity compare, so this costs nothing a
     // frame, and the hull being flown belongs to the zone that has gone.
@@ -523,13 +571,24 @@ export class Docking {
     return out.set(p.x, p.y, p.z).applyMatrix4(target.frame);
   }
 
-  /** Every invented number, live: `__debug.dock({ laneSpeed: 60 })`, `__debug.dock({ face: 'lane' })`. */
-  tune(patch: Partial<typeof DOCK_TUNE> & { face?: typeof DOCK_FACE.rule } = {}): Record<string, unknown> {
+  /**
+   * Every invented number, live: `__debug.dock({ laneSpeed: 60 })`, `__debug.dock({ face: 'lane' })`,
+   * `__debug.dock({ clamp: { gap: 3 } })`. A station's numbers and a clamp's share the one call, and the
+   * clamp's are set under `clamp`, which is the one form to give the owner: two of the names are in both
+   * (`ask`, `settle`), and only `clamp` says which is meant. A name that is the clamp's alone is taken at
+   * the top level as well, so a console that reaches for `{ gap: 3 }` is not simply ignored.
+   */
+  tune(patch: Partial<typeof DOCK_TUNE> & { face?: typeof DOCK_FACE.rule; clamp?: Partial<typeof CLAMP_TUNE>; allow?: boolean } = {}): Record<string, unknown> {
     for (const k of Object.keys(DOCK_TUNE) as (keyof typeof DOCK_TUNE)[]) {
       const n = patch[k];
       if (typeof n === 'number' && Number.isFinite(n)) DOCK_TUNE[k] = n;
     }
+    for (const k of Object.keys(CLAMP_TUNE) as (keyof typeof CLAMP_TUNE)[]) {
+      const n = (patch.clamp?.[k] ?? (k in DOCK_TUNE ? undefined : (patch as Record<string, unknown>)[k])) as number | undefined;
+      if (typeof n === 'number' && Number.isFinite(n)) CLAMP_TUNE[k] = n;
+    }
     if (patch.face === 'auto' || patch.face === 'hardpoint' || patch.face === 'lane') DOCK_FACE.rule = patch.face;
+    if (patch.allow !== undefined) this.clamp.answer(!!patch.allow);
     return this.report();
   }
 
@@ -558,6 +617,602 @@ export class Docking {
       targets: this.list().map((c) => ({ at: c.label, model: c.object.model, lanes: c.lanes.map((l) => ({ lane: l.lane, in: l.in.map((w) => w.points.length), out: l.out.map((w) => w.points.length), radius: n2(l.radius), bare: l.bare })) })),
       face: DOCK_FACE.rule,
       tune: { ...DOCK_TUNE },
+      clamp: this.clamp.report(),
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------------------------------
+// One ship clamped onto another
+//
+// A clamped ship is written to a pose in the carrier's frame before every step and ghosted. Nothing of
+// it is simulated in that frame: the carrier's pilot flies both hulls because only one of them is
+// flown at all, and the ship being carried answers nothing but Undock. The crew of either ship ride
+// along untouched, because a ship's rooms are already drawn from its own live matrix, which for the
+// carried hull is now the carrier's matrix times the clamp pose.
+//
+// The whole of it is ours: see the note at the foot of `dockingMath.ts`.
+
+/** What a clamp calls the thing it is holding to: a hull in this world, or another player's ship. */
+export type ClampOn = { kind: 'ship'; ship: Vehicle } | { kind: 'peer'; id: number };
+
+/** The directed messages two browsers pass about a clamp. */
+export type ClampWord = 'dock' | 'allow' | 'refuse' | 'undock';
+
+/** What a clamp needs of the other players: where their ship stands, how big it is, and who they are. */
+export interface ClampPeers {
+  /** Every peer in this world who is on a ship, filled into `out` (which is cleared first). */
+  shipPeers(out: number[]): number[];
+  /** The pose and velocity of the ship peer `id` is on; false when they are on none, or are elsewhere. */
+  vehiclePose(id: number, pos: THREE.Vector3, quat: THREE.Quaternion, vel: THREE.Vector3): boolean;
+  /** That ship's name, box and bounding radius; null when the picture of it is not in yet. */
+  vehicleOf(id: number): { label: string; bounds: BoundsLike; radius: number } | null;
+  /** What to call the player, for the rows. */
+  peerName(id: number): string;
+}
+
+/** How a clamp speaks to one other player. Local play leaves it null and nothing is ever sent. */
+export interface ClampLink {
+  /** This browser's own id on the relay; 0 while it is offline. */
+  id(): number;
+  send(to: number, word: ClampWord): void;
+}
+
+/** A hull being carried, and where it rests. */
+interface Carried {
+  ship: Vehicle;
+  on: ClampOn;
+  label: string;
+  /** The clamp pose in the carrier's frame. */
+  readonly local: THREE.Vector3;
+  readonly quat: THREE.Quaternion;
+  /** Where the settle eases from, in that same frame. */
+  readonly fromPos: THREE.Vector3;
+  readonly fromQuat: THREE.Quaternion;
+  settleLeft: number;
+}
+
+const CLAMP_UP = new THREE.Vector3(0, 1, 0);
+const CLAMP_ONE = new THREE.Vector3(1, 1, 1);
+const STILL_V = new THREE.Vector3();
+
+export class ShipClamp {
+  /** The other players, for a clamp onto their ship; null in a browser playing alone. */
+  peers: ClampPeers | null = null;
+  /** The way to one other player; null offline. */
+  link: ClampLink | null = null;
+  /** What the row says under itself, and what the last answer was. */
+  note = '';
+  private carried: Carried | null = null;
+  /** A hull let go of, still ghosted until it is clear of the carrier it was on. */
+  private letting: { ship: Vehicle; on: ClampOn } | null = null;
+  /** A request to another player's pilot, waiting for their answer, and the hull it was asked for. */
+  private waiting: { to: number; left: number; ship: Vehicle } | null = null;
+  /** A request from another player, waiting for this pilot's answer, and the hull they asked for room on. */
+  private asked: { from: number; name: string; left: number; ship: Vehicle } | null = null;
+  /**
+   * Each peer this pilot has let dock, and the hull they were let onto. It is the only thing this
+   * browser knows of a peer's ship riding its own: their clamp is theirs, so the grant stands as the
+   * record of it until they say they have let go, or they or the hull go away.
+   */
+  private readonly allowed = new Map<number, Vehicle>();
+  /** Each pair of hulls' clamp spot, worked out once: the carrier's model and the carried one's. */
+  private readonly spots = new Map<string, THREE.Vector3>();
+  /** How many times the ray down a carrier's back found nothing, so the box's top was used and not kept. */
+  private missed = 0;
+  private readonly frame = new THREE.Matrix4();
+  private readonly framePos = new THREE.Vector3();
+  private readonly frameQ = new THREE.Quaternion();
+  private readonly frameVel = new THREE.Vector3();
+  private readonly leadPos = { x: 0, y: 0, z: 0 };
+  private readonly leadQ = { x: 0, y: 0, z: 0, w: 1 };
+  private readonly holdPos = new THREE.Vector3();
+  private readonly holdQuat = new THREE.Quaternion();
+  private readonly spot = new THREE.Vector3();
+  private readonly world: DockWorld;
+  private readonly peerIds: number[] = [];
+  private readonly scratch = new THREE.Vector3();
+  private readonly scratch2 = new THREE.Vector3();
+  private readonly scratchQ = new THREE.Quaternion();
+  private readonly scratchScale = new THREE.Vector3();
+  private readonly inverse = new THREE.Matrix4();
+  private readonly rel = new THREE.Matrix4();
+  private readonly relPos = new THREE.Vector3();
+  private readonly relQ = new THREE.Quaternion();
+
+  constructor(world: DockWorld) {
+    this.world = world;
+  }
+
+  /** The hull being carried, or being let go of; null when nothing is. */
+  get busy(): Vehicle | null {
+    return this.carried?.ship ?? this.letting?.ship ?? null;
+  }
+
+  /** Whether this hull is clamped onto something: a jump, a crossing and a station dock all refuse while it is. */
+  carrying(ship: Vehicle | null): boolean {
+    return !!ship && this.carried?.ship === ship;
+  }
+
+  /**
+   * Whether this hull has something clamped onto it: a hull in this world, or another player's ship
+   * this pilot has let on (the grant is all this browser has of theirs). A carrier is refused the jump,
+   * both crossings and the landing for the same reason the hull it carries is.
+   */
+  carries(ship: Vehicle | null): boolean {
+    if (!ship) return false;
+    const on = this.carried?.on;
+    if (on && on.kind === 'ship' && on.ship === ship) return true;
+    if (this.allowed.size) for (const v of this.allowed.values()) if (v === ship) return true;
+    return false;
+  }
+
+  /** Whether a hull in this world is clamped onto this one, which is the only pair a crossing is offered for. */
+  private carryingOn(ship: Vehicle): boolean {
+    const on = this.carried?.on;
+    return !!on && on.kind === 'ship' && on.ship === ship;
+  }
+
+  /**
+   * The other ship a walker aboard `ship` may cross into, when the two are clamped together, both have
+   * rooms, and the walker stands at the room's own way in. Both hulls must be in this world: another
+   * player's rooms are not simulated here, so there is nothing to step into.
+   */
+  crossing(ship: Vehicle, at: THREE.Vector3): { to: Vehicle; label: string } | null {
+    const c = this.carried;
+    if (!c || c.settleLeft > 0) return null;
+    const other = c.ship === ship ? (c.on.kind === 'ship' ? c.on.ship : null) : this.carryingOn(ship) ? c.ship : null;
+    if (!other || other.disposed || !other.interior || !ship.interior) return null;
+    if (!atTheDoor(at, ship.interior.entry, CLAMP_TUNE)) return null;
+    return { to: other, label: other.spec.label };
+  }
+
+  /**
+   * The row while the clamp is doing something: carried, coming alongside, clearing the hull, waiting
+   * for another player's answer, or asked by one. Null when it is doing none of those, and the station's
+   * own lanes have the row.
+   */
+  row(ship: Vehicle | null, role: 'pilot' | 'passenger'): { label: string; why: string | null; note: string | null } | null {
+    // A request from another player comes before anything about this pilot's own flight: it is theirs to answer.
+    const asked = this.asked;
+    if (asked && ship === asked.ship) return { label: `Let ${asked.name} dock`, why: role === 'pilot' ? null : "the pilot's call", note: `${Math.ceil(asked.left)} s of flying to answer · __debug.dock({ allow: false }) turns them away` };
+    if (!ship) return null;
+    const c = this.carried;
+    if (c?.ship === ship) {
+      if (c.settleLeft > 0) return { label: 'Undock', why: 'coming alongside', note: this.note || null };
+      return { label: `Undock from ${c.label}`, why: role === 'pilot' ? null : "the pilot's call", note: this.note || null };
+    }
+    if (this.letting?.ship === ship) return { label: 'Dock', why: 'still clearing the hull', note: this.note || null };
+    // Only for the hull the question was asked for: a pilot who stepped into another ship meanwhile is
+    // not kept from a station's lane by a request that is not about the hull they are flying.
+    if (this.waiting?.ship === ship) return { label: 'Dock', why: 'waiting for their answer', note: this.note || null };
+    return null;
+  }
+
+  /**
+   * The row where a carrier is within reach and nothing else is on offer. A station's own lane always
+   * wins, so this is only ever asked once the station has said it has nothing.
+   */
+  offerRow(ship: Vehicle | null, role: 'pilot' | 'passenger'): { label: string; why: string | null; note: string | null } | null {
+    if (!ship) return null;
+    const near = this.offer(ship);
+    if (!near) return null;
+    if (role !== 'pilot') return { label: 'Dock', why: "the pilot's call", note: null };
+    return { label: `Dock onto ${near.label}`, why: this.refusal(ship), note: this.note || null };
+  }
+
+  /**
+   * The row pressed. Null when the clamp has nothing to do with this press, so the station's dock takes
+   * it. `mayStart` is false where a station lane is on offer, which always wins over a carrier near by.
+   */
+  act(ship: Vehicle | null, mayStart = true): string | null {
+    // A null ship is the caller saying the press is the station's, not the clamp's: nothing here may
+    // answer it, or a Launch would grant a peer's request and leave the ship where it stood.
+    if (!ship) return null;
+    if (this.asked && this.asked.ship === ship) return this.answer(true);
+    if (this.carried?.ship === ship) return this.undock();
+    if (this.letting?.ship === ship) return (this.note = 'still clearing the hull');
+    if (this.waiting?.ship === ship) return (this.note = 'waiting for their answer');
+    return mayStart && this.offer(ship) ? this.dock(ship) : null;
+  }
+
+  /** Let the asking player dock, or turn them away. */
+  answer(yes: boolean): string {
+    const asked = this.asked;
+    if (!asked) return (this.note = 'nobody has asked');
+    this.asked = null;
+    if (yes && asked.ship.disposed) {
+      this.link?.send(asked.from, 'refuse');
+      return (this.note = `the hull ${asked.name} asked for is gone`);
+    }
+    this.link?.send(asked.from, yes ? 'allow' : 'refuse');
+    // The grant is the record: this browser never sees their clamp, so it is what says the hull is
+    // carrying something until they let go, or they or the hull go away.
+    if (yes) this.allowed.set(asked.from, asked.ship);
+    return (this.note = yes ? `${asked.name} may dock` : `turned ${asked.name} away`);
+  }
+
+  /** Why this hull cannot be clamped onto anything just now; null when it can. */
+  private refusal(ship: Vehicle): string | null {
+    if (ship.disposed) return 'the ship is gone';
+    if (ship.held) return 'the jump has the ship';
+    if (ship.landed) return 'lift off first';
+    if (ship.holding) return 'something else has the ship';
+    if (Math.abs(ship.speed) > CLAMP_TUNE.slow) return `slow to ${Math.round(CLAMP_TUNE.slow)} m/s first`;
+    return null;
+  }
+
+  /** Ask to be carried: onto a hull in this world at once, onto another player's ship by their leave. */
+  dock(ship: Vehicle): string {
+    if (this.carried || this.letting || this.waiting) return (this.note = 'already docking');
+    const why = this.refusal(ship);
+    if (why) return (this.note = why);
+    const near = this.offer(ship);
+    if (!near) return (this.note = `nothing within ${Math.round(CLAMP_TUNE.ask)} m big enough to carry this ship`);
+    if (near.on.kind === 'peer') {
+      const link = this.link;
+      if (!link || !link.id()) return (this.note = 'their ship is not ours to dock onto while offline');
+      link.send(near.on.id, 'dock');
+      this.waiting = { to: near.on.id, left: CLAMP_TUNE.lapse, ship };
+      return (this.note = `asked ${near.label} for room`);
+    }
+    return this.begin(ship, near.on, near.label);
+  }
+
+  /** The ease onto the clamp spot begins: from where the hull stands now, in the carrier's frame. */
+  private begin(ship: Vehicle, on: ClampOn, label: string): string {
+    if (!this.carrierFrame(on, 0, 0)) return (this.note = 'the ship to dock onto is gone');
+    if (!this.spotFor(on, ship, this.spot)) return (this.note = 'nowhere on that hull to rest');
+    this.inverse.copy(this.frame).invert();
+    const c: Carried = {
+      ship,
+      on,
+      label,
+      local: this.spot.clone(),
+      quat: new THREE.Quaternion(),
+      fromPos: ship.pos.clone().applyMatrix4(this.inverse),
+      fromQuat: new THREE.Quaternion(),
+      settleLeft: CLAMP_TUNE.settle,
+    };
+    this.frame.decompose(this.scratch, this.scratchQ, this.scratchScale);
+    ship.quaternion(this.holdQuat);
+    c.fromQuat.copy(this.scratchQ).invert().multiply(this.holdQuat);
+    this.carried = c;
+    // Nothing may ram a hull that cannot move out of the way, and the hull it rides is solid.
+    ship.setGhost(true);
+    return (this.note = `docking onto ${label}`);
+  }
+
+  /** Let go: the carrier's own motion, plus a push along its up, and solid again once it is clear. */
+  undock(): string {
+    const c = this.carried;
+    if (!c) return (this.note = 'not docked onto anything');
+    this.carried = null;
+    const ship = c.ship;
+    if (c.on.kind === 'peer') this.link?.send(c.on.id, 'undock');
+    if (ship.disposed) return (this.note = 'the ship is gone');
+    // The carrier's own velocity is what the hull was travelling at, and the push is along the carrier's
+    // up, so a ship let go of never drops through the hull it was riding. A carrier that has gone in the
+    // meantime leaves nothing to read: the hull is simply let go where it stands, and made solid at once.
+    if (!this.carrierFrame(c.on, 0, 0)) {
+      ship.release(null);
+      ship.setGhost(false);
+      return (this.note = 'the ship it was docked onto is gone');
+    }
+    this.scratch.copy(CLAMP_UP).applyQuaternion(this.frameQ).multiplyScalar(CLAMP_TUNE.push).add(this.frameVel);
+    ship.release(this.scratch);
+    this.letting = { ship, on: c.on };
+    return (this.note = `let go of ${c.label}`);
+  }
+
+  /**
+   * The step. Called once a step from the game's own vehicle pass, before any hull has moved, which is
+   * why the carrier's pose is read a step ahead (`leadPose`).
+   */
+  step(dt: number): void {
+    // A grant outlives nothing: the peer who was let on has gone or has left this world, or the hull
+    // they were let onto is not there any more. Otherwise a hull that was once ridden would be refused
+    // the jump for the rest of the session. The set is empty almost always, and is not walked then.
+    if (this.allowed.size) {
+      for (const [id, v] of this.allowed) if (v.disposed || !this.peers?.vehicleOf(id)) this.allowed.delete(id);
+    }
+    // Both clocks run on the step's own seconds, not the wall's, so they stop while a panel is open --
+    // which is the point: the ship menu is the only place a request can be answered, and the twenty
+    // seconds must not run out while the pilot is reading the row. They run again the moment it is shut.
+    const asked = this.asked;
+    if (asked) {
+      asked.left -= dt;
+      if (asked.ship.disposed) {
+        this.link?.send(asked.from, 'refuse');
+        this.asked = null;
+      } else if (asked.left <= 0) {
+        this.asked = null;
+        this.note = `${asked.name} waited long enough and was not answered`;
+      }
+    }
+    const waiting = this.waiting;
+    if (waiting) {
+      waiting.left -= dt;
+      if (waiting.ship.disposed) this.waiting = null;
+      else if (waiting.left <= 0) {
+        this.waiting = null;
+        this.note = 'no answer came';
+      }
+    }
+    const letting = this.letting;
+    if (letting) {
+      const ship = letting.ship;
+      if (ship.disposed) this.letting = null;
+      else if (!this.carrierFrame(letting.on, 0, 0)) {
+        ship.setGhost(false);
+        this.letting = null;
+      } else if (clampClear(ship.pos, this.framePos, ship.radius, this.carrierRadius(letting.on), CLAMP_TUNE)) {
+        ship.setGhost(false);
+        this.letting = null;
+        this.note = 'clear of the hull';
+      }
+    }
+    const c = this.carried;
+    if (!c) return;
+    const ship = c.ship;
+    if (ship.disposed) {
+      this.carried = null;
+      this.note = 'the ship is gone';
+      return;
+    }
+    // The hull being ridden has gone (blown up, put back in the garage, a zone left): let go before
+    // anything reads a body that is not there any more, and let the hull fall free where it stood.
+    if (!this.carrierFrame(c.on, dt, CLAMP_TUNE.lead)) {
+      this.carried = null;
+      ship.release(null);
+      ship.setGhost(false);
+      this.note = 'the ship it was docked onto is gone';
+      return;
+    }
+    if (c.settleLeft > 0) {
+      c.settleLeft = Math.max(0, c.settleLeft - dt);
+      const k = settleEase(CLAMP_TUNE.settle > 0 ? 1 - c.settleLeft / CLAMP_TUNE.settle : 1);
+      this.holdPos.lerpVectors(c.fromPos, c.local, k);
+      this.holdQuat.slerpQuaternions(c.fromQuat, c.quat, k);
+      if (c.settleLeft <= 0) this.note = `docked onto ${c.label}`;
+    } else {
+      this.holdPos.copy(c.local);
+      this.holdQuat.copy(c.quat);
+    }
+    // Which frame the hold is written in. For a hull in this world it is that hull's own drawn matrix,
+    // which every draw refreshes: the carried ship then rides it even on a frame this step does not run
+    // (a panel open, the map up), instead of being pinned to wherever the carrier stood when it last
+    // did. That matrix is a step behind the body, so the pose written in it is turned by the difference
+    // between it and the step-ahead pose, which puts the hull exactly where it belongs on a frame this
+    // does run. A peer's ship is a picture with no matrix of its own here, so that one keeps ours.
+    let live: THREE.Matrix4 | null = null;
+    if (c.on.kind === 'ship') {
+      // Its own matrix worked out from where it stands, rather than waited for: a tab with no frames in
+      // it (a driven one, `__debug.advance`) never draws, and the carried hull would ride a matrix left
+      // over from the last drawn frame. Parents and self only, so none of the hull's parts is walked.
+      c.on.ship.group.updateWorldMatrix(true, false);
+      live = c.on.ship.group.matrixWorld;
+    }
+    if (live) {
+      this.rel.copy(live).invert().multiply(this.frame);
+      this.rel.decompose(this.relPos, this.relQ, this.scratchScale);
+      this.holdPos.applyMatrix4(this.rel);
+      this.holdQuat.premultiply(this.relQ);
+      ship.hold(live, this.holdPos, this.holdQuat);
+    } else ship.hold(this.frame, this.holdPos, this.holdQuat);
+  }
+
+  /**
+   * The carrier's frame `lead` of a step on, into `this.frame` (and its pose and velocity into
+   * `framePos`, `frameQ`, `frameVel`). False when there is no carrier there any more.
+   */
+  private carrierFrame(on: ClampOn, dt: number, lead: number): boolean {
+    if (on.kind === 'ship') {
+      const v = on.ship;
+      if (v.disposed || !v.body.isValid()) return false;
+      this.framePos.copy(v.pos);
+      v.quaternion(this.frameQ);
+      const lv = v.body.linvel();
+      this.frameVel.set(lv.x, lv.y, lv.z);
+      const av = v.body.angvel();
+      this.scratch2.set(av.x, av.y, av.z);
+    } else {
+      const peers = this.peers;
+      if (!peers || !peers.vehiclePose(on.id, this.framePos, this.frameQ, this.frameVel)) return false;
+      // A peer's ship is a picture that glides between their messages: it has no turn rate of its own here.
+      this.scratch2.set(0, 0, 0);
+    }
+    if (lead > 0 && dt > 0) {
+      leadPose(this.framePos, this.frameQ, this.frameVel, this.scratch2, dt, lead, this.leadPos, this.leadQ);
+      this.framePos.set(this.leadPos.x, this.leadPos.y, this.leadPos.z);
+      this.frameQ.set(this.leadQ.x, this.leadQ.y, this.leadQ.z, this.leadQ.w);
+    }
+    this.frame.compose(this.framePos, this.frameQ, CLAMP_ONE);
+    return true;
+  }
+
+  private carrierRadius(on: ClampOn): number {
+    if (on.kind === 'ship') return on.ship.radius;
+    return this.peers?.vehicleOf(on.id)?.radius ?? 0;
+  }
+
+  private carrierBounds(on: ClampOn): BoundsLike | null {
+    if (on.kind === 'ship') return on.ship.spec.bounds;
+    return this.peers?.vehicleOf(on.id)?.bounds ?? null;
+  }
+
+  /**
+   * Where this ship rests on that carrier, in the carrier's frame, worked out once per pair of models.
+   * The box's top is the spot before anything has looked at the hull; a ray straight down the carrier's
+   * back then lowers it onto the skin, since a box's top is set by whatever stands highest on the hull
+   * and a ship left up there would ride a bridge tower's height above the deck. A peer's ship is a
+   * picture with no colliders, so that one keeps the box's top and says so.
+   */
+  private spotFor(on: ClampOn, ship: Vehicle, out: THREE.Vector3): boolean {
+    const bounds = this.carrierBounds(on);
+    if (!bounds) return false;
+    const key = `${on.kind === 'ship' ? on.ship.spec.id : `peer:${this.peers?.vehicleOf(on.id)?.label ?? on.id}`}|${ship.spec.id}`;
+    const kept = this.spots.get(key);
+    if (kept) {
+      out.copy(kept);
+      return true;
+    }
+    clampLocal(bounds, ship.spec.bounds, out, CLAMP_TUNE);
+    // A hull in this world is lowered onto its own skin, and the answer is only worth keeping when the
+    // ray found that skin: anything standing in the way (another hull parked there, a station), or a
+    // carrier whose colliders the query cannot see just then (ghosted in a jump), leaves the box's top,
+    // and keeping that would pin this pair of hulls a mast's height apart for the rest of the session.
+    // A peer's ship is a picture with no colliders here, so that one keeps the box's top and is kept.
+    if (on.kind === 'ship' && !this.lowerOntoSkin(on.ship, ship, bounds, out)) {
+      this.missed++;
+      return true;
+    }
+    this.spots.set(key, out.clone());
+    return true;
+  }
+
+  /** The ray down the carrier's back, in the world, and the hit brought back into the carrier's frame. */
+  private lowerOntoSkin(carrier: Vehicle, ship: Vehicle, bounds: BoundsLike, out: THREE.Vector3): boolean {
+    const physics = this.world.physics;
+    if (!physics || !carrier.body.isValid()) return false;
+    // The ray starts a metre over the spot and must reach the box's own floor: `out.y` carries the
+    // carried hull's belly offset, so a reach measured as the carrier's height alone stops short for a
+    // ship whose origin stands above its belly, and starts inside the carrier for one whose origin is
+    // below it (where a solid cast answers at the ray's own start).
+    const top = out.y + 1;
+    const reach = top - lowSide(bounds, 1) + 1;
+    this.scratch.set(out.x, top, out.z).applyMatrix4(this.frame);
+    this.scratch2.copy(CLAMP_UP).applyQuaternion(this.frameQ).negate();
+    const hit = probeSurface(physics, this.scratch, this.scratch2, reach, ship.body);
+    if (!hit || hit.body !== carrier.body) return false;
+    this.inverse.copy(this.frame).invert();
+    this.scratch.copy(hit.point).applyMatrix4(this.inverse);
+    out.y = clampOnSkin(this.scratch.y, ship.spec.bounds, CLAMP_TUNE);
+    return true;
+  }
+
+  /** The nearest hull big enough to carry this one, with its clamp spot within reach. */
+  private offer(ship: Vehicle): { on: ClampOn; label: string; distance: number } | null {
+    if (!ship.spec.ship || ship.disposed) return null;
+    let best: ClampOn | null = null;
+    let bestLabel = '';
+    let bestD = Infinity;
+    for (const v of this.world.vehicles) {
+      if (v === ship || v.disposed || v.autopilot || !v.spec.ship) continue;
+      if (!carrierEnough(v.spec.bounds, ship.spec.bounds, CLAMP_TUNE)) continue;
+      const d = ship.pos.distanceTo(v.pos) - v.radius;
+      if (d >= bestD) continue;
+      bestD = d;
+      best = { kind: 'ship', ship: v };
+      bestLabel = `the ${v.spec.label}`;
+    }
+    const peers = this.peers;
+    if (peers) {
+      for (const id of peers.shipPeers(this.peerIds)) {
+        const info = peers.vehicleOf(id);
+        if (!info || !carrierEnough(info.bounds, ship.spec.bounds, CLAMP_TUNE)) continue;
+        if (!peers.vehiclePose(id, this.scratch, this.scratchQ, STILL_V)) continue;
+        const d = ship.pos.distanceTo(this.scratch) - info.radius;
+        if (d >= bestD) continue;
+        bestD = d;
+        best = { kind: 'peer', id };
+        bestLabel = `${peers.peerName(id)}'s ${info.label}`;
+      }
+    }
+    return best && bestD <= CLAMP_TUNE.ask ? { on: best, label: bestLabel, distance: bestD } : null;
+  }
+
+  /** A directed message from one other player. `ship` is the hull this browser is flying, or null. */
+  heard(from: number, word: ClampWord, ship: Vehicle | null): void {
+    if (word === 'dock') {
+      const name = this.peers?.peerName(from) ?? 'other ship';
+      // Turned away at once rather than left waiting: this pilot is in no ship, is being carried
+      // themselves, has already been asked, is waiting on an answer of their own, or is already
+      // carrying somebody. That last one matters most -- there is one clamp spot per pair of hulls,
+      // so two peers granted at once would be drawn inside one another.
+      if (!ship || this.carried || this.asked || this.waiting || this.allowed.size) {
+        this.link?.send(from, 'refuse');
+        return;
+      }
+      this.asked = { from, name, left: CLAMP_TUNE.lapse, ship };
+      this.note = `${name} asks to dock`;
+      return;
+    }
+    if (word === 'refuse') {
+      if (this.waiting?.to === from) {
+        this.waiting = null;
+        this.note = 'they said no';
+      }
+      return;
+    }
+    if (word === 'allow') {
+      const w = this.waiting;
+      // Their answer may be twenty seconds old, and nothing about this hull was looked at again when it
+      // was asked for. So everything the press itself checked is checked again here -- the ship is
+      // still ours to clamp, it is still slow, and their hull is still the one within reach -- and an
+      // answer that no longer fits is told at once that the clamp is off, or a ship would be eased on
+      // from kilometres away at any speed it happened to be doing.
+      if (!w || w.to !== from || !ship || w.ship !== ship) {
+        this.link?.send(from, 'undock');
+        return;
+      }
+      this.waiting = null;
+      const why = this.refusal(ship);
+      const near = this.offer(ship);
+      if (why || !near || near.on.kind !== 'peer' || near.on.id !== from) {
+        this.link?.send(from, 'undock');
+        this.note = why ?? 'too far off their hull by the time they answered';
+        return;
+      }
+      this.begin(ship, near.on, near.label);
+      return;
+    }
+    // 'undock': the carrier's pilot has nothing to give back here; the ship that was on it lets itself go.
+    this.allowed.delete(from);
+    if (this.carried?.on.kind === 'peer' && this.carried.on.id === from) this.undock();
+  }
+
+  /**
+   * What goes in the relay state while this hull is being carried: whose ship it is on, and the pose on
+   * it. Only a hull carried on another player's ship is named: a hull carried on one standing in this
+   * world alone is nobody's, and the others have no picture of it to hang this one from -- they are
+   * sent where it is in the world, as they are for any ship, and that is where they draw it.
+   */
+  wire(ship: Vehicle | null): { to: number; p: [number, number, number]; q: [number, number, number, number] } | null {
+    const c = this.carried;
+    if (!c || c.ship !== ship || c.settleLeft > 0 || c.on.kind !== 'peer') return null;
+    const n3 = (n: number) => Number(n.toFixed(3));
+    return { to: c.on.id, p: [n3(c.local.x), n3(c.local.y), n3(c.local.z)], q: [n3(c.quat.x), n3(c.quat.y), n3(c.quat.z), n3(c.quat.w)] };
+  }
+
+  /** A zone left, or the game put down: whatever is held is let go and nothing is remembered. */
+  leave(): void {
+    if (this.carried) this.undock();
+    const letting = this.letting;
+    if (letting && !letting.ship.disposed) letting.ship.setGhost(false);
+    this.letting = null;
+    this.waiting = null;
+    this.asked = null;
+    this.allowed.clear();
+    this.spots.clear();
+  }
+
+  report(): Record<string, unknown> {
+    const n2 = (n: number) => Number(n.toFixed(2));
+    const c = this.carried;
+    return {
+      note: this.note,
+      carried: c ? { ship: c.ship.spec.id, on: c.on.kind, of: c.label, settling: n2(c.settleLeft), at: c.local.toArray().map(n2), held: c.ship.holding, ghosted: c.ship.ghosted } : null,
+      letting: this.letting ? this.letting.ship.spec.id : null,
+      waiting: this.waiting ? { to: this.waiting.to, left: n2(this.waiting.left) } : null,
+      asked: this.asked ? { from: this.asked.from, name: this.asked.name, left: n2(this.asked.left) } : null,
+      allowed: [...this.allowed.keys()],
+      carrying: [...this.allowed.values()].map((v) => v.spec.id),
+      spots: this.spots.size,
+      // The ray down a carrier's back that found nothing: the box's top was used and not kept, so the
+      // next press tries again. A count that climbs is the spot to look at when a ship rides too high.
+      missedSkin: this.missed,
+      tune: { ...CLAMP_TUNE },
     };
   }
 }
