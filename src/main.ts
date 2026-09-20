@@ -110,6 +110,7 @@ import { COMBAT_TUNE, CombatNet, tuneCombat } from './net/combatNet.ts';
 import type { Bolt } from './combat/bolts';
 import { applyAppearance, dress, packLook } from './player/look';
 import { RemotePlayers } from './net/remotePlayers';
+import { remoteBlades } from './net/remoteBlades.ts';
 import { danceOf, defaultEmotes, emoteChoices, FLOURISHES, isDanceClip, isFlourishClip, loadEmotes, loopsEmote, saveEmotes } from './core/emotes';
 import { HUD_DPR_RANGE, HUD_LINES_RANGE, HUD_SCALE_RANGE, loadSettings, type Settings } from './core/settings';
 import { deleteCharacter, loadCharacters, newCharacterId, upsertCharacter, type Appearance, type SavedCharacter } from './core/characters';
@@ -241,6 +242,8 @@ interface ShipCrossing {
   condition?: import('./space/shipCombat').CarriedCondition | null;
 }
 const tmp2 = new THREE.Vector3();
+/** Where a thrown blade is in the world, for the state that carries it; written once a message. */
+const thrownAt = new THREE.Vector3();
 /** Scratch for the gravity boots' look round for something to stand on: the ways looked and the best of them. */
 const bootScratch = [0, 1, 2, 3, 4, 5, 6, 7, 8].map(() => new THREE.Vector3());
 const bootDir: THREE.Vector3[] = [];
@@ -2892,7 +2895,7 @@ class App {
         const strength = typeof raw.bladeGlowStrength === 'number' ? raw.bladeGlowStrength : null;
         const eye = this.cam.camera.position;
         const list = createBladeList();
-        collectBlades(list, this.player.saberBlades, this.world.npcs.npcs, eye, this.world.mobiles?.live);
+        collectBlades(list, this.player.saberBlades, this.world.npcs.npcs, eye, remoteBlades.holders(this.world.mobiles?.live));
         const row = fx?.describe().passes.find((p) => p.id === 'bladeGlow') ?? null;
         const seen = pass?.lastBlades ?? null;
         const rect = pass?.lastRect ?? null;
@@ -3088,6 +3091,9 @@ class App {
     this.remotes.prepareVehicle = (roots) => this.world.vehiclePrepare(roots);
     // A peer's painted ship owns copies of its materials: out of the world's sets when they go (read at call time).
     this.remotes.forget = (m) => this.world.forgetMaterials(m);
+    // The other players' blades keep their renderers for the next peer; the ones over that go, and a
+    // disposed material must leave the portal renderer's set and the cascades' map with them.
+    remoteBlades.forget = (m) => this.world.forgetMaterials(m);
     // A new mobile prototype: the motion blur's shaders for its morph counts, after the world's own preparation.
     MobileAssets.for(import.meta.env.BASE_URL).alsoPrepare = (root) => this.postfx?.product<VelocityProduct>('velocity')?.prepareRoots([root]) ?? Promise.resolve();
     this.net.onJoin = (peer) => this.remotes.add(peer.id, peer.hello);
@@ -4324,7 +4330,7 @@ class App {
     // The ship this player flies (or last flew or stood out), with its components, droid and paint.
     const ship = this.helloShip();
     if (ship) this.helloShipId = ship.id;
-    const hello: Hello = { name: c?.name ?? 'someone', species: this.characterId, class: this.kit?.id ?? 'jedi', planet: this.world.planet?.id ?? '', zone: this.zone, look: c ? packLook(c.appearance, c.outfit ?? []) : undefined, held, ship };
+    const hello: Hello = { name: c?.name ?? 'someone', species: this.characterId, class: this.kit?.id ?? 'jedi', planet: this.world.planet?.id ?? '', zone: this.zone, look: c ? packLook(c.appearance, c.outfit ?? []) : undefined, held, ship, saber: this.player.bladeColor };
     // Who the session is about: every connection and every change of world goes through here, so this is
     // where the session learns which character is in play, where it is and what its record holds now.
     this.net.session.noteCharacter(c, { species: hello.species, class: hello.class, planet: hello.planet, zone: hello.zone });
@@ -4510,8 +4516,14 @@ class App {
     // peer would be handed a place a kilometre from the last one ten times a second, which their side
     // glides through as a teleport and hands to their motion blur as a screen-wide smear.
     const hidden = this.hyperspace.hiddenToPeers || this.ultraCruise.running;
+    // The blade when it is out of the hand: where it is in the world and how far it has spun, so the
+    // others draw it in the air rather than in a hand it is not in. Aboard, `thrown.pos` is in the
+    // hull's frame, as everything aboard is, and is carried into the world here.
+    const th = p.thrown.inFlight ? thrownAt.copy(p.thrown.pos) : null;
+    if (th && p.aboard) th.applyMatrix4(roomFrame(p.aboard));
+    const tb = th ? ([n2(th.x), n2(th.y), n2(th.z), n3(p.thrown.spin)] as [number, number, number, number]) : undefined;
     // One or the other, never both: the hull a passenger stands in is sent by whoever flies it.
-    this.net.sendState({ p: [n2(at.x), n2(at.y), n2(at.z)], h: n3(p.heading), s: p.mounted ? 'seated' : (rig?.describe().state ?? 'idle'), v: n2(Math.hypot(p.vel.x, p.vel.z)), m: !!p.mounted, sab: p.saberOn, q, ...(inHull ? { in: inHull } : { veh }), ...(hidden ? { j: 1 as const } : {}) });
+    this.net.sendState({ p: [n2(at.x), n2(at.y), n2(at.z)], h: n3(p.heading), s: p.mounted ? 'seated' : (rig?.describe().state ?? 'idle'), v: n2(Math.hypot(p.vel.x, p.vel.z)), m: !!p.mounted, sab: p.saberOn, q, ...(tb ? { tb } : {}), ...(inHull ? { in: inHull } : { veh }), ...(hidden ? { j: 1 as const } : {}) });
   }
 
   /** The wheel's slots from the rig's own emotes when none were kept yet, and the menu's Emotes page fed from it. */
@@ -5950,6 +5962,8 @@ class App {
     n = this.world.shipFx.glowBatches(out, n);
     n = this.effects.glowMeshes(out, n);
     n = this.player.glowCores(out, n);
+    // The other players' blades, which write no depth either.
+    n = remoteBlades.glowCores(out, n);
     // The fighters exist once a planet has loaded.
     if (this.world.npcs) n = this.world.npcs.glowCores(out, n);
     // The catalogue's people with a lightsaber (the dressed Jedi, Sith and Inquisitors).
@@ -6048,7 +6062,9 @@ class App {
       // The lit blades as drawn this frame (drawBlades and the fighters' step have run), and how
       // bright a surface near them can be from every other light; aboard, floors are the hull's.
       const blades = this.fxBlades;
-      collectBlades(blades, this.player.saberBlades, this.world.npcs.npcs, cam.position, this.world.mobiles?.live);
+      // The catalogue's people and the other players are gathered as one list, so the eight the glow
+      // pass keeps are the nearest eight whoever is holding them.
+      collectBlades(blades, this.player.saberBlades, this.world.npcs.npcs, cam.position, remoteBlades.holders(this.world.mobiles?.live));
       const lit = this.litSources;
       lit.torch = this.torchOn ? this.torch : null;
       lit.eye.copy(cam.position);
@@ -7764,6 +7780,13 @@ class App {
       if (this.breakFrames) throw new Error('debug: the frame is broken on purpose');
       // The blades are drawn from where the hands ended up this frame, so they never trail the pose.
       player.drawBlades(dt, this.cam.camera);
+      // The other players' blades, from where their hands ended up this frame as well (their figures
+      // were moved and posed in stepNet above). With the glow pass on they light the world through
+      // it, exactly as the player's do, and ask for no light at all. With it off they take a pooled
+      // flash only when one is standing dark: this draw is the last asker in the frame, so nothing
+      // the player's own blade, a fighter's glow or a ship's room lights asked for earlier loses one
+      // -- and equally, with a busy pool a peer's blade goes unlit rather than taking somebody's.
+      remoteBlades.draw(dt, this.cam.camera, this.bladeGlowOwnsLight() ? null : this.effects);
       const tRender = performance.now();
       this.drawFrame();
       stats.renderMs = performance.now() - tRender;
