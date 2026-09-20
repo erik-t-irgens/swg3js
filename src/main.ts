@@ -62,7 +62,9 @@ import { AppearanceUi } from './ui/appearanceUi';
 import { CharacterSelect } from './ui/characterSelect';
 import { CreatorBar } from './ui/creatorBar';
 import { Menu, keyName } from './ui/menu';
-import { ShipMenu, type ShipStatus } from './ui/shipMenu';
+import { ShipMenu, type ShipCruise, type ShipStatus } from './ui/shipMenu';
+import { Docking } from './space/docking';
+import { DOCK_TUNE } from './space/dockingMath';
 import { HyperspaceUi } from './ui/hyperspaceUi';
 import { Hyperspace } from './space/hyperspace';
 import { HyperspaceTunnel } from './space/hyperspaceTunnel';
@@ -266,6 +268,16 @@ class App {
   private readonly creatorBar: CreatorBar;
   private readonly menu: Menu;
   private readonly shipMenu: ShipMenu;
+  /**
+   * Docking at a station: the lane asked for from the ship menu, flown by its own autopilot. Made in
+   * the constructor beside the menu it belongs to, since the world it reads is made there first.
+   */
+  private readonly docking: Docking;
+  /**
+   * The ultra cruise, for the ship menu's own row. Whatever owns the cruise sets it; until something
+   * does, the row says the cruise is not built.
+   */
+  cruiseControl: ShipCruise | null = null;
   /** The System Map (the destinations of a jump) and the countdown line. */
   private readonly hyperspaceUi: HyperspaceUi;
   /** The jump: its countdown, its phases, and the hull it flies. */
@@ -539,7 +551,22 @@ class App {
     this.shipEdit.onTab = (id) => this.toggleSpawner(id as 'garage' | 'npcs');
     // A fit changed in the last 300 ms is written before the page goes.
     window.addEventListener('beforeunload', () => this.flushFits());
-    this.shipMenu = new ShipMenu(this.ui, { status: () => this.shipStatus(), goToSpace: () => void this.goToSpace(), land: () => void this.landShip(), eject: () => void this.eject(), hyperspace: () => this.hyperspaceButton() }, () => keyName(this.input.bindings.ship[0] ?? ''));
+    // Docking reads the world only (its pack, what it places and what its dock effects play), and is
+    // made before the menu that asks it for its row.
+    this.docking = new Docking(this.world);
+    this.shipMenu = new ShipMenu(
+      this.ui,
+      {
+        status: () => this.shipStatus(),
+        goToSpace: () => void this.goToSpace(),
+        land: () => void this.landShip(),
+        eject: () => void this.eject(),
+        hyperspace: () => this.hyperspaceButton(),
+        dock: () => this.dockButton(),
+        cruise: () => this.cruiseControl?.toggle(),
+      },
+      () => keyName(this.input.bindings.ship[0] ?? ''),
+    );
     this.shipMenu.onClose = () => this.toggleShipMenu();
     // The System Map and the jump. What these read is assigned above: this.ui (a field initialiser),
     // this.input, this.world, this.cam, this.player, this.scene (a field initialiser, where the tunnel
@@ -1960,6 +1987,25 @@ class App {
           at: this.player.worldPos.toArray().map((n) => Number(n.toFixed(2))),
           ...(isSurfaceRoom(room) ? room.report() : { tune: { ...SURFACE_ROOM } }),
         };
+      },
+      /**
+       * Docking at a station: `dock()` reports where it stands and every hull in the zone with lanes,
+       * `dock({ laneSpeed: 60 })` sets any of the invented numbers (DOCK_TUNE in space/dockingMath.ts:
+       * ask, laneSpeed, dockSpeed, gain, arrive, standOff, linkCos, linkMax, bank, settle, repair,
+       * sideCos, approachCos, nearLeg, flyBy, budget, faceCos) and `dock({ face: 'lane' })` chooses
+       * what a parked ship faces (auto, hardpoint, lane). `sideCos` and `approachCos` are the two
+       * bearings that decide whether a lane can be reached from where the ship stands without crossing
+       * the hull: at -1 both are off and the row offers a lane from anywhere, as it used to.
+       * `dock({ go: true })` asks for a lane in the ship flown, `{ go: false }` launches or breaks off.
+       * `__debug.advance` steps it, so a whole approach can be watched from a hidden tab.
+       */
+      dock: (opts: { go?: boolean; face?: 'auto' | 'hardpoint' | 'lane' } & Partial<typeof DOCK_TUNE> = {}) => {
+        const p = this.player;
+        const v = p.mounted ?? p.piloting ?? null;
+        const out = this.docking.tune(opts);
+        if (opts.go === true) return { asked: v ? this.docking.dock(v) : 'no ship is being flown', ...this.docking.report() };
+        if (opts.go === false) return { said: this.docking.act(v), ...this.docking.report() };
+        return out;
       },
       /**
        * The astromechs in their sockets: `droid({ shown: 0.4 })` sets the share of a droid's height shown over its socket
@@ -3499,6 +3545,7 @@ class App {
     const zone = spaceZoneOf(this.world.planet);
     // A destroyed ship crosses nowhere.
     if (!ship || ship.destroyed || !zone || this.traveling || this.spaceGate !== 'up') return;
+    if (this.refuseWhileDocked()) return;
     this.closePanels();
     await this.travel(zone, undefined, { def: ship.def!, speed: Math.max(60, ship.speed), height: 0, crew: this.crewRecord(), condition: this.conditionRecord(ship) });
   }
@@ -3508,6 +3555,7 @@ class App {
     const ship = this.pilotedShip();
     const below = planetBelow(this.world.planet);
     if (!ship || ship.destroyed || !below || this.traveling) return;
+    if (this.refuseWhileDocked()) return;
     this.closePanels();
     await this.travel(below, undefined, { def: ship.def!, speed: 90, height: SPACE_ARRIVAL_HEIGHT, crew: this.crewRecord(), condition: this.conditionRecord(ship) });
   }
@@ -3528,6 +3576,13 @@ class App {
       return;
     }
     if (this.hyperspace.locksControls || !this.world.planet.space || !this.pilotedShip()) return;
+    // A ship at a dock or on a station's lane is not the pilot's to take anywhere: the map reaches this
+    // by its own row as well as the ship menu, so the refusal lives here rather than on the label.
+    const why = this.dockRefusal();
+    if (why) {
+      this.hud.setPrompt(why);
+      return;
+    }
     this.shipMenu.hide();
     this.hyperspaceUi.show({
       here: this.world.planet.id,
@@ -3545,6 +3600,9 @@ class App {
    * was asked for; the panel shows what comes back.
    */
   private jumpFromGalaxy(d: Destination): string | null {
+    // A ship at a dock or on a station's lane is not the pilot's to take anywhere.
+    const held = this.dockRefusal();
+    if (held) return held;
     const why = this.hyperspace.start(d);
     if (why === null && this.map.open) this.toggleMap();
     return why;
@@ -3994,6 +4052,10 @@ class App {
     }
     // A ship in a jump is flown by the jump (its cruise is `jumpCruise`), whether or not a panel is open: the pilot's keys do nothing.
     if (pilot && this.hyperspace.drives(pilot)) drive = null;
+    // A dock: while its autopilot flies the ship down a station's lane, or back out along it, the drive
+    // it gives is used in place of the pilot's own, and a hand on the controls hands the ship straight
+    // back. Docked, it holds the hull and the pilot's drive is passed through untouched.
+    if (simulate) drive = this.docking.step(pilot, dt, drive);
     // A ship's target and guns: the guns lead the target when it sits within their cone, else
     // fire along the nose; the bolts are the game's own and strike what a blaster's would, ships included.
     if (simulate && pilot?.spec.ship && !this.hyperspace.drives(pilot)) this.aimShip(pilot, dt);
@@ -4700,12 +4762,45 @@ class App {
       planetName: inSpace ? (planetBelow(this.world.planet)?.name ?? null) : null,
       zoneName: inSpace ? (this.world.spaceData?.title && this.world.spaceData.title !== this.world.planet.id ? this.world.spaceData.title : this.world.planet.name) : null,
       jump: {
-        canJump: !inSpace ? 'only in space' : role !== 'pilot' || !ship.def ? "the pilot's call" : null,
+        // A ship at a dock or on a lane cannot jump: it is not the pilot's to fly until it is clear.
+        canJump: !inSpace ? 'only in space' : (this.dockRefusal(ship) ?? (role !== 'pilot' || !ship.def ? "the pilot's call" : null)),
         counting: counting ? (hs.prompt ?? 'counting down') : null,
         busy: hs.phase !== 'idle' && !counting,
       },
+      dock: this.docking.menuRow(ship, role, inSpace),
+      cruise: this.cruiseControl?.available(),
       speed: Math.round(Math.abs(ship.speed) * 3.6),
     };
+  }
+
+  /**
+   * Why the flown ship cannot be taken anywhere just now, or null. A ship at a dock is held in the
+   * station's own frame and the station is putting it right; one on a lane is being flown by the
+   * station's autopilot. Either way the jump and both crossings must refuse, or two owners would write
+   * a pose onto the same hull and the ship would be carried off the dock mid-repair.
+   */
+  private dockRefusal(of?: Vehicle | null): string | null {
+    const ship = of ?? this.pilotedShip();
+    if (this.docking.docked(ship)) return 'undock first';
+    if (this.docking.flying(ship)) return "on the station's lane";
+    return null;
+  }
+
+  /** The same refusal, said in the head-up display, for a row that has no words of its own. */
+  private refuseWhileDocked(): boolean {
+    const why = this.dockRefusal();
+    if (why) this.hud.setPrompt(why);
+    return why !== null;
+  }
+
+  /** The ship menu's docking row: ask for a lane, leave the dock, or break off, whichever it offers. */
+  private dockButton(): void {
+    const p = this.player;
+    // Only whoever is at the controls: a passenger's row is dead, and nothing else may press it.
+    const ship = p.mounted ?? p.piloting ?? null;
+    if (!ship?.spec.ship) return;
+    const said = this.docking.act(ship);
+    if (said) this.hud.setPrompt(said);
   }
 
   private freeMouse(free: boolean): void {

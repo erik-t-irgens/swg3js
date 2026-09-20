@@ -1109,6 +1109,21 @@ export class World {
     this.particles?.remove(h);
   }
 
+  /**
+   * What a station's dock plays, by the part of docking it belongs to, at a point in the world. Every
+   * dock effect in the retail archives names a sound and no particle, so this is one sound; false when
+   * the zone has no such effect (a pack converted before they were carried), so a caller can say so.
+   *
+   * A pack that ever did carry a particle here would place it on a live frame, and its program would be
+   * compiled there: nothing prepares the dock effects at zone load as the jump's are. That is why only
+   * the sound is played, and a particle is left to whoever adds the preparation.
+   */
+  dockEffect(part: string, x: number, y: number, z: number): boolean {
+    const fx = this.spaceData?.dockEffects?.[part];
+    if (!fx) return false;
+    return fx.sound ? this.playSound(fx.sound, x, y, z) !== 0 : false;
+  }
+
   private async loadSpaceBodies(pack: AssetPack): Promise<void> {
     const token = this.loadToken;
     // This zone's NPC ship manager, captured before the wait: a zone left meanwhile is not given anchors.
