@@ -1792,8 +1792,14 @@ function packStatus(dir) {
     need(`weapons <swg-dir> ${dir} --retail-only`, 'no weapons converted for the rack (I in game, the Weapons tab)');
   } else {
     const items = itemPackStatus(weapons.weapons);
-    console.log(`  weapons: ${weapons.weapons?.length ?? 0} on the rack, ${weapons.skipped?.length ?? 0} left out; ${items.named} named, ${items.slotted} with slots, ${items.iconed} icons`);
+    // A weapon effect's sounds: the older packs kept one sound for the muzzle and one for a hit on a
+    // creature, and nothing for the other four surfaces, the eight misses or the ricochet. A pack that
+    // kept them all writes `hit` as the five columns rather than as one name.
+    const withFx = (weapons.weapons ?? []).filter((w) => w.fx?.sounds);
+    const perSurface = withFx.filter((w) => w.fx.sounds.hit && typeof w.fx.sounds.hit === 'object' && !Array.isArray(w.fx.sounds.hit)).length;
+    console.log(`  weapons: ${weapons.weapons?.length ?? 0} on the rack, ${weapons.skipped?.length ?? 0} left out; ${items.named} named, ${items.slotted} with slots, ${items.iconed} icons, ${perSurface} of ${withFx.length} with every sound their effect names`);
     if (items.missingKeys) need(`weapons <swg-dir> ${dir} --retail-only`, 'the weapons carry no names, slots or icons (the backpack needs them)');
+    else if (withFx.length && !perSurface) need(`weapons <swg-dir> ${dir} --retail-only`, 'the weapons keep one sound per effect (a bolt into water, into the ground or into nothing falls back on the plain blaster)');
   }
   // The wardrobe folders (optional, as the README says): what the backpack can show of each; the to-do comes from
   // the same table the mobiles block uses, so the two can never ask for different commands.
@@ -3333,12 +3339,14 @@ switch (cmd) {
     }
     const cefParts = (cef) => {
       const path = (cef ?? '').replace(/\\/g, '/').replace(/^\//, '');
-      if (!path || !vfs.has(path)) return { particle: null, sound: null };
+      if (!path || !vfs.has(path)) return { particle: null, sound: null, sounds: [] };
       try {
         const fx = parseClientEffect(parseIff(vfs.read(path)));
-        return { particle: fx.particles[0] ?? null, sound: fx.sounds[0] ?? null };
+        // Every sound the effect names, not only its first: the game plays one of them, and which
+        // it is is the effect's business, not ours.
+        return { particle: fx.particles[0] ?? null, sound: fx.sounds[0] ?? null, sounds: fx.sounds };
       } catch {
-        return { particle: null, sound: null };
+        return { particle: null, sound: null, sounds: [] };
       }
     };
     const particleFile = (prt) => {
@@ -3360,6 +3368,13 @@ switch (cmd) {
         const fire = cefParts(row['Fire Client Effect']);
         const hit = cefParts(row['Hit (Creature) Client Effect']);
         const miss = cefParts(row['Miss (Hit Nothing) Client Effect']);
+        // What the shot sounds like striking each of the five surfaces the table has a column for,
+        // and coming to nothing in each of the eight ways it can: the particles drawn are still the
+        // creature's hit and the plain miss, which are the two the game draws. Several columns
+        // often name one effect (the light blaster's metal, stone, wood and other are all its
+        // "other" effect), which is the table as the game shipped it.
+        const hitSound = (what) => cefParts(row[`Hit (${what}) Client Effect`]).sounds;
+        const missSound = (what) => cefParts(row[`Miss (Hit ${what}) Client Effect`]).sounds;
         let reach = 0;
         if (/\.prt$/i.test(shot) && vfs.has(shot)) {
           try {
@@ -3368,7 +3383,21 @@ switch (cmd) {
             reach = 0;
           }
         }
-        out = { id, index, shot: /\.prt$/i.test(shot) ? particleFile(shot) : null, reach: Number(reach.toFixed(2)), fire: particleFile(fire.particle), hit: particleFile(hit.particle), miss: particleFile(miss.particle), sounds: { fire: fire.sound, hit: hit.sound } };
+        out = {
+          id,
+          index,
+          shot: /\.prt$/i.test(shot) ? particleFile(shot) : null,
+          reach: Number(reach.toFixed(2)),
+          fire: particleFile(fire.particle),
+          hit: particleFile(hit.particle),
+          miss: particleFile(miss.particle),
+          sounds: {
+            fire: fire.sounds,
+            hit: { creature: hitSound('Creature'), metal: hitSound('Metal'), stone: hitSound('Stone'), wood: hitSound('Wood'), other: hitSound('Other') },
+            miss: { water: missSound('Water'), terrain: missSound('Terrain'), creature: missSound('Creature'), metal: missSound('Metal'), stone: missSound('Stone'), wood: missSound('Wood'), other: missSound('Other'), nothing: missSound('Nothing') },
+            ricochet: cefParts(row['Ricochet Client Effect']).sounds,
+          },
+        };
       }
       fxCache.set(key, out);
       return out;
