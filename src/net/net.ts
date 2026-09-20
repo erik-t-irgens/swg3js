@@ -3,6 +3,8 @@
 
 import type { Look } from '../player/look';
 import type { ShipFit } from '../vehicles/shipFit';
+import { sharedClock } from '../world/sharedClock.ts';
+import { SESSION, Session, WIRE_VERSION, type CharacterSummary, type Settlement } from './session.ts';
 
 export interface Hello {
   name: string;
@@ -69,6 +71,44 @@ export interface Peer {
 
 type Status = 'off' | 'connecting' | 'online' | 'reconnecting';
 
+/**
+ * What a server that holds the world may say, read off the same parsed message. It is its own shape
+ * because two of its fields spell words the older messages already use: `s` is a rig state on a state
+ * and a clock on a pong, and `word` is a docking word on an ask and a flag on a hail. Nothing is ever
+ * read as both, because each case reads one shape or the other and never mixes them.
+ */
+interface ServerWord {
+  v?: number;
+  now?: number;
+  epoch?: number;
+  dayMs?: number;
+  nonce?: string;
+  word?: number;
+  ff?: number;
+  you?: { player?: string; character?: string; name?: string };
+  keep?: string;
+  character?: string;
+  browser?: CharacterSummary;
+  server?: CharacterSummary;
+  take?: string;
+  record?: CharacterSummary | null;
+  why?: string;
+  by?: string;
+  c?: number;
+  s?: number;
+}
+
+/**
+ * How often the socket asks the clock whether it wants a round trip, in milliseconds. It is not the
+ * rate of the round trips themselves -- that is the shared clock's own `CLOCK_TUNE.pingSeconds`, and
+ * `duePing()` is what decides -- because that number is live through `__sharedDay({ pingSeconds })` and
+ * a timer set from it once at module load could only ever be made slower, never faster, which is the
+ * direction anyone tuning a clock uses. A comparison a second costs nothing and allocates nothing.
+ *
+ * Invented: one second, small enough that the finest rate worth asking for is met.
+ */
+const PING_TICK = 1000;
+
 const STORAGE = 'swg.server';
 
 export class Net {
@@ -78,6 +118,25 @@ export class Net {
   private retryTimer = 0;
   private retryDelay = 1000;
   private wanted = false;
+  /**
+   * Who this browser is, and what the server on the other end holds. It is here rather than beside the
+   * game because it is the socket that hears the words it answers; everything else in the game asks the
+   * session, never the socket, what is true.
+   */
+  readonly session = new Session();
+  /** The wait for the server to speak first, and the clock's round trips. */
+  private hailTimer = 0;
+  private pingTimer = 0;
+  /** Whether the hello has gone on this line yet: it waits for the handshake to be settled one way or the other. */
+  private greeted = false;
+  /**
+   * The hello went on the wait running out rather than on the handshake, so the far end may have
+   * thrown it away: a server started with a join word listens to nothing until a browser has claimed.
+   * If the hail then turns up late, the hello has to be said again, or this browser sits on the server
+   * with no record at all -- every state it sends dropped, invisible to everyone including itself, and
+   * nothing in the game to say why.
+   */
+  private greetedEarly = false;
   status: Status = 'off';
   id = 0;
   readonly peers = new Map<number, Peer>();
@@ -89,6 +148,8 @@ export class Net {
   /** A word meant for this player alone: one ship asking another's pilot for room on their hull, and the answer. */
   onAsk: (from: number, word: AskWord) => void = () => {};
   onStatus: (status: Status, detail: string) => void = () => {};
+  /** Something the player has to read: joining, being taken over, a refusal. The message line takes it. */
+  onNotice: (text: string) => void = () => {};
 
   /** The server kept in this browser, or the one in ?server=, or none. */
   static savedUrl(): string {
@@ -110,6 +171,13 @@ export class Net {
     }
   }
 
+  constructor() {
+    // The session answers the server through this socket, and what it needs the player to read goes
+    // where every other notice goes. Both are read at call time, so the game may replace `onNotice`.
+    this.session.send = (msg) => this.send(msg);
+    this.session.onNote = (text) => this.onNotice(text);
+  }
+
   get online(): boolean {
     return this.status === 'online';
   }
@@ -118,6 +186,8 @@ export class Net {
   connect(url: string, hello: Hello): void {
     this.url = url.trim();
     this.hello = hello;
+    // `wanted` is what the reconnect hangs on, and being taken over or turned away clears it; asking to
+    // connect is the one thing that sets it again, because this time the player asked for it.
     this.wanted = !!this.url;
     this.open();
   }
@@ -125,21 +195,50 @@ export class Net {
   /** Who and where this player is now (a new world after travel); sent at once when online. */
   setHello(hello: Hello): void {
     this.hello = hello;
-    if (this.online) this.send({ t: 'hello', ...hello });
+    // Before the handshake has settled the hello has not gone yet, and the one the handshake sends will
+    // be this one: a server started with a join word listens to nothing until it knows who is there, so
+    // a hello sent ahead of the claim would simply be dropped and never sent again.
+    if (this.online && this.greeted) this.send({ t: 'hello', v: WIRE_VERSION, ...hello });
+  }
+
+  /** The hello, once per line, after the handshake has settled one way or the other. */
+  private greet(): void {
+    if (this.greeted || this.socket?.readyState !== WebSocket.OPEN) return;
+    this.greeted = true;
+    if (this.hello) this.send({ t: 'hello', v: WIRE_VERSION, ...this.hello });
   }
 
   disconnect(): void {
     this.wanted = false;
     window.clearTimeout(this.retryTimer);
+    this.stopTimers();
     this.socket?.close();
     this.socket = null;
     this.clearPeers();
+    this.session.closed();
+    // Put down on purpose: the day goes back to this browser's own clock rather than carrying the
+    // server's offset about with it.
+    sharedClock.none();
     this.setStatus('off', '');
+  }
+
+  /** One round trip for the clock, when it wants one: the answer comes back to the case above. */
+  private ping(): void {
+    if (sharedClock.duePing()) this.send({ t: 'ping', c: sharedClock.beginPing() });
+  }
+
+  /** The wait for a hail and the clock's round trips, both stopped whenever the socket goes. */
+  private stopTimers(): void {
+    window.clearTimeout(this.hailTimer);
+    window.clearInterval(this.pingTimer);
+    this.hailTimer = 0;
+    this.pingTimer = 0;
   }
 
   private open(): void {
     if (!this.wanted || !this.url) return;
     window.clearTimeout(this.retryTimer);
+    this.stopTimers();
     this.socket?.close();
     let ws: WebSocket;
     try {
@@ -153,14 +252,36 @@ export class Net {
     this.setStatus(this.retryDelay > 1000 ? 'reconnecting' : 'connecting', this.url);
     ws.onopen = () => {
       this.retryDelay = 1000;
+      this.greeted = false;
+      this.greetedEarly = false;
       this.setStatus('online', this.url);
-      if (this.hello) this.send({ t: 'hello', ...this.hello });
+      this.session.opening();
+      // With no join word the hello goes at once, exactly as it always did, and the claim follows the
+      // server's challenge whenever that arrives. With a word it waits for the challenge, because a
+      // server started with one listens to nothing until it has been told who is there: a hello sent
+      // ahead of the claim would be dropped and never sent again. The wait below is the backstop for a
+      // line that says nothing at all, which is the relay that came before.
+      if (!this.session.word) this.greet();
+      this.hailTimer = window.setTimeout(() => {
+        this.hailTimer = 0;
+        this.session.hailTimedOut();
+        sharedClock.none();
+        // With a word set nothing has been said yet, so this hello is the one going ahead of a claim.
+        // With none, the hello went at the moment the line opened and was kept by whatever is there.
+        this.greetedEarly = !!this.session.word;
+        this.greet();
+      }, SESSION.hailWait);
     };
     ws.onmessage = (e) => this.receive(String(e.data));
     ws.onclose = () => {
       if (this.socket !== ws) return;
       this.socket = null;
+      this.stopTimers();
       this.clearPeers();
+      this.session.closed();
+      // The line dropped rather than being put down: what the clock had estimated is kept and the day
+      // carries on at its own rate, so nothing jumps while the line comes back.
+      sharedClock.lost();
       if (!this.wanted) return;
       this.setStatus('reconnecting', `in ${Math.round(this.retryDelay / 1000)} s`);
       this.retryTimer = window.setTimeout(() => this.open(), this.retryDelay);
@@ -208,9 +329,92 @@ export class Net {
     } catch {
       return;
     }
+    // The server's own words are read off the same object through this shape: `s` and `word` mean one
+    // thing to a state or an ask and another to a pong or a hail, so they are never read as both.
+    const server = msg as unknown as ServerWord;
     switch (msg.t) {
+      case 'hail':
+        // The server speaks first. An old relay never sends this and a browser that never hears it goes
+        // on as it always has; nothing here can run twice, because a hail comes once per line.
+        window.clearTimeout(this.hailTimer);
+        this.hailTimer = 0;
+        // The world's clock, from the greeting: the day and the weather follow it from here on, and the
+        // round trips below sharpen it. The hello follows the claim, never the other way about.
+        sharedClock.hail(Number(server.now), Number(server.dayMs) || undefined);
+        this.session.hail({ v: Number(server.v) || 0, now: Number(server.now) || 0, epoch: Number(server.epoch) || 0, dayMs: Number(server.dayMs) || 0, nonce: String(server.nonce ?? ''), word: server.word === 1 ? 1 : 0, ff: server.ff === 1 ? 1 : 0 });
+        // A hail that came in after the wait had already run out: this browser said hello ahead of its
+        // claim, and a server that asks for a join word threw that hello away without a word about it.
+        // Now that it has claimed, the hello is said again. A server that asks for no word kept the
+        // first one, and a second would cost this browser the welcome it is owed.
+        if (this.greetedEarly && server.word === 1) this.greeted = false;
+        this.greetedEarly = false;
+        this.greet();
+        // The round trips are only worth taking while the clock really is the server's: a greeting
+        // whose clock could not be true leaves the day on this machine's own, and a timer asking
+        // nothing every few seconds for the life of the page is worse than no timer at all.
+        if (sharedClock.shared) {
+          this.ping();
+          window.clearInterval(this.pingTimer);
+          this.pingTimer = window.setInterval(() => this.ping(), PING_TICK);
+        }
+        break;
+      case 'pong':
+        sharedClock.pong(Number(server.c), Number(server.s));
+        break;
+      case 'claimed':
+        // The server has us: this is what makes it a server session, not the welcome, because a server
+        // with a join word answers the claim before it will listen to a hello at all.
+        this.session.claimed(server.you, typeof server.keep === 'string' ? (server.keep as Settlement) : '');
+        break;
+      case 'settle':
+        // Two copies of one character with the same change counter and a different story (decision 4).
+        if (server.character && server.browser && server.server) this.session.settleAsk(String(server.character), server.browser, server.server);
+        break;
+      case 'settled':
+        if (server.character) this.session.settled(String(server.character), String(server.take ?? ''), server.record ?? null);
+        break;
+      case 'refused':
+        // Not the line: only the character. The server holds that id for another player and leaves the
+        // line open on purpose, so the browser is still itself and can offer a different character.
+        // Nothing read this word before, and such a browser sat on an open line it would never be
+        // welcomed onto, with nothing anywhere to say why.
+        this.session.refusedCharacter(typeof server.why === 'string' ? server.why : '');
+        break;
+      case 'denied':
+        // The server will not have us and saying it again cannot change that, so the reconnect stops:
+        // `wanted` false is what keeps a browser from asking for ever.
+        this.wanted = false;
+        this.session.denied(typeof server.why === 'string' ? server.why : '');
+        // Turned away is not a line that dropped: this is a world this browser is not in, so the day
+        // goes back to its own clock rather than keeping a stranger's offset for the life of the page.
+        // It must come before the close, because the close's own handler keeps whatever is still shared.
+        sharedClock.none();
+        this.socket?.close();
+        this.setStatus('off', 'turned away');
+        break;
+      case 'taken':
+        // The same character was opened in a newer browser (decision 8). This one stops wanting to
+        // reconnect; without that the two would take the character off one another for ever.
+        this.wanted = false;
+        this.session.taken(typeof server.by === 'string' ? server.by : undefined);
+        // The same as being turned away: this browser is out of that world, so it takes its own clock
+        // back rather than keeping the server's offset with nothing to correct it.
+        sharedClock.none();
+        this.socket?.close();
+        this.clearPeers();
+        this.setStatus('off', 'taken over');
+        break;
       case 'welcome':
         this.id = msg.id ?? 0;
+        if (this.hailTimer) {
+          // A welcome with nothing said before it is the old relay answering the hello. (It cannot be
+          // this browser's own hello: that waits for the hail or the wait, and both clear this timer.)
+          window.clearTimeout(this.hailTimer);
+          this.hailTimer = 0;
+          this.session.welcomedWithoutHail();
+          sharedClock.none();
+        }
+        this.session.welcome({ id: msg.id, v: Number(server.v) || 0, ff: server.ff === 1 ? 1 : 0 });
         for (const p of msg.peers ?? []) {
           this.peers.set(p.id, p);
           this.onJoin(p);

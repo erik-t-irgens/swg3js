@@ -4,20 +4,43 @@ import { DEFAULT_BINDINGS, type Action, type Input } from '../core/input';
 import { DEFAULT_SETTINGS, saveSettings, type Settings } from '../core/settings';
 import { FX_KNOBS, fxPassDef, fxProductDef } from '../core/fxRegistry.ts';
 import { INTERFACE, notifyBindingsChanged, type Knob } from './hudPage.ts';
+import { multiplayerMarkup, type CharacterCopy } from './multiplayerPage.ts';
 
 // The Interface page's knobs and the rebind note live in `hudPage.ts` so that a node test can read
-// them without a browser; they are theirs to change and everything else's to import from here.
+// them without a browser; they are theirs to change and everything else's to import from here. The
+// Multiplayer page is in `multiplayerPage.ts` for the same reason, and is re-exported from here too.
 export { onBindingsChanged, notifyBindingsChanged } from './hudPage.ts';
+export { MULTIPLAYER_PARTS, multiplayerMarkup, type CharacterCopy, type MultiplayerView } from './multiplayerPage.ts';
 
 type Page = 'main' | 'controls' | 'graphics' | 'interface' | 'sound' | 'emotes' | 'multiplayer';
 
-/** What the multiplayer page needs from the game: the relay's address and state, and who is here. */
+/**
+ * What the multiplayer page needs from the game: the address and state of the line, who is here, and
+ * this browser's own identity -- the key it made for itself, which can be copied to another machine, the
+ * join word the address carries, and the one question the page ever has to ask (a character played in
+ * two places at once).
+ */
 export interface NetSource {
   url(): string;
   status(): string;
   peers(): string[];
   connect(url: string): void;
   disconnect(): void;
+  /** Off, waiting on the server's first word, an old relay, or a server that holds the world. */
+  mode(): 'off' | 'waiting' | 'relay' | 'server';
+  /** This player's public name: the same in every browser holding the same key. */
+  player(): string;
+  /** The key written out for copying into another browser. */
+  exportKey(): string;
+  /** Take a key copied out of another browser; the answer is the new player's name, or '' if it did not read as a key. */
+  importKey(text: string): string;
+  /** The join word on the address, which a server started with one will not have anyone without. */
+  word(): string;
+  setWord(word: string): void;
+  /** A character the server and this browser disagree about, or null; both copies as each side holds them. */
+  ask(): { character: string; browser: CharacterCopy; server: CharacterCopy } | null;
+  /** Which copy of that character stands. */
+  resolveAsk(take: 'browser' | 'server'): void;
 }
 
 /** What the emotes page needs from the game: the rig's emote clips, and the wheel's slots to read and write. */
@@ -314,13 +337,14 @@ export class Menu {
     } else if (page === 'multiplayer') {
       const net = this.net;
       const peers = net?.peers() ?? [];
-      body.innerHTML = `<h2>Multiplayer</h2>
-        <p class="menu-hint">A start: a relay passes everyone's place and pose to everyone else, and each player is shown as their own character where they stand, doing what they do. Each player's vehicle or ship is carried across with them on it. No combat between players yet, no bolts or damage across the relay, nothing kept on it. Run one with <code>node server/relay.mjs</code> (port 8787) and give its address here; <code>?server=ws://host:8787</code> in the page's address does the same.</p>
-        <div class="knob"><div class="knob-label">Relay address<small>ws://host:8787, or wss:// behind a proxy with TLS</small></div><div class="knob-control"><input type="text" class="server" value="${(net?.url() ?? '').replace(/"/g, '&quot;')}" placeholder="ws://localhost:8787" spellcheck="false" /></div></div>
-        <div class="menu-actions"><button class="connect">Connect</button><button class="disconnect">Disconnect</button><span class="menu-hint net-status">${net?.status() ?? 'off'}</span></div>
-        <h3>Here <span>${peers.length} on this world</span></h3>${peers.length ? `<ul class="peer-list">${peers.map((n) => `<li>${n.replace(/</g, '&lt;')}</li>`).join('')}</ul>` : '<p class="menu-hint">Nobody else here.</p>'}`;
+      const mode = net?.mode() ?? 'off';
+      const ask = net?.ask() ?? null;
+      body.innerHTML = multiplayerMarkup({ url: net?.url() ?? '', word: net?.word() ?? '', status: net?.status() ?? 'off', mode, player: net?.player() ?? '', peers, ask });
       const input = body.querySelector<HTMLInputElement>('.server')!;
+      const word = body.querySelector<HTMLInputElement>('.word')!;
       body.querySelector('.connect')!.addEventListener('click', () => {
+        // The word is kept before the address, since connecting is what proves it.
+        net?.setWord(word.value.trim());
         net?.connect(input.value.trim());
         window.setTimeout(() => this.showPage('multiplayer'), 600);
       });
@@ -330,6 +354,61 @@ export class Menu {
       });
       input.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') body.querySelector<HTMLButtonElement>('.connect')!.click();
+      });
+      if (ask) {
+        body.querySelector('.keep-local')!.addEventListener('click', () => {
+          this.onUiSound('confirm');
+          net?.resolveAsk('browser');
+          this.showPage('multiplayer');
+        });
+        body.querySelector('.keep-server')!.addEventListener('click', () => {
+          this.onUiSound('confirm');
+          net?.resolveAsk('server');
+          this.showPage('multiplayer');
+        });
+      }
+      const keyNote = body.querySelector<HTMLElement>('.key-note')!;
+      body.querySelector('.copy-key')!.addEventListener('click', () => {
+        const key = net?.exportKey() ?? '';
+        // The clipboard is not there on every page (it wants a secure context too), so the key is shown
+        // to be copied by hand when it refuses rather than the button doing nothing.
+        const shown = () => {
+          keyNote.textContent = 'copy it by hand:';
+          this.showKey(body, key);
+        };
+        try {
+          void navigator.clipboard.writeText(key).then(() => (keyNote.textContent = 'copied'), shown);
+        } catch {
+          shown();
+        }
+      });
+      body.querySelector('.show-key')!.addEventListener('click', () => this.showKey(body, net?.exportKey() ?? ''));
+      const useNote = body.querySelector<HTMLElement>('.use-note')!;
+      const useButton = body.querySelector<HTMLButtonElement>('.use-key')!;
+      const keyIn = body.querySelector<HTMLInputElement>('.key-in')!;
+      let armed = false;
+      useButton.addEventListener('click', () => {
+        if (!armed) {
+          // Asked twice, because this makes the browser somebody else: everything it owns stays where it
+          // is, but a server will not know it as the player it was.
+          armed = true;
+          useButton.textContent = 'Really? This browser becomes that player';
+          useNote.textContent = 'click again to go on';
+          return;
+        }
+        const who = net?.importKey(keyIn.value) ?? '';
+        armed = false;
+        if (!who) {
+          useButton.textContent = 'Use this key';
+          useNote.textContent = 'those words are not a key';
+          return;
+        }
+        this.onUiSound('confirm');
+        this.showPage('multiplayer');
+        // Said on the page that has just been built again, since a line already open still holds the
+        // claim the player before this one made: the server does not know this player until Connect.
+        const note = this.root.querySelector<HTMLElement>('.use-note');
+        if (note) note.textContent = net?.mode() === 'server' ? `now ${who} · press Connect again to join as this player` : `now ${who}`;
       });
     } else if (page === 'sound') {
       body.innerHTML = `<h2>Sound</h2><p class="menu-hint">Sound starts on your first click, as browsers require. Every sample, and every volume, pitch and gap inside it, is the game's own; how loudness falls off with distance, how many sounds play at once and the room echo are ours.</p>${SOUND.map((g) => `<h3>${g.title}</h3>${this.knobRows(g.knobs)}`).join('')}<div class="menu-actions"><button class="reset-sound">Reset sound to defaults</button></div>`;
@@ -365,6 +444,17 @@ export class Menu {
         this.showPage('graphics');
       });
     }
+  }
+
+  /** The key on the page, ready to be selected and copied by hand. Nothing is shown until it is asked for. */
+  private showKey(body: HTMLElement, key: string): void {
+    const row = body.querySelector<HTMLElement>('.key-out-row');
+    const out = body.querySelector<HTMLInputElement>('.key-out');
+    if (!row || !out) return;
+    out.value = key;
+    row.classList.remove('hidden');
+    out.focus();
+    out.select();
   }
 
   private knobRows(knobs: readonly Knob[]): string {

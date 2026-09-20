@@ -98,6 +98,7 @@ import { draggable } from './ui/drag';
 import { LoadingScreen } from './ui/loading';
 import { EmoteWheel } from './ui/emoteWheel';
 import { Net, type Hello, type PeerVehicle } from './net/net';
+import { SESSION, Session, tuneSession } from './net/session.ts';
 import { clockKnob } from './world/sharedClock.ts';
 import { applyAppearance, dress, packLook } from './player/look';
 import { RemotePlayers } from './net/remotePlayers';
@@ -3092,8 +3093,26 @@ class App {
     };
     this.net.onStatus = (status, detail) => {
       this.netStatus = detail ? `${status} (${detail})` : status;
-      if (status === 'online') this.messages.system('connected to the relay');
     };
+    // The join word carried on the address (?server=... &word=...) is the one this browser joins with
+    // from now on, exactly as the address's server is the one it keeps.
+    const joinWord = Session.savedWord();
+    if (joinWord) this.net.session.setWord(joinWord);
+    // Everything the session has to tell the player -- joining, which kind of line this is, a character
+    // opened in another browser, a refusal -- goes to the message line, which holds it long enough to be
+    // read. Nothing of this goes to the prompt, which is rewritten every frame.
+    this.net.onNotice = (text) => this.messages.system(text);
+    // What the server made of this character. Nothing applies it yet: the server holds a character's
+    // name, where it is and its change counter, and what it owns comes with the ledger later.
+    this.net.session.onSettled = (what, record) => {
+      if (what === 'server') console.info('the server holds its own copy of this character:', record);
+    };
+    // The session's numbers and what it has made of the line, live: `__debug.session()` reads them and
+    // `__debug.session({ hailWait: 2000 })` sets the one number this side invents (how long to wait for
+    // a server to speak first before deciding this is the relay that came before). The clock's numbers
+    // are not here; they are `__debug.day()`'s.
+    const debugRoot = (window as unknown as { __debug?: Record<string, unknown> }).__debug;
+    if (debugRoot) debugRoot.session = (o?: Partial<typeof SESSION>) => (o ? { ...tuneSession(o), ...this.net.session.debug() } : this.net.session.debug());
 
     this.select = new CharacterSelect(this.ui);
     this.select.onPlay = (c) => void this.play(c).catch((err) => console.warn('could not enter the world', err));
@@ -3121,6 +3140,16 @@ class App {
         else this.net.disconnect();
       },
       disconnect: () => this.net.disconnect(),
+      // Who this browser is, and what it has made of the server on the other end. All of it is read at
+      // click time, so the page never holds a stale copy of any of it.
+      mode: () => this.net.session.mode,
+      player: () => this.net.session.player,
+      exportKey: () => this.net.session.exportKey(),
+      importKey: (text) => this.net.session.importKey(text),
+      word: () => this.net.session.word,
+      setWord: (word) => this.net.session.setWord(word),
+      ask: () => this.net.session.ask,
+      resolveAsk: (take) => this.net.session.resolveAsk(take),
     };
     this.menu.onResume = () => this.resume();
     this.menu.onSwitchCharacter = () => this.switchToSelect();
@@ -3901,11 +3930,18 @@ class App {
     // The ship this player flies (or last flew or stood out), with its components, droid and paint.
     const ship = this.helloShip();
     if (ship) this.helloShipId = ship.id;
-    return { name: c?.name ?? 'someone', species: this.characterId, class: this.kit?.id ?? 'jedi', planet: this.world.planet?.id ?? '', zone: this.zone, look: c ? packLook(c.appearance, c.outfit ?? []) : undefined, held, ship };
+    const hello: Hello = { name: c?.name ?? 'someone', species: this.characterId, class: this.kit?.id ?? 'jedi', planet: this.world.planet?.id ?? '', zone: this.zone, look: c ? packLook(c.appearance, c.outfit ?? []) : undefined, held, ship };
+    // Who the session is about: every connection and every change of world goes through here, so this is
+    // where the session learns which character is in play, where it is and what its record holds now.
+    this.net.session.noteCharacter(c, { species: hello.species, class: hello.class, planet: hello.planet, zone: hello.zone });
+    return hello;
   }
 
   /** Send the hello again shortly (dressing several pieces sends one): a change of clothes or weapon reaches the others. */
   private queueHello(): void {
+    // What the character owns, wears and flies has changed, whether or not anyone is connected: the
+    // counter that settles an evening played offline rises here, and only when the record really moved.
+    this.net.session.noteCharacter(this.current);
     if (!this.net.online) return;
     window.clearTimeout(this.helloTimer);
     this.helloTimer = window.setTimeout(() => {
