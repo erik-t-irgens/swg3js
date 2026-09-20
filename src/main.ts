@@ -37,7 +37,7 @@ import { DEFAULT_GADGETS, GADGETS } from './combat/gadgets';
 import { RAGDOLL } from './combat/ragdoll';
 import { WeaponCatalogue, type WeaponDef } from './player/weapons';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { Hud } from './ui/hud';
+import { Hud, hudBindingsChanged } from './ui/hud';
 import { specFor, type DriveInput } from './vehicles/vehicle';
 import { interceptTime, leadPoint } from './combat/intercept';
 import { PostFX, type FxFrameInput, type SunInfo } from './core/postfx';
@@ -59,6 +59,10 @@ import { MESSAGES, MessageLine, plain, tuneMessages } from './ui/messages';
 import { COL, colourOf } from './core/palette';
 import { HudCanvas, OVERLAY_TUNE } from './ui/hudCanvas';
 import { layout, makeLayout, tuneSizes, type HudLayout, type HudSizes } from './ui/hudMath';
+import { ActionBar } from './ui/prompt';
+import { PROMPT, newPromptState, resetPromptState, tunePrompt, type PromptState } from './ui/promptRules';
+import { FEEDBACK_TUNE, HudFeedback, type FeedbackTune, type ScreenPoint } from './ui/hudFeedback';
+import { Nameplates, PLATE_TUNE } from './ui/nameplate';
 import { VehiclesUi } from './ui/vehiclesUi';
 import { ShipEditUi } from './ui/shipEditUi';
 import { DROID_SHOWN, DROID_SHOWN_BY_HULL, droidShown, droidSink, fitKey, packFit, partsOf, slotLabel, stockFit, type ResolvedFit, type ShipFit } from './vehicles/shipFit';
@@ -68,7 +72,7 @@ import { ambientOverrides, lookBounds, spawnDistance } from './world/mobiles/spa
 import { AppearanceUi } from './ui/appearanceUi';
 import { CharacterSelect } from './ui/characterSelect';
 import { CreatorBar } from './ui/creatorBar';
-import { Menu, keyName } from './ui/menu';
+import { Menu, keyName, onBindingsChanged, notifyBindingsChanged } from './ui/menu';
 import { ShipMenu, type ShipCruise, type ShipStatus } from './ui/shipMenu';
 import { Docking } from './space/docking';
 import { CLAMP_TUNE, DOCK_TUNE } from './space/dockingMath';
@@ -163,8 +167,19 @@ const CAMERA_REST_PITCH = 0.32;
  * own, whose single meter is either a burst that fills as it charges or a heat gauge that fills as
  * it overheats: true shows the heat gauge as the booster's headroom, so a full arc means "ready" on
  * both kinds. Flip it to see the gauge itself.
+ *
+ * `promptHz` and `nearbyHz` are the two rates this file gathers state at instead of every frame,
+ * and both are invented. Eight times a second is fast enough that walking up to a vehicle changes
+ * the bar before the hand reaches the key and slow enough that the asking — the lift underfoot, the
+ * elevators near, the doorless building near, the nearest vehicle — costs an eighth of what it did;
+ * four is the rate the corner line it feeds is written at anyway, so asking oftener could not show.
+ * Raising either to sixty puts the old per-frame cost back, which is how to measure what they save.
+ *
+ * `hurtRange` is how far a blow may have come from and still draw an arc, in metres. A blow from
+ * further off than this is taken as having no useful direction (a sniper across a valley points at a
+ * pixel), and shows the red flash alone.
  */
-const HUD_WIRING = { gunBits: 32, heatIsHeadroom: true };
+const HUD_WIRING = { gunBits: 32, heatIsHeadroom: true, promptHz: 8, nearbyHz: 4, hurtRange: 400 };
 
 /** Debug counters, readable from the console as window.__stats. */
 const stats = { frameMs: 0, physicsMs: 0, renderMs: 0, rawDt: 0, grounded: false, vel: [0, 0, 0] as number[], calls: 0, triangles: 0, pack: '', terrain: '', chunks: 0 };
@@ -415,6 +430,49 @@ class App {
    * canvas: it touches no WebGL context, so nothing compiles because of it.
    */
   private readonly overlay = new HudCanvas(this.ui);
+  /**
+   * The short bar of things you can press here, bottom centre. A field initialiser beside the
+   * message line, so it exists before anything in the constructor could ask for it.
+   */
+  private readonly actions = new ActionBar(this.ui);
+  /**
+   * Where the player is standing, as the bar's rules want it: one struct, filled in place a few
+   * times a second and never rebuilt. `promptClock` counts down to the next fill and `promptLive`
+   * is what the bar was last told, so a frame that stops simulating empties it once rather than
+   * waiting for the next fill (a bar of things you cannot press over the death card is the fault).
+   */
+  private readonly promptState: PromptState = newPromptState();
+  private promptClock = 0;
+  private promptLive = false;
+  /**
+   * The arc on the side a blow came from, the tick on the crosshair when one of your shots tells,
+   * and the rising numbers. Its shapes go on the same overlay; its words go to the message line.
+   */
+  private readonly feedback = new HudFeedback(this.ui);
+  /** The name and health of whatever the crosshair rests on, over its head; the corner's "nearby" gone. */
+  private readonly plates = new Nameplates(this.ui);
+  /** Where the crosshair is cast from and where it points: two kept vectors, refilled each frame. */
+  private readonly plateEye = new THREE.Vector3();
+  private readonly plateDir = new THREE.Vector3();
+  /** Where a world point lands on the screen, for the rising numbers: filled in place, never new. */
+  private readonly feedbackPoint = new THREE.Vector3();
+  /**
+   * Where the blow being dealt to the player right now came from, held for the length of one call.
+   * It is set by the wrapper in the constructor and read by the frame loop's damage closure as the
+   * second source: the player's own record hands the direction to its callback itself, and this
+   * catches anything that reaches the record by a path that does not.
+   */
+  private hurtSource: THREE.Vector3 | null = null;
+  /** The nearest living thing's name, found at `HUD_WIRING.nearbyHz` rather than on the frame path. */
+  private nearbyName = '';
+  private nearbyClock = 0;
+  /**
+   * The two words the long prompt line needs that the bar's own state has no room for: how many
+   * levels the lift underfoot has, and what the building with no way in on foot is called. Gathered
+   * with the rest, so the long line asks the world for nothing at all on the frame path.
+   */
+  private promptLiftStops = 0;
+  private promptDoorless = '';
   /** Where every piece of the display sits, refilled on a resize or a change of scale and never in a frame. */
   private readonly hudLayout: HudLayout = makeLayout();
   private fxQueued = false;
@@ -611,6 +669,14 @@ class App {
     this.litSources.effects = this.effects;
     this.scene.add(this.marks.mesh);
     this.hud = new Hud(this.ui);
+    // The crosshair, the charge ring and a slot's cooldown sweep are shapes and go on the overlay;
+    // the keys on the slot caps and in the help block come from the bindings, read once here and
+    // again whenever the Controls page moves one, so nothing reads them on the frame path.
+    this.hud.attach(this.overlay, COL);
+    this.hud.setInput(this.input);
+    onBindingsChanged(hudBindingsChanged);
+    // What is in each hand: the live object the player keeps, and the rack's own picture for an item.
+    this.hud.setHandSource({ equipped: this.player.equipped, icon: (item) => (this.weapons ? this.weapons.iconUrl(item as WeaponDef) : null) });
     // The comms and the ship's status line; the world (assigned above) hands the taunts over.
     this.shipHud = new ShipHud(this.ui);
     // Its shapes go on the overlay, in the palette's own colours; its one-shot lines and the pilots'
@@ -618,6 +684,35 @@ class App {
     this.shipHud.attach(this.overlay, COL);
     this.shipHud.messages = (kind, text, colour) => this.sayShipLine(kind, text, colour);
     this.world.ships.onTaunt = (who, text, faction) => this.shipHud.say(who, text, FACTION_COLOR[faction]);
+    // The damage feedback draws on the same overlay and says its lines on the same message line. Its
+    // projector is the one piece of three it cannot own: a world point onto this frame's screen,
+    // through one kept vector, so twelve rising numbers allocate nothing between them.
+    this.feedback.attach(this.overlay, COL);
+    this.feedback.messages = (kind, text, colour) => this.sayShipLine(kind, text, colour);
+    this.feedback.setProjector((x, y, z, out) => this.projectToScreen(x, y, z, out));
+    // Where a blow on the player came from. Every striker already passes it — a creature, a fighter,
+    // a mobile and a bolt all call `damage(amount, from, push, source)` — and the record now hands it
+    // on to its callback, so the closure below reads it directly. This wrapper caught it before that
+    // and stays as the second source, because it costs nothing: the record is one object for the life
+    // of the session, so this is a single wrapper and not a per-frame anything.
+    const target = this.world.playerTarget;
+    const innerDamage = target.damage.bind(target);
+    target.damage = (amount: number, from?: THREE.Vector3): void => {
+      this.hurtSource = from ?? null;
+      // Put back whatever happens: a direction left standing would be worn by the next blow that
+      // has none of its own, and a fall would flash with an arc on the side of whatever last shot.
+      try {
+        innerDamage(amount, from);
+      } finally {
+        this.hurtSource = null;
+      }
+    };
+    // Every blow the player lands, whatever struck and whichever file called it: the world wraps each
+    // living thing's own `damage` once as it joins the list, so this is one hook rather than a dozen.
+    this.world.watchPlayerHits((hit, amount, killed) => this.landedHit(hit, amount, killed));
+    // The bar reads the keys you have bound straight out of the input, which the Controls page edits
+    // in place: a rebind reaches the caps on the bar's next fill with nothing having to be told.
+    this.actions.setBindings(this.input.bindings);
     // The wardrobe says what it refused in its own panel; the line it used to clear here was rewritten
     // by the frame loop before anyone could see either it or the clear, so there is nothing to clear.
     this.wardrobe = new WardrobeUi(this.ui, () => {});
@@ -1398,11 +1493,15 @@ class App {
       /** Rebind an action to one or more keys (KeyboardEvent.code names, or Mouse0/Mouse1/Mouse2); no keys restores the default. Kept in local storage. */
       bind: (action: Action, ...codes: string[]) => {
         this.input.bind(action, codes);
+        notifyBindingsChanged();
         return this.input.bindings[action];
       },
       /** Every action and the keys bound to it. */
       bindings: () => ({ ...this.input.bindings }),
-      resetBindings: () => this.input.resetBindings(),
+      resetBindings: () => {
+        this.input.resetBindings();
+        notifyBindingsChanged();
+      },
       /**
        * The mixer, and its live numbers. Nothing can be heard from a driven tab, so this is how
        * sound is checked headless: the context's state (`suspended` means nobody has clicked yet),
@@ -2099,7 +2198,7 @@ class App {
        * beside it. `lineWrites` is the message line's, counted apart because a line said or fading
        * is a write that is meant to happen.
        */
-      hud: (opts: { overlay?: boolean; scale?: number; dpr?: number; boxes?: boolean; condition?: boolean; target?: boolean; arcs?: boolean; line?: boolean; lines?: number; fullPrompts?: boolean; flight?: Partial<FlightTune>; tune?: Parameters<Hud['tune']>[0]; messages?: Partial<typeof MESSAGES>; wiring?: Partial<typeof HUD_WIRING>; under?: Partial<typeof OVERLAY_TUNE>; sizes?: Partial<HudSizes> } = {}) => {
+      hud: (opts: { overlay?: boolean; scale?: number; dpr?: number; boxes?: boolean; condition?: boolean; target?: boolean; arcs?: boolean; line?: boolean; lines?: number; fullPrompts?: boolean; damageArc?: boolean; damageNumbers?: boolean; nameplate?: boolean; jediCrosshair?: boolean; flight?: Partial<FlightTune>; tune?: Parameters<Hud['tune']>[0]; messages?: Partial<typeof MESSAGES>; wiring?: Partial<typeof HUD_WIRING>; under?: Partial<typeof OVERLAY_TUNE>; sizes?: Partial<HudSizes>; feedback?: Partial<FeedbackTune>; prompt?: Partial<typeof PROMPT>; plates?: Partial<typeof PLATE_TUNE> } = {}) => {
         const S = this.settings;
         let sized = false;
         // Clamped here, at the door, and not only on the way to the canvas: whatever is typed in the
@@ -2130,6 +2229,23 @@ class App {
           S.hudFullPrompts = opts.fullPrompts;
           sized = true;
         }
+        // The four fighting switches, as the Interface page sets them.
+        if (typeof opts.damageArc === 'boolean') {
+          S.hudDamageArc = opts.damageArc;
+          sized = true;
+        }
+        if (typeof opts.damageNumbers === 'boolean') {
+          S.hudDamageNumbers = opts.damageNumbers;
+          sized = true;
+        }
+        if (typeof opts.nameplate === 'boolean') {
+          S.hudNameplate = opts.nameplate;
+          sized = true;
+        }
+        if (typeof opts.jediCrosshair === 'boolean') {
+          S.hudJediCrosshair = opts.jediCrosshair;
+          sized = true;
+        }
         if (sized) this.applyHudSettings();
         if (typeof opts.overlay === 'boolean') this.overlay.setEnabled(opts.overlay);
         if (typeof opts.boxes === 'boolean') this.overlay.setBoxes(opts.boxes);
@@ -2146,15 +2262,29 @@ class App {
         }
         // A size only reaches the screen on the next layout, which `applyHudSettings` runs.
         if (opts.sizes && tuneSizes(opts.sizes) > 0) this.applyHudSettings();
+        if (opts.feedback) this.feedback.tune(opts.feedback);
+        if (opts.prompt) tunePrompt(opts.prompt);
+        if (opts.plates) this.plates.tune(opts.plates);
         if (opts.wiring) {
           if (typeof opts.wiring.gunBits === 'number' && Number.isFinite(opts.wiring.gunBits)) HUD_WIRING.gunBits = Math.max(1, Math.min(32, Math.round(opts.wiring.gunBits)));
           if (typeof opts.wiring.heatIsHeadroom === 'boolean') HUD_WIRING.heatIsHeadroom = opts.wiring.heatIsHeadroom;
+          // The two gather rates and the arc's range. A rate of 60 puts the old per-frame cost back,
+          // which is how to measure what gathering at 8 and 4 saves; nothing may be 0, or the gather
+          // would never come round again.
+          if (typeof opts.wiring.promptHz === 'number' && Number.isFinite(opts.wiring.promptHz)) HUD_WIRING.promptHz = Math.max(1, Math.min(120, opts.wiring.promptHz));
+          if (typeof opts.wiring.nearbyHz === 'number' && Number.isFinite(opts.wiring.nearbyHz)) HUD_WIRING.nearbyHz = Math.max(1, Math.min(120, opts.wiring.nearbyHz));
+          if (typeof opts.wiring.hurtRange === 'number' && Number.isFinite(opts.wiring.hurtRange)) HUD_WIRING.hurtRange = Math.max(1, opts.wiring.hurtRange);
         }
         const c = this.overlay.stats;
         const body = this.hud.stats();
         const ship = this.shipHud.report();
         const line = this.messages.debug();
+        const bar = this.actions.debug();
+        const fb = this.feedback.report();
+        const foot = this.hud.report();
+        const plate = this.plates.report();
         const L = this.hudLayout;
+        const s = this.promptState;
         return {
           // `ops` is the canvas's own count of everything drawn through it, the display's strokes
           // included, and is the figure the budget is written against; `shapes` is the display's own
@@ -2164,7 +2294,7 @@ class App {
           // are the last full second's. The message line is counted apart: it writes only when
           // something was said or is fading, which is by design, and its own counter is a lifetime
           // total, so adding it here would put a rising number where a 0 is meant to stand.
-          writes: body.writes + ship.writes,
+          writes: body.writes + ship.writes + fb.writes,
           byDesign: body.byDesign,
           lineWrites: { lastSecond: this.lineWritesLast, total: line.writes },
           scale: L.scale,
@@ -2172,10 +2302,50 @@ class App {
           layout: { arcR: Math.round(L.arcR), aimMax: Math.round(L.aimMax), condition: [L.condition.x, L.condition.y, L.condition.w, L.condition.h], message: [L.message.x, L.message.y, L.message.w, L.message.h] },
           pips: ship.pips,
           messages: { lines: line.lines, fading: line.fading, said: line.said, merged: line.merged, dropped: line.dropped, kept: MESSAGES.kept, styled: !this.messages.styleless },
-          shows: { condition: S.hudShipCondition, target: S.hudTargetBlock, arcs: S.hudArcs, line: S.hudMessages, fullPrompts: S.hudFullPrompts },
+          shows: { condition: S.hudShipCondition, target: S.hudTargetBlock, arcs: S.hudArcs, line: S.hudMessages, fullPrompts: S.hudFullPrompts, damageArc: S.hudDamageArc, damageNumbers: S.hudDamageNumbers, nameplate: S.hudNameplate, jediCrosshair: S.hudJediCrosshair },
           bodyBars: this.bodyShown,
+          // The bar of things you can press: what it is showing, with the key on each cap, and what
+          // the state behind it says. `writes` is the bar's own lifetime total, not a rate, since it
+          // only writes when what it shows has changed; walking about is what makes it rise.
+          actions: {
+            shown: bar.shown,
+            slots: this.actions.size,
+            writes: bar.writes,
+            changed: bar.changed,
+            rebinds: bar.rebinds,
+            styled: bar.styled,
+            list: this.actionsList(bar.shown),
+            state: { live: s.live, jump: s.jump, noclip: s.noclip, mounted: s.mounted, piloting: s.piloting, kind: s.vehicle.kind, lift: s.lift, elevator: s.elevator, doorless: s.doorless, boots: s.boots, bootsReach: s.bootsReach, aboard: s.aboard, atControls: s.atControls, eva: s.eva, near: s.near, shipMenu: s.shipMenu },
+            hz: HUD_WIRING.promptHz,
+          },
+          // The damage feedback: the arcs standing, the numbers rising, and how long ago a shot of
+          // yours told and killed (-1 for "not since the world loaded").
+          feedback: { arcs: fb.arcs, numbers: fb.numbers, ops: fb.ops, writes: fb.writes, attached: fb.attached, projector: fb.projector, sinceHit: fb.tick, sinceKill: fb.kill, shown: this.feedback.shown, tune: { ...FEEDBACK_TUNE } },
+          // On foot: the glyphs the sheet holds, the keys the number slots are showing (which is how
+          // a rebind is checked from a tab nobody can see), what is in each hand, and whether the
+          // crosshair is drawn for the class in play.
+          onFoot: { icons: foot.icons, keys: foot.keys, hands: foot.hands, crosshair: foot.crosshair, attached: foot.attached, ops: foot.ops },
+          // The plate over a head, and the line in the corner it replaced.
+          plates: { shown: plate.shown, label: plate.label, writes: plate.writes, enabled: plate.enabled, tune: { ...PLATE_TUNE } },
+          nearby: { name: this.nearbyName, hz: HUD_WIRING.nearbyHz },
           wiring: { ...HUD_WIRING },
         };
+      },
+      /**
+       * Try the damage feedback without being shot at. The angle is degrees clockwise from straight
+       * ahead: `hurt(0)` ahead, `hurt(90)` on the right, `hurt(180)` behind, `hurt(270)` on the left.
+       * `hurt(null)` is a blow with no direction (the red flash alone). `hit(12)` ticks the crosshair
+       * as one of your own shots landing, and `hit(12, true)` as the one that killed.
+       */
+      hurt: (deg: number | null = 0) => {
+        if (deg === null) this.hurtFrom(null);
+        else this.feedback.hurtAngle(deg);
+        return this.feedback.report();
+      },
+      hit: (amount = 10, killed = false, label = 'a test') => {
+        const p = this.player.worldPos;
+        this.feedback.hit(amount, killed, 999, label, p.x, p.y + 1.6, p.z - 3);
+        return this.feedback.report();
       },
       /** Say a line on the message line by hand, to see a kind's colour and the fade: `say('hit you', 'test')`. */
       say: (kind: ShipMessageKind = 'system', text = 'a test line') => {
@@ -3070,8 +3240,23 @@ class App {
     this.world.leave();
     this.shipHud.clear();
     this.messages.clear();
-    // No frame runs outside the world, so the overlay is taken off here rather than waiting for one.
+    // No frame runs outside the world, so the overlay is taken off here rather than waiting for one,
+    // and with it the damage feedback and the bar of things you could press in a world you have left.
     this.overlay.idle();
+    this.feedback.clear();
+    this.plates.clear();
+    this.hud.idle();
+    this.actions.clear();
+    this.promptLive = false;
+    resetPromptState(this.promptState);
+    // The three readings kept beside the struct, and the two clocks: the struct's own reset does not
+    // reach them, and a name or a building's label left standing would be written into the corner of
+    // the next world for as long as it takes the clock to come round again.
+    this.nearbyName = '';
+    this.nearbyClock = 0;
+    this.promptClock = 0;
+    this.promptLiftStops = 0;
+    this.promptDoorless = '';
     this.showBodyBlock(true);
     this.hud.setPrompt('');
     this.hud.setMouseFree(false);
@@ -3165,6 +3350,10 @@ class App {
       case 'hudMessages':
       case 'hudMessageLines':
       case 'hudFullPrompts':
+      case 'hudDamageArc':
+      case 'hudDamageNumbers':
+      case 'hudNameplate':
+      case 'hudJediCrosshair':
         // A size, a backing store and a few switches: no shader and no element is made.
         this.applyHudSettings();
         break;
@@ -3188,12 +3377,23 @@ class App {
     this.overlay.setScale(scale);
     this.overlay.setDpr(Math.max(HUD_DPR_RANGE.min, Math.min(HUD_DPR_RANGE.max, S.hudDpr)));
     this.shipHud.setScale(scale);
+    this.feedback.setScale(scale);
+    this.hud.setScale(scale);
+    this.plates.setScale(scale);
+    // A crosshair is drawn for every class; whether the Jedi is one of them is the player's, since a
+    // permanent crosshair changes how a saber fight feels.
+    this.hud.setCrosshair(true, S.hudJediCrosshair);
+    this.plates.setEnabled(S.hudNameplate);
     this.hudLayoutFor(scale);
     // The message column the layout worked out, so a long line cannot run under the centred blocks on
     // a narrow window. One property write, on a resize and a change of scale, never in a frame.
     document.documentElement.style.setProperty('--hud-msg-w', `${Math.round(this.hudLayout.message.w)}px`);
     MESSAGES.kept = Math.max(HUD_LINES_RANGE.min, Math.min(HUD_LINES_RANGE.max, Math.round(S.hudMessageLines)));
     this.messages.setEnabled(S.hudMessages);
+    // The four feedback switches. The tick on the crosshair has no switch of its own: it is the
+    // cheapest thing on the screen and the only sign that a shot told at all, so it is always on.
+    // What it says in words follows the message line, since that is where the words would go.
+    this.feedback.setShown(S.hudDamageArc, true, S.hudDamageNumbers, S.hudMessages);
     // Turned off, the long line would otherwise stand at whatever it last said: the frame loop stops
     // writing it, so it is emptied here.
     if (!S.hudFullPrompts) this.hud.setPrompt('');
@@ -3220,6 +3420,160 @@ class App {
   /** The overlay's layout at a scale, worked out on a resize or a change of scale and never in a frame. */
   private hudLayoutFor(scale: number): void {
     layout(window.innerWidth, window.innerHeight, scale, this.hudLayout);
+    // The damage feedback lays its arcs out against the same window. Told here, on the resize and on
+    // a change of scale, it never reads the window from a frame again.
+    this.feedback.setLayout(this.hudLayout.w, this.hudLayout.h);
+  }
+
+  /**
+   * A world point onto this frame's screen, in pixels from the top left, for the rising damage
+   * numbers. One kept vector, so the whole pool costs no allocation; false when the point is behind
+   * the camera, which is the number's signal to stand aside rather than to be thrown away.
+   */
+  private projectToScreen(x: number, y: number, z: number, out: ScreenPoint): boolean {
+    const v = this.feedbackPoint.set(x, y, z).project(this.cam.camera);
+    if (!(v.z <= 1) || !Number.isFinite(v.x)) return false;
+    out.x = (v.x * 0.5 + 0.5) * window.innerWidth;
+    out.y = (0.5 - v.y * 0.5) * window.innerHeight;
+    return true;
+  }
+
+  /**
+   * You hurt something: the tick on the crosshair, the line in words and — with the setting on — a
+   * number over its head. The world calls this for every blow of the player's, whatever landed it.
+   * The point is the body's head rather than its feet, since that is where a number belongs.
+   */
+  private landedHit(target: { pos: THREE.Vector3; halfHeight: number; key: number; label: string }, amount: number, killed: boolean): void {
+    const p = target.pos;
+    this.feedback.hit(amount, killed, target.key, target.label, p.x, p.y + target.halfHeight, p.z);
+  }
+
+  /**
+   * A blow landed on the player, and where it came from in the world: the red flash, which every
+   * blow gets, and the arc on that side of the screen, which only a blow with a direction gets. A
+   * fall, a burn and a jolt through a hull pass nothing and show the flash alone.
+   *
+   * Aboard a ship's rooms the player's own place is the hull's frame and the world's is `worldPos`,
+   * so the direction is measured in the world, where everything that strikes from outside stands.
+   */
+  private hurtFrom(from: THREE.Vector3 | null | undefined): void {
+    this.hud.hurt();
+    if (!from) return;
+    const at = this.player.worldPos;
+    const dx = from.x - at.x;
+    const dy = from.y - at.y;
+    const dz = from.z - at.z;
+    // A blow from the far side of a valley points at a pixel: past the range it is no direction at all.
+    const r = HUD_WIRING.hurtRange;
+    if (dx * dx + dy * dy + dz * dz > r * r) return;
+    this.feedback.hurt(dx, dy, dz);
+  }
+
+  /**
+   * The bar as it stands, in words, for the console: a key-cap and its label per slot shown. Only
+   * the slots that are actually on the bar are joined, so a two-action bar reads "E mount | Space
+   * hop" rather than trailing a pair of bare separators for the cells that are hidden. It is built
+   * on demand from the console and never in a frame, which is the only reason it may build a string.
+   */
+  private actionsList(shown: number): string {
+    let out = '';
+    for (let i = 0; i < shown; i++) out += `${out ? ' | ' : ''}${this.actions.keyAt(i)} ${this.actions.labelAt(i)}`;
+    return out;
+  }
+
+  /**
+   * Where the player is standing, as the action bar's rules want it, into the one struct this file
+   * keeps. Nothing is built: the struct is reset in place and filled in place.
+   *
+   * It is called a few times a second rather than every frame, and that is the whole point of it.
+   * The words the bar shows never cost anything; the *asking* does — the lift underfoot, the
+   * elevators near, the doorless building near and the nearest vehicle are all walks of a list or a
+   * physics lookup, and the long line this replaces did every one of them on every frame, the
+   * elevators twice on one line. Gathering them eight times a second is the saving.
+   *
+   * The order the states are asked in is the long prompt line's own, which is not quite the bar's:
+   * the line asks for the lift underfoot before it asks what is being flown, so the lift is asked
+   * for while a bridge's controls are held too. That costs one lookup eight times a second and it
+   * keeps the line saying exactly what it said before. The bar's rules read the same struct in their
+   * own order and offer the ship there, which is theirs to decide. A jump and noclip decide the
+   * whole of it and return before anything at all is asked for.
+   */
+  private gatherPrompt(simulate: boolean): PromptState {
+    const s = resetPromptState(this.promptState);
+    const p = this.player;
+    s.live = simulate;
+    if (!simulate) return s;
+    const room = p.aboard;
+    // The ship menu: near the top of a planet's sky it is news, in space it is simply there.
+    s.shipMenu = this.spaceGate === 'up' ? 'altitude' : this.world.planet.space ? 'here' : '';
+    // A jump holds the controls, and its own few actions are the whole bar while it does.
+    const jump = this.hyperspace.prompt;
+    if (jump) {
+      s.jump = !this.hyperspace.crewFree || !room ? 'waiting' : this.liftHere() ? 'lift' : p.piloting ? 'piloting' : room.pilotSpot && p.pos.distanceTo(room.pilotSpot) < CONTROLS_RANGE ? 'controls' : 'waiting';
+      s.lift = s.jump === 'lift';
+      return s;
+    }
+    s.noclip = p.noclip;
+    if (s.noclip) return s;
+    // On foot, and standing at a bridge's controls too: the long line asks for the lift underfoot
+    // before it asks what is flown, and both readings are gathered here so that the long line can
+    // read them rather than ask for them again on every frame it is written.
+    if (!p.mounted) {
+      const lift = this.liftHere();
+      s.lift = !!lift;
+      this.promptLiftStops = lift ? lift.stops.length : 0;
+      if (!lift && !room) {
+        // One call, not two: the long line asked twice on one line, once to test and once to read.
+        const lifts = this.world.elevatorsNear(p.pos, MOUNT_RANGE);
+        if (lifts.length) s.elevator = lifts[0].kind === 'down' ? 'down' : 'up';
+        else {
+          const doorless = this.world.doorlessNear(p.pos);
+          s.doorless = !!doorless;
+          this.promptDoorless = doorless ? doorless.label : '';
+        }
+      }
+    }
+    const flown = p.mounted ?? p.piloting;
+    if (flown) {
+      s.mounted = !!p.mounted;
+      s.piloting = !p.mounted;
+      const v = s.vehicle;
+      v.kind = flown.spec.kind;
+      v.ship = !!flown.spec.ship;
+      v.space = flown.space;
+      v.landed = flown.landed;
+      v.holding = flown.holding;
+      v.airborne = flown.airborne;
+      v.canLand = SHIP_GROUND.rule === 'landing';
+      v.setDownNear = !!flown.setDownNear;
+      v.powered = flown.powered;
+      v.wings = flown.wings.length > 0;
+      v.wingsOpen = flown.wings.chosen;
+      v.guns = flown.guns.length > 0;
+      v.hop = !!flown.spec.hop;
+      v.boost = flown.spec.boost === 'heat' || flown.spec.boost === 'burst';
+      v.cutKey = CUT_ENGINES_KEY;
+      // A speeder or a mount has no ship menu of its own to offer.
+      if (!v.ship) s.shipMenu = '';
+      return s;
+    }
+    if (isSurfaceRoom(room)) {
+      s.boots = true;
+      s.bootsReach = !!this.reachFromBoots();
+      return s;
+    }
+    if (room) {
+      s.aboard = true;
+      s.atControls = !!room.pilotSpot && p.pos.distanceTo(room.pilotSpot) < CONTROLS_RANGE;
+      // Aboard a hull in space the menu is reached from the rooms; on a planet it is not.
+      return s;
+    }
+    // One walk of the vehicles for all three of the questions the long line asked separately: is
+    // one in reach, has it a room to step into, and is it on its back.
+    const near = this.nearestVehicle();
+    s.near = !near ? '' : near.interior ? 'board' : near.upsideDown ? 'flip' : 'mount';
+    s.eva = p.eva;
+    return s;
   }
 
   /**
@@ -3235,9 +3589,13 @@ class App {
     if (!simulate || !o.begin()) {
       o.idle();
       this.shipHud.idle();
+      this.feedback.idle();
+      this.hud.idle();
       return;
     }
+    this.hud.draw();
     this.shipHud.draw();
+    this.feedback.draw();
     o.end();
   }
 
@@ -4034,8 +4392,11 @@ class App {
     this.zone = planet.zones?.length ? (planet.zones.find((z) => z.id === zoneId) ?? planet.zones[0]).id : undefined;
     this.postfx?.reset();
     this.marks.clear();
-    // No pilot's line or ship status from the world left behind.
+    // No pilot's line or ship status from the world left behind, and no damage feedback either: it
+    // ages on the real clock and runs through a travel, so a blow landed a fraction of a second
+    // before one would otherwise say what it hurt on the planet arrived at.
     this.shipHud.clear();
+    this.feedback.clear();
     this.world.load(planet, packIdOf(planet, this.zone));
     this.spawn = this.world.spawnPoint();
     const stand = at ?? this.spawn;
@@ -4748,7 +5109,8 @@ class App {
       if (v === player.mounted && v.flipped) {
         this.dismountBeside(v);
         player.takeDamage(10);
-        this.hud.hurt();
+        // Thrown by the ground, not by anybody: no direction, so the red flash and no arc.
+        this.hurtFrom(null);
         this.messages.hitYou('thrown off: the speeder is on its back');
       }
       if (v.justHit > 0) {
@@ -4756,7 +5118,9 @@ class App {
         this.effects.flash(v.pos, 0xffa050, 6 + v.justHit, 5, 0.12);
         if (v === player.mounted) {
           player.takeDamage(Math.round(Math.min(40, (v.justHit - 6) * 1.5)));
-          this.hud.hurt();
+          // A jolt through the hull under you: the hull keeps no record of what it ran into, so
+          // there is no direction to point at and the flash is the whole of it.
+          this.hurtFrom(null);
         }
       }
       if (v.struck > 0) {
@@ -4764,7 +5128,9 @@ class App {
         // takes them in its shields and armour: the pilot is jolted and keeps their health until it is destroyed.
         if (v === player.mounted || v === player.piloting) {
           if (!v.combat) player.takeDamage(Math.round(Math.min(12, v.struck * 0.2)));
-          this.hud.hurt();
+          // Bolts in the hull: the hull counts them but does not keep where they came from, so this
+          // one flashes without an arc. The ship's own bars flash in the layer's colour instead.
+          this.hurtFrom(null);
         }
         v.struck = 0;
       }
@@ -4787,7 +5153,8 @@ class App {
           tmp.copy(v.pos).y += 0.6;
           player.fling(tmp, tmp2.set(lv.x, lv.y, lv.z));
           player.takeDamage(25);
-          this.hud.hurt();
+          // Blown up under you: it is all round, so it has no side.
+          this.hurtFrom(null);
         } else if (player.aboard?.vehicle === v) this.thrownOutOfShip(v);
         this.effects.ring(v.pos, 0xffa050, 6 + v.radius, 0.5);
         this.effects.burst(v.pos, 0xffc080, 2 + v.radius, 0.4);
@@ -4807,7 +5174,8 @@ class App {
     if (player.piloting?.crashed) {
       const m = player.piloting;
       player.takeDamage(Math.round(THREE.MathUtils.clamp((m.crashed - 8) * 1.2, 5, 95)));
-      this.hud.hurt();
+      // Flown into the ground: no side to it.
+      this.hurtFrom(null);
       m.crashed = 0;
     }
     if (player.mounted) {
@@ -4817,7 +5185,7 @@ class App {
         // Flown into the ground: hurt by the speed, and the crash shown where it happened.
         const dmg = Math.round(THREE.MathUtils.clamp((m.crashed - 8) * 1.2, 5, 95));
         player.takeDamage(dmg);
-        this.hud.hurt();
+        this.hurtFrom(null);
         this.effects.burst(m.pos, 0xffb070, 3 + m.radius, 0.35);
         this.effects.flash(m.pos, 0xff8a50, 20, 25, 0.3);
         this.messages.hitYou(`crashed at ${Math.round(m.crashed * 3.6)} km/h: ${dmg} damage`);
@@ -5107,10 +5475,12 @@ class App {
       // A bolt the saber turns away becomes the player's: what it then hurts turns on them.
       playerSource: this.world.playerTarget,
       block: (bolt, hit, out) => player.deflect(bolt.dir, hit, this.cam, out),
-      onPlayerHit: (dmg) => {
+      // The bolt hands over where it was when it reached you, which is the direction it came from
+      // closely enough for an arc: a bolt travels 600 m/s and the point is a frame old at most.
+      onPlayerHit: (dmg, from) => {
         if (player.mounted || player.noclip) return;
         player.takeDamage(dmg);
-        this.hud.hurt();
+        this.hurtFrom(from);
       },
     });
   }
@@ -6474,7 +6844,8 @@ class App {
     (this.kits.bounty_hunter as BountyHunterKit | undefined)?.coolDown();
     p.fling(tmp, tmp2.set(lv.x, lv.y, lv.z));
     p.takeDamage(20);
-    this.hud.hurt();
+    // Thrown out of a hull that has gone: nothing to point at.
+    this.hurtFrom(null);
     this.cam.setFrame(null);
   }
 
@@ -6532,26 +6903,11 @@ class App {
     }
   }
 
-  /** Whether the nearest vehicle in reach has a room to step into. */
-  private nearestHasRoom(): boolean {
-    let best: Vehicle | null = null;
-    let bestD = MOUNT_RANGE;
-    for (const sp of this.world.vehicles) {
-      const d = this.vehicleReach(sp);
-      if (d < bestD) {
-        bestD = d;
-        best = sp;
-      }
-    }
-    return !!best?.interior;
-  }
-
-  private nearestSpeederDistance(): number {
-    let d = Infinity;
-    for (const sp of this.world.vehicles) d = Math.min(d, this.vehicleReach(sp));
-    return d;
-  }
-
+  /**
+   * The vehicle within arm's reach, or nothing. It answers all three of the questions the prompt
+   * used to ask separately, each with a walk of its own: is one in reach, has it a room to step
+   * into (`interior`), and is it on its back (`upsideDown`).
+   */
   private nearestVehicle(): Vehicle | null {
     let best: Vehicle | null = null;
     let bestD = MOUNT_RANGE;
@@ -6706,10 +7062,12 @@ class App {
       // Where the player stands, whether it may be attacked at all, and what a blow does: the one
       // record everything alive fights over. Mounted stays targetable, as it always has -- the
       // creatures chase a rider -- and the damage is dropped by the callback.
-      const hurt = (dmg: number) => {
+      // `from` is where whatever struck was standing: every creature, fighter, mobile and bolt already
+      // passes it, and it is what turns the red flash into an arc on the side the blow came from.
+      const hurt = (dmg: number, from?: THREE.Vector3) => {
         if (!simulate || player.mounted || player.noclip || player.aboard) return;
         player.takeDamage(dmg);
-        this.hud.hurt();
+        this.hurtFrom(from ?? this.hurtSource);
       };
       // The weather's view of the player: aboard rooms nothing falls; a ridden ship's box keeps rain out of its canopy.
       this.world.aboard = !!player.aboard;
@@ -6762,32 +7120,60 @@ class App {
       this.world.updateWeatherView(dt);
       this.world.updateShadows(performance.now());
 
+      // The short bar of things you can press. Its state is gathered a few times a second into one
+      // kept struct, because the asking is what costs — the lift underfoot, the elevators near, the
+      // doorless building near and the nearest vehicle — and never the words. It is emptied at once
+      // on any frame that is not simulated, rather than waiting for the next gather: a row of things
+      // you cannot press, standing over the death card, is exactly the fault to avoid.
+      if (!simulate) {
+        if (this.promptLive) {
+          this.promptLive = false;
+          this.actions.clear();
+          resetPromptState(this.promptState);
+          // The plate over a head goes with it: a name standing over a creature behind the death
+          // card would be the same fault as a frozen reticle, and the plates are DOM, not canvas.
+          this.plates.clear();
+        }
+      } else {
+        this.promptClock -= rawDt;
+        if (this.promptClock <= 0 || !this.promptLive) {
+          this.promptClock = 1 / Math.max(1, HUD_WIRING.promptHz);
+          this.promptLive = true;
+          this.actions.set(this.gatherPrompt(true));
+        }
+      }
       // The ship menu is where space is gone to and come back from; the prompt says when the ship is high enough.
-      // The long line of every key is what it always was, but it is now a setting, and the setting is
-      // worth having: the *conditions* are its cost, not the words. Writing it asks the world for the
-      // lift underfoot, the elevators near, the doorless building near and the nearest vehicle, every
-      // frame. With the line off none of that is asked for; only the lift stays, because the jump's
-      // own line says whether there is one.
-      const full = this.settings.hudFullPrompts;
+      // The long line of every key is what it always was, but it is now a setting, and it costs
+      // nothing on the frame path either way: the *conditions* were always its cost, not the words,
+      // and every one of them — the lift underfoot, the elevators near, the doorless building near,
+      // the nearest vehicle, the ship in reach of the boots — is now read out of the bar's own
+      // state, gathered a few times a second. The line's wording can therefore be an eighth of a
+      // second behind what is underfoot, which is far less than it takes to reach for the key.
+      const S8 = this.promptState;
+      // The line is written only while the game is simulating, as the bar is emptied then. Half of
+      // its branches read the eighth-of-a-second state, which is emptied on the frame the game stops,
+      // and half read the player directly, which is not: written over an open panel the line would
+      // disagree with itself, saying "E mount" where it had been saying "E lift". A jump's own line
+      // goes over it either way, so a countdown is never lost to a panel.
+      const full = this.settings.hudFullPrompts && simulate;
       const shipKey = full ? keyName(input.bindings.ship[0] ?? '') : '';
       const shipHint = !full ? '' : this.spaceGate === 'up' ? ` · <b>at altitude for space: ${shipKey}</b> ship menu` : this.world.planet.space ? ` · <b>${shipKey}</b> ship menu` : '';
       let prompt = '';
-      let lift: ReturnType<App['liftHere']> = null;
-      let doorless: { label: string } | null = null;
-      if (!full) lift = this.liftHere();
-      else if (player.noclip) prompt = `<b>NOCLIP</b> ${Math.round(player.noclipSpeed)} m/s · <b>WASD</b> fly · <b>Space</b> up · <b>Ctrl</b> down · <b>Shift</b> fast · <b>+</b>/<b>-</b> speed · <b>N</b> off`;
-      else if (player.mounted) prompt = mountPrompt(player.mounted, input.bindings.wings[0] ?? WINGS_KEY) + (player.mounted.spec.ship ? shipHint : '');
-      else if ((lift = this.liftHere())) prompt = `<b>E</b> lift: ${lift.stops.length} levels`;
-      else if (!player.aboard && this.world.elevatorsNear(player.pos, MOUNT_RANGE).length) prompt = `<b>E</b> elevator ${this.world.elevatorsNear(player.pos, MOUNT_RANGE)[0].kind === 'down' ? 'down' : 'up'}`;
-      else if (!player.aboard && (doorless = this.world.doorlessNear(player.pos))) prompt = `<b>E</b> enter ${doorless.label} (no way in on foot)`;
-      else if (player.piloting) prompt = `at the controls of the ${player.piloting.spec.label} · ${player.piloting.landed ? `landed · <b>W</b> or <b>Space</b> lifts off` : `<b>W</b>/<b>S</b> throttle · mouse steers${player.piloting.spec.ship && SHIP_GROUND.rule === 'landing' ? ` · hold <b>Ctrl</b> to set down · <b>${keyName(CUT_ENGINES_KEY)}</b> cuts the engines` : ''}`} · <b>Alt</b> looks around · <b>E</b> lets go · ${Math.round(Math.abs(player.piloting.speed) * 3.6)} km/h${shipHint}${player.piloting.landNote ? ` · ${player.piloting.landNote}` : ''}`;
-      // Standing on something out in space: the boots hold, a jump lets go, and E climbs into a ship beside you.
-      else if (isSurfaceRoom(player.aboard)) prompt = `<b>gravity boots</b> on ${this.reachFromBoots() ? 'a surface · <b>E</b> climbs into the ship' : 'a surface · <b>E</b> takes them off'} · <b>jump</b> lets go${player.aboard.atEdge ? ' · <b>the surface underfoot runs out near here</b>' : ''} · <b>${shipKey}</b> ship menu`;
-      else if (player.aboard) prompt = (player.aboard.pilotSpot && player.pos.distanceTo(player.aboard.pilotSpot) < CONTROLS_RANGE ? `<b>E</b> take the controls` : `aboard ${player.aboard.vehicle.spec.label} · <b>E</b> step out`) + (this.world.planet.space ? ` · <b>${shipKey}</b> ship menu` : '');
-      else if (player.eva) prompt = `adrift · <b>W/S</b> thrust ahead and back · <b>A/D</b> sideways · <b>Space/Ctrl</b> up and down · mouse turns · <b>Z/V</b> roll · <b>${keyName(input.bindings.brake[0] ?? '')}</b> brake · ${Math.round(player.vel.length() * 3.6)} km/h${this.nearestSpeederDistance() < MOUNT_RANGE ? (this.nearestHasRoom() ? ' · <b>E</b> board' : ' · <b>E</b> mount') : ' · <b>E</b> gravity boots'}${performance.now() - this.bootsNoteAt < SURFACE_ROOM.note * 1000 && this.bootsNote ? ` · ${this.bootsNote}` : ''}`;
-      else if (this.nearestSpeederDistance() < MOUNT_RANGE) prompt = this.nearestHasRoom() ? '<b>E</b> board' : this.nearestVehicle()?.upsideDown ? '<b>E</b> flip it upright' : '<b>E</b> mount';
+      if (full) {
+        if (player.noclip) prompt = `<b>NOCLIP</b> ${Math.round(player.noclipSpeed)} m/s · <b>WASD</b> fly · <b>Space</b> up · <b>Ctrl</b> down · <b>Shift</b> fast · <b>+</b>/<b>-</b> speed · <b>N</b> off`;
+        else if (player.mounted) prompt = mountPrompt(player.mounted, input.bindings.wings[0] ?? WINGS_KEY) + (player.mounted.spec.ship ? shipHint : '');
+        else if (S8.lift) prompt = `<b>E</b> lift: ${this.promptLiftStops} levels`;
+        else if (S8.elevator) prompt = `<b>E</b> elevator ${S8.elevator}`;
+        else if (S8.doorless) prompt = `<b>E</b> enter ${this.promptDoorless} (no way in on foot)`;
+        else if (player.piloting) prompt = `at the controls of the ${player.piloting.spec.label} · ${player.piloting.landed ? `landed · <b>W</b> or <b>Space</b> lifts off` : `<b>W</b>/<b>S</b> throttle · mouse steers${player.piloting.spec.ship && SHIP_GROUND.rule === 'landing' ? ` · hold <b>Ctrl</b> to set down · <b>${keyName(CUT_ENGINES_KEY)}</b> cuts the engines` : ''}`} · <b>Alt</b> looks around · <b>E</b> lets go · ${Math.round(Math.abs(player.piloting.speed) * 3.6)} km/h${shipHint}${player.piloting.landNote ? ` · ${player.piloting.landNote}` : ''}`;
+        // Standing on something out in space: the boots hold, a jump lets go, and E climbs into a ship beside you.
+        else if (isSurfaceRoom(player.aboard)) prompt = `<b>gravity boots</b> on ${S8.bootsReach ? 'a surface · <b>E</b> climbs into the ship' : 'a surface · <b>E</b> takes them off'} · <b>jump</b> lets go${player.aboard.atEdge ? ' · <b>the surface underfoot runs out near here</b>' : ''} · <b>${shipKey}</b> ship menu`;
+        else if (player.aboard) prompt = (player.aboard.pilotSpot && player.pos.distanceTo(player.aboard.pilotSpot) < CONTROLS_RANGE ? `<b>E</b> take the controls` : `aboard ${player.aboard.vehicle.spec.label} · <b>E</b> step out`) + (this.world.planet.space ? ` · <b>${shipKey}</b> ship menu` : '');
+        else if (player.eva) prompt = `adrift · <b>W/S</b> thrust ahead and back · <b>A/D</b> sideways · <b>Space/Ctrl</b> up and down · mouse turns · <b>Z/V</b> roll · <b>${keyName(input.bindings.brake[0] ?? '')}</b> brake · ${Math.round(player.vel.length() * 3.6)} km/h${S8.near === 'board' ? ' · <b>E</b> board' : S8.near ? ' · <b>E</b> mount' : ' · <b>E</b> gravity boots'}${performance.now() - this.bootsNoteAt < SURFACE_ROOM.note * 1000 && this.bootsNote ? ` · ${this.bootsNote}` : ''}`;
+        else if (S8.near) prompt = S8.near === 'board' ? '<b>E</b> board' : S8.near === 'flip' ? '<b>E</b> flip it upright' : '<b>E</b> mount';
+      }
       // A jump's countdown, then "jumping", over whatever the prompt would say; in the tunnel, the crew's lifts and controls.
-      prompt = this.jumpPrompt(lift !== null) ?? prompt;
+      prompt = this.jumpPrompt(S8.lift) ?? prompt;
       this.hud.setPrompt(prompt);
       // Mouse flight's display (seated or at a bridge's controls, in flight, Alt not held): the aim circle, the ring and the
       // cursor, in pixels, at this frame's field of view. The cursor is the hull's (about its nose, from the pilot's eye), so
@@ -6868,6 +7254,18 @@ class App {
         if (landNote) this.messages.note(landNote);
       }
       this.shipHud.update(dt);
+      // The damage feedback, after this frame's last camera move and after the flight display has
+      // worked out where the reticle sits. It is handed the camera's three axes as nine plain
+      // numbers, so nothing of three's reaches that file, and the middle it ticks: the flight
+      // display's own boresight while it is up (in a chase view it drifts off the centre of the
+      // window), else the middle. Both are writes into kept fields; nothing is made.
+      const fcam = this.cam.camera.matrixWorld.elements;
+      this.feedback.setCamera(fcam[0], fcam[1], fcam[2], fcam[4], fcam[5], fcam[6], -fcam[8], -fcam[9], -fcam[10]);
+      if (flying) this.feedback.setCentre(window.innerWidth / 2 + this.flightView.ox, window.innerHeight / 2 + this.flightView.oy);
+      else this.feedback.setCentre();
+      // On the real clock, as the message line is: an arc that landed as a panel opened fades while
+      // the panel is open rather than standing there when it closes.
+      this.feedback.update(rawDt);
       // The message line ages on the real clock, not the simulation's — `rawDt`, not the step's
       // clamped `dt`: a notice sent as a panel opened must still fade while it is open, or it would
       // be standing there when the panel closes, and under a long stall a clamped delta would hold
@@ -6883,7 +7281,32 @@ class App {
         this.lineWriteWindow = 0;
       }
       const at = player.worldPos;
-      this.hud.update(dt, at.x, at.y, at.z, this.kit, player.hp, player.maxHp, this.world.day.clock(), this.nearbyLabel(at), player.saberOn);
+      // "Nearby" walked every living thing on the planet — a few hundred in a busy town — on every
+      // frame, for a line the corner block writes four times a second. The plate over a head says
+      // what you are looking at, which is the better answer to the same question, so with the plate
+      // on the line is empty and the walk does not happen at all; with it off the walk is at the
+      // rate the line is written, so it happens once per line rather than fifteen times per line.
+      this.nearbyClock -= rawDt;
+      if (this.settings.hudNameplate) this.nearbyName = '';
+      else if (this.nearbyClock <= 0) {
+        this.nearbyClock = 1 / Math.max(1, HUD_WIRING.nearbyHz);
+        this.nearbyName = this.nearbyLabel(at);
+      }
+      this.hud.update(dt, at.x, at.y, at.z, this.kit, player.hp, player.maxHp, this.world.day.clock(), this.nearbyName, player.saberOn);
+      // The tighter crosshair while a shot is aimed, and the plate over whatever it rests on. The
+      // crosshair is cast from the camera, so the eye and the direction are read straight out of its
+      // world matrix into two kept vectors: column 3 is where it stands, column 2 negated is where
+      // it looks. The plate walks the world's kept list at its own rate, not this frame's.
+      this.hud.setAiming(player.aiming);
+      // The switch is asked here rather than left to the plates' own first line, so that with the
+      // plate off nothing at all is done for it: the world's list is a kept array, but building the
+      // argument list to be declined is the one place an "off" switch would not turn something off.
+      if (simulate && this.settings.hudNameplate) {
+        const pm = this.cam.camera.matrixWorld.elements;
+        this.plateEye.set(pm[12], pm[13], pm[14]);
+        this.plateDir.set(-pm[8], -pm[9], -pm[10]);
+        this.plates.track(rawDt, this.world.targets(), this.plateEye.x, this.plateEye.y, this.plateEye.z, this.plateDir.x, this.plateDir.y, this.plateDir.z, this.cam.camera, window.innerWidth, window.innerHeight, this.world.playerTarget.key);
+      }
 
       if (this.breakFrames) throw new Error('debug: the frame is broken on purpose');
       // The blades are drawn from where the hands ended up this frame, so they never trail the pose.
