@@ -57,8 +57,8 @@ import { vehiclePlumes } from './vehicles/enginePlumes';
 import { Notice } from './ui/notice';
 import { MESSAGES, MessageLine, plain, tuneMessages } from './ui/messages';
 import { COL, colourOf } from './core/palette';
-import { HudCanvas } from './ui/hudCanvas';
-import { layout, makeLayout, type HudLayout } from './ui/hudMath';
+import { HudCanvas, OVERLAY_TUNE } from './ui/hudCanvas';
+import { layout, makeLayout, tuneSizes, type HudLayout, type HudSizes } from './ui/hudMath';
 import { VehiclesUi } from './ui/vehiclesUi';
 import { ShipEditUi } from './ui/shipEditUi';
 import { DROID_SHOWN, DROID_SHOWN_BY_HULL, droidShown, droidSink, fitKey, packFit, partsOf, slotLabel, stockFit, type ResolvedFit, type ShipFit } from './vehicles/shipFit';
@@ -2099,7 +2099,7 @@ class App {
        * beside it. `lineWrites` is the message line's, counted apart because a line said or fading
        * is a write that is meant to happen.
        */
-      hud: (opts: { overlay?: boolean; scale?: number; dpr?: number; boxes?: boolean; condition?: boolean; target?: boolean; arcs?: boolean; line?: boolean; lines?: number; fullPrompts?: boolean; flight?: Partial<FlightTune>; tune?: Parameters<Hud['tune']>[0]; messages?: Partial<typeof MESSAGES>; wiring?: Partial<typeof HUD_WIRING> } = {}) => {
+      hud: (opts: { overlay?: boolean; scale?: number; dpr?: number; boxes?: boolean; condition?: boolean; target?: boolean; arcs?: boolean; line?: boolean; lines?: number; fullPrompts?: boolean; flight?: Partial<FlightTune>; tune?: Parameters<Hud['tune']>[0]; messages?: Partial<typeof MESSAGES>; wiring?: Partial<typeof HUD_WIRING>; under?: Partial<typeof OVERLAY_TUNE>; sizes?: Partial<HudSizes> } = {}) => {
         const S = this.settings;
         let sized = false;
         // Clamped here, at the door, and not only on the way to the canvas: whatever is typed in the
@@ -2136,6 +2136,16 @@ class App {
         if (opts.flight) this.shipHud.tune(opts.flight);
         if (opts.tune) this.hud.tune(opts.tune);
         if (opts.messages) tuneMessages(opts.messages);
+        // The overlay's own three invented numbers and the geometry table, live: the under-stroke's
+        // alpha and width are the likeliest thing to want changed once it is seen on a bright desert
+        // and against a starfield, and neither can be judged from here.
+        if (opts.under) {
+          if (typeof opts.under.widen === 'number' && Number.isFinite(opts.under.widen)) OVERLAY_TUNE.widen = opts.under.widen;
+          if (typeof opts.under.alpha === 'number' && Number.isFinite(opts.under.alpha)) OVERLAY_TUNE.alpha = opts.under.alpha;
+          if (typeof opts.under.clearSlop === 'number' && Number.isFinite(opts.under.clearSlop)) OVERLAY_TUNE.clearSlop = opts.under.clearSlop;
+        }
+        // A size only reaches the screen on the next layout, which `applyHudSettings` runs.
+        if (opts.sizes && tuneSizes(opts.sizes) > 0) this.applyHudSettings();
         if (opts.wiring) {
           if (typeof opts.wiring.gunBits === 'number' && Number.isFinite(opts.wiring.gunBits)) HUD_WIRING.gunBits = Math.max(1, Math.min(32, Math.round(opts.wiring.gunBits)));
           if (typeof opts.wiring.heatIsHeadroom === 'boolean') HUD_WIRING.heatIsHeadroom = opts.wiring.heatIsHeadroom;
@@ -2158,6 +2168,7 @@ class App {
           byDesign: body.byDesign,
           lineWrites: { lastSecond: this.lineWritesLast, total: line.writes },
           scale: L.scale,
+          under: { ...OVERLAY_TUNE },
           layout: { arcR: Math.round(L.arcR), aimMax: Math.round(L.aimMax), condition: [L.condition.x, L.condition.y, L.condition.w, L.condition.h], message: [L.message.x, L.message.y, L.message.w, L.message.h] },
           pips: ship.pips,
           messages: { lines: line.lines, fading: line.fading, said: line.said, merged: line.merged, dropped: line.dropped, kept: MESSAGES.kept, styled: !this.messages.styleless },
@@ -3178,6 +3189,9 @@ class App {
     this.overlay.setDpr(Math.max(HUD_DPR_RANGE.min, Math.min(HUD_DPR_RANGE.max, S.hudDpr)));
     this.shipHud.setScale(scale);
     this.hudLayoutFor(scale);
+    // The message column the layout worked out, so a long line cannot run under the centred blocks on
+    // a narrow window. One property write, on a resize and a change of scale, never in a frame.
+    document.documentElement.style.setProperty('--hud-msg-w', `${Math.round(this.hudLayout.message.w)}px`);
     MESSAGES.kept = Math.max(HUD_LINES_RANGE.min, Math.min(HUD_LINES_RANGE.max, Math.round(S.hudMessageLines)));
     this.messages.setEnabled(S.hudMessages);
     // Turned off, the long line would otherwise stand at whatever it last said: the frame loop stops
@@ -6840,7 +6854,9 @@ class App {
       // The flown ship's shields, armour, hull, boost, its parts and what is down; the comms fading.
       const fight = flownFight;
       const condition = fight && this.settings.hudShipCondition ? fight : null;
-      this.shipHud.setStatus(condition ? flownStatus : null, condition?.stats, condition ? condition.cond.parts : null);
+      // The parts are watched whether the block is drawn or not, so a part going down still says so
+      // in words with the block switched off; the last argument is what draws it.
+      this.shipHud.setStatus(fight ? flownStatus : null, fight?.stats, fight ? fight.cond.parts : null, !!condition);
       // The body's own bars and the class's slot row stand down while the ship's condition is in their
       // place: a health bar that cannot change in flight read as a second, broken one.
       this.showBodyBlock(!condition);
