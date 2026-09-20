@@ -226,6 +226,12 @@ const NO_HURT = (): void => {};
 const TEXTURES_PER_YIELD = 4;
 
 /**
+ * Told when the player lands a blow: what was hurt, by how much, and whether that blow finished it.
+ * The interface's damage feedback is the one thing that listens (`World.watchPlayerHits`).
+ */
+export type PlayerHitWatch = (target: Living, amount: number, killed: boolean) => void;
+
+/**
  * The player as one of the living: the only one the game makes exactly one of, so its key is a
  * named constant. `main` fills in where it stands, whether it may be attacked at all (noclip,
  * aboard, dead: not) and what a blow does, once a frame before everything alive is stepped.
@@ -243,13 +249,18 @@ class PlayerTarget implements Living {
    * has said where they are.
    */
   dead = true;
-  /** What the loop does with a blow: it filters mounted, noclip and aboard itself. */
-  hurt: (damage: number) => void = NO_HURT;
+  /** What the loop does with a blow, and where it came from: it filters mounted, noclip and aboard itself. */
+  hurt: (damage: number, from?: THREE.Vector3) => void = NO_HURT;
   radiusToward(): number {
     return 0.35;
   }
-  damage(amount: number): void {
-    this.hurt(amount);
+  /**
+   * `from` is where whatever struck was standing. It is a parameter of the contract every striker
+   * already passes, and it is handed straight to the callback, which is what turns the red flash into
+   * an arc on the side the blow came from.
+   */
+  damage(amount: number, from?: THREE.Vector3): void {
+    this.hurt(amount, from);
   }
 }
 
@@ -284,6 +295,9 @@ export class World {
   /** The one list handed round each frame, rebuilt only when a manager has gained or lost a body. */
   private readonly livingList: Living[] = [];
   private livingAt = { creatures: -1, npcs: -1, player: false };
+  /** Who is told when the player lands a blow (`watchPlayerHits`), and which bodies already tell them. */
+  private hitWatch: PlayerHitWatch | null = null;
+  private readonly hitWatched = new WeakSet<Living>();
   /** Blaster turrets standing near where the player arrived. */
   turrets!: TurretManager;
   /** The gallery world's labels and animated mannequins, on that planet only. */
@@ -3458,7 +3472,7 @@ export class World {
   }
 
   /** `target` is whom the turrets shoot at, or null while nothing should be shot (noclip, riding). */
-  update(dt: number, playerPos: THREE.Vector3, camPos: THREE.Vector3, fastTime: boolean, onAttack: (damage: number) => void, target: TurretTarget | null = null): void {
+  update(dt: number, playerPos: THREE.Vector3, camPos: THREE.Vector3, fastTime: boolean, onAttack: (damage: number, from?: THREE.Vector3) => void, target: TurretTarget | null = null): void {
     this.stream(playerPos, STREAM_BUDGET);
     this.streamFar(playerPos, 1);
     if (this.layoutStream) {
@@ -3606,8 +3620,8 @@ export class World {
   }
 
   /** One kept callback rather than a fresh closure a frame; what it does is set by the loop. */
-  private readonly hurtPlayer = (damage: number): void => {
-    this.playerTarget.hurt(damage);
+  private readonly hurtPlayer = (damage: number, from?: THREE.Vector3): void => {
+    this.playerTarget.hurt(damage, from);
   };
 
   /**
@@ -3622,6 +3636,10 @@ export class World {
     const mv = this.mobiles?.version ?? -1;
     const alive = !this.playerTarget.dead;
     if (!fresh && cv === at.creatures && nv === at.npcs && mv === this.mobilesAt && alive === at.player) return this.livingList;
+    // Whether anything has come or gone since the last build, which is the only time a new body can
+    // need watching. `stepLiving` asks for a fresh list every frame, so this must not be the rebuild
+    // itself: it is the version change, and in a steady frame it is false and nothing is scanned.
+    const gained = cv !== at.creatures || nv !== at.npcs || mv !== this.mobilesAt || alive !== at.player;
     at.creatures = cv;
     at.npcs = nv;
     this.mobilesAt = mv;
@@ -3632,11 +3650,67 @@ export class World {
     // A mobile whose model is still loading neither thinks nor is fought over (the manager bumps its version when one is up).
     if (this.mobiles) for (const m of this.mobiles.live) if (m.ready) this.livingList.push(m);
     if (this.npcs) for (const n of this.npcs.npcs) this.livingList.push(n);
+    if (this.hitWatch && gained) this.watchHits();
     return this.livingList;
   }
 
+  /**
+   * Who to tell when the player lands a blow. It is the one hook the interface's damage feedback
+   * needs, and it is here rather than at the call sites because there are a dozen of those, in four
+   * files, and every one of them already says who struck: a power, a saber sweep, a bolt and a
+   * flame all pass `world.playerTarget` as the blow's `source`.
+   *
+   * What it does is wrap each living thing's own `damage` once, as it joins the list, so the watch
+   * hears every blow whatever hurt it and whichever file called it. The wrapper calls through first
+   * and reads `dead` either side of the call, which is how it knows a blow finished something. It is
+   * put on once per body, never in a frame, and only while somebody is watching.
+   *
+   * What it does **not** hear: anything hurt that is not one of the living — a ship (whose own bars
+   * flash, which is the flight display's), a turret, a door. Pass null to stop watching; bodies
+   * already wrapped keep their wrapper, which then costs one comparison a blow and does nothing.
+   *
+   * The amount reported is the damage the blow **offered**. A body already dead is filtered here,
+   * since a corpse stays on the list a while and refuses every blow on its own first line; a body
+   * that refuses a blow for any other reason (one of your own side that would not fight you) cannot
+   * be told from one that took it without reaching inside it, and is reported as a blow that landed.
+   */
+  watchPlayerHits(watch: PlayerHitWatch | null): void {
+    this.hitWatch = watch;
+    if (watch) this.watchHits();
+  }
+
+  /** Every living thing in the list that has not been wrapped yet. Called when one has come or gone. */
+  private watchHits(): void {
+    const list = this.livingList;
+    for (let i = 0; i < list.length; i++) {
+      const t = list[i];
+      if (this.hitWatched.has(t)) continue;
+      const inner = t.damage.bind(t);
+      try {
+        t.damage = (amount: number, from?: THREE.Vector3, push?: number, source?: Living | null): void => {
+          const before = t.dead;
+          inner(amount, from, push, source);
+          const watch = this.hitWatch;
+          // The player's own blows only, and never the player hurting itself: everything else on the
+          // list is hurt by creatures and fighters all the time and none of it is yours to be told of.
+          // A body that was already dead when the blow was offered is not reported either: a corpse
+          // stays on the list for a while and refuses damage on its own first line, and emptying a
+          // clip into one used to tick the crosshair and say a line for every shot.
+          if (!watch || before || source !== this.playerTarget || t === this.playerTarget) return;
+          watch(t, amount, !before && t.dead);
+        };
+        // Marked only once it has really taken the wrapper, so a body that would not is tried again
+        // the next time something comes or goes rather than being written off for good.
+        this.hitWatched.add(t);
+      } catch {
+        // A body that will not take one is simply not watched. This runs inside the frame loop's own
+        // target list, and nothing on the screen is worth throwing there.
+      }
+    }
+  }
+
   /** Where the player stands, whether it may be attacked at all, and what a blow does to it. */
-  setPlayerTarget(pos: THREE.Vector3, targetable: boolean, hurt: (damage: number) => void): void {
+  setPlayerTarget(pos: THREE.Vector3, targetable: boolean, hurt: (damage: number, from?: THREE.Vector3) => void): void {
     this.playerTarget.pos.copy(pos);
     this.playerTarget.dead = !targetable;
     this.playerTarget.hurt = hurt;
