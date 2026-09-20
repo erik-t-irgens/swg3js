@@ -34,6 +34,7 @@ import { childrenOf, find, findAll, isForm, parseIff, readCString } from './iff.
 import { parseDatatable } from './datatable.mjs';
 import { parseClientEffect } from './shipdata.mjs';
 import { readTemplate, stringParam } from './objtemplate.mjs';
+import { scanTemplates } from './mobilescan.mjs';
 
 // A path as the client data writes it: backslashes, a leading slash, and on the wing
 // forms one or two `@` signs before it (`@@sound/wings_open_xwing.snd`). One file names
@@ -357,5 +358,105 @@ export function readSoundTables(vfs, { log = () => {} } = {}) {
   }
 
   log(`  sounds: ${out.rooms.length} room rows over ${new Set(out.rooms.map((r) => r.pob)).size} buildings, ${Object.keys(out.interface).length} interface sounds, ${out.melee.length} melee and ${out.ranged.length} ranged weapon rows, ${Object.keys(out.doorStyles).length} door styles, ${new Set(Object.values(out.flyby)).size} flyby sounds, ${Object.keys(out.surfaces).length} terrain surfaces`);
+  return out;
+}
+
+// ------------------------------------------------------------ who owns which client data file
+
+const norm = (s) => String(s ?? '').replace(/\\/g, '/').replace(/^\//, '').toLowerCase();
+
+/**
+ * Every mobile template and the client data file it resolves to, which is what says how that
+ * creature, droid or person steps, grunts and calls out. The catalogue keeps each entry's
+ * template and nothing more, so the join is made here, through the same resolver the `mobiles`
+ * scan uses: a template's chain is followed through its shared template and its base, and the
+ * first `clientDataFile` along it wins.
+ *
+ * `keep` narrows the map to the client data the pack actually holds (a file that names no
+ * sound is not written), so nothing is written that a lookup could not use.
+ */
+export function readMobileClientData(vfs, { keep = null, log = () => {} } = {}) {
+  // 36 templates name a path with no file behind it, most of them because the file is not in
+  // the archives at all. Four of them are only in the wrong folder (a creature written without
+  // its `creature/` step, one written with a `som/` step it does not have), and exactly one file
+  // in the whole client data tree carries that name: those are taken, so a creature the game
+  // sold as a mount is not silent over a spelling. A name two files share is not guessed at.
+  const byBase = new Map();
+  for (const f of new Set(vfs.list('clientdata/'))) {
+    if (!/\.(cdf|iff)$/i.test(f)) continue;
+    const base = f.slice(f.lastIndexOf('/') + 1).toLowerCase();
+    byBase.set(base, byBase.has(base) ? null : f);
+  }
+  const out = {};
+  let named = 0;
+  let absent = 0;
+  let moved = 0;
+  for (const row of scanTemplates(vfs)) {
+    if (!row.clientData) continue;
+    named++;
+    let file = norm(row.clientData);
+    if (!vfs.has(file)) {
+      const elsewhere = byBase.get(file.slice(file.lastIndexOf('/') + 1));
+      if (!elsewhere) {
+        absent++;
+        continue;
+      }
+      file = elsewhere;
+      moved++;
+    }
+    if (keep && !keep(file)) continue;
+    out[row.template] = file;
+  }
+  log(`  sounds: ${Object.keys(out).length} mobile templates join a client data file that names a sound (${named} name one, ${absent} name a file the archives do not hold${moved ? `, ${moved} name one that is there under another folder` : ''})`);
+  return out;
+}
+
+/**
+ * The player species and the client data that maps their feet to each surface. A species with
+ * no file of its own uses another's: the Bothans name the human files, which is why this is
+ * followed up the template chain rather than guessed from the species' own name.
+ */
+export function readSpeciesClientData(vfs, { log = () => {} } = {}) {
+  const cache = new Map();
+  const chain = (start) => {
+    const out = [];
+    let path = norm(start);
+    for (let depth = 0; depth < 12 && path; depth++) {
+      if (!vfs.has(path)) break;
+      let t = cache.get(path);
+      if (t === undefined) {
+        try {
+          t = readTemplate(parseIff(vfs.read(path)));
+        } catch {
+          t = null;
+        }
+        cache.set(path, t);
+      }
+      if (!t) break;
+      out.push(t);
+      const shared = stringParam(t.params.get('sharedTemplate'));
+      path = shared ? norm(shared) : t.base ? norm(t.base) : null;
+    }
+    return out;
+  };
+  const out = {};
+  let shared = 0;
+  for (const template of vfs.list('object/creature/player/').filter((p) => /^object\/creature\/player\/shared_[^/]+\.iff$/.test(p)).sort()) {
+    const species = template.replace(/^.*\/shared_/, '').replace(/\.iff$/i, '');
+    let file = null;
+    let appearance = null;
+    for (const t of chain(template)) {
+      if (!file) file = stringParam(t.params.get('clientDataFile'));
+      if (!appearance) appearance = stringParam(t.params.get('appearanceFilename'));
+      if (file && appearance) break;
+    }
+    if (!file) continue;
+    const clientData = norm(file);
+    // The files are named `..._<species>_<m|f>`, so a file that does not carry this species'
+    // own stem is another species' map borrowed.
+    if (!clientData.includes(species.replace(/_male$/, '_m').replace(/_female$/, '_f'))) shared++;
+    out[species] = { template, clientData, ...(appearance ? { appearance: norm(appearance) } : {}), present: vfs.has(clientData) };
+  }
+  log(`  sounds: ${Object.keys(out).length} player species join a footstep map${shared ? ` (${shared} of them another species' file)` : ''}`);
   return out;
 }
