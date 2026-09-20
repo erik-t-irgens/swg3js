@@ -6,6 +6,12 @@
 // on and off, each with the client's own zone-map icon where the pack has it. The galaxy, to
 // travel, is the window's other tab.
 //
+// The people you are grouped with are a layer of their own on both maps, switched on and off like the
+// zone's own layers: a diamond and a name where each of them stands, the leader's larger and ringed.
+// The layer is read from `groupMapFeed` (`spaceMapLayers.ts`), which is empty while there is no group
+// and no server, and its box is not shown at all then — on a planet, where it is the only box there
+// is, that means no layer bar either, so a game playing alone has exactly the map it has always had.
+//
 // The space view holds its own follow flag: it follows your ship until you slide the view, and F or
 // the Follow button puts it back. Nothing three draws is made during a frame: every mark, shell,
 // line, cone and label comes from a pool (`spaceMapLayers.ts`), grown to what a zone wants when its
@@ -15,7 +21,7 @@
 
 import * as THREE from 'three';
 import type { GalaxyMap, Poi } from './galaxyMap';
-import { distanceText, drawnAsLine, drawnAsShell, hasLayer, LAYERS, MapView, marksOf, ObjectList, Pool, poolWants, ShipList, VIEW_TUNE, type LayerId, type MapMark, type MapPack, type ShipMark } from './spaceMapLayers.ts';
+import { distanceText, drawnAsLine, drawnAsShell, GROUP_MAP_TUNE, GroupLabels, GroupList, groupMapFeed, hasLayer, LABEL_MOVE, LABEL_TEXT, LAYERS, mapFromGameX, mapFromGameZ, MapView, marksOf, ObjectList, Pool, poolWants, screenFromMapX, screenFromMapY, ShipList, VIEW_TUNE, type GroupMark, type LayerId, type MapMark, type MapPack, type ShipMark } from './spaceMapLayers.ts';
 
 /** Where the player is and what is round them, read fresh every time the map draws. */
 export interface MapSource {
@@ -42,6 +48,12 @@ export interface MapSource {
    */
   onHyperspace(destination: string): void;
   onTeleport(poi: Poi): void;
+  /**
+   * The people you are grouped with, written into the list the map owns, in the game's coordinates.
+   * Optional: with nothing here the map reads `groupMapFeed` instead, and with neither it draws no
+   * group at all.
+   */
+  group?(out: GroupList): void;
 }
 
 interface MapImage {
@@ -116,18 +128,27 @@ const SPLINE_POINTS = 64;
 const MAP_BUILD = { gridSize: 24000, gridSquares: 48, axes: 1500, shellSegments: 16, shellRings: 10 };
 
 /** The layers that are on when the map is first opened. */
-const LAYERS_ON: readonly LayerId[] = ['stations', 'points', 'launch', 'fields', 'nebulae', 'ships'];
+const LAYERS_ON: readonly LayerId[] = ['stations', 'points', 'launch', 'fields', 'nebulae', 'ships', 'group'];
 
-/** The colour each layer is drawn and named in, as three wants it and as CSS wants it. */
-const LAYER_COLOURS: Record<LayerId, number> = { stations: 0xffd27f, points: 0x9fe8a0, launch: 0xffffff, fields: 0x9aa7b8, nebulae: 0xc08fff, ships: 0x7fd7ff };
-const LAYER_CSS: Record<LayerId, string> = { stations: '#ffd27f', points: '#9fe8a0', launch: '#ffffff', fields: '#9aa7b8', nebulae: '#c08fff', ships: '#7fd7ff' };
+/**
+ * The colour each layer is drawn and named in, as three wants it and as CSS wants it. The group's is
+ * a rose: far enough round from the violet a nebula's shell wears to be told from it at a glance, and
+ * not the amber of a station, the cyan of a ship or the orange your own hull is drawn in.
+ */
+const LAYER_COLOURS: Record<LayerId, number> = { stations: 0xffd27f, points: 0x9fe8a0, launch: 0xffffff, fields: 0x9aa7b8, nebulae: 0xc08fff, ships: 0x7fd7ff, group: 0xff5f9e };
+const LAYER_CSS: Record<LayerId, string> = { stations: '#ffd27f', points: '#9fe8a0', launch: '#ffffff', fields: '#9aa7b8', nebulae: '#c08fff', ships: '#7fd7ff', group: '#ff5f9e' };
 
 /** The space view's own styles, added once so nothing outside this file has to carry them. */
 const SPACE_MAP_CSS = `
-.map-layers { position: absolute; left: 10px; top: 10px; display: flex; flex-direction: column; gap: 3px; padding: 8px 10px; font-size: 11px; color: var(--text); background: color-mix(in srgb, var(--void) 72%, transparent); border: 1px solid var(--panel-border); border-radius: 6px; }
+/* The bar takes no clicks of its own: on a planet the map under it is dragged, wheeled and clicked
+   to travel, and the bar's own corner must not swallow a place. Its boxes and its button take theirs. */
+.map-layers { position: absolute; left: 10px; top: 10px; display: flex; flex-direction: column; gap: 3px; padding: 8px 10px; font-size: 11px; color: var(--text); background: color-mix(in srgb, var(--void) 72%, transparent); border: 1px solid var(--panel-border); border-radius: 6px; pointer-events: none; }
 .map-layers[hidden] { display: none; }
-.map-layers label { display: flex; align-items: center; gap: 6px; cursor: pointer; white-space: nowrap; }
-.map-layers .follow { margin-top: 5px; padding: 3px 8px; font-size: 11px; background: color-mix(in srgb, var(--pool) 35%, transparent); color: var(--text); border: 1px solid var(--accent); border-radius: 4px; cursor: pointer; }
+.map-layers label { display: flex; align-items: center; gap: 6px; cursor: pointer; white-space: nowrap; pointer-events: auto; }
+/* A box with nothing behind it is taken out of the bar: the rule above would otherwise lay out a
+   hidden label anyway, since a display of its own beats the browser's own rule for [hidden]. */
+.map-layers label[hidden], .map-layers .follow[hidden] { display: none; }
+.map-layers .follow { margin-top: 5px; pointer-events: auto; padding: 3px 8px; font-size: 11px; background: color-mix(in srgb, var(--pool) 35%, transparent); color: var(--text); border: 1px solid var(--accent); border-radius: 4px; cursor: pointer; }
 .map-layers .follow.on { background: color-mix(in srgb, var(--pool) 70%, transparent); }
 .map-labels { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
 .map-labels[hidden] { display: none; }
@@ -178,6 +199,8 @@ export class MapUi {
   private readonly shellGroup = new THREE.Group();
   private readonly shipMarks = new THREE.Group();
   private readonly splineGroup = new THREE.Group();
+  /** The group's members, apart from the zone's own marks: nothing picks a person out of the pack. */
+  private readonly groupMarks = new THREE.Group();
   /** The groups a pick asks, in the order it asks them, so asking makes no array. */
   private readonly pickGroups: THREE.Group[] = [];
   private readonly drop: THREE.Line;
@@ -212,6 +235,19 @@ export class MapUi {
   private shipPool!: Pool<THREE.Mesh>;
   private splinePool!: Pool<THREE.Line>;
   private labelPool!: Pool<HTMLElement>;
+  // The group: read once a frame into the list the map owns, drawn by both views from that one read.
+  private readonly groupList = new GroupList();
+  private readonly groupLabels = new GroupLabels();
+  private groupPool!: Pool<THREE.Mesh>;
+  private groupLabelPool!: Pool<HTMLElement>;
+  /** What the last frame of each view drew of the group, for `__debug.mapGroup()`. */
+  private readonly groupDrawn = { planet: 0, space: 0 };
+  /** The layer bar's boxes, so one can be taken out of it while there is nothing behind it. */
+  private readonly layerBoxes = new Map<LayerId, HTMLElement>();
+  /** The made-up group the console can stand to look at the layer with one browser; 0 is none. */
+  private testGroup = 0;
+  private testFill: ((out: GroupList) => void) | null = null;
+  private readonly testNames: string[] = [];
   /** The marks' own looks: one material a layer, made once. */
   private readonly markMaterials = new Map<LayerId, THREE.MeshBasicMaterial>();
   private readonly shipMine = new THREE.MeshBasicMaterial({ color: 0xff6a3d });
@@ -280,7 +316,7 @@ export class MapUi {
     // and the far end's distance is written straight into it each frame.
     drop.setAttribute('lineDistance', new THREE.BufferAttribute(new Float32Array(2), 1));
     this.drop = new THREE.Line(drop, new THREE.LineDashedMaterial({ color: 0xff6a3d, dashSize: 40, gapSize: 25 }));
-    this.scene3d.add(this.markGroup, this.shellGroup, this.splineGroup, this.shipMarks, this.drop);
+    this.scene3d.add(this.markGroup, this.shellGroup, this.splineGroup, this.shipMarks, this.groupMarks, this.drop);
     this.pickGroups.push(this.markGroup, this.shellGroup, this.splineGroup);
     const grid = new THREE.GridHelper(MAP_BUILD.gridSize, MAP_BUILD.gridSquares, 0x2d7fd6, 0x1a3a55);
     (grid.material as THREE.Material).transparent = true;
@@ -320,7 +356,9 @@ export class MapUi {
       label.appendChild(box);
       label.appendChild(document.createTextNode(layer.label));
       this.layerBar.appendChild(label);
-      void this.loadIcon(layer.id, layer.icon);
+      this.layerBoxes.set(layer.id, label);
+      // A layer the client never drew (the group) has no zone-map icon to ask a pack for.
+      if (layer.icon) void this.loadIcon(layer.id, layer.icon);
     }
     this.followButton = document.createElement('button');
     this.followButton.className = 'follow on';
@@ -366,7 +404,9 @@ export class MapUi {
 
   /** Every drawn thing the space view can want, made the first frame that wants it and moved after. */
   private buildPools(): void {
-    for (const layer of LAYERS) this.markMaterials.set(layer.id, new THREE.MeshBasicMaterial({ color: LAYER_COLOURS[layer.id], wireframe: true }));
+    // One material a layer for the zone's own marks. The group is not one of them: nothing a pack
+    // holds is ever in that layer, and its members wear a solid material of their own below.
+    for (const layer of LAYERS) if (layer.id !== 'group') this.markMaterials.set(layer.id, new THREE.MeshBasicMaterial({ color: LAYER_COLOURS[layer.id], wireframe: true }));
     const markGeometry = new THREE.OctahedronGeometry(1);
     this.markPool = new Pool<THREE.Mesh>(
       () => {
@@ -410,15 +450,64 @@ export class MapUi {
       (l, on) => (l.visible = on),
     );
     this.labelPool = new Pool<HTMLElement>(
-      () => {
-        const el = document.createElement('div');
-        el.className = 'map-label';
-        el.innerHTML = '<i></i><b></b>';
-        this.labelLayer.appendChild(el);
-        return el;
-      },
+      () => this.makeLabel(false),
       (el, on) => (el.hidden = !on),
     );
+    // The group's own marks and names: a pool apiece, so a member's name is never squeezed out by a
+    // zone full of labels and neither pool is the other's cap. Both are made to the group's size here,
+    // when the map is built, rather than by the frame somebody joins.
+    const memberGeometry = new THREE.OctahedronGeometry(1);
+    const memberMaterial = new THREE.MeshBasicMaterial({ color: LAYER_COLOURS.group });
+    // Both pools are shown and hidden only when that has changed, so a group standing still over a
+    // drawn frame touches neither the scene graph nor the page.
+    this.groupPool = new Pool<THREE.Mesh>(
+      () => {
+        const m = new THREE.Mesh(memberGeometry, memberMaterial);
+        this.groupMarks.add(m);
+        return m;
+      },
+      (m, on) => {
+        if (m.visible !== on) m.visible = on;
+      },
+    );
+    this.groupLabelPool = new Pool<HTMLElement>(
+      () => this.makeLabel(true),
+      (el, on) => {
+        if (el.hidden === on) el.hidden = !on;
+      },
+    );
+    this.growGroupPools();
+  }
+
+  /**
+   * The group's pools, made to the group's own size before any frame draws one: a member arriving is
+   * then never the thing that builds a mesh or a `<div>`. It is asked again once a frame, which costs
+   * a comparison, so that raising the cap from the console also happens between frames rather than in
+   * the middle of one.
+   */
+  private growGroupPools(): void {
+    const want = Math.max(1, Math.round(GROUP_MAP_TUNE.cap));
+    if (this.groupPool.items.length >= want && this.groupLabelPool.items.length >= want) return;
+    this.groupPool.grow(want);
+    this.groupLabelPool.grow(want);
+  }
+
+  /**
+   * One name over the space view, made once. A group label wears its layer's colour and its plain dot
+   * from the moment it is made, so a frame that draws it writes only its text and its place — and
+   * only when either has changed.
+   */
+  private makeLabel(group: boolean): HTMLElement {
+    const el = document.createElement('div');
+    el.className = 'map-label';
+    el.innerHTML = '<i></i><b></b>';
+    if (group) {
+      el.dataset.layer = 'group';
+      el.style.color = LAYER_CSS.group;
+      (el.firstElementChild as HTMLElement).className = 'plain';
+    }
+    this.labelLayer.appendChild(el);
+    return el;
   }
 
   onClose: () => void = () => {};
@@ -443,7 +532,7 @@ export class MapUi {
   private attachDebug(): void {
     const w = window as unknown as { __debug?: Record<string, unknown> };
     if (!w.__debug || w.__debug.spaceMap) return;
-    w.__debug.spaceMap = (tune?: Partial<typeof MARK_TUNE> & Partial<typeof VIEW_TUNE>) => {
+    w.__debug.spaceMap = (tune?: Partial<typeof MARK_TUNE> & Partial<typeof VIEW_TUNE> & Partial<typeof GROUP_MAP_TUNE>) => {
       if (tune) {
         for (const k of Object.keys(MARK_TUNE) as (keyof typeof MARK_TUNE)[]) {
           const v = tune[k];
@@ -452,6 +541,10 @@ export class MapUi {
         for (const k of Object.keys(VIEW_TUNE) as (keyof typeof VIEW_TUNE)[]) {
           const v = tune[k];
           if (typeof v === 'number' && Number.isFinite(v)) VIEW_TUNE[k] = v;
+        }
+        for (const k of Object.keys(GROUP_MAP_TUNE) as (keyof typeof GROUP_MAP_TUNE)[]) {
+          const v = tune[k];
+          if (typeof v === 'number' && Number.isFinite(v)) GROUP_MAP_TUNE[k] = v;
         }
       }
       return {
@@ -463,9 +556,76 @@ export class MapUi {
         selected: this.selected?.name ?? null,
         icons: this.icons.size,
         pools: { marks: this.markPool.made, shells: this.shellPool.made, splines: this.splinePool.made, ships: this.shipPool.made, labels: this.labelPool.made, shipEntries: this.shipList.made },
-        tune: { ...MARK_TUNE, ...VIEW_TUNE },
+        tune: { ...MARK_TUNE, ...VIEW_TUNE, ...GROUP_MAP_TUNE },
       };
     };
+    /**
+     * `__debug.mapGroup()`: who the map is being told you are grouped with, and what the last frame of
+     * each view drew of them. It reads the group itself, so it answers with the map shut and in a tab
+     * that is drawing no frames at all — which is the only way a session that cannot see the screen
+     * can check this layer. `writes` is every property the group's names have written to the page
+     * since the map was built: a still map must not move it.
+     */
+    w.__debug.mapGroup = (opt?: { test?: number }) => {
+      if (opt && typeof opt.test === 'number' && Number.isFinite(opt.test)) this.standTestGroup(Math.max(0, Math.min(GROUP_MAP_TUNE.cap, Math.round(opt.test))));
+      this.readGroup();
+      const members: { key: string; name: string; leader: boolean; here: boolean; at: number[] }[] = [];
+      for (let i = 0; i < this.groupList.length; i++) {
+        const m = this.groupList.items[i];
+        members.push({ key: m.key, name: m.name, leader: m.leader, here: m.here, at: [Math.round(m.x), Math.round(m.y), Math.round(m.z)] });
+      }
+      return {
+        fed: !!(this.source.group ?? groupMapFeed.fill),
+        test: this.testGroup,
+        layerOn: this.layersOn.has('group'),
+        boxShown: !this.layerBoxes.get('group')?.hidden,
+        members: this.groupList.length,
+        here: this.groupList.here,
+        // People handed over beyond the group's own size, which nothing here draws or keeps.
+        dropped: this.groupList.dropped,
+        leader: this.groupList.leader?.name ?? null,
+        drawn: { ...this.groupDrawn },
+        writes: this.groupLabels.writes,
+        slots: this.groupLabels.slots,
+        pools: { marks: this.groupPool.made, labels: this.groupLabelPool.made, entries: this.groupList.made },
+        list: members,
+      };
+    };
+  }
+
+  /**
+   * `__debug.mapGroup({ test: n })`: stand n made-up people round the player so the layer can be seen
+   * and its numbers read from one browser alone, and `{ test: 0 }` takes them away again. They are a
+   * console aid and nothing else: the map holds them itself rather than putting them where a real
+   * group is read from, so taking them away always works and nothing that holds a group is disturbed.
+   * The first of them leads. The ring they stand in is a radius, and it is one of ours: on the ground
+   * a share of the screen (`GROUP_MAP_TUNE.testRing`, in pixels, turned into metres at whatever the
+   * map is zoomed to), and in space a share of the distance the view is looking at (`testShare`).
+   *
+   * It is also the one thing here that reads the player every frame, which is one object a frame from
+   * the game — the map's own arrow already asks for the same one, and only while a stand-in is up.
+   */
+  private standTestGroup(n: number): void {
+    this.testGroup = n;
+    // Their names are made when they are stood, never by a frame that draws them.
+    this.testNames.length = 0;
+    for (let i = 0; i < n; i++) this.testNames.push(`Test ${i + 1}`);
+    if (!n) {
+      this.testFill = null;
+      return;
+    }
+    if (!this.testFill) {
+      this.testFill = (out: GroupList) => {
+        const p = this.source.player();
+        // Before the first frame has fitted the map there is no scale yet: the same fallbacks `fit` uses.
+        const scale = this.scale || (this.image?.width ?? 16384) / Math.min(this.canvas2d.clientWidth || 900, this.canvas2d.clientHeight || 560);
+        const r = this.canvas3d.hidden ? scale * GROUP_MAP_TUNE.testRing : this.view.orbit.distance * GROUP_MAP_TUNE.testShare;
+        for (let i = 0; i < this.testGroup; i++) {
+          const a = (i / this.testGroup) * Math.PI * 2;
+          out.add(this.testNames[i], this.testNames[i], i === 0, true, p.x + Math.cos(a) * r, p.y, p.z + Math.sin(a) * r);
+        }
+      };
+    }
   }
 
   hide(): void {
@@ -527,8 +687,15 @@ export class MapUi {
     const here = this.source.here();
     this.canvas2d.hidden = here.space;
     this.canvas3d.hidden = !here.space;
-    this.layerBar.hidden = !here.space;
     this.labelLayer.hidden = !here.space;
+    // The group is read once a frame, before either view draws, so both draw from the same list and
+    // the bar can hide the layer's box the moment there is nobody in it.
+    this.readGroup();
+    this.fitLayerBar(here.space);
+    // The view that is not drawing drew nothing of the group, so its count says so rather than
+    // holding what it drew the last time the map was the other way round.
+    if (here.space) this.groupDrawn.planet = 0;
+    else this.groupDrawn.space = 0;
     if (!here.space) {
       this.selectBox.hidden = true;
       this.tip.hidden = true;
@@ -536,6 +703,38 @@ export class MapUi {
     // The world is asked once a frame and handed on, rather than asked again by the space view.
     if (here.space) this.draw3d(here.packId, here.name);
     else this.draw2d(here.packId, here.name);
+  }
+
+  /**
+   * The group, into the list the map owns. Whoever holds the group fills it; with no server, no group
+   * or an old relay there is nothing to fill it and the list comes out empty, which every reader
+   * below takes as "there is no group". A stand-in put up from the console wins over both, so that
+   * taking it away again always works and a real group is never what it replaced.
+   */
+  private readGroup(): void {
+    this.growGroupPools();
+    this.groupList.begin();
+    const fill = this.testFill ?? this.source.group ?? groupMapFeed.fill;
+    if (fill) fill(this.groupList);
+  }
+
+  /**
+   * Which boxes the bar shows: the zone's layers in space, the group's box wherever there is a group,
+   * and the Follow button only in space. On a planet with no group there is nothing to show, so the
+   * bar itself goes — the map is then exactly the map a game with no server has always had. Nothing
+   * is written unless it has changed.
+   */
+  private fitLayerBar(space: boolean): void {
+    let any = false;
+    for (const layer of LAYERS) {
+      const box = this.layerBoxes.get(layer.id);
+      if (!box) continue;
+      const on = (space || layer.planet) && (layer.id !== 'group' || this.groupList.length > 0);
+      if (box.hidden === on) box.hidden = !on;
+      if (on) any = true;
+    }
+    if (this.followButton.hidden === space) this.followButton.hidden = !space;
+    if (this.layerBar.hidden === any) this.layerBar.hidden = !any;
   }
 
   // ---- The planet: the client's map, panned and zoomed. ----
@@ -565,7 +764,7 @@ export class MapUi {
   /** Game coordinates to the map's (the snapshot's): the game mirrors X and recentres. */
   private toMap(x: number, z: number): { x: number; z: number } {
     const c = this.source.center() ?? { x: 0, z: 0 };
-    return { x: c.x - x, z: z + c.z };
+    return { x: mapFromGameX(c.x, x), z: mapFromGameZ(c.z, z) };
   }
 
   private fit(): void {
@@ -629,7 +828,7 @@ export class MapUi {
   private toScreen(mx: number, mz: number): { x: number; y: number } {
     const w = this.canvas2d.clientWidth;
     const h = this.canvas2d.clientHeight;
-    return { x: w / 2 + (mx - this.look.x) / this.scale, y: h / 2 - (mz - this.look.z) / this.scale };
+    return { x: screenFromMapX(mx, this.look.x, this.scale, w), y: screenFromMapY(mz, this.look.z, this.scale, h) };
   }
 
   private poiAt(x: number, y: number): Poi | null {
@@ -732,6 +931,8 @@ export class MapUi {
         ctx.fillText(p.name, s.x + 6, s.y);
       }
     }
+    // The people you are grouped with, under your own mark so yours is never hidden by one of theirs.
+    this.drawGroup2d(w, h);
     // The player: an arrow the way they face (the map's X runs the other way from the game's).
     const p = this.source.player();
     const m = this.toMap(p.x, p.z);
@@ -764,6 +965,63 @@ export class MapUi {
       ctx.textAlign = 'left';
     }
     this.readout.textContent = `${name} · ${Math.round(m.x)}, ${Math.round(m.z)}${p.altitude !== null ? ` · ${Math.round(p.altitude)} m up` : ''} · ${(this.scale * 100).toFixed(0)} m per 100 px · drag, wheel, double-click to centre, click a place to go`;
+  }
+
+  /**
+   * The group on the planet's map: a diamond where each member stands and their name beside it, the
+   * leader's larger and ringed. Only the members on this world have a place here; the rest are the
+   * roster's business, not the map's. Everything is drawn straight onto the canvas, so a frame of it
+   * writes nothing to the page.
+   */
+  private drawGroup2d(w: number, h: number): void {
+    this.groupDrawn.planet = 0;
+    if (!this.layersOn.has('group') || !this.groupList.length) return;
+    const ctx = this.ctx;
+    ctx.font = '11px system-ui, sans-serif';
+    ctx.textBaseline = 'middle';
+    // The same two steps `toMap` and `toScreen` take, through the same four functions, one number at
+    // a time: both of those hand back a point of their own and this runs for every member of every
+    // frame the map draws.
+    const centre = this.source.center();
+    const cx = centre ? centre.x : 0;
+    const cz = centre ? centre.z : 0;
+    for (let i = 0; i < this.groupList.length && this.groupDrawn.planet < GROUP_MAP_TUNE.cap; i++) {
+      const m = this.groupList.items[i];
+      if (!m.here) continue;
+      const sx = screenFromMapX(mapFromGameX(cx, m.x), this.look.x, this.scale, w);
+      const sy = screenFromMapY(mapFromGameZ(cz, m.z), this.look.z, this.scale, h);
+      // Off the canvas by more than a name's width, or a line's height: the same margin the places use.
+      if (sx < -60 || sy < -20 || sx > w + 60 || sy > h + 20) continue;
+      const r = GROUP_MAP_TUNE.memberPixels * (m.leader ? GROUP_MAP_TUNE.leaderScale : 1);
+      ctx.save();
+      ctx.translate(sx, sy);
+      ctx.fillStyle = LAYER_CSS.group;
+      ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(0, -r);
+      ctx.lineTo(r, 0);
+      ctx.lineTo(0, r);
+      ctx.lineTo(-r, 0);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      if (m.leader) {
+        // The ring is a multiple of the leader's own mark, so widening a member widens it too.
+        ctx.beginPath();
+        ctx.arc(0, 0, r * GROUP_MAP_TUNE.leaderRing, 0, Math.PI * 2);
+        ctx.strokeStyle = LAYER_CSS.group;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      }
+      ctx.restore();
+      const gap = GROUP_MAP_TUNE.labelGap;
+      ctx.fillStyle = 'rgba(0,0,0,0.75)';
+      ctx.fillText(m.label, sx + gap + 1, sy + 1);
+      ctx.fillStyle = LAYER_CSS.group;
+      ctx.fillText(m.label, sx + gap, sy);
+      this.groupDrawn.planet++;
+    }
   }
 
   // ---- Space: the zone in three axes, turned and zoomed. ----
@@ -1109,6 +1367,71 @@ export class MapUi {
     this.shellPool.end();
     this.splinePool.end();
     this.labelPool.end();
+    this.drawGroup3d(w, h);
+  }
+
+  /**
+   * The group in space: a solid mark where each member is, the leader's larger, with their name over
+   * it. The marks and the names come from pools of the group's own size, made when the map was built,
+   * so a member arriving makes nothing.
+   */
+  private drawGroup3d(w: number, h: number): void {
+    this.groupPool.begin();
+    this.groupLabelPool.begin();
+    this.groupDrawn.space = 0;
+    if (this.layersOn.has('group')) {
+      const size = Math.max(GROUP_MAP_TUNE.memberMin, this.view.orbit.distance * GROUP_MAP_TUNE.memberSize);
+      for (let i = 0; i < this.groupList.length && this.groupDrawn.space < GROUP_MAP_TUNE.cap; i++) {
+        const m = this.groupList.items[i];
+        if (!m.here) continue;
+        const mesh = this.groupPool.take();
+        mesh.position.set(m.x, m.y, m.z);
+        mesh.scale.setScalar(m.leader ? size * GROUP_MAP_TUNE.leaderScale : size);
+        this.placeGroupLabel(m, w, h);
+        this.groupDrawn.space++;
+      }
+    }
+    this.groupPool.end();
+    this.groupLabelPool.end();
+  }
+
+  /**
+   * A member's name over the canvas. What was last written is kept by the pool's slot rather than by
+   * the member, because the slot a member is drawn from changes whenever the group does; a name in
+   * the same place saying the same thing writes nothing.
+   */
+  private placeGroupLabel(m: GroupMark, w: number, h: number): void {
+    this.scratch.set(m.x, m.y, m.z).project(this.camera3d);
+    if (this.scratch.z > 1 || Math.abs(this.scratch.x) > 1 || Math.abs(this.scratch.y) > 1) return;
+    const slot = this.groupLabelPool.used;
+    const el = this.groupLabelPool.take();
+    // Beside the mark and a little above it: the same offsets the zone's own labels are placed with.
+    const px = Math.round((this.scratch.x * 0.5 + 0.5) * w) + 8;
+    const py = Math.round((-this.scratch.y * 0.5 + 0.5) * h) - 8;
+    const write = this.groupLabels.place(slot, m.label, px, py);
+    if (write & LABEL_TEXT) (el.lastElementChild as HTMLElement).textContent = m.label;
+    if (write & LABEL_MOVE) el.style.transform = `translate(${px}px, ${py}px)`;
+  }
+
+  /** The member under a point on the space canvas, nearest first, or null: what the cursor names. */
+  private groupAt(x: number, y: number): GroupMark | null {
+    if (!this.layersOn.has('group')) return null;
+    const w = this.canvas3d.clientWidth || 1;
+    const h = this.canvas3d.clientHeight || 1;
+    let best: GroupMark | null = null;
+    let bestD = MARK_TUNE.pickPixels;
+    for (let i = 0; i < this.groupList.length; i++) {
+      const m = this.groupList.items[i];
+      if (!m.here) continue;
+      this.scratch.set(m.x, m.y, m.z).project(this.camera3d);
+      if (this.scratch.z > 1) continue;
+      const d = Math.hypot((this.scratch.x * 0.5 + 0.5) * w - x, (-this.scratch.y * 0.5 + 0.5) * h - y);
+      if (d < bestD) {
+        bestD = d;
+        best = m;
+      }
+    }
+    return best;
   }
 
   /** A mark's name and icon over the canvas, while it is on screen and the labels are not all taken. */
@@ -1167,14 +1490,18 @@ export class MapUi {
     if (!this.hoverMoved && !drifted) return;
     this.hoverMoved = false;
     this.hoverCam.copy(this.camera3d.position);
-    // The ships first: a nebula's shell can be kilometres across and would otherwise name every
-    // ship inside it.
+    // The group first, then the ships: a nebula's shell can be kilometres across and would otherwise
+    // name every ship inside it, and a member standing at a station should still be the one named.
     this.rayThrough(this.hover.x, this.hover.y);
     let label: string | null = null;
-    for (const hit of this.raycaster.intersectObjects(this.shipMarks.children, false)) {
-      if (!hit.object.visible) continue;
-      label = hit.object.name;
-      break;
+    const member = this.groupAt(this.hover.x, this.hover.y);
+    if (member) label = member.label;
+    if (!label) {
+      for (const hit of this.raycaster.intersectObjects(this.shipMarks.children, false)) {
+        if (!hit.object.visible) continue;
+        label = hit.object.name;
+        break;
+      }
     }
     if (!label) {
       const mark = this.markAt(this.hover.x, this.hover.y);

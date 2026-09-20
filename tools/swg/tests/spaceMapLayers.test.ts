@@ -3,7 +3,7 @@
 // and the numbers are chosen to be easy to check by eye. Each case says what real shape it stands for.
 import assert from 'node:assert/strict';
 import {
-  distanceText, drawnAsLine, drawnAsShell, hasLayer, labelFrom, LAYERS, MapView, marksOf, ObjectList, Pool, poolWants, rgbOf, ShipList, VIEW_TUNE, type MapMark, type MapPack,
+  distanceText, drawnAsLine, drawnAsShell, GROUP_MAP_TUNE, GroupLabels, GroupList, groupMapFeed, hasLayer, LABEL_MOVE, LABEL_NONE, LABEL_TEXT, labelFrom, LAYERS, mapFromGameX, mapFromGameZ, MapView, marksOf, ObjectList, Pool, poolWants, rgbOf, screenFromMapX, screenFromMapY, ShipList, VIEW_TUNE, type MapMark, type MapPack,
 } from '../../../src/ui/spaceMapLayers.ts';
 
 let checks = 0;
@@ -194,9 +194,102 @@ ok(poolWants([], 48).marks === 0 && poolWants([], 48).labels === 0, 'a zone with
 ok(hasLayer(marks, 'stations') && !hasLayer(marksOf(null), 'stations'), 'the map can tell whether a pack gave a station at all');
 ok(!hasLayer(old, 'nebulae'), 'an older pack gave no nebula');
 
-// 11. Every layer has a box and an icon name, and the marks only ever use those layers.
-ok(LAYERS.length === 6 && LAYERS.every((l) => !!l.label && /^zone_[a-z]+$/.test(l.icon)), 'each layer has a name and a zone-map icon');
+// 11. Every layer has a box, and the marks only ever use those layers. Every layer a zone's pack
+// fills has a zone-map icon; the group's is the one the client never drew, and it is the one layer a
+// planet's map shows a box for.
+ok(LAYERS.length === 7 && LAYERS.every((l) => !!l.label), 'each layer has a box with a name');
+ok(LAYERS.every((l) => (l.id === 'group' ? l.icon === '' && l.planet : /^zone_[a-z]+$/.test(l.icon) && !l.planet)), 'a pack\'s layers have an icon and are space only; the group has neither');
 const ids = new Set(LAYERS.map((l) => l.id));
 ok(marks.every((m) => ids.has(m.layer)), 'every mark belongs to a layer that has a box');
+ok(marks.every((m) => m.layer !== 'group'), 'no pack can put anything in the group layer');
+
+// 12. The group. Its list is filled in place every frame, like the ships': a frame of it makes no
+// entry, no array and no string once the group has been seen once, which is what lets the map read it
+// every frame. The label is the one string it makes, and only when the name or the leader changes.
+const group = new GroupList();
+const feed = (leaderName: string, hereToo: boolean) => {
+  group.begin();
+  group.add('a', leaderName, true, true, 100, 20, -300);
+  group.add('b', 'Second', false, hereToo, -40, 0, 60);
+};
+for (let frame = 0; frame < 3; frame++) feed('First', true);
+ok(group.length === 2 && group.made === 2, 'three frames of two members made two entries in all');
+ok(group.here === 2 && group.leader?.name === 'First', 'the list says how many are on this world and which of them leads');
+ok(group.items[0].label === 'First (leader)' && group.items[1].label === 'Second', 'the leader is marked in the name the map writes');
+const wasLabel = group.items[0].label;
+feed('First', true);
+ok(group.items[0].label === wasLabel, 'a frame that changes nothing makes no new label');
+feed('First', false);
+ok(group.here === 1 && group.length === 2, 'a member on another world is still in the group and is not one the map can draw');
+group.begin();
+ok(group.length === 0 && group.here === 0 && group.leader === null, 'a group that has gone empties the list the moment the frame reads it');
+ok(groupMapFeed.fill === null, 'with nobody holding a group, there is nothing for the map to read');
+
+// 13. The group's names on the space map: what a frame must write. This is the rule the display pass
+// set — nothing goes to the page unless what it says has changed — measured rather than claimed.
+const labels = new GroupLabels();
+ok(labels.place(0, 'First (leader)', 100, 50) === (LABEL_TEXT | LABEL_MOVE), 'a name seen for the first time writes its text and its place');
+ok(labels.place(0, 'First (leader)', 100, 50) === LABEL_NONE, 'the same name in the same place writes nothing at all');
+ok(labels.place(0, 'First (leader)', 101, 50) === LABEL_MOVE, 'a name that has moved writes only its place');
+ok(labels.place(0, 'Second', 101, 50) === LABEL_TEXT, 'a slot that has changed hands writes only its text');
+ok(labels.writes === 4, 'four writes in all across those four frames');
+labels.place(1, 'Second', 0, 0);
+ok(labels.slots === 2 && labels.writes === 6, 'a second name is kept apart from the first');
+const still = labels.writes;
+for (let frame = 0; frame < 30; frame++) {
+  labels.place(0, 'Second', 101, 50);
+  labels.place(1, 'Second', 0, 0);
+}
+ok(labels.writes === still, 'thirty still frames of two names write nothing');
+
+// 14. The numbers the maps draw the group with are ours, and every one of them is a number.
+const tuneKeys = Object.keys(GROUP_MAP_TUNE) as (keyof typeof GROUP_MAP_TUNE)[];
+ok(tuneKeys.length === 9 && tuneKeys.every((k) => Number.isFinite(GROUP_MAP_TUNE[k])), 'every invented number the group layer draws with is live and finite');
+ok(GROUP_MAP_TUNE.cap === 8 && GROUP_MAP_TUNE.leaderScale > 1, 'the map draws the agreed group size, and the leader larger than a member');
+ok(GROUP_MAP_TUNE.testRing > 0 && GROUP_MAP_TUNE.testShare > 0, 'the made-up group the console stands is drawn at a width of its own, and it is live too');
+
+// 15. A group larger than the agreed one stops at the cap, both in what is kept and in what is drawn:
+// the map is the last place a roster that has grown too big can be caught on the drawing side.
+const big = new GroupList();
+big.begin();
+for (let i = 0; i < GROUP_MAP_TUNE.cap + 5; i++) big.add(`m${i}`, `Member ${i}`, i === 0, i % 2 === 0, i, 0, 0);
+ok(big.length === GROUP_MAP_TUNE.cap && big.items.length === GROUP_MAP_TUNE.cap, 'a roster past the agreed group neither draws nor keeps the rest');
+ok(big.dropped === 5 && big.made === GROUP_MAP_TUNE.cap, 'the ones left out are counted, and no entry was made for them');
+ok(big.here === Math.ceil(GROUP_MAP_TUNE.cap / 2), 'only the members on this world count as ones the map can draw');
+big.begin();
+ok(big.dropped === 0, 'a frame that fits starts the count again');
+
+// 16. Who is in a slot is kept, and it is the group's own id for them rather than whatever line they
+// are on: a member who reconnects keeps their key, and the console can still tell them apart.
+const swap = new GroupList();
+swap.begin();
+swap.add('m1', 'First', true, true, 0, 0, 0);
+swap.add('m2', 'Second', false, true, 0, 0, 0);
+swap.begin();
+swap.add('m2', 'Second', true, true, 0, 0, 0);
+ok(swap.items[0].key === 'm2' && swap.items[0].label === 'Second (leader)', 'a slot that changed hands carries the new person, and their new mark');
+ok(swap.length === 1 && swap.leader?.key === 'm2', 'a group that lost somebody is one shorter the moment the frame reads it');
+
+// 17. The planet map's projection: the group's marks go through the same four functions the places
+// and the player's arrow do, one number at a time, so nothing can mirror one way and not the other.
+const CENTRE = { x: 1200, z: -400 };
+const LOOK = { x: 300, z: 90 };
+const SCALE = 29.3;
+const W = 900;
+const H = 560;
+const screenOf = (x: number, z: number) => ({
+  x: screenFromMapX(mapFromGameX(CENTRE.x, x), LOOK.x, SCALE, W),
+  y: screenFromMapY(mapFromGameZ(CENTRE.z, z), LOOK.z, SCALE, H),
+});
+const mine = screenOf(150, 275);
+const theirs = screenOf(150, 275);
+ok(near(mine.x, theirs.x) && near(mine.y, theirs.y), 'a member standing where you stand is drawn on your own point');
+// The game mirrors X onto the client's picture: a thousand metres further along the game's X is a
+// thousand metres the other way on the map, which is the step that has cost time before.
+const east = screenOf(1150, 275);
+ok(near(east.x, mine.x - 1000 / SCALE) && near(east.y, mine.y), 'a member a kilometre along X lands a kilometre the mirrored way, and no higher or lower');
+const north = screenOf(150, 1275);
+ok(near(north.y, mine.y - 1000 / SCALE) && near(north.x, mine.x), 'a member a kilometre along Z lands a kilometre up the screen');
+ok(near(screenFromMapX(LOOK.x, LOOK.x, SCALE, W), W / 2) && near(screenFromMapY(LOOK.z, LOOK.z, SCALE, H), H / 2), 'the point the window is looking at is the middle of the canvas');
 
 console.log(`\n${checks} checks passed`);

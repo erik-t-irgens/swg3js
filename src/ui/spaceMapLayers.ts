@@ -11,18 +11,29 @@
 // Everything here reads a pack loosely, so a pack converted before fields, nebulae and lanes existed
 // simply gives those layers nothing. Nothing in this file knows a zone's name or any of the game's
 // numbers; the test's data is all made up.
+//
+// One layer comes from nothing the converter wrote: the people you are grouped with. They are read
+// each frame out of `groupMapFeed`, which whoever holds the group sets and which is null while there
+// is none, so a game with no server draws that layer nothing and shows no box for it.
 
 /** The map's switchable layers, in the order their boxes are shown. */
-export type LayerId = 'stations' | 'points' | 'launch' | 'fields' | 'nebulae' | 'ships';
+export type LayerId = 'stations' | 'points' | 'launch' | 'fields' | 'nebulae' | 'ships' | 'group';
 
-/** Each layer's box, and the zone-map icon the client drew it with (`space_ui/<icon>.png` in the packs). */
-export const LAYERS: readonly { id: LayerId; label: string; icon: string }[] = [
-  { id: 'stations', label: 'Stations', icon: 'zone_spacestation' },
-  { id: 'points', label: 'Hyperspace', icon: 'zone_hyperspace' },
-  { id: 'launch', label: 'Launch point', icon: 'zone_waypoint' },
-  { id: 'fields', label: 'Asteroid fields', icon: 'zone_asteroids' },
-  { id: 'nebulae', label: 'Nebulae', icon: 'zone_nebula' },
-  { id: 'ships', label: 'Ships', icon: 'zone_ship' },
+/**
+ * Each layer's box, the zone-map icon the client drew it with (`space_ui/<icon>.png` in the packs),
+ * and whether it means anything on a planet as well as in space. Everything a zone's pack holds is
+ * space only; the people you are grouped with are on whichever world you are on, so theirs is the one
+ * box the planet's map shows — and the only one the client never drew, so it has no icon of its own
+ * and its marks wear a plain dot.
+ */
+export const LAYERS: readonly { id: LayerId; label: string; icon: string; planet: boolean }[] = [
+  { id: 'stations', label: 'Stations', icon: 'zone_spacestation', planet: false },
+  { id: 'points', label: 'Hyperspace', icon: 'zone_hyperspace', planet: false },
+  { id: 'launch', label: 'Launch point', icon: 'zone_waypoint', planet: false },
+  { id: 'fields', label: 'Asteroid fields', icon: 'zone_asteroids', planet: false },
+  { id: 'nebulae', label: 'Nebulae', icon: 'zone_nebula', planet: false },
+  { id: 'ships', label: 'Ships', icon: 'zone_ship', planet: false },
+  { id: 'group', label: 'Group', icon: '', planet: true },
 ];
 
 /** One thing the map shows and can name, in the GAME frame (metres). */
@@ -499,6 +510,212 @@ export class ShipList {
   get mine(): ShipMark | null {
     for (let i = 0; i < this.n; i++) if (this.items[i].mine) return this.items[i];
     return null;
+  }
+}
+
+// ---- The planet map's projection, as four numbers in and one out. ----
+//
+// The planet's map is the client's own picture, and the game mirrors X and recentres onto it. The
+// window works in points and the group works in single numbers (a member of every frame must not
+// hand back a point of its own), so both go through these rather than each having its own copy of
+// the algebra: change one of them and the places, the player's arrow and the group all move together.
+
+/** A game X onto the map's, about the world's centre. */
+export function mapFromGameX(centreX: number, x: number): number {
+  return centreX - x;
+}
+
+/** A game Z onto the map's. */
+export function mapFromGameZ(centreZ: number, z: number): number {
+  return z + centreZ;
+}
+
+/** A map X to the canvas, from its left edge, at the scale and the point the window is looking at. */
+export function screenFromMapX(mapX: number, lookX: number, scale: number, width: number): number {
+  return width / 2 + (mapX - lookX) / scale;
+}
+
+/** A map Z to the canvas, from its top edge: the screen's Y runs the other way. */
+export function screenFromMapY(mapZ: number, lookZ: number, scale: number, height: number): number {
+  return height / 2 - (mapZ - lookZ) / scale;
+}
+
+// ---- The group: the people you are grouped with, on whichever map is showing. ----
+
+/**
+ * Invented: how the maps draw the people you are grouped with. Every number here is ours and every one
+ * is live through `__debug.spaceMap({ memberPixels, leaderRing, labelGap, memberSize, memberMin,
+ * leaderScale, cap, testRing, testShare })`; `__debug.mapGroup()` reports what the last frame drew
+ * with them. The group's own size is the agreed eight, and the ranges an invite or a trade reach are
+ * the game's own and are not here: nothing on the map enforces a distance.
+ */
+export const GROUP_MAP_TUNE = {
+  /** The planet map: half a member's diamond, in screen pixels. */
+  memberPixels: 5,
+  /**
+   * The planet map: the ring round the leader, as a multiple of the leader's own half-diamond, so
+   * that widening a member widens the ring with it rather than swallowing it.
+   */
+  leaderRing: 1.8,
+  /** The planet map: pixels between a member's mark and their name. */
+  labelGap: 9,
+  /** The space map: a member's mark as a share of the distance looked at, so it holds its size on screen. */
+  memberSize: 0.011,
+  /** The space map: a member's mark is never smaller than this many metres. */
+  memberMin: 10,
+  /** How much larger the leader's mark is drawn than a member's, on both maps. */
+  leaderScale: 1.6,
+  /**
+   * How many members either map will draw, and how many entries the list will hold: the group's own
+   * size, which is the same eight the group module holds itself (`GROUP_TUNE.max`) and is set in both
+   * places because neither reaches into the other. Raising it here only widens the map's own pools.
+   */
+  cap: 8,
+  /**
+   * Console only: how wide, in screen pixels, the ring of made-up people that `__debug.mapGroup({
+   * test: n })` stands round the player is drawn on a planet's map. It is a share of the screen and
+   * not a distance on the ground, because a planet's map starts about thirty metres to the pixel and
+   * a ring of tens of metres would land inside the player's own arrow.
+   */
+  testRing: 120,
+  /** Console only: the same ring in space, as a share of the distance the view is looking at. */
+  testShare: 0.25,
+};
+
+/** One person in your group, filled in place by whoever holds the group. */
+export interface GroupMark {
+  /**
+   * Who this is, the same string every frame while they are in the group: the id their own group
+   * knows them by, never the connection they happen to be on, which changes when they reconnect and
+   * is nothing at all while they are away. It is read by `__debug.mapGroup()`, which is how a session
+   * that cannot see the screen tells one member from another; the names over the space map are kept
+   * by their pool slot rather than by this, because the slot is what holds the element that was
+   * written, and a slot changes hands whenever the group does.
+   */
+  key: string;
+  name: string;
+  leader: boolean;
+  /** True while they are on the world the map is showing: only those have a place to draw. */
+  here: boolean;
+  /** Where they are, in the GAME frame and in metres — the same numbers a ship's mark carries. */
+  x: number;
+  y: number;
+  z: number;
+  /** What the maps write beside their mark, made only when the name or the leader changes. */
+  label: string;
+}
+
+/**
+ * The group the maps draw, written straight into entries the maps own: filling it makes no array, no
+ * string and no object once the group has been seen once, which is what lets it be read every frame.
+ */
+export class GroupList {
+  readonly items: GroupMark[] = [];
+  made = 0;
+  /** People handed over beyond the cap and not kept: a roster larger than the agreed group. */
+  dropped = 0;
+  private n = 0;
+
+  begin(): void {
+    this.n = 0;
+    this.dropped = 0;
+  }
+
+  add(key: string, name: string, leader: boolean, here: boolean, x: number, y: number, z: number): void {
+    // The drawing stops at the cap either way; stopping here as well is what keeps a roster that has
+    // grown past the agreed group from growing this list, and every walk of it, without a bound.
+    if (this.n >= GROUP_MAP_TUNE.cap) {
+      this.dropped++;
+      return;
+    }
+    if (this.n === this.items.length) {
+      this.items.push({ key: '', name: '', leader: false, here: false, x: 0, y: 0, z: 0, label: '' });
+      this.made++;
+    }
+    const m = this.items[this.n++];
+    m.key = key;
+    // The label is a new string, so it is made only when the name or the leader mark has changed —
+    // which is an event, not a frame. Who is in the slot does not come into it: two people called the
+    // same thing are written the same thing, so there is nothing to make.
+    if (m.name !== name || m.leader !== leader || !m.label) m.label = leader ? `${name} (leader)` : name;
+    m.name = name;
+    m.leader = leader;
+    m.here = here;
+    m.x = x;
+    m.y = y;
+    m.z = z;
+  }
+
+  get length(): number {
+    return this.n;
+  }
+
+  /** How many of them are on the world the map is showing: what the maps can actually draw. */
+  get here(): number {
+    let n = 0;
+    for (let i = 0; i < this.n; i++) if (this.items[i].here) n++;
+    return n;
+  }
+
+  /** The leader, or null while the group has none in it (nobody is grouped, or the leader is away). */
+  get leader(): GroupMark | null {
+    for (let i = 0; i < this.n; i++) if (this.items[i].leader) return this.items[i];
+    return null;
+  }
+}
+
+/**
+ * Where the maps read the group from. Whoever holds the group sets `fill`; with no server, or with no
+ * group, it stays null and both maps draw nothing and hide the layer's own box, which is what "gone
+ * the moment the group is" means. The maps never reach into the group themselves, so nothing about
+ * groups is loaded or run by a game playing alone.
+ *
+ * Three things the filler owes the maps: the player themselves is left out (their own mark is already
+ * on both maps, and a member's diamond over it would only hide it); a member's place is in the game's
+ * own frame and in metres — the world place, not a place in some hull's frame; and `fill` is called
+ * once for every frame the map window draws, whether the layer's box is ticked or not (the box itself
+ * is only shown while there is a group, so the map has to look), so it must do no work beyond reading
+ * what is already known and must make nothing.
+ */
+export const groupMapFeed: { fill: ((out: GroupList) => void) | null } = { fill: null };
+
+/** What a group label needs written this frame: nothing, its place, its text, or both. */
+export const LABEL_NONE = 0;
+export const LABEL_MOVE = 1;
+export const LABEL_TEXT = 2;
+
+/**
+ * What each group label on the space map was last written with, by the pool slot it was drawn from
+ * (never by the member, since the slot a member is drawn from changes when the group does). A label
+ * that says the same thing in the same place writes nothing at all, which is what keeps a still map
+ * from touching the page; `writes` counts every property that was written, and the node test drives
+ * it over frames.
+ */
+export class GroupLabels {
+  private readonly placed: { text: string; x: number; y: number }[] = [];
+  writes = 0;
+
+  /** The slot's write mask; the record is updated as though what it asks for was written. */
+  place(slot: number, text: string, x: number, y: number): number {
+    while (this.placed.length <= slot) this.placed.push({ text: '', x: NaN, y: NaN });
+    const p = this.placed[slot];
+    let out = LABEL_NONE;
+    if (p.text !== text) {
+      p.text = text;
+      out |= LABEL_TEXT;
+      this.writes++;
+    }
+    if (p.x !== x || p.y !== y) {
+      p.x = x;
+      p.y = y;
+      out |= LABEL_MOVE;
+      this.writes++;
+    }
+    return out;
+  }
+
+  get slots(): number {
+    return this.placed.length;
   }
 }
 

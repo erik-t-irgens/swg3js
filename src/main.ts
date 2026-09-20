@@ -25,6 +25,7 @@ import { loadPlayerRig } from './player/rig';
 import { Character, loadSpeciesIndex, type SpeciesEntry } from './player/character';
 import { GalaxyMap, type Poi } from './ui/galaxyMap';
 import { MapUi } from './ui/mapUi';
+import { groupMapFeed } from './ui/spaceMapLayers.ts';
 import { WardrobeUi } from './ui/wardrobeUi';
 import { WeaponsUi } from './ui/weaponsUi';
 import { BackpackUi, type BackpackCell } from './ui/backpackUi';
@@ -989,6 +990,11 @@ class App {
           }
         };
       })(),
+      // The people you are grouped with, for the map's own layer on whichever world you are on.
+      // Whoever holds the group hands it over here; with nobody holding one this reads nothing, the
+      // map draws no group, and its box is not shown at all. It is asked once a frame the map draws,
+      // so it must make nothing and do no work beyond reading what is already known.
+      group: (out) => groupMapFeed.fill?.(out),
       pack: () => this.world.spaceData,
       piloting: () => !!this.world.planet.space && !!this.pilotedShip(),
       // The map's Hyperspace button: the map closes and the System Map opens on this system, where
@@ -3166,6 +3172,23 @@ class App {
       for (const peer of this.net.peers.values()) if (onThisWorld(peer.hello) && peer.hello.name.toLowerCase() === want) return peer.id;
       for (const peer of this.net.peers.values()) if (onThisWorld(peer.hello) && peer.hello.name.toLowerCase().startsWith(want)) return peer.id;
       return 0;
+    };
+    // The maps' own group layer: the roster, each member where their own state last put them. A
+    // member on another world has no place on this map and is left to the roster on the display; the
+    // local player is left out, because their own mark is already on both maps. The map calls this
+    // once for every frame its window draws, so nothing here makes anything: the point is filled in
+    // place, and a member is named by the id the group knows them by, which does not change when
+    // they reconnect and is not 0 while they are away. A group that has gone leaves no roster, so
+    // the layer and its box go with it and nothing has to be unset.
+    const groupMapAt = { x: 0, y: 0, z: 0 };
+    groupMapFeed.fill = (out) => {
+      const roster = groups.roster;
+      if (!roster) return;
+      for (const m of roster.members) {
+        if (m.me) continue;
+        const here = groups.peerAt(m.id, groupMapAt);
+        out.add(m.mid, m.name, m.leader, here, groupMapAt.x, groupMapAt.y, groupMapAt.z);
+      }
     };
     groups.onNote = (text) => this.messages.system(text);
     // Travelling together is another wave's: the word is carried and said, and nobody is moved by it.
