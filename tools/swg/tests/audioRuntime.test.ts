@@ -17,6 +17,9 @@ import { UI_NO_CALLER, UI_ROWS, UI_THROTTLE, UiSounds, type UiAction } from '../
 import { AudioSystem, GROUP_OF_CATEGORY, SOUND_GROUPS, type AudioSettings } from '../../../src/audio/audio.ts';
 import { ClipEventIndex, ClipWatcher, crossed, type ActiveClip, type ClipHalf } from '../../../src/audio/clipEvents.ts';
 import { BodySounds, FOOT_TUNE, resolveSurface, sampleFamily, surfaceWord } from '../../../src/audio/footsteps.ts';
+import { SaberSounds, swingGroup, type JkaPack, type SaberWorld } from '../../../src/audio/saberSounds.ts';
+import { powerById } from '../../../src/combat/forcePowers.ts';
+import { liveSettings } from '../../../src/core/settings.ts';
 
 let passed = 0;
 const ok = (cond: boolean, msg: string) => {
@@ -1086,6 +1089,409 @@ class FakeHost {
   fighter.hunting = true;
   feet.update(0.25, ear, lists as never);
   ok(host.played.some((p) => p.id === 'sound/v_shout.snd'), 'and one that has turned on something calls out at once');
+}
+
+// ---------------------------------------------------------------------------------------------
+// Lightsabers: which whoosh a style swings with, a move that carries its own marks against one
+// that carries none, Jedi Academy's files given templates of their own, the hum following a lit
+// blade through rain and water, and the Force powers that last.
+// ---------------------------------------------------------------------------------------------
+
+/** A mixer that writes down what it was asked for, with a clock the test winds by hand. */
+class SaberFakeHost {
+  now = 10;
+  advancing = false;
+  /** Set true to refuse everything, which is what a full voice pool does. */
+  refuse = false;
+  readonly played: { id: string; at: number; loop: boolean; gain: number; x?: number; key: number }[] = [];
+  readonly stopped: number[] = [];
+  readonly moved: { key: number; x: number }[] = [];
+  readonly asked: string[] = [];
+  readonly templates = new Map<string, unknown>();
+  private next = 1;
+  readonly bank = {
+    available: true,
+    template: (id: string): unknown => this.templates.get(id) ?? null,
+  };
+  play(id: string, options: { x?: number; y?: number; z?: number; loop?: boolean; gain?: number; at?: number } = {}): number {
+    if (this.refuse) return 0;
+    const key = this.next++;
+    this.played.push({ id, at: options.at ?? this.now, loop: !!options.loop, gain: options.gain ?? 1, x: options.x, key });
+    return key;
+  }
+  stop(key: number): void {
+    this.stopped.push(key);
+  }
+  move(key: number, x: number): void {
+    this.moved.push({ key, x });
+  }
+  setGain(): void {}
+  isPlaying(key: number): boolean {
+    return key > 0 && !this.stopped.includes(key);
+  }
+  prepare(ids: Iterable<string>): void {
+    for (const id of ids) this.asked.push(id);
+  }
+}
+
+/** Jedi Academy's own set as the converter writes it, cut down to what the checks need. */
+const jkaPack = (): JkaPack => ({
+  format: 2,
+  sabers: {
+    single_1: { on: 'sound/weapons/saber/saberon.wav', loop: 'sound/weapons/saber/saberhum4.wav', off: 'sound/weapons/saber/saberoff.wav' },
+    dual_1: { loop: 'sound/weapons/saber/saberhum4.wav' },
+    jedi: { loop: 'sound/weapons/saber/saberhum1.wav' },
+  },
+  files: {
+    // The names the `.sab` files write are not always the extension the archive holds, and it slips
+    // both ways: the ignition is an mp3 written as a wav, and the catch a wav written as an mp3.
+    'sound/weapons/saber/saberon.mp3': 13293,
+    'sound/weapons/saber/saberoff.mp3': 9741,
+    'sound/weapons/saber/saberhum4.wav': 68948,
+    'sound/weapons/saber/saberhum1.wav': 76160,
+    'sound/weapons/saber/saberhup1.mp3': 6188,
+    'sound/weapons/saber/saberhup2.mp3': 7024,
+    'sound/weapons/saber/saberhup3.mp3': 6188,
+    'sound/weapons/saber/saberhup4.mp3': 8069,
+    'sound/weapons/saber/saberhup5.mp3': 7651,
+    'sound/weapons/saber/saberhup6.mp3': 7651,
+    'sound/weapons/saber/saberhup7.mp3': 8069,
+    'sound/weapons/saber/saberhup8.mp3': 8069,
+    'sound/weapons/saber/saberhup9.mp3': 9114,
+    'sound/weapons/saber/saberblock1.mp3': 8534,
+    'sound/weapons/saber/saberhit1.mp3': 11473,
+    'sound/weapons/saber/saberhitwall1.mp3': 7283,
+    'sound/weapons/saber/saber_catch.wav': 2217,
+    'sound/weapons/saber/hitwater.mp3': 12879,
+    'sound/weapons/saber/rainfizz1.mp3': 7467,
+    'sound/weapons/saber/boiling.wav': 72574,
+  },
+});
+
+/** A saber sound of its own, with the pack in and the mixer standing in. */
+function sabersWith(host: SaberFakeHost, opts: { clips?: ClipEventIndex; world?: SaberWorld; pack?: JkaPack | null } = {}): SaberSounds {
+  const s = new SaberSounds();
+  s.attach(host as never, { clips: opts.clips ?? null, world: opts.world ?? null });
+  s.adopt(opts.pack === undefined ? jkaPack() : opts.pack);
+  return s;
+}
+
+const blade = {} as object;
+
+// ---- which whoosh a style swings with ----
+{
+  ok(swingGroup('fast') === 'fast' && swingGroup('medium') === 'medium' && swingGroup('strong') === 'strong', "the three single styles take Jedi Academy's three groups of whooshes in order");
+  ok(swingGroup('dual') === 'fast' && swingGroup('staff') === 'medium', 'the dual style swings with the quick group and the staff with the middle one');
+}
+
+// ---- a move that marks its own whooshes, against one that marks none ----
+{
+  const host = new SaberFakeHost();
+  const clips = new ClipEventIndex();
+  // A kata as Jedi Academy marks it: two whooshes in the torso's block, at its own frames.
+  clips.adopt({
+    jka: {
+      clips: {
+        BOTH_A2_SPECIAL: { frames: 41, upper: [{ type: 'sound', sound: 'sound/weapons/saber/saberhup%d.wav', range: [4, 6], frame: 4, frames: 41 }, { type: 'sound', sound: 'sound/weapons/saber/saberhup%d.wav', range: [4, 6], frame: 20, frames: 41 }] },
+      },
+    },
+  });
+  const s = sabersWith(host, { clips });
+  s.swing('medium', { x: 1, y: 2, z: 3 }, 'BOTH_A2_SPECIAL', 2);
+  ok(host.played.length === 2, 'a move whose clip Jedi Academy marked sounds once per mark and not at all at its start');
+  const first = host.played[0];
+  const second = host.played[1];
+  ok(near(first.at - host.now, (4 / 40) * 2, 1e-6) && near(second.at - host.now, (20 / 40) * 2, 1e-6), "each whoosh is laid on the audio clock at its own mark's fraction of the move's real length");
+  ok(first.id === second.id && first.id.includes('saberhup') && first.id.includes('4-6'), 'the range the mark names becomes one template with those three files as its samples, picked between as the game does');
+  host.played.length = 0;
+  // Every ordinary attack of every style carries no mark at all.
+  s.swing('strong', { x: 0, y: 0, z: 0 }, 'BOTH_A3_T__B_', 0.7);
+  ok(host.played.length === 1 && host.played[0].id === 'jka:swingStrong', 'a move that carries none whooshes exactly once as it starts, from its own style group');
+  host.played.length = 0;
+  host.now += 1;
+  s.swing('medium', { x: 0, y: 0, z: 0 }, 'BOTH_A2_SPECIAL');
+  ok(host.played.length === 1 && host.played[0].id === 'jka:swingMedium', 'a marked clip with no length to lay its marks along whooshes once rather than at nothing');
+  const counts = (s.status() as { counts: { marked: number; swings: number } }).counts;
+  ok(counts.marked === 1 && counts.swings === 2, 'and the report tells the two apart');
+  // The same moves are what a sword and a polearm swing through, and they are not lightsabers.
+  host.played.length = 0;
+  host.now += 1;
+  s.follow({ x: 0, y: 0, z: 0 }, []);
+  s.swing('medium', null, 'BOTH_A1_T__B_', 0.5);
+  ok(host.played.length === 0, 'the player swinging with no blade out makes no saber sound: the move machine runs for every melee weapon');
+  const b = {} as object;
+  host.now += 1;
+  s.follow({ x: 0, y: 0, z: 0 }, [b]);
+  s.ignite(b, true, { x: 0, y: 1, z: 0 });
+  s.hum(b, { x: 0, y: 1, z: 0 }, { x: 0, y: 2, z: 0 }, 1 / 60);
+  host.played.length = 0;
+  s.swing('medium', null, 'BOTH_A1_T__B_', 0.5);
+  ok(host.played.length === 1 && host.played[0].id === 'jka:swingMedium' && host.played[0].x === 0, 'and with a blade out it whooshes at the blade');
+}
+
+// ---- Jedi Academy's files, which have no sound template of their own ----
+{
+  const host = new SaberFakeHost();
+  const s = sabersWith(host);
+  s.ignite(blade, true, { x: 0, y: 1, z: 0 });
+  const hum = host.bank.template('jka:hum:single_1') as { samples: string[]; loops?: [number, number]; category: number } | null;
+  ok(!!hum && hum.samples[0] === '../jka/sound/weapons/saber/saberhum4.wav', "a made-up template points at the file where the converter put it, beside the bank's own samples");
+  ok(!!hum && hum.loops?.[0] === -1 && hum.category === 7, "a hum loops for ever and answers to the same layer the game's own lightsaber sounds do");
+  const on = host.bank.template('jka:on') as { samples: string[] } | null;
+  ok(!!on && on.samples[0].endsWith('saberon.mp3'), 'a name written with the wrong extension finds the file that is really there, as Jedi Academy\'s own loader does');
+  host.templates.set('sound/amb_x.snd', { dim: 2 });
+  ok(!!host.bank.template('sound/amb_x.snd'), "and everything else still reaches the bank's own 5,597 templates");
+  ok(new URL('assets-private/sounds/samples/../jka/sound/weapons/saber/saberhum4.wav', 'http://game/').pathname === '/assets-private/sounds/jka/sound/weapons/saber/saberhum4.wav', 'the sample path resolves to the folder the converter copied Jedi Academy into');
+}
+
+// ---- the hum on a lit blade, and what the weather does to it ----
+{
+  const host = new SaberFakeHost();
+  const sky = { rain: 0 };
+  const sea = { top: -1e9 };
+  const world: SaberWorld = {
+    listenerSpace: { building: 7, cell: 2 },
+    weather: { fx: sky, roofs: { topAt: () => -1e9 } },
+    footSurfaces: { waterTop: () => sea.top, space: () => null },
+  };
+  const s = sabersWith(host, { world });
+  const b = {} as object;
+  s.follow({ x: 0, y: 0, z: 0 }, [b]);
+  s.ignite(b, true, { x: 0, y: 1, z: 0 });
+  ok(host.played.some((p) => p.id === 'jka:on' && !p.loop), 'a blade lit plays its ignition once');
+  s.hum(b, { x: 0, y: 1, z: 0 }, { x: 0, y: 2, z: 0 }, 1 / 60);
+  const loop = host.played.find((p) => p.loop);
+  ok(!!loop && loop.id === 'jka:hum:single_1', "the player's own blade hums as the plain hilt does");
+  const blades = (s.status() as { blades: { space: number }[] }).blades;
+  ok(blades[0].space === 7, "a blade in the player's own hand is in the room the ear is in, so nothing in the hand is ever heard through a wall");
+  host.played.length = 0;
+  s.hum(b, { x: 1, y: 1, z: 0 }, { x: 1, y: 2, z: 0 }, 1 / 60);
+  ok(host.played.length === 0 && host.moved.some((m) => m.key === loop!.key), 'and it follows the blade rather than being started again');
+  // Under water the hum gives way to the boil, and comes back when the blade is out of it. The
+  // world is what says so; nothing has to tell the blade.
+  sea.top = 9;
+  host.now += 1;
+  s.hum(b, { x: 1, y: 1, z: 0 }, { x: 1, y: 2, z: 0 }, 1 / 60);
+  ok(host.stopped.includes(loop!.key) && host.played.some((p) => p.id === 'jka:boil' && p.loop), 'a blade under water boils in place of its hum');
+  sea.top = -1e9;
+  sky.rain = 1;
+  host.played.length = 0;
+  host.now += 1;
+  s.hum(b, { x: 1, y: 1, z: 0 }, { x: 1, y: 2, z: 0 }, 1 / 60);
+  host.now += 5;
+  s.hum(b, { x: 1, y: 1, z: 0 }, { x: 1, y: 2, z: 0 }, 1 / 60);
+  ok(host.played.some((p) => p.id === 'jka:fizz'), 'and one out in the rain hisses');
+  // Something that would rather say for itself wins for a second and then lapses back to the world.
+  s.weather(b, false, false);
+  host.played.length = 0;
+  host.now += 0.5;
+  s.hum(b, { x: 1, y: 1, z: 0 }, { x: 1, y: 2, z: 0 }, 1 / 60);
+  ok(!host.played.some((p) => p.id === 'jka:fizz'), 'a blade told it is not raining on it is not, whatever the sky says');
+  s.ignite(b, false, { x: 1, y: 1, z: 0 });
+  ok(host.played.some((p) => p.id === 'jka:off'), 'a blade put out plays its shut-off');
+  s.hum(b, { x: 1, y: 1, z: 0 }, { x: 1, y: 2, z: 0 }, 1 / 60);
+  ok(!host.played.some((p) => p.loop && p.id.startsWith('jka:hum') && p.at > 0 && !host.stopped.includes(p.key)), 'and nothing of it is left humming');
+}
+
+// ---- the blade meeting things ----
+{
+  const host = new SaberFakeHost();
+  const s = sabersWith(host);
+  s.contact('block', { x: 0, y: 0, z: 0 });
+  s.contact('block', { x: 0, y: 0, z: 0 });
+  ok(host.played.length === 1, 'two blows of a kind within a frame of each other are one sound, so a blade dragged along a wall does not rattle');
+  host.now += 1;
+  s.contact('wall', { x: 0, y: 0, z: 0 });
+  s.contact('body', { x: 0, y: 0, z: 0 });
+  s.contact('catch', { x: 0, y: 0, z: 0 });
+  ok(host.played.map((p) => p.id).join(' ') === 'jka:block jka:wall jka:body jka:catch', 'a bolt turned away, a wall, a body and a blade caught out of the air each have their own sound');
+  // A parry knows it happened but not where: it sounds at the blade the renderer drew a moment ago,
+  // which is in the world even when the body's own place is in a ship's frame.
+  const b = {} as object;
+  s.follow({ x: 100, y: 0, z: 0 }, [b]);
+  s.ignite(b, true, { x: 5, y: 1, z: 0 });
+  s.hum(b, { x: 5, y: 1, z: 0 }, { x: 5, y: 2, z: 0 }, 1 / 60);
+  host.played.length = 0;
+  s.contact('clash');
+  ok(host.played.length === 1 && host.played[0].x === 5, "a blow with no place of its own is heard at the player's own blade rather than at the body");
+}
+
+// ---- the game's own set, and having neither ----
+{
+  const host = new SaberFakeHost();
+  for (const id of ['sound/wep_idle1_lightsaber.snd', 'sound/wep_activate_lightsaber.snd', 'sound/wep_lightsaber_swing.snd', 'sound/wep_lightsaber_hit_flesh.snd']) host.templates.set(id, { dim: 3 });
+  const settings = liveSettings();
+  const was = settings.soundSabers;
+  settings.soundSabers = 'swg';
+  const s = sabersWith(host);
+  const b = {} as object;
+  s.follow({ x: 0, y: 0, z: 0 }, [b]);
+  s.ignite(b, true, { x: 0, y: 0, z: 0 });
+  s.hum(b, { x: 0, y: 0, z: 0 }, { x: 0, y: 1, z: 0 }, 1 / 60);
+  ok(host.played.some((p) => p.id === 'sound/wep_activate_lightsaber.snd') && host.played.some((p) => p.id === 'sound/wep_idle1_lightsaber.snd'), "with the game's own sounds chosen, the blade lights and hums from the game's own templates");
+  s.contact('catch', { x: 0, y: 0, z: 0 });
+  ok(host.played.some((p) => p.id === 'jka:catch'), "and a role the game has nothing for keeps Jedi Academy's file whichever set is chosen");
+  settings.soundSabers = was;
+  // Nothing converted at all: every call is refused and counted, and none of them throws.
+  const bare = new SaberSounds();
+  const empty = new SaberFakeHost();
+  empty.bank.available = false;
+  bare.attach(empty as never, {});
+  bare.ignite(b, true, { x: 0, y: 0, z: 0 });
+  bare.swing('medium', null, 'BOTH_A1_T__B_', 0.5);
+  bare.contact('body', { x: 0, y: 0, z: 0 });
+  ok(empty.played.length === 0 && (bare.status() as { counts: { noSound: number } }).counts.noSound > 0, 'with nothing converted the blades are silent, say so, and nothing throws');
+}
+
+// ---- the Force powers ----
+{
+  const host = new SaberFakeHost();
+  const s = sabersWith(host);
+  s.follow({ x: 1, y: 2, z: 3 });
+  const lightning = powerById('lightning')!;
+  const jump = powerById('jump')!;
+  s.power(jump, 'once');
+  ok(host.played.length === 1 && host.played[0].id === 'sound/pl_force_jump.snd', 'a power that fires and is done plays one of the game\'s own sounds where the player is');
+  host.played.length = 0;
+  for (let i = 0; i < 4; i++) s.holdPower(lightning, true);
+  const starts = host.played.filter((p) => p.id.endsWith('_begin.snd')).length;
+  const loops = host.played.filter((p) => p.loop).length;
+  ok(starts === 1 && loops === 1, 'one that lasts opens once and keeps one loop however many frames it is held for');
+  s.holdPower(lightning, false);
+  ok(host.played.some((p) => p.id.endsWith('_end.snd')) && host.stopped.length === 1, 'and letting go ends it and takes the loop with it');
+  // A loop the mixer refuses (a full pool) must not make the opening sound ask again every frame.
+  host.played.length = 0;
+  host.refuse = true;
+  for (let i = 0; i < 5; i++) s.holdPower(lightning, true);
+  host.refuse = false;
+  s.holdPower(lightning, true);
+  ok(host.played.length === 0, 'a power whose loop the mixer refused does not bang its opening sound out on every frame it is held');
+  s.stopPowers();
+  ok((s.status() as { powers: unknown[] }).powers.length === 0, 'and a change of class lets go of everything a power was holding open');
+}
+
+// ---- a blade that stops being drawn without being put out ----
+{
+  const host = new SaberFakeHost();
+  const s = sabersWith(host);
+  const b = {} as object;
+  s.ignite(b, true, { x: 4, y: 1, z: 0 });
+  s.hum(b, { x: 4, y: 1, z: 0 }, { x: 4, y: 2, z: 0 }, 1 / 60);
+  const loop = host.played.find((p) => p.loop)!;
+  ok(!!loop && loop.id.startsWith('jka:hum'), 'a blade nobody owns still hums');
+  // A mobile walks behind the camera: it is culled as a whole group, so its blade renderer stops
+  // being called although the blade is still lit and nothing has said otherwise.
+  host.now += 0.3;
+  s.tick();
+  ok(!host.stopped.includes(loop.key), 'a blade undrawn for a moment keeps its hum: a frame or two is not a disappearance');
+  host.now += 1;
+  s.tick();
+  ok(host.stopped.includes(loop.key), 'one undrawn for longer has its hum let go rather than left hanging where it was last drawn');
+  host.played.length = 0;
+  host.now += 1;
+  s.hum(b, { x: 9, y: 1, z: 0 }, { x: 9, y: 2, z: 0 }, 1 / 60);
+  const again = host.played.find((p) => p.loop);
+  ok(!!again && again.x === 9, 'and it hums again, where it now is, the moment it is drawn once more -- with no second ignition');
+  ok(!host.played.some((p) => p.id === 'jka:on'), 'nothing lights twice for it');
+  ok((s.status() as { counts: { lost: number } }).counts.lost === 1, 'the report counts what it swept up');
+}
+
+// ---- two blades are two sounds ----
+{
+  const host = new SaberFakeHost();
+  const s = sabersWith(host);
+  s.contact('block', { x: 0, y: 0, z: 0 });
+  s.contact('block', { x: 0, y: 0, z: 1 });
+  ok(host.played.length === 1, 'one blade ringing twice in the same instant and the same place is one sound');
+  s.contact('block', { x: 40, y: 0, z: 0 });
+  ok(host.played.length === 2, "and another fighter's blade across the room in the same instant is its own");
+  host.played.length = 0;
+  s.swing('fast', { x: 0, y: 0, z: 0 }, undefined, 0);
+  s.swing('fast', { x: 0.5, y: 0, z: 0 }, undefined, 0);
+  s.swing('fast', { x: 40, y: 0, z: 0 }, undefined, 0);
+  ok(host.played.length === 2, 'the same holds for whooshes: a chain in one place is one, two fighters are two');
+}
+
+// ---- a move begun over the top of another ----
+{
+  const host = new SaberFakeHost();
+  const clips = new ClipEventIndex();
+  clips.adopt({
+    jka: {
+      clips: {
+        BOTH_A2_SPECIAL: { frames: 41, upper: [{ type: 'sound', sound: 'sound/weapons/saber/saberhup%d.wav', range: [4, 6], frame: 4, frames: 41 }, { type: 'sound', sound: 'sound/weapons/saber/saberhup%d.wav', range: [4, 6], frame: 36, frames: 41 }] },
+      },
+    },
+  });
+  const s = sabersWith(host, { clips });
+  s.swing('medium', { x: 0, y: 0, z: 0 }, 'BOTH_A2_SPECIAL', 4);
+  const [early, late] = host.played;
+  ok(host.played.length === 2, 'a kata lays its whooshes out along the move');
+  // A quarter of the way through, the move is chained out of: the first whoosh has sounded, the
+  // second has not.
+  host.now += 1;
+  s.cancel();
+  ok(!host.stopped.includes(early.key) && host.stopped.includes(late.key), 'a move cut short takes only the whooshes that had not sounded yet, and lets the one already sounding finish');
+}
+
+// ---- the blade going into the water ----
+{
+  const host = new SaberFakeHost();
+  const sea = { top: -1e9 };
+  const world: SaberWorld = {
+    listenerSpace: { building: -1, cell: -1 },
+    weather: { fx: { rain: 0 }, roofs: { topAt: () => -1e9 } },
+    footSurfaces: { waterTop: () => sea.top, space: () => null },
+  };
+  const s = sabersWith(host, { world });
+  const b = {} as object;
+  s.ignite(b, true, { x: 0, y: 1, z: 0 });
+  s.hum(b, { x: 0, y: 1, z: 0 }, { x: 0, y: 2, z: 0 }, 1 / 60);
+  host.played.length = 0;
+  sea.top = 9;
+  host.now += 1;
+  s.hum(b, { x: 0, y: 1, z: 0 }, { x: 0, y: 2, z: 0 }, 1 / 60);
+  ok(host.played.some((p) => p.id === 'jka:water'), 'the blade going into the water is heard meeting it, once, on the frame it does');
+  host.played.length = 0;
+  host.now += 1;
+  s.hum(b, { x: 0, y: 1, z: 0 }, { x: 0, y: 2, z: 0 }, 1 / 60);
+  ok(!host.played.some((p) => p.id === 'jka:water'), 'and not again while it stays in it');
+}
+
+// ---- whose blade it is, decided again at every ignition ----
+{
+  const host = new SaberFakeHost();
+  const s = sabersWith(host);
+  const b = {} as object;
+  // The first ignition lands before the kit has said which blades are the player's, which is what
+  // happens whenever a blade is lit on a frame the game did not simulate.
+  s.ignite(b, true, { x: 0, y: 1, z: 0 });
+  s.hum(b, { x: 0, y: 1, z: 0 }, { x: 0, y: 2, z: 0 }, 1 / 60);
+  ok(host.played.some((p) => p.loop && p.id === 'jka:hum:jedi'), "a blade of nobody's hums as anybody else's");
+  s.ignite(b, false, { x: 0, y: 1, z: 0 });
+  s.follow({ x: 0, y: 0, z: 0 }, [b]);
+  host.played.length = 0;
+  host.now += 1;
+  s.ignite(b, true, { x: 0, y: 1, z: 0 });
+  s.hum(b, { x: 0, y: 1, z: 0 }, { x: 0, y: 2, z: 0 }, 1 / 60);
+  ok(host.played.some((p) => p.loop && p.id === 'jka:hum:single_1'), 'and the same blade lit again once the kit has spoken hums as the player, not as a stranger for ever');
+}
+
+// ---- the report is there before anything has made a sound ----
+{
+  const had = 'window' in globalThis;
+  const dbg: Record<string, unknown> = {};
+  (globalThis as unknown as { window?: unknown }).window = { __debug: dbg };
+  const host = new SaberFakeHost();
+  const s = new SaberSounds();
+  // Adopted first, so attaching does not go looking for the pack over a network the test has none of.
+  s.adopt(jkaPack());
+  s.attach(host as never, {});
+  const report = typeof dbg.sabers === 'function' ? (dbg.sabers as () => Record<string, unknown>)() : null;
+  ok(!!report && !!(report as { roles: unknown }).roles, "the console's own report is hung the moment the mixer is, not on the first blade lit: a saber that is silent can be asked why");
+  s.tick();
+  ok(typeof dbg.sabers === 'function', 'and it is hung again if the game replaces what it was hung on');
+  if (!had) delete (globalThis as unknown as { window?: unknown }).window;
 }
 
 console.log(`\n${passed} checks passed`);

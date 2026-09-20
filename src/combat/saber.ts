@@ -11,6 +11,7 @@
 // This file is derived from OpenJK, copyright (C) 1999-2000 Id Software, Inc., (C) 2000-2013
 // Activision, (C) 2013 OpenJK contributors, and is used under the GNU General Public License
 // version 2 (see LICENSES/OpenJK-GPL-2.0.txt).
+import { sabers } from '../audio/saberSounds.ts';
 
 export type Quad = 'BR' | 'R' | 'TR' | 'T' | 'TL' | 'L' | 'BL' | 'B';
 export type MoveKind = 'none' | 'ready' | 'attack' | 'start' | 'return' | 'transition' | 'special';
@@ -481,6 +482,9 @@ export class SaberCombat {
     this.duration = 0;
     this.chainCount = 0;
     this.buffered = false;
+    // A kata whose whooshes were laid out ahead of it must not go on whooshing after the blade has
+    // been put away, thrown or lost.
+    sabers.cancel();
   }
 
   /** Advance; returns the animation to start when the move changes, else null. */
@@ -568,6 +572,17 @@ export class SaberCombat {
     const fallback = move.kata ? 2.5 : move.kind === 'attack' || move.kind === 'special' ? 0.45 : move.kind === 'transition' ? 0.25 : move.kind === 'ready' ? 0 : 0.2;
     this.duration = loop ? 0 : (natural ?? fallback) / speed;
     this.timer = this.duration;
+    // A move that cuts or kicks is heard. The clip's own marks are what a special, a kata or a kick
+    // sounds on, and this is the one place that knows both the clip and how long it will really
+    // last, speed and all; an ordinary attack, which Jedi Academy marked with nothing, whooshes once
+    // from its style's group. A parry, a transition and the ready stance make no sound at all.
+    if (move.kind === 'attack' || move.kind === 'special') {
+      // A move begun over the top of another takes the one before it with it: a kata chained into,
+      // knocked out of or killed part way through would otherwise go on whooshing on the audio
+      // clock over whatever came next.
+      sabers.cancel();
+      sabers.swing(this.style, null, anim, this.duration);
+    }
     return { move, anim, speed, blend: move.blend / 1000, loop, impulse, forceCost };
   }
 }

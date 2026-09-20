@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { KICK_DAMAGE } from './saber';
 import { THROW } from './saberThrow';
 import { DEFAULT_LOADOUT, POWERS, SLOT_ACTIONS, SLOT_COUNT, powerById } from './forcePowers';
+import { sabers } from '../audio/saberSounds.ts';
 import type { Hittable, Kit, KitContext, KitSlot, Living, Resource } from './kit';
 import { nearestInCone, type ConeQuery } from './targets';
 import { sweepCapsule } from './sweep';
@@ -18,6 +19,12 @@ const CAN_HOLD = (t: Living): boolean => !!t.holdAt;
 /** Rage lasts this long, then rests this long. */
 const RAGE_TIME = 10;
 const RAGE_REST = 20;
+/**
+ * The three powers that are held and the three that are toggled, looked up once rather than on
+ * every frame they are held: what each one sounds like is on the power itself (`forcePowers.ts`).
+ */
+const HELD_POWERS = { lightning: powerById('lightning'), drain: powerById('drain'), grip: powerById('grip') };
+const KEPT_POWERS = { speed: powerById('speed'), protect: powerById('protect'), rage: powerById('rage') };
 
 export class JediKit implements Kit {
   readonly id = 'jedi' as const;
@@ -57,6 +64,8 @@ export class JediKit implements Kit {
   styleNote = '';
   private readonly hitThisSwing = new Set<Hittable>();
   private lastAttackId = -1;
+  /** The body's count of bolts turned away, as it stood last frame: a rise in it is a block heard. */
+  private lastBlocks = -1;
   /** What the thrown saber has hit on its current leg out or back. */
   private readonly hitThisLeg = new Set<Hittable>();
   private lastLegId = -1;
@@ -162,6 +171,21 @@ export class JediKit implements Kit {
     const planet = world.planet;
     const res = this.resource;
     const onFoot = !player.mounted;
+    // Where the player's own sounds are heard, and which blades in the world are the player's: the
+    // move machine and the parries know when something happens but not where the body is, and the
+    // blades in other hands hum as somebody else's. The figure's world place, not `pos`, because
+    // aboard a ship `pos` is in the hull's frame and a power used there would sound out in the zone.
+    sabers.follow(player.worldPos, player.saberBlades);
+    // A bolt turned away rings off the blade. The count is what the body raises for every bolt it
+    // really blocked, which is the only thing that knows it happened: the parry animation plays
+    // only when the legs have nothing better to do, so a block heard from there would be silent
+    // whenever the player was moving or already swinging, and the maths that turns the bolt round
+    // is a pure function several things may one day ask without a bolt being blocked at all.
+    if (this.lastBlocks < 0) this.lastBlocks = player.blocks;
+    else if (player.blocks !== this.lastBlocks) {
+      this.lastBlocks = player.blocks;
+      sabers.contact('block');
+    }
 
     // Lightsaber: the player runs the swing itself (Jedi Academy's move system); each new swing
     // may hit every creature once.
@@ -242,6 +266,7 @@ export class JediKit implements Kit {
             res.value -= 20;
             player.launch(Math.sqrt(2 * planet.gravity * 11), 9, cam);
             effects.ring(player.pos, 0x9fd4ff, 5, 0.5);
+            sabers.power(powerById(id), 'once');
           }
           break;
         case 'speed':
@@ -254,6 +279,7 @@ export class JediKit implements Kit {
           if (onFoot && pressed && res.value >= 25) {
             res.value -= 25;
             this.shove(ctx, 1);
+            sabers.power(powerById(id), 'once');
           }
           break;
         case 'pull':
@@ -261,6 +287,7 @@ export class JediKit implements Kit {
             res.value -= 20;
             this.pullCd = 1.5;
             this.shove(ctx, -1);
+            sabers.power(powerById(id), 'once');
           }
           break;
         case 'lightning':
@@ -277,6 +304,7 @@ export class JediKit implements Kit {
             res.value -= 40;
             this.repulseCd = 4;
             this.repulse(ctx);
+            sabers.power(powerById(id), 'once');
           }
           break;
         case 'slow':
@@ -289,6 +317,7 @@ export class JediKit implements Kit {
               tmp.copy(target.pos).y += target.halfHeight;
               effects.ring(tmp, 0xc0a0ff, 3, 0.6);
               effects.flash(tmp, 0xc0a0ff, 12, 8, 0.3);
+              sabers.power(powerById(id), 'once', tmp);
             }
           }
           break;
@@ -298,6 +327,7 @@ export class JediKit implements Kit {
             this.healCd = 6;
             player.heal(35);
             effects.ring(player.pos, 0x9fffb0, 3, 0.6);
+            sabers.power(powerById(id), 'once');
           }
           break;
         case 'protect':
@@ -397,6 +427,16 @@ export class JediKit implements Kit {
       this.gripped = null;
     }
 
+    // What the powers that last sound like while they last. Each is asked every frame and speaks
+    // only when it changes: one sound as it comes on, a loop that follows the player, one as it
+    // goes -- whether it was switched off, ran the Force out or simply ended. The grip speaks only
+    // once it has hold of something, which is the moment the choking starts.
+    sabers.holdPower(KEPT_POWERS.speed, this.speedActive);
+    sabers.holdPower(KEPT_POWERS.protect, this.protectActive);
+    sabers.holdPower(KEPT_POWERS.rage, raging);
+    sabers.holdPower(HELD_POWERS.lightning, lightning);
+    sabers.holdPower(HELD_POWERS.drain, drain);
+    sabers.holdPower(HELD_POWERS.grip, grip && !!this.gripped);
     res.value = Math.min(res.max, Math.max(0, res.value + 9 * dt));
   }
 
@@ -472,7 +512,13 @@ export class JediKit implements Kit {
 
   /** Hurt every creature a capsule between two points touches, each once per `already` (the damage is the style's, with the rage already in it). */
   private sweep(ctx: KitContext, from: THREE.Vector3, to: THREE.Vector3, radius: number, damage: number, already: Set<Hittable>, push = 5): void {
-    sweepCapsule(ctx, from, to, radius, damage / ctx.player.damageBoost, already, push);
+    const hit = sweepCapsule(ctx, from, to, radius, damage / ctx.player.damageBoost, already, push);
+    // The blade met a body. One sound however many it caught, at the middle of what it swept, and
+    // never again for the same body in the same swing: `already` is what makes that true.
+    if (hit > 0) {
+      tmp2.copy(from).lerp(to, 0.5);
+      sabers.contact('body', tmp2);
+    }
   }
 
   private drawBolt(from: THREE.Vector3, to: THREE.Vector3): void {
@@ -490,6 +536,10 @@ export class JediKit implements Kit {
   }
 
   dispose(): void {
+    // The kit is going (a change of class, a new character, the select screen): anything a power
+    // was holding open goes with it, since nothing else will ever be told to end it.
+    sabers.stopPowers();
+    sabers.follow(null);
     this.scene.remove(this.aura, this.bolt);
     this.aura.geometry.dispose();
     this.aura.material.dispose();

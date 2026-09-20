@@ -10,6 +10,7 @@
 // Activision, (C) 2013 OpenJK contributors, and is used under the GNU General Public License
 // version 2 (see LICENSES/OpenJK-GPL-2.0.txt).
 import * as THREE from 'three';
+import { sabers } from '../audio/saberSounds.ts';
 
 const UNIT = 0.0254;
 export const THROW = {
@@ -84,8 +85,11 @@ export class SaberThrow {
           this.vel.copy(tmp).multiplyScalar(THROW.steerSpeed * UNIT);
         }
         tmp.copy(this.pos).addScaledVector(this.vel, dt);
-        if (hitWall(this.pos, tmp)) this.startReturn();
-        else this.pos.copy(tmp);
+        if (hitWall(this.pos, tmp)) {
+          // It struck something solid and turns for home: the blade bounced off it.
+          sabers.contact('bounce', this.pos);
+          this.startReturn();
+        } else this.pos.copy(tmp);
         return null;
       }
       toHand.copy(hand).sub(this.pos);
@@ -98,6 +102,7 @@ export class SaberThrow {
       this.inFlight = false;
       this.returning = false;
       this.pos.copy(hand);
+      sabers.contact('catch', hand);
       return 'caught';
     }
     this.vel.copy(toHand).normalize().multiplyScalar(speed);

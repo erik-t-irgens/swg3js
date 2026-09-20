@@ -4,6 +4,7 @@
 // same blade, so a blade dragged along a surface draws one continuous stroke. One mesh holds every
 // stroke's pieces (a ring of quads, the oldest overwritten), so the cost is one draw whatever the number.
 import * as THREE from 'three';
+import { sabers } from '../audio/saberSounds.ts';
 
 /** How many pieces of stroke the world keeps at once. */
 const MAX_PIECES = 900;
@@ -136,8 +137,13 @@ export class SaberMarks {
     return true;
   }
 
-  /** A dot's worth of stroke where a stroke begins. */
+  /**
+   * A dot's worth of stroke where a stroke begins -- which is also where the blade is first heard
+   * to meet the wall. A stroke dragged along is one contact, not one a frame: only its beginning,
+   * and a beginning again after the blade has left the surface and come back, makes a sound.
+   */
   private stub(point: THREE.Vector3): boolean {
+    sabers.contact('wall', point);
     side.set(1, 0, 0);
     if (Math.abs(n.dot(side)) > 0.9) side.set(0, 0, 1);
     side.cross(n).normalize().multiplyScalar(WIDTH / 2);

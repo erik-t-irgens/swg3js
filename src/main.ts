@@ -104,6 +104,7 @@ import { OUTSIDE, type SoundSpace } from './audio/distance.ts';
 import type { AmbienceTune } from './audio/ambience.ts';
 import type { WorldSourceTune } from './audio/emitters.ts';
 import { BodySounds, type BodyLists, type FootTune, type PlayerBody } from './audio/footsteps.ts';
+import { sabers } from './audio/saberSounds.ts';
 import { CLIP_EVENT_TUNE, type ClipEventTune } from './audio/clipEvents.ts';
 import { FAMILY_TUNE } from './world/terrain';
 import { RoomAir, type RoomAirDebugOptions, type RoomAirInput } from './world/roomAir';
@@ -478,6 +479,11 @@ class App {
     // Where the feet ask what they have landed on: the water, the room, the thing stood on and the
     // ground, all of which only the world can say.
     this.feet.attachWorld(this.world.footSurfaces);
+    // The blades: the mixer they play through, the clip events that say which frames of a move
+    // whoosh (the feet already read them, so the same index is shared rather than fetched twice),
+    // and the world, which is asked only what room the ear is in and whether it is raining on the
+    // blade or the blade is under water.
+    sabers.attach(this.audio, { clips: this.feet.index, world: this.world, baseUrl: import.meta.env.BASE_URL });
     // The lava tables World loads go to the heat haze from here on.
     this.world.heat = this.heat;
     // Plumes the heat haze draws, asked for once a frame from inside the effects chain (after the

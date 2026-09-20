@@ -5,6 +5,7 @@
 // the smear is long; a walk sweeps little, so it is a shimmer; a still blade has none at all.
 // Everything adds light rather than covering, and nothing writes depth, so blades cross cleanly.
 import * as THREE from 'three';
+import { sabers } from '../audio/saberSounds.ts';
 
 /** What a saber's blade file gives: its length and width in metres, and the seconds to ignite and retract. */
 export interface BladeSpec {
@@ -122,6 +123,8 @@ export class SaberBlade {
   readonly drawnTip = new THREE.Vector3();
   /** Whether `update` drew the blade this frame (cleared at the start of every update and by reset()). */
   private drawn = false;
+  /** What the sound was last told about this blade, so it is told only when it changes. */
+  private sounding = false;
 
   /** How far out the blade is, 0 to 1. */
   get ignition(): number {
@@ -167,6 +170,10 @@ export class SaberBlade {
   reset(): void {
     this.lit = 0;
     this.drawn = false;
+    // Nothing drawn and nothing heard: a blade put away this way never fades its hum out over a
+    // place it is no longer in.
+    this.sounding = false;
+    sabers.forget(this);
     for (const h of this.history) h.age = Infinity;
     for (const m of [this.glow, this.core, this.smearGlow, this.smearCore]) m.visible = false;
   }
@@ -185,6 +192,12 @@ export class SaberBlade {
    * `on` ignites or retracts it; `swing` (0 to 1) is how hard it is being swung, which lengthens the smear.
    */
   update(dt: number, base: THREE.Vector3, tip: THREE.Vector3, on: boolean, camera: THREE.Camera, swing: number, snap = false, frame: THREE.Matrix4 | null = null): void {
+    // Every blade in the world is heard through its own renderer, so a blade whose renderer stops
+    // being called (a mobile culled behind the camera, a body dying off screen) would leave its hum
+    // hanging where it was. This is the one call that happens on every frame whatever else is going
+    // on -- the player's blades run through it whether they are lit or not -- so the sweep for such
+    // hums hangs here, before any of the early returns below.
+    sabers.tick();
     // Retracted, or with no length, the early returns below leave this false: no light.
     this.drawn = false;
     const openRate = 1 / Math.max(0.05, Math.min(IGNITE, this.spec.open));
@@ -192,6 +205,14 @@ export class SaberBlade {
     this.lit = snap ? (on ? 1 : 0) : THREE.MathUtils.clamp(this.lit + (on ? openRate : -closeRate) * dt, 0, 1);
     // The sweep is remembered in a frame: the world's, or aboard a moving ship the hull's, so the
     // ship's own motion is no smear. A change of frame forgets the path.
+    // The blade is also what the ear hears: it lights and goes out here, it hums here while it is
+    // out, and the rain hisses off it here. A blade snapped on or off (the thrown saber leaving the
+    // hand and coming back, a world arriving with the saber already lit) changes state without
+    // igniting, so it is switched quietly.
+    if (on !== this.sounding) {
+      this.sounding = on;
+      sabers.ignite(this, on, base, { quiet: snap });
+    }
     const framed = frame !== null;
     if (framed !== this.framed) for (const h of this.history) h.age = Infinity;
     this.framed = framed;
@@ -223,6 +244,9 @@ export class SaberBlade {
     this.drawnBase.copy(base);
     this.drawnTip.copy(end);
     this.drawn = true;
+    // The hum follows the drawn blade rather than the hilt: the tip's own speed is what makes it
+    // rise through a swing, and it is the one measure a fighter's blade has as well as the player's.
+    sabers.hum(this, base, end, dt);
     // The sweep: this frame's blade in front, older ones behind it, fading with age.
     for (let i = HISTORY - 1; i > 0; i--) {
       this.history[i].a.copy(this.history[i - 1].a);
@@ -292,6 +316,8 @@ export class SaberBlade {
   }
 
   dispose(): void {
+    this.sounding = false;
+    sabers.forget(this);
     for (const m of [this.glow, this.core, this.smearGlow, this.smearCore]) {
       m.geometry.dispose();
       m.material.dispose();
