@@ -92,6 +92,7 @@ import { deleteCharacter, loadCharacters, newCharacterId, upsertCharacter, type 
 import { FRAME_NUDGE, Garage, type VehicleDef } from './vehicles/garage';
 import { WINGS_KEY, WING_RULE, dropPilotChoices } from './vehicles/wings';
 import { CUT_ENGINES_KEY, LANDING, SHIP_GROUND, SHIP_ROOM } from './vehicles/landing';
+import { SURFACE_ROOM, SurfaceRoom, isSurfaceRoom, probeSurface, roomFrame, roomTurn } from './vehicles/surfaceRoom';
 import type { Vehicle, VehicleKind } from './vehicles/vehicle';
 import { HEAD_TO_EYE, SEATED_EYE_FALLBACK, SEAT_RULE, cockpitYawStep, frameFileName, mirroredOffset, seatDropUsed } from './vehicles/cockpitSeat';
 import { World } from './world/world';
@@ -178,6 +179,13 @@ interface ShipCrossing {
   condition?: import('./space/shipCombat').CarriedCondition | null;
 }
 const tmp2 = new THREE.Vector3();
+/** Scratch for the gravity boots' look round for something to stand on: the ways looked and the best of them. */
+const bootScratch = [0, 1, 2, 3, 4, 5, 6, 7, 8].map(() => new THREE.Vector3());
+const bootDir: THREE.Vector3[] = [];
+const bootAt = new THREE.Vector3();
+const bootPoint = new THREE.Vector3();
+const bootUp = new THREE.Vector3();
+let bootBody: import('@dimforge/rapier3d-compat').RigidBody | null = null;
 const boltFrom = new THREE.Vector3();
 /** A ship's shot: where it leaves and which way (bolts.fire and effects.flash copy what they are given). */
 const shotFrom = new THREE.Vector3();
@@ -1918,6 +1926,32 @@ class App {
         return v.landReport();
       },
       /**
+       * The gravity boots: `boots()` reports whether they hold and what they hold to, `boots({ on: true })` takes
+       * hold of whatever is within reach out in space (the same as pressing E adrift), `boots({ off: true })` lets
+       * go, and any of the invented numbers (SURFACE_ROOM in vehicles/surfaceRoom.ts: patch, reach, feel, release,
+       * turn, stray, triangles, lift, gravity) is set by name: `boots({ turn: 180 })` snaps the view onto the face
+       * under the feet twice as fast. `__debug.advance` steps it all, so a walk round a rock can be taken from a
+       * hidden tab: `__debug.boots({ on: true }); __debug.advance(2, ['KeyW']); __debug.boots()`.
+       */
+      boots: (opts: { on?: boolean; off?: boolean } & Partial<typeof SURFACE_ROOM> = {}) => {
+        for (const k of Object.keys(SURFACE_ROOM) as (keyof typeof SURFACE_ROOM)[]) {
+          const n = opts[k];
+          if (typeof n === 'number' && Number.isFinite(n)) SURFACE_ROOM[k] = n;
+        }
+        if (opts.on) this.bootsTake(null);
+        if (opts.off && isSurfaceRoom(this.player.aboard)) this.leaveShip(false);
+        const room = this.player.aboard;
+        const up = isSurfaceRoom(room) ? new THREE.Vector3(0, 1, 0).applyQuaternion(roomTurn(room)) : null;
+        return {
+          on: isSurfaceRoom(room),
+          space: this.world.planet.space,
+          note: this.bootsNote,
+          up: up ? up.toArray().map((n) => Number(n.toFixed(3))) : null,
+          at: this.player.worldPos.toArray().map((n) => Number(n.toFixed(2))),
+          ...(isSurfaceRoom(room) ? room.report() : { tune: { ...SURFACE_ROOM } }),
+        };
+      },
+      /**
        * The astromechs in their sockets: `droid({ shown: 0.4 })` sets the share of a droid's height shown over its socket
        * for every hull without its own, `droid({ shown: 0.5, hull: 'vwing' })` one hull's own (DROID_SHOWN and
        * DROID_SHOWN_BY_HULL in shipFit.ts); every droid on the world is sunk again at once. Returns each: its hull, the
@@ -2699,9 +2733,12 @@ class App {
     pose.uz = this.listenerUp.z;
     const aboard = this.player.aboard;
     const cell = this.world.cellState;
-    pose.space.building = aboard ? this.spaceIdOf(aboard.vehicle) : this.spaceIdOf(cell?.building ?? null);
+    // A surface the boots hold to is out of doors: the ear is beside a rock, not inside the hull that the
+    // room happens to be named by, so the zone's own bed keeps playing rather than crossfading away.
+    const inHull = aboard && !isSurfaceRoom(aboard) ? aboard.vehicle : null;
+    pose.space.building = inHull ? this.spaceIdOf(inHull) : this.spaceIdOf(cell?.building ?? null);
     // Which room of a hull the player stands in is not tracked yet; a building's is.
-    pose.space.cell = aboard ? -1 : (cell?.cell ?? -1);
+    pose.space.cell = inHull ? -1 : (cell?.cell ?? -1);
     // The world's own sound reads the same two numbers: its beds sit wherever the ear does, so
     // walking into a cantina crossfades the street away rather than cutting it off at the door.
     this.world.listenerSpace.building = pose.space.building;
@@ -2946,7 +2983,9 @@ class App {
     const n3 = (n: number) => Number(n.toFixed(3));
     // The vehicle this player is on, so the others see it with them on it; and the figure's
     // whole turn where a heading is not enough (aboard a banked hull, adrift in space).
-    const v = p.mounted ?? p.piloting ?? p.aboard?.vehicle ?? null;
+    // Standing on a surface is not being aboard a ship: peers would otherwise draw the figure inside a hull
+    // it is merely beside. The whole turn goes over as it already does for anyone adrift.
+    const v = p.mounted ?? p.piloting ?? (isSurfaceRoom(p.aboard) ? null : p.aboard?.vehicle) ?? null;
     // Another fitted ship taken: the hello (with that ship's fit) goes again once, debounced. Two strings compared, nothing allocated.
     const shipId = v?.def?.fit ? v.def.id : this.helloShipId;
     if (shipId !== this.helloShipId) {
@@ -3344,8 +3383,14 @@ class App {
     const p = this.player;
     // Off the ship before the world it stands in goes: its room's physics world goes with it.
     if (p.aboard) {
-      p.aboard.reveal(false);
+      const room = p.aboard;
+      room.reveal(false);
+      // A corpse's pieces live in the room's own physics (startRagdoll builds them there): they go before the
+      // room does, or the world is freed under bodies the next frame still reads.
+      if (isSurfaceRoom(room) && p.ragdoll) p.endRagdoll();
       p.leave();
+      // A surface belongs to nothing but the boots: it is given up here, or its world would be left behind.
+      if (isSurfaceRoom(room)) room.dispose();
     }
     if (p.mounted) p.dismount(p.pos.clone());
     // A jump's arrival (or the zone's, above) is where the world streams from, not the zone's spawn.
@@ -3766,7 +3811,7 @@ class App {
     // Mounted or piloted, a ship out of the cockpit and the chase is always drawn.
     if (ship) this.showHull(ship, true);
     // Aboard a ship the view is upright in the hull's frame, as the body is; adrift in space, in the body's own.
-    this.cam.setFrame(player.aboard ? player.aboard.vehicle.group.quaternion : player.eva ? player.evaFrame : null);
+    this.cam.setFrame(player.aboard ? roomTurn(player.aboard) : player.eva ? player.evaFrame : null);
     // Seated in a ship the first-person eye is the cockpit's, so zooming in lands there.
     const eyes = seated ? this.shipEyeWorld(seated, this.shipEyeW) : this.eyes();
     this.cam.update(input, player.worldPos, blocked, dt, eyes, 1, player.eyeHeight);
@@ -3840,6 +3885,8 @@ class App {
   private cameraInHull(): boolean {
     const room = this.player.aboard;
     if (!room) return false;
+    // Standing on a surface is out of doors, whatever the physics of it: no room's share of the grade there.
+    if (isSurfaceRoom(room)) return false;
     if (this.cam.firstPerson) return true;
     // Seating the figure has already brought the hull's world matrix up to date this frame.
     this.hullInverse.copy(room.vehicle.group.matrixWorld).invert();
@@ -3957,7 +4004,10 @@ class App {
       v.interior?.physics.step(dt);
     }
     if (player.aboard) {
-      // Fallen out of the room (through a door in flight): back into the world with the hull's motion.
+      // A room with a step of its own: a surface eases its up onto the face under the feet before the walker
+      // is drawn on it, and says so the moment the boots let go (a jump, or the edge of the patch).
+      player.aboard.step?.(dt, player);
+      // Fallen out of the room (through a door in flight), or let go of: back into the world with its motion.
       if (!player.aboard.contains(player.pos)) this.leaveShip(true);
       else player.placeVisual();
     }
@@ -4274,7 +4324,8 @@ class App {
     ra.camera = cam;
     ra.view = view;
     ra.cell = this.world.cellState;
-    ra.aboard = this.player.aboard;
+    // A ship's rooms have air, lamps and motes; a surface in space has none of it, so it is not one of these.
+    ra.aboard = isSurfaceRoom(this.player.aboard) ? null : (this.player.aboard as import('./vehicles/interior').ShipInterior | null);
     ra.cameraInHull = this.cameraInHull();
     ra.playerPos = this.player.pos;
     ra.sun = this.world.sunInfo(this.fxSun);
@@ -4345,8 +4396,9 @@ class App {
       lit.torch = this.torchOn ? this.torch : null;
       lit.eye.copy(cam.position);
       blades.litCeiling = litCeiling(blades, lit);
-      const hull = this.player.aboard?.vehicle.group;
-      if (hull) blades.up.set(0, 1, 0).transformDirection(hull.matrixWorld);
+      // Whatever the player is standing in, the hull's rooms or a surface in space: "up" is that room's.
+      const standingIn = this.player.aboard;
+      if (standingIn) blades.up.set(0, 1, 0).transformDirection(roomFrame(standingIn));
       else blades.up.set(0, 1, 0);
       postfx.end(f);
     }
@@ -5299,6 +5351,18 @@ class App {
 
   private handleMount(): void {
     const p = this.player;
+    if (isSurfaceRoom(p.aboard)) {
+      // Standing on a surface: E climbs into a ship within arm's reach, and takes the boots off otherwise.
+      const near = this.reachFromBoots();
+      this.leaveShip(false);
+      if (near?.interior) this.boardShip(near);
+      else if (near) {
+        p.mount(near);
+        if (near.spec.ship && near.def) this.lastShipDef = near.def;
+        this.cam.distance = Math.max(this.cam.distance, 9.5);
+      }
+      return;
+    }
     if (p.aboard) {
       const room = p.aboard;
       const v = room.vehicle;
@@ -5345,7 +5409,85 @@ class App {
       p.mount(best);
       if (best.spec.ship && best.def) this.lastShipDef = best.def;
       this.cam.distance = Math.max(this.cam.distance, 9.5);
+      return;
     }
+    // Nothing to climb into, and out in space: the gravity boots take hold of whatever is within reach.
+    if (this.world.planet.space && p.eva) this.bootsTake(null);
+  }
+
+  /** A note the boots left (why they would not take hold), shown in the prompt for a moment. */
+  private bootsNote = '';
+  private bootsNoteAt = 0;
+
+  /** The vehicle within arm's reach of someone standing on a surface, measured in the world, since `pos` is the room's there. */
+  private reachFromBoots(): Vehicle | null {
+    const at = this.player.worldPos;
+    let best: Vehicle | null = null;
+    let bestD = MOUNT_RANGE;
+    for (const sp of this.world.vehicles) {
+      if (sp.autopilot) continue;
+      const d = at.distanceTo(sp.pos) - sp.radius;
+      if (d < bestD) {
+        bestD = d;
+        best = sp;
+      }
+    }
+    return best;
+  }
+
+  /**
+   * Switch the gravity boots on: whatever is nearest along the ways looked (what `toward` says first, then
+   * where the camera points, then the six ways out of the figure itself) becomes the ground, and the figure
+   * stands on it with that face's own up. It holds to anything solid, a rock, a station or a hull, and to one
+   * that moves as readily as to one that does not, since the room is read from what it stands on every step.
+   */
+  private bootsTake(toward: THREE.Vector3 | null, from?: THREE.Vector3): boolean {
+    const p = this.player;
+    if (p.aboard || p.mounted || p.noclip || this.dying) return false;
+    const note = (why: string): false => {
+      this.bootsNote = why;
+      this.bootsNoteAt = performance.now();
+      return false;
+    };
+    if (!this.world.planet.space) return note('the boots only hold where there is no gravity');
+    // The room is a room of a hull's: the ship stood beside, or the nearest one in the zone.
+    const ship = this.reachFromBoots() ?? [...this.world.vehicles].filter((v) => !v.autopilot).sort((a, b) => a.pos.distanceToSquared(p.worldPos) - b.pos.distanceToSquared(p.worldPos))[0];
+    if (!ship) return note('no ship out here to boot from');
+    // The look starts at the waist, away from the face being looked for, so a ray never starts inside it.
+    const at = bootAt.copy(from ?? p.worldPos);
+    if (toward) at.addScaledVector(bootScratch[0].copy(toward).normalize(), -SURFACE_ROOM.waist);
+    else at.addScaledVector(bootScratch[0].set(0, 1, 0).applyQuaternion(p.group.quaternion), SURFACE_ROOM.waist);
+    let best: { d: number } | null = null;
+    bootDir.length = 0;
+    if (toward) bootDir.push(bootScratch[1].copy(toward));
+    this.cam.camera.getWorldDirection(bootScratch[8]);
+    bootDir.push(bootScratch[8]);
+    for (let i = 0; i < 6; i++) {
+      const v = bootScratch[i + 2].set(i === 0 ? 1 : i === 1 ? -1 : 0, i === 2 ? 1 : i === 3 ? -1 : 0, i === 4 ? 1 : i === 5 ? -1 : 0);
+      bootDir.push(v.applyQuaternion(p.group.quaternion));
+    }
+    for (let i = 0; i < bootDir.length; i++) {
+      const dir = bootDir[i];
+      const hit = probeSurface(this.physics, at, dir, SURFACE_ROOM.reach, p.body);
+      if (!hit || (best && hit.distance >= best.d)) continue;
+      best = { d: hit.distance };
+      bootPoint.copy(hit.point);
+      bootUp.copy(hit.normal);
+      bootBody = hit.body;
+      // The way that was asked for wins outright rather than only by being nearest: a pilot climbing out is
+      // looking along their hull's own down, and what the ship stands on is what they should stand on, even
+      // though the hull they just left is nearer to them than the rock under it.
+      if (i === 0 && toward) break;
+    }
+    if (!best) return note(`nothing within ${Math.round(SURFACE_ROOM.reach)} m to stand on`);
+    const gravity = -this.physics.world.gravity.y;
+    const room = SurfaceRoom.take(this.physics, bootPoint, bootUp, bootBody, ship, gravity, ship.body.isValid() ? ship.body : null);
+    if (!room) return note('nothing there the boots can hold to (no surface was found in it)');
+    this.postfx?.reset();
+    p.board(room, room.entry.clone());
+    this.cam.zoomTarget = Math.min(this.cam.zoomTarget, SURFACE_ROOM.zoom);
+    this.bootsNote = '';
+    return true;
   }
 
   /** Off the vehicle onto the floor beside it (in space, adrift beside it with its motion). */
@@ -5396,6 +5538,15 @@ class App {
     const p = this.player;
     const room = p.aboard;
     if (!room || room.vehicle !== v) return;
+    // Standing on a surface when a ship went. The boots hold to what is under the feet, not to the ship that
+    // brought you: only a walker standing on that very hull is let go (adrift where they stood on the next
+    // look, nothing thrown and nothing hurt). Standing on a rock beside it, the rock is untouched and the
+    // room is merely pointed at a live hull, since it names one for the aboard path's sake.
+    if (isSurfaceRoom(room)) {
+      if (room.standsOn(v.body)) room.release();
+      else room.renameTo(this.reachFromBoots() ?? this.world.vehicles.find((o) => o !== v && !o.autopilot) ?? null);
+      return;
+    }
     room.toWorld(p.pos, tmp);
     const lv = v.body.linvel();
     p.leave();
@@ -5417,11 +5568,26 @@ class App {
     // made with nobody aboard changes nothing and should cut nothing.
     this.postfx?.reset();
     const v = room.vehicle;
+    // The boots: the figure is left adrift exactly where it stood, carrying what it was doing in the room
+    // and what the room itself was doing, and the room goes with it (nothing else holds a surface).
+    const surface = isSurfaceRoom(room) ? room : null;
     room.toWorld(p.pos, tmp);
+    if (surface) surface.worldVelocity(p.vel, tmp2);
+    // Dying in the boots builds the ragdoll in the surface's own physics world, and that world is freed a few
+    // lines below: the corpse goes first, or the next frame's ragdoll step reads bodies that are gone.
+    if (surface && p.ragdoll) p.endRagdoll();
     p.leave();
     // A flame held in the room lived in the hull's frame: it stops, and a trigger still held places it again outside.
     (this.kits.bounty_hunter as BountyHunterKit | undefined)?.coolDown();
     room.reveal(false);
+    if (surface) {
+      p.stand(tmp);
+      p.vel.copy(tmp2);
+      p.grounded = false;
+      surface.dispose();
+      this.hud.setPrompt('');
+      return;
+    }
     if (!fell) {
       v.quaternion(tmpQ);
       tmp.set(-(v.spec.bounds.max[0] - v.spec.bounds.min[0]) / 2 - 1.2, 0, 0).applyQuaternion(tmpQ).add(v.pos);
@@ -5671,8 +5837,10 @@ class App {
       else if (!player.aboard && this.world.elevatorsNear(player.pos, MOUNT_RANGE).length) prompt = `<b>E</b> elevator ${this.world.elevatorsNear(player.pos, MOUNT_RANGE)[0].kind === 'down' ? 'down' : 'up'}`;
       else if (!player.aboard && (doorless = this.world.doorlessNear(player.pos))) prompt = `<b>E</b> enter ${doorless.label} (no way in on foot)`;
       else if (player.piloting) prompt = `at the controls of the ${player.piloting.spec.label} · ${player.piloting.landed ? `landed · <b>W</b> or <b>Space</b> lifts off` : `<b>W</b>/<b>S</b> throttle · mouse steers${player.piloting.spec.ship && SHIP_GROUND.rule === 'landing' ? ` · hold <b>Ctrl</b> to set down · <b>${keyName(CUT_ENGINES_KEY)}</b> cuts the engines` : ''}`} · <b>Alt</b> looks around · <b>E</b> lets go · ${Math.round(Math.abs(player.piloting.speed) * 3.6)} km/h${shipHint}${player.piloting.landNote ? ` · ${player.piloting.landNote}` : ''}`;
+      // Standing on something out in space: the boots hold, a jump lets go, and E climbs into a ship beside you.
+      else if (isSurfaceRoom(player.aboard)) prompt = `<b>gravity boots</b> on ${this.reachFromBoots() ? 'a surface · <b>E</b> climbs into the ship' : 'a surface · <b>E</b> takes them off'} · <b>jump</b> lets go${player.aboard.atEdge ? ' · <b>the surface underfoot runs out near here</b>' : ''} · <b>${shipKey}</b> ship menu`;
       else if (player.aboard) prompt = (player.aboard.pilotSpot && player.pos.distanceTo(player.aboard.pilotSpot) < CONTROLS_RANGE ? `<b>E</b> take the controls` : `aboard ${player.aboard.vehicle.spec.label} · <b>E</b> step out`) + (this.world.planet.space ? ` · <b>${shipKey}</b> ship menu` : '');
-      else if (player.eva) prompt = `adrift · <b>W/S</b> thrust ahead and back · <b>A/D</b> sideways · <b>Space/Ctrl</b> up and down · mouse turns · <b>Z/V</b> roll · <b>${keyName(input.bindings.brake[0] ?? '')}</b> brake · ${Math.round(player.vel.length() * 3.6)} km/h${this.nearestSpeederDistance() < MOUNT_RANGE ? (this.nearestHasRoom() ? ' · <b>E</b> board' : ' · <b>E</b> mount') : ''}`;
+      else if (player.eva) prompt = `adrift · <b>W/S</b> thrust ahead and back · <b>A/D</b> sideways · <b>Space/Ctrl</b> up and down · mouse turns · <b>Z/V</b> roll · <b>${keyName(input.bindings.brake[0] ?? '')}</b> brake · ${Math.round(player.vel.length() * 3.6)} km/h${this.nearestSpeederDistance() < MOUNT_RANGE ? (this.nearestHasRoom() ? ' · <b>E</b> board' : ' · <b>E</b> mount') : ' · <b>E</b> gravity boots'}${performance.now() - this.bootsNoteAt < SURFACE_ROOM.note * 1000 && this.bootsNote ? ` · ${this.bootsNote}` : ''}`;
       else if (this.nearestSpeederDistance() < MOUNT_RANGE) prompt = this.nearestHasRoom() ? '<b>E</b> board' : this.nearestVehicle()?.upsideDown ? '<b>E</b> flip it upright' : '<b>E</b> mount';
       // A jump's countdown, then "jumping", over whatever the prompt would say; in the tunnel, the crew's lifts and controls.
       prompt = this.jumpPrompt(lift !== null) ?? prompt;

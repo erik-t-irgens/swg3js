@@ -6,6 +6,7 @@ import { Group, groups, RAPIER, type Physics } from '../core/physics';
 import { markActor } from '../world/portalRender';
 import type { Vehicle } from '../vehicles/vehicle';
 import { SEATED_EYE_FALLBACK, SEATED_PELVIS_FALLBACK, bodyLift } from '../vehicles/cockpitSeat';
+import { roomFrame, roomTurn, type WalkableRoom } from '../vehicles/surfaceRoom';
 import type { World } from '../world/world';
 import { STANCE_ANIM, STYLE_DAMAGE, SaberCombat, type Dir, type SaberInput } from '../combat/saber';
 import { SaberThrow, THROW } from '../combat/saberThrow';
@@ -321,8 +322,12 @@ export class Player {
   /** Bolts turned away so far, for the console. */
   blocks = 0;
   private physics: Physics;
-  /** The ship's room this player is in, with physics of its own; `pos` is then in the hull's frame. */
-  aboard: import('../vehicles/interior').ShipInterior | null = null;
+  /**
+   * The room this player is in, with physics of its own; `pos` is then in that room's frame. A ship's rooms,
+   * or a surface in space the boots hold them to: both are rooms to everything here, and `roomFrame` gives
+   * whichever frame the one in hand keeps its physics in.
+   */
+  aboard: WalkableRoom | null = null;
   /** The ship flown from inside its rooms (standing at its controls, still aboard). */
   piloting: Vehicle | null = null;
   /** Set by the App each frame: the view is inside the cockpit (first person, seated in a ship), so the body rises no more than the collar allows. */
@@ -517,7 +522,7 @@ export class Player {
    * Step into a ship's room: the body moves to the room's own physics world, in the hull's
    * frame, and from here `pos` is in that frame; the figure is drawn wherever the hull puts it.
    */
-  board(interior: import('../vehicles/interior').ShipInterior, local: THREE.Vector3): void {
+  board(interior: WalkableRoom, local: THREE.Vector3): void {
     if (this.aboard) this.leave();
     this.mounted = null;
     this.worldBody = { physics: this.physics, body: this.body, collider: this.collider, controller: this.controller };
@@ -564,9 +569,8 @@ export class Player {
   placeVisual(): void {
     const room = this.aboard;
     if (room) {
-      room.vehicle.group.updateMatrixWorld(true);
-      this.group.position.copy(this.pos).applyMatrix4(room.vehicle.group.matrixWorld);
-      this.group.quaternion.copy(room.vehicle.group.quaternion).multiply(tmpQ.setFromAxisAngle(UP_AXIS, this.heading));
+      this.group.position.copy(this.pos).applyMatrix4(roomFrame(room));
+      this.group.quaternion.copy(roomTurn(room)).multiply(tmpQ.setFromAxisAngle(UP_AXIS, this.heading));
     } else if (this.eva) {
       this.group.position.copy(this.pos);
       this.group.quaternion.copy(this.evaFrame);
@@ -590,7 +594,7 @@ export class Player {
     this.thrown.cancel();
     this.rig.stopOverride(0);
     this.group.updateMatrixWorld(true);
-    const frame = this.aboard ? this.aboard.vehicle.group.matrixWorld : null;
+    const frame = this.aboard ? roomFrame(this.aboard) : null;
     this.ragdoll = new Ragdoll(this.physics, this.rig.root, { frame, velocity: this.aboard ? null : this.vel });
     this.body.setEnabled(false);
     this.updateBlades();
@@ -881,7 +885,7 @@ export class Player {
     const swing = this.bladeActive ? 1 : busy ? 0.55 : 0;
     const away = this.thrown.inFlight || this.orbiting;
     // Aboard, the sweep is remembered in the hull's frame, so the ship's own motion leaves no smear.
-    const hull = this.aboard ? this.aboard.vehicle.group.matrixWorld : null;
+    const hull = this.aboard ? roomFrame(this.aboard) : null;
     for (const { frame, blade, snap, hiltTop } of this.blades) {
       const shown = isShown(frame);
       const length = blade.spec.length;
@@ -1751,7 +1755,7 @@ export class Player {
         this.handPosition(handPos);
         if (this.aboard) {
           // Thrown aboard: in the hull's frame from the start.
-          hullInv.copy(this.aboard.vehicle.group.matrixWorld).invert();
+          hullInv.copy(roomFrame(this.aboard)).invert();
           handPos.applyMatrix4(hullInv);
           aim.transformDirection(hullInv);
         }
@@ -2134,7 +2138,7 @@ export class Player {
     const room = this.aboard;
     if (room) {
       // Aboard, the saber flies in the hull's frame (`pos` already is): the hand and the aim brought into it.
-      hullInv.copy(room.vehicle.group.matrixWorld).invert();
+      hullInv.copy(roomFrame(room)).invert();
       handPos.applyMatrix4(hullInv);
       aim.transformDirection(hullInv);
     }
@@ -2142,8 +2146,8 @@ export class Player {
     const result = this.thrown.update(dt, handPos, aimFrom, aim, input.held('saberThrow'), blocked);
     if (result === 'caught') return;
     if (room) {
-      this.flying.position.copy(this.thrown.pos).applyMatrix4(room.vehicle.group.matrixWorld);
-      this.flying.quaternion.copy(room.vehicle.group.quaternion).multiply(tmpQ.setFromAxisAngle(UP_AXIS, this.thrown.spin));
+      this.flying.position.copy(this.thrown.pos).applyMatrix4(roomFrame(room));
+      this.flying.quaternion.copy(roomTurn(room)).multiply(tmpQ.setFromAxisAngle(UP_AXIS, this.thrown.spin));
     } else {
       this.flying.position.copy(this.thrown.pos);
       this.flying.rotation.set(0, this.thrown.spin, 0);
@@ -2154,7 +2158,7 @@ export class Player {
     cam.camera.getWorldDirection(fwd);
     // Aboard, the flying is in the room's frame: the camera's world direction turned into it
     // (its right is already the room's).
-    if (this.aboard) fwd.applyQuaternion(this.aboard.vehicle.quaternion(tmpQ).invert());
+    if (this.aboard) fwd.applyQuaternion(tmpQ.copy(roomTurn(this.aboard)).invert());
     cam.right(rgt);
     move.set(0, 0, 0);
     if (input.held('forward')) move.add(fwd);
