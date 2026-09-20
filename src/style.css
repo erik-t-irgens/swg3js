@@ -1,9 +1,49 @@
+/* The HUD's own rules; the panels' are below. An import, so the whole interface is styled before any
+   script runs and there is nothing for the game to remember to load. */
+@import './ui/hud.css';
+
 :root {
+  /* palette: the eighteen named colours, the one home for every value on the screen. `src/core/palette.ts`
+     reads exactly these names from here at boot and hands them to the overlay canvas, and
+     `tools/swg/tests/palette.test.ts` checks the two tables against each other name for name and value
+     for value, so a rename or a drift in one file fails a test rather than the screen. Every value but
+     `component` was already on the screen before this pass; `component` is here so that a part hit and a
+     hull hit stop looking identical. Nothing is pure white or pure black. */
   --accent: #7fd7ff;
-  --panel: rgba(8, 14, 24, 0.62);
-  --panel-border: rgba(127, 215, 255, 0.28);
-  --text: #e8f1f8;
+  --ink: #e8f1f8;
   --muted: #9fb3c4;
+  --void: #060a12;
+  --plate: rgba(24, 38, 54, 0.7);
+  --panel: rgba(8, 14, 24, 0.62);
+  --rule: rgba(127, 215, 255, 0.18);
+  --edge: rgba(127, 215, 255, 0.28);
+  --good: #6adf7a;
+  --warn: #e2a33c;
+  --bad: #ff5a4a;
+  --hot: #ffb040;
+  --shield: #9fd8ff;
+  --armour: #ffb070;
+  --chassis: #ff8a50;
+  --component: #ffd27f;
+  --health: #b8322a;
+  --pool: #2d7fd6;
+  /* /palette */
+
+  /* The two ramps, built from the eighteen so no bar carries a colour of its own. The health bar's
+     bright end is the danger colour, which is a shade off the #ff7a5a it wore before and is the colour
+     everything else dangerous on the screen is drawn in. */
+  --ramp-health: linear-gradient(90deg, var(--health), var(--bad));
+  --ramp-pool: linear-gradient(90deg, var(--pool), var(--accent));
+
+  /* The names the panels already use, kept pointing at the eighteen so every `var(--…)` in this file
+     keeps working and there is still only one place a colour is written down. */
+  --text: var(--ink);
+  --panel-border: var(--edge);
+
+  /* The HUD scale, 0.75 to 1.5. Every size in `hud.css` is a `calc()` on it; the overlay canvas takes
+     the same number through `HudCanvas.setScale`. */
+  --hud-scale: 1;
+
   font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
   color: var(--text);
 }
@@ -38,12 +78,6 @@ b { color: var(--accent); font-weight: 600; }
 .force-bar { position: relative; width: 240px; height: 12px; background: rgba(0,0,0,0.55); border: 1px solid var(--panel-border); border-radius: 8px; overflow: hidden; }
 .force-fill { height: 100%; background: linear-gradient(90deg, #2d7fd6, var(--accent)); transition: width 0.08s linear; }
 .force-text { position: absolute; inset: 0; text-align: center; font-size: 9px; line-height: 12px; letter-spacing: 0.08em; text-shadow: 0 1px 2px #000; }
-.slots { display: flex; gap: 4px; }
-.slot { display: flex; flex-direction: column; align-items: center; width: 72px; padding: 4px 3px; background: var(--panel); border: 1px solid var(--panel-border); border-radius: 5px; font-size: 9px; }
-.slot .key { font-weight: 700; color: var(--accent); font-size: 11px; }
-.slot .name { white-space: nowrap; }
-.slot .cost { color: var(--muted); font-size: 9px; }
-.slot.active { border-color: var(--accent); box-shadow: 0 0 12px rgba(127,215,255,0.5); background: rgba(45,127,214,0.35); }
 
 /* A panel over the game: the overlay round it is clear, so the world shows behind an open panel (a graphics setting is seen as it moves); the select screen alone dims, there being no world behind it yet. */
 .overlay { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; pointer-events: auto !important; }
@@ -116,28 +150,10 @@ b { color: var(--accent); font-weight: 600; }
 .bar .text { position: absolute; inset: 0; text-align: center; font-size: 10.5px; line-height: 14px; letter-spacing: 0.08em; text-shadow: 0 1px 2px #000; }
 .bottom { gap: 6px; }
 .class-name { font-size: 11px; letter-spacing: 0.2em; text-transform: uppercase; color: var(--muted); }
-.slot { position: relative; overflow: hidden; }
-.slot .cd { position: absolute; left: 0; right: 0; bottom: 0; height: 0; background: rgba(0,0,0,0.55); pointer-events: none; }
-.slot > span { position: relative; }
-/* The flight display: the aim circle, the cursor's ring, a crosshair, and the cursor as an arrow or a pip. */
-.flight { position: absolute; left: 50%; top: 50%; margin: -160px 0 0 -160px; pointer-events: none; }
-.flight .ring { fill: none; stroke: rgba(127,215,255,0.22); stroke-width: 1; }
-.flight .cross { stroke: var(--accent); stroke-width: 2; filter: drop-shadow(0 0 3px rgba(127,215,255,0.8)); }
-.flight .stick-line { stroke: #ffffff; stroke-width: 2.5; stroke-linecap: round; filter: drop-shadow(0 0 3px rgba(0,0,0,0.8)); }
-.flight .stick-head { fill: #ffffff; filter: drop-shadow(0 0 3px rgba(0,0,0,0.8)); }
-.flight .stick-dot { fill: #ffffff; filter: drop-shadow(0 0 3px rgba(0,0,0,0.8)); }
 .crosshair { position: absolute; left: 50%; top: 50%; width: 6px; height: 6px; margin: -3px 0 0 -3px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 6px rgba(127,215,255,0.9), 0 0 0 1px rgba(0,0,0,0.5); }
 /* A charging shot or power: a bar filling under the crosshair. */
 .charge { position: absolute; left: 50%; top: 50%; width: 60px; height: 4px; margin: 14px 0 0 -30px; background: rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.25); border-radius: 2px; overflow: hidden; }
 .charge .fill { height: 100%; width: 0; background: #ffb040; box-shadow: 0 0 6px rgba(255,176,64,0.9); }
-.targets { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
-.targets .tbox { fill: none; stroke: #ff8a50; stroke-width: 1.5; filter: drop-shadow(0 0 3px rgba(0,0,0,0.8)); }
-.targets .lead { fill: none; stroke: #ffffff; stroke-width: 1.5; filter: drop-shadow(0 0 3px rgba(0,0,0,0.8)); }
-.targets .lead-cross { stroke: #ffffff; stroke-width: 1.5; filter: drop-shadow(0 0 3px rgba(0,0,0,0.8)); }
-.targets .lead-line { stroke: rgba(255,255,255,0.45); stroke-width: 1; stroke-dasharray: 4 4; }
-.targets .tlabel { fill: #ffffff; font-size: 12px; text-anchor: middle; paint-order: stroke; stroke: rgba(0,0,0,0.8); stroke-width: 3px; }
-.prompt { position: absolute; left: 50%; bottom: 150px; transform: translateX(-50%); padding: 6px 14px; background: var(--panel); border: 1px solid var(--panel-border); border-radius: 6px; font-size: 13px; white-space: nowrap; }
-.prompt:empty { display: none; }
 .hurt { position: absolute; inset: 0; opacity: 0; background: radial-gradient(ellipse at center, rgba(255,0,0,0) 45%, rgba(190,20,20,0.55) 100%); }
 .clock { font-family: ui-monospace, Menlo, monospace; font-size: 16px; color: var(--accent); }
 .class-pick { display: flex; gap: 12px; justify-content: center; margin-bottom: 8px; }
@@ -409,10 +425,8 @@ b { color: var(--accent); font-weight: 600; }
 /* The countdown line of a jump, under every panel and the loading screen. */
 #hyperspace-count { position: fixed; top: 22%; left: 50%; transform: translateX(-50%); z-index: 0; pointer-events: none; font-size: 22px; font-weight: 600; letter-spacing: 0.16em; color: var(--accent); text-shadow: 0 0 12px rgba(0,0,0,0.9), 0 1px 2px #000; white-space: nowrap; }
 
-/* Space combat: the target box by what the target is to the pilot, the NPC pilots' comms at the top, the flown ship's condition over the health bar, the NPC tab's tier picker. */
-.targets .tbox.enemy { stroke: #ff5a4a; }
-.targets .tbox.friend { stroke: #6adf7a; }
-.targets .tbox.neutral { stroke: #ffffff; }
+/* Space combat: the NPC pilots' comms at the top, the flown ship's condition over the health bar, the NPC tab's tier picker.
+   The target box's own colours moved to `ui/hud.css` with the rest of the target's rules. */
 #ship-hud { position: absolute; inset: 0; pointer-events: none; }
 #ship-hud .comms { position: absolute; top: 14px; left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 4px; max-width: min(760px, 80vw); }
 #ship-hud .comms-line { padding: 4px 12px; background: var(--panel); border: 1px solid var(--panel-border); border-radius: 5px; font-size: 13px; line-height: 1.4; text-align: center; text-shadow: 0 1px 2px #000; }

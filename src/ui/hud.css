@@ -1,0 +1,464 @@
+/*
+ * The HUD's own stylesheet, apart from the panels'. Pulled in by `src/style.css`, which is the page's
+ * one stylesheet link, so the whole interface is styled before any script runs.
+ *
+ * The eighteen colours are declared in `src/style.css` on `:root` and read from there by both sides:
+ * these rules and `src/core/palette.ts`, which hands the same strings to the overlay canvas.
+ *
+ * Every size is a `calc()` on `--hud-scale` rather than a `transform: scale()` on the HUD's root: a
+ * transform blurs every 1 px border at a non-integer scale, and readable hairlines are worth the
+ * `calc()`s, which cost nothing once the layout is done.
+ *
+ * Nothing here writes per frame. A bar changes by `transform: scaleX()` on its fill (`width` reflows,
+ * a transform does not) and only when the share, rounded to a pixel of the bar's length, has moved.
+ */
+
+:root {
+  /*
+   * The instrument face: the HUD's numbers, key-caps, labels and message line. Bahnschrift ships with
+   * Windows and is a condensed DIN — narrow, even, and unmistakably an instrument beside the panels'
+   * Segoe. Where it is absent the stack falls back with no layout shift beyond width, because every
+   * number that could jitter is tabular and every label is short. No web font is loaded.
+   */
+  --hud-font: Bahnschrift, 'DIN Alternate', 'Segoe UI Variable Display', 'Segoe UI', system-ui, sans-serif;
+  --hud-fixed: ui-monospace, Menlo, monospace;
+  /* Bahnschrift is a variable font whose width axis sits at 100 unless it is asked: without this the
+     instrument face draws at normal width and is not told apart from the panels' Segoe. A stack that
+     falls back to a fixed-width family ignores it. */
+  --hud-stretch: 87.5%;
+  /* The dark a drop-shadow or a text outline is thrown in. Not a nineteenth colour: it is `void` at
+     0.8, which is how rule 1 — nothing pure black — reaches the shadows as well as the strokes. */
+  --shade: color-mix(in srgb, var(--void) 80%, transparent);
+}
+
+/* Everything in the instrument face takes the same three declarations. */
+.hud-msg,
+.hud-num,
+.hud-cap,
+.hud-cond,
+.hud-tgt,
+.hud-tgt-edge,
+.hud-acts,
+.hud-plate,
+.hud-dmg {
+  font-family: var(--hud-font);
+  font-stretch: var(--hud-stretch);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- the overlay canvas ---------------------------------------------------------------------------
+ * The first child of `#ui`, so every panel draws over it. It never takes the pointer. */
+#hud-overlay {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+/* --- rule 2, for words: a 1 px dark shadow on four sides ------------------------------------------
+ * A cyan hairline over a noon dune is unreadable without it and obvious with it. One rule, no cost. */
+.hud-msg,
+.hud-num,
+.hud-cap,
+.hud-act .label,
+.hud-plate .name,
+.hud-cond .label,
+.hud-cond .pct,
+.hud-tgt {
+  text-shadow: 1px 0 0 var(--void), -1px 0 0 var(--void), 0 1px 0 var(--void), 0 -1px 0 var(--void);
+}
+
+/* --- bars -----------------------------------------------------------------------------------------
+ * One shape everywhere: a 1 px `edge` border on `void`, quarter hairlines in `rule` inside it, a fill
+ * that changes by `scaleX`, and behind the fill a ghost left at the previous value that eases down
+ * over 0.6 s, which is what makes the size of a hit legible at all. */
+.hud-bar {
+  position: relative;
+  box-sizing: border-box;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--void) 55%, transparent);
+  border: 1px solid var(--edge);
+  border-radius: 2px;
+  transition: border-color 0.12s linear;
+}
+/* The quarter, half and three-quarter marks, so a glance reads the share without a number. They are a
+   layer of their own over the fill rather than the bar's own background, because a fill with an opaque
+   colour would cover them and the design asks for them to read *inside* the bar, not only over the
+   empty part of it. */
+.hud-bar::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+  background-image: linear-gradient(90deg, transparent calc(25% - 0.5px), var(--rule) calc(25% - 0.5px), var(--rule) calc(25% + 0.5px), transparent calc(25% + 0.5px), transparent calc(50% - 0.5px), var(--rule) calc(50% - 0.5px), var(--rule) calc(50% + 0.5px), transparent calc(50% + 0.5px), transparent calc(75% - 0.5px), var(--rule) calc(75% - 0.5px), var(--rule) calc(75% + 0.5px), transparent calc(75% + 0.5px));
+}
+.hud-bar > .fill,
+.hud-bar > .ghost {
+  position: absolute;
+  inset: 0;
+  transform-origin: left center;
+  transform: scaleX(0);
+  will-change: transform;
+}
+/* The ghost is behind the fill whatever order the two are put in the markup, so the shape enforces
+   itself rather than depending on every consumer remembering. */
+.hud-bar > .ghost {
+  z-index: 1;
+  background: color-mix(in srgb, var(--muted) 40%, transparent);
+  transition: transform 0.6s ease-out;
+}
+/* A bar that rises — a repair, a shield recharging — must not have its ghost crawl up behind it: the
+   ease is for a drop only. The consumer adds `snap` for the frame it sets a ghost that is going up and
+   takes it off again. */
+.hud-bar > .ghost.snap { transition: none; }
+.hud-bar > .fill {
+  z-index: 2;
+  background: var(--accent);
+}
+/* A bar's band, for the health, class-pool and target bars. */
+.hud-bar.good > .fill { background: var(--good); }
+.hud-bar.warn > .fill { background: var(--warn); }
+.hud-bar.bad > .fill { background: var(--bad); }
+/* The ship's four layers keep their own colour on the bar, the pip and the hull flash alike. */
+.hud-bar.shield > .fill { background: var(--shield); }
+.hud-bar.armour > .fill { background: var(--armour); }
+.hud-bar.chassis > .fill { background: var(--chassis); }
+.hud-bar.component > .fill { background: var(--component); }
+.hud-bar.hp > .fill { background: var(--ramp-health); }
+.hud-bar.pool > .fill { background: var(--ramp-pool); }
+/* A hit flashes the layer's colour on the border for a quarter of a second: one class toggle. */
+.hud-bar.hit.shield { border-color: var(--shield); }
+.hud-bar.hit.armour { border-color: var(--armour); }
+.hud-bar.hit.chassis { border-color: var(--chassis); }
+.hud-bar.hit.component { border-color: var(--component); }
+.hud-bar.hit.hp { border-color: var(--bad); }
+/* A face with no shield or no armour: a dash where the bar would be. */
+.hud-bar.none {
+  border-color: color-mix(in srgb, var(--edge) 50%, transparent);
+}
+.hud-bar.none::after { background-image: none; }
+
+/* --- pips, one per fitted part --------------------------------------------------------------------
+ * A raised cell with an inner fill by the part's share; when it is down the fill goes and a cross
+ * appears. The row's own name goes to the message line the moment a pip changes state, since with the
+ * pointer locked there is no hover. */
+.hud-pips {
+  display: flex;
+  gap: calc(4px * var(--hud-scale));
+}
+.hud-pip {
+  position: relative;
+  box-sizing: border-box;
+  width: calc(10px * var(--hud-scale));
+  height: calc(10px * var(--hud-scale));
+  background: var(--plate);
+  border: 1px solid var(--edge);
+  border-radius: 1px;
+  overflow: hidden;
+}
+.hud-pip > .fill {
+  position: absolute;
+  inset: 0;
+  transform-origin: center bottom;
+  transform: scaleY(1);
+  background: var(--component);
+}
+.hud-pip.low > .fill { background: var(--warn); }
+.hud-pip.down > .fill { display: none; }
+.hud-pip.down { border-color: var(--bad); }
+/* The cross on a part that is down: two 1.5 px strokes, no image and no glyph fetch. */
+.hud-pip.down::before,
+.hud-pip.down::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 10%;
+  width: calc(1.5px * var(--hud-scale));
+  height: 80%;
+  margin-left: calc(-0.75px * var(--hud-scale));
+  background: var(--bad);
+}
+.hud-pip.down::before { transform: rotate(45deg); }
+.hud-pip.down::after { transform: rotate(-45deg); }
+
+/* --- the ship's condition, bottom centre ----------------------------------------------------------
+ * Shields and armour split front and back, then the hull, then a pip per component. */
+.hud-cond {
+  position: absolute;
+  left: 50%;
+  bottom: calc(96px * var(--hud-scale));
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: calc(4px * var(--hud-scale));
+  font-family: var(--hud-font);
+  font-variant-numeric: tabular-nums;
+  font-size: calc(11px * var(--hud-scale));
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+}
+.hud-cond .row {
+  display: flex;
+  align-items: center;
+  gap: calc(10px * var(--hud-scale));
+}
+.hud-cond .label {
+  flex: none;
+  width: calc(64px * var(--hud-scale));
+  color: var(--muted);
+  text-transform: uppercase;
+}
+.hud-cond .hud-bar {
+  flex: none;
+  width: calc(132px * var(--hud-scale));
+  height: calc(9px * var(--hud-scale));
+}
+.hud-cond .pct {
+  flex: none;
+  width: calc(34px * var(--hud-scale));
+  text-align: right;
+  color: var(--ink);
+}
+.hud-cond .hud-pips { margin-top: calc(2px * var(--hud-scale)); }
+
+/* --- the target's readout -------------------------------------------------------------------------
+ * Its bracket is drawn on the overlay; the words and the three short bars are here, moved by
+ * `translate3d` and written only when they change. */
+.hud-tgt {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  gap: calc(2px * var(--hud-scale));
+  font-family: var(--hud-font);
+  font-variant-numeric: tabular-nums;
+  font-size: calc(12px * var(--hud-scale));
+  white-space: nowrap;
+  will-change: transform;
+}
+.hud-tgt .name {
+  font-size: calc(13px * var(--hud-scale));
+  color: var(--ink);
+}
+.hud-tgt .name .range { float: right; margin-left: calc(14px * var(--hud-scale)); color: var(--muted); }
+.hud-tgt .what { color: var(--muted); }
+.hud-tgt .bars { display: flex; gap: calc(6px * var(--hud-scale)); align-items: center; }
+.hud-tgt .hud-bar {
+  width: calc(64px * var(--hud-scale));
+  height: calc(5px * var(--hud-scale));
+}
+.hud-tgt.enemy .name { color: var(--bad); }
+.hud-tgt.friend .name { color: var(--good); }
+.hud-tgt.inactive { opacity: 0.4; }
+/* The range beside an off-screen target's arrow. */
+.hud-tgt-edge {
+  position: absolute;
+  left: 0;
+  top: 0;
+  font-family: var(--hud-font);
+  font-variant-numeric: tabular-nums;
+  font-size: calc(12px * var(--hud-scale));
+  color: var(--ink);
+  white-space: nowrap;
+  will-change: transform;
+}
+
+/* --- the speed number, beside the speed arc -------------------------------------------------------- */
+.hud-num {
+  position: absolute;
+  font-family: var(--hud-font);
+  font-variant-numeric: tabular-nums;
+  font-size: calc(15px * var(--hud-scale));
+  color: var(--ink);
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  will-change: transform;
+}
+.hud-num small {
+  font-size: calc(10px * var(--hud-scale));
+  color: var(--muted);
+  margin-left: calc(3px * var(--hud-scale));
+}
+
+/* --- the message line, bottom left -----------------------------------------------------------------
+ * Eight pooled lines, never grown, reused round-robin. Each has a 2 px left rule in its kind's colour
+ * and sits on a dark plate, so a line reads over sand as well as over space. */
+.hud-msgs {
+  position: absolute;
+  left: calc(14px * var(--hud-scale));
+  bottom: calc(14px * var(--hud-scale));
+  /* The column the layout worked out, so a long line cannot run under the centred blocks on a narrow
+     window. Whoever applies the HUD settings writes `--hud-msg-w` from `layout().message.w` on a
+     resize and a change of scale — one property write, never per frame — and the fallback is the
+     table's own width at the HUD scale, which is right on any roomy window. */
+  max-width: var(--hud-msg-w, calc(420px * var(--hud-scale)));
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: calc(2px * var(--hud-scale));
+  font-family: var(--hud-font);
+  font-size: calc(13px * var(--hud-scale));
+  line-height: 1.35;
+}
+.hud-msg {
+  padding: calc(2px * var(--hud-scale)) calc(6px * var(--hud-scale));
+  background: color-mix(in srgb, var(--void) 35%, transparent);
+  border-left: calc(2px * var(--hud-scale)) solid var(--muted);
+  color: var(--ink);
+  /* `text-overflow` needs `nowrap`: without it a long line wraps to a second row instead of being cut,
+     which breaks the line height the column's geometry is worked out from. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: opacity 0.25s linear;
+}
+.hud-msg[hidden] { display: none; }
+.hud-msg .count { color: var(--muted); margin-left: calc(5px * var(--hud-scale)); }
+.hud-msg .who { font-weight: 600; }
+/* The kinds and their colours are ours. */
+.hud-msg.system { border-left-color: var(--accent); }
+.hud-msg.you-hit { border-left-color: var(--good); }
+.hud-msg.hit-you { border-left-color: var(--bad); }
+.hud-msg.spatial { border-left-color: var(--component); }
+.hud-msg.note { border-left-color: var(--muted); color: var(--muted); }
+
+/* --- key-caps and the action bar -------------------------------------------------------------------
+ * At most four things you can do right now, each a cap and two or three words. The cap shows the key
+ * you have bound, not a key written into the code. */
+.hud-acts {
+  position: absolute;
+  left: 50%;
+  bottom: calc(52px * var(--hud-scale));
+  transform: translateX(-50%);
+  display: flex;
+  gap: calc(14px * var(--hud-scale));
+  font-family: var(--hud-font);
+  font-size: calc(13px * var(--hud-scale));
+  white-space: nowrap;
+}
+.hud-act {
+  display: flex;
+  align-items: center;
+  gap: calc(5px * var(--hud-scale));
+}
+.hud-act[hidden] { display: none; }
+.hud-act .label { color: var(--ink); }
+.hud-cap {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  min-width: calc(22px * var(--hud-scale));
+  height: calc(18px * var(--hud-scale));
+  padding: 0 calc(4px * var(--hud-scale));
+  background: var(--plate);
+  border: 1px solid var(--edge);
+  border-radius: calc(2px * var(--hud-scale));
+  font-family: var(--hud-font);
+  font-variant-numeric: tabular-nums;
+  font-size: calc(11px * var(--hud-scale));
+  color: var(--accent);
+}
+
+/* --- the look-at nameplate ------------------------------------------------------------------------
+ * Pooled eight, moved by `translate3d` only, on nothing but its own shadow. */
+.hud-plate {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: calc(2px * var(--hud-scale));
+  font-family: var(--hud-font);
+  font-size: calc(12px * var(--hud-scale));
+  opacity: 0;
+  transition: opacity 0.15s linear;
+  will-change: transform, opacity;
+}
+.hud-plate.on { opacity: 1; }
+.hud-plate[hidden] { display: none; }
+.hud-plate .name { color: var(--ink); white-space: nowrap; }
+.hud-plate .hud-bar {
+  width: calc(44px * var(--hud-scale));
+  height: calc(4px * var(--hud-scale));
+}
+
+/* --- a rising damage number (a setting, off by default) -------------------------------------------- */
+.hud-dmg {
+  position: absolute;
+  left: 0;
+  top: 0;
+  font-family: var(--hud-font);
+  font-variant-numeric: tabular-nums;
+  font-size: calc(13px * var(--hud-scale));
+  color: var(--ink);
+  text-shadow: 1px 0 0 var(--void), -1px 0 0 var(--void), 0 1px 0 var(--void), 0 -1px 0 var(--void);
+  will-change: transform, opacity;
+}
+.hud-dmg[hidden] { display: none; }
+.hud-dmg.kill { color: var(--bad); }
+
+/* --- moved here from `src/style.css`, unchanged except where rule 1 applies -------------------------
+ * These belong to the HUD and not to the panels. They are the pieces the new display replaces;
+ * they keep working exactly as they did until the code that uses them goes. The one change is rule 1
+ * of the design: nothing is drawn in pure white, so `#ffffff` is `--ink`. */
+
+/* The ability slot row. */
+.slots { display: flex; gap: 4px; }
+.slot {
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 72px;
+  padding: 4px 3px;
+  background: var(--panel);
+  border: 1px solid var(--edge);
+  border-radius: 5px;
+  font-size: 9px;
+}
+.slot .key { font-weight: 700; color: var(--accent); font-size: 11px; }
+.slot .name { white-space: nowrap; }
+.slot .cost { color: var(--muted); font-size: 9px; }
+.slot.active { border-color: var(--accent); box-shadow: 0 0 12px rgba(127, 215, 255, 0.5); background: rgba(45, 127, 214, 0.35); }
+.slot .cd { position: absolute; left: 0; right: 0; bottom: 0; height: 0; background: color-mix(in srgb, var(--void) 55%, transparent); pointer-events: none; }
+.slot > span { position: relative; }
+
+/* The flight display: the aim circle, the cursor's ring, a crosshair, and the cursor as an arrow or a pip. */
+.flight { position: absolute; left: 50%; top: 50%; margin: -160px 0 0 -160px; pointer-events: none; }
+.flight .ring { fill: none; stroke: var(--rule); stroke-width: 1; }
+.flight .cross { stroke: var(--accent); stroke-width: 2; filter: drop-shadow(0 0 3px rgba(127, 215, 255, 0.8)); }
+.flight .stick-line { stroke: var(--ink); stroke-width: 2.5; stroke-linecap: round; filter: drop-shadow(0 0 3px var(--shade)); }
+.flight .stick-head { fill: var(--ink); filter: drop-shadow(0 0 3px var(--shade)); }
+.flight .stick-dot { fill: var(--ink); filter: drop-shadow(0 0 3px var(--shade)); }
+
+/* The target box, its lead reticle and its label. */
+.targets { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+.targets .tbox { fill: none; stroke: var(--chassis); stroke-width: 1.5; filter: drop-shadow(0 0 3px var(--shade)); }
+.targets .lead { fill: none; stroke: var(--ink); stroke-width: 1.5; filter: drop-shadow(0 0 3px var(--shade)); }
+.targets .lead-cross { stroke: var(--ink); stroke-width: 1.5; filter: drop-shadow(0 0 3px var(--shade)); }
+.targets .lead-line { stroke: var(--ink); stroke-opacity: 0.45; stroke-width: 1; stroke-dasharray: 4 4; }
+.targets .tlabel { fill: var(--ink); font-size: 12px; text-anchor: middle; paint-order: stroke; stroke: var(--shade); stroke-width: 3px; }
+.targets .tbox.enemy { stroke: var(--bad); }
+.targets .tbox.friend { stroke: var(--good); }
+.targets .tbox.neutral { stroke: var(--ink); }
+
+/* The long prompt line, kept behind a setting for one round of play and then dropped. */
+.prompt {
+  position: absolute;
+  left: 50%;
+  bottom: 150px;
+  transform: translateX(-50%);
+  padding: 6px 14px;
+  background: var(--panel);
+  border: 1px solid var(--edge);
+  border-radius: 6px;
+  font-size: 13px;
+  white-space: nowrap;
+}
+.prompt:empty { display: none; }
