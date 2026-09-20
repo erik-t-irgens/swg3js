@@ -32,6 +32,12 @@
 //   { t: 'emote', clip }
 //   { t: 'ask', to, word: dock|allow|refuse|undock }         the one message meant for a single other player: asking
 //                                                          their pilot for room on their hull, and the answer
+//   { t: 'group', do: invite|accept|decline|leave|kick|promote|disband|trip|travel, to?, who?, where? }
+//                                                          a fireteam (groups.mjs): who to ask is the connection id
+//                                                          the browser already knows them by, who to put out or hand
+//                                                          the group to is the member id the roster gives, and a trip
+//                                                          is the world the leader is going to
+//   { t: 'chat', scope: say|group, text }                    a line, to everyone on this world or to the group
 // Server to browser:
 //   { t: 'hail', v, now, epoch, dayMs, nonce, word, ff }     sent the instant the socket opens, before anything is said
 //   { t: 'claimed', you, keep }   { t: 'denied', why }   { t: 'refused', why }   { t: 'taken', by }
@@ -43,6 +49,17 @@
 //   { t: 'join', id, hello }   { t: 'leave', id }   { t: 'state', id, ... }   { t: 'emote', id, clip }
 //   { t: 'hello', id, hello }  (a peer already on this world changed something)
 //   { t: 'ask', id, word }     (from the player who sent it, to the one it was addressed to, and to nobody else)
+//   { t: 'group', do: 'roster', id, leader, you, members: [{ m, s, name, planet, zone, hp, leader, here }] }
+//   { t: 'group', do: 'news', what: joined|left|kicked|away|back|leader|disbanded|declined|lapsed|
+//                                    gone|withdrawn, who, name }   (withdrawn: an invitation you sent
+//                                    is void because the one you asked has gone)
+//   { t: 'group', do: 'health', who, hp }   (one member's health moved; the roster carries it too, and
+//                                            this is the line sent when nothing else changed)
+//   { t: 'group', do: 'invited', from, name, until }   { t: 'group', do: 'sent', to, name, until }
+//   { t: 'group', do: 'trip', from, name, where, until }   { t: 'group', do: 'travelling', who, name, where }
+//   { t: 'group', do: 'none', why }   (you are in no group now)   { t: 'group', do: 'gone' }   (the invitation has)
+//   { t: 'group', do: 'refused', why }   (to whoever asked, and to nobody else)
+//   { t: 'chat', id, from, scope, text }
 //
 // Everything but the claim, the ping and the ask goes to the world the player is on and no further
 // (rooms.mjs). Before this, a browser was told about people on other planets and dressed them,
@@ -58,6 +75,7 @@ import { Rooms, roomKey, roomLabel } from './rooms.mjs';
 import { WorldClock, DAY_MS } from './clock.mjs';
 import { STORE_TUNING, openStore } from './store.mjs';
 import { Sessions, checkClaim, makeNonce, summaryOf } from './identity.mjs';
+import { GROUP_RANGES, GROUP_TUNING, Groups, cleanChat, cleanGroup } from './groups.mjs';
 
 /** What this server speaks. A browser that hears no hail is talking to the relay that came before. */
 const WIRE_VERSION = 2;
@@ -136,6 +154,7 @@ for (let i = 0; i < args.length; i++) {
   const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
   if (has(TUNING, name)) TUNING[name] = value;
   else if (name.startsWith('wire.') && has(WIRE, name.slice(5))) WIRE[name.slice(5)] = value;
+  else if (name.startsWith('group.') && has(GROUP_TUNING, name.slice(6))) GROUP_TUNING[name.slice(6)] = value;
   else console.log(`  --set ${name}: there is no such number, and it has been ignored`);
 }
 
@@ -157,6 +176,11 @@ const store = openStore({ dir: DATA, saveEvery: TUNING['store.saveEvery'], renam
 const clock = new WorldClock({ epoch: store.data.epoch, dayMs: DAY });
 const rooms = new Rooms();
 const sessions = new Sessions();
+// The groups are keyed by character, not by connection, which is what lets someone reload their
+// browser without their friends losing them: the line closes, their place is held, and the new line
+// claiming the same character picks it up again. They are not written to disk -- a group is a thing
+// people are doing together this evening, not a thing the world remembers.
+const groups = new Groups({ tuning: GROUP_TUNING });
 const settings = { friendlyFire: FRIENDLY_FIRE, word: WORD ? 1 : 0, dayMs: DAY };
 const had = store.data.settings ?? {};
 if (had.friendlyFire !== settings.friendlyFire || had.word !== settings.word || had.dayMs !== settings.dayMs) store.change({ t: 'settings', settings });
@@ -233,6 +257,98 @@ function tellRoomAbout(key, peer) {
   for (const id of rooms.members(key)) {
     if (id === peer.id) continue;
     tellAbout(clients.get(id), peer);
+  }
+}
+
+/**
+ * Send out what a group decided. The rules in `groups.mjs` know members by a key that outlives a
+ * connection, so this is where a key becomes a socket again; a member whose line is closed is simply
+ * not written to, and what they missed is in the roster they are sent when they come back.
+ */
+function deliver(result) {
+  const tell = result?.tell;
+  if (!tell?.length) return;
+  for (const line of tell) {
+    for (const key of line.to) {
+      const session = groups.sessionOf(key);
+      if (session) send(clients.get(session), line.msg);
+    }
+  }
+}
+
+/**
+ * How far apart two players are, for the invitation's own range. Infinity when either has not moved
+ * yet or they are on different worlds, which is the honest answer: the client's table gives an
+ * invitation 90 m and 90 m only reaches across one world.
+ *
+ * A player aboard a ship's rooms sends their place in that hull's frame rather than the world's, so
+ * this measures an invitation between someone inside a hull and someone standing outside it against
+ * the wrong origin. Both aboard the same hull is right, both outside is right, and the mixed case
+ * is left alone until a friend's hull is a place you can stand in.
+ */
+function metresBetween(a, b) {
+  if (!a?.state?.p || !b?.state?.p) return Infinity;
+  if (rooms.keyOf(a.id) !== rooms.keyOf(b.id)) return Infinity;
+  return Math.hypot(a.state.p[0] - b.state.p[0], a.state.p[1] - b.state.p[1], a.state.p[2] - b.state.p[2]);
+}
+
+/**
+ * The nearest player on this world who answers to a name, for an invitation typed as a line rather
+ * than picked off a list. Two players can share a name, so the nearest is the one meant; somebody on
+ * another world is not considered at all, since an invitation could not reach them anyway.
+ */
+function nearestNamed(c, name) {
+  if (!name) return null;
+  const want = name.toLowerCase();
+  let best = null;
+  let nearest = Infinity;
+  for (const id of rooms.members(rooms.keyOf(c.id))) {
+    const other = clients.get(id);
+    if (!other || other === c || other.hello?.name?.toLowerCase() !== want) continue;
+    const how = metresBetween(c, other);
+    // The first one found stands even when there is no telling how far off they are, so that asking
+    // them is refused for being too far away rather than for there being nobody of that name.
+    if (best && how >= nearest) continue;
+    nearest = how;
+    best = other;
+  }
+  return best;
+}
+
+/**
+ * The name a group knows a browser by: its character when it has said which one it is playing, and
+ * its connection otherwise. The character is what survives a reload; a browser that never says who
+ * it is (an older one, or a server with no join word set) is known by its line and loses its group
+ * when that line closes, which is the behaviour it would have had anyway.
+ */
+function memberKeyOf(c) {
+  return c.character ? `c:${c.character}` : `s:${c.id}`;
+}
+
+/**
+ * Whether this line is still the one holding its member. The same character opened in a second
+ * browser moves the member across at once and the older line is closed a moment later; inside that
+ * moment a word from the dying line would be taken as the member's -- a `leave` would put the new
+ * browser out of the group, and a chat line would go out under the old line's name.
+ */
+function holdsMember(c) {
+  return groups.sessionOf(c.member) === c.id;
+}
+
+/**
+ * Tell the groups where a browser is and what it is called, on the way in and after a travel.
+ * `moved` says the world changed under it, which throws the last place away: a position is in the
+ * world it was sent from, so an invitation's distance and the place a newcomer is handed would both
+ * be measured against a world this browser has left until its first state on the new one arrives.
+ */
+function markPresent(c, moved = false) {
+  const key = memberKeyOf(c);
+  if (moved) c.state = null;
+  const about = { session: c.id, name: c.hello?.name ?? c.claimed ?? '', planet: c.hello?.planet ?? '', zone: c.hello?.zone ?? '' };
+  if (c.member === key) deliver(groups.place(key, about));
+  else {
+    c.member = key;
+    deliver(groups.present(key, about));
   }
 }
 
@@ -355,6 +471,13 @@ function onClaim(c, msg) {
   }
   send(c, { t: 'claimed', you: { player: verdict.player, character: verdict.character, name: claim.name }, keep: verdict.keep });
   console.log(`  ${c.id} is player ${verdict.player} playing ${claim.name}`);
+  // Now that there is a name for this browser that outlives its line, the groups can have it: if
+  // this character's place in a group is still being held -- a reload, a line that dropped -- it is
+  // picked up here and everyone is told they are back, before a word about where they are.
+  c.claimed = claim.name;
+  markPresent(c);
+  const back = groups.groupOf(c.member);
+  if (back) console.log(`  ${c.id} "${claim.name}" is in ${back.id} again (${back.members.size} in it)`);
 }
 
 function onSettle(c, msg) {
@@ -388,7 +511,11 @@ function onMessage(c, text, trimmed = false) {
     return;
   }
   if (!msg || typeof msg.t !== 'string') return;
-  if (trimmed && (msg.t === 'state' || msg.t === 'emote' || msg.t === 'ask')) return;
+  // Chat is dropped with the news when a browser is past its allowance for the second: it has a far
+  // tighter limit of its own already, so anything arriving here in that state is a browser shouting.
+  // What a group is asked for is not: those are rare, they are decisions rather than news, and one
+  // lost would leave the two sides disagreeing about who is in.
+  if (trimmed && (msg.t === 'state' || msg.t === 'emote' || msg.t === 'ask' || msg.t === 'chat')) return;
   if (msg.t === 'claim') {
     onClaim(c, msg);
     return;
@@ -412,6 +539,9 @@ function onMessage(c, text, trimmed = false) {
     if (msg.v === WIRE_VERSION) c.v = WIRE_VERSION;
     const key = roomKey(hello.planet, hello.zone);
     const move = rooms.set(c.id, key);
+    // A group's roster says what world each member is on, so it is told here and nowhere else; this
+    // is also where a browser that never claims a character becomes someone a group can hold.
+    markPresent(c, !first && move.from !== key);
     if (first) {
       tellRoomAbout(key, c);
       const peers = roster(key, c.id);
@@ -469,6 +599,53 @@ function onMessage(c, text, trimmed = false) {
     if (!to || to === c || !to.hello) return;
     if (rooms.keyOf(to.id) !== rooms.keyOf(c.id)) return;
     send(to, { t: 'ask', id: c.id, word: ask.word });
+  } else if (msg.t === 'group') {
+    // Everything a fireteam is: the rules are in groups.mjs, which knows nothing about sockets, and
+    // all that happens here is that the browser asking is named, the one it names is looked up, and
+    // whatever the rules decided is sent out. Nothing is answered with an error the browser could
+    // read as something happening: a refusal is its own message and goes only to whoever asked.
+    if (!c.hello || !c.member || !holdsMember(c)) return;
+    const g = cleanGroup(msg, GROUP_TUNING);
+    if (!g) return;
+    // A decision is never thrown away for being behind, so this is the one thing standing between a
+    // key held down and the server writing a roster to all eight as fast as it can read.
+    if (!groups.mayAsk(c.member)) return;
+    if (g.do === 'invite') {
+      const to = (g.to ? clients.get(g.to) : null) ?? nearestNamed(c, g.name);
+      // The distance is measured here because this is the only place that knows where two people
+      // are standing; the rule it is held to -- the client's own 90 m -- is in groups.mjs.
+      deliver(groups.invite(c.member, to?.member ?? '', metresBetween(c, to)));
+    } else if (g.do === 'accept') deliver(groups.accept(c.member));
+    else if (g.do === 'decline') deliver(groups.decline(c.member));
+    else if (g.do === 'leave') deliver(groups.leave(c.member));
+    else if (g.do === 'kick') deliver(groups.kick(c.member, g.who));
+    else if (g.do === 'promote') deliver(groups.promote(c.member, g.who));
+    else if (g.do === 'disband') deliver(groups.disband(c.member));
+    else if (g.do === 'trip') deliver(groups.trip(c.member, g.where));
+    else if (g.do === 'travel') deliver(groups.travel(c.member));
+  } else if (msg.t === 'chat') {
+    // A line, and only ever a line: it is cut to length, stripped of anything that is not text and
+    // sent on as text. Whatever shows it escapes it; nothing here ever reads it.
+    if (!c.hello || !c.member || !holdsMember(c)) return;
+    const chat = cleanChat(msg, GROUP_TUNING);
+    if (!chat) return;
+    if (!groups.mayChat(c.member)) return;
+    const line = { t: 'chat', id: c.id, from: c.hello.name, scope: chat.scope, text: chat.text };
+    // The speaker is sent their own line back rather than showing it themselves, so what everyone
+    // reads is the same text in the same order, whatever the server made of it.
+    if (chat.scope === 'group') {
+      const to = groups.chatTo(c.member);
+      if (!to) {
+        send(c, { t: 'group', do: 'refused', why: 'you are not in a group' });
+        return;
+      }
+      for (const key of to) {
+        const session = groups.sessionOf(key);
+        if (session) send(clients.get(session), line);
+      }
+    } else {
+      sendToRoom(rooms.keyOf(c.id), line);
+    }
   }
 }
 
@@ -495,6 +672,7 @@ const server = createServer((req, res) => {
         v: WIRE_VERSION,
         connected: clients.size,
         rooms: rooms.describe(),
+        groups: groups.describe(),
         clock: clock.describe(),
         world: store.describe(),
         joinWord: WORD ? 'set' : 'none',
@@ -505,6 +683,10 @@ const server = createServer((req, res) => {
         backlog: [...clients.values()].map((c) => ({ id: c.id, who: c.hello?.name ?? '', queued: c.socket.writableLength, dropped: c.dropped, knows: c.known.size })),
         tuning: TUNING,
         caps: WIRE,
+        group: GROUP_TUNING,
+        // The distances a group works to, which are the client's own and not this server's to pick:
+        // they are printed here so what is being enforced can be read off without reading the code.
+        ranges: GROUP_RANGES,
       },
       null,
       1,
@@ -531,6 +713,10 @@ server.on('upgrade', (req, socket) => {
     nonce: makeNonce(),
     player: null,
     character: null,
+    /** The name a group knows this browser by, which outlives the line when it has claimed one. */
+    member: null,
+    /** What the character it claimed is called, before its first hello says so. */
+    claimed: '',
     asking: null,
     heard: Date.now(),
     dropped: 0,
@@ -589,6 +775,10 @@ server.on('upgrade', (req, socket) => {
     clients.delete(c.id);
     const key = rooms.leave(c.id);
     sessions.release(c.id);
+    // Their group is told they have stepped out, not that they have gone: their place is held for a
+    // while, so a reload does not cost anybody their group and the leader does not change hands
+    // over one. It is `tick` that gives a place up when nobody comes back for it.
+    deliver(groups.absent(c.id));
     console.log(`- ${c.id} ${who(c)} left${key ? ` ${roomLabel(key)}` : ''} (${clients.size} connected)`);
     // Everyone who was ever told about this browser is told it has gone, wherever they are standing
     // now: a browser holds on to a peer it has met while that peer is on another world, so the news
@@ -619,6 +809,11 @@ setInterval(() => {
   }
 }, TUNING['watch.ping']);
 
+// The only clock a group needs: an invitation nobody answered, a trip nobody took and a place held
+// for someone who has not come back all have a life on them, and this is what ends them. With
+// nobody grouped and nobody asked it walks two empty tables a second and writes nothing.
+setInterval(() => deliver(groups.tick()), GROUP_TUNING.tick);
+
 let closing = false;
 const shutDown = (why) => {
   if (closing) return;
@@ -639,5 +834,6 @@ server.listen(PORT, () => {
   console.log(`  the world is kept in ${DATA}: ${store.describe()}`);
   console.log(`  ${WORD ? 'a join word is set: a browser must carry it in its address, and one that cannot is turned away' : 'no join word: anyone who can reach this port can join (--word=<something> sets one)'}`);
   console.log(`  damage between players is ${FRIENDLY_FIRE ? 'on' : 'off (--friendly-fire turns it on)'}`);
+  console.log(`  a group holds ${GROUP_TUNING.members}, an invitation reaches ${GROUP_RANGES.invite} m (the client's own distance), and a place is held for ${Math.round(GROUP_TUNING.hold / 1000)} s while someone reloads`);
   console.log(`  a browser built before this one plays as it always has; http://localhost:${PORT}/ says what is going on`);
 });
