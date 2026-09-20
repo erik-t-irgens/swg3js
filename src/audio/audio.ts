@@ -230,6 +230,8 @@ interface Playing {
   source: AudioBufferSourceNode | null;
   sample: string;
   rate: number;
+  /** The extra pitch that was baked into `rate` when this sound began, so a change can be written live. */
+  pitchWritten: number;
   /** Audio time the sound playing now ends. */
   endsAt: number;
   /** Audio time the loop now due was first asked for, for the patience drop. */
@@ -507,6 +509,7 @@ export class AudioSystem {
       source: null,
       sample: '',
       rate: 1,
+      pitchWritten: 0,
       endsAt: 0,
       askedAt: now,
       audible: 1,
@@ -1050,6 +1053,7 @@ export class AudioSystem {
     p.source = src;
     p.sample = sample;
     p.rate = rate;
+    p.pitchWritten = p.pitch;
     p.endsAt = at + Math.max(0, buf.duration - offset) / rate;
     p.askedAt = now;
     p.starts++;
@@ -1111,6 +1115,13 @@ export class AudioSystem {
     }
     // Where it sits around the head. The node is given the source's world place and nothing else:
     // its own falloff is off, so the whole curve stays in `distance.ts` where a test can sweep it.
+    // A pitch that moves while a voice plays: an engine rising with the throttle, and the Doppler
+    // shift on a ship going past. Written like every other parameter, at most `writeRate` times a
+    // second and only on a change, so a loop that keeps its pitch costs nothing.
+    if (p.source) {
+      const rate = p.rate * rateOf(p.pitch - p.pitchWritten);
+      if (Math.abs(rate - p.source.playbackRate.value) > 1e-3) p.source.playbackRate.setTargetAtTime(rate, now, this.tune.ramp);
+    }
     if (slot.pan) this.place(slot.pan, p.x, p.y, p.z, now);
     this.writeSpace(p, slot, now, false);
   }
