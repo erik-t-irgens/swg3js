@@ -70,11 +70,18 @@ const ACTION_LABELS: Record<Action, string> = {
   wings: 'Open and close the wings (flying a ship)',
 };
 
+/**
+ * The two tables `keyName` looks a code up in. They are out here rather than inside it because the
+ * name of a key is asked for on the frame path, and a table built inside the call is two objects
+ * built again every time it is asked.
+ */
+const MOUSE_NAMES: Record<string, string> = { Mouse0: 'Left mouse', Mouse1: 'Middle mouse', Mouse2: 'Right mouse', Mouse3: 'Mouse 4', Mouse4: 'Mouse 5' };
+const KEY_NAMES: Record<string, string> = { Space: 'Space', Equal: '=', Minus: '-', Comma: ',', Period: '.', Slash: '/', Backquote: '`', BracketLeft: '[', BracketRight: ']', Semicolon: ';', Quote: "'", Backslash: '\\', Tab: 'Tab', Enter: 'Enter', CapsLock: 'Caps Lock' };
+
 /** "KeyW" reads as "W", "Mouse0" as "Left mouse", "ControlLeft" as "Left Ctrl". */
 export function keyName(code: string): string {
   if (!code) return '—';
-  const mouse: Record<string, string> = { Mouse0: 'Left mouse', Mouse1: 'Middle mouse', Mouse2: 'Right mouse', Mouse3: 'Mouse 4', Mouse4: 'Mouse 5' };
-  if (mouse[code]) return mouse[code];
+  if (MOUSE_NAMES[code]) return MOUSE_NAMES[code];
   let m = /^Key([A-Z])$/.exec(code);
   if (m) return m[1];
   m = /^Digit(\d)$/.exec(code);
@@ -85,8 +92,7 @@ export function keyName(code: string): string {
   if (m) return `${m[2]} ${m[1] === 'Control' ? 'Ctrl' : m[1]}`;
   m = /^Arrow(.+)$/.exec(code);
   if (m) return `${m[1]} arrow`;
-  const named: Record<string, string> = { Space: 'Space', Equal: '=', Minus: '-', Comma: ',', Period: '.', Slash: '/', Backquote: '`', BracketLeft: '[', BracketRight: ']', Semicolon: ';', Quote: "'", Backslash: '\\', Tab: 'Tab', Enter: 'Enter', CapsLock: 'Caps Lock' };
-  return named[code] ?? code;
+  return KEY_NAMES[code] ?? code;
 }
 
 interface Knob {
