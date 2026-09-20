@@ -442,7 +442,8 @@ npm run swg -- ships @SWG assets-private --retail-only                          
 npm run swg -- space @SWG all assets-private --retail-only                        #    every space zone: stations, asteroid fields, planets, sky and hyperspace points; Kessel, Ord Mantell and Deep Space
 npm run swg -- sandbox @SWG assets-private --retail-only                          #    optional: a made-up system to fly fast in, 250 km across (nothing in it is the game's)
 npm run swg -- water @SWG all assets-private --retail-only                        #    each planet's own water: the colour, opacity, ripples and drift of every lake and sea, and each lava shader's look
-npm run swg -- sounds @SWG assets-private --retail-only                           #    every sound the game can play, the samples they name and where each one is used (about 856 MB)
+npm run swg -- sounds @SWG assets-private --retail-only --jka=@JKA                #    every sound the game can play, the samples they name and where each one is used (about 856 MB),
+                                                                                  #    plus Jedi Academy's saber sounds and the frames its animations mark
 npm run swg -- status assets-private                                              # 8. what is in place, and the command for anything missing
 npm run dev                                                                       # 9. play
 ```

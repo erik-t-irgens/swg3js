@@ -69,10 +69,12 @@
 //                                                                  also written to <out-dir>/audit.txt
 //   node tools/swg/cli.mjs extras <swg-dir>                       what the archives outside the retail manifests add or replace, by category
 //                                                                  (a listing only; nothing from them is converted)
-//   node tools/swg/cli.mjs sounds <swg-dir> <out-dir> [planet|all] [--only=<text>] [--no-samples]
+//   node tools/swg/cli.mjs sounds <swg-dir> <out-dir> [planet|all] [--only=<text>] [--no-samples] [--jka=<dir>]
 //                                                                  every sound the game can play, the samples they name, and where each one is
 //                                                                  used, as <out-dir>/sounds; a planet (or all) also writes that planet's own
-//                                                                  placed emitters, room beds and surfaces as <out-dir>/<planet>/sounds.json
+//                                                                  placed emitters, room beds and surfaces as <out-dir>/<planet>/sounds.json;
+//                                                                  --jka also takes Jedi Academy's saber sounds and the frames its animations
+//                                                                  mark, from its GameData folder
 //   node tools/swg/cli.mjs status <out-dir>                        what the packs under <out-dir> hold and which commands would fill the gaps
 //   node tools/swg/cli.mjs terrain-check <out-dir> [--limit=n] [--layers] [--at=x,z]
 //                                                                  generate terrain at every snapshot object and compare with its height;
@@ -140,6 +142,8 @@ import { exportSky } from './sky.mjs';
 import { exportWater } from './water.mjs';
 import { convertSounds, soundStatus } from './sound.mjs';
 import { convertSoundPlaces, placesStatus } from './soundplaces.mjs';
+import { clipEventStatus, convertClipEvents } from './clipevents.mjs';
+import { convertJkaSounds, jkaSoundStatus } from './jkasound.mjs';
 import { nameLocomotion } from './clipnames.mjs';
 import { core3MobileStats, mobileTemplates, scanServerSpawns } from './spawns.mjs';
 import { loadEffect } from './texrender.mjs';
@@ -1926,6 +1930,15 @@ function packStatus(dir) {
   const places = placesStatus(dir, GAME_PLANETS, readJson);
   if (places.line) console.log(places.line);
   if (places.need) need(`sounds <swg-dir> ${dir} all --retail-only`, places.need);
+  // When each animation marks a foot landing or a voice, which animation each species' clips play
+  // (compared with the species packs, so a drift shows as a line rather than as silent feet), and
+  // Jedi Academy's own marks and saber sounds.
+  const clipEvents = clipEventStatus(dir, readJson, { packs: (id) => readJson(join(dir, 'characters', id, 'parts.json')) });
+  console.log(clipEvents.line);
+  if (clipEvents.need) need(`sounds <swg-dir> ${dir} --retail-only --jka=<jedi-academy-gamedata>`, clipEvents.need);
+  const jkaSounds = jkaSoundStatus(dir, readJson);
+  if (jkaSounds.line) console.log(jkaSounds.line);
+  if (jkaSounds.need) need(`sounds <swg-dir> ${dir} --retail-only --jka=<jedi-academy-gamedata>`, jkaSounds.need);
   if (!todo.size) {
     console.log(`everything is in place: ${planets} planet packs, creatures and player`);
     return;
@@ -5077,7 +5090,13 @@ switch (cmd) {
     if (!pos[2]) usage();
     const vfs = mount(pos[1]);
     mkdirSync(pos[2], { recursive: true });
+    // Jedi Academy first, so a wrong path is found before the long work: its saber hums, the files
+    // its animation events name, and the frames those events mark.
+    const jkaSounds = options.jka ? convertJkaSounds(options.jka, pos[2], { log: console.log }) : null;
         convertSounds(vfs, pos[2], { only: options.only ?? null, samples: !flags.has('--no-samples'), log: console.log });
+    // When each of the game's own animations marks a footstep, a voice or a blow landing, which
+    // animation each species' clips play, and which client data each body reads its events from.
+    convertClipEvents(vfs, pos[2], { jka: jkaSounds, log: console.log });
     // A planet argument (or `all`) also writes where that planet's sounds are: the emitters its
     // world places, the room beds of the buildings it places, and what is underfoot on each of them.
     // A name that is not a planet is a typo, not a planet with nothing in it, so it says so.
