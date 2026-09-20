@@ -59,6 +59,10 @@
 //   node tools/swg/cli.mjs space <swg-dir> <zone>|all <out-dir>     a space zone (space_tatooine, ..., space_light1 Kessel, space_heavy1 Deep Space,
 //                                                                  space_ord_mantell): its stations, asteroid fields, planets, sky and hyperspace points
 //   node tools/swg/cli.mjs maps <swg-dir> <out-dir>                 the client's planet map image into every converted planet pack (map.png, map.json)
+//   node tools/swg/cli.mjs sandbox <swg-dir> <out-dir> [--seed=N]   a made-up system to fly in, 250 km across, as <out-dir>/space_sandbox:
+//                                                                  a sun and a sky borrowed from a converted zone, four to six planets with real
+//                                                                  places you can fly to, asteroid fields and three jump points; nothing in it
+//                                                                  is the game's, and the pack says so
 //                                                                  as <out-dir>/<zone>, a pack the game flies through
 //   node tools/swg/cli.mjs audit <swg-dir> <out-dir> [planet] [--limit=n]   every object the archives place on each converted planet against its pack:
 //                                                                  what is missing, why (skipped kind, creature, older conversion), and where;
@@ -113,6 +117,7 @@ import { effectAlpha, alphaModeFor } from './eff.mjs';
 import { MATERIAL_FORMAT, describeLines, describeSurface, surfaceCounts, surfaceCountsLine, surfaceLine, surfaceTexture } from './surface.mjs';
 import { localize, parseDatatable, parseStringTable } from './datatable.mjs';
 import { galaxyData, galaxyStatus, SPACE_PACK_VERSION, SPACE_ZONES, spaceZoneStatus } from './space.mjs';
+import { SANDBOX_ZONE, buildSandbox, pickSkyZone, sandboxStatus } from './sandbox.mjs';
 import { mountCreatures, riderPoseFor } from './mounts.mjs';
 import { pickSaddleHardpoint, saddleEntry, saddleStatus, satHardpoints } from './saddles.mjs';
 import { assembleShip, assemblyStatus, clientChildren, expandPart, partFamilyOf, SHIP_ASSEMBLY_FORMAT } from './shipparts.mjs';
@@ -1936,6 +1941,9 @@ function packStatus(dir) {
     if (s.stale) staleSpace.push(zone);
   }
   if (staleSpace.length) need(`space <swg-dir> all ${dir} --retail-only`, `space zones missing, or converted before the nebulae, the fields and the docking lanes (${staleSpace.join(', ')})`);
+  // The made-up system, if there is one: it is optional, so it is listed rather than asked for.
+  const sandboxLine = sandboxStatus(readQuiet(join(dir, SANDBOX_ZONE, 'space.json')));
+  console.log(`  ${sandboxLine.line}${sandboxLine.stale ? ` (sandbox <swg-dir> ${dir} --retail-only builds one)` : ''}`);
   const galaxyLine = galaxyStatus(readQuiet(join(dir, 'galaxy.json')));
   console.log(`  ${galaxyLine.line}`);
   if (galaxyLine.stale) need(`maps <swg-dir> ${dir} --retail-only`, 'the galaxy map has no shuttle routes (galaxy.json)');
@@ -4865,6 +4873,123 @@ switch (cmd) {
       const pointNotes = [made && `${made} invented`, borrowed && `${borrowed} borrowed`].filter(Boolean).join(', ');
       console.log(`-> ${outDir}: ${title}, ${stations.length} station${stations.length === 1 ? '' : 's'}, ${asteroids} asteroids in ${models.size} models, ${planets.length} planets and moons${env.skybox ? `, skybox ${env.skybox}` : ', no skybox named'}, ${env.lights.length} lights, ${env.celestials.length} star sprites, ${env.stars?.count ?? 0} stars, ${env.dust?.count ?? 0} dust${scenery.length ? `, ${scenery.length} scenery` : ''}, ${nebulae.length} nebulae, ${fields.length} fields, ${Object.values(lanes).reduce((n, l) => n + l.lanes.length, 0)} docking lanes, ${points.length} hyperspace points${pointNotes ? ` (${pointNotes})` : ''}, arrival at ${arrival.kind === 'launch' ? 'launch point' : `point ${arrival.point ?? 'the origin'}`}`);
     }
+    printEffectSummary();
+    break;
+  }
+
+  case 'sandbox': {
+    // <swg-dir> <out-dir> [--seed=N]: a made-up system to fly in, written from a seed out of what
+    // is already in the archives: one space zone's sky, that zone's own planet appearances, and the
+    // asteroid field styles the real fields are scattered from. Nothing in it is the game's. Every
+    // place, size, distance and count is ours, and the pack says so: its jump points carry
+    // `source: 'invented'`, its fields `invented: true`, and a `sandbox` block names the seed it was
+    // drawn from, how far the system reaches and whose sky it borrowed.
+    if (!pos[2]) usage();
+    const vfs = mount(pos[1]);
+    const { cleanText, parseHyperspaceScene, parsePlanetAppearance, parseSpaceEnvironment, parseSpacePlanets, scatterField, warpTimings } = await import('./space.mjs');
+    const skyZone = pickSkyZone((p) => vfs.has(p));
+    if (!skyZone) {
+      console.log('sandbox: there is no space zone in the archives to borrow a sky from');
+      break;
+    }
+    const outDir = join(pos[2], SANDBOX_ZONE);
+    mkdirSync(join(outDir, 'space'), { recursive: true });
+    const table = (path) => {
+      const p = String(path ?? '').replace(/\\/g, '/');
+      return p && vfs.has(p) ? parseDatatable(parseIff(vfs.read(p))).rows : null;
+    };
+    // The jump scene and its warp effects, which every zone shares.
+    const hsScene = vfs.has('scene/hyperspace.iff') ? parseHyperspaceScene(parseIff(vfs.read('scene/hyperspace.iff'))) : null;
+    const warpFx = (p) => {
+      try {
+        return p && vfs.has(p) ? parseParticleEffect(parseIff(vfs.read(p))) : null;
+      } catch (err) {
+        console.log(`  warp effect ${p}: ${err.message}`);
+        return null;
+      }
+    };
+    const warpFile = (p) => {
+      if (!p) return null;
+      const e = convertParticle(vfs, p, outDir);
+      return e.failed ? null : (e.file ?? null);
+    };
+    const refusals = vfs.has('string/en/shared_hyperspace.stf') ? parseStringTable(vfs.read('string/en/shared_hyperspace.stf')) : new Map();
+    // The pictures the system's bodies may wear: the borrowed zone's own planet appearances. Only
+    // the surface image is taken; how big a body is and where it stands are the generator's, so the
+    // appearance's own radius is neither read nor wanted.
+    const trnRoot = parseIff(vfs.read(`terrain/${skyZone}.trn`));
+    const looks = [];
+    for (const p of parseSpacePlanets(trnRoot)) {
+      let look = null;
+      try {
+        if (vfs.has(p.appearance)) look = parsePlanetAppearance(parseIff(vfs.read(p.appearance)));
+      } catch (err) {
+        console.log(`  ${p.appearance}: ${err.message}`);
+      }
+      let texture = null;
+      const t = look ? textureFor(vfs, look.shader) : null;
+      if (t?.png) {
+        texture = `space/${basename(p.appearance).replace(/\.pln$/i, '')}.png`;
+        writeFileSync(join(outDir, texture), t.png);
+      }
+      looks.push({ appearance: p.appearance, texture });
+    }
+    // The asteroid styles the real fields use, from whichever zones the archives have.
+    const styleTables = [];
+    for (const z of Object.keys(SPACE_ZONES)) {
+      for (const row of table(`datatables/space/asteroidfield/${z}.iff`) ?? []) {
+        const p = String(row.FieldStyleTable ?? '').replace(/\\/g, '/');
+        if (p && vfs.has(p) && !styleTables.includes(p)) styleTables.push(p);
+      }
+    }
+    const models = new Map();
+    const cache = new Map();
+    const convert = (template) => {
+      const r = resolveTemplateMesh(vfs, template, cache);
+      if (r.skip || r.particle || r.skeletal) return { skip: r.skip ?? 'not a mesh' };
+      const single = r.parts.length === 1 && !r.parts[0].transform && !r.effects?.length && !r.parts[0].hardpoints?.length;
+      const id = familyOf(single ? r.parts[0].mesh : r.appearance);
+      if (!models.has(id)) {
+        try {
+          const conv = convertOne(vfs, single ? r.parts[0].mesh : r.appearance, join(outDir, `${id}.glb`));
+          const b = conv.mesh.bounds ?? { min: [0, 0, 0], max: [0, 0, 0] };
+          const bounds = conv.flipX ? { min: [-b.max[0], b.min[1], b.min[2]], max: [-b.min[0], b.max[1], b.max[2]] } : b;
+          models.set(id, { id, file: `${id}.glb`, bounds, triangles: conv.tris, ...(conv.tris ? {} : { failed: 'no triangles' }) });
+        } catch (err) {
+          models.set(id, { id, failed: err.message });
+        }
+      }
+      const def = models.get(id);
+      if (!def || def.failed) return { skip: def?.failed ?? 'failed' };
+      const bb = def.bounds;
+      // In space an object is met from every side: its radius is its whole extent.
+      return { model: id, radius: Math.max(0.5, ...bb.min.map(Math.abs), ...bb.max.map(Math.abs)) };
+    };
+    console.log(`sandbox: sky borrowed from ${skyZone}, ${looks.length} bodies to wear, ${styleTables.length} asteroid styles`);
+    const built = buildSandbox({
+      seed: options.seed ? Number(options.seed) >>> 0 : undefined,
+      skyZone,
+      planetLooks: () => looks,
+      styleTables: () => styleTables,
+      styleRows: (p) => table(p) ?? [],
+      scatter: (row, styles) => scatterField(row, styles),
+      convert,
+      models: () => [...models.values()],
+      hyperspace: () => ({
+        scene: hsScene ? { source: 'scene/hyperspace.iff', ...hsScene } : null,
+        effects: {
+          enter: warpFile(hsScene?.enter.particle),
+          exit: warpFile(hsScene?.exit.particle),
+          timing: hsScene ? warpTimings(warpFx(hsScene.enter.particle), warpFx(hsScene.exit.particle)) : null,
+        },
+        messages: { alreadyAtPoint: cleanText(refusals.get('already_at_point') ?? '') || null },
+        frameCheck: { checked: 0, sameCloser: 0, mirroredCloser: 0, meanErrorSame: 0, meanErrorMirrored: 0 },
+      }),
+      sky: (zone) => exportSky(vfs, zone, outDir, { textureFor: (p) => textureFor(vfs, p), particleFor: (p) => convertParticle(vfs, p, outDir), log: console.log, space: parseSpaceEnvironment(trnRoot) }),
+      write: (rel, text) => writeFileSync(join(outDir, rel), text),
+      log: console.log,
+    });
+    console.log(`-> ${outDir}: ${built.planets.length} planets, ${built.asteroids} asteroids in ${models.size} models, ${built.fields.length} fields, ${built.points.length} jump points, ${Math.round((built.pack.sandbox?.edge ?? 0) / 1000)} km across, drawn from seed ${built.seed} (everything in it invented)`);
     printEffectSummary();
     break;
   }

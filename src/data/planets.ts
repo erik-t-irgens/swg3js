@@ -356,6 +356,18 @@ const SYSTEMS: { id: string; system: string; name: string; tagline: string; desc
     seed: 5103,
     palette: { low: 0x1a1426, mid: 0x4a3a6a, high: 0x9a8cc0, slope: 0x1a1426, shore: 0x4a3a6a },
   },
+  {
+    // Not a place in the game at all: a system of our own to fly in, written from a seed by the
+    // converter's `sandbox` command out of what the client already has. Without that pack the zone
+    // is listed and says it is not converted, as any other unconverted zone does.
+    id: 'space_sandbox',
+    system: 'sandbox',
+    name: 'Sandbox',
+    tagline: 'A system of our own, to fly fast in',
+    description: 'A made-up system: a sun, a few planets far enough out to fly toward, and asteroid fields between them. Nothing in it is from the game; every place and size in it is ours, and it is 250 km across, which is as far as an ultra-fast cruise will carry you before it turns you round.',
+    seed: 5104,
+    palette: { low: 0x14202e, mid: 0x3f6a86, high: 0x9fc6d8, slope: 0x14202e, shore: 0x3f6a86 },
+  },
 ];
 for (const s of SYSTEMS) {
   PLANETS.push({

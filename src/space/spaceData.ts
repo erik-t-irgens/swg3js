@@ -234,6 +234,31 @@ export interface DockEffect {
   sound: string | null;
 }
 
+/**
+ * A planet or moon in a zone's sky. A retail zone's bodies are pictures with no true distance: they
+ * hang along `direction` (CLIENT frame) at the sky's own reach and cover `size` of it.
+ *
+ * A made-up system's bodies stand somewhere instead: `place: 'world'` carries `at`, the body's true
+ * middle in the GAME frame (mirrored by the converter, as the nebulae and the fields are), and
+ * `radius`, its true radius in metres, so the game can grow it as a ship closes on it. `direction`
+ * and `size` still point and size it the same way, so anything that does not know `place` draws it
+ * as a picture on the sky exactly as before.
+ */
+export interface SpaceBody {
+  appearance: string;
+  direction: number[];
+  size: number;
+  texture: string | null;
+  /** 'world' for a body that stands somewhere; absent or 'sky' for a picture hung on the sky. */
+  place?: 'sky' | 'world';
+  /** GAME frame; only with `place: 'world'`. */
+  at?: Vec3;
+  /** Metres; the appearance's own radius, or null on a body whose appearance names none. */
+  radius?: number | null;
+  /** 'invented' on a made-up system's body: nothing about it came from the client's files. */
+  source?: string;
+}
+
 export interface SpacePack {
   /** 1 for a pack converted before hyperspace (no title, arrival, scenery or hyperspace in the file). */
   version: number;
@@ -244,7 +269,7 @@ export interface SpacePack {
   title: string;
   stations: SpaceStation[];
   scenery: SpaceScenery[];
-  planets: { appearance: string; direction: number[]; size: number; texture: string | null }[];
+  planets: SpaceBody[];
   /** Null on an older pack. */
   arrival: SpaceArrival | null;
   /** Null on an older pack: nothing to jump to. */
@@ -264,6 +289,12 @@ export interface SpacePack {
   lanes?: Record<string, ModelLanes>;
   /** Version 3: what a dock plays, by the part it plays. Empty on an older pack. */
   dockEffects?: Record<string, DockEffect>;
+  /**
+   * Only on a made-up system: the seed it was drawn from, how far it reaches from its middle in
+   * metres, and which converted zone's sky it borrows. Its presence is what says "nothing in this
+   * zone is the client's", and it is what an ultra-fast cruise asks for before it will run.
+   */
+  sandbox?: { source: 'invented'; seed: number; edge: number; skyFrom: string | null } | null;
 }
 
 /** A pack as the file has it, filled out so every field of `SpacePack` is there (an older pack has fewer). */
@@ -295,6 +326,7 @@ function normalise(zone: string, raw: Partial<SpacePack> & { stations?: Partial<
     fields: Array.isArray(raw.fields) ? raw.fields : [],
     lanes: raw.lanes && typeof raw.lanes === 'object' ? raw.lanes : {},
     dockEffects: raw.dockEffects && typeof raw.dockEffects === 'object' ? raw.dockEffects : {},
+    sandbox: raw.sandbox && typeof raw.sandbox === 'object' ? raw.sandbox : null,
   };
 }
 

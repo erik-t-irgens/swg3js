@@ -167,7 +167,11 @@ ok(onTop[0] === 10 && onTop[1] === 20 && near(onTop[2], 30 + 782), 'a station on
 
 // 10. The zone lists agree.
 const spaceIds = PLANETS.filter((p) => p.space).map((p) => p.id).sort();
-ok(spaceIds.join(',') === Object.keys(SPACE_ZONES).sort().join(','), 'the game\'s space zones are the converter\'s');
+// The made-up system is the one zone that is nobody's scene in the archives, so the converter's
+// list of the client's zones does not carry it; everything else must be on both lists.
+const MADE_UP_ZONES = ['space_sandbox'];
+ok(spaceIds.filter((id) => !MADE_UP_ZONES.includes(id)).join(',') === Object.keys(SPACE_ZONES).sort().join(','), 'the game\'s space zones are the converter\'s, but for the systems we made up');
+ok(MADE_UP_ZONES.every((id) => spaceIds.includes(id)), 'and a system we made up is a zone of the game all the same');
 for (const [id, planet] of Object.entries(SPACE_ZONES)) {
   const z = PLANETS.find((p) => p.id === id)!;
   if (planet) ok(z.space === planet && planetBelow(z)?.id === planet && spaceZoneOf(planetBelow(z)!)?.id === id, `${id} is ${planet}'s orbit, both ways`);
