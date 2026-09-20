@@ -40,7 +40,7 @@ export interface ClipEvent {
   sound?: string;
   /** The pattern's index range, both ends included. */
   range?: [number, number];
-  /** How often it plays at all, 0 to 1; Jedi Academy's footsteps carry one. */
+  /** How often it plays at all, out of a hundred, in which nought means always; Jedi Academy's own carry one. */
   chance?: number;
 }
 

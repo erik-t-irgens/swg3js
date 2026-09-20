@@ -830,8 +830,9 @@ export class BodySounds {
   private playFoot(v: Voice, event: ClipEvent, clip: ActiveClip): void {
     const world = this.world;
     const chance = event.chance;
-    // Jedi Academy's own footsteps carry a chance; the game's own carry none and always land.
-    if (chance !== undefined && chance < 1 && Math.random() > chance) return;
+    // Jedi Academy's own footsteps carry a chance out of a hundred, in which nought means always;
+    // the game's own carry none and always land.
+    if (chance !== undefined && chance > 0 && Math.random() * 100 > chance) return;
     const q = this.query;
     q.x = this.foot.x;
     q.y = this.foot.y;
