@@ -250,6 +250,8 @@ export interface LoopHost {
   setGain(key: number, gain: number): void;
   setSpace(key: number, space: SoundSpace): void;
   isPlaying(key: number): boolean;
+  /** Which of the game's own rooms the ear stands in, by the interior table's room type; -1 outside. */
+  setRoom?(type: number): void;
   prepare(ids: Iterable<string>): void;
 }
 

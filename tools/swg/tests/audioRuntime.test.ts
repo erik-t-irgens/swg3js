@@ -1494,4 +1494,330 @@ const blade = {} as object;
   if (!had) delete (globalThis as unknown as { window?: unknown }).window;
 }
 
+// ---------------------------------------------------------------------------------------------
+// The room the ear is in: what a wall does to a sound heard through it, what the room's own echo
+// is sent, and what is not in the world at all. Every name this section declares is prefixed
+// `mix`, so nothing here can collide with the sections above or with one appended after it.
+// ---------------------------------------------------------------------------------------------
+{
+  const mixMade: MixNode[] = [];
+  class MixParam {
+    value: number;
+    writes = 0;
+    ramps = 0;
+    constructor(v: number) {
+      this.value = v;
+    }
+    setValueAtTime(v: number) {
+      this.value = v;
+      this.writes++;
+      return this;
+    }
+    setTargetAtTime(v: number) {
+      this.value = v;
+      this.writes++;
+      this.ramps++;
+      return this;
+    }
+    linearRampToValueAtTime(v: number) {
+      this.value = v;
+      this.writes++;
+      return this;
+    }
+    cancelScheduledValues() {
+      return this;
+    }
+  }
+  class MixNode {
+    readonly kind: string;
+    readonly outputs: MixNode[] = [];
+    constructor(kind: string) {
+      this.kind = kind;
+      mixMade.push(this);
+    }
+    connect(to: MixNode) {
+      this.outputs.push(to);
+      return to;
+    }
+    disconnect(to?: MixNode) {
+      if (!to) this.outputs.length = 0;
+      else {
+        const i = this.outputs.indexOf(to);
+        if (i >= 0) this.outputs.splice(i, 1);
+      }
+    }
+  }
+  class MixGain extends MixNode {
+    readonly gain = new MixParam(1);
+    constructor() {
+      super('gain');
+    }
+  }
+  class MixPanner extends MixNode {
+    panningModel = 'equalpower';
+    distanceModel = 'inverse';
+    refDistance = 1;
+    rolloffFactor = 1;
+    readonly positionX = new MixParam(0);
+    readonly positionY = new MixParam(0);
+    readonly positionZ = new MixParam(0);
+    constructor() {
+      super('panner');
+    }
+  }
+  class MixSource extends MixNode {
+    buffer: unknown = null;
+    readonly playbackRate = new MixParam(1);
+    onended: (() => void) | null = null;
+    started: { at: number; offset: number } | null = null;
+    constructor() {
+      super('source');
+    }
+    start(at = 0, offset = 0) {
+      this.started = { at, offset };
+    }
+    stop() {}
+  }
+  const mixBuffer = (channels: number, frames: number, rate: number) => ({
+    numberOfChannels: channels,
+    length: frames,
+    sampleRate: rate,
+    duration: frames / rate,
+    getChannelData: () => new Float32Array(frames),
+    copyToChannel: () => {},
+  });
+  const mixCtx = {
+    currentTime: 0,
+    sampleRate: 22050,
+    destination: new MixNode('destination'),
+    listener: { setPosition: () => {}, setOrientation: () => {} },
+    createGain: () => new MixGain(),
+    createPanner: () => new MixPanner(),
+    createConvolver: () => Object.assign(new MixNode('convolver'), { buffer: null as unknown }),
+    createBiquadFilter: () => Object.assign(new MixNode('filter'), { type: 'lowpass', frequency: new MixParam(0) }),
+    createBufferSource: () => new MixSource(),
+    createBuffer: (channels: number, frames: number, rate: number) => mixBuffer(channels, frames, rate),
+  };
+
+  const mixSettings: AudioSettings = { soundMaster: 1, soundAmbience: 1, soundEffects: 1, soundVoices: 1, soundFootsteps: 1, soundVehicles: 1, soundInterface: 1, soundMusic: 1, soundHeadphones: false, soundRoomEcho: true, soundInBackground: false, soundSabers: 'jka' };
+  const mix = new AudioSystem('', mixSettings);
+  mix.installOffline(mixCtx as unknown as BaseAudioContext);
+  const mixEchoes = mixMade.filter((n) => n.kind === 'convolver');
+  const mixReturns = mixMade.filter((n) => n instanceof MixGain && mixEchoes.some((c) => c.outputs.includes(n))) as MixGain[];
+  ok(mixReturns.length === 2 && mixReturns.every((g) => g.gain.value === 1), 'both echoes stand open and are fed by each voice in turn, so a voice that leaves a room rings out instead of being cut off at the doorway');
+
+  mix.bank.adopt({
+    format: 1,
+    templates: {
+      'sound/fire.snd': plain({ category: 0, dim: 3, full: 20 }),
+      'sound/bed.snd': plain({ category: 0, dim: 2, full: 8, loops: endless() }),
+      'sound/click.snd': plain({ category: 4, dim: 2, full: 8, volume: noVariation(0.9) }),
+      // The shape of the two rows of the game's own interface table that are category 2 and carry
+      // a distance: on the effects layer, and in the world unless the caller says otherwise.
+      'sound/zoom.snd': plain({ category: 2, dim: 2, full: 0.1, volume: noVariation(0.9) }),
+      'sound/loop.snd': plain({ category: 0, dim: 3, full: 20, loops: endless() }),
+      'sound/zoomloop.snd': plain({ category: 2, dim: 3, full: 20, loops: endless() }),
+    },
+  });
+  mix.bank.provide('sample/a.wav', mixBuffer(1, 11025, 22050) as unknown as AudioBuffer);
+  const mixOutside = { x: 0, y: 0, z: 0, fx: 0, fy: 0, fz: -1, ux: 0, uy: 1, uz: 0, space: { building: -1, cell: -1 } };
+  const mixRoom = { ...mixOutside, space: { building: 4, cell: 2 } };
+  /** Every send gain feeding echo `i`, newest slot last. */
+  const mixSends = (i: number) => mixMade.filter((n) => n instanceof MixGain && n.outputs.includes(mixEchoes[i])) as MixGain[];
+
+  // A fire out on the plain, with the ear out there with it: nothing is sent to either echo.
+  mix.play('sound/fire.snd', { x: 3, y: 0, z: 0, space: { building: -1, cell: -1 } });
+  mix.update(1 / 60, mixOutside);
+  ok(mixSends(0).length === 1 && mixSends(0)[0].gain.value === 0 && mixSends(1)[0].gain.value === 0, 'a sound out of doors is sent to neither echo, whatever the setting says');
+  ok((mix.status().echo as { using: number | null }).using === null, 'and the report says the ear is in no room');
+
+  // The same fire, with both it and the ear in a building the game has not named: the ordinary echo.
+  const mixFire = mixSends(0)[0];
+  const mixHall = mixSends(1)[0];
+  mix.stopAll();
+  mixCtx.currentTime = 1;
+  mix.play('sound/fire.snd', { x: 3, y: 0, z: 0, space: { building: 4, cell: 2 } });
+  mix.update(1 / 60, mixRoom);
+  ok(near(mixFire.gain.value, mix.tune.echoSend[0], 1e-6) && mixHall.gain.value === 0, "a sound standing in the ear's own room is sent to that room's echo, and to that one alone");
+
+  // Mos Eisley's cantina and the four capitol lobbies: the interior table's room type 7, the long one.
+  mix.setRoom(7);
+  mixCtx.currentTime = 1.1;
+  mix.update(1 / 60, mixRoom);
+  ok(near(mixHall.gain.value, mix.tune.echoSend[1], 1e-6) && mixFire.gain.value === 0, 'a tall hall moves the whole voice to the long echo rather than adding it to the short one');
+  ok((mix.status().echo as { room: number | null; using: number | null }).using === 1, 'and the report names which of the two is carrying the room');
+
+  // The switch the owner asked for.
+  mix.apply({ ...mixSettings, soundRoomEcho: false });
+  mixCtx.currentTime = 1.2;
+  mix.update(1 / 60, mixRoom);
+  ok(mixFire.gain.value === 0 && mixHall.gain.value === 0, 'and turning the room echo off empties both sends');
+  mix.apply(mixSettings);
+  mixCtx.currentTime = 1.25;
+  mix.update(1 / 60, mixRoom);
+
+  // The two echoes are shared by every layer and return straight to the master, so a voice's send
+  // has to carry its own layer's gain or a slider turned down would leave its echo playing.
+  mix.apply({ ...mixSettings, soundAmbience: 0.25 });
+  mixCtx.currentTime = 1.35;
+  mix.update(1 / 60, mixRoom);
+  ok(near(mixHall.gain.value, mix.tune.echoSend[1] * 0.25, 1e-6), "a layer's slider takes that layer's echo down with it, since the echoes return past the layer gains");
+  mix.apply(mixSettings);
+
+  // Heard through a wall: the muffled branch, and nothing of the room about it.
+  mixCtx.currentTime = 1.45;
+  mix.update(1 / 60, mixOutside);
+  const mixVoice = (mix.status().voices as { muffled: boolean; echo: number }[])[0];
+  ok(mixVoice.muffled && mixVoice.echo === 0, 'a sound in a room the ear has walked out of is muffled and is sent to no echo: it is not in the room any more');
+  ok(mixFire.gain.value === 0 && mixHall.gain.value === 0, 'which the sends themselves say too');
+
+  // An area bed has no place of its own: it is the sound of wherever the ear is, so the room's
+  // echo is not for it.
+  mix.stopAll();
+  mix.setRoom(22);
+  mixCtx.currentTime = 2;
+  mix.play('sound/bed.snd', { loop: true, space: mixRoom.space });
+  mix.update(1 / 60, mixRoom);
+  const mixBedSends = mixSends(0);
+  ok(mixBedSends[mixBedSends.length - 1].gain.value === 0, 'a bed, which stands wherever the ear does rather than anywhere in the room, is sent to no echo');
+
+  // The interface is not in the world at all: a click must not be heard through the wall filter
+  // because the player has stepped indoors, and must never be echoed. Played the way the game
+  // plays it, through the interface's own table, so the mark the rule reads is the real one.
+  mix.stopAll();
+  mixCtx.currentTime = 3;
+  mix.ui.attach({ backpack_open: 'sound/click.snd' });
+  ok(mix.ui.play('panelOpen'), 'the interface plays its own table');
+  mix.update(1 / 60, mixRoom);
+  const mixClick = (mix.status().voices as { id: string; gain: number; muffled: boolean; echo: number; space: string }[]).find((v) => v.id === 'sound/click.snd');
+  ok(!!mixClick && mixClick.gain === 1 && !mixClick.muffled && mixClick.echo === 0, 'an interface click is heard at its own gain inside a building, unmuffled and dry: it is not in the world');
+  ok(mixClick!.space === 'not in the world', 'and the report says so rather than leaving it looking like a sound that has lost its room');
+
+  // A slot is handed from voice to voice, and its muffling is a ramp: the one taking it over must
+  // come in at its own value outright, not slide out of the last one's over a fifth of a second.
+  mix.stopAll();
+  mixCtx.currentTime = 4;
+  mix.play('sound/fire.snd', { x: 3, y: 0, z: 0, space: { building: 9, cell: 0 } });
+  mix.update(1 / 60, mixRoom);
+  // The one slot every positional sound in this section has taken in turn, read from its panner:
+  // the dry path, the muffled path and the low-pass at the end of it.
+  const mixPan = mixMade.find((n) => n instanceof MixPanner) as MixPanner;
+  const mixMuffled = mixPan.outputs.find((o) => o instanceof MixGain && o.outputs.some((x) => x.kind === 'filter')) as MixGain;
+  const mixWall = mixMuffled.outputs.find((x) => x.kind === 'filter') as MixNode & { frequency: MixParam };
+  const mixDry = mixPan.outputs.find((o) => o instanceof MixGain && o !== mixMuffled && !mixEchoes.some((c) => o.outputs.includes(c))) as MixGain;
+  ok(near(mixMuffled.gain.value, DISTANCE_TUNE.muffleGain, 1e-6) && mixWall.frequency.value === DISTANCE_TUNE.muffleHz, 'a sound in another building goes through the low-pass at the muffling frequency');
+  ok(!!mixDry && mixDry.gain.value === 0, 'and the dry path is a node of its own, closed while it is muffled, so the two are a crossfade and not a switch');
+  mix.stopAll();
+  mixCtx.currentTime = 5;
+  const mixWrites = mixMuffled.gain.writes;
+  mix.play('sound/fire.snd', { x: 3, y: 0, z: 0, space: { building: 4, cell: 2 } });
+  mix.update(1 / 60, mixRoom);
+  ok(mixMuffled.gain.value === 0 && mixDry.gain.value === 1 && mixMuffled.gain.writes > mixWrites, "the voice that takes the slot over is written dry on the frame it starts, rather than easing out of the last voice's muffling");
+
+  // A loop coming round again is the same voice, not a new one: it must not be snapped out of a
+  // crossfade it is part way through (a bed looping while the player walks through a doorway).
+  mix.stopAll();
+  mixCtx.currentTime = 7;
+  mix.play('sound/loop.snd', { x: 3, y: 0, z: 0, space: { building: 4, cell: 2 }, loop: true });
+  mix.update(1 / 60, mixRoom);
+  const mixStarted = () => (mix.status().counts as { started: number }).started;
+  const mixLoops = mixStarted();
+  const mixSteady = mixMuffled.gain.writes + mixDry.gain.writes + mixFire.gain.writes;
+  mixCtx.currentTime = 7.6;
+  mix.update(1 / 60, mixRoom);
+  ok(mixStarted() > mixLoops, 'a loop comes round again on its own clock');
+  ok(mixMuffled.gain.writes + mixDry.gain.writes + mixFire.gain.writes === mixSteady, 'and nothing about its room is written again, because nothing about it moved');
+
+  // Headphones: the browser loads its head-related impulses the first time a panner is asked for
+  // them, so that is done once, when the setting is asked for, and not on the first shot fired.
+  const mixPanners = () => mixMade.filter((n) => n instanceof MixPanner) as MixPanner[];
+  const mixBefore = mixPanners().length;
+  ok(!(mix.status().headphones as { warmedAsked: boolean }).warmedAsked, 'nothing is warmed while the game is on speakers');
+  mix.apply({ ...mixSettings, soundHeadphones: true });
+  const mixWarm = mixPanners().slice(mixBefore);
+  ok(mixWarm.length === 1 && mixWarm[0].panningModel === 'HRTF', 'switching headphones on builds one panner of its own and asks it for the head-related model, before any voice is placed');
+  ok((mix.status().headphones as { warmedAsked: boolean; disagreeing: number }).warmedAsked, 'and the report says the warm-up has been asked for, which is as much as script can know: the browser finishes its own load');
+  mix.apply({ ...mixSettings, soundHeadphones: false });
+  mix.apply({ ...mixSettings, soundHeadphones: true });
+  ok(mixPanners().length === mixBefore + 1, 'switching it off and on again costs nothing: the impulses are loaded once for the session');
+  mixCtx.currentTime = 6;
+  mix.stopAll();
+  mix.play('sound/fire.snd', { x: 3, y: 0, z: 0, space: { building: 4, cell: 2 } });
+  mix.update(1 / 60, mixRoom);
+  ok((mix.status().headphones as { disagreeing: number }).disagreeing === 0 && mixPanners().slice(-1)[0].panningModel === 'HRTF', 'and a voice placed after the switch is placed around the head, with no slot left on the other model');
+  mix.apply(mixSettings);
+
+  // Stepping out of a room the game had named. The caller says -1, and the ear's own space still
+  // says it is in a building, so the echo stays on and goes back to the ordinary one.
+  mix.stopAll();
+  mixCtx.currentTime = 10;
+  mix.setRoom(7);
+  mix.play('sound/fire.snd', { x: 3, y: 0, z: 0, space: mixRoom.space });
+  mix.update(1 / 60, mixRoom);
+  ok((mix.status().echo as { using: number | null }).using === 1, 'a room the game has named as a tall hall takes the long echo');
+  mix.setRoom(-1);
+  mixCtx.currentTime = 10.1;
+  mix.update(1 / 60, mixRoom);
+  ok((mix.status().echo as { room: number | null; using: number | null }).room === null && (mix.status().echo as { using: number | null }).using === 0, 'and stepping out of it goes back to the ordinary one rather than staying in the hall');
+
+  // The room belongs to the world, so it goes when the world does.
+  mix.setRoom(7);
+  mix.stopAll();
+  mixCtx.currentTime = 10.2;
+  mix.update(1 / 60, mixOutside);
+  ok((mix.status().echo as { room: number | null; using: number | null }).room === null && (mix.status().echo as { using: number | null }).using === null, 'everything let go takes the room with it, so a travel out of a hall does not leave the open world ringing');
+
+  // The override the console has, for comparing the two echoes without walking to the one room
+  // that asks for the long one.
+  mix.tune.echoRoom = 7;
+  mixCtx.currentTime = 10.3;
+  mix.play('sound/fire.snd', { x: 3, y: 0, z: 0, space: { building: -1, cell: -1 } });
+  mix.update(1 / 60, mixOutside);
+  ok((mix.status().echo as { using: number | null; forcedRoom: number | null }).using === 1, 'the console can stand the ear in a tall hall wherever it is, which is how the two echoes are compared');
+  ok((mix.status().echo as { forcedRoom: number | null }).forcedRoom === 7, 'and the report says the room was forced rather than named by the game');
+  mix.tune.echoRoom = -1;
+  mix.stopAll();
+
+  // Not in the world is the caller's word, not the template's category: two rows of the game's own
+  // interface table are category 2 and carry a distance, and would go silent indoors on the old
+  // rule, which read the pool the category had put the voice in.
+  mixCtx.currentTime = 11;
+  mix.play('sound/zoom.snd', { ui: true });
+  mix.update(1 / 60, mixRoom);
+  const mixZoom = (mix.status().voices as { id: string; gain: number; muffled: boolean; echo: number; space: string }[]).find((v) => v.id === 'sound/zoom.snd');
+  ok(!!mixZoom && mixZoom.gain === 1 && !mixZoom.muffled && mixZoom.space === 'not in the world', 'an interface row that is not on the interface layer is still not in the world when the caller says so');
+  mix.stopAll();
+  mixCtx.currentTime = 11.5;
+  mix.play('sound/zoom.snd');
+  mix.update(1 / 60, mixRoom);
+  const mixZoomWorld = (mix.status().voices as { id: string; gain: number; space: string }[]).find((v) => v.id === 'sound/zoom.snd');
+  ok(!!mixZoomWorld && mixZoomWorld.gain === 0 && mixZoomWorld.space !== 'not in the world', 'and the same row played as a sound in the world is shut out by the wall, which is what the caller is saying it is not');
+
+  // The four-times-a-second path has to answer the same way, or a looping voice the caller has
+  // taken out of the world would be distance-tested after being exempted everywhere else.
+  mix.stopAll();
+  mixCtx.currentTime = 12;
+  mix.loop('sound/zoomloop.snd', { x: 900, y: 0, z: 0, space: { building: -1, cell: -1 }, ui: true });
+  mix.loop('sound/loop.snd', { x: 900, y: 0, z: 0, space: { building: -1, cell: -1 } });
+  // The grid's own beat is a quarter of a second of frames, not a jump of the clock.
+  for (let i = 0; i < 20; i++) {
+    mixCtx.currentTime = 12 + (i + 1) / 60;
+    mix.update(1 / 60, mixOutside);
+  }
+  const mixFar = mix.status().voices as { id: string; gain: number }[];
+  ok(mixFar.find((v) => v.id === 'sound/loop.snd')!.gain === 0, 'a loop nine hundred metres off is out of earshot on the grid pass');
+  ok(mixFar.find((v) => v.id === 'sound/zoomloop.snd')!.gain === 1, 'while one the caller has taken out of the world is heard at its own gain there too, the same answer the frame path gives');
+
+  // A voice played before its emitter was known and moved afterwards has a place from then on.
+  mix.stopAll();
+  mixCtx.currentTime = 13;
+  const mixLate = mix.play('sound/fire.snd', { space: mixRoom.space });
+  mix.update(1 / 60, mixRoom);
+  ok((mix.status().voices as { space: string }[])[0].space === 'no place', 'a voice played with no point stands wherever the ear does');
+  mix.move(mixLate, 3, 0, 0);
+  mixCtx.currentTime = 13.1;
+  mix.update(1 / 60, mixRoom);
+  ok((mix.status().voices as { space: string }[])[0].space === '4:2', 'and moving it to a point gives it one, so it fades with distance and can be echoed like anything else in the room');
+}
+
 console.log(`\n${passed} checks passed`);

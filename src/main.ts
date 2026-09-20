@@ -1357,7 +1357,9 @@ class App {
        * voices refused a slot, the grid's pass, the bank (templates, samples, memory) and the last
        * dozen sounds asked for with what became of each. With an object it also tunes, live:
        * `{ distance: { audible: 12 } }`, `{ voices: { positional: 24 } }`, `{ grid: { rate: 2 } }`
-       * and `{ mixer: { writeRate: 60 } }`, each merged into the invented numbers of its kind.
+       * and `{ mixer: { writeRate: 60 } }`, each merged into the invented numbers of its kind. The
+       * echo's own are in `mixer` too: `echoSend` (a pair), `echoEase`, and `echoRoom`, which
+       * stands in for the interior table's room type so the two echoes can be compared anywhere.
        */
       audio: (opts: { distance?: Record<string, number>; voices?: Record<string, number>; grid?: Record<string, number>; mixer?: Record<string, number> } = {}) => {
         if (opts.distance) Object.assign(this.audio.distance, opts.distance);

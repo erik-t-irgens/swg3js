@@ -104,6 +104,14 @@ export interface PlayOptions {
   pitch?: number;
   /** An audio-clock time to start at, to the sample: what player music will lay its parts on. */
   at?: number;
+  /**
+   * The caller saying this is not a sound in the world but one made at the ear: a panel's click, a
+   * confirmation, a warning. It takes no distance, nothing of a wall between it and the ear and
+   * nothing of the room. It is asked of the caller rather than read off the template's category,
+   * because the game's own interface table is not all of one category: two of its rows carry a
+   * distance and sit on the effects layer, and three more carry a distance while being category 4.
+   */
+  ui?: boolean;
 }
 
 export interface MixerTune {
@@ -117,13 +125,38 @@ export interface MixerTune {
   lookahead: number;
   /** INVENTED: the two room echoes' lengths in seconds (ordinary rooms, then the tall halls). */
   echo: [number, number];
+  /**
+   * INVENTED: how much of a voice standing in the listener's own room is sent to each echo. The
+   * client's own amounts are not in the archives; these are a light wash, more of it in the tall
+   * halls, and the owner has a switch that turns the whole thing off.
+   */
+  echoSend: [number, number];
+  /** INVENTED: seconds a voice takes to move between the echoes, or out of them at a doorway. */
+  echoEase: number;
+  /**
+   * Not an amount but an override, for comparing the two echoes without walking to the room that
+   * asks for the long one: below 0 the room comes from the game (`setRoom`), and any other value
+   * stands in for the interior table's own number, so 7 puts every voice in a tall hall wherever
+   * the ear is standing.
+   */
+  echoRoom: number;
   /** INVENTED: seconds a voice refused a slot waits before it asks again. */
   retry: number;
   /** INVENTED: seconds a voice that gives way fades over, so stealing one never clicks. */
   cutFade: number;
 }
 
-export const MIXER_TUNE: MixerTune = { writeRate: 30, ramp: 0.03, hideFade: 0.1, lookahead: 0.12, echo: [0.6, 1.8], retry: 0.25, cutFade: 0.008 };
+export const MIXER_TUNE: MixerTune = { writeRate: 30, ramp: 0.03, hideFade: 0.1, lookahead: 0.12, echo: [0.6, 1.8], echoSend: [0.12, 0.28], echoEase: 0.2, echoRoom: -1, retry: 0.25, cutFade: 0.008 };
+
+/**
+ * The client's room type, from the interior table's `Room Type` column. Only two values are used in
+ * the retail tables: 7 on six rows (the four capitol lobbies, Mos Eisley's cantina and one station
+ * greenhouse) and 22 on the other 259. So 7 is the long echo and everything else the short one; a
+ * room the game has not named is an ordinary room, which is right for 259 rooms out of 265.
+ */
+const TALL_HALL_ROOM = 7;
+/** No room at all: the open world, and what `setRoom` is given when the ear steps outside. */
+const NO_ROOM = -1;
 
 /**
  * The three pools' slots are numbered one after another, so a slot's nodes are found by one index
@@ -157,6 +190,16 @@ interface Slot {
   group: SoundGroup | null;
   lastGain: number;
   lastWrite: number;
+  /**
+   * The share of the last voice that went through the muffled branch and through each echo. A slot
+   * is handed from one voice to the next, and its dry, muffled and send gains are ramps: without
+   * these the sound taking a slot over would come in wearing whatever the last one left, and slide
+   * out of it over a fifth of a second.
+   */
+  lastMuffle: number;
+  lastSends: number[];
+  /** The voice the slot last sounded, so a loop coming round again is not treated as a new one. */
+  owner: number;
 }
 
 interface Playing {
@@ -169,6 +212,14 @@ interface Playing {
   y: number;
   z: number;
   flat: boolean;
+  /**
+   * Whether it was given a place at all. A bed, an interface click and a sound asked for with no
+   * point stand wherever the ear does: they take no distance and no echo, since the echo is what
+   * puts a sound in the room and they are not in it.
+   */
+  placed: boolean;
+  /** The caller said this is a sound made at the ear, not one in the world. See `PlayOptions.ui`. */
+  ui: boolean;
   space: SoundSpace;
   gain: number;
   pitch: number;
@@ -232,8 +283,12 @@ export class AudioSystem {
   private readonly finished: number[] = [];
   private settings: AudioSettings;
   private listener: ListenerPose = { x: 0, y: 0, z: 0, fx: 0, fy: 0, fz: -1, ux: 0, uy: 1, uz: 0, space: OUTSIDE };
+  /** The interior table's room type for the room the ear stands in; -1 is "not in one, or unnamed". */
+  private roomType = NO_ROOM;
   private hidden = false;
   private unlocked = false;
+  /** The browser's head-related impulses are loaded once, on the first press rather than mid-fight. */
+  private warmedPanning = false;
   private lastListenerWrite = 0;
   private lastGroupWrite = -1;
   /** Counters a hidden tab reads instead of listening. */
@@ -249,7 +304,9 @@ export class AudioSystem {
     this.bank = new SoundBank(baseUrl, { ...BANK_TUNE, ...tune });
     this.ui = new UiSounds(
       () => this.now,
-      (id) => this.play(id, { gain: 1 }) !== 0,
+      // Every row the interface plays is marked as such here, whatever category its template
+      // carries, so the "not in the world" rule follows the caller and not the data.
+      (id) => this.play(id, { gain: 1, ui: true }) !== 0,
     );
   }
 
@@ -331,13 +388,18 @@ export class AudioSystem {
       this.groups.set(g, node);
     }
     // Two room echoes, made once and never reloaded: a short one for ordinary rooms and a long one
-    // for the tall halls. Both are ours (the client's settings are not in the archives) and both
-    // stay silent until the room rule is switched on.
+    // for the tall halls. Both are ours (the client's settings are not in the archives). What
+    // reaches them is each voice's own send, which is 0 out of doors and 0 with the setting off, so
+    // the return stands open: a voice that leaves the room takes its send down and the echo rings
+    // out after it rather than being cut off at the doorway. What an idle convolver costs is a
+    // reading and not a measurement: a silent input should stay silent through the graph once the
+    // tail has run out, but nothing here has timed it, so the A and B is the sends themselves
+    // (`__debug.audio({ mixer: { echoSend: [0, 0] } })`).
     for (const seconds of this.tune.echo) {
       const conv = ctx.createConvolver();
       conv.buffer = this.impulse(seconds);
       const ret = ctx.createGain();
-      ret.gain.value = 0;
+      ret.gain.value = 1;
       conv.connect(ret);
       ret.connect(this.master);
       this.echoes.push(conv);
@@ -432,6 +494,8 @@ export class AudioSystem {
       y: options.y ?? 0,
       z: options.z ?? 0,
       flat,
+      placed: options.x !== undefined,
+      ui: options.ui ?? false,
       // The caller's space is copied, never held: one building's object handed to several voices
       // would move every one of them the first time it was written to.
       space: { building: (options.space ?? OUTSIDE).building, cell: (options.space ?? OUTSIDE).cell },
@@ -509,6 +573,10 @@ export class AudioSystem {
     p.x = x;
     p.y = y;
     p.z = z;
+    // A voice moved to a point has a place from here on, whether or not it was given one at the
+    // start: a held loop whose emitter was not known on the frame it began (a saber lit before the
+    // blade exists) would otherwise never fade with distance and never be echoed.
+    p.placed = true;
     this.grid.move(key, x, y, z);
   }
 
@@ -530,6 +598,17 @@ export class AudioSystem {
   setSpace(key: number, space: SoundSpace): void {
     const p = this.playing.get(key);
     if (p) p.space = space;
+  }
+
+  /**
+   * Which of the game's own rooms the ear stands in, by the interior table's room type: 7 for the
+   * six rows the table marks apart (the four capitol lobbies, Mos Eisley's cantina and one station
+   * greenhouse) and 22 for every other room it names. Called by whoever tracks the room; a game
+   * that never calls it still gets the ordinary echo wherever the listener's space says it is
+   * inside something, which is what 259 of the table's 265 rows ask for anyway.
+   */
+  setRoom(type: number): void {
+    this.roomType = Number.isFinite(type) ? type : NO_ROOM;
   }
 
   /**
@@ -563,6 +642,9 @@ export class AudioSystem {
     while (this.voices.length) this.release(this.voices[this.voices.length - 1]);
     this.grid.clear();
     this.budget.clear();
+    // The room goes with the world: nothing names one again until the next world tracks the ear,
+    // and a stale room type would leave the open world sounding like the hall it was left in.
+    this.roomType = NO_ROOM;
   }
 
   /** What a hidden tab reads instead of listening. */
@@ -570,9 +652,17 @@ export class AudioSystem {
     const voices: Record<string, unknown>[] = [];
     let waiting = 0;
     let gridded = 0;
+    let muffledVoices = 0;
+    let echoingVoices = 0;
+    const index = this.echoIndex();
     for (const p of this.playing.values()) {
       if (p.slot < 0 && p.loop) waiting++;
       if (p.gridded) gridded++;
+      const worldly = this.worldly(p);
+      const muffle = worldly ? muffleShare(this.listener.space, p.space) : 0;
+      const echo = worldly && p.placed && muffle <= 0 && index >= 0 ? (this.tune.echoSend[index] ?? 0) * this.groupGain(p.group) : 0;
+      if (muffle > 0) muffledVoices++;
+      if (echo > 0) echoingVoices++;
       voices.push({
         id: p.id,
         group: p.group,
@@ -584,6 +674,10 @@ export class AudioSystem {
         gain: Number(p.audible.toFixed(3)),
         distance: p.flat ? null : Number(Math.hypot(p.x - this.listener.x, p.y - this.listener.y, p.z - this.listener.z).toFixed(1)),
         starts: p.starts,
+        // Where it stands in relation to the ear's own room: through a wall, or in the room with it.
+        space: worldly ? (p.placed ? `${p.space.building}:${p.space.cell}` : 'no place') : 'not in the world',
+        muffled: muffle > 0,
+        echo: Number(echo.toFixed(3)),
       });
     }
     voices.sort((a, b) => (b.gain as number) - (a.gain as number));
@@ -593,10 +687,37 @@ export class AudioSystem {
       hidden: this.hidden,
       master: this.masterGain(),
       groups: Object.fromEntries(SOUND_GROUPS.map((g) => [g, this.groupGain(g)])),
-      // What the graph is doing rather than what the settings ask for: the room rule is not switched
-      // on yet, so the muffled path and the two echoes are built and silent, and say so.
+      // What the graph is doing rather than what the settings ask for: which model the panners that
+      // exist are really using, and what the room rule is really sending.
       panning: this.slots.find((s) => s?.pan)?.pan?.panningModel ?? (this.settings.soundHeadphones ? 'HRTF' : 'equalpower'),
-      echo: { impulses: this.echoes.length, sending: this.slots.some((s) => s?.sends.some((g) => g.gain.value > 0)) },
+      headphones: {
+        on: this.settings.soundHeadphones,
+        // A slot whose model disagrees with the setting: this must stay 0, or a voice is being
+        // placed by the wrong rule.
+        disagreeing: this.slots.filter((s) => s?.pan && s.pan.panningModel !== (this.settings.soundHeadphones ? 'HRTF' : 'equalpower')).length,
+        // The warm-up has been pushed through once this session. Whether the browser has finished
+        // loading its impulses is its own business and nothing in script can see it, so this says
+        // what was asked for and not what is done.
+        warmedAsked: this.warmedPanning,
+      },
+      // The room the ear is in and what that asks of the echoes. `room` is what the game named, and
+      // `inside` whether the ear's own space is in a building or aboard a hull; either one puts the
+      // echo on, and 7 (the tall halls) is the one that picks the long impulse.
+      echo: {
+        impulses: this.echoes.length,
+        seconds: [...this.tune.echo],
+        on: this.settings.soundRoomEcho,
+        room: this.roomType === NO_ROOM ? null : this.roomType,
+        // The console's override, when one is set: what `room` would have to be for the echo in
+        // force. Null is the ordinary case, the room coming from the game.
+        forcedRoom: this.tune.echoRoom >= 0 ? this.tune.echoRoom : null,
+        inside: this.listener.space.building >= 0,
+        using: index < 0 ? null : index,
+        send: index < 0 ? 0 : (this.tune.echoSend[index] ?? 0),
+        voices: echoingVoices,
+        sending: this.slots.some((s) => s?.sends.some((g) => g.gain.value > 0)),
+      },
+      muffledVoices,
       slotsBuilt: this.slots.filter(Boolean).length,
       categoryGain: [...this.categoryGain],
       voices: voices.slice(0, 24),
@@ -707,9 +828,45 @@ export class AudioSystem {
     for (const g of SOUND_GROUPS) this.groups.get(g)?.gain.setTargetAtTime(this.groupGain(g), ctx.currentTime, this.tune.ramp);
     // Headphones: the panners change how they place a sound, which costs a convolution a voice and
     // is a parameter, not a rebuild, so nothing is interrupted.
+    this.warmPanning();
     const model: PanningModelType = this.settings.soundHeadphones ? 'HRTF' : 'equalpower';
     for (const slot of this.slots) if (slot?.pan && slot.pan.panningModel !== model) slot.pan.panningModel = model;
     this.lastGroupWrite = -1;
+  }
+
+  /**
+   * The first panner asked to place a sound around the head makes the browser load its set of
+   * head-related impulses, which is work on the main thread and then on the audio thread. Left to
+   * happen on a voice, it would land on whichever sound the player heard first after switching the
+   * setting on -- a shot in a fight, most likely. So the moment headphones are asked for, one
+   * silent frame of sound is pushed through a panner of its own, and the load is the browser's to
+   * finish while nothing is being placed. Done once; switching back and forth costs nothing after
+   * that. Switching the setting on during play already forced the load through the loop below,
+   * which retunes every slot that exists, so what this really covers is a settings object applied
+   * at start, where no slot has been built yet. Whether the browser has finished is not something
+   * script can see: the report says the warm-up was asked for, not that it is over.
+   */
+  private warmPanning(): void {
+    const ctx = this.ctx;
+    if (!ctx || this.warmedPanning || !this.settings.soundHeadphones) return;
+    this.warmedPanning = true;
+    try {
+      const pan = ctx.createPanner();
+      pan.panningModel = 'HRTF';
+      const gain = ctx.createGain();
+      gain.gain.value = 0;
+      const src = ctx.createBufferSource();
+      src.buffer = ctx.createBuffer(1, 128, ctx.sampleRate);
+      src.connect(pan).connect(gain).connect(this.master ?? ctx.destination);
+      src.onended = () => {
+        src.disconnect();
+        pan.disconnect();
+        gain.disconnect();
+      };
+      src.start(ctx.currentTime);
+    } catch {
+      /* a context that cannot pan cannot be warmed, and nothing here may throw into a frame */
+    }
   }
 
   private writeGroups(now: number): void {
@@ -868,6 +1025,13 @@ export class AudioSystem {
     }
     slot.lastGain = gain;
     slot.lastWrite = at;
+    // The slot may have been another voice's a moment ago, and its dry, muffled and echo gains are
+    // ramps: a new voice's are written outright at the same time as its level, rather than sliding
+    // out of what the last one left. A loop of this same voice coming round again is not a new
+    // voice, and must not snap out of a crossfade it is part way through (a bed looping while the
+    // player walks through a doorway).
+    this.writeSpace(p, slot, at, slot.owner !== p.key);
+    slot.owner = p.key;
     try {
       src.start(at, offset);
     } catch {
@@ -897,8 +1061,13 @@ export class AudioSystem {
 
   /** The distance and space gain this voice would be heard at, 0 to 1. */
   private audibleOf(p: Playing): number {
+    // Not in the world: heard wherever the ear is, at the gain it was given. Without this a click
+    // is heard through the wall filter the moment the player steps into a building, and one whose
+    // row carries a distance (three of the game's own interface rows do) goes silent there, since
+    // a placeless sound with a distance is heard only in the ear's own building.
+    if (!this.worldly(p)) return 1;
     if (p.flat && p.template.full <= 0) return 1;
-    if (p.flat && p.x === 0 && p.y === 0 && p.z === 0) return p.space.building === this.listener.space.building ? 1 : 0;
+    if (p.flat && !p.placed) return p.space.building === this.listener.space.building ? 1 : 0;
     this.counts.distanceTests++;
     return this.audibleAt(p, Math.hypot(p.x - this.listener.x, p.y - this.listener.y, p.z - this.listener.z));
   }
@@ -908,6 +1077,10 @@ export class AudioSystem {
    * nothing here measures a distance of its own, which is the whole point of the grid.
    */
   private gridAudible(p: Playing): number {
+    // The same first answer as `audibleOf`, so the two paths cannot disagree about a voice that is
+    // not in the world: a looping one would otherwise be distance-tested here after being exempted
+    // everywhere else.
+    if (!this.worldly(p)) return 1;
     const s = this.grid.source(p.key);
     if (!s) return this.audibleOf(p);
     if (!this.grid.isNear(p.key)) return 0;
@@ -939,9 +1112,97 @@ export class AudioSystem {
     // Where it sits around the head. The node is given the source's world place and nothing else:
     // its own falloff is off, so the whole curve stays in `distance.ts` where a test can sweep it.
     if (slot.pan) this.place(slot.pan, p.x, p.y, p.z, now);
-    const muffle = muffleShare(this.listener.space, p.space);
-    slot.dry.gain.setTargetAtTime(1 - muffle, now, this.distance.muffleEase);
-    slot.muffled.gain.setTargetAtTime(muffle * this.distance.muffleGain, now, this.distance.muffleEase);
+    this.writeSpace(p, slot, now, false);
+  }
+
+  /**
+   * Where the voice stands in relation to the ear's own room: through the wall, or in the room with
+   * it. Both halves are ours -- whether the client muffled anything at all is not in the archives,
+   * and neither are its echo settings.
+   *
+   * - **Through a wall.** The listener inside a building and the source outside it, or the other way
+   *   round: the voice moves off the dry path onto the muffled one, which is a low-pass and a drop
+   *   in level, and sends nothing to the room's echo, since it is not in the room.
+   * - **In the room with you.** A voice that stands somewhere in the ear's own room is sent to
+   *   whichever echo that room asks for. A voice with no place of its own -- an area bed, which is
+   *   the sound of wherever the ear is -- is not: the echo is what puts a sound somewhere in a
+   *   room, and a bed is not anywhere in it. Neither is a voice the caller made at the ear.
+   *
+   * `snap` writes the values outright rather than ramping to them, which is what a slot handed to a
+   * new voice needs: the gains are ramps, and without it the new sound would come in wearing the
+   * last one's muffling and slide out of it over a fifth of a second.
+   */
+  private writeSpace(p: Playing, slot: Slot, when: number, snap: boolean): void {
+    const worldly = this.worldly(p);
+    const muffle = worldly ? muffleShare(this.listener.space, p.space) : 0;
+    if (snap || Math.abs(muffle - slot.lastMuffle) > 1e-3) {
+      const dry = 1 - muffle;
+      const wet = muffle * this.distance.muffleGain;
+      if (snap) {
+        // Outright, and with whatever the last voice left still running cancelled first: the
+        // voice giving the slot up is fading out on a node of its own and its ramps are still in
+        // the queue, so a bare write would be overtaken by them.
+        slot.dry.gain.cancelScheduledValues(when);
+        slot.muffled.gain.cancelScheduledValues(when);
+        slot.dry.gain.setValueAtTime(dry, when);
+        slot.muffled.gain.setValueAtTime(wet, when);
+      } else {
+        slot.dry.gain.setTargetAtTime(dry, when, this.distance.muffleEase);
+        slot.muffled.gain.setTargetAtTime(wet, when, this.distance.muffleEase);
+      }
+      slot.lastMuffle = muffle;
+    }
+    // Which echo this frame's room asks for, and how much of a voice standing in it goes there.
+    // The two echoes are shared by every layer and return straight to the master, so a voice's send
+    // carries its own layer's gain: without it, turning Ambience down would leave the cantina's own
+    // echo playing at full volume.
+    const index = worldly && p.placed && muffle <= 0 ? this.echoIndex() : -1;
+    const layer = this.groupGain(p.group);
+    for (let i = 0; i < slot.sends.length; i++) {
+      const want = i === index ? (this.tune.echoSend[i] ?? 0) * layer : 0;
+      if (!snap && Math.abs(want - slot.lastSends[i]) <= 1e-3) continue;
+      if (snap) {
+        slot.sends[i].gain.cancelScheduledValues(when);
+        slot.sends[i].gain.setValueAtTime(want, when);
+      } else slot.sends[i].gain.setTargetAtTime(want, when, this.tune.echoEase);
+      slot.lastSends[i] = want;
+    }
+  }
+
+  /**
+   * Whether a voice is in the world at all. A sound the caller made at the ear is not, and neither
+   * is the music bus: they are heard wherever the ear is, at the gain they were given, with no
+   * distance, no wall between them and nothing of the room about them. A click muffled through a
+   * wall because the player walked into a cantina reads as a fault in the menu.
+   *
+   * It asks the caller (`PlayOptions.ui`) rather than the template's category, because the game's
+   * own interface table is not all of one category: two of its rows are category 2 and would land
+   * on the effects layer, and three more carry a distance, which on a voice with no place of its
+   * own means "heard only in the ear's own building" -- silence the moment the player steps
+   * indoors.
+   */
+  private worldly(p: Playing): boolean {
+    return !p.ui && p.group !== 'music';
+  }
+
+  /**
+   * Which of the two room echoes the ear's own room asks for, or -1 for none: out of doors, with
+   * the setting off, or when nothing has said where the listener is. A room the game has not named
+   * is an ordinary room.
+   */
+  private echoIndex(): number {
+    if (!this.settings.soundRoomEcho) return -1;
+    const room = this.roomNow();
+    // Inside: either the game has named the room the ear is in, or the ear's own space says it is
+    // in a building or aboard a hull. Stepping outside is `setRoom(-1)` and a space of -1, so a
+    // caller that names rooms must name the open world too.
+    if (room === NO_ROOM && this.listener.space.building < 0) return -1;
+    return room === TALL_HALL_ROOM ? 1 : 0;
+  }
+
+  /** The room type in force: the console's override where it is set, and the game's otherwise. */
+  private roomNow(): number {
+    return this.tune.echoRoom >= 0 ? this.tune.echoRoom : this.roomType;
   }
 
   /** A panner's place, through its parameters where the browser has them and the old call otherwise. */
@@ -1065,7 +1326,7 @@ export class AudioSystem {
       head.connect(send).connect(conv);
       return send;
     });
-    slot = { gain, pan, head, cut, dry, muffled, filter, sends, out, group: null, lastGain: 0, lastWrite: 0 };
+    slot = { gain, pan, head, cut, dry, muffled, filter, sends, out, group: null, lastGain: 0, lastWrite: 0, lastMuffle: 0, lastSends: sends.map(() => 0), owner: 0 };
     this.slots[index] = slot;
     return slot;
   }

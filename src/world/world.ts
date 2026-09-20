@@ -3554,6 +3554,9 @@ export class World {
     ctx.rowCount = this.bedRowCount;
     ctx.daylight = this.day.daylight;
     ctx.room = this.roomRowNow();
+    // The ear's own room decides the echo: the interior table's room type, 7 in the six rooms it
+    // marks apart and 22 in every other room it names. -1 is the open world.
+    this.audio?.setRoom?.(ctx.room?.room ?? -1);
     ctx.pass = pass;
     a.update(dt, ctx);
   }

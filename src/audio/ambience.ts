@@ -28,7 +28,7 @@ export interface RoomRow {
   night: string | null;
   music: string | null;
   surface: string;
-  /** The client's room type: 7 on Mos Eisley's cantina and the four capitol lobbies, 22 elsewhere. */
+  /** The client's room type: 7 on six rows (four capitol lobbies, a cantina, a greenhouse), 22 elsewhere. */
   room: number;
 }
 
