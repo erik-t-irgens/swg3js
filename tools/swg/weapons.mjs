@@ -115,3 +115,338 @@ export function buildWeapons(templates, deps, { log = () => {}, limit = Infinity
   if (skipped.length) log(`left out: ${[...reasons.entries()].map(([w, n]) => `${n} ${w}`).join('; ')}`);
   return { weapons, skipped };
 }
+
+// ---------------------------------------------------------------------------------------------
+// The Force's own effects.
+//
+// The client has them. Under `appearance/` sit the `pt_force_*.prt` particle effects (the choke, the
+// absorb and its trigger, the armour, the feedback, the heal, the knockdown, the meditate, the
+// resists, the shield, the speeds, the throw, the weaken and its hit, the channel, and the pieces of
+// lightning); under `clienteffect/` sit the `pl_force_*.cef` files, each of which names a particle, a
+// sound, or both, in exactly the shape the guns' own effects are read in above; and the beams are
+// `.ltn` files in the LEFX format the nebulae's lightning is already read from (`nebula.mjs`,
+// `parseLightning`), which is why nothing here parses a beam itself.
+//
+// What is NOT in the archives is which of those belongs to which power: the game's power table was
+// its server's and did not ship. So everything below that is a file path is the client's, and every
+// pairing of a power to a file is ours. Each row says which of the two it is (`source`), and a row
+// whose files are not in the archives at all comes out `'none'`, so the pack never pretends the game
+// had something it has not got.
+
+/** Where the client keeps the Force's effects; a prefix each, for the archive listing. */
+export const FORCE_PATHS = {
+  particles: 'appearance/pt_force_',
+  effects: 'clienteffect/pl_force_',
+  /** The beam appearances: the lightning ladder, the choke's bolt, the drain's ray, and the rest. */
+  beams: ['appearance/force_lightning', 'appearance/pt_force_', 'appearance/pt_bolt_force_', 'appearance/pt_drain_force'],
+};
+
+/** A particle's or client effect's bare name: no folder, no `pt_force_`/`pl_force_`, no extension. */
+export function forceName(path) {
+  const base = String(path ?? '').replace(/\\/g, '/').replace(/^.*\//, '').replace(/\.[^.]+$/, '');
+  return base.replace(/^p[lt]_force_/, '');
+}
+
+/**
+ * A beam's key: its file name without the folder or the extension, and with nothing stripped, since
+ * the beams come under four different prefixes and `pt_force_throw` and the throw's own particle
+ * would otherwise want the same name.
+ */
+export function forceBeamName(path) {
+  return String(path ?? '').replace(/\\/g, '/').replace(/^.*\//, '').replace(/\.[^.]+$/, '');
+}
+
+/** Where a pack keeps a beam's picture: one per shader, since the beams share theirs. */
+export function forceBeamImage(shader) {
+  const base = String(shader ?? '').replace(/\\/g, '/').replace(/^.*\//, '').replace(/\.[^.]+$/, '');
+  return `force/${base || 'beam'}.png`;
+}
+
+/**
+ * Which of the game's effects each power wears, and where it is put. The power ids are the game's
+ * own (`src/combat/forcePowers.ts`); the files are the client's; the PAIRING is ours except where
+ * the client's own data settles it — a client effect that names the particle and the sound together
+ * for the very act the power is (the choke is the grip, the throw is the pull, the weaken is the
+ * drain, the absorb is the protect, the speed is the speed), or a beam appearance that names the
+ * effect at each of its own ends. That is what `source: 'game'` means. `'invented'` is a real effect
+ * of the client's put on a power it never named that way; `'none'` is a power the archives hold no
+ * effect for, which keeps the burst the game already draws.
+ *
+ * `parts` is ordered and each entry carries a `role` (`cast` as it fires, `hold` while it lasts,
+ * `land` where it arrives), an `at` (`hand`, `body`, `target`) and the files to try in order, the
+ * first one the archives hold winning; `beam:start` and `beam:end` stand for the effects the row's
+ * own beam names at its two ends, which is the client's answer and is always tried first. `beam`
+ * names a row of the built `beams` block, and `cef` a client effect the row takes its sound from
+ * when no part of it gives one (which is how a power with no particle at all is still heard).
+ */
+export const FORCE_POWER_FX = [
+  { power: 'jump', source: 'none', note: 'the archives hold no particle for a Force jump, only its sound', cef: 'clienteffect/pl_force_jump.cef', parts: [] },
+  {
+    power: 'speed',
+    source: 'game',
+    note: "the client's own speed effects: one as it starts, one while it runs",
+    parts: [
+      { role: 'cast', at: 'body', files: ['appearance/pt_force_speed_activate.prt'] },
+      { role: 'hold', at: 'body', files: ['appearance/pt_force_speed_moves.prt', 'appearance/pt_force_speed.prt'] },
+    ],
+  },
+  { power: 'push', source: 'none', note: 'the archives hold no particle for a Force push, only its sound', cef: 'clienteffect/pl_force_push.cef', parts: [] },
+  {
+    power: 'pull',
+    source: 'game',
+    // The client has a beam for the throw as well as a particle, and the beam names its own ends.
+    note: "the client's throw is the drag, which is what this power does; its client effect names the particle and the sound together, and it has a beam of its own",
+    beam: 'pt_force_throw',
+    parts: [{ role: 'cast', at: 'target', files: ['appearance/pt_force_throw.prt'] }],
+  },
+  {
+    power: 'lightning',
+    source: 'game',
+    // The beam appearance is the Force's own lightning and says itself what plays at each end of a
+    // bolt; the ladder of twenty-one light and dark rungs is the client's too, and taking the plain
+    // one is ours.
+    note: "the client's own lightning beam, which names the effect at each of its ends; the plain rung of the ladder is our pick out of the twenty-one",
+    beam: 'force_lightning',
+    // The lightning's own particles are under names no client effect reaches, so the sound comes
+    // from the client effect the game plays as a bolt begins.
+    cef: 'clienteffect/pl_force_lightning_begin.cef',
+    parts: [
+      { role: 'cast', at: 'hand', files: ['beam:start', 'appearance/pt_force_lightning_start.prt'] },
+      { role: 'land', at: 'target', files: ['beam:end', 'appearance/pt_force_lightning_end.prt'] },
+    ],
+  },
+  {
+    power: 'drain',
+    source: 'game',
+    note: "the client's weaken, with its own hit effect where it lands; the beam is the client's ray named for the drain",
+    beam: 'pt_drain_force',
+    parts: [
+      { role: 'hold', at: 'target', files: ['appearance/pt_force_weaken.prt'] },
+      { role: 'land', at: 'target', files: ['appearance/pt_force_weaken_hit.prt'] },
+    ],
+  },
+  {
+    power: 'grip',
+    source: 'game',
+    note: "the client's choke, whose client effect names the particle and the sound together; the beam is the client's bolt named for the choke",
+    beam: 'pt_bolt_force_choke',
+    parts: [{ role: 'hold', at: 'target', files: ['appearance/pt_force_choke.prt'] }],
+  },
+  { power: 'repulse', source: 'none', note: 'the archives hold no particle for a Force blast, only its sound', cef: 'clienteffect/pl_force_blast.cef', parts: [] },
+  { power: 'slow', source: 'none', note: 'the archives hold no particle for holding a body where it stands, only the tangle\'s sound', cef: 'clienteffect/pl_force_tangle.cef', parts: [] },
+  {
+    power: 'heal',
+    source: 'game',
+    note: "the client's heal, whose client effect names the particle and the sound together",
+    parts: [{ role: 'cast', at: 'body', files: ['appearance/pt_force_heal_self.prt'] }],
+  },
+  {
+    power: 'protect',
+    source: 'game',
+    note: "the client's absorb: the trigger on oneself as it comes on, the absorb itself where a blow lands",
+    parts: [
+      { role: 'cast', at: 'body', files: ['appearance/pt_force_absorb_trigger.prt'] },
+      { role: 'land', at: 'body', files: ['appearance/pt_force_absorb.prt'] },
+    ],
+  },
+  {
+    power: 'rage',
+    source: 'invented',
+    // Nothing in the archives is a rage: the armour is the nearest self-buff the client draws.
+    note: "the client's armour stands in for the rage, which the game has no effect of its own for",
+    parts: [{ role: 'cast', at: 'body', files: ['appearance/pt_force_armor.prt'] }],
+  },
+  { power: 'fists', source: 'none', note: 'bare hands is not a Force power and draws nothing', parts: [] },
+];
+
+/** What a pack's `powers` block is, so a reader can tell an older one apart. */
+export const FORCE_POWERS_VERSION = 1;
+
+/**
+ * Build the pack's `powers` block from the archives. Everything it reads and writes comes in through
+ * `deps`, so the shape of the block is testable without an archive anywhere near it:
+ *
+ * - `list(prefix)` every file path under that prefix (the mounted archives' own listing);
+ * - `has(path)` whether a file is there;
+ * - `particle(path)` converts a `.prt` into the pack, returning `{ file, id, attached }` or
+ *   `{ failed }` (this is `convertParticle`, which caches per pack, so asking twice is free);
+ * - `clientEffect(path)` reads a `.cef` as `{ particles, sounds }` (`parseClientEffect`);
+ * - `beam(path)` reads a `.ltn` (`parseLightning` from the nebulae's own reader);
+ * - `image(shader)` writes a beam's picture into the pack and gives its path, or null.
+ *
+ * Returns `{ version, effects, clientEffects, beams, powers, skipped, counts }`.
+ */
+export function buildForcePowers(deps, { log = () => {} } = {}) {
+  const list = (prefix) => (deps.list?.(prefix) ?? []).map((p) => String(p).replace(/\\/g, '/').toLowerCase());
+  const skipped = [];
+  const effects = {};
+  const byPath = new Map();
+
+  /** Convert one particle into the pack, once, and keep it under its bare name. */
+  const convert = (path) => {
+    const key = path.toLowerCase();
+    const had = byPath.get(key);
+    if (had) return had;
+    const r = deps.particle?.(path);
+    if (!r || r.failed) {
+      skipped.push({ file: path, why: r?.failed ?? 'no particle reader' });
+      return null;
+    }
+    const entry = { particle: path, file: r.file ?? null, carried: r.attached ?? 0, clientEffect: null, sound: null, sounds: [] };
+    effects[forceName(path)] = entry;
+    byPath.set(key, entry);
+    return entry;
+  };
+
+  // 1. Every one of the game's Force particle effects, converted into the pack.
+  for (const path of list(FORCE_PATHS.particles).filter((p) => /\.prt$/.test(p)).sort()) convert(path);
+
+  // 2. Every Force client effect, read for what it names. 26 of them pair a particle with a sound;
+  //    the rest name a sound alone, which is still worth writing down, since a power with no
+  //    particle of its own can still be heard.
+  const clientEffects = {};
+  const speaksFor = new Map(); // particle path -> { score, path, sounds }
+  for (const path of list(FORCE_PATHS.effects).filter((p) => /\.cef$/.test(p)).sort()) {
+    let cef = null;
+    try {
+      cef = deps.clientEffect?.(path) ?? null;
+    } catch {
+      cef = null;
+    }
+    if (!cef) {
+      skipped.push({ file: path, why: 'the client effect did not read' });
+      continue;
+    }
+    const particle = (cef.particles ?? [])[0] ?? null;
+    const sounds = cef.sounds ?? [];
+    clientEffects[forceName(path)] = { file: path, particle, sounds };
+    if (!particle) continue;
+    const key = particle.toLowerCase();
+    if (!byPath.has(key)) {
+      log(`  ${path}: names ${particle}, which is not one of the Force's own particles`);
+      continue;
+    }
+    // Several client effects name one particle (two name the heal, two the speed's own start), and
+    // they carry different sounds. The one that speaks for a particle is the one whose own name is
+    // the particle's, then one whose name runs into it, then the first alphabetically: keyed on the
+    // alphabet alone the speed's start would be heard as a meditation.
+    const a = forceName(path);
+    const b = forceName(particle);
+    const score = a === b ? 2 : a.startsWith(b) || b.startsWith(a) ? 1 : 0;
+    const had = speaksFor.get(key);
+    if (!had || score > had.score) speaksFor.set(key, { score, path, sounds });
+  }
+  for (const [key, chosen] of speaksFor) {
+    const e = byPath.get(key);
+    if (!e) continue;
+    e.clientEffect = chosen.path;
+    e.sound = chosen.sounds[0] ?? null;
+    e.sounds = chosen.sounds;
+  }
+
+  // 3. The beams. These are read by the nebulae's own LEFX reader, which gives the flip-book
+  //    picture, its timing, the two waveforms and the effects played at each end of a bolt; one
+  //    picture is written per shader, since the ladder of them shares its texture.
+  const beams = {};
+  const images = new Map();
+  const beamFiles = [];
+  for (const prefix of FORCE_PATHS.beams) for (const p of list(prefix)) if (/\.ltn$/.test(p) && !beamFiles.includes(p)) beamFiles.push(p);
+  beamFiles.sort();
+  for (const path of beamFiles) {
+    let ltn = null;
+    try {
+      ltn = deps.beam?.(path) ?? null;
+    } catch {
+      ltn = null;
+    }
+    if (!ltn) {
+      skipped.push({ file: path, why: 'the beam appearance did not read' });
+      continue;
+    }
+    const shader = ltn.texture?.shader ?? null;
+    if (shader && !images.has(shader)) images.set(shader, deps.image?.(shader) ?? null);
+    const tidy = (p) => (p ? p.replace(/\\/g, '/').toLowerCase() : null);
+    const at = (p) => (p ? convert(p)?.file ?? null : null);
+    beams[forceBeamName(path)] = {
+      source: path,
+      flipbook: ltn.texture ?? null,
+      texture: shader ? images.get(shader) ?? null : null,
+      waveforms: ltn.waveforms ?? [],
+      value: ltn.value ?? 0,
+      // Both the path the file names and the file we wrote for it: the first is what the beam says,
+      // the second is what the game loads.
+      startParticle: tidy(ltn.start),
+      endParticle: tidy(ltn.end),
+      start: at(tidy(ltn.start)),
+      end: at(tidy(ltn.end)),
+      trailingBytes: ltn.trailingBytes ?? 0,
+    };
+  }
+
+  // 4. The powers themselves: the table above, resolved against what the archives turned out to
+  //    hold. A row that finds nothing is written all the same and marked `none`.
+  const powers = [];
+  for (const row of FORCE_POWER_FX) {
+    const beam = row.beam && beams[row.beam] ? row.beam : null;
+    const ends = beam ? beams[beam] : null;
+    const parts = [];
+    for (const part of row.parts ?? []) {
+      // `beam:start` and `beam:end` are what the row's own beam appearance names at its two ends,
+      // which is the client's answer to "what plays where the bolt begins".
+      const files = (part.files ?? [])
+        .map((f) => (f === 'beam:start' ? ends?.startParticle : f === 'beam:end' ? ends?.endParticle : f.toLowerCase()))
+        .filter(Boolean);
+      const path = files.find((f) => byPath.has(f)) ?? files.find((f) => deps.has?.(f));
+      const e = path ? convert(path) : null;
+      parts.push({
+        role: part.role,
+        at: part.at,
+        particle: e?.particle ?? null,
+        file: e?.file ?? null,
+        sound: e?.sound ?? null,
+        sounds: e?.sounds ?? [],
+        carried: e?.carried ?? 0,
+        clientEffect: e?.clientEffect ?? null,
+        ...(e ? {} : { missing: (part.files ?? []).map((f) => (f.startsWith('beam:') ? `${row.beam}'s own ${f.slice(5)}` : f)) }),
+      });
+    }
+    const drawn = parts.filter((p) => p.file);
+    const source = row.source === 'none' || (!drawn.length && !beam) ? 'none' : row.source;
+    const note = source === 'none' && row.source !== 'none' ? `${row.note}; none of it is in these archives, so the game draws its own burst` : row.note;
+    // A power with no particle of its own is still heard: the row's own client effect names a sound.
+    let own = null;
+    if (row.cef) {
+      const c = clientEffects[forceName(row.cef)];
+      own = { file: row.cef, sounds: c?.sounds ?? [], read: !!c };
+    }
+    powers.push({ power: row.power, source, note, sound: drawn.find((p) => p.sound)?.sound ?? own?.sounds[0] ?? null, beam, parts, ...(own ? { clientEffect: own.file, sounds: own.sounds } : {}) });
+  }
+
+  const counts = {
+    particles: Object.keys(effects).length,
+    clientEffects: Object.keys(clientEffects).length,
+    paired: Object.values(clientEffects).filter((c) => c.particle && c.sounds.length).length,
+    beams: Object.keys(beams).length,
+    fromGame: powers.filter((p) => p.source === 'game').length,
+    invented: powers.filter((p) => p.source === 'invented').length,
+    none: powers.filter((p) => p.source === 'none').length,
+  };
+  log(
+    `the Force: ${counts.particles} particle effects, ${counts.clientEffects} client effects (${counts.paired} pairing a particle with a sound), ${counts.beams} beams; ` +
+      `${counts.fromGame} powers wear the game's own, ${counts.invented} wear one we chose, ${counts.none} have none${skipped.length ? `, ${skipped.length} files left out` : ''}`,
+  );
+  return { version: FORCE_POWERS_VERSION, effects, clientEffects, beams, powers, skipped, counts };
+}
+
+/** What `status` says about a pack's `powers` block, and whether it must ask for the command again. */
+export function forcePowersStatus(block) {
+  if (!block || !Array.isArray(block.powers) || !block.powers.length) return { has: false, line: 'the Force powers throw the same spark (no effects converted)' };
+  const drawn = block.powers.filter((p) => p.source !== 'none').length;
+  const beams = Object.keys(block.beams ?? {}).length;
+  const particles = Object.keys(block.effects ?? {}).length;
+  return {
+    has: true,
+    old: (block.version ?? 0) < FORCE_POWERS_VERSION,
+    line: `powers: ${drawn} of ${block.powers.length} wear the game's own effect, ${particles} particle effects, ${beams} beams`,
+  };
+}

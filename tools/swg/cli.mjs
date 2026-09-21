@@ -6,7 +6,8 @@
 //   node tools/swg/cli.mjs list <swg-dir> [filter]                list files across archives (search priority applied)
 //   node tools/swg/cli.mjs extract <swg-dir> <path-in-archive> <out-file>
 //   node tools/swg/cli.mjs dump <file.iff> | <swg-dir> <path-in-archive> [--strings] [--hex]   print an IFF tree (--strings lists every readable string in each chunk, --hex every chunk's bytes with the floats they would be)
-//   node tools/swg/cli.mjs weapons <swg-dir> <out-dir> [--limit=N] [--no-icons]   every weapon the game can hold, with its class, name, hands and picture, under <out-dir>/weapons
+//   node tools/swg/cli.mjs weapons <swg-dir> <out-dir> [--limit=N] [--no-icons]   every weapon the game can hold, with its class, name, hands and picture, under <out-dir>/weapons;
+//                                                                  also the Force's own effects (the pt_force_ particles, the pl_force_ client effects and the beam appearances) as the manifest's `powers` block
 //   node tools/swg/cli.mjs ships <swg-dir> <out-dir> [--limit=N] [--match=yacht] [--glass=<regex>]   every ship a player can fly, with its interior when it has one, under <out-dir>/ships (--match redoes those ships only; --glass=<regex> marks more shaders as glass);
 //                                                                  also the game's projectile table with every bolt and hit effect as projectiles.json,
 //                                                                  every component a hull's slots take and the droids as components.json, and the paint
@@ -146,6 +147,7 @@ import { convertSoundPlaces, placesStatus } from './soundplaces.mjs';
 import { clipEventStatus, convertClipEvents } from './clipevents.mjs';
 import { convertJkaSounds, jkaSoundStatus } from './jkasound.mjs';
 import { convertShipSounds, shipSoundStatus } from './shipsounds.mjs';
+import { forcePowersStatus } from './weapons.mjs';
 import { nameLocomotion } from './clipnames.mjs';
 import { core3MobileStats, mobileTemplates, scanServerSpawns } from './spawns.mjs';
 import { loadEffect } from './texrender.mjs';
@@ -1802,6 +1804,12 @@ function packStatus(dir) {
     console.log(`  weapons: ${weapons.weapons?.length ?? 0} on the rack, ${weapons.skipped?.length ?? 0} left out; ${items.named} named, ${items.slotted} with slots, ${items.iconed} icons, ${perSurface} of ${withFx.length} with every sound their effect names`);
     if (items.missingKeys) need(`weapons <swg-dir> ${dir} --retail-only`, 'the weapons carry no names, slots or icons (the backpack needs them)');
     else if (withFx.length && !perSurface) need(`weapons <swg-dir> ${dir} --retail-only`, 'the weapons keep one sound per effect (a bolt into water, into the ground or into nothing falls back on the plain blaster)');
+    // The Force's own effects travel in the same pack. A pack converted before them has no `powers`
+    // block at all and every power throws the same spark; an older block is asked for again too.
+    const force = forcePowersStatus(weapons.powers);
+    console.log(`  the Force: ${force.line}`);
+    if (!force.has) need(`weapons <swg-dir> ${dir} --retail-only`, 'the Force powers have none of the game\'s own effects (every power throws the same spark)');
+    else if (force.old) need(`weapons <swg-dir> ${dir} --retail-only`, 'the Force powers were converted before the beams and the sounds were written');
   }
   // The wardrobe folders (optional, as the README says): what the backpack can show of each; the to-do comes from
   // the same table the mobiles block uses, so the two can never ask for different commands.
@@ -3277,11 +3285,12 @@ switch (cmd) {
     // <swg-dir> <out-dir> [--limit=N]: every weapon the game can hold, as models under <out-dir>/weapons
     // with a manifest naming each one's class (pistol, carbine, rifle, heavy, one-hand sword, knife,
     // two-hand sword, polearm, lightsaber); the kinds the game does not play yet are listed with why.
+    // The same manifest carries the Force's own effects as its `powers` block (weapons.mjs).
     if (!pos[2]) usage();
     const vfs = mount(pos[1]);
     const outDir = join(pos[2], 'weapons');
     mkdirSync(outDir, { recursive: true });
-    const { buildWeapons, WEAPON_CLASSES } = await import('./weapons.mjs');
+    const { buildForcePowers, buildWeapons, forceBeamImage, WEAPON_CLASSES } = await import('./weapons.mjs');
     // The backpack's names, descriptions, hands and pictures (items.mjs, thumbnail.mjs); --no-icons draws none, and
     // then no texture entry carries the reduced copy the pictures are drawn from.
     const itemCaches = newItemCaches();
@@ -3427,9 +3436,43 @@ switch (cmd) {
     } catch (err) {
       console.warn('weapons: the saber palette did not read', err);
     }
-    const manifest = { classes: WEAPON_CLASSES, weapons, skipped, saberColors, effects };
+    // The Force's own effects, which are in the archives: every `appearance/pt_force_*.prt`
+    // converted, every `clienteffect/pl_force_*.cef` read for the particle and sound it names
+    // together, and the beam appearances through the nebulae's own LEFX reader. Which effect goes
+    // with which power is ours, because the game's power table was its server's; every row of the
+    // block says whether its pairing is the game's, ours, or missing from the archives entirely.
+    const { parseLightning } = await import('./nebula.mjs');
+    const beamRead = (path) => {
+      try {
+        return vfs.has(path) ? parseLightning(parseIff(vfs.read(path))) : null;
+      } catch (err) {
+        console.log(`  beam ${path}: ${err.message}`);
+        return null;
+      }
+    };
+    const beamImage = (shader) => {
+      const t = textureFor(vfs, shader);
+      if (!t?.png) return null;
+      const file = forceBeamImage(shader);
+      mkdirSync(join(outDir, dirname(file)), { recursive: true });
+      writeFileSync(join(outDir, file), t.png);
+      return file;
+    };
+    const powers = buildForcePowers(
+      {
+        list: (prefix) => vfs.list(prefix),
+        has: (path) => vfs.has(path),
+        particle: (path) => convertParticle(vfs, path, outDir),
+        clientEffect: (path) => (vfs.has(path) ? parseClientEffect(parseIff(vfs.read(path))) : null),
+        beam: beamRead,
+        image: beamImage,
+      },
+      { log: console.log },
+    );
+    const manifest = { classes: WEAPON_CLASSES, weapons, skipped, saberColors, effects, powers };
     writeFileSync(join(outDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
     console.log(`-> ${outDir}: ${weapons.length} weapons in ${models.size} models, ${skipped.length} left out (listed in manifest.json; I in game opens the rack, the Weapons tab); ${fxCache.size} weapon effect rows, ${particleCountFor(outDir)} particle effects; ${weapons.filter((w) => w.name).length} named, ${weapons.filter((w) => w.icon).length} with icons`);
+    if (powers.skipped.length) console.log(`   the Force's files left out:\n${powers.skipped.map((s) => `     ${s.file}  (${s.why})`).join('\n')}`);
     const unknown = skipped.filter((s) => /unknown|melee kind/.test(s.why));
     if (unknown.length) console.log(`   kinds without a style yet:\n${unknown.map((s) => `     ${s.template}  (${s.why})`).join('\n')}`);
     printEffectSummary();

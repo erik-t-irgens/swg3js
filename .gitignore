@@ -7,3 +7,13 @@ server/data
 .env
 *.tre
 .why
+# Anything unpacked from a game install so that it can be read on this machine is ignored
+# exactly as assets-private is: nothing derived from either install is ever committed, and a
+# `git add -A` must not be able to publish it. The folders and files below are where such
+# things have actually been dropped while working; the patterns cover the rest.
+jka-files
+*.gla
+*.pk3
+*.zip
+extras.txt
+restuss.txt
