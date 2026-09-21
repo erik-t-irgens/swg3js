@@ -74,6 +74,16 @@ export interface PeerState {
   tb?: [number, number, number, number];
   /** The figure's whole turn (aboard a banked hull, adrift in space), when a heading is not enough. */
   q?: [number, number, number, number];
+  /**
+   * Where their head is looking, up or down: one byte, the middle of it level and a step of
+   * `PITCH_WIRE` (`src/player/lookAt.ts`, which packs and unpacks it, and which no knob moves: both
+   * ends decode with their own copy, so a step one browser could widen is not an agreement at all).
+   * Left and right is the
+   * heading this state already carries, so this is the whole of the head on the wire -- a head that
+   * turns left and right but never looks up is the thing you would notice. A browser built before
+   * this sends none and its peers' heads are simply level, as they always were.
+   */
+  pt?: number;
   /** The vehicle the peer is on, when they are on one. Never sent with `in`: one or the other. */
   veh?: PeerVehicle;
   /** The hull of another player's ship the peer is in, when they are in one: it replaces `veh`. */
@@ -487,7 +497,10 @@ export class Net {
           // rather than trusted -- a far end on another build can send a hull with no place in it,
           // and a throw here would cost every message after it. A state also arrives this way from
           // the roster a server sends on joining, which no live message has been through.
-          const state: PeerState = { p: msg.p, h: msg.h ?? 0, s: msg.s ?? 'idle', v: msg.v ?? 0, m: !!msg.m, sab: !!msg.sab, q: msg.q, ...rideFields(msg.in, msg.veh), ...(msg.j === 1 ? { j: 1 as const } : {}) };
+          // The head's pitch is a byte or it is nothing: a far end on another build may send
+          // anything, and a number that is not one leaves the head level rather than throwing.
+          const pitch = typeof msg.pt === 'number' && Number.isFinite(msg.pt) ? Math.min(255, Math.max(0, Math.round(msg.pt))) : undefined;
+          const state: PeerState = { p: msg.p, h: msg.h ?? 0, s: msg.s ?? 'idle', v: msg.v ?? 0, m: !!msg.m, sab: !!msg.sab, q: msg.q, ...(pitch === undefined ? {} : { pt: pitch }), ...rideFields(msg.in, msg.veh), ...(msg.j === 1 ? { j: 1 as const } : {}) };
           if (peer) peer.state = state;
           this.onState(msg.id, state);
         }

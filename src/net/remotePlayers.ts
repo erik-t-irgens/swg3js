@@ -12,6 +12,7 @@ import { changedSlots, fitKey, type ResolvedFit, type ShipFit } from '../vehicle
 import type { ShipBuild } from '../vehicles/shipMounts';
 import type { ShipPaint } from '../vehicles/shipPaint';
 import { applyLookPrepared } from '../player/look';
+import { LOOK, unpackPitch } from '../player/lookAt.ts';
 import { weaponHolder, type WeaponCatalogue, type WeaponDef } from '../player/weapons';
 import type { FxMoverList } from '../core/fx/velocity';
 import { RELAY, stepRelayVelocity } from '../core/fx/velocityMath.ts';
@@ -90,6 +91,13 @@ interface RemoteVehicle {
   target: THREE.Vector3;
   targetQ: THREE.Quaternion;
   pose: string | null;
+  /**
+   * What the peer is doing on it: seated on a mount or in a cockpit (`ride`), standing at a bridge's
+   * controls (`pilot`), or simply aboard. The head's look reads it, because a pilot at a bridge is
+   * not seated and their state says so -- without this the one switch the owner is handed
+   * (`__debug.headLook({ ride })`) would do nothing at all for half the cases it names.
+   */
+  role: 'ride' | 'pilot' | 'aboard';
   /** Its world velocity from the relay's messages (m/s): its glide between them is not its speed. */
   vel: THREE.Vector3;
   /** performance.now() of its last message; 0 before the first. */
@@ -187,6 +195,22 @@ interface Remote {
   hp: number;
   maxHp: number;
   down: boolean;
+  /**
+   * Where their head is looking, up or down, in radians (positive looks down): the one byte their
+   * state carries, turned back into an angle here. Left and right is their heading, which the
+   * figure is already turned by, so the head's own turn off the chest is the tilt alone. A peer on
+   * an older build sends none and stays at nothing, which is a level head, as it always was.
+   */
+  headPitch: number;
+  /**
+   * Whether their head was allowed to look at all on this frame, decided in the pass that poses the
+   * figure and applied in a pass of its own after every picture has been placed. The look is built
+   * about the body's own up axis read off the figure's live world pose, and the two placement passes
+   * below are what put a passenger on a carrier's deck and a clamped hull on its carrier: read
+   * before them, a peer standing in a banking hull would have their head turned about last frame's
+   * axis.
+   */
+  lookAllowed: boolean;
   /** The colour their blade is lit in; the game's own default until their own browser says. */
   saberColor: number;
   /** Their blade when it is out of their hand: where it is in the world and how far it has spun. */
@@ -316,7 +340,7 @@ export class RemotePlayers {
     this.scene.add(group);
     markActor(group);
     const view: PeerView = { id, name: hello.name, shown: group.visible, group, rig: null, ship: null, shipBox: null, hp: 100, maxHp: 100, down: false, saber: false, saberColor: DEFAULT_PEER_SABER, hands: [], saberThrown: null, hullFrame: null };
-    const remote: Remote = { id, hello, group, rig: null, label, target: new THREE.Vector3(0, -1000, 0), heading: 0, targetQ: null, state: 'idle', speed: 0, saber: false, silent: 0, dance: null, vehicle: null, aboard: null, lookApplied: null, lookPending: null, heldApplied: null, heldModels: [], vel: new THREE.Vector3(), heardAt: 0, jumping: false, hp: 100, maxHp: 100, down: false, saberColor: DEFAULT_PEER_SABER, thrown: null, view };
+    const remote: Remote = { id, hello, group, rig: null, label, target: new THREE.Vector3(0, -1000, 0), heading: 0, targetQ: null, state: 'idle', speed: 0, saber: false, silent: 0, dance: null, vehicle: null, aboard: null, lookApplied: null, lookPending: null, heldApplied: null, heldModels: [], vel: new THREE.Vector3(), heardAt: 0, jumping: false, hp: 100, maxHp: 100, down: false, headPitch: 0, lookAllowed: false, saberColor: DEFAULT_PEER_SABER, thrown: null, view };
     this.remotes.set(id, remote);
     // Told before the rig is fetched: what hangs on a peer decides for itself how much of them it
     // needs, and a body is made on the first frame they are drawn, not here at the origin.
@@ -392,6 +416,10 @@ export class RemotePlayers {
     if (!down) {
       rig.stopOverride(0.2);
       r.dance = null;
+      // Standing up out of a held clip: the head's look is put down outright rather than eased away,
+      // because the clip that was posing the head is dropped in this same call and an eased turn
+      // would be laid on top of whatever the standing pose writes on the very next frame.
+      rig.clearLook();
       return;
     }
     this.playDeath(r, 0.08);
@@ -594,6 +622,9 @@ export class RemotePlayers {
     r.state = STATES.has(s.s) ? s.s : 'idle';
     r.speed = s.v;
     r.saber = s.sab;
+    // Where their head is looking: the byte back into an angle. A state without one leaves the head
+    // where it is rather than snapping it level, since a browser built before this never sends one.
+    if (s.pt !== undefined) r.headPitch = unpackPitch(s.pt);
     // Their blade out of their hand. Nothing here draws it; what hangs on a peer reads it off the view.
     const tb = s.tb;
     r.thrown = tb && tb.length === 4 && tb.every((v) => Number.isFinite(v)) ? { x: tb[0], y: tb[1], z: tb[2], spin: tb[3] } : null;
@@ -660,7 +691,7 @@ export class RemotePlayers {
     }
     if (!r.vehicle || r.vehicle.id !== veh.id) {
       this.dropVehicle(r);
-      const rv: RemoteVehicle = { id: veh.id, obj: null, target: new THREE.Vector3(veh.p[0], veh.p[1], veh.p[2]), targetQ: new THREE.Quaternion(veh.q[0], veh.q[1], veh.q[2], veh.q[3]), pose: veh.pose ?? null, vel: new THREE.Vector3(), heardAt: 0, wings: null, wingsWant: veh.w === 1, wingsMoved: false, landed: veh.landed === 1, dock: null, size: null, box: null, build: null, paint: null, fit: null, busy: null, want: null };
+      const rv: RemoteVehicle = { id: veh.id, obj: null, target: new THREE.Vector3(veh.p[0], veh.p[1], veh.p[2]), targetQ: new THREE.Quaternion(veh.q[0], veh.q[1], veh.q[2], veh.q[3]), pose: veh.pose ?? null, role: veh.role, vel: new THREE.Vector3(), heardAt: 0, wings: null, wingsWant: veh.w === 1, wingsMoved: false, landed: veh.landed === 1, dock: null, size: null, box: null, build: null, paint: null, fit: null, busy: null, want: null };
       r.vehicle = rv;
       void this.bringVehicle(r, rv);
     }
@@ -671,6 +702,9 @@ export class RemotePlayers {
     rv.target.set(veh.p[0], veh.p[1], veh.p[2]);
     rv.targetQ.set(veh.q[0], veh.q[1], veh.q[2], veh.q[3]).normalize();
     rv.pose = veh.pose ?? null;
+    // Seated, at a bridge's controls, or merely aboard: it can change without the hull changing (a
+    // passenger takes the controls), so it is written on every message and not only on the first.
+    rv.role = veh.role;
     // The pilot's wings as they send them; a peer on an older build sends none, and its wings open while it moves.
     rv.wingsWant = veh.w !== undefined ? veh.w === 1 : rv.vel.length() > 4;
     // Clamped onto another player's ship: kept in that ship's own frame, and placed from it each frame.
@@ -899,8 +933,11 @@ export class RemotePlayers {
       }
       const rig = r.rig;
       if (rig && r.down) {
-        // Down: the death clip holds on its last frame and nothing else is asked of the figure.
+        // Down: the death clip holds on its last frame and nothing else is asked of the figure. The
+        // head goes with it -- a body on the ground whose head goes on following its own camera is
+        // exactly the doll the look is meant to avoid -- and the look itself is applied below.
         rig.update(dt);
+        r.lookAllowed = false;
       } else if (rig) {
         // A flourish over, the dance goes on.
         if (r.dance && !rig.overriding) rig.play(r.dance, { fadeIn: 0.15, loop: true });
@@ -914,12 +951,31 @@ export class RemotePlayers {
         }
         rig.setState(rig.hasState(state) ? state : 'idle', r.speed);
         rig.update(dt);
+        // Whether their head may look at all. It goes still under anything the clip is posing the
+        // head through -- an emote, a dance, a swing that rides the upper body, a death clip -- and,
+        // unless the switch says otherwise, while they are on something they ride: seated on a mount
+        // or in a cockpit, and at a bridge's controls too, which their state does not say but the
+        // role on the hull they sent does. The look itself is applied after the placement passes.
+        const riding = state === 'seated' || rv?.role === 'pilot';
+        r.lookAllowed = !rig.overriding && (!riding || LOOK.ride > 0);
       }
     }
     if (anyDocked) this.placeDocked();
     // After the clamped pictures, never before: the hull a passenger stands in may itself be
     // clamped onto another, and its own pose is only right once that pass has put it there.
     if (anyAboard) this.placeAboard();
+    // Their heads, after both placement passes and never inside the one above: the turn is built
+    // about the body's own up axis, taken from the figure's live world pose, and a peer standing in
+    // a banking hull read before those passes would have their head turned about last frame's axis.
+    // Nothing here moves a figure, so it may safely be the last thing done to the bones.
+    for (const r of this.remotes.values()) {
+      const rig = r.rig;
+      if (!rig || !r.group.visible) continue;
+      // The tilt alone, because the figure is already turned by their heading and the head's turn is
+      // measured from the chest. A peer's rig is never given a torso twist, so there is nothing to
+      // take off; down, their head is level and eases there like everything else.
+      rig.lookToward(0, r.down ? 0 : r.headPitch, dt, r.lookAllowed);
+    }
     // Last of all: every figure and every picture is now where it is drawn this frame, which is
     // where a body of theirs belongs. A watcher told any sooner would follow a pose that the
     // clamped and the aboard passes were about to move.

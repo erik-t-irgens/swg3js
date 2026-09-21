@@ -56,6 +56,17 @@ export const COMBAT_WIRE = {
   tick: 60000,
 };
 
+/**
+ * The top of the head's pitch field on a `state`, which is simply what a byte holds. It is a shape
+ * and not a tuning, so it is **not** in `COMBAT_WIRE`: the relay maps `--set combat.<name>=<number>`
+ * straight onto that object, and `--set combat.pitch=0` would quietly pin every player's head byte
+ * to nought for the whole run, which every browser reads as a head looking hard down, with nothing
+ * anywhere saying why. What a step of the byte is worth in degrees is the browser's
+ * (`src/player/lookAt.ts`'s `PITCH_WIRE`) and is deliberately not repeated here -- the server passes
+ * a byte on and has no opinion about where anybody is looking.
+ */
+export const HEAD_PITCH_BYTE = 255;
+
 // Written as escapes, as server/groups.mjs writes the same class: the bytes themselves in a
 // source file do not survive being copied about, a lint pass, or an editor that strips them, and
 // one of them is a NUL.
@@ -174,6 +185,23 @@ export function cleanEnd(x) {
   const at = point(x.at);
   if (!at) return undefined;
   return { n: shotNumber(x.n), at };
+}
+
+/**
+ * The head's pitch as it crosses on a `state`, or undefined: a whole number inside one byte, the
+ * middle of it level. It is checked exactly as every other field is -- a browser on another build
+ * can neither send a fraction, a string nor a number outside the byte -- and it is passed on
+ * without being read: what a step is worth in degrees belongs to the browser that packed it.
+ *
+ * A state with no pitch in it (a browser built before the head followed the view) is not an error
+ * and is left alone, so a peer's head is simply level, as it always was.
+ */
+export function cleanHeadPitch(x) {
+  // A number, and nothing that merely turns into one: `null`, `true` and an empty string all read
+  // as 0 through `Number`, and a head forced level by a field that was never a pitch is a fault
+  // that would never be looked for.
+  if (typeof x !== 'number' || !Number.isFinite(x)) return undefined;
+  return Math.min(HEAD_PITCH_BYTE, Math.max(0, Math.round(x)));
 }
 
 /**

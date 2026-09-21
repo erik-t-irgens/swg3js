@@ -19,6 +19,7 @@ import { CLASH, clashes } from './combat/clash.ts';
 import { SCARS, scarReport, setScars, tuneScars } from './combat/scars.ts';
 import { gunSpeedReport, type GunSpeedTune } from './combat/guns.ts';
 import { footprints } from './world/footprints.ts';
+import { loosePropsGroup, propsDebug } from './world/looseProps.ts';
 import { saberHitReport, type SaberHitTune } from './combat/saberHit.ts';
 import { createBladeList } from './core/fx/bladeList';
 import { BLADE_GLOW_TUNE, segmentDistanceSq, type BladeGlowTune } from './core/fx/bladeGlowMath.ts';
@@ -27,6 +28,7 @@ import { SSAO_TUNE_DEFAULTS, type SsaoPass } from './core/fx/ssao';
 import { SSAO_BASE_POWER } from './core/fx/ssaoMath.ts';
 import type { FighterGlow } from './world/npcs';
 import { loadPlayerRig } from './player/rig';
+import { LOOK, lookReport, packPitch, wrapAngle } from './player/lookAt.ts';
 import { Character, loadSpeciesIndex, type SpeciesEntry } from './player/character';
 import { GalaxyMap, type Poi } from './ui/galaxyMap';
 import { MapUi } from './ui/mapUi';
@@ -261,6 +263,8 @@ interface ShipCrossing {
 const tmp2 = new THREE.Vector3();
 /** Where a thrown blade is in the world, for the state that carries it; written once a message. */
 const thrownAt = new THREE.Vector3();
+/** Where the view looks, for the head that follows it; written once a frame and never made. */
+const headLook = new THREE.Vector3();
 /** Scratch for putting a walker out of a hull another player flies: where that hull is, and what it is doing. */
 const goneAt = new THREE.Vector3();
 const goneVel = new THREE.Vector3();
@@ -1479,11 +1483,17 @@ class App {
       shadowLook: (radius?: number, intensity?: number, mapSize?: number) => this.world.setShadowLook(radius, intensity, mapSize),
       /** Retune shadows: distance is how far the cascades reach, minRadius which objects cast. Shorter reach is cheaper and sharper. */
       shadows: (distance?: number, minRadius?: number) => this.world.setShadows(distance, minRadius),
-      /** The ragdolls' numbers (springs, limits, sleep), changed live: `ragdoll({ stiffness: 80, springFade: 2 })`; no argument reads them, with every fallen body's state. */
+      /** The ragdolls' numbers (springs, limits, sleep, how a piece turns, whether a body meets its own pieces), changed live: `ragdoll({ selfCollide: true })`, `ragdoll({ inertiaBlend: 1 })`; no argument reads them, with every fallen body's state and the contact filter's counts. */
       ragdoll: (tune?: Partial<typeof RAGDOLL>) => {
         if (tune) Object.assign(RAGDOLL, tune);
         return { ...RAGDOLL, hooks: { ...this.physics.hookStats }, bodies: [...this.world.creatures.creatures.map((c) => c.ragdoll?.status ?? null), ...this.world.npcs.npcs.map((n) => n.ragdoll?.status ?? null), this.player.ragdoll?.status ?? null].filter(Boolean) };
       },
+      /**
+       * The loose props: `props()` says how many are standing, awake and asleep; `props({ sleep: 4 })`
+       * (every name in `PROPS`) moves a number live; `props({ reset: true })` stands them all back
+       * where they began. Written in `src/world/looseProps.ts` and named here, so there is one of it.
+       */
+      props: propsDebug,
       /** Kill the player (the death card and the ragdoll), every creature, or every fighter, to see them fall. */
       kill: (what: 'player' | 'creatures' | 'fighters' | 'mobiles' | 'all' = 'player', filter?: string) => {
         // `filter` is a substring of a mobile's entry id or name, a creature's name, or a fighter's species.
@@ -3021,6 +3031,15 @@ class App {
       backpack: () => this.backpack.state(),
       /** The kit a class would get, resolved against this character's catalogues; nothing is given. */
       startingKit: (cls?: ClassId) => this.equipment.kit(cls ?? this.current?.class ?? this.kit.id),
+      /**
+       * The head that looks where you look: where it has got to, in degrees, and every number it
+       * has. `headLook({ yaw: 70 })` widens the cone, `headLook({ rate: 2 })` slows the ease so it
+       * can be watched, `headLook({ ride: 1 })` lets it follow at a ship's controls (0, the default,
+       * keeps it still on anything ridden) and `headLook({ yaw: 0, pitch: 0 })` is the switch that
+       * puts the game back exactly as it was. `head.wantedPitch` is the degree that crosses to the
+       * others; `look(yaw, pitch)` above is what aims the view itself from a driven tab.
+       */
+      headLook: (tune?: Partial<typeof LOOK>) => lookReport(tune, this.player.rig?.headLook ?? null),
       /** Whether the torso is held steady over running legs while a pose rides the upper body (on by default). */
       steady: (on?: boolean) => {
         if (this.player.rig && on !== undefined) this.player.rig.steady = on;
@@ -5249,8 +5268,14 @@ class App {
     const th = p.thrown.inFlight ? thrownAt.copy(p.thrown.pos) : null;
     if (th && p.aboard) th.applyMatrix4(roomFrame(p.aboard));
     const tb = th ? ([n2(th.x), n2(th.y), n2(th.z), n3(p.thrown.spin)] as [number, number, number, number]) : undefined;
+    // Where the head is looking, up or down: one byte, the middle of it level. Left and right is the
+    // heading this message already carries. It is where the *view* looks and not where this
+    // browser's ease has got to, because the peer's own browser eases it too and easing an eased
+    // number would lag their head twice over; a frame in which the head is not looking at all
+    // (a kata, a ride, a panel) sends the middle of the byte and their head is level.
+    const pt = rig ? packPitch(rig.headLook.wantedPitch) : undefined;
     // One or the other, never both: the hull a passenger stands in is sent by whoever flies it.
-    this.net.sendState({ p: [n2(at.x), n2(at.y), n2(at.z)], h: n3(p.heading), s: p.mounted ? 'seated' : (rig?.describe().state ?? 'idle'), v: n2(Math.hypot(p.vel.x, p.vel.z)), m: !!p.mounted, sab: p.saberOn, q, ...(tb ? { tb } : {}), ...(inHull ? { in: inHull } : { veh }), ...(hidden ? { j: 1 as const } : {}) });
+    this.net.sendState({ p: [n2(at.x), n2(at.y), n2(at.z)], h: n3(p.heading), s: p.mounted ? 'seated' : (rig?.describe().state ?? 'idle'), v: n2(Math.hypot(p.vel.x, p.vel.z)), m: !!p.mounted, sab: p.saberOn, q, ...(pt === undefined ? {} : { pt }), ...(tb ? { tb } : {}), ...(inHull ? { in: inHull } : { veh }), ...(hidden ? { j: 1 as const } : {}) });
   }
 
   /** The wheel's slots from the rig's own emotes when none were kept yet, and the menu's Emotes page fed from it. */
@@ -5590,7 +5615,7 @@ class App {
     const stand = at ?? this.spawn;
     this.player.reset(stand);
     this.world.warmUp(stand);
-    this.physics.world.step();
+    this.physics.stepOnce();
     this.cam.yaw = Math.PI;
     this.hud.setPlanet(planet);
     this.map.setCurrent(planet.id, this.zone);
@@ -5748,7 +5773,7 @@ class App {
     }
     this.lastShipDef = def;
     v.launch(speed);
-    this.physics.world.step();
+    this.physics.stepOnce();
     return v;
   }
 
@@ -5960,7 +5985,7 @@ class App {
     if (p.aboard) p.placeVisual();
     else if (p.mounted) p.syncMount();
     this.world.warmUp(pose.pos);
-    this.physics.world.step();
+    this.physics.stepOnce();
     this.hud.setPlanet(planet);
     this.map.setCurrent(planet.id, this.zone);
     this.updateUrl();
@@ -6085,7 +6110,7 @@ class App {
     p.reset(pos);
     this.spawn.copy(pos);
     this.world.jumpTo(pos);
-    this.physics.world.step();
+    this.physics.stepOnce();
     await this.settle();
     this.savePlace(true);
     await this.loadingScreen.hide();
@@ -6949,6 +6974,12 @@ class App {
     if (w.creatures) for (const c of w.creatures.creatures) out.add(c.group, false, 'creature');
     if (w.npcs) for (const n of w.npcs.npcs) out.add(n.group, false, 'npc');
     if (w.mobiles) for (const m of w.mobiles.live) out.add(m.group, false, 'creature');
+    // The loose props: one group for all of them, whose root never moves and whose children do, so
+    // the classifier's "only the parts that move relative to it" branch is exactly right for them.
+    // 'vehicle' rather than a kind of their own: `FxMoverKind` has no 'prop' and a crate is the
+    // nearest thing to one of these -- a rigid thing that moves and turns as one.
+    const props = loosePropsGroup();
+    if (props) out.add(props, false, 'vehicle');
     this.remotes.collectMovers(out);
   };
 
@@ -8028,7 +8059,7 @@ class App {
         const next = this.world.useElevator(p.pos, up);
         if (!next) return false;
         p.reset(next);
-        this.physics.world.step();
+        this.physics.stepOnce();
         return true;
       };
       if (kind === 'up') tryDir(true);
@@ -8041,7 +8072,7 @@ class App {
       if (at) {
         p.pos.copy(at);
         p.vel.set(0, 0, 0);
-        this.physics.world.step();
+        this.physics.stepOnce();
       }
       return true;
     }
@@ -8077,7 +8108,7 @@ class App {
       const at = p.aboard ? p.aboard.toWorld(p.pos, liftAt) : liftAt.copy(p.pos);
       vehicleSounds.lift(stop.level > from, at.x, at.y, at.z, this.listenerPose.space);
     }
-    if (!p.aboard) this.physics.world.step();
+    if (!p.aboard) this.physics.stepOnce();
   }
 
   private handleMount(): void {
@@ -8146,7 +8177,7 @@ class App {
     if (best?.upsideDown) {
       // On its back: E turns it over rather than climbing on.
       best.rightSelf();
-      this.physics.world.step();
+      this.physics.stepOnce();
       return;
     }
     if (best) {
@@ -8850,6 +8881,33 @@ class App {
       if (player.rig) {
         player.group.visible = true;
         player.rig.setHeadHidden(this.fpHeadForce ?? this.cam.firstPerson);
+        // The head follows where the view looks (`src/player/lookAt.ts`). It is asked for here, after
+        // the physics and the camera and after the figure's own pose, so the direction is this frame's
+        // and the turn is measured from where `twistTorso` has just left the chest rather than from
+        // the body's heading -- the torso keeps Jedi Academy's own quarter-turn toward the way the
+        // legs go, and the head is a third thing beside it.
+        //
+        // It goes still, easing back at the same rate, through **any** one-off clip -- a kata, a
+        // kick, a death, an emote, a dance, and an ordinary swing riding the upper body over running
+        // legs, which is the common case in a fight and not the rare one. An upper-body clip drives
+        // the spine, the arms and the head, so a head still tracking the crosshair through one is
+        // turned on top of a pose the swing is writing, which is exactly the doll this is to avoid.
+        // It goes still too while the player is down or not being simulated at all, and -- unless
+        // `__debug.headLook({ ride: 1 })` says otherwise -- while they are on something they ride:
+        // seated on a mount or in a cockpit, and standing at a bridge's controls as well, whose
+        // pose is authored with the head where it wants it.
+        // A body whose own pieces are posing it is not a body with a head to turn: while the
+        // ragdoll has the bones the look is dropped outright rather than eased out, or a shrinking
+        // turn is laid on top of the pieces' pose for a fifth of a second after every death.
+        // `clearLook` puts a joint back only where the look itself left it, so a bone the ragdoll
+        // has already written this frame is not touched; everywhere else the ease is what is wanted.
+        const rig = player.rig;
+        this.cam.forward(headLook);
+        if (player.ragdoll) rig.clearLook();
+        else {
+          const still = rig.overriding || ((!!player.mounted || !!player.piloting) && LOOK.ride <= 0);
+          rig.lookToward(wrapAngle(Math.atan2(headLook.x, headLook.z) - player.heading), this.cam.pitch, dt, simulate && !this.dying && player.hp > 0 && !still);
+        }
       } else player.group.visible = !this.cam.firstPerson; // the primitive placeholder body, before any rig
       // Seated in a ship without a cockpit frame the game drew no pilot: the whole figure, shadow included, is hidden.
       if (player.mounted?.riderHidden) player.group.visible = false;

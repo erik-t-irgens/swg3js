@@ -8,6 +8,7 @@
 // Dependency-free, shared by the server and by tools/swg/tests/netWire.test.ts.
 
 import { cleanShip } from './shipWire.mjs';
+import { cleanHeadPitch } from './combatWire.mjs';
 import { cleanRide, quat } from './vehicleWire.mjs';
 
 /**
@@ -144,6 +145,10 @@ export function cleanState(x, self = 0) {
   };
   const q = quat(x.q);
   if (q) state.q = q;
+  // Where their head is looking, up or down: one byte, checked in `combatWire.mjs` with the rest of
+  // what the fight sends. Left and right is the heading above, so this is the whole of the head.
+  const pitch = cleanHeadPitch(x.pt);
+  if (pitch !== undefined) state.pt = pitch;
   // In a hyperspace jump: the others hide this player and their ship until a state comes without it.
   if (x.j === 1) state.j = 1;
   // Their blade out of their hand: where it is and how far it has spun, kept only when all four

@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { Character, type GripAxes } from './character';
 import { HeadHider, type HeadStatusRow } from './headHide.ts';
+import { HeadLook } from './lookAt.ts';
 import { chainPoint, clipLinks, HEAD_TO_EYE, type Quat, type Vec3 } from '../vehicles/cockpitSeat';
 import type { ActiveClip, ClipHalf } from '../audio/clipEvents.ts';
 
@@ -137,8 +138,16 @@ const IDENTITY_Q = new THREE.Quaternion();
 /** States whose legs walk or run around the standing pelvis, where a pose on the upper body is held steady. */
 const LOCOMOTION_STATES = new Set<RigState>(['walk', 'run', 'runBack', 'walkBack', 'runSaber', 'walkSaber', 'strafeLeft', 'strafeRight', 'gunWalk', 'gunRun', 'gunReadyWalk', 'gunReadyRun', 'gunAimWalk', 'gunAimRun']);
 const rootQ = new THREE.Quaternion();
+const rootInvQ = new THREE.Quaternion();
 const parentQ = new THREE.Quaternion();
 const alignQ = new THREE.Quaternion();
+/** The head's own turn, kept apart from the torso twist's temporaries: both are written in one frame. */
+const lookQ = new THREE.Quaternion();
+const lookPitchQ = new THREE.Quaternion();
+const lookAlignQ = new THREE.Quaternion();
+const lookRootQ = new THREE.Quaternion();
+const lookRootInvQ = new THREE.Quaternion();
+const lookParentQ = new THREE.Quaternion();
 const restWorld = new THREE.Vector3();
 const dirWorld = new THREE.Vector3();
 const tmpA = new THREE.Vector3();
@@ -169,6 +178,34 @@ export class CharacterRig {
   private readonly bones = new Map<string, THREE.Bone>();
   /** Each spine bone's pose before and after the torso twist, so the twist never stacks on itself. */
   private readonly twists = new Map<THREE.Bone, { clean: THREE.Quaternion; twisted: THREE.Quaternion }>();
+  /**
+   * The same pair for the two joints the head's look turns, which is the same rule one joint further
+   * up. The entries are made once per rig (two of them) and kept for its life: they are cleared of
+   * their *turn* rather than thrown away, since a head that stops looking and looks again is what
+   * happens at the end of every kata, kick, emote and death, and making four quaternions there would
+   * be four made on a live frame in the middle of a fight.
+   */
+  private readonly lookTurns = new Map<THREE.Bone, { clean: THREE.Quaternion; turned: THREE.Quaternion }>();
+  /** Whether a turn of the look is standing on those joints just now, which is what `lookTurns.size` used to say. */
+  private lookTurned = false;
+  /**
+   * How far the torso twist really turned the spine this frame, after its own clamp: what the head's
+   * look takes off before its cone, so the two never add up past what was asked for. Written by
+   * `twistTorso`, which is **not** called on every path a body can take -- adrift on foot in space
+   * the figure is posed and nothing twists the spine -- so `twistFresh` says whether what is here
+   * was written this frame. `lookToward` reads it and puts it down again, and a look that runs on a
+   * frame the twist did not measures itself from a chest with no turn in it, which is what the
+   * spine really has. Left standing, the last on-foot frame's turn (up to the clamp's 1.2 rad) would
+   * be taken off every adrift frame and the head would sit pulled to one side for as long as the
+   * player floated, with nothing to put it back.
+   */
+  private twistYaw = 0;
+  private twistPitch = 0;
+  private twistFresh = false;
+  /** Where this body's head is looking, and the ease that takes it there (`lookAt.ts`). */
+  readonly headLook = new HeadLook();
+  /** The neck and the head, found once: null once looked for and not found. */
+  private lookBones: { neck: THREE.Bone | null; head: THREE.Bone | null } | null = null;
   private readonly roles = new Map<BoneRole, THREE.Bone | null>();
   private readonly restArm = new Map<'left' | 'right', THREE.Vector3>();
   /** Bind-pose rotations of the arm bones: relative to the root (upper arms) and to the parent (forearms). */
@@ -910,11 +947,19 @@ export class CharacterRig {
    */
   twistTorso(angle: number, pitch = 0): void {
     const spines = [...this.bones.values()].filter((b) => /^spine_?[1-3]$/i.test(b.name));
+    // What the head's look measures itself from is what the spine was really given, clamp and all,
+    // and nothing at all when there is no spine to turn.
+    this.twistYaw = spines.length ? THREE.MathUtils.clamp(angle, -1.2, 1.2) : 0;
+    this.twistPitch = spines.length ? THREE.MathUtils.clamp(pitch, -0.9, 0.9) : 0;
+    // Written this frame: the look may take it off. Put down again by the look itself, so a frame
+    // that never reaches here leaves the head measuring from a chest with no turn in it.
+    this.twistFresh = true;
     if (!spines.length) return;
-    const each = THREE.MathUtils.clamp(angle, -1.2, 1.2) / spines.length;
+    const each = this.twistYaw / spines.length;
     // A tilt about the character's right axis too (positive bends forward and down), for aiming a gun where the camera looks.
-    const eachPitch = THREE.MathUtils.clamp(pitch, -0.9, 0.9) / spines.length;
+    const eachPitch = this.twistPitch / spines.length;
     this.root.getWorldQuaternion(rootQ);
+    rootInvQ.copy(rootQ).invert();
     tmpQ.setFromAxisAngle(UP_AXIS, each);
     if (eachPitch !== 0) tmpQ.multiply(pitchQ.setFromAxisAngle(RIGHT_AXIS, eachPitch));
     for (const bone of spines) {
@@ -935,12 +980,118 @@ export class CharacterRig {
       if (each !== 0 || eachPitch !== 0) {
         // A turn about the character's up axis, expressed in the bone's parent frame.
         bone.parent.getWorldQuaternion(parentQ);
-        alignQ.copy(parentQ).invert().multiply(rootQ).multiply(tmpQ).multiply(rootQ.clone().invert()).multiply(parentQ);
+        // The kept inverse, not a fresh one: this runs once per spine bone on every frame of every
+        // body in view, and a quaternion made here is a quaternion made a frame per bone.
+        alignQ.copy(parentQ).invert().multiply(rootQ).multiply(tmpQ).multiply(rootInvQ).multiply(parentQ);
         bone.quaternion.premultiply(alignQ);
       }
       twist.twisted.copy(bone.quaternion);
       bone.updateMatrixWorld(true);
     }
+  }
+
+  /**
+   * Turn the head toward where the view looks: the same pattern as the twist, one joint further up,
+   * and beside it rather than instead of it. `yaw` and `pitch` are where the view looks measured
+   * from **the body's own heading** (yaw positive to the character's left, pitch positive looking
+   * down, which is the camera's own pitch); the turn the spine was given this frame is taken off
+   * here, so the head is measured from where `twistTorso` left the chest and the two never add up
+   * past the cone. `allowed` false -- a special move, a kata, a death, an emote, a ride -- eases the
+   * whole thing back to nothing at the same rate it eased out.
+   *
+   * Call after `update()` and after `twistTorso`, with the world matrices current, exactly as the
+   * twist is called: the bone work is the same and it reads the chest the twist has just written.
+   * Allocation-free, and a rig with no head joint does nothing at all.
+   */
+  lookToward(yaw: number, pitch: number, dt: number, allowed: boolean): void {
+    const look = this.headLook;
+    // The chest's own turn, but only if something really wrote it this frame: a path that poses the
+    // body without twisting the spine (adrift on foot in space) leaves the last one standing, and
+    // subtracting a turn the spine has not got would hold the head to one side for good.
+    if (!this.twistFresh) {
+      this.twistYaw = 0;
+      this.twistPitch = 0;
+    }
+    this.twistFresh = false;
+    look.step(yaw, pitch, this.twistYaw, this.twistPitch, dt, allowed);
+    if (!this.lookBones) {
+      const neck = this.neckBone();
+      const head = this.boneFor('head');
+      // A skeleton whose head *is* the neck (nothing in the packs, but a converted model may be
+      // anything) shares nothing: the head takes the whole turn rather than twice its share.
+      this.lookBones = { neck: neck && neck !== head ? neck : null, head };
+    }
+    const { neck, head } = this.lookBones;
+    if (!head) return;
+    // Nothing to put back and nothing to turn: the frames after the look has eased out cost two
+    // comparisons, which is what lets the game leave it switched on.
+    if (look.yaw === 0 && look.pitch === 0 && !this.lookTurned) return;
+    this.root.getWorldQuaternion(lookRootQ);
+    lookRootInvQ.copy(lookRootQ).invert();
+    // The neck first: the head hangs under it, so its own parent frame is read after the neck has
+    // been turned and written.
+    if (neck) this.turnLookBone(neck, look.neckYaw, look.neckPitch);
+    this.turnLookBone(head, neck ? look.headYaw : look.yaw, neck ? look.headPitch : look.pitch);
+    // Eased all the way back and not wanted: the clean poses are on the joints again (the two calls
+    // above have just put them there), so from here the look costs two comparisons a frame until it
+    // is asked for again. The pairs themselves stay -- they are two objects for the life of the rig,
+    // and throwing them away would make four quaternions again at the end of every move.
+    this.lookTurned = !(!look.on && look.yaw === 0 && look.pitch === 0);
+  }
+
+  /**
+   * The neck joint, by name, once per rig. Exact first and only then anything carrying the word:
+   * a name search that matches loosely is a mistake this project has made before, and a skeleton
+   * with two bones carrying `neck` in their names would otherwise hand the look whichever the map
+   * happened to hold first and put two thirds of the turn on a joint that is not the neck.
+   */
+  private neckBone(): THREE.Bone | null {
+    for (const pattern of [/^neck$/i, /^neck_?\d+$/i, /^(bip01[_ ]?)?neck/i, /neck/i]) {
+      for (const [name, bone] of this.bones) if (pattern.test(name)) return bone;
+    }
+    return null;
+  }
+
+  /**
+   * One joint of the head's look. The clean/turned pair is the twist's own rule: the turn goes on
+   * top of the clip's pose and never on top of last frame's, and a joint no clip wrote this frame
+   * still holds the turned value, so the clean one is put back first.
+   */
+  private turnLookBone(bone: THREE.Bone, yaw: number, pitch: number): void {
+    const parent = bone.parent;
+    if (!parent) return;
+    let turn = this.lookTurns.get(bone);
+    if (!turn) {
+      turn = { clean: new THREE.Quaternion(), turned: new THREE.Quaternion() };
+      this.lookTurns.set(bone, turn);
+    } else if (bone.quaternion.equals(turn.turned)) bone.quaternion.copy(turn.clean);
+    turn.clean.copy(bone.quaternion);
+    if (yaw !== 0 || pitch !== 0) {
+      lookQ.setFromAxisAngle(UP_AXIS, yaw);
+      if (pitch !== 0) lookQ.multiply(lookPitchQ.setFromAxisAngle(RIGHT_AXIS, pitch));
+      // A turn about the figure's own up and right axes, expressed in the joint's parent frame, so
+      // the joint keeps its authored twist and only the look changes.
+      parent.getWorldQuaternion(lookParentQ);
+      lookAlignQ.copy(lookParentQ).invert().multiply(lookRootQ).multiply(lookQ).multiply(lookRootInvQ).multiply(lookParentQ);
+      bone.quaternion.premultiply(lookAlignQ);
+    }
+    turn.turned.copy(bone.quaternion);
+    bone.updateMatrixWorld(true);
+  }
+
+  /**
+   * Forget the head's look outright and put the joints back as the clip left them, rather than
+   * easing it away over the next fifth of a second. What needs it is a body that stops being posed
+   * by one thing and starts being posed by another with no frames in between: a peer standing up
+   * again out of the death clip (`RemotePlayers.setDown`), where the held clip is dropped in the
+   * same call. Everywhere else the ease is what is wanted, and `allowed` false is how to ask for it.
+   */
+  clearLook(): void {
+    this.headLook.reset();
+    for (const [bone, turn] of this.lookTurns) {
+      if (bone.quaternion.equals(turn.turned)) bone.quaternion.copy(turn.clean);
+    }
+    this.lookTurned = false;
   }
 
   /**
