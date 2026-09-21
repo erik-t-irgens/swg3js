@@ -640,46 +640,248 @@ export function settleEase(t: number): number {
 }
 
 /**
- * Who holds each lane. It is local today: one browser, one ship. The shape is the one a server will
- * answer with, so the call site does not change when it becomes a request -- `claim` grants or refuses,
- * and `release` gives back everything one owner holds.
+ * What a claim is for: a station's own dock lane, or the spot on a hull that one ship rides another
+ * on. They are one table because they are one question -- two players wanting the same place -- and
+ * the server answers both with the same word.
+ */
+export type SpotKind = 'dock' | 'carrier';
+
+/**
+ * INVENTED, both of them, and live through `__debug.dock({ spots: { wait: 5 } })`.
+ * - `wait`: how long a claim waits for the server's answer before it is taken as granted (s). The
+ *   answer is a round trip and the approach it starts is the better part of a minute, so waiting for
+ *   it before flying would make a dock feel broken on a slow line; the claim is flown on and a
+ *   refusal that arrives during the approach breaks it off. Nothing is ever waited on: the fallback
+ *   is the answer this browser would have given itself, which is the answer it gives when there is no
+ *   server at all. **It stops the waiting and never the hearing**: an answer that arrives after it
+ *   has run out is acted on exactly as one that arrives before, because the claim is still this
+ *   browser's and the server is still the only place the truth is. Were it otherwise, a round trip
+ *   slower than this -- or one message lost and re-sent -- would leave a hull sitting in a lane the
+ *   server had already given to somebody else, with nothing on either side ever noticing.
+ * - `forget`: how long a spot the server said was somebody else's is remembered as theirs (s). It is
+ *   what keeps the pilot from pressing straight back into the same refusal, and it is not a lease:
+ *   nothing here believes the other ship is still there, only that asking again this second would be
+ *   asking the same question twice. Once it runs out the spot is asked for again and the server
+ *   answers again, which is the only place the truth ever is.
+ */
+export const SPOT_TUNE = {
+  wait: 3,
+  forget: 30,
+};
+
+/** One claim as this browser holds it. */
+interface Claim {
+  /** The name it was made under, or '' for a spot the server says is somebody else's. */
+  by: string;
+  kind: SpotKind;
+  /** Waiting on the server's answer: granted here and not yet anywhere else. */
+  pending: boolean;
+  /** Seconds left: of the wait while it is pending, of the forgetting while it is somebody else's. */
+  left: number;
+  /** Whether the question really went out, so only what the server knows of is ever given back to it. */
+  sent: boolean;
+  /**
+   * Whether the server's word about this claim has come. It is this, and never `pending`, that makes
+   * a second word about one claim change nothing: the wait stops this browser *waiting* on an answer,
+   * not *hearing* one, so a claim whose wait has run out is still the claim the server is answering
+   * and a refusal at four seconds takes a hull off a lane exactly as one at two does.
+   */
+  answered: boolean;
+  /** Somebody else holds it. */
+  theirs: boolean;
+}
+
+/** What the claims are doing, for the report; built when it is asked for and never in a step. */
+export interface ClaimStats {
+  /** How many spots this browser holds, and how many of those are still waiting on an answer. */
+  held: number;
+  pending: number;
+  /** How many it knows to be somebody else's just now. */
+  theirs: number;
+  /** Questions put, answers granted, answers refused, and answers that had not come within the wait. */
+  asked: number;
+  granted: number;
+  refused: number;
+  timedOut: number;
+  /**
+   * How many answers arrived after their wait had run out and were acted on all the same. On a line
+   * where this is not 0, `SPOT_TUNE.wait` is shorter than the round trip and could be raised; it is
+   * counted rather than dropped, which is the whole of the fix for a slow line.
+   */
+  late: number;
+}
+
+/**
+ * Who holds each lane, and each spot on a carrier's back. Playing alone it is what it always was:
+ * one browser, one ship, the answer decided here and now. With a server holding the world the same
+ * call puts the question to it -- `ask` -- and the claim stands **pending** until the answer comes:
+ * granted here meanwhile, so the approach starts at once, and broken off by `onLost` if the answer
+ * says the spot was somebody else's. An answer that has not come within `SPOT_TUNE.wait` leaves the
+ * local answer standing and the claim open: it stops the browser waiting, never hearing, so the word
+ * is still acted on whenever it does arrive. Only an answer that never comes at all stands unsettled,
+ * and that is the game played alone.
+ *
+ * With `ask` unset -- no server address, an older relay, a dropped line -- nothing is sent, nothing
+ * is ever pending and every one of these answers exactly as it did before there was a server to ask.
  */
 export class LaneClaims {
-  private readonly held = new Map<string, string>();
+  private readonly held = new Map<string, Claim>();
+  private askedCount = 0;
+  private grantedCount = 0;
+  private refusedCount = 0;
+  private timedOutCount = 0;
+  private lateCount = 0;
+
+  /**
+   * How a claim is put to the server. It answers true when the question really went out, which is
+   * what makes the claim pending; null, or false, is this browser deciding for itself.
+   */
+  ask: ((kind: SpotKind, what: string) => boolean) | null = null;
+  /** How a claim given back is told to the server. Only ever called for one that was really asked for. */
+  give: ((kind: SpotKind, what: string) => void) | null = null;
+  /**
+   * The server says the spot is somebody else's. Whatever was started on the strength of the local
+   * answer is broken off by the caller: a ship must never sit in a lane it does not hold.
+   */
+  onLost: (what: string, by: string, why: string) => void = () => {};
 
   /** `${target}|${lane}`, the key a claim is made under. */
   static key(target: string, lane: string): string {
     return `${target}|${lane}`;
   }
 
-  /** Granted, or refused because someone else holds it. Claiming what you already hold is granted. */
-  claim(key: string, by: string): boolean {
-    const who = this.held.get(key);
-    if (who !== undefined && who !== by) return false;
-    this.held.set(key, by);
+  /**
+   * Granted, or refused because someone else holds it. Claiming what you already hold is granted,
+   * whether or not the answer to it has come back yet. With a server there, a grant is the local
+   * answer and the question goes out in the same breath.
+   */
+  claim(key: string, by: string, kind: SpotKind = 'dock'): boolean {
+    const had = this.held.get(key);
+    if (had) return had.by === by;
+    const sent = this.ask ? this.ask(kind, key) : false;
+    if (sent) this.askedCount++;
+    this.held.set(key, { by, kind, pending: sent, left: sent ? SPOT_TUNE.wait : 0, sent, answered: false, theirs: false });
     return true;
   }
 
+  /** Whoever holds it, 'elsewhere' for a spot the server says is somebody else's, or null. */
   holder(key: string): string | null {
-    return this.held.get(key) ?? null;
+    const c = this.held.get(key);
+    if (!c) return null;
+    return c.theirs ? 'elsewhere' : c.by;
   }
 
   free(key: string, by: string): boolean {
-    const who = this.held.get(key);
-    return who === undefined || who === by;
+    const c = this.held.get(key);
+    return c === undefined || (!c.theirs && c.by === by);
+  }
+
+  /** Whether a claim of ours is still waiting on the server's answer, which is what the note says. */
+  asking(key: string): boolean {
+    return this.held.get(key)?.pending === true;
+  }
+
+  /**
+   * The server's word about one spot. True when it was an answer to a question this browser really
+   * put and has not been answered before -- **whether or not the wait has run out**, since the wait
+   * is what stops this browser waiting and not what stops it hearing. A word about a spot already
+   * known to be somebody else's, about one given back since, about a claim made with no server
+   * behind it, or a second word about a claim already answered, changes nothing.
+   *
+   * `kind` is the server's own, when the caller has it: the server holds a spot under its kind as
+   * well as its name, and this is where the two are made to agree. Today's two kinds build names
+   * that cannot run into one another, but that is an accident of two unrelated key builders rather
+   * than a rule, and a kind added later whose names are plain words would otherwise have its answers
+   * land on another kind's claim. Left out, it is taken as it always was.
+   */
+  answer(what: string, granted: boolean, why = '', kind?: SpotKind): boolean {
+    const c = this.held.get(what);
+    if (!c || c.theirs || !c.sent || c.answered) return false;
+    if (kind && c.kind !== kind) return false;
+    c.answered = true;
+    // A word that came after the wait had run out is acted on all the same, and counted, so that a
+    // line slower than `SPOT_TUNE.wait` shows in the report as a number rather than as two ships in
+    // one lane that nothing ever notices.
+    if (!c.pending) this.lateCount++;
+    if (granted) {
+      c.pending = false;
+      c.left = 0;
+      this.grantedCount++;
+      return true;
+    }
+    this.refusedCount++;
+    // Written before anybody is told, so that whatever the caller does about losing it -- breaking
+    // off an approach, which gives its claims back -- cannot give back a claim that is not ours.
+    this.held.set(what, { by: '', kind: c.kind, pending: false, left: SPOT_TUNE.forget, sent: false, answered: true, theirs: true });
+    this.onLost(what, c.by, why || 'somebody else got there first');
+    return true;
+  }
+
+  /**
+   * The claims' own clock, in the step's seconds: the caller steps it where it steps the docking, so
+   * it stops while a panel is open, as the clamp's two clocks do. With nothing claimed anywhere it
+   * walks an empty table and returns.
+   */
+  tick(dt: number): void {
+    if (!this.held.size || !(dt > 0)) return;
+    for (const [key, c] of this.held) {
+      if (c.pending) {
+        c.left -= dt;
+        if (c.left > 0) continue;
+        // No answer has come yet. The local answer stands meanwhile, which is the answer this
+        // browser gives itself when there is no server at all: a dock that hangs because a message
+        // was slow would be worse than the race this is here to settle. The claim is *not* closed:
+        // it is still ours and still the server's to answer, and `answer` acts on a word that
+        // arrives after this exactly as on one that arrives before it.
+        c.pending = false;
+        c.left = 0;
+        this.timedOutCount++;
+      } else if (c.theirs) {
+        c.left -= dt;
+        if (c.left <= 0) this.held.delete(key);
+      }
+    }
   }
 
   /** Everything this owner holds, given back (a dock broken off, a ship disposed, a zone left). */
   release(by: string): void {
-    for (const [k, who] of this.held) if (who === by) this.held.delete(k);
+    for (const [key, c] of this.held) {
+      if (c.theirs || c.by !== by) continue;
+      this.held.delete(key);
+      if (c.sent) this.give?.(c.kind, key);
+    }
   }
 
   clear(): void {
+    for (const [key, c] of this.held) if (!c.theirs && c.sent) this.give?.(c.kind, key);
     this.held.clear();
   }
 
+  /** How many spots this browser holds. What the server says is somebody else's is not one of them. */
   get count(): number {
-    return this.held.size;
+    let n = 0;
+    for (const c of this.held.values()) if (!c.theirs) n++;
+    return n;
+  }
+
+  /** How many of those are still waiting on an answer. */
+  get pending(): number {
+    let n = 0;
+    for (const c of this.held.values()) if (c.pending) n++;
+    return n;
+  }
+
+  /** What the claims are doing, for `__debug.dock().spots`. */
+  stats(): ClaimStats {
+    let held = 0;
+    let pending = 0;
+    let theirs = 0;
+    for (const c of this.held.values()) {
+      if (c.theirs) theirs++;
+      else held++;
+      if (c.pending) pending++;
+    }
+    return { held, pending, theirs, asked: this.askedCount, granted: this.grantedCount, refused: this.refusedCount, timedOut: this.timedOutCount, late: this.lateCount };
   }
 }
 

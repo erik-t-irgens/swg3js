@@ -21,6 +21,7 @@ import {
   DOCK_FACE,
   DOCK_TUNE,
   LaneClaims,
+  SPOT_TUNE,
   approachRun,
   atTheDoor,
   carrierEnough,
@@ -41,7 +42,15 @@ import {
   type BoundsLike,
   type LanePlan,
   type LaneRun,
+  type SpotKind,
 } from './dockingMath.ts';
+
+/**
+ * Handed on so that whatever wires the server's answers to `spotAnswer` can name the kind without
+ * reaching past this file into the maths: the kind is half the key a spot is held under and must
+ * travel with the name the whole way.
+ */
+export type { SpotKind };
 
 /** What a dock plays, by the part of docking it belongs to; the keys the pack's `dockEffects` uses. */
 export type DockPart = 'harddock' | 'release' | 'reload' | 'repairGroup' | 'repair' | 'repairAlt';
@@ -71,16 +80,44 @@ interface DockTarget {
 
 export type DockPhase = 'idle' | 'approach' | 'settle' | 'repair' | 'docked' | 'launch';
 
+/**
+ * How a claim reaches the server, and the server's answer reaches back. The wiring hands one of these
+ * over when there is a server holding the world; with none -- no address set, the relay that came
+ * before, a line that has dropped -- it is null, nothing is ever sent, and every claim is this
+ * browser's own exactly as it was before there was anything to ask.
+ */
+export interface SpotLink {
+  /** Whether the server is holding the world just now. Asked at the moment of asking, never kept. */
+  active(): boolean;
+  /** Ask for a spot (`take`), or give one back. The answer comes back through `Docking.spotAnswer`. */
+  send(kind: SpotKind, what: string, take: boolean): void;
+}
+
 /** How long the ship's own controls are ignored after a dock is asked for (s, INVENTED: see `Docking.grace`). */
 const GRACE = 0.75;
 
 const ONE = new THREE.Vector3(1, 1, 1);
 
 export class Docking {
-  /** Who holds which lane. Local today, a server's answer later; the shape does not change. */
+  /**
+   * Who holds which lane, and which spot on a carrier's back. Playing alone it answers here and now,
+   * as it always did; with a server it puts the question and holds the claim pending until the answer
+   * comes (`spots`, below).
+   */
   readonly claims = new LaneClaims();
   /** One ship carried on another's hull: the same row asks for it, and the same step writes its pose. */
   readonly clamp: ShipClamp;
+  /**
+   * The way to the server for a claim, when there is one. Set by the wiring and null everywhere else,
+   * which is where docking is exactly what it was.
+   */
+  spotLink: SpotLink | null = null;
+  /**
+   * Something the player should read now rather than on the next press: losing the race for a dock is
+   * the only thing docking has to say that a row nobody is looking at would swallow. The message line
+   * takes it (the prompt is rewritten every frame and would never show it).
+   */
+  onNote: (text: string) => void = () => {};
   phase: DockPhase = 'idle';
   /** What the menu says under the row, and what a break-off left behind. */
   note = '';
@@ -131,7 +168,49 @@ export class Docking {
 
   constructor(world: DockWorld) {
     this.world = world;
-    this.clamp = new ShipClamp(world);
+    this.clamp = new ShipClamp(world, this.claims);
+    // The claims' three hooks, wired here so that nothing outside this file has to know there is a
+    // server at all: the call sites go on calling `claim` and `release` exactly as they did.
+    this.claims.ask = (kind, what) => {
+      const link = this.spotLink;
+      if (!link || !link.active()) return false;
+      link.send(kind, what, true);
+      return true;
+    };
+    this.claims.give = (kind, what) => {
+      const link = this.spotLink;
+      if (link && link.active()) link.send(kind, what, false);
+    };
+    this.claims.onLost = (what, by, why) => this.lostSpot(what, by, why);
+  }
+
+  /**
+   * The server's answer to a claim. `what` is the key it was made under and `kind` the kind it was
+   * made for, both of which came back with it: the server holds a spot under its world, its kind and
+   * its name, so the kind is carried the whole way rather than thrown away here. Anything this
+   * browser does not hold is ignored inside `LaneClaims`, so an answer for a zone since left or for a
+   * dock already broken off moves nothing -- but one that is merely late still lands, because the
+   * wait stops the waiting and not the hearing.
+   */
+  spotAnswer(what: string, granted: boolean, why = '', kind?: SpotKind): boolean {
+    return this.claims.answer(what, granted, why, kind);
+  }
+
+  /**
+   * A spot this browser had flown on turned out to be somebody else's. The dock is broken off where
+   * the ship stands -- a hull must never sit in a lane it does not hold -- and the pilot is told in
+   * words, because the row that carries the note may not be open and the press that would show it is
+   * the one they have already made.
+   */
+  private lostSpot(what: string, by: string, why: string): void {
+    if (this.claimed === what && this.claimedBy === by) {
+      // The break-off writes its own note and gives back everything that claim owned; the lane
+      // itself is already marked as theirs, so nothing gives back a claim that is not ours.
+      this.breakOff(why);
+      this.onNote(why);
+      return;
+    }
+    if (this.clamp.spotLost(what, why)) this.onNote(why);
   }
 
   /** In a space zone: everything here is for space, and a planet's structures have no lanes. */
@@ -332,7 +411,7 @@ export class Docking {
     if (!best) return (this.note = near.why ?? `no lane at ${target.label}`);
     const key = LaneClaims.key(target.key, best.lane);
     const by = this.owner(ship);
-    if (!this.claims.claim(key, by)) return (this.note = `lane ${best.lane} is taken`);
+    if (!this.claims.claim(key, by, 'dock')) return (this.note = `lane ${best.lane} is taken`);
     this.claimed = key;
     this.claimedBy = by;
     this.ship = ship;
@@ -344,7 +423,10 @@ export class Docking {
     this.grace = GRACE;
     this.flown = 0;
     this.phase = 'approach';
-    this.note = `flying lane ${best.lane} into ${target.label}`;
+    // The lane is flown on the answer this browser gave itself while the server's own is still on its
+    // way: the round trip is a fraction of a second and the approach is the better part of a minute,
+    // so waiting for it would make every dock feel broken. The row says which of the two it is.
+    this.note = this.claims.asking(key) ? `flying lane ${best.lane} into ${target.label} · asking for it` : `flying lane ${best.lane} into ${target.label}`;
     return this.note;
   }
 
@@ -438,6 +520,11 @@ export class Docking {
     // or not a station dock is running, and the pilot's own drive is passed through untouched (the hold
     // is what stops the hull from flying, so nothing has to take the controls away).
     this.clamp.step(dt);
+    // The claims' clock, on the step's own seconds like both of the clamp's: a claim waiting on the
+    // server and a spot known to be somebody else's both run down here and nowhere else, so they
+    // stop while a panel is open and `__debug.advance` steps them as the loop does. It walks an
+    // empty table and returns whenever nothing is claimed, which is almost always.
+    this.claims.tick(dt);
     if (this.phase === 'idle') return drive;
     // A different pack under a running dock is a travel: an identity compare, so this costs nothing a
     // frame, and the hull being flown belongs to the zone that has gone.
@@ -578,7 +665,11 @@ export class Docking {
    * (`ask`, `settle`), and only `clamp` says which is meant. A name that is the clamp's alone is taken at
    * the top level as well, so a console that reaches for `{ gap: 3 }` is not simply ignored.
    */
-  tune(patch: Partial<typeof DOCK_TUNE> & { face?: typeof DOCK_FACE.rule; clamp?: Partial<typeof CLAMP_TUNE>; allow?: boolean } = {}): Record<string, unknown> {
+  tune(patch: Partial<typeof DOCK_TUNE> & { face?: typeof DOCK_FACE.rule; clamp?: Partial<typeof CLAMP_TUNE>; spots?: Partial<typeof SPOT_TUNE>; allow?: boolean } = {}): Record<string, unknown> {
+    for (const k of Object.keys(SPOT_TUNE) as (keyof typeof SPOT_TUNE)[]) {
+      const n = patch.spots?.[k];
+      if (typeof n === 'number' && Number.isFinite(n)) SPOT_TUNE[k] = Math.max(0, n);
+    }
     for (const k of Object.keys(DOCK_TUNE) as (keyof typeof DOCK_TUNE)[]) {
       const n = patch[k];
       if (typeof n === 'number' && Number.isFinite(n)) DOCK_TUNE[k] = n;
@@ -614,6 +705,10 @@ export class Docking {
       ghosted: this.ship?.ghosted ?? false,
       ours: { held: this.heldByUs, ghosted: this.ghostedByUs },
       claims: this.claims.count,
+      // Whether a claim is with the server at all, and what has become of the ones that were: with no
+      // link every one of these is a local answer and `asked` stays 0, which is the one number that
+      // says docking is running exactly as it does alone.
+      spots: { link: this.spotLink && this.spotLink.active() ? 'server' : 'none', ...this.claims.stats(), tune: { ...SPOT_TUNE } },
       targets: this.list().map((c) => ({ at: c.label, model: c.object.model, lanes: c.lanes.map((l) => ({ lane: l.lane, in: l.in.map((w) => w.points.length), out: l.out.map((w) => w.points.length), radius: n2(l.radius), bare: l.bare })) })),
       face: DOCK_FACE.rule,
       tune: { ...DOCK_TUNE },
@@ -836,6 +931,22 @@ const CLAMP_UP = new THREE.Vector3(0, 1, 0);
 const CLAMP_ONE = new THREE.Vector3(1, 1, 1);
 const STILL_V = new THREE.Vector3();
 
+/**
+ * The name a clamp's claims are made under. One browser clamps one ship at a time -- `dock` refuses
+ * outright while anything is carried, letting go or waiting -- so there is one owner and it needs no
+ * counter of its own, unlike the station's, which names the hull because a lane is claimed per ship.
+ */
+const CLAMP_OWNER = 'clamp';
+
+/**
+ * The spot on one hull's back, as the server keys it: the connection of whoever flies it. Every
+ * browser but that pilot's own knows their ship by that number, and the pilot never asks for room on
+ * their own hull, so the two sides of a race name the same spot without anything being sent about it.
+ */
+function carrierSpot(id: number): string {
+  return LaneClaims.key('carrier', String(id));
+}
+
 export class ShipClamp {
   /** The other players, for a clamp onto their ship; null in a browser playing alone. */
   peers: ClampPeers | null = null;
@@ -846,8 +957,13 @@ export class ShipClamp {
   private carried: Carried | null = null;
   /** A hull let go of, still ghosted until it is clear of the carrier it was on. */
   private letting: { ship: Vehicle; on: ClampOn } | null = null;
-  /** A request to another player's pilot, waiting for their answer, and the hull it was asked for. */
-  private waiting: { to: number; left: number; ship: Vehicle } | null = null;
+  /**
+   * A request to another player's pilot, waiting for their answer, and the hull it was asked for.
+   * While `asking` is set the word has **not** gone out yet: the spot on that hull's back is still
+   * pending with the server, and the request waits for it (see `dock`). `label` is what to call the
+   * hull in the row when it does go out.
+   */
+  private waiting: { to: number; left: number; ship: Vehicle; asking: boolean; label: string } | null = null;
   /** A request from another player, waiting for this pilot's answer, and the hull they asked for room on. */
   private asked: { from: number; name: string; left: number; ship: Vehicle } | null = null;
   /**
@@ -883,9 +999,16 @@ export class ShipClamp {
   private readonly rel = new THREE.Matrix4();
   private readonly relPos = new THREE.Vector3();
   private readonly relQ = new THREE.Quaternion();
+  /**
+   * The same table the station's lanes are claimed in: one hull's back is a place two ships can want
+   * at once exactly as a dock is, and one table means one answer. It is the docking's own, handed in
+   * rather than made here, because the server answers both kinds through the one link.
+   */
+  private readonly claims: LaneClaims;
 
-  constructor(world: DockWorld) {
+  constructor(world: DockWorld, claims: LaneClaims = new LaneClaims()) {
     this.world = world;
+    this.claims = claims;
   }
 
   /** The hull being carried, or being let go of; null when nothing is. */
@@ -1086,8 +1209,20 @@ export class ShipClamp {
     if (near.on.kind === 'peer') {
       const link = this.link;
       if (!link || !link.id()) return (this.note = 'their ship is not ours to dock onto while offline');
+      // One ship to a hull's back, and **one** race for it. The spot is claimed first; the word to
+      // their pilot waits until that claim has stopped being pending, because their pilot decides by
+      // arrival order -- one request at a time, the next refused outright -- and a spot the server
+      // gave to one ship while their pilot's single slot held the other would turn both away, each
+      // refused by a different judge. Waiting here makes the server the only judge: whoever it grants
+      // the spot to is the only one who asks at all. It costs at most `SPOT_TUNE.wait`, against a
+      // request that stands for `CLAMP_TUNE.lapse`, and the clock below runs from the press either
+      // way. Playing alone the claim is never pending, the word goes out in this same call, and this
+      // is exactly the local answer it always was.
+      if (!this.claims.claim(carrierSpot(near.on.id), CLAMP_OWNER, 'carrier')) return (this.note = `another ship is already coming aboard ${near.label}`);
+      const asking = this.claims.asking(carrierSpot(near.on.id));
+      this.waiting = { to: near.on.id, left: CLAMP_TUNE.lapse, ship, asking, label: near.label };
+      if (asking) return (this.note = `asking for room on ${near.label}`);
       link.send(near.on.id, 'dock');
-      this.waiting = { to: near.on.id, left: CLAMP_TUNE.lapse, ship };
       return (this.note = `asked ${near.label} for room`);
     }
     return this.begin(ship, near.on, near.label);
@@ -1123,6 +1258,9 @@ export class ShipClamp {
     if (!c) return (this.note = 'not docked onto anything');
     this.carried = null;
     const ship = c.ship;
+    // The spot goes back the moment this hull lets go of it, not when it is clear: what the next ship
+    // needs to know is that nobody is being eased onto that back any more.
+    this.claims.release(CLAMP_OWNER);
     if (c.on.kind === 'peer') this.link?.send(c.on.id, 'undock');
     if (ship.disposed) return (this.note = 'the ship is gone');
     // The carrier's own velocity is what the hull was travelling at, and the push is along the carrier's
@@ -1167,10 +1305,22 @@ export class ShipClamp {
     const waiting = this.waiting;
     if (waiting) {
       waiting.left -= dt;
-      if (waiting.ship.disposed) this.waiting = null;
-      else if (waiting.left <= 0) {
+      // Either way the spot goes back: a hull nobody is coming aboard is a hull the next ship may ask
+      // for, and a claim left standing on a request that lapsed would hold it for the rest of the zone.
+      if (waiting.ship.disposed) {
         this.waiting = null;
+        this.claims.release(CLAMP_OWNER);
+      } else if (waiting.left <= 0) {
+        this.waiting = null;
+        this.claims.release(CLAMP_OWNER);
         this.note = 'no answer came';
+      } else if (waiting.asking && !this.claims.asking(carrierSpot(waiting.to))) {
+        // The spot is settled -- granted, or the wait ran out and this browser's own answer stands --
+        // so their pilot can be asked now, and is the only one asking. A refusal never reaches here:
+        // `spotLost` takes the request down before a word has gone anywhere.
+        waiting.asking = false;
+        this.link?.send(waiting.to, 'dock');
+        this.note = `asked ${waiting.label} for room`;
       }
     }
     const letting = this.letting;
@@ -1191,6 +1341,7 @@ export class ShipClamp {
     const ship = c.ship;
     if (ship.disposed) {
       this.carried = null;
+      this.claims.release(CLAMP_OWNER);
       this.note = 'the ship is gone';
       return;
     }
@@ -1198,6 +1349,7 @@ export class ShipClamp {
     // anything reads a body that is not there any more, and let the hull fall free where it stood.
     if (!this.carrierFrame(c.on, dt, CLAMP_TUNE.lead)) {
       this.carried = null;
+      this.claims.release(CLAMP_OWNER);
       ship.release(null);
       ship.setGhost(false);
       this.note = 'the ship it was docked onto is gone';
@@ -1375,6 +1527,7 @@ export class ShipClamp {
     if (word === 'refuse') {
       if (this.waiting?.to === from) {
         this.waiting = null;
+        this.claims.release(CLAMP_OWNER);
         this.note = 'they said no';
       }
       return;
@@ -1395,6 +1548,8 @@ export class ShipClamp {
       const near = this.offer(ship);
       if (why || !near || near.on.kind !== 'peer' || near.on.id !== from) {
         this.link?.send(from, 'undock');
+        // Nothing is coming aboard after all, so the spot goes back with the word that says so.
+        this.claims.release(CLAMP_OWNER);
         this.note = why ?? 'too far off their hull by the time they answered';
         return;
       }
@@ -1403,6 +1558,13 @@ export class ShipClamp {
     }
     // 'undock': the carrier's pilot has nothing to give back here; the ship that was on it lets itself go.
     this.allowed.delete(from);
+    // It is also how a ship withdraws a request it has already made (the server gave that hull's back
+    // to somebody else after the asking word had gone out). Answering a dead request would hold this
+    // pilot's one slot against the ship that really has the spot.
+    if (this.asked?.from === from) {
+      this.asked = null;
+      this.note = 'they did not need the room after all';
+    }
     if (this.carried?.on.kind === 'peer' && this.carried.on.id === from) this.undock();
   }
 
@@ -1419,6 +1581,33 @@ export class ShipClamp {
     return { to: c.on.id, p: [n3(c.local.x), n3(c.local.y), n3(c.local.z)], q: [n3(c.quat.x), n3(c.quat.y), n3(c.quat.z), n3(c.quat.w)] };
   }
 
+  /**
+   * A spot on a hull's back this browser had asked for, or was riding, turned out to be somebody
+   * else's. True when it was one of ours, which is what says the pilot should be told in words.
+   */
+  spotLost(what: string, why: string): boolean {
+    const c = this.carried;
+    if (c && c.on.kind === 'peer' && carrierSpot(c.on.id) === what) {
+      // Already aboard, and it was never ours to be aboard: let go, which tells their pilot too.
+      this.undock();
+      this.note = why;
+      return true;
+    }
+    const w = this.waiting;
+    if (w && carrierSpot(w.to) === what) {
+      this.waiting = null;
+      this.claims.release(CLAMP_OWNER);
+      // A request still waiting on the spot has said nothing to anybody, so there is nothing to take
+      // back. One that had already gone out -- the wait ran out, the word went, and the refusal came
+      // in afterwards -- is withdrawn, or their pilot would answer a request that is already dead and
+      // hold their own hull's back against the ship the server really gave it to.
+      if (!w.asking) this.link?.send(w.to, 'undock');
+      this.note = why;
+      return true;
+    }
+    return false;
+  }
+
   /** A zone left, or the game put down: whatever is held is let go and nothing is remembered. */
   leave(): void {
     if (this.carried) this.undock();
@@ -1429,6 +1618,9 @@ export class ShipClamp {
     this.asked = null;
     this.allowed.clear();
     this.spots.clear();
+    // Whatever spot this browser still held on somebody's back: the zone has gone and so has the
+    // hull. `Docking.leave` clears the whole table after this, which tells the server about the rest.
+    this.claims.release(CLAMP_OWNER);
   }
 
   report(): Record<string, unknown> {
@@ -1438,7 +1630,9 @@ export class ShipClamp {
       note: this.note,
       carried: c ? { ship: c.ship.spec.id, on: c.on.kind, of: c.label, settling: n2(c.settleLeft), at: c.local.toArray().map(n2), held: c.ship.holding, ghosted: c.ship.ghosted } : null,
       letting: this.letting ? this.letting.ship.spec.id : null,
-      waiting: this.waiting ? { to: this.waiting.to, left: n2(this.waiting.left) } : null,
+      // `asking` true means the word has not gone to their pilot yet: the spot on their hull's back
+      // is still pending with the server, and the server decides who asks at all.
+      waiting: this.waiting ? { to: this.waiting.to, left: n2(this.waiting.left), asking: this.waiting.asking } : null,
       asked: this.asked ? { from: this.asked.from, name: this.asked.name, left: n2(this.asked.left) } : null,
       allowed: [...this.allowed.keys()],
       carrying: [...this.allowed.values()].map((v) => v.spec.id),

@@ -520,12 +520,21 @@ export class Net {
       // what they mean belongs to src/net/owned.ts, and the socket reads none of it.
       case 'spawn':
       case 'keep':
+      // What a character owns, and a trade between two players: the server's list coming down, and
+      // the window each side is looking at. Handed over whole, as the group's words are; what they
+      // mean belongs to src/net/trade.ts, and nothing of an item is read here.
+      case 'items':
+      case 'trade':
       // The world's creatures as they cross: where the ones another browser thinks for have got to,
       // one of them gone, and a blow somebody struck against one this browser keeps. Handed over
       // whole, as the group's words are; what they mean belongs to src/net/npcNet.ts.
       case 'npcState':
       case 'npcGone':
       case 'npcHurt':
+      // The places two players can both want: the server's answer to a claim on a station's dock
+      // lane or on the spot on a hull that one ship rides another on. Handed over whole, as the
+      // group's words are; what it means belongs to src/space/docking.ts.
+      case 'spot':
       case 'duel':
         // The group and the words players type: handed over whole to whoever owns them. Nothing is
         // read here, so this switch does not have to grow a case for every word a group can say.

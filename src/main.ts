@@ -75,7 +75,7 @@ import { CharacterSelect } from './ui/characterSelect';
 import { CreatorBar } from './ui/creatorBar';
 import { Menu, keyName, onBindingsChanged, notifyBindingsChanged } from './ui/menu';
 import { ShipMenu, type ShipCruise, type ShipStatus } from './ui/shipMenu';
-import { BOARD_TUNE, Docking, boardRow, onPeerHullGone, peerHullGone, peerRooms, setPeerRooms, type BoardState, type CrossSide, type CrossTo, type PeerRooms } from './space/docking';
+import { BOARD_TUNE, Docking, boardRow, onPeerHullGone, peerHullGone, peerRooms, setPeerRooms, type BoardState, type CrossSide, type CrossTo, type PeerRooms, type SpotKind } from './space/docking';
 import { CLAMP_TUNE, DOCK_TUNE } from './space/dockingMath';
 import { HyperspaceUi } from './ui/hyperspaceUi';
 import { Hyperspace } from './space/hyperspace';
@@ -105,6 +105,8 @@ import { clockKnob } from './world/sharedClock.ts';
 import { sharedClock } from './world/sharedClock.ts';
 import { GROUP_RANGE, GROUP_TUNE, Groups, tuneGroups } from './net/groups.ts';
 import { GROUP_UI_TUNE, GroupUi, tuneGroupUi } from './ui/groupUi.ts';
+import { TRADE_TUNE, Trade, tuneTrade, type TradeItem } from './net/trade.ts';
+import { TRADE_UI_TUNE, TradeUi, tuneTradeUi } from './ui/tradeUi.ts';
 import { CHAT_TUNE, ChatUi, tuneChat } from './ui/chatUi.ts';
 import { COMBAT_TUNE, CombatNet, tuneCombat } from './net/combatNet.ts';
 // Travelling together: what a leader's trip means on this side, and where to come out to be beside them.
@@ -122,7 +124,7 @@ import { RemotePlayers, watchPeers } from './net/remotePlayers';
 import { remoteBlades } from './net/remoteBlades.ts';
 import { danceOf, defaultEmotes, emoteChoices, FLOURISHES, isDanceClip, isFlourishClip, loadEmotes, loopsEmote, saveEmotes } from './core/emotes';
 import { HUD_DPR_RANGE, HUD_LINES_RANGE, HUD_SCALE_RANGE, loadSettings, type Settings } from './core/settings';
-import { deleteCharacter, loadCharacters, newCharacterId, upsertCharacter, type Appearance, type SavedCharacter } from './core/characters';
+import { deleteCharacter, knownToServer, loadCharacters, markKnownToServer, newCharacterId, upsertCharacter, type Appearance, type SavedCharacter } from './core/characters';
 import { FRAME_NUDGE, Garage, type VehicleDef } from './vehicles/garage';
 import { WINGS_KEY, WING_RULE, dropPilotChoices } from './vehicles/wings';
 import { CUT_ENGINES_KEY, LANDING, SHIP_GROUND, SHIP_ROOM, SPACE_LANDING } from './vehicles/landing';
@@ -332,6 +334,16 @@ class App {
   private readonly equipment: Equipment;
   /** The backpack panel, the inventory's first tab. */
   private readonly backpack: BackpackUi;
+  /**
+   * Where an item given or destroyed here is told to the server's ledger. The trade wiring sets it
+   * when there is a server to tell; until then, and for ever in a game played alone, it is null and
+   * the backpack is local storage exactly as it always was.
+   */
+  private tradeLedger: ((what: 'add' | 'drop', kind: 'wear' | 'weapon', id: string) => void) | null = null;
+  /** Where "this is what I am wearing and holding" goes, for the same reason and by the same wiring. */
+  private tradeUsing: (() => void) | null = null;
+  /** Where the group roster's Trade button goes; the trade wiring fills it in. */
+  private tradeAsk: ((id: number, name: string) => string) | null = null;
   /** The weapons rack as it loads (null when none is converted); the equipment waits on it. */
   private weaponsLoaded!: Promise<WeaponCatalogue | null>;
   /** The hello resend after a change of clothes or weapon, debounced so several pieces send one. */
@@ -771,6 +783,10 @@ class App {
         upsertCharacter(c);
       },
       changed: (what) => this.onEquipmentChanged(what),
+      // An item this browser gave itself or destroyed goes to the server's ledger as well, so its
+      // rows and this cache do not drift. It is set by the trade wiring and is null until then, and
+      // with no server it stays quiet: a game played alone writes to local storage and nowhere else.
+      ledger: (what, kind, id) => this.tradeLedger?.(what, kind, id),
       baseUrl: import.meta.env.BASE_URL,
     });
     // The Skills tab: the Force powers or the gadgets in the number slots, given to the class's kit and kept with the character.
@@ -3193,6 +3209,29 @@ class App {
     this.net.onAsk = (from, word) => this.docking.clamp.heard(from, word, this.pilotedShip());
     this.docking.clamp.peers = this.remotes;
     this.docking.clamp.link = { id: () => this.net.id, send: (to, word) => this.net.sendAsk(to, word) };
+    // The places two players can both want: a station's dock lane and the spot on a hull that one
+    // ship rides another on. The claim is put to the server and the ship flies on this browser's own
+    // answer meanwhile; an answer that says the place was somebody else's breaks the approach off,
+    // and one that never comes leaves the local answer standing, which is the answer this browser
+    // gives itself when there is no server at all. Nothing here runs in a frame.
+    this.docking.spotLink = {
+      active: () => this.net.session.authority === 'server',
+      send: (kind, what, take) => this.net.sendWord({ t: 'claimSpot', kind, what, do: take ? 'take' : 'free' }),
+    };
+    // Losing the race for a dock is the one thing docking has to say that the row nobody is looking
+    // at would swallow, so it goes to the message line, never to the prompt (rewritten every frame).
+    this.docking.onNote = (text) => this.messages.system(text);
+    // Whatever else reads the server's own words reads them first and this takes what is left, so
+    // nothing hung on the same hook is unplugged.
+    const spotWordWas = this.net.onWord;
+    this.net.onWord = (msg) => {
+      spotWordWas(msg);
+      // The kind goes with the name: the server holds a spot under its world, its kind and its name,
+      // so throwing the kind away here would leave two halves keyed differently and a kind added
+      // later landing its answers on another kind's claim. `LaneClaims.answer` is where the two are
+      // made to agree; a word with no kind on it is taken as it always was.
+      if (msg?.t === 'spot') this.docking.spotAnswer(String(msg.what ?? ''), msg.granted === 1, String(msg.why ?? ''), msg.kind as SpotKind | undefined);
+    };
     this.remotes.carrierPose = (to, pos, quat) => {
       const p = this.player;
       const v = to === this.net.id ? p.mounted ?? p.piloting ?? p.aboard?.vehicle ?? null : null;
@@ -3586,6 +3625,9 @@ class App {
     const groupUi = new GroupUi(this.ui, {
       groups,
       note: (text) => this.messages.system(text),
+      // The trade wiring is built after this panel, so the ledger is reached through the holder it
+      // fills in rather than captured here; with none there is no button at all.
+      trade: (id, name) => this.tradeAsk?.(id, name) ?? 'trading is not wired here',
       project: (x, y, z, out) => this.projectToScreen(x, y, z, out),
       anchor: peerAnchor,
       // Where the eye is and which way it looks, out of the camera's own matrix: column 3 is where it
@@ -3641,6 +3683,209 @@ class App {
     // Where the display's roster reads the group from. The same array between changes, so nothing is
     // allocated to read it, and the roster writes only the values that have moved.
     this.roster.source = () => (groups.roster ? groups.roster.members : null);
+
+    // ---- The things you own, and trading them. ----
+    //
+    // The server holds a row per item and moves two rows in one step (server/ledger.mjs). This side
+    // holds a cache of that list and a window showing what each of you has put in; it moves nothing
+    // itself, ever. An item leaves this backpack only when the server's own list comes down, which
+    // is what makes it impossible for one browser to end a trade holding both halves of it.
+    //
+    // Everything asks the session, never the socket, so with no address set -- or against the relay
+    // that came before -- nothing is sent, no window opens, the backpack is local storage exactly as
+    // it always was and the game is what it is without any of this.
+    const trade = new Trade();
+    trade.send = (msg) => this.net.sendWord(msg);
+    trade.authority = () => this.net.session.authority;
+    trade.selfId = () => this.net.id;
+    // The countdown on a question is the server's own clock, which the shared clock estimates.
+    trade.serverNow = () => sharedClock.now();
+    // The 8 m is measured from where the two figures last stood, which is the same pair of answers
+    // the group's own 90 m is measured from; the server measures it again and is what decides.
+    trade.meAt = (out) => groups.meAt(out);
+    trade.peerAt = (id, out) => groups.peerAt(id, out);
+    trade.owns = (kind, id) => this.equipment.owns(kind, id);
+    trade.inUse = (kind, id) => this.equipment.inUse(kind, id);
+    // What this browser holds for the character in play, for the one moment it hands its list up.
+    // The first time a character is handed up this is what the server writes down; after that its
+    // own rows stand and this browser is told them instead of being merged with.
+    trade.mine = () => {
+      const rec = this.creating ? null : this.current;
+      if (!rec) return null;
+      const items: TradeItem[] = [];
+      for (const o of rec.items ?? []) items.push({ kind: o.kind, id: o.id, got: o.got });
+      return items;
+    };
+    // What the record says about itself, which goes up with the list: "a server has taken this
+    // character down before". An empty list under that mark is a browser whose storage was cleared,
+    // not a character that owns nothing, and it is what keeps a cache from being written back over
+    // a server that has never held this character (a fresh one, or one restored from an older
+    // snapshot). A server that knows nothing of the mark ignores it and nothing changes.
+    trade.mark = () => {
+      const rec = this.creating ? null : this.current;
+      if (!rec) return null;
+      return { known: knownToServer(rec), rev: rec.rev ?? 0 };
+    };
+    // What is on the body and in the hands, which is what the server refuses an offer of a worn
+    // shirt with. The whole of it each time, and only when it has moved.
+    trade.using = () => {
+      const snap = this.equipment.snapshot();
+      const worn: TradeItem[] = [];
+      for (const id of Object.keys(snap.worn)) worn.push({ kind: 'wear', id, got: 0 });
+      const held: TradeItem[] = [];
+      for (const id of [snap.held.right, snap.held.left]) if (id) held.push({ kind: 'weapon', id, got: 0 });
+      return { worn, held };
+    };
+    // The server's list, which stands: the record is marked as the server's, and the equipment
+    // writes the backpack, the body and the hands from it in one step. Nothing else in the game may
+    // write the items while there is a server holding them. `take` is the server's own word for
+    // which copy stood -- `browser` the first time this character was handed up, `server` after.
+    trade.onList = (items, take) => {
+      const rec = this.creating ? null : this.current;
+      if (!rec) return;
+      const wasKnown = knownToServer(rec);
+      markKnownToServer(rec, this.net.session.counterOf(rec.id));
+      if (take === 'server' && !wasKnown) this.messages.system('this server holds its own list of what this character owns, and it is the one that stands');
+      void this.equipment.reconcile(items).then((note) => {
+        if (note !== 'dropped' && note !== 'nothing in the backpack changed') this.messages.system(note);
+        if (this.backpack.open) void this.refreshBackpack();
+        // What is worn and held goes up after the list, because it is named by the server's own row
+        // ids and those are only known once a list has arrived.
+        trade.tellUsing();
+      });
+    };
+    trade.onNote = (text) => this.messages.system(text);
+    // An item given or destroyed here goes to the ledger as well, and what is on the body and in the
+    // hands is said whenever it moves, since that is what the server refuses an offer of a worn
+    // shirt with. Neither is how an item moves between two players: that is a trade, and only the
+    // server moves those.
+    this.tradeLedger = (what, kind, id) => {
+      if (what === 'add') trade.noteAdded(kind, id, Date.now());
+      else trade.noteDropped(kind, id);
+    };
+    this.tradeUsing = () => trade.tellUsing();
+    // The moment the server has taken this browser's claim, its list goes up: a character the server
+    // has never seen is written down from it, and after that the server's list is the truth.
+    this.net.session.onClaimed = () => trade.tell();
+    const tradeUi = new TradeUi(this.ui, {
+      trade,
+      note: (text) => this.messages.system(text),
+      look: (kind, id) => {
+        const ctx = this.equipment.lastContext;
+        if (!ctx) return { name: id.replace(/_/g, ' '), icon: null };
+        const info = itemInfo(kind, id, ctx);
+        return { name: info.name, icon: info.icon };
+      },
+      owned: () => {
+        const rows: { item: TradeItem; use: 'worn' | 'right' | 'left' | null }[] = [];
+        for (const o of this.equipment.owned()) rows.push({ item: { kind: o.kind, id: o.id, got: o.got }, use: this.equipment.inUse(o.kind, o.id) });
+        return rows;
+      },
+      view: (eye, dir) => {
+        const pm = this.cam.camera.matrixWorld.elements;
+        eye.x = pm[12];
+        eye.y = pm[13];
+        eye.z = pm[14];
+        dir.x = -pm[8];
+        dir.y = -pm[9];
+        dir.z = -pm[10];
+        return this.started && this.inWorld;
+      },
+      peersHere: (out) => {
+        let n = 0;
+        for (const peer of this.net.peers.values()) {
+          const s = peer.state;
+          if (!s || !onThisWorld(peer.hello)) continue;
+          const slot = out[n] ?? (out[n] = { id: 0, name: '', x: 0, y: 0, z: 0 });
+          slot.id = peer.id;
+          slot.name = peer.hello.name;
+          slot.x = s.p[0];
+          slot.y = s.p[1];
+          slot.z = s.p[2];
+          n++;
+        }
+        return n;
+      },
+      canOpen: () => this.started && this.inWorld && !this.traveling && !this.menu.open && !this.map.open,
+      freeMouse: (free) => this.freeMouse(free),
+      // Whether anything else is holding the mouse. The trade window is deliberately allowed over
+      // the backpack (that is where its own Trade button is), so the panel asks before it hands the
+      // mouse back -- and, the other way round, it knows that nobody will hand it back for it when
+      // what refused the window was a travel, a death or a jump rather than another panel.
+      elseHasMouse: () => this.anyPanelOpen() || this.map.open,
+    });
+    // The backpack's own Trade button: ask whoever this player is standing by and looking at. It is
+    // the same rule the chat line's /trade comes to, and the ledger is what refuses it when there is
+    // no server, nobody there, or they are past the game's own 8 m.
+    this.backpack.onTrade = () => this.messages.system(tradeUi.askLookedAt());
+    // The group roster's own Trade button, which names a member by the connection they are on rather
+    // than by who is being looked at: the panel was built before this block, so it reaches the
+    // ledger through the holder it fills in here.
+    this.tradeAsk = (id, name) => trade.askTrade(id, name);
+    // The window's names and pictures are the backpack's own, so the catalogues are read once when a
+    // trade opens rather than on the frame a cell is drawn (they are cached by the equipment).
+    const hadTradeWindow = trade.onWindow;
+    trade.onWindow = (w) => {
+      hadTradeWindow(w);
+      // The panel has already drawn by now (it chained onto this hook first), so with no catalogue
+      // read yet it is showing raw ids and no pictures: it is told to draw again when the read
+      // lands rather than waiting for the other side to move something.
+      if (w && !this.equipment.lastContext) void this.equipment.itemContext().then(() => tradeUi.refresh());
+    };
+    // Whatever else reads the server's own words reads them first and this takes what is left.
+    const tradeWordWas = this.net.onWord;
+    this.net.onWord = (msg) => {
+      tradeWordWas(msg);
+      trade.handle(msg);
+    };
+    // A line that dropped, was put down or was taken over leaves no trade and no list behind: the
+    // server cancels its own side, nothing ever moved, and what is in local storage is the backpack
+    // again. The handler already on the hook is kept and called first.
+    const tradeStatusWas = this.net.onStatus;
+    this.net.onStatus = (status, detail) => {
+      tradeStatusWas(status, detail);
+      if (status !== 'online') {
+        trade.clear();
+        tradeUi.clearAll();
+      }
+    };
+    if (debugRoot) {
+      // `__debug.trade()` says what the ledger and the window are doing; `__debug.trade({ offerMax: 6 })`
+      // sets one of this side's own numbers and `{ ui: { hz: 2 } }` one of the panel's. The rest is
+      // how a script with no mouse plays a trade: `{ ask: <a peer's id> }` or `{ ask: true }` for
+      // whoever is being looked at, `{ accept: true }`, `{ put: 'weapon:baton_stun' }`, `{ take: ... }`,
+      // `{ ready: true }`, `{ cancel: true }`, and `{ sync: true }` to ask the server for the list
+      // again. The 8 m a trade reaches is the game's own and is printed, not settable.
+      debugRoot.trade = (o?: Partial<typeof TRADE_TUNE> & { ui?: Partial<typeof TRADE_UI_TUNE>; ask?: number | boolean; accept?: boolean; decline?: boolean; put?: string; take?: string; ready?: boolean; cancel?: boolean; sync?: boolean; tell?: boolean; open?: boolean }) => {
+        if (o?.ui) tuneTradeUi(o.ui);
+        if (o) tuneTrade(o);
+        let answer = '';
+        const split = (key: string): ['wear' | 'weapon', string] | null => {
+          const i = key.indexOf(':');
+          const kind = key.slice(0, i);
+          if (kind !== 'wear' && kind !== 'weapon') return null;
+          return [kind, key.slice(i + 1)];
+        };
+        if (typeof o?.ask === 'number') answer = trade.askTrade(o.ask) || `asked ${o.ask} to trade`;
+        else if (o?.ask === true) answer = tradeUi.askLookedAt();
+        if (o?.accept === true) trade.accept();
+        if (o?.decline === true) trade.decline();
+        if (typeof o?.put === 'string') {
+          const at = split(o.put);
+          answer = at ? trade.putIn(at[0], at[1]) || `${o.put} is in the trade` : `no item ${o.put}`;
+        }
+        if (typeof o?.take === 'string') {
+          const at = split(o.take);
+          answer = at ? trade.takeOut(at[0], at[1]) || `${o.take} is out of the trade` : `no item ${o.take}`;
+        }
+        if (typeof o?.ready === 'boolean') answer = trade.setReady(o.ready) || (o.ready ? 'you are happy with it' : 'you took that back');
+        if (o?.cancel === true) trade.cancel();
+        if (o?.sync === true) trade.sync();
+        if (o?.tell === true) trade.tell();
+        if (o?.open === true) answer = tradeUi.show() ? 'the window is up' : 'no window may take the screen here';
+        return { ...trade.debug(), answer, window: trade.window, items: trade.list.length, tune: TRADE_TUNE, ui: { ...TRADE_UI_TUNE, ...tradeUi.debug() }, range: GROUP_RANGE.trade };
+      };
+    }
 
     // ---- Shots, hits and health between players. ----
     //
@@ -4709,6 +4954,10 @@ class App {
   private onEquipmentChanged(what: 'owned' | 'worn' | 'held' | 'busy'): void {
     if (this.backpack.open) void this.refreshBackpack();
     if (what === 'busy') return;
+    // The server keeps what is worn and held so that it can refuse an offer of it; it is said here
+    // because this is the one place that hears every change, and nothing is sent when it has not
+    // moved or when there is no server to tell.
+    this.tradeUsing?.();
     this.weaponsUi.held = { right: this.player.equipped.right?.id ?? null, left: this.player.equipped.left?.id ?? null };
     if (this.weaponsUi.open) this.weaponsUi.render();
     if (this.wardrobe.open && what === 'worn') this.wardrobe.refresh();
