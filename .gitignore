@@ -17,3 +17,6 @@ jka-files
 *.zip
 extras.txt
 restuss.txt
+
+# The launcher's local builds: the exe, and releases packed to try before publishing.
+launcher-build

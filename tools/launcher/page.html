@@ -1,0 +1,434 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="swg3js-token" content="%TOKEN%">
+<title>swg3js launcher</title>
+<style>
+/* The launcher page is part of the game's interface, so it wears the game's own eighteen colours and
+   nothing else: the block below is copied from src/style.css, and the launcher's test fails if the two
+   ever disagree by a name or a value. None of the client's own interface art is used. */
+:root {
+  /* palette: the eighteen named colours, copied from src/style.css. */
+  --accent: #7fd7ff;
+  --ink: #e8f1f8;
+  --muted: #9fb3c4;
+  --void: #060a12;
+  --plate: rgba(24, 38, 54, 0.7);
+  --panel: rgba(8, 14, 24, 0.62);
+  --rule: rgba(127, 215, 255, 0.18);
+  --edge: rgba(127, 215, 255, 0.28);
+  --good: #6adf7a;
+  --warn: #e2a33c;
+  --bad: #ff5a4a;
+  --hot: #ffb040;
+  --shield: #9fd8ff;
+  --armour: #ffb070;
+  --chassis: #ff8a50;
+  --component: #ffd27f;
+  --health: #b8322a;
+  --pool: #2d7fd6;
+  /* /palette */
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  color: var(--ink);
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--void); }
+body { min-height: 100vh; padding: 28px 16px 48px; }
+main { max-width: 880px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+header { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+h1 { margin: 0; font-size: 26px; font-weight: 600; letter-spacing: 0.08em; color: var(--accent); }
+h2 { margin: 0 0 10px; font-size: 15px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--accent); }
+.version { color: var(--muted); font-size: 13px; }
+section { background: var(--panel); border: 1px solid var(--edge); border-radius: 6px; padding: 16px 18px; }
+.row { display: grid; grid-template-columns: 170px 1fr auto; gap: 8px 12px; align-items: center; margin-bottom: 12px; }
+.row label { color: var(--muted); font-size: 14px; }
+.row .say { grid-column: 2 / 4; font-size: 13px; margin-top: -4px; }
+input[type=text], input[type=number] { width: 100%; background: var(--plate); color: var(--ink); border: 1px solid var(--rule); border-radius: 4px; padding: 7px 9px; font: inherit; font-size: 14px; }
+input:focus { outline: none; border-color: var(--accent); }
+button, a.button { background: var(--plate); color: var(--ink); border: 1px solid var(--edge); border-radius: 4px; padding: 7px 14px; font: inherit; font-size: 14px; cursor: pointer; text-decoration: none; display: inline-block; white-space: nowrap; }
+button:hover:not(:disabled), a.button:hover { border-color: var(--accent); color: var(--accent); }
+button:disabled { color: var(--muted); border-color: var(--rule); cursor: default; }
+button.primary, a.button.primary { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.good { color: var(--good); }
+.warn { color: var(--warn); }
+.bad { color: var(--bad); }
+.muted { color: var(--muted); }
+.buttons { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.steps { list-style: none; margin: 10px 0 0; padding: 0; font-size: 14px; }
+.steps li { padding: 6px 0; border-top: 1px solid var(--rule); }
+.steps li:first-child { border-top: none; }
+.steps .why { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
+.progress { margin-top: 14px; padding: 12px; background: var(--plate); border-radius: 4px; font-size: 14px; }
+.progress .big { font-size: 17px; color: var(--ink); }
+.progress .line { font-family: Consolas, 'Cascadia Mono', monospace; font-size: 12px; color: var(--muted); margin-top: 6px; overflow-wrap: anywhere; }
+.bar { height: 4px; background: var(--rule); border-radius: 2px; margin: 10px 0 6px; overflow: hidden; }
+.bar > div { height: 100%; background: var(--accent); width: 0; transition: width 0.4s; }
+pre.log { margin: 12px 0 0; max-height: 280px; overflow: auto; background: var(--void); border: 1px solid var(--rule); border-radius: 4px; padding: 10px; font: 12px/1.45 Consolas, 'Cascadia Mono', monospace; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
+pre.log .note { color: var(--accent); }
+pre.log .bad { color: var(--bad); }
+details summary { cursor: pointer; color: var(--muted); font-size: 13px; margin-top: 10px; }
+.addresses { font-family: Consolas, 'Cascadia Mono', monospace; font-size: 14px; color: var(--ink); margin: 8px 0; }
+.small { font-size: 12px; }
+.message { min-height: 1.2em; font-size: 14px; margin-top: 8px; }
+@media (max-width: 640px) { .row { grid-template-columns: 1fr; } .row .say { grid-column: 1; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>SWG3JS</h1>
+    <span class="version" id="version"></span>
+    <span class="version" id="update"></span>
+    <span style="flex:1"></span>
+    <button id="checkUpdate">Check for updates</button>
+    <button id="quit" title="Stops the launcher, the conversion and the server">Quit</button>
+  </header>
+
+  <section id="folders">
+    <h2>Your installs</h2>
+    <div class="row">
+      <label for="swg">Star Wars Galaxies</label>
+      <input type="text" id="swg" spellcheck="false" placeholder="the folder that holds the .tre archives">
+      <button data-pick="swg">Choose…</button>
+      <div class="say" id="swgSay"></div>
+    </div>
+    <div class="row">
+      <label for="jka">Jedi Academy</label>
+      <input type="text" id="jka" spellcheck="false" placeholder="its GameData folder (optional)">
+      <button data-pick="jka">Choose…</button>
+      <div class="say" id="jkaSay"></div>
+    </div>
+    <div class="row">
+      <label for="out">Converted content</label>
+      <input type="text" id="out" spellcheck="false" placeholder="a folder of its own, about 14 GB">
+      <button data-pick="out">Choose…</button>
+      <div class="say" id="outSay"></div>
+    </div>
+    <p class="muted small">The converted content is made on this machine from your own installs and never leaves it.</p>
+  </section>
+
+  <section id="convert">
+    <h2>Convert</h2>
+    <div id="statusSay"></div>
+    <ul class="steps" id="steps"></ul>
+    <div class="buttons" style="margin-top:12px">
+      <button class="primary" id="convertBtn">Convert</button>
+      <button id="stopBtn">Stop</button>
+      <button id="statusBtn">Ask again</button>
+    </div>
+    <div class="message" id="convertMsg"></div>
+    <div class="progress" id="progress" hidden>
+      <div class="big" id="progStep"></div>
+      <div class="bar"><div id="progBar"></div></div>
+      <div id="progTime" class="muted"></div>
+      <div class="line" id="progLine"></div>
+    </div>
+    <details id="logBox">
+      <summary>The conversion's log <span id="logFile"></span></summary>
+      <pre class="log" id="log"></pre>
+    </details>
+    <details>
+      <summary>What status says</summary>
+      <pre class="log" id="statusLines"></pre>
+    </details>
+  </section>
+
+  <section id="play">
+    <h2>Play</h2>
+    <div class="row">
+      <label for="joinServer">A friend's server</label>
+      <input type="text" id="joinServer" spellcheck="false" placeholder="ws://192.168.1.20:8787 (leave empty to play alone)">
+      <span></span>
+    </div>
+    <div class="row">
+      <label for="joinWord">Their join word</label>
+      <input type="text" id="joinWord" spellcheck="false" placeholder="if they set one">
+      <span></span>
+    </div>
+    <div class="buttons">
+      <a class="button primary" id="playLink" target="_blank" rel="noopener" href="/">Play</a>
+      <span class="muted small" id="playSay"></span>
+    </div>
+  </section>
+
+  <section id="host">
+    <h2>Host for friends</h2>
+    <p class="muted small" style="margin-top:0">Runs the game's server on this machine so friends can play with you. Off unless you start it.</p>
+    <div class="row">
+      <label for="hostWord">Join word</label>
+      <input type="text" id="hostWord" spellcheck="false" placeholder="letters and numbers; friends need it to join">
+      <span></span>
+    </div>
+    <div class="row">
+      <label for="hostPort">Port</label>
+      <input type="number" id="hostPort" min="1024" max="65535" value="8787">
+      <span></span>
+    </div>
+    <div class="buttons">
+      <button id="hostStart">Start the server</button>
+      <button id="hostStop">Stop it</button>
+    </div>
+    <div class="message" id="hostMsg"></div>
+    <div id="hostInfo" hidden>
+      <div class="small muted">A friend on the same network puts one of these in their launcher's "A friend's server":</div>
+      <div class="addresses" id="hostAddresses"></div>
+      <div class="small muted">Across the internet, forward TCP port <span id="hostPortSay"></span> on your router to this machine and give them ws://&lt;your public address&gt;:<span id="hostPortSay2"></span>.</div>
+      <pre class="log" id="hostLines"></pre>
+    </div>
+  </section>
+</main>
+<script>
+'use strict';
+const TOKEN = document.querySelector('meta[name="swg3js-token"]').content;
+const $ = (id) => document.getElementById(id);
+let state = null;
+let logAfter = 0;
+let editing = new Set();
+
+async function call(route, body) {
+  const res = await fetch(`/launcher/api/${route}`, {
+    method: body === undefined ? 'GET' : 'POST',
+    headers: { 'x-swg3js-token': TOKEN, 'Content-Type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (res.status === 403) throw new Error('reload');
+  return res.json();
+}
+
+function say(el, check) {
+  el.textContent = check ? check.sentence : '';
+  el.className = `say ${!check ? '' : check.ok ? 'good' : check.optional ? 'warn' : 'bad'}`;
+}
+
+function duration(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (h) return `${h} h ${m} min`;
+  if (m) return `${m} min ${s % 60} s`;
+  return `${s} s`;
+}
+
+function setField(id, value) {
+  if (editing.has(id)) return;
+  const el = $(id);
+  if (el.value !== (value ?? '')) el.value = value ?? '';
+}
+
+function render() {
+  const s = state;
+  if (!s) return;
+  const v = s.version || {};
+  $('version').textContent = v.commit === 'checkout' ? 'from a checkout' : `version ${String(v.commit || '?').slice(0, 7)}${v.date ? `, ${new Date(v.date).toLocaleDateString()}` : ''}`;
+  $('update').textContent = s.update && s.update.note ? s.update.note : '';
+  $('checkUpdate').disabled = !s.canUpdate || !!(s.job && s.job.running);
+
+  setField('swg', s.settings.swg);
+  setField('jka', s.settings.jka);
+  setField('out', s.settings.out);
+  say($('swgSay'), s.checks.swg);
+  say($('jkaSay'), s.checks.jka);
+  say($('outSay'), s.checks.out);
+
+  const st = s.status;
+  const job = s.job;
+  const running = !!(job && job.running);
+  let line = '';
+  let cls = '';
+  if (st.running && !running) line = 'Asking the converter what is missing…';
+  else if (st.error) { line = st.error; cls = 'bad'; }
+  else if (st.done) { line = 'Everything is converted. Press Play.'; cls = 'good'; }
+  else if (st.ran) {
+    const runnable = st.steps.filter((x) => !x.skip).length;
+    line = `${runnable} step${runnable === 1 ? '' : 's'} still to run${s.update && s.update.updated ? ' (the new version asks for these)' : ''}. A first full conversion takes several hours; it can be stopped and carried on at any time.`;
+    cls = 'warn';
+  }
+  $('statusSay').textContent = line;
+  $('statusSay').className = cls;
+  const list = $('steps');
+  const want = st.steps.map((x) => `${x.label}|${x.reason}|${x.skip || ''}`).join('\n');
+  if (list.dataset.key !== want) {
+    list.dataset.key = want;
+    list.textContent = '';
+    for (const x of st.steps) {
+      const li = document.createElement('li');
+      li.textContent = x.label + (x.skip ? ` (${x.skip})` : '');
+      if (x.skip) li.className = 'muted';
+      const why = document.createElement('span');
+      why.className = 'why';
+      why.textContent = x.reason;
+      li.appendChild(why);
+      list.appendChild(li);
+    }
+  }
+  $('statusLines').textContent = (st.lines || []).join('\n');
+
+  $('convertBtn').disabled = running || !s.checks.swg?.ok || !s.checks.out?.ok || st.done;
+  $('stopBtn').disabled = !running || job.stopping;
+  $('statusBtn').disabled = running || st.running;
+  const prog = $('progress');
+  if (job) {
+    prog.hidden = false;
+    const total = Math.max(job.total, job.done + (job.current ? 1 : 0), 1);
+    if (job.current) {
+      $('progStep').textContent = `Step ${job.current.index} of ${total}: ${job.current.label}`;
+      $('progTime').textContent = `This step has run ${duration(s.now - job.current.startedAt)}; the whole conversion ${duration(s.now - job.startedAt)}.${job.stopping ? ' Stopping…' : ''}`;
+      $('progLine').textContent = job.current.lastLine || '';
+    } else if (running) {
+      $('progStep').textContent = job.stopping ? 'Stopping…' : 'Asking the converter what is next…';
+      $('progTime').textContent = `The whole conversion has run ${duration(s.now - job.startedAt)}.`;
+      $('progLine').textContent = '';
+    } else {
+      $('progStep').textContent = job.outcome || 'Finished.';
+      $('progTime').textContent = `Ran ${duration((job.finishedAt || s.now) - job.startedAt)}; ${job.done} step${job.done === 1 ? '' : 's'} run.`;
+      $('progLine').textContent = '';
+    }
+    $('progBar').style.width = `${Math.round((job.done / total) * 100)}%`;
+    $('logFile').textContent = job.log ? `(kept in ${job.log})` : '';
+  } else prog.hidden = true;
+
+  const url = new URL('/', location.href);
+  const server = $('joinServer').value.trim() || (s.relay && s.relay.running ? `ws://127.0.0.1:${s.relay.port}` : '');
+  const word = $('joinWord').value.trim() || (s.relay && s.relay.running && !$('joinServer').value.trim() ? s.relay.word : '');
+  if (server) url.searchParams.set('server', server);
+  if (server && word) url.searchParams.set('word', word);
+  $('playLink').href = url.pathname + url.search;
+  $('playSay').textContent = !s.game.built ? 'The game is not built in this install.' : server ? `Joins ${server}.` : s.checks.out?.ok ? '' : 'Choose where the converted content is first; without it the game draws only its stand-ins.';
+  setField('joinServer', s.settings.join?.server);
+  setField('joinWord', s.settings.join?.word);
+
+  setField('hostWord', s.settings.host?.word);
+  setField('hostPort', String(s.settings.host?.port ?? 8787));
+  const r = s.relay;
+  $('hostStart').disabled = !!(r && r.running);
+  $('hostStop').disabled = !(r && r.running);
+  $('hostInfo').hidden = !(r && r.running);
+  if (r) {
+    $('hostAddresses').textContent = r.addresses.length ? r.addresses.join('\n') : 'this machine has no network address';
+    $('hostPortSay').textContent = r.port;
+    $('hostPortSay2').textContent = r.port;
+    $('hostLines').textContent = r.lines.join('\n');
+  }
+}
+
+async function refresh() {
+  try {
+    state = await call('state');
+    render();
+  } catch (err) {
+    if (err.message === 'reload') location.reload();
+  }
+  try {
+    const l = await call(`log?after=${logAfter}`);
+    if (l.lines.length) {
+      const pre = $('log');
+      const atEnd = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 8;
+      for (const x of l.lines) {
+        const span = document.createElement('span');
+        span.className = x.kind === 'out' ? '' : x.kind;
+        span.textContent = `${x.line}\n`;
+        pre.appendChild(span);
+      }
+      while (pre.childNodes.length > 3000) pre.removeChild(pre.firstChild);
+      if (atEnd) pre.scrollTop = pre.scrollHeight;
+      logAfter = l.last;
+    }
+  } catch {
+    /* next time */
+  }
+}
+
+async function waitForRestart() {
+  for (let i = 0; i < 120; i++) {
+    await new Promise((r) => setTimeout(r, 1000));
+    try {
+      const res = await fetch('/launcher/api/ping');
+      if (res.ok) { location.reload(); return; }
+    } catch { /* still starting */ }
+  }
+}
+
+for (const id of ['swg', 'jka', 'out']) {
+  const el = $(id);
+  el.addEventListener('focus', () => editing.add(id));
+  el.addEventListener('change', async () => {
+    editing.delete(id);
+    await call('settings', { [id]: el.value });
+    refresh();
+  });
+  el.addEventListener('blur', () => editing.delete(id));
+}
+for (const id of ['joinServer', 'joinWord']) {
+  const el = $(id);
+  el.addEventListener('focus', () => editing.add(id));
+  el.addEventListener('blur', () => editing.delete(id));
+  el.addEventListener('input', () => render());
+  el.addEventListener('change', () => call('settings', { join: { server: $('joinServer').value, word: $('joinWord').value } }));
+}
+for (const id of ['hostWord', 'hostPort']) {
+  const el = $(id);
+  el.addEventListener('focus', () => editing.add(id));
+  el.addEventListener('blur', () => editing.delete(id));
+}
+document.querySelectorAll('[data-pick]').forEach((b) => b.addEventListener('click', async () => {
+  b.disabled = true;
+  try {
+    const r = await call('pick', { which: b.dataset.pick });
+    if (r.sentence) $('convertMsg').textContent = r.sentence;
+  } finally {
+    b.disabled = false;
+    refresh();
+  }
+}));
+$('convertBtn').addEventListener('click', async () => {
+  const r = await call('convert', {});
+  $('convertMsg').textContent = r.sentence || '';
+  $('convertMsg').className = `message ${r.ok ? '' : 'bad'}`;
+  if (r.ok) $('logBox').open = true;
+  refresh();
+});
+$('stopBtn').addEventListener('click', async () => {
+  const r = await call('stop', {});
+  $('convertMsg').textContent = r.sentence || '';
+  refresh();
+});
+$('statusBtn').addEventListener('click', async () => {
+  $('statusBtn').disabled = true;
+  await call('status', {});
+  refresh();
+});
+$('hostStart').addEventListener('click', async () => {
+  const r = await call('host', { on: true, word: $('hostWord').value, port: Number($('hostPort').value) });
+  $('hostMsg').textContent = r.sentence || '';
+  $('hostMsg').className = `message ${r.ok ? '' : 'bad'}`;
+  editing.delete('hostWord');
+  refresh();
+});
+$('hostStop').addEventListener('click', async () => {
+  const r = await call('host', { on: false });
+  $('hostMsg').textContent = r.sentence || '';
+  refresh();
+});
+$('checkUpdate').addEventListener('click', async () => {
+  $('checkUpdate').disabled = true;
+  $('update').textContent = 'Checking…';
+  const r = await call('update', {});
+  $('update').textContent = r.sentence || '';
+  if (r.restarting) waitForRestart();
+});
+$('quit').addEventListener('click', async () => {
+  const r = await call('quit', {});
+  document.querySelector('main').innerHTML = '';
+  const p = document.createElement('p');
+  p.textContent = r.sentence;
+  p.style.textAlign = 'center';
+  document.querySelector('main').appendChild(p);
+  clearInterval(timer);
+});
+const timer = setInterval(() => { if (!document.hidden) refresh(); }, 1000);
+refresh();
+</script>
+</body>
+</html>
