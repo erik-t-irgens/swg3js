@@ -11,18 +11,23 @@ import { CharacterRig, loadPlayerRig } from '../player/rig';
 import { applyLook } from '../player/look';
 import { FIGHTS, isSaber, type WeaponCatalogue, type WeaponDef } from '../player/weapons';
 import { SaberBlade } from '../combat/saberBlade';
+import { CLASH } from '../combat/clash.ts';
 import { keepNearestGlow } from '../combat/bladeLights';
 import { Ragdoll } from '../combat/ragdoll';
 import { GUNS, gunTypeFor, type GunProfile } from '../combat/guns';
 import type { Bolts } from '../combat/bolts';
 import type { Effects } from '../combat/effects';
-import { nextLivingKey, type Aggression, type Living, type Side } from '../combat/kit';
+import { nextLivingKey, type Aggression, type Hittable, type Living, type Side } from '../combat/kit';
 import { hostileSides } from '../combat/targets';
 import type { Terrain } from './terrain';
 import { markActor } from './portalRender';
 import { slotOf } from '../ui/wardrobeUi';
 import type { CellState } from './layoutStream';
-import { SABER_SWINGS } from './mobiles/arms';
+import { BLADE_SWING, SABER_SWINGS, bladeSwingReport, borrowSwingFigures, noteBladeLookup, noteBladeSwing, noteTimerBlow, returnSwingFigures, weaponFarPoint, type BladeSwingTune } from './mobiles/arms';
+// A fighter's blade hurts what it passed through since the last frame by exactly the machinery the
+// player's does, never by a rule of its own: `BladePath` steps the same capsule along the ground the
+// blade covered, and a `Striker` of this fighter's own is what puts it behind the blow.
+import { BLADE_RADIUS, BladePath, type Striker } from '../combat/sweep';
 
 /** What a fighter carries, and so how it fights. */
 type Arm = 'saber' | 'melee' | 'gun';
@@ -89,6 +94,12 @@ export interface FighterGlow {
 export interface NpcDeps {
   weapons: WeaponCatalogue | null;
   effects: Effects | null;
+  /**
+   * What a physics collider belongs to, if it is something a blade can hurt: the same lookup the
+   * bolts are given, with the player's own capsule answering for the player, who is in no
+   * manager's collider map. Without it a fighter's swing finds nothing and hurts nobody.
+   */
+  hittableAt?: (handle: number) => Hittable | undefined;
   /** The species the character packs hold, by id; the fallback list when none is known. */
   species: string[];
   /** Compile an object's shaders in the background, resolving when it can be drawn without a stall. */
@@ -111,6 +122,14 @@ const staticOnly = (c: RAPIER.Collider): boolean => {
   const body = c.parent();
   return !body || body.isFixed();
 };
+/** The lookup a fighter has before the game hands it one: a blade then finds nothing at all. */
+const NOTHING_AT = (): undefined => undefined;
+/**
+ * Said once, the first time a swing opens with no lookup behind it. Without one a swept blade can
+ * find nobody, which would leave every bladed fighter in the game harmless and look exactly like a
+ * tuning problem -- so the swing falls back on the blow the timer used to land and this says why.
+ */
+let warnedBlind = false;
 
 export class Npc implements Living {
   readonly group = new THREE.Group();
@@ -149,8 +168,45 @@ export class Npc implements Living {
   private target: Living | null = null;
   private retarget = 0;
   private attackCd = 1 + Math.random();
-  /** A swing under way: seconds until its blade lands. */
-  private hitIn = -1;
+  /**
+   * A swing under way: seconds of it left. While it runs the blade sweeps the ground it covers
+   * every frame, so the blow lands where the blade passed rather than on whoever happened to
+   * stand within reach when a timer ran out.
+   */
+  private swingLeft = -1;
+  /**
+   * Where this fighter's blade was when it was last drawn. Its own, never at module scope: one
+   * path there would be every fighter's path at once, which is the mistake the blade ends above
+   * were already made to stop making.
+   */
+  private readonly bladePath = new BladePath();
+  /** What this swing has already bitten: one bite per body per swing, as the player's blade takes. */
+  private readonly hitThisSwing = new Set<Hittable>();
+  /** This fighter behind its own blow rather than the player: one struct, written, never made. */
+  private readonly strike: Striker;
+  /** Whether this swing's blade has been swept at all: with no lookup it never is. */
+  private swingSwept = false;
+  /** Whether this swing has already been heard landing: one contact sound a swing, as the timer gave. */
+  private swingSounded = false;
+  /** Who this swing was aimed at, for the blow the timer used to land when nothing can be swept. */
+  private swingTarget: Living | null = null;
+  /** What the game hands it to name colliders with this frame; `NOTHING_AT` until it is wired. */
+  private lookup: (handle: number) => Hittable | undefined = NOTHING_AT;
+  /**
+   * What this fighter's blade is allowed to find. The sweep hands back colliders and the game's
+   * own lookup names the turrets, the vehicles and another player's hull as well as the living,
+   * while the blow this replaced could only ever reach a `Living` it had picked out of the world's
+   * list of them -- so a swing beside a parked speeder must not take the speeder down, and a
+   * fighter standing over a body that is already out must not go on cutting it.
+   */
+  private readonly findLiving = (handle: number): Hittable | undefined => {
+    const c = this.lookup(handle);
+    // A `Living` has a key; a turret, a vehicle or a peer's hull can merely be hurt and has none.
+    if (!c || c.dead || typeof (c as Partial<Living>).key !== 'number') return undefined;
+    return c;
+  };
+  /** A sword's or a club's far end in the holder's own frame (a lightsaber's blade is measured from its hilt). */
+  private readonly reachFar = new THREE.Vector3();
   private stunned = 0;
   private slowed = 0;
   private dotDps = 0;
@@ -171,6 +227,10 @@ export class Npc implements Living {
     markActor(this.group);
     this.body = physics.world.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(x, y + this.halfHeight, z));
     this.collider = physics.world.createCollider(RAPIER.ColliderDesc.capsule(this.halfHeight - 0.35, 0.35), this.body);
+    // Who is swinging. `from` is this fighter's own place object, so the shove a blow gives is
+    // measured from where it stands this frame with nothing copied; nothing is spared and there is
+    // no matrix, since a fighter never fights in a hull's frame.
+    this.strike = { physics, hittableAt: this.findLiving, effects: null, source: this, from: this.pos, exclude: this.body, spare: null, radius: BLADE_RADIUS, damage: BLADE_SWING.fighterSaber, push: BLADE_SWING.fighterPush, color: 0xffffff, now: 0 };
   }
 
   /** What to call it in the console and on a target reticle. */
@@ -309,6 +369,12 @@ export class Npc implements Living {
       this.group.parent?.add(this.blade.group);
       if (this.blade.group.parent) markActor(this.blade.group);
     } else if (this.arm === 'gun') this.gun = GUNS[gunTypeFor(def, def.class)];
+    else {
+      // A sword, an axe or a club: its reach is the far end of the model's longest extent, which is
+      // the rule the player's own hand reads a rack weapon with, so both swing the same steel.
+      const far = weaponFarPoint(def.bounds, def.length);
+      this.reachFar.set(0, 0, 0).setComponent(far.axis, far.distance);
+    }
   }
 
   /** Who hurt it last, and for how long it remembers; it turns on whoever struck. */
@@ -364,7 +430,10 @@ export class Npc implements Living {
   private die(): void {
     this.dead = true;
     this.deadTimer = 9;
-    this.hitIn = -1;
+    this.swingLeft = -1;
+    this.swingTarget = null;
+    this.hitThisSwing.clear();
+    this.bladePath.reset();
     this.heldAt = null;
     this.provoked = null;
     const rig = this.rig;
@@ -409,8 +478,12 @@ export class Npc implements Living {
     return h.localToWorld(out.set(0, 0, len * 0.55));
   }
 
-  /** `now` is the world's simulated clock (`World.simTime`), so `__debug.advance` exercises the hold. */
-  update(dt: number, terrain: Terrain, foes: readonly Living[], bolts: Bolts, effects: Effects | null, camera: THREE.Camera | null, now: number): void {
+  /**
+   * `now` is the world's simulated clock (`World.simTime`), so `__debug.advance` exercises the
+   * hold. `hittableAt` is what a swinging blade names the colliders it touches with; with none
+   * nothing can be swept at all and the swing falls back on the blow the timer used to land.
+   */
+  update(dt: number, terrain: Terrain, foes: readonly Living[], bolts: Bolts, effects: Effects | null, camera: THREE.Camera | null, now: number, hittableAt: ((handle: number) => Hittable | undefined) | null = null): void {
     this.now = now;
     // Slowed, everything of its own runs at a crawl; a burn eats in real time.
     this.slowed = Math.max(0, this.slowed - dt);
@@ -438,9 +511,19 @@ export class Npc implements Living {
       this.blade?.update(dt, this.bladeBase, this.bladeTip, false, camera ?? IDLE_CAMERA, 0, true);
       return;
     }
+    this.lookup = hittableAt ?? NOTHING_AT;
     const sdt = dt * own;
     this.stunned = Math.max(0, this.stunned - sdt);
     this.attackCd = Math.max(0, this.attackCd - sdt);
+    // The window runs on the real step, never the slowed one. Slowed, `sdt` is a eighth of `dt`,
+    // and an instant blow only arrived late for it; a *live blade* on that clock stays out and
+    // sweeping for nearly three seconds, so slowing a fighter would make standing near it more
+    // dangerous rather than less. How often it swings is still its own slowed clock (`attackCd`).
+    let closed = false;
+    if (this.swingLeft >= 0) {
+      this.swingLeft -= dt;
+      closed = this.swingLeft < 0;
+    }
     this.retarget -= sdt;
     // Whoever hurt it last outranks the nearest, whatever side they are on, until it forgets.
     if (this.provoked) {
@@ -474,7 +557,7 @@ export class Npc implements Living {
       diff = Math.atan2(Math.sin(diff), Math.cos(diff));
       this.heading += diff * Math.min(1, sdt * 6);
       const reach = this.arm === 'gun' ? 9 + Math.random() * 0.1 : 1.9;
-      if (d > reach && this.hitIn < 0) {
+      if (d > reach && this.swingLeft < 0) {
         const step = Math.min(d - reach, RUN_SPEED * sdt);
         this.pos.x += Math.sin(this.heading) * step;
         this.pos.z += Math.cos(this.heading) * step;
@@ -500,7 +583,22 @@ export class Npc implements Living {
           rig?.playUpper(rig.firstOf('rifle_combat_standing_fire_1', 'add_rifle_fire_1', 'pistol_combat_standing_fire_1') ?? '', 0.04);
         } else if (this.arm !== 'gun' && d < 2.6) {
           this.attackCd = 1.1 + Math.random() * 0.4;
-          this.hitIn = 0.32;
+          // The swing opens a window rather than setting the moment a blow lands: for as long as it
+          // runs the blade cuts what it passes through, once each, and it can now miss altogether.
+          // The path is not reset here: the blade was drawn on the frame before and wrote its ends
+          // down, so the first cut of the swing steps from where the blade really stood.
+          this.swingLeft = BLADE_SWING.window;
+          this.hitThisSwing.clear();
+          this.swingSwept = false;
+          this.swingSounded = false;
+          // Kept for the one case the sweep cannot cover, below: nothing was ever wired to say what
+          // a collider belongs to, so the blade can find nobody however well it is swung.
+          this.swingTarget = t;
+          noteBladeSwing(!hittableAt);
+          if (!hittableAt && !warnedBlind) {
+            warnedBlind = true;
+            console.warn('fighters: nothing was wired to say what a collider belongs to (npcDeps.hittableAt), so a swung blade can find nobody; the blow it replaced stands in. __debug.blades() counts it.');
+          }
           const swing = SWINGS[Math.floor(Math.random() * SWINGS.length)];
           if (rig?.has(swing)) rig.play(swing, { fadeIn: 0.06 });
           // A blade's own whoosh is the sabers' to make (the clip it plays may mark its own); a
@@ -517,20 +615,6 @@ export class Npc implements Living {
             combatSounds.saberSwing(swingStyle(swing), bx, by, bz, swing);
           }
           else combatSounds.melee(this.weapon, false, this.pos.x, this.pos.y + 1.2, this.pos.z);
-        }
-      }
-    }
-    if (this.hitIn >= 0) {
-      this.hitIn -= sdt;
-      if (this.hitIn < 0 && t) {
-        tmp.copy(t.pos).sub(this.pos);
-        if (tmp.length() < 2.8) {
-          t.damage(this.arm === 'saber' ? 32 : 18, this.pos, 4, this);
-          // Where the blow landed: a blade's is the sabers' own contact, a sword's the melee table's.
-          tmp2.copy(t.pos).y += t.halfHeight;
-          if (this.arm === 'saber') combatSounds.saberContact('body', tmp2.x, tmp2.y, tmp2.z);
-          else combatSounds.melee(this.weapon, true, tmp2.x, tmp2.y, tmp2.z);
-          if (effects) effects.burst(tmp2, this.arm === 'saber' ? this.color.getHex() : 0xffd0a0, 1, 0.2);
         }
       }
     }
@@ -582,13 +666,96 @@ export class Npc implements Living {
       rig.update(sdt);
       this.group.updateMatrixWorld(true);
     }
-    if (this.blade && this.holder) {
-      const len = this.blade.spec.length;
+    // Where the weapon lies this frame, and what it cuts. A lightsaber's blade runs up from the
+    // hilt's top; a sword's or a club's steel is the model's own longest extent out of the grip.
+    // The sweep is here, after the body has been posed and the holder's matrix is this frame's, so
+    // the blade never cuts from where it was standing a frame ago.
+    const swinging = this.swingLeft >= 0;
+    if (this.holder && this.arm !== 'gun') {
       this.holder.updateWorldMatrix(true, false);
-      this.holder.localToWorld(this.bladeBase.set(0, this.hiltTop, 0));
-      this.holder.localToWorld(this.bladeTip.set(0, this.hiltTop + len, 0));
-      this.blade.update(dt, this.bladeBase, this.bladeTip, !!t, camera ?? IDLE_CAMERA, this.hitIn >= 0 ? 1 : this.moving ? 0.3 : 0);
+      if (this.blade) {
+        this.holder.localToWorld(this.bladeBase.set(0, this.hiltTop, 0));
+        this.holder.localToWorld(this.bladeTip.set(0, this.hiltTop + this.blade.spec.length, 0));
+        // Whose blade this is when it meets another, and what it weighs (src/combat/clash.ts): the
+        // fighter's own living key, its swing window, and the medium style, which is what its
+        // one-hand swings are. Without this the blade owns nobody, and a blade that owns nobody
+        // never clashes with another that owns nobody either -- which is every other fighter.
+        this.blade.owner = this.key;
+        this.blade.attacking = swinging;
+        this.blade.clashWeight = CLASH.weights.medium;
+        this.blade.update(dt, this.bladeBase, this.bladeTip, !!t, camera ?? IDLE_CAMERA, swinging ? 1 : this.moving ? 0.3 : 0);
+      } else {
+        this.holder.localToWorld(this.bladeBase.set(0, 0, 0));
+        this.holder.localToWorld(this.bladeTip.copy(this.reachFar));
+      }
+      // Swinging, the blade cuts what it has passed through; standing, it only writes down where it
+      // is, so the first cut of the next swing steps from the blade and not from the last swing.
+      if (swinging && hittableAt) this.sweepBlade(effects, now);
+      else this.bladePath.mark(this.bladeBase, this.bladeTip, now);
     }
+    // The window has just shut on a swing that was never swept at all -- no lookup was wired to
+    // name what the blade touched, or the weapon had not finished loading into the hand. The blow
+    // the timer used to land stands in, so a wave one line short of its wiring leaves the fight
+    // exactly what it was rather than harmless. A swing that *was* swept never comes through here,
+    // whether it cut anybody or missed, so nothing is ever hurt twice.
+    if (closed) {
+      if (!this.swingSwept) this.timerBlow(effects);
+      this.swingTarget = null;
+    }
+  }
+
+  /**
+   * The blow the timer landed before the blade was swept: whatever it was aimed at, if it is still
+   * alive and still within reach, takes the same damage, the same shove, the same sound and the
+   * same burst it always did. It runs only where a swing could sweep nothing (`__debug.blades()`
+   * counts it as `fellBack`), never beside the sweep, so nothing is ever hurt twice.
+   */
+  private timerBlow(effects: Effects | null): void {
+    const t = this.swingTarget;
+    if (!t || t.dead) return;
+    tmp.copy(t.pos).sub(this.pos);
+    if (tmp.length() >= BLADE_SWING.timerReach) return;
+    const saber = this.arm === 'saber';
+    t.damage(saber ? BLADE_SWING.fighterSaber : BLADE_SWING.fighterMelee, this.pos, BLADE_SWING.fighterPush, this);
+    tmp2.copy(t.pos).y += t.halfHeight;
+    if (saber) combatSounds.saberContact('body', tmp2.x, tmp2.y, tmp2.z);
+    else combatSounds.melee(this.weapon, true, tmp2.x, tmp2.y, tmp2.z);
+    effects?.burst(tmp2, saber ? this.color.getHex() : BLADE_SWING.meleeSpark, 1, 0.2);
+    noteTimerBlow();
+  }
+
+  /**
+   * One frame of a swing: the blade cuts the ground it has covered since the last frame, through
+   * the same swept path the player's own blade takes, and whatever it passes through is hurt once
+   * however many of the path's steps touched it. **One sound a swing**, not one a frame: a swing
+   * that catches three bodies over three of its frames is one blow landing, exactly as the timer
+   * it replaced was, and a brawl of several fighters would otherwise be a good deal noisier than
+   * it was before. The burst and the borrowed flash are the sweep's own, per body.
+   */
+  private sweepBlade(effects: Effects | null, now: number): void {
+    const strike = this.strike;
+    const saber = this.arm === 'saber';
+    strike.effects = effects;
+    strike.now = now;
+    strike.damage = saber ? BLADE_SWING.fighterSaber : BLADE_SWING.fighterMelee;
+    strike.color = saber ? this.color.getHex() : BLADE_SWING.meleeSpark;
+    this.swingSwept = true;
+    // The player's readout is one shared record and this blade is swept at a different simulated
+    // second of the same drawn frame, so it is borrowed rather than written into: see
+    // `borrowSwingFigures`. The `finally` is what keeps a throw inside the query from leaving the
+    // player's own figures holding a fighter's swing.
+    let hits = 0;
+    borrowSwingFigures(now);
+    try {
+      hits = this.bladePath.sweep(strike, this.bladeBase, this.bladeTip, this.hitThisSwing);
+    } finally {
+      returnSwingFigures(now);
+    }
+    if (hits <= 0 || this.swingSounded) return;
+    this.swingSounded = true;
+    tmp2.copy(this.bladeBase).lerp(this.bladeTip, 0.5);
+    if (saber) combatSounds.saberContact('body', tmp2.x, tmp2.y, tmp2.z);
+    else combatSounds.melee(this.weapon, true, tmp2.x, tmp2.y, tmp2.z);
   }
 
   /** The blade renderer when the weapon is a lightsaber: the light it throws is read from it. */
@@ -696,6 +863,8 @@ export class NpcManager {
   /** `targets` is the world's one list of living things (the player, the creatures, the fighters). */
   update(dt: number, targets: readonly Living[], bolts: Bolts, camera: THREE.Camera | null, now: number): void {
     if (this.disposed) return;
+    this.expose();
+    noteBladeLookup(!!this.deps.hittableAt);
     const follow = this.deps.followCell;
     for (let i = this.npcs.length - 1; i >= 0; i--) {
       const npc = this.npcs[i];
@@ -705,7 +874,7 @@ export class NpcManager {
         npc.cell = follow(npc.cell, npc.cellFrom, npc.pos);
         npc.cellFrom.copy(npc.pos);
       }
-      npc.update(dt, this.terrain, targets, bolts, this.deps.effects, camera, now);
+      npc.update(dt, this.terrain, targets, bolts, this.deps.effects, camera, now, this.deps.hittableAt ?? null);
       if (npc.dead && npc.deadTimer <= 0) {
         // The collider handle went out of the lookup in `die`, at the moment the collider itself
         // went. Deleting it again here would unregister whichever live body rapier has since
@@ -715,6 +884,24 @@ export class NpcManager {
         this.version++;
       }
     }
+  }
+
+  /** Which `__debug` object the knob below was hung on, so it is hung once and not once a frame. */
+  private exposedOn: unknown = null;
+
+  /**
+   * `__debug.blades()` reports and `__debug.blades({ window: 0.2 })` retunes, hung here rather than
+   * in the game's own console block so that nothing outside these two files has to know that
+   * everybody else's blades have a tuning object at all (`clash.ts` and `nebulae.ts` hang theirs
+   * the same way). It is what says whether the wiring is in: `lookup` reads `none` while nothing
+   * has been given to name a collider with, which is the one way this wave can quietly do nothing.
+   */
+  private expose(): void {
+    if (typeof window === 'undefined') return;
+    const dbg = (window as unknown as { __debug?: Record<string, unknown> }).__debug;
+    if (!dbg || dbg === this.exposedOn) return;
+    this.exposedOn = dbg;
+    dbg.blades = (opts?: Partial<BladeSwingTune>) => bladeSwingReport(opts);
   }
 
   dispose(): void {

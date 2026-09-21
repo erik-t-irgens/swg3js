@@ -15,6 +15,8 @@ import { PLANETS, packIdOf, planetBelow, planetById, spaceZoneOf, type PlanetDef
 import { DEFAULT_SABER_COLOR, Player } from './player/player';
 import { SaberMarks } from './combat/saberMarks';
 import { collectBlades, lightAt, litCeiling, type LitSources } from './combat/bladeLights';
+import { CLASH, clashes } from './combat/clash.ts';
+import { saberHitReport, type SaberHitTune } from './combat/saberHit.ts';
 import { createBladeList } from './core/fx/bladeList';
 import { BLADE_GLOW_TUNE, segmentDistanceSq, type BladeGlowTune } from './core/fx/bladeGlowMath.ts';
 import { BLADE_GLOW_VIEWS, type BladeGlowPass } from './core/fx/bladeGlow';
@@ -714,6 +716,11 @@ class App {
     this.effects = new Effects(this.scene);
     // The ships' muzzle and hit flashes borrow the pool from here on, without waiting for the weapons rack (which sets it again).
     this.world.npcDeps.effects = this.effects;
+    // What a fighter's blade finds when it sweeps: the lookup the bolts are given, with the player's
+    // own capsule answering for the player, who is in no manager's collider map. Without it no swing
+    // can name what it touched, and every one of them falls back on the blow the timer used to land
+    // (`__debug.blades().lookup` says so, and the first such swing says so in the console).
+    this.world.npcDeps.hittableAt = (h) => (h === this.player.collider.handle ? this.world.playerTarget : this.world.hittableAt(h));
     // The room's air reads the world, the portal renderer and the player, all assigned above; its
     // motes join the scene now, hidden, so the loading screen's warm-up compiles them.
     this.roomAir = new RoomAir(this.scene, this.world, this.portals, this.settings);
@@ -1811,8 +1818,14 @@ class App {
         const p = at ? { x: at[0], y: at[1], z: at[2] } : this.player.worldPos;
         return this.feet.probe(p.x, p.y, p.z, at ? this.world.inside : this.world.inside || !!this.player.aboard);
       },
-      /** The saber system's state: style, current move, chain count, whether the rig has Jedi Academy's clips, the special jump in progress, and the thrown saber's flight. */
-      saber: () => ({ blade: (() => { const a = new THREE.Vector3(); const b = new THREE.Vector3(); this.player.bladeSegmentAt(0, a, b); return { hilt: a.toArray().map((v) => Number(v.toFixed(3))), tip: b.toArray().map((v) => Number(v.toFixed(3))) }; })(), blade2: (() => { if (this.player.bladeCount < 2) return null; const a = new THREE.Vector3(); const b = new THREE.Vector3(); this.player.bladeSegmentAt(1, a, b); return { hilt: a.toArray().map((v) => Number(v.toFixed(3))), tip: b.toArray().map((v) => Number(v.toFixed(3))) }; })(), style: this.player.saber.style, move: this.player.saber.move, chain: this.player.saber.chainCount, timer: Number(this.player.saber.timer.toFixed(2)), jkaClips: this.player.hasJkaClips, on: this.player.saberOn, special: this.player.jka.specialJump, thrown: this.player.thrown.inFlight ? { returning: this.player.thrown.returning, at: this.player.thrown.pos.toArray().map((v) => Number(v.toFixed(2))) } : null }),
+      /**
+       * The saber system's state: style, current move, chain count, whether the rig has Jedi Academy's clips, the special
+       * jump in progress, and the thrown saber's flight; and `hit`, which is where a blade lands -- this swing's hits, what
+       * last frame's blades cost in casts and sub-steps, the brush's last victims and the tuning. Any of `SABER_HIT`
+       * (`stepLength`, `maxSteps`, `jump`, `gap`, `carry`, `brushShare`, `brushEvery`, `brushRadius`, `brushPush`) moves it
+       * live, and `hit.tune` is what to bake; `__debug.saber({ brushShare: 0 })` is the switch that makes the game what it was.
+       */
+      saber: (opts?: Partial<SaberHitTune>) => ({ hit: saberHitReport(opts), blade: (() => { const a = new THREE.Vector3(); const b = new THREE.Vector3(); this.player.bladeSegmentAt(0, a, b); return { hilt: a.toArray().map((v) => Number(v.toFixed(3))), tip: b.toArray().map((v) => Number(v.toFixed(3))) }; })(), blade2: (() => { if (this.player.bladeCount < 2) return null; const a = new THREE.Vector3(); const b = new THREE.Vector3(); this.player.bladeSegmentAt(1, a, b); return { hilt: a.toArray().map((v) => Number(v.toFixed(3))), tip: b.toArray().map((v) => Number(v.toFixed(3))) }; })(), style: this.player.saber.style, move: this.player.saber.move, chain: this.player.saber.chainCount, timer: Number(this.player.saber.timer.toFixed(2)), jkaClips: this.player.hasJkaClips, on: this.player.saberOn, special: this.player.jka.specialJump, thrown: this.player.thrown.inFlight ? { returning: this.player.thrown.returning, at: this.player.thrown.pos.toArray().map((v) => Number(v.toFixed(2))) } : null }),
       /** Particle effects within r metres of the player: file, distance, whether playing, live particles. With `verbose`, every emitter: texture, blend, whether the texture loaded, and the first particle's size, alpha, colour and screen position. */
       particles: (r = 200, verbose = false) => {
         const list = this.world.particlesNear(this.player.pos.x, this.player.pos.z, r);
@@ -1863,6 +1876,14 @@ class App {
             this.world.setPlayerTarget(this.player.worldPos, !this.player.noclip && this.player.hp > 0, (dmg) => this.player.takeDamage(dmg));
             this.world.stepLiving(dt, this.player.worldPos, this.cam.camera);
             this.physics.step(dt);
+            // The blades are drawn and then weighed against one another here as they are in the
+            // frame loop. A driven tab draws no frames at all, and the clashes run on `simTime`
+            // like everything else with a clock, so without these two lines `__debug.clash()`
+            // could only ever report zeros -- including the owner's own check that `reach: 0`
+            // changed nothing. The peers are not stepped by this helper, so their blades are not
+            // drawn here either and only the player's, the fighters' and the catalogue's meet.
+            this.player.drawBlades(dt, this.cam.camera);
+            this.stepClashes();
             this.effects.update(dt);
             this.updateCamera(null);
             // The feet step with the simulation: the mixer is recording rather than playing, so a
@@ -6631,6 +6652,33 @@ class App {
     });
   }
 
+  /**
+   * Two blades that meet (`src/combat/clash.ts`), once every blade in the world has been drawn.
+   * Nothing about a clash crosses the wire: both browsers draw both blades, so each strikes its
+   * own sparks and neither takes damage from it.
+   *
+   * It is a method rather than a block in the frame loop because the loop is not the only thing
+   * that has to turn this clock: `__debug.advance` drives a tab that draws no frames at all, and
+   * without this call there `__debug.clash()` could only ever report zeros -- which is the one
+   * report the owner has instead of the sparks they cannot see.
+   */
+  private stepClashes(): void {
+    const player = this.player;
+    // The player's blades as the clashes read them: one hand (so a staff's two halves never meet
+    // each other), the style's weight, and the very swing the hit sweep hurts with -- which is
+    // `onFoot && saberOn && bladeActive` there (`jedi.ts`), so a blade carried in a saddle or a
+    // cockpit declares no swing it is not making.
+    const mine = player.saberBlades;
+    const weight = CLASH.weights[player.saber.style];
+    const swinging = !player.mounted && player.saberOn && player.bladeActive;
+    for (let i = 0; i < mine.length; i++) {
+      mine[i].owner = this.world.playerTarget.key;
+      mine[i].attacking = swinging;
+      mine[i].clashWeight = weight;
+    }
+    if (clashes.update(this.world.simTime, mine, this.world.npcs?.npcs ?? EMPTY_BODIES, remoteBlades.holders(this.world.mobiles?.live))) clashes.place(this.effects, sabers);
+  }
+
   /** One frame through the portal renderer: the camera's building in full, the world through its doors (or the reverse). */
   /** Draw calls and triangles of the last frame, summed over every pass. */
   private frameCalls = 0;
@@ -8895,10 +8943,18 @@ class App {
       // The other players' blades, from where their hands ended up this frame as well (their figures
       // were moved and posed in stepNet above). With the glow pass on they light the world through
       // it, exactly as the player's do, and ask for no light at all. With it off they take a pooled
-      // flash only when one is standing dark: this draw is the last asker in the frame, so nothing
-      // the player's own blade, a fighter's glow or a ship's room lights asked for earlier loses one
-      // -- and equally, with a busy pool a peer's blade goes unlit rather than taking somebody's.
+      // flash only when one is standing dark: nothing the player's own blade, a fighter's glow or a
+      // ship's room lights asked for earlier in the frame loses one -- and equally, with a busy pool
+      // a peer's blade goes unlit rather than taking somebody's. The clash step below is the only
+      // thing that asks after this draw, and it asks the same way (`CLASH.flashBorrow`, 'free'), so
+      // a clash in a lit cabin sparks without a light of its own rather than blanking the cabin.
       remoteBlades.draw(dt, this.cam.camera, this.bladeGlowOwnsLight() ? null : this.effects);
+      // Two blades that meet. Every blade in the world has just been drawn -- the player's above,
+      // the fighters' and the catalogue's in their own step, the peers' on the line above -- so the
+      // nearest approach between each pair is worked out here, where every pose is this frame's,
+      // rather than in the frame context's blade block below, which the Effects setting leaves out
+      // altogether. Nothing sparks while play is paused.
+      if (simulate) this.stepClashes();
       const tRender = performance.now();
       this.drawFrame();
       stats.renderMs = performance.now() - tRender;

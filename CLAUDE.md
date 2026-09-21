@@ -18,7 +18,7 @@ The owner plays it on Windows, in Chrome, and tests by hand. They report what th
 - Do not create pull requests unless asked.
 - Development happens on `claude/gun-combat`. After every commit, push the branch and fast-forward `main`:
   `git push -u origin claude/gun-combat && git checkout main && git merge --ff-only claude/gun-combat && git push origin main && git checkout claude/gun-combat`
-- Before pushing: `npx tsc --noEmit -p .` and `npx vite build` must be clean, and `npm run test:all` must pass (it runs the converter, terrain, effects, weather, first-person head, inventory, audio, display and network suites; several other suites are still separate scripts). `node --check` any converter or server module you touched. The tests are plain node scripts (`npm run test:converter`, `npm run test:net`, …), not vitest suites.
+- Before pushing: `npx tsc --noEmit -p .` and `npx vite build` must be clean, and `npm run test:all` must pass (it runs the converter, terrain, effects, weather, first-person head, close combat, inventory, audio, display and network suites; several other suites are still separate scripts). `node --check` any converter or server module you touched. The tests are plain node scripts (`npm run test:converter`, `npm run test:net`, …), not vitest suites.
 
 ## Setup on a new machine
 

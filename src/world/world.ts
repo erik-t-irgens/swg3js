@@ -64,6 +64,7 @@ import { Gallery } from './gallery';
 import { surfaces } from './surfaces';
 import { TurretManager, type TurretTarget } from '../combat/turrets';
 import { PLAYER_KEY, type Aggression, type Hittable, type Living, type Side } from '../combat/kit';
+import { clashes } from '../combat/clash.ts';
 
 const tmpQ = new THREE.Quaternion();
 const tmpV = new THREE.Vector3();
@@ -754,6 +755,11 @@ export class World {
       catalogue: () => MobileCatalogue.loaded(import.meta.env.BASE_URL),
       targets: () => this.targets(),
       groundAt: (x, y, z, inside) => this.groundAt(x, y, z, inside),
+      // What a carried blade finds when it sweeps. It goes through the fighters' own lookup when
+      // there is one, since that is the one that knows the player's capsule and it asks ours for
+      // everything else itself; asking ours again after it would search every collider twice for
+      // every wall a blade touches, which is most of what a blade touches.
+      hittableAt: (h) => (this.npcDeps.hittableAt ? this.npcDeps.hittableAt(h) : this.hittableAt(h)),
       // A mobile put down inside starts in the room whose box holds it (else the player's, who is
       // inside when anything is), then is followed through the portals as the player is.
       cellAt: (p) => this.layoutStream?.buildingAt(p) ?? this.cellState,
@@ -1022,6 +1028,10 @@ export class World {
 
   private unload(): void {
     this.loadGeneration++;
+    // Two blades meeting: the pairs that have clashed lately go with the world they clashed in
+    // (src/combat/clash.ts). The step holds no renderer between steps, so there is nothing here
+    // to free -- this is only the ring saying so rather than waiting for the clock to go back.
+    clashes.clear();
     // Every bed, emitter and weather channel let go before the things they follow are disposed: the
     // particle effects go a few lines down, and a loop left on one would follow a point in a world
     // that has gone. The sky and the effects are wired again on the next planet's first frames.
@@ -3521,7 +3531,14 @@ export class World {
 
   /** The mobile, creature, fighter, turret, other player or vehicle a physics collider belongs to (every collider of a long body is its own). */
   hittableAt(handle: number): Hittable | undefined {
-    return this.mobiles?.byCollider.get(handle) ?? this.creatures.byCollider.get(handle) ?? this.npcs.byCollider.get(handle) ?? this.turrets.byCollider.get(handle) ?? this.peers().byCollider.get(handle) ?? this.vehicles.find((v) => v.colliderHandles.includes(handle));
+    const found = this.mobiles?.byCollider.get(handle) ?? this.creatures.byCollider.get(handle) ?? this.npcs.byCollider.get(handle) ?? this.turrets.byCollider.get(handle) ?? this.peers().byCollider.get(handle);
+    if (found) return found;
+    // A plain loop rather than `find`, because this is asked once per collider a swept capsule
+    // touches and a blade is now cast up to four times a frame: the predicate handed to `find` is
+    // a closure made on every call, which is exactly what the rule against allocating in a step is
+    // about. Nothing else about the answer changes.
+    for (let i = 0; i < this.vehicles.length; i++) if (this.vehicles[i].colliderHandles.includes(handle)) return this.vehicles[i];
+    return undefined;
   }
 
   /** `target` is whom the turrets shoot at, or null while nothing should be shot (noclip, riding). */

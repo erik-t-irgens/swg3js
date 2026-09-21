@@ -14,7 +14,7 @@ import type { Physics } from '../../core/physics';
 import type { Terrain } from '../terrain';
 import type { Bolts } from '../../combat/bolts';
 import type { Effects } from '../../combat/effects';
-import type { Living } from '../../combat/kit';
+import type { Hittable, Living } from '../../combat/kit';
 import { GUNS, gunTypeFor } from '../../combat/guns';
 import { Character } from '../../player/character';
 import type { WeaponCatalogue } from '../../player/weapons';
@@ -74,6 +74,8 @@ export interface MobileManagerDeps {
   targets(): readonly Living[];
   /** The ground under a point, through the physics when inside a building. */
   groundAt(x: number, y: number, z: number, inside: boolean): number | null;
+  /** What a physics collider belongs to, when a carried blade sweeps through it. */
+  hittableAt?(handle: number): Hittable | undefined;
   /**
    * The room a mobile put down inside a building starts in (it walked through no portal to get
    * there): the smallest room box holding the point, else the player's room, or null.
@@ -303,6 +305,7 @@ export class MobileManager {
       effects: () => this.deps.effects(),
       alert: (self, attacker) => this.assist(self, attacker),
       groundAt: (x, gy, z, ins) => this.deps.groundAt(x, gy, z, ins),
+      hittableAt: (h) => this.deps.hittableAt?.(h),
       wantRagdoll: (self) => this.queueRagdoll(self),
     });
     this.live.push(m);

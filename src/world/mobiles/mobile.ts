@@ -32,8 +32,10 @@ import { GUNS, type GunProfile } from '../../combat/guns';
 import { Ragdoll } from '../../combat/ragdoll';
 import { SaberBlade } from '../../combat/saberBlade';
 import { boneForRole } from '../../player/rig';
-import { MUZZLE_PATTERNS } from './arms';
-import { nextLivingKey, PLAYER_KEY, type Aggression, type Living, type Side } from '../../combat/kit';
+import { BLADE_SWING, MUZZLE_PATTERNS, borrowSwingFigures, noteBladeSwing, returnSwingFigures } from './arms';
+import { BLADE_RADIUS, BladePath, type Striker } from '../../combat/sweep';
+import { CLASH } from '../../combat/clash.ts';
+import { nextLivingKey, PLAYER_KEY, type Aggression, type Hittable, type Living, type Side } from '../../combat/kit';
 import { hostileSides, sideOf } from '../../combat/targets';
 import { npcNow, NPC_TUNE, type NpcMark, type NpcRow, type NpcSubject } from '../../net/npcNet.ts';
 import { markActor } from '../portalRender';
@@ -176,6 +178,8 @@ export interface MobileDeps {
   alert(self: Mobile, attacker: Living): void;
   /** The ground under a point, through the physics when inside a building. */
   groundAt(x: number, y: number, z: number, inside: boolean): number | null;
+  /** What a physics collider belongs to, when a carried blade sweeps through it; with none it cuts nobody. */
+  hittableAt?(handle: number): Hittable | undefined;
   /** Asking for the ragdoll, which the manager starts a couple a frame. */
   wantRagdoll(self: Mobile): void;
 }
@@ -271,6 +275,27 @@ export class Mobile implements Living, NpcSubject {
   private hitCd = 0;
   private swingAt = 0;
   private swingKey: number | null = null;
+  /** While a carried blade is live: the simulated second its swing window shuts. */
+  private swingUntil = 0;
+  /** What this swing has already bitten: one bite per body per swing, as every other blade takes. */
+  private readonly hitThisSwing = new Set<Hittable>();
+  /** Whether this swing has already been heard landing: one contact sound a swing, not one a frame. */
+  private swingSounded = false;
+  /** Where its blade was when it was last drawn; its own, never at module scope. */
+  private readonly bladePath = new BladePath();
+  /** This body behind its own blow: one struct, written each frame, never made in a step. */
+  private strike: Striker | null = null;
+  /**
+   * What its blade is allowed to find: only something alive. The world's lookup names the turrets,
+   * the vehicles and another player's hull as well, and the blow this replaces could only ever
+   * reach a `Living` -- so a swing beside a parked speeder leaves the speeder alone, and a body
+   * already out is not cut again. One arrow for the life of the body, never one a frame.
+   */
+  private readonly findLiving = (handle: number): Hittable | undefined => {
+    const c = this.deps.hittableAt?.(handle);
+    if (!c || c.dead || typeof (c as { key?: unknown }).key !== 'number') return undefined;
+    return c;
+  };
   private shotsLeft = 0;
   private nextShotAt = 0;
   private thinkAt = 0;
@@ -534,7 +559,47 @@ export class Mobile implements Living, NpcSubject {
     h.localToWorld(this.bladeBase.set(0, this.hiltTop, 0));
     h.localToWorld(this.bladeTip.set(0, this.hiltTop + b.spec.length, 0));
     const on = !this.dead && this.fighting();
-    b.update(dt, this.bladeBase, this.bladeTip, on, camera ?? IDLE_CAMERA, this.swingAt > 0 ? 1 : this.speed > 0.5 ? 0.3 : 0, this.dead);
+    // A swing is live from the moment the clip's blow would have landed until its window shuts, so
+    // the smear, the clashes and the sweep below all read the one answer.
+    const swinging = this.swingAt > 0 || this.now < this.swingUntil;
+    // Whose blade it is when it meets another, and what it weighs (src/combat/clash.ts). Without
+    // this it owns nobody, and two blades that own nobody never clash with each other.
+    b.owner = this.key;
+    b.attacking = swinging;
+    b.clashWeight = CLASH.weights.medium;
+    b.update(dt, this.bladeBase, this.bladeTip, on, camera ?? IDLE_CAMERA, swinging ? 1 : this.speed > 0.5 ? 0.3 : 0, this.dead);
+    // Swinging, the blade cuts what it has passed through since the last frame; standing, it only
+    // writes down where it is, so the first cut of the next swing steps from the blade itself. A
+    // driven body (another browser thinks for it) never swings here: its keeper's blow crosses.
+    if (this.driven || this.dead || !this.deps.hittableAt) return;
+    if (this.now >= this.swingUntil) {
+      this.bladePath.mark(this.bladeBase, this.bladeTip, this.now);
+      return;
+    }
+    const strike = (this.strike ??= { physics: this.deps.physics, hittableAt: this.findLiving, effects: null, source: this, from: this.pos, exclude: this.body, spare: null, radius: BLADE_RADIUS, damage: this.blow, push: 3, color: b.color.getHex(), now: 0 });
+    strike.effects = this.deps.effects();
+    strike.damage = this.blow;
+    strike.push = BLOW_PUSH[this.entry.stats?.sizeClass ?? 'small'] ?? 3;
+    strike.color = b.color.getHex();
+    strike.now = this.now;
+    // The player's readout (`SABER_HIT_STATS`) is one shared record and this blade is swept at a
+    // different simulated second of the same drawn frame, so it is borrowed and put back rather
+    // than written into. The `finally` is what keeps a throw inside the query from leaving the
+    // player's own figures holding this swing for good.
+    let hits = 0;
+    borrowSwingFigures(this.now);
+    try {
+      hits = this.bladePath.sweep(strike, this.bladeBase, this.bladeTip, this.hitThisSwing);
+    } finally {
+      returnSwingFigures(this.now);
+    }
+    // One sound a swing, not one a frame: a swing that catches three bodies over three of its
+    // frames is one blow landing, exactly as the instant blow it replaces was.
+    if (hits > 0 && !this.swingSounded) {
+      this.swingSounded = true;
+      tmp2.copy(this.bladeBase).lerp(this.bladeTip, 0.5);
+      combatSounds.saberContact('body', tmp2.x, tmp2.y, tmp2.z);
+    }
   }
 
   /** The blade renderer while it lives and holds a lightsaber: the blade glow reads its light from it, as from a fighter's. */
@@ -688,6 +753,8 @@ export class Mobile implements Living, NpcSubject {
       this.decision = null;
       this.goal = null;
       this.swingAt = 0;
+      // The blade stops cutting here as well: from now on the keeper's browser lands its blows.
+      this.swingUntil = 0;
       this.shotsLeft = 0;
       this.dotLeft = 0;
       this.slowed = 0;
@@ -846,6 +913,8 @@ export class Mobile implements Living, NpcSubject {
         this.downPhase = 'fall';
         this.state = 'knockdown';
         this.swingAt = 0;
+        // A body on its way to the floor cuts nothing more: the window shuts with the swing.
+        this.swingUntil = 0;
         this.shotsLeft = 0;
       }
     }
@@ -1431,7 +1500,21 @@ export class Mobile implements Living, NpcSubject {
     // A blow under way lands part way into its swing, if the target is still in reach.
     if (this.swingAt > 0 && this.now >= this.swingAt) {
       this.swingAt = 0;
-      const t = this.swingKey !== null && target && target.key === this.swingKey ? target : null;
+      // A body that carries a blade cuts what the blade passes through instead: the swing opens a
+      // window here and `updateBlade` sweeps the path for as long as it runs, so it can miss, can
+      // catch two bodies at once, and takes one bite out of each. With nothing wired to name what a
+      // collider belongs to, no sweep is possible at all and the instant blow below stands in.
+      // Only a blade that is really being drawn can be swept: `updateBlade` works the ends out and
+      // it does nothing at all for a body culled as a group or lying in a ragdoll, so such a body
+      // keeps the instant blow it always had rather than swinging at nothing.
+      const sweeps = !!this.blade && !!this.deps.hittableAt && !this.driven && this.group.visible && !this.ragdoll;
+      if (this.blade) noteBladeSwing(!sweeps);
+      if (sweeps) {
+        this.swingUntil = this.now + BLADE_SWING.window;
+        this.hitThisSwing.clear();
+        this.swingSounded = false;
+      }
+      const t = sweeps ? null : this.swingKey !== null && target && target.key === this.swingKey ? target : null;
       if (t && !t.dead) {
         const gap = Math.hypot(t.pos.x - this.pos.x, t.pos.z - this.pos.z) - t.radiusToward(this.pos) - this.radiusToward(t.pos);
         const level = Math.abs(t.pos.y + t.halfHeight - (this.pos.y + this.halfHeight)) <= this.halfHeight + t.halfHeight + BRAIN_TUNE.vertical;
@@ -1547,6 +1630,10 @@ export class Mobile implements Living, NpcSubject {
     this.rangedCd = 0;
     this.hitCd = 0;
     this.swingAt = 0;
+    this.swingUntil = 0;
+    this.swingSounded = false;
+    this.hitThisSwing.clear();
+    this.bladePath.reset();
     this.shotsLeft = 0;
     this.downPhase = null;
     this.memory.clear();
