@@ -68,6 +68,25 @@ export interface SurfacePack {
 export type FootSource = 'water' | 'room' | 'object' | 'terrain' | 'last' | 'default';
 
 /**
+ * What the ground under a foot is shaped like: the surface's own normal, and the collider it
+ * belongs to. Nothing about a sound needs either; a mark laid where the foot landed needs both --
+ * the normal so it lies in a slope instead of through it, the collider so a mark on a streamed
+ * prop goes down with that prop. One kept record, refilled: nothing is allocated to ask.
+ */
+export interface FootGround {
+  nx: number;
+  ny: number;
+  nz: number;
+  /**
+   * The collider underfoot, or **null** for the world itself (the terrain, a building's shell).
+   * Null rather than a number on purpose: which number stands for "the world" is the marks
+   * system's own to say (it is -1 there, because 0 is a handle the engine really hands out), and
+   * naming it here would be that value's second home.
+   */
+  owner: number | null;
+}
+
+/**
  * What the world can say about a point. The world answers with what it holds -- a room's own
  * surface, and the templates of the object and the ground -- and the naming below turns the
  * templates into the words the client data keys on, so the world needs to know nothing about the
@@ -88,6 +107,15 @@ export interface SurfaceSource {
   objectTemplate(x: number, y: number, z: number, inside: boolean): string | null;
   /** The terrain surface template the ground is painted with there. */
   groundTemplate(x: number, z: number): string | null;
+  /**
+   * What the ground under a point is shaped like, for a mark laid on it rather than for a sound:
+   * its normal, and the collider it belongs to. Fills `out` and says whether it could answer.
+   *
+   * Optional, and asked for only when something is really going to be laid there -- a walk over
+   * stone asks nothing -- so a world without it (a node test, a planet with no physics yet) simply
+   * gets flat, world-owned marks.
+   */
+  footGround?(x: number, y: number, z: number, inside: boolean, out: FootGround): boolean;
   /** The building and cell a point is in, for the muffling rule; null in the open. */
   space(x: number, y: number, z: number): SoundSpace | null;
 }
@@ -309,6 +337,12 @@ export interface PlayerBody extends ClipSource {
   dead: boolean;
   /** The species pack's id (`human_male`), which names its clips and finds its client data. */
   species: string;
+  /**
+   * Which way the body faces, a turn about +Y. Nothing about a sound needs it; a foot's own mark
+   * does, since a print points the way its body was going. Optional, so a caller that has none
+   * (and the node tests) is unchanged.
+   */
+  heading?: number;
 }
 
 /** A mobile, as this needs to see it: the catalogue's creatures, droids and people. */
@@ -321,6 +355,8 @@ export interface MobileBodyLike {
   state: string;
   inside: boolean;
   scale: number;
+  /** Which way it faces, for the print its foot leaves; optional, as the player's is. */
+  heading?: number;
   pos: { x: number; y: number; z: number };
   entry: { id: string; template?: string; kind?: string; appearance?: string | null; stats?: { sizeClass?: string } | null };
   animator: { activeClips(out: ActiveClip[]): number } | null;
@@ -335,6 +371,8 @@ export interface FighterBodyLike {
   /** Whether it has something it means to fight, which is when it calls out. */
   hunting: boolean;
   species: string;
+  /** Which way it faces, for the print its foot leaves; optional, as the player's is. */
+  heading?: number;
   pos: { x: number; y: number; z: number };
   cell: unknown | null;
   rig: { activeClips(out: ActiveClip[]): number } | null;
@@ -383,6 +421,48 @@ interface Voice {
   voices: number;
 }
 
+/**
+ * One foot landing, as anything else that wants to know hears of it: where it landed, what it
+ * landed on, and whose foot it was. It is one kept record, refilled per step, so a listener reads
+ * what it needs and never holds on to it -- and a listener is called on the frame the clip's own
+ * mark says the foot lands, which is the whole point of hanging one here rather than on a clock.
+ *
+ * The world lays a print off this (`src/world/footprints.ts`); the sound is played beside it. This
+ * module knows nothing of either: it says what happened, as it already does for the mixer.
+ */
+export interface FootStep {
+  /** The body's own key: the player's 1, every other living thing's its own. */
+  key: number;
+  kind: 'player' | 'mobile' | 'fighter';
+  label: string;
+  /** What it landed on, or null where the body is swimming and has no feet at all. */
+  surface: string | null;
+  from: FootSource;
+  x: number;
+  y: number;
+  z: number;
+  /** The body's heading: a turn about +Y, as the rest of the game keeps one. */
+  heading: number;
+  /** How big the body is against the model it was built from; 1 for a person. */
+  scale: number;
+  inside: boolean;
+  /** Aboard a hull, what its deck is made of -- and a sign that the place above is that hull's frame. */
+  deck: string | null;
+  /**
+   * What the ground under this step is shaped like, asked for rather than handed over: the slope
+   * and the collider cost a look at the world and only a listener that is really going to lay
+   * something there wants them, so a walk over stone pays nothing. Fills the caller's own record
+   * and says whether the world could answer.
+   *
+   * **Valid only inside the listener's own call**, like the rest of this record: it reads where the
+   * step happened, which the next step overwrites. Null where nothing can say (a node test).
+   */
+  ground: ((out: FootGround) => boolean) | null;
+}
+
+/** A listener beside the sound. Set on `BodySounds.onStep`; only one, which is all anything needs. */
+export type StepHook = (step: FootStep) => void;
+
 /** One line of the report: a foot event and everything that decided what it sounded like. */
 export interface FootLogRow {
   at: number;
@@ -407,6 +487,11 @@ export class BodySounds {
    * moves both at once.
    */
   readonly tune: FootTune = FOOT_TUNE;
+  /**
+   * Somebody else who wants to know when a foot lands: the world's footprints. Called on the same
+   * mark as the sound, with one kept record, and a step with nobody listening costs one branch.
+   */
+  onStep: StepHook | null = null;
   readonly index = new ClipEventIndex();
   /** The last few foot events, which is how feet are checked in a tab that can hear nothing. */
   readonly log: FootLogRow[] = [];
@@ -554,6 +639,8 @@ export class BodySounds {
       w.x = p.x;
       w.y = p.y;
       w.z = p.z;
+      w.heading = p.heading ?? 0;
+      w.scale = 1;
       w.inside = p.inside;
       w.deck = p.deck;
       w.space = p.space;
@@ -577,6 +664,9 @@ export class BodySounds {
       w.x = m.pos.x;
       w.y = m.pos.y;
       w.z = m.pos.z;
+      w.heading = m.heading ?? 0;
+      // A creature's own size, which is what makes a bantha's print a bantha's and not a person's.
+      w.scale = m.scale > 0 ? m.scale : 1;
       w.inside = m.inside;
       w.deck = null;
       w.space = null;
@@ -590,6 +680,8 @@ export class BodySounds {
       w.x = f.pos.x;
       w.y = f.pos.y;
       w.z = f.pos.z;
+      w.heading = f.heading ?? 0;
+      w.scale = 1;
       w.inside = !!f.cell;
       w.deck = null;
       w.space = null;
@@ -604,7 +696,7 @@ export class BodySounds {
   }
 
   /** Where the body being stepped stands, refilled per body: the update allocates nothing. */
-  private readonly where = { x: 0, y: 0, z: 0, inside: false, deck: null as string | null, space: null as SoundSpace | null, dead: false, hunting: false, player: false };
+  private readonly where = { x: 0, y: 0, z: 0, heading: 0, scale: 1, inside: false, deck: null as string | null, space: null as SoundSpace | null, dead: false, hunting: false, player: false };
 
   status(): Record<string, unknown> {
     const rows: Record<string, unknown>[] = [];
@@ -684,7 +776,7 @@ export class BodySounds {
     return v;
   }
 
-  private stepBody(v: Voice, w: { x: number; y: number; z: number; inside: boolean; deck: string | null; space: SoundSpace | null; dead: boolean; hunting: boolean }, loopOwner: MobileBodyLike | null, source: ClipSource | null, listener: { x: number; y: number; z: number }, sweep: boolean): void {
+  private stepBody(v: Voice, w: { x: number; y: number; z: number; heading: number; scale: number; inside: boolean; deck: string | null; space: SoundSpace | null; dead: boolean; hunting: boolean }, loopOwner: MobileBodyLike | null, source: ClipSource | null, listener: { x: number; y: number; z: number }, sweep: boolean): void {
     const { x, y, z, inside, dead, hunting } = w;
     // A body met for the first time is measured at once rather than waiting for the next pass: a
     // creature spawned under the player's nose would otherwise stand silent for a quarter second.
@@ -756,6 +848,8 @@ export class BodySounds {
     this.foot.x = x;
     this.foot.y = y;
     this.foot.z = z;
+    this.foot.heading = w.heading;
+    this.foot.scale = w.scale;
     this.foot.inside = inside;
     this.foot.deck = w.deck;
     this.foot.player = v.kind === 'player';
@@ -781,7 +875,19 @@ export class BodySounds {
   }
 
   /** Where the body whose events are being read stands; a field, so the sink makes no closure. */
-  private readonly foot = { x: 0, y: 0, z: 0, inside: false, deck: null as string | null, space: null as SoundSpace | null, player: false };
+  private readonly foot = { x: 0, y: 0, z: 0, heading: 0, scale: 1, inside: false, deck: null as string | null, space: null as SoundSpace | null, player: false };
+  /** The one step handed to whoever is listening, refilled: a foot landing allocates nothing. */
+  private readonly stepOut: FootStep = { key: 0, kind: 'player', label: '', surface: null, from: 'default', x: 0, y: 0, z: 0, heading: 0, scale: 1, inside: false, deck: null, ground: null };
+  /**
+   * The step's own question about the ground it landed on, answered from where that step happened.
+   * A bound field rather than a closure per step, so a foot landing allocates nothing; it is put on
+   * the record once below and reads `this.foot`, which is the step being handed over.
+   */
+  private readonly askGround = (out: FootGround): boolean => {
+    const w = this.world;
+    if (!w || !w.footGround) return false;
+    return w.footGround(this.foot.x, this.foot.y, this.foot.z, this.foot.inside, out);
+  };
   /** The one question asked of the resolver, refilled: a step allocates nothing. */
   private readonly query = { x: 0, y: 0, z: 0, inside: false, player: false, last: null as string | null, deck: null as string | null };
 
@@ -854,6 +960,26 @@ export class BodySounds {
     else if (sound) this.counts.noSound++;
     // Rounded with arithmetic rather than `toFixed`, which would make a string per step to throw away.
     this.note({ at: Math.round(this.clock * 100) / 100, body: v.label, clip: clip.name, event: event.name, surface: r.surface, from: r.from, sound, key, distance: Math.round(this.liveDistance * 10) / 10 });
+    // And whoever else wants to know that a foot landed here, on the same mark and the same frame:
+    // the world's own prints. One kept record, filled and handed over; nothing is allocated, and a
+    // listener that throws is its own affair -- the sound has already played.
+    const hook = this.onStep;
+    if (!hook) return;
+    const out = this.stepOut;
+    out.key = v.key;
+    out.kind = v.kind;
+    out.label = v.label;
+    out.surface = r.surface;
+    out.from = r.from;
+    out.x = this.foot.x;
+    out.y = this.foot.y;
+    out.z = this.foot.z;
+    out.heading = this.foot.heading;
+    out.scale = this.foot.scale;
+    out.inside = this.foot.inside;
+    out.deck = this.foot.deck;
+    out.ground = this.askGround;
+    hook(out);
   }
 
   /**

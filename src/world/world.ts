@@ -37,7 +37,7 @@ import { addPointLight, fillCascades, luminanceOf, resetFxLights, setDirectional
 import { ParticleEffects, type EffectHandle, type EffectSounds } from './particles';
 import { Ambience, type AmbienceContext, type BedRow, type RoomRow } from '../audio/ambience.ts';
 import { OUTSIDE, type SoundSpace } from '../audio/distance.ts';
-import { FOOT_TUNE } from '../audio/footsteps.ts';
+import { FOOT_TUNE, type FootGround } from '../audio/footsteps.ts';
 import type { LoopHost } from '../audio/emitters.ts';
 import { loadSpacePack, type SpacePack } from '../space/spaceData.ts';
 import { Nebulae, installNebulaDebug } from '../space/nebulae.ts';
@@ -68,6 +68,8 @@ import { clashes } from '../combat/clash.ts';
 
 const tmpQ = new THREE.Quaternion();
 const tmpV = new THREE.Vector3();
+/** The ground's normal under a foot, for the print laid there; a step allocates nothing. */
+const footNormal = new THREE.Vector3();
 const lumOf = (c: THREE.Color): number => luminance(c.r, c.g, c.b);
 const tmpM = new THREE.Matrix4();
 /** How far out a space zone's planets hang, and the radius (metres) a planet of size 1 has there. */
@@ -714,6 +716,46 @@ export class World {
       const filter = inside ? groups(Group.all, Group.all & ~(Group.terrain | Group.exterior)) : undefined;
       const hit = this.physics.topHit(x, z, y + FOOT_TUNE.probe, FOOT_TUNE.reach, filter, World.staticOnly);
       return hit ? stream.templateOfCollider(hit.handle) : null;
+    },
+    /**
+     * What the ground under a foot is shaped like, for the mark laid there rather than for the
+     * sound: the surface's own normal, so a print lies in a dune's face instead of cutting through
+     * it, and the collider it stands on, so a print laid on a placed object goes down with that
+     * object. Fills the caller's record and says whether anything could be said.
+     *
+     * It is asked for **only when a mark is really going to be laid** -- a walk over stone never
+     * reaches here -- so it can afford a look of its own. The normal is the terrain's, which is
+     * four height samples half a metre apart and no ray at all; the block under a body that is
+     * standing on it is already generated, so nothing is built on the main thread to answer.
+     *
+     * A body standing on top of a placed object takes that object's collider and the ground's own
+     * slope. That is the honest answer and not an oversight: the surface word came from the ground
+     * underneath in the first place (most placed things are made of nothing of their own, which is
+     * what the client's surface type 0 means), and what matters is that the mark dies with the
+     * thing it was laid on.
+     */
+    footGround: (x: number, y: number, z: number, inside: boolean, out: FootGround): boolean => {
+      out.nx = 0;
+      out.ny = 1;
+      out.nz = 0;
+      // Null is the world itself: the marks system names that value, not this.
+      out.owner = null;
+      const terrain = this.terrain;
+      if (terrain) {
+        const n = terrain.normalAt(x, z, footNormal);
+        out.nx = n.x;
+        out.ny = n.y;
+        out.nz = n.z;
+      }
+      const stream = this.layoutStream;
+      if (stream) {
+        // The same ray, filter and predicate `objectTemplate` above casts, so what a print is laid
+        // on and what it sounds like can never name two different things.
+        const filter = inside ? groups(Group.all, Group.all & ~(Group.terrain | Group.exterior)) : undefined;
+        const hit = this.physics.topHit(x, z, y + FOOT_TUNE.probe, FOOT_TUNE.reach, filter, World.staticOnly);
+        if (hit) out.owner = hit.handle;
+      }
+      return true;
     },
     groundTemplate: (x: number, z: number): string | null => this.terrain?.surfaceAt(x, z) ?? null,
     space: (x: number, y: number, z: number): SoundSpace | null => this.ambience?.sources.spaceAt?.(x, y, z) ?? null,

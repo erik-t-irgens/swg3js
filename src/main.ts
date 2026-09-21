@@ -13,9 +13,12 @@ import { Input, type Action } from './core/input';
 import { Physics } from './core/physics';
 import { PLANETS, packIdOf, planetBelow, planetById, spaceZoneOf, type PlanetDef } from './data/planets';
 import { DEFAULT_SABER_COLOR, Player } from './player/player';
-import { SaberMarks } from './combat/saberMarks';
+import { MARK_WORLD, marks, type MarkPlace } from './world/marks.ts';
 import { collectBlades, lightAt, litCeiling, type LitSources } from './combat/bladeLights';
 import { CLASH, clashes } from './combat/clash.ts';
+import { SCARS, scarReport, setScars, tuneScars } from './combat/scars.ts';
+import { gunSpeedReport, type GunSpeedTune } from './combat/guns.ts';
+import { footprints } from './world/footprints.ts';
 import { saberHitReport, type SaberHitTune } from './combat/saberHit.ts';
 import { createBladeList } from './core/fx/bladeList';
 import { BLADE_GLOW_TUNE, segmentDistanceSq, type BladeGlowTune } from './core/fx/bladeGlowMath.ts';
@@ -297,8 +300,13 @@ class App {
   private readonly world: World;
   private readonly player: Player;
   private readonly effects: Effects;
-  /** The burns lit lightsabers leave on what they touch. */
-  private readonly marks = new SaberMarks();
+  /** The marks the world keeps: a blade's burn, a bolt's scar, a foot's print. One set for the page. */
+  private readonly marks = marks;
+  /** Scratch for the prints the feet lay: a foot landing allocates nothing. */
+  private readonly printAt = { x: 0, y: 0, z: 0 };
+  private readonly printAlong = { x: 0, y: 0, z: 0 };
+  private readonly printUp = { x: 0, y: 1, z: 0 };
+  private readonly printOpts: MarkPlace = { along: null, mirror: false, aspect: 1, owner: MARK_WORLD };
   private readonly bladeSegments = [0, 1, 2].map(() => ({ a: new THREE.Vector3(), b: new THREE.Vector3() }));
   private readonly markPoint = new THREE.Vector3();
   private readonly markNormal = new THREE.Vector3();
@@ -727,7 +735,38 @@ class App {
     this.roomAirInput = { dt: 0, camera: this.cam.camera, view: null, cell: null, aboard: null, cameraInHull: false, playerPos: this.player.pos, sun: null, overcast: 0, dust: 0, bufferHeight: 1 };
     this.litSources.world = this.world;
     this.litSources.effects = this.effects;
-    this.scene.add(this.marks.mesh);
+    this.scene.add(this.marks.group);
+    // What lays the mark a bolt leaves where it stops (`src/combat/scars.ts`). The combat code has
+    // no way to reach the marks system and no business knowing what builds a mark, so it asks
+    // through a seam and this is the one line that fills it in. The marks system lives for the
+    // session -- a world being left clears its ring rather than taking it down -- so it is
+    // registered once here and never again.
+    setScars(this.marks);
+    // Where a foot lands leaves a print: the footprint listener works out where it goes, which way
+    // round it is, how big it is and how long it lasts, and the marks system draws it as its own
+    // kind. One closure, made once, and the record it is handed is read here and never held.
+    footprints.sink = (m) => {
+      this.printAt.x = m.x;
+      this.printAt.y = m.y;
+      this.printAt.z = m.z;
+      // The heading, horizontal: `place` flattens it into the surface itself.
+      this.printAlong.x = m.fx;
+      this.printAlong.y = 0;
+      this.printAlong.z = m.fz;
+      // The ground's own slope, so the print lies in a dune's face rather than through it. Laid
+      // flat, a print's toe is under the sand past about two and a half degrees: the lift is 6 mm
+      // against a half-length of 140 mm, and a dune face is ten to twenty degrees.
+      this.printUp.x = m.nx;
+      this.printUp.y = m.ny;
+      this.printUp.z = m.nz;
+      this.printOpts.along = this.printAlong;
+      this.printOpts.mirror = m.left;
+      this.printOpts.aspect = m.length / m.width;
+      // What it was laid on, so a print on a placed object goes down when that object streams out.
+      // Null is the world itself, which is the marks system's own `MARK_WORLD` and is -1, not 0.
+      this.printOpts.owner = m.owner === null ? MARK_WORLD : m.owner;
+      this.marks.place('print', this.printAt, this.printUp, m.width, m.life, this.printOpts);
+    };
     this.hud = new Hud(this.ui);
     // The crosshair, the charge ring and a slot's cooldown sweep are shapes and go on the overlay;
     // the keys on the slot caps and in the help block come from the bindings, read once here and
@@ -1739,6 +1778,30 @@ class App {
         const log = this.feet.log.slice(-Math.max(1, n));
         console.table(log);
         return { ...this.feet.status(), ground: { familyChunksHeld: this.inWorld ? this.world.terrain.familyChunks : 0, familyChunks: FAMILY_TUNE.familyChunks }, recent: log };
+      },
+      /**
+       * The prints feet leave, headless: the last dozen laid (the body, the ground, which foot,
+       * where, how steep the ground was, what it was laid on and how long it will last), how many
+       * steps were taken and what became of each -- laid, refused for hard ground, refused aboard a
+       * hull, or too soon after the last one -- and which surfaces keep a print at all. `drawn`
+       * false means nothing is wired to the marks system and nothing is being drawn.
+       *
+       * With an object it tunes, live, every invented number of its own: whether prints are laid at
+       * all (`enabled`), a print's `length` and `width`, half the distance between a body's feet
+       * (`stance`), how long one lasts (`life`), how much of that life the ground's own grading is
+       * spent on (`strengthLife`), how far a body must move before it leaves another (`minStep`),
+       * the most a creature's own size may grow one by (`maxScale`) and how many bodies' feet are
+       * remembered (`bodies`). A key named in none of them is said rather than dropped. Which
+       * ground keeps a print is a table, not a number: `PRINT_SURFACES` in `src/world/surfaces.ts`.
+       */
+      footprints: (opts: Partial<typeof footprints.tune> = {}) => {
+        const unknown: string[] = [];
+        for (const [key, value] of Object.entries(opts)) {
+          if (key in footprints.tune) (footprints.tune as unknown as Record<string, unknown>)[key] = value;
+          else unknown.push(key);
+        }
+        if (unknown.length) console.warn(`footprints: nothing here is tuned by ${unknown.join(', ')}`);
+        return footprints.status();
       },
       /**
        * The guns, headless: the last shots, hits, misses, flybys, blows and blasts as a table, each
@@ -2983,8 +3046,25 @@ class App {
         this.player.refitGrip();
         return { ...this.player.gripTune, effective: { right: this.player.tunedGrip('right'), left: this.player.tunedGrip('left') }, axes: this.player.rig?.grip ?? null };
       },
-      /** How many lightsaber burns are on the world's surfaces now. */
-      marks: () => this.marks.count(),
+      /**
+       * The ground guns' bolt speed: the multiplier in force, what a bolt is stretched to, and what
+       * every trigger that fires a bolt now leaves the muzzle at in metres a second beside what it
+       * left at before, slowest first. `__debug.guns({ speed: 1 })` puts every one of them back to
+       * exactly the speed its own weapon data gives it, to the last bit, and draws its bolt exactly
+       * the length it always was. A ship's guns are not here and are not touched: 600 m/s over
+       * 512 m is the game's own number out of its own table.
+       */
+      guns: (opts?: Partial<GunSpeedTune> & { speed?: number }) => gunSpeedReport(opts),
+      /**
+       * The mark a bolt leaves: whether anything is laying them at all, whether they are switched
+       * on, and how many of each family have been laid and refused. `__debug.scars({ on: 0 })` is
+       * the switch that makes the game what it was. How a mark *looks* -- how wide each family is
+       * drawn, how long it lasts, how much of the ring the scars have -- is `__debug.marks()`.
+       */
+      scars: (opts?: Partial<typeof SCARS>) => {
+        if (opts) tuneScars(opts);
+        return scarReport();
+      },
       /**
        * The lightsaber glow. No argument: the blades lit now, whether the pass drew, the light ceiling and the flash pool.
        * `show`: 'light' the added light over a dim picture, 'normals' the normals it lit with, 'rect' the box it worked in
@@ -4079,7 +4159,9 @@ class App {
       // The blocker's own shot from the block point, which crosses as any other shot of theirs does.
       // One bolt in, one bolt out: the one that came in is ending on every screen, this one's word
       // is on its way, and neither browser has to guess what the other did with it.
-      this.world.bolts.fire(at, out, { owner: 'player', damage: bolt.damage, metresPerSecond: bolt.speed, life: bolt.life, color: bolt.color, size: bolt.size, projectile: bolt.projectile, exclude: this.player.aboard ? this.player.aboard.vehicle.body : this.player.body, frame: this.player.aboard ? { matrix: this.player.aboard.vehicle.group.matrixWorld, physics: this.player.aboard.physics } : null, source: this.world.playerTarget });
+      // A bolt turned away by a blade is still that gun's bolt where it finally lands, so the mark
+      // it will leave is the incoming bolt's own and not a plain blaster's.
+      this.world.bolts.fire(at, out, { owner: 'player', damage: bolt.damage, metresPerSecond: bolt.speed, life: bolt.life, color: bolt.color, size: bolt.size, scar: bolt.scar, projectile: bolt.projectile, exclude: this.player.aboard ? this.player.aboard.vehicle.body : this.player.body, frame: this.player.aboard ? { matrix: this.player.aboard.vehicle.group.matrixWorld, physics: this.player.aboard.physics } : null, source: this.world.playerTarget });
       return true;
     };
     // This player's own health is looked at ten times a second and sent at `healthHz`, which is why
@@ -4730,6 +4812,12 @@ class App {
       // The guns ask the same planet what its things are made of, and let go of the last one's.
       if (pack) combatSounds.begin(pack);
       else combatSounds.leave();
+      // The second listener beside the sound: the world lays a print where a foot lands, on the
+      // frame the clip's own mark says it lands and never on a clock of its own. The hook is the
+      // same bound function every time, so nothing is made here, and the feet a body had last put
+      // down go with the planet, as the marks themselves do.
+      this.feet.onStep = footprints.stepHook;
+      footprints.leave();
     }
     // The shared table that names the nine terrain surfaces arrives with the sound bank, some
     // frames after the game starts. Handed over when it changes rather than read through a cast,
@@ -4765,6 +4853,9 @@ class App {
       this.footSpace.cell = OUTSIDE.cell;
       p.space = hull ? this.footSpace : null;
       p.dead = this.dying || player.hp <= 0;
+      // Which way the body faces, which the sound has no use for and a print does: it points the
+      // way the walker was going.
+      p.heading = player.heading;
       p.species = this.characterId;
       this.feet.playerTemplate = rig.character?.manifest.template ?? null;
       lists.player = p;

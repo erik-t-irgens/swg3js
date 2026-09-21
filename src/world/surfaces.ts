@@ -421,6 +421,40 @@ export function drawsAfterWater(material: THREE.Material | THREE.Material[]): bo
   return Array.isArray(material) ? material.some(one) : one(material);
 }
 
+// ---- What a surface keeps of a foot ----
+
+/**
+ * INVENTED: which of the surfaces a foot can land on takes a footprint, and how deeply -- 0 is
+ * ground that keeps nothing of a step and 1 is ground that keeps all of it.
+ *
+ * The words are the ones the feet already resolve (`resolveSurface` in `src/audio/footsteps.ts`):
+ * the nine the terrain paints (sand, rock, grass, mud, snow, surf, stone, harddirt, softdirt), the
+ * four the interior table gives a room (metal, stone, wood, carpet), and the two the water answers
+ * with (water, surf). Which of them is soft enough to keep a mark is ours -- the archives hold no
+ * such list, and nothing in the client ever left a print -- so it is one table, here, beside the
+ * rest of what a surface is, rather than a rule spread over the code that lays the marks.
+ *
+ * Everything absent keeps nothing, which is deliberate for the ones worth naming: rock, stone,
+ * harddirt and grass out of doors, metal, wood and carpet in a room, and water and surf, where a
+ * print would wash out as it was made.
+ */
+export const PRINT_SURFACES: Record<string, number> = {
+  sand: 1,
+  snow: 1,
+  mud: 0.85,
+  softdirt: 0.6,
+};
+
+/**
+ * How deeply a surface takes a print, 0 for ground that keeps none of it and for no surface at all
+ * (which is what a body swimming answers with). Pure, so the node test reads the table itself.
+ */
+export function printDepth(surface: string | null | undefined): number {
+  if (!surface) return 0;
+  const depth = PRINT_SURFACES[surface];
+  return typeof depth === 'number' && depth > 0 ? depth : 0;
+}
+
 /** The texture indices any material's standard slot names. */
 function referencedTextures(json: { materials?: unknown[] }): Set<number> {
   const out = new Set<number>();
