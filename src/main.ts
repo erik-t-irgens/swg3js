@@ -107,6 +107,8 @@ import { GROUP_RANGE, GROUP_TUNE, Groups, tuneGroups } from './net/groups.ts';
 import { GROUP_UI_TUNE, GroupUi, tuneGroupUi } from './ui/groupUi.ts';
 import { CHAT_TUNE, ChatUi, tuneChat } from './ui/chatUi.ts';
 import { COMBAT_TUNE, CombatNet, tuneCombat } from './net/combatNet.ts';
+// Travelling together: what a leader's trip means on this side, and where to come out to be beside them.
+import { TOGETHER_TUNE, TravelTogether, tuneTogether, type TogetherMove } from './net/travelTogether.ts';
 import type { Bolt } from './combat/bolts';
 import { applyAppearance, dress, packLook } from './player/look';
 import { RemotePlayers, watchPeers } from './net/remotePlayers';
@@ -369,6 +371,8 @@ class App {
   /** Playing together: the relay's client and the other players it tells of. */
   private readonly net = new Net();
   private readonly remotes: RemotePlayers;
+  /** Going where the group goes: what a leader's trip means here, and where to come out to be beside them. */
+  private readonly together = new TravelTogether();
   private netStatus = 'off';
   private lastStateSent = 0;
   /** The wheel's eight slots, clip names; filled from the rig's own emotes the first time. */
@@ -3273,8 +3277,109 @@ class App {
       }
     };
     groups.onNote = (text) => this.messages.system(text);
-    // Travelling together is another wave's: the word is carried and said, and nobody is moved by it.
-    groups.onTravel = (where) => this.messages.system(`the group is going to ${where.planet || 'another world'}; going with them comes later`);
+
+    // ---- Going where the group goes. ----
+    //
+    // The offer is the group's: a leader crossing to another world hands everybody else the same
+    // trip, with a countdown on it, and nobody is moved without saying yes. What is wired here is
+    // what a trip means on this side -- which crossing keeps it, and where to come out so that a
+    // group that left together is still together when the loading screen lifts. A member standing
+    // in somebody else's hull is not moved at all and is asked to step out first: nothing here
+    // carries a passenger out of another browser's rooms, so nothing here pretends to.
+    const together = this.together;
+    together.send = (msg) => this.net.sendWord(msg);
+    together.authority = () => this.net.session.authority;
+    together.note = (text) => this.messages.system(text);
+    // The same clock the group's own countdowns are measured against: two machines a minute apart
+    // on their own clocks would otherwise wait different lengths for the same word.
+    together.now = () => sharedClock.now();
+    together.offerTrip = (where) => groups.offerTrip(where);
+    together.leading = () => groups.leading;
+    together.others = () => (groups.roster ? groups.roster.members.reduce((n, m) => n + (m.me ? 0 : 1), 0) : 0);
+    together.myMid = () => groups.roster?.you ?? '';
+    together.leaderId = () => groups.roster?.members.find((m) => m.leader)?.id ?? 0;
+    // Only somebody still on the roster is somebody to arrive beside: a member who left, or a group
+    // that has gone, would otherwise go on being followed until their place aged out.
+    together.inGroup = (id) => !!groups.roster?.members.some((m) => m.id === id);
+    together.isSpace = (id) => !!PLANETS.find((p) => p.id === id)?.space;
+    together.here = () => {
+      const p = this.player;
+      // A hull whose rooms this player is standing in and which this browser does not fly is
+      // somebody else's: they carry their passengers, and a passenger who travelled by themselves
+      // would step out of a ship still parked where it was.
+      const hull = p.aboard?.vehicle ?? null;
+      const mine = !hull || this.world.vehicles.includes(hull);
+      return {
+        planet: this.world.planet?.id ?? '',
+        zone: this.zone ?? '',
+        inSpace: !!this.world.planet?.space,
+        flying: !!this.pilotedShip(),
+        aboardOther: !!hull && !mine,
+        busy: this.traveling || this.dying || !this.started || !this.inWorld || this.hyperspace.phase !== 'idle',
+      };
+    };
+    together.onGo = (move) => void this.crossWithGroup(move);
+    // The server has taken this browser's yes: from here it is a crossing like any other.
+    groups.onTravel = (where) => void together.take(where);
+    // Saying yes is asked about before it is said. The server counts an acceptance once and for
+    // all, and refuses a second one, so a member who said yes while a loading screen was still up,
+    // or while standing in a friend's cabin, would be locked out of a trip that is still standing
+    // for the rest of the group. Refused here, the offer is left where it is, with its countdown
+    // running, and can be taken the moment the reason has gone.
+    const acceptWas = groups.acceptTrip.bind(groups);
+    groups.acceptTrip = () => {
+      const trip = groups.trip;
+      if (trip) {
+        const plan = together.canTake({ planet: trip.planet, zone: trip.zone, how: trip.how, at: trip.at });
+        if (plan.do === 'stay') {
+          this.messages.system(plan.why || 'that is not a trip to take from here');
+          return;
+        }
+      }
+      acceptWas();
+    };
+    // A jump is a crossing the travel path never sees: inside a system nothing is loaded at all, and
+    // to another system the hull is carried across rather than arrived in. So the jump says for
+    // itself where it is going, as the countdown starts, and where it came out when it ends. Where
+    // it will come out is asked for only when there is somebody to tell, since working that out is
+    // a pass over the system's landmarks and a game played alone must pay nothing for a word it
+    // never sends; what it came to is in `__debug.together().lastTrip`.
+    this.hyperspace.onJump = (zone, endOf) => {
+      if (together.telling) together.leaving(zone, '', 'jump', endOf());
+    };
+    this.hyperspace.onArrived = (zone, at) => together.arrived(zone, '', [at[0], at[1], at[2]]);
+    // The words the group says about crossing reach this browser through the same hook the roster
+    // and the chat do; whatever was on it is kept and called first, so nothing is unplugged.
+    const crossWordWas = this.net.onWord;
+    this.net.onWord = (msg) => {
+      crossWordWas(msg);
+      together.handle(msg);
+    };
+    // A line that dropped or was taken over leaves no trip and no places behind: what the group held
+    // is the server's, and a place somebody reported before the line went is not worth standing at.
+    const crossStatusWas = this.net.onStatus;
+    this.net.onStatus = (status, detail) => {
+      crossStatusWas(status, detail);
+      if (status !== 'online') together.clear();
+    };
+    if (debugRoot) {
+      // `__debug.together()` says what it is doing and `__debug.together({ spreadSpace: 300 })` sets
+      // one of this side's own numbers; `{ take: true }` takes the offer up without the panel, which
+      // is how a script with no mouse answers one, and `{ offer: true }` offers the group the world
+      // this browser is on. A trip this browser could not keep is refused before the yes is sent,
+      // here as at the panel, and says why in the message line. Every number here is ours; the
+      // group's own ranges are the game's and are printed by `__debug.group()`.
+      debugRoot.together = (o?: Partial<typeof TOGETHER_TUNE> & { take?: boolean; offer?: boolean }) => {
+        if (o) tuneTogether(o);
+        if (o?.offer === true) together.leaving(this.world.planet?.id ?? '', this.zone ?? '', this.world.planet?.space ? 'space' : 'ground', null);
+        if (o?.take === true) {
+          const trip = groups.trip;
+          if (trip) groups.acceptTrip();
+          else this.messages.system('there is no trip to take');
+        }
+        return { ...together.debug(), tune: TOGETHER_TUNE, trip: groups.trip };
+      };
+    }
     // Whatever else reads the server's own words reads them first and this takes what is left, so a
     // later wave hanging its own words on the same hook does not unplug the group's.
     const wordWas = this.net.onWord;
@@ -4986,11 +5091,24 @@ class App {
     this.input.captured = false;
     const zone = planet.zones?.find((z) => z.id === zoneId);
     console.info(`travel: to ${planet.name}${zone ? ` (${zone.name})` : ''}${ship ? ` flying the ${ship.def.id}${ship.crew ? ` from its rooms${ship.crew.piloting ? ' at the controls' : ''}` : ''}` : ''}`);
+    // Leading a group, this is a trip the rest of them are offered, with a countdown of its own;
+    // either way the group is told that this browser is on its way, which makes stale whatever it
+    // last said about where it was standing, so that a group going back to a world it has already
+    // been to is never sent to the point it came out at the time before. With no server it says
+    // nothing and sends nothing.
+    this.together.leaving(planet.id, zoneId ?? '', planet.space ? 'space' : 'ground');
     this.loadingScreen.show(planet, zone ? `${planet.name}: ${zone.name}` : planet.name, 'travelling');
     await new Promise((r) => setTimeout(r, 400));
+    // Taking the group's trip up: come out beside whoever led it rather than at this world's own
+    // spawn. It waits here, under the loading screen and before anyone steps out of a ship, for the
+    // word saying where they came out -- bounded, and usually already in by the time it is asked.
+    const beside = await this.together.followPoint(planet.id, zoneId ?? '', !!planet.space);
+    const besideAt = beside ? new THREE.Vector3(beside[0], beside[1], beside[2]) : null;
+    // A ship carried across comes out there facing the way a ship spawned at an arrival always has.
+    const crossing = besideAt && ship && !ship.arrival ? { ...ship, arrival: { pos: besideAt, quaternion: new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI) } } : ship;
     // Into space with no ship carried (the galaxy map): arriveInSpace puts the ship at the zone's own arrival, so the world
     // streams from there. Read before anyone leaves a ship, so nothing waits between the leave and the unload.
-    const spaceArrival = !ship && planet.space ? arrivalAt(await loadSpacePack(import.meta.env.BASE_URL, packIdOf(planet, zoneId))) : null;
+    const spaceArrival = !crossing && planet.space ? arrivalAt(await loadSpacePack(import.meta.env.BASE_URL, packIdOf(planet, zoneId))) : null;
     const p = this.player;
     // Off the ship before the world it stands in goes: its room's physics world goes with it.
     if (p.aboard) {
@@ -5009,10 +5127,20 @@ class App {
       if (isSurfaceRoom(room)) room.dispose();
     }
     if (p.mounted) p.dismount(p.pos.clone());
-    // A jump's arrival (or the zone's, above) is where the world streams from, not the zone's spawn.
-    this.arrive(planet, zoneId, ship?.arrival?.pos ?? (spaceArrival ? new THREE.Vector3(spaceArrival[0], spaceArrival[1], spaceArrival[2]) : undefined));
-    const arrived = ship ? await this.arriveInShip(ship.def, ship.speed, ship.height, ship.crew, ship.arrival ?? null, ship.condition ?? null) : planet.space ? await this.arriveInSpace() : null;
+    // A jump's arrival, the group's, or the zone's (above) is where the world streams from, not the zone's spawn.
+    this.arrive(planet, zoneId, crossing?.arrival?.pos ?? besideAt ?? (spaceArrival ? new THREE.Vector3(spaceArrival[0], spaceArrival[1], spaceArrival[2]) : undefined));
+    const arrived = crossing
+      ? await this.arriveInShip(crossing.def, crossing.speed, crossing.height, crossing.crew, crossing.arrival ?? null, crossing.condition ?? null)
+      : planet.space
+        ? await this.arriveInSpace(besideAt ?? undefined)
+        : null;
     await this.settle();
+    // Where this crossing came out, for anyone in the group taking the same trip after it. It is
+    // said under the same name the trip was offered under, not the zone `arrive` settled on: a
+    // planet with zones and none named resolves to its first, and a member following the world the
+    // offer named would never match a word that came back with the resolved name on it.
+    const cameOut = arrived?.pos ?? this.player.worldPos;
+    this.together.arrived(planet.id, zoneId ?? '', [cameOut.x, cameOut.y, cameOut.z]);
     this.savePlace(true);
     await this.loadingScreen.hide();
     this.traveling = false;
@@ -5108,6 +5236,63 @@ class App {
     if (this.refuseWhileDocked()) return;
     this.closePanels();
     await this.travel(zone, undefined, { def: ship.def!, speed: Math.max(60, ship.speed), height: 0, crew: this.crewRecord(), condition: this.conditionRecord(ship) });
+  }
+
+  /**
+   * The crossing a trip the group offered asks of this browser, once it has been taken up. A jump
+   * is a jump -- the only crossing that keeps the hull, its rooms and whoever walks them -- and
+   * everything else is the ordinary travel, carrying the ship being flown when there is one. The
+   * world itself is looked up rather than trusted: what arrives is a name another browser sent.
+   */
+  private async crossWithGroup(move: TogetherMove): Promise<void> {
+    const planet = PLANETS.find((p) => p.id === move.planet);
+    if (!planet) {
+      this.messages.system(`the group went to ${move.planet || 'nowhere'}, which is not a world here`);
+      return;
+    }
+    // A ship at a dock, on a station's lane, or with another clamped to it is not its pilot's to
+    // take anywhere, and a trip the group offered is no exception: two owners writing a pose onto
+    // one hull is the reason, and it does not care who asked for the crossing. A crossing on foot
+    // out of a docked ship is a different thing and is still allowed, as the ship menu's own way
+    // off always has been.
+    if ((move.withShip || move.do === 'jump') && this.refuseWhileDocked()) return;
+    const zoneId = move.zone || undefined;
+    if (move.do === 'jump') {
+      if (!move.at) return;
+      // The System Map's catalogue is what a jump reads another system's arrival out of, and it is
+      // fetched the first time that map is opened: somebody who has never opened it would be told
+      // to convert the space zones again. It is in hand within a moment and the countdown is longer.
+      if (planet.id !== this.world.planet.id) await this.catalogue().catch(() => null);
+      const why = this.hyperspace.followTo(planet.id, [move.at[0], move.at[1], move.at[2]], 'the group');
+      if (why) this.messages.system(`cannot jump after the group: ${why}`);
+      return;
+    }
+    if (move.do !== 'travel') return;
+    // Carrying a hull up into a system is the ship menu's own way up and asks for the same height:
+    // from the ground nobody's ship follows anybody into orbit. Leaving a system, and coming down
+    // onto a planet, there is no such gate. Below it the crossing is still made -- being with the
+    // group is the whole point of it -- but on foot, which is what the galaxy map has always done.
+    const carry = !!this.world.planet.space || !planet.space || this.spaceGate === 'up';
+    const ship = move.withShip && carry ? this.pilotedShip() : null;
+    this.closePanels();
+    if (ship && ship.def && !ship.destroyed) {
+      // Up into a system at the speed the ship has, down onto a planet from the height a landing
+      // comes in at: the same two crossings the ship menu's own rows make.
+      const up = !!planet.space;
+      await this.travel(planet, zoneId, {
+        def: ship.def,
+        speed: up ? Math.max(60, ship.speed) : 90,
+        height: up ? 0 : SPACE_ARRIVAL_HEIGHT,
+        crew: this.crewRecord(),
+        condition: this.conditionRecord(ship),
+      });
+      return;
+    }
+    // On foot after all: said plainly, because a ship left on the other side of a crossing is not
+    // something to find out about once the loading screen has lifted. A hull nobody is flying is
+    // left where it stands, as the galaxy map's own travel has always left it.
+    if (move.withShip || this.player.aboard) this.messages.system('going with the group; the ship stays here');
+    await this.travel(planet, zoneId);
   }
 
   /** The ship menu's way down: the flown ship leaves orbit for the planet below, with everyone aboard. A system with no planet below has no way down. */

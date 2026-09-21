@@ -128,11 +128,35 @@ const EXIT_CRUISE_MIN = 40;
 
 const clamp = (v: number, lo: number, hi: number) => (v < lo ? lo : v > hi ? hi : v);
 
+/**
+ * What `onJump` is until somebody hangs something on it. Kept as a value of its own so that a jump
+ * with nobody listening does not work out where it will come out: that answer costs a pass over the
+ * system's landmarks, and a game played alone has no use for it.
+ */
+const NO_JUMP = () => {};
+
 export class Hyperspace {
   phase: JumpPhase = 'idle';
   /** The effects' turn about the hull's Y in degrees, and how far ahead of the hull they are placed (metres along the nose), for checking by eye (__debug.jumpFx). */
   fxTurn = 0;
   fxAhead = 0;
+  /**
+   * A jump has begun: the system it goes to, a way of asking where it will come out (game frame)
+   * and what that place is called. Whoever is with other people hangs the group's own offer on
+   * this, so that a jump is something a group can take together; with nobody else it is not called
+   * upon to do anything. The end is asked for rather than handed over because working it out is a
+   * pass over the system's landmarks, and nothing about the jump's own flight depends on it.
+   */
+  onJump: (zone: string, endOf: () => Vec3 | null, name: string) => void = NO_JUMP;
+  /**
+   * The jump is over and the hull is back in its pilot's hands, at this place in that system. It is
+   * the only word a jump gives about where it ended: a jump inside a system never travels, and one
+   * to another system carries the hull across rather than arriving in it, so nothing else along the
+   * way could say.
+   */
+  onArrived: (zone: string, at: Vec3) => void = () => {};
+  /** Where the last jump came out, kept so nothing is allocated to report it. */
+  private readonly arrivedAt: Vec3 = [0, 0, 0];
 
   private readonly host: HyperspaceHost;
   /** Seconds into the present phase (the countdown's seconds left while counting). */
@@ -202,7 +226,42 @@ export class Hyperspace {
     this.showCount();
     // The tunnel's program is in the cache from the loading screen; this only builds it if something marked it since.
     this.host.prepareTunnel();
+    // Said once per jump, as the countdown begins rather than when it ends, so that anyone offered
+    // the trip has the whole countdown to say yes and leaves at about the same moment. With nobody
+    // listening the jump's own end is not worked out at all, so a game played alone pays nothing.
+    if (this.onJump !== NO_JUMP) this.onJump(dest.zone, () => this.endOf(dest), dest.name);
     return null;
+  }
+
+  /**
+   * A jump after somebody else, to a bare place in a system rather than to a destination on the
+   * map: the group's own way of keeping together. It is an ordinary jump in every other respect --
+   * the same countdown, the same refusals (`why`), the same stages -- and `at` is in the game frame,
+   * as every place that crosses the wire is. Null when it began, else why it could not.
+   */
+  followTo(zone: string, at: Vec3, name = 'the group'): string | null {
+    if (!at || at.some((v) => !Number.isFinite(v))) return 'there is nowhere to jump to';
+    // `toGame` is its own opposite (it negates x), and a destination holds its place in the client's
+    // frame, so this is the game-frame point written the way the rest of a destination is written.
+    const dest: Destination = { key: `${zone}:together`, zone, id: 'together', kind: 'point', name, description: '', at: toGame([at[0], at[1], at[2]]), radius: 0, invented: true };
+    return this.start(dest);
+  }
+
+  /**
+   * Where a jump to this destination would come out, in the game frame, or null with no pack for
+   * it. It is the same arrival `beginEnter` works out when the countdown ends, at the cruise and
+   * the position the ship has now; the jump itself goes on working it out for itself, so nothing
+   * about the flight depends on this.
+   */
+  private endOf(dest: Destination): Vec3 | null {
+    const pack = this.packOf(dest.zone);
+    if (!pack) return null;
+    const ship = this.host.ship();
+    const sameZone = dest.zone === this.host.zone();
+    const cruise = ship ? clamp(ship.cruise, EXIT_CRUISE_MIN, Math.max(EXIT_CRUISE_MIN, ship.spec.maxSpeed * 2)) : EXIT_CRUISE_MIN;
+    const approach: Vec3 | null = sameZone && ship ? [ship.pos.x, ship.pos.y, ship.pos.z] : arrivalAt(pack);
+    const pose = arrivalPose({ kind: dest.kind, at: toGame(dest.at), radius: dest.radius }, landmarksOf(pack), approach, cruise, sceneOf(pack));
+    return pose.end;
   }
 
   /** Why a destination cannot be jumped to now, or null: the same rules as `start`, for the panel. */
@@ -554,6 +613,13 @@ export class Hyperspace {
         this.lastArrivalError = hull.pos.distanceTo(this.end);
       }
       this.releaseHull(hull);
+      // Where this ship came out, for anyone coming after it. The hull's own place, not the arrival
+      // it was aimed at: the brake ends within a metre or two of it, and what a group wants to know
+      // is where the ship actually is.
+      this.arrivedAt[0] = hull.pos.x;
+      this.arrivedAt[1] = hull.pos.y;
+      this.arrivedAt[2] = hull.pos.z;
+      this.onArrived(this.dest?.zone ?? this.host.zone(), this.arrivedAt);
     }
     if (this.t >= exitEnd(s)) {
       // The exit effect is transient and ends by itself; the jump is over.

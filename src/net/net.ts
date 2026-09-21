@@ -502,6 +502,10 @@ export class Net {
         break;
       case 'group':
       case 'chat':
+      // Travelling together: where a member of this group is crossing to, and where they came out.
+      // It reaches this browser from members on other worlds as well, which is the point of it, and
+      // what it means belongs to src/net/travelTogether.ts.
+      case 'cross':
       // The fight between players: the bolts that cross, where each one landed, a blade turning one
       // away, health, death and the duel. Handed over whole, as the group's words are, because what
       // they mean belongs to src/net/combatNet.ts and not here.

@@ -42,6 +42,12 @@
 //                                                          the group to is the member id the roster gives, and a trip
 //                                                          is the world the leader is going to
 //   { t: 'chat', scope: say|group, text }                    a line, to everyone on this world or to the group
+//   { t: 'cross', phase: going|here, planet, zone, how, at? }  travelling together (crossWire.mjs): the world this
+//                                                          player is crossing to, and where they came out when they
+//                                                          are there. It goes to their group and only to their
+//                                                          group, members on other worlds included: it is what
+//                                                          lets somebody who takes the leader's trip up arrive
+//                                                          beside them rather than at their own world's spawn
 //   { t: 'shot', n, p, d, s, l, c, z, g?, a?, b?, fx?, rc?, hx?, pk?, in? }
 //                                                          a bolt that left this player's gun (combatWire.mjs): its
 //                                                          own number, where it left and which way, how fast, how
@@ -81,6 +87,7 @@
 //   { t: 'group', do: 'none', why }   (you are in no group now)   { t: 'group', do: 'gone' }   (the invitation has)
 //   { t: 'group', do: 'refused', why }   (to whoever asked, and to nobody else)
 //   { t: 'chat', id, from, scope, text }
+//   { t: 'cross', id, from, phase, planet, zone, how, at? }   (to the sender's group, and to nobody else)
 //   { t: 'shot', id, ... }   { t: 'end', id, n, at }   { t: 'blocked', id, of, n, at }
 //   { t: 'health', id, hp, d? }   { t: 'died', id, by? }
 //   { t: 'hurt', id, a, at, w? }   (to the one hurt and to nobody else, and only where they may be hurt)
@@ -101,6 +108,7 @@ import { WorldClock, DAY_MS } from './clock.mjs';
 import { STORE_TUNING, openStore } from './store.mjs';
 import { Sessions, checkClaim, makeNonce, summaryOf } from './identity.mjs';
 import { GROUP_RANGES, GROUP_TUNING, Groups, cleanChat, cleanGroup } from './groups.mjs';
+import { cleanCross, mayCross } from './crossWire.mjs';
 import { COMBAT_WIRE, Duels, cleanBlocked, cleanDied, cleanDuel, cleanEnd, cleanHealth, cleanHit, cleanShot, mayHurt } from './combatWire.mjs';
 
 /** What this server speaks. A browser that hears no hail is talking to the relay that came before. */
@@ -672,6 +680,30 @@ function onMessage(c, text, trimmed = false) {
     else if (g.do === 'disband') deliver(groups.disband(c.member));
     else if (g.do === 'trip') deliver(groups.trip(c.member, g.where));
     else if (g.do === 'travel') deliver(groups.travel(c.member));
+  } else if (msg.t === 'cross') {
+    // Travelling together. A group's offer carries the world its leader is going to, which is
+    // enough to send everybody to the same planet and not enough to put them beside each other
+    // when they arrive: where a player actually came out is known only to their own browser, and a
+    // member on another world is sent nothing that would say, since a state goes to the world its
+    // player is on and no further. So this word goes to the group and only to the group -- to
+    // people on other planets included, which is the whole point of it.
+    if (!c.hello || !c.member || !holdsMember(c)) return;
+    const cross = cleanCross(msg);
+    if (!cross) return;
+    // Twice a crossing is all anybody needs, and a crossing takes seconds. The allowance is this
+    // word's own rather than the group's for decisions: sharing that one, a member who crossed in
+    // the same second as an invitation or a promotion could have the word saying where they came
+    // out dropped without a sound, and the group would then scatter with nothing to say why. The
+    // record is made the first time this browser crosses and written in place after that.
+    c.crossing ??= { at: 0, lines: 0 };
+    if (!mayCross(c.crossing, Date.now())) return;
+    const to = groups.chatTo(c.member);
+    if (!to) return;
+    const line = { t: 'cross', id: c.id, from: c.hello.name, ...cross };
+    for (const key of to) {
+      const session = groups.sessionOf(key);
+      if (session && session !== c.id) send(clients.get(session), line);
+    }
   } else if (msg.t === 'chat') {
     // A line, and only ever a line: it is cut to length, stripped of anything that is not text and
     // sent on as text. Whatever shows it escapes it; nothing here ever reads it.
