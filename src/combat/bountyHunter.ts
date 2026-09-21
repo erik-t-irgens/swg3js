@@ -7,6 +7,7 @@ import type { BoltFrame } from './bolts';
 import type { Hittable, Kit, KitContext, KitSlot, Living, Resource } from './kit';
 import type { EffectHandle, ParticleEffects } from '../world/particles';
 import { plumeNoiseFrequency, type HeatPlumeSink } from '../world/heatSources';
+import { shoveLooseProps } from '../world/looseProps.ts';
 import { DEFAULT_GADGETS, gadgetById, type GadgetDef, type GrenadeSpec } from './gadgets';
 import { SLOT_ACTIONS, SLOT_COUNT } from './forcePowers';
 import { Unarmed } from './unarmed';
@@ -926,6 +927,9 @@ export class BountyHunterKit implements Kit {
       sp.body.applyImpulse({ x: tmp.x * m * 6 * f * machines, y: m * 4 * f * machines, z: tmp.z * m * 6 * f * machines }, true);
       if (machines > 1) sp.damage(damage * f * machines);
     }
+    // The loose props: a blast takes every direction, so no cone, and reaches half as far again as
+    // it does for a body, exactly as it does for a vehicle above.
+    shoveLooseProps(at, radius * 1.5, 1, null, 12 + damage * 0.1);
     const dp = player.pos.distanceTo(at);
     if (dp < radius * 0.7 && !player.mounted) player.takeDamage(damage * 0.35 * (1 - dp / (radius * 0.7)));
     // A blast sets off the charges near it: a chain of mines, a det pack under a grenade.

@@ -9,6 +9,7 @@ import { nearestInCone, type ConeQuery } from './targets';
 import { BLADE_RADIUS, BladePath, playerStrike, strikeSweep } from './sweep.ts';
 import { BrushClock, SABER_HIT, bodyTeleported, brushDamage, noteBrush, saberSwingStart, type HitLedger } from './saberHit.ts';
 import { roomFrame } from '../vehicles/surfaceRoom.ts';
+import { loosePropAhead, shoveLooseProps } from '../world/looseProps.ts';
 import type { BoltFrame } from './bolts';
 import type { EffectHandle, ParticleEffects } from '../world/particles';
 import { Unarmed } from './unarmed';
@@ -644,11 +645,16 @@ export class JediKit implements Kit {
 
     // Grip: whatever is under the crosshair lifted and held ahead, choking; let go and it is thrown.
     if (grip) {
-      if (!this.gripped || this.gripped.dead) this.gripped = this.targetAhead(ctx, 14, 0.7, CAN_HOLD);
+      // A body first, and a loose prop when there is none: a prop is deliberately not in
+      // `targets()`, which `targetAhead` reads, so it is asked for by name. Same reach, same cone.
+      // The camera's forward is read before the choice rather than after it, since the cone is what
+      // picks the prop; and a prop is looked for only out in the world, never from inside a hull's
+      // rooms, where `pos` is the hull's frame and the props are still standing on the planet.
+      cam.forward(tmp);
+      if (!this.gripped || this.gripped.dead) this.gripped = this.targetAhead(ctx, 14, 0.7, CAN_HOLD) ?? (player.aboard ? null : loosePropAhead(player.worldPos, tmp, 14, 0.7));
       const g = this.gripped;
       if (g) {
         res.value -= 12 * dt;
-        cam.forward(tmp);
         tmp2.copy(player.pos).addScaledVector(tmp, 3.2 + g.halfHeight);
         tmp2.y = player.pos.y + 1.6 + g.halfHeight;
         g.holdAt?.(tmp2, dt);
@@ -861,6 +867,11 @@ export class JediKit implements Kit {
       const m = sp.body.mass();
       sp.body.applyImpulse({ x: tmp2.x * m * 9 * (1 - d / 14), y: m * 4, z: tmp2.z * m * 9 * (1 - d / 14) }, true);
     }
+    // The loose props (src/world/looseProps.ts). They are not in `targets()` -- nothing should ever
+    // pick a fight with a crate -- so a power that wants one asks for it by name. `tmp` is the
+    // camera's forward, which is the same cone the bodies above are chosen with. It is measured from
+    // `worldPos` and not `pos`, because a prop only ever stands in the world's own frame.
+    shoveLooseProps(player.worldPos, 16, sign, tmp, sign > 0 ? 18 : 10);
   }
 
   /** Repulse: a blast in every direction from the player. */
@@ -888,6 +899,8 @@ export class JediKit implements Kit {
       const m = sp.body.mass();
       sp.body.applyImpulse({ x: tmp2.x * m * 10 * (1 - d / 12), y: m * 5, z: tmp2.z * m * 10 * (1 - d / 12) }, true);
     }
+    // Every loose prop within reach, in every direction: no cone, as the bodies above take none.
+    shoveLooseProps(player.worldPos, 10, 1, null, 20);
   }
 
   /**

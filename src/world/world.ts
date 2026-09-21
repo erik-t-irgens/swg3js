@@ -42,6 +42,7 @@ import type { LoopHost } from '../audio/emitters.ts';
 import { loadSpacePack, type SpacePack } from '../space/spaceData.ts';
 import { Nebulae, installNebulaDebug } from '../space/nebulae.ts';
 import { dropForceLightning, loadForceLightning, stepForceLightning } from '../combat/forceLightning.ts';
+import { dropLooseProps, loadLooseProps, loosePropAt, stepLooseProps } from './looseProps.ts';
 import { prepareForceEffects } from '../combat/forcePowers.ts';
 import { liveSettings } from '../core/settings.ts';
 import { peerBodies, type RemoteBodies } from '../net/remoteBodies.ts';
@@ -1124,6 +1125,10 @@ export class World {
     }
     this.dropNebulae();
     dropForceLightning(this);
+    // The loose props go with the world they were stood in: their bodies out of the one Rapier
+    // world (which outlives a planet and would otherwise keep two dozen of them for ever), their
+    // materials forgotten by the portal set and the cascades, then freed.
+    dropLooseProps(this);
     this.flora = null;
     this.groundTextures?.dispose();
     this.groundTextures = null;
@@ -2669,6 +2674,11 @@ export class World {
     markActor(this.creatures.group);
     // Turrets are spawned from the NPC tab (B) now, not stood around the arrival point.
     markActor(this.turrets.group);
+    // The loose props: two dozen crates and balls of ours stood in rings round the arrival point,
+    // for a fight to knock about. Here rather than in `loadPack`, because here the ground round the
+    // arrival has already been generated (the `stream` above) and the loading screen's own compile
+    // still follows, so their two programs are built behind it. None is stood in space.
+    loadLooseProps(this, center, (x, z) => this.terrain.heightAt(x, z), !!this.planet.space);
     // No bike is stood in space: there is no ground for it, and the player arrives in a ship.
     if (this.planet.space) return;
     const sx = center.x + 5;
@@ -3587,9 +3597,13 @@ export class World {
     }));
   }
 
-  /** The mobile, creature, fighter, turret, other player or vehicle a physics collider belongs to (every collider of a long body is its own). */
+  /**
+   * The mobile, creature, fighter, turret, other player, loose prop or vehicle a physics collider
+   * belongs to (every collider of a long body is its own). A loose prop is here and deliberately
+   * not in `targets()`: a bolt stops on a crate and shoves it, and nothing ever picks a fight with one.
+   */
   hittableAt(handle: number): Hittable | undefined {
-    const found = this.mobiles?.byCollider.get(handle) ?? this.creatures.byCollider.get(handle) ?? this.npcs.byCollider.get(handle) ?? this.turrets.byCollider.get(handle) ?? this.peers().byCollider.get(handle);
+    const found = this.mobiles?.byCollider.get(handle) ?? this.creatures.byCollider.get(handle) ?? this.npcs.byCollider.get(handle) ?? this.turrets.byCollider.get(handle) ?? this.peers().byCollider.get(handle) ?? loosePropAt(handle);
     if (found) return found;
     // A plain loop rather than `find`, because this is asked once per collider a swept capsule
     // touches and a blade is now cast up to four times a frame: the predicate handed to `find` is
@@ -3635,6 +3649,9 @@ export class World {
     if (this.nebulae && this.camera) this.nebulae.update(dt, this.camera);
     // The Force's beams: the flicker, the flip-book and the fade of any one nothing is holding.
     stepForceLightning(dt);
+    // The loose props: the pose of any that is awake onto its mesh, the sleep rule, and any thrown
+    // off the world put back on its stand. One asleep is not read at all.
+    stepLooseProps(dt, playerPos);
     this.waterTime += dt;
     for (const m of this.waterMaterials) m.userData.uniforms.uTime.value = this.waterTime;
     // Modulo the shader's own loop, whose flow × loopTime is whole: the noise wraps without a seam.
