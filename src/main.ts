@@ -6339,7 +6339,9 @@ class App {
       const blades = this.fxBlades;
       // The catalogue's people and the other players are gathered as one list, so the eight the glow
       // pass keeps are the nearest eight whoever is holding them.
-      collectBlades(blades, this.player.saberBlades, this.world.npcs.npcs, cam.position, remoteBlades.holders(this.world.mobiles?.live));
+      // The fighters exist only once a planet has loaded, and a frame is drawn behind the loading
+      // screen before that: without the guard the first such frame throws and the frame is lost.
+      collectBlades(blades, this.player.saberBlades, this.world.npcs?.npcs ?? EMPTY_BODIES, cam.position, remoteBlades.holders(this.world.mobiles?.live));
       const lit = this.litSources;
       lit.torch = this.torchOn ? this.torch : null;
       lit.eye.copy(cam.position);
