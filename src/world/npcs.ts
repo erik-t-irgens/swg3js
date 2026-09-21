@@ -1,9 +1,17 @@
 // Fighters: humanoid NPCs stood on demand to fight the player and each other. Each is a character
 // rig of a random species with a random look, a weapon off the rack (a lightsaber, a sword or a
-// gun) in its hand, and a body the blades and bolts can hurt. The mind is small: the nearest foe
-// within reach is the target, it runs to its weapon's range, and it swings or shoots on a timer.
-// A first pass: no cover, no dodging, the ground read from the terrain only. Its clothes come off
-// its species' wardrobe (a Wookiee's from the Wookiee pieces alone).
+// gun) in its hand, and a body the blades and bolts can hurt. Its clothes come off its species'
+// wardrobe (a Wookiee's from the Wookiee pieces alone).
+//
+// The mind is **the creatures' own** (`mobiles/brain.ts`), not a temper of this file's: a fighter
+// fills a `BrainSelf` a few times a second, the same pure function the wildlife thinks with
+// answers, and the body acts on that answer every frame between. What that brings that a fighter
+// never had: giving up on a target it cannot reach in height, leashing home, remembering and
+// forgetting who hurt it, wandering when there is nothing to do, and a nerve that breaks. What it
+// does not bring is paths -- the answer is a goal and a pace, and a fighter still walks at it in a
+// straight line, because navigation is a later pass. Nothing else about a fighter moved: its body
+// is still kinematic, its height still comes from the terrain (or from a ray inside a building),
+// and its clothes, its weapon and its blade are exactly what they were.
 import * as THREE from 'three';
 import { combatSounds } from '../audio/combatSounds';
 import { Group, groups, RAPIER, type Physics } from '../core/physics';
@@ -19,12 +27,16 @@ import { scarFamilyOf } from '../combat/scars.ts';
 import type { Bolts } from '../combat/bolts';
 import type { Effects } from '../combat/effects';
 import { nextLivingKey, type Aggression, type Hittable, type Living, type Side } from '../combat/kit';
-import { hostileSides } from '../combat/targets';
+import { PLAYER_KEY, hostileSides } from '../combat/targets';
 import type { Terrain } from './terrain';
 import { markActor } from './portalRender';
 import { slotOf } from '../ui/wardrobeUi';
 import type { CellState } from './layoutStream';
 import { BLADE_SWING, SABER_SWINGS, bladeSwingReport, borrowSwingFigures, noteBladeLookup, noteBladeSwing, noteTimerBlow, returnSwingFigures, weaponFarPoint, type BladeSwingTune } from './mobiles/arms';
+// The creatures' mind, unchanged and shared: a pure function of plain numbers, so a fighter is one
+// more body filling the same struct rather than a second set of rules that has to be kept in step.
+import { BRAIN_TUNE, decide, type BrainSelf, type BrainTarget, type Decision } from './mobiles/brain.ts';
+import type { MobileState } from './mobiles/types';
 // A fighter's blade hurts what it passed through since the last frame by exactly the machinery the
 // player's does, never by a rule of its own: `BladePath` steps the same capsule along the ground the
 // blade covered, and a `Striker` of this fighter's own is what puts it behind the blow.
@@ -46,9 +58,81 @@ function swingStyle(clip: string): 'fast' | 'medium' | 'strong' {
   return 'medium';
 }
 const SPECIES_FALLBACK = ['human_male', 'human_female', 'twilek_male', 'twilek_female', 'zabrak_male', 'zabrak_female', 'rodian_male', 'bothan_male', 'trandoshan_male', 'moncal_female', 'sullustan_male', 'wookiee_male'];
-const RUN_SPEED = 5.2;
-const SIGHT = 45;
 const HP = 160;
+
+/**
+ * Everything a fighter's body does that is not the brain's to decide, and every number of it is
+ * invented. How far it sees, how long it remembers, how far it chases before it goes home and
+ * when it gives a target up are **not** here: those are the creatures' own (`BRAIN_TUNE` in
+ * `mobiles/brain.ts`), because a fighter thinks with the same function the wildlife does.
+ */
+export interface FighterTune {
+  /** How fast it runs and how fast it wanders, metres a second. */
+  run: number;
+  walk: number;
+  /** Seconds between thoughts, and the share either way the next one is spread by. */
+  think: number;
+  thinkJitter: number;
+  /**
+   * A blade's or a club's reach past both bodies, in metres: with two people's own radii (0.35
+   * each) this is the 2.6 m a fighter's swing has always opened at.
+   */
+  reach: number;
+  /** How far a gun-armed one shoots from, and how wide of the nose it will shoot or swing (radians). */
+  gunRange: number;
+  aimCone: number;
+  /** The scatter on its aim, and the least seconds between shots. */
+  aimSpread: number;
+  gunEvery: number;
+  /** The spread on top of a shot's cooldown, so a line of them does not fire as one volley. */
+  gunSpread: number;
+  /** Seconds between swings, and the spread on top. */
+  swingEvery: number;
+  swingSpread: number;
+  /**
+   * Inside a building, the share of the indoor leash a wander may reach. The brain's own wander
+   * (8 to 30 m from home) is drawn for the open ground and is farther than the leash it keeps
+   * indoors (25 m), so a goal past that would trip the leash the moment the fighter crossed it:
+   * it would turn round, run home and set off again, pacing instead of idling. The goal is pulled
+   * back inside here rather than in `brain.ts`, whose wander numbers are the wildlife's too.
+   */
+  wanderInsideShare: number;
+  /** How fast it turns toward what it faces: the share of the error taken a second. */
+  turn: number;
+  /** How near a goal counts as arrived, metres. */
+  arrive: number;
+  /**
+   * Its nerve breaks below this share of its health: it thinks as a skittish thing until it is
+   * healed, which is to say it runs from whoever hurt it and from the player rather than fighting.
+   * Nothing heals a fighter, so a broken nerve is for the rest of its life -- deliberately: a
+   * badly hurt one wanders off and bolts if you come near it.
+   */
+  fleeUnder: number;
+  /** The window the stuck check measures over, and the share of the ground commanded that counts as moving. */
+  stuckWindow: number;
+  stuckShare: number;
+}
+
+export const FIGHTER_TUNE: FighterTune = {
+  run: 5.2,
+  walk: 1.8,
+  think: 0.4,
+  thinkJitter: 0.25,
+  reach: 1.9,
+  gunRange: 22,
+  aimCone: 0.5,
+  aimSpread: 0.03,
+  gunEvery: 0.35,
+  gunSpread: 0.3,
+  swingEvery: 1.1,
+  swingSpread: 0.4,
+  wanderInsideShare: 0.8,
+  turn: 6,
+  arrive: 0.5,
+  fleeUnder: 0.25,
+  stuckWindow: 1.5,
+  stuckShare: 0.2,
+};
 
 /** The wearables a Wookiee wears, and nobody else: the Kashyyykian pieces, and the ones marked _wke. */
 const WOOKIEE_ONLY = /kashyyyk|(^|_)wke(_|$)/i;
@@ -84,6 +168,9 @@ const UP = new THREE.Vector3(0, 1, 0);
 const Y = new THREE.Vector3(0, 1, 0);
 const Z = new THREE.Vector3(0, 0, 1);
 const tmpQ = new THREE.Quaternion();
+/** The two ends of a line-of-sight test, written rather than made: one ray a thought, no objects. */
+const LINE_FROM = { x: 0, y: 0, z: 0 };
+const LINE_TO = { x: 0, y: 0, z: 0 };
 
 /** A fighter's lit blade wanting a pooled light this frame: where, in its colour, and how far from the eye (squared). */
 export interface FighterGlow {
@@ -167,8 +254,37 @@ export class Npc implements Living {
   private readonly bladeTip = new THREE.Vector3();
   readonly color = new THREE.Color().setHSL(Math.random(), 0.9, 0.55);
   private target: Living | null = null;
-  private retarget = 0;
   private attackCd = 1 + Math.random();
+  /**
+   * The brain's own state, kept between thoughts and handed back to it: what it is doing, whom it
+   * is after, where it is going, when an alert or a flight ends, since when its target has been out
+   * of reach in height, and the target it has given up on. All of it is the creatures' vocabulary,
+   * so `mobiles/brain.ts` reads a fighter and a bantha out of the same struct.
+   */
+  state: MobileState = 'idle';
+  private targetKey: number | null = null;
+  private decision: Decision | null = null;
+  private thinkAt = 0;
+  private wanderAt = -1;
+  private goal: { x: number; z: number } | null = null;
+  private until = 0;
+  private blockedSince: number | null = null;
+  private forgetKey: number | null = null;
+  private forgetUntil = 0;
+  /** Whoever hurt it and when (simulated seconds); the brain turns it on the most recent of them. */
+  private readonly memory = new Map<number, { who: Living; at: number }>();
+  /** The brain's view of the world this thought, and the objects it is filled into: one set for the fighter's life. */
+  private readonly brainTargets: BrainTarget[] = [];
+  private readonly brainPool: BrainTarget[] = [];
+  /** The point it is facing this frame (the target moves between thoughts): written, never made. */
+  private readonly faceAt = { x: 0, z: 0 };
+  /** The pace the last thought asked for, so the rig plays the walk the brain wandered at. */
+  private pace: 'stand' | 'walk' | 'run' = 'stand';
+  /** How often in a row it has been found going nowhere while it asked to move, and the window's measure. */
+  private stuck = 0;
+  private stuckClock = 0;
+  private stuckCommanded = 0;
+  private readonly stuckFrom = new THREE.Vector3();
   /**
    * A swing under way: seconds of it left. While it runs the blade sweeps the ground it covers
    * every frame, so the blow lands where the blade passed rather than on whoever happened to
@@ -220,9 +336,18 @@ export class Npc implements Living {
   /** Where it stood when its room was last followed, and when (sim time). */
   readonly cellFrom = new THREE.Vector3();
   followAt = -Infinity;
+  /**
+   * Where it was stood. The brain leashes it back here when a chase runs long, which is the one
+   * thing a fighter has never done: before this it followed whatever it was after until one of
+   * them died.
+   */
+  readonly homeX: number;
+  readonly homeZ: number;
 
   constructor(readonly species: string, private readonly physics: Physics, x: number, y: number, z: number) {
     this.name = `${species.replace(/_/g, ' ')} fighter`;
+    this.homeX = x;
+    this.homeZ = z;
     this.pos.set(x, y, z);
     this.group.position.copy(this.pos);
     markActor(this.group);
@@ -241,7 +366,8 @@ export class Npc implements Living {
 
   /**
    * Whether it has something alive it means to fight. Read by what gives it a voice: a fighter
-   * standing about with nothing to fight calls out at nothing.
+   * standing about with nothing to fight calls out at nothing. One wandering, fleeing or going
+   * home has no target at all, so it falls silent of its own accord.
    */
   get hunting(): boolean {
     return !this.dead && !!this.target && !this.target.dead;
@@ -254,6 +380,13 @@ export class Npc implements Living {
 
   /** Where the world's simulated clock stood at this fighter's last step: the hold's grace keys off it. */
   private now = 0;
+  /**
+   * Whether the world's clock has reached it yet. Until the first step `now` is 0, which is not a
+   * time: a blow struck between being stood and that step would stamp a grudge at 0 and the first
+   * thought would find it twenty seconds old and throw it away, so a fighter shot as it appeared
+   * would not turn on whoever shot it. Those grudges are dated from the first step instead.
+   */
+  private stepped = false;
   /** Where the Force is holding it, and until when (seconds of that clock); null when free. */
   private heldAt: THREE.Vector3 | null = null;
   private heldUntil = 0;
@@ -378,16 +511,24 @@ export class Npc implements Living {
     }
   }
 
-  /** Who hurt it last, and for how long it remembers; it turns on whoever struck. */
-  private provoked: Living | null = null;
-  private provokedFor = 0;
+  /** Whoever struck, remembered from now: the brain turns it on the most recent of them. */
+  private remember(source: Living): void {
+    if (source.key === this.key) return;
+    const g = this.memory.get(source.key);
+    if (g) {
+      g.at = this.now;
+      g.who = source;
+    } else this.memory.set(source.key, { who: source, at: this.now });
+  }
 
   damage(amount: number, from?: THREE.Vector3, push = 0, source?: Living | null): void {
     if (this.dead) return;
-    if (source && source.key !== this.key && source.aggression !== 'passive') {
-      this.provoked = source;
-      this.provokedFor = 20;
-    }
+    // Allies do not hurt each other, exactly as a mobile's do not: a shot or a swing from its own
+    // side, from one that would never pick a fight with it, passes it by. Two fighters are hostile
+    // to each other by `hostileSides`, so this lets a brawl between them stand and only stops the
+    // blow that could never have been aimed here.
+    if (source && source.key !== this.key && source.side === this.side && !hostileSides(source, this)) return;
+    if (source && source.key !== this.key && source.aggression !== 'passive') this.remember(source);
     this.hp -= amount;
     this.stunned = Math.max(this.stunned, 0.2);
     if (from && push > 0) {
@@ -436,7 +577,11 @@ export class Npc implements Living {
     this.hitThisSwing.clear();
     this.bladePath.reset();
     this.heldAt = null;
-    this.provoked = null;
+    this.memory.clear();
+    this.target = null;
+    this.targetKey = null;
+    this.decision = null;
+    this.state = 'dead';
     const rig = this.rig;
     // The death clip plays out, then the body falls to the physics from its last frame.
     this.ragdollIn = 0.6;
@@ -480,11 +625,327 @@ export class Npc implements Living {
   }
 
   /**
+   * Whether a shot from here would reach a target's middle: one ray against what stands still,
+   * cast at a thought and never at a frame. Inside a building it ignores the terrain and the
+   * outer shells, as everything else of a body indoors does.
+   */
+  private lineTo(t: Living): boolean {
+    this.muzzle(tmp);
+    LINE_FROM.x = tmp.x;
+    LINE_FROM.y = tmp.y;
+    LINE_FROM.z = tmp.z;
+    LINE_TO.x = t.pos.x;
+    LINE_TO.y = t.pos.y + t.halfHeight;
+    LINE_TO.z = t.pos.z;
+    return !this.physics.segmentBlocked(LINE_FROM, LINE_TO, !!this.cell);
+  }
+
+  /**
+   * Its nerve, which is what the brain is told its temper is. Whole, it is the aggressive thing it
+   * has always been; below `fleeUnder` of its health it thinks as a skittish one, which in the
+   * creatures' brain means running from whoever hurt it and from the player rather than fighting.
+   * Its `aggression` itself never moves, because that is what the rest of the game reads to decide
+   * who picks a fight with it, and a wounded fighter is still worth fighting.
+   */
+  private get nerve(): Aggression {
+    return this.hp < this.maxHp * FIGHTER_TUNE.fleeUnder ? 'skittish' : this.aggression;
+  }
+
+  /**
+   * A wander goal pulled back inside the indoor leash, in place. The brain's wander reaches 8 to
+   * 30 m from home in any direction, which is drawn for the open ground; indoors it leashes at 25,
+   * so a goal past that radius makes the leash fire the moment the fighter crosses it and the
+   * fighter churns out and back for as long as it is left alone. Nothing of the brain's is changed
+   * for it: its wander is the wildlife's as much as the fighters', and this is one fighter pulling
+   * its own goal in. `FIGHTER_TUNE.wanderInsideShare` is how much of the leash it may use.
+   */
+  private clampWanderInside(d: Decision): void {
+    const g = d.goal;
+    if (!g) return;
+    const max = BRAIN_TUNE.leashInside * FIGHTER_TUNE.wanderInsideShare;
+    const dx = g.x - this.homeX;
+    const dz = g.z - this.homeZ;
+    const far = Math.hypot(dx, dz);
+    if (far <= max || far < 1e-6) return;
+    const k = max / far;
+    g.x = this.homeX + dx * k;
+    g.z = this.homeZ + dz * k;
+    // The brain hands one object back as the goal, as where it walks and as what it faces; the
+    // other two are written from it all the same, so that this stays right if that ever changes.
+    if (d.moveTo && d.moveTo !== g) {
+      d.moveTo.x = g.x;
+      d.moveTo.z = g.z;
+    }
+    if (d.face && d.face !== g) {
+      d.face.x = g.x;
+      d.face.z = g.z;
+    }
+  }
+
+  /**
+   * One thought. The world's living things are filled into pooled structs, the fighter itself into
+   * a `BrainSelf`, and the creatures' own `decide` answers; everything it hands back is kept for
+   * the next thought and read by the frames in between. The list is cut to what could matter --
+   * anything it holds a grudge against or is already fighting, and everything else within the
+   * farthest the brain's own numbers can reach.
+   */
+  private think(foes: readonly Living[], now: number): void {
+    if (this.wanderAt < 0) this.wanderAt = now + 1 + Math.random() * 4;
+    // Grudges past the brain's memory, and the dead, are dropped.
+    for (const [k, g] of this.memory) if (now - g.at > BRAIN_TUNE.memory || g.who.dead) this.memory.delete(k);
+    const list = this.brainTargets;
+    list.length = 0;
+    let current: Living | null = null;
+    const reachOut = Math.max(BRAIN_TUNE.aggroBig, BRAIN_TUNE.leash) + 30;
+    const ranged = this.arm === 'gun' && this.gun ? FIGHTER_TUNE.gunRange : 0;
+    for (const t of foes) {
+      if (t.key === this.key) continue;
+      const dx = t.pos.x - this.pos.x;
+      const dz = t.pos.z - this.pos.z;
+      const grudge = this.memory.get(t.key);
+      const isCurrent = t.key === this.targetKey;
+      if (!grudge && !isCurrent && dx * dx + dz * dz > reachOut * reachOut) continue;
+      if (isCurrent) current = t;
+      // Filled into a pooled object: the brain copies what it keeps and never holds on to these.
+      let b = this.brainPool[list.length];
+      if (!b) {
+        b = { key: 0, x: 0, y: 0, z: 0, halfHeight: 0, radius: 0, side: t.side, aggression: t.aggression, dead: false, attackedMeAt: -Infinity, hasLine: false };
+        this.brainPool.push(b);
+      }
+      b.key = t.key;
+      b.x = t.pos.x;
+      b.y = t.pos.y;
+      b.z = t.pos.z;
+      b.halfHeight = t.halfHeight;
+      b.radius = t.radiusToward(this.pos) + this.radiusToward();
+      b.side = t.side;
+      b.aggression = t.aggression;
+      b.dead = t.dead;
+      b.attackedMeAt = grudge ? grudge.at : -Infinity;
+      // One ray a thought, and only along the one it is already after: a fresh target is chased or
+      // stared at for a tick before it is shot at, which is the rule the creatures fight by too.
+      b.hasLine = isCurrent && ranged > 0 && !t.dead ? this.lineTo(t) : false;
+      list.push(b);
+    }
+    const self: BrainSelf = {
+      key: this.key,
+      x: this.pos.x,
+      y: this.pos.y,
+      z: this.pos.z,
+      heading: this.heading,
+      homeX: this.homeX,
+      homeZ: this.homeZ,
+      side: this.side,
+      aggression: this.nerve,
+      inside: !!this.cell,
+      // A person is never a big body: the far sight is a bantha's and a rancor's.
+      big: false,
+      reach: FIGHTER_TUNE.reach,
+      ranged,
+      melee: this.arm !== 'gun',
+      halfHeight: this.halfHeight,
+      hpRatio: this.hp / this.maxHp,
+      state: this.state,
+      targetKey: this.targetKey,
+      stuck: this.stuck,
+      now,
+      wanderAt: this.wanderAt,
+      goal: this.goal,
+      until: this.until,
+      blockedSince: this.blockedSince,
+      forgetKey: this.forgetKey,
+      forgetUntil: this.forgetUntil,
+    };
+    const d = decide(self, list);
+    // A wander indoors is pulled back inside the indoor leash before it is kept: see
+    // `wanderInsideShare`. Only a wander, and only inside -- a flight is meant to be short and to
+    // end where it ends, and outdoors the brain's farthest wander is half the leash already.
+    if (d.state === 'wander' && this.cell) this.clampWanderInside(d);
+    if (d.clearMemory) this.memory.clear();
+    if (d.targetKey !== this.targetKey) {
+      this.stuck = 0;
+      this.stuckClock = 0;
+    }
+    this.targetKey = d.targetKey;
+    // The body behind the key: the one already in hand when it has not changed, else looked up once.
+    let next: Living | null = d.targetKey === null ? null : d.targetKey === current?.key ? current : null;
+    if (d.targetKey !== null && !next) {
+      for (const t of foes) {
+        if (t.key !== d.targetKey) continue;
+        next = t;
+        break;
+      }
+    }
+    this.target = next;
+    this.wanderAt = d.wanderAt;
+    this.goal = d.goal;
+    this.until = d.until;
+    this.blockedSince = d.blockedSince;
+    this.forgetKey = d.forgetKey;
+    this.forgetUntil = d.forgetUntil;
+    if (d.state === 'return' && this.state !== 'return') this.goal = null;
+    this.state = d.state;
+    this.decision = d;
+  }
+
+  /**
+   * One frame of what the last thought decided: the brain gives a goal, a pace and something to
+   * face, and the fighter walks at it in a straight line, because paths are a later pass's. The
+   * attack is the one the brain chose, on the fighter's own cooldown and only once its nose is
+   * within `aimCone` of what it is fighting, which is the gate its swing has always had.
+   */
+  private act(sdt: number, bolts: Bolts, effects: Effects | null, hittableAt: ((handle: number) => Hittable | undefined) | null): void {
+    const d = this.decision;
+    if (this.target?.dead) this.target = null;
+    const t = this.target;
+    let moveTo = d?.moveTo ?? null;
+    let face = d?.face ?? null;
+    let pace: 'stand' | 'walk' | 'run' = d?.pace ?? 'stand';
+    // The target moves between thoughts: the chase and the aim follow it every frame.
+    if (t && d && (d.state === 'chase' || d.state === 'attack' || d.state === 'alert')) {
+      this.faceAt.x = t.pos.x;
+      this.faceAt.z = t.pos.z;
+      face = this.faceAt;
+      if (d.state === 'chase') {
+        moveTo = this.faceAt;
+        // Close enough to strike: stop rather than run on until the next thought. A gun keeps
+        // closing, because a chase is what the brain answers when the shot is out of range *or*
+        // when there is a wall in the way, and standing off at the gun's range with nothing to
+        // shoot through would leave it there for good.
+        const gap = Math.hypot(t.pos.x - this.pos.x, t.pos.z - this.pos.z) - t.radiusToward(this.pos) - this.radiusToward();
+        if (this.arm !== 'gun' && gap <= FIGHTER_TUNE.reach) pace = 'stand';
+      }
+    }
+    // Stunned, or with a blade already on its way through a swing, it stands where it is.
+    if (this.stunned > 0 || this.swingLeft >= 0) pace = 'stand';
+    let diff = 0;
+    if (face && this.stunned <= 0) {
+      const want = Math.atan2(face.x - this.pos.x, face.z - this.pos.z);
+      diff = Math.atan2(Math.sin(want - this.heading), Math.cos(want - this.heading));
+      this.heading += diff * Math.min(1, sdt * FIGHTER_TUNE.turn);
+    }
+    const speed = pace === 'run' ? FIGHTER_TUNE.run : pace === 'walk' ? FIGHTER_TUNE.walk : 0;
+    this.pace = pace;
+    this.moving = false;
+    if (moveTo && speed > 0) {
+      const gap = Math.hypot(moveTo.x - this.pos.x, moveTo.z - this.pos.z);
+      if (gap > FIGHTER_TUNE.arrive) {
+        const step = Math.min(gap, speed * sdt);
+        this.pos.x += Math.sin(this.heading) * step;
+        this.pos.z += Math.cos(this.heading) * step;
+        this.moving = true;
+      }
+    }
+    this.checkStuck(sdt, this.moving ? speed : 0);
+    // Stunned it neither moves nor strikes, which is what being stunned has always meant here.
+    if (!t || !d || this.stunned > 0 || d.state !== 'attack' || this.attackCd > 0 || Math.abs(diff) >= FIGHTER_TUNE.aimCone) return;
+    if (d.attack === 'ranged' && this.arm === 'gun' && this.gun) this.shoot(t, bolts, effects);
+    else if (d.attack === 'melee' && this.arm !== 'gun') this.swing(t, hittableAt);
+  }
+
+  /**
+   * The ground covered against the speed asked for, over a window: far under it and the brain is
+   * told it is stuck, and gives the target up after a few of them. It never fires today, because a
+   * fighter's body is kinematic and its place is written straight, so it walks through whatever is
+   * in the way rather than being held by it; it is here for the pass that gives them paths.
+   */
+  private checkStuck(dt: number, commanded: number): void {
+    if (this.stuckClock === 0) this.stuckFrom.copy(this.pos);
+    this.stuckClock += dt;
+    this.stuckCommanded += commanded * dt;
+    if (this.stuckClock < FIGHTER_TUNE.stuckWindow) return;
+    const avg = this.stuckCommanded / this.stuckClock;
+    const covered = Math.hypot(this.pos.x - this.stuckFrom.x, this.pos.z - this.stuckFrom.z);
+    if (avg > 1 && covered < FIGHTER_TUNE.stuckShare * avg * this.stuckClock) this.stuck++;
+    this.stuckClock = 0;
+    this.stuckCommanded = 0;
+  }
+
+  /** A bolt at the foe's middle, out of its own gun off the rack. */
+  private shoot(t: Living, bolts: Bolts, effects: Effects | null): void {
+    const g = this.gun;
+    const rig = this.rig;
+    if (!g) return;
+    this.attackCd = Math.max(FIGHTER_TUNE.gunEvery, g.primary.fireTime * 2.5) + Math.random() * FIGHTER_TUNE.gunSpread;
+    this.muzzle(tmp2);
+    tmp.copy(t.pos).y += t.halfHeight * 0.9;
+    tmp.sub(tmp2).normalize();
+    // A fighter's aim scatters a little more than the player's.
+    const s = FIGHTER_TUNE.aimSpread;
+    tmp.x += (Math.random() - 0.5) * s;
+    tmp.y += (Math.random() - 0.5) * s;
+    tmp.z += (Math.random() - 0.5) * s;
+    tmp.normalize();
+    // Its own gun off the rack, so an enemy's shot sounds like the weapon in its hands.
+    bolts.fire(tmp2, tmp, { owner: 'enemy', damage: Math.max(6, g.primary.damage * 0.6), speed: g.primary.speed || 2300, color: g.primary.color, size: g.primary.size, push: g.primary.push, exclude: this.body, life: 6, source: this, sound: combatSounds.gunOf(this.weapon), scar: scarFamilyOf(g.type, this.weapon?.fx?.id) });
+    effects?.flash(tmp2, g.primary.color, 6, 5, 0.06);
+    rig?.playUpper(rig.firstOf('rifle_combat_standing_fire_1', 'add_rifle_fire_1', 'pistol_combat_standing_fire_1') ?? '', 0.04);
+  }
+
+  /** A swing: the window during which the blade cuts whatever it passes through. */
+  private swing(t: Living, hittableAt: ((handle: number) => Hittable | undefined) | null): void {
+    const rig = this.rig;
+    this.attackCd = FIGHTER_TUNE.swingEvery + Math.random() * FIGHTER_TUNE.swingSpread;
+    // The swing opens a window rather than setting the moment a blow lands: for as long as it
+    // runs the blade cuts what it passes through, once each, and it can now miss altogether.
+    // The path is not reset here: the blade was drawn on the frame before and wrote its ends
+    // down, so the first cut of the swing steps from where the blade really stood.
+    this.swingLeft = BLADE_SWING.window;
+    this.hitThisSwing.clear();
+    this.swingSwept = false;
+    this.swingSounded = false;
+    // Kept for the one case the sweep cannot cover, below: nothing was ever wired to say what
+    // a collider belongs to, so the blade can find nobody however well it is swung.
+    this.swingTarget = t;
+    noteBladeSwing(!hittableAt);
+    if (!hittableAt && !warnedBlind) {
+      warnedBlind = true;
+      console.warn('fighters: nothing was wired to say what a collider belongs to (npcDeps.hittableAt), so a swung blade can find nobody; the blow it replaced stands in. __debug.blades() counts it.');
+    }
+    const swing = SWINGS[Math.floor(Math.random() * SWINGS.length)];
+    if (rig?.has(swing)) rig.play(swing, { fadeIn: 0.06 });
+    // A blade's own whoosh is the sabers' to make (the clip it plays may mark its own); a
+    // sword or a club takes the melee table's row for what it is.
+    // Jedi Academy's three styles are its A1, A2 and A3 swings, which is the list above.
+    // A blade is heard along the blade, not at the hips: the middle of the blade as it was
+    // last drawn, which is where its own light is read from too. Before the first frame that
+    // drew it there is no blade to speak of, and the body stands in.
+    if (this.arm === 'saber') {
+      const drawn = this.bladeTip.lengthSq() > 1e-6;
+      const bx = drawn ? (this.bladeBase.x + this.bladeTip.x) * 0.5 : this.pos.x;
+      const by = drawn ? (this.bladeBase.y + this.bladeTip.y) * 0.5 : this.pos.y + 1.2;
+      const bz = drawn ? (this.bladeBase.z + this.bladeTip.z) * 0.5 : this.pos.z;
+      combatSounds.saberSwing(swingStyle(swing), bx, by, bz, swing);
+    } else combatSounds.melee(this.weapon, false, this.pos.x, this.pos.y + 1.2, this.pos.z);
+  }
+
+  /** What it is thinking, in one line, for `__debug.fighters()`. */
+  status(): Record<string, unknown> {
+    return {
+      name: this.name,
+      arm: this.arm,
+      state: this.state,
+      target: this.targetKey === PLAYER_KEY ? 'you' : (this.target?.label ?? this.targetKey),
+      hp: Number(this.hp.toFixed(0)),
+      nerve: this.nerve,
+      fromHome: Number(Math.hypot(this.pos.x - this.homeX, this.pos.z - this.homeZ).toFixed(1)),
+      inside: !!this.cell,
+      remembers: this.memory.size,
+      stuck: this.stuck,
+    };
+  }
+
+  /**
    * `now` is the world's simulated clock (`World.simTime`), so `__debug.advance` exercises the
    * hold. `hittableAt` is what a swinging blade names the colliders it touches with; with none
    * nothing can be swept at all and the swing falls back on the blow the timer used to land.
    */
   update(dt: number, terrain: Terrain, foes: readonly Living[], bolts: Bolts, effects: Effects | null, camera: THREE.Camera | null, now: number, hittableAt: ((handle: number) => Hittable | undefined) | null = null): void {
+    if (!this.stepped) {
+      this.stepped = true;
+      // Whatever was struck before this fighter had a clock is dated from here (see `stepped`).
+      for (const g of this.memory.values()) g.at = now;
+    }
     this.now = now;
     // Slowed, everything of its own runs at a crawl; a burn eats in real time.
     this.slowed = Math.max(0, this.slowed - dt);
@@ -525,100 +986,17 @@ export class Npc implements Living {
       this.swingLeft -= dt;
       closed = this.swingLeft < 0;
     }
-    this.retarget -= sdt;
-    // Whoever hurt it last outranks the nearest, whatever side they are on, until it forgets.
-    if (this.provoked) {
-      this.provokedFor -= sdt;
-      if (this.provokedFor <= 0 || this.provoked.dead) this.provoked = null;
+    // The mind: a thought a few times a second, and the body acting on the last one every frame
+    // between. Both run on the world's simulated clock, so `__debug.advance` exercises the leash,
+    // the memory and the give-up exactly as a real minute does.
+    if (now >= this.thinkAt) {
+      this.thinkAt = now + FIGHTER_TUNE.think * (1 + (Math.random() * 2 - 1) * FIGHTER_TUNE.thinkJitter);
+      this.think(foes, now);
     }
-    if (this.retarget <= 0) {
-      this.retarget = 0.4 + Math.random() * 0.3;
-      let best: Living | null = this.provoked;
-      let bestD = SIGHT;
-      if (!best) {
-        for (const f of foes) {
-          if (f.key === this.key || f.dead || !hostileSides(this, f)) continue;
-          const d = f.pos.distanceTo(this.pos);
-          if (d < bestD) {
-            bestD = d;
-            best = f;
-          }
-        }
-      }
-      this.target = best;
-    }
-    const t = this.target && !this.target.dead ? this.target : null;
-    this.moving = false;
-    if (t && this.stunned <= 0) {
-      tmp.copy(t.pos).sub(this.pos);
-      tmp.y = 0;
-      const d = tmp.length();
-      const want = Math.atan2(tmp.x, tmp.z);
-      let diff = want - this.heading;
-      diff = Math.atan2(Math.sin(diff), Math.cos(diff));
-      this.heading += diff * Math.min(1, sdt * 6);
-      const reach = this.arm === 'gun' ? 9 + Math.random() * 0.1 : 1.9;
-      if (d > reach && this.swingLeft < 0) {
-        const step = Math.min(d - reach, RUN_SPEED * sdt);
-        this.pos.x += Math.sin(this.heading) * step;
-        this.pos.z += Math.cos(this.heading) * step;
-        this.moving = true;
-      }
-      // The attack: a swing that lands a moment in, or a bolt at the foe's middle.
-      if (this.attackCd <= 0 && Math.abs(diff) < 0.5) {
-        if (this.arm === 'gun' && this.gun && d < 26) {
-          const g = this.gun;
-          this.attackCd = Math.max(0.35, g.primary.fireTime * 2.5) + Math.random() * 0.3;
-          this.muzzle(tmp2);
-          tmp.copy(t.pos).y += t.halfHeight * 0.9;
-          tmp.sub(tmp2).normalize();
-          // A fighter's aim scatters a little more than the player's.
-          const s = 0.03;
-          tmp.x += (Math.random() - 0.5) * s;
-          tmp.y += (Math.random() - 0.5) * s;
-          tmp.z += (Math.random() - 0.5) * s;
-          tmp.normalize();
-          // Its own gun off the rack, so an enemy's shot sounds like the weapon in its hands.
-          bolts.fire(tmp2, tmp, { owner: 'enemy', damage: Math.max(6, g.primary.damage * 0.6), speed: g.primary.speed || 2300, color: g.primary.color, size: g.primary.size, push: g.primary.push, exclude: this.body, life: 6, source: this, sound: combatSounds.gunOf(this.weapon), scar: scarFamilyOf(g.type, this.weapon?.fx?.id) });
-          effects?.flash(tmp2, g.primary.color, 6, 5, 0.06);
-          rig?.playUpper(rig.firstOf('rifle_combat_standing_fire_1', 'add_rifle_fire_1', 'pistol_combat_standing_fire_1') ?? '', 0.04);
-        } else if (this.arm !== 'gun' && d < 2.6) {
-          this.attackCd = 1.1 + Math.random() * 0.4;
-          // The swing opens a window rather than setting the moment a blow lands: for as long as it
-          // runs the blade cuts what it passes through, once each, and it can now miss altogether.
-          // The path is not reset here: the blade was drawn on the frame before and wrote its ends
-          // down, so the first cut of the swing steps from where the blade really stood.
-          this.swingLeft = BLADE_SWING.window;
-          this.hitThisSwing.clear();
-          this.swingSwept = false;
-          this.swingSounded = false;
-          // Kept for the one case the sweep cannot cover, below: nothing was ever wired to say what
-          // a collider belongs to, so the blade can find nobody however well it is swung.
-          this.swingTarget = t;
-          noteBladeSwing(!hittableAt);
-          if (!hittableAt && !warnedBlind) {
-            warnedBlind = true;
-            console.warn('fighters: nothing was wired to say what a collider belongs to (npcDeps.hittableAt), so a swung blade can find nobody; the blow it replaced stands in. __debug.blades() counts it.');
-          }
-          const swing = SWINGS[Math.floor(Math.random() * SWINGS.length)];
-          if (rig?.has(swing)) rig.play(swing, { fadeIn: 0.06 });
-          // A blade's own whoosh is the sabers' to make (the clip it plays may mark its own); a
-          // sword or a club takes the melee table's row for what it is.
-          // Jedi Academy's three styles are its A1, A2 and A3 swings, which is the list above.
-          // A blade is heard along the blade, not at the hips: the middle of the blade as it was
-          // last drawn, which is where its own light is read from too. Before the first frame that
-          // drew it there is no blade to speak of, and the body stands in.
-          if (this.arm === 'saber') {
-            const drawn = this.bladeTip.lengthSq() > 1e-6;
-            const bx = drawn ? (this.bladeBase.x + this.bladeTip.x) * 0.5 : this.pos.x;
-            const by = drawn ? (this.bladeBase.y + this.bladeTip.y) * 0.5 : this.pos.y + 1.2;
-            const bz = drawn ? (this.bladeBase.z + this.bladeTip.z) * 0.5 : this.pos.z;
-            combatSounds.saberSwing(swingStyle(swing), bx, by, bz, swing);
-          }
-          else combatSounds.melee(this.weapon, false, this.pos.x, this.pos.y + 1.2, this.pos.z);
-        }
-      }
-    }
+    this.act(sdt, bolts, effects, hittableAt);
+    // What it is fighting, for the stance it stands in and for whether its blade is held ready:
+    // the brain drops it while it flees or goes home, so both go quiet with it.
+    const t = this.target;
     // A shove from a blow or a blast, spent over a moment.
     if (this.push.lengthSq() > 1e-4) {
       this.pos.addScaledVector(this.push, sdt);
@@ -659,7 +1037,10 @@ export class Npc implements Living {
     this.group.quaternion.setFromAxisAngle(UP, this.heading);
     if (rig) {
       if (!rig.overriding) {
-        if (this.moving) rig.setState('run', RUN_SPEED * own);
+        // A wander walks and everything else runs, which is the brain's own pace rather than this
+        // file's: before it, a fighter had one gait and only ever used it to close on somebody.
+        if (this.moving && this.pace === 'walk') rig.setState('walk', FIGHTER_TUNE.walk * own);
+        else if (this.moving) rig.setState('run', FIGHTER_TUNE.run * own);
         else if (this.arm === 'gun') rig.setState(rig.hasState('gunAimIdle') ? 'gunAimIdle' : 'idle');
         else if (this.arm === 'saber' && t) rig.setState(rig.hasState('stance') ? 'stance' : 'idle');
         else rig.setState('idle');
@@ -782,8 +1163,10 @@ export class Npc implements Living {
     this.ragdoll = null;
     // Anything still holding this one reads it as dead from here on.
     if (!this.dead) this.byCollider?.delete(this.collider.handle);
-    this.provoked = null;
+    this.memory.clear();
     this.target = null;
+    this.targetKey = null;
+    this.decision = null;
     if (!this.dead) this.physics.world.removeCollider(this.collider, false);
     this.dead = true;
     this.physics.world.removeRigidBody(this.body);
@@ -903,6 +1286,19 @@ export class NpcManager {
     if (!dbg || dbg === this.exposedOn) return;
     this.exposedOn = dbg;
     dbg.blades = (opts?: Partial<BladeSwingTune>) => bladeSwingReport(opts);
+    dbg.fighters = (opts?: Partial<FighterTune>) => this.report(opts);
+  }
+
+  /**
+   * `__debug.fighters()` says what every fighter out is thinking and what it is thinking it with;
+   * `__debug.fighters({ run: 3 })` retunes the body's own numbers live. The **mind's** numbers are
+   * the creatures' and are not this object's: how far one sees, how long it remembers, how far it
+   * chases before it goes home and when it gives a target up all move through
+   * `__debug.mobileTune({ brain: { ... } })`, and are printed here so that both are in one place.
+   */
+  private report(opts?: Partial<FighterTune>): Record<string, unknown> {
+    if (opts) Object.assign(FIGHTER_TUNE, opts);
+    return { tune: { ...FIGHTER_TUNE }, brain: { ...BRAIN_TUNE }, out: this.npcs.length, fighters: this.npcs.map((n) => n.status()) };
   }
 
   dispose(): void {
