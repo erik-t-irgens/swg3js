@@ -50,6 +50,12 @@ export class BackpackUi {
   /** A double-click, Enter, or the Equip and Left hand buttons. */
   onUse: (key: string, hand?: 'left') => void = () => {};
   onDestroy: (key: string) => void = () => {};
+  /**
+   * The Trade button: ask whoever this player is standing by and looking at. Nothing here knows what
+   * a trade is -- the wiring hands it to the ledger, which is what refuses it when there is no
+   * server, nobody there, or they are past the game's own 8 m.
+   */
+  onTrade: () => void = () => {};
 
   private readonly count: HTMLElement;
   private readonly find: HTMLInputElement;
@@ -77,6 +83,7 @@ export class BackpackUi {
           ${tabStrip(INVENTORY_TABS, 'backpack')}
           <span class="count"></span>
           <input class="find" placeholder="find" />
+          <button class="trade">Trade</button>
           <button class="close">Close <b>I</b></button>
         </div>
         <div class="backpack-main">
@@ -103,6 +110,7 @@ export class BackpackUi {
     this.examine = this.root.querySelector('.bp-examine')!;
     this.note = this.root.querySelector('.bp-note')!;
     this.root.querySelector('.close')!.addEventListener('click', () => this.hide());
+    this.root.querySelector('.trade')!.addEventListener('click', () => this.onTrade());
     wireTabs(this.root, 'backpack', (id) => this.onTab(id));
     this.find.addEventListener('input', () => this.render(this.model));
     // A click on the backdrop closes it; one inside must not.

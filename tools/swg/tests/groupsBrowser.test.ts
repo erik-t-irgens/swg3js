@@ -280,7 +280,10 @@ function make(authority: 'me' | 'server' = 'server', me = 7) {
   ok(t.g.type('/kick nobody') === 'nobody in the group is called nobody', 'a name nobody has says so');
   ok(t.g.type('/who').startsWith('group of 2:'), '/who reads the group out');
   ok(t.g.type('/nonsense') === 'there is no /nonsense', 'a command nothing knows says so rather than being said aloud');
-  ok(t.g.type('/trade').includes('comes later'), 'a command from a later wave says it is not here yet');
+  // `/trade` asks the ledger, which is made by the game's own wiring and not by this test: with
+  // nothing made, the line says there is nobody to trade with rather than looking like a command
+  // that does nothing. What it does when there is one is pinned in tradeBrowser.test.ts.
+  ok(t.g.type('/trade') === 'there is nobody to trade with', 'a trade with no ledger wired says so');
   t.g.peerByName = (name) => (name.toLowerCase() === 'lando' ? 9 : 0);
   t.places.set(9, [0, 0, 10]);
   t.sent.length = 0;

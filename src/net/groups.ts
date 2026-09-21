@@ -24,6 +24,7 @@
 // included, so that everyone reads the same words in the same order.
 
 import { combatNow } from './combatNet.ts';
+import { tradeNow } from './trade.ts';
 import type { Authority } from './session.ts';
 
 /**
@@ -597,8 +598,21 @@ export class Groups {
         if (!this.inviteNow) return 'nobody has asked you';
         this.decline();
         return '';
-      case 'trade':
-        return 'trading comes later; it is not in the game yet';
+      // The game's own word for it, at the game's own 8 m. Who owns what is the server's and this
+      // only asks; with nothing made yet (a page that has not wired the ledger) it says so rather
+      // than looking like a command that does nothing.
+      case 'trade': {
+        const ledger = tradeNow();
+        if (!ledger) return 'there is nobody to trade with';
+        if (ledger.asked) {
+          ledger.accept();
+          return '';
+        }
+        if (!line.arg) return 'who? (/trade <name>)';
+        const id = this.idByName(line.arg);
+        if (!id) return `nobody here is called ${line.arg}`;
+        return ledger.askTrade(id, line.arg);
+      }
       // The game's own words for agreeing to fight and for calling it off, at the game's own
       // distances. Who may hurt whom is the server's, and this only asks.
       case 'duel': {
@@ -617,7 +631,7 @@ export class Groups {
         combatNow()?.peace();
         return '';
       case 'help':
-        return 'chat: type to say it aloud, /g <words> to the group. /invite <name>, /accept, /decline, /leave, /promote <name>, /kick <name>, /who, /duel <name>, /peace.';
+        return 'chat: type to say it aloud, /g <words> to the group. /invite <name>, /accept, /decline, /leave, /promote <name>, /kick <name>, /who, /trade <name>, /duel <name>, /peace.';
       default:
         return `there is no /${line.command}`;
     }

@@ -32,6 +32,14 @@ export interface EquipmentDeps {
   persist(c: SavedCharacter): void;
   /** Something changed: what is owned, worn or held, or which items are being put on. */
   changed(what: 'owned' | 'worn' | 'held' | 'busy'): void;
+  /**
+   * An item appeared in this character's list, or left it, on this browser's own say-so: the
+   * starting kit, a give, something worn that was not owned, a destroy. The wiring hands it to the
+   * server so that its rows and this cache do not drift. A trade never comes this way -- an item
+   * between two players is moved by the server and arrives here as a whole list (`reconcile`) --
+   * and with no server nothing is wired to it at all, which is why it is optional.
+   */
+  ledger?: (what: 'add' | 'drop', kind: 'wear' | 'weapon', id: string) => void;
   baseUrl: string;
 }
 
@@ -60,6 +68,15 @@ export interface UseResult {
 }
 
 const DROPPED = 'dropped';
+
+/** What a list from the server changed here, in words: "two things came in, one went". */
+export function reconcileWords(came: number, gone: number): string {
+  const things = (n: number) => (n === 1 ? 'one thing' : `${n} things`);
+  if (came && gone) return `${things(came)} came in, ${things(gone)} went`;
+  if (came) return `${things(came)} came in`;
+  if (gone) return `${things(gone)} went`;
+  return 'nothing in the backpack changed';
+}
 
 export class Equipment {
   private readonly deps: EquipmentDeps;
@@ -186,6 +203,7 @@ export class Equipment {
     const items = (rec.items ??= []);
     if (items.some((o) => o.kind === kind && o.id === id)) return false;
     items.push({ id, kind, got: Date.now() });
+    this.deps.ledger?.('add', kind, id);
     return true;
   }
 
@@ -457,10 +475,84 @@ export class Equipment {
         if (e.left?.id === id) this.deps.player.unequip('left');
       }
       rec.items = (rec.items ?? []).filter((o) => !(o.kind === kind && o.id === id));
+      this.deps.ledger?.('drop', kind, id);
       this.save({ noGive: true });
       this.deps.changed('owned');
       this.deps.changed(kind === 'wear' ? 'worn' : 'held');
       return `${name} destroyed`;
+    });
+  }
+
+  /** Whether this character owns an item now: what a trade asks before it will offer one. */
+  owns(kind: 'wear' | 'weapon', id: string): boolean {
+    return !!this.deps.record()?.items?.some((o) => o.kind === kind && o.id === id);
+  }
+
+  /**
+   * What an item is doing instead of sitting in the backpack: worn, or in one of the hands. It is
+   * what a trade reads to refuse something that is on the body rather than taking it off the player
+   * behind their back, and it is read from the body and the hands themselves, never from the record,
+   * because the record is written after the fact and a piece being put on is on before it is saved.
+   */
+  inUse(kind: 'wear' | 'weapon', id: string): 'worn' | 'right' | 'left' | null {
+    if (kind === 'wear') return this.wornPartOf(id) ? 'worn' : null;
+    const e = this.deps.player.equipped;
+    if (e.right?.id === id) return 'right';
+    if (e.left?.id === id) return 'left';
+    return null;
+  }
+
+  /**
+   * The server's list of what this character owns, which stands. It is the one way anything outside
+   * this file writes the items, and it is written whole rather than merged: once a server holds a
+   * character, its rows are the truth and what is here is a cache of them (the wave's decision 7).
+   *
+   * Anything that has gone comes off the body and out of the hands first, in the same step, so a
+   * shirt traded away cannot be left being worn by a character that no longer owns it; then the list
+   * is written and saved with `noGive`, because the ordinary save gives back whatever is worn and
+   * held -- which would put the very item that was just traded away straight back into the list.
+   *
+   * It runs in the queue like everything else, so a put-on or a take-up still in flight finishes
+   * first and cannot land after the list it would contradict. Nothing is sent from here: the server
+   * has already written the rows, and this is the browser catching up.
+   */
+  reconcile(items: readonly OwnedItem[]): Promise<string> {
+    return this.run('reconcile', DROPPED, async (alive) => {
+      await this.itemContext();
+      if (!alive()) return DROPPED;
+      const rec = this.deps.record();
+      if (!rec) return 'no character is being played';
+      const want = normalizeOwned(items as OwnedItem[]);
+      const had = normalizeOwned(rec.items);
+      const wanted = new Set(want.map((o) => `${o.kind}:${o.id}`));
+      const gone = had.filter((o) => !wanted.has(`${o.kind}:${o.id}`));
+      const came = want.filter((o) => !had.some((h) => h.kind === o.kind && h.id === o.id));
+      let tookOff = false;
+      let unhanded = false;
+      for (const o of gone) {
+        if (o.kind === 'wear') {
+          if (this.wornPartOf(o.id)) {
+            this.takeOff(o.id);
+            tookOff = true;
+          }
+          continue;
+        }
+        const e = this.deps.player.equipped;
+        if (e.right?.id === o.id) {
+          this.deps.player.unequip('right');
+          unhanded = true;
+        }
+        if (e.left?.id === o.id) {
+          this.deps.player.unequip('left');
+          unhanded = true;
+        }
+      }
+      rec.items = want;
+      this.save({ noGive: true });
+      if (gone.length || came.length) this.deps.changed('owned');
+      if (tookOff) this.deps.changed('worn');
+      if (unhanded) this.deps.changed('held');
+      return reconcileWords(came.length, gone.length);
     });
   }
 

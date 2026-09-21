@@ -301,6 +301,13 @@ export class Session {
   onAsk: (ask: { character: string; browser: CharacterSummary; server: CharacterSummary } | null) => void = () => {};
   /** How a character was settled, for whoever will apply the server's copy when there is one to apply. */
   onSettled: (what: Settlement, record: CharacterSummary | null) => void = () => {};
+  /**
+   * The server has taken this browser's claim. It is the moment the ledger hands its list up -- a
+   * character the server has never seen is written down from what this browser holds, and after that
+   * the server's rows are the truth (src/net/trade.ts). Nothing here knows what an item is: it says
+   * that the line is a server line with a character settled on it, and that is all.
+   */
+  onClaimed: (keep: Settlement | '') => void = () => {};
   /** Something to send: `Net` puts it on the socket. */
   send: (msg: Record<string, unknown>) => void = () => {};
 
@@ -619,6 +626,8 @@ export class Session {
     this.stat.admin = you?.admin === 1;
     if (you?.character) this.stat.character = you.character;
     this.onNote(`joined the world as ${this.charName || you?.name || 'someone'}`);
+    // Said last, so that whoever hands their list up is doing it with everything above already true.
+    this.onClaimed(this.stat.keep);
   }
 
   /** The welcome, which on a server carries this connection's number and the friendly-fire switch. */

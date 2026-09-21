@@ -43,6 +43,24 @@ export interface SavedCharacter {
   inv?: 1;
   /** The ships' fits by garage id (a component per chassis slot, paint values, the droid); a ship absent is stock. */
   ships?: Record<string, ShipFit>;
+  /**
+   * 1 once a server has taken this character's items down, which makes everything under `items` here
+   * a cache of the server's own list rather than the only copy there is. It is absent for every
+   * character that has only ever been played alone, and that is what keeps a game with no server
+   * exactly the game it was: nothing reads this unless there is a server to read it against.
+   *
+   * It is also what a browser says when it first hands its list up -- "I believe you already hold
+   * this one" -- so that a browser whose storage was cleared (which has no mark, and no items) is
+   * told everything back rather than taken for a character that has just lost everything it owned.
+   */
+  known?: 1;
+  /**
+   * The change counter the server last settled this character at (the counter itself lives beside the
+   * player's key, in `swg.charrev`, because it counts changes made with nobody watching). It is kept
+   * here as well so that what the record says about itself and what the server was told cannot drift
+   * apart when one of the two stores is cleared and the other is not.
+   */
+  rev?: number;
 }
 
 export function loadCharacters(): SavedCharacter[] {
@@ -77,6 +95,33 @@ export function upsertCharacter(c: SavedCharacter): boolean {
 
 export function deleteCharacter(id: string): void {
   saveCharacters(loadCharacters().filter((c) => c.id !== id));
+}
+
+/**
+ * Whether a server holds this character's items, which is what makes the list in it a cache. A
+ * record from before any of this, and every character that has only ever been played alone, answers
+ * false, and everything that reads it then goes on exactly as it did.
+ */
+export function knownToServer(c: SavedCharacter | null | undefined): boolean {
+  return !!c && c.known === 1;
+}
+
+/**
+ * The server has taken this character down: mark the record and keep the counter it settled at. The
+ * record passed in is written as well as the copy in storage, because the game plays the object it
+ * holds and a mark only in storage would be lost the next time anything saved.
+ *
+ * The counter never goes backwards here: a message that arrives out of order must not make a
+ * character look older than it is, which is what the whole settling rests on.
+ */
+export function markKnownToServer(c: SavedCharacter, rev: number): boolean {
+  const n = Number.isFinite(rev) && rev > 0 ? Math.round(rev) : 0;
+  const was = c.known === 1 && (c.rev ?? 0) >= n;
+  c.known = 1;
+  if (n > (c.rev ?? 0)) c.rev = n;
+  if (was) return false;
+  upsertCharacter(c);
+  return true;
 }
 
 export function newCharacterId(): string {

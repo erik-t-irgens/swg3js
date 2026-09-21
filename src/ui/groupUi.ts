@@ -87,6 +87,12 @@ export interface GroupUiDeps {
   canOpen: () => boolean;
   /** The panel wants the mouse (and gives it back): the game's own free-the-mouse. */
   freeMouse: (free: boolean) => void;
+  /**
+   * Ask a member of the group to trade, by the connection they are on. It is handed in rather than
+   * imported because the ledger is wired after this panel is built; the answer is what to tell the
+   * player, and '' when the asking went out.
+   */
+  trade?: (id: number, name: string) => string;
 }
 
 interface Row {
@@ -95,14 +101,20 @@ interface Row {
   readonly where: HTMLElement;
   readonly bar: HTMLElement;
   readonly fill: HTMLElement;
+  readonly trade: HTMLButtonElement;
   readonly promote: HTMLButtonElement;
   readonly kick: HTMLButtonElement;
   /** The member id the roster gives, which is what a kick or a promotion names. */
   mid: string;
+  /** The connection the member is on now, which is what a trade names them by; 0 while they are away. */
+  id: number;
+  /** The member's plain name, without the leader's mark or the "(you)", which is what a trade says. */
+  who: string;
   nameText: string;
   whereText: string;
   hp: number;
   buttons: boolean;
+  canTrade: boolean;
   shown: boolean;
 }
 
@@ -289,7 +301,7 @@ export class GroupUi {
     for (let i = 0; i < GROUP_TUNE.max; i++) {
       const el = document.createElement('div');
       el.className = 'group-row hidden';
-      el.innerHTML = '<span class="who"></span><span class="acts"><button type="button" class="promote">Lead</button><button type="button" class="kick">Remove</button></span><span class="where"></span><span class="hp"><i></i></span>';
+      el.innerHTML = '<span class="who"></span><span class="acts"><button type="button" class="trade">Trade</button><button type="button" class="promote">Lead</button><button type="button" class="kick">Remove</button></span><span class="where"></span><span class="hp"><i></i></span>';
       this.list.appendChild(el);
       const row: Row = {
         el,
@@ -297,15 +309,23 @@ export class GroupUi {
         where: el.querySelector<HTMLElement>('.where')!,
         bar: el.querySelector<HTMLElement>('.hp')!,
         fill: el.querySelector<HTMLElement>('.hp > i')!,
+        trade: el.querySelector<HTMLButtonElement>('.trade')!,
         promote: el.querySelector<HTMLButtonElement>('.promote')!,
         kick: el.querySelector<HTMLButtonElement>('.kick')!,
         mid: '',
+        id: 0,
+        who: '',
         nameText: '',
         whereText: '',
         hp: -2,
         buttons: true,
+        canTrade: true,
         shown: true,
       };
+      row.trade.addEventListener('click', () => {
+        if (!row.id || !this.deps.trade) return;
+        this.deps.note(this.deps.trade(row.id, row.who) || `asked ${row.who} to trade`);
+      });
       row.promote.addEventListener('click', () => {
         if (row.mid) this.deps.groups.promote(row.mid);
       });
@@ -536,6 +556,8 @@ export class GroupUi {
           row.el.classList.add('hidden');
           row.shown = false;
           row.mid = '';
+          row.id = 0;
+          row.who = '';
           this.stat.writes++;
         }
         continue;
@@ -546,6 +568,8 @@ export class GroupUi {
         this.stat.writes++;
       }
       row.mid = m.mid;
+      row.id = m.id;
+      row.who = m.name;
       const name = `${m.leader ? '★ ' : ''}${m.name}${m.me ? ' (you)' : ''}`;
       if (name !== row.nameText) {
         row.nameText = name;
@@ -573,6 +597,14 @@ export class GroupUi {
         row.buttons = buttons;
         row.promote.classList.toggle('hidden', !buttons);
         row.kick.classList.toggle('hidden', !buttons);
+        this.stat.writes++;
+      }
+      // Trading is nobody's privilege: any member may ask any other, and the ledger refuses it past
+      // the game's own 8 m. It is hidden for your own row and for anybody who is not here.
+      const canTrade = !m.me && m.here && !!this.deps.trade;
+      if (canTrade !== row.canTrade) {
+        row.canTrade = canTrade;
+        row.trade.classList.toggle('hidden', !canTrade);
         this.stat.writes++;
       }
     }
