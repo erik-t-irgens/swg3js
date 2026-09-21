@@ -19,15 +19,89 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # A release is only ever made from a clean checkout. Nothing converted from a game install is ever
+      # committed, so this can only fail if that rule was broken, and then nothing is built or published.
+      - name: No converted content in the checkout
+        run: |
+          if [ -e assets-private ]; then echo "assets-private is in the checkout; refusing to build a release"; exit 1; fi
+          if git ls-files | grep -iE '(^|/)assets-private/|\.(tre|toc|pk3)$'; then echo "game files are tracked; refusing to build a release"; exit 1; fi
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
       - run: npm ci
       - run: npm run build
+      # The launcher's release: the pack builds the game again into a folder of its own (Vite's manifest
+      # on, the private copy off) and takes only what that build made, then the converter, the server and
+      # the launcher proper from git's own list. It fails on anything else.
+      - name: Pack the release
+        run: node tools/launcher/pack.mjs --ci --out=release --commit=${{ github.sha }}
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release
+          path: release/
+          if-no-files-found: error
+
+  # swg3js.exe: Node's own single-executable application with the launcher's bootstrap sealed in. It
+  # updates itself from the release below, so a new one is only needed when the bootstrap changes, but
+  # it is built every time so the link always hands a friend the newest.
+  launcher:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run launcher:build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: exe
+          path: launcher-build/swg3js.exe
+          if-no-files-found: error
+
+  # One rolling release, tagged `latest`, always main's newest. The new archive is uploaded beside the
+  # old (it is named for its commit), then the exe, then the record that names the archive, and only
+  # then are the older archives removed and the tag moved, so a launcher reading the release at any
+  # moment finds the archive its record names.
+  release:
+    needs: [build, launcher]
+    # Only main is ever the release, whichever branch a manual run was started on.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release
+          path: release
+      - uses: actions/download-artifact@v4
+        with:
+          name: exe
+          path: exe
+      - name: Publish to the latest release
+        run: |
+          set -euo pipefail
+          archive=$(jq -r .archive.name release/release.json)
+          test -f "release/$archive"
+          if ! gh release view latest >/dev/null 2>&1; then
+            gh release create latest --target "$GITHUB_SHA" --title "swg3js (main)" \
+              --notes "The newest build of main. Download swg3js.exe and run it: it keeps itself up to date, converts your own Star Wars Galaxies install on your machine and plays the game in your browser. No game files are in this release."
+          fi
+          old=$(gh release view latest --json assets --jq '.assets[].name' | grep -E '^swg3js-.*\.tar\.gz$' | grep -vxF "$archive" || true)
+          gh release upload latest "release/$archive" --clobber
+          gh release upload latest exe/swg3js.exe --clobber
+          gh release upload latest release/release.json --clobber
+          for a in $old; do gh release delete-asset latest "$a" --yes; done
+          gh api --method PATCH "repos/$GH_REPO/git/refs/tags/latest" -f sha="$GITHUB_SHA" -F force=true
 
   deploy:
     needs: build

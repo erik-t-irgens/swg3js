@@ -30,6 +30,9 @@ function privateAssets(): Plugin {
       });
     },
     closeBundle() {
+      // SWG3JS_NO_PRIVATE=1 is the release pack's build (tools/launcher/pack.mjs --build): a release is
+      // never to carry converted content, even when it is packed on a machine that has some.
+      if (process.env.SWG3JS_NO_PRIVATE === '1') return;
       if (fs.existsSync(PRIVATE_DIR)) fs.cpSync(PRIVATE_DIR, path.resolve(ROOT, 'dist/assets-private'), { recursive: true });
     },
   };
