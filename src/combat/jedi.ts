@@ -5,7 +5,10 @@ import { DEFAULT_LOADOUT, SLOT_ACTIONS, SLOT_COUNT, powerById, type PowerDef } f
 import { sabers } from '../audio/saberSounds.ts';
 import type { Hittable, Kit, KitContext, KitSlot, Living, Resource } from './kit';
 import { nearestInCone, type ConeQuery } from './targets';
-import { sweepCapsule } from './sweep';
+import { BLADE_RADIUS, BladePath, playerStrike, strikeSweep } from './sweep.ts';
+import { BrushClock, SABER_HIT, bodyTeleported, brushDamage, noteBrush, saberSwingStart, type HitLedger } from './saberHit.ts';
+import { roomFrame } from '../vehicles/surfaceRoom.ts';
+import type { BoltFrame } from './bolts';
 import { Unarmed } from './unarmed';
 
 const tmp = new THREE.Vector3();
@@ -13,6 +16,8 @@ const tmp2 = new THREE.Vector3();
 const a = new THREE.Vector3();
 const b = new THREE.Vector3();
 const LIGHTNING_SEGMENTS = 14;
+/** The spark a blade leaves where it bites, which is the colour every sweep has always thrown. */
+const SABER_SPARK = 0x9fd4ff;
 /** The narrowings the powers ask `targetAhead` for, as kept predicates rather than a closure a frame. */
 const CAN_SLOW = (t: Living): boolean => !!t.slow;
 const CAN_HOLD = (t: Living): boolean => !!t.holdAt;
@@ -74,6 +79,26 @@ export class JediKit implements Kit {
   /** Last style change, for the HUD. */
   styleNote = '';
   private readonly hitThisSwing = new Set<Hittable>();
+  /**
+   * Where each lit blade was last frame: one per blade the player can have out (the staff's second
+   * and the dual style's left-hand saber), kept here rather than at module scope, since the blades
+   * belong to whoever holds them.
+   */
+  private readonly bladePaths: BladePath[] = [new BladePath(), new BladePath()];
+  /** Whom a merely lit blade has already brushed, and when, so it takes its tenth four times a second and no more. */
+  private readonly brush = new BrushClock();
+  /** The hull's frame while aboard, and the way back into it: kept, because they are asked every lit frame. */
+  private aboardFrame: BoltFrame | null = null;
+  private readonly intoFrame = new THREE.Matrix4();
+  /**
+   * Where the body itself stood when a blade was last swept, and when. A body that moved further
+   * than `SABER_HIT.carry` could carry it was *put* there -- a lift's pick, a teleport, an arrival
+   * -- and every path it holds starts fresh, which is the one case the path's own rules cannot see:
+   * a lift puts the player just through a doorway, which is well inside the blade's own `jump`, and
+   * a path swept across it would cast the capsule through the wall beside the door.
+   */
+  private readonly bodyWas = new THREE.Vector3();
+  private bodyAt = -Infinity;
   private lastAttackId = -1;
   /** The body's count of bolts turned away, as it stood last frame: a rise in it is a block heard. */
   private lastBlocks = -1;
@@ -213,12 +238,62 @@ export class JediKit implements Kit {
       this.unarmed.reset();
       player.fistsBusy = false;
     }
-    // Every lit blade sweeps: the staff's second and the dual style's left-hand saber too.
-    if (onFoot && player.saberOn && player.bladeActive) {
+    // Every lit blade sweeps: the staff's second and the dual style's left-hand saber too. The cast
+    // is stepped along the path the blade covered since last frame (`SABER_HIT`), so a swing at a
+    // run no longer steps over a thin body between two frames, and a blade that is merely lit still
+    // writes its path down, so the first frame of the next swing has somewhere to step from. A lit
+    // blade nobody is swinging brushes what it stands in for a tenth of the style's damage, at most
+    // four times a second per body, which is `brushShare` and is off at 0; what counts as lit there
+    // is the renderers' own answer and not this file's. Aboard, the path, the capsule and the query
+    // are all in the hull's frame and in the room's own physics, as a bolt fired aboard is, or the
+    // ship's own motion would be part of every swing.
+    const bladeFrame = this.frameOf(ctx);
+    const swinging = onFoot && player.saberOn && player.bladeActive;
+    const inHand = onFoot && player.saberOn && !player.fists && !player.thrown.inFlight && !player.orbiting;
+    if (swinging || inHand) {
+      const now = world.simTime;
+      saberSwingStart(player.saber.attackId);
+      // The body was put where it stands rather than having walked there: nothing it holds swept
+      // anything on the way, so every path starts again from here.
+      // `pos` and not `worldPos`, because that is the frame the path itself is kept in: aboard a
+      // hull at 900 m/s the world place moves kilometres a frame and would call every swing a
+      // teleport, while in the hull's frame the body is standing still, which it is.
+      if (bodyTeleported(this.bodyWas.distanceTo(player.pos), now - this.bodyAt)) for (const path of this.bladePaths) path.reset();
+      this.bodyWas.copy(player.pos);
+      this.bodyAt = now;
       for (let i = 0; i < player.bladeCount; i++) {
         player.bladeSegmentAt(i, a, b);
-        this.sweep(ctx, a, b, 0.16, player.saberDamage, this.hitThisSwing);
+        if (bladeFrame) {
+          a.applyMatrix4(this.intoFrame);
+          b.applyMatrix4(this.intoFrame);
+        }
+        const path = this.bladePaths[i];
+        if (swinging) this.sweep(ctx, a, b, BLADE_RADIUS, player.saberDamage, this.hitThisSwing, 5, path, now, bladeFrame);
+        else path.mark(a, b, now);
       }
+      // The brush, from the renderers and from nowhere else: `SaberBlade.glowing` is the one thing
+      // that knows a blade is really drawn and out, so a sword or a polearm from the rack (which
+      // `bladeSegmentAt` answers for, on purpose, so its swing lands) brushes nobody, and a blade
+      // part-way through its ignition brushes with only the part that is out. One cast where the
+      // blade is drawn, never a stepped path: this is what standing *in* a blade costs.
+      if (!swinging && inHand && SABER_HIT.brushShare > 0) {
+        this.brush.begin(now);
+        let brushed = 0;
+        for (const blade of player.saberBlades) {
+          if (!blade.glowing) continue;
+          a.copy(blade.drawnBase);
+          b.copy(blade.drawnTip);
+          if (bladeFrame) {
+            a.applyMatrix4(this.intoFrame);
+            b.applyMatrix4(this.intoFrame);
+          }
+          brushed += this.sweep(ctx, a, b, SABER_HIT.brushRadius, brushDamage(player.saberDamage), this.brush, SABER_HIT.brushPush, null, now, bladeFrame);
+        }
+        noteBrush(brushed, now, this.brush.declined);
+      }
+    } else {
+      for (const path of this.bladePaths) path.reset();
+      this.bodyAt = -Infinity;
     }
     // A kick: the foot out in its direction, from the body's middle.
     const kick = onFoot ? player.saber.kicking : null;
@@ -518,15 +593,42 @@ export class JediKit implements Kit {
     }
   }
 
-  /** Hurt every creature a capsule between two points touches, each once per `already` (the damage is the style's, with the rage already in it). */
-  private sweep(ctx: KitContext, from: THREE.Vector3, to: THREE.Vector3, radius: number, damage: number, already: Set<Hittable>, push = 5): void {
-    const hit = sweepCapsule(ctx, from, to, radius, damage / ctx.player.damageBoost, already, push);
+  /**
+   * Hurt every creature a capsule between two points touches, each once per `already` (the damage
+   * is the style's, with the rage already in it). With a `path`, the capsule is stepped along
+   * everything the blade covered since last frame rather than cast at its two ends alone, and with
+   * a `frame` all of it -- the path, the capsule and the query -- is in the hull's frame while the
+   * blow is heard out in the world. Returns how many bodies were caught.
+   */
+  private sweep(ctx: KitContext, from: THREE.Vector3, to: THREE.Vector3, radius: number, damage: number, already: HitLedger, push = 5, path: BladePath | null = null, now = 0, frame: BoltFrame | null = null): number {
+    const who = playerStrike(ctx, frame, radius, damage, push, SABER_SPARK, now);
+    const hit = path ? path.sweep(who, from, to, already) : strikeSweep(who, from, to, already);
     // The blade met a body. One sound however many it caught, at the middle of what it swept, and
     // never again for the same body in the same swing: `already` is what makes that true.
     if (hit > 0) {
       tmp2.copy(from).lerp(to, 0.5);
+      // Aboard, the swing was measured in the hull's frame and the ear is out in the world.
+      if (frame) tmp2.applyMatrix4(frame.matrix);
       sabers.contact('body', tmp2);
     }
+    return hit;
+  }
+
+  /**
+   * The frame a blade swings in: the hull's while aboard (the room's own physics with it, as a
+   * bolt fired aboard has), else none. One kept struct and one kept inverse, since this is asked
+   * on every frame a blade is lit.
+   */
+  private frameOf(ctx: KitContext): BoltFrame | null {
+    const room = ctx.player.aboard;
+    if (!room) return null;
+    const matrix = roomFrame(room);
+    if (this.aboardFrame) {
+      this.aboardFrame.matrix = matrix;
+      this.aboardFrame.physics = room.physics;
+    } else this.aboardFrame = { matrix, physics: room.physics };
+    this.intoFrame.copy(matrix).invert();
+    return this.aboardFrame;
   }
 
   private drawBolt(from: THREE.Vector3, to: THREE.Vector3): void {
@@ -548,6 +650,10 @@ export class JediKit implements Kit {
     // was holding open goes with it, since nothing else will ever be told to end it.
     sabers.stopPowers();
     sabers.follow(null);
+    // The brush's ring holds the bodies it last touched; nothing else will ever let go of them.
+    this.brush.clear();
+    for (const path of this.bladePaths) path.reset();
+    this.bodyAt = -Infinity;
     this.scene.remove(this.aura, this.bolt);
     this.aura.geometry.dispose();
     this.aura.material.dispose();
