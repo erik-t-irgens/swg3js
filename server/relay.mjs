@@ -80,6 +80,25 @@
 //                                                          goes to that keeper alone, who decides what it does
 //   { t: 'npcDrop', i }                                      this browser cannot keep that one (no body, no species):
 //                                                          the grant goes back and it is not offered again for a while
+//   { t: 'items', do: list|get|add|drop|using, rows?, kind?, what?, id?, worn?, held? }
+//                                                          what this character owns (ledger.mjs). `list` is the
+//                                                          backpack handed up on a first claim; after that the
+//                                                          server's list is the truth and this is answered with it.
+//                                                          `add` and `drop` are the game's own changes (the starting
+//                                                          kit, the give tab, destroying something), and `using` says
+//                                                          what is on the body and in the hands, which may not be
+//                                                          put up in a trade
+//   { t: 'trade', do: ask|accept|decline|offer|ready|unready|cancel, to?, rows? }
+//                                                          handing something over at the game's own 8 m: who to ask
+//                                                          is the connection id the browser already knows them by,
+//                                                          an offer is the whole of this side's pane by row id, and
+//                                                          the swap happens when both sides have said they are happy
+//   { t: 'claimSpot', do: take|free, kind: dock|carrier, what }
+//                                                          a place two players can both want (spots.mjs): a station's
+//                                                          dock lane, or the spot on a hull that one ship rides
+//                                                          another on. The server's answer is the only thing that
+//                                                          makes a claim real, and a line that closes gives back
+//                                                          everything it held
 // Server to browser:
 //   { t: 'hail', v, now, epoch, dayMs, nonce, word, ff }     sent the instant the socket opens, before anything is said
 //   { t: 'claimed', you, keep }   { t: 'denied', why }   { t: 'refused', why }   { t: 'taken', by }
@@ -116,6 +135,16 @@
 //   { t: 'npcState', id?, r: [...] }   (a keeper's batch passed on to the rest of that world; with no `id` it is the
 //                                       picture a browser is handed on arriving, of where everything was last seen)
 //   { t: 'npcHurt', id, i, a, at, w?, b? }   (a blow, to the browser keeping that creature and to nobody else)
+//   { t: 'items', do: 'list', take: browser|server, rows: [{ id, kind, what, got }] }   (the settled list, sent back
+//                                                          in answer to a list or a get: the first one a character
+//                                                          hands up is written down, and after that this is the truth)
+//   { t: 'items', do: 'added', row }   { t: 'items', do: 'gone', id }   { t: 'items', do: 'refused', why }
+//   { t: 'trade', do: 'asked', id, from, name, until }   { t: 'trade', do: 'sent', id, to, name, until }
+//   { t: 'trade', do: 'state', id, with, name, yours: { rows, ready }, theirs: { rows, ready } }
+//                                                          (the whole trade from each side's own end, so neither
+//                                                           browser has to work out what the other is looking at)
+//   { t: 'trade', do: 'done', with, gave, got }   { t: 'trade', do: 'off', why }   { t: 'trade', do: 'refused', why }
+//   { t: 'spot', kind, what, granted, why? }   (to whoever asked, and to nobody else)
 //
 // Everything but the claim, the ping and the ask goes to the world the player is on and no further
 // (rooms.mjs). Before this, a browser was told about people on other planets and dressed them,
@@ -136,6 +165,8 @@ import { GROUP_RANGES, GROUP_TUNING, Groups, cleanChat, cleanGroup } from './gro
 import { cleanCross, mayCross } from './crossWire.mjs';
 import { COMBAT_WIRE, Duels, cleanBlocked, cleanDied, cleanDuel, cleanEnd, cleanHealth, cleanHit, cleanShot, mayHurt } from './combatWire.mjs';
 import { NpcPlaces, cleanNpcBatch, cleanNpcDrop, cleanNpcHit } from './npcWire.mjs';
+import { LEDGER_TUNING, Ledger, cleanItems, cleanTrade, mayItems } from './ledger.mjs';
+import { SPOT_TUNING, Spots, cleanSpot, mayClaim } from './spots.mjs';
 
 /** What this server speaks. A browser that hears no hail is talking to the relay that came before. */
 const WIRE_VERSION = 2;
@@ -218,6 +249,8 @@ for (let i = 0; i < args.length; i++) {
   else if (name.startsWith('group.') && has(GROUP_TUNING, name.slice(6))) GROUP_TUNING[name.slice(6)] = value;
   else if (name.startsWith('combat.') && has(COMBAT_WIRE, name.slice(7))) COMBAT_WIRE[name.slice(7)] = value;
   else if (name.startsWith('own.') && has(OWN_TUNING, name.slice(4))) OWN_TUNING[name.slice(4)] = value;
+  else if (name.startsWith('item.') && has(LEDGER_TUNING, name.slice(5))) LEDGER_TUNING[name.slice(5)] = value;
+  else if (name.startsWith('spot.') && has(SPOT_TUNING, name.slice(5))) SPOT_TUNING[name.slice(5)] = value;
   else console.log(`  --set ${name}: there is no such number, and it has been ignored`);
 }
 
@@ -263,6 +296,16 @@ const ownership = new Ownership({ tuning: OWN_TUNING });
 // where things are standing rather than waiting a quarter of a second for the first batch. It is a
 // picture and nothing else: what exists and whether it is alive is the spawn list's above.
 const npcPlaces = new NpcPlaces();
+// What every connected character owns, and the trades that move a row from one to another
+// (ledger.mjs). Unlike the groups and the creatures this *is* written to disk: it is the one thing
+// here the world remembers, and the reason a character no longer lives or dies with one browser's
+// local storage. Every change goes out through the store, so the log has it before anybody is told.
+const ledger = new Ledger({ tuning: LEDGER_TUNING, write: (rec) => store.change(rec) });
+ledger.load(store.data);
+// The places two people can both want: a station's dock lane, and the spot on a hull that one ship
+// rides another on (spots.mjs). Held by connection and never written down -- a claim means "a ship is
+// flying at this right now", which nothing about a restart can still be true of.
+const spots = new Spots({ tuning: SPOT_TUNING });
 const settings = { friendlyFire: FRIENDLY_FIRE, word: WORD ? 1 : 0, dayMs: DAY };
 const had = store.data.settings ?? {};
 if (had.friendlyFire !== settings.friendlyFire || had.word !== settings.word || had.dayMs !== settings.dayMs) store.change({ t: 'settings', settings });
@@ -594,6 +637,10 @@ function onClaim(c, msg) {
   // picked up here and everyone is told they are back, before a word about where they are.
   c.claimed = claim.name;
   markPresent(c);
+  // And the ledger has it too, which is what lets a trade name a character rather than a line: the
+  // same character opened in a second browser is the newer one's from this instant, and whatever
+  // trade the older line had open is broken off with the items where they started.
+  deliverTo(ledger.here(c.character, { session: c.id, name: claim.name }));
   const back = groups.groupOf(c.member);
   if (back) console.log(`  ${c.id} "${claim.name}" is in ${back.id} again (${back.members.size} in it)`);
 }
@@ -671,6 +718,10 @@ function onMessage(c, text, trimmed = false) {
     // stood them. A browser that has only just arrived has not said where it is standing on that
     // world yet, so it is nowhere until its first state and keeps nothing meanwhile.
     ownership.here(c.id, key, null);
+    // A dock, or the spot on a hull one ship rides another on, is a place in one world: whatever this
+    // browser was holding where it came from is given back as it leaves, or a lane it is no longer
+    // anywhere near would stay shut behind it for the rest of the evening.
+    if (move.from && move.from !== key) spots.left(c.id, move.from);
     if (first || move.from !== key) send(c, { t: 'spawn', do: 'list', world: key, rows: ownership.listFor(key) });
     // ...and where those creatures have got to, so they are stood where they really are rather than
     // at the spot they were first put down and then walked across the world by the first batches.
@@ -1014,6 +1065,103 @@ function onMessage(c, text, trimmed = false) {
     const word = cleanKeep(msg);
     if (!word) return;
     deliverTo(ownership.awake(c.id, word.a === 1));
+  } else if (msg.t === 'items') {
+    // What this character owns. It is the character's and not the line's, so a browser that has not
+    // said which character it is playing has nothing here: with no claim the game is exactly what it
+    // was, its backpack in its own local storage and the server never asked.
+    if (!c.hello || !c.character) return;
+    const ask = cleanItems(msg, LEDGER_TUNING);
+    if (!ask) return;
+    c.owning ??= { at: 0, lines: 0 };
+    if (!mayItems(c.owning, Date.now(), LEDGER_TUNING['ask.perSecond'])) return;
+    if (ask.do === 'get' && ledger.holds(c.character)) {
+      // A browser asking for what it already has is not settling anything, so it must not break
+      // that character's live trade off: the list is sent and nothing else happens.
+      send(c, { t: 'items', do: 'list', take: 'server', rows: ledger.listFor(c.character) });
+      return;
+    }
+    if (ask.do === 'list' || ask.do === 'get') {
+      // The first list a character hands up is written down and is the list; every one after it is
+      // answered with the server's, which is the whole of decision 7(a). A browser whose storage was
+      // cleared sends `get` and is handed everything back. What the browser's own record claims
+      // about itself goes with the list: an empty list from a browser that believes the server has
+      // already taken this character down is a cache that was cleared, and is never written down.
+      const settled = ledger.settle(c.character, ask.do === 'list' ? ask.rows : [], { known: ask.do === 'list' && ask.known === true, rev: ask.do === 'list' ? ask.rev : 0 });
+      deliverTo(settled);
+      send(c, { t: 'items', do: 'list', take: settled.take, rows: settled.rows });
+      if (settled.take === 'browser') console.log(`  ${c.id} ${who(c)} handed up ${settled.rows.length} things, which this world now holds`);
+      return;
+    }
+    if (ask.do === 'using') {
+      ledger.using(c.character, ask.worn, ask.held);
+      return;
+    }
+    if (ask.do === 'add') {
+      const made = ledger.add(c.character, ask.kind, ask.what, ask.got);
+      if (!made.ok) {
+        send(c, { t: 'items', do: 'refused', why: made.why });
+        return;
+      }
+      if (!made.already) send(c, { t: 'items', do: 'added', row: made.row });
+      return;
+    }
+    const off = ledger.drop(c.character, ask.id);
+    if (!off.ok) {
+      send(c, { t: 'items', do: 'refused', why: off.why });
+      return;
+    }
+    send(c, { t: 'items', do: 'gone', id: ask.id });
+  } else if (msg.t === 'trade') {
+    // Handing something over. The rules are in ledger.mjs, which knows nothing about sockets; all
+    // that happens here is that the two players are named, how far apart they are standing is
+    // measured -- this being the only place that knows -- and whatever the rules decided is sent out.
+    if (!c.hello || !c.character) return;
+    const step = cleanTrade(msg, LEDGER_TUNING);
+    if (!step) return;
+    c.owning ??= { at: 0, lines: 0 };
+    if (!mayItems(c.owning, Date.now(), LEDGER_TUNING['ask.perSecond'])) return;
+    if (step.do === 'ask') {
+      const to = clients.get(step.to);
+      if (!to || to === c || !to.hello || !to.character) return;
+      deliverTo(ledger.ask(c.character, to.character, metresBetween(c, to)));
+    } else if (step.do === 'accept') deliverTo(ledger.accept(c.character));
+    else if (step.do === 'decline') deliverTo(ledger.decline(c.character));
+    else if (step.do === 'offer') deliverTo(ledger.offer(c.character, step.rows));
+    else if (step.do === 'unready') deliverTo(ledger.unready(c.character));
+    else if (step.do === 'cancel') deliverTo(ledger.cancel(c.character));
+    else if (step.do === 'ready') {
+      // The game's own TRADE_ACCEPT, measured again on the press: two people who have walked apart
+      // with the window open do not trade, and neither do two on different worlds.
+      const trade = ledger.tradeOf(c.character);
+      if (!trade) return;
+      const other = trade.a === c.character ? trade.b : trade.a;
+      deliverTo(ledger.ready(c.character, metresBetween(c, clients.get(ledger.sessionOf(other)))));
+    }
+  } else if (msg.t === 'claimSpot') {
+    // A place two players can both want. Pass 1 built these as local claims and said so; this is the
+    // server answer that makes one real. It is about a ship in the world this minute, so it is held
+    // by the line and nothing of it is written down.
+    if (!c.hello) return;
+    const spot = cleanSpot(msg, SPOT_TUNING);
+    if (!spot) return;
+    const world = rooms.keyOf(c.id);
+    if (!world) return;
+    // Giving a place back is never rate-limited and never dropped: it is a map delete, it can only
+    // ever make the world freer, and one dropped would leave a lane held by a browser that does not
+    // believe it holds it -- shut until that line closes, with nothing on either side to say why.
+    if (spot.do === 'free') {
+      deliverTo(spots.free(c.id, world, spot.kind, spot.what));
+      return;
+    }
+    c.claiming ??= { at: 0, lines: 0 };
+    // Asking faster than a ship can need places is refused **in words**, never in silence: the
+    // browser flies on its own answer until this comes back, so a question answered with nothing is
+    // read as a grant when the wait runs out and the same lane is then handed to the next ship.
+    if (!mayClaim(c.claiming, Date.now(), SPOT_TUNING)) {
+      deliverTo(spots.tooFast(c.id, spot.kind, spot.what));
+      return;
+    }
+    deliverTo(spots.take(c.id, world, spot.kind, spot.what));
   }
 }
 
@@ -1046,6 +1194,8 @@ const server = createServer((req, res) => {
         world: store.describe(),
         creatures: ownership.describe(),
         creaturePlaces: npcPlaces.describe(),
+        items: ledger.describe(),
+        spots: spots.describe(),
         joinWord: WORD ? 'set' : 'none',
         admin: adminFor(store.data, ADMIN) || 'nobody yet',
         friendlyFire: FRIENDLY_FIRE,
@@ -1058,6 +1208,8 @@ const server = createServer((req, res) => {
         group: GROUP_TUNING,
         combat: COMBAT_WIRE,
         own: OWN_TUNING,
+        item: LEDGER_TUNING,
+        spot: SPOT_TUNING,
         // The distances a group works to, which are the client's own and not this server's to pick:
         // they are printed here so what is being enforced can be read off without reading the code.
         ranges: GROUP_RANGES,
@@ -1160,6 +1312,14 @@ server.on('upgrade', (req, socket) => {
     // so nothing is left standing with nobody's brain in it. The creatures themselves stay: they
     // belong to the world and not to anybody in it, whoever stood them.
     deliverTo(ownership.gone(c.id));
+    // A trade dies with either line: it ends with both sides' items exactly where they started, and
+    // the other player is told why rather than being left with a window over a browser that has gone.
+    // A swap that had already been written down is not undone by this -- it was one step, and it is
+    // done -- so whoever came back would find the item where the log says it is.
+    deliverTo(ledger.gone(c.id));
+    // And whatever dock or spot on a hull it was holding is free at once, so nobody circles a lane a
+    // browser that has gone still has its name on.
+    spots.gone(c.id);
     // A world nobody is left standing on stops being remembered: the picture of where its creatures
     // had got to is only there for the next browser to arrive, and it is rebuilt from their batches.
     if (key && rooms.members(key).size === 0) npcPlaces.forget(key);
@@ -1202,6 +1362,12 @@ setInterval(() => deliver(groups.tick()), GROUP_TUNING.tick);
 // clock and nothing in ownership.mjs counts. With nothing stood anywhere it walks an empty table.
 setInterval(() => deliverTo(ownership.tick()), OWN_TUNING.grant);
 
+// An invitation to trade nobody answered, and a trade nobody has touched for a long while: both have
+// a life on them, and this is what ends them. With nobody trading it walks an empty table a second
+// and writes nothing. (A claimed dock needs no clock: it is given back when the ship lets go, when
+// its browser leaves that world, and when its line closes.)
+setInterval(() => deliverTo(ledger.tick()), LEDGER_TUNING.tick);
+
 // A duel nobody answered, and one nobody has landed a blow in for an hour, both end on their own.
 // It is a slow clock on purpose: with nobody fighting it walks two empty tables once a minute.
 setInterval(() => deliverTo(duels.tick()), COMBAT_WIRE.tick);
@@ -1230,5 +1396,6 @@ server.listen(PORT, () => {
   const admin = adminFor(store.data, ADMIN);
   console.log(`  nothing appears in the world on its own: ${admin ? `${admin} is its admin and stands creatures by hand` : 'the first player this world meets becomes its admin and stands creatures by hand'} (--admin=<player id> names another)`);
   console.log(`  one browser thinks for each of them: the nearest player within ${OWN_TUNING.range} m, changing hands only after another has been a quarter nearer for ${Math.round(OWN_TUNING.steady / 1000)} s`);
+  console.log(`  what each character owns is kept here too: ${ledger.describe()}; two players trade within ${GROUP_RANGES.trade} m -- the client's own distance -- and a swap is one line in the log or none`);
   console.log(`  a browser built before this one plays as it always has; http://localhost:${PORT}/ says what is going on`);
 });

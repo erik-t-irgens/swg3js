@@ -1,6 +1,7 @@
 // The truth the server keeps between runs: the players it knows, their characters, the things they
-// own (an empty slot until the ledger wave), the houses (likewise) and the switches it was started
-// with. One file you can read, plus a log of the changes since it was last written.
+// own (a row per item, whose shape is the ledger's: see ledger.mjs), the houses (an empty slot still)
+// and the switches it was started with. One file you can read, plus a log of the changes since it was
+// last written.
 //
 // How it is written, and why: the snapshot goes to `world.json.tmp`, is flushed to the disk and
 // only then renamed over `world.json`, so a machine that loses power mid-write still has the last
@@ -21,6 +22,7 @@
 
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
+import { applyItems } from './ledger.mjs';
 
 /** The shape of the file. A file written by a newer server is left alone and not played into. */
 export const STORE_VERSION = 1;
@@ -87,8 +89,12 @@ export function applyChange(data, rec) {
       return true;
     }
     default:
-      // A record from a newer server: kept in the log, not understood here, and not an error.
-      return false;
+      // What a character owns is the ledger's shape rather than this file's, so a record about one
+      // row goes there to be applied: one place decides what a row looks like on disk, and the same
+      // function runs when a trade happens and when the log is replayed on start. Anything it does
+      // not know either is a record from a newer server: kept in the log, not understood here, and
+      // not an error.
+      return applyItems(data, rec);
   }
 }
 
