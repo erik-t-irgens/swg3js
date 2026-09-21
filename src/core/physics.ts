@@ -63,39 +63,95 @@ export { RAPIER };
 
 export const FIXED_DT = 1 / 60;
 
+/**
+ * The one rule about the ragdolls that the contact filter enforces and that can be changed while
+ * the game runs. It is kept here, where the filter reads it, so the engine's own module knows
+ * nothing of the combat code; the knob the owner turns is `RAGDOLL.selfCollide` in
+ * src/combat/ragdoll.ts (`__debug.ragdoll({ selfCollide: true })`), which is an accessor over this.
+ *
+ * Off is what the game has always done: a corpse's pieces pass through one another. On, the pieces
+ * of one body meet -- but never the pieces of two different bodies, and never two pieces a joint
+ * holds together or that already lay inside each other in the pose the body died in, which is what
+ * the pairs each piece is told to ignore are for.
+ */
+export const RAGDOLL_RULES = { selfCollide: false };
+
+/** One piece of a ragdoll as the contact filter knows it. */
+interface RagdollPiece {
+  /** Which corpse it belongs to: two pieces of two different corpses never meet, switch or no. */
+  group: number;
+  /** The pieces it must never meet whatever the switch says: what a joint holds it to, and what it already lies inside. */
+  ignore: Set<number>;
+}
+
 /** Thin wrapper around a Rapier world with a fixed-step accumulator. */
 export class Physics {
   readonly world: RAPIER.World;
   private acc = 0;
-  /** The ragdolls' colliders: they touch only what stands still, and never one another (see `hooks`). */
-  private readonly ragdolls = new Set<number>();
+  /** The ragdolls' colliders: they touch only what stands still, and one another only by the rule in `hooks`. */
+  private readonly ragdolls = new Map<number, RagdollPiece>();
+  /** Group numbers handed out one to a corpse, so no two corpses ever share one. */
+  private ragdollGroups = 0;
   /**
    * The contact filter the ragdolls ask for: a ragdoll piece meets the ground, a building, a
    * room (colliders with no body, or a fixed one) and nothing that moves on its own: no player,
-   * creature, vehicle or other ragdoll, so a corpse never trips the living or stacks on another.
+   * creature, vehicle or other corpse, so a corpse never trips the living or stacks on another.
+   * Its own body's other pieces it meets only while `RAGDOLL_RULES.selfCollide` is on, and then
+   * only the ones it was not told to ignore.
    */
-  /** How often the hook ran and how many pairs it dropped, for the console. */
-  readonly hookStats = { calls: 0, dropped: 0 };
+  /** How often the hook ran, how many pairs it dropped, and how many of one body's own pieces it let meet, for the console. */
+  readonly hookStats = { calls: 0, dropped: 0, self: 0 };
   /** Nothing reads it, but the engine runs the contact hooks only on a step given a queue. */
   private readonly events = new RAPIER.EventQueue(false);
   private readonly hooks: RAPIER.PhysicsHooks = {
     filterContactPair: (c1, c2, b1, b2) => {
       this.hookStats.calls++;
-      const r1 = this.ragdolls.has(c1);
-      const r2 = this.ragdolls.has(c2);
-      if (!r1 && !r2) return RAPIER.SolverFlags.COMPUTE_IMPULSE;
-      if (r1 && r2) {
+      const p1 = this.ragdolls.get(c1);
+      const p2 = this.ragdolls.get(c2);
+      if (!p1 && !p2) return RAPIER.SolverFlags.COMPUTE_IMPULSE;
+      if (p1 && p2) {
+        // Two pieces of a corpse. With the switch off they pass through each other as they always
+        // have; with it on, the pieces of one body meet, and a pair either of them was told to
+        // ignore (a joint holds them, or they already lay inside each other) never does.
+        if (RAGDOLL_RULES.selfCollide && p1.group === p2.group && !p1.ignore.has(c2) && !p2.ignore.has(c1)) {
+          this.hookStats.self++;
+          return RAPIER.SolverFlags.COMPUTE_IMPULSE;
+        }
         this.hookStats.dropped++;
         return null;
       }
-      const other = r1 ? b2 : b1;
-      const body = other === undefined || other === null ? null : this.world.getRigidBody(other);
-      if (!body || body.isFixed()) return RAPIER.SolverFlags.COMPUTE_IMPULSE;
+      // One piece against something else. It meets whatever stands still -- a collider with no body
+      // of its own (the ground, a building, a room) or a fixed one -- and nothing that moves on its
+      // own. Which of the two the other body is was worked out before the step began: nothing here
+      // may call into the engine, because the world is mid-step and a call back into it is a
+      // recursive borrow that throws out of the step's own callback (see `movers`).
+      const other = p1 ? b2 : b1;
+      if (other === undefined || other === null || !this.movers.has(other)) return RAPIER.SolverFlags.COMPUTE_IMPULSE;
       this.hookStats.dropped++;
       return null;
     },
     filterIntersectionPair: () => true,
   };
+
+  /**
+   * The bodies that move on their own, by handle. The contact filter has one question it cannot ask
+   * the engine -- whether the body a corpse's piece has met is fixed -- because a call into the
+   * world from inside `world.step` throws "recursive use of an object detected", which unwinds out
+   * of the filter itself. So the answer is worked out here, before the step, and only while
+   * something is actually dead: with no corpse in the world the filter never reaches this branch
+   * and the pass is never made.
+   */
+  private readonly movers = new Set<number>();
+
+  /** Kept, not made per call: this runs once a frame for every body in the streamed world while anything is dead. */
+  private readonly noteMover = (b: RAPIER.RigidBody): void => {
+    if (!b.isFixed()) this.movers.add(b.handle);
+  };
+
+  private refreshMovers(): void {
+    this.movers.clear();
+    this.world.forEachRigidBody(this.noteMover);
+  }
 
   private constructor() {
     this.world = new RAPIER.World({ x: 0, y: -20, z: 0 });
@@ -105,8 +161,15 @@ export class Physics {
     this.world.integrationParameters.numSolverIterations = 8;
   }
 
-  markRagdoll(c: RAPIER.Collider): void {
-    this.ragdolls.add(c.handle);
+  /** A group number of its own for one corpse: every piece of it is marked with this and no other body ever takes it. */
+  nextRagdollGroup(): number {
+    this.ragdollGroups++;
+    return this.ragdollGroups;
+  }
+
+  /** A piece of a corpse, with the body it belongs to and the handles of the pieces it must never meet. */
+  markRagdoll(c: RAPIER.Collider, group: number, ignore: number[] = []): void {
+    this.ragdolls.set(c.handle, { group, ignore: new Set(ignore) });
   }
 
   unmarkRagdoll(c: RAPIER.Collider): void {
@@ -116,6 +179,12 @@ export class Physics {
   /** Whether a collider is a ragdoll's, for the character controller and the sweeps to pass over. */
   isRagdoll(handle: number): boolean {
     return this.ragdolls.has(handle);
+  }
+
+  /** What a piece was told to ignore, for the console and the tests; nothing in play reads it. */
+  ragdollPiece(handle: number): { group: number; ignore: number[] } | null {
+    const piece = this.ragdolls.get(handle);
+    return piece ? { group: piece.group, ignore: [...piece.ignore] } : null;
   }
 
   /**
@@ -140,8 +209,14 @@ export class Physics {
     return this.peers.has(handle);
   }
 
-  /** Kept, not made per call: a vehicle casts one of these per wheel per step. */
-  private readonly notPeer = (c: RAPIER.Collider): boolean => !this.peers.has(c.handle);
+  /**
+   * What the one ray that filters nothing at all passes over: another player's body, and a corpse.
+   * Neither is a surface to stand on -- a peer standing under a speeder would be its road, and so
+   * would a dead body lying under one -- and the two other rays that ask for a floor among things
+   * that move already pass over corpses by hand (a ship's set-down probe, the boots' patch).
+   * Kept, not made per call: a vehicle casts one of these per wheel per step.
+   */
+  private readonly notPeerOrCorpse = (c: RAPIER.Collider): boolean => !this.peers.has(c.handle) && !this.ragdolls.has(c.handle);
 
   static async create(): Promise<Physics> {
     await RAPIER.init();
@@ -167,6 +242,9 @@ export class Physics {
 
   step(dt: number): void {
     this.acc += dt;
+    // Which bodies move on their own, for the contact filter, which cannot ask once the step has
+    // begun. Only while there is a corpse in the world: nothing else reaches that branch.
+    if (this.ragdolls.size) this.refreshMovers();
     let n = 0;
     while (this.acc >= FIXED_DT && n < 4) {
       // The hooks run only on the step that takes an event queue; without one they are silently left out.
@@ -176,6 +254,21 @@ export class Physics {
       n++;
     }
     if (n === 4) this.acc = 0;
+  }
+
+  /**
+   * One step outside the accumulator, for the few places that must advance the world at once so a
+   * scene query can see what was just built or moved (a ship launched, a lift taken, a vehicle
+   * righted, a world warmed up). It exists because `world.step()` with no event queue runs no hooks
+   * at all: on such a step a corpse lying anywhere near meets everything, its own jointed and
+   * overlapping pairs included, and each of those gets one unfiltered shove out of the engine's
+   * penetration recovery. So every deliberate step goes through here or through `step`, and the
+   * raw call is not used anywhere a body can be dead.
+   */
+  stepOnce(): void {
+    if (this.ragdolls.size) this.refreshMovers();
+    this.world.step(this.events, this.hooks);
+    this.steps++;
   }
 
   /**
@@ -319,12 +412,14 @@ export class Physics {
    */
   /**
    * Most callers pass no groups at all, and with none the engine does no group test, so another
-   * player's body would be found here however its own groups are set. Nobody stands on a peer:
-   * they are passed over.
+   * player's body would be found here however its own groups are set, and so would a corpse, whose
+   * colliders are kept out of the living by a contact filter that a ray never reaches. Nobody
+   * stands on either: both are passed over (`notPeerOrCorpse`; a node test pins this call site by
+   * its exact text, so the name and the test move together).
    */
   groundDistance(x: number, y: number, z: number, maxDist: number, exclude?: RAPIER.RigidBody, filterGroups?: number): number | null {
     const ray = new RAPIER.Ray({ x, y, z }, { x: 0, y: -1, z: 0 });
-    const hit = this.world.castRay(ray, maxDist, true, undefined, filterGroups, undefined, exclude, this.notPeer);
+    const hit = this.world.castRay(ray, maxDist, true, undefined, filterGroups, undefined, exclude, this.notPeerOrCorpse);
     return hit ? hit.timeOfImpact : null;
   }
 

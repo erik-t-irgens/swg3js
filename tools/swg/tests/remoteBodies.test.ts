@@ -90,7 +90,7 @@ function peer(id: number, x: number, y: number, z: number, opts: { shown?: boole
   ok(moves.length >= 2 && moves.every((m) => m.includes('this.walkPast')), `3: every step the player takes walks past a corpse and a peer (${moves.length} call sites)`);
   ok(/walkPast = \(c: RAPIER\.Collider\): boolean => !this\.physics\.isRagdoll\(c\.handle\) && !this\.physics\.isPeer\(c\.handle\)/.test(player), '3: and the predicate is one kept arrow, not one made on every step');
   const physics = src('../../../src/core/physics.ts');
-  ok(physics.includes('castRay(ray, maxDist, true, undefined, filterGroups, undefined, exclude, this.notPeer)'), '3: the one ray in the game that filters nothing at all does not call a peer the ground');
+  ok(physics.includes('castRay(ray, maxDist, true, undefined, filterGroups, undefined, exclude, this.notPeerOrCorpse)'), '3: the one ray in the game that filters nothing at all calls neither a peer nor a corpse the ground');
 }
 
 // --- 4: the world finds them ------------------------------------------------------------------------
