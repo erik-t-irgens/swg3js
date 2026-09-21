@@ -394,7 +394,11 @@ export function clipEventStatus(dir, readJson, { packs = null } = {}) {
     const known = file.species.tables?.[entry.table] ?? {};
     // A pack lists Jedi Academy's clips apart, under `jkaClips`, so none of them is in `clips`
     // today; the guard is here so a pack that ever merged the two lists would not read as drift.
-    const missing = pack.clips.filter((c) => !(c in known) && !/^BOTH_/i.test(c));
+    // A branch of a selector is baked as `<logical name>:<label>` (the moods are `idle:<mood>`),
+    // and the table knows the logical name and not the label, so the name is what is looked up:
+    // without this every mood in a pack reads as a clip the archives do not have, and status asks
+    // for a reconversion that cannot mend it, for ever.
+    const missing = pack.clips.filter((c) => !(c.split(':')[0] in known) && !/^BOTH_/i.test(c));
     if (missing.length) drift.push(`${id}: ${missing.slice(0, 4).join(', ')}${missing.length > 4 ? ` and ${missing.length - 4} more` : ''}`);
   }
   const line = `  sounds: ${parts.join(', ')}${drift.length ? `, ${drift.length} species whose pack clips are not in the table` : ''}`;
