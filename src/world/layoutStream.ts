@@ -11,6 +11,7 @@ import type { Exclusion } from './props';
 import { ACTOR_LAYER, INTERIOR_LAYER, crossing } from './portalRender';
 import { mirroredTransform, type EffectHandle, type ParticleEffects } from './particles';
 import { castsShadow, drawsAfterWater } from './surfaces';
+import { marks } from './marks.ts';
 
 export const REGION = 256;
 
@@ -680,6 +681,10 @@ export class LayoutStreamer {
     if (!cols) return;
     for (const c of cols) {
       this.colliderTemplate.delete(c.handle);
+      // Anything burnt, scarred or trodden on this thing goes with it: the marks are in the world's
+      // frame and a mark left behind would hang in the air where the prop was. It is free when
+      // nothing is owned, which is every pass in which nobody has shot a crate.
+      marks.forget(c.handle);
       this.physics.removeCollider(c);
     }
     this.colliders.delete(o);

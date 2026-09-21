@@ -1,0 +1,160 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The marks the world keeps: a bolt's scar, a rocket's char, a slug's pit, a flame's soot, a
+  lightning fork and a footprint. Every one of them is drawn here, by hand, for this game. Nothing
+  on this sheet comes from anywhere else: the client has no dynamic marks at all (what it calls a
+  decal is a placed surface graphic and what it calls a footprint is a building's ground plan), so
+  there was never anything to convert and this is ours the way `src/ui/hud.svg` is ours.
+
+  One row of eight cells, 128 by 128 each, 1024 by 128 in all. `src/world/marks.ts` fetches it once,
+  draws it into a canvas and hands the canvas to one texture that both mark meshes read; a sheet
+  that does not arrive costs the pictures and nothing else, because the shader falls back to a soft
+  disc of the right size in the right colour. The cell order is the one the code calls the slots:
+
+      0 bolt   1 rocket   2 slug   3 flame   4 lightning   5 print   6 rim   7 (spare)
+
+  Three rules hold everywhere on it, and a new cell that breaks one of them will look wrong:
+
+   - **Only the alpha is read.** Everything is drawn in white and the shader gives it its colour,
+     which is how one cell serves a fresh scar (hot) and the same scar half a minute later (cold)
+     with nothing redrawn. So what matters in a shape is where it is opaque, not what colour it is.
+   - **Nothing is drawn outside the middle 78% of its cell** (that is, inside x 14..114 of each
+     128-wide cell). The shader fades the last fifth of every quad to nothing so that a mark never
+     ends on a hard square edge, and the mip chain of a one-row atlas blurs neighbours together at
+     the small sizes, so the margin is what keeps a rocket's char out of a slug's pit at 40 m.
+   - **v runs along the mark and u across it**, as the saber's own stroke has always been drawn, and
+     a texture's v is read from the bottom up. So the footprint's toe is at the *top* of its cell
+     and its heel at the bottom, and it is drawn nearly the full width of the cell because the quad
+     it lands on is two and a half times as long as it is wide.
+
+  Sizes are not in here: a mark's size in metres is `MARKS.scarSize` and `MARKS.printLength` in the
+  code, so the same picture is a pinhole or a crater depending only on who asks for it.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="128" viewBox="0 0 1024 128" aria-hidden="true">
+
+  <defs>
+    <!-- A blaster scar: burnt right through in the middle, feathering out to nothing. -->
+    <radialGradient id="m-bolt-core" cx="50%" cy="50%" r="50%">
+      <stop offset="0%"   stop-color="#fff" stop-opacity="1"/>
+      <stop offset="46%"  stop-color="#fff" stop-opacity="0.96"/>
+      <stop offset="70%"  stop-color="#fff" stop-opacity="0.55"/>
+      <stop offset="88%"  stop-color="#fff" stop-opacity="0.16"/>
+      <stop offset="100%" stop-color="#fff" stop-opacity="0"/>
+    </radialGradient>
+    <!-- The soot a rocket throws: thin, wide and uneven. -->
+    <radialGradient id="m-soot" cx="50%" cy="50%" r="50%">
+      <stop offset="0%"   stop-color="#fff" stop-opacity="0.82"/>
+      <stop offset="55%"  stop-color="#fff" stop-opacity="0.5"/>
+      <stop offset="82%"  stop-color="#fff" stop-opacity="0.17"/>
+      <stop offset="100%" stop-color="#fff" stop-opacity="0"/>
+    </radialGradient>
+    <!-- A slug's pit: small, hard-edged and dense, with barely any halo. -->
+    <radialGradient id="m-pit" cx="50%" cy="50%" r="50%">
+      <stop offset="0%"   stop-color="#fff" stop-opacity="1"/>
+      <stop offset="62%"  stop-color="#fff" stop-opacity="0.94"/>
+      <stop offset="78%"  stop-color="#fff" stop-opacity="0.3"/>
+      <stop offset="100%" stop-color="#fff" stop-opacity="0"/>
+    </radialGradient>
+    <!-- A flame's smudge: no edge anywhere, all of it faint. -->
+    <radialGradient id="m-smudge" cx="50%" cy="50%" r="50%">
+      <stop offset="0%"   stop-color="#fff" stop-opacity="0.62"/>
+      <stop offset="40%"  stop-color="#fff" stop-opacity="0.44"/>
+      <stop offset="74%"  stop-color="#fff" stop-opacity="0.2"/>
+      <stop offset="100%" stop-color="#fff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- ===== 0: a blaster bolt ======================================================================
+       A ring: a hole burnt through with a raised, ragged lip round it. At twenty metres it is the
+       roundest and densest of the five, which is what tells it from the rocket's wide smear. -->
+  <g transform="translate(0 0)">
+    <circle cx="64" cy="64" r="46" fill="url(#m-bolt-core)"/>
+    <circle cx="64" cy="64" r="26" fill="#fff" fill-opacity="0.55"/>
+    <!-- The lip, drawn as a stroked ring and broken up by four short spurs so it is not a stencil. -->
+    <circle cx="64" cy="64" r="33" fill="none" stroke="#fff" stroke-opacity="0.85" stroke-width="7"/>
+    <path d="M64 24 66 14M98 60l11-3M64 104l-3 10M30 68l-10 4"
+          fill="none" stroke="#fff" stroke-opacity="0.5" stroke-width="6" stroke-linecap="round"/>
+  </g>
+
+  <!-- ===== 1: a rocket ============================================================================
+       A wide, torn char: a dark middle with tongues of soot thrown out of it. Drawn to the full
+       field, because the quad it lands on is already the biggest of the five and the point of it is
+       that it reads as a crater and not as a big blaster hole. -->
+  <g transform="translate(128 0)">
+    <circle cx="64" cy="64" r="50" fill="url(#m-soot)"/>
+    <path d="M64 16c11 9 17 17 19 26 9-4 18-4 26 0-5 8-11 13-19 16 8 5 13 12 15 21-10 2-19 1-27-4
+             -1 10-6 18-14 25-8-7-13-15-14-25-8 5-17 6-27 4 2-9 7-16 15-21-8-3-14-8-19-16
+             8-4 17-4 26 0 2-9 8-17 19-26z"
+          fill="#fff" fill-opacity="0.72"/>
+    <circle cx="64" cy="64" r="21" fill="#fff" fill-opacity="0.95"/>
+    <!-- Cracks out of the middle: the one thing that reads as heat at five metres. -->
+    <path d="M64 43V21M83 55l19-13M84 76l20 11M64 86v22M44 76l-20 11M45 55 26 42"
+          fill="none" stroke="#fff" stroke-opacity="0.55" stroke-width="5" stroke-linecap="round"/>
+  </g>
+
+  <!-- ===== 2: a slug ==============================================================================
+       A pinhole. Small, hard and almost without a halo, so that at five metres it is a dot and at
+       twenty it is still a dot rather than a smudge. -->
+  <g transform="translate(256 0)">
+    <circle cx="64" cy="64" r="30" fill="url(#m-pit)"/>
+    <circle cx="64" cy="64" r="15" fill="#fff"/>
+    <!-- Three chips out of the surface round it: a slug spalls, a bolt does not. -->
+    <path d="M85 44l9-8M43 47l-10-7M70 88l6 11" fill="none" stroke="#fff" stroke-opacity="0.45"
+          stroke-width="5" stroke-linecap="round"/>
+  </g>
+
+  <!-- ===== 3: a flame =============================================================================
+       Soot and nothing else: no rim, no edge, no middle. It is the one of the five that must never
+       look burnt *through*, because a flame thrower does not make a hole. -->
+  <g transform="translate(384 0)">
+    <ellipse cx="64" cy="66" rx="48" ry="44" fill="url(#m-smudge)"/>
+    <ellipse cx="52" cy="54" rx="26" ry="22" fill="#fff" fill-opacity="0.2"/>
+    <ellipse cx="80" cy="76" rx="22" ry="18" fill="#fff" fill-opacity="0.17"/>
+    <path d="M40 28c8 10 6 20-4 30M92 34c-9 9-9 19 1 28M64 96c10 6 14 13 12 20"
+          fill="none" stroke="#fff" stroke-opacity="0.22" stroke-width="9" stroke-linecap="round"/>
+  </g>
+
+  <!-- ===== 4: lightning ===========================================================================
+       A fork: thin, angular and branching, burnt along its length and nowhere wide. Nothing else on
+       the sheet has a straight edge, which is the whole of how it reads apart. -->
+  <g transform="translate(512 0)" fill="none" stroke="#fff" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M60 16 44 58h18L38 112" stroke-opacity="0.95" stroke-width="8"/>
+    <path d="M62 34 86 22M64 52l22 6M56 72 34 70M66 84l24 14" stroke-opacity="0.6" stroke-width="5"/>
+    <path d="M88 22l10-6M86 58l14 4M34 70l-12-5M90 98l9 7" stroke-opacity="0.35" stroke-width="4"/>
+  </g>
+
+  <!-- ===== 5: a footprint =========================================================================
+       A boot sole: the ball of the foot, the waist and the heel, with four tread bars across it.
+       The toe is at the top of the cell (v runs along the mark, and v is read from the bottom up),
+       and it is drawn nearly the full width because the quad is two and a half times as long as it
+       is wide. Soft all over: it is a shape pressed into sand, not a stamp. -->
+  <g transform="translate(640 0)">
+    <path d="M64 15c16 0 27 9 29 23 2 13-1 22-4 30-2 7-2 12-1 18 2 10 1 18-3 23-5 6-14 8-21 8
+             -7 0-16-2-21-8-4-5-5-13-3-23 1-6 1-11-1-18-3-8-6-17-4-30 2-14 13-23 29-23z"
+          fill="#fff" fill-opacity="0.9"/>
+    <!-- The tread: four bars across the ball and one across the heel, cut out as gaps. -->
+    <g fill="#fff" fill-opacity="0.35">
+      <rect x="36" y="38" width="56" height="7" rx="3.5"/>
+      <rect x="36" y="53" width="56" height="7" rx="3.5"/>
+      <rect x="38" y="68" width="52" height="7" rx="3.5"/>
+      <rect x="40" y="95" width="48" height="8" rx="4"/>
+    </g>
+    <!-- The waist, where a sole narrows: a shadow rather than a line. -->
+    <path d="M44 80h40" stroke="#fff" stroke-opacity="0.25" stroke-width="10" stroke-linecap="round"/>
+  </g>
+
+  <!-- ===== 6: the hot rim =========================================================================
+       Laid over a fresh scar in the additive mesh for the first second of its life and gone after.
+       It is a thin annulus and nothing else: what it does is make a scar *arrive* rather than
+       appear, and it is the one cell on the sheet that is meant to be seen bright. -->
+  <g transform="translate(768 0)">
+    <circle cx="64" cy="64" r="36" fill="none" stroke="#fff" stroke-opacity="0.95" stroke-width="9"/>
+    <circle cx="64" cy="64" r="44" fill="none" stroke="#fff" stroke-opacity="0.35" stroke-width="7"/>
+    <circle cx="64" cy="64" r="28" fill="none" stroke="#fff" stroke-opacity="0.3" stroke-width="6"/>
+  </g>
+
+  <!-- ===== 7: spare ===============================================================================
+       Deliberately empty. The atlas is eight cells because eight is the width the code divides by;
+       the next kind of mark goes here and needs no change to the shader. -->
+
+</svg>
