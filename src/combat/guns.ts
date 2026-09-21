@@ -14,6 +14,123 @@ import type { WeaponClass, WeaponDef } from '../player/weapons';
 export type GunType = 'bryar' | 'blaster' | 'blasterRapid' | 'disruptor' | 'bowcaster' | 'repeater' | 'demp2' | 'flechette' | 'rocket' | 'concussion' | 'flamethrower' | 'lightning' | 'slug' | 'sonic' | 'acid' | 'crossbow' | 'carbonite';
 
 /**
+ * A metre per engine unit: every speed in this file is in Jedi Academy's units a second, and this is
+ * the one number that turns one into the other. It lives here because this is where those units are
+ * written down, and `bolts.ts` and the readout below both read it from here rather than keeping a
+ * copy: a speed the readout printed from a second copy of this would be a speed no bolt ever flies
+ * at, which is the drift this project has been bitten by before.
+ */
+export const ENGINE_UNIT = 0.0254;
+
+export interface GunSpeedTune {
+  /**
+   * Every ground gun's bolt speed, over the speed its own weapon data gives it. **1 is the game
+   * exactly as it was**, and is the switch: `__debug.guns({ speed: 1 })`.
+   *
+   * It is one multiplier and not seventeen edited numbers on purpose. What makes these guns feel
+   * like the ones they were ported from is their speeds *relative to one another* -- a slugthrower
+   * is three times a rifle and a rocket is half of one -- and a multiplier is the only change that
+   * keeps every one of those ratios while moving the lot. A gun whose speed is 0 is a hitscan beam
+   * or a cone and is untouched, since a multiplier on nothing is nothing.
+   */
+  ground: number;
+  /**
+   * How much of that multiplier the *drawn* bolt takes in length. At 2.5x a rifle bolt crosses
+   * about two and a half metres in a frame, and a dash a third of a metre long read as a dotted
+   * line rather than as a streak; stretching it is what makes a fast bolt look fast. 1 takes the
+   * whole multiplier, 0 leaves every bolt the length it always was.
+   */
+  stretchShare: number;
+  /** The most a bolt may be stretched to, whatever the multiplier, so nothing becomes a lance. */
+  maxStretch: number;
+}
+
+/**
+ * How much faster the ground guns fire than their own weapon data says, and how much longer their
+ * bolts are drawn for it. **Ours, both of them, and the one number in the game that overrides a
+ * speed the data gave.** It applies to the ground guns alone: a ship's bolt is 600 m/s over 512 m
+ * out of the client's own `datatables/space/ship_weapon_components.iff`, which is the game's own
+ * number and is not this project's to overwrite -- which is why the multiplier lives where a gun's
+ * units-a-second become metres a second (`Bolts.fire`) and never on the ship path, which hands its
+ * speed in as metres a second already made.
+ *
+ * Live through `__debug.guns({ speed: 1 })`.
+ */
+export const GUN_SPEED: GunSpeedTune = {
+  ground: 2.5,
+  stretchShare: 1,
+  maxStretch: 4,
+};
+
+/**
+ * A ground gun's muzzle speed in metres a second: its own units-a-second, the engine unit, and the
+ * multiplier. The one place `guns.ts`'s numbers become a speed, so everything downstream -- the
+ * bolt's own flight, the length its ray leads by, a blade's deflection, an aim -- reads the bolt's
+ * live speed and follows with nothing else to change.
+ */
+export function groundBoltSpeed(unitsPerSecond: number, unit: number, tune: GunSpeedTune = GUN_SPEED): number {
+  if (!Number.isFinite(unitsPerSecond) || unitsPerSecond <= 0) return 0;
+  const m = Number.isFinite(tune.ground) && tune.ground > 0 ? tune.ground : 1;
+  return unitsPerSecond * unit * m;
+}
+
+/**
+ * How much longer a ground gun's bolt is drawn than it used to be. Exactly 1 at a multiplier of 1,
+ * so the switch that puts the old speed back puts the old picture back with it.
+ */
+export function boltStretch(tune: GunSpeedTune = GUN_SPEED): number {
+  const m = Number.isFinite(tune.ground) && tune.ground > 0 ? tune.ground : 1;
+  const share = Number.isFinite(tune.stretchShare) && tune.stretchShare > 0 ? tune.stretchShare : 0;
+  const s = 1 + (m - 1) * share;
+  if (!(s > 1)) return 1;
+  return s > tune.maxStretch ? tune.maxStretch : s;
+}
+
+/** The floors that keep the rules finite: a zero multiplier is a bolt that never leaves the muzzle. */
+const SPEED_FLOOR: Record<keyof GunSpeedTune, number> = { ground: 0.05, stretchShare: 0, maxStretch: 1 };
+
+/**
+ * Move the guns' speed live. `speed` is the same number as `ground` and is the name the switch is
+ * spelled with, since `__debug.guns({ speed: 1 })` is the one line the owner types to see the game
+ * as it was; both are accepted and both mean the multiplier.
+ */
+export function tuneGunSpeed(opts?: (Partial<GunSpeedTune> & { speed?: number }) | null): GunSpeedTune {
+  if (!opts) return GUN_SPEED;
+  if (typeof opts.speed === 'number' && Number.isFinite(opts.speed)) GUN_SPEED.ground = Math.max(SPEED_FLOOR.ground, opts.speed);
+  for (const key of Object.keys(GUN_SPEED) as (keyof GunSpeedTune)[]) {
+    const v = opts[key];
+    if (typeof v === 'number' && Number.isFinite(v)) GUN_SPEED[key] = Math.max(SPEED_FLOOR[key], v);
+  }
+  return GUN_SPEED;
+}
+
+/**
+ * The readout: the multiplier in force, what a bolt is stretched to, and what every gun's two
+ * triggers now fire at in metres a second beside what they fired at before. Passing `speed` (or any
+ * of the tuning's numbers) moves it first. Console only, so it may allocate.
+ */
+export function gunSpeedReport(opts?: (Partial<GunSpeedTune> & { speed?: number }) | null): {
+  tune: GunSpeedTune;
+  stretch: number;
+  guns: { gun: GunType; trigger: string; was: number; now: number }[];
+} {
+  if (opts) tuneGunSpeed(opts);
+  // The engine unit the bolts themselves fly by (`ENGINE_UNIT`), not a copy of it: the two columns
+  // below are the speeds a gun really left the muzzle at before and leaves at now, and a second
+  // copy of this number would let the readout say something no bolt ever did.
+  const unit = ENGINE_UNIT;
+  const rows: { gun: GunType; trigger: string; was: number; now: number }[] = [];
+  for (const g of Object.values(GUNS)) {
+    for (const [trigger, mode] of [['primary', g.primary] as const, ['alt', g.alt] as const]) {
+      if (!mode || mode.speed <= 0) continue;
+      rows.push({ gun: g.type, trigger, was: Number((mode.speed * unit).toFixed(2)), now: Number(groundBoltSpeed(mode.speed, unit).toFixed(2)) });
+    }
+  }
+  rows.sort((a, b) => a.now - b.now);
+  return { tune: { ...GUN_SPEED }, stretch: Number(boltStretch().toFixed(3)), guns: rows };
+}
+
+/**
  * How a trigger fires. `shot` fires bolts at the rate while held; `charge` builds while held and
  * fires on release; `stream` is a cone of harm (a flame) while held; `beam` a hitscan line held on
  * what is ahead; `mines` throws bouncing charges; `blast` a burst around the shooter.

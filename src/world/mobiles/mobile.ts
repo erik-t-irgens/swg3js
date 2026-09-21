@@ -29,6 +29,7 @@ import type { Terrain } from '../terrain';
 import type { Bolts } from '../../combat/bolts';
 import type { Effects } from '../../combat/effects';
 import { GUNS, type GunProfile } from '../../combat/guns';
+import { scarFamilyOf } from '../../combat/scars.ts';
 import { Ragdoll } from '../../combat/ragdoll';
 import { SaberBlade } from '../../combat/saberBlade';
 import { boneForRole } from '../../player/rig';
@@ -1081,18 +1082,19 @@ export class Mobile implements Living, NpcSubject {
     if (beast) {
       color = SPIT.color;
       const burn = this.blow * SPIT.burn;
-      this.deps.bolts.fire(from, dir, { owner: 'enemy', damage: this.blow, metresPerSecond: SPIT.speed, color, size: SPIT.size * Math.max(0.6, Math.min(2, Math.sqrt(this.scale * this.plan.height / 2))), gravity: SPIT.gravity, push: 1, exclude: this.body, source: this, sound: SPIT_SOUND, onHit: (_p, hit) => hit?.afflict?.(burn, SPIT.burnFor) });
+      this.deps.bolts.fire(from, dir, { owner: 'enemy', damage: this.blow, metresPerSecond: SPIT.speed, color, size: SPIT.size * Math.max(0.6, Math.min(2, Math.sqrt(this.scale * this.plan.height / 2))), gravity: SPIT.gravity, push: 1, exclude: this.body, source: this, sound: SPIT_SOUND, scar: 'flame', onHit: (_p, hit) => hit?.afflict?.(burn, SPIT.burnFor) });
     } else {
       // The gun in its hand when it holds one off the rack; else a droid's or a person's own: the
       // pistol's bolt for the one-frame pistol shots, the rifle's otherwise.
       // (A beam or a flame has no bolt to fire: its holder shoots the rifle's.)
       const held = this.gun && this.gun.primary.speed > 0 ? this.gun : null;
       const pistol = !!this.roles?.rangedAdditive && /pistol/i.test(this.roles.ranged ?? '');
-      const g = (held ?? (pistol ? GUNS.bryar : GUNS.blaster)).primary;
+      const profile = held ?? (pistol ? GUNS.bryar : GUNS.blaster);
+      const g = profile.primary;
       color = g.color;
       // The weapon in its hand is known here by the rack's id alone (the hands are given a copy of
       // the model, not the record), which is all its sounds need: every id is its template's name.
-      this.deps.bolts.fire(from, dir, { owner: 'enemy', damage: this.blow, speed: g.speed, color, size: g.size, push: g.push, exclude: this.body, source: this, sound: (held ? combatSounds.gunById(this.weapon) : null) ?? combatSounds.gunOf(pistol ? OWN_GUN.pistol : OWN_GUN.rifle) });
+      this.deps.bolts.fire(from, dir, { owner: 'enemy', damage: this.blow, speed: g.speed, color, size: g.size, push: g.push, exclude: this.body, source: this, sound: (held ? combatSounds.gunById(this.weapon) : null) ?? combatSounds.gunOf(pistol ? OWN_GUN.pistol : OWN_GUN.rifle), scar: scarFamilyOf(profile.type, this.weapon) });
     }
     // The flash is a pooled light shared by everything; only a near shot may borrow one.
     if (this.tier?.name === 'near' && cameraDist < LOD_TUNE.near) this.deps.effects()?.flash(from, color, 5, 6, 0.06);

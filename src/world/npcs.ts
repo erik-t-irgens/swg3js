@@ -15,6 +15,7 @@ import { CLASH } from '../combat/clash.ts';
 import { keepNearestGlow } from '../combat/bladeLights';
 import { Ragdoll } from '../combat/ragdoll';
 import { GUNS, gunTypeFor, type GunProfile } from '../combat/guns';
+import { scarFamilyOf } from '../combat/scars.ts';
 import type { Bolts } from '../combat/bolts';
 import type { Effects } from '../combat/effects';
 import { nextLivingKey, type Aggression, type Hittable, type Living, type Side } from '../combat/kit';
@@ -578,7 +579,7 @@ export class Npc implements Living {
           tmp.z += (Math.random() - 0.5) * s;
           tmp.normalize();
           // Its own gun off the rack, so an enemy's shot sounds like the weapon in its hands.
-          bolts.fire(tmp2, tmp, { owner: 'enemy', damage: Math.max(6, g.primary.damage * 0.6), speed: g.primary.speed || 2300, color: g.primary.color, size: g.primary.size, push: g.primary.push, exclude: this.body, life: 6, source: this, sound: combatSounds.gunOf(this.weapon) });
+          bolts.fire(tmp2, tmp, { owner: 'enemy', damage: Math.max(6, g.primary.damage * 0.6), speed: g.primary.speed || 2300, color: g.primary.color, size: g.primary.size, push: g.primary.push, exclude: this.body, life: 6, source: this, sound: combatSounds.gunOf(this.weapon), scar: scarFamilyOf(g.type, this.weapon?.fx?.id) });
           effects?.flash(tmp2, g.primary.color, 6, 5, 0.06);
           rig?.playUpper(rig.firstOf('rifle_combat_standing_fire_1', 'add_rifle_fire_1', 'pistol_combat_standing_fire_1') ?? '', 0.04);
         } else if (this.arm !== 'gun' && d < 2.6) {

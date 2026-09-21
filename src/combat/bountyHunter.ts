@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { combatSounds, COMBAT_TUNE } from '../audio/combatSounds';
 import { RAPIER } from '../core/physics';
 import { GUNS, gunTypeFor, type FireMode, type GunProfile } from './guns';
+import { layScar, marksHold, scarFamilyOf } from './scars.ts';
 import type { BoltFrame } from './bolts';
 import type { Hittable, Kit, KitContext, KitSlot, Living, Resource } from './kit';
 import type { EffectHandle, ParticleEffects } from '../world/particles';
@@ -576,7 +577,7 @@ export class BountyHunterKit implements Kit {
       const s = base + (mode.pellets && !mode.fan ? ((mode.pelletSpread ?? 0) * Math.PI) / 180 : 0);
       if (s > 0) shotDir.addScaledVector(side, Math.tan((Math.random() * 2 - 1) * s)).addScaledVector(lift, Math.tan((Math.random() * 2 - 1) * s));
       shotDir.normalize();
-      if (mode.speed <= 0) this.hitscan(ctx, mode, muzzle, shotDir, damage, level);
+      if (mode.speed <= 0) this.hitscan(ctx, gun, mode, muzzle, shotDir, damage, level);
       else {
         ctx.bolts.fire(muzzle, shotDir, {
           owner: 'player',
@@ -594,6 +595,10 @@ export class BountyHunterKit implements Kit {
           bounces: mode.bounces,
           homing: mark ? { pos: mark.pos, dead: mark.dead } : null,
           sound: gunSound,
+          // The mark it leaves where it stops: the gun's own type first, its weapon effect family
+          // second (`scarFamilyOf`). A rocket leaves a char, a slugthrower a pit, a flame gun soot
+          // and a lightning gun a fork, so the four read apart on a wall.
+          scar: scarFamilyOf(gun.type, fx?.id),
           onHit: (p, target) => {
             if (mode.splash) this.blast(ctx, p, mode.splash.damage, mode.splash.radius, mode);
             if (target) this.afflict(ctx, target, mode);
@@ -616,7 +621,7 @@ export class BountyHunterKit implements Kit {
   }
 
   /** A shot that lands the instant it is fired: what the line meets is hurt, and the line is drawn as a fading beam. */
-  private hitscan(ctx: KitContext, mode: FireMode, at: THREE.Vector3, along: THREE.Vector3, damage: number, level: number): void {
+  private hitscan(ctx: KitContext, profile: GunProfile, mode: FireMode, at: THREE.Vector3, along: THREE.Vector3, damage: number, level: number): void {
     const { player, world, physics, effects } = ctx;
     const room = player.aboard;
     const ray = new RAPIER.Ray(at, along);
@@ -652,6 +657,11 @@ export class BountyHunterKit implements Kit {
       if (missed) combatSounds.miss(gun, end.x, end.y, end.z, missed);
       else combatSounds.hit(gun, end.x, end.y, end.z, null);
       effects.burst(end, 0xffb070, 0.35, 0.12);
+      // The mark a beam leaves, on the same two conditions a bolt's takes: not on the water, whose
+      // surface writes no depth and would wear a mark that hung over the swell, and only on
+      // something that holds still. It carries no bolt, so the normal is the way the beam came: a
+      // beam fired at a wall marks it square, and one fired across a wall leans a little.
+      if (missed !== 'water' && marksHold(hit.collider)) layScar(scarFamilyOf(profile.type, player.equipped.right?.fx?.id), end.x, end.y, end.z, -along.x, -along.y, -along.z, hit.collider.handle);
     }
     if (mode.splash) this.blast(ctx, end, mode.splash.damage, mode.splash.radius, mode);
     effects.flash(end, mode.color, 10, 6, 0.1);

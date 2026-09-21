@@ -18,9 +18,12 @@ import { RAPIER, type Physics } from '../core/physics';
 import { markActor } from '../world/portalRender';
 import type { EffectHandle, ParticleEffects } from '../world/particles';
 import type { Effects } from './effects';
+import { ENGINE_UNIT, boltStretch, groundBoltSpeed } from './guns.ts';
+import { layScar, marksHold, type ScarFamily } from './scars.ts';
 import type { Hittable, Living } from './kit';
 
-const UNIT = 0.0254;
+/** A metre per engine unit. One home, in `guns.ts`, where the guns' own speeds are written down. */
+const UNIT = ENGINE_UNIT;
 
 /** The E-11 blaster rifle's numbers (g_weapon.c, bg_weapons.c). */
 export const BLASTER = {
@@ -56,7 +59,12 @@ export interface ProjectileVisual {
 export interface BoltOptions {
   owner: BoltOwner;
   damage?: number;
-  /** Units a second. */
+  /**
+   * Units a second, out of the ground guns' own weapon data. This is the one path the ground guns'
+   * speed multiplier is applied on (`GUN_SPEED.ground` in `guns.ts`): a bolt given its speed this
+   * way is a gun's, and a bolt given `metresPerSecond` has been handed a speed already made and is
+   * left alone, which is what keeps a ship's 600 m/s the game's own number.
+   */
   speed?: number;
   /** Metres a second, in place of `speed`, for the game's own guns. */
   metresPerSecond?: number;
@@ -110,6 +118,13 @@ export interface BoltOptions {
    * rather than a second bolt.
    */
   wire?: number;
+  /**
+   * The mark this bolt leaves where it stops, as the family of the gun that fired it
+   * (`scarFamilyOf` in `scars.ts`). Left out, it is a plain bolt's ring: a turret's shot, a
+   * creature's spit and a picture of somebody else's shot with nothing else said about it all leave
+   * that, which is better than leaving nothing at all. Null leaves no mark at all.
+   */
+  scar?: ScarFamily | null;
 }
 
 export interface BoltFrame {
@@ -165,6 +180,12 @@ export interface Bolt {
   inert: boolean;
   /** Which shot it is where shots cross between browsers, 0 where they do not (`BoltOptions.wire`). */
   wire: number;
+  /**
+   * What it marks whatever it stops on with, carried on the bolt rather than only in the options it
+   * was built from: a bolt turned away by a blade is the same gun's bolt where it finally lands.
+   * Null marks nothing.
+   */
+  scar: ScarFamily | null;
 }
 
 /** A shot that landed the instant it was fired: its line, fading over its life. */
@@ -197,6 +218,15 @@ const soundAt = new THREE.Vector3();
 const flyStep = new THREE.Vector3();
 const hitPoint = new THREE.Vector3();
 const hitNormal = new THREE.Vector3();
+/** The probe a bolt ended by a word casts for the surface to mark, and the normal it comes back with. */
+const cutFrom = new THREE.Vector3();
+const cutNormal = new THREE.Vector3();
+/**
+ * How far either side of the point the one who fired gave that probe looks for a surface, in metres.
+ * Wide enough for two browsers' streamed worlds to disagree by a hand's breadth and narrow enough
+ * that a shot which ended in the air finds nothing. Ours, invented.
+ */
+const CUT_PROBE = 0.35;
 const bounce = new THREE.Vector3();
 const placeQ = new THREE.Quaternion();
 const frameQ = new THREE.Quaternion();
@@ -238,6 +268,13 @@ export class Bolts {
    * stopped, and the copy is cut short there.
    */
   private readonly passableNotPeer = (c: RAPIER.Collider): boolean => c.collisionGroups() !== 0 && !this.peers?.isPeer(c.handle);
+  /**
+   * The other half of that: every other player's body and nothing else. It answers one question, and
+   * only for a picture of somebody else's shot -- did somebody stand in the way of this copy? A copy
+   * flies over them on purpose, so the wall behind a player it went through is not where anybody
+   * shot, and no mark is left there. Made once, not per ray.
+   */
+  private readonly peerOnly = (c: RAPIER.Collider): boolean => !!this.peers?.isPeer(c.handle);
   /** The physics of the world being flown through, for the filter above; set at the top of every update. */
   private peers: Physics | null = null;
 
@@ -278,16 +315,16 @@ export class Bolts {
 
   /** Fire a bolt from `from` along `dir` (unit length). */
   fire(from: THREE.Vector3, dir: THREE.Vector3, o: BoltOptions): Bolt {
-    const { owner, damage = BLASTER.damage, speed = BLASTER.velocity, metresPerSecond, inherit, life = BLASTER.life, color = 0xff4a2a, exclude, projectile, size = 1, push = BLASTER.push, onHit, gravity = 0, bounces = 0, homing = null, frame = null, source = null, sound = null, inert = false, wire = 0 } = o;
+    const { owner, damage = BLASTER.damage, speed = BLASTER.velocity, metresPerSecond, inherit, life = BLASTER.life, color = 0xff4a2a, exclude, projectile, size = 1, push = BLASTER.push, onHit, gravity = 0, bounces = 0, homing = null, frame = null, source = null, sound = null, inert = false, wire = 0, scar = 'bolt' } = o;
     const [coreMat, glowMat] = this.materialsFor(color);
     const mesh = new THREE.Group();
     mesh.add(new THREE.Mesh(this.core, coreMat), new THREE.Mesh(this.glow, glowMat), new THREE.Mesh(this.head, glowMat));
-    // A bigger bolt is wider and a little longer, not just scaled up.
-    mesh.scale.set(size, size, 0.6 + size * 0.4);
     mesh.position.copy(from);
     // The bolt's velocity: its muzzle speed along the barrel, plus whatever the shooter itself
-    // was doing, so a fighter at full throttle sees its bolts pull away as they should.
-    const vel = dir.clone().normalize().multiplyScalar(metresPerSecond ?? speed * UNIT);
+    // was doing, so a fighter at full throttle sees its bolts pull away as they should. A speed in
+    // units a second is a ground gun's and takes the multiplier; one already in metres a second is
+    // the game's own (a ship's gun, a picture of somebody else's shot) and is taken as given.
+    const vel = dir.clone().normalize().multiplyScalar(metresPerSecond ?? groundBoltSpeed(speed, UNIT));
     if (inherit) vel.add(inherit);
     const s = vel.length();
     const heading = s > 1e-6 ? vel.divideScalar(s) : dir.clone().normalize();
@@ -295,13 +332,27 @@ export class Bolts {
     const fxPlayer = this.playerFor(projectile);
     const fx = projectile && fxPlayer ? fxPlayer.place(projectile.effect, placeM.compose(from, mesh.quaternion, ONE), false, true) : null;
     if (fx) mesh.visible = false;
+    // A bigger bolt is wider and a little longer, not just scaled up. A **ground gun's** bolt is
+    // longer again by the speed multiplier (`boltStretch`), because at two and a half times the
+    // speed a dash a third of a metre long crosses two and a half metres in a frame and reads as a
+    // dotted line rather than as a streak. The stretch is asked the very same question the speed
+    // was, and not a different one: a bolt handed `metresPerSecond` was handed a speed already
+    // made -- a ship's gun, a creature's spit, a picture of somebody else's shot -- and is left
+    // exactly as long as it always was, so the game's own 600 m/s bolt is the game's own length and
+    // its ray leads by the game's own reach. A bolt really drawn as one of the game's own
+    // projectile effects takes none of it either: the mesh is hidden behind that effect and its
+    // reach is the number that leads. One that asked for an effect and did not get one (the pack is
+    // not loaded yet) is drawn with this mesh and stretches with it, since the mesh is then what is
+    // seen and what leads.
+    const stretch = metresPerSecond === undefined && !fx ? boltStretch() : 1;
+    mesh.scale.set(size, size, (0.6 + size * 0.4) * stretch);
     this.scene.add(mesh);
     markActor(mesh);
     // Which gun this is, for everything it will be heard doing: the caller's own set, or, for a
     // ship's bolt fired by something that does not carry one, the set of the projectile it draws,
     // and failing both the plain blaster, so a bolt is never silent leaving and loud landing.
     const gun = sound ?? (projectile ? combatSounds.projectileGun(projectile.effect) : null) ?? GENERIC_GUN;
-    const bolt: Bolt = { pos: from.clone(), dir: heading, speed: s, damage, owner, exclude, age: 0, life, lead: fx && projectile ? projectile.reach : (LENGTH / 2) * mesh.scale.z, reflected: 0, mesh, fx, hitFx: fx ? (projectile?.hit ?? null) : null, fxPack: fx ? fxPlayer : null, push, onHit: onHit ?? null, gravity, bounces, homing, vel: gravity || homing ? vel.clone().multiplyScalar(s) : null, frame, source, sound: gun, flew: false, color, size, projectile: projectile ?? null, inert, wire };
+    const bolt: Bolt = { pos: from.clone(), dir: heading, speed: s, damage, owner, exclude, age: 0, life, lead: fx && projectile ? projectile.reach : (LENGTH / 2) * mesh.scale.z, reflected: 0, mesh, fx, hitFx: fx ? (projectile?.hit ?? null) : null, fxPack: fx ? fxPlayer : null, push, onHit: onHit ?? null, gravity, bounces, homing, vel: gravity || homing ? vel.clone().multiplyScalar(s) : null, frame, source, sound: gun, flew: false, color, size, projectile: projectile ?? null, inert, wire, scar: scar ?? null };
     if (frame) this.settle(bolt);
     this.bolts.push(bolt);
     this.fired[owner]++;
@@ -325,7 +376,7 @@ export class Bolts {
   warmUp(colors: number[] = [0xff4a2a, 0x3af06a]): void {
     for (const color of colors) {
       // Not really a shot: the set that names nothing, so the warm-up is heard no more than it is seen.
-      const b = this.fire(new THREE.Vector3(0, -900, 0), new THREE.Vector3(0, -1, 0), { owner: 'enemy', color, speed: 0, sound: SILENT_GUN });
+      const b = this.fire(new THREE.Vector3(0, -900, 0), new THREE.Vector3(0, -1, 0), { owner: 'enemy', color, speed: 0, sound: SILENT_GUN, scar: null });
       b.age = BLASTER.life;
       this.fired.enemy--;
     }
@@ -421,6 +472,11 @@ export class Bolts {
         combatSounds.hit(b.sound, hitPoint.x, hitPoint.y, hitPoint.z, 'ship');
         w.effects.burst(hitPoint, 0xffb070, 0.35, 0.12);
         w.effects.flash(hitPoint, 0xff8a50, 6, 4, 0.08);
+        // No scar on a deck. Everything aboard lives in the hull's frame and the marks are one
+        // mesh in the world's, so a mark made here would either sit at the world's origin or, once
+        // carried out, smear across the sky the moment the ship moved. Riding the hull means a
+        // second mesh under the hull's own group, which is the marks system's to give and not the
+        // bolt's; until it does, a shot fired aboard bursts and sounds and marks nothing.
         // Nothing a picture of a bolt lands on is told about it: whatever the shot did is the
         // business of the browser that fired it, and this is one of the three ways a bolt in this
         // file can pass something on.
@@ -540,6 +596,26 @@ export class Bolts {
         else combatSounds.hit(b.sound, hitPoint.x, hitPoint.y, hitPoint.z, null, hit.collider.handle);
         w.effects.burst(hitPoint, 0xffb070, 0.35, 0.12);
         w.effects.flash(hitPoint, 0xff8a50, 6, 4, 0.08);
+        // The scar it leaves, of the family of the gun that fired it (`scars.ts`). Only on
+        // something that is not alive, and never on the water, whose surface writes no depth and
+        // would wear a mark that hung over it as the swell went by. The collider that stopped the
+        // bolt goes with it: the marks system is what decides whether a mark on a thing that
+        // streams out goes with it, and this is the one place that knows which thing it was. A
+        // picture of somebody else's shot leaves one too, at its own trace's point, which is
+        // within a few centimetres of the shooter's on any world both browsers have streamed.
+        // Only on something that holds still (`marksHold`). A mark is a quad in the world and the
+        // thing it was laid on is not asked again: on a corpse's settling limb, a crate somebody can
+        // shove or a parked hull it would slide out of the surface at once and then hang in the air
+        // for its whole life, since only a streamed thing's collider is ever forgotten. The ground,
+        // a wall, a building's shell and every streamed prop are fixed or bodiless and take it.
+        //
+        // And not where a copy of somebody else's shot flew through the person it hit: an inert copy
+        // passes over every peer's body by design, so the shooter's shot may have ended on a player
+        // while this copy flew on to the wall behind them. A mark there is a mark where nobody shot.
+        if (b.scar && missed !== 'water' && marksHold(hit.collider) && !(b.inert && w.physics.world.castRay(ray, hit.timeOfImpact, true, undefined, undefined, undefined, b.exclude, this.peerOnly))) {
+          if (hitNormal.lengthSq() < 1e-6) hitNormal.copy(b.dir).negate();
+          layScar(b.scar, hitPoint.x, hitPoint.y, hitPoint.z, hitNormal.x, hitNormal.y, hitNormal.z, hit.collider.handle);
+        }
       }
       // The game's own hit effect for a ship's or a gun's bolt, stood on the surface it struck.
       if (b.hitFx && b.fxPack) {
@@ -556,13 +632,44 @@ export class Bolts {
    * picture of a shot is brought into line with the shot it copies, and how the one real bolt is
    * stopped when a blade somewhere else turned it away. A bolt that has already gone is no error:
    * the word and the flight are two clocks, and either may come first.
+   *
+   * The mark goes here, at the point the one who fired gave, which is the design's own rule: a copy
+   * still in the air has not marked anything yet, and marking it here is what puts the scar in the
+   * same place on both screens with nothing added to the wire. What is not taken on trust is that
+   * there is anything there to mark: the point comes from another browser's streamed world and may
+   * be a body, a blade's block in mid-air, or something this browser has not got, so a short probe
+   * along the bolt's own heading has to find a surface that holds still before a quad is laid on it
+   * (`markCut`). A copy that had already stopped on its own is not brought back here at all -- it
+   * never reaches this method, since whoever holds the shots has let go of it -- and it marked where
+   * it stopped, which on any wall both browsers have streamed is a few centimetres from this point.
    */
   cutShort(bolt: Bolt, at: THREE.Vector3, effects: Effects | null = null): boolean {
     const i = this.bolts.indexOf(bolt);
     if (i < 0) return false;
     effects?.burst(at, 0xffb070, 0.35, 0.12);
+    this.markCut(bolt, at);
     this.remove(i, null);
     return true;
+  }
+
+  /**
+   * The mark for a bolt ended by a word from somewhere else. Nothing is marked unless the probe
+   * finds a surface that holds still within `CUT_PROBE` of the point, is not another player and is
+   * not under water: a shot that ended on a person, on a lit blade or on something only the shooter
+   * has streamed leaves nothing anywhere, which is the one artefact a mark must never make. Aboard a
+   * hull's rooms nothing is marked at all, as everywhere else in this file.
+   */
+  private markCut(b: Bolt, at: THREE.Vector3): void {
+    const phys = this.peers;
+    if (!b.scar || b.frame || !phys || combatSounds.overWater(at.x, at.y, at.z)) return;
+    cutFrom.copy(at).addScaledVector(b.dir, -CUT_PROBE);
+    const ray = new RAPIER.Ray(cutFrom, b.dir);
+    const hit = phys.world.castRayAndGetNormal(ray, CUT_PROBE * 2, true, undefined, undefined, undefined, b.exclude, this.passable);
+    if (!hit || phys.isPeer(hit.collider.handle) || !marksHold(hit.collider)) return;
+    const p = ray.pointAt(hit.timeOfImpact);
+    cutNormal.set(hit.normal.x, hit.normal.y, hit.normal.z);
+    if (cutNormal.lengthSq() < 1e-6) cutNormal.copy(b.dir).negate();
+    layScar(b.scar, p.x, p.y, p.z, cutNormal.x, cutNormal.y, cutNormal.z, hit.collider.handle);
   }
 
   /** Put the bolt's mesh, or the effect carried in its place, where the bolt now is. */
