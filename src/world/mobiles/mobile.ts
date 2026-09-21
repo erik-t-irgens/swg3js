@@ -6,6 +6,21 @@
 //
 // The body exists before the model does: a spawn is never blocked on a download, a bolt can find
 // and kill a mobile whose model is still loading, and a body with no model is simply not drawn.
+//
+// A creature the world shares between players has a second life: **driven**. One browser thinks for
+// it and every other one holds the same body with its brain switched off, eased toward what the
+// keeper says four times a second and playing the clip its told pace asks for. A driven mobile is
+// not a picture -- it has its colliders, it is lifted to the ground, it follows rooms through the
+// portals and it is in the one list of the living -- so it can be shot at, swept at, targeted with
+// Tab and walked into exactly as one this browser thinks for. What it does not have is a brain, a
+// dynamic body or the right to take health off itself: a blow struck here is asked of the keeper
+// (`src/net/npcNet.ts`) and the keeper's answer, which arrives as the health in the next batch or
+// as the word that it is gone, is what kills it. Taking one over is seamless on purpose: the brain
+// starts from where the body is standing, and no pose is reset, because a respawn's pose reset is
+// exactly what would make a creature flick as it changed hands.
+//
+// With no server none of this runs: `driven` is never set, `mine` answers yes for everything, and
+// every creature is this browser's own with its damage applied where it lands.
 import * as THREE from 'three';
 import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { combatSounds, type GunSound } from '../../audio/combatSounds';
@@ -20,6 +35,7 @@ import { boneForRole } from '../../player/rig';
 import { MUZZLE_PATTERNS } from './arms';
 import { nextLivingKey, PLAYER_KEY, type Aggression, type Living, type Side } from '../../combat/kit';
 import { hostileSides, sideOf } from '../../combat/targets';
+import { npcNow, NPC_TUNE, type NpcMark, type NpcRow, type NpcSubject } from '../../net/npcNet.ts';
 import { markActor } from '../portalRender';
 import { planBody, radiusToward, type BodyInput, type BodyPlan } from './shape';
 import { moveSpeeds, stepGait, type GaitStep } from './gait';
@@ -35,6 +51,14 @@ export type { MobileState };
 const tmp = new THREE.Vector3();
 const tmp2 = new THREE.Vector3();
 const tmpQ = new THREE.Quaternion();
+/**
+ * Where a blow off the wire came from. Its own vector rather than one of the two above, because a
+ * blow arrives in the middle of a message and `damage` spends `tmp` on the knock it gives.
+ */
+const blowFrom = new THREE.Vector3();
+/** Written into by the driven body every frame; the engine copies out of them at the call. */
+const driveAt = { x: 0, y: 0, z: 0 };
+const driveTurn = { x: 0, y: 0, z: 0, w: 1 };
 const UP = new THREE.Vector3(0, 1, 0);
 /** What a blade faces while no camera is given (a headless step). */
 const IDLE_CAMERA = new THREE.PerspectiveCamera();
@@ -110,6 +134,12 @@ const HIT_EVERY = 0.6;
 const DEAD_FOR = 10;
 /** A hologram shrinks away over this long instead of falling. */
 const HOLOGRAM_FADE = 0.5;
+/**
+ * The state words a driven creature may be told it is in. A word from the wire is checked against
+ * this before it is kept, since what it chooses is a clip and a gait set: the list is the one in
+ * `types.ts` and the server checks it too.
+ */
+const STATE_WORDS: readonly string[] = ['loading', 'idle', 'wander', 'alert', 'chase', 'attack', 'flee', 'return', 'knockdown', 'dying', 'dead'];
 /** The stuck check's window (seconds), and the side-step it tries. */
 const STUCK_WINDOW = 1.5;
 const SIDESTEP = THREE.MathUtils.degToRad(60);
@@ -164,7 +194,7 @@ interface Grudge {
   total: number;
 }
 
-export class Mobile implements Living {
+export class Mobile implements Living, NpcSubject {
   /**
    * Its place in the one list of living things, for as long as it lives. A respawn is a new
    * life, so it takes a new key: a brain that remembered this body must not find the fresh one.
@@ -282,6 +312,22 @@ export class Mobile implements Living {
   private readonly brainTargets: BrainTarget[] = [];
   /** The objects `brainTargets` is filled from, reused every thought. */
   private readonly brainPool: BrainTarget[] = [];
+  /**
+   * The id every browser knows this creature by, when it is one of the world's; empty while it is
+   * this browser's alone, which is every creature with no server and everything a console stood.
+   */
+  private shared = '';
+  /** Another browser thinks for it: no brain, no dynamics, and no health taken off here. */
+  private driven = false;
+  /** Where the keeper says it is, and how it faces: what the ease walks toward. */
+  private readonly toldAt = new THREE.Vector3();
+  private toldHeading = 0;
+  private toldSpeed = 0;
+  private toldState: MobileState = 'idle';
+  /** Whether anything has been said about it yet: the first word is arrived at, not eased toward. */
+  private toldOnce = false;
+  /** Something this browser owes the wire about it while it keeps it: it was struck, it was thrown. */
+  private mark: NpcMark | null = null;
 
   constructor(spawn: MobileSpawn, private readonly deps: MobileDeps) {
     const e = spawn.entry;
@@ -523,6 +569,194 @@ export class Mobile implements Living {
     return this.dead || !!this.animator?.busy || this.swingAt > 0 || this.shotsLeft > 0 || this.state === 'attack';
   }
 
+  // ---- one of the world's creatures ----------------------------------------------------------------
+  //
+  // Everything from here to `stepDriven` is the `NpcSubject` the wire talks to (src/net/npcNet.ts).
+  // A creature with no id is not one of the world's and none of it ever runs: that is every creature
+  // in a game with no server, and everything stood from the console.
+
+  /** Make it one of the world's, by the id every browser knows it by. Said once, when it is stood. */
+  shareAs(id: string): void {
+    this.shared = id;
+  }
+
+  /** The id every browser knows it by, or an empty string while it is this browser's alone. */
+  get npcId(): string {
+    return this.shared;
+  }
+
+  get npcDead(): boolean {
+    return this.dead;
+  }
+
+  /** Another browser thinks for it. */
+  get isDriven(): boolean {
+    return this.driven;
+  }
+
+  /**
+   * One of the world's while a server is holding the world: every browser on it has a copy of this
+   * creature under the same name, whoever is thinking for it just now. It is asked rather than
+   * stored because a creature can be one of the world's before the line is up and after it drops,
+   * and with no server it is false for everything, which is the game played alone.
+   */
+  private get sharedLive(): boolean {
+    return !!this.shared && (npcNow()?.active ?? false);
+  }
+
+  /**
+   * Where it is and what it is doing, for the keeper's batch. False while there is nothing worth
+   * saying: a body whose model has not landed has not moved and has nothing to play.
+   */
+  npcFill(row: NpcRow): boolean {
+    if (this.disposed || this.state === 'loading') return false;
+    row.p[0] = this.pos.x;
+    row.p[1] = this.pos.y;
+    row.p[2] = this.pos.z;
+    row.h = this.heading;
+    row.s = this.state;
+    row.v = this.speed;
+    row.hp = this.maxHp > 0 ? Math.max(0, this.hp) / this.maxHp : 0;
+    // A thing that happened once is said once: it is taken as it is handed over, so a batch that is
+    // sent says it and the next one does not.
+    if (this.mark) {
+      row.f = this.mark;
+      this.mark = null;
+    }
+    return true;
+  }
+
+  /**
+   * What the keeper says. Nothing here is jumped to: the place and the heading are walked toward in
+   * `stepDriven` at the same tenth of a second every other glide in this game uses. `snap` is the
+   * first word about it, where there is nothing to walk from -- a body stood from a spawn record
+   * would otherwise cross the world from its spawn point at walking pace.
+   */
+  npcDrive(row: NpcRow, snap: boolean): void {
+    if (this.disposed || this.dead) return;
+    this.toldAt.set(row.p[0], row.p[1], row.p[2]);
+    this.toldHeading = row.h;
+    this.toldSpeed = row.v;
+    if (STATE_WORDS.includes(row.s)) this.toldState = row.s as MobileState;
+    // The keeper's number, not a number worked out here: this is the only thing that moves a driven
+    // creature's health, and it is why a browser cannot come to disagree about how hurt one is.
+    this.hp = Math.max(0, Math.min(this.maxHp, row.hp * this.maxHp));
+    if (snap || !this.toldOnce) {
+      this.toldOnce = true;
+      this.placeAt(this.toldAt.x, this.toldAt.y, this.toldAt.z, row.h);
+    }
+    if (row.f) this.sawMark(row.f);
+  }
+
+  /**
+   * Something that had to be seen once: it was struck, and it left the ground.
+   *
+   * A death is not one of them and never arrives here. It has a word of its own, which reaches this
+   * body as `npcEnd`, and two ways to say one death would be two paths for the same thing.
+   */
+  private sawMark(mark: NpcMark): void {
+    if (mark === 'hit') {
+      this.flinch(0.1);
+      return;
+    }
+    // 'leap': it left the ground. The ease carries the arc, since where it is is said four times a
+    // second and it is the place that matters; what this says is that it is not walking.
+    this.grounded = false;
+  }
+
+  /**
+   * Whether another browser thinks for it. Called only when the answer changes, and seamless both
+   * ways: giving it up eases from where it stands, and taking it over starts the brain from where
+   * the body is, with nothing reset and no pose put back -- a pose reset here is exactly the flick
+   * that would say "this creature just changed hands".
+   */
+  npcSetDriven(driven: boolean): void {
+    if (this.driven === driven || this.disposed) return;
+    this.driven = driven;
+    const live = this.body.isValid();
+    if (driven) {
+      this.toldAt.copy(this.pos);
+      this.toldHeading = this.heading;
+      this.toldSpeed = this.speed;
+      this.toldState = this.state === 'loading' ? 'loading' : this.state;
+      this.toldOnce = false;
+      // Nothing of its own is under way any more: a swing part way through would land on a target
+      // this browser is no longer thinking about, and a burst would go on firing bolts nobody else
+      // can see.
+      this.targetKey = null;
+      this.targetRef = null;
+      this.decision = null;
+      this.goal = null;
+      this.swingAt = 0;
+      this.shotsLeft = 0;
+      this.dotLeft = 0;
+      this.slowed = 0;
+      this.stunned = 0;
+      this.heldUntil = 0;
+      // Out of the solver. A dynamic body nobody is steering would fall, drift and be shoved about
+      // between the keeper's words; kinematic, it goes exactly where it is told and still stops a
+      // bolt, holds a blade and blocks a walker.
+      if (live) this.body.setBodyType(RAPIER.RigidBodyType.KinematicPositionBased, true);
+      return;
+    }
+    // Ours again, from where it stands.
+    if (live) {
+      this.body.setBodyType(RAPIER.RigidBodyType.Dynamic, true);
+      this.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+      this.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+      this.body.setGravityScale(this.flyer || this.swimming ? 0 : 1, true);
+    }
+    this.state = this.state === 'loading' ? 'loading' : this.dead ? this.state : 'idle';
+    // It thinks at once rather than standing still for a think's worth of seconds, and the stuck
+    // check starts again: the ground it covered while it was driven is not its own walking.
+    this.thinkAt = 0;
+    this.wanderAt = -1;
+    this.stuck = 0;
+    this.stuckClock = 0;
+    this.stuckCommanded = 0;
+    this.ramp = this.speed;
+  }
+
+  /**
+   * A blow somebody else struck, handed over by the wire. It is only ever called on the browser that
+   * keeps this creature, so it goes through the ordinary path: the grudge, the pack's alert, the
+   * health and the death are all worked out exactly as they are for a blow struck here.
+   */
+  npcHurt(amount: number, x: number, y: number, z: number, source: Living | null, _what = ''): void {
+    if (this.dead || this.disposed || this.driven) return;
+    blowFrom.set(x, y, z);
+    // No push: what struck is somebody else's bolt or blade and nothing on the wire says how hard
+    // it shoves. The health and the flinch are what cross.
+    this.damage(amount, blowFrom, 0, source);
+  }
+
+  /** The keeper says it is gone: it died there, or it was taken out of the world. */
+  npcEnd(why: 'dead' | 'gone'): void {
+    if (this.disposed) return;
+    if (why === 'dead') {
+      if (!this.dead) this.die();
+      return;
+    }
+    // Taken away rather than killed: it is spent, and the manager takes the body down on its next
+    // pass, which is the one place a mobile is ever removed.
+    this.dead = true;
+    this.hp = 0;
+    this.deadTimer = 0;
+    this.state = 'dead';
+  }
+
+  /** Put exactly there, body and picture together: the first word about a driven creature, and a lift. */
+  private placeAt(x: number, y: number, z: number, heading: number): void {
+    this.pos.set(x, y, z);
+    this.heading = heading;
+    tmpQ.setFromAxisAngle(UP, heading);
+    this.group.position.set(x, y + this.plan.feet, z);
+    this.group.quaternion.copy(tmpQ);
+    if (!this.body.isValid()) return;
+    this.body.setTranslation({ x, y: y + this.plan.feet, z }, true);
+    this.body.setRotation({ x: tmpQ.x, y: tmpQ.y, z: tmpQ.z, w: tmpQ.w }, true);
+  }
+
   private remember(source: Living, amount: number): void {
     if (this.aggression === 'passive' || source.key === this.key) return;
     const g = this.memory.get(source.key);
@@ -543,34 +777,53 @@ export class Mobile implements Living {
     if (this.dead || this.disposed) return;
     // Allies do not hurt each other: a shot or a swing from its own side, from one that would never
     // pick a fight with it, passes it by. Without this a pack firing at the player through its own
-    // ring turned on itself and feuded for the rest of the fight.
+    // ring turned on itself and feuded for the rest of the fight. It is asked before the blow is
+    // handed anywhere, so a blow that could never land is never put on the wire either.
     if (source && source.key !== this.key && source.side === this.side && !hostileSides(source, this)) return;
+    // Another browser thinks for it: the blow is asked of that browser and nothing is taken off
+    // here. Its health comes back in the keeper's next batch, and if that blow finished it the word
+    // that it is gone comes with it. Nothing here may ever subtract from something it does not keep,
+    // or two browsers would hold two different creatures under one name.
+    // Whether the player of this browser struck it is the only thing about who struck that can
+    // cross: it is the one person the browser at the other end can name. A creature of this
+    // browser's, an NPC fighter of its or a turret of its is nobody over there, and sent under this
+    // player's name the keeper's creature -- and, through its pack's alert, everything standing with
+    // it -- would turn on a player who never touched it.
+    if (this.driven && this.shared && npcNow()?.askHit(this.shared, amount, this.pos.x, this.pos.y + this.halfHeight, this.pos.z, '', source?.key === PLAYER_KEY)) return;
     if (source && source.key !== this.key) {
       this.remember(source, amount);
       this.deps.alert(this, source);
     }
     this.hp -= amount;
+    // Something everyone else has to see once: what they are told is that it was struck, and their
+    // own copy flinches with the same clip this one is about to play.
+    this.mark = 'hit';
     if (this.hp <= 0) {
       this.die();
       return;
     }
     // A flinch, shorter the bigger it is: a repeater must not pin a krayt dragon in place.
     this.stunned = Math.max(this.stunned, 0.15 * Math.min(1, this.plan.knockResist));
-    // A hit reaction, now and then, never over an attack, and none for a hologram.
-    if (this.animator && !this.hologram && this.hitCd <= 0 && this.animator.shotLevel < SHOT_PRIORITY.attack && !this.downPhase) {
-      const r = this.roles!;
-      const share = amount / this.maxHp;
-      const clip = this.entry.kind === 'creature' && share > 0.2 && r.hitHeavy ? r.hitHeavy : share < 0.08 ? (r.hitLight ?? r.hitMedium) : (r.hitMedium ?? r.hitLight);
-      if (this.animator.once(clip, { priority: SHOT_PRIORITY.hit, fadeIn: 0.06, fadeOut: 0.2 }) !== null) this.hitCd = HIT_EVERY;
-    }
+    this.flinch(amount / this.maxHp);
     if (from && push > 0) {
       tmp.copy(this.pos).sub(from).setY(0);
       if (tmp.lengthSq() > 1e-8) this.knock(tmp.normalize(), push);
     }
   }
 
+  /** The hit reaction: now and then, never over an attack, and none for a hologram. */
+  private flinch(share: number): void {
+    if (!this.animator || this.hologram || this.hitCd > 0 || this.animator.shotLevel >= SHOT_PRIORITY.attack || this.downPhase) return;
+    const r = this.roles;
+    if (!r) return;
+    const clip = this.entry.kind === 'creature' && share > 0.2 && r.hitHeavy ? r.hitHeavy : share < 0.08 ? (r.hitLight ?? r.hitMedium) : (r.hitMedium ?? r.hitLight);
+    if (this.animator.once(clip, { priority: SHOT_PRIORITY.hit, fadeIn: 0.06, fadeOut: 0.2 }) !== null) this.hitCd = HIT_EVERY;
+  }
+
   knock(dir: THREE.Vector3, power: number): void {
-    if (this.dead || this.disposed) return;
+    // Driven from elsewhere: where it goes is the keeper's to say, and a shove written into a
+    // kinematic body here would be undone by the next word about it anyway.
+    if (this.dead || this.disposed || this.driven) return;
     const k = power * this.plan.knockResist;
     // A strong shove throws it up as well; a bolt's nudge does not make it hop.
     const lift = k >= 6 ? Math.max(k * 0.55, 2) : k * 0.25;
@@ -581,7 +834,12 @@ export class Mobile implements Living {
       this.body.setLinvel({ x: v.x + dir.x * k, y: Math.max(v.y, lift), z: v.z + dir.z * k }, true);
     }
     this.stunned = Math.max(this.stunned, Math.min(0.8, 0.1 * k));
-    if (lift > 1) this.grounded = false;
+    if (lift > 1) {
+      this.grounded = false;
+      // Off the ground: the ease on every other browser would walk it along the floor, so this is
+      // one of the things they are told happened rather than left to work out.
+      this.mark = 'leap';
+    }
     if (k >= KNOCKDOWN_AT && this.roles?.knockdown && this.animator && !this.downPhase) {
       const d = this.animator.once(this.roles.knockdown, { hold: true, priority: SHOT_PRIORITY.down, onEnd: () => this.lieDown() });
       if (d !== null) {
@@ -616,7 +874,9 @@ export class Mobile implements Living {
   }
 
   holdAt(point: THREE.Vector3, dt: number): void {
-    if (this.dead || this.disposed || !this.plan.canHold) return;
+    // Held by the Force is a thing done to a body, and a driven one is not this browser's body to
+    // move: the power fires and the creature goes on walking wherever its keeper says.
+    if (this.dead || this.disposed || this.driven || !this.plan.canHold) return;
     this.heldUntil = this.now + Math.max(0.05, dt * 3);
     this.stunned = Math.max(this.stunned, 0.3);
     this.grounded = false;
@@ -633,8 +893,12 @@ export class Mobile implements Living {
     this.knock(dir, power);
   }
 
+  // A burn, a stun and a slow are all things a keeper works out on its own copy and says the result
+  // of through the health and the pace in its batch, so a browser that does not keep this creature
+  // takes none of them: applied here they would be applied twice, once at each end.
+
   afflict(dps: number, seconds: number): void {
-    if (this.dead) return;
+    if (this.dead || this.driven) return;
     if (dps * seconds >= this.dotDps * this.dotLeft) {
       this.dotDps = dps;
       this.dotLeft = seconds;
@@ -642,12 +906,12 @@ export class Mobile implements Living {
   }
 
   stun(seconds: number): void {
-    if (this.dead) return;
+    if (this.dead || this.driven) return;
     this.stunned = Math.max(this.stunned, seconds);
   }
 
   slow(seconds: number): void {
-    if (this.dead) return;
+    if (this.dead || this.driven) return;
     this.slowed = Math.max(this.slowed, seconds);
   }
 
@@ -672,8 +936,16 @@ export class Mobile implements Living {
     if (!this.model) return;
     const r = this.roles;
     const clip = r ? (this.swimming ? (r.swimDown ?? r.down) : this.flyer ? (r.hoverDown ?? r.down) : r.down) ?? r.hitHeavy : null;
-    const d = this.animator?.once(clip, { hold: true, priority: SHOT_PRIORITY.down, fadeIn: 0.08, onEnd: () => this.deps.wantRagdoll(this) }) ?? null;
-    if (d === null) this.deps.wantRagdoll(this);
+    // One of the world's, with a server holding it: the death plays as a clip and the body is never
+    // handed to the physics. Nothing carries bone motion between browsers, so a ragdoll is simulated
+    // again from scratch on every screen and comes to rest in a different heap on each -- which is
+    // the same divergence the game already forbids for a player's own death, for the same reason. It
+    // would also stop the body being written from the wire for the whole of the corpse's life, since
+    // the ragdoll is read before the driven branch is. Alone, or on a world nobody else is holding,
+    // it falls exactly as it always has.
+    const heap = !this.sharedLive;
+    const d = this.animator?.once(clip, { hold: true, priority: SHOT_PRIORITY.down, fadeIn: 0.08, onEnd: heap ? () => this.deps.wantRagdoll(this) : undefined }) ?? null;
+    if (d === null && heap) this.deps.wantRagdoll(this);
   }
 
   /** Hand the skinned body to the physics from the pose the death clip left. Called by the manager's queue. */
@@ -780,7 +1052,10 @@ export class Mobile implements Living {
   }
 
   private fighting(): boolean {
-    return this.targetKey !== null && (this.state === 'chase' || this.state === 'attack' || this.state === 'alert');
+    const at = this.state === 'chase' || this.state === 'attack' || this.state === 'alert';
+    // Driven, there is no target here to have: what it is doing is the keeper's word for it, and
+    // that word is what chooses the combat stance, the combat gaits and a lit blade.
+    return at && (this.targetKey !== null || this.driven);
   }
 
   update(dt: number, ctx: MobileContext, tier: LodTier): void {
@@ -795,6 +1070,13 @@ export class Mobile implements Living {
       this.pos.set(tmp.x, tmp.y - Math.min(0.3, this.halfHeight * 0.3), tmp.z);
       this.deadTimer -= dt;
       if (this.blade) this.blade.group.visible = false;
+      return;
+    }
+    // 1b. Driven from elsewhere: nothing below runs at all. No ground check of its own, no thought,
+    // no steering, no springs -- it is walked toward what its keeper last said and plays the clip
+    // that pace asks for.
+    if (this.driven) {
+      this.stepDriven(dt, ctx, tier);
       return;
     }
     // 2. The body's place, and the heading it is held at.
@@ -858,6 +1140,72 @@ export class Mobile implements Living {
     this.act(sdt, ctx, tier);
     this.holdHeight(t);
     this.animate(sdt, tier);
+    this.updateBlade(dt, ctx.camera);
+  }
+
+  /**
+   * One frame of a creature another browser thinks for. It is the same body doing the same things
+   * to the world -- it is lifted to the ground, it is followed through a building's portals, it
+   * stops a bolt and it stands in the one list of the living -- with the brain, the steering and the
+   * dynamics taken out and a word from the wire put in their place.
+   *
+   * Nothing is allocated: the two objects the engine is written through are kept above, and the
+   * gait's answer goes into the one struct every mobile already reuses.
+   */
+  private stepDriven(dt: number, ctx: MobileContext, tier: LodTier): void {
+    // 1. Toward what the keeper last said, a tenth of a second's worth at a time -- the same glide
+    //    a remote player's figure is drawn with, so a creature moves no differently from a person.
+    const k = this.toldOnce ? 1 - Math.exp(-dt / Math.max(1e-3, NPC_TUNE.glideSeconds)) : 1;
+    this.pos.lerp(this.toldAt, k);
+    let diff = this.toldHeading - this.heading;
+    diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+    this.heading += diff * k;
+    this.toldOnce = true;
+    // 2. The body follows the picture here, not the other way about: it is kinematic, so where it
+    //    is is written rather than solved for.
+    const feet = this.plan.feet;
+    tmpQ.setFromAxisAngle(UP, this.heading);
+    driveAt.x = this.pos.x;
+    driveAt.y = this.pos.y + feet;
+    driveAt.z = this.pos.z;
+    driveTurn.x = tmpQ.x;
+    driveTurn.y = tmpQ.y;
+    driveTurn.z = tmpQ.z;
+    driveTurn.w = tmpQ.w;
+    if (this.body.isValid()) {
+      this.body.setNextKinematicTranslation(driveAt);
+      this.body.setNextKinematicRotation(driveTurn);
+    }
+    this.group.position.copy(driveAt);
+    this.group.quaternion.copy(tmpQ);
+    // 3. Dead: the death clip plays out where it fell and the timer runs, exactly as it does for one
+    //    this browser killed itself, so the manager takes the body down in its own good time.
+    if (this.dead) {
+      if (this.fading > 0) {
+        this.fading = Math.max(0, this.fading - dt);
+        this.inner.scale.setScalar(this.scale * Math.max(0.001, this.fading / HOLOGRAM_FADE));
+      }
+      this.animate(dt, tier);
+      this.updateBlade(dt, ctx.camera);
+      this.deadTimer -= dt;
+      return;
+    }
+    if (this.state === 'loading' && !this.model) return;
+    // 4. Whether it is in water, which is what chooses between its swimming clips and its walking
+    //    ones. Asked at the same rate a mobile of this browser's own asks it.
+    if (tier.name === 'near' || (this.frame + this.key) % 4 === 0) this.checkGround(driveAt);
+    // 5. What it is doing, and the clip for it: the gait is chosen from the pace its keeper says its
+    //    feet are going at, through the same acceleration ramp a mobile of this browser's own uses,
+    //    so nothing slides and nothing snaps between one word and the next.
+    this.state = this.toldState;
+    this.hitCd -= dt;
+    const move = this.entry.move;
+    const accel = (this.toldSpeed > this.speeds.walk + 1e-3 ? move.accel?.[0] : move.accel?.[1]) ?? 4;
+    const gait = stepGait(this.ramp, this.toldSpeed, accel, dt, this.gaitsNow(), this.idleNow(), this.scale, undefined, this.gaitOut);
+    this.ramp = gait.ramp;
+    this.speed = gait.speed;
+    if (!this.downPhase) this.animator?.loop(gait.clip ?? this.idleNow(), gait.timeScale);
+    this.animate(dt, tier);
     this.updateBlade(dt, ctx.camera);
   }
 
@@ -1170,6 +1518,9 @@ export class Mobile implements Living {
     const v = this.body.linvel();
     this.body.setLinvel({ x: v.x, y: 0, z: v.z }, true);
     this.pos.y = ground;
+    // Driven, what it is walking toward is raised with it: left where it was, the next frame's ease
+    // would pull it straight back under the ground it has just been put on top of.
+    if (this.driven) this.toldAt.y = Math.max(this.toldAt.y, ground);
     this.grounded = true;
     return true;
   }
@@ -1210,6 +1561,9 @@ export class Mobile implements Living {
     this.stuckClock = 0;
     this.wanderAt = -1;
     this.thinkAt = 0;
+    // A fresh life has not been spoken about yet, and owes the wire nothing about the last one.
+    this.toldOnce = false;
+    this.mark = null;
     this.speed = 0;
     this.ramp = 0;
     this.swimming = false;
@@ -1260,6 +1614,9 @@ export class Mobile implements Living {
       run: Number(this.speeds.run.toFixed(2)),
       speed: Number(this.speed.toFixed(2)),
       tier: this.tier?.name ?? null,
+      // One of the world's creatures, and whether this browser is the one thinking for it.
+      shared: this.shared || null,
+      driven: this.driven,
       shadow: this.meshes.some((m) => m.castShadow),
       visible: this.group.visible,
       inside: this.inside,
@@ -1277,6 +1634,14 @@ export class Mobile implements Living {
     if (this.disposed) return;
     this.disposed = true;
     this.dead = true;
+    // Nothing is said about it going: this browser's body went, and the creature itself belongs to
+    // the world (a travel, a world unloaded, a body cleared here). What is dropped is the wire's
+    // hold on this body, and only while it is still this body the wire is holding: a creature stood
+    // again under the same id has already taken that place.
+    if (this.shared) {
+      const net = npcNow();
+      if (net?.find(this.shared) === this) net.remove(this.shared);
+    }
     this.memory.clear();
     this.targetRef = null;
     this.endRagdoll();

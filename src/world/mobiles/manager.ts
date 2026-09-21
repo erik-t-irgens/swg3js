@@ -34,6 +34,8 @@ import type { MobileEntry } from './types';
 import type { CellState } from '../layoutStream';
 import type { FighterGlow } from '../npcs';
 import { keepNearestGlow } from '../../combat/bladeLights';
+import { PendingSpawns, armsRng, decideStand, rollsFor, scaleFrom, type SpawnRecord } from '../spawnSeed.ts';
+import { npcNow } from '../../net/npcNet.ts';
 
 export interface SpawnOpts {
   origin?: 'spawned' | 'ambient';
@@ -41,6 +43,19 @@ export interface SpawnOpts {
   inside?: boolean;
   overrides?: MobileSpawn['overrides'];
   heading?: number;
+  /**
+   * One number everything this spawn would otherwise roll is drawn from (src/world/spawnSeed.ts):
+   * its size within its own range, the weapon it takes off the rack and the colour of a blade. With
+   * none given it rolls as it always did, so nothing that stood a creature before this behaves
+   * differently now.
+   */
+  seed?: number;
+  /**
+   * The name the world knows this one by, when it is one the world holds rather than one this
+   * browser stood for itself. It is what `removeById` takes it down by and what everything that talks
+   * about it across a wire says; a spawn without one is this browser's own business, as before.
+   */
+  worldId?: string;
 }
 
 export interface MobileManagerDeps {
@@ -125,6 +140,8 @@ interface Held {
   loaded: Promise<void>;
   /** Its tier, refilled every frame (the mobile keeps a reference to it for the console). */
   tier: LodTier;
+  /** The one number it rolls everything from, or undefined for one that rolls as it always did. */
+  seed: number | undefined;
   /** The building room it is in, followed through the portals, or null outside. */
   cell: CellState | null;
   /** Where its feet were when the room was last followed. */
@@ -163,8 +180,16 @@ export class MobileManager {
     return this.deps.catalogue();
   }
 
-  /** Why an entry cannot be stood now, in a sentence, or null when it can. */
-  whyNot(entry: MobileEntry, cat: MobileCatalogue, origin: 'spawned' | 'ambient' = 'spawned'): string | null {
+  /**
+   * Why an entry cannot be stood now, in a sentence, or null when it can.
+   *
+   * The origin is what the cap is asked about. `spawned` is one this browser stood from the tab and
+   * is what the cap counts; `ambient` is the planet's own wildlife; `world` is one the world holds,
+   * which the cap must never refuse -- it is a local limit on what somebody may stand from the tab,
+   * and applied to the world's list every browser would end up holding a different arbitrary subset
+   * of the creatures everyone else can see, with nothing said anywhere.
+   */
+  whyNot(entry: MobileEntry, cat: MobileCatalogue, origin: 'spawned' | 'ambient' | 'world' = 'spawned'): string | null {
     const where = this.deps.refuse();
     if (where) return where;
     // The one model the game's own archives cannot give: said as what it is, not as a fault.
@@ -235,7 +260,9 @@ export class MobileManager {
     const cat = this.deps.catalogue();
     if (!cat) return `the creature and NPC catalogue has not loaded yet (or is not converted: ${CATALOGUE_COMMAND})`;
     const origin = opts.origin ?? 'spawned';
-    const why = this.whyNot(entry, cat, origin);
+    // One the world holds is not this browser's own spawn, whatever it is stored as: it is asked
+    // about as `world` so the hand-spawn cap never refuses it (see `whyNot`).
+    const why = this.whyNot(entry, cat, opts.worldId ? 'world' : origin);
     if (why) {
       this.lastNote = why;
       return why;
@@ -253,17 +280,20 @@ export class MobileManager {
       } else y = ground;
     }
     const hierarchy: BodyInput['hierarchy'] = pack?.hierarchy === 'creature_base' || pack?.hierarchy === 'all_b' ? pack.hierarchy : 'other';
+    // A seeded spawn rolls nothing: its heading and its size come out of the one number every browser
+    // standing this record has, so the same creature stands the same way in all of them.
+    const rolls = opts.seed !== undefined ? rollsFor(opts.seed) : null;
     const spawn: MobileSpawn = {
       entry,
       x: at.x,
       y,
       z: at.z,
-      heading: at.heading ?? opts.heading ?? Math.random() * Math.PI * 2,
+      heading: at.heading ?? opts.heading ?? (rolls ? rolls.heading * Math.PI * 2 : Math.random() * Math.PI * 2),
       origin,
       inside,
       bounds,
       hierarchy,
-      scale: opts.scale,
+      scale: opts.scale ?? (rolls ? scaleFrom(entry.size?.scale, rolls.scale) : undefined),
       overrides: opts.overrides,
     };
     const m = new Mobile(spawn, {
@@ -290,6 +320,7 @@ export class MobileManager {
       visible: null,
       loaded: Promise.resolve(),
       tier: { name: 'near', animEvery: 1, visible: true, castShadow: false, think: LOD_TUNE.think[0], move: true },
+      seed: opts.seed,
       cell: null,
       cellFrom: m.pos.clone(),
     };
@@ -298,8 +329,120 @@ export class MobileManager {
       m.room = held.cell?.cell ?? 0;
     }
     this.held.set(m, held);
+    if (opts.worldId) {
+      this.byWorldId.set(opts.worldId, m);
+      this.worldIds.set(m, opts.worldId);
+      // One of the world's: the wire is told, so whichever browser the server grants it to thinks
+      // for it and every other one holds the same body with its brain switched off. With no server
+      // this costs a map insert and nothing else, and every creature stays this browser's own.
+      m.shareAs(opts.worldId);
+      npcNow()?.add(m);
+    }
     held.loaded = this.load(m, held, entry, cat);
     return m;
+  }
+
+  // ---- the world's own spawns -----------------------------------------------------------------------
+  //
+  // Nothing appears in a world on its own any longer: what is out there was stood by an admin, and
+  // what an admin stands belongs to the world. Such a spawn is a record (src/world/spawnSeed.ts)
+  // rather than a call, so every browser stands the same creature from the same numbers and can take
+  // the same one down again by name.
+
+  /** The world's spawns by the name every browser knows them by. */
+  private readonly byWorldId = new Map<string, Mobile>();
+  /** The other way round, so a mobile met in a list can say what the world calls it. */
+  private readonly worldIds = new WeakMap<Mobile, string>();
+  /** The records that arrived before the catalogue did; stood the moment it lands. */
+  private readonly pending = new PendingSpawns();
+
+  /**
+   * Stand one from a record: its place, its heading and everything it would otherwise roll, all out
+   * of the record itself. The entry is resolved from the catalogue by the record's species key, so a
+   * browser told about a spawn needs nothing but the record.
+   *
+   * `world` is the world this browser is standing in, and a record naming any other is refused: a
+   * spawn word for the world just left can arrive during or after a trip, and stood here it would
+   * put a creature at the old world's metres. The whole decision is `decideStand` in
+   * `src/world/spawnSeed.ts`, which a node test drives branch by branch.
+   *
+   * Answers the mobile, or a sentence. A record that is already standing answers the one already
+   * standing, since the same record arriving twice must never make two creatures; a record that
+   * arrives before the catalogue has landed -- the ordinary case, since its one fetch is usually
+   * still in flight when the first planet loads -- is kept and stood the moment it does, and the
+   * sentence says so.
+   */
+  standRecord(rec: SpawnRecord, world: string): Mobile | string {
+    const id = rec && typeof rec.id === 'string' ? rec.id : '';
+    const already = id ? this.byWorldId.get(id) : undefined;
+    const cat = this.deps.catalogue();
+    const choice = decideStand(rec, {
+      world,
+      standing: !!already && !already.removed,
+      catalogue: !!cat,
+      known: !!cat && !!rec && !!cat.byId(rec.species),
+    });
+    if (choice.do === 'already') return already!;
+    if (choice.do === 'refuse') {
+      if (id) this.pending.drop(id);
+      this.lastNote = choice.why;
+      return choice.why;
+    }
+    if (choice.do === 'wait') {
+      this.pending.add(rec, world);
+      this.lastNote = choice.why;
+      return choice.why;
+    }
+    const a = choice.args;
+    this.pending.drop(a.id);
+    const entry = cat!.byId(a.species)!;
+    return this.spawn(entry, { x: a.x, y: a.y, z: a.z, heading: a.heading }, { origin: 'spawned', inside: a.inside, seed: a.seed, worldId: a.id });
+  }
+
+  /**
+   * The records that were waiting for the catalogue, stood now that it is here. Called from the
+   * manager's own step, so nothing outside has to remember to ask and a browser that arrived before
+   * the catalogue did still ends up with the world's creatures rather than with none of them.
+   */
+  private drainPending(): void {
+    for (const p of this.pending.take()) this.standRecord(p.rec, p.world);
+  }
+
+  /** How many of the world's own spawns are waiting for the catalogue to land. */
+  get waitingForCatalogue(): number {
+    return this.pending.size;
+  }
+
+  /** The one the world calls `id`, or null. */
+  mobileById(id: string): Mobile | null {
+    const m = this.byWorldId.get(id);
+    return m && !m.removed ? m : null;
+  }
+
+  /** What the world calls a mobile, or '' for one this browser stood for itself. */
+  worldIdOf(m: Mobile): string {
+    return this.worldIds.get(m) ?? '';
+  }
+
+  /**
+   * Take down the one the world calls `id`; false when there is no such one here. A record still
+   * waiting for the catalogue is forgotten rather than stood a moment later, so a creature that died
+   * before this browser had a catalogue never appears.
+   */
+  removeById(id: string): boolean {
+    const waiting = this.pending.drop(id);
+    const m = this.byWorldId.get(id);
+    if (!m) return waiting;
+    this.byWorldId.delete(id);
+    if (!m.removed) this.remove(m);
+    return true;
+  }
+
+  /** How many of the world's own spawns are standing here. */
+  get worldSpawnCount(): number {
+    let n = 0;
+    for (const m of this.byWorldId.values()) if (!m.removed) n++;
+    return n;
   }
 
   /** The model and the pack for a mobile, then the model hung on the body, unless it has gone meanwhile. */
@@ -318,7 +461,7 @@ export class MobileManager {
     const [model, pack, arms] = await Promise.allSettled([
       assets.acquireModel(file, { hologram, bounds, estimate: guess.model, look: look ? { entry, cat } : undefined }),
       packInfo ? assets.acquirePack(packInfo.id, packInfo.file, packInfo.json, guess.pack) : Promise.resolve(null),
-      this.armsFor(entry, packInfo),
+      this.armsFor(entry, packInfo, held.seed),
     ]);
     held.loading = false;
     const gotModel = model.status === 'fulfilled' ? model.value : null;
@@ -370,9 +513,15 @@ export class MobileManager {
    * already been parsed (the player's own always has; one is never fetched for this). The weapon
    * is prepared before it is handed over, so holding it compiles nothing in play. Nothing for a
    * creature, a droid or a hologram.
+   *
+   * `seed` is the one number a spawn the world holds rolls everything from: with one, the weapon off
+   * the rack and the colour of a blade come out of it rather than out of the dice, so the same record
+   * is armed the same way in every browser. Without one (everything stood before this, and everything
+   * stood with no server) it rolls exactly as it did.
    */
-  private async armsFor(entry: MobileEntry, packInfo: PackSummary | null): Promise<ArmsPlan | null> {
+  private async armsFor(entry: MobileEntry, packInfo: PackSummary | null, seed?: number): Promise<ArmsPlan | null> {
     if (!packInfo || packInfo.hierarchy !== 'all_b') return null;
+    const rand = seed !== undefined ? armsRng(seed) : Math.random;
     const json = await this.deps.assets.packJson(packInfo.id, packInfo.json);
     const roles = rolesFor(json, entry.gender);
     const choice = armsChoice(entry, packInfo.hierarchy, roles, json.roleSources);
@@ -393,7 +542,7 @@ export class MobileManager {
       if (swings.size) extras = { clips: swings, roles: { attacks: [...swings.keys()] } };
     }
     const rack = this.deps.weapons?.() ?? null;
-    const def = rack ? chooseWeapon(choice, rack.weapons) : null;
+    const def = rack ? chooseWeapon(choice, rack.weapons, rand) : null;
     if (!rack || !def) return { equipment: null, extras };
     const model = await rack.model(def);
     let ready = this.preparedWeapons.get(def.file);
@@ -414,7 +563,7 @@ export class MobileManager {
         length: def.length || 0.6,
         hiltTop: b ? Math.abs(b.max[1] - b.min[1]) / 2 : 0.13,
         blade: saber && def.blade ? { length: def.blade.length, width: def.blade.width, open: def.blade.open, close: def.blade.close } : null,
-        color: saber ? (/sith|dark|inquisitor/.test(entry.id) ? DARK_BLADE : LIGHT_BLADES[Math.floor(Math.random() * LIGHT_BLADES.length)]) : 0xffffff,
+        color: saber ? (/sith|dark|inquisitor/.test(entry.id) ? DARK_BLADE : LIGHT_BLADES[Math.floor(rand() * LIGHT_BLADES.length)]) : 0xffffff,
       },
     };
   }
@@ -426,22 +575,9 @@ export class MobileManager {
   spawnAhead(entry: MobileEntry, from: THREE.Vector3, forward: THREE.Vector3, n = 1, distance = 10, inside = false): SpawnResult {
     const mobiles: Mobile[] = [];
     let note = '';
-    const fwd = tmp.set(forward.x, 0, forward.z);
-    if (fwd.lengthSq() < 1e-8) fwd.set(0, 0, 1);
-    fwd.normalize();
-    const centre = new THREE.Vector3(from.x + fwd.x * distance, from.y, from.z + fwd.z * distance);
-    const cat = this.deps.catalogue();
-    const box = cat ? lookBounds(entry, cat.file.appearances) : null;
-    const size = box ? Math.max(Math.abs(box.max[0] - box.min[0]), Math.abs(box.max[2] - box.min[2])) : 1;
-    const ring = n > 1 ? Math.max(1.5, (size * n) / (2 * Math.PI) + size * 0.3) : 0;
-    for (let i = 0; i < n; i++) {
-      const a = (i / Math.max(1, n)) * Math.PI * 2;
-      const p = new THREE.Vector3(centre.x + Math.sin(a) * ring, from.y, centre.z + Math.cos(a) * ring);
-      const spot = this.deps.spawnSpot(p, ZERO, 0, inside);
-      if (!spot) {
-        note = inside ? 'there is no floor under that spot' : 'no ground there';
-        continue;
-      }
+    const spots = this.spotsAhead(entry, from, forward, n, distance, inside);
+    if (spots.length < n) note = inside ? 'there is no floor under that spot' : 'no ground there';
+    for (const spot of spots) {
       const heading = Math.atan2(from.x - spot.x, from.z - spot.z);
       const got = this.spawn(entry, { x: spot.x, y: spot.y, z: spot.z, heading }, { inside });
       if (typeof got === 'string') {
@@ -453,6 +589,34 @@ export class MobileManager {
     if (!note) note = mobiles.length ? `${mobiles.length} ${entry.name} stood` : 'nothing stood';
     else if (mobiles.length) note = `${mobiles.length} stood; ${note}`;
     return { spawned: mobiles.length, note, mobiles };
+  }
+
+  /**
+   * Where `n` of an entry would stand `distance` ahead of a point: the same ring `spawnAhead` puts
+   * them on, and nothing stood. It is a method of its own so that a spawn asked for over the wire
+   * picks its places exactly as one stood here would -- one call answering the same spot `n` times
+   * would stack a whole group inside itself, since the world's own spot finder is one ray straight
+   * down and gives the same answer to the same question. Spots that have no floor are left out, so
+   * a caller wanting all of them compares the length with what it asked for.
+   */
+  spotsAhead(entry: MobileEntry, from: THREE.Vector3, forward: THREE.Vector3, n = 1, distance = 10, inside = false): THREE.Vector3[] {
+    const out: THREE.Vector3[] = [];
+    const fwd = tmp.set(forward.x, 0, forward.z);
+    if (fwd.lengthSq() < 1e-8) fwd.set(0, 0, 1);
+    fwd.normalize();
+    const cx = from.x + fwd.x * distance;
+    const cz = from.z + fwd.z * distance;
+    const cat = this.deps.catalogue();
+    const box = cat ? lookBounds(entry, cat.file.appearances) : null;
+    const size = box ? Math.max(Math.abs(box.max[0] - box.min[0]), Math.abs(box.max[2] - box.min[2])) : 1;
+    const ring = n > 1 ? Math.max(1.5, (size * n) / (2 * Math.PI) + size * 0.3) : 0;
+    for (let i = 0; i < n; i++) {
+      const a = (i / Math.max(1, n)) * Math.PI * 2;
+      const p = new THREE.Vector3(cx + Math.sin(a) * ring, from.y, cz + Math.cos(a) * ring);
+      const spot = this.deps.spawnSpot(p, ZERO, 0, inside);
+      if (spot) out.push(spot);
+    }
+    return out;
   }
 
   /** The planet's own wildlife: `count` of an entry about a point, respawned rather than removed. Returns how many stood. */
@@ -484,6 +648,13 @@ export class MobileManager {
   remove(m: Mobile): void {
     const i = this.live.indexOf(m);
     if (i >= 0) this.live.splice(i, 1);
+    // A world spawn's name goes with the body, or the name would answer with a mobile that is gone
+    // and nothing could ever stand that record again.
+    const worldId = this.worldIds.get(m);
+    if (worldId !== undefined) {
+      if (this.byWorldId.get(worldId) === m) this.byWorldId.delete(worldId);
+      this.worldIds.delete(m);
+    }
     for (const c of m.colliders) if (this.byCollider.get(c.handle) === m) this.byCollider.delete(c.handle);
     this.group.remove(m.group);
     const q = this.ragdollQueue.indexOf(m);
@@ -559,6 +730,13 @@ export class MobileManager {
   /** Step every mobile with the detail its distance and the screen allow; start a couple of queued ragdolls, nearest first. */
   update(dt: number, ctx: MobileContext): void {
     if (this.disposed) return;
+    // The world's creatures that arrived before the catalogue did, stood now it is here. One map's
+    // size read a frame while the queue is empty, which it is for the whole of an ordinary session.
+    if (this.pending.size > 0 && this.deps.catalogue()) this.drainPending();
+    // The world's creatures: what this browser keeps is said four times a second, and who keeps what
+    // is asked of the server's last grant. It is here rather than on a timer so `__debug.advance`
+    // drives it; with no server it returns on its first line.
+    npcNow()?.step(dt);
     this.frame++;
     const camera = ctx.camera;
     if (camera) {
@@ -746,6 +924,7 @@ export class MobileManager {
     this.byCollider.clear();
     this.ragdollQueue.length = 0;
     this.held.clear();
+    this.pending.clear();
     this.version++;
   }
 }

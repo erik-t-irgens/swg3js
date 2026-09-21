@@ -65,6 +65,21 @@
 //   { t: 'duel', do: ask|accept|decline|end, to? }           the game's own COMBAT_DUEL and COMBAT_PEACE, at its own
 //                                                          128 m: how two players agree to fight where the server's
 //                                                          switch for it is off
+//   { t: 'spawn', do: add|remove|clear|dead, species?, at?, h?, seed?, id?, inside? }
+//                                                          the world's creatures (ownership.mjs). Nothing appears on
+//                                                          its own: an admin stands one by hand and what they stand
+//                                                          is the world's. `add`, `remove` and `clear` are the
+//                                                          admin's alone; `dead` is the word of whichever browser
+//                                                          was keeping that creature, and a death happens once
+//   { t: 'keep', do: 'awake', a }                            this browser has been put to sleep, or woken: asleep it
+//                                                          keeps nothing, and the server picks again at once
+//   { t: 'npcState', r: [{ i, p, h, s, v, hp, f? }] }        where the creatures this browser keeps have got to, four
+//                                                          times a second (npcWire.mjs); rows for anything it was not
+//                                                          granted are dropped rather than passed on
+//   { t: 'npcHit', i, a, at, w?, b? }                        a blow struck against a creature somebody else keeps: it
+//                                                          goes to that keeper alone, who decides what it does
+//   { t: 'npcDrop', i }                                      this browser cannot keep that one (no body, no species):
+//                                                          the grant goes back and it is not offered again for a while
 // Server to browser:
 //   { t: 'hail', v, now, epoch, dayMs, nonce, word, ff }     sent the instant the socket opens, before anything is said
 //   { t: 'claimed', you, keep }   { t: 'denied', why }   { t: 'refused', why }   { t: 'taken', by }
@@ -92,6 +107,15 @@
 //   { t: 'health', id, hp, d? }   { t: 'died', id, by? }
 //   { t: 'hurt', id, a, at, w? }   (to the one hurt and to nobody else, and only where they may be hurt)
 //   { t: 'duel', do: asked|sent|on|off|declined|refused, id?, why? }
+//   { t: 'spawn', do: 'list', world, rows: [{ id, world, species, at, h, seed, inside?, hp? }] }   (what stands on
+//                                                          this world, sent on arriving and again when it is cleared)
+//   { t: 'spawn', do: 'add', row }   { t: 'spawn', do: 'gone', id, why: dead|removed }
+//   { t: 'spawn', do: 'refused', why }   (to whoever asked, and to nobody else)
+//   { t: 'keep', add: [id], drop: [id] }   (who thinks for which creature: the server's answer is the only one,
+//                                           and a browser never thinks for one it was not granted)
+//   { t: 'npcState', id?, r: [...] }   (a keeper's batch passed on to the rest of that world; with no `id` it is the
+//                                       picture a browser is handed on arriving, of where everything was last seen)
+//   { t: 'npcHurt', id, i, a, at, w?, b? }   (a blow, to the browser keeping that creature and to nobody else)
 //
 // Everything but the claim, the ping and the ask goes to the world the player is on and no further
 // (rooms.mjs). Before this, a browser was told about people on other planets and dressed them,
@@ -106,10 +130,12 @@ import { WIRE, cleanClaim, cleanEmote, cleanHello, cleanPing, cleanSettle, clean
 import { Rooms, roomKey, roomLabel } from './rooms.mjs';
 import { WorldClock, DAY_MS } from './clock.mjs';
 import { STORE_TUNING, openStore } from './store.mjs';
-import { Sessions, checkClaim, makeNonce, summaryOf } from './identity.mjs';
+import { Sessions, adminFor, checkClaim, firstRegistered, isAdmin, makeNonce, summaryOf } from './identity.mjs';
+import { OWN_TUNING, Ownership, cleanKeep, cleanSpawn, maySpawn } from './ownership.mjs';
 import { GROUP_RANGES, GROUP_TUNING, Groups, cleanChat, cleanGroup } from './groups.mjs';
 import { cleanCross, mayCross } from './crossWire.mjs';
 import { COMBAT_WIRE, Duels, cleanBlocked, cleanDied, cleanDuel, cleanEnd, cleanHealth, cleanHit, cleanShot, mayHurt } from './combatWire.mjs';
+import { NpcPlaces, cleanNpcBatch, cleanNpcDrop, cleanNpcHit } from './npcWire.mjs';
 
 /** What this server speaks. A browser that hears no hail is talking to the relay that came before. */
 const WIRE_VERSION = 2;
@@ -160,6 +186,7 @@ if (args.includes('--help') || args.includes('-h')) {
   --port=<n>          the port to listen on (default 8787; a bare number works too)
   --word=<something>  a join word: a browser must carry it, and one that cannot is turned away
   --data=<folder>     where the world is kept (default server/data)
+  --admin=<player id> who may stand creatures in the world (default: the first player this world met)
   --friendly-fire     let players hurt each other (off by default)
   --day=<seconds>     how long a day is (default ${DAY_MS / 1000}, the game's own)
   --set <name>=<n>    move one of the server's own numbers for this run
@@ -190,6 +217,7 @@ for (let i = 0; i < args.length; i++) {
   else if (name.startsWith('wire.') && has(WIRE, name.slice(5))) WIRE[name.slice(5)] = value;
   else if (name.startsWith('group.') && has(GROUP_TUNING, name.slice(6))) GROUP_TUNING[name.slice(6)] = value;
   else if (name.startsWith('combat.') && has(COMBAT_WIRE, name.slice(7))) COMBAT_WIRE[name.slice(7)] = value;
+  else if (name.startsWith('own.') && has(OWN_TUNING, name.slice(4))) OWN_TUNING[name.slice(4)] = value;
   else console.log(`  --set ${name}: there is no such number, and it has been ignored`);
 }
 
@@ -199,6 +227,10 @@ const WORD = option('word', process.env.SWG_WORD ?? '');
 // Beside this file, not beside whatever folder the server happened to be started from: a world kept
 // in the wrong place looks exactly like every player having disappeared.
 const DATA = option('data', join(import.meta.dirname, 'data'));
+// Who may stand creatures in the world. Named here it stands for this run whatever is written down;
+// with none given the world's own answer is used, and a world that has met nobody yet makes the first
+// player it registers its admin (see below), which is the person who started the server and joined it.
+const ADMIN = option('admin', process.env.SWG_ADMIN ?? '');
 const FRIENDLY_FIRE = flag('friendly-fire') || flag('ff');
 const DAY = Number(option('day', '')) > 0 ? Number(option('day', '')) * 1000 : DAY_MS;
 
@@ -222,9 +254,30 @@ const groups = new Groups({ tuning: GROUP_TUNING });
 // group, a duel is a thing two people are doing this minute: it is held by connection and nothing
 // of it is written to disk.
 const duels = new Duels({ range: GROUP_RANGES.duel, seconds: COMBAT_WIRE.duel });
+// The world's creatures: what an admin has stood by hand, and which browser is thinking for each of
+// them this half-second (ownership.mjs). Nothing appears on its own -- the planet's automatic
+// wildlife is off -- so this list is empty until somebody stands something in it. It is not written
+// to disk: what stands in the world is a thing people are doing this evening, like a group.
+const ownership = new Ownership({ tuning: OWN_TUNING });
+// Where each of the world's creatures was last said to be, so a browser arriving on a world is told
+// where things are standing rather than waiting a quarter of a second for the first batch. It is a
+// picture and nothing else: what exists and whether it is alive is the spawn list's above.
+const npcPlaces = new NpcPlaces();
 const settings = { friendlyFire: FRIENDLY_FIRE, word: WORD ? 1 : 0, dayMs: DAY };
 const had = store.data.settings ?? {};
 if (had.friendlyFire !== settings.friendlyFire || had.word !== settings.word || had.dayMs !== settings.dayMs) store.change({ t: 'settings', settings });
+// A world played in before there was an admin at all takes the first player it ever registered, so
+// nobody has to name themselves on a command line to be the admin of their own world. A name given
+// on the command line stands for the run and is not written down: it is a switch, not the truth.
+if (!ADMIN && !adminFor(store.data)) {
+  const first = firstRegistered(store.data);
+  if (first) store.change({ t: 'settings', settings: { admin: first } });
+}
+
+/** Whether this browser is the world's admin: the server's answer, asked fresh each time. */
+function admins(c) {
+  return isAdmin(store.data, c.player, ADMIN);
+}
 
 /** A connected browser: its socket, its buffers, who it turned out to be, and its last news. */
 const clients = new Map();
@@ -488,6 +541,16 @@ function onClaim(c, msg) {
   if (verdict.registered) {
     store.change({ t: 'player', id: verdict.player, player: { key: claim.key, name: claim.name, first: clock.now(), seen: clock.now() } });
     console.log(`  ${c.id} is a player this server has not met before (${verdict.player}), now registered`);
+    // The first player a world ever meets is its admin, and that is written down beside the rest of
+    // the truth: it is the person who started the server and joined it, and they should not have to
+    // name themselves on a command line to be able to stand anything in their own world. With
+    // `--admin=` given, nothing is written down at all -- the same guard the startup block wears,
+    // and for the same reason: the name on the command line is a switch for this run, and writing
+    // somebody else down while it is set would hand the world to them at the next start with no flag.
+    if (!ADMIN && !adminFor(store.data)) {
+      store.change({ t: 'settings', settings: { admin: verdict.player } });
+      console.log(`  ${verdict.player} is the first player this world has met and is its admin`);
+    }
   } else {
     store.change({ t: 'player', id: verdict.player, player: { name: claim.name, seen: clock.now() } });
   }
@@ -521,8 +584,11 @@ function onClaim(c, msg) {
       setTimeout(() => old.socket.destroy(), TUNING['close.grace']);
     }
   }
-  send(c, { t: 'claimed', you: { player: verdict.player, character: verdict.character, name: claim.name }, keep: verdict.keep });
-  console.log(`  ${c.id} is player ${verdict.player} playing ${claim.name}`);
+  // Whether this player is the one who may stand creatures in the world goes out with the answer to
+  // their claim, which is the first thing the server says that knows who they are; a browser built
+  // before this has no field for it and reads nothing, and one with no server is never an admin.
+  send(c, { t: 'claimed', you: { player: verdict.player, character: verdict.character, name: claim.name, admin: admins(c) ? 1 : 0 }, keep: verdict.keep });
+  console.log(`  ${c.id} is player ${verdict.player} playing ${claim.name}${admins(c) ? ' (the admin of this world)' : ''}`);
   // Now that there is a name for this browser that outlives its line, the groups can have it: if
   // this character's place in a group is still being held -- a reload, a line that dropped -- it is
   // picked up here and everyone is told they are back, before a word about where they are.
@@ -599,6 +665,19 @@ function onMessage(c, text, trimmed = false) {
     // A group's roster says what world each member is on, so it is told here and nowhere else; this
     // is also where a browser that never claims a character becomes someone a group can hold.
     markPresent(c, !first && move.from !== key);
+    // The world's creatures. Which browser thinks for which of them is worked out from where
+    // everybody is standing, so the world a browser is on is told here; and a browser arriving on one
+    // is handed the list of what stands there, which is how everyone sees the same creatures whoever
+    // stood them. A browser that has only just arrived has not said where it is standing on that
+    // world yet, so it is nowhere until its first state and keeps nothing meanwhile.
+    ownership.here(c.id, key, null);
+    if (first || move.from !== key) send(c, { t: 'spawn', do: 'list', world: key, rows: ownership.listFor(key) });
+    // ...and where those creatures have got to, so they are stood where they really are rather than
+    // at the spot they were first put down and then walked across the world by the first batches.
+    if (first || move.from !== key) {
+      const where = npcPlaces.rows(key);
+      if (where.length) send(c, { t: 'npcState', r: where });
+    }
     if (first) {
       tellRoomAbout(key, c);
       const peers = roster(key, c.id);
@@ -637,6 +716,10 @@ function onMessage(c, text, trimmed = false) {
     const state = cleanState(msg, c.id);
     if (!state) return;
     c.state = state;
+    // Where this browser is standing is also what decides which creatures it keeps, and a state
+    // arriving is what says it is still awake: a tab that has stopped drawing has stopped sending,
+    // and the silence in ownership.mjs is what takes its creatures off it.
+    ownership.here(c.id, rooms.keyOf(c.id), state.p);
     sendToRoom(rooms.keyOf(c.id), { t: 'state', id: c.id, ...state }, c.id, true);
   } else if (msg.t === 'emote') {
     if (!c.hello) return;
@@ -797,6 +880,140 @@ function onMessage(c, text, trimmed = false) {
     } else if (duel.do === 'accept') deliverTo(duels.accept(c.id));
     else if (duel.do === 'decline') deliverTo(duels.decline(c.id));
     else if (duel.do === 'end') deliverTo(duels.end(c.id));
+  } else if (msg.t === 'spawn') {
+    // The world's creatures. Nothing appears on its own: an admin stands one by hand and what they
+    // stand belongs to the world -- everyone on it is told, one browser thinks for it, and it is
+    // handed between browsers as people walk about. The asking browser is told along with everyone
+    // else rather than standing its own copy, so there is one path and not two.
+    if (!c.hello) return;
+    const ask = cleanSpawn(msg, OWN_TUNING);
+    if (!ask) return;
+    const world = rooms.keyOf(c.id);
+    if (!world) return;
+    if (ask.do === 'dead') {
+      // A death is the word of whichever browser was keeping that creature, and of nobody else: it
+      // is the one that was thinking for it. It is also the word of whoever was keeping it a moment
+      // ago (`mayKill`, the grace in OWN_TUNING): a keeper drops one to nothing and says so in the
+      // same breath, the grants go out twice a second, and the two cross -- without the grace a kill
+      // that landed as the creature changed hands would simply be dropped and the creature stood
+      // back up whole by whoever took it. A death happens once and stays, so a browser that takes
+      // the creature over afterwards cannot stand it up again. It is not counted against the spawn
+      // allowance below: a death is not a thing asked for, and a fight is not a key held down.
+      if (!ownership.mayKill(c.id, ask.id)) return;
+      const end = ownership.died(ask.id);
+      if (!end.ok) return;
+      deliverTo(end);
+      sendToRoom(end.world, { t: 'spawn', do: 'gone', id: ask.id, why: 'dead' });
+      // It is gone, so the picture of where things stand forgets it.
+      npcPlaces.gone(end.world, ask.id);
+      return;
+    }
+    // The allowance is counted before anything is decided about who is asking, and before a word
+    // goes back: it is what stands between a key held down and a world filling up as fast as it can
+    // be read, and a browser that is not the admin is exactly the one it has to hold. Counted after
+    // the refusal, the browsers the cap exists for would be the only ones it never reached, each
+    // junk word costing an outbound frame.
+    c.spawning ??= { at: 0, lines: 0 };
+    if (!maySpawn(c.spawning, Date.now(), OWN_TUNING)) return;
+    if (!admins(c)) {
+      send(c, { t: 'spawn', do: 'refused', why: 'only this world’s admin can stand creatures in it' });
+      return;
+    }
+    if (ask.do === 'add') {
+      // The seed is the server's when the browser named none: it is what each browser rolls the
+      // creature's own numbers from, so it has to be the same one everywhere and it is decided once.
+      const seed = ask.seed || (Math.random() * 0xffffffff) >>> 0;
+      const made = ownership.spawn({ world, species: ask.species, at: ask.at, h: ask.h, seed, by: c.player ?? '', id: ask.id ?? '', inside: !!ask.inside });
+      if (!made.ok) {
+        send(c, { t: 'spawn', do: 'refused', why: made.why });
+        return;
+      }
+      // The news first and the grant after it, so that the browser told to think for this creature
+      // has already been told there is one: a grant naming something a browser has never heard of is
+      // taken all the same, but only because nothing should ever rest on the order two messages
+      // happen to arrive in.
+      sendToRoom(world, { t: 'spawn', do: 'add', row: made.row });
+      deliverTo(made);
+      console.log(`  ${c.id} ${who(c)} stood ${made.row.species} on ${roomLabel(world)} as ${made.row.id}`);
+    } else if (ask.do === 'remove') {
+      const off = ownership.remove(ask.id);
+      if (!off.ok) return;
+      deliverTo(off);
+      sendToRoom(off.world, { t: 'spawn', do: 'gone', id: ask.id, why: 'removed' });
+      npcPlaces.gone(off.world, ask.id);
+    } else if (ask.do === 'clear') {
+      const cleared = ownership.clearWorld(world);
+      deliverTo(cleared);
+      // The whole list again rather than a word per creature: a browser reading a list takes down
+      // whatever is not in it, so an empty one is exactly "nothing stands here now" in one message.
+      sendToRoom(world, { t: 'spawn', do: 'list', world, rows: ownership.listFor(world) });
+      // Everything that stood here has gone, so where it all stood goes with it.
+      npcPlaces.forget(world);
+      if (cleared.ids.length) console.log(`  ${c.id} ${who(c)} took down ${cleared.ids.length} on ${roomLabel(world)}`);
+    }
+  } else if (msg.t === 'npcState') {
+    // A keeper's batch: where the creatures it is thinking for have got to. It goes to the world it
+    // was sent from and no further, and only for the ones this browser really keeps -- the grant is
+    // the server's answer and a browser never speaks for something it was not given. Dropped with
+    // the news when a browser is behind: a lost batch is a quarter of a second of a creature's walk,
+    // and the next one puts it right.
+    if (!c.hello) return;
+    const batch = cleanNpcBatch(msg);
+    if (!batch) return;
+    const world = rooms.keyOf(c.id);
+    if (!world) return;
+    const rows = batch.r.filter((r) => ownership.keeps(c.id, r.i) && ownership.worldOf(r.i) === world);
+    if (!rows.length) return;
+    npcPlaces.note(world, rows);
+    // What is left of each of them, kept with the list rather than only in the last batch: the list
+    // is what a browser arriving builds from, and a creature that has been fought must not be stood
+    // up whole by whoever the grant lands on next.
+    for (const r of rows) ownership.health(c.id, r.i, r.hp);
+    sendToRoom(world, { t: 'npcState', id: c.id, r: rows }, c.id, true);
+  } else if (msg.t === 'npcHit') {
+    // A blow struck against a creature somebody else is thinking for. It is a claim addressed to
+    // whoever keeps that creature: the server checks that it is real, that it is alive, that it is
+    // on this world, and passes it on. The keeper applies it on its own copy and what comes back is
+    // the health in its next batch or the word that the creature is gone, so two browsers can never
+    // come to disagree about how hurt one is. Never dropped for being behind: a blow is a decision,
+    // and one lost is a shot that hurt nothing.
+    //
+    // `b` is the whole of what crosses about who struck, and it is passed on exactly as it came.
+    // The `id` on this message names the browser the blow was sent from, which is not the same thing
+    // as the striker: with `b` the player at that browser struck it themselves and the keeper may
+    // blame them, and without it the blow was a creature's, a fighter's or a turret's and there is
+    // nobody the keeper can name. Blamed on the browser regardless, the keeper's creature and its
+    // whole pack would turn on a player who never touched it.
+    if (!c.hello) return;
+    const hit = cleanNpcHit(msg);
+    if (!hit) return;
+    if (!ownership.alive(hit.i)) return;
+    const world = ownership.worldOf(hit.i);
+    if (!world || world !== rooms.keyOf(c.id)) return;
+    const keeper = ownership.keeperOf(hit.i);
+    if (!keeper || keeper === c.id) return;
+    send(clients.get(keeper), { t: 'npcHurt', id: c.id, i: hit.i, a: hit.a, at: hit.at, ...(hit.w ? { w: hit.w } : {}), ...(hit.b ? { b: 1 } : {}) });
+  } else if (msg.t === 'npcDrop') {
+    // A browser saying it cannot keep one: it has no body for that creature and cannot build one
+    // (its catalogue does not know the species), or its model has still not landed. Keeping a
+    // creature means saying where it has got to, and a browser that cannot is invisible from here --
+    // it is talking normally, so the silence rule never reaches it, and it is the nearest, so every
+    // pass hands the creature straight back to it. Frozen on every screen, for the life of the
+    // world. It asks for nothing, so nothing is answered: the grant goes back and that browser is
+    // not offered this creature again for a while.
+    if (!c.hello) return;
+    const drop = cleanNpcDrop(msg);
+    if (!drop) return;
+    if (!ownership.worldOf(drop.i) || ownership.worldOf(drop.i) !== rooms.keyOf(c.id)) return;
+    deliverTo(ownership.refuse(c.id, drop.i));
+  } else if (msg.t === 'keep') {
+    // The one thing a browser says about keeping: that it has been put to sleep, or woken. A sleeping
+    // tab draws no frames and sends nothing at all, so it says so on its way out rather than being
+    // found a minute later by the silence; what it was keeping goes to somebody who is awake.
+    if (!c.hello) return;
+    const word = cleanKeep(msg);
+    if (!word) return;
+    deliverTo(ownership.awake(c.id, word.a === 1));
   }
 }
 
@@ -827,7 +1044,10 @@ const server = createServer((req, res) => {
         duels: duels.describe(),
         clock: clock.describe(),
         world: store.describe(),
+        creatures: ownership.describe(),
+        creaturePlaces: npcPlaces.describe(),
         joinWord: WORD ? 'set' : 'none',
+        admin: adminFor(store.data, ADMIN) || 'nobody yet',
         friendlyFire: FRIENDLY_FIRE,
         // What each browser is behind by. There is nothing else that shows a line falling behind:
         // `queued` is what is waiting to go out and `dropped` is how much news has been trimmed
@@ -837,6 +1057,7 @@ const server = createServer((req, res) => {
         caps: WIRE,
         group: GROUP_TUNING,
         combat: COMBAT_WIRE,
+        own: OWN_TUNING,
         // The distances a group works to, which are the client's own and not this server's to pick:
         // they are printed here so what is being enforced can be read off without reading the code.
         ranges: GROUP_RANGES,
@@ -935,6 +1156,13 @@ server.on('upgrade', (req, socket) => {
     // A duel does not wait for anybody: whoever they were fighting is told it is over, rather than
     // being left in a fight with a line that has closed.
     deliverTo(duels.drop(c.id));
+    // Whatever this browser was thinking for is taken off it at once and given to whoever is nearest,
+    // so nothing is left standing with nobody's brain in it. The creatures themselves stay: they
+    // belong to the world and not to anybody in it, whoever stood them.
+    deliverTo(ownership.gone(c.id));
+    // A world nobody is left standing on stops being remembered: the picture of where its creatures
+    // had got to is only there for the next browser to arrive, and it is rebuilt from their batches.
+    if (key && rooms.members(key).size === 0) npcPlaces.forget(key);
     console.log(`- ${c.id} ${who(c)} left${key ? ` ${roomLabel(key)}` : ''} (${clients.size} connected)`);
     // Everyone who was ever told about this browser is told it has gone, wherever they are standing
     // now: a browser holds on to a peer it has met while that peer is on another world, so the news
@@ -970,6 +1198,10 @@ setInterval(() => {
 // nobody grouped and nobody asked it walks two empty tables a second and writes nothing.
 setInterval(() => deliver(groups.tick()), GROUP_TUNING.tick);
 
+// Who thinks for which creature, worked out twice a second: the rate the grants go out at is this
+// clock and nothing in ownership.mjs counts. With nothing stood anywhere it walks an empty table.
+setInterval(() => deliverTo(ownership.tick()), OWN_TUNING.grant);
+
 // A duel nobody answered, and one nobody has landed a blow in for an hour, both end on their own.
 // It is a slow clock on purpose: with nobody fighting it walks two empty tables once a minute.
 setInterval(() => deliverTo(duels.tick()), COMBAT_WIRE.tick);
@@ -995,5 +1227,8 @@ server.listen(PORT, () => {
   console.log(`  ${WORD ? 'a join word is set: a browser must carry it in its address, and one that cannot is turned away' : 'no join word: anyone who can reach this port can join (--word=<something> sets one)'}`);
   console.log(`  damage between players is ${FRIENDLY_FIRE ? 'on' : `off (--friendly-fire turns it on); with it off, two players may still agree to a duel, which reaches ${GROUP_RANGES.duel} m -- the client's own distance`}`);
   console.log(`  a group holds ${GROUP_TUNING.members}, an invitation reaches ${GROUP_RANGES.invite} m (the client's own distance), and a place is held for ${Math.round(GROUP_TUNING.hold / 1000)} s while someone reloads`);
+  const admin = adminFor(store.data, ADMIN);
+  console.log(`  nothing appears in the world on its own: ${admin ? `${admin} is its admin and stands creatures by hand` : 'the first player this world meets becomes its admin and stands creatures by hand'} (--admin=<player id> names another)`);
+  console.log(`  one browser thinks for each of them: the nearest player within ${OWN_TUNING.range} m, changing hands only after another has been a quarter nearer for ${Math.round(OWN_TUNING.steady / 1000)} s`);
   console.log(`  a browser built before this one plays as it always has; http://localhost:${PORT}/ says what is going on`);
 });

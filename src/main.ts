@@ -109,6 +109,13 @@ import { CHAT_TUNE, ChatUi, tuneChat } from './ui/chatUi.ts';
 import { COMBAT_TUNE, CombatNet, tuneCombat } from './net/combatNet.ts';
 // Travelling together: what a leader's trip means on this side, and where to come out to be beside them.
 import { TOGETHER_TUNE, TravelTogether, tuneTogether, type TogetherMove } from './net/travelTogether.ts';
+// The world's creatures: nothing stands on its own, an admin stands them, and one browser thinks for each.
+import { OWN_TUNE, owned, tuneOwned, type SpawnRow } from './net/owned.ts';
+// The world's creatures as they cross: a keeper's batch, and a blow asked of whoever keeps one.
+import { NPC_TUNE, NpcNet, tuneNpcs } from './net/npcNet.ts';
+import { peerBodies } from './net/remoteBodies.ts';
+// One creature stood by hand, as everything that talks about it says it.
+import { recordFor, type SpawnRecord } from './world/spawnSeed.ts';
 import type { Bolt } from './combat/bolts';
 import { applyAppearance, dress, packLook } from './player/look';
 import { RemotePlayers, watchPeers } from './net/remotePlayers';
@@ -3216,6 +3223,160 @@ class App {
     // are not here; they are `__debug.day()`'s.
     const debugRoot = (window as unknown as { __debug?: Record<string, unknown> }).__debug;
     if (debugRoot) debugRoot.session = (o?: Partial<typeof SESSION>) => (o ? { ...tuneSession(o), ...this.net.session.debug() } : this.net.session.debug());
+
+    // ---- The world's creatures, and whose browser thinks for each of them. ----
+    //
+    // Nothing appears in a world on its own: an admin stands a creature by hand and what they stand
+    // belongs to the world, so everyone connected sees it and exactly one browser runs its brain.
+    // Which browser that is, is the server's answer and nobody else's (server/ownership.mjs); this
+    // side holds the answer and asks `owned.mine(id)`. With no address set the whole thing is quiet
+    // and every creature is this browser's, which is the game exactly as it is played alone.
+    //
+    owned.send = (msg) => this.net.sendWord(msg);
+    owned.authority = () => this.net.session.authority;
+    owned.admin = () => this.net.session.isAdmin;
+    owned.onNote = (text) => this.messages.system(text);
+    // Whether this tab is being drawn at all. The module never reads the document itself; it asks,
+    // and says what it is on the first word it hears on a line, which is what covers a page opened
+    // in a background tab -- `visibilitychange` fires on a change and there has not been one.
+    owned.visible = () => !document.hidden;
+    // Whatever else reads the server's own words reads them first and this takes what is left, so
+    // nothing hung on the same hook is unplugged.
+    const ownedWordWas = this.net.onWord;
+    this.net.onWord = (msg) => {
+      ownedWordWas(msg);
+      owned.handle(msg);
+    };
+    // A line that dropped, was put down or was taken over leaves none of this behind: what this
+    // browser kept was the server's to give, and with no line there is nothing to say a creature has
+    // died. The handler already on the hook is kept and called first.
+    const ownedStatusWas = this.net.onStatus;
+    this.net.onStatus = (status, detail) => {
+      ownedStatusWas(status, detail);
+      if (status !== 'online') owned.clear();
+    };
+    // A tab put to sleep draws no frames and sends nothing at all, so it says so on its way out and
+    // whatever it was thinking for goes to somebody who is awake; saying nothing would leave those
+    // creatures standing still until the server's own minute of silence ran out.
+    document.addEventListener('visibilitychange', () => owned.sayAwake(!document.hidden));
+    if (debugRoot) {
+      // `__debug.owned()` says what this browser keeps: how many the world holds here, how many are
+      // this browser's, which by id, how many have changed hands either way, and how long ago the
+      // last one did. All numbers: none of it can be seen from a driven tab. `{ asksPerSecond: 2 }`
+      // sets one of this side's own manners; the rule's own numbers are the server's and are printed
+      // on its status page, because the server is what decides and two copies of a rule is one too
+      // many.
+      debugRoot.owned = (o?: Partial<typeof OWN_TUNE>) => (o ? { ...owned.debug(), tune: tuneOwned(o) } : { ...owned.debug(), tune: OWN_TUNE });
+    }
+
+    // ---- Where the world's creatures have got to. ----
+    //
+    // `owned` above says what stands in this world and which browser thinks for each of them; this
+    // says where the ones this browser thinks for have got to, four times a second, and carries a
+    // blow struck against one it does not keep to the browser that does. A creature nobody here
+    // keeps runs no brain and no physics: it is eased toward what it is told and plays the clip its
+    // told pace asks for (`src/world/mobiles/mobile.ts`). With no server none of it runs and every
+    // creature is this browser's own, which is the game exactly as it is played alone.
+    const creatures = new NpcNet();
+    creatures.send = (msg) => this.net.sendWord(msg);
+    creatures.authority = () => this.net.session.authority;
+    creatures.keeps = (id) => owned.mine(id);
+    // Which creatures the server has granted this browser, asked once a batch and never in a frame.
+    // `keeps` answers about a creature something here already holds; this is what finds the one
+    // nothing here holds at all -- a grant for a species this browser's catalogue does not know, or
+    // one whose model never landed -- which is handed back rather than left frozen on every screen
+    // in the world. The array is refilled rather than rebuilt, so the asking allocates nothing.
+    const grantedIds: string[] = [];
+    creatures.granted = () => {
+      grantedIds.length = 0;
+      for (const r of owned.list) if (owned.mine(r.id)) grantedIds.push(r.id);
+      return grantedIds;
+    };
+    // A death has one word, and it is the spawn list's: this browser's own creature dying goes out
+    // as the list's `dead` rather than as a second word of this module's.
+    creatures.died = (id) => {
+      owned.sayDead(id);
+      return owned.active;
+    };
+    creatures.buried = (id) => owned.dead(id);
+    // Who struck, so a creature turns on the right person: the blow carries a relay id, the peers'
+    // bodies turn that into the key everything alive is known by, and the one list of the living is
+    // where the body itself is. Nobody found is a blow that lands with nobody to blame. It is only
+    // ever asked for a blow that said the player at that browser struck it themselves, since that is
+    // the only person over there this side can name.
+    creatures.attacker = (id) => {
+      const key = peerBodies().keyOf(id);
+      if (!key) return null;
+      for (const t of this.world.targets()) if (t.key === key) return t;
+      return null;
+    };
+    // The two things worth a word: a grant this browser cannot honour and has handed back, and rows
+    // about more creatures than it is keeping track of. Both happen on a clock, so the module holds
+    // them to one word every `NPC_TUNE.noteEvery` seconds of its own accord.
+    creatures.onNote = (text) => this.messages.system(text);
+    // Read after whatever is already on the hook, so neither unplugs the other.
+    const creatureWordWas = this.net.onWord;
+    this.net.onWord = (msg) => {
+      creatureWordWas(msg);
+      creatures.handle(msg);
+    };
+    // A line that dropped, was put down or was taken over: every creature goes back to being this
+    // browser's own, because a body left driven would stand still for ever with nobody to drive it.
+    const creatureStatusWas = this.net.onStatus;
+    this.net.onStatus = (status, detail) => {
+      creatureStatusWas(status, detail);
+      if (status !== 'online') creatures.clear();
+    };
+    if (debugRoot) {
+      // `__debug.npcs()` says what this browser thinks for and what is being driven at it: `kept`
+      // and `driven` with their ids, the batches and rows said and heard, blows asked and applied,
+      // how many are waiting for a body, how many keepers have gone quiet and how many grants were
+      // handed back. All numbers: none of it can be seen from a driven tab. `{ batchHz: 10 }` sets
+      // one of this side's own manners.
+      debugRoot.npcs = (o?: Partial<typeof NPC_TUNE>) => (o ? { ...creatures.rows(), tune: tuneNpcs(o) } : creatures.rows());
+    }
+
+    // What the world's list says stands here is what is stood here. The list's own shape is not the
+    // manager's, so it is turned into a record on the way in; everything else about standing one --
+    // the catalogue entry, the ground under it, everything it rolls -- is the record's own.
+    const recordOf = (r: SpawnRow): SpawnRecord => ({ id: r.id, world: r.world, species: r.species, x: r.at[0], y: r.at[1], z: r.at[2], heading: r.h, seed: r.seed, inside: r.inside });
+    // Stand one of the world's, and put on it what has been done to it. The share is the one thing
+    // about a creature that is not in the record: a creature that has been fought is not the creature
+    // that was stood, and a browser walking up to a half-killed animal must not stand it up whole. A
+    // row with no share at all is one nobody has said anything about, which is a whole one.
+    const standRow = (r: SpawnRow, here: string): void => {
+      const mobiles = this.world.mobiles;
+      if (!mobiles) return;
+      const m = mobiles.standRecord(recordOf(r), here);
+      if (typeof m !== 'string' && r.hp !== undefined && r.hp < 1) m.hp = Math.max(0, Math.min(m.maxHp, r.hp * m.maxHp));
+    };
+    owned.onList = (rows) => {
+      const mobiles = this.world.mobiles;
+      if (!mobiles) return;
+      // A list is a world handed over whole: it arrives on reaching one and after every travel. What
+      // was remembered about where the last world's creatures stood is not about this one and goes
+      // now, or a page that has travelled enough times holds its whole allowance of parked rows in
+      // worlds that are gone and refuses the rows of the world it is standing in.
+      creatures.freshWorld();
+      const here = this.worldKey();
+      const wanted = new Set<string>();
+      for (const r of rows) {
+        wanted.add(r.id);
+        standRow(r, here);
+      }
+      // A list is the whole truth about a world: whatever is not in it is not there any more.
+      for (const m of [...mobiles.live]) {
+        const id = mobiles.worldIdOf(m);
+        if (id && !wanted.has(id)) mobiles.removeById(id);
+      }
+    };
+    owned.onAdd = (row) => standRow(row, this.worldKey());
+    owned.onGone = (id, why) => {
+      // A death is played out where the body stands and the manager takes it down in its own time;
+      // one taken down by an admin goes at once.
+      creatures.noteGone(id, why === 'dead' ? 'dead' : 'gone');
+      if (why !== 'dead') this.world.mobiles?.removeById(id);
+    };
 
     // ---- The group and the words players type at each other. ----
     //
@@ -6788,8 +6949,129 @@ class App {
       clear: (filter) => this.world.mobiles?.clear((m) => filter(m.entry)) ?? 0,
       clearAll: () => (this.world.mobiles?.clear() ?? 0) + this.world.npcs.removeAll() + this.world.turrets.removeAll() + (this.world.npcShips?.clear() ?? 0),
       ships: this.shipSpawner(),
+      world: this.worldSpawns(),
+      clearMachines: () => {
+        // What is this browser's own and nobody else's: the machines, the fighters, the NPC ships,
+        // and any creature with no name in the world's list. What the world holds is left where it
+        // is -- it is asked for over the wire instead (`askClearAll`), so one browser's "Clear all"
+        // cannot empty a shared world off its own screen alone.
+        const mobiles = this.world.mobiles;
+        const mine = mobiles ? mobiles.clear((m) => !mobiles.worldIdOf(m)) : 0;
+        return mine + this.world.npcs.removeAll() + this.world.turrets.removeAll() + (this.world.npcShips?.clear() ?? 0);
+      },
       missing: `No creature and NPC catalogue yet. It loads at start; if it never does, convert it with ${CATALOGUE_COMMAND}.`,
     };
+  }
+
+  /**
+   * The world's own rules about standing creatures, when a server is holding them. Nothing appears in
+   * a world on its own any more: what is alive there was stood by an admin, and what an admin stands
+   * belongs to the world -- so a spawn from the NPC tab is asked for over the wire and what comes back
+   * is what is stood, the admin's own browser taking the same path as everybody else's. With no
+   * server, or with the relay that came before one, `shared()` is false and the tab stands everything
+   * here exactly as it did.
+   *
+   * It is built once, when the tab is opened, and every question it answers is asked again each time
+   * it is put: connecting, disconnecting and being made an admin all happen while the tab is open,
+   * and the tab follows the answer rather than the object.
+   *
+   * The counter the names are made from starts at the wall clock rather than at nought, so a browser
+   * that is reloaded cannot give a new creature the name of one it stood before lunch.
+   */
+  private worldSpawns(): import('./ui/npcUi').WorldSpawns {
+    return {
+      shared: () => this.net.session.authority === 'server',
+      maySpawn: () => this.net.session.isAdmin,
+      why: () => 'only the world’s admin may stand creatures here',
+      ask: (entry, n) => {
+        const cat = this.world.mobileCatalogue;
+        const mobiles = this.world.mobiles;
+        if (!cat || !mobiles) return { spawned: 0, note: 'the creature and NPC catalogue has not loaded yet' };
+        // Asked about as one of the world's: the hand-spawn cap is this browser's own limit on what
+        // somebody may stand from the tab, and it must never refuse what the world holds.
+        const why = mobiles.whyNot(entry, cat, 'world');
+        if (why) return { spawned: 0, note: why };
+        this.cam.forward(tmp);
+        tmp.y = 0;
+        tmp.normalize();
+        const inside = this.world.inside;
+        const bounds = lookBounds(entry, cat.file.appearances);
+        const scale = entry.size?.scale?.[1] ?? 1;
+        const want = Math.max(1, n);
+        const far = inside ? Math.min(4, spawnDistance(bounds, scale)) : spawnDistance(bounds, scale);
+        // The same ring a spawn stood here would take (the world's own spot finder is one ray
+        // straight down, so asking it the same question `n` times would stack the lot inside each
+        // other), and indoors the same two steps back toward the player's feet when a wall is
+        // nearer than that.
+        let spots = mobiles.spotsAhead(entry, this.player.pos, tmp, want, far, inside);
+        for (const d of inside ? [1.5, 0.5] : []) {
+          if (spots.length) break;
+          spots = mobiles.spotsAhead(entry, this.player.pos, tmp, want, d, inside);
+        }
+        if (!spots.length) return { spawned: 0, note: inside ? 'there is no floor under that spot' : 'no ground there' };
+        let asked = 0;
+        for (const spot of spots) {
+          const heading = Math.atan2(this.player.pos.x - spot.x, this.player.pos.z - spot.z);
+          const rec = recordFor(this.worldKey(), this.net.session.player, this.worldSpawnCount++, entry.id, { x: spot.x, y: spot.y, z: spot.z, heading, inside });
+          const why2 = this.askWorldSpawn(rec);
+          if (why2) return { spawned: asked, note: why2 };
+          asked++;
+        }
+        return { spawned: asked, note: asked === 1 ? `asked for a ${entry.name}` : `asked for ${asked} ${entry.name}` };
+      },
+      askClear: (filter) => {
+        const mobiles = this.world.mobiles;
+        if (!mobiles) return 0;
+        let n = 0;
+        for (const m of [...mobiles.live]) {
+          if (m.origin !== 'spawned' || !filter(m.entry)) continue;
+          const id = mobiles.worldIdOf(m);
+          if (!id) {
+            // One this browser stood for itself (a machine row's creature, or one stood before the
+            // server was there): it is nobody else's, so the row's clear takes it down here. Without
+            // this the only way to take such a body down is "Clear all".
+            mobiles.remove(m);
+            n++;
+          } else if (!this.askWorldDespawn(id)) n++;
+        }
+        return n;
+      },
+      askClearAll: () => !this.askWorldClearAll(),
+    };
+  }
+
+  /** How many the world has been asked to stand from here; the wall clock so a reload never repeats a name. */
+  private worldSpawnCount = Date.now();
+
+  /**
+   * The world this browser is standing on, spelled exactly as the server keys its rooms
+   * (`roomKey` in `server/rooms.mjs`): the planet, a character no id can hold, and the zone. It has
+   * to be spelled the server's way and not ours, because it is what every spawn record the server
+   * sends back carries -- and a record is refused unless it names the world it is being stood in,
+   * which is the guard that stops a spawn word for the world just left being stood at this one's
+   * metres. Spelled as the planet alone, every record the server sent would be refused.
+   */
+  private worldKey(): string {
+    return `${this.world.planet?.id ?? ''}\0${this.zone ?? ''}`;
+  }
+
+  /**
+   * Ask the server to stand one. The record is this browser's suggestion and nothing is stood by it:
+   * what comes back over the wire is what is stood, here as everywhere else. The answer is a word for
+   * the player, or '' when the asking went out.
+   */
+  private askWorldSpawn(rec: SpawnRecord): string {
+    return owned.askSpawn(rec.species, [rec.x, rec.y ?? 0, rec.z], rec.heading, rec.seed, rec.id, !!rec.inside);
+  }
+
+  /** Ask the server to take one down by the name the world knows it by; '' when the word went out. */
+  private askWorldDespawn(id: string): string {
+    return owned.askRemove(id);
+  }
+
+  /** Ask the server to take down everything this world holds; '' when the word went out. */
+  private askWorldClearAll(): string {
+    return owned.askClear();
   }
 
   /**
@@ -6856,6 +7138,9 @@ class App {
     if (cat && entry && cat.ready(entry).ok && this.world.mobiles) {
       return {
         id: 'creature',
+        // This row stands a real creature out of the catalogue, so on a world whose creatures the
+        // server holds it is the world's and not this browser's: the NPC tab gates it with the rest.
+        world: true,
         label: `${def.name} (this planet)`,
         blurb: `${temper}; the catalogue's ${entry.id}`,
         count: () => this.world.mobiles?.count(entry.id) ?? 0,
