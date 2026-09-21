@@ -15,7 +15,7 @@ import type { PlacedObject } from '../world/layoutStream.ts';
 import type { SpacePack } from './spaceData.ts';
 import type { Physics } from '../core/physics.ts';
 import type { DriveInput, Vehicle } from '../vehicles/vehicle.ts';
-import { probeSurface } from '../vehicles/surfaceRoom.ts';
+import { probeSurface, type WalkableRoom } from '../vehicles/surfaceRoom.ts';
 import {
   CLAMP_TUNE,
   DOCK_FACE,
@@ -658,6 +658,166 @@ export interface ClampLink {
   send(to: number, word: ClampWord): void;
 }
 
+// ---------------------------------------------------------------------------------------------------
+// A hull somebody else flies, as a place to stand in
+//
+// A peer's ship has always been a picture here: the model with its parts hung on it, moved between
+// messages, its rooms hidden and no physics in it. Standing in one means building those rooms as a
+// still room of their own -- the gravity-hull technique the game already uses for your own ship, with
+// the picture's live matrix as the frame -- and that is a load, so it is asked for and waited on.
+//
+// Whoever builds them registers here (`setPeerRooms`). Nothing in this file builds anything: it only
+// asks. With nobody registered every question below answers "no" and the game is exactly what it was,
+// which is also what playing alone and what an older relay both look like.
+
+/** A hull another player flies, once this browser can make a place to stand in of it. */
+export interface PeerRooms {
+  /** Their hull as a room, when it is already built and ready to walk in; null when it is not. */
+  roomOf(id: number): WalkableRoom | null;
+  /** Whose hull a room is: the relay id of the player who flies it, 0 for a room that is nobody's. */
+  idOf(room: WalkableRoom | null | undefined): number;
+  /**
+   * Build that hull's rooms and make them ready -- prepared and compiled before anything is shown --
+   * and answer the room. Null when that hull cannot be one (they have gone, it has no rooms, the
+   * build failed); `why` says which. Asking for a hull already open answers with what is there.
+   */
+  open(id: number): Promise<WalkableRoom | null>;
+  /**
+   * Somebody has stepped into those rooms, or out of them: they are shown or hidden, and while
+   * somebody is in them they are not taken down whatever else happens. It is not the same word as
+   * `close`, which gives them back: a walker who steps out of a friend's hull and straight back in
+   * should not wait for the whole thing to be built a second time.
+   */
+  aboard(id: number, yes: boolean): void;
+  /**
+   * Done with them: the rooms come down and the hull is a picture again. Safe for a hull never
+   * opened, and for one still opening. Never asked for a room somebody is standing in.
+   */
+  close(id: number): void;
+  /** Why that hull is not somewhere to stand, in words for a row; null when it is, or will be once asked. */
+  why(id: number): string | null;
+  /**
+   * The nearest player whose hull's side is within `range` m of a point in the world, and whose hull
+   * is one that could be stood in at all; 0 when none is. The action bar asks this every frame, so
+   * it allocates nothing and builds nothing.
+   */
+  nearest(at: THREE.Vector3, range: number): number;
+  /** What to call their ship, for the rows and the notes. */
+  label(id: number): string;
+  /**
+   * That hull as it stands: its place and its motion in the world, filled in, and its bounding radius
+   * returned. 0 when the hull is not here, and then nothing is filled. For standing a walker clear of
+   * it on the way out; it allocates nothing.
+   */
+  hullAt(id: number, pos: THREE.Vector3, vel: THREE.Vector3): number;
+}
+
+/** Whoever builds peers' rooms, and whoever wants telling when one is about to go. One of each per page. */
+let thePeerRooms: PeerRooms | null = null;
+let hullGoneWatcher: ((id: number) => void) | null = null;
+
+/** Register (or let go of) whatever makes a hull somebody else flies into a place to stand in. */
+export function setPeerRooms(rooms: PeerRooms | null): void {
+  thePeerRooms = rooms;
+}
+
+/** What can make a peer's hull boardable, or null when nothing can -- playing alone, or an older relay. */
+export function peerRooms(): PeerRooms | null {
+  return thePeerRooms;
+}
+
+/**
+ * Whoever boards registers once here. The builder calls `peerHullGone(id)` *before* it frees a room's
+ * physics, so a walker standing in it can be put somewhere in the world first: a body left in a freed
+ * world is the one mistake this whole path cannot survive.
+ */
+export function onPeerHullGone(fn: ((id: number) => void) | null): void {
+  hullGoneWatcher = fn;
+}
+
+/** Called by the builder before a peer's rooms are taken down. */
+export function peerHullGone(id: number): void {
+  hullGoneWatcher?.(id);
+}
+
+/**
+ * INVENTED, both of them, and live through `__board({ ... })`:
+ * - `reach`: how near the side of a hull somebody else flies you must stand for E to board it (m). The
+ *   local one is 3.6 m from a vehicle's side; a parked ship is a bigger thing to walk up to and its
+ *   picture's radius is measured from the model's origin, not its middle, so this is roomier.
+ * - `wait`: how long boarding waits for their rooms to be built before it gives up and says so (s).
+ *   Building them is a load and a compile: a second or two the first time, nothing after.
+ */
+export const BOARD_TUNE = {
+  reach: 8,
+  wait: 20,
+};
+
+/**
+ * The live knob, on the window as `__board()`: whether anything in this browser can make a hull
+ * somebody else flies into a place to stand in, whether anyone is listening for one going, and the
+ * two numbers above, which it also sets. Reading it costs nothing and it never runs in a frame. A
+ * script-driven tab is hidden, so this is the only way to see what boarding is set to.
+ */
+export function boardKnob(opts?: { reach?: number; wait?: number }): Record<string, unknown> {
+  if (opts) {
+    if (opts.reach !== undefined && Number.isFinite(opts.reach)) BOARD_TUNE.reach = Math.max(0, opts.reach);
+    if (opts.wait !== undefined && Number.isFinite(opts.wait)) BOARD_TUNE.wait = Math.max(0, opts.wait);
+  }
+  return { builder: thePeerRooms ? 'registered' : 'none', watcher: hullGoneWatcher ? 'registered' : 'none', tune: { ...BOARD_TUNE } };
+}
+
+(globalThis as unknown as { __board?: typeof boardKnob }).__board = boardKnob;
+
+/**
+ * Which hull a crossing is from, or to: one in this world, or one another player flies. It is what a
+ * clamp calls the thing it holds to, said again in the crossing's own words -- `pairOf` answers one
+ * where the other is expected -- and the two are one name so they cannot drift apart.
+ */
+export type CrossSide = ClampOn;
+
+/** Where a crossing goes, and what to call it. */
+export type CrossTo = CrossSide & { label: string };
+
+/** Whether two sides name the same hull. */
+function sameSide(a: CrossSide, b: CrossSide): boolean {
+  return a.kind === 'ship' ? b.kind === 'ship' && a.ship === b.ship : b.kind === 'peer' && a.id === b.id;
+}
+
+/** What the ship menu's Board row is told about where the walker stands; every field is already decided. */
+export interface BoardState {
+  /** The hull clamped to this one that the walker could cross into, by name; null when there is none. */
+  across: string | null;
+  /** Whether that hull is one another player flies, which is the only crossing this row is shown for. */
+  theirs: boolean;
+  /** Whether the walker stands at their own room's way in, which is the only place a crossing is offered. */
+  atDoor: boolean;
+  /** A crossing asked for and still being made ready, so the row waits rather than asking again. */
+  opening: boolean;
+  /** Why that hull cannot be crossed into just now (their rooms are not built, they have gone); null when it can. */
+  why: string | null;
+}
+
+/**
+ * What the ship menu's Board row says. Pure, so every case can be walked in a test with no DOM: the
+ * words and the reasons are here, the gathering is the game's and the drawing is the menu's.
+ *
+ * Null where there is nothing to board, and the row is then not shown at all. The game only offers it
+ * for a hull another player flies, because that is the crossing that can be waited on and refused;
+ * between two hulls of this world E at the way in is instant and always works, and a row saying so
+ * would be a change to a game played alone, where no hull is ever anyone else's.
+ */
+export function boardRow(state: BoardState | null): { label: string; why: string | null; note: string | null } | null {
+  if (!state) return null;
+  // The one row that is drawn before anything is known to be there: a crossing has been asked for and
+  // the rooms are being made, which is the only way `opening` is ever set. It names the hull when the
+  // game could name it, so the row is never a bare word about a ship nobody mentioned.
+  if (state.opening) return { label: state.across ? `Crossing to the ${state.across}…` : 'Crossing…', why: 'their rooms are being built', note: 'once, the first time you board that hull' };
+  if (!state.across || !state.theirs) return null;
+  const why = state.why ?? (state.atDoor ? null : "stand at your own room's way in to cross");
+  return { label: `Cross to the ${state.across}`, why, note: why === null ? 'E at the way in does the same' : null };
+}
+
 /** A hull being carried, and where it rests. */
 interface Carried {
   ship: Vehicle;
@@ -715,6 +875,10 @@ export class ShipClamp {
   private readonly scratch2 = new THREE.Vector3();
   private readonly scratchQ = new THREE.Quaternion();
   private readonly scratchScale = new THREE.Vector3();
+  /** Where a peer's ship stands, for the one test that asks whether it is really on this hull. Its own, so nothing nested can write over it. */
+  private readonly pairPos = new THREE.Vector3();
+  private readonly pairQ = new THREE.Quaternion();
+  private readonly pairVel = new THREE.Vector3();
   private readonly inverse = new THREE.Matrix4();
   private readonly rel = new THREE.Matrix4();
   private readonly relPos = new THREE.Vector3();
@@ -747,24 +911,94 @@ export class ShipClamp {
     return false;
   }
 
-  /** Whether a hull in this world is clamped onto this one, which is the only pair a crossing is offered for. */
-  private carryingOn(ship: Vehicle): boolean {
-    const on = this.carried?.on;
-    return !!on && on.kind === 'ship' && on.ship === ship;
+  /**
+   * The other ship a walker aboard `from` may cross into, when the two are clamped together, both are
+   * places to stand in, and the walker stands at their own room's way in. `at` is in the frame of the
+   * hull they are standing in, as `Player.pos` is aboard.
+   *
+   * Either side may be a hull another player flies: one of ours clamped onto theirs, or one of theirs
+   * they were let onto. Their side is only ever a crossing once their rooms are actually built here,
+   * which `peerRooms()` answers for; with nobody building them this is the local pair it always was.
+   */
+  crossing(from: CrossSide, at: THREE.Vector3): CrossTo | null {
+    const other = this.crossPair(from);
+    if (!other) return null;
+    const entry = this.entryOf(from);
+    return entry && atTheDoor(at, entry, CLAMP_TUNE) ? other : null;
   }
 
   /**
-   * The other ship a walker aboard `ship` may cross into, when the two are clamped together, both have
-   * rooms, and the walker stands at the room's own way in. Both hulls must be in this world: another
-   * player's rooms are not simulated here, so there is nothing to step into.
+   * The same pair without the door test: the hull clamped to this one that is a place to stand in,
+   * by name. It is what the menu's row is written from, so the row can say "stand at the way in"
+   * rather than simply not appearing while the walker is at the far end of the cabin.
    */
-  crossing(ship: Vehicle, at: THREE.Vector3): { to: Vehicle; label: string } | null {
+  crossPair(from: CrossSide): CrossTo | null {
+    const other = this.pairOf(from);
+    if (!other) return null;
+    const label = this.roomLabel(other);
+    return label === null ? null : ({ ...other, label } as CrossTo);
+  }
+
+  /**
+   * The hull clamped to this one, either way round and whoever flies it, or null. Our own clamp knows
+   * its pair exactly and will not answer until the settle has run out; a peer's ship riding our hull
+   * is known only by the grant we gave them (their clamp is theirs), so its own ease is theirs to
+   * finish and the gate on that side is simply whether their rooms are here.
+   */
+  private pairOf(side: CrossSide): CrossSide | null {
     const c = this.carried;
-    if (!c || c.settleLeft > 0) return null;
-    const other = c.ship === ship ? (c.on.kind === 'ship' ? c.on.ship : null) : this.carryingOn(ship) ? c.ship : null;
-    if (!other || other.disposed || !other.interior || !ship.interior) return null;
-    if (!atTheDoor(at, ship.interior.entry, CLAMP_TUNE)) return null;
-    return { to: other, label: other.spec.label };
+    if (c && c.settleLeft <= 0) {
+      if (side.kind === 'ship' && side.ship === c.ship) return c.on;
+      if (sameSide(side, c.on)) return { kind: 'ship', ship: c.ship };
+    }
+    // One grant per pair of hulls, so the first that names this side is the pair -- but only while
+    // they are really on it.
+    for (const [id, v] of this.allowed) {
+      const ours = side.kind === 'ship' && side.ship === v;
+      const theirs = side.kind === 'peer' && side.id === id;
+      if (!ours && !theirs) continue;
+      if (!this.resting(id, v)) continue;
+      return ours ? { kind: 'peer', id } : { kind: 'ship', ship: v };
+    }
+    return null;
+  }
+
+  /**
+   * Whether the ship a peer was let onto this hull is really lying on it. The grant on its own says
+   * nothing about that: it is written the moment this pilot says yes, which is before the asking ship
+   * has flown a metre of an approach that reaches fifty of them, and it stands until they say they
+   * have let go -- which a pilot whose own clamp never began never says. Their clamp is theirs and
+   * this browser cannot see it, so the test is the one an undock already uses the other way round:
+   * they are on the hull for as long as they are not clear of it.
+   */
+  private resting(id: number, carrier: Vehicle): boolean {
+    const peers = this.peers;
+    if (!peers || carrier.disposed) return false;
+    const info = peers.vehicleOf(id);
+    if (!info || !peers.vehiclePose(id, this.pairPos, this.pairQ, this.pairVel)) return false;
+    return !clampClear(this.pairPos, carrier.pos, info.radius, carrier.radius, CLAMP_TUNE);
+  }
+
+  /** The way in of the room a walker is standing in, in that hull's own frame; null when it has none. */
+  private entryOf(side: CrossSide): THREE.Vector3 | null {
+    if (side.kind === 'ship') return side.ship.disposed ? null : side.ship.interior?.entry ?? null;
+    return peerRooms()?.roomOf(side.id)?.entry ?? null;
+  }
+
+  /**
+   * What to call the hull a crossing would go into, or null when there is nothing there to step into.
+   *
+   * For a hull another player flies that is "built, or buildable". A hull nothing in this browser can
+   * make a place of answers `why` and is refused here; one that simply has not been asked for yet is
+   * a crossing that waits while it is built, which is the whole point of the row and of the note the
+   * walker gets. Gating this on the rooms being up already would mean the first crossing into a
+   * friend's hull could never be started, since nothing else ever asks for them to be built.
+   */
+  private roomLabel(side: CrossSide): string | null {
+    if (side.kind === 'ship') return !side.ship.disposed && side.ship.interior ? side.ship.spec.label : null;
+    const rooms = peerRooms();
+    if (!rooms) return null;
+    return rooms.roomOf(side.id) || rooms.why(side.id) === null ? rooms.label(side.id) : null;
   }
 
   /**

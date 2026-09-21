@@ -75,7 +75,7 @@ import { CharacterSelect } from './ui/characterSelect';
 import { CreatorBar } from './ui/creatorBar';
 import { Menu, keyName, onBindingsChanged, notifyBindingsChanged } from './ui/menu';
 import { ShipMenu, type ShipCruise, type ShipStatus } from './ui/shipMenu';
-import { Docking } from './space/docking';
+import { BOARD_TUNE, Docking, boardRow, onPeerHullGone, peerHullGone, peerRooms, setPeerRooms, type BoardState, type CrossSide, type CrossTo, type PeerRooms } from './space/docking';
 import { CLAMP_TUNE, DOCK_TUNE } from './space/dockingMath';
 import { HyperspaceUi } from './ui/hyperspaceUi';
 import { Hyperspace } from './space/hyperspace';
@@ -109,7 +109,7 @@ import { CHAT_TUNE, ChatUi, tuneChat } from './ui/chatUi.ts';
 import { COMBAT_TUNE, CombatNet, tuneCombat } from './net/combatNet.ts';
 import type { Bolt } from './combat/bolts';
 import { applyAppearance, dress, packLook } from './player/look';
-import { RemotePlayers } from './net/remotePlayers';
+import { RemotePlayers, watchPeers } from './net/remotePlayers';
 import { remoteBlades } from './net/remoteBlades.ts';
 import { danceOf, defaultEmotes, emoteChoices, FLOURISHES, isDanceClip, isFlourishClip, loadEmotes, loopsEmote, saveEmotes } from './core/emotes';
 import { HUD_DPR_RANGE, HUD_LINES_RANGE, HUD_SCALE_RANGE, loadSettings, type Settings } from './core/settings';
@@ -117,7 +117,7 @@ import { deleteCharacter, loadCharacters, newCharacterId, upsertCharacter, type 
 import { FRAME_NUDGE, Garage, type VehicleDef } from './vehicles/garage';
 import { WINGS_KEY, WING_RULE, dropPilotChoices } from './vehicles/wings';
 import { CUT_ENGINES_KEY, LANDING, SHIP_GROUND, SHIP_ROOM, SPACE_LANDING } from './vehicles/landing';
-import { SURFACE_ROOM, SurfaceRoom, isSurfaceRoom, probeSurface, roomFrame, roomTurn } from './vehicles/surfaceRoom';
+import { SURFACE_ROOM, SurfaceRoom, isSurfaceRoom, probeSurface, roomFrame, roomTurn, type WalkableRoom } from './vehicles/surfaceRoom';
 import type { Vehicle, VehicleKind } from './vehicles/vehicle';
 import { HEAD_TO_EYE, SEATED_EYE_FALLBACK, SEAT_RULE, cockpitYawStep, frameFileName, mirroredOffset, seatDropUsed } from './vehicles/cockpitSeat';
 import { World } from './world/world';
@@ -244,6 +244,17 @@ interface ShipCrossing {
 const tmp2 = new THREE.Vector3();
 /** Where a thrown blade is in the world, for the state that carries it; written once a message. */
 const thrownAt = new THREE.Vector3();
+/** Scratch for putting a walker out of a hull another player flies: where that hull is, and what it is doing. */
+const goneAt = new THREE.Vector3();
+const goneVel = new THREE.Vector3();
+/**
+ * Scratch for the look round the other players' hulls (which one is near enough to board, and where
+ * one stands). Its own, because the action bar asks that every frame and the answer is read while the
+ * pair above is still wanted.
+ */
+const peerAt = new THREE.Vector3();
+const peerVel = new THREE.Vector3();
+const peerTurn = new THREE.Quaternion();
 /** Scratch for the gravity boots' look round for something to stand on: the ways looked and the best of them. */
 const bootScratch = [0, 1, 2, 3, 4, 5, 6, 7, 8].map(() => new THREE.Vector3());
 const bootDir: THREE.Vector3[] = [];
@@ -798,11 +809,74 @@ class App {
         eject: () => void this.eject(),
         hyperspace: () => this.hyperspaceButton(),
         dock: () => this.dockButton(),
+        board: () => this.boardButton(),
         cruise: () => this.cruiseControl?.toggle(),
       },
       () => keyName(this.input.bindings.ship[0] ?? ''),
     );
     this.shipMenu.onClose = () => this.toggleShipMenu();
+    // Boarding: whoever makes a hull somebody else flies into a place to stand in tells this before it
+    // takes one down, so a walker standing in it is put out into the world while its physics is still
+    // there. Registered once for the page; with nobody building such rooms it is never called.
+    onPeerHullGone((id) => this.peerHullGone(id));
+    // And the other way: what this browser can make of another player's hull speaks its own language
+    // -- pictures, peers and little Rapier worlds -- and boarding speaks in rooms and relay ids. This
+    // is the one place the two meet, and nothing in it builds anything: it asks. Everything it reads
+    // it reads at call time, so it is registered here, long before the peers themselves exist.
+    {
+      const rooms = this.world.remoteRooms();
+      /** Which player's hull a room is, kept as each one is handed over. Weak: an entry goes with the room it names. */
+      const whose = new WeakMap<WalkableRoom, number>();
+      const note = (id: number, room: WalkableRoom | null | undefined): WalkableRoom | null => {
+        if (room) whose.set(room, id);
+        return room ?? null;
+      };
+      /** The hull whose rooms are being taken down at this instant, while that call is on the stack; 0 otherwise. */
+      let leaving = 0;
+      setPeerRooms({
+        roomOf: (id) => note(id, rooms.roomOf(id)?.interior),
+        idOf: (room) => (room ? whose.get(room) ?? 0 : 0),
+        open: async (id) => note(id, (await rooms.board(id))?.interior),
+        aboard: (id, yes) => {
+          // Not back into a room that is in the middle of being taken down: that word is answered
+          // there by hand, below, and saying it again from inside the call would re-enter a teardown
+          // already on the stack.
+          if (leaving === id && !yes) return;
+          rooms.enter(id, yes);
+        },
+        close: (id) => {
+          // Never under the walker. A room somebody is standing in is given back when they step out
+          // of it, and freeing its physics world with a body in it is the one mistake here that is
+          // not survivable.
+          const room = this.player.aboard;
+          if (room && whose.get(room) === id) return;
+          rooms.enter(id, false);
+          rooms.release(id);
+        },
+        why: (id) => this.peerHullWhy(id),
+        nearest: (at, range) => this.nearestPeerHull(at, range),
+        label: (id) => this.remotes.vehicleOf(id)?.label ?? 'ship',
+        hullAt: (id, pos, vel) => (this.remotes.vehiclePose(id, pos, peerTurn, vel) ? this.remotes.vehicleOf(id)?.radius ?? 0 : 0),
+      });
+      // A room about to be freed with somebody in it. Once this has returned nobody is in it --
+      // stepped out here, or never in it at all and the flag left over from a travel -- so it is
+      // theirs to free rather than to cut loose and keep standing where the hull was.
+      rooms.onMustLeave = (id, room) => {
+        leaving = id;
+        try {
+          peerHullGone(id);
+        } finally {
+          leaving = 0;
+          room.held = false;
+        }
+      };
+      // Which picture each player's ride is, so boarding can tell a hull with rooms in it from a
+      // speeder before it offers anything. One write per player per frame and nothing allocated.
+      watchPeers({
+        peerMoved: (p) => void this.peerHulls.set(p.id, p.ship),
+        peerRemoved: (id) => void this.peerHulls.delete(id),
+      });
+    }
     // The System Map and the jump. What these read is assigned above: this.ui (a field initialiser),
     // this.input, this.world, this.cam, this.player, this.scene (a field initialiser, where the tunnel
     // goes); this.postfx may be null and is read with ?. at call time. Neither constructor calls anything
@@ -3996,14 +4070,19 @@ class App {
     }
     if (room) {
       s.aboard = true;
-      s.atControls = !!room.pilotSpot && p.pos.distanceTo(room.pilotSpot) < CONTROLS_RANGE;
+      // Aboard a hull another player flies there is nothing here to take the controls of and no ship
+      // menu to open: their ship is theirs, and E is both the way in and the way out of it.
+      const theirs = (peerRooms()?.idOf(room) ?? 0) !== 0;
+      s.atControls = !theirs && !!room.pilotSpot && p.pos.distanceTo(room.pilotSpot) < CONTROLS_RANGE;
+      if (theirs) s.shipMenu = '';
       // Aboard a hull in space the menu is reached from the rooms; on a planet it is not.
       return s;
     }
     // One walk of the vehicles for all three of the questions the long line asked separately: is
     // one in reach, has it a room to step into, and is it on its back.
     const near = this.nearestVehicle();
-    s.near = !near ? '' : near.interior ? 'board' : near.upsideDown ? 'flip' : 'mount';
+    // Nothing of this world's within reach, but a hull another player flies may be: E boards that.
+    s.near = near ? (near.interior ? 'board' : near.upsideDown ? 'flip' : 'mount') : peerRooms()?.nearest(p.pos, BOARD_TUNE.reach) ? 'board' : '';
     s.eva = p.eva;
     return s;
   }
@@ -4918,9 +4997,14 @@ class App {
       const room = p.aboard;
       room.reveal(false);
       // A corpse's pieces live in the room's own physics (startRagdoll builds them there): they go before the
-      // room does, or the world is freed under bodies the next frame still reads.
-      if (isSurfaceRoom(room) && p.ragdoll) p.endRagdoll();
+      // room does, or the world is freed under bodies the next frame still reads. A hull somebody else flies
+      // has a little world of its own too, and it is freed the moment this one is.
+      if (p.ragdoll) p.endRagdoll();
       p.leave();
+      // And whoever built that hull's rooms is told nobody is in them, or they are left marked as
+      // held and are never given back.
+      const peer = peerRooms()?.idOf(room) ?? 0;
+      if (peer) peerRooms()?.aboard(peer, false);
       // A surface belongs to nothing but the boots: it is given up here, or its world would be left behind.
       if (isSurfaceRoom(room)) room.dispose();
     }
@@ -5041,6 +5125,10 @@ class App {
     const p = this.player;
     const below = planetBelow(this.world.planet);
     if (!below || this.traveling || !(p.mounted || p.aboard)) return;
+    // Never out of a hull another player flies. The way out of theirs is E, which takes the body out
+    // of that room's own little physics world and stands the figure beside the hull; a travel from in
+    // there would unload this world around a body that is not in it.
+    if ((peerRooms()?.idOf(p.aboard) ?? 0) !== 0) return;
     this.closePanels();
     await this.travel(below);
   }
@@ -5453,7 +5541,9 @@ class App {
     // read in stepLiving, which runs after this in the loop and in __debug.advance alike.
     this.world.simulating = simulate;
     // A hull removed with someone still in its rooms (the garage's clear, the console): out into the world first.
-    if (player.aboard && !this.world.vehicles.includes(player.aboard.vehicle)) this.thrownOutOfShip(player.aboard.vehicle);
+    // A hull somebody else flies is in no such list -- it is a picture with rooms hung under it, and the rooms
+    // themselves call the walker out (peerHullGone) when that player's ship goes.
+    if (player.aboard && !peerRooms()?.idOf(player.aboard) && !this.world.vehicles.includes(player.aboard.vehicle)) this.thrownOutOfShip(player.aboard.vehicle);
     let drive: DriveInput | null = null;
     const pilot = player.mounted ?? player.piloting;
     const playerHull = pilot ?? player.aboard?.vehicle ?? null;
@@ -6346,6 +6436,11 @@ class App {
   /** The ship the player is in and their standing with it, for the ship menu; null on foot or on a ground vehicle. */
   private shipStatus(): ShipStatus | null {
     const p = this.player;
+    // Aboard a hull another player flies there is no ship menu at all: not one row of it is this
+    // browser's to press. The hull those rooms name is a stand-in nobody here flies, and a menu drawn
+    // from it would offer to land, jump, dock and eject somebody else's ship. E is the way back out,
+    // at the way in or anywhere else in the room.
+    if (this.crossSideOf(p.aboard)?.kind === 'peer') return null;
     const ship = p.mounted ?? p.piloting ?? p.aboard?.vehicle ?? null;
     if (!ship?.spec.ship) return null;
     const inSpace = !!this.world.planet.space;
@@ -6370,6 +6465,7 @@ class App {
         busy: hs.phase !== 'idle' && !counting,
       },
       dock: this.docking.menuRow(ship, role, inSpace),
+      board: boardRow(this.boardState()) ?? undefined,
       cruise: this.cruiseControl?.available(),
       speed: Math.round(Math.abs(ship.speed) * 3.6),
     };
@@ -6393,6 +6489,45 @@ class App {
     const why = this.dockRefusal();
     if (why) this.messages.system(why);
     return why !== null;
+  }
+
+  /**
+   * Where the walker stands for the ship menu's Board row, or null when there is nothing to cross
+   * into and the row is not shown. Only a walker in a ship's rooms has anywhere to cross from -- from
+   * a cockpit seat there is no way in to stand at -- and only into a hull another player flies, since
+   * that is the crossing that can be waited on and refused; between two hulls of this world E at the
+   * way in is instant, and a row about it would be a change to a game played alone.
+   */
+  private boardState(): BoardState | null {
+    const rooms = peerRooms();
+    if (this.crossingTo) return { across: rooms?.label(this.crossingTo) ?? null, theirs: true, atDoor: false, opening: true, why: null };
+    const p = this.player;
+    const room = p.aboard;
+    const side = this.crossSideOf(room);
+    if (!room || !side) return null;
+    const pair = this.docking.clamp.crossPair(side);
+    if (!pair) return null;
+    return {
+      across: pair.label,
+      theirs: pair.kind === 'peer',
+      atDoor: !!this.docking.clamp.crossing(side, p.pos),
+      opening: false,
+      // A hull whose rooms are not built yet is a crossing that waits, not one that is refused: a
+      // reason here is whoever would build them saying they can never be a place at all.
+      why: pair.kind === 'peer' ? rooms?.why(pair.id) ?? null : null,
+    };
+  }
+
+  /** The ship menu's Board row: step across into the rooms of the ship clamped to this one. */
+  private boardButton(): void {
+    const p = this.player;
+    const room = p.aboard;
+    const side = this.crossSideOf(room);
+    const across = room && side ? this.docking.clamp.crossing(side, p.pos) : null;
+    if (!room || !across) return;
+    this.shipMenu.hide();
+    this.freeMouse(false);
+    void this.crossTo(room, across);
   }
 
   /** The ship menu's docking row: ask for a lane, leave the dock, or break off, whichever it offers. */
@@ -7087,7 +7222,12 @@ class App {
         p.piloting = null;
         return;
       }
-      if (room.pilotSpot && p.pos.distanceTo(room.pilotSpot) < CONTROLS_RANGE) {
+      // Which hull this is: one of this world's, or one another player flies. Read before the
+      // controls, because you do not fly somebody else's ship -- aboard theirs there is no spot to
+      // take the controls at, only the way in and the way out, and the hull the rooms name there is a
+      // stand-in nothing in this browser flies.
+      const side = this.crossSideOf(room);
+      if (side?.kind !== 'peer' && room.pilotSpot && p.pos.distanceTo(room.pilotSpot) < CONTROLS_RANGE) {
         p.piloting = v;
         this.cam.zoomTarget = Math.max(this.cam.zoomTarget, 6);
         this.messages.note(`at the controls of the ${v.spec.label}`);
@@ -7095,10 +7235,11 @@ class App {
       }
       // The two hulls are clamped together and this walker stands at the room's own way in: E crosses
       // into the other ship's rooms rather than stepping out of a door that opens onto the hull it
-      // rides. Anywhere else in the room E steps out as it always did.
-      const across = this.docking.clamp.crossing(v, p.pos);
+      // rides. Either hull may be one another player flies. Anywhere else in the room E steps out as
+      // it always did.
+      const across = side && this.docking.clamp.crossing(side, p.pos);
       if (across) {
-        this.crossToShip(room, across.to);
+        void this.crossTo(room, across);
         return;
       }
       this.leaveShip(false);
@@ -7131,6 +7272,15 @@ class App {
       p.mount(best);
       if (best.spec.ship && best.def) this.lastShipDef = best.def;
       this.cam.distance = Math.max(this.cam.distance, 9.5);
+      return;
+    }
+    // Nothing of this world's within reach, but a hull another player flies may be: E boards it, which
+    // builds their rooms here the first time. A hull of our own always wins, so nothing about walking
+    // up to your own ship changes, and with nobody building peers' rooms this answers 0 and the boots
+    // below are what E does, exactly as before.
+    const near = peerRooms()?.nearest(p.pos, BOARD_TUNE.reach) ?? 0;
+    if (near) {
+      void this.boardPeerShip(near);
       return;
     }
     // Nothing to climb into, and out in space: the gravity boots take hold of whatever is within reach.
@@ -7253,21 +7403,244 @@ class App {
   }
 
   /**
-   * Out of one clamped ship's rooms and into the other's, at its way in. The body leaves the room it
-   * was in before it is put in the next (`Player.board` does that itself), so it is never left in a
-   * physics world nothing steps; a flame held in the old hull's frame goes out with it.
+   * Which hull a room belongs to, as the clamp names hulls: one of this world's, or one another
+   * player flies. Null for a surface the boots hold to, which is nobody's rooms.
    */
-  private crossToShip(from: import('./vehicles/surfaceRoom').WalkableRoom, to: Vehicle): void {
-    const room = to.interior;
+  private crossSideOf(room: WalkableRoom | null | undefined): CrossSide | null {
+    if (!room || isSurfaceRoom(room)) return null;
+    const id = peerRooms()?.idOf(room) ?? 0;
+    return id ? { kind: 'peer', id } : { kind: 'ship', ship: room.vehicle };
+  }
+
+  /** The picture of the ride each other player is on, refilled by the peers themselves. Nothing but the boarding questions reads it. */
+  private readonly peerHulls = new Map<number, THREE.Object3D | null>();
+  /** Scratch for the walk of the peers, so asking every frame allocates nothing. */
+  private readonly peerHullIds: number[] = [];
+
+  /**
+   * Whether the ride that player is on is a hull with rooms in it at all. The picture says which
+   * vehicle it is and the garage says whether that one has rooms, which is the same test whoever
+   * builds them makes -- they are the authority and refuse for themselves, but a question asked
+   * before anything is built keeps the action bar from offering to board a speeder bike.
+   */
+  private peerHullRooms(id: number): boolean {
+    const picture = this.peerHulls.get(id);
+    const vehicleId = typeof picture?.userData.vehicleId === 'string' ? (picture.userData.vehicleId as string) : '';
+    if (!vehicleId) return false;
+    // A peer's picture was built by the garage, so by the time there is one the garage is loaded.
+    const def = this.world.garage?.find(vehicleId);
+    return !!def && (!!def.interior || (def.cells ?? []).some((c) => c.index > 0));
+  }
+
+  /**
+   * The player whose hull's side is nearest this point and within `range` of it, or 0. A hull of this
+   * world always wins before this is asked, so nothing about walking up to your own ship changes, and
+   * with no relay there are no peers and this is one walk of an empty list.
+   */
+  private nearestPeerHull(at: THREE.Vector3, range: number): number {
+    let best = 0;
+    let bestD = range;
+    for (const id of this.remotes.shipPeers(this.peerHullIds)) {
+      if (!this.peerHullRooms(id)) continue;
+      const info = this.remotes.vehicleOf(id);
+      if (!info || !this.remotes.vehiclePose(id, peerAt, peerTurn, peerVel)) continue;
+      const d = at.distanceTo(peerAt) - info.radius;
+      if (d >= bestD) continue;
+      bestD = d;
+      best = id;
+    }
+    return best;
+  }
+
+  /**
+   * Why that player's hull is not somewhere to stand, in words, or null when it is -- or will be once
+   * it has been asked for, which is what the crossing's own wait is about. Only a hull that can never
+   * be one is a refusal here.
+   */
+  private peerHullWhy(id: number): string | null {
+    if (this.world.remoteRooms().roomOf(id)) return null;
+    if (!this.remotes.vehicleOf(id)) return 'their ship is not here';
+    if (!this.peerHullRooms(id)) return 'there are no rooms in their ship to stand in';
+    return null;
+  }
+
+  /**
+   * A crossing asked for and still being made ready: the hull it is into, so the row says so and a
+   * second press does not ask twice. 0 when nothing is being made ready.
+   */
+  private crossingTo = 0;
+
+  /**
+   * Their rooms, built and made ready, or null when that takes longer than boarding is prepared to
+   * wait for. A build is a load and a compile a drawable at a time, and a hidden tab compiles as it
+   * polls, so the wait is generous; a build that lands after it is given back rather than left open.
+   * `crossingTo` is held for the whole of it, so a second press asks nothing twice.
+   */
+  private async roomsOf(rooms: PeerRooms, id: number): Promise<WalkableRoom | null> {
+    this.crossingTo = id;
+    let timer = 0;
+    const gaveUp = new Promise<null>((resolve) => {
+      timer = window.setTimeout(() => resolve(null), BOARD_TUNE.wait * 1000);
+    });
+    const job = rooms.open(id);
+    try {
+      const room = await Promise.race([job, gaveUp]);
+      // Given back when it lands, not now: a build still running has nothing to close, and one closed
+      // that way would finish afterwards and leave a room standing that nobody had asked for.
+      if (!room) {
+        void job.then(
+          (late) => {
+            if (late) rooms.close(id);
+          },
+          () => {},
+        );
+      }
+      return room;
+    } finally {
+      window.clearTimeout(timer);
+      this.crossingTo = 0;
+    }
+  }
+
+  /**
+   * Out of one clamped ship's rooms and into the other's, at its way in, whoever flies either of them.
+   * A hull another player flies is only rooms once this browser has built them, which is a load and a
+   * compile: the first crossing into one waits for that, and everything is asked again afterwards,
+   * because a second or two is long enough for the pair to have come apart or the walker to have died.
+   *
+   * The body leaves the room it was in before it is put in the next (`Player.board` does that itself),
+   * so it is never left in a physics world nothing steps; a flame held in the old hull's frame goes
+   * out with it.
+   */
+  private async crossTo(from: WalkableRoom, to: CrossTo): Promise<void> {
+    const p = this.player;
+    const rooms = peerRooms();
+    let room = to.kind === 'ship' ? to.ship.interior : rooms?.roomOf(to.id) ?? null;
+    if (!room && to.kind === 'peer') {
+      if (!rooms || this.crossingTo) return;
+      this.messages.note(`building the rooms of the ${to.label}…`);
+      room = await this.roomsOf(rooms, to.id);
+      // The wait is a second or two of real play: the walker may have stepped out, died or travelled,
+      // and the two hulls may have come apart. Everything is asked again rather than assumed -- the
+      // room itself included, since one built and then taken down between the two lines would be a
+      // physics world that is gone.
+      const side = this.crossSideOf(p.aboard);
+      const still = side && this.docking.clamp.crossPair(side);
+      if (!room || rooms.roomOf(to.id) !== room || p.aboard !== from || this.dying || this.traveling || !still || still.kind !== 'peer' || still.id !== to.id) {
+        this.messages.system(rooms.why(to.id) ?? `the ${to.label} is no longer there to cross into`);
+        if (room) rooms.close(to.id);
+        return;
+      }
+    }
     if (!room) return;
+    const leaving = rooms?.idOf(from) ?? 0;
+    const entering = to.kind === 'peer' ? to.id : 0;
     // The camera steps from one hull's frame into another's: the effects have no history across it.
     this.postfx?.reset();
     (this.kits.bounty_hunter as BountyHunterKit | undefined)?.coolDown();
-    from.reveal(false);
-    room.reveal(true);
-    this.player.board(room, room.entry.clone());
+    // The room stepped into is shown first, then the body moves (`board` takes it out of the old
+    // room's own physics), and only then is the room stepped out of told that nobody is in it --
+    // which for a hull another player flies is also what lets it be taken down.
+    if (entering && rooms) rooms.aboard(entering, true);
+    else room.reveal(true);
+    p.board(room, room.entry.clone());
+    if (leaving && rooms) rooms.aboard(leaving, false);
+    else from.reveal(false);
     this.cam.zoomTarget = Math.min(this.cam.zoomTarget, 4);
-    this.messages.note(`across in the ${to.spec.label}: E at the way in crosses back, E anywhere else steps out`);
+    this.messages.note(`across in the ${to.label}: E at the way in crosses back, E anywhere else steps out`);
+  }
+
+  /**
+   * Step into the rooms of a ship another player flies, from outside it. Their hull is a picture until
+   * this is asked for: the rooms are built, prepared and compiled before anything is shown, so the
+   * first boarding of a hull waits a second or two and every one after it is at once.
+   *
+   * Everything is asked again after the wait: the walker may have mounted something, boarded something
+   * else, died or travelled while their rooms were being built.
+   */
+  private async boardPeerShip(id: number): Promise<void> {
+    const rooms = peerRooms();
+    const p = this.player;
+    if (!rooms || this.crossingTo) return;
+    let room = rooms.roomOf(id);
+    if (!room) {
+      this.messages.note(`building the rooms of the ${rooms.label(id)}…`);
+      room = await this.roomsOf(rooms, id);
+      if (!room) {
+        this.messages.system(rooms.why(id) ?? 'their ship is not somewhere to stand just now');
+        return;
+      }
+      if (p.aboard || p.mounted || this.dying || this.traveling || rooms.nearest(p.pos, BOARD_TUNE.reach) !== id) {
+        this.messages.system(`stepped away while the ${rooms.label(id)} was being made ready`);
+        rooms.close(id);
+        return;
+      }
+    }
+    this.postfx?.reset();
+    rooms.aboard(id, true);
+    p.board(room, room.entry.clone());
+    this.cam.zoomTarget = Math.min(this.cam.zoomTarget, 4);
+    this.messages.note(`aboard the ${rooms.label(id)}: E steps out, and the room has physics of its own`);
+  }
+
+  /**
+   * A hull somebody else flies is about to stop being a place to stand in -- that player has gone, the
+   * line dropped, or their ship was let go of -- and this browser is standing in it. The walker is put
+   * out into the world beside the hull before anything of the room is freed: a body left in a physics
+   * world that has been freed is the one mistake this path cannot survive.
+   */
+  private peerHullGone(id: number): void {
+    const rooms = peerRooms();
+    if (rooms && this.stepOutOfPeerHull(id)) this.messages.system(`the ${rooms.label(id)} is gone: you are outside it`);
+  }
+
+  /**
+   * Out of the rooms of a hull another player flies, into the world beside it. True when the walker
+   * really was in that hull, so the caller knows whether to say anything. Nothing of the peer's ship
+   * is read but the picture's own place, motion and size, which is all this browser has of it.
+   */
+  private stepOutOfPeerHull(id: number, fell = false): boolean {
+    const p = this.player;
+    const rooms = peerRooms();
+    const room = p.aboard;
+    if (!rooms || !room || rooms.idOf(room) !== id) return false;
+    room.toWorld(p.pos, tmp);
+    const radius = rooms.hullAt(id, goneAt, goneVel);
+    const hullY = goneAt.y;
+    if (p.ragdoll) p.endRagdoll();
+    p.leave();
+    // A flame held in that hull's frame lived in a frame that is going: it stops here.
+    (this.kits.bounty_hunter as BountyHunterKit | undefined)?.coolDown();
+    this.postfx?.reset();
+    // Whoever built the rooms is told nobody is in them any more, which is also what lets them go.
+    rooms.aboard(id, false);
+    // Clear of where the hull was, along the way out from its middle; standing exactly at that middle
+    // (nothing to point away from) the figure simply goes sideways, which is as good as any other way.
+    // Having fallen out of a door in flight, the figure stays exactly where the hull's frame put it,
+    // as it does out of one of this world's: it fell out of that spot and is not being shown out.
+    if (!fell && radius > 0) {
+      goneAt.sub(tmp);
+      if (goneAt.lengthSq() < 1e-6) goneAt.set(-1, 0, 0);
+      tmp.addScaledVector(goneAt.normalize(), -(radius + 1.5));
+    }
+    // On a planet there is ground under that spot, and none of it is theirs to ignore: without this
+    // a walker shown out of a friend's parked ship is left standing in the hillside, or in the air.
+    if (!fell && !this.world.planet.space) {
+      const from = Math.max(tmp.y, hullY) + 0.5;
+      // The walker's own body is back in this world at the place it was left, which may be exactly
+      // here: cast from inside a capsule, a ray finds that capsule and calls its middle the floor.
+      const hit = this.physics.groundDistance(tmp.x, from, tmp.z, 40, p.body);
+      tmp.y = hit !== null ? from - hit + 0.15 : Math.max(this.world.terrain.heightAt(tmp.x, tmp.z), this.world.terrain.waterLevel - 1) + 0.3;
+    }
+    p.stand(tmp);
+    // Their hull's own motion, in space and in the air alike: it is all this browser has of it, and
+    // a fall out of a hull at speed without it is a sideways teleport.
+    if (radius > 0 && (fell || this.world.planet.space)) {
+      p.vel.copy(goneVel);
+      p.grounded = false;
+    } else p.grounded = !this.world.planet.space && !fell;
+    this.cam.setFrame(null);
+    return true;
   }
 
   /** Step into a ship's room, at its entry. The seat inside is not there yet: E again steps out. */
@@ -7322,6 +7695,19 @@ class App {
     // The figure is stood beside the hull, so this is a camera cut too. Below the guard: a call
     // made with nobody aboard changes nothing and should cut nothing.
     this.postfx?.reset();
+    // Out of a hull somebody else flies: nothing of theirs is this game's to read -- no hull box to
+    // step beside, no body to take a velocity off -- so the figure goes out by the room's own frame,
+    // clear of the picture, and `reveal(false)` is what tells whoever built the rooms nobody is in
+    // them. Everything below reads `room.vehicle`, which for their hull is a stand-in.
+    const peer = peerRooms()?.idOf(room) ?? 0;
+    if (peer) {
+      // Stepping out says nobody is in them and no more. Taking them down here would build the whole
+      // interior again on the next press, and this runs on any frame the walker is outside the room's
+      // own box -- a step through a doorway in flight would rebuild their ship every frame. Whoever
+      // built them lets them go once their hull stops being drawn.
+      this.stepOutOfPeerHull(peer, fell);
+      return;
+    }
     const v = room.vehicle;
     // The boots: the figure is left adrift exactly where it stood, carrying what it was doing in the room
     // and what the room itself was doing, and the room goes with it (nothing else holds a surface).

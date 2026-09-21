@@ -10,7 +10,7 @@
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
 import { Physics, RAPIER } from '../../../src/core/physics.ts';
-import { Docking, type ClampWord } from '../../../src/space/docking.ts';
+import { BOARD_TUNE, Docking, boardKnob, boardRow, onPeerHullGone, peerHullGone, peerRooms, setPeerRooms, type ClampWord, type PeerRooms } from '../../../src/space/docking.ts';
 import {
   CLAMP_TUNE,
   atTheDoor,
@@ -348,18 +348,190 @@ function fakeWorld(vehicles: unknown[], physics: unknown = null) {
   ship.interior = { entry: new THREE.Vector3(0, 0, -1) };
   const docking = new Docking(fakeWorld([carrier, ship]) as never);
   const clamp = docking.clamp;
-  ok(clamp.crossing(ship as never, ship.interior.entry) === null, '8: with the two ships apart there is nowhere to cross to');
+  const from = { kind: 'ship', ship: ship as never } as const;
+  const fromCarrier = { kind: 'ship', ship: carrier as never } as const;
+  ok(clamp.crossing(from, ship.interior.entry) === null, '8: with the two ships apart there is nowhere to cross to');
   clamp.dock(ship as never);
-  ok(clamp.crossing(ship as never, ship.interior.entry) === null, '8: nor while the hull is still coming alongside');
+  ok(clamp.crossing(from, ship.interior.entry) === null, '8: nor while the hull is still coming alongside');
   for (let i = 0; i < 200; i++) docking.step(null, 1 / 60, null);
-  const across = clamp.crossing(ship as never, ship.interior.entry);
-  ok(across?.to === (carrier as never), `8: at the small ship's own way in, the crossing is to the hull it rides (${across?.label})`);
-  ok(clamp.crossing(ship as never, new THREE.Vector3(0, 0, 400)) === null, '8: and nowhere else in the room, where E steps out as it always did');
-  const back = clamp.crossing(carrier as never, carrier.interior.entry);
-  ok(back?.to === (ship as never), '8: from the carrier it goes the other way');
+  const across = clamp.crossing(from, ship.interior.entry);
+  ok(across?.kind === 'ship' && across.ship === (carrier as never), `8: at the small ship's own way in, the crossing is to the hull it rides (${across?.label})`);
+  ok(clamp.crossing(from, new THREE.Vector3(0, 0, 400)) === null, '8: and nowhere else in the room, where E steps out as it always did');
+  // The same pair without the door test: what the menu's row is written from, so it can say "stand at
+  // the way in" rather than simply not being there.
+  const pair = clamp.crossPair(from);
+  ok(pair?.kind === 'ship' && pair.ship === (carrier as never), '8: the pair itself is known wherever in the room the walker stands');
+  const back = clamp.crossing(fromCarrier, carrier.interior.entry);
+  ok(back?.kind === 'ship' && back.ship === (ship as never), '8: from the carrier it goes the other way');
   // A hull with no rooms is nothing to cross into: stepping out puts you beside it, as it always did.
   carrier.interior = null;
-  ok(clamp.crossing(ship as never, ship.interior.entry) === null, '8: a carrier with no rooms offers no crossing');
+  ok(clamp.crossing(from, ship.interior.entry) === null && clamp.crossPair(from) === null, '8: a carrier with no rooms offers no crossing');
+}
+
+// --- 8b: crossing to and from a hull another player flies -------------------------------------------
+// A peer's ship is a picture with its rooms hidden and no physics until something in this browser
+// builds them. Nothing here builds anything: the clamp only asks whoever does, and with nobody
+// registered every answer is the one it always gave, which is what playing alone looks like.
+{
+  /** A room of theirs, as little of one as the crossing reads: its own way in, in that hull's frame. */
+  const theirRoom = { entry: new THREE.Vector3(2, 0, -3) } as never;
+  let built = false;
+  /** What whoever builds the rooms says about that hull: null is "it is one, or will be once asked". */
+  let refusal: string | null = null;
+  const opened: number[] = [];
+  const closed: number[] = [];
+  const held: boolean[] = [];
+  const fakeRooms: PeerRooms = {
+    roomOf: (id) => (id === 3 && built ? theirRoom : null),
+    idOf: (room) => (room === theirRoom ? 3 : 0),
+    open: async (id) => {
+      opened.push(id);
+      built = true;
+      return theirRoom;
+    },
+    aboard: (_id, yes) => void held.push(yes),
+    close: (id) => void closed.push(id),
+    why: () => refusal,
+    nearest: () => 0,
+    label: () => 'their big hull',
+    hullAt: (_id, pos, vel) => {
+      pos.set(0, 0, 0);
+      vel.set(0, 0, 0);
+      return 33;
+    },
+  };
+
+  const ship = hull('fighter', 'small hull', box([-6, -2, -9], [6, 2, 9]), new THREE.Vector3(0, 20, 0));
+  ship.interior = { entry: new THREE.Vector3(0, 0, -1) };
+  const docking = new Docking(fakeWorld([ship]) as never);
+  const clamp = docking.clamp;
+  clamp.link = { id: () => 7, send: () => {} };
+  clamp.peers = {
+    shipPeers: (out: number[]) => ((out.length = 0), out.push(3), out),
+    vehiclePose: (id, pos, quat, vel) => {
+      if (id !== 3) return false;
+      pos.set(0, 0, 0);
+      quat.identity();
+      vel.set(0, 0, 0);
+      return true;
+    },
+    vehicleOf: (id) => (id === 3 ? { label: 'their big hull', bounds: box([-12, -4, -30], [12, 4, 30]), radius: 33 } : null),
+    peerName: () => 'the other player',
+  };
+  clamp.dock(ship as never);
+  clamp.heard(3, 'allow', ship as never);
+  for (let i = 0; i < 200; i++) docking.step(null, 1 / 60, null);
+  const mine = { kind: 'ship', ship: ship as never } as const;
+  const theirs = { kind: 'peer', id: 3 } as const;
+
+  ok(peerRooms() === null, '8b: with nothing registered, nothing in this browser can make a peer\'s hull a place to stand in');
+  ok(clamp.crossing(mine, ship.interior.entry) === null, '8b: so the crossing into it is refused, exactly as it was before any of this');
+
+  setPeerRooms(fakeRooms);
+  refusal = 'their ship is not here';
+  ok(clamp.crossing(mine, ship.interior.entry) === null, '8b: registered, but a hull nothing can make a place of is refused as it always was');
+  // Built, or buildable. Gating the crossing on the rooms being up already would mean the first
+  // crossing into a friend's hull could never be started: nothing else ever asks for them to be built,
+  // so the wait, the note and the row would all be unreachable.
+  refusal = null;
+  const waits = clamp.crossing(mine, ship.interior.entry);
+  ok(waits?.kind === 'peer' && waits.id === 3, '8b: a hull whose rooms are not built but could be is a crossing that waits, not one that is refused');
+  ok(opened.length === 0, '8b: and asking for it still builds nothing by itself');
+  built = true;
+  const over = clamp.crossing(mine, ship.interior.entry);
+  ok(over?.kind === 'peer' && over.id === 3 && over.label === 'their big hull', `8b: once their rooms are built the crossing names them (${over?.label})`);
+  ok(clamp.crossing(mine, new THREE.Vector3(0, 0, 400)) === null, '8b: and only at our own way in, as with two hulls of this world');
+  const home = clamp.crossing(theirs, theirRoom.entry);
+  ok(home?.kind === 'ship' && home.ship === (ship as never), '8b: and from their rooms it goes back the same way');
+  ok(clamp.crossing(theirs, new THREE.Vector3(40, 0, 0)) === null, '8b: from the far end of their cabin it does not');
+  // Their hull is what our ship rides, so this is the whole of what the clamp knows of the pair.
+  ship.interior = null;
+  ok(clamp.crossing(theirs, theirRoom.entry) === null, '8b: with our own rooms gone there is nothing for them to cross into either');
+  ship.interior = { entry: new THREE.Vector3(0, 0, -1) };
+
+  // A ship of theirs let onto our hull: the grant is the only record this browser has of their clamp,
+  // and it is the pair a crossing is offered for just as our own clamp is.
+  const carrier = hull('carrier', 'big hull', box([-12, -4, -30], [12, 4, 30]), new THREE.Vector3(0, 0, 0));
+  carrier.interior = { entry: new THREE.Vector3(0, -1, 4) };
+  const host = new Docking(fakeWorld([carrier]) as never);
+  host.clamp.link = { id: () => 1, send: () => {} };
+  /** Where their ship is: the grant says nothing about that, so this is the whole of what decides it. */
+  const theirAt = new THREE.Vector3(0, 400, 0);
+  host.clamp.peers = {
+    shipPeers: (o: number[]) => ((o.length = 0), o.push(3), o),
+    vehiclePose: (id, pos, quat, vel) => {
+      if (id !== 3) return false;
+      pos.copy(theirAt);
+      quat.identity();
+      vel.set(0, 0, 0);
+      return true;
+    },
+    vehicleOf: () => ({ label: 'their big hull', bounds: box([-6, -2, -9], [6, 2, 9]), radius: 9 }),
+    peerName: () => 'the other player',
+  };
+  host.clamp.heard(3, 'dock', carrier as never);
+  host.clamp.answer(true);
+  // The grant is written the moment this pilot says yes, which is before the asking ship has flown a
+  // metre of an approach that reaches fifty of them: a walker at the way in must not be put inside a
+  // hull that is still four hundred metres off.
+  ok(host.clamp.crossPair({ kind: 'ship', ship: carrier as never }) === null, '8b: a grant given while their ship is still out there is no crossing');
+  theirAt.set(0, 10, 0);
+  const outward = host.clamp.crossing({ kind: 'ship', ship: carrier as never }, carrier.interior.entry);
+  ok(outward?.kind === 'peer' && outward.id === 3, '8b: once they are lying on the hull, the crossing is into their ship');
+  const inward = host.clamp.crossing({ kind: 'peer', id: 3 }, theirRoom.entry);
+  ok(inward?.kind === 'ship' && inward.ship === (carrier as never), '8b: and out of their ship back into ours');
+  // A pilot whose own clamp never began never sends `undock`, so the grant alone would stand for the
+  // rest of the session and offer a crossing into a ship that is nowhere near.
+  theirAt.set(0, 400, 0);
+  ok(host.clamp.crossPair({ kind: 'ship', ship: carrier as never }) === null, '8b: and they fly off without a word and the crossing goes with them');
+  theirAt.set(0, 10, 0);
+  host.clamp.heard(3, 'undock', carrier as never);
+  ok(host.clamp.crossPair({ kind: 'ship', ship: carrier as never }) === null, '8b: they let go and there is no pair left to cross');
+
+  ok(opened.length === 0 && closed.length === 0 && held.length === 0, '8b: and asking about a crossing never builds, takes down or steps into anything by itself');
+  setPeerRooms(null);
+  ok(clamp.crossing(mine, ship.interior.entry) === null, '8b: letting go of the builder puts the game back exactly where it was');
+}
+
+// --- 8c: the words of the ship menu's Board row -----------------------------------------------------
+// Pure: the row is written from where the walker stands, and the menu only draws it. A row nobody can
+// press is never shown at all, which is what keeps a game played alone looking like the one on main.
+{
+  ok(boardRow(null) === null, '8c: with nothing to cross into there is no row, so the menu is the one that was always there');
+  ok(boardRow({ across: null, theirs: true, atDoor: true, opening: false, why: null }) === null, '8c: and none in a ship with nothing clamped to it');
+  ok(boardRow({ across: 'big hull', theirs: false, atDoor: true, opening: false, why: null }) === null, '8c: nor between two hulls of this world, where E at the way in is instant: a game played alone never grows a row');
+  const waiting = boardRow({ across: null, theirs: true, atDoor: false, opening: true, why: null });
+  ok(waiting?.why === 'their rooms are being built', `8c: while their rooms are being built the row says so rather than asking again (${waiting?.label})`);
+  const naming = boardRow({ across: 'big hull', theirs: true, atDoor: false, opening: true, why: null });
+  ok(naming?.label === 'Crossing to the big hull…', `8c: and it names the hull where the game could name it (${naming?.label})`);
+  const away = boardRow({ across: 'big hull', theirs: true, atDoor: false, opening: false, why: null });
+  ok(away?.label === 'Cross to the big hull' && away.why === "stand at your own room's way in to cross", `8c: standing across the cabin it says where to stand (${away?.why})`);
+  const here = boardRow({ across: 'big hull', theirs: true, atDoor: true, opening: false, why: null });
+  ok(here?.label === 'Cross to the big hull' && here.why === null && here.note === 'E at the way in does the same', `8c: at the way in it can be pressed, and says the key does it too (${here?.note})`);
+  const refused = boardRow({ across: 'big hull', theirs: true, atDoor: true, opening: false, why: 'they have gone' });
+  ok(refused?.why === 'they have gone', '8c: and a reason given by the game wins over the row\'s own');
+}
+
+// --- 8d: the two invented numbers, and the word before a room is freed -------------------------------
+{
+  const before = { ...BOARD_TUNE };
+  const knob = boardKnob();
+  ok((knob.tune as { reach: number }).reach === before.reach && knob.builder === 'none', `8d: the knob reports what boarding is set to and whether anything can build a peer's rooms (${JSON.stringify(knob.tune)})`);
+  boardKnob({ reach: 12, wait: 5 });
+  ok(BOARD_TUNE.reach === 12 && BOARD_TUNE.wait === 5, '8d: and both numbers are live');
+  boardKnob({ reach: -4 });
+  ok(BOARD_TUNE.reach === 0, '8d: a reach below nothing is nothing, not a negative one');
+  boardKnob(before);
+  ok(BOARD_TUNE.reach === before.reach && BOARD_TUNE.wait === before.wait, '8d: put back');
+
+  // The one word that must never be missed: a room about to be freed with somebody standing in it.
+  const told: number[] = [];
+  onPeerHullGone((id) => void told.push(id));
+  peerHullGone(11);
+  ok(told.length === 1 && told[0] === 11, '8d: whoever boards is told which hull is going before anything of its room is freed');
+  onPeerHullGone(null);
+  peerHullGone(12);
+  ok(told.length === 1, '8d: and letting go of that stops it, so nothing is called into a game that has moved on');
 }
 
 // --- 9: the clamp spot lowered onto the skin -------------------------------------------------------
