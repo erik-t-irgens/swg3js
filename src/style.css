@@ -82,15 +82,41 @@ b { color: var(--accent); font-weight: 600; }
 /* A panel over the game: the overlay round it is clear, so the world shows behind an open panel (a graphics setting is seen as it moves); the select screen alone dims, there being no world behind it yet. */
 .overlay { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; pointer-events: auto !important; }
 .overlay * { pointer-events: auto; }
-#start.overlay { background: color-mix(in srgb, var(--void) 72%, transparent); backdrop-filter: blur(4px); }
+/* The select screen stands alone, with no world behind it yet: a stage of its own in the palette's darkest colour. */
+#start.overlay { background: var(--void); align-items: stretch; justify-content: stretch; overflow: hidden; }
 /* A panel's header drags it about; where it is put is kept. */
 .drag-handle { cursor: move; user-select: none; }
 .drag-handle button, .drag-handle input, .drag-handle select, .drag-handle label { cursor: pointer; }
 
-#start .start-panel { text-align: center; max-width: 560px; padding: 36px 40px; background: var(--panel); border: 1px solid var(--panel-border); border-radius: 10px; }
-#start h1 { margin: 0 0 4px; font-size: 44px; letter-spacing: 0.18em; color: var(--accent); font-weight: 700; }
-#start .sub { color: var(--muted); margin-bottom: 20px; }
-#start .controls { text-align: left; font-size: 13px; line-height: 1.7; color: var(--muted); margin-bottom: 20px; }
+/* Windows that size (`src/ui/drag.ts`). The grip is three short diagonal strokes in the bottom-right
+   corner, drawn in `muted` and lit `accent` under the pointer; the right and bottom edges are bare
+   strips a few pixels wide that show only a resize cursor. They are the last children of the panel, so
+   they are drawn over its contents in tree order and carry no z-index. A panel the overlay centres is
+   made their containing block here; a panel that is already absolute (the group's, the trade window)
+   keeps its own position. */
+.overlay > .win { position: relative; }
+.win-grip, .win-edge { position: absolute; touch-action: none; user-select: none; }
+.win-grip {
+  right: 1px; bottom: 1px; width: 14px; height: 14px; cursor: nwse-resize;
+  background: linear-gradient(135deg, transparent 0 46%, var(--muted) 46% 52%, transparent 52% 64%, var(--muted) 64% 70%, transparent 70% 82%, var(--muted) 82% 88%, transparent 88%);
+  opacity: 0.7;
+}
+.win-grip:hover { opacity: 1; background: linear-gradient(135deg, transparent 0 46%, var(--accent) 46% 52%, transparent 52% 64%, var(--accent) 64% 70%, transparent 70% 82%, var(--accent) 82% 88%, transparent 88%); }
+.win-edge-r { top: 0; right: 0; bottom: 16px; width: 5px; cursor: ew-resize; }
+.win-edge-b { left: 0; right: 16px; bottom: 0; height: 5px; cursor: ns-resize; }
+.win-edge:hover { background: color-mix(in srgb, var(--accent) 25%, transparent); }
+/* A strip standing over a scrollbar in the panel steps aside while the pointer is on that bar, so the bar takes the press. */
+.win-grip.win-pass, .win-edge.win-pass { pointer-events: none; }
+/* The creator's full-size panels are neither moved nor sized. */
+.overlay.creation .win-grip, .overlay.creation .win-edge { display: none; }
+.overlay.creation .drag-handle { cursor: auto; }
+/* A window somebody has sized is the frame its contents fill: its size is written on it, border to
+   border, and its own caps in the height of the screen give way. A window at its own default size is
+   laid out by its own rules below, exactly as before. */
+.win-sized { box-sizing: border-box; }
+
+#start h1 { margin: 0; font-size: clamp(20px, 3.4vh, 36px); line-height: 1.1; letter-spacing: 0.22em; color: var(--accent); font-weight: 700; }
+#start .sub { margin-top: 3px; font-size: 12px; color: var(--muted); }
 #start button, .map-header button { padding: 10px 22px; font-size: 15px; background: color-mix(in srgb, var(--pool) 35%, transparent); color: var(--text); border: 1px solid var(--accent); border-radius: 6px; cursor: pointer; letter-spacing: 0.06em; }
 #start button:hover, .map-header button:hover { background: color-mix(in srgb, var(--pool) 60%, transparent); }
 
@@ -360,21 +386,145 @@ b { color: var(--accent); font-weight: 600; }
 #garage .weapons-row em { color: var(--muted); font-style: normal; font-size: 10px; }
 #garage .hint { padding: 12px; font-size: 12px; color: var(--muted); }
 
-/* The character select: cards, one per character kept in this browser. */
-#start .start-panel.select { max-width: 960px; width: min(960px, 94vw); }
-.chars { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 12px; margin: 18px 0 14px; }
-.chars-empty { grid-column: 1 / -1; color: var(--muted); font-size: 13px; padding: 24px 12px; border: 1px dashed var(--panel-border); border-radius: 8px; }
-.char { position: relative; text-align: left; padding: 14px 14px 12px; background: linear-gradient(180deg, var(--plate), color-mix(in srgb, var(--void) 85%, transparent)); border: 1px solid var(--panel-border); border-radius: 8px; cursor: pointer; transition: border-color 0.15s, box-shadow 0.15s; }
-.char:hover, .char:focus { border-color: var(--accent); box-shadow: 0 0 14px color-mix(in srgb, var(--accent) 35%, transparent); outline: none; }
-.char-name { font-size: 17px; font-weight: 600; letter-spacing: 0.04em; margin-bottom: 4px; color: var(--text); }
-.char-line { font-size: 12px; color: var(--text); }
-.char-line.muted { color: var(--muted); }
-.char-line.small { font-size: 10px; margin-top: 6px; }
-.char .delete { position: absolute; top: 6px; right: 6px; width: 22px; height: 22px; padding: 0; font-size: 14px; line-height: 20px; background: transparent; border: 1px solid transparent; color: var(--muted); border-radius: 4px; }
-.char .delete:hover { color: var(--bad); border-color: var(--bad); background: color-mix(in srgb, var(--bad) 12%, transparent); }
-.select-foot { display: flex; align-items: center; justify-content: center; gap: 12px; margin-bottom: 16px; }
-.select-foot .room { font-size: 11px; color: var(--muted); }
+/* --- the character select ------------------------------------------------------------------------
+   A list down the left, the chosen character standing on a stage in the middle, its record on the
+   right; under 1100 px the record goes under the list. Sizes are clamps between a 1280 x 720 screen at
+   150% (853 x 480 CSS pixels) and 2560 x 1440 at 100%, every column may shrink to nothing sideways
+   (`min-width: 0`, long words cut with an ellipsis), and the figure's canvas fills a box whose drawing
+   buffer the preview keeps the same shape, so it is never stretched. */
+#start .cs {
+  position: relative; display: flex; flex-direction: column; flex: 1 1 auto; width: 100%; height: 100%; min-width: 0; box-sizing: border-box;
+  padding: clamp(10px, 2.2vh, 28px) clamp(12px, 2vw, 40px); gap: clamp(8px, 1.6vh, 18px); overflow: hidden;
+  background: radial-gradient(ellipse 70% 60% at 50% 42%, color-mix(in srgb, var(--pool) 10%, transparent), transparent 70%), var(--void);
+}
+#start .cs-head { flex: none; display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; min-width: 0; }
+#start .cs-brand { min-width: 0; }
+#start .cs-count { flex: none; font-size: 12px; color: var(--muted); letter-spacing: 0.08em; }
+#start .cs-main {
+  flex: 1 1 auto; min-height: 0; min-width: 0; display: grid; gap: clamp(10px, 1.4vw, 24px);
+  grid-template-columns: minmax(230px, 320px) minmax(0, 1fr) minmax(240px, 340px); grid-template-rows: minmax(0, 1fr);
+  grid-template-areas: "roster stage card";
+}
+#start .cs-roster { grid-area: roster; min-width: 0; min-height: 0; display: flex; flex-direction: column; gap: 6px; overflow-x: hidden; overflow-y: auto; }
+#start .cs-title { flex: none; padding: 0 2px; font-size: 11px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--muted); }
+#start .cs-list { display: flex; flex-direction: column; gap: 6px; min-width: 0; padding: 2px; }
+#start .cs-entry {
+  position: relative; display: flex; align-items: center; gap: 10px; width: 100%; min-width: 0; box-sizing: border-box; padding: 9px 12px;
+  text-align: left; font: inherit; letter-spacing: 0; color: var(--text); cursor: pointer;
+  background: color-mix(in srgb, var(--void) 55%, transparent); border: 1px solid var(--rule); border-radius: 6px; transition: border-color 0.15s, background 0.15s;
+}
+#start .cs-entry:hover { background: color-mix(in srgb, var(--pool) 14%, transparent); border-color: var(--edge); }
+/* The chosen entry: filled, lit at the edge and with a bar down its left, so it reads at a glance and not only by its border. */
+#start .cs-entry.on { background: color-mix(in srgb, var(--pool) 28%, transparent); border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent), 0 0 12px color-mix(in srgb, var(--accent) 22%, transparent); }
+#start .cs-entry:focus { outline: none; }
+#start .cs-entry:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+#start .cs-entry-ic { flex: none; font-size: 26px; color: var(--muted); }
+#start .cs-entry.on .cs-entry-ic { color: var(--accent); }
+#start .cs-entry-text { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+#start .cs-entry-name { display: flex; align-items: center; gap: 7px; min-width: 0; font-size: 15px; font-weight: 600; letter-spacing: 0.03em; }
+#start .cs-entry-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#start .cs-entry-line { font-size: 11.5px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#start .cs-entry-line.muted, #start .muted { color: var(--muted); }
+#start .cs-empty { background: transparent; border-style: dashed; color: var(--muted); }
+#start .cs-empty .cs-entry-name { font-weight: 500; }
+#start .cs-empty .cs-entry-line { color: var(--muted); }
+#start .cs-empty.first { color: var(--text); border-color: var(--edge); }
+#start .cs-empty.first .cs-entry-ic { color: var(--accent); }
+#start .cs-empty.on { background: color-mix(in srgb, var(--pool) 18%, transparent); border-style: solid; }
+#start .cs-swatch { flex: none; display: inline-block; width: 10px; height: 10px; border-radius: 50%; border: 1px solid color-mix(in srgb, var(--ink) 35%, transparent); vertical-align: -1px; }
+#start .cs-swatch.big { width: 13px; height: 13px; margin-right: 4px; vertical-align: -2px; }
+
+/* The stage: a soft light behind the body, a floor glow where the feet stand (the preview frames the
+   figure head to toe, its feet about a twentieth of the way up from the bottom of the canvas) and a
+   vignette over the edges. All of it is gradients of the palette; nothing is a picture. */
+#start .cs-stage {
+  grid-area: stage; position: relative; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden;
+  border: 1px solid var(--rule); border-radius: 10px;
+  background: radial-gradient(ellipse 46% 58% at 50% 44%, color-mix(in srgb, var(--pool) 16%, transparent), transparent 100%), linear-gradient(180deg, color-mix(in srgb, var(--void) 60%, transparent), var(--void));
+}
+#start .cs-stage::after { content: ''; position: absolute; inset: 0; pointer-events: none; background: radial-gradient(ellipse 78% 72% at 50% 46%, transparent 55%, color-mix(in srgb, var(--void) 85%, transparent) 100%); }
+#start .cs-figure { position: relative; flex: 1 1 auto; min-height: 0; background: radial-gradient(ellipse 26% 5% at 50% 95.5%, color-mix(in srgb, var(--accent) 22%, transparent), transparent 100%); }
+#start .cs-figure .cs-canvas { position: absolute; inset: 0; opacity: 0; transition: opacity 0.35s ease; }
+#start .cs-stage.is-ready .cs-canvas { opacity: 1; }
+#start .cs-state { position: absolute; left: 50%; top: 44%; transform: translate(-50%, -50%); width: max-content; max-width: min(80%, 460px); text-align: center; font-size: 13px; line-height: 1.5; color: var(--muted); letter-spacing: 0.04em; pointer-events: none; }
+#start .cs-stage.is-waiting .cs-state::before, #start .cs-stage.is-loading .cs-state::before { content: ''; display: block; width: 24px; height: 24px; margin: 0 auto 10px; border-radius: 50%; border: 2px solid var(--rule); border-top-color: var(--accent); animation: cs-turn 1s linear infinite; }
+#start .cs-stage.is-error .cs-state { color: var(--warn); user-select: text; }
+@keyframes cs-turn { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { #start .cs-stage .cs-state::before { animation: none; } #start .cs-figure .cs-canvas { transition: none; } }
+#start .cs-hint { position: absolute; left: 0; right: 0; top: 10px; padding: 0 12px; text-align: center; font-size: 10px; letter-spacing: 0.05em; color: var(--muted); pointer-events: none; opacity: 0; transition: opacity 0.35s; }
+#start .cs-stage.is-ready .cs-hint { opacity: 0.8; }
+
+/* Under the figure: Play, and a quieter Delete that only asks; the question takes the row's place. */
+#start .cs-go, #start .cs-confirm { flex: none; display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 10px; padding: 10px 14px clamp(10px, 1.8vh, 18px); min-width: 0; }
+#start .cs-play { max-width: 100%; min-width: min(260px, 100%); padding: 11px 28px; font-size: 16px; font-weight: 600; letter-spacing: 0.1em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; background: color-mix(in srgb, var(--pool) 45%, transparent); border: 1px solid var(--accent); }
+#start .cs-play:hover { background: color-mix(in srgb, var(--pool) 70%, transparent); }
+#start .cs-delete { padding: 8px 14px; font-size: 12px; color: var(--muted); background: transparent; border: 1px solid var(--rule); }
+#start .cs-delete:hover { color: var(--bad); border-color: var(--bad); background: color-mix(in srgb, var(--bad) 12%, transparent); }
+#start .cs-go button:focus-visible, #start .cs-confirm button:focus-visible, #start .cs-card button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+#start .cs-confirm { flex-direction: column; gap: 8px; background: color-mix(in srgb, var(--bad) 10%, transparent); border-top: 1px solid color-mix(in srgb, var(--bad) 45%, transparent); }
+#start .cs-confirm-text { max-width: 520px; font-size: 13px; line-height: 1.5; text-align: center; }
+#start .cs-confirm-text b { color: var(--text); }
+#start .cs-confirm-buttons { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; }
+#start .cs-keep, #start .cs-really { padding: 8px 18px; font-size: 13px; }
+#start .cs-really { background: color-mix(in srgb, var(--bad) 45%, transparent); border-color: var(--bad); }
+#start .cs-really:hover:not(:disabled) { background: color-mix(in srgb, var(--bad) 70%, transparent); }
 #start button:disabled { opacity: 0.45; cursor: default; }
+
+/* The record: only what it really holds. */
+#start .cs-card { grid-area: card; min-width: 0; min-height: 0; box-sizing: border-box; overflow-x: hidden; overflow-y: auto; padding: 16px 18px; background: var(--panel); border: 1px solid var(--rule); border-radius: 10px; }
+#start .cs-name-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-width: 0; }
+#start .cs-name { flex: 1 1 0; min-width: 0; margin: 0; font-size: clamp(18px, 2.6vh, 26px); font-weight: 600; letter-spacing: 0.04em; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#start .cs-rename { flex: none; display: inline-flex; align-items: center; gap: 5px; padding: 4px 8px; font-size: 11px; letter-spacing: 0.04em; color: var(--muted); background: transparent; border: 1px solid var(--rule); border-radius: 4px; }
+#start .cs-rename:hover { color: var(--text); border-color: var(--accent); background: color-mix(in srgb, var(--pool) 20%, transparent); }
+#start .cs-rename .ic { font-size: 14px; }
+#start .cs-name-input { flex: 1 1 100%; min-width: 0; box-sizing: border-box; padding: 6px 8px; font: inherit; font-size: 18px; color: var(--text); background: color-mix(in srgb, var(--void) 55%, transparent); border: 1px solid var(--accent); border-radius: 4px; outline: none; }
+#start .cs-name-help { flex: 1 1 100%; font-size: 11px; color: var(--muted); }
+#start .cs-name-help.warn { color: var(--warn); }
+#start .cs-classline { display: flex; align-items: center; gap: 6px; margin: 4px 0 12px; font-size: 12px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--accent); }
+#start .cs-classline .ic { font-size: 18px; }
+#start .cs-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 7px 14px; margin: 0; font-size: 13px; }
+#start .cs-facts dt { padding-top: 2px; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+#start .cs-facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+#start .cs-card-empty h2 { margin: 0 0 8px; font-size: 20px; font-weight: 600; color: var(--text); }
+#start .cs-card-empty p { margin: 0; font-size: 13px; line-height: 1.55; color: var(--muted); }
+
+#start .cs-foot { flex: none; min-width: 0; display: flex; flex-direction: column; gap: 3px; font-size: 11.5px; line-height: 1.6; color: var(--muted); }
+#start .cs-controls { opacity: 0.8; }
+/* Play or Create pressed: the game is on its way, and nothing more is taken. */
+#start.is-busy .cs-main { cursor: progress; }
+#start.is-busy .cs-entry, #start.is-busy .cs-go button, #start.is-busy .cs-rename { pointer-events: none; opacity: 0.6; }
+
+/* Under 1100 px the record goes under the list and the stage keeps the rest of the width. */
+@media (max-width: 1100px) {
+  #start .cs-main { grid-template-columns: minmax(210px, 300px) minmax(0, 1fr); grid-template-rows: minmax(0, auto) minmax(0, 1fr); grid-template-areas: "roster stage" "card stage"; }
+  #start .cs-card { padding: 12px 14px; }
+}
+/* A narrow window: the list and the stage share the width evenly. */
+@media (max-width: 720px) {
+  #start .cs-main { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+}
+/* A short window (720 px tall at 150% is 480 CSS px): tighter entries, the time line and the key lines go, all of which the record repeats. */
+@media (max-height: 640px) {
+  #start .cs-entry { padding: 5px 10px; gap: 8px; }
+  #start .cs-entry-ic { font-size: 20px; }
+  #start .cs-entry-name { font-size: 13.5px; }
+  #start .cs-entry-line.muted { display: none; }
+  #start .cs-foot, #start .sub, #start .cs-hint { display: none; }
+  #start .cs-classline { margin: 2px 0 8px; }
+  #start .cs-facts { gap: 4px 12px; font-size: 12px; }
+  #start .cs-play { padding: 8px 22px; font-size: 14px; }
+  #start .cs-go, #start .cs-confirm { padding: 8px 12px; }
+}
+/* A big screen (2560 x 1440 at 100%): the side columns and their words grow a little, so the stage is not a lake. */
+@media (min-width: 1900px) and (min-height: 1000px) {
+  #start .cs-main { grid-template-columns: minmax(280px, 380px) minmax(0, 1fr) minmax(300px, 420px); }
+  #start .cs-entry { padding: 12px 14px; }
+  #start .cs-entry-ic { font-size: 30px; }
+  #start .cs-entry-name { font-size: 17px; }
+  #start .cs-entry-line { font-size: 13px; }
+  #start .cs-facts { font-size: 14.5px; }
+  #start .cs-foot { font-size: 12.5px; }
+}
 
 /* The creator: the appearance and wardrobe panels at full size, the weapons tab and the close button out of the way, a bar below. */
 .overlay.creation { align-items: flex-start; padding-top: 10px; background: radial-gradient(ellipse at 50% 30%, rgba(30,48,70,0.95), color-mix(in srgb, var(--void) 98%, transparent)); backdrop-filter: none; }
@@ -528,3 +678,40 @@ b { color: var(--accent); font-weight: 600; }
 .slot-stats { font-size: 10px; opacity: 0.7; margin-left: 6px; }
 .slot-note { font-size: 10px; color: var(--muted); margin: -2px 0 4px 106px; }
 .edit-note { font-size: 11px; color: var(--muted); padding: 4px 0 8px; line-height: 1.5; }
+
+/* --- a window somebody has sized: its contents follow the frame --------------------------------
+   Every rule here waits on `win-sized`, which `src/ui/drag.ts` puts on a panel only once it has been
+   given a size of its own, so a window at its default size is untouched. What the rules do is the
+   same everywhere: the part of the window that holds a list, a grid, a map or a preview takes the
+   height the header and the foot leave (`flex: 1`, `min-height: 0`), the caps in the height of the
+   screen (`vh`) give way to the frame, and whatever does not fit scrolls inside, never sideways. The
+   group's panel and the trade window carry their own in the stylesheets their files inject. */
+
+/* A header that runs out of room wraps its tabs and buttons onto a second line rather than losing its close button. */
+.map-panel.win-sized .map-header, .wardrobe-panel.win-sized .wardrobe-header, .ship-panel.win-sized .ship-header { flex-wrap: wrap; row-gap: 6px; }
+
+/* The map: the planet's map or the space view below the header, and the galaxy the same way. The
+   canvases are sized from their holder on every frame they draw, so they follow with nothing else to do. */
+.map-panel.win-sized > .map-body.here { flex: 1 1 auto; height: auto; min-height: 0; }
+.map-panel.win-sized > .galaxy-body { flex: 1 1 auto; max-height: none; min-height: 0; }
+.map-panel.win-sized .galaxy-view { min-height: 0; }
+.map-panel.win-sized .galaxy-info { width: clamp(200px, 32%, 380px); }
+
+/* The ship menu and the lift: the rows scroll under the header. */
+.ship-panel.win-sized { display: flex; flex-direction: column; }
+.ship-panel.win-sized > .ship-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+/* The System Map: its three columns are as tall as the window leaves them, each scrolling on its own. */
+.hyperspace-panel.win-sized > .ship-body { display: flex; flex-direction: column; overflow: hidden; }
+.hyperspace-panel.win-sized .hs-grid { flex: 1 1 auto; min-height: 0; max-height: none; grid-template-rows: minmax(0, 1fr); }
+.hyperspace-panel.win-sized .hs-col { max-height: none; }
+.hyperspace-panel.win-sized > .ship-body > .menu-hint { flex: none; }
+
+/* The inventory and the spawner: the doll grows with the window's width (the ship's own preview
+   already takes a share of it), and the backpack's two areas are as tall as the window leaves them. */
+.wardrobe-panel.win-sized .wardrobe-preview { flex-basis: clamp(200px, 34%, 560px); }
+.backpack-panel.win-sized .backpack-main { grid-template-rows: minmax(0, 1fr); }
+.backpack-panel.win-sized .bp-grid[data-area="pack"], .backpack-panel.win-sized .bp-grid[data-area="worn"] { max-height: none; }
+.backpack-panel.win-sized .bp-examine, .backpack-panel.win-sized .bp-hint { flex: none; }
+
+/* The Escape menu: the page scrolls as it always did; the nav scrolls too once the window is shorter than it. */
+#menu .menu-panel.win-sized .menu-nav { overflow-y: auto; }

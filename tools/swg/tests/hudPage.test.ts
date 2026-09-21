@@ -15,7 +15,7 @@
 // Everything here is synthetic. No browser, no document, and nothing read from the game's own files:
 // the module is imported for its tables alone, and `Menu` itself is never built.
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { DEFAULT_SETTINGS, HUD_LINES_RANGE, HUD_SCALE_RANGE } from '../../../src/core/settings.ts';
 import { INTERFACE, notifyBindingsChanged, onBindingsChanged } from '../../../src/ui/hudPage.ts';
 
@@ -192,6 +192,70 @@ const knobs: Knob[] = INTERFACE.flatMap((g) => g.knobs as unknown as Knob[]);
   const typed = [...new Set(literals.filter((l) => !allowed.has(l)))];
   ok(typed.length === 0, `no colour is typed into a panel by hand${typed.length ? `: ${typed.join(', ')}` : ''}`);
   ok(literals.length > 0 && literals.length <= 4, `and the deliberate few are still few (${literals.length})`);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The stylesheets the TypeScript files inject. The group's panel, the trade window, the chat line, the
+// space map, the galaxy and the roster each carry their rules as a string and put them in a <style>
+// of their own, which the block above never reads -- and the group's panel had hand-typed `rgba()`
+// values in it for exactly that reason. So every `const <NAME>CSS = \`…\`` under `src/` is read out of
+// its file and held to the same three rules: every tint is a declared name at an alpha, every name it
+// reads is declared, and no colour is typed in. An interpolation is followed to the constant it names:
+// the trade window's `col(COL.x, 'x')` stands for `var(--x)`, and anything else has its own text
+// scanned for literals, so a colour cannot be hidden in a constant beside the sheet.
+//
+// No file is let off: the rule is the interface's and it has no exceptions, so a sheet that types a
+// colour fails here whoever owns it.
+{
+  const css = readFileSync(new URL('../../../src/style.css', import.meta.url), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+  const open = css.indexOf(':root');
+  const root = css.slice(open, css.indexOf('}', open));
+  const declared = new Set([...root.matchAll(/(--[a-z0-9-]+)\s*:/g)].map((m) => m[1]));
+  // A sheet may also read the display's own layout numbers (the roster's place, the HUD's font), which
+  // `hud.css` and `style.css` declare outside `:root`'s palette; a tint must still be one of the palette's.
+  const hudCss = readFileSync(new URL('../../../src/ui/hud.css', import.meta.url), 'utf8');
+  const anywhere = new Set([...`${css}\n${hudCss}`.matchAll(/(--[a-z0-9-]+)\s*:/g)].map((m) => m[1]));
+  const src = new URL('../../../src/', import.meta.url);
+  const files = (readdirSync(src, { recursive: true }) as string[]).map((f) => f.replace(/\\/g, '/')).filter((f) => f.endsWith('.ts'));
+  let sheets = 0;
+  const failures: string[] = [];
+  for (const file of files) {
+    const text = readFileSync(new URL(file, src), 'utf8');
+    for (const m of text.matchAll(/const\s+([A-Z_]*CSS)\s*=\s*`([\s\S]*?)`;/g)) {
+      sheets++;
+      const name = `${file} ${m[1]}`;
+      const hidden: string[] = [];
+      // Each `${IDENT}` stands for what its constant is.
+      const body = m[2].replace(/\$\{\s*([A-Za-z_$][\w$]*)\s*\}/g, (_all, ident: string) => {
+        const def = new RegExp(`const\\s+${ident}\\s*=\\s*([^;]+);`).exec(text);
+        if (!def) return 'inherit';
+        const named = /^col\(\s*COL\.([a-z]+)\s*,\s*'([a-z]+)'\s*\)$/.exec(def[1].trim());
+        if (named && named[1] === named[2]) return `var(--${named[2]})`;
+        for (const lit of def[1].matchAll(/#[0-9a-fA-F]{3,8}\b|rgba?\([^)]*\)/g)) hidden.push(lit[0]);
+        return 'inherit';
+      });
+      const sheet = body.replace(/\/\*[\s\S]*?\*\//g, '');
+      const problems: string[] = [];
+      // A name read with a fallback of its own is a number the file sets from script (the roster's
+      // place); a colour's fallback would be caught below as a typed colour anyway.
+      const strays = [...new Set([...sheet.matchAll(/var\(\s*(--[a-z0-9-]+)\s*\)/g)].map((v) => v[1]).filter((n) => !declared.has(n) && !anywhere.has(n)))];
+      if (strays.length) problems.push(`reads names the stylesheet does not declare: ${strays.join(', ')}`);
+      const mixes = [...sheet.matchAll(/color-mix\([^()]*(?:\([^()]*\)[^()]*)*\)/g)].map((x) => x[0]);
+      const bad = mixes.filter((x) => !/^color-mix\(in srgb, var\((--[a-z0-9-]+)\) (\d+(?:\.\d+)?)%, transparent\)$/.test(x.trim()));
+      if (bad.length) problems.push(`mixes a tint that is not a name at an alpha: ${bad.slice(0, 2).join(' | ')}`);
+      const offPalette = mixes.map((x) => /var\((--[a-z0-9-]+)\)/.exec(x)?.[1] ?? '').filter((n) => n && !declared.has(n));
+      if (offPalette.length) problems.push(`mixes a tint from a name that is not a colour: ${offPalette.join(', ')}`);
+      const values = [...sheet.matchAll(/(?:^|[;{])\s*[-a-zA-Z]+\s*:\s*([^;{}]+)/g)].map((v) => v[1]);
+      const typed: string[] = [...hidden];
+      for (const v of values) for (const lit of v.matchAll(/#[0-9a-fA-F]{3,8}\b|rgba?\([^)]*\)/g)) typed.push(lit[0].replace(/\s+/g, ''));
+      if (typed.length) problems.push(`types ${typed.length} colour(s) by hand: ${[...new Set(typed)].slice(0, 3).join(', ')}`);
+      if (problems.length) failures.push(`${name} ${problems.join('; ')}`);
+    }
+  }
+  ok(sheets >= 5, `the injected stylesheets are found (${sheets})`);
+  ok(failures.length === 0, `and every one is held to the stylesheet's own rule${failures.length ? `: ${failures.join(' || ')}` : ''}`);
+  const group = readFileSync(new URL('ui/groupUi.ts', src), 'utf8');
+  ok(!/rgba?\(|#[0-9a-fA-F]{6}\b/.test(/const CSS = `([\s\S]*?)`;/.exec(group)?.[1] ?? 'rgba('), "the group's panel, whose hand-typed colours started this check, has none left");
 }
 
 console.log(`\n${checks} checks passed`);

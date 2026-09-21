@@ -236,6 +236,20 @@
     <circle cx="12" cy="12" r="1.6"/>
   </symbol>
 
+  <!-- ===== the select screen ==================================================================== -->
+
+  <!-- Rename: a pencil. -->
+  <symbol id="ic-pencil" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M15.5 4.5 19.5 8.5 9 19H5v-4z"/>
+    <path d="M13 7l4 4"/>
+  </symbol>
+
+  <!-- Room for another: a plus. -->
+  <symbol id="ic-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 5.5v13"/>
+    <path d="M5.5 12h13"/>
+  </symbol>
+
   <!-- Somebody speaking. -->
   <symbol id="ic-speech" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
     <path d="M20 15a2.5 2.5 0 0 1-2.5 2.5H9.5L5 21V6.5A2.5 2.5 0 0 1 7.5 4h10A2.5 2.5 0 0 1 20 6.5z"/>

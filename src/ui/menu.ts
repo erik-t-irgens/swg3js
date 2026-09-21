@@ -5,6 +5,7 @@ import { DEFAULT_SETTINGS, saveSettings, type Settings } from '../core/settings'
 import { FX_KNOBS, fxPassDef, fxProductDef } from '../core/fxRegistry.ts';
 import { INTERFACE, notifyBindingsChanged, type Knob } from './hudPage.ts';
 import { multiplayerMarkup, type CharacterCopy } from './multiplayerPage.ts';
+import { resetWindows } from './drag.ts';
 
 // The Interface page's knobs and the rebind note live in `hudPage.ts` so that a node test can read
 // them without a browser; they are theirs to change and everything else's to import from here. The
@@ -418,10 +419,13 @@ export class Menu {
         this.showPage('sound');
       });
     } else if (page === 'interface') {
-      body.innerHTML = `<h2>Interface</h2><p class="menu-hint">None of the game's own interface is used: every line, arc, bar, square and glyph on the screen is drawn here, and every number on this page is ours. The keys a slot or an action shows are the keys you have bound, which you set under Controls.</p>${INTERFACE.map((g) => `<h3>${g.title}</h3>${this.knobRows(g.knobs)}`).join('')}<div class="menu-actions"><button class="reset-hud">Reset the display to defaults</button></div>`;
+      body.innerHTML = `<h2>Interface</h2><p class="menu-hint">None of the game's own interface is used: every line, arc, bar, square and glyph on the screen is drawn here, and every number on this page is ours. The keys a slot or an action shows are the keys you have bound, which you set under Controls.</p>${INTERFACE.map((g) => `<h3>${g.title}</h3>${this.knobRows(g.knobs)}`).join('')}<div class="menu-actions"><button class="reset-hud">Reset the display and every window to defaults</button></div>`;
       this.wireKnobs(body);
       body.querySelector('.reset-hud')!.addEventListener('click', () => {
         for (const g of INTERFACE) for (const k of g.knobs) this.setValue(k.key, DEFAULT_SETTINGS[k.key] as number | boolean | string);
+        // Every window's place and size go too, the menu's own included: each goes back to where and
+        // as big as its own layout makes it.
+        resetWindows();
         this.showPage('interface');
       });
     } else if (page === 'emotes') {

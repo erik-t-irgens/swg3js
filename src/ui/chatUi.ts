@@ -164,15 +164,15 @@ const CSS = `
   gap: calc(6px * var(--hud-scale, 1));
   padding: calc(4px * var(--hud-scale, 1)) calc(8px * var(--hud-scale, 1));
   border-radius: 4px;
-  background: rgba(6, 12, 18, 0.72);
-  border: 1px solid var(--rule, rgba(150, 190, 220, 0.25));
+  background: color-mix(in srgb, var(--void) 72%, transparent);
+  border: 1px solid var(--rule);
   font: 500 calc(13px * var(--hud-scale, 1))/1.3 system-ui, sans-serif;
-  color: var(--ink, #dff1ff);
+  color: var(--ink);
   pointer-events: auto;
   z-index: 6;
 }
 .chat-line.hidden { display: none; }
-.chat-line > .scope { color: var(--accent, #7fd7ff); white-space: nowrap; }
+.chat-line > .scope { color: var(--accent); white-space: nowrap; }
 .chat-line > input {
   width: calc(360px * var(--hud-scale, 1));
   background: transparent;
@@ -195,22 +195,22 @@ const CSS = `
   max-width: 260px;
   padding: 3px 8px;
   border-radius: 8px;
-  background: rgba(6, 12, 18, 0.72);
-  border: 1px solid var(--rule, rgba(150, 190, 220, 0.25));
+  background: color-mix(in srgb, var(--void) 72%, transparent);
+  border: 1px solid var(--rule);
   font: 500 13px/1.3 system-ui, sans-serif;
-  color: var(--ink, #dff1ff);
+  color: var(--ink);
   white-space: pre-wrap;
   word-break: break-word;
   will-change: transform, opacity;
 }
 .chat-bubble.hidden { display: none; }
-.chat-bubble.group { border-color: var(--accent, #7fd7ff); }
-.chat-bubble > b { color: var(--accent, #7fd7ff); font-weight: 600; margin-right: 4px; }
+.chat-bubble.group { border-color: var(--accent); }
+.chat-bubble > b { color: var(--accent); font-weight: 600; margin-right: 4px; }
 `;
 
 /** The colour a speaker's name wears in the message line: the group's own channel stands apart. */
-const SAY_COLOUR = 'var(--ink, #dff1ff)';
-const GROUP_COLOUR = 'var(--accent, #7fd7ff)';
+const SAY_COLOUR = 'var(--ink)';
+const GROUP_COLOUR = 'var(--accent)';
 
 export class ChatUi {
   readonly root: HTMLElement;

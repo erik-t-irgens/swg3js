@@ -120,6 +120,10 @@ type Pane = 'pack' | 'mine' | 'theirs';
  * The stylesheet. Every colour is one of the palette's names, with the palette's own value behind it
  * as the fallback rather than a literal chosen here, so this file cannot drift from `src/style.css`
  * even where a stylesheet is half loaded.
+ *
+ * A window somebody has sized (`win-sized`, from `src/ui/drag.ts`) lays its three panes down the
+ * frame's height and scrolls each grid inside its own pane, the find field and the buttons keeping
+ * their room.
  */
 const col = (i: number, name: string) => `var(--${name}, ${PALETTE_FALLBACK[i]})`;
 const INK = col(COL.ink, 'ink');
@@ -149,6 +153,11 @@ const CSS = `
   z-index: 7;
 }
 .trade-panel.hidden { display: none; }
+.trade-panel.win-sized:not(.hidden) { display: flex; flex-direction: column; }
+.trade-panel.win-sized .trade-head, .trade-panel.win-sized .trade-foot, .trade-panel.win-sized .hint { flex: none; }
+.trade-panel.win-sized .trade-panes { flex: 1 1 auto; min-height: 0; grid-template-rows: minmax(0, 1fr); }
+.trade-panel.win-sized .trade-pane { display: flex; flex-direction: column; min-height: 0; }
+.trade-panel.win-sized .trade-grid { flex: 1 1 auto; min-height: 0; max-height: none; }
 .trade-panel h3 { margin: 0 0 6px; font-size: calc(13px * var(--hud-scale, 1)); color: ${ACCENT}; }
 .trade-head { display: flex; align-items: baseline; gap: 8px; }
 .trade-head .find { flex: 1 1 auto; min-width: 60px; background: ${PLATE}; color: inherit; border: 1px solid ${RULE}; border-radius: 3px; padding: 2px 6px; font: inherit; }

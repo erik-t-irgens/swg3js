@@ -53,11 +53,11 @@ const GALAXY_CSS = `
 .galaxy-catch { position: absolute; inset: 0; cursor: grab; touch-action: none; }
 .galaxy-catch:active { cursor: grabbing; }
 .galaxy-note { position: absolute; left: 10px; bottom: 8px; font-size: 11px; color: var(--muted); pointer-events: none; }
-.galaxy-label { position: absolute; left: 0; top: 0; display: flex; align-items: center; gap: 5px; font-size: 11px; color: #c8d8e8; text-shadow: 0 1px 2px var(--void); white-space: nowrap; }
+.galaxy-label { position: absolute; left: 0; top: 0; display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--ink); text-shadow: 0 1px 2px var(--void); white-space: nowrap; }
 .galaxy-label[hidden] { display: none; }
 .galaxy-label i { display: block; width: 5px; height: 5px; background: currentColor; border-radius: 50%; }
 .galaxy-label.on { color: var(--accent); }
-.galaxy-label.here { color: #ff9d5a; }
+.galaxy-label.here { color: var(--hot); }
 .galaxy-label.ours b::after { content: ' *'; opacity: 0.7; }
 .galaxy-info { width: 310px; flex: 0 0 auto; overflow-y: auto; padding: 10px 12px; font-size: 12px; background: color-mix(in srgb, var(--void) 70%, transparent); border: 1px solid var(--panel-border); border-radius: 8px; }
 .galaxy-info h3 { margin: 0 0 2px; font-size: 15px; color: var(--accent); }
@@ -165,7 +165,7 @@ export class GalaxyMap {
       const sky = `#${p.sky.top.toString(16).padStart(6, '0')}`;
       const ground = `#${p.palette.mid.toString(16).padStart(6, '0')}`;
       card.innerHTML = `
-        <div class="globe" style="background: radial-gradient(circle at 35% 35%, ${sky} 0%, ${ground} 55%, #000 100%)"></div>
+        <div class="globe" style="background: radial-gradient(circle at 35% 35%, ${sky} 0%, ${ground} 55%, var(--void) 100%)"></div>
         <div class="card-body">
           <h3>${p.name}</h3>
           <div class="tag">${p.tagline}</div>
@@ -410,7 +410,10 @@ export class GalaxyMap {
     const h = this.viewHolder.clientHeight;
     if (!w || !h || this.mainEl.hidden) return;
     const ratio = renderer.getPixelRatio();
-    if (renderer.domElement.width !== Math.round(w * ratio) || renderer.domElement.height !== Math.round(h * ratio)) renderer.setSize(w, h, false);
+    // Compared the way three sizes the buffer (it floors): compared rounded, a holder whose width times
+    // 1.25 or 1.5 ends in more than a half set the size again on every frame, which throws the
+    // buffer away each time.
+    if (renderer.domElement.width !== Math.floor(w * ratio) || renderer.domElement.height !== Math.floor(h * ratio)) renderer.setSize(w, h, false);
     this.view.draw(renderer, w, h);
   }
 

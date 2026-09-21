@@ -43,6 +43,13 @@ export class CharacterPreview {
   private dirty = true;
   private framed = false;
   private running = false;
+  /**
+   * Called on every drawn frame, before the draw, with the seconds since the last frame and the doll.
+   * The select screen plays the idle on the clone here. The clone has a skeleton of its own, so the
+   * character in the world is never moved by it.
+   */
+  onFrame: ((dt: number, model: THREE.Object3D) => void) | null = null;
+  private lastFrameAt = 0;
 
   constructor() {
     this.canvas.className = 'preview-canvas';
@@ -66,7 +73,16 @@ export class CharacterPreview {
     // keeps the drawing buffer the same shape as the box, whatever the window does afterwards.
     this.observer = new ResizeObserver((entries) => {
       const box = entries[0]?.contentRect;
-      if (box) this.resize(Math.round(box.width), Math.round(box.height));
+      if (!box) return;
+      this.resize(Math.round(box.width), Math.round(box.height));
+      // Setting the size empties the drawing buffer, and an observer runs after this frame's draw and
+      // before the frame is shown: drawn again here, a window being sized never shows an empty doll.
+      // The camera is placed first: a resize can move the fitted distance, and before the first frame it
+      // has never been placed at all.
+      if (this.running && this.model) {
+        this.placeCamera();
+        this.draw(this.model);
+      }
     });
     this.observer.observe(this.canvas);
   }
@@ -217,6 +233,9 @@ export class CharacterPreview {
   /** Size the drawing buffer to the box the panel gives it. */
   resize(width: number, height: number): void {
     if (width < 8 || height < 8) return;
+    // The window may have been carried to a screen of another scale, or the browser zoomed.
+    const ratio = Math.min(window.devicePixelRatio, 2);
+    if (this.renderer.getPixelRatio() !== ratio) this.renderer.setPixelRatio(ratio);
     const shapeChanged = this.camera.aspect !== width / height;
     this.renderer.setSize(width, height, false);
     this.camera.aspect = width / height;
@@ -244,11 +263,14 @@ export class CharacterPreview {
     requestAnimationFrame(this.frame);
     if (!this.model) return;
     this.dirty = false;
+    const now = performance.now();
+    // Capped, so a tab that was away comes back without the idle jumping a whole cycle.
+    const dt = this.lastFrameAt > 0 ? Math.min(0.1, (now - this.lastFrameAt) / 1000) : 0;
+    this.lastFrameAt = now;
+    this.onFrame?.(dt, this.model);
     this.frames++;
     this.follow();
-    const cp = Math.cos(this.pitch);
-    this.camera.position.set(Math.sin(this.yaw) * cp * this.distance + this.pan.x, this.height + Math.sin(this.pitch) * this.distance + this.pan.y, Math.cos(this.yaw) * cp * this.distance + this.pan.z);
-    this.camera.lookAt(this.pan.x, this.height + this.pan.y, this.pan.z);
+    this.placeCamera();
     this.draw(this.model);
     // On the lens path three's counts hold only its last render() (the quad): the lens keeps the frame's.
     const lensed = this.lens && this.dof !== null;
@@ -259,6 +281,13 @@ export class CharacterPreview {
       path: this.lens ? 'lens' : 'direct',
     };
   };
+
+  /** The camera on its orbit about the doll, from the turn, tilt, distance and slide as they are now. */
+  private placeCamera(): void {
+    const cp = Math.cos(this.pitch);
+    this.camera.position.set(Math.sin(this.yaw) * cp * this.distance + this.pan.x, this.height + Math.sin(this.pitch) * this.distance + this.pan.y, Math.cos(this.yaw) * cp * this.distance + this.pan.z);
+    this.camera.lookAt(this.pan.x, this.height + this.pan.y, this.pan.z);
+  }
 
   /**
    * Straight onto the canvas as always, or, with the depth of field on and the doll close enough for a
@@ -333,6 +362,7 @@ export class CharacterPreview {
     if (this.running) return;
     this.running = true;
     this.dirty = true;
+    this.lastFrameAt = 0;
     // The first frame after opening compiles both of the doll's program variants (direct and lens).
     this.warmedFor = null;
     requestAnimationFrame(this.frame);
@@ -343,6 +373,24 @@ export class CharacterPreview {
     // The lens target's memory goes back while the panel is shut; the next lens frame sizes it again.
     this.dof?.release();
     this.lens = false;
+  }
+
+  /**
+   * Forget the framing, so the next `refresh` frames its model afresh at this turn. The select screen
+   * calls it between characters: a doll framed once for the first figure cuts the head off a taller one.
+   */
+  reframe(yaw = 0): void {
+    this.framed = false;
+    this.userFramed = false;
+    this.pan.set(0, 0, 0);
+    this.yaw = yaw;
+    this.pitch = 0.05;
+  }
+
+  /** Stop drawing and let go of the clone and its buffers in this context. The next `refresh` makes another. */
+  release(): void {
+    this.stop();
+    this.dispose();
   }
 
   /** Drop the clone's own geometry; materials and textures belong to the character. */

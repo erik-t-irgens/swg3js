@@ -103,7 +103,7 @@ import { HyperspaceCatalogue, arrivalAt, landmarksOf, loadSpacePack, type Destin
 import { TUNNEL_TIMES, arrivalPose, jumpChaseBack, lookRotation, sceneOf, toGame, tunnelCameraFar, tunnelSize } from './space/hyperspaceMath';
 import { LiftMenu } from './ui/liftMenu';
 import { stopLabel, type LiftStop } from './world/lifts';
-import { draggable } from './ui/drag';
+import { draggable, windowsDebug } from './ui/drag.ts';
 import { LoadingScreen } from './ui/loading';
 import { EmoteWheel } from './ui/emoteWheel';
 import { Net, type Hello, type PeerVehicle } from './net/net';
@@ -1176,13 +1176,22 @@ class App {
       onTeleport: (poi) => void this.teleport(this.world.planet, poi, this.zone),
     });
     this.map.onClose = () => this.toggleMap();
-    // Every panel moves by its header and stays put; the overlay round it is clear, so the world shows behind.
+    // Every window moves by its header and sizes by its corner and far edges, and stays as it was left;
+    // the overlay round it is clear, so the world shows behind. The group's and the trade window are
+    // wired where they are built, further down.
     draggable(this.map.root, '.map-panel', '.map-header', 'map');
     draggable(this.shipMenu.root, '.ship-panel', '.ship-header', 'ship');
     draggable(this.hyperspaceUi.root, '.ship-panel', '.ship-header', 'hyperspace');
-    for (const [id, ui] of [['wardrobe', this.wardrobe], ['weapons', this.weaponsUi], ['garage', this.vehiclesUi], ['npcs', this.npcUi], ['appearance', this.appearanceUi], ['backpack', this.backpack], ['shipedit', this.shipEdit]] as const) draggable(ui.root, '.wardrobe-panel', '.wardrobe-header', id);
+    draggable(this.liftMenu.root, '.ship-panel', '.ship-header', 'lift');
+    for (const [id, ui] of [['wardrobe', this.wardrobe], ['weapons', this.weaponsUi], ['garage', this.vehiclesUi], ['npcs', this.npcUi], ['appearance', this.appearanceUi], ['backpack', this.backpack], ['shipedit', this.shipEdit], ['force', this.forceUi]] as const) draggable(ui.root, '.wardrobe-panel', '.wardrobe-header', id);
     // Console hooks for driving the game from tests: window.__debug.teleport(x, z, yaw), .look(yaw, pitch), .cell().
     (window as unknown as { __debug: unknown }).__debug = {
+      /**
+       * Every window's box, its minimum, what storage holds for it, whether it is wholly on the screen and
+       * whether anything in it would scroll sideways. `{ set: { id: 'map', x: 40, y: 30, w: 900, h: 600 } }`
+       * sizes one as a drag would (no w/h: its own size), `{ reset: true }` forgets them all, `{ reset: 'map' }` one.
+       */
+      windows: (o?: Parameters<typeof windowsDebug>[0]) => windowsDebug(o),
       /** Put the player at x, z on the ground (or at `y`); a point inside a building's room, once that building's interior is built, counts as being in it. Returns the cell. */
       teleport: (x: number, z: number, yaw?: number, y?: number) => {
         const at = new THREE.Vector3(x, y ?? this.world.terrain.heightAt(x, z) + 0.3, z);
@@ -3833,6 +3842,8 @@ class App {
       canOpen: () => this.started && this.inWorld && !this.traveling && !this.menu.open && !this.map.open && !this.anyPanelOpen(),
       freeMouse: (free) => this.freeMouse(free),
     });
+    // The group's panel moves by its title and sizes by its corner, as every other window does.
+    draggable(groupUi.root, '.group-panel', 'h3', 'group');
     if (debugRoot) {
       // `__debug.group()` reads what the group is doing and `__debug.group({ chevron: 60 })` sets one
       // of this side's own numbers; `{ ui: { panelKey: 'KeyY' } }` sets the panel's. The distances an
@@ -4000,6 +4011,8 @@ class App {
       // what refused the window was a travel, a death or a jump rather than another panel.
       elseHasMouse: () => this.anyPanelOpen() || this.map.open,
     });
+    // The trade window moves by its head (its find field still takes a click) and sizes by its corner.
+    draggable(tradeUi.root, '.trade-panel', '.trade-head', 'trade');
     // The backpack's own Trade button: ask whoever this player is standing by and looking at. It is
     // the same rule the chat line's /trade comes to, and the ledger is what refuses it when there is
     // no server, nobody there, or they are past the game's own 8 m.
@@ -4284,8 +4297,66 @@ class App {
     }
 
     this.select = new CharacterSelect(this.ui);
-    this.select.onPlay = (c) => void this.play(c).catch((err) => console.warn('could not enter the world', err));
-    this.select.onCreate = () => void this.openCreator().catch((err) => console.warn('creator', err));
+    // The select screen's figure is the player's own rig, put in the character's species, look and
+    // clothes by the very steps `play` takes, so Play finds all of it already loaded. One at a time:
+    // `useSpecies` hangs a rig on the player the moment it lands, so two loads in flight together could
+    // leave whichever finished last on the player. Play and Create wait their turn behind the load in
+    // flight rather than racing it, and a load whose choice has been overtaken stops at its next step.
+    let figureTurn: Promise<unknown> = Promise.resolve();
+    const inTurn = <T,>(job: () => Promise<T>): Promise<T> => {
+      const run = figureTurn.then(job, job);
+      figureTurn = run.catch(() => undefined);
+      return run;
+    };
+    // `applyAppearance` sets only the colours that differ from the pack's own, which is right on a
+    // fresh rig and wrong on one that another character of the same species has just worn: the first
+    // one's hair would stay on the second wherever the second kept the default. So every colour the
+    // rig holds is put back to what this record asks, or to the pack's own where it asks nothing.
+    const putBackLook = (character: Character, a: SavedCharacter['appearance'] | undefined) => {
+      const want = a?.values ?? {};
+      const back: Record<string, number> = {};
+      for (const [k, v] of Object.entries(character.variableValues())) {
+        const target = k in want ? want[k] : (character.manifest.values?.[k] ?? character.manifest.values?.[k.replace(/^.*\//, '')]);
+        if (typeof target === 'number' && target !== v && character.canCustomize(k)) back[k] = target;
+      }
+      if (Object.keys(back).length) character.customizer?.setAll(back);
+    };
+    this.select.loadFigure = (c, alive) =>
+      inTurn(async () => {
+        if (!alive()) return null;
+        const words = c.species.replace(/_/g, ' ');
+        const missing = { error: `The ${words} body is not converted on this machine, so there is nothing to stand here. The character still plays. To add it: npm run swg -- species @SWG assets-private --retail-only` };
+        // Known to be missing: said at once, and the player's rig is left as it is.
+        if (this.speciesList.length && !this.speciesList.some((s) => s.id === c.species)) return missing;
+        const character = await this.useSpecies(c.species);
+        if (!character || character.manifest.id !== c.species) return missing;
+        if (!alive()) return null;
+        putBackLook(character, c.appearance);
+        this.applyAppearance(character, c.appearance);
+        await this.dress(character, c.outfit ?? []);
+        if (!alive()) return null;
+        // The colour renders finish before the clone is taken, so the figure fades in finished.
+        await character.customizer?.settled();
+        if (!alive()) return null;
+        // The mood's own idle where this pack has a branch for it, as `setMood` would choose; else the plain idle.
+        const mood = (c.mood ?? '').trim().toLowerCase();
+        const name = (mood && this.player.rig ? this.player.rig.variant('idle', mood) : null) ?? 'idle';
+        const idle = character.clips.find((k) => k.name === name) ?? character.clips.find((k) => k.name === 'idle') ?? null;
+        return { character, idle };
+      });
+    this.select.weaponName = async (id) => {
+      const weapons = await (this.weaponsLoaded ?? Promise.resolve(null)).catch(() => null);
+      return itemInfo('weapon', id, { wardrobe: null, wardrobeDir: null, weapons, species: '', packParts: [] }).name;
+    };
+    this.select.onPlay = (c) =>
+      void inTurn(async () => {
+        // Enter pressed before the figure was asked for finds the rig still in the last character's colours.
+        const worn = this.player.rig?.character;
+        if (worn && worn.manifest.id === c.species) putBackLook(worn, c.appearance);
+        await this.play(c);
+      }).catch((err) => console.warn('could not enter the world', err));
+    this.select.onCreate = () => void inTurn(() => this.openCreator()).catch((err) => console.warn('creator', err));
+    if (debugRoot) debugRoot.select = () => this.select.report();
     this.select.onDelete = (c) => {
       deleteCharacter(c.id);
       this.select.show(loadCharacters());

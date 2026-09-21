@@ -126,6 +126,14 @@ interface Chevron {
   shown: boolean;
 }
 
+// Every colour is one of the palette's eighteen names (`src/style.css`, `src/core/palette.ts`), as a
+// name or as that name at an alpha, and never a value typed here: `hudPage.test.ts` reads this string
+// out of the file and holds it to the same rule as the stylesheet. The panel's backing was a near-black
+// at 0.78 and is `void` at 78%; the buttons' fill was a blue-grey at 0.9 and is `plate`, as the trade
+// window's buttons already are; the health bar's track was white at 0.12 and is `ink` at 12%.
+//
+// A window somebody has sized (`win-sized`, from `src/ui/drag.ts`) lays its rows out down the frame
+// and scrolls them, the header and the foot keeping their room.
 const CSS = `
 .group-panel {
   position: absolute;
@@ -134,36 +142,39 @@ const CSS = `
   width: calc(260px * var(--hud-scale, 1));
   padding: calc(8px * var(--hud-scale, 1));
   border-radius: 6px;
-  background: rgba(6, 12, 18, 0.78);
-  border: 1px solid var(--rule, rgba(150, 190, 220, 0.25));
+  background: color-mix(in srgb, var(--void) 78%, transparent);
+  border: 1px solid var(--rule);
   font: 500 calc(12px * var(--hud-scale, 1))/1.4 system-ui, sans-serif;
-  color: var(--ink, #dff1ff);
+  color: var(--ink);
   pointer-events: auto;
   z-index: 6;
 }
 .group-panel.hidden { display: none; }
-.group-panel h3 { margin: 0 0 6px; font-size: calc(13px * var(--hud-scale, 1)); color: var(--accent, #7fd7ff); }
-.group-row { display: grid; grid-template-columns: 1fr auto; gap: 2px 6px; padding: 4px 0; border-top: 1px solid var(--rule, rgba(150, 190, 220, 0.18)); }
+.group-panel.win-sized:not(.hidden) { display: flex; flex-direction: column; }
+.group-panel.win-sized .rows { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+.group-panel.win-sized .foot, .group-panel.win-sized .hint, .group-panel.win-sized h3 { flex: none; }
+.group-panel h3 { margin: 0 0 6px; font-size: calc(13px * var(--hud-scale, 1)); color: var(--accent); }
+.group-row { display: grid; grid-template-columns: 1fr auto; gap: 2px 6px; padding: 4px 0; border-top: 1px solid var(--rule); }
 .group-row.hidden { display: none; }
 .group-row .who { font-weight: 600; }
-.group-row .where { color: var(--muted, #9fb3c4); font-size: calc(11px * var(--hud-scale, 1)); }
-.group-row .hp { grid-column: 1 / -1; height: 3px; background: rgba(255, 255, 255, 0.12); border-radius: 2px; overflow: hidden; }
+.group-row .where { color: var(--muted); font-size: calc(11px * var(--hud-scale, 1)); }
+.group-row .hp { grid-column: 1 / -1; height: 3px; background: color-mix(in srgb, var(--ink) 12%, transparent); border-radius: 2px; overflow: hidden; }
 .group-row .hp.hidden { display: none; }
-.group-row .hp > i { display: block; height: 100%; background: var(--good, #6adf7a); transform-origin: left center; transform: scaleX(1); }
+.group-row .hp > i { display: block; height: 100%; background: var(--good); transform-origin: left center; transform: scaleX(1); }
 .group-row .acts { grid-column: 2; display: flex; gap: 4px; }
 .group-panel button {
-  background: rgba(20, 40, 56, 0.9);
+  background: var(--plate);
   color: inherit;
-  border: 1px solid var(--rule, rgba(150, 190, 220, 0.3));
+  border: 1px solid var(--edge);
   border-radius: 3px;
   padding: 2px 6px;
   font: inherit;
   cursor: pointer;
 }
 .group-panel button.hidden { display: none; }
-.group-panel button:hover { border-color: var(--accent, #7fd7ff); }
+.group-panel button:hover { border-color: var(--accent); }
 .group-panel .foot { display: flex; gap: 4px; margin-top: 6px; flex-wrap: wrap; }
-.group-panel .hint { color: var(--muted, #9fb3c4); font-size: calc(11px * var(--hud-scale, 1)); margin: 6px 0 0; }
+.group-panel .hint { color: var(--muted); font-size: calc(11px * var(--hud-scale, 1)); margin: 6px 0 0; }
 .group-ask {
   position: absolute;
   left: 50%;
@@ -171,10 +182,10 @@ const CSS = `
   transform: translateX(-50%);
   padding: calc(8px * var(--hud-scale, 1)) calc(12px * var(--hud-scale, 1));
   border-radius: 6px;
-  background: rgba(6, 12, 18, 0.85);
-  border: 1px solid var(--accent, #7fd7ff);
+  background: color-mix(in srgb, var(--void) 85%, transparent);
+  border: 1px solid var(--accent);
   font: 500 calc(13px * var(--hud-scale, 1))/1.4 system-ui, sans-serif;
-  color: var(--ink, #dff1ff);
+  color: var(--ink);
   text-align: center;
   pointer-events: auto;
   z-index: 7;
@@ -182,9 +193,9 @@ const CSS = `
 .group-ask.hidden { display: none; }
 .group-ask .acts { display: flex; gap: 6px; justify-content: center; margin-top: 6px; }
 .group-ask button {
-  background: rgba(20, 40, 56, 0.9);
+  background: var(--plate);
   color: inherit;
-  border: 1px solid var(--rule, rgba(150, 190, 220, 0.3));
+  border: 1px solid var(--edge);
   border-radius: 3px;
   padding: 3px 10px;
   font: inherit;
@@ -195,9 +206,9 @@ const CSS = `
   position: absolute;
   top: 0;
   left: 0;
-  color: var(--accent, #7fd7ff);
+  color: var(--accent);
   font: 600 14px/1 system-ui, sans-serif;
-  text-shadow: 0 0 3px rgba(0, 0, 0, 0.8);
+  text-shadow: 0 0 3px color-mix(in srgb, var(--void) 80%, transparent);
   white-space: nowrap;
   will-change: transform;
 }

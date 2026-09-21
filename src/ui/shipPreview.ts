@@ -106,7 +106,14 @@ export class ShipPreview {
     // The panel sizes the canvas with CSS: watching it keeps the drawing buffer the shape of the box.
     this.observer = new ResizeObserver((entries) => {
       const box = entries[0]?.contentRect;
-      if (box) this.resize(Math.round(box.width), Math.round(box.height));
+      if (!box) return;
+      this.resize(Math.round(box.width), Math.round(box.height));
+      // Sizing empties the buffer after this frame's draw: drawn again before it is shown, so a window
+      // being sized never shows an empty stage. The camera is placed first, since the fit may have moved.
+      if (this.running && this.holder) {
+        this.placeCamera();
+        this.renderer.render(this.scene, this.camera);
+      }
     });
     this.canvasEl = this.makeContext();
   }
@@ -361,6 +368,9 @@ export class ShipPreview {
 
   private resize(width: number, height: number): void {
     if (width < 8 || height < 8) return;
+    // The window may have been carried to a screen of another scale, or the browser zoomed.
+    const ratio = Math.min(window.devicePixelRatio, 2);
+    if (this.renderer.getPixelRatio() !== ratio) this.renderer.setPixelRatio(ratio);
     this.renderer.setSize(width, height, false);
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
@@ -430,15 +440,20 @@ export class ShipPreview {
     if (!this.holder) return;
     this.wings?.step(dt);
     if (!this.userFramed) this.yaw += AUTO_TURN * dt;
+    this.placeCamera();
+    this.renderer.render(this.scene, this.camera);
+    this.frames++;
+  };
+
+  /** The camera on its orbit about the ship, from the turn, tilt, distance and slide as they are now. */
+  private placeCamera(): void {
     const cp = Math.cos(this.pitch);
     const tx = this.centre.x + this.pan.x;
     const ty = this.centre.y + this.pan.y;
     const tz = this.centre.z + this.pan.z;
     this.camera.position.set(tx + Math.sin(this.yaw) * cp * this.distance, ty + Math.sin(this.pitch) * this.distance, tz + Math.cos(this.yaw) * cp * this.distance);
     this.camera.lookAt(tx, ty, tz);
-    this.renderer.render(this.scene, this.camera);
-    this.frames++;
-  };
+  }
 }
 
 /** A mesh, sprite, points or line with a material: what the renderer draws and compiles. */

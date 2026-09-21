@@ -127,6 +127,16 @@ const SPLINE_POINTS = 64;
  */
 const MAP_BUILD = { gridSize: 24000, gridSquares: 48, axes: 1500, shellSegments: 16, shellRings: 10 };
 
+/**
+ * The map window's canvases' pixels per CSS pixel: the screen's own (1.25 and 1.5 at Windows' 125% and
+ * 150%), capped at 2 as it always was. Both canvases compare their buffer with their box times this on
+ * every frame they draw, so a window made bigger or smaller, or carried to another screen, is drawn at
+ * its new size on the very frame it is laid out at it.
+ */
+function mapPixelRatio(): number {
+  return Math.min(window.devicePixelRatio || 1, 2);
+}
+
 /** The layers that are on when the map is first opened. */
 const LAYERS_ON: readonly LayerId[] = ['stations', 'points', 'launch', 'fields', 'nebulae', 'ships', 'group'];
 
@@ -678,8 +688,13 @@ export class MapUi {
   private mapRenderer(): THREE.WebGLRenderer {
     if (!this.renderer3d) {
       this.renderer3d = new THREE.WebGLRenderer({ canvas: this.canvas3d, antialias: true, alpha: true });
-      this.renderer3d.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+      this.renderer3d.setPixelRatio(mapPixelRatio());
     }
+    // The window can be dragged onto a screen of another scale, or the browser zoomed, while the map
+    // is open: the ratio is read each frame (one comparison) and the buffer follows on the frame it
+    // changes, the same frame it is drawn into, so no blank frame is ever shown between the two.
+    const ratio = mapPixelRatio();
+    if (this.renderer3d.getPixelRatio() !== ratio) this.renderer3d.setPixelRatio(ratio);
     return this.renderer3d;
   }
 
@@ -847,7 +862,7 @@ export class MapUi {
 
   private draw2d(packId: string, name: string): void {
     const c = this.canvas2d;
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const dpr = mapPixelRatio();
     const w = c.clientWidth;
     const h = c.clientHeight;
     if (!w || !h) return;
@@ -1212,12 +1227,11 @@ export class MapUi {
     const w = c.clientWidth;
     const h = c.clientHeight;
     if (!w || !h) return;
-    if (!this.renderer3d) {
-      this.renderer3d = new THREE.WebGLRenderer({ canvas: c, antialias: true, alpha: true });
-      this.renderer3d.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-    }
-    const r = this.renderer3d;
-    const resized = c.width !== Math.round(w * r.getPixelRatio()) || c.height !== Math.round(h * r.getPixelRatio());
+    // Made on the first frame either tab draws, and its ratio kept to the screen's on every frame.
+    const r = this.mapRenderer();
+    // Floored, as three sizes the buffer: rounded, a box whose size times 1.25 or 1.5 ends in more than a
+    // half read as a new size on every frame and threw the buffer away each time.
+    const resized = c.width !== Math.floor(w * r.getPixelRatio()) || c.height !== Math.floor(h * r.getPixelRatio());
     if (resized || this.camera3d.far !== VIEW_TUNE.far) {
       if (resized) {
         r.setSize(w, h, false);

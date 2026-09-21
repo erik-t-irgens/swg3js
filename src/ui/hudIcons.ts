@@ -48,6 +48,8 @@ export const ICON_IDS = [
   'ic-hand',
   'ic-hit',
   'ic-system',
+  'ic-pencil',
+  'ic-plus',
   'ic-speech',
 ] as const;
 
