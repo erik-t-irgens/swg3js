@@ -131,6 +131,53 @@ export function checkClaim(data, claim, nonce, { word = '' } = {}) {
   return { ok: true, player: claim.player, character: claim.character, registered: !known, keep: settleCharacter(stored, offered), stored, offered };
 }
 
+// ------------------------------------------------------------------------------------------------
+// Who the admin is
+//
+// One player may stand creatures in the world, and what they stand is the world's: everyone sees it
+// and one browser thinks for it. Which player that is, is the server's to say and nobody else's --
+// `--admin=<player id>` on the command line names one, and with none given it is whichever player
+// this world registered first, which is the person who ran the server and joined it. It is written
+// down with the rest of the truth (`settings.admin` in the store), so it does not change under
+// anyone the next time the server starts.
+
+/**
+ * The player id this world takes as its admin: the one named on the command line, else the one it
+ * has written down, else nothing at all -- which is a world that has met nobody yet.
+ */
+export function adminFor(data, named = '') {
+  if (typeof named === 'string' && named) return named;
+  const kept = data?.settings?.admin;
+  return typeof kept === 'string' && kept ? kept : '';
+}
+
+/**
+ * The first player this world ever registered, by the moment it was written down. It is what a world
+ * that has been played in before this rule existed falls back on, so the person whose world it is
+ * does not have to name themselves on a command line to be the admin of it.
+ */
+export function firstRegistered(data) {
+  let first = '';
+  let when = Infinity;
+  for (const id of Object.keys(data?.players ?? {})) {
+    const at = Number(data.players[id]?.first);
+    const stamp = Number.isFinite(at) ? at : Infinity;
+    // The earliest stamp wins, and two with no stamp at all are settled by their ids, so the answer
+    // is the same every time the world is read back rather than whatever order the keys came in.
+    if (stamp < when || (stamp === when && (!first || id < first))) {
+      when = stamp;
+      first = id;
+    }
+  }
+  return first;
+}
+
+/** Whether a player is the admin of this world. Nobody is, while nobody has been named. */
+export function isAdmin(data, player, named = '') {
+  const admin = adminFor(data, named);
+  return !!admin && !!player && admin === player;
+}
+
 /**
  * Who is playing which character right now. A character opened in a second browser is given to the
  * newer one and the older is told it was taken over (decision 8); this is the piece that says so.

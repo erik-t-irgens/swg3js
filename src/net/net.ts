@@ -515,6 +515,17 @@ export class Net {
       case 'blocked':
       case 'health':
       case 'died':
+      // The world's creatures: what an admin has stood in this world, what has gone, and which of
+      // them this browser has been given to think for. Handed over whole, as the group's words are;
+      // what they mean belongs to src/net/owned.ts, and the socket reads none of it.
+      case 'spawn':
+      case 'keep':
+      // The world's creatures as they cross: where the ones another browser thinks for have got to,
+      // one of them gone, and a blow somebody struck against one this browser keeps. Handed over
+      // whole, as the group's words are; what they mean belongs to src/net/npcNet.ts.
+      case 'npcState':
+      case 'npcGone':
+      case 'npcHurt':
       case 'duel':
         // The group and the words players type: handed over whole to whoever owns them. Nothing is
         // read here, so this switch does not have to grow a case for every word a group can say.

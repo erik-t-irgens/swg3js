@@ -254,6 +254,12 @@ export interface SessionStats {
   taken: boolean;
   /** Whether damage between players is switched on where we are (the same answer `friendlyFire` gives). */
   friendlyFire: boolean;
+  /**
+   * Whether this player is the one who may stand creatures in the world (the same answer `isAdmin`
+   * gives). It is the server's word, carried in the answer to this browser's claim; with no server
+   * there is no admin at all, because there is nobody to be an admin of.
+   */
+  admin: boolean;
   /** Which version of the language the far end speaks, as its greeting said; 0 until one does. */
   serverVersion: number;
 }
@@ -287,7 +293,7 @@ export class Session {
   private ffHeard = false;
   /** Said once per line: a server speaking a language newer than this browser's. */
   private saidNewer = false;
-  private stat: SessionStats = { mode: 'off', authority: 'me', player: '', character: '', id: 0, counter: 0, keep: '', ask: null, denied: '', refused: '', taken: false, friendlyFire: false, serverVersion: 0 };
+  private stat: SessionStats = { mode: 'off', authority: 'me', player: '', character: '', id: 0, counter: 0, keep: '', ask: null, denied: '', refused: '', taken: false, friendlyFire: false, admin: false, serverVersion: 0 };
 
   /** What the game tells the player: joining, being taken over, a character settled. The message line takes it. */
   onNote: (text: string) => void = () => {};
@@ -513,6 +519,9 @@ export class Session {
     this.stat.refused = '';
     this.stat.friendlyFire = false;
     this.ffHeard = false;
+    // Being the admin is the server's word about the line that is opening, not about the one that
+    // closed: until this one answers, nobody may stand anything.
+    this.stat.admin = false;
     this.stat.serverVersion = 0;
     this.saidNewer = false;
     // A line being opened again is the player asking for this character back, so what was true of the
@@ -529,6 +538,7 @@ export class Session {
     this.stat.ask = null;
     this.stat.friendlyFire = false;
     this.ffHeard = false;
+    this.stat.admin = false;
   }
 
   /** Nothing was heard within the wait: this is the old relay, and everything a server would hold is off. */
@@ -595,7 +605,7 @@ export class Session {
   }
 
   /** The server has us: this is a server session, and it says how it settled the character. */
-  claimed(you: { player?: string; character?: string; name?: string } | undefined, keep: Settlement | ''): void {
+  claimed(you: { player?: string; character?: string; name?: string; admin?: number } | undefined, keep: Settlement | ''): void {
     this.stat.mode = 'server';
     this.stat.authority = 'server';
     this.stat.denied = '';
@@ -603,6 +613,10 @@ export class Session {
     this.stat.keep = keep || '';
     // The server has us, so the switch it named is now the one in force here.
     this.stat.friendlyFire = this.ffHeard;
+    // Whether this player may stand creatures in the world. It is a flag on the answer to the claim,
+    // which a server built before this never sends and an old relay never answers at all, so a
+    // browser that is told nothing is not an admin -- which is the right answer in both cases.
+    this.stat.admin = you?.admin === 1;
     if (you?.character) this.stat.character = you.character;
     this.onNote(`joined the world as ${this.charName || you?.name || 'someone'}`);
   }
@@ -685,6 +699,7 @@ export class Session {
     this.stat.authority = 'me';
     this.stat.friendlyFire = false;
     this.ffHeard = false;
+    this.stat.admin = false;
     this.onNote(`the server turned this browser away: ${this.stat.denied}`);
   }
 
@@ -706,6 +721,7 @@ export class Session {
     this.stat.authority = 'me';
     this.stat.friendlyFire = false;
     this.ffHeard = false;
+    this.stat.admin = false;
     this.onNote(by ? `this character was opened in another browser (${by}); this one has stopped` : 'this character was opened in another browser; this one has stopped');
   }
 
@@ -727,6 +743,16 @@ export class Session {
    */
   get friendlyFire(): boolean {
     return this.stat.friendlyFire;
+  }
+
+  /**
+   * Whether this player may stand creatures in the world: the server's word and nobody else's, and
+   * false everywhere there is no server to say it -- playing alone, against the relay that came
+   * before, or on a line that has dropped. It is read where a panel asks whether to offer the
+   * button; the server is what refuses the word itself, so nothing rests on this being right.
+   */
+  get isAdmin(): boolean {
+    return this.stat.authority === 'server' && this.stat.admin;
   }
 
   /** A tie waiting on the player, or null. */
