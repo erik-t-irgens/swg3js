@@ -514,7 +514,10 @@ export function measureBox(obj: THREE.Object3D): PeerBox | null {
   const box = new THREE.Box3();
   const one = new THREE.Box3();
   const walk = (o: THREE.Object3D): void => {
-    if (!o.visible) return;
+    // Rooms hung on a hull are not the hull: the game's rooms are larger than the ship around them, and
+    // while somebody is standing in another player's ship they are drawn, so a box over everything drawn
+    // would be a box the size of their cabins.
+    if (!o.visible || o.userData.noBox) return;
     const m = o as THREE.Mesh;
     if (m.isMesh && m.geometry) {
       if (!m.geometry.boundingBox) m.geometry.computeBoundingBox();

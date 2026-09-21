@@ -42,6 +42,8 @@ import { loadSpacePack, type SpacePack } from '../space/spaceData.ts';
 import { Nebulae, installNebulaDebug } from '../space/nebulae.ts';
 import { liveSettings } from '../core/settings.ts';
 import { peerBodies, type RemoteBodies } from '../net/remoteBodies.ts';
+import { remoteInteriors, type RemoteInteriors } from '../net/remoteInterior.ts';
+import { watchPeers } from '../net/remotePlayers.ts';
 import { ShipContacts } from '../space/contacts';
 import { NpcShipManager } from '../space/npcShips';
 import { ZONE_TIER } from '../space/roster';
@@ -468,6 +470,11 @@ export class World {
     this.ships = new ShipContacts(this.shipFx, this.bolts, () => this.npcDeps.effects ?? null, () => this.garage ?? null);
     this.ships.onShipDown = (v) => this.npcShips?.destroyed(v, this.simTime);
     void this.ships.load(import.meta.env.BASE_URL);
+    // The rooms of a hull another player flies are bound to this world now rather than on the first
+    // ask: binding is what lets go of the rooms built in the world before this one (their bodies are
+    // in a physics world that is about to be freed), and what puts them in earshot of the peers.
+    // Nothing is built until somebody asks for a hull to be made a place.
+    this.remoteRooms();
     scene.add(this.chunkRoot, this.sun, this.sun.target, this.hemi, this.fill, this.fill.target, this.splashes.points, this.dust.points);
     markActor(this.splashes.points);
     markActor(this.dust.points);
@@ -1119,6 +1126,9 @@ export class World {
     this.forgetMaterials(this.waterMaterials);
     for (const m of this.waterMaterials) m.dispose();
     this.waterMaterials.length = 0;
+    // The rooms of a hull another player flies belong to the world that has just gone. A room somebody
+    // is standing in is not freed under them: it is cut loose and left where it was until they step out.
+    this.remoteRooms().releaseAll();
   }
 
   /**
@@ -2721,7 +2731,7 @@ export class World {
     const gravity = -this.physics.world.gravity.y;
     if (def.interior) {
       try {
-        v.interior = await ShipInterior.load(v, `${import.meta.env.BASE_URL}${def.interior.file}`, def.interior.def, gravity);
+        v.interior = await ShipInterior.load(v, `${import.meta.env.BASE_URL}${def.interior.file}`, def.interior.def, gravity, { prepare: (roots) => this.vehiclePrepare(roots) });
       } catch (err) {
         console.warn(`${def.id}: its interior did not load`, err);
       }
@@ -3479,6 +3489,28 @@ export class World {
 
   private peers(): RemoteBodies {
     return (this.peerLink ??= peerBodies().bind(this.physics));
+  }
+
+  /**
+   * The rooms of a hull another player flies (src/net/remoteInterior.ts), bound to this world the
+   * first time anything asks: its physics for the stand-in hull, its scene, its gravity, its garage,
+   * and the one preparation a vehicle gets before it is shown (`vehiclePrepare`, which adopts the
+   * materials and builds their programs a drawable at a time) so that a room shown in play compiles
+   * nothing. Until somebody asks for a hull to be made a place, nothing is built and this holds
+   * nothing at all, which is the game with no server.
+   */
+  private roomLink: RemoteInteriors | null = null;
+
+  remoteRooms(): RemoteInteriors {
+    return (this.roomLink ??= remoteInteriors().bind({
+      physics: this.physics,
+      scene: this.scene,
+      gravity: () => -this.physics.world.gravity.y,
+      garage: async () => (this.garage ??= await Garage.load(import.meta.env.BASE_URL)),
+      prepare: (roots) => this.vehiclePrepare(roots),
+      forget: (m) => this.forgetMaterials(m),
+      watch: watchPeers,
+    }));
   }
 
   /** The mobile, creature, fighter, turret, other player or vehicle a physics collider belongs to (every collider of a long body is its own). */

@@ -7521,6 +7521,11 @@ class App {
       this.ultraCruise.update(dt);
       this.stepVehicles(dt, simulate);
       this.stepNet(dt);
+      // The rooms of a hull another player flies step themselves, here, once a frame: a room outlives
+      // the player whose hull it was (somebody standing in a ship whose pilot has just dropped off the
+      // line is standing in a floor that must go on being simulated), and the peers' own pass says
+      // nothing at all about a player who is gone. Called twice in a frame it does the work once.
+      this.world.remoteRooms().step();
 
       const fast = simulate && input.held('fastForward');
       for (const m of this.shown) m.update(dt);

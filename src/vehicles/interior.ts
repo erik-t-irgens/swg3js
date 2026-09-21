@@ -42,20 +42,60 @@ export interface RoomLight {
   cell?: number;
 }
 
+/**
+ * What a ship's rooms ask of the hull they are inside, and the whole of it. Everything the class
+ * below reads or writes of the hull goes through this, so the rooms themselves know nothing of
+ * flight, collision, guns or a fit: a frame to live in, a name for the lift's title, the two places
+ * a view is taken from, and the two flags that say somebody is in them.
+ *
+ * `Vehicle` satisfies it, and so does the stand-in hull another player's picture is given
+ * (`src/net/remoteInterior.ts`). That stand-in is a real Vehicle rather than a bare object, because
+ * `WalkableRoom.vehicle` is read as one at some thirty places outside these rooms -- the prompts, the
+ * bolts' frame, the camera, the room air, the motion blur -- and narrowing every one of them is a
+ * change for another day. This interface is what makes that day a small one: when those readers are
+ * narrowed too, `vehicle` below becomes an `InteriorHost` and nothing in this file moves.
+ */
+export interface InteriorHost {
+  /** The frame the rooms live in: their meshes hang under it and their physics is in its space. */
+  readonly group: THREE.Object3D;
+  /** What to call the hull, for a lift's title. */
+  readonly spec: { readonly label: string };
+  /** Where the view sits at the controls, in the hull's frame, and what put it there. */
+  cockpit: [number, number, number] | null;
+  eyeSource: string;
+  /** Somebody is in the rooms: the hull shows its glass clear and counts itself occupied. */
+  occupied: boolean;
+  setGlassClear(on: boolean): void;
+}
+
 /** What names the way in among a room's hardpoints. */
 const ENTRY_HARDPOINT = /spawn|entry|entrance|start|arriv|player_?start|boarding/i;
 /** How bright a room's lights are over the client's values, as the world's rooms have them. */
 const ROOM_LIGHT_SCALE = 3;
 
 /**
- * Which portal cell a node belongs to, from its own or an ancestor's name: the converter names
- * them cell:<index>:<name>, and GLTFLoader strips the colons, so "cell:2:hall" arrives as
- * "cell2hall". -1 for a node of a plain model.
+ * Which portal cell a node *is*, from its own name and nothing else: the converter names a cell's
+ * node cell:<index>:<name>, and GLTFLoader strips the colons, so "cell:2:hall" arrives as
+ * "cell2hall". -1 for anything that is not a cell's own node.
+ *
+ * This is the question to ask when a room is being shown, hidden or lifted out whole, because the
+ * meshes under a cell are not rooms and must not be turned on one by one (that is what would show a
+ * window's invisible pane). `cellIndexOf` below asks the other question, "which cell is this part
+ * of", and both are written here so there is one spelling of the converter's naming.
+ */
+export function ownCellIndex(o: THREE.Object3D | null): number {
+  const m = o ? /^cell[:_]?(\d+)/.exec(o.name) : null;
+  return m ? Number(m[1]) : -1;
+}
+
+/**
+ * Which portal cell a node belongs to, from its own or an ancestor's name. -1 for a node of a
+ * plain model.
  */
 export function cellIndexOf(o: THREE.Object3D | null): number {
   for (let n = o; n; n = n.parent) {
-    const m = /^cell[:_]?(\d+)/.exec(n.name);
-    if (m) return Number(m[1]);
+    const i = ownCellIndex(n);
+    if (i >= 0) return i;
   }
   return -1;
 }
@@ -115,7 +155,18 @@ export class ShipInterior {
    * @param meshes the room's meshes, each with its matrixWorld current.
    * @param owned whether the meshes are the interior's own model (removed and disposed with it) or the hull's.
    */
-  private constructor(readonly vehicle: Vehicle, group: THREE.Object3D, frame: THREE.Object3D, meshes: THREE.Mesh[], private readonly def: InteriorDef, gravity: number, private readonly owned: boolean) {
+  /**
+   * The hull these rooms are in, as everything outside them knows it. Nothing in this class reads it:
+   * the class reads `host` (InteriorHost above), which is the same object seen as the little the rooms
+   * really need.
+   */
+  readonly vehicle: Vehicle;
+  /** The hull as these rooms need it, and the only way this class may reach it. */
+  private readonly host: InteriorHost;
+
+  private constructor(vehicle: Vehicle, group: THREE.Object3D, frame: THREE.Object3D, meshes: THREE.Mesh[], private readonly def: InteriorDef, gravity: number, private readonly owned: boolean) {
+    this.vehicle = vehicle;
+    this.host = vehicle;
     this.physics = Physics.local(gravity);
     this.group = group;
     const w = this.physics.world;
@@ -223,7 +274,7 @@ export class ShipInterior {
       if (!m.isMesh || cell <= 0) return;
       if (!names.has(cell)) names.set(cell, cellNameOf(o));
       if (!m.geometry.boundingBox) m.geometry.computeBoundingBox();
-      const box = m.geometry.boundingBox!.clone().applyMatrix4(new THREE.Matrix4().copy(this.vehicle.group.matrixWorld).invert().multiply(m.matrixWorld));
+      const box = m.geometry.boundingBox!.clone().applyMatrix4(new THREE.Matrix4().copy(this.host.group.matrixWorld).invert().multiply(m.matrixWorld));
       (boxes.get(cell) ?? boxes.set(cell, new THREE.Box3()).get(cell)!).union(box);
     });
     const bridge = [...names.entries()].find(([, n]) => /bridge|cockpit|pilot|flight|control|helm/i.test(n))?.[0];
@@ -235,8 +286,8 @@ export class ShipInterior {
     if (!spot) return;
     this.pilotSpot = spot;
     // The view from the controls: standing eyes over the spot.
-    this.vehicle.cockpit = [spot.x, spot.y + 1.55, spot.z];
-    this.vehicle.eyeSource = 'bridge';
+    this.host.cockpit = [spot.x, spot.y + 1.55, spot.z];
+    this.host.eyeSource = 'bridge';
     console.info(`ship interior: the controls are at the front of "${names.get(bridge)}", ${spot.toArray().map((n) => n.toFixed(1)).join(',')}`);
   }
 
@@ -278,24 +329,51 @@ export class ShipInterior {
     return best ? new THREE.Vector3(best.x, best.y + 0.15, best.z) : null;
   }
 
-  /** Load an interior model and hang it inside a hull, with its own physics world at the planet's gravity. */
-  static async load(vehicle: Vehicle, url: string, def: InteriorDef, gravity: number): Promise<ShipInterior> {
+  /**
+   * The materials of an interior model of its own, so whoever built these rooms can take them out of
+   * the world's sets when it takes the rooms down (`World.forgetMaterials`: the portal renderer's set
+   * and the shadow cascades' map are both strong). Empty for rooms that are part of the hull model,
+   * whose materials are the hull's and are neither ours to forget nor ours to dispose.
+   */
+  readonly ownMaterials: THREE.Material[] = [];
+
+  /**
+   * Load an interior model and hang it inside a hull, with its own physics world at the planet's gravity.
+   *
+   * `opts.hidden` hangs it out of sight, for rooms that must not show until somebody is in them (a hull
+   * somebody else flies, whose rooms would otherwise be seen through its skin from outside); `opts.prepare`
+   * is given the loaded scene before the rooms are measured, so its materials join the world's schemes and
+   * its programs are built before any frame draws them.
+   */
+  static async load(vehicle: Vehicle, url: string, def: InteriorDef, gravity: number, opts: { hidden?: boolean; prepare?: (roots: THREE.Object3D[]) => Promise<void> } = {}): Promise<ShipInterior> {
     const gltf = await surfaces.withPlugin(new GLTFLoader()).loadAsync(url);
     // Rooms are never rained on: every material is marked dry before the scan can meet it (each
     // load parses its own file, so nothing outside these rooms shares them).
+    const mine: THREE.Material[] = [];
     gltf.scene.traverse((o) => {
       const m = o as THREE.Mesh;
       if (!m.isMesh) return;
-      for (const mat of Array.isArray(m.material) ? m.material : [m.material]) mat.userData.dry = true;
+      for (const mat of Array.isArray(m.material) ? m.material : [m.material]) {
+        mat.userData.dry = true;
+        if (!mine.includes(mat)) mine.push(mat);
+      }
     });
+    // Out of sight until somebody is in them, when that is what was asked for: set before the scene
+    // is hung, so no frame ever draws them.
+    if (opts.hidden) gltf.scene.visible = false;
     // Inside the hull: the model's frame is the hull's, so the room moves, banks and rolls with it.
     vehicle.group.add(gltf.scene);
     markActor(gltf.scene);
+    // Its materials join the world's schemes and its programs are built now, not on the frame it is
+    // first drawn: a room shown in play must compile nothing.
+    if (opts.prepare) await opts.prepare([gltf.scene]);
     const meshes: THREE.Mesh[] = [];
     gltf.scene.traverse((o) => {
       if ((o as THREE.Mesh).isMesh) meshes.push(o as THREE.Mesh);
     });
-    return new ShipInterior(vehicle, gltf.scene, vehicle.group, meshes, def, gravity, true);
+    const interior = new ShipInterior(vehicle, gltf.scene, vehicle.group, meshes, def, gravity, true);
+    interior.ownMaterials.push(...mine);
+    return interior;
   }
 
   /**
@@ -311,7 +389,7 @@ export class ShipInterior {
       const m = o as THREE.Mesh;
       if (cell <= 0) return;
       // The cell's own node, not the meshes under it (showing those again would show a window's invisible pane).
-      if (/^cell[:_]?\d+/.test(o.name) && !(o.parent && /^cell[:_]?\d+/.test(o.parent.name))) rooms.push(o);
+      if (ownCellIndex(o) >= 0 && ownCellIndex(o.parent) < 0) rooms.push(o);
       if (m.isMesh) meshes.push(m);
     });
     if (!meshes.length) return null;
@@ -334,8 +412,8 @@ export class ShipInterior {
     // The hull's glass is the game's own solid pane while the rooms are hidden (nothing behind it
     // to see) and clear while someone is aboard, so those outside see them in (the vehicle's own
     // panes, shared with a pilot at the controls).
-    this.vehicle.occupied = aboard;
-    this.vehicle.setGlassClear(aboard);
+    this.host.occupied = aboard;
+    this.host.setGlassClear(aboard);
   }
 
   /**
@@ -344,7 +422,7 @@ export class ShipInterior {
    * way in becomes the entry.
    */
   private readHardpointsAndLights(def: InteriorDef): void {
-    const v = this.vehicle;
+    const v = this.host;
     v.group.updateMatrixWorld(true);
     const groupInverse = new THREE.Matrix4().copy(v.group.matrixWorld).invert();
     let modelOffset = new THREE.Vector3();
@@ -394,8 +472,8 @@ export class ShipInterior {
     out.length = 0;
     if (!this.lights.length) return out;
     const sorted = this.lights.map((l) => ({ l, d: l.pos.distanceToSquared(near) })).sort((a, b) => a.d - b.d).slice(0, count);
-    this.vehicle.group.updateMatrixWorld(true);
-    for (const { l } of sorted) out.push({ pos: l.pos.clone().applyMatrix4(this.vehicle.group.matrixWorld), color: l.color, intensity: l.intensity, distance: l.distance });
+    this.host.group.updateMatrixWorld(true);
+    for (const { l } of sorted) out.push({ pos: l.pos.clone().applyMatrix4(this.host.group.matrixWorld), color: l.color, intensity: l.intensity, distance: l.distance });
     return out;
   }
 
@@ -459,7 +537,7 @@ export class ShipInterior {
     if (cell <= 0 || !LIFT_CELL.test(this.cellNames.get(cell) ?? '')) return null;
     const stops = liftStops(this.def, cell);
     if (stops.length < 2) return null;
-    return { stops, current: stopAt(stops, local.y - this.modelOffset.y), title: `${this.vehicle.spec.label} · ${(this.cellNames.get(cell) ?? 'lift').replace(/_/g, ' ')}` };
+    return { stops, current: stopAt(stops, local.y - this.modelOffset.y), title: `${this.host.spec.label} · ${(this.cellNames.get(cell) ?? 'lift').replace(/_/g, ' ')}` };
   }
 
   /** Ride to one of a lift's stops: the spot through that doorway, in the hull's frame. */
@@ -469,15 +547,15 @@ export class ShipInterior {
 
   /** A world-space point in the hull's frame. */
   toLocal(world: THREE.Vector3, out: THREE.Vector3): THREE.Vector3 {
-    this.vehicle.group.updateMatrixWorld(true);
-    inverse.copy(this.vehicle.group.matrixWorld).invert();
+    this.host.group.updateMatrixWorld(true);
+    inverse.copy(this.host.group.matrixWorld).invert();
     return out.copy(world).applyMatrix4(inverse);
   }
 
   /** A point in the hull's frame, in the world. */
   toWorld(local: THREE.Vector3, out: THREE.Vector3): THREE.Vector3 {
-    this.vehicle.group.updateMatrixWorld(true);
-    return out.copy(local).applyMatrix4(this.vehicle.group.matrixWorld);
+    this.host.group.updateMatrixWorld(true);
+    return out.copy(local).applyMatrix4(this.host.group.matrixWorld);
   }
 
   /** The camera's block test, run in the room: world points in, the distance along from->to where the room blocks, or null. */
@@ -491,7 +569,7 @@ export class ShipInterior {
     if (this.owned) {
       // These rooms' materials are this spawn's alone and nothing disposes them: their animated surfaces go now.
       surfaces.forgetUnder(this.group);
-      this.vehicle.group.remove(this.group);
+      this.host.group.remove(this.group);
       this.group.traverse((o) => {
         const m = o as THREE.Mesh;
         if (m.isMesh) m.geometry.dispose();

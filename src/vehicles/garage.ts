@@ -6,7 +6,7 @@ import { Vehicle, specFor, vehicleKindOf, type VehicleKind, type VehicleSpec } f
 import type { Physics } from '../core/physics';
 import { ACTOR_LAYER } from '../world/portalRender';
 import { surfaces } from '../world/surfaces';
-import { cellIndexOf } from './interior';
+import { cellIndexOf, ownCellIndex } from './interior';
 import { COCKPIT_BODY_NUDGE, EYE_OVER_PELVIS, bodyLift, frameFileName, isEyeHardpoint, isSeatHardpoint, mirroredOffset, offsetShare, pelvisOnSeat, seatDropBelow, seatDropUsed, viewEye, type Vec3 } from './cockpitSeat';
 import { EngineTrail } from './trail';
 import { advanceEnginePhase, engineHeatOf } from './enginePlumes';
@@ -674,6 +674,12 @@ export class Garage {
       if (cellIndexOf(o) > 0) o.visible = false;
     });
     const holder = new THREE.Group();
+    // Which of the garage's vehicles this picture is. A picture is passed about as a bare object
+    // (the peers hand it over as `PeerView.ship`), and anything that has to go back to the def it
+    // was built from -- the rooms of a hull somebody else flies (src/net/remoteInterior.ts) -- has
+    // nowhere else to read it. A string, so the JSON copy `Object3D.copy` makes of userData carries
+    // it and costs nothing.
+    holder.userData.vehicleId = def.id;
     // A ship is never wetted, parked or flying: its materials were marked dry when the model
     // loaded (by the model's own kind), and another player's is held dry as well.
     if (def.kind === 'ship') holder.userData.weatherDry = true;
@@ -704,6 +710,62 @@ export class Garage {
       throw err;
     }
     return { holder, wings: a.wings, unresolved: a.unresolved, build: a.build, paint, fit };
+  }
+
+  /**
+   * The rooms of a picture, kept rather than hidden: `visualParts` builds a hull that is a portal
+   * building with its cells in place and every one of them turned off, because the game's rooms are
+   * bigger than the hull around them and would be seen through its skin. This hands back a copy of
+   * those cells, on their own, to hang under a frame of their own and show only to whoever is inside.
+   *
+   * It is a copy and not the picture's own nodes for one reason: the picture goes on being a picture.
+   * Moving its cells out from under its model would shift them by the re-centring the garage did to
+   * that model, and would leave the box a bolt stops against measuring something that is no longer
+   * there. A clone shares its geometry and its materials with the picture, so nothing is uploaded,
+   * nothing is compiled and nothing new is in memory but the nodes themselves; each mesh is marked
+   * `shared` so that whoever disposes the copy leaves the picture's geometry alone.
+   *
+   * The wrapper carries the model's own place within the picture, so the copy stands exactly where
+   * the picture's own cells stand and the rooms read the same offset from the manifest's frame that a
+   * spawned hull's rooms read. It comes back **turned off**: these rooms are the game's own, which
+   * are larger than the hull around them, and whatever is done with the copy next -- hanging it,
+   * measuring it, preparing its materials and building their programs, all of which yields to the
+   * frame loop -- must not put a friend's cabins through the outside of their ship for the length of
+   * it. Whoever builds rooms out of it turns it on once they are hidden by the rooms themselves.
+   *
+   * Null when the hull has no rooms of its own.
+   */
+  visualRooms(holder: THREE.Object3D): THREE.Object3D | null {
+    const tops: THREE.Object3D[] = [];
+    let model: THREE.Object3D | null = null;
+    holder.traverse((o) => {
+      // Cell 0 is the hull's own shell, which the picture already draws: a copy of it would stand in
+      // the same place as the original, fighting it for every pixel.
+      if (ownCellIndex(o) <= 0 || ownCellIndex(o.parent) >= 0) return;
+      tops.push(o);
+      model ??= o.parent;
+    });
+    if (!tops.length || !model) return null;
+    const group = new THREE.Group();
+    group.name = 'rooms';
+    const from = model as THREE.Object3D;
+    group.position.copy(from.position);
+    group.quaternion.copy(from.quaternion);
+    group.scale.copy(from.scale);
+    for (const top of tops) {
+      const copy = top.clone(true);
+      copy.traverse((o) => {
+        // The picture's cells are all turned off; the copy's are on, and the rooms hide them again
+        // until somebody boards (an invisible pane is turned off there, where it is known to be one).
+        o.visible = true;
+        const m = o as THREE.Mesh;
+        if (m.isMesh) m.userData.shared = true;
+      });
+      group.add(copy);
+    }
+    // Out of sight from the moment it exists, for the reason in the note above.
+    group.visible = false;
+    return group;
   }
 
   /**
