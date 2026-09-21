@@ -38,7 +38,8 @@ import { Equipment } from './player/equipment';
 import { itemInfo, WEAPON_ORDER, type ItemContext } from './player/items';
 import { OFF_HAND_CLASSES, normalizeOwned, slotRank, slotWords, speciesWords } from './core/inventory';
 import { ForceUi } from './ui/forceUi';
-import { DEFAULT_LOADOUT, POWERS } from './combat/forcePowers';
+import { DEFAULT_LOADOUT, POWERS, forceFxReport, type ForceFxTune } from './combat/forcePowers';
+import { setForceBeamLook } from './combat/forceLightning.ts';
 import { DEFAULT_GADGETS, GADGETS } from './combat/gadgets';
 import { RAGDOLL } from './combat/ragdoll';
 import { WeaponCatalogue, type WeaponDef } from './player/weapons';
@@ -1077,6 +1078,13 @@ class App {
       };
       this.world.npcs?.attach(this.world.npcDeps);
       if (c) console.info(`weapons: ${c.weapons.length} on the rack, ${c.skipped.length} left out`);
+      // The Force beam's own appearance out of the weapons pack (a `.ltn`, FORM LEFX, converted
+      // beside the powers' particles, keyed by its own file name in the pack's `powers.beams`).
+      // The catalogue and the first world's load race each other, so this both keeps it for the
+      // next world and gives it to a pool that is already up; a texture is not part of a program's
+      // key, so the swap compiles nothing, and the look's own two particles are prepared before
+      // the pool takes it.
+      setForceBeamLook((c?.manifest as { powers?: { beams?: Record<string, unknown> } } | undefined)?.powers?.beams?.force_lightning ?? null, (file) => `${import.meta.env.BASE_URL}assets-private/weapons/${file}`);
       // The peers' weapons waiting for the rack go in their hands now (remotes is assigned later in the constructor).
       this.remotes?.refreshHeld();
     });
@@ -3139,10 +3147,23 @@ class App {
           notes,
         };
       },
-      /** The Force powers in the slots: `powers(['grip', 'pull', null, 'repulse'])` sets them (ids from forcePowers.ts), no argument lists them. */
-      powers: (ids?: (string | null)[]) => {
-        if (ids) this.setSkills('jedi', ids);
-        return { slots: this.jediKit().loadout, all: POWERS.map((p) => `${p.id}: ${p.name} (${p.kind}, ${p.cost})`) };
+      /**
+       * The Force powers. With a list it puts them in the number slots, as it always did:
+       * `powers(['grip', 'pull', null, 'repulse'])` (ids from forcePowers.ts). With no argument it
+       * lists the slots, every power, and **what each one draws** -- the game's own effect as it
+       * fires, the one held while it lasts and the one where it lands, the beam it is drawn with,
+       * the sound, and whether that pairing is the client's own (`game`), one of the client's
+       * effects worn by a power the game never had (`invented`) or nothing at all (`none`, which is
+       * push, repulse, jump and slow, each of which looks exactly as it always did). With an object
+       * it moves `FORCE_FX`: `powers({ on: 0 })` places no Force effect at all, `powers({ fxSound:
+       * 1 })` also plays the sounds a placed effect's own emitters name (which are left to the
+       * power's own voice, so that a particle naming the sound its client effect already named is
+       * not heard twice), and `hitEvery`, `handAhead`, `handUp`, `selfUp` and `targetShare` are the
+       * rest. The beams themselves are `__debug.forceLightning()`.
+       */
+      powers: (ids?: (string | null)[] | Partial<ForceFxTune>) => {
+        if (Array.isArray(ids)) this.setSkills('jedi', ids);
+        return { slots: this.jediKit().loadout, all: POWERS.map((p) => `${p.id}: ${p.name} (${p.kind}, ${p.cost})`), ...forceFxReport(ids && !Array.isArray(ids) ? ids : null) };
       },
       /** The Bounty Hunter's gadgets in the slots: `gadgets(['cryoban', 'trip_mine', 'det_pack'])` sets them (ids from gadgets.ts), no argument lists them. */
       gadgets: (ids?: (string | null)[]) => {

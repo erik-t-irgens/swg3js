@@ -41,6 +41,8 @@ import { FOOT_TUNE, type FootGround } from '../audio/footsteps.ts';
 import type { LoopHost } from '../audio/emitters.ts';
 import { loadSpacePack, type SpacePack } from '../space/spaceData.ts';
 import { Nebulae, installNebulaDebug } from '../space/nebulae.ts';
+import { dropForceLightning, loadForceLightning, stepForceLightning } from '../combat/forceLightning.ts';
+import { prepareForceEffects } from '../combat/forcePowers.ts';
 import { liveSettings } from '../core/settings.ts';
 import { peerBodies, type RemoteBodies } from '../net/remoteBodies.ts';
 import { remoteInteriors, type RemoteInteriors } from '../net/remoteInterior.ts';
@@ -1008,6 +1010,19 @@ export class World {
         for (const p of this.layoutStream.objects) if (p.radius >= 2 && !p.contained) this.terrain.addAnchor({ x: p.x, z: p.z, y: p.y, r: p.radius });
       }
     }
+    // The Force's own beams: a small pool built into the scene here, hidden, so the warm-up
+    // compiles it behind the loading screen and no beam is ever made on the frame a power is used.
+    // Every world has one, since a Jedi fights on the ground as well as in a ship.
+    await loadForceLightning(this, () => token === this.loadToken);
+    if (token !== this.loadToken) return null;
+    // The Force powers' own effects, out of the weapons pack: their batches made hidden in the
+    // scene and their textures uploaded here, so the warm-up compiles them behind the loading
+    // screen and no power builds a program on the frame it is first used. The rack is the world's
+    // own and is null only while it is still coming (the kit asks again when it lands); a second
+    // call over the same files prepares nothing again.
+    const forceReady = await prepareForceEffects(this.weaponFx, this.renderer, this.npcDeps.weapons?.manifest);
+    if (token !== this.loadToken) return null;
+    if (forceReady) console.info(`the Force: ${forceReady} of the powers' own effects made ready`);
     this.props.dispose();
     this.props = new PropFactory(planet, this.flora ? [] : scatter);
     for (const c of this.chunks.values()) this.disposeChunk(c);
@@ -1108,6 +1123,7 @@ export class World {
       this.spaceBodies = null;
     }
     this.dropNebulae();
+    dropForceLightning(this);
     this.flora = null;
     this.groundTextures?.dispose();
     this.groundTextures = null;
@@ -3617,6 +3633,8 @@ export class World {
     if (this.spaceWorldBodies.length) this.placeStandingBodies(camPos);
     // The nebulae: where the camera is inside them, the haze, the sheets' order and the strikes.
     if (this.nebulae && this.camera) this.nebulae.update(dt, this.camera);
+    // The Force's beams: the flicker, the flip-book and the fade of any one nothing is holding.
+    stepForceLightning(dt);
     this.waterTime += dt;
     for (const m of this.waterMaterials) m.userData.uniforms.uTime.value = this.waterTime;
     // Modulo the shader's own loop, whose flow × loopTime is whole: the noise wraps without a seam.

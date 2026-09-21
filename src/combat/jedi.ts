@@ -1,7 +1,8 @@
 import * as THREE from 'three';
 import { KICK_DAMAGE } from './saber';
 import { THROW } from './saberThrow';
-import { DEFAULT_LOADOUT, SLOT_ACTIONS, SLOT_COUNT, powerById, type PowerDef } from './forcePowers';
+import { DEFAULT_LOADOUT, FORCE_FX, SLOT_ACTIONS, SLOT_COUNT, adoptPowerPack, noteForceFx, noteForceFxMissing, powerById, powerEffect, powerVoice, prepareForceEffects, type PowerDef, type PowerPart } from './forcePowers';
+import { holdForceBeam, releaseForceBeam } from './forceLightning.ts';
 import { sabers } from '../audio/saberSounds.ts';
 import type { Hittable, Kit, KitContext, KitSlot, Living, Resource } from './kit';
 import { nearestInCone, type ConeQuery } from './targets';
@@ -9,13 +10,37 @@ import { BLADE_RADIUS, BladePath, playerStrike, strikeSweep } from './sweep.ts';
 import { BrushClock, SABER_HIT, bodyTeleported, brushDamage, noteBrush, saberSwingStart, type HitLedger } from './saberHit.ts';
 import { roomFrame } from '../vehicles/surfaceRoom.ts';
 import type { BoltFrame } from './bolts';
+import type { EffectHandle, ParticleEffects } from '../world/particles';
 import { Unarmed } from './unarmed';
 
 const tmp = new THREE.Vector3();
 const tmp2 = new THREE.Vector3();
 const a = new THREE.Vector3();
 const b = new THREE.Vector3();
-const LIGHTNING_SEGMENTS = 14;
+/** Where a held beam goes and where it ends, so the frame that draws one allocates nothing. */
+const beamDir = new THREE.Vector3();
+const beamEnd = new THREE.Vector3();
+/** The one transform, turn, place and direction a placed effect is built from; kept, never made in a frame. */
+const fxM = new THREE.Matrix4();
+const fxQ = new THREE.Quaternion();
+const fxAt = new THREE.Vector3();
+const fxDir = new THREE.Vector3();
+/** Where a power's effect is asked for, in the world's frame, before it is carried into the hull's. */
+const fxWhere = new THREE.Vector3();
+const FX_ONE = new THREE.Vector3(1, 1, 1);
+/**
+ * Whether a placed Force effect is allowed to play the sounds its own emitters name. One kept
+ * object written in place, never made in a frame; `FORCE_FX.fxSound` is what moves it, and it is 0,
+ * so the power's voice is the sabers' alone and a particle naming the sound its client effect
+ * already named is not heard twice.
+ */
+const FX_PLACE_OPTS = { sound: false };
+const fxSpeaks = (): { sound: boolean } => {
+  FX_PLACE_OPTS.sound = FORCE_FX.fxSound > 0;
+  return FX_PLACE_OPTS;
+};
+/** The client's particle effects are authored looking down their own +Z, as the guns' own are placed. */
+const FX_Z = new THREE.Vector3(0, 0, 1);
 /** The spark a blade leaves where it bites, which is the colour every sweep has always thrown. */
 const SABER_SPARK = 0x9fd4ff;
 /** The narrowings the powers ask `targetAhead` for, as kept predicates rather than a closure a frame. */
@@ -30,6 +55,20 @@ const RAGE_REST = 20;
  */
 const HELD_POWERS = { lightning: powerById('lightning'), drain: powerById('drain'), grip: powerById('grip') };
 const KEPT_POWERS = { speed: powerById('speed'), protect: powerById('protect'), rage: powerById('rage') };
+
+/**
+ * One of the game's own effects held for as long as a power lasts: the handle, the file it draws,
+ * the frame it was placed in and the player that made it. A power that ends, a file that changes or
+ * a frame that changes (boarding a ship, stepping out of one) takes the old one down and places the
+ * new one; while none of those happen the effect is simply moved, so a power held for a minute
+ * places one effect and not sixty a second.
+ */
+class HeldFx {
+  handle: EffectHandle | null = null;
+  file = '';
+  frame: THREE.Matrix4 | null = null;
+  owner: ParticleEffects | null = null;
+}
 
 export class JediKit implements Kit {
   readonly id = 'jedi' as const;
@@ -91,6 +130,36 @@ export class JediKit implements Kit {
   private aboardFrame: BoltFrame | null = null;
   private readonly intoFrame = new THREE.Matrix4();
   /**
+   * That same frame as this frame's powers see it, written once at the top of `update`: a power used
+   * aboard a ship's rooms places its effect in the hull's frame and it rides the hull, exactly as a
+   * bolt fired there does.
+   */
+  private fxFrame: BoltFrame | null = null;
+  /**
+   * The standing effects the lasting powers keep: the speed's blur, the shield, the rage's aura, the
+   * lightning and the drain at the hand and the choke on what is held. One slot each for the life of
+   * the kit, so a power held costs one handle and no allocation a frame.
+   */
+  private readonly fxSpeed = new HeldFx();
+  private readonly fxProtect = new HeldFx();
+  private readonly fxRage = new HeldFx();
+  private readonly fxLightning = new HeldFx();
+  private readonly fxDrain = new HeldFx();
+  private readonly fxGrip = new HeldFx();
+  /**
+   * When a power last threw its `land` effect (`FORCE_FX.hitEvery`), one clock per power that can
+   * be landing at the same moment as another. There are two, and they are two because Protect is a
+   * toggle: it can be up while Lightning or Drain is held, and on one shared clock the lightning's
+   * own landing -- placed four times a second for as long as the key is down -- would keep the
+   * clock fresh and the blow the guard absorbed would never draw at all, which is the one thing
+   * that shows the guard is doing anything. Lightning and Drain do share theirs, and may: the slot
+   * loop makes `drain` false whenever `lightning` is true, so only one of the two is ever held.
+   */
+  private readonly fxHeldClock = { at: -Infinity };
+  private readonly fxGuardClock = { at: -Infinity };
+  /** The body's health as it stood last frame: a fall in it while the guard is up is a blow absorbed. */
+  private lastHp = Infinity;
+  /**
    * Where the body itself stood when a blade was last swept, and when. A body that moved further
    * than `SABER_HIT.carry` could carry it was *put* there -- a lift's pick, a teleport, an arrival
    * -- and every path it holds starts fresh, which is the one case the path's own rules cannot see:
@@ -110,8 +179,6 @@ export class JediKit implements Kit {
   fistsActive = false;
   private readonly unarmed = new Unarmed();
   private readonly aura: THREE.Mesh<THREE.SphereGeometry, THREE.MeshBasicMaterial>;
-  private readonly bolt: THREE.Line<THREE.BufferGeometry, THREE.LineBasicMaterial>;
-  private readonly boltPositions = new Float32Array((LIGHTNING_SEGMENTS + 1) * 3);
   private time = 0;
 
   constructor(private readonly scene: THREE.Scene) {
@@ -120,12 +187,7 @@ export class JediKit implements Kit {
       new THREE.MeshBasicMaterial({ color: 0x5fb8ff, transparent: true, opacity: 0.14, blending: THREE.AdditiveBlending, depthWrite: false }),
     );
     this.aura.visible = false;
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(this.boltPositions, 3));
-    this.bolt = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0xbfe6ff, toneMapped: false }));
-    this.bolt.visible = false;
-    this.bolt.frustumCulled = false;
-    scene.add(this.aura, this.bolt);
+    scene.add(this.aura);
     // The slots are filled the one way they are ever filled, so the array the display walks exists
     // and agrees with the loadout from the first frame.
     this.setLoadout(DEFAULT_LOADOUT);
@@ -248,6 +310,20 @@ export class JediKit implements Kit {
     // are all in the hull's frame and in the room's own physics, as a bolt fired aboard is, or the
     // ship's own motion would be part of every swing.
     const bladeFrame = this.frameOf(ctx);
+    this.fxFrame = bladeFrame;
+    // Which of the game's own effects each power wears, out of the weapons pack. The rack arrives
+    // after the world does, so it is asked for here rather than at the kit's making; the pack is
+    // read once and the same manifest is never read twice (`adoptPowerPack`).
+    //
+    // The world's own load prepares every one of those effects behind the loading screen, which is
+    // what keeps a power from building a program on the frame it is first used. This is the belt
+    // for the one case that cannot reach: a rack that lands *after* the world did, where nothing
+    // would otherwise ask for them until a key was pressed. It happens once, off the frame, and a
+    // second call over the same files prepares nothing again.
+    // The renderer is handed over as well, since the world has one: without it the batches are
+    // built but the textures are not uploaded, and this belt exists for exactly the path where that
+    // upload would otherwise land on the first frame a power draws.
+    if (ctx.weapons && adoptPowerPack(ctx.weapons.manifest)) void prepareForceEffects(ctx.world.weaponFx, ctx.world.renderer, ctx.weapons.manifest);
     const swinging = onFoot && player.saberOn && player.bladeActive;
     const inHand = onFoot && player.saberOn && !player.fists && !player.thrown.inFlight && !player.orbiting;
     if (swinging || inHand) {
@@ -348,21 +424,30 @@ export class JediKit implements Kit {
           if (onFoot && pressed && player.grounded && !player.swimming && res.value >= 20) {
             res.value -= 20;
             player.launch(Math.sqrt(2 * planet.gravity * 11), 9, cam);
-            effects.ring(player.pos, 0x9fd4ff, 5, 0.5);
-            sabers.power(powerById(id), 'once');
+            // The archives have no jump effect at all -- its client effect names a sound and no
+            // particle -- so the ring and the flash are ours and are exactly what they always were.
+            // `worldPos` and not `pos`: the ring pool draws in the world's frame, and aboard a
+            // ship's rooms `pos` is the hull's, which would put the ring wherever the hull's own
+            // coordinates happen to land in the world -- metres to kilometres off.
+            effects.ring(player.worldPos, 0x9fd4ff, 5, 0.5);
+            sabers.power(powerVoice(powerById(id)), 'once');
           }
           break;
         case 'speed':
           if (pressed) {
             if (this.speedActive) this.speedActive = false;
-            else if (res.value >= 10) this.speedActive = true;
+            else if (res.value >= 10) {
+              this.speedActive = true;
+              // The game's own effect as it comes on; the one that runs while it lasts is held below.
+              this.fireFx(ctx, id, powerEffect(id)?.cast);
+            }
           }
           break;
         case 'push':
           if (onFoot && pressed && res.value >= 25) {
             res.value -= 25;
             this.shove(ctx, 1);
-            sabers.power(powerById(id), 'once');
+            sabers.power(powerVoice(powerById(id)), 'once');
           }
           break;
         case 'pull':
@@ -370,7 +455,12 @@ export class JediKit implements Kit {
             res.value -= 20;
             this.pullCd = 1.5;
             this.shove(ctx, -1);
-            sabers.power(powerById(id), 'once');
+            // The game's own throw, looking where the pull does. Its row puts it on what it
+            // reached, and a pull reaches everything ahead rather than one body, so it stands at
+            // the hand: `partPoint`'s own answer when there is nothing to put it on.
+            cam.forward(tmp);
+            this.fireFx(ctx, id, powerEffect(id)?.cast, null, tmp);
+            sabers.power(powerVoice(powerById(id)), 'once');
           }
           break;
         case 'lightning':
@@ -387,7 +477,7 @@ export class JediKit implements Kit {
             res.value -= 40;
             this.repulseCd = 4;
             this.repulse(ctx);
-            sabers.power(powerById(id), 'once');
+            sabers.power(powerVoice(powerById(id)), 'once');
           }
           break;
         case 'slow':
@@ -397,10 +487,12 @@ export class JediKit implements Kit {
               res.value -= 25;
               this.slowCd = 5;
               target.slow?.(5);
+              // The tangle names a sound and no particle, so the ring and the flash are ours and
+              // are what they always were.
               tmp.copy(target.pos).y += target.halfHeight;
               effects.ring(tmp, 0xc0a0ff, 3, 0.6);
               effects.flash(tmp, 0xc0a0ff, 12, 8, 0.3);
-              sabers.power(powerById(id), 'once', tmp);
+              sabers.power(powerVoice(powerById(id)), 'once', tmp);
             }
           }
           break;
@@ -409,20 +501,31 @@ export class JediKit implements Kit {
             res.value -= 30;
             this.healCd = 6;
             player.heal(35);
-            effects.ring(player.pos, 0x9fffb0, 3, 0.6);
-            sabers.power(powerById(id), 'once');
+            // The ring is drawn in the world's frame, so it takes `worldPos` (heal has no `onFoot`
+            // guard and is reachable aboard a ship's rooms, where `pos` is the hull's frame).
+            effects.ring(player.worldPos, 0x9fffb0, 3, 0.6);
+            // The game's own heal, on the body: the one pairing its own client effect settles.
+            this.fireFx(ctx, id, powerEffect(id)?.cast);
+            sabers.power(powerVoice(powerById(id)), 'once');
           }
           break;
         case 'protect':
           if (pressed) {
             if (this.protectActive) this.protectActive = false;
-            else if (res.value >= 15) this.protectActive = true;
+            else if (res.value >= 15) {
+              this.protectActive = true;
+              // The absorb's trigger, on oneself, as the guard comes up; what the client draws
+              // where a blow lands is its `land` part and is placed below, when one does.
+              this.fireFx(ctx, id, powerEffect(id)?.cast);
+            }
           }
           break;
         case 'rage':
           if (pressed && this.rageLeft <= 0 && this.rageRest <= 0 && player.hp > 25) {
             this.rageLeft = RAGE_TIME;
-            effects.ring(player.pos, 0xff4040, 4, 0.5);
+            effects.ring(player.worldPos, 0xff4040, 4, 0.5);
+            // The game never had a rage, so whatever the pack put on it is ours and says so.
+            this.fireFx(ctx, id, powerEffect(id)?.cast);
           }
           break;
         case 'fists':
@@ -454,16 +557,30 @@ export class JediKit implements Kit {
     this.aura.visible = (this.speedActive || this.protectActive || raging) && onFoot;
     if (this.aura.visible) {
       this.aura.material.color.set(raging ? 0xff5040 : this.protectActive ? 0x60ff90 : 0x5fb8ff);
-      this.aura.position.copy(player.pos).y += 1;
+      // The aura hangs in the world's scene, so it is placed in the world's frame: aboard a ship's
+      // rooms `pos` is the hull's and `onFoot` is still true (it means unmounted, not off a ship).
+      this.aura.position.copy(player.worldPos).y += 1;
       const s = 1 + Math.sin(this.time * 9) * 0.08;
       this.aura.scale.set(s, s * 1.3, s);
     }
+    // The game's own effects for the three powers that are kept on: each stands on the body while
+    // its power lasts and is taken down the moment it stops. `holdFx` moves the effect it already
+    // has rather than placing another, so a toggle left on for a minute places one and not sixty a
+    // second; a power whose row the pack has not got holds nothing and looks as it always did.
+    this.holdFx(ctx, 'speed', this.fxSpeed, this.speedActive && onFoot);
+    this.holdFx(ctx, 'protect', this.fxProtect, this.protectActive && onFoot);
+    this.holdFx(ctx, 'rage', this.fxRage, raging && onFoot);
+    // What the client draws where a blow is absorbed. Nothing tells the kit that the player was
+    // hurt, so the body's own health falling while the guard is up is what says so -- on a clock of
+    // its own, so a burst of fire is one effect and not twelve, and so that lightning held in the
+    // same moment (which lands four times a second of its own) cannot swallow it.
+    if (this.protectActive && onFoot && player.hp < this.lastHp) this.landFx(ctx, 'protect', null, world.simTime, this.fxGuardClock);
+    this.lastHp = player.hp;
 
     // Lightning and Drain: a bolt at the nearest creature ahead, hurting it while the key is down;
     // the drain gives what it takes back to the player.
     this.lightningActive = lightning;
     this.drainActive = drain;
-    this.bolt.visible = lightning || drain;
     if (lightning || drain) {
       res.value -= (drain ? 10 : 18) * dt;
       cam.forward(tmp);
@@ -479,16 +596,51 @@ export class JediKit implements Kit {
           target.knock?.(tmp2, 4);
         }
       }
-      const start = tmp2.copy(player.pos).addScaledVector(tmp, 0.4);
-      start.y += 1.35;
-      const end = target ? target.pos.clone().setY(target.pos.y + target.halfHeight) : start.clone().addScaledVector(tmp, 14);
-      this.bolt.material.color.set(drain ? 0xff6060 : 0xbfe6ff);
-      this.drawBolt(start, end);
-      // The glow comes from the pooled flash lights (a light of the kit's own would come and go
-      // with the class, and a change in the light count recompiles every shader).
-      tmp2.copy(end).lerp(start, 0.5).y += 0.5;
-      ctx.effects.flash(tmp2, drain ? 0xff6060 : 0x9fd4ff, 14 + Math.random() * 12, 18, 0.08);
-    }
+      // The beam is the world's own pool (`forceLightning.ts`), built and compiled behind the
+      // loading screen, so nothing is made on the frame the key goes down. Its near end borrows
+      // one pooled flash light on its own clock and its far end, given nothing struck, is a wall
+      // or the ground the pool finds by a ray of its own -- a beam never ends in the air.
+      //
+      // The frame is `fxFrame`, which is what every other effect in this file is placed with and
+      // is null on foot; `aboardFrame` is the kept struct behind it and is never cleared when the
+      // player steps off, so a beam given that would be drawn and cast in the last hull the player
+      // stood in. And everything handed to the pool must be in that one frame, exactly as
+      // `fxTransform` does for the powers' particles: aboard, `player.pos` already is the hull's,
+      // the camera's forward and a target's place are the world's and are carried in.
+      //
+      // Where the bolt leaves the hand is the very point a power's own effect at the hand is placed
+      // at, so the two are one number apiece and `__debug.powers({ handUp: 1.2 })` moves both.
+      const beamFrame = this.fxFrame;
+      beamDir.copy(tmp);
+      if (beamFrame) beamDir.transformDirection(this.intoFrame);
+      const start = tmp2.copy(player.pos).addScaledVector(beamDir, FORCE_FX.handAhead);
+      start.y += FORCE_FX.handUp;
+      let beamTo: THREE.Vector3 | null = null;
+      if (target) {
+        beamTo = beamEnd.copy(target.pos).setY(target.pos.y + target.halfHeight);
+        if (beamFrame) beamTo.applyMatrix4(this.intoFrame);
+      }
+      holdForceBeam({
+        owner: this,
+        style: drain ? 'drain' : 'lightning',
+        from: start,
+        dir: beamDir,
+        reach: 26,
+        to: beamTo,
+        frame: beamFrame,
+        exclude: player.body,
+      });
+      // The game's own effects for a power that is held: what the row holds while the key is down
+      // (the weaken on what is being drained), and what it plays where the power lands, on its own
+      // clock. What the power's *beam* plays at its two ends is the beam pool's and is never placed
+      // here (`viaBeam`), or the lightning's start would stand at the hand twice.
+      const held = drain ? 'drain' : 'lightning';
+      this.holdFx(ctx, held, drain ? this.fxDrain : this.fxLightning, true, target);
+      if (target) this.landFx(ctx, held, target, world.simTime, this.fxHeldClock);
+    } else releaseForceBeam(this);
+    // Either key let go, or the other one taken up: the hand's effect goes with it.
+    if (!lightning) this.dropFx(this.fxLightning);
+    if (!drain) this.dropFx(this.fxDrain);
 
     // Grip: whatever is under the crosshair lifted and held ahead, choking; let go and it is thrown.
     if (grip) {
@@ -503,24 +655,163 @@ export class JediKit implements Kit {
         g.damage(6 * dt, player.pos, 0, world.playerTarget);
         tmp2.copy(g.pos).y += g.halfHeight;
         ctx.effects.flash(tmp2, 0xc0b0ff, 4, 5, 0.08);
-      }
+        // The choke, on the body being choked: the client's own effect for this power, and it
+        // follows what is held rather than being placed again as it struggles.
+        this.holdFx(ctx, 'grip', this.fxGrip, true, g);
+      } else this.dropFx(this.fxGrip);
     } else if (this.gripped) {
       cam.forward(tmp);
       this.gripped.release?.(tmp, 18);
       this.gripped = null;
+      this.dropFx(this.fxGrip);
     }
 
     // What the powers that last sound like while they last. Each is asked every frame and speaks
     // only when it changes: one sound as it comes on, a loop that follows the player, one as it
     // goes -- whether it was switched off, ran the Force out or simply ended. The grip speaks only
     // once it has hold of something, which is the moment the choking starts.
-    sabers.holdPower(KEPT_POWERS.speed, this.speedActive);
-    sabers.holdPower(KEPT_POWERS.protect, this.protectActive);
-    sabers.holdPower(KEPT_POWERS.rage, raging);
-    sabers.holdPower(HELD_POWERS.lightning, lightning);
-    sabers.holdPower(HELD_POWERS.drain, drain);
-    sabers.holdPower(HELD_POWERS.grip, grip && !!this.gripped);
+    sabers.holdPower(powerVoice(KEPT_POWERS.speed), this.speedActive);
+    sabers.holdPower(powerVoice(KEPT_POWERS.protect), this.protectActive);
+    sabers.holdPower(powerVoice(KEPT_POWERS.rage), raging);
+    sabers.holdPower(powerVoice(HELD_POWERS.lightning), lightning);
+    sabers.holdPower(powerVoice(HELD_POWERS.drain), drain);
+    sabers.holdPower(powerVoice(HELD_POWERS.grip), grip && !!this.gripped);
     res.value = Math.min(res.max, Math.max(0, res.value + 9 * dt));
+  }
+
+  // ---- where a power's own effect goes ----
+  //
+  // Every point handed to `fireFx` and `holdFx` below is in the **world's** frame, and the placing
+  // is what carries it into the hull's while the player is aboard a ship's rooms -- so a power used
+  // in there rides the hull, exactly as a bolt fired there does, and one used on a planet is placed
+  // in the world with no frame at all. That is why the body's place here is `worldPos` and not
+  // `pos`: aboard, `pos` is already in the hull's frame and would be carried into it twice.
+
+  /** On the body itself: the heal's rise, the speed's blur, the shield, the rage's aura. */
+  private selfPoint(ctx: KitContext): THREE.Vector3 {
+    return fxWhere.copy(ctx.player.worldPos).setY(ctx.player.worldPos.y + FORCE_FX.selfUp);
+  }
+
+  /** At the hand, a little ahead of the body along the view: where a held power leaves it. */
+  private handPoint(ctx: KitContext): THREE.Vector3 {
+    ctx.cam.forward(fxDir);
+    fxWhere.copy(ctx.player.worldPos).addScaledVector(fxDir, FORCE_FX.handAhead);
+    fxWhere.y += FORCE_FX.handUp;
+    return fxWhere;
+  }
+
+  /** On what the power reached, up its own height (`targetShare` of it). */
+  private targetPoint(target: Living): THREE.Vector3 {
+    return fxWhere.copy(target.pos).setY(target.pos.y + target.halfHeight * FORCE_FX.targetShare);
+  }
+
+  /**
+   * Where one of a power's own parts goes: the pack's row says which of the three places it is, and
+   * a part put on what it reached with nothing to reach (a push that threw a roomful, a pull with
+   * nobody in front of it) falls back to the hand, which is where the power came from.
+   */
+  private partPoint(ctx: KitContext, part: PowerPart, target: Living | null): THREE.Vector3 {
+    if (part.place === 'target') return target ? this.targetPoint(target) : this.handPoint(ctx);
+    if (part.place === 'hand') return this.handPoint(ctx);
+    return this.selfPoint(ctx);
+  }
+
+  /**
+   * One of the game's own effects placed once and left to play itself out (`transient`, which the
+   * effects player ends after one run however long the client's own effect loops for): the `cast`
+   * part as a power fires, the `land` part where it arrives. A power the pack has no such part for
+   * places nothing at all and looks exactly as it did before the Force had effects, which is the
+   * whole of the fallback -- the rings and the flashes beside these calls are untouched.
+   *
+   * It is placed silent (`FORCE_FX.fxSound` 0). The power's voice is the sabers', which already
+   * play the sound the client effect named, and a `pt_force_*` emitter that names that same sound
+   * -- which is exactly what a `.cef` pairing a particle with a sound makes likely -- would be
+   * heard twice over, once from each side. `{ fxSound: 1 }` lets the effect speak as well, which is
+   * how to hear whether a particle carries anything its `.cef` never named.
+   */
+  private fireFx(ctx: KitContext, id: string, part: PowerPart | null | undefined, target: Living | null = null, dir: THREE.Vector3 | null = null): void {
+    if (!(FORCE_FX.on > 0)) return;
+    if (!part) {
+      noteForceFxMissing();
+      return;
+    }
+    const fxs = ctx.world.weaponFx;
+    this.fxTransform(this.partPoint(ctx, part, target), dir);
+    fxs.place(part.file, fxM, false, true, this.fxFrame ? this.fxFrame.matrix : null, false, fxSpeaks());
+    noteForceFx(id, part.file);
+  }
+
+  /**
+   * The `hold` part, the effect a lasting power keeps while it lasts. The one it already has is
+   * moved rather than placed again; it is taken down and placed afresh only when the file or the
+   * frame changes, and dropped outright when the power ends.
+   */
+  private holdFx(ctx: KitContext, id: string, slot: HeldFx, on: boolean, target: Living | null = null): void {
+    const part = on && FORCE_FX.on > 0 ? powerEffect(id)?.hold : null;
+    if (!part) {
+      this.dropFx(slot);
+      return;
+    }
+    const fxs = ctx.world.weaponFx;
+    const frame = this.fxFrame ? this.fxFrame.matrix : null;
+    this.fxTransform(this.partPoint(ctx, part, target), null);
+    if (slot.handle && slot.owner === fxs && slot.file === part.file && slot.frame === frame) {
+      fxs.move(slot.handle, fxM);
+      return;
+    }
+    this.dropFx(slot);
+    // Silent for the same reason a fired one is: the power's own loop is the sabers' (`holdPower`),
+    // and an emitter that names it too would be heard twice for as long as the power lasts.
+    slot.handle = fxs.place(part.file, fxM, false, false, frame, false, fxSpeaks());
+    slot.file = part.file;
+    slot.frame = frame;
+    slot.owner = fxs;
+    noteForceFx(id, part.file);
+  }
+
+  /**
+   * The `land` part, where a power that is held arrives: placed no oftener than `FORCE_FX.hitEvery`,
+   * since a fresh effect on every frame of a held key is sixty a second. The clock is handed in
+   * rather than being one field for all of them: two powers can be landing in the same window (the
+   * guard is a toggle and stands while lightning is held), and on one clock the oftener of the two
+   * would silently swallow the other.
+   */
+  private landFx(ctx: KitContext, id: string, target: Living | null, now: number, clock: { at: number }): void {
+    const part = powerEffect(id)?.land;
+    if (!part || now - clock.at < FORCE_FX.hitEvery) return;
+    clock.at = now;
+    this.fireFx(ctx, id, part, target);
+  }
+
+  /** A held effect taken down (the power ended, the kit is going, the world was left). */
+  private dropFx(slot: HeldFx): void {
+    if (slot.handle && slot.owner) slot.owner.remove(slot.handle);
+    slot.handle = null;
+    slot.file = '';
+    slot.frame = null;
+    slot.owner = null;
+  }
+
+  /** Every held effect taken down at once. */
+  private dropAllFx(): void {
+    for (const slot of [this.fxSpeed, this.fxProtect, this.fxRage, this.fxLightning, this.fxDrain, this.fxGrip]) this.dropFx(slot);
+  }
+
+  /**
+   * `fxM`, the transform an effect is placed with: the point and, where the power has a direction,
+   * the turn that looks along it. Both are carried into the hull's frame while aboard.
+   */
+  private fxTransform(at: THREE.Vector3, dir: THREE.Vector3 | null): void {
+    fxAt.copy(at);
+    if (this.fxFrame) fxAt.applyMatrix4(this.intoFrame);
+    if (dir) {
+      fxDir.copy(dir);
+      if (this.fxFrame) fxDir.transformDirection(this.intoFrame);
+      const len = fxDir.length();
+      if (len > 1e-6) fxQ.setFromUnitVectors(FX_Z, fxDir.divideScalar(len));
+      else fxQ.identity();
+    } else fxQ.identity();
+    fxM.compose(fxAt, fxQ, FX_ONE);
   }
 
   /**
@@ -545,7 +836,11 @@ export class JediKit implements Kit {
   private shove(ctx: KitContext, sign: number): void {
     const { player, world, cam, effects } = ctx;
     cam.forward(tmp);
-    effects.ring(player.pos, sign > 0 ? 0xbfe0ff : 0xffd0a0, 12, 0.45);
+    // Drawn in the world's frame, so `worldPos`: the archives have no push effect at all and this
+    // ring is the whole of its look. What the shove itself is measured from is left as it was --
+    // `pos` against the targets' own places -- since that is a question of its own and not this
+    // wave's.
+    effects.ring(player.worldPos, sign > 0 ? 0xbfe0ff : 0xffd0a0, 12, 0.45);
     for (const c of world.targets()) {
       if (c === world.playerTarget || c.dead) continue;
       tmp2.copy(c.pos).sub(player.pos);
@@ -571,8 +866,10 @@ export class JediKit implements Kit {
   /** Repulse: a blast in every direction from the player. */
   private repulse(ctx: KitContext): void {
     const { player, world, effects } = ctx;
-    effects.ring(player.pos, 0xbfe0ff, 18, 0.5);
-    effects.burst(tmp.copy(player.pos).setY(player.pos.y + 1), 0xdfefff, 3, 0.3);
+    // The same: the repulse has no effect in the archives either, so the ring, the burst and the
+    // flash are its whole look and are placed in the frame they are drawn in.
+    effects.ring(player.worldPos, 0xbfe0ff, 18, 0.5);
+    effects.burst(tmp.copy(player.worldPos).setY(player.worldPos.y + 1), 0xdfefff, 3, 0.3);
     effects.flash(tmp, 0xbfe0ff, 40, 14, 0.25);
     for (const c of world.targets()) {
       if (c === world.playerTarget || c.dead) continue;
@@ -631,33 +928,24 @@ export class JediKit implements Kit {
     return this.aboardFrame;
   }
 
-  private drawBolt(from: THREE.Vector3, to: THREE.Vector3): void {
-    const arr = this.boltPositions;
-    const dir = tmp.copy(to).sub(from);
-    const len = dir.length();
-    for (let i = 0; i <= LIGHTNING_SEGMENTS; i++) {
-      const t = i / LIGHTNING_SEGMENTS;
-      const jitter = i === 0 || i === LIGHTNING_SEGMENTS ? 0 : Math.min(1, len * 0.06) * (0.6 + t * 0.6);
-      arr[i * 3] = from.x + dir.x * t + (Math.random() - 0.5) * jitter;
-      arr[i * 3 + 1] = from.y + dir.y * t + (Math.random() - 0.5) * jitter;
-      arr[i * 3 + 2] = from.z + dir.z * t + (Math.random() - 0.5) * jitter;
-    }
-    this.bolt.geometry.attributes.position.needsUpdate = true;
-  }
-
   dispose(): void {
     // The kit is going (a change of class, a new character, the select screen): anything a power
     // was holding open goes with it, since nothing else will ever be told to end it.
     sabers.stopPowers();
     sabers.follow(null);
+    // And the beam, if one was being held: the pool's own step lets go of anything that merely
+    // stops asking (a Jedi who dies, or one whose panel takes the screen), but a kit that is going
+    // will never be stepped again.
+    releaseForceBeam(this);
+    // And anything a lasting power was drawing: the effects player lives for the session, so a
+    // standing effect nobody took down would go on playing where the kit last stood.
+    this.dropAllFx();
     // The brush's ring holds the bodies it last touched; nothing else will ever let go of them.
     this.brush.clear();
     for (const path of this.bladePaths) path.reset();
     this.bodyAt = -Infinity;
-    this.scene.remove(this.aura, this.bolt);
+    this.scene.remove(this.aura);
     this.aura.geometry.dispose();
     this.aura.material.dispose();
-    this.bolt.geometry.dispose();
-    this.bolt.material.dispose();
   }
 }
