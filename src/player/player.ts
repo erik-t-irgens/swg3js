@@ -248,6 +248,15 @@ export class Player {
   readonly jka = new JkaMovement();
   /** The lightsaber move system (Jedi Academy's styles, swings and chains). */
   readonly saber = new SaberCombat();
+  /**
+   * A blade of ours met another (src/combat/clash.ts): the loser's swing runs out into its return.
+   * In a bind neither blade gave way, so neither swing is cut short -- both take the bind's own
+   * give from the renderer and go on. One object for the life of the session, so hanging it on a
+   * blade every frame never allocates.
+   */
+  private readonly saberClashed = (loser: boolean, bind: boolean): void => {
+    if (loser && !bind) this.saber.clashed();
+  };
   /** The Force pool the kit exposes, spent by force jumps. */
   force: { value: number } | null = null;
   /** Whether the rig carries Jedi Academy's clips (set when a rig attaches). */
@@ -900,6 +909,9 @@ export class Player {
       frame.updateWorldMatrix(true, false);
       frame.localToWorld(bladeBase.set(0, hiltTop, 0));
       frame.localToWorld(bladeEnd.set(0, hiltTop + length, 0));
+      // A blade of ours meeting another: the swing gives, and what is left of it runs out into the
+      // return the move table already has. The renderer's own recoil happens either way.
+      if (!blade.onClash) blade.onClash = this.saberClashed;
       blade.update(dt, bladeBase, bladeEnd, shown, camera, swing, snap || away, hull);
     }
   }

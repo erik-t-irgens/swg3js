@@ -487,6 +487,23 @@ export class SaberCombat {
     sabers.cancel();
   }
 
+  /**
+   * The swing met another blade and gave way. The move table already has a return out of every
+   * quadrant, so nothing new is played: what is left of the swing is taken away and the chain runs
+   * on into the move it would have reached anyway, a frame later.
+   *
+   * Two kinds of move are left alone. A move that is not a swing at all (a transition, the ready
+   * stance, a kick, which hurts with the foot) has nothing to cut short. And a **special** -- the
+   * katas, the lunges, the jump attacks -- is a whole-body clip that the project's rules say must
+   * never be interfered with, so a blade that meets another in the middle of a kata takes the
+   * renderer's own give and the kata plays out.
+   */
+  clashed(): void {
+    if (!this.attacking) return;
+    if (this.current.kind === 'special') return;
+    this.timer = 0;
+  }
+
   /** Advance; returns the animation to start when the move changes, else null. */
   update(dt: number, saberOn: boolean, input: SaberInput, clipDuration: (anim: string) => number | null): SaberPlay | null {
     if (!saberOn) {

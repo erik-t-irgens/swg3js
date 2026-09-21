@@ -6,6 +6,7 @@
 // Everything adds light rather than covering, and nothing writes depth, so blades cross cleanly.
 import * as THREE from 'three';
 import { sabers } from '../audio/saberSounds.ts';
+import { recoilAfter, recoilFor, recoilReach, tipSpeedOf } from './clash.ts';
 
 /** What a saber's blade file gives: its length and width in metres, and the seconds to ignite and retract. */
 export interface BladeSpec {
@@ -101,8 +102,42 @@ const pt = new THREE.Vector3();
 const end = new THREE.Vector3();
 const mid = new THREE.Vector3();
 const localBase = new THREE.Vector3();
+const localTip = new THREE.Vector3();
+
+/** One number per renderer ever made, so a pair of blades has a key with no object in it. */
+let nextBladeId = 0;
 
 export class SaberBlade {
+  /** This renderer's own number, for the length of the page: what the clashes key a pair on. */
+  readonly id = ++nextBladeId;
+  /**
+   * Whoever holds it, as the clashes read it: the player's key, a fighter's, a peer's. Two blades
+   * that share an owner never clash, and 0 is "nobody said" -- two of those never clash either,
+   * since the commonest pair of unnamed blades is one staff's two halves.
+   */
+  owner = 0;
+  /**
+   * Whether the blade is in a swing that can hurt. Its holder sets it each frame (the player's
+   * `bladeActive`, a fighter's swing window); a blade nobody sets it on still clashes when the
+   * blade's own measured tip speed says it is being swung.
+   */
+  attacking = false;
+  /** The style's weight in a clash (`CLASH.weights`); 1 until its holder names a style. */
+  clashWeight = 1;
+  /** Metres a second the lit tip is moving, in the frame the path is remembered in; 0 undrawn. */
+  tipSpeed = 0;
+  /**
+   * A blade met another: the give, 1 at the moment of it and easing to 0 over `CLASH.recoilTime`.
+   * There is no clip for a blade being shoved, so this is the shove: the lit length dips back
+   * toward the hilt by `CLASH.recoilDip` of itself and springs out again.
+   */
+  private recoil = 0;
+  /**
+   * What its holder hangs on a clash, if anything: the move machine being thrown into its return.
+   * Null on a blade whose holder has not asked, which is every blade until something wires it.
+   * `bind` is the outcome where neither blade gave way, so the loser flag is false on both of them.
+   */
+  onClash: ((loser: boolean, bind: boolean) => void) | null = null;
   readonly group = new THREE.Group();
   readonly color = new THREE.Color(0x3aa0ff);
   private readonly coreColor = new THREE.Color();
@@ -113,6 +148,9 @@ export class SaberBlade {
   private readonly history: { a: THREE.Vector3; b: THREE.Vector3; age: number }[] = [];
   /** How far the blade is out, 0 to 1. */
   private lit = 0;
+  /** The lit tip as it stood last frame, in the remembered frame, and whether there is one: the tip speed. */
+  private readonly lastTip = new THREE.Vector3();
+  private tipKnown = false;
   /** The frame the sweep is remembered in (a moving ship's hull), and whether there is one. */
   private readonly frameM = new THREE.Matrix4();
   private readonly frameInv = new THREE.Matrix4();
@@ -166,15 +204,43 @@ export class SaberBlade {
     this.coreColor.set(0xffffff).lerp(this.color, 0.18);
   }
 
+  /** The glow's colour as one number, for anything that places an effect in it (the clash sparks). */
+  get clashColor(): number {
+    return this.color.getHex();
+  }
+
+  /**
+   * This blade met another. There is no clip for it, so the shove is the blade's own give: the lit
+   * length dips back toward the hilt and springs out again over `CLASH.recoilTime`. Which of the
+   * three gives it takes -- the loser's, the winner's, or a bind's, where neither gave way -- is
+   * `recoilFor`, which is pure and is what the node test sweeps. Whatever its holder hung on
+   * `onClash` (a swing thrown into its return) is called after, so a holder that wired nothing
+   * still shows the blade being pushed.
+   */
+  clashed(loser: boolean, bind = false): void {
+    const give = recoilFor(loser, bind);
+    if (give > this.recoil) this.recoil = give;
+    if (this.onClash) this.onClash(loser, bind);
+  }
+
+  /** Where the blade has been is forgotten: a teleport, a catch, a change of frame, a blade going out. */
+  private forgetPath(): void {
+    for (const h of this.history) h.age = Infinity;
+    this.tipKnown = false;
+    this.tipSpeed = 0;
+  }
+
   /** Nothing drawn, and the swept history forgotten (a teleport, a holster). */
   reset(): void {
     this.lit = 0;
     this.drawn = false;
+    this.attacking = false;
+    this.recoil = 0;
     // Nothing drawn and nothing heard: a blade put away this way never fades its hum out over a
     // place it is no longer in.
     this.sounding = false;
     sabers.forget(this);
-    for (const h of this.history) h.age = Infinity;
+    this.forgetPath();
     for (const m of [this.glow, this.core, this.smearGlow, this.smearCore]) m.visible = false;
   }
 
@@ -198,8 +264,12 @@ export class SaberBlade {
     // on -- the player's blades run through it whether they are lit or not -- so the sweep for such
     // hums hangs here, before any of the early returns below.
     sabers.tick();
-    // Retracted, or with no length, the early returns below leave this false: no light.
+    // Retracted, or with no length, the early returns below leave this false: no light, and a tip
+    // that is not drawn is not moving.
     this.drawn = false;
+    this.tipSpeed = 0;
+    // The give from a clash springs out whether the blade is drawn this frame or not.
+    this.recoil = recoilAfter(this.recoil, dt);
     const openRate = 1 / Math.max(0.05, Math.min(IGNITE, this.spec.open));
     const closeRate = 1 / Math.max(0.05, Math.min(IGNITE, this.spec.close));
     this.lit = snap ? (on ? 1 : 0) : THREE.MathUtils.clamp(this.lit + (on ? openRate : -closeRate) * dt, 0, 1);
@@ -214,7 +284,7 @@ export class SaberBlade {
       sabers.ignite(this, on, base, { quiet: snap });
     }
     const framed = frame !== null;
-    if (framed !== this.framed) for (const h of this.history) h.age = Infinity;
+    if (framed !== this.framed) this.forgetPath();
     this.framed = framed;
     if (frame) {
       this.frameM.copy(frame);
@@ -225,9 +295,9 @@ export class SaberBlade {
     }
     localBase.copy(base).applyMatrix4(this.frameInv);
     // A jump (a teleport, a catch back into the hand) is not a sweep: forget the path.
-    if (Number.isFinite(this.history[0].age) && this.history[0].a.distanceToSquared(localBase) > 4) for (const h of this.history) h.age = Infinity;
+    if (Number.isFinite(this.history[0].age) && this.history[0].a.distanceToSquared(localBase) > 4) this.forgetPath();
     if (this.lit <= 0.001) {
-      for (const h of this.history) h.age = Infinity;
+      this.forgetPath();
       for (const m of [this.glow, this.core, this.smearGlow, this.smearCore]) m.visible = false;
       return;
     }
@@ -235,8 +305,19 @@ export class SaberBlade {
     const full = dir.length();
     if (full < 1e-4) return;
     dir.divideScalar(full);
-    // The blade as far as it is out, its end rounded off.
-    const length = full * this.lit;
+    // How fast the lit tip is moving, measured from the blade's full reach in the frame the path is
+    // remembered in (a ship's own motion is not a swing, and neither is the blade's own give below).
+    // It is what tells a blade being swung from one merely carried where nobody set the flag.
+    // A step the tip crossed a room in is a gap and not a swing (`CLASH.tipJump`): the frame loop
+    // clamps its own `dt`, so the first frame back from a hidden tab, a stall or a panel would
+    // otherwise divide a large movement by a twentieth of a second and read as a very fast swing.
+    localTip.copy(base).addScaledVector(dir, full * this.lit).applyMatrix4(this.frameInv);
+    this.tipSpeed = this.tipKnown ? tipSpeedOf(this.lastTip.distanceTo(localTip), dt) : 0;
+    this.lastTip.copy(localTip);
+    this.tipKnown = true;
+    // The blade as far as it is out, less whatever a clash has just shoved back into the hilt, its
+    // end rounded off.
+    const length = recoilReach(full, this.lit, this.recoil);
     end.copy(base).addScaledVector(dir, length);
     this.ribbon(this.glow, base, end, this.spec.width * GLOW_WIDTH, camera);
     this.ribbon(this.core, base, end, this.spec.width * CORE_WIDTH, camera);

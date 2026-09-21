@@ -436,6 +436,11 @@ export class RemoteBlades implements PeerWatcher {
       s = { saber, def: null, top: PEER_BLADE_TUNE.hiltTop, on: false };
       r.slots[which] = s;
     }
+    // Whose blade it is when it meets another (src/combat/clash.ts): their own id, negated so it
+    // can never be mistaken for one of this browser's living keys, which keeps one peer's staff
+    // from clashing with itself. Nothing says whether they are swinging -- that is not on the wire
+    // -- so the blade's own measured tip speed is what makes one of theirs a swing.
+    s.saber.owner = -r.id;
     // The rack's numbers are read only when the weapon changes, and written into the renderer's own
     // spec in place: a fresh object here would be one per blade per peer on every frame.
     if (s.def !== held.def) {
