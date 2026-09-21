@@ -631,7 +631,7 @@ export class Groups {
         combatNow()?.peace();
         return '';
       case 'help':
-        return 'chat: type to say it aloud, /g <words> to the group. /invite <name>, /accept, /decline, /leave, /promote <name>, /kick <name>, /who, /trade <name>, /duel <name>, /peace.';
+        return 'chat: type to say it aloud, /g <words> to the group. /invite <name>, /accept, /decline, /leave, /promote <name>, /kick <name>, /who, /trade <name>, /duel <name>, /peace, /mood <name>.';
       default:
         return `there is no /${line.command}`;
     }

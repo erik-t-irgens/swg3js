@@ -116,6 +116,8 @@ import { GROUP_UI_TUNE, GroupUi, tuneGroupUi } from './ui/groupUi.ts';
 import { TRADE_TUNE, Trade, tuneTrade, type TradeItem } from './net/trade.ts';
 import { TRADE_UI_TUNE, TradeUi, tuneTradeUi } from './ui/tradeUi.ts';
 import { CHAT_TUNE, ChatUi, tuneChat } from './ui/chatUi.ts';
+// The moods: one word that is two things at once, the body's branch and the chat's mark.
+import { MOOD_TUNE, cleanMoodName, findMood, isMoodOff, moodListLine, moodNote, moodReport, tuneMoods } from './player/moods.ts';
 import { COMBAT_TUNE, CombatNet, tuneCombat } from './net/combatNet.ts';
 // Travelling together: what a leader's trip means on this side, and where to come out to be beside them.
 import { TOGETHER_TUNE, TravelTogether, tuneTogether, type TogetherMove } from './net/travelTogether.ts';
@@ -3745,6 +3747,30 @@ class App {
     // is what the labels used before.
     const drawnAt = this.remotes as RemotePlayers & { peerAnchor?: (id: number, out: { x: number; y: number; z: number }) => boolean };
     const peerAnchor = (id: number, out: { x: number; y: number; z: number }): boolean => (drawnAt.peerAnchor ? drawnAt.peerAnchor(id, out) : groups.peerAt(id, out));
+    // A mood, set from the chat line. It is one word that writes two things: the body takes the
+    // animation table's branch through the rig's own selector machinery when the pack has one, and
+    // the name is kept on the character and sent in the hello whether it has one or not, so that
+    // what this player says is marked with it on every screen. A pack converted before the moods
+    // simply has no branch, which is said in words and is never an error.
+    const setMood = (arg: string): string => {
+      const rig = this.player.rig;
+      const known = { body: rig ? rig.moodValues() : [] };
+      if (!arg.trim()) return moodListLine(this.current?.mood ?? '', known);
+      const off = isMoodOff(arg);
+      const mood = off ? null : findMood(arg, known);
+      if (!off && !mood) {
+        const word = cleanMoodName(arg);
+        return word ? `there is no mood called ${word}` : 'a mood is one word';
+      }
+      const inBody = rig ? rig.setMood(mood ? mood.id : null) : false;
+      if (this.current && !this.creating) {
+        this.current.mood = mood ? mood.id : '';
+        upsertCharacter(this.current);
+      }
+      // Resent as a change of clothes is, so the others see it; with no server there is nobody to tell.
+      this.queueHello();
+      return moodNote(mood, inBody);
+    };
     const chatUi = new ChatUi(this.ui, {
       groups,
       say: (speaker, text, colour) => (speaker ? this.messages.spatial(speaker, text, colour) : this.messages.note(text)),
@@ -3762,6 +3788,12 @@ class App {
       // it again. `requestLock` already knows a browser refuses one straight after Escape and asks
       // again a moment later, so this is the whole of it.
       relock: () => this.input.requestLock(),
+      mood: setMood,
+      // Whose mood marks a line: a peer's own word for it out of their hello, and this player's out
+      // of the record being played. Never read from anything drawn, and '' for anybody in none. A
+      // negative id is a speaker the server did not name, which is nobody: it takes no mark at all
+      // rather than this player's, which would put a mood on a stranger that was never theirs.
+      moodOf: (id) => (id > 0 ? (this.net.peers.get(id)?.hello.mood ?? '') : id === 0 ? (this.current?.mood ?? '') : ''),
     });
     const groupUi = new GroupUi(this.ui, {
       groups,
@@ -3818,6 +3850,19 @@ class App {
         if (o?.open === false) chatUi.close();
         const answer = typeof o?.send === 'string' ? groups.type(o.send, o.scope ?? 'say') : '';
         return { ...chatUi.debug(), answer, tune: CHAT_TUNE, log: groups.log.map((l) => `${l.scope === 'group' ? '[group] ' : ''}${l.name}: ${l.text}`) };
+      };
+      // `__debug.mood()` says what mood is on, whether the pack really had a branch for it and which
+      // moods the pack carries; `__debug.mood({ set: 'angry' })` sets one without the chat line, which
+      // is how a script with no keyboard tries them; `__debug.mood({ body: 0 })` is the switch that
+      // leaves the body exactly as it was and keeps only the chat's mark.
+      debugRoot.mood = (o?: Partial<typeof MOOD_TUNE> & { set?: string }) => {
+        const rig = this.player.rig;
+        if (o) tuneMoods(o);
+        // The body switch takes effect on the mood already worn rather than at the next one.
+        if (o && rig) rig.setMood(rig.mood, true);
+        const answer = typeof o?.set === 'string' ? setMood(o.set) : '';
+        const report = moodReport(null, { mood: this.current?.mood ?? '', inBody: rig?.moodInBody ?? false, pack: rig ? rig.moodValues() : [] });
+        return { ...report, answer, body: rig?.mood ?? '' };
       };
     }
 
@@ -5072,7 +5117,7 @@ class App {
     // The ship this player flies (or last flew or stood out), with its components, droid and paint.
     const ship = this.helloShip();
     if (ship) this.helloShipId = ship.id;
-    const hello: Hello = { name: c?.name ?? 'someone', species: this.characterId, class: this.kit?.id ?? 'jedi', planet: this.world.planet?.id ?? '', zone: this.zone, look: c ? packLook(c.appearance, c.outfit ?? []) : undefined, held, ship, saber: this.player.bladeColor };
+    const hello: Hello = { name: c?.name ?? 'someone', species: this.characterId, class: this.kit?.id ?? 'jedi', planet: this.world.planet?.id ?? '', zone: this.zone, look: c ? packLook(c.appearance, c.outfit ?? []) : undefined, held, ship, saber: this.player.bladeColor, mood: c?.mood || undefined };
     // Who the session is about: every connection and every change of world goes through here, so this is
     // where the session learns which character is in play, where it is and what its record holds now.
     this.net.session.noteCharacter(c, { species: hello.species, class: hello.class, planet: hello.planet, zone: hello.zone });
@@ -5480,6 +5525,10 @@ class App {
     const bladeColor = c.saber?.color ?? DEFAULT_SABER_COLOR;
     this.player.setSaberColor(bladeColor);
     this.weaponsUi.saberColor = bladeColor;
+    // The mood the character was last in, back on the body: the idle takes its branch where this pack
+    // has one, and the name goes out in the hello either way. A record from before the moods has none,
+    // which takes nothing off nothing.
+    this.player.rig?.setMood(c.mood ?? null);
     // The weapons in hand at logout, back in the same hands, blade unlit; behind the loading screen,
     // where arriving compiles the whole scene, the held models included.
     await this.equipment.restoreHeld();

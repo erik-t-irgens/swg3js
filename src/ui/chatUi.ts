@@ -12,6 +12,7 @@
 // selector and never a key.
 
 import { GROUP_TUNE, Groups, parseLine, type ChatLine, type ChatScope, type PointOut } from '../net/groups.ts';
+import { moodTag } from '../player/moods.ts';
 
 /** Where a world point landed on the screen, in pixels from the top left. Filled in place. */
 export interface ChatScreenPoint {
@@ -56,6 +57,20 @@ export const CHAT_TUNE = {
   escapeHoldMs: 400,
   /** Whether a line also goes to the message line, which is the log until the display grows one of its own. */
   toMessageLine: true,
+  /**
+   * Invented: whether Enter opens the line when there is no server. It did not, and the reason was a
+   * good one -- a game played alone must be the game it was, and a line with nobody to say anything
+   * to explains itself for nothing. What changed is that the line is no longer only for saying
+   * things to people: `/mood` poses your own body and is saved on your own character, and it is the
+   * only way in that this wave built (the design's other one, a list in the Skills panel, was not).
+   * With this at false the line is shut again with no server and `__debug.mood({ set })` is the only
+   * way to a mood, which is the old behaviour exactly.
+   *
+   * Nothing else about playing alone moves: a line of plain words typed with no server is kept in
+   * the log and answered with "there is no server here, so nobody heard that", which is what the
+   * group module has always done with one.
+   */
+  aloneOpens: true,
 };
 
 /** Set any of those, clamped to what makes sense; the answer is the table as it now stands. */
@@ -68,6 +83,7 @@ export function tuneChat(o: Partial<typeof CHAT_TUNE>): typeof CHAT_TUNE {
   if (typeof o.escapeHoldMs === 'number') CHAT_TUNE.escapeHoldMs = Math.max(0, Math.min(2000, Math.round(o.escapeHoldMs)));
   if (typeof o.bubbleRange === 'number') CHAT_TUNE.bubbleRange = Math.max(1, Math.min(2000, o.bubbleRange));
   if (typeof o.toMessageLine === 'boolean') CHAT_TUNE.toMessageLine = o.toMessageLine;
+  if (typeof o.aloneOpens === 'boolean') CHAT_TUNE.aloneOpens = o.aloneOpens;
   return CHAT_TUNE;
 }
 
@@ -106,6 +122,20 @@ export interface ChatDeps {
    * after Escape and tries again a moment later.
    */
   relock?: () => void;
+  /**
+   * `/mood <name>`, or `/mood` on its own for the list. The answer is what to tell the player, in
+   * words; a mood the pack has no body branch for is still set and still says so, because "not yet"
+   * is not an error. Absent (a page that has not wired the moods) and `/mood` says so rather than
+   * looking like a command that does nothing.
+   */
+  mood?: (arg: string) => string;
+  /**
+   * The mood a speaker is in, by name, so that what they say is marked with it: their own id for a
+   * peer, 0 for this player, and a negative id for a speaker nobody could name, which must answer ''
+   * rather than falling back on anybody. '' when they are in none, which is the ordinary case, and
+   * the whole hook is optional.
+   */
+  moodOf?: (id: number) => string;
 }
 
 interface Bubble {
@@ -286,10 +316,12 @@ export class ChatUi {
     const t = e.target as HTMLElement | null;
     // Something else is being typed into (a name in the creator, an address in the menu): not ours.
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
-    // With no server there is nobody to say anything to, and a game played alone must be the game it
-    // was: Enter does nothing at all, rather than opening a line and then explaining itself. The
-    // console can still open it (`__debug.chat({ open: true })`).
-    if (!this.deps.groups.active) return;
+    // With no server there is nobody to say anything to -- but the line is not only for saying things
+    // to people any more: `/mood` poses your own body and is kept on your own character, and is the
+    // one way to a mood the game has (the design's other, a list in the Skills panel, is not built).
+    // So the line opens alone as well, and `CHAT_TUNE.aloneOpens` at false is the old rule back, with
+    // `__debug.chat({ open: true })` and `__debug.mood({ set })` still reaching both halves.
+    if (!this.deps.groups.active && !(CHAT_TUNE.aloneOpens && this.deps.mood)) return;
     if (!this.deps.canOpen()) return;
     e.preventDefault();
     this.show();
@@ -318,6 +350,13 @@ export class ChatUi {
     if (line.kind === 'chat') this.scope = line.scope;
     else if (line.command === 'group') this.scope = 'group';
     else if (line.command === 'say') this.scope = 'say';
+    // The mood is this line's own command and never the group module's: what it writes is a rig, a
+    // character record and a hello, none of which the group knows anything about, and a command the
+    // group does not know would otherwise come back as "there is no /mood".
+    if (line.kind === 'command' && line.command === 'mood') {
+      this.deps.say('', this.deps.mood ? this.deps.mood(line.arg) : 'there are no moods here', SAY_COLOUR);
+      return;
+    }
     // What the line meant is the group module's to decide: a command does its work there, and words go
     // on whichever channel they named or on the one this line is set to.
     const answer = this.deps.groups.type(typed, this.scope);
@@ -386,9 +425,26 @@ export class ChatUi {
 
   // ---- what people said ----------------------------------------------------------------------------
 
+  /**
+   * The mood a speaker is in, as it is written after their name: the chat half of a mood, which
+   * happens whether or not their pack has a branch for it and whether or not the name is one this
+   * game offers. Their own word for it, from their hello, never a guess from anything drawn.
+   */
+  private moodOf(line: ChatLine): string {
+    if (!this.deps.moodOf) return '';
+    // Who to ask about. 0 is this player and a positive id is that peer -- but a line the server put
+    // no id on arrives as id 0 and `mine` false, and 0 already means "this player" here, so asking
+    // with it would write **your** mood after a stranger's name, which is a statement about somebody
+    // else that is simply untrue. A speaker nobody could name is asked for as -1, which is nobody,
+    // and the answer is no mark at all.
+    const who = line.mine ? 0 : line.id > 0 ? line.id : -1;
+    return moodTag(this.deps.moodOf(who));
+  }
+
   private heard(line: ChatLine): void {
+    const mood = this.moodOf(line);
     if (CHAT_TUNE.toMessageLine) {
-      const who = line.mine ? 'you' : line.name;
+      const who = `${line.mine ? 'you' : line.name}${mood}`;
       this.deps.say(line.scope === 'group' ? `[group] ${who}` : who, line.text, line.scope === 'group' ? GROUP_COLOUR : SAY_COLOUR);
     }
     // Your own words are in the line you typed them on; a bubble over your own head is for nobody.
@@ -413,9 +469,12 @@ export class ChatUi {
     }
     b.id = line.id;
     b.left = GROUP_TUNE.bubbleSeconds;
-    if (b.name !== line.name) {
-      b.name = line.name;
-      this.write(b.who, 'textContent', line.name);
+    // The name over their head wears their mood, as the line in the log does; written only when it
+    // has changed, so a speaker who has not changed their mood writes nothing.
+    const named = `${line.name}${this.moodOf(line)}`;
+    if (b.name !== named) {
+      b.name = named;
+      this.write(b.who, 'textContent', named);
     }
     if (b.text !== line.text) {
       b.text = line.text;

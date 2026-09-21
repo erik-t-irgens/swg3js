@@ -21,6 +21,13 @@ export interface Hello {
   ship?: { id: string; fit: ShipFit };
   /** The colour their lightsaber's blade is lit in, as hex; left out by a browser built before this. */
   saber?: number;
+  /**
+   * The mood they are in, by name (`src/player/moods.ts`): one short word, resent when it changes
+   * exactly as the look is. The others stand and walk in it where their pack has a branch for it,
+   * and what they say is marked with it either way. Left out by a browser built before this, and by
+   * anybody in no mood, so a peer without one is simply a peer with none.
+   */
+  mood?: string;
 }
 
 /** The vehicle a peer is on: which (a garage id), where it is and how it is turned, and how the peer is in it. */

@@ -28,6 +28,12 @@ export interface SavedCharacter {
   powers?: string[];
   /** The Bounty Hunter's gadgets in the number slots, by id; absent means the default set. */
   gadgets?: string[];
+  /**
+   * The mood this character is in, by name (`src/player/moods.ts`): how it stands and walks when the
+   * pack has a branch for the name, and what marks what it says either way. Absent, or empty, means
+   * no mood at all, which is every record from before there were any.
+   */
+  mood?: string;
   planet: string;
   zone?: string;
   /** Where it last stood, and which way it faced; absent until it has been played. */

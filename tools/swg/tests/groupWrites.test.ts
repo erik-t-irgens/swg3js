@@ -238,7 +238,7 @@ function writes(what: () => void): number {
 
 const { Groups } = await import('../../../src/net/groups.ts');
 const { GroupUi, GROUP_UI_TUNE, tuneGroupUi } = await import('../../../src/ui/groupUi.ts');
-const { ChatUi, CHAT_TUNE } = await import('../../../src/ui/chatUi.ts');
+const { ChatUi, CHAT_TUNE, tuneChat } = await import('../../../src/ui/chatUi.ts');
 
 let checks = 0;
 const ok = (cond: boolean, what: string) => {
@@ -497,6 +497,27 @@ const panel = new GroupUi(parent as never, {
   setLock(true);
   ok(!panel.open && asked.held === heldWas + 1, 'clicking the world takes the pointer back, and the panel stands down rather than freezing the player');
   setLock(false);
+}
+
+// --- and what that rule became when the moods arrived ------------------------------------------------
+//
+// A mood poses your own body and is saved on your own character, so the line is no longer only for
+// saying things to people: it opens with no server as well, and `/mood` is the only way to a mood
+// the game has. It opens alone only where there is one to set, which is why the line built at the
+// top of this file -- which takes no `mood` hook -- stays shut above and says what it always said.
+{
+  authority = 'me';
+  groups.clear();
+  const alone = new ChatUi(makeEl() as never, { groups, say: () => {}, project, anchor: (id, out) => groups.peerAt(id, out), meAt: (out) => groups.meAt(out), canOpen: () => canOpen, typing: () => {}, mood: () => 'you are angry' });
+  press('Enter');
+  ok(alone.open, 'with a mood to set the line opens alone, because /mood is the only way to one');
+  ok(!chat.open, 'and a line with no mood wired is still shut: what changed is the moods, not playing alone');
+  alone.close();
+  tuneChat({ aloneOpens: false });
+  press('Enter');
+  ok(!alone.open, 'and the switch puts the old rule straight back');
+  tuneChat({ aloneOpens: true });
+  authority = 'server';
 }
 
 console.log(`\n${checks} checks passed`);

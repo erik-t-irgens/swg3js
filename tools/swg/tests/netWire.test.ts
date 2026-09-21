@@ -51,6 +51,23 @@ const claim = (extra: Record<string, unknown> = {}) => ({ t: 'claim', player: 'a
   ok(cleanHello(hello({ ship: { id: '<script>' } }))?.ship === undefined, '2: a ship id that is not a name is dropped');
 }
 
+// --- 2b: a hello's mood ----------------------------------------------------------------------------
+//
+// A mood is one short word and the server never reads it as anything else: it is shown after a
+// speaker's name with `textContent` on every other browser, so what must not get through is a line,
+// a tag or a name long enough to push a roster about.
+{
+  ok(cleanHello(hello({ mood: 'angry' }))?.mood === 'angry', '2b: a mood is kept');
+  ok(cleanHello(hello({ mood: ' ANGRY ' }))?.mood === 'angry', '2b: trimmed and read in lower case, as the browser writes it');
+  ok(cleanHello(hello({ mood: 'npc_sitting_table' }))?.mood === 'npc_sitting_table', "2b: the table's own underscored values are names");
+  ok(cleanHello(hello())?.mood === undefined, '2b: a hello with no mood in it is a hello with no mood, not an error');
+  ok(cleanHello(hello({ mood: '' }))?.mood === undefined, '2b: and so is an empty one');
+  ok(cleanHello(hello({ mood: 'two words' }))?.mood === undefined, '2b: two words are not a mood');
+  ok(cleanHello(hello({ mood: '<b>angry</b>' }))?.mood === undefined, '2b: nor is anything that is not letters, digits and underscores');
+  ok(cleanHello(hello({ mood: 42 }))?.mood === undefined, '2b: nor is a number');
+  ok(cleanHello(hello({ mood: `a${'b'.repeat(400)}` }))?.mood?.length === WIRE.mood, `2b: an over-long mood is cut to ${WIRE.mood} rather than refused`);
+}
+
 // --- 3: a state ------------------------------------------------------------------------------------
 {
   const clean = cleanState(state()) as Record<string, unknown>;

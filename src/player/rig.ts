@@ -3,6 +3,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { Character, type GripAxes } from './character';
 import { HeadHider, type HeadStatusRow } from './headHide.ts';
 import { HeadLook } from './lookAt.ts';
+import { MOOD_TUNE } from './moods.ts';
 import { chainPoint, clipLinks, HEAD_TO_EYE, type Quat, type Vec3 } from '../vehicles/cockpitSeat';
 import type { ActiveClip, ClipHalf } from '../audio/clipEvents.ts';
 
@@ -137,6 +138,18 @@ const steadyQ = new THREE.Quaternion();
 const IDENTITY_Q = new THREE.Quaternion();
 /** States whose legs walk or run around the standing pelvis, where a pose on the upper body is held steady. */
 const LOCOMOTION_STATES = new Set<RigState>(['walk', 'run', 'runBack', 'walkBack', 'runSaber', 'walkSaber', 'strafeLeft', 'strafeRight', 'gunWalk', 'gunRun', 'gunReadyWalk', 'gunReadyRun', 'gunAimWalk', 'gunAimRun']);
+/**
+ * The one state a mood may change, and the whole of "combat is never affected": the plain idle. The
+ * saber, gun, prone and kneeling states have states of their own and are not in this list, so a mood
+ * set before a fight changes nothing about the fight.
+ *
+ * The walk is not here, and that is the data's answer rather than a choice: the animation table's
+ * mood selector hangs under the still branch alone, and the walk and the run carry no mood selector
+ * at all, so there is no walking mood to convert and a branch written for one could never fire. It
+ * was measured over the real table leaf by leaf. If a species' table is ever found with one, adding
+ * `'walk'` back to this list is the whole of the change -- everything below reads the list.
+ */
+const MOOD_STATES: readonly RigState[] = ['idle'];
 const rootQ = new THREE.Quaternion();
 const rootInvQ = new THREE.Quaternion();
 const parentQ = new THREE.Quaternion();
@@ -249,6 +262,9 @@ export class CharacterRig {
   private override: THREE.AnimationAction | null = null;
   private overrideEnds = 0;
   private overrideTime = 0;
+  /** The mood the body has been asked for, '' for none, and whether this pack really had a branch for it. */
+  private moodName = '';
+  private moodOnBody = false;
 
   /** Meshes carrying each morph target, by target name. */
   private readonly morphs = new Map<string, THREE.Mesh[]>();
@@ -598,6 +614,107 @@ export class CharacterRig {
     const prefix = `${base}:`;
     for (const [clip, v] of Object.entries(this.variants)) if (clip.startsWith(prefix) && v.values.includes(value) && this.actions.has(clip)) return clip;
     return this.actions.has(base) ? base : null;
+  }
+
+  /** The mood the body is wearing, '' for none. */
+  get mood(): string {
+    return this.moodName;
+  }
+
+  /** Whether this pack really had a branch for that mood, so the body is posing it rather than merely holding the name. */
+  get moodInBody(): boolean {
+    return this.moodOnBody;
+  }
+
+  /**
+   * The branch of a state's clip a mood picks, or null when this pack has none. It is the selector
+   * machinery `variant` already uses, with two differences that matter here: only a branch under the
+   * `mood` variable counts (a gender's or a speed's value must never be taken for a mood), and the
+   * plain clip is **not** an answer -- "the pack has no branch for this mood" has to be tellable
+   * from "the pack's branch is the default clip under another name", or a mood the conversion has
+   * not run for yet would read as one that had.
+   */
+  private moodClip(base: string, value: string): string | null {
+    const exact = `${base}:${value}`;
+    if (this.actions.has(exact)) return exact;
+    const prefix = `${base}:`;
+    for (const [clip, v] of Object.entries(this.variants)) {
+      if (v.variable !== 'mood' || !clip.startsWith(prefix)) continue;
+      if (v.values.includes(value) && this.actions.has(clip)) return clip;
+    }
+    return null;
+  }
+
+  /**
+   * Every value this pack's idle carries a branch for, which is what tells a pack converted before
+   * the moods from one converted after. A pack with none answers with an empty list, which reads as
+   * "not yet" everywhere and is never an error.
+   *
+   * It is the pack's own list and is not filtered here: the same conversion writes the entertainers'
+   * performances and the scene NPCs' poses beside the moods, and what `/mood` may offer out of them
+   * is `isMoodValue` in `moods.ts` -- the pack says what it carries, and the mood rules say which of
+   * it is a mood. Console and chat only, so it may allocate.
+   */
+  moodValues(): string[] {
+    const out: string[] = [];
+    for (const state of MOOD_STATES) {
+      const base = this.findClip(STATE_CLIPS[state]);
+      if (!base) continue;
+      const prefix = `${base}:`;
+      for (const clip of this.actions.keys()) {
+        if (!clip.startsWith(prefix)) continue;
+        const v = this.variants[clip];
+        // A branch under some other selector (a gender, a speed) is not a mood and is stepped over;
+        // a branch the manifest says nothing about is named for its own value, as the converter names them.
+        if (v && v.variable !== 'mood') continue;
+        for (const value of v ? v.values : [clip.slice(prefix.length)]) {
+          if (value && !out.includes(value)) out.push(value);
+        }
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Wear a mood, or `null` to take it off. The idle takes the mood's own branch when this pack has
+   * one; everything else the body does is untouched, the walk, the run and the fight included.
+   *
+   * The answer is whether the body really took it: false for a mood the pack has no branch for,
+   * which is every mood until the player pack has been converted with them, and which the caller
+   * says in words rather than treating as a failure. A mood with no branch still leaves the body in
+   * a clean state -- the state's clip is played again from the top through `setState`'s own restart,
+   * because a preference taken away is not a change `setState` would otherwise notice, and an action
+   * that has been faded out is disabled by three and would show the bind pose until it is reset.
+   */
+  setMood(mood: string | null, force = false): boolean {
+    const want = typeof mood === 'string' ? mood.trim().toLowerCase() : '';
+    if (!force && want === this.moodName) return this.moodOnBody;
+    this.moodName = want;
+    let took = false;
+    for (const state of MOOD_STATES) {
+      // `MOOD_TUNE.body` at 0 is the switch that makes the game exactly what it was: the name is
+      // still worn (the chat keeps marking what you say) and nothing is preferred on the body.
+      const base = want && MOOD_TUNE.body > 0 ? this.findClip(STATE_CLIPS[state]) : undefined;
+      const clip = base ? this.moodClip(base, want) : null;
+      if (clip) took = true;
+      this.prefer(state, clip);
+    }
+    this.moodOnBody = took;
+    this.restartState();
+    return took;
+  }
+
+  /**
+   * Play the state's clip again from the table, whether or not the state itself has changed.
+   * `setState` leaves an action that is already up alone, so a preference taken away would go on
+   * playing for ever; and three disables an action once its fade-out finishes, so one that comes
+   * back after that has to be reset. Clearing the state is what makes `setState` take both branches.
+   */
+  private restartState(): void {
+    const state = this.state;
+    if (!state) return;
+    this.state = null;
+    this.setState(state, 0, this.wantedUpper);
   }
 
   /**

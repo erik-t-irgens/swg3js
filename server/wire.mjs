@@ -37,6 +37,8 @@ export const WIRE = {
   held: 80,
   /** How high a character's change counter may go before it is nonsense. */
   counter: 1e9,
+  /** A mood's name. It matches `MOOD_TUNE.nameChars` in the browser, and both are ours. */
+  mood: 24,
 };
 
 const NAME_CONTROL = /[\u0000-\u001f\u007f]/g;
@@ -44,6 +46,12 @@ const CHARACTER_ID = /^[A-Za-z0-9_.-]+$/;
 const HEX16 = /^[0-9a-f]{16}$/;
 const HEX64 = /^[0-9a-f]{64}$/;
 const CLASSES = ['jedi', 'bounty_hunter'];
+/**
+ * The characters a mood's name is made of, which is the class every value in the game's own mood
+ * tables is written in. The server has no opinion about what a mood means -- which of them poses a
+ * body is the browser's pack to answer -- and only makes sure what is passed on is a word, not a line.
+ */
+const MOOD_NAME = /^[a-z0-9_]+$/;
 const TAKES = ['browser', 'server'];
 /**
  * Names a character id may not have. A character id is used as a key in the table the server keeps,
@@ -121,6 +129,11 @@ export function cleanHello(x) {
   // cannot put a string, a huge number or a fraction of one through as one.
   const saber = Number(x.saber);
   if (Number.isFinite(saber) && saber >= 0 && saber <= 0xffffff) hello.saber = Math.round(saber) >>> 0;
+  // The mood they are in: one short word of that class, or nothing at all. A hello with no mood in
+  // it (a browser built before them, or a player in none) is not an error and is simply a hello with
+  // no mood field, exactly as empty hands are no `held`.
+  const mood = cleanWord(x.mood, '', WIRE.mood).trim().toLowerCase();
+  if (mood && MOOD_NAME.test(mood)) hello.mood = mood;
   const ship = cleanShip(x.ship);
   if (ship) hello.ship = ship;
   return hello;

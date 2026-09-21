@@ -483,6 +483,9 @@ export class RemotePlayers {
       remote.heldApplied = null;
       remote.heldModels = [];
       remote.rig.setState('idle');
+      // The mood they are in, out of their own hello: their idle takes its branch where the pack has
+      // one, and a peer in none -- or a browser built before the moods -- has none.
+      remote.rig.setMood(remote.hello.mood ?? null);
       try {
         await this.applyLook(remote);
         // A newer look that arrived meanwhile is still going on (the first gave way to it): the rig
@@ -583,6 +586,9 @@ export class RemotePlayers {
     r.hello = hello;
     // The colour they lit it in; a browser built before this sends none and keeps the game's own blue.
     if (typeof hello.saber === 'number') this.setSaberColor(id, hello.saber);
+    // The mood they are in now, which is resent when it changes exactly as their look is. Nothing
+    // is loaded, compiled or dressed for it: it is one clip the rig already has, or none.
+    r.rig?.setMood(hello.mood ?? null);
     if (!speciesChanged)
       void this.applyLook(r).then(() => {
         if (!r.rig) return;
