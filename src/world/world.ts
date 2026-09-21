@@ -7,6 +7,7 @@ import { MobileManager } from './mobiles/manager';
 import { MobileAssets } from './mobiles/assets';
 import { MobileCatalogue } from './mobiles/catalogue';
 import { ambientOverrides } from './mobiles/spawning';
+import { wildlifeWanted } from './spawnSeed.ts';
 import { DayCycle } from './daycycle';
 import { SwgSky, type SkyLighting } from './sky';
 import { Weather, type WeatherViewContext, type WeatherWorldContext } from './weather';
@@ -2589,9 +2590,14 @@ export class World {
     this.readySound();
     this.stream(center, Infinity);
     this.streamFar(center, Infinity);
-    // The planet's own wildlife: through the catalogue (its own model, clips and brain) when it has
-    // landed and has the species, else the old creatures, which is also what a cold first load gets.
-    if (!this.ambientFromCatalogue(center)) this.creatures.spawnAround(center);
+    // Nothing stands on its own any more. The planet's own wildlife used to be stood here -- through
+    // the catalogue (its own model, clips and brain) when it had landed and had the species, else the
+    // old creatures -- and it is now behind one switch, off unless this browser's storage says
+    // otherwise (`localStorage['swg.wildlife'] = '1'`, WILDLIFE_KEY in src/world/spawnSeed.ts). What
+    // is alive in a world is what somebody stood there, and what an admin stands belongs to the
+    // world. The switch is read once, here, and short-circuits before the catalogue is even asked, so
+    // an arrival with it off does exactly as much work as it did before and no more.
+    if (wildlifeWanted() && !this.ambientFromCatalogue(center)) this.creatures.spawnAround(center);
     markActor(this.creatures.group);
     // Turrets are spawned from the NPC tab (B) now, not stood around the arrival point.
     markActor(this.turrets.group);

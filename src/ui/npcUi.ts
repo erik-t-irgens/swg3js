@@ -14,6 +14,7 @@ import type { MobileCatalogue } from '../world/mobiles/catalogue';
 import { placeOf } from '../world/mobiles/catalogueIndex';
 import { groupPicks, permanentGap } from '../world/mobiles/spawning';
 import type { MobileEntry } from '../world/mobiles/types';
+import { WORLD_HOLDS_IT, spawnRefusal, type WorldSpawnGate } from '../world/spawnSeed.ts';
 
 export interface NpcKind {
   id: string;
@@ -25,6 +26,14 @@ export interface NpcKind {
   spawn: () => string;
   /** Take every one away; returns how many. */
   clear: () => number;
+  /**
+   * Whether this row stands one of the world's own creatures rather than a machine of this browser's.
+   * The three rows above the catalogue are this browser's own and are never gated -- that is how a
+   * fight is tried with no server at all -- except the one that stands a real creature out of the
+   * catalogue: on a shared world that one belongs to the world, so it is gated with the rest and the
+   * same creature is stood from the catalogue below, where everybody sees it.
+   */
+  world?: boolean;
 }
 
 /** What one spawn from the panel did: how many stood, and a sentence for the count line (the refusal when none did). */
@@ -50,6 +59,39 @@ export interface ShipSpawner {
   missing: string | null;
 }
 
+/**
+ * What a server holding the world's creatures lets this browser do from here.
+ *
+ * Nothing stands in a world on its own any more: what is alive there was stood by an admin, and what
+ * an admin stands belongs to the world rather than to the browser that asked -- everyone connected
+ * sees it, one browser thinks for it, and it is handed over between them. So with a server on the
+ * line a spawn is *asked for* rather than stood: what comes back from the server is what is stood,
+ * and the admin's own browser takes the very same path as everybody else's. Anyone who is not an
+ * admin may look at the whole catalogue and stand nothing; their buttons say so rather than failing
+ * quietly when pressed.
+ *
+ * With no server (`shared()` false, which is also what no `world` at all means) the tab is exactly
+ * what it has always been: every spawn is this browser's own and is stood here.
+ */
+export interface WorldSpawns extends WorldSpawnGate {
+  /** Ask the server for `n` of an entry ahead of the player; the report is what to say now. */
+  ask(entry: MobileEntry, n: number): SpawnReport;
+  /**
+   * Ask for everything the filter picks to be taken down; how many went. What the world holds is
+   * asked for over the wire; anything of this browser's own that the filter picks (a machine row's
+   * creature stood before the server was there) is taken down here, or a row's "clear" would stop
+   * working the moment the browser connected.
+   */
+  askClear(filter: (e: MobileEntry) => boolean): number;
+  /**
+   * Ask the server to take down everything the world holds here. True when the word went out. What
+   * the world holds is never thrown away locally: one browser pressing "Clear all" must not empty a
+   * shared world off its own screen while everybody else still sees it -- and if this browser is the
+   * one thinking for those creatures, the bodies it was thinking for would go with no word sent.
+   */
+  askClearAll(): boolean;
+}
+
 /** What the panel needs from the game. The catalogue is a getter: it may land after the tab is first opened. */
 export interface SpawnerDeps {
   /** The machines of the old tab: the turret, the fighter, this planet's creature. */
@@ -68,8 +110,20 @@ export interface SpawnerDeps {
   clear(filter: (e: MobileEntry) => boolean): number;
   /** Take away everything stood by hand, the machines too; returns how many. */
   clearAll(): number;
+  /**
+   * Take away only what is this browser's own -- the machines, the fighters, the NPC ships and any
+   * creature with no name in the world's list -- leaving what the world holds where it is. It is
+   * what "Clear all" does on a shared world, beside asking the server to clear the rest for
+   * everybody. Left out, a shared world's "Clear all" asks the server and takes nothing away here.
+   */
+  clearMachines?(): number;
   /** The line to show when there is no catalogue. */
   missing: string;
+  /**
+   * The world's own rules about standing things, when a server is holding them. Left out (or with
+   * `shared()` false) the tab stands everything itself, exactly as it always did.
+   */
+  world?: WorldSpawns;
 }
 
 /** Rows drawn per group at a time. */
@@ -100,6 +154,10 @@ export class NpcUi {
   private refreshTimer = 0;
   /** The last thing said on the count line, kept until the next action. */
   private note = '';
+  /** The world's refusal as the buttons last wore it, so nothing is written while it stands still. */
+  private gate = '';
+  /** And whether the world was holding its own creatures then: the machine rows turn on that alone. */
+  private gateShared = false;
   /** Each starship row's chosen tier, by family, kept across renders (the catalogue landing redraws the body). */
   private readonly shipTiers = new Map<string, number>();
   open = false;
@@ -147,10 +205,7 @@ export class NpcUi {
       for (const c of this.chips.querySelectorAll<HTMLButtonElement>('button[data-chip]')) c.classList.toggle('on', c === b);
       this.render();
     });
-    this.root.querySelector('.clear-all')!.addEventListener('click', () => {
-      const n = this.deps?.clearAll() ?? 0;
-      this.say(`${n} taken away`);
-    });
+    this.root.querySelector('.clear-all')!.addEventListener('click', () => this.clearEverything());
     // One listener for every button in the body, by what it is for.
     this.body.addEventListener('click', (e) => this.onClick(e));
     // A starship row's tier, kept by family.
@@ -182,6 +237,92 @@ export class NpcUi {
   private say(note: string): void {
     this.note = note;
     this.refresh();
+  }
+
+  /**
+   * Why this browser may not stand or take down a creature just now, or '' when it may. It is only
+   * ever a refusal of the world's: with no server, or with one that leaves the creatures to each
+   * browser, this is empty and nothing about the tab changes.
+   */
+  private whyNotSpawn(): string {
+    return spawnRefusal(this.deps?.world);
+  }
+
+  /**
+   * Why one of the machine rows above the catalogue is off, or '' when it is not one the world holds.
+   * Two of the three are this browser's own whatever the server says; the one that stands a real
+   * creature out of the catalogue is the world's on a shared world, and is refused there for the
+   * admin as well, since the same creature is stood from the catalogue below where everybody sees it.
+   */
+  private whyNotKind(k: NpcKind): string {
+    if (!k.world) return '';
+    const w = this.deps?.world;
+    if (!w || !w.shared()) return '';
+    return this.whyNotSpawn() || WORLD_HOLDS_IT;
+  }
+
+  /** One button wearing a refusal, or wearing its own tooltip again. Nothing is written twice. */
+  private wear(b: HTMLButtonElement, why: string): void {
+    if (b.disabled !== !!why) b.disabled = !!why;
+    if (why) {
+      if (b.dataset.tipWas === undefined) b.dataset.tipWas = b.title;
+      if (b.title !== why) b.title = why;
+    } else if (b.dataset.tipWas !== undefined) {
+      b.title = b.dataset.tipWas;
+      delete b.dataset.tipWas;
+    }
+  }
+
+  /**
+   * Put the refusal on every button that would change the world, or take it off again. Called when
+   * the body is drawn and whenever the answer moves, never on a frame and never on a refresh that
+   * changed nothing: a steady second writes nothing at all. "Clear all" lives in the header rather
+   * than in the body, so it is reached by name: it is the one press that would otherwise empty a
+   * shared world off this screen alone.
+   */
+  private applyGate(force = false): void {
+    const why = this.whyNotSpawn();
+    const shared = !!this.deps?.world?.shared();
+    if (!force && why === this.gate && shared === this.gateShared) return;
+    this.gate = why;
+    this.gateShared = shared;
+    for (const b of this.body.querySelectorAll<HTMLButtonElement>('button[data-spawn], button[data-clear], button[data-group-spawn], button[data-group-clear]')) this.wear(b, why);
+    const all = this.root.querySelector<HTMLButtonElement>('.clear-all');
+    if (all) this.wear(all, why);
+    // The machine rows: each asks for itself, since only one of the three is ever the world's.
+    for (const b of this.body.querySelectorAll<HTMLButtonElement>('button[data-kind-spawn], button[data-kind-clear]')) {
+      const id = b.dataset.kindSpawn ?? b.dataset.kindClear ?? '';
+      const k = this.deps?.kinds.find((x) => x.id === id);
+      this.wear(b, k ? this.whyNotKind(k) : '');
+    }
+  }
+
+  /**
+   * "Clear all". Offline it is exactly what it always was. On a shared world what the world holds is
+   * not this browser's to throw away: the server is asked to take it down for everyone, and only
+   * what is this browser's own goes here.
+   */
+  private clearEverything(): void {
+    const deps = this.deps;
+    if (!deps) return;
+    const w = deps.world;
+    if (!w || !w.shared()) {
+      this.say(`${deps.clearAll()} taken away`);
+      return;
+    }
+    const why = this.whyNotSpawn();
+    if (why) {
+      this.applyGate(true);
+      this.say(why);
+      return;
+    }
+    const asked = w.askClearAll();
+    const mine = deps.clearMachines ? deps.clearMachines() : 0;
+    if (!asked) {
+      this.say(mine ? `${mine} of this browser’s own taken away; the server is not holding the world’s creatures yet` : 'the server is not holding the world’s creatures yet');
+      return;
+    }
+    this.say(mine ? `the world’s creatures asked to go, and ${mine} of this browser’s own taken away` : 'the world’s creatures asked to go');
   }
 
   /** Whether an entry can be stood at all, and if not the sentence that says why (the permanent gap first). */
@@ -216,6 +357,8 @@ export class NpcUi {
     this.groups.wire(this.body);
     // Groups that are open (by hand earlier, or every group of a search) are filled now.
     for (const d of this.body.querySelectorAll<HTMLDetailsElement>('details.cat-group[open]')) this.fill(d.dataset.key ?? '');
+    // The world's refusal, if there is one, onto every button that has just been drawn.
+    this.applyGate(true);
     this.refresh();
   }
 
@@ -312,6 +455,8 @@ export class NpcUi {
     grid.insertAdjacentHTML('beforeend', rows.join(''));
     if (to < g.entries.length) grid.insertAdjacentHTML('beforeend', `<div class="cat-wide mob-more"><button data-more="${escapeHtml(key)}">show the next ${Math.min(PAGE, g.entries.length - to)} of ${g.entries.length - to} more</button></div>`);
     this.drawn.set(key, to);
+    // The rows just drawn have their own spawn and clear buttons, which the world may be refusing.
+    this.applyGate(true);
     this.refresh();
   }
 
@@ -333,6 +478,17 @@ export class NpcUi {
     return `<div class="cat-item mob-row${why ? ' unavailable' : ''}${short ? ' short' : ''}" data-entry="${id}" title="${escapeHtml(title)}"><span class="cat-name">${escapeHtml(e.name)}${sub}${tag}</span><span class="cat-hands"><span class="cat-badge" data-count="${id}"></span><button data-spawn="${id}" title="${why ? escapeHtml(why) : 'stand one ahead of you'}">spawn</button><button data-clear="${id}" title="take away every one stood from here">clear</button></span></div>`;
   }
 
+  /**
+   * Stand one, or ask for one. With a server holding the world's creatures the spawn goes over the
+   * wire and what comes back is what stands, so the admin's own browser takes the same path as every
+   * other; with no such server it is stood here, exactly as it always was.
+   */
+  private askOrStand(deps: SpawnerDeps, entry: MobileEntry, n: number): SpawnReport {
+    const w = deps.world;
+    if (w && w.shared()) return w.ask(entry, n);
+    return deps.spawn(entry, n);
+  }
+
   private onClick(ev: MouseEvent): void {
     const deps = this.deps;
     const b = (ev.target as HTMLElement).closest<HTMLButtonElement>('button');
@@ -344,6 +500,29 @@ export class NpcUi {
       ev.preventDefault();
       ev.stopPropagation();
     }
+    // A world whose creatures the server holds refuses everything that would change it to anyone but
+    // an admin. Such a button is already off, so this is only reached by a click that raced the
+    // answer moving; it says why rather than doing nothing. The machines below are not the world's.
+    if (d.spawn !== undefined || d.clear !== undefined || d.groupSpawn !== undefined || d.groupClear !== undefined) {
+      const why = this.whyNotSpawn();
+      if (why) {
+        this.applyGate(true);
+        this.say(why);
+        return;
+      }
+    }
+    // The machine rows are this browser's own, except the one that stands a real creature out of the
+    // catalogue: on a shared world that one is the world's and says so rather than standing one only
+    // this browser can see.
+    if (d.kindSpawn !== undefined || d.kindClear !== undefined) {
+      const k = deps.kinds.find((x) => x.id === (d.kindSpawn ?? d.kindClear));
+      const why = k ? this.whyNotKind(k) : '';
+      if (why) {
+        this.applyGate(true);
+        this.say(why);
+        return;
+      }
+    }
     if (d.kindSpawn !== undefined) {
       const k = deps.kinds.find((x) => x.id === d.kindSpawn);
       if (k) this.say(k.spawn());
@@ -352,10 +531,12 @@ export class NpcUi {
       if (k) this.say(`${k.clear()} taken away`);
     } else if (d.spawn !== undefined && cat) {
       const e = cat.byId(d.spawn);
-      if (e) this.say(deps.spawn(e, 1).note);
+      if (e) this.say(this.askOrStand(deps, e, 1).note);
     } else if (d.clear !== undefined) {
       const id = d.clear;
-      this.say(`${deps.clear((e) => e.id === id)} taken away`);
+      const pick = (e: MobileEntry) => e.id === id;
+      const shared = deps.world?.shared() ? deps.world : null;
+      this.say(shared ? `${shared.askClear(pick)} asked to go` : `${deps.clear(pick)} taken away`);
     } else if (d.groupSpawn !== undefined && cat) {
       const g = this.groupsByKey.get(d.groupSpawn);
       if (!g) return;
@@ -364,19 +545,22 @@ export class NpcUi {
       let stood = 0;
       let refusal = '';
       for (const e of picks) {
-        const r = deps.spawn(e, 1);
+        const r = this.askOrStand(deps, e, 1);
         stood += r.spawned;
         if (!r.spawned) {
           refusal = r.note;
           break;
         }
       }
-      this.say(refusal ? `${stood} stood; ${refusal}` : `${stood} of ${g.label.toLowerCase()} stood`);
+      const asked = deps.world?.shared() ? 'asked for' : 'stood';
+      this.say(refusal ? `${stood} ${asked}; ${refusal}` : `${stood} of ${g.label.toLowerCase()} ${asked}`);
     } else if (d.groupClear !== undefined) {
       const g = this.groupsByKey.get(d.groupClear);
       if (!g) return;
       const ids = new Set(g.entries.map((e) => e.id));
-      this.say(`${deps.clear((e) => ids.has(e.id))} taken away`);
+      const pick = (e: MobileEntry) => ids.has(e.id);
+      const shared = deps.world?.shared() ? deps.world : null;
+      this.say(shared ? `${shared.askClear(pick)} asked to go` : `${deps.clear(pick)} taken away`);
     } else if (d.more !== undefined) {
       this.fill(d.more);
     } else if ((d.shipOne !== undefined || d.shipPatrol !== undefined) && deps.ships) {
@@ -401,10 +585,13 @@ export class NpcUi {
       this.render();
       return;
     }
+    // Connecting, disconnecting or being made an admin moves the world's answer while the tab is
+    // open: the buttons follow it here, and write nothing on a refresh where it has not moved.
+    this.applyGate();
     const counts = deps.counts();
     // The machines and fighters stood from here (the planet's creature row counts its wildlife too, so it is left out).
     const machines = deps.kinds.reduce((n, k) => n + (k.id === 'creature' ? 0 : k.count()), 0);
-    const head = `${deps.live()} of ${deps.cap()} out${machines ? `, ${machines} machines and fighters` : ''}`;
+    const head = `${deps.live()} of ${deps.cap()} out${machines ? `, ${machines} machines and fighters` : ''}${this.gate ? ` · ${this.gate}` : ''}`;
     this.count.textContent = this.note ? `${head} · ${this.note}` : head;
     this.count.title = this.note;
     const fmt = (c: { out: number; loading: number } | undefined) => (!c || !c.out ? '' : c.loading ? `${c.out} out (${c.loading} loading)` : `${c.out} out`);
