@@ -77,7 +77,8 @@
 //                                                                  --jka also takes Jedi Academy's saber sounds and the frames its animations
 //                                                                  mark, from its GameData folder; the ships pack, where it is converted, also
 //                                                                  gets its hulls', parts' and vehicles' own sounds as <out-dir>/sounds/ships.json
-//   node tools/swg/cli.mjs status <out-dir>                        what the packs under <out-dir> hold and which commands would fill the gaps
+//   node tools/swg/cli.mjs status <out-dir> [--json]               what the packs under <out-dir> hold and which commands would fill the gaps
+//                                                                  (--json: the same as steps in order, arguments split, for the launcher)
 //   node tools/swg/cli.mjs terrain-check <out-dir> [--limit=n] [--layers] [--at=x,z]
 //                                                                  generate terrain at every snapshot object and compare with its height;
 //                                                                  --layers lists every layer, --at prints the height at one point
@@ -95,7 +96,7 @@
 //                       and write the creature and NPC spawns to <pack>/spawns.json; or set CORE3 in the environment)
 //        --no-flip (keep left-handed coordinates)  --no-textures (skip DDS decoding)
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join, relative, resolve } from 'node:path';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { resolveParts } from './appearance.mjs';
 import { decodeDds } from './dds.mjs';
 import { buildGlb } from './glb.mjs';
@@ -153,6 +154,7 @@ import { moodEntries } from './moods.mjs';
 import { core3MobileStats, mobileTemplates, scanServerSpawns } from './spawns.mjs';
 import { loadEffect } from './texrender.mjs';
 import { readTemplate, stringParam } from './objtemplate.mjs';
+import { statusJson } from './statusplan.mjs';
 import { openTre, openVfs, readHeader } from './tre.mjs';
 
 // A .env beside package.json names the folders once; @NAME anywhere in the arguments becomes that
@@ -1729,8 +1731,25 @@ function skyEffectsUncarried(packDir, sky) {
 }
 
 function packStatus(dir) {
-  const readJson = (file) => (existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : null);
+  // A file that is there but will not parse (a conversion stopped or a machine that lost power in
+  // the middle of writing it) is taken as missing, so the step that writes it is asked for again,
+  // and is named once, so the report says why: a stack trace here would leave nothing to resume by.
+  const unreadable = new Set();
+  const readJson = (file) => {
+    if (!existsSync(file)) return null;
+    try {
+      return JSON.parse(readFileSync(file, 'utf8'));
+    } catch {
+      if (!unreadable.has(file)) {
+        unreadable.add(file);
+        console.log(`  ${relative(dir, file).split(sep).join('/')}: cannot be read (cut short while it was written?); taken as missing`);
+      }
+      return null;
+    }
+  };
   const todo = new Map();
+  // Carried beside the to-do for `status --json`, whose caller sets those files aside before it runs anything.
+  todo.unreadable = unreadable;
   const need = (cmd, why) => {
     if (!todo.has(cmd)) todo.set(cmd, []);
     todo.get(cmd).push(why);
@@ -2021,6 +2040,8 @@ function packStatus(dir) {
   // Jedi Academy's own marks and saber sounds.
   const clipEvents = clipEventStatus(dir, readJson, { packs: (id) => readJson(join(dir, 'characters', id, 'parts.json')) });
   console.log(clipEvents.line);
+  // The sounds read the species packs, so a species whose pack drifted is converted again first.
+  if (clipEvents.species?.length) need(`species <swg-dir> ${dir} --retail-only`, `the species packs' clips no longer match the archives (${clipEvents.species.join(', ')}), before the sounds`);
   if (clipEvents.need) need(`sounds <swg-dir> ${dir} --retail-only --jka=<jedi-academy-gamedata>`, clipEvents.need);
   const jkaSounds = jkaSoundStatus(dir, readJson);
   if (jkaSounds.line) console.log(jkaSounds.line);
@@ -2033,11 +2054,12 @@ function packStatus(dir) {
   if (shipSounds.need) need(`sounds <swg-dir> ${dir} --retail-only`, shipSounds.need);
   if (!todo.size) {
     console.log(`everything is in place: ${planets} planet packs, creatures and player`);
-    return;
+    return todo;
   }
 
   console.log('\nto fill the gaps (replace <swg-dir> with your SWG folder):');
   for (const [cmd, whys] of todo) console.log(`  npm run swg -- ${cmd}\n      ${whys.length > 4 ? `${whys.slice(0, 3).join('; ')}; and ${whys.length - 3} more` : whys.join('; ')}`);
+  return todo;
 }
 
 /** Names of the world snapshots the archives hold (snapshot/<name>.ws). */
@@ -5265,6 +5287,23 @@ switch (cmd) {
   case 'status': {
     // <out-dir>: what the converted packs hold, and the command that fills each gap. Needs no archives.
     if (!pos[1]) usage();
+    if (flags.has('--json')) {
+      // The same report for a program (the launcher): the steps still to run, in order, each with its
+      // arguments split and its reasons, and the report's own lines beside them. The folder is resolved
+      // so every path in a step begins with exactly the text the steps are split around.
+      const dir = resolve(pos[1]);
+      const lines = [];
+      const keep = console.log;
+      console.log = (...a) => lines.push(a.map(String).join(' '));
+      let todo;
+      try {
+        todo = packStatus(dir);
+      } finally {
+        console.log = keep;
+      }
+      process.stdout.write(`${JSON.stringify(statusJson(todo, dir, lines), null, 2)}\n`);
+      break;
+    }
     packStatus(pos[1]);
     break;
   }

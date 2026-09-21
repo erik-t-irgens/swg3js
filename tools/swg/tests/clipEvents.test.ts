@@ -279,6 +279,10 @@ const fine = clipEventStatus('out', readOf(good), { packs: packOf(['run', 'idle'
 ok(fine.need === null && fine.line.includes('5043 animations mark none') && fine.line.includes('791 only shots'), 'a full set needs nothing, and the line tells an animation that marks nothing from one that marks only shots');
 const drifted = clipEventStatus('out', readOf(good), { packs: packOf(['run', 'idle', 'sprint']) });
 ok(drifted.need !== null && drifted.need.includes('sprint'), "a species pack holding a clip the archives' own table does not names the clip rather than going silent");
+ok(Array.isArray(drifted.species) && drifted.species.join() === 'human_male', 'and names the species to convert again, so status can ask for that step itself');
+const branched = { ...good, species: { ...good.species, tables: { 'appearance/lat/all_m.lat': { ...good.species.tables['appearance/lat/all_m.lat'], 'loop_combat_standing:speed1': 'appearance/animation/a_cs.ans' } } } };
+const branches = clipEventStatus('out', readOf(branched), { packs: packOf(['run', 'idle', 'loop_combat_standing:speed1', 'idle:happy']) });
+ok(branches.need === null && branches.species === undefined, "a branch the table keys whole, and a mood the table knows by its logical name, are neither of them drift");
 const noJka = clipEventStatus('out', readOf({ ...good, jka: undefined }), { packs: packOf(['run']) });
 ok(noJka.need !== null && noJka.need.includes('--jka'), 'with no Jedi Academy half, status asks for it by the option that brings it');
 const older = clipEventStatus('out', readOf({ ...good, format: 0 }), { packs: packOf(['run']) });

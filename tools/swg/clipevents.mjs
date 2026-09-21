@@ -388,6 +388,7 @@ export function clipEventStatus(dir, readJson, { packs = null } = {}) {
   // A species pack whose clip names no longer match what the archives make of the same table
   // would take its feet down with it, so the two lists are compared here rather than by ear.
   const drift = [];
+  const drifted = [];
   for (const [id, entry] of Object.entries(file.species?.species ?? {})) {
     const pack = packs ? packs(id) : null;
     if (!pack || !Array.isArray(pack.clips)) continue;
@@ -397,13 +398,21 @@ export function clipEventStatus(dir, readJson, { packs = null } = {}) {
     // A branch of a selector is baked as `<logical name>:<label>` (the moods are `idle:<mood>`),
     // and the table knows the logical name and not the label, so the name is what is looked up:
     // without this every mood in a pack reads as a clip the archives do not have, and status asks
-    // for a reconversion that cannot mend it, for ever.
-    const missing = pack.clips.filter((c) => !(c.split(':')[0] in known) && !/^BOTH_/i.test(c));
-    if (missing.length) drift.push(`${id}: ${missing.slice(0, 4).join(', ')}${missing.length > 4 ? ` and ${missing.length - 4} more` : ''}`);
+    // for a reconversion that cannot mend it, for ever. The table's own keys carry a selector's
+    // branches whole (`loop_combat_standing:speed1`), so a name is looked up as it is first and by
+    // its logical name only after: looked up by the logical name alone, every such branch read as
+    // drift on all twenty species.
+    const missing = pack.clips.filter((c) => !(c in known) && !(c.split(':')[0] in known) && !/^BOTH_/i.test(c));
+    if (missing.length) {
+      drift.push(`${id}: ${missing.slice(0, 4).join(', ')}${missing.length > 4 ? ` and ${missing.length - 4} more` : ''}`);
+      drifted.push(id);
+    }
   }
   const line = `  sounds: ${parts.join(', ')}${drift.length ? `, ${drift.length} species whose pack clips are not in the table` : ''}`;
   if ((file.format ?? 0) < CLIP_EVENTS_FORMAT) return { line, need: 'the clip events are from an older converter' };
-  if (drift.length) return { line, need: `a species pack's clips no longer match the archives (${drift[0]}): reconvert that species, then the sounds` };
+  // The species to convert again travel with the answer, so status can ask for that step itself
+  // rather than naming work in a sentence that no step of its own would ever do.
+  if (drift.length) return { line, need: `a species pack's clips no longer match the archives (${drift[0]}): reconvert that species, then the sounds`, species: drifted };
   if (!jkaClips) return { line, need: "the clip events have no Jedi Academy half (no saber swings or body falls): add --jka=<Jedi Academy's GameData folder>" };
   return { line, need: null };
 }
