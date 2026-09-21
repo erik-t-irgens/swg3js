@@ -13,7 +13,7 @@
 //                                                                  every component a hull's slots take and the droids as components.json, and the paint
 //                                                                  recipes as customize.json (images in customize/), and the NPC ship types with
 //                                                                  their tier fits, formations, taunts and hit effects as combat.json (--verbose lists its notes)
-//   node tools/swg/cli.mjs species <swg-dir> <out-dir> [--only=human,twilek_female] [--var=...]   every playable species and gender as parts, with characters/index.json for the character creator
+//   node tools/swg/cli.mjs species <swg-dir> <out-dir> [--only=human,twilek_female] [--var=...] [--no-moods]   every playable species and gender as parts, with characters/index.json for the character creator
 //   node tools/swg/cli.mjs ash <swg-dir> <appearance/x.sat | object/.../shared_x.iff> [--find=pistol]   the animation state hierarchy behind a skeletal appearance, with its strings
 //   node tools/swg/cli.mjs shader <swg-dir> <shader/x.sht>        list a shader's texture slots
 //   node tools/swg/cli.mjs materials <swg-dir> <appearance-path | object/x.iff> | --ship=<id>   every shader an appearance uses, with its effect, alpha and what the converter makes of it (diagnostic)
@@ -29,11 +29,11 @@
 //                                                                  every creature, droid and NPC for the spawner under <out-dir>/mobiles: models, shared animation packs, catalogue.json
 //   node tools/swg/cli.mjs sat <swg-dir> <x.sat | object/mobile/shared_x.iff> <out.glb> [--anim=all|idle,walk] [--var=skin_color=3,...] [--wear=object/tangible/wearables/...,...]
 //   node tools/swg/cli.mjs trt <swg-dir> <x.trt> <out.png> [--var=name=value,...]   bake a texture renderer blueprint (skin, hair) to a PNG
-//   node tools/swg/cli.mjs player <swg-dir> <out-dir> [--template=object/creature/player/shared_human_male.iff] [--wear=...|none] [--var=...]   the player's character as <out-dir>/player/<id>.glb + manifest.json
+//   node tools/swg/cli.mjs player <swg-dir> <out-dir> [--template=object/creature/player/shared_human_male.iff] [--wear=...|none] [--var=...] [--no-moods]   the player's character as <out-dir>/player/<id>.glb + manifest.json
 //                                                               [--jka=<Jedi Academy GameData or base dir>] [--jka-anims=BOTH_A1_T__B_,...]  adds Jedi Academy's saber attacks, jumps and rolls, retargeted
 //   node tools/swg/cli.mjs loading <swg-dir> <out-dir> [--match=ui_load] [--list]   the game's loading-screen pictures, one per planet, as <out-dir>/loading/<planet>.png
 //   node tools/swg/cli.mjs wardrobe <swg-dir> <out-dir> [--gender=male|female] [--kind=wearables,hair] [--match=...] [--limit=N] [--no-icons]   every wearable and hairstyle as parts, with names, slots, species rules and pictures
-//   node tools/swg/cli.mjs parts <swg-dir> <out-dir> [--template=...] [--wear=...]   body, head and worn items as separate GLBs on one shared skeleton
+//   node tools/swg/cli.mjs parts <swg-dir> <out-dir> [--template=...] [--wear=...] [--no-moods]   body, head and worn items as separate GLBs on one shared skeleton
 //   node tools/swg/cli.mjs clips-save <model.glb> <out.clips> [--only=BOTH_]   lift a model's animations into a bundle that survives re-conversion
 //   node tools/swg/cli.mjs clips-apply <model.glb> <in.clips> [--drop=BOTH_]   put a bundle's animations back onto a model, joints matched by name
 //   node tools/swg/cli.mjs jka-clips <player.glb> <jka-dir> [--jka-anims=...]   re-import Jedi Academy's clips into a converted player GLB (no SWG archives needed)
@@ -149,6 +149,7 @@ import { convertJkaSounds, jkaSoundStatus } from './jkasound.mjs';
 import { convertShipSounds, shipSoundStatus } from './shipsounds.mjs';
 import { forcePowersStatus } from './weapons.mjs';
 import { nameLocomotion } from './clipnames.mjs';
+import { moodEntries } from './moods.mjs';
 import { core3MobileStats, mobileTemplates, scanServerSpawns } from './spawns.mjs';
 import { loadEffect } from './texrender.mjs';
 import { readTemplate, stringParam } from './objtemplate.mjs';
@@ -857,6 +858,9 @@ function convertParts(vfs, outRoot, template, { wear = DEFAULT_WEAR, variables =
     wear,
     parts: { dir: outDir, rig: 'rig' },
     gender,
+    // The parts rig is the one the game plays, so the moods have to reach it and not only the
+    // single-model player pack; --no-moods leaves them out for a size baseline.
+    moods: !flags.has('--no-moods'),
   });
   let kept = null;
   if (carried) {
@@ -880,6 +884,9 @@ function convertParts(vfs, outRoot, template, { wear = DEFAULT_WEAR, variables =
     defaultWear: info.parts.filter((p) => p.occlusionLayer > 0).map((p) => p.name),
     clips: info.animations,
     clipSpeeds: info.clipSpeeds ?? {},
+    // Whether this run was asked for the standing loop's mood branches at all; false is
+    // --no-moods, which is a choice rather than a gap, and `status` reads it as one.
+    moods: info.moodsAsked === true,
     ...(info.partialClips ? { partialClips: info.partialClips } : {}),
     ...(info.variants ? { variants: info.variants } : {}),
     parts: info.parts,
@@ -892,6 +899,8 @@ function convertParts(vfs, outRoot, template, { wear = DEFAULT_WEAR, variables =
   const total = info.parts.reduce((a, p) => a + p.bytes, 0);
   console.log(`-> ${outDir}`);
   console.log(`   rig ${info.rig.file}: ${info.rig.joints} joints, ${info.rig.clips} clips${kept ? ` (${kept.count} Jedi Academy clips carried over from the old rig)` : ''}`);
+  if (info.moodClips) console.log(`   moods: ${info.moodClips.length} branches (${info.moodClips.join(', ') || 'none'})`);
+  for (const m of info.moodNotes ?? []) console.log(`   mood ${m}`);
   for (const p of info.parts) {
     console.log(`   ${p.name.padEnd(22)} ${String(p.triangles).padStart(5)} tris  ${(p.bytes / 1024).toFixed(0).padStart(5)} KB  layer ${p.occlusionLayer}${p.occludes?.length ? `  hides ${p.occludes.join(' ')}` : ''}${p.morphs?.length ? `  ${p.morphs.length} morphs` : ''}`);
   }
@@ -1110,7 +1119,7 @@ function skinnedTexture(vfs, shaderPath, slots, ctx, info, mesh = null) {
  * the game can dress and undress a character at run time rather than the converter deciding once.
  * `animations: false` reads no animation table at all, for a model whose clips live in a shared pack.
  */
-function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80, variables = new Map(), wear = [], extraClips = null, parts = null, gender = null, hardpoints = false, extraHardpoints = [] } = {}) {
+function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80, variables = new Map(), wear = [], extraClips = null, parts = null, gender = null, hardpoints = false, extraHardpoints = [], moods = false } = {}) {
   let satPath = path.replace(/\\/g, '/');
   if (/\.iff$/i.test(satPath)) {
     const cache = new Map();
@@ -1122,7 +1131,10 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
   if (!sat.skeletons.length) throw new Error(`${satPath}: no skeleton`);
   const skeletonFile = sat.skeletons[0].file;
   const loadSkeleton = (file) => parseSkeleton(readIff(vfs, file), (f) => (vfs.has(f) ? readIff(vfs, f) : null));
-  const info = { sat: satPath, skeleton: skeletonFile, joints: 0, meshes: [], animations: [], missing: [], unknownTransforms: 0, skipped: [], textureRenderers: [], customization: new Set(), variables: new Map(), attached: [], shaderNotes: new Set() };
+  // `moodsAsked` goes into the manifest so that `status` can tell a pack converted with
+  // --no-moods, which is a choice the owner made, from one converted before the moods existed,
+  // which is work still to do. Without it the two look the same and status asks for ever.
+  const info = { sat: satPath, skeleton: skeletonFile, joints: 0, meshes: [], animations: [], missing: [], unknownTransforms: 0, skipped: [], textureRenderers: [], customization: new Set(), variables: new Map(), attached: [], shaderNotes: new Set(), moodsAsked: moods === true };
   // Extra skeletons (the face rig) hang from a joint of the first.
   const extras = [];
   for (const k of sat.skeletons.slice(1)) {
@@ -1316,7 +1328,8 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
   if (animations === false && tableFile) info.animationTable = tableFile;
   const latFile = animations === false ? null : tableFile;
   if (latFile && vfs.has(latFile)) {
-    const lat = parseLat(readIff(vfs, latFile));
+    const latRoot = readIff(vfs, latFile);
+    const lat = parseLat(latRoot);
     info.animationTable = latFile;
     const wanted = animations === 'all' || animations === 'list' ? null : animations.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
     const parsed = new Map();
@@ -1330,12 +1343,31 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
       return a;
     };
     const named = nameLocomotion(lat.entries, loadAnimation);
+    // The mood branches of the named locomotion clips. They are asked for outright rather than
+    // matched by name, because the table's own name for one carries the gender branch and the
+    // speed index (the shipped flattener's naming) and the game asks for the friendly name.
+    if (moods) {
+      // A table the mood readers cannot walk (one with no INFO chunk where they expect one) must
+      // cost this species its moods and not its whole conversion: the rule of this pass is that a
+      // missing mood reads as "not yet" and never as an error.
+      try {
+        const found = moodEntries(latRoot, named);
+        named.push(...found.entries);
+        info.moodNotes = found.notes;
+        info.moodClips = found.entries.map((e) => e.clip);
+      } catch (err) {
+        info.moodNotes = [`branches could not be read from ${latFile}: ${err.message}`];
+        info.moodClips = [];
+      }
+    }
     info.available = named.map((e) => `${e.clip}${e.clip !== e.name ? ` (${e.name}${e.speed ? ` ${e.speed.toFixed(1)} m/s` : ''})` : ''}${e.kind === 'file' || e.kind === 'inline' ? '' : ` [${e.kind}]`}${e.variable ? ` (${e.variable}${e.isDefault ? ', default' : ''})` : ''}${e.timeScale && e.timeScale !== 1 ? ` x${e.timeScale.toFixed(2)}` : ''}`);
     if (animations === 'list') return info;
     const used = new Set();
     const cut = [];
     for (const e of named) {
-      if (wanted && !wanted.some((w) => (w.startsWith('=') ? e.clip.toLowerCase() === w.slice(1) || e.name.toLowerCase() === w.slice(1) : e.clip.toLowerCase().includes(w) || e.name.toLowerCase().includes(w)))) continue;
+      // A mood branch was asked for outright by the mood pass: the name filters are written
+      // against the table's own names and would never match the friendly name it carries.
+      if (!e.mood && wanted && !wanted.some((w) => (w.startsWith('=') ? e.clip.toLowerCase() === w.slice(1) || e.name.toLowerCase() === w.slice(1) : e.clip.toLowerCase().includes(w) || e.name.toLowerCase().includes(w)))) continue;
       if (used.has(e.clip)) continue;
       if (clips.length >= maxAnimations) {
         // Past the cap: say which wanted clips were left out rather than dropping them quietly.
@@ -1403,6 +1435,12 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
     }
   }
   const skin = skinData(skeleton, clips, { flipX: true, hardpoints: wantedHardpoints });
+  // A one-frame pose is written twice a frame apart. `skinData` gives such a clip a duration of
+  // zero, three finishes a zero-length action on its first update, and a repeating one divides by
+  // that length and poses the bones at NaN — which is what a still pose played as a state does.
+  // The mobiles packs have padded theirs since they were written; these rigs now do the same, and
+  // the call is a no-op on every clip of more than one key.
+  skin.clips.forEach((clip, i) => M.padSingleFrame(clip, clips[i]?.animation?.fps || 30));
   if (hardpoints) {
     info.hardpoints = skin.hardpoints.map((h) => ({ name: h.name, joint: skin.joints[h.joint].name }));
     for (const name of skin.droppedHardpoints) info.skipped.push(`hardpoint ${name}: its joint is not in the skeleton`);
@@ -1411,7 +1449,8 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
     // Clips from elsewhere (Jedi Academy's), already retargeted onto this skeleton's joints.
     const extra = extraClips(skin.joints, info);
     for (const c of extra) {
-      skin.clips.push(c);
+      // One key from elsewhere is as zero-length as one from the table; the pad is a no-op above one.
+      skin.clips.push(M.padSingleFrame(c, 30));
       info.animations.push(c.name);
     }
   }
@@ -1646,6 +1685,17 @@ const PLAYER_CLIPS = '=idle,=walk,=run,=idle_combat,=walk_combat,=run_combat,=ju
 /** Clips a player rig keeps at most: the locomotion, carries, emotes, dances and flourishes come to about a thousand. */
 const PLAYER_MAX_CLIPS = 1400;
 const PLAYER_TEMPLATE = 'object/creature/player/shared_human_male.iff';
+/** A mood branch of a locomotion clip, as the mood pass names one: `idle:calm`, `walk:angry`. */
+const MOOD_CLIP = /^(idle|walk|run)(_combat)?:[a-z0-9_]+$/i;
+/** How many mood values a pack's mood clips carry between them, out of its own `variants`. */
+function moodValues(variants, clips) {
+  let n = 0;
+  for (const c of clips) {
+    const v = (variants ?? {})[c];
+    if (v?.variable === 'mood') n += v.values?.length ?? 0;
+  }
+  return n;
+}
 
 /** Planet ids the game can load a pack for (see src/data/planets.ts). */
 const GAME_PLANETS = ['tatooine', 'naboo', 'corellia', 'dantooine', 'lok', 'endor', 'dathomir', 'yavin4', 'talus', 'rori', 'mustafar', 'kashyyyk_main', 'kashyyyk_hunting', 'kashyyyk_dead_forest', 'kashyyyk_rryatt_trail', 'kashyyyk_north_dungeons', 'kashyyyk_south_dungeons', 'kashyyyk_pob_dungeons'];
@@ -1768,9 +1818,21 @@ function packStatus(dir) {
     const playerLacks = lacking(p.clips);
     if (playerLacks.length) console.log(`  player clips missing: ${playerLacks.join(', ')}`);
     if (!Object.keys(p.jkaClips ?? {}).length) console.log('  player: no Jedi Academy clips (saber swings, jumps, rolls): add --jka=<jka-dir> to the player command, then re-run parts, clips-save and clips-apply');
+    // The mood branches of the standing loop: `idle:<mood>` clips, with the values each carries in
+    // `variants`. A pack converted before them has none and the body stands the same whatever
+    // mood is set, which is a thing to say rather than a thing to leave the owner to notice.
+    // `moods: false` in the manifest is --no-moods: the owner weighed the 5 MB against the pose
+    // and left them out, which is an answer and not a gap, so nothing is asked for again.
+    const moodClips = (names) => names.filter((c) => MOOD_CLIP.test(c));
+    const playerMoods = moodClips(p.clips);
+    const playerNoMoods = p.moods === false;
+    if (playerNoMoods) console.log('  player: moods left out on purpose (--no-moods); the body stands the same whatever mood is set');
+    else if (!playerMoods.length) console.log('  player: no mood branches (the body stands the same whatever mood is set)');
+    else console.log(`  player moods: ${playerMoods.length} branches over ${moodValues(p.variants, playerMoods)} values`);
     if (!p.wear?.length) need(`player <swg-dir> ${dir} --retail-only`, 'the player has no clothes');
     else if (!swims) need(`player <swg-dir> ${dir} --retail-only`, 'the player lacks the swimming clips');
     else if (playerLacks.length) need(`player <swg-dir> ${dir} --retail-only${p.jkaClips ? ' --jka=<jka-dir>' : ''}`, `the player lacks the ${playerLacks.join(', ')} clips`);
+    else if (!playerMoods.length && !playerNoMoods) need(`player <swg-dir> ${dir} --retail-only${p.jkaClips ? ' --jka=<jka-dir>' : ''}`, 'the player has no mood branches: converted before the moods');
     // The parts pack the game prefers: it must carry the named locomotion clips, and the Jedi Academy clips travel to it by bundle.
     const partsFile = join(dir, 'characters', p.id, 'parts.json');
     const partsManifest = readJson(partsFile);
@@ -1788,6 +1850,14 @@ function packStatus(dir) {
         need(`parts <swg-dir> ${dir} --retail-only`, `the parts rig lacks the ${partsLacks.join(', ')} clips`);
       }
       if (playerJka && jkaCount < playerJka) need(`clips-save ${join(dir, p.file)} ${join(dir, 'player', 'jka.clips')} --only=BOTH_ && clips-apply ${join(dir, 'characters', p.id, 'rig.glb')} ${join(dir, 'player', 'jka.clips')}`, `the parts rig has ${jkaCount} of the player's ${playerJka} Jedi Academy clips`);
+      // The parts rig is what the game plays, so a mood the player pack has and it has not is a
+      // mood nobody ever sees.
+      const partsMoods = moodClips([...clipNames]);
+      if (partsManifest.moods === false) console.log('  parts: moods left out on purpose (--no-moods)');
+      else if (!partsMoods.length) {
+        console.log('  parts: no mood branches (the game plays the parts rig, so the player pack\'s moods do not reach it until parts is rerun)');
+        need(`parts <swg-dir> ${dir} --retail-only`, 'the parts rig has no mood branches');
+      } else console.log(`  parts moods: ${partsMoods.length} branches over ${moodValues(partsManifest.variants, partsMoods)} values`);
     }
   }
   const weapons = readJson(join(dir, 'weapons/manifest.json'));
@@ -2905,7 +2975,7 @@ switch (cmd) {
           return r.clips;
         }
       : null;
-    const info = convertSat(vfs, template, join(outDir, `${id}.glb`), { animations: options.anim ?? PLAYER_CLIPS, variables: customizationValues(options.var), wear, maxAnimations: options['max-anims'] ? Number(options['max-anims']) : PLAYER_MAX_CLIPS, extraClips });
+    const info = convertSat(vfs, template, join(outDir, `${id}.glb`), { animations: options.anim ?? PLAYER_CLIPS, variables: customizationValues(options.var), wear, maxAnimations: options['max-anims'] ? Number(options['max-anims']) : PLAYER_MAX_CLIPS, extraClips, moods: !flags.has('--no-moods') });
     console.log(`${info.sat}: skeleton ${info.skeleton} (${info.joints} joints${info.attached.length ? `, with ${info.attached.join('; ')}` : ''})`);
     if (jka) console.log(`  jka: ${Object.keys(info.jkaClips).length} clips retargeted${jka.missing.length ? `; not in animation.cfg: ${jka.missing.join(', ')}` : ''}`);
     if (jka) console.log(`  jka: locomotion speeds from the feet: ${Object.entries(info.jkaClips).filter(([, c]) => c.speed).map(([n, c]) => `${n} ${c.speed.toFixed(2)} m/s`).join(', ') || 'none'}`);
@@ -2914,6 +2984,8 @@ switch (cmd) {
     if (info.customization.size) console.log(`  customization (set with --var=name=value,...):\n    ${[...info.customization].join('\n    ')}`);
     if (info.shaderNotes.size) console.log(`  shaders:\n    ${[...info.shaderNotes].join('\n    ')}`);
     console.log(`  animations (${info.animations.length}): ${info.animations.join(', ') || 'none'}`);
+    for (const m of info.moodNotes ?? []) console.log(`  mood ${m}`);
+    if (info.moodClips) console.log(`  moods (${info.moodClips.length}): ${info.moodClips.join(', ') || 'none'}`);
     if (!info.animations.length && info.available) console.log(`  available (${info.available.length}): ${info.available.join(', ')}`);
     for (const c of info.clipStats ?? []) console.log(`  clip ${c}`);
     if (info.unknownTransforms) console.log(`  ${info.unknownTransforms} vertex weights named joints the skeleton lacks: ${[...info.unknownJoints ?? []].join(', ')}`);
@@ -2927,7 +2999,8 @@ switch (cmd) {
       const lacking = wantedGun.filter((n) => !have.has(n));
       if (lacking.length) console.log(`  the animation table in these archives lacks ${lacking.join(', ')}: the blaster's combat stances and hip shots the state hierarchy names. The retail table has 870 logical names, the Legends one 908; convert without --retail-only to take them from the Legends table (the clips themselves are the game's own files; nothing leaves assets-private).`);
     }
-    const entry = { id, file: `player/${id}.glb`, template, wear, variables: Object.fromEntries(customizationValues(options.var)), clips: info.animations, clipSpeeds: info.clipSpeeds ?? {}, ...(info.partialClips ? { partialClips: info.partialClips } : {}), ...(info.variants ? { variants: info.variants } : {}), bounds: info.bounds, scale: 1, ...(info.jkaClips ? { jkaClips: info.jkaClips } : {}), ...(info.jkaGrip ? { jkaGrip: info.jkaGrip } : {}) };
+    // `moods: false` is --no-moods, a size baseline the owner chose; status must not ask again for it.
+    const entry = { id, file: `player/${id}.glb`, template, wear, variables: Object.fromEntries(customizationValues(options.var)), clips: info.animations, clipSpeeds: info.clipSpeeds ?? {}, moods: info.moodsAsked === true,...(info.partialClips ? { partialClips: info.partialClips } : {}), ...(info.variants ? { variants: info.variants } : {}), bounds: info.bounds, scale: 1, ...(info.jkaClips ? { jkaClips: info.jkaClips } : {}), ...(info.jkaGrip ? { jkaGrip: info.jkaGrip } : {}) };
     if (!info.jkaClips && existsSync(join(outDir, 'manifest.json'))) {
       const before = (JSON.parse(readFileSync(join(outDir, 'manifest.json'), 'utf8')).players ?? []).find((e) => e.id === id);
       const had = Object.keys(before?.jkaClips ?? {}).length;
