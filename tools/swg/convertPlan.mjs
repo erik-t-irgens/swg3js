@@ -121,7 +121,16 @@ export const STEP_FACTS = {
   // clips-save reads the player pack's own GLB and manifest; clips-apply writes the parts rig.
   'clips-save': { order: 24, lock: 'player', needs: ['player'], seconds: 5, bytes: 0.45 * GB, measured: '486 clips out: 0.5 s, 332 MB' },
   'clips-apply': { order: 25, lock: 'characters', needs: ['clips-save', 'parts'], seconds: 5, bytes: 1.05 * GB, measured: '486 clips onto the parts rig: 1.3 s, 806 MB' },
-  species: { order: 26, lock: 'characters', needs: ['parts', 'clips-apply', 'wardrobe'], seconds: 150, bytes: 2.6 * GB, measured: 'every playable species: 118.4 s, 2,015 MB, 199 MB written' },
+  // `species` reads `player/jka.clips` itself and puts it on every rig it writes (cli.mjs's species
+  // case), which was missed here: it was listed as needing `clips-apply`, the step that puts the
+  // same bundle on the *parts* rig, and not the step that makes the bundle. On a first conversion
+  // that is the difference between twenty rigs with saber moves and one. `status` cannot ask for
+  // `clips-apply` until the parts rig exists, so on the round where `parts` and `species` first
+  // become askable together `clips-apply` is no step of the run and is taken as done -- while
+  // `clips-save`, which reads only the player pack, is askable on that very round and holds
+  // `species` behind it. Without the bundle `species` says so and carries on, so the cost of
+  // getting this wrong was silent.
+  species: { order: 26, lock: 'characters', needs: ['parts', 'clips-save', 'clips-apply', 'wardrobe'], seconds: 150, bytes: 2.6 * GB, measured: 'every playable species: 118.4 s, 2,015 MB, 199 MB written' },
   loading: { order: 27, lock: 'loading', needs: [], seconds: 5, bytes: 0.4 * GB, measured: '2.4 s, 315 MB, 10 pictures' },
   // The mobiles read characters/index.json and every wardrobe's wardrobe.json to dress their NPCs.
   // The catalogue over all 5,067 entries is built whatever the run converts, so what was measured on

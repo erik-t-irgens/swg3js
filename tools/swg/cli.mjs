@@ -2075,6 +2075,15 @@ function packStatus(dir) {
     if (playerNoMoods) console.log('  player: moods left out on purpose (--no-moods); the body stands the same whatever mood is set');
     else if (!playerMoods.length) console.log('  player: no mood branches (the body stands the same whatever mood is set)');
     else console.log(`  player moods: ${playerMoods.length} branches over ${moodValues(p.variants, playerMoods)} values`);
+    // The bundle itself, which is what carries the Jedi Academy clips onto every rig the conversion
+    // writes: the parts rig through clips-apply, and each playable species through the species
+    // command, which reads it directly. It is asked for here rather than only beside the parts rig
+    // (below), because `status` cannot see the parts rig on the round the player pack first appears
+    // and the bundle is what everything downstream waits on.
+    const jkaBundle = join(dir, 'player', 'jka.clips');
+    if (Object.keys(p.jkaClips ?? {}).length && !existsSync(jkaBundle)) {
+      need(`clips-save ${join(dir, p.file)} ${jkaBundle} --only=BOTH_`, 'the player pack has Jedi Academy clips and no bundle to carry them to the rigs');
+    }
     if (!p.wear?.length) need(`player <swg-dir> ${dir} --retail-only`, 'the player has no clothes');
     else if (!swims) need(`player <swg-dir> ${dir} --retail-only`, 'the player lacks the swimming clips');
     else if (playerLacks.length) need(`player <swg-dir> ${dir} --retail-only${p.jkaClips ? ' --jka=<jka-dir>' : ''}`, `the player lacks the ${playerLacks.join(', ')} clips`);
@@ -2156,8 +2165,26 @@ function packStatus(dir) {
     }
   }
   const speciesIndex = readJson(join(dir, 'characters/index.json'));
-  if (speciesIndex?.species?.length) console.log(`  species: ${speciesIndex.species.map((sp) => `${sp.id} (${sp.morphs.length} sliders, ${sp.variables.length} variables${sp.jkaClips ? '' : ', NO Jedi Academy clips'})`).join(', ')}`);
-  else need(`species <swg-dir> ${dir} --retail-only`, 'no species index: only the one character can be played');
+  if (speciesIndex?.species?.length) {
+    console.log(`  species: ${speciesIndex.species.map((sp) => `${sp.id} (${sp.morphs.length} sliders, ${sp.variables.length} variables${sp.jkaClips ? '' : ', NO Jedi Academy clips'})`).join(', ')}`);
+    // A species rig takes its saber swings, jumps and rolls from the bundle, and the species command
+    // carries on with a word when the bundle is not there yet -- which is what a first conversion
+    // does, since the bundle is made after the player pack. Nothing ever asked for the species
+    // again, so a conversion could report itself complete with the saber moves on the one rig
+    // clips-apply writes and on no other, which is how a whole install can end up silently unable
+    // to swing. The bundle on disk is the question and not the player pack's own count: a player
+    // pack re-run without --jka carries none of its own while the rigs already have theirs.
+    // Each rig's own parts.json and not the index's copy of the count: the index is written by the
+    // species run and never again, so a rig that got its clips afterwards (which is exactly what
+    // clips-apply does to the parts rig) still reads as having none there.
+    const withoutJka = existsSync(join(dir, 'player', 'jka.clips'))
+      ? speciesIndex.species.filter((sp) => !Object.keys(readJson(join(dir, 'characters', sp.id, 'parts.json'))?.jkaClips ?? {}).length)
+      : [];
+    if (withoutJka.length) {
+      const names = withoutJka.slice(0, 4).map((sp) => sp.id).join(', ');
+      need(`species <swg-dir> ${dir} --retail-only`, `${withoutJka.length} of the ${speciesIndex.species.length} playable species have no Jedi Academy clips (no saber swings, jumps or rolls): ${names}${withoutJka.length > 4 ? ' and more' : ''}`);
+    }
+  } else need(`species <swg-dir> ${dir} --retail-only`, 'no species index: only the one character can be played');
   const ships = readJson(join(dir, 'ships/manifest.json'));
   if (!ships) need(`ships <swg-dir> ${dir} --retail-only`, 'no ships converted for the garage (B in game, at the bottom)');
   else {

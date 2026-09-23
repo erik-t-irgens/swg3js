@@ -112,6 +112,26 @@ ok(waits('ships', 'mobiles'), 'the ships wait for the mobiles, whose astromech m
 ok(waits('sounds', 'ships') && waits('sounds', 'species') && waits('sounds', 'snapshot'), 'the sounds wait for the ships, the species packs and the planets they are joined to');
 ok(waits('mobiles', 'species') && waits('mobiles', 'wardrobe'), 'the mobiles wait for the index and the wardrobes their NPCs are dressed from');
 ok(waits('species', 'wardrobe') && waits('parts', 'wardrobe'), 'whatever writes the species index waits for the wardrobes it names');
+ok(waits('species', 'clips-save'), 'the species rigs wait for the bundle they take their Jedi Academy clips from, and not only for the step that puts it on the parts rig');
+{
+  // The round a first conversion really has, and the one this was got wrong on for a long time:
+  // `status` cannot ask for `clips-apply` until the parts rig exists, so on the round where `parts`
+  // and `species` first become askable together, `clips-apply` is no step of the run and is taken
+  // as already done. Only `clips-save`, which reads the player pack alone, is askable then -- so it
+  // is the one that has to hold `species` back. Without it every species but the parts rig's own
+  // came out with no saber swings, no jumps and no rolls, and nothing said so.
+  const round = { format: 1, dir: OUT, done: false, unreadable: [], steps: [
+    step(`parts @SWG ${OUT} --retail-only`, 'the parts rig lacks the named idle, walk and run clips'),
+    step(`clips-save ${OUT}\\player\\human_male.glb ${OUT}\\player\\jka.clips --only=BOTH_`, 'the player pack has Jedi Academy clips and no bundle'),
+    step(`species @SWG ${OUT} --retail-only`, 'no species index'),
+    step(`wardrobe @SWG ${OUT} --retail-only`, 'NPC outfit pieces wear from wardrobe/human_male'),
+  ] };
+  const early = convertPlan(round, { swg: SWG, jka: JKA, out: OUT });
+  const sp = early.steps.find((s) => s.command === 'species')!;
+  const save = early.steps.find((s) => s.command === 'clips-save')!;
+  ok(sp.after.includes(save.key), 'and does so on the very round where the clip pair is only half askable');
+  ok(early.steps.indexOf(save) < early.steps.indexOf(sp), 'so the bundle is made before the rigs that read it are written');
+}
 ok(at('wardrobe').every((s) => s.after.length === 0) && one('creatures').after.length === 0 && one('weapons').after.length === 0, 'the wardrobes, the creatures and the weapons wait for nothing at all');
 const place = new Map(plan.steps.map((s, i) => [s.key, i]));
 ok(plan.steps.every((s, i) => (s.after ?? []).every((k) => place.get(k)! < i)), 'the plan is printed in an order it could really be run in: nothing stands before what it waits for');
