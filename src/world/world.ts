@@ -999,6 +999,63 @@ export class World {
     return this.swellOver(x, z, flat, groundY);
   }
 
+  /**
+   * Why the swell over a point is the height it is: every term the fade is built from, in the order
+   * it is applied, and the first one that took it to nothing. For the console only -- it samples
+   * the ground and builds an object.
+   *
+   * It exists because "the body is not riding the wave I can see" has half a dozen causes that look
+   * identical from outside: the switch, a mesh with no swell (every lake and the far ring carry
+   * `uWaveHeight` 0), water too shallow to carry one, the camera fade, our own scale, and a ground
+   * height that is not the seabed. The last is the one worth naming: the fade is on the water's
+   * **depth**, and a reader that believes the water is a metre deep asks for a fiftieth of the wave
+   * a reader that knows it is forty metres deep asks for -- while the shader, which reads its own
+   * grid of ground heights, carries on drawing the wave it always drew.
+   */
+  seaSwellWhy(x: number, z: number, groundY = Number.NaN): Record<string, unknown> {
+    const terrain = this.terrain;
+    const flat = terrain ? terrain.waterHeightAt(x, z) : Number.NaN;
+    const near = this.waterNear;
+    const u = near?.lit.userData.uniforms;
+    const waveHeight = (u?.uWaveHeight?.value as number | undefined) ?? 0;
+    const ground = Number.isFinite(groundY) ? groundY : (terrain?.heightAt(x, z) ?? Number.NaN);
+    const depth = flat - ground;
+    const camera = SEA_FEED.farFade ? this.camera : null;
+    const cameraDistance = camera ? Math.hypot(camera.position.x - x, camera.position.z - z) : 0;
+    const onSea = !!terrain && Number.isFinite(flat) && !!near && onSeaSurface(flat, terrain.waterLevel, !!this.water?.visible);
+    const scale = onSea ? swellScaleAt(depth, waveHeight, cameraDistance) : 0;
+    const swell = this.swellOver(x, z, flat, groundY);
+    const why = !terrain ? 'no terrain'
+      : !SEA_FEED.on ? 'the sea reader is switched off (sea({ on: true }))'
+      : this.globalWaterIsLava ? 'this world s water is lava'
+      : !Number.isFinite(flat) ? 'no water over this point'
+      : !near ? 'no near sea mesh built here'
+      : !onSea ? 'this table is not the sea (a lake, a pool, or the sea not drawn)'
+      : waveHeight <= 0 ? 'this mesh carries no swell at all (uWaveHeight 0: every lake and the far ring)'
+      : !(scale > 0) ? (depth < 5 ? `the water is only ${depth.toFixed(2)} m deep here, and the swell fades out under 5 m` : 'the scale came to nothing')
+      : null;
+    return {
+      swell: Number.isFinite(swell) ? Number(swell.toFixed(4)) : null,
+      why,
+      flat: Number.isFinite(flat) ? Number(flat.toFixed(3)) : null,
+      waterLevel: terrain ? Number(terrain.waterLevel.toFixed(3)) : null,
+      onSea,
+      // The seabed the fade believes is under this point, and how deep that makes the water. The
+      // shader reads its own 16 m grid for the same thing, so these two disagreeing is exactly the
+      // case where a body holds a line the drawn water knows nothing about.
+      ground: Number.isFinite(ground) ? Number(ground.toFixed(3)) : null,
+      groundFrom: Number.isFinite(groundY) ? 'the caller' : 'terrain.heightAt',
+      depth: Number.isFinite(depth) ? Number(depth.toFixed(3)) : null,
+      waveHeight,
+      farFade: SEA_FEED.farFade,
+      cameraDistance: Number(cameraDistance.toFixed(1)),
+      ourScale: SEA_FEED.scale,
+      // What the fade came to in the end. 1 is the whole authored wave; the shader multiplies its
+      // own copy of this by the same numbers, bar the ground grid and our own scale.
+      scale: Number(scale.toFixed(4)),
+    };
+  }
+
   /** The swell over a point whose flat height the caller has already paid for. 0 is "no swell here". */
   private swellOver(x: number, z: number, flat: number, groundY: number): number {
     const terrain = this.terrain;

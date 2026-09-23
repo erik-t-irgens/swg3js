@@ -1900,6 +1900,11 @@ class App {
           // was off its line before the frame and `moved` is what the controller allowed of it: a
           // `moved` far short of `gap`, or of the other sign, is something the body is touching.
           frame: { ...p.swimProbe, held: Number.isFinite(p.swimProbe.moved) ? Number((p.swimProbe.gap - p.swimProbe.moved).toFixed(4)) : null },
+          // And every term the swell's own fade is built from, with the first one that took it to
+          // nothing named. This is where a body holding a line the drawn water knows nothing about
+          // shows up: the fade is on the water's depth, and the seabed this reads is not the one
+          // the shader reads.
+          why: this.world.seaSwellWhy(p.pos.x, p.pos.z),
         };
       },
       /**
