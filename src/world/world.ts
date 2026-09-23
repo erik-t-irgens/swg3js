@@ -114,6 +114,12 @@ const INTERIOR_AMBIENT_SCALE = 1.2;
 const INTERIOR_AMBIENT_FLOOR = 0.18;
 /** Seconds between ripple passes: dense enough that a swimmer's rings overlap into a wake. */
 const RIPPLE_INTERVAL = 0.12;
+/**
+ * Seconds a body is kept in the water's height field after it has left it (INVENTED). Long enough
+ * that walking in and out of the shallows does not make and unmake a mesh every second, short
+ * enough that nothing is held for a world it has left.
+ */
+const SIM_BODY_KEEP = 8;
 
 /**
  * The footprint a person leaves in the water: two legs and a torso between them, so a wader cuts
@@ -480,6 +486,8 @@ export class World {
   private readonly simBodies = new Map<object, SimBody>();
   /** Bodies touched this frame; the rest are switched off so they cost nothing. */
   private readonly simSeen = new Set<object>();
+  /** How long each body has been out of the water, so one that has gone for good can be let go. */
+  private readonly simIdle = new Map<object, number>();
   /** A hull box per vehicle spec, shared by every vehicle of that kind. */
   private readonly hullProxies = new Map<string, THREE.BufferGeometry>();
   private waderProxy: THREE.BufferGeometry | null = null;
@@ -1129,6 +1137,12 @@ export class World {
 
   private unload(): void {
     this.loadGeneration++;
+    // The water's height field holds a mesh and a material per thing that waded here, and the keys
+    // are the bodies themselves: a world left with them still in the map holds every one of them.
+    for (const body of this.simBodies.values()) body.dispose();
+    this.simBodies.clear();
+    this.simIdle.clear();
+    this.simSeen.clear();
     // Two blades meeting: the pairs that have clashed lately go with the world they clashed in
     // (src/combat/clash.ts). The step holds no renderer between steps, so there is nothing here
     // to free -- this is only the ring saying so rather than waiting for the clock to go back.
@@ -1696,13 +1710,26 @@ export class World {
   }
 
   /**
+   * The filter the environment cubes go through, with its own three programs built here rather
+   * than on the frame that first asks for a cube. Three builds them inside `fromCubemap`, and the
+   * cube arrives in a loader's callback, which usually lands after the loading screen has lifted:
+   * on a machine where a program costs hundreds of milliseconds that is a visible freeze, and the
+   * warning it prints (`_applyPMREM` in the stack) is what put us on to this.
+   */
+  private makePmrem(renderer: THREE.WebGLRenderer): THREE.PMREMGenerator {
+    const gen = new THREE.PMREMGenerator(renderer);
+    gen.compileCubemapShader();
+    return gen;
+  }
+
+  /**
    * The environment reflective surfaces see: the block's day or night cube map when the pack
    * has one, otherwise the sky dome itself, filtered again every few seconds as it changes.
    */
   private refreshEnvironment(dt: number): void {
     const sky = this.swgSky;
     if (!sky || !this.renderer) return;
-    this.pmrem ??= new THREE.PMREMGenerator(this.renderer);
+    this.pmrem ??= this.makePmrem(this.renderer);
     // The heaviest block's cube for the hour (the weather's mix picks the block), by its first face:
     // a new area or level with another cube loads that one; a cube that failed is never asked again.
     const cube = this.day.isDay ? sky.environment.day : sky.environment.night;
@@ -1824,7 +1851,26 @@ export class World {
     }
 
     // Anything not touched this frame has left the water, so it stops being drawn into the field.
-    for (const [key, body] of this.simBodies) if (!this.simSeen.has(key)) body.active = false;
+    // Anything not touched this frame has left the water, so it stops being drawn into the field;
+    // one that has been out of it for a while is let go altogether. Without that the map holds a
+    // mesh, a material and the dead body itself for everything that has ever waded, for the life of
+    // the page and across travels. A body that comes back makes an identical material, so three
+    // finds the program it already has and nothing is compiled for it.
+    for (const [key, body] of this.simBodies) {
+      if (this.simSeen.has(key)) {
+        this.simIdle.set(key, 0);
+        continue;
+      }
+      body.active = false;
+      const idle = (this.simIdle.get(key) ?? 0) + dt;
+      if (idle <= SIM_BODY_KEEP) {
+        this.simIdle.set(key, idle);
+        continue;
+      }
+      body.dispose();
+      this.simBodies.delete(key);
+      this.simIdle.delete(key);
+    }
   }
 
   /**
@@ -2721,6 +2767,9 @@ export class World {
   /** Generate every chunk in view immediately (used when arriving on a planet). */
   warmUp(center: THREE.Vector3): void {
     this.exclusions = [{ x: center.x, z: center.z, r: 14 }];
+    // The environment filter's own programs, built here with everything else's rather than in the
+    // loader callback that brings the first cube in, which lands after the screen has lifted.
+    if (this.renderer) this.pmrem ??= this.makePmrem(this.renderer);
     // The sound of the place, as early as it can be had: on an arrival this runs before the pack is
     // in, so it usually only hands the weather its channel sink and the first frames of `update` do
     // the rest, still behind the loading screen.
