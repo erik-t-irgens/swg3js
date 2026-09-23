@@ -16,6 +16,60 @@ import { isShadowOnly } from '../core/fxRegistry.ts';
 
 export const ACTOR_LAYER = 31;
 export const INTERIOR_LAYER = 1;
+
+/** The shadow pass's stray draws: whether they are made, and what the last pass met. */
+export interface ShadowStrays {
+  /** True draws them, which is the old behaviour and the baseline this was measured against. */
+  keep: boolean;
+  /** Stray draws the last shadow pass met, whether or not they were made. 0 when it met none. */
+  seen: number;
+  /** Direct draws made during that pass by something other than its own render list; see `hookDraws`. */
+  foreign: number;
+}
+
+/**
+ * Whether the old behaviour was asked for, which is how a baseline is taken.
+ *
+ * It is asked for on the address (`?shadowStrays=1`) and deliberately never remembered. An earlier
+ * turn of this read a stored key instead, and a browser given that key once ran the old behaviour
+ * on that address for ever after with none of the cut in it -- which is exactly how a measurement
+ * becomes a lie, and it happened: the key was left set on the dev server's own address and the game
+ * was quietly shipped there with its own cut switched off. The key is cleared here, so a browser
+ * that still carries it is mended by loading the game once.
+ */
+function baselineAsked(): boolean {
+  try {
+    if (typeof localStorage !== 'undefined') localStorage.removeItem('swg.shadowStrays');
+  } catch {
+    // Storage throws outright in a private window, where there was never anything to clear.
+  }
+  try {
+    if (typeof location === 'undefined' || !location.search) return false;
+    return new URLSearchParams(location.search).get('shadowStrays') === '1';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The one stray record, read and written through `__debug.shaders()` and `__debug.passLog()`.
+ *
+ * Fields rather than constants, so the baseline can be taken back and forth in one session without
+ * a reload (`__debug.shaders({ keepStrays: true })`), and a plain module-level object because the
+ * game reaches it by importing this file, which is the one thing that cannot hand back a second
+ * copy. It hung on `globalThis` for a while, so that a console `import()` of this file could find
+ * it: a dev server stamps its imports with a version, so such an import evaluates the file a
+ * *second* time and hands back a second set of module-level values, and a knob turned on that copy
+ * moved nothing at all while the counter beside it read 0. There is nothing to import now -- the
+ * game's own hook is the way in -- so the field is gone and with it the second name in the console.
+ *
+ * Nothing about the picture changes either way: the pass's colour is cleared on the next line of
+ * `render`. What changes is the number of programs -- see `hookDraws`.
+ */
+export const SHADOW_STRAYS: ShadowStrays = { keep: baselineAsked(), seen: 0, foreign: 0 };
+// Said out loud, because a session that reads the baseline as the game's ordinary behaviour
+// concludes the cut does nothing.
+if (SHADOW_STRAYS.keep) console.warn('shaders: ?shadowStrays=1 is set, so the shadow pass keeps its stray draws — the old behaviour, one light set more. Take it off the address for the cut.');
 const PORTAL_RANGE = 120;
 const MAX_BUILDINGS = 6;
 /** Doorways count as reaching this far above their polygon when deciding which side the camera is on. */
@@ -85,15 +139,56 @@ export class PortalRenderer {
   /** The object the renderer is drawing right now, noted by the hook on renderBufferDirect. */
   private drawing: THREE.Object3D | null = null;
 
+  /** True only while the shadow maps are being shaded (see `renderShadows`). */
+  private shadingShadows = false;
+
+  /**
+   * Stray draws this frame's shadow pass met, whether or not they were made. Zeroed at the top of
+   * every `render` and copied into `SHADOW_STRAYS.seen` once the pass is over, which is where the
+   * console reads it (`__shadowStrays`) with no import and no hook in `main.ts`.
+   */
+  strays = 0;
+
   /**
    * Hook the renderer's draw call so the object being drawn is always known: a draw that throws
    * is then named at once. Finding it by drawing every candidate alone as its own scene, as
    * this used to, compiled a lightless shader for each and cost seconds per failure.
+   *
+   * The hook is also where the shadow pass's stray draws are dropped. That pass is made through a
+   * camera that sees every layer (so every caster counts) and holds nothing in its frustum (so it
+   * draws nothing) -- but a mesh with `frustumCulled` false is never tested against a frustum, so
+   * three puts it in that pass's render list and draws it anyway, under a camera that sees the
+   * world's lights and a building's rooms' lights at once. That is a third light set, and three
+   * keys a program on the light counts whether or not the shader reads a light, so every actor,
+   * vehicle, glow and trail was paying for a whole extra program that no frame ever shows: the
+   * pass's own colour is cleared on the next line of `render`.
+   *
+   * What counts as the stray is asked precisely, by *whose* draw it is and not by a convention: it
+   * is a draw of the probe's own render list, so the camera is the probe itself. The shadow maps'
+   * own draws come through here with the light's camera and no scene at all (WebGLShadowMap passes
+   * null), so casters were never in question; but a direct draw made by something else while this
+   * pass is running -- a geometry product drawn out of an `onAfterRender`, say (nothing does that
+   * today: the velocity pass's direct draws run inside `PostFX.end`, after `render` has returned)
+   * -- would have been swallowed by a scene-is-null test with no error and no counter anyone reads,
+   * and the fault would have looked like a missing effect rather than a dropped draw. Such a draw
+   * is made as it asks and counted in `SHADOW_STRAYS.foreign`, which should stay at nought.
+   *
+   * Measured on one world, booted both ways (`?shadowStrays=1` and a reload, with
+   * `__debug.passLog()` for the rest): the world pass, the interiors, the portals and the depth
+   * reset draw the same number of calls and the same number of triangles to the last one, and only
+   * the shadow pass differs, by exactly the strays. On a planet it was nine whole programs and four
+   * of the twenty-one a ship spawned in play used to build; in a space zone, eighteen.
    */
   private hookDraws(): void {
     const r = this.renderer;
     const direct = r.renderBufferDirect.bind(r);
     r.renderBufferDirect = (camera, scene, geometry, material, object, group) => {
+      if (this.shadingShadows && scene !== null) {
+        if (camera === this.shadowProbe) {
+          this.strays++;
+          if (!SHADOW_STRAYS.keep) return;
+        } else SHADOW_STRAYS.foreign++;
+      }
       this.drawing = object;
       direct(camera, scene, geometry, material, object, group);
     };
@@ -265,10 +360,22 @@ export class PortalRenderer {
   private renderShadows(scene: THREE.Scene, view: Building | null): void {
     const r = this.renderer;
     // Off, or faded to nothing by a storm (the cascades' intensity is 0, so the stale maps cannot show).
-    if (!r.shadowMap.enabled || !this.shadowsWanted) return;
+    if (!r.shadowMap.enabled || !this.shadowsWanted) {
+      SHADOW_STRAYS.seen = 0;
+      return;
+    }
     if (view) this.showInterior(view, true);
     r.shadowMap.needsUpdate = true;
-    this.pass('shadows', scene, this.shadowProbe);
+    this.shadingShadows = true;
+    try {
+      this.pass('shadows', scene, this.shadowProbe);
+    } finally {
+      this.shadingShadows = false;
+      // Once for the pass, not once for each stray: read as its own sentence ("what the last
+      // shadow pass met"), a count written only where there was something to count says N for ever
+      // after the frame that last met one.
+      SHADOW_STRAYS.seen = this.strays;
+    }
     if (view) this.showInterior(view, false);
   }
 
@@ -294,6 +401,7 @@ export class PortalRenderer {
     // (turned off inline at each such pass, so no closure is made per frame).
     try {
       this.passes = 0;
+      this.strays = 0;
       this.passLog.length = 0;
       projView.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
       frustum.setFromProjectionMatrix(projView);

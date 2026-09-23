@@ -8,7 +8,7 @@ import { Effects } from './combat/effects';
 import { JediKit } from './combat/jedi';
 import type { ClassId, Kit, KitContext } from './combat/kit';
 import { ThirdPersonCamera } from './core/camera';
-import { PortalRenderer } from './world/portalRender';
+import { PortalRenderer, SHADOW_STRAYS } from './world/portalRender.ts';
 import { Input, type Action } from './core/input';
 import { Physics } from './core/physics';
 import { PLANETS, packIdOf, planetBelow, planetById, spaceZoneOf, type PlanetDef } from './data/planets';
@@ -157,6 +157,7 @@ import { configureWaterSim, pokeWaterSim, waterSimDebug, WATER_SIM_DRAFT, WATER_
 import { RANGE } from './world/gallery';
 import { castsShadow, surfaces } from './world/surfaces';
 import { compilerVerdict, groupPrograms, loadingLine, machineAside, measureCompiler, ProgramWatch, readKey, SHADER_TUNE, verdictLine, type ProgramPhase, type ProgramRow } from './core/shaderWatch.ts';
+import { census as programFamilies } from './core/fx/programCensus.ts';
 
 /** The keys for the vehicle ridden, by its kind. */
 function mountPrompt(v: import('./vehicles/vehicle').Vehicle, wingsKey: string = WINGS_KEY): string {
@@ -1265,6 +1266,128 @@ class App {
         if (opts?.poke) pokeWaterSim(opts.poke[0], opts.poke[1], 0.6, 1.2);
         return waterSimDebug();
       },
+      /**
+       * Every shader program the renderer holds, what makes each one differ from the next, and what
+       * has been built since the game started. This is the one hook for all of it; nothing else
+       * should grow a second.
+       *
+       * With no argument: how many are live, how many were built and dropped in each phase of the
+       * session, what this machine costs for one, the live programs counted by light signature, any
+       * cache key built more than once (a key built twice is a program the cache let go and
+       * something asked for straight back, which is the whole cost again), and what was built in
+       * play, newest first.
+       *
+       * `shaders({ groups: true })` counts the live list by every dimension that can make one
+       * program differ from another — the light signature, which face is drawn, fog, the shadow
+       * maps, skinning, instancing, the alpha test, vertex colours, the environment cube and its
+       * height, the cascades, the wet wrap and each material's own key. That is the figure to have
+       * in hand before anything is collapsed: a signature with one program in it is a pass nothing
+       * warmed.
+       *
+       * `shaders({ families: true })` asks the other question: not how many programs carry each
+       * flag but which material family has more than one program at all, and what the second one
+       * is *for* — the light set, a side, an alpha test, the cascades' defines, the wet wrap, a
+       * material's own key. `combinedPrograms` comes out of the same census and is always
+       * answered, because it is the guard rail and nobody will pass an option to find it: a light
+       * set that holds two of the game's passes at once is a camera that was shown both, and every
+       * program built under it is one no frame will ever draw with. **It must stay at nought**;
+       * `combinedLights[0].of` names which two passes the offending set is holding together.
+       *
+       * `shaders({ full: true })` lists every live program with its facts, and with `raw` as well
+       * the whole cache key of each, which is how to see what really differs between two programs
+       * that look alike in the list (a key that could not be read is always printed whole).
+       * `shaders({ since: true })` answers how many have been built since the last time it was
+       * asked, which is how to tell what a run of `__debug.bench(n)` really cost: bench draws its
+       * frames itself and never reaches the frame loop's own counter.
+       *
+       * `pace` is the paced queue: what is still to be compiled, what is holding something back
+       * from being shown, the worst play frame so far and how many went over. In ordinary play
+       * `pace.worstFrame` should be 1, `pace.overranFrames` 0 and `pace.idle` false; `idle` true
+       * while the game is being played means no frame loop is running and every wait on the queue
+       * is being answered outright instead.
+       *
+       * `strays` is the shadow pass's own record: `seen` is what its last pass met, `foreign` must
+       * stay at nought, and `keep` says whether the old behaviour is on. `shaders({ keepStrays:
+       * true })` turns it on live and `false` takes it back, which is how to see what the cut is
+       * worth without a reload; `?shadowStrays=1` on the address does the same from a boot, which
+       * is the way that cannot be fooled by a world already streamed in.
+       */
+      shaders: (opts?: { full?: boolean; groups?: boolean; families?: boolean; since?: boolean; raw?: boolean; keepStrays?: boolean }) => {
+        if (opts?.keepStrays !== undefined) SHADOW_STRAYS.keep = opts.keepStrays;
+        const rows = this.shaderRows();
+        // Sampled here as well as in the frame loop, so a console call in a driven tab (where no
+        // frame runs on its own) still sees what the last draw built. The phase is the frame loop's
+        // own rule and never a second reading of it: asked at the select screen, this used to file
+        // the session's first programs as built in play, which is the one thing the hook is read for.
+        this.sampleShaders(this.shaderPhase());
+        const totals = this.shaderWatch.totals;
+        const grouped = groupPrograms(rows);
+        // Worked out once, whether or not the family list is asked for: `combinedPrograms` below
+        // comes out of it and is the one number this hook exists to keep at nought.
+        const families = programFamilies(rows);
+        const out: Record<string, unknown> = {
+          live: rows.length,
+          built: totals.made,
+          dropped: totals.dropped,
+          byPhase: totals.byPhase,
+          // The per-key history is capped (a key is usually a hook's whole source text, kilobytes of
+          // it, and nothing tells the watch when the renderer lets a program go). `remade` and
+          // `builtInPlay` below are read out of the most recent `keys` of them; `forgotten` is how
+          // many older ones the cap has dropped, and is 0 for any session short of a few worlds.
+          keys: totals.keys,
+          forgotten: totals.forgotten,
+          machine: compilerVerdict(),
+          // Kept on deliberately: reading a shader's error log was measured to cost nothing at all
+          // (1569.8 ms against 1569.5 ms over four programs), and a broken shader must still say so.
+          checkShaderErrors: this.renderer.debug.checkShaderErrors,
+          parallelCompile: !!this.renderer.getContext().getExtension('KHR_parallel_shader_compile'),
+          keysRead: grouped.read,
+          keysUnread: grouped.unread,
+          lights: grouped.groups.lights,
+          // The guard rail, answered always: a light set that holds two of the game's passes at
+          // once is a pass the game does not have, and every program under it is one no frame ever
+          // draws with. Nought is the only right answer; `shaders({ families: true })` names which
+          // two passes are being held together when it is not.
+          combinedPrograms: families.combinedPrograms,
+          // The shadow pass's stray draws: what its last pass met, whether the old behaviour is on,
+          // and how many direct draws something other than that pass made while it ran (nought).
+          strays: { keep: SHADOW_STRAYS.keep, seen: SHADOW_STRAYS.seen, foreign: SHADOW_STRAYS.foreign },
+          // How the paced queue is doing: what is still to be compiled, what is holding something
+          // back from being shown, and the worst play frame so far.
+          pace: this.world.shaderPace(),
+          remade: this.shaderWatch.remade(),
+          builtInPlay: this.shaderWatch.builtInPlay(),
+        };
+        if (opts?.since) out.since = this.shaderWatch.takeSince();
+        if (opts?.groups) out.groups = grouped.groups;
+        if (opts?.families) {
+          out.families = opts.full ? families.groups : families.groups.slice(0, 20);
+          out.split = families.split;
+          out.combinedLights = families.combined;
+        }
+        if (opts?.full) {
+          out.programs = rows
+            .map((p) => {
+              const facts = readKey(p.cacheKey);
+              return {
+                name: p.name || p.type || '?',
+                used: p.usedTimes ?? 0,
+                lights: facts?.lights ?? 'key not read',
+                side: facts?.side ?? '?',
+                flags: facts ? [facts.fog && 'fog', facts.skinning && 'skinned', facts.instancing && 'instanced', facts.alphaTest && 'alphaTest', facts.vertexColors && 'vertexColors', facts.envMap && `env ${facts.envHeight}`, facts.cascades && 'cascades', facts.wet && 'wet'].filter(Boolean).join(' ') : '',
+                custom: facts?.custom ?? '',
+                // The raw key, whole: always for a program whose key could not be read, since that is
+                // the one way to find out why, and for every program with `raw`, which is how to see
+                // what really differs between two programs that look alike here. Whole rather than
+                // clipped because the answer is usually in the tail, which a clipped key never
+                // reaches: the tail is where a three that has moved its fields would show.
+                key: facts && !opts?.raw ? undefined : p.cacheKey,
+              };
+            })
+            .sort((a, b) => a.lights.localeCompare(b.lights) || a.name.localeCompare(b.name));
+        }
+        return out;
+      },
       roomAir: (opts?: RoomAirDebugOptions) => {
         const d = opts ? this.roomAir.debug(opts) : this.roomAir.describe();
         const pass = this.postfx?.describe().passes.find((p) => p.id === 'lightShafts') ?? null;
@@ -1417,7 +1540,15 @@ class App {
         }
         return { nearCut: [...MOTION_TUNING.nearCut], radiusOfHeight: MOTION_TUNING.radiusOfHeight, samples: MOTION_TUNING.samples, shutter: MOTION_TUNING.shutter, tileSize: this.postfx?.pass<MotionBlurPass>('motionBlur')?.tileSize ?? null, limits: { ...MOVER_LIMITS } };
       },
-      /** Every pass of the last frame: what it was and what it drew. */
+      /**
+       * Every pass of the last frame: what it was and what it drew, and beside it what the shadow
+       * pass met. `strays` is the draws it found of meshes that opt out of frustum culling (every
+       * actor's, every trail's, every glow's), which are dropped because that pass's camera is
+       * shown the world's lights and a building's rooms' lights at once and its colour is cleared
+       * the moment it ends; `straysKept` says whether the old behaviour is on, and `straysForeign`
+       * counts a direct draw made during the pass by something other than the pass itself, which
+       * must stay at nought.
+       */
       passLog: () => {
         const log = this.portals.passLog;
         const byLabel = new Map<string, { passes: number; calls: number; triangles: number }>();
@@ -1427,7 +1558,7 @@ class App {
           e.calls += p.calls;
           e.triangles += p.triangles;
         }
-        return { total: { passes: log.length, calls: log.reduce((a, p) => a + p.calls, 0) }, byLabel: Object.fromEntries(byLabel) };
+        return { total: { passes: log.length, calls: log.reduce((a, p) => a + p.calls, 0) }, byLabel: Object.fromEntries(byLabel), strays: SHADOW_STRAYS.seen, straysKept: SHADOW_STRAYS.keep, straysForeign: SHADOW_STRAYS.foreign };
       },
       flora: () => this.world.floraStatus,
       /**
