@@ -27,8 +27,8 @@ const WATER_CUBE_SIZE = 128;
 const WATER_ENV_INTENSITY = 0.55;
 /** FogExp2 hides 99.5 % of a surface where (density x z)^2 = ln 200; nothing beyond that is worth a reflection. */
 const FOG_HIDDEN = 2.302;
-/** A lake does not swell, but its rings and rain still move the surface a little. */
-const LAKE_REACH = 0.15;
+// A lake's own reach moved to waterLineMath.ts's WATER_LINE_TUNE with the rest of the surface line,
+// when "am I under water" became one answer that World gives and this class is told.
 
 export interface WaterBody {
   /** In world.scene, layer 0, drawn with `lit`. */
@@ -301,10 +301,12 @@ export class WaterBodies {
 
   /**
    * Once a frame, before the scene is drawn: which bodies are worth drawing, whether any water is
-   * really on screen, whether the camera sits inside the swell, and therefore whether the effects'
-   * reflections take the environment term over this frame. Returns `inView`. Allocates nothing.
+   * really on screen, and therefore whether the effects' reflections take the environment term over
+   * this frame. `underwater` is `World.cameraUnderwaterAt`'s conservative answer -- the shared one,
+   * with the swell's reach and its hysteresis in it -- rather than a height test of this class's own.
+   * Returns `inView`. Allocates nothing.
    */
-  beginFrame(camera: THREE.PerspectiveCamera, surface: number, onSea: boolean, fogDensity: number, wanted: boolean): boolean {
+  beginFrame(camera: THREE.PerspectiveCamera, underwater: boolean, fogDensity: number, wanted: boolean): boolean {
     this.visibility.poll();
     tmpM.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
     frustum.setFromProjectionMatrix(tmpM);
@@ -319,10 +321,9 @@ export class WaterBodies {
     if (!any) this.visibility.invalidate();
     this.inFrustum = any;
     this.inView = any && this.visibility.state !== 'hidden';
-    // Within the swell's reach of the surface a crest can pass over the camera: no reflections
-    // there, with 20 cm of hysteresis so the picture does not flicker as one does.
-    const margin = (onSea ? this.nearSwell : LAKE_REACH) + 0.1 + (this.underwater ? 0.2 : 0);
-    this.underwater = camera.position.y < surface + margin;
+    // Told, not worked out: within the swell's reach of the surface a crest can pass over the
+    // camera, and there are no reflections there.
+    this.underwater = underwater;
     this.wanted = wanted;
     this.active = wanted && this.inView && !this.underwater;
     setWaterEnvSpecular(this.active ? 0 : 1);

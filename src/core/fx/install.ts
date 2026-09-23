@@ -14,10 +14,12 @@ import { installHeatHaze } from './heat';
 import type { HeatSources } from '../../world/heatSources';
 import { LensFlarePass } from './lensFlare';
 import { LightShaftsPass } from './lightShafts';
+import { UnderwaterPass } from './underwater';
 import { DepthOfFieldPass } from './dof';
 import { DofGlowProduct, type DofGlowCollector } from './dofGlow';
 import { VelocityProduct, type FxMoverList } from './velocity';
 import type { MotionBlurPass } from './motionBlur';
+import type { FxPass } from './pass';
 
 export interface FxInstallDeps {
   /** The water bodies whose mask and reflections the effects draw (`World.waterBodies`). */
@@ -28,6 +30,13 @@ export interface FxInstallDeps {
   collectDofGlows?: DofGlowCollector;
   /** Every object that moves on its own this frame (App.collectMovers). Without it there is no object blur. */
   collectMovers?: (out: FxMoverList) => void;
+  /**
+   * Makes the pass that draws the specks drifting in the water (`UnderwaterSpecksPass`, which is the
+   * game's own geometry and lives under `src/world/`). A factory rather than a pass, because a pass
+   * belongs to one chain: the Effects switch builds a second chain in the background and disposes
+   * the first, which would take a shared pass's geometry and program with it.
+   */
+  specks?: () => FxPass;
 }
 
 export function installEffects(postfx: PostFX, deps: FxInstallDeps = {}): void {
@@ -47,6 +56,14 @@ export function installEffects(postfx: PostFX, deps: FxInstallDeps = {}): void {
   if (deps.heat) installHeatHaze(postfx, deps.heat);
   // The room's air needs nothing from the game here: it reads RoomAir's frame through the frame context.
   postfx.registerPass(new LightShaftsPass());
+  // The look under water needs nothing from the game here either: it reads whether the camera is
+  // under a surface, how deep, and which body's colour and opacity from the frame context, and asks
+  // for no product. It draws on no frame the camera is dry. Where it sits in the chain is the
+  // registry's (FX_PASSES), not this line's.
+  postfx.registerPass(new UnderwaterPass());
+  // The specks drifting in that water, when the game hands over a way to make them. They are drawn
+  // after the lens rather than here, which is the registry's business and not this line's.
+  if (deps.specks) postfx.registerPass(deps.specks());
   // The depth of field when aiming, with the glows' own depth when the game lists them.
   const dofGlow = deps.collectDofGlows ? new DofGlowProduct(postfx, deps.collectDofGlows) : null;
   if (dofGlow) postfx.registerProduct(dofGlow);

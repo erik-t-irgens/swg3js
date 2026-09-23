@@ -58,8 +58,44 @@ export interface FxFrameInput {
   clouds: readonly FxCloudLayer[];
   /** Sheets listed this frame (0..4). */
   cloudCount: number;
-  /** The camera is under a water surface: nothing beyond the water is seen as sky. */
+  /**
+   * The camera *may* have water over it: nothing beyond the water is seen as sky. The conservative
+   * verdict, true throughout the margin band -- over the open sea that is up to a metre and a half
+   * of air over the mean surface, because a crest could be there. What must not be caught wrong
+   * reads this (the lens flare); anything that paints the picture must not.
+   */
   cameraUnderwater: boolean;
+  /**
+   * The camera is really below the surface (`UnderwaterInfo.submerged`, which is `depth > 0`). This
+   * is the fact a look is drawn from: `cameraUnderwater` is true while the eye is plainly in the
+   * air, and painting the screen there would be a bug rather than a safety.
+   */
+  cameraSubmerged: boolean;
+  /**
+   * Metres of water over the camera (0 while it is dry, and 0 right at the surface line, so nothing
+   * this drives pops on). `World.cameraUnderwaterAt`'s depth.
+   */
+  underwaterDepth: number;
+  /**
+   * The colour of the water the camera is under, in the renderer's working space: the water body's
+   * own converted colour, the very colour its material wears. A reference to the world's kept
+   * record, never a new object; nothing in the chain may write it.
+   */
+  underwaterColor: THREE.Color;
+  /**
+   * That water's own opacity, as the converter read it from the client's own water texture: the one
+   * per-body signal there is of how thick the water is, so a silty pond and open sea are not seen
+   * exactly as far through. `UnderwaterInfo.opacity`; 0.75 is the record's own resting value.
+   */
+  underwaterOpacity: number;
+  /**
+   * How far a crest can lift the surface over the camera, metres (`UnderwaterInfo.reach`): the sea's
+   * own measured swell where the surface is the sea, a lake's fixed reach otherwise, 0 where there
+   * is no water. The surface the CPU knows is flat and the one drawn is displaced by up to this, and
+   * nothing this side knows which way: anything that must not be drawn in the air keeps this clear
+   * of the line.
+   */
+  underwaterReach: number;
   /** The lit blades this frame, world space: the game's kept list, refilled in drawFrame. */
   blades: FxBladeList;
   /** The frame's lights, both passes' sets (src/core/fx/lights.ts): the game's kept record, refilled in drawFrame after the scene is drawn. */
@@ -151,7 +187,18 @@ export interface FxFrameContext {
   /** The cloud sheets drawn this frame; a reference to the input's kept list. */
   clouds: readonly FxCloudLayer[];
   cloudCount: number;
+  /** Water may be over the camera (the margin band included): the safe answer, for what must not be caught wrong. */
   cameraUnderwater: boolean;
+  /** The camera is really below the surface: the answer anything that draws must read. */
+  cameraSubmerged: boolean;
+  /** Metres of water over the camera; 0 dry, and 0 at the surface line itself. */
+  underwaterDepth: number;
+  /** The colour of the water over the camera, working space: this context's own kept Color, copied each frame. */
+  readonly underwaterColor: THREE.Color;
+  /** That water's own opacity, the converter's reading of the client's texture: how thick this body is. */
+  underwaterOpacity: number;
+  /** How far a crest can lift that surface here, metres (`UnderwaterInfo.reach`): 0 where there is no water. */
+  underwaterReach: number;
   /** The room this frame is drawn from inside (`RoomAir.frame`), or null. */
   room: RoomAirFrame | null;
   /** The weather now; zeros when it is off (a kept record). */
@@ -223,6 +270,12 @@ export function createContext(renderer: THREE.WebGLRenderer, settings: FxSetting
     clouds: [],
     cloudCount: 0,
     cameraUnderwater: false,
+    cameraSubmerged: false,
+    underwaterDepth: 0,
+    // The neutral water colour waterLookFor falls back to, until a frame hands the body's own.
+    underwaterColor: new THREE.Color(0x2e7fbb),
+    underwaterOpacity: 0.75,
+    underwaterReach: 0,
     room: null,
     weather: { overcast: 0, rain: 0, snow: 0, dust: 0, wetness: 0 },
     debugViewPass: null,
@@ -303,6 +356,11 @@ export function updateContext(ctx: FxFrameContext, input: FxFrameInput, size: TH
   ctx.clouds = input.clouds;
   ctx.cloudCount = input.cloudCount;
   ctx.cameraUnderwater = input.cameraUnderwater;
+  ctx.cameraSubmerged = input.cameraSubmerged;
+  ctx.underwaterDepth = input.underwaterDepth;
+  ctx.underwaterColor.copy(input.underwaterColor);
+  ctx.underwaterOpacity = input.underwaterOpacity;
+  ctx.underwaterReach = input.underwaterReach;
   ctx.room = input.room;
   const w = input.weather;
   ctx.weather.overcast = w ? w.overcast : 0;

@@ -1,6 +1,8 @@
 // Shader pieces more than one effect wants. One definition each, pasted into whichever shader
 // needs it, so two passes can never disagree about what a depth sample means.
-import { GLSL_OCT_DECODE, GLSL_OCT_ENCODE } from '../glslOct';
+// The extension is on purpose: a node test that reaches this file (the specks' does, for fxViewZ)
+// resolves it as it stands, and an extensionless relative import would stop the suite dead.
+import { GLSL_OCT_DECODE, GLSL_OCT_ENCODE } from '../glslOct.ts';
 
 /**
  * The vertex shader for a full-screen draw. The quad in `pass.ts` is a single triangle that

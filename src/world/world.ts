@@ -16,6 +16,7 @@ import { Splashes, updateWaterDepth, type WaterMaterial } from './water';
 import { addSimBody, stepWaterSim, type SimBody } from './waterSim';
 import { WaterBodies, type WaterBody } from './waterBodies';
 import { envLightFrom, isLavaWater, shaderKey, type WaterLook } from './waterLook';
+import { coveringWaterShader, onSeaSurface, surfaceReach, underwaterVerdict, type WaterLineQuery } from './waterLineMath.ts';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { createLavaMaterial, LAVA_LOOK, lavaGeometry, lavaHeatTable, loadLavaTextures, refreshLavaFar, standInLavaTextures, type LavaMaterial, type LavaTextures } from './lava';
 import { FALLBACK_LAVA_STYLE, groupLava, lavaStyleFor, type LavaStyle } from './lavaStyle';
@@ -123,6 +124,46 @@ const RIPPLE_INTERVAL = 0.12;
  * enough that nothing is held for a world it has left.
  */
 const SIM_BODY_KEEP = 8;
+
+/**
+ * One answer about one point and the water over it (`World.cameraUnderwaterAt`). The caller keeps
+ * the record and hands it back every time, because `under` is read before it is written: that is
+ * where the hysteresis lives, and it is what keeps one asker's verdict steady on its own.
+ */
+export interface UnderwaterInfo {
+  /**
+   * The conservative answer: water may be over the point, a passing crest included. What must not be
+   * caught wrong reads this -- the reflections and the lens flare -- and it is true for up to a metre
+   * and a half over the open sea's mean surface.
+   */
+  under: boolean;
+  /** The strict answer: the point is really below the surface. Anything that paints the picture reads this one. */
+  submerged: boolean;
+  /** Metres of water over the point, 0 when the answer is no and 0 inside the margin band. */
+  depth: number;
+  /** The colour of the water over the point, in the renderer's working space; the water material's own. */
+  readonly color: THREE.Color;
+  /** That water's own opacity, as the converter read it from the client's texture. */
+  opacity: number;
+  /**
+   * How far a crest can lift the surface over the point (`surfaceReach`): the sea's own measured
+   * swell where the surface is the sea, a lake's fixed reach otherwise, 0 where there is no water
+   * over the point at all. The surface above is the flat table height and the one drawn is that
+   * height displaced by up to this, either way, and nothing on this side knows which -- so anything
+   * that must not be drawn in the air (the specks) keeps this much clear of the line.
+   */
+  reach: number;
+  /** The look the colour and the opacity were read from, so nothing re-reads a colour string while the water does not change. */
+  look: WaterLook | null;
+}
+
+/** A record for `World.cameraUnderwaterAt` to fill. Dry, with the neutral colour, until a first answer. */
+export function createUnderwaterInfo(): UnderwaterInfo {
+  return { under: false, submerged: false, depth: 0, color: new THREE.Color(0x2e7fbb), opacity: 0.75, reach: 0, look: null };
+}
+
+/** The one question `World.cameraUnderwaterAt` asks the rule, refilled rather than made, so no call allocates. */
+const waterLineQuery: WaterLineQuery = { y: 0, surface: 0, reach: 0, wasUnder: false, lava: false, dry: false };
 
 /**
  * The footprint a person leaves in the water: two legs and a torso between them, so a wader cuts
@@ -1228,6 +1269,16 @@ export class World {
     this.groundTextures = null;
     this.dropSky();
     this.waterBodies.clear();
+    // The verdict and the looks belong to the world they were read in: a world left under water must
+    // not hand the next one its hysteresis, or its colour.
+    this.cameraWater.under = false;
+    this.cameraWater.submerged = false;
+    this.cameraWater.depth = 0;
+    this.cameraWater.look = null;
+    this.forgetCameraWater();
+    this.waterLooks.clear();
+    this.globalWaterShader = null;
+    this.globalWaterIsLava = false;
     this.waterNear = this.waterFarBody = null;
     for (const m of this.localWater) {
       this.scene.remove(m);
@@ -2071,6 +2122,14 @@ export class World {
   private applySwgWater(swg: SwgTerrain): void {
     const planet = this.planet;
     const bodies = this.waterBodies;
+    // The pack's water.json has landed by now, so anything cached before it is out of date.
+    this.waterLooks.clear();
+    this.cameraWater.look = null;
+    this.forgetCameraWater();
+    this.globalWaterShader = swg.template.useGlobalWaterTable ? shaderKey(swg.template.globalWaterTableShaderTemplateName) || null : null;
+    // The global table gets the lava reading the local ones get below, since nothing else gives it
+    // one: it has no terrain water type of its own, so the pack's entry and then its shader's name.
+    this.globalWaterIsLava = !!this.globalWaterShader && isLavaWater(this.globalWaterShader, 0, bodies.data?.shaders[this.globalWaterShader]);
     if (swg.template.useGlobalWaterTable) {
       const look = bodies.lookFor(shaderKey(swg.template.globalWaterTableShaderTemplateName) || null, planet);
       if (!this.water) this.createGlobalWater(look, swg.template.globalWaterTableHeight);
@@ -3848,6 +3907,12 @@ export class World {
     v.fog = this.scene.fog instanceof THREE.FogExp2 ? this.scene.fog : null;
     v.hull = this.weatherHull;
     v.ridden = this.weatherRidden;
+    // The weather keeps its own bare height test (`cam.y < waterAt(cam)`), and is the one asker that
+    // is *not* given the shared answer. Its particles are scene geometry behind the `weather`
+    // setting and have nothing to do with the Effects switch, so the shared margin -- 1.29 m over
+    // the open sea, where the swell is -- would have stopped the rain while the player stood
+    // waist-deep in the shallows with the whole sky falling round them, and it would have done it
+    // with Effects off, which nothing in this pass may change.
     this.weather.updateView(dt, this.camera, v);
   }
   /** What the weather's first half is told, kept and refilled. */
@@ -4392,13 +4457,126 @@ export class World {
   }
 
   /**
-   * The camera is under a water surface (lakes included): the sky is not seen through it. The water
-   * bodies' own test this frame (beginWaterFrame, with the swell's reach over the sea), or the plain
-   * one of the surface plus 0.3 m, so the flare and the reflections agree and neither shows through a lake.
+   * Whether a point is under a water surface, how deep under it is, and the look of the water over
+   * it. The one answer the reflections, the lens flare and the effects chain read, so nothing on the
+   * screen can disagree about which side of the surface the eye is on. **The weather asks its own
+   * question still**, and deliberately: its particles are scene geometry behind the `weather`
+   * setting, so a margin here would change the game with Effects off, which it may not.
+   *
+   * It is named for the camera because two of its three exclusions are the *player's* state and not
+   * the point's: a building's rooms are the room the player is in (`inside`), and whether the planet
+   * has a sea at all is read off the mesh that follows the camera. Ask it about a creature, a bolt
+   * or a mobile and you get the player's room; that is the rename to do first if anything ever does.
+   *
+   * Three things it is not. A space zone and a building's rooms have no water at all. And lava is
+   * water to the terrain and is water to nothing else: the lava planet's tables are all lava, and
+   * without the guard a flow reads as a lake to sink into (the same guard `footSurfaces.waterTop`
+   * and the ripples already take, and by the same reading -- the highest table covering the point --
+   * with the global table's own shader tested too, which those two do not do).
+   *
+   * Two answers come back, and which one a caller wants matters. `under` carries the water's own
+   * reach, so a crest passing over the eye counts, and 20 cm of hysteresis so the verdict does not
+   * chatter as one does: it is the safe answer for anything that must not reflect a sky it cannot
+   * see. `submerged` is the strict one, true only below the real surface, and is what anything that
+   * paints the picture must read -- the band between them is open air.
+   *
+   * `out` is the caller's record and is read before it is written (`out.under` is the previous
+   * answer, which is where the hysteresis lives), so each asker is steady on its own and asking
+   * twice at one point answers the same twice. Allocates nothing: the look is one kept object per
+   * water shader on the planet.
+   */
+  cameraUnderwaterAt(p: THREE.Vector3, out: UnderwaterInfo): UnderwaterInfo {
+    const swg = this.terrain.swg;
+    const dry = !this.planet || !!this.planet.space || this.inside;
+    const surface = dry ? -Infinity : this.terrain.waterHeightAt(p.x, p.z);
+    const table = dry || !swg ? null : swg.waterTableAt(p.x, p.z);
+    const seaDrawn = !dry && !!this.water?.visible;
+    const onSea = onSeaSurface(surface, this.terrain.waterLevel, seaDrawn);
+    // Is what stands over the point lava? Whichever table the surface belongs to is the one asked:
+    // the highest local table covering it, or -- where none wins and the global sea is the surface --
+    // the global table itself, which on the lava planet is a flow like all the rest of them.
+    const lava = onSea ? this.globalWaterIsLava : !!table && this.lavaTables.size > 0 && this.lavaTables.has(table);
+    const ask = waterLineQuery;
+    ask.y = p.y;
+    ask.surface = surface;
+    // The swell only lifts the sea the player is standing over; a lake's own reach is the rule's.
+    ask.reach = surfaceReach(onSea, this.waterBodies.swell);
+    ask.wasUnder = out.under;
+    ask.lava = lava;
+    ask.dry = dry;
+    underwaterVerdict(ask, out);
+    // The reach the verdict was reached with, carried rather than thrown away: the chain draws
+    // things that must not appear in the air over a trough, and this is the only measure of how far
+    // the drawn surface can stand from the flat one.
+    out.reach = out.under ? ask.reach : 0;
+    if (out.under) {
+      const look = this.waterLookAt(coveringWaterShader(table, lava, surface, this.globalWaterShader));
+      if (out.look !== look) {
+        out.look = look;
+        out.color.set(look.color);
+        out.opacity = look.opacity;
+      }
+    }
+    return out;
+  }
+
+  /** The camera's own answer this frame, refreshed by `beginWaterFrame` before the scene is drawn. */
+  readonly cameraWater: UnderwaterInfo = createUnderwaterInfo();
+  /**
+   * The point `cameraWater` was last worked out for. Every asker in a frame asks about the same
+   * camera, and the answer walks two lists of water tables, so the second and third ask read the
+   * record instead of walking them again. It is cleared wherever the water itself changes (a world
+   * unloaded, a pack landing), and `beginWaterFrame` works it out afresh every drawn frame in any
+   * case, so nothing can be answered from a frame that has been.
+   */
+  private readonly cameraWaterPoint = new THREE.Vector3(NaN, NaN, NaN);
+
+  /** Forget this frame's camera answer: the next ask works it out again. */
+  private forgetCameraWater(): void {
+    this.cameraWaterPoint.set(NaN, NaN, NaN);
+  }
+
+  /**
+   * The camera's record for this point, worked out once however many times it is asked for. Callers
+   * read `under` (conservative: reflections, the flare), `submerged` (strict: anything drawn) and
+   * `depth`.
+   */
+  cameraWaterAt(p: THREE.Vector3): UnderwaterInfo {
+    if (!this.cameraWaterPoint.equals(p)) {
+      this.cameraWaterPoint.copy(p);
+      this.cameraUnderwaterAt(p, this.cameraWater);
+    }
+    return this.cameraWater;
+  }
+
+  /**
+   * The camera is under a water surface (lakes included): the sky is not seen through it. The
+   * conservative answer, which is what the lens flare has always read.
    */
   cameraUnderwater(p: THREE.Vector3): boolean {
-    if (!this.planet || this.planet.space || this.inside) return false;
-    return this.waterBodies.underwater || p.y < this.terrain.waterHeightAt(p.x, p.z) + 0.3;
+    return this.cameraWaterAt(p).under;
+  }
+
+  /** The global water table's shader on this planet, or null; set by applySwgWater, cleared by unload. */
+  private globalWaterShader: string | null = null;
+  /**
+   * The global table itself is lava. `applySwgWater` reads the local tables one by one and skips the
+   * lava ones, but nothing read the global table the same way: on the lava planet the whole sea is a
+   * flow, and without this the eye below it would be taken for swimming. The same reading every
+   * other lava table gets (`isLavaWater`), with no terrain water type of its own to offer.
+   */
+  private globalWaterIsLava = false;
+  /** One look per water shader on this planet, so asking what the water over a point looks like allocates nothing. */
+  private readonly waterLooks = new Map<string, WaterLook>();
+
+  private waterLookAt(shader: string | null): WaterLook {
+    const key = shader ?? '';
+    let look = this.waterLooks.get(key);
+    if (!look) {
+      look = this.waterBodies.lookFor(shader, this.planet);
+      this.waterLooks.set(key, look);
+    }
+    return look;
   }
 
   /**
@@ -4449,11 +4627,12 @@ export class World {
    * The lit water and the reflections pass must agree, so the one decision is taken here.
    */
   beginWaterFrame(camera: THREE.PerspectiveCamera, reflectionsWanted: boolean): void {
-    const dry = !this.planet || !!this.planet.space;
-    const surface = dry ? -Infinity : this.terrain.waterHeightAt(camera.position.x, camera.position.z);
-    const onSea = !dry && !!this.water?.visible && surface === this.terrain.waterLevel;
+    // Worked out here, once, for the whole frame: `drawFrame` asks the same record again for the
+    // flare and for the chain and finds it already filled.
+    this.forgetCameraWater();
+    const under = this.cameraWaterAt(camera.position).under;
     const fog = this.scene.fog instanceof THREE.FogExp2 ? this.scene.fog.density : 0;
-    this.waterBodies.beginFrame(camera, surface, onSea, fog, reflectionsWanted);
+    this.waterBodies.beginFrame(camera, under, fog, reflectionsWanted);
   }
 
   /**

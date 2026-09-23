@@ -57,6 +57,8 @@ import { createCloudLayers, createSkyLights, flareLook, tuneFlareLook } from './
 import { MAX_CLOUD_LAYERS, MAX_FLARE_SOURCES } from './core/fx/flareMath';
 import { SPACE_SKY_TUNE, tuneSpaceSky, type SunRule } from './space/suns';
 import { heatTuning, type HeatProduct } from './core/fx/heat';
+import { tuneUnderwater, type UnderwaterTune } from './core/fx/underwaterMath.ts';
+import type { UnderwaterPass } from './core/fx/underwater';
 import { FIGURE_SPHERE, followDepth, measureLocalSphere, type FxMoverList, type LocalSphere, type VelocityProduct } from './core/fx/velocity';
 import { MOTION_TUNING, MOVER_LIMITS } from './core/fx/velocityMath.ts';
 import type { MotionBlurPass } from './core/fx/motionBlur';
@@ -153,6 +155,7 @@ import { sabers } from './audio/saberSounds.ts';
 import { CLIP_EVENT_TUNE, type ClipEventTune } from './audio/clipEvents.ts';
 import { FAMILY_TUNE } from './world/terrain';
 import { RoomAir, type RoomAirDebugOptions, type RoomAirInput } from './world/roomAir';
+import { UnderwaterSpecksPass, type UnderwaterSpeckDebugOptions } from './world/underwaterSpecks.ts';
 import { configureWaterSim, pokeWaterSim, waterSimDebug, WATER_SIM_DRAFT, WATER_SIM_IMPACT, WATER_SIM_SPEED } from './world/waterSim';
 import { RANGE } from './world/gallery';
 import { castsShadow, surfaces } from './world/surfaces';
@@ -481,7 +484,7 @@ class App {
   /** What the blades' light ceiling reads, kept and refilled each frame; the world and the pool are set in the constructor. */
   private readonly litSources: LitSources = { world: null!, effects: null!, torch: null, eye: new THREE.Vector3() };
   /** What the effects are told about each frame, refilled in drawFrame rather than made again. */
-  private readonly fxInput: FxFrameInput = { camera: null as unknown as THREE.PerspectiveCamera, dt: 1 / 60, sun: null, portalView: false, cameraInHull: false, inside: false, aboard: false, space: false, fog: null, daylight: 1, dayIndex: 0, lighting: null, planetId: '', aiming: false, aimAmount: 0, firstPerson: false, orbitDistance: 0, skyLights: createSkyLights(MAX_FLARE_SOURCES), skyLightCount: 0, clouds: createCloudLayers(MAX_CLOUD_LAYERS), cloudCount: 0, cameraUnderwater: false, waterInView: false, blades: this.fxBlades, lights: this.fxLights, room: null, followFar: 0, weather: null };
+  private readonly fxInput: FxFrameInput = { camera: null as unknown as THREE.PerspectiveCamera, dt: 1 / 60, sun: null, portalView: false, cameraInHull: false, inside: false, aboard: false, space: false, fog: null, daylight: 1, dayIndex: 0, lighting: null, planetId: '', aiming: false, aimAmount: 0, firstPerson: false, orbitDistance: 0, skyLights: createSkyLights(MAX_FLARE_SOURCES), skyLightCount: 0, clouds: createCloudLayers(MAX_CLOUD_LAYERS), cloudCount: 0, cameraUnderwater: false, cameraSubmerged: false, underwaterDepth: 0, underwaterColor: new THREE.Color(0x2e7fbb), underwaterOpacity: 0.75, underwaterReach: 0, waterInView: false, blades: this.fxBlades, lights: this.fxLights, room: null, followFar: 0, weather: null };
   private readonly fxSun: SunInfo = { dir: new THREE.Vector3(), color: new THREE.Color(), intensity: 0 };
   /** What the debug mask draws: the player and whatever they ride or are aboard. */
   private readonly fxMaskObjects: THREE.Object3D[] = [];
@@ -1393,6 +1396,20 @@ class App {
         const pass = this.postfx?.describe().passes.find((p) => p.id === 'lightShafts') ?? null;
         return { ...d, effects: !!this.postfx, pass };
       },
+      /**
+       * The specks drifting past the eye under water. With no argument, the listing: whether they
+       * are wanted, whether the camera is really under a surface, how many were drawn, where the
+       * ceiling under the swell stands and, when nothing was drawn, why not. With one, the knobs:
+       * `__debug.specks({ count, amount, span, size, drift, sink, swirl, swirlRate, brightness,
+       * tint, lightDepth, nightFloor, near, surfaceFade, fadeSeconds })`. Every number of them is
+       * ours -- the game had no under water at all -- none is saved, and none rebuilds a program.
+       * Nothing about them can be judged from a driven tab: this answers in numbers.
+       */
+      specks: (opts?: UnderwaterSpeckDebugOptions) => {
+        const pass = this.postfx?.pass<UnderwaterSpecksPass>('underwaterSpecks');
+        if (!pass) return 'the effects are off; turn Effects on in the menu';
+        return opts ? pass.debug(opts) : pass.describe();
+      },
       passes: () => this.portals.passes,
       /** The effects chain: every pass with its setting, whether it drew, why not, and what it cost. `postfx({ godRays: false })` forces one off, `{ godRays: null }` gives it back to the settings. */
       postfx: (changes?: Partial<Record<FxPassId, boolean | null>>) => {
@@ -1771,6 +1788,32 @@ class App {
           sources,
           product: product ? product.describe() : null,
           why: !product || !row ? 'the heat haze is not installed on this chain' : row.drewLastFrame ? null : (row.why ?? null),
+        };
+      },
+      /**
+       * The look under water: what the pass was given the last time it drew, what that came to, and
+       * why it did not draw, with console tuning (`sight`, `tint`, `minLength`, `bodyMurk`,
+       * `bodyMurkRef`, `murkLight`, `nightFloor`, `lightDepth`, `deepFloor`, `veilMax`, `veilDepth`,
+       * `surfaceEase`, `ceiling`, `shimmerUv`, `shimmerCells`, `shimmerRate`, `shimmerNear`,
+       * `shimmerFar`, `shimmerSurface`, `shimmerDeep`). Reads stored values only. There was no under
+       * water in the game, so every one of these numbers is ours.
+       */
+      underwater: (tune?: Partial<UnderwaterTune>) => {
+        const T = tuneUnderwater(tune);
+        const S = this.settings;
+        const setting = { on: S.underwater, strength: S.underwaterStrength, shimmer: S.underwaterShimmerStrength };
+        const fx = this.postfx;
+        if (!fx) return { effects: false, note: 'the look under water is drawn by the effects chain; turn Effects on', setting, tuning: { ...T } };
+        const pass = fx.pass<UnderwaterPass>('underwater');
+        const row = fx.describe().passes.find((p) => p.id === 'underwater');
+        const water = this.world.cameraWater;
+        return {
+          effects: true,
+          setting,
+          tuning: { ...T },
+          under: { under: water.under, depth: water.depth, opacity: water.opacity },
+          look: pass ? pass.describe() : null,
+          why: !pass || !row ? 'the look under water is not installed on this chain' : row.drewLastFrame ? null : (row.why ?? null),
         };
       },
       /** A plume 5 m ahead of the camera, crossing the view left to right, for `seconds`: the haze without a vehicle or a gun. */
@@ -7281,7 +7324,24 @@ class App {
       // The suns (in space, the stars) the sky drew this frame, its cloud sheets, and whether the camera is under water: the lens flare's sources.
       f.skyLightCount = this.world.skyLights(f.skyLights, flareLook.nightSuns);
       f.cloudCount = this.world.cloudLayers(f.clouds);
-      f.cameraUnderwater = this.world.cameraUnderwater(cam.position);
+      // The camera's own water, worked out once in beginWaterFrame above and read here: the record
+      // is the world's own and is refilled in place, so the colour is a reference, not a copy.
+      // Two verdicts, and which is which matters. `cameraUnderwater` is the safe one -- water may be
+      // over the eye, a passing crest included, which over the sea reaches more than a metre into
+      // the air -- and is what the lens flare has always read. `cameraSubmerged` is the strict one,
+      // and is what the look is drawn from, since the band between them is open air. The rest is how
+      // deep the camera is, what colour the water over it is and how thick that body is (the
+      // converter's own reading of the client's water texture, which is the only thing that tells a
+      // silty pond from open sea).
+      const water = this.world.cameraWaterAt(cam.position);
+      f.cameraUnderwater = water.under;
+      f.cameraSubmerged = water.submerged;
+      f.underwaterDepth = water.depth;
+      f.underwaterColor = water.color;
+      f.underwaterOpacity = water.opacity;
+      // And how far a crest can lift that surface here: the flat height the CPU knows is not where
+      // the sea is drawn, and the specks keep this much clear of the line so none is ever in the air.
+      f.underwaterReach = water.reach;
       // The room this frame is drawn from inside (RoomAir ran above, before the scene): the light shafts' input.
       f.room = this.roomAir.frame;
       // The far side of what the camera follows: nothing nearer smears with the camera.
@@ -7391,7 +7451,9 @@ class App {
       if (ridden) out.push(ridden.group);
       return out;
     };
-    installEffects(fx, { water: this.world.waterBodies, heat: this.heat, collectMovers: this.collectMovers, collectDofGlows: this.collectDofGlows });
+    // The specks are made per chain: a pass belongs to one, and switching Effects builds a second in
+    // the background and disposes the first, which would take a shared pass's points with it.
+    installEffects(fx, { water: this.world.waterBodies, heat: this.heat, collectMovers: this.collectMovers, collectDofGlows: this.collectDofGlows, specks: () => new UnderwaterSpecksPass() });
     return fx;
   }
 

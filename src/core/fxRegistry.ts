@@ -34,6 +34,11 @@ export interface FxSettings {
   roomMoteAmount: number;
   godRays: boolean;
   godRayStrength: number;
+  /** Under a water surface: the picture graded by how much water each pixel is seen through, and a shimmer to the view. */
+  underwater: boolean;
+  underwaterStrength: number;
+  /** The shimmer over the view under water, and the specks drifting in it. */
+  underwaterShimmerStrength: number;
   depthOfField: boolean;
   depthOfFieldStrength: number;
   motionBlur: boolean;
@@ -61,8 +66,10 @@ export type FxPassId =
   | 'heatHaze'
   | 'lightShafts'
   | 'godRays'
+  | 'underwater'
   | 'depthOfField'
   | 'motionBlur'
+  | 'underwaterSpecks'
   | 'bloom'
   | 'lensFlare'
   | 'colorGrade'
@@ -161,6 +168,9 @@ export const FX_DEFAULTS: FxSettings = {
   roomMoteAmount: 1,
   godRays: true,
   godRayStrength: 0.6,
+  underwater: true,
+  underwaterStrength: 1,
+  underwaterShimmerStrength: 1,
   depthOfField: true,
   depthOfFieldStrength: 1,
   motionBlur: true,
@@ -205,6 +215,9 @@ export const FX_KNOBS: readonly FxKnobDef[] = [
   { key: 'roomMoteAmount', pass: null, label: 'Dust mote amount', kind: 'range', min: 0.25, max: 2, step: 0.05, format: (v) => `${Math.round(v * 1500)}`, requires: ['roomMotes'], hint: 'How many motes hang in the air around you.' },
   { key: 'godRays', pass: 'godRays', label: 'God rays', kind: 'toggle', requires: ['effects'], hint: 'Sunlight scattered towards you where the sky shows between trees, walls and hulls.' },
   { key: 'godRayStrength', pass: 'godRays', label: 'God ray strength', kind: 'range', min: 0.1, max: 1.5, step: 0.05, format: two, requires: ['effects', 'godRays'], hint: '0.3 a hint, 0.6 a morning, 1.2 a blaze.' },
+  { key: 'underwater', pass: 'underwater', label: 'Underwater look', kind: 'toggle', requires: ['effects'], hint: 'Under a lake or the sea the picture takes the water\'s own colour, thicker the further off a thing is, and darker the deeper you go; the view shimmers a little and specks drift past. Off, being under water looks exactly as it did before.' },
+  { key: 'underwaterStrength', pass: 'underwater', label: 'Underwater strength', kind: 'range', min: 0, max: 2, step: 0.05, format: two, requires: ['effects', 'underwater'], hint: '0.5 clear water you can see a long way through, 1 a lake, 2 half as far again as murky. 0 leaves the colour alone and keeps the shimmer.' },
+  { key: 'underwaterShimmerStrength', pass: 'underwater', label: 'Underwater shimmer', kind: 'range', min: 0, max: 2, step: 0.05, format: two, requires: ['effects', 'underwater'], hint: 'The view wavering as the light bends through the ripples overhead, strongest close to you, and the specks drifting past to show you are moving. 0 turns both off without losing the colour.' },
   { key: 'depthOfField', pass: 'depthOfField', label: 'Depth of field when aiming', kind: 'toggle', requires: ['effects'], hint: 'Aiming a gun brings what the crosshair is on into focus and softens what lies nearer and farther; your own character and your shots stay sharp. Wheel in close on the face in the wardrobe and the doll softens a little behind it too.' },
   { key: 'depthOfFieldStrength', pass: 'depthOfField', label: 'Depth of field strength', kind: 'range', min: 0, max: 2, step: 0.05, format: two, requires: ['effects', 'depthOfField'], hint: '0.5 a hint, 1 a camera lens, 2 a long lens. 0 turns the blur off without turning the setting off.' },
   { key: 'motionBlur', pass: 'motionBlur', label: 'Motion blur', kind: 'toggle', requires: ['effects'], hint: 'What the camera moves past smears along its movement: the ground under a ship at speed, a wall in a turn; what moves with you stays sharp.' },
@@ -235,8 +248,10 @@ export const FX_PASSES: readonly FxPassDef[] = [
   { id: 'heatHaze', stage: 'scene', toggles: ['heatHaze'], required: false, needs: ['heat', 'linearDepthHalf'], budgetMs: 0.16, typical: false, canBeLast: false, live: true, why: 'Displaces what the surfaces look like, so it follows every surface pass; before the atmosphere and the lens, since the air and the glass sit between the heat and the eye.' },
   { id: 'lightShafts', stage: 'scene', toggles: ['lightShafts'], required: false, needs: ['linearDepthHalf', 'normalsHalf'], budgetMs: 0.3, typical: false, canBeLast: false, live: true, why: 'Daylight scattered in the air of the room the camera is in, from its doorways, the sunlit patch where it lands, and the glow around the room\'s lamps. Evaluated per pixel along the view ray and stopped by the scene depth, which scene meshes cannot read. Atmosphere: after the surface passes (SSAO has darkened the corners the patch lands among), before god rays, depth of field, motion blur and bloom, so the beams defocus, smear and bloom with the room.' },
   { id: 'godRays', stage: 'scene', toggles: ['godRays'], required: false, needs: ['linearDepthHalf'], budgetMs: 0.25, typical: true, canBeLast: false, live: true, why: 'Scattered sunlight. Before depth of field, since rays are far light that should soften with the far background they overlay, and before the blur and the bloom so they smear and spill like the sun.' },
+  { id: 'underwater', stage: 'scene', toggles: ['underwater'], required: false, needs: [], budgetMs: 0.12, typical: false, canBeLast: false, live: true, why: 'What the water between the eye and each pixel does to it, and the shimmer of the light bending through the ripples overhead. After the god rays, so scattered sunlight is graded by the water it comes through like anything else; before the lens, so the aperture and the shutter soften and smear what the water has already done. It reads the full-resolution scene depth itself and asks for no product, and it draws on no frame the camera is dry.' },
   { id: 'depthOfField', stage: 'lens', toggles: ['depthOfField'], required: false, needs: ['linearDepthHalf', 'dofGlow'], budgetMs: 0.35, typical: false, canBeLast: false, live: true, why: 'The aperture needs colour and depth aligned, so it comes before motion blur; before bloom so a defocused highlight blooms as a disc.' },
   { id: 'motionBlur', stage: 'lens', toggles: ['motionBlur'], required: false, needs: ['velocity'], budgetMs: 0.25, cpuBudgetMs: 0.2, typical: true, canBeLast: false, live: true, why: 'The shutter after the aperture, and before bloom: bloom first would smear the halo around a near engine glow by the depth of the ground behind it.' },
+  { id: 'underwaterSpecks', stage: 'lens', toggles: ['underwater'], required: false, needs: [], budgetMs: 0.06, typical: false, canBeLast: false, live: true, why: 'The specks drifting in the water, added to the picture rather than seen through it, so they are drawn rather than sampled: the pass puts its own points straight into the buffer and tests the scene depth in its own fragment program. After the underwater look, whose grading reads the scene depth and would take the *background\'s* transmittance off every speck, leaving open water with almost none; after the aperture and the shutter, which would soften and smear each one by the depth and the movement of whatever lies behind it, and in open water, where the depth is the far plane, would turn every speck into a disc the moment the player aimed. Before bloom and the grade, so they spill and are graded with the picture. It asks for no product and draws on no frame the camera is not really under a surface.' },
   { id: 'bloom', stage: 'lens', toggles: ['bloom'], required: false, needs: [], budgetMs: 0.35, typical: true, canBeLast: false, live: true, why: 'Bright light scattering in the eye, so it needs the high range and must come before tone mapping, and after everything that adds or moves light so all of it spills. It composites in place.' },
   { id: 'lensFlare', stage: 'lens', toggles: ['lensFlare'], required: false, needs: [], budgetMs: 0.12, typical: true, canBeLast: false, live: true, why: 'Glare and ghosts are reflections inside the lens of the brightest sources. After bloom, so the flare is not thresholded and bloomed again and its ceiling sees the bloom it must not stack on; after the motion blur and depth of field, so it is neither smeared nor defocused; before grade and tone mapping, so it is graded and mapped with the picture.' },
   { id: 'colorGrade', stage: 'lens', toggles: ['colorGrade'], required: false, needs: [], budgetMs: 0.04, typical: true, canBeLast: false, live: true, why: 'Each planet’s white balance, tint, saturation and contrast in the linear high range, just before the tone curve, so the highlights roll off after grading rather than clipping.' },

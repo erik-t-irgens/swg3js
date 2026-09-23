@@ -927,6 +927,9 @@ export class Weather {
 
     // Where the effect plays: not aboard, not underground in a building, not under water, and
     // fading out high above the ground.
+    // Its own height test, and deliberately not the shared one the reflections and the chain read:
+    // that one carries the swell's reach, which over the open sea is more than a metre of air, and
+    // the rain must not stop while the eye is plainly out of the water. It runs with Effects off.
     this.underwater = cam.y < ctx.waterAt(cam.x, cam.z);
     const ground = ctx.groundAt(cam.x, cam.z);
     const want = ctx.aboard || (ctx.inside && ctx.underground) || this.underwater ? 0 : ground === null ? 1 : 1 - smoothstep(HIGH_FROM, HIGH_TO, cam.y - ground);
