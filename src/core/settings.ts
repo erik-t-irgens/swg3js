@@ -36,6 +36,17 @@ export interface Settings extends FxSettings {
   mobileCap: number;
   /** Metres past which a creature or NPC holds its pose until it comes nearer. */
   mobileAnimRange: number;
+  // Interactive water: a height field forced by an overhead render of whatever is in the water,
+  // so a ripple takes the shape of the thing that made it. Scene content, not an effect: it works
+  // with the effects off, and its cost does not depend on how much water is on screen.
+  waterRipples: boolean;
+  /** Grid a side: 256, 512, 768 or 1024. Reach grows with it, so the texel shrinks either way. */
+  waterRippleDetail: number;
+  /** How tall ripples stand, 1 the tuned height. */
+  waterRippleHeight: number;
+  /** How long they linger, 0 a dead pond to 1 a bathtub. */
+  waterRipplePersistence: number;
+
   // The weather: scene content, not an effect, so these work with the effects off.
   /** Rain, dust storms and snow as the planet's environment rows have them. */
   weather: boolean;
@@ -128,6 +139,10 @@ export const DEFAULT_SETTINGS: Settings = {
   farRadius: 6,
   mobileCap: 40,
   mobileAnimRange: 160,
+  waterRipples: true,
+  waterRippleDetail: 512,
+  waterRippleHeight: 1,
+  waterRipplePersistence: 0.85,
   weather: true,
   weatherDensity: 1,
   rainOpacity: 0.55,

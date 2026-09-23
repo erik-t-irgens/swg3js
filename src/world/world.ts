@@ -12,7 +12,8 @@ import { DayCycle } from './daycycle';
 import { SwgSky, type SkyLighting } from './sky';
 import { Weather, type WeatherViewContext, type WeatherWorldContext } from './weather';
 import { WEATHER_UNIFORMS, WET_WRAP, wetWrap } from './wetness';
-import { emitRipple, Splashes, updateWaterDepth, type WaterMaterial } from './water';
+import { Splashes, updateWaterDepth, type WaterMaterial } from './water';
+import { addSimBody, stepWaterSim, type SimBody } from './waterSim';
 import { WaterBodies, type WaterBody } from './waterBodies';
 import { envLightFrom, isLavaWater, shaderKey, type WaterLook } from './waterLook';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
@@ -113,6 +114,41 @@ const INTERIOR_AMBIENT_SCALE = 1.2;
 const INTERIOR_AMBIENT_FLOOR = 0.18;
 /** Seconds between ripple passes: dense enough that a swimmer's rings overlap into a wake. */
 const RIPPLE_INTERVAL = 0.12;
+
+/**
+ * The footprint a person leaves in the water: two legs and a torso between them, so a wader cuts
+ * two lines rather than pushing a disc. Built once and shared, since every wader is the same
+ * shape at this scale; a mount or a droid that wants its own outline can pass its real geometry.
+ */
+function buildWaderProxy(): THREE.BufferGeometry {
+  const parts: THREE.BufferGeometry[] = [];
+  const leg = new THREE.CylinderGeometry(0.15, 0.12, 1.6, 8);
+  const left = leg.clone(); left.translate(-0.19, 0.8, 0); parts.push(left);
+  const right = leg.clone(); right.translate(0.19, 0.8, 0); parts.push(right);
+  const torso = new THREE.CylinderGeometry(0.3, 0.26, 1.1, 10);
+  torso.translate(0, 2.15, 0); parts.push(torso);
+  leg.dispose();
+
+  let count = 0;
+  const flat = parts.map((g) => {
+    const n = g.index ? g.toNonIndexed() : g;
+    count += n.attributes.position.count;
+    return n;
+  });
+  const pos = new Float32Array(count * 3);
+  let off = 0;
+  for (const g of flat) {
+    pos.set(g.attributes.position.array as Float32Array, off * 3);
+    off += g.attributes.position.count;
+    g.dispose();
+  }
+  const out = new THREE.BufferGeometry();
+  out.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  // The proxy stands with its feet at the origin, so it is placed at the wader's own position and
+  // sinks from there; the splat only cares how far below the surface each triangle reaches.
+  out.translate(0, -1.6, 0);
+  return out;
+}
 const FOG_SCALE = 0.18;
 /** Physics colliders only exist this many chunks out; nothing dynamic lives farther away. */
 const PHYSICS_RADIUS = 3;
@@ -440,6 +476,13 @@ export class World {
   private rippleClock = 0;
   /** Where each mover was at the last ripple pass, for its velocity through the water. */
   private readonly lastSeen = new WeakMap<object, THREE.Vector3>();
+  /** One body in the water's height field per thing that wades, swims or floats. */
+  private readonly simBodies = new Map<object, SimBody>();
+  /** Bodies touched this frame; the rest are switched off so they cost nothing. */
+  private readonly simSeen = new Set<object>();
+  /** A hull box per vehicle spec, shared by every vehicle of that kind. */
+  private readonly hullProxies = new Map<string, THREE.BufferGeometry>();
+  private waderProxy: THREE.BufferGeometry | null = null;
   private readonly splashes = new Splashes();
   private readonly dust = new Dust();
   private dustDue = 0;
@@ -1706,18 +1749,20 @@ export class World {
   }
 
   /**
-   * Rings, wakes and splashes from whatever wades or swims: the player, everything alive (the
-   * creatures and the fighters both) and the speeders. Each mover's velocity through the water
-   * shapes its wake and throws spray when fast.
+   * A person's legs, a hull's keel line: the shape that goes into the water is the shape the
+   * ripple takes. Each wader and every floating vehicle keeps a proxy in the height field
+   * waterSim.ts steps, moved here every frame so a wake is continuous rather than a row of rings.
+   * Spray stays on its own slower clock, since particles do not need the frame rate.
    */
   private emitRipples(dt: number, playerPos: THREE.Vector3): void {
     this.splashes.update(dt, (x, z) => this.terrain.waterHeightAt(x, z));
     if (!this.waterMaterials.length) return;
     this.rippleClock += dt;
-    if (this.rippleClock < RIPPLE_INTERVAL) return;
-    const interval = this.rippleClock;
-    this.rippleClock = 0;
-    const touch = (key: object, p: THREE.Vector3, strength: number) => {
+    const spray = this.rippleClock >= RIPPLE_INTERVAL;
+    if (spray) this.rippleClock = 0;
+    this.simSeen.clear();
+
+    const touch = (key: object, p: THREE.Vector3, geo: THREE.BufferGeometry, draft: number, q: THREE.Quaternion | null, strength: number) => {
       // Lava takes no rings and throws no spray.
       if (this.lavaTables.size && this.lavaTables.has(this.terrain.swg?.waterTableAt(p.x, p.z) as SwgWaterTable)) return;
       const surface = this.terrain.waterHeightAt(p.x, p.z);
@@ -1728,39 +1773,58 @@ export class World {
         this.lastSeen.set(key, last);
       }
       const known = !Number.isNaN(last.x);
-      const vx = known ? (p.x - last.x) / interval : 0;
-      const vz = known ? (p.z - last.z) / interval : 0;
+      const vx = known && dt > 0 ? (p.x - last.x) / dt : 0;
+      const vz = known && dt > 0 ? (p.z - last.z) / dt : 0;
+      const vy = known && dt > 0 ? (last.y - p.y) / dt : 0;
       last.copy(p);
       if (depth < -0.3 || depth > 2.5) return;
-      const speed = Math.hypot(vx, vz);
-      // Standing still barely stirs the water; moving through it leaves a wake.
-      if (speed < 0.15) {
-        if (Math.random() < 0.25) emitRipple(p.x, p.z, strength * 0.25, this.waterTime);
-        return;
+
+      let body = this.simBodies.get(key);
+      if (!body) {
+        body = addSimBody(geo, draft);
+        this.simBodies.set(key, body);
       }
-      emitRipple(p.x, p.z, strength * Math.min(1, 0.4 + speed / 4), this.waterTime, vx, vz);
+      body.active = true;
+      body.draft = draft;
+      body.object.position.copy(p);
+      if (q) body.object.quaternion.copy(q);
+      // Only a real arrival punches a crater; a wader bobbing does not.
+      body.velDown = Math.max(0, Math.min((vy - 1.5) / 12, 1)) * strength;
+      this.simSeen.add(key);
+
       // Spray past a brisk walk, more the faster the mover and the shallower it sits.
-      if (speed > 1.6 && depth < 1.6) this.splashes.spawn(p.x, surface, p.z, Math.round(1 + Math.min(speed, 8) * 0.9 * strength), vx, vz);
-    };
-    touch(this, playerPos, 1);
-    // Everything alive that wades or swims, whatever kind of body it is; the player's own ring
-    // was drawn above, so its entry in the list is passed over.
-    for (const t of this.targets()) if (!t.dead && t !== this.playerTarget) touch(t, t.pos, 0.9);
-    // A vehicle stirs the water from its bow and its stern, harder the bigger it is, each point
-    // wandering a little so the rings overlap unevenly rather than as one neat wake.
-    for (const v of this.vehicles) {
-      // Only one riding on the water (a machine floats above it, so its underside is no guide):
-      // the touch points sit just under the surface, a flyer overhead stirs nothing.
-      if (!v.onWater) continue;
-      const strength = 1.6 + v.radius * 0.5;
-      v.quaternion(tmpQ);
-      const reach = Math.max(0.5, v.radius * 0.6);
-      for (const [key, along] of [[v, reach], [v.seat, -reach]] as const) {
-        tmpV.set((Math.random() - 0.5) * v.radius * 0.6, 0, along + (Math.random() - 0.5) * 0.4).applyQuaternion(tmpQ).add(v.pos);
-        tmpV.y = this.terrain.waterHeightAt(tmpV.x, tmpV.z) - 0.3;
-        touch(key, tmpV, strength * (0.8 + Math.random() * 0.4));
+      const speed = Math.hypot(vx, vz);
+      if (spray && speed > 1.6 && depth < 1.6) {
+        this.splashes.spawn(p.x, surface, p.z, Math.round(1 + Math.min(speed, 8) * 0.9 * strength), vx, vz);
       }
+    };
+
+    const wader = (this.waderProxy ??= buildWaderProxy());
+    touch(this, playerPos, wader, 1.1, null, 1);
+    for (const t of this.targets()) if (!t.dead && t !== this.playerTarget) touch(t, t.pos, wader, 1.0, null, 0.9);
+
+    // A hull displaces along its whole length, so the proxy is the vehicle's own box, turned with
+    // it: the wake comes off the real beam and draught instead of two points near the middle.
+    for (const v of this.vehicles) {
+      if (!v.onWater) continue;
+      const b = v.spec.bounds;
+      let geo = this.hullProxies.get(v.spec.id);
+      if (!geo) {
+        geo = new THREE.BoxGeometry(
+          Math.max(0.3, b.max[0] - b.min[0]),
+          Math.max(0.3, b.max[1] - b.min[1]),
+          Math.max(0.3, b.max[2] - b.min[2]),
+        );
+        geo.translate((b.min[0] + b.max[0]) / 2, (b.min[1] + b.max[1]) / 2, (b.min[2] + b.max[2]) / 2);
+        this.hullProxies.set(v.spec.id, geo);
+      }
+      v.quaternion(tmpQ);
+      tmpV.copy(v.pos);
+      touch(v, tmpV, geo, Math.max(0.5, v.radius * 0.7), tmpQ, 1.4 + v.radius * 0.3);
     }
+
+    // Anything not touched this frame has left the water, so it stops being drawn into the field.
+    for (const [key, body] of this.simBodies) if (!this.simSeen.has(key)) body.active = false;
   }
 
   /**
@@ -3657,6 +3721,11 @@ export class World {
     // Modulo the shader's own loop, whose flow × loopTime is whole: the noise wraps without a seam.
     for (const m of this.lavaMaterials) m.uniforms.uFlowTime.value = this.waterTime % m.userData.loopTime;
     this.emitRipples(dt, playerPos);
+    // The field is stepped after its bodies have moved and before anything is drawn, so the water
+    // shader reads the surface those bodies just made.
+    if (this.renderer && this.camera && this.waterMaterials.length) {
+      stepWaterSim(this.renderer, this.camera.position.x, this.camera.position.z, this.terrain.waterHeightAt(this.camera.position.x, this.camera.position.z), dt);
+    }
     this.emitDust(dt);
     if (this.waterMaterials.length) updateWaterDepth(playerPos.x, playerPos.z, (x, z) => this.terrain.heightIfCached(x, z, FAR_TILE, FAR_RES));
     if (this.water) {

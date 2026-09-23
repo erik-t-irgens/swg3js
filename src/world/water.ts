@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import type { WaterLook } from './waterLook';
 import { GLSL_OCT_ENCODE } from '../core/glslOct';
 import { RAIN_RINGS_GLSL, WEATHER_PARS_GLSL, WEATHER_UNIFORMS } from './wetness';
+import { WATER_SIM_ON, WATER_SIM_RELIEF, WATER_SIM_TEX, WATER_SIM_WINDOW } from './waterSim';
 
 /**
  * Water: a physically based surface that reflects the sky's environment map, moved by a
@@ -66,15 +67,9 @@ const WAVE_COUNT = 8;
 /** The detail tile: a Phillips-spectrum height field of this many samples across this many metres. */
 const TILE_N = 256;
 const TILE_SIZE = 28;
-/** Rings spreading from things that touch the water: shared by every water material. */
-const MAX_RIPPLES = 32;
-const RIPPLE_LIFE = 3.0;
-/** Per ring: x, z, start time, strength; then direction x, z, speed, spare. */
-const ringData = new Float32Array(MAX_RIPPLES * 4).fill(-1000);
-const ringMotion = new Float32Array(MAX_RIPPLES * 4);
-const RINGS = { value: ringData };
-const RING_MOTION = { value: ringMotion };
-let nextRing = 0;
+// Rings and wakes no longer live in a uniform array. They are a height field stepped on the GPU
+// in waterSim.ts, forced by an overhead render of everything in the water, so a ripple takes the
+// shape of whatever made it.
 
 /**
  * Depth under the water: a moving window of ground heights around the player, from terrain
@@ -127,21 +122,6 @@ export function updateWaterDepth(centerX: number, centerZ: number, heightAt: (x:
     if (h !== null) depthHeights[k] = h;
   }
   depthTexture.needsUpdate = true;
-}
-
-/** Start a ring at a world position moving with a velocity; `strength` scales its height (1 for a person wading). */
-export function emitRipple(x: number, z: number, strength: number, time: number, vx = 0, vz = 0): void {
-  const o = nextRing * 4;
-  ringData[o] = x;
-  ringData[o + 1] = z;
-  ringData[o + 2] = time;
-  ringData[o + 3] = strength;
-  const speed = Math.hypot(vx, vz);
-  ringMotion[o] = speed > 1e-3 ? vx / speed : 0;
-  ringMotion[o + 1] = speed > 1e-3 ? vz / speed : 0;
-  ringMotion[o + 2] = speed;
-  ringMotion[o + 3] = 0;
-  nextRing = (nextRing + 1) % MAX_RIPPLES;
 }
 
 /** In-place radix-2 complex FFT (inverse when `inverse`), lengths a power of two. */
@@ -302,8 +282,10 @@ const WAVES_GLSL = /* glsl */ `
   uniform float uOmega[${WAVE_COUNT}];
   uniform sampler2D uDetail;
   uniform float uDetailSize;
-  uniform vec4 uRings[${MAX_RIPPLES}];
-  uniform vec4 uRingMotion[${MAX_RIPPLES}];
+  uniform sampler2D uSimTex;
+  uniform vec4 uSimWindow;   // originX, originZ, metres across, metres a texel
+  uniform float uSimRelief;
+  uniform float uSimOn;
   uniform sampler2D uDepthTex;
   uniform vec2 uDepthOrigin;
   uniform float uDepthSize;
@@ -411,24 +393,15 @@ const WAVES_GLSL = /* glsl */ `
     return uWind - n * min(0.0, dot(uWind, n)) * near;
   }
 
-  // Rings and wakes: a damped packet spreading from each source, stronger ahead of a moving one.
-  float ringHeight(vec2 p) {
-    float h = 0.0;
-    for (int i = 0; i < ${MAX_RIPPLES}; i++) {
-      vec4 r = uRings[i];
-      float age = uTime - r.z;
-      if (age < 0.0 || age > ${RIPPLE_LIFE.toFixed(1)}) continue;
-      vec4 m = uRingMotion[i];
-      vec2 d = p - r.xy;
-      float dist = length(d);
-      float front = 0.35 + age * 1.25;
-      float packet = exp(-pow((dist - front) / 0.55, 2.0));
-      float fade = exp(-age * 1.4) * (1.0 - age / ${RIPPLE_LIFE.toFixed(1)});
-      float bow = m.z > 0.3 ? 0.45 + 0.55 * max(0.0, dot(d / max(dist, 1e-3), m.xy)) : 1.0;
-      float amp = r.w * (0.12 + 0.05 * min(m.z, 6.0));
-      h += amp * bow * packet * fade * sin((dist - front) * 11.0) / (1.0 + dist * 0.6);
-    }
-    return h;
+  // Rings and wakes, read from the height field waterSim.ts steps. One fetch carries the ripple
+  // and its slope, because the step wrote the slope out of taps it already had. Outside the
+  // window, and across a band inside its edge, it fades away so the boundary never shows.
+  vec4 simAt(vec2 p) {
+    vec2 uv = vec2((p.x - uSimWindow.x) / uSimWindow.z, 1.0 - (p.y - uSimWindow.y) / uSimWindow.z);
+    vec2 e = min(uv, 1.0 - uv);
+    float fade = clamp(min(e.x, e.y) * 14.0, 0.0, 1.0);
+    if (fade <= 0.0 || uSimOn < 0.5) return vec4(0.0);
+    return texture2D(uSimTex, uv) * fade;
   }
 `;
 
@@ -519,8 +492,10 @@ export function createWaterMaterial(look: WaterLook, waves: boolean, opts: { win
     uFxTraced: WATER_FX_TRACED,
     uWaves: { value: sea.waves },
     uOmega: { value: sea.omega },
-    uRings: RINGS,
-    uRingMotion: RING_MOTION,
+    uSimTex: WATER_SIM_TEX,
+    uSimWindow: WATER_SIM_WINDOW,
+    uSimRelief: WATER_SIM_RELIEF,
+    uSimOn: WATER_SIM_ON,
     // The weather's shared objects: rain rings the surface where it is open to the sky.
     ...WEATHER_UNIFORMS,
   };
@@ -648,8 +623,11 @@ function installWaterHook(mat: WaterMaterial, uniforms: WaterUniforms, variant: 
           vec2 shoreGrad;
           float toShore = min(shoreDistance(vWaterXZ, depth, shoreGrad), depth * 6.0);
           vec2 slope = detailSlope(vWaterXZ, flowAt(shoreGrad, depth)) * (0.35 + 0.65 * detail) * (0.5 + 0.5 * calm);
-          float e = 0.06;
-          slope += vec2(ringHeight(vWaterXZ + vec2(e, 0.0)) - ringHeight(vWaterXZ - vec2(e, 0.0)), ringHeight(vWaterXZ + vec2(0.0, e)) - ringHeight(vWaterXZ - vec2(0.0, e))) / (2.0 * e) * detail;
+          // One fetch where five passes over a thirty-two ring loop used to be. The window's v
+          // runs against world Z, so that half of the slope comes back negated.
+          vec4 sim = simAt(vWaterXZ);
+          float simH = sim.r * uSimRelief;
+          slope += vec2(sim.b, -sim.a) * uSimRelief / uSimWindow.w * detail;
           // Rain rings where the surface is open to the sky (the roof grid's top over a lake is the
           // lake itself, so open water reads as open; under a pier or an overhang it does not ring).
           if (uRain > 0.001) slope += rainRingSlope(vWaterXZ, uWeatherTime, uRain) * 1.2 * detail * (1.0 - weatherShelter(vec3(vWaterXZ.x, vWaterLevel, vWaterXZ.y), vec3(0.0, 1.0, 0.0)).x);
@@ -658,7 +636,7 @@ function installWaterHook(mat: WaterMaterial, uniforms: WaterUniforms, variant: 
           float lap = vnoise(vWaterXZ * 1.7 + vec2(uTime * 0.35, -uTime * 0.22)) * 0.6 + vnoise(vWaterXZ * 6.0 - vec2(uTime * 0.5, uTime * 0.4)) * 0.4;
           float band = 1.0 - smoothstep(0.35, 1.5, toShore);
           float shore = band * mix(1.0, smoothstep(0.35, 0.8, lap), smoothstep(0.0, 1.0, toShore));
-          waterFoam = smoothstep(0.7, 0.98, crest) * 0.35 * calm + clamp(abs(ringHeight(vWaterXZ)) * 2.0, 0.0, 0.15) * detail + shore * 0.3;
+          waterFoam = smoothstep(0.7, 0.98, crest) * 0.35 * calm + clamp(abs(simH) * 2.0, 0.0, 0.15) * detail + shore * 0.3;
         }
         diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.8, 0.86, 0.9), waterFoam);
         diffuseColor.a = mix(diffuseColor.a, 1.0, waterFoam * 0.5);`,
@@ -684,7 +662,7 @@ function installWaterHook(mat: WaterMaterial, uniforms: WaterUniforms, variant: 
       external = fn;
     },
   });
-  mat.customProgramCacheKey = () => `swg-water-3-${variant}-rain-${waves ? 'waves' : 'flat'}-${external ? 'hooked' : 'plain'}`;
+  mat.customProgramCacheKey = () => `swg-water-5-${variant}-rain-${waves ? 'waves' : 'flat'}-${external ? 'hooked' : 'plain'}`;
 }
 
 /**

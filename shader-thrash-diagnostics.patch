@@ -1,0 +1,126 @@
+diff --git a/src/main.ts b/src/main.ts
+index fae8e75..f47da4f 100644
+--- a/src/main.ts
++++ b/src/main.ts
+@@ -153,6 +153,7 @@ import { sabers } from './audio/saberSounds.ts';
+ import { CLIP_EVENT_TUNE, type ClipEventTune } from './audio/clipEvents.ts';
+ import { FAMILY_TUNE } from './world/terrain';
+ import { RoomAir, type RoomAirDebugOptions, type RoomAirInput } from './world/roomAir';
++import { configureWaterSim, pokeWaterSim, waterSimDebug, WATER_SIM_DRAFT, WATER_SIM_IMPACT, WATER_SIM_SPEED } from './world/waterSim';
+ import { RANGE } from './world/gallery';
+ import { castsShadow, surfaces } from './world/surfaces';
+ 
+@@ -298,6 +299,12 @@ class App {
+   private torch!: THREE.SpotLight;
+   private torchOn = false;
+   private lastPrograms = 0;
++  /** Program ids seen last frame. The cache's length only shows the net change; a frame that made
++   *  forty and dropped forty looks like a quiet one, which is exactly the frame worth catching. */
++  private readonly seenPrograms = new Set<number>();
++  /** Every program made since the game started, by cache key, with how often it has been remade.
++   *  A key remade more than once is a thrash: something is asking for a program the cache just let go. */
++  private readonly programHistory = new Map<string, { made: number; name: string }>();
+   private readonly canvas = document.getElementById('game') as HTMLCanvasElement;
+   private readonly ui = document.getElementById('ui') as HTMLElement;
+   private readonly renderer: THREE.WebGLRenderer;
+@@ -613,6 +620,12 @@ class App {
+ 
+   constructor(private readonly physics: Physics) {
+     this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true, powerPreference: 'high-performance', stencil: true });
++    // A shader's error check is read back the first time the program is drawn with, and reading a
++    // program's info log blocks until the driver has finished linking it. That turns every first
++    // use into a stall and throws away the parallel compile the driver was already doing in the
++    // background. Kept on in development, where a broken shader must still say so, and off in a
++    // build, where it costs whole seconds. `__debug.shaders()` reports which way it is set.
++    this.renderer.debug.checkShaderErrors = !!import.meta.env.DEV;
+     // ?lowfx=1 is the cheap preset for this session; otherwise the settings kept in this browser.
+     const lowfx = new URLSearchParams(location.search).get('lowfx') === '1';
+     if (lowfx) Object.assign(this.settings, { renderScale: 0.5, shadows: false, effects: false });
+@@ -739,6 +752,8 @@ class App {
+     // The room's air reads the world, the portal renderer and the player, all assigned above; its
+     // motes join the scene now, hidden, so the loading screen's warm-up compiles them.
+     this.roomAir = new RoomAir(this.scene, this.world, this.portals, this.settings);
++    // The water's height field reads these each step, so the menu's knobs need no apply case.
++    configureWaterSim(this.settings);
+     this.roomAirInput = { dt: 0, camera: this.cam.camera, view: null, cell: null, aboard: null, cameraInHull: false, playerPos: this.player.pos, sun: null, overcast: 0, dust: 0, bufferHeight: 1 };
+     this.litSources.world = this.world;
+     this.litSources.effects = this.effects;
+@@ -1238,6 +1253,44 @@ class App {
+       },
+       cell: () => (this.world.cellState ? { model: this.world.cellState.building.model.def.id, cell: this.world.cellState.cell } : null),
+       /** The room's air (see the README): the room, its doorway beams, its lamps and motes. With options, retunes or switches the debug views first. */
++      /**
++       * Every shader program the renderer holds, and which cache keys have been made more than once.
++       * A key with `made` above 1 is the thing to chase: the cache let its program go and something
++       * asked for it straight back, which is a stall each time round. `shaders({ full: true })` lists
++       * every live program with how many materials share it.
++       */
++      shaders: (opts?: { full?: boolean }) => {
++        const list = (this.renderer.info.programs ?? []) as unknown as { id: number; cacheKey: string; name: string; usedTimes: number }[];
++        const thrash = [...this.programHistory.entries()]
++          .filter(([, v]) => v.made > 1)
++          .sort((a, b) => b[1].made - a[1].made)
++          .slice(0, 20)
++          .map(([key, v]) => ({ made: v.made, name: v.name, key: key.slice(0, 90) }));
++        const out: Record<string, unknown> = {
++          live: list.length,
++          madeEver: this.programHistory.size,
++          checkShaderErrors: this.renderer.debug.checkShaderErrors,
++          parallelCompile: !!this.renderer.getContext().getExtension('KHR_parallel_shader_compile'),
++          thrashing: thrash.length,
++          worst: thrash,
++        };
++        if (opts?.full) out.programs = list.map((p) => ({ name: p.name, used: p.usedTimes, key: p.cacheKey.slice(0, 90) })).sort((a, b) => a.name.localeCompare(b.name));
++        return out;
++      },
++      /**
++       * The water's height field: `ripples()` reports it. `ripples({ speed })` sets the wave speed as
++       * (c·dt/dx)², which is held under 0.5 because the scheme is unstable above it; `draft` is how
++       * hard a hull holds the surface down and `impact` how hard a fast arrival punches. These are
++       * content tuning rather than taste, which is why they are here and not in the menu.
++       * `ripples({ poke: [x, z] })` drops a ring in at a world position.
++       */
++      ripples: (opts?: { speed?: number; draft?: number; impact?: number; poke?: [number, number] }) => {
++        if (opts?.speed !== undefined) WATER_SIM_SPEED.value = Math.min(Math.max(opts.speed, 0.01), 0.49);
++        if (opts?.draft !== undefined) WATER_SIM_DRAFT.value = Math.max(0, opts.draft);
++        if (opts?.impact !== undefined) WATER_SIM_IMPACT.value = Math.max(0, opts.impact);
++        if (opts?.poke) pokeWaterSim(opts.poke[0], opts.poke[1], 0.6, 1.2);
++        return waterSimDebug();
++      },
+       roomAir: (opts?: RoomAirDebugOptions) => {
+         const d = opts ? this.roomAir.debug(opts) : this.roomAir.describe();
+         const pass = this.postfx?.describe().passes.find((p) => p.id === 'lightShafts') ?? null;
+@@ -9254,10 +9307,31 @@ class App {
+       this.drawOverlay(simulate);
+       stats.frameMs = performance.now() - tFrame;
+       // A shader compiled on a live frame is a stall: say which frame, and how many, so the cause can be found.
+-      const programs = this.renderer.info.programs?.length ?? 0;
++      const list = this.renderer.info.programs ?? [];
++      const programs = list.length;
++      // Compare by id: the cache's length hides a frame that made and dropped in equal measure.
++      let made = 0;
++      let firstKey = '';
++      const live = new Set<number>();
++      for (const p of list as unknown as { id: number; cacheKey: string; name: string }[]) {
++        live.add(p.id);
++        if (this.seenPrograms.has(p.id)) continue;
++        made++;
++        if (!firstKey) firstKey = p.name || p.cacheKey.slice(0, 60);
++        const h = this.programHistory.get(p.cacheKey);
++        if (h) h.made++;
++        else this.programHistory.set(p.cacheKey, { made: 1, name: p.name || '?' });
++      }
++      let dropped = 0;
++      for (const id of this.seenPrograms) if (!live.has(id)) dropped++;
++      this.seenPrograms.clear();
++      for (const id of live) this.seenPrograms.add(id);
+       // While the effects are switching over, programs are made on purpose and on frames that are not stalls.
+       // Under the jump's white, the destination's programs are made on purpose (World.readyAround), unseen.
+-      if (programs > this.lastPrograms && this.lastPrograms > 0 && !this.traveling && !this.fxBusy && !this.hyperspace.covered) console.info(`shaders: ${programs - this.lastPrograms} compiled during play (${stats.frameMs.toFixed(0)} ms frame, ${programs} programs in all)`);
++      if (made > 0 && this.lastPrograms > 0 && !this.traveling && !this.fxBusy && !this.hyperspace.covered) {
++        const churn = dropped > 0 ? `, ${dropped} dropped` : '';
++        console.info(`shaders: ${made} compiled during play${churn} (${stats.frameMs.toFixed(0)} ms frame, ${programs} programs in all, first "${firstKey}") — __debug.shaders() for the thrash list`);
++      }
+       this.lastPrograms = programs;
+       stats.rawDt = rawDt;
+       stats.grounded = player.grounded;

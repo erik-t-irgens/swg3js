@@ -124,6 +124,14 @@ export function keyName(code: string): string {
   return KEY_NAMES[code] ?? code;
 }
 
+/** Grid a side; reach grows with it, so the texel shrinks either way. Matches WATER_SIM_DETAIL. */
+const rippleDetail = [
+  { value: 256, label: 'Low (50 cm)' },
+  { value: 512, label: 'Normal (38 cm)' },
+  { value: 768, label: 'High (29 cm)' },
+  { value: 1024, label: 'Ultra (25 cm)' },
+];
+
 const GRAPHICS: { title: string; knobs: readonly Knob[] }[] = [
   {
     title: 'Picture',
@@ -150,6 +158,17 @@ const GRAPHICS: { title: string; knobs: readonly Knob[] }[] = [
     // effect that is not written yet keeps its key but hides its knob.
     title: 'Effects',
     knobs: FX_KNOBS.filter((k) => (k.pass === null || fxPassDef(k.pass).live) && (!k.product || fxProductDef(k.product).live)),
+  },
+  {
+    // Scene content like the weather below: it works with the effects off, and its cost is fixed
+    // per frame rather than per pixel of water on screen.
+    title: 'Water',
+    knobs: [
+      { key: 'waterRipples', label: 'Interactive ripples', kind: 'toggle', requires: [], hint: 'Wading, swimming and boats push the surface about, and the ripple takes the shape of the thing that made it: two lines from a person\'s legs, a bow wave and a wake off a hull. Off, the water keeps its swell, its wind ripples and its shore foam.' },
+      { key: 'waterRippleDetail', label: 'Ripple detail', kind: 'select', options: rippleDetail, requires: ['waterRipples'], hint: 'How fine the surface is worked out, and how far from you it is worked out at all. Finer resolves a footstep; coarser costs less and is hard to tell apart on open water. The cost is the same whether you are looking at a puddle or an ocean.' },
+      { key: 'waterRippleHeight', label: 'Ripple height', kind: 'range', min: 0, max: 2, step: 0.05, format: (v) => `${v.toFixed(2)}×`, requires: ['waterRipples'], hint: '1 is the tuned height. Lower reads as a calm, heavy sea; higher makes every wake and footfall stand out, which is useful for seeing what the water is doing and overdone as a rule.' },
+      { key: 'waterRipplePersistence', label: 'Ripple persistence', kind: 'range', min: 0, max: 1, step: 0.05, format: (v) => `${Math.round(v * 100)}%`, requires: ['waterRipples'], hint: 'How long a ripple lives before the water settles. Low is a shallow, muddy pool that swallows a wake in a moment; high holds a boat\'s wake behind it for a long stretch and lets ripples cross and interfere.' },
+    ],
   },
   {
     // Scene content, not an effect: it works with the effects off, and nothing here recompiles a shader.

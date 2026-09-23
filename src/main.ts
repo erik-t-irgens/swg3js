@@ -153,6 +153,7 @@ import { sabers } from './audio/saberSounds.ts';
 import { CLIP_EVENT_TUNE, type ClipEventTune } from './audio/clipEvents.ts';
 import { FAMILY_TUNE } from './world/terrain';
 import { RoomAir, type RoomAirDebugOptions, type RoomAirInput } from './world/roomAir';
+import { configureWaterSim, pokeWaterSim, waterSimDebug, WATER_SIM_DRAFT, WATER_SIM_IMPACT, WATER_SIM_SPEED } from './world/waterSim';
 import { RANGE } from './world/gallery';
 import { castsShadow, surfaces } from './world/surfaces';
 
@@ -739,6 +740,8 @@ class App {
     // The room's air reads the world, the portal renderer and the player, all assigned above; its
     // motes join the scene now, hidden, so the loading screen's warm-up compiles them.
     this.roomAir = new RoomAir(this.scene, this.world, this.portals, this.settings);
+    // The water's height field reads these each step, so the menu's knobs need no apply case.
+    configureWaterSim(this.settings);
     this.roomAirInput = { dt: 0, camera: this.cam.camera, view: null, cell: null, aboard: null, cameraInHull: false, playerPos: this.player.pos, sun: null, overcast: 0, dust: 0, bufferHeight: 1 };
     this.litSources.world = this.world;
     this.litSources.effects = this.effects;
@@ -1238,6 +1241,20 @@ class App {
       },
       cell: () => (this.world.cellState ? { model: this.world.cellState.building.model.def.id, cell: this.world.cellState.cell } : null),
       /** The room's air (see the README): the room, its doorway beams, its lamps and motes. With options, retunes or switches the debug views first. */
+      /**
+       * The water's height field: `ripples()` reports it. `ripples({ speed })` sets the wave speed as
+       * (c·dt/dx)², which is held under 0.5 because the scheme is unstable above it; `draft` is how
+       * hard a hull holds the surface down and `impact` how hard a fast arrival punches. These are
+       * content tuning rather than taste, which is why they are here and not in the menu.
+       * `ripples({ poke: [x, z] })` drops a ring in at a world position.
+       */
+      ripples: (opts?: { speed?: number; draft?: number; impact?: number; poke?: [number, number] }) => {
+        if (opts?.speed !== undefined) WATER_SIM_SPEED.value = Math.min(Math.max(opts.speed, 0.01), 0.49);
+        if (opts?.draft !== undefined) WATER_SIM_DRAFT.value = Math.max(0, opts.draft);
+        if (opts?.impact !== undefined) WATER_SIM_IMPACT.value = Math.max(0, opts.impact);
+        if (opts?.poke) pokeWaterSim(opts.poke[0], opts.poke[1], 0.6, 1.2);
+        return waterSimDebug();
+      },
       roomAir: (opts?: RoomAirDebugOptions) => {
         const d = opts ? this.roomAir.debug(opts) : this.roomAir.describe();
         const pass = this.postfx?.describe().passes.find((p) => p.id === 'lightShafts') ?? null;
