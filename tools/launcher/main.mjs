@@ -4,9 +4,11 @@
 //   - serves its own page at /launcher/ and opens it in the player's browser;
 //   - remembers the Star Wars Galaxies folder, the Jedi Academy folder and where the converted content
 //     goes, offers Windows' own folder dialog for each, and checks each folder is what it claims;
-//   - converts: asks the converter's `status --json` what is missing and runs exactly that, one step at
-//     a time, asking again after each, until it asks for nothing; with the converter's own last line,
-//     the step's running time, a log on disk and a Stop that leaves nothing a second press cannot resume;
+//   - converts: hands the whole job to the converter's own driver (`tools/swg/convertDrive.mjs`, the
+//     same one `npm run swg -- convert` uses), which asks `status --json` what is missing and runs
+//     exactly that, several steps at once where they do not tread on each other, until it asks for
+//     nothing; with the converter's own last line per step, each step's running time, a log on disk and
+//     a Stop that leaves nothing a second press cannot resume;
 //   - serves the built game at / and the converted content at /assets-private/, and opens the game;
 //   - hosts for friends if asked: the release's own server, with a join word.
 //
@@ -22,7 +24,7 @@ import { networkInterfaces } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { checkJka, checkOut, checkSwg, formatBytes, roomFor } from './checks.mjs';
-import { labelOf, nextStep, planSteps, readStatus, setAside } from './plan.mjs';
+import { labelOf, planSteps, readStatus } from './plan.mjs';
 import { resolveUnder, sendFile } from './serve.mjs';
 
 /** The port the launcher asks for first, and keeps: the game's characters live in the browser's storage for this address, so a port that moved would hide them. Ours. */
@@ -143,6 +145,8 @@ export async function start(ctx) {
     jka: '',
     out: '',
     port: PREFERRED_PORT,
+    /** How many conversion steps may run at once; 0 is the driver's own reckoning of this machine. */
+    jobs: 0,
     host: { word: '', port: RELAY_PORT },
     join: { server: '', word: '' },
     ...(readJson(settingsFile) ?? {}),
@@ -206,6 +210,8 @@ export async function start(ctx) {
   };
 
   // ---- status ------------------------------------------------------------------------------
+  // What the page lists. The drive does not read this: it asks `status` itself, every time round, since
+  // that is the only truth about what is done and a list read once would be a list going stale.
   const status = { ran: null, running: false, error: '', steps: [], lines: [], done: false };
   const runStatus = async () => {
     if (!checks.out?.ok) {
@@ -238,81 +244,108 @@ export async function start(ctx) {
   };
 
   // ---- the conversion drive ----------------------------------------------------------------
+  // The launcher keeps no loop of its own any more. Which steps there are, what order they go in, what
+  // may run beside what, when a file left half written is set aside and when the whole thing is
+  // finished are the converter's own driver's (`tools/swg/convertDrive.mjs`), so the page and
+  // `npm run swg -- convert` follow one set of rules and a change to either reaches both. What is left
+  // here is what only the launcher can give: its own way of starting a child (the exe told which file
+  // to run), its page's view of what is happening, and its Stop. It is answered in events rather than
+  // console lines, so nothing here reads the driver's words.
   let job = null;
+  let stopper = null;
   const drive = async ({ only = null } = {}) => {
     const started = Date.now();
     convertLog = join(logsDir, `convert-${stamp()}.log`);
-    job = { running: true, stopping: false, startedAt: started, done: 0, total: 0, current: null, results: [], stuck: [], outcome: '', log: convertLog, only, child: null };
+    // The steps running just now, by their key. `current` stays what the page has always read (the
+    // one that started first) and `steps` is all of them, so a page built before parallel runs still
+    // shows something true.
+    const live = new Map();
+    job = { running: true, stopping: false, startedAt: started, done: 0, total: 0, current: null, steps: [], results: [], stuck: [], outcome: '', log: convertLog, only };
+    const showLive = () => {
+      job.steps = [...live.values()].sort((a, b) => a.startedAt - b.startedAt);
+      job.current = job.steps[0] ?? null;
+    };
     say(`conversion started ${new Date(started).toLocaleString()}${only ? ` (only ${only})` : ''}; log ${convertLog}`, 'note');
-    const history = new Map();
-    try {
-      for (;;) {
-        if (job.stopping) break;
-        const json = await runStatus();
-        if (!json) {
-          job.outcome = status.error;
+    stopper = new AbortController();
+    const onEvent = (e) => {
+      switch (e.kind) {
+        case 'pass':
+          job.total = job.done + e.steps.length;
+          say(`--- ${e.steps.length} step${e.steps.length === 1 ? '' : 's'} to run, up to ${e.jobs} at once; every step's own output is in ${e.logDir}`, 'note');
+          for (const p of e.problems ?? []) say(`    ${p}`, 'note');
+          break;
+        case 'step-start':
+          live.set(e.key, { label: e.label, args: e.args, reason: e.reason, startedAt: Date.now(), lastLine: '', index: job.done + live.size + 1 });
+          showLive();
+          say(`--- started: ${e.label}`, 'note');
+          if (e.reason) say(`    why: ${e.reason}`, 'note');
+          say(`    runs: swg ${e.args.join(' ')}`, 'note');
+          break;
+        case 'step-line': {
+          const s = live.get(e.key);
+          if (s) s.lastLine = e.line;
+          // With one step running the converter's own line is the line; with several, whose it is has
+          // to be on it, or the log reads as one program contradicting itself.
+          say(live.size > 1 ? `[${e.label}] ${e.line}` : e.line);
           break;
         }
-        // A file a stopped step left half written: status takes it as missing, and the step that writes
-        // it is asked for again, but that step may read the old file before it writes a new one. So it is
-        // set aside (renamed, never deleted) and status asked again, which is what makes Convert resume.
-        const cut = setAside(json.unreadable, folders().out, say);
-        if (cut.failed) {
-          job.outcome = cut.failed;
+        case 'step-end': {
+          live.delete(e.key);
+          showLive();
+          job.results.push({ label: e.label, code: e.code, seconds: e.seconds, stopped: e.status === 'stopped' });
+          if (e.code === 0) job.done++;
+          say(e.code === 0 ? `--- ${e.label} done in ${e.seconds} s` : `--- ${e.label} ${e.status} (exit ${e.code}) after ${e.seconds} s; its own log is ${e.logFile}`, e.code === 0 ? 'note' : 'bad');
           break;
         }
-        if (cut.moved) continue;
-        let steps = status.steps;
-        if (only) steps = steps.filter((s) => s.args[0] === only);
-        const stuck = [];
-        const step = nextStep(steps, history, stuck);
-        job.stuck = stuck.map((s) => ({ label: s.label, reason: s.reason, args: s.args }));
-        const waiting = steps.filter((s) => !s.skip && !history.get(s.key)?.failed && !stuck.includes(s));
-        job.total = job.done + waiting.length;
-        if (!step) {
-          const skipped = steps.filter((s) => s.skip);
-          const failed = job.results.filter((r) => r.code !== 0);
-          if (failed.length) job.outcome = `Finished, but ${failed.length} step${failed.length === 1 ? '' : 's'} failed: ${failed.map((f) => f.label).join(', ')}. The log says why; Convert tries again.`;
-          else if (stuck.length) job.outcome = `Finished what can be done here. ${stuck.length} step${stuck.length === 1 ? ' is' : 's are'} still asked for after running, which running again will not change: ${stuck.map((s) => s.label).join(', ')}.`;
-          else if (skipped.length) job.outcome = `Finished. ${skipped.length} step${skipped.length === 1 ? ' needs' : 's need'} a Jedi Academy folder: ${skipped.map((s) => s.label).join(', ')}.`;
-          else job.outcome = only ? `Finished: nothing more is asked of ${only}.` : 'Everything is converted.';
+        case 'step-skip':
+          say(`--- ${e.label} was not run: ${e.because}`, 'note');
           break;
-        }
-        const t0 = Date.now();
-        job.current = { label: step.label, args: step.args, reason: step.reason, startedAt: t0, lastLine: '', index: job.done + 1 };
-        say(`--- step ${job.done + 1} of ${job.total}: ${step.label}`, 'note');
-        say(`    why: ${step.reason}`, 'note');
-        say(`    runs: swg ${step.args.join(' ')}`, 'note');
-        const run = runChild(cli, step.args, {
-          onLine: (l) => {
-            if (job.current) job.current.lastLine = l;
-            say(l);
-          },
-        });
-        job.child = run.child;
-        const code = await run.done;
-        job.child = null;
-        const seconds = Math.round((Date.now() - t0) / 1000);
-        const prev = history.get(step.key);
-        history.set(step.key, { runs: (prev?.runs ?? 0) + 1, reason: step.reason, failed: code !== 0 && !job.stopping });
-        job.results.push({ label: step.label, args: step.args, code, seconds, stopped: job.stopping });
-        job.current = null;
-        if (job.stopping) {
-          say(`stopped during ${step.label} after ${seconds} s; press Convert to carry on from where status says it is`, 'note');
-          job.outcome = `Stopped during ${step.label}. Press Convert to carry on.`;
+        case 'pass-end':
+          // The page's list of what is left is `status`'s own answer, and the drive asks it again at
+          // the top of every round; without this the list would keep the first round's answer for the
+          // whole conversion while the progress block beside it moved.
+          runStatus();
           break;
-        }
-        say(code === 0 ? `--- ${step.label} done in ${seconds} s` : `--- ${step.label} failed (exit ${code}) after ${seconds} s`, code === 0 ? 'note' : 'bad');
-        job.done++;
+        case 'note':
+          say(e.line, e.level === 'bad' ? 'bad' : 'note');
+          break;
+        default:
+          break;
       }
+    };
+    try {
+      const { runConvert } = await import('../swg/convertDrive.mjs');
+      const f = folders();
+      const summary = await runConvert({
+        cli,
+        out: f.out,
+        swg: f.swg,
+        jka: f.jka,
+        // Whatever the settings hold, straight through: what `--jobs=0` or a word means is the runner's
+        // own `jobsFor`, which the command line and this both hand it to, so the two cannot disagree.
+        jobs: settings.jobs ?? null,
+        only: only ? [only] : null,
+        logsDir,
+        cwd: dataDir,
+        env: { ...process.env, SWG3JS_DATA: dataDir },
+        childCommand: ctx.childCommand,
+        signal: stopper.signal,
+        onEvent,
+      });
+      job.stuck = summary.stuck.map((s) => ({ label: s.label, reason: s.reason, args: s.args ?? [] }));
+      job.outcome = summary.outcome;
+      for (const line of summary.lines.slice(1)) say(line, 'note');
     } catch (err) {
       job.outcome = `The conversion stopped: ${err.message}`;
       say(job.outcome, 'bad');
     } finally {
+      live.clear();
+      showLive();
       job.running = false;
       job.finishedAt = Date.now();
       say(`conversion ended: ${job.outcome}`, 'note');
       convertLog = null;
+      stopper = null;
       runStatus();
     }
   };
@@ -339,7 +372,9 @@ export async function start(ctx) {
   const stopConvert = () => {
     if (!job?.running) return { ok: false, sentence: 'Nothing is running.' };
     job.stopping = true;
-    if (job.child) job.child.kill();
+    // One word to the driver, which owns every child it started: it kills them, keeps what is finished
+    // and says what was not, and Convert carries on from whatever status says is left.
+    if (stopper) stopper.abort();
     return { ok: true, sentence: 'Stopping.' };
   };
 
@@ -393,7 +428,7 @@ export async function start(ctx) {
     settings,
     checks,
     status: { ran: status.ran, running: status.running, error: status.error, done: status.done, steps: status.steps.map((s) => ({ label: s.label, reason: s.reason, skip: s.skip ?? null, command: s.args[0] })), lines: status.lines },
-    job: job && { running: job.running, stopping: job.stopping, startedAt: job.startedAt, finishedAt: job.finishedAt ?? null, done: job.done, total: job.total, current: job.current, results: job.results, stuck: job.stuck, outcome: job.outcome, log: job.log },
+    job: job && { running: job.running, stopping: job.stopping, startedAt: job.startedAt, finishedAt: job.finishedAt ?? null, done: job.done, total: job.total, current: job.current, steps: job.steps, results: job.results, stuck: job.stuck, outcome: job.outcome, log: job.log },
     relay: relay && { running: relay.running, port: relay.port, word: relay.word, startedAt: relay.startedAt, lines: relay.lines.slice(-12), log: relay.log, addresses: lanAddresses().map((a) => `ws://${a}:${relay.port}`) },
     game: { url: gameUrl(port), built: existsSync(join(distDir, 'index.html')) },
     paths: { data: dataDir, app: appDir, logs: logsDir },

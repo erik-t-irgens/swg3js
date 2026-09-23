@@ -1,8 +1,13 @@
-// From what `status --json` asks for to what the launcher runs. The list of conversions is never kept
-// here: `status` is the truth and changes with the converter, so the launcher asks it, runs the first
-// step it can, and asks again, until it asks for nothing. What lives here is only how a step's
-// placeholders become the player's folders, which steps cannot run on this machine, and how to tell a
-// step that keeps being asked for after it has run (so the drive stops instead of looping for ever).
+// From what `status --json` asks for to what is run. The list of conversions is never kept here:
+// `status` is the truth and changes with the converter, so it is asked, what it asks for is run, and it
+// is asked again until it asks for nothing. What lives here is only how a step's placeholders become
+// the player's folders, which steps cannot run on this machine, how to tell a step that keeps being
+// asked for after it has run (so a drive stops instead of looping for ever), and setting aside a file a
+// killed step left half written.
+//
+// It is the launcher's file and the launcher's page reads `planSteps` for its list of steps, but the
+// last three are the converter's driver's too (`tools/swg/convertDrive.mjs`, which `npm run swg --
+// convert` runs): there is one copy of each rule, not two that can disagree.
 
 import { renameSync } from 'node:fs';
 import { resolve, sep } from 'node:path';
@@ -87,12 +92,14 @@ export function planSteps(status, folders) {
 }
 
 /**
- * The next step to run, given what has been run in this drive (`history`: key to `{ runs, reason,
- * failed }`), or null. A step is passed over when it cannot run here, when it failed in this drive, or
- * when it is asked for again for exactly the reasons it was asked for before it last ran: running it
- * again would change nothing, so the drive says so rather than looping. `stuck` collects those.
+ * The steps worth running now, given what has been run in this drive (`history`: key to `{ runs,
+ * reason, failed }`), in the order they were asked for. A step is passed over when it cannot run here,
+ * when it failed in this drive, or when it is asked for again for exactly the reasons it was asked for
+ * before it last ran: running it again would change nothing, so the drive says so rather than looping.
+ * `stuck` collects those.
  */
-export function nextStep(steps, history, stuck = []) {
+export function runnableSteps(steps, history, stuck = []) {
+  const out = [];
   for (const s of steps) {
     if (s.skip) continue;
     const h = history.get(s.key);
@@ -101,9 +108,14 @@ export function nextStep(steps, history, stuck = []) {
       if (!stuck.some((x) => x.key === s.key)) stuck.push(s);
       continue;
     }
-    return s;
+    out.push(s);
   }
-  return null;
+  return out;
+}
+
+/** The first of those, or null: what a drive that runs one step at a time asks for. */
+export function nextStep(steps, history, stuck = []) {
+  return runnableSteps(steps, history, stuck)[0] ?? null;
 }
 
 /**

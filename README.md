@@ -53,7 +53,7 @@ URL options: `?planet=lok` spawns on a specific world, `?class=bounty_hunter` pi
    JKA=C:/Program Files (x86)/Steam/steamapps/common/Jedi Academy/GameData  # Jedi Academy, for the saber and jump animations
    ```
    The converter replaces `@SWG` and `@JKA` on its command line with these, so paths with spaces need no quoting.
-4. Convert the assets into `assets-private/` (git-ignored, never committed) with the command list under **Converting your own SWG install** below, every command with `--retail-only`. `npm run swg -- status assets-private` says what is in place and prints the command for anything missing.
+4. Convert the assets into `assets-private/` (git-ignored, never committed) with `npm run swg -- convert`, which does the whole job in one command; **Converting your own SWG install** below says what it costs and how to run one step on its own.
 5. `npm run dev` and open the printed URL.
 
 ## The launcher
@@ -64,7 +64,7 @@ For a player who does not want Node, git or a command line: one Windows program,
 2. **Run it.** It is not signed, so the first time Windows SmartScreen says "Windows protected your PC". Click **More info**, then **Run anyway**. (If your browser flagged the download, keep it from the browser's download list first.) A console window opens and says what it is doing; the launcher runs for as long as that window is open, and closing it stops everything the launcher started.
 3. It fetches the newest version of the game (about 4 MB) and opens its own page in your browser, at `http://127.0.0.1:47031/launcher/`. With no internet it starts the version it already has.
 4. **Pick your folders**, each with **Choose…** (or paste a path): the Star Wars Galaxies folder that holds the `.tre` archives, Jedi Academy's `GameData` folder (optional: without it there are no saber moves, jumps or saber sounds), and a folder of its own for the converted content, on a disk with about 16 GB free. Each says in a sentence whether it is right.
-5. **Convert.** The launcher asks the converter what is missing and runs exactly that, step by step, until nothing is: it shows which step of how many, what the converter is doing now and how long the step has run, and keeps a log. A first full conversion takes several hours. **Stop** stops it cleanly, and **Convert** later carries on from where it was, since the converter always knows what is left; after an update the page shows whatever the new version asks for.
+5. **Convert.** The launcher hands the job to the converter's own driver — the same one `npm run swg -- convert` runs — which asks what is missing and runs exactly that, several steps at once where they cannot tread on each other, until nothing is: the page shows how many are running of how many, what each one is doing now and how long it has run, and keeps a log. A first full conversion takes a few hours. **Stop** stops it cleanly, and **Convert** later carries on from where it was, since the converter always knows what is left; after an update the page shows whatever the new version asks for.
 6. **Play** opens the game in a new tab. Your characters are kept by your browser for that address, which is why the launcher keeps to the same port.
 7. **Playing together**: to host, set a join word under **Host for friends** and press **Start the server**; the page lists the address a friend on your network types into their own launcher's **A friend's server** field (across the internet, forward the port on your router and give them your public address). A friend then presses **Play** as usual. The first time the server starts, Windows Defender Firewall asks whether `swg3js.exe` may communicate on networks: tick **Private networks** (your home network) and press **Allow access**. If you press Cancel, or the network you are on is marked Public and you ticked only Private, a friend's launcher cannot reach you and nothing on the page says why; to change it later, open **Windows Security**, **Firewall & network protection**, **Allow an app through firewall**, press **Change settings** and tick `swg3js.exe` for the kind of network you are on.
 
@@ -481,7 +481,34 @@ CLAUDE.md          the handoff for Claude Code: rules, architecture, lessons lea
 
 Everything the game shows from the original client (planets, buildings, ground textures, creatures, the player character) is converted from a locally owned install into `assets-private/`, which is git-ignored and never committed. The converter is `tools/swg/cli.mjs`; `docs/ASSETS.md` explains what may be converted and why, and `tools/swg/README.md` documents every command.
 
-**Setup, once per machine.** Node 22.18 or newer (24 is fine), then `npm install`. Copy `.env.example` to `.env` (git-ignored) and put the folder holding the `.tre` archives in it, and Jedi Academy's `GameData` folder if you have the game:
+**Setup, once per machine.** Node 22.18 or newer (24 is fine), then `npm install`. That is all: the converter finds both installs by itself.
+
+**The whole conversion, in one command.**
+
+```bash
+npm run swg -- convert
+```
+
+It finds the two installs (a `.env` first where there is one, then what Windows itself records of its installed games, then the usual places; it prints where it looked and asks rather than guessing), asks `status` what is missing, and runs exactly that — in the order the converter needs, several steps at once where they cannot tread on each other — until nothing is missing. Everything goes into `assets-private/`, which is git-ignored and never committed, and every step runs with `--retail-only`, which mounts only the SOE-origin archives and leaves an emulator project's own content out.
+
+It asks in rounds, because `status` can only ask for work whose own preconditions are already there: it cannot ask for the character's parts before the player pack exists, nor for the clip pair before the parts rig does. So a step whose input this round has still to write waits for the round after rather than being run against a pack that is not there yet, and the rounds go on until nothing is asked for. A first conversion takes four or five of them, and the wardrobes and the loading pictures — which `status` has no way of asking for on a machine that has converted nothing — are converted with the rest. Two commands are not part of it: `sandbox`, which is optional, and `gallery`, the development world, which has a section of its own below; run either on its own when you want it.
+
+A first full run is a few hours and about 14 GB. While it runs it shows one moving display: how far through it is, which steps are running and the last line each of them printed. Every step's whole output goes to a file of its own under `assets-private/logs/convert-<time>/`, and the folder is printed.
+
+**Ctrl+C** stops it cleanly and says what was finished; running it again carries on from whatever `status` says is left, so it can be done over several evenings. A step that fails does not stop the ones that do not depend on it: at the end it names what failed and where each one's log is, and comes back non-zero.
+
+| Add | What it does |
+| --- | --- |
+| `convert <folder>` | put the converted content somewhere other than `assets-private` |
+| `--only=ships,space` | run only those steps, and say which of the things they read are being left out |
+| `--jobs=N` | how many steps may run at once (it picks a number for the machine otherwise, and never runs more at once than the machine has cores) |
+| `--dry-run` | print the round it would start now — every step, roughly how long it takes, what it waits for and what it may not run beside — with what waits for a later round and what cannot be asked for until these packs exist; run nothing |
+| `--yes` | ask nothing, for a script (a folder it cannot find is then an error rather than a question) |
+| `--swg=<dir>` `--jka=<dir>` | name the installs outright |
+
+`npm run swg -- status assets-private` says what is in place and prints the command for anything missing; `convert` is that list, asked again as each pack arrives, run for you — plus the wardrobes and the loading pictures, which nothing on that list can ask for until another pack names them. Without Jedi Academy the saber moves, jumps and saber sounds are left out and the steps that need it say so.
+
+**A `.env` names the folders once**, if you would rather not be asked: copy `.env.example` to `.env` (git-ignored) and put the folder holding the `.tre` archives in it, and Jedi Academy's `GameData` folder if you have the game:
 
 ```
 SWG=C:/SWG
@@ -490,7 +517,7 @@ JKA=C:/Program Files (x86)/Steam/steamapps/common/Jedi Academy/GameData
 
 The converter replaces `@SWG`, `@JKA` and `@CORE3` on its command line with those values, so the commands below work the same in cmd, PowerShell, Git Bash and a Unix shell, and paths with spaces need no quoting. A shell variable works too (`export SWG=...`, then `@SWG` as the argument), and the environment wins over `.env`.
 
-**The whole conversion, in order.** Every command takes `--retail-only`, which mounts only the SOE-origin archives and leaves an emulator project's own content out.
+**One command at a time.** Every command below runs exactly as it always has, and `convert` only ever runs these same commands; the list is here for anybody who wants one of them on its own, and for reading what each one does.
 
 ```bash
 npm run swg -- verify @SWG --retail-only                                        # 1. which archives are retail (sanity check)

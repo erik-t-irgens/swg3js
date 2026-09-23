@@ -77,6 +77,12 @@
 //                                                                  --jka also takes Jedi Academy's saber sounds and the frames its animations
 //                                                                  mark, from its GameData folder; the ships pack, where it is converted, also
 //                                                                  gets its hulls', parts' and vehicles' own sounds as <out-dir>/sounds/ships.json
+//   node tools/swg/cli.mjs convert [out-dir] [--swg=<dir>] [--jka=<dir>] [--only=<command>,...] [--jobs=N] [--dry-run] [--yes]
+//                                                                  the whole conversion in one command: it asks status what is missing, runs
+//                                                                  exactly that in the order the converter needs, several steps at once, and
+//                                                                  asks again until nothing is; stop it and run it again to carry on.
+//                                                                  <out-dir> is assets-private unless another is named, the two installs are
+//                                                                  found without a .env, and every step runs with --retail-only
 //   node tools/swg/cli.mjs status <out-dir> [--json]               what the packs under <out-dir> hold and which commands would fill the gaps
 //                                                                  (--json: the same as steps in order, arguments split, for the launcher)
 //   node tools/swg/cli.mjs terrain-check <out-dir> [--limit=n] [--layers] [--at=x,z]
@@ -5281,6 +5287,166 @@ switch (cmd) {
     // A name that is not a planet is a typo, not a planet with nothing in it, so it says so.
     if (pos[3] && pos[3] !== 'all' && !GAME_PLANETS.includes(pos[3])) usage();
     if (pos[3]) convertSoundPlaces(vfs, pos[2], { planets: pos[3] === 'all' ? GAME_PLANETS : [pos[3]], log: console.log });
+    break;
+  }
+
+  case 'convert': {
+    // [out-dir] [--swg=<dir>] [--jka=<dir>] [--only=<command>,...] [--jobs=N] [--dry-run] [--yes]:
+    // the whole conversion, in one command. Nothing here holds the list of conversions and nothing
+    // here decides an order: `status` says what is missing, convertPlan.mjs says what may run beside
+    // what, convertRun.mjs runs those steps as children of this node, and convertDrive.mjs joins the
+    // three and asks `status` again until it asks for nothing -- the same driver the launcher's own
+    // Convert runs, so the two cannot drift apart. This is a way in, not a way out: every command
+    // below still runs on its own exactly as it did, and this one only ever starts those same commands.
+    const outDir = resolve(pos[1] ?? 'assets-private');
+    // What `--jobs=` comes to is the runner's own `jobsFor`, and nobody else's: the launcher hands in
+    // whatever its settings hold and this hands in whatever was typed, so `--jobs=0`, `--jobs=lots` and
+    // `--jobs=64` mean one thing in both. Said out loud when what was asked for is not what is used.
+    const jobsAsked = options.jobs === undefined ? null : options.jobs;
+    const only = options.only ? options.only.split(',').map((s) => s.trim()).filter(Boolean) : null;
+    // A name that is no command of this converter's would otherwise be a run that does nothing and
+    // calls itself finished. The list is read from this file's own usage lines, which is the list
+    // `usage()` prints, so a command added later needs nothing done here.
+    if (only) {
+      const known = readFileSync(new URL(import.meta.url))
+        .toString()
+        .split('\n')
+        .map((l) => /^\/\/\s+node tools\/swg\/cli\.mjs (\S+)/.exec(l))
+        .filter(Boolean)
+        .map((m) => m[1]);
+      const wrong = only.filter((c) => !known.includes(c));
+      if (wrong.length) {
+        console.error(`--only= does not know ${wrong.join(', ')}. The commands are: ${known.join(', ')}`);
+        process.exit(1);
+      }
+    }
+    const dryRun = flags.has('--dry-run');
+    // Nothing is asked when there is nobody to answer: a script, a launcher or anything else whose
+    // input is not a console is told what is wrong rather than left waiting at a prompt for ever.
+    const quiet = flags.has('--yes') || !process.stdin.isTTY;
+    // The driver reads this machine and starts children, and every step it starts is another run of
+    // this very file: it is loaded only when convert is asked for, so no other command, and none of
+    // those children, carries any of it.
+    let driver;
+    let plan;
+    try {
+      driver = await import('./convertDrive.mjs');
+      plan = await driver.loadPlan();
+    } catch (err) {
+      console.error(`convert needs tools/swg/convertDrive.mjs, convertPlan.mjs and convertRun.mjs, and this checkout has not got all three (${err.message}).`);
+      console.error('Every command still runs on its own; the list is in README.md under "Converting your own SWG install".');
+      process.exit(1);
+    }
+
+    const askLine = async (question) => {
+      const { createInterface } = await import('node:readline');
+      const rl = createInterface({ input: process.stdin, output: process.stdout });
+      try {
+        return String(await new Promise((res) => rl.question(question, res))).trim();
+      } finally {
+        rl.close();
+      }
+    };
+    // Where the two installs are: what the command line named, else .env, else what Windows itself
+    // records, else the usual places. Nothing is ever taken on trust: every candidate is checked, and
+    // when none is right the search itself is printed rather than a guess being made quietly.
+    let found = plan.findInstalls({ swg: options.swg ?? null, jka: options.jka ?? null });
+    while (!found.swg.ok) {
+      console.error(found.swg.sentence);
+      for (const where of found.searched) console.error(`  looked: ${where}`);
+      if (quiet) process.exit(1);
+      const typed = await askLine("The folder holding the client's .tre archives (blank to give up): ");
+      if (!typed) process.exit(1);
+      found = plan.findInstalls({ swg: typed, jka: options.jka ?? null });
+    }
+    console.log(`Star Wars Galaxies: ${found.swg.path}${found.swg.from ? ` (${found.swg.from})` : ''}`);
+    console.log(found.jka.ok ? `Jedi Academy: ${found.jka.path}${found.jka.from ? ` (${found.jka.from})` : ''}` : `Jedi Academy: ${found.jka.sentence}`);
+    console.log(`Converted content: ${outDir}`);
+    const atOnce = driver.jobsFor(jobsAsked);
+    if (jobsAsked !== null && String(atOnce) !== String(jobsAsked).trim()) {
+      console.log(`--jobs=${jobsAsked} is not a number of steps this machine can run at once; ${atOnce} at once instead.`);
+    }
+    if (!dryRun && !quiet) {
+      const answer = await askLine('Convert now? A first full run takes hours and about 14 GB. [Y/n] ');
+      if (/^n/i.test(answer)) process.exit(0);
+    }
+
+    const { fileURLToPath } = await import('node:url');
+    // One moving display for the whole run rather than ten children shouting at once: while it is
+    // drawing it is the only thing that writes to the screen, and every child's own output is in its
+    // own file. On anything that is not a terminal it prints a line as each step starts and ends
+    // instead, so a piped run reads as a log rather than as a screenful of cursor moves.
+    let display = null;
+    const show = (line) => {
+      if (!display || !process.stdout.isTTY) console.log(line);
+    };
+    // Ctrl+C stops cleanly: the driver kills whatever is running and says what was finished and what
+    // was not, and running convert again carries on from what status says is left. A second press is
+    // the ordinary way out, for a child that will not go -- and it stops the display first, since the
+    // display hides the cursor while it draws and only its own stop puts it back.
+    const stopper = new AbortController();
+    let presses = 0;
+    const onInterrupt = () => {
+      presses++;
+      if (presses > 1) {
+        if (display) display.stop();
+        process.exit(130);
+      }
+      console.log('\nstopping: what is running is being stopped; run convert again to carry on');
+      stopper.abort();
+    };
+    process.on('SIGINT', onInterrupt);
+    let summary;
+    try {
+      summary = await driver.runConvert({
+        cli: fileURLToPath(import.meta.url),
+        plan,
+        out: outDir,
+        swg: found.swg.path,
+        jka: found.jka.ok ? found.jka.path : '',
+        jobs: jobsAsked,
+        only,
+        dryRun,
+        signal: stopper.signal,
+        onPass: ({ state }) => {
+          display = driver.startDisplay(state);
+        },
+        onEvent: (e) => {
+          if (display) display.event(e);
+          switch (e.kind) {
+            case 'status':
+              show(e.done ? 'nothing is missing' : `${e.steps} thing${e.steps === 1 ? ' is' : 's are'} missing${e.seeded ? `, ${e.seeded} of them work status has no way of asking for` : ''}`);
+              break;
+            case 'pass':
+              show(`${e.steps.length} step${e.steps.length === 1 ? '' : 's'} to run, up to ${e.jobs} at once; logs in ${e.logDir}`);
+              for (const p of e.problems) show(`  ${p}`);
+              break;
+            // Nothing is said here about a step starting, ending or being passed over: the display says
+            // it, in whichever of its two ways this screen wants, and the summary says it again at the
+            // end. Said here as well it would be said twice on anything that is not a terminal.
+            case 'note':
+              show(e.line);
+              break;
+            case 'pass-end':
+              if (display) display.stop();
+              display = null;
+              break;
+            default:
+              break;
+          }
+        },
+      });
+    } catch (err) {
+      if (display) display.stop();
+      console.error(`the conversion could not go on: ${err.message}`);
+      process.exitCode = 1;
+      break;
+    } finally {
+      process.off('SIGINT', onInterrupt);
+    }
+    console.log('');
+    for (const line of summary.lines) console.log(line);
+    if (!summary.ok) process.exitCode = 1;
     break;
   }
 

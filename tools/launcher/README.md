@@ -10,10 +10,10 @@ the player's side is in the root `README.md` under **The launcher**.
 | File | What it is | Where it runs |
 | --- | --- | --- |
 | `bootstrap.cjs` | The one script built into the exe. Updates the install, then starts the launcher proper; also runs the release's scripts as children. | Sealed into the exe; changes only when the exe is rebuilt |
-| `main.mjs` | The launcher proper: a web server on `127.0.0.1`, the page's API, the conversion drive, serving the game, hosting. | In the release, so it updates with the game |
+| `main.mjs` | The launcher proper: a web server on `127.0.0.1`, the page's API, the conversion (handed to the converter's own driver), serving the game, hosting. | In the release, so it updates with the game |
 | `page.html` | The launcher's page, plain HTML, the game's eighteen colours and nothing else. | In the release |
 | `checks.mjs` | The folder and disk checks, each answering one sentence. | In the release |
-| `plan.mjs` | From `status --json` to the steps that run, and when a step is stuck. | In the release |
+| `plan.mjs` | From `status --json` to the steps the page lists, which steps are stuck, and the half-written files set aside before a run (the last two are the converter's driver's too). | In the release |
 | `serve.mjs` | Content types, byte ranges, path checks. | In the release |
 | `pack.mjs` | Packs a release: the archive and its record. | CI, and here to try a release |
 | `build-exe.mjs` | Builds the exe (`npm run launcher:build`). | Windows |
@@ -84,18 +84,38 @@ The converted content is wherever the player chose, never in here.
 ## The conversion drive
 
 Convert checks the folders and the free space (16 GB for a first conversion, 3 GB to top up; ours),
-then loops: run `status <out> --json`, take the first step it can run, run it, ask again. A step that
-needs Jedi Academy with none chosen is shown and skipped; a step with `jka: 'takes'` gets `--jka=` when
-there is a folder (the README says the player command always wants it). A step that failed is not run
-again in the same drive, and one that `status` asks for again for exactly the reasons it gave before
+and then hands the whole job to the converter's own driver, `tools/swg/convertDrive.mjs` — the same one
+`npm run swg -- convert` runs, so the page and the command line follow one set of rules and neither
+can drift from the other. The driver asks `status <out> --json` what is missing, works out from
+`tools/swg/convertPlan.mjs` what may run beside what, runs those steps as children through
+`tools/swg/convertRun.mjs` (several at once where they do not write the same pack), and asks again
+until nothing is asked for. What the launcher still gives it is what only the launcher knows: how to
+start a child (the exe told which file to run, `ctx.childCommand`), where the logs go, and an
+`AbortSignal` that Stop trips. It is answered in **events** rather than console lines — `status`,
+`pass`, `step-start`, `step-line`, `step-end`, `step-skip`, `note`, `pass-end` — so nothing here reads
+the driver's words; the page shows every step running, each with the converter's own last line, and
+`job.current` stays the one that started first so a page built before parallel runs still reads true.
+The list of what is left beside the progress block is `status`'s own answer, and `pass-end` is where it
+is asked again: the driver asks in rounds (`status` cannot ask for the character's parts until the
+player pack is there, so one round is not the conversion), and without that the list would keep the
+first round's answer for hours while the block beside it moved.
+
+A step that needs Jedi Academy with none chosen is shown and skipped; a step with `jka: 'takes'` gets
+`--jka=` when there is a folder (the README says the player command always wants it). A step whose
+dependency failed is reported as skipped rather than failed, a step that failed does not stop the ones
+that do not depend on it, and one that `status` asks for again for exactly the reasons it gave before
 it ran is called stuck and passed over, so the drive always ends and says what is left. Stop kills
-the running converter; Convert again resumes, since `status` says what is left. Most of the
-converter's JSON is written in one plain write, so a Stop (or a crash, or a power cut) in the middle
-of one can leave it cut short: `status` takes a file it cannot parse as missing, names it on a line
-of its own and lists it in `--json`'s `unreadable`, and the drive renames each such file beside
-itself to `<name>.cut-<time>` (never deleting it) before asking again, since the step that writes it
-may read the old one first. The three folders are kept absolute, resolved when they are set, because
-the converter runs with the data folder as its working folder.
+whatever is running; Convert again resumes, since `status` says what is left. Most of the converter's
+JSON is written in one plain write, so a Stop (or a crash, or a power cut) in the middle of one can
+leave it cut short: `status` takes a file it cannot parse as missing, names it on a line of its own
+and lists it in `--json`'s `unreadable`, and each such file is renamed beside itself to
+`<name>.cut-<time>` (never deleting it) before anything runs, since the step that writes it may read
+the old one first. The three folders are kept absolute, resolved when they are set, because the
+converter runs with the data folder as its working folder. How many steps run at once is the driver's
+own reckoning of this machine; `jobs` in `settings.json` overrides it, and whatever it holds is handed
+straight to the driver, which puts it through the one function that decides what a `0`, a word or a
+number larger than this machine comes to (`jobsFor` in `tools/swg/convertRun.mjs`), so the page and the
+command line cannot mean different things by the same setting.
 
 ## Trying a release before it is published
 
