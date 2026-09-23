@@ -51,7 +51,17 @@
 //                                                                  "all" converts every planet the game knows into <out-dir>/<planet>
 //   node tools/swg/cli.mjs stat <swg-dir> <file>                    which archive provides a file (after load order and deletions)
 //   node tools/swg/cli.mjs why <swg-dir> <planet> <pattern>         why snapshot objects matching a name do or do not convert
-//   node tools/swg/cli.mjs pob <swg-dir> <file.pob>                 print a portal building's cells, portals and links (diagnostic)
+//   node tools/swg/cli.mjs pob <swg-dir> <file.pob>                 print a portal building's cells, portals, links and each cell's walkable floor (diagnostic)
+//
+//   Every command that converts a portal building (snapshot, ships, gallery, space; no other
+//   command reads a floor at all) also writes the cells' walkable floors and path graphs as
+//   <out-dir>/floors.json, which says in a `mesh` field which of the two shapes it is.
+//   --no-floors writes none and removes one an earlier run left, so the pack really has none;
+//   --floors-graph-only writes the node graphs without the triangle meshes (about a twentieth of
+//   the bytes), which `status` reports as GRAPHS ONLY and asks to be run again in full, since
+//   nothing can funnel a body through a doorway without the mesh. A building this run redid never
+//   keeps the last run's floors, and one the pack no longer carries is dropped. A pack with no
+//   floors.json plays exactly as it did before they existed.
 //   node tools/swg/cli.mjs terrain <swg-dir> <planet>|all <out-dir>  copy just the terrain template and ground textures into a pack
 //                                                                  ("all": into every planet pack already under <out-dir>)
 //   node tools/swg/cli.mjs sky <swg-dir> <planet>|all <out-dir>      the planet's sky (sun, moons, colour ramps, skybox, reflection maps) into a pack
@@ -105,6 +115,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, s
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { resolveParts } from './appearance.mjs';
 import { decodeDds } from './dds.mjs';
+import { FLOOR_PACK_VERSION, floorBlock, floorSize, parseFloor } from './flr.mjs';
 import { buildGlb } from './glb.mjs';
 import { dump, find, isForm, parseIff, readCString } from './iff.mjs';
 import { classifyDirectory, isRetailByName } from './manifest.mjs';
@@ -499,7 +510,7 @@ function loadAppearanceMesh(vfs, appearancePath) {
     merged.warnings.push(...mesh.warnings);
     if (parts.length === 1) merged.bounds = mesh.bounds;
     if (part.cell !== undefined) {
-      const cell = cells.get(part.cell) ?? cells.set(part.cell, { index: part.cell, name: part.cellName, groups: [], hardpoints: [], warnings: [], portals: part.cellPortals ?? [], lights: part.cellLights ?? [] }).get(part.cell);
+      const cell = cells.get(part.cell) ?? cells.set(part.cell, { index: part.cell, name: part.cellName, groups: [], hardpoints: [], warnings: [], portals: part.cellPortals ?? [], lights: part.cellLights ?? [], floor: part.cellFloor ?? '' }).get(part.cell);
       cell.groups.push(...mesh.groups);
       cell.hardpoints.push(...mesh.hardpoints);
       portalGeometry ??= part.portalGeometry ?? null;
@@ -544,7 +555,183 @@ function convertOne(vfs, appearancePath, outFile, opts = {}) {
     : undefined;
   // Portal polygons in model space (X flipped with the meshes) so the game can tell which cell the player is in.
   const portals = portalGeometry ? portalGeometry.map((p) => ({ v: p.verts.map(([x, y, z]) => [flipX ? -x : x, y, z]), i: p.indices })) : undefined;
+  // The cells' walkable floors, into the pack's floors.json rather than the manifest: the manifests
+  // are written indented, and a floor is thousands of plain numbers.
+  if (cells) noteFloors(vfs, dirname(outFile), basename(outFile).replace(/\.glb$/i, ''), cells, flipX);
   return { meshPath, mesh, flipX, tris, shaders, textured: textures.size, warnings: mesh.warnings, partCount, cells: cellInfo, portals, effects };
+}
+
+// The floors a portal building's cells walk on, gathered per pack and written beside the manifest
+// as floors.json rather than into it: the manifests are written indented, and one number a line
+// would turn a planet's floors from three megabytes into thirty. Keyed by pack for the same reason
+// the particle caches are: a run over several planets must not leave one planet's floors in
+// another planet's file. `--no-floors` leaves the file out altogether and `--floors-graph-only`
+// writes the node graphs without the triangle meshes, which is about a twentieth of the bytes.
+const packFloors = new Map(); // resolve(outDir) -> { stats, seen: Set(id), models: Map(id -> { cellIndex: block }) }
+
+// The commands that carry floors into a pack, which is exactly the four that write floors.json.
+// Anything else converting a portal building -- `why` and `msh` into a temporary file, `pack` and
+// `sandbox`, whose manifests keep no cells at all -- would otherwise fetch and parse every cell's
+// floor out of the archives and drop the lot without a word.
+const FLOOR_COMMANDS = new Set(['snapshot', 'ships', 'gallery', 'space']);
+
+function floorsFor(outDir) {
+  const key = resolve(outDir);
+  let rec = packFloors.get(key);
+  if (!rec) packFloors.set(key, (rec = { models: new Map(), seen: new Set(), stats: { cells: 0, named: 0, read: 0, missing: 0, failed: 0, older: 0, meshes: 0, graphs: 0, vertices: 0, triangles: 0, nodes: 0, edges: 0, notes: [] } }));
+  return rec;
+}
+
+/**
+ * One cell's floor. Deliberately not cached: the whole game holds 3,332 cell floors in 3,266
+ * distinct files, so a cache would save 66 reads and hold a few hundred megabytes of parsed
+ * triangles for the length of a run over every planet. Reading and converting every floor in the
+ * archives takes 423 ms measured, so there is nothing to save.
+ */
+function readFloor(vfs, path) {
+  if (!vfs.has(path)) return { missing: true };
+  try {
+    return parseFloor(parseIff(vfs.read(path)));
+  } catch (err) {
+    return { failed: err.message };
+  }
+}
+
+/**
+ * The floors of one converted portal building, into the pack's record. `cells` is what convertOne
+ * built for the manifest, each carrying the .flr its cell named.
+ */
+function noteFloors(vfs, outDir, id, cells, flipX) {
+  if (flags.has('--no-floors') || !cells || !FLOOR_COMMANDS.has(cmd)) return;
+  const rec = floorsFor(outDir);
+  // Recorded whether or not a floor comes of it, for two reasons: a building this run redid must
+  // never keep the floors of the run before it (its cells and their indices may have moved), and a
+  // building whose cells name no floor, or name one the archives have not got, is a building that
+  // was read and has none -- which is not the same as one nobody has looked at, and is what the
+  // pack and `status` would otherwise have no way of saying.
+  rec.seen.add(id);
+  const mesh = !flags.has('--floors-graph-only');
+  const out = {};
+  for (const c of cells) {
+    rec.stats.cells++;
+    if (!c.floor) continue;
+    rec.stats.named++;
+    const floor = readFloor(vfs, c.floor);
+    if (floor.missing) {
+      rec.stats.missing++;
+      continue;
+    }
+    if (floor.failed) {
+      rec.stats.failed++;
+      if (rec.stats.notes.length < 8) rec.stats.notes.push(`cell ${c.index} of ${id}: ${floor.failed}`);
+      continue;
+    }
+    rec.stats.read++;
+    if (floor.version !== '0006') rec.stats.older++;
+    for (const w of floor.warnings) if (rec.stats.notes.length < 8) rec.stats.notes.push(`cell ${c.index} of ${id}: ${w}`);
+    const { block, notes } = floorBlock(floor, { flipX, links: c.portals ?? [], mesh });
+    for (const nte of notes) if (rec.stats.notes.length < 8) rec.stats.notes.push(`cell ${c.index} of ${id}: ${nte}`);
+    if (!block.floor && !block.graph) continue;
+    const size = floorSize(floor);
+    if (block.floor) {
+      rec.stats.meshes++;
+      rec.stats.vertices += size.vertices;
+      rec.stats.triangles += size.triangles;
+    }
+    if (block.graph) {
+      rec.stats.graphs++;
+      rec.stats.nodes += size.nodes;
+      rec.stats.edges += size.edges;
+    }
+    out[c.index] = block;
+  }
+  rec.models.set(id, out);
+}
+
+/**
+ * Write the pack's floors.json and say what went in.
+ *
+ * `keep` is the ids the pack's manifest now carries, which the caller has just written. Only three
+ * kinds of entry survive from the file already on disk: one for a building this run did not touch,
+ * that the pack still carries, and that the last run wrote in the same shape. That matters because
+ * floors.json is the one snapshot artefact that is not rewritten outright: without the first test a
+ * building whose floors came back missing this run would go on publishing the last run's, cell
+ * indices and all; without the second a `--retail-only` run would leave the floors a non-retail run
+ * read for buildings the retail archives do not hold; and without the third a `--floors-graph-only`
+ * run would leave a file that is half meshes and half not, which no line of the run could describe.
+ *
+ * `--no-floors` means the pack is to have none, so a file an earlier run left is removed rather
+ * than left to be served. A run that converted no portal building at all makes no claim and leaves
+ * the file exactly as it found it.
+ */
+function writeFloors(outDir, keep = null) {
+  const key = resolve(outDir);
+  const rec = packFloors.get(key);
+  packFloors.delete(key);
+  const file = join(outDir, 'floors.json');
+  if (flags.has('--no-floors')) {
+    if (existsSync(file)) {
+      rmSync(file);
+      console.log(`floors: --no-floors, so the floors.json an earlier run left was removed (${file})`);
+    }
+    return;
+  }
+  if (!rec) return;
+  const mesh = !flags.has('--floors-graph-only');
+  const keepIds = keep ? new Set(keep) : null;
+  let models = {};
+  let kept = 0;
+  let gone = 0;
+  let reshaped = 0;
+  try {
+    if (existsSync(file)) {
+      const old = JSON.parse(readFileSync(file, 'utf8'));
+      if (old && old.version === FLOOR_PACK_VERSION && old.models) {
+        const sameShape = (old.mesh ?? true) === mesh;
+        for (const [id, cells] of Object.entries(old.models)) {
+          if (rec.seen.has(id)) continue;
+          if (keepIds && !keepIds.has(id)) {
+            gone++;
+            continue;
+          }
+          if (!sameShape) {
+            reshaped++;
+            continue;
+          }
+          models[id] = cells;
+          kept++;
+        }
+      }
+    }
+  } catch (err) {
+    console.log(`   the last floors.json could not be read (${err.message}); writing only this run's`);
+    models = {};
+    kept = 0;
+  }
+  for (const [id, cells] of rec.models) models[id] = cells;
+  const s = rec.stats;
+  if (!Object.keys(models).length) {
+    if (existsSync(file)) rmSync(file);
+    console.log(`floors: none written (${s.cells} cells, ${s.named} naming a floor, ${s.missing} not in the archives, ${s.failed} unreadable)`);
+    return;
+  }
+  // `mesh` says which shape the file is, since a graph without the mesh it funnels over is a pack
+  // that looks complete and cannot path: `status` reads it and asks for the full run.
+  writeFileSync(file, JSON.stringify({ version: FLOOR_PACK_VERSION, mesh, models }));
+  const empty = [...rec.models.values()].filter((m) => !Object.keys(m).length).length;
+  const kb = (statSync(file).size / 1024).toFixed(0);
+  const asides = [
+    s.missing ? `${s.missing} named but not in the archives` : '',
+    s.failed ? `${s.failed} unreadable` : '',
+    s.older ? `${s.older} in an older version of the format` : '',
+    empty ? `${empty} building(s) with no cell floor at all` : '',
+    kept ? `${kept} building(s) kept from the last run` : '',
+    gone ? `${gone} dropped as no longer in the pack` : '',
+    reshaped ? `${reshaped} dropped: the last run wrote ${mesh ? 'graphs only' : 'meshes'}` : '',
+  ].filter(Boolean);
+  console.log(`floors: ${s.read} of ${s.named} cell floors read over ${rec.models.size} buildings (${s.cells} cells in all${asides.length ? `; ${asides.join(', ')}` : ''})`);
+  console.log(`   ${mesh ? `${s.meshes} walkable meshes (${s.vertices} vertices, ${s.triangles} triangles), ` : 'GRAPHS ONLY (--floors-graph-only: no walkable meshes, so nothing can funnel through a doorway), '}${s.graphs} path graphs (${s.nodes} nodes, ${s.edges} edges) -> ${file}, ${kb} KB`);
+  for (const n of s.notes) console.log(`   note: ${n}`);
 }
 
 // Particle effects: converted once per .prt into <out-dir>/particles/, textures shared within one
@@ -1784,6 +1971,18 @@ function packStatus(dir) {
     const layers = existsSync(join(packDir, 'terrain')) ? readdirSync(join(packDir, 'terrain')).filter((f) => f.endsWith('.lay')).length : 0;
     const sky = readJson(join(packDir, 'sky.json'));
     const water = readJson(join(packDir, 'water.json'));
+    // The cells' walkable floors, which a pack converted before they were read simply has not got:
+    // the game falls back to walking straight at what it wants, so this asks rather than warns.
+    const withCells = (manifest.categories?.layout ?? []).filter((m) => m.cells && m.cells.length);
+    // Gated on the version the game reads, or a file written in an older shape would be counted
+    // here and passed over there: the pack would read as floored and the game would have none.
+    const floors = readJson(join(packDir, 'floors.json'));
+    const floorsRead = floors?.models && floors.version === FLOOR_PACK_VERSION ? floors : null;
+    const floored = floorsRead ? withCells.filter((m) => floorsRead.models[m.id]).length : 0;
+    // An entry with no cells in it is a building that was read and has no floor in the archives,
+    // which is not the same as one nobody has looked at and must not read as a gap forever.
+    const floorless = floorsRead ? withCells.filter((m) => floorsRead.models[m.id] && !Object.keys(floorsRead.models[m.id]).length).length : 0;
+    const graphOnly = !!floorsRead && floorsRead.mesh === false;
     const parts = [
       `${objects} objects`,
       `${flora} flora models`,
@@ -1797,6 +1996,7 @@ function packStatus(dir) {
       shaders ? `ground textures ${textured}/${shaders.families.length}` : 'NO GROUND TEXTURES',
       sky ? `sky (${sky.blocks.length} blocks${sky.weather ? `, weather ${new Set(sky.blocks.map((b) => b.cameraEffect?.file).filter(Boolean)).size} effects` : ', NO WEATHER'})` : 'NO SKY',
       water ? `water (${Object.keys(water.shaders ?? {}).length} shaders, ${Object.values(water.shaders ?? {}).filter((s) => s.kind === 'lava').length} lava${waterPackNeedsHarm(water) ? ', NO WATER VALUES' : ''})` : terrain ? 'NO WATER LOOK' : null,
+      withCells.length ? (floored ? `floors ${floored}/${withCells.length} buildings${graphOnly ? ', GRAPHS ONLY (no walkable meshes)' : ''}${floorless ? `, ${floorless} with none in the archives` : ''}` : 'NO FLOORS') : null,
     ].filter(Boolean);
     console.log(`  ${planet}: ${parts.join(', ')}`);
     if (!objects) need(`snapshot <swg-dir> ${planet} ${packDir} --center=auto --radius=all --retail-only`, `${planet} has no objects`);
@@ -1805,6 +2005,10 @@ function packStatus(dir) {
     else if (!sky) need(`sky <swg-dir> all ${dir} --retail-only`, `${planet} has no sky`);
     else if (!sky.weather) need(`sky <swg-dir> all ${dir} --retail-only`, `${planet} sky has no weather effects`);
     else if (skyEffectsUncarried(packDir, sky)) need(`sky <swg-dir> all ${dir} --retail-only`, `${planet} sky's effects were converted before the effects their particles carry`);
+    if (withCells.length && floored < withCells.length) need(`snapshot <swg-dir> ${planet} ${packDir} --center=auto --radius=all --retail-only`, `${planet}'s buildings have no walkable floors (${withCells.length - floored} of ${withCells.length})`);
+    // A graph with no mesh under it looks complete and cannot funnel a body through a doorway, so
+    // it is asked for again rather than counted as done. Drop --floors-graph-only to mend it.
+    else if (withCells.length && graphOnly) need(`snapshot <swg-dir> ${planet} ${packDir} --center=auto --radius=all --retail-only`, `${planet}'s buildings were converted with --floors-graph-only: path graphs, no walkable meshes`);
     // Its own `if`: exportWater always writes the file, so its existence is the whole test.
     if (terrain && !water) need(`water <swg-dir> all ${dir} --retail-only`, `${planet} has no water.json`);
     // A lava entry written before the lava look has no `lava` block: the game draws it in a stand-in look.
@@ -1984,6 +2188,16 @@ function packStatus(dir) {
     if (fits.old || !comps || !existsSync(join(dir, 'ships/customize.json'))) need(`ships <swg-dir> ${dir} --retail-only`, 'the ships have no loadouts or paint (converted before ship customization)');
     else if (!fits.astromechs && astromechModels) need(`ships <swg-dir> ${dir} --retail-only`, 'the astromechs were converted after the ships; the ships command links them');
     if (combat.stale) need(`ships <swg-dir> ${dir} --retail-only`, combat.why);
+    // The rooms' walkable floors, on the hulls that have rooms at all.
+    const roomy = (ships.models ?? []).filter((m) => m.cells && m.cells.length);
+    const shipFloors = readJson(join(dir, 'ships/floors.json'));
+    const shipFloorsRead = shipFloors?.models && shipFloors.version === FLOOR_PACK_VERSION ? shipFloors : null;
+    const floored = shipFloorsRead ? roomy.filter((m) => shipFloorsRead.models[m.id]).length : 0;
+    const floorless = shipFloorsRead ? roomy.filter((m) => shipFloorsRead.models[m.id] && !Object.keys(shipFloorsRead.models[m.id]).length).length : 0;
+    const shipGraphOnly = !!shipFloorsRead && shipFloorsRead.mesh === false;
+    if (roomy.length) console.log(`     rooms' floors: ${floored}/${roomy.length} hulls${shipGraphOnly ? ', GRAPHS ONLY (no walkable meshes)' : ''}${floorless ? `, ${floorless} with none in the archives` : ''}`);
+    if (roomy.length && floored < roomy.length) need(`ships <swg-dir> ${dir} --retail-only`, `${roomy.length - floored} hull(s) with rooms have no walkable floors`);
+    else if (roomy.length && shipGraphOnly) need(`ships <swg-dir> ${dir} --retail-only`, "the ships' rooms were converted with --floors-graph-only: path graphs, no walkable meshes");
   }
   if (ships && (ships.materialFormat ?? 1) < MATERIAL_FORMAT) need(`ships <swg-dir> ${dir} --retail-only`, "ships' models were converted before animated and glowing surfaces");
   const gallery = readJson(join(dir, 'gallery/manifest.json'));
@@ -2349,6 +2563,7 @@ async function snapshotPlanet(vfs, planet, outDir) {
     if (fx.length || attached) console.log(`particles: ${fx.length} effects placed on their own (${objects.filter((o) => fx.some((m) => m.id === o.model)).length} placements), ${attached} attached to models, ${particleTextures.get(resolve(outDir))?.size ?? 0} textures`);
     const withCells = manifest.categories.layout.filter((m) => m.cells);
     console.log(`buildings: ${withCells.length} models with cells, ${withCells.filter((m) => m.portals && m.portals.length).length} with portals`);
+    writeFloors(outDir, manifest.categories.layout.map((m) => m.id));
     console.log(`terrain: ${terrainFile ?? 'not found'}, ${objects.filter((o) => o.layer).length} objects with terrain modification layers (${new Set(objects.map((o) => o.layer).filter(Boolean)).size} files)`);
     for (const [reason, count] of Object.entries(skipped).sort((a, b) => b[1] - a[1])) {
       console.log(`  skipped ${count}: ${reason}`);
@@ -4262,6 +4477,7 @@ switch (cmd) {
     writeFileSync(join(outDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
     const withInterior = ships.filter((sh) => sh.interior && !sh.interior.failed).length;
     console.log(`-> ${outDir}: ${ships.length} ships in ${models.size} models, ${withInterior} with an interior, ${skipped.length} left out (listed in manifest.json; B in game opens the garage, ships at the bottom)`);
+    writeFloors(outDir, (manifest.models ?? []).map((m) => m.id));
     if (skipped.length) console.log(`   left out:\n${skipped.map((sk) => `     ${sk.template}  (${sk.why})`).join('\n')}`);
     if (components) console.log(loadoutsLine([...fits.values()], droids, { shaders: recipes.size, images: paint.images, bytes: paint.bytes }));
     // NPC ships and space combat (combat.json, npcships.mjs): every tiered NPC ship type a garage hull
@@ -4511,8 +4727,10 @@ switch (cmd) {
         galleryFormat = 1;
       }
     }
-    writeFileSync(join(outDir, 'manifest.json'), JSON.stringify({ planet: 'gallery', materialFormat: galleryFormat, categories: { layout: [...models.values()].filter((m) => m && !m.failed) } }, null, 2));
+    const galleryModels = [...models.values()].filter((m) => m && !m.failed);
+    writeFileSync(join(outDir, 'manifest.json'), JSON.stringify({ planet: 'gallery', materialFormat: galleryFormat, categories: { layout: galleryModels } }, null, 2));
     writeFileSync(join(outDir, 'gallery.json'), JSON.stringify({ sections: g.sections, anims: g.anims }));
+    writeFloors(outDir, galleryModels.map((m) => m.id));
     console.log(`-> ${outDir}: ${g.objects.length} exhibits, ${models.size} models; play it with ?planet=gallery`);
     printEffectSummary();
     break;
@@ -4621,7 +4839,29 @@ switch (cmd) {
     const pob = parsePob(root);
     console.log(`${pob.cells.length} cells, ${pob.portals.length} portal polygons`);
     pob.portals.forEach(({ verts, indices }, i) => console.log(`  portal ${i}: ${verts.length} verts, ${indices.length / 3} triangles, centre ${verts.reduce((a, v) => a.map((c, k) => c + v[k] / verts.length), [0, 0, 0]).map((v) => v.toFixed(2)).join(',')}`));
-    pob.cells.forEach((c, i) => console.log(`  cell ${i} "${c.name}" ${c.appearance} floor ${c.floor || '-'}: ${c.portals.map((p) => `#${p.geometry}->${p.target}${p.passable ? '' : ' closed'}${p.disabled ? ' disabled' : ''}`).join(' ') || 'no portals'}`));
+    pob.cells.forEach((c, i) => {
+      console.log(`  cell ${i} "${c.name}" ${c.appearance} floor ${c.floor || '-'}: ${c.portals.map((p) => `#${p.geometry}->${p.target}${p.passable ? '' : ' closed'}${p.disabled ? ' disabled' : ''}`).join(' ') || 'no portals'}`);
+      // The walkable floor the cell names, as the pack would read it.
+      if (!c.floor) return;
+      if (!vfs.has(c.floor)) {
+        console.log(`     floor: not in the archives`);
+        return;
+      }
+      try {
+        const fl = parseFloor(parseIff(vfs.read(c.floor)));
+        const doors = fl.triangles.reduce((n, t) => n + t.portals.filter((p) => p >= 0).length, 0);
+        const cross = fl.triangles.reduce((n, t) => n + t.crossable.filter(Boolean).length, 0);
+        let lo = Infinity;
+        let hi = -Infinity;
+        for (const v of fl.vertices) {
+          lo = Math.min(lo, v[1]);
+          hi = Math.max(hi, v[1]);
+        }
+        console.log(`     floor: FLOR ${fl.version}, ${fl.vertices.length} vertices, ${fl.triangles.length} triangles, ${cross} crossable edges, ${doors} leading through a portal, y ${lo.toFixed(2)}..${hi.toFixed(2)}${fl.graph ? `, graph ${fl.graph.nodes.length} nodes (${fl.graph.nodes.filter((n) => n.type === 0).length} in a doorway) ${fl.graph.edges.length} edges` : ', no path graph'}${fl.warnings.length ? `; ${fl.warnings.join('; ')}` : ''}`);
+      } catch (err) {
+        console.log(`     floor: unreadable (${err.message})`);
+      }
+    });
     break;
   }
 
@@ -5042,8 +5282,10 @@ switch (cmd) {
         frameCheck,
       };
       writeFileSync(join(outDir, 'space.json'), JSON.stringify({ version: SPACE_PACK_VERSION, zone, planet: SPACE_ZONES[zone] ?? null, title, stations, scenery, planets, arrival, hyperspace, nebulae, nebulaLook: look, lightning, fields, lanes, dockEffects: dockFx }, null, 2));
-      writeFileSync(join(outDir, 'manifest.json'), JSON.stringify({ planet: zone, categories: { layout: [...models.values()].filter((m) => !m.failed) } }, null, 2));
+      const zoneModels = [...models.values()].filter((m) => !m.failed);
+      writeFileSync(join(outDir, 'manifest.json'), JSON.stringify({ planet: zone, categories: { layout: zoneModels } }, null, 2));
       writeFileSync(join(outDir, 'layout.json'), JSON.stringify({ planet: zone, center: { x: 0, z: 0 }, radius: null, objects, skipped: [] }));
+      writeFloors(outDir, zoneModels.map((m) => m.id));
       const env = parseSpaceEnvironment(trnRoot);
       exportSky(vfs, zone, outDir, { textureFor: (p) => textureFor(vfs, p), particleFor: (p) => convertParticle(vfs, p, outDir), log: console.log, space: env });
       const made = points.filter((p) => p.source === 'invented').length;

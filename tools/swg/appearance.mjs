@@ -183,7 +183,7 @@ export function resolveParts(vfs, rawPath, depth = 0, detail = 0) {
     cells.forEach((cell, i) => {
       if (!cell.appearance) return;
       try {
-        for (const part of resolveParts(vfs, cell.appearance, depth + 1, detail)) out.push({ ...part, cell: i, cellName: cell.name || (i === 0 ? 'exterior' : `cell${i}`), cellPortals: cell.portals, cellLights: cell.lights ?? [], portalGeometry: portals });
+        for (const part of resolveParts(vfs, cell.appearance, depth + 1, detail)) out.push({ ...part, cell: i, cellName: cell.name || (i === 0 ? 'exterior' : `cell${i}`), cellPortals: cell.portals, cellLights: cell.lights ?? [], cellFloor: cell.floor ?? '', portalGeometry: portals });
       } catch (err) {
         errors.push(`cell ${i}: ${err.message}`);
       }

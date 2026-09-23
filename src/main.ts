@@ -146,6 +146,7 @@ import { SURFACE_ROOM, SurfaceRoom, isSurfaceRoom, probeSurface, roomFrame, room
 import type { Vehicle, VehicleKind } from './vehicles/vehicle';
 import { HEAD_TO_EYE, SEATED_EYE_FALLBACK, SEAT_RULE, cockpitYawStep, frameFileName, mirroredOffset, seatDropUsed } from './vehicles/cockpitSeat';
 import { World } from './world/world';
+import { worldNav } from './world/nav/nav.ts';
 import type { FacilityChoice, NamedPlace } from './world/cloning.ts';
 import { GATE_TUNE, ZoneGates, gateAction, gateSaid, tuneGates, zoneOfPack } from './world/zoneGates.ts';
 import { AudioSystem, type ListenerPose } from './audio/audio.ts';
@@ -3367,7 +3368,10 @@ class App {
       /** Whether the figure pushes the dynamic bodies it walks into (off: a hull's triangles as the pushed shape crashed the engine). */
       pushBodies: (on = true) => {
         this.player.setPushBodies(on);
-        return on ? 'the figure pushes bodies it walks into' : 'the figure pushes nothing';
+        // The fighters carry the same controller and must be re-checked with it, or the knob
+        // covers every body in the world except the ones there are most of.
+        this.world.npcs?.setPushBodies(on);
+        return on ? 'the figure and the fighters push bodies they walk into' : 'the figure and the fighters push nothing';
       },
       shipDrift: (speed = 2, spin = 0.4) => {
         const p = this.player;
@@ -3712,6 +3716,22 @@ class App {
       },
       /** Every mobile's cull sphere, whether it is on and near the screen, whether it is drawn and casts, and its tier: the check that the one sphere is in the frame it claims. */
       mobileCull: () => this.world.mobiles?.cullReport(this.cam.camera, this.player.pos) ?? 'no world loaded',
+      /**
+       * The indoor pathing: `nav()` says whether this pack carries floor meshes at all, how many
+       * rooms name one, how many have been read, how many searches have been asked for and what
+       * became of each, and what the last one cost; `nav({ reach: 0.6, every: 0.25 })` moves any of
+       * the invented numbers live (they are `NAV_TUNE` in `src/world/nav/navMesh.ts`);
+       * `nav({ describe: true })` reads every room's floor in the building you are standing in and
+       * says what it came out as. `converted: false` is the whole of "nothing here is running":
+       * that is a pack from before the floors, and every body indoors steers straight at its goal.
+       */
+      nav: (tune?: Partial<import('./world/nav/navMesh').NavTune> & { describe?: boolean }) => {
+        if (tune) worldNav.set(tune);
+        // `buildingAt` allocates a CellState, which is why this is a thing to type rather than
+        // something a frame does.
+        const here = tune?.describe ? this.world.buildingAt(this.player.worldPos) : null;
+        return { ...worldNav.status(), building: here ? worldNav.describe(here.building) : null };
+      },
       /** Blow up the vehicle ridden, piloted or stood in (its health to nothing), to see the rider thrown or the crew put out. */
       wreck: () => {
         const v = this.player.mounted ?? this.player.piloting ?? this.player.aboard?.vehicle ?? null;

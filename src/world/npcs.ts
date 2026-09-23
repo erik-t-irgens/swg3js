@@ -9,15 +9,33 @@
 // never had: giving up on a target it cannot reach in height, leashing home, remembering and
 // forgetting who hurt it, wandering when there is nothing to do, and a nerve that breaks. What it
 // does not bring is paths -- the answer is a goal and a pace, and a fighter still walks at it in a
-// straight line, because navigation is a later pass. Nothing else about a fighter moved: its body
-// is still kinematic, its height still comes from the terrain (or from a ray inside a building),
-// and its clothes, its weapon and its blade are exactly what they were.
+// straight line, because navigation is a later pass.
+//
+// What it **does** have now is a body and a stance. The body is the player's own character
+// controller and the player's own capsule (`src/world/fighterStance.ts`, whose numbers are lifted
+// from `Player.makeBody` unchanged): a fighter is stopped by a wall, climbs a step of half a metre
+// and a slope of 55 degrees, and takes its floor from the controller rather than from a ray cast
+// half a metre over its feet -- so it no longer walks through the walls it has always walked
+// through, and `checkStuck`, which is documented below as never firing, now fires. It is stopped
+// by exactly what stops the player and no more: the collision capsule is the player's 1.6 m and
+// not the 1.8 m the aim point implies, or a clearance you can walk under would be a wall to it.
+// Two floors of last resort under all of that, and they are not the same one. Outdoors the
+// planet's own ground, because the heightfield colliders only exist within a few chunks of the
+// player and a fighter that has wandered off has nothing under it. Indoors the height it last
+// really had, because a building's colliders are dropped when the player walks away while the room
+// a body is in goes on answering -- so without it a fighter left behind falls through a floor that
+// is no longer there and is finally teleported onto the terrain when it drops out of the
+// building's box, which for a dungeon is hundreds of metres.
+// The stance is the player's three-way carry -- relaxed, combat, aimed -- picked from what it has
+// to fight instead of from a mouse button, with the barrel measured against where the next bolt is
+// going and the difference folded into the spine exactly as `Player.correctAim` folds it. Both are
+// only how a fighter stands, aims and is stopped: nothing here decides anything.
 import * as THREE from 'three';
 import { combatSounds } from '../audio/combatSounds';
 import { Group, groups, RAPIER, type Physics } from '../core/physics';
-import { CharacterRig, loadPlayerRig } from '../player/rig';
+import { CharacterRig, loadPlayerRig, type RigState } from '../player/rig';
 import { applyLook } from '../player/look';
-import { FIGHTS, isSaber, type WeaponCatalogue, type WeaponDef } from '../player/weapons';
+import { FIGHTS, gunKindOf, isSaber, type WeaponCatalogue, type WeaponDef } from '../player/weapons';
 import { SaberBlade } from '../combat/saberBlade';
 import { CLASH } from '../combat/clash.ts';
 import { keepNearestGlow } from '../combat/bladeLights';
@@ -32,11 +50,16 @@ import type { Terrain } from './terrain';
 import { markActor } from './portalRender';
 import { slotOf } from '../ui/wardrobeUi';
 import type { CellState } from './layoutStream';
+import { NavAgent } from './nav/navAgent.ts';
+import { worldNav } from './nav/nav.ts';
 import { BLADE_SWING, SABER_SWINGS, bladeSwingReport, borrowSwingFigures, noteBladeLookup, noteBladeSwing, noteTimerBlow, returnSwingFigures, weaponFarPoint, type BladeSwingTune } from './mobiles/arms';
 // The creatures' mind, unchanged and shared: a pure function of plain numbers, so a fighter is one
 // more body filling the same struct rather than a second set of rules that has to be kept in step.
 import { BRAIN_TUNE, decide, type BrainSelf, type BrainTarget, type Decision } from './mobiles/brain.ts';
 import type { MobileState } from './mobiles/types';
+// How it stands, aims and is held up: the pure half, which a node test drives with a real physics
+// world rather than a mirror. Every number of the controller's is the player's own.
+import { FIGHTER_BODY, STANCE_TUNE, aimMode, applyBody, bodyShare, capsuleDrop, easeAngle, fallSpeed, fighterPush, settleFooting, spineShare, stanceFor, stepAimFix, tuneFighterBody, tuneStance, wrapAngle, type AimWhen, type FighterBody, type Footing, type Stance, type StanceInput, type StanceTune } from './fighterStance.ts';
 // A fighter's blade hurts what it passed through since the last frame by exactly the machinery the
 // player's does, never by a rule of its own: `BladePath` steps the same capsule along the ground the
 // blade covered, and a `Striker` of this fighter's own is what puts it behind the blow.
@@ -134,6 +157,14 @@ export const FIGHTER_TUNE: FighterTune = {
   stuckShare: 0.2,
 };
 
+/**
+ * What `__debug.fighters({ ... })` takes: the body's own numbers as before, plus `stance` for how
+ * a fighter stands and aims and `body` for the capsule and the character controller under it
+ * (`src/world/fighterStance.ts`). The mind's numbers are the creatures' and move through
+ * `__debug.mobileTune({ brain: { ... } })`, as they always have.
+ */
+export type FighterKnob = Partial<FighterTune> & { stance?: Partial<StanceTune>; body?: Partial<FighterBody> };
+
 /** The wearables a Wookiee wears, and nobody else: the Kashyyykian pieces, and the ones marked _wke. */
 const WOOKIEE_ONLY = /kashyyyk|(^|_)wke(_|$)/i;
 /** Pieces that are not clothes to be seen in: quest props, the new-player set. */
@@ -161,6 +192,8 @@ export function pickOutfit(items: { id: string; kind: string; gender: string; pa
 
 const tmp = new THREE.Vector3();
 const tmp2 = new THREE.Vector3();
+/** The third the aim needs (the grip, against the muzzle): written, never made, never kept. */
+const tmp3 = new THREE.Vector3();
 /** What a blade faces while no camera is given (a dead fighter's retracting blade, a headless step). */
 const IDLE_CAMERA = new THREE.PerspectiveCamera();
 const spot = new THREE.Vector3();
@@ -171,6 +204,17 @@ const tmpQ = new THREE.Quaternion();
 /** The two ends of a line-of-sight test, written rather than made: one ray a thought, no objects. */
 const LINE_FROM = { x: 0, y: 0, z: 0 };
 const LINE_TO = { x: 0, y: 0, z: 0 };
+/**
+ * The four things a frame asks for, per fighter, kept and written into rather than built. Nothing
+ * here is read across a call, so one of each serves every fighter in the world: `stanceAsk` and
+ * `aimAsk` are filled and handed straight to a pure function, and `moveAsk`/`moveGot` are the
+ * vectors the character controller is given and answers into (its `computedMovement()` makes one
+ * every call unless it is handed somewhere to write).
+ */
+const stanceAsk: StanceInput = { gun: false, combat: false, hasTarget: false, gap: 0, range: 0, offNose: 0 };
+const aimAsk: AimWhen = { aiming: false, sinceShot: 0, stunned: false };
+const moveAsk = { x: 0, y: 0, z: 0 };
+const moveGot = { x: 0, y: 0, z: 0 };
 
 /** A fighter's lit blade wanting a pooled light this frame: where, in its colour, and how far from the eye (squared). */
 export interface FighterGlow {
@@ -196,16 +240,31 @@ export interface NpcDeps {
   cellAt?: (p: THREE.Vector3) => CellState | null;
   /** Follow a body through a building's portals, as the player is followed. */
   followCell?: (state: CellState | null, prev: THREE.Vector3, pos: THREE.Vector3) => CellState | null;
+  /**
+   * Whether that room's colliders are built this instant. A building's collision comes and goes
+   * with the player's distance while the room a body is in goes on answering from model data, so
+   * without this a fighter left behind in a building falls through a floor that is no longer
+   * there. With no answer wired the fighters take "solid", which is exactly how they behaved
+   * before it existed.
+   */
+  cellSolid?: (state: CellState | null) => boolean;
 }
 
 /** How often (seconds of sim time) a fighter's room is followed, and how far it may go between. */
 const FOLLOW_EVERY = 0.25;
 const FOLLOW_STEP = 2;
-/** How far above its feet a fighter's floor ray starts inside: a stair's step, and less than a counter. */
-const FLOOR_STEP = 0.5;
-/** A floor inside a building: neither the terrain under it nor the building's outer shell. */
+/** Inside a building: neither the terrain under it nor the building's outer shell, as the player walks. */
 const INSIDE_FILTER = groups(Group.all, Group.all & ~(Group.terrain | Group.exterior));
-/** Only what stands still is a floor. */
+/** Outside: everything. */
+const OUTSIDE_FILTER = groups(Group.all, Group.all);
+/**
+ * What stops a fighter walking: only what stands still. A collider with no body at all (a room's,
+ * a building's) or a fixed one (the ground, a placed object) is a wall; everything that moves on
+ * its own passes through, which is another fighter, a creature, a mobile, a vehicle, the player,
+ * another player's body (kinematic and a sensor besides) and a corpse (dynamic). That is not the
+ * player's predicate, which stops the player on a creature: it is deliberately narrower, because a
+ * crowd of fighters that jam on one another would report itself stuck and give up the fight.
+ */
 const staticOnly = (c: RAPIER.Collider): boolean => {
   const body = c.parent();
   return !body || body.isFixed();
@@ -218,13 +277,22 @@ const NOTHING_AT = (): undefined => undefined;
  * tuning problem -- so the swing falls back on the blow the timer used to land and this says why.
  */
 let warnedBlind = false;
+/** Said once, the first time the floor of last resort has to lift a body a whole height (see `move`). */
+let warnedLift = false;
 
 export class Npc implements Living {
   readonly group = new THREE.Group();
   readonly pos = new THREE.Vector3();
   readonly body: RAPIER.RigidBody;
   readonly collider: RAPIER.Collider;
-  readonly halfHeight = 0.9;
+  /**
+   * The player's own character controller, on the player's own numbers: what stops this body at a
+   * wall, climbs it up a step and a ramp, and answers whether it is standing on anything. A
+   * fighter's place is still written straight into a kinematic body -- what changed is that the
+   * place written is the one the controller allowed.
+   */
+  readonly controller: RAPIER.KinematicCharacterController;
+  readonly halfHeight = FIGHTER_BODY.halfHeight;
   /** Its place in the one list of living things, for as long as it lives. */
   readonly key = nextLivingKey();
   readonly side: Side = 'fighter';
@@ -280,6 +348,47 @@ export class Npc implements Living {
   private readonly faceAt = { x: 0, z: 0 };
   /** The pace the last thought asked for, so the rig plays the walk the brain wandered at. */
   private pace: 'stand' | 'walk' | 'run' = 'stand';
+  /**
+   * The ground this frame's step asked for, before anything was allowed to stop it: `act` writes
+   * it and `update` hands it to the character controller. One vector for the fighter's life.
+   */
+  private readonly wish = new THREE.Vector3();
+  /** The vertical, read and written in place by `settleFooting`; `y` is copied back onto `pos`. */
+  private readonly footing: Footing = { y: 0, fallVy: Number.NaN, grounded: true };
+  /** How far along the ground it really went this frame, against how far it asked for: the readout's `held`. */
+  private moved = 0;
+  /**
+   * Seconds since it last had something alive to fight. The combat carry lasts `STANCE_TUNE.ready`
+   * seconds past that, exactly as the player's blaster stays up for five seconds after a shot, so
+   * a fighter that has just killed somebody does not snap its blade off on the same frame.
+   */
+  private sinceFought = Infinity;
+  /** Which carry it stands in this frame: relaxed, combat, or aimed at something. */
+  stance: Stance = 'relaxed';
+  /**
+   * The aim's measured correction, this fighter's own: the barrel against where the next bolt is
+   * going, folded in a frame at a time. The spine takes `spineShare` of the yaw and the drawn body
+   * takes what is left (`aimTurn`), which is the player's own division of it.
+   */
+  private readonly aimFix = { yaw: 0, pitch: 0 };
+  private aimTurn = 0;
+  /** Seconds since it last fired, so the recoil is not chased (the player does not chase it either). */
+  private sinceShot = Infinity;
+  /**
+   * The blaster poses this rig has for the gun in its hand, found once when the weapon goes on:
+   * which carries its speed set is, the aimed pose held on the upper body and the hip-fire one.
+   * Resolved to clip names rather than kept as patterns, because a pattern is re-matched against
+   * every one of the rig's twelve hundred clips on every `setState`, which is every frame.
+   */
+  private gunPose: { kind: 'pistol' | 'rifle'; aim: string | null; ready: string | null } | null = null;
+  /**
+   * The far end of a gun in the holder's own frame: the extreme of the model's **longest** axis,
+   * which is the barrel, read by the same rule the player's own hand reads a rack weapon with
+   * (`weaponFarPoint`, and the player's hidden `far` marker). Read along anything else the aim
+   * would line the wrong axis up with the target, which is the mistake that once turned the guns
+   * ninety degrees.
+   */
+  private readonly barrelFar = new THREE.Vector3();
   /** How often in a row it has been found going nowhere while it asked to move, and the window's measure. */
   private stuck = 0;
   private stuckClock = 0;
@@ -333,6 +442,16 @@ export class Npc implements Living {
   readonly name: string;
   /** The building room it is in, followed through the portals by the manager; null outside. */
   cell: CellState | null = null;
+  /**
+   * Whether that room has collision under it this instant, refreshed on the same pass the room is
+   * followed on. True outdoors and true with nothing wired to ask, which is what it always was.
+   */
+  cellSolid = true;
+  /** How often the floor of last resort has had to lift this body, and by how much the last time. */
+  private lifted = 0;
+  private liftedBy = 0;
+  /** Its own path: the corners still to walk, and the clock that says when to ask for fresh ones. */
+  readonly navAgent = new NavAgent();
   /** Where it stood when its room was last followed, and when (sim time). */
   readonly cellFrom = new THREE.Vector3();
   followAt = -Infinity;
@@ -352,7 +471,19 @@ export class Npc implements Living {
     this.group.position.copy(this.pos);
     markActor(this.group);
     this.body = physics.world.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(x, y + this.halfHeight, z));
-    this.collider = physics.world.createCollider(RAPIER.ColliderDesc.capsule(this.halfHeight - 0.35, 0.35), this.body);
+    // The collision capsule is the **player's**, not the drawn body's: the same radius and the same
+    // straight part, dropped so its feet are this body's feet. The two were one number and a
+    // clearance between the player's 1.6 m and the fighter's 1.8 m was therefore open for the
+    // player and a wall for a fighter -- a lintel, a pipe, a low doorway -- which is the "stuck
+    // where it used to walk through" the controller was given to avoid rather than to cause.
+    // `halfHeight` is untouched: it is the aim point the rest of the game shoots at.
+    this.collider = physics.world.createCollider(RAPIER.ColliderDesc.capsule(FIGHTER_BODY.standHalf, FIGHTER_BODY.radius).setTranslation(0, capsuleDrop(), 0), this.body);
+    // The controller is made with the body and set to the fighters' numbers, which are the
+    // player's. It never pushes what it walks into: the engine's push works the contact against
+    // the other body's own shape, and with a hull's triangles as that shape it panics and every
+    // call into the engine fails afterwards -- the lesson `Player.pushBodies` is off for.
+    this.controller = physics.world.createCharacterController(FIGHTER_BODY.offset);
+    applyBody(this.controller);
     // Who is swinging. `from` is this fighter's own place object, so the shove a blow gives is
     // measured from where it stands this frame with nothing copied; nothing is spared and there is
     // no matrix, since a fighter never fights in a hull's frame.
@@ -375,7 +506,7 @@ export class Npc implements Living {
 
   /** A person is a circle from above: the capsule's own radius, whichever way you come at it. */
   radiusToward(): number {
-    return 0.35;
+    return FIGHTER_BODY.radius;
   }
 
   /** Where the world's simulated clock stood at this fighter's last step: the hold's grace keys off it. */
@@ -502,13 +633,49 @@ export class Npc implements Living {
       if (def.blade) this.blade.spec = { length: def.blade.length, width: def.blade.width, open: def.blade.open, close: def.blade.close };
       this.group.parent?.add(this.blade.group);
       if (this.blade.group.parent) markActor(this.blade.group);
-    } else if (this.arm === 'gun') this.gun = GUNS[gunTypeFor(def, def.class)];
-    else {
+    } else if (this.arm === 'gun') {
+      this.gun = GUNS[gunTypeFor(def, def.class)];
+      this.findGunPoses(rig, def);
+    } else {
       // A sword, an axe or a club: its reach is the far end of the model's longest extent, which is
       // the rule the player's own hand reads a rack weapon with, so both swing the same steel.
       const far = weaponFarPoint(def.bounds, def.length);
       this.reachFar.set(0, 0, 0).setComponent(far.axis, far.distance);
     }
+  }
+
+  /**
+   * The blaster carries this rig has for the gun that has just gone into its hand, found once and
+   * kept: the relaxed set (a pistol at the side, a rifle across the chest), which is the legs and
+   * the arms for every carry, and the two poses that ride the upper body over it -- the aimed one
+   * and the hip-fire one. They are the player's own choices (`Player.animateRig`), read the same
+   * way: the table's own aimed loop where the species has one, else the transition into the aimed
+   * pose held at its end, which `CharacterRig` already knows to hold because its name ends in
+   * `_aimed` or `_ready`.
+   *
+   * Every one is resolved to a clip **name** here rather than left as a pattern for `prefer`,
+   * because a pattern is matched against every clip the rig holds on every `setState`, and a
+   * species rig holds twelve hundred of them. A rig without the game's blaster clips comes out of
+   * this with nulls and the state table's own fallbacks carry it, which is what a fighter has
+   * always played.
+   */
+  private findGunPoses(rig: CharacterRig, def: WeaponDef): void {
+    const far = weaponFarPoint(def.bounds, def.length);
+    this.barrelFar.set(0, 0, 0).setComponent(far.axis, far.distance);
+    const kind = gunKindOf(def.class);
+    const base = kind === 'pistol' ? 'loop_pistol_standing' : 'loop_rifle';
+    // The relaxed carry's speed set under every carry, so the legs never sway an aimed pose.
+    for (const [suffix, n] of [['Idle', 0], ['Walk', 1], ['Run', 2]] as const) {
+      const relaxed = rig.clipMatching(new RegExp(`^${base}:speed${n}`)) ?? null;
+      rig.prefer(`gun${suffix}` as RigState, relaxed);
+      rig.prefer(`gunReady${suffix}` as RigState, relaxed);
+      rig.prefer(`gunAim${suffix}` as RigState, relaxed);
+    }
+    const aim = rig.firstOf(...rig.clipsMatching(new RegExp(`^loop_${kind}(_a)?_combat_standing_aimed(:speed0)?$`)), kind === 'pistol' ? 'trn_pistol_combat_to_pistol_combat_aimed' : 'trn_rifle_a_standing_ready_to_aimed');
+    const ready = kind === 'pistol'
+      ? rig.firstOf('loop_pistol_riding', ...rig.clipsMatching(/^loop_pistol_combat_standing_aimed/))
+      : rig.firstOf('trn_rifle_a_standing_hold_to_ready', 'loop_rifle_riding');
+    this.gunPose = { kind, aim, ready };
   }
 
   /** Whoever struck, remembered from now: the brain turns it on the most recent of them. */
@@ -576,6 +743,7 @@ export class Npc implements Living {
     this.swingTarget = null;
     this.hitThisSwing.clear();
     this.bladePath.reset();
+    this.navAgent.clear();
     this.heldAt = null;
     this.memory.clear();
     this.target = null;
@@ -765,6 +933,11 @@ export class Npc implements Living {
     if (d.targetKey !== this.targetKey) {
       this.stuck = 0;
       this.stuckClock = 0;
+      // And the metres asked for in the part-window being thrown away with it: left standing, a
+      // fighter that finished a run at the run speed and then stood still to attack a new target
+      // carried that speed into `avg` over a clock starting at nothing, and counted a stuck it
+      // had not earned.
+      this.stuckCommanded = 0;
     }
     this.targetKey = d.targetKey;
     // The body behind the key: the one already in hand when it has not changed, else looked up once.
@@ -818,6 +991,17 @@ export class Npc implements Living {
     }
     // Stunned, or with a blade already on its way through a swing, it stands where it is.
     if (this.stunned > 0 || this.swingLeft >= 0) pace = 'stand';
+    // The way out of the room (src/world/nav/). Indoors, the building's own floors say which corner
+    // to walk at next; only what it *faces* is taken from the path, so the arrival test further
+    // down still measures the real goal. Never while it is attacking: `diff` below is also the gate
+    // its swing is held behind, and a nose turned at a corner is a nose off what it is fighting.
+    // Outdoors, and in a room the pack has no floor for with the goal in that same room, `corner`
+    // is null and every line below is the line it was.
+    if (moveTo && pace !== 'stand' && this.cell && d && d.state !== 'attack') {
+      const goalY = t && (d.state === 'chase' || d.state === 'alert') ? t.pos.y : this.pos.y;
+      const corner = worldNav.corner(this.navAgent, this.cell, this.pos.x, this.pos.y, this.pos.z, moveTo.x, goalY, moveTo.z, this.radiusToward(), this.now);
+      if (corner) face = corner;
+    }
     let diff = 0;
     if (face && this.stunned <= 0) {
       const want = Math.atan2(face.x - this.pos.x, face.z - this.pos.z);
@@ -827,12 +1011,16 @@ export class Npc implements Living {
     const speed = pace === 'run' ? FIGHTER_TUNE.run : pace === 'walk' ? FIGHTER_TUNE.walk : 0;
     this.pace = pace;
     this.moving = false;
+    // The ground it is asking for, not the ground it will get: `update` hands this to the
+    // character controller, and a wall, a slope or a step may let it have less or none of it.
+    // That difference is exactly what `checkStuck` below measures.
+    this.wish.set(0, 0, 0);
     if (moveTo && speed > 0) {
       const gap = Math.hypot(moveTo.x - this.pos.x, moveTo.z - this.pos.z);
       if (gap > FIGHTER_TUNE.arrive) {
         const step = Math.min(gap, speed * sdt);
-        this.pos.x += Math.sin(this.heading) * step;
-        this.pos.z += Math.cos(this.heading) * step;
+        this.wish.x = Math.sin(this.heading) * step;
+        this.wish.z = Math.cos(this.heading) * step;
         this.moving = true;
       }
     }
@@ -845,9 +1033,11 @@ export class Npc implements Living {
 
   /**
    * The ground covered against the speed asked for, over a window: far under it and the brain is
-   * told it is stuck, and gives the target up after a few of them. It never fires today, because a
-   * fighter's body is kinematic and its place is written straight, so it walks through whatever is
-   * in the way rather than being held by it; it is here for the pass that gives them paths.
+   * told it is stuck, and gives the target up after a few of them. It used never to fire, because
+   * a fighter's place was written straight in and it walked through whatever was in the way; with
+   * the character controller under it there is now something to be held by, so this is live. It is
+   * the one thing a fighter *decides* that the body changed, and it is the thing the counter was
+   * always wired to: a fighter pressed into a wall gives its target up rather than leaning on it.
    */
   private checkStuck(dt: number, commanded: number): void {
     if (this.stuckClock === 0) this.stuckFrom.copy(this.pos);
@@ -867,6 +1057,9 @@ export class Npc implements Living {
     const rig = this.rig;
     if (!g) return;
     this.attackCd = Math.max(FIGHTER_TUNE.gunEvery, g.primary.fireTime * 2.5) + Math.random() * FIGHTER_TUNE.gunSpread;
+    // The recoil is not chased: the aim's correction sits still for a moment after a shot, as the
+    // player's does, or it would fight the fire clip's own kick and wag the barrel.
+    this.sinceShot = 0;
     this.muzzle(tmp2);
     tmp.copy(t.pos).y += t.halfHeight * 0.9;
     tmp.sub(tmp2).normalize();
@@ -932,6 +1125,23 @@ export class Npc implements Living {
       inside: !!this.cell,
       remembers: this.memory.size,
       stuck: this.stuck,
+      // How it stands and how much of the way it is to the ground it asked for: with a body that
+      // can be stopped, `held` under one is a fighter leaning on something.
+      stance: this.stance,
+      grounded: this.grounded,
+      // Metres a second downward, 0 standing: `held` reads 1 for an unobstructed fall, so without
+      // this nothing on the readout told a body dropping through the world from one walking.
+      fall: Number((Number.isNaN(this.fallVy) ? 0 : -this.fallVy).toFixed(2)),
+      // Whether the room it is in has collision under it at all (outdoors, always).
+      solid: !this.cell || this.cellSolid,
+      // How often the floor of last resort has had to lift it a whole body's height, and by how
+      // much the last time: both should stay 0.
+      lifted: this.lifted,
+      liftedBy: Number(this.liftedBy.toFixed(1)),
+      held: Number(this.wish.lengthSq() > 1e-12 ? Math.min(1, this.moved / Math.max(1e-6, Math.hypot(this.wish.x, this.wish.z))).toFixed(2) : 1),
+      // The aim's correction in degrees, and the share of it the spine could not take.
+      aim: { yaw: Number(((this.aimFix.yaw * 180) / Math.PI).toFixed(1)), pitch: Number(((this.aimFix.pitch * 180) / Math.PI).toFixed(1)), body: Number(((this.aimTurn * 180) / Math.PI).toFixed(1)) },
+      poses: this.gunPose ? { kind: this.gunPose.kind, aim: this.gunPose.aim, ready: this.gunPose.ready } : null,
     };
   }
 
@@ -997,56 +1207,44 @@ export class Npc implements Living {
     // What it is fighting, for the stance it stands in and for whether its blade is held ready:
     // the brain drops it while it flees or goes home, so both go quiet with it.
     const t = this.target;
-    // A shove from a blow or a blast, spent over a moment.
+    // A shove from a blow or a blast, spent over a moment. It goes through the controller with
+    // everything else, so a body knocked into a wall stops at the wall instead of through it.
     if (this.push.lengthSq() > 1e-4) {
-      this.pos.addScaledVector(this.push, sdt);
+      this.wish.addScaledVector(this.push, sdt);
       this.push.multiplyScalar(Math.max(0, 1 - sdt * 4));
     }
-    // Where the ground is, and whether the Force is keeping it off there. A kinematic body goes
-    // where it is put, so the hold and the fall have to be written here or the clamp undoes them
-    // every frame: a gripped fighter would be dragged down and a thrown one would slide.
-    // Inside a building the floor under it, by a ray from a step above its feet (a cantina's floor,
-    // not the ground under the building); outside, or with nothing under it, the terrain.
-    // Only what stands still counts: the ray starts inside the fighter's own capsule. From a step
-    // up, not a metre: a kinematic body walking into a counter or a table would pop onto its top.
-    const floor = this.cell ? this.physics.topSurface(this.pos.x, this.pos.z, this.pos.y + FLOOR_STEP, 40, INSIDE_FILTER, staticOnly) : null;
-    const ground = floor ?? terrain.heightAt(this.pos.x, this.pos.z);
-    if (this.heldAt && this.now < this.heldUntil) {
-      this.pos.lerp(this.heldAt, Math.min(1, sdt * 12));
-      this.fallVy = 0;
-      this.grounded = false;
-      // A blow that lifted it (fallVy above zero) starts the arc from the ground it is standing on.
-    } else if (!Number.isNaN(this.fallVy) && (this.pos.y > ground + 0.02 || this.fallVy > 0)) {
-      this.heldAt = null;
-      this.fallVy -= 18 * sdt;
-      this.pos.y += this.fallVy * sdt;
-      this.grounded = false;
-      if (this.pos.y <= ground) {
-        this.pos.y = ground;
-        this.fallVy = Number.NaN;
-        this.grounded = true;
-      }
-    } else {
-      this.heldAt = null;
-      this.fallVy = Number.NaN;
-      this.pos.y = ground;
-      this.grounded = true;
-    }
+    this.sinceShot += dt;
+    // Which carry it stands in, and for how long after the fight: one number, read by the rig, the
+    // aim and whether a blade is lit.
+    if (t && !t.dead) this.sinceFought = 0;
+    else this.sinceFought += dt;
+    const combat = this.sinceFought < STANCE_TUNE.ready;
+    // Where the target is from the nose, for the carry and for the aim. One angle, written.
+    const offNose = t ? wrapAngle(Math.atan2(t.pos.x - this.pos.x, t.pos.z - this.pos.z) - this.heading) : 0;
+    // Written into the kept struct rather than built: one literal here is one allocation per
+    // fighter per frame, which is the rule this file is held to.
+    stanceAsk.gun = this.arm === 'gun';
+    stanceAsk.combat = combat;
+    stanceAsk.hasTarget = !!t && !t.dead;
+    stanceAsk.gap = t ? Math.hypot(t.pos.x - this.pos.x, t.pos.z - this.pos.z) : Infinity;
+    stanceAsk.range = FIGHTER_TUNE.gunRange;
+    stanceAsk.offNose = offNose;
+    this.stance = stanceFor(stanceAsk);
+    this.move(sdt, terrain);
     this.body.setNextKinematicTranslation({ x: this.pos.x, y: this.pos.y + this.halfHeight, z: this.pos.z });
     this.group.position.copy(this.pos);
-    this.group.quaternion.setFromAxisAngle(UP, this.heading);
+    // The drawn body also carries whatever share of the aim's turn the spine could not take, which
+    // is the player's own `aimBodyTurn`. It is never given to `heading`: the heading is the brain's
+    // facing, which is the direction the body walks in and the cone a shot is gated on, and a
+    // visual correction has no business moving either.
+    this.group.quaternion.setFromAxisAngle(UP, this.heading + this.aimTurn);
     if (rig) {
-      if (!rig.overriding) {
-        // A wander walks and everything else runs, which is the brain's own pace rather than this
-        // file's: before it, a fighter had one gait and only ever used it to close on somebody.
-        if (this.moving && this.pace === 'walk') rig.setState('walk', FIGHTER_TUNE.walk * own);
-        else if (this.moving) rig.setState('run', FIGHTER_TUNE.run * own);
-        else if (this.arm === 'gun') rig.setState(rig.hasState('gunAimIdle') ? 'gunAimIdle' : 'idle');
-        else if (this.arm === 'saber' && t) rig.setState(rig.hasState('stance') ? 'stance' : 'idle');
-        else rig.setState('idle');
-      }
+      if (!rig.overriding) this.poseRig(rig, own);
       rig.update(sdt);
       this.group.updateMatrixWorld(true);
+      // After the pose and after the matrices, exactly as the player's is: the spine takes its
+      // share of the correction and the barrel is then measured where the pose and the turn left it.
+      this.aimPose(sdt, t);
     }
     // Where the weapon lies this frame, and what it cuts. A lightsaber's blade runs up from the
     // hilt's top; a sword's or a club's steel is the model's own longest extent out of the grip.
@@ -1065,7 +1263,10 @@ export class Npc implements Living {
         this.blade.owner = this.key;
         this.blade.attacking = swinging;
         this.blade.clashWeight = CLASH.weights.medium;
-        this.blade.update(dt, this.bladeBase, this.bladeTip, !!t, camera ?? IDLE_CAMERA, swinging ? 1 : this.moving ? 0.3 : 0);
+        // Lit while it is fighting, and for the few seconds of the combat carry after: it used to
+        // snap off on the very frame its target died, which is the one place the stance changes
+        // what is *seen* of a blade rather than only of a body.
+        this.blade.update(dt, this.bladeBase, this.bladeTip, combat, camera ?? IDLE_CAMERA, swinging ? 1 : this.moving ? 0.3 : 0);
       } else {
         this.holder.localToWorld(this.bladeBase.set(0, 0, 0));
         this.holder.localToWorld(this.bladeTip.copy(this.reachFar));
@@ -1084,6 +1285,188 @@ export class Npc implements Living {
       if (!this.swingSwept) this.timerBlow(effects);
       this.swingTarget = null;
     }
+  }
+
+  /**
+   * One frame of the body: the ground `act` asked for and the vertical, handed to the character
+   * controller, and what it allowed written back onto `pos`.
+   *
+   * Three things are not the controller's.
+   *
+   * The **Force's hold** is a teleport and stays one: a gripped fighter is lerped to where the
+   * power is holding it and the body written straight, because that is what a grip is and what
+   * every power in the game already does to a creature. Nothing may stop it.
+   *
+   * The **ground outdoors** is the planet's own, not the controller's. The heightfield colliders
+   * only exist within a few chunks of the player (`PHYSICS_RADIUS` in `world.ts`), so a fighter
+   * that has wandered any distance is over nothing at all and the controller would let it fall out
+   * of the world. The terrain is therefore a floor it may never go below -- and only a floor:
+   * above it the controller's answer stands, which is what lets a fighter climb a ramp, a step or
+   * a rock rather than being pinned to the ground under them. Inside a building there is no such
+   * floor, deliberately: a dungeon's rooms go far below the terrain and a clamp to it would drag a
+   * body up through the floor it is standing on.
+   *
+   * The **room whose collision has been dropped** is the indoor half of that same problem, and it
+   * is why the branch above is not simply "no floor indoors". A building's colliders are built
+   * only within a couple of hundred metres of the player; the room a body is in is model data and
+   * goes on answering whatever became of them. So a fighter left in a building the player has
+   * walked away from stands in a room with nothing under it at all, falls at 18 m/s², and keeps
+   * falling until it drops out of the building's own box -- at which point its room goes null and
+   * the terrain clamp fires in a single frame, which for a dungeon is a teleport of hundreds of
+   * metres to the open surface. `cellSolid` is the guard: with no floor built, the body keeps the
+   * height the last real frame gave it and is standing on its own floor again the moment the
+   * colliders come back.
+   *
+   * And the **first frame**, before the world has stepped at all: a scene query sees nothing then,
+   * so the step is taken whole rather than through a controller that would report open ground.
+   */
+  private move(sdt: number, terrain: Terrain): void {
+    this.moved = 0;
+    if (this.heldAt && this.now < this.heldUntil) {
+      this.pos.lerp(this.heldAt, Math.min(1, sdt * 12));
+      this.fallVy = 0;
+      this.grounded = false;
+      return;
+    }
+    this.heldAt = null;
+    const f = this.footing;
+    f.fallVy = this.fallVy;
+    // Inside a building whose rooms have no collision this instant: nothing to stand on and
+    // nothing to fall past, so the height is held rather than integrated (see above).
+    const airless = !!this.cell && !this.cellSolid;
+    const holdY = this.pos.y;
+    // One frame of gravity, whether it is falling or standing: standing that is a few millimetres,
+    // which holds it on the floor without the controller reading a step as a wall.
+    const dy = airless ? 0 : fallSpeed(f, sdt);
+    if (this.physics.steps > 0) {
+      moveAsk.x = this.wish.x;
+      moveAsk.y = this.wish.y + dy;
+      moveAsk.z = this.wish.z;
+      this.controller.computeColliderMovement(this.collider, moveAsk, undefined, this.cell ? INSIDE_FILTER : OUTSIDE_FILTER, staticOnly);
+      // Written into a vector of ours: with nowhere to write, rapier makes one every call, which
+      // is one object per fighter per frame.
+      const mv = this.controller.computedMovement(moveGot);
+      this.pos.x += mv.x;
+      this.pos.y += mv.y;
+      this.pos.z += mv.z;
+      this.moved = Math.hypot(mv.x, mv.z);
+      f.grounded = this.controller.computedGrounded();
+    } else {
+      this.pos.x += this.wish.x;
+      this.pos.y += this.wish.y + dy;
+      this.pos.z += this.wish.z;
+      this.moved = Math.hypot(this.wish.x, this.wish.z);
+      f.grounded = false;
+    }
+    f.y = this.pos.y;
+    const lift = settleFooting(f, this.cell ? null : terrain.heightAt(this.pos.x, this.pos.z), airless ? holdY : null);
+    // A floor of last resort that has to lift a body by more than its own height is not a body
+    // walking down a dune: it is one that was somewhere it could not stand. Counted for the
+    // readout rather than hidden, and said once, because there is nothing else on the screen that
+    // tells a fall from a walk.
+    if (lift > this.halfHeight * 2) {
+      this.lifted++;
+      this.liftedBy = lift;
+      if (!warnedLift) {
+        warnedLift = true;
+        console.warn(`fighters: a body was ${lift.toFixed(1)} m under the ground and was put back on it; __debug.fighters() counts it as lifted.`);
+      }
+    }
+    this.pos.y = f.y;
+    this.fallVy = f.fallVy;
+    this.grounded = f.grounded;
+  }
+
+  /**
+   * What it is standing in this frame, in the rig's own states. This is the whole of the owner's
+   * "a combat/non combat state like players have": the states are the player's own and the rule
+   * that picks between them is `stanceFor`.
+   *
+   * With a gun: the relaxed carry with the weapon down, the combat carry once there is something
+   * to fight, and the aimed pose held on the upper body once that something is in front of it and
+   * within reach of the gun -- each with its own idle, walk and run, as the player's are. Before
+   * this a gun-armed fighter stood in one pose for ever and ran with the plain run, holding its
+   * blaster as if it were a handbag.
+   *
+   * With a blade: the plain walk and run out of a fight, Jedi Academy's saber walk and run in one,
+   * and the style's stance standing -- again the player's, who moves that way with a blade lit.
+   */
+  private poseRig(rig: CharacterRig, own: number): void {
+    const moving = this.moving;
+    const walking = this.pace === 'walk';
+    const speed = (walking ? FIGHTER_TUNE.walk : FIGHTER_TUNE.run) * own;
+    if (this.arm === 'gun') {
+      const carry = this.stance === 'aim' ? 'gunAim' : this.stance === 'ready' ? 'gunReady' : 'gun';
+      const state = `${carry}${moving ? (walking ? 'Walk' : 'Run') : 'Idle'}` as RigState;
+      // The pose that rides the upper body over those legs: the aimed one, or the hip-fire one.
+      // Relaxed there is none, so the carry's own clip has the whole body.
+      const pose = this.gunPose;
+      const upper = this.stance === 'aim' ? (pose?.aim ?? null) : this.stance === 'ready' ? (pose?.ready ?? null) : null;
+      rig.setState(state, moving ? speed : 0, upper);
+      return;
+    }
+    if (moving) {
+      // A lit blade moves the way the player's does with one out; a club or a sword is carried at
+      // the plain walk and run, which is what the game's own clips give it.
+      const saber = this.arm === 'saber' && this.stance !== 'relaxed';
+      rig.setState(saber ? (walking ? 'walkSaber' : 'runSaber') : walking ? 'walk' : 'run', speed);
+      return;
+    }
+    if (this.stance !== 'relaxed' && rig.hasState('stance')) rig.setState('stance');
+    else rig.setState('idle');
+  }
+
+  /**
+   * The aim, once the pose is on and the matrices are this frame's. The barrel is measured where
+   * that pose and last frame's turn left it, the difference to where the next bolt is going is
+   * folded in, the spine takes what it can of the yaw and the drawn body eases onto the rest --
+   * which is `Player.correctAim` and `Player.aimBodyTurn`, on the player's own numbers, with the
+   * crosshair replaced by the point `shoot` aims at.
+   *
+   * Only a gun. A blade is swung by clips that pose the whole arm and a twisted spine would move
+   * where the blade cuts, which is a decision and not a look.
+   *
+   * Three modes, not two, and the difference matters more than it looks: with nothing to aim at
+   * the correction **eases** back to nothing as the player's does with the gun down, but in the
+   * third of a second after a shot, and while a blow has it staggered, it is **held** exactly
+   * where it stands -- the player's own early return out of the recoil. Easing there instead
+   * would throw away 95 per cent of a settled aim between one shot and the next and spend most of
+   * the gun's cooldown winning it back, so the barrel would swing off the target and on again with
+   * every shot for as long as the fight lasted.
+   */
+  private aimPose(dt: number, t: Living | null): void {
+    if (this.arm !== 'gun') return;
+    const rig = this.rig;
+    if (!rig) return;
+    const holder = this.holder;
+    aimAsk.aiming = !!t && !t.dead && !!holder && this.stance !== 'relaxed';
+    aimAsk.sinceShot = this.sinceShot;
+    aimAsk.stunned = this.stunned > 0;
+    const mode = aimMode(aimAsk);
+    if (mode === 'chase' && holder && t) {
+      // Where the shot is going: the same point `shoot` aims at, from the same muzzle.
+      this.muzzle(tmp2);
+      tmp.copy(t.pos);
+      tmp.y += t.halfHeight * 0.9;
+      tmp.sub(tmp2);
+      const len = tmp.length();
+      // And where the barrel is pointing: the grip to the far end of the model's longest axis.
+      holder.updateWorldMatrix(true, false);
+      holder.getWorldPosition(tmp3);
+      holder.localToWorld(tmp2.copy(this.barrelFar));
+      tmp2.sub(tmp3);
+      const barrel = tmp2.length();
+      if (len > 1e-4 && barrel > 1e-6) {
+        tmp.divideScalar(len);
+        tmp2.divideScalar(barrel);
+        stepAimFix(this.aimFix, Math.atan2(tmp.x, tmp.z), Math.asin(Math.max(-1, Math.min(1, tmp.y))), Math.atan2(tmp2.x, tmp2.z), Math.asin(Math.max(-1, Math.min(1, tmp2.y))), dt, 'chase');
+      }
+      // A barrel of no length or a target on top of the muzzle leaves the correction alone, which
+      // is the player's own `if (barrelB.lengthSq() < 1e-6) return;` and is a hold, not an ease.
+    } else if (mode === 'ease') stepAimFix(this.aimFix, 0, 0, 0, 0, dt, 'ease');
+    // 'hold' does nothing at all, which is the whole of it.
+    rig.twistTorso(spineShare(this.aimFix.yaw), this.aimFix.pitch);
+    this.aimTurn = easeAngle(this.aimTurn, bodyShare(this.aimFix.yaw), STANCE_TUNE.bodyTurn, dt);
   }
 
   /**
@@ -1170,6 +1553,9 @@ export class Npc implements Living {
     if (!this.dead) this.physics.world.removeCollider(this.collider, false);
     this.dead = true;
     this.physics.world.removeRigidBody(this.body);
+    // The controller is the engine's, not the body's: removing the body leaves it behind, and a
+    // world that has stood a thousand fighters would keep a thousand of them.
+    this.physics.world.removeCharacterController(this.controller);
     scene.remove(this.group);
     if (this.blade) {
       scene.remove(this.blade.group);
@@ -1203,6 +1589,7 @@ export class NpcManager {
     const npc = new Npc(id, this.physics, x, at.y ?? this.terrain.heightAt(x, z), z);
     npc.cellFrom.copy(npc.pos);
     if (at.inside) npc.cell = this.deps.cellAt?.(npc.pos) ?? null;
+    npc.cellSolid = this.deps.cellSolid?.(npc.cell) ?? true;
     this.scene.add(npc.group);
     this.npcs.push(npc);
     this.byCollider.set(npc.collider.handle, npc);
@@ -1210,6 +1597,17 @@ export class NpcManager {
     this.version++;
     void npc.dress(this.baseUrl, this.deps).catch((err) => console.warn(`fighter ${id}: no rig`, err));
     return npc;
+  }
+
+  /**
+   * Whether the fighters' controllers push the dynamic bodies they walk into, which is the
+   * player's own `__debug.pushBodies` and is off for the same reason. It reaches the fighters
+   * already out as well as the ones stood after, or the knob that exists to re-check the engine's
+   * trimesh panic would quietly have covered one body in the world.
+   */
+  setPushBodies(on: boolean): void {
+    fighterPush(on);
+    for (const n of this.npcs) applyBody(n.controller);
   }
 
   removeAll(): number {
@@ -1250,6 +1648,7 @@ export class NpcManager {
     this.expose();
     noteBladeLookup(!!this.deps.hittableAt);
     const follow = this.deps.followCell;
+    const solid = this.deps.cellSolid;
     for (let i = this.npcs.length - 1; i >= 0; i--) {
       const npc = this.npcs[i];
       // Its room, followed through the portals four times a second, and sooner when it has gone a couple of metres.
@@ -1258,6 +1657,10 @@ export class NpcManager {
         npc.cell = follow(npc.cell, npc.cellFrom, npc.pos);
         npc.cellFrom.copy(npc.pos);
       }
+      // Whether that room still has collision under it, asked every frame and not on the follow's
+      // own quarter-second: it is two lookups, and a quarter of a second of falling through a
+      // floor that has gone is half a metre nobody asked for.
+      if (solid && !npc.dead) npc.cellSolid = solid(npc.cell);
       npc.update(dt, this.terrain, targets, bolts, this.deps.effects, camera, now, this.deps.hittableAt ?? null);
       if (npc.dead && npc.deadTimer <= 0) {
         // The collider handle went out of the lookup in `die`, at the moment the collider itself
@@ -1286,7 +1689,7 @@ export class NpcManager {
     if (!dbg || dbg === this.exposedOn) return;
     this.exposedOn = dbg;
     dbg.blades = (opts?: Partial<BladeSwingTune>) => bladeSwingReport(opts);
-    dbg.fighters = (opts?: Partial<FighterTune>) => this.report(opts);
+    dbg.fighters = (opts?: FighterKnob) => this.report(opts);
   }
 
   /**
@@ -1296,9 +1699,19 @@ export class NpcManager {
    * chases before it goes home and when it gives a target up all move through
    * `__debug.mobileTune({ brain: { ... } })`, and are printed here so that both are in one place.
    */
-  private report(opts?: Partial<FighterTune>): Record<string, unknown> {
-    if (opts) Object.assign(FIGHTER_TUNE, opts);
-    return { tune: { ...FIGHTER_TUNE }, brain: { ...BRAIN_TUNE }, out: this.npcs.length, fighters: this.npcs.map((n) => n.status()) };
+  private report(opts?: FighterKnob): Record<string, unknown> {
+    if (opts) {
+      const { stance, body, ...own } = opts;
+      Object.assign(FIGHTER_TUNE, own);
+      if (stance) tuneStance(stance);
+      if (body) {
+        tuneFighterBody(body);
+        // The controller's numbers go on to every fighter already out; the capsule's are read when
+        // a body is made and only reach the ones stood after.
+        for (const n of this.npcs) applyBody(n.controller);
+      }
+    }
+    return { tune: { ...FIGHTER_TUNE }, stance: { ...STANCE_TUNE }, body: { ...FIGHTER_BODY }, brain: { ...BRAIN_TUNE }, out: this.npcs.length, fighters: this.npcs.map((n) => n.status()) };
   }
 
   dispose(): void {

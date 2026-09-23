@@ -330,6 +330,7 @@ export class MobileManager {
     if (inside) {
       held.cell = this.deps.cellAt(m.pos);
       m.room = held.cell?.cell ?? 0;
+      m.navCell = held.cell;
     }
     this.held.set(m, held);
     if (opts.worldId) {
@@ -768,6 +769,7 @@ export class MobileManager {
         held.cell = null;
         held.cellFrom.copy(m.pos);
         m.room = 0;
+        m.navCell = null;
         m.setInside(false);
         this.version++;
       }
@@ -777,6 +779,8 @@ export class MobileManager {
         held.cell = this.deps.followCell(held.cell, held.cellFrom, m.pos);
         held.cellFrom.copy(m.pos);
         m.room = held.cell?.cell ?? 0;
+        // The same room the path is keyed on: the body throws its corners away when this changes.
+        m.navCell = held.cell;
         m.setInside(held.cell !== null);
         // Under the ground outside (the planet's heights came in after it was stood): back on top.
         if (m.liftToGround()) held.cellFrom.copy(m.pos);

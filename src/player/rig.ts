@@ -1058,12 +1058,29 @@ export class CharacterRig {
   }
 
   /**
+   * The spine bones the twist is spread over, worked out once. `bones` is filled in the
+   * constructor and never added to, so this cannot go stale; it was a spread, a filter and a
+   * regular expression per bone on **every call**, which was once a frame for the player and is
+   * now once a frame for every gun-armed fighter in the world as well.
+   */
+  private spines: THREE.Bone[] | null = null;
+
+  private spineBones(): THREE.Bone[] {
+    if (!this.spines) {
+      const found: THREE.Bone[] = [];
+      for (const b of this.bones.values()) if (/^spine_?[1-3]$/i.test(b.name)) found.push(b);
+      this.spines = found;
+    }
+    return this.spines;
+  }
+
+  /**
    * Turn the torso about the vertical by `angle` radians (positive to the character's left),
    * spread over the spine bones, so the upper body can face the camera while the legs run at
    * an angle. Call after update() and after world matrices are current.
    */
   twistTorso(angle: number, pitch = 0): void {
-    const spines = [...this.bones.values()].filter((b) => /^spine_?[1-3]$/i.test(b.name));
+    const spines = this.spineBones();
     // What the head's look measures itself from is what the spine was really given, clamp and all,
     // and nothing at all when there is no spine to turn.
     this.twistYaw = spines.length ? THREE.MathUtils.clamp(angle, -1.2, 1.2) : 0;

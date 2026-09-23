@@ -1196,6 +1196,10 @@ export class World {
     this.npcs.attach({
       cellAt: (p) => this.layoutStream?.buildingAt(p) ?? this.cellState,
       followCell: (state, prev, pos) => (this.layoutStream ? this.layoutStream.trackCell(state, prev, pos) : null),
+      // And whether that room has collision under it this instant: a building's colliders come and
+      // go with the player's distance while the room a body is in goes on answering, so a fighter
+      // with a character controller under it has to be able to ask for the floor and not the room.
+      cellSolid: (state) => this.layoutStream?.cellsSolid(state) ?? true,
     });
     // The NPC ships of this world (unload disposed the last one's). `this.terrain` is assigned above and
     // `this.playerTarget` is a field initialiser; everything else is an arrow read when it is called.
@@ -3970,6 +3974,14 @@ export class World {
 
   describeDoorless(pos: THREE.Vector3): ReturnType<LayoutStreamer['describeDoorless']> {
     return this.layoutStream?.describeDoorless(pos) ?? [];
+  }
+
+  /**
+   * The building room standing at a point, or null outdoors. For the console only: it allocates a
+   * `{ building, cell }` every call, which is why everything in a frame asks `indoorsAt` instead.
+   */
+  buildingAt(pos: THREE.Vector3): CellState | null {
+    return this.layoutStream?.buildingAt(pos) ?? null;
   }
 
   /**

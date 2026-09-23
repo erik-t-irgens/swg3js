@@ -44,6 +44,9 @@ import { planBody, radiusToward, type BodyInput, type BodyPlan } from './shape';
 import { moveSpeeds, stepGait, type GaitStep } from './gait';
 import { BRAIN_TUNE, decide, type BrainSelf, type BrainTarget, type Decision } from './brain';
 import { LOD_TUNE, type LodTier } from './lod';
+import { NavAgent } from '../nav/navAgent.ts';
+import { worldNav } from '../nav/nav.ts';
+import type { CellState } from '../layoutStream';
 import { MobileAnimator, SHOT_PRIORITY } from './animator';
 import { describeRoles, rolesFor } from './packClips';
 import type { PackAsset } from './assets';
@@ -233,6 +236,14 @@ export class Mobile implements Living, NpcSubject {
   inside: boolean;
   /** The building room it is in (the manager follows it through the portals), 0 outside. */
   room = 0;
+  /**
+   * The same room as the building it is in, which is what an indoor path is keyed on. The manager
+   * writes it beside `room`; null outside, and null for every pack and every planet whose buildings
+   * have no rooms, in which case the steering below is exactly what it always was.
+   */
+  navCell: CellState | null = null;
+  /** Its own path: the corners still to walk and the clock that says when to ask for fresh ones. */
+  readonly navAgent = new NavAgent();
   heading: number;
   /** Where it came from: the leash is measured from here. */
   homeX: number;
@@ -1429,6 +1440,17 @@ export class Mobile implements Living, NpcSubject {
         if (this.melee && gap <= (this.entry.stats?.reach ?? 1.5) * this.scale * 0.8) pace = 'stand';
       }
     }
+    // The way out of the room. Indoors, the building's own floors say which corner to walk at next
+    // on the way to where the brain is sending it; only what it *faces* is taken from the path, so
+    // the arrival test below still measures the real goal and a body walking the last corner of a
+    // path does not stop a stride short of it. Outdoors, in a room whose floor the pack has not
+    // got with the goal in that same room, and for anything that flies, `corner` is null and every
+    // line below is the line it always was.
+    if (moveTo && pace !== 'stand' && this.navCell && !this.flyer && !this.driven) {
+      const goalY = target && d && (d.state === 'chase' || d.state === 'attack' || d.state === 'alert') ? target.pos.y : this.pos.y;
+      const corner = worldNav.corner(this.navAgent, this.navCell, this.pos.x, this.pos.y, this.pos.z, moveTo.x, goalY, moveTo.z, this.plan.across, this.now);
+      if (corner) face = corner;
+    }
     if (this.waterAhead && pace !== 'stand') pace = 'stand';
     if (!tier.move || this.stunned > 0 || this.downPhase) pace = 'stand';
     if (!tier.move) {
@@ -1650,6 +1672,10 @@ export class Mobile implements Living, NpcSubject {
     this.stuckClock = 0;
     this.wanderAt = -1;
     this.thinkAt = 0;
+    // A path is a path through one room of one building; a body stood somewhere else carries none
+    // of it. The manager gives it its room again on its next follow.
+    this.navCell = null;
+    this.navAgent.clear();
     // A fresh life has not been spoken about yet, and owes the wire nothing about the last one.
     this.toldOnce = false;
     this.mark = null;

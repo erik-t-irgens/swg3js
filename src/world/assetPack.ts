@@ -11,6 +11,41 @@ export interface CellLight {
   attenuation: number[];
 }
 
+/**
+ * One cell's walkable floor, as the converter read it out of the cell's own floor file and mirrored
+ * into the model's frame with the meshes. Flat arrays of plain numbers: nothing is allocated to
+ * read one, and a reader indexes rather than walks.
+ *
+ *   v   three numbers a vertex: x, y, z
+ *   t   ten numbers a triangle, in this order:
+ *         0..2  the three corner indices into `v`, wound so (b - a) x (c - a) points up
+ *         3..5  the triangle across edge k, or -1 where the mesh ends. Edge k runs from corner k
+ *               to corner k + 1 (mod 3).
+ *         6..8  the cell's own portal link index behind edge k (an index into `cells[i].portals`),
+ *               or -1. Only ever set on an edge with no neighbour.
+ *         9     a three-bit mask: bit k is set when edge k may be walked over. Every edge with a
+ *               neighbour is set; a set edge with no neighbour is a doorway or a step across to
+ *               another piece of the same floor.
+ */
+export interface CellFloor {
+  v: number[];
+  t: number[];
+}
+
+/**
+ * The node graph the client walked that floor by.
+ *   n   five numbers a node: x, y, z, then its type (1 an ordinary node, 0 one standing in a
+ *       doorway) and, for a doorway node, the cell's own portal link index; -1 otherwise.
+ *   e   two node indices an edge. Every edge is listed both ways round, as the file stores it.
+ */
+export interface CellGraph {
+  n: number[];
+  e: number[];
+}
+
+/** The floors.json shape this game reads; a file that says anything else is passed over. */
+export const FLOOR_PACK_VERSION = 1;
+
 export interface PackModelDef {
   id: string;
   file: string;
@@ -24,6 +59,10 @@ export interface PackModelDef {
     portals?: { geometry: number; target: number; passable: boolean }[];
     /** The cell's own lights from the portal file: 0 ambient, 1 parallel, 2 point; Direct3D attenuation constants. */
     lights?: CellLight[];
+    /** The walkable floor the cell names, from the pack's floors.json. Absent on a pack converted before floors. */
+    floor?: CellFloor;
+    /** The path graph beside that floor. Absent where the cell's floor file carries none. */
+    graph?: CellGraph;
   }[];
   /** Portal polygons in model space (vertices and triangle indices), indexed by the cells' `geometry` field. */
   portals?: { v: number[][]; i: number[] }[];
@@ -122,6 +161,32 @@ export class AssetPack {
         if (lr.ok && (lr.headers.get('content-type') ?? '').includes('json')) pack.layout = (await lr.json()) as Layout;
       } catch {
         pack.layout = null;
+      }
+      // The cells' walkable floors, written beside the manifest rather than in it (the manifests
+      // are written indented and a floor is thousands of plain numbers). A pack converted before
+      // they were read has no such file: the cells keep no floor and everything that walks indoors
+      // steers straight at its goal, which is what it did before this existed.
+      try {
+        const fr = await fetch(`${baseUrl}floors.json`);
+        if (fr.ok && (fr.headers.get('content-type') ?? '').includes('json')) {
+          const floors = (await fr.json()) as { version?: number; models?: Record<string, Record<string, { floor?: CellFloor; graph?: CellGraph }>> };
+          if (floors.version === FLOOR_PACK_VERSION && floors.models) {
+            for (const list of Object.values(manifest.categories)) {
+              for (const def of list) {
+                const byCell = floors.models[def.id];
+                if (!byCell || !def.cells) continue;
+                for (const cell of def.cells) {
+                  const block = byCell[String(cell.index)];
+                  if (!block) continue;
+                  if (block.floor) cell.floor = block.floor;
+                  if (block.graph) cell.graph = block.graph;
+                }
+              }
+            }
+          }
+        }
+      } catch {
+        /* no floors in this pack: the game steers, as it always has */
       }
       return pack;
     } catch {

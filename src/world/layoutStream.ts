@@ -92,6 +92,13 @@ export interface Building {
   interior: THREE.Mesh[];
   /** Whether `interior` is currently built, so the sweep can tell "not yet" from "has none". */
   interiorBuilt: boolean;
+  /**
+   * The placed object this building was made from, which is the key its **collision** is held
+   * under: a building's colliders come and go with the player's distance while the building
+   * itself stays, so anything standing on its floors has to be able to ask whether there is one
+   * (`cellsSolid`). Optional only so that a hand-built stand-in in a test need not carry one.
+   */
+  object?: PlacedObject;
 }
 
 interface LoadedTier {
@@ -537,7 +544,7 @@ export class LayoutStreamer {
       const built: (Building | null)[] = list.map((p) => {
         if (!isBuilding || p.contained) return null;
         const matrix = new THREE.Matrix4().compose(tmpV.set(p.x, p.y, p.z), p.q, ONE);
-        const b: Building = { model, template: p.template, x: p.x, z: p.z, radius: model.radius, matrix, inverse: matrix.clone().invert(), interior: [], interiorBuilt: false };
+        const b: Building = { model, template: p.template, x: p.x, z: p.z, radius: model.radius, matrix, inverse: matrix.clone().invert(), interior: [], interiorBuilt: false, object: p };
         buildings.push(b);
         this.buildings.add(b);
         return b;
@@ -772,6 +779,26 @@ export class LayoutStreamer {
 
   get colliderCount(): number {
     return this.colliders.size;
+  }
+
+  /**
+   * Whether the rooms of the building a body is standing in really have collision this instant.
+   *
+   * Which room a body is in is model data (`trackCell` reads boxes, portal polygons and a matrix)
+   * and goes on answering for ever; the colliders those rooms are made of are built only within
+   * `COLLIDER_RANGE` of the player and dropped again beyond it, and the whole tier can unload
+   * under them as well. So for anything that stands on a floor rather than being drawn on one --
+   * a fighter with a character controller under it -- "I am in cell 4" is not the same question as
+   * "there is a floor under me", and asking the first for the second drops the body through it.
+   *
+   * Null (outdoors) is solid: the terrain answers there, and a fighter out of range of the
+   * heightfield has its own floor in `settleFooting`.
+   */
+  cellsSolid(state: CellState | null): boolean {
+    if (!state) return true;
+    const b = state.building;
+    if (!this.buildings.has(b)) return false;
+    return !b.object || this.colliders.has(b.object);
   }
 
   /**
