@@ -39,13 +39,44 @@ export interface UnderwaterTune {
   bodyMurk: number;
   /** The opacity that counts as ordinary water, so a body at exactly this is seen exactly `sight` through. */
   bodyMurkRef: number;
-  /** The radiance of the murk's brightest channel at the surface in full daylight, in scene units. */
+  /**
+   * The radiance of the murk's brightest channel at the surface under `lightRef` worth of light, in
+   * scene units. It is not an absolute any more: what the murk really sits at is this times the
+   * share of `lightRef` the scene's own lights come to (`lightShareFor`), so a storm hour, a
+   * shadowed cove and midnight each dim the water by themselves rather than every body on every
+   * planet reaching one fixed grey.
+   */
   murkLight: number;
-  /** The share of that the murk keeps at midnight, so a night dive is dark rather than black. */
+  /**
+   * The scene light that counts as full daylight, in the renderer's own linear terms: the summed
+   * luminance of the sun, the sky half of the hemisphere and the fill — or, indoors, the room's own
+   * ambient and parallel, whichever set comes to more, exactly as `lightOf` reads them. A planet at
+   * noon comes to about this, so `murkLight` still means at noon what it has always meant.
+   */
+  lightRef: number;
+  /**
+   * The least share of `lightRef` the murk may be lit by, so however dark the hour the water is dark
+   * rather than black. It was the share kept at midnight against the day's own 0 to 1; it is the
+   * same guard, now against the light the scene really has.
+   */
   nightFloor: number;
-  /** Metres: the depth over which the daylight reaching the murk falls away toward `deepFloor`. */
+  /**
+   * And the most. It is **1**, which is to say the murk may be dimmed by the light and never lifted
+   * by it: the owner asked for water that is shadowier, and a ceiling above 1 would have let a
+   * planet whose lights come to more than `lightRef` sit *brighter* at the surface than the fixed
+   * 0.35 this replaced — the change moving the wrong way on exactly the bright planets it was meant
+   * for. With it at 1, `murkLight` is what the murk reaches on the brightest planet at noon and
+   * every other hour and place is darker, which is the one property the request needs and the one
+   * `lightRef`'s own uncertainty cannot spoil. `__debug.underwater({ lightCeil: 1.6 })` gives the
+   * headroom back if a bright planet reads too flat.
+   */
+  lightCeil: number;
+  /** Metres: the depth over which the light reaching the murk falls away toward `deepFloor`. */
   lightDepth: number;
-  /** The share of its surface brightness the murk keeps however deep the camera goes. */
+  /**
+   * The share of its surface brightness the murk keeps however deep the camera goes: the floor that
+   * keeps deep water very dark rather than pure black.
+   */
   deepFloor: number;
   /** The most of the whole picture the depth veil may take, 0..1. `veilFor` never returns more than this, at any strength. */
   veilMax: number;
@@ -59,20 +90,51 @@ export interface UnderwaterTune {
   surfaceEase: number;
   /** The murk stops at the water surface overhead rather than running to the far plane (see `waterPath`). */
   ceiling: boolean;
-  /** How far the shimmer may move the picture, in uv across the screen's *width*, at shimmer strength 1 and right under the eye. */
+  /**
+   * How far the shimmer may move the picture, in uv across the screen's *width*, at shimmer
+   * strength 1 and at the surface. It is the whole frame that moves by this now, so it buys much
+   * more of the picture than the same number did while only the near field wobbled: 0.0035 of a
+   * 1920-wide window is about 3 px at the wobble's extremes and about 1 px most of the time.
+   */
   shimmerUv: number;
   /**
-   * Noise cells across the screen's width. The finer of the two octaves is 2.3 times this, and the
-   * field repeats every `SHIMMER_PERIOD` cells, so past `SHIMMER_PERIOD / 2.3` the finer octave
-   * starts to tile across the view: keep this under about 13.
+   * Noise cells across the screen's **height**, not its width. The shader lays the field out as
+   * `vUv * vec2(aspect, 1) x shimmerCells`, and `vUv.x` spans the width, so the width carries
+   * `aspect` times as many cells as this and a cell is `height / shimmerCells` pixels square
+   * whatever the window's shape (`shimmerCellsAcross`). At the default 3.5 that is a swell about
+   * 309 px across on a 1920x1080 window — six or so across the view — and the same 309 px on an
+   * ultrawide, which is why the count is the height's: widening the window adds swells rather than
+   * stretching them.
+   *
+   * The ceiling is the width's, though. The finer octave samples `SHIMMER_FINE` times as fast and
+   * the field repeats every `SHIMMER_PERIOD` cells, so the largest value that does not tile inside
+   * one view is `SHIMMER_PERIOD / (SHIMMER_FINE x aspect)` — about 7.8 at 16:9, 6.0 at 21:9 and 5.8
+   * on the widest monitor anybody plays on (`shimmerCellsMax`, which the node test sweeps at each of
+   * those shapes). Keep it under about 5.5 and it is safe on all of them. Low is a lens — a few
+   * broad swells across the whole window — and high is heat.
    */
   shimmerCells: number;
   /** Cells a second the noise drifts (the first octave travels `sqrt(1.25)` of this; see `shimmerPhase`). */
   shimmerRate: number;
-  /** Metres of water in front of a pixel: full shimmer at or nearer than this ... */
-  shimmerNear: number;
-  /** ... and none at all past this, so a far wall does not swim. */
-  shimmerFar: number;
+  /**
+   * Metres of water in front of a pixel past which the shimmer is gone. **0 is the lens**, and is
+   * the default: the wobble is the same everywhere in the frame, the far wall and the surface
+   * overhead included, which is what the owner asked for ("like the camera itself has a lens over
+   * it that wobbles slightly"). Anything above 0 puts back the old near-field rule — whole out to
+   * `SHIMMER_FADE_START` metres of water and gone by this — which is kept for one reason only: so
+   * the two can be looked at in one session (`__debug.underwater({ shimmerReach: 28 })` is exactly
+   * the rule as it shipped), which is the comparison the owner was promised and cannot be made at
+   * all once the old rule is deleted.
+   *
+   * **It goes in the next wave, whichever way the owner answers**, rather than waiting on them:
+   * four things carry it and nothing else does — this field and its default, `SHIMMER_FADE_START`
+   * with `shimmerFadeStart`, the tail of `shimmerFor` from `const reach`, and in `underwater.ts` the
+   * `uShimmerFade` uniform with its two lines in `prepare` and the one `if` in the fragment program.
+   * Leaving it is a second rule standing beside the first, which is the thing the brief warned
+   * against; at 0 it is inert (one uniform compare, the same for every pixel in the draw, never
+   * divergent), and that is the only reason it is here for one wave and not for two.
+   */
+  shimmerReach: number;
   /** Metres: the camera depth over which the shimmer eases from all of itself toward `shimmerDeep`. */
   shimmerSurface: number;
   /** The share of the shimmer left far under the surface, where the ripples' own light no longer reaches. */
@@ -90,21 +152,32 @@ export const UNDERWATER_TUNE: UnderwaterTune = {
   bodyMurk: 0.6,
   bodyMurkRef: 0.75,
   murkLight: 0.35,
+  lightRef: 2.8,
   nightFloor: 0.06,
-  lightDepth: 12,
-  deepFloor: 0.25,
+  lightCeil: 1,
+  lightDepth: 6,
+  deepFloor: 0.06,
   veilMax: 0.35,
   veilDepth: 9,
   surfaceEase: 0.6,
   ceiling: true,
-  shimmerUv: 0.006,
-  shimmerCells: 5.5,
-  shimmerRate: 0.09,
-  shimmerNear: 2,
-  shimmerFar: 28,
+  shimmerUv: 0.0035,
+  shimmerCells: 3.5,
+  shimmerRate: 0.18,
+  shimmerReach: 0,
   shimmerSurface: 10,
   shimmerDeep: 0.35,
 };
+
+/**
+ * Metres of water in front of a pixel at which the *old* near-field fade began, kept so that one
+ * number (`shimmerReach`) restores that rule exactly rather than approximately: at reach 28 the fade
+ * runs from 2 m to 28 m, which is the pair the pass shipped with. With a reach shorter than twice
+ * this the start is halved into it instead, so the fade is never inverted whatever is typed.
+ *
+ * It does nothing at the default reach of 0, where there is no fade at all.
+ */
+export const SHIMMER_FADE_START = 2;
 
 /**
  * The neutral body: `waterLookFor`'s own default (#2e7fbb) in linear light, its own opacity, and a
@@ -129,20 +202,52 @@ export const UNDERWATER_FALLBACK: { readonly color: Readonly<Vec3>; readonly dep
  *
  * It is 32 rather than the 16 the wrap needs because the period is also how far the field may be
  * stretched before it tiles across the screen, and `shimmerCells` is a live knob: at 32 the finer
- * octave has room out to about 13 cells across the view.
+ * octave has room out to `shimmerCellsMax` cells across the screen's height, which is about 7.8 on
+ * a 16:9 window and 6.0 on a 21:9 one. (It is not 13. That figure was worked out as though
+ * `shimmerCells` counted across the *width*; it counts across the height, and the width carries
+ * `aspect` times as many, so the real ceiling is that much lower — see `shimmerCellsMax`.)
  */
 export const SHIMMER_PERIOD = 32;
 export const SHIMMER_WRAP = SHIMMER_PERIOD * 2;
+
+/**
+ * How much faster the finer of the two octaves samples the lattice. The pass writes this straight
+ * into its own GLSL, as it does `SHIMMER_PERIOD`, so the shader and `shimmerCellsMax` cannot pick
+ * two different numbers — which is the whole of what made the tiling ceiling wrong before.
+ */
+export const SHIMMER_FINE = 2.3;
+
+/**
+ * The lights the murk is lit by, read structurally so this module still imports nothing: the
+ * frame's own `FxLights` (`src/core/fx/lights.ts`) satisfies it exactly, and a node test can hand
+ * over a plain object. Only luminances are read, so nothing here allocates or touches a colour.
+ *
+ * Which lights: the same four `World.litIrradianceNear` adds for the blade glow's ceiling — the sun
+ * (or the moon; with the cascades on they carry its colour and intensity, and `fillFxLights` reads
+ * them), the sky half of the hemisphere, the client's unshadowed fill, and a lit room's ambient and
+ * parallel. A room that is not lit holds zeros, so no test is needed for it.
+ */
+export interface UnderwaterLightSources {
+  readonly sky: {
+    readonly sun: { readonly luminance: number };
+    readonly hemiSkyLuminance: number;
+    readonly fill: { readonly luminance: number };
+  };
+  readonly rooms: {
+    readonly ambientLuminance: number;
+    readonly parallel: { readonly luminance: number };
+  };
+}
 
 /** What one frame comes to: the five things the shader is given. */
 export interface UnderwaterLook {
   /** Per channel, 1 / metres: how fast it is eaten. Already times the look's strength, the body's own murkiness and the surface ease. */
   extinction: Vec3;
-  /** The colour a far pixel becomes, in scene units: lit, dimmed for the camera's depth and for the hour. */
+  /** The colour a far pixel becomes, in scene units: the body's hue under the light the scene really has, dimmed as the camera goes down. */
   murk: Vec3;
   /** 0..1: how much of the whole picture, near pixels and the surface overhead included, is taken by the murk. */
   veil: number;
-  /** How far the shimmer may move a pixel right under the eye, in uv; the distance fade is per pixel. */
+  /** How far the shimmer may move a pixel, in uv. The same for every pixel in the frame unless `shimmerReach` is on. */
   shimmer: number;
   /** 0..1: how much of the whole look this depth has brought in (`easeIn`), kept for the console only. */
   ease: number;
@@ -225,18 +330,76 @@ export function extinctionFor(color: Readonly<Vec3>, strength: number, tune: Und
 }
 
 /**
- * The colour a far pixel becomes: the body's own hue, at the brightness `murkLight` sets, dimmed as
- * the camera goes down (the light has that much more water to get through) and as the day goes
- * (`daylight` is the world's own 0 at night, 1 by day).
+ * The light the scene really has, in the renderer's own linear terms: the sun, the sky half of the
+ * hemisphere and the fill, or a lit room's ambient and parallel, whichever of the two sets comes to
+ * more.
+ *
+ * **The brighter of the two, not both.** `World.litIrradianceNear` adds all five, and this used to
+ * as well, but that sum is a deliberate over-estimate used as a *ceiling* for the blade glow, where
+ * too high is merely cautious. Here it is the value itself, and inside a building the sky set does
+ * not light the cell at all — that is the whole of the portal renderer's layer split — so adding the
+ * lamps on top of a sun that is not shining in would read an indoor pool as brighter than open sea
+ * at noon, which is the opposite of what was asked for. Taking the larger set leaves every outdoor
+ * frame exactly as it was (a room that is not lit holds zeros) and can never make a roofed pool
+ * brighter than the sky above the roof.
+ *
+ * A record no frame has filled is all zeros, and there is no planet whose sky is off while anything
+ * is drawn at all, so a light that is not above zero is read as "not told" and answered with
+ * `lightRef` — a frame the game did not fill must leave the water looking like daylight rather than
+ * paint the screen black. A record that is not there at all (a driven frame built by hand, a test)
+ * goes the same way rather than throwing inside a draw, which is why every reach is guarded.
  */
-export function murkFor(color: Readonly<Vec3>, cameraDepth: number, daylight: number, tune: UnderwaterTune, out: Vec3): Vec3 {
+export function lightOf(src: Readonly<UnderwaterLightSources> | null | undefined, tune: UnderwaterTune): number {
+  const ref = Math.max(1e-4, finite(tune.lightRef, 2.8));
+  const sky = src?.sky;
+  const rooms = src?.rooms;
+  // Written out rather than folded through a helper: this runs on every frame the camera is under
+  // water, and a closure made here would be an allocation a frame.
+  let open = 0;
+  if (sky) {
+    if (sky.sun) open += Math.max(0, finite(sky.sun.luminance, 0));
+    open += Math.max(0, finite(sky.hemiSkyLuminance, 0));
+    if (sky.fill) open += Math.max(0, finite(sky.fill.luminance, 0));
+  }
+  let indoors = 0;
+  if (rooms) {
+    indoors += Math.max(0, finite(rooms.ambientLuminance, 0));
+    if (rooms.parallel) indoors += Math.max(0, finite(rooms.parallel.luminance, 0));
+  }
+  const light = open > indoors ? open : indoors;
+  return light > 0 ? light : ref;
+}
+
+/**
+ * How brightly the murk is lit, as a share of the reference daylight: the scene's own light over
+ * `lightRef`, held between `nightFloor` and `lightCeil`. This is the whole of what makes the water
+ * sit under the light the world has rather than at one fixed level on every planet at every hour —
+ * the murk used to be an absolute radiance written into a linear target that runs well above 1 in
+ * daylight, so a body that should have been a dark pool reached the same grey-blue as open sea at
+ * noon and the far water read *brighter* than the near picture.
+ *
+ * A light that is not a number reads as the reference day, never as darkness.
+ */
+export function lightShareFor(light: number, tune: UnderwaterTune): number {
+  const ref = Math.max(1e-4, finite(tune.lightRef, 2.8));
+  const floor = clamp01(finite(tune.nightFloor, 0.06));
+  const ceil = Math.max(floor, finite(tune.lightCeil, 1));
+  const share = Math.max(0, finite(light, ref)) / ref;
+  return share < floor ? floor : share > ceil ? ceil : share;
+}
+
+/**
+ * The colour a far pixel becomes: the body's own hue, at `murkLight` times the share of the
+ * reference daylight the scene's lights come to, dimmed as the camera goes down — the light has
+ * that much more water to get through, and that fall is what makes deep water read as shadow rather
+ * than as a brightening fog. `light` is `lightOf`'s sum, not the day's own 0 to 1.
+ */
+export function murkFor(color: Readonly<Vec3>, cameraDepth: number, light: number, tune: UnderwaterTune, out: Vec3): Vec3 {
   const depth = Math.max(0, finite(cameraDepth, 0));
-  const deepFloor = clamp01(finite(tune.deepFloor, 0.25));
-  const lightDepth = Math.max(0.01, finite(tune.lightDepth, 12));
-  const nightFloor = clamp01(finite(tune.nightFloor, 0.06));
+  const deepFloor = clamp01(finite(tune.deepFloor, 0.06));
+  const lightDepth = Math.max(0.01, finite(tune.lightDepth, 6));
   const down = deepFloor + (1 - deepFloor) * Math.exp(-depth / lightDepth);
-  const day = nightFloor + (1 - nightFloor) * clamp01(finite(daylight, 1));
-  const level = Math.max(0, finite(tune.murkLight, 0.35)) * down * day;
+  const level = Math.max(0, finite(tune.murkLight, 0.35)) * down * lightShareFor(light, tune);
   const peak = Math.max(color[0], color[1], color[2], 1e-6);
   for (let i = 0; i < 3; i++) out[i] = (Math.max(0, color[i]) / peak) * level;
   return out;
@@ -279,25 +442,69 @@ export function waterPath(distance: number, rayUp: number, cameraDepth: number, 
 }
 
 /**
- * How far the shimmer may move a pixel, in uv: all of it near the eye, nothing past `shimmerFar`,
- * and less the deeper the camera is, since what makes the picture wobble is the light bending
- * through the ripples overhead.
+ * How many noise cells the lens lays across the screen's **width**, which is `shimmerCells` times
+ * the window's aspect and not `shimmerCells` itself.
  *
- * `path` is the water in front of the pixel (`waterPath`), not how far off the pixel is. That is
- * deliberate: the surface overhead and the sky through it carry the far plane's depth, and they are
- * the one thing whose ripples cause this, so faded on distance they would be the one place in the
- * picture that did not wobble.
+ * The shader's layout is `vec2 p = vUv * vec2(aspect, 1.0) * uShimmer.y`, and `vUv.x` spans the
+ * width: so `p.x` runs from 0 to `aspect x cells` across the width while `p.y` runs 0 to `cells`
+ * down the height. That is what keeps a cell square in pixels (`height / cells` each way), and it
+ * is what makes every figure quoted across the width — a swell's width, how near the field is to
+ * tiling — carry the aspect. Reported by `__debug.underwater` so the owner is judging the number
+ * their own window really has.
+ */
+export function shimmerCellsAcross(cells: number, aspect: number): number {
+  return Math.max(0, finite(cells, 0)) * Math.max(0, finite(aspect, 1));
+}
+
+/**
+ * The largest `shimmerCells` whose finer octave still does not repeat within one view, on a window
+ * of this shape: the lattice tiles every `SHIMMER_PERIOD` cells, the finer octave samples
+ * `SHIMMER_FINE` times as fast, and the furthest the frame reaches along either of the noise's own
+ * axes is `cells x max(1, aspect)` (see `shimmerCellsAcross`; the v channel samples the same field
+ * with its axes swapped, so the same pair of spans covers both).
+ *
+ * About 7.8 at 16:9 and 6.0 at 21:9. The default of 3.5 is well inside both; anything past this
+ * shows the same swell twice in one frame, which reads as a pattern rather than as water.
+ */
+export function shimmerCellsMax(aspect: number): number {
+  const a = Math.max(1, finite(aspect, 1));
+  return SHIMMER_PERIOD / (SHIMMER_FINE * a);
+}
+
+/**
+ * Where the old near-field fade begins, for a given reach. One function so the pass and this module
+ * cannot pick two different numbers; at the default reach of 0 there is no fade and this is unused.
+ */
+export function shimmerFadeStart(reach: number): number {
+  const r = Math.max(0, finite(reach, 0));
+  return r > 0 ? Math.min(SHIMMER_FADE_START, r * 0.5) : 0;
+}
+
+/**
+ * How far the shimmer may move a pixel, in uv.
+ *
+ * It is **the whole frame's** number: the surface overhead, the sky through it, the bed, a far wall
+ * and the pixel against the eye all move by the same amount, because what the owner asked for is a
+ * lens over the camera rather than a haze hanging on what is near. It still falls away with the
+ * camera's own depth, since what makes the picture wobble is the light bending through the ripples
+ * overhead and deep down that light is no longer arriving; that is one number over the whole frame
+ * and not a second rule about where a pixel is.
+ *
+ * The rule this replaced faded it out on `path`, the water in front of each pixel (`waterPath`), so
+ * that a far wall did not swim. It sold "there is something on this material" rather than "I am
+ * looking through water", which is what the owner reported. It is still reachable, for comparison
+ * only, by giving `shimmerReach` the distance it used to end at; `path` is ignored at the default.
  */
 export function shimmerFor(path: number, cameraDepth: number, strength: number, tune: UnderwaterTune): number {
   const k = Math.max(0, finite(strength, 1));
   if (k <= 0) return 0;
-  const near = Math.max(0, finite(tune.shimmerNear, 2));
-  const far = Math.max(near + 0.01, finite(tune.shimmerFar, 28));
-  const fade = 1 - smoothstep(near, far, Math.max(0, finite(path, 0)));
   const surface = Math.max(0.01, finite(tune.shimmerSurface, 10));
   const deep = clamp01(finite(tune.shimmerDeep, 0.35));
   const sank = 1 - Math.exp(-Math.max(0, finite(cameraDepth, 0)) / surface);
-  return Math.max(0, finite(tune.shimmerUv, 0.006)) * k * fade * (1 + (deep - 1) * sank);
+  const amp = Math.max(0, finite(tune.shimmerUv, 0.0035)) * k * (1 + (deep - 1) * sank);
+  const reach = Math.max(0, finite(tune.shimmerReach, 0));
+  if (!(reach > 0)) return amp;
+  return amp * (1 - smoothstep(shimmerFadeStart(reach), reach, Math.max(0, finite(path, 0))));
 }
 
 /**
@@ -315,14 +522,15 @@ export function shimmerPhase(time: number, tune: UnderwaterTune): number {
 
 /**
  * The whole frame's numbers in one go: what `prepare` writes into the uniforms and what the node
- * test sweeps. `shimmer` here is the amplitude right under the eye; the shader applies the fade on
- * the water in front of each pixel, which is `shimmerFor` with the same arguments.
+ * test sweeps. `shimmer` is the amplitude every pixel in the frame takes; only with `shimmerReach`
+ * turned on for a comparison does the shader narrow it per pixel, which is `shimmerFor` with that
+ * pixel's own `path`.
  */
 export function deriveUnderwater(
   color: Readonly<Vec3>,
   opacity: number,
   cameraDepth: number,
-  daylight: number,
+  light: number,
   strength: number,
   shimmerStrength: number,
   tune: UnderwaterTune,
@@ -332,7 +540,8 @@ export function deriveUnderwater(
   const ease = easeIn(cameraDepth, tune);
   const body = murkinessFor(opacity, tune);
   extinctionFor(color, Math.max(0, finite(strength, 1)) * body * ease, tune, out.extinction);
-  murkFor(color, cameraDepth, daylight, tune, out.murk);
+  // `light` is the scene's own (`lightOf`), not the day's 0 to 1: see `lightShareFor`.
+  murkFor(color, cameraDepth, light, tune, out.murk);
   out.veil = veilFor(cameraDepth, strength, tune) * ease;
   out.shimmer = shimmerFor(0, cameraDepth, shimmerStrength, tune) * ease;
   out.ease = ease;
@@ -362,6 +571,25 @@ export function applyUnderwaterPixel(color: Readonly<Vec3>, path: number, look: 
  * Write a few of the tuning numbers, ignoring anything that is not a key of its own kind: the one
  * place `__debug.underwater` is allowed to change. Returns the live object.
  */
+/**
+ * The names in a patch `tuneUnderwater` will drop on the floor: a key that is not one of its own,
+ * or one given the wrong kind of value. It drops them in silence, which is the right thing inside a
+ * draw and the wrong thing at a console — `shimmerNear` and `shimmerFar` outlived the tune by a
+ * whole wave in a doc comment, and anybody who typed one would have watched nothing happen and
+ * concluded the shimmer was broken. `__debug.underwater` reports this beside the tuning.
+ */
+export function unknownUnderwaterKeys(patch: Partial<UnderwaterTune> | undefined): string[] {
+  if (!patch) return [];
+  const into = UNDERWATER_TUNE as unknown as Record<string, unknown>;
+  const dropped: string[] = [];
+  for (const [key, value] of Object.entries(patch)) {
+    if (!(key in UNDERWATER_TUNE) || typeof value !== typeof into[key] || (typeof value === 'number' && !Number.isFinite(value))) {
+      dropped.push(key);
+    }
+  }
+  return dropped;
+}
+
 export function tuneUnderwater(patch: Partial<UnderwaterTune> | undefined): UnderwaterTune {
   if (!patch) return UNDERWATER_TUNE;
   const into = UNDERWATER_TUNE as unknown as Record<string, unknown>;

@@ -3,19 +3,41 @@
 // There was no under water in the game at all — you could not go under — so nothing here is copied
 // from anything. With Effects off this pass does not exist and the game under water looks exactly
 // as it always did; with Effects on the picture is graded by how much water each pixel is seen
-// through, a flat veil rises with how deep the camera itself is, and the whole view shimmers a
-// little near the eye. Every number is in `underwaterMath.ts` and live through `__debug.underwater`.
+// through, a flat veil rises with how deep the camera itself is, and the whole frame wobbles gently,
+// as through a lens held over the camera. Every number is in `underwaterMath.ts` and live through
+// `__debug.underwater`.
 //
-// Four things about it are not obvious.
+// Five things about it are not obvious.
 //
 // Water writes no depth. So the surface overhead, and the sky through it, carry the depth of
 // whatever stands beyond them — the far plane — and a fog driven by the scene depth alone would
 // paint the whole way up solid murk. The way out is arithmetic rather than another buffer: the
 // surface is a plane `cameraDepth` metres over the eye, so a ray leaving upward is in water for
 // `cameraDepth / up` metres and no further (`waterPath`). Looking up is then bright, looking along
-// the bed is murk, and nothing had to be traced. The shimmer fades on that same length rather than
-// on how far the pixel is, so the surface overhead — the one thing whose ripples cause the wobble —
-// is the one thing that wobbles most.
+// the bed is murk, and nothing had to be traced.
+//
+// The wobble is a lens and not a haze. It once faded out on the water in front of each pixel, so a
+// far wall did not swim and only what was close moved; the owner played it and said it read as
+// something sitting on the materials rather than as looking through water, and asked instead for
+// "the camera itself has a lens over it that wobbles slightly". So the amplitude is now one number
+// for the whole frame — the bed, a far wall, the surface overhead and the sky through it alike — and
+// nothing about where a pixel is changes it. It still falls away with the camera's own *depth*
+// (`shimmerSurface`, `shimmerDeep`), which is one number over the whole frame rather than a second
+// rule about where a pixel stands, because the light that bends is the light coming through the
+// ripples overhead. The old rule is one knob away for as long as the owner wants to compare the two
+// (`shimmerReach`; see `shimmerFor`), and goes when they have settled.
+//
+// Deeper is darker, and the murk is a share of the light the world has rather than a level of its
+// own. The owner played the first cut and said the water "gets brighter as it goes deeper like fog,
+// but it should become shadowier". It did, and for a reason worth writing down: the murk was an
+// absolute radiance (0.35) written into a linear scene target that runs well above 1 in daylight,
+// and each body's colour is normalised by its own peak, so every body on every planet at every hour
+// reached that one level. Anything darker than it — a shaded bed ten metres down — was *raised*
+// toward it by distance, which is a fog that lightens. Now the level is `murkLight` times the share
+// of `lightRef` the frame's own lights come to (`lightOf`, `lightShareFor`, from the record
+// `World.fillFxLights` fills just before the chain runs) and it falls with the camera's own depth
+// over `lightDepth` toward `deepFloor`, which is a floor and not a level, so deep water is very dark
+// and never pure black. With Effects off none of this exists, as none of the pass does.
 //
 // The whole look eases in over the first half metre (`easeIn`). "Am I under water" is answered with
 // a margin and hysteresis, so for a band reaching above the plain surface the answer is yes and the
@@ -37,7 +59,13 @@ import { FX_FULLSCREEN_VERTEX, FX_HASH, FX_LINEARIZE } from './glsl';
 import {
   createUnderwaterLook,
   deriveUnderwater,
+  lightOf,
+  lightShareFor,
+  shimmerCellsAcross,
+  shimmerCellsMax,
+  shimmerFadeStart,
   shimmerPhase,
+  SHIMMER_FINE,
   SHIMMER_PERIOD,
   UNDERWATER_FALLBACK,
   UNDERWATER_TUNE,
@@ -61,10 +89,18 @@ const UNDERWATER = {
     uVeil: { value: 0 },
     /** x: metres the camera is under the surface; y: 1 while the murk stops at the surface overhead. */
     uCeiling: { value: new THREE.Vector2(0, 1) },
-    /** x: uv the picture may move right under the eye; y: noise cells across the screen; z: the drift's phase. */
+    /**
+     * x: uv the whole frame may move; y: noise cells across the screen's **height** (the width
+     * carries `aspect` times as many — see the layout line below and `shimmerCellsAcross`);
+     * z: the drift's phase.
+     */
     uShimmer: { value: new THREE.Vector3() },
-    /** Metres of water in front of a pixel: the shimmer is whole at x and gone by y. */
-    uShimmerFade: { value: new THREE.Vector2(2, 28) },
+    /**
+     * The comparison knob only. y is `shimmerReach`: **0, the default, is the lens** and the branch
+     * below is not taken at all; above 0 the old near-field rule is back, whole out to x metres of
+     * water in front of the pixel and gone by y.
+     */
+    uShimmerFade: { value: new THREE.Vector2(0, 0) },
   },
   vertexShader: FX_FULLSCREEN_VERTEX,
   fragmentShader: /* glsl */ `
@@ -98,8 +134,10 @@ const UNDERWATER = {
     // haze's, slower and much smaller, so it reads as light bending rather than as heat. Over one
     // wrap of the phase (0 to 2 x the period) the first octave moves (2P, P) cells and the second
     // (-P, -2P), each a whole number of periods, so the field at the wrap is the field at 0 exactly.
+    // The finer octave's rate is written in from SHIMMER_FINE, because shimmerCellsMax -- the
+    // largest shimmerCells that does not tile inside one view -- is worked out from that number.
     float wobble(vec2 p, float phase) {
-      return uwNoise(p + phase * vec2(1.0, 0.5)) * 0.65 + uwNoise(p * 2.3 - phase * vec2(0.5, 1.0)) * 0.35;
+      return uwNoise(p + phase * vec2(1.0, 0.5)) * 0.65 + uwNoise(p * ${SHIMMER_FINE} - phase * vec2(0.5, 1.0)) * 0.35;
     }
 
     void main() {
@@ -120,15 +158,21 @@ const UNDERWATER = {
       if (uCeiling.y > 0.5 && up > 0.0) path = min(path, uCeiling.x / max(up, 1e-4));
       if (!(path >= 0.0)) path = 0.0;
 
-      // The shimmer: read the picture from a little to one side, whole where there is little water
-      // in front of the pixel and gone where there is a lot, so the surface overhead wavers and the
-      // far wall does not swim. The length is this pixel's own rather than the one it borrows from,
-      // which keeps a silhouette's murk from jumping as the offset crosses it, and the offset is
-      // scaled by the aspect in v so the wobble is as wide as it is tall in pixels.
+      // The shimmer: read the picture from a little to one side, by the same amount everywhere in
+      // the frame, so the whole view wobbles as if through a lens rather than only what is close.
+      // The murk below still uses this pixel's own path and not the one it borrows from, which
+      // keeps a silhouette's murk from jumping as the offset crosses it, and the offset is scaled by
+      // the aspect in v so the wobble is as wide as it is tall in pixels.
       vec2 uv = vUv;
       float aspect = uTanHalfFov.x / max(uTanHalfFov.y, 1e-6);
-      float amp = uShimmer.x * (1.0 - smoothstep(uShimmerFade.x, uShimmerFade.y, path));
+      float amp = uShimmer.x;
+      // The old near-field rule, for comparison only and off at the default (uShimmerFade.y is 0).
+      // One uniform decides it for every pixel in the draw, so the branch never diverges.
+      if (uShimmerFade.y > 0.0) amp *= 1.0 - smoothstep(uShimmerFade.x, uShimmerFade.y, path);
       if (amp > 1e-5) {
+        // vUv.x spans the width, so this lays uShimmer.y cells down the HEIGHT and aspect times as
+        // many across the width, which is what keeps a cell square in pixels. Every figure quoted
+        // across the width therefore carries the aspect: shimmerCellsAcross, shimmerCellsMax.
         vec2 p = vUv * vec2(aspect, 1.0) * uShimmer.y;
         vec2 off = (vec2(wobble(p, uShimmer.z), wobble(p.yx + 11.3, uShimmer.z)) - 0.5) * amp * vec2(1.0, aspect);
         // NaN, or further than any strength should reach: no move at all.
@@ -156,7 +200,7 @@ export class UnderwaterPass extends ShaderFxPass {
   private readonly look: UnderwaterLook = createUnderwaterLook();
   private readonly body: Vec3 = [0, 0, 0];
   /** What the last frame drawn was given, for `__debug.underwater` only. */
-  private readonly last = { depth: 0, opacity: 0, daylight: 1, depthWasFinite: false, drewFrame: -1 };
+  private readonly last = { depth: 0, opacity: 0, daylight: 1, light: 0, lightShare: 1, depthWasFinite: false, drewFrame: -1, aspect: 1 };
 
   constructor() {
     super(UNDERWATER);
@@ -203,7 +247,13 @@ export class UnderwaterPass extends ShaderFxPass {
     const opacity = Number.isFinite(ctx.underwaterOpacity) ? ctx.underwaterOpacity : UNDERWATER_FALLBACK.opacity;
     const S = ctx.settings;
     const T = UNDERWATER_TUNE;
-    const look = deriveUnderwater(this.body, opacity, depth, ctx.daylight, S.underwaterStrength, S.underwaterShimmerStrength, T, this.look);
+    // What is lighting the world this frame, from the record `World.fillFxLights` refilled a few
+    // lines before the chain runs: the sun (or the moon), the sky half of the hemisphere, the fill
+    // and a lit room's own ambient and parallel. The murk is a share of this rather than a fixed
+    // radiance, which is what stops a dark pool at dusk reaching the same grey-blue as open sea at
+    // noon, and `lightOf` answers with the reference day when the record holds nothing at all.
+    const light = lightOf(ctx.lights, T);
+    const look = deriveUnderwater(this.body, opacity, depth, light, S.underwaterStrength, S.underwaterShimmerStrength, T, this.look);
 
     const u = this.material.uniforms;
     u.tDepth.value = ctx.depth;
@@ -220,13 +270,20 @@ export class UnderwaterPass extends ShaderFxPass {
     // (`shimmerPhase`), so the field after the wrap is the field before it and no shader ever
     // carries a large, growing time into a hash.
     (u.uShimmer.value as THREE.Vector3).set(look.shimmer, Math.max(0.1, T.shimmerCells), shimmerPhase(ctx.time, T));
-    (u.uShimmerFade.value as THREE.Vector2).set(Math.max(0, T.shimmerNear), Math.max(Math.max(0, T.shimmerNear) + 0.01, T.shimmerFar));
+    // 0 at the default, which is the lens: the shader's fade branch is then not taken at all.
+    const reach = Math.max(0, T.shimmerReach);
+    (u.uShimmerFade.value as THREE.Vector2).set(shimmerFadeStart(reach), reach);
 
     this.last.depth = depth;
     this.last.opacity = opacity;
     this.last.daylight = ctx.daylight;
+    this.last.light = light;
+    this.last.lightShare = lightShareFor(light, T);
     this.last.depthWasFinite = depthWasFinite;
     this.last.drewFrame = ctx.frame;
+    // The window's own shape, kept so `describe` can answer about the lattice in the width's terms
+    // rather than in the tune's. `uTanHalfFov` is (tan(fov/2) x aspect, tan(fov/2)).
+    this.last.aspect = ctx.tanHalfFov.x / Math.max(ctx.tanHalfFov.y, 1e-6);
   }
 
   /** For `__debug.underwater`: what the last frame drawn was given and what it came to. Reads stored values only. */
@@ -237,6 +294,11 @@ export class UnderwaterPass extends ShaderFxPass {
       cameraDepth: this.last.depth,
       bodyOpacity: this.last.opacity,
       daylight: this.last.daylight,
+      // The light the world really had this frame (sun + sky + fill + a lit room's own), and that
+      // over `lightRef`, held between `nightFloor` and `lightCeil`: what the murk's level is a share
+      // of. A share near 1 is a planet at noon; the murk is that much of `murkLight` at the surface.
+      sceneLight: this.last.light,
+      lightShare: this.last.lightShare,
       // False only on a frame whose handed-over depth was not a number and the fallback was worn.
       depthWasFinite: this.last.depthWasFinite,
       bodyColor: [this.body[0], this.body[1], this.body[2]],
@@ -246,7 +308,20 @@ export class UnderwaterPass extends ShaderFxPass {
       channelMetres: l.extinction.map((k) => (k > 1e-9 ? 1 / k : Infinity)),
       murk: [l.murk[0], l.murk[1], l.murk[2]],
       veil: l.veil,
+      // How far the whole frame may move, in uv across the screen's width. The same for every pixel
+      // unless `shimmerReach` (in this call's `tuning`) has been given the old near-field rule back.
       shimmerUv: l.shimmer,
+      // The lattice in the terms the owner can see it in, on the window they are really playing on.
+      // `shimmerCells` is counted across the *height*; the width carries `aspect` times as many, so
+      // a figure worked out by dividing the window's width by the tune's own number is out by the
+      // aspect. `cellsMax` is the largest `shimmerCells` this window can take before the finer
+      // octave repeats inside one view.
+      shimmerLattice: {
+        aspect: this.last.aspect,
+        cellsDown: Math.max(0.1, UNDERWATER_TUNE.shimmerCells),
+        cellsAcross: shimmerCellsAcross(Math.max(0.1, UNDERWATER_TUNE.shimmerCells), this.last.aspect),
+        cellsMax: shimmerCellsMax(this.last.aspect),
+      },
     };
   }
 }

@@ -333,6 +333,76 @@ export function stillInLava(raw: boolean, secondsSince: number, linger: number =
   return Number.isFinite(secondsSince) && secondsSince < l;
 }
 
+/**
+ * One subject's standing in a flow, as the tick remembers it between steps. There are two readers of
+ * it -- the world's hazard tick, which decides whether anything is hurt, and the player's sink, which
+ * decides how far the figure is drawn down -- and they must draw the **same** line, so they step the
+ * same record through the same function below rather than each writing the three lines out.
+ *
+ * They really could differ otherwise, and not by a centimetre: `inLava`'s band moves a line by
+ * `hold` metres, but `stillInLava` bridges a case no distance can reach, and a reader that had the
+ * band and not the bridge would come out false for half a second in the middle of a flow. On the lava
+ * planet that is not a wobble but a jump -- where no local table covers a column, `World.lavaAt`
+ * falls through to the global sea's level, which is metres *below* the feet, so the depth goes from
+ * half a metre under the surface to a large negative in a single step.
+ */
+export interface LavaHold {
+  /**
+   * The verdict as it stands, bridge and all: what is said, whether the clock is kept, and what the
+   * next step's `inLava`/`rideOverLava` take as `was`.
+   */
+  in: boolean;
+  /**
+   * Whether **this** step's own verdict was true, with no bridge. It is the only one a blow may ever
+   * be charged for, so that nobody is burnt for ground they have really left.
+   */
+  raw: boolean;
+  /** Seconds since `raw` was last true; Infinity where it never has been. */
+  gap: number;
+  /**
+   * The last depth that really was in the flow. A bridged step has no depth worth reading -- the
+   * column it stands over is not the flow's at all -- so whatever measures itself against the surface
+   * measures against this instead and holds where it was, which is the whole meaning of the bridge.
+   */
+  depth: number;
+}
+
+/** Nothing in anything, nothing remembered. */
+export function newLavaHold(): LavaHold {
+  return { in: false, raw: false, gap: Infinity, depth: -Infinity };
+}
+
+/**
+ * Everything forgotten, in silence: a world going, the switch going off, a body that has stopped
+ * standing on its own feet (mounted, noclipping, adrift, aboard a hull's rooms). Turning the switch
+ * back on then says the line afresh rather than saying "out" first.
+ */
+export function resetLavaHold(h: LavaHold): void {
+  h.in = false;
+  h.raw = false;
+  h.gap = Infinity;
+  h.depth = -Infinity;
+}
+
+/**
+ * Move one subject's verdict on by `dt` seconds, given what `World.lavaAt` says about the point that
+ * matters (a body's feet, a ride's belly). `ride` picks which of the two lines is drawn: a hover
+ * machine never gets under a surface at all, so what it rides over is measured with a reach.
+ *
+ * This is the whole of the rule and there is deliberately no second copy of it anywhere. Allocates
+ * nothing, and a subject over no flow at all is one compare and an add.
+ */
+export function stepLavaHold(h: LavaHold, dt: number, depth: number, ride = false): LavaHold {
+  const raw = ride ? rideOverLava(depth, h.in) : inLava(depth, h.in);
+  if (raw) {
+    h.gap = 0;
+    h.depth = depth;
+  } else h.gap += Number.isFinite(dt) && dt > 0 ? dt : 0;
+  h.raw = raw;
+  h.in = stillInLava(raw, h.gap);
+  return h;
+}
+
 /** Write the knobs, ignoring anything that is not a finite number (or a boolean where one goes). */
 export function tuneLavaHarm(t: LavaHarmTune | undefined): typeof LAVA_HARM {
   if (!t) return LAVA_HARM;

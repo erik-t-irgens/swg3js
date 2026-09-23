@@ -3,6 +3,7 @@ import type { WaterLook } from './waterLook';
 import { GLSL_OCT_ENCODE } from '../core/glslOct';
 import { RAIN_RINGS_GLSL, WEATHER_PARS_GLSL, WEATHER_UNIFORMS } from './wetness';
 import { WATER_SIM_ON, WATER_SIM_RELIEF, WATER_SIM_TEX, WATER_SIM_WINDOW } from './waterSim';
+import { surfaceBandFor, surfaceHideUniform, tuneWaterSurface, WATER_SURFACE_TUNE, type WaterSurfaceTune } from './waterSurfaceMath.ts';
 
 /**
  * Water: a physically based surface that reflects the sky's environment map, moved by a
@@ -14,7 +15,11 @@ import { WATER_SIM_ON, WATER_SIM_RELIEF, WATER_SIM_TEX, WATER_SIM_WINDOW } from 
  *
  * Each body's colour, opacity and how hard and fast its ripples run come from the terrain's own
  * water shader (`WaterLook`), so a sulphur sea and a clear pool are the same material with
- * different numbers.
+ * different numbers. That opacity is the body's floor rather than the whole of it: seen from above,
+ * the surface hides more of what is under it the deeper the water beneath the pixel is
+ * (`waterSurfaceMath.ts`, `WATER_SURFACE_HIDE`), which is the owner's "I can see as far as possible
+ * through the surface of the water". It is uniforms on this one program and nothing else, so it
+ * holds with the Effects setting off, where the look pass under water does not exist at all.
  */
 export interface WaterUniforms {
   uTime: { value: number };
@@ -56,6 +61,46 @@ export const WATER_FX_TRACED = { value: 0.55 };
 export const WATER_WIND = { value: new THREE.Vector2(0, 0) };
 /** The wind speed the flow reaches its full rate at (m/s); the weather divides by this. */
 export const WATER_WIND_FULL = 12;
+/**
+ * How the surface hides what is under it, for every water material at once: x the strength (0 is
+ * the water exactly as it was), y the opacity deep water reaches, z and w the metres of depth it
+ * runs between. `WaterSurfaceTune` is the readable copy and the node test's; these are the two
+ * objects the card sees.
+ *
+ * It reaches only pixels the depth window has a real height for. Where it has none -- the seconds
+ * after a load, and anything past about 900 m, which is outside the window altogether -- the rule is
+ * off and the body wears the converted shader's own opacity, as it always did.
+ */
+export const WATER_SURFACE_HIDE = { value: new THREE.Vector4(0, 0.96, 0.5, 5) };
+/** Metres the camera must stand over a body's own surface for the whole of that rule; under it, none of it. */
+export const WATER_SURFACE_BAND = { value: 0.5 };
+
+/** The four slots, held rather than made, so the sync allocates nothing however often it is called. */
+const HIDE_SLOTS: number[] = [0, 0, 0, 0];
+
+/**
+ * Push `WATER_SURFACE_TUNE` into the two shared uniform objects. Called once when this module loads
+ * and again by `__debug.waterSurface`; never per frame, since nothing about it moves on its own.
+ * Nothing is compiled: these are uniforms on the one program every water material already shares.
+ *
+ * The order and the clamps are both `waterSurfaceMath`'s (`surfaceHideUniform`, `surfaceBandFor`),
+ * not written out again here: the fragment program reads `.x .y .z .w` as strength, most, shallow,
+ * deep, and a transposition between the two would fade the wrong way while every check still passed.
+ * The node test sweeps that function's order and reads the two lines below as text.
+ */
+export function syncWaterSurface(): void {
+  const v = surfaceHideUniform(WATER_SURFACE_TUNE, HIDE_SLOTS);
+  WATER_SURFACE_HIDE.value.set(v[0], v[1], v[2], v[3]);
+  WATER_SURFACE_BAND.value = surfaceBandFor(WATER_SURFACE_TUNE);
+}
+syncWaterSurface();
+
+/** The console's knob: write the tuning and hand it to the card. Returns the live tuning. */
+export function setWaterSurface(patch: Partial<WaterSurfaceTune> | undefined): WaterSurfaceTune {
+  const T = tuneWaterSurface(patch);
+  syncWaterSurface();
+  return T;
+}
 /** Metres of tile the detail layer is carried per second at a full wind, before uDrift scales it. */
 const DETAIL_FLOW = 0.06;
 /** Cycles per second of the flow's two-phase crossfade: the tile is never carried further than half a cycle. */
@@ -121,6 +166,24 @@ export function updateWaterDepth(centerX: number, centerZ: number, heightAt: (x:
     const h = heightAt(origin.x + (i + 0.5) * DEPTH_CELL, origin.y + (j + 0.5) * DEPTH_CELL);
     if (h !== null) depthHeights[k] = h;
   }
+  depthTexture.needsUpdate = true;
+}
+
+/**
+ * Forget every height in the window, so the next passes fill it from the world that is there now.
+ *
+ * The window slides with the player and keeps what it already knows, which is right inside one world
+ * and wrong the moment the ground at those coordinates belongs to another: a travel that lands
+ * within the window's own width of where the last one ended slides the *previous* planet's heights
+ * into the new window, and they stand until the refresh reaches them (`heightIfCached` answers null
+ * while the far-tile cache is cold, so that is seconds rather than frames). That used to cost only a
+ * wave fading in the wrong place; now that the surface's own opacity is read from this grid it would
+ * be a visibly wrong sheet of water, so `World.unload` empties it.
+ */
+export function resetWaterDepth(): void {
+  depthHeights.fill(DEPTH_UNKNOWN);
+  DEPTH.origin.value.set(-1e9, -1e9);
+  depthCursor = 0;
   depthTexture.needsUpdate = true;
 }
 
@@ -296,13 +359,30 @@ export const WAVES_GLSL = /* glsl */ `
   uniform float uDepthSize;
   varying float vWaterLevel;
 
-  // Water depth at a point: the surface's own level less the ground under it (deep where unknown).
-  float waterDepth(vec2 p) {
+  // Water depth at a point, and whether the window has a verdict there at all.
+  //
+  // Both unknown cases -- a point outside the moving window, and a cell the refresh has not reached
+  // -- answer 100 m, because the swell's shallow fade and the shore band want "deep" there: a window
+  // that has not caught up must not flatten the sea or ring a shoreline round the player. That makes
+  // 100 a shrug rather than a measurement, and anything that *paints* by the depth has to be able to
+  // tell the two apart, so "known" comes back beside it (0 shrug, 1 measured) instead of being
+  // guessed at from the number -- a body really deeper than 100 m answers 100 as well, and is known.
+  float waterDepthKnown(vec2 p, out float known) {
+    known = 0.0;
     vec2 uv = (p - uDepthOrigin) / uDepthSize;
     if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) return 100.0;
     float ground = texture2D(uDepthTex, uv).r;
     // Unknown cells hold a huge negative height; anything blended toward one counts as deep water.
-    return ground < -500.0 ? 100.0 : min(vWaterLevel - ground, 100.0);
+    if (ground < -500.0) return 100.0;
+    known = 1.0;
+    return min(vWaterLevel - ground, 100.0);
+  }
+
+  // Water depth at a point: the surface's own level less the ground under it (deep where unknown).
+  // One fetch, the same fetch; the readers that want "deep where unknown" take this one.
+  float waterDepth(vec2 p) {
+    float known;
+    return waterDepthKnown(p, known);
   }
 
   float hash21(vec2 p) {
@@ -415,6 +495,16 @@ export const WAVES_GLSL = /* glsl */ `
  * extra output needs an explicit location (three declares location 0 itself); the lit water only
  * needs the switch that hands its environment term to the reflections pass.
  */
+/**
+ * Fragment-only declarations for the surface's own opacity. `cameraPosition` is three's: its
+ * fragment prefix declares it on every material that is not a raw shader, so the eye's height over
+ * this pixel's own surface needs no varying of its own.
+ */
+const SURFACE_PARS_GLSL = /* glsl */ `
+  uniform vec4 uSurfaceHide;
+  uniform float uSurfaceBand;
+`;
+
 const MASK_PARS_GLSL = /* glsl */ `
   #ifdef WATER_FX_MASK
     layout(location = 1) out highp vec4 fxEnvOut;
@@ -501,6 +591,10 @@ export function createWaterMaterial(look: WaterLook, waves: boolean, opts: { win
     uSimWindow: WATER_SIM_WINDOW,
     uSimRelief: WATER_SIM_RELIEF,
     uSimOn: WATER_SIM_ON,
+    // The surface's own opacity against the depth under it: shared objects, so every lake and sea
+    // in the game moves together and the console's knob costs one write rather than a walk.
+    uSurfaceHide: WATER_SURFACE_HIDE,
+    uSurfaceBand: WATER_SURFACE_BAND,
     // The weather's shared objects: rain rings the surface where it is open to the sky.
     ...WEATHER_UNIFORMS,
   };
@@ -594,7 +688,7 @@ function installWaterHook(mat: WaterMaterial, uniforms: WaterUniforms, variant: 
         }`,
       );
     shader.fragmentShader = shader.fragmentShader
-      .replace('#include <common>', `#include <common>\n${WAVES_GLSL}\nvarying vec2 vWaterXZ;\nvarying float vWaterDist;\n${MASK_PARS_GLSL}\n${WEATHER_PARS_GLSL}\n${RAIN_RINGS_GLSL}`)
+      .replace('#include <common>', `#include <common>\n${WAVES_GLSL}\nvarying vec2 vWaterXZ;\nvarying float vWaterDist;\n${SURFACE_PARS_GLSL}\n${MASK_PARS_GLSL}\n${WEATHER_PARS_GLSL}\n${RAIN_RINGS_GLSL}`)
       .replace(
         // Only the specular environment term: the irradiance and the multiscatter stay, so the
         // water looks the same while the reflections pass adds this term back itself. The mask
@@ -617,7 +711,12 @@ function installWaterHook(mat: WaterMaterial, uniforms: WaterUniforms, variant: 
         float waterFoam;
         {
           vec3 disp; vec3 wn; float crest;
-          float depth = waterDepth(vWaterXZ);
+          // Both answers from the one fetch: the depth, and whether it is a measurement at all. The
+          // waves and the shore take the depth as it stands ("deep where unknown"); only the opacity
+          // below, which would otherwise paint a sheet over every lake the window has not reached,
+          // reads the verdict.
+          float depthKnown;
+          float depth = waterDepthKnown(vWaterXZ, depthKnown);
           float calm = smoothstep(0.15, 3.0, depth);
           gerstner(vWaterXZ, calm, disp, wn, crest);
           float detail = 1.0 - smoothstep(120.0, 700.0, vWaterDist);
@@ -642,6 +741,22 @@ function installWaterHook(mat: WaterMaterial, uniforms: WaterUniforms, variant: 
           float band = 1.0 - smoothstep(0.35, 1.5, toShore);
           float shore = band * mix(1.0, smoothstep(0.35, 0.8, lap), smoothstep(0.0, 1.0, toShore));
           waterFoam = smoothstep(0.7, 0.98, crest) * 0.35 * calm + clamp(abs(simH) * 2.0, 0.0, 0.15) * detail + shore * 0.3;
+          // The surface hides what is under it where the water is deep: the converted shader's own
+          // opacity in the shallows, rising toward uSurfaceHide.y over deep water. Line for line
+          // with surfaceOpacityFor/surfaceHideFor in waterSurfaceMath.ts, which the node test sweeps.
+          // Only for an eye above this body's own surface (uSurfaceBand metres to bring it fully in,
+          // so nothing steps as a swimmer's head breaks the water): from below, looking up must stay
+          // the way out, which is the whole of the look pass's ceiling argument. It only ever raises,
+          // so a body the converter read as thicker than uSurfaceHide.y keeps its own number.
+          // And it is off wherever the window has no verdict (depthKnown 0): the grid is 2048 m wide
+          // and fills over a second or two after a load, so without that every water pixel in the
+          // frame -- and all shallow water past about 900 m, for ever -- would read as a trench and
+          // draw as a sheet. No verdict means no rule, which is the water exactly as it was.
+          {
+            float over = smoothstep(0.0, uSurfaceBand, cameraPosition.y - vWaterLevel);
+            float hide = smoothstep(uSurfaceHide.z, uSurfaceHide.w, max(depth, 0.0)) * clamp(uSurfaceHide.x, 0.0, 1.0) * over * depthKnown;
+            diffuseColor.a += (max(diffuseColor.a, uSurfaceHide.y) - diffuseColor.a) * hide;
+          }
         }
         diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.8, 0.86, 0.9), waterFoam);
         diffuseColor.a = mix(diffuseColor.a, 1.0, waterFoam * 0.5);`,
@@ -667,7 +782,7 @@ function installWaterHook(mat: WaterMaterial, uniforms: WaterUniforms, variant: 
       external = fn;
     },
   });
-  mat.customProgramCacheKey = () => `swg-water-5-${variant}-rain-${waves ? 'waves' : 'flat'}-${external ? 'hooked' : 'plain'}`;
+  mat.customProgramCacheKey = () => `swg-water-6-${variant}-rain-${waves ? 'waves' : 'flat'}-${external ? 'hooked' : 'plain'}`;
 }
 
 /**

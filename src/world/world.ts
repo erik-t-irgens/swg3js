@@ -12,7 +12,7 @@ import { DayCycle } from './daycycle';
 import { SwgSky, type SkyLighting } from './sky';
 import { Weather, type WeatherViewContext, type WeatherWorldContext } from './weather';
 import { WEATHER_UNIFORMS, WET_WRAP, wetWrap } from './wetness';
-import { Splashes, updateWaterDepth, type WaterMaterial } from './water';
+import { resetWaterDepth, Splashes, updateWaterDepth, type WaterMaterial } from './water';
 import { addSimBody, stepWaterSim, type SimBody } from './waterSim';
 import { WaterBodies, type WaterBody } from './waterBodies';
 import { envLightFrom, isLavaWater, shaderKey, type WaterLook } from './waterLook';
@@ -21,7 +21,7 @@ import { SEA_FEED, seaFeedReport, seaHeight, seaSwellAt, swellScaleAt, tuneSeaFe
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { createLavaMaterial, LAVA_LOOK, lavaGeometry, lavaHeatTable, loadLavaTextures, refreshLavaFar, standInLavaTextures, type LavaMaterial, type LavaTextures } from './lava';
 import { FALLBACK_LAVA_STYLE, groupLava, lavaStyleFor, type LavaStyle } from './lavaStyle';
-import { applyLavaHarm, inLava, LAVA_HARM, lavaHarmReport, lavaTickDamage, resetLavaHarm, rideOverLava, stillInLava, tuneLavaHarm, type LavaHarmTune } from './lavaHarmMath.ts';
+import { applyLavaHarm, LAVA_HARM, lavaHarmReport, lavaTickDamage, newLavaHold, resetLavaHarm, resetLavaHold, stepLavaHold, tuneLavaHarm, type LavaHarmTune } from './lavaHarmMath.ts';
 import { burnReport, clearBurn, newPlayerBurn, takeBurn, tunePlayerBurn, type PlayerBurn, type PlayerBurnTune } from '../combat/burnMath.ts';
 import type { HeatSources, LavaHeatTable } from './heatSources';
 import { setEnvironment } from './envmap';
@@ -634,14 +634,13 @@ export class World {
    */
   private lavaClock = 0;
   /**
-   * Simulated seconds since the flow verdict last came out true, or Infinity where it has not been
-   * true at all. It is what holds the line and the clock across a gap too short to believe
-   * (`stillInLava`): a hull drifting over the edge of a flow polygon reads a depth one step and no
-   * flow whatsoever the next, and no margin measured in metres can bridge that.
+   * The tick's standing in the flow: the verdict, whether this very step's own was true, how long it
+   * has been false, and the last depth that really was in it (`LavaHold` in `lavaHarmMath.ts`). The
+   * record and the one function that steps it are shared with the player's sink, so the burn and the
+   * drop on the figure draw the same line from the same numbers rather than each writing the rule
+   * out -- which is how one of them came to have the hysteresis band without the bridge across it.
    */
-  private lavaGap = Infinity;
-  /** Whether the verdict counted as true on the last step: what moves the hysteresis line (`inLava`'s `was`). */
-  private lavaIn = false;
+  private readonly lavaHold = newLavaHold();
   /** What is burning right now, so the message line is told once when it starts and once when it stops. */
   private lavaBurning: 'no' | 'you' | 'ride' = 'no';
   /** Multiplier on the sky's fog density, for tuning from the console. */
@@ -1540,8 +1539,7 @@ export class World {
     // announced about a burn that ended because the ground under it was taken away.
     resetLavaHarm();
     this.lavaClock = 0;
-    this.lavaGap = Infinity;
-    this.lavaIn = false;
+    resetLavaHold(this.lavaHold);
     this.lavaBurning = 'no';
     // And a fire the player was carrying goes with the world it was lit in: travel puts it out in
     // silence, so nobody arrives on the next planet still alight and nothing is said about it over
@@ -1614,6 +1612,12 @@ export class World {
     this.forgetMaterials(this.waterMaterials);
     for (const m of this.waterMaterials) m.dispose();
     this.waterMaterials.length = 0;
+    // The depth window holds ground heights by world coordinate and slides with the player, keeping
+    // what it knows: right inside one world, wrong the instant those coordinates are another's. An
+    // arrival within the window's own width of the last one would otherwise slide the old planet's
+    // bed into the new one and hold it until the far-tile cache warms, which the surface's own
+    // opacity now reads.
+    resetWaterDepth();
     // The rooms of a hull another player flies belong to the world that has just gone. A room somebody
     // is standing in is not freed under them: it is cut loose and left where it was until they step out.
     this.remoteRooms().releaseAll();
@@ -2622,7 +2626,7 @@ export class World {
       harm: lavaHarmReport(),
       burning: this.lavaBurning,
       depth: Number.isFinite(depth) ? depth : null,
-      held: this.lavaIn && this.lavaGap > 0 && Number.isFinite(this.lavaGap) ? { for: this.lavaGap, linger: LAVA_HARM.linger } : null,
+      held: this.lavaHold.in && this.lavaHold.gap > 0 && Number.isFinite(this.lavaHold.gap) ? { for: this.lavaHold.gap, linger: LAVA_HARM.linger } : null,
     };
   }
 
@@ -4624,8 +4628,7 @@ export class World {
     // rather than saying "out" first.
     if (!LAVA_HARM.on) {
       this.lavaClock = 0;
-      this.lavaGap = Infinity;
-      this.lavaIn = false;
+      resetLavaHold(this.lavaHold);
       this.lavaBurning = 'no';
       return;
     }
@@ -4645,15 +4648,14 @@ export class World {
       depth = this.lavaAt(playerPos.x, playerPos.y, playerPos.z);
     }
     // A hover machine never gets under a surface at all, so what it rides over is measured with a
-    // reach; a body on its own feet has to be in the flow. Both lines move for something already in
-    // (`lavaIn`), or a body resting at the line flips every step.
-    const raw = ride ? rideOverLava(depth, this.lavaIn) : inLava(depth, this.lavaIn);
-    // And a gap in the verdict too short to believe is bridged: over the edge of a flow polygon the
-    // depth does not wobble, it vanishes, and no distance can span that.
-    if (raw) this.lavaGap = 0;
-    else this.lavaGap += dt;
-    const burning = stillInLava(raw, this.lavaGap);
-    this.lavaIn = burning;
+    // reach; a body on its own feet has to be in the flow. Both lines move for something already in,
+    // or a body resting at the line flips every step; and a gap in the verdict too short to believe
+    // is bridged, because over the edge of a flow polygon the depth does not wobble, it vanishes,
+    // and no distance can span that. All three of those are `stepLavaHold`, which the player's sink
+    // steps too, so the burn and the drop on the figure can never draw different lines.
+    const hold = stepLavaHold(this.lavaHold, dt, depth, !!ride);
+    const raw = hold.raw;
+    const burning = hold.in;
     // Who could take it if it landed. A ride the client's own table says takes none of it answers for
     // itself: which hulls are on that list is the immunity join's business (`lavaImmune`, written
     // once at spawn) and this asks only for its answer.

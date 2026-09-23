@@ -49,6 +49,7 @@ import { FX_LINEARIZE } from '../core/fx/glsl.ts';
 import {
   createUnderwaterLook,
   deriveUnderwater,
+  lightOf,
   UNDERWATER_FALLBACK,
   UNDERWATER_TUNE,
   type UnderwaterLook,
@@ -555,7 +556,10 @@ export class UnderwaterSpecksPass implements FxPass {
     this.body[2] = c.b;
     this.tint.copy(c);
     const S = ctx.settings;
-    const look = deriveUnderwater(this.body, opacity, depth, ctx.daylight, S.underwaterStrength, S.underwaterShimmerStrength, UNDERWATER_TUNE, this.look);
+    // The scene's own light, exactly as the look pass reads it (`lightOf`), so the two derivations
+    // stay one derivation. Nothing here reads the murk it drives -- only `extinction` and `veil` are
+    // used below -- but passing the day's number instead would be the seam a later reader trips on.
+    const look = deriveUnderwater(this.body, opacity, depth, lightOf(ctx.lights, UNDERWATER_TUNE), S.underwaterStrength, S.underwaterShimmerStrength, UNDERWATER_TUNE, this.look);
     (u.uExtinction.value as THREE.Vector3).set(look.extinction[0], look.extinction[1], look.extinction[2]);
     u.uSurvive.value = 1 - Math.min(1, Math.max(0, look.veil));
 

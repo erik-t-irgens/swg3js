@@ -57,7 +57,7 @@ import { createCloudLayers, createSkyLights, flareLook, tuneFlareLook } from './
 import { MAX_CLOUD_LAYERS, MAX_FLARE_SOURCES } from './core/fx/flareMath';
 import { SPACE_SKY_TUNE, tuneSpaceSky, type SunRule } from './space/suns';
 import { heatTuning, type HeatProduct } from './core/fx/heat';
-import { tuneUnderwater, type UnderwaterTune } from './core/fx/underwaterMath.ts';
+import { tuneUnderwater, unknownUnderwaterKeys, type UnderwaterTune } from './core/fx/underwaterMath.ts';
 import type { UnderwaterPass } from './core/fx/underwater';
 import { FIGURE_SPHERE, followDepth, measureLocalSphere, type FxMoverList, type LocalSphere, type VelocityProduct } from './core/fx/velocity';
 import { MOTION_TUNING, MOVER_LIMITS } from './core/fx/velocityMath.ts';
@@ -160,7 +160,10 @@ import type { LavaHarmTune } from './world/lavaHarmMath.ts';
 import type { SeaFeedTune } from './world/seaFeed.ts';
 import type { PlayerBurnTune } from './combat/burnMath.ts';
 import type { BreathTune } from './player/breathMath.ts';
+import type { LavaSinkTune } from './player/lavaSinkMath.ts';
 import { configureWaterSim, pokeWaterSim, waterSimDebug, WATER_SIM_DRAFT, WATER_SIM_IMPACT, WATER_SIM_SPEED } from './world/waterSim';
+import { setWaterSurface, WATER_SURFACE_BAND, WATER_SURFACE_HIDE } from './world/water';
+import type { WaterSurfaceTune } from './world/waterSurfaceMath.ts';
 import { RANGE } from './world/gallery';
 import { castsShadow, surfaces } from './world/surfaces';
 import { compilerVerdict, groupPrograms, loadingLine, machineAside, measureCompiler, ProgramWatch, readKey, SHADER_TUNE, verdictLine, type ProgramPhase, type ProgramRow } from './core/shaderWatch.ts';
@@ -1811,14 +1814,23 @@ class App {
        * over a flow a ride's belly still burns) and `linger` (how long a verdict is held when it
        * goes false) are **ours**. `depth` is where the player -- or the belly of what they ride --
        * stands against the flow over them right now, and null where the water there is not a flow.
-       * `lava({ on: false })` is the switch that makes the ground exactly what it was.
+       * `lava({ on: false })` is the switch that makes the ground exactly what it was -- the sink
+       * below included, since a flow with its switch off does nothing to anybody.
+       *
+       * `sink` is the third thing a flow does and every number of it is **ours**: how far it draws a
+       * body down (to the waist and no further), how fast it does it, how fast it lets go once the
+       * body is clear, and how much of the walk it keeps while it holds. Its `secondsToWaist` is
+       * measured from the lip of a flow, which is the figure to hold against `harm.secondsToKillAt100`.
+       * `lava({ sink: { on: false } })` is its own switch, and the figure and the view go back to
+       * where the body really stands there and then.
        */
-      lava: (tune?: { intensity?: number; glow?: number; glowFrom?: number; glowTo?: number; axes?: 'xyz' | 'xzy' } & LavaHarmTune) => {
+      lava: (tune?: { intensity?: number; glow?: number; glowFrom?: number; glowTo?: number; axes?: 'xyz' | 'xzy'; sink?: LavaSinkTune } & LavaHarmTune) => {
         if (tune) {
           this.world.setLavaLook(tune);
           this.world.setLavaHarm(tune);
+          if (tune.sink) this.player.setLavaSink(tune.sink);
         }
-        return this.world.lavaStatus;
+        return { ...this.world.lavaStatus, sink: this.player.setLavaSink() };
       },
       /**
        * The player's own fire: the numbers in force and the burn as it stands. Every one of them is
@@ -1886,23 +1898,35 @@ class App {
       /**
        * The look under water: what the pass was given the last time it drew, what that came to, and
        * why it did not draw, with console tuning (`sight`, `tint`, `minLength`, `bodyMurk`,
-       * `bodyMurkRef`, `murkLight`, `nightFloor`, `lightDepth`, `deepFloor`, `veilMax`, `veilDepth`,
-       * `surfaceEase`, `ceiling`, `shimmerUv`, `shimmerCells`, `shimmerRate`, `shimmerNear`,
-       * `shimmerFar`, `shimmerSurface`, `shimmerDeep`). Reads stored values only. There was no under
-       * water in the game, so every one of these numbers is ours.
+       * `bodyMurkRef`, `murkLight`, `lightRef`, `nightFloor`, `lightCeil`, `lightDepth`,
+       * `deepFloor`, `veilMax`, `veilDepth`, `surfaceEase`, `ceiling`, `shimmerUv`, `shimmerCells`,
+       * `shimmerRate`, `shimmerReach`, `shimmerSurface`, `shimmerDeep`) — every key of
+       * `UNDERWATER_TUNE` and nothing else, since `tuneUnderwater` silently drops a name that is not
+       * one of its own rather than saying so. Reads stored values only. There was no under water in
+       * the game, so every one of these numbers is ours.
+       *
+       * `shimmerCells` counts cells down the screen's **height**; the reply's `shimmerLattice` says
+       * what that comes to across the width of the window really in use, and the most it may be
+       * there before the field repeats inside one view.
        */
       underwater: (tune?: Partial<UnderwaterTune>) => {
+        // Worked out before the write, since the write is what makes a good key indistinguishable
+        // from a bad one: a name the tune has never heard of is dropped in silence otherwise.
+        const ignored = unknownUnderwaterKeys(tune);
         const T = tuneUnderwater(tune);
         const S = this.settings;
         const setting = { on: S.underwater, strength: S.underwaterStrength, shimmer: S.underwaterShimmerStrength };
         const fx = this.postfx;
-        if (!fx) return { effects: false, note: 'the look under water is drawn by the effects chain; turn Effects on', setting, tuning: { ...T } };
+        if (!fx) return { effects: false, note: 'the look under water is drawn by the effects chain; turn Effects on', setting, ignored, tuning: { ...T } };
         const pass = fx.pass<UnderwaterPass>('underwater');
         const row = fx.describe().passes.find((p) => p.id === 'underwater');
         const water = this.world.cameraWater;
         return {
           effects: true,
           setting,
+          // Empty unless something typed was not written: a misspelling, a dead name, a word where
+          // a number goes. It is not an error — the rest of the call went through.
+          ignored,
           tuning: { ...T },
           under: { under: water.under, depth: water.depth, opacity: water.opacity },
           look: pass ? pass.describe() : null,
@@ -1930,6 +1954,30 @@ class App {
           sink.push(at.x, at.y, at.z, right.x, right.y, right.z, 6, 0.3, 1.2, 1.4, (elapsed * 6 * plumeNoiseFrequency(1.2) + 0.25) % 1);
         });
         return { seconds, providers: this.heat.providerCount, effects: !!this.postfx, setting: this.settings.heatHaze };
+      },
+      /**
+       * How much the water's own surface hides of what is under it, which is the owner's "I can see
+       * as far as possible through the surface of the water". It is not an effect: it is uniforms on
+       * the one program every lake and sea already wears, so it holds with the Effects setting off
+       * exactly as with it on, and it is the one water knob that does.
+       *
+       * `waterSurface()` reports the tuning and what the card is holding. `{ hide: 0 }` is the
+       * switch -- the water exactly as it was, every body and every depth -- and `{ hide: 1 }` puts
+       * it back. `{ most: 0.88 }` lets more of the bed through over deep water and `{ deep: 9 }`
+       * makes the water have to be deeper before it hides anything. Nothing is compiled by any of
+       * it and nothing is read on a frame: the numbers are pushed into two shared uniform objects
+       * when they are written. Every one of them is ours; the game had no such rule.
+       */
+      waterSurface: (tune?: Partial<WaterSurfaceTune>) => {
+        const T = setWaterSurface(tune);
+        const v = WATER_SURFACE_HIDE.value;
+        return {
+          tuning: { ...T },
+          // What the card is holding, which is the tuning after its own clamps: the strength, the
+          // opacity deep water reaches, and the two depths it runs between.
+          uniform: { hide: v.x, most: v.y, shallow: v.z, deep: v.w, eyeBand: WATER_SURFACE_BAND.value },
+          note: "the water's own material, so this holds with the Effects setting off as well",
+        };
       },
       /**
        * Every water body with the shader it came from, its look, what it reflects and whether it

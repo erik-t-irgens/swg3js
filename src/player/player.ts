@@ -19,6 +19,8 @@ import { STYLES, type SaberStyle } from '../combat/saber';
 import { SaberBlade } from '../combat/saberBlade';
 import { stepBurn as spendBurn } from '../combat/burnMath.ts';
 import { breathReport, maxBreath, newBreath, resetBreath, stepBreath as spendBreath, tuneBreath, type Breath, type BreathTune } from './breathMath.ts';
+import { LAVA_HARM, newLavaHold, resetLavaHold, stepLavaHold, type LavaHold } from '../world/lavaHarmMath.ts';
+import { lavaSinkReport, newLavaSink, resetLavaSink, stepLavaSink as spendLavaSink, tuneLavaSink, type LavaSink, type LavaSinkTune } from './lavaSinkMath.ts';
 
 /**
  * The two lines a fire says, and the only two: one when you catch, one when it goes out, and
@@ -268,6 +270,28 @@ export class Player {
    * thing this file already knows and nothing else does.
    */
   private readonly air: Breath = newBreath();
+  /**
+   * How far a flow has drawn this body down and whether it is in one (`src/player/lavaSinkMath.ts`,
+   * which owns every rule about it). It lives here for the same reason the air does: standing in a
+   * flow is a thing this file already knows about its own feet, and the sink it causes is a drop on
+   * the drawn figure and on the view -- never on the physics body, whose real feet are what the
+   * world's harm tick measures and must go on measuring.
+   */
+  private readonly lava: LavaSink = newLavaSink();
+  /**
+   * Whether this body counts as standing in a flow, how long it has been out of one and the last
+   * depth it really was in: the **same record and the same stepper the world's hazard tick uses**
+   * (`LavaHold`, `stepLavaHold` in `src/world/lavaHarmMath.ts`), so the sink and the burn cannot draw
+   * different lines. Writing the rule out here instead is exactly how the sink came to have the
+   * hysteresis band without the bridge across the gaps it cannot reach.
+   */
+  private readonly lavaHold: LavaHold = newLavaHold();
+  /**
+   * What is left of the walking speed after the flow, 0 to 1, written once a step by `stepLavaSink`
+   * and read by both movement profiles. It is a second factor rather than a write to
+   * `speedMultiplier`, which Force Speed rewrites from scratch every frame.
+   */
+  private lavaPaceNow = 1;
   heading = 0;
   speedMultiplier = 1;
   saberOn = false;
@@ -626,6 +650,10 @@ export class Player {
       this.group.quaternion.copy(this.evaFrame);
     } else {
       this.group.position.copy(this.pos);
+      // Drawn into the flow it is standing in. `drawnSink` and not `lava.sink`, and the view reads
+      // the very same getter, so the two cannot come apart on the paths that place the figure
+      // themselves.
+      this.group.position.y -= this.drawnSink;
       this.group.rotation.set(0, this.heading, 0);
     }
   }
@@ -651,6 +679,11 @@ export class Player {
     // up again would otherwise come back with no air in it and take its first blow a second later,
     // with `said` already true, so nothing would have told it to hold its breath.
     this.dropBreath();
+    // And up out of the flow, before the matrices below are worked out: the ragdoll is built from
+    // where the bones are **drawn**, so a body left drawn a waist into the bed would have every piece
+    // of it made inside the ground and thrown apart on the first step that resolved them. The figure
+    // rises to its real feet on the frame it dies, which is the one moment the pop is paid for.
+    this.dropLavaSink();
     if (this.ragdoll || !this.rig) return;
     this.saber.holster();
     this.thrown.cancel();
@@ -684,6 +717,9 @@ export class Player {
     this.pos.copy(p);
     this.vel.set(0, 0, 0);
     this.grounded = true;
+    // Stood somewhere means stood on your feet: a body put down here is not in whatever flow it was
+    // last drawn into, and `placeVisual` below would otherwise draw it a waist under the new ground.
+    this.dropLavaSink();
     this.body.setEnabled(true);
     this.body.setTranslation({ x: p.x, y: p.y, z: p.z }, true);
     this.placeVisual();
@@ -703,6 +739,10 @@ export class Player {
     // the death itself) and it is what makes a travel taken mid-dive arrive with full lungs, in
     // silence, rather than drowning the player on the far side of a loading screen.
     this.dropBreath();
+    // And out of the flow: a body stood up somewhere fresh is stood up on its feet, not drawn a waist
+    // into ground it has never been in. `reset` writes the group's place itself a few lines down, so
+    // there is nothing here to re-place.
+    this.dropLavaSink();
     // And out of the water, which is not the same thing as having air. A body stood up somewhere is
     // stood up dry: leaving these two standing meant the first simulated frame of the new world
     // stepped the breath as a dive (the swim block has not run yet to say otherwise), and worse,
@@ -916,11 +956,41 @@ export class Player {
     this.saberColor = c.lerp(new THREE.Color(0xffffff), 0.12).getHex();
   }
 
-  /** How high the eyes are over the feet in the posture held: standing, crouched, kneeling, or lying down. */
-  get eyeHeight(): number {
+  /**
+   * How high the eyes are over the feet in the posture held: standing, crouched, kneeling, or lying
+   * down. The posture alone, with nothing the world is doing to the body in it -- which is what the
+   * sink below needs, and is why the two are separate getters rather than one.
+   */
+  get postureEye(): number {
     if (this.mounted || this.aboard || this.eva || this.swimming) return 1.5;
     // A roll is a crouch that moves: the view stays down through it, as the game's does.
     return this.prone ? 0.45 : this.kneeling ? 1.0 : this.crouching || this.jka.rolling ? 1.05 : 1.5;
+  }
+
+  /**
+   * How far under its real feet the figure is really **drawn**, which is not always how far the flow
+   * has pulled it. Three paths place the group themselves and none of them takes the drop: aboard a
+   * hull's rooms and adrift in space `placeVisual` has its own branch (`y` in a hull's frame is not
+   * the world's, and there is no lava in either place), and a rider is placed by `syncMount` from the
+   * hull's own attitude. None of those three is ever *given* a sink -- `stepLavaSink` hands them the
+   * verdict false -- but a sink already in the body takes 0.63 s to let go, and for that moment the
+   * figure is up and the drop is still on the record. The camera reads this getter too, so the orbit
+   * centre cannot sit under a body that has already risen.
+   */
+  private get drawnSink(): number {
+    return this.mounted || this.aboard || this.eva ? 0 : this.lava.sink;
+  }
+
+  /**
+   * Where the view centres over `worldPos`: the posture's eye height, less however far a flow has
+   * drawn the body down. The drawn figure is lowered by the very same getter in `placeVisual`, so the
+   * two can only agree -- in third person the orbit's centre comes down with the shoulders, and in
+   * first person the camera is put at the head bone itself, which hangs under the group and has
+   * already come with it. This is the whole of requirement 4 and it is one subtraction in each place
+   * because they are one number.
+   */
+  get eyeHeight(): number {
+    return this.postureEye - this.drawnSink;
   }
 
   /** Whether the blade in the right hand is a lightsaber (the placeholder's, or a hilt from the rack) rather than a sword or polearm. */
@@ -1519,6 +1589,104 @@ export class Player {
     resetBreath(this.air);
   }
 
+  /**
+   * The flow's hold on the body: how far it has drawn the figure down, and what that leaves of its
+   * walk. Beside the fire, the regeneration delay and the breath in `update`, deliberately and for
+   * the same reasons: the four pause together with a panel, step together under `__debug.advance`,
+   * and each of them is a thing the ground is doing to a body over time.
+   *
+   * It runs **before** the four branches that return early (riding, noclipping, adrift in space,
+   * standing in a hull's rooms), which is the whole reason it is up here rather than down in the
+   * block that reads the water. None of those four is standing in anything, so none of them feeds the
+   * sink; but every one of them still has to let a sink already in the body come back out, and a step
+   * that only ran on the walking path would leave a figure that mounted a speeder half-way into a
+   * flow drawn low for as long as it rode. The verdict is simply false for all four and the sink
+   * rises out of its own accord.
+   *
+   * The depth is last frame's feet, exactly as the breath reads last frame's `submerged`: a sixtieth
+   * of a second against a sink that takes two and a half, and the price of being here where a panel
+   * pauses it.
+   *
+   * Two things it deliberately does not do. It never moves the physics body: `pos` is what the
+   * world's harm tick measures, so a sink that moved it would change how fast a flow kills, and a
+   * capsule pushed into the bed would be shoved straight back out by the controller on the same step.
+   * And it does not draw the verdict itself: `stepLavaHold` is the world's own, record and all, so
+   * the sink is in the flow on exactly the steps the burn is.
+   *
+   * That is not a nicety. The band in `inLava` moves a line by `hold` metres, but `stillInLava`
+   * bridges a gap no distance can reach -- where no local table covers a column `World.lavaAt` falls
+   * through to the global sea's level, metres *below* the feet, so the depth jumps from half a metre
+   * under the surface to a large negative and back in the space of two steps. A verdict with the band
+   * and not the bridge came out false across such a seam, and the figure climbed out of a full sink
+   * at the rising rate (four times the going one) and then stepped back down into it.
+   *
+   * Across a bridged step the depth read is the last one that really was in the flow (`hold.depth`),
+   * not the column's, so the figure goes on toward the target it had rather than chasing a surface
+   * that is not there.
+   */
+  private stepLavaSink(dt: number, world: World): void {
+    const onFoot = !this.ragdoll && !this.mounted && !this.noclip && !this.eva && !this.aboard;
+    const h = this.lavaHold;
+    // Off its own feet, or with the flow's own switch off, nothing about a flow reaches this body and
+    // the hold is forgotten exactly as the hazard tick forgets its own. The sink then rises out of
+    // wherever it had got to, which is what stops a body that mounts half-way into a flow from being
+    // drawn low for as long as it rides.
+    if (!onFoot || !LAVA_HARM.on) resetLavaHold(h);
+    else stepLavaHold(h, dt, world.lavaAt(this.pos.x, this.pos.y, this.pos.z));
+    const r = spendLavaSink(this.lava, dt, h.in ? h.depth : -Infinity, h.in, this.postureEye);
+    this.lavaPaceNow = r.pace;
+  }
+
+  /**
+   * The sink as it stands and the numbers in force, with the console's own knob
+   * (`__debug.lava({ sink: … })`, which is where it belongs: it is one of the things a flow does).
+   * Every one of them is **ours** -- the client's terrain water values say what lava takes off you and
+   * how often, and nothing whatever about standing in it, because in that game you could not.
+   *
+   * `sink({ on: false })` is the switch that makes the game exactly what it was: the figure and the
+   * view go back there and then rather than at the next step, because the step is in `update`, which
+   * does not run while a panel is open.
+   */
+  setLavaSink(tune?: LavaSinkTune): ReturnType<typeof lavaSinkReport> {
+    if (tune) {
+      tuneLavaSink(tune);
+      if (tune.on === false) this.dropLavaSink();
+    }
+    // The harm's own margin and the game's own run go in rather than being written down a second time
+    // in the report: `secondsToWaist` is measured from the **lip** of a flow (the line the sink and
+    // the burn both start on) and not from the surface, which is the difference between the 2.53 s
+    // the whole choice of rate rests on and 3.03 s for a descent nobody ever makes.
+    return lavaSinkReport(this.lava, LAVA_HARM.margin, RUN_SPEED);
+  }
+
+  /**
+   * Up out of the flow and the hold forgotten, at once, because this is no longer the body it had:
+   * it has died, or it has been stood up whole somewhere (a respawn, an arrival on another world, the
+   * console's own teleport). At a death it matters for more than tidiness -- the ragdoll is built
+   * from where the bones are **drawn**, so a body left sunk would have its pieces made a waist deep
+   * inside the bed and thrown apart by the first step that resolved them.
+   */
+  private dropLavaSink(): void {
+    const was = this.lava.sink;
+    resetLavaSink(this.lava);
+    // And the verdict's own memory with it, or a body stood up somewhere fresh would carry the last
+    // one's hysteresis band and its bridge into the first step of the new place.
+    resetLavaHold(this.lavaHold);
+    this.lavaPaceNow = 1;
+    // And the figure with it, so the drop is gone from the picture on this very frame rather than on
+    // the next one `update` happens to reach -- which at a death is never, since `update` returns at
+    // its first line for as long as the ragdoll is up, and the ragdoll is built from where the bones
+    // are drawn.
+    //
+    // Guarded twice, and both guards earn themselves. `was > 0` keeps every other caller (a respawn,
+    // an arrival, the switch) from paying for a place it did not need. `!this.mounted` is the one
+    // that matters: `placeVisual` writes the group's **turn** as well as its place, from `heading`
+    // about the upright, and a body seated in a ride is placed by `syncMount` from the hull's own
+    // attitude -- so calling it on a rider would flatten a banked pilot's pitch and roll. A rider is
+    // never sunk in any case, which is what makes the guard free.
+    if (was > 0 && !this.mounted) this.placeVisual();
+  }
+
   bladeSegment(a: THREE.Vector3, b: THREE.Vector3): void {
     this.parts.saber.getWorldPosition(a);
     this.parts.bladeTip.getWorldPosition(b);
@@ -1758,6 +1926,9 @@ export class Player {
     // the frame it comes up: a sixtieth of a second either way on a thirty-second lungful, and the
     // price of it being here, where a panel pauses it exactly as it pauses the regeneration.
     this.stepBreath(dt, world);
+    // And the flow's hold on the body, on that same clock and in that same place, and before the four
+    // branches that return early, so a sink already in the body comes back out wherever it has gone.
+    this.stepLavaSink(dt, world);
 
     if (this.swing >= 0) {
       this.swing += dt / SWING_TIME;
@@ -1839,7 +2010,12 @@ export class Player {
     this.crouching = !this.swimming && !this.prone && !this.kneeling && input.held('crouch');
     this.setCrouchCollider((this.crouching || this.prone || this.kneeling) && this.grounded);
     if (this.grounded && !this.swimming) this.postureTransition(was, moving);
-    let speed = (walking ? WALK_SPEED : RUN_SPEED) * this.speedMultiplier * (this.crouching && this.grounded ? 0.5 : 1);
+    // `lavaPaceNow` is what a flow has left of the walk: 1 everywhere else, and it is a factor of its
+    // own rather than a write to `speedMultiplier`, which Force Speed rewrites from scratch each
+    // frame. It goes on both profiles' speeds (here for the game's own, and on `speedScale` below for
+    // Jedi Academy's), so the body really moves slower and the clips, which are scaled to how fast it
+    // moves, slow with it.
+    let speed = (walking ? WALK_SPEED : RUN_SPEED) * this.speedMultiplier * this.lavaPaceNow * (this.crouching && this.grounded ? 0.5 : 1);
 
     // Water: the surface here, and how deep the body sits in it. Swimming starts when the
     // chest is under; the head stays above the surface unless the player dives.
@@ -1922,7 +2098,7 @@ export class Player {
       c.jump = jump;
       c.jumpPressed = jumpPressed && !this.saber.busy;
       c.attack = input.held('attack');
-      c.speedScale = this.speedMultiplier * this.paceScale(walking, mz, mx);
+      c.speedScale = this.speedMultiplier * this.lavaPaceNow * this.paceScale(walking, mz, mx);
       const force = this.force;
       const ev = this.jka.step(dt, this.vel, this.pos, this.grounded, c, { value: force?.value ?? 100, spend: (n) => { if (force) force.value = Math.max(0, force.value - n); } });
       if (ev.jumped) {
