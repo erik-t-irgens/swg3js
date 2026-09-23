@@ -985,6 +985,20 @@ export class World {
     return this.swellOver(x, z, terrain.waterHeightAt(x, z), groundY);
   }
 
+  /**
+   * The swell over a point whose flat surface the caller **already has in hand**, which is every
+   * body that floats: the swim reads the lava-filtered column and a swimming creature reads the
+   * terrain's own table, and neither wants that sampling done twice. 0 is "no swell here", so a
+   * lake, a pool, the shallows and a planet with no sea all answer the flat surface unchanged.
+   *
+   * `groundY` is only the depth the swell fades out in; left out, it is sampled, which costs
+   * nothing that is not already warm because the guards above it mean this line is reached only
+   * over a swelling sea.
+   */
+  seaSwellOverFlat(x: number, z: number, flat: number, groundY = Number.NaN): number {
+    return this.swellOver(x, z, flat, groundY);
+  }
+
   /** The swell over a point whose flat height the caller has already paid for. 0 is "no swell here". */
   private swellOver(x: number, z: number, flat: number, groundY: number): number {
     const terrain = this.terrain;
@@ -1176,6 +1190,8 @@ export class World {
       catalogue: () => MobileCatalogue.loaded(import.meta.env.BASE_URL),
       targets: () => this.targets(),
       groundAt: (x, y, z, inside) => this.groundAt(x, y, z, inside),
+      // So a swimming creature lies on the drawn sea rather than on the flat table under it.
+      seaSwellAt: (x, z, flat) => this.seaSwellOverFlat(x, z, flat),
       // What a carried blade finds when it sweeps. It goes through the fighters' own lookup when
       // there is one, since that is the one that knows the player's capsule and it asks ours for
       // everything else itself; asking ours again after it would search every collider twice for

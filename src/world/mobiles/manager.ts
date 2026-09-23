@@ -74,6 +74,8 @@ export interface MobileManagerDeps {
   targets(): readonly Living[];
   /** The ground under a point, through the physics when inside a building. */
   groundAt(x: number, y: number, z: number, inside: boolean): number | null;
+  /** The swell over a point whose flat surface the caller has, so a swimmer rides the waves. */
+  seaSwellAt?(x: number, z: number, flat: number): number;
   /** What a physics collider belongs to, when a carried blade sweeps through it. */
   hittableAt?(handle: number): Hittable | undefined;
   /**
@@ -305,6 +307,7 @@ export class MobileManager {
       effects: () => this.deps.effects(),
       alert: (self, attacker) => this.assist(self, attacker),
       groundAt: (x, gy, z, ins) => this.deps.groundAt(x, gy, z, ins),
+      seaSwellAt: this.deps.seaSwellAt ? (x, z, flat) => this.deps.seaSwellAt!(x, z, flat) : undefined,
       hittableAt: (h) => this.deps.hittableAt?.(h),
       wantRagdoll: (self) => this.queueRagdoll(self),
     });

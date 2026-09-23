@@ -147,6 +147,7 @@ import type { Vehicle, VehicleKind } from './vehicles/vehicle';
 import { HEAD_TO_EYE, SEATED_EYE_FALLBACK, SEAT_RULE, cockpitYawStep, frameFileName, mirroredOffset, seatDropUsed } from './vehicles/cockpitSeat';
 import { World } from './world/world';
 import { worldNav } from './world/nav/nav.ts';
+import { tuneAfloat } from './world/afloat.ts';
 import type { FacilityChoice, NamedPlace } from './world/cloning.ts';
 import { GATE_TUNE, ZoneGates, gateAction, gateSaid, tuneGates, zoneOfPack } from './world/zoneGates.ts';
 import { AudioSystem, type ListenerPose } from './audio/audio.ts';
@@ -1868,6 +1869,32 @@ class App {
       sea: (x?: number | SeaFeedTune, z?: number) => {
         if (typeof x === 'number' && typeof z === 'number') return { flat: this.world.terrain.waterHeightAt(x, z), sea: this.world.seaAt(x, z) };
         return this.world.setSeaFeed(typeof x === 'object' && x !== null ? x : undefined);
+      },
+      /**
+       * How a body holds a height nothing supports it at -- a swimmer lying on the surface, a flyer
+       * at its cruising height -- which is one spring shared by the player and every creature
+       * (`AFLOAT` in `src/world/afloat.ts`). `afloat()` reports it with where the player is against
+       * its own float line now; `afloat({ track: 4 })` stiffens the chase for a run, `{ damp: 0 }`
+       * lets it overshoot the crest and `{ speed: 1 }` shows what a body too slow to keep up looks
+       * like. Nothing is saved. The swell itself is `__debug.sea`.
+       */
+      afloat: (tune?: Partial<import('./world/afloat').AfloatTune>) => {
+        const p = this.player;
+        const flat = this.world.waterColumnAt(p.pos.x, p.pos.z);
+        const surface = flat + this.world.seaSwellOverFlat(p.pos.x, p.pos.z, flat);
+        return {
+          tune: tuneAfloat(tune),
+          swimming: p.swimming,
+          submerged: p.submerged,
+          flat: Number.isFinite(flat) ? Number(flat.toFixed(3)) : null,
+          surface: Number.isFinite(surface) ? Number(surface.toFixed(3)) : null,
+          swell: Number.isFinite(surface) && Number.isFinite(flat) ? Number((surface - flat).toFixed(3)) : 0,
+          y: Number(p.pos.y.toFixed(3)),
+          // How far under the drawn surface the body is lying. It should sit at the swim depth and
+          // stay there while the wave moves; a figure that wanders is the spring losing the wave.
+          under: Number.isFinite(surface) ? Number((surface - p.pos.y).toFixed(3)) : null,
+          rise: Number(p.vel.y.toFixed(3)),
+        };
       },
       /**
        * The lava drawn now (tables, and each look with where its textures came from: "client",

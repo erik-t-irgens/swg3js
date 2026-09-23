@@ -8,6 +8,7 @@ import type { Vehicle } from '../vehicles/vehicle';
 import { SEATED_EYE_FALLBACK, SEATED_PELVIS_FALLBACK, bodyLift } from '../vehicles/cockpitSeat';
 import { roomFrame, roomTurn, type WalkableRoom } from '../vehicles/surfaceRoom';
 import type { World } from '../world/world';
+import { afloatVelocity } from '../world/afloat.ts';
 import { STANCE_ANIM, STYLE_DAMAGE, SaberCombat, type Dir, type SaberInput } from '../combat/saber';
 import { SaberThrow, THROW } from '../combat/saberThrow';
 import { Ragdoll } from '../combat/ragdoll';
@@ -2034,7 +2035,14 @@ export class Player {
     // instead, stayed tinted blue. Room boxes are padded and overhang their hulls, and swimming down
     // to an entrance that sits under a lake puts the point inside one before the doorway is crossed.
     // This body has the better room rule and uses it on the next line.
-    const surface = this.aboard ? -1e9 : world.waterColumnAt(this.pos.x, this.pos.z);
+    //
+    // And the surface is the **drawn** one, not the flat table: the open sea swells, and a swimmer
+    // measured against the plane through the middle of those waves has a crest rise over its head
+    // and a trough drop out from under its feet while the body itself never moves. `swellOverFlat`
+    // is 0 on a lake, in the shallows, on a planet with no sea and wherever the sea is switched
+    // off, so everywhere but the open sea this is the line it always was.
+    const flat = this.aboard ? -1e9 : world.waterColumnAt(this.pos.x, this.pos.z);
+    const surface = flat + world.seaSwellOverFlat(this.pos.x, this.pos.z, flat);
     const depth = surface - this.pos.y;
     // Interiors can sit below a lake (the Gungan cities do) and are never water. `inside` is the
     // cell the frame tracks through doorways -- walked into rather than read off a box -- which is
@@ -2052,7 +2060,13 @@ export class Player {
       const k = 1 - Math.exp(-dt * 4);
       this.vel.x += (move.x * speed - this.vel.x) * k;
       this.vel.z += (move.z * speed - this.vel.z) * k;
+      // Lying on the surface is not standing still in y any more. With the swell in `surface` the
+      // float line moves, so the body has to ride it, and that is the same spring a swimming
+      // creature has always held its own line with (`src/world/afloat.ts`). On flat water it asks
+      // for nothing, since the line it is chasing is exactly where the body already is.
+      const ride = afloatVelocity(surface - SWIM_DEPTH, this.pos.y, this.vel.y, dt);
       let vy = 0;
+      let riding = false;
       if (input.held('jump')) vy = SWIM_SPEED * RUN_SPEED;
       else if (input.held('crouch')) vy = -SWIM_SPEED * RUN_SPEED;
       else if (moving) {
@@ -2060,10 +2074,15 @@ export class Player {
         // look downwards dives, so ordinary forward swimming keeps the head up.
         cam.camera.getWorldDirection(dive);
         vy = dive.y * speed * (mz >= 0 ? 1 : -1);
-        if (!this.submerged && (vy > 0 || dive.y > -0.5)) vy = 0;
-      } else if (!this.submerged) vy = 0;
+        if (!this.submerged && (vy > 0 || dive.y > -0.5)) { vy = ride; riding = true; }
+      } else if (!this.submerged) { vy = ride; riding = true; }
       else vy = -0.3; // a slow sink when idle under water
-      this.vel.y += (vy - this.vel.y) * (1 - Math.exp(-dt * 6));
+      // The other branches are a speed the body is *asked* for and eased onto; the spring's answer
+      // is a considered speed already, with its own damping in it, so it goes on as it stands.
+      // Easing that as well is a second lag on top of the first, and the two together left the
+      // body a quarter of a metre out of step with a swell it should have been riding.
+      if (riding) this.vel.y = vy;
+      else this.vel.y += (vy - this.vel.y) * (1 - Math.exp(-dt * 6));
       // Buoyancy: rising past the float line stops at it.
       if (this.vel.y > 0 && depth - this.vel.y * dt < SWIM_DEPTH) this.vel.y = Math.max(0, (depth - SWIM_DEPTH) / dt);
       this.grounded = false;

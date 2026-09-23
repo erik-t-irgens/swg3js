@@ -26,6 +26,7 @@ import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.j
 import { combatSounds, type GunSound } from '../../audio/combatSounds';
 import { Group, groups, RAPIER, type Physics } from '../../core/physics';
 import type { Terrain } from '../terrain';
+import { afloatVelocity } from '../afloat.ts';
 import type { Bolts } from '../../combat/bolts';
 import type { Effects } from '../../combat/effects';
 import { GUNS, type GunProfile } from '../../combat/guns';
@@ -182,6 +183,12 @@ export interface MobileDeps {
   alert(self: Mobile, attacker: Living): void;
   /** The ground under a point, through the physics when inside a building. */
   groundAt(x: number, y: number, z: number, inside: boolean): number | null;
+  /**
+   * The swell standing over a point whose flat surface the caller already has, so a swimmer rides
+   * the waves instead of a plane through the middle of them. Absent, or 0, is a flat sea, which is
+   * what a lake, the shallows and a world converted before the sea swelled all are.
+   */
+  seaSwellAt?(x: number, z: number, flat: number): number;
   /** What a physics collider belongs to, when a carried blade sweeps through it; with none it cuts nobody. */
   hittableAt?(handle: number): Hittable | undefined;
   /** Asking for the ragdoll, which the manager starts a couple a frame. */
@@ -1220,7 +1227,7 @@ export class Mobile implements Living, NpcSubject {
     // 10. Act, 11. hold its height, 12. animate.
     if (this.state === 'return') this.hp = Math.min(this.maxHp, this.hp + (this.maxHp / 3) * sdt);
     this.act(sdt, ctx, tier);
-    this.holdHeight(t);
+    this.holdHeight(t, sdt);
     this.animate(sdt, tier);
     this.updateBlade(dt, ctx.camera);
   }
@@ -1582,11 +1589,19 @@ export class Mobile implements Living, NpcSubject {
   }
 
   /** A flyer holds its cruising height over the ground; a swimmer floats. */
-  private holdHeight(t: { x: number; y: number; z: number }): void {
+  private holdHeight(t: { x: number; y: number; z: number }, sdt: number): void {
     if (this.dead || this.heldUntil > this.now) return;
     let wantY: number | null = null;
+    let afloat = false;
     if (this.swimming) {
-      wantY = this.deps.terrain.waterHeightAt(this.pos.x, this.pos.z) - this.plan.swimDepth + this.plan.feet;
+      afloat = true;
+      // The **drawn** surface, not the flat table under it: on the open sea a body measured
+      // against that plane has the waves pass over it while it holds perfectly still. The swell is
+      // 0 on a lake, in the shallows and on a planet with no sea, so everywhere else this is the
+      // line it always was.
+      const flat = this.deps.terrain.waterHeightAt(this.pos.x, this.pos.z);
+      const swell = this.deps.seaSwellAt?.(this.pos.x, this.pos.z, flat) ?? 0;
+      wantY = flat + swell - this.plan.swimDepth + this.plan.feet;
     } else if (this.flyer) {
       const ground = this.deps.groundAt(this.pos.x, t.y, this.pos.z, this.inside) ?? this.deps.terrain.heightAt(this.pos.x, this.pos.z);
       wantY = ground + this.plan.hover + this.plan.feet;
@@ -1594,7 +1609,11 @@ export class Mobile implements Living, NpcSubject {
     }
     if (wantY === null) return;
     const v = this.body.linvel();
-    const vy = clamp((wantY - t.y) * 2.5 - v.y * 0.3, -6, 6);
+    // A floater chases a surface that moves and takes the shared spring (`src/world/afloat.ts`),
+    // which the player's own swim reads too, so a person and a creature on the same wave ride it
+    // alike and one knob moves both. A flyer chases a height that stands still and keeps the
+    // softer numbers it has always had, since nothing about a hover changed.
+    const vy = afloat ? afloatVelocity(wantY, t.y, v.y, sdt) : clamp((wantY - t.y) * 2.5 - v.y * 0.3, -6, 6);
     this.body.setLinvel({ x: v.x, y: vy, z: v.z }, true);
   }
 
