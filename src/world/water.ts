@@ -272,7 +272,12 @@ function seaState(seed: number, windAngle: number): { waves: THREE.Vector4[]; om
   return { waves, omega };
 }
 
-const WAVES_GLSL = /* glsl */ `
+/**
+ * Exported for one reader only: `swellProbe.ts`, the unwired console probe that reads the card's own
+ * wave height back so the CPU mirror in `swellMath.ts` can be settled by measurement rather than by
+ * assertion. The probe includes this very text, so what it measures is what the water draws.
+ */
+export const WAVES_GLSL = /* glsl */ `
   uniform float uTime;
   uniform float uWaveHeight;
   uniform float uRipple;

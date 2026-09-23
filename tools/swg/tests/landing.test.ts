@@ -3,7 +3,7 @@
 // pack is read, and the hull shapes stand in for the kinds the game has rather than naming any.
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
-import { LANDING, SHIP_GROUND, catchDistance, fitFloor, floorUnder, heldPose, landingFoot, planeTilt, planeUp, planeY, restPose, settleEase, withFilter, type FloorPlane } from '../../../src/vehicles/landing.ts';
+import { LANDING, SHIP_GROUND, catchDistance, fitFloor, floorUnder, heldPose, landingFoot, landingLiquid, landingLiquidNote, planeTilt, planeUp, planeY, restPose, settleEase, withFilter, type FloorPlane } from '../../../src/vehicles/landing.ts';
 
 let checks = 0;
 const ok = (cond: boolean, what: string) => {
@@ -161,6 +161,50 @@ function samples(a: number, b: number, c: number, x = 0, z = 0, r = 4): THREE.Ve
   SHIP_GROUND.rule = 'springs';
   ok(SHIP_GROUND.rule === 'springs', '6: the older hover-only ride can be put back live');
   SHIP_GROUND.rule = 'landing';
+}
+
+// --- 7: water under the hull -----------------------------------------------------------------------
+// The one rule of wave 5's landing package: a ship is refused a put-down over water. Nothing here
+// floats a hull; a refused hull goes on hovering, which is what it has always done over the sea.
+{
+  // The open sea: a bed twenty metres down with the surface over it. Refused, and named.
+  ok(landingLiquid(-18, 0, false, false, false) === 'water', '7: the open sea is refused');
+  ok(landingLiquidNote(landingLiquid(-18, 0, false, false, false)) === 'the water is no place to set down', '7: and the message line is told which');
+  // A lake, whose surface is its own table's height: the same answer, whatever the height is.
+  ok(landingLiquid(112.4, 115, false, false, false) === 'water', '7: a lake is refused too');
+  // Dry land: the terrain answers -Infinity for a column with no water over it.
+  ok(landingLiquid(40, -Infinity, false, false, false) === '', '7: dry land is landable');
+  // A table standing under the floor is not water over the hull: the terrain has risen above it.
+  ok(landingLiquid(6, 2, false, false, false) === '', '7: a surface below the floor is not in the way');
+  // The shallows: a ford under the tune is landable, a hand's breadth more is not.
+  ok(landingLiquid(0, LANDING.wet - 0.01, false, false, false) === '', `7: ${LANDING.wet} m of water or less is still landable`);
+  ok(landingLiquid(0, LANDING.wet + 0.01, false, false, false) === 'water', '7: a finger deeper and it is refused');
+  ok(landingLiquid(0, LANDING.wet, false, false, false) === '', '7: the line itself is landable (the compare is strict)');
+  ok(LANDING.wet > LANDING.gap, '7: the line stands above the gap a landed hull keeps, so a hull is never refused where it would rest dry');
+  // The flow: the same rule, different words, because a flow is water to the terrain and to nothing else.
+  ok(landingLiquid(-3, 1, true, false, false) === 'lava', '7: a lava flow is refused as its own thing');
+  ok(landingLiquidNote(landingLiquid(-3, 1, true, false, false)) === 'a lava flow is no place to set down', '7: and is named as one');
+  ok(landingLiquidNote('') === '', '7: nothing in the way says nothing at all');
+  // No floor under the surface at all: there is the water and nothing measurable to stand on.
+  ok(landingLiquid(-Infinity, 0, false, false, false) === 'water', '7: water over no floor at all is refused');
+  ok(landingLiquid(-Infinity, -Infinity, false, false, false) === '', '7: and no floor with no water is not this rule\'s business');
+  // Engines cut: the hull has nowhere else to go and ditches, exactly as `restPose`'s clamp lets it
+  // lean onto a slope it would never choose to land on.
+  ok(landingLiquid(-18, 0, false, true, false) === '', '7: a hull with its engines cut ditches rather than being refused');
+  ok(landingLiquid(-3, 1, true, true, false) === '', '7: and ditches into a flow as readily');
+  // In a building's rooms the planet's water table is not the floor and is not water: 87 placed portal
+  // buildings across the converted planets have a room floor under their planet's table, and by height
+  // alone every one of them would refuse a landing in a dry hangar.
+  ok(landingLiquid(-18, 0, false, false, true) === '', '7: a hull in a building\'s rooms is never refused for the table under the building');
+  ok(landingLiquid(-3, 1, true, false, true) === '', '7: nor for a flow under it');
+  // The knob: 0 refuses every wet spot, a large number puts the old behaviour back for every hull.
+  const wasWet = LANDING.wet;
+  LANDING.wet = 0;
+  ok(landingLiquid(0, 0.01, false, false, false) === 'water', '7: wet 0 refuses the last inch of a beach');
+  LANDING.wet = 1e6;
+  ok(landingLiquid(-18, 0, false, false, false) === '', '7: a large wet puts the old set-down-on-the-bed behaviour back');
+  LANDING.wet = wasWet;
+  ok(landingLiquid(-18, 0, false, false, false) === 'water', '7: and the tune is live, read on every call');
 }
 
 console.log(`\n${checks} checks passed`);

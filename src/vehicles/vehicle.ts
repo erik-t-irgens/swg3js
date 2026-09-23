@@ -8,7 +8,7 @@ import { cleanTrimesh, Group, groups, RAPIER, TRIMESH_FLAGS, type Physics } from
 import { WING_RULE, WingSet, easeWing, pilotWings, wingTopFactor, wingsWanted } from './wings';
 import { hardpointName, ownHardpoint, partOf, underPivot } from './shipAssembly';
 import { partnerLoss } from '../space/shipDamage';
-import { LANDING, SHIP_GROUND, SHIP_ROOM, SPACE_LANDING, catchDistance, fitFloor, floorUnder, heldPose, landingFoot, poseInFrame, restPose, settleEase, surfacePose, surfaceUp, withFilter, type FloorPlane } from './landing';
+import { LANDING, SHIP_GROUND, SHIP_ROOM, SPACE_LANDING, catchDistance, fitFloor, floorUnder, heldPose, landingFoot, landingLiquid, landingLiquidNote, poseInFrame, restPose, settleEase, surfacePose, surfaceUp, withFilter, type FloorPlane, type LandingLiquid } from './landing';
 
 /**
  * A vehicle's hull meets everything but the ground: the springs hold it off the terrain from
@@ -499,7 +499,7 @@ export class Vehicle {
   landed = false;
   /** A ship's engines: cut, nothing holds it up and it comes down. The throttle or Space starts them again. */
   powered = true;
-  /** Why the last put-down was refused (too steep), for the prompt; cleared when the ship lifts off or lands. */
+  /** Why the last put-down was refused (too steep, or water under the hull), for the prompt and the message line; cleared when the ship lifts off or lands. */
   landNote = '';
   /** Metres from the foot to the floor under it, as the last step read it (Infinity with no floor found). */
   footGap = Infinity;
@@ -532,6 +532,14 @@ export class Vehicle {
   /** The physics and the terrain of the step now running, so a floor ray can be cast from the ground functions. */
   private stepPhysics: Physics | null = null;
   private stepGround: ((x: number, z: number) => number) | null = null;
+  /**
+   * The water surface over a column as the terrain answers it, lava tables and all, and whether that
+   * column's liquid is a flow: what the landing refusal reads, kept from the step that was handed them
+   * so the console's report can ask the same question between steps. Both are the callers' own bound
+   * fields, so nothing is made here.
+   */
+  private stepLiquid: ((x: number, z: number) => number) | null = null;
+  private stepLava: ((x: number, z: number) => boolean) | null = null;
   /** The floor under a point while the vehicle stands in a room: a ray among what stands still. A field, so no closure is made per step. */
   private readonly roomFloorAt = (x: number, z: number): number => this.floorRay(x, z);
   /** A hold on the hull: it is written to this pose before every step, in a frame (a live matrix) or in the world. */
@@ -657,6 +665,9 @@ export class Vehicle {
       gap: Number.isFinite(this.footGap) ? n2(this.footGap) : null,
       airborne: this.airborne,
       note: this.landNote,
+      // What stands over the floor under the foot now: `kind` is what a put-down would be refused for
+      // ('' is nothing in the way) and `over` how deep it lies over that floor, against `LANDING.wet`.
+      under: this.liquidUnder(),
       // What it is standing on, not what the last look happened to find: every probe writes `landedOn`,
       // including the one a merely-slow hull runs each step, so it means nothing until the hull is down.
       space: this.space ? { near: this.setDownNear, asked: this.settingDown, on: !this.landed && this.settleLeft <= 0 ? null : this.landedOn ? 'something that can move' : 'the world' } : null,
@@ -931,11 +942,45 @@ export class Vehicle {
     // A refusal is the answer to one attempt: it goes as soon as the pilot stops asking for down,
     // or "too steep to set down here" would follow the ship about until it next landed somewhere.
     if (!drive?.down && this.landNote) this.landNote = '';
-    if (this.downFor >= LANDING.hold && this.footGap <= LANDING.reach && this.beginLanding(false, 0)) {
-      this.stepSettle(0);
-      return true;
+    if (this.downFor >= LANDING.hold) {
+      // Water under the hull: refused here, before the floor is anywhere near, because the sea's own
+      // bed lies far below `LANDING.reach` in anything but the shallows, so `footGap` would never come
+      // inside it for the put-down to be tried at all -- and the pilot would hold down over the open
+      // sea, be refused by nothing, and be told nothing either. The
+      // floor is the one this step already read for the gap, so the refusal costs one water lookup
+      // and nothing else, and only while the pilot is asking. `landNote` is how the too-steep refusal
+      // already reaches the message line, and the line says a note once when it changes.
+      const wet = landingLiquid(floor, this.stepLiquid?.(footWorld.x, footWorld.z) ?? -Infinity, this.stepLava?.(footWorld.x, footWorld.z) ?? false, false, this.inRoom);
+      if (wet) {
+        this.landNote = landingLiquidNote(wet);
+        this.downFor = 0;
+        return false;
+      }
+      if (this.footGap <= LANDING.reach && this.beginLanding(false, 0)) {
+        this.stepSettle(0);
+        return true;
+      }
     }
     return false;
+  }
+
+  /**
+   * What liquid stands over the floor under the hull's foot now, for the console's report: the kind the
+   * refusal would name and how deep it is over the floor, or null where the column has none. It casts the
+   * put-down's own floor ray, so it is a report and never a step's work.
+   */
+  private liquidUnder(): { kind: LandingLiquid; over: number | null } | null {
+    if (!this.foot || !this.stepLiquid) return null;
+    this.quaternion(q);
+    this.footAt(q, footWorld);
+    const liquid = this.stepLiquid(footWorld.x, footWorld.z);
+    if (!Number.isFinite(liquid)) return null;
+    const floor = this.floorUnder(footWorld.x, footWorld.z);
+    const over = liquid - floor;
+    return {
+      kind: landingLiquid(floor, liquid, this.stepLava?.(footWorld.x, footWorld.z) ?? false, false, this.inRoom),
+      over: Number.isFinite(over) ? Number(over.toFixed(2)) : null,
+    };
   }
 
   /**
@@ -1529,9 +1574,22 @@ export class Vehicle {
 
   /**
    * One step. `groundAt` is the terrain's height and `waterAt` the water surface's (or -Infinity):
-   * a machine floats on water at its ride height, an animal swims with its body chest-deep.
+   * a machine floats on water at its ride height, an animal swims with its body chest-deep. `lavaAt`
+   * says whether the liquid over a column is a flow rather than water; it changes nothing a hull does
+   * and only chooses the words a refused landing says, so a caller that has no answer may leave it out.
+   *
+   * `seaAt` is the **second** water reader (`World.seaAt`): the same surface with the swell in it, so
+   * a hull riding the open sea bobs, pitches and rolls with the waves instead of sitting on a plane
+   * through the middle of them. The hover springs read it, and so does `onWater` -- not because
+   * `onWater` is about floating but because it measures **the hull's own height** against a surface,
+   * and the hull's height now breathes. The two must be read against the same water or the margin
+   * between them is eaten by the wave (see the rule itself, below). `flyShip`'s floor keeps the flat
+   * reader, since `h < 0` there is a crash and a ship skimming the sea must not crash on a crest
+   * standing a metre over the table. Left out (an older caller, a test) the springs read `waterAt` as
+   * they always did, and so they do wherever the swell does not reach: a lake, a pool, the shallows,
+   * a flow, or the switch turned off.
    */
-  update(dt: number, physics: Physics, drive: DriveInput | null, groundAt?: (x: number, z: number) => number, waterAt?: (x: number, z: number) => number): void {
+  update(dt: number, physics: Physics, drive: DriveInput | null, groundAt?: (x: number, z: number) => number, waterAt?: (x: number, z: number) => number, lavaAt?: (x: number, z: number) => boolean, seaAt?: (x: number, z: number, groundY?: number) => number): void {
     const s = this.spec;
     const body = this.body;
     body.resetForces(true);
@@ -1545,8 +1603,14 @@ export class Vehicle {
     // own reset must not fire there). The room's is a bound field, so no closure is made per step.
     this.stepPhysics = physics;
     this.stepGround = groundAt ?? null;
+    this.stepLiquid = waterAt ?? null;
+    this.stepLava = lavaAt ?? null;
     const ground = this.inRoom ? this.roomFloorAt : groundAt;
     const water = this.inRoom ? undefined : waterAt;
+    // What the springs float on: the swell-aware reader where the caller has one, the flat table
+    // otherwise. A room has no water at all, so a hull standing in one floats on neither. Typed
+    // outright, since a reader that takes only x and z is assignable to one that also takes a ground.
+    const sea: ((x: number, z: number, groundY?: number) => number) | undefined = this.inRoom ? undefined : (seaAt ?? waterAt);
     // A ship that is down, or coming down, is the landing rule's before anything else reads the hull;
     // it gives the hull back (false) when the pilot opens up again.
     if (s.ship && (this.landed || this.settleLeft > 0) && this.groundShip(dt, drive)) {
@@ -1643,13 +1707,40 @@ export class Vehicle {
     // `lavaImmune` above). Filtering lava out here -- as the feet, the ripples and the swim line all
     // do -- would drop the hull through the flow onto the bed, which is not what riding over one
     // looks like.
+    //
+    // The surface the springs float on is `sea`, which is the swell-aware reader where the caller
+    // gave one and the flat table everywhere else, so a hull on the open water rides the waves it can
+    // see. The ground under each corner is worked out here in any case, so it is handed over rather
+    // than asked for again: the swell dies in the shallows and the depth is what says where.
     const height = s.bounds.max[1] - s.bounds.min[1];
     const floorAt = (x: number, z: number) => {
       const solid = ground ? ground(x, z) : -Infinity;
-      const wet = water ? water(x, z) : -Infinity;
+      const wet = sea ? sea(x, z, solid) : -Infinity;
       return Math.max(solid, s.animal ? wet - height * 0.55 : wet);
     };
-    this.onWater = !!water && !!ground && water(this.pos.x, this.pos.z) > ground(this.pos.x, this.pos.z) + 0.05 && this.pos.y - s.bounds.min[1] < water(this.pos.x, this.pos.z) + ride * 1.6 + 0.3;
+    // Over water, and low enough over it to be riding it rather than flying over it.
+    //
+    // Whether the column is wet at all stays the **flat** table's answer against the ground: that is
+    // a verdict, and a verdict wants the steady reader. The height test is against the **sea**, the
+    // very surface the springs below float the hull on, because the hull's own height now breathes
+    // with the swell and a test that compares a breathing height against a plane breathes with it.
+    // The arithmetic: the springs settle a corner 0.75 * ride over the floor, so on flat water the
+    // margin left here is 0.85 * ride + 0.3 -- 0.85 m at hover 0.65, 0.72 m at 0.5, 0.43 m at 0.15 --
+    // while the sea's own r.m.s. is 0.35 m and its crests reach about 1.07 m. Measured against the
+    // flat table a hull would therefore stop being "on water" exactly while it rode a crest, which
+    // drops it out of the wake field, silences its water engine loop and lets it raise dust over the
+    // open sea. Measured against the sea the difference is bit for bit what it was on a flat plane,
+    // whatever the wave is doing under it.
+    this.onWater = false;
+    if (water && ground) {
+      const bedY = ground(this.pos.x, this.pos.z);
+      const flatTop = water(this.pos.x, this.pos.z);
+      if (flatTop > bedY + 0.05) {
+        // The ground is already in hand, so the sea reader does not walk the terrain for a depth.
+        const top = sea ? sea(this.pos.x, this.pos.z, bedY) : flatTop;
+        this.onWater = this.pos.y - s.bounds.min[1] < top + ride * 1.6 + 0.3;
+      }
+    }
     if (!flying) {
       for (const hp of this.hoverPoints) {
         p.copy(hp).applyQuaternion(q).add(this.pos);
@@ -1658,7 +1749,7 @@ export class Vehicle {
         // Inside a building the shells and the terrain are not its floor, as they are not the mobiles'.
         const hit = physics.groundDistance(p.x, p.y + drop, p.z, drop + ride * 2.2 + 0.5, body, this.inRoom ? FLOOR_INSIDE : undefined);
         let dist = hit === null ? null : hit - drop;
-        if (water) {
+        if (sea) {
           const toWater = p.y - floorAt(p.x, p.z);
           if (dist === null || toWater < dist) dist = toWater;
         }
@@ -2070,6 +2161,8 @@ export class Vehicle {
     // they would keep a whole world and its terrain alive behind it.
     this.stepPhysics = null;
     this.stepGround = null;
+    this.stepLiquid = null;
+    this.stepLava = null;
     this.holdFrame = null;
     for (const h of this.colliderHandles) if (HULLS.get(h) === this) HULLS.delete(h);
     this.combat?.dispose();

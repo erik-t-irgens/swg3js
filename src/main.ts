@@ -157,6 +157,7 @@ import { FAMILY_TUNE } from './world/terrain';
 import { RoomAir, type RoomAirDebugOptions, type RoomAirInput } from './world/roomAir';
 import { UnderwaterSpecksPass, type UnderwaterSpeckDebugOptions } from './world/underwaterSpecks.ts';
 import type { LavaHarmTune } from './world/lavaHarmMath.ts';
+import type { SeaFeedTune } from './world/seaFeed.ts';
 import type { PlayerBurnTune } from './combat/burnMath.ts';
 import type { BreathTune } from './player/breathMath.ts';
 import { configureWaterSim, pokeWaterSim, waterSimDebug, WATER_SIM_DRAFT, WATER_SIM_IMPACT, WATER_SIM_SPEED } from './world/waterSim';
@@ -1769,6 +1770,33 @@ class App {
       },
       water: (x: number, z: number) => this.world.terrain.waterHeightAt(x, z),
       /**
+       * The **second** water reader and its knobs: the sea with the swell in it, which is what
+       * floats on it reads and what nothing else may. `sea()` reports the numbers in force, the
+       * shader's own fade edges they lean on, the swell's reach on this planet and -- in `why` --
+       * why nothing is bobbing when nothing is.
+       *
+       * `sea({ on: false })` puts the flat table back under every hull and makes the game exactly
+       * what it was. `sea({ scale: 0.5 })` halves the bob without touching the picture, which is the
+       * knob for a sea with the right rhythm and too much height -- and there is a reason it might
+       * have: the near sea is 15 m a quad while its waves run 7.8 m to 33.5 m, so the mesh draws
+       * about half the swell the hull is really floating on. `sea({ solve: 0 })` drops the inverse
+       * solve back to the plain forward sum (0.047 m r.m.s. out, 0.29 m at worst, against 3 mm for
+       * the one step that is the default), since a wave carries the surface sideways as well as up.
+       * `sea({ farFade: true })` mirrors the shader's camera-distance fade as well: off by default,
+       * because the mesh goes flat past 900 m for want of vertices rather than for want of waves,
+       * and a ride that changes when the camera turns away is the worse fault of the two.
+       *
+       * `sea(x, z)` answers that reader at a point beside `water(x, z)`, which is the flat one: over
+       * the open sea the two differ by the swell and everywhere else they are the same number. The
+       * water's own clock only turns on a drawn frame, so in a driven tab -- and under
+       * `__debug.advance`, which does not step the world -- the swell is a still shape and a hull
+       * settles onto it rather than riding it.
+       */
+      sea: (x?: number | SeaFeedTune, z?: number) => {
+        if (typeof x === 'number' && typeof z === 'number') return { flat: this.world.terrain.waterHeightAt(x, z), sea: this.world.seaAt(x, z) };
+        return this.world.setSeaFeed(typeof x === 'object' && x !== null ? x : undefined);
+      },
+      /**
        * The lava drawn now (tables, and each look with where its textures came from: "client",
        * "partial" or "stand-in"), the look every lava material shares, and what a flow does to
        * whoever stands in it. `lava({ intensity, glow, glowFrom, glowTo })` tunes the colour and
@@ -2997,7 +3025,9 @@ class App {
       /**
        * How the ship ridden, piloted or nearest stands on the ground: `landing()` reports it, `landing({ gap: 0.1 })`
        * sets any of the invented numbers (LANDING in vehicles/landing.ts: gap, tilt, settle, reach, catchLead, hold,
-       * hard, floorReach, spread, bandSlack) and `landing({ room: { spare: 4 } })` the ones for a ship in a building's
+       * hard, floorReach, spread, bandSlack, and `wet`, which is how deep the water or the lava over the floor must
+       * stand before a put-down is refused; the report's `under` says what is under the foot and how deep it is)
+       * and `landing({ room: { spare: 4 } })` the ones for a ship in a building's
        * rooms (SHIP_ROOM: every, step, spare). `landing({ rule: 'springs' })` puts the older hover-only ride back for
        * every ship, `landing({ cut: true })` cuts its engines, so it comes down and settles where it stands (false
        * starts them again), and `landing({ up: true })` lifts it off. `__debug.advance` steps all of it, so a settle
@@ -6754,6 +6784,17 @@ class App {
     return this.postfx?.pass<import('./core/fx/grade').ColorGradePass>('colorGrade') ?? null;
   }
 
+  /**
+   * What a stepping vehicle reads of the world under it: the terrain's height, the surface of whatever
+   * water stands over a column (lava tables and all, which is what the springs want -- a flow holds a
+   * speeder up exactly as a lake does), and whether that liquid is a flow, which only ever chooses the
+   * words a refused landing says. Bound fields rather than closures made in the loop: they were made
+   * afresh for every vehicle on every step, and a step runs at the physics rate.
+   */
+  private readonly vehicleGroundAt = (x: number, z: number): number => this.world.terrain.heightAt(x, z);
+  private readonly vehicleWaterAt = (x: number, z: number): number => this.world.terrain.waterHeightAt(x, z);
+  private readonly vehicleLavaAt = (x: number, z: number): boolean => Number.isFinite(this.world.lavaAt(x, 0, z));
+
   /** Drive the ridden vehicle from the keys (the mouse or A/D steer, Alt frees the look, W/S throttle, Shift boost, Space hop, the view's tilt or Space and X climb and sink), step every vehicle, and seat the rider. */
   private stepVehicles(dt: number, simulate: boolean): void {
     const { player, input } = this;
@@ -6861,13 +6902,14 @@ class App {
     // fire along the nose; the bolts are the game's own and strike what a blaster's would, ships included.
     if (simulate && pilot?.spec.ship && !this.hyperspace.drives(pilot)) this.aimShip(pilot, dt);
     else this.shipLeadValid = false;
-    const terrain = this.world.terrain;
     for (const v of this.world.vehicles) {
       // Which building room the ship stands in, followed through the portals before it steps: in one, its
       // floor is the room's and its hull ignores the terrain and the shells.
       this.world.trackVehicleRoom(v, dt);
       // An NPC ship flies on its brain's drive while play runs (held, it goes nowhere anyway).
-      if (!v.drift) v.update(dt, this.physics, v === pilot ? drive : simulate && v.autopilot ? v.autopilot.drive : null, (x, z) => terrain.heightAt(x, z), (x, z) => terrain.waterHeightAt(x, z));
+      // The seventh is the swell-aware sea reader, which only the hover springs take: a hull on the
+      // open water floats on the surface that is drawn rather than on the table's flat height.
+      if (!v.drift) v.update(dt, this.physics, v === pilot ? drive : simulate && v.autopilot ? v.autopilot.drive : null, this.vehicleGroundAt, this.vehicleWaterAt, this.vehicleLavaAt, this.world.seaAtFn);
       else {
         const t = v.body.translation();
         v.pos.set(t.x, t.y, t.z);
@@ -6951,7 +6993,7 @@ class App {
     this.spaceGate = null;
     if (flown?.spec.ship && flown.def) {
       if (this.world.planet.space) this.spaceGate = 'down';
-      else if (flown.airborne && spaceZoneOf(this.world.planet) && flown.pos.y - terrain.heightAt(flown.pos.x, flown.pos.z) > SPACE_GATE_HEIGHT) this.spaceGate = 'up';
+      else if (flown.airborne && spaceZoneOf(this.world.planet) && flown.pos.y - this.world.terrain.heightAt(flown.pos.x, flown.pos.z) > SPACE_GATE_HEIGHT) this.spaceGate = 'up';
     }
     if (player.piloting?.crashed) {
       const m = player.piloting;

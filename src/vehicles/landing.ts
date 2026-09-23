@@ -37,6 +37,11 @@ export const CUT_ENGINES_KEY = 'KeyJ';
  * - `floorReach`: how far a floor ray looks down from the hull's middle (m): a hangar is tens of metres high.
  * - `spread`: the share of the footprint the four outer floor samples stand out at.
  * - `bandSlack`: how far over the bottom of its hover band a ship still counts as at the bottom of it (m).
+ * - `wet`: how deep the liquid over the floor has to stand (m) before a set-down is refused. A hull
+ *   rests `gap` over the floor, so anything over that already has its belly in the water; the number
+ *   is a little more than the gap so that a ford, a puddle and the last inches of a beach are still
+ *   landable and a lake or the open sea is not. `0` refuses every wet spot, a large number restores
+ *   the old behaviour of setting down on the bed with the water over the hull.
  */
 export const LANDING = {
   gap: 0.3,
@@ -49,6 +54,7 @@ export const LANDING = {
   floorReach: 120,
   spread: 0.45,
   bandSlack: 0.05,
+  wet: 0.5,
 };
 
 /**
@@ -124,6 +130,56 @@ export function withFilter(current: number, filter: number): number {
  */
 export function catchDistance(fall: number): number {
   return Math.max(LANDING.reach, fall * LANDING.catchLead);
+}
+
+/**
+ * What lies between a hull and the floor it would rest on: nothing, the planet's water, or a lava
+ * flow. The empty string is "nothing in the way", so a caller reads the answer as a truthy note.
+ */
+export type LandingLiquid = '' | 'water' | 'lava';
+
+/**
+ * Whether a ship may set down where it stands, as far as what stands over the floor is concerned.
+ * Nothing here floats a hull: it refuses the put-down, and a hull refused goes on hovering exactly as
+ * it did before, which is what it has always done over the open sea.
+ *
+ * `floor` is the solid floor under the foot (the terrain, or a room's own ray: `floorUnder`), `liquid`
+ * the surface of whatever stands over that column as the terrain's own water reader answers it, which
+ * is lava as readily as water -- hence `lava`, which the caller reads from the world and which only
+ * ever changes the words. **This takes the flat surface, never a swelling one**: the question is
+ * whether there is water here at all, not where a crest is standing this second.
+ *
+ * Two exceptions, and both are the file's own precedents rather than new policy:
+ *
+ * - `forced` is a hull with its engines cut. It has nowhere else to go, so it ditches: the same
+ *   answer `restPose`'s `clamp` already gives a hull falling onto a slope too steep to land on.
+ * - `inRoom` is a hull standing in a building's rooms, where the planet's water table is not the
+ *   floor and is not water at all. 87 placed portal buildings across the converted planets have a
+ *   room floor under their planet's water table, so by height alone every one of them would refuse a
+ *   landing in a dry hangar; the room is the answer, as it is for a foot and a blade
+ *   (`waterTopAt` in `src/world/waterLineMath.ts`). A lake really inside a room is not water to the
+ *   terrain either -- it would be a placed surface, and the room's own ray is what the hull rests on.
+ *
+ * A finite surface over no floor at all is refused too: there is the liquid, and nothing measurable
+ * under it to stand on.
+ */
+export function landingLiquid(floor: number, liquid: number, lava: boolean, forced: boolean, inRoom: boolean): LandingLiquid {
+  if (forced || inRoom) return '';
+  if (!Number.isFinite(liquid)) return '';
+  const kind: LandingLiquid = lava ? 'lava' : 'water';
+  if (!Number.isFinite(floor)) return kind;
+  return liquid - floor > LANDING.wet ? kind : '';
+}
+
+/**
+ * What the message line says about a refusal. The words are here rather than in the hull so that the
+ * rule and what the player reads are pinned by the same test; the hull says it once, through the
+ * `landNote` the "too steep" refusal already goes out on.
+ */
+export function landingLiquidNote(kind: LandingLiquid): string {
+  if (kind === 'lava') return 'a lava flow is no place to set down';
+  if (kind === 'water') return 'the water is no place to set down';
+  return '';
 }
 
 /** A floor fitted to the samples: y = a·x + b·z + c, in the world. */

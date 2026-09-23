@@ -17,6 +17,7 @@ import { addSimBody, stepWaterSim, type SimBody } from './waterSim';
 import { WaterBodies, type WaterBody } from './waterBodies';
 import { envLightFrom, isLavaWater, shaderKey, type WaterLook } from './waterLook';
 import { coveringWaterShader, onSeaSurface, surfaceReach, underwaterVerdict, waterTopAt, type WaterLineQuery } from './waterLineMath.ts';
+import { SEA_FEED, seaFeedReport, seaHeight, seaSwellAt, swellScaleAt, tuneSeaFeed, type SeaFeedTune, type SwellWave } from './seaFeed.ts';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { createLavaMaterial, LAVA_LOOK, lavaGeometry, lavaHeatTable, loadLavaTextures, refreshLavaFar, standInLavaTextures, type LavaMaterial, type LavaTextures } from './lava';
 import { FALLBACK_LAVA_STYLE, groupLava, lavaStyleFor, type LavaStyle } from './lavaStyle';
@@ -920,6 +921,102 @@ export class World {
     if (!stream) return false;
     return stream.indoorsAt(roomProbe.set(x, y, z));
   };
+
+  /**
+   * **The second water reader: the sea as it is drawn, for what floats and for nothing else.**
+   *
+   * The flat table (exactly what `Terrain.waterHeightAt` answers, lava tables and all) plus the
+   * swell's own height over the point. Every reader that is not about floating keeps the flat one and
+   * must go on keeping it: the swell reaches about 1.19 m and a wader swims at 1.1 m of water, so a
+   * breathing shared height would flip a body in and out of swimming with every crest. The swim
+   * line, the feet, the blade, the spawn heights, the splashes, the weather and the camera's own
+   * water line all read `waterHeightAt`, `waterColumnAt` or `footSurfaces.waterTop`.
+   *
+   * There is exactly one other consumer, and it is a consequence of this one rather than a second
+   * decision: a rule that measures **a floating hull's own height** against a water surface must read
+   * the same surface the springs floated it on, or the wave eats the margin between them and the rule
+   * flickers at sea. `Vehicle.onWater` does, and the wake's depth window does through `seaSwellOver`
+   * below. Nothing else in the game may.
+   *
+   * It answers the flat height **exactly**, to the bit, wherever the swell does not reach:
+   *   * over a lake or a pool, because a surface that is not the global table's own height is not
+   *     the sea (`onSeaSurface`, the same float-exact compare the camera's water line takes). That
+   *     is the **only** guard a lake has here, and it is one guard rather than two: the wave
+   *     uniforms read below are always the near sea's own material's, whose `uWaveHeight` is 1, and
+   *     a lake's own flat material is never asked;
+   *   * in water under 0.3 m, and **only** under it: the shader's own `smoothstep(0.3, 5, depth)` is
+   *     what is mirrored, so the swell is dead at 0.3 m, half of it is there at 2.65 m and the whole
+   *     of it by 5 m. "The shallows are unchanged" is true of the shoreline, where the surface must
+   *     hold still, and not of a hull in three metres of water, which bobs by about half the sea;
+   *   * over a flow, since the lava planet's global table is not a sea to swell;
+   *   * with the switch off (`__debug.sea({ on: false })`) or with no wave sum registered.
+   *
+   * Two things it does **not** answer, because a reader that looks exhaustive is read as one:
+   *   * it has no room rule of its own. A hull inside a building floats on neither water, and that
+   *     is `Vehicle.update`'s doing -- it passes no sea reader at all while `inRoom`. The next
+   *     caller gets no such guard and must bring its own, as every other water reader's caller does.
+   *   * with `farFade` off (the default) it answers the swell at any distance, while the drawn sea
+   *     is flat wherever the near plane does not reach: that plane is 3000 m across and follows the
+   *     player, so a hull more than about 1500 m from the player floats on a swell the far ring
+   *     draws flat (`waves: false`, `uWaveHeight` 0). Nothing is watched at that range today. It is
+   *     a second disagreement with the picture and not the same one as the mesh's 15 m quads.
+   *
+   * `groundY` is the ground height under the point where the caller already has it -- the hover
+   * springs work it out for every corner before they ask -- so the depth costs nothing there; leave
+   * it out and the terrain is asked. Allocates nothing and makes no closure: it is called once per
+   * hover point per physics step.
+   */
+  seaAt(x: number, z: number, groundY = Number.NaN): number {
+    const terrain = this.terrain;
+    if (!terrain) return -Infinity;
+    const flat = terrain.waterHeightAt(x, z);
+    return seaHeight(flat, this.swellOver(x, z, flat, groundY));
+  }
+
+  /**
+   * The swell **alone** over a point: exactly what `seaAt` adds to the flat table, and 0 wherever it
+   * adds nothing at all. For a caller that already has the flat height in hand and wants to know how
+   * far the drawn sea stands over it -- the wake's own depth window, which measures a hull that now
+   * rides the waves against a surface read from the flat table.
+   */
+  seaSwellOver(x: number, z: number, groundY = Number.NaN): number {
+    const terrain = this.terrain;
+    if (!terrain) return 0;
+    return this.swellOver(x, z, terrain.waterHeightAt(x, z), groundY);
+  }
+
+  /** The swell over a point whose flat height the caller has already paid for. 0 is "no swell here". */
+  private swellOver(x: number, z: number, flat: number, groundY: number): number {
+    const terrain = this.terrain;
+    // The cheapest possible answers first: the switch, no sea on this planet, and the flow guard.
+    if (!terrain || !SEA_FEED.on || !Number.isFinite(flat) || this.globalWaterIsLava) return 0;
+    const near = this.waterNear;
+    // One guard, not two: the uniforms below are always the near sea's own material, whose
+    // `uWaveHeight` is hard-wired to 1, so a lake is kept flat by this float-exact compare alone.
+    if (!near || !onSeaSurface(flat, terrain.waterLevel, !!this.water?.visible)) return 0;
+    const u = near.lit.userData.uniforms;
+    const waveHeight = (u.uWaveHeight?.value as number | undefined) ?? 0;
+    const depth = flat - (Number.isFinite(groundY) ? groundY : terrain.heightAt(x, z));
+    const camera = SEA_FEED.farFade ? this.camera : null;
+    const scale = swellScaleAt(depth, waveHeight, camera ? Math.hypot(camera.position.x - x, camera.position.z - z) : 0);
+    if (!(scale > 0)) return 0;
+    const waves = u.uWaves?.value as SwellWave[] | undefined;
+    const omega = u.uOmega?.value as number[] | undefined;
+    if (!waves || !omega) return 0;
+    return seaSwellAt(waves, omega, x, z, this.waterTime, scale);
+  }
+
+  /**
+   * The sea reader as a kept arrow, so the frame loop hands it to every vehicle's step without
+   * making a closure per vehicle per frame.
+   */
+  readonly seaAtFn = (x: number, z: number, groundY?: number): number => this.seaAt(x, z, groundY ?? Number.NaN);
+
+  /** The numbers the sea reader runs on, with the knobs written first. `__debug.sea` prints it. */
+  setSeaFeed(tune?: SeaFeedTune): ReturnType<typeof seaFeedReport> & { swell: number; time: number; sea: boolean } {
+    tuneSeaFeed(tune);
+    return { ...seaFeedReport(), swell: this.waterBodies.swell, time: this.waterTime, sea: !!this.water?.visible && !this.globalWaterIsLava };
+  }
 
   /**
    * The water over a **column**: the height of whatever table covers this x and z, with lava
@@ -2064,7 +2161,7 @@ export class World {
     if (spray) this.rippleClock = 0;
     this.simSeen.clear();
 
-    const touch = (key: object, p: THREE.Vector3, geo: THREE.BufferGeometry, draft: number, q: THREE.Quaternion | null, strength: number) => {
+    const touch = (key: object, p: THREE.Vector3, geo: THREE.BufferGeometry, draft: number, q: THREE.Quaternion | null, strength: number, floats = false) => {
       // Lava takes no rings and throws no spray (`World.lavaAt`: finite is a flow over this column).
       if (Number.isFinite(this.lavaAt(p.x, p.y, p.z))) return;
       // Nor does a room. This reader asked the water table by column, as the feet and the blade once
@@ -2073,7 +2170,15 @@ export class World {
       // reader tells a room from open water, and -Infinity is its own "no water over this point".
       const surface = this.footSurfaces.waterTop(p.x, p.y, p.z);
       if (!Number.isFinite(surface)) return;
-      const depth = surface - p.y;
+      // What floats is floated by `seaAt`, so its own height breathes with the swell while this
+      // reader's does not: measured against the flat table alone the window below would open and
+      // shut with the wave under the hull rather than with where the hull is. The swell over the
+      // column is added back, which leaves the depth bit for bit what it was on a flat sea whatever
+      // the wave does, and is 0 on a lake, in the shallows, over a flow and with the switch off. A
+      // wader is not lifted by anything and takes none of it: the swim line, the feet and the
+      // splashes all keep the flat table, which is the whole reason there are two readers (D17).
+      const lift = floats ? this.seaSwellOver(p.x, p.z) : 0;
+      const depth = surface + lift - p.y;
       let last = this.lastSeen.get(key);
       if (!last) {
         last = new THREE.Vector3(Number.NaN, 0, 0);
@@ -2099,7 +2204,11 @@ export class World {
       body.velDown = Math.max(0, Math.min((vy - 1.5) / 12, 1)) * strength;
       this.simSeen.add(key);
 
-      // Spray past a brisk walk, more the faster the mover and the shallower it sits.
+      // Spray past a brisk walk, more the faster the mover and the shallower it sits. It is thrown
+      // from the **flat** surface even under a hull riding a crest, because a droplet dies when it
+      // falls back through the height `Splashes.update` is fed, which is the flat table: born on the
+      // sea instead, a burst in a trough would spawn under that height and die on its first step.
+      // The two must agree, and moving both is the floating ship's work, not this reader's.
       const speed = Math.hypot(vx, vz);
       if (spray && speed > 1.6 && depth < 1.6) {
         this.splashes.spawn(p.x, surface, p.z, Math.round(1 + Math.min(speed, 8) * 0.9 * strength), vx, vz);
@@ -2127,7 +2236,8 @@ export class World {
       }
       v.quaternion(tmpQ);
       tmpV.copy(v.pos);
-      touch(v, tmpV, geo, Math.max(0.5, v.radius * 0.7), tmpQ, 1.4 + v.radius * 0.3);
+      // The last argument is what says this one floats: its height was written by springs fed the sea.
+      touch(v, tmpV, geo, Math.max(0.5, v.radius * 0.7), tmpQ, 1.4 + v.radius * 0.3, true);
     }
 
     // Anything not touched this frame has left the water, so it stops being drawn into the field.
