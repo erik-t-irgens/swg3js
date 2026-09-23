@@ -156,6 +156,7 @@ import { RoomAir, type RoomAirDebugOptions, type RoomAirInput } from './world/ro
 import { configureWaterSim, pokeWaterSim, waterSimDebug, WATER_SIM_DRAFT, WATER_SIM_IMPACT, WATER_SIM_SPEED } from './world/waterSim';
 import { RANGE } from './world/gallery';
 import { castsShadow, surfaces } from './world/surfaces';
+import { compilerVerdict, groupPrograms, loadingLine, machineAside, measureCompiler, ProgramWatch, readKey, SHADER_TUNE, verdictLine, type ProgramPhase, type ProgramRow } from './core/shaderWatch.ts';
 
 /** The keys for the vehicle ridden, by its kind. */
 function mountPrompt(v: import('./vehicles/vehicle').Vehicle, wingsKey: string = WINGS_KEY): string {
@@ -299,6 +300,15 @@ class App {
   private torch!: THREE.SpotLight;
   private torchOn = false;
   private lastPrograms = 0;
+  /**
+   * Which shader programs the renderer holds, and which appeared on which frame. The renderer's own
+   * `info.programs.length` is a net figure, so a frame that made one and dropped another reads as a
+   * quiet one; the watch compares by program id instead, and can say what was made rather than only
+   * how many. `__debug.shaders()` is the whole of it.
+   */
+  private readonly shaderWatch = new ProgramWatch();
+  /** Said once a session, after the machine has been measured behind the first loading screen. */
+  private shaderVerdictSaid = false;
   private readonly canvas = document.getElementById('game') as HTMLCanvasElement;
   private readonly ui = document.getElementById('ui') as HTMLElement;
   private readonly renderer: THREE.WebGLRenderer;
@@ -5659,6 +5669,10 @@ class App {
       this.loadingScreen.setWhat(`loading ${stage}`);
       await new Promise((r) => setTimeout(r, 100));
     }
+    // How dear a shader program is on this machine, measured once a session and only here, behind a
+    // screen the player is already waiting at. It decides nothing about how the game looks: only how
+    // hard it paces itself afterwards, and what this screen admits to while the wait is long.
+    this.measureShaderCompiler();
     // Every shader compiles now, behind the screen: the effects, the bolts and the kit's own
     // visuals put one of themselves in the scene first, so the first shot, hit or throw finds its
     // shaders ready rather than compiling them on the frame it is needed.
@@ -5677,13 +5691,81 @@ class App {
     this.loadingScreen.setWhat('preparing ship effects');
     await this.world.ships.prepareEffects(this.renderer);
     const tCompile = performance.now();
-    const compiled = await this.world.compileAllAsync((done, total) => this.loadingScreen.setWhat(`compiling shaders, ${done} of ${total} objects`));
+    // The line under the title is the one the screen always said on a machine where a program costs
+    // a millisecond, and says why the wait is long on one where it costs a third of a second: a
+    // thirty-second wait with a reason is a different thing from one that looks hung.
+    const compiled = await this.world.compileAllAsync((done, total) => this.loadingScreen.setWhat(loadingLine(done, total, compilerVerdict())));
     if (compiled) console.info(`shaders: ${compiled} programs compiled behind the loading screen in ${(performance.now() - tCompile).toFixed(0)} ms`);
     // A frame with everything in, so the first thing seen is the world and not the screen lifting off a blank.
     this.drawFrame();
     this.lastPrograms = this.renderer.info.programs?.length ?? 0;
+    // Everything built behind this screen is put on the watch's books as the loading screen's work,
+    // so the first play frame reports the one program it really made rather than the two hundred
+    // the screen made, and `__debug.shaders()` can tell the two apart afterwards.
+    //
+    // In a tab that is on screen the frame loop has been sampling all through the load and has said
+    // `loading` for every one of those frames already, so this finds nothing left to file and costs
+    // one pass over the live list. It is not idle: in a hidden tab, and in anything driving the game
+    // without frames, no frame loop runs at all and this is the only sample the whole load gets.
+    this.sampleShaders('loading');
     this.loadingScreen.setProgress(1);
     await new Promise((r) => setTimeout(r, 120));
+  }
+
+  /** The renderer's live program list, in the shape the watch reads. Nothing is copied. */
+  private shaderRows(): readonly ProgramRow[] {
+    return (this.renderer.info.programs ?? []) as unknown as readonly ProgramRow[];
+  }
+
+  /**
+   * One sample of the renderer's program list. Called once a frame and again wherever programs are
+   * built on purpose, so nothing is ever attributed to the wrong phase.
+   */
+  private sampleShaders(phase: ProgramPhase): { made: number; dropped: number; live: number; first: string } {
+    return this.shaderWatch.sample(this.shaderRows(), phase, performance.now());
+  }
+
+  /**
+   * What the game is doing, in the watch's own four words. Every sample asks this and nothing works
+   * it out for itself, because the one figure the whole shader watch exists to get right is "what
+   * was built during play", and a second opinion about what playing means corrupts it silently.
+   *
+   * It was two opinions and neither was right. The frame loop called every frame that was not a
+   * travel, a jump or an effects switch `play`, which at the select screen — where there is no
+   * world, no player and nothing playing — filed the session's first fourteen programs as built in
+   * play and left them in that list for the rest of the session; and it called a frame behind the
+   * loading screen `covered`, which is the word for a live frame the player cannot see, so
+   * `loading` was never used by anything and the deliberate sample at the end of `settle` had
+   * nothing left to file. The order below is the order the words mean: waiting on purpose first,
+   * then a covered frame, then no world at all, and only what is left is play.
+   */
+  private shaderPhase(): ProgramPhase {
+    if (this.loadingScreen.open || this.traveling) return 'loading';
+    if (this.fxBusy || this.hyperspace.covered) return 'covered';
+    if (!this.inWorld || !this.started) return 'boot';
+    return 'play';
+  }
+
+  /**
+   * Measure the machine once, behind a loading screen, and say what was found. The probe builds two
+   * or three trivial programs nobody has built before and times the driver's own blocking answer;
+   * on a machine where that is a millisecond it stops after one and costs nothing worth naming.
+   */
+  private measureShaderCompiler(): void {
+    if (this.shaderVerdictSaid) return;
+    let gl: WebGL2RenderingContext | WebGLRenderingContext | null = null;
+    try {
+      gl = this.renderer.getContext();
+    } catch {
+      gl = null;
+    }
+    const verdict = measureCompiler(gl, { inPlay: this.started && !this.loadingScreen.open });
+    // Not measured means the probe declined (it was asked in play); it may ask again next time.
+    if (!verdict.measured && verdict.why.includes('in play')) return;
+    this.shaderVerdictSaid = true;
+    // One line, once a session. A machine with nothing wrong with it gets one cheerful line and is
+    // never mentioned again.
+    console.info(verdictLine(verdict));
   }
 
   /** Write where the character stands into its record, every few seconds or at once. */
@@ -7227,7 +7309,10 @@ class App {
           }));
         });
         if (next) await next.warmUp();
-        await this.world.compileAllAsync((done, total) => this.notice.set(`${label}: shaders for ${done} of ${total} objects`), { target: next ? next.compileTarget : null, waitReady: true, keepQueue: true });
+        // The aside is the loading screen's, in the same words: nothing at all on a machine that
+        // builds a program in a millisecond, and what it really costs on one that does not, since
+        // this notice is the only thing on the screen while the switch takes its seconds.
+        await this.world.compileAllAsync((done, total) => this.notice.set(`${label}: shaders for ${done} of ${total} objects${machineAside(compilerVerdict())}`), { target: next ? next.compileTarget : null, waitReady: true, keepQueue: true });
         if (this.settings.effects !== want) {
           // It moved again while we compiled: throw this one away and look at the settings afresh.
           next?.dispose();
@@ -9270,12 +9355,25 @@ class App {
       // death card, an open panel or the map.
       this.drawOverlay(simulate);
       stats.frameMs = performance.now() - tFrame;
-      // A shader compiled on a live frame is a stall: say which frame, and how many, so the cause can be found.
-      const programs = this.renderer.info.programs?.length ?? 0;
+      // A shader compiled on a live frame is a stall: say which frame, how many, and WHAT, so the
+      // cause can be found rather than only counted. The renderer's own `programs.length` cannot
+      // answer that, nor even how many were made: it is a net figure, and a frame that built one
+      // and let another go reads as a quiet one. The watch compares by program id instead.
+      //
       // While the effects are switching over, programs are made on purpose and on frames that are not stalls.
       // Under the jump's white, the destination's programs are made on purpose (World.readyAround), unseen.
-      if (programs > this.lastPrograms && this.lastPrograms > 0 && !this.traveling && !this.fxBusy && !this.hyperspace.covered) console.info(`shaders: ${programs - this.lastPrograms} compiled during play (${stats.frameMs.toFixed(0)} ms frame, ${programs} programs in all)`);
-      this.lastPrograms = programs;
+      // Behind a loading screen the player is waiting on purpose, and before the first world there is
+      // nothing to play at all. Every one of those frames is sampled all the same, under the word
+      // that fits it, so nothing goes uncounted, `__debug.shaders()` can still say what each of them
+      // built, and the line below is written for a live frame of real play and for nothing else.
+      const phase = this.shaderPhase();
+      const made = this.sampleShaders(phase);
+      if (made.made > 0 && phase === 'play' && this.lastPrograms > 0) {
+        const churn = made.dropped > 0 ? `, ${made.dropped} dropped` : '';
+        const over = made.made > SHADER_TUNE.playBudget ? ' — over the one a frame this game holds to' : '';
+        console.info(`shaders: ${made.made} built during play${churn} (${stats.frameMs.toFixed(0)} ms frame, ${made.live} programs in all, first "${made.first}")${over} — __debug.shaders() for the rest`);
+      }
+      this.lastPrograms = made.live;
       stats.rawDt = rawDt;
       stats.grounded = player.grounded;
       stats.vel = [player.vel.x, player.vel.y, player.vel.z];

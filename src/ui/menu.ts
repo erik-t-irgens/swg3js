@@ -6,6 +6,7 @@ import { FX_KNOBS, fxPassDef, fxProductDef } from '../core/fxRegistry.ts';
 import { INTERFACE, notifyBindingsChanged, type Knob } from './hudPage.ts';
 import { multiplayerMarkup, type CharacterCopy } from './multiplayerPage.ts';
 import { resetWindows } from './drag.ts';
+import { compilerVerdict, verdictNote } from '../core/shaderWatch.ts';
 
 // The Interface page's knobs and the rebind note live in `hudPage.ts` so that a node test can read
 // them without a browser; they are theirs to change and everything else's to import from here. The
@@ -438,7 +439,14 @@ export class Menu {
         this.showPage('sound');
       });
     } else if (page === 'interface') {
-      body.innerHTML = `<h2>Interface</h2><p class="menu-hint">None of the game's own interface is used: every line, arc, bar, square and glyph on the screen is drawn here, and every number on this page is ours. The keys a slot or an action shows are the keys you have bound, which you set under Controls.</p>${INTERFACE.map((g) => `<h3>${g.title}</h3>${this.knobRows(g.knobs)}`).join('')}<div class="menu-actions"><button class="reset-hud">Reset the display and every window to defaults</button></div>`;
+      // What this browser costs to build one shader program, in the player's own words, and only
+      // once it has been measured -- which happens behind the first loading screen and never in
+      // play. It is a readout and not a knob: there is nothing here to set, and on a machine with
+      // nothing wrong with it the line is one cheerful sentence. It wears the page's own hint
+      // style, so it takes no colour of its own.
+      const machine = verdictNote(compilerVerdict());
+      const machineNote = machine ? `<p class="menu-hint">${machine}</p>` : '';
+      body.innerHTML = `<h2>Interface</h2><p class="menu-hint">None of the game's own interface is used: every line, arc, bar, square and glyph on the screen is drawn here, and every number on this page is ours. The keys a slot or an action shows are the keys you have bound, which you set under Controls.</p>${machineNote}${INTERFACE.map((g) => `<h3>${g.title}</h3>${this.knobRows(g.knobs)}`).join('')}<div class="menu-actions"><button class="reset-hud">Reset the display and every window to defaults</button></div>`;
       this.wireKnobs(body);
       body.querySelector('.reset-hud')!.addEventListener('click', () => {
         for (const g of INTERFACE) for (const k of g.knobs) this.setValue(k.key, DEFAULT_SETTINGS[k.key] as number | boolean | string);
