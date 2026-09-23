@@ -34,6 +34,9 @@ import { isLiftCell, liftStops, stopAt, type LiftStop } from './lifts';
 import type { SunInfo } from '../core/postfx';
 import { luminance, pointIrradiance } from '../core/fx/bladeGlowMath.ts';
 import { isShadowOnly } from '../core/fxRegistry.ts';
+import { ProgramQueue, resolveLinks } from '../core/programQueue.ts';
+import { PACE_TUNE, framesFor } from '../core/programPace.ts';
+import { pacingHard, shaderBudget } from '../core/shaderWatch.ts';
 import { addPointLight, fillCascades, luminanceOf, resetFxLights, setDirectional, type FxLights } from '../core/fx/lights';
 import { ParticleEffects, type EffectHandle, type EffectSounds } from './particles';
 import { Ambience, type AmbienceContext, type BedRow, type RoomRow } from '../audio/ambience.ts';
@@ -276,6 +279,30 @@ const NO_HURT = (): void => {};
 
 /** How many of an actor's textures are uploaded before the frame is given a turn (`prepareActor`). */
 const TEXTURES_PER_YIELD = 4;
+
+/**
+ * False when local storage holds `swg.shaderPace` = '0' (read once): the whole of the pacing is
+ * then off and the game is what it was before it. A tier of placed objects is added to the scene
+ * and drawn the moment it loads, and every other deferred compile -- an actor, a vehicle, a peer,
+ * a weapon, an NPC hull -- is built outright a mesh at a time rather than a program a frame, which
+ * is exactly what `compileReady` did before the queue existed. So the cost of being the first
+ * frame to draw a material nothing had built can be seen on a real machine and compared with the
+ * hold. Nothing about the picture differs either way -- the same objects, the same materials, the
+ * same frame they are drawn in once they are up -- only which frame pays for their programs.
+ *
+ * What the switch does **not** undo is `resolveLinks`, which finishes a program's link where the
+ * first draw used to. That is not pacing: it is the difference between a ship prepared in ten
+ * seconds and one prepared at once, and putting it back would be putting a fault back.
+ *
+ * It is read once, so it takes effect on the next world loaded.
+ */
+const SHADER_PACING: boolean = (() => {
+  try {
+    return typeof localStorage === 'undefined' || localStorage.getItem('swg.shaderPace') !== '0';
+  } catch {
+    return true;
+  }
+})();
 
 /**
  * Told when the player lands a blow: what was hurt, by how much, and whether that blow finished it.
@@ -1041,6 +1068,12 @@ export class World {
       this.particles.heightAt = (x, z) => this.terrain.heightAt(x, z);
       // The gallery is one long walk of exhibits with nothing else to draw: everything loads from anywhere on it.
       this.layoutStream = new LayoutStreamer(this.scene, this.physics, pack, layout, this.particles, { reach: planet.id === 'gallery' ? 4 : this.streamReach(), hugeColliders: !!planet.space });
+      // A tier is built hidden and shown once its programs exist, so no frame is ever the first to
+      // draw a material nothing had built: that was thirteen programs and two frames of over a
+      // second for a player who had not moved. `swg.shaderPace` = '0' in local storage leaves it
+      // null, which is the behaviour this had before -- a tier drawn the moment it loads -- and is
+      // the way to see for yourself what the hold is worth on your own machine.
+      if (SHADER_PACING) this.layoutStream.prepare = (objects) => this.prepareStreamed(objects);
       // A space zone's hyperspace effects are made ready now (their textured batches hidden in the scene, their
       // textures uploaded), so settle() compiles them behind the loading screen and no jump builds a program on a
       // live frame. Not `solid`: the jump places them without it (placeZoneEffect). `spaceData` was set by
@@ -1137,6 +1170,10 @@ export class World {
 
   private unload(): void {
     this.loadGeneration++;
+    // Everything still queued belonged to the world that is going: the objects are about to be
+    // taken out of the scene, and whoever was waiting on one (a tier holding itself back until it
+    // can be drawn without a stall) is answered rather than left waiting for ever.
+    this.programs.clear();
     // The water's height field holds a mesh and a material per thing that waded here, and the keys
     // are the bodies themselves: a world left with them still in the map holds every one of them.
     for (const body of this.simBodies.values()) body.dispose();
@@ -1719,6 +1756,21 @@ export class World {
   private makePmrem(renderer: THREE.WebGLRenderer): THREE.PMREMGenerator {
     const gen = new THREE.PMREMGenerator(renderer);
     gen.compileCubemapShader();
+    // `compileCubemapShader` covers the cube the pack brings and nothing else: the filter three
+    // runs over a *scene* is another program again, and a planet with no cube map of its own
+    // reaches it four seconds into play, from `refreshEnvironment`, on whatever frame that lands
+    // on. Measured on a machine where a program costs about nine milliseconds, that one frame was
+    // 47 ms; on a machine where a program costs a third of a second it is a visible freeze, in
+    // play, for a picture nobody asked for. One throw-away filter of an empty scene builds it here
+    // instead, with the very numbers the real call uses so that nothing about the program can
+    // differ, and the target it hands back is given up at once. Nothing is kept and no frame that
+    // is drawn is changed by it.
+    try {
+      const empty = new THREE.Scene();
+      gen.fromScene(empty, 0.04, 1, 20000, { size: 128 }).dispose();
+    } catch (err) {
+      console.warn('sky: the environment filter could not be warmed; its first reflection will cost a frame', err);
+    }
     return gen;
   }
 
@@ -2573,12 +2625,41 @@ export class World {
     }
   }
 
-  /** Objects whose shaders are still to be asked for, a few per frame. */
-  private readonly compileQueue: THREE.Object3D[] = [];
+  /**
+   * The one queue every deferred compile goes through: what a tier of the world brought in and is
+   * being held back until it can be drawn without a stall, and what the quarter-second material
+   * scan found that nobody is waiting on. It is drained a job at a time against a budget per frame
+   * (`ProgramQueue.pump`, called from `updateShadows`), so a machine with a slow compiler pays a
+   * dropped frame rather than a freeze, and flushed outright behind a loading screen or inside a
+   * jump's closed tunnel, where the player is waiting on purpose.
+   */
+  readonly programs = new ProgramQueue();
+
+  /**
+   * Whether the player is waiting on purpose just now: a loading screen is up, or a jump's closed
+   * tunnel is drawn over the world. The game fills it in (`main.ts` knows about both and this does
+   * not); with nothing filled in only a tab drawing no frames counts, which is safe but paces the
+   * loading screen as though it were play.
+   *
+   * This used to be a depth counter raised by `compileAllAsync`, `readyAround` and `settleCarried`,
+   * on the reasoning that those three only ever run behind a screen. Two of them do not:
+   * `reconcileEffects` calls `compileAllAsync` on the Effects switch **so that the old picture goes
+   * on being drawn** while the other variant compiles, and the ultra cruise calls `readyAround` at
+   * its stop with frames running and no screen up. For the seconds either took, every rule in this
+   * file believed the player was waiting and compiled outright on frames that were being drawn --
+   * the one thing the pacing exists to stop. So the question is asked of the game, which knows,
+   * rather than guessed from which method happens to be on the stack.
+   */
+  playerWaiting: () => boolean = () => false;
+
+  /** Whether nothing that is drawn would notice a long frame just now: a screen, a tunnel, or a tab drawing nothing. */
+  private get behindScreen(): boolean {
+    return this.playerWaiting() || (typeof document !== 'undefined' && document.hidden);
+  }
 
   /** Queue some objects' shaders for the background: a batch of new buildings must not all land in one frame. */
   private compileObjects(objects: THREE.Object3D[]): void {
-    this.compileQueue.push(...objects);
+    this.programs.add(objects, 'the quarter-second material scan');
   }
 
   /** The renderer walks a root; a stand-in root walks just these, so the rest of the scene is not re-examined. */
@@ -2640,23 +2721,86 @@ export class World {
     }
   }
 
-  /** Compile some objects for every pass that draws them, for the target they will be drawn into. */
-  private compileFor(r: THREE.WebGLRenderer, camera: THREE.Camera, objects: THREE.Object3D[], async: boolean, target: THREE.WebGLRenderTarget | null = this.compileTarget()): Promise<unknown>[] {
-    const jobs: Promise<unknown>[] = [];
+  /**
+   * Compile some objects for every pass that draws them, for the target they will be drawn into,
+   * and then **finish** every program that made: three stops at `linkProgram`, and a driver that
+   * links in the background does not finish until something asks the program a question, which
+   * until now was the first frame that drew it. `resolveLinks` asks it here instead. Nothing waits
+   * on `KHR_parallel_shader_compile`, which is advertised and broken on the machines this matters
+   * for; `async` now means only "let the driver start on the rest of the batch first".
+   */
+  private compileFor(r: THREE.WebGLRenderer, camera: THREE.Camera, objects: THREE.Object3D[], target: THREE.WebGLRenderTarget | null = this.compileTarget()): void {
     const byPass = new Map<number, THREE.Object3D[]>();
     for (const o of objects) for (const p of World.passesOf(o)) (byPass.get(p) ?? byPass.set(p, []).get(p)!).push(o);
     for (const [layer, list] of byPass) {
       const root = World.rootOf(list);
-      this.withLayers(camera, layer, () =>
-        this.withTarget(r, target, () => {
-          // compileAsync builds the programs now and only waits on the driver's linking, so the
-          // target can go back as soon as the call returns.
-          if (async) jobs.push(r.compileAsync(root, camera, this.scene).catch(() => {}));
-          else r.compile(root, camera, this.scene);
-        }),
-      );
+      this.withLayers(camera, layer, () => this.withTarget(r, target, () => r.compile(root, camera, this.scene)));
     }
-    return jobs;
+    // After every pass, so a material drawn in two has both of its programs finished. This is what
+    // makes the call synchronous in the only sense a caller cares about: every program these
+    // objects need exists and has been linked by the time this returns. Never `compileAsync`,
+    // which waits on `KHR_parallel_shader_compile` -- advertised and broken on the drivers this
+    // work exists for, where it answered "not ready" for six programs over four seconds.
+    for (const o of objects) this.programs.countLinks(resolveLinks(r, o));
+  }
+
+  /**
+   * Which pass of an object the queue has already built. An actor is drawn in the world's pass and
+   * in a room's, which is two programs, and a frame allowed one must be able to stop between them:
+   * so a turn at an object builds one pass, the cursor remembers where it got to, and the queue
+   * offers the object again. The map is weak, so an object that goes takes its place in it along.
+   */
+  private readonly passCursor = new WeakMap<THREE.Object3D, number>();
+
+  /**
+   * One turn at making an object ready to be drawn: its programs built, a pass at a time, for the
+   * target it will be drawn into, and their links finished. Answers how many programs that cost
+   * (which is what the frame's budget is charged) and whether the object is finished. `allowance`
+   * is how many more programs this frame may build; a turn stops as soon as it has spent it, and
+   * the first pass of a turn always runs, or a frame with nothing left could never make progress.
+   * This is the one place a program is built outside the loading screen's own batches.
+   */
+  private compileOne(o: THREE.Object3D, allowance = Number.POSITIVE_INFINITY): { made: number; done: boolean } {
+    const r = this.renderer;
+    const camera = this.camera;
+    if (!r || !camera) return { made: 0, done: true };
+    const passes = World.passesOf(o);
+    let at = this.passCursor.get(o) ?? 0;
+    if (at >= passes.length) {
+      this.passCursor.delete(o);
+      return { made: 0, done: true };
+    }
+    const before = r.info.programs?.length ?? 0;
+    // The target is read per object, so a switch part way through a queue compiles the rest for the
+    // path the game will really draw.
+    const target = this.compileTarget();
+    let made = 0;
+    while (at < passes.length) {
+      const layer = passes[at];
+      const root = World.rootOf([o]);
+      const was = r.info.programs?.length ?? 0;
+      this.withLayers(camera, layer, () => this.withTarget(r, target, () => r.compile(root, camera, this.scene)));
+      made += (r.info.programs?.length ?? 0) - was;
+      at++;
+      if (made >= allowance) break;
+    }
+    const done = at >= passes.length;
+    if (done) this.passCursor.delete(o);
+    else this.passCursor.set(o, at);
+    // Asked after every pass this turn built, so a material drawn in two has both links finished
+    // by the time the object is done with.
+    this.programs.countLinks(resolveLinks(r, o));
+    return { made: (r.info.programs?.length ?? 0) - before, done };
+  }
+
+  /** Every pass of one object, in one go: behind a loading screen, where nothing is being looked at. */
+  private compileWhole(o: THREE.Object3D): number {
+    let made = 0;
+    for (;;) {
+      const step = this.compileOne(o);
+      made += step.made;
+      if (step.done) return made;
+    }
   }
 
   /**
@@ -2677,38 +2821,147 @@ export class World {
         if (((m as THREE.Mesh).isMesh || (m as THREE.Sprite).isSprite || (m as THREE.Points).isPoints || (m as THREE.Line).isLine) && (m as THREE.Mesh).material) meshes.push(m);
       });
     }
-    for (const m of meshes) {
-      // The target is read for every mesh, so a switch part way through compiles the rest for the
-      // path the game will actually draw.
-      const target = this.compileTarget();
-      // A hidden tab compiles at once: compileAsync waits on the linking with a chained timer, which a
-      // hidden tab holds to one a second, then one a minute, and a hidden tab draws nothing to stall.
-      const hidden = typeof document !== 'undefined' && document.hidden;
-      for (const layer of World.passesOf(m)) {
-        const root = World.rootOf([m]);
-        if (hidden) this.withLayers(camera, layer, () => this.withTarget(r, target, () => r.compile(root, camera, this.scene)));
-        else await this.withLayers(camera, layer, () => this.withTarget(r, target, () => r.compileAsync(root, camera, this.scene).catch(() => {})));
-      }
-      await this.breath();
-    }
+    if (!meshes.length) return;
+    // Something being made ready to be shown is urgent: a peer walking up, a weapon taken up, a
+    // ship spawned. It goes ahead of the scenery filling in, which is the one producer that pushes
+    // without stopping.
+    await this.queueOrBuild(meshes, 'something being made ready to be shown', true);
   }
 
-  /** A few queued objects a frame, asked for in the background; called once per frame. */
-  private drainCompiles(): void {
-    if (!this.compileQueue.length) return;
-    const r = this.renderer;
-    const camera = this.camera;
-    if (!r || !camera) {
-      this.compileQueue.length = 0;
+  /**
+   * What the placed-object streamer waits on before it shows a tier: the same rule as
+   * `compileReady`, said in the streamer's own words so an overrunning frame names it. The objects
+   * handed over are drawables already, so nothing is traversed.
+   *
+   * Their materials are adopted first, and that order is not a detail. `CSM.setupMaterial` writes
+   * `USE_CSM`, `CSM_CASCADES` and `CSM_FADE` into a material's defines and hangs an
+   * `onBeforeCompile` on it, and the wet wrap rewrites `customProgramCacheKey`; all of that is in
+   * three's program key. Compiled first and adopted afterwards, every streamed material would cost
+   * two programs -- the first one never drawn -- and would be drawn unshadowed by the sun and dry
+   * in the rain until the second arrived. The quarter-second scan used to be the only thing that
+   * adopted these, and the queue drains every frame, so the scan lost that race fourteen times in
+   * fifteen.
+   */
+  private async prepareStreamed(objects: THREE.Object3D[]): Promise<void> {
+    if (!objects.length) return;
+    for (const o of objects) this.adoptMaterials(o);
+    await this.queueOrBuild(objects, 'the placed-object streamer', false);
+  }
+
+  /**
+   * Make some objects ready to be drawn and answer when they are, either through the paced queue
+   * or outright.
+   *
+   * Outright when nothing that is drawn would notice: behind a loading screen, in a jump's closed
+   * tunnel, in a tab drawing no frames, or with the pacing switched off. Outright too when no
+   * frame has looked at the queue for a while, because only a frame empties it -- the promise from
+   * `push` is answered by `pump`, `flush` or `clear` and by nothing else, so a caller that waits
+   * on it while no frame loop is running waits for ever. That is not a hypothetical: a character
+   * whose saved world is a space zone is put back in a ship inside `play()`, which is before the
+   * frame loop's own gate is opened, and this is the call it hangs on.
+   */
+  private async queueOrBuild(objects: THREE.Object3D[], label: string, urgent: boolean): Promise<void> {
+    if (!objects.length) return;
+    if (!SHADER_PACING || this.behindScreen || this.programs.idle(performance.now())) {
+      for (const o of objects) {
+        this.compileWhole(o);
+        await this.breath();
+      }
       return;
     }
-    const batch = this.compileQueue.splice(0, 2);
-    const before = r.info.programs?.length ?? 0;
-    const t0 = performance.now();
-    this.compileFor(r, camera, batch, true);
-    const made = (r.info.programs?.length ?? 0) - before;
-    const ms = performance.now() - t0;
-    if (made && ms > 30) console.info(`shaders: ${made} started in the background (${ms.toFixed(0)} ms), ${this.compileQueue.length} objects still queued`);
+    // On the queue, a program a frame, answered when the last of it is built: a dressed fighter or
+    // a spawned ship stays hidden for a few more frames rather than stopping one dead. `compileOne`
+    // finishes each program's link, so the frame that first draws it pays nothing.
+    const wait = this.programs.push(objects, label, urgent);
+    let settled = false;
+    void wait.then(() => {
+      settled = true;
+    });
+    while (!settled) {
+      // The frame loop stopping under a wait is the same case as there never having been one, and
+      // it must be answered the same way rather than left hanging.
+      if (this.programs.idle(performance.now())) {
+        await this.flushQueue();
+        break;
+      }
+      await new Promise<void>((r) => setTimeout(r, PACE_TUNE.pollMs));
+    }
+    await wait;
+  }
+
+  /** The flush in flight, if any: a second caller joins it rather than starting another. */
+  private flushing: Promise<void> | null = null;
+
+  /**
+   * Everything on the queue, now, with a breath between objects. One flush at a time: two running
+   * together would each take the head job while the other still held it, and a job would be
+   * stepped over. A second caller joins the first, which takes work pushed while it runs anyway.
+   */
+  private flushQueue(): Promise<void> {
+    if (!this.flushing) {
+      this.flushing = this.programs
+        .flush((o, allowance) => this.compileOne(o, allowance), () => this.breath())
+        .finally(() => {
+          this.flushing = null;
+        });
+    }
+    return this.flushing;
+  }
+
+  /**
+   * One frame's worth of the queue, called once a frame from `updateShadows`. In play the budget is
+   * one program (`SHADER_TUNE.playBudget`, package C's number) and a few milliseconds; behind a
+   * loading screen it is the screen's. A frame that goes over says so once, and names where the
+   * work came from, because the count on its own has never been enough to find the cause.
+   */
+  private drainCompiles(): void {
+    // Before anything else, and whether or not there is work: what "a frame is running" means to
+    // anyone waiting on the queue is that this was called, and a queue that happens to be empty
+    // must not read as a frame loop that has stopped.
+    this.programs.tick(performance.now());
+    if (!this.programs.pending) return;
+    if (!this.renderer || !this.camera) {
+      this.programs.clear();
+      return;
+    }
+    // With the pacing off the queue is still where the quarter-second scan's finds go; they are
+    // taken at the loading screen's allowance instead of one a frame, which is as near as this can
+    // come to not pacing at all.
+    const out = this.programs.pump(this.behindScreen || !SHADER_PACING, (o, allowance) => this.compileOne(o, allowance), () => performance.now());
+    if (out.over) console.info(this.programs.line());
+  }
+
+  /**
+   * What the program queue is doing: the console's one shader hook reads it.
+   *
+   * `budget` and `hard` are not this file's opinions: both come from the machine the game measured
+   * once behind its first loading screen, so the pacing is decided in one place by one measurement
+   * rather than by each part of this guessing at what a program costs.
+   */
+  shaderPace(): { pacing: boolean; pending: number; waiting: number; built: number; linked: number; worstFrame: number; overranFrames: number; blame: string; budget: number; hard: boolean; framesLeft: number; behindScreen: boolean; frames: number; idle: boolean } {
+    const budget = shaderBudget(this.behindScreen);
+    return {
+      // False with `swg.shaderPace` = '0' in local storage: everything below still counts, but
+      // nothing is held back and the budget is the loading screen's whatever the frame is.
+      pacing: SHADER_PACING,
+      pending: this.programs.pending,
+      waiting: this.programs.waiting,
+      built: this.programs.built,
+      linked: this.programs.linked,
+      worstFrame: this.programs.worstFrame,
+      overranFrames: this.programs.overranFrames,
+      blame: this.programs.blame,
+      budget,
+      // True where the machine measured slow enough that a careless frame is a visible freeze: the
+      // one thing the probe decides besides the number above.
+      hard: pacingHard(),
+      framesLeft: framesFor(this.programs.pending, budget),
+      behindScreen: this.behindScreen,
+      // How many frames have looked at the queue, and whether one has lately: `idle` true in play
+      // means the frame loop has stopped and every wait is being answered outright instead.
+      frames: this.programs.ticks,
+      idle: this.programs.idle(performance.now()),
+    };
   }
 
   /**
@@ -2718,16 +2971,40 @@ export class World {
    */
   async compileAllAsync(
     onProgress: (done: number, total: number) => void = () => {},
-    opts: { target?: THREE.WebGLRenderTarget | null; waitReady?: boolean; keepQueue?: boolean } = {},
+    /**
+     * There used to be a `waitReady` here, asking for the programs to be ready and not merely
+     * created before this returns. It is gone because it is now always true and cannot be asked
+     * for: `compileFor` finishes every program's link itself (`resolveLinks`), which is what the
+     * one caller that passed it wanted and is stronger than the parallel-compile extension's word.
+     * Anyone who changes `compileFor` to stop finishing links is changing that promise for
+     * everybody, which is the right place for it to be noticed.
+     */
+    opts: { target?: THREE.WebGLRenderTarget | null; keepQueue?: boolean } = {},
   ): Promise<number> {
     const r = this.renderer;
     const camera = this.camera;
     if (!r || !camera) return 0;
+    // Nothing is raised here. This sweep is not proof that the player is waiting: the Effects
+    // switch calls it in play on purpose, so that the old picture goes on being drawn while the
+    // other variant compiles. Whether the player is waiting is `playerWaiting`, which the game
+    // fills in, and the sweep's own compiles do not go through the paced queue in any case.
+    return this.compileEverything(r, camera, onProgress, opts);
+  }
+
+  private async compileEverything(
+    r: THREE.WebGLRenderer,
+    camera: THREE.Camera,
+    onProgress: (done: number, total: number) => void,
+    opts: { target?: THREE.WebGLRenderTarget | null; keepQueue?: boolean },
+  ): Promise<number> {
     this.setupShadowMaterials();
     // Switching the effects compiles for the other path while the frames still draw the old one,
     // so the queue it would otherwise be feeding is left alone.
     const target = opts.target !== undefined ? opts.target : this.compileTarget();
-    if (!opts.keepQueue) this.compileQueue.length = 0;
+    // Only the work nobody is waiting on is dropped: this sweep is about to compile every material
+    // in the scene, so the scan's list is redundant, while a tier still waiting to be shown must
+    // keep its promise -- it will cost nothing when it runs, its materials being built here.
+    if (!opts.keepQueue) this.programs.clearLoose();
     const objects: THREE.Object3D[] = [];
     this.scene.traverse((o) => {
       const m = o as THREE.Mesh;
@@ -2736,17 +3013,18 @@ export class World {
     const before = r.info.programs?.length ?? 0;
     const BATCH = 8;
     for (let i = 0; i < objects.length; i += BATCH) {
-      const jobs = this.compileFor(r, camera, objects.slice(i, i + BATCH), !!opts.waitReady, target);
-      // Waiting means the programs are linked when this returns, so the picture can change over.
-      if (opts.waitReady) await Promise.all(jobs);
+      // `compileFor` builds each batch's programs and finishes their links before it returns, so
+      // every program this sweep makes is ready to draw with by the time it ends, and no chained
+      // poll is left running behind the loading screen.
+      this.compileFor(r, camera, objects.slice(i, i + BATCH), target);
       onProgress(Math.min(objects.length, i + BATCH), objects.length);
       await this.nextFrame();
     }
     // The weather's falling effects draw in their own scene, with no lights and no fog: compiled
     // against that scene (never this one, whose lights and fog are in the program key), for the
-    // same target, so the first rain compiles nothing.
-    const weatherDone = this.withTarget(r, target, () => this.weather.compile(r, camera, !!opts.waitReady));
-    if (opts.waitReady && weatherDone) await weatherDone;
+    // same target, so the first rain compiles nothing. Its links are finished here too.
+    this.withTarget(r, target, () => this.weather.compile(r, camera, false));
+    this.programs.countLinks(resolveLinks(r, this.weather.scene));
     return (r.info.programs?.length ?? 0) - before;
   }
 
@@ -3445,15 +3723,27 @@ export class World {
    * so what it allocates is no frame's cost.
    */
   async readyAround(pos: THREE.Vector3, timeoutMs: number): Promise<boolean> {
+    // Nothing is raised here either. This is called inside a jump's closed tunnel, where the game
+    // already answers `playerWaiting`, **and** at the ultra cruise's stop, where frames are being
+    // drawn and no screen is up. It must not decide for itself that the player is waiting; the
+    // flush below keeps to no allowance because nothing on the queue is a thing being looked at,
+    // which is a different claim and is true in both places.
+    return this.waitReadyAround(pos, timeoutMs);
+  }
+
+  private async waitReadyAround(pos: THREE.Vector3, timeoutMs: number): Promise<boolean> {
     const t0 = performance.now();
     for (;;) {
       const ls = this.layoutStream;
       if (this.packStatus !== 'loading' && (!ls || (ls.loadedAround(pos.x, pos.z) && ls.collidersPending === 0))) {
-        // Cascades and the wet wrap first, then the programs: the queue drainCompiles would have fired without waiting, and anything new.
+        // Cascades and the wet wrap first, then the programs: everything the queue is still holding
+        // (a tier waiting to be shown, the scan's finds) and anything new, built outright rather
+        // than a program a frame, since nothing is being looked at.
         const fresh = this.adoptMaterials(this.scene);
-        const pending = this.compileQueue.splice(0);
-        if (!fresh.length && !pending.length) return true;
-        await this.compileReady([...pending, ...fresh]);
+        const pending = this.programs.pending;
+        if (!fresh.length && !pending) return true;
+        await this.flushQueue();
+        if (fresh.length) await this.compileReady(fresh);
         continue;
       }
       if (performance.now() - t0 > timeoutMs) return false;
@@ -3504,12 +3794,19 @@ export class World {
    * wait ran out.
    */
   async settleCarried(pos: THREE.Vector3, envMs: number, timeoutMs: number): Promise<boolean> {
+    // The whole of it is behind the jump's closed tunnel, and that is the game's word (`playerWaiting`)
+    // rather than this method's: the same sweep and the same wait are used in play as well.
+    return this.settleInTunnel(pos, envMs, timeoutMs);
+  }
+
+  private async settleInTunnel(pos: THREE.Vector3, envMs: number, timeoutMs: number): Promise<boolean> {
     const t0 = performance.now();
     await this.environmentReady(envMs);
     if (this.renderer) await this.ships.prepareEffects(this.renderer);
-    // Hidden, the programs are compiled at once rather than waited on: compileAsync polls the linking on a chained
-    // timer, which a hidden tab holds to one a minute, and the tunnel would stay shut for half an hour.
-    await this.compileAllAsync(() => {}, { waitReady: !document.hidden, keepQueue: true });
+    // Nothing here waits on the parallel-compile extension: `compileAllAsync` finishes every link it
+    // makes before it returns, which is what the old `waitReady` asked for and what a hidden tab (whose
+    // chained timers are held to one a minute) could never have got from a poll.
+    await this.compileAllAsync(() => {}, { keepQueue: true });
     return this.readyAround(pos, Math.max(1000, timeoutMs - (performance.now() - t0)));
   }
 

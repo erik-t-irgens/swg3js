@@ -150,6 +150,16 @@ export class LayoutStreamer {
   loadedInstances = 0;
   /** How far each size tier loads, in metres; a world can reach farther than a planet does. */
   private ranges: number[];
+  /**
+   * Build a tier's programs before it is drawn (the world sets it to its own paced queue). A tier
+   * used to be added to the scene the moment its models had loaded, and whatever materials it
+   * brought that nothing had built yet were built on the frame that first drew them: standing still
+   * on a planet while this ran made thirteen programs and two frames of over a second. So with this
+   * set the meshes go in hidden and are shown once their programs exist, which costs a moment's
+   * more pop-in on a fast machine and takes a freeze off a slow one. Null puts the old behaviour
+   * back exactly.
+   */
+  prepare: ((objects: THREE.Object3D[]) => Promise<void>) | null = null;
 
   constructor(
     private readonly scene: THREE.Scene,
@@ -422,7 +432,33 @@ export class LayoutStreamer {
     return true;
   }
 
+  /**
+   * One region's tier: its models loaded, its instances made, and then -- with the loading slot
+   * already given back -- its programs built before the meshes are shown.
+   *
+   * The slot is given back the moment the models are in and instanced, which is where it was given
+   * back before there was anything to compile. Held across the compile as well, three tiers whose
+   * materials were new would hold all three of `MAX_CONCURRENT_LOADS` for as many frames as they
+   * had programs, and no fourth tier would start: a town would fill in behind the player's walk
+   * because of a shader queue, which is the opposite of the point.
+   */
   private async loadTier(region: Region, tier: number): Promise<void> {
+    const loaded = await this.buildTier(region, tier);
+    if (!loaded || !this.prepare || !loaded.meshes.length) return;
+    // The meshes went in hidden: they are shown once their programs exist, so no frame is ever the
+    // first to draw a material nothing had built. The tier is already recorded, so an unload while
+    // this waits takes them out in the ordinary way and the guard below drops the reveal.
+    try {
+      await this.prepare(loaded.meshes);
+    } catch (err) {
+      console.warn('snapshot: a tier could not be compiled ahead of its first draw; shown anyway', err);
+    }
+    if (this.disposed || region.tiers[tier] !== loaded) return;
+    for (const mesh of loaded.meshes) mesh.visible = true;
+  }
+
+  /** The loading half of a tier, holding one of the streamer's slots for exactly as long as it loads. */
+  private async buildTier(region: Region, tier: number): Promise<LoadedTier | null> {
     region.tiers[tier] = 'loading';
     this.loads++;
     try {
@@ -441,9 +477,9 @@ export class LayoutStreamer {
             console.warn(`snapshot model ${id} failed to load: ${err instanceof Error ? err.message : String(err)}`);
           }
         }
-        if (this.disposed) return;
+        if (this.disposed) return null;
       }
-      if (region.tiers[tier] !== 'loading') return;
+      if (region.tiers[tier] !== 'loading') return null;
       const loaded = this.instance(objects, models);
       region.tiers[tier] = loaded;
       // A huge object's collision comes with its tier, a few pieces an update, never keyed on the player's distance.
@@ -454,6 +490,7 @@ export class LayoutStreamer {
       }
       // Models that finished loading after the last collider pass get their collision next update.
       this.lastColliderX = Number.NaN;
+      return loaded;
     } finally {
       this.loads--;
       if (region.tiers[tier] === 'loading') region.tiers[tier] = null;
@@ -514,6 +551,8 @@ export class LayoutStreamer {
         mesh.receiveShadow = true;
         mesh.instanceMatrix.needsUpdate = true;
         mesh.computeBoundingSphere();
+        // Hidden until its programs exist (loadTier shows it); with no `prepare` set it is shown at once, as it always was.
+        if (this.prepare) mesh.visible = false;
         this.scene.add(mesh);
         meshes.push(mesh);
       }
@@ -531,6 +570,7 @@ export class LayoutStreamer {
     if (b.interiorBuilt) return;
     b.interiorBuilt = true;
     if (!b.model.portals.length) return;
+    const made: THREE.Mesh[] = [];
     for (const prim of b.model.primitives) {
       if (prim.cell <= 0) continue;
       const mesh = new THREE.Mesh(prim.geometry, prim.material);
@@ -543,8 +583,28 @@ export class LayoutStreamer {
       mesh.visible = false;
       mesh.layers.set(INTERIOR_LAYER);
       b.interior.push(mesh);
-      this.scene.add(mesh);
+      made.push(mesh);
     }
+    if (!made.length) return;
+    // Into the scene now, hidden, as they always have been: the portal renderer writes `visible`
+    // itself for the cells it draws.
+    //
+    // They were held out of the scene until their programs existed, and that was a hole rather than
+    // a late reveal. A tier held back is a thing not yet drawn; a cell held back is a room that is
+    // not there -- the colliders are built elsewhere and are already in, so a player who walked in
+    // before the queue reached the cells walked into an invisible interior and looked out through
+    // the doorway at the world. A tier's reveal is the streamer's to hold and a cell's is not.
+    //
+    // A room's own materials are its own (the pack clones them so the portal renderer can stencil
+    // them apart), so the first building of a kind does bring new programs with it. The compile is
+    // asked for anyway, and it has the walk to the door to finish in; if the player beats it, the
+    // frame that draws the cell builds the program exactly as it did before any of this, and the
+    // frame loop's shader line says so.
+    for (const mesh of made) this.scene.add(mesh);
+    if (!this.prepare) return;
+    void this.prepare(made).catch((err) => {
+      console.warn('snapshot: a building’s rooms could not be compiled ahead of being drawn', err);
+    });
   }
 
   /** Drop a building's interior meshes. Shared geometry and materials are left alone. */

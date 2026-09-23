@@ -1125,7 +1125,9 @@ export class VelocityProduct extends GeometryProduct {
     };
     this.variants.push(variant);
     this.byKey.set(key, variant);
-    // A key first met in play starts compiling at once; its draws wait until it is linked.
+    // A key first met in play builds its program now: its draws are this frame's, so there is
+    // nothing to defer it to and nothing to put it on the world's queue for. It is one program,
+    // and the frame loop's own shader line reports it as it reports every program built in play.
     if (!warm) void this.compileVariant(variant);
     return variant;
   }
@@ -1197,42 +1199,53 @@ export class VelocityProduct extends GeometryProduct {
     return mesh;
   }
 
-  /** Build a variant's program without stalling a frame: it becomes ready once linked, or failed. */
+  /**
+   * Build a variant's program without waiting on a promise that may never be answered: it becomes
+   * ready once linked, or failed.
+   *
+   * Never `compileAsync`, which is what this did. That call waits on
+   * `KHR_parallel_shader_compile`, and on the drivers this work exists for the extension is
+   * advertised, never reports a program ready and charges nearly two seconds for the question --
+   * so everything awaiting it waited with it, which is how one spawned hull came to take ten
+   * seconds to prepare (`World.vehiclePrepare` is `prepareVehicle` **and then** `prepareRoots`).
+   * `compile` builds the program and `getUniforms()` below finishes the link, which is exactly
+   * what the first draw would have asked and is finite everywhere. It is the same guarantee the
+   * world's own queue took for the same reason (`resolveLinks`).
+   */
   private compileVariant(variant: VelocityVariant): Promise<void> {
     if (variant.ready || variant.failed || this.disposed) return Promise.resolve();
     if (variant.job) return variant.job;
     variant.compiling = true;
     const r = this.renderer;
     const prev = r.getRenderTarget();
-    let job: Promise<unknown>;
     r.setRenderTarget(this.compileTarget);
+    let err: unknown = null;
     try {
-      job = r.compileAsync(variant.dummy, FX_CAMERA);
-    } catch (err) {
-      job = Promise.reject(err);
+      r.compile(variant.dummy, FX_CAMERA);
+    } catch (e) {
+      err = e;
     } finally {
       r.setRenderTarget(prev);
     }
-    variant.job = job
-      .then(() => {
-        // compileAsync resolves once the program reports ready, even when linking failed.
-        const props = r.properties.get(variant.material) as { currentProgram?: { getUniforms(): unknown; diagnostics?: { runnable: boolean } }; __version?: number };
-        const program = props.currentProgram;
-        program?.getUniforms();
-        if (!program || program.diagnostics?.runnable === false) throw new Error('the program did not link');
-        // The first real draw would otherwise work the program out again with that draw's `side`,
-        // which is in the key: a double-sided mesh first would compile a second program mid-frame.
-        // This is what three records after its own first draw with the program just built.
-        props.__version = variant.material.version;
-        variant.ready = true;
-      })
-      .catch((err) => {
-        variant.failed = true;
-        console.warn(`velocity: variant ${variant.key} failed to compile; its meshes blur with the camera only`, err);
-      })
-      .finally(() => {
-        variant.compiling = false;
-      });
+    try {
+      if (err) throw err;
+      const props = r.properties.get(variant.material) as { currentProgram?: { getUniforms(): unknown; diagnostics?: { runnable: boolean } }; __version?: number };
+      const program = props.currentProgram;
+      // The question three's own first draw asks, which is what makes a deferred driver finish.
+      program?.getUniforms();
+      if (!program || program.diagnostics?.runnable === false) throw new Error('the program did not link');
+      // The first real draw would otherwise work the program out again with that draw's `side`,
+      // which is in the key: a double-sided mesh first would compile a second program mid-frame.
+      // This is what three records after its own first draw with the program just built.
+      props.__version = variant.material.version;
+      variant.ready = true;
+    } catch (e) {
+      variant.failed = true;
+      console.warn(`velocity: variant ${variant.key} failed to compile; its meshes blur with the camera only`, e);
+    } finally {
+      variant.compiling = false;
+    }
+    variant.job = Promise.resolve();
     return variant.job;
   }
 

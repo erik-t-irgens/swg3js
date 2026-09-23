@@ -3357,6 +3357,15 @@ class App {
     this.death.querySelector('.respawn')!.addEventListener('click', () => this.respawn());
     this.ui.appendChild(this.death);
     this.loadingScreen = new LoadingScreen(this.ui, import.meta.env.BASE_URL);
+    // Whether a long frame would be seen just now: a loading screen over the world, or a jump's
+    // closed tunnel in front of it. The world asks this before it decides to pace a shader compile
+    // rather than do it outright, and it is the only thing that knows the answer -- it used to
+    // guess from which of its own methods was on the stack, and guessed wrongly in both directions
+    // (the Effects switch and the ultra cruise's stop both run with frames being drawn). Without
+    // it the pacing is still safe -- nothing can hang, and nothing compiles on a drawn frame --
+    // but a loading screen would build its programs one a frame instead of the screen's allowance,
+    // which is slower for no gain. `this.hyperspace` is assigned earlier in this constructor.
+    this.world.playerWaiting = () => this.loadingScreen.open || this.hyperspace.covered;
     this.emoteWheel = new EmoteWheel(this.ui);
     this.remotes = new RemotePlayers(this.scene, import.meta.env.BASE_URL, async () => {
       this.world.garage ??= await Garage.load(import.meta.env.BASE_URL);
@@ -7312,7 +7321,7 @@ class App {
         // The aside is the loading screen's, in the same words: nothing at all on a machine that
         // builds a program in a millisecond, and what it really costs on one that does not, since
         // this notice is the only thing on the screen while the switch takes its seconds.
-        await this.world.compileAllAsync((done, total) => this.notice.set(`${label}: shaders for ${done} of ${total} objects${machineAside(compilerVerdict())}`), { target: next ? next.compileTarget : null, waitReady: true, keepQueue: true });
+        await this.world.compileAllAsync((done, total) => this.notice.set(`${label}: shaders for ${done} of ${total} objects${machineAside(compilerVerdict())}`), { target: next ? next.compileTarget : null, keepQueue: true });
         if (this.settings.effects !== want) {
           // It moved again while we compiled: throw this one away and look at the settings afresh.
           next?.dispose();
