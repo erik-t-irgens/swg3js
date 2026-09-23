@@ -241,7 +241,7 @@ export class Character {
   private pendingCustomizer: Customizer | null = null;
 
   /** The normal maps' scale for the live recipes' maps, set from the settings before a character loads. */
-  static readonly normalScale = new THREE.Vector2(1, -1);
+  static readonly normalScale = new THREE.Vector2(1, 1);
 
   private constructor(readonly manifest: PartsManifest, clips: THREE.AnimationClip[]) {
     this.clips = clips;

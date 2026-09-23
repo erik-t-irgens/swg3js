@@ -324,8 +324,8 @@ export class Customizer {
     return this.textures.get(material);
   }
 
-  /** How the normal maps are read: their strength, and green flipped, since the game's maps are Direct3D's (green down) and the renderer's are green up; the same flip the glTF loader applies to the converted models. */
-  normalScale = new THREE.Vector2(1, -1);
+  /** How the normal maps are read: their strength, with the green taken as it stands, the same way up as the rest of the world's. */
+  normalScale = new THREE.Vector2(1, 1);
 
   /** Change the strength or flip the normal maps on every material that has one, live. */
   setNormalScale(x: number, y: number): number {

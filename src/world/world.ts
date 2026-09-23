@@ -3642,8 +3642,13 @@ export class World {
     this.lastTx = Number.NaN;
   }
 
-  /** The normal maps' scale for every material in the scene, now and as they arrive: strength, with the green flipped (the game's maps are Direct3D's). */
-  normalScale = new THREE.Vector2(1, -1);
+  /**
+   * The normal maps' scale for every material in the scene, now and as they arrive. The green
+   * channel is taken as it stands: it was flipped here for years on the reasoning that the game's
+   * maps are Direct3D's, and looked at by eye on a screen it is the wrong way up. `__debug.normals`
+   * flips it live for anyone who wants to see the difference again.
+   */
+  normalScale = new THREE.Vector2(1, 1);
 
   /** The strength and way up of every normal map in the scene, live, for checking the convention by eye. */
   setNormalScale(x: number, y: number): number {

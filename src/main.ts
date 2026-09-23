@@ -721,8 +721,8 @@ class App {
       await this.postfx?.product<VelocityProduct>('velocity')?.prepareRoots(roots);
     };
     this.world.userFog = S.fog;
-    this.world.normalScale.set(S.normalStrength, -S.normalStrength);
-    Character.normalScale.set(S.normalStrength, -S.normalStrength);
+    this.world.normalScale.set(S.normalStrength, S.normalStrength);
+    Character.normalScale.set(S.normalStrength, S.normalStrength);
     this.world.setShadowLook(S.shadowSoftness, undefined, S.shadowMapSize);
     this.world.setShadows(S.shadowDistance, S.shadowCasterRadius);
     this.world.setReach(S.objectReach, S.terrainRadius, S.farRadius);
@@ -1578,8 +1578,8 @@ class App {
         if (!c?.customizer) return 'no live recipes on this character';
         return c.customizer.describe(mesh);
       },
-      /** Every normal map's strength and way up, live, the world's and the character's: `normals(1, -1)` is the default (the game's maps are Direct3D's, green down), `normals(1, 1)` the other way up, `normals(0, 0)` none. */
-      normals: (x = 1, y = -1) => {
+      /** Every normal map's strength and way up, live, the world's and the character's: `normals(1, 1)` is the default (the green taken as it stands), `normals(1, -1)` the other way up, which is how the game had them for years, `normals(0, 0)` none. */
+      normals: (x = 1, y = 1) => {
         const world = this.world.setNormalScale(x, y);
         const c = this.player.rig?.character;
         const own = c?.customizer?.setNormalScale(x, y) ?? 0;
@@ -4728,9 +4728,9 @@ class App {
         this.world.userFog = S.fog;
         break;
       case 'normalStrength':
-        Character.normalScale.set(S.normalStrength, -S.normalStrength);
-        this.world.setNormalScale(S.normalStrength, -S.normalStrength);
-        this.player.rig?.character?.customizer?.setNormalScale(S.normalStrength, -S.normalStrength);
+        Character.normalScale.set(S.normalStrength, S.normalStrength);
+        this.world.setNormalScale(S.normalStrength, S.normalStrength);
+        this.player.rig?.character?.customizer?.setNormalScale(S.normalStrength, S.normalStrength);
         break;
       case 'shadows':
         this.world.setShadowsEnabled(S.shadows);

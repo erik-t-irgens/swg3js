@@ -348,8 +348,8 @@ const normalCache = new Map();
  * A shader's normal map as tangent-space RGB. The game's compressed normal maps ("cn"
  * textures, the CNRM slot) keep x in the alpha and y in the green channel with z left to be
  * rebuilt, told from an ordinary RGB map by the alpha carrying the detail and the red none.
- * The game is Direct3D's: its green points down the texture, and the glTF loader reads a map
- * without tangents with its green flipped, which is exactly that, so the channels go as they are.
+ * The channels go into the GLB exactly as the game has them; which way up the green is read is the
+ * game's own business and not the converter's (`__debug.normals`), so nothing here changes with it.
  */
 function normalFor(vfs, file) {
   const key = file.replace(/\\/g, '/').toLowerCase();
