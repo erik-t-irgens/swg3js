@@ -265,6 +265,14 @@ export class Player {
   /** Swimming with the head under the surface (diving). */
   submerged = false;
   /**
+   * What the last swimming frame decided about holding the float line, for `__debug.afloat`. One
+   * kept object written in place, so asking costs nothing and nothing is allocated in a frame.
+   * Every field is the raw number the frame used: what the surface was, where the line therefore
+   * was, where the body was, what the spring asked for, whether the holding branch was the one
+   * taken at all, what the buoyancy cap left of it, and what the character controller then allowed.
+   */
+  readonly swimProbe = { dt: 0, surface: 0, want: 0, from: 0, gap: 0, ride: 0, riding: false, asked: 0, capped: 0, moved: Number.NaN };
+  /**
    * The air in the lungs (`src/player/breathMath.ts`, which owns every rule about it). It lives on
    * the body rather than on the world's player record, which is where the fire lives, because
    * nothing outside ever *gives* anybody a breath: it is spent by being under water, which is a
@@ -2084,7 +2092,23 @@ export class Player {
       if (riding) this.vel.y = vy;
       else this.vel.y += (vy - this.vel.y) * (1 - Math.exp(-dt * 6));
       // Buoyancy: rising past the float line stops at it.
+      const asked = this.vel.y;
       if (this.vel.y > 0 && depth - this.vel.y * dt < SWIM_DEPTH) this.vel.y = Math.max(0, (depth - SWIM_DEPTH) / dt);
+      // What this frame really decided, for `__debug.afloat`. One kept object, written only while
+      // swimming, so it costs a handful of stores and allocates nothing: a body that will not hold
+      // its line can be told apart from one that is never asked to, and both from one that asks and
+      // is refused by the character controller.
+      const probe = this.swimProbe;
+      probe.dt = dt;
+      probe.surface = surface;
+      probe.want = surface - SWIM_DEPTH;
+      probe.from = this.pos.y;
+      probe.gap = surface - SWIM_DEPTH - this.pos.y;
+      probe.ride = ride;
+      probe.riding = riding;
+      probe.asked = asked;
+      probe.capped = this.vel.y;
+      probe.moved = Number.NaN;
       this.grounded = false;
     } else if (this.moveProfile === 'jka') {
       // Jedi Academy's ground and air rules: friction, acceleration, air control, and jumps
@@ -2164,6 +2188,10 @@ export class Player {
     // predicate is what keeps it true if that filter is ever widened.
     this.controller.computeColliderMovement(this.collider, { x: this.vel.x * dt, y: this.vel.y * dt, z: this.vel.z * dt }, undefined, filter, this.walkPast);
     const mv = this.controller.computedMovement();
+    // What the controller allowed of what the swim asked for. A body that asks to rise and is
+    // handed back less -- or handed back a fall -- is being held by something it is touching, and
+    // no spring above can argue with that.
+    if (this.swimming) this.swimProbe.moved = mv.y;
     this.pos.x += mv.x;
     this.pos.y += mv.y;
     this.pos.z += mv.z;

@@ -1894,6 +1894,12 @@ class App {
           // stay there while the wave moves; a figure that wanders is the spring losing the wave.
           under: Number.isFinite(surface) ? Number((surface - p.pos.y).toFixed(3)) : null,
           rise: Number(p.vel.y.toFixed(3)),
+          // What the last swimming frame actually did, which is the only way to tell a spring that
+          // will not hold its line from one that is never asked to hold it, and both from one that
+          // asks and is refused by the body's own character controller. `gap` is how far the body
+          // was off its line before the frame and `moved` is what the controller allowed of it: a
+          // `moved` far short of `gap`, or of the other sign, is something the body is touching.
+          frame: { ...p.swimProbe, held: Number.isFinite(p.swimProbe.moved) ? Number((p.swimProbe.gap - p.swimProbe.moved).toFixed(4)) : null },
         };
       },
       /**
