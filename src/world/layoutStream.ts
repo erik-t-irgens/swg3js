@@ -832,38 +832,44 @@ export class LayoutStreamer {
   }
 
   /**
-   * A building with rooms beside a point (within its radius and a few metres) that cannot be
-   * walked into from there: no passable doorway from outside within a dozen metres of the point
-   * and near its height. The dungeons whose way in was a server object, the stations whose
-   * doors are up in the air. The nearest such, or null.
+   * A building with rooms beside a point (within its radius and a few metres) that has no way in
+   * on foot at all: not one passable doorway between outside and any of its rooms. The dungeons
+   * whose way in was a server object, the stations whose doors are up in the air. The nearest
+   * such, or null.
+   *
+   * It used to ask a narrower question -- whether a passable outside doorway stood within a dozen
+   * metres of the player and near their height -- which made the offer of a way in a thing that
+   * came and went as you walked round a building that has perfectly good doors, at the back, on
+   * the far side, or up its steps. A building with a door is now never offered one, wherever the
+   * player is standing, and the owner keeps a list of the doors the game cannot find rather than
+   * the game papering over them.
    */
   doorlessNear(pos: THREE.Vector3): Building | null {
     let best: Building | null = null;
     let bestD = Infinity;
     for (const b of this.buildings) {
       const d = Math.hypot(b.x - pos.x, b.z - pos.z);
-      if (d > b.radius + 6 || !(b.model.def.cells?.length)) continue;
-      const reachable = b.model.portals.some((p) => {
-        if (!p.passable || !p.links.some((l) => l.from === 0 || l.to === 0)) return false;
-        localA.set(0, 0, 0);
-        for (const v of p.verts) localA.add(v);
-        localA.divideScalar(Math.max(1, p.verts.length)).applyMatrix4(b.matrix);
-        return Math.hypot(localA.x - pos.x, localA.z - pos.z) < 12 && Math.abs(localA.y - pos.y) < 3;
-      });
-      if (reachable || d >= bestD) continue;
+      if (d > b.radius + 6 || !(b.model.def.cells?.length) || d >= bestD) continue;
+      if (b.model.portals.some((p) => p.passable && p.links.some((l) => l.from === 0 || l.to === 0))) continue;
       bestD = d;
       best = b;
     }
     return best;
   }
 
-  /** The buildings around a point and why each does or does not count as doorless, for the console. */
-  describeDoorless(pos: THREE.Vector3): { model: string; d: number; radius: number; built: boolean; cells: number; portals: number; outsideDoors: number }[] {
-    const out: { model: string; d: number; radius: number; built: boolean; cells: number; portals: number; outsideDoors: number }[] = [];
+  /**
+   * The buildings around a point and why each does or does not count as doorless, for the console.
+   * `outsideDoors` is the whole of the rule now: nought is a building the game offers a way into,
+   * and any other number is one it expects you to walk into, so a building listed here with doors
+   * that you cannot find on the ground is one for the owner's list.
+   */
+  describeDoorless(pos: THREE.Vector3): { model: string; d: number; radius: number; built: boolean; cells: number; portals: number; outsideDoors: number; doorless: boolean }[] {
+    const out: { model: string; d: number; radius: number; built: boolean; cells: number; portals: number; outsideDoors: number; doorless: boolean }[] = [];
     for (const b of this.buildings) {
       const d = Math.hypot(b.x - pos.x, b.z - pos.z);
       if (d > b.radius + 30) continue;
-      out.push({ model: b.model.def.id, d: Math.round(d), radius: Math.round(b.radius), built: b.interiorBuilt, cells: b.model.def.cells?.length ?? 0, portals: b.model.portals.length, outsideDoors: b.model.portals.filter((p) => p.passable && p.links.some((l) => l.from === 0 || l.to === 0)).length });
+      const outsideDoors = b.model.portals.filter((p) => p.passable && p.links.some((l) => l.from === 0 || l.to === 0)).length;
+      out.push({ model: b.model.def.id, d: Math.round(d), radius: Math.round(b.radius), built: b.interiorBuilt, cells: b.model.def.cells?.length ?? 0, portals: b.model.portals.length, outsideDoors, doorless: outsideDoors === 0 && !!b.model.def.cells?.length });
     }
     return out;
   }
