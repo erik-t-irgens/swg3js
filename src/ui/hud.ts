@@ -2,7 +2,7 @@ import type { Kit } from '../combat/kit';
 // The game's own table of worlds, so a roster row names a planet and a zone the way the rest of the
 // game names them rather than inventing words from an id. It is plain data and imports nothing.
 import { PLANETS, type PlanetDef } from '../data/planets.ts';
-import { HUD_SIZES, barBand, breathRow, clamp01, makeBreathRow } from './hudMath.ts';
+import { HUD_SIZES, barBand, breathRow, clamp01, distanceWords as metreWords, makeBreathRow } from './hudMath.ts';
 import { glyphFor, handGlyph, iconCount, installIcons } from './hudIcons.ts';
 
 /**
@@ -1815,10 +1815,14 @@ export function quantiseMetres(d: number): number {
   return Math.round(v / step) * step;
 }
 
-/** A quantised distance as it reads: metres, and kilometres to a tenth from `kmFrom` up. */
+/**
+ * A quantised distance as it reads: metres, and kilometres to a tenth from `kmFrom` up. The words
+ * themselves are `hudMath`'s, so the roster down the side of the screen and the death card's list of
+ * facilities spell a distance the same way and follow the same live threshold -- the rule the action
+ * bar and the Controls page already keep for a key's name.
+ */
 export function distanceWords(metres: number): string {
-  if (metres >= ROSTER_TUNE.kmFrom) return `${(metres / 1000).toFixed(1)} km`;
-  return `${Math.round(metres)} m`;
+  return metreWords(metres, ROSTER_TUNE.kmFrom);
 }
 
 /**

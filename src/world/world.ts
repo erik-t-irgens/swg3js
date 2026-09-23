@@ -34,6 +34,7 @@ import { Group, groups, RAPIER as R } from '../core/physics';
 import { CHUNK_RES, CHUNK_SIZE, Terrain } from './terrain';
 import { SwgTerrain, type BuildingLayerSource, type SwgWaterTable } from './swgTerrain';
 import { LayoutStreamer, type Building, type CellState, type PlacedObject } from './layoutStream';
+import { CLONING_TUNE, facilitiesNear, SPAWN_CELL_NAME, type FacilityChoice, type NamedPlace } from './cloning.ts';
 import { isLiftCell, liftStops, stopAt, type LiftStop } from './lifts';
 import type { SunInfo } from '../core/postfx';
 import { luminance, pointIrradiance } from '../core/fx/bladeGlowMath.ts';
@@ -3969,6 +3970,33 @@ export class World {
 
   describeDoorless(pos: THREE.Vector3): ReturnType<LayoutStreamer['describeDoorless']> {
     return this.layoutStream?.describeDoorless(pos) ?? [];
+  }
+
+  /**
+   * The facilities this world places where the dead come back, nearest the point given first, each
+   * named by the pack's own list of places where one stands in a named place. Every object the pack
+   * holds is here whether or not its region has streamed in, so this is a whole world's answer and
+   * not what happens to be drawn.
+   */
+  cloningFacilities(from: { x: number; z: number }, places: readonly NamedPlace[] = [], limit?: number): FacilityChoice[] {
+    return facilitiesNear(this.layoutStream?.objects ?? [], from, places, limit ?? CLONING_TUNE.shown);
+  }
+
+  /**
+   * Put the player inside the facility standing at a point: the room the archives' own layout names
+   * `spawn` where the building has one -- which is this game's reading of an ordinary room name and
+   * not something the client says -- and its way in otherwise. Null when that building's region has
+   * not streamed in yet, which is the caller's cue to leave them on the ground where it stands.
+   */
+  cloneRoomAt(x: number, z: number, template?: string): THREE.Vector3 | null {
+    if (!this.layoutStream) return null;
+    const b = this.layoutStream.buildingPlacedAt(x, z, template);
+    if (!b) return null;
+    const entry = this.layoutStream.namedEntryOf(b, SPAWN_CELL_NAME);
+    if (!entry) return null;
+    this.cellState = { building: b, cell: entry.cell };
+    this.prevPlayerPos.copy(entry.at);
+    return entry.at;
   }
 
   /** Put the player inside the doorless building beside them: a standing spot in its entry room, and the cell. */

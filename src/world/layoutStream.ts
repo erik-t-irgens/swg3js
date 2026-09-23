@@ -5,13 +5,16 @@
 import * as THREE from 'three';
 import { cleanTrimesh, Group, groups, RAPIER as R, TRIMESH_FLAGS, type Physics } from '../core/physics';
 import { splitTrimesh } from './trimeshPieces.ts';
-import type { AssetPack, Layout, LoadedModel } from './assetPack';
+import type { AssetPack, Layout, LoadedModel, PackModelDef } from './assetPack';
 import { CHUNK_SIZE } from './terrain';
 import type { Exclusion } from './props';
 import { ACTOR_LAYER, INTERIOR_LAYER, crossing } from './portalRender';
 import { mirroredTransform, type EffectHandle, type ParticleEffects } from './particles';
 import { castsShadow, drawsAfterWater } from './surfaces';
 import { marks } from './marks.ts';
+// Which room a name picks is a rule of its own, with a node test over it; this file calls it rather
+// than keeping a second copy.
+import { namedCellIndex } from './cloning.ts';
 
 export const REGION = 256;
 
@@ -73,6 +76,8 @@ export interface PlacedObject {
 /** A placed portal building; the player's cell inside it is tracked by crossing its portals. */
 export interface Building {
   model: LoadedModel;
+  /** The object template the snapshot placed it under, which is what says what kind of place it is. */
+  template: string;
   x: number;
   z: number;
   radius: number;
@@ -525,7 +530,7 @@ export class LayoutStreamer {
       const built: (Building | null)[] = list.map((p) => {
         if (!isBuilding || p.contained) return null;
         const matrix = new THREE.Matrix4().compose(tmpV.set(p.x, p.y, p.z), p.q, ONE);
-        const b: Building = { model, x: p.x, z: p.z, radius: model.radius, matrix, inverse: matrix.clone().invert(), interior: [], interiorBuilt: false };
+        const b: Building = { model, template: p.template, x: p.x, z: p.z, radius: model.radius, matrix, inverse: matrix.clone().invert(), interior: [], interiorBuilt: false };
         buildings.push(b);
         this.buildings.add(b);
         return b;
@@ -885,15 +890,51 @@ export class LayoutStreamer {
     const doorway = b.model.portals.find((p) => p.links.some((l) => l.from === 0 || l.to === 0));
     const link = doorway?.links.find((l) => l.from === 0 || l.to === 0);
     const index = link ? (link.from === 0 ? link.to : link.from) : cells[0].index;
-    const cell = cells.find((c) => c.index === index) ?? cells[0];
+    return this.standIn(b, cells.find((c) => c.index === index) ?? cells[0]);
+  }
+
+  /**
+   * A standing spot inside a building's own named room, where it has one, and its way in otherwise.
+   * The name is the caller's and is matched on the cell's own name; which name means what is the
+   * caller's business too (`cloning.ts` says whose reading its own one is).
+   */
+  namedEntryOf(b: Building, name: string): { cell: number; at: THREE.Vector3 } | null {
+    this.buildInterior(b);
+    const cells = b.model.def.cells ?? [];
+    // The pick itself is the rule in `cloning.ts`, which a node test runs: there is one of it, not a
+    // copy here and a copy there that can drift apart.
+    const index = namedCellIndex(cells, name);
+    const cell = index > 0 ? cells.find((c) => c.index === index) : undefined;
+    return cell ? this.standIn(b, cell) : this.entryOf(b);
+  }
+
+  /** A spot on the floor of one of a building's rooms, in the world. */
+  private standIn(b: Building, cell: NonNullable<PackModelDef['cells']>[number]): { cell: number; at: THREE.Vector3 } {
     const [x0, y0, z0] = cell.bounds.min;
     const [x1, y1, z1] = cell.bounds.max;
     localA.set((x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2).applyMatrix4(b.matrix);
-    // The room's lowest floor under its middle, in the world (the building may be turned, so the extent is the box's diagonal).
-    const half = Math.hypot(y1 - y0) / 2 + 0.5;
+    // The room's lowest floor under its middle, in the world. The span searched is the room's own
+    // height: a building is turned about the upright, which leaves a box's height alone, and the
+    // corners are taken as an extent rather than as min and max, since the packs converted before
+    // the box chunk was read properly carry the two the other way round.
+    const half = Math.abs(y1 - y0) / 2 + 0.5;
     const floors = this.physics.floorsAt(localA.x, localA.z, localA.y + half, localA.y - half);
     const y = floors.length ? floors[floors.length - 1] + 0.15 : localA.y - half + 0.5;
     return { cell: cell.index, at: new THREE.Vector3(localA.x, y, localA.z) };
+  }
+
+  /**
+   * The streamed building standing at a point, or null when its region has not loaded. Placed
+   * buildings carry the very numbers the layout gave them, so this is an exact match within a metre
+   * rather than a search for the nearest; with a template as well it is the one the caller meant
+   * even where two buildings share an origin.
+   */
+  buildingPlacedAt(x: number, z: number, template?: string): Building | null {
+    for (const b of this.buildings) {
+      if (template !== undefined && b.template !== template) continue;
+      if (Math.abs(b.x - x) < 1 && Math.abs(b.z - z) < 1) return b;
+    }
+    return null;
   }
 
   /** The building and cell holding a world point, for a player put there without walking in (a teleport), or null. */

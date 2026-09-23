@@ -150,6 +150,13 @@ export interface PromptState {
   lift: boolean;
   elevator: '' | 'up' | 'down';
   doorless: boolean;
+  /**
+   * Standing at one of the gates a world's zones are walked between: 'travel' where the pack names
+   * a destination and 'nowhere' where it does not. It carries no place name, deliberately — a cap
+   * wears a word from the table below and never the name of what you are looking at, so where the
+   * gate leads is said on the message line as you come to it and on the long line in full.
+   */
+  gate: '' | 'travel' | 'nowhere';
   /** The gravity boots hold a surface out in space; `bootsReach` is a ship close enough to climb into. */
   boots: boolean;
   bootsReach: boolean;
@@ -176,6 +183,7 @@ export function newPromptState(): PromptState {
     lift: false,
     elevator: '',
     doorless: false,
+    gate: '',
     boots: false,
     bootsReach: false,
     aboard: false,
@@ -196,6 +204,7 @@ export function resetPromptState(s: PromptState): PromptState {
   s.lift = false;
   s.elevator = '';
   s.doorless = false;
+  s.gate = '';
   s.boots = false;
   s.bootsReach = false;
   s.aboard = false;
@@ -236,6 +245,11 @@ export const PROMPT_WORDS = Object.freeze({
   up: 'up a level',
   down: 'down a level',
   inside: 'go inside',
+  // A gate between two of a world's zones. The cap says what happens, never where it goes: the
+  // destination is a place name, which is the thing you are looking at, and it is said on the
+  // message line as you come to the gate and written in full on the long line.
+  gate: 'through the gate',
+  gateNowhere: 'the gate (nowhere)',
   stepOut: 'step out',
   takeControls: 'take the controls',
   climbIn: 'climb in',
@@ -393,6 +407,12 @@ export function fillActions(s: PromptState, out: PromptAction[]): number {
   } else if (s.near) {
     n = push(out, n, 'mount', s.near === 'board' ? W.board : s.near === 'flip' ? W.flip : W.mount);
   }
+  // The gate between two of a world's zones is the last thing the key can mean, which is why it is
+  // asked last: a lift, an elevator, a way into a building, a vehicle or a hull in reach has already
+  // taken the cap by then and `push` drops this outright. The gather stands the gate down in that
+  // case as well, in `zoneGates.ts`, so the key never does one thing and say another; offering it
+  // here last is the same rule written where the bar can be driven and checked.
+  if (s.gate) n = push(out, n, 'mount', s.gate === 'travel' ? W.gate : W.gateNowhere);
   if (s.shipMenu) n = push(out, n, 'ship', W.shipMenu);
   return n;
 }

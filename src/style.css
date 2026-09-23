@@ -158,6 +158,9 @@ b { color: var(--accent); font-weight: 600; }
 .poi:hover { border-color: var(--accent); background: color-mix(in srgb, var(--pool) 35%, transparent); }
 .poi.starport, .poi.shuttleport { border-color: color-mix(in srgb, var(--accent) 35%, transparent); }
 .poi.city { border-color: var(--accent); font-weight: 600; }
+/* The client's own named places: the same neutral the ground map draws them in, so a chip here and a
+   dot there are read as the same kind of thing. */
+.poi.place { border-color: color-mix(in srgb, var(--ink) 45%, transparent); }
 
 /* The travel curtain is the one pure black left in the file on purpose: it is not drawn over the
    world, it replaces the world while the next one loads, and a curtain that stops a shade short of
@@ -170,6 +173,14 @@ b { color: var(--accent); font-weight: 600; }
 .death-card h2 { margin: 0 0 12px; font-size: 14px; letter-spacing: 0.2em; color: var(--accent); font-weight: 500; text-transform: uppercase; }
 .death-card button { padding: 10px 26px; font-size: 13px; letter-spacing: 0.08em; background: color-mix(in srgb, var(--pool) 30%, transparent); color: var(--text); border: 1px solid var(--panel-border); border-radius: 6px; cursor: pointer; }
 .death-card button:hover { border-color: var(--accent); background: color-mix(in srgb, var(--pool) 50%, transparent); }
+/* The facilities on this world, nearest first. Hidden on a world with none, where the card is the
+   card it always was. */
+.death-hint { margin: 0 0 6px; font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase; color: var(--muted); }
+.death-hint[hidden], .death-list[hidden] { display: none; }
+.death-list { display: flex; flex-direction: column; gap: 4px; margin: 0 0 12px; max-height: 34vh; overflow-y: auto; }
+.death-card .death-place { display: flex; align-items: baseline; justify-content: space-between; gap: 18px; padding: 7px 14px; font-size: 12px; letter-spacing: 0.04em; text-align: left; }
+.death-card .death-place .far { font-size: 11px; color: var(--muted); }
+.death-card .death-place:hover .far { color: var(--text); }
 
 /* v0.2 additions */
 .bar { position: relative; width: 320px; height: 14px; background: color-mix(in srgb, var(--void) 55%, transparent); border: 1px solid var(--panel-border); border-radius: 7px; overflow: hidden; }

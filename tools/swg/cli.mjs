@@ -23,7 +23,7 @@
 //   node tools/swg/cli.mjs batch <swg-dir> <out-dir> [filter]     convert every .msh matching filter (default appearance/mesh/)
 //   node tools/swg/cli.mjs pack <swg-dir> <spec.json> <out-dir>    build a game asset pack from a spec (see packs/)
 //   node tools/swg/cli.mjs planets <swg-dir>                        list the world snapshots in the archives and where each would centre
-//   node tools/swg/cli.mjs pois <swg-dir> <planet>|all <out-dir>    (re)write just pois.json for packs converted already
+//   node tools/swg/cli.mjs pois <swg-dir> <planet>|all <out-dir>    (re)write just pois.json and gates.json for packs converted already
 //   node tools/swg/cli.mjs creatures <swg-dir> <out-dir>              every planet's creature as a skinned GLB under <out-dir>/creatures/
 //   node tools/swg/cli.mjs mobiles <swg-dir> <out-dir> [--only=creatures,droids,npcs,dressed,specials] [--match=re] [--limit=N] [--skip-existing] [--core3=<dir>|none] [--max-variants=32] [--plan]
 //                                                                  every creature, droid and NPC for the spawner under <out-dir>/mobiles: models, shared animation packs, catalogue.json
@@ -146,6 +146,8 @@ import { createRequire } from 'node:module';
 
 /** Named places per planet (see regions/build.mjs). */
 const REGIONS = createRequire(import.meta.url)('./regions/regions.json');
+import { frameCheck, mergePlaceLists, placeKey, portLabel, readClientPlaces, title } from './places.mjs';
+import { isZoneGate, writeZoneGates } from './gates.mjs';
 import { decodeTga, encodeHeightmap } from './tga.mjs';
 import { exportSky } from './sky.mjs';
 import { exportWater, readWaterHarm, waterHarmLines, waterPackNeedsHarm } from './water.mjs';
@@ -1775,6 +1777,7 @@ function packStatus(dir) {
     const objects = layout ? layout.objects.length : 0;
     const flora = Object.keys(manifest.categories?.flora ?? {}).length;
     const pois = readJson(join(packDir, 'pois.json'));
+    const gates = readJson(join(packDir, 'gates.json'));
     const terrain = existsSync(join(packDir, 'terrain.trn'));
     const shaders = readJson(join(packDir, 'terrain/shaders.json'));
     const textured = shaders ? shaders.families.filter((f) => f.file).length : 0;
@@ -1784,7 +1787,12 @@ function packStatus(dir) {
     const parts = [
       `${objects} objects`,
       `${flora} flora models`,
-      pois ? `${(pois.pois ?? pois).length ?? 0} places` : 'no pois.json',
+      // A pack written before the client's table was read carries no count of it at all, which is
+      // not the same thing as having read it and found none: say which, and say how many when known.
+      pois ? `${(pois.pois ?? pois).length ?? 0} places${pois.clientPlaces === undefined ? ' (the client\'s own not read yet)' : `, ${pois.clientPlaces} the client's own`}` : 'no pois.json',
+      // Only worth a word where there are any: every world but one has none, and saying "0 gates"
+      // on ten planets would bury the one line that matters.
+      gates ? `${gates.gates.length} zone gates${gates.gates.filter((g) => !g.to).length ? `, ${gates.gates.filter((g) => !g.to).length} leading nowhere named` : ''}` : null,
       terrain ? `terrain${layers ? ` + ${layers} building layers` : ''}` : 'NO TERRAIN',
       shaders ? `ground textures ${textured}/${shaders.families.length}` : 'NO GROUND TEXTURES',
       sky ? `sky (${sky.blocks.length} blocks${sky.weather ? `, weather ${new Set(sky.blocks.map((b) => b.cameraEffect?.file).filter(Boolean)).size} effects` : ', NO WEATHER'})` : 'NO SKY',
@@ -1805,6 +1813,12 @@ function packStatus(dir) {
     // were read; a pack with no lava is never asked, since nothing there could burn anyone.
     else if (waterPackNeedsHarm(water)) need(`water <swg-dir> all ${dir} --retail-only`, `${planet}'s water.json has lava but none of the client's water values`);
     if (!pois) need(`pois <swg-dir> all ${dir} --retail-only`, `${planet} has no pois.json`);
+    // A file written before the client's own table was read carries no count of it at all; one that
+    // read the table and found nothing there (the tree world's trail and dungeon zones) carries 0.
+    else if (pois.clientPlaces === undefined) need(`pois <swg-dir> all ${dir} --retail-only`, `${planet}'s places were written before the client's own named places were read`);
+    // A world whose layout carries gates between its zones but no gates.json was converted before the
+    // join was written: those gates stand there doing nothing and nothing else would say so.
+    if (!gates && layout && layout.objects.some((o) => isZoneGate(o.template))) need(`pois <swg-dir> all ${dir} --retail-only`, `${planet}'s zone gates have no destinations`);
     if (objects && (manifest.materialFormat ?? 1) < MATERIAL_FORMAT) need(`snapshot <swg-dir> all ${dir} --radius=all --retail-only`, `${planet}'s models were converted before animated and glowing surfaces`);
   }
   const creatures = readJson(join(dir, 'creatures/manifest.json'));
@@ -2119,24 +2133,20 @@ function autoCenter(snap, entries) {
 }
 
 /**
- * Points of interest for the in-game map, in SWG coordinates: the planet's named places
+ * Points of interest for the in-game map, in SWG coordinates: the client's own named places
+ * (`places.mjs`), the planet's named places from the emulator's region scripts
  * (regions/regions.json: cities, landmarks and areas, with names from the client's string
  * tables), the client's own region table when it has one, and every starport and shuttleport
  * in the snapshot named after the city it stands in.
+ *
+ * The client's table wins a name clash and the names only we have are kept (`mergePlaceLists`).
  */
-function pointsOfInterest(vfs, planet, snap, entries, { regions: wantRegions = true } = {}) {
+function pointsOfInterest(vfs, planet, snap, entries, { regions: wantRegions = true, archive: wantArchive = true } = {}) {
   const strings = new Map();
-  const places = [];
-  const seen = new Set();
-  const add = (p) => {
-    const k = p.name.toLowerCase();
-    if (seen.has(k)) return;
-    seen.add(k);
-    places.push(p);
-  };
+  const ours = [];
   for (const r of REGIONS[planet] ?? []) {
     const name = (r.stringId && localize(vfs, r.stringId, strings)) || r.name;
-    add({ name, x: r.x, z: r.z, r: r.r, kind: r.kind });
+    ours.push({ name, x: r.x, z: r.z, r: r.r, kind: r.kind });
   }
   const table = `datatables/clientregion/${planet}.iff`;
   if (wantRegions && vfs.has(table)) {
@@ -2144,50 +2154,61 @@ function pointsOfInterest(vfs, planet, snap, entries, { regions: wantRegions = t
     for (const row of dt.rows) {
       const [id, x, z, r] = dt.columns.map((c) => row[c]);
       if (typeof id !== 'string' || typeof x !== 'number') continue;
-      add({ name: localize(vfs, id, strings) ?? title(id.split(':').pop()), x, z, r, kind: r > 1000 ? 'area' : 'landmark' });
+      ours.push({ name: localize(vfs, id, strings) ?? title(id.split(':').pop()), x, z, r, kind: r > 1000 ? 'area' : 'landmark' });
     }
   }
-  const cities = places.filter((p) => p.kind === 'city');
-  const cityAt = (x, z) => {
-    let best = null;
-    for (const c of cities) if (Math.hypot(c.x - x, c.z - z) <= Math.max(c.r, 300) && (!best || c.r < best.r)) best = c;
-    return best;
-  };
+  const archive = wantArchive ? readClientPlaces(vfs, planet, strings) : { rows: [], unnamed: 0, missing: 0 };
+  const merged = mergePlaceLists(archive.rows, ours);
+  const places = merged.places;
+  const seen = new Set(places.map((p) => placeKey(p.name)));
+  // Whether the client's table is in the snapshot's own frame is measured, never assumed: the run
+  // says how far its places are from the nearest thing the snapshot builds, as they stand and with
+  // X mirrored, and the answer goes into the pack beside them.
+  const frame = frameCheck(archive.rows, entries.filter((e) => e.world && e.parentId === 0).map((e) => ({ x: e.world.pos[0], z: e.world.pos[2] })));
+  let namedAfterPlace = 0;
   for (const e of entries) {
     if (!e.world || e.parentId !== 0) continue;
     const template = snap.templates[e.node.templateIndex];
     const kind = template.includes('starport') ? 'starport' : template.includes('shuttleport') ? 'shuttleport' : null;
     if (!kind) continue;
     const [x, , z] = e.world.pos;
-    const city = cityAt(x, z);
-    const label = kind === 'starport' ? 'Starport' : 'Shuttleport';
-    add({ name: city ? `${city.name} ${label}` : `${label} (${x.toFixed(0)}, ${z.toFixed(0)})`, x, z, r: 0, kind });
+    const label = portLabel(x, z, places, kind === 'starport' ? 'Starport' : 'Shuttleport');
+    if (label.from === 'place') namedAfterPlace++;
+    const k = placeKey(label.name);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    places.push({ name: label.name, x, z, r: 0, kind });
   }
-  const order = { city: 0, starport: 1, shuttleport: 2, landmark: 3, area: 4 };
+  const order = { city: 0, starport: 1, shuttleport: 2, place: 3, landmark: 4, area: 5 };
   places.sort((a, b) => (order[a.kind] ?? 9) - (order[b.kind] ?? 9) || a.name.localeCompare(b.name));
-  return places;
+  return { places, stats: { ...merged, archive: archive.rows.length, unnamed: archive.unnamed, missing: archive.missing, ours: ours.length, namedAfterPlace, frame } };
 }
 
-/** "jabbas_palace" -> "Jabbas Palace" */
-function title(key) {
-  return key.split('_').filter(Boolean).map((w, i) => (i > 0 && /^(of|the|in|on|at|and|with)$/.test(w) ? w : w[0].toUpperCase() + w.slice(1))).join(' ');
-}
-
-/** Write <out>/pois.json for a planet; a broken region table costs the regions, never the snapshot. */
+/** Write <out>/pois.json for a planet; a broken table costs that table's places, never the snapshot. */
 function writePois(vfs, planet, snap, entries, cx, cz, outDir) {
-  let pois = [];
-  try {
-    pois = pointsOfInterest(vfs, planet, snap, entries);
-  } catch (err) {
-    console.warn(`points of interest: ${err.message}`);
+  let result = null;
+  // Each step sheds one source, so one unreadable table never costs the others.
+  for (const opts of [{}, { archive: false }, { regions: false }, { regions: false, archive: false }]) {
     try {
-      pois = pointsOfInterest(vfs, planet, snap, entries, { regions: false });
-    } catch {
-      pois = [];
+      result = pointsOfInterest(vfs, planet, snap, entries, opts);
+      break;
+    } catch (err) {
+      console.warn(`points of interest: ${err.message}`);
     }
   }
-  writeFileSync(join(outDir, 'pois.json'), JSON.stringify({ planet, center: { x: cx, z: cz }, pois }));
-  console.log(`points of interest: ${pois.length} (${pois.filter((p) => p.kind === 'region').length} named regions, ${pois.filter((p) => p.kind !== 'region').length} travel points) -> ${join(outDir, 'pois.json')}`);
+  const pois = result ? result.places : [];
+  const s = result ? result.stats : null;
+  const file = { planet, center: { x: cx, z: cz }, clientPlaces: s ? s.archive : 0, ...(s && s.frame.rows ? { frameCheck: s.frame } : {}), pois };
+  writeFileSync(join(outDir, 'pois.json'), JSON.stringify(file));
+  const counts = `${pois.length} (${pois.filter((p) => p.kind === 'place').length} the client's own named places, ${pois.filter((p) => p.kind === 'city' || p.kind === 'landmark' || p.kind === 'area').length} regions, ${pois.filter((p) => p.kind === 'starport' || p.kind === 'shuttleport').length} travel points)`;
+  console.log(`points of interest: ${counts} -> ${join(outDir, 'pois.json')}`);
+  if (s) {
+    console.log(`  places: the client's table gave ${s.archive}${s.unnamed ? ` (${s.unnamed} whose Name column names the wrong table, named by its own key instead)` : ''}${s.missing ? ` (${s.missing} whose name string the table is missing, labelled from its key)` : ''}, ours gave ${s.ours}, ${s.clashed} names were in both (the client's won${s.ringsKept ? `, except ${s.ringsKept} where ours is a ring with a reach and keeps its row` : ''})${s.repeats ? `, ${s.repeats} names the client's table itself repeats elsewhere` : ''}${s.sameSpot ? `, ${s.sameSpot} repeated in the same spot and dropped` : ''}${s.namedAfterPlace ? `, ${s.namedAfterPlace} port(s) named after a place rather than a city` : ''}`);
+    if (s.frame.rows) {
+      console.log(`  frame: ${s.frame.rows} places, nearest built thing ${s.frame.asIs} m away as they stand against ${s.frame.mirrored} m with X mirrored; worst ${s.frame.worst.m} m (${s.frame.worst.name})`);
+      if (s.frame.mirrored < s.frame.asIs) console.warn(`  WARNING: ${planet}'s named places sit closer to the snapshot with X mirrored; the table may not be in the snapshot's frame`);
+    }
+  }
 }
 
 /** Convert one planet's snapshot (see the snapshot command). */
@@ -2316,6 +2337,10 @@ async function snapshotPlanet(vfs, planet, outDir) {
     writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
     console.log(`flora: ${flora.models} models for ${flora.families} families${flora.missing ? `, ${flora.missing} appearances missing` : ''}${flora.particles ? `, ${flora.particles} particle effects skipped` : ''}`);
     writePois(vfs, planet, snap, entries, cx, cz, outDir);
+    // The gates one world's zones are walked between, joined to the places beside them. It reads the
+    // layout.json written a few lines above, so it needs nothing from the snapshot, and a world with
+    // no gates in its layout writes no file and prints nothing at all.
+    writeZoneGates(vfs, planet, outDir);
     const fx = manifest.categories.layout.filter((m) => m.particle);
     const attached = manifest.categories.layout.reduce((n, m) => n + (m.effects?.length ?? 0), 0);
     console.log(`layout: ${objects.length} objects, ${manifest.categories.layout.length} models -> ${join(outDir, 'layout.json')}`);
@@ -4543,8 +4568,11 @@ switch (cmd) {
     const planets = pos[2] === 'all' ? snapshotPlanets(vfs).filter((p) => GAME_PLANETS.includes(p)) : [pos[2]];
     for (const planet of planets) {
       const outDir = pos[2] === 'all' ? join(pos[3], planet) : pos[3];
-      if (!vfs.has(`snapshot/${planet}.ws`)) {
-        console.warn(`no snapshot/${planet}.ws in archives`);
+      // Not every planet ships a world snapshot: the expansions place everything through buildout
+      // tables, which is why the lava world and the tree world's zones were skipped here (and so
+      // never got the places their packs' own snapshot runs had written).
+      if (!vfs.has(`snapshot/${planet}.ws`) && !vfs.has(`datatables/buildout/areas_${planet}.iff`)) {
+        console.warn(`no snapshot/${planet}.ws and no buildout table in archives`);
         continue;
       }
       const { snap, entries } = loadPlanetObjects(vfs, planet);
@@ -4561,6 +4589,9 @@ switch (cmd) {
       mkdirSync(outDir, { recursive: true });
       console.log(`=== ${planet} (centre ${cx},${cz}) ===`);
       writePois(vfs, planet, snap, entries, cx, cz, outDir);
+      // And the zone gates, off the pack's own layout.json: this is the one rerun that gives a pack
+      // converted before the join its gates' destinations.
+      writeZoneGates(vfs, planet, outDir);
     }
     break;
   }

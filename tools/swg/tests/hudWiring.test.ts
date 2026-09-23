@@ -170,8 +170,18 @@ const pkg = JSON.parse(read('package.json')) as { scripts: Record<string, string
   const leaveAt = main.indexOf('private switchToSelect(');
   ok(leaveAt > 0, 'a world is left in one place');
   const leave = main.slice(leaveAt, main.indexOf('this.select.show(', leaveAt));
-  for (const field of ["this.nearbyName = ''", 'this.promptLiftStops = 0', "this.promptDoorless = ''"]) {
+  for (const field of ["this.nearbyName = ''", 'this.promptLiftStops = 0', "this.promptDoorless = ''", "this.promptGate = ''", 'this.zoneGates.clear()']) {
     ok(leave.includes(field), `${field.split(' ')[0].slice(5)} is put back when a world is left`);
+  }
+  // Which world's gates these are belongs to the world's own load and not to the prompt gather: the
+  // gather runs six early returns deep on the on-foot path, so pointed at from there the key would
+  // consult the world left behind for the first frames after every arrival.
+  {
+    const arriveAt2 = main.indexOf('private arrive(');
+    const body = main.slice(arriveAt2, arriveAt2 + 1600);
+    ok(body.includes('this.zoneGates.use('), "a world's own gates are pointed at when the world loads");
+    const gatherAt = main.indexOf('private gatherGate(');
+    ok(gatherAt > 0 && !main.slice(gatherAt, gatherAt + 1600).includes('zoneGates.use('), 'and never from the prompt gather');
   }
   // The plate's switch is asked before the call, not inside it: an "off" switch that still builds the
   // argument list turns nothing off.
@@ -252,6 +262,13 @@ const pkg = JSON.parse(read('package.json')) as { scripts: Record<string, string
     ['at an elevator, going up', (s) => void (s.elevator = 'up'), 'E up a level'],
     ['at an elevator, going down', (s) => void (s.elevator = 'down'), 'E down a level'],
     ['beside a building with no way in', (s) => void (s.doorless = true), 'E go inside'],
+    // The gate between two of a world's zones. The cap says what happens; where it goes is a place
+    // name, which is said on the message line as you come to it and never worn by a cap.
+    ['at a gate between two zones', (s) => void (s.gate = 'travel'), 'E through the gate'],
+    ['at a gate the pack names nowhere for', (s) => void (s.gate = 'nowhere'), 'E the gate (nowhere)'],
+    ['a gate and a speeder at once', (s) => void ((s.gate = 'travel'), (s.near = 'mount')), 'E mount'],
+    ['a gate and a lift shaft at once', (s) => void ((s.gate = 'travel'), (s.lift = true)), 'E the lift'],
+    ['a gate with the ship menu on offer', (s) => void ((s.gate = 'travel'), (s.shipMenu = 'here')), 'E through the gate | P ship menu'],
     ['a lift shaft and a speeder at once', (s) => void ((s.lift = true), (s.near = 'mount')), 'E the lift'],
     ['noclip', (s) => void (s.noclip = true), 'N noclip off | = faster | - slower'],
     // Aboard a ship's rooms, and out in space on foot.

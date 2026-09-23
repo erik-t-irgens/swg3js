@@ -20,6 +20,7 @@
 // not the one it was placed at last.
 
 import * as THREE from 'three';
+import { COL, colourOf } from '../core/palette.ts';
 import type { GalaxyMap, Poi } from './galaxyMap';
 import { distanceText, drawnAsLine, drawnAsShell, GROUP_MAP_TUNE, GroupLabels, GroupList, groupMapFeed, hasLayer, LABEL_MOVE, LABEL_TEXT, LAYERS, mapFromGameX, mapFromGameZ, MapView, marksOf, ObjectList, Pool, poolWants, screenFromMapX, screenFromMapY, ShipList, VIEW_TUNE, type GroupMark, type LayerId, type MapMark, type MapPack, type ShipMark } from './spaceMapLayers.ts';
 
@@ -925,7 +926,12 @@ export class MapUi {
       if (s.x < -60 || s.y < -20 || s.x > w + 60 || s.y > h + 20) continue;
       const city = p.kind === 'city';
       const travel = p.kind === 'starport' || p.kind === 'shuttleport';
-      const colour = city ? '#7fd7ff' : travel ? '#ffd27f' : p.kind === 'region' || p.kind === 'area' ? 'rgba(180,200,220,0.6)' : '#c8d8e8';
+      // The client's own named places wear `ink`, the palette's name for a neutral mark, which is
+      // what they are; it is brighter than the landmark grey below so they read first. The four
+      // signal colours would separate further but they mean state and nothing else. The last two
+      // literals here are the map's own colours with a second home: neither `muted` nor `ink` is
+      // that value, so moving them is a change to how the map looks and not this wave's to make.
+      const colour = city ? colourOf(COL.accent) : travel ? colourOf(COL.component) : p.kind === 'place' ? colourOf(COL.ink) : p.kind === 'region' || p.kind === 'area' ? 'rgba(180,200,220,0.6)' : '#c8d8e8';
       const r = p.r / this.scale;
       if (city || (r > 6 && p.r >= POI_RING_MIN)) {
         ctx.strokeStyle = colour;
@@ -938,8 +944,10 @@ export class MapUi {
       ctx.beginPath();
       ctx.arc(s.x, s.y, city ? 3 : 2, 0, Math.PI * 2);
       ctx.fill();
-      // A city's name always; a port's or a landmark's once the map is close enough that it does not sit on the city's.
-      if (city || this.scale < labelsFrom) {
+      // A city's name always, and the client's own named places too: on the lava world and the tree
+      // world's zones they are every name there is, and a map of unnamed dots would be no map at
+      // all. A port's or a landmark's once the map is close enough that it does not sit on a city's.
+      if (city || p.kind === 'place' || this.scale < labelsFrom) {
         ctx.fillStyle = 'rgba(0,0,0,0.7)';
         ctx.fillText(p.name, s.x + 7, s.y + 1);
         ctx.fillStyle = colour;

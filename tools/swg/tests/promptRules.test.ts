@@ -160,6 +160,16 @@ const fill = (s: ReturnType<typeof newPromptState>) => fillActions(s, slots);
 }
 
 {
+  // At one of the gates a world's zones are walked between. The cap says what happens and never
+  // where it goes: a place name on a cap would be a label built outside the table below, which the
+  // whole-bar check further down would catch, and where it leads is said on the message line.
+  const n = fill(at({ gate: 'travel' }));
+  ok(n === 1 && words(n)[0] === PROMPT_WORDS.gate, 'standing at a gate between two of a world zones: through it');
+  const nowhere = fill(at({ gate: 'nowhere' }));
+  ok(nowhere === 1 && words(nowhere)[0] === PROMPT_WORDS.gateNowhere, 'a gate the pack names nowhere for: the bar says so rather than saying nothing');
+}
+
+{
   // The gravity boots hold a surface out in space.
   const off = fill(at({ boots: true }));
   ok(words(off).join() === `${PROMPT_WORDS.bootsOff},${PROMPT_WORDS.letGoSurface}`, `on a surface: the boots come off, or you let go (${show(off).join(', ')})`);
@@ -227,6 +237,27 @@ const fill = (s: ReturnType<typeof newPromptState>) => fillActions(s, slots);
 }
 
 {
+  // The gate is the last thing that key can mean, so anything else at all takes it. The gather
+  // stands the gate down in these states too, but the rules must not depend on that: a state that
+  // says both is filled here and the gate must not appear under a cap that is about to do something
+  // else. That is `push`'s one-binding rule, said for the one action added after it.
+  for (const [what, fields, want] of [
+    ['a lift shaft', { lift: true }, PROMPT_WORDS.lift],
+    ['an elevator', { elevator: 'up' as const }, PROMPT_WORDS.up],
+    ['a building with no way in', { doorless: true }, PROMPT_WORDS.inside],
+    ['a speeder', { near: 'mount' as const }, PROMPT_WORDS.mount],
+    ['a ship with a room', { near: 'board' as const }, PROMPT_WORDS.board],
+    ['a ship aboard', { aboard: true }, PROMPT_WORDS.stepOut],
+  ] as [string, Record<string, unknown>, string][]) {
+    const n = fill(at({ gate: 'travel', ...fields }));
+    ok(n === 1 && words(n)[0] === want, `a gate and ${what} at once: ${what} keeps the key (${show(n).join(', ')})`);
+  }
+  // The one thing beside a gate that has a key of its own.
+  const menu = fill(at({ gate: 'travel', shipMenu: 'here' }));
+  ok(words(menu).join() === `${PROMPT_WORDS.gate},${PROMPT_WORDS.shipMenu}`, `a gate with the ship menu on offer: both, on their own keys (${show(menu).join(', ')})`);
+}
+
+{
   // The boots and a lift shaft: two different keys, so both are shown.
   const n = fill(at({ lift: true, boots: true, bootsReach: false }));
   ok(n === 2 && words(n).join() === `${PROMPT_WORDS.lift},${PROMPT_WORDS.letGoSurface}`, `a lift with the boots on: both, on their own keys (${show(n).join(', ')})`);
@@ -278,6 +309,8 @@ const fill = (s: ReturnType<typeof newPromptState>) => fillActions(s, slots);
     at({ lift: true }),
     at({ elevator: 'up' }),
     at({ doorless: true }),
+    at({ gate: 'travel' }),
+    at({ gate: 'nowhere' }),
     at({ boots: true, bootsReach: true }),
     at({ aboard: true, atControls: true }),
     at({ eva: true }),
@@ -299,6 +332,91 @@ const fill = (s: ReturnType<typeof newPromptState>) => fillActions(s, slots);
   }
   ok(!bad, `every action names a binding the game has, and every label comes from the one table${bad ? `: ${bad}` : ''}`);
   ok(longest <= PROMPT.maxLabel, `the longest label is ${longest} characters, inside the ${PROMPT.maxLabel} the bar allows`);
+}
+
+{
+  // The list above is written out by hand, which is the way that check can be passed by omission: a
+  // field added to `PromptState` and not added there is a state its label rule never sees, and a
+  // label built outside the table would go unnoticed for as long as nobody thought to add a row. So
+  // the fields are read out of the source instead and every one of them is driven — alone, and in
+  // every pair, which is what reaches an action offered only when two things are true at once.
+  const src = readFileSync(new URL('../../../src/ui/promptRules.ts', import.meta.url), 'utf8');
+  /** A named union's members, or the literals written inline on the field itself. */
+  const literalsOf = (type: string): string[] => {
+    const t = type.trim();
+    const here = [...t.matchAll(/'([^']*)'/g)].map((m) => m[1]);
+    if (here.length) return here;
+    const alias = new RegExp(`export type ${t} =([^;]+);`).exec(src);
+    return alias ? [...alias[1].matchAll(/'([^']*)'/g)].map((m) => m[1]) : [];
+  };
+  /** Every field of an interface in the source, with the values worth trying for it. */
+  const fieldsOf = (name: string, skip: string[]): [string, unknown[]][] => {
+    const body = new RegExp(`export interface ${name} \\{([\\s\\S]*?)\\n\\}`).exec(src);
+    assert.ok(body, `the ${name} fields were found in the source`);
+    const out: [string, unknown[]][] = [];
+    for (const m of body[1].matchAll(/^ {2}([A-Za-z0-9_]+): ([^;]+);/gm)) {
+      const [, key, type] = m;
+      if (skip.includes(key)) continue;
+      if (type.trim() === 'boolean') out.push([key, [true, false]]);
+      else {
+        const lits = literalsOf(type);
+        if (lits.length) out.push([key, lits]);
+      }
+    }
+    return out;
+  };
+  // `vehicle` is the nested struct and is swept on its own below; `live` false is the empty bar and
+  // is checked at the top of this file; `kind` and `cutKey` are free strings the game always fills.
+  const stateFields = fieldsOf('PromptState', ['vehicle', 'live']);
+  const vehicleFields = fieldsOf('PromptVehicle', ['kind', 'cutKey']);
+  ok(stateFields.length >= 15 && vehicleFields.length >= 10, `the state fields were read out of the source (${stateFields.length} on the state, ${vehicleFields.length} on the vehicle)`);
+  ok(stateFields.some(([k]) => k === 'gate'), 'the gate between a world\'s zones is one of the fields the sweep found');
+
+  const table = new Set<string>(Object.values(PROMPT_WORDS));
+  let swept = 0;
+  let fault = '';
+  const drive = (fill: (s: ReturnType<typeof newPromptState>) => void) => {
+    const s = at({});
+    // A vehicle the game would really have: the bar is never handed a ship with no key to cut it by.
+    Object.assign(s.vehicle, { kind: 'ship', ship: true, cutKey: 'KeyJ' });
+    fill(s);
+    const n = fillActions(s, slots);
+    swept++;
+    if (n > PROMPT.slots) fault ||= `more actions than slots: ${n}`;
+    const seen: string[] = [];
+    for (let i = 0; i < n; i++) {
+      const a = slots[i];
+      const cap = a.action || `[${a.code}]`;
+      if (seen.includes(cap)) fault ||= `one binding twice on the bar: ${cap}`;
+      seen.push(cap);
+      if (a.action && !BINDINGS.has(a.action)) fault ||= `${a.action} is not a binding`;
+      if (!a.action && !/^[A-Za-z]/.test(a.code)) fault ||= `an action with neither a binding nor a key: ${a.label}`;
+      if (!table.has(a.label)) fault ||= `a label built somewhere other than the table: ${JSON.stringify(a.label)}`;
+      if (a.label.length > PROMPT.maxLabel) fault ||= `a label wider than the bar: ${a.label}`;
+    }
+  };
+  for (const [key, values] of stateFields) for (const v of values) drive((s) => void ((s as unknown as Record<string, unknown>)[key] = v));
+  for (const [k1, v1s] of stateFields) {
+    for (const v1 of v1s) {
+      for (const [k2, v2s] of stateFields) {
+        if (k2 === k1) continue;
+        for (const v2 of v2s) {
+          drive((s) => {
+            const r = s as unknown as Record<string, unknown>;
+            r[k1] = v1;
+            r[k2] = v2;
+          });
+        }
+      }
+    }
+  }
+  for (const [key, values] of vehicleFields) {
+    for (const v of values) {
+      drive((s) => void ((s.mounted = true), ((s.vehicle as unknown as Record<string, unknown>)[key] = v)));
+      drive((s) => void ((s.piloting = true), ((s.vehicle as unknown as Record<string, unknown>)[key] = v)));
+    }
+  }
+  ok(!fault, `every state the struct can be in fills the bar with the table's own words and one cap a key (${swept} states swept)${fault ? `: ${fault}` : ''}`);
 }
 
 {

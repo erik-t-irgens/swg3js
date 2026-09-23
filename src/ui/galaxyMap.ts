@@ -14,13 +14,18 @@ import { destinationFor, drawnSystems, GALAXY_TUNE, loadGalaxyFile, planetTextur
 import { loadSpacePack, type Destination, type HyperspaceCatalogue } from '../space/spaceData';
 import { GALAXY_VIEW_TUNE, GalaxyView } from './galaxyView';
 
-/** A named place from a converted pack's pois.json, in SWG coordinates. */
+/**
+ * A named place from a converted pack's pois.json, in SWG coordinates. `place` is the client's own
+ * named place: a point with a description and no reach of its own, which is why it is drawn as a
+ * dot and never as a ring. `desc` is the client's own words for it, where it has any.
+ */
 export interface Poi {
   name: string;
   x: number;
   z: number;
   r: number;
-  kind: 'city' | 'starport' | 'shuttleport' | 'landmark' | 'area' | 'region';
+  kind: 'city' | 'starport' | 'shuttleport' | 'place' | 'landmark' | 'area' | 'region';
+  desc?: string;
 }
 
 /** What the galaxy tab needs from the game to offer a jump into a system's orbit. */
@@ -225,7 +230,9 @@ export class GalaxyMap {
       b.className = `poi ${poi.kind}`;
       b.type = 'button';
       b.textContent = poi.name;
-      b.title = `${poi.kind} at ${poi.x.toFixed(0)}, ${poi.z.toFixed(0)}`;
+      // The client's own description where the place has one, and where it has not, what it is and
+      // where. A `title` is the browser's own tooltip: nothing is drawn and nothing is measured.
+      b.title = poi.desc ? `${poi.desc}\n${poi.x.toFixed(0)}, ${poi.z.toFixed(0)}` : `${poi.kind} at ${poi.x.toFixed(0)}, ${poi.z.toFixed(0)}`;
       b.addEventListener('click', (e) => {
         e.stopPropagation();
         this.onTeleport(p, poi, zone);
@@ -255,10 +262,16 @@ export class GalaxyMap {
     };
     const cities = pois.filter((x) => x.kind === 'city');
     const travel = pois.filter((x) => x.kind === 'starport' || x.kind === 'shuttleport');
+    const places = pois.filter((x) => x.kind === 'place');
     const landmarks = pois.filter((x) => x.kind === 'landmark' || x.kind === 'region');
     const areas = pois.filter((x) => x.kind === 'area');
     section('Cities', cities, collapsedCities);
     section('Travel', travel, cities.length > 0 || collapsedCities);
+    // The client's own named places stand ahead of the emulator's landmarks, and open on a world
+    // with no cities (the lava world, the tree world's zones), where they are the only names there
+    // are and the card would otherwise be headings and nothing else. A starport does not close it:
+    // the tree world's main zone has one, and closing it there is exactly the case this is for.
+    section('Places', places, cities.length > 0);
     section('Landmarks', landmarks, true);
     section('Regions', areas, true);
   }
@@ -318,9 +331,14 @@ export class GalaxyMap {
     const pois = await this.loadPois(packId);
     if (!wrap.isConnected) return;
     const extent = meta.width;
-    for (const poi of pois) {
+    // The cities and the ports, and on a world with no cities the client's own named places as well,
+    // since there they are the names the world has: the lava world would be blank without them and
+    // the tree world's main zone would be one starport among nine places it does not draw. A world
+    // with cities is left as it was, or its thumbnail fills with dots.
+    const dotted = pois.filter((p) => p.kind === 'city' || p.kind === 'starport' || p.kind === 'shuttleport');
+    const withPlaces = pois.some((p) => p.kind === 'city') ? dotted : [...dotted, ...pois.filter((p) => p.kind === 'place')];
+    for (const poi of withPlaces) {
       const travel = poi.kind === 'starport' || poi.kind === 'shuttleport';
-      if (poi.kind !== 'city' && !travel) continue;
       const left = (poi.x + extent / 2) / extent;
       const top = (extent / 2 - poi.z) / extent;
       if (!(left >= 0 && left <= 1 && top >= 0 && top <= 1)) continue;

@@ -46,7 +46,9 @@ import { DEFAULT_GADGETS, GADGETS } from './combat/gadgets';
 import { RAGDOLL } from './combat/ragdoll';
 import { WeaponCatalogue, type WeaponDef } from './player/weapons';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { Hud, hudBindingsChanged, Roster, ROSTER_TUNE } from './ui/hud';
+// `distanceWords` is the interface's own spelling of a distance, threshold and all, so the death
+// card's rows read exactly as the group roster's do.
+import { distanceWords, Hud, hudBindingsChanged, Roster, ROSTER_TUNE } from './ui/hud';
 import { specFor, type DriveInput } from './vehicles/vehicle';
 import { interceptTime, leadPoint } from './combat/intercept';
 import { PostFX, type FxFrameInput, type SunInfo } from './core/postfx';
@@ -144,6 +146,8 @@ import { SURFACE_ROOM, SurfaceRoom, isSurfaceRoom, probeSurface, roomFrame, room
 import type { Vehicle, VehicleKind } from './vehicles/vehicle';
 import { HEAD_TO_EYE, SEATED_EYE_FALLBACK, SEAT_RULE, cockpitYawStep, frameFileName, mirroredOffset, seatDropUsed } from './vehicles/cockpitSeat';
 import { World } from './world/world';
+import type { FacilityChoice, NamedPlace } from './world/cloning.ts';
+import { GATE_TUNE, ZoneGates, gateAction, gateSaid, tuneGates, zoneOfPack } from './world/zoneGates.ts';
 import { AudioSystem, type ListenerPose } from './audio/audio.ts';
 import { OUTSIDE, type SoundSpace } from './audio/distance.ts';
 import type { AmbienceTune } from './audio/ambience.ts';
@@ -391,6 +395,10 @@ class App {
   private weapons: WeaponCatalogue | null = null;
   private readonly fade: HTMLElement;
   private readonly death: HTMLElement;
+  /** The line over the death card's list of facilities, shown only while there is a list. */
+  private readonly deathHint: HTMLElement;
+  /** The death card's list of facilities: filled on the death and emptied on the way out. */
+  private readonly deathList: HTMLElement;
   private readonly select: CharacterSelect;
   private readonly creatorBar: CreatorBar;
   private readonly menu: Menu;
@@ -565,6 +573,15 @@ class App {
    */
   private promptLiftStops = 0;
   private promptDoorless = '';
+  /**
+   * The gates this world's zones are walked between, pointed at the pack by `arrive` and by the
+   * jump's own crossing, and the clock that keeps a fight out of them. A world with no gates.json
+   * — which is every world but one, and every pack converted before the join was written — has no
+   * gates and everything below answers "no gate".
+   */
+  private readonly zoneGates = new ZoneGates();
+  /** Where the gate you are standing at leads, in full, for the long line; empty where there is none. */
+  private promptGate = '';
   /** Where every piece of the display sits, refilled on a resize or a change of scale and never in a frame. */
   private readonly hudLayout: HudLayout = makeLayout();
   private fxQueued = false;
@@ -623,6 +640,18 @@ class App {
   /** The last frame's length, for the effects that smear by how far the camera moved in it. */
   private lastDt = 1 / 60;
   private spawn = new THREE.Vector3();
+  /**
+   * The world's own named places, read once when a world loads off the very list the map reads, so
+   * that the death card can call a facility by the town it stands in. Empty until it lands, and
+   * empty for a world whose pack has no list, which costs the rows their names and nothing else.
+   */
+  private placeNames: Poi[] = [];
+  /** Which pack `placeNames` was read for: a travel's own read is the one that counts. */
+  private placeNamesFor = '';
+  /** The map's own place loader, captured from the galaxy tab so nothing here has to open the map. */
+  private poisOf: (packId: string) => Promise<Poi[]> = async () => [];
+  /** The facilities the death card is offering just now, in the order its rows stand. */
+  private deathChoices: FacilityChoice[] = [];
   /** Animation mixers of models shown through the debug hook. */
   private readonly shown: THREE.AnimationMixer[] = [];
   private readonly portals: PortalRenderer;
@@ -1136,6 +1165,9 @@ class App {
         onHyperspace: (d) => this.jumpFromGalaxy(d),
       },
     );
+    // The galaxy tab keeps a world's named places once it has read them; the death card reads the
+    // same list through this rather than reaching into the map.
+    this.poisOf = (id) => galaxy.loadPois(id);
     // The map window: the world here (the planet's own map, or the space zone in three axes) and the galaxy to travel.
     this.map = new MapUi(this.ui, galaxy, {
       here: () => {
@@ -2897,7 +2929,7 @@ class App {
             rebinds: bar.rebinds,
             styled: bar.styled,
             list: this.actionsList(bar.shown),
-            state: { live: s.live, jump: s.jump, noclip: s.noclip, mounted: s.mounted, piloting: s.piloting, kind: s.vehicle.kind, lift: s.lift, elevator: s.elevator, doorless: s.doorless, boots: s.boots, bootsReach: s.bootsReach, aboard: s.aboard, atControls: s.atControls, eva: s.eva, near: s.near, shipMenu: s.shipMenu },
+            state: { live: s.live, jump: s.jump, noclip: s.noclip, mounted: s.mounted, piloting: s.piloting, kind: s.vehicle.kind, lift: s.lift, elevator: s.elevator, doorless: s.doorless, gate: s.gate, gateTo: this.promptGate, boots: s.boots, bootsReach: s.bootsReach, aboard: s.aboard, atControls: s.atControls, eva: s.eva, near: s.near, shipMenu: s.shipMenu },
             hz: HUD_WIRING.promptHz,
           },
           // The damage feedback: the arcs standing, the numbers rising, and how long ago a shot of
@@ -3153,6 +3185,33 @@ class App {
         if (opts.go === true) return { asked: v ? this.docking.dock(v) : 'no ship is being flown', ...this.docking.report() };
         if (opts.go === false) return { said: this.docking.act(v), ...this.docking.report() };
         return out;
+      },
+      /**
+       * The gates a world's zones are walked between: what the pack carries, which one is in reach, what the key would do
+       * there and the two numbers, live. `gates({ reach: 20 })` and `gates({ calm: 1 })` move them (GATE_TUNE in
+       * zoneGates.ts). Nothing here can be seen from a tab that draws no frames, which is why it answers in numbers.
+       */
+      gates: (opts: Partial<typeof GATE_TUNE> = {}) => {
+        tuneGates(opts);
+        const p = this.player;
+        const at = p.worldPos;
+        const near = this.zoneGates.nearest(at.x, at.y, at.z);
+        const since = this.zoneGates.since(this.world.simTime);
+        return {
+          pack: this.world.packId,
+          gates: this.zoneGates.gates.map((g) => ({ to: g.to, label: g.label, at: [Math.round(g.x), Math.round(g.y), Math.round(g.z)], d: Math.round(Math.hypot(g.x - at.x, g.y - at.y, g.z - at.z)) })),
+          here: near ? { to: near.gate.to, label: near.gate.label, d: Math.round(near.d * 10) / 10 } : null,
+          sinceABlow: Number.isFinite(since) ? Math.round(since * 10) / 10 : 'no blow in this world',
+          would: gateAction({
+            live: true,
+            onFoot: !p.mounted && !p.piloting && !p.aboard && !p.noclip,
+            free: !this.nearestVehicle(),
+            since,
+            d: near ? near.d : null,
+            to: !!near?.gate.to,
+          }),
+          under: { ...GATE_TUNE },
+        };
       },
       /**
        * The astromechs in their sockets: `droid({ shown: 0.4 })` sets the share of a droid's height shown over its socket
@@ -3632,6 +3691,28 @@ class App {
         }
         return this.world.npcs.npcs.map((f) => ({ name: f.name, arm: f.arm, weapon: f.weapon?.id ?? null, outfit: f.outfit, hp: Number(f.hp.toFixed(0)), dead: f.dead, dist: Number(f.pos.distanceTo(this.player.pos).toFixed(1)), rig: !!f.rig }));
       },
+      /**
+       * The facilities on this world where the dead come back, nearest first; with a row number it
+       * comes round at that one now, without dying, which is the only way to try the choice from a
+       * tab that draws no frames. The console lists **all** of them, where the card shows its first
+       * few: a world with eight is one the card cannot show whole, and the row numbers here are the
+       * ones this call itself takes.
+       */
+      cloning: (row?: number) => {
+        const rows = this.world.planet?.space ? [] : this.world.cloningFacilities(this.player.worldPos, this.placesHere(), 0);
+        if (row !== undefined) {
+          if (!rows[row]) return `there is no row ${row}: this world offers ${rows.length}`;
+          this.deathChoices = rows;
+          void this.respawnAt(row);
+          return `coming round at ${rows[row].name}`;
+        }
+        return {
+          world: this.world.planet?.id ?? null,
+          places: this.placeNames.length,
+          named: this.placesHere().length,
+          rows: rows.map((f, i) => ({ row: i, name: f.name, away: distanceWords(f.d), at: [Math.round(f.x), Math.round(f.z)] })),
+        };
+      },
       /** The gun in hand: its Jedi Academy type and numbers. */
       gunType: () => {
         const p = (this.kits.bounty_hunter as BountyHunterKit | undefined ?? new BountyHunterKit(this.scene)).profile({ player: this.player } as KitContext);
@@ -3670,7 +3751,11 @@ class App {
     // The death card: over the fallen body, with the way back.
     this.death = document.createElement('div');
     this.death.id = 'death';
-    this.death.innerHTML = `<div class="death-card"><h2>You have become one with the Force</h2><button class="respawn">Respawn</button></div>`;
+    // The list of facilities is filled on the death itself and is empty on a world that has none,
+    // where the card is exactly the card it always was.
+    this.death.innerHTML = `<div class="death-card"><h2>You have become one with the Force</h2><div class="death-hint" hidden></div><div class="death-list" hidden></div><button class="respawn">Respawn</button></div>`;
+    this.deathHint = this.death.querySelector('.death-hint') as HTMLElement;
+    this.deathList = this.death.querySelector('.death-list') as HTMLElement;
     this.death.querySelector('.respawn')!.addEventListener('click', () => this.respawn());
     this.ui.appendChild(this.death);
     this.loadingScreen = new LoadingScreen(this.ui, import.meta.env.BASE_URL);
@@ -4886,6 +4971,8 @@ class App {
     this.promptClock = 0;
     this.promptLiftStops = 0;
     this.promptDoorless = '';
+    this.promptGate = '';
+    this.zoneGates.clear();
     this.showBodyBlock(true);
     this.hud.setPrompt('');
     this.hud.setMouseFree(false);
@@ -5073,6 +5160,11 @@ class App {
    * The point is the body's head rather than its feet, since that is where a number belongs.
    */
   private landedHit(target: { pos: THREE.Vector3; halfHeight: number; key: number; label: string }, amount: number, killed: boolean): void {
+    // A blow of yours on something living: the zone gates stand aside for a few seconds, so a fight
+    // beside one cannot end in another zone because E was pressed to mount a speeder. This watches
+    // the living only — a shot at a hull or a turret never reaches it — so the whole of the rule is
+    // this and `hurtFrom`, which is every blow taken, from anything at all.
+    this.zoneGates.fought(this.world.simTime);
     const p = target.pos;
     this.feedback.hit(amount, killed, target.key, target.label, p.x, p.y + target.halfHeight, p.z);
   }
@@ -5086,6 +5178,8 @@ class App {
    * so the direction is measured in the world, where everything that strikes from outside stands.
    */
   private hurtFrom(from: THREE.Vector3 | null | undefined): void {
+    // Every blow taken, with a direction or without: the zone gates stand aside for a few seconds.
+    this.zoneGates.fought(this.world.simTime);
     this.hud.hurt();
     if (!from) return;
     const at = this.player.worldPos;
@@ -5207,7 +5301,41 @@ class App {
     // Nothing of this world's within reach, but a hull another player flies may be: E boards that.
     s.near = near ? (near.interior ? 'board' : near.upsideDown ? 'flip' : 'mount') : peerRooms()?.nearest(p.pos, BOARD_TUNE.reach) ? 'board' : '';
     s.eva = p.eva;
+    this.gatherGate(s);
     return s;
+  }
+
+  /**
+   * The gate between two of a world's zones, into the same struct as everything else: whether the
+   * key would take you through it, and the destination in full for the long line. It is asked for
+   * eight times a second like the rest, and on a world with no gates at all — which is every world
+   * but one — it is one comparison and nothing more.
+   *
+   * The two rules it applies are `zoneGates.ts`'s own: the gate never takes the key from anything
+   * else within reach, and it stands aside for a few seconds after any blow either way. Which
+   * pack's gates these are was settled when the world loaded, not here.
+   *
+   * It is also where the game says where a gate leads: the bar's caps come from one frozen table of
+   * words and none of them is a place name, so the name goes on the message line, once, the first
+   * time each gate is offered in this world.
+   */
+  private gatherGate(s: PromptState): void {
+    const p = this.player;
+    const at = p.worldPos;
+    const near = this.zoneGates.nearest(at.x, at.y, at.z);
+    const act = gateAction({
+      live: s.live,
+      onFoot: !p.mounted && !p.piloting && !p.aboard && !p.noclip,
+      free: !s.lift && !s.elevator && !s.doorless && !s.near && !s.boots && !s.eva,
+      since: this.zoneGates.since(this.world.simTime),
+      d: near ? near.d : null,
+      to: !!near?.gate.to,
+    });
+    s.gate = act === 'none' ? '' : act;
+    this.promptGate = act === 'none' ? '' : gateSaid(near?.gate);
+    if (act !== 'none' && this.zoneGates.fresh(near?.gate)) {
+      this.messages.system(act === 'travel' ? `a gate to ${this.promptGate}` : 'a gate this pack names nowhere for');
+    }
   }
 
   /**
@@ -6156,6 +6284,21 @@ class App {
     this.shipHud.clear();
     this.feedback.clear();
     this.world.load(planet, packIdOf(planet, this.zone));
+    // This world's named places, off the same list the map reads and cached there: what the death
+    // card calls each facility. Never awaited, and a world whose pack has no list simply has none.
+    const placesFor = packIdOf(planet, this.zone);
+    // The gates this world's zones are walked between, pointed at the pack the world is loading and
+    // not at whatever the prompt last gathered: a gate belongs to the world arriving, and asked for
+    // from the gather it would be the world left behind's gates, mirrored about the world left
+    // behind's centre, for as long as it took a frame to reach the on-foot branch.
+    this.zoneGates.use(import.meta.env.BASE_URL, placesFor);
+    this.placeNames = [];
+    this.placeNamesFor = placesFor;
+    void this.poisOf(placesFor)
+      .then((list) => {
+        if (this.placeNamesFor === placesFor) this.placeNames = list;
+      })
+      .catch(() => {});
     this.spawn = this.world.spawnPoint();
     const stand = at ?? this.spawn;
     this.player.reset(stand);
@@ -6521,6 +6664,10 @@ class App {
     this.shipTarget = null;
     this.targetFx.select(null, false, null);
     this.world.loadCarrying(hull, planet, packIdOf(planet, this.zone));
+    // What `arrive` does for a zone: the gates go with the world, even here, where every zone a jump
+    // reaches is a system with none. A world swapped under the hull with the last one's gates still
+    // pointed at would be the one place they could be wrong and never show.
+    this.zoneGates.use(import.meta.env.BASE_URL, packIdOf(planet, this.zone));
     if (!this.world.vehicles.includes(hull)) return null;
     // At the arrival's start, facing the arrival, before anything streams: the world streams round where the hull is.
     hull.teleport(pose.pos, pose.quaternion, 0);
@@ -7718,8 +7865,131 @@ class App {
       void this.fadeAndRespawn();
       return;
     }
+    this.offerRespawn();
     this.death.classList.add('on');
     this.freeMouse(true);
+  }
+
+  /**
+   * The world's own named places in the world's own frame: the pack writes them in the game's
+   * coordinates, which are mirrored in X and centred on the snapshot's middle exactly as every
+   * placed object is. Built on the death and nowhere else, so it is no frame's cost.
+   */
+  private placesHere(): NamedPlace[] {
+    const c = this.world.layoutCenter;
+    if (!c || this.placeNamesFor !== packIdOf(this.world.planet, this.zone)) return [];
+    return this.placeNames.map((p) => ({ name: p.name, x: -(p.x - c.x), z: p.z - c.z, r: p.r }));
+  }
+
+  /**
+   * Fill the death card with the facilities on this world, nearest first with how far each is from
+   * where the body fell. A world with none (the lava planet, every zone of the tree planet, and
+   * space, where there is no ground at all) keeps the card it always had, and the line says why
+   * rather than leaving the player to wonder.
+   */
+  private offerRespawn(): void {
+    const rows = this.world.planet?.space ? [] : this.world.cloningFacilities(this.player.worldPos, this.placesHere());
+    this.deathChoices = rows;
+    this.deathList.textContent = '';
+    for (let i = 0; i < rows.length; i++) {
+      const row = document.createElement('button');
+      row.className = 'death-place';
+      const where = document.createElement('span');
+      where.className = 'where';
+      where.textContent = rows[i].name;
+      const far = document.createElement('span');
+      far.className = 'far';
+      far.textContent = distanceWords(rows[i].d);
+      row.append(where, far);
+      row.addEventListener('click', () => void this.respawnAt(i));
+      this.deathList.appendChild(row);
+    }
+    this.deathList.hidden = rows.length === 0;
+    this.deathHint.hidden = rows.length === 0;
+    this.deathHint.textContent = rows.length ? 'come back at' : '';
+    if (!rows.length && this.world.planet && !this.world.planet.space) {
+      this.messages.system(`nothing on ${this.world.planet.name} brings the dead back, so you come round where you started`);
+    }
+  }
+
+  /**
+   * Off whatever was being ridden or stood in before the world is moved under it: a body that died
+   * in a hull's rooms lives in that room's own physics, and a world moved around it would leave it
+   * in a world nothing streams. These are the travel's own steps for the same reason, without the
+   * ship, which is left where it stands and is a planet away once this is done. The ragdoll is
+   * already gone by here, which is what the room's own physics needed taken out of it.
+   */
+  private stepOffForRespawn(): void {
+    const p = this.player;
+    if (p.aboard) {
+      const room = p.aboard;
+      room.reveal(false);
+      p.leave();
+      // And whoever built that hull's rooms is told nobody is in them, or they are left held for good.
+      const peer = peerRooms()?.idOf(room) ?? 0;
+      if (peer) peerRooms()?.aboard(peer, false);
+      // A surface belongs to nothing but the boots: whoever lets go of it disposes it.
+      if (isSurfaceRoom(room)) room.dispose();
+    }
+    if (p.mounted) p.dismount(p.pos.clone());
+  }
+
+  /**
+   * Come back at one of the facilities the card offered. It is a teleport and is made like one: the
+   * world is moved to the facility under a loading screen and waited for, and only then is the
+   * player stood in its room -- a facility past the streamer's reach has no building here yet and so
+   * no floor to stand on. Should the building still not be there when the wait gives up, they come
+   * round on the ground where it stands and the line says so.
+   *
+   * Everything after the loading screen goes up is in a `try`, because this one reaches further than
+   * the map's teleport does -- the streamer, the physics and a building's own cells -- and a throw
+   * anywhere in it would otherwise leave `traveling` true, which is the loading screen up for good
+   * with no way back to the game.
+   */
+  private async respawnAt(index: number): Promise<void> {
+    const f = this.deathChoices[index];
+    if (!f || this.traveling) return;
+    this.deathChoices = [];
+    this.death.classList.remove('on');
+    this.traveling = true;
+    this.input.captured = false;
+    this.map.hide();
+    this.loadingScreen.show(this.world.planet, f.name, 'coming round');
+    const p = this.player;
+    try {
+      p.endRagdoll();
+      this.stepOffForRespawn();
+      this.dying = false;
+      await new Promise((r) => setTimeout(r, 250));
+      // On the ground where it stands first, which is what moves the streamer, and what the player is
+      // left standing on if the building never arrives.
+      const outside = new THREE.Vector3(f.x, this.world.terrain.heightAt(f.x, f.z) + 0.3, f.z);
+      p.reset(outside);
+      this.world.jumpTo(outside);
+      this.physics.stepOnce();
+      await this.settle();
+      // A ray finds nothing until the world has stepped: the floor inside is read after this one.
+      this.physics.stepOnce();
+      const inside = this.world.cloneRoomAt(f.x, f.z, f.template);
+      if (inside) p.reset(inside);
+      else {
+        // The real ground is in by now even when the building is not, so stand them on it rather than
+        // on the height the stand-in terrain guessed while the pack was still loading. This is the
+        // spot the facility itself is placed at, so the words say where they are and not that they
+        // are clear of it: with no building here there is nothing to be outside of.
+        const ground = this.world.terrain.heightAt(outside.x, outside.z);
+        if (p.pos.y < ground + 0.05) p.reset(outside.setY(ground + 0.3));
+        this.messages.system(`${f.name} has not come in yet, so you come round on the ground where it stands`);
+      }
+      this.physics.stepOnce();
+      // Where you last came back is where a plain respawn puts you next time.
+      this.spawn.copy(p.pos);
+      this.savePlace(true);
+    } finally {
+      await this.loadingScreen.hide();
+      this.traveling = false;
+      this.freeMouse(false);
+    }
   }
 
   private async fadeAndRespawn(): Promise<void> {
@@ -7735,6 +8005,7 @@ class App {
   /** Back at the spawn, whole; the ragdoll is taken away. */
   private respawn(): void {
     this.death.classList.remove('on');
+    this.deathChoices = [];
     this.player.endRagdoll();
     this.player.reset(this.spawn);
     this.dying = false;
@@ -8672,6 +8943,49 @@ class App {
     return false;
   }
 
+  /**
+   * E at one of the gates a world's zones are walked between: through it, to the zone the pack says
+   * it opens on. Deliberately the last thing E can mean and the first thing a fight takes away —
+   * the lift, the elevator and the way into a building have already had the key by the time this is
+   * called, a vehicle or another player's hull within reach keeps it here, and the gate stands
+   * aside for a few seconds after any blow, so a fight beside one cannot end in another zone by
+   * accident.
+   *
+   * A gate the converter would not name a destination for says so and does nothing, which the
+   * conversion run prints too: it is the honest answer where the archives do not say where a gate
+   * leads.
+   */
+  private handleZoneGate(): boolean {
+    const p = this.player;
+    // The same "on foot in the world" the gather works out: riding, at a bridge's controls, in a
+    // ship's rooms or on its skin in the boots (both of which are `aboard`), adrift, or flying free.
+    if (p.mounted || p.piloting || p.aboard || p.eva || p.noclip) return false;
+    const at = p.worldPos;
+    const near = this.zoneGates.nearest(at.x, at.y, at.z);
+    if (!near) return false;
+    const act = gateAction({
+      live: !this.traveling && !this.dying,
+      onFoot: true,
+      free: !this.nearestVehicle() && !peerRooms()?.nearest(p.pos, BOARD_TUNE.reach),
+      since: this.zoneGates.since(this.world.simTime),
+      d: near.d,
+      to: !!near.gate.to,
+    });
+    if (act === 'none') return false;
+    if (act === 'nowhere' || !near.gate.to) {
+      this.messages.system('this gate leads nowhere the pack names');
+      return true;
+    }
+    const dest = zoneOfPack(near.gate.to);
+    if (!dest) {
+      this.messages.system(`this gate opens on ${near.gate.to}, which this build has no world for`);
+      return true;
+    }
+    this.messages.system(`through the gate to ${near.gate.label ?? dest.zone.name}`);
+    void this.travel(dest.planet, dest.zone.id);
+    return true;
+  }
+
   /** The lift shaft the player stands in, in a building or aboard a ship, with its stops. */
   private liftHere(): { stops: LiftStop[]; current: number; title: string } | null {
     const p = this.player;
@@ -9347,7 +9661,7 @@ class App {
           // leaving for the select screen and the map's teleport abort the jump first.
           if (input.pressedAction('mount') && !player.noclip) {
             if (!this.hyperspace.locksControls) {
-              if (!this.handleElevator()) this.handleMount();
+              if (!this.handleElevator() && !this.handleZoneGate()) this.handleMount();
             } else this.pressJumpE();
           }
           if (input.pressedAction('noclip') && !player.mounted && !this.hyperspace.locksControls) player.toggleNoclip();
@@ -9559,6 +9873,10 @@ class App {
         else if (player.aboard) prompt = (player.aboard.pilotSpot && player.pos.distanceTo(player.aboard.pilotSpot) < CONTROLS_RANGE ? `<b>E</b> take the controls` : `aboard ${player.aboard.vehicle.spec.label} · <b>E</b> step out`) + (this.world.planet.space ? ` · <b>${shipKey}</b> ship menu` : '');
         else if (player.eva) prompt = `adrift · <b>W/S</b> thrust ahead and back · <b>A/D</b> sideways · <b>Space/Ctrl</b> up and down · mouse turns · <b>Z/V</b> roll · <b>${keyName(input.bindings.brake[0] ?? '')}</b> brake · ${Math.round(player.vel.length() * 3.6)} km/h${S8.near === 'board' ? ' · <b>E</b> board' : S8.near ? ' · <b>E</b> mount' : ' · <b>E</b> gravity boots'}${performance.now() - this.bootsNoteAt < SURFACE_ROOM.note * 1000 && this.bootsNote ? ` · ${this.bootsNote}` : ''}`;
         else if (S8.near) prompt = S8.near === 'board' ? '<b>E</b> board' : S8.near === 'flip' ? '<b>E</b> flip it upright' : '<b>E</b> mount';
+        // The gate's own line, where the bar can only say that it is a gate: the long line has the
+        // room for where it goes, and this is the one place the name is written every frame rather
+        // than said once.
+        else if (S8.gate) prompt = S8.gate === 'travel' ? `<b>E</b> go to ${this.promptGate}` : '<b>E</b> this gate leads nowhere the pack names';
       }
       // A jump's countdown, then "jumping", over whatever the prompt would say; in the tunnel, the crew's lifts and controls.
       prompt = this.jumpPrompt(S8.lift) ?? prompt;

@@ -300,6 +300,20 @@ const roster = new Roster(makeEl());
 }
 
 // ---------------------------------------------------------------------------------------------
+// Where a distance starts reading in kilometres is a live knob, and it must reach every place on
+// the screen that reads one out: the roster down the side and the death card's list of facilities
+// are a few centimetres apart and are drawn at the same moment. They share one spelling in
+// `hudMath`, which is handed this threshold, so moving it here moves both.
+{
+  const was = ROSTER_TUNE.kmFrom;
+  ok(distanceWords(1400) === '1.4 km', 'at the threshold it has, fourteen hundred metres reads in kilometres');
+  ROSTER_TUNE.kmFrom = 2000;
+  ok(distanceWords(1400) === '1400 m', 'move the knob and the very same distance reads in metres');
+  ROSTER_TUNE.kmFrom = was;
+  ok(distanceWords(1400) === '1.4 km', 'and it follows the knob back');
+}
+
+// ---------------------------------------------------------------------------------------------
 // A world is named the way the game names it, out of the game's own table, and these are the ids
 // that really cross: a planet's id with a zone's beside it, and a system whose id looks nothing
 // like its name.

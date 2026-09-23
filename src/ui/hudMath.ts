@@ -462,6 +462,23 @@ export function barBand(share: number): 'good' | 'warn' | 'bad' {
   return 'bad';
 }
 
+/**
+ * A distance as the interface spells it: metres up to `kmFrom`, then kilometres to a tenth. It is
+ * here, in the pure file, because two places on the screen read a distance out -- the group's roster
+ * down the side and the death card's list of facilities -- and they are often a few centimetres
+ * apart. One spelling and one threshold, so the two can never say `1400 m` and `1.4 km` of the same
+ * distance at the same moment.
+ *
+ * `kmFrom` is handed in rather than read here so this stays a function of its arguments: the roster
+ * and the card both pass `ROSTER_TUNE.kmFrom`, which is live at the console, and so both follow a
+ * change of it together. A distance that is not one at all reads as nothing, because `0 m` and
+ * `NaN m` are each a statement and neither is true.
+ */
+export function distanceWords(metres: number, kmFrom: number): string {
+  if (!Number.isFinite(metres) || metres < 0) return '';
+  return metres >= kmFrom ? `${(metres / 1000).toFixed(1)} km` : `${Math.round(metres)} m`;
+}
+
 /** The breath row: whether it stands at all, how full it is, and the band its fill wears. */
 export interface BreathRow {
   show: boolean;
