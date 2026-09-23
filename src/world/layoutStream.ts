@@ -12,6 +12,7 @@ import { ACTOR_LAYER, INTERIOR_LAYER, crossing } from './portalRender';
 import { mirroredTransform, type EffectHandle, type ParticleEffects } from './particles';
 import { castsShadow, drawsAfterWater } from './surfaces';
 import { marks } from './marks.ts';
+import { floraClearRadius } from './floraClear.ts';
 // Which room a name picks is a rule of its own, with a node test over it; this file calls it rather
 // than keeping a second copy.
 import { namedCellIndex } from './cloning.ts';
@@ -195,7 +196,13 @@ export class LayoutStreamer {
         this.regions.set(key, region);
       }
       region.objects[p.tier].push(p);
-      if (p.radius >= 1 && !p.contained) this.addExclusion({ x: gx, z: gz, r: p.radius + 2 });
+      // What this object keeps flora off: its own model's reach, never the snapshot's radius, which
+      // is a load distance and on some worlds is kilometres. See `floraClear.ts` -- read as the
+      // snapshot's, it left eight of the eighteen worlds with no procedural flora at all.
+      if (!p.contained) {
+        const clear = floraClearRadius(o.radius, this.pack.find(o.model)?.bounds ?? null);
+        if (clear > 0) this.addExclusion({ x: gx, z: gz, r: clear });
+      }
       if (!p.contained) this.largestRadius = Math.max(this.largestRadius, Math.min(p.radius, COLLIDER_RADIUS_CAP));
       if (hugeColliders && !p.contained && p.radius > COLLIDER_RADIUS_CAP) this.huge.add(p);
     }

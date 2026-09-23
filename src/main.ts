@@ -164,6 +164,7 @@ import type { LavaHarmTune } from './world/lavaHarmMath.ts';
 import type { SeaFeedTune } from './world/seaFeed.ts';
 import type { PlayerBurnTune } from './combat/burnMath.ts';
 import type { BreathTune } from './player/breathMath.ts';
+import { FLORA_CLEAR } from './world/floraClear.ts';
 import type { LavaSinkTune } from './player/lavaSinkMath.ts';
 import { configureWaterSim, pokeWaterSim, waterSimDebug, WATER_SIM_DRAFT, WATER_SIM_IMPACT, WATER_SIM_SPEED } from './world/waterSim';
 import { setWaterSurface, WATER_SURFACE_BAND, WATER_SURFACE_HIDE } from './world/water';
@@ -1631,7 +1632,43 @@ class App {
         }
         return { total: { passes: log.length, calls: log.reduce((a, p) => a + p.calls, 0) }, byLabel: Object.fromEntries(byLabel), strays: SHADOW_STRAYS.seen, straysKept: SHADOW_STRAYS.keep, straysForeign: SHADOW_STRAYS.foreign };
       },
-      flora: () => this.world.floraStatus,
+      /**
+       * What the planet has planted, and what it is stopping you with.
+       *
+       * With no argument: how many plants are standing, how many flora models the pack carries, and
+       * the appearances it has none for (which are nearly all insects and birds -- particle effects
+       * the converter skips on purpose -- so a long list here is not a fault).
+       *
+       * `flora({ near: 20 })` lists the flora **colliders** within that many metres of the player,
+       * nearest first: each one's radius, how tall it stands, and how far off it is. That is the
+       * reading for "I am caught on something I cannot see", because flora is generated from the
+       * terrain rather than placed, so `__debug.near()` -- which lists the layout's own objects --
+       * never shows it. A cylinder much wider than the plant drawn over it, or one with nothing
+       * drawn there at all, is what to report.
+       *
+       * `clear` says how far each placed object keeps flora off: `'model'` is the model's own reach
+       * and `'snapshot'` the streaming radius the game read for years, which on some worlds is
+       * kilometres and left them with no flora whatsoever. `flora({ rule: 'snapshot' })` puts that
+       * back for comparison at the next world load; it changes nothing already streamed in.
+       */
+      flora: (opts?: { near?: number; rule?: 'model' | 'snapshot'; pad?: number; cap?: number }) => {
+        if (opts?.rule) FLORA_CLEAR.rule = opts.rule;
+        if (typeof opts?.pad === 'number' && Number.isFinite(opts.pad)) FLORA_CLEAR.pad = Math.max(0, opts.pad);
+        if (typeof opts?.cap === 'number' && Number.isFinite(opts.cap)) FLORA_CLEAR.cap = Math.max(1, opts.cap);
+        const status = this.world.floraStatus;
+        const out: Record<string, unknown> = { ...(status ?? {}), clear: { ...FLORA_CLEAR } };
+        if (opts?.near !== undefined) {
+          const p = this.player.pos;
+          const r = Math.max(1, Math.min(200, opts.near));
+          const ground = this.world.terrain.heightAt(p.x, p.z);
+          out.colliders = this.world
+            .collidersNear(p.x, p.z, r)
+            .map((c) => ({ d: Number(Math.hypot(c.x - p.x, c.z - p.z).toFixed(2)), radius: Number(c.r.toFixed(2)), stands: Number((c.top - ground).toFixed(2)), x: Number(c.x.toFixed(1)), z: Number(c.z.toFixed(1)) }))
+            .filter((c) => c.d <= r)
+            .sort((a, b) => a.d - b.d);
+        }
+        return out;
+      },
       /**
        * Load a character assembled from parts and stand it beside the player: one skeleton, a
        * body, a head and whatever is worn, each its own file. Then `.wear(name)`, `.remove(name)`,

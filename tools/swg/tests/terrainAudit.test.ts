@@ -242,13 +242,17 @@ const near = (a: number, b: number, eps = 1e-6) => Math.abs(a - b) <= eps;
   const terrainSrc = readFileSync(new URL('../../../src/world/terrain.ts', import.meta.url), 'utf8');
   check('the engine s terrain chunk is still what the index count assumes', new RegExp(`export const CHUNK_SIZE = ${CLEARANCE.chunk};`).test(terrainSrc), `CLEARANCE.chunk is ${CLEARANCE.chunk}`);
   const stream = readFileSync(new URL('../../../src/world/layoutStream.ts', import.meta.url), 'utf8');
-  // This one is a guard on the rule the measurement PRICES, not on a copy: the day decision D17
-  // is built this check goes red, on purpose, and whoever builds it updates it in the same commit
-  // (the measurement's "today" column then has to be re-read as "before D17" and nothing else).
+  // A guard on the rule the measurement PRICES, not on a copy. It went red once, on purpose, the
+  // day the rule changed: the game no longer excludes by the snapshot's radius but by the model's
+  // own reach (`src/world/floraClear.ts`) -- which is the third rule this very measurement priced,
+  // and the one it found lands within 2% of the client's own `clearFloraRadius` counts while
+  // needing no reconversion. So the table's two columns are now "before" (the snapshot rule, which
+  // `--rule=snapshot` still measures) and "after" (what the game does). The guard pins the new rule
+  // the same way: if it goes red again, whoever moves the rule re-reads the table in that commit.
   check(
-    'the rule being measured is still the snapshot radius plus two',
-    /this\.addExclusion\(\{ x: gx, z: gz, r: p\.radius \+ 2 \}\)/.test(stream),
-    'layoutStream.ts no longer excludes radius + 2: if that is decision D17 being built, update this check with it',
+    'the rule being measured is still the model reach the game now uses',
+    /floraClearRadius\(o\.radius, this\.pack\.find\(o\.model\)\?\.bounds \?\? null\)/.test(stream),
+    'layoutStream.ts no longer excludes by the model reach: re-read the measurement with whatever replaced it',
   );
 }
 
