@@ -1,8 +1,11 @@
 // The water exporter on synthetic shaders: colours and opacity from a MAIN texture's mean taken in
 // linear light, ripple from a normal map's slope, drift from the TSNS scroll rate, a cube map
 // written as six mirrored PNGs, and lava told from water by effect, by water type and by name.
-// Also the game's own reader of what it writes (src/world/waterLook.ts) and the occlusion-query
-// state machine that decides whether any water is on screen (src/world/waterVisibility.ts).
+// Also the two client tables that say what being in water costs you and who pays nothing, the join
+// from a row's server template to the shared one every pack is keyed on, and the `status` rule that
+// asks for the command again. Every table below is made up here; none of it is read from anyone's
+// archives. And the game's own reader of what all this writes (src/world/waterLook.ts) and the
+// occlusion-query state machine that decides whether any water is on screen (waterVisibility.ts).
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, existsSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -13,7 +16,8 @@ import { cubeFaces } from '../sky.mjs';
 import { findAll, parseIff } from '../iff.mjs';
 import { shaderTextures } from '../sht.mjs';
 import { decodeDdsVolume } from '../dds.mjs';
-import { exportWater, isLavaEffect, lavaEntry, lavaParams, linearToSrgbHex, meanLinear, normalSlope, REFERENCE_SCROLL, REFERENCE_SLOPE, textureFactorOf, WATER_CUBE_SIZE } from '../water.mjs';
+import { parseDatatable } from '../datatable.mjs';
+import { CREATURE_WATER_VALUES, exportWater, isLavaEffect, lavaEntry, lavaParams, linearToSrgbHex, meanLinear, normalSlope, readWaterHarm, REFERENCE_SCROLL, REFERENCE_SLOPE, textureFactorOf, WATER_CUBE_SIZE, WATER_VALUES, waterHarmLines, waterHarmTypes, waterImmunity, waterPackNeedsHarm } from '../water.mjs';
 import { envLightFrom, isLavaWater, readWaterPack, shaderKey, waterLookFor, type WaterShaderInfo } from '../../../src/world/waterLook.ts';
 import { drawsBefore, sortByDraw, WaterVisibility, type WaterDrawKey } from '../../../src/world/waterVisibility.ts';
 
@@ -113,6 +117,37 @@ put('texture/lava_noise_test.dds', ddsVolume(4, 4, 4, Uint8Array.from({ length: 
 put('shader/wter_lava_test.sht', sht('effect/water_lava_textured.eft', [txm('MAIN', 'texture\\wter_main.dds'), txm('CUBE', 'texture\\env_test.dds'), txm('LKUP', 'texture\\lava_ramp_test.dds'), txm('TEXT', 'texture\\lava_mix_test.dds'), txm('NOIS', 'texture\\lava_noise_test.dds')], [mats(), tfns()]));
 put('shader/wter_lava_test2.sht', sht('effect/water_lava_textured.eft', [txm('LKUP', 'texture\\lava_ramp_test.dds'), txm('TEXT', 'texture\\absent.dds'), txm('NOIS', 'texture\\lava_noise_test.dds')], [mats()]));
 put('shader/wter_test_as_lava.sht', sht('effect\\water.eft', [txm('MAIN', 'texture\\wter_main.dds'), txm('NRML', 'texture\\wter_test_n.dds')]));
+
+/** A datatable (DTII > 0001 > COLS, TYPE, ROWS) as the client writes one, for the converter's own parser. */
+const dt = (columns: string[], types: string[], rows: (string | number)[][]): Item => {
+  const c = new W().i32(columns.length);
+  for (const x of columns) c.str(x);
+  const t = new W();
+  for (const x of types) t.str(x);
+  const r = new W().i32(rows.length);
+  for (const row of rows) row.forEach((v, i) => (types[i][0] === 's' ? r.str(String(v)) : types[i][0] === 'f' ? r.f32(Number(v)) : r.i32(Number(v))));
+  return form('DTII', form('0001', chunk('COLS', c.bytes()), chunk('TYPE', t.bytes()), chunk('ROWS', r.bytes())));
+};
+/** Made-up water kinds, so nothing here is the client's own numbers: a third row proves the index is read and not assumed. */
+const waterValues = dt(
+  ['water_type', 'causes_damage', 'damage_kills', 'damage_interval_secs', 'damage_per_interval_percentage', 'transparent'],
+  ['s', 'i', 'i', 'i', 'f', 'i'],
+  [['calm', 0, 0, 0, 0, 1], ['molten', 1, 1, 2, 40, 0], ['scalding', 1, 0, 3, 12.5, 1]],
+);
+/** Made-up templates: two with a shared sibling in the archives, one without, one written the way an exporter leaves paths. */
+const creatureValues = dt(
+  ['object_template_name', 'lava_resistance'],
+  ['s', 'f'],
+  [
+    ['object/mobile/vehicle/test_float_skiff.iff', 100],
+    ['object/mobile/som/test_ember_bug.iff', 50],
+    ['object/mobile/vehicle/test_absent_rider.iff', 100],
+    ['Object\\Mobile\\Vehicle\\TEST_Caps_Rider.IFF', 100],
+  ],
+);
+put(WATER_VALUES, encode(waterValues));
+put(CREATURE_WATER_VALUES, encode(creatureValues));
+for (const p of ['object/mobile/vehicle/shared_test_float_skiff.iff', 'object/mobile/som/shared_test_ember_bug.iff', 'object/mobile/vehicle/shared_test_caps_rider.iff']) put(p, new Uint8Array(0));
 
 const uses = [
   { shader: 'wter_test', waterTypes: [0], tables: 2, global: true },
@@ -280,6 +315,82 @@ ok(pack.notes.some((n: string) => n.includes('wter_gone')) && logs.some((l) => l
   ok(lavaFiles.length === 2, `the crust and the noise two lava shaders share are written once each (${lavaFiles.length} writes)`);
   ok(wrote.filter((p) => p.endsWith('water.json')).length === 1 && wrote.length === 9, `nothing else is written (${wrote.length} files)`);
   ok(readdirSync(join(out, 'water')).length === 8, 'and only those six PNGs, the crust and the noise are on disk');
+}
+
+// --- what the client says water does to you (the harm block) -----------------------------------
+
+{
+  const types = waterHarmTypes(parseDatatable(parseIff(Buffer.from(encode(waterValues)))));
+  ok(types.length === 3 && types.map((t: { type: number }) => t.type).join() === '0,1,2', 'a row keeps its index, which is what the terrain\'s own water type is read as');
+  ok(types[0].name === 'calm' && types[1].name === 'molten', 'and its own name beside it, so a reader can check the two agree');
+  ok(types[0].damage === false && types[0].kills === false && types[0].transparent === true, 'the flags come back as flags, not as the ones and noughts the table stores');
+  ok(types[1].damage === true && types[1].kills === true && types[1].intervalSeconds === 2, 'a kind that hurts says so, says it kills, and says how often it lands');
+  ok(types[1].percent === 40 && types[1].share === 0.4, `the percentage is kept as the table has it and again as a fraction (${types[1].percent}, ${types[1].share})`);
+  ok(types[2].percent === 12.5 && types[2].share === 0.125, 'a fraction of a per cent divides cleanly too');
+  ok(waterHarmTypes(null).length === 0 && waterHarmTypes({ rows: [] }).length === 0, 'no table, or an empty one, gives no kinds of water and does not throw');
+  ok(waterHarmTypes({ rows: [{}] })[0].share === 0 && waterHarmTypes({ rows: [{}] })[0].damage === false, 'a row missing every column is harmless rather than NaN');
+  // The seam: these are the names the game's own reader of the block looks for. A row whose `damage`
+  // is spelled otherwise reads as doing none, which is silent, so the spelling is pinned on this
+  // side as well as on that one.
+  ok(['type', 'damage', 'kills', 'intervalSeconds', 'percent', 'share'].every((k) => k in types[1]), `a row is written under the names the game reads (${Object.keys(types[1]).join(', ')})`);
+}
+{
+  const rows = waterImmunity(parseDatatable(parseIff(Buffer.from(encode(creatureValues)))), (p: string) => vfs.has(p));
+  ok(rows.length === 4, 'every row of the immunity table comes back, joined or not');
+  ok(rows[0].template === 'object/mobile/vehicle/test_float_skiff.iff' && rows[0].shared === 'object/mobile/vehicle/shared_test_float_skiff.iff' && rows[0].id === 'test_float_skiff', `a row is joined to the shared template beside it and reduced to the name a pack is keyed on (${rows[0].id})`);
+  ok(rows[1].shared === 'object/mobile/som/shared_test_ember_bug.iff' && rows[1].resistance === 50, 'the join is the file\'s own name whatever folder it is in, and the resistance is the table\'s own number');
+  ok(rows[2].shared === null && rows[2].id === 'test_absent_rider', 'a row with no shared template in the archives is kept, with its id, so it can be reported as a miss rather than vanishing');
+  ok(rows[3].template === 'object/mobile/vehicle/test_caps_rider.iff' && rows[3].shared !== null, 'backslashes and capitals in a path are no reason to miss the join');
+  ok(waterImmunity(null).length === 0 && waterImmunity({ rows: [{ object_template_name: 'a/b.iff' }] })[0].shared === null, 'no table gives no rows, and with no way to ask the archives nothing joins');
+}
+{
+  const notes: string[] = [];
+  const harm = readWaterHarm(vfs, notes)!;
+  ok(harm.source === 'client' && harm.typeFrom === 'row', 'the block says whose numbers these are and how the water type was arrived at');
+  ok(harm.files.types === WATER_VALUES && harm.files.immune === CREATURE_WATER_VALUES, 'and names the two files it read');
+  ok(harm.types.length === 3 && harm.immune.length === 4 && notes.length === 0, 'both tables are read and nothing is remarked on when both are there');
+
+  const only = { has: (p: string) => p === WATER_VALUES, read: () => files.get(WATER_VALUES)!, list: () => [] as string[] };
+  const half: string[] = [];
+  const one = readWaterHarm(only, half)!;
+  ok(one.types.length === 3 && one.immune.length === 0 && half.length === 1 && half[0].includes(CREATURE_WATER_VALUES), `one table missing leaves its own list empty and says so once (${half[0]})`);
+
+  const none = { has: () => false, read: () => Buffer.alloc(0), list: () => [] as string[] };
+  const both: string[] = [];
+  ok(readWaterHarm(none, both) === null && both.length === 2, 'with neither table there is no block at all, and both are named');
+
+  const broken = { has: (p: string) => p === WATER_VALUES, read: () => Buffer.from('not an iff at all'), list: () => [] as string[] };
+  const why: string[] = [];
+  ok(readWaterHarm(broken, why) === null && why.length === 2, 'a table that will not parse is a note, not a throw');
+
+  const lines = waterHarmLines(harm);
+  ok(lines[0].includes('3 rows') && lines[0].includes('molten 40% every 2s, kills') && lines[0].includes('calm unharmed'), `the run says what each kind of water does (${lines[0]})`);
+  ok(lines[1].includes('4 rows, 3 joined') && lines[1].includes('1 not'), `and how many templates joined (${lines[1]})`);
+  ok(lines.some((l) => l.includes('test_float_skiff, test_ember_bug')) && lines.some((l) => l.includes('test_absent_rider') && l.includes('no shared template')), 'naming the ones that joined and the one that did not');
+  ok(waterHarmLines(null).length === 1, 'and with no tables at all it says that in one line');
+}
+{
+  const withHarm = JSON.parse(readFileSync(join(out, 'water.json'), 'utf8'));
+  ok(withHarm.harm?.source === 'client' && withHarm.harm.types.length === 3 && withHarm.harm.immune.length === 4, 'the block rides in every planet\'s water.json, read by the exporter itself when it is not handed one');
+
+  const given = mkdtempSync(join(tmpdir(), 'water-harm-'));
+  const notes: string[] = [];
+  exportWater(vfs, 'handed', [], template, given, { log: (m: string) => notes.push(m), harm: { source: 'client', files: { types: 'a', immune: 'b' }, typeFrom: 'row', types: [], immune: [] } });
+  ok(JSON.parse(readFileSync(join(given, 'water.json'), 'utf8')).harm.files.types === 'a', 'a block read once for the whole run is written to every planet as it stands');
+
+  const without = mkdtempSync(join(tmpdir(), 'water-noharm-'));
+  exportWater(vfs, 'dry', [], template, without, { log: () => {}, harm: null });
+  const bare = JSON.parse(readFileSync(join(without, 'water.json'), 'utf8'));
+  ok(bare.harm === null && bare.notes.some((n: string) => n.includes('no harm block')), 'a run whose tables could not be read writes the block as null and says so in the pack');
+}
+{
+  const lava = { kind: 'lava' };
+  const water = { kind: 'water' };
+  const harm = { source: 'client' };
+  ok(waterPackNeedsHarm({ shaders: { a: lava, b: water } }), 'a pack with lava in it and no water values is asked for again');
+  ok(!waterPackNeedsHarm({ shaders: { a: lava }, harm }), 'one that has them is not');
+  ok(!waterPackNeedsHarm({ shaders: { a: water, b: water } }), 'and a pack with no lava at all is never asked, since nothing there could burn anyone');
+  ok(!waterPackNeedsHarm({ shaders: {} }) && !waterPackNeedsHarm(null) && !waterPackNeedsHarm('x') && !waterPackNeedsHarm({ shaders: { a: null } }), 'an empty, absent or malformed pack asks for nothing');
 }
 
 // --- the pieces the exporter is built from -----------------------------------------------------

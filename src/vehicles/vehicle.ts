@@ -339,6 +339,13 @@ export class Vehicle {
   /** The hull's condition: hard hits take from it, and at nothing the vehicle is done for. */
   hp = 100;
   readonly maxHp = 100;
+  /**
+   * A flow cannot hurt this hull: the client's own terrain table names its template. Joined once,
+   * when the vehicle is spawned (`lavaImmuneTemplate` in `src/world/lavaImmunity.ts`), never looked
+   * up in a frame; false for anything with no garage entry behind it (the placeholder, a stand-in
+   * for a hull another player flies), which is right, since none of those stands in a flow.
+   */
+  lavaImmune = false;
   /** The speed lost in a hard hit this step (m/s), read once by the game for the sparks and the damage shown; 0 otherwise. */
   justHit = 0;
   /** In flight, the velocity the last step was told to fly at; what the step took off it is a hit. */
@@ -1629,6 +1636,13 @@ export class Vehicle {
     const flying = !!s.fly && this.altitude > s.fly.floor + 0.05;
     const drop = this.centre.y - s.bounds.min[1];
     // The water is a floor too: a machine rides on it, an animal sinks in to its chest.
+    //
+    // `waterAt` here is the terrain's own height, lava tables and all, and that is **deliberate**:
+    // a flow holds a speeder up exactly as a lake does, and what a flow costs is taken off the hull
+    // instead (the world's hazard tick, which the client's own immunity list can excuse -- see
+    // `lavaImmune` above). Filtering lava out here -- as the feet, the ripples and the swim line all
+    // do -- would drop the hull through the flow onto the bed, which is not what riding over one
+    // looks like.
     const height = s.bounds.max[1] - s.bounds.min[1];
     const floorAt = (x: number, z: number) => {
       const solid = ground ? ground(x, z) : -Infinity;

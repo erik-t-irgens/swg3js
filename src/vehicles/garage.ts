@@ -17,6 +17,7 @@ import { boltSlotOf, changedSlots, componentIndex, droidShown, droidSink, gunWea
 import { collectMounts, countSpotHardpoints, dropWingsUnder, engineSpotsOf, fitTree, hangParts, onModel, rebindGlows, recordHung, refitSwap, splitPartChildren, stageRefit, type Mounts, type PendingPart, type ShipBuild, type SpareGlows, type StandIn, type SwapResult } from './shipMounts';
 import { ShipPaint } from './shipPaint';
 import { renderPaint } from './paintRender';
+import { lavaImmuneTemplate, setImmunityCatalogue } from '../world/lavaImmunity';
 
 // Moved to shipAssembly.ts (node-testable); every existing import from here keeps working.
 export { hardpointName } from './shipAssembly';
@@ -249,6 +250,10 @@ export class Garage {
       console.warn('garage: no projectile table', err);
     }
     g.vehicles.sort((a, b) => a.kind.localeCompare(b.kind) || a.id.localeCompare(b.id));
+    // What this build carries, for the one report that can say whether the client's list of what a
+    // flow cannot hurt joins to anything here. Templates only: a creature has none and is never on
+    // the list. It costs one walk of the manifests, once, and nothing per spawn or per frame.
+    setImmunityCatalogue(g.vehicles.map((v) => v.template));
     return g;
   }
 
@@ -1112,6 +1117,11 @@ export class Garage {
       console.info(`garage: ${def.id} cockpit guessed at ${v.podSeat.map((n) => n.toFixed(2)).join(',')} from the mesh (its origin sits at ${model.position.toArray().map((n) => n.toFixed(2)).join(',')} in its box)`);
     }
     v.def = def;
+    // Whether a flow can hurt this hull, joined once here and never looked up again: the client's
+    // own terrain table names the templates that take none, and the pack the planet loaded is what
+    // carries the list. A creature has no template of its own in the manifest and so is never on it.
+    v.lavaImmune = lavaImmuneTemplate(def.template);
+    if (v.lavaImmune) console.info(`garage: ${def.id} takes no damage from a flow (the client's own table names it)`);
     // The fit it was built from, its parts per slot (for a refit) and its paint.
     v.build = a.build;
     v.fit = fit;

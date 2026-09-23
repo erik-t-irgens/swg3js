@@ -148,7 +148,7 @@ import { createRequire } from 'node:module';
 const REGIONS = createRequire(import.meta.url)('./regions/regions.json');
 import { decodeTga, encodeHeightmap } from './tga.mjs';
 import { exportSky } from './sky.mjs';
-import { exportWater } from './water.mjs';
+import { exportWater, readWaterHarm, waterHarmLines, waterPackNeedsHarm } from './water.mjs';
 import { convertSounds, soundStatus } from './sound.mjs';
 import { convertSoundPlaces, placesStatus } from './soundplaces.mjs';
 import { clipEventStatus, convertClipEvents } from './clipevents.mjs';
@@ -1788,7 +1788,7 @@ function packStatus(dir) {
       terrain ? `terrain${layers ? ` + ${layers} building layers` : ''}` : 'NO TERRAIN',
       shaders ? `ground textures ${textured}/${shaders.families.length}` : 'NO GROUND TEXTURES',
       sky ? `sky (${sky.blocks.length} blocks${sky.weather ? `, weather ${new Set(sky.blocks.map((b) => b.cameraEffect?.file).filter(Boolean)).size} effects` : ', NO WEATHER'})` : 'NO SKY',
-      water ? `water (${Object.keys(water.shaders ?? {}).length} shaders, ${Object.values(water.shaders ?? {}).filter((s) => s.kind === 'lava').length} lava)` : terrain ? 'NO WATER LOOK' : null,
+      water ? `water (${Object.keys(water.shaders ?? {}).length} shaders, ${Object.values(water.shaders ?? {}).filter((s) => s.kind === 'lava').length} lava${waterPackNeedsHarm(water) ? ', NO WATER VALUES' : ''})` : terrain ? 'NO WATER LOOK' : null,
     ].filter(Boolean);
     console.log(`  ${planet}: ${parts.join(', ')}`);
     if (!objects) need(`snapshot <swg-dir> ${planet} ${packDir} --center=auto --radius=all --retail-only`, `${planet} has no objects`);
@@ -1801,6 +1801,9 @@ function packStatus(dir) {
     if (terrain && !water) need(`water <swg-dir> all ${dir} --retail-only`, `${planet} has no water.json`);
     // A lava entry written before the lava look has no `lava` block: the game draws it in a stand-in look.
     else if (water && Object.values(water.shaders ?? {}).some((s) => s.kind === 'lava' && !s.missing && s.lava === undefined && /lava/i.test(s.effect ?? ''))) need(`water <swg-dir> all ${dir} --retail-only`, `${planet}'s water.json has no lava look`);
+    // And a pack with lava in it but no harm block was converted before the client's water values
+    // were read; a pack with no lava is never asked, since nothing there could burn anyone.
+    else if (waterPackNeedsHarm(water)) need(`water <swg-dir> all ${dir} --retail-only`, `${planet}'s water.json has lava but none of the client's water values`);
     if (!pois) need(`pois <swg-dir> all ${dir} --retail-only`, `${planet} has no pois.json`);
     if (objects && (manifest.materialFormat ?? 1) < MATERIAL_FORMAT) need(`snapshot <swg-dir> all ${dir} --radius=all --retail-only`, `${planet}'s models were converted before animated and glowing surfaces`);
   }
@@ -4687,10 +4690,16 @@ switch (cmd) {
     // <swg-dir> <planet>|all <out-dir>: each planet's water shaders (colour, opacity, ripple,
     // drift and cube map) as water.json, plus the cube faces under water/; each lava shader's look
     // (flow, colour ramp, bloom factor) goes in its entry, its crust and noise volume under water/.
+    // The client's own water value tables (what being in each kind of water does, and who takes
+    // none of it) are read once and written into every planet's water.json as its `harm` block.
     if (!pos[3]) usage();
     const vfs = mount(pos[1]);
     const targets = pos[2] === 'all' ? GAME_PLANETS.filter((p) => existsSync(join(pos[3], p, 'manifest.json'))).map((p) => [p, join(pos[3], p)]) : [[pos[2], pos[3]]];
     if (!targets.length) console.log(`no planet packs under ${pos[3]} yet; run snapshot first`);
+    const harmNotes = [];
+    const harm = readWaterHarm(vfs, harmNotes);
+    for (const line of waterHarmLines(harm)) console.log(line);
+    for (const n of harmNotes) console.log(`  ${n}`);
     const { parseTerrainTemplate, waterShaderUses } = await import('../../src/swg/terrain/trn.ts');
     for (const [planet, outDir] of targets) {
       const path = `terrain/${planet}.trn`;
@@ -4707,7 +4716,7 @@ switch (cmd) {
       }
       mkdirSync(outDir, { recursive: true });
       console.log(`${planet}:`);
-      exportWater(vfs, planet, waterShaderUses(t), t, outDir, { log: console.log });
+      exportWater(vfs, planet, waterShaderUses(t), t, outDir, { log: console.log, harm });
     }
     break;
   }

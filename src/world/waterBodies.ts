@@ -4,6 +4,8 @@ import type { PlanetDef } from '../data/planets';
 import { currentEnvironment, onEnvironment } from './envmap';
 import { createWaterMaskMaterial, createWaterMaterial, setWaterEnvSpecular, WATER_FX_FOG, WATER_FX_TRACED, waveReach, type WaterMaterial } from './water';
 import { readWaterPack, waterLookFor, type WaterLook, type WaterPackData } from './waterLook';
+import { packNamesImmunity, setLavaImmunity } from './lavaImmunity';
+import { lavaImmuneTemplates } from './lavaHarmMath';
 import { sortByDraw, WaterVisibility, type WaterDrawKey, type WaterVisibilityState } from './waterVisibility';
 
 /**
@@ -182,6 +184,9 @@ export class WaterBodies {
   /** Read the pack's water.json into `data` (null when absent or unparsable); in 'shader' mode also filter its cubes. */
   async load(pack: AssetPack | null, planetId = ''): Promise<void> {
     this.data = null;
+    // Who a flow cannot hurt goes with the pack that names them: cleared here so a world with no
+    // pack to say (a space zone, a world left) leaves nobody immune, and written again below.
+    setLavaImmunity(null);
     this.notes.length = 0;
     this.planetId = planetId;
     this.disposeCubes();
@@ -195,11 +200,25 @@ export class WaterBodies {
       this.warn('water: no water.json in this pack (reconvert: npm run swg -- water @SWG all assets-private --retail-only); the planet\'s colours are used');
       return;
     }
+    let raw: unknown = null;
     try {
-      this.data = readWaterPack(JSON.parse(new TextDecoder().decode(bytes)));
+      raw = JSON.parse(new TextDecoder().decode(bytes));
+      this.data = readWaterPack(raw);
     } catch {
+      raw = null;
       this.data = null;
     }
+    // Who a flow cannot hurt, out of the same file. The block has exactly one parser
+    // (`lavaImmuneTemplates`, beside the rest of what that block means); `packNamesImmunity` reads
+    // nothing and only says whether the list is there at all, which is what tells a converted pack
+    // whose list came out empty (worth a line) from a pack converted before the list existed
+    // (expected, and says nothing). Null for the second: nobody is immune, as the game is today.
+    //
+    // It is given the **raw** parsed file rather than `data`, which is what it has always needed and
+    // still the safer of the two: `readWaterPack` builds its own record, and a block it stopped
+    // carrying would take the immunity with it without a word.
+    const named = lavaImmuneTemplates(raw);
+    setLavaImmunity(named.length || packNamesImmunity(raw) ? named : null);
     if (!this.data) {
       this.warn('water: water.json does not parse; the planet\'s colours are used (reconvert: npm run swg -- water @SWG all assets-private --retail-only)');
       return;
@@ -277,6 +296,8 @@ export class WaterBodies {
     this.disposeCubes();
     this.pack = null;
     this.data = null;
+    // A world left says nothing about who a flow cannot hurt; the next pack read says it again.
+    setLavaImmunity(null);
     this.nearSwell = 0;
     this.lavaTables = 0;
     this.notes.length = 0;

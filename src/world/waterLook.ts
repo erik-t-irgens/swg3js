@@ -67,6 +67,15 @@ export interface WaterPackData {
   global: { height: number; shader: string; shaderSize: number } | null;
   shaders: Record<string, WaterShaderInfo>;
   notes: string[];
+  /**
+   * What this planet's water does to whatever stands in it, exactly as the water command wrote it
+   * and unread here: the client's own water values and its list of what takes no damage. It is kept
+   * rather than re-typed because nothing about it is this file's business -- `lavaHarmMath.ts` is
+   * where the block means anything -- but it must survive the way in, since the record this
+   * function builds is what `World` hands on, and a block dropped here is a block the game never
+   * sees however well the converter writes it. Undefined on every pack converted before it existed.
+   */
+  harm?: unknown;
 }
 
 /** How one water body is drawn. */
@@ -102,7 +111,8 @@ function readCube(v: unknown): WaterCubeInfo | undefined {
  * water.json read leniently, never throwing: null unless it is an object with an object `shaders`.
  * An entry is kept when it is an object whose `kind` is 'water' or 'lava'; a colour that is not
  * "#rrggbb", or a number that is not finite, is dropped from its entry; a cube without six string
- * faces is dropped. The `lava` block and unknown fields are kept as they are.
+ * faces is dropped. The `lava` block and unknown fields are kept as they are, and so is the pack's
+ * own `harm` block, which is what the rest of the game reads off this record.
  */
 export function readWaterPack(json: unknown): WaterPackData | null {
   if (!isObject(json) || !isObject(json.shaders)) return null;
@@ -143,13 +153,17 @@ export function readWaterPack(json: unknown): WaterPackData | null {
     shaders[key] = out;
   }
   const g = isObject(json.global) ? json.global : null;
-  return {
+  const out: WaterPackData = {
     version: num(json.version) ?? 0,
     planet: str(json.planet) ?? '',
     global: g ? { height: num(g.height) ?? 0, shader: str(g.shader) ?? '', shaderSize: num(g.shaderSize) ?? 2 } : null,
     shaders,
     notes: Array.isArray(json.notes) ? json.notes.filter((n): n is string => typeof n === 'string') : [],
   };
+  // Carried through untouched and unchecked: the readers of the harm block take the raw shapes and
+  // never throw, and a block re-read here would be a second spelling of what they already know.
+  if (json.harm !== undefined) out.harm = json.harm;
+  return out;
 }
 
 /** Lava: the terrain says type 1; else the pack's entry decides; with no entry, a shader that names lava. */

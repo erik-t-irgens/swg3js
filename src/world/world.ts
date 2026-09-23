@@ -20,6 +20,7 @@ import { coveringWaterShader, onSeaSurface, surfaceReach, underwaterVerdict, typ
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { createLavaMaterial, LAVA_LOOK, lavaGeometry, lavaHeatTable, loadLavaTextures, refreshLavaFar, standInLavaTextures, type LavaMaterial, type LavaTextures } from './lava';
 import { FALLBACK_LAVA_STYLE, groupLava, lavaStyleFor, type LavaStyle } from './lavaStyle';
+import { applyLavaHarm, inLava, LAVA_HARM, lavaHarmReport, lavaTickDamage, resetLavaHarm, rideOverLava, stillInLava, tuneLavaHarm, type LavaHarmTune } from './lavaHarmMath.ts';
 import type { HeatSources, LavaHeatTable } from './heatSources';
 import { setEnvironment } from './envmap';
 import { PropFactory, type Collider, type Exclusion, type ScatterItem } from './props';
@@ -437,6 +438,23 @@ export class World {
   npcShips: NpcShipManager | null = null;
   /** The ship the player flies or is aboard, and whether play is simulated: both set by the game's `stepVehicles` every step. */
   playerShip: Vehicle | null = null;
+  /**
+   * Whatever the player rides or drives, or null: set by the game's `stepVehicles` every step, which
+   * runs in the frame loop and in `__debug.advance` alike. It is what an environmental hurt reaches
+   * instead of the rider, since a rider in a flow is inside the thing that is burning.
+   */
+  playerRides: Vehicle | null = null;
+  /**
+   * The player's whole health, for a hazard that takes a share of it rather than a number of points;
+   * set beside `playerRides`. It is 100 today and the default is the same 100, so the tick is right
+   * whether or not the game ever writes it.
+   */
+  playerMaxHp = 100;
+  /**
+   * What the world says once, in words: the game's message line (main sets it). Null with nothing
+   * listening, which is every test and every headless use, and nothing here may depend on it.
+   */
+  onNote: ((text: string) => void) | null = null;
   simulating = true;
   private props!: PropFactory;
   private readonly chunks = new Map<string, Chunk>();
@@ -543,6 +561,23 @@ export class World {
   private readonly lavaTextures: THREE.Texture[] = [];
   private readonly lavaTables = new Set<SwgWaterTable>();
   private lavaLooks: { style: string; tables: number; textures: LavaTextures['source'] }[] = [];
+  /**
+   * The hazard tick's own clock, in simulated seconds and only while play runs, so a panel held open
+   * over a flow does not bank up a minute of burning to be paid the moment it closes. It is not
+   * `simTime` minus a mark for the same reason.
+   */
+  private lavaClock = 0;
+  /**
+   * Simulated seconds since the flow verdict last came out true, or Infinity where it has not been
+   * true at all. It is what holds the line and the clock across a gap too short to believe
+   * (`stillInLava`): a hull drifting over the edge of a flow polygon reads a depth one step and no
+   * flow whatsoever the next, and no margin measured in metres can bridge that.
+   */
+  private lavaGap = Infinity;
+  /** Whether the verdict counted as true on the last step: what moves the hysteresis line (`inLava`'s `was`). */
+  private lavaIn = false;
+  /** What is burning right now, so the message line is told once when it starts and once when it stops. */
+  private lavaBurning: 'no' | 'you' | 'ride' = 'no';
   /** Multiplier on the sky's fog density, for tuning from the console. */
   fogScale = 1;
   /** The player's own fog setting, over the planet's: 1 as the planet has it. */
@@ -805,9 +840,11 @@ export class World {
    */
   readonly footSurfaces = {
     waterTop: (x: number, z: number): number => {
-      // Lava is water to the terrain and is not to a foot: the lava planet's global sea is hidden
-      // and every one of its tables is lava, so without this a step over a flow reads as wading.
-      if (this.lavaTables.size && this.lavaTables.has(this.terrain?.swg?.waterTableAt(x, z) as SwgWaterTable)) return -Infinity;
+      // Lava is water to the terrain and is not to a foot: `waterHeightAt` answers with the height of
+      // whatever table covers the column, a flow as readily as a lake, so without this a step over a
+      // flow reads as wading. Any finite depth at all means the water over this column is a flow,
+      // whatever height is asked about, so the height handed in here is not read (`World.lavaAt`).
+      if (Number.isFinite(this.lavaAt(x, 0, z))) return -Infinity;
       return this.terrain?.waterHeightAt(x, z) ?? -Infinity;
     },
     /**
@@ -1279,6 +1316,13 @@ export class World {
     this.waterLooks.clear();
     this.globalWaterShader = null;
     this.globalWaterIsLava = false;
+    // What a pack said goes with the world it was said for, back to "nobody has said", and nothing is
+    // announced about a burn that ended because the ground under it was taken away.
+    resetLavaHarm();
+    this.lavaClock = 0;
+    this.lavaGap = Infinity;
+    this.lavaIn = false;
+    this.lavaBurning = 'no';
     this.waterNear = this.waterFarBody = null;
     for (const m of this.localWater) {
       this.scene.remove(m);
@@ -1893,8 +1937,8 @@ export class World {
     this.simSeen.clear();
 
     const touch = (key: object, p: THREE.Vector3, geo: THREE.BufferGeometry, draft: number, q: THREE.Quaternion | null, strength: number) => {
-      // Lava takes no rings and throws no spray.
-      if (this.lavaTables.size && this.lavaTables.has(this.terrain.swg?.waterTableAt(p.x, p.z) as SwgWaterTable)) return;
+      // Lava takes no rings and throws no spray (`World.lavaAt`: finite is a flow over this column).
+      if (Number.isFinite(this.lavaAt(p.x, p.y, p.z))) return;
       const surface = this.terrain.waterHeightAt(p.x, p.z);
       const depth = surface - p.y;
       let last = this.lastSeen.get(key);
@@ -2182,6 +2226,17 @@ export class World {
       this.scene.add(mesh);
     }
     bodies.lavaTables = lava;
+    // What this planet's water does to what stands in it, out of the pack's own `harm` block (the
+    // client's own tables, as the water command wrote them). Seeded on every load, lava or not, so
+    // nothing carries over from the last world; a pack converted before the command read them
+    // carries no block, and then nothing burns and the warning says which command mends it.
+    //
+    // `bodies.data` is `readWaterPack`'s record and it carries the block through untouched. That is
+    // load-bearing and not incidental: the reader builds its own object, so a field it stopped
+    // carrying would take the whole burn away in silence, and `waterLook.ts` says so where it does it.
+    const harm = applyLavaHarm(bodies.data, lava > 0);
+    if (harm.note) console.warn(harm.note);
+    else if (lava > 0) console.info(`lava: ${(harm.share * 100).toFixed(0)}% of a life every ${harm.interval} s (${harm.source})`);
     if (swg.waterTables.length) console.info(`water: ${swg.waterTables.length} local tables (${this.localWater.length} water in ${shaders.size} shaders, ${lava} lava)${swg.template.useGlobalWaterTable ? `, global at ${swg.template.globalWaterTableHeight.toFixed(1)} m` : ', no global table'}`);
   }
 
@@ -2291,9 +2346,28 @@ export class World {
     this.lavaLooks = [];
   }
 
-  /** The lava drawn now and the look every lava material shares (`__debug.lava`). */
-  get lavaStatus(): { tables: number; looks: { style: string; tables: number; textures: LavaTextures['source'] }[]; intensity: number; glow: number; glowFrom: number; glowTo: number; axes: 'xyz' | 'xzy' } {
+  /** The lava drawn now, the look every lava material shares, and what it does to whoever stands in it (`__debug.lava`). */
+  get lavaStatus(): {
+    tables: number;
+    looks: { style: string; tables: number; textures: LavaTextures['source'] }[];
+    intensity: number;
+    glow: number;
+    glowFrom: number;
+    glowTo: number;
+    axes: 'xyz' | 'xzy';
+    harm: ReturnType<typeof lavaHarmReport>;
+    burning: 'no' | 'you' | 'ride';
+    /** Metres under the flow over the player (or under it at the belly of what they ride), negative above it; null where the water there is not lava. */
+    depth: number | null;
+    /** Whether the tick is holding a verdict that has gone false, and for how long (`LAVA_HARM.linger`). */
+    held: { for: number; linger: number } | null;
+  } {
     const e = LAVA_LOOK.axes.value.elements;
+    const at = this.playerRides ?? null;
+    const p = at ? at.pos : this.playerTarget.pos;
+    // The same point the tick measures, or the console would report a depth the burn is not using.
+    const lift = at ? Math.min(at.spec.bounds.min[1], at.spec.bounds.max[1]) : 0;
+    const depth = this.lavaAt(p.x, p.y + lift, p.z);
     return {
       tables: this.lavaTables.size,
       looks: this.lavaLooks.map((l) => ({ ...l })),
@@ -2302,7 +2376,16 @@ export class World {
       glowFrom: LAVA_LOOK.glowFrom.value,
       glowTo: LAVA_LOOK.glowTo.value,
       axes: e[4] === 1 ? 'xyz' : 'xzy',
+      harm: lavaHarmReport(),
+      burning: this.lavaBurning,
+      depth: Number.isFinite(depth) ? depth : null,
+      held: this.lavaIn && this.lavaGap > 0 && Number.isFinite(this.lavaGap) ? { for: this.lavaGap, linger: LAVA_HARM.linger } : null,
     };
+  }
+
+  /** Writes LAVA_HARM: what a flow takes, how often, and where its two lines are drawn (`__debug.lava`). */
+  setLavaHarm(harm: LavaHarmTune): void {
+    tuneLavaHarm(harm);
   }
 
   /** Writes LAVA_LOOK; a threshold change recomputes every lava material's far values. */
@@ -4229,6 +4312,127 @@ export class World {
     // a second, so a held run would otherwise sweep every anchor in the zone and wake all of them.
     this.npcShips?.update(dt, this.simTime, this.simulating && !this.streamHold);
     this.ships.update(dt, this.simTime, this.simulating);
+    // What the ground itself does to whoever stands on it. Last, after everything alive has moved
+    // and after the hulls, so a body is burnt where this step left it and not where it was.
+    this.stepHazards(dt, playerPos);
+  }
+
+  /**
+   * The lava tick: once every `LAVA_HARM.interval` simulated seconds, whoever is standing in a flow
+   * loses a share of their whole life. It runs on the world's own clock and only while play runs, so
+   * `__debug.advance` exercises it and a panel held open over a flow pauses it, exactly as the ships'
+   * fight pauses.
+   *
+   * **It reaches the player and what they ride, and nothing else** (the design's D12), which is why
+   * this is not a loop over `targets()`. That list carries another player's body, which hands every
+   * blow it takes to the wire and would have this browser billing them for a flow they can see for
+   * themselves; and a body from the catalogue that somebody else is driving, whose own keeper is
+   * standing it in the same flow and will take it off there. The world's own creatures come with the
+   * wave that owns them.
+   *
+   * A rider is burnt through their ride and never directly: they are sitting inside the thing that
+   * is in the flow, and the client's own immunity list is a list of *vehicles* for exactly that
+   * reason. The ride's own damage already jolts whoever is on it.
+   *
+   * Allocates nothing: four numbers of state and no closure.
+   */
+  private stepHazards(dt: number, playerPos: THREE.Vector3): void {
+    // Paused: nothing is measured, nothing is said, and the clock is left exactly where it stands --
+    // so a panel opened nine tenths of the way to a blow does not throw that progress away, and
+    // closing it does not announce that you are out of a flow you are still standing in.
+    if (!this.simulating) return;
+    // Switched off: everything forgotten, in silence, so turning it back on says the line afresh
+    // rather than saying "out" first.
+    if (!LAVA_HARM.on) {
+      this.lavaClock = 0;
+      this.lavaGap = Infinity;
+      this.lavaIn = false;
+      this.lavaBurning = 'no';
+      return;
+    }
+    const ride = this.playerRides;
+    // Where to look. For a body, its own feet: `playerPos` is the world's, aboard a ship's rooms as
+    // well, so nothing here reads a hull frame. For a ride, its **belly** -- the lower corner of its
+    // box in its own frame, which the garage puts at the origin for everything it builds and which a
+    // creature keeps from its pack, where the two corners may be the other way round (a pack
+    // converted before the bounds fix), so the lower of the two is taken and neither is trusted to be
+    // the one called `min`. Measured from the origin instead, whether a ride burned would depend on
+    // how tall it is, and a tall hull would hover over a flow untouched.
+    let depth: number;
+    if (ride) {
+      const b = ride.spec.bounds;
+      depth = this.lavaAt(ride.pos.x, ride.pos.y + Math.min(b.min[1], b.max[1]), ride.pos.z);
+    } else {
+      depth = this.lavaAt(playerPos.x, playerPos.y, playerPos.z);
+    }
+    // A hover machine never gets under a surface at all, so what it rides over is measured with a
+    // reach; a body on its own feet has to be in the flow. Both lines move for something already in
+    // (`lavaIn`), or a body resting at the line flips every step.
+    const raw = ride ? rideOverLava(depth, this.lavaIn) : inLava(depth, this.lavaIn);
+    // And a gap in the verdict too short to believe is bridged: over the edge of a flow polygon the
+    // depth does not wobble, it vanishes, and no distance can span that.
+    if (raw) this.lavaGap = 0;
+    else this.lavaGap += dt;
+    const burning = stillInLava(raw, this.lavaGap);
+    this.lavaIn = burning;
+    // Who could take it if it landed. A ride the client's own table says takes none of it answers for
+    // itself: which hulls are on that list is the immunity join's business (`lavaImmune`, written
+    // once at spawn) and this asks only for its answer.
+    const immune = ride ? ride.lavaImmune : false;
+    // Whether a blow can land at all: a destroyed hull, and a player who is dead, noclipping or
+    // aboard a hull's rooms (all of which the game marks by `playerTarget.dead`).
+    const alive = ride ? !ride.dead : !this.playerTarget.dead;
+    // And whether a blow would come to anything. On every planet converted before the water command
+    // read the client's tables the share is nothing, and a line reading "the lava is burning you"
+    // over a body losing nothing is the same untruth as a blow with no line. It also keeps a blow of
+    // nothing off a hull's own damage path, which for a ship would place its armour's hit effect
+    // once a second for a burn that is not happening.
+    const bites = LAVA_HARM.share > 0;
+    const hurts = burning && bites && !immune && alive;
+    // A body that can no longer be hurt drops the line in silence: saying "you are out of the lava"
+    // over a corpse still lying in it would be the one line the message line ought never to say.
+    if (!alive) this.lavaBurning = 'no';
+    else this.sayBurning(!hurts ? 'no' : ride ? 'ride' : 'you');
+    if (!hurts) {
+      this.lavaClock = 0;
+      return;
+    }
+    // The line and the clock are held through a flicker; a **blow** is only ever charged for a step
+    // whose own verdict was true, so nobody is burnt for ground they have really left.
+    if (!raw) return;
+    this.lavaClock += dt;
+    if (this.lavaClock < LAVA_HARM.interval) return;
+    // Put down rather than wound back: a frame longer than the interval (a stall, a hidden tab) pays
+    // for one blow and not for as many as it covered.
+    this.lavaClock = 0;
+    if (ride) {
+      // No direction: the hull's own damage takes one for the arc on the pilot's screen, and a flow
+      // is under the whole hull rather than off to one side of it.
+      ride.damage(lavaTickDamage(LAVA_HARM.share, ride.maxHp));
+      return;
+    }
+    // The player's own path, which is what applies the regeneration lockout: the record's `damage`
+    // and not its `hurt`, so the game's own wrapper round it runs. Nothing is passed for where the
+    // blow came from, so the screen flashes red and draws no arc -- a vector straight down would
+    // draw a real arc at the bottom of the screen and read as something shooting from below.
+    this.playerTarget.damage(lavaTickDamage(LAVA_HARM.share, this.playerMaxHp));
+  }
+
+  /**
+   * One line when a burn starts and one when it stops, and nothing at all in between: the message
+   * line merges a repeat within two seconds into a count, so a line a second would show a rising
+   * number and bury everything else the game says.
+   */
+  private sayBurning(now: 'no' | 'you' | 'ride'): void {
+    if (now === this.lavaBurning) return;
+    const was = this.lavaBurning;
+    this.lavaBurning = now;
+    const say = this.onNote;
+    if (!say) return;
+    if (now === 'you') say('the lava is burning you');
+    else if (now === 'ride') say('the lava is burning what you are riding');
+    else if (was === 'you') say('you are out of the lava');
+    else say('your ride is out of the lava');
   }
 
   /** The spawner's cap and the mobiles' animation range (the settings), kept for the managers later planets make. */
@@ -4555,6 +4759,38 @@ export class World {
    */
   cameraUnderwater(p: THREE.Vector3): boolean {
     return this.cameraWaterAt(p).under;
+  }
+
+  /**
+   * How far under the lava over a point it stands: metres below the flow's surface, negative above
+   * it, and **-Infinity where the water over the point is not lava at all** -- which is every point
+   * on every planet but the one with flows, and is the answer a caller that only wants to know
+   * "is this column lava" reads as `Number.isFinite`.
+   *
+   * This is the one place the question is asked. It used to be written out twice, in
+   * `footSurfaces.waterTop` and in the ripple emitter, each as the same pair of terms; a third copy
+   * for the harm is how three of them would drift apart. `lavaHarmMath.ts` turns the depth into a
+   * verdict (`inLava` for a body, `rideOverLava` for something hovering) and the margins are there
+   * rather than here.
+   *
+   * Which table is asked is `cameraUnderwaterAt`'s reading and not the looser one the two callers
+   * had: the highest local table covering the point when that table is what the surface here really
+   * is, and the global sea itself where none of them wins. On every planet converted today that is
+   * exactly what the old pair answered -- the only planet with flows has no global table and no
+   * table standing under one -- so nothing the feet or the rings do moves.
+   *
+   * Allocates nothing, and on a planet with no lava at all it is two loads and a compare.
+   */
+  lavaAt(x: number, y: number, z: number): number {
+    const terrain = this.terrain;
+    if (!terrain) return -Infinity;
+    const swg = terrain.swg;
+    // Nothing here is a flow: the cheapest possible answer, and the one every other planet takes.
+    if (!swg || (!this.lavaTables.size && !this.globalWaterIsLava)) return -Infinity;
+    const level = terrain.waterLevel;
+    const table = swg.waterTableAt(x, z);
+    if (table && table.height > level) return this.lavaTables.has(table) ? table.height - y : -Infinity;
+    return this.globalWaterIsLava && Number.isFinite(level) ? level - y : -Infinity;
   }
 
   /** The global water table's shader on this planet, or null; set by applySwgWater, cleared by unload. */

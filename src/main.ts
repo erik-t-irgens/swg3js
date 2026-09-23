@@ -156,6 +156,7 @@ import { CLIP_EVENT_TUNE, type ClipEventTune } from './audio/clipEvents.ts';
 import { FAMILY_TUNE } from './world/terrain';
 import { RoomAir, type RoomAirDebugOptions, type RoomAirInput } from './world/roomAir';
 import { UnderwaterSpecksPass, type UnderwaterSpeckDebugOptions } from './world/underwaterSpecks.ts';
+import type { LavaHarmTune } from './world/lavaHarmMath.ts';
 import { configureWaterSim, pokeWaterSim, waterSimDebug, WATER_SIM_DRAFT, WATER_SIM_IMPACT, WATER_SIM_SPEED } from './world/waterSim';
 import { RANGE } from './world/gallery';
 import { castsShadow, surfaces } from './world/surfaces';
@@ -833,6 +834,12 @@ class App {
     // Every blow the player lands, whatever struck and whichever file called it: the world wraps each
     // living thing's own `damage` once as it joins the list, so this is one hook rather than a dozen.
     this.world.watchPlayerHits((hit, amount, killed) => this.landedHit(hit, amount, killed));
+    // What the world says once, in words: standing in a flow, and stepping out of one. It goes to the
+    // message line like every other one-shot notice and never to the prompt, which is rewritten every
+    // frame from outside every guard. One line when a burn starts and one when it stops, never a
+    // number per blow: the line merges a repeat within two seconds into a count, and a count that
+    // climbed once a second would bury everything else the game says.
+    this.world.onNote = (text) => this.messages.system(text);
     // The bar reads the keys you have bound straight out of the input, which the Controls page edits
     // in place: a rebind reaches the caps on the bar's next fill with nothing having to be told.
     this.actions.setBindings(this.input.bindings);
@@ -1761,12 +1768,26 @@ class App {
       water: (x: number, z: number) => this.world.terrain.waterHeightAt(x, z),
       /**
        * The lava drawn now (tables, and each look with where its textures came from: "client",
-       * "partial" or "stand-in") and the look every lava material shares. `lava({ intensity, glow,
-       * glowFrom, glowTo })` tunes the colour and which veins glow; `lava({ axes: 'xzy' })` reads the
-       * client's texture coordinate the other way round, `{ axes: 'xyz' }` restores it.
+       * "partial" or "stand-in"), the look every lava material shares, and what a flow does to
+       * whoever stands in it. `lava({ intensity, glow, glowFrom, glowTo })` tunes the colour and
+       * which veins glow; `lava({ axes: 'xzy' })` reads the client's texture coordinate the other
+       * way round, `{ axes: 'xyz' }` restores it.
+       *
+       * The `harm` half is the other pass. `share` (of a whole life) and `interval` (seconds) are
+       * the **client's own**, out of its terrain water values and into the pack by the water
+       * command; `source` says whether this planet's pack carried them at all, and `harm.why` says
+       * in words why nothing is burning when nothing is. `on`, `margin` (how far under a surface
+       * counts as being in it), `hold` (the band you climb back out through), `rideReach` (how far
+       * over a flow a ride's belly still burns) and `linger` (how long a verdict is held when it
+       * goes false) are **ours**. `depth` is where the player -- or the belly of what they ride --
+       * stands against the flow over them right now, and null where the water there is not a flow.
+       * `lava({ on: false })` is the switch that makes the ground exactly what it was.
        */
-      lava: (look?: { intensity?: number; glow?: number; glowFrom?: number; glowTo?: number; axes?: 'xyz' | 'xzy' }) => {
-        if (look) this.world.setLavaLook(look);
+      lava: (tune?: { intensity?: number; glow?: number; glowFrom?: number; glowTo?: number; axes?: 'xyz' | 'xzy' } & LavaHarmTune) => {
+        if (tune) {
+          this.world.setLavaLook(tune);
+          this.world.setLavaHarm(tune);
+        }
         return this.world.lavaStatus;
       },
       /**
@@ -3526,7 +3547,7 @@ class App {
       },
       player: () => {
         const p = this.player;
-        return { hp: Number(p.hp.toFixed(1)), blocking: p.blocking, aiming: p.aiming, gunReady: p.gunReady, prone: p.prone, kneeling: p.kneeling, crouching: p.crouching, jkaMode: p.jkaMode, rig: p.rig?.describe() ?? null, pos: p.pos.toArray().map((v) => Number(v.toFixed(2))), camera: this.cam.camera.position.toArray().map((v) => Number(v.toFixed(2))), vel: p.vel.toArray().map((v) => Number(v.toFixed(2))), grounded: p.grounded, heading: Number(((p.heading * 180) / Math.PI).toFixed(0)), cameraYaw: Number(((Math.atan2(this.cam.camera.getWorldDirection(new THREE.Vector3()).x, this.cam.camera.getWorldDirection(new THREE.Vector3()).z) * 180) / Math.PI).toFixed(0)), swimming: p.swimming, submerged: p.submerged, water: this.world.terrain.waterHeightAt(p.pos.x, p.pos.z), ground: this.world.terrain.heightAt(p.pos.x, p.pos.z), captured: this.input.captured };
+        return { hp: Number(p.hp.toFixed(1)), blocking: p.blocking, aiming: p.aiming, gunReady: p.gunReady, prone: p.prone, kneeling: p.kneeling, crouching: p.crouching, jkaMode: p.jkaMode, rig: p.rig?.describe() ?? null, pos: p.pos.toArray().map((v) => Number(v.toFixed(2))), camera: this.cam.camera.position.toArray().map((v) => Number(v.toFixed(2))), vel: p.vel.toArray().map((v) => Number(v.toFixed(2))), grounded: p.grounded, heading: Number(((p.heading * 180) / Math.PI).toFixed(0)), cameraYaw: Number(((Math.atan2(this.cam.camera.getWorldDirection(new THREE.Vector3()).x, this.cam.camera.getWorldDirection(new THREE.Vector3()).z) * 180) / Math.PI).toFixed(0)), swimming: p.swimming, submerged: p.submerged, water: this.world.terrain.waterHeightAt(p.pos.x, p.pos.z), swimWater: this.world.footSurfaces.waterTop(p.pos.x, p.pos.z), ground: this.world.terrain.heightAt(p.pos.x, p.pos.z), captured: this.input.captured };
       },
     };
 
@@ -6712,6 +6733,17 @@ class App {
     const pilot = player.mounted ?? player.piloting;
     const playerHull = pilot ?? player.aboard?.vehicle ?? null;
     this.world.playerShip = playerHull?.spec.ship ? playerHull : null;
+    // What the world's own hazards reach beside the player: whatever they ride or drive, and how big
+    // a whole life is, since a flow takes a share of one rather than a number of points. Here rather
+    // than in the frame loop because this method runs in `__debug.advance` too, and in both it runs
+    // before `stepLiving`, where the tick that reads them is. (`weatherRidden` is the same vehicle
+    // but is written only in the drawn loop, so in a driven tab it is null for the whole session.)
+    //
+    // It must be written every step, including the step it becomes null: a rider the world still
+    // thinks is mounted would be announced as burning while the loop's own damage closure, which
+    // drops every blow on anyone mounted, quietly threw the blow away.
+    this.world.playerRides = pilot;
+    this.world.playerMaxHp = player.maxHp;
     if (simulate && pilot) {
       // The mouse steers: the vehicle turns toward where the camera looks, and a flyer climbs or
       // sinks as the view tilts up or down past a dead band around level. Alt frees the camera

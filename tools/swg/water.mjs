@@ -11,8 +11,14 @@
 // with kind 'lava' so the game can tell them from water even where the terrain's water type says 0,
 // and each carries a `lava` block: the MATL's flow and colour values, the bloom texture factor, the
 // colour ramp inline, and the crust and the noise volume written under <pack>/water/.
+//
+// Beside them the pack carries a `harm` block: what the client's own two little terrain tables say
+// being in each kind of water does to you, and which templates it says take none of it. Every number
+// in that block is the client's, marked so; what the game actually applies is its own, live, and
+// nowhere near here.
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
+import { parseDatatable } from './datatable.mjs';
 import { findAll, parseIff } from './iff.mjs';
 import { shaderTextures } from './sht.mjs';
 import { decodeDds, decodeDdsVolume, isDdsCube } from './dds.mjs';
@@ -298,12 +304,135 @@ export function waterShaderEntry(vfs, use, outDir, written, notes, writeFile = w
   return entry;
 }
 
+/** The client's own table of what being in each kind of water does to you. */
+export const WATER_VALUES = 'datatables/terrain/water_values.iff';
+/** The client's own list of templates that take no damage from it. */
+export const CREATURE_WATER_VALUES = 'datatables/terrain/creature_water_values.iff';
+
+/**
+ * water_values.iff as rows: one per kind of water, in the order the table holds them. The terrain's
+ * own water tables carry a water type as a number and this table has no such column, so the row's
+ * index is taken as that number — an inference, not something the archives state. Each row keeps its
+ * own `water_type` name beside the index so a reader can check the two agree rather than trust it.
+ *
+ * `percent` is the table's own column untouched; `share` is the same number as a fraction, written
+ * once here so no reader has to remember to divide. Whether that share is of maximum or of current
+ * health the table does not say, and the game decides. The field names are the ones the game's own
+ * reader takes (`damage`, `kills`, `interval`/`intervalSeconds`, `share`/`percent`): rename one here
+ * and it must be renamed there in the same breath, or a row reads as doing no damage at all.
+ */
+export function waterHarmTypes(table) {
+  return (table?.rows ?? []).map((row, type) => {
+    const percent = Number(row.damage_per_interval_percentage ?? 0);
+    const ok = Number.isFinite(percent);
+    const interval = Number(row.damage_interval_secs ?? 0);
+    return {
+      type,
+      name: String(row.water_type ?? ''),
+      damage: !!row.causes_damage,
+      kills: !!row.damage_kills,
+      intervalSeconds: Number.isFinite(interval) ? round6(interval) : 0,
+      percent: ok ? round6(percent) : 0,
+      share: ok ? round6(percent / 100) : 0,
+      transparent: !!row.transparent,
+    };
+  });
+}
+
+/**
+ * creature_water_values.iff as rows: the templates the client says take no damage from lava, each
+ * with the resistance it gives them (every retail row is 100).
+ *
+ * The table names the server template, which is not in the client archives at all; what is there,
+ * and what every pack is keyed on, is the shared template beside it — the same path with `shared_`
+ * in front of the file's own name. So each row is resolved that way and reduced to the file's stem
+ * (`id`), which is the name a converted vehicle or creature carries. `has(path)` answers whether a
+ * path is in the archives; a row whose sibling is not there keeps `shared` null and is reported as a
+ * miss rather than dropped, since its id may still join to something a pack holds.
+ */
+export function waterImmunity(table, has = () => false) {
+  return (table?.rows ?? []).map((row) => {
+    const template = clean(row.object_template_name);
+    const cut = template.lastIndexOf('/');
+    const shared = `${template.slice(0, cut + 1)}shared_${template.slice(cut + 1)}`;
+    const resistance = Number(row.lava_resistance ?? 0);
+    return {
+      template,
+      shared: has(shared) ? shared : null,
+      id: template.slice(cut + 1).replace(/\.iff$/, ''),
+      resistance: Number.isFinite(resistance) ? round6(resistance) : 0,
+    };
+  });
+}
+
+/**
+ * The `harm` block for water.json: both of the client's tables, read straight. Null when neither is
+ * in the archives or neither will parse, with why in `notes`; a table that is missing on its own
+ * leaves its own list empty. Nothing here is ours: `source` says so, and the two file names say
+ * where each list came from.
+ */
+export function readWaterHarm(vfs, notes = []) {
+  const read = (path) => {
+    if (!vfs.has(path)) {
+      notes.push(`${path}: not in the archives, so the pack carries none of its values`);
+      return null;
+    }
+    try {
+      return parseDatatable(parseIff(vfs.read(path)));
+    } catch (err) {
+      notes.push(`${path}: ${err.message}`);
+      return null;
+    }
+  };
+  const values = read(WATER_VALUES);
+  const creatures = read(CREATURE_WATER_VALUES);
+  if (!values && !creatures) return null;
+  return {
+    source: 'client',
+    files: { types: WATER_VALUES, immune: CREATURE_WATER_VALUES },
+    typeFrom: 'row',
+    types: waterHarmTypes(values),
+    immune: waterImmunity(creatures, (p) => vfs.has(p)),
+  };
+}
+
+/**
+ * What the run says it read: a line per table, then which immunity rows joined to a shared template
+ * and which did not. Printed once a run, not once a planet, since both tables are the whole game's.
+ */
+export function waterHarmLines(harm) {
+  if (!harm) return ["lava harm: neither of the client's water value tables could be read"];
+  const say = (t) => `${t.name || `type ${t.type}`} ${t.damage ? `${t.percent}% every ${t.intervalSeconds}s${t.kills ? ', kills' : ''}` : 'unharmed'}`;
+  const joined = harm.immune.filter((e) => e.shared);
+  const lines = [
+    `lava harm: ${harm.files.types}, ${harm.types.length} rows (${harm.types.map(say).join('; ')}); the row index is read as the terrain's own water type`,
+    `lava harm: ${harm.files.immune}, ${harm.immune.length} rows, ${joined.length} joined to a shared template, ${harm.immune.length - joined.length} not`,
+  ];
+  if (joined.length) lines.push(`  joined: ${joined.map((e) => e.id).join(', ')}`);
+  for (const e of harm.immune) if (!e.shared) lines.push(`  ${e.template}: no shared template in the archives`);
+  return lines;
+}
+
+/**
+ * Whether `status` should ask for the water command again: the pack has lava in it and no harm
+ * block, which is a pack converted before the client's water values were read. A pack with no lava
+ * at all is never asked, and neither is one whose block is already there.
+ */
+export function waterPackNeedsHarm(water) {
+  if (!water || typeof water !== 'object') return false;
+  if (water.harm) return false;
+  return Object.values(water.shaders ?? {}).some((s) => s && s.kind === 'lava');
+}
+
 /**
  * Write <outDir>/water.json for a terrain's water shader uses and return 'water.json'. Always
  * writes, with `shaders: {}` when the terrain has no water at all, so `status` only has to see
  * that the file is there. `template` is the template parsed for this planet, never another's.
+ *
+ * `harm` is the client's water values, read once a run by the caller and handed to every planet;
+ * left out, this reads them itself, so a planet converted through the snapshot carries them too.
  */
-export function exportWater(vfs, planet, uses, template, outDir, { log = console.error, writeFile = writeFileSync } = {}) {
+export function exportWater(vfs, planet, uses, template, outDir, { log = console.error, writeFile = writeFileSync, harm } = {}) {
   const notes = [];
   const written = new Map();
   const shaders = {};
@@ -312,7 +441,9 @@ export function exportWater(vfs, planet, uses, template, outDir, { log = console
   const global = template?.useGlobalWaterTable
     ? { height: template.globalWaterTableHeight, shader: uses.find((u) => u.global)?.shader ?? '', shaderSize: template.globalWaterTableShaderSize }
     : null;
-  const out = { version: 1, planet, global, shaders, notes };
+  const values = harm === undefined ? readWaterHarm(vfs, notes) : harm;
+  if (!values) notes.push("the client's water value tables could not be read, so this pack carries no harm block");
+  const out = { version: 1, planet, global, harm: values ?? null, shaders, notes };
   writeFile(join(outDir, 'water.json'), JSON.stringify(out, null, 1));
   const list = Object.values(shaders);
   const lava = list.filter((s) => s.kind === 'lava').length;

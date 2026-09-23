@@ -1608,7 +1608,14 @@ export class Player {
 
     // Water: the surface here, and how deep the body sits in it. Swimming starts when the
     // chest is under; the head stays above the surface unless the player dives.
-    const surface = this.aboard ? -1e9 : terrain.waterHeightAt(this.pos.x, this.pos.z);
+    //
+    // The height asked for is the **lava-filtered** one, which is the very answer the feet already
+    // take (`World.footSurfaces.waterTop`) and not `terrain.waterHeightAt`: a flow is water to the
+    // terrain and is water to nothing else, so reading the terrain's own height had the player wade
+    // into a flow and then swim strokes in it. With the flow filtered out there is no surface over
+    // the point at all, so the body walks the bed of the flow under its own gravity and burns where
+    // it stands, which is the harm's business and not this file's.
+    const surface = this.aboard ? -1e9 : world.footSurfaces.waterTop(this.pos.x, this.pos.z);
     const depth = surface - this.pos.y;
     // Interiors can sit below a lake (the Gungan cities do) and are never water. Once
     // swimming, a little slack keeps the float line from flickering between states.
