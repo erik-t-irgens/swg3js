@@ -12,6 +12,11 @@
 // are in the window. The water shader reads one texel for both the ripple height and its slope,
 // because the step writes the slope out of taps it already had.
 import * as THREE from 'three';
+import {
+  courantOf, dampingFor, deepWaterWavelength, fastestRipple, maxWaveSpeed, realWavePeriod,
+  realWaveSpeed, reliefFor, RIPPLE_HELP, rippleGroupSpeed, rippleHalfLife, ripplePeriod,
+  ripplePhaseSpeed, ringPeriodSeconds, shallowWaterDepth, waveTerm,
+} from './rippleMath.ts';
 
 /**
  * Detail presets, keyed by grid size, which is what the setting stores. Grid and reach move
@@ -32,9 +37,6 @@ let HALF = WINDOW / 2;
 /** The step runs at a fixed rate whatever the frame rate, or the wave speed rides on it. */
 const FIXED_DT = 1 / 120;
 const MAX_STEPS = 4;
-/** (c·dt/dx)². Above 0.5 the scheme is unstable and the field explodes. */
-const C2 = 0.42;
-const DAMP = 0.9975;
 /** Point impulses waiting for the next step. */
 const MAX_POKES = 8;
 
@@ -75,12 +77,55 @@ export function configureWaterSim(s: WaterSimSettings): void {
   settings = s;
 }
 
-/** Wave speed as (c·dt/dx)². Console only: above 0.5 the scheme is unstable and the field explodes. */
-export const WATER_SIM_SPEED = { value: 0.001 };
-/** How hard a hull holds the surface down, and how hard a fast arrival punches. Console only: these
- *  are content tuning, not taste, and a player has no way to judge them. */
+/**
+ * The coupling between neighbouring texels, in **metres a second**, the same at every detail
+ * setting.
+ *
+ * It used to be the step's own (c·dt/dx)² stored raw, and dx is a texel: the term therefore stood
+ * for 1.90 m/s on the lowest detail, 1.42 on the default and 0.95 on the highest, so a quality
+ * setting was changing how the water behaved. The default here is the number the default detail
+ * always had (0.001 at 37.5 cm a texel and 1/120 s is 1.423 m/s), so nothing tuned by eye is thrown
+ * away; `waveTerm` works the step's number out per preset and holds it under the stability limit,
+ * saying so once if a number ever asks for more than the grid can carry.
+ *
+ * It is **not** the speed a ripple is seen to travel at, and it never was. The step multiplies the
+ * whole update by the damping, which puts a spring under every texel as well as coupling it to its
+ * neighbours, and at every wavelength a player can make out the spring is the stronger of the two:
+ * a disturbance mostly rings where it stands, and what energy does carry goes at `carryMs` in the
+ * report below — about 0.67 m/s at the tuned numbers, half this. `rippleMath.ts` has the arithmetic
+ * and the node test steps the recurrence to check it.
+ *
+ * Console only, with draft and impact below: these are content tuning, not taste, and a player has
+ * no way to judge them. `__debug.ripples()` prints what each one means and what the field really
+ * does beside what real water of the same size would do.
+ */
+export const WATER_SIM_SPEED = { value: 1.423 };
+/** How far a fully submerged body holds the surface down, in the field's own units: multiply by the
+ *  ripple height in metres for the dip. */
 export const WATER_SIM_DRAFT = { value: 0.55 };
+/** How hard a fast arrival punches, in field units a step while it is still coming down. */
 export const WATER_SIM_IMPACT = { value: 0.08 };
+
+/** The speed the last warning was about, so a held speed says so once rather than every frame. */
+let warnedSpeed = Number.NaN;
+let warnedTexel = Number.NaN;
+
+function warnIfHeld(speed: number, texel: number): void {
+  // A speed that is not a number at all never reaches the field (`waveTerm` answers 0 for one), so
+  // there is nothing to warn about — and warning would never stop, since NaN is equal to nothing,
+  // including the NaN already warned about. `Object.is` is the same test that does hold for it.
+  if (!Number.isFinite(speed)) return;
+  const cap = maxWaveSpeed(texel, FIXED_DT);
+  if (speed <= cap) return;
+  if (Object.is(speed, warnedSpeed) && Object.is(texel, warnedTexel)) return;
+  warnedSpeed = speed;
+  warnedTexel = texel;
+  console.warn(
+    `water ripples: ${speed.toFixed(2)} m/s is more than a ${(texel * 100).toFixed(0)} cm grid can carry at ` +
+    `${Math.round(1 / FIXED_DT)} steps a second, so it is held at ${cap.toFixed(2)} m/s. A coarser ripple ` +
+    'detail setting carries a faster wave, not a finer one.',
+  );
+}
 
 /** A body in the water. Move `object` each frame; the module reads its transform and nothing else. */
 export interface SimBody {
@@ -88,7 +133,8 @@ export interface SimBody {
   readonly object: THREE.Mesh;
   /** Metres the geometry must reach below the surface to displace fully. Roughly the body's draught. */
   draft: number;
-  /** Metres a second downward. Drives the impact impulse; a crater rather than a ring. */
+  /** How hard it arrived, 0 to 1 on the caller's own scale, not a speed. Drives the impact impulse
+   *  while it is still coming down: a crater rather than a ring. */
   velDown: number;
   /** Off for a body that has left the water, so it costs nothing. */
   active: boolean;
@@ -265,10 +311,13 @@ function build(renderer: THREE.WebGLRenderer): Rig | null {
       uSplat: { value: splat.texture },
       uTexel: { value: new THREE.Vector2(1 / SIM, 1 / SIM) },
       uScroll: { value: new THREE.Vector2() },
-      uC2: { value: C2 },
-      uDamp: { value: DAMP },
-      uDraft: { value: 0.55 },
-      uImpact: { value: 0.08 },
+      // Stand-ins only: the step sets all four from the live knobs before it renders, on the very
+      // call that built the rig. They are worked out the same way all the same, so nothing here
+      // can drift from what the step does.
+      uC2: { value: waveTerm(WATER_SIM_SPEED.value, TEXEL, FIXED_DT) },
+      uDamp: { value: dampingFor(settings.waterRipplePersistence) },
+      uDraft: { value: WATER_SIM_DRAFT.value },
+      uImpact: { value: WATER_SIM_IMPACT.value },
       uPokes: { value: pokes },
     },
     depthTest: false,
@@ -392,11 +441,14 @@ export function stepWaterSim(
   }
 
   WATER_SIM_ON.value = 1;
-  WATER_SIM_RELIEF.value = 0.5 * Math.max(0, settings.waterRippleHeight);
-  rig.stepMat.uniforms.uC2.value = Math.min(WATER_SIM_SPEED.value, 0.49);
+  WATER_SIM_RELIEF.value = reliefFor(settings.waterRippleHeight);
+  // The wave term is worked out from a speed in metres a second and this preset's texel, so the
+  // detail setting changes how finely the surface is resolved and not how fast it moves.
+  rig.stepMat.uniforms.uC2.value = waveTerm(WATER_SIM_SPEED.value, TEXEL, FIXED_DT);
+  warnIfHeld(WATER_SIM_SPEED.value, TEXEL);
   // Persistence is eased into the damping factor, whose useful span is narrow and whose top end
   // must stay below 1 or the field never settles.
-  rig.stepMat.uniforms.uDamp.value = 0.985 + Math.min(Math.max(settings.waterRipplePersistence, 0), 1) * 0.0145;
+  rig.stepMat.uniforms.uDamp.value = dampingFor(settings.waterRipplePersistence);
   rig.stepMat.uniforms.uDraft.value = WATER_SIM_DRAFT.value;
   rig.stepMat.uniforms.uImpact.value = WATER_SIM_IMPACT.value;
 
@@ -465,23 +517,91 @@ export function stepWaterSim(
 }
 
 
-/** What the field is doing, for the console: `__debug.water()`. */
+/**
+ * What the field is doing and what every one of its numbers means, for the console:
+ * `__debug.ripples()`. Every figure here is either read straight off the live settings or is plain
+ * arithmetic from `rippleMath.ts`, which a node test sweeps; nothing is measured off the GPU.
+ *
+ * It answers in metres and seconds on purpose, and it answers about the field the game really
+ * steps rather than about the wave equation the step is written from. `speedMs` is the coupling
+ * knob; **`carryMs` is the number to trust** — the fastest a ripple's energy actually travels, at
+ * the wavelength `carryWaveM`, with the damping's spring taken into account. `ringPeriodS` is how
+ * long a big, slow disturbance takes to swing through once, which is what it does instead of
+ * travelling. `compare` puts the field's own speed and swing beside a real deep-water wave of the
+ * very same length, so "does it look realistic" is a comparison rather than a squint. `halfLifeS`
+ * is persistence with a stopwatch on it, `reliefM` is ripple height in metres, `holdDownM` is how
+ * far a fully submerged body pulls the surface under, and `help` says what each knob does in words.
+ *
+ * It answers with the sim off as well, from the settings as they stand, so a number can be tried
+ * before the water is in front of you.
+ */
 export function waterSimDebug(): Record<string, unknown> {
+  const preset = WATER_SIM_DETAIL[settings.waterRippleDetail] ?? WATER_SIM_DETAIL[512];
+  const texel = rig ? TEXEL : preset.window / preset.grid;
+  const asked = WATER_SIM_SPEED.value;
+  const speed = Number.isFinite(asked) ? Math.max(0, asked) : 0;
+  const damp = dampingFor(settings.waterRipplePersistence);
+  const relief = reliefFor(settings.waterRippleHeight);
+  const term = waveTerm(speed, texel, FIXED_DT);
+  const carry = fastestRipple(damp, term, texel, FIXED_DT);
+  const r = (v: number, n = 2): number => (Number.isFinite(v) ? +v.toFixed(n) : v);
+  const detail: Record<string, unknown> = {};
+  for (const key of Object.keys(WATER_SIM_DETAIL)) {
+    const p = WATER_SIM_DETAIL[Number(key)];
+    const t = p.window / p.grid;
+    const c = fastestRipple(damp, waveTerm(speed, t, FIXED_DT), t, FIXED_DT);
+    detail[key] = {
+      texelCm: r(t * 100, 1), reachM: p.window,
+      capMs: r(maxWaveSpeed(t, FIXED_DT)), carryMs: r(c.speedMs, 3),
+    };
+  }
+  // The field's own behaviour at a few sizes, beside real deep water of the same size. `oursMs` is
+  // the group speed — where the energy goes — and `phaseMs` is the crest sliding, which runs away
+  // with the wavelength and is why the phase speed is no use as an answer.
+  const compare = [0.75, 1.5, 3, 6, 12].map((waveM) => ({
+    waveM,
+    oursMs: r(rippleGroupSpeed(damp, term, waveM, texel, FIXED_DT), 3),
+    realMs: r(realWaveSpeed(waveM), 3),
+    phaseMs: r(ripplePhaseSpeed(damp, term, waveM, texel, FIXED_DT), 2),
+    oursSwingS: r(ripplePeriod(damp, term, waveM, texel, FIXED_DT), 3),
+    realSwingS: r(realWavePeriod(waveM), 3),
+  }));
   return {
     on: !!rig,
     failed,
     grid: rig ? SIM : 0,
-    windowM: rig ? WINDOW : 0,
-    texelCm: rig ? +(TEXEL * 100).toFixed(1) : 0,
+    windowM: rig ? WINDOW : preset.window,
+    texelCm: r(texel * 100, 1),
     bodies: bodies.length,
     active: bodies.filter((b) => b.active).length,
-    originX: +originX.toFixed(1),
-    originZ: +originZ.toFixed(1),
-    relief: WATER_SIM_RELIEF.value,
-    speed: WATER_SIM_SPEED.value,
-    damping: rig ? rig.stepMat.uniforms.uDamp.value : null,
+    originX: r(originX, 1),
+    originZ: r(originZ, 1),
+    // What the coupling is set to, and what the grid will carry.
+    speedMs: r(speed, 3),
+    speedCapMs: r(maxWaveSpeed(texel, FIXED_DT)),
+    waveTerm: +term.toFixed(5),
+    courant: r(courantOf(speed, texel, FIXED_DT), 3),
+    // What the field really does. The damping is a spring as well as friction, so a ripple carries
+    // at carryMs rather than at speedMs, and a long one rings at ringPeriodS instead of going
+    // anywhere. Both fall out of the step's own roots; the node test steps it to check them.
+    carryMs: r(carry.speedMs, 3),
+    carryWaveM: r(carry.waveM, 2),
+    ringPeriodS: r(ringPeriodSeconds(damp, FIXED_DT), 3),
+    carryLikeWaveM: r(deepWaterWavelength(carry.speedMs)),
+    carryLikeDepthM: r(shallowWaterDepth(carry.speedMs), 2),
+    compare,
+    // How tall, how long-lived, how deep a body sits.
+    heightSetting: settings.waterRippleHeight,
+    reliefM: r(relief, 3),
+    persistence: settings.waterRipplePersistence,
+    damping: r(damp, 5),
+    halfLifeS: r(rippleHalfLife(damp, FIXED_DT), 3),
     draft: WATER_SIM_DRAFT.value,
+    holdDownM: r(relief * WATER_SIM_DRAFT.value, 3),
     impact: WATER_SIM_IMPACT.value,
+    punchMPerStep: r(relief * WATER_SIM_IMPACT.value, 3),
+    detail,
+    help: RIPPLE_HELP,
   };
 }
 
