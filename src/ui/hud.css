@@ -438,6 +438,18 @@
   width: calc(160px * var(--hud-scale));
   height: calc(6px * var(--hud-scale));
 }
+/* Breath, the row that is only there while you are under water. Its width is the other two bars' so
+   the three line up; its height is between theirs (`breathBarW`, `breathBarH`, which the display's own
+   test checks against this file). It is given no fill colour of its own on purpose: a bar with no band
+   wears `.hud-bar > .fill`, which is the interface's accent, and that is the one colour on the block
+   that is neither the health ramp nor the class pool's. The display puts `warn` and `bad` on it as it
+   empties, and `.hud-bar.warn > .fill` names one class more than the default does, so it wins on its
+   own without this file having to say anything about breath's colour at all. */
+.hud-brow .hud-bar.breath {
+  flex: none;
+  width: calc(160px * var(--hud-scale));
+  height: calc(8px * var(--hud-scale));
+}
 
 /* The number row and the hands, side by side under the bars. */
 .hud-kit {

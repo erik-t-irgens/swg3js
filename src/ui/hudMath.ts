@@ -92,6 +92,15 @@ export const HUD_SIZES = {
   healthBarH: 10,
   poolBarW: 160,
   poolBarH: 6,
+  /**
+   * The breath row. There was no going under water in the game at all, so nothing here is read from
+   * anything it shipped: both numbers are ours. The bar is exactly as wide as the health bar and the
+   * class pool's, so the three left edges and the three right edges line up in the block however many
+   * of them stand; its height sits between theirs, because running out of breath kills you and
+   * spending the class pool does not.
+   */
+  breathBarW: 160,
+  breathBarH: 8,
   targetBarW: 64,
   targetBarH: 5,
   plateBarW: 44,
@@ -206,6 +215,12 @@ export const HUD_SIZES = {
   bandBad: 1 / 6,
   /** A pip's fill goes `warn` under a quarter. */
   pipWarn: 0.25,
+  /**
+   * A breath within a thousandth of full is full, and the row goes down. It is a real guard and not
+   * a rounding nicety: a pool that eases back toward its top rather than reaching it would otherwise
+   * leave the row standing on dry land for ever, which is the one thing it must never do.
+   */
+  breathFull: 0.999,
   /** The booster pulses under a fifth. */
   boostPulse: 0.2,
   /** A blow whose sideways part is under this share of its forward part is taken as ahead or behind. */
@@ -445,6 +460,40 @@ export function barBand(share: number): 'good' | 'warn' | 'bad' {
   if (share >= HUD_SIZES.bandWarn) return 'good';
   if (share >= HUD_SIZES.bandBad) return 'warn';
   return 'bad';
+}
+
+/** The breath row: whether it stands at all, how full it is, and the band its fill wears. */
+export interface BreathRow {
+  show: boolean;
+  share: number;
+  band: 'good' | 'warn' | 'bad';
+}
+
+export function makeBreathRow(): BreathRow {
+  return { show: false, share: 1, band: 'good' };
+}
+
+/**
+ * Breath, as the display asks about it. The row is wanted while there is a real pool and it is not
+ * full — which is both halves of the rule the design asks for in one test: it comes up the moment
+ * breath starts to go, it stays up while it comes back in air (so you can watch it return), and it
+ * is down, costing a frame nothing, the rest of the time. Whoever holds the breath may hand over
+ * nothing at all on dry land instead, and that is the same answer by a shorter road.
+ *
+ * An empty breath is emphatically wanted: `value` of 0 shows an empty bar, not no bar. A pool with no
+ * maximum, or either number not a number at all, is nothing known rather than a bar at nought, so the
+ * row goes down — a display that cannot be told what it is showing shows nothing.
+ *
+ * The band is the same one every other bar wears (`barBand`, warn under a third and bad under a
+ * sixth), so the colour a player has already learnt on the health bar means the same thing here.
+ * Nothing is allocated: the answer is written into the caller's own struct.
+ */
+export function breathRow(value: number, max: number, out: BreathRow): BreathRow {
+  const known = Number.isFinite(value) && Number.isFinite(max) && max > 0;
+  out.share = known ? clamp01(value / max) : 1;
+  out.show = known && out.share < HUD_SIZES.breathFull;
+  out.band = barBand(out.share);
+  return out;
 }
 
 /** Where a target sits once it is kept on the screen, and which way to point at it if it is not. */

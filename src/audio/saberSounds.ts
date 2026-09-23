@@ -84,7 +84,7 @@ export interface SaberHost {
 export interface SaberWorld {
   readonly listenerSpace: SoundSpace;
   readonly weather: { fx: { rain: number }; roofs: { topAt(x: number, z: number): number } };
-  readonly footSurfaces: { waterTop(x: number, z: number): number; space(x: number, y: number, z: number): SoundSpace | null };
+  readonly footSurfaces: { waterTop(x: number, y: number, z: number): number; space(x: number, y: number, z: number): SoundSpace | null };
 }
 
 export interface SaberTune {
@@ -807,16 +807,25 @@ export class SaberSounds {
     // what stands over every point near the player, which is what the rain itself is clipped by.
     const rain = world.weather.fx.rain;
     v.raining = rain > 0 && world.weather.roofs.topAt(v.x, v.z) < v.y;
-    const wet = world.footSurfaces.waterTop(v.x, v.z) > v.y;
+    // The room this blade is in, asked first so that one lookup answers both questions it settles:
+    // a blade standing in a room is in that room's sound space, and a room is never under the
+    // planet's water however deep its floor is cut. (The player's own blade is in the room the ear
+    // is in and never asks, so it takes the water reader's own room test below.)
+    let inRoom = false;
+    if (v.owner !== 'player') {
+      const space = world.footSurfaces.space(v.x, v.y, v.z);
+      inRoom = !!space;
+      v.space.building = space?.building ?? NO_SPACE.building;
+      v.space.cell = space?.cell ?? NO_SPACE.cell;
+    }
+    // The blade's own point, not its column: the reader answers dry for a blade in a room, so a
+    // cave or a bunker standing under a planet's water table no longer boils a lit blade indoors.
+    // Known to be in a room already, it is not asked at all -- the answer could only be dry.
+    const wet = !inRoom && world.footSurfaces.waterTop(v.x, v.y, v.z) > v.y;
     // The blade going into the water is a blow like any other, and is the moment that role sounds:
     // under the water it boils instead, which is the hum's business below.
     if (wet && !v.underwater) this.contact('water', v);
     v.underwater = wet;
-    if (v.owner !== 'player') {
-      const space = world.footSurfaces.space(v.x, v.y, v.z);
-      v.space.building = space?.building ?? NO_SPACE.building;
-      v.space.cell = space?.cell ?? NO_SPACE.cell;
-    }
   }
 
   /** A drop of rain hissing off a lit blade, now and then while it is out in the open. */

@@ -1,6 +1,8 @@
 // Where the water's surface line is, for the one question "am I under water": how far over the
-// plain surface still counts as under, how far the answer holds once it is yes, and how deep under
-// a point is. Pure, and it imports nothing, so a node test runs exactly what the game runs.
+// plain surface still counts as under, how far the answer holds once it is yes, how deep under
+// a point is, and -- for the reader the feet and the blade share -- whether the point is in a room,
+// where there is no water at all whatever height it stands at. Pure, and it imports nothing, so a
+// node test runs exactly what the game runs.
 //
 // (The look of the water once you are under it is a different file, `src/core/fx/underwaterMath.ts`,
 // and a different tuning object. This one decides only which side of the surface the eye is on.)
@@ -73,6 +75,48 @@ export interface WaterLineVerdict {
    * on at the line.
    */
   depth: number;
+}
+
+/**
+ * Whether a point stands inside a building's room. The world answers it from the streamed
+ * buildings' own cells; a node test answers it from fixtures. Nothing about it is a THREE type, so
+ * the rule below is the same arithmetic in both.
+ */
+export type RoomTest = (x: number, y: number, z: number) => boolean;
+
+/**
+ * The water over a point, for the one reader the feet, the blade and everything after them share
+ * (`World.footSurfaces.waterTop`): the surface the terrain gives, **unless the point stands in a
+ * room**, and then no water at all.
+ *
+ * Caves and bunkers really do sit below a planet's water table -- 87 placed portal buildings across
+ * ten converted planets have a room floor under one -- and in every one of those rooms the height
+ * alone says the body is wading: the footsteps go silent and a lit blade hisses and boils indoors,
+ * in the dry. The room is the answer, not the height, so the rule is the room's and is written here
+ * rather than in any one caller's clause order, where it would mend the feet and leave the blade.
+ *
+ * `indoors` is asked **only when it could change the answer**: a point above the surface, and every
+ * point on a planet with no water over it (`surface` -Infinity), returns before asking. So a step on
+ * dry land costs exactly what it cost before -- one compare more, and not one lookup -- and the room
+ * is looked up only where the old answer would have been "wading".
+ *
+ * This is the same exception `underwaterVerdict` already takes for the camera through its `dry`
+ * flag; the camera reads the player's own tracked room, and this reads the point's, because a blade
+ * and a foot are not always the player's.
+ *
+ * **Who must not read it.** A body with a tracked cell of its own -- the player, whose swim reads
+ * `World.waterColumnAt` and `Player.inside` -- must take the column and its own room rule instead.
+ * `indoors` here is a box test, and a room box is padded and overhangs its hull (89 of the 938
+ * placed portal buildings in the converted packs have one that straddles the water line at the
+ * building's own point). The worst a wrong box can do to a foot is silence one step; handed to a
+ * swimmer it is a depth of -Infinity, which fails every swim test at once with no hysteresis able to
+ * soften it, and takes the water out from under a body mid-stroke.
+ */
+export function waterTopAt(x: number, y: number, z: number, surface: number, indoors: RoomTest): number {
+  // Written as "not under" rather than "above": a height that is not a number asks nothing and keeps
+  // the surface it was handed, which every caller already reads as no water over it.
+  if (!(y < surface)) return surface;
+  return indoors(x, y, z) ? -Infinity : surface;
 }
 
 /**

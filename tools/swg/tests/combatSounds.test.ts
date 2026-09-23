@@ -171,7 +171,10 @@ const TABLES: CombatTables = {
   // A world with a metal crate standing over the sand, a lake to the west, and a wooden hut whose
   // walls a ray down from a bolt's mark can never name: collider 9 is one of them.
   const world: SurfaceSource & ColliderSurfaces = {
-    waterTop: (x) => (x < -100 ? 5 : -Infinity),
+    // The world's reader answers for a **point**, not a column: it takes the height and the lake it
+    // names ends at 5 m. Written that way on purpose, so a caller that stopped handing it the height
+    // fails here rather than passing silently.
+    waterTop: (x, y) => (x < -100 && y < 5 ? 5 : -Infinity),
     roomSurface: (x) => (x > 200 ? 'metal' : null),
     objectTemplate: (x) => (x > 50 && x < 200 ? 'object/tangible/crate.iff' : null),
     groundTemplate: () => 'abstract/terrain_surface/sand.iff',
@@ -194,6 +197,7 @@ const TABLES: CombatTables = {
   ok(mixer.last() === 'sound/wood.snd', 'a bolt in a wall is what the collider that stopped it belongs to: a ray down from a mark four metres up a wall would name the ground painted under the building instead');
   ok(c.missKindAt(-200, 0, 0) === 'water' && c.missKindAt(0, 0, 0) === 'terrain' && c.missKindAt(60, 0, 0) === null, 'a shot that hurt nothing came to the water, to the bare ground, or to something standing there, which is a hit and not a miss');
   ok(c.missKindAt(0, 4, 0, 9) === null, 'and a wall the ray cannot reach is one of those, because the collider names it');
+  ok(c.missKindAt(-200, 8, 0) === 'terrain', 'a shot that stopped in the air over that lake is not in the water: the reader is asked about the point and not about the column under it');
   c.hit(gun, 300, 0, 0, null);
   ok(mixer.last() === 'sound/metal.snd', "indoors the mark's own room answers, as it does for a foot, and it is the room the shot landed in rather than the one the ear stands in (the ear here is in the open)");
   mixer.clear();

@@ -16,7 +16,7 @@ import { Splashes, updateWaterDepth, type WaterMaterial } from './water';
 import { addSimBody, stepWaterSim, type SimBody } from './waterSim';
 import { WaterBodies, type WaterBody } from './waterBodies';
 import { envLightFrom, isLavaWater, shaderKey, type WaterLook } from './waterLook';
-import { coveringWaterShader, onSeaSurface, surfaceReach, underwaterVerdict, type WaterLineQuery } from './waterLineMath.ts';
+import { coveringWaterShader, onSeaSurface, surfaceReach, underwaterVerdict, waterTopAt, type WaterLineQuery } from './waterLineMath.ts';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { createLavaMaterial, LAVA_LOOK, lavaGeometry, lavaHeatTable, loadLavaTextures, refreshLavaFar, standInLavaTextures, type LavaMaterial, type LavaTextures } from './lava';
 import { FALLBACK_LAVA_STYLE, groupLava, lavaStyleFor, type LavaStyle } from './lavaStyle';
@@ -80,6 +80,13 @@ const tmpQ = new THREE.Quaternion();
 const tmpV = new THREE.Vector3();
 /** The ground's normal under a foot, for the print laid there; a step allocates nothing. */
 const footNormal = new THREE.Vector3();
+/**
+ * The point the water reader asks the buildings about. Its own vector rather than the file's shared
+ * scratch: the question is asked from inside `footSurfaces.waterTop`, which the feet, the blade and
+ * the bolts call from outside this file at any moment, and a borrowed scratch is the kind of thing
+ * that is right until something up the stack borrows it too.
+ */
+const roomProbe = new THREE.Vector3();
 const lumOf = (c: THREE.Color): number => luminance(c.r, c.g, c.b);
 const tmpM = new THREE.Matrix4();
 /** How far out a space zone's planets hang, and the radius (metres) a planet of size 1 has there. */
@@ -887,6 +894,58 @@ export class World {
   }
 
   /**
+   * Whether a point stands in a building's room, for the water rule in `footSurfaces.waterTop`: the
+   * streamed buildings' own cell boxes, which is the very answer `footSurfaces.roomSurface` and the
+   * sound's `space` already take for a point that is not the player's. A building whose interior has
+   * not been built yet still answers, since the boxes come with the model's def and not with the
+   * meshes; a building the streamer has not reached does not, and nobody is standing in one of those.
+   *
+   * It is **not** the player's tracked cell. That cell is the better answer for the player and only
+   * for the player -- it is walked through doorways rather than read off boxes -- and this reader is
+   * asked about a fighter's blade and a mobile's feet as readily as about the player's own. What the
+   * boxes cost when they are wrong is a step near a wall that a room's box overhangs; what reading
+   * the player's cell instead would cost is every other body's answer.
+   *
+   * A kept arrow, so the reader hands it over without allocating a closure per call, and
+   * `LayoutStreamer.indoorsAt` rather than its `buildingAt`, which allocates a `{ building, cell }`
+   * per hit: this answers with a number out of `cellAt` and allocates nothing at all.
+   *
+   * Public because the console reports it (`__debug.player().inRoom`). It is the reader's **own**
+   * answer, which is the only honest witness for what the reader did: the box test over the streamed
+   * buildings, which answers before a building's interior is built and before any cell is tracked,
+   * and so can differ from `World.inside` (the portal-walked cell) in either direction.
+   */
+  readonly indoorsAt = (x: number, y: number, z: number): boolean => {
+    const stream = this.layoutStream;
+    if (!stream) return false;
+    return stream.indoorsAt(roomProbe.set(x, y, z));
+  };
+
+  /**
+   * The water over a **column**: the height of whatever table covers this x and z, with lava
+   * filtered out, and no room asked at all. -Infinity where there is no water over the column.
+   *
+   * This is the reader for a body that has a better room rule of its own than the boxes -- the
+   * player, whose swim reads the cell the portal renderer walks it through (`Player.inside`). It
+   * must stay separate from `footSurfaces.waterTop`: that one answers -Infinity for a point in a
+   * room box, and a swimmer who consumed that would read a depth of -Infinity and fall out of the
+   * water mid-stroke. Rooms overhang their hulls and `cellAt` pads every box by a further half
+   * metre, so a padded box really can straddle the water line -- 89 of the 938 placed portal
+   * buildings in the converted packs have one that does so at the building's own point, reaching
+   * under the line by a median of 11 m. Swimming down to an entrance that sits under a lake is the
+   * plain case: the point is inside the padded box before the doorway is crossed.
+   *
+   * Lava is water to the terrain and is water to nothing else: `waterHeightAt` answers with the
+   * height of whatever table covers the column, a flow as readily as a lake, so without this guard a
+   * step over a flow reads as wading. Any finite depth at all means the water over this column is a
+   * flow, whatever height is asked about (`World.lavaAt`).
+   */
+  waterColumnAt(x: number, z: number): number {
+    if (Number.isFinite(this.lavaAt(x, 0, z))) return -Infinity;
+    return this.terrain?.waterHeightAt(x, z) ?? -Infinity;
+  }
+
+  /**
    * What a foot lands on, as the world alone can say it: the water over a point, the interior
    * table's surface for the room it is in, the object template of whatever it is standing on, and
    * the surface the terrain paints there. The words are none of this file's business -- the sound
@@ -897,14 +956,20 @@ export class World {
    * body's own capsule an unfiltered ray finds that capsule and calls its middle the floor.
    */
   readonly footSurfaces = {
-    waterTop: (x: number, z: number): number => {
-      // Lava is water to the terrain and is not to a foot: `waterHeightAt` answers with the height of
-      // whatever table covers the column, a flow as readily as a lake, so without this a step over a
-      // flow reads as wading. Any finite depth at all means the water over this column is a flow,
-      // whatever height is asked about, so the height handed in here is not read (`World.lavaAt`).
-      if (Number.isFinite(this.lavaAt(x, 0, z))) return -Infinity;
-      return this.terrain?.waterHeightAt(x, z) ?? -Infinity;
-    },
+    /**
+     * The water over a **point**: the column (lava filtered out, `waterColumnAt`), and then the room
+     * rule. A room is never under the planet's water, whatever height its floor stands at: caves and
+     * bunkers really do sit below a water table, and read by height alone every one of them had the
+     * feet wading and a lit blade boiling indoors. `waterTopAt` asks the room only for a point the
+     * surface would otherwise cover, so a step on dry land costs what it always did.
+     *
+     * Everything that has no room rule of its own reads this -- a foot as it lands, a lit blade four
+     * times a second, a bolt where it stopped. The player's swim does **not**: it reads
+     * `waterColumnAt` and its own tracked cell, because the box this asks is padded and can overhang
+     * open water, and the worst a wrong box can do to a footstep is silence it while the same answer
+     * would take a swimmer's water away underneath them.
+     */
+    waterTop: (x: number, y: number, z: number): number => waterTopAt(x, y, z, this.waterColumnAt(x, z), this.indoorsAt),
     /**
      * The room the player is in, from the cell the frame already tracked. The floor is asked for by
      * itself rather than taken off the bed's own row: `roomRow` steps over a row whose bed the bank
@@ -2002,7 +2067,12 @@ export class World {
     const touch = (key: object, p: THREE.Vector3, geo: THREE.BufferGeometry, draft: number, q: THREE.Quaternion | null, strength: number) => {
       // Lava takes no rings and throws no spray (`World.lavaAt`: finite is a flow over this column).
       if (Number.isFinite(this.lavaAt(p.x, p.y, p.z))) return;
-      const surface = this.terrain.waterHeightAt(p.x, p.z);
+      // Nor does a room. This reader asked the water table by column, as the feet and the blade once
+      // did, so in the 87 placed buildings whose floors stand under their planet's water table a
+      // walker indoors pushed the ripple field about and left rings on a stone floor. The shared
+      // reader tells a room from open water, and -Infinity is its own "no water over this point".
+      const surface = this.footSurfaces.waterTop(p.x, p.y, p.z);
+      if (!Number.isFinite(surface)) return;
       const depth = surface - p.y;
       let last = this.lastSeen.get(key);
       if (!last) {
@@ -4866,9 +4936,10 @@ export class World {
    * on every planet but the one with flows, and is the answer a caller that only wants to know
    * "is this column lava" reads as `Number.isFinite`.
    *
-   * This is the one place the question is asked. It used to be written out twice, in
-   * `footSurfaces.waterTop` and in the ripple emitter, each as the same pair of terms; a third copy
-   * for the harm is how three of them would drift apart. `lavaHarmMath.ts` turns the depth into a
+   * This is the one place the question is asked. It used to be written out twice, in the water
+   * reader (`waterColumnAt` now, which `footSurfaces.waterTop` and the player's swim both read
+   * through) and in the ripple emitter, each as the same pair of terms; a third copy for the harm is
+   * how three of them would drift apart. `lavaHarmMath.ts` turns the depth into a
    * verdict (`inLava` for a body, `rideOverLava` for something hovering) and the margins are there
    * rather than here.
    *

@@ -13,9 +13,11 @@ import {
   surfaceReach,
   underwaterMargin,
   underwaterVerdict,
+  waterTopAt,
   type WaterLineQuery,
   type WaterLineVerdict,
 } from '../../../src/world/waterLineMath.ts';
+import { FOOT_TUNE, resolveSurface, type SurfaceSource } from '../../../src/audio/footsteps.ts';
 
 let passed = 0;
 const ok = (cond: boolean, msg: string) => {
@@ -188,5 +190,94 @@ ok(coveringWaterShader(null, false, 12, 'sea') === 'sea', 'no table at all: the 
 // which is the right answer and is what the code did before this rule was gathered into one place.
 ok(coveringWaterShader({ height: 12, shader: '' }, false, 12, 'sea') === null, 'a table that names no shader takes the planet\'s own water, not the sea\'s');
 ok(coveringWaterShader(null, false, 12, null) === null, 'and with no global shader either, no look: the record keeps the neutral one');
+
+// --- the rooms that think they are under water ---------------------------------------------------
+
+// The other half of the same question, for the reader the feet and the blade share
+// (`World.footSurfaces.waterTop`): a room is never under the planet's water table, whatever height
+// its floor stands at. The fixture is a planet built like Rori, whose converted pack gives its whole
+// world one global table at 75 m, with a cave cut into the ground under it: the room's floor is
+// 20 m below the water's surface, and read by height alone every step in it splashes and a lit blade
+// hisses and boils indoors.
+const LAKE_TOP = 75;
+/** The cave: one room box in world metres, floor at 55 m, ceiling at 70, all of it under the table. */
+const CAVE = { x0: -20, x1: 20, y0: 55, y1: 70, z0: -20, z1: 20 };
+const asks = { n: 0 };
+const inCave = (x: number, y: number, z: number): boolean => {
+  asks.n++;
+  return x >= CAVE.x0 && x <= CAVE.x1 && y >= CAVE.y0 && y <= CAVE.y1 && z >= CAVE.z0 && z <= CAVE.z1;
+};
+/** The reader as the world runs it: the terrain's own surface, then the room rule. */
+const readWater = (x: number, y: number, z: number, surface = LAKE_TOP): number => waterTopAt(x, y, z, surface, inCave);
+
+asks.n = 0;
+ok(readWater(0, 56, 0) === -Infinity, 'standing on a cave floor 19 m under a planet\'s water table: no water at all');
+ok(asks.n === 1, 'and the room was asked about exactly once');
+asks.n = 0;
+ok(readWater(200, 74, 200) === LAKE_TOP, 'a metre under the open lake\'s surface, well away from the cave: the surface, as before');
+ok(asks.n === 1, 'the room is asked there too -- being under the surface is the whole of what makes it worth asking');
+asks.n = 0;
+ok(readWater(0, 80, 0) === LAKE_TOP && readWater(200, 200, 200) === LAKE_TOP, 'above the surface the answer is the surface');
+ok(asks.n === 0, 'and the room is never asked there: dry land costs one compare more than it did and not one lookup');
+asks.n = 0;
+ok(readWater(0, -500, 0, -Infinity) === -Infinity && asks.n === 0, 'a planet (or a space zone) with no water over the point asks nothing either');
+asks.n = 0;
+ok(Number.isNaN(readWater(0, Number.NaN, 0)) === false && readWater(0, Number.NaN, 0) === LAKE_TOP && asks.n === 0, 'a height that is not a number keeps the surface it was handed and asks nothing');
+ok(readWater(0, LAKE_TOP, 0) === LAKE_TOP, 'exactly at the surface is not under it');
+
+// How often the branch is taken, which is what this fixture can honestly count: a walk of a hundred
+// steps over dry ground asks the room nothing, and the only steps that ask are the ones the old
+// reader would have called wading. What one of those asks *costs* is not measured here and cannot be
+// -- `inCave` is a box, while the game's room test is `LayoutStreamer.indoorsAt`, a walk of the
+// streamed portal buildings with a prefilter and a padded cell box each. This pins the count; the
+// notes give the walk's own length over the converted packs.
+asks.n = 0;
+for (let i = 0; i < 100; i++) readWater(i * 3, 90, 0);
+const dryAsks = asks.n;
+asks.n = 0;
+for (let i = 0; i < 100; i++) readWater(i * 3, 74, 0);
+ok(dryAsks === 0 && asks.n === 100, `a hundred steps on dry ground: ${dryAsks} room lookups; a hundred in the shallows: ${asks.n}`);
+
+// The feet inherit it, which is the point of mending the reader rather than the clause order: the
+// water clause comes first as it always did, and now answers dry, so the room's own floor decides.
+const names = { object: () => null, ground: (t: string) => (t === 'sand' ? 'sand' : null) };
+const source = (surface: number): SurfaceSource => ({
+  waterTop: (x: number, y: number, z: number) => waterTopAt(x, y, z, surface, inCave),
+  roomSurface: () => 'stone',
+  objectTemplate: () => null,
+  groundTemplate: () => 'sand',
+  space: () => null,
+});
+const step = (x: number, y: number, z: number, inside: boolean) => resolveSurface({ x, y, z, inside, player: true, last: null, deck: null }, source(LAKE_TOP), names, FOOT_TUNE);
+ok(step(0, 56, 0, true).surface === 'stone' && step(0, 56, 0, true).from === 'room', 'a foot on that cave floor lands on the room\'s own surface');
+ok(step(200, 73.5, 200, false).surface === null && step(200, 73.5, 200, false).from === 'water', 'and a foot chest deep in the open lake is still swimming, with no feet at all');
+ok(step(200, 74.8, 200, false).surface === 'water' && step(200, 76, 200, false).surface === 'sand', 'ankle deep it wades and up on the shore it is sand: nothing outdoors moves');
+// What the old reader did in that cave, written out so the diff is on the record: the surface alone
+// put 19 m of water over a body standing on dry stone.
+ok(LAKE_TOP - 56 > FOOT_TUNE.swim, `read by height alone that cave floor carried ${LAKE_TOP - 56} m of water, past the ${FOOT_TUNE.swim} m that silences the feet`);
+// And the blade, which never reaches `resolveSurface` at all: its own test is `top > y`. That the
+// real `SaberSounds.ask` takes this branch is pinned where `ask` itself can be run, in
+// `audioRuntime.test.ts`; this is the rule the world hands it.
+ok(!(readWater(0, 56, 0) > 56), 'a lit blade held on that cave floor is not in the water');
+ok(readWater(200, 74, 200) > 74, 'and one held in the lake still is');
+
+// Why the player's swim must **not** read this reader, written down so that moving it onto this one
+// fails here rather than in the water. A room's box is padded and overhangs its hull, so a swimmer
+// can enter one before the doorway is crossed -- swimming down to an entrance that sits under a lake
+// is the plain case -- and the depth the swim works from is `surface - y`. With the room-aware
+// reader that depth is -Infinity, which is not "a little less water": it fails every swim test at
+// once, with no hysteresis able to soften it, so gravity comes back and buoyancy goes mid-stroke.
+// The swim therefore reads `World.waterColumnAt`, which is the lava-filtered column and no room at
+// all, and takes its room rule from the cell the portal renderer walked it through.
+// The player's own threshold is 1.1 m with 0.3 m of slack once swimming; the feet's is close enough
+// to stand for it here and is the one number this file already imports.
+const SWIM_AT = FOOT_TUNE.swim;
+const roomAwareDepth = readWater(0, 60, 0) - 60;
+// `waterColumnAt` is `waterTopAt` with the room rule left out, which on this fixture is the surface
+// it was handed: 15 m of lake stands over that point whether or not a box reaches it.
+const columnDepth = LAKE_TOP - 60;
+ok(roomAwareDepth === -Infinity, 'the room-aware reader hands a point inside a room box a depth of -Infinity');
+ok(!(roomAwareDepth > SWIM_AT - 0.3), 'which fails even the slack an already-swimming body is given: it does not soften the swim, it switches it off');
+ok(columnDepth === 15 && columnDepth > SWIM_AT, 'while the column the swim really reads keeps the 15 m of lake over that point, so a swimmer beside a wall goes on swimming');
 
 console.log(`\n${passed} checks passed`);

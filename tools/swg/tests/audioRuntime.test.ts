@@ -1249,10 +1249,20 @@ const blade = {} as object;
   const host = new SaberFakeHost();
   const sky = { rain: 0 };
   const sea = { top: -1e9 };
+  // A cave cut under the water table, off to the east: the world's own reader answers no water at
+  // all for a point standing in a room, however deep the room's floor is cut, and the fixture is
+  // written as the world writes it so that `ask` is exercised rather than restated. It reads the
+  // height it is handed, so a caller that stopped passing one would fail here.
+  const cave = { x0: 40, x1: 60, y0: -10, y1: 5, z0: -10, z1: 10 };
+  const inCave = (x: number, y: number, z: number): boolean =>
+    x >= cave.x0 && x <= cave.x1 && y >= cave.y0 && y <= cave.y1 && z >= cave.z0 && z <= cave.z1;
   const world: SaberWorld = {
     listenerSpace: { building: 7, cell: 2 },
     weather: { fx: sky, roofs: { topAt: () => -1e9 } },
-    footSurfaces: { waterTop: () => sea.top, space: () => null },
+    footSurfaces: {
+      waterTop: (x: number, y: number, z: number) => (y < sea.top && inCave(x, y, z) ? -Infinity : sea.top),
+      space: (x: number, y: number, z: number) => (inCave(x, y, z) ? { building: 3, cell: 1 } : null),
+    },
   };
   const s = sabersWith(host, { world });
   const b = {} as object;
@@ -1273,6 +1283,23 @@ const blade = {} as object;
   host.now += 1;
   s.hum(b, { x: 1, y: 1, z: 0 }, { x: 1, y: 2, z: 0 }, 1 / 60);
   ok(host.stopped.includes(loop!.key) && host.played.some((p) => p.id === 'jka:boil' && p.loop), 'a blade under water boils in place of its hum');
+  // The same table, the same depth, but the point is inside a cave cut under it: the reader answers
+  // dry for the point, so the blade hums indoors instead of boiling. This is `ask` doing it and not
+  // a restatement of its arithmetic, which is what makes it a guard on the height ever being dropped
+  // from the call again.
+  host.played.length = 0;
+  host.now += 1;
+  s.hum(b, { x: 50, y: 0, z: 0 }, { x: 50, y: 2, z: 0 }, 1 / 60);
+  const own = (s.status() as { blades: { owner: string; underwater: boolean; boiling: boolean; space: number }[] }).blades[0];
+  ok(!own.underwater && !own.boiling && host.played.some((p) => p.loop && p.id.startsWith('jka:hum')), 'a lit blade held in a cave cut under a planet\'s water table hums rather than boiling');
+  // And a blade that is not the player's, which is the one that also asks which room it is in: one
+  // lookup settles both, so it takes that room's sound space and is never under the water there.
+  const other = {} as object;
+  s.ignite(other, true, { x: 50, y: 1, z: 0 });
+  s.hum(other, { x: 50, y: 0, z: 0 }, { x: 50, y: 2, z: 0 }, 1 / 60);
+  const theirs = (s.status() as { blades: { owner: string; underwater: boolean; space: number }[] }).blades.find((v) => v.owner === 'other');
+  ok(!!theirs && !theirs.underwater && theirs.space === 3, 'a fighter\'s blade in that cave is in the cave\'s own sound space and is not in the water either');
+  s.ignite(other, false, { x: 50, y: 1, z: 0 });
   sea.top = -1e9;
   sky.rain = 1;
   host.played.length = 0;

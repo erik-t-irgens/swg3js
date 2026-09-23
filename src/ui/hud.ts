@@ -2,7 +2,7 @@ import type { Kit } from '../combat/kit';
 // The game's own table of worlds, so a roster row names a planet and a zone the way the rest of the
 // game names them rather than inventing words from an id. It is plain data and imports nothing.
 import { PLANETS, type PlanetDef } from '../data/planets.ts';
-import { HUD_SIZES, barBand, clamp01 } from './hudMath.ts';
+import { HUD_SIZES, barBand, breathRow, clamp01, makeBreathRow } from './hudMath.ts';
 import { glyphFor, handGlyph, iconCount, installIcons } from './hudIcons.ts';
 
 /**
@@ -53,6 +53,15 @@ const HINT_ACTIONS: readonly { action: string; word: string }[] = [
  */
 export const HUD_TUNE = {
   barPixels: 320,
+  /**
+   * The breath bar's own step, INVENTED like the rest and deliberately coarser than `barPixels`. The
+   * two bars are told apart by what they do rather than by what they are: health arrives in blows and
+   * wants half a pixel of the bar, so the size of a hit reads; breath is a slow drain and is written
+   * once per pixel of the bar's own length (160 at scale 1), which is the finest a pixel can show.
+   * A whole dive therefore costs at most 160 writes for the bar, spread over however long the breath
+   * lasts, rather than 320.
+   */
+  breathPixels: 160,
   cooldownSteps: 100,
   chargeSteps: 100,
   hurtSteps: 100,
@@ -72,7 +81,7 @@ const ZERO_OK: readonly string[] = ['tickAlpha', 'aimTickAlpha'];
  * The keys `tune` takes. A key that is not one of these is a mistake at the console, and saying so is
  * worth more than quietly accepting it: `Object.assign` took `{ barPixel: 1 }` without a word.
  */
-const TUNE_KEYS = ['barPixels', 'cooldownSteps', 'chargeSteps', 'hurtSteps', 'tickAlpha', 'aimTickAlpha'] as const;
+const TUNE_KEYS = ['barPixels', 'breathPixels', 'cooldownSteps', 'chargeSteps', 'hurtSteps', 'tickAlpha', 'aimTickAlpha'] as const;
 
 /** What `Hud.stats()` reports, filled in place so asking for it allocates nothing. */
 export interface HudStats {
@@ -102,6 +111,18 @@ export interface HudColours {
   readonly void: number;
   readonly hot: number;
   readonly good: number;
+}
+
+/**
+ * A second bar's readout: a word, where it stands and what it stands out of. It is the shape the
+ * class pool has always had (`Resource` in `src/combat/kit.ts`), declared structurally here so that
+ * the breath row can take the same thing from whoever holds the player's breath without this file
+ * learning anything about either of them.
+ */
+export interface BarReadout {
+  readonly label: string;
+  readonly value: number;
+  readonly max: number;
 }
 
 /** Where the keys on the cells come from: the game's own `Input` satisfies it. */
@@ -210,6 +231,23 @@ export class Hud {
   private readonly res: BodyBar;
   private readonly resRow: HTMLElement;
   private readonly resText: HTMLElement;
+  /**
+   * The breath row: the bar, its number, and the row that carries both. It is the **first** row of
+   * the body block, above the health bar, and that is a choice rather than an accident. The block is
+   * anchored at the bottom of the screen and grows upward, so a row put in at the top moves nothing
+   * that is already on the screen: the health bar, the class pool, the ability cells and the hands
+   * all stay exactly where they were, and only the class's name above them is pushed up. A row put in
+   * under the pool would have shifted both bars upward the moment you went under, which is the worst
+   * possible time to move what someone is watching.
+   *
+   * It carries no ghost. The ghost behind the other two bars is there so the size of a *blow* reads,
+   * and breath is not taken in blows: it drains. A ghost would ease down behind it on every frame of
+   * a dive, would never once be seen, and would double the writes the row makes.
+   */
+  private readonly breathBar: HTMLElement;
+  private readonly breathFill: HTMLElement;
+  private readonly breathRowEl: HTMLElement;
+  private readonly breathText: HTMLElement;
   private readonly slotsEl: HTMLElement;
   private readonly hands: HandCell[] = [];
   private readonly help: HTMLElement;
@@ -242,6 +280,25 @@ export class Hud {
   private resShown = true;
   private resTextDrawn = NaN;
   private resLabelDrawn = '';
+  /**
+   * The breath row as it stands: whether it is up, the bar in steps of `breathPixels`, the number and
+   * the word last written, and the band the fill wears (`''` is the resting one, which is no class at
+   * all and so the bar's own colour). `NaN` is "nothing written yet", as it is for the other bars.
+   */
+  private breathShown = false;
+  private breathCur = NaN;
+  private breathTextDrawn = NaN;
+  private breathLabelDrawn = '';
+  /**
+   * The band the bar is wearing. It starts at `good` rather than at nothing because the markup above
+   * carries neither `warn` nor `bad`, which *is* the resting band: starting it empty would have the
+   * row spend two writes on the frame it first comes up toggling two classes off that were never on.
+   * It is deliberately not reset when the row goes down, since the element keeps its classes while it
+   * is hidden and the two would then disagree.
+   */
+  private breathBandDrawn = 'good';
+  /** What `breathRow` fills, kept so that asking about breath allocates nothing in a frame. */
+  private readonly breathOut = makeBreathRow();
   private chargeShown = false;
   private chargeDrawn = NaN;
   private charge = 0;
@@ -275,7 +332,7 @@ export class Hud {
   /** The tighter, brighter crosshair while a shot is being aimed; set by whoever reads the input. */
   private aiming = false;
   /** What `report` hands back: one object, filled in place. */
-  private readonly out = { ops: 0, icons: 0, keys: '', attached: false, crosshair: false, hands: '' };
+  private readonly out = { ops: 0, icons: 0, keys: '', attached: false, crosshair: false, hands: '', breath: '' };
 
   constructor(parent: HTMLElement) {
     this.root = document.createElement('div');
@@ -301,6 +358,10 @@ export class Hud {
       <div class="bottom">
         <div class="class-name"></div>
         <div class="hud-body">
+          <div class="hud-brow breath-row" hidden>
+            <div class="hud-bar breath"><div class="fill"></div></div>
+            <div class="val breath-val"></div>
+          </div>
           <div class="hud-brow hp-row">
             <div class="hud-bar hp"><div class="ghost snap"></div><div class="fill"></div></div>
             <div class="val hp-val"></div>
@@ -334,6 +395,10 @@ export class Hud {
     this.res = { fill: q('.hud-bar.pool > .fill'), ghost: q('.hud-bar.pool > .ghost'), cur: NaN, ghostAt: NaN, snap: true, ghostFor: 0 };
     this.resRow = q('.res-row');
     this.resText = q('.res-val');
+    this.breathRowEl = q('.breath-row');
+    this.breathBar = q('.hud-bar.breath');
+    this.breathFill = q('.hud-bar.breath > .fill');
+    this.breathText = q('.breath-val');
     this.slotsEl = q('.slots');
     this.help = q('.help');
     this.crosshair = q('.crosshair');
@@ -538,11 +603,14 @@ export class Hud {
    * What the on-foot half drew and what it is showing, for the console: a kept object. `keys` is the
    * row of key-caps as it stands, which is how a rebind is checked from a tab nobody can see;
    * `icons` is how many glyphs the page holds, which is 0 while the sheet is still on its way.
+   * `breath` is the breath row as it reads, and an empty string while the row is down, which is the
+   * only way to see it at all from a tab nobody is looking at.
    */
-  report(): { ops: number; icons: number; keys: string; attached: boolean; crosshair: boolean; hands: string } {
+  report(): { ops: number; icons: number; keys: string; attached: boolean; crosshair: boolean; hands: string; breath: string } {
     const o = this.out;
     o.icons = iconCount();
     o.crosshair = this.crosshairShown();
+    o.breath = this.breathShown ? `${this.breathLabelDrawn} ${this.breathTextDrawn}` : '';
     let keys = '';
     for (let i = 0; i < this.kitSlotCount; i++) keys += (keys ? ' ' : '') + keyLabel(this.slots[i].code);
     o.keys = keys;
@@ -577,6 +645,7 @@ export class Hud {
     if (took) {
       this.hp.cur = NaN;
       this.res.cur = NaN;
+      this.breathCur = NaN;
       this.chargeDrawn = NaN;
       this.hurtDrawn = NaN;
     }
@@ -664,7 +733,12 @@ export class Hud {
   // -------------------------------------------------------------------------------------------
   // The frame.
 
-  update(dt: number, x: number, y: number, z: number, kit: Kit, hp: number, maxHp: number, clock: string, creatureName: string, saberOn: boolean): void {
+  /**
+   * One frame of the slow half. `breath` is the player's own breath if they have any to show, and
+   * nothing at all otherwise — which is what dry land hands over, and what every caller written
+   * before there was breath hands over by leaving the argument off.
+   */
+  update(dt: number, x: number, y: number, z: number, kit: Kit, hp: number, maxHp: number, clock: string, creatureName: string, saberOn: boolean, breath?: BarReadout | null): void {
     this.frames++;
     const now = performance.now();
     const acc = (now - this.lastFps) / 1000;
@@ -718,6 +792,8 @@ export class Hud {
         this.writes++;
       }
     }
+    // Breath, which is a row that is not there at all on dry land and costs such a frame nothing.
+    this.setBreath(breath ?? null);
     // The ghosts' eases ending: once a frame, and nothing is written in a steady one.
     this.ageBars(dt);
     // The slot row: `kit.slots` is the kit's own array and is not rebuilt here, and the row's own
@@ -801,6 +877,60 @@ export class Hud {
     bar.cur = steps;
     bar.fill.style.transform = `scaleX(${steps / px})`;
     this.writes++;
+  }
+
+  /**
+   * The breath row. It stands while there is breath to show and it is not full (`breathRow` in
+   * `hudMath`), and it is not on the page at all otherwise — a frame on dry land reaches the first
+   * line, finds the row down and already down, and writes nothing.
+   *
+   * What it costs while it is up: the row appearing is one write, then one per pixel of the bar's own
+   * length as it drains (`HUD_TUNE.breathPixels`), one per change of the number beside it, two on
+   * each of the at most two changes of band, and one as the row goes down again. Nothing is compared
+   * against the page: what was written is remembered here, as everywhere else in this file.
+   *
+   * The band is two class toggles rather than one because the resting colour is no class at all —
+   * the bar wears the interface's own accent from `.hud-bar > .fill`, which is the stylesheet's
+   * default and the one colour on the block that is neither health nor the class pool.
+   */
+  private setBreath(r: BarReadout | null): void {
+    const b = breathRow(r ? r.value : 0, r ? r.max : 0, this.breathOut);
+    const show = !!r && b.show;
+    if (show !== this.breathShown) {
+      this.breathShown = show;
+      this.breathRowEl.hidden = !show;
+      this.writes++;
+      // Whatever it held when it went down is written again from scratch the next time it comes up,
+      // so a row that comes back never shows the last dive's number for a frame.
+      if (!show) {
+        this.breathCur = NaN;
+        this.breathTextDrawn = NaN;
+        this.breathLabelDrawn = '';
+      }
+    }
+    if (!show || !r) return;
+    const px = Math.max(1, HUD_TUNE.breathPixels);
+    const steps = Math.round(b.share * px);
+    if (steps !== this.breathCur) {
+      this.breathCur = steps;
+      this.breathFill.style.transform = `scaleX(${steps / px})`;
+      this.writes++;
+    }
+    if (b.band !== this.breathBandDrawn) {
+      this.breathBandDrawn = b.band;
+      this.breathBar.classList.toggle('warn', b.band === 'warn');
+      this.breathBar.classList.toggle('bad', b.band === 'bad');
+      this.writes += 2;
+    }
+    // Ceiling, not rounding, and for the health bar's own reason two centimetres below it: a thing
+    // that is still there must never read nought. Rounded, the last half-second of air says "0".
+    const shown = Math.ceil(r.value);
+    if (shown !== this.breathTextDrawn || r.label !== this.breathLabelDrawn) {
+      this.breathTextDrawn = shown;
+      this.breathLabelDrawn = r.label;
+      this.breathText.textContent = `${r.label} ${shown}`;
+      this.writes++;
+    }
   }
 
   private writeGhost(bar: BodyBar, steps: number, px: number): void {

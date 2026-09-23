@@ -853,7 +853,7 @@ export class CombatSounds {
   overWater(x: number, y: number, z: number): boolean {
     const w = this.world;
     if (!w) return false;
-    const top = w.waterTop(x, z);
+    const top = w.waterTop(x, y, z);
     return Number.isFinite(top) && top > y;
   }
 

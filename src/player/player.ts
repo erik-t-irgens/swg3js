@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import type { ClassId } from '../combat/kit';
+import type { ClassId, Resource } from '../combat/kit';
 import type { ThirdPersonCamera } from '../core/camera';
 import type { Input } from '../core/input';
 import { Group, groups, RAPIER, type Physics } from '../core/physics';
@@ -18,6 +18,7 @@ import { FIGHTS, OFF_HAND, gunKindOf, isSaber, type WeaponClass, type WeaponDef 
 import { STYLES, type SaberStyle } from '../combat/saber';
 import { SaberBlade } from '../combat/saberBlade';
 import { stepBurn as spendBurn } from '../combat/burnMath.ts';
+import { breathReport, maxBreath, newBreath, resetBreath, stepBreath as spendBreath, tuneBreath, type Breath, type BreathTune } from './breathMath.ts';
 
 /**
  * The two lines a fire says, and the only two: one when you catch, one when it goes out, and
@@ -27,6 +28,22 @@ import { stepBurn as spendBurn } from '../combat/burnMath.ts';
  */
 const BURN_LIT = 'you are on fire';
 const BURN_OUT = 'the fire is out';
+
+/**
+ * The two lines a dive says, and the only two: one when the head has been under long enough to be
+ * worth saying and one when it comes up. Nothing at all in between, and in particular **nothing per
+ * drowning blow**: the message line merges a repeat within two seconds into a rising count, so a
+ * line a second would bury everything else the game says while the one thing that matters -- the
+ * screen flashing and the health bar going down -- is already on the screen.
+ *
+ * They are ours, like every other word and number about breath, because there was no going under
+ * water in the game at all. They are here rather than in the pure module because they are words.
+ */
+const BREATH_SHORT = 'you are holding your breath';
+const BREATH_BACK = 'you can breathe again';
+
+/** The display's name for the breath row; the row itself is `src/ui/hud.ts`'s. */
+const BREATH_LABEL = 'Breath';
 
 // The original game's run is 5.375 m/s; the character stands about 1.75 m.
 const RUN_SPEED = 5.5;
@@ -244,6 +261,13 @@ export class Player {
   swimming = false;
   /** Swimming with the head under the surface (diving). */
   submerged = false;
+  /**
+   * The air in the lungs (`src/player/breathMath.ts`, which owns every rule about it). It lives on
+   * the body rather than on the world's player record, which is where the fire lives, because
+   * nothing outside ever *gives* anybody a breath: it is spent by being under water, which is a
+   * thing this file already knows and nothing else does.
+   */
+  private readonly air: Breath = newBreath();
   heading = 0;
   speedMultiplier = 1;
   saberOn = false;
@@ -623,6 +647,10 @@ export class Player {
     // on the fresh body the moment the respawn simulated a frame -- with `said` already true, so it
     // would eat the new health bar without a word and then announce that it had gone out.
     this.dropBurn();
+    // And the lungs, for the same reason and in the same breath: a body that drowned and was stood
+    // up again would otherwise come back with no air in it and take its first blow a second later,
+    // with `said` already true, so nothing would have told it to hold its breath.
+    this.dropBreath();
     if (this.ragdoll || !this.rig) return;
     this.saber.holster();
     this.thrown.cancel();
@@ -671,6 +699,17 @@ export class Player {
     // death itself) and it covers every way a body is stood up fresh -- the respawn, an arrival, the
     // console's own teleport.
     this.dropBurn();
+    // Whole means a lungful too: this is the second of the two guards on the breath (the first is at
+    // the death itself) and it is what makes a travel taken mid-dive arrive with full lungs, in
+    // silence, rather than drowning the player on the far side of a loading screen.
+    this.dropBreath();
+    // And out of the water, which is not the same thing as having air. A body stood up somewhere is
+    // stood up dry: leaving these two standing meant the first simulated frame of the new world
+    // stepped the breath as a dive (the swim block has not run yet to say otherwise), and worse,
+    // that a world with no swim block to run at all -- space, where `update` returns at the EVA
+    // branch -- kept the last dive's verdict for ever and drowned the player in vacuum.
+    this.swimming = false;
+    this.submerged = false;
     this.swing = -1;
     this.jka.reset();
     this.saber.holster();
@@ -1372,6 +1411,114 @@ export class Player {
     this.world?.playerTarget.clearBurn();
   }
 
+  /**
+   * The breath as the display reads it, or **null when there is nothing to show** -- which is every
+   * frame on dry land, and is what lets the row be absent rather than empty. It is the same
+   * `{ label, value, max }` shape the class pool has (`Kit.resource`), so the row that draws it is
+   * the row that already draws one, and it is deliberately a second field rather than a borrowing of
+   * that one: the Bounty Hunter has no class pool at all, so there is no slot to borrow.
+   *
+   * One kept object, written in place. A getter that built one would put an object into every frame
+   * of every dive, and the display reads it once a frame.
+   */
+  get breath(): Resource | null {
+    const b = this.air;
+    const max = maxBreath();
+    // A lungful of no seconds at all has no bar to draw: a row with `max` 0 is a length the display
+    // would have to divide by. `tuneBreath` refuses to write one, so this is only reachable by
+    // writing the number itself, and the honest answer is the same as dry land -- there is nothing
+    // to show. The display guards this too; a getter that hands out a shape nobody can draw is this
+    // file's own fault and not the row's.
+    if (max <= 0) return null;
+    // Full and not under: nothing to draw. `left` reaches `max` exactly (the recovery clamps to it),
+    // so this is a real equality and not a threshold that could leave a hairline of bar on screen.
+    if (!b.under && b.left >= max) return null;
+    const r = this.breathRes;
+    r.value = b.left;
+    r.max = max;
+    return r;
+  }
+
+  /** The kept reading behind `breath`; its label never changes and is written once. */
+  private readonly breathRes: Resource = { label: BREATH_LABEL, value: 0, max: 0 };
+
+  /** Seconds of air left, for anything that wants the number without the display's shape. */
+  get breathLeft(): number {
+    return this.air.left;
+  }
+
+  /**
+   * The breath: the numbers in force and the air as it stands, with the console's own knob
+   * (`__debug.breath`). Every one of them is **ours** -- there was no going under water in the game
+   * at all, so there is no table to be faithful to and nothing here is the client's.
+   *
+   * `breath({ on: false })` is the switch that makes the game exactly what it was: the lungs go back
+   * to full there and then, rather than at the next step, because the step is in `update`, which
+   * does not run while a panel is open. `breath({ full: true })` fills them without changing a
+   * number, which is how to climb out of a dive from the console.
+   */
+  setBreath(tune?: BreathTune & { full?: boolean }): ReturnType<typeof breathReport> & { hp: number } {
+    if (tune) {
+      tuneBreath(tune);
+      if (tune.on === false || tune.full) resetBreath(this.air);
+    }
+    return { ...breathReport(this.air), hp: Math.round(this.hp * 10) / 10 };
+  }
+
+  /**
+   * The air, spent under water and recovered out of it. Beside the fire and the regeneration delay
+   * in `update`, deliberately and for the same reasons: the three pause together with a panel, step
+   * together under `__debug.advance`, and every drowning blow sets the regeneration delay afresh, so
+   * nothing can be healing while the lungs are empty.
+   *
+   * What counts as under is `submerged` (the head below the surface, which the swim block works out
+   * from the **lava-filtered** water height, so a flow is not something you can drown in) and the
+   * four states in which this body is not in the water at all whatever `submerged` says: riding,
+   * noclipping, adrift in space, and standing in a hull's rooms.
+   *
+   * All four of those return from `update` **before** the swim block, so none of them has anything
+   * to write a fresh verdict with, and this used to be the only thing standing between a stale
+   * `submerged` and a drowning. Naming them is now the second line and not the first: every one of
+   * those four branches puts `submerged` down for itself, beside the `swimming` it was already
+   * putting down (`board`, `mount`, `evaUpdate`, `flyUpdate`), and so does `reset`, which is every
+   * way a body is stood up somewhere fresh. The rule those enforce is that `submerged` is never true
+   * while `swimming` is false -- the swim block only ever sets it from `swimming` -- so a leftover
+   * is now an impossible state rather than a state this one test has to catch. The test stays
+   * because it is four properties on a record and the thing it would cost to be wrong about is a
+   * player drowning in vacuum.
+   *
+   * It does not take the damage off directly: it hands it to the world's player record, which is the
+   * path that applies the regeneration lockout and raises the red flash, with **no direction**, so
+   * the screen flashes and no arc points anywhere -- there is no side that water is on. And it
+   * passes no `source`, so nothing anywhere is blamed for it.
+   */
+  private stepBreath(dt: number, world: World): void {
+    const under = this.submerged && !this.mounted && !this.noclip && !this.eva && !this.aboard;
+    const r = spendBreath(this.air, dt, under);
+    if (r.started) world.onNote?.(BREATH_SHORT);
+    if (r.damage > 0) world.playerTarget.damage(r.damage);
+    // Surfacing and drowning cannot fall on the same step (one needs the head out, the other needs
+    // it in), so the order of these two is a matter of reading rather than of arithmetic.
+    //
+    // `hp > 0` is the same guard the fire's last line carries two methods above, and for the same
+    // reason: "you can breathe again" over your own corpse is the one moment this line reads as a
+    // joke. A body with a rig never reaches it -- `update` returns at its first line for as long as
+    // the ragdoll is up -- but the placeholder body has no rig, `startRagdoll` returns before it
+    // sets `ragdoll`, and `update` goes on running for the second and a half the death card takes,
+    // which is long enough to refill the lungs over a corpse and say so.
+    if (r.ended && this.hp > 0) world.onNote?.(BREATH_BACK);
+  }
+
+  /**
+   * The lungs full again and the dive forgotten, in silence, because this is no longer the body that
+   * took the breath: it has died, or it has been stood up whole somewhere (a respawn, an arrival on
+   * another world, the console's own teleport). `resetBreath` puts `said` back with the rest, so
+   * nothing announces that a drowning body can breathe again.
+   */
+  private dropBreath(): void {
+    resetBreath(this.air);
+  }
+
   bladeSegment(a: THREE.Vector3, b: THREE.Vector3): void {
     this.parts.saber.getWorldPosition(a);
     this.parts.bladeTip.getWorldPosition(b);
@@ -1393,6 +1540,12 @@ export class Player {
     this.vel.set(0, 0, 0);
     this.swing = -1;
     this.eva = false;
+    // Out of the water by the act of getting on, as `board` already does for a ship's rooms. A rider
+    // returns from `update` before the swim block, so anything left standing here is last frame's
+    // for as long as the ride lasts -- and rides end in other worlds. `submerged` is only ever
+    // meaningful while `swimming` is, so the two go together wherever either is put down.
+    this.swimming = false;
+    this.submerged = false;
     this.flung = false;
     // The rider starts straight: no twist toward the view or aim carried over from on foot (nor back onto the ground after).
     this.torsoTwist = 0;
@@ -1481,7 +1634,11 @@ export class Player {
     this.pos.y += mv.y;
     this.pos.z += mv.z;
     this.grounded = false;
+    // There is no water out here and no swim block on this path to say so: this branch returns from
+    // `update` before it. `submerged` goes down with `swimming` because a verdict left standing here
+    // is left standing for the whole spacewalk.
     this.swimming = false;
+    this.submerged = false;
     this.body.setNextKinematicTranslation({ x: this.pos.x, y: this.pos.y, z: this.pos.z });
     this.heading = Math.atan2(evaFwd.x, evaFwd.z);
     this.group.position.copy(this.pos);
@@ -1596,6 +1753,11 @@ export class Player {
     // because every blow it lands sets the delay above afresh. Before the mounted branch below, so a
     // rider goes on burning; the blow itself is refused for them by the record's own callback.
     this.stepBurn(dt, world);
+    // And the air, on the same clock and in the same place. It reads `submerged` as the last swim
+    // block left it, which is one frame old on the frame the head goes under and one frame old on
+    // the frame it comes up: a sixtieth of a second either way on a thirty-second lungful, and the
+    // price of it being here, where a panel pauses it exactly as it pauses the regeneration.
+    this.stepBreath(dt, world);
 
     if (this.swing >= 0) {
       this.swing += dt / SWING_TIME;
@@ -1682,16 +1844,26 @@ export class Player {
     // Water: the surface here, and how deep the body sits in it. Swimming starts when the
     // chest is under; the head stays above the surface unless the player dives.
     //
-    // The height asked for is the **lava-filtered** one, which is the very answer the feet already
-    // take (`World.footSurfaces.waterTop`) and not `terrain.waterHeightAt`: a flow is water to the
-    // terrain and is water to nothing else, so reading the terrain's own height had the player wade
-    // into a flow and then swim strokes in it. With the flow filtered out there is no surface over
-    // the point at all, so the body walks the bed of the flow under its own gravity and burns where
-    // it stands, which is the harm's business and not this file's.
-    const surface = this.aboard ? -1e9 : world.footSurfaces.waterTop(this.pos.x, this.pos.z);
+    // The height asked for is the **lava-filtered column** (`World.waterColumnAt`) and not
+    // `terrain.waterHeightAt`: a flow is water to the terrain and is water to nothing else, so
+    // reading the terrain's own height had the player wade into a flow and then swim strokes in it.
+    // With the flow filtered out there is no surface over the point at all, so the body walks the
+    // bed of the flow under its own gravity and burns where it stands, which is the harm's business
+    // and not this file's.
+    //
+    // It is deliberately **not** `footSurfaces.waterTop`, which the feet, the blade and the bolts
+    // read: that one also answers -Infinity for a point standing in a room's box, and a swimmer who
+    // consumed that would read a depth of -Infinity and lose the water from under them -- gravity
+    // back, buoyancy gone, the saber out again -- while the screen, which reads the tracked cell
+    // instead, stayed tinted blue. Room boxes are padded and overhang their hulls, and swimming down
+    // to an entrance that sits under a lake puts the point inside one before the doorway is crossed.
+    // This body has the better room rule and uses it on the next line.
+    const surface = this.aboard ? -1e9 : world.waterColumnAt(this.pos.x, this.pos.z);
     const depth = surface - this.pos.y;
-    // Interiors can sit below a lake (the Gungan cities do) and are never water. Once
-    // swimming, a little slack keeps the float line from flickering between states.
+    // Interiors can sit below a lake (the Gungan cities do) and are never water. `inside` is the
+    // cell the frame tracks through doorways -- walked into rather than read off a box -- which is
+    // the answer only the player has and is why the swim needs no box test. Once swimming, a little
+    // slack keeps the float line from flickering between states.
     this.swimming = !this.inside && depth > (this.swimming ? SWIM_DEPTH - 0.3 : SWIM_DEPTH);
     this.submerged = this.swimming && depth > DIVE_DEPTH;
 
@@ -2276,7 +2448,10 @@ export class Player {
     this.pos.addScaledVector(move, speed * dt);
     this.vel.set(0, 0, 0);
     this.grounded = false;
+    // Noclip returns from `update` before the swim block too, so the same rule holds: the two go
+    // down together, or a dive flown out of is still a dive to everything that reads it.
     this.swimming = false;
+    this.submerged = false;
     const desired = Math.atan2(fwd.x, fwd.z);
     let diff = desired - this.heading;
     diff = Math.atan2(Math.sin(diff), Math.cos(diff));

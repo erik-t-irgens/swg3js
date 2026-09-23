@@ -93,8 +93,14 @@ export interface FootGround {
  * sound packs.
  */
 export interface SurfaceSource {
-  /** The height of the water surface over a point, or -Infinity where there is none. */
-  waterTop(x: number, z: number): number;
+  /**
+   * The height of the water surface over a point, or -Infinity where there is none. The point's own
+   * height is asked for as well as its column, because a room is never under the planet's water
+   * however deep its floor stands (`waterTopAt` in `src/world/waterLineMath.ts`): caves and bunkers
+   * really do sit below a water table, and by column alone the feet in them wade and a lit blade
+   * boils.
+   */
+  waterTop(x: number, y: number, z: number): number;
   /** The interior table's surface for the room a point is in (`metal`, `carpet`). */
   roomSurface(x: number, y: number, z: number): string | null;
   /**
@@ -274,8 +280,11 @@ export function surfaceWord(path: string | null | undefined, table?: Record<stri
 
 /** What one foot landing at a point lands on. Pure: it asks the four sources in the client's order. */
 export function resolveSurface(q: { x: number; y: number; z: number; inside: boolean; player: boolean; last: string | null; deck?: string | null }, world: SurfaceSource, names: SurfaceNames, tune: FootTune): { surface: string | null; from: FootSource } {
-  // 1. Water. Deep enough and it is swimming, which has a voice of its own and no feet.
-  const top = world.waterTop(q.x, q.z);
+  // 1. Water. Deep enough and it is swimming, which has a voice of its own and no feet. The world's
+  // reader takes the room the point is in into account itself, so a cave under a lake answers dry
+  // here and falls through to its own floor below -- which is why this clause stays first and the
+  // fix is not an ordering of clauses: the blade, which never reaches this function, needs it too.
+  const top = world.waterTop(q.x, q.y, q.z);
   if (Number.isFinite(top)) {
     const depth = top - q.y;
     if (depth > tune.swim) return { surface: null, from: 'water' };
@@ -725,7 +734,7 @@ export class BodySounds {
     // Asked once each and handed to the resolver, so the ray down is cast once rather than twice.
     const object = w.objectTemplate(x, y, z, inside);
     const ground = w.groundTemplate(x, z);
-    const top = w.waterTop(x, z);
+    const top = w.waterTop(x, y, z);
     const room = inside ? w.roomSurface(x, y, z) : null;
     const once: SurfaceSource = { waterTop: () => top, roomSurface: () => room, objectTemplate: () => object, groundTemplate: () => ground, space: () => null };
     const r = resolveSurface({ x, y, z, inside, player, last: null }, once, this.names, this.tune);

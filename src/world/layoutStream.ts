@@ -906,6 +906,23 @@ export class LayoutStreamer {
     return null;
   }
 
+  /**
+   * Whether a world point stands in any streamed building's room: the same walk `buildingAt` makes,
+   * asked as a yes or no. It is a method of its own and not a `!== null` on that one because
+   * **`buildingAt` allocates** -- `{ building, cell }` is a fresh object on every hit -- and the
+   * water rule in `World.footSurfaces.waterTop` is asked wherever a foot lands, a blade is lit or a
+   * bolt stops. `cellAt` hands back a number and allocates nothing, so this walk is the prefilter's
+   * two compares per streamed portal building, the cell boxes of whichever one holds the point, and
+   * no garbage at all.
+   */
+  indoorsAt(pos: THREE.Vector3): boolean {
+    for (const b of this.buildings) {
+      if (Math.abs(b.x - pos.x) > b.radius + 4 || Math.abs(b.z - pos.z) > b.radius + 4) continue;
+      if (this.cellAt(b, pos) > 0) return true;
+    }
+    return false;
+  }
+
   /** The cell of a building whose bounds hold a world point (smallest first), or 0 for none. */
   cellAt(b: Building, pos: THREE.Vector3): number {
     localA.copy(pos).applyMatrix4(b.inverse);

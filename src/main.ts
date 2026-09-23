@@ -158,6 +158,7 @@ import { RoomAir, type RoomAirDebugOptions, type RoomAirInput } from './world/ro
 import { UnderwaterSpecksPass, type UnderwaterSpeckDebugOptions } from './world/underwaterSpecks.ts';
 import type { LavaHarmTune } from './world/lavaHarmMath.ts';
 import type { PlayerBurnTune } from './combat/burnMath.ts';
+import type { BreathTune } from './player/breathMath.ts';
 import { configureWaterSim, pokeWaterSim, waterSimDebug, WATER_SIM_DRAFT, WATER_SIM_IMPACT, WATER_SIM_SPEED } from './world/waterSim';
 import { RANGE } from './world/gallery';
 import { castsShadow, surfaces } from './world/surfaces';
@@ -1812,6 +1813,18 @@ class App {
        * both of those want a visible frame to be seen at all.
        */
       burn: (tune?: PlayerBurnTune & { light?: { dps: number; seconds: number }; out?: boolean }) => this.world.setPlayerBurn(tune),
+      /**
+       * Breath: the numbers in force and the air as it stands. Every one of them is **ours** and
+       * there was nothing to copy -- you could not go under water in the game at all, so there is no
+       * table, no column and no default anywhere in the archives for any of it.
+       *
+       * `seconds` is a full lungful, `recoverSeconds` how long a full one takes to come back in air,
+       * `tick` how often a blow lands once the air is gone, `damage` what one blow takes (0 is a
+       * breath that costs nothing to run out of), and `sayAfter` the patience at both ends of a dive,
+       * which is what keeps a swimmer bobbing for mouthfuls from saying two lines a bob. `full` fills
+       * the lungs now. Nothing here is saved and nothing rebuilds a program.
+       */
+      breath: (tune?: BreathTune & { full?: boolean }) => this.player.setBreath(tune),
       /**
        * The heat haze: what drew last frame and why it did not, with console tuning (`show` tints the
        * hot air cyan, `clientOffset`, `gate`, `fadeStart`, `fadeEnd`, `lift`, `plumeRange`,
@@ -3569,7 +3582,7 @@ class App {
       },
       player: () => {
         const p = this.player;
-        return { hp: Number(p.hp.toFixed(1)), blocking: p.blocking, aiming: p.aiming, gunReady: p.gunReady, prone: p.prone, kneeling: p.kneeling, crouching: p.crouching, jkaMode: p.jkaMode, rig: p.rig?.describe() ?? null, pos: p.pos.toArray().map((v) => Number(v.toFixed(2))), camera: this.cam.camera.position.toArray().map((v) => Number(v.toFixed(2))), vel: p.vel.toArray().map((v) => Number(v.toFixed(2))), grounded: p.grounded, heading: Number(((p.heading * 180) / Math.PI).toFixed(0)), cameraYaw: Number(((Math.atan2(this.cam.camera.getWorldDirection(new THREE.Vector3()).x, this.cam.camera.getWorldDirection(new THREE.Vector3()).z) * 180) / Math.PI).toFixed(0)), swimming: p.swimming, submerged: p.submerged, water: this.world.terrain.waterHeightAt(p.pos.x, p.pos.z), swimWater: this.world.footSurfaces.waterTop(p.pos.x, p.pos.z), ground: this.world.terrain.heightAt(p.pos.x, p.pos.z), captured: this.input.captured };
+        return { hp: Number(p.hp.toFixed(1)), blocking: p.blocking, aiming: p.aiming, gunReady: p.gunReady, prone: p.prone, kneeling: p.kneeling, crouching: p.crouching, jkaMode: p.jkaMode, rig: p.rig?.describe() ?? null, pos: p.pos.toArray().map((v) => Number(v.toFixed(2))), camera: this.cam.camera.position.toArray().map((v) => Number(v.toFixed(2))), vel: p.vel.toArray().map((v) => Number(v.toFixed(2))), grounded: p.grounded, heading: Number(((p.heading * 180) / Math.PI).toFixed(0)), cameraYaw: Number(((Math.atan2(this.cam.camera.getWorldDirection(new THREE.Vector3()).x, this.cam.camera.getWorldDirection(new THREE.Vector3()).z) * 180) / Math.PI).toFixed(0)), swimming: p.swimming, submerged: p.submerged, water: this.world.terrain.waterHeightAt(p.pos.x, p.pos.z), swimWater: this.world.waterColumnAt(p.pos.x, p.pos.z), footWater: this.world.footSurfaces.waterTop(p.pos.x, p.pos.y, p.pos.z), inRoom: this.world.indoorsAt(p.pos.x, p.pos.y, p.pos.z), trackedRoom: this.world.inside, ground: this.world.terrain.heightAt(p.pos.x, p.pos.z), captured: this.input.captured };
       },
     };
 
@@ -9581,7 +9594,9 @@ class App {
         this.nearbyClock = 1 / Math.max(1, HUD_WIRING.nearbyHz);
         this.nearbyName = this.nearbyLabel(at);
       }
-      this.hud.update(dt, at.x, at.y, at.z, this.kit, player.hp, player.maxHp, this.world.day.clock(), this.nearbyName, player.saberOn);
+      // The breath goes last: it is null on dry land and with a full lungful, and the row is not on
+      // the page at all while it is, so an ordinary frame writes nothing for it.
+      this.hud.update(dt, at.x, at.y, at.z, this.kit, player.hp, player.maxHp, this.world.day.clock(), this.nearbyName, player.saberOn, player.breath);
       // The tighter crosshair while a shot is aimed, and the plate over whatever it rests on. The
       // crosshair is cast from the camera, so the eye and the direction are read straight out of its
       // world matrix into two kept vectors: column 3 is where it stands, column 2 negated is where
