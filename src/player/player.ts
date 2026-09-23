@@ -17,6 +17,16 @@ import type { CharacterRig, RigState } from './rig';
 import { FIGHTS, OFF_HAND, gunKindOf, isSaber, type WeaponClass, type WeaponDef } from './weapons';
 import { STYLES, type SaberStyle } from '../combat/saber';
 import { SaberBlade } from '../combat/saberBlade';
+import { stepBurn as spendBurn } from '../combat/burnMath.ts';
+
+/**
+ * The two lines a fire says, and the only two: one when you catch, one when it goes out, and
+ * nothing at all in between. They are ours -- the client's own fire state is a chime and a look and
+ * it said no words -- and they are here rather than in the pure module because they are words, which
+ * a node test has nothing useful to say about.
+ */
+const BURN_LIT = 'you are on fire';
+const BURN_OUT = 'the fire is out';
 
 // The original game's run is 5.375 m/s; the character stands about 1.75 m.
 const RUN_SPEED = 5.5;
@@ -605,6 +615,14 @@ export class Player {
    * camera keeps following `pos`, which follows the body from now on.
    */
   startRagdoll(): void {
+    // The fire goes out with the body, in silence, and **before** the early return, because a body
+    // with no rig dies just as thoroughly. This is the one place a death can be caught: the whole
+    // death card is unsimulated, so nothing in the world's own step runs between the blow that kills
+    // and the respawn, and `update` below returns at its first line for as long as the ragdoll is
+    // up, so nothing spends the burn either. Left standing, a burn with seconds on it would resume
+    // on the fresh body the moment the respawn simulated a frame -- with `said` already true, so it
+    // would eat the new health bar without a word and then announce that it had gone out.
+    this.dropBurn();
     if (this.ragdoll || !this.rig) return;
     this.saber.holster();
     this.thrown.cancel();
@@ -648,6 +666,11 @@ export class Player {
     this.vel.set(0, 0, 0);
     this.grounded = true;
     this.hp = this.maxHp;
+    // Whole again means not alight either: health back and a fire still burning would be a body put
+    // together from two different moments. It is the second of the two guards (the first is at the
+    // death itself) and it covers every way a body is stood up fresh -- the respawn, an arrival, the
+    // console's own teleport.
+    this.dropBurn();
     this.swing = -1;
     this.jka.reset();
     this.saber.holster();
@@ -1304,6 +1327,51 @@ export class Player {
     this.hp = Math.min(this.maxHp, this.hp + amount);
   }
 
+  /**
+   * A fire the player is carrying, spent. The burn itself lives on the world's player record
+   * (`PlayerTarget.burn`), because `afflict` is the one contract a striker has ever reached; what
+   * happens here is the **spending** of it, deliberately beside the regeneration delay in `update`,
+   * so the two pause and step together and neither can ever run while the other does not.
+   *
+   * Three things it does not do. It does not take the damage off directly: it hands it to the
+   * record's own `damage`, which is the path that applies the regeneration lockout and raises the
+   * red flash, with **no direction**, so the screen flashes and no arc points anywhere -- a fire is
+   * on you and not off to one side of you. It does not say a word per blow: one line when you catch
+   * and one when it goes out, because the message line merges a repeat within two seconds into a
+   * rising count that would bury everything else the game says. And it does not end a fire that has
+   * become impossible: a fire ends where the body does (`startRagdoll`, `reset`) or where the world
+   * does (`World.unload`), which are the three moments this step is never called in.
+   *
+   * A burn that is not burning costs one property read, which is why it is called unconditionally.
+   */
+  private stepBurn(dt: number, world: World): void {
+    const t = world.playerTarget;
+    if (!t.burning) return;
+    const r = spendBurn(t.burn, dt);
+    if (r.started) world.onNote?.(BURN_LIT);
+    // Mounted, the record's own callback refuses the blow, exactly as it refuses every other blow
+    // on a rider; the fire goes on burning and is seen and heard, and it costs the rider nothing.
+    if (r.damage > 0) t.damage(r.damage);
+    // And if that last blow was the one that finished you, nothing is said: "the fire is out" over
+    // your own corpse, on the very frame the death card comes up, is the one moment this line reads
+    // as a joke. `hp` is read after the blow rather than predicted from it, because a blow the
+    // game's own rule refuses (a rider's) takes nothing off and should still end with the words.
+    if (r.ended && this.hp > 0) world.onNote?.(BURN_OUT);
+  }
+
+  /**
+   * The fire out and forgotten, in silence, because this is no longer the body that caught it: it
+   * has died, or it has been stood up whole somewhere. The burn itself lives on the world's player
+   * record, so this is one hop through the world the last `update` was given -- null before the
+   * first, which is exactly when there is nothing to put out.
+   *
+   * Silence is the point: `clearBurn` puts `said` back with the rest, so nothing is announced about
+   * a fire that ended because the body did, and the next one says its own first line.
+   */
+  private dropBurn(): void {
+    this.world?.playerTarget.clearBurn();
+  }
+
   bladeSegment(a: THREE.Vector3, b: THREE.Vector3): void {
     this.parts.saber.getWorldPosition(a);
     this.parts.bladeTip.getWorldPosition(b);
@@ -1523,6 +1591,11 @@ export class Player {
     }
     this.regenDelay = Math.max(0, this.regenDelay - dt);
     if (this.regenDelay <= 0 && this.hp < this.maxHp) this.hp = Math.min(this.maxHp, this.hp + 4 * dt);
+    // And the fire, on that same clock and in that same place: a panel pauses both alike, both step
+    // under `__debug.advance`, and a burn keeps the regeneration locked out for as long as it lasts
+    // because every blow it lands sets the delay above afresh. Before the mounted branch below, so a
+    // rider goes on burning; the blow itself is refused for them by the record's own callback.
+    this.stepBurn(dt, world);
 
     if (this.swing >= 0) {
       this.swing += dt / SWING_TIME;

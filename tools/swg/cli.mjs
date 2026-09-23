@@ -154,7 +154,7 @@ import { convertSoundPlaces, placesStatus } from './soundplaces.mjs';
 import { clipEventStatus, convertClipEvents } from './clipevents.mjs';
 import { convertJkaSounds, jkaSoundStatus } from './jkasound.mjs';
 import { convertShipSounds, shipSoundStatus } from './shipsounds.mjs';
-import { forcePowersStatus } from './weapons.mjs';
+import { extraEffectsStatus, forcePowersStatus } from './weapons.mjs';
 import { nameLocomotion } from './clipnames.mjs';
 import { moodEntries } from './moods.mjs';
 import { core3MobileStats, mobileTemplates, scanServerSpawns } from './spawns.mjs';
@@ -1902,6 +1902,17 @@ function packStatus(dir) {
     console.log(`  weapons: ${weapons.weapons?.length ?? 0} on the rack, ${weapons.skipped?.length ?? 0} left out; ${items.named} named, ${items.slotted} with slots, ${items.iconed} icons, ${perSurface} of ${withFx.length} with every sound their effect names`);
     if (items.missingKeys) need(`weapons <swg-dir> ${dir} --retail-only`, 'the weapons carry no names, slots or icons (the backpack needs them)');
     else if (withFx.length && !perSurface) need(`weapons <swg-dir> ${dir} --retail-only`, 'the weapons keep one sound per effect (a bolt into water, into the ground or into nothing falls back on the plain blaster)');
+    // The effects beyond the guns' own rows: the held triggers' beams and the burn a body wears when
+    // it has been set alight. Every one of them is in the retail archives, so anything missing is a
+    // rerun away and this asks rather than fails. One ask names all of them: the burn used to have a
+    // branch of its own that swallowed the others, so a pack short of the ice beam as well was never
+    // told about it until the burn was mended.
+    const fx = extraEffectsStatus(weapons.effects);
+    console.log(`  weapon effects: ${fx.line}`);
+    if (fx.missing.length) {
+      const alight = fx.missing.includes('onfire') ? '; a body set alight is drawn with no fire at all until it is there' : '';
+      need(`weapons <swg-dir> ${dir} --retail-only`, `the pack has no ${fx.missing.join(', ')} effect${fx.missing.length > 1 ? 's' : ''}${alight}`);
+    }
     // The Force's own effects travel in the same pack. A pack converted before them has no `powers`
     // block at all and every power throws the same spark; an older block is asked for again too.
     const force = forcePowersStatus(weapons.powers);
@@ -3394,7 +3405,7 @@ switch (cmd) {
     const vfs = mount(pos[1]);
     const outDir = join(pos[2], 'weapons');
     mkdirSync(outDir, { recursive: true });
-    const { buildForcePowers, buildWeapons, forceBeamImage, WEAPON_CLASSES } = await import('./weapons.mjs');
+    const { buildForcePowers, buildWeapons, forceBeamImage, EXTRA_EFFECTS, WEAPON_CLASSES, wornOnABody } = await import('./weapons.mjs');
     // The backpack's names, descriptions, hands and pictures (items.mjs, thumbnail.mjs); --no-icons draws none, and
     // then no texture entry carries the reduced copy the pictures are drawn from.
     const itemCaches = newItemCaches();
@@ -3525,12 +3536,25 @@ switch (cmd) {
     };
     const limit = options.limit ? Number(options.limit) : Infinity;
     const { weapons, skipped } = buildWeapons(galleryTemplates(vfs, 'object/weapon/'), { convert, fxFor, describe: (template, id) => describeItem(vfs, template, id, itemCaches) }, { log: console.log, limit });
-    // Effects the new gun types need beyond their own rows: the flame thrower's and the lightning rifle's beams, the lightning's muzzle.
+    // Effects beyond the guns' own rows (EXTRA_EFFECTS in weapons.mjs): the held triggers' beams,
+    // the lightning's muzzle, and the burn a body that has been set alight wears.
     const effects = {};
-    for (const [name, prt] of [['flame', 'appearance/pt_beam_flame_thrower.prt'], ['lightning', 'appearance/pt_beam_lightning.prt'], ['lightningMuzzle', 'appearance/pt_muzzle_lightning.prt'], ['acid', 'appearance/pt_beam_acid.prt'], ['ice', 'appearance/pt_beam_ice.prt']]) {
+    for (const { name, path: prt, worn } of EXTRA_EFFECTS) {
       if (!vfs.has(prt)) continue;
       const file = particleFile(prt);
-      if (file) effects[name] = file;
+      if (!file) continue;
+      effects[name] = file;
+      // An effect that is hung on a living body has to be one a body at rest can be seen wearing.
+      // Read back what was just written and say so plainly if it is not: the fault is invisible by
+      // eye (an effect that draws nothing looks exactly like a burn that is not working at all), so
+      // it is worth one small file read per entry on a command that writes hundreds.
+      if (!worn) continue;
+      try {
+        const check = wornOnABody(JSON.parse(readFileSync(join(outDir, file), 'utf8')));
+        if (!check.ok) console.warn(`  ${name}: WARNING — this effect cannot be worn by a body: ${check.why}. A body set alight will not be drawn with it properly; the game will need another.`);
+      } catch (err) {
+        console.warn(`  ${name}: could not be checked as a body's effect: ${err.message}`);
+      }
     }
     // The blade colours the game offers (palette/wp_lightsaber.pal), as hex.
     let saberColors = [];

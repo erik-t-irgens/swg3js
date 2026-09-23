@@ -206,6 +206,15 @@ export interface BoltWorld {
   player: { body: RAPIER.RigidBody; collider: RAPIER.Collider; pos: THREE.Vector3 };
   /** The player as something that can be blamed: a bolt the saber turns away becomes theirs. */
   playerSource?: Living | null;
+  /**
+   * The player as something a bolt can afflict, or null. It is not what `hittableAt` answers: the
+   * player is in no manager's collider map and has a branch of their own below, so a burn or an acid
+   * an enemy's bolt carries would otherwise stop at their skin -- a spitting creature's acid and a
+   * fireball's splash reach every other body in the game and reached nothing here. Only an enemy's
+   * bolt is ever handed it: a shot of the player's own that a blade turned back is re-owned to them
+   * a few lines above, and must not set them alight with their own fireball.
+   */
+  playerHittable?: Hittable | null;
   /** A bolt reached the player: return the way it leaves when blocked, or null to let it hurt. */
   block(bolt: Bolt, hit: THREE.Vector3, out: THREE.Vector3): boolean;
   onPlayerHit(damage: number, from: THREE.Vector3): void;
@@ -546,7 +555,10 @@ export class Bolts {
           combatSounds.hit(b.sound, hitPoint.x, hitPoint.y, hitPoint.z, 'creature');
           w.effects.burst(hitPoint, 0xff8060, 0.5, 0.15);
         }
-        if (!b.inert) b.onHit?.(hitPoint, null);
+        // What the bolt carried beyond its damage -- a burn, an acid -- reaches the player here and
+        // only from somebody else's shot; `null` for the player's own, whose blade may have turned
+        // it back to them.
+        if (!b.inert) b.onHit?.(hitPoint, b.owner !== 'player' ? w.playerHittable ?? null : null);
         this.remove(i, hitPoint);
         continue;
       }

@@ -21,6 +21,7 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 import { createLavaMaterial, LAVA_LOOK, lavaGeometry, lavaHeatTable, loadLavaTextures, refreshLavaFar, standInLavaTextures, type LavaMaterial, type LavaTextures } from './lava';
 import { FALLBACK_LAVA_STYLE, groupLava, lavaStyleFor, type LavaStyle } from './lavaStyle';
 import { applyLavaHarm, inLava, LAVA_HARM, lavaHarmReport, lavaTickDamage, resetLavaHarm, rideOverLava, stillInLava, tuneLavaHarm, type LavaHarmTune } from './lavaHarmMath.ts';
+import { burnReport, clearBurn, newPlayerBurn, takeBurn, tunePlayerBurn, type PlayerBurn, type PlayerBurnTune } from '../combat/burnMath.ts';
 import type { HeatSources, LavaHeatTable } from './heatSources';
 import { setEnvironment } from './envmap';
 import { PropFactory, type Collider, type Exclusion, type ScatterItem } from './props';
@@ -372,6 +373,41 @@ class PlayerTarget implements Living {
   dead = true;
   /** What the loop does with a blow, and where it came from: it filters mounted, noclip and aboard itself. */
   hurt: (damage: number, from?: THREE.Vector3) => void = NO_HURT;
+  /**
+   * The fire the player is carrying, if any: how hard it burns, how long it has left and where its
+   * tick clock stands (`src/combat/burnMath.ts`, which owns every rule about it).
+   *
+   * It lives **here**, on the record every striker already reaches, rather than on the player's own
+   * body, because `afflict` is the one contract a flame has ever had and this is the object it is
+   * offered to. It is spent in `Player.update`, beside the regeneration delay, so it pauses with a
+   * panel exactly as regeneration does and `__debug.advance` steps it.
+   */
+  readonly burn: PlayerBurn = newPlayerBurn();
+  /**
+   * Whether the player is alight right now: the one thing anything outside this file need ask, and
+   * what the burning manager reads to decide whether to draw, sound and heat a fire on them.
+   */
+  get burning(): boolean {
+    return this.burn.left > 0;
+  }
+  /**
+   * And **how long it has left**, which is the reading every other living thing answers and the one
+   * the burning manager picks bodies by: it refuses to light a fire for the last fraction of a burn,
+   * so it wants the seconds and not a yes or no. A `burning` that answered only *whether* left the
+   * player's own fire invisible, silent and unheated while their health bar was being eaten, and
+   * nothing anywhere would have failed or warned -- the field is optional on the manager's side, so
+   * the mismatch is exactly the kind that type checking cannot see.
+   *
+   * There is deliberately **no** `dead` test in it, unlike the creature's and the mobile's. On this
+   * record `dead` means noclipping, aboard a hull's rooms or in a panel as well as really down, and
+   * the manager draws on a body that may be attacked while it chimes on the burn itself: a walk up a
+   * boarding ramp must not sound as though the fire had gone out and come back. A body that has
+   * really died carries no burn to read, because the fire is put out where the body dies
+   * (`Player.startRagdoll`).
+   */
+  get burningFor(): number {
+    return this.burn.left;
+  }
   radiusToward(): number {
     return 0.35;
   }
@@ -382,6 +418,28 @@ class PlayerTarget implements Living {
    */
   damage(amount: number, from?: THREE.Vector3): void {
     this.hurt(amount, from);
+  }
+  /**
+   * Set the player alight for a while: `dps` a second for `seconds`, the greater of `dps x seconds`
+   * winning, exactly as it does on a creature, a fighter and a mobile. It is the same method on the
+   * same contract, so anything that can already set one of those alight sets the player alight with
+   * no change to itself.
+   *
+   * `dead` here is the record's own meaning -- not simulated, noclipping, aboard a hull's rooms,
+   * dying or down -- and refusing then is what keeps this in step with the rest of the record: a
+   * body nothing may hurt is a body nothing may set alight either.
+   */
+  afflict(dps: number, seconds: number): void {
+    if (this.dead) return;
+    takeBurn(this.burn, dps, seconds);
+  }
+  /**
+   * The fire out and forgotten, in **silence**: a death, a travel, a respawn, a switch turned off.
+   * Nothing is said, deliberately -- "the fire is out" over a corpse, or shouted at a loading
+   * screen, is the one line this ought never to say.
+   */
+  clearBurn(): void {
+    clearBurn(this.burn);
   }
 }
 
@@ -1323,6 +1381,11 @@ export class World {
     this.lavaGap = Infinity;
     this.lavaIn = false;
     this.lavaBurning = 'no';
+    // And a fire the player was carrying goes with the world it was lit in: travel puts it out in
+    // silence, so nobody arrives on the next planet still alight and nothing is said about it over
+    // a loading screen. Here rather than in `Player.update` because a travel unloads the world from
+    // outside the frame loop, and a burn left standing would be spent on the next planet's clock.
+    this.playerTarget.clearBurn();
     this.waterNear = this.waterFarBody = null;
     for (const m of this.localWater) {
       this.scene.remove(m);
@@ -2386,6 +2449,28 @@ export class World {
   /** Writes LAVA_HARM: what a flow takes, how often, and where its two lines are drawn (`__debug.lava`). */
   setLavaHarm(harm: LavaHarmTune): void {
     tuneLavaHarm(harm);
+  }
+
+  /**
+   * The player's own fire: the numbers in force and the burn as it stands (`__debug.burn`).
+   *
+   * `light` sets the player alight now, which is the only way anyone can see a fire at all until
+   * something in the game reaches `PlayerTarget.afflict` -- today nothing does, and the notes with
+   * this wave say exactly why. It goes through `afflict`, so it is refused while the player may not
+   * be hurt and it obeys the greater-of-the-two rule like any other burn.
+   */
+  setPlayerBurn(tune?: PlayerBurnTune & { light?: { dps: number; seconds: number }; out?: boolean }): ReturnType<typeof burnReport> {
+    if (tune) {
+      tunePlayerBurn(tune);
+      // The switch thrown off puts a fire already lit out **here**, not at the next step. The step
+      // is in `Player.update`, which does not run while a panel is open, so a switch thrown from the
+      // console with the menu up would otherwise leave the player burning -- drawn, heated and
+      // sounded by the manager, which reads the burn and not the switch -- until the menu closed.
+      if (tune.on === false) this.playerTarget.clearBurn();
+      if (tune.out) this.playerTarget.clearBurn();
+      if (tune.light) this.playerTarget.afflict(tune.light.dps, tune.light.seconds);
+    }
+    return burnReport(this.playerTarget.burn);
   }
 
   /** Writes LAVA_LOOK; a threshold change recomputes every lava material's far values. */
@@ -4312,6 +4397,20 @@ export class World {
     // a second, so a held run would otherwise sweep every anchor in the zone and wake all of them.
     this.npcShips?.update(dt, this.simTime, this.simulating && !this.streamHold);
     this.ships.update(dt, this.simTime, this.simulating);
+    // A fire the player is carrying is **not** put out from here, and the reason is worth keeping.
+    // The obvious line -- while play is simulated, a burning player who has become untargetable has
+    // the fire put out -- was here, and it could not do the one job it was written for. The record's
+    // `dead` is five quite different things at once (not simulated, noclipping, aboard a hull's
+    // rooms, dying, down), and death is the one of them it can never catch: the whole death card is
+    // unsimulated, so a guard on `simulating` means the line cannot run between the blow that kills
+    // and the respawn, and by the respawn the player is alive again. So it did nothing on a death
+    // and everything on a boarding ramp, which is the opposite of both packages' intent.
+    //
+    // A fire now ends where the body it is on ends: `Player.startRagdoll` puts it out in silence at
+    // the death, `Player.reset` again when the body is stood up whole, and `unload` when the world
+    // goes. Noclipping and stepping aboard leave the burn alone deliberately -- it goes on being
+    // spent, every blow of it refused by the game's own rule about what may hurt the player, and the
+    // burning manager draws nothing on a body that may not be attacked, so nothing is left standing.
     // What the ground itself does to whoever stands on it. Last, after everything alive has moved
     // and after the hulls, so a body is burnt where this step left it and not where it was.
     this.stepHazards(dt, playerPos);

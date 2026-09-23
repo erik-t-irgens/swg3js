@@ -4,6 +4,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { surfaces } from '../world/surfaces';
 import { OFF_HAND_CLASSES } from '../core/inventory.ts';
+import { fireLookLine, pickFireLook, type FireLook } from './fireLook.ts';
 
 export type WeaponClass = 'pistol' | 'carbine' | 'rifle' | 'heavy' | 'sword1h' | 'knife' | 'sword2h' | 'polearm' | 'fist' | 'lightsaber' | 'lightsaber2h' | 'lightsaberStaff' | 'thrown';
 
@@ -64,9 +65,17 @@ export interface WeaponsManifest {
   skipped: { template: string; why: string }[];
   /** The blade colours the game offers, as hex. */
   saberColors?: string[];
-  /** Effects beyond the guns' own rows: the flame thrower's and the lightning rifle's beams, the acid and ice beams. */
-  effects?: Partial<Record<'flame' | 'lightning' | 'lightningMuzzle' | 'acid' | 'ice', string>>;
+  /**
+   * Effects beyond the guns' own rows: the flame thrower's and the lightning rifle's beams, the acid
+   * and ice beams, and the burn a body wears once it has been set alight (`onfire`, which a pack
+   * converted before it has not got, and for which nothing else in the pack can stand in — see
+   * `fireLook.ts` for why).
+   */
+  effects?: Partial<Record<ExtraEffect, string>>;
 }
+
+/** The effects a pack carries beyond the guns' own rows, by the name the game asks for them by. */
+export type ExtraEffect = 'flame' | 'lightning' | 'lightningMuzzle' | 'acid' | 'ice' | 'onfire';
 
 /** What each class fights like, when the manifest does not say. */
 export const FIGHTS: Record<WeaponClass, Fights> = { pistol: 'gun', carbine: 'gun', rifle: 'gun', heavy: 'gun', sword1h: 'single', knife: 'single', sword2h: 'single', polearm: 'staff', fist: 'single', lightsaber: 'lightsaber', lightsaber2h: 'lightsaber', lightsaberStaff: 'lightsaber', thrown: 'thrown' };
@@ -83,6 +92,8 @@ export class WeaponCatalogue {
   readonly skipped: { template: string; why: string }[];
   private readonly loader = surfaces.withPlugin(new GLTFLoader());
   private readonly models = new Map<string, Promise<THREE.Group>>();
+  /** The fire chosen for a burning body: undefined until it is first asked for, then kept. */
+  private fireChosen: FireLook | null | undefined;
 
   private constructor(readonly manifest: WeaponsManifest, private readonly baseUrl: string) {
     this.weapons = manifest.weapons;
@@ -106,8 +117,22 @@ export class WeaponCatalogue {
   }
 
   /** The pack's extra effects (beams for the flame thrower and the like), by name. */
-  effect(name: 'flame' | 'lightning' | 'lightningMuzzle' | 'acid' | 'ice'): string | null {
+  effect(name: ExtraEffect): string | null {
     return this.manifest.effects?.[name] ?? null;
+  }
+
+  /**
+   * The fire a burning body is drawn with: the client's own burn where the pack has it, and null
+   * where the pack was converted before it, since nothing else the pack carries can be worn by a
+   * body (`fireLook.ts`). Worked out once and said once, so the console makes plain what this
+   * session is drawing and what to run if it is nothing.
+   */
+  fireLook(): FireLook | null {
+    if (this.fireChosen === undefined) {
+      this.fireChosen = pickFireLook(this.manifest);
+      console.log(fireLookLine(this.fireChosen));
+    }
+    return this.fireChosen;
   }
 
   /** A weapon's picture as a full URL, or null when the pack drew none. */

@@ -157,6 +157,7 @@ import { FAMILY_TUNE } from './world/terrain';
 import { RoomAir, type RoomAirDebugOptions, type RoomAirInput } from './world/roomAir';
 import { UnderwaterSpecksPass, type UnderwaterSpeckDebugOptions } from './world/underwaterSpecks.ts';
 import type { LavaHarmTune } from './world/lavaHarmMath.ts';
+import type { PlayerBurnTune } from './combat/burnMath.ts';
 import { configureWaterSim, pokeWaterSim, waterSimDebug, WATER_SIM_DRAFT, WATER_SIM_IMPACT, WATER_SIM_SPEED } from './world/waterSim';
 import { RANGE } from './world/gallery';
 import { castsShadow, surfaces } from './world/surfaces';
@@ -1790,6 +1791,27 @@ class App {
         }
         return this.world.lavaStatus;
       },
+      /**
+       * The player's own fire: the numbers in force and the burn as it stands. Every one of them is
+       * **ours** -- the client had a fire state and a chime for it and said nothing whatever about
+       * what it cost you or how often, because that was its server's and did not ship.
+       *
+       * `burn({ light: { dps: 8, seconds: 3 } })` sets the player alight now, which is the only way
+       * to see one until something in the game calls `afflict` on the player; it goes through
+       * `afflict`, so it is refused while the player may not be hurt and the greater of two burns
+       * still wins. `burn({ out: true })` puts it out in silence. `tick` is how often a blow lands
+       * (a fraction a frame would lock the regeneration out for ever and flash the screen sixty
+       * times a second), `cap` the guard on how long one affliction may keep you alight, and
+       * `on: false` the switch that makes the game exactly what it was, putting out a fire already
+       * lit as it goes.
+       *
+       * Try it with `__debug.advance`: `__debug.burn({ light: { dps: 8, seconds: 3 } })` then
+       * `__debug.advance(3)` spends the whole burn -- three blows of 8 and the two lines on the
+       * message line. `advance` hands a blow straight to the body rather than through the frame's
+       * own callback, so on that path there is no red flash and a rider is burnt rather than spared;
+       * both of those want a visible frame to be seen at all.
+       */
+      burn: (tune?: PlayerBurnTune & { light?: { dps: number; seconds: number }; out?: boolean }) => this.world.setPlayerBurn(tune),
       /**
        * The heat haze: what drew last frame and why it did not, with console tuning (`show` tints the
        * hot air cyan, `clientOffset`, `gate`, `fadeStart`, `fadeEnd`, `lift`, `plumeRange`,
@@ -7221,6 +7243,9 @@ class App {
       player,
       // A bolt the saber turns away becomes the player's: what it then hurts turns on them.
       playerSource: this.world.playerTarget,
+      // And the player as something a bolt can set alight, which is what makes an enemy's acid or a
+      // fireball burn them as it burns every other body; a shot of their own is never handed it.
+      playerHittable: this.world.playerTarget,
       block: (bolt, hit, out) => player.deflect(bolt.dir, hit, this.cam, out),
       // The bolt hands over where it was when it reached you, which is the direction it came from
       // closely enough for an arc: a bolt travels 600 m/s and the point is a frame old at most.
