@@ -35,6 +35,7 @@ import { MapUi } from './ui/mapUi';
 import { groupMapFeed } from './ui/spaceMapLayers.ts';
 import { WardrobeUi } from './ui/wardrobeUi';
 import { WeaponsUi } from './ui/weaponsUi';
+import { GIVE_TUNE } from './ui/giveModel.ts';
 import { BackpackUi, type BackpackCell } from './ui/backpackUi';
 import { Equipment } from './player/equipment';
 import { itemInfo, WEAPON_ORDER, type ItemContext } from './player/items';
@@ -1737,6 +1738,21 @@ class App {
       },
       /** The wardrobe doll: what the last clone produced and how big its canvas is. */
       preview: () => this.wardrobe.previewState(),
+      /**
+       * The two give screens (Clothes and Weapons): every number they invent, live, and what each is
+       * showing. `giveScreens({ page: 60 })` redraws both. `drawn` is how many cells are really in
+       * the page and should stay inside `openCells` however much is worn; `marked` is how many cells
+       * have to print the id's own part because their names alone would not tell them apart.
+       * (`give` itself is the tool that hands the player an item, further down.)
+       */
+      giveScreens: (opts?: Partial<typeof GIVE_TUNE>) => {
+        if (opts) {
+          Object.assign(GIVE_TUNE, opts);
+          this.wardrobe.refresh();
+          this.weaponsUi.render();
+        }
+        return { tune: { ...GIVE_TUNE }, clothes: this.wardrobe.state(), weapons: this.weaponsUi.state() };
+      },
       /** First person's head: what each worn part does (whole, split, none) and why; `fpHead(true)` hides it from any camera to look at, `fpHead(null)` follows the camera again. */
       fpHead: (force?: boolean | null) => {
         if (force !== undefined) this.fpHeadForce = force;

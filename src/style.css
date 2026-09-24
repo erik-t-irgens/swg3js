@@ -253,7 +253,6 @@ b { color: var(--accent); font-weight: 600; }
 
 /* The panels with a doll beside a long list (the wardrobe, the appearance editor) take more of the screen. */
 .wardrobe-panel.wide { width: min(1120px, 96vw); max-height: 90vh; }
-#wardrobe .wardrobe-panel { width: min(960px, 96vw); }
 .wardrobe-slot.colour { align-items: flex-start; }
 .wardrobe-slot.colour .slot-label { padding-top: 2px; }
 
@@ -297,7 +296,7 @@ b { color: var(--accent); font-weight: 600; }
 .cat-label { font-size: 12px; letter-spacing: 0.1em; font-weight: 600; color: var(--accent); text-transform: uppercase; }
 .cat-count { font-size: 10px; color: var(--text); background: color-mix(in srgb, var(--pool) 30%, transparent); border-radius: 8px; padding: 1px 7px; }
 .cat-note { font-size: 11px; color: var(--muted); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#weapons .wardrobe-panel, #garage .wardrobe-panel, #npcs .wardrobe-panel { width: min(1040px, 96vw); }
+#garage .wardrobe-panel, #npcs .wardrobe-panel { width: min(1040px, 96vw); }
 .cat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 3px; padding: 2px 8px 8px; }
 .cat-grid .cat-wide { grid-column: 1 / -1; }
 .cat-item { display: flex; align-items: center; gap: 6px; padding: 3px 6px; font-size: 12px; border-radius: 4px; background: color-mix(in srgb, var(--ink) 3%, transparent); min-width: 0; }
@@ -387,6 +386,57 @@ b { color: var(--accent); font-weight: 600; }
 .bp-hint { padding: 6px 14px 10px; font-size: 10px; color: var(--muted); letter-spacing: 0.03em; }
 .bp-note { color: var(--warn); }
 @media (max-width: 760px) { .backpack-main { grid-template-columns: minmax(0, 1fr); } }
+
+/* The two give tabs (Clothes and Weapons). They were dropdowns and one-line rows; they are now the
+   backpack's own picture cells inside the folding groups the rack and the spawner already use, so the
+   three lists in the game read alike. Every rule here is a size or a state: not one of them names a
+   colour of its own, because a cell is a `.bp-cell` and wears exactly what the backpack's cells wear. */
+/* Both panels carry `wide` (the wardrobe always did), so this only has to beat the id-led widths the
+   two of them had before. The lists grew an examine strip and a hint line under them and must not
+   lose that much of the list, so they take a little more of the screen than `wide` gives; the
+   creator's own rule is `#wardrobe.creation .wardrobe-panel` and still wins over both. */
+#wardrobe .wardrobe-panel, #weapons .wardrobe-panel { width: min(1120px, 96vw); }
+.wardrobe-panel.give-panel { max-height: 92vh; }
+/* Both headers now carry a find box as well as their switches, which is more than one line holds on
+   a narrow screen: they wrap, and the count line gives way rather than pushing the buttons off. */
+#wardrobe .wardrobe-header, #weapons .wardrobe-header { flex-wrap: wrap; row-gap: 6px; }
+#wardrobe .wardrobe-header .count, #weapons .wardrobe-header .count { min-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.give-body { padding-right: 6px; }
+/* A group's grid holds picture cells rather than one-line entries. */
+#wardrobe .cat-grid, #weapons .cat-grid { grid-template-columns: repeat(auto-fill, 76px); gap: 6px; padding: 4px 8px 8px; }
+/* One line of name more than the backpack's cells, and room under it for the id's own part: a give
+   list is read by name rather than recognised, and the game calls many things the same thing. */
+#wardrobe .bp-cell, #weapons .bp-cell { height: 116px; }
+#wardrobe .bp-name, #weapons .bp-name { -webkit-line-clamp: 3; }
+/* A cell that has to say which of several alike-named items it is gives two of the name's three
+   lines to the mark below, which wraps to two of its own: the mark is at most 22 characters and this
+   holds about thirty, so it is never itself clipped. */
+#wardrobe .bp-cell.marked .bp-name, #weapons .bp-cell.marked .bp-name { -webkit-line-clamp: 2; }
+.give-id {
+  flex: none; padding: 0 3px 2px; font-size: 9px; line-height: 1.15; color: var(--accent);
+  overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; word-break: break-all;
+}
+#wardrobe .bp-cell:focus-visible, #weapons .bp-cell:focus-visible { border-color: var(--accent); }
+/* A word in the picture's corner: the piece is one this species wears unseen, or the other gender's. */
+.give-tag { position: absolute; left: 2px; top: 2px; padding: 0 3px; border-radius: 3px; font-size: 8px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--warn); background: color-mix(in srgb, var(--void) 72%, transparent); pointer-events: none; }
+/* The off-hand mark on a weapon's picture is both a badge and a button: it says the class may go in
+   the left hand and puts it there. It is the one control inside a cell, which is why a give cell is a
+   div with a button's part rather than a button (a button inside a button is not markup). */
+.give-off { position: absolute; right: 2px; bottom: 2px; padding: 0 5px; font: inherit; font-size: 9px; line-height: 15px; color: var(--muted); background: color-mix(in srgb, var(--void) 62%, transparent); border: 1px solid var(--panel-border); border-radius: 3px; cursor: pointer; }
+.give-off:hover { color: var(--text); border-color: var(--accent); }
+.give-off.on { color: var(--text); background: color-mix(in srgb, var(--pool) 65%, transparent); border-color: var(--accent); }
+/* A cell that is a listing and not a pick: a grenade, which is thrown from a number slot and never held. */
+.bp-cell.give-listing { cursor: default; opacity: 0.8; }
+.bp-cell.give-listing:hover { border-color: color-mix(in srgb, var(--ink) 8%, transparent); }
+.give-more { display: flex; justify-content: center; padding: 4px 0; }
+.give-more button { padding: 3px 12px; font-size: 11px; background: color-mix(in srgb, var(--pool) 20%, transparent); color: var(--text); border: 1px solid var(--panel-border); border-radius: 4px; cursor: pointer; }
+.bp-examine-head small { font-weight: 400; font-size: 10px; color: var(--muted); letter-spacing: 0.04em; }
+#wardrobe .wardrobe-header .find { flex: none; width: 140px; padding: 4px 8px; font-size: 11px; background: color-mix(in srgb, var(--void) 30%, transparent); color: var(--text); border: 1px solid var(--panel-border); border-radius: 4px; }
+/* The list takes the room; the examine strip and the hint below it keep their height and never give way. */
+.give-panel > .wardrobe-main { flex: 1 1 auto; min-height: 0; padding-bottom: 8px; }
+.give-panel > .bp-examine { flex: none; min-height: 88px; margin-bottom: 4px; }
+.give-panel .bp-examine-text { max-height: 92px; }
+.give-panel > .bp-hint { flex: none; }
 .force-row { display: grid; grid-template-columns: 190px 1fr auto; align-items: center; gap: 12px; padding: 6px 8px; border-bottom: 1px solid color-mix(in srgb, var(--ink) 5%, transparent); font-size: 12px; }
 .force-row.held { background: color-mix(in srgb, var(--pool) 12%, transparent); }
 .force-name { font-weight: 600; }
