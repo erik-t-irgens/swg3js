@@ -31,8 +31,12 @@ export const MOBILES_FORMAT = 1;
  *
  * 2: the direction selector is read, so the aimed blaster stances and the whole-body shots exist
  * at all, and the curated set asks for them, for the one-handed sword and for the cover postures.
+ * 3: a carry row per weapon (`ALLB_CARRIES`) is resolved into the pack's JSON, so the runtime
+ *    picks a row instead of matching clip names. No new clip is wanted for it -- every name a row
+ *    reads is one 2 already asks for -- so this rides the same rerun and costs no extra bytes in
+ *    the GLBs; only the JSON grows.
  */
-export const ANIM_FORMAT = 2;
+export const ANIM_FORMAT = 3;
 export const KINDS = ['creature', 'droid', 'npc', 'dressed', 'special'];
 
 /** Animation tables whose mobiles are machines, whatever hierarchy they sit on. */
@@ -706,6 +710,78 @@ export const ALLB_RANGED_STANCES = {
   rifle: ['loop_rifle_a_combat_standing_aimed', 'loop_rifle_combat_standing', 'loop_rifle'],
 };
 
+/**
+ * One row per weapon a body can hold: which logical name is that weapon's relaxed carry, its
+ * weapon-up carry, its aimed loop, what it fires or swings, and the ways in and out.
+ *
+ * This is the knowledge the runtime used to guess at. `armedRoles` rewrote six roles for a rifle
+ * carrier by matching clip **names** with regular expressions, did nothing whatever for a pistol,
+ * and had no way of naming a blade's ready stance -- so every sword-carrying body in the game stood
+ * in an unarmed guard and threw punches. Which logical name means which weapon's carry is a fact
+ * about the animation table, and the table is read here, so it is resolved here, once per pack.
+ *
+ * Every name below is one the curated list already asks for, so no row costs a clip. `polearm` is
+ * the exception and is deliberate: its names are the same shape as the sword's, the curated list
+ * does not ask for them yet (the owner's call in the design), and so its row resolves to nothing
+ * and is left out of the pack -- the day the list asks for them the row fills itself.
+ *
+ * A stance name is read as a locomotion name (its speed branches are an idle, a walk and a run)
+ * exactly as `loop_standing` is, which is how a rifle's held walk and run are found without
+ * anybody matching a clip name for them.
+ */
+export const ALLB_CARRIES = {
+  pistol: {
+    relaxed: ['loop_pistol_standing'],
+    ready: ['loop_pistol_combat_standing'],
+    aimed: ['loop_pistol_combat_standing_aimed'],
+    fires: ['pistol_combat_standing_fire_1', 'pistol_combat_standing_fire_3', 'pistol_combat_standing_fire_5', 'pistol_combat_standing_fire_7', 'pistol_combat_standing_fire_9', 'pistol_combat_standing_fire_11'],
+    recoil: ['add_pistol_fire_1', 'add_pistol_fire_3'],
+    swings: [],
+    toCombat: ['trn_pistol_standing_to_pistol_combat_standing'],
+    fromCombat: ['trn_pistol_combat_standing_aimed_to_pistol_combat_standing'],
+  },
+  rifle: {
+    relaxed: ['loop_rifle'],
+    ready: ['loop_rifle_combat_standing'],
+    aimed: ['loop_rifle_a_combat_standing_aimed'],
+    fires: ['rifle_standing_aimed_fire_1', 'rifle_standing_aimed_fire_3', 'rifle_standing_aimed_fire_5', 'rifle_standing_aimed_fire_7', 'rifle_standing_aimed_fire_9', 'rifle_standing_aimed_fire_11'],
+    recoil: ['add_rifle_fire_1', 'add_rifle_fire_3'],
+    swings: [],
+    toCombat: ['trn_rifle_a_standing_hold_to_ready'],
+    fromCombat: ['trn_rifle_a_standing_aimed_to_ready'],
+  },
+  sword: {
+    relaxed: [],
+    ready: ['loop_sword_1h_ready'],
+    aimed: [],
+    fires: [],
+    recoil: [],
+    swings: ['sword_1h_standing_ready_hrz_slash_middle_r', 'sword_1h_standing_ready_hrz_slash_middle_l', 'sword_1h_standing_ready_hrz_slash_high_r', 'sword_1h_standing_ready_hrz_slash_low_l', 'sword_1h_standing_ready_vrt_slash', 'sword_1h_standing_ready_thrust_middle'],
+    toCombat: ['trn_standing_to_sword_1h_standing_ready'],
+    fromCombat: ['trn_cbt_sword_1h_standing_ready_to_standing_2'],
+  },
+  polearm: {
+    relaxed: [],
+    ready: ['loop_polearm_combat'],
+    aimed: [],
+    fires: [],
+    recoil: [],
+    swings: ['polearm_standing_ready_hrz_slash_middle_r', 'polearm_standing_ready_hrz_slash_middle_l', 'polearm_standing_ready_vrt_slash', 'polearm_standing_ready_thrust_middle'],
+    toCombat: ['trn_standing_to_polearm_combat'],
+    fromCombat: ['trn_polearm_combat_to_standing'],
+  },
+  unarmed: {
+    relaxed: [],
+    ready: ['loop_combat_standing'],
+    aimed: [],
+    fires: [],
+    recoil: [],
+    swings: ALLB_ATTACKS,
+    toCombat: ['trn_unarmed_standing_to_unarmed_standing_ready'],
+    fromCombat: ['trn_unarmed_standing_ready_to_standing'],
+  },
+};
+
 const EMPTY_ROLES = () => ({
   idle: null, walk: null, run: null, gaits: [],
   idleCombat: null, walkCombat: null, runCombat: null, gaitsCombat: [],
@@ -720,6 +796,74 @@ const EMPTY_ROLES = () => ({
   swimDown: null, swimDownLoop: null, hoverDown: null,
   emotes: {}, bind: null,
 });
+
+/**
+ * One weapon's carry row, or null when the table says nothing about that weapon at all.
+ *
+ * `logicalOf(name)` gives the clips a logical name resolved to, slowest first, and `speedOf(clip)`
+ * the ground speed the clip was animated at -- the two things a stance needs to be read as an
+ * idle, a walk and a run, exactly as `loop_standing` is. Null rather than a row of nulls, so a pack
+ * carries only the weapons it really has something for and the runtime's "no row, behave as before"
+ * branch is reached honestly.
+ *
+ * `plainIdle` is the pack's own standing loop, and a relaxed carry that resolves to **that clip**
+ * is dropped. Several of the holstered carries resolve to the plain breathing loop and its plain
+ * walk and run -- the client's way of saying "there is no special pose for carrying this" -- and a
+ * row that reported them as a carry would make a body fighting with a pistol stand breathing
+ * instead of in the guard it stands in today. A carry is only a carry when it is its own clip.
+ */
+export function resolveCarry(def, logicalOf, speedOf, plainIdle = null) {
+  const listOf = (name) => (logicalOf(name) ?? []).map((clip) => ({ clip, speed: speedOf(clip) ?? 0 }));
+  // The first name of the list that resolves to anything, read as a locomotion set.
+  const locoOf = (names) => {
+    for (const n of names ?? []) {
+      const list = listOf(n);
+      if (list.length) return gaitsOf(list);
+    }
+    return null;
+  };
+  const first = (names) => {
+    for (const n of names ?? []) {
+      const clip = logicalOf(n)?.[0];
+      if (clip) return clip;
+    }
+    return null;
+  };
+  const each = (names) => (names ?? []).map((n) => logicalOf(n)?.[0] ?? null).filter((c, i, a) => c && a.indexOf(c) === i);
+  const ready = locoOf(def.ready);
+  let relaxed = locoOf(def.relaxed);
+  if (relaxed && relaxed.idle === plainIdle) relaxed = null;
+  // The gaits are the weapon-up ones where the table has them and the carry's own otherwise, which
+  // is what a rifle has today: its port-arms walk and run, and no combat-stance branches at all.
+  const move = ready?.gaits.length ? ready : (relaxed?.gaits.length ? relaxed : (ready ?? relaxed));
+  const row = {
+    relaxed: relaxed?.idle ?? null,
+    ready: ready?.idle ?? null,
+    aimed: locoOf(def.aimed)?.idle ?? null,
+    walk: move?.walk ?? null,
+    run: move?.run ?? null,
+    gaits: move?.gaits ?? [],
+    fires: each(def.fires),
+    recoil: first(def.recoil),
+    swings: each(def.swings),
+    toCombat: first(def.toCombat),
+    fromCombat: first(def.fromCombat),
+  };
+  const anything = row.relaxed || row.ready || row.aimed || row.fires.length || row.recoil || row.swings.length;
+  return anything ? row : null;
+}
+
+/** Every weapon the table says anything about, as `{ pistol: row, ... }`; `{}` for a hierarchy with none. */
+export function resolveCarries(plan, hierarchy = plan.hierarchy, plainIdle = null) {
+  if (hierarchy !== 'all_b') return {};
+  const speedOf = new Map(plan.clips.map((c) => [c.name, c.speed]));
+  const out = {};
+  for (const [weapon, def] of Object.entries(ALLB_CARRIES)) {
+    const row = resolveCarry(def, (n) => plan.logical[n], (c) => speedOf.get(c), plainIdle);
+    if (row) out[weapon] = row;
+  }
+  return out;
+}
 
 /**
  * Which clip plays for each thing a mobile does. The candidates follow the hierarchy's own
@@ -779,7 +923,7 @@ export function resolveRoles(plan, hierarchy = plan.hierarchy) {
     for (const [key, name] of Object.entries(CREATURE_EMOTES)) if (first(name)) roles.emotes[key] = first(name);
   }
   if (plan.clips.some((c) => c.additive)) roles.bind = 'bind_pose';
-  return { roles, sources };
+  return { roles, sources, carries: resolveCarries(plan, hierarchy, roles.idle) };
 }
 
 /** The roles that differ when the female branch is chosen, or {} when nothing does. */
@@ -1476,6 +1620,7 @@ export function planMobiles({ vfs, scan, io, options = {}, source, core3Stats = 
       const resolved = resolveRoles(p, p.hierarchy);
       p.roles = resolved.roles;
       p.roleSources = resolved.sources;
+      p.carries = resolved.carries;
       p.variants = genderVariant(p, resolved.roles);
       p.file = `mobiles/anims/${packId}.glb`;
       p.json = `mobiles/anims/${packId}.json`;
@@ -1635,7 +1780,10 @@ export function runMobiles(ctx) {
       const p = plan.packs.get(id);
       const r = p.roles;
       const speed = (clip) => `${clip}${p.clips.find((c) => c.name === clip)?.speed ? ` ${p.clips.find((c) => c.name === clip).speed.toFixed(2)}` : ''}`;
-      log(`  anims ${id} [${p.hierarchy}, ${p.set}]: ${p.clipCount} clips from ${Object.keys(p.logical).length} names, ${p.clips.reduce((a, c) => a + c.frames, 0)} frames, ~${mb(p.estimatedBytes)}; idle ${r.idle ?? 'NONE'}${r.walk ? `, walk ${speed(r.walk)}` : ', NO WALK'}${r.run ? `, run ${speed(r.run)}` : ', NO RUN'}; combat ${r.gaitsCombat.length}; attacks ${r.attacks.length}${r.attacks.length ? '' : ' (NO ATTACK)'}; ranged ${r.ranged ?? 'none'}; hits ${[r.hitLight && 'l', r.hitMedium && 'm', r.hitHeavy && 'h'].filter(Boolean).join('.') || 'NO HITS'}; ${[r.down && 'down', r.downLoop && 'loop', r.getUp && 'up'].filter(Boolean).join('/') || 'NO DOWN'}; emotes ${Object.keys(r.emotes).length}${p.missing.length ? `; missing ${p.missing.length} .ans` : ''}`);
+      // Each carry row as "weapon(r=ready a=aimed 6 fires)", so a run says plainly which weapons a
+      // pack can really hold and which of them can aim.
+      const carries = Object.entries(p.carries ?? {}).map(([w, c]) => `${w}(${[c.ready && 'ready', c.aimed && 'aimed', c.fires.length && `${c.fires.length} fires`, c.swings.length && `${c.swings.length} swings`, !c.fires.length && c.recoil && 'recoil only'].filter(Boolean).join(' ')})`).join(', ');
+      log(`  anims ${id} [${p.hierarchy}, ${p.set}]: ${p.clipCount} clips from ${Object.keys(p.logical).length} names, ${p.clips.reduce((a, c) => a + c.frames, 0)} frames, ~${mb(p.estimatedBytes)}; idle ${r.idle ?? 'NONE'}${r.walk ? `, walk ${speed(r.walk)}` : ', NO WALK'}${r.run ? `, run ${speed(r.run)}` : ', NO RUN'}; combat ${r.gaitsCombat.length}; attacks ${r.attacks.length}${r.attacks.length ? '' : ' (NO ATTACK)'}; ranged ${r.ranged ?? 'none'}; hits ${[r.hitLight && 'l', r.hitMedium && 'm', r.hitHeavy && 'h'].filter(Boolean).join('.') || 'NO HITS'}; ${[r.down && 'down', r.downLoop && 'loop', r.getUp && 'up'].filter(Boolean).join('/') || 'NO DOWN'}; emotes ${Object.keys(r.emotes).length}${carries ? `; carries ${carries}` : ''}${p.missing.length ? `; missing ${p.missing.length} .ans` : ''}`);
     }
     log('mobiles: --plan, nothing written');
     return { plan, written: 0, catalogue: null };
@@ -1679,6 +1827,9 @@ export function runMobiles(ctx) {
         key: p.key, file: p.file, table: p.table, hierarchy: p.hierarchy, set: p.set,
         skeletons: p.skeletons, joints: p.joints, appearances: p.appearances, speciesRigs: p.speciesRigs,
         clips: baked.clips, logical: p.logical, roles: p.roles, roleSources: p.roleSources, variants: p.variants,
+        // Left out rather than written empty, so a pack with nothing to say about any weapon reads
+        // as one the runtime must treat the old way.
+        ...(Object.keys(p.carries ?? {}).length ? { carries: p.carries } : {}),
         missing: p.missing, skipped: p.skipped.map((s) => `${s.name}: ${s.why}`), bytes: baked.bytes, tracks: baked.tracks,
       };
       commit(p.json, [[`${p.file}.tmp`, p.file]], body);

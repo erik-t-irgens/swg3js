@@ -4684,7 +4684,11 @@ export class World {
     const targets = this.targets(true);
     this.creatures.update(dt, playerPos, this.hurtPlayer);
     this.mobiles?.update(dt, { now: this.simTime, dt, camera, playerPos, targets });
-    this.npcs.update(dt, targets, this.bolts, camera, this.simTime);
+    // `playerPos` is only read by a fighter under a long walk (`src/world/errand.ts`), which measures
+    // how far the body was from the player to know whether anything along the route was solid. It is
+    // handed in rather than picked out of `targets`, because the player leaves that list while
+    // noclipping, aboard or dead and the walk's account must not go blind on any of those.
+    this.npcs.update(dt, targets, this.bolts, camera, this.simTime, playerPos);
     // The ships that fight: the contacts in step with the vehicles (the player's ship marked), the NPC ships'
     // brains (held, thinking nothing, while play is paused), then every combat's shields, boost and damage bands.
     this.ships.sync(this.vehicles, this.playerShip, this.playerTarget, this.simTime);

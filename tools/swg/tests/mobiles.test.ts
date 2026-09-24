@@ -250,6 +250,40 @@ const genderRoles = M.resolveRoles(genderPlan, 'all_b');
 ok(M.genderVariant(genderPlan, genderRoles.roles)['gender:f'].idle === 'hit' && Object.keys(M.genderVariant(npc, npcRoles.roles)).length === 0, 'a pack carries the roles that differ for a woman, and nothing when they do not');
 
 // ---------------------------------------------------------------------------------------------
+// The carry rows: which logical name is which weapon's stance, resolved here rather than guessed
+// at by matching clip names in the browser.
+
+for (const [stem, speed, frames] of [['ready', 0, 60], ['aim', 0, 60], ['fire1', 0, 20], ['fire3', 0, 20], ['port', 0, 60], ['portwalk', 1.4, 50], ['portrun', 4.8, 40], ['guard', 0, 60], ['swing', 0, 20]] as [string, number, number][]) {
+  headers[`appearance/animation/${stem}.ans`] = { frames, fps: 30, speed, transforms: ['root', 'child'], animatedRotations: 2, animatedTranslations: 0, offsetTranslations: 0 };
+}
+const armed = planOf([
+  ['loop_standing', spat(pxat('idle'), pxat('walk'), pxat('run'))],
+  // The holstered carry, which on the real table is the plain breathing loop under another name.
+  ['loop_pistol_standing', spat(pxat('idle'), pxat('walk'), pxat('run'))],
+  ['loop_pistol_combat_standing', pxat('ready')],
+  ['loop_pistol_combat_standing_aimed', pxat('aim')],
+  ['pistol_combat_standing_fire_1', pxat('fire1')],
+  ['pistol_combat_standing_fire_3', pxat('fire3')],
+  ['add_pistol_fire_1', pxat('shot')],
+  // A rifle with the port-arms carry and its held walk and run, and no combat stance at all: what
+  // every humanoid pack on this machine has today.
+  ['loop_rifle', spat(pxat('port'), pxat('portwalk'), pxat('portrun'))],
+  ['loop_sword_1h_ready', pxat('guard')],
+  ['sword_1h_standing_ready_hrz_slash_middle_r', pxat('swing')],
+], 'all_b');
+const carries = M.resolveRoles(armed, 'all_b').carries;
+ok(carries.pistol.ready === 'ready' && carries.pistol.aimed === 'aim', 'a pistol row names its weapon-up carry and its aimed loop');
+ok(carries.pistol.fires.join() === 'fire1,fire3' && carries.pistol.recoil === 'shot', '... every whole-body shot it has, in order, with the one-frame recoil beside them');
+ok(carries.pistol.relaxed === null, '... and a holstered carry that is only the plain standing loop is not called a carry');
+ok(carries.rifle.relaxed === 'port' && carries.rifle.ready === null, 'a rifle with only its port-arms carry names that and claims no combat stance');
+ok(carries.rifle.walk === 'portwalk' && carries.rifle.run === 'portrun' && carries.rifle.gaits.length === 2 && carries.rifle.gaits[0].speed === 1.4, '... and walks and runs with it held, at the clips own speeds, slowest first');
+ok(carries.rifle.fires.length === 0 && carries.rifle.aimed === null, '... with nothing to fire and nothing to aim, because the table has neither');
+ok(carries.sword.ready === 'guard' && carries.sword.swings.join() === 'swing' && carries.sword.aimed === null && carries.sword.fires.length === 0, 'a blade row is a ready stance and swings, and never an aim');
+ok(!('unarmed' in carries) && !('polearm' in carries), 'a weapon the table says nothing about gets no row at all');
+ok(Object.keys(M.resolveCarries(creature, 'creature_base')).length === 0, 'a creature hierarchy has no carry rows: nothing there holds a weapon');
+ok(Object.keys(M.resolveRoles(npc, 'all_b').carries).join() === 'pistol', 'a pack whose only weapon name is the pistol recoil carries the pistol row alone');
+
+// ---------------------------------------------------------------------------------------------
 // 21-23. Baking
 
 const two = skinData(skeleton2(), [{ name: 'x_loc_walk', animation: anim(2), loop: true }, { name: 'walk', animation: anim(2), loop: false }]);

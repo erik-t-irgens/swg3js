@@ -14,7 +14,7 @@ import { surfaces } from '../surfaces';
 import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js';
 import type { AnimPack, MobileEntry, Vec3 } from './types';
 import type { MobileCatalogue } from './catalogue';
-import { makeAdditiveOnce, missingRoles, rolesFor, type PackClipSource } from './packClips';
+import { makeAdditiveOnce, missingCarries, missingRoles, rolesFor, type PackClipSource } from './packClips';
 import { makeHologram } from './hologram';
 import { buildLook, isLook, lookKey } from './look';
 
@@ -445,6 +445,10 @@ export class MobileAssets {
       this.reported.add(id);
       const missing = missingRoles(rolesFor(json, null), byName);
       if (missing.length) console.warn(`mobiles: pack ${id} names clips its GLB has not got, for ${missing.join(', ')}; those roles count as missing`);
+      // The carry rows as well, which `missingRoles` does not reach: a row names what the animation
+      // table holds rather than what the bake wrote, so the two can differ.
+      const gaps = missingCarries(json.carries, byName);
+      if (gaps.length) console.warn(`mobiles: pack ${id} carries rows naming clips its GLB has not got, for ${gaps.join(', ')}; a body holding that weapon falls back on the pack's own`);
     }
     return asset;
   }

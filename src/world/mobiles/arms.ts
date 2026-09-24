@@ -14,7 +14,7 @@
 // tests): no enum, no namespace, no constructor parameter properties, and a relative import only
 // as `import type` or with its `.ts` extension onto another module that is pure the same way
 // (`saberHit.ts` is: arithmetic, one type import, and node already runs it for its own test).
-import type { MobileEntry, PackClipInfo, Roles } from './types';
+import type { CarryRow, CarryWeapon, MobileEntry, PackClipInfo, Roles } from './types';
 import type { WeaponClass } from '../../player/weapons';
 import { SABER_HIT_STATS } from '../../combat/saberHit.ts';
 
@@ -154,13 +154,69 @@ export function chooseWeapon<W extends { id: string; class: WeaponClass }>(arms:
   return pick(ofClass);
 }
 
+/** Which carry row an arms choice stands in. A lightsaber is the one-handed blade's carry. */
+export function carryWeaponFor(arms: ArmsKind | null | undefined): CarryWeapon {
+  if (!arms) return 'unarmed';
+  return arms.kind === 'saber' ? 'sword' : arms.carry;
+}
+
 /**
- * The roles that change when a gun is held as a rifle: the pack's rifle stance, its walk and run
- * with the rifle held (at their own ground speeds), and the rifle's recoil as the ranged pulse.
- * A pistol keeps the pack's roles as they are (its stance and recoil are what `ranged` already
- * names). Only clips the pack holds are named; an empty object when it has none of them.
+ * One carry row laid over a pack's roles. The row is the converter's (`ALLB_CARRIES` in
+ * `tools/swg/mobiles.mjs`) and says what the animation table says; this only decides which role
+ * each of its fields is.
+ *
+ * Four things worth reading twice. The row drives the **combat** roles alone -- `idle`, `walk`,
+ * `run` and `gaits` are left exactly as they were, so nothing about how fast a body walks about
+ * moves and `moveSpeeds` reads the same numbers it always did. `ranged` takes a whole-body shot
+ * where the table has one and falls back to the one-frame recoil where it has not, which is the
+ * same choice `resolveRoles` makes and is what keeps a pack with nothing but a recoil behaving as
+ * it does today. A blaster row leaves `attacks` alone: those are the melee swings a gunner throws
+ * when something closes on it, and a row's `fires` are not them. And every field is allowed to be
+ * missing: what a row is silent about is left where the pack's own roles put it, which is why a
+ * rifle with a port-arms carry and no combat-stance branches comes out of this exactly as it goes
+ * in today.
  */
-export function armedRoles(clips: readonly Pick<PackClipInfo, 'name' | 'speed' | 'additive'>[], carry: 'pistol' | 'rifle'): Partial<Roles> {
+export function rolesFromCarry(row: CarryRow): Partial<Roles> {
+  const out: Partial<Roles> = {};
+  const stance = row.ready ?? row.relaxed;
+  if (stance) {
+    out.rangedStance = stance;
+    out.idleCombat = stance;
+  }
+  if (row.aimed) out.rangedAimed = row.aimed;
+  if (row.gaits.length) {
+    out.gaitsCombat = row.gaits;
+    out.walkCombat = row.walk ?? row.gaits[0].clip;
+    out.runCombat = row.run ?? row.gaits[row.gaits.length - 1].clip;
+  }
+  if (row.fires.length) {
+    out.ranged = row.fires[0];
+    out.rangedShots = row.fires;
+    out.rangedAdditive = false;
+  } else if (row.recoil) {
+    out.ranged = row.recoil;
+    out.rangedAdditive = true;
+  }
+  if (row.swings.length) out.attacks = row.swings;
+  if (row.toCombat) out.toCombat = row.toCombat;
+  if (row.fromCombat) out.fromCombat = row.fromCombat;
+  return out;
+}
+
+/**
+ * The roles that change for the weapon a body really holds: its carry row where the pack carries
+ * one, and otherwise the clip-name matching this did before there were rows.
+ *
+ * The fallback is kept, not tidied away, because it is what every pack on a machine that has not
+ * been reconverted still needs: it finds the rifle's port-arms stance, its held walk and run and
+ * its recoil by matching clip names, and it has never had anything at all to say about a pistol, a
+ * blade or an aimed pose. A pack with rows needs none of it. An empty object means "leave the
+ * pack's roles exactly as they are", which is what a body whose weapon the table is silent about
+ * must do.
+ */
+export function armedRoles(clips: readonly Pick<PackClipInfo, 'name' | 'speed' | 'additive'>[], carry: CarryWeapon, carries?: Partial<Record<CarryWeapon, CarryRow>> | null): Partial<Roles> {
+  const row = carries?.[carry];
+  if (row) return rolesFromCarry(row);
   if (carry !== 'rifle') return {};
   const find = (re: RegExp) => clips.find((c) => re.test(c.name));
   const idle = find(/rifle_a_standing_hold_idle|rifle.*standing.*idle/);

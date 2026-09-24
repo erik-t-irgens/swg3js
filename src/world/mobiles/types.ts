@@ -130,7 +130,63 @@ export interface AnimPack {
   roleSources?: Record<string, string>;
   /** Overlays by selector value, "gender:f". */
   variants: Record<string, Partial<Roles>>;
+  /**
+   * One row per weapon a body can hold, resolved in the converter (`ALLB_CARRIES` in
+   * `tools/swg/mobiles.mjs`). Absent on every pack converted before it existed, and on every
+   * hierarchy but the humanoid one, in which case the runtime falls back on the clip-name matching
+   * it has always done (`armedRoles`).
+   */
+  carries?: Partial<Record<CarryWeapon, CarryRow>>;
   missing?: string[];
+}
+
+/**
+ * Which weapon a carry row is for. `unarmed` is the row a body with empty hands stands in, which is
+ * the pack's own combat stance and its punches: the row names what has always happened rather than
+ * adding anything to it.
+ */
+export type CarryWeapon = 'pistol' | 'rifle' | 'sword' | 'polearm' | 'unarmed';
+
+/**
+ * How one weapon is carried: the stances, the gaits that hold it, and what it fires or swings.
+ *
+ * It exists because the alternative was the runtime reading clip **names**: `armedRoles` rewrote
+ * six roles for a rifle carrier with regular expressions over the pack's clip list, did nothing at
+ * all for a pistol, and could not express a blade's ready stance in any form. The knowledge of
+ * which logical name is which weapon's stance belongs where the animation table is read, so it is
+ * resolved there once per pack and the runtime picks a row.
+ *
+ * Every field may be null or empty: a row is written for a weapon the table says anything at all
+ * about, and what it is silent on simply leaves the roles where they were.
+ */
+export interface CarryRow {
+  /** The carry with the weapon down or shouldered: what it stands in out of a fight. */
+  relaxed: string | null;
+  /** The weapon-up carry: what it holds between blows and shots. */
+  ready: string | null;
+  /** The aimed loop a blaster settles into with something in front of it; null for a blade. */
+  aimed: string | null;
+  /** Walking and running with the weapon up, at the clips' own ground speeds, slowest first. */
+  walk: string | null;
+  run: string | null;
+  gaits: Gait[];
+  /**
+   * Whole-body shots, in the table's own order; empty where the table has none. Only the first
+   * carries any meaning -- it is the one `ranged` becomes, which is what a pack with a single shot
+   * plays and what a shot the bake left out falls back to. The rest are drawn from evenly.
+   */
+  fires: string[];
+  /** The one-frame additive recoil, which is all a pack with no whole-body shot has. */
+  recoil: string | null;
+  /**
+   * Melee swings; empty for a blaster row. The order is read: they become `attacks`, whose first is
+   * the light blow (seven times in ten), whose second is the heavy one and whose rest are the
+   * specials one time in ten.
+   */
+  swings: string[];
+  /** The way into the carry and the way out of it. */
+  toCombat: string | null;
+  fromCombat: string | null;
 }
 
 export interface Gait {
@@ -162,6 +218,18 @@ export interface Roles {
   ranged: string | null;
   rangedAdditive: boolean;
   rangedStance: string | null;
+  /**
+   * The aimed loop, held while the body really has something in front of its gun. Optional: it is
+   * written only from a carry row, so a pack converted before the rows existed has none and the
+   * body stands in `rangedStance` exactly as it always did.
+   */
+  rangedAimed?: string | null;
+  /**
+   * Every whole-body shot the carry has, drawn from evenly so a gunner does not fire the same one
+   * each time. Optional for the same reason as `rangedAimed`; `ranged` is the first of them where
+   * there are any, which makes the first the default and the order otherwise meaningless.
+   */
+  rangedShots?: string[];
   hitLight: string | null;
   hitMedium: string | null;
   hitHeavy: string | null;

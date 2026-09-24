@@ -50,8 +50,15 @@ import { worldNav } from '../nav/nav.ts';
 import type { CellState } from '../layoutStream';
 import { MobileAnimator, SHOT_PRIORITY } from './animator';
 import { describeRoles, idleClipFor, ownGunIsPistol, rolesFor } from './packClips';
+// The fighters' own carry and aim, borrowed whole rather than written a second time: pure, on the
+// player's numbers, node-tested, and the bones it wants (`spine1..3`, the hand's weapon joint) are
+// exactly the ones a mobile's clone carries. One knob moves a fighter's carry and a mobile's.
+import { STANCE_TUNE, aimMode, bodyShare, easeAngle, spineShare, stanceFor, stepAimFix, type AimFix, type AimWhen, type Stance, type StanceInput } from '../fighterStance.ts';
+// The spine is collected on the one walk the clone already takes, by the module's own `SPINE_BONE`
+// rule, which is why that rule is exported and no second walk is: one home for which bones fold.
+import { SPINE_BONE, foldSpine, type FoldRecord } from './spineFold.ts';
 import type { PackAsset } from './assets';
-import type { Gait, MobileEntry, MobileState, Roles, Vec3 } from './types';
+import type { CarryWeapon, Gait, MobileEntry, MobileState, Roles, Vec3 } from './types';
 
 export type { MobileState };
 
@@ -69,6 +76,13 @@ const driveTurn = { x: 0, y: 0, z: 0, w: 1 };
 const UP = new THREE.Vector3(0, 1, 0);
 /** What a blade faces while no camera is given (a headless step). */
 const IDLE_CAMERA = new THREE.PerspectiveCamera();
+/**
+ * The aim's own scratch: three points, module-level and written in place, so that measuring a
+ * barrel against a target allocates nothing on a frame with a hundred armed bodies in it.
+ */
+const aimWant = new THREE.Vector3();
+const aimHave = new THREE.Vector3();
+const aimGrip = new THREE.Vector3();
 
 /** The body a mobile wears: a plain model's prototype, or a person's dressed look; cloned per mobile. */
 export interface MobileBody {
@@ -80,6 +94,14 @@ export interface MobileBody {
 export interface MobileExtras {
   clips?: ReadonlyMap<string, THREE.AnimationClip>;
   roles?: Partial<Roles>;
+  /** Which carry row those roles came from, so the body knows what is in its hands. */
+  carry?: CarryWeapon;
+  /**
+   * Whether the pack really carried a row for that weapon, as against the clip-name matching
+   * `armedRoles` falls back on. It is what lets the stance choose the clip at all
+   * (`IdleSituation.carried`), so a pack nobody has reconverted stands exactly where it did.
+   */
+  carried?: boolean;
 }
 
 /** A weapon off the rack, loaded and prepared, for a person to hold. */
@@ -330,6 +352,44 @@ export class Mobile implements Living, NpcSubject {
   private holder: THREE.Group | null = null;
   private blade: SaberBlade | null = null;
   private hiltTop = 0.13;
+  /**
+   * Which carry row its roles came from, and which of the three carries it stands in this instant.
+   * `unarmed` and `relaxed` are what a creature, a driven body and anything holding nothing are,
+   * and between them they mean every branch below is skipped.
+   */
+  private carry: CarryWeapon = 'unarmed';
+  /**
+   * Whether that carry came from a real row in the pack, which is what lets the stance pick the
+   * clip. False on every pack converted before the rows, and then the stance is worked out and
+   * reported but changes nothing a body stands in -- see `IdleSituation.carried`.
+   */
+  private carried = false;
+  private stance: Stance = 'relaxed';
+  /**
+   * Whether the spine may be folded toward what it is shooting at: only for a body whose pack
+   * really carries an aimed pose for the weapon in its hands.
+   *
+   * It is a gate and not an optimisation. A pack that has never been reconverted holds a blaster
+   * carrier in the plain breathing loop with the gun at its hip, and folding the chest until that
+   * hip-held barrel pointed at a target would lean the body back by tens of degrees -- a pose
+   * nobody authored and nothing would recognise. With an aimed loop the barrel already points
+   * roughly where the body faces, the correction is small, and folding it is the whole point.
+   */
+  private canAim = false;
+  /** The simulated second the combat carry lapses, `STANCE_TUNE.ready` after its last live foe. */
+  private readyUntil = -Infinity;
+  /** Seconds since its last shot: the recoil window the aim is **held** through, as the player's is. */
+  private sinceShot = Infinity;
+  /** The measured aim correction, and how much of it the drawn body has eased onto. */
+  private readonly aimFix: AimFix = { yaw: 0, pitch: 0 };
+  private aimTurn = 0;
+  /** The two structs the stance and the aim are asked through, written and never made. */
+  private readonly stanceAsk: StanceInput = { gun: false, combat: false, hasTarget: false, gap: 0, range: 0, offNose: 0 };
+  private readonly aimAsk: AimWhen = { aiming: false, sinceShot: 0, stunned: false };
+  /** The spine bones the fold is spread over, found once when the model is hung; empty for a body with none. */
+  private spines: THREE.Bone[] | null = null;
+  /** What the fold last wrote on each of them, so it never folds on top of its own last turn. */
+  private readonly folded = new Map<THREE.Bone, FoldRecord>();
   private readonly bladeBase = new THREE.Vector3();
   private readonly bladeTip = new THREE.Vector3();
   private readonly restPose = new Map<THREE.Object3D, { p: THREE.Vector3; q: THREE.Quaternion; s: THREE.Vector3 }>();
@@ -463,6 +523,7 @@ export class Mobile implements Living, NpcSubject {
     if (this.disposed || this.dead) return { ok: false, warning: null };
     const scene = cloneSkeleton(model.scene);
     const names = new Set<string>();
+    const spines: THREE.Bone[] = [];
     scene.traverse((o) => {
       names.add(o.name);
       const m = o as THREE.Mesh;
@@ -471,18 +532,31 @@ export class Mobile implements Living, NpcSubject {
         // Culled as a whole by the manager, never mesh by mesh (a mesh's own sphere would be in its own frame).
         m.frustumCulled = false;
       }
-      if ((o as THREE.Bone).isBone) this.restPose.set(o, { p: o.position.clone(), q: o.quaternion.clone(), s: o.scale.clone() });
+      if ((o as THREE.Bone).isBone) {
+        this.restPose.set(o, { p: o.position.clone(), q: o.quaternion.clone(), s: o.scale.clone() });
+        // Found on the one walk the clone already takes, rather than on a walk of its own: this
+        // runs once per body and the aim then costs a list lookup a frame.
+        if (SPINE_BONE.test(o.name)) spines.push(o as THREE.Bone);
+      }
     });
+    this.spines = spines;
+    this.carry = extras?.carry ?? 'unarmed';
+    this.carried = !!extras?.carried;
     markActor(scene);
     this.inner.add(scene);
     this.model = scene;
     let warning: string | null = null;
     if (pack) {
       this.roles = rolesFor(pack.json, this.entry.gender);
+      // The pack's own ranged attack, kept before the carry is laid over it: it is what a row whose
+      // clips the bake left out falls back on, below.
+      const ownRanged = this.roles.ranged;
+      const ownAdditive = this.roles.rangedAdditive;
       // A rifle's carry, a Jedi's swings: laid over the pack's roles, with any clips they name.
       if (extras?.roles) Object.assign(this.roles, extras.roles);
       const clips = extras?.clips?.size ? new Map([...pack.clips, ...extras.clips]) : pack.clips;
-      this.animator = new MobileAnimator(scene, clips, pack.additive);
+      const animator = new MobileAnimator(scene, clips, pack.additive);
+      this.animator = animator;
       this.animPack = pack;
       const probe = pack.clips.get(this.roles.idle ?? '') ?? pack.clips.values().next().value;
       if (probe && probe.tracks.length) {
@@ -493,6 +567,22 @@ export class Mobile implements Living, NpcSubject {
       const r = this.roles;
       this.speeds = moveSpeeds(r, this.scale, this.entry.move);
       this.melee = (this.flyer && r.hoverAttacks.length ? r.hoverAttacks : r.attacks).length > 0;
+      // The aimed pose the fold is only meaningful over, and the GLB really having it: a pack whose
+      // carry row names one the bake left out would otherwise fold a body over a clip that is not
+      // there. Read once, here, rather than on every frame of every armed body.
+      this.canAim = !!r.rangedAimed && animator.has(r.rangedAimed);
+      // And the shots, for the same reason and once for the same cost: a row says what the animation
+      // table holds, not what the bake wrote, so a name the bake left out would be a shot that plays
+      // nothing at all. What the GLB has is kept; with none of them left the pack's own ranged
+      // attack comes back, recoil and all, which is what a pack with no rows plays anyway.
+      if (r.rangedShots?.length) {
+        const have = r.rangedShots.filter((c) => animator.has(c));
+        r.rangedShots = have.length ? have : undefined;
+      }
+      if (r.ranged && !animator.has(r.ranged)) {
+        r.ranged = r.rangedShots?.[0] ?? ownRanged;
+        r.rangedAdditive = r.rangedShots?.length ? false : ownAdditive;
+      }
       // Only what the catalogue gives a ranged attack shoots: a pack with a ranged clip is not enough.
       const ranged = this.entry.stats?.ranged;
       this.rangedRange = r.ranged && !this.hologram && ranged && ranged.range > 0 ? ranged.range * Math.max(1, Math.sqrt(this.scale)) : 0;
@@ -779,6 +869,9 @@ export class Mobile implements Living, NpcSubject {
       this.slowed = 0;
       this.stunned = 0;
       this.heldUntil = 0;
+      // And the aim, which nothing steps for a driven body: left folded, the chest would keep the
+      // turn it had at the moment it changed hands for as long as it was somebody else's.
+      this.dropAim();
       // Out of the solver. A dynamic body nobody is steering would fall, drift and be shoved about
       // between the keeper's words; kinematic, it goes exactly where it is told and still stops a
       // bolt, holds a blade and blocks a walker.
@@ -1012,6 +1105,9 @@ export class Mobile implements Living, NpcSubject {
     this.shotsLeft = 0;
     this.downPhase = null;
     this.targetRef = null;
+    // Before the death clip, so the fall is posed from the clip's own chest and the ragdoll built
+    // from it is not carrying an aim.
+    this.dropAim();
     const v = this.body.linvel();
     this.body.setLinvel({ x: 0, y: this.flyer ? Math.min(0, v.y) : v.y, z: 0 }, true);
     // A flyer falls out of the air; a swimmer stays afloat.
@@ -1118,6 +1214,10 @@ export class Mobile implements Living, NpcSubject {
     if (this.tier?.name === 'near' && cameraDist < LOD_TUNE.near) this.deps.effects()?.flash(from, color, 5, 6, 0.06);
     const r = this.roles;
     if (r?.ranged && r.rangedAdditive) this.animator?.pulse(r.ranged, 0.06, 0.12);
+    // The recoil window the aim is held through starts at the bolt, not at the clip: it is the
+    // player's own 0.35 s and it is what stops the barrel swinging off a target and back on again
+    // between every shot and the next.
+    this.sinceShot = 0;
   }
 
   /** The set of roles in use now: swimming, hovering, fighting, or plain. */
@@ -1131,7 +1231,121 @@ export class Mobile implements Living, NpcSubject {
   }
 
   private idleNow(): string | null {
-    return idleClipFor(this.roles, { swimming: this.swimming, flying: this.flyer, shooting: this.decision?.attack === 'ranged', fighting: this.fighting() });
+    return idleClipFor(this.roles, { swimming: this.swimming, flying: this.flyer, shooting: this.decision?.attack === 'ranged', fighting: this.fighting(), stance: this.stance, carried: this.carried });
+  }
+
+  /**
+   * Which of the three carries it stands in, from what is in its hands and where its foe is:
+   * `stanceFor`, the fighters' own, on the player's own numbers. A body with nothing off the rack
+   * (a creature, a droid with a built-in gun, anyone the catalogue arms with nothing) is `relaxed`
+   * for ever, which is exactly what it was before any of this.
+   *
+   * The combat carry outlives the fight by `STANCE_TUNE.ready` seconds, as the player's blaster
+   * stays up after a shot -- otherwise a body drops its weapon to its side between one thought and
+   * the next every time its target steps behind something.
+   */
+  private stepStance(target: Living | null): void {
+    if (this.carry === 'unarmed' && !this.gun && !this.blade) {
+      this.stance = 'relaxed';
+      return;
+    }
+    const live = !!target && !target.dead;
+    if (live && this.fighting()) this.readyUntil = this.now + STANCE_TUNE.ready;
+    const ask = this.stanceAsk;
+    const dx = live ? target!.pos.x - this.pos.x : 0;
+    const dz = live ? target!.pos.z - this.pos.z : 0;
+    const off = live ? Math.atan2(dx, dz) - this.heading : Math.PI;
+    ask.gun = !!this.gun;
+    ask.combat = this.now < this.readyUntil;
+    ask.hasTarget = live;
+    ask.gap = live ? Math.hypot(dx, dz) : 0;
+    // Its own reach when the catalogue gives it no range at all (a body with a blade, or one whose
+    // gun the catalogue never gave a range), so `stanceFor`'s range test is never a comparison
+    // against zero that would hold a carrier at `ready` for ever.
+    ask.range = this.rangedRange || 20;
+    ask.offNose = live ? Math.atan2(Math.sin(off), Math.cos(off)) : Math.PI;
+    this.stance = stanceFor(ask);
+  }
+
+  /**
+   * The aim let go of and the spine put back where its clip had it, in one call: a body that has
+   * died, one another browser has taken over, and one starting a fresh life.
+   *
+   * It matters most at death. The fold writes bone quaternions directly, and a ragdoll is built
+   * from the pose the death clip leaves, so a turn left in the chest would be baked into the heap.
+   * A death clip that keys the spine washes the fold out by itself; one that does not would leave
+   * a corpse with its chest wound round for as long as it lay there.
+   */
+  private dropAim(): void {
+    this.stance = 'relaxed';
+    this.readyUntil = -Infinity;
+    this.aimFix.yaw = 0;
+    this.aimFix.pitch = 0;
+    this.aimTurn = 0;
+    this.inner.rotation.y = 0;
+    // The same frame the fold is taken in, and put back to nothing before it is read.
+    if (this.spines?.length) foldSpine(this.spines, this.inner, this.folded, 0, 0);
+  }
+
+  /**
+   * The aim, once the pose is on: the barrel is measured where the clip and last frame's fold left
+   * it, the difference to where the next bolt is really going is folded in, the spine takes what it
+   * can of the yaw and the drawn body eases onto the rest. It is `Player.correctAim` through the
+   * fighters' pure module, with the crosshair replaced by the point `fire` aims at.
+   *
+   * Only a gun in the hand. A blade is swung by clips that pose the whole arm, and a body with no
+   * weapon off the rack has no grip to measure a barrel from at all.
+   *
+   * Nothing here decides anything: a mobile's bolt leaves `muzzlePoint` aimed straight at its
+   * target whatever the pose says, so a fold that is wrong is a body that looks wrong and never a
+   * body that misses. That is why it can be this cheap.
+   */
+  private aimPose(dt: number): void {
+    const holder = this.holder;
+    const target = this.targetRef;
+    const ask = this.aimAsk;
+    ask.aiming = !!this.gun && !!holder && !!target && !target.dead && this.stance !== 'relaxed';
+    ask.sinceShot = this.sinceShot;
+    ask.stunned = this.stunned > 0;
+    const mode = aimMode(ask);
+    if (mode === 'chase' && holder && target) {
+      // The matrices are last frame's until something asks: the clip has just been posed and the
+      // parents are the group's, so this is the one call that makes the measurement this frame's.
+      holder.updateWorldMatrix(true, false);
+      holder.getWorldPosition(aimGrip);
+      // Where the barrel points: the grip to the muzzle node, which was hung at the far end of the
+      // model when the weapon went in the hand.
+      this.muzzlePoint(aimWant);
+      aimHave.copy(aimWant).sub(aimGrip);
+      const barrel = aimHave.length();
+      // And where the shot is going: the same point `fire` aims at, from that same muzzle.
+      aimGrip.copy(aimWant);
+      aimWant.set(target.pos.x, target.pos.y + target.halfHeight, target.pos.z).sub(aimGrip);
+      const len = aimWant.length();
+      if (len > 1e-4 && barrel > 1e-6) {
+        aimWant.divideScalar(len);
+        aimHave.divideScalar(barrel);
+        stepAimFix(this.aimFix, Math.atan2(aimWant.x, aimWant.z), Math.asin(clamp(aimWant.y, -1, 1)), Math.atan2(aimHave.x, aimHave.z), Math.asin(clamp(aimHave.y, -1, 1)), dt, 'chase');
+      }
+      // A barrel of no length, or a foe standing on the muzzle, leaves the correction exactly where
+      // it is: the player's own early return, which is a hold and not an ease.
+    } else if (mode === 'ease') stepAimFix(this.aimFix, 0, 0, 0, 0, dt, 'ease');
+    // 'hold' does nothing at all, which is the whole of it.
+    //
+    // What the spine could not take goes on the drawn model, never on the heading: the heading is
+    // the brain's, the body's rotation, where its bolts and its blade start from and what the
+    // stuck check measures. The model turning inside it is a look.
+    //
+    // It is written **before** the fold, and the fold is about `inner` rather than `group`, because
+    // the tilt is about whatever frame the fold is given. The two frames are a whole body turn
+    // apart: the spine takes at most `spineMax` (0.6 rad) and everything past that -- up to 1.6 --
+    // is this turn, so folding about the group tilts the chest about an axis that far off the drawn
+    // body's own right and rolls it sideways instead of leaning it forward. The player has no such
+    // seam, because its leftover goes on the heading and `rig.twistTorso`'s root already carries it.
+    // Writing the turn first is the other half: read afterwards the axis would be last frame's.
+    this.aimTurn = easeAngle(this.aimTurn, bodyShare(this.aimFix.yaw), STANCE_TUNE.bodyTurn, dt);
+    if (this.inner.rotation.y !== this.aimTurn) this.inner.rotation.y = this.aimTurn;
+    foldSpine(this.spines ?? [], this.inner, this.folded, spineShare(this.aimFix.yaw), this.aimFix.pitch);
   }
 
   private fighting(): boolean {
@@ -1207,6 +1421,9 @@ export class Mobile implements Living, NpcSubject {
     }
     // 7. Timers.
     this.stunned = Math.max(0, this.stunned - sdt);
+    // On the simulated clock beside the rest, so `__debug.advance` moves the recoil window the aim
+    // is held through exactly as a drawn frame does.
+    this.sinceShot += sdt;
     this.attackCd -= sdt;
     this.rangedCd -= sdt;
     this.hitCd -= sdt;
@@ -1218,11 +1435,18 @@ export class Mobile implements Living, NpcSubject {
       this.think(ctx);
       this.thinkAt = this.now + tier.think * (0.85 + Math.random() * 0.3);
     }
-    // 10. Act, 11. hold its height, 12. animate.
+    // 10. The carry it stands in (before acting: `act` chooses the loop from it), 11. act,
+    // 12. hold its height, 13. animate, 14. aim.
     if (this.state === 'return') this.hp = Math.min(this.maxHp, this.hp + (this.maxHp / 3) * sdt);
+    this.stepStance(this.targetRef);
     this.act(sdt, ctx, tier);
     this.holdHeight(t, sdt);
     this.animate(sdt, tier);
+    // After the mixer and before the blade: the fold goes on top of the pose the clip has just
+    // written, and the blade's own ends are worked out from the hand the fold has just moved.
+    // Skipped for everything with nothing in its hands, for anything culled, and for a tier whose
+    // mixer is not running at all -- which is most of the world.
+    if (this.gun && this.holder && this.canAim && this.group.visible && tier.animEvery > 0) this.aimPose(sdt);
     this.updateBlade(dt, ctx.camera);
   }
 
@@ -1571,8 +1795,13 @@ export class Mobile implements Living, NpcSubject {
       const beast = this.entry.kind === 'creature' || this.entry.kind === 'special';
       this.rangedCd = cooldown * jitter();
       if (!roles.rangedAdditive && roles.ranged) {
-        // A whole-body shot: the bolt leaves part way into the clip.
-        const length = animator.once(roles.ranged, { priority: SHOT_PRIORITY.attack, fadeIn: 0.08, fadeOut: 0.2 });
+        // A whole-body shot: the bolt leaves part way into the clip. The carry row hands over every
+        // shot the weapon has where the table carries them (six a weapon), so a gunner standing
+        // over somebody does not fire the identical clip a dozen times; a pack with one falls back
+        // to `ranged`, which is that one.
+        const shots = roles.rangedShots;
+        const shot = shots && shots.length > 1 ? shots[Math.floor(Math.random() * shots.length)] : roles.ranged;
+        const length = animator.once(animator.has(shot) ? shot : roles.ranged, { priority: SHOT_PRIORITY.attack, fadeIn: 0.08, fadeOut: 0.2 });
         this.shotsLeft = 1;
         this.nextShotAt = this.now + Math.min(0.5, 0.4 * (length ?? 0.5));
       } else {
@@ -1672,6 +1901,13 @@ export class Mobile implements Living, NpcSubject {
     this.hitThisSwing.clear();
     this.bladePath.reset();
     this.shotsLeft = 0;
+    // The carry and the aim. The bones have just been put back to their rest pose above, so the
+    // fold's record of what it last wrote describes a pose that no longer exists: cleared rather
+    // than unwound, or it would compare a rest-pose quaternion against a folded one, find them
+    // different, and take the fold as the clip's own -- which is the one way this can compound.
+    this.folded.clear();
+    this.dropAim();
+    this.sinceShot = Infinity;
     this.downPhase = null;
     this.memory.clear();
     this.targetKey = null;
@@ -1753,6 +1989,15 @@ export class Mobile implements Living, NpcSubject {
       ragdoll: this.ragdoll?.status ?? null,
       ranged: this.rangedRange ? Number(this.rangedRange.toFixed(0)) : 0,
       weapon: this.weapon,
+      // What it is carrying and how it is holding it, with the spine's share of the aim in degrees
+      // and how much of it the drawn model took. `spines 0` on a person is the one thing here that
+      // means something is wrong: it is a skeleton the fold found no spine in.
+      // A body holding something whose pack has no row for it says so: the stance is still worked
+      // out and reported, and it chooses no clip, which is the one line that says why nothing moved.
+      carry: this.carried || !(this.gun || this.blade) ? this.carry : `${this.carry} (no row in this pack: reconvert mobiles)`,
+      stance: this.carried || !(this.gun || this.blade) ? this.stance : `${this.stance} (no row: it chooses no clip)`,
+      aim: !this.gun ? null : !this.canAim ? 'no aimed pose in this pack: reconvert mobiles' : `${THREE.MathUtils.radToDeg(spineShare(this.aimFix.yaw)).toFixed(1)}° spine, ${THREE.MathUtils.radToDeg(this.aimTurn).toFixed(1)}° body, ${THREE.MathUtils.radToDeg(this.aimFix.pitch).toFixed(1)}° pitch`,
+      spines: this.spines?.length ?? 0,
       roles: r ? describeRoles(r) : null,
     };
   }

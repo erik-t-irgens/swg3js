@@ -126,6 +126,30 @@ export function missingRoles(roles: Roles, clips: ReadonlyMap<string, THREE.Anim
   return out;
 }
 
+/**
+ * The same, for the carry rows: `<weapon>.<field>` for every clip a row names that the GLB has not
+ * got. The rows are not covered by `missingRoles`, which walks `Roles` alone, and they need it more:
+ * every other role is the converter's own pick out of the clips it wrote, while a row says what the
+ * *animation table* holds, so a name the bake left out is a row that plays nothing and says nothing.
+ */
+export function missingCarries(carries: AnimPack['carries'], clips: ReadonlyMap<string, THREE.AnimationClip>): string[] {
+  const out: string[] = [];
+  for (const [weapon, row] of Object.entries(carries ?? {})) {
+    if (!row) continue;
+    for (const [field, v] of Object.entries(row)) {
+      if (typeof v === 'string') {
+        if (!clips.has(v)) out.push(`${weapon}.${field}`);
+      } else if (Array.isArray(v)) {
+        v.forEach((item, i) => {
+          const name = typeof item === 'string' ? item : (item as { clip?: string })?.clip;
+          if (name && !clips.has(name)) out.push(`${weapon}.${field}[${i}]`);
+        });
+      }
+    }
+  }
+  return out;
+}
+
 /** What a body is doing this frame, as far as the choice of idle is concerned. */
 export interface IdleSituation {
   swimming: boolean;
@@ -134,6 +158,30 @@ export interface IdleSituation {
   shooting: boolean;
   /** It is in a fight at all (chasing, attacking or alerted, with somebody to fight). */
   fighting: boolean;
+  /**
+   * Which carry it stands in (`stanceFor` in `src/world/fighterStance.ts`), when anything has
+   * worked one out for it. Left off by a body with no carry -- a creature, a driven mobile --
+   * and then the two branches it reaches are both unreachable, so the choice is the one this
+   * function has always made.
+   */
+  stance?: 'relaxed' | 'ready' | 'aim';
+  /**
+   * Whether the pack really carries a **row** for the weapon in this body's hands -- the converter's
+   * `carries`, resolved from the animation table -- as against the roles a pack written before the
+   * rows happens to hold.
+   *
+   * It is the gate and it is not optional, because `rangedStance` means two different things on
+   * either side of it. From a row it is the weapon's own weapon-up carry, which is what a body
+   * fighting with that weapon should stand in. Without one it is whatever `resolveRoles` could find
+   * for the pack's own ranged clip, and for a pistol source that is the **holstered** carry, whose
+   * still branch is the plain breathing loop -- so honouring a stance there would stand a body
+   * fighting with a pistol breathing where today it stands in the unarmed guard, and would stand a
+   * blade carrier, whose decision is never `ranged` and so never reached this at all, in a pistol
+   * pose for the whole of every fight. Measured over the converted catalogue on the owner's machine,
+   * ungated it moved 1,577 of 2,181 armed bodies off the guard -- 1,059 of them onto the plain
+   * breathing loop -- with no conversion run. The same fact gates the spine fold (`canAim`).
+   */
+  carried?: boolean;
 }
 
 /**
@@ -146,12 +194,21 @@ export interface IdleSituation {
  * exactly the pack whose stance is a real aimed pose. Gated on the flag, every such stance --
  * every aimed blaster pose in the game -- is unreachable, and the body falls through to its
  * unarmed combat idle instead.
+ *
+ * The aimed loop goes in front of both, and only a body whose pack carries a real row can reach
+ * either: the stance is the pose a blaster settles into with something really in front of it, which
+ * is a different thing from "its decision this instant is to shoot" -- a gunner holds the aim
+ * through its whole cooldown and through a stagger, as the player's does. `at.carried` is why the
+ * broadening costs nothing on a pack nobody has reconverted; see `IdleSituation.carried`, which is
+ * the whole of that argument.
  */
 export function idleClipFor(r: Roles | null, at: IdleSituation): string | null {
   if (!r) return null;
   if (at.swimming && r.swimIdle) return r.swimIdle;
   if (at.flying && r.hoverIdle) return r.hoverIdle;
-  if (at.shooting && r.rangedStance) return r.rangedStance;
+  const held = !!at.carried && (at.stance === 'ready' || at.stance === 'aim');
+  if (held && at.stance === 'aim' && r.rangedAimed) return r.rangedAimed;
+  if ((at.shooting || held) && r.rangedStance) return r.rangedStance;
   if (at.fighting && r.idleCombat) return r.idleCombat;
   return r.idle;
 }
@@ -179,7 +236,8 @@ export function describeRoles(r: Roles): string {
   if (r.swim || r.swimIdle) parts.push('swims');
   if (r.hover || r.hoverIdle) parts.push('hovers');
   if (r.attacks?.length) parts.push(`${r.attacks.length} attack${r.attacks.length === 1 ? '' : 's'}`);
-  if (r.ranged) parts.push(r.rangedAdditive ? 'ranged (additive)' : 'ranged');
+  if (r.ranged) parts.push(r.rangedAdditive ? 'ranged (additive)' : `ranged${(r.rangedShots?.length ?? 0) > 1 ? ` (${r.rangedShots!.length} shots)` : ''}`);
+  if (r.rangedAimed) parts.push('aims');
   const hits = [r.hitLight && 'l', r.hitMedium && 'm', r.hitHeavy && 'h'].filter(Boolean).join('/');
   if (hits) parts.push(`hits ${hits}`);
   const down = [r.down && 'down', r.downLoop && 'loop', r.getUp && 'up'].filter(Boolean).join(' ');

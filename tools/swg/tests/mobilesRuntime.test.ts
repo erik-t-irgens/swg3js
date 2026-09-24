@@ -13,7 +13,11 @@ import { BRAIN_TUNE, decide, hostile, wanderPoint, type BrainSelf, type BrainTar
 import { LOD_TUNE, lodTier, type LodInput } from '../../../src/world/mobiles/lod.ts';
 import { makeAdditiveOnce, missingRoles, rigClipsFromPack, rolesFor, type PackClipSource } from '../../../src/world/mobiles/packClips.ts';
 import type { AnimPack, MobileAppearance, MobileEntry, Roles } from '../../../src/world/mobiles/types.ts';
-import { armedRoles, armsFor, chooseWeapon, gunKindForRoles, hintFor, hintForEntry, muzzleBone, SABER_SWINGS, wantsSaber } from '../../../src/world/mobiles/arms.ts';
+import { armedRoles, armsFor, carryWeaponFor, chooseWeapon, gunKindForRoles, hintFor, hintForEntry, muzzleBone, rolesFromCarry, SABER_SWINGS, wantsSaber } from '../../../src/world/mobiles/arms.ts';
+import { idleClipFor } from '../../../src/world/mobiles/packClips.ts';
+import type { CarryRow } from '../../../src/world/mobiles/types.ts';
+import { stanceFor } from '../../../src/world/fighterStance.ts';
+import { FOLD_YAW_MAX, SPINE_BONE, foldSpine, type FoldRecord } from '../../../src/world/mobiles/spineFold.ts';
 import { ambientOverrides, groupPicks, HUMANOID_BOUNDS, lookBounds, permanentGap, spawnDistance, speciesOf } from '../../../src/world/mobiles/spawning.ts';
 import type { WeaponClass } from '../../../src/player/weapons.ts';
 
@@ -628,6 +632,154 @@ function lod(over: Partial<LodInput> = {}): LodInput {
   ok(Object.keys(armedRoles([{ name: 'idle', speed: 0 }], 'rifle')).length === 0, 'a pack without rifle clips changes nothing');
   ok(muzzleBone(['root', 'spine1', 'jaw', 'hold_r']) === 'hold_r' && muzzleBone(['root', 'jaw']) === 'jaw' && muzzleBone(['root']) === null, "the muzzle bone: a gun's joint first, then the mouth");
   ok(SABER_SWINGS.length === 10 && SABER_SWINGS.every((s) => s.startsWith('BOTH_A')), "the swings are Jedi Academy's ten one-hand attacks");
+
+  // --- the carry rows: picking a row instead of matching clip names -----------------------------
+  const row = (over: Partial<CarryRow> = {}): CarryRow => ({ relaxed: null, ready: null, aimed: null, walk: null, run: null, gaits: [], fires: [], recoil: null, swings: [], toCombat: null, fromCombat: null, ...over });
+  const pistolRow = row({ ready: 'p_ready', aimed: 'p_aim', gaits: [{ clip: 'p_walk', speed: 1.5 }, { clip: 'p_run', speed: 5 }], walk: 'p_walk', run: 'p_run', fires: ['p_fire1', 'p_fire3'], recoil: 'p_add', toCombat: 'p_in', fromCombat: 'p_out' });
+  const over = rolesFromCarry(pistolRow);
+  ok(over.rangedStance === 'p_ready' && over.idleCombat === 'p_ready' && over.rangedAimed === 'p_aim', 'a carry row stands a body in its weapon-up pose and gives it an aimed one');
+  ok(over.ranged === 'p_fire1' && over.rangedAdditive === false && over.rangedShots?.join() === 'p_fire1,p_fire3', '... fires whole-body, with every shot the weapon has');
+  ok(over.gaitsCombat?.length === 2 && over.walkCombat === 'p_walk' && over.runCombat === 'p_run', '... and walks and runs with the weapon up');
+  ok(over.attacks === undefined, '... and leaves the melee swings alone: a gunner still punches what closes on it');
+  const recoilOnly = rolesFromCarry(row({ relaxed: 'r_port', recoil: 'r_add', gaits: [{ clip: 'r_walk', speed: 1.4 }] }));
+  ok(recoilOnly.ranged === 'r_add' && recoilOnly.rangedAdditive === true && recoilOnly.rangedStance === 'r_port' && recoilOnly.rangedAimed === undefined, 'a row with only a port-arms carry and a recoil is exactly what a rifle has today');
+  ok(rolesFromCarry(row({ ready: 's_guard', swings: ['s_a', 's_b'] })).attacks?.join() === 's_a,s_b', 'a blade row is a ready stance and its own swings');
+  // The row wins where there is one; the clip-name matching is what every pack on a machine that
+  // has not been reconverted still gets, and it must be bit-for-bit what it always was.
+  ok(armedRoles(packClips, 'rifle', { rifle: pistolRow }).rangedStance === 'p_ready', 'a pack with rows is read from its row');
+  ok(armedRoles(packClips, 'rifle', {}).rangedStance === 'all_b_cbt_rifle_a_standing_hold_idle', 'a pack with no row for the weapon falls back on the clip names');
+  ok(armedRoles(packClips, 'rifle', null).rangedStance === armedRoles(packClips, 'rifle').rangedStance, 'a pack with no rows at all is what it always was');
+  ok(Object.keys(armedRoles(packClips, 'pistol', {})).length === 0 && Object.keys(armedRoles(packClips, 'sword', {})).length === 0, 'without a row there is still nothing to say about a pistol or a blade');
+  ok(carryWeaponFor({ kind: 'gun', carry: 'rifle', classes: ['rifle'], prefer: [] }) === 'rifle' && carryWeaponFor({ kind: 'saber', classes: ['lightsaber'], prefer: [] }) === 'sword' && carryWeaponFor(null) === 'unarmed', 'a lightsaber stands in the one-handed blade row; nothing in hand is the unarmed one');
+}
+
+// --- the idle a carry stands in ----------------------------------------------------------------
+{
+  const armed = roles({ idle: 'breathe', idleCombat: 'guard', rangedStance: 'ready', rangedAimed: 'aimed' });
+  const at = (over: Partial<Parameters<typeof idleClipFor>[1]> = {}) => idleClipFor(armed, { swimming: false, flying: false, shooting: false, fighting: false, carried: true, ...over });
+  ok(at() === 'breathe', 'out of a fight with its weapon down it breathes');
+  ok(at({ stance: 'ready' }) === 'ready' && at({ stance: 'aim' }) === 'aimed', 'weapon up it stands ready, and aimed once something is in front of it');
+  ok(at({ fighting: true, stance: 'relaxed' }) === 'guard', 'a body with no carry keeps the unarmed guard');
+  ok(at({ shooting: true, carried: false }) === 'ready', 'its decision to shoot still reaches the stance, for a body nothing works a carry out for');
+  // The gate, and the whole of what makes this safe on a machine nobody has reconverted. Without a
+  // row `rangedStance` is not a carry at all: for a pistol source it is the holstered pose, whose
+  // still branch is the plain breathing loop, and a blade carrier -- whose decision is never
+  // `ranged`, so it never reached this branch before -- would stand in it for every fight it has.
+  // So a stance with no row behind it must choose exactly what it chose before there were stances.
+  const rowless = (over: Partial<Parameters<typeof idleClipFor>[1]> = {}) => idleClipFor(armed, { swimming: false, flying: false, shooting: false, fighting: false, ...over });
+  ok(rowless({ fighting: true, stance: 'ready' }) === 'guard' && rowless({ fighting: true, stance: 'aim' }) === 'guard', 'a pack with no carry row stands in the unarmed guard whatever stance is worked out for it');
+  ok(rowless({ stance: 'aim' }) === 'breathe', '... and out of a fight it breathes, as it always did');
+  ok(rowless({ fighting: true, shooting: true, stance: 'ready' }) === 'ready', '... while its decision to shoot still reaches the stance, which is the one thing that always did');
+  // A pack converted before any of this has no aimed loop, and must stand exactly where it did.
+  const old = roles({ idle: 'breathe', idleCombat: 'guard', rangedStance: 'ready' });
+  const before = (over: Partial<Parameters<typeof idleClipFor>[1]> = {}) => idleClipFor(old, { swimming: false, flying: false, shooting: false, fighting: false, carried: true, ...over });
+  ok(before({ stance: 'aim', fighting: true }) === 'ready' && before({ fighting: true }) === 'guard', 'with a row but no aimed loop the aim falls back to the ready stance, and a body with no stance to the guard');
+  ok(idleClipFor(roles({ idle: 'breathe', swimIdle: 'swim' }), { swimming: true, flying: false, shooting: true, fighting: true, stance: 'aim', carried: true }) === 'swim', 'swimming beats every carry, as it always did');
+  // And the stance itself is the fighters', on the fighters' numbers.
+  const ask = { gun: true, combat: true, hasTarget: true, gap: 10, range: 20, offNose: 0 };
+  ok(stanceFor(ask) === 'aim' && stanceFor({ ...ask, combat: false }) === 'relaxed' && stanceFor({ ...ask, gun: false }) === 'ready' && stanceFor({ ...ask, offNose: 2 }) === 'ready', 'the carry is stanceFor: relaxed out of a fight, ready with a blade or a foe off the nose, aimed otherwise');
+}
+
+// --- the spine fold ----------------------------------------------------------------------------
+// The very function the game runs, on a three bones a real skeleton has, driven here because the
+// one way it can go wrong (folding on top of its own last turn) is invisible in a single frame.
+{
+  /** A root with a three-bone spine and a hand at the top of it, as a body's clone carries. */
+  const rig = () => {
+    const root = new THREE.Object3D();
+    root.name = 'mobile';
+    let parent: THREE.Object3D = root;
+    const spine: THREE.Bone[] = [];
+    for (let i = 1; i <= 3; i++) {
+      const b = new THREE.Bone();
+      b.name = `spine${i}`;
+      b.position.set(0, 0.25, 0);
+      parent.add(b);
+      spine.push(b);
+      parent = b;
+    }
+    const hand = new THREE.Object3D();
+    hand.name = 'hold_r';
+    hand.position.set(0.25, 0.2, 0);
+    parent.add(hand);
+    root.updateMatrixWorld(true);
+    return { root, spine, hand };
+  };
+  const yawOf = (o: THREE.Object3D) => {
+    const q = o.getWorldQuaternion(new THREE.Quaternion());
+    const v = new THREE.Vector3(0, 0, 1).applyQuaternion(q);
+    return Math.atan2(v.x, v.z);
+  };
+  const { root, spine, hand } = rig();
+  // The rule the game collects a spine by, exactly as `Mobile.attach` applies it inside the one walk
+  // it already takes over a fresh clone. There is no `spineBonesOf` to call: a second walk in `src/`
+  // would be a second implementation of this, and the test would be driving the wrong one.
+  const spinesOf = (o: THREE.Object3D): THREE.Bone[] => {
+    const out: THREE.Bone[] = [];
+    o.traverse((n) => {
+      if ((n as THREE.Bone).isBone && SPINE_BONE.test(n.name)) out.push(n as THREE.Bone);
+    });
+    return out;
+  };
+  ok(spinesOf(root).length === 3 && spinesOf(root)[0] === spine[0], 'the fold finds the three spine bones and nothing else');
+  const folded = new Map<THREE.Bone, FoldRecord>();
+  foldSpine(spine, root, folded, 0.6, 0);
+  root.updateMatrixWorld(true);
+  ok(Math.abs(yawOf(hand) - 0.6) < 1e-6, 'a fold of 0.6 rad turns what hangs off the top of the spine by exactly that');
+  ok(Math.abs(hand.getWorldPosition(new THREE.Vector3()).y - 0.95) < 1e-6, '... and does not move it up or down');
+  // The clip keyed nothing for these bones this frame, so they still hold what the fold wrote.
+  // Folding again by the same angle must land in the same place, not twice as far.
+  foldSpine(spine, root, folded, 0.6, 0);
+  root.updateMatrixWorld(true);
+  ok(Math.abs(yawOf(hand) - 0.6) < 1e-6, 'folding again on an unkeyed bone does not compound: the same angle is the same pose');
+  foldSpine(spine, root, folded, 0, 0);
+  root.updateMatrixWorld(true);
+  ok(Math.abs(yawOf(hand)) < 1e-6, 'a fold of nothing puts the chest back exactly where the clip had it');
+  // And a clip that did key the bone is folded from its new value, not from the fold's memory.
+  spine[0].quaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), 0.2);
+  foldSpine(spine, root, folded, 0.3, 0);
+  root.updateMatrixWorld(true);
+  ok(Math.abs(yawOf(hand) - 0.5) < 1e-6, "a bone the clip moved is folded on top of where the clip left it");
+  // The tilt is about the root's **own** right, so a chest told to lean forward leans along the
+  // frame the fold was handed and nowhere else. It is why the fold must be given the frame the body
+  // is really drawn in: a mobile puts the share of the yaw its spine could not take on the drawn
+  // model inside its group (up to 1.6 rad of it), so folding about the group would tilt the chest
+  // about an axis that far round from the model's own right and roll it sideways instead.
+  const lean = rig();
+  lean.root.rotation.y = Math.PI / 2;
+  lean.root.updateMatrixWorld(true);
+  foldSpine(lean.spine, lean.root, new Map(), 0, 0.4);
+  lean.root.updateMatrixWorld(true);
+  const leanWorld = lean.hand.getWorldPosition(new THREE.Vector3());
+  const leanLocal = lean.root.worldToLocal(leanWorld.clone());
+  ok(Math.abs(leanLocal.x - 0.25) < 1e-6 && leanLocal.z > 0.15, "a forward tilt is about the root's own right: nothing moves sideways in that frame");
+  ok(Math.abs(leanWorld.z + 0.25) < 1e-6 && leanWorld.x > 0.15, '... so in the world it leans the way the root faces, a quarter turn from the world axis');
+  // The clamp is the rig's, and a body with no spine at all is simply not folded.
+  const bare = rig();
+  ok(foldSpine(bare.spine, bare.root, new Map(), 5, 0) === FOLD_YAW_MAX, 'the fold is clamped to what a spine will take');
+  ok(foldSpine([], root, folded, 1, 1) === 0, 'a skeleton with no spine folds nothing and says so');
+  // Nothing is allocated per fold but the one record per bone, made the first time.
+  const counted = new Map<THREE.Bone, FoldRecord>();
+  foldSpine(spine, root, counted, 0.1, 0.1);
+  const size = counted.size;
+  for (let i = 0; i < 50; i++) foldSpine(spine, root, counted, 0.1 + i * 0.001, 0.05);
+  ok(counted.size === size && size === 3, 'fifty folds make no record beyond the one per bone');
+  // And a body standing with its weapon down costs nothing at all: with nothing folded and nothing
+  // asked for, no world matrix is composed, so the renderer's own pass is left to do what it always
+  // did. That is the case almost every body in the world is in almost every frame, which is why it
+  // is worth a check of its own -- it is observed here by moving something below the spine and
+  // seeing that the fold did not pick it up.
+  const quiet = rig();
+  const rest = new Map<THREE.Bone, FoldRecord>();
+  foldSpine(quiet.spine, quiet.root, rest, 0, 0);
+  foldSpine(quiet.spine, quiet.root, rest, 0, 0);
+  quiet.hand.position.x = 9;
+  foldSpine(quiet.spine, quiet.root, rest, 0, 0);
+  ok(Math.abs(quiet.hand.matrixWorld.elements[12] - 9) > 1, 'with nothing folded and nothing asked for, the fold composes no world matrix at all');
+  foldSpine(quiet.spine, quiet.root, rest, 0.1, 0);
+  // 9 m out on a chest turned a tenth of a radian, so 9 cos 0.1 = 8.955, which is the new local
+  // place carried through and not the stale one.
+  ok(Math.abs(quiet.hand.matrixWorld.elements[12] - 9 * Math.cos(0.1)) < 1e-6, '... and the first real fold brings everything above the spine with it');
 }
 
 // --- spawning: the box a person is planned from ------------------------------------------------

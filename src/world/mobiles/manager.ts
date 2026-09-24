@@ -20,7 +20,7 @@ import { Character } from '../../player/character';
 import type { WeaponCatalogue } from '../../player/weapons';
 import { Mobile, type MobileContext, type MobileEquipment, type MobileExtras, type MobileSpawn } from './mobile';
 import { MOBILE_CACHE, MobileAssets, type ModelAsset, type PackAsset } from './assets';
-import { armedRoles, armsFor as armsChoice, chooseWeapon, SABER_SWINGS } from './arms';
+import { armedRoles, armsFor as armsChoice, carryWeaponFor, chooseWeapon, SABER_SWINGS } from './arms';
 import { isLook, lookKey } from './look';
 import { lookBounds, permanentGap } from './spawning';
 import type { PackSummary } from './types';
@@ -515,11 +515,15 @@ export class MobileManager {
   private readonly preparedWeapons = new Map<string, Promise<void>>();
 
   /**
-   * What a person holds and plays with (arms.ts): a gun off the rack with the pack's rifle carry
-   * when it is held as a rifle, or a lightsaber with Jedi Academy's swings when a species rig has
-   * already been parsed (the player's own always has; one is never fetched for this). The weapon
-   * is prepared before it is handed over, so holding it compiles nothing in play. Nothing for a
-   * creature, a droid or a hologram.
+   * What a person holds and plays with (arms.ts): a gun off the rack with its weapon's own carry
+   * row out of the pack -- its ready stance, its aimed loop, the gaits that hold it and its
+   * whole-body shots -- or a lightsaber with the blade's row under Jedi Academy's swings, which
+   * are lent from a species rig that has already been parsed (the player's own always has; one is
+   * never fetched for this). The weapon is prepared before it is handed over, so holding it
+   * compiles nothing in play. Nothing for a creature, a droid or a hologram.
+   *
+   * A pack with no rows -- every pack converted before they existed -- falls back on the clip-name
+   * matching `armedRoles` has always done, which is a rifle's port-arms carry and nothing else.
    *
    * `seed` is the one number a spawn the world holds rolls everything from: with one, the weapon off
    * the rack and the colour of a blade come out of it rather than out of the dice, so the same record
@@ -533,24 +537,36 @@ export class MobileManager {
     const roles = rolesFor(json, entry.gender);
     const choice = armsChoice(entry, packInfo.hierarchy, roles, json.roleSources);
     if (!choice) return null;
-    let extras: MobileExtras | null = null;
+    const carry = carryWeaponFor(choice);
+    // Whether the pack really carries a row for that weapon, as against the clip-name matching the
+    // fallback does: it is what lets the body's stance choose the clip it stands in at all, so a
+    // pack nobody has reconverted works its stance out and stands exactly where it always did.
+    const carried = !!json.carries?.[carry];
+    const over = armedRoles(json.clips ?? [], carry, json.carries);
+    let extras: MobileExtras | null = Object.keys(over).length ? { roles: over, carry, carried } : { carry, carried };
     if (choice.kind === 'gun') {
-      const over = armedRoles(json.clips ?? [], choice.carry);
-      if (Object.keys(over).length) extras = { roles: over };
-      else if (choice.carry === 'rifle' && !this.warned.has(`rifle:${packInfo.id}`)) {
+      if (!Object.keys(over).length && choice.carry === 'rifle' && !this.warned.has(`rifle:${packInfo.id}`)) {
         // Said once a pack: the rifle is held in the pack's own (pistol) stance, which is the best it has.
         this.warned.add(`rifle:${packInfo.id}`);
         console.info(`mobiles: pack ${packInfo.id} has no rifle clips; ${entry.id} and the rest on it hold a rifle in its own stance`);
       }
     } else {
+      // The blade's own ready stance and gaits come from the row where the pack has one; the swings
+      // stay Jedi Academy's, lent from a rig that is already parsed, because they are the ones this
+      // game's blade combat was built around and they cost no bytes.
       const rig = Character.parsedRigClips(entry.species ?? undefined);
       const swings = new Map<string, THREE.AnimationClip>();
       for (const c of rig ?? []) if (SABER_SWINGS.includes(c.name)) swings.set(c.name, c);
-      if (swings.size) extras = { clips: swings, roles: { attacks: [...swings.keys()] } };
+      if (swings.size) extras = { clips: swings, roles: { ...over, attacks: [...swings.keys()] }, carry, carried };
     }
     const rack = this.deps.weapons?.() ?? null;
     const def = rack ? chooseWeapon(choice, rack.weapons, rand) : null;
-    if (!rack || !def) return { equipment: null, extras };
+    // Nothing on the rack of the kind (or no rack yet): it holds nothing, so it carries nothing.
+    // Kept apart from the empty overlay above because the overlay is the *weapon's* roles -- a ready
+    // stance, a carry gait, a whole-body shot -- and a body with empty hands standing in a weapon's
+    // carry is the same wrong pose from the other end. It falls back on the pack's own roles, which
+    // is the unarmed guard, and `stepStance` leaves it relaxed.
+    if (!rack || !def) return { equipment: null, extras: null };
     const model = await rack.model(def);
     let ready = this.preparedWeapons.get(def.file);
     if (!ready) {
