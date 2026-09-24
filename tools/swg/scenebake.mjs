@@ -22,6 +22,55 @@
 // Everything here is pure arithmetic over plain objects, so the node test runs the real rules
 // rather than a mirror of them, and the converter is the only thing that touches a file.
 
+import path from 'node:path';
+
+/**
+ * The one folder the bake may write into, under the assets root.
+ *
+ * **The planet packs are read and never written.** A scene's textures are re-encoded smaller,
+ * which would be a catastrophe done in place: the world you actually play would quietly lose its
+ * detail, with no way back short of converting every planet again. So the bake reads the packs and
+ * writes copies here, and `sceneOut` below is the only thing in the converter that names an output
+ * file, so there is nowhere else for a careless line to put one. Deleting this folder puts
+ * everything back exactly as it was, which is the same promise every other optional pack makes.
+ */
+export const SCENES_DIR = 'scenes';
+
+/**
+ * Where a baked file goes: under the assets root, under `scenes`, and nowhere else.
+ *
+ * Refuses rather than sanitises. A part that climbs out, an absolute path, or a root that is not a
+ * real place are all mistakes in the caller, and quietly rewriting them into something safe would
+ * hide the mistake while the next one goes unchecked.
+ */
+export function sceneOut(root, ...parts) {
+  if (typeof root !== 'string' || !root) throw new Error('the assets root is required');
+  for (const p of parts) {
+    if (typeof p !== 'string' || !p) throw new Error(`a path part must be a non-empty string, not ${JSON.stringify(p)}`);
+    if (path.isAbsolute(p)) throw new Error(`a path part may not be absolute: ${p}`);
+  }
+  const base = path.resolve(root, SCENES_DIR);
+  const full = path.resolve(base, ...parts);
+  // `relative` is the honest test: it answers '..' or an absolute path for anything outside.
+  const rel = path.relative(base, full);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) throw new Error(`a scene may only be written under ${SCENES_DIR}/, not ${full}`);
+  return full;
+}
+
+/**
+ * Whether a path is one of the converted packs the bake reads. Nothing here ever opens one of
+ * these for writing; this exists so the command can say plainly what it is reading and a test can
+ * hold it to the line.
+ */
+export function isSourcePack(root, file) {
+  const base = path.resolve(root);
+  const scenes = path.resolve(base, SCENES_DIR);
+  const full = path.resolve(file);
+  const inRoot = !path.relative(base, full).startsWith('..');
+  const inScenes = !path.relative(scenes, full).startsWith('..') && path.relative(scenes, full) !== '';
+  return inRoot && !inScenes;
+}
+
 /**
  * Every invented number of the bake. None of these is the client's: the client never had a fixed
  * camera to size anything for. Live through the `scenes` command's own options.

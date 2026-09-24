@@ -6,7 +6,7 @@
 // it checks the arithmetic alone and says so.
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
-import { frustumPlanes, inFrustum, pixelSpan, placedAt, placesForRoster, planPlace, scenePlan, textureTarget, SCENE_BAKE_TUNE } from '../scenebake.mjs';
+import { frustumPlanes, inFrustum, isSourcePack, pixelSpan, placedAt, placesForRoster, planPlace, scenePlan, sceneOut, textureTarget, SCENE_BAKE_TUNE } from '../scenebake.mjs';
 import { sceneSpots } from '../../../src/data/scenes.ts';
 import { CREATOR_KEYS } from '../../../src/world/scenePlaces.ts';
 
@@ -19,6 +19,47 @@ function ok(cond: boolean, what: string): void {
 const note = (s: string): void => console.log(`note ${s}`);
 
 const CAM = { x: 0, y: 0, z: 0, look: { x: 0, y: 0, z: -1 }, fov: 62 };
+
+{
+  // Where the bake is allowed to write, which matters more than anything else here. A scene's
+  // textures are re-encoded smaller; done in place that would quietly strip the detail out of the
+  // world you actually play, with no way back short of converting every planet again.
+  const out = sceneOut('assets-private', 'tyrena', 'scene.json');
+  ok(out.replace(/\\/g, '/').endsWith('assets-private/scenes/tyrena/scene.json'), `a baked file lands under the scenes folder (${out.replace(/\\/g, '/')})`);
+  const climbs = ['..', '../tatooine', 'a/../../tatooine', '../../etc/passwd', 'tyrena/../../tatooine/rock.glb'];
+  for (const bad of climbs) {
+    let threw = false;
+    try {
+      sceneOut('assets-private', bad, 'x.glb');
+    } catch {
+      threw = true;
+    }
+    ok(threw, `a path that climbs out is refused rather than sanitised (${bad})`);
+  }
+  let absThrew = false;
+  try {
+    sceneOut('assets-private', process.platform === 'win32' ? 'C:\\windows\\x.glb' : '/etc/x.glb');
+  } catch {
+    absThrew = true;
+  }
+  ok(absThrew, 'and so is an absolute one');
+  let emptyThrew = false;
+  try {
+    sceneOut('');
+  } catch {
+    emptyThrew = true;
+  }
+  ok(emptyThrew, 'and a root that is not a place at all');
+
+  // The other half of the same promise: what counts as a pack the bake only ever reads.
+  ok(isSourcePack('assets-private', 'assets-private/tatooine/rock.glb'), "a planet's own model is a source");
+  ok(!isSourcePack('assets-private', 'assets-private/scenes/tyrena/scene.json'), 'and nothing under the scenes folder is');
+  ok(!isSourcePack('assets-private', 'elsewhere/rock.glb'), 'nor is anything outside the assets root');
+
+  // Stated as the rule it is, so a later reader cannot mistake it for an accident of the layout.
+  const scenes = sceneOut('assets-private', 'x');
+  ok(!isSourcePack('assets-private', scenes), 'so no path the bake may write is a path the bake reads: the two sets cannot overlap');
+}
 
 {
   // The frustum, from the outside in.
