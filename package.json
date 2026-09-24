@@ -42,7 +42,7 @@
     "test:stance": "node tools/swg/tests/fighterStance.test.ts",
     "test:posture": "node tools/swg/tests/fighterPosture.test.ts",
     "test:combat": "npm run test:blade && npm run test:clash && npm run test:blades && npm run test:marks && npm run test:scars && npm run test:footprints && npm run test:look && npm run test:ragdoll && npm run test:moods && npm run test:burn && npm run test:breath && npm run test:stance && npm run test:posture",
-    "test:cloning": "node tools/swg/tests/cloning.test.ts && node tools/swg/tests/sceneCapture.test.ts",
+    "test:cloning": "node tools/swg/tests/cloning.test.ts && node tools/swg/tests/sceneCapture.test.ts && node tools/swg/tests/scenes.test.ts",
     "test:gates": "node tools/swg/tests/gates.test.ts",
     "test:inventory": "node tools/swg/tests/inventory.test.ts && node tools/swg/tests/equipment.test.ts",
     "test:wings": "node tools/swg/tests/shipparts.test.ts && node tools/swg/tests/wings.test.ts",
