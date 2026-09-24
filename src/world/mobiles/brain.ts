@@ -11,6 +11,9 @@
 import { PLAYER_KEY, hostileSides } from '../../combat/targets.ts';
 import type { Aggression, Side } from '../../combat/kit';
 import type { MobileState } from './types';
+// The posture's four words, beside the pace's three. A type-only import, so nothing of the
+// fighters' file is loaded here and node's type stripping erases the line outright.
+import type { Posture } from '../fighterStance.ts';
 
 export interface BrainSelf {
   key: number;
@@ -73,6 +76,21 @@ export interface Decision {
   targetKey: number | null;
   moveTo: { x: number; z: number } | null;
   pace: 'stand' | 'walk' | 'run';
+  /**
+   * How low the body stands, beside the pace rather than folded into the state. The pace is already
+   * an axis orthogonal to the state -- a body chases at a walk or at a run -- and a posture is the
+   * same shape, since a body can be prone *and* attacking; and the state words are written out in
+   * three places that must agree, one of them in the relay, so a new state word would be a server
+   * change before a posture had crossed anything.
+   *
+   * **Nothing in `decide` writes it.** It leaves here as 'stand' on every decision, for the
+   * wildlife and for a fighter alike, and the fighters then write their own answer onto it before
+   * acting on it (`Npc.stepPosture`), exactly as the indoor wander clamp rewrites `goal` after the
+   * brain has answered. That is deliberate: the rule that would belong in here is a cover rule,
+   * which needs a flag only a fighter sets so that a spitting creature never crouches behind a
+   * rock, and that is a wave of its own. When it is written it goes here and no consumer changes.
+   */
+  posture: Posture;
   face: { x: number; z: number } | null;
   attack: 'melee' | 'ranged' | null;
   emote: 'alert' | 'idle' | null;
@@ -185,6 +203,7 @@ export function decide(self: BrainSelf, targets: readonly BrainTarget[], tune: B
     targetKey: null,
     moveTo: null,
     pace: 'stand',
+    posture: 'stand',
     face: null,
     attack: null,
     emote: null,

@@ -30,6 +30,21 @@
 // to fight instead of from a mouse button, with the barrel measured against where the next bolt is
 // going and the difference folded into the spine exactly as `Player.correctAim` folds it. Both are
 // only how a fighter stands, aims and is stopped: nothing here decides anything.
+//
+// And a **posture** beside the carry: upright, crouched, kneeling or lying down, which is an axis
+// of its own carried on the brain's own decision beside the pace. Three things about it are worth
+// knowing before reading the code, and each of them is the client's data rather than a choice.
+// A crouched body does nothing at all -- twelve of the state hierarchy's 147 states are the crouch
+// and every one carries zero actions -- so the crouch is how a body **moves** low. A kneeling one
+// fights: the archives carry twelve kneeling fires, six a weapon, with a ready and an aimed kneel
+// carry each, and they were invisible only because a direction selector's tag was read as three
+// characters instead of four. And neither a kneel nor a prone body moves at all, because the kneel
+// has no walk clip in the game's own set and a prone body has no route anywhere except back up --
+// so a fighter asked to go somewhere gets up first and never crawls, and nothing plans a path for
+// a shape lying down. The collision capsule and the aim point move with the posture in one call
+// and never apart (`setPosture`), because a bolt is a ray and the capsule is the hitbox. When a
+// body goes down is ours (`POSTURE_TUNE`) and nothing in the archives ever computed it: cover was
+// a server-side state and the server never shipped.
 import * as THREE from 'three';
 import { combatSounds } from '../audio/combatSounds';
 import { Group, groups, RAPIER, type Physics } from '../core/physics';
@@ -64,7 +79,7 @@ import { BRAIN_TUNE, decide, type BrainSelf, type BrainTarget, type Decision } f
 import type { MobileState } from './mobiles/types';
 // How it stands, aims and is held up: the pure half, which a node test drives with a real physics
 // world rather than a mirror. Every number of the controller's is the player's own.
-import { FIGHTER_BODY, STANCE_TUNE, aimMode, applyBody, bodyShare, capsuleDrop, easeAngle, fallSpeed, fighterPush, settleFooting, spineShare, stanceFor, stepAimFix, tuneFighterBody, tuneStance, wrapAngle, type AimWhen, type FighterBody, type Footing, type Stance, type StanceInput, type StanceTune } from './fighterStance.ts';
+import { FIGHTER_BODY, POSTURE_TUNE, STANCE_TUNE, aimMode, aimPointFor, applyBody, bodyShare, capsuleDrop, capsuleDropFor, capsuleHalfFor, capsuleTopFor, easeAngle, fallSpeed, fighterPush, firePatterns, paceInPosture, postureFor, postureTransitionNames, settleFooting, spineShare, stanceFor, stepAimFix, tuneFighterBody, tunePosture, tuneStance, wrapAngle, type AimWhen, type FighterBody, type Footing, type Posture, type PostureInput, type PostureTune, type Stance, type StanceInput, type StanceTune } from './fighterStance.ts';
 // A fighter's blade hurts what it passed through since the last frame by exactly the machinery the
 // player's does, never by a rule of its own: `BladePath` steps the same capsule along the ground the
 // blade covered, and a `Striker` of this fighter's own is what puts it behind the blow.
@@ -168,7 +183,20 @@ export const FIGHTER_TUNE: FighterTune = {
  * (`src/world/fighterStance.ts`). The mind's numbers are the creatures' and move through
  * `__debug.mobileTune({ brain: { ... } })`, as they always have.
  */
-export type FighterKnob = Partial<FighterTune> & { stance?: Partial<StanceTune>; body?: Partial<FighterBody> };
+export type FighterKnob = Partial<FighterTune> & {
+  stance?: Partial<StanceTune>;
+  body?: Partial<FighterBody>;
+  /** How low a body goes and when: `__debug.fighters({ postures: { kneelFrom: 3 } })`. */
+  postures?: Partial<PostureTune>;
+  /**
+   * Put every fighter out into one posture and hold it there, or hand them all back to the rule
+   * with `'auto'` or null: `__debug.fighters({ posture: 'prone' })`. It is the only way to look at a
+   * prone or crouched body today, since the rule kneels far oftener than it lies down and nothing
+   * crouches until there is somewhere to crouch **to** -- and it is the only way to ask whether a
+   * body that has gone down is really harder to hit, which nobody can answer from a hidden tab.
+   */
+  posture?: Posture | 'auto' | null;
+};
 
 /** The wearables a Wookiee wears, and nobody else: the Kashyyykian pieces, and the ones marked _wke. */
 const WOOKIEE_ONLY = /kashyyyk|(^|_)wke(_|$)/i;
@@ -218,6 +246,8 @@ const LINE_TO = { x: 0, y: 0, z: 0 };
  */
 const stanceAsk: StanceInput = { gun: false, combat: false, hasTarget: false, gap: 0, range: 0, offNose: 0 };
 const aimAsk: AimWhen = { aiming: false, sinceShot: 0, stunned: false };
+/** How low it stands, asked the same way: filled and handed straight to `postureFor`. */
+const postureAsk: PostureInput = { grounded: true, gun: false, combat: false, shooting: false, gap: Infinity, hpRatio: 1, pace: 'stand', held: false, canProne: false, was: 'stand' };
 const moveAsk = { x: 0, y: 0, z: 0 };
 const moveGot = { x: 0, y: 0, z: 0 };
 
@@ -284,6 +314,8 @@ const NOTHING_AT = (): undefined => undefined;
 let warnedBlind = false;
 /** Said once, the first time the floor of last resort has to lift a body a whole height (see `move`). */
 let warnedLift = false;
+/** Said once, the first time a body is laid flat by hand on a rig that has no prone loop to draw it with. */
+let warnedProne = false;
 
 // `ErrandBody` is here rather than only in `errand.ts` so the compiler is what says a fighter can be
 // given a long walk: its home is writable, it has a key and a label, and it can say what it is doing
@@ -300,7 +332,22 @@ export class Npc implements Living, ErrandBody {
    * place written is the one the controller allowed.
    */
   readonly controller: RAPIER.KinematicCharacterController;
-  readonly halfHeight = FIGHTER_BODY.halfHeight;
+  /**
+   * The aim point the whole game shoots at, over this body's feet -- and **not readonly any more**,
+   * because it moves with the posture. A standing body is aimed at 0.9 m, half the 1.8 m drawn
+   * body; a low one at the middle of the 1.0 m shell it is really wearing (`aimPointFor`). It moves
+   * in the same call the collision capsule does and never in another, since the capsule is the
+   * hitbox and the two coming apart is either a shot that misses a body it went through or a
+   * shooter aiming over its head.
+   */
+  halfHeight = FIGHTER_BODY.halfHeight;
+  /**
+   * Where the kinematic body itself sits over the feet, for the whole of this fighter's life: the
+   * **standing** half-height, whatever posture it is in. The posture moves the collider under the
+   * body and the aim point above it, and never the body, or every place in the game that reads a
+   * fighter's position would have to know which posture it was in.
+   */
+  readonly bodyLift = FIGHTER_BODY.halfHeight;
   /** Its place in the one list of living things, for as long as it lives. */
   readonly key = nextLivingKey();
   readonly side: Side = 'fighter';
@@ -374,6 +421,35 @@ export class Npc implements Living, ErrandBody {
   /** Which carry it stands in this frame: relaxed, combat, or aimed at something. */
   stance: Stance = 'relaxed';
   /**
+   * How low it stands this frame: upright, crouched, kneeling or lying down. The rule is
+   * `postureFor` (`src/world/fighterStance.ts`), which reads the very decision the brain handed
+   * back, and what it answers is written onto that decision's own `posture` field so there is one
+   * place the word lives. This is what the body is really **in**; `decision.posture` is what was
+   * wanted this frame, and the two differ only for the length of the settle.
+   */
+  posture: Posture = 'stand';
+  /** Seconds before it may take another posture, so it does not bob between two on the edge of a number. */
+  private postureHeld = 0;
+  /** A posture put on it by hand (`__debug.fighters({ posture: 'prone' })`); null when the rule decides. */
+  private forced: Posture | null = null;
+  /** Whether the collision capsule is the low one this instant, so a change is written once and not every frame. */
+  private lowBody = false;
+  /**
+   * Whether this rig holds any of the game's own prone loops, resolved once when it is dressed
+   * (`preferPostures`). The rule will not lay a body down that cannot be drawn lying down: the
+   * prone states' own last resort is the *standing* idle, so without this a badly hurt fighter
+   * would stand bolt upright while its shell and the point everything aims at had both dropped.
+   * False until it is dressed, which is the right answer for a body that is not drawn at all yet.
+   */
+  private canProne = false;
+  /**
+   * How fast it really travels crouched, in metres a second: the crouch walk clip's own pace,
+   * resolved once with the clips. The player's rule, in the player's own words -- "movement keeps
+   * pace with the clip that plays for it, so the feet stay planted" -- and without it a crouching
+   * fighter scuttled at the full standing walk.
+   */
+  private crouchPace = FIGHTER_TUNE.walk;
+  /**
    * The aim's measured correction, this fighter's own: the barrel against where the next bolt is
    * going, folded in a frame at a time. The spine takes `spineShare` of the yaw and the drawn body
    * takes what is left (`aimTurn`), which is the player's own division of it.
@@ -388,7 +464,16 @@ export class Npc implements Living, ErrandBody {
    * Resolved to clip names rather than kept as patterns, because a pattern is re-matched against
    * every one of the rig's twelve hundred clips on every `setState`, which is every frame.
    */
-  private gunPose: { kind: 'pistol' | 'rifle'; aim: string | null; ready: string | null } | null = null;
+  private gunPose: {
+    kind: 'pistol' | 'rifle';
+    aim: string | null;
+    ready: string | null;
+    /** The same two kneeling, which are among the names the tag fix recovered. */
+    kneelAim: string | null;
+    kneelReady: string | null;
+    /** Which shots it fires in each posture, resolved once: the game's own, six per weapon kneeling. */
+    fires: Record<Posture, string[]>;
+  } | null = null;
   /**
    * The far end of a gun in the holder's own frame: the extreme of the model's **longest** axis,
    * which is the barrel, read by the same rule the player's own hand reads a rack weapon with
@@ -491,7 +576,7 @@ export class Npc implements Living, ErrandBody {
     this.pos.set(x, y, z);
     this.group.position.copy(this.pos);
     markActor(this.group);
-    this.body = physics.world.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(x, y + this.halfHeight, z));
+    this.body = physics.world.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(x, y + this.bodyLift, z));
     // The collision capsule is the **player's**, not the drawn body's: the same radius and the same
     // straight part, dropped so its feet are this body's feet. The two were one number and a
     // clearance between the player's 1.6 m and the fighter's 1.8 m was therefore open for the
@@ -587,6 +672,7 @@ export class Npc implements Living, ErrandBody {
     this.group.add(rig.root);
     markActor(rig.root);
     this.rig = rig;
+    this.preferPostures(rig);
     rig.setState('idle');
     // A random look: the height, and every colour and choice the pack lets vary, thrown; and
     // clothes off the species' wardrobe.
@@ -696,7 +782,188 @@ export class Npc implements Living, ErrandBody {
     const ready = kind === 'pistol'
       ? rig.firstOf('loop_pistol_riding', ...rig.clipsMatching(/^loop_pistol_combat_standing_aimed/))
       : rig.firstOf('trn_rifle_a_standing_hold_to_ready', 'loop_rifle_riding');
-    this.gunPose = { kind, aim, ready };
+    // The kneel keeps the relaxed kneel under it and the carry rides its upper body, exactly as the
+    // standing ones do and exactly as the player reads them (`Player.animateRig`). The aimed kneel
+    // and the kneeling ready carry are two of the names the direction selector's tag bug deleted
+    // from every rig, so on a pack converted before that fix both of these come out null and the
+    // plain kneel carries the whole body -- which is the same quiet fallback the standing aim has
+    // always had, and is why nothing here needs a reconversion to be safe.
+    //
+    // Resolved to a **name**, not left as a pattern, for the reason stated above the loop: the
+    // kneel is the one state a kneeling fighter sets on every frame it is down, and `setState`
+    // asks `preferredClip` before its own change test, so a pattern there is an array literal, two
+    // iterators and a regex test against every one of a species rig's twelve hundred clip names,
+    // per kneeling fighter per frame -- and on a pack that has none of them the scan runs to the
+    // end of the table and finds nothing, every frame, for ever.
+    rig.prefer('kneel', rig.clipMatching(new RegExp(`^loop_${kind}_kneeling`)) ?? null);
+    const kneelAim = rig.firstOf(...rig.clipsMatching(new RegExp(`^loop_${kind}_(combat_kneeling|kneeling_combat)_aimed`)), `trn_${kind}_combat_kneeling_to_${kind}_combat_kneeling_aimed`);
+    const kneelReady = rig.firstOf(...rig.clipsMatching(new RegExp(`^loop_${kind}_(combat_kneeling|kneeling_combat)(?!_aimed)`)), `trn_${kind}_combat_standing_to_${kind}_combat_kneeling`);
+    // And which shots each posture fires, resolved to names here for the same reason the carries
+    // are: a pattern would be matched against twelve hundred clips on every trigger pull. A crouch
+    // has no shots in the game's data at all and never asks for one (see `act`), so its row is the
+    // standing one and is never read.
+    const fires = { stand: [], crouch: [], kneel: [], prone: [] } as Record<Posture, string[]>;
+    for (const posture of ['stand', 'kneel', 'prone'] as const) {
+      for (const pattern of firePatterns(kind, posture)) {
+        const found = rig.clipsMatching(pattern);
+        if (found.length) {
+          fires[posture] = found;
+          break;
+        }
+      }
+    }
+    fires.crouch = fires.stand;
+    this.gunPose = { kind, aim, ready, kneelAim, kneelReady, fires };
+  }
+
+  /**
+   * The postures' own clips, asked for once when the rig is dressed, and the two numbers that come
+   * off them. Only the crouch needs saying: the rig holds the game's own `loop_crouched:speed0` and
+   * `:speed1` and the state table names Jedi Academy's `BOTH_CROUCH1IDLE` and `BOTH_CROUCH1WALK`
+   * instead, so nothing in the game has ever played the game's own crouch. Asked for here, per
+   * fighter, rather than by editing that table: the table is the player's too, and putting the
+   * game's crouch on the player is a visible change to something that ships today and is the
+   * owner's to look at rather than a fighter wave's to slip in. A rig without the clips keeps Jedi
+   * Academy's, which is what a pack converted before this pass carries.
+   *
+   * Every one is `prefer`red as a **name** and never as a pattern, which is the same rule
+   * `findGunPoses` states at length: `CharacterRig.setState` resolves a state's preference before
+   * its own change test, so a pattern on a state a body sets every frame is a scan of the whole
+   * twelve-hundred-clip table on every frame of every body in that state.
+   */
+  private preferPostures(rig: CharacterRig): void {
+    // Whether it can be drawn lying down at all, which the rule reads before it ever lays one flat:
+    // the game's prone loops are `loop_prone:speedN` plain and `loop_<gun>[_combat]_prone[_aimed]`
+    // with a blaster, and the state table's own last resort under all of them is the **standing**
+    // idle. A rig with none of them therefore draws a prone body upright while its collider says
+    // 1.0 m and the whole game aims at 0.5 m, which is the one failure here that says nothing at
+    // all; a rig with any of them has a real low pose to fall back through.
+    this.canProne = !!rig.clipMatching(/^loop_[a-z_]*prone/);
+    const idle = rig.clipMatching(/^loop_crouched:speed0/) ?? null;
+    const walk = rig.clipMatching(/^loop_crouched:speed1/) ?? null;
+    if (walk) {
+      rig.prefer('crouch', idle);
+      rig.prefer('crouchWalk', walk);
+      rig.prefer('crouchWalkBack', walk);
+    }
+    // And how fast a crouching body really travels, which is the clip's own pace and not the
+    // standing walk's: this is `Player.paceScale`'s rule ("movement keeps pace with the clip that
+    // plays for it, so the feet stay planted"), read once here because `naturalSpeed` resolves a
+    // state the same expensive way a preference does. Capped at the standing walk, since nothing
+    // low should outrun a body on its feet, and floored so a clip with no speed of its own cannot
+    // pin a crouch to a standstill.
+    this.crouchPace = Math.min(FIGHTER_TUNE.walk, Math.max(0.5, rig.naturalSpeed('crouchWalk') ?? FIGHTER_TUNE.walk));
+  }
+
+  /**
+   * Go into a posture: the drawn pose is `poseRig`'s, and this is the half of it that is real --
+   * **the collision capsule and the aim point, moved in one call and never apart.** A bolt is a ray
+   * against the physics world and the struck collider is mapped back to a body, so the capsule *is*
+   * the hitbox: move only the aim point and a shot at a body that has gone down misses a shape that
+   * is still a 1.6 m pillar, and move only the capsule and the shooter aims over its head.
+   *
+   * The low shape is the player's own crouch collider, 1.6 m to 1.0 m with the feet where they
+   * were, and it is one shape for all three low postures: a prone body is therefore no harder to
+   * hit than a kneeling one, and what going low really buys is the band between the two shells.
+   * `FIGHTER_BODY.lowHalf` is the one number that changes that and it is live.
+   *
+   * Written **twice**, as the player writes it: the offset on the parent is what the next physics
+   * step reads, and the world translation is what a query cast in the rest of *this* frame reads,
+   * so the ground test and every bolt in the air see one capsule rather than the new shape at the
+   * old centre for a frame.
+   */
+  private setPosture(p: Posture): void {
+    // A posture the rule would never ask for can still be put on by hand, and a rig with none of
+    // the game's prone loops draws one standing up while its shell says 1.0 m. Said once, because
+    // `__debug.fighters({ posture: 'prone' })` is exactly how the owner is told to look at it and
+    // a silent standing idle there is indistinguishable from the hook not working.
+    if (p === 'prone' && !this.canProne && !warnedProne) {
+      warnedProne = true;
+      console.warn('fighters: this rig has none of the prone loops, so a body put flat by hand is drawn standing; the rule never asks for prone on such a rig.');
+    }
+    this.posture = p;
+    const low = p !== 'stand';
+    if (low === this.lowBody) return;
+    this.lowBody = low;
+    this.resize();
+  }
+
+  /**
+   * Write the capsule and the aim point for the posture it is in. Its own method because the knob
+   * moves `lowHalf` and `standHalf` live and a body already standing about has to be re-shaped
+   * where it stands -- the capsule is otherwise read only when a fighter is made.
+   */
+  resize(): void {
+    if (this.dead) return;
+    const half = capsuleHalfFor(this.posture);
+    this.collider.setHalfHeight(half);
+    // The drop is worked against **this body's own lift**, not against the live `halfHeight`. The
+    // lift is read once when the body is made and the tuning is live, so a fighter already standing
+    // about when `__debug.fighters({ body: { halfHeight: … } })` moves the aim point still hangs
+    // from the old number: worked from the new one, its capsule's feet would sink below the point
+    // it stands on by the difference. `setTranslation` below is in the world and needs no such
+    // correction; this one is relative to the body.
+    this.collider.setTranslationWrtParent({ x: 0, y: capsuleDropFor(half, FIGHTER_BODY, this.bodyLift), z: 0 });
+    this.collider.setTranslation({ x: this.pos.x, y: this.pos.y + FIGHTER_BODY.radius + half, z: this.pos.z });
+    this.halfHeight = aimPointFor(this.posture);
+  }
+
+  /** Hold it in one posture by hand, or hand it back to the rule with null. The settle does not apply. */
+  force(p: Posture | null): void {
+    this.forced = p;
+    if (p) {
+      this.postureHeld = 0;
+      this.setPosture(p);
+    }
+  }
+
+  /**
+   * How low it stands this frame. Everything the rule reads is either the brain's own answer or
+   * something this body already knows, so nothing is measured for it: `shooting` is the decision's
+   * own verdict, which already carries the range test and the one line-of-sight ray a thought
+   * casts.
+   *
+   * The answer is written onto the decision (`d.posture`) rather than kept only here, so the word
+   * has one home and the cover rule that will eventually set it inside `decide` can take it over
+   * without a consumer changing -- the same shape the indoor wander clamp already has, which
+   * rewrites the decision's `goal` after the brain has answered.
+   */
+  private stepPosture(sdt: number, pace: 'stand' | 'walk' | 'run', t: Living | null, d: Decision | null, combat: boolean): void {
+    this.postureHeld = Math.max(0, this.postureHeld - sdt);
+    // `grounded` and no stagger beside it: a bolt sets a 0.2 s stun on this body through `damage`,
+    // and feeding that to the rule stood a fighter up for as long as anybody was shooting at it,
+    // which is the one moment the whole posture exists for. A blow that really takes it off its
+    // feet -- `knock` past its threshold, a throw, a Force grip -- writes `grounded = false` here
+    // itself, so nothing is lost. See `PostureInput.grounded`.
+    postureAsk.grounded = this.grounded;
+    postureAsk.gun = this.arm === 'gun';
+    postureAsk.combat = combat;
+    postureAsk.shooting = !!d && d.state === 'attack' && d.attack === 'ranged' && !!t && !t.dead;
+    postureAsk.gap = t ? Math.hypot(t.pos.x - this.pos.x, t.pos.z - this.pos.z) : Infinity;
+    postureAsk.hpRatio = this.hp / this.maxHp;
+    postureAsk.pace = pace;
+    // A body under a long walk never goes down: rule 1 of the posture is the order, so the walk is
+    // exactly what it was before this wave existed.
+    postureAsk.held = !!this.errand && !this.errand.done;
+    // Whether this rig can be drawn lying down at all, resolved once when it was dressed. A body
+    // that cannot never goes prone under the rule, since the posture drops its shell to 1.0 m and
+    // the point everything aims at to 0.5 m and it would otherwise stand bolt upright while being
+    // shot in the shins.
+    postureAsk.canProne = this.canProne;
+    postureAsk.was = this.posture;
+    const want = this.forced ?? postureFor(postureAsk);
+    if (d) d.posture = want;
+    if (want === this.posture || this.postureHeld > 0) return;
+    this.postureHeld = POSTURE_TUNE.settle;
+    const was = this.posture;
+    this.setPosture(want);
+    // And the game's own one-shot between the two, when the rig has it, played over the state clips
+    // exactly as the player plays it. `poseRig` stands aside while it runs (`rig.overriding`), so
+    // the body goes down through the transition rather than snapping into the new pose.
+    const rig = this.rig;
+    if (!rig) return;
+    const clip = rig.firstOf(...postureTransitionNames(was, want, this.arm === 'gun' && this.stance !== 'relaxed' ? (this.gunPose?.kind ?? null) : null, this.stance === 'aim', pace !== 'stand'));
+    if (clip) rig.play(clip, { fadeIn: 0.08 });
   }
 
   /** Whoever struck, remembered from now: the brain turns it on the most recent of them. */
@@ -758,6 +1025,11 @@ export class Npc implements Living, ErrandBody {
   byCollider: Map<number, Npc> | null = null;
 
   private die(): void {
+    // Upright first, while the collider is still there to be written: the death clip and the
+    // ragdoll after it are a standing body's, and a corpse left with a low aim point would be shot
+    // at half a metre over ground it is lying on.
+    this.forced = null;
+    this.setPosture('stand');
     this.dead = true;
     this.deadTimer = 9;
     this.swingLeft = -1;
@@ -1012,6 +1284,15 @@ export class Npc implements Living, ErrandBody {
     }
     // Stunned, or with a blade already on its way through a swing, it stands where it is.
     if (this.stunned > 0 || this.swingLeft >= 0) pace = 'stand';
+    // How low it stands, and what that lets it do. The rule reads the decision the brain has
+    // already answered and writes its answer back onto it; the posture then **caps the pace**,
+    // because in the game's own data the kneel has no walk at all and a prone body has no route
+    // anywhere except back up. So a body asked to go somewhere gets up first and then walks, and
+    // nothing ever plans a path for a shape lying down. The combat carry's own window is worked out
+    // here rather than read off `update`, which settles it after this runs.
+    const combat = (!!t && !t.dead) || this.sinceFought < STANCE_TUNE.ready;
+    this.stepPosture(sdt, pace, t, d, combat);
+    pace = paceInPosture(pace, this.posture);
     // The way out of the room (src/world/nav/). Indoors, the building's own floors say which corner
     // to walk at next; only what it *faces* is taken from the path, so the arrival test further
     // down still measures the real goal. Never while it is attacking: `diff` below is also the gate
@@ -1029,7 +1310,7 @@ export class Npc implements Living, ErrandBody {
       diff = Math.atan2(Math.sin(want - this.heading), Math.cos(want - this.heading));
       this.heading += diff * Math.min(1, sdt * FIGHTER_TUNE.turn);
     }
-    const speed = pace === 'run' ? FIGHTER_TUNE.run : pace === 'walk' ? FIGHTER_TUNE.walk : 0;
+    const speed = this.paceSpeed(pace);
     this.pace = pace;
     this.moving = false;
     // The ground it is asking for, not the ground it will get: `update` hands this to the
@@ -1048,8 +1329,40 @@ export class Npc implements Living, ErrandBody {
     this.checkStuck(sdt, this.moving ? speed : 0);
     // Stunned it neither moves nor strikes, which is what being stunned has always meant here.
     if (!t || !d || this.stunned > 0 || d.state !== 'attack' || this.attackCd > 0 || Math.abs(diff) >= FIGHTER_TUNE.aimCone) return;
+    // **A crouched body does nothing at all**, and that is the client's own data rather than a
+    // choice of ours: of the state hierarchy's 147 states twelve are the crouch and every one of
+    // the twelve carries zero actions -- no fire, no attack, no throw, no heal. The crouch is how a
+    // body moves low; the kneel is how it fights low, and it has twelve fires of its own to do it
+    // with. So `__debug.fighters({ posture: 'crouch' })` really does make a squad hold its fire,
+    // which is worth knowing before it looks like a bug.
+    if (this.posture === 'crouch') return;
+    // And a swing is a standing body's: the game has a kneeling butt-stroke, but what a fighter
+    // swings is Jedi Academy's set and every clip in it is authored upright. Nothing with a blade
+    // reaches a low posture under the rule (`postureFor` refuses anything but a gun); this is for a
+    // posture put on by hand.
+    if (this.posture !== 'stand' && d.attack === 'melee') return;
     if (d.attack === 'ranged' && this.arm === 'gun' && this.gun) this.shoot(t, bolts, effects);
     else if (d.attack === 'melee' && this.arm !== 'gun') this.swing(t, hittableAt);
+  }
+
+  /**
+   * How fast it really travels at a pace, in metres a second. Standing and crouching are not the
+   * same walk: `paceInPosture` already caps a crouch at a walk, and this caps *that* at the crouch
+   * clip's own pace, which is the player's rule (`Player.paceScale`: "movement keeps pace with the
+   * clip that plays for it, so the feet stay planted"). Both the ground covered and the speed the
+   * clip is scaled to come from here, so they cannot disagree -- and a crouching body that travelled
+   * at the standing 1.8 m/s would either slide its feet or outrun its own animation's clamp.
+   *
+   * A kneeling or prone body never reaches this with anything but 'stand': the pace is already held
+   * at a standstill for both.
+   */
+  private paceSpeed(pace: 'stand' | 'walk' | 'run'): number {
+    if (pace === 'stand') return 0;
+    // The cap is taken again here and not only when the clip was read, because the walk itself is
+    // live on the knob: `__debug.fighters({ walk: 0.6 })` must not leave a crouching body outrunning
+    // a standing one. One comparison, nothing made.
+    if (this.posture === 'crouch') return Math.min(FIGHTER_TUNE.walk, this.crouchPace);
+    return pace === 'run' ? FIGHTER_TUNE.run : FIGHTER_TUNE.walk;
   }
 
   /**
@@ -1093,7 +1406,16 @@ export class Npc implements Living, ErrandBody {
     // Its own gun off the rack, so an enemy's shot sounds like the weapon in its hands.
     bolts.fire(tmp2, tmp, { owner: 'enemy', damage: Math.max(6, g.primary.damage * 0.6), speed: g.primary.speed || 2300, color: g.primary.color, size: g.primary.size, push: g.primary.push, exclude: this.body, life: 6, source: this, sound: combatSounds.gunOf(this.weapon), scar: scarFamilyOf(g.type, this.weapon?.fx?.id) });
     effects?.flash(tmp2, g.primary.color, 6, 5, 0.06);
-    rig?.playUpper(rig.firstOf('rifle_combat_standing_fire_1', 'add_rifle_fire_1', 'pistol_combat_standing_fire_1') ?? '', 0.04);
+    // The shot it plays is the posture's own and the weapon's own, drawn from the six the pack
+    // holds for each rather than the same one every time: standing, kneeling (twelve of them in the
+    // archives, six a weapon, which is the game's own behaviour and not an invention of this wave)
+    // and lying down. It was one hard-coded name before this, and a rifle's at that, whatever was
+    // in the hand. A pack converted before the direction selector's tag was read properly holds
+    // none of the aimed or kneeling ones and falls through to the additive recoil, exactly as it
+    // always has -- which is the whole of "degrade quietly" here.
+    const fires = this.gunPose?.fires[this.posture];
+    const clip = fires?.length ? fires[Math.floor(Math.random() * fires.length)] : rig?.firstOf('rifle_combat_standing_fire_1', 'add_rifle_fire_1', 'pistol_combat_standing_fire_1');
+    if (clip && rig) rig.playUpper(clip, 0.04);
   }
 
   /** A swing: the window during which the blade cuts whatever it passes through. */
@@ -1200,6 +1522,19 @@ export class Npc implements Living, ErrandBody {
       // How it stands and how much of the way it is to the ground it asked for: with a body that
       // can be stopped, `held` under one is a fighter leaning on something.
       stance: this.stance,
+      // How low it stands, what the rule wanted this frame (the two differ only for the length of
+      // the settle), whether the posture was put on by hand, and **where its collider really is** --
+      // how tall the shell it is wearing stands off the ground and what height the rest of the game
+      // shoots at. Those last two are the whole of whether a low body is harder to hit, and they are
+      // printed rather than described because nobody can see a capsule.
+      posture: this.posture,
+      wants: this.decision?.posture ?? 'stand',
+      forced: this.forced,
+      shell: { tall: Number(capsuleTopFor(this.posture).toFixed(2)), aimAt: Number(this.halfHeight.toFixed(2)) },
+      // Why a body never lies down, and how fast it goes when it is low: both are read off its rig
+      // once and are the answer to "the prone posture does nothing" on a pack that has no prone
+      // loop and to "a crouching fighter looks slow", which it is, deliberately.
+      low: { canProne: this.canProne, crouchPace: Number(this.crouchPace.toFixed(2)) },
       grounded: this.grounded,
       // Metres a second downward, 0 standing: `held` reads 1 for an unobstructed fall, so without
       // this nothing on the readout told a body dropping through the world from one walking.
@@ -1303,7 +1638,10 @@ export class Npc implements Living, ErrandBody {
     stanceAsk.offNose = offNose;
     this.stance = stanceFor(stanceAsk);
     this.move(sdt, terrain);
-    this.body.setNextKinematicTranslation({ x: this.pos.x, y: this.pos.y + this.halfHeight, z: this.pos.z });
+    // The **body's** own lift, not the aim point: the two were one number until the posture moved
+    // the aim point, and writing the body from it would have dropped a kneeling fighter's whole
+    // capsule forty centimetres into the floor.
+    this.body.setNextKinematicTranslation({ x: this.pos.x, y: this.pos.y + this.bodyLift, z: this.pos.z });
     this.group.position.copy(this.pos);
     // The drawn body also carries whatever share of the aim's turn the spine could not take, which
     // is the player's own `aimBodyTurn`. It is never given to `heading`: the heading is the brain's
@@ -1436,7 +1774,10 @@ export class Npc implements Living, ErrandBody {
     // walking down a dune: it is one that was somewhere it could not stand. Counted for the
     // readout rather than hidden, and said once, because there is nothing else on the screen that
     // tells a fall from a walk.
-    if (lift > this.halfHeight * 2) {
+    // The standing body's own height, never the aim point, which a low posture moves: the question
+    // this asks is whether a body was somewhere it could not stand, and a kneeling one is not a
+    // shorter answer to it.
+    if (lift > this.bodyLift * 2) {
       this.lifted++;
       this.liftedBy = lift;
       if (!warnedLift) {
@@ -1466,7 +1807,14 @@ export class Npc implements Living, ErrandBody {
   private poseRig(rig: CharacterRig, own: number): void {
     const moving = this.moving;
     const walking = this.pace === 'walk';
-    const speed = (walking ? FIGHTER_TUNE.walk : FIGHTER_TUNE.run) * own;
+    // The very speed `act` moved it at, so the clip is scaled to the ground really covered and the
+    // feet stay planted -- crouched included, where the two used to be the standing walk and the
+    // crouch clip's own pace respectively.
+    const speed = this.paceSpeed(walking ? 'walk' : 'run') * own;
+    if (this.posture !== 'stand') {
+      this.poseLow(rig, moving, speed);
+      return;
+    }
     if (this.arm === 'gun') {
       const carry = this.stance === 'aim' ? 'gunAim' : this.stance === 'ready' ? 'gunReady' : 'gun';
       const state = `${carry}${moving ? (walking ? 'Walk' : 'Run') : 'Idle'}` as RigState;
@@ -1486,6 +1834,40 @@ export class Npc implements Living, ErrandBody {
     }
     if (this.stance !== 'relaxed' && rig.hasState('stance')) rig.setState('stance');
     else rig.setState('idle');
+  }
+
+  /**
+   * The three low postures, in the player's own states, which is what makes this wave cost no
+   * reconversion of its own: a fighter is drawn by the player's `CharacterRig`, so the states are
+   * already there and the species rigs already carry the kneel, the prone set, the crouch loops and
+   * every plain transition between them.
+   *
+   * Lying down never plays a moving variant. That is not a shortcut: the pace is already held at
+   * nothing for a prone body (`paceInPosture`), so there is never a frame in which it is both prone
+   * and travelling, and asking for the crawl would animate a body that is not going anywhere.
+   *
+   * Kneeling takes no speed either, because the kneel is the game's *still* low pose and its clip
+   * set has no walk in it at all. The carry rides its upper body, the aimed kneel where the pack
+   * has one; on a pack converted before the tag fix those two names resolve to nothing and the
+   * plain kneel has the whole body, which is a body kneeling with its gun down rather than nothing
+   * at all.
+   */
+  private poseLow(rig: CharacterRig, moving: boolean, speed: number): void {
+    const gun = this.arm === 'gun';
+    const pose = this.gunPose;
+    if (this.posture === 'prone') {
+      if (gun) rig.setState(`${this.stance === 'aim' ? 'gunProneAim' : this.stance === 'ready' ? 'gunProneReady' : 'gunProne'}Idle` as RigState, 0);
+      else rig.setState('prone', 0);
+      return;
+    }
+    if (this.posture === 'kneel') {
+      rig.setState('kneel', 0, gun ? (this.stance === 'aim' ? (pose?.kneelAim ?? null) : this.stance === 'ready' ? (pose?.kneelReady ?? null) : null) : null);
+      return;
+    }
+    // Crouched: the game's own `loop_crouched` pair where the rig has them (`preferPostures`), else
+    // Jedi Academy's, which is what the state table names and what everything in this game has
+    // played until now. The standing carry rides the upper body, as the player's does crouched.
+    rig.setState(moving ? 'crouchWalk' : 'crouch', moving ? speed : 0, gun ? (this.stance === 'aim' ? (pose?.aim ?? null) : this.stance === 'ready' ? (pose?.ready ?? null) : null) : null);
   }
 
   /**
@@ -1895,17 +2277,24 @@ export class NpcManager {
    */
   private report(opts?: FighterKnob): Record<string, unknown> {
     if (opts) {
-      const { stance, body, ...own } = opts;
+      const { stance, body, postures, posture, ...own } = opts;
       Object.assign(FIGHTER_TUNE, own);
       if (stance) tuneStance(stance);
+      if (postures) tunePosture(postures);
       if (body) {
         tuneFighterBody(body);
-        // The controller's numbers go on to every fighter already out; the capsule's are read when
-        // a body is made and only reach the ones stood after.
-        for (const n of this.npcs) applyBody(n.controller);
+        // The controller's numbers go on to every fighter already out, and so now does the shape:
+        // the low capsule is a number the owner will want to try live, and a knob that only
+        // reached bodies stood afterwards would be a knob that looked as though it did nothing.
+        for (const n of this.npcs) {
+          applyBody(n.controller);
+          n.resize();
+        }
       }
+      // A posture put on by hand reaches every fighter out, and `'auto'` hands them all back.
+      if (posture !== undefined) for (const n of this.npcs) n.force(posture === 'auto' || posture === null ? null : posture);
     }
-    return { tune: { ...FIGHTER_TUNE }, stance: { ...STANCE_TUNE }, body: { ...FIGHTER_BODY }, brain: { ...BRAIN_TUNE }, out: this.npcs.length, fighters: this.npcs.map((n) => n.status()) };
+    return { tune: { ...FIGHTER_TUNE }, stance: { ...STANCE_TUNE }, postures: { ...POSTURE_TUNE }, body: { ...FIGHTER_BODY }, brain: { ...BRAIN_TUNE }, out: this.npcs.length, fighters: this.npcs.map((n) => n.status()) };
   }
 
   dispose(): void {

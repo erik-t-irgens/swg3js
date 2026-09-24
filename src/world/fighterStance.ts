@@ -2,7 +2,15 @@
 // engine and no browser, so a node test drives the very functions the game runs rather than a
 // mirror of them.
 //
-// Three things live here.
+// Four things live here.
+//
+// **The posture.** How low a body stands -- upright, crouched, kneeling or lying down -- which is
+// an axis of its own beside the carry and beside the pace, and the rule that picks between them.
+// The four words, what each one lets a body do and which of them may fire are the client's own
+// data; when a body goes down is ours and every number of it is in `POSTURE_TUNE`. The collision
+// capsule and the aim point move together with it and never apart (`capsuleHalfFor`,
+// `aimPointFor`), because a bolt is a ray against the physics world and the capsule *is* the
+// hitbox. See `Posture`.
 //
 // **The stance.** Whether a fighter is in its relaxed carry, its combat carry or its aimed one.
 // That is the player's own three-way state (`Player.gunReady`, `Player.aiming` in
@@ -33,6 +41,27 @@
 
 /** Which carry a fighter stands in: its weapon down, its weapon up, or aimed at something. */
 export type Stance = 'relaxed' | 'ready' | 'aim';
+
+/**
+ * **How low a body stands**, which is an axis of its own beside the carry and beside the pace: a
+ * body can be prone *and* attacking, exactly as it can be running *and* chasing. Four values and no
+ * fifth mechanism -- the word is carried on the brain's own `Decision` (`posture`, beside `pace`)
+ * so that both consumers read it in one place each and nothing has to invent a state word, which
+ * would be a change to the relay's own list before a posture had crossed anything.
+ *
+ * The four are the client's own, and which of them is which is not a guess. Of the state
+ * hierarchy's 147 states twelve are the crouch and **every one of the twelve carries zero
+ * actions** -- no fire, no attack, no throw, no heal -- while the kneel's set is an idle, the
+ * throws, the heals, a rifle butt-stroke and the twelve kneeling fires. The crouch's own clip set
+ * is an idle *and a walk*; the kneel's is an idle and **no walk at all**. So in the game's own data
+ * the crouch is how a body **moves** low and the kneel is how it **stands still** low, and that is
+ * exactly how they are used here: see `postureFor` for the rule and `paceInPosture` for what each
+ * one lets a body do.
+ */
+export type Posture = 'stand' | 'crouch' | 'kneel' | 'prone';
+
+/** The game's own word for each, which is what its transition and carry clips are named with. */
+const POSTURE_WORD: Record<Posture, string> = { stand: 'standing', crouch: 'crouched', kneel: 'kneeling', prone: 'prone' };
 
 export interface StanceTune {
   /**
@@ -136,6 +165,28 @@ export interface FighterBody {
    * where it used to walk through" the body was given to avoid.
    */
   standHalf: number;
+  /**
+   * Half the straight part of the capsule in **any** low posture -- crouched, kneeling or lying
+   * down. The player's own `CROUCH_HALF_HEIGHT`, so a low fighter is the player's own 1.0 m body
+   * with its feet where they were, and one number serves all three for the same reason the player
+   * has one: a real long low body is a support capsule plus hull balls, which is a shape change and
+   * a wave of its own.
+   *
+   * It moves **with the aim point** and never on its own (`aimPointFor`). That is not a choice: a
+   * bolt is a ray against the physics world and the struck collider is mapped back to a body, so
+   * the capsule **is** the hitbox. Move only the aim point and shots at a body that has gone down
+   * miss a body that is still a 1.6 m pillar; move only the capsule and the shooter aims half a
+   * metre over its head.
+   *
+   * The honest arithmetic of taking one capsule for all three, so nobody has to rediscover it: a
+   * standing body's shell reaches 1.6 m and a low one's 1.0 m, so going low takes a body out of the
+   * band **1.0 to 1.6 m** and out of no other. A shot aimed at a low body's own middle still finds
+   * it every time, and a prone body is exactly as hard to hit as a kneeling one. What going low
+   * really buys today is the shot already in the air at standing chest height. `lowHalf` is the one
+   * number that changes that, and it is live: `__debug.fighters({ body: { lowHalf: 0 } })` is the
+   * lowest the player's own radius allows, a 0.7 m shell.
+   */
+  lowHalf: number;
   /** The controller's skin: how far off a surface it is held. */
   offset: number;
   /** The tallest step it climbs and the least tread it needs on top of one. */
@@ -156,6 +207,7 @@ export const FIGHTER_BODY: FighterBody = {
   radius: 0.35,
   halfHeight: 0.9,
   standHalf: 0.45,
+  lowHalf: 0.15,
   offset: 0.04,
   autostep: 0.5,
   autostepWidth: 0.2,
@@ -172,6 +224,9 @@ const BODY_FLOOR: Record<keyof FighterBody, number> = {
   radius: 0.05,
   halfHeight: 0.1,
   standHalf: 0.05,
+  // Nought is legal here and is not a degenerate shape: a capsule of no straight part is a ball of
+  // the radius, which is the lowest a body the player's own width can lie.
+  lowHalf: 0,
   offset: 0.001,
   autostep: 0,
   autostepWidth: 0.01,
@@ -188,7 +243,49 @@ const BODY_FLOOR: Record<keyof FighterBody, number> = {
  * as the player's is, so the feet of both are the point they stand on.
  */
 export function capsuleDrop(tune: FighterBody = FIGHTER_BODY): number {
-  return tune.radius + tune.standHalf - tune.halfHeight;
+  return capsuleDropFor(tune.standHalf, tune);
+}
+
+/**
+ * The same, for a capsule of any straight part: where its middle sits relative to the kinematic
+ * body, which never moves with the posture. The body's own lift over the feet is the **standing**
+ * `halfHeight` for the whole of its life, so that a change of posture is two writes on the collider
+ * and nothing at all on the body -- move the body and every place that reads a fighter's position
+ * would have to know which posture it was in.
+ *
+ * `lift` is that body's own lift, and it is a parameter rather than `tune.halfHeight` for one
+ * reason: the lift is read **once**, when the body is made, and the tuning is live. A fighter
+ * already standing about when `__debug.fighters({ body: { halfHeight: … } })` moves the aim point
+ * is still hanging from the old number, so a drop worked out from the new one would sink its
+ * capsule's feet below the point it is standing on by exactly the difference. The caller passes
+ * the lift it really has (`Npc.bodyLift`); the default is for a body made this instant, where the
+ * two are the same number by construction.
+ */
+export function capsuleDropFor(half: number, tune: FighterBody = FIGHTER_BODY, lift: number = tune.halfHeight): number {
+  return tune.radius + half - lift;
+}
+
+/** Half the straight part of the collision capsule in a posture: the player's 1.6 m standing, 1.0 m low. */
+export function capsuleHalfFor(posture: Posture, tune: FighterBody = FIGHTER_BODY): number {
+  return posture === 'stand' ? tune.standHalf : tune.lowHalf;
+}
+
+/**
+ * Where the rest of the game shoots at a body in a posture, over its feet -- and the **one** number
+ * that must move with `capsuleHalfFor` and never without it (see `lowHalf`).
+ *
+ * Standing it is the fighter's own `halfHeight`, 0.9: half the 1.8 m *drawn* body, which is not the
+ * 1.6 m collision capsule and never was. Low it is the middle of the low capsule itself,
+ * `radius + lowHalf`, which is derived and not a second invented number: a body that is 1.0 m of
+ * shell is aimed at 0.5 m up, so the aim point is inside the shell whatever `lowHalf` is moved to.
+ */
+export function aimPointFor(posture: Posture, tune: FighterBody = FIGHTER_BODY): number {
+  return posture === 'stand' ? tune.halfHeight : tune.radius + tune.lowHalf;
+}
+
+/** How tall the collision capsule stands in a posture, feet to crown: what a bolt has to cross to find it. */
+export function capsuleTopFor(posture: Posture, tune: FighterBody = FIGHTER_BODY): number {
+  return 2 * (tune.radius + capsuleHalfFor(posture, tune));
 }
 
 /**
@@ -284,6 +381,229 @@ export function stanceFor(o: StanceInput, tune: StanceTune = STANCE_TUNE): Stanc
   if (!(o.gap <= o.range * tune.aimShare)) return 'ready';
   if (!(Math.abs(o.offNose) <= tune.aimCone)) return 'ready';
   return 'aim';
+}
+
+/**
+ * How low a body goes, and when. **Every number here is invented** -- the client has the postures,
+ * the clips, the transitions and the twelve kneeling fires, and a `Cover` state and a `kneel`,
+ * `prone` and `stand` command besides, but nothing anywhere in the archives computes, marks or
+ * stores a position worth taking: cover was a server-side state and the server never shipped. So
+ * when a body goes down is ours, and it is live through `__debug.fighters({ postures: { ... } })`.
+ */
+export interface PostureTune {
+  /**
+   * The least distance, in metres, at which a gunner holding its ground drops to a knee rather than
+   * shooting standing. Closer than this it stays up: a body that runs into your face and then
+   * kneels at arm's length reads as a bug rather than as cover.
+   */
+  kneelFrom: number;
+  /**
+   * The share of its health below which it lies down instead of kneeling, and the least range at
+   * which it will. Both matter: below `FIGHTER_TUNE.fleeUnder` (0.25) a fighter's nerve breaks and
+   * it runs rather than standing and shooting at all, so anything at or under that would never be
+   * reached; and lying down with somebody a few metres away is not cover, it is a body that cannot
+   * back off, since a prone body does not move at all (`paceInPosture`).
+   */
+  proneUnder: number;
+  proneFrom: number;
+  /**
+   * The least seconds a body keeps a posture before it may take another. It is a **rate limit and
+   * nothing more**: a fighter standing exactly on one of the numbers above would otherwise bob
+   * between two postures a frame at a time, and this holds it to one change every `settle`.
+   *
+   * What it cannot do -- and a claim that it could is what let the stagger term stand in the rule
+   * for a round -- is stop a change the rule *asks* for. Damped, a rule that answered "upright"
+   * under fire simply alternated more slowly. If a posture is wrong, it has to be wrong in
+   * `postureFor`; this number only says how often the answer may be acted on. A **forced** posture
+   * ignores it outright.
+   */
+  settle: number;
+}
+
+export const POSTURE_TUNE: PostureTune = {
+  kneelFrom: 6,
+  proneUnder: 0.5,
+  proneFrom: 10,
+  settle: 0.6,
+};
+
+const POSTURE_FLOOR: Record<keyof PostureTune, number> = { kneelFrom: 0, proneUnder: 0, proneFrom: 0, settle: 0 };
+
+/** Move the posture's numbers live; returns what is in force. */
+export function tunePosture(opts?: Partial<PostureTune> | null): PostureTune {
+  if (!opts) return POSTURE_TUNE;
+  for (const key of Object.keys(POSTURE_TUNE) as (keyof PostureTune)[]) {
+    const v = opts[key];
+    if (typeof v === 'number' && Number.isFinite(v)) POSTURE_TUNE[key] = Math.max(POSTURE_FLOOR[key], v);
+  }
+  return POSTURE_TUNE;
+}
+
+/**
+ * What the posture is decided from. Every field is something the brain has already answered or the
+ * body already knows, so nothing is measured twice and nothing is cast: `shooting` in particular is
+ * the brain's own verdict (`state === 'attack'` with `attack === 'ranged'`), which already means
+ * "in range, with a line", so the ray that established it is the one ray a thought already casts.
+ * Primitives only, and the caller keeps one of these and writes into it.
+ */
+export interface PostureInput {
+  /**
+   * On its feet at all: in the air after a knock, thrown by the Force or held by a grip, it is not,
+   * and each of those three writes `grounded = false` on the body itself.
+   *
+   * This is the **only** reason a blow stands a body up, and that is the whole of a lesson that
+   * cost this rule its point once already. There used to be a `stunned` term beside it, and
+   * `Npc.damage` sets a 0.2 s stagger on *every* hit, a single bolt included -- so a body went
+   * upright the instant anybody shot at it, which is precisely and only the moment the cover is
+   * for. The settle cannot damp that: it caps how often the posture may change, not whether a
+   * forced change happens, so under steady fire a fighter merely alternated more slowly (shot
+   * every 1.5 s, upright 36% of a ten-second firefight and a dozen changes of posture; shot five
+   * times a second, upright for effectively all of it and never on a knee again). And the term
+   * bought nothing the comment claimed for it, because a blow hard enough to stagger a body off
+   * its feet -- a real knock, a throw, a grip -- already answers here.
+   */
+  grounded: boolean;
+  /** A gun in hand. Nothing with a blade ever goes low: it has to close to 1.9 m to do anything. */
+  gun: boolean;
+  /** In a fight, or within the combat carry's own five seconds of one. */
+  combat: boolean;
+  /** The brain says it is shooting this instant: in range, with a line, and firing. */
+  shooting: boolean;
+  /** How far the thing it is fighting is, in metres; Infinity with nothing to fight. */
+  gap: number;
+  /** Its health as a share of what it started with. */
+  hpRatio: number;
+  /** The pace the brain asked for this frame, before the posture is allowed to cap it. */
+  pace: 'stand' | 'walk' | 'run';
+  /** Whether something outranks the posture outright: a long walk under orders. */
+  held: boolean;
+  /**
+   * Whether this body can really be **drawn** lying down -- whether its rig holds any of the game's
+   * own prone loops at all. It is a capability and not a preference, and the rule reads it because
+   * the posture is a physical claim and not a pose: going prone drops the collision capsule to
+   * 1.0 m and the point the whole game aims at to 0.5 m, so a body that answers no here and lies
+   * down anyway is a figure standing bolt upright playing its standing idle while every shot in the
+   * world is aimed at its shins. The kneel needs no such gate: its own fallback row ends in a crouch
+   * idle, which is at least a low pose.
+   */
+  canProne: boolean;
+  /** What it is in now, so a body already low moves low rather than standing straight up. */
+  was: Posture;
+}
+
+/**
+ * How low it stands this frame. The rule is short on purpose, and every clause of it is either the
+ * client's own data or a number named in `POSTURE_TUNE`:
+ *
+ * 1. Under orders, off its feet, out of a fight or holding anything but a gun: upright.
+ *    A body under a long walk never goes down, which is the whole of "a prone body does not path".
+ * 2. Asked to **run**: upright. Nobody runs low, and the game has no clip for it either.
+ * 3. Not shooting: a body asked to **walk** keeps whatever low posture it had and crouches, because
+ *    the crouch is the game's own moving low pose; standing still it simply keeps what it has, so a
+ *    fighter whose target has just died holds its firing position rather than springing up on that
+ *    very frame and kneeling again a second later. The combat window ends it either way.
+ * 4. Shooting and holding its ground: on a knee past `kneelFrom`, and flat past `proneFrom` once it
+ *    is hurt past `proneUnder` and its rig can be drawn lying down. Nearer than `kneelFrom` it
+ *    shoots standing.
+ *
+ * **Being shot at is not in this rule anywhere**, and that is the single most important thing about
+ * it: see `PostureInput.grounded`. Only a blow that takes a body off its feet stands it up, because
+ * bolts in the air are the whole reason the posture exists and a rule that answered "upright" to
+ * one would hand back exactly what it was bought with.
+ *
+ * What is **not** here, and is wave 6's: where to go. This rule says how low a body stands where it
+ * already is; it never moves one, and it knows nothing about what it is standing behind. The crouch
+ * is therefore thin today on purpose -- it is reached when a low body is asked to walk, and the
+ * thing that will ordinarily ask for that is a move to a cover spot that does not exist yet.
+ */
+export function postureFor(o: PostureInput, tune: PostureTune = POSTURE_TUNE): Posture {
+  if (o.held || !o.grounded || !o.gun || !o.combat) return 'stand';
+  if (o.pace === 'run') return 'stand';
+  if (!o.shooting) return o.pace === 'walk' ? (o.was === 'stand' ? 'stand' : 'crouch') : o.was;
+  if (o.pace === 'walk') return o.was === 'stand' ? 'stand' : 'crouch';
+  // Written as a refusal rather than a test so a distance that is not a number stands the body up
+  // rather than kneeling it, which is the way round every other gate in this file is written.
+  if (!(o.gap >= tune.kneelFrom)) return 'stand';
+  if (o.canProne && o.hpRatio <= tune.proneUnder && o.gap >= tune.proneFrom) return 'prone';
+  return 'kneel';
+}
+
+/**
+ * What a posture lets a body do with the pace the brain asked for, which is the **client's own**
+ * data and not an invention: the crouch's clip set is an idle and a walk, the kneel's is an idle
+ * and no walk at all, and a prone body has no route anywhere in the state hierarchy except back up
+ * through standing or kneeling.
+ *
+ * So a kneeling or prone body is held still rather than given a crawl the navigation could not
+ * follow -- and the answer to "what does a prone fighter do when it is asked to go somewhere" is
+ * that it **gets up first**: `postureFor` hands back a crouch or a stand the moment the pace is not
+ * 'stand', and only then does this let it move. It never crawls, and no path is ever planned for a
+ * body lying down, so nothing downstream has to be told that its width changed.
+ */
+export function paceInPosture(pace: 'stand' | 'walk' | 'run', posture: Posture): 'stand' | 'walk' | 'run' {
+  if (posture === 'stand') return pace;
+  if (posture === 'crouch') return pace === 'run' ? 'walk' : pace;
+  return 'stand';
+}
+
+/**
+ * The game's one-shot between two postures, in the order to try them: **the player's own
+ * arithmetic** (`Player.postureTransition`), lifted here whole so a fighter and the player change
+ * posture by the same names and a node test can drive it without a rig.
+ *
+ * `gun` is the kind of blaster in hand, or null for anything else and for a weapon that is not up;
+ * `aimed` is whether the aimed set is wanted. A crouch is refused while moving, as the player
+ * refuses it: those clips only play standing still.
+ *
+ * One of these names is **misspelt in the archives themselves** -- the aimed way down from lying to
+ * kneeling spells its destination `kneleing` -- and the converter writes what the archives hold, so
+ * the wrong spelling is asked for beside the right one rather than mended in a pack. The right name
+ * is first, so a pack that ever carries it wins.
+ */
+export function postureTransitionNames(from: Posture, to: Posture, gun: 'pistol' | 'rifle' | null, aimed: boolean, moving: boolean): string[] {
+  if (from === to) return [];
+  if ((from === 'crouch' || to === 'crouch') && moving) return [];
+  const f = POSTURE_WORD[from];
+  const t = POSTURE_WORD[to];
+  const names: string[] = [];
+  if (gun && from !== 'crouch' && to !== 'crouch') {
+    if (aimed) {
+      names.push(`trn_${gun}_combat_${f}_aimed_to_${gun}_combat_${t}_aimed`);
+      if (to === 'kneel') names.push(`trn_${gun}_combat_${f}_aimed_to_${gun}_combat_kneleing_aimed`);
+    }
+    names.push(`trn_${gun}_combat_${f}_to_${gun}_combat_${t}`);
+  }
+  names.push(`trn_${f}_to_${t}`);
+  return names;
+}
+
+/**
+ * Which of a rig's shots a body in a posture fires, in the order to try them -- again the player's
+ * own (`Player.shootClip`), so that a fighter and the player fire the same clips.
+ *
+ * The kneeling row is the one worth saying out loud, because an earlier reading of the archives had
+ * it the other way round and would have made an invention out of the game's own behaviour. The
+ * shared body table declares **twelve kneeling fires**, six per weapon, with a ready and an aimed
+ * kneel carry each; every one of them resolves and every file is in the retail archives. They were
+ * invisible only because a direction selector's tag was read as three characters instead of four,
+ * which deleted them from every converted rig. So a kneeling shooter is the game's own behaviour
+ * with the game's own whole-body clips, and no additive recoil is wanted where a real clip exists.
+ *
+ * Prone takes the *aimed* shots for every shot, as the player does: the unaimed prone shots throw
+ * the off hand about. It never asks for the additive **by name** either, since that recoil was
+ * authored over a standing body -- though the last-resort row will take it, or anything else the
+ * rig has, rather than leave a shot silent, which is again exactly what the player does. A crouch
+ * has no shots at all and never asks: of the hierarchy's twelve crouch states not one carries a
+ * fire, an attack, a throw or a heal, which is why a crouched body here does not shoot.
+ */
+export function firePatterns(kind: 'pistol' | 'rifle', posture: Posture): RegExp[] {
+  if (posture === 'prone') {
+    return [new RegExp(`^${kind}_(combat_)?prone_aimed_fire_\\d+$`), new RegExp(`^${kind}_(combat_)?prone(_aimed)?_fire_\\d+$`), new RegExp(`^(add_)?${kind}_(combat_)?(prone_|kneeling_|standing_)?fire_\\d+$`)];
+  }
+  if (posture === 'kneel') {
+    return [new RegExp(`^${kind}_(combat_)?kneeling(_aimed)?_fire_\\d+$`), new RegExp(`^${kind}_kneeling_fire_\\d+$`), new RegExp(`^add_${kind}_fire_\\d+$`), new RegExp(`^(add_)?${kind}_(combat_)?(prone_|kneeling_|standing_)?fire_\\d+$`)];
+  }
+  return [new RegExp(`^${kind}_(combat_)?standing(_aimed)?_fire_\\d+$`), new RegExp(`^add_${kind}_fire_\\d+$`), new RegExp(`^(add_)?${kind}_(combat_)?(prone_|kneeling_|standing_)?fire_\\d+$`)];
 }
 
 /** The aim's measured correction: one of these per fighter, written and never made. */
