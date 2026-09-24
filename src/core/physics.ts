@@ -394,6 +394,39 @@ export class Physics {
     return this.world.castRay(r, len, true, undefined, filter, undefined, undefined, this.fixedOnly) !== null;
   }
 
+  /** The cover search's own ray, kept: a search casts a dozen and a half of these and must make nothing. */
+  private readonly blockRay = new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: 1, z: 0 });
+
+  /**
+   * How far along the segment from a to b the first thing that **stands still** is, or `Infinity`
+   * when the segment is clear.
+   *
+   * It is `cameraBlock`'s own question -- the same fixed-or-bodiless predicate, the same indoor
+   * filter -- asked with primitives and answered with a number. Two differences, and both are the
+   * reason it exists rather than being a call into that one. `cameraBlock` makes a `RAPIER.Ray` on
+   * every call, which is one object a frame for a camera and sixteen per body per search for the
+   * cover code; and it takes two point objects, which a caller with nothing but numbers would have
+   * to build. Nothing that moves on its own may answer either way, or a body takes cover behind the
+   * very creature it is fighting, behind the player, or behind a speeder that is about to drive off.
+   */
+  blockDistance(ax: number, ay: number, az: number, bx: number, by: number, bz: number, inside = false): number {
+    const dx = bx - ax;
+    const dy = by - ay;
+    const dz = bz - az;
+    const len = Math.hypot(dx, dy, dz);
+    if (!(len > 1e-4)) return Infinity;
+    const r = this.blockRay;
+    r.origin.x = ax;
+    r.origin.y = ay;
+    r.origin.z = az;
+    r.dir.x = dx / len;
+    r.dir.y = dy / len;
+    r.dir.z = dz / len;
+    const filter = inside ? groups(Group.all, Group.all & ~(Group.terrain | Group.exterior)) : groups(Group.all, Group.all);
+    const hit = this.world.castRay(r, len, true, undefined, filter, undefined, undefined, this.fixedOnly);
+    return hit ? hit.timeOfImpact : Infinity;
+  }
+
   /** A static cylinder, or null for a degenerate one (the physics engine aborts on non-positive or NaN sizes). */
   createStaticCylinder(x: number, y: number, z: number, radius: number, halfHeight: number): RAPIER.Collider | null {
     if (![x, y, z, radius, halfHeight].every(Number.isFinite) || radius <= 0.01 || halfHeight <= 0.01) return null;

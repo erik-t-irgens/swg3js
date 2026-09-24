@@ -125,6 +125,45 @@ const localA = new THREE.Vector3();
 const localB = new THREE.Vector3();
 /** The padded box a cell-follow tests a point against: one scratch, since a ship is followed as often as the player. */
 const tmpBox = new THREE.Box3();
+/** Where a placed object's own model box sits once it is turned: `blockersNear`'s alone, so nothing it does can disturb a sweep. */
+const blockCentre = new THREE.Vector3();
+
+/**
+ * Something to hide behind, as `blockersNear` hands it over: a disc over a placed object's
+ * footprint and the world height of its top. Whoever asks may keep more fields on the objects it
+ * passes in (the cover search keeps a gap on each); this writes these four and no others.
+ */
+export interface NearBlocker {
+  x: number;
+  z: number;
+  /** Half the widest span of the model's own box: a disc that covers it, whatever way it is turned. */
+  radius: number;
+  /** The world height of its top. */
+  topY: number;
+}
+
+/**
+ * One placed object's standing shape, worked out **once** when its collision was built: the streamer
+ * keeps a flat list of these and `blockersNear` walks that rather than the collider map.
+ *
+ * Why it is a list and not the map. The map is every object with collision within `COLLIDER_RANGE`
+ * of the player, which on the owner's own worlds is a median of about 540 and as many as 1,424; the
+ * map walk cost a model lookup, a quaternion turn and a `Math.hypot` each, the entry destructuring
+ * allocated a pair an entry, and the early exit fires only once two dozen have been *accepted* --
+ * so the fill ran the whole map exactly where cover matters most, which is a body standing in the
+ * open with little near it. Measured in node at the real densities that walk was 28, 57 and 74
+ * microseconds at 540, 1,081 and 1,424 objects, four times a step; this list with a squared distance
+ * is 0.6, 1.0 and 1.4. The cost is at last flat in how crowded the world is, which is what the cover
+ * wave claimed it was.
+ */
+interface BlockRec {
+  /** Whose record this is, so a removal can put the list's last entry back in its place. */
+  o: PlacedObject;
+  x: number;
+  z: number;
+  radius: number;
+  topY: number;
+}
 
 /** Where the player is: outside (cell 0 of no building) or in a cell of a building. */
 export interface CellState {
@@ -144,6 +183,13 @@ export class LayoutStreamer {
    * are not the default). Filled and emptied in the same two places the colliders themselves are.
    */
   private readonly colliderTemplate = new Map<number, string>();
+  /**
+   * What stands where, for whatever asks what a body could hide behind: one record per object with
+   * collision, filled and emptied in the same two places the colliders themselves are, and kept as a
+   * flat list with an index beside it so that a removal is a swap rather than a walk.
+   */
+  private readonly blockList: BlockRec[] = [];
+  private readonly blockAt = new Map<PlacedObject, number>();
   /** Objects wider than COLLIDER_RADIUS_CAP. Must stay a field initialiser: the constructor's loop fills it. */
   private readonly huge = new Set<PlacedObject>();
   /** Huge objects whose collision is still being built, a few pieces an update. A field initialiser, as `huge`. */
@@ -350,6 +396,7 @@ export class LayoutStreamer {
   /** A huge object's collision, to be built a piece at a time; marked as having colliders so nothing builds it twice. */
   private queueHuge(o: PlacedObject): void {
     this.colliders.set(o, []);
+    this.noteBlocker(o);
     this.hugeQueue.push({ o, prim: 0, pieces: null, next: 0 });
   }
 
@@ -706,7 +753,9 @@ export class LayoutStreamer {
   private updateColliders(px: number, pz: number): void {
     // Distances count from an object's edge, not its centre: a palace is wider than the range,
     // and its collision must stay while the player walks its far wings.
-    for (const [o] of this.colliders) {
+    // `keys()` and not the entries: the values are not read here, and destructuring an entry makes
+    // a two-element array per object every pass over a map this long.
+    for (const o of this.colliders.keys()) {
       // A huge object's collision comes and goes with its tier, not with the player's distance.
       if (this.huge.has(o)) continue;
       if (Math.hypot(o.x - px, o.z - pz) - o.radius > COLLIDER_RANGE * UNLOAD_SLACK) this.removeColliders(o);
@@ -753,6 +802,7 @@ export class LayoutStreamer {
       this.colliderTemplate.set(col.handle, o.template);
     }
     this.colliders.set(o, cols);
+    this.noteBlocker(o);
   }
 
   private removeColliders(o: PlacedObject): void {
@@ -767,6 +817,83 @@ export class LayoutStreamer {
       this.physics.removeCollider(c);
     }
     this.colliders.delete(o);
+    this.forgetBlocker(o);
+  }
+
+  /**
+   * Something standing near a point that a body might hide behind: a disc over its footprint and
+   * the height of its top, both in the world. It is deliberately the crudest shape that can aim a
+   * candidate cover spot, and it is written as a plain shape rather than as the cover code's own
+   * type so that nothing in the streamer has to know that cover exists.
+   */
+  blockersNear(x: number, z: number, reach: number, out: NearBlocker[], cap: number): number {
+    const lim = Math.min(cap | 0, out.length);
+    if (lim <= 0 || !(reach > 0)) return 0;
+    let n = 0;
+    const list = this.blockList;
+    for (let i = 0; i < list.length; i++) {
+      const b = list[i];
+      // Squared, with the blocker's own disc folded into the bound rather than subtracted from a
+      // root: `Math.hypot` is a call and a square root apiece, and this list is walked up to four
+      // times a step over as many as fourteen hundred records. `dist - radius > reach` and
+      // `dist² > (reach + radius)²` are the same test for non-negative numbers.
+      const dx = b.x - x;
+      const dz = b.z - z;
+      const far = reach + b.radius;
+      if (dx * dx + dz * dz > far * far) continue;
+      const e = out[n];
+      e.x = b.x;
+      e.z = b.z;
+      e.radius = b.radius;
+      e.topY = b.topY;
+      if (++n >= lim) break;
+    }
+    return n;
+  }
+
+  /**
+   * Note what a placed object stands like, the moment its collision is built. Only what really has
+   * collision is ever offered: an object whose collision has not been built (too small, too far, or
+   * placed inside a building) is not a wall to anything, and offering it would spend rays on a crate
+   * that stops no bolts.
+   */
+  private noteBlocker(o: PlacedObject): void {
+    if (o.contained || this.blockAt.has(o)) return;
+    const box = this.pack.loaded(o.model)?.bounds;
+    if (!box) return;
+    // **Extents and never corners.** A pack converted before the mesh reader took a BOX chunk's two
+    // corners componentwise carries them the other way round -- seven models on one of the owner's
+    // own worlds do -- so `box.max` is not reliably the larger end, and `max.y` read as the top
+    // would put a rock's top at or below the feet of anything standing beside it and refuse it
+    // silently, with no ray cast and nothing to show for it. The spans survive either way once the
+    // sign is taken out, and the middle is a midpoint whichever corner is which.
+    const hx = Math.abs(box.max.x - box.min.x) * 0.5;
+    const hz = Math.abs(box.max.z - box.min.z) * 0.5;
+    // The disc that covers the model's own box whatever way it is turned. It over-blocks -- a
+    // square kilometre of town by four to twelve times -- and that does not matter, because a
+    // blocker never claims cover: it only says where to put a candidate, and the rays decide.
+    const radius = Math.hypot(hx, hz);
+    if (!(radius > 0)) return;
+    blockCentre.set((box.min.x + box.max.x) * 0.5, 0, (box.min.z + box.max.z) * 0.5).applyQuaternion(o.q);
+    this.blockAt.set(o, this.blockList.length);
+    // A placed object is turned about the world's up on every world in the game, so the model's own
+    // highest point is still its highest point. Anything tipped on its side would read low here, and
+    // the rays would refuse the spot it offered rather than believe it.
+    this.blockList.push({ o, x: o.x + blockCentre.x, z: o.z + blockCentre.z, radius, topY: o.y + Math.max(box.min.y, box.max.y) });
+  }
+
+  /** And forget it when its collision goes: the last record is swapped into the hole it leaves. */
+  private forgetBlocker(o: PlacedObject): void {
+    const i = this.blockAt.get(o);
+    if (i === undefined) return;
+    this.blockAt.delete(o);
+    const last = this.blockList.length - 1;
+    if (i !== last) {
+      const moved = this.blockList[last];
+      this.blockList[i] = moved;
+      this.blockAt.set(moved.o, i);
+    }
+    this.blockList.length = last;
   }
 
   /**
@@ -779,6 +906,17 @@ export class LayoutStreamer {
 
   get colliderCount(): number {
     return this.colliders.size;
+  }
+
+  /**
+   * How many of those have a standing shape a body could get behind (`blockersNear`'s own list).
+   *
+   * It is the number to read before anything else about cover: nought here in a town is a wire that
+   * was never connected, not a world without crates in it, and no counter downstream can tell the
+   * two apart. It is smaller than `colliderCount` by whatever had no model loaded or no footprint.
+   */
+  get blockerCount(): number {
+    return this.blockList.length;
   }
 
   /**
