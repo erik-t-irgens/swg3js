@@ -189,8 +189,17 @@ export interface ShootDeps {
   releaseDay: () => void;
   /** What the sky is doing now, read after the day has been pinned and the frames have settled. */
   readLight: () => SceneLight | null;
-  /** The player's own figure, hidden while a picture is taken: the live one is drawn over the picture. */
-  figure: THREE.Object3D;
+  /**
+   * Take out of the world everything that must not be baked into a picture, and hand back the call
+   * that puts it all back.
+   *
+   * Two kinds of thing: the player's own figure, and every vehicle. Both are drawn **live** over
+   * the backdrop -- the figure because it is the character being made, and the ship because it
+   * wears that character's own fit and paint -- so a copy of either frozen in the picture would
+   * stand there for ever beside the real one. Three skips an invisible object before the shadow
+   * pass looks at it, so hiding drops their shadows with them, which is what is wanted.
+   */
+  hideForShot: () => () => void;
   /** Say what is happening, since the pass takes minutes. */
   say: (line: string) => void;
 }
@@ -269,8 +278,9 @@ export async function runShoot(deps: ShootDeps, only?: readonly string[], tune?:
     quat: camera.quaternion.clone(),
     ratio: deps.renderer.getPixelRatio(),
     size: deps.renderer.getSize(new THREE.Vector2()),
-    figureVisible: deps.figure.visible,
   };
+  /** Set while a picture is being taken; called to put the figure and the vehicles back. */
+  let unhide: (() => void) | null = null;
   const at = new THREE.Vector3();
   const look = new THREE.Vector3();
 
@@ -292,10 +302,8 @@ export async function runShoot(deps: ShootDeps, only?: readonly string[], tune?:
         for (const step of steps) {
           try {
             deps.holdDay(step.hour / 24);
-            // The figure is taken out of the picture entirely. Three skips an invisible object
-            // before the shadow pass looks at it, so this drops its shadow with it, which is what
-            // is wanted: the live figure over the picture casts its own.
-            deps.figure.visible = false;
+            // The figure and every vehicle come out of the picture: both are drawn live over it.
+            unhide = deps.hideForShot();
             deps.renderer.setPixelRatio(1);
             deps.renderer.setSize(render.width, render.height, false);
             deps.resized();
@@ -326,7 +334,8 @@ export async function runShoot(deps: ShootDeps, only?: readonly string[], tune?:
             failed.push({ path: step.path, why: String((e as Error).message ?? e) });
             deps.say(`shoot: ${step.path} failed: ${(e as Error).message ?? e}`);
           } finally {
-            deps.figure.visible = before.figureVisible;
+            unhide?.();
+            unhide = null;
           }
         }
       }
@@ -342,8 +351,10 @@ export async function runShoot(deps: ShootDeps, only?: readonly string[], tune?:
       }
     }
   } finally {
+    // Nothing puts the figure and the vehicles back here: the inner `finally` around each picture
+    // always runs, so by the time this is reached they are already back. A second restore looked
+    // like insurance and was provably dead, which is worse than none.
     deps.releaseDay();
-    deps.figure.visible = before.figureVisible;
     deps.renderer.setPixelRatio(before.ratio);
     deps.renderer.setSize(before.size.x, before.size.y, false);
     deps.resized();

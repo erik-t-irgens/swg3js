@@ -28,13 +28,26 @@ import { SSAO_TUNE_DEFAULTS, type SsaoPass } from './core/fx/ssao';
 import { SSAO_BASE_POWER } from './core/fx/ssaoMath.ts';
 import type { FighterGlow } from './world/npcs';
 import { DEFAULT_TIER } from './world/npcs.ts';
-import { captureScene, sceneLine } from './world/sceneCapture.ts';
+import { captureScene, headingDegrees, sceneLine } from './world/sceneCapture.ts';
 import { packPlanet, runShoot, shootPlan } from './world/sceneShoot.ts';
+import { sceneSpots } from './data/scenes.ts';
 /**
  * How near a named place has to be for `__debug.scene` to call the shot that place's. Ours, and
  * generous on purpose: it is a label on a captured line and not a rule anything obeys.
  */
 const SCENE_PLACE_REACH = 400;
+/**
+ * How far a parked ship may be from the camera and still be taken as part of a captured shot.
+ *
+ * This is **not** the mount range and must never be it again. The capture first asked
+ * `nearestVehicle`, which is the test for what the player could climb into: 3.6 m from the hull's
+ * own edge, and nothing more than 4 m above or below them. A ship parked where it actually looks
+ * right in a picture is nowhere near that, so of sixty-seven captures with a ship parked in shot,
+ * exactly one recorded it -- and only because that test subtracts the hull's radius and a big hull
+ * has enough of one to cover the difference. The question a capture asks is what is in the
+ * picture, not what is within arm's reach.
+ */
+const SCENE_SHIP_REACH = 250;
 import { loadPlayerRig } from './player/rig';
 import { LOOK, lookReport, packPitch, wrapAngle } from './player/lookAt.ts';
 import { Character, loadSpeciesIndex, type SpeciesEntry } from './player/character';
@@ -2871,7 +2884,16 @@ class App {
               const r = (v: number) => Number(v.toFixed(4));
               return { dir: [r(d.x), r(d.y), r(d.z)], main: L ? L.main.getHexString() : 'ffffff', mainScale: L ? Number(L.mainScale.toFixed(3)) : 1, ambient: L ? L.ambient.getHexString() : '404040' };
             },
-            figure: this.player.group,
+            hideForShot: () => {
+              // The figure and every vehicle: both are drawn live over the finished picture, so a
+              // copy of either baked into it would stand there for ever beside the real one.
+              const was: { o: THREE.Object3D; visible: boolean }[] = [{ o: this.player.group, visible: this.player.group.visible }];
+              for (const v of this.world.vehicles) was.push({ o: v.group, visible: v.group.visible });
+              for (const w of was) w.o.visible = false;
+              return () => {
+                for (const w of was) w.o.visible = w.visible;
+              };
+            },
             say: (line) => console.info(line),
           },
           only,
@@ -4120,7 +4142,7 @@ class App {
             place = q.name;
           }
         }
-        const v = this.nearestVehicle();
+        const v = this.shipInShot(cam.position, tmp);
         const shot = captureScene({
           name,
           pack,
@@ -4136,6 +4158,25 @@ class App {
         // line that can be selected and copied in one go.
         console.log(line);
         return { ...shot, line, paste: line };
+      },
+      /**
+       * Record where a ship stands for one of the captured places: park it where it looks right, aim the
+       * camera as the shot does, and `captureShip('tyrena')` prints one line to paste into `SCENE_SHIPS`.
+       * A place's ship is the same at every hour of it, so this is seventeen lines rather than sixty-seven
+       * captures. With no key, or one nothing answers to, it lists the keys.
+       */
+      captureShip: (key?: string) => {
+        const keys = sceneSpots().map((s) => s.key);
+        if (!key || !keys.includes(key)) return { error: key ? `no place is called ${key}` : 'name the place', places: keys };
+        const cam = this.cam.camera;
+        cam.getWorldDirection(tmp);
+        const v = this.shipInShot(cam.position, tmp);
+        if (!v) return { error: `no ship in front of the camera within ${SCENE_SHIP_REACH} m; park one in shot first`, place: key };
+        const g = v.group.position;
+        const pose = { x: Number(g.x.toFixed(2)), y: Number(g.y.toFixed(2)), z: Number(g.z.toFixed(2)), heading: headingDegrees(v.heading) };
+        const line = `  '${key}': { x: ${pose.x}, y: ${pose.y}, z: ${pose.z}, heading: ${pose.heading} },`;
+        console.log(line);
+        return { place: key, ship: v.def?.id ?? null, pose, metres: Number(Math.hypot(g.x - cam.position.x, g.y - cam.position.y, g.z - cam.position.z).toFixed(1)), line, paste: line };
       },
       /** The gun in hand: its Jedi Academy type and numbers. */
       gunType: () => {
@@ -10022,6 +10063,37 @@ class App {
       if (d < bestD) {
         bestD = d;
         best = sp;
+      }
+    }
+    return best;
+  }
+
+  /**
+   * The ship a captured shot is composed around: the nearest one **in front of the camera**, not
+   * the nearest one the player could climb into.
+   *
+   * Read `nearestVehicle` above and then this, because the difference is the whole point. That one
+   * answers "what would E do here", and its reach is 3.6 m from the hull's skin with a four-metre
+   * ceiling, which is right for a key press and hopeless for a photograph: a ship parked where it
+   * looks good in a shot is tens of metres off and often on ground well above or below the figure.
+   * This one takes plain distance from the camera and the one test that actually matters for a
+   * picture, which is whether the thing is in front of it.
+   */
+  private shipInShot(camAt: THREE.Vector3, forward: THREE.Vector3): Vehicle | null {
+    let best: Vehicle | null = null;
+    let bestD = SCENE_SHIP_REACH;
+    for (const v of this.world.vehicles) {
+      // A patrol's hull is the zone's, never the shot's: nobody parked it.
+      if (v.autopilot) continue;
+      const dx = v.group.position.x - camAt.x;
+      const dy = v.group.position.y - camAt.y;
+      const dz = v.group.position.z - camAt.z;
+      // Behind the camera is not in the picture, whatever the distance.
+      if (dx * forward.x + dy * forward.y + dz * forward.z <= 0) continue;
+      const d = Math.hypot(dx, dy, dz);
+      if (d < bestD) {
+        bestD = d;
+        best = v;
       }
     }
     return best;

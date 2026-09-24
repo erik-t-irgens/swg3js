@@ -64,7 +64,7 @@ const counted = shootCount(plan);
   ok(man.version === 1 && man.render.width === 4320 && man.render.height === 1440, `the manifest records the size the pictures were really rendered at (${man.render.width} by ${man.render.height})`);
   ok(man.shots.length === counted.shots, 'with a row per composition');
   ok(man.shots.every((s) => s.hours.length > 0 && s.camera && s.stand), 'each carrying its camera, its standing spot and at least one hour');
-  ok(man.shots.filter((s) => s.ship).length === 1, 'and exactly one of them a parked ship, which is all the owner captured');
+  ok(man.shots.filter((s) => s.ship).length === sceneSpots().filter((s) => s.ship).length, 'and a parked ship wherever one is known, which the manifest must carry through rather than drop');
   const labels = man.shots.flatMap((s) => s.hours.map((h) => h.label));
   ok(labels.every((l) => l.length > 0), 'every hour has a word on its button');
   const theed = man.shots.find((s) => s.key === 'theed-overlook');

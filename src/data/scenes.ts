@@ -21,7 +21,7 @@
 // them by looking. A run of five between six and ten in the morning and nothing at all between
 // fifteen and seventeen is what a sky that is worth seeing really looks like on these worlds.
 
-import type { SceneShot } from '../world/sceneCapture.ts';
+import type { ScenePose, SceneShot } from '../world/sceneCapture.ts';
 
 /**
  * Every captured backdrop, in the order they were taken, exactly as the game wrote them. Nothing
@@ -129,6 +129,23 @@ export const SCENE_SHOTS: readonly SceneShot[] = [
   { name: 'kashyyyk-only', pack: 'kashyyyk_main', place: 'Kachirho Starport', space: false, stand: { x: -53.88, y: 44.35, z: -35.85, heading: 158.3 }, camera: { x: -53.06, y: 45.89, z: -37.9, look: { x: -54.06, y: 45.85, z: -35.4 }, fov: 62 }, hour: 17.4, ship: null },
 ];
 
+/**
+ * Where the ship stands in each place, keyed by the shot's own key.
+ *
+ * A table apart from the captures above, and it is worth saying why. The owner parked a ship in
+ * shot at **every** place, but the capture asked `nearestVehicle` for it -- the test for what the
+ * player could climb into, 3.6 m from the hull's skin -- so sixty-six of the sixty-seven recorded
+ * nothing, and only Theed got through because that test subtracts the hull's radius and a big hull
+ * has enough of one to cover the difference. The capture now asks what is in front of the camera
+ * instead, but the shots already taken cannot be mended after the fact: the ship was somewhere and
+ * nothing wrote it down.
+ *
+ * Rather than have the owner stand in sixty-seven places again for a field that is the same at
+ * every hour of one place, `__debug.captureShip('<key>')` records one line here per place. A key
+ * with no row simply has no ship, which is what every place has today.
+ */
+export const SCENE_SHIPS: Readonly<Record<string, ScenePose>> = {};
+
 /** A spot: one composition, with every hour the owner captured of it. */
 export interface SceneSpot {
   /** The name of its earliest capture with the hour's label taken off, which is how a spot is keyed. */
@@ -171,6 +188,12 @@ export function sceneSpots(shots: readonly SceneShot[] = SCENE_SHOTS): SceneSpot
     // A spot takes the first ship it is given: the owner parked one for the shot, not for the hour.
     if (!spot.ship && s.ship) spot.ship = s.ship;
     spot.hours.push({ name: s.name, hour: s.hour });
+  }
+  // The ships recorded per place win over anything a capture happened to catch, since a row here
+  // was aimed at the shot while a captured one was whatever stood within arm's reach at the time.
+  for (const spot of out) {
+    const parked = SCENE_SHIPS[spot.key];
+    if (parked) spot.ship = parked;
   }
   return out;
 }

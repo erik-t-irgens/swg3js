@@ -8,7 +8,7 @@
 // captured holds that today, so anything that stops holding it is a typo and not a style.
 import assert from 'node:assert/strict';
 import { readSceneLine, sceneLine } from '../../../src/world/sceneCapture.ts';
-import { SCENE_SHOTS, sceneSpots } from '../../../src/data/scenes.ts';
+import { SCENE_SHIPS, SCENE_SHOTS, sceneSpots } from '../../../src/data/scenes.ts';
 
 let passed = 0;
 function ok(cond: boolean, what: string): void {
@@ -96,10 +96,24 @@ function facing(headingDeg: number): { x: number; z: number } {
   const dupHours = spots.filter((s) => new Set(s.hours.map((h) => h.hour)).size !== s.hours.length);
   ok(dupHours.length === 0, 'with no composition captured twice at the same hour');
 
-  // The ship, which only one composition has: the owner parked one for the selection screen there
-  // and nowhere else, so anything that needs one must cope with almost every scene having none.
-  const withShip = spots.filter((s) => s.ship);
-  ok(withShip.length === 1 && withShip[0].pack === 'naboo', `exactly one composition has a ship parked in it (${withShip.map((s) => s.key).join(', ')})`);
+  // The ship. The owner parked one in shot at **every** place, but the capture asked what was
+  // within mounting distance rather than what was in front of the camera, so only the one place
+  // where a big hull's radius happened to cover the difference recorded it. What is pinned here is
+  // therefore not a count but the repair: a row in the ships table reaches its spot, and a place
+  // with neither still answers null, since anything drawing a ship must cope with that.
+  const captured = SCENE_SHOTS.filter((s) => s.ship);
+  const caughtAt = new Set(captured.map((c) => c.pack));
+  ok(caughtAt.size === 1, `the captures caught a ship in one place only, which is the bug and not the owner (${[...caughtAt].join(', ')}, ${captured.length} of ${SCENE_SHOTS.length} captures)`);
+  const rows = Object.keys(SCENE_SHIPS);
+  const spotKeys = new Set(spots.map((s) => s.key));
+  const stray = rows.filter((k) => !spotKeys.has(k));
+  ok(stray.length === 0, `every place named in the ships table is one that was really captured (${stray.join(', ') || `${rows.length} rows, none stray`})`);
+  const placed = spots.filter((s) => s.ship);
+  ok(placed.length >= rows.length, `every row in the table reaches its place (${placed.length} places have a ship, ${rows.length} rows)`);
+  for (const k of rows) {
+    const spot = spots.find((s) => s.key === k);
+    ok(!!spot?.ship && spot.ship.x === SCENE_SHIPS[k].x && spot.ship.z === SCENE_SHIPS[k].z, `${k} takes the ship the table gives it, over anything a capture happened to catch`);
+  }
 
   // A place named by the world, where the world knew one. Not every spot has one and that is fine;
   // what would not be fine is a name that came back empty rather than absent.
