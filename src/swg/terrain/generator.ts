@@ -513,6 +513,17 @@ export abstract class LayerItem {
 export abstract class Boundary extends LayerItem {
   featherFunction = 0;
   featherDistance = 0;
+  /**
+   * A circle's, rectangle's and polyline's feather distance is a **share** of the shape (of the
+   * radius, of the shorter side, of the width), so it belongs in [0, 1] and the file's value is
+   * clamped to it. A polygon's is **metres** measured in from its edge, which is how its own
+   * isWithin reads it, and the retail terrains carry values up to 700 there while every other
+   * kind keeps its own inside [0, 1] on every world. Clamping a polygon's to 1 turned a ramp
+   * hundreds of metres wide into a one-metre edge, which is why whole layers -- a mountain
+   * range, a plateau, a town's flattened ground -- stood at full strength right up to their own
+   * outline instead of easing in, and props authored on the slope were left hanging.
+   */
+  protected featherInMetres = false;
 
   abstract isWithin(worldX: number, worldZ: number): number;
   abstract intersects(r: Rect): boolean;
@@ -544,7 +555,8 @@ export abstract class Boundary extends LayerItem {
 
   protected readFeather(r: ChunkReader): void {
     this.featherFunction = r.int32();
-    this.featherDistance = clamp(0, r.float(), 1);
+    const distance = r.float();
+    this.featherDistance = this.featherInMetres ? Math.max(0, distance) : clamp(0, distance, 1);
   }
 }
 
@@ -816,6 +828,8 @@ export class BoundaryPolygon extends BoundaryPoly {
 
   constructor() {
     super('BPOL');
+    // Metres in from the edge, not a share of the shape: see Boundary.featherInMetres.
+    this.featherInMetres = true;
   }
 
   isWithin(worldX: number, worldZ: number): number {

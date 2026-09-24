@@ -316,5 +316,45 @@ const t0 = performance.now(); let c = 0;
   for (let cz = -5; cz < 5; cz++) for (let cx = -5; cx < 5; cx++) { s.generate(cx * 32 - 4, cz * 32 - 4, s.numberOfPoles, s.poleStep); c++; }
   console.log(`generated ${c} chunks in ${(performance.now() - t0).toFixed(1)} ms (${((performance.now() - t0) / c).toFixed(2)} ms/chunk, ${s.numberOfPoles}x${s.numberOfPoles} poles)`);
 }
+// --- A boundary's feather distance. A circle's, a rectangle's and a polyline's is a share of the
+//     shape and belongs in [0, 1]; a polygon's is metres measured in from its own edge, which is
+//     how BoundaryPolygon.isWithin reads it and how the retail terrains write it (values up to
+//     700 there, while every other kind stays inside [0, 1] on every world). Clamping a polygon's
+//     to 1 turned every ramp into a one-metre edge and stood whole layers -- a mountain range, a
+//     plateau, a town's flattened ground -- at full strength right up to their own outline.
+{
+  const adtaBytes = chunk('ADTA', new W().i32(0).i32(0).i32(1).str('').bytes());
+  // BPOL version 7: point count, points, feather function and distance, local water table,
+  // height, shader size, water type, shader.
+  const poly = (name: string, pts: [number, number][], fn: number, fd: number) => {
+    const w = new W().i32(pts.length);
+    for (const [px, pz] of pts) w.f32(px).f32(pz);
+    return form('BPOL', form('0007', ihdr(name), chunk('DATA', w.i32(fn).f32(fd).i32(0).f32(0).f32(2).i32(0).str('').bytes())));
+  };
+  const circ = (name: string, fd: number) => form('BCIR', form('0002', ihdr(name), chunk('DATA', new W().f32(0).f32(0).f32(40).i32(0).f32(fd).bytes())));
+  const rec = (name: string, fd: number) => form('BREC', form('0004', ihdr(name), chunk('DATA', new W().f32(0).f32(0).f32(40).f32(40).i32(0).f32(fd).i32(0).i32(0).f32(0).f32(2).str('').i32(0).bytes())));
+  const line = (name: string, fd: number) => form('BPLN', form('0003', ihdr(name), chunk('DATA', new W().i32(2).f32(0).f32(0).f32(40).f32(0).i32(0).f32(fd).f32(8).bytes())));
+  const square: [number, number][] = [[-100, -100], [100, -100], [100, 100], [-100, 100]];
+  const layerP = form('LAYR', form('0003', ihdr('P'), adtaBytes, poly('pad', square, 0, 60), ahcn(0, 100)));
+  const layerS = form('LAYR', form('0003', ihdr('S'), adtaBytes, circ('c', 5), rec('r', 3), line('l', 3)));
+  const tp = parseTerrainTemplate(encode(form('PTAT', form('0015', chunk('DATA', header),
+    form('TGEN', form('0000', sgrp, form('FGRP', form('0008')), form('RGRP', form('0003')), form('EGRP', form('0002')), mgrp, form('LYRS', layerP, layerS))), form('BAKE')))));
+  const shapes = tp.generator.layers[1].boundaries.map((b) => b.featherDistance);
+  check('a circle, a rectangle and a polyline keep their feather as a share of the shape', shapes.join() === '1,1,1', shapes.join());
+  const pad = tp.generator.layers[0].boundaries[0];
+  check('a polygon keeps its feather distance in metres', pad.featherDistance === 60, String(pad.featherDistance));
+  const sp = new TerrainSampler(tp);
+  const grid = sp.generate(-128, -128, 129, 2);
+  const at = (px: number, pz: number) => grid.heights[((pz + 128) / 2) * 129 + (px + 128) / 2];
+  check('inside the feather the layer is at full strength', near(at(0, 0), 100, 1e-3) && near(at(0, -30), 100, 1e-3), `${at(0, 0)} ${at(0, -30)}`);
+  check('a layer bounded by a polygon eases in over its feather', near(at(70, 0), 50, 1e-3) && near(at(50, 0), 100 * (50 / 60), 1e-3) && near(at(-90, 0), 100 / 6, 1e-3), `${at(70, 0)} ${at(50, 0)} ${at(-90, 0)}`);
+  check('and stops at its outline', at(110, 0) === 0 && at(0, 110) === 0, `${at(110, 0)} ${at(0, 110)}`);
+  // The fault the owner saw: with the feather cut to a metre the ramp is a wall, so the ground
+  // one pole step in from the edge already stands at the layer's full height.
+  let wall = 0;
+  for (let px = -100; px <= 100; px += 2) if (at(px, 0) > 99.9) wall++;
+  check('the polygon does not pop up as a block with vertical sides', wall === 41, `${wall} of 101 poles across it stand at full height`);
+}
+
 console.log(failures ? `${failures} FAILURES` : 'all passed');
 process.exit(failures ? 1 : 0);

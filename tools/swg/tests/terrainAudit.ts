@@ -1,7 +1,16 @@
 // A terrain audit for a converted planet pack: it reads the pack's own terrain template, the
-// building modification layers its layout names, and the layout itself, and prints two things
-// per planet -- how far the ground the generator makes sits from the height each placed object
-// was authored at, and a census of how steep that ground is, with the worst places named.
+// building modification layers its layout names, and the layout itself, and prints three things
+// per planet -- how far the ground the generator makes sits from the **client's own** baked
+// ground heights, how far it sits from the height each placed object was authored at, and a
+// census of how steep that ground is, with the worst places named.
+//
+// The first of those is the one that settles an argument. A terrain file of version 15 carries a
+// map of the ground height at every 16 m flora tile, written by the game's own terrain editor: it
+// is the client's answer to "how high is the ground here", to the centimetre, over the whole
+// world, and it owes nothing to this port. Where the generator disagrees with it, the generator
+// is wrong. A placed object's authored height is a weaker witness, because plenty of objects are
+// meant to stand off the ground (an overhead beam, a crate on a roof, a buildout-area marker),
+// which is why it is printed beside the baked heights rather than instead of them.
 //
 // It measures and changes nothing. There is no browser, no worker, no renderer and no archive
 // here: it reads the converted pack off disk and runs the same TerrainSampler the game runs,
@@ -9,13 +18,15 @@
 //
 // Run:  node tools/swg/tests/terrainAudit.ts assets-private [planet ...] [--top=8] [--wild=1024]
 //
-// The pure arithmetic in here (the buckets, the percentiles, the slope, the yaw) is pinned by
-// tools/swg/tests/terrainAudit.test.ts, which is what makes the numbers it prints worth reading.
+// The pure arithmetic in here (the buckets, the percentiles, the slope, the yaw, the flora tile's
+// own point) is pinned by tools/swg/tests/terrainAudit.test.ts, which is what makes the numbers
+// it prints worth reading.
 
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { attachBitmap, bitmapFiles, ORIGIN_OFFSET, parseLayerFile, parseTerrainTemplate, TerrainSampler } from '../../../src/swg/terrain/trn.ts';
+import { RandomGenerator } from '../../../src/swg/terrain/fractal.ts';
+import { attachBitmap, bitmapFiles, ORIGIN_OFFSET, parseLayerFile, parseTerrainTemplate, TerrainSampler, type TerrainTemplate } from '../../../src/swg/terrain/trn.ts';
 
 /**
  * Every number the audit judges by is here, and every one of them is ours: nothing in the
@@ -49,6 +60,14 @@ export const AUDIT = {
    * apart rather than dropped.
    */
   areaGrid: 2048,
+  /** Collidable flora tiles are 16 m in the engine whatever the template's own tile size is. */
+  floraTile: 16,
+  /** Roughly how many baked flora tiles to sample per world; the stride is worked out from it. */
+  bakedTiles: 8192,
+  /** A baked tile this close to the ground the generator makes counts as agreeing. */
+  bakedOk: 2,
+  /** Past this, a baked tile is called a fault rather than a rounding difference. */
+  bakedBad: 10,
 };
 
 /** Whether a point sits exactly on the buildout-area grid (see AUDIT.areaGrid). */
@@ -177,6 +196,47 @@ export function summariseHeights(items: { err: number; x: number; z: number; tem
   };
 }
 
+/**
+ * Where the engine plants the one piece of collidable flora a 16 m tile may carry, which is the
+ * point its baked height belongs to. It mirrors ProceduralTerrainAppearance::createFlora, which
+ * src/world/flora.ts follows too: the tile's key is its row-major index in the whole map's tile
+ * grid, that key seeds the engine's own random generator, and the first two numbers it draws are
+ * the offsets inside the tile's border. Nothing here reads the archives; the numbers all come out
+ * of the pack's own terrain file.
+ */
+export function floraTilePoint(tileX: number, tileZ: number, tilesAcross: number, border: number, tile: number = AUDIT.floraTile): { x: number; z: number } {
+  const centre = Math.floor(tilesAcross / 2);
+  const key = ((tileZ + centre) * tilesAcross + (tileX + centre)) >>> 0;
+  const r = new RandomGenerator(key);
+  const xOffset = r.randomReal();
+  const zOffset = r.randomReal();
+  return { x: tileX * tile + border + xOffset * (tile - 2 * border), z: tileZ * tile + border + zOffset * (tile - 2 * border) };
+}
+
+export interface BakedCheck {
+  /** How many tiles carried flora and were compared. */
+  n: number;
+  agree: number;
+  rough: number;
+  bad: number;
+  /** |ours - the client's| for every tile compared, ascending. */
+  sorted: number[];
+  worst: { err: number; x: number; z: number }[];
+}
+
+/** Summarise one world's baked-height comparison; `items` is our height less the client's. */
+export function summariseBaked(items: { err: number; x: number; z: number }[], top = AUDIT.top): BakedCheck {
+  const sorted = items.map((i) => Math.abs(i.err)).sort((a, b) => a - b);
+  return {
+    n: items.length,
+    agree: sorted.filter((d) => d <= AUDIT.bakedOk).length,
+    rough: sorted.filter((d) => d > AUDIT.bakedOk && d <= AUDIT.bakedBad).length,
+    bad: sorted.filter((d) => d > AUDIT.bakedBad).length,
+    sorted,
+    worst: [...items].sort((a, b) => Math.abs(b.err) - Math.abs(a.err)).slice(0, top),
+  };
+}
+
 /** Merge hot blocks that sit within `merge` metres of each other, strongest first. */
 export function clusters(hot: Map<string, { count: number; deg: number; x: number; z: number }>, merge = AUDIT.clusterMerge): { count: number; deg: number; x: number; z: number; blocks: number }[] {
   const items = [...hot.values()].sort((a, b) => b.count - a.count || b.deg - a.deg);
@@ -287,6 +347,51 @@ function loadPack(dir: string): { layout: { planet: string; center: { x: number;
   return { layout, pois };
 }
 
+/**
+ * Our ground against the terrain file's own baked flora heights, sampled on an even lattice of
+ * blocks so that one world costs a bounded amount of work however big it is. Returns null when
+ * the file carries no such map (versions before 15 do not).
+ */
+function compareBaked(template: TerrainTemplate, sampler: TerrainSampler, top: number): BakedCheck | null {
+  const family = template.flora.collidableMap;
+  const heights = template.flora.collidableHeightMap;
+  if (!family || !heights) return null;
+  const tile = AUDIT.floraTile;
+  const tilesAcross = Math.floor(template.mapWidthInMeters / tile);
+  const centre = Math.floor(tilesAcross / 2);
+  const bw = sampler.blockWidth;
+  const perBlock = Math.max(1, Math.round(bw / tile));
+  const blocksAcross = Math.max(1, Math.floor(template.mapWidthInMeters / bw));
+  // Only about a fifth of a world's tiles carry flora, so ask for five times as many as wanted.
+  const stride = Math.max(1, Math.round(blocksAcross / Math.sqrt(Math.max(1, AUDIT.bakedTiles / (perBlock * perBlock) / 0.2))));
+  const border = template.flora.collidable.tileBorder;
+  const half = template.mapWidthInMeters / 2;
+  const items: { err: number; x: number; z: number }[] = [];
+  for (let j = 0; j < blocksAcross; j += stride) {
+    for (let i = 0; i < blocksAcross; i += stride) {
+      const bx = Math.floor((-half + i * bw) / bw);
+      const bz = Math.floor((-half + j * bw) / bw);
+      const t0x = Math.floor((bx * bw) / tile);
+      const t0z = Math.floor((bz * bw) / tile);
+      for (let dz = 0; dz < perBlock; dz++) {
+        for (let dx = 0; dx < perBlock; dx++) {
+          const tx = t0x + dx;
+          const tz = t0z + dz;
+          const keyX = tx + centre;
+          const keyZ = tz + centre;
+          if (keyX < 0 || keyZ < 0 || keyX >= tilesAcross || keyZ >= tilesAcross) continue;
+          // A tile with no flora has no baked height either: the map's value there means nothing.
+          if (!family.getValue(keyX, keyZ)) continue;
+          const p = floraTilePoint(tx, tz, tilesAcross, border, tile);
+          items.push({ err: sampler.heightAt(p.x, p.z) - heights.getValue(keyX, keyZ), x: p.x, z: p.z });
+        }
+      }
+      sampler.invalidateAll();
+    }
+  }
+  return summariseBaked(items, top);
+}
+
 export function auditPack(dir: string, opts: { top?: number; wildBlocks?: number; log?: (line: string) => void } = {}): void {
   const log = opts.log ?? ((l: string) => console.log(l));
   const top = opts.top ?? AUDIT.top;
@@ -314,6 +419,9 @@ export function auditPack(dir: string, opts: { top?: number; wildBlocks?: number
     else bitmapsMissing++;
   }
   const sampler = new TerrainSampler(template);
+  // The baked heights are the terrain file's own and know nothing of the buildings placed on the
+  // world, so they are compared before any building layer joins the generator.
+  const baked = compareBaked(template, sampler, top);
   const free = layout.objects.filter((o) => !o.contained);
   let layersAdded = 0;
   let layersMissing = 0;
@@ -337,6 +445,19 @@ export function auditPack(dir: string, opts: { top?: number; wildBlocks?: number
   log('');
   log(`=== ${layout.planet}  (${free.length} placed objects outside cells, map ${template.mapWidthInMeters} m, poles every ${sampler.poleStep} m)`);
   log(`    terrain ${template.name.replace(/\\/g, '/').split('/').pop()} v${template.version}; ${layersAdded} building layers applied${layersMissing ? `, ${layersMissing} layer files missing from the pack` : ''}${layersUnreadable ? `, ${layersUnreadable} unreadable` : ''}; ${bitmaps} bitmaps attached${bitmapsMissing ? `, ${bitmapsMissing} missing (their filter passes everywhere)` : ''}`);
+
+  // --- the client's own baked ground heights: the one measure here that nothing of ours wrote.
+  if (!baked) log(`    the terrain file carries no baked ground heights (version ${template.version}), so there is nothing of the client's to check the generator against on this world.`);
+  else if (!baked.n) log(`    the terrain file's baked ground heights name no flora anywhere, so there is nothing to compare.`);
+  else {
+    const bpct = (n: number) => `${((100 * n) / Math.max(1, baked.n)).toFixed(2)}%`;
+    log(`    the client's own baked ground heights (${baked.n} flora tiles): ${baked.agree} agree within ${AUDIT.bakedOk} m (${bpct(baked.agree)}), ${baked.rough} within ${AUDIT.bakedBad} m (${bpct(baked.rough)}), ${baked.bad} further (${bpct(baked.bad)})`);
+    log(`      |error| median ${percentile(baked.sorted, 0.5).toFixed(2)} m, p99 ${percentile(baked.sorted, 0.99).toFixed(2)} m, worst ${percentile(baked.sorted, 1).toFixed(1)} m`);
+    if (baked.bad) {
+      log(`    FLAG the generator disagrees with the terrain file's own heights by more than ${AUDIT.bakedBad} m at ${baked.bad} of ${baked.n} tiles; where it does, it is the generator that is wrong:`);
+      for (const w of baked.worst) log(`      ${w.err >= 0 ? '+' : ''}${w.err.toFixed(1)} m at ${w.x.toFixed(0)}, ${w.z.toFixed(0)} (${nameAt(pois, w.x, w.z)})`);
+    }
+  }
 
   // --- authored height against the ground, one sampler block at a time so memory stays flat.
   const bw = sampler.blockWidth;

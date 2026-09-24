@@ -8,7 +8,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { form, chunk, W, encode } from './iffWriter.ts';
-import { AUDIT, auditPack, bucketLabels, bucketOf, censusBlock, clusters, emptyCensus, meanSlope, nameAt, onAreaGrid, percentile, slopeDegrees, summariseHeights, yawOf } from './terrainAudit.ts';
+import { AUDIT, auditPack, bucketLabels, bucketOf, censusBlock, clusters, emptyCensus, floraTilePoint, meanSlope, nameAt, onAreaGrid, percentile, slopeDegrees, summariseBaked, summariseHeights, yawOf } from './terrainAudit.ts';
 import { CLEARANCE, DiscIndex, drawIndices, excludedArea, floatParam, footprintRadius, indexEntries, ownClearFlora, ringArea } from './floraClearance.ts';
 
 let failures = 0;
@@ -291,6 +291,59 @@ const near = (a: number, b: number, eps = 1e-6) => Math.abs(a - b) <= eps;
     check('a pack that names a terrain file it has not got is skipped, not thrown out of', (() => { const d3 = mkdtempSync(join(tmpdir(), 'swg-audit-')); writeFileSync(join(d3, 'layout.json'), JSON.stringify({ planet: 'gone', center: { x: 0, z: 0 }, terrain: 'nowhere.trn', objects: [] })); const out: string[] = []; auditPack(d3, { log: (l) => out.push(l) }); rmSync(d3, { recursive: true, force: true }); return out.some((l) => /SKIPPED: its layout names nowhere\.trn/.test(l)); })());
     check('and nothing is flagged as near vertical', /nothing at or past 80 degrees where anything is built/.test(all), bit(/degrees/));
     check('a pack with no terrain is passed over', (() => { const d2 = mkdtempSync(join(tmpdir(), 'swg-audit-')); writeFileSync(join(d2, 'layout.json'), JSON.stringify({ planet: 'x', center: { x: 0, z: 0 }, terrain: null, objects: [] })); const out: string[] = []; auditPack(d2, { log: (l) => out.push(l) }); rmSync(d2, { recursive: true, force: true }); return out.length === 0; })());
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// --- the client's own baked ground heights, which are the audit's one witness that owes this
+//     port nothing. A version-15 terrain file carries the ground height at every 16 m flora tile
+//     as its editor wrote it, so where the generator disagrees with that map the generator is
+//     wrong. Here the ground is a plane at zero and the map agrees everywhere but one tile.
+{
+  check('the audit plants a flora tile where the engine does', AUDIT.floraTile === CLEARANCE.collidableTile, `${AUDIT.floraTile} vs ${CLEARANCE.collidableTile}`);
+  const p = floraTilePoint(0, 0, 64, 0);
+  check('a tile\'s point lies inside the tile', p.x >= 0 && p.x < 16 && p.z >= 0 && p.z < 16, `${p.x}, ${p.z}`);
+  const q = floraTilePoint(3, -5, 64, 0);
+  check('and another tile draws its own', q.x >= 48 && q.x < 64 && q.z >= -80 && q.z < -64 && (q.x - 48 !== p.x || q.z + 80 !== p.z), `${q.x}, ${q.z}`);
+  const b = floraTilePoint(0, 0, 64, 4);
+  check('a border keeps the point off the tile\'s edge', b.x >= 4 && b.x <= 12 && b.z >= 4 && b.z <= 12, `${b.x}, ${b.z}`);
+  const s = summariseBaked([{ err: 0.01, x: 0, z: 0 }, { err: -1.9, x: 1, z: 1 }, { err: 4, x: 2, z: 2 }, { err: -40, x: 3, z: 3 }], 2);
+  check('the baked summary splits agreement, roughness and fault', s.n === 4 && s.agree === 2 && s.rough === 1 && s.bad === 1, JSON.stringify({ n: s.n, a: s.agree, r: s.rough, b: s.bad }));
+  check('and names the worst first, signed', s.worst.length === 2 && s.worst[0].err === -40 && s.worst[1].err === 4, JSON.stringify(s.worst));
+
+  const dir = mkdtempSync(join(tmpdir(), 'swg-audit-'));
+  try {
+    const header = new W().str('baked').f32(1024).f32(32).i32(8).i32(0).f32(0).f32(2).str('').f32(60)
+      .f32(0).f32(0).f32(0).f32(0).u32(0).f32(0).f32(0).f32(0).f32(0).u32(0).f32(0).f32(0).f32(0).f32(0).u32(0).f32(0).f32(0).f32(0).f32(0).u32(0).u8(0).bytes();
+    const tgen = form('TGEN', form('0000', form('SGRP', form('0006')), form('FGRP', form('0008')), form('RGRP', form('0003')), form('EGRP', form('0002')), form('MGRP', form('0000')), form('LYRS')));
+    const across = 1024 / AUDIT.floraTile;
+    // One bit a tile, every bit zero and the minimum 1: every tile carries flora, so every tile's
+    // baked height counts. (A tile with no flora has no height baked for it.)
+    const families = form('PIMP', form('0000', chunk('CNTL', new W().i32(across).i32(across).i32(1).i32(1).bytes()), chunk('DATA', new Uint8Array((across * across) / 8))));
+    // A byte a tile at half a metre a step: zero everywhere but the tile at the origin, which the
+    // file puts 40 m up while the generator's plane is at zero.
+    const raw = new Uint8Array(across * across);
+    const centre = across / 2;
+    raw[centre * across + centre] = 80;
+    const heights = form('PFPM', form('PIMP', form('0000', chunk('CNTL', new W().i32(across).i32(across).i32(8).i32(0).bytes()), chunk('DATA', raw))), form('0000', chunk('CNTL', new W().f32(0.5).bytes())));
+    writeFileSync(join(dir, 'terrain.trn'), encode(form('PTAT', form('0015', chunk('DATA', header), tgen, families, heights, form('BAKE')))));
+    writeFileSync(join(dir, 'layout.json'), JSON.stringify({ planet: 'baked', center: { x: 0, z: 0 }, terrain: 'terrain.trn', objects: [] }));
+    const lines: string[] = [];
+    auditPack(dir, { top: 3, wildBlocks: 16, log: (l) => lines.push(l) });
+    const all = lines.join('\n');
+    const bit = (re: RegExp) => (all.split('\n').find((l) => re.test(l)) ?? 'no such line').trim();
+    check('the audit compares the ground with the terrain file\'s own baked heights', /the client's own baked ground heights \(4096 flora tiles\): 4095 agree within 2 m/.test(all), bit(/baked ground heights/));
+    check('and flags the one tile it disagrees with, signed and placed', /FLAG the generator disagrees with the terrain file's own heights by more than 10 m at 1 of 4096 tiles/.test(all) && new RegExp(`-40\\.0 m at ${Math.round(p.x)}, ${Math.round(p.z)}`).test(all), bit(/-40\.0 m/));
+    check('a world whose terrain bakes no heights says so instead of reporting nothing', (() => {
+      const d2 = mkdtempSync(join(tmpdir(), 'swg-audit-'));
+      writeFileSync(join(d2, 'terrain.trn'), encode(form('PTAT', form('0015', chunk('DATA', header), tgen, form('BAKE')))));
+      writeFileSync(join(d2, 'layout.json'), JSON.stringify({ planet: 'nobake', center: { x: 0, z: 0 }, terrain: 'terrain.trn', objects: [] }));
+      const out: string[] = [];
+      auditPack(d2, { top: 2, wildBlocks: 16, log: (l) => out.push(l) });
+      rmSync(d2, { recursive: true, force: true });
+      return out.some((l) => /carries no baked ground heights/.test(l));
+    })());
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
