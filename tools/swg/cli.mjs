@@ -76,6 +76,12 @@
 //                                                                  It reads no archive, so it takes no <swg-dir>. About two minutes and three
 //                                                                  megabytes for a 16 km world; without it every body outdoors steers as it
 //                                                                  always did
+//   node tools/swg/cli.mjs scenes <out-dir> [--places=a,b] [--quality=0.35] [--aspect=3.8] [--cull=6]
+//                                                                  the small worlds the creation and selection screens stand a character in, built
+//                                                                  from the planet packs already converted: only what the shot's fixed camera can
+//                                                                  see, with every texture taken down to the pixels it really covers. It opens no
+//                                                                  archive, so it takes no <swg-dir>, and it must run after the worlds it draws
+//                                                                  from. It writes only under <out-dir>/scenes and never touches a pack
 //   node tools/swg/cli.mjs sandbox <swg-dir> <out-dir> [--seed=N]   a made-up system to fly in, 250 km across, as <out-dir>/space_sandbox:
 //                                                                  a sun and a sky borrowed from a converted zone, four to six planets with real
 //                                                                  places you can fly to, asteroid fields and three jump points; nothing in it
@@ -5558,6 +5564,34 @@ switch (cmd) {
     break;
   }
 
+  case 'scenes': {
+    // <out-dir> [--places=a,b] [--quality=0.35] [--aspect=3.8] [--cull=6]: the small worlds the
+    // creation and selection screens stand a character in, built from the planet packs that are
+    // already converted. It opens no archive -- the snapshots, the models and their textures are
+    // all in the packs -- so it takes no <swg-dir> and nothing about `--retail-only` applies.
+    //
+    // It must run **after** the worlds it draws from, and it only ever writes under
+    // <out-dir>/scenes: the packs themselves are read and never touched, so deleting that one
+    // folder puts the install back exactly as it was.
+    if (!pos[1]) usage();
+    const { sceneSpots } = await import('../../src/data/scenes.ts');
+    const { CREATOR_KEYS } = await import('../../src/world/scenePlaces.ts');
+    const { bakeScenes } = await import('./scenes.mjs');
+    const { SCENE_BAKE_TUNE } = await import('./scenebake.mjs');
+    const tune = { ...SCENE_BAKE_TUNE };
+    if (options.quality) tune.quality = Number(options.quality);
+    if (options.aspect) tune.aspect = Number(options.aspect);
+    if (options.cull) tune.cullPixels = Number(options.cull);
+    const only = options.places ? String(options.places).split(',').map((s) => s.trim()).filter(Boolean) : null;
+    const started = Date.now();
+    const out = bakeScenes({ root: pos[1], spots: sceneSpots(), creatorKeys: CREATOR_KEYS, only, tune, log: (line) => console.log(line) });
+    const mb = (n) => `${(n / 1048576).toFixed(1)} MB`;
+    console.log(`scenes: ${out.manifest.places.length} places, ${out.manifest.models} models, ${mb(out.bytesBefore)} of pack read down to ${mb(out.bytesAfter)} (${out.shrunk} textures shrunk) in ${((Date.now() - started) / 1000).toFixed(0)}s`);
+    if (out.missingPacks.length) console.log(`scenes: not converted yet, so left out: ${out.missingPacks.join(', ')}`);
+    for (const f of out.failed.slice(0, 10)) console.log(`scenes: ${f.key} failed — ${f.why}`);
+    if (out.failed.length > 10) console.log(`scenes: and ${out.failed.length - 10} more`);
+    break;
+  }
   case 'navgrid': {
     // <planet>|all <out-dir> [--cell=2] [--skip-existing]: the outdoor walkability grid, baked from
     // a pack that is already converted. It opens no archive at all -- the terrain template, the

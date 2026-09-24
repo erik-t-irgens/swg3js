@@ -112,6 +112,14 @@ export const SCENE_BAKE_TUNE = {
   screenHeight: 1440,
   /** No texture is shrunk below this, however far off the thing is: a 4-pixel wall reads as a colour. */
   minTexture: 16,
+  /**
+   * The floor for a texture feeding a cut-out material, which is higher because these are the ones
+   * that fail quietly. A cut-out is a threshold on alpha, and averaging alpha down is exactly what
+   * thins a frond until it disappears: a leaf covering three texels in eight comes out at 0.375 and
+   * fails a 0.5 test everywhere at once. Shrinking them less is the cheap half of the answer; the
+   * other half is that foliage is the first thing to look at on a screen.
+   */
+  maskMinTexture: 128,
   /** Nothing is carried past this, whatever its size: the far haze swallows it. */
   farCap: 9000,
   /** How far past its own extent an object may sit outside the frustum and still be kept, in metres. */
@@ -203,6 +211,14 @@ export function planPlace(spot, layout, models, tune = SCENE_BAKE_TUNE) {
   const built = Math.min(170, cam.fov * (tune.fovPad ?? 1));
   const planes = frustumPlanes(cam, cam.look, built, tune.aspect, tune.farCap);
   const instances = [];
+  /**
+   * The placed particle effects -- a campfire's smoke, sparks off a broken panel. They are kept
+   * apart from the instances because they are not meshes at all: the pack carries each as a little
+   * JSON of emitters, so there is no texture to size and nothing to shrink. They are recorded so
+   * that whatever draws them later has the places, and skipped by the model pool so that trying to
+   * read one as a model cannot fail the bake.
+   */
+  const effects = [];
   const nearest = new Map();
   let dropped = 0;
   let missing = 0;
@@ -226,11 +242,16 @@ export function planPlace(spot, layout, models, tune = SCENE_BAKE_TUNE) {
     }
     // Kept in the place's own frame, with the standing spot as the origin: the active place always
     // sits at the world origin, so nothing is ever far enough out for a float to lose centimetres.
-    instances.push({ model: o.model, x: at.x - spot.stand.x, y: at.y - spot.stand.y, z: at.z - spot.stand.z, q: o.q });
+    const here = { model: o.model, x: at.x - spot.stand.x, y: at.y - spot.stand.y, z: at.z - spot.stand.z, q: o.q };
+    if (m.particle) {
+      effects.push(here);
+      continue;
+    }
+    instances.push(here);
     const px = pixelSpan(m.size, Math.max(1, d), cam.fov, tune.screenHeight);
     nearest.set(o.model, Math.max(nearest.get(o.model) ?? 0, px));
   }
-  return { key: spot.key, pack: spot.pack, instances, nearest, dropped, missing };
+  return { key: spot.key, pack: spot.pack, instances, effects, nearest, dropped, missing };
 }
 
 /**

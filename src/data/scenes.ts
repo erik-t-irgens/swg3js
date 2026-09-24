@@ -9,13 +9,15 @@
 // cannot be built by anybody, and unlike a converted pack they are a handful of numbers a person
 // typed by standing somewhere and liking the view.
 //
-// **Most of these are the same place at a different hour.** The 67 captures are 15 places and 17
-// compositions, and at 13 of those places the stand and the camera are identical to the centimetre
-// across every hour of it -- so a place is one camera and a list of hours, and turning the time of
-// day in the creator moves the world's own clock rather than picking a different place. The two
-// places that are not
-// one composition are recorded rather than tidied away: Theed has a second standing spot of its
-// own, and the earliest Lars Homestead capture sits a few centimetres from the other three.
+// **Most of these are the same place at a different hour.** The 67 captures gather into 16 places,
+// and at most of them the stand and the camera are identical to the centimetre across every hour --
+// so a place is one camera and a list of hours, and turning the time of day in the creator moves
+// the world's own clock rather than picking a different place.
+//
+// Two of them did not match to the centimetre, which is why `SAME_PLACE` exists. The Lars
+// Homestead camera moved half a metre between the first hour and the other three, and read as two
+// places that gave the creator's Tatooine one hour instead of four. Theed's second standing spot
+// is 7.9 m from the first and really is another shot, so it stays its own place.
 //
 // The hours are the game's own clock, 0 to 24, and they are **not** evenly spread: the owner chose
 // them by looking. A run of five between six and ten in the morning and nothing at all between
@@ -147,9 +149,6 @@ export const SCENE_SHOTS: readonly SceneShot[] = [
 export const SCENE_SHIPS: Readonly<Record<string, ScenePose>> = {
   'theed-overlook': { x: 11789.62, y: 12.41, z: -2092.28, heading: 43.3 },
   'lars-homestead': { x: 1215.26, y: 0.06, z: -1969.68, heading: 308.5 },
-  // The owner's own call: the second Lars composition stands 20 cm from the first, so one ship
-  // suits both and they asked for it rather than walking out there twice.
-  'lars-homestead-2': { x: 1215.26, y: 0.06, z: -1969.68, heading: 308.5 },
   jabbapalace: { x: 3503.71, y: 32.14, z: -2074.63, heading: 273 },
   tyrena: { x: 4787.59, y: 0.54, z: 2005.39, heading: 297.1 },
   agrilatswamp: { x: -625.02, y: 48.98, z: 9223.16, heading: 170.4 },
@@ -186,14 +185,26 @@ export interface SceneSpot {
  * centimetres from its neighbours becomes its own spot and says so, instead of being quietly
  * folded into one whose geometry it does not actually share.
  */
+/**
+ * How far apart two captures may stand and still be the same place, in metres.
+ *
+ * Not an exact match, because a person walking back to a spot the next day does not stand on the
+ * same square centimetre. The Lars Homestead captures are the case: the same composition, and the
+ * camera moved 0.53 m between the first hour and the other three. Read as two places they gave the
+ * creator's Tatooine one hour instead of four. A metre merges those and still keeps Theed's second
+ * standing spot separate, which is 7.9 m from the first and really is another shot.
+ */
+export const SAME_PLACE = 1;
+
 export function sceneSpots(shots: readonly SceneShot[] = SCENE_SHOTS): SceneSpot[] {
   const out: SceneSpot[] = [];
-  const at = new Map<string, SceneSpot>();
   const taken = new Set<string>();
+  const near = (a: { x: number; y: number; z: number }, b: { x: number; y: number; z: number }): boolean => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z) <= SAME_PLACE;
   for (const s of shots) {
     const c = s.camera;
-    const k = [s.pack, s.stand.x, s.stand.y, s.stand.z, s.stand.heading, c.x, c.y, c.z, c.look.x, c.look.y, c.look.z, c.fov].join('|');
-    let spot = at.get(k);
+    // The first spot of the same world this one stands with, else a spot of its own. Order decides
+    // ties, which is the capture order, so the earliest of a cluster is the one that names it.
+    let spot = out.find((o) => o.pack === s.pack && near(o.stand, s.stand) && near(o.camera, c));
     if (!spot) {
       // The hour's own word comes off the first capture's name, which leaves what the owner called
       // the place. Two places can end up with the same word for it, so a key is taken once and the
@@ -203,7 +214,6 @@ export function sceneSpots(shots: readonly SceneShot[] = SCENE_SHOTS): SceneSpot
       for (let n = 2; taken.has(key); n++) key = `${base}-${n}`;
       taken.add(key);
       spot = { key, pack: s.pack, place: s.place, stand: s.stand, camera: c, ship: s.ship, hours: [] };
-      at.set(k, spot);
       out.push(spot);
     }
     // A spot takes the first ship it is given: the owner parked one for the shot, not for the hour.

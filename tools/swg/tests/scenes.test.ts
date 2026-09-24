@@ -87,13 +87,13 @@ function facing(headingDeg: number): { x: number; z: number } {
   // The grouping, which is what makes the owner's time-of-day switcher cheap: one bake per
   // composition, the hour a parameter on it.
   const spots = sceneSpots();
-  ok(spots.length === 17, `the captures gather into seventeen compositions (${spots.length})`);
+  ok(spots.length === 16, `the captures gather into sixteen places (${spots.length})`);
   ok(spots.reduce((n, s) => n + s.hours.length, 0) === SCENE_SHOTS.length, 'losing none of them on the way');
   const keys = new Set(spots.map((s) => s.key));
   ok(keys.size === spots.length, 'every composition has a key of its own, counted up where two places wanted the same word');
   const many = spots.filter((s) => s.hours.length > 1);
   ok(many.length === 12, `and twelve of them hold more than one hour (${many.length}), which is the geometry a bake does once and re-lights`);
-  ok(spots.filter((s) => s.hours.length === 1).length === 5, 'while five were captured at a single hour, which on four of those worlds is the only hour that looked right');
+  ok(spots.filter((s) => s.hours.length === 1).length === 4, 'while four were captured at a single hour, which on three of those worlds is the only hour that looked right');
   const dupHours = spots.filter((s) => new Set(s.hours.map((h) => h.hour)).size !== s.hours.length);
   ok(dupHours.length === 0, 'with no composition captured twice at the same hour');
 
