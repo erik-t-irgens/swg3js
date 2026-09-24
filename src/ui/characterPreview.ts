@@ -11,6 +11,82 @@ import { clone as cloneSkinned } from 'three/examples/jsm/utils/SkeletonUtils.js
 import type { Character } from '../player/character';
 import { PreviewDof, type PreviewEffects, type PreviewReport } from './previewDof';
 import { PREVIEW_DOF, previewGate, previewLensOn, previewSpan, type PreviewSpan } from '../core/fx/dofMath.ts';
+import { backdropFit, sceneView, type BackdropRender, type ScenePoint } from '../world/sceneBackdrop.ts';
+
+/**
+ * A place to stand the doll in: one of the owner's captured shots, its picture, and the sky that
+ * was over it. Everything the preview needs and nothing it does not, so the screen that hands one
+ * over need not know how a backdrop registers.
+ */
+export interface PreviewScene {
+  /** The picture, already a URL the browser can fetch. */
+  url: string;
+  /** How that picture was rendered, which is half of the registration. */
+  render: BackdropRender;
+  /** The shot's own vertical field of view, which is the other half. */
+  fov: number;
+  /** The camera and the look-at point, in the doll's own frame: the figure's feet are the origin. */
+  camera: ScenePoint;
+  look: ScenePoint;
+  /** The turn that leaves the figure facing as it was captured. */
+  faceYaw: number;
+  /** The sun at that hour, or null for a shot rendered before the pass recorded one. */
+  light: { dir: [number, number, number]; main: string; mainScale: number; ambient: string } | null;
+}
+
+/** The doll's own field of view away from a scene; in one it takes the shot's. */
+const PREVIEW_FOV = 28;
+
+/**
+ * How a captured sky is put on the figure, and how the figure is grounded on a picture. Every one
+ * of these is ours: the world's own light is in the world's own units and nothing says what it
+ * should come to in a preview lit by three lamps, so the sun's strength is clamped into a band
+ * that keeps a face readable at every hour the owner captured. Live through `__debug.scene`.
+ */
+export const SCENE_LIGHT = {
+  /** The weakest and strongest the captured sun may drive the key light, as a share of its own. */
+  keyMin: 0.35,
+  keyMax: 1.3,
+  /** What is left of the doll's own fill and rim once a real sky is doing the work. */
+  fill: 0.45,
+  rim: 0.5,
+  /** The captured ambient against the doll's own hemisphere light. */
+  hemi: 1,
+  /** The figure's own light when it is switched on. */
+  face: 1.5,
+  /** How dark the patch under the feet is, and how far past the figure it reaches. */
+  contact: 0.5,
+  contactSpread: 0.9,
+};
+
+/**
+ * The soft dark patch the figure stands on. Drawn here rather than shipped as a picture: it is one
+ * radial fade, it costs a 64-pixel texture, and it is not the client's art and could not be.
+ */
+function contactTexture(): THREE.Texture {
+  const size = 64;
+  const c = document.createElement('canvas');
+  c.width = size;
+  c.height = size;
+  const ctx = c.getContext('2d');
+  if (ctx) {
+    const g = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+    g.addColorStop(0, 'rgba(0,0,0,1)');
+    g.addColorStop(0.55, 'rgba(0,0,0,0.55)');
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, size, size);
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+
+/** Build a scene from a shot's record and the picture for one of its hours. */
+export function previewSceneOf(shot: { stand: { x: number; y: number; z: number; heading: number }; camera: { x: number; y: number; z: number; look: ScenePoint; fov: number } }, url: string, render: BackdropRender, light: PreviewScene['light']): PreviewScene {
+  const view = sceneView(shot);
+  return { url, render, fov: shot.camera.fov, camera: view.camera, look: view.look, faceYaw: view.faceYaw, light };
+}
 
 export class CharacterPreview {
   /** What the settings ask of every doll: App keeps it in step with Effects and Depth of field (a change shows on the next frame). */
@@ -29,7 +105,7 @@ export class CharacterPreview {
   readonly canvas = document.createElement('canvas');
   private readonly renderer: THREE.WebGLRenderer;
   private readonly scene = new THREE.Scene();
-  private readonly camera = new THREE.PerspectiveCamera(28, 1, 0.05, 40);
+  private readonly camera = new THREE.PerspectiveCamera(PREVIEW_FOV, 1, 0.05, 40);
   private readonly pivot = new THREE.Group();
   private model: THREE.Object3D | null = null;
   /** Facing the viewer: the character's front is down +Z, so the camera starts there. */
@@ -67,7 +143,27 @@ export class CharacterPreview {
     fill.position.set(-3, 1.2, 1.5);
     const rim = new THREE.DirectionalLight(0xffffff, 1.4);
     rim.position.set(-1, 2, -3.5);
-    this.scene.add(key, fill, rim, new THREE.HemisphereLight(0xbcd3e8, 0x35302a, 1.1));
+    const hemi = new THREE.HemisphereLight(0xbcd3e8, 0x35302a, 1.1);
+    this.scene.add(key, fill, rim, hemi);
+    this.lights = { key, fill, rim, hemi };
+    this.lightRest = { key: { colour: key.color.getHex(), power: key.intensity, at: key.position.clone() }, fill: fill.intensity, rim: rim.intensity, hemi: { sky: hemi.color.getHex(), power: hemi.intensity } };
+    // The backdrop fills whatever holder it is put in and never takes a click: the doll's own
+    // canvas lies over it and is what the pointer talks to.
+    this.backdrop.className = 'preview-backdrop';
+    Object.assign(this.backdrop.style, { position: 'absolute', inset: '0', backgroundRepeat: 'no-repeat', backgroundPosition: 'center', pointerEvents: 'none', display: 'none' });
+    // The figure's own light, for a shot whose hour is too dark to see a face by. Off unless it is
+    // asked for, and it sits with the camera rather than with the sun, so it fills what the shot's
+    // own light leaves in shadow instead of fighting it.
+    this.faceLight = new THREE.DirectionalLight(0xffeedd, 0);
+    this.scene.add(this.faceLight);
+    // Where the figure stands, in a scene, gets a soft dark patch: without one a character over a
+    // photograph floats, whatever else is right about it. It is not a shadow of the body (there is
+    // no ground here to cast one on) but the contact under the feet, which is what the eye reads.
+    this.contact = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({ map: contactTexture(), transparent: true, depthWrite: false, opacity: 0 }));
+    this.contact.rotation.x = -Math.PI / 2;
+    this.contact.renderOrder = -1;
+    this.contact.visible = false;
+    this.scene.add(this.contact);
     this.bindDrag();
     // The panel sizes the canvas with CSS, and measuring it once races the layout. Watching it
     // keeps the drawing buffer the same shape as the box, whatever the window does afterwards.
@@ -89,6 +185,23 @@ export class CharacterPreview {
 
   private readonly observer: ResizeObserver;
 
+  /** The four lights the doll is lit by away from a scene, and what they were set to when it was made. */
+  private readonly lights: { key: THREE.DirectionalLight; fill: THREE.DirectionalLight; rim: THREE.DirectionalLight; hemi: THREE.HemisphereLight };
+  private readonly lightRest: { key: { colour: number; power: number; at: THREE.Vector3 }; fill: number; rim: number; hemi: { sky: number; power: number } };
+  private readonly faceLight: THREE.DirectionalLight;
+  private readonly contact: THREE.Mesh;
+  /**
+   * The picture behind the doll. A plain element with a background image rather than a quad in the
+   * scene: the canvas is already see-through and sits over the page, so the browser draws the
+   * backdrop with its own scaling, which costs this context no texture, no upload and no program.
+   * A screen that wants one puts this in its holder **before** the canvas; anything that does not
+   * never touches it and the doll is exactly what it always was.
+   */
+  readonly backdrop: HTMLElement = document.createElement('div');
+  private scene3: PreviewScene | null = null;
+  /** How far the figure has been spun from the facing it was captured at. */
+  private spin = 0;
+
   /** Where the camera looks, off the doll's middle: the right button drags it, to bring the face up close. */
   private readonly pan = new THREE.Vector3();
   private panning = false;
@@ -108,6 +221,13 @@ export class CharacterPreview {
       const dy = e.clientY - this.lastY;
       this.lastX = e.clientX;
       this.lastY = e.clientY;
+      if (this.scene3) {
+        // In a place, the drag turns the figure and nothing else: the camera is the shot's own and
+        // moving it would ask the picture for a view it was never taken from.
+        this.spin -= dx * 0.011;
+        this.dirty = true;
+        return;
+      }
       if (this.panning) {
         // Slide the view across the screen: a pixel moves the target the same way whatever the zoom.
         const perPixel = (2 * this.distance * Math.tan(((this.camera.fov * Math.PI) / 180) / 2)) / Math.max(1, this.canvas.clientHeight);
@@ -128,7 +248,12 @@ export class CharacterPreview {
     };
     this.canvas.addEventListener('contextmenu', (e) => e.preventDefault());
     this.canvas.addEventListener('dblclick', () => {
-      // Back to the whole doll.
+      // In a place, back to the facing it was captured at; otherwise back to the whole doll.
+      if (this.scene3) {
+        this.spin = 0;
+        this.dirty = true;
+        return;
+      }
       this.pan.set(0, 0, 0);
       this.userFramed = false;
       this.distance = this.fitDistance(this.modelSize);
@@ -139,6 +264,9 @@ export class CharacterPreview {
     this.canvas.addEventListener('pointerup', up);
     this.canvas.addEventListener('pointercancel', up);
     this.canvas.addEventListener('wheel', (e) => {
+      // A place has no zoom: the shot's camera is where it is, and moving it in or out would part
+      // the figure from the picture it is standing in.
+      if (this.scene3) return;
       // Finer steps close in, so the face can be framed.
       this.distance = Math.min(Math.max(this.distance * (e.deltaY > 0 ? 1.12 : 1 / 1.12), 0.25), 12);
       this.userFramed = true;
@@ -201,6 +329,8 @@ export class CharacterPreview {
     this.modelSize = size.clone();
     this.pivot.add(copy);
     this.model = copy;
+    // The patch under the feet is the new figure's width, not the last one's.
+    if (this.scene3) this.sizeContact();
     this.dirty = true;
     let meshes = 0;
     copy.traverse((o) => {
@@ -240,8 +370,12 @@ export class CharacterPreview {
     this.renderer.setSize(width, height, false);
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
+    // The picture behind is laid out from the view's own shape, so it is refitted here and not on
+    // a frame: a window dragged wider shows more of the place sideways, exactly as the live camera
+    // does, and the two must change together or the ground slides under the feet while it moves.
+    if (shapeChanged) this.fitBackdrop();
     // The first real size arrives after the model, so the fit has to be redone once it does.
-    if (shapeChanged && !this.userFramed) this.distance = this.fitDistance(this.modelSize);
+    if (shapeChanged && !this.userFramed && !this.scene3) this.distance = this.fitDistance(this.modelSize);
     if (this.dof) {
       this.renderer.getDrawingBufferSize(this.bufferSize);
       this.dof.setSize(this.bufferSize.x, this.bufferSize.y);
@@ -282,8 +416,116 @@ export class CharacterPreview {
     };
   };
 
+  /**
+   * Stand the doll in one of the owner's captured places, or take it out of one with null.
+   *
+   * In a scene the camera does not move at all: it is the shot's own camera, and the figure turns
+   * under it. That is the whole trick, and it is why the picture can be a picture -- a camera that
+   * orbited would want parallax the picture cannot give.
+   */
+  setScene(scene: PreviewScene | null): void {
+    this.scene3 = scene;
+    this.spin = 0;
+    this.pivot.rotation.y = 0;
+    const L = this.lights;
+    const rest = this.lightRest;
+    if (!scene) {
+      this.backdrop.style.display = 'none';
+      this.backdrop.style.backgroundImage = '';
+      this.contact.visible = false;
+      L.key.color.setHex(rest.key.colour);
+      L.key.intensity = rest.key.power;
+      L.key.position.copy(rest.key.at);
+      L.fill.intensity = rest.fill;
+      L.rim.intensity = rest.rim;
+      L.hemi.color.setHex(rest.hemi.sky);
+      L.hemi.intensity = rest.hemi.power;
+      this.faceLight.intensity = 0;
+      this.camera.fov = PREVIEW_FOV;
+      this.camera.updateProjectionMatrix();
+      this.dirty = true;
+      return;
+    }
+    this.backdrop.style.display = '';
+    this.backdrop.style.backgroundImage = `url("${encodeURI(scene.url)}")`;
+    this.fitBackdrop();
+    // The sun the picture was taken under, on the figure. Its own strength is the world's and is
+    // not this context's, so it is clamped into a band that keeps a face readable at any hour;
+    // the band is ours and is in SCENE_LIGHT.
+    const sun = scene.light;
+    if (sun) {
+      const d = new THREE.Vector3(sun.dir[0], sun.dir[1], sun.dir[2]);
+      if (d.lengthSq() < 1e-6) d.set(0.3, 0.9, 0.3);
+      L.key.position.copy(d.normalize().multiplyScalar(10));
+      L.key.color.set(`#${sun.main}`);
+      L.key.intensity = rest.key.power * Math.min(SCENE_LIGHT.keyMax, Math.max(SCENE_LIGHT.keyMin, sun.mainScale));
+      L.hemi.color.set(`#${sun.ambient}`);
+      L.hemi.intensity = rest.hemi.power * SCENE_LIGHT.hemi;
+      L.fill.intensity = rest.fill * SCENE_LIGHT.fill;
+      L.rim.intensity = rest.rim * SCENE_LIGHT.rim;
+    }
+    this.contact.visible = true;
+    (this.contact.material as THREE.MeshBasicMaterial).opacity = SCENE_LIGHT.contact;
+    this.sizeContact();
+    this.dirty = true;
+  }
+
+  /** Whether the doll is standing in a place, which is what the screens ask before offering an hour. */
+  get inScene(): boolean {
+    return this.scene3 !== null;
+  }
+
+  /**
+   * The figure's own light: what the owner asked for, for a shot whose hour leaves a face in the
+   * dark. It sits with the camera, so it fills rather than fighting the sun the shot was taken
+   * under, and it does nothing at all outside a scene.
+   */
+  setFaceLight(on: boolean, strength = 1): void {
+    this.faceLight.intensity = on && this.scene3 ? SCENE_LIGHT.face * Math.max(0, strength) : 0;
+    this.dirty = true;
+  }
+
+  get faceLightOn(): boolean {
+    return this.faceLight.intensity > 0;
+  }
+
+  /** Lay the picture over the view at the size its own field of view asks for. */
+  private fitBackdrop(): void {
+    const s = this.scene3;
+    if (!s) return;
+    const w = this.canvas.clientWidth || this.canvas.width || 1;
+    const h = this.canvas.clientHeight || this.canvas.height || 1;
+    const fit = backdropFit(s.render, { fov: s.fov, aspect: w / h });
+    this.backdrop.style.backgroundSize = `${(fit.scaleX * 100).toFixed(4)}% ${(fit.scaleY * 100).toFixed(4)}%`;
+    this.lastFit = fit;
+  }
+
+  /** What the last fit worked out, for the console when a backdrop does not sit where it should. */
+  lastFit: { scaleX: number; scaleY: number; covers: boolean } | null = null;
+
+  /** The dark patch under the feet, as wide as the figure standing on it. */
+  private sizeContact(): void {
+    const r = Math.max(0.35, Math.max(this.modelSize.x, this.modelSize.z) * SCENE_LIGHT.contactSpread);
+    this.contact.scale.set(r, r, 1);
+  }
+
   /** The camera on its orbit about the doll, from the turn, tilt, distance and slide as they are now. */
   private placeCamera(): void {
+    const s = this.scene3;
+    if (s) {
+      // The shot's own camera, exactly, and nothing the pointer does moves it. The figure spins
+      // on the pivot instead, which is at the feet and already holds the centred model.
+      if (this.camera.fov !== s.fov) {
+        this.camera.fov = s.fov;
+        this.camera.updateProjectionMatrix();
+      }
+      this.camera.position.set(s.camera.x, s.camera.y, s.camera.z);
+      this.camera.lookAt(s.look.x, s.look.y, s.look.z);
+      this.pivot.rotation.y = s.faceYaw + this.spin;
+      // The figure's own light follows the camera, which is what makes it a fill and not a second sun.
+      this.faceLight.position.copy(this.camera.position);
+      return;
+    }
     const cp = Math.cos(this.pitch);
     this.camera.position.set(Math.sin(this.yaw) * cp * this.distance + this.pan.x, this.height + Math.sin(this.pitch) * this.distance + this.pan.y, Math.cos(this.yaw) * cp * this.distance + this.pan.z);
     this.camera.lookAt(this.pan.x, this.height + this.pan.y, this.pan.z);

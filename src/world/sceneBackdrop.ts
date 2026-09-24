@@ -80,6 +80,36 @@ export function backdropRenderFor(shotFov: number, widestViewAspect: number, hei
   return { fov: shotFov, aspect, width: Math.round(h * aspect), height: h };
 }
 
+/** A point, in whatever frame the thing holding it is in. */
+export interface ScenePoint {
+  x: number;
+  y: number;
+  z: number;
+}
+
+/**
+ * A shot as the doll's own preview has to hold it: the camera and the look-at point moved into the
+ * frame the figure already stands in, and the turn that leaves the figure facing as it was captured.
+ *
+ * The preview stands its doll at the origin with the feet on the floor and spins it there, so the
+ * world coordinates of a shot are no use to it directly. Subtracting the standing spot moves the
+ * whole composition into that frame without changing a single angle or distance, which is what
+ * keeps the registration exact: the camera is the same camera, it is simply described from the
+ * figure's feet instead of from the middle of a planet.
+ */
+export function sceneView(shot: { stand: { x: number; y: number; z: number; heading: number }; camera: { x: number; y: number; z: number; look: ScenePoint } }): { camera: ScenePoint; look: ScenePoint; faceYaw: number } {
+  const s = shot.stand;
+  const c = shot.camera;
+  const camera = { x: c.x - s.x, y: c.y - s.y, z: c.z - s.z };
+  const look = { x: c.look.x - s.x, y: c.look.y - s.y, z: c.look.z - s.z };
+  // The doll is modelled facing +Z and the shot has it facing away from the camera, so the turn
+  // that puts +Z along "away from the camera" is the one the capture was taken at. Read off the
+  // camera rather than off the captured heading on purpose: the heading is the body's and can be a
+  // few degrees from square to the shot, and what must be reproduced is the *picture*.
+  const faceYaw = Math.atan2(-camera.x, -camera.z);
+  return { camera, look, faceYaw };
+}
+
 /** The words the owner names an hour with, as a person would read them on a button. */
 const HOUR_WORDS: Record<string, string> = {
   sunrise: 'Sunrise',

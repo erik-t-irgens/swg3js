@@ -64,6 +64,25 @@ export const SHOOT_TUNE = {
   streamMs: 45000,
 };
 
+/**
+ * What the sky was doing at the moment a picture was taken.
+ *
+ * Recorded rather than guessed, and it is what makes the figure belong in the shot: the live
+ * character is lit by the same sun, from the same direction, in the same colour as the place
+ * behind it. Without this a figure at sunset is lit at noon and reads as pasted on, however good
+ * the picture is.
+ */
+export interface SceneLight {
+  /** Unit vector toward the sun, in the world's axes, which are the shot's. */
+  dir: [number, number, number];
+  /** The key light's colour, as six hex digits with no hash. */
+  main: string;
+  /** How strong the key light stood at that hour. */
+  mainScale: number;
+  /** The ambient the sky filled the scene with. */
+  ambient: string;
+}
+
 /** One hour of one shot, as the pass will render it. */
 export interface ShootStep {
   key: string;
@@ -74,6 +93,8 @@ export interface ShootStep {
   path: string;
   /** What a button offering this hour says. */
   label: string;
+  /** The sky at the moment it was taken, filled in by the pass and null until then. */
+  light: SceneLight | null;
 }
 
 /** Everything to do for one world, so a world is loaded once however many shots stand in it. */
@@ -100,7 +121,7 @@ export function shootPlan(only?: readonly string[]): ShootGroup[] {
     }
     g.spots.push({
       spot,
-      steps: spot.hours.map((h) => ({ key: spot.key, name: h.name, hour: h.hour, path: backdropPath(spot.key, h.name), label: hourLabel(h.name, spot.key, h.hour) })),
+      steps: spot.hours.map((h) => ({ key: spot.key, name: h.name, hour: h.hour, path: backdropPath(spot.key, h.name), label: hourLabel(h.name, spot.key, h.hour), light: null })),
     });
   }
   return [...groups.values()];
@@ -166,6 +187,8 @@ export interface ShootDeps {
   holdDay: (t: number) => void;
   /** Let the day run again. */
   releaseDay: () => void;
+  /** What the sky is doing now, read after the day has been pinned and the frames have settled. */
+  readLight: () => SceneLight | null;
   /** The player's own figure, hidden while a picture is taken: the live one is drawn over the picture. */
   figure: THREE.Object3D;
   /** Say what is happening, since the pass takes minutes. */
@@ -289,6 +312,9 @@ export async function runShoot(deps: ShootDeps, only?: readonly string[]): Promi
             camera.position.copy(at);
             camera.lookAt(look);
             deps.drawFrame();
+            // Read after the settle, never before it: the sky blends its rows over several frames
+            // and the light on the first frame after the hour moved is the hour before's.
+            step.light = deps.readLight();
             const blob = await grab(deps.renderer, render.width, render.height, SHOOT_TUNE.quality);
             const bytes = await put(step.path, blob);
             written.push({ path: step.path, bytes });

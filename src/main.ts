@@ -2861,6 +2861,12 @@ class App {
               this.world.day.time = t;
             },
             releaseDay: () => void clockKnob({ release: true }),
+            readLight: () => {
+              const L = this.world.swgSky?.lighting;
+              const d = this.world.day.lightDir;
+              const r = (v: number) => Number(v.toFixed(4));
+              return { dir: [r(d.x), r(d.y), r(d.z)], main: L ? L.main.getHexString() : 'ffffff', mainScale: L ? Number(L.mainScale.toFixed(3)) : 1, ambient: L ? L.ambient.getHexString() : '404040' };
+            },
             figure: this.player.group,
             say: (line) => console.info(line),
           },

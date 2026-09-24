@@ -5,8 +5,8 @@
 // arithmetic is pure and this sweeps it: the same direction must land in the same place in the
 // picture and in the live view, at every window shape the owner might drag the game into.
 import assert from 'node:assert/strict';
-import { backdropFit, backdropPath, backdropRenderFor, hourLabel, isCreatorShot, CREATOR_KEYS, type BackdropRender } from '../../../src/world/sceneBackdrop.ts';
-import { sceneSpots } from '../../../src/data/scenes.ts';
+import { backdropFit, backdropPath, backdropRenderFor, hourLabel, isCreatorShot, sceneView, CREATOR_KEYS, type BackdropRender } from '../../../src/world/sceneBackdrop.ts';
+import { sceneSpots, SCENE_SHOTS } from '../../../src/data/scenes.ts';
 
 let passed = 0;
 function ok(cond: boolean, what: string): void {
@@ -71,7 +71,7 @@ const render: BackdropRender = backdropRenderFor(SHOT_FOV, 3, 1600);
   ok(hourLabel('rori-swamp-afternoon-late', 'rori-swamp', 20.14) === 'Late afternoon', 'a word the owner hyphenated reads the same as the one they ran together');
   ok(hourLabel('yavin4-only', 'yavin4', 19.65) === '19:39', 'a shot captured at one hour, named for being the only one, reads as the time, which is always true');
   ok(hourLabel('mustafar', 'mustafar', 13.5) === '13:30', 'and so does one whose name is only the world');
-  ok(hourLabel('tyrena-somethingelse', 'tyrena', 12) === 'Somethingelse', 'a word nobody planned for is still the owner’s and is shown, tidied, rather than replaced by a guess');
+  ok(hourLabel('tyrena-somethingelse', 'tyrena', 12) === 'Somethingelse', "a word nobody planned for is still the owner's and is shown, tidied, rather than replaced by a guess");
 }
 
 {
@@ -82,7 +82,44 @@ const render: BackdropRender = backdropRenderFor(SHOT_FOV, 3, 1600);
   const shots = spots.reduce((n, s) => n + s.hours.length, 0);
   ok(paths.size === shots, `every hour of every shot has a path of its own (${paths.size} of ${shots})`);
   ok([...paths].every((p) => /^[\w.-]+\/[\w.-]+\.jpg$/.test(p)), 'and every one is a plain folder and file name, with nothing in it a file system would refuse');
-  ok(backdropPath('theed-overlook', 'theed-overlook-midday') === 'theed-overlook/midday.jpg', 'a shot’s own name comes off the front, so the folder is the place and the file is the hour');
+  ok(backdropPath('theed-overlook', 'theed-overlook-midday') === 'theed-overlook/midday.jpg', "a shot's own name comes off the front, so the folder is the place and the file is the hour");
+}
+
+{
+  // Moving a shot into the doll's own frame, where the figure's feet are the origin. Nothing about
+  // the composition may change on the way: the same camera, the same distance, the same angles.
+  const off: string[] = [];
+  const turned: string[] = [];
+  const stretched: string[] = [];
+  for (const shot of SCENE_SHOTS) {
+    const v = sceneView(shot);
+    const world = Math.hypot(shot.camera.x - shot.stand.x, shot.camera.y - shot.stand.y, shot.camera.z - shot.stand.z);
+    const local = Math.hypot(v.camera.x, v.camera.y, v.camera.z);
+    if (Math.abs(world - local) > 1e-9) stretched.push(shot.name);
+
+    // The look-at direction must be the same direction it was, or the camera is aimed elsewhere.
+    const a = { x: shot.camera.look.x - shot.camera.x, y: shot.camera.look.y - shot.camera.y, z: shot.camera.look.z - shot.camera.z };
+    const b = { x: v.look.x - v.camera.x, y: v.look.y - v.camera.y, z: v.look.z - v.camera.z };
+    const la = Math.hypot(a.x, a.y, a.z) || 1;
+    const lb = Math.hypot(b.x, b.y, b.z) || 1;
+    if ((a.x * b.x + a.y * b.y + a.z * b.z) / (la * lb) < 1 - 1e-12) off.push(shot.name);
+
+    // The doll is modelled facing +Z, so the turn must leave +Z pointing away from the camera.
+    const faceX = Math.sin(v.faceYaw);
+    const faceZ = Math.cos(v.faceYaw);
+    const awayX = -v.camera.x;
+    const awayZ = -v.camera.z;
+    const len = Math.hypot(awayX, awayZ) || 1;
+    if (Math.abs(faceX - awayX / len) > 1e-9 || Math.abs(faceZ - awayZ / len) > 1e-9) turned.push(shot.name);
+  }
+  ok(stretched.length === 0, `the camera keeps its distance from the figure in every shot (${stretched.join(', ') || 'all 67'})`);
+  ok(off.length === 0, `and points exactly where it pointed (${off.join(', ') || 'all 67'})`);
+  ok(turned.length === 0, `and the figure is turned to face away from it, which is the facing it was captured at (${turned.join(', ') || 'all 67'})`);
+
+  // The figure stands on the floor of the doll's frame, which is what makes the contact patch and
+  // the feet meet: the camera is above the standing spot in every one of these.
+  const below = SCENE_SHOTS.filter((s) => sceneView(s).camera.y <= 0);
+  ok(below.length === 0, `the camera is above the ground the figure stands on in every shot (${below.map((b) => b.name).join(', ') || 'all 67'})`);
 }
 
 {
@@ -91,7 +128,8 @@ const render: BackdropRender = backdropRenderFor(SHOT_FOV, 3, 1600);
   const missing = CREATOR_KEYS.filter((k) => !keys.has(k));
   ok(CREATOR_KEYS.length === 3, 'the creator offers three places, as asked');
   ok(missing.length === 0, `and every one of them is a shot that was really captured (${missing.join(', ') || 'all three found'})`);
-  ok(isCreatorShot(CREATOR_KEYS[0]) && !isCreatorShot('rori-swamp'), 'the selection screen’s other shots are not the creator’s');
+  ok(isCreatorShot(CREATOR_KEYS[0]) && !isCreatorShot('rori-swamp'), "the selection screen's other shots are not the creator's");
 }
 
 console.log(`\n${passed} checks passed`);
+

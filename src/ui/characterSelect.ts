@@ -18,6 +18,7 @@ import { PLANETS } from '../data/planets.ts';
 import type { Character } from '../player/character.ts';
 import { DEFAULT_SABER_COLOR } from '../player/player.ts';
 import { CharacterPreview } from './characterPreview.ts';
+import { loadSceneLibrary, SceneBar } from './sceneBar.ts';
 import { installIcons } from './hudIcons.ts';
 import { agoWords, classGlyph, classWords, cleanName, initialIndex, keyAction, NAME_MAX, placeWords, safeColour, slotsFor, stepIndex, type Slot } from './selectModel.ts';
 
@@ -79,6 +80,8 @@ export class CharacterSelect {
   private readonly confirmEl: HTMLElement;
 
   private preview: PreviewHooks | null = null;
+  /** The row of places and hours under the figure; null until the doll is built, and idle with no backdrops rendered. */
+  private sceneBar: SceneBar | null = null;
   private gen = 0;
   private figure: FigureState = 'none';
   private figureError = '';
@@ -358,8 +361,20 @@ export class CharacterSelect {
   private previewFor(): PreviewHooks {
     if (this.preview) return this.preview;
     const p: PreviewHooks = new CharacterPreview();
+    // The picture goes in first and the canvas over it: neither carries a z-index, so two
+    // positioned boxes in one stacking context paint in tree order and the figure is drawn on the
+    // place rather than under it.
+    this.figureBox.appendChild(p.backdrop);
     p.canvas.classList.add('cs-canvas');
     this.figureBox.appendChild(p.canvas);
+    // The row that offers the places, over both. With no backdrops rendered on this machine the
+    // library answers null, the row hides itself and the screen is exactly what it always was.
+    this.sceneBar = new SceneBar(
+      (scene) => p.setScene(scene),
+      (on) => p.setFaceLight(on),
+    );
+    this.figureBox.appendChild(this.sceneBar.element);
+    void loadSceneLibrary().then((lib) => this.sceneBar?.setLibrary(lib));
     // The idle is played on the clone, not on the character: the clone has its own skeleton, so the
     // rig the world will use stays exactly as it was dressed. The mixer is made once per clone.
     p.onFrame = (dt, model) => {
