@@ -152,6 +152,13 @@ import { worldNav } from './world/nav/nav.ts';
 // has to turn a place name or a pair of coordinates into a point, because the world's own named
 // places are the App's (`placesHere`) and nothing under `src/world/` can see them.
 import { ERRAND_TUNE, tuneErrand, type ErrandTune } from './world/errand.ts';
+// Cover: the one shared searcher and its numbers, the ladder's three cover columns and the brain's
+// own reach for a blocked shot. `__debug.cover()` is the only way any of it can be read from a tab
+// that draws no frames; the knob itself is also on `__debug.fighters({ cover: … })`.
+import { coverSearch, tuneCover } from './world/cover.ts';
+import { GROUND_SKILL } from './world/groundSkill.ts';
+import { GROUND_STEP } from './world/groundStep.ts';
+import { BRAIN_TUNE } from './world/mobiles/brain.ts';
 import { tuneAfloat } from './world/afloat.ts';
 import type { FacilityChoice, NamedPlace } from './world/cloning.ts';
 import { GATE_TUNE, ZoneGates, gateAction, gateSaid, tuneGates, zoneOfPack } from './world/zoneGates.ts';
@@ -3830,6 +3837,71 @@ class App {
         // something a frame does.
         const here = tune?.describe ? this.world.buildingAt(this.player.worldPos) : null;
         return { ...worldNav.status(), building: here ? worldNav.describe(here.building) : null };
+      },
+      /**
+       * Where a body would get to, out of the line of fire, and what looking for it cost
+       * (`src/world/cover.ts`, `Npc.stepCover`, and the rule itself in the shared
+       * `decide`). None of this wave can be seen from a tab that draws no frames, so all of it
+       * answers in numbers.
+       *
+       *   `__debug.cover()`               -- the account: the searcher's counters and what its
+       *                                      last search cost, the ladder's three cover columns a
+       *                                      tier, and a row per live fighter with its tier, its
+       *                                      state, whether it wants cover and where its spot is
+       *   `__debug.cover({ reach: 20 })`  -- moves the search's own numbers live (`COVER_TUNE`;
+       *                                      the same knob as `__debug.fighters({ cover: … })`)
+       *   `__debug.cover({ probe: true })`  -- runs one real search **now**, from the nearest live
+       *                                      fighter's feet against you, and prints what was
+       *                                      offered, what was refused and why, and the spot
+       *   `__debug.cover({ probe: 2 })`   -- from fighter 2 in `__debug.fighters()`
+       *   `__debug.cover({ probe: 'here' })` -- from **your own** feet against the nearest fighter,
+       *                                      which is how to ask whether a place you have walked to
+       *                                      is cover at all without standing a body on it
+       *
+       * Read `ground` before anything else: `colliders` is what the streamer has built round you
+       * and `blockers` is how much of it has a shape to hide behind. Nought blockers in a town is
+       * `NpcDeps.blockers` unwired or a streamer that has built nothing, and every counter below
+       * reads exactly the same as a world with no crates in it. With blockers standing and the
+       * searcher's `rays` at nought, the probe's own list says why: every entry `refused` for being
+       * shorter than a crouched chest is a world of kerbstones, and one refused with a **negative**
+       * `over` would be a model box read upside down.
+       */
+      cover: (opts?: Partial<import('./world/cover').CoverTune> & { probe?: boolean | number | 'here' }) => {
+        const npcs = this.world.npcs;
+        const { probe, ...tune } = opts ?? {};
+        if (Object.keys(tune).length) tuneCover(tune);
+        if (probe !== undefined && probe !== false) {
+          const live = npcs.npcs.filter((n) => !n.dead);
+          if (!live.length) return 'no fighter is out: __debug.fighter(1) stands one, and the probe needs one at either end (a body to search from, or a threat to search against)';
+          let body = live[0];
+          if (typeof probe === 'number') {
+            if (!npcs.npcs[probe] || npcs.npcs[probe].dead) return `there is no live fighter ${probe}: __debug.fighters() lists ${live.length}`;
+            body = npcs.npcs[probe];
+          } else for (const n of live) if (n.pos.distanceToSquared(this.player.worldPos) < body.pos.distanceToSquared(this.player.worldPos)) body = n;
+          const me = this.player.worldPos;
+          // From your feet against the body, or from the body's feet against you. The threat is
+          // always the other one's **aim point**, which is where its shots really leave from.
+          return probe === 'here'
+            ? npcs.coverProbe(me.x, me.y, me.z, body.pos.x, body.pos.y + body.halfHeight, body.pos.z, body.tier)
+            : npcs.coverProbe(body.pos.x, body.pos.y, body.pos.z, me.x, me.y + this.world.playerTarget.halfHeight, me.z, body.tier);
+        }
+        return {
+          search: coverSearch.status(),
+          // **Read this first.** How many placed objects have collision just now and how many of
+          // those have a shape to hide behind: nought blockers in a town is a wire that was never
+          // connected rather than a world without crates, and every counter below reads the same
+          // either way.
+          ground: this.world.coverGround,
+          // The three columns of the ladder this wave is about, so "a low tier barely uses cover"
+          // is a number and not a claim: how often it looks, how far it will walk for a spot, and
+          // how many extra metres one it can shoot back out of is worth to it.
+          ladder: Object.fromEntries(Object.entries(GROUND_SKILL).map(([t, s]) => [t, { coverEvery: s.coverEvery, coverWalk: s.coverWalk, hardCost: s.hardCost }])),
+          range: BRAIN_TUNE.coverRange,
+          // And how long a body stays in a hole it cannot shoot out of, and how long afterwards it
+          // will not take another: the two numbers that keep hard cover from being a one-way door.
+          hole: { forSeconds: GROUND_STEP.hardFor, restSeconds: GROUND_STEP.hardRest },
+          fighters: npcs.npcs.map((n, i) => ({ i, name: n.name, tier: n.tier, arm: n.arm, state: n.state, ...n.coverStatus() })),
+        };
       },
       /** Blow up the vehicle ridden, piloted or stood in (its health to nothing), to see the rider thrown or the crew put out. */
       wreck: () => {

@@ -13,8 +13,20 @@ export type SizeClass = 'tiny' | 'small' | 'medium' | 'large' | 'huge';
 export type Vec3 = [number, number, number];
 export type MobileAggression = 'aggressive' | 'defensive' | 'skittish' | 'passive';
 
-/** What a mobile is doing, as the brain and the body both read it. */
-export type MobileState = 'loading' | 'idle' | 'wander' | 'alert' | 'chase' | 'attack' | 'flee' | 'return' | 'knockdown' | 'dying' | 'dead';
+/**
+ * What a mobile is doing, as the brain and the body both read it.
+ *
+ * `cover` is the game's own word rather than one of ours: `Cover` is state 0 in the client's own
+ * `state.iff`, beside Aiming and Alert, with 139 commands in `command_table.iff` gated on it. The
+ * server that would have computed one never shipped, so what a body in it *does* is entirely ours
+ * (`src/world/cover.ts`), but the word is the game's and it is a state and not a field for that
+ * reason. Only a flagged fighter ever reaches it: no creature sets `BrainSelf.seeksCover`.
+ *
+ * This list is written out in four places that must agree -- here, `STATE_WORDS` in `mobile.ts`,
+ * `ERRAND_STATES` in `../errand.ts` and `STATES` in `server/npcWire.mjs` -- and a word added here
+ * and nowhere else is a word the wire quietly turns back into `idle`.
+ */
+export type MobileState = 'loading' | 'idle' | 'wander' | 'alert' | 'chase' | 'attack' | 'cover' | 'flee' | 'return' | 'knockdown' | 'dying' | 'dead';
 
 export interface MobileCatalogueFile {
   /** 1; anything else is reported and refused. */

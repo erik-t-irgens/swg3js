@@ -680,7 +680,10 @@ export class BodySounds {
       w.deck = null;
       w.space = null;
       w.dead = m.dead;
-      w.hunting = m.state === 'chase' || m.state === 'attack' || m.state === 'alert';
+      // `cover` counts as hunting for the same reason it counts as fighting everywhere else: it is
+      // the attack state under another name, and a body that went quiet the moment it got behind
+      // something would be the one body in a fight you could not hear. Nothing sends the word yet.
+      w.hunting = m.state === 'chase' || m.state === 'attack' || m.state === 'cover' || m.state === 'alert';
       w.player = false;
       this.stepBody(v, w, m.ready ? m : null, m.animator, listener, sweep);
     }

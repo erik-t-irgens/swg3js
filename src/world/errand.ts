@@ -145,8 +145,16 @@ export function tuneErrand(patch: Partial<ErrandTune>): ErrandTune {
   return ERRAND_TUNE;
 }
 
-/** The brain's states, in the order a track row's byte codes them. Index 255 is "something else". */
-export const ERRAND_STATES = ['loading', 'idle', 'wander', 'alert', 'chase', 'attack', 'flee', 'return', 'knockdown', 'dying', 'dead'] as const;
+/**
+ * The brain's states, in the order a track row's byte codes them. Index 255 is "something else".
+ *
+ * A new word goes on the **end**, never in the middle: the code is the index and a track already
+ * printed is read against this list. `cover` is therefore last rather than beside `attack`, which
+ * is where it sits in `MobileState` itself. A body under one of these walks is never in it in any
+ * case -- the order holds the body upright and `Npc.stepCover` refuses outright while an errand
+ * runs -- so the row is there for the day the two are allowed to overlap.
+ */
+export const ERRAND_STATES = ['loading', 'idle', 'wander', 'alert', 'chase', 'attack', 'flee', 'return', 'knockdown', 'dying', 'dead', 'cover'] as const;
 
 function stateCode(name: string): number {
   const i = (ERRAND_STATES as readonly string[]).indexOf(name);

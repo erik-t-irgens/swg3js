@@ -168,7 +168,7 @@ const HOLOGRAM_FADE = 0.5;
  * this before it is kept, since what it chooses is a clip and a gait set: the list is the one in
  * `types.ts` and the server checks it too.
  */
-const STATE_WORDS: readonly string[] = ['loading', 'idle', 'wander', 'alert', 'chase', 'attack', 'flee', 'return', 'knockdown', 'dying', 'dead'];
+const STATE_WORDS: readonly string[] = ['loading', 'idle', 'wander', 'alert', 'chase', 'attack', 'cover', 'flee', 'return', 'knockdown', 'dying', 'dead'];
 /** The stuck check's window (seconds), and the side-step it tries. */
 const STUCK_WINDOW = 1.5;
 const SIDESTEP = THREE.MathUtils.degToRad(60);
@@ -273,7 +273,25 @@ export class Mobile implements Living, NpcSubject {
   navCell: CellState | null = null;
   /** Its own path: the corners still to walk and the clock that says when to ask for fresh ones. */
   readonly navAgent = new NavAgent();
+  /**
+   * The way the **feet** go: the direction it travels, the yaw its body is held at and the number
+   * that crosses the wire. Everything that has ever read it still means that.
+   */
   heading: number;
+  /**
+   * The way its **weapon** points, which until this wave was the same number. It is read by one
+   * rule -- the carry (`stepStance`), which asks how far off its nose its foe is -- and that rule
+   * was being told the wrong thing: a body stepping round a rock twists its whole heading sixty
+   * degrees for a second, and measured against that the foe went outside the aiming cone and the
+   * weapon came down for as long as the step lasted.
+   *
+   * The drawn body was never fooled, because the aim's own correction measures the **barrel** and
+   * not the heading, so it wound the chest back onto the target throughout; only the carry that
+   * chose which pose to wind was. So the split here is small and exact: the feet go round the rock
+   * and the gun stays up. A creature with nothing in its hands never reaches the rule at all and is
+   * bit for bit what it was.
+   */
+  facing: number;
   /** Where it came from: the leash is measured from here. */
   homeX: number;
   homeZ: number;
@@ -460,6 +478,7 @@ export class Mobile implements Living, NpcSubject {
     this.hp = this.maxHp;
     this.blow = spawn.overrides?.damage ?? e.stats?.damage ?? 8;
     this.heading = spawn.heading;
+    this.facing = spawn.heading;
     this.homeX = spawn.x;
     this.homeZ = spawn.z;
     this.inside = spawn.inside;
@@ -928,6 +947,9 @@ export class Mobile implements Living, NpcSubject {
   private placeAt(x: number, y: number, z: number, heading: number): void {
     this.pos.set(x, y, z);
     this.heading = heading;
+    // Put exactly there means exactly there: a body set down, lifted or first heard of from another
+    // browser has its weapon pointed the way its feet are and no lean left over from before.
+    this.facing = heading;
     tmpQ.setFromAxisAngle(UP, heading);
     this.group.position.set(x, y + this.plan.feet, z);
     this.group.quaternion.copy(tmpQ);
@@ -1254,7 +1276,10 @@ export class Mobile implements Living, NpcSubject {
     const ask = this.stanceAsk;
     const dx = live ? target!.pos.x - this.pos.x : 0;
     const dz = live ? target!.pos.z - this.pos.z : 0;
-    const off = live ? Math.atan2(dx, dz) - this.heading : Math.PI;
+    // Off the **weapon's** nose and not off the feet's: whether the weapon comes up is a question
+    // about where the weapon is pointed, and a body side-stepping round a rock has not stopped
+    // aiming at you.
+    const off = live ? Math.atan2(dx, dz) - this.facing : Math.PI;
     ask.gun = !!this.gun;
     ask.combat = this.now < this.readyUntil;
     ask.hasTarget = live;
@@ -1279,6 +1304,9 @@ export class Mobile implements Living, NpcSubject {
   private dropAim(): void {
     this.stance = 'relaxed';
     this.readyUntil = -Infinity;
+    // And the weapon back on the feet, for the same reason the fold is washed out: a body that has
+    // died or changed hands must not be left leaning on a target it is no longer thinking about.
+    this.facing = this.heading;
     this.aimFix.yaw = 0;
     this.aimFix.pitch = 0;
     this.aimTurn = 0;
@@ -1349,7 +1377,12 @@ export class Mobile implements Living, NpcSubject {
   }
 
   private fighting(): boolean {
-    const at = this.state === 'chase' || this.state === 'attack' || this.state === 'alert';
+    // `cover` is in the list because it is the attack state under another name: a body behind a
+    // crate is still in a fight, and one told the word off the wire must carry the combat stance,
+    // the combat gaits and a lit blade exactly as one told `attack` does. Nothing in this game
+    // sends it yet -- only a fighter takes cover and a fighter is on no wire -- and listing it here
+    // is what makes that stay true when one is.
+    const at = this.state === 'chase' || this.state === 'attack' || this.state === 'cover' || this.state === 'alert';
     // Driven, there is no target here to have: what it is doing is the keeper's word for it, and
     // that word is what chooses the combat stance, the combat gaits and a lit blade.
     return at && (this.targetKey !== null || this.driven);
@@ -1467,6 +1500,11 @@ export class Mobile implements Living, NpcSubject {
     let diff = this.toldHeading - this.heading;
     diff = Math.atan2(Math.sin(diff), Math.cos(diff));
     this.heading += diff * k;
+    // A driven body has no aim of its own -- `dropAim` took it when it changed hands and nothing
+    // steps it again -- so its weapon points where its feet do. The wire carries one angle and the
+    // lean does not cross; a keeper's sliding gunner is drawn walking straight here, which is a
+    // difference nobody can see against the tenth of a second everything else on it is glided over.
+    this.facing = this.heading;
     this.toldOnce = true;
     // 2. The body follows the picture here, not the other way about: it is kinematic, so where it
     //    is is written rather than solved for.
@@ -1654,25 +1692,42 @@ export class Mobile implements Living, NpcSubject {
     let face = d?.face ?? null;
     let pace = d?.pace ?? 'stand';
     const target = this.targetRef;
-    if (target && d && (d.state === 'chase' || d.state === 'attack' || d.state === 'alert')) {
+    // `cover` is `attack` or `chase` under another name and is listed with them for that reason,
+    // though no creature can reach it: the word is gated on `BrainSelf.seeksCover` and nothing but
+    // a tiered fighter sets that. It is here so a mobile that is ever given one does not silently
+    // stop tracking whatever it is fighting.
+    if (target && d && (d.state === 'chase' || d.state === 'attack' || d.state === 'cover' || d.state === 'alert')) {
       face = this.faceAt;
       face.x = target.pos.x;
       face.z = target.pos.z;
-      if (d.state === 'chase') {
+      if (d.state === 'chase' || (d.state === 'cover' && !!d.moveTo)) {
         moveTo = face;
         // Close enough to strike: stop rather than run on until the next thought.
         const gap = Math.hypot(target.pos.x - this.pos.x, target.pos.z - this.pos.z) - target.radiusToward(this.pos) - this.radiusToward(target.pos);
         if (this.melee && gap <= (this.entry.stats?.reach ?? 1.5) * this.scale * 0.8) pace = 'stand';
       }
     }
+    // Where the **gun** points, which from here on is a different question from where the feet go:
+    // the thing it is fighting, whatever its legs are doing. It is read by the carry alone, and by
+    // nothing else at all, so for a creature with empty hands it costs one angle and changes
+    // nothing.
+    //
+    // **This line must stay above the corner below.** `face` is the feet's want in this method --
+    // `this.heading` is eased onto it, and the body's velocity goes along the heading -- and the
+    // corner overwrites it with the next point on the indoor path. Capture `look` after that and it
+    // is the corner too, which is the whole of the split undone: an armed creature rounding a
+    // doorway would swing its gun onto the doorway instead of keeping it on what it is fighting.
+    // The side-step below is the same trap from the other side, and is applied to the heading only.
+    // `fighterMove.test.ts` pins the order as text, because nothing else can.
+    const look = face;
     // The way out of the room. Indoors, the building's own floors say which corner to walk at next
-    // on the way to where the brain is sending it; only what it *faces* is taken from the path, so
-    // the arrival test below still measures the real goal and a body walking the last corner of a
+    // on the way to where the brain is sending it; only where it **travels** is taken from the path,
+    // so the arrival test below still measures the real goal and a body walking the last corner of a
     // path does not stop a stride short of it. Outdoors, in a room whose floor the pack has not
     // got with the goal in that same room, and for anything that flies, `corner` is null and every
     // line below is the line it always was.
     if (moveTo && pace !== 'stand' && this.navCell && !this.flyer && !this.driven) {
-      const goalY = target && d && (d.state === 'chase' || d.state === 'attack' || d.state === 'alert') ? target.pos.y : this.pos.y;
+      const goalY = target && d && (d.state === 'chase' || d.state === 'attack' || d.state === 'cover' || d.state === 'alert') ? target.pos.y : this.pos.y;
       const corner = worldNav.corner(this.navAgent, this.navCell, this.pos.x, this.pos.y, this.pos.z, moveTo.x, goalY, moveTo.z, this.plan.across, this.now);
       if (corner) face = corner;
     }
@@ -1685,15 +1740,25 @@ export class Mobile implements Living, NpcSubject {
     }
     let wanted = pace === 'run' ? this.speeds.run : pace === 'walk' ? this.speeds.walk : 0;
     if (moveTo && pace !== 'stand' && Math.hypot(moveTo.x - this.pos.x, moveTo.z - this.pos.z) < 0.5) wanted = 0;
-    // Face the move point, or the target while attacking.
-    if (face && !this.downPhase && this.stunned <= 0) {
-      let want = Math.atan2(face.x - this.pos.x, face.z - this.pos.z);
-      if (this.now < this.sidestepUntil && pace !== 'stand') want += this.sidestep;
+    // Point the feet at the move point, or at the target while attacking -- and the weapon at
+    // whatever it is really fighting. The side-step goes on the **feet alone** now: it is a twist
+    // of sixty degrees for a second to get round whatever it walked into, and twisting the weapon
+    // with it dropped the carry out of its aiming cone and put the gun down for the whole step.
+    if (!this.downPhase && this.stunned <= 0) {
       const rate = THREE.MathUtils.degToRad(wanted > this.speeds.walk + 1e-3 ? move.turnRun : move.turnWalk) || Math.PI;
-      let diff = want - this.heading;
-      diff = Math.atan2(Math.sin(diff), Math.cos(diff));
       const turn = rate * dt;
-      this.heading += clamp(diff, -turn, turn);
+      if (face) {
+        let want = Math.atan2(face.x - this.pos.x, face.z - this.pos.z);
+        if (this.now < this.sidestepUntil && pace !== 'stand') want += this.sidestep;
+        this.heading += clamp(Math.atan2(Math.sin(want - this.heading), Math.cos(want - this.heading)), -turn, turn);
+      }
+      // The same rate, so the two never come apart faster than a body can turn; with nothing to
+      // fight the weapon simply follows the feet, which is where it has always pointed.
+      const aimAt = look ?? face;
+      if (aimAt) {
+        const want = Math.atan2(aimAt.x - this.pos.x, aimAt.z - this.pos.z);
+        this.facing += clamp(Math.atan2(Math.sin(want - this.facing), Math.cos(want - this.facing)), -turn, turn);
+      } else this.facing = this.heading;
     }
     // Speed: the template's acceleration toward the pace, then the gait that matches what it ends up doing.
     const accel = (wanted > this.speeds.walk + 1e-3 ? move.accel?.[0] : move.accel?.[1]) ?? 4;

@@ -489,6 +489,22 @@ export interface PostureInput {
   canProne: boolean;
   /** What it is in now, so a body already low moves low rather than standing straight up. */
   was: Posture;
+  /**
+   * Standing in cover it **cannot shoot out of** -- wave 6's one addition, and the only thing in
+   * this rule that is about somewhere rather than about the body itself.
+   *
+   * It is deliberately narrow. Cover a body can shoot back out of is not here at all, because such
+   * a body is shooting and rule 4 already puts it on a knee, which is a firing stance; this is the
+   * other kind, where the search found that a bolt aimed at a standing chest *and* one aimed at a
+   * crouched chest both stop short, so there is nothing to do from the spot but be behind it. That
+   * is the one moment a body should go low with no shot to take, and going low there is a crouch
+   * rather than a kneel because the crouch is the game's own low pose for a body that is not
+   * fighting from it.
+   *
+   * Optional, and absent means false: every caller that knows nothing about cover -- the node
+   * tests, and anything that ever asks this about the player -- is the body this rule always was.
+   */
+  covered?: boolean;
 }
 
 /**
@@ -498,10 +514,12 @@ export interface PostureInput {
  * 1. Under orders, off its feet, out of a fight or holding anything but a gun: upright.
  *    A body under a long walk never goes down, which is the whole of "a prone body does not path".
  * 2. Asked to **run**: upright. Nobody runs low, and the game has no clip for it either.
- * 3. Not shooting: a body asked to **walk** keeps whatever low posture it had and crouches, because
- *    the crouch is the game's own moving low pose; standing still it simply keeps what it has, so a
- *    fighter whose target has just died holds its firing position rather than springing up on that
- *    very frame and kneeling again a second later. The combat window ends it either way.
+ * 3. Not shooting: a body standing in cover it cannot shoot out of **ducks** -- the one place it
+ *    goes low with no shot to take. Otherwise one asked to **walk** keeps whatever low posture it
+ *    had and crouches, because the crouch is the game's own moving low pose; standing still it
+ *    simply keeps what it has, so a fighter whose target has just died holds its firing position
+ *    rather than springing up on that very frame and kneeling again a second later. The combat
+ *    window ends it either way.
  * 4. Shooting and holding its ground: on a knee past `kneelFrom`, and flat past `proneFrom` once it
  *    is hurt past `proneUnder` and its rig can be drawn lying down. Nearer than `kneelFrom` it
  *    shoots standing.
@@ -511,15 +529,17 @@ export interface PostureInput {
  * bolts in the air are the whole reason the posture exists and a rule that answered "upright" to
  * one would hand back exactly what it was bought with.
  *
- * What is **not** here, and is wave 6's: where to go. This rule says how low a body stands where it
- * already is; it never moves one, and it knows nothing about what it is standing behind. The crouch
- * is therefore thin today on purpose -- it is reached when a low body is asked to walk, and the
- * thing that will ordinarily ask for that is a move to a cover spot that does not exist yet.
+ * What is still **not** here: where to go. This rule says how low a body stands where it already
+ * is and never moves one. `covered` is the one thing it has been told about what a body is standing
+ * behind, and it is a single boolean the cover search answers rather than any knowledge of the
+ * world -- the search, the spot and the walk to it are all `src/world/cover.ts` and
+ * `Npc.stepCover`. It is also what the crouch was waiting for: before wave 6 the crouch was
+ * reached only when a low body was asked to walk.
  */
 export function postureFor(o: PostureInput, tune: PostureTune = POSTURE_TUNE): Posture {
   if (o.held || !o.grounded || !o.gun || !o.combat) return 'stand';
   if (o.pace === 'run') return 'stand';
-  if (!o.shooting) return o.pace === 'walk' ? (o.was === 'stand' ? 'stand' : 'crouch') : o.was;
+  if (!o.shooting) return o.covered ? 'crouch' : o.pace === 'walk' ? (o.was === 'stand' ? 'stand' : 'crouch') : o.was;
   if (o.pace === 'walk') return o.was === 'stand' ? 'stand' : 'crouch';
   // Written as a refusal rather than a test so a distance that is not a number stands the body up
   // rather than kneeling it, which is the way round every other gate in this file is written.

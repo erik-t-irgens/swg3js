@@ -1273,6 +1273,11 @@ export class World {
       // go with the player's distance while the room a body is in goes on answering, so a fighter
       // with a character controller under it has to be able to ask for the floor and not the room.
       cellSolid: (state) => this.layoutStream?.cellsSolid(state) ?? true,
+      // What stands near a body that it could get behind: the streamer's own placed objects, each
+      // as a disc over its model's box. It is the only thing the cover search has to be given --
+      // every ray it casts it casts itself -- and with nothing wired it finds no blockers and
+      // answers none, which is a fighter walking into the open exactly as it always did.
+      blockers: (x, z, reach, out, cap) => this.layoutStream?.blockersNear(x, z, reach, out, cap) ?? 0,
     });
     // The NPC ships of this world (unload disposed the last one's). `this.terrain` is assigned above and
     // `this.playerTarget` is a field initialiser; everything else is an arrow read when it is called.
@@ -4102,6 +4107,18 @@ export class World {
   }
 
   /** The snapshot's centre in SWG coordinates (the game's origin), when a converted pack is loaded. */
+  /**
+   * What the cover search can even be offered on this world, for `__debug.cover()`: how many placed
+   * objects have collision this instant, and how many of those have a standing shape to hide behind.
+   *
+   * Nought blockers in a town is `NpcDeps.blockers` unwired or a streamer that has built nothing,
+   * and neither the searcher's counters nor a body's own row can tell you that: both read exactly
+   * like a world with no crates in it.
+   */
+  get coverGround(): { colliders: number; blockers: number } {
+    return { colliders: this.layoutStream?.colliderCount ?? 0, blockers: this.layoutStream?.blockerCount ?? 0 };
+  }
+
   /** Placed objects around a point with their streaming state, for the console. */
   objectsNear(x: number, z: number, r: number): ReturnType<LayoutStreamer['describeNear']> {
     return this.layoutStream?.describeNear(x, z, r) ?? [];

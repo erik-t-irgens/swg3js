@@ -1,4 +1,4 @@
-// A mobile's mind: idle, wander, alert, chase, attack, flee, return. It picks from the shared list
+// A mobile's mind: idle, wander, alert, chase, attack, cover, flee, return. It picks from the shared list
 // of living things, fights back against whoever hurt it, gives up past a leash, checks height as
 // well as distance, and wanders home's neighbourhood when there is nothing to do.
 //
@@ -52,6 +52,31 @@ export interface BrainSelf {
   /** A target given up on, and until when it is not taken again. */
   forgetKey: number | null;
   forgetUntil: number;
+  /**
+   * Whether this body gets behind things at all. **The one flag that lets the cover rule below
+   * reach a fighter and never a creature**, and the reason there is one `decide` in this game
+   * rather than two.
+   *
+   * It is deliberately neither of the two things it looks like. It is not "has a ranged attack":
+   * 2,550 of the catalogue's 5,140 entries do, most of them creatures that spit, and a spitting
+   * creature crouching behind a rock is wrong. And it is not the kind either, since a dressed NPC
+   * plays a curated pack with no low clips in it at all. It is set by the body that can really do
+   * it -- a tiered fighter, holding a gun, out of doors -- and left out everywhere else, so a
+   * bantha is bit for bit what it was.
+   */
+  seeksCover?: boolean;
+  /**
+   * Whether it is behind something **now**. Fed back exactly as `state`, `stuck` and `goal` are,
+   * and read for one thing only: it is what names the state `cover` rather than `attack` or
+   * `chase`.
+   *
+   * The division is the whole of why the word can be trusted. This file decides *whether a body
+   * wants* cover, which is a rule and belongs with the other rules; whether it has any is a fact
+   * about the world that only the thing holding the physics can answer, and it comes back in here
+   * as one boolean. So the state word is never a guess: a body says `cover` when it is standing
+   * behind something and says `chase` while it is still looking.
+   */
+  inCover?: boolean;
 }
 
 export interface BrainTarget {
@@ -83,14 +108,27 @@ export interface Decision {
    * three places that must agree, one of them in the relay, so a new state word would be a server
    * change before a posture had crossed anything.
    *
-   * **Nothing in `decide` writes it.** It leaves here as 'stand' on every decision, for the
-   * wildlife and for a fighter alike, and the fighters then write their own answer onto it before
-   * acting on it (`Npc.stepPosture`), exactly as the indoor wander clamp rewrites `goal` after the
-   * brain has answered. That is deliberate: the rule that would belong in here is a cover rule,
-   * which needs a flag only a fighter sets so that a spitting creature never crouches behind a
-   * rock, and that is a wave of its own. When it is written it goes here and no consumer changes.
+   * **Nothing in `decide` writes it**, and now that the cover rule is here that is a decision
+   * rather than a gap. It leaves as 'stand' on every decision, for the wildlife and for a fighter
+   * alike, and the fighters write their own answer onto it before acting on it
+   * (`Npc.stepPosture`), exactly as the indoor wander clamp rewrites `goal` after the brain has
+   * answered. How low a body goes needs three things this file has not got and should not be given
+   * -- whether its rig can be drawn lying down, whether it is on its feet at all, and what it is
+   * standing behind -- so it is settled where those are known. What comes back from there is the
+   * one boolean the rule above reads, `BrainSelf.inCover`.
    */
   posture: Posture;
+  /**
+   * Whether to go looking for somewhere to stand where the thing it is fighting cannot see it.
+   *
+   * It is the **rule** and not the answer: this file has no idea what is standing near the body and
+   * never will, so what it says is "a search is worth running now". The search itself, the spot it
+   * picks and how long the body believes it are the fighter's (`Npc.stepCover`, over
+   * `src/world/cover.ts`), and the one thing that comes back here is `BrainSelf.inCover`.
+   *
+   * False on every decision of every creature, because `seeksCover` is.
+   */
+  cover: boolean;
   face: { x: number; z: number } | null;
   attack: 'melee' | 'ranged' | null;
   emote: 'alert' | 'idle' | null;
@@ -136,6 +174,16 @@ export interface BrainTune {
   alertRange: number;
   /** How near home counts as home. */
   home: number;
+  /**
+   * How far out a body whose shot is blocked will look for cover rather than simply closing, as a
+   * share of its own weapon's range.
+   *
+   * Over one on purpose. A blocked shot at the edge of a gun's reach is still a fight -- the wall
+   * is between the two bodies, not past the target -- and the number exists only to keep a body
+   * that has noticed somebody half a kilometre off from standing behind a crate about it. Anything
+   * further and the brain answers the plain chase it always answered.
+   */
+  coverRange: number;
 }
 
 export const BRAIN_TUNE: BrainTune = {
@@ -158,6 +206,7 @@ export const BRAIN_TUNE: BrainTune = {
   alertFor: 0.5,
   alertRange: 8,
   home: 2,
+  coverRange: 1.5,
 };
 
 /** Whether `me` picks a fight with `them` on sight: the matrix lives in targets.ts, one place for every body. */
@@ -193,8 +242,29 @@ function level(self: BrainSelf, t: BrainTarget, tune: BrainTune): boolean {
  * 4. A target out of reach in height for `giveUp` seconds, or stuck `stuckGiveUp` times: home,
  *    and that target forgotten for `forget` seconds.
  * 5. With a target: shoot it (in range, with a line), strike it (in reach and level), stare at a
- *    fresh one that is far, else chase it.
+ *    fresh one that is far, else chase it. A body whose `seeksCover` flag is set gets behind
+ *    something while it does: see the cover note below.
  * 6. Nothing to do: wander when the clock is up, else stand, now and then with an idle emote.
+ *
+ * ## Cover
+ *
+ * Two things, and keeping them apart is what makes the word honest.
+ *
+ * `d.cover` is **whether to look**. It is set while a flagged body is shooting -- a gunfight is
+ * where a body wants something between it and the bolts -- and while its shot is blocked and the
+ * target is within `coverRange` of its own reach. That second half is the one line in this game
+ * that was always going to be wrong: a gunner whose shot is blocked falls through to a chase and
+ * **walks into the open**, because a chase is what this function answers both when the target is
+ * too far off and when there is a wall in the way. Note what has *not* changed with it: the chase
+ * is still answered, with the target still as `moveTo` at a run. So a body that looks and finds
+ * nothing closes exactly as it always did, which is the one failure this rule must not have.
+ *
+ * `state: 'cover'` is **whether it is behind anything**, and it is the game's own word for it --
+ * `Cover` is state 0 in the client's own table, beside Aiming and Alert, with 139 commands gated on
+ * it. It is written only where `attack` or `chase` would have been and only when `inCover` comes
+ * back true, so nothing else in the ladder changes and the word cannot say a body is in cover
+ * while it is walking about in the open. A creature never reaches either, because `seeksCover` is
+ * how both are gated and nothing but a fighter sets it.
  */
 export function decide(self: BrainSelf, targets: readonly BrainTarget[], tune: BrainTune = BRAIN_TUNE, rand: () => number = Math.random): Decision {
   const now = self.now;
@@ -204,6 +274,7 @@ export function decide(self: BrainSelf, targets: readonly BrainTarget[], tune: B
     moveTo: null,
     pace: 'stand',
     posture: 'stand',
+    cover: false,
     face: null,
     attack: null,
     emote: null,
@@ -302,13 +373,22 @@ export function decide(self: BrainSelf, targets: readonly BrainTarget[], tune: B
     const at = { x: target.x, z: target.z };
     d.face = at;
     const dist = Math.hypot(target.x - self.x, target.z - self.z);
+    // Whether this body gets behind things at all, and whether it is behind one now. Both are one
+    // flag away from false for every creature in the game; see the cover note above.
+    const seeks = self.seeksCover === true && self.ranged > 0;
+    const covered = seeks && self.inCover === true;
     // 5. Shoot, strike, stare, or run at it.
     // The line is only ever looked for along the current target (a ray a think, not one per
     // candidate), so a fresh target is chased or stared at for one tick before it is shot.
     if (self.ranged > 0 && dist <= self.ranged && target.hasLine) {
-      d.state = 'attack';
+      d.state = covered ? 'cover' : 'attack';
       d.attack = 'ranged';
       d.pace = 'stand';
+      // In a gunfight it wants something between it and the bolts whether its own shot is clear or
+      // not: a body that only looked while it was blocked would take cover and then step out of it
+      // the moment it could see, which is a body playing peek-a-boo rather than fighting from
+      // behind a crate. What keeps it from searching every step is its own tier's `coverEvery`.
+      d.cover = seeks;
       return d;
     }
     if (self.melee && dist - target.radius <= self.reach && isLevel) {
@@ -329,9 +409,13 @@ export function decide(self: BrainSelf, targets: readonly BrainTarget[], tune: B
       d.pace = 'stand';
       return d;
     }
-    d.state = 'chase';
+    // A chase, and for a flagged gunner a chase it would rather not take: `cover` is the wall in
+    // the way, told apart from "too far off" by the one line-of-sight ray a thought already casts.
+    // `moveTo` is the target either way, so a body that finds no spot closes exactly as before.
+    d.state = covered ? 'cover' : 'chase';
     d.moveTo = at;
     d.pace = 'run';
+    d.cover = seeks && !target.hasLine && dist <= self.ranged * tune.coverRange;
     return d;
   }
 
@@ -344,7 +428,7 @@ export function decide(self: BrainSelf, targets: readonly BrainTarget[], tune: B
     d.pace = 'walk';
     return d;
   }
-  if (self.state === 'wander' || self.state === 'return' || self.state === 'chase' || self.state === 'attack' || self.state === 'alert' || self.state === 'flee') {
+  if (self.state === 'wander' || self.state === 'return' || self.state === 'chase' || self.state === 'attack' || self.state === 'cover' || self.state === 'alert' || self.state === 'flee') {
     // Just arrived or just done: stand a while, one time in eight with an idle emote.
     d.state = 'idle';
     d.wanderAt = nextWander(now, tune, rand);

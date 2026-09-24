@@ -45,6 +45,21 @@
 // and never apart (`setPosture`), because a bolt is a ray and the capsule is the hitbox. When a
 // body goes down is ours (`POSTURE_TUNE`) and nothing in the archives ever computed it: cover was
 // a server-side state and the server never shipped.
+//
+// And now **where it is pointed and where it is going are two numbers**. Until this wave every body
+// in this game moved along its own heading -- a creature sets its velocity from it, a fighter sets
+// its wish from it -- so keeping a gun on you and going anywhere were one act, and the only sidestep
+// anything had was a twist of the whole body. `heading` is still the way the feet go and still means
+// what everything that reads it has always meant; `facing` is the new one, the way the gun points,
+// and the drawn body carries the difference through the very machinery the aim's own correction
+// already used (the spine takes `spineMax` of it and the model turns onto the rest). Three things
+// ride on that split and each of them is a tier's to earn (`groundSkill.ts`, which is the ground's
+// answer to `PILOT_SKILL`): a slide sideways with the gun still on you, a standoff ring so a squad
+// does not walk into your face in single file, and somewhere to stand where you cannot see it
+// (`cover.ts`). Beside them the trigger stops being a metronome -- a burst of the tier's own length
+// and then a rest, which is the shape the creatures have always had and the fighters never did. A
+// body at tier 0 has none of it and is the fighter this game had, which is what
+// `__debug.fighters({ tier: 0 })` is for.
 import * as THREE from 'three';
 import { combatSounds } from '../audio/combatSounds';
 import { Group, groups, RAPIER, type Physics } from '../core/physics';
@@ -64,9 +79,23 @@ import { PLAYER_KEY, hostileSides } from '../combat/targets';
 import type { Terrain } from './terrain';
 import { markActor } from './portalRender';
 import { slotOf } from '../ui/wardrobeUi';
-import type { CellState } from './layoutStream';
+import type { CellState, NearBlocker } from './layoutStream';
 import { NavAgent } from './nav/navAgent.ts';
 import { worldNav } from './nav/nav.ts';
+// Whether a place cannot be walked to at all, which only the baked grid can say. A world with no
+// grid answers "yes" to everything, so a cover spot behind a wall on ground this body's ground is
+// not joined to is refused where there is a bake and taken on trust where there is not.
+import { outdoorNav } from './nav/outdoorNav.ts';
+// Somewhere to stand where the thing shooting cannot see you. Pure rules and a shared searcher with
+// a budget of its own; every ray it casts comes out of the adapter the manager builds below.
+import { COVER_TUNE, askFromSkill, coverHeights, coverSearch, tuneCover, type Blocker, type CoverAsk, type CoverDeps, type CoverKind, type CoverTune } from './cover.ts';
+// How well a body on the ground fights, by tier: the ground half of what `PILOT_SKILL` is for a
+// hand on a ship's stick. Every number of it is invented and all of it is live through one knob.
+import { GROUND_SKILL, GROUND_TUNE, aimScatter, coverDue, fireReset, fireStep, skillOfGroundTier, strafeShare, thinkEvery, tuneGroundSkill, willFire, type AimScatter, type FireClock, type GroundSkill } from './groundSkill.ts';
+// And how it moves once those two are apart: the lean the legs may show, the ring a gunner holds,
+// the slot it takes on it and how near it lets an ally stand. Pure numbers in a file of their own,
+// so a node test reads the very object the game runs on.
+import { GROUND_STEP, tuneGroundStep, type GroundStep } from './groundStep.ts';
 // A long walk's order and its account (`src/world/errand.ts`). The order is three writes -- the
 // body's home moved onto the destination and the body held on the way home, which together are the
 // two clauses of the creatures' brain's own first rule -- and everything else in that file is the
@@ -178,6 +207,19 @@ export const FIGHTER_TUNE: FighterTune = {
 };
 
 /**
+ * What tier a fighter is stood up at. Three is the middle of the ladder and is deliberately the
+ * body the owner already knows: its cone is today's exactly, and its reaction and its scatter sit
+ * inside today's span either side (`tools/swg/tests/groundSkill.test.ts` pins both).
+ *
+ * **Tier 0 is not a tier**: it is the flat fighter this game had before there were any, with
+ * today's `aimSpread`, `gunEvery` and `gunSpread` and no burst, no strafe and no cover at all. It
+ * is there so the whole wave can be turned off and looked at beside itself in one line --
+ * `__debug.fighters({ tier: 0 })` -- which is what `SHIP_GROUND.rule` and `WING_RULE` are for
+ * elsewhere in this game, and it is the reason those three numbers are still read.
+ */
+export const DEFAULT_TIER = 3;
+
+/**
  * What `__debug.fighters({ ... })` takes: the body's own numbers as before, plus `stance` for how
  * a fighter stands and aims and `body` for the capsule and the character controller under it
  * (`src/world/fighterStance.ts`). The mind's numbers are the creatures' and move through
@@ -186,6 +228,21 @@ export const FIGHTER_TUNE: FighterTune = {
 export type FighterKnob = Partial<FighterTune> & {
   stance?: Partial<StanceTune>;
   body?: Partial<FighterBody>;
+  /**
+   * The tier every fighter out is set to, and every one stood after: 1 to 5, or **0** for the flat
+   * body this game had before the ladder existed. `__debug.fighters({ tier: 5 })`.
+   */
+  tier?: number;
+  /**
+   * The ladder itself, in the shape the pilots' knob already takes:
+   * `__debug.fighters({ skill: { 5: { strafe: 0 } } })`. Each tier's object is written in place, so
+   * it reaches the bodies already standing about.
+   */
+  skill?: (Partial<Record<number, Partial<GroundSkill>>> & { tune?: Partial<typeof GROUND_TUNE> }) | null;
+  /** The cover search's own numbers: `__debug.fighters({ cover: { reach: 20 } })`. */
+  cover?: Partial<CoverTune>;
+  /** How a body moves now that facing and travel are two numbers: `__debug.fighters({ step: { legMax: 0 } })`. */
+  step?: Partial<GroundStep>;
   /** How low a body goes and when: `__debug.fighters({ postures: { kneelFrom: 3 } })`. */
   postures?: Partial<PostureTune>;
   /**
@@ -247,7 +304,7 @@ const LINE_TO = { x: 0, y: 0, z: 0 };
 const stanceAsk: StanceInput = { gun: false, combat: false, hasTarget: false, gap: 0, range: 0, offNose: 0 };
 const aimAsk: AimWhen = { aiming: false, sinceShot: 0, stunned: false };
 /** How low it stands, asked the same way: filled and handed straight to `postureFor`. */
-const postureAsk: PostureInput = { grounded: true, gun: false, combat: false, shooting: false, gap: Infinity, hpRatio: 1, pace: 'stand', held: false, canProne: false, was: 'stand' };
+const postureAsk: PostureInput = { grounded: true, gun: false, combat: false, shooting: false, gap: Infinity, hpRatio: 1, pace: 'stand', held: false, canProne: false, was: 'stand', covered: false };
 const moveAsk = { x: 0, y: 0, z: 0 };
 const moveGot = { x: 0, y: 0, z: 0 };
 
@@ -283,6 +340,15 @@ export interface NpcDeps {
    * before it existed.
    */
   cellSolid?: (state: CellState | null) => boolean;
+  /**
+   * What stands within reach of a point that a body could hide behind: the streamer's own placed
+   * objects, each as a disc over its model's box and the height of its top
+   * (`LayoutStreamer.blockersNear`). It fills the objects already in `out` and returns how many.
+   *
+   * With nothing wired the cover search finds no blockers, casts no rays and answers none, which is
+   * a fighter that walks into the open exactly as it always did.
+   */
+  blockers?: (x: number, z: number, reach: number, out: NearBlocker[], cap: number) => number;
 }
 
 /** How often (seconds of sim time) a fighter's room is followed, and how far it may go between. */
@@ -359,7 +425,24 @@ export class Npc implements Living, ErrandBody {
   readonly maxHp = HP;
   dead = false;
   deadTimer = 0;
+  /**
+   * The way the **feet** go: the direction this body travels and the yaw the drawn group is set
+   * from. It is what `heading` has always been, and everything that reads it still means that --
+   * the ground `act` asks for, the brain's own view of which way the body is pointed, the walk's
+   * report, the rotation.
+   */
   heading = Math.random() * Math.PI * 2;
+  /**
+   * The way the **gun** points, which until this wave was the same number. It is what the trigger's
+   * cone is measured against (`willFire`) and what tells the carry whether the target is in front
+   * of it (`stanceAsk.offNose`); the drawn body's own turn onto the target is the aim's, not this.
+   *
+   * It only ever differs from `heading` while a body of a tier that has earned the split is keeping
+   * its weapon on something while its feet go somewhere else -- sliding sideways, walking to a
+   * cover spot, holding a standoff ring -- and never by more than `GROUND_STEP.legMax`, because
+   * past that the legs could not show it and the body turns to walk instead.
+   */
+  facing = this.heading;
   rig: CharacterRig | null = null;
   arm: Arm = 'saber';
   weapon: WeaponDef | null = null;
@@ -378,6 +461,96 @@ export class Npc implements Living, ErrandBody {
   readonly color = new THREE.Color().setHSL(Math.random(), 0.9, 0.55);
   private target: Living | null = null;
   private attackCd = 1 + Math.random();
+  /** Which rung of the ladder it fights on; 0 is the flat body this game had before there was one. */
+  tier = DEFAULT_TIER;
+  /**
+   * Its tier's own row, **held as the object and never copied field by field**, exactly as an NPC
+   * pilot holds its `PilotSkill`: the knob writes each row in place, so a body that had taken the
+   * numbers out would stop hearing it. Null is tier 0, the flat body, which reads `FIGHTER_TUNE`'s
+   * own `aimSpread`, `gunEvery` and `gunSpread` and has no burst, no slide and no cover.
+   */
+  skill: GroundSkill | null = skillOfGroundTier(DEFAULT_TIER);
+  /**
+   * The trigger: how long until the next pull and how far into the burst it is. A fighter fired
+   * single shots every 0.35 to 0.65 seconds for ever with no gap at all, which is the whole of why
+   * it read as a machine; this is the creatures' own shape, which is a burst and then a rest.
+   */
+  private readonly fire: FireClock = { wait: 0, shots: 0 };
+  /** One shot's scatter, written and never made. */
+  private readonly scatter: AimScatter = { yaw: 0, pitch: 0 };
+  /** Whether the last thought found a line to what it is after: the cover rule reads it. */
+  private hasLine = false;
+  /** Which way it is sliding, when it last decided, and how long the slide it decided on runs. */
+  private strafeSide = Math.random() < 0.5 ? -1 : 1;
+  private strafeAt = 0;
+  private slideUntil = 0;
+  /** How much of its travel is a push off the allies standing on top of it, worked out at a thought. */
+  private spreadX = 0;
+  private spreadZ = 0;
+  /** Where it is walking to this frame when that is not the brain's own point: written, never made. */
+  private readonly walkTo = { x: 0, z: 0 };
+  /**
+   * Whether this frame's travel is a **slide** -- sideways round the ring, with the gun staying
+   * where it is -- rather than a move to somewhere. It is what decides which of the two angles gives
+   * way when they are further apart than the legs can show: a slide is held to the lean, and a move
+   * turns the body and takes the gun with it.
+   */
+  private leanOnly = false;
+  /** What one cover search is asked. One per body, written into. */
+  private readonly coverAsk: CoverAsk = { x: 0, y: 0, z: 0, tx: 0, ty: 0, tz: 0, reach: 0, hardCost: 0, indoors: false };
+  /** The physics the cover search casts through; the manager hands over its one adapter at the spawn. */
+  cover: CoverDeps | null = null;
+  /** The spot it is making for, and what kind it is; null when it is not using cover at all. */
+  private coverKind: CoverKind | null = null;
+  private coverX = 0;
+  private coverY = 0;
+  private coverZ = 0;
+  /** When it last looked (the tier's own `coverEvery`), whom the spot was found against, and when to give up on it. */
+  private coverAt = -Infinity;
+  private coverFor = 0;
+  private coverUntil = 0;
+  /**
+   * Whether it has been found really standing in its spot yet, which is what starts the clock on a
+   * hole: the patience before that is the **walk's**, and the two are different lengths.
+   */
+  private coverSettled = false;
+  /**
+   * Until when a spot it cannot shoot out of is worth nothing to it at any price.
+   *
+   * It is the whole of the fix for hard cover being a one-way door. A body behind something blocked
+   * at a standing chest as well as a crouched one fires nothing -- the search says it cannot, and
+   * `postureFor` crouches it, and a crouched body carries no actions at all in the client's own
+   * data -- and the hold on such a spot used to be renewed on every look for as long as the spot
+   * still tested as cover, which at every tier that looks oftener than the hold is long is for ever.
+   * So it ducked and never came out, and the player could not shoot it either, because hard cover is
+   * hard both ways. Now the hole is held for `GROUND_STEP.hardFor` and then given up, and for
+   * `GROUND_STEP.hardRest` after that the search is told a hole costs Infinity, which is the price
+   * of a spot that will never be picked.
+   */
+  private hardRestAt = -Infinity;
+  /**
+   * What the search said about the spot it picked, kept for the console and read by nothing else.
+   *
+   * It is three numbers rather than the `CoverSpot` itself on purpose: that object is the one the
+   * searcher refills on the next call, so a body holding it would be reporting somebody else's
+   * answer. `coverWhy` is the score, which is the walk plus this tier's `hardCost` when the spot
+   * cannot be shot out of -- the whole of *why* this spot beat the others -- and `coverWhich` is
+   * the blocker's place in that search's own list, which is only ever worth anything beside a
+   * `__debug.cover({ probe: true })` taken in the same breath.
+   */
+  private coverWalk = 0;
+  private coverWhy = 0;
+  private coverWhich = -1;
+  /**
+   * How fast the thing it is shooting at is really going, eased, for the tier's `lead`. Measured
+   * here because nothing in this game carries a living body's velocity: `Living` is a place, a
+   * health and a key.
+   */
+  private tvx = 0;
+  private tvz = 0;
+  private tvKey = 0;
+  private tvX = 0;
+  private tvZ = 0;
   /**
    * The brain's own state, kept between thoughts and handed back to it: what it is doing, whom it
    * is after, where it is going, when an alert or a flight ends, since when its target has been out
@@ -613,6 +786,15 @@ export class Npc implements Living, ErrandBody {
   /** A person is a circle from above: the capsule's own radius, whichever way you come at it. */
   radiusToward(): number {
     return FIGHTER_BODY.radius;
+  }
+
+  /**
+   * Put it on a rung of the ladder. The row itself is held, never copied, so the knob reaches this
+   * body afterwards; 0 or less is the flat fighter that has no tier at all.
+   */
+  setTier(tier: number): void {
+    this.tier = Number.isFinite(tier) ? Math.max(0, Math.round(tier)) : DEFAULT_TIER;
+    this.skill = this.tier <= 0 ? null : skillOfGroundTier(this.tier);
   }
 
   /** Where the world's simulated clock stood at this fighter's last step: the hold's grace keys off it. */
@@ -938,7 +1120,16 @@ export class Npc implements Living, ErrandBody {
     postureAsk.grounded = this.grounded;
     postureAsk.gun = this.arm === 'gun';
     postureAsk.combat = combat;
-    postureAsk.shooting = !!d && d.state === 'attack' && d.attack === 'ranged' && !!t && !t.dead;
+    // The brain's own verdict, and `cover` counts because it is the attack state under another
+    // name: a body that has got behind a crate and can still see you is shooting, and one whose
+    // posture said otherwise would crouch -- which is the one posture that carries no actions at
+    // all in the client's own data -- and never fire from the spot it just walked to.
+    postureAsk.shooting = !!d && (d.state === 'attack' || d.state === 'cover') && d.attack === 'ranged' && !!t && !t.dead;
+    // And the other half of it: standing in cover it **cannot** shoot out of, which is the one
+    // place a body should go low without a shot to take. The kind is the search's own answer
+    // (`hard` is blocked at a standing body's chest as well as a crouched one's), and the arrival
+    // test is the same one `act` holds it still with.
+    postureAsk.covered = this.coverKind === 'hard' && Math.hypot(this.coverX - this.pos.x, this.coverZ - this.pos.z) <= FIGHTER_TUNE.arrive;
     postureAsk.gap = t ? Math.hypot(t.pos.x - this.pos.x, t.pos.z - this.pos.z) : Infinity;
     postureAsk.hpRatio = this.hp / this.maxHp;
     postureAsk.pace = pace;
@@ -1157,6 +1348,9 @@ export class Npc implements Living, ErrandBody {
     const list = this.brainTargets;
     list.length = 0;
     let current: Living | null = null;
+    /** Whom it was after before this thought, so the line it found can be kept only if it still is. */
+    const was = this.targetKey;
+    let line = false;
     const reachOut = Math.max(BRAIN_TUNE.aggroBig, BRAIN_TUNE.leash) + 30;
     const ranged = this.arm === 'gun' && this.gun ? FIGHTER_TUNE.gunRange : 0;
     for (const t of foes) {
@@ -1186,6 +1380,7 @@ export class Npc implements Living, ErrandBody {
       // One ray a thought, and only along the one it is already after: a fresh target is chased or
       // stared at for a tick before it is shot at, which is the rule the creatures fight by too.
       b.hasLine = isCurrent && ranged > 0 && !t.dead ? this.lineTo(t) : false;
+      if (isCurrent) line = b.hasLine;
       list.push(b);
     }
     const self: BrainSelf = {
@@ -1216,6 +1411,15 @@ export class Npc implements Living, ErrandBody {
       blockedSince: this.blockedSince,
       forgetKey: this.forgetKey,
       forgetUntil: this.forgetUntil,
+      // The two the cover rule is gated on, and this is the whole of what a fighter tells the
+      // shared brain about cover. The flag is a **capability and not a kind**: a tier of its own
+      // (tier 0 has no row and no cover), a gun in the hand, and out of doors, where the streamer
+      // has really built colliders for the things a body would hide behind. It is deliberately not
+      // "has a ranged attack", which 2,550 catalogue entries do and most of them spit; and the
+      // errand is in it so that a body under a long walk never claims the word.
+      seeksCover: !!this.skill && this.arm === 'gun' && !!this.gun && !this.cell && !(this.errand && !this.errand.done),
+      // And whether it really is behind something, which only this side can answer.
+      inCover: this.coverKind !== null,
     };
     const d = decide(self, list);
     // A wander indoors is pulled back inside the indoor leash before it is kept: see
@@ -1223,7 +1427,19 @@ export class Npc implements Living, ErrandBody {
     // end where it ends, and outdoors the brain's farthest wander is half the leash already.
     if (d.state === 'wander' && this.cell) this.clampWanderInside(d);
     if (d.clearMemory) this.memory.clear();
+    // Whether the shot is clear, kept from the one ray a thought casts: the cover rule reads it,
+    // because "chase" is what the brain answers both when the target is out of range **and** when
+    // there is a wall in the way, and only the second of those is a reason to go and stand
+    // somewhere else. It is worth nothing about a target it has only just picked up, so it is kept
+    // only while the target has not changed.
+    this.hasLine = d.targetKey !== null && d.targetKey === was ? line : false;
     if (d.targetKey !== this.targetKey) {
+      // The trigger goes back to the start of a burst: a body that has just found something to
+      // shoot at waits its tier's own reaction before the first pull, and one that has lost its
+      // target is ready the instant it finds another.
+      fireReset(this.fire, d.targetKey !== null ? (this.skill?.reaction ?? 0) : 0);
+      // And the cover it was holding was found against somebody else.
+      this.coverKind = null;
       this.stuck = 0;
       this.stuckClock = 0;
       // And the metres asked for in the part-window being thrown away with it: left standing, a
@@ -1252,13 +1468,60 @@ export class Npc implements Living, ErrandBody {
     if (d.state === 'return' && this.state !== 'return') this.goal = null;
     this.state = d.state;
     this.decision = d;
+    this.stepSpacing(list);
+  }
+
+  /**
+   * How hard this body is being pushed off the ones standing on top of it, as a direction and a
+   * strength between 0 and 1. It needs no plumbing whatever: the brain is already handed every
+   * living thing within reach with its side on it, and the only thing this adds is one pass over
+   * that list keeping the ones on **its own** side -- which is exactly the ones the brain skipped.
+   *
+   * Worked out at a thought rather than at a frame, deliberately. Two and a half thoughts a second
+   * is four metres of a running body, which is plenty: this is a nudge that keeps a squad from
+   * standing in one another, not a solver, and a fighter's controller passes straight through
+   * another fighter on purpose (a crowd jammed on itself would each report itself stuck and give
+   * the fight up).
+   */
+  private stepSpacing(list: readonly BrainTarget[]): void {
+    this.spreadX = 0;
+    this.spreadZ = 0;
+    const near = GROUND_STEP.spacing;
+    if (!(near > 0)) return;
+    let sx = 0;
+    let sz = 0;
+    for (const b of list) {
+      if (b.dead || b.key === this.key || b.side !== this.side) continue;
+      const dx = this.pos.x - b.x;
+      const dz = this.pos.z - b.z;
+      const d2 = dx * dx + dz * dz;
+      if (!(d2 > 1e-6) || d2 > near * near) continue;
+      const d = Math.sqrt(d2);
+      // Hardest when they are touching and nothing at all at `spacing`, so a line of bodies does
+      // not twitch at the edge of it.
+      const w = 1 - d / near;
+      sx += (dx / d) * w;
+      sz += (dz / d) * w;
+    }
+    const len = Math.hypot(sx, sz);
+    if (!(len > 1e-6)) return;
+    const k = Math.min(1, len) / len;
+    this.spreadX = sx * k;
+    this.spreadZ = sz * k;
   }
 
   /**
    * One frame of what the last thought decided: the brain gives a goal, a pace and something to
-   * face, and the fighter walks at it in a straight line, because paths are a later pass's. The
-   * attack is the one the brain chose, on the fighter's own cooldown and only once its nose is
-   * within `aimCone` of what it is fighting, which is the gate its swing has always had.
+   * face, and the fighter walks at it. The attack is the one the brain chose, on its own clock and
+   * only once its weapon is within its cone of what it is fighting, which is the gate its swing has
+   * always had.
+   *
+   * What changed with the split is that this method now answers **two** questions where it used to
+   * answer one. Where the feet go: the brain's point, or a cover spot, or a place on a standoff
+   * ring, and through a room's own corners where there are any. Where the gun points: the thing it
+   * is fighting, whatever the feet are doing, until the difference is more than the legs could show
+   * and the whole body turns to walk. For a body with no tier, and for anything holding a blade,
+   * the two are the same point on every frame and every line below is the line it always was.
    */
   private act(sdt: number, bolts: Bolts, effects: Effects | null, hittableAt: ((handle: number) => Hittable | undefined) | null): void {
     const d = this.decision;
@@ -1267,48 +1530,125 @@ export class Npc implements Living, ErrandBody {
     let moveTo = d?.moveTo ?? null;
     let face = d?.face ?? null;
     let pace: 'stand' | 'walk' | 'run' = d?.pace ?? 'stand';
-    // The target moves between thoughts: the chase and the aim follow it every frame.
-    if (t && d && (d.state === 'chase' || d.state === 'attack' || d.state === 'alert')) {
+    /** How far off the thing it is fighting is, middle to middle: read by four rules below. */
+    const gap = t ? Math.hypot(t.pos.x - this.pos.x, t.pos.z - this.pos.z) : Infinity;
+    // The target moves between thoughts: the chase and the aim follow it every frame. `cover` is
+    // in the list because it is `attack` or `chase` under another name -- a body behind a crate is
+    // still fighting somebody -- and the second test picks out which of the two it stands for by
+    // whether the brain gave it anywhere to go.
+    if (t && d && (d.state === 'chase' || d.state === 'attack' || d.state === 'alert' || d.state === 'cover')) {
       this.faceAt.x = t.pos.x;
       this.faceAt.z = t.pos.z;
       face = this.faceAt;
-      if (d.state === 'chase') {
+      if (d.state === 'chase' || (d.state === 'cover' && !!d.moveTo)) {
         moveTo = this.faceAt;
         // Close enough to strike: stop rather than run on until the next thought. A gun keeps
         // closing, because a chase is what the brain answers when the shot is out of range *or*
         // when there is a wall in the way, and standing off at the gun's range with nothing to
-        // shoot through would leave it there for good.
-        const gap = Math.hypot(t.pos.x - this.pos.x, t.pos.z - this.pos.z) - t.radiusToward(this.pos) - this.radiusToward();
-        if (this.arm !== 'gun' && gap <= FIGHTER_TUNE.reach) pace = 'stand';
+        // shoot through would leave it there for good. What a **tiered** gunner does with that is
+        // `stepStandoff` below, which holds it on a ring instead of walking into your face -- and
+        // which still closes whenever the shot is blocked, for exactly the reason in this comment.
+        if (this.arm !== 'gun' && gap - t.radiusToward(this.pos) - this.radiusToward() <= FIGHTER_TUNE.reach) pace = 'stand';
       }
     }
     // Stunned, or with a blade already on its way through a swing, it stands where it is.
-    if (this.stunned > 0 || this.swingLeft >= 0) pace = 'stand';
+    const frozen = this.stunned > 0 || this.swingLeft >= 0;
+    if (frozen) pace = 'stand';
+    // Where the **feet** are going, which from here on is a different question from where the gun
+    // is pointed. A cover spot outranks the ring, the ring outranks the brain's own point, and a
+    // slide is laid over whichever of them is left; all three are a gunner's and each of them
+    // answers false for the body this game had before there were tiers, in which case every line
+    // below is the line it always was.
+    let held = false;
+    this.leanOnly = false;
+    if (this.stepCover(t, d)) {
+      this.walkTo.x = this.coverX;
+      this.walkTo.z = this.coverZ;
+      moveTo = this.walkTo;
+      held = frozen || Math.hypot(this.coverX - this.pos.x, this.coverZ - this.pos.z) <= FIGHTER_TUNE.arrive;
+      // Run for it. A body walking to cover under fire is a body that is not behind anything yet;
+      // one that is stunned or half way through a swing is neither, and goes nowhere at all.
+      pace = held ? 'stand' : pace === 'stand' ? 'run' : pace;
+    } else if (!frozen && this.stepStandoff(t, d, gap)) {
+      moveTo = this.walkTo;
+      pace = pace === 'stand' ? 'walk' : pace;
+    }
     // How low it stands, and what that lets it do. The rule reads the decision the brain has
     // already answered and writes its answer back onto it; the posture then **caps the pace**,
     // because in the game's own data the kneel has no walk at all and a prone body has no route
     // anywhere except back up. So a body asked to go somewhere gets up first and then walks, and
     // nothing ever plans a path for a shape lying down. The combat carry's own window is worked out
     // here rather than read off `update`, which settles it after this runs.
+    //
+    // It is asked **after** the movement rules above and not before, because a body that has
+    // decided to slide or to run for a crate is a body that is on its feet: the posture rule reads
+    // the pace it is really taking, and a kneel decided against the brain's `stand` would then be
+    // capped back to a standstill by `paceInPosture` and the slide would never happen.
     const combat = (!!t && !t.dead) || this.sinceFought < STANCE_TUNE.ready;
     this.stepPosture(sdt, pace, t, d, combat);
     pace = paceInPosture(pace, this.posture);
     // The way out of the room (src/world/nav/). Indoors, the building's own floors say which corner
-    // to walk at next; only what it *faces* is taken from the path, so the arrival test further
-    // down still measures the real goal. Never while it is attacking: `diff` below is also the gate
-    // its swing is held behind, and a nose turned at a corner is a nose off what it is fighting.
-    // Outdoors, and in a room the pack has no floor for with the goal in that same room, `corner`
-    // is null and every line below is the line it was.
+    // to walk at next; only where it **walks** is taken from the path, so the arrival test further
+    // down still measures the real goal. Never while it is attacking. Outdoors, and in a room the
+    // pack has no floor for with the goal in that same room, `corner` is null and every line below
+    // is the line it was.
+    //
+    // Before the split this wrote `face`, because facing and travel were one number and the only
+    // way to walk at a corner was to point at it. It writes the travel point now, which is the same
+    // body walking the same corners -- and a gunner rounding one keeps its gun where it was.
     if (moveTo && pace !== 'stand' && this.cell && d && d.state !== 'attack') {
       const goalY = t && (d.state === 'chase' || d.state === 'alert') ? t.pos.y : this.pos.y;
       const corner = worldNav.corner(this.navAgent, this.cell, this.pos.x, this.pos.y, this.pos.z, moveTo.x, goalY, moveTo.z, this.radiusToward(), this.now);
-      if (corner) face = corner;
+      if (corner) moveTo = corner;
     }
+    // Two wants, and for every body that has not earned the split they are one number: the travel
+    // falls back to the facing when there is nowhere to go (a body standing and shooting still
+    // turns onto what it is shooting at), and the facing falls back to the travel when there is
+    // nothing to aim at, which is every creature, every blade and every tier-0 fighter there is.
+    const goTo = pace === 'stand' ? null : moveTo;
+    const wantTravel = goTo ? Math.atan2(goTo.x - this.pos.x, goTo.z - this.pos.z) : Number.NaN;
+    let wantFace = face ? Math.atan2(face.x - this.pos.x, face.z - this.pos.z) : Number.NaN;
+    let wantHead = Number.isFinite(wantTravel) ? wantTravel : wantFace;
+    if (!Number.isFinite(wantFace)) wantFace = wantHead;
+    // The legs have to be able to show it, and there is no strafe clip in either game -- so a body
+    // whose feet go more than `legMax` off its gun is a body walking sideways with nothing to draw
+    // it with. Which of the two gives way depends on what the movement **is**, and that is the one
+    // distinction in this whole split that is not obvious:
+    //
+    //   - a **slide** (`leanOnly`: sideways round a ring, at most a right angle off the line to the
+    //     target) is held to what the legs can show, so it becomes a diagonal rather than a slip and
+    //     the gun stays where it is. That costs the slide some of its sideways reach and buys back
+    //     the whole point of it.
+    //   - anything else -- walking to a crate behind it, backing out of somebody's face, going home
+    //     -- turns the body and takes the gun with it, because a body that has decided to go
+    //     somewhere has stopped aiming at you and a backpedal is not a pose this rig has.
+    //
+    // How far a slide may lean is the **tier's** and not one flat number, which is the other half of
+    // what `GroundSkill.strafe` is for: a body travelling at `a` off its facing puts `sin a` of its
+    // speed sideways, so the tier's share is `asin(strafe)` and the ceiling every body shares is
+    // `legMax`. Held to the ceiling alone, a slide on the ring was a right angle clamped back to 60
+    // degrees at every tier that slid at all, so tier 3 and tier 5 circled at one speed in one
+    // direction and only the duty cycle told them apart. Anything that is not a slide is held to the
+    // ceiling as before, because that limit is the legs' and not the body's skill.
+    if (this.split && Number.isFinite(wantHead) && Number.isFinite(wantFace)) {
+      const off = wrapAngle(wantHead - wantFace);
+      const lean = this.leanOnly ? this.slideLean : GROUND_STEP.legMax;
+      if (Math.abs(off) > lean) {
+        if (this.leanOnly && Math.abs(off) <= Math.PI / 2 + 0.01) wantHead = wantFace + Math.sign(off) * lean;
+        else wantFace = wantHead;
+      }
+    }
+    if (!this.split) wantFace = wantHead;
     let diff = 0;
-    if (face && this.stunned <= 0) {
-      const want = Math.atan2(face.x - this.pos.x, face.z - this.pos.z);
-      diff = Math.atan2(Math.sin(want - this.heading), Math.cos(want - this.heading));
-      this.heading += diff * Math.min(1, sdt * FIGHTER_TUNE.turn);
+    if (this.stunned <= 0) {
+      const k = Math.min(1, sdt * FIGHTER_TUNE.turn);
+      if (Number.isFinite(wantHead)) this.heading += wrapAngle(wantHead - this.heading) * k;
+      if (Number.isFinite(wantFace)) {
+        // Measured before the turn, exactly as it always was: this is the error the trigger's own
+        // cone is tested against, not what is left after the frame's easing.
+        diff = wrapAngle(wantFace - this.facing);
+        this.facing += diff * k;
+      } else this.facing = this.heading;
     }
     const speed = this.paceSpeed(pace);
     this.pace = pace;
@@ -1317,18 +1657,48 @@ export class Npc implements Living, ErrandBody {
     // character controller, and a wall, a slope or a step may let it have less or none of it.
     // That difference is exactly what `checkStuck` below measures.
     this.wish.set(0, 0, 0);
-    if (moveTo && speed > 0) {
-      const gap = Math.hypot(moveTo.x - this.pos.x, moveTo.z - this.pos.z);
-      if (gap > FIGHTER_TUNE.arrive) {
-        const step = Math.min(gap, speed * sdt);
-        this.wish.x = Math.sin(this.heading) * step;
-        this.wish.z = Math.cos(this.heading) * step;
+    if (goTo && speed > 0 && !held) {
+      const away = Math.hypot(goTo.x - this.pos.x, goTo.z - this.pos.z);
+      if (away > FIGHTER_TUNE.arrive) {
+        const step = Math.min(away, speed * sdt);
+        // Along its own nose, as it always has been -- the nose is simply not the gun any more.
+        // The allies it is standing on top of push it a little off that line, which is the whole of
+        // the spacing: nothing is solved, a body is merely nudged.
+        let ax = Math.sin(this.heading);
+        let az = Math.cos(this.heading);
+        const push = this.split ? GROUND_STEP.spacingPush : 0;
+        if (push > 0 && (this.spreadX !== 0 || this.spreadZ !== 0)) {
+          ax += this.spreadX * push;
+          az += this.spreadZ * push;
+          const len = Math.hypot(ax, az) || 1;
+          ax /= len;
+          az /= len;
+        }
+        this.wish.x = ax * step;
+        this.wish.z = az * step;
         this.moving = true;
       }
     }
     this.checkStuck(sdt, this.moving ? speed : 0);
-    // Stunned it neither moves nor strikes, which is what being stunned has always meant here.
-    if (!t || !d || this.stunned > 0 || d.state !== 'attack' || this.attackCd > 0 || Math.abs(diff) >= FIGHTER_TUNE.aimCone) return;
+    // Stunned it neither moves nor strikes, which is what being stunned has always meant here. A
+    // body in the cover state shoots on exactly the same terms as one in the attack state, because
+    // it *is* one: `d.attack` is what says a shot would land, and the word beside it only says
+    // whether the body is behind anything while it lands it. Leaving `cover` out here would have
+    // been the whole of this wave's trap -- a tier-5 fighter that took cover and then never fired
+    // again from it.
+    if (!t || !d || this.stunned > 0 || (d.state !== 'attack' && d.state !== 'cover')) return;
+    // A tiered gunner's trigger is its own: a burst of its tier's length at its tier's spacing and
+    // then a rest, which is the creatures' shape and is what a fighter has never had. The clock is
+    // stepped **only** on a frame it would really shoot -- in the attack state, with its gun on the
+    // target -- or its burst would run down while it stood there with nobody in front of it.
+    if (d.attack === 'ranged' && this.arm === 'gun' && this.gun && this.posture !== 'crouch') {
+      const skill = this.skill;
+      if (skill) {
+        if (willFire(skill, diff) && fireStep(this.fire, skill, sdt)) this.shoot(t, bolts, effects);
+        return;
+      }
+    }
+    if (this.attackCd > 0 || Math.abs(diff) >= FIGHTER_TUNE.aimCone) return;
     // **A crouched body does nothing at all**, and that is the client's own data rather than a
     // choice of ours: of the state hierarchy's 147 states twelve are the crouch and every one of
     // the twelve carries zero actions -- no fire, no attack, no throw, no heal. The crouch is how a
@@ -1366,6 +1736,295 @@ export class Npc implements Living, ErrandBody {
   }
 
   /**
+   * Whether this body's tier has earned facing and travel as two numbers at all.
+   *
+   * It is the strafe share and not a flag of its own, and that is deliberate: the two bottom rungs
+   * of the ladder put nothing sideways, so they are the body the owner already knows -- one
+   * heading, walking wherever it is pointed -- and the split is something the top three earn. Tier
+   * 0 has no row at all and is the fighter this game had before any of this.
+   */
+  private get split(): boolean {
+    return !!this.skill && this.skill.strafe > 0;
+  }
+
+  /**
+   * The most this body's feet may sit off its gun **while it slides**, radians.
+   *
+   * It is the angle whose sine is its tier's `strafe`, because a body travelling at that angle off
+   * its facing puts exactly that share of its speed sideways -- which is what the field says it is,
+   * and what it did not mean before: the ring's travel vector is normalised, so the tier's number
+   * was divided back out and every sliding body leaned the full ceiling. Held under
+   * `GROUND_STEP.legMax` too, since past that the legs cannot show it whatever the tier.
+   *
+   * One `asin` on the frames a tiered gunner is really sliding, and nothing kept: the tier's row is
+   * live on the knob and a number worked out once would stop hearing it.
+   */
+  private get slideLean(): number {
+    const s = this.skill ? Math.min(1, Math.max(0, this.skill.strafe)) : 0;
+    return Math.min(GROUND_STEP.legMax, Math.asin(s));
+  }
+
+  /**
+   * Somewhere to stand where the thing shooting at it cannot see it, and whether it is making for
+   * one now. The search itself is `src/world/cover.ts` -- pure rules, one shared searcher with a
+   * budget of four a step over every body in the world -- and this is the whole of the wiring:
+   * when to look, what to ask, and how long to believe the answer.
+   *
+   * Five refusals before a ray is ever cast, and each of them is a real rule rather than a guard.
+   * A body with no tier does not use cover at all. Neither does one with a blade: it has to close
+   * to 1.9 m to do anything, so standing behind a crate is standing still. Neither does one under
+   * a long walk, whose orders outrank everything. **Indoors nothing at all**, which the search
+   * refuses for itself and which is the streamer's own doing rather than a shortcut: an object
+   * placed inside a building has no collision whatever -- five thousand of them on one planet,
+   * two thousand waist high and wide enough to hide behind, not one solid -- so cover in a cantina
+   * would look as though it worked and would stop no bolts. And a body that is already behind
+   * something does not go looking for somewhere else to be -- it **claims** where it stands, which
+   * is not a nicety: unclaimed, the standoff ring below would slide it straight back out from behind
+   * the very thing it was standing behind, and the brain would never say the word.
+   *
+   * How long it believes an answer is two lengths and not one, and that is the fix for the one real
+   * bug this wave shipped with. The patience on the **walk** is `GROUND_STEP.coverHold`. Once the
+   * body is really standing in the spot, cover it can shoot out of is renewed for as long as it
+   * holds -- that is a firing position and a body belongs in one -- while cover it **cannot** shoot
+   * out of is held for `GROUND_STEP.hardFor` and then given up, with `GROUND_STEP.hardRest` after it
+   * in which no hole is worth taking at any price. Renewed alike, a hole was a one-way door: the
+   * body fires nothing from one, so it ducked behind a wall and stayed there for good.
+   *
+   * **Whether it wants cover at all is the brain's**, which is where the rule belongs and which is
+   * why the flag exists: `decide` answers `d.cover` for a flagged body that is shooting, and for
+   * one whose shot is blocked within `BRAIN_TUNE.coverRange` of its own reach -- the one line in
+   * this game that was always going to be wrong, since a gunner with a wall in front of it used to
+   * fall through to a chase and walk into the open. Everything below is the wiring round that
+   * answer: when to look (this body's own tier), what to ask, and how long to believe it.
+   */
+  private stepCover(t: Living | null, d: Decision | null): boolean {
+    const skill = this.skill;
+    const deps = this.cover;
+    if (!skill || !deps || !t || t.dead || !d || this.arm !== 'gun' || !this.gun || (this.errand && !this.errand.done)) {
+      this.coverKind = null;
+      return false;
+    }
+    const ask = this.coverAsk;
+    ask.x = this.pos.x;
+    ask.y = this.pos.y;
+    ask.z = this.pos.z;
+    // The point a shot would really come from: the threat's own aim point, which is what it shoots
+    // from and what a spot has to break the line to.
+    ask.tx = t.pos.x;
+    ask.ty = t.pos.y + t.halfHeight;
+    ask.tz = t.pos.z;
+    ask.indoors = !!this.cell;
+    askFromSkill(ask, skill);
+    // Just out of a hole: one is worth nothing to it at any price for a while, so it presses forward
+    // or looks for somewhere it can shoot from instead of ducking behind the same wall again.
+    // Infinity is the price of a spot that is never picked -- the score is the walk plus this, and a
+    // candidate that cannot beat the best already found is never even chosen.
+    if (this.now < this.hardRestAt) ask.hardCost = Infinity;
+    const due = coverDue(skill, this.now - this.coverAt);
+    if (this.coverKind !== null) {
+      if (this.coverFor !== t.key) {
+        // Found against somebody else: it is not cover against this one and there is nothing to rest
+        // from either.
+        this.coverKind = null;
+        this.coverSettled = false;
+      } else {
+        const near = Math.hypot(this.coverX - this.pos.x, this.coverZ - this.pos.z) <= FIGHTER_TUNE.arrive;
+        // The frame it really gets there is what starts a hole's own short clock; until then the
+        // patience on `coverUntil` is the walk's, which is a different length and a different thing.
+        // It runs before the test below so a body arriving on the very frame its walking patience
+        // ran out is not thrown out of the spot it has just reached.
+        if (near) this.holdCover(this.coverKind);
+        if (this.now > this.coverUntil) this.dropCover();
+        else if (due && near) {
+          // Standing in it: is the crate it is behind still cover, now that the shooting has moved?
+          // Two rays and no search, which is what `test` is for.
+          this.coverAt = this.now;
+          this.coverKind = coverSearch.test(deps, ask, this.coverX, this.coverY, this.coverZ);
+          this.holdCover(this.coverKind);
+        }
+      }
+    }
+    if (this.coverKind !== null) return true;
+    if (!due) return false;
+    // **Whether to look at all is the brain's** and not this file's. It was two lines here -- a
+    // chase with no line, and a ranged attack -- and they are the same two rules, moved into
+    // `decide` where every other rule about what a body wants already lives, behind the
+    // `seeksCover` flag so that a creature can never reach them. Nothing else about the wiring
+    // moved: when to look is still this body's tier, what to ask is still this body's, and how
+    // long to believe the answer is still the hold below.
+    if (d.cover !== true) return false;
+    this.coverAt = this.now;
+    // Already behind something: stand in it, and **claim** it. The two rays this costs are the same
+    // two the search would have spent on its first candidate and they answer the question that
+    // matters -- but merely answering false here left the body not in cover as far as the brain and
+    // the standoff ring were concerned, and the ring then slid it out from behind the thing it was
+    // standing behind. A hole is not claimed while it is resting from the last one: the whole point
+    // of the rest is that it should be pressing forward.
+    const here = coverSearch.test(deps, ask, this.pos.x, this.pos.y, this.pos.z);
+    if (here !== null) {
+      if (here === 'hard' && this.now < this.hardRestAt) return false;
+      this.takeCover(this.pos.x, this.pos.y, this.pos.z, here, t.key, 0, 0, -1);
+      // It is standing in it already, so the clock on a hole starts now rather than at the first
+      // look after a walk it does not have to make.
+      this.holdCover(here);
+      return true;
+    }
+    const spot = coverSearch.find(deps, ask, this.now);
+    if (!spot) return false;
+    // Read off the searcher's one kept answer now, while it is still this body's: see `coverWhy`.
+    this.takeCover(spot.x, spot.y, spot.z, spot.kind, t.key, spot.walk, spot.score, spot.blocker);
+    return true;
+  }
+
+  /**
+   * Take a spot: where it is, what kind it is, and whom it is cover against. The patience written
+   * here is the **walk's** -- how long the body will keep making for a place before giving it up as
+   * somewhere it cannot reach. How long it may stay once it is there is `holdCover`'s, which is a
+   * different length for the two kinds.
+   */
+  private takeCover(x: number, y: number, z: number, kind: CoverKind, against: number, walk: number, score: number, which: number): void {
+    this.coverX = x;
+    this.coverY = y;
+    this.coverZ = z;
+    this.coverKind = kind;
+    this.coverFor = against;
+    this.coverUntil = this.now + GROUND_STEP.coverHold;
+    this.coverSettled = false;
+    this.coverWalk = walk;
+    this.coverWhy = score;
+    this.coverWhich = which;
+  }
+
+  /**
+   * How long it may stay, now that it has been found really standing in the spot.
+   *
+   * Cover it can shoot out of is renewed every look for as long as it holds: that is a firing
+   * position, and a body that stepped out of one every few seconds would be playing peek-a-boo. A
+   * hole it cannot shoot out of gets `GROUND_STEP.hardFor` **once**, from the moment it is in it,
+   * and is never renewed -- which is the whole difference between a duck and the one-way door this
+   * was. And a spot that has stopped being cover at all ends now.
+   */
+  private holdCover(kind: CoverKind | null): void {
+    if (kind === 'crouch') this.coverUntil = this.now + GROUND_STEP.coverHold;
+    else if (kind === null) this.coverUntil = this.now;
+    else if (!this.coverSettled) {
+      this.coverSettled = true;
+      this.coverUntil = this.now + GROUND_STEP.hardFor;
+    }
+  }
+
+  /**
+   * Let a spot go. A hole the body really **sat in** starts the rest that keeps it from dropping
+   * straight into another; one it merely gave up walking to does not, since it has not spent a
+   * moment behind anything and has nothing to press on from.
+   */
+  private dropCover(): void {
+    if (this.coverKind === 'hard' && this.coverSettled) this.hardRestAt = this.now + GROUND_STEP.hardRest;
+    this.coverKind = null;
+    this.coverSettled = false;
+  }
+
+  /**
+   * Where a tiered gunner stands while it shoots: on a ring round what it is fighting, at its own
+   * slot on it, sliding sideways. Writes `walkTo` and answers whether it has anywhere to be.
+   *
+   * Three things it is not. It is **not** a second decision path: the brain has already said
+   * "attack" or "chase" and this only moves the feet inside that answer. It is **not** a solver --
+   * the slot is one number off this body's own key, so no two bodies pick the same line and nothing
+   * is shared or negotiated. And it never holds a body off a target whose shot is blocked: a chase
+   * with no line is the brain saying there is a wall in the way, and a ring held against a wall is
+   * a body that stands there all evening.
+   */
+  private stepStandoff(t: Living | null, d: Decision | null, gap: number): boolean {
+    const skill = this.skill;
+    if (!skill || !t || t.dead || !d || this.arm !== 'gun' || !this.gun || !(gap > 1e-3)) return false;
+    // "The brain says shoot, or a chase with a line", written off `d.attack` rather than off the
+    // state word alone so that `cover` -- which is `attack` and `chase` under another name -- is
+    // read as whichever of the two it stands for. It is reached only in the moment between a spot
+    // being dropped and the next thought renaming the state, since anything really in cover has
+    // been answered by `stepCover` before this is called at all.
+    const shooting = d.attack === 'ranged' && (d.state === 'attack' || d.state === 'cover');
+    if (!shooting && !((d.state === 'chase' || d.state === 'cover') && this.hasLine)) return false;
+    if (this.errand && !this.errand.done) return false;
+    const ring = Math.max(1, FIGHTER_TUNE.gunRange * GROUND_STEP.standoff);
+    const band = Math.max(1, ring * 0.15);
+    // Outward from the target, and this body's own slot a little way round from it.
+    const ux = (this.pos.x - t.pos.x) / gap;
+    const uz = (this.pos.z - t.pos.z) / gap;
+    const slot = (((this.key * 0.6180339887498949) % 1) - 0.5) * 2 * GROUND_STEP.ringSpread;
+    const cs = Math.cos(slot);
+    const sn = Math.sin(slot);
+    let vx = t.pos.x + (ux * cs - uz * sn) * ring - this.pos.x;
+    let vz = t.pos.z + (ux * sn + uz * cs) * ring - this.pos.z;
+    const off = Math.hypot(vx, vz);
+    // Inside the band it is where it wants to be and only the slide moves it at all.
+    if (off > band) {
+      vx /= off;
+      vz /= off;
+    } else {
+      vx = 0;
+      vz = 0;
+    }
+    // Whether it is sliding at all just now, and which way. It is a duty cycle and not a state:
+    // a body that slid on every frame it was shooting would be walking on every frame it was
+    // shooting, and a walking body never goes down on one knee -- so a slide that never stopped
+    // would have quietly taken the whole of the kneeling away. At each boundary it rolls its tier's
+    // own share for whether to slide for a moment or to hold its ground and shoot.
+    if (this.now - this.strafeAt >= GROUND_STEP.flipEvery) {
+      this.strafeAt = this.now;
+      if (Math.random() < 0.4) this.strafeSide = -this.strafeSide;
+      this.slideUntil = Math.random() < skill.strafe ? this.now + GROUND_STEP.slideFor : this.now;
+    }
+    const side = this.now < this.slideUntil ? strafeShare(skill, true, gap) * this.strafeSide : 0;
+    vx += -uz * side;
+    vz += ux * side;
+    const len = Math.hypot(vx, vz);
+    if (!(len > 1e-3)) return false;
+    // Whether this is a slide or a move, which is what says which angle gives way when the two are
+    // further apart than the legs can show. Anything but backing out of somebody's face is a slide:
+    // closing on the ring is a few degrees off the line and holding it is a right angle off it, and
+    // both of those are a body that is still shooting at you. Backing off is not -- it is a body
+    // walking away, and there is no backpedal pose in this rig to draw one with.
+    this.leanOnly = gap >= ring * GROUND_STEP.closeIn;
+    // A point a stride or two out along that line rather than a velocity: everything downstream --
+    // the arrival test, the corner lookup, the stuck check -- is written in terms of somewhere to
+    // walk to, and a body that is handed a point is a body all of it still understands.
+    const step = Math.max(2, this.paceSpeed('walk') * 1.5);
+    this.walkTo.x = this.pos.x + (vx / len) * step;
+    this.walkTo.z = this.pos.z + (vz / len) * step;
+    return true;
+  }
+
+  /**
+   * How fast the thing it is shooting at is really travelling, eased, so the tier's `lead` has
+   * something to lead. Nothing in this game carries a living body's velocity -- a `Living` is a
+   * place, a health and a key -- so it is measured here, per fighter, over its own frames, and is
+   * thrown away the moment the target changes rather than carried onto the next one.
+   */
+  private trackTarget(dt: number): void {
+    const t = this.target;
+    if (!t || t.dead || !(dt > 1e-6)) {
+      this.tvKey = 0;
+      this.tvx = 0;
+      this.tvz = 0;
+      return;
+    }
+    if (this.tvKey !== t.key) {
+      this.tvKey = t.key;
+      this.tvX = t.pos.x;
+      this.tvZ = t.pos.z;
+      this.tvx = 0;
+      this.tvz = 0;
+      return;
+    }
+    const k = Math.min(1, dt * 4);
+    this.tvx += ((t.pos.x - this.tvX) / dt - this.tvx) * k;
+    this.tvz += ((t.pos.z - this.tvZ) / dt - this.tvz) * k;
+    this.tvX = t.pos.x;
+    this.tvZ = t.pos.z;
+  }
+
+  /**
    * The ground covered against the speed asked for, over a window: far under it and the brain is
    * told it is stuck, and gives the target up after a few of them. It used never to fire, because
    * a fighter's place was written straight in and it walked through whatever was in the way; with
@@ -1390,19 +2049,46 @@ export class Npc implements Living, ErrandBody {
     const g = this.gun;
     const rig = this.rig;
     if (!g) return;
-    this.attackCd = Math.max(FIGHTER_TUNE.gunEvery, g.primary.fireTime * 2.5) + Math.random() * FIGHTER_TUNE.gunSpread;
+    const skill = this.skill;
+    // The trigger's own clock has already been stepped for a tiered body, so all this has to add is
+    // the weapon's floor under it: a tier-5 burst is a shot every 0.24 s and a rocket launcher is
+    // not. Tier 0 keeps the flat cooldown this game has always had, which is what makes
+    // `__debug.fighters({ tier: 0 })` a real comparison rather than a slower version of the new one.
+    if (skill) this.fire.wait = Math.max(this.fire.wait, g.primary.fireTime);
+    else this.attackCd = Math.max(FIGHTER_TUNE.gunEvery, g.primary.fireTime * 2.5) + Math.random() * FIGHTER_TUNE.gunSpread;
     // The recoil is not chased: the aim's correction sits still for a moment after a shot, as the
     // player's does, or it would fight the fire clip's own kick and wag the barrel.
     this.sinceShot = 0;
     this.muzzle(tmp2);
     tmp.copy(t.pos).y += t.halfHeight * 0.9;
+    // Where it will be rather than where it is, by the tier's own share of the lead. Nought is a
+    // body that shoots at where you are standing and one is a body that shoots at where you will
+    // be; the flight is capped at a second and a half so a bolt at the far edge of a gun's range
+    // cannot be led half way across a town.
+    if (skill && skill.lead > 0 && (this.tvx !== 0 || this.tvz !== 0)) {
+      const flight = Math.min(1.5, Math.hypot(tmp.x - tmp2.x, tmp.y - tmp2.y, tmp.z - tmp2.z) / Math.max(1, g.primary.speed || 2300));
+      tmp.x += this.tvx * flight * skill.lead;
+      tmp.z += this.tvz * flight * skill.lead;
+    }
     tmp.sub(tmp2).normalize();
-    // A fighter's aim scatters a little more than the player's.
-    const s = FIGHTER_TUNE.aimSpread;
-    tmp.x += (Math.random() - 0.5) * s;
-    tmp.y += (Math.random() - 0.5) * s;
-    tmp.z += (Math.random() - 0.5) * s;
-    tmp.normalize();
+    if (skill) {
+      // The tier's scatter: a yaw and a pitch, drawn evenly over the cone's own disc, laid on the
+      // shot in its own frame rather than added to the vector's components -- a box thrown on x, y
+      // and z is not a cone and is wider across the corners than along the axes.
+      aimScatter(skill, Math.random(), Math.random(), this.scatter);
+      const flat = Math.hypot(tmp.x, tmp.z);
+      const yaw = Math.atan2(tmp.x, tmp.z) + this.scatter.yaw;
+      const pitch = Math.atan2(tmp.y, flat) + this.scatter.pitch;
+      const cp = Math.cos(pitch);
+      tmp.set(Math.sin(yaw) * cp, Math.sin(pitch), Math.cos(yaw) * cp);
+    } else {
+      // A fighter's aim scatters a little more than the player's.
+      const s = FIGHTER_TUNE.aimSpread;
+      tmp.x += (Math.random() - 0.5) * s;
+      tmp.y += (Math.random() - 0.5) * s;
+      tmp.z += (Math.random() - 0.5) * s;
+      tmp.normalize();
+    }
     // Its own gun off the rack, so an enemy's shot sounds like the weapon in its hands.
     bolts.fire(tmp2, tmp, { owner: 'enemy', damage: Math.max(6, g.primary.damage * 0.6), speed: g.primary.speed || 2300, color: g.primary.color, size: g.primary.size, push: g.primary.push, exclude: this.body, life: 6, source: this, sound: combatSounds.gunOf(this.weapon), scar: scarFamilyOf(g.type, this.weapon?.fx?.id) });
     effects?.flash(tmp2, g.primary.color, 6, 5, 0.06);
@@ -1503,6 +2189,51 @@ export class Npc implements Living, ErrandBody {
     out.failures = this.navAgent.failures;
   }
 
+  /**
+   * Cover, in numbers, because none of it can be looked at: **where** the spot is and not only how
+   * far off, which kind it is, what it scored and which of that search's blockers it stands behind,
+   * how many seconds are left on the hold, and how long ago it last looked at all.
+   *
+   * `wants` is the brain's own answer -- true while a search is being asked for -- and it is the
+   * one field here worth reading first. A body reading `wants: true` with `at: null` for minutes on
+   * end is one that is looking and finding nothing, which is a quite different complaint from one
+   * that never looks at all (`wants: false`: no tier, a blade in its hand, indoors, or nothing to
+   * fight), and both are different again from a wire that was never connected, which is
+   * `__debug.cover({ probe: true })` and its empty blocker list.
+   *
+   * A spot with `blocker: -1` and `away: 0` is the other answer worth knowing: the body did not walk
+   * anywhere, it **claimed where it was already standing**, which on rolling ground is a body gone
+   * hull-down behind a rise as readily as one behind a crate. That is the rule working; if a squad
+   * on open ground stops oftener than it should, this is the row that says so.
+   */
+  coverStatus(): Record<string, unknown> {
+    return {
+      wants: this.decision?.cover === true,
+      at: this.coverKind
+        ? {
+            kind: this.coverKind,
+            x: Number(this.coverX.toFixed(1)),
+            y: Number(this.coverY.toFixed(1)),
+            z: Number(this.coverZ.toFixed(1)),
+            away: Number(Math.hypot(this.coverX - this.pos.x, this.coverZ - this.pos.z).toFixed(1)),
+            walk: Number(this.coverWalk.toFixed(1)),
+            score: Number(this.coverWhy.toFixed(1)),
+            blocker: this.coverWhich,
+            holdsFor: Number(Math.max(0, this.coverUntil - this.now).toFixed(1)),
+            // Whether it has been found really standing in it yet, which is what starts a hole's
+            // own short clock; before that `holdsFor` is the patience on the walk.
+            settled: this.coverSettled,
+          }
+        : null,
+      lookedAgo: Number.isFinite(this.coverAt) ? Number((this.now - this.coverAt).toFixed(1)) : null,
+      every: this.skill ? this.skill.coverEvery : null,
+      // Seconds left in which a spot it cannot shoot out of is worth nothing to it at any price,
+      // which is what keeps a hole from being a one-way door. A body reading `wants: true`,
+      // `at: null` and a `restsFor` counting down is pressing forward on purpose.
+      restsFor: Number(Math.max(0, this.hardRestAt - this.now).toFixed(1)),
+    };
+  }
+
   /** What it is thinking, in one line, for `__debug.fighters()`. */
   status(): Record<string, unknown> {
     return {
@@ -1519,6 +2250,15 @@ export class Npc implements Living, ErrandBody {
       inside: !!this.cell,
       remembers: this.memory.size,
       stuck: this.stuck,
+      // Which rung it fights on (0 is the flat body this game had before there was a ladder), how
+      // far its feet are off its gun this frame in degrees -- which is the whole of the split, and
+      // is 0 for every body that has not earned it -- and whether it is behind anything.
+      tier: this.tier,
+      lean: Number(((wrapAngle(this.heading - this.facing) * 180) / Math.PI).toFixed(1)),
+      cover: this.coverStatus(),
+      // Where its trigger is: seconds to the next pull and how far into the burst it is. A fighter
+      // used to fire single shots for ever with no gap, which is what this exists to show.
+      trigger: this.skill ? { wait: Number(this.fire.wait.toFixed(2)), shots: this.fire.shots, of: Math.max(1, Math.round(this.skill.burst)) } : null,
       // How it stands and how much of the way it is to the ground it asked for: with a body that
       // can be stopped, `held` under one is a fighter leaning on something.
       stance: this.stance,
@@ -1607,9 +2347,15 @@ export class Npc implements Living, ErrandBody {
     // between. Both run on the world's simulated clock, so `__debug.advance` exercises the leash,
     // the memory and the give-up exactly as a real minute does.
     if (now >= this.thinkAt) {
-      this.thinkAt = now + FIGHTER_TUNE.think * (1 + (Math.random() * 2 - 1) * FIGHTER_TUNE.thinkJitter);
+      // How long a body takes to notice that the world has changed is its tier's, jittered so a
+      // squad stood up on one frame does not go on thinking on one frame for ever. Tier 0 keeps the
+      // flat 0.4 s every fighter used to share, which is roughly where tier 4 sits.
+      this.thinkAt = now + (this.skill ? thinkEvery(this.skill, Math.random()) : FIGHTER_TUNE.think * (1 + (Math.random() * 2 - 1) * FIGHTER_TUNE.thinkJitter));
       this.think(foes, now);
     }
+    // How fast what it is shooting at is going, before anything reads it: `act` may pull the
+    // trigger on this very frame and the lead is measured off these two numbers.
+    this.trackTarget(dt);
     this.act(sdt, bolts, effects, hittableAt);
     // What it is fighting, for the stance it stands in and for whether its blade is held ready:
     // the brain drops it while it flees or goes home, so both go quiet with it.
@@ -1626,8 +2372,11 @@ export class Npc implements Living, ErrandBody {
     if (t && !t.dead) this.sinceFought = 0;
     else this.sinceFought += dt;
     const combat = this.sinceFought < STANCE_TUNE.ready;
-    // Where the target is from the nose, for the carry and for the aim. One angle, written.
-    const offNose = t ? wrapAngle(Math.atan2(t.pos.x - this.pos.x, t.pos.z - this.pos.z) - this.heading) : 0;
+    // Where the target is from the **gun**, for the carry: whether the weapon comes up is a question
+    // about where the weapon is pointed and not about which way the feet are going, and the two are
+    // no longer one number. Measured off the heading, a body sliding sideways with its gun squarely
+    // on you would drop out of the aimed carry for as long as it slid.
+    const offNose = t ? wrapAngle(Math.atan2(t.pos.x - this.pos.x, t.pos.z - this.pos.z) - this.facing) : 0;
     // Written into the kept struct rather than built: one literal here is one allocation per
     // fighter per frame, which is the rule this file is held to.
     stanceAsk.gun = this.arm === 'gun';
@@ -2047,6 +2796,105 @@ export class NpcManager {
     waterOver: (x: number, y: number, z: number): number => this.terrain.waterHeightAt(x, z) - y,
   };
 
+  /**
+   * The physics the cover search casts through, made once for this world and handed to every
+   * fighter stood in it. Four closures and nothing else; each of them answers in primitives, so a
+   * search allocates nothing at all.
+   *
+   * `hit` is deliberately `cameraBlock`'s own question -- the first thing that **stands still**,
+   * and never a creature, a vehicle, the player or another fighter -- because a body that could
+   * take cover behind the thing it is fighting would be standing in the open a moment later.
+   * `floor` is the same predicate cast downward, which is what keeps a spot off a drop and off the
+   * side of a wall. And `sameGround` is the baked walkability grid's own region ranks, which is the
+   * one thing that can say a place is on ground this body's ground is not joined to at all; a world
+   * with no grid answers yes to everything, so the two rays are the whole answer there.
+   *
+   * What it is **not** is `outdoorNav.walkable`: the bake grows its blocked set by a cell, which is
+   * a two-metre margin against a body two thirds of a metre wide, and a cover spot stands half a
+   * metre off a crate's face -- so that test is false for practically every real spot there is.
+   */
+  private readonly coverDeps: CoverDeps = {
+    blockers: (x, z, reach, out, cap) => this.deps.blockers?.(x, z, reach, out as NearBlocker[], cap) ?? 0,
+    hit: (ax, ay, az, bx, by, bz) => this.physics.blockDistance(ax, ay, az, bx, by, bz),
+    floor: (x, z, fromY, maxDrop) => this.physics.topSurface(x, z, fromY, maxDrop, OUTSIDE_FILTER, staticOnly) ?? Number.NaN,
+    sameGround: (ax, az, bx, bz) => outdoorNav.reachable(ax, az, bx, bz),
+  };
+
+  /** The tier every fighter stood from here takes. `__debug.fighters({ tier: 5 })` moves it and everyone out. */
+  tier = DEFAULT_TIER;
+
+  /** The probe's own ask and its own list of what was offered; made once, on the first `__debug.cover({ probe: … })`. */
+  private probeAsk: CoverAsk | null = null;
+  private probeBlockers: Blocker[] | null = null;
+  private probeCount = 0;
+
+  /**
+   * One cover search, run now, from a point and against a threat: what `__debug.cover({ probe:
+   * true })` is, and the only way any of this can be looked at from a tab that draws no frames.
+   *
+   * It answers the three questions in order. **What is even being offered**, which is the one way
+   * this whole wave can quietly do nothing -- with `NpcDeps.blockers` unwired every search finds
+   * nothing, casts no ray and returns none, and the counters would read like a world with no
+   * crates in it rather than like a wire that was never connected. **Which of those are worth a
+   * ray**, with the reason each one that is not was refused. And **what the search picked and why**
+   * -- the spot's own place, its kind, its walk and the score that beat the others.
+   *
+   * Two honest notes about what it costs. It counts into the searcher's own totals exactly as a
+   * body's search does, because it *is* one; and it is handed a clock of its own, which resets the
+   * per-step budget, so a probe taken mid-fight lets up to `perStep` more searches run on that one
+   * step. Both are the right trade for a console call and neither is reachable from a frame.
+   */
+  coverProbe(x: number, y: number, z: number, tx: number, ty: number, tz: number, tier = this.tier): Record<string, unknown> {
+    const ask = (this.probeAsk ??= { x: 0, y: 0, z: 0, tx: 0, ty: 0, tz: 0, reach: 0, hardCost: 0, indoors: false });
+    const pool = (this.probeBlockers ??= Array.from({ length: 24 }, () => ({ x: 0, z: 0, radius: 0, topY: 0, gap: 0 })));
+    const skill = skillOfGroundTier(tier <= 0 ? DEFAULT_TIER : tier);
+    ask.x = x;
+    ask.y = y;
+    ask.z = z;
+    ask.tx = tx;
+    ask.ty = ty;
+    ask.tz = tz;
+    ask.indoors = false;
+    askFromSkill(ask, skill);
+    const got = this.deps.blockers?.(x, z, ask.reach, pool as NearBlocker[], pool.length) ?? 0;
+    const h = coverHeights();
+    const offered = pool.slice(0, got).map((b) => {
+      const over = b.topY - y;
+      const wide = b.radius * 2;
+      return {
+        x: Number(b.x.toFixed(1)),
+        z: Number(b.z.toFixed(1)),
+        away: Number(Math.hypot(b.x - x, b.z - z).toFixed(1)),
+        wide: Number(wide.toFixed(1)),
+        over: Number(over.toFixed(1)),
+        // Why the search would not look behind it, or null when it would.
+        refused: !(over >= COVER_TUNE.minTop) ? 'shorter than a crouched chest' : !(wide >= COVER_TUNE.minWide) ? 'narrower than a body' : null,
+      };
+    });
+    offered.sort((a, b) => a.away - b.away);
+    // A clock nothing else uses, so the probe is never the search a body was refused.
+    const found = coverSearch.find(this.coverDeps, ask, -(++this.probeCount));
+    // Copied on the spot: the searcher refills that object on its next call.
+    const spot = found ? { kind: found.kind, x: Number(found.x.toFixed(1)), y: Number(found.y.toFixed(1)), z: Number(found.z.toFixed(1)), walk: Number(found.walk.toFixed(1)), score: Number(found.score.toFixed(1)), blocker: found.blocker } : null;
+    return {
+      from: { x: Number(x.toFixed(1)), y: Number(y.toFixed(1)), z: Number(z.toFixed(1)) },
+      threat: { x: Number(tx.toFixed(1)), y: Number(ty.toFixed(1)), z: Number(tz.toFixed(1)) },
+      tier: tier <= 0 ? DEFAULT_TIER : tier,
+      // What the tier asked for, which is most of why a low tier is bad at this.
+      reach: Number(ask.reach.toFixed(1)),
+      hardCost: ask.hardCost,
+      // The two heights the rays are cast at, over the spot's own floor: a crouched body's aim
+      // point and a standing one's, straight out of the hitbox, so they move when it does.
+      heights: { crouch: Number(h.low.toFixed(2)), stand: Number(h.stand.toFixed(2)) },
+      blockers: offered,
+      spot,
+      // `spot: null` with blockers listed is a real answer (nothing they stand behind breaks the
+      // line, or nothing behind them can be walked to); `blockers: []` is the wire.
+      why: spot ? `behind blocker ${found?.blocker}, ${spot.kind === 'hard' ? 'hard cover, so it cannot shoot out of it either' : 'crouch cover, so it can rise and shoot'}` : got === 0 ? 'nothing was offered: either there is nothing near or `NpcDeps.blockers` is unwired' : 'something stands near, but no spot behind any of them both breaks the line and can be walked to',
+      cost: { rays: coverSearch.status().lastRays, ms: coverSearch.status().lastMs },
+    };
+  }
+
   constructor(private readonly scene: THREE.Scene, private readonly physics: Physics, private readonly terrain: Terrain, private readonly baseUrl: string) {}
 
   /** What the fighters need from the game: the rack, the effects, the species there are. */
@@ -2058,10 +2906,14 @@ export class NpcManager {
    * Stand one at a point on the ground, of a random species; it dresses and arms itself as its rig
    * loads. `at.y` and `at.inside` put it on a building's floor, in the room the point is in.
    */
-  spawnAt(x: number, z: number, wanted?: string, at: { y?: number; inside?: boolean } = {}): Npc {
+  spawnAt(x: number, z: number, wanted?: string, at: { y?: number; inside?: boolean; tier?: number } = {}): Npc {
     const species = this.deps.species.length ? this.deps.species : SPECIES_FALLBACK;
     const id = (wanted && species.find((s) => s.includes(wanted))) ?? species[Math.floor(Math.random() * species.length)];
     const npc = new Npc(id, this.physics, x, at.y ?? this.terrain.heightAt(x, z), z);
+    npc.setTier(at.tier ?? this.tier);
+    // The one adapter, shared: the searcher's per-step budget is only worth anything if every body
+    // in the world is asking the same one.
+    npc.cover = this.coverDeps;
     npc.cellFrom.copy(npc.pos);
     if (at.inside) npc.cell = this.deps.cellAt?.(npc.pos) ?? null;
     npc.cellSolid = this.deps.cellSolid?.(npc.cell) ?? true;
@@ -2277,10 +3129,19 @@ export class NpcManager {
    */
   private report(opts?: FighterKnob): Record<string, unknown> {
     if (opts) {
-      const { stance, body, postures, posture, ...own } = opts;
+      const { stance, body, postures, posture, tier, skill, cover, step, ...own } = opts;
       Object.assign(FIGHTER_TUNE, own);
       if (stance) tuneStance(stance);
       if (postures) tunePosture(postures);
+      if (skill) tuneGroundSkill(skill);
+      if (cover) tuneCover(cover);
+      if (step) tuneGroundStep(step);
+      // A rung reaches every body out as well as every one stood afterwards, since the whole point
+      // of `tier: 0` is to look at the fighter this game had beside the one it has now.
+      if (typeof tier === 'number' && Number.isFinite(tier)) {
+        this.tier = Math.max(0, Math.round(tier));
+        for (const n of this.npcs) n.setTier(this.tier);
+      }
       if (body) {
         tuneFighterBody(body);
         // The controller's numbers go on to every fighter already out, and so now does the shape:
@@ -2294,7 +3155,24 @@ export class NpcManager {
       // A posture put on by hand reaches every fighter out, and `'auto'` hands them all back.
       if (posture !== undefined) for (const n of this.npcs) n.force(posture === 'auto' || posture === null ? null : posture);
     }
-    return { tune: { ...FIGHTER_TUNE }, stance: { ...STANCE_TUNE }, postures: { ...POSTURE_TUNE }, body: { ...FIGHTER_BODY }, brain: { ...BRAIN_TUNE }, out: this.npcs.length, fighters: this.npcs.map((n) => n.status()) };
+    return {
+      tune: { ...FIGHTER_TUNE },
+      stance: { ...STANCE_TUNE },
+      postures: { ...POSTURE_TUNE },
+      body: { ...FIGHTER_BODY },
+      brain: { ...BRAIN_TUNE },
+      // The ladder, the movement and what the cover search has cost. `cover.blockers` reading 0
+      // over a session in a town is the one way this wave quietly does nothing: it means nothing
+      // was wired to say what stands near a body (`NpcDeps.blockers`), so every search finds no
+      // blockers, casts no rays and answers none.
+      tier: this.tier,
+      skill: GROUND_SKILL,
+      ground: { ...GROUND_TUNE },
+      step: { ...GROUND_STEP },
+      cover: coverSearch.status(),
+      out: this.npcs.length,
+      fighters: this.npcs.map((n) => n.status()),
+    };
   }
 
   dispose(): void {

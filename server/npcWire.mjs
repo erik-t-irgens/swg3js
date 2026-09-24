@@ -46,8 +46,19 @@ export const NPC_WIRE = {
   remember: 4096,
 };
 
-/** What a creature may be doing: the game's own list of states (src/world/mobiles/types.ts). */
-const STATES = ['loading', 'idle', 'wander', 'alert', 'chase', 'attack', 'flee', 'return', 'knockdown', 'dying', 'dead'];
+/**
+ * What a creature may be doing: the game's own list of states (src/world/mobiles/types.ts), which
+ * this must be kept in step with by hand.
+ *
+ * `cover` is the newest of them and is the one word here that nothing sends yet: the bodies that
+ * take cover are the fighters, and a fighter is nobody else's -- it has no spawn record and does
+ * not implement `NpcSubject`, so it never reaches this wire at all. It is listed all the same,
+ * because the rule is that a state word is a state word everywhere, and a word this list has not
+ * got is quietly turned into `idle` below rather than refused: a server left behind would draw a
+ * body standing about while its own browser had it behind a crate. **A server already running must
+ * be restarted for it.**
+ */
+const STATES = ['loading', 'idle', 'wander', 'alert', 'chase', 'attack', 'cover', 'flee', 'return', 'knockdown', 'dying', 'dead'];
 
 /**
  * The things that must be seen once rather than eased into: it was struck, and it left the ground.
