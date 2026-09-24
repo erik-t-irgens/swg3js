@@ -248,10 +248,13 @@ async function put(path: string, body: Blob | string): Promise<number> {
  * renderer is resized once per picture rather than once per pass, because a window resize during
  * the pass would otherwise leave the rest of the pictures at the old size without saying so.
  */
-export async function runShoot(deps: ShootDeps, only?: readonly string[]): Promise<ShootResult> {
+export async function runShoot(deps: ShootDeps, only?: readonly string[], tune?: Partial<typeof SHOOT_TUNE>): Promise<ShootResult> {
+  // The tune is taken as given rather than written back, so one careful run at a smaller size does
+  // not quietly become the size every later run uses.
+  const T = { ...SHOOT_TUNE, ...tune };
   const plan = shootPlan(only);
   const counted = shootCount(plan);
-  const render = backdropRenderFor(SCENE_SHOTS[0]?.camera.fov ?? 62, SHOOT_TUNE.aspect, SHOOT_TUNE.height);
+  const render = backdropRenderFor(SCENE_SHOTS[0]?.camera.fov ?? 62, T.aspect, T.height);
   const started = performance.now();
   const written: ShootResult['written'] = [];
   const failed: ShootResult['failed'] = [];
@@ -283,8 +286,8 @@ export async function runShoot(deps: ShootDeps, only?: readonly string[]): Promi
         deps.placePlayer(spot.stand.x, spot.stand.y, spot.stand.z);
         at.set(spot.camera.x, spot.camera.y, spot.camera.z);
         look.set(spot.camera.look.x, spot.camera.look.y, spot.camera.look.z);
-        const ready = await deps.readyAround(at, SHOOT_TUNE.streamMs);
-        if (!ready) deps.say(`shoot: ${spot.key} did not finish streaming in ${(SHOOT_TUNE.streamMs / 1000) | 0}s; taking it as it stands`);
+        const ready = await deps.readyAround(at, T.streamMs);
+        if (!ready) deps.say(`shoot: ${spot.key} did not finish streaming in ${(T.streamMs / 1000) | 0}s; taking it as it stands`);
 
         for (const step of steps) {
           try {
@@ -303,7 +306,7 @@ export async function runShoot(deps: ShootDeps, only?: readonly string[]): Promi
             camera.updateProjectionMatrix();
             // Settle. Each frame gives the browser back, or the occlusion queries the water's own
             // visibility rides on are never answered and the reflections never draw.
-            for (let i = 0; i < SHOOT_TUNE.settleFrames; i++) {
+            for (let i = 0; i < T.settleFrames; i++) {
               camera.position.copy(at);
               camera.lookAt(look);
               deps.drawFrame();
@@ -315,7 +318,7 @@ export async function runShoot(deps: ShootDeps, only?: readonly string[]): Promi
             // Read after the settle, never before it: the sky blends its rows over several frames
             // and the light on the first frame after the hour moved is the hour before's.
             step.light = deps.readLight();
-            const blob = await grab(deps.renderer, render.width, render.height, SHOOT_TUNE.quality);
+            const blob = await grab(deps.renderer, render.width, render.height, T.quality);
             const bytes = await put(step.path, blob);
             written.push({ path: step.path, bytes });
             deps.say(`shoot: ${step.path} (${(bytes / 1048576).toFixed(2)} MB) ${written.length}/${counted.pictures}`);

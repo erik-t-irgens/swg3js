@@ -2838,8 +2838,12 @@ class App {
        * The figure is hidden while each is taken, the day is pinned at the shot's own hour and given back after,
        * and the window's own size and camera are put back whatever happens. A run of part of it does not rewrite
        * the manifest, so the screens keep reading the pictures that are really there.
+       *
+       * The pictures are 1440 tall by default, and the effects chain allocates several buffers that size: if the
+       * card runs out of memory, `shoot(undefined, { height: 900 })` costs less than half as much and still looks
+       * right behind a character. `quality`, `aspect`, `settleFrames` and `streamMs` move the same way.
        */
-      shoot: async (only?: string[]) => {
+      shoot: async (only?: string[], tune?: Parameters<typeof runShoot>[2]) => {
         const report = await runShoot(
           {
             renderer: this.renderer,
@@ -2871,6 +2875,7 @@ class App {
             say: (line) => console.info(line),
           },
           only,
+          tune,
         );
         return report;
       },
