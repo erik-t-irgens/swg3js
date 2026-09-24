@@ -130,6 +130,55 @@ function fakeGlb(dim: number, mask: boolean): Buffer {
 }
 
 {
+  // Animated surfaces, which are the ones that would break silently. The converter writes a
+  // flip-book as `extras.swg.anim` with a list of **texture indices**, and a scroll as
+  // `extras.swg.scroll`; the game reads them off `userData` and swaps between those textures every
+  // frame. A shrink that renumbered a texture, dropped an image or lost the extras would leave a
+  // sign animating to the wrong frames, or to none, with nothing to say so.
+  const png = encodePng(32, 32, checker(32, 32));
+  const frames = [encodePng(32, 32, checker(32, 32)), encodePng(32, 32, checker(32, 32)), encodePng(32, 32, checker(32, 32))];
+  const bin = Buffer.concat([png, ...frames]);
+  let at = 0;
+  const views = [png, ...frames].map((b) => {
+    const v = { buffer: 0, byteOffset: at, byteLength: b.length };
+    at += b.length;
+    return v;
+  });
+  const doc = {
+    asset: { version: '2.0' },
+    buffers: [{ byteLength: bin.length }],
+    bufferViews: views,
+    images: views.map((_, i) => ({ mimeType: 'image/png', bufferView: i })),
+    textures: views.map((_, i) => ({ source: i })),
+    materials: [
+      {
+        alphaMode: 'OPAQUE',
+        pbrMetallicRoughness: { baseColorTexture: { index: 0 } },
+        extras: { unlit: true, swg: { anim: { mode: 'time', seconds: [0.1, 0.1], map: [1, 2, 3] }, scroll: { map: [0, 0.175] }, alphaMap: 2 } },
+      },
+    ],
+    meshes: [{ primitives: [{ attributes: {}, material: 0 }] }],
+    nodes: [{ mesh: 0 }],
+    scenes: [{ nodes: [0] }],
+    scene: 0,
+  };
+  const out = shrinkModel(buildGlb(doc, bin), () => 16);
+  const back = readGlb(out.buf);
+  const swg = back.json.materials[0].extras?.swg;
+  ok(!!swg, 'a shrunk model keeps the extras the converter wrote on its materials');
+  ok(JSON.stringify(swg.anim.map) === '[1,2,3]', `and the flip-book still names the same texture indices (${JSON.stringify(swg.anim?.map)})`);
+  ok(swg.anim.seconds[0] === 0.1 && swg.scroll.map[1] === 0.175 && swg.alphaMap === 2, 'with its timing, its scroll rate and its alpha map untouched');
+  ok(back.json.images.length === 4 && back.json.textures.length === 4, `every frame of the flip-book survives (${back.json.images.length} images)`);
+  const sizes = back.json.images.map((im: { bufferView: number }) => {
+    const v = back.json.bufferViews[im.bufferView];
+    const d = decodePng(back.bin.subarray(v.byteOffset, v.byteOffset + v.byteLength));
+    return `${d?.width}x${d?.height}`;
+  });
+  ok(new Set(sizes).size === 1, `and every frame comes out the same size as the others, or the swap would jump (${[...new Set(sizes)].join(', ')})`);
+  ok(back.json.materials[0].extras.unlit === true, 'and the other extras the game reads come through with them');
+}
+
+{
   // A real model, if one is installed.
   const dir = 'assets-private/tatooine';
   const file = existsSync(dir) ? readdirSync(dir).find((f) => f.endsWith('.glb')) : null;

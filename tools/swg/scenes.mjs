@@ -143,6 +143,17 @@ export function bakeScenes({ root, spots, creatorKeys, only = null, tune = SCENE
     builtFor: { aspect: tune.aspect, fovPad: tune.fovPad, quality: tune.quality, cullPixels: tune.cullPixels },
     creator: creatorKeys.filter((k) => places.some((p) => p.key === k)),
     places,
+    /**
+     * The planet packs these scenes lean on, which they read rather than copy.
+     *
+     * Only the placed objects needed shrinking: they carry textures sized for walking up to a
+     * wall, and a fixed camera never does. The ground, the sky, the water, the flora and the
+     * particle effects need no such thing -- they are already small, they are already on the disk
+     * beside this, and copying them would have added 12 to 27 MB a world to say the same thing
+     * twice. So a scene names its world and the game loads that world's own terrain rules, sky and
+     * effects exactly as it does in play, which is also what keeps the clouds moving.
+     */
+    packs: [...new Set(places.map((p) => p.pack))],
     models: plan.pool.size,
     bytes: bytesAfter,
   };

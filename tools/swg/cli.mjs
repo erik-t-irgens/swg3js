@@ -2318,6 +2318,28 @@ function packStatus(dir) {
   // The made-up system, if there is one: it is optional, so it is listed rather than asked for.
   const sandboxLine = sandboxStatus(readQuiet(join(dir, SANDBOX_ZONE, 'space.json')));
   console.log(`  ${sandboxLine.line}${sandboxLine.stale ? ` (sandbox <swg-dir> ${dir} --retail-only builds one)` : ''}`);
+  // The creation and selection places. Asked for rather than merely listed, because with none of
+  // them those two screens fall back to a doll on a dark stage and nothing says why. A scene is
+  // built from a planet pack, so one built before its world was last converted is stale: the models
+  // it shrank may no longer be the models that world places.
+  {
+    const sceneMan = readQuiet(join(dir, 'scenes', 'manifest.json'));
+    const manPath = join(dir, 'scenes', 'manifest.json');
+    const builtAt = existsSync(manPath) ? statSync(manPath).mtimeMs : 0;
+    const stalePacks = (sceneMan?.packs ?? []).filter((p) => {
+      const layout = join(dir, p, 'layout.json');
+      return existsSync(layout) && statSync(layout).mtimeMs > builtAt;
+    });
+    // Not asked for before there is a world to build one from: a scene is made out of a planet
+    // pack, so on a fresh folder the thing to do is convert a planet, and saying otherwise would
+    // send somebody to a command that can only answer that none of those worlds is converted yet.
+    const anyWorld = GAME_PLANETS.some((p) => existsSync(join(dir, p, 'layout.json')));
+    if (!anyWorld) console.log('  places: none yet, and none asked for until a world is converted');
+    else if (!sceneMan) need(`scenes ${dir}`, 'the creation and selection screens have no places to stand a character in (scenes/)');
+    else if (sceneMan.format !== 1) need(`scenes ${dir}`, `the places were built in an older format (${sceneMan.format})`);
+    else if (stalePacks.length) need(`scenes ${dir}`, `worlds converted since their places were built (${stalePacks.join(', ')})`);
+    else console.log(`  places: ${sceneMan.places.length} for the creation and selection screens, ${sceneMan.models} models, ${(sceneMan.bytes / 1048576).toFixed(0)} MB`);
+  }
   const galaxyLine = galaxyStatus(readQuiet(join(dir, 'galaxy.json')));
   console.log(`  ${galaxyLine.line}`);
   if (galaxyLine.stale) need(`maps <swg-dir> ${dir} --retail-only`, 'the galaxy map has no shuttle routes (galaxy.json)');

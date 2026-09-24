@@ -265,7 +265,13 @@ process.on('exit', () => rmSync(scratch, { recursive: true, force: true }));
   const real = readStatus(r.stdout);
   ok(real.dir === resolve(out) && !real.done && real.steps[0].command === 'snapshot', 'and asks for the planets first');
   ok(real.steps.every((s) => s.args.includes(resolve(out)) || s.args.some((a) => a.startsWith(resolve(out)))), 'every step names the folder whole');
-  ok(real.steps.every((s) => s.args.includes('--retail-only')), 'every step it asks for is retail-only');
+  // Every step that opens an archive is retail-only. A couple of commands open none at all -- they
+  // are built out of packs that are already converted -- and asking those for `--retail-only` would
+  // be asking them about something they never look at.
+  const ARCHIVE_FREE = new Set(['navgrid', 'scenes']);
+  const fromArchives = real.steps.filter((s) => !ARCHIVE_FREE.has(s.command));
+  ok(fromArchives.every((s) => s.args.includes('--retail-only')), `every step that reads an archive is retail-only (${fromArchives.length} of ${real.steps.length})`);
+  ok(real.steps.filter((s) => ARCHIVE_FREE.has(s.command)).every((s) => !s.args.includes('--retail-only')), 'and the ones that read none do not pretend to care');
   ok(real.lines.some((l) => /tatooine: no pack/.test(l)), 'the human report comes with it');
   const human = spawnSync(process.execPath, [join(root, 'tools', 'swg', 'cli.mjs'), 'status', out], { encoding: 'utf8' });
   ok(human.stdout.includes('to fill the gaps') && !human.stdout.trim().startsWith('{'), 'without --json the report is the human one');
