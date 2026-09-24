@@ -161,7 +161,7 @@ export function hourLabel(name: string, key: string, hour: number): string {
  * these three are the ones whose compositions carry a horizon, a town and a sky between them.
  * Changing this changes nothing else: it is a list of keys and every other screen ignores it.
  */
-export const CREATOR_KEYS: readonly string[] = ['theed-overlook', 'lars-homestead', 'endor-treevillage'];
+export const CREATOR_KEYS: readonly string[] = ['lars-homestead', 'theed-overlook', 'tyrena'];
 
 /** Whether a shot is one the creator offers, by its key. */
 export function isCreatorShot(key: string): boolean {
