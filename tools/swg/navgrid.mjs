@@ -14,8 +14,8 @@
 // A cell is blocked when any of three things is true of it, and each is recorded separately so the
 // census can say which:
 //
-//   slope    the ground rises past the 55 degrees the player's character controller climbs
-//            (`setMaxSlopeClimbAngle`), measured over one pole step, which is the real triangle.
+//   slope    the ground rises past `SLOPE_CLIMB_DEGREES` over one pole step, which is the real
+//            triangle. The number and the whole of the owner's reasoning about it are there.
 //   objects  a placed object's own triangles stand between 0.5 m (the autostep) and 1.6 m (the top
 //            of the capsule) above the ground there. A building's interior rooms are left out:
 //            somebody outside walks into the shell, not into the furniture.
@@ -43,38 +43,68 @@
 // where enough of the fine cells under it are walkable. It exists so the runtime's search has a
 // cheap first pass: a whole world is a million coarse cells, which a search can cross in a few
 // milliseconds, where the fine grid is sixty-seven million and could not be.
+//
+// And beside both goes a second nibble a cell, the **clearance**: how far that cell stands from the
+// nearest thing a body cannot walk on, in cells, capped at `CLEARANCE_MAX`. It is what lets the
+// runtime's search buy a wider berth round a mountain or a wall -- a cell near something costs more
+// to walk than one in the open -- and it is baked rather than worked out at search time for a
+// measured reason: a field that is one value over nearly all of a world deflates to almost nothing
+// (the numbers are in `tools/swg/README.md`), while deriving it would mean reading a square of the
+// bitmap round every cell the search ever opens, tens of millions of reads inside a frame's budget.
+// A cap of `CLEARANCE_MAX` cells is what makes it compress: past that the whole open desert is one
+// number, and the runtime never needs to tell twenty metres of room from thirty.
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { deflateRawSync } from 'node:zlib';
 
-/** The shape of the files this writes; a pack that says anything else is passed over by the game. */
-export const NAV_GRID_VERSION = 1;
+/**
+ * The shape of the files this writes; a pack that says anything else is passed over by the game.
+ *
+ * 2 added the clearance plane. A version 1 grid is simply not read: it has no clearance in it, and
+ * the game would have to carry a second search that knew nothing of berths to use one. Re-baking a
+ * world is one command that opens no archive, so the cheap answer is to re-bake.
+ */
+export const NAV_GRID_VERSION = 2;
 
 /** The player's own numbers, read off `src/player/player.ts` and repeated for fighters in `fighterStance.ts`. */
 export const AGENT_RADIUS = 0.35;
 export const AUTOSTEP = 0.5;
 export const BODY_TOP = 1.6;
 /**
- * The angle the grid calls climbable. It is the player's own `setMaxSlopeClimbAngle(55)`, which
- * every fighter shares, and it was checked in a real physics world under node rather than taken on
- * trust: a character controller driven at a ramp climbs 54 degrees and is stopped dead at 56.
+ * The angle the grid calls climbable, and the owner's own choice rather than a fact about the game.
  *
- * A catalogue mobile is not a controller -- it is a dynamic body with its rotations locked, driven
- * by `setLinvel` -- and the solver decides, so its limit is **not** one angle. Driven at a trimesh
- * ramp for twenty seconds it climbs the whole of a 48-degree face at 5.2 m/s and 6.9 m/s, gets
- * 19 m up it at 3.5 and less than a metre at 1.8; at 1.8 m/s it is already down to 3.9 m at 44.
- * So the limit moves with speed, from about 45 at a walk to about 49 at a hard run, and at every
- * speed and at every size measured -- a womp rat's capsule, a person's, a bantha's -- 50 degrees
- * and above stops it dead.
+ * Two different bodies walk this ground and they are stopped by two different angles.
  *
- * What that settles is the thing that was in doubt, and it is the opposite way round from the
- * worry: the wildlife does **not** scrabble up faces a fighter refuses -- it is stopped by faces a
- * fighter walks, everywhere between about 45 and 55 degrees. The grid is therefore too generous to
- * a creature rather than too mean, which is why `--slope=` is here: a run at 47 covers a mobile at
- * a run and a run at 45 covers one at a walk, each at the cost of refusing a fighter ground it can
- * really climb. Today a creature walks at that face anyway, so nothing is worse than it is.
+ * A **fighter** has the player's own character controller and its `setMaxSlopeClimbAngle(55)`, and
+ * that was checked in a real physics world under node rather than taken on trust: a controller
+ * driven at a ramp climbs 54 degrees and is stopped dead at 56. So for a fighter, 55 is the truth.
+ *
+ * A **catalogue mobile** is not a controller -- it is a dynamic body with its rotations locked,
+ * driven by `setLinvel` -- and the solver decides, so its limit is not one angle at all. Driven at
+ * a trimesh ramp for twenty seconds it climbs the whole of a 48-degree face at 5.2 m/s and 6.9 m/s,
+ * gets 19 m up it at 3.5 and less than a metre at 1.8; at 1.8 m/s it is already down to 3.9 m at
+ * 44. So its limit moves with speed, from about 45 at a walk to about 49 at a hard run, and at
+ * every speed and at every size measured -- a womp rat's capsule, a person's, a bantha's -- 50
+ * degrees and above stops it dead.
+ *
+ * That settles the thing that was in doubt, and the opposite way round from the worry: the wildlife
+ * does **not** scrabble up faces a fighter refuses. It is stopped by faces a fighter walks,
+ * everywhere between about 45 and 55 degrees.
+ *
+ * The default is therefore **47**, which is the owner's call and is written down here as theirs.
+ * Their words were that "even in real life 45 is pretty difficult", and 47 is the run-flat-out
+ * figure above: it is the angle at which every body in the game, the wildlife included, can really
+ * get up the ground the grid is about to promise it.
+ *
+ * **What it costs, plainly.** Ground between 47 and 55 degrees is ground a *fighter* can climb and
+ * this grid now refuses, so a route for a fighter may go round a face it could have walked up. That
+ * is a deliberate trade and not an oversight: a grid that routes a creature up a face it cannot
+ * climb leaves it leaning on the hill until its stuck watch throws the route away, while a grid
+ * that walks a fighter round a slope merely takes it the long way. One failure is visible for the
+ * rest of the evening and the other is a longer walk, so the grid is cut to the body that can do
+ * least. `--slope=` moves it for a run: 55 is the old grid exactly, 45 covers a mobile at a walk.
  */
-export const SLOPE_CLIMB_DEGREES = 55;
+export const SLOPE_CLIMB_DEGREES = 47;
 /** Chest deep: past this the game calls it swimming and there are no feet at all. */
 export const SWIM_DEPTH = 1.2;
 
@@ -88,10 +118,44 @@ export const COARSE = 8;
  */
 export const COARSE_SHARE = 1 / 3;
 
+/**
+ * How far from the nearest unwalkable cell the clearance plane still counts, in cells. Past it
+ * every cell reads the same number, which is what makes the plane compress: on a real world the
+ * open ground is one long run of `CLEARANCE_MAX` and deflate pays almost nothing for it.
+ *
+ * Seven cells is fourteen metres at the terrain's own two, which is a good deal wider than any
+ * berth the runtime asks for (`OUTDOOR_TUNE.berth`) and leaves that knob room to be moved live
+ * without re-baking. It also fits a nibble, so the plane is exactly the size of the region plane
+ * beside it and the two are read the same way.
+ */
+export const CLEARANCE_MAX = 7;
+
 /** Nibble values. 1..RANKS are the largest regions by area; RANKS+1 is anything smaller. */
 export const RANKS = 13;
 export const OTHER_REGION = 14;
 export const INDOOR = 15;
+
+/**
+ * How far round a named town's own centre counts as that town's ground, metres, and how far out
+ * the check then looks for the world's largest walkable region.
+ *
+ * Both invented. The ring has to be wide enough that the answer is the town's streets and not
+ * whichever cell the POI's own point happens to land in -- a town centre lands in a walled yard
+ * often enough that one snapped point is no measurement at all, which is exactly how a bake that
+ * cut two towns off a world was first reported as cutting none.
+ */
+export const TOWN_RING = 120;
+export const TOWN_LOOK = 400;
+
+/**
+ * `OUTDOOR_TUNE.goalSnap` in `src/world/nav/outdoorGrid.ts`, repeated here because the converter
+ * does not import the runtime. It is the distance that decides whether a town standing off the
+ * main region still matters: a goal within it is pulled onto the body's own ground and a real
+ * route is planned to the town's edge, and a goal past it is answered 'unreachable' and the body
+ * steers the whole way, which is the game with no grid at all. A node test fails if the two
+ * numbers ever disagree.
+ */
+export const GOAL_SNAP = 40;
 
 /**
  * How far below and above the ground a portal building's own room geometry still counts as that
@@ -265,14 +329,78 @@ export function readGlbTriangles(file) {
 // ---- the bake ---------------------------------------------------------------------------------
 
 /**
- * The regions, the nibbles, the coarse plane and its edges, from a blocked mask and an indoor mask.
+ * The clearance plane: one nibble a cell, how far it stands from the nearest cell a body may not
+ * walk on, in cells, capped at `clearMax`. An unwalkable cell is 0.
+ *
+ * It is a two-pass chamfer in **thirds of a cell**, the textbook 3-4 approximation of the Euclidean
+ * distance (3 for an orthogonal step, 4 for a diagonal), which is within about 6% of the truth and
+ * costs two sweeps of the world rather than a flood per cell. Everything starts at
+ * `(clearMax + 1) * 3` and only ever falls, so nothing can overflow the byte it is held in and no
+ * value under the cap is ever wrong; everything at or over the cap clamps to `clearMax`, which is
+ * exactly the answer the runtime wants there.
+ *
+ * **Off the edge of the world counts as unwalkable**, so the map's own rim carries a berth like any
+ * other edge. It costs one branch a cell and saves the runtime a rule of its own.
+ */
+export function clearanceNibbles(nx, nz, walkable, clearMax = CLEARANCE_MAX) {
+  const cap = (clearMax + 1) * 3;
+  const n = nx * nz;
+  const d = new Uint8Array(n);
+  for (let k = 0; k < n; k++) d[k] = walkable(k) ? cap : 0;
+  for (let j = 0; j < nz; j++) {
+    for (let i = 0; i < nx; i++) {
+      const k = j * nx + i;
+      let v = d[k];
+      if (!v) continue;
+      const up = j > 0;
+      const w = (i > 0 ? d[k - 1] : 0) + 3;
+      if (w < v) v = w;
+      const nn = (up ? d[k - nx] : 0) + 3;
+      if (nn < v) v = nn;
+      const nw = (up && i > 0 ? d[k - nx - 1] : 0) + 4;
+      if (nw < v) v = nw;
+      const ne = (up && i + 1 < nx ? d[k - nx + 1] : 0) + 4;
+      if (ne < v) v = ne;
+      d[k] = v;
+    }
+  }
+  for (let j = nz - 1; j >= 0; j--) {
+    for (let i = nx - 1; i >= 0; i--) {
+      const k = j * nx + i;
+      let v = d[k];
+      if (!v) continue;
+      const down = j + 1 < nz;
+      const e = (i + 1 < nx ? d[k + 1] : 0) + 3;
+      if (e < v) v = e;
+      const s = (down ? d[k + nx] : 0) + 3;
+      if (s < v) v = s;
+      const se = (down && i + 1 < nx ? d[k + nx + 1] : 0) + 4;
+      if (se < v) v = se;
+      const sw = (down && i > 0 ? d[k + nx - 1] : 0) + 4;
+      if (sw < v) v = sw;
+      d[k] = v;
+    }
+  }
+  const out = new Uint8Array(Math.ceil(n / 2));
+  for (let k = 0; k < n; k++) {
+    const v = d[k] ? Math.min(clearMax, Math.round(d[k] / 3)) : 0;
+    const b = k >> 1;
+    if (k & 1) out[b] = (out[b] & 0x0f) | (v << 4);
+    else out[b] = (out[b] & 0xf0) | v;
+  }
+  return out;
+}
+
+/**
+ * The regions, the nibbles, the coarse plane, its edges and the clearance, from a blocked mask and
+ * an indoor mask.
  *
  * It is a function of its own because it is the whole of the grid's arithmetic and none of its
  * reading: a node test draws a world by hand, calls this, and checks the very bytes the converter
  * writes. `solid` is one byte a cell, non-zero for blocked; `flags` carries the indoor mark under
  * `indoorBit`.
  */
-export function packGrid(nx, nz, solid, flags, indoorBit, coarseStep, log = () => {}) {
+export function packGrid(nx, nz, solid, flags, indoorBit, coarseStep, log = () => {}, clearMax = CLEARANCE_MAX) {
   // Two floods rather than one: the first counts the regions and keeps a seed for each, the second
   // writes the ranks. That costs a second pass and saves holding a label for every one of sixty-seven
   // million cells, which is what a single pass would need.
@@ -455,7 +583,63 @@ export function packGrid(nx, nz, solid, flags, indoorBit, coarseStep, log = () =
       }
     }
   }
-  return { nibbles, coarse, edges, regions, cnx, cnz };
+  // The clearance is measured against the very predicate the search walks under, so a building's
+  // own footprint earns a berth exactly as a cliff does: a body walking past a cantina should not
+  // scrape its wall either, and `walkable` is the one place that says what may be stood on.
+  const clear = clearanceNibbles(nx, nz, walkable, clearMax);
+  return { nibbles, coarse, edges, clear, regions, cnx, cnz };
+}
+
+/**
+ * Where one named town stands on a finished grid: the region most of the open ground within
+ * `TOWN_RING` of its centre belongs to, and how far the world's largest walkable region (rank 1)
+ * reaches toward it, in metres.
+ *
+ * It exists because a slope angle can take a town off the main region and **nothing else in the
+ * pipeline would say so**. The check that was tried first took one point per town -- the nearest
+ * open cell to the POI's own centre -- and compared region ids; on the two Corellian towns a
+ * rebake really did cut off, that point landed in a walled yard at every angle, so both read
+ * "already apart" and the severance was invisible. One snapped point is not a measurement of a
+ * town: the ground round it is.
+ *
+ * `nibble(k)` reads the finished region plane, which is why this takes an accessor rather than the
+ * packed bytes -- a node test hands it a world drawn by hand.
+ */
+export function townStanding(nibble, nx, nz, i0, j0, ringCells, lookCells) {
+  const tally = new Map();
+  let open = 0;
+  for (let dj = -ringCells; dj <= ringCells; dj++) {
+    for (let di = -ringCells; di <= ringCells; di++) {
+      const i = i0 + di, j = j0 + dj;
+      if (i < 0 || j < 0 || i >= nx || j >= nz) continue;
+      const v = nibble(j * nx + i);
+      if (!(v > 0 && v < INDOOR)) continue;
+      open++;
+      tally.set(v, (tally.get(v) ?? 0) + 1);
+    }
+  }
+  let region = -1;
+  let best = 0;
+  for (const [v, n] of tally) if (n > best) { best = n; region = v; }
+  // Ring by ring outward. The rings are square and the answer is a **distance**, so stopping at the
+  // first ring that holds a rank-1 cell is not enough: that cell may be in the ring's corner, at
+  // `r * sqrt(2)`, while a nearer one sits in the middle of an edge two rings further out. Every
+  // cell of ring r is at least r away, so the search may stop once r passes the best distance
+  // found, and no sooner -- which costs about four tenths more rings and makes the number exact
+  // rather than up to 41% over.
+  let rank1 = Infinity;
+  if (i0 >= 0 && j0 >= 0 && i0 < nx && j0 < nz && nibble(j0 * nx + i0) === 1) rank1 = 0;
+  for (let r = 1; r <= lookCells && r <= rank1; r++) {
+    for (let d = -r; d <= r; d++) {
+      for (const [i, j] of [[i0 + d, j0 - r], [i0 + d, j0 + r], [i0 - r, j0 + d], [i0 + r, j0 + d]]) {
+        if (i < 0 || j < 0 || i >= nx || j >= nz) continue;
+        if (nibble(j * nx + i) !== 1) continue;
+        const dd = Math.hypot(i - i0, j - j0);
+        if (dd < rank1) rank1 = dd;
+      }
+    }
+  }
+  return { region, share: open ? best / open : 0, open, rank1Cells: rank1 };
 }
 
 /**
@@ -765,10 +949,68 @@ export async function buildNavGrid(dir, opts = {}) {
   // The regions, the nibbles, the coarse plane and its edges. It is one call because a node test
   // drives the very same code over a world drawn by hand: everything below this line is arithmetic
   // over the blocked and indoor masks, and nothing in it has ever seen an archive.
-  const packed = packGrid(nx, nz, solid, flags, MARK_INDOOR, COARSE, (line) => log(`  ${line}`));
-  const { nibbles, coarse, edges, regions } = packed;
+  const clearMax = Math.max(1, Math.min(15, Math.round(Number(opts.clearMax ?? CLEARANCE_MAX))));
+  const packed = packGrid(nx, nz, solid, flags, MARK_INDOOR, COARSE, (line) => log(`  ${line}`), clearMax);
+  const { nibbles, coarse, edges, clear, regions } = packed;
   const cnx = packed.cnx;
   const cnz = packed.cnz;
+  // What the clearance plane came to, which is the one number that says whether a berth can be
+  // bought on this world at all: a world whose open ground is all at 1 or 2 has no room to stand
+  // off anything, and the runtime's cost curve would then only ever be a surcharge.
+  const clearHistogram = new Array(clearMax + 1).fill(0);
+  for (let k = 0; k < nx * nz; k++) {
+    const b = clear[k >> 1];
+    clearHistogram[k & 1 ? b >> 4 : b & 0x0f]++;
+  }
+
+  // ---- where the named towns ended up ----------------------------------------------------------
+  // The one thing a change to `SLOPE_CLIMB_DEGREES` can do that nothing else in the pipeline would
+  // notice: take a town off the world's main walkable region, so every body in it is on an island
+  // and every errand to it is answered 'unreachable'. It costs one pass over a few hundred-metre
+  // squares and it is the difference between that shipping and that being read off the bake's own
+  // output. A pack with no `pois.json` is simply not checked, as one with no floors is not.
+  const towns = [];
+  {
+    const poiFile = join(dir, 'pois.json');
+    let list = [];
+    if (existsSync(poiFile)) {
+      try {
+        list = (JSON.parse(readFileSync(poiFile, 'utf8')).pois ?? []).filter((p) => p.kind === 'city' && Number.isFinite(p.x) && Number.isFinite(p.z));
+      } catch { list = []; }
+    }
+    const nibble = (k) => {
+      const b = nibbles[k >> 1];
+      return k & 1 ? b >> 4 : b & 0x0f;
+    };
+    const ringCells = Math.max(1, Math.round(TOWN_RING / cell));
+    const lookCells = Math.max(1, Math.round(TOWN_LOOK / cell));
+    for (const p of list) {
+      // The same frame conversion the placements take: gx = centerX - swgX, gz = swgZ - centerZ.
+      const gx = cx - p.x;
+      const gz = p.z - cz;
+      const i0 = Math.floor((gx - x0) / cell);
+      const j0 = Math.floor((gz - z0) / cell);
+      const s = townStanding(nibble, nx, nz, i0, j0, ringCells, lookCells);
+      towns.push({
+        name: p.name,
+        region: s.region,
+        share: Number(s.share.toFixed(3)),
+        open: s.open,
+        rank1: Number.isFinite(s.rank1Cells) ? Number((s.rank1Cells * cell).toFixed(1)) : null,
+      });
+    }
+    // A town is cut off when its own ground is not the main region **and** the main region does not
+    // reach within the distance a goal is pulled over. Inside that distance the game still plans a
+    // real route to the town's edge and the body steers the last few metres, which is what several
+    // coastal towns have always done; past it there are no corners at all.
+    const cut = towns.filter((t) => t.region !== 1 && (t.rank1 === null || t.rank1 > GOAL_SNAP));
+    if (cut.length) {
+      log(`  WARNING: ${cut.length} of ${towns.length} named town${cut.length === 1 ? ' stands' : 's stand'} on ground the largest walkable region does not reach within ${GOAL_SNAP} m, so a body sent to one is answered 'unreachable' and steers the whole way: ${cut.map((t) => `${t.name} (region ${t.region}, rank 1 ${t.rank1 === null ? `over ${TOWN_LOOK}` : t.rank1} m off)`).join(', ')}`);
+      log(`  if that is new, it is the slope: re-bake this world with --slope=<higher> and compare, since the angle is the only thing that moves it`);
+    } else if (towns.length) {
+      log(`  all ${towns.length} named towns stand on or within ${GOAL_SNAP} m of the largest walkable region`);
+    }
+  }
 
   const seconds = (Date.now() - started) / 1000;
   const header = {
@@ -789,10 +1031,19 @@ export async function buildNavGrid(dir, opts = {}) {
     // beside the two they made is the whole of the check.
     center: { x: cx, z: cz },
     ranks: RANKS,
+    clearMax,
     regions: regions.slice(0, RANKS).map((r, i) => ({ rank: i + 1, cells: r.cells, km2: Number(((r.cells * cell * cell) / 1e6).toFixed(3)) })),
     otherRegions: Math.max(0, regions.length - RANKS),
     slopeDegrees: Number(opts.slope ?? SLOPE_CLIMB_DEGREES),
+    // Where each named town ended up, so `status` can say it tomorrow and two bakes at two angles
+    // can be held against each other without re-measuring either. `rank1` is metres to the nearest
+    // cell of the largest walkable region, or null when it is further off than `TOWN_LOOK`.
+    towns,
     stats: {
+      // Cells at each clearance, 0 (unwalkable) first: how much room this world really has to
+      // stand off anything. It is written down because the runtime's berth is only worth its
+      // arithmetic where there are cells to buy it with.
+      clearance: clearHistogram,
       slope: slopeCells,
       objects: objectCells,
       water: waterCells,
@@ -808,21 +1059,26 @@ export async function buildNavGrid(dir, opts = {}) {
       seconds: Number(seconds.toFixed(1)),
     },
   };
-  return { header, nibbles, coarse, edges, regions };
+  return { header, nibbles, coarse, edges, clear, regions };
 }
 
 /**
  * Write one world's grid into its pack: `nav.json` beside the manifest and `nav.bin` beside it, the
- * nibbles and the coarse plane in one raw-deflate stream so the browser can inflate them in one go.
+ * region nibbles, the coarse plane, its edges and the clearance nibbles in one raw-deflate stream
+ * so the browser can inflate them in one go.
+ *
+ * The planes go in that order and the header says how long each is, so a reader takes four
+ * subarrays of one buffer and copies nothing.
  */
 export function writeNavGrid(dir, built) {
-  const { header, nibbles, coarse, edges } = built;
-  const joined = new Uint8Array(nibbles.length + coarse.length + edges.length);
+  const { header, nibbles, coarse, edges, clear } = built;
+  const joined = new Uint8Array(nibbles.length + coarse.length + edges.length + clear.length);
   joined.set(nibbles, 0);
   joined.set(coarse, nibbles.length);
   joined.set(edges, nibbles.length + coarse.length);
+  joined.set(clear, nibbles.length + coarse.length + edges.length);
   const packed = deflateRawSync(joined, { level: 9 });
-  const out = { ...header, file: 'nav.bin', fineBytes: nibbles.length, coarseBytes: coarse.length, edgeBytes: edges.length, packedBytes: packed.length };
+  const out = { ...header, file: 'nav.bin', fineBytes: nibbles.length, coarseBytes: coarse.length, edgeBytes: edges.length, clearBytes: clear.length, packedBytes: packed.length };
   mkdirSync(dirname(join(dir, 'nav.json')), { recursive: true });
   writeFileSync(join(dir, 'nav.json'), `${JSON.stringify(out, null, 2)}\n`);
   writeFileSync(join(dir, 'nav.bin'), packed);

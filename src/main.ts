@@ -149,6 +149,7 @@ import type { Vehicle, VehicleKind } from './vehicles/vehicle';
 import { HEAD_TO_EYE, SEATED_EYE_FALLBACK, SEAT_RULE, cockpitYawStep, frameFileName, mirroredOffset, seatDropUsed } from './vehicles/cockpitSeat';
 import { World } from './world/world';
 import { worldNav } from './world/nav/nav.ts';
+import { outdoorNav } from './world/nav/outdoorNav.ts';
 // The long walk: its numbers and its knob. The order itself is `NpcManager.send`; this file only
 // has to turn a place name or a pair of coordinates into a point, because the world's own named
 // places are the App's (`placesHere`) and nothing under `src/world/` can see them.
@@ -3831,13 +3832,27 @@ class App {
        * `nav({ describe: true })` reads every room's floor in the building you are standing in and
        * says what it came out as. `converted: false` is the whole of "nothing here is running":
        * that is a pack from before the floors, and every body indoors steers straight at its goal.
+       *
+       * The answer's `outdoor` is the other half: the world's baked walkability grid, what its
+       * searches have come to and what the last one cost. `nav({ outdoor: { berth: 0 } })` moves
+       * any of that side's invented numbers live (`OUTDOOR_TUNE` and `OUTDOOR_AGENT` in
+       * `src/world/nav/outdoorGrid.ts` and `outdoorNav.ts`), which is where the berth lives: a
+       * `berthCost` of 0 is the search exactly as it was before bodies gave anything a wide berth,
+       * and `berth` cannot usefully be raised past `clearMax` cells, which is what the bake stored.
+       * `ready: false` there is a world nobody has run `npm run swg -- navgrid` over, and every
+       * body outdoors in it steers straight at its goal as it always did.
        */
-      nav: (tune?: Partial<import('./world/nav/navMesh').NavTune> & { describe?: boolean }) => {
-        if (tune) worldNav.set(tune);
+      nav: (tune?: Partial<import('./world/nav/navMesh').NavTune> & {
+        describe?: boolean;
+        outdoor?: Partial<import('./world/nav/outdoorGrid').OutdoorTune & import('./world/nav/outdoorNav').OutdoorAgentTune>;
+      }) => {
+        const { outdoor, ...indoor } = tune ?? {};
+        if (Object.keys(indoor).length) worldNav.set(indoor);
+        if (outdoor) outdoorNav.set(outdoor);
         // `buildingAt` allocates a CellState, which is why this is a thing to type rather than
         // something a frame does.
         const here = tune?.describe ? this.world.buildingAt(this.player.worldPos) : null;
-        return { ...worldNav.status(), building: here ? worldNav.describe(here.building) : null };
+        return { ...worldNav.status(), outdoor: outdoorNav.status(), building: here ? worldNav.describe(here.building) : null };
       },
       /**
        * Where a body would get to, out of the line of fire, and what looking for it cost

@@ -12,17 +12,24 @@
 // each of them is open -- which is the bug that made four cross-country routes stop dead.
 import assert from 'node:assert/strict';
 import {
+  CLEARANCE_MAX,
   COARSE,
+  GOAL_SNAP,
   INDOOR,
   INDOOR_ABOVE,
   INDOOR_BELOW,
   NAV_GRID_VERSION,
   OTHER_REGION,
   RANKS,
+  SLOPE_CLIMB_DEGREES,
+  TOWN_LOOK,
+  TOWN_RING,
+  clearanceNibbles,
   indoorFootprint,
   isBuildingDef,
   packGrid,
   readGlbTriangles,
+  townStanding,
 } from '../navgrid.mjs';
 import {
   NAV_GRID_VERSION as RUNTIME_VERSION,
@@ -31,15 +38,20 @@ import {
   NAV_RANKS,
   OUTDOOR_TUNE,
   OutdoorWork,
+  berthAt,
+  berthOf,
+  berthPenalty,
   cellOf,
   cellX,
   cellZ,
+  clearAt,
   coarseJoins,
   coarseSearch,
   decodeGrid,
   isIndoor,
   isOpen,
   lineClear,
+  lineClearance,
   nearestOpen,
   nibbleAt,
   planRoute,
@@ -84,10 +96,11 @@ function draw(rows: string[], coarseStep = COARSE): Drawn {
       else if (c === 'B') flags[j * nx + i] = 1;
     }
   }
-  const p = packGrid(nx, nz, solid, flags, 1, coarseStep) as {
+  const p = packGrid(nx, nz, solid, flags, 1, coarseStep, undefined, CLEARANCE_MAX) as {
     nibbles: Uint8Array;
     coarse: Uint8Array;
     edges: Uint8Array;
+    clear: Uint8Array;
     regions: { seed: number; cells: number }[];
     cnx: number;
     cnz: number;
@@ -106,11 +119,14 @@ function draw(rows: string[], coarseStep = COARSE): Drawn {
     fineBytes: p.nibbles.length,
     coarseBytes: p.coarse.length,
     edgeBytes: p.edges.length,
+    clearBytes: p.clear.length,
+    clearMax: CLEARANCE_MAX,
   };
-  const bytes = new Uint8Array(p.nibbles.length + p.coarse.length + p.edges.length);
+  const bytes = new Uint8Array(p.nibbles.length + p.coarse.length + p.edges.length + p.clear.length);
   bytes.set(p.nibbles, 0);
   bytes.set(p.coarse, p.nibbles.length);
   bytes.set(p.edges, p.nibbles.length + p.coarse.length);
+  bytes.set(p.clear, p.nibbles.length + p.coarse.length + p.edges.length);
   const grid = decodeGrid(header, bytes);
   assert.ok(grid, 'the drawn world decodes');
   return { grid: grid as OutdoorGrid, work: new OutdoorWork(header, 4096), header, bytes, nx, nz };
@@ -327,6 +343,230 @@ ok(RANKS === NAV_RANKS && OTHER_REGION === NAV_OTHER && INDOOR === NAV_INDOOR, '
   const reach = Math.hypot(lastX - start[0], w.work.pulled[(n - 1) * 2 + 1] - start[1]);
   ok(reach < OUTDOOR_TUNE.horizon * 2, `the last corner is ${reach.toFixed(0)} m off, inside the ${OUTDOOR_TUNE.horizon} m horizon's own reach`);
   ok(reach > OUTDOOR_TUNE.straight, 'and further than the plain sight test would have answered');
+}
+
+// ---- the berth ----------------------------------------------------------------------------------
+// A cell near something a body cannot walk on costs the fine search more than a cell in the open,
+// so a route stands off a mountain or a wall instead of scraping it. Everything about it is
+// invented, so what is pinned here is the two things it must never do -- reach past its own berth,
+// and close a way through -- and the one thing the owner asked for, which is that a route along a
+// long face really does move off it.
+
+/** The least room, in cells, the walked route keeps: every leg of the pull measured end to end. */
+function roomAlong(w: Drawn, from: [number, number]): number {
+  let px = from[0];
+  let pz = from[1];
+  let worst = Infinity;
+  for (let i = 0; i < w.work.pulledCount; i++) {
+    const r = lineClearance(w.grid, px, pz, w.work.pulled[i * 2], w.work.pulled[i * 2 + 1]);
+    if (r < worst) worst = r;
+    px = w.work.pulled[i * 2];
+    pz = w.work.pulled[i * 2 + 1];
+  }
+  return worst;
+}
+
+/** The tune with the berth switched off entirely: the search exactly as it was before there was one. */
+const NO_BERTH: OutdoorTune = { ...OUTDOOR_TUNE, berthCost: 0, berthPull: 0 };
+
+{
+  // The clearance plane itself, on a world with one blocked cell in the middle of it. The chamfer is
+  // checked cell by cell rather than by eye, because everything else here rests on it.
+  const nx = 32;
+  const nz = 32;
+  const rows: string[] = [];
+  for (let j = 0; j < nz; j++) {
+    let line = '';
+    for (let i = 0; i < nx; i++) line += i === 16 && j === 16 ? '#' : '.';
+    rows.push(line);
+  }
+  const w = draw(rows);
+  const cell = (i: number, j: number): number => clearAt(w.grid, j * nx + i);
+  ok(cell(16, 16) === 0, 'a cell nothing may stand on has no clearance at all');
+  ok(cell(17, 16) === 1 && cell(16, 17) === 1, 'its neighbours stand one cell off it');
+  ok(cell(17, 17) === 1, 'and so does the one on the diagonal, which is 1.41 cells away and rounds to one');
+  ok(cell(18, 16) === 2 && cell(19, 16) === 3, 'the next cells out are two and three');
+  ok(cell(16, 0) === 1 && cell(0, 16) === 1, 'the edge of the world counts as something too, so the rim keeps no room');
+  ok(cell(8, 8) === CLEARANCE_MAX, `and open ground reads the cap (${CLEARANCE_MAX} cells), which is what makes the plane compress`);
+  // The chamfer is its own function and is driven directly, since the bake calls it over sixty-seven
+  // million cells and a mistake in it is silent everywhere.
+  const bare = clearanceNibbles(8, 8, () => true, 3) as Uint8Array;
+  ok((bare[0] & 0x0f) === 1, 'a world with nothing in it still has a rim');
+  ok(((bare[(3 * 8 + 3) >> 1] >> (((3 * 8 + 3) & 1) * 4)) & 0x0f) === 3, 'and its middle reads the cap it was given');
+}
+
+{
+  // A long face with open ground under it. The straight run along it scrapes the wall; the berth is
+  // what makes the route step off it and run parallel a few metres out, which is the whole of what
+  // the owner asked for.
+  const nx = 120;
+  const nz = 40;
+  const rows: string[] = [];
+  for (let j = 0; j < nz; j++) {
+    let line = '';
+    for (let i = 0; i < nx; i++) line += j <= 20 && i >= 20 && i <= 100 ? '#' : '.';
+    rows.push(line);
+  }
+  const w = draw(rows);
+  const from = at(5, 22);
+  const to = at(115, 22);
+
+  ok(planRoute(w.grid, w.work, ...from, ...to, NO_BERTH) === 'found', 'with the berth off, a run along a long face is found');
+  const hugged = roomAlong(w, from);
+  const huggedOpened = w.work.fineOpened;
+  const huggedCorners = w.work.pulledCount;
+
+  ok(planRoute(w.grid, w.work, ...from, ...to) === 'found', 'and with it on it is found too');
+  const wide = roomAlong(w, from);
+  ok(wide > hugged, `the route stands ${wide} cells off the face where before it kept ${hugged}`);
+  ok(wide * CELL >= OUTDOOR_TUNE.berthPull, `and it keeps at least the ${OUTDOOR_TUNE.berthPull} m the string-pull asks of a leg`);
+  ok(w.work.pulledCount <= huggedCorners + 4, `it costs ${w.work.pulledCount - huggedCorners} more corners, not a list of them`);
+  ok(w.work.fineOpened < huggedOpened * 4, `and ${w.work.fineOpened} fine cells against ${huggedOpened}: a berth is searched for, not searched around`);
+}
+
+{
+  // Open country is not touched at all. Every cell along this corridor is further from anything than
+  // the berth reaches, so the term is exactly nought and the search opens the very cells it did
+  // before there were berths -- which is the promise that the commonest case pays nothing.
+  const nx = 120;
+  const nz = 40;
+  const rows: string[] = [];
+  for (let j = 0; j < nz; j++) rows.push('.'.repeat(nx));
+  const w = draw(rows);
+  const from = at(5, 20);
+  const to = at(115, 20);
+  planRoute(w.grid, w.work, ...from, ...to, NO_BERTH);
+  const plainOpened = w.work.fineOpened;
+  const plainCorners = w.work.pulledCount;
+  const plainFirst = w.work.pulled[0];
+  planRoute(w.grid, w.work, ...from, ...to);
+  ok(w.work.fineOpened === plainOpened, `open ground opens the same ${plainOpened} fine cells either way`);
+  ok(w.work.pulledCount === plainCorners && w.work.pulled[0] === plainFirst, 'and hands back the very same corners');
+}
+
+{
+  // The one thing a berth must never do. A wall five cells thick with a single open cell through it:
+  // the way through is one cell wide, so every step of it is as dear as a step can be, and it is
+  // still the route -- because the surcharge is added and bounded, and no finite surcharge can beat
+  // a way round that does not exist.
+  const nx = 120;
+  const nz = 40;
+  const rows: string[] = [];
+  for (let j = 0; j < nz; j++) {
+    let line = '';
+    for (let i = 0; i < nx; i++) line += i >= 58 && i <= 62 && j !== 20 ? '#' : '.';
+    rows.push(line);
+  }
+  const w = draw(rows);
+  const from = at(5, 20);
+  const to = at(115, 20);
+  const out = planRoute(w.grid, w.work, ...from, ...to);
+  ok(out === 'found', `a gap one cell wide that is the only way through answers '${out}' with the berth on`);
+  let through = false;
+  for (let i = 0; i < w.work.rawCount; i++) {
+    if (Math.abs(w.work.raw[i * 2] - at(60, 20)[0]) < CELL && Math.abs(w.work.raw[i * 2 + 1] - at(60, 20)[1]) < CELL) through = true;
+  }
+  ok(through, 'and the path really goes through it rather than somewhere the grid does not have');
+  ok(clearAt(w.grid, 20 * nx + 60) === 1, 'even though every cell of it keeps one cell of room, which is the dearest ground there is');
+}
+
+{
+  // The curve itself, swept. It is the whole of the invented part, so what it may not do is pinned
+  // here rather than inferred from a route.
+  const cellM = 2;
+  const maxCells = CLEARANCE_MAX;
+  const reach = OUTDOOR_TUNE.berth / cellM;
+  ok(Math.abs(berthPenalty(0, cellM, maxCells) - OUTDOOR_TUNE.berthCost) < 1e-9, `nought room costs the full ${OUTDOOR_TUNE.berthCost} share`);
+  ok(berthPenalty(reach, cellM, maxCells) === 0 && berthPenalty(reach + 3, cellM, maxCells) === 0, 'at the berth and past it the term is exactly nought, not merely small');
+  let falling = true;
+  let last = Infinity;
+  for (let c = 0; c <= reach; c += 0.25) {
+    const p = berthPenalty(c, cellM, maxCells);
+    if (p > last + 1e-12) falling = false;
+    last = p;
+  }
+  ok(falling, 'and it only ever falls as the room grows');
+  // The relation that is not arbitrary, and the reason the ramp is straight. The fine search is a
+  // weighted A*: it buys its speed by accepting any route within `fineWeight` of the cheapest, so a
+  // surcharge moves a route only as far out as its own slope beats that greed. Below this the berth
+  // is arithmetic that changes no route at all, which is exactly what a square at 1.5 did.
+  const slope = (berthPenalty(0, cellM, maxCells) - berthPenalty(1, cellM, maxCells)) / 1;
+  ok(slope > OUTDOOR_TUNE.fineWeight - 1, `a cell of room is worth ${slope.toFixed(2)} against the search's own greed of ${(OUTDOOR_TUNE.fineWeight - 1).toFixed(2)}, so the berth really reaches`);
+  ok(OUTDOOR_TUNE.berthCurve === 1, 'which is what a straight ramp gives and a square does not: its slope dies where the greed does');
+  ok(berthPenalty(0, cellM, maxCells, { ...OUTDOOR_TUNE, berthCost: 0 }) === 0, 'a `berthCost` of nought is the search with no berth in it at all');
+  ok(berthPenalty(2, cellM, maxCells, { ...OUTDOOR_TUNE, berthCurve: 2 }) < berthPenalty(2, cellM, maxCells), 'and a square is the gentler of the two shapes everywhere between');
+  // A berth raised past what the bake counted cannot reach further, because every cell out there
+  // carries the same number; the curve is clamped to that rather than flattening over a lie.
+  const greedy: OutdoorTune = { ...OUTDOOR_TUNE, berth: (maxCells + 6) * cellM };
+  ok(berthPenalty(maxCells, cellM, maxCells, greedy) === 0, 'and one raised past the cap the bake stored still reaches exactly the cap');
+  // The curve swept above is worth nothing if the search runs its own copy of it, which is what it
+  // did: four lines inlined in `corridorSearch` and four here, agreeing today and free to drift.
+  // They are one function now, and this is what says so -- `berthPenalty` **is** what the search
+  // adds to a step, hoisted, so a sweep of it is a sweep of the search.
+  let worst = 0;
+  for (const t of [OUTDOOR_TUNE, { ...OUTDOOR_TUNE, berthCurve: 2 }, { ...OUTDOOR_TUNE, berthCost: 1.5 }, { ...OUTDOOR_TUNE, berthCost: 0 }, { ...OUTDOOR_TUNE, berth: 0 }, greedy]) {
+    const b = berthOf(cellM, maxCells, t as OutdoorTune);
+    for (let c = 0; c <= maxCells; c++) worst = Math.max(worst, Math.abs(berthAt(b, c) - berthPenalty(c, cellM, maxCells, t as OutdoorTune)));
+  }
+  ok(worst === 0, 'the hoisted form the search runs and the one-call form this sweeps are the same arithmetic, exactly');
+  ok(berthOf(cellM, maxCells, { ...OUTDOOR_TUNE, berth: 0 }).share === 0, 'a berth of nought metres is switched off at the top of the search rather than tested per cell');
+}
+
+// ---- the named towns, which is the one thing only the bake can see ------------------------------
+{
+  // A world cut in two by a wall, with three towns on it: one out on the big half, one out on the
+  // small half, and one on the small half hard against the wall. Each town's own centre stands in a
+  // walled yard, which is the shape that matters here -- a town centre lands in one often enough
+  // that measuring a town by the single cell its centre snaps to says nothing about the town at
+  // all, and that is exactly how a rebake that cut two Corellian towns off their world came to be
+  // reported as cutting none.
+  //
+  // The ring is the test's own 40 m rather than the shipped `TOWN_RING`, because the drawn world is
+  // smaller than 120 m across; the shipped numbers are pinned as numbers below.
+  const nx = 200;
+  const nz = 60;
+  const towns: [number, number][] = [[60, 30], [170, 30], [140, 30]];
+  const rows: string[] = [];
+  for (let j = 0; j < nz; j++) {
+    let line = '';
+    for (let i = 0; i < nx; i++) {
+      const wall = i >= 130 && i <= 134;
+      // A 5x5 ring of wall with a 3x3 open yard inside it: the centre is open, and it is its own
+      // little walkable region with nothing to do with the ground round the town.
+      const yard = towns.some(([ti, tj]) => Math.max(Math.abs(i - ti), Math.abs(j - tj)) === 2);
+      line += wall || yard ? '#' : '.';
+    }
+    rows.push(line);
+  }
+  const w = draw(rows);
+  const nibble = (k: number): number => nibbleAt(w.grid, k);
+  const ring = 20;
+  const look = 200;
+  type Standing = { region: number; share: number; open: number; rank1Cells: number };
+  const big = townStanding(nibble, nx, nz, 60, 30, ring, look) as Standing;
+  const far = townStanding(nibble, nx, nz, 170, 30, ring, look) as Standing;
+  const near = townStanding(nibble, nx, nz, 140, 30, ring, look) as Standing;
+  ok(big.region === 1 && big.rank1Cells * CELL <= GOAL_SNAP, 'the town out on the big half reads the largest walkable region, right under it');
+  ok(far.region === 2, `the town out on the small half reads region ${far.region}, which is not the largest`);
+  ok(far.rank1Cells * CELL > GOAL_SNAP, `and the largest region is ${(far.rank1Cells * CELL).toFixed(0)} m off, past the ${GOAL_SNAP} m a goal is pulled: every errand to it is answered 'unreachable'`);
+  ok(near.region === 2 && near.rank1Cells * CELL <= GOAL_SNAP, `the town against the wall also stands on region ${near.region}, but the largest region is ${(near.rank1Cells * CELL).toFixed(0)} m off, so a route is still planned to its doorstep and the body steers the rest`);
+  ok(big.share > 0.8 && far.share > 0.8 && near.share > 0.5, 'each answer is the ground round its town and not one cell of it');
+  // And the reason it is measured that way rather than from the town's own point.
+  const snapped = towns.map(([i, j]) => nibble(j * nx + i));
+  ok(snapped.every((v) => v > 2), `each town centre itself snaps into its own walled yard (regions ${snapped.join(', ')}), so one point would have called all three of them apart and said nothing about any of them`);
+  ok(GOAL_SNAP === OUTDOOR_TUNE.goalSnap, `the bake's idea of how far a goal is pulled (${GOAL_SNAP} m) is the game's own \`goalSnap\``);
+  ok(TOWN_RING > 0 && TOWN_LOOK > TOWN_RING, `and the shipped ring (${TOWN_RING} m) is inside the shipped look (${TOWN_LOOK} m)`);
+
+  // The distance it reports is a distance and the rings it walks are square, so the first ring
+  // holding a rank-1 cell is not the answer: that cell can sit in the ring's corner at r * sqrt(2)
+  // while a nearer one sits in the middle of an edge three rings further out. Here the corner cell
+  // is met at ring 10 and 14.14 cells away, and the true nearest is at ring 13 and 13.00. A reading
+  // that stopped at the first ring would report the number 9% over, and the number goes into a
+  // warning the owner is meant to compare between two bakes.
+  const sparse = (k: number): number => (k === 30 * 41 + 30 || k === 20 * 41 + 33 ? 1 : 2);
+  const corner = townStanding(sparse, 41, 41, 20, 20, 5, 30) as Standing;
+  ok(Math.abs(corner.rank1Cells - 13) < 1e-9, `the nearest rank-1 cell is reported at ${corner.rank1Cells.toFixed(2)} cells, not the ${Math.hypot(10, 10).toFixed(2)} of the first ring that held one`);
+  ok(corner.region === 2, 'and the town still reads the ground it is standing on');
 }
 
 // ---- the plane's own blindness is its own word, and is paid for once --------------------------
@@ -649,6 +889,21 @@ ok(RANKS === NAV_RANKS && OTHER_REGION === NAV_OTHER && INDOOR === NAV_INDOOR, '
   // far above that is not caution: it is how long a search that is not going to answer runs for.
   ok(t.coarseExpand >= 25000 && t.coarseExpand <= 60000, `the coarse budget (${t.coarseExpand}) covers the longest real route with room to spare and not a great deal more`);
   ok(t.componentCap > 0, 'and the goal-side flood has a budget of its own');
+  // The berth's own three, and the one relation between them that is not arbitrary: the room a
+  // string-pull leg insists on must be inside the berth the search bought, or the pull would refuse
+  // every leg of a route the search itself thought good enough and fall back to hugging every time.
+  ok(t.berth > 0 && t.berthCost > 0, 'a body gives something it cannot walk on a wide berth');
+  ok(t.berthPull > 0 && t.berthPull <= t.berth, `and the pull keeps ${t.berthPull} m of the ${t.berth} m the search bought`);
+  ok(t.berth <= CLEARANCE_MAX * 2, `the berth (${t.berth} m) is inside what the bake stores (${CLEARANCE_MAX} cells at 2 m)`);
+}
+
+// ---- the angle the grid calls climbable ----------------------------------------------------------
+// It is the owner's choice and not a fact about the game, so what is pinned is the choice: a
+// catalogue mobile is stopped between about 45 degrees at a walk and 49 at a run, and the grid is
+// cut to the body that can do least rather than to the fighter's own 55.
+{
+  ok(SLOPE_CLIMB_DEGREES === 47, `the grid calls ${SLOPE_CLIMB_DEGREES} degrees climbable`);
+  ok(SLOPE_CLIMB_DEGREES >= 45 && SLOPE_CLIMB_DEGREES < 50, 'which is inside the span a dynamic body was measured at, and under the 50 that stopped every one of them');
 }
 
 console.log(`\n${checks} checks passed`);

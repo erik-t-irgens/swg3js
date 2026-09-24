@@ -87,6 +87,12 @@ export interface OutdoorStatus {
   nx: number;
   nz: number;
   bytes: number;
+  /**
+   * The clearance the bake stopped counting at, in cells. It is here because it is the ceiling on
+   * `tune.berth`: raised past `clearMax * cell` metres, the berth reaches no further, since every
+   * cell out there carries the same number. 0 is a grid with no clearance in it at all.
+   */
+  clearMax: number;
   /** Searches asked for, and what they came to. */
   asked: number;
   found: number;
@@ -385,6 +391,7 @@ export class OutdoorNav {
       nx: h?.nx ?? 0,
       nz: h?.nz ?? 0,
       bytes: this.bytes,
+      clearMax: h?.clearMax ?? 0,
       asked: this.asked,
       found: this.foundCount,
       straight: this.straightCount,

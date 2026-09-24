@@ -8,20 +8,37 @@
 // footprint -- which is not blocked and is not ours either, because the indoor pathing from pass 6
 // has that building's own authored floor and takes over at the door.
 //
-// Beside it is a coarse plane, one byte per `coarse` fine cells, carrying the same rank where
+// Beside it is a second nibble a cell, the **clearance**: how far that cell stands from the nearest
+// thing a body cannot walk on, in cells, capped at what the bake still counted. It is what buys a
+// berth -- a cell near something costs the fine search a share more than a cell in the open, and the
+// string-pull keeps the legs that hold that room rather than the straightest one, which would scrape
+// the very thing the route went round. The berth reaches exactly nothing past `berth` metres, so
+// open country is searched cell for cell as it was before there were berths at all, and it is
+// additive and finite, so a corridor narrower than the berth is dearer and never closed.
+//
+// Beside both is a coarse plane, one byte per `coarse` fine cells, carrying the same rank where
 // enough of the fine cells under it are walkable. The search is in two passes because of it: a
 // whole world is sixty-seven million fine cells, which nothing may search on a frame, and about a
 // million coarse ones, which a search crosses in a few milliseconds. The coarse pass finds the
-// shape of the route; a fine pass repairs each hop the coarse plane was too blunt to get right; and
-// a line-of-sight string-pull throws away every corner the body did not need.
+// shape of the route; a fine pass repairs each hop the coarse plane was too blunt to get right and
+// buys the berth inside it; and a line-of-sight string-pull throws away every corner the body did
+// not need. The coarse pass knows nothing of berths on purpose: its cell is sixteen metres, a berth
+// is a metres-scale thing, and the corridor the fine search runs in is at its narrowest forty-eight
+// metres wide -- room enough to stand a route off whatever it passes.
 //
 // The corners are the whole of the runtime's job. The bodies' own steering is not touched: they are
 // handed a corner instead of a goal, exactly as they already are indoors, which is the one thing
 // the route measurements were unambiguous about -- waypoints every twenty-five metres along the
 // same path, without a sight test between them, arrived nought times in twenty.
 
-/** The shape of the files this reads; a pack that says anything else is passed over. */
-export const NAV_GRID_VERSION = 1;
+/**
+ * The shape of the files this reads; a pack that says anything else is passed over.
+ *
+ * 2 added the clearance plane, which is what a berth is bought with. A version 1 grid is not read
+ * at all rather than read without it: a world with no clearance would need a second search that
+ * knew nothing of berths, and re-baking a world opens no archive and takes two minutes.
+ */
+export const NAV_GRID_VERSION = 2;
 
 /** Nibble values, as the converter writes them. */
 export const NAV_BLOCKED = 0;
@@ -45,6 +62,9 @@ export interface OutdoorHeader {
   fineBytes: number;
   coarseBytes: number;
   edgeBytes: number;
+  clearBytes: number;
+  /** The clearance the bake stopped counting at, in cells: every cell further off reads this. */
+  clearMax: number;
 }
 
 export interface OutdoorTune {
@@ -106,6 +126,91 @@ export interface OutdoorTune {
   horizon: number;
   /** At most this many searches in one step of the simulation, over every body there is. */
   perStep: number;
+  /**
+   * How much room a body would like between itself and the nearest thing it cannot walk on,
+   * metres. Inside this a cell costs more than one in the open, and at or past it a cell costs
+   * exactly what it always did -- so open ground is untouched and only the cells really near
+   * something pay. 0 turns the whole berth off and the search is the one that shipped before it.
+   *
+   * It is clamped by what the bake stored (`header.clearMax` cells): raised past that, every cell
+   * out there reads the same number and the curve would flatten rather than reach further.
+   */
+  berth: number;
+  /**
+   * How much dearer a metre walked hard against something is than a metre in the open, as a share:
+   * 3 means a step with a wall at the body's elbow costs four times what the same step costs out in
+   * the open. It falls away to exactly nothing at `berth`, along `berthCurve`.
+   *
+   * Every part of it is invented, and the shape was chosen for two things it must never do. It is
+   * **additive and bounded**, so a corridor narrower than the berth is dearer and never closed: a
+   * gap one cell wide that is the only way through is still taken, because no finite surcharge can
+   * beat a route that does not exist. And it **reaches nothing**: past `berth` the term is exactly
+   * zero rather than merely small, so a search over open country opens the cells it always did.
+   *
+   * What the geometry then does with it is the point. A short obstacle is bowed round by a cell or
+   * two, because the diagonal that steps out costs about 0.41 of a cell each way and a pebble is
+   * not worth it; a long face -- a mountain, a town wall -- is worth stepping out from over its
+   * whole length, so the route leaves it and runs parallel to it at the berth. That is the owner's
+   * "wider berths round mountains and large obstacles", and it falls out of one number.
+   *
+   * **Why it is 3 and not something gentler**, which is the one thing here that is not obvious. The
+   * fine search is a *weighted* A*: `fineWeight` above one buys its speed by accepting any route
+   * within that factor of the cheapest, and a route that hugs a wall is well inside 1.6 times one
+   * that stands off it. So a surcharge only moves a route as far out as its own **slope** beats
+   * that greed -- it must be worth more than `fineWeight - 1` per cell of room gained, which with a
+   * straight ramp is `berthCost * cell / berth`. Measured on a drawn eighty-cell face: at 1.5 the
+   * route came out to three cells of the four asked for, and at 3 (a slope of 0.75 against the
+   * weight's 0.6) it came out to all four, for four more cells opened out of 110. Gentler numbers
+   * do not give a gentler berth; they give most of no berth at all.
+   *
+   * **What it costs where it buys nothing**, which is the other half of the same fact. The weighted
+   * search's greed is a ratio, so a surcharge on every step divides it: inside a corridor narrower
+   * than the berth every cell is surcharged by about the same amount, the route cannot move, and
+   * all the search gets is expansions. Measured, opening the identical cells and handing back the
+   * identical corners: x1.4 in Anchorhead, x3.7 in Mos Espa, x9.8 on a drawn three-wide mountain
+   * pass and x13.8 on a drawn lattice of two-cell streets. It stays cheap in absolute terms (the
+   * worst real in-town plan measured 7.4 ms against a 20 ms budget, mean under 1.1 ms) and the open
+   * country it was built for pays nothing at all, since past `berth` the term is exactly nought.
+   * But a body that never leaves a town is buying nothing with it, and `berthCost` 0 is the switch.
+   */
+  berthCost: number;
+  /**
+   * How the surcharge falls away between nothing and `berth`: the power the missing share of the
+   * berth is raised to. 1 is a straight ramp, 2 a square that bites near the wall and is almost
+   * gone a few metres out.
+   *
+   * It is a knob rather than a constant because it, and not `berthCost`, is what decides **how
+   * far** a route really stands off, and the two shapes are not two flavours of the same thing. A
+   * square's slope has all but died by the time the route is two thirds of the way out, so it stops
+   * pushing exactly where the weighted search stops caring: on the same drawn face, a square at
+   * `berthCost` 1.5 moved the route not one cell, and at 3 moved it three of the four. A straight
+   * ramp pushes with the same force the whole way and settles the route at the berth itself. So 1
+   * is the default, and 2 is here to be compared against by eye.
+   */
+  berthCurve: number;
+  /**
+   * The most room a corner-to-corner leg of the string-pull will be asked to keep, metres. It
+   * exists because the pull would otherwise throw the berth away on its first leg: every leg it
+   * tests is judged by whether a body could walk it, and the straightest walkable line between two
+   * points on a route that went round something is exactly the one that scrapes that thing.
+   *
+   * What is really asked of a leg is the **lesser** of this and the tightest point the raw route
+   * passes on that stretch, so the pull never insists on more room than the search found: through a
+   * doorway it asks for the doorway, and along an open face it asks for this. A leg that holds it is
+   * preferred however short; the farthest merely walkable leg is taken when none does, which is the
+   * answer this gave before there were berths at all. 0 turns it off.
+   *
+   * It must be more than the two to four metres a line hugging a wall keeps, or a hug would satisfy
+   * it and nothing would change; and it is under `berth`, since asking for more room than the
+   * search was told to buy would refuse legs of a route the search itself thought good enough.
+   *
+   * Being under `berth` is why **the room the body really walks with is this and not `berth`**: on
+   * the drawn face the raw route keeps the whole four cells the search bought and the pulled one
+   * keeps three, which is 6 m and not 8. That is the design and not a loss -- the corners are a
+   * body's steering targets, not rails -- but anything quoting "the berth the route kept" has to
+   * say which of the two it measured.
+   */
+  berthPull: number;
 }
 
 export const OUTDOOR_TUNE: OutdoorTune = {
@@ -124,7 +229,62 @@ export const OUTDOOR_TUNE: OutdoorTune = {
   corridorAgain: 3,
   horizon: 400,
   perStep: 1,
+  berth: 8,
+  berthCost: 3,
+  berthCurve: 1,
+  berthPull: 6,
 };
+
+/**
+ * The berth's constants for one grid: how far out it reaches in cells, the surcharge at nought
+ * clearance, and the shape between. Worked out once per search rather than per cell, which is what
+ * it is a struct for -- `corridorSearch` opens thousands of cells and every one of them would
+ * otherwise redo the same three comparisons and a divide.
+ */
+export interface Berth {
+  /** Cells, never further than the bake could still tell apart. 0 is a berth that is switched off. */
+  reach: number;
+  /** The surcharge at nought clearance, as a share of a step. 0 is the search with no berth in it. */
+  share: number;
+  curve: number;
+  /** `curve === 1`, kept so the hot loop tests a boolean rather than a float. */
+  straight: boolean;
+}
+
+/** The berth a grid of this cell size, with this much baked clearance, buys under this tune. */
+export function berthOf(cellMetres: number, maxCells: number, tune: OutdoorTune = OUTDOOR_TUNE): Berth {
+  const reach = tune.berth > 0 && cellMetres > 0
+    ? Math.min(maxCells > 0 ? maxCells : Infinity, tune.berth / cellMetres)
+    : 0;
+  const share = tune.berthCost > 0 && reach > 0 ? tune.berthCost : 0;
+  const curve = tune.berthCurve > 0 ? tune.berthCurve : 1;
+  return { reach, share, curve, straight: curve === 1 };
+}
+
+/**
+ * The berth's own cost curve, as a share of a step: how much dearer a cell with `cells` of room
+ * round it is than a cell out in the open.
+ *
+ * This is the whole of the invented part and it is **the very arithmetic the search runs**, not a
+ * mirror of it: `corridorSearch` calls this per neighbour, so a node test that sweeps it sweeps the
+ * search. It was two copies of the same four lines once, one here and one inlined in the loop, and
+ * the test pinned the copy the game did not use.
+ */
+export function berthAt(b: Berth, cells: number): number {
+  if (!(b.share > 0) || cells >= b.reach) return 0;
+  const missing = 1 - Math.max(0, cells) / b.reach;
+  return b.share * (b.straight ? missing : Math.pow(missing, b.curve));
+}
+
+/**
+ * The same curve in one call, for a caller that has a tune and a clearance and nothing hoisted: the
+ * console's knob and the node test's sweep. It pins the two things the curve must never stop doing
+ * -- reach exactly nothing at the berth, and stay finite at nought clearance, which is what keeps a
+ * one-cell corridor walkable.
+ */
+export function berthPenalty(cells: number, cellMetres: number, maxCells: number, tune: OutdoorTune = OUTDOOR_TUNE): number {
+  return berthAt(berthOf(cellMetres, maxCells, tune), cells);
+}
 
 /**
  * What a plan came to. `corners` is only meaningful for 'found'.
@@ -169,6 +329,13 @@ export interface OutdoorGrid {
    * touching across the border between them -- and this is the fine grids own answer, baked.
    */
   edges: Uint8Array;
+  /**
+   * One nibble a cell: how far it stands from the nearest cell a body may not walk on, in cells,
+   * capped at `header.clearMax`. 0 is a cell nothing may stand on at all. It is what a berth is
+   * bought with, and it is baked rather than measured here because measuring it would mean reading
+   * a square of the region plane round every cell a search ever opens.
+   */
+  clear: Uint8Array;
 }
 
 /**
@@ -292,18 +459,29 @@ export function decodeGrid(header: OutdoorHeader, bytes: Uint8Array): OutdoorGri
   if (!(header.nx > 0) || !(header.nz > 0) || !(header.cell > 0) || !(header.coarse > 0)) return null;
   const fineBytes = Math.ceil((header.nx * header.nz) / 2);
   const coarseBytes = header.cnx * header.cnz;
-  if (bytes.length < fineBytes + coarseBytes * 2) return null;
+  if (bytes.length < fineBytes * 2 + coarseBytes * 2) return null;
   return {
     header,
     fine: bytes.subarray(0, fineBytes),
     coarse: bytes.subarray(fineBytes, fineBytes + coarseBytes),
     edges: bytes.subarray(fineBytes + coarseBytes, fineBytes + coarseBytes * 2),
+    clear: bytes.subarray(fineBytes + coarseBytes * 2, fineBytes * 2 + coarseBytes * 2),
   };
 }
 
 /** The nibble at a fine cell index. */
 export function nibbleAt(g: OutdoorGrid, k: number): number {
   const b = g.fine[k >> 1];
+  return k & 1 ? b >> 4 : b & 0x0f;
+}
+
+/**
+ * How far a fine cell stands from the nearest cell a body may not walk on, in cells, as the bake
+ * measured it. 0 off the world, since nothing outside it can be stood on either.
+ */
+export function clearAt(g: OutdoorGrid, k: number): number {
+  if (k < 0) return 0;
+  const b = g.clear[k >> 1];
   return k & 1 ? b >> 4 : b & 0x0f;
 }
 
@@ -378,14 +556,26 @@ export function nearestOpen(g: OutdoorGrid, x: number, z: number, metres: number
  * corners and a search that lets it walks the drawn body through a wall.
  */
 export function lineClear(g: OutdoorGrid, ax: number, az: number, bx: number, bz: number): boolean {
+  return lineClearance(g, ax, az, bx, bz) >= 0;
+}
+
+/**
+ * The same walk, answering **how much room** the line keeps: the least clearance, in cells, of any
+ * cell it passes through, or -1 when a body could not walk it at all.
+ *
+ * It is one function rather than two because the string-pull asks both questions of every leg it
+ * tests, and asking them apart would walk each line twice.
+ */
+export function lineClearance(g: OutdoorGrid, ax: number, az: number, bx: number, bz: number): number {
   const h = g.header;
   let i = Math.floor((ax - h.x0) / h.cell);
   let j = Math.floor((az - h.z0) / h.cell);
   const i1 = Math.floor((bx - h.x0) / h.cell);
   const j1 = Math.floor((bz - h.z0) / h.cell);
-  if (i < 0 || j < 0 || i >= h.nx || j >= h.nz) return false;
-  if (i1 < 0 || j1 < 0 || i1 >= h.nx || j1 >= h.nz) return false;
-  if (!isOpen(g, j * h.nx + i)) return false;
+  if (i < 0 || j < 0 || i >= h.nx || j >= h.nz) return -1;
+  if (i1 < 0 || j1 < 0 || i1 >= h.nx || j1 >= h.nz) return -1;
+  if (!isOpen(g, j * h.nx + i)) return -1;
+  let room = clearAt(g, j * h.nx + i);
   const dx = bx - ax;
   const dz = bz - az;
   const stepI = dx > 0 ? 1 : -1;
@@ -406,17 +596,27 @@ export function lineClear(g: OutdoorGrid, ax: number, az: number, bx: number, bz
       j += stepJ;
       tMaxZ += tDeltaZ;
     } else {
-      // Exactly through a corner: both of the cells it passes between must be open.
-      if (!isOpen(g, j * h.nx + (i + stepI)) || !isOpen(g, (j + stepJ) * h.nx + i)) return false;
+      // Exactly through a corner: both of the cells it passes between must be open, and the body
+      // brushes both, so both count toward the room the line keeps.
+      const sideA = j * h.nx + (i + stepI);
+      const sideB = (j + stepJ) * h.nx + i;
+      if (!isOpen(g, sideA) || !isOpen(g, sideB)) return -1;
+      const a = clearAt(g, sideA);
+      const b = clearAt(g, sideB);
+      if (a < room) room = a;
+      if (b < room) room = b;
       i += stepI;
       j += stepJ;
       tMaxX += tDeltaX;
       tMaxZ += tDeltaZ;
     }
-    if (i < 0 || j < 0 || i >= h.nx || j >= h.nz) return false;
-    if (!isOpen(g, j * h.nx + i)) return false;
+    if (i < 0 || j < 0 || i >= h.nx || j >= h.nz) return -1;
+    const k = j * h.nx + i;
+    if (!isOpen(g, k)) return -1;
+    const c = clearAt(g, k);
+    if (c < room) room = c;
   }
-  return guard < cap;
+  return guard < cap ? room : -1;
 }
 
 // ---- the searches -------------------------------------------------------------------------------
@@ -649,6 +849,12 @@ export function markCorridor(g: OutdoorGrid, w: OutdoorWork, from: number, to: n
  *
  * It does not have to be the shortest path. `fineWeight` leans it toward the goal and opens far
  * fewer cells for a route the string-pull is going to straighten anyway.
+ *
+ * It is also the one search that knows about **berths**: a cell nearer than `berth` to anything a
+ * body cannot walk on costs a share more than a cell in the open, falling to exactly nothing at the
+ * berth itself, so open country is searched exactly as it was and a route only pays where it really
+ * is near something. The surcharge is additive and finite, which is the property that matters: a
+ * gap one cell wide that is the only way through is dearer and never closed.
  */
 export function corridorSearch(g: OutdoorGrid, w: OutdoorWork, startK: number, goalK: number, tune: OutdoorTune = OUTDOOR_TUNE, deadline = Infinity): number {
   const h = g.header;
@@ -681,6 +887,11 @@ export function corridorSearch(g: OutdoorGrid, w: OutdoorWork, startK: number, g
     const cj = Math.floor(c / h.cnx);
     return (cj * h.coarse + Math.floor(r / h.coarse)) * h.nx + (ci * h.coarse + (r % h.coarse));
   };
+  // The berth, worked out once for the whole search rather than per cell. With `berthCost` at
+  // nought `share` is nought, the term below is skipped, and the search is the one that shipped
+  // before berths, cell for cell.
+  const berth = berthOf(h.cell, h.clearMax, tune);
+  const berthShare = berth.share;
   let opened = 0;
   let found = -1;
   while (n > 0) {
@@ -716,7 +927,11 @@ export function corridorSearch(g: OutdoorGrid, w: OutdoorWork, startK: number, g
         if (di && dj && (!isOpen(g, j * h.nx + ii) || !isOpen(g, jj * h.nx + i))) continue;
         const kk = inside(world);
         if (kk < 0) continue;
-        const nd = gk + (di && dj ? SQRT2 : 1);
+        // The step, and the berth laid over it as a share of the step's own length, so a diagonal
+        // taken hard against a wall costs proportionately more than an orthogonal one does.
+        const len = di && dj ? SQRT2 : 1;
+        let nd = gk + len;
+        if (berthShare) nd += len * berthAt(berth, clearAt(g, world));
         if (w.fClosed[kk] === stamp) continue;
         if (w.fStamp[kk] === stamp && w.fg[kk] <= nd) continue;
         w.fStamp[kk] = stamp;
@@ -762,27 +977,47 @@ export function corridorSearch(g: OutdoorGrid, w: OutdoorWork, startK: number, g
  * sight of the last. It is the sight test and not the spacing that matters -- nodes every
  * twenty-five metres along the same path with no sight test between them arrived nought times in
  * twenty, and the same path string-pulled arrived every time.
+ *
+ * It **keeps the berth the search bought**, which it would otherwise throw away on its first leg:
+ * the straightest walkable line between two points on a bowed route is exactly the one that scrapes
+ * the thing the route bowed round. So a leg is preferred while it holds `berthPull` of room, and
+ * the farthest merely walkable leg is taken only when no leg holds it -- which is what happens in a
+ * town, where every cell is near a wall and the corners are the ones this always gave.
  */
 export function stringPull(g: OutdoorGrid, raw: Float64Array, rawCount: number, out: Float64Array, tune: OutdoorTune = OUTDOOR_TUNE): number {
   if (rawCount <= 0) return 0;
   const cap = Math.floor(out.length / 2);
+  const want = tune.berthPull > 0 ? tune.berthPull / g.header.cell : 0;
   let count = 0;
   let anchor = 0;
   let ax = raw[0];
   let az = raw[1];
   while (anchor < rawCount - 1 && count < cap) {
     let best = anchor + 1;
+    let wide = -1;
     let misses = 0;
+    // The most room this stretch may be asked to keep, which is never more than the path it is
+    // replacing had: it starts at `berthPull` and falls to the tightest point the raw route passes
+    // between the anchor and wherever the leg ends. Asked for a fixed figure instead, the pull
+    // would refuse every leg of a route through a gap narrower than it and fall back to the
+    // straightest line there is, which is the one that scrapes the wall.
+    let held = want > 0 ? Math.min(want, clearAt(g, cellOf(g, ax, az))) : 0;
     for (let k = anchor + 1; k < rawCount; k++) {
       const x = raw[k * 2];
       const z = raw[k * 2 + 1];
       if (Math.hypot(x - ax, z - az) > tune.pullCap) break;
-      if (lineClear(g, ax, az, x, z)) {
+      if (want > 0) {
+        const c = clearAt(g, cellOf(g, x, z));
+        if (c < held) held = c;
+      }
+      const room = lineClearance(g, ax, az, x, z);
+      if (room >= 0) {
         best = k;
+        if (want > 0 && room >= held) wide = k;
         misses = 0;
       } else if (++misses >= tune.pullMiss) break;
     }
-    anchor = best;
+    anchor = wide >= 0 ? wide : best;
     ax = raw[anchor * 2];
     az = raw[anchor * 2 + 1];
     out[count * 2] = ax;

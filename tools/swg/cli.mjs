@@ -70,7 +70,7 @@
 //   node tools/swg/cli.mjs space <swg-dir> <zone>|all <out-dir>     a space zone (space_tatooine, ..., space_light1 Kessel, space_heavy1 Deep Space,
 //                                                                  space_ord_mantell): its stations, asteroid fields, planets, sky and hyperspace points
 //   node tools/swg/cli.mjs maps <swg-dir> <out-dir>                 the client's planet map image into every converted planet pack (map.png, map.json)
-//   node tools/swg/cli.mjs navgrid <planet>|all <out-dir> [--cell=2] [--slope=55] [--skip-existing]
+//   node tools/swg/cli.mjs navgrid <planet>|all <out-dir> [--cell=2] [--slope=47] [--skip-existing]
 //                                                                  bake a world's outdoor walkability grid (nav.json, nav.bin) from the pack
 //                                                                  it already has: the terrain, the placements and the models' own triangles.
 //                                                                  It reads no archive, so it takes no <swg-dir>. About two minutes and three
@@ -122,7 +122,7 @@ import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { resolveParts } from './appearance.mjs';
 import { decodeDds } from './dds.mjs';
 import { FLOOR_PACK_VERSION, floorBlock, floorSize, parseFloor } from './flr.mjs';
-import { NAV_GRID_VERSION, buildNavGrid, writeNavGrid } from './navgrid.mjs';
+import { GOAL_SNAP, NAV_GRID_VERSION, SLOPE_CLIMB_DEGREES, buildNavGrid, writeNavGrid } from './navgrid.mjs';
 import { buildGlb } from './glb.mjs';
 import { dump, find, isForm, parseIff, readCString } from './iff.mjs';
 import { classifyDirectory, isRetailByName } from './manifest.mjs';
@@ -2007,6 +2007,15 @@ function packStatus(dir) {
     const navMoved = navGrid && navGrid.center && layout?.center
       && (Math.abs(navGrid.center.x - layout.center.x) > 0.5 || Math.abs(navGrid.center.z - layout.center.z) > 0.5);
     const navNoIndoor = navGrid && navGrid.stats && navGrid.stats.buildings > 0 && !navGrid.stats.indoor;
+    // Its towns: a town whose ground is not the main walkable region and which the main region does
+    // not reach within `GOAL_SNAP` is a town every errand to is answered 'unreachable', and the one
+    // thing the slope angle can do that nothing else would notice. It is said here and not asked
+    // for, because re-running the same bake will not mend it -- only another angle will, which is
+    // the owner's choice and not a job. A grid baked before towns were recorded has no list and is
+    // not complained about, as a pack with no floors is not.
+    const navCut = Array.isArray(navGrid?.towns)
+      ? navGrid.towns.filter((t) => t.region !== 1 && (t.rank1 === null || t.rank1 > GOAL_SNAP))
+      : [];
     const parts = [
       `${objects} objects`,
       `${flora} flora models`,
@@ -2023,9 +2032,15 @@ function packStatus(dir) {
       withCells.length ? (floored ? `floors ${floored}/${withCells.length} buildings${graphOnly ? ', GRAPHS ONLY (no walkable meshes)' : ''}${floorless ? `, ${floorless} with none in the archives` : ''}` : 'NO FLOORS') : null,
       // The outdoor walkability grid. A world without one plays exactly as it always did, so this
       // says what is there rather than shouting, and asks for it once below.
-      navGrid ? `nav grid ${navGrid.nx}x${navGrid.nz} at ${navGrid.cell} m${navMoved ? ', BAKED AROUND ANOTHER CENTRE' : ''}${navNoIndoor ? ', NO BUILDING FOOTPRINTS' : ''}` : 'no nav grid',
+      // The angle is in the line because it is the owner's own choice and moves what the grid
+      // says: a world baked at one and its neighbour at another would steer two different ways
+      // with nothing anywhere to show it.
+      navGrid ? `nav grid ${navGrid.nx}x${navGrid.nz} at ${navGrid.cell} m, ${navGrid.slopeDegrees ?? '?'} deg${navMoved ? ', BAKED AROUND ANOTHER CENTRE' : ''}${navNoIndoor ? ', NO BUILDING FOOTPRINTS' : ''}${navCut.length ? `, ${navCut.length} TOWN${navCut.length === 1 ? '' : 'S'} OFF THE MAIN REGION` : ''}` : 'no nav grid',
     ].filter(Boolean);
     console.log(`  ${planet}: ${parts.join(', ')}`);
+    if (navCut.length) {
+      console.log(`    at ${navGrid.slopeDegrees} degrees the largest walkable region does not reach within ${GOAL_SNAP} m of ${navCut.map((t) => `${t.name} (${t.rank1 === null ? 'over 400' : t.rank1} m)`).join(', ')}: a body sent to one is told it cannot get there and steers the whole way, as it did before there was a grid. Only the angle moves this -- re-bake with --slope=<higher> to see what it costs.`);
+    }
     if (!objects) need(`snapshot <swg-dir> ${planet} ${packDir} --center=auto --radius=all --retail-only`, `${planet} has no objects`);
     if (!terrain) need(`snapshot <swg-dir> ${planet} ${packDir} --center=auto --radius=all --retail-only`, `${planet} has no terrain`);
     else if (!shaders) need(`terrain <swg-dir> all ${dir} --retail-only`, `${planet} has no ground textures`);
@@ -5554,8 +5569,10 @@ switch (cmd) {
       : [[pos[1], join(pos[2], pos[1])]];
     if (!targets.length) console.log(`no planet packs under ${pos[2]} yet; run snapshot first`);
     const cell = options.cell ? Number(options.cell) : undefined;
-    // The angle the grid calls climbable. The default is the player's own 55 degrees, which every
-    // fighter shares; a catalogue mobile is a dynamic body and its own measured limit is about 47.
+    // The angle the grid calls climbable. The default is 47, which is what a catalogue mobile --
+    // a dynamic body, not a character controller -- was measured to climb at a hard run; the
+    // player's own controller and every fighter climb 55, so the grid is cut to the body that can
+    // do least. `SLOPE_CLIMB_DEGREES` in navgrid.mjs carries the whole of the owner's reasoning.
     const slope = options.slope ? Number(options.slope) : undefined;
     let built = 0;
     for (const [planet, outDir] of targets) {
@@ -5563,9 +5580,21 @@ switch (cmd) {
         console.log(`${planet}: no layout.json under ${outDir}; run snapshot first`);
         continue;
       }
-      if (flags.has('--skip-existing') && existsSync(join(outDir, 'nav.json'))) {
-        console.log(`${planet}: nav.json is there already`);
-        continue;
+      // `--skip-existing` resumes a run that stopped, so what it must skip is a world that is
+      // really **done**, not one that merely has a file. A grid of an older version is one the
+      // game does not read at all, and a grid baked at another angle is a different grid; skipping
+      // either leaves the tree looking converted and the game with no pathing on that world, with
+      // `status` in the same session asking for the very bake this just declined to do.
+      if (flags.has('--skip-existing')) {
+        const there = readJson(join(outDir, 'nav.json'));
+        const want = slope ?? SLOPE_CLIMB_DEGREES;
+        if (there && there.version === NAV_GRID_VERSION && there.nx && Number(there.slopeDegrees) === Number(want)) {
+          console.log(`${planet}: nav.json is there already, version ${there.version} at ${there.slopeDegrees} degrees`);
+          continue;
+        }
+        if (there) {
+          console.log(`${planet}: re-baking: the nav.json there is ${there.version === NAV_GRID_VERSION ? `at ${there.slopeDegrees} degrees, not ${want}` : `version ${there.version}, which this build does not read`}`);
+        }
       }
       try {
         const grid = await buildNavGrid(outDir, { cell, slope, log: (line) => console.log(line) });
@@ -5573,6 +5602,12 @@ switch (cmd) {
         const stats = out.stats;
         console.log(`  blocked before the body's ${stats.margin} m margin: slope ${stats.slope}, objects ${stats.objects}, water ${stats.water}; after it ${stats.blocked} (${((100 * stats.blocked) / (out.nx * out.nz)).toFixed(2)}%), plus ${stats.indoor} cells inside ${stats.buildings} portal buildings, which the rooms' own pathing has`);
         console.log(`  the largest walkable region holds ${out.regions[0] ? out.regions[0].km2 : 0} km^2; ${out.regions.length} are ranked and ${out.otherRegions} more are smaller still`);
+        // How much room this world has to stand a route off anything, which is the whole of what
+        // the clearance plane is for: a world whose walkable ground is nearly all at the cap can
+        // buy a berth almost everywhere, and one that is mostly one and two cannot.
+        const walkable = stats.clearance.slice(1).reduce((a, b) => a + b, 0);
+        const roomy = stats.clearance[stats.clearance.length - 1];
+        console.log(`  clearance: ${((100 * roomy) / Math.max(1, walkable)).toFixed(1)}% of the walkable ground stands ${out.clearMax} cells or more off anything, at ${(100 * stats.clearance[1]) / Math.max(1, walkable) < 0.05 ? '<0.1' : ((100 * stats.clearance[1]) / Math.max(1, walkable)).toFixed(1)}% hard against it`);
         console.log(`${planet}: ${(out.packedBytes / 1e6).toFixed(2)} MB -> ${join(outDir, 'nav.bin')} in ${stats.seconds} s`);
         built++;
       } catch (err) {
