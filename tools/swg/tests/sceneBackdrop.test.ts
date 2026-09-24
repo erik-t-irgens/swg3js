@@ -5,7 +5,7 @@
 // arithmetic is pure and this sweeps it: the same direction must land in the same place in the
 // picture and in the live view, at every window shape the owner might drag the game into.
 import assert from 'node:assert/strict';
-import { backdropFit, backdropPath, backdropRenderFor, hourLabel, isCreatorShot, sceneView, CREATOR_KEYS, type BackdropRender } from '../../../src/world/sceneBackdrop.ts';
+import { backdropFit, backdropPath, backdropRenderFor, hourLabel, isCreatorShot, orbitFor, sceneView, CREATOR_KEYS, type BackdropRender } from '../../../src/world/sceneBackdrop.ts';
 import { sceneSpots, SCENE_SHOTS } from '../../../src/data/scenes.ts';
 
 let passed = 0;
@@ -120,6 +120,34 @@ const render: BackdropRender = backdropRenderFor(SHOT_FOV, 3, 1600);
   // the feet meet: the camera is above the standing spot in every one of these.
   const below = SCENE_SHOTS.filter((s) => sceneView(s).camera.y <= 0);
   ok(below.length === 0, `the camera is above the ground the figure stands on in every shot (${below.map((b) => b.name).join(', ') || 'all 67'})`);
+}
+
+{
+  // Standing somebody back in a captured place: the three numbers the game's own orbiting camera
+  // takes must reproduce the offset that was captured, or they are put somewhere else entirely.
+  let worstPos = 0;
+  let worstAim = 0;
+  let worstName = '';
+  for (const shot of SCENE_SHOTS) {
+    const o = orbitFor(shot);
+    const cp = Math.cos(o.pitch);
+    // The camera stands at focus + dir * distance, which is what this has to rebuild.
+    const back = { x: Math.sin(o.yaw) * cp * o.distance, y: Math.sin(o.pitch) * o.distance, z: Math.cos(o.yaw) * cp * o.distance };
+    const want = { x: shot.camera.x - shot.stand.x, y: shot.camera.y - shot.stand.y, z: shot.camera.z - shot.stand.z };
+    const err = Math.hypot(back.x - want.x, back.y - want.y, back.z - want.z);
+    if (err > worstPos) {
+      worstPos = err;
+      worstName = shot.name;
+    }
+    // And the way it then looks: back toward the figure, which is half a turn from the offset.
+    const looked = Math.atan2(shot.camera.look.x - shot.camera.x, shot.camera.look.z - shot.camera.z);
+    const gap = Math.abs(((((o.yaw + Math.PI - looked) * 180) / Math.PI) % 360 + 540) % 360 - 180);
+    if (gap > worstAim) worstAim = gap;
+  }
+  ok(worstPos < 1e-9, `the orbit rebuilds every captured camera offset exactly (worst ${worstPos.toExponential(1)} m, ${worstName})`);
+  ok(worstAim < 1, `and aims where the shot really looked (worst ${worstAim.toFixed(2)} degrees over all 67)`);
+  const flat = orbitFor({ stand: { x: 0, y: 0, z: 0 }, camera: { x: 0, y: 0, z: 0 } });
+  ok(Number.isFinite(flat.yaw) && Number.isFinite(flat.pitch) && flat.distance > 0, 'and a camera standing exactly on the figure answers numbers rather than dividing by nought');
 }
 
 {

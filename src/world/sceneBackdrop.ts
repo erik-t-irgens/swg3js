@@ -110,6 +110,26 @@ export function sceneView(shot: { stand: { x: number; y: number; z: number; head
   return { camera, look, faceYaw };
 }
 
+/**
+ * The three numbers that put the game's own orbiting camera back in a captured shot.
+ *
+ * The third-person camera stands at `focus + dir * distance` with
+ * `dir = (sin yaw * cos pitch, sin pitch, cos yaw * cos pitch)`, so a captured camera offset
+ * inverts straight into yaw, pitch and distance and reproduces the offset exactly (checked over
+ * every capture to a part in 10^15). The **turn is the exact one**; the height and the distance
+ * are close rather than exact in play, because the orbit hangs off the body's own focus point and
+ * not off the feet the capture measured from. That is the right trade for what this is used for --
+ * standing somebody back in a place so they can recognise it -- and the pictures themselves are
+ * framed by the shoot, which uses the captured camera outright and none of this.
+ */
+export function orbitFor(shot: { stand: { x: number; y: number; z: number }; camera: { x: number; y: number; z: number } }): { yaw: number; pitch: number; distance: number } {
+  const x = shot.camera.x - shot.stand.x;
+  const y = shot.camera.y - shot.stand.y;
+  const z = shot.camera.z - shot.stand.z;
+  const distance = Math.hypot(x, y, z) || 1;
+  return { yaw: Math.atan2(x, z), pitch: Math.asin(Math.max(-1, Math.min(1, y / distance))), distance };
+}
+
 /** The words the owner names an hour with, as a person would read them on a button. */
 const HOUR_WORDS: Record<string, string> = {
   sunrise: 'Sunrise',
