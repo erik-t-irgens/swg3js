@@ -29,6 +29,7 @@ import { SSAO_BASE_POWER } from './core/fx/ssaoMath.ts';
 import type { FighterGlow } from './world/npcs';
 import { DEFAULT_TIER } from './world/npcs.ts';
 import { captureScene, sceneLine } from './world/sceneCapture.ts';
+import { packPlanet, runShoot, shootPlan } from './world/sceneShoot.ts';
 /**
  * How near a named place has to be for `__debug.scene` to call the shot that place's. Ours, and
  * generous on purpose: it is a label on a captured line and not a rule anything obeys.
@@ -2830,6 +2831,45 @@ class App {
         void this.travel(planetById(id));
         return `travelling to ${id}`;
       },
+      /**
+       * Render the creation and selection backdrops from the captured shots: `await shoot()` for every one
+       * (67 pictures over 12 worlds, minutes, and it travels), `await shoot(['tyrena', 'naboo'])` for one shot
+       * or one world. Needs `npm run dev`, which is the only thing allowed to write into the scenes folder.
+       * The figure is hidden while each is taken, the day is pinned at the shot's own hour and given back after,
+       * and the window's own size and camera are put back whatever happens. A run of part of it does not rewrite
+       * the manifest, so the screens keep reading the pictures that are really there.
+       */
+      shoot: async (only?: string[]) => {
+        const report = await runShoot(
+          {
+            renderer: this.renderer,
+            camera: this.cam.camera,
+            drawFrame: () => this.drawFrame(),
+            resized: () => {
+              this.postfx?.setSize();
+              this.world.onCameraResized();
+            },
+            packId: () => this.world.packId,
+            goToPack: async (pack) => {
+              const where = packPlanet(pack);
+              if (!where) throw new Error(`no world is the ${pack} pack`);
+              await this.travel(planetById(where.planet), where.zone);
+            },
+            placePlayer: (x, y, z) => this.player.reset(new THREE.Vector3(x, y, z)),
+            readyAround: (at, ms) => this.world.readyAround(at, ms),
+            holdDay: (t) => {
+              this.world.day.time = t;
+            },
+            releaseDay: () => void clockKnob({ release: true }),
+            figure: this.player.group,
+            say: (line) => console.info(line),
+          },
+          only,
+        );
+        return report;
+      },
+      /** What `shoot` would do, without doing any of it: the worlds it would visit, the shots in each and the pictures. */
+      shootPlan: () => shootPlan().map((g) => ({ world: g.pack, shots: g.spots.map((s) => `${s.spot.key} (${s.steps.length}h)`) })),
       /**
        * The System Map's lists (`await jumps()` for the zone flown in, `jumps('space_light1')` for another): every system's title,
        * and the zone's destinations with their keys for `jump`, how far each is from the ship (km, this zone only), whether it is
