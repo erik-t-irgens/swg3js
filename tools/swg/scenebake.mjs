@@ -87,8 +87,27 @@ export const SCENE_BAKE_TUNE = {
    * things going obviously soft.
    */
   quality: 0.35,
-  /** The widest window a scene is built for. Wider than this and the frustum's edges show. */
-  aspect: 3,
+  /**
+   * The widest window a scene is built for. Past this the cull's own edge comes into view, which
+   * is the one failure here nobody could miss.
+   *
+   * 3.8 covers a 32:9 super-ultrawide with room to spare, and it is generous on purpose: measured
+   * over the three creator places, widening all the way from 16:9 to 4.2:1 costs 9% more instances
+   * and 11% more models, because what is added is only ever a sliver at each side. **A narrower
+   * window needs no thought at all**: a perspective camera holds its vertical angle fixed and lets
+   * the aspect widen the horizontal, so a taller window shows the same 62 degrees up and down and
+   * strictly less across. Every window narrower than this one is a subset of it.
+   */
+  aspect: 3.8,
+  /**
+   * How much wider than the shot's own field of view to build, on both axes.
+   *
+   * The shot was captured at the owner's own setting and the creator's camera uses the shot's
+   * angle, not the player's current one, so the two agree by construction. This is margin against
+   * that stopping being true -- somebody raising the field of view in the settings, or a later
+   * screen framing a little looser -- and at these prices it is cheaper than a rebake.
+   */
+  fovPad: 1.15,
   /** The screen the pixel rules are reckoned against. */
   screenHeight: 1440,
   /** No texture is shrunk below this, however far off the thing is: a 4-pixel wall reads as a colour. */
@@ -178,7 +197,11 @@ export function placedAt(o, centre) {
  */
 export function planPlace(spot, layout, models, tune = SCENE_BAKE_TUNE) {
   const cam = spot.camera;
-  const planes = frustumPlanes(cam, cam.look, cam.fov, tune.aspect, tune.farCap);
+  // Built wider than the shot on both axes, and at the widest window planned for. The pixel rules
+  // below still use the shot's **own** angle, because how big a thing really looks is a fact about
+  // the shot and not about how much margin the cull was given.
+  const built = Math.min(170, cam.fov * (tune.fovPad ?? 1));
+  const planes = frustumPlanes(cam, cam.look, built, tune.aspect, tune.farCap);
   const instances = [];
   const nearest = new Map();
   let dropped = 0;

@@ -193,6 +193,31 @@ const CAM = { x: 0, y: 0, z: 0, look: { x: 0, y: 0, z: -1 }, fov: 62 };
     ok(plan.places.every((p) => p.instances.length > 0), 'and none of them came out empty, which would be a camera pointing at nothing');
     ok(plan.places.every((p) => p.missing === 0), 'with every model they name really in its pack');
     ok(plan.pool.size < instances, `the pool is smaller than the instance count, which is what instancing is for (${plan.pool.size} against ${instances})`);
+
+    // The guarantee against seeing the cull's own edge: whatever window the game is played in, it
+    // asks for less than the build did. Checked as containment rather than as a count, because two
+    // plans of the same size could still differ, and it is the *missing* one that shows on screen.
+    const three = sceneSpots().filter((s) => wanted.has(s.key));
+    const wide = scenePlan(three, packs);
+    for (const [aspect, fovPad, name] of [
+      [16 / 9, 1, 'an ordinary window'],
+      [21 / 9, 1, 'an ultrawide'],
+      [32 / 9, 1, 'a super-ultrawide'],
+      [1, 1, 'a square one'],
+      [0.6, 1, 'a tall narrow one'],
+    ] as [number, number, string][]) {
+      const narrow = scenePlan(three, packs, { ...SCENE_BAKE_TUNE, aspect, fovPad });
+      const missing: string[] = [];
+      for (let i = 0; i < narrow.places.length; i++) {
+        const have = new Set(wide.places[i].instances.map((n: { model: string; x: number; z: number }) => `${n.model}|${n.x.toFixed(2)}|${n.z.toFixed(2)}`));
+        for (const inst of narrow.places[i].instances as { model: string; x: number; z: number }[]) {
+          const k = `${inst.model}|${inst.x.toFixed(2)}|${inst.z.toFixed(2)}`;
+          if (!have.has(k)) missing.push(`${narrow.places[i].key}:${inst.model}`);
+        }
+      }
+      ok(missing.length === 0, `${name} sees nothing the build left out (${missing.slice(0, 3).join(', ') || 'a strict subset'})`);
+    }
+    note(`built for ${SCENE_BAKE_TUNE.aspect}:1 at ${Math.round(62 * SCENE_BAKE_TUNE.fovPad)} degrees: ${instances} instances, ${plan.pool.size} models`);
   }
 }
 
