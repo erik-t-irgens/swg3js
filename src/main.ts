@@ -28,6 +28,12 @@ import { SSAO_TUNE_DEFAULTS, type SsaoPass } from './core/fx/ssao';
 import { SSAO_BASE_POWER } from './core/fx/ssaoMath.ts';
 import type { FighterGlow } from './world/npcs';
 import { DEFAULT_TIER } from './world/npcs.ts';
+import { captureScene, sceneLine } from './world/sceneCapture.ts';
+/**
+ * How near a named place has to be for `__debug.scene` to call the shot that place's. Ours, and
+ * generous on purpose: it is a label on a captured line and not a rule anything obeys.
+ */
+const SCENE_PLACE_REACH = 400;
 import { loadPlayerRig } from './player/rig';
 import { LOOK, lookReport, packPitch, wrapAngle } from './player/lookAt.ts';
 import { Character, loadSpeciesIndex, type SpeciesEntry } from './player/character';
@@ -4032,6 +4038,53 @@ class App {
           named: this.placesHere().length,
           rows: rows.map((f, i) => ({ row: i, name: f.name, away: distanceWords(f.d), at: [Math.round(f.x), Math.round(f.z)] })),
         };
+      },
+      /**
+       * Capture where you are standing, what the camera can see and what hour it is, as one line to
+       * paste back: the backdrops the character creator and the selection screen will be baked from.
+       *
+       * Stand the character where it should stand, aim the camera until the shot looks right, and
+       * run `__debug.capture('theed-terrace')`. It reads the world, the nearest place the pack has a
+       * name for, both poses, the camera's field of view and the day's own hour -- **the hour is
+       * captured on purpose**, because the day runs and a backdrop that did not carry one would be
+       * the same place at noon one launch and at midnight the next.
+       *
+       * A ship is captured too, if one is parked within reach: park it where it looks right rather
+       * than typing a number at it. `__debug.capture()` with no name makes one from the world and
+       * the hour. The line it prints is JSON so a chat window, a text file and a copy button all
+       * carry it without a stray newline changing what it means.
+       */
+      capture: (name?: string) => {
+        const p = this.player;
+        const cam = this.cam.camera;
+        cam.getWorldDirection(tmp);
+        const pack = packIdOf(this.world.planet, this.zone);
+        // The nearest place this pack names, if one is near enough to be what the shot is of.
+        let place: string | null = null;
+        let near = SCENE_PLACE_REACH;
+        for (const q of this.placesHere()) {
+          const d = Math.hypot(q.x - p.pos.x, q.z - p.pos.z);
+          if (d < near) {
+            near = d;
+            place = q.name;
+          }
+        }
+        const v = this.nearestVehicle();
+        const shot = captureScene({
+          name,
+          pack,
+          place,
+          space: !!this.world.planet.space,
+          stand: { x: p.pos.x, y: p.pos.y, z: p.pos.z, heading: p.heading },
+          camera: { x: cam.position.x, y: cam.position.y, z: cam.position.z, forward: { x: tmp.x, y: tmp.y, z: tmp.z }, fov: cam.fov },
+          dayTime: this.world.day.time,
+          ship: v ? { x: v.group.position.x, y: v.group.position.y, z: v.group.position.z, heading: v.heading } : null,
+        });
+        const line = sceneLine(shot);
+        // Printed as well as returned: the console collapses an object and the whole point is a
+        // line that can be selected and copied in one go.
+        console.log(line);
+        return { ...shot, line, paste: line };
       },
       /** The gun in hand: its Jedi Academy type and numbers. */
       gunType: () => {
