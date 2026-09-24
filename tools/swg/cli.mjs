@@ -2184,6 +2184,24 @@ function packStatus(dir) {
       const names = withoutJka.slice(0, 4).map((sp) => sp.id).join(', ');
       need(`species <swg-dir> ${dir} --retail-only`, `${withoutJka.length} of the ${speciesIndex.species.length} playable species have no Jedi Academy clips (no saber swings, jumps or rolls): ${names}${withoutJka.length > 4 ? ' and more' : ''}`);
     }
+    // And the aimed blaster poses, which are the same shape of hole from the other end. The
+    // direction selector's tag was read wrong for years, so every standing and kneeling *aimed*
+    // stance was dropped on the way out of the archives; the prone ones survived, because no
+    // direction selector stands over them, which is why looking for "aimed" alone finds twelve
+    // clips and proves nothing. `player`, `parts` and `species` keep **no format stamp at all**,
+    // so unlike the mobiles pack there is nothing for `status` to compare and nothing would ever
+    // ask for these again. And the game does not complain: it asks for the pose by pattern and
+    // falls back on the last frame of a transition, which reads as a body that freezes rather
+    // than one that is missing an animation.
+    const aimedStanding = (m) => {
+      const names = [...(m?.clips ?? []), ...Object.keys(m?.clipSpeeds ?? {})];
+      return names.some((c) => /^loop_\w*combat_standing_aimed(:|$)/.test(c));
+    };
+    const withoutAimed = speciesIndex.species.filter((sp) => !aimedStanding(readJson(join(dir, 'characters', sp.id, 'parts.json'))));
+    if (withoutAimed.length) {
+      const names = withoutAimed.slice(0, 4).map((sp) => sp.id).join(', ');
+      need(`player <swg-dir> ${dir} --retail-only --jka=<jka-dir> && parts <swg-dir> ${dir} --retail-only && clips-save ${join(dir, 'player', 'human_male.glb')} ${join(dir, 'player', 'jka.clips')} --only=BOTH_ && clips-apply ${join(dir, 'characters', 'human_male', 'rig.glb')} ${join(dir, 'player', 'jka.clips')} && species <swg-dir> ${dir} --retail-only`, `${withoutAimed.length} of the ${speciesIndex.species.length} species rigs have no aimed blaster pose (a body with a gun up freezes on a transition instead): ${names}${withoutAimed.length > 4 ? ' and more' : ''}`);
+    }
   } else need(`species <swg-dir> ${dir} --retail-only`, 'no species index: only the one character can be played');
   const ships = readJson(join(dir, 'ships/manifest.json'));
   if (!ships) need(`ships <swg-dir> ${dir} --retail-only`, 'no ships converted for the garage (B in game, at the bottom)');
