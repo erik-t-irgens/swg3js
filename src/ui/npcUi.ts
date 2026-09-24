@@ -22,8 +22,15 @@ export interface NpcKind {
   blurb: string;
   /** How many stand on the world now. */
   count: () => number;
-  /** Stand one ahead of the player; returns a line for the prompt. */
-  spawn: () => string;
+  /**
+   * The grades this row can be stood at, drawn as a picker beside its button, exactly as a
+   * starship family's tiers are. Absent on a row that has only one kind of body, which is most of
+   * them. The fighters have one because a tier changes how a body fights rather than what it is,
+   * and the only other way to choose one is a line typed into the console.
+   */
+  tiers?: { values: number[]; start: number; label: (t: number) => string };
+  /** Stand one ahead of the player at the grade picked, if it has grades; returns a line for the prompt. */
+  spawn: (tier?: number) => string;
   /** Take every one away; returns how many. */
   clear: () => number;
   /**
@@ -160,6 +167,8 @@ export class NpcUi {
   private gateShared = false;
   /** Each starship row's chosen tier, by family, kept across renders (the catalogue landing redraws the body). */
   private readonly shipTiers = new Map<string, number>();
+  /** And each machine row's, for the rows that have grades (the fighters). Kept the same way and for the same reason. */
+  private readonly kindTiers = new Map<string, number>();
   open = false;
   /** A click on another tab: the game swaps the panels. */
   onTab: (id: string) => void = () => {};
@@ -208,12 +217,14 @@ export class NpcUi {
     this.root.querySelector('.clear-all')!.addEventListener('click', () => this.clearEverything());
     // One listener for every button in the body, by what it is for.
     this.body.addEventListener('click', (e) => this.onClick(e));
-    // A starship row's tier, kept by family.
+    // A starship row's tier, kept by family; and a machine row's grade, kept by its id.
     this.body.addEventListener('change', (e) => {
       const sel = e.target as HTMLSelectElement;
-      if (sel?.tagName !== 'SELECT' || sel.dataset.shipTier === undefined) return;
+      if (sel?.tagName !== 'SELECT') return;
       const tier = Number(sel.value);
-      if (Number.isFinite(tier)) this.shipTiers.set(sel.dataset.shipTier, tier);
+      if (!Number.isFinite(tier)) return;
+      if (sel.dataset.shipTier !== undefined) this.shipTiers.set(sel.dataset.shipTier, tier);
+      else if (sel.dataset.kindTier !== undefined) this.kindTiers.set(sel.dataset.kindTier, tier);
     });
     // A group opened for the first time builds its rows ('toggle' does not bubble: caught on the way down).
     this.body.addEventListener(
@@ -363,7 +374,19 @@ export class NpcUi {
   }
 
   private kindsHtml(deps: SpawnerDeps): string {
-    const rows = deps.kinds.map((k) => `<div class="cat-item" title="${escapeHtml(k.blurb)}"><span class="cat-name">${escapeHtml(k.label)} <small>${escapeHtml(k.blurb)}</small></span><span class="cat-hands"><span class="cat-badge" data-kind-count="${escapeHtml(k.id)}"></span><button data-kind-spawn="${escapeHtml(k.id)}" title="stand one ahead of you">spawn</button><button data-kind-clear="${escapeHtml(k.id)}" title="take every one away">clear</button></span></div>`);
+    const rows = deps.kinds.map((k) => {
+      const id = escapeHtml(k.id);
+      // The grade picker, where a row has grades, drawn as a starship family's tier is and kept
+      // across a redraw the same way, so the two read alike in the same tab.
+      let picker = '';
+      if (k.tiers) {
+        const kept = this.kindTiers.get(k.id);
+        const want = kept !== undefined && k.tiers.values.includes(kept) ? kept : k.tiers.start;
+        const options = k.tiers.values.map((t) => `<option value="${t}"${t === want ? ' selected' : ''}>${escapeHtml(k.tiers!.label(t))}</option>`).join('');
+        picker = `<select class="ship-tier" data-kind-tier="${id}" title="how well this one fights">${options}</select>`;
+      }
+      return `<div class="cat-item" title="${escapeHtml(k.blurb)}"><span class="cat-name">${escapeHtml(k.label)} <small>${escapeHtml(k.blurb)}</small></span><span class="cat-hands">${picker}<span class="cat-badge" data-kind-count="${id}"></span><button data-kind-spawn="${id}" title="stand one ahead of you">spawn</button><button data-kind-clear="${id}" title="take every one away">clear</button></span></div>`;
+    });
     return groupHtml('kinds', 'Machines and fighters', deps.kinds.length, 'stood ahead of you, facing you', this.groups.isOpen('kinds', true), rows.join(''));
   }
 
@@ -525,7 +548,9 @@ export class NpcUi {
     }
     if (d.kindSpawn !== undefined) {
       const k = deps.kinds.find((x) => x.id === d.kindSpawn);
-      if (k) this.say(k.spawn());
+      // The grade the picker is on, else the row's own default. A row with no grades is handed
+      // nothing and behaves exactly as it did.
+      if (k) this.say(k.spawn(k.tiers ? (this.kindTiers.get(k.id) ?? k.tiers.start) : undefined));
     } else if (d.kindClear !== undefined) {
       const k = deps.kinds.find((x) => x.id === d.kindClear);
       if (k) this.say(`${k.clear()} taken away`);

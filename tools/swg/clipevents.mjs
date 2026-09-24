@@ -410,9 +410,22 @@ export function clipEventStatus(dir, readJson, { packs = null } = {}) {
   }
   const line = `  sounds: ${parts.join(', ')}${drift.length ? `, ${drift.length} species whose pack clips are not in the table` : ''}`;
   if ((file.format ?? 0) < CLIP_EVENTS_FORMAT) return { line, need: 'the clip events are from an older converter' };
-  // The species to convert again travel with the answer, so status can ask for that step itself
-  // rather than naming work in a sentence that no step of its own would ever do.
-  if (drift.length) return { line, need: `a species pack's clips no longer match the archives (${drift[0]}): reconvert that species, then the sounds`, species: drifted };
+  // Which way this comparison can fire, which an earlier version of it got backwards and asked a
+  // question no amount of work could answer. `missing` is the names a species pack has that the
+  // stored table has not, and that table is a **snapshot of the archives taken when `sounds` last
+  // ran**. So a pack that is newer than the sounds pack always drifts, and one that is older never
+  // does: it simply carries fewer names, every one of which the table still knows. (A pack never
+  // carries the whole table either way -- the curated list is a couple of hundred names out of the
+  // body table's nine hundred -- so the other direction is not a signal at all.) Reconverting the
+  // species therefore cannot mend it and `status` would ask for it again for ever, which is the
+  // same rake the mood comment above describes, trodden on from the other side. What is old is the
+  // sounds pack, and `sounds` is the one step that reads the archives again and rewrites the table.
+  if (drift.length) {
+    return {
+      line,
+      need: `the sounds pack's clip table is older than the species packs, which carry ${drift.length === 1 ? 'a name' : 'names'} it has never seen (${drift[0]}): the species packs are the current ones and converting them again cannot mend this`,
+    };
+  }
   if (!jkaClips) return { line, need: "the clip events have no Jedi Academy half (no saber swings or body falls): add --jka=<Jedi Academy's GameData folder>" };
   return { line, need: null };
 }

@@ -2364,8 +2364,11 @@ function packStatus(dir) {
   // Jedi Academy's own marks and saber sounds.
   const clipEvents = clipEventStatus(dir, readJson, { packs: (id) => readJson(join(dir, 'characters', id, 'parts.json')) });
   console.log(clipEvents.line);
-  // The sounds read the species packs, so a species whose pack drifted is converted again first.
-  if (clipEvents.species?.length) need(`species <swg-dir> ${dir} --retail-only`, `the species packs' clips no longer match the archives (${clipEvents.species.join(', ')}), before the sounds`);
+  // One line, not two. This used to ask for the species as well, on the reading that a pack whose
+  // clips the sound table does not know must itself be the old one. It is the other way round every
+  // time (the reasoning is in `clipEventStatus`), so that ask could never be satisfied: the two
+  // lines contradicted each other in the same to-do list and the species one would have been asked
+  // for again after every run of it, for ever.
   if (clipEvents.need) need(`sounds <swg-dir> ${dir} --retail-only --jka=<jedi-academy-gamedata>`, clipEvents.need);
   const jkaSounds = jkaSoundStatus(dir, readJson);
   if (jkaSounds.line) console.log(jkaSounds.line);

@@ -27,6 +27,7 @@ import { BLADE_GLOW_VIEWS, type BladeGlowPass } from './core/fx/bladeGlow';
 import { SSAO_TUNE_DEFAULTS, type SsaoPass } from './core/fx/ssao';
 import { SSAO_BASE_POWER } from './core/fx/ssaoMath.ts';
 import type { FighterGlow } from './world/npcs';
+import { DEFAULT_TIER } from './world/npcs.ts';
 import { loadPlayerRig } from './player/rig';
 import { LOOK, lookReport, packPitch, wrapAngle } from './player/lookAt.ts';
 import { Character, loadSpeciesIndex, type SpeciesEntry } from './player/character';
@@ -8784,6 +8785,17 @@ class App {
 
   /** What the NPC tab can stand in front of the player: a blaster turret, a fighter, and the planet's creature. */
   private npcKinds(): import('./ui/npcUi').NpcKind[] {
+    // The grades a fighter can be stood at, named rather than numbered, because a row of bare
+    // digits says nothing about what it is choosing. **Nought is the one worth knowing**: it is
+    // not the bottom of the ladder but the fighter this game had before there was a ladder --
+    // a flat shot clock, no burst, no slide and no cover at all -- so the whole of that work can
+    // be stood beside itself in the same tab. `__debug.fighters({ tier: n })` still moves every
+    // fighter already out; this picks what the next one is stood at and leaves the rest alone.
+    const FIGHTER_TIERS = {
+      values: [0, 1, 2, 3, 4, 5],
+      start: DEFAULT_TIER,
+      label: (t: number) => (t === 0 ? 'before tiers' : ['', 'raw', 'poor', 'fair', 'good', 'deadly'][t] ?? String(t)),
+    };
     const ahead = (distance: number) => {
       this.cam.forward(tmp);
       return { x: this.player.pos.x + tmp.x * distance, z: this.player.pos.z + tmp.z * distance, facing: Math.atan2(-tmp.x, -tmp.z) };
@@ -8807,7 +8819,8 @@ class App {
         label: 'Fighter',
         blurb: 'a humanoid of a random species with a random look and a lightsaber, sword or gun off the rack; fights you and the other fighters; 160 health',
         count: () => this.world.npcs.npcs.filter((n) => !n.dead).length,
-        spawn: () => {
+        tiers: FIGHTER_TIERS,
+        spawn: (tier?: number) => {
           const inside = this.world.inside;
           let x = 0;
           let z = 0;
@@ -8828,8 +8841,8 @@ class App {
             x = p.x + (Math.random() - 0.5) * 4;
             z = p.z + (Math.random() - 0.5) * 4;
           }
-          const n = this.world.npcs.spawnAt(x, z, undefined, spot ? { y: spot.y, inside: true } : {});
-          return `a ${n.name} ahead (${this.world.npcs.npcs.length} out)`;
+          const n = this.world.npcs.spawnAt(x, z, undefined, { ...(spot ? { y: spot.y, inside: true } : {}), ...(tier === undefined ? {} : { tier }) });
+          return `a ${n.name} ahead at ${FIGHTER_TIERS.label(n.tier)} (${this.world.npcs.npcs.length} out)`;
         },
         clear: () => this.world.npcs.removeAll(),
       },
