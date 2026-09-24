@@ -229,7 +229,16 @@ interface Remote {
  */
 const DEFAULT_PEER_SABER = 0x3aa0ff;
 
-const STATES: Set<string> = new Set(['idle', 'walk', 'run', 'air', 'seated', 'swim', 'float', 'crouch', 'crouchWalk', 'crouchWalkBack', 'stance', 'strafeLeft', 'strafeRight', 'runBack', 'walkBack', 'runSaber', 'walkSaber', 'gunIdle', 'gunWalk', 'gunRun', 'gunReadyIdle', 'gunReadyWalk', 'gunReadyRun', 'gunAimIdle', 'gunAimWalk', 'gunAimRun', 'kneel', 'prone', 'proneMove']);
+/**
+ * Which state words off the wire are drawn, and it must be **every** one of `RigState`: anything
+ * missing is silently read as `idle`, which is a body standing up. It is written out rather than
+ * imported because this file is reached from the network side and importing the rig would pull the
+ * saber, the throw, the ragdoll and the movement port in behind it; `remoteBodies.test.ts` reads
+ * both files as text and fails when the two lists disagree, which is how this drifted in the first
+ * place -- the six prone blaster carries were added to the rig and never added here, so a player
+ * lying prone with a blaster was drawn standing on every other screen.
+ */
+const STATES: Set<string> = new Set(['idle', 'walk', 'run', 'air', 'seated', 'swim', 'float', 'crouch', 'crouchWalk', 'crouchWalkBack', 'stance', 'strafeLeft', 'strafeRight', 'runBack', 'walkBack', 'runSaber', 'walkSaber', 'gunIdle', 'gunWalk', 'gunRun', 'gunReadyIdle', 'gunReadyWalk', 'gunReadyRun', 'gunAimIdle', 'gunAimWalk', 'gunAimRun', 'kneel', 'prone', 'proneMove', 'gunProneIdle', 'gunProneMove', 'gunProneReadyIdle', 'gunProneReadyMove', 'gunProneAimIdle', 'gunProneAimMove']);
 
 export class RemotePlayers {
   private readonly remotes = new Map<number, Remote>();

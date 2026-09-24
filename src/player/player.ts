@@ -1154,7 +1154,17 @@ export class Player {
     const names: string[] = [];
     const gun = this.classId === 'bounty_hunter' && this.hasGunClips && this.gunReady ? this.gunKind : null;
     if (gun && from !== 'crouched' && to !== 'crouched') {
-      if (this.aiming) names.push(`trn_${gun}_combat_${from}_aimed_to_${gun}_combat_${to}_aimed`);
+      if (this.aiming) {
+        names.push(`trn_${gun}_combat_${from}_aimed_to_${gun}_combat_${to}_aimed`);
+        // One of these names is misspelt in the archives themselves: the aimed way down from lying
+        // to kneeling spells the destination `kneleing`, and the converter writes what the archives
+        // hold, so the correctly spelled name matches nothing and the posture change falls back to
+        // the plain transition without saying so. Asked for by name beside the right one rather than
+        // mended in the converter, because a pack should hold what the client holds and the rest of
+        // the game should not have to know which of the two spellings a clip arrived under. The
+        // right name is tried first, so a pack that ever carries it wins.
+        if (to === 'kneeling') names.push(`trn_${gun}_combat_${from}_aimed_to_${gun}_combat_kneleing_aimed`);
+      }
       names.push(`trn_${gun}_combat_${from}_to_${gun}_combat_${to}`);
     }
     names.push(`trn_${from}_to_${to}`);

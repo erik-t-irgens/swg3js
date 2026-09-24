@@ -473,6 +473,23 @@ const bodies = new RemoteBodies().bind(physics);
   // and nothing whatever is sent, which is the game with no server and is what a page that never
   // calls it stays.
   ok(/sendBlowsTo\(hand: \(\(blow: PeerBlow\) => void\) \| null, may: \(\(id: number\) => boolean\) \| null = null\): void \{[\s\S]{0,200}b\.onBlow = hand;[\s\S]{0,60}b\.mayHurt = may;/.test(peers), '14: and one call puts every blow struck here on the wire, with nothing of the physics in it');
+  // Which state words off the wire are drawn. The set is written out in that file rather than
+  // imported, because importing the rig from the network side would pull the saber, the throw, the
+  // ragdoll and the movement port in behind it -- so the two lists can drift, and they did: the six
+  // prone blaster carries were added to the rig and never added here, and a player lying prone with
+  // a blaster was drawn standing on every other screen. Anything missing is read as `idle`, which is
+  // a body standing up, so the failure is silent by construction and only a check like this one can
+  // see it.
+  const states = /const STATES: Set<string> = new Set\(\[([^\]]*)\]\)/.exec(peers)?.[1] ?? '';
+  const drawn = new Set(states.split(',').map((s) => s.trim().replace(/^'|'$/g, '')).filter(Boolean));
+  const rigSrc = src('../../../src/player/rig.ts');
+  const union = /export type RigState = ([^;]+);/.exec(rigSrc)?.[1] ?? '';
+  const all = union.split('|').map((s) => s.trim().replace(/^'|'$/g, '')).filter(Boolean);
+  ok(all.length > 30 && drawn.size > 0, '14: both lists are still spelled the way this check reads them');
+  const missing = all.filter((s) => !drawn.has(s));
+  ok(missing.length === 0, `14: every one of the rig's ${all.length} states is drawn on a peer${missing.length ? ` (missing: ${missing.join(', ')})` : ''}`);
+  const extra = [...drawn].filter((s) => !all.includes(s));
+  ok(extra.length === 0, `14: and the peer list invents none of its own${extra.length ? ` (extra: ${extra.join(', ')})` : ''}`);
 }
 
 console.log(`\n${checks} checks passed`);
