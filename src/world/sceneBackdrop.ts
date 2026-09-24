@@ -111,6 +111,15 @@ export function sceneView(shot: { stand: { x: number; y: number; z: number; head
 }
 
 /**
+ * How high over the feet the third-person camera's orbit is centred, standing.
+ *
+ * **This is not ours: it is `EYE_HEIGHT` in `src/core/camera.ts`**, restated here because this file
+ * is pure and may not import the camera. A node test reads that file as text and fails if the two
+ * ever disagree, the way the palette and the display's own geometry are kept in step.
+ */
+export const ORBIT_EYE_HEIGHT = 1.5;
+
+/**
  * The three numbers that put the game's own orbiting camera back in a captured shot.
  *
  * The third-person camera stands at `focus + dir * distance` with
@@ -122,13 +131,57 @@ export function sceneView(shot: { stand: { x: number; y: number; z: number; head
  * standing somebody back in a place so they can recognise it -- and the pictures themselves are
  * framed by the shoot, which uses the captured camera outright and none of this.
  */
-export function orbitFor(shot: { stand: { x: number; y: number; z: number }; camera: { x: number; y: number; z: number } }): { yaw: number; pitch: number; distance: number } {
+export function orbitFor(shot: { stand: { x: number; y: number; z: number }; camera: { x: number; y: number; z: number } }, eyeHeight = ORBIT_EYE_HEIGHT): { yaw: number; pitch: number; distance: number } {
   const x = shot.camera.x - shot.stand.x;
-  const y = shot.camera.y - shot.stand.y;
+  // **From the eyes, not the feet.** The orbit's centre is the body's view height above where it
+  // stands, and measuring from the feet instead put the camera a metre and a half too high and
+  // therefore looking that much further down -- about 23 degrees at these distances, and the same
+  // amount at every shot, since they all stand the camera roughly 1.5 m up and 3.5 m back.
+  const y = shot.camera.y - (shot.stand.y + eyeHeight);
   const z = shot.camera.z - shot.stand.z;
   const distance = Math.hypot(x, y, z) || 1;
   return { yaw: Math.atan2(x, z), pitch: Math.asin(Math.max(-1, Math.min(1, y / distance))), distance };
 }
+
+/**
+ * Where a point in the world lands on the screen of a captured shot.
+ *
+ * `x` and `y` are fractions of the half-screen: 0 is dead centre and 1 is the edge, so anything
+ * past 1 is cut off. `ahead` is false for something behind the camera, which is the one case where
+ * the fractions mean nothing at all.
+ *
+ * This exists because a ship parked by eye can sit exactly on the frame's edge without anybody
+ * noticing: it is drawn live in three dimensions rather than baked into the picture, so a window
+ * narrower than the one it was judged in really does cut it in half.
+ */
+export function framePlace(
+  camera: { x: number; y: number; z: number; look: ScenePoint; fov: number },
+  point: ScenePoint,
+  aspect: number,
+): { ahead: boolean; x: number; y: number; inFrame: boolean; distance: number } {
+  const f = { x: camera.look.x - camera.x, y: camera.look.y - camera.y, z: camera.look.z - camera.z };
+  const fl = Math.hypot(f.x, f.y, f.z) || 1;
+  f.x /= fl;
+  f.y /= fl;
+  f.z /= fl;
+  // The camera's own right and up, taken against world up as three's `lookAt` does.
+  let r = { x: -f.z, y: 0, z: f.x };
+  const rl = Math.hypot(r.x, r.y, r.z) || 1;
+  r = { x: r.x / rl, y: r.y / rl, z: r.z / rl };
+  const u = { x: r.y * f.z - r.z * f.y, y: r.z * f.x - r.x * f.z, z: r.x * f.y - r.y * f.x };
+  const d = { x: point.x - camera.x, y: point.y - camera.y, z: point.z - camera.z };
+  const ahead = d.x * f.x + d.y * f.y + d.z * f.z;
+  const right = d.x * r.x + d.y * r.y + d.z * r.z;
+  const up = d.x * u.x + d.y * u.y + d.z * u.z;
+  const tv = Math.tan((Math.max(1e-3, Math.min(179, camera.fov)) * Math.PI) / 360);
+  const th = tv * Math.max(1e-6, aspect);
+  const x = ahead > 0 ? right / (ahead * th) : 0;
+  const y = ahead > 0 ? up / (ahead * tv) : 0;
+  return { ahead: ahead > 0, x, y, inFrame: ahead > 0 && Math.abs(x) <= 1 && Math.abs(y) <= 1, distance: Math.hypot(d.x, d.y, d.z) };
+}
+
+/** The narrowest window a scene is judged against: anything cut off here is cut off for most people. */
+export const FRAME_ASPECT = 16 / 9;
 
 /** The words the owner names an hour with, as a person would read them on a button. */
 const HOUR_WORDS: Record<string, string> = {

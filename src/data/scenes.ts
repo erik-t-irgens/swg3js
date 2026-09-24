@@ -144,7 +144,28 @@ export const SCENE_SHOTS: readonly SceneShot[] = [
  * every hour of one place, `__debug.captureShip('<key>')` records one line here per place. A key
  * with no row simply has no ship, which is what every place has today.
  */
-export const SCENE_SHIPS: Readonly<Record<string, ScenePose>> = {};
+export const SCENE_SHIPS: Readonly<Record<string, ScenePose>> = {
+  'theed-overlook': { x: 11789.62, y: 12.41, z: -2092.28, heading: 43.3 },
+  'lars-homestead': { x: 1215.26, y: 0.06, z: -1969.68, heading: 308.5 },
+  // The owner's own call: the second Lars composition stands 20 cm from the first, so one ship
+  // suits both and they asked for it rather than walking out there twice.
+  'lars-homestead-2': { x: 1215.26, y: 0.06, z: -1969.68, heading: 308.5 },
+  jabbapalace: { x: 3503.71, y: 32.14, z: -2074.63, heading: 273 },
+  tyrena: { x: 4787.59, y: 0.54, z: 2005.39, heading: 297.1 },
+  agrilatswamp: { x: -625.02, y: 48.98, z: 9223.16, heading: 170.4 },
+  'rori-swamp': { x: 5769.26, y: 76.13, z: 9658.79, heading: 292.2 },
+  'lok-nyms': { x: 68.06, y: 1.7, z: -60.61, heading: 323.1 },
+  mustafar: { x: -2952.6, y: 230.11, z: -4443.24, heading: 45.3 },
+  'endor-treevillage': { x: -5508.48, y: 20.05, z: -3890.22, heading: 92.1 },
+  'endor-lakevillage': { x: -346.26, y: 0.7, z: -6562.74, heading: 139.7 },
+  'talus-dearic': { x: -995.06, y: 10.07, z: 169.31, heading: 350 },
+  yavin4: { x: 4806.28, y: 84.81, z: 4172.15, heading: 270 },
+  dathomir: { x: 3930.61, y: 127.58, z: 1578.69, heading: 236.3 },
+  'dantooine-temple': { x: -8413.89, y: 9.04, z: 7581.4, heading: 261.3 },
+  kashyyyk: { x: -43.84, y: 44.06, z: -15.81, heading: 201.5 },
+  // Sixteen of the seventeen. The one with no row is the owner's control shot, whose own name says
+  // it has no ship in it, so its absence here is the record agreeing with itself.
+};
 
 /** A spot: one composition, with every hour the owner captured of it. */
 export interface SceneSpot {

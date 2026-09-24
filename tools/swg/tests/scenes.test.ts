@@ -8,6 +8,7 @@
 // captured holds that today, so anything that stops holding it is a typo and not a style.
 import assert from 'node:assert/strict';
 import { readSceneLine, sceneLine } from '../../../src/world/sceneCapture.ts';
+import { framePlace, FRAME_ASPECT } from '../../../src/world/sceneBackdrop.ts';
 import { SCENE_SHIPS, SCENE_SHOTS, sceneSpots } from '../../../src/data/scenes.ts';
 
 let passed = 0;
@@ -114,6 +115,26 @@ function facing(headingDeg: number): { x: number; z: number } {
     const spot = spots.find((s) => s.key === k);
     ok(!!spot?.ship && spot.ship.x === SCENE_SHIPS[k].x && spot.ship.z === SCENE_SHIPS[k].z, `${k} takes the ship the table gives it, over anything a capture happened to catch`);
   }
+
+  // Where each ship really lands on an ordinary window. The ship is drawn live rather than baked
+  // into the picture, so a window narrower than the one it was parked in cuts it off for real, and
+  // a ship sitting exactly on the edge is invisible as a fault until somebody sees the screen.
+  const behind: string[] = [];
+  const cut: string[] = [];
+  const edgy: string[] = [];
+  for (const spot of spots) {
+    if (!spot.ship) continue;
+    const on = framePlace(spot.camera, spot.ship, FRAME_ASPECT);
+    if (!on.ahead) behind.push(spot.key);
+    else if (Math.abs(on.x) > 1 || Math.abs(on.y) > 1) cut.push(`${spot.key} (${on.x.toFixed(2)}, ${on.y.toFixed(2)})`);
+    else if (Math.max(Math.abs(on.x), Math.abs(on.y)) > 0.85) edgy.push(`${spot.key} (${on.x.toFixed(2)}, ${on.y.toFixed(2)})`);
+  }
+  ok(behind.length === 0, `no ship is parked behind its own shot (${behind.join(', ') || `all ${rows.length} are in front`})`);
+  // A ceiling rather than a count, so moving one of these toward the middle makes the number fall
+  // and nothing here has to be edited to let an improvement through. Which of them is worth moving
+  // is the owner's to say: they were parked by eye through a view that was tilted at the time.
+  ok(cut.length <= 2, `at most two ships are cut off on an ordinary window, and they are named rather than left to be found on a screen (${cut.join('; ') || 'none'})`);
+  ok(cut.length + edgy.length <= 3, `and at most three sit near enough the edge to be worth a second look (${edgy.join('; ') || 'none on the edge'})`);
 
   // A place named by the world, where the world knew one. Not every spot has one and that is fine;
   // what would not be fine is a name that came back empty rather than absent.

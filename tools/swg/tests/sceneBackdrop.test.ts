@@ -5,7 +5,8 @@
 // arithmetic is pure and this sweeps it: the same direction must land in the same place in the
 // picture and in the live view, at every window shape the owner might drag the game into.
 import assert from 'node:assert/strict';
-import { backdropFit, backdropPath, backdropRenderFor, hourLabel, isCreatorShot, orbitFor, sceneView, CREATOR_KEYS, type BackdropRender } from '../../../src/world/sceneBackdrop.ts';
+import { readFileSync } from 'node:fs';
+import { backdropFit, backdropPath, backdropRenderFor, hourLabel, isCreatorShot, orbitFor, sceneView, CREATOR_KEYS, ORBIT_EYE_HEIGHT, type BackdropRender } from '../../../src/world/sceneBackdrop.ts';
 import { sceneSpots, SCENE_SHOTS } from '../../../src/data/scenes.ts';
 
 let passed = 0;
@@ -131,9 +132,9 @@ const render: BackdropRender = backdropRenderFor(SHOT_FOV, 3, 1600);
   for (const shot of SCENE_SHOTS) {
     const o = orbitFor(shot);
     const cp = Math.cos(o.pitch);
-    // The camera stands at focus + dir * distance, which is what this has to rebuild.
+    // The camera stands at focus + dir * distance, and the focus is the eyes, not the feet.
     const back = { x: Math.sin(o.yaw) * cp * o.distance, y: Math.sin(o.pitch) * o.distance, z: Math.cos(o.yaw) * cp * o.distance };
-    const want = { x: shot.camera.x - shot.stand.x, y: shot.camera.y - shot.stand.y, z: shot.camera.z - shot.stand.z };
+    const want = { x: shot.camera.x - shot.stand.x, y: shot.camera.y - (shot.stand.y + ORBIT_EYE_HEIGHT), z: shot.camera.z - shot.stand.z };
     const err = Math.hypot(back.x - want.x, back.y - want.y, back.z - want.z);
     if (err > worstPos) {
       worstPos = err;
@@ -146,8 +147,21 @@ const render: BackdropRender = backdropRenderFor(SHOT_FOV, 3, 1600);
   }
   ok(worstPos < 1e-9, `the orbit rebuilds every captured camera offset exactly (worst ${worstPos.toExponential(1)} m, ${worstName})`);
   ok(worstAim < 1, `and aims where the shot really looked (worst ${worstAim.toFixed(2)} degrees over all 67)`);
-  const flat = orbitFor({ stand: { x: 0, y: 0, z: 0 }, camera: { x: 0, y: 0, z: 0 } });
-  ok(Number.isFinite(flat.yaw) && Number.isFinite(flat.pitch) && flat.distance > 0, 'and a camera standing exactly on the figure answers numbers rather than dividing by nought');
+  const flat = orbitFor({ stand: { x: 0, y: -ORBIT_EYE_HEIGHT, z: 0 }, camera: { x: 0, y: 0, z: 0 } });
+  ok(Number.isFinite(flat.yaw) && Number.isFinite(flat.pitch) && flat.distance > 0, 'and a camera standing exactly on the orbit answers numbers rather than dividing by nought');
+
+  // The eye height is the camera's own number and not ours. Read as text, because this file is
+  // pure and may not import the camera, and a copy that drifts is the bug the owner reported:
+  // measured from the feet the pitch came out 23 degrees too steep at every one of these shots.
+  const cameraSource = readFileSync(new URL('../../../src/core/camera.ts', import.meta.url), 'utf8');
+  const declared = /const EYE_HEIGHT\s*=\s*([\d.]+)/.exec(cameraSource);
+  ok(!!declared && Number(declared[1]) === ORBIT_EYE_HEIGHT, `the eye height matches the camera's own EYE_HEIGHT (${declared?.[1]} against ${ORBIT_EYE_HEIGHT})`);
+
+  // What the old reading cost, kept as a number so nobody restores it thinking it was harmless.
+  const theed = SCENE_SHOTS[0];
+  const fromFeet = Math.asin((theed.camera.y - theed.stand.y) / Math.hypot(theed.camera.x - theed.stand.x, theed.camera.y - theed.stand.y, theed.camera.z - theed.stand.z));
+  const fromEyes = orbitFor(theed).pitch;
+  ok(((fromFeet - fromEyes) * 180) / Math.PI > 15, `measuring from the feet instead tilts the view ${(((fromFeet - fromEyes) * 180) / Math.PI).toFixed(1)} degrees further down, which is what was seen`);
 }
 
 {

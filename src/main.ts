@@ -30,7 +30,7 @@ import type { FighterGlow } from './world/npcs';
 import { DEFAULT_TIER } from './world/npcs.ts';
 import { captureScene, headingDegrees, sceneLine } from './world/sceneCapture.ts';
 import { packPlanet, runShoot, shootPlan } from './world/sceneShoot.ts';
-import { orbitFor } from './world/sceneBackdrop.ts';
+import { framePlace, orbitFor, FRAME_ASPECT } from './world/sceneBackdrop.ts';
 import { sceneSpots } from './data/scenes.ts';
 /**
  * How near a named place has to be for `__debug.scene` to call the shot that place's. Ours, and
@@ -177,7 +177,7 @@ import { outdoorNav } from './world/nav/outdoorNav.ts';
 import { ERRAND_TUNE, tuneErrand, type ErrandTune } from './world/errand.ts';
 // Cover: the one shared searcher and its numbers, the ladder's three cover columns and the brain's
 // own reach for a blocked shot. `__debug.cover()` is the only way any of it can be read from a tab
-// that draws no frames; the knob itself is also on `__debug.fighters({ cover: â€¦ })`.
+// that draws no frames; the knob itself is also on `__debug.fighters({ cover: Ã¢â‚¬Â¦ })`.
 import { coverSearch, tuneCover } from './world/cover.ts';
 import { GROUND_SKILL } from './world/groundSkill.ts';
 import { GROUND_STEP } from './world/groundStep.ts';
@@ -214,29 +214,29 @@ import { census as programFamilies } from './core/fx/programCensus.ts';
 /** The keys for the vehicle ridden, by its kind. */
 function mountPrompt(v: import('./vehicles/vehicle').Vehicle, wingsKey: string = WINGS_KEY): string {
   const k = v.spec.kind;
-  const bar = (f: number) => 'â–®'.repeat(Math.round(f * 8)) + 'â–¯'.repeat(8 - Math.round(f * 8));
-  const boost = v.spec.boost === 'heat' ? ` Â· <b>Shift</b> boost Â· heat ${bar(v.meter)}${v.overheated > 0 ? ' BURNT OUT' : ''}` : v.spec.boost === 'burst' ? ` Â· <b>Shift</b> boost ${bar(v.meter)}` : '';
-  const hop = v.spec.hop ? ' Â· <b>Space</b> hop' : '';
-  const fly = v.spec.fly ? ' Â· look up/down or <b>Space</b>/<b>X</b> to climb and sink' : '';
+  const bar = (f: number) => 'Ã¢â€“Â®'.repeat(Math.round(f * 8)) + 'Ã¢â€“Â¯'.repeat(8 - Math.round(f * 8));
+  const boost = v.spec.boost === 'heat' ? ` Ã‚Â· <b>Shift</b> boost Ã‚Â· heat ${bar(v.meter)}${v.overheated > 0 ? ' BURNT OUT' : ''}` : v.spec.boost === 'burst' ? ` Ã‚Â· <b>Shift</b> boost ${bar(v.meter)}` : '';
+  const hop = v.spec.hop ? ' Ã‚Â· <b>Space</b> hop' : '';
+  const fly = v.spec.fly ? ' Ã‚Â· look up/down or <b>Space</b>/<b>X</b> to climb and sink' : '';
   if (k === 'ship') {
     // Down on the ground: what gets it up again, and why a put-down was refused.
-    if (v.landed) return `${v.space ? 'set down Â· <b>W</b> lifts off along the surface' : 'landed Â· <b>W</b> or <b>Space</b> lifts off'} Â· <b>E</b> leave${v.space ? ' (the boots take hold of what it stands on)' : ''}${v.landNote ? ` Â· ${v.landNote}` : ''}`;
-    if (v.holding) return 'setting downâ€¦';
+    if (v.landed) return `${v.space ? 'set down Ã‚Â· <b>W</b> lifts off along the surface' : 'landed Ã‚Â· <b>W</b> or <b>Space</b> lifts off'} Ã‚Â· <b>E</b> leave${v.space ? ' (the boots take hold of what it stands on)' : ''}${v.landNote ? ` Ã‚Â· ${v.landNote}` : ''}`;
+    if (v.holding) return 'setting downÃ¢â‚¬Â¦';
     // Hovering, the ship is a VTOL: it holds still until the throttle opens, rises and sinks on the keys, slides sideways. In flight the mouse flies it.
-    const down = SHIP_GROUND.rule === 'landing' ? ` Â· <b>Ctrl</b> brings it down, held at the bottom to set it down Â· <b>${keyName(CUT_ENGINES_KEY)}</b> cuts the engines` : '';
+    const down = SHIP_GROUND.rule === 'landing' ? ` Ã‚Â· <b>Ctrl</b> brings it down, held at the bottom to set it down Ã‚Â· <b>${keyName(CUT_ENGINES_KEY)}</b> cuts the engines` : '';
     // Out in space there is no ground: the same key sets the hull down on whatever it has come to a stop over.
-    const setDown = v.space && SHIP_GROUND.rule === 'landing' ? (v.setDownNear ? ` Â· <b>${keyName(CUT_ENGINES_KEY)}</b> sets it down on what is under you` : Math.abs(v.speed) <= SPACE_LANDING.speed ? ' Â· nothing under it to set down on' : '') : '';
-    const hover = `<b>W</b> throttle up into flight Â· mouse turns Â· <b>Space</b>/<b>Ctrl</b> rise and sink Â· <b>A/D</b> slide${v.space ? setDown : down}`;
+    const setDown = v.space && SHIP_GROUND.rule === 'landing' ? (v.setDownNear ? ` Ã‚Â· <b>${keyName(CUT_ENGINES_KEY)}</b> sets it down on what is under you` : Math.abs(v.speed) <= SPACE_LANDING.speed ? ' Ã‚Â· nothing under it to set down on' : '') : '';
+    const hover = `<b>W</b> throttle up into flight Ã‚Â· mouse turns Ã‚Â· <b>Space</b>/<b>Ctrl</b> rise and sink Ã‚Â· <b>A/D</b> slide${v.space ? setDown : down}`;
     // Stopped in the air the ship holds its height, so the way down belongs on the flight line too.
-    const flight = `<b>W</b>/<b>S</b> throttle up and down Â· mouse: in the circle aims the guns, out of it keeps turning the ship Â· <b>A/D</b> roll Â· <b>Space</b>/<b>X</b> pitch${v.powered ? '' : ' Â· <b>ENGINES CUT</b>'}${v.space ? setDown : Math.abs(v.speed) < 2 ? down : ''}`;
+    const flight = `<b>W</b>/<b>S</b> throttle up and down Ã‚Â· mouse: in the circle aims the guns, out of it keeps turning the ship Ã‚Â· <b>A/D</b> roll Ã‚Â· <b>Space</b>/<b>X</b> pitch${v.powered ? '' : ' Ã‚Â· <b>ENGINES CUT</b>'}${v.space ? setDown : Math.abs(v.speed) < 2 ? down : ''}`;
     // A ship whose wings open: the wings key and which way a press would take the pilot's choice; an open chosen while a
     // low wing waits for room says so.
-    const wings = v.wings.length ? ` Â· <b>${keyName(wingsKey)}</b> ${v.wings.chosen ? 'close' : 'open'} the wings${v.wings.pilot && !v.wings.target ? ' (they open with room under them)' : ''}` : '';
-    return `<b>E</b> leave Â· ${v.airborne ? flight : hover} Â· <b>wheel</b> zoom, all the way in for the cockpit Â· <b>Alt</b> look around${v.guns.length ? ' Â· <b>click</b> fires Â· <b>Tab</b> next target' : ''}${wings} Â· <b>Shift</b> burn Â· ${v.airborne ? 'flying' : 'hovering'} Â· ${Math.round(Math.abs(v.speed) * 3.6)} km/h${v.hp < v.maxHp ? ` Â· hull ${Math.round((v.hp / v.maxHp) * 100)}%` : ''}${v.landNote ? ` Â· ${v.landNote}` : ''}`;
+    const wings = v.wings.length ? ` Ã‚Â· <b>${keyName(wingsKey)}</b> ${v.wings.chosen ? 'close' : 'open'} the wings${v.wings.pilot && !v.wings.target ? ' (they open with room under them)' : ''}` : '';
+    return `<b>E</b> leave Ã‚Â· ${v.airborne ? flight : hover} Ã‚Â· <b>wheel</b> zoom, all the way in for the cockpit Ã‚Â· <b>Alt</b> look around${v.guns.length ? ' Ã‚Â· <b>click</b> fires Ã‚Â· <b>Tab</b> next target' : ''}${wings} Ã‚Â· <b>Shift</b> burn Ã‚Â· ${v.airborne ? 'flying' : 'hovering'} Ã‚Â· ${Math.round(Math.abs(v.speed) * 3.6)} km/h${v.hp < v.maxHp ? ` Ã‚Â· hull ${Math.round((v.hp / v.maxHp) * 100)}%` : ''}${v.landNote ? ` Ã‚Â· ${v.landNote}` : ''}`;
   }
   const turn = k === 'ground' ? 'mouse or <b>A/D</b> turn' : 'mouse or <b>A/D</b> steer';
-  const hull = v.hp < v.maxHp ? ` Â· hull ${Math.round((v.hp / v.maxHp) * 100)}%${v.hp / v.maxHp < 0.34 ? ' LIMPING' : v.hp / v.maxHp < 0.67 ? ' smoking' : ''}` : '';
-  return `<b>E</b> dismount Â· <b>W/S</b> throttle Â· ${turn} Â· <b>Alt</b> look around${boost}${hop}${fly} Â· ${k} Â· ${Math.round(Math.abs(v.speed) * 3.6)} km/h${hull}`;
+  const hull = v.hp < v.maxHp ? ` Ã‚Â· hull ${Math.round((v.hp / v.maxHp) * 100)}%${v.hp / v.maxHp < 0.34 ? ' LIMPING' : v.hp / v.maxHp < 0.67 ? ' smoking' : ''}` : '';
+  return `<b>E</b> dismount Ã‚Â· <b>W/S</b> throttle Ã‚Â· ${turn} Ã‚Â· <b>Alt</b> look around${boost}${hop}${fly} Ã‚Â· ${k} Ã‚Â· ${Math.round(Math.abs(v.speed) * 3.6)} km/h${hull}`;
 }
 
 const MOUNT_RANGE = 3.6;
@@ -272,8 +272,8 @@ const CAMERA_REST_PITCH = 0.32;
  *
  * `promptHz` and `nearbyHz` are the two rates this file gathers state at instead of every frame,
  * and both are invented. Eight times a second is fast enough that walking up to a vehicle changes
- * the bar before the hand reaches the key and slow enough that the asking â€” the lift underfoot, the
- * elevators near, the doorless building near, the nearest vehicle â€” costs an eighth of what it did;
+ * the bar before the hand reaches the key and slow enough that the asking Ã¢â‚¬â€ the lift underfoot, the
+ * elevators near, the doorless building near, the nearest vehicle Ã¢â‚¬â€ costs an eighth of what it did;
  * four is the rate the corner line it feeds is written at anyway, so asking oftener could not show.
  * Raising either to sixty puts the old per-frame cost back, which is how to measure what they save.
  *
@@ -327,7 +327,7 @@ interface ShipCrossing {
   speed: number;
   height: number;
   crew?: ShipCrew | null;
-  /** Where the ship comes out and which way it faces (game frame), instead of over the spawn at heading Ï€. */
+  /** Where the ship comes out and which way it faces (game frame), instead of over the spawn at heading Ãâ‚¬. */
   arrival?: { pos: THREE.Vector3; quaternion: THREE.Quaternion } | null;
   /** The ship's fight as it left (shields, armour, chassis, parts down, boost, as shares), put on the new hull once it is adopted; null or absent: whole. */
   condition?: import('./space/shipCombat').CarriedCondition | null;
@@ -629,7 +629,7 @@ class App {
   /**
    * The gates this world's zones are walked between, pointed at the pack by `arrive` and by the
    * jump's own crossing, and the clock that keeps a fight out of them. A world with no gates.json
-   * â€” which is every world but one, and every pack converted before the join was written â€” has no
+   * Ã¢â‚¬â€ which is every world but one, and every pack converted before the join was written Ã¢â‚¬â€ has no
    * gates and everything below answers "no gate".
    */
   private readonly zoneGates = new ZoneGates();
@@ -902,8 +902,8 @@ class App {
     this.feedback.attach(this.overlay, COL);
     this.feedback.messages = (kind, text, colour) => this.sayShipLine(kind, text, colour);
     this.feedback.setProjector((x, y, z, out) => this.projectToScreen(x, y, z, out));
-    // Where a blow on the player came from. Every striker already passes it â€” a creature, a fighter,
-    // a mobile and a bolt all call `damage(amount, from, push, source)` â€” and the record now hands it
+    // Where a blow on the player came from. Every striker already passes it Ã¢â‚¬â€ a creature, a fighter,
+    // a mobile and a bolt all call `damage(amount, from, push, source)` Ã¢â‚¬â€ and the record now hands it
     // on to its callback, so the closure below reads it directly. This wrapper caught it before that
     // and stays as the second source, because it costs nothing: the record is one object for the life
     // of the session, so this is a single wrapper and not a per-frame anything.
@@ -1357,7 +1357,7 @@ class App {
        * The water's height field: `ripples()` reports it. `ripples({ speed })` sets the coupling
        * between neighbouring texels in **metres a second** (1.423 as it ships), the same at every
        * detail setting; the grid caps it and the game says so in the console once when it holds it
-       * there, so anything is safe to ask for. It is not the speed a ripple is seen to travel at â€”
+       * there, so anything is safe to ask for. It is not the speed a ripple is seen to travel at Ã¢â‚¬â€
        * read `carryMs` in the report for that, because the damping is a spring as well as friction.
        * `draft` is how hard a hull holds the surface down and `impact` how hard a fast arrival
        * punches. These are content tuning rather than taste, which is why they are here and not in
@@ -1388,7 +1388,7 @@ class App {
        * play, newest first.
        *
        * `shaders({ groups: true })` counts the live list by every dimension that can make one
-       * program differ from another â€” the light signature, which face is drawn, fog, the shadow
+       * program differ from another Ã¢â‚¬â€ the light signature, which face is drawn, fog, the shadow
        * maps, skinning, instancing, the alpha test, vertex colours, the environment cube and its
        * height, the cascades, the wet wrap and each material's own key. That is the figure to have
        * in hand before anything is collapsed: a signature with one program in it is a pass nothing
@@ -1396,7 +1396,7 @@ class App {
        *
        * `shaders({ families: true })` asks the other question: not how many programs carry each
        * flag but which material family has more than one program at all, and what the second one
-       * is *for* â€” the light set, a side, an alpha test, the cascades' defines, the wet wrap, a
+       * is *for* Ã¢â‚¬â€ the light set, a side, an alpha test, the cascades' defines, the wet wrap, a
        * material's own key. `combinedPrograms` comes out of the same census and is always
        * answered, because it is the guard rail and nobody will pass an option to find it: a light
        * set that holds two of the game's passes at once is a camera that was shown both, and every
@@ -2073,7 +2073,7 @@ class App {
        * why it did not draw, with console tuning (`sight`, `tint`, `minLength`, `bodyMurk`,
        * `bodyMurkRef`, `murkLight`, `lightRef`, `nightFloor`, `lightCeil`, `lightDepth`,
        * `deepFloor`, `veilMax`, `veilDepth`, `surfaceEase`, `ceiling`, `shimmerUv`, `shimmerCells`,
-       * `shimmerRate`, `shimmerReach`, `shimmerSurface`, `shimmerDeep`) â€” every key of
+       * `shimmerRate`, `shimmerReach`, `shimmerSurface`, `shimmerDeep`) Ã¢â‚¬â€ every key of
        * `UNDERWATER_TUNE` and nothing else, since `tuneUnderwater` silently drops a name that is not
        * one of its own rather than saying so. Reads stored values only. There was no under water in
        * the game, so every one of these numbers is ours.
@@ -2098,7 +2098,7 @@ class App {
           effects: true,
           setting,
           // Empty unless something typed was not written: a misspelling, a dead name, a word where
-          // a number goes. It is not an error â€” the rest of the call went through.
+          // a number goes. It is not an error Ã¢â‚¬â€ the rest of the call went through.
           ignored,
           tuning: { ...T },
           under: { under: water.under, depth: water.depth, opacity: water.opacity },
@@ -2583,7 +2583,7 @@ class App {
       /** Draw the grade's own shader over known colours and compare every texel with the JavaScript the node test sweeps: `ok` false means the two have drifted apart. */
       gradeSelfTest: () => {
         const pass = this.gradePass();
-        if (!pass) return 'the effects are off (turn Effects on): the self test draws the gradeâ€™s own shader';
+        if (!pass) return 'the effects are off (turn Effects on): the self test draws the gradeÃ¢â‚¬â„¢s own shader';
         return pass.selfTest(this.renderer);
       },
       /** An estimate of how far the grade moves the frame just drawn: `darkened` and `brightened` should both be 0. */
@@ -3019,7 +3019,7 @@ class App {
       },
       /**
        * The head-up display: what the overlay costs, what it drew last frame, and the DOM writes of
-       * the last full second that were not by design â€” the number to look for is 0, and the 4 Hz
+       * the last full second that were not by design Ã¢â‚¬â€ the number to look for is 0, and the 4 Hz
        * clock, `/loc` and frame-rate lines are counted apart as `byDesign`.
        *
        * `{ overlay: false }` turns the canvas off for a baseline and `{ overlay: true }` back on;
@@ -3281,7 +3281,7 @@ class App {
         const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, l), new THREE.MeshStandardMaterial({ color: 0x8899aa }));
         mesh.position.y = h / 2;
         const v = this.world.addVehicle(specFor(kind, 'box', 'box', bounds), mesh, this.player.pos, this.player.heading);
-        return `box ${w}Ã—${h}Ã—${l} spawned as a ${kind} at ${v.pos.toArray().map((n) => n.toFixed(1)).join(',')}`;
+        return `box ${w}Ãƒâ€”${h}Ãƒâ€”${l} spawned as a ${kind} at ${v.pos.toArray().map((n) => n.toFixed(1)).join(',')}`;
       },
       /** Change the ridden (else the nearest) vehicle's handling live: `vehicleTune({ bank: 0, turnRate: 1.2 })`, a ship's `{ inertia: 1, turnRate: 0.8 }`; returns the spec. */
       vehicleTune: (patch: Partial<import('./vehicles/vehicle').VehicleSpec> = {}) => {
@@ -3847,7 +3847,7 @@ class App {
         const cat = this.world.mobileCatalogue;
         if (!mobiles) return 'no world loaded';
         if (!cat) return 'the creature and NPC catalogue has not loaded yet (or is not converted: npm run swg -- mobiles @SWG assets-private --retail-only)';
-        if (this.player.aboard) return 'nothing can be stood aboard a shipâ€™s rooms';
+        if (this.player.aboard) return 'nothing can be stood aboard a shipÃ¢â‚¬â„¢s rooms';
         const exact = cat.byId(idOrFind) ?? cat.resolve(idOrFind);
         const hits = exact ? [exact] : cat.search(idOrFind, { limit: 9 });
         const e = hits[0];
@@ -3945,7 +3945,7 @@ class App {
        *                                      tier, and a row per live fighter with its tier, its
        *                                      state, whether it wants cover and where its spot is
        *   `__debug.cover({ reach: 20 })`  -- moves the search's own numbers live (`COVER_TUNE`;
-       *                                      the same knob as `__debug.fighters({ cover: â€¦ })`)
+       *                                      the same knob as `__debug.fighters({ cover: Ã¢â‚¬Â¦ })`)
        *   `__debug.cover({ probe: true })`  -- runs one real search **now**, from the nearest live
        *                                      fighter's feet against you, and prints what was
        *                                      offered, what was refused and why, and the spot
@@ -4190,7 +4190,9 @@ class App {
         const at = new THREE.Vector3(spot.stand.x, spot.stand.y, spot.stand.z);
         this.player.reset(at);
         this.player.heading = (spot.stand.heading * Math.PI) / 180;
-        const orbit = orbitFor(spot);
+        // The body's own view height, not the table's default: a posture that sinks the eyes moves
+        // the orbit's centre with them, and the camera would otherwise sit that much off.
+        const orbit = orbitFor(spot, this.player.eyeHeight);
         this.cam.yaw = orbit.yaw;
         this.cam.pitch = orbit.pitch;
         this.cam.distance = orbit.distance;
@@ -4223,7 +4225,14 @@ class App {
         const pose = { x: Number(g.x.toFixed(2)), y: Number(g.y.toFixed(2)), z: Number(g.z.toFixed(2)), heading: headingDegrees(v.heading) };
         const line = `  '${key}': { x: ${pose.x}, y: ${pose.y}, z: ${pose.z}, heading: ${pose.heading} },`;
         console.log(line);
-        return { place: key, ship: v.def?.id ?? null, pose, metres: Number(camAt.distanceTo(g).toFixed(1)), line, paste: line };
+        // Where it will really sit on the screen. A ship parked by eye can land exactly on the
+        // frame's edge without anybody seeing it, because it is drawn live rather than baked into
+        // the picture: a window narrower than the one it was judged in cuts it in half for real.
+        const on = framePlace(spot.camera, pose, FRAME_ASPECT);
+        const edge = Math.max(Math.abs(on.x), Math.abs(on.y));
+        const framing = !on.ahead ? 'behind the shot' : edge > 1 ? 'OFF SCREEN on an ordinary window; move it toward the middle' : edge > 0.85 ? 'right on the edge; nudge it toward the middle' : 'well in frame';
+        if (edge > 0.85 || !on.ahead) this.messages.system(`${key}: the ship is ${framing}`);
+        return { place: key, ship: v.def?.id ?? null, pose, metres: Number(camAt.distanceTo(g).toFixed(1)), framing, screen: { x: Number(on.x.toFixed(2)), y: Number(on.y.toFixed(2)) }, line, paste: line };
       },
       /** The gun in hand: its Jedi Academy type and numbers. */
       gunType: () => {
@@ -5411,7 +5420,7 @@ class App {
       if (c) console.info(`mobiles: ${c.entries.length} in the catalogue`);
     });
     // Aboard a ship's rooms nothing is stood, whoever asks (the console, the spawner, the wildlife).
-    this.world.refuseMobiles = () => (this.player?.aboard ? 'nothing can be stood aboard a shipâ€™s rooms' : null);
+    this.world.refuseMobiles = () => (this.player?.aboard ? 'nothing can be stood aboard a shipÃ¢â‚¬â„¢s rooms' : null);
     this.appearanceUi.onSpecies = (id) => void this.switchCharacter(id);
     const params = new URLSearchParams(location.search);
     this.setClass(params.get('class') === 'bounty_hunter' ? 'bounty_hunter' : 'jedi');
@@ -5667,14 +5676,14 @@ class App {
   }
 
   /**
-   * You hurt something: the tick on the crosshair, the line in words and â€” with the setting on â€” a
+   * You hurt something: the tick on the crosshair, the line in words and Ã¢â‚¬â€ with the setting on Ã¢â‚¬â€ a
    * number over its head. The world calls this for every blow of the player's, whatever landed it.
    * The point is the body's head rather than its feet, since that is where a number belongs.
    */
   private landedHit(target: { pos: THREE.Vector3; halfHeight: number; key: number; label: string }, amount: number, killed: boolean): void {
     // A blow of yours on something living: the zone gates stand aside for a few seconds, so a fight
     // beside one cannot end in another zone because E was pressed to mount a speeder. This watches
-    // the living only â€” a shot at a hull or a turret never reaches it â€” so the whole of the rule is
+    // the living only Ã¢â‚¬â€ a shot at a hull or a turret never reaches it Ã¢â‚¬â€ so the whole of the rule is
     // this and `hurtFrom`, which is every blow taken, from anything at all.
     this.zoneGates.fought(this.world.simTime);
     const p = target.pos;
@@ -5721,7 +5730,7 @@ class App {
    * keeps. Nothing is built: the struct is reset in place and filled in place.
    *
    * It is called a few times a second rather than every frame, and that is the whole point of it.
-   * The words the bar shows never cost anything; the *asking* does â€” the lift underfoot, the
+   * The words the bar shows never cost anything; the *asking* does Ã¢â‚¬â€ the lift underfoot, the
    * elevators near, the doorless building near and the nearest vehicle are all walks of a list or a
    * physics lookup, and the long line this replaces did every one of them on every frame, the
    * elevators twice on one line. Gathering them eight times a second is the saving.
@@ -5820,8 +5829,8 @@ class App {
   /**
    * The gate between two of a world's zones, into the same struct as everything else: whether the
    * key would take you through it, and the destination in full for the long line. It is asked for
-   * eight times a second like the rest, and on a world with no gates at all â€” which is every world
-   * but one â€” it is one comparison and nothing more.
+   * eight times a second like the rest, and on a world with no gates at all Ã¢â‚¬â€ which is every world
+   * but one Ã¢â‚¬â€ it is one comparison and nothing more.
    *
    * The two rules it applies are `zoneGates.ts`'s own: the gate never takes the key from anything
    * else within reach, and it stands aside for a few seconds after any blow either way. Which
@@ -5853,7 +5862,7 @@ class App {
   /**
    * One call a frame, after the world is drawn: every shape of the display, on the overlay. It draws
    * nothing at all and takes what it drew off the canvas once while the game is not simulating, and
-   * it allocates nothing â€” the primitives take numbers and colour indices only.
+   * it allocates nothing Ã¢â‚¬â€ the primitives take numbers and colour indices only.
    */
   private drawOverlay(simulate: boolean): void {
     const o = this.overlay;
@@ -6697,8 +6706,8 @@ class App {
    * was built during play", and a second opinion about what playing means corrupts it silently.
    *
    * It was two opinions and neither was right. The frame loop called every frame that was not a
-   * travel, a jump or an effects switch `play`, which at the select screen â€” where there is no
-   * world, no player and nothing playing â€” filed the session's first fourteen programs as built in
+   * travel, a jump or an effects switch `play`, which at the select screen Ã¢â‚¬â€ where there is no
+   * world, no player and nothing playing Ã¢â‚¬â€ filed the session's first fourteen programs as built in
    * play and left them in that list for the rest of the session; and it called a frame behind the
    * loading screen `covered`, which is the word for a live frame the player cannot see, so
    * `loading` was never used by anything and the deliberate sample at the end of `settle` had
@@ -7220,10 +7229,10 @@ class App {
     const p = this.player;
     const room = p.aboard;
     if (!line || !hs.crewFree || !room) return line;
-    if (inLift) return 'in hyperspace Â· <b>E</b> lift';
-    if (p.piloting) return 'in hyperspace Â· the ship comes out when the way ahead is ready Â· <b>E</b> lets go of the controls';
-    if (room.pilotSpot && p.pos.distanceTo(room.pilotSpot) < CONTROLS_RANGE) return 'in hyperspace Â· <b>E</b> take the controls';
-    return 'in hyperspace Â· the ship comes out when the way ahead is ready';
+    if (inLift) return 'in hyperspace Ã‚Â· <b>E</b> lift';
+    if (p.piloting) return 'in hyperspace Ã‚Â· the ship comes out when the way ahead is ready Ã‚Â· <b>E</b> lets go of the controls';
+    if (room.pilotSpot && p.pos.distanceTo(room.pilotSpot) < CONTROLS_RANGE) return 'in hyperspace Ã‚Â· <b>E</b> take the controls';
+    return 'in hyperspace Ã‚Â· the ship comes out when the way ahead is ready';
   }
 
   /** The jump's crew kept aboard: someone who stepped out of the rooms in the tunnel (through a door) is boarded again at the entry. */
@@ -7849,7 +7858,7 @@ class App {
   /**
    * The target block, filled into the one kept struct: where the target shows on screen and how wide
    * it projects, what to call it, and the shields, armour and hull of the face turned toward the
-   * pilot. Nothing here is made afresh â€” the two strings are joined only when the target itself
+   * pilot. Nothing here is made afresh Ã¢â‚¬â€ the two strings are joined only when the target itself
    * changes, so following one costs no allocation at all.
    */
   private targetHud(pilot: Vehicle): TargetView | null {
@@ -7882,7 +7891,7 @@ class App {
     if (t !== this.targetWordsOf) {
       this.targetWordsOf = t;
       tv.name = c?.type?.name ?? t.spec.label;
-      tv.kind = c ? `${FACTION_LABEL[c.faction]}${c.type ? ` Â· tier ${c.type.tier}` : ''}` : t.spec.kind;
+      tv.kind = c ? `${FACTION_LABEL[c.faction]}${c.type ? ` Ã‚Â· tier ${c.type.tier}` : ''}` : t.spec.kind;
     }
     // The face turned toward the pilot, where the target has a fight of its own; else its plain hull.
     const s = c?.combat?.summary(pilot.pos) ?? null;
@@ -7941,7 +7950,7 @@ class App {
    * The body's bars and the class's slot row, shown or hidden, and with them the on-foot dot, which
    * would otherwise sit inside the reticle's own boresight. Both are found the first time they are
    * asked for, because the display builds its own markup in the constructor, and written only on a
-   * change; shown again, the dot takes the rule it always had â€” it is the Bounty Hunter's.
+   * change; shown again, the dot takes the rule it always had Ã¢â‚¬â€ it is the Bounty Hunter's.
    */
   private bodyBlock: HTMLElement | null = null;
   private crosshairEl: HTMLElement | null = null;
@@ -8798,7 +8807,7 @@ class App {
     return {
       shared: () => this.net.session.authority === 'server',
       maySpawn: () => this.net.session.isAdmin,
-      why: () => 'only the worldâ€™s admin may stand creatures here',
+      why: () => 'only the worldÃ¢â‚¬â„¢s admin may stand creatures here',
       ask: (entry, n) => {
         const cat = this.world.mobileCatalogue;
         const mobiles = this.world.mobiles;
@@ -9063,7 +9072,7 @@ class App {
     const guard = def.kind === 'ship';
     if (guard && this.spawning.has(def.id)) return `already preparing the ${def.label}`;
     if (guard) this.spawning.add(def.id);
-    this.messages.note(`preparing the ${def.label}â€¦`);
+    this.messages.note(`preparing the ${def.label}Ã¢â‚¬Â¦`);
     // The fit the edit page kept in the last few hundred milliseconds is written before it is read.
     this.flushFits();
     try {
@@ -9071,7 +9080,7 @@ class App {
       // A fitted ship stood out is the one the others are told of while none is flown.
       if (v.spec.ship && def.fit) this.lastShipDef = def;
       const b = v.spec.bounds;
-      const size = [b.max[0] - b.min[0], b.max[1] - b.min[1], b.max[2] - b.min[2]].map((n) => n.toFixed(1)).join('Ã—');
+      const size = [b.max[0] - b.min[0], b.max[1] - b.min[1], b.max[2] - b.min[2]].map((n) => n.toFixed(1)).join('Ãƒâ€”');
       this.messages.note(`${def.label}: a ${v.spec.kind}, ${size} m (E to ride)`);
       return `${def.id} spawned as a ${v.spec.kind}: ${size} m at ${v.pos.toArray().map((n) => n.toFixed(1)).join(',')}, ${v.pos.distanceTo(this.player.pos).toFixed(1)} m away, seat ${v.spec.seat.map((n) => n.toFixed(2)).join(',')}, hardpoints: ${v.hardpoints.join(' ') || 'none'}, seated from ${v.seatFrom ?? 'its kind'}`;
     } catch (err) {
@@ -9469,7 +9478,7 @@ class App {
 
   /**
    * E at one of the gates a world's zones are walked between: through it, to the zone the pack says
-   * it opens on. Deliberately the last thing E can mean and the first thing a fight takes away â€”
+   * it opens on. Deliberately the last thing E can mean and the first thing a fight takes away Ã¢â‚¬â€
    * the lift, the elevator and the way into a building have already had the key by the time this is
    * called, a vehicle or another player's hull within reach keeps it here, and the gate stands
    * aside for a few seconds after any blow, so a fight beside one cannot end in another zone by
@@ -9861,7 +9870,7 @@ class App {
     let room = to.kind === 'ship' ? to.ship.interior : rooms?.roomOf(to.id) ?? null;
     if (!room && to.kind === 'peer') {
       if (!rooms || this.crossingTo) return;
-      this.messages.note(`building the rooms of the ${to.label}â€¦`);
+      this.messages.note(`building the rooms of the ${to.label}Ã¢â‚¬Â¦`);
       room = await this.roomsOf(rooms, to.id);
       // The wait is a second or two of real play: the walker may have stepped out, died or travelled,
       // and the two hulls may have come apart. Everything is asked again rather than assumed -- the
@@ -9907,7 +9916,7 @@ class App {
     if (!rooms || this.crossingTo) return;
     let room = rooms.roomOf(id);
     if (!room) {
-      this.messages.note(`building the rooms of the ${rooms.label(id)}â€¦`);
+      this.messages.note(`building the rooms of the ${rooms.label(id)}Ã¢â‚¬Â¦`);
       room = await this.roomsOf(rooms, id);
       if (!room) {
         this.messages.system(rooms.why(id) ?? 'their ship is not somewhere to stand just now');
@@ -10378,8 +10387,8 @@ class App {
       this.world.updateShadows(performance.now());
 
       // The short bar of things you can press. Its state is gathered a few times a second into one
-      // kept struct, because the asking is what costs â€” the lift underfoot, the elevators near, the
-      // doorless building near and the nearest vehicle â€” and never the words. It is emptied at once
+      // kept struct, because the asking is what costs Ã¢â‚¬â€ the lift underfoot, the elevators near, the
+      // doorless building near and the nearest vehicle Ã¢â‚¬â€ and never the words. It is emptied at once
       // on any frame that is not simulated, rather than waiting for the next gather: a row of things
       // you cannot press, standing over the death card, is exactly the fault to avoid.
       if (!simulate) {
@@ -10402,8 +10411,8 @@ class App {
       // The ship menu is where space is gone to and come back from; the prompt says when the ship is high enough.
       // The long line of every key is what it always was, but it is now a setting, and it costs
       // nothing on the frame path either way: the *conditions* were always its cost, not the words,
-      // and every one of them â€” the lift underfoot, the elevators near, the doorless building near,
-      // the nearest vehicle, the ship in reach of the boots â€” is now read out of the bar's own
+      // and every one of them Ã¢â‚¬â€ the lift underfoot, the elevators near, the doorless building near,
+      // the nearest vehicle, the ship in reach of the boots Ã¢â‚¬â€ is now read out of the bar's own
       // state, gathered a few times a second. The line's wording can therefore be an eighth of a
       // second behind what is underfoot, which is far less than it takes to reach for the key.
       const S8 = this.promptState;
@@ -10414,19 +10423,19 @@ class App {
       // goes over it either way, so a countdown is never lost to a panel.
       const full = this.settings.hudFullPrompts && simulate;
       const shipKey = full ? keyName(input.bindings.ship[0] ?? '') : '';
-      const shipHint = !full ? '' : this.spaceGate === 'up' ? ` Â· <b>at altitude for space: ${shipKey}</b> ship menu` : this.world.planet.space ? ` Â· <b>${shipKey}</b> ship menu` : '';
+      const shipHint = !full ? '' : this.spaceGate === 'up' ? ` Ã‚Â· <b>at altitude for space: ${shipKey}</b> ship menu` : this.world.planet.space ? ` Ã‚Â· <b>${shipKey}</b> ship menu` : '';
       let prompt = '';
       if (full) {
-        if (player.noclip) prompt = `<b>NOCLIP</b> ${Math.round(player.noclipSpeed)} m/s Â· <b>WASD</b> fly Â· <b>Space</b> up Â· <b>Ctrl</b> down Â· <b>Shift</b> fast Â· <b>+</b>/<b>-</b> speed Â· <b>N</b> off`;
+        if (player.noclip) prompt = `<b>NOCLIP</b> ${Math.round(player.noclipSpeed)} m/s Ã‚Â· <b>WASD</b> fly Ã‚Â· <b>Space</b> up Ã‚Â· <b>Ctrl</b> down Ã‚Â· <b>Shift</b> fast Ã‚Â· <b>+</b>/<b>-</b> speed Ã‚Â· <b>N</b> off`;
         else if (player.mounted) prompt = mountPrompt(player.mounted, input.bindings.wings[0] ?? WINGS_KEY) + (player.mounted.spec.ship ? shipHint : '');
         else if (S8.lift) prompt = `<b>E</b> lift: ${this.promptLiftStops} levels`;
         else if (S8.elevator) prompt = `<b>E</b> elevator ${S8.elevator}`;
         else if (S8.doorless) prompt = `<b>E</b> enter ${this.promptDoorless} (no way in on foot)`;
-        else if (player.piloting) prompt = `at the controls of the ${player.piloting.spec.label} Â· ${player.piloting.landed ? `landed Â· <b>W</b> or <b>Space</b> lifts off` : `<b>W</b>/<b>S</b> throttle Â· mouse steers${player.piloting.spec.ship && SHIP_GROUND.rule === 'landing' ? ` Â· hold <b>Ctrl</b> to set down Â· <b>${keyName(CUT_ENGINES_KEY)}</b> cuts the engines` : ''}`} Â· <b>Alt</b> looks around Â· <b>E</b> lets go Â· ${Math.round(Math.abs(player.piloting.speed) * 3.6)} km/h${shipHint}${player.piloting.landNote ? ` Â· ${player.piloting.landNote}` : ''}`;
+        else if (player.piloting) prompt = `at the controls of the ${player.piloting.spec.label} Ã‚Â· ${player.piloting.landed ? `landed Ã‚Â· <b>W</b> or <b>Space</b> lifts off` : `<b>W</b>/<b>S</b> throttle Ã‚Â· mouse steers${player.piloting.spec.ship && SHIP_GROUND.rule === 'landing' ? ` Ã‚Â· hold <b>Ctrl</b> to set down Ã‚Â· <b>${keyName(CUT_ENGINES_KEY)}</b> cuts the engines` : ''}`} Ã‚Â· <b>Alt</b> looks around Ã‚Â· <b>E</b> lets go Ã‚Â· ${Math.round(Math.abs(player.piloting.speed) * 3.6)} km/h${shipHint}${player.piloting.landNote ? ` Ã‚Â· ${player.piloting.landNote}` : ''}`;
         // Standing on something out in space: the boots hold, a jump lets go, and E climbs into a ship beside you.
-        else if (isSurfaceRoom(player.aboard)) prompt = `<b>gravity boots</b> on ${S8.bootsReach ? 'a surface Â· <b>E</b> climbs into the ship' : 'a surface Â· <b>E</b> takes them off'} Â· <b>jump</b> lets go${player.aboard.atEdge ? ' Â· <b>the surface underfoot runs out near here</b>' : ''} Â· <b>${shipKey}</b> ship menu`;
-        else if (player.aboard) prompt = (player.aboard.pilotSpot && player.pos.distanceTo(player.aboard.pilotSpot) < CONTROLS_RANGE ? `<b>E</b> take the controls` : `aboard ${player.aboard.vehicle.spec.label} Â· <b>E</b> step out`) + (this.world.planet.space ? ` Â· <b>${shipKey}</b> ship menu` : '');
-        else if (player.eva) prompt = `adrift Â· <b>W/S</b> thrust ahead and back Â· <b>A/D</b> sideways Â· <b>Space/Ctrl</b> up and down Â· mouse turns Â· <b>Z/V</b> roll Â· <b>${keyName(input.bindings.brake[0] ?? '')}</b> brake Â· ${Math.round(player.vel.length() * 3.6)} km/h${S8.near === 'board' ? ' Â· <b>E</b> board' : S8.near ? ' Â· <b>E</b> mount' : ' Â· <b>E</b> gravity boots'}${performance.now() - this.bootsNoteAt < SURFACE_ROOM.note * 1000 && this.bootsNote ? ` Â· ${this.bootsNote}` : ''}`;
+        else if (isSurfaceRoom(player.aboard)) prompt = `<b>gravity boots</b> on ${S8.bootsReach ? 'a surface Ã‚Â· <b>E</b> climbs into the ship' : 'a surface Ã‚Â· <b>E</b> takes them off'} Ã‚Â· <b>jump</b> lets go${player.aboard.atEdge ? ' Ã‚Â· <b>the surface underfoot runs out near here</b>' : ''} Ã‚Â· <b>${shipKey}</b> ship menu`;
+        else if (player.aboard) prompt = (player.aboard.pilotSpot && player.pos.distanceTo(player.aboard.pilotSpot) < CONTROLS_RANGE ? `<b>E</b> take the controls` : `aboard ${player.aboard.vehicle.spec.label} Ã‚Â· <b>E</b> step out`) + (this.world.planet.space ? ` Ã‚Â· <b>${shipKey}</b> ship menu` : '');
+        else if (player.eva) prompt = `adrift Ã‚Â· <b>W/S</b> thrust ahead and back Ã‚Â· <b>A/D</b> sideways Ã‚Â· <b>Space/Ctrl</b> up and down Ã‚Â· mouse turns Ã‚Â· <b>Z/V</b> roll Ã‚Â· <b>${keyName(input.bindings.brake[0] ?? '')}</b> brake Ã‚Â· ${Math.round(player.vel.length() * 3.6)} km/h${S8.near === 'board' ? ' Ã‚Â· <b>E</b> board' : S8.near ? ' Ã‚Â· <b>E</b> mount' : ' Ã‚Â· <b>E</b> gravity boots'}${performance.now() - this.bootsNoteAt < SURFACE_ROOM.note * 1000 && this.bootsNote ? ` Ã‚Â· ${this.bootsNote}` : ''}`;
         else if (S8.near) prompt = S8.near === 'board' ? '<b>E</b> board' : S8.near === 'flip' ? '<b>E</b> flip it upright' : '<b>E</b> mount';
         // The gate's own line, where the bar can only say that it is a gate: the long line has the
         // room for where it goes, and this is the one place the name is written every frame rather
@@ -10527,13 +10536,13 @@ class App {
       // On the real clock, as the message line is: an arc that landed as a panel opened fades while
       // the panel is open rather than standing there when it closes.
       this.feedback.update(rawDt);
-      // The message line ages on the real clock, not the simulation's â€” `rawDt`, not the step's
+      // The message line ages on the real clock, not the simulation's Ã¢â‚¬â€ `rawDt`, not the step's
       // clamped `dt`: a notice sent as a panel opened must still fade while it is open, or it would
       // be standing there when the panel closes, and under a long stall a clamped delta would hold
       // every line far past its eight seconds.
       this.messages.update(rawDt);
       // The group's roster: it takes the list from the group module itself and writes only what has
-      // changed â€” eight rows of number comparisons, nothing allocated, and nothing written at all
+      // changed Ã¢â‚¬â€ eight rows of number comparisons, nothing allocated, and nothing written at all
       // while nobody has moved.
       this.roster.update();
       // The line's write counter is a lifetime total; it is sampled here into the per-second rate the
@@ -10546,7 +10555,7 @@ class App {
         this.lineWriteWindow = 0;
       }
       const at = player.worldPos;
-      // "Nearby" walked every living thing on the planet â€” a few hundred in a busy town â€” on every
+      // "Nearby" walked every living thing on the planet Ã¢â‚¬â€ a few hundred in a busy town Ã¢â‚¬â€ on every
       // frame, for a line the corner block writes four times a second. The plate over a head says
       // what you are looking at, which is the better answer to the same question, so with the plate
       // on the line is empty and the walk does not happen at all; with it off the walk is at the
@@ -10616,8 +10625,8 @@ class App {
       const made = this.sampleShaders(phase);
       if (made.made > 0 && phase === 'play' && this.lastPrograms > 0) {
         const churn = made.dropped > 0 ? `, ${made.dropped} dropped` : '';
-        const over = made.made > SHADER_TUNE.playBudget ? ' â€” over the one a frame this game holds to' : '';
-        console.info(`shaders: ${made.made} built during play${churn} (${stats.frameMs.toFixed(0)} ms frame, ${made.live} programs in all, first "${made.first}")${over} â€” __debug.shaders() for the rest`);
+        const over = made.made > SHADER_TUNE.playBudget ? ' Ã¢â‚¬â€ over the one a frame this game holds to' : '';
+        console.info(`shaders: ${made.made} built during play${churn} (${stats.frameMs.toFixed(0)} ms frame, ${made.live} programs in all, first "${made.first}")${over} Ã¢â‚¬â€ __debug.shaders() for the rest`);
       }
       this.lastPrograms = made.live;
       stats.rawDt = rawDt;
