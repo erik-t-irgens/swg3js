@@ -10,11 +10,29 @@
 //   unit         a thing the run converts and records: a model, a pack, or a wearable folder
 import { createHash } from 'node:crypto';
 import { childOf, childrenOf, isForm, readCString } from './iff.mjs';
-import { R, skinData } from './skeletal.mjs';
+import { DIRECTION, R, skinData } from './skeletal.mjs';
 import { buildGlb, everyKeyEquals } from './glb.mjs';
 
-/** Bump whenever the conversion changes what a unit holds: every record then reads `oldFormat`. */
+/**
+ * Bump whenever the conversion changes what **any** unit holds: every record then reads
+ * `oldFormat` and the whole of `mobiles/` is rebuilt, models and wearables included.
+ */
 export const MOBILES_FORMAT = 1;
+
+/**
+ * Bump when only the animation packs change. It is in a pack's own signature and in nothing else,
+ * so the 153 packs go stale and the models, colour variants and wearable folders stay current:
+ * a rerun with `--skip-existing` then rewrites the packs alone.
+ *
+ * A pack's signature already carries its clip list, so a pack that gains a clip would go stale by
+ * itself -- but the roles, the logical names and the role sources are in the JSON and not in the
+ * signature, and a pack can gain a name that resolves to a clip it already had. This is what
+ * catches those.
+ *
+ * 2: the direction selector is read, so the aimed blaster stances and the whole-body shots exist
+ * at all, and the curated set asks for them, for the one-handed sword and for the cover postures.
+ */
+export const ANIM_FORMAT = 2;
 export const KINDS = ['creature', 'droid', 'npc', 'dressed', 'special'];
 
 /** Animation tables whose mobiles are machines, whatever hierarchy they sit on. */
@@ -31,15 +49,57 @@ export const FAMILIES = new Map([
   ['basilisk_war_droid', 'machine'],
 ]);
 
-/** The combat set an `all_b` table bakes: what a person or droid needs to stand, fight, fall and get up. */
+/**
+ * The combat set an `all_b` table bakes: what a person or droid needs to stand, fight, fall and
+ * get up. A name with a speed selector under it bakes one clip per branch, so the clip count is
+ * always higher than the name count.
+ *
+ * The blaster, one-handed sword and cover sections below were added once the direction selector
+ * could be read at all: the aimed stances and the whole-body shots resolve to nothing without
+ * that fix, so asking for them before it would have written a pack that quietly lacked them. The
+ * two-handed sword and the polearm are the owner's to call and are deliberately left out; their
+ * names are the same shape (`loop_sword2h_combat`, `loop_polearm_combat` and their swings).
+ */
 export const CURATED_ALL_B = [
   'loop_standing', 'loop_combat_standing', 'loop_swimming',
   'attack_light_standing', 'attack_heavy_standing',
   'unarmed_standing_ready_jab_double', 'unarmed_standing_ready_lead_uppercut', 'unarmed_standing_ready_rear_roundhouse_kic',
   'unarmed_standing_ready_lead_frontkick', 'unarmed_standing_ready_hammerfist', 'unarmed_standing_ready_headbutt',
   'unarmed_combo_2a', 'unarmed_combo_3a', 'unarmed_combo_4a', 'unarmed_combo_5a',
-  'cbt_attack_ranged', 'loop_pistol_standing', 'add_pistol_fire_1', 'add_pistol_fire_3', 'loop_pistol_combat_standing_aimed', 'pistol_combat_standing_fire_1',
-  'loop_rifle', 'add_rifle_fire_1', 'add_rifle_fire_3', 'loop_rifle_a_combat_standing_aimed', 'rifle_standing_aimed_fire_1',
+  // Blasters: the relaxed carry, the ready and aimed standing stances, every whole-body standing
+  // shot the game has (six a weapon, odd-numbered), the additive recoils and the ways in and out.
+  'cbt_attack_ranged',
+  'loop_pistol_standing', 'loop_pistol_combat_standing', 'loop_pistol_combat_standing_aimed',
+  'add_pistol_fire_1', 'add_pistol_fire_3',
+  'pistol_combat_standing_fire_1', 'pistol_combat_standing_fire_3', 'pistol_combat_standing_fire_5',
+  'pistol_combat_standing_fire_7', 'pistol_combat_standing_fire_9', 'pistol_combat_standing_fire_11',
+  'trn_pistol_standing_to_pistol_combat_standing', 'trn_pistol_combat_to_pistol_combat_aimed', 'trn_pistol_combat_standing_aimed_to_pistol_combat_standing',
+  'loop_rifle', 'loop_rifle_combat_standing', 'loop_rifle_a_combat_standing_aimed',
+  'add_rifle_fire_1', 'add_rifle_fire_3',
+  'rifle_standing_aimed_fire_1', 'rifle_standing_aimed_fire_3', 'rifle_standing_aimed_fire_5',
+  'rifle_standing_aimed_fire_7', 'rifle_standing_aimed_fire_9', 'rifle_standing_aimed_fire_11',
+  'trn_rifle_a_standing_hold_to_ready', 'trn_rifle_a_standing_ready_to_aimed', 'trn_rifle_a_standing_aimed_to_ready',
+  // The one-handed sword: its own ready stance (a speed set of its own, so a body with a blade
+  // walks and runs holding it) and six swings at three heights, both sides, plus a thrust.
+  'loop_sword_1h_ready',
+  'sword_1h_standing_ready_hrz_slash_middle_r', 'sword_1h_standing_ready_hrz_slash_middle_l',
+  'sword_1h_standing_ready_hrz_slash_high_r', 'sword_1h_standing_ready_hrz_slash_low_l',
+  'sword_1h_standing_ready_thrust_middle', 'sword_1h_standing_ready_vrt_slash',
+  'trn_standing_to_sword_1h_standing_ready', 'trn_cbt_sword_1h_standing_ready_to_standing_2', 'trn_unarmed_standing_ready_to_standing',
+  // Cover: kneeling, prone and the crouch, each posture's blaster stances aimed and not, every
+  // kneeling and prone shot the game has, and every way in and out between the four postures.
+  'loop_kneeling', 'loop_prone', 'loop_crouched',
+  'loop_pistol_kneeling', 'loop_pistol_combat_kneeling', 'loop_pistol_combat_kneeling_aimed',
+  'loop_rifle_kneeling', 'loop_rifle_kneeling_combat', 'loop_rifle_kneeling_combat_aimed',
+  'loop_pistol_prone', 'loop_pistol_combat_prone', 'loop_pistol_combat_prone_aimed',
+  'loop_rifle_prone', 'loop_rifle_combat_prone', 'loop_rifle_combat_prone_aimed',
+  'pistol_combat_kneeling_fire_1', 'pistol_combat_kneeling_fire_3', 'pistol_combat_kneeling_fire_5',
+  'pistol_combat_kneeling_fire_7', 'pistol_kneeling_fire_9', 'pistol_kneeling_fire_11',
+  'rifle_kneeling_fire_1', 'rifle_kneeling_fire_3', 'rifle_kneeling_fire_5',
+  'rifle_kneeling_fire_7', 'rifle_kneeling_fire_9', 'rifle_kneeling_fire_11',
+  'pistol_combat_prone_fire_1', 'rifle_combat_prone_fire_1',
+  'trn_standing_to_kneeling', 'trn_kneeling_to_standing', 'trn_kneeling_to_prone', 'trn_prone_to_kneeling',
+  'trn_standing_to_prone', 'trn_prone_to_standing', 'trn_standing_to_crouched', 'trn_crouched_to_standing', 'trn_crouched_to_kneeling',
   'rea_get_hit_light_high_center', 'rea_get_hit_light_mid_center', 'rea_get_hit_light_low_left',
   'rea_get_hit_medium_high_center', 'rea_get_hit_medium_mid_center', 'rea_get_hit_medium_low_left',
   'add_rea_get_hit_light', 'add_get_hit_medium',
@@ -377,10 +437,16 @@ export function flattenPaths(form, timeScale = 1, path = []) {
       return out;
     }
     case 'DRAT': {
+      // "DIR " is a four-character tag, three letters and a space, as "VAL " is below. Every
+      // direction branch is kept with its code; which one a spawn plays is leafPenalty's to say.
       const out = [];
-      for (const dir of childrenOf(v, 'DIR')) {
-        const code = new R(childOf(dir, 'INFO').data).i8();
-        out.push(...flattenPaths(dir.children.find(isForm), timeScale, [...path, { k: 'dir', v: code }]));
+      for (const dir of childrenOf(v, 'DIR ')) {
+        // Both are there on every retail branch, but this loop never ran before the tag was
+        // corrected, so a branch missing either is stepped over rather than throwing.
+        const info = childOf(dir, 'INFO');
+        const child = dir.children.find(isForm);
+        if (!info || !child) continue;
+        out.push(...flattenPaths(child, timeScale, [...path, { k: 'dir', v: new R(info.data).i8() }]));
       }
       return out;
     }
@@ -436,7 +502,9 @@ function leafPenalty(leaf, female) {
   let penalty = 0;
   for (const step of leaf.path) {
     if (step.k === 'yaw') penalty += step.v ? 50 : 0;
-    else if (step.k === 'dir') penalty += step.v === 0 ? 0 : 50;
+    // A direction code is a bitmask (4 front, 8 back, 1 right, 2 left) and is never 0, so the
+    // branch a body facing what it is fighting plays is the front one, DIRECTION.front.
+    else if (step.k === 'dir') penalty += step.v === DIRECTION.front ? 0 : 50;
     else if (step.k === 'sel') {
       const values = step.values ?? [];
       const want = step.variable === 'mounted_creature' ? ['0'] : step.variable === 'mood' ? ['calm'] : step.variable === 'gender' ? (female ? ['f'] : ['m', 'o']) : null;
@@ -601,7 +669,14 @@ const CREATURE_ROLES = {
 const CREATURE_ATTACKS = ['cbt_stand_combat_attack_light', 'cbt_stand_combat_attack_heavy', 'cbt_stand_combat_attack_special_1', 'cbt_stand_combat_attack_special_2'];
 const CREATURE_HOVER_ATTACKS = ['cbt_hover_attack_light', 'cbt_hover_attack_heavy', 'cbt_hover_attack_special_1', 'cbt_hover_attack_special_2'];
 const CREATURE_EMOTES = { vocalize: 'emt_stand_vocalize', threaten: 'emt_stand_threaten', fidget: 'idl_stand_fidget', eat: 'emt_stand_eat', look: 'emt_stand_look', startle: 'emt_stand_startle', combatVocalize: 'emt_stand_combat_vocalize' };
-const ALLB_ROLES = {
+export const ALLB_ROLES = {
+  // The humanoid tables have no plain "stand to combat stance": every one they carry names the
+  // weapon it is drawn for, so the generic body takes the sword's and the blaster's in that order.
+  // Nothing in the game plays these two yet -- `toCombat` and `fromCombat` were null on every
+  // humanoid pack because this table listed no candidates at all -- so what they cost is bytes
+  // and what they buy is a pack that has them when something wants them.
+  toCombat: ['trn_standing_to_sword_1h_standing_ready', 'trn_pistol_standing_to_pistol_combat_standing'],
+  fromCombat: ['trn_unarmed_standing_ready_to_standing', 'trn_cbt_sword_1h_standing_ready_to_standing_2', 'trn_pistol_combat_standing_aimed_to_pistol_combat_standing'],
   hitLight: ['rea_get_hit_light_mid_center', 'add_rea_get_hit_light'],
   hitMedium: ['rea_get_hit_medium_mid_center', 'add_get_hit_medium'],
   hitHeavy: ['trn_rea_get_hit_heavy_backward'],
@@ -613,8 +688,23 @@ const ALLB_ROLES = {
   knockdownLoop: ['loop_knocked_down'],
   knockdownGetUp: ['trn_knocked_down_to_standing'],
 };
-const ALLB_ATTACKS = ['attack_light_standing', 'attack_heavy_standing', 'unarmed_combo_2a', 'unarmed_standing_ready_jab_double', 'unarmed_standing_ready_lead_uppercut', 'unarmed_standing_ready_rear_roundhouse_kic', 'unarmed_standing_ready_lead_frontkick', 'unarmed_standing_ready_hammerfist', 'unarmed_standing_ready_headbutt', 'unarmed_combo_3a', 'unarmed_combo_4a', 'unarmed_combo_5a'];
-const ALLB_RANGED = ['cbt_attack_ranged', 'pistol_combat_standing_fire_1', 'rifle_standing_aimed_fire_1', 'add_pistol_fire_1', 'add_rifle_fire_1'];
+export const ALLB_ATTACKS = ['attack_light_standing', 'attack_heavy_standing', 'unarmed_combo_2a', 'unarmed_standing_ready_jab_double', 'unarmed_standing_ready_lead_uppercut', 'unarmed_standing_ready_rear_roundhouse_kic', 'unarmed_standing_ready_lead_frontkick', 'unarmed_standing_ready_hammerfist', 'unarmed_standing_ready_headbutt', 'unarmed_combo_3a', 'unarmed_combo_4a', 'unarmed_combo_5a'];
+// The whole-body shots come first and the one-frame additive recoils last, which is the order this
+// list has always had -- but the first three resolved to nothing on a humanoid table until the
+// direction selector could be read, so every humanoid pack fell through to `add_pistol_fire_1`.
+// With the reader fixed a humanoid's `ranged` is a whole-body shot and `rangedAdditive` is false.
+export const ALLB_RANGED = ['cbt_attack_ranged', 'pistol_combat_standing_fire_1', 'rifle_standing_aimed_fire_1', 'add_pistol_fire_1', 'add_rifle_fire_1'];
+
+/**
+ * The stance a gun carrier stands in, best first: its weapon's aimed loop, then its ready loop,
+ * then the relaxed carry it walks about with. Until the direction selector could be read the first
+ * two of each pair resolved to nothing, so every humanoid fell through to the third -- and the
+ * pistol's third is the holstered carry, whose still branch is the plain breathing idle.
+ */
+export const ALLB_RANGED_STANCES = {
+  pistol: ['loop_pistol_combat_standing_aimed', 'loop_pistol_combat_standing', 'loop_pistol_standing'],
+  rifle: ['loop_rifle_a_combat_standing_aimed', 'loop_rifle_combat_standing', 'loop_rifle'],
+};
 
 const EMPTY_ROLES = () => ({
   idle: null, walk: null, run: null, gaits: [],
@@ -678,8 +768,9 @@ export function resolveRoles(plan, hierarchy = plan.hierarchy) {
     roles.attacks = ALLB_ATTACKS.map(first).filter((c, i, a) => c && a.indexOf(c) === i);
     pick('ranged', ALLB_RANGED);
     roles.rangedAdditive = !!sources.ranged?.startsWith('add_');
-    if (sources.ranged && /pistol/.test(sources.ranged)) roles.rangedStance = gaitsOf((plan.logical.loop_pistol_combat_standing_aimed ?? plan.logical.loop_pistol_standing ?? []).map((clip) => ({ clip, speed: speedOf.get(clip) ?? 0 }))).idle;
-    else if (sources.ranged && /rifle/.test(sources.ranged)) roles.rangedStance = gaitsOf((plan.logical.loop_rifle_a_combat_standing_aimed ?? plan.logical.loop_rifle ?? []).map((clip) => ({ clip, speed: speedOf.get(clip) ?? 0 }))).idle;
+    const stance = (names) => gaitsOf((names.map((n) => plan.logical[n]).find((l) => l?.length) ?? []).map((clip) => ({ clip, speed: speedOf.get(clip) ?? 0 }))).idle;
+    if (sources.ranged && /pistol/.test(sources.ranged)) roles.rangedStance = stance(ALLB_RANGED_STANCES.pistol);
+    else if (sources.ranged && /rifle/.test(sources.ranged)) roles.rangedStance = stance(ALLB_RANGED_STANCES.rifle);
     for (const name of CURATED_ALL_B) if (name.startsWith('emt_') && first(name)) roles.emotes[name.slice(4)] = first(name);
   } else {
     for (const [role, candidates] of Object.entries(CREATURE_ROLES)) pick(role, candidates);
@@ -1389,7 +1480,7 @@ export function planMobiles({ vfs, scan, io, options = {}, source, core3Stats = 
       p.file = `mobiles/anims/${packId}.glb`;
       p.json = `mobiles/anims/${packId}.json`;
       p.skeletons = a.skeletons;
-      p.sig = signatureOf({ f: MOBILES_FORMAT, source: source.key, key, set: p.set, clips: p.clips.map((c) => [c.file, c.timeScale, c.loop, c.additive]) });
+      p.sig = signatureOf({ f: MOBILES_FORMAT, a: ANIM_FORMAT, source: source.key, key, set: p.set, clips: p.clips.map((c) => [c.file, c.timeScale, c.loop, c.additive]) });
       packs.set(packId, p);
     }
     if (a.playerBody) p.speciesRigs.push(a.playerBody);

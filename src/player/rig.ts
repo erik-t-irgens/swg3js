@@ -39,8 +39,13 @@ const STATE_CLIPS: Record<RigState, (string | RegExp)[]> = {
   gunIdle: [/^loop_rifle:speed0/, /^loop_pistol_standing:speed0/, 'idle', 'stand'],
   gunWalk: [/^loop_rifle:speed1/, /^loop_pistol_standing:speed1/, 'walk', 'loop_walk'],
   gunRun: [/^loop_rifle:speed2/, /^loop_pistol_standing:speed2/, 'run', 'loop_run'],
-  // The combat carry is the game's one combat stance for every weapon (loop_combat_standing); there
-  // is no aimed loop: aiming holds the last frame of the transition into the aimed pose on the upper body.
+  // These two lists are the fallback and almost never the answer: `player.ts` writes a `prefer` for
+  // both states every frame a blaster is held, naming that gun's own relaxed carry, and `prefer`
+  // resolves ahead of the list (`setState` below). loop_combat_standing is the game's *unarmed*
+  // combat stance, not its one stance for every weapon: the table has a ready and an aimed loop per
+  // weapon (loop_pistol_combat_standing, loop_pistol_combat_standing_aimed and the rifle's), which
+  // the converter could not read until the direction selector's tag was read as four characters.
+  // The aimed pose rides the upper body and is asked for by pattern in `player.ts`, not from here.
   gunReadyIdle: [/^loop_combat_standing:speed0$/, /^loop_combat_standing:speed0/, 'idle_combat', /^loop_rifle:speed0/, 'idle'],
   gunReadyWalk: [/^loop_combat_standing:speed1$/, /^loop_combat_standing:speed1/, 'walk_combat', /^loop_rifle:speed1/, 'walk'],
   gunReadyRun: [/^loop_combat_standing:speed2$/, /^loop_combat_standing:speed2/, 'run_combat', /^loop_rifle:speed2/, 'run'],

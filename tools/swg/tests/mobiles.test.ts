@@ -462,10 +462,12 @@ ok(stamp.key === M.sourceStampOf({ retailOnly: true, archives: [...archives].rev
 'the archive stamp ignores their order and notices a flag, an archive or a size');
 ok(M.signatureOf({ source: stamp.key, sat: 'x' }) !== M.signatureOf({ source: 'other', sat: 'x' }), 'a unit converted from other archives has another signature');
 const sizes: Record<string, number> = { 'mobiles/models/x.glb': 100 };
-const record = { format: 1, unit: 'model', id: 'x', sig: 'sig', source: stamp, code: 'c', written: '', files: [{ path: 'mobiles/models/x.glb', bytes: 100 }] };
+// The written format is whatever the converter writes now, not a number typed in here: a bump is
+// meant to make every pack on disk read as old, and this record stands for one just written.
+const record = { format: M.MOBILES_FORMAT, unit: 'model', id: 'x', sig: 'sig', source: stamp, code: 'c', written: '', files: [{ path: 'mobiles/models/x.glb', bytes: 100 }] };
 const sizeOf = (p: string) => sizes[p] ?? null;
 ok(M.unitState(null, { sig: 'sig', source: stamp }, sizeOf) === 'missing'
-  && M.unitState({ ...record, format: 0 }, { sig: 'sig', source: stamp }, sizeOf) === 'oldFormat'
+  && M.unitState({ ...record, format: M.MOBILES_FORMAT - 1 }, { sig: 'sig', source: stamp }, sizeOf) === 'oldFormat'
   && M.unitState({ ...record, source: { ...stamp, key: 'other' } }, { sig: 'sig', source: stamp }, sizeOf) === 'foreign'
   && M.unitState({ ...record, files: [{ path: 'mobiles/models/gone.glb', bytes: 1 }] }, { sig: 'sig', source: stamp }, sizeOf) === 'incomplete'
   && M.unitState({ ...record, files: [{ path: 'mobiles/models/x.glb', bytes: 99 }] }, { sig: 'sig', source: stamp }, sizeOf) === 'incomplete'
@@ -508,11 +510,11 @@ ok(M.selectWork(smallPlan, { limit: 1 }).entries.size === 1, 'a limit keeps the 
 const dressedOnly = M.selectWork(smallPlan, { only: ['dressed'] });
 ok(dressedOnly.packs.size === 1 && dressedOnly.wearables.size === 1 && dressedOnly.models.size === 0, '--only=dressed takes its pack and its wearable folder and no model');
 const records = new Map<string, any>([
-  ['mobiles/models/rancor.json', { format: 1, unit: 'model', id: 'rancor', sig: 'sig-rancor', source: stamp, code: 'c', files: [{ path: 'mobiles/models/rancor.glb', bytes: 10 }], triangles: 3228, meshes: ['rancor_l0'], bounds: { min: [0, 0, 0], max: [1, 1, 1] }, bytes: 10, variants: { v1: { file: 'mobiles/variants/rancor/v1.glb', same: false, bytes: 5 } } }],
-  ['mobiles/models/graul.json', { format: 1, unit: 'model', id: 'graul', sig: 'other', source: stamp, code: 'c', files: [{ path: 'mobiles/models/graul.glb', bytes: 10 }], bytes: 10 }],
-  ['mobiles/models/aqualish_m_01.json', { format: 1, unit: 'model', id: 'aqualish_m_01', sig: 'sig-aqualish_m_01', source: { ...stamp, key: 'other' }, code: 'c', files: [] }],
-  ['mobiles/anims/rancor.json', { format: 1, unit: 'pack', id: 'rancor', sig: 'sig-p1', source: stamp, code: 'c', files: [], clips: [1, 2, 3], bytes: 7 }],
-  ['mobiles/anims/all_m-all_b-hum_m_face.json', { format: 1, unit: 'pack', id: 'x', sig: 'sig-p2', source: stamp, code: 'c', files: [] }],
+  ['mobiles/models/rancor.json', { format: M.MOBILES_FORMAT, unit: 'model', id: 'rancor', sig: 'sig-rancor', source: stamp, code: 'c', files: [{ path: 'mobiles/models/rancor.glb', bytes: 10 }], triangles: 3228, meshes: ['rancor_l0'], bounds: { min: [0, 0, 0], max: [1, 1, 1] }, bytes: 10, variants: { v1: { file: 'mobiles/variants/rancor/v1.glb', same: false, bytes: 5 } } }],
+  ['mobiles/models/graul.json', { format: M.MOBILES_FORMAT, unit: 'model', id: 'graul', sig: 'other', source: stamp, code: 'c', files: [{ path: 'mobiles/models/graul.glb', bytes: 10 }], bytes: 10 }],
+  ['mobiles/models/aqualish_m_01.json', { format: M.MOBILES_FORMAT, unit: 'model', id: 'aqualish_m_01', sig: 'sig-aqualish_m_01', source: { ...stamp, key: 'other' }, code: 'c', files: [] }],
+  ['mobiles/anims/rancor.json', { format: M.MOBILES_FORMAT, unit: 'pack', id: 'rancor', sig: 'sig-p1', source: stamp, code: 'c', files: [], clips: [1, 2, 3], bytes: 7 }],
+  ['mobiles/anims/all_m-all_b-hum_m_face.json', { format: M.MOBILES_FORMAT, unit: 'pack', id: 'x', sig: 'sig-p2', source: stamp, code: 'c', files: [] }],
 ]);
 smallPlan.appearances.get('rancor').variants = { v1: { key: 'a=1', values: { a: 1 }, templates: 1 }, v2: { key: 'a=2', values: { a: 2 }, templates: 1 } };
 const catalogue = M.assembleCatalogue(smallPlan, { records, sizeOf: (p: string) => (p.endsWith('graul.glb') || p.endsWith('rancor.glb') ? 10 : null), options: {}, wardrobes: { human_male: { references: 1, present: true } } });

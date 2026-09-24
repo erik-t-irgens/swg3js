@@ -3306,7 +3306,14 @@ switch (cmd) {
       const wantedGun = ['loop_pistol_combat_standing_aimed', 'pistol_combat_standing_fire_1', 'loop_pistol_combat_kneeling_aimed', 'loop_rifle_a_combat_standing_aimed', 'rifle_standing_aimed_fire_1', 'loop_rifle_kneeling_combat_aimed'];
       const have = new Set(info.animations.map((n) => n.split(':')[0]));
       const lacking = wantedGun.filter((n) => !have.has(n));
-      if (lacking.length) console.log(`  the animation table in these archives lacks ${lacking.join(', ')}: the blaster's combat stances and hip shots the state hierarchy names. The retail table has 870 logical names, the Legends one 908; convert without --retail-only to take them from the Legends table (the clips themselves are the game's own files; nothing leaves assets-private).`);
+      // This used to say the retail table was the smaller one -- "870 logical names, the Legends
+      // one 908; convert without --retail-only" -- and it was blaming the archives for a reader
+      // bug of ours. The table in the retail archives declares 908 names, 4 of them duplicated;
+      // the reader could not follow 34 of them because it matched the direction selector's tag as
+      // three characters instead of four, and 908 - 4 - 34 is 870 exactly. There is no smaller
+      // retail table and there never was. If these names are still missing, the archives really
+      // have not got them, so say only that.
+      if (lacking.length) console.log(`  the animation table in these archives lacks ${lacking.join(', ')}: the blaster's combat stances and aimed shots the state hierarchy names. Without them the player and the fighters hold the last frame of a transition instead of a real aimed pose.`);
     }
     // `moods: false` is --no-moods, a size baseline the owner chose; status must not ask again for it.
     const entry = { id, file: `player/${id}.glb`, template, wear, variables: Object.fromEntries(customizationValues(options.var)), clips: info.animations, clipSpeeds: info.clipSpeeds ?? {}, moods: info.moodsAsked === true,...(info.partialClips ? { partialClips: info.partialClips } : {}), ...(info.variants ? { variants: info.variants } : {}), bounds: info.bounds, scale: 1, ...(info.jkaClips ? { jkaClips: info.jkaClips } : {}), ...(info.jkaGrip ? { jkaGrip: info.jkaGrip } : {}) };

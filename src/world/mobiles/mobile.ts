@@ -49,7 +49,7 @@ import { NavAgent } from '../nav/navAgent.ts';
 import { worldNav } from '../nav/nav.ts';
 import type { CellState } from '../layoutStream';
 import { MobileAnimator, SHOT_PRIORITY } from './animator';
-import { describeRoles, rolesFor } from './packClips';
+import { describeRoles, idleClipFor, ownGunIsPistol, rolesFor } from './packClips';
 import type { PackAsset } from './assets';
 import type { Gait, MobileEntry, MobileState, Roles, Vec3 } from './types';
 
@@ -1103,10 +1103,10 @@ export class Mobile implements Living, NpcSubject {
       this.deps.bolts.fire(from, dir, { owner: 'enemy', damage: this.blow, metresPerSecond: SPIT.speed, color, size: SPIT.size * Math.max(0.6, Math.min(2, Math.sqrt(this.scale * this.plan.height / 2))), gravity: SPIT.gravity, push: 1, exclude: this.body, source: this, sound: SPIT_SOUND, scar: 'flame', onHit: (_p, hit) => hit?.afflict?.(burn, SPIT.burnFor) });
     } else {
       // The gun in its hand when it holds one off the rack; else a droid's or a person's own: the
-      // pistol's bolt for the one-frame pistol shots, the rifle's otherwise.
+      // pistol's bolt when the clip it plays is a pistol's, the rifle's otherwise.
       // (A beam or a flame has no bolt to fire: its holder shoots the rifle's.)
       const held = this.gun && this.gun.primary.speed > 0 ? this.gun : null;
-      const pistol = !!this.roles?.rangedAdditive && /pistol/i.test(this.roles.ranged ?? '');
+      const pistol = ownGunIsPistol(this.roles);
       const profile = held ?? (pistol ? GUNS.bryar : GUNS.blaster);
       const g = profile.primary;
       color = g.color;
@@ -1131,13 +1131,7 @@ export class Mobile implements Living, NpcSubject {
   }
 
   private idleNow(): string | null {
-    const r = this.roles;
-    if (!r) return null;
-    if (this.swimming && r.swimIdle) return r.swimIdle;
-    if (this.flyer && r.hoverIdle) return r.hoverIdle;
-    if (this.decision?.attack === 'ranged' && r.rangedAdditive && r.rangedStance) return r.rangedStance;
-    if (this.fighting() && r.idleCombat) return r.idleCombat;
-    return r.idle;
+    return idleClipFor(this.roles, { swimming: this.swimming, flying: this.flyer, shooting: this.decision?.attack === 'ranged', fighting: this.fighting() });
   }
 
   private fighting(): boolean {

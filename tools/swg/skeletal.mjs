@@ -430,12 +430,36 @@ export function parseLat(root) {
 }
 
 /**
+ * A direction selector's codes. They are a bitmask -- 4 front, 8 back, 1 right, 2 left -- and the
+ * retail tables use 1, 2, 4, 5, 6, 9 and 10, with 8 exactly once (2,471 branches over 358
+ * selectors) and 0 never. There is therefore no "no direction" branch to carry the plain name.
+ */
+export const DIRECTION = { right: 1, left: 2, front: 4, frontRight: 5, frontLeft: 6, back: 8, backRight: 9, backLeft: 10 };
+
+/**
+ * What a direction branch is called here, or null for one this conversion does not bake.
+ *
+ * Front only, and the front branch keeps the plain name. Baking all seven would multiply every
+ * aimed set by about seven and would need a game that knows which way its target lies, which
+ * nothing asks for; to bake them, return `:dir${code}` for the rest and nothing else changes.
+ *
+ * That direction 4 is the front is an inference from the files and not a proof, and it is the one
+ * thing the rest of the pass leans on, so it lives here alone and can be overturned in one place.
+ * The evidence, counted over every table in the retail archives: code 4 is the only code present
+ * in all 358 direction selectors; of its leaves whose file names end in a direction word, 307 end
+ * "_front" and none ends in any other; and it is the only branch that ever carries a sub-selector
+ * (the mood, whose wind-up CLAUDE.md already records sitting on a standing loop).
+ */
+export function directionSuffix(code) {
+  return code === DIRECTION.front ? '' : null;
+}
+
+/**
  * The keyframe animations an animation template form resolves to, unwrapping the selector
  * templates the client picks from at run time: KFAT (inline keyframes), PXAT (a .ans file),
  * SSAT (chosen by a named string variable; each value becomes "name:value"), SPAT (chosen by
- * speed; "name:speedN"), DRAT (chosen by direction; the forward one keeps the name, the
- * others get ":dirN"), TSCL (time scaled), AGAT (a loop with random emotes; the loop),
- * PBAT (priority blend; the primary component).
+ * speed; "name:speedN"), DRAT (chosen by direction; see `directionSuffix`), TSCL (time scaled),
+ * AGAT (a loop with random emotes; the loop), PBAT (priority blend; the primary component).
  */
 export function flattenAnimationTemplate(form, name, timeScale = 1) {
   if (!form) return [{ name, kind: 'none' }];
@@ -479,11 +503,21 @@ export function flattenAnimationTemplate(form, name, timeScale = 1) {
       return out;
     }
     case 'DRAT': {
+      // The tag is "DIR " -- three letters and a space, exactly as "VAL " is in the string
+      // selector below. Read as three characters it matched nothing, so every direction selector
+      // came back empty, and so did every time-scale and probability selector wrapping one: the
+      // whole aimed blaster vocabulary, standing and kneeling, was silently deleted.
+      // Every one of the 2,471 branches in the retail tables carries both its INFO and a template
+      // form, but this loop never ran before the tag was corrected, so neither is assumed: a branch
+      // missing either is stepped over rather than throwing out of a whole conversion.
       const out = [];
-      for (const dir of childrenOf(v, 'DIR')) {
-        const code = new R(childOf(dir, 'INFO').data).i8();
+      for (const dir of childrenOf(v, 'DIR ')) {
+        const info = childOf(dir, 'INFO');
         const child = dir.children.find(isForm);
-        out.push(...flattenAnimationTemplate(child, code === 0 ? name : `${name}:dir${code}`, timeScale));
+        if (!info || !child) continue;
+        const suffix = directionSuffix(new R(info.data).i8());
+        if (suffix === null) continue;
+        out.push(...flattenAnimationTemplate(child, `${name}${suffix}`, timeScale));
       }
       return out;
     }

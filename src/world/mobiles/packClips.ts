@@ -126,6 +126,51 @@ export function missingRoles(roles: Roles, clips: ReadonlyMap<string, THREE.Anim
   return out;
 }
 
+/** What a body is doing this frame, as far as the choice of idle is concerned. */
+export interface IdleSituation {
+  swimming: boolean;
+  flying: boolean;
+  /** Its decision is to shoot: it stands in its weapon's own stance while it does. */
+  shooting: boolean;
+  /** It is in a fight at all (chasing, attacking or alerted, with somebody to fight). */
+  fighting: boolean;
+}
+
+/**
+ * The loop a body stands in when it is not moving, in the order the branches are asked.
+ *
+ * The stance is **not** conditional on `rangedAdditive`. It used to be, back when the only stance
+ * a humanoid pack could carry was the plain breathing loop the one-frame recoil was pulsed over,
+ * and the conjunct read as "there is a recoil to pulse". It is not that: `rangedStance` is the
+ * loop the body holds between shots, and a pack whose ranged attack is a whole-body clip is
+ * exactly the pack whose stance is a real aimed pose. Gated on the flag, every such stance --
+ * every aimed blaster pose in the game -- is unreachable, and the body falls through to its
+ * unarmed combat idle instead.
+ */
+export function idleClipFor(r: Roles | null, at: IdleSituation): string | null {
+  if (!r) return null;
+  if (at.swimming && r.swimIdle) return r.swimIdle;
+  if (at.flying && r.hoverIdle) return r.hoverIdle;
+  if (at.shooting && r.rangedStance) return r.rangedStance;
+  if (at.fighting && r.idleCombat) return r.idleCombat;
+  return r.idle;
+}
+
+/**
+ * Whether a body's **own** ranged attack -- the one it plays when it holds nothing off the rack --
+ * is a pistol's. The clip it plays is what the bolt and its sound have to match, so the clip's own
+ * name is the whole answer.
+ *
+ * It was `rangedAdditive && /pistol/`, and the conjunct was an accident of what the converter
+ * could read: every pack whose ranged clip was named for a pistol also happened to be additive,
+ * because the whole-body pistol shots resolved to nothing. Now that they resolve, the conjunct
+ * would silently move 37 of the 88 humanoid and droid packs onto the rifle's bolt and the rifle's
+ * sound. Dropping it leaves every pack converted before this one reading exactly as it does today.
+ */
+export function ownGunIsPistol(r: Pick<Roles, 'ranged'> | null): boolean {
+  return /pistol/i.test(r?.ranged ?? '');
+}
+
 /** A line naming what a pack's roles give, for the console: "idle walk run · combat · 2 attacks · ranged · ...". */
 export function describeRoles(r: Roles): string {
   const parts: string[] = [];
