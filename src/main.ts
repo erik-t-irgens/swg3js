@@ -148,6 +148,10 @@ import type { Vehicle, VehicleKind } from './vehicles/vehicle';
 import { HEAD_TO_EYE, SEATED_EYE_FALLBACK, SEAT_RULE, cockpitYawStep, frameFileName, mirroredOffset, seatDropUsed } from './vehicles/cockpitSeat';
 import { World } from './world/world';
 import { worldNav } from './world/nav/nav.ts';
+// The long walk: its numbers and its knob. The order itself is `NpcManager.send`; this file only
+// has to turn a place name or a pair of coordinates into a point, because the world's own named
+// places are the App's (`placesHere`) and nothing under `src/world/` can see them.
+import { ERRAND_TUNE, tuneErrand, type ErrandTune } from './world/errand.ts';
 import { tuneAfloat } from './world/afloat.ts';
 import type { FacilityChoice, NamedPlace } from './world/cloning.ts';
 import { GATE_TUNE, ZoneGates, gateAction, gateSaid, tuneGates, zoneOfPack } from './world/zoneGates.ts';
@@ -207,6 +211,21 @@ function mountPrompt(v: import('./vehicles/vehicle').Vehicle, wingsKey: string =
 
 const MOUNT_RANGE = 3.6;
 type InventoryTab = 'backpack' | 'wardrobe' | 'appearance' | 'weapons' | 'force';
+/**
+ * What `__debug.send` takes beside a destination: which body walks, the walk whose rows to print,
+ * calling the orders off, and the account's own invented numbers. It may be given as the first
+ * argument on its own (`__debug.send({ stop: true })`), or after a destination.
+ */
+interface SendOpts {
+  /** Which fighter, by its place in `__debug.fighters()`; the nearest to you by default. */
+  fighter?: number;
+  /** Call every running order off. */
+  stop?: boolean;
+  /** Print a walk's one-second rows for `console.table`: which walk, or `true` for the first. */
+  track?: number | boolean;
+  /** Move the account's invented numbers (`ERRAND_TUNE`); the two that are the game's own are refused. */
+  tune?: Partial<ErrandTune>;
+}
 /** The camera pitch a flyer holds its height at: the default view, a little above level. */
 const CAMERA_REST_PITCH = 0.32;
 
@@ -2459,6 +2478,32 @@ class App {
         }
         if (!hold) for (const k of keys) this.input.force(k, false);
       },
+      /**
+       * What `advance` costs: simulate `seconds` and say how long of the wall clock it really took.
+       * This is one call rather than a line the owner has to type because it settles a question
+       * nobody can answer from a hidden tab -- whether the helper can stand in for a long walk at
+       * all. Above about 250 ms of real time per ten simulated seconds it cannot, and a walk should
+       * be watched in a visible window with the owner following on a speeder instead.
+       *
+       * Note the second half of that answer, which timing cannot show: `advance` never calls
+       * `world.update`, so **nothing streams** -- no chunk is built and no collider appears round
+       * the walking body. A long walk driven by this helper is inconclusive by construction, and
+       * `__debug.send()` will say so.
+       */
+      advanceCost: (seconds = 10) => {
+        const dbg = (window as unknown as { __debug: { advance(s: number): void } }).__debug;
+        const t0 = performance.now();
+        dbg.advance(seconds);
+        const ms = performance.now() - t0;
+        const per10 = (ms / Math.max(0.001, seconds)) * 10;
+        return {
+          simulated: seconds,
+          realMs: Math.round(ms),
+          msPerTenSimulatedSeconds: Math.round(per10),
+          fighters: this.world.npcs.npcs.length,
+          verdict: per10 <= 250 ? 'the helper is cheap enough to drive a long walk with -- but it still streams nothing, so the walk proves nothing about collision' : 'too slow to drive a long walk: watch one in a visible window, following on a speeder',
+        };
+      },
       /** With the effects on: scan the frame for pixels that are not numbers (what the bloom smears into a black box) and name the object under the first one. */
       blackBox: () => {
         if (!this.postfx) return 'the effects are off (turn Effects on): the scan reads their frame';
@@ -3801,6 +3846,82 @@ class App {
           this.world.npcs.spawnAt(this.player.pos.x + tmp.x * d + (Math.random() - 0.5) * 6, this.player.pos.z + tmp.z * d + (Math.random() - 0.5) * 6, species);
         }
         return this.world.npcs.npcs.map((f) => ({ name: f.name, arm: f.arm, weapon: f.weapon?.id ?? null, outfit: f.outfit, hp: Number(f.hp.toFixed(0)), dead: f.dead, dist: Number(f.pos.distanceTo(this.player.pos).toFixed(1)), rig: !!f.rig }));
+      },
+      /**
+       * Send a fighter somewhere it will not forget, and read the account of how it got on
+       * (`src/world/errand.ts`). The order is the creatures' brain's own first rule with the body's
+       * home moved onto the destination, so it runs there, takes no target, answers nobody and
+       * stops when it arrives.
+       *
+       *   `__debug.send('bestine')`      -- the nearest fighter to you, to that named place
+       *   `__debug.send(-158, -112)`     -- to a point, the same coordinates `__debug.teleport` takes
+       *   `__debug.send()`               -- the account of every walk, running and last finished
+       *   `__debug.send({ track: 0 })`   -- walk 0's one-second rows, for `console.table`
+       *   `__debug.send({ stop: true })` -- call every order off (each body's home is left where it stands)
+       *   `__debug.send({ fighter: 2 })` with a destination picks the body by its place in `fighters()`
+       *   `__debug.send({ tune: { stallSeconds: 90 } })` moves the account's own invented numbers
+       *
+       * The two reading options answer on their own and are taken **before** any destination, so
+       * `__debug.send('bestine', { track: 0 })` prints a track and sends nobody; `fighter` and `tune`
+       * are the two that go beside a destination.
+       *
+       * **Read `proved` before believing an arrival.** Placed-object colliders exist only within
+       * 170 m of you and terrain collision within about 192 m, so a body walking alone is stopped by
+       * nothing and arrives having proved nothing. The walk counts its one-second samples against
+       * those two distances and says `inconclusive` rather than `arrived` when it was mostly out
+       * there. Follow it on a speeder; `__debug.advance` never calls `world.update`, so under it
+       * nothing streams at all and every walk is inconclusive by construction.
+       */
+      send: (to?: string | number | SendOpts, z?: number | SendOpts, more?: SendOpts) => {
+        const npcs = this.world.npcs;
+        const o: SendOpts = (typeof to === 'object' && to !== null ? to : null) ?? (typeof z === 'object' && z !== null ? z : null) ?? more ?? {};
+        if (o.tune) tuneErrand(o.tune);
+        if (o.stop) return `${npcs.stopErrands()} order(s) called off; each body's home was left where it stands, so none of them will run back`;
+        if (o.track !== undefined) {
+          const list = npcs.errandList();
+          const pick = list[typeof o.track === 'number' ? o.track : 0];
+          if (!pick) return 'no walk has been given yet: __debug.send(\'<place>\') starts one';
+          return pick.track();
+        }
+        if (to === undefined || typeof to === 'object') {
+          const list = npcs.errandList();
+          if (!list.length) return { walks: 0, how: "__debug.send('<place>') or __debug.send(x, z); __debug.send() reads it back", fighters: npcs.npcs.length, places: this.placesHere().map((p) => p.name).sort(), tune: { ...ERRAND_TUNE } };
+          return list.map((e) => e.report());
+        }
+        // Where to. A place name first, because the owner's own sentence names towns: the world's
+        // own list, already fetched for the death card and already in the world's frame.
+        let x: number;
+        let zz: number;
+        let place: string | null = null;
+        if (typeof to === 'number') {
+          if (typeof z !== 'number') return 'give both x and z, or a place name: __debug.send(-158, -112)';
+          x = to;
+          zz = z;
+        } else {
+          const places = this.placesHere();
+          const key = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+          const want = key(to);
+          const hit = places.find((p) => key(p.name) === want) ?? places.find((p) => key(p.name).includes(want));
+          // A world whose list is empty is not a world with no such place: the names are fetched
+          // from the pack on every world load and never awaited, and a pack from before the places
+          // command carries none at all. Say which of the two it is rather than "no such place".
+          if (!hit && !places.length) return `this world has no named places to hand: either its pack carries none or the list has not arrived yet. Use coordinates: __debug.send(${Math.round(this.player.worldPos.x)}, ${Math.round(this.player.worldPos.z)})`;
+          if (!hit) return { noSuchPlace: to, onThisWorld: places.length, names: places.map((p) => p.name).sort() };
+          x = hit.x;
+          zz = hit.z;
+          place = hit.name;
+        }
+        // Which body. The nearest live fighter unless one is named by its place in `fighters()`.
+        const live = npcs.npcs.filter((n) => !n.dead);
+        if (!live.length) return 'no fighter is out: __debug.fighter(1) stands one, and a creature is deliberately not what this order is for';
+        let body = live[0];
+        if (o.fighter !== undefined) {
+          if (!npcs.npcs[o.fighter] || npcs.npcs[o.fighter].dead) return `there is no live fighter ${o.fighter}: __debug.fighters() lists ${live.length}`;
+          body = npcs.npcs[o.fighter];
+        } else for (const n of live) if (n.pos.distanceToSquared(this.player.worldPos) < body.pos.distanceToSquared(this.player.worldPos)) body = n;
+        // `worldPos` and not `pos`: aboard a hull's rooms `pos` is the hull's frame, and the whole
+        // instrument is a distance from the player measured in the world's.
+        return npcs.send(body, x, zz, place, this.player.worldPos).report();
       },
       /**
        * The facilities on this world where the dead come back, nearest first; with a row number it

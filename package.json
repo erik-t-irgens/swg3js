@@ -16,7 +16,7 @@
     "launcher:pack": "node tools/launcher/pack.mjs",
     "test:launcher": "node tools/launcher/tests/launcher.test.mjs",
     "test:terrain": "node tools/swg/tests/terrain.test.ts && node tools/swg/tests/terrainAudit.test.ts && node tools/swg/tests/floraClear.test.ts",
-    "test:nav": "node tools/swg/tests/nav.test.ts",
+    "test:nav": "node tools/swg/tests/nav.test.ts && node tools/swg/tests/errand.test.ts",
     "test:weather": "node tools/swg/tests/weather.test.ts && node tools/swg/tests/wetness.test.ts",
     "test:water": "node tools/swg/tests/water.test.ts && node tools/swg/tests/waterLine.test.ts && node tools/swg/tests/waterSurface.test.ts && node tools/swg/tests/swell.test.ts && node tools/swg/tests/afloat.test.ts && node tools/swg/tests/seaFeed.test.ts && node tools/swg/tests/underwater.test.ts && node tools/swg/tests/underwaterSpecks.test.ts && node tools/swg/tests/ripples.test.ts && node tools/swg/tests/lavaImmunity.test.ts",
     "test:lava": "node tools/swg/tests/lavaSeam.test.ts && node tools/swg/tests/lavaHarm.test.ts && node tools/swg/tests/lavaImmunity.test.ts && node tools/swg/tests/lavaSink.test.ts",

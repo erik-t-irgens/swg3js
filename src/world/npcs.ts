@@ -52,6 +52,11 @@ import { slotOf } from '../ui/wardrobeUi';
 import type { CellState } from './layoutStream';
 import { NavAgent } from './nav/navAgent.ts';
 import { worldNav } from './nav/nav.ts';
+// A long walk's order and its account (`src/world/errand.ts`). The order is three writes -- the
+// body's home moved onto the destination and the body held on the way home, which together are the
+// two clauses of the creatures' brain's own first rule -- and everything else in that file is the
+// evidence: a fighter is the body it is given to, and nothing here knows how the account is kept.
+import { Errand, type ErrandBody, type ErrandProbe, type ErrandWorld } from './errand.ts';
 import { BLADE_SWING, SABER_SWINGS, bladeSwingReport, borrowSwingFigures, noteBladeLookup, noteBladeSwing, noteTimerBlow, returnSwingFigures, weaponFarPoint, type BladeSwingTune } from './mobiles/arms';
 // The creatures' mind, unchanged and shared: a pure function of plain numbers, so a fighter is one
 // more body filling the same struct rather than a second set of rules that has to be kept in step.
@@ -280,7 +285,10 @@ let warnedBlind = false;
 /** Said once, the first time the floor of last resort has to lift a body a whole height (see `move`). */
 let warnedLift = false;
 
-export class Npc implements Living {
+// `ErrandBody` is here rather than only in `errand.ts` so the compiler is what says a fighter can be
+// given a long walk: its home is writable, it has a key and a label, and it can say what it is doing
+// without allocating. Nothing else in the game answers to it.
+export class Npc implements Living, ErrandBody {
   readonly group = new THREE.Group();
   readonly pos = new THREE.Vector3();
   readonly body: RAPIER.RigidBody;
@@ -459,9 +467,22 @@ export class Npc implements Living {
    * Where it was stood. The brain leashes it back here when a chase runs long, which is the one
    * thing a fighter has never done: before this it followed whatever it was after until one of
    * them died.
+   *
+   * Not readonly, and that is most of the waypoint order: `decide`'s first rule is "past the leash,
+   * run home, take no target, answer nobody, until you are within two metres of home", so **moving
+   * these two is the order** and `brain.ts` never has to know an order exists. Only
+   * `src/world/errand.ts` writes them, and it writes them every step so nothing can quietly lift an
+   * order half way. The rest of the order is `holdReturn` below, which is what carries it over the
+   * stretch where the leash cannot.
    */
-  readonly homeX: number;
-  readonly homeZ: number;
+  homeX: number;
+  homeZ: number;
+  /**
+   * The long walk this fighter is on, if any: the order, the track of how it went and the verdict
+   * (`src/world/errand.ts`). Null for every fighter in an ordinary fight, and nothing in the fight
+   * reads it.
+   */
+  errand: Errand | null = null;
 
   constructor(readonly species: string, private readonly physics: Physics, x: number, y: number, z: number) {
     this.name = `${species.replace(/_/g, ' ')} fighter`;
@@ -1112,6 +1133,54 @@ export class Npc implements Living {
     } else combatSounds.melee(this.weapon, false, this.pos.x, this.pos.y + 1.2, this.pos.z);
   }
 
+  /**
+   * The same numbers `status()` prints, written into a struct the caller already has instead of
+   * built into a fresh object with every field rounded for the console. A long walk reads this on
+   * every frame for a quarter of an hour -- about fifty thousand of them -- and nothing in this
+   * file may allocate on a frame, which is the whole reason the two are not one method.
+   *
+   * `held` is the share of the ground this frame asked for that the character controller actually
+   * allowed, and `asking` is whether it asked for any: a body standing still reads 1 and must never
+   * be mistaken for one leaning on a wall.
+   */
+  /**
+   * Put it on the way home, which is the half of the waypoint order the moved home cannot do on its
+   * own. `decide`'s first rule has two clauses and the order needs both: `fromHome > leash` carries
+   * a body whose destination is further off than 60 m outdoors or 25 m inside, and
+   * `state === 'return' && fromHome > home` carries it the rest of the way in. Since the home **is**
+   * the destination, the first clause never fires at all on an order to somewhere in sight, and
+   * without this write such an order left the body wandering its new neighbourhood -- an order that
+   * silently did nothing. It is also what the last stretch of every long walk has always depended
+   * on, and until now only by luck: nothing in the game moves a fighter's state out of `return`, so
+   * it held, but nothing said so and a change here would have broken arrivals quietly.
+   *
+   * A dead body is left alone: `die` writes `dead` and the walk ends on the same step, and putting a
+   * state back on a corpse would take its death clip off it.
+   */
+  holdReturn(): void {
+    if (this.dead) return;
+    this.state = 'return';
+  }
+
+  probe(out: ErrandProbe): void {
+    out.x = this.pos.x;
+    out.y = this.pos.y;
+    out.z = this.pos.z;
+    out.heading = this.heading;
+    out.state = this.state;
+    out.asking = this.wish.lengthSq() > 1e-12;
+    out.held = out.asking ? Math.min(1, this.moved / Math.max(1e-6, Math.hypot(this.wish.x, this.wish.z))) : 1;
+    out.stuck = this.stuck;
+    out.lifted = this.lifted;
+    out.liftedBy = this.liftedBy;
+    out.grounded = this.grounded;
+    out.inside = !!this.cell;
+    out.hp = this.hp;
+    out.dead = this.dead;
+    out.plans = this.navAgent.plans;
+    out.failures = this.navAgent.failures;
+  }
+
   /** What it is thinking, in one line, for `__debug.fighters()`. */
   status(): Record<string, unknown> {
     return {
@@ -1122,6 +1191,9 @@ export class Npc implements Living {
       hp: Number(this.hp.toFixed(0)),
       nerve: this.nerve,
       fromHome: Number(Math.hypot(this.pos.x - this.homeX, this.pos.z - this.homeZ).toFixed(1)),
+      // Under a long walk its home *is* the destination, so `fromHome` is how far it still has to
+      // go and this says which walk that is. `__debug.send()` is the whole account.
+      errand: this.errand ? (this.errand.done ? `${this.errand.verdict}` : `walking to ${this.errand.place ?? `${Math.round(this.errand.toX)}, ${Math.round(this.errand.toZ)}`}`) : null,
       inside: !!this.cell,
       remembers: this.memory.size,
       stuck: this.stuck,
@@ -1571,6 +1643,27 @@ export class NpcManager {
   version = 0;
   private deps: NpcDeps = { weapons: null, effects: null, species: [] };
   private disposed = false;
+  /**
+   * How many long walks are running. A frame with none scans nothing at all: the player's place has
+   * to be picked out of the world's list of the living to measure against, and that is a loop over
+   * every body in the world which nobody should pay for when no walk is being watched.
+   */
+  private errands = 0;
+  /** The last walk that ended, kept so its account can still be read after the body has wandered off. */
+  private lastErrand: Errand | null = null;
+  /** The world's simulated clock at the last step, so an order given from the console has a time. */
+  private lastNow = 0;
+  /**
+   * What a walk reads of the world each step: one object, written into, with one closure made here
+   * and never again. `waterOver` is asked at most once a second and only while a walk is running.
+   */
+  private readonly errandWorld: ErrandWorld = {
+    playerX: 0,
+    playerZ: 0,
+    playerKnown: false,
+    syncGrids: 0,
+    waterOver: (x: number, y: number, z: number): number => this.terrain.waterHeightAt(x, z) - y,
+  };
 
   constructor(private readonly scene: THREE.Scene, private readonly physics: Physics, private readonly terrain: Terrain, private readonly baseUrl: string) {}
 
@@ -1610,9 +1703,81 @@ export class NpcManager {
     for (const n of this.npcs) applyBody(n.controller);
   }
 
+  /**
+   * Send a fighter to a point and hold it to it until it arrives, stops making ground or the clock
+   * runs out: `src/world/errand.ts` is the order and the account of it. A body already under orders
+   * has the old one closed off first, so one fighter is never walking to two places.
+   *
+   * It is a **fighter** and never a creature, and the reason is the account rather than the walk: a
+   * creature going home heals a third of its health a second, which would make the walk unkillable
+   * and hide the one failure this report most needs to be able to name, and a creature can be handed
+   * to another browser half way, which drops the brain's state with the hand-over.
+   */
+  send(npc: Npc, x: number, z: number, place: string | null = null, player?: { x: number; z: number }): Errand {
+    if (npc.errand && !npc.errand.done) {
+      npc.errand.finish('stopped', this.lastNow);
+      this.errands--;
+      this.lastErrand = npc.errand;
+    }
+    // The walk's own first row is taken by `begin`, so the world it is measured against is filled
+    // here rather than waiting for the next frame: the caller has the player, and without it that
+    // one row would read "no player" on every walk ever given.
+    const w = this.errandWorld;
+    w.syncGrids = this.terrain.swg?.syncGenerations ?? 0;
+    if (player) {
+      w.playerX = player.x;
+      w.playerZ = player.z;
+      w.playerKnown = true;
+    }
+    const e = new Errand(npc, { x, z, place }, this.lastNow, FIGHTER_TUNE.run);
+    e.begin(w);
+    npc.errand = e;
+    this.errands++;
+    return e;
+  }
+
+  /**
+   * Close off a body's order because the body itself is going. A walk whose body has been disposed
+   * can never step again, so one left running would hold `errands` above zero and keep the world's
+   * fill alive in every frame for the rest of the session -- and, worse, would print a verdict on a
+   * walk that stopped for a reason nothing in the account names. A walk that has already ended (it
+   * arrived, or it died and said so on its own step) is left exactly as it is.
+   */
+  private closeErrand(npc: Npc): void {
+    const e = npc.errand;
+    if (!e || e.done) return;
+    e.finish('gone', this.lastNow);
+    this.lastErrand = e;
+    this.errands--;
+  }
+
+  /** Every walk this world has seen, the ones still running first; the newest finished one last. */
+  errandList(): Errand[] {
+    const out: Errand[] = [];
+    for (const n of this.npcs) if (n.errand) out.push(n.errand);
+    if (this.lastErrand && !out.includes(this.lastErrand)) out.push(this.lastErrand);
+    return out;
+  }
+
+  /** Call every running order off. Each body's home is left where it stands, so none of them runs back. */
+  stopErrands(): number {
+    let n = 0;
+    for (const npc of this.npcs) {
+      if (!npc.errand || npc.errand.done) continue;
+      npc.errand.finish('stopped', this.lastNow);
+      this.lastErrand = npc.errand;
+      this.errands--;
+      n++;
+    }
+    return n;
+  }
+
   removeAll(): number {
     const n = this.npcs.length;
-    for (const npc of this.npcs) npc.dispose(this.scene);
+    for (const npc of this.npcs) {
+      this.closeErrand(npc);
+      npc.dispose(this.scene);
+    }
     this.npcs.length = 0;
     this.byCollider.clear();
     this.version++;
@@ -1642,13 +1807,31 @@ export class NpcManager {
     return n;
   }
 
-  /** `targets` is the world's one list of living things (the player, the creatures, the fighters). */
-  update(dt: number, targets: readonly Living[], bolts: Bolts, camera: THREE.Camera | null, now: number): void {
+  /**
+   * `targets` is the world's one list of living things (the player, the creatures, the fighters).
+   * `playerPos` is the player in the world's own frame and is read by nothing but a fighter under a
+   * long walk; with none given such a walk records that it had nobody to measure against, which it
+   * reads as the worst case rather than as a pass.
+   */
+  update(dt: number, targets: readonly Living[], bolts: Bolts, camera: THREE.Camera | null, now: number, playerPos?: THREE.Vector3): void {
     if (this.disposed) return;
     this.expose();
     noteBladeLookup(!!this.deps.hittableAt);
+    this.lastNow = now;
     const follow = this.deps.followCell;
     const solid = this.deps.cellSolid;
+    // The world a long walk is measured against, filled once for every walk running and not at all
+    // when none is.
+    const walking = this.errands > 0;
+    if (walking) {
+      const w = this.errandWorld;
+      w.playerKnown = !!playerPos;
+      if (playerPos) {
+        w.playerX = playerPos.x;
+        w.playerZ = playerPos.z;
+      }
+      w.syncGrids = this.terrain.swg?.syncGenerations ?? 0;
+    }
     for (let i = this.npcs.length - 1; i >= 0; i--) {
       const npc = this.npcs[i];
       // Its room, followed through the portals four times a second, and sooner when it has gone a couple of metres.
@@ -1662,7 +1845,18 @@ export class NpcManager {
       // floor that has gone is half a metre nobody asked for.
       if (solid && !npc.dead) npc.cellSolid = solid(npc.cell);
       npc.update(dt, this.terrain, targets, bolts, this.deps.effects, camera, now, this.deps.hittableAt ?? null);
+      // The walk, after the body has taken its step: what it records is what really happened this
+      // frame, never what was asked for. A walk that ends here takes the count down with it.
+      const e = npc.errand;
+      if (walking && e && !e.done) {
+        e.step(now, this.errandWorld);
+        if (e.done) {
+          this.errands--;
+          this.lastErrand = e;
+        }
+      }
       if (npc.dead && npc.deadTimer <= 0) {
+        this.closeErrand(npc);
         // The collider handle went out of the lookup in `die`, at the moment the collider itself
         // went. Deleting it again here would unregister whichever live body rapier has since
         // given that recycled handle to, and that body would stop taking damage.
