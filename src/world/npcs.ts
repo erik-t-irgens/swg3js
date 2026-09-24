@@ -1596,9 +1596,21 @@ export class Npc implements Living, ErrandBody {
     // Before the split this wrote `face`, because facing and travel were one number and the only
     // way to walk at a corner was to point at it. It writes the travel point now, which is the same
     // body walking the same corners -- and a gunner rounding one keeps its gun where it was.
-    if (moveTo && pace !== 'stand' && this.cell && d && d.state !== 'attack') {
+    if (moveTo && pace !== 'stand' && d && d.state !== 'attack') {
       const goalY = t && (d.state === 'chase' || d.state === 'alert') ? t.pos.y : this.pos.y;
-      const corner = worldNav.corner(this.navAgent, this.cell, this.pos.x, this.pos.y, this.pos.z, moveTo.x, goalY, moveTo.z, this.radiusToward(), this.now);
+      // Indoors the building's own floors say which corner to walk at next; **outdoors the world's
+      // baked walkability grid does**, which is the half that was written and then left unwired,
+      // so every body outdoors went on steering straight at its goal and walked into the first
+      // mountain between it and the place it was sent. Both answer null for a world that carries
+      // neither, and for a goal near enough that the straight line is the whole answer, and then
+      // every line below is the line it was.
+      //
+      // The two share one `NavAgent` on purpose: the agent keys its path on the building it was
+      // planned in and the outdoor path puts a sentinel in that slot, so a body that walks out of
+      // a door finds the building changed and throws its indoor corners away on the spot.
+      const corner = this.cell
+        ? worldNav.corner(this.navAgent, this.cell, this.pos.x, this.pos.y, this.pos.z, moveTo.x, goalY, moveTo.z, this.radiusToward(), this.now)
+        : outdoorNav.corner(this.navAgent, this.pos.x, this.pos.y, this.pos.z, moveTo.x, goalY, moveTo.z, this.radiusToward(), this.now);
       if (corner) moveTo = corner;
     }
     // Two wants, and for every body that has not earned the split they are one number: the travel

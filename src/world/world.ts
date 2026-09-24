@@ -34,6 +34,7 @@ import { Group, groups, RAPIER as R } from '../core/physics';
 import { CHUNK_RES, CHUNK_SIZE, Terrain } from './terrain';
 import { SwgTerrain, type BuildingLayerSource, type SwgWaterTable } from './swgTerrain';
 import { LayoutStreamer, type Building, type CellState, type PlacedObject } from './layoutStream';
+import { outdoorNav } from './nav/outdoorNav.ts';
 import { CLONING_TUNE, facilitiesNear, SPAWN_CELL_NAME, type FacilityChoice, type NamedPlace } from './cloning.ts';
 import { isLiftCell, liftStops, stopAt, type LiftStop } from './lifts';
 import type { SunInfo } from '../core/postfx';
@@ -1351,6 +1352,14 @@ export class World {
       return null;
     }
     this.pack = pack;
+    // The world's outdoor walkability grid, written beside the manifest by the `navgrid` command.
+    // A world with no `nav.json` answers false to everything and every body in it steers exactly as
+    // it did before any of this existed. Awaited rather than left in flight so the loading screen
+    // covers it -- about 3.7 MB for a 16 km world, a tenth of a second to inflate -- and the token
+    // is checked after, because a travel during that fetch must not leave the next world holding
+    // the last one's ground.
+    await outdoorNav.load(this.packId);
+    if (token !== this.loadToken) return null;
     this.packProgress = 0.12;
 
     const scatter: ScatterItem[] = [];
@@ -1554,6 +1563,9 @@ export class World {
     // taken out of the scene, and whoever was waiting on one (a tier holding itself back until it
     // can be drawn without a stall) is answered rather than left waiting for ever.
     this.programs.clear();
+    // The outdoor walkability grid: about forty megabytes of typed arrays for a 16 km world, and
+    // nothing else holds them.
+    outdoorNav.unload();
     // The water's height field holds a mesh and a material per thing that waded here, and the keys
     // are the bodies themselves: a world left with them still in the map holds every one of them.
     for (const body of this.simBodies.values()) body.dispose();
