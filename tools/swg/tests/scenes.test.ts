@@ -8,7 +8,7 @@
 // captured holds that today, so anything that stops holding it is a typo and not a style.
 import assert from 'node:assert/strict';
 import { readSceneLine, sceneLine } from '../../../src/world/sceneCapture.ts';
-import { framePlace, FRAME_ASPECT } from '../../../src/world/sceneBackdrop.ts';
+import { framePlace, FRAME_ASPECT } from '../../../src/world/scenePlaces.ts';
 import { SCENE_SHIPS, SCENE_SHOTS, sceneSpots } from '../../../src/data/scenes.ts';
 
 let passed = 0;

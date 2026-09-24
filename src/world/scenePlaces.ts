@@ -1,83 +1,32 @@
-// Registering a rendered backdrop with the camera that is drawn over it.
+// The places a character is shown in: where the camera stands, where the figure stands, and how
+// the game's own orbiting camera is put back into one of them.
 //
-// A creation or selection backdrop is one of the owner's captured shots **rendered once** rather
-// than built again every time the screen opens. That is not a shortcut, it is the shape of the
-// problem: the camera in these shots never moves, so no parallax is possible and a picture of the
-// place is not an approximation of the place, it is the place. It also costs about two megabytes
-// where carrying the geometry costs a hundred and fifty (measured over the owner's own packs: the
-// models a single Theed shot can see are 150 MB of textured GLB, and 1.3 GB over the seventeen
-// shots, which no selection screen can afford to fetch).
+// These are the owner's captured shots (src/data/scenes.ts). The creation and selection screens
+// stand the character in the **real world** at one of them: the sun of that hour really lights the
+// figure, the animated surfaces really animate and the clouds really move, none of which a picture
+// of the place could ever do. A rendered-backdrop version of this was built first and thrown away;
+// what survived it is the arithmetic below, which is what the shots were always for.
 //
-// What has to be exact is the **registration**: the figure is drawn live in three dimensions over
-// a picture taken by another camera, and if the two projections disagree by a per cent the
-// character's feet leave the ground. They agree when the live camera is the shot's own camera --
-// same place, same look-at, same vertical field of view -- and the picture is laid over the view
-// at the scale its own field of view asks for. That scale is what this file works out, and it is
-// pure arithmetic so a node test can sweep it rather than anybody eyeballing a seam.
-//
-// The picture is deliberately rendered **wider and taller than any window**, because a window can
-// be any shape and a backdrop that runs out at the edge is worse than one with margin to spare.
-// The live camera keeps the shot's vertical field of view whatever the window does (three's
-// perspective camera does this by itself: the vertical angle is fixed and the aspect only widens
-// the horizontal), so a wider window shows more of the picture sideways and a taller one shows
-// less. Everything here follows from that one fact.
+// Everything here is pure, so a node test can sweep it rather than anybody eyeballing a seam.
 
-/** How a backdrop was rendered: the angles it covers, which is all the registration needs. */
-export interface BackdropRender {
-  /** Vertical field of view in degrees, at least the shot's own and usually more, for margin. */
-  fov: number;
-  /** Width over height of the rendered picture. */
-  aspect: number;
-  /** The pixels it was rendered at, kept so a re-render can be told from the same shot at another size. */
-  width: number;
-  height: number;
-}
-
-/** The view it is being drawn under: the live camera and the window. */
-export interface BackdropView {
-  /** The live camera's vertical field of view in degrees. This is the shot's own, always. */
-  fov: number;
-  /** The viewport's width over height. */
-  aspect: number;
-}
-
+import { PLANETS } from '../data/planets.ts';
 /**
- * How large to draw the picture, as a multiple of the viewport, so that a point in it lands where
- * the live camera would put the same point in the world.
+ * The world a pack belongs to, and the zone within it if it has zones.
  *
- * Both projections are rectilinear, so a direction `theta` off the middle lands at
- * `tan(theta) / tan(fov / 2)` of the way to the edge in either. The picture's own half-angles are
- * therefore the whole of it: the scale is one projection's tangent over the other's, per axis.
+ * A capture records the **pack** it was taken in, which is what the world calls itself; travelling
+ * wants a planet and a zone. For a one-zone world those are the same word, and for a many-zoned one
+ * (Kashyyyk's seven) they are not, so the answer is looked up rather than assumed.
  */
-export function backdropFit(render: BackdropRender, view: BackdropView): { scaleX: number; scaleY: number; covers: boolean } {
-  const half = (deg: number): number => Math.tan((Math.max(1e-3, Math.min(179, deg)) * Math.PI) / 360);
-  const rv = half(render.fov);
-  const vv = half(view.fov);
-  const rh = rv * Math.max(1e-6, render.aspect);
-  const vh = vv * Math.max(1e-6, view.aspect);
-  const scaleY = rv / vv;
-  const scaleX = rh / vh;
-  // A hair under one is still a gap at the edge, so the test is honest rather than generous.
-  return { scaleX, scaleY, covers: scaleX >= 1 && scaleY >= 1 };
-}
-
-/**
- * How to render a shot so its picture covers every window worth planning for.
- *
- * **The vertical field of view is the shot's own and never more**, which is worth saying because
- * the instinct is to render wide in both directions for margin. A perspective camera's vertical
- * angle does not change with the window: three holds the vertical fixed and lets the aspect widen
- * the horizontal, so however tall or narrow the window is, the picture's vertical registration is
- * exact at the shot's own angle and margin up and down would only be thrown away. All the margin
- * that can ever be used is sideways, and that is the aspect's to give.
- *
- * So there is one real choice here: the widest window to support. Past it the picture runs out at
- * the sides, which `backdropFit` reports rather than hiding.
- */
-export function backdropRenderFor(shotFov: number, widestViewAspect: number, height: number): BackdropRender {
-  const aspect = Math.max(1, widestViewAspect);
-  const h = Math.max(16, Math.round(height));
-  return { fov: shotFov, aspect, width: Math.round(h * aspect), height: h };
+export function packPlanet(pack: string): { planet: string; zone?: string } | null {
+  for (const p of PLANETS) {
+    if (!p.zones?.length) {
+      if (p.id === pack) return { planet: p.id };
+      continue;
+    }
+    const z = p.zones.find((x) => x.pack === pack);
+    if (z) return { planet: p.id, zone: z.id };
+  }
+  return null;
 }
 
 /** A point, in whatever frame the thing holding it is in. */
@@ -85,29 +34,6 @@ export interface ScenePoint {
   x: number;
   y: number;
   z: number;
-}
-
-/**
- * A shot as the doll's own preview has to hold it: the camera and the look-at point moved into the
- * frame the figure already stands in, and the turn that leaves the figure facing as it was captured.
- *
- * The preview stands its doll at the origin with the feet on the floor and spins it there, so the
- * world coordinates of a shot are no use to it directly. Subtracting the standing spot moves the
- * whole composition into that frame without changing a single angle or distance, which is what
- * keeps the registration exact: the camera is the same camera, it is simply described from the
- * figure's feet instead of from the middle of a planet.
- */
-export function sceneView(shot: { stand: { x: number; y: number; z: number; heading: number }; camera: { x: number; y: number; z: number; look: ScenePoint } }): { camera: ScenePoint; look: ScenePoint; faceYaw: number } {
-  const s = shot.stand;
-  const c = shot.camera;
-  const camera = { x: c.x - s.x, y: c.y - s.y, z: c.z - s.z };
-  const look = { x: c.look.x - s.x, y: c.look.y - s.y, z: c.look.z - s.z };
-  // The doll is modelled facing +Z and the shot has it facing away from the camera, so the turn
-  // that puts +Z along "away from the camera" is the one the capture was taken at. Read off the
-  // camera rather than off the captured heading on purpose: the heading is the body's and can be a
-  // few degrees from square to the shot, and what must be reproduced is the *picture*.
-  const faceYaw = Math.atan2(-camera.x, -camera.z);
-  return { camera, look, faceYaw };
 }
 
 /**
@@ -227,12 +153,6 @@ export function hourLabel(name: string, key: string, hour: number): string {
   // An unknown word is still the owner's own: it is shown tidied rather than replaced by a guess.
   const pretty = raw.replace(/-/g, ' ').trim();
   return `${pretty.charAt(0).toUpperCase()}${pretty.slice(1)}`;
-}
-
-/** Where a shot's picture for one hour lives, under the scenes folder. */
-export function backdropPath(key: string, name: string): string {
-  const hourPart = name.startsWith(`${key}-`) ? name.slice(key.length + 1) : name;
-  return `${key}/${hourPart || 'only'}.jpg`;
 }
 
 /**

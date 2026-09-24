@@ -29,8 +29,7 @@ import { SSAO_BASE_POWER } from './core/fx/ssaoMath.ts';
 import type { FighterGlow } from './world/npcs';
 import { DEFAULT_TIER } from './world/npcs.ts';
 import { captureScene, headingDegrees, sceneLine } from './world/sceneCapture.ts';
-import { packPlanet, runShoot, shootPlan } from './world/sceneShoot.ts';
-import { framePlace, orbitFor, FRAME_ASPECT } from './world/sceneBackdrop.ts';
+import { framePlace, orbitFor, packPlanet, FRAME_ASPECT } from './world/scenePlaces.ts';
 import { sceneSpots } from './data/scenes.ts';
 /**
  * How near a named place has to be for `__debug.scene` to call the shot that place's. Ours, and
@@ -2845,65 +2844,6 @@ class App {
         void this.travel(planetById(id));
         return `travelling to ${id}`;
       },
-      /**
-       * Render the creation and selection backdrops from the captured shots: `await shoot()` for every one
-       * (67 pictures over 12 worlds, minutes, and it travels), `await shoot(['tyrena', 'naboo'])` for one shot
-       * or one world. Needs `npm run dev`, which is the only thing allowed to write into the scenes folder.
-       * The figure is hidden while each is taken, the day is pinned at the shot's own hour and given back after,
-       * and the window's own size and camera are put back whatever happens. A run of part of it does not rewrite
-       * the manifest, so the screens keep reading the pictures that are really there.
-       *
-       * The pictures are 1440 tall by default, and the effects chain allocates several buffers that size: if the
-       * card runs out of memory, `shoot(undefined, { height: 900 })` costs less than half as much and still looks
-       * right behind a character. `quality`, `aspect`, `settleFrames` and `streamMs` move the same way.
-       */
-      shoot: async (only?: string[], tune?: Parameters<typeof runShoot>[2]) => {
-        const report = await runShoot(
-          {
-            renderer: this.renderer,
-            camera: this.cam.camera,
-            drawFrame: () => this.drawFrame(),
-            resized: () => {
-              this.postfx?.setSize();
-              this.world.onCameraResized();
-            },
-            packId: () => this.world.packId,
-            goToPack: async (pack) => {
-              const where = packPlanet(pack);
-              if (!where) throw new Error(`no world is the ${pack} pack`);
-              await this.travel(planetById(where.planet), where.zone);
-            },
-            placePlayer: (x, y, z) => this.player.reset(new THREE.Vector3(x, y, z)),
-            readyAround: (at, ms) => this.world.readyAround(at, ms),
-            holdDay: (t) => {
-              this.world.day.time = t;
-            },
-            releaseDay: () => void clockKnob({ release: true }),
-            readLight: () => {
-              const L = this.world.swgSky?.lighting;
-              const d = this.world.day.lightDir;
-              const r = (v: number) => Number(v.toFixed(4));
-              return { dir: [r(d.x), r(d.y), r(d.z)], main: L ? L.main.getHexString() : 'ffffff', mainScale: L ? Number(L.mainScale.toFixed(3)) : 1, ambient: L ? L.ambient.getHexString() : '404040' };
-            },
-            hideForShot: () => {
-              // The figure and every vehicle: both are drawn live over the finished picture, so a
-              // copy of either baked into it would stand there for ever beside the real one.
-              const was: { o: THREE.Object3D; visible: boolean }[] = [{ o: this.player.group, visible: this.player.group.visible }];
-              for (const v of this.world.vehicles) was.push({ o: v.group, visible: v.group.visible });
-              for (const w of was) w.o.visible = false;
-              return () => {
-                for (const w of was) w.o.visible = w.visible;
-              };
-            },
-            say: (line) => console.info(line),
-          },
-          only,
-          tune,
-        );
-        return report;
-      },
-      /** What `shoot` would do, without doing any of it: the worlds it would visit, the shots in each and the pictures. */
-      shootPlan: () => shootPlan().map((g) => ({ world: g.pack, shots: g.spots.map((s) => `${s.spot.key} (${s.steps.length}h)`) })),
       /**
        * The System Map's lists (`await jumps()` for the zone flown in, `jumps('space_light1')` for another): every system's title,
        * and the zone's destinations with their keys for `jump`, how far each is from the ship (km, this zone only), whether it is
@@ -10172,6 +10112,13 @@ class App {
     const seen = new Map<string, number>();
     const frame = () => {
       requestAnimationFrame(frame);
+      // The backdrop shoot drives its own frames and must be the only thing doing so. It yields to
+      // the browser between them on purpose -- several effects answer only after control has gone
+      // back, the water's occlusion query among them -- and the game's own step ran in those gaps:
+      // it wrote `player.group.visible = true` every time, so the figure came back into shots it
+      // had been taken out of. The step still runs, because the world must keep updating for the
+      // sky to reach the hour being shot; what it no longer does is draw (see `this.shooting`
+      // below) and what the shoot no longer trusts is that a hide set once stays set.
       try {
         step();
       } catch (err) {
@@ -10603,6 +10550,11 @@ class App {
       // altogether. Nothing sparks while play is paused.
       if (simulate) this.stepClashes();
       const tRender = performance.now();
+      // While the backdrop shoot is running it draws the frames itself, from the shot's camera and
+      // at the shot's size. The rest of this step still runs -- the world must go on updating or
+      // the sky never re-blends to the hour a picture is being taken at -- but a draw from the
+      // player's own camera in between would put that view into the motion blur's history and its
+      // focus into the lens, which is what smeared every picture of the first run.
       this.drawFrame();
       stats.renderMs = performance.now() - tRender;
       // The display's shapes, over the picture and under every panel. Nothing is drawn and the canvas

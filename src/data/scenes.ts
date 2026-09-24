@@ -1,4 +1,4 @@
-// The backdrops the character creator and the selection screen are built from: where a figure
+// The places the character creator and the selection screen stand a character in: where the figure
 // stands, where the camera stands, and at what hour.
 //
 // **Every one of these is the owner's own choice, made by eye and captured in the running game**
@@ -11,9 +11,9 @@
 //
 // **Most of these are the same place at a different hour.** The 67 captures are 15 places and 17
 // compositions, and at 13 of those places the stand and the camera are identical to the centimetre
-// across every hour of it -- so a bake does the geometry once per composition and the hour only
-// changes the sky and the light. That is what makes the owner's ask cheap: letting somebody turn
-// the time of day in the creator costs a re-light, not a second world. The two places that are not
+// across every hour of it -- so a place is one camera and a list of hours, and turning the time of
+// day in the creator moves the world's own clock rather than picking a different place. The two
+// places that are not
 // one composition are recorded rather than tidied away: Theed has a second standing spot of its
 // own, and the earliest Lars Homestead capture sits a few centimetres from the other three.
 //
@@ -24,8 +24,8 @@
 import type { ScenePose, SceneShot } from '../world/sceneCapture.ts';
 
 /**
- * Every captured backdrop, in the order they were taken, exactly as the game wrote them. Nothing
- * is collapsed or rounded here: a bake groups them by spot itself, so a capture that turns out to
+ * Every capture, in the order they were taken, exactly as the game wrote them. Nothing is
+ * collapsed or rounded here: `sceneSpots` groups them itself, so a capture that turns out to
  * differ from its neighbours by a few centimetres is kept rather than silently folded into them.
  */
 export const SCENE_SHOTS: readonly SceneShot[] = [

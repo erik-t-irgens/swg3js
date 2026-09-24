@@ -3,14 +3,11 @@
 import type { Character, SpeciesEntry } from '../player/character';
 import { INVENTORY_TABS, tabStrip, wireTabs } from './tabs';
 import { CharacterPreview } from './characterPreview';
-import { loadSceneLibrary, SceneBar } from './sceneBar.ts';
 
 export class AppearanceUi {
   readonly root: HTMLElement;
   private readonly body: HTMLElement;
   private readonly preview: CharacterPreview;
-  /** The row of places and hours under the figure; idle with no backdrops rendered on this machine. */
-  private readonly sceneBar: SceneBar;
   /** The doll, for the console (__debug.previewDof). */
   get doll(): CharacterPreview {
     return this.preview;
@@ -44,18 +41,7 @@ export class AppearanceUi {
     parent.appendChild(this.root);
     this.body = this.root.querySelector<HTMLElement>('.wardrobe-body')!;
     this.preview = new CharacterPreview();
-    const stage = this.root.querySelector<HTMLElement>('.wardrobe-preview')!;
-    stage.prepend(this.preview.canvas);
-    // The place behind the figure goes in before the canvas, so it is painted under it, and the
-    // row that picks between places goes over both. The creator offers three places rather than
-    // all seventeen, which is the owner's own ask; with none rendered the row hides and the
-    // creator is exactly what it was.
-    stage.prepend(this.preview.backdrop);
-    this.sceneBar = new SceneBar(
-      (scene) => this.preview.setScene(scene),
-      (on) => this.preview.setFaceLight(on),
-    );
-    stage.appendChild(this.sceneBar.element);
+    this.root.querySelector<HTMLElement>('.wardrobe-preview')!.prepend(this.preview.canvas);
     this.root.querySelector('.close')!.addEventListener('click', () => this.hide());
     wireTabs(this.root, 'appearance', (id) => this.onTab(id));
     this.root.querySelector<HTMLSelectElement>('.species')!.addEventListener('change', (e) => {
@@ -304,12 +290,6 @@ export class AppearanceUi {
   show(): void {
     this.open = true;
     this.root.classList.remove('hidden');
-    // This panel is two things: the creator, which stands the figure in one of the owner's places,
-    // and the appearance panel in play, where it is a doll on its own and a photograph of
-    // somewhere else would be nonsense. The class the creator puts on it is what tells them apart,
-    // and it is on before this runs.
-    if (this.root.classList.contains('creation')) void loadSceneLibrary().then((lib) => this.open && this.sceneBar.setLibrary(lib, true));
-    else this.sceneBar.setLibrary(null);
     this.preview.start();
   }
 

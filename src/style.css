@@ -507,12 +507,6 @@ b { color: var(--accent); font-weight: 600; }
 #start .cs-figure { position: relative; flex: 1 1 auto; min-height: 0; background: radial-gradient(ellipse 26% 5% at 50% 95.5%, color-mix(in srgb, var(--accent) 22%, transparent), transparent 100%); }
 #start .cs-figure .cs-canvas { position: absolute; inset: 0; opacity: 0; transition: opacity 0.35s ease; }
 #start .cs-stage.is-ready .cs-canvas { opacity: 1; }
-/* The place behind the figure fades in with it, so a character and the ground it stands on never
-   arrive separately. It carries no colour of its own: what it shows is a photograph. */
-#start .cs-figure .preview-backdrop { opacity: 0; transition: opacity 0.35s ease; }
-#start .cs-stage.is-ready .preview-backdrop { opacity: 1; }
-#start .cs-figure .scene-bar { opacity: 0; transition: opacity 0.35s ease; }
-#start .cs-stage.is-ready .scene-bar { opacity: 1; }
 #start .cs-state { position: absolute; left: 50%; top: 44%; transform: translate(-50%, -50%); width: max-content; max-width: min(80%, 460px); text-align: center; font-size: 13px; line-height: 1.5; color: var(--muted); letter-spacing: 0.04em; pointer-events: none; }
 #start .cs-stage.is-waiting .cs-state::before, #start .cs-stage.is-loading .cs-state::before { content: ''; display: block; width: 24px; height: 24px; margin: 0 auto 10px; border-radius: 50%; border: 2px solid var(--rule); border-top-color: var(--accent); animation: cs-turn 1s linear infinite; }
 #start .cs-stage.is-error .cs-state { color: var(--warn); user-select: text; }
