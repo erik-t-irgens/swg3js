@@ -155,6 +155,27 @@ ok(one('flibberty').alone === true && one('flibberty').needs.length === 0, 'a co
 ok(plan.steps.filter((s) => s.alone).length === 1, 'and it is the only one that does');
 ok(factsFor('snapshot') !== null && factsFor('flibberty') === null, 'the facts are there for the commands the converter has and for no others');
 
+// ------------------------------------------------------------------ the nav grid's own command line
+// Every other per-planet command is `<command> <swg-dir> <planet> <out-dir>`, so its planet is the
+// second argument. `navgrid` reads no archive and takes no <swg-dir>, so its planet is the first,
+// and a plan that looked in the usual place would give all eighteen bakes the same lock -- either
+// `pack:*` (no scope at all: eighteen bakes strictly one at a time, each holding every planet pack
+// against the snapshot, terrain, sky, water, pois, flora and maps of every world for two and a half
+// minutes) or one bogus `pack:assets-private` shared by the lot, which is the same jam under a
+// different name. Nothing else in this file would notice either, which is why it is checked here.
+ok(locksFor('navgrid', ['navgrid', 'tatooine', OUT]).join() === 'pack:tatooine', 'a nav grid bake holds only the planet it bakes');
+ok(locksFor('navgrid', ['navgrid', 'naboo', OUT]).join() === 'pack:naboo', 'and another world is another lock');
+ok(locksFor('navgrid', ['navgrid', 'all', OUT]).join() === 'pack:*', 'while a run over every world holds them all');
+{
+  const bakes = ['tatooine', 'naboo', 'lok', 'rori'].map((p) => step(`navgrid ${p} ${OUT}`, `${p} has no outdoor walkability grid`));
+  const baked = convertPlan({ format: 1, dir: OUT, done: false, unreadable: [], steps: bakes }, { swg: SWG, jka: JKA, out: OUT });
+  const sets = new Set(baked.steps.map((s) => s.locks.join()));
+  ok(baked.steps.length === 4 && sets.size === 4, 'four bakes are four different locks, so four worlds really do bake at once');
+  ok(baked.steps.every((s) => s.after.length === 0), 'and none of them waits for another');
+  ok(baked.steps.every((s) => s.cost.seconds < 400), 'one world is costed as one world and not as the whole fleet');
+  ok(costOf('navgrid', ['navgrid', 'all', OUT]).seconds > costOf('navgrid', ['navgrid', 'tatooine', OUT]).seconds * 4, 'every world costs a great deal more than one');
+}
+
 // ------------------------------------------------------------------ what it is thought to cost
 ok(at('snapshot').find((s) => s.args[2] === 'all')!.cost.seconds > planets[0].cost.seconds * 4, 'every planet costs a good deal more than one');
 ok(plan.steps.every((s) => s.cost.seconds > 0 && s.cost.bytes >= 0.3 * 1024 ** 3), 'every step carries a time and at least what mounting the archives holds');

@@ -70,6 +70,12 @@
 //   node tools/swg/cli.mjs space <swg-dir> <zone>|all <out-dir>     a space zone (space_tatooine, ..., space_light1 Kessel, space_heavy1 Deep Space,
 //                                                                  space_ord_mantell): its stations, asteroid fields, planets, sky and hyperspace points
 //   node tools/swg/cli.mjs maps <swg-dir> <out-dir>                 the client's planet map image into every converted planet pack (map.png, map.json)
+//   node tools/swg/cli.mjs navgrid <planet>|all <out-dir> [--cell=2] [--slope=55] [--skip-existing]
+//                                                                  bake a world's outdoor walkability grid (nav.json, nav.bin) from the pack
+//                                                                  it already has: the terrain, the placements and the models' own triangles.
+//                                                                  It reads no archive, so it takes no <swg-dir>. About two minutes and three
+//                                                                  megabytes for a 16 km world; without it every body outdoors steers as it
+//                                                                  always did
 //   node tools/swg/cli.mjs sandbox <swg-dir> <out-dir> [--seed=N]   a made-up system to fly in, 250 km across, as <out-dir>/space_sandbox:
 //                                                                  a sun and a sky borrowed from a converted zone, four to six planets with real
 //                                                                  places you can fly to, asteroid fields and three jump points; nothing in it
@@ -116,6 +122,7 @@ import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { resolveParts } from './appearance.mjs';
 import { decodeDds } from './dds.mjs';
 import { FLOOR_PACK_VERSION, floorBlock, floorSize, parseFloor } from './flr.mjs';
+import { NAV_GRID_VERSION, buildNavGrid, writeNavGrid } from './navgrid.mjs';
 import { buildGlb } from './glb.mjs';
 import { dump, find, isForm, parseIff, readCString } from './iff.mjs';
 import { classifyDirectory, isRetailByName } from './manifest.mjs';
@@ -1983,6 +1990,23 @@ function packStatus(dir) {
     // which is not the same as one nobody has looked at and must not read as a gap forever.
     const floorless = floorsRead ? withCells.filter((m) => floorsRead.models[m.id] && !Object.keys(floorsRead.models[m.id]).length).length : 0;
     const graphOnly = !!floorsRead && floorsRead.mesh === false;
+    // The ground this world can be walked on. Gated on the version the game reads, as the floors
+    // are, or a file written in an older shape would read as done here and be passed over there.
+    const navRead = readJson(join(packDir, 'nav.json'));
+    const navGrid = navRead && navRead.version === NAV_GRID_VERSION && navRead.nx ? navRead : null;
+    // Two things a grid can be wrong about in a way nothing else would ever notice.
+    //
+    // Its frame: every cell's place is derived from the pack's centre at the moment it was baked,
+    // so a world re-snapshotted around a different centre leaves a grid that loads, reports its
+    // size cheerfully and stands the whole difference away from the ground it describes. A grid
+    // baked before the centre was written down cannot be checked and is not complained about.
+    //
+    // Its buildings: a bake whose manifest entries carried no `cells` marks not one indoor cell,
+    // so every building's inside is open ground and a route may cut through one. The bake says so
+    // at the time; this is the half that is still there tomorrow.
+    const navMoved = navGrid && navGrid.center && layout?.center
+      && (Math.abs(navGrid.center.x - layout.center.x) > 0.5 || Math.abs(navGrid.center.z - layout.center.z) > 0.5);
+    const navNoIndoor = navGrid && navGrid.stats && navGrid.stats.buildings > 0 && !navGrid.stats.indoor;
     const parts = [
       `${objects} objects`,
       `${flora} flora models`,
@@ -1997,6 +2021,9 @@ function packStatus(dir) {
       sky ? `sky (${sky.blocks.length} blocks${sky.weather ? `, weather ${new Set(sky.blocks.map((b) => b.cameraEffect?.file).filter(Boolean)).size} effects` : ', NO WEATHER'})` : 'NO SKY',
       water ? `water (${Object.keys(water.shaders ?? {}).length} shaders, ${Object.values(water.shaders ?? {}).filter((s) => s.kind === 'lava').length} lava${waterPackNeedsHarm(water) ? ', NO WATER VALUES' : ''})` : terrain ? 'NO WATER LOOK' : null,
       withCells.length ? (floored ? `floors ${floored}/${withCells.length} buildings${graphOnly ? ', GRAPHS ONLY (no walkable meshes)' : ''}${floorless ? `, ${floorless} with none in the archives` : ''}` : 'NO FLOORS') : null,
+      // The outdoor walkability grid. A world without one plays exactly as it always did, so this
+      // says what is there rather than shouting, and asks for it once below.
+      navGrid ? `nav grid ${navGrid.nx}x${navGrid.nz} at ${navGrid.cell} m${navMoved ? ', BAKED AROUND ANOTHER CENTRE' : ''}${navNoIndoor ? ', NO BUILDING FOOTPRINTS' : ''}` : 'no nav grid',
     ].filter(Boolean);
     console.log(`  ${planet}: ${parts.join(', ')}`);
     if (!objects) need(`snapshot <swg-dir> ${planet} ${packDir} --center=auto --radius=all --retail-only`, `${planet} has no objects`);
@@ -2009,6 +2036,10 @@ function packStatus(dir) {
     // A graph with no mesh under it looks complete and cannot funnel a body through a doorway, so
     // it is asked for again rather than counted as done. Drop --floors-graph-only to mend it.
     else if (withCells.length && graphOnly) need(`snapshot <swg-dir> ${planet} ${packDir} --center=auto --radius=all --retail-only`, `${planet}'s buildings were converted with --floors-graph-only: path graphs, no walkable meshes`);
+    // Its own `if`, because it needs no archives at all and nothing above it can fill it.
+    if (terrain && objects && !navGrid) need(`navgrid ${planet} ${dir}`, `${planet} has no outdoor walkability grid: bodies outdoors steer straight at their goal`);
+    else if (navMoved) need(`navgrid ${planet} ${dir}`, `${planet}'s nav grid was baked around the centre ${navGrid.center.x},${navGrid.center.z} and the pack's is now ${layout.center.x},${layout.center.z}: every cell in it is that far from the ground it describes`);
+    else if (navNoIndoor) need(`navgrid ${planet} ${dir}`, `${planet}'s nav grid has ${navGrid.stats.buildings} portal buildings and no footprints for any of them: a route may cut straight through one`);
     // Its own `if`: exportWater always writes the file, so its existence is the whole test.
     if (terrain && !water) need(`water <swg-dir> all ${dir} --retail-only`, `${planet} has no water.json`);
     // A lava entry written before the lava look has no `lava` block: the game draws it in a stand-in look.
@@ -5506,6 +5537,46 @@ switch (cmd) {
     writeFileSync(join(pos[2], 'galaxy.json'), JSON.stringify(galaxy, null, 2));
     console.log(`galaxy.json: ${galaxy.planets.length} planets, ${galaxy.routes.length} shuttle routes -> ${join(pos[2], 'galaxy.json')}`);
     console.log(`${done} planet maps written`);
+    break;
+  }
+
+  case 'navgrid': {
+    // <planet>|all <out-dir> [--cell=2] [--skip-existing]: the outdoor walkability grid, baked from
+    // a pack that is already converted. It opens no archive at all -- the terrain template, the
+    // building terrain layers, the placements and the models' own triangles are all in the pack --
+    // so it takes no <swg-dir> and nothing about `--retail-only` applies to it.
+    if (!pos[2]) usage();
+    const targets = pos[1] === 'all'
+      ? GAME_PLANETS.filter((p) => existsSync(join(pos[2], p, 'layout.json'))).map((p) => [p, join(pos[2], p)])
+      : [[pos[1], join(pos[2], pos[1])]];
+    if (!targets.length) console.log(`no planet packs under ${pos[2]} yet; run snapshot first`);
+    const cell = options.cell ? Number(options.cell) : undefined;
+    // The angle the grid calls climbable. The default is the player's own 55 degrees, which every
+    // fighter shares; a catalogue mobile is a dynamic body and its own measured limit is about 47.
+    const slope = options.slope ? Number(options.slope) : undefined;
+    let built = 0;
+    for (const [planet, outDir] of targets) {
+      if (!existsSync(join(outDir, 'layout.json'))) {
+        console.log(`${planet}: no layout.json under ${outDir}; run snapshot first`);
+        continue;
+      }
+      if (flags.has('--skip-existing') && existsSync(join(outDir, 'nav.json'))) {
+        console.log(`${planet}: nav.json is there already`);
+        continue;
+      }
+      try {
+        const grid = await buildNavGrid(outDir, { cell, slope, log: (line) => console.log(line) });
+        const out = writeNavGrid(outDir, grid);
+        const stats = out.stats;
+        console.log(`  blocked before the body's ${stats.margin} m margin: slope ${stats.slope}, objects ${stats.objects}, water ${stats.water}; after it ${stats.blocked} (${((100 * stats.blocked) / (out.nx * out.nz)).toFixed(2)}%), plus ${stats.indoor} cells inside ${stats.buildings} portal buildings, which the rooms' own pathing has`);
+        console.log(`  the largest walkable region holds ${out.regions[0] ? out.regions[0].km2 : 0} km^2; ${out.regions.length} are ranked and ${out.otherRegions} more are smaller still`);
+        console.log(`${planet}: ${(out.packedBytes / 1e6).toFixed(2)} MB -> ${join(outDir, 'nav.bin')} in ${stats.seconds} s`);
+        built++;
+      } catch (err) {
+        console.log(`${planet}: ${err.message}`);
+      }
+    }
+    console.log(`${built} worlds baked`);
     break;
   }
 

@@ -37,6 +37,18 @@ export class NavAgent {
   /** Searches asked for and searches that found nothing, for the console. */
   plans = 0;
   failures = 0;
+  /**
+   * The outdoor path's own progress watch, and nothing indoors ever writes it. Where the body was
+   * when it was last seen to be getting somewhere, and the simulated second that was: a body whose
+   * corners have stopped working -- it is leaning on a rock the grid does not carry -- reaches no
+   * corner, so `at` never moves, and with a goal that is standing still `wants` below would
+   * otherwise answer false for ever and the body would push at that corner all evening.
+   * `moveX` is NaN until the first look, which is how "no progress has been watched yet" is told
+   * from "it has not moved".
+   */
+  moveX = Number.NaN;
+  moveZ = Number.NaN;
+  movedAt = 0;
   /** The corner handed back, written rather than made. */
   readonly out = { x: 0, z: 0 };
 
@@ -46,6 +58,8 @@ export class NavAgent {
     this.goalX = Number.NaN;
     this.goalZ = Number.NaN;
     this.failed = false;
+    this.moveX = Number.NaN;
+    this.moveZ = Number.NaN;
   }
 
   /**
@@ -72,8 +86,16 @@ export class NavAgent {
     return since >= tune.every;
   }
 
-  /** What a search found: `count` corners already written into `corners`, or 0 for nothing. */
-  took(building: object | null, cell: number, goalX: number, goalZ: number, now: number, count: number): void {
+  /**
+   * What a search found: `count` corners already written into `corners`, or 0 for nothing.
+   *
+   * `failed` is whether that answer should hold the body back for `retry`, and it is not simply
+   * "no corners": a search that answered "the straight line is the whole of it" found nothing to
+   * write and did not fail at all, and marking it failed would make the body ignore a goal that
+   * walked three hundred metres away for the whole of `retry`. It defaults to the old rule, so
+   * every caller that does not say otherwise behaves exactly as it did.
+   */
+  took(building: object | null, cell: number, goalX: number, goalZ: number, now: number, count: number, failed: boolean = count === 0): void {
     this.building = building;
     this.cell = cell;
     this.goalX = goalX;
@@ -82,7 +104,7 @@ export class NavAgent {
     this.count = Math.max(0, Math.min(count, Math.floor(this.corners.length / 2)));
     this.at = 0;
     this.plans++;
-    this.failed = this.count === 0;
+    this.failed = failed;
     if (this.failed) this.failures++;
   }
 

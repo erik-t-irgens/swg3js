@@ -104,6 +104,16 @@ export const STEP_FACTS = {
   // when it cannot be read, which is a wrong map nothing would ever ask about again: it waits for
   // whoever writes that file (the snapshot writes it, and terrain writes it again).
   maps: { order: 16, lock: 'pack', locks: ['galaxy'], needs: ['snapshot', 'terrain'], seconds: 20, bytes: 0.5 * GB, measured: 'one pack in place: 2.2 s, 310 MB' },
+  // The outdoor walkability grid. It is the one step here that opens no archive at all -- it reads
+  // the pack's own terrain, placements and models -- so it mounts nothing, and almost all of its
+  // time is the terrain generator running over sixty-seven million poles on one core. It is also
+  // the one step whose planet stands **first** on its command line rather than second, because it
+  // takes no <swg-dir>: see SCOPE_ARG below, which is what lets eighteen of these run four at a
+  // time on a pack lock each instead of eighteen of them queueing behind one `pack:*`.
+  // The figure below is the child's own peak working set, watched at 5 Hz like every other row
+  // here; the megabytes it writes are the last number on the line and not the first, because the
+  // test's guard reads the first one as the memory.
+  navgrid: { order: 17, lock: 'pack', needs: ['snapshot', 'terrain'], seconds: 3000, each: 170, bytes: 1.05 * GB, measured: 'tatooine: 142 s, 764 MB, 3.8 MB written' },
 
   // The wardrobes. Each run writes one folder of its own (`join(<out>, 'wardrobe', speciesId)`, and
   // the id is a function of --template and --gender alone), so the four the converter asks for are
@@ -154,17 +164,32 @@ export const STEP_FACTS = {
   sounds: { order: 34, lock: 'sounds', needs: ['ships', 'species', 'parts', 'clips-apply', 'player', 'snapshot'], seconds: 120, bytes: 0.7 * GB, measured: 'the bank: 7.6 s, 425 MB, 865 MB written; with one planet\'s places: 5.4 s, 510 MB' },
 };
 
-// Which commands carry the planet (or the zone) as their second argument and the output folder as
-// their third, and which take the output folder second and write every pack there is. `maps` is the
-// second kind: `maps <swg-dir> <out-dir>` writes a map into every planet pack it finds.
-/** The commands whose second argument is a planet (or `all`). */
-const PER_PLANET = new Set(['snapshot', 'terrain', 'sky', 'water', 'pois', 'flora']);
-/** The same for a space zone. */
-const PER_ZONE = new Set(['space']);
+// Which commands carry the planet (or the zone) they write, and **where** on their own command
+// line it stands. Which argument it is is not a convention and must not be assumed: almost every
+// one of these is `<command> <swg-dir> <planet> <out-dir>`, so the planet is the second argument,
+// but `navgrid` reads no archive at all and therefore takes no `<swg-dir>` -- its planet is the
+// first. Read at a fixed second position it would pick up the output folder instead, which is a
+// lock name no other step shares and so looks like eighteen different planets; read as no scope at
+// all (which is what an absent entry means) every bake holds `pack:*`, the whole fleet, and the
+// eighteen of them run strictly one at a time with every other pack-writing step waiting behind
+// each. `maps` really is the second kind: `maps <swg-dir> <out-dir>` writes into every pack it
+// finds, so it has no entry here and holds them all, which is the truth about it.
+/** The positional argument that names the planet or zone a command writes. */
+const SCOPE_ARG = {
+  snapshot: 2,
+  terrain: 2,
+  sky: 2,
+  water: 2,
+  pois: 2,
+  flora: 2,
+  space: 2,
+  navgrid: 1,
+};
 
 /** The planet or zone a step names, or `all` for a command that writes every one of them. */
 function scopeOf(command, args) {
-  return PER_PLANET.has(command) || PER_ZONE.has(command) ? args?.[2] ?? 'all' : 'all';
+  const at = SCOPE_ARG[command];
+  return at === undefined ? 'all' : args?.[at] ?? 'all';
 }
 
 /** Every planet pack, or every zone, as one lock; a step that holds it holds each of them too. */
