@@ -28,6 +28,8 @@ import {
   LAIR_TUNE,
   bodyAt,
   creatureAt,
+  lairHealth,
+  reinforcements,
   lairSites,
   respawnWait,
   spreadOf,
@@ -42,6 +44,7 @@ import {
 import type { MobileCatalogue } from './mobiles/catalogue.ts';
 import type { MobileEntry } from './mobiles/types.ts';
 import type { Mobile } from './mobiles/mobile.ts';
+import { WildNest, type NestDeps } from './wildNest.ts';
 
 /** A world's own half of the pack: its areas and the people who stand still in it. */
 export interface WildPack {
@@ -73,6 +76,23 @@ export interface WildDeps {
   centre(): { x: number; z: number } | null;
   /** True while the world is holding everything still (an ultra cruise), or has no streaming at all. */
   held(): boolean;
+  /**
+   * What a nest needs to stand in the world, or null where there is no world to stand it in (a node
+   * test). With none, a lair is its creatures and nothing in the middle, which is what it was.
+   */
+  nest?: NestDeps | null;
+  /** The ground under a point, for the nest alone: a creature's height is the manager's business. */
+  groundAt?(x: number, z: number): number;
+}
+
+/** One standing site as the console sees it. */
+export interface WildReport {
+  key: string;
+  lair: string;
+  nest: { up: boolean; hp: number; of: number; dead: boolean } | 'no model' | false;
+  broken: boolean;
+  away: number;
+  bodies: { who: string; fromNest: number; fromEye: number; dead: boolean }[];
 }
 
 /** One site that is standing now. */
@@ -80,6 +100,10 @@ interface Standing {
   site: LairSite;
   def: LairDef;
   bodies: Mobile[];
+  /** The thing in the middle, where the lair has one and its model is converted. */
+  nest: WildNest | null;
+  /** When it last sent more out, on the world's own clock. */
+  helpedAt: number;
   /** When it was broken, on the world's own clock; 0 while it is up. */
   brokeAt: number;
   /** How long it stays broken. */
@@ -179,6 +203,11 @@ export class WildLife {
   }
 
   private clear(): void {
+    // Every nest goes with it. A nest holds a body in the physics world, a group in the scene and
+    // its own copies of the model's materials, and dropping the record without disposing it leaves
+    // all three behind -- which on a world unload is a material still in the portal renderer's set,
+    // walked a dozen times a frame for the rest of the session.
+    for (const rec of this.standing.values()) rec.nest?.dispose();
     this.standing.clear();
     this.last.up = 0;
     this.last.bodies = 0;
@@ -200,6 +229,8 @@ export class WildLife {
     this.since += dt;
     const moved = !Number.isFinite(this.lastAt.x) || this.lastAt.distanceTo(at) > WILD_TUNE.moveMetres;
     if (this.since < WILD_TUNE.everySeconds && !moved) {
+      // A nest being struck answers on the frame it is struck, not on the next slow pass.
+      this.reinforce(now, cat, centre, deps);
       this.reap(now, deps);
       return;
     }
@@ -217,6 +248,7 @@ export class WildLife {
       if (stood >= WILD_TUNE.sitesPerPass) break;
       if (this.stand(site, now, cat, centre, deps)) stood++;
     }
+    this.reinforce(now, cat, centre, deps);
     this.reap(now, deps);
   }
 
@@ -226,7 +258,7 @@ export class WildLife {
     if (!def) return false;
     const n = standingAt(def, site.seed);
     const spread = spreadOf(def);
-    const rec: Standing = { site, def, bodies: [], brokeAt: 0, wait: respawnWait(site.seed), killed: 0 };
+    const rec: Standing = { site, def, bodies: [], nest: null, helpedAt: -Infinity, brokeAt: 0, wait: respawnWait(site.seed), killed: 0 };
     for (let i = 0; i < n; i++) {
       const who = creatureAt(def, site.seed, i);
       if (!who) continue;
@@ -259,6 +291,19 @@ export class WildLife {
       rec.bodies.push(m);
     }
     if (!rec.bodies.length) return false;
+    // The nest, where the lair has one and its model is converted. It is built behind the creatures
+    // rather than before them: a site with its animals up and its mound still arriving is a site,
+    // and one that waited for the mound would stand nothing at all on a world with no nests.
+    const file = def.nest ? this.manifest?.nests?.[def.nest]?.file : null;
+    if (file && deps.nest) {
+      const middle = intoWorld(site.x, site.z, centre);
+      const nest = new WildNest(def.nest ?? 'nest', lairHealth(def, this.manifest?.creatures ?? {}));
+      rec.nest = nest;
+      void nest.build(file, { x: middle.x, y: deps.groundAt?.(middle.x, middle.z) ?? 0, z: middle.z }, deps.nest).then((made) => {
+        // Put away while it was loading: the record is gone and nothing will ever take it down.
+        if (!made || this.standing.get(site.key) !== rec) nest.dispose();
+      });
+    }
     this.standing.set(site.key, rec);
     this.last.stood += rec.bodies.length;
     this.count();
@@ -269,6 +314,8 @@ export class WildLife {
   private put(key: string, deps: WildDeps): void {
     const rec = this.standing.get(key);
     if (!rec) return;
+    rec.nest?.dispose();
+    rec.nest = null;
     for (const m of rec.bodies) deps.remove(m);
     this.last.dropped += rec.bodies.length;
     this.standing.delete(key);
@@ -281,6 +328,49 @@ export class WildLife {
    * A body the manager has taken down (killed, or swept) is dropped from the record here rather
    * than being chased, so nothing holds a reference to a mobile that has gone.
    */
+  /**
+   * A struck nest sends more of its own out, and a broken one never does again.
+   *
+   * This is the owner's own account of a lair and the whole reason it is worth walking up to one:
+   * hitting it makes it worse before it makes it better, and the only way to stop that is to break
+   * it. The cooldown and how many come at a time are ours; the ceiling is the server's, which is the
+   * one number in its data that says how much of a creature belongs at one nest.
+   */
+  private reinforce(now: number, cat: MobileCatalogue, centre: { x: number; z: number }, deps: WildDeps): void {
+    for (const rec of this.standing.values()) {
+      const nest = rec.nest;
+      if (!nest || !nest.wantsHelp) continue;
+      nest.wantsHelp = false;
+      // Broken is broken: nothing more comes out of it, ever, which is what killing it is for.
+      if (nest.dead) continue;
+      const n = reinforcements(rec.def, rec.bodies.length, now - rec.helpedAt);
+      if (n <= 0) continue;
+      rec.helpedAt = now;
+      const spread = spreadOf(rec.def);
+      for (let k = 0; k < n; k++) {
+        // Drawn from the nest's own seed and the count so far, so two browsers watching one lair
+        // being attacked bring the same creatures out in the same places.
+        const i = rec.bodies.length + k;
+        const who = creatureAt(rec.def, rec.site.seed, i);
+        const c = who ? this.manifest?.creatures[who] : null;
+        const entry = c ? cat.byId(c.id) : null;
+        if (!entry) continue;
+        const spot = bodyAt(rec.site, i, spread);
+        const world = intoWorld(spot.x, spot.z, centre);
+        const middle = intoWorld(rec.site.x, rec.site.z, centre);
+        const m = deps.spawn(entry, { x: world.x, z: world.z, heading: -spot.heading }, rec.site.seed ^ i);
+        if (typeof m === 'string') {
+          this.last.refused = m;
+          continue;
+        }
+        m.homeX = middle.x;
+        m.homeZ = middle.z;
+        rec.bodies.push(m);
+      }
+      this.count();
+    }
+  }
+
   private reap(now: number, deps: WildDeps): void {
     void deps;
     for (const [key, rec] of this.standing) {
@@ -336,6 +426,17 @@ export class WildLife {
     return out.sort((a, b) => a.away - b.away).slice(0, n);
   }
 
+  /**
+   * The nest whose collider this is, for `World.hittableAt`: how a bolt or a blade reaches one.
+   *
+   * Walked rather than kept in a map because there are never more than a handful standing and the
+   * map would be one more thing to keep in step with the disposals.
+   */
+  nestAt(handle: number): WildNest | undefined {
+    for (const rec of this.standing.values()) if (rec.nest?.handle === handle) return rec.nest;
+    return undefined;
+  }
+
   /** What one site would stand, without standing it: for the console, and for a check. */
   holds(key: string): { lair: string; creatures: string[] } | null {
     const site = this.sites.find((s) => s.key === key);
@@ -361,15 +462,16 @@ export class WildLife {
   report(
     at: THREE.Vector3,
     centre: { x: number; z: number } | null,
-  ): { key: string; lair: string; nest: boolean; broken: boolean; away: number; bodies: { who: string; fromNest: number; fromEye: number; dead: boolean }[] }[] {
-    const out: { key: string; lair: string; nest: boolean; broken: boolean; away: number; bodies: { who: string; fromNest: number; fromEye: number; dead: boolean }[] }[] = [];
+  ): WildReport[] {
+    const out: WildReport[] = [];
     for (const rec of this.standing.values()) {
       const w = centre ? intoWorld(rec.site.x, rec.site.z, centre) : { x: rec.site.x, z: rec.site.z };
       out.push({
         key: rec.site.key,
         lair: rec.site.lair,
         // A herd has no nest to stand round, which is worth seeing: it explains an empty middle.
-        nest: !!rec.def.nest,
+        // Where there is one, its health says whether it is up, being fought, or broken.
+        nest: rec.nest ? { up: rec.nest.up, hp: Math.round(rec.nest.hp), of: rec.nest.maxHp, dead: rec.nest.dead } : rec.def.nest ? 'no model' : false,
         broken: rec.brokeAt > 0,
         away: Math.round(Math.hypot(w.x - at.x, w.z - at.z)),
         bodies: rec.bodies.map((m) => ({

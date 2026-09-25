@@ -4192,6 +4192,18 @@ export class World {
         spawn: (entry, at, seed) => this.mobiles?.spawn(entry, at, { origin: 'spawned', seed, worldId: `wild:${seed}` }) ?? 'no world',
         remove: (m) => this.mobiles?.remove(m),
         centre: () => this.layoutCenter,
+        // A nest's own height is this world's to answer, unlike a creature's: the manager works one
+        // out for a body it is standing, and a nest is not one of those.
+        groundAt: (x, z) => this.terrain.heightAt(x, z),
+        nest: {
+          scene: this.scene,
+          physics: this.physics,
+          outdoorGroups: () => groups(Group.exterior, Group.all),
+          forget: (mats) => this.forgetMaterials(mats),
+          prepare: (root) => this.prepareActor(root),
+          markActor,
+          baseUrl: import.meta.env.BASE_URL,
+        },
         // It holds when the streamer holds (an ultra cruise pins both), and never runs at all for
         // the creation and selection screens, which are a cut-out world with no streaming.
         held: () => this.streamHold || this.sceneOnly || !this.simulating,
@@ -4629,7 +4641,15 @@ export class World {
    * not in `targets()`: a bolt stops on a crate and shoves it, and nothing ever picks a fight with one.
    */
   hittableAt(handle: number): Hittable | undefined {
-    const found = this.mobiles?.byCollider.get(handle) ?? this.creatures.byCollider.get(handle) ?? this.npcs.byCollider.get(handle) ?? this.turrets.byCollider.get(handle) ?? this.peers().byCollider.get(handle) ?? loosePropAt(handle);
+    const found =
+      this.mobiles?.byCollider.get(handle) ??
+      this.creatures.byCollider.get(handle) ??
+      this.npcs.byCollider.get(handle) ??
+      this.turrets.byCollider.get(handle) ??
+      this.peers().byCollider.get(handle) ??
+      loosePropAt(handle) ??
+      // A lair's own nest, which is how a bolt or a blade reaches the thing in the middle.
+      wildLife.nestAt(handle);
     if (found) return found;
     // A plain loop rather than `find`, because this is asked once per collider a swept capsule
     // touches and a blade is now cast up to four times a frame: the predicate handed to `find` is

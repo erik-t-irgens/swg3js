@@ -9,7 +9,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as THREE from 'three';
 import { WildLife, WILD_TUNE, intoWorld, type WildDeps, type WildManifest, type WildPack } from '../../../src/world/wildLife.ts';
-import { LAIR_TUNE } from '../../../src/world/mobiles/lairs.ts';
+import { LAIR_TUNE, lairHealth, reinforcements, type LairDef } from '../../../src/world/mobiles/lairs.ts';
 
 let passed = 0;
 function ok(cond: boolean, what: string): void {
@@ -244,8 +244,18 @@ const bigArea = { name: 'a', shape: 'circle' as const, x: 0, z: 0, r: 3000, grou
   // built on that spot. Handing it the raw terrain height puts a body under the floor of a camp's
   // own hut, where the physics ejects it out of the world and the manager takes it away as spent --
   // which from outside is a lair that stood and then vanished.
-  ok(!/y: deps\.groundAt/.test(world), "no height is handed to the manager: its own answer knows about what is standing on that ground and the terrain's does not");
-  ok(/deps\.spawn\(entry, \{ x: world\.x, z: world\.z, heading:/.test(world), 'so a body is placed by its two ground numbers and its facing alone');
+  // No `spawn` call anywhere may carry a height. The nest's own ground lookup is a different thing
+  // and is allowed: a nest is placed by this code, while a creature is placed by the manager.
+  const spawns = world.match(/deps\.spawn\(entry, \{[^}]*\}/g) ?? [];
+  ok(spawns.length >= 2, `both places that stand a creature were found (${spawns.length})`);
+  ok(
+    spawns.every((s) => !/\by:/.test(s)),
+    "no height is handed to the manager at either of them: its own answer knows what is standing on that ground and the terrain's does not",
+  );
+  ok(
+    spawns.every((s) => /x: world\.x, z: world\.z, heading:/.test(s)),
+    'so a body is placed by its two ground numbers and its facing alone',
+  );
 
   // And the kill test must not be `dead` alone, or a disposal reads as a fight.
   ok(/if \(m\.dead && !m\.removed\) rec\.killed\+\+/.test(world), 'a kill is only counted while the body is still there, since disposing one marks it dead too');
@@ -262,6 +272,29 @@ const bigArea = { name: 'a', shape: 'circle' as const, x: 0, z: 0, r: 3000, grou
   ok(/origin: 'spawned'/.test(line), "the wild world stands its creatures as spawned, so the manager leaves them where their lair is");
   ok(/worldId: `wild:/.test(line), 'and names them for the world, which is what keeps the hand-spawn cap and the NPC tab off them');
   ok(!/origin: 'ambient'/.test(line), "and never as ambient, which would have the manager teleport each one to a fresh spot near the player");
+}
+
+// ------------------------------------------------------------------ the nest, struck and broken
+{
+  // A node test has no world to stand a nest in, so `deps.nest` is absent and a site is its
+  // creatures and nothing in the middle -- which is exactly what the world does where a lair's model
+  // is not converted. What is checked here is the rule, which is pure and lives in `lairs.ts`.
+  const nest: LairDef = { kind: 'creature_lair', mobiles: [{ who: 'thing', n: 1 }], boss: [], cap: 8, nest: 'n.iff', building: '', people: false };
+  const creatures = { thing: manifest.creatures.thing };
+
+  ok(lairHealth(nest, creatures) >= LAIR_TUNE.healthRange[0], 'a nest has a great deal of health, which is what makes breaking one a decision');
+  ok(reinforcements(nest, 4, 0) === 0, 'struck twice in a moment it sends nobody the second time: it has a clock');
+  ok(reinforcements(nest, 4, 99) > 0, 'once the clock is out it sends more');
+  ok(reinforcements(nest, 8, 99) === 0, "and never past the ceiling the server's own data puts on that nest");
+
+  // The wiring, read as text: three lines two files apart, none of which would fail to compile.
+  const src = readFileSync(new URL('../../../src/world/wildLife.ts', import.meta.url), 'utf8');
+  ok(/if \(nest\.dead\) continue;/.test(src), 'a broken nest never sends anything out again, which is what killing it is for');
+  ok(/rec\.nest\?\.dispose\(\)/.test(src), 'a site put away takes its nest down with it');
+  ok(/for \(const rec of this\.standing\.values\(\)\) rec\.nest\?\.dispose\(\)/.test(src), 'and clearing the whole world disposes every one of them, materials and body and all');
+  const nestSrc = readFileSync(new URL('../../../src/world/wildNest.ts', import.meta.url), 'utf8');
+  ok(/this\.deps\?\.forget\(this\.owned\)/.test(nestSrc), "a nest's materials are given back before they are thrown away, or the portal renderer's set grows with every one that ever stood");
+  ok(/model\.clone\(true\)/.test(nestSrc), 'and its model is a clone, so nothing here ever disposes the geometry the cache holds');
 }
 
 // ------------------------------------------------------------------ a real world, where converted

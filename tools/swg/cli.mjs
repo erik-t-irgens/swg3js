@@ -5820,15 +5820,17 @@ switch (cmd) {
       const cache = new Map();
       const nestDir = join(dir, 'nests');
       mkdirSync(nestDir, { recursive: true });
-      // Only what a region can reach, and only the ones that are really a nest: the rest of the
-      // `buildings*` column names a camp or a base, which is a portal building and another wave's.
+      // Everything a region can reach, of both kinds. A lair's `buildings*` column names either a
+      // tangible nest -- a mound, an antpile, a bramble, the thing an animal lives in -- or a whole
+      // POI building, which is a camp or a base that people live in. Taking only the first leaves
+      // every camp in the world as four thieves standing round nothing, which is 270 of the 851.
       const wanted = new Set();
       for (const [, r] of regions) {
         for (const a of r.spawn) {
           for (const g of a.groups) {
             for (const s of groups.get(g) ?? []) {
               const l = lairs.get(s.lair);
-              if (l?.nest && /\/tangible\//.test(l.nest)) wanted.add(l.nest);
+              if (l?.nest) wanted.add(l.nest);
             }
           }
         }
