@@ -8,6 +8,8 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   HOUSE_TUNE,
+  blockedBy,
+  blockerName,
   clearRadius,
   groundVerdict,
   patchOfBounds,
@@ -16,7 +18,9 @@ import {
   patchSize,
   spotAhead,
   type Patch,
+  type Standing,
 } from '../../../src/world/housePlace.ts';
+import { modelReach } from '../../../src/world/floraClear.ts';
 
 let passed = 0;
 function ok(cond: boolean, what: string): void {
@@ -209,6 +213,41 @@ const flat = (probes: readonly { x: number; z: number }[], h = 10): number[] => 
   ok(clearRadius({ hx: 30, hz: 30, cx: 0, cz: 0 }) > r, 'a bigger building keeps more of it off');
 }
 
+// ---------------------------------------------------------------- what is already standing there
+
+{
+  const p: Patch = { hx: 10, hz: 10, cx: 0, cz: 0 };
+  const reach = clearRadius(p);
+  ok(blockedBy(p, { x: 0, z: 0 }, 0, []) === null, 'an empty patch of ground is not blocked by anything');
+  ok(!!blockedBy(p, { x: 0, z: 0 }, 0, [{ x: reach - 1, z: 0, radius: 1 }]), 'and one with something inside its circle is');
+  ok(blockedBy(p, { x: 0, z: 0 }, 0, [{ x: reach + 2, z: 0, radius: 1 }]) === null, 'and one with something just clear of it is not');
+  ok(blockedBy(p, { x: 0, z: 0 }, 0, [{ x: 1, z: 0, radius: 0 }]) === null, 'a thing with no size of its own blocks nothing, whatever it is standing on');
+}
+
+{
+  // The nearest is what is answered, so the refusal names the thing a player can see themselves
+  // standing next to rather than whichever happened to come first out of the region lists.
+  const p: Patch = { hx: 5, hz: 5, cx: 0, cz: 0 };
+  const hit = blockedBy(p, { x: 0, z: 0 }, 0, [
+    { x: 0, z: 9, radius: 3, template: 'object/x/shared_far_thing.iff' },
+    { x: 0, z: 2, radius: 3, template: 'object/x/shared_near_thing.iff' },
+  ]);
+  ok(hit?.template?.includes('near_thing') === true, 'the nearest thing in the way is the one named');
+}
+
+{
+  // The patch's offset turns with the building, so what is in the way depends on which way you face.
+  const p: Patch = { hx: 4, hz: 4, cx: 0, cz: 12 };
+  const thing = [{ x: 0, z: 12, radius: 1 }];
+  ok(!!blockedBy(p, { x: 0, z: 0 }, 0, thing), 'facing one way the building reaches the thing');
+  ok(blockedBy(p, { x: 0, z: 0 }, Math.PI, thing) === null, 'and turned about it does not');
+}
+
+{
+  ok(blockerName('object/building/general/shared_cantina_tatooine.iff') === 'cantina tatooine', 'a refusal says what is in the way in words, out of the template');
+  ok(blockerName(undefined) === 'something' && blockerName('') === 'something', 'and says something rather than nothing when it cannot');
+}
+
 // ---------------------------------------------------------------- the real buildings
 
 {
@@ -311,6 +350,56 @@ const flat = (probes: readonly { x: number; z: number }[], h = 10): number[] => 
       allBind.over > 0 && allBind.under > 0 && allBind.steep > 0,
       `all three tests refuse real ground somewhere (${allBind.over} over the doorstep, ${allBind.under} falling away, ${allBind.steep} too steep)`,
     );
+
+    // And what the world already has standing on it. The layout is the very file the streamer reads
+    // and the sizes are the models' own, so this is the same answer the game gives -- including the
+    // mirror, which is the streamer's and not the pack's.
+    for (const planet of worlds) {
+      const dir = join('assets-private', planet);
+      if (!has(join(dir, 'layout.json')) || !has(join(dir, 'manifest.json'))) continue;
+      const layout = JSON.parse(readFileSync(join(dir, 'layout.json'), 'utf8')) as {
+        center: { x: number; z: number };
+        objects: { model: string; template: string; x: number; z: number; radius: number; contained?: boolean }[];
+      };
+      const manifest = JSON.parse(readFileSync(join(dir, 'manifest.json'), 'utf8')) as { categories: Record<string, { id: string; bounds?: { min: number[]; max: number[] }; particle?: boolean }[]> };
+      const sizeOf = new Map<string, number>();
+      for (const d of Object.values(manifest.categories).flat()) sizeOf.set(d.id, d.particle ? Number.NaN : modelReach(d.bounds));
+      const standing: Standing[] = [];
+      for (const o of layout.objects) {
+        if (o.contained) continue;
+        // The model's own box and nothing else. The snapshot's radius is a load distance: taken as
+        // a size it refused all of one world, and the commonest thing in the way on another was a
+        // cloud of insects. See `LayoutStreamer.objectsNear`, which this is the mirror of.
+        const radius = sizeOf.get(o.model) ?? Number.NaN;
+        if (!(radius > 0)) continue;
+        // The streamer's own mirror, which is where snapshot space and the world meet.
+        standing.push({ x: -(o.x - layout.center.x), z: o.z - layout.center.z, radius, template: o.template });
+      }
+      let tried = 0;
+      let blocked = 0;
+      let worst = { name: '', n: 0 };
+      const by = new Map<string, number>();
+      for (let z = -reach; z <= reach; z += step) {
+        for (let x = -reach; x <= reach; x += step) {
+          tried++;
+          const hit = blockedBy(patch, { x, z }, 0, standing);
+          if (!hit) continue;
+          blocked++;
+          const name = blockerName(hit.template);
+          const n = (by.get(name) ?? 0) + 1;
+          by.set(name, n);
+          if (n > worst.n) worst = { name, n };
+        }
+      }
+      const share = (100 * blocked) / Math.max(1, tried);
+      // Both ends are wide on purpose: this is to catch a rule that refuses a whole planet (which
+      // is exactly what reading the snapshot's own radius as a size would do -- see floraClear.ts)
+      // or one that never refuses anything at all.
+      assert.ok(share < 60, `${planet}: what is already built does not refuse most of the world (${share.toFixed(1)}%)`);
+      passed++;
+      console.log(`ok   ${planet}: ${share.toFixed(1)}% of ${tried} spots have something of the world's own already standing there`);
+      note(`     over ${standing.length} placed objects; the commonest thing in the way is "${worst.name}" (${worst.n} spots)`);
+    }
   }
 }
 

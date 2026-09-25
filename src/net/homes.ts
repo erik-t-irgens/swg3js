@@ -78,6 +78,18 @@ export class Homes {
     this.busy.clear();
   }
 
+  /**
+   * A world has finished loading and can be built on.
+   *
+   * This is not decoration. The browser says hello with its new planet **before** the pack has
+   * loaded, so the server's list of what is built there arrives at a browser whose world has no
+   * streamer yet and every house in it is refused for having nowhere to go. So a row the world
+   * would not take is kept rather than thrown away, and this is what tries them again.
+   */
+  ready(): void {
+    for (const row of this.rows.values()) if (!this.standing.has(row.id)) void this.up(row);
+  }
+
   /** Everything the server has said about this world, handed over whole. */
   word(msg: Record<string, unknown>): void {
     if (msg.t === 'homes') {
@@ -143,7 +155,8 @@ export class Homes {
         this.standing.add(row.id);
         this.stood++;
       } else {
-        this.rows.delete(row.id);
+        // Kept, not thrown away: the world may simply not have loaded yet, and this row is the
+        // server's truth about what is built there. `ready` tries them all again.
         this.lastWhy = out.why ?? '';
       }
     } finally {

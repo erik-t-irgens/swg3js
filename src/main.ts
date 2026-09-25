@@ -1456,8 +1456,7 @@ class App {
         // terrain -- and what goes to the server is the answer. The house itself goes up when the
         // server says so, in `homes.word`, exactly as everybody else's does.
         if (shared) {
-          const tried = await this.world.placeBuilding(model, { from: { x: p.x, z: p.z }, yaw, force: opts.force, key: 'house:trying' });
-          this.world.unplaceBuilding('house:trying');
+          const tried = await this.world.placeBuilding(model, { from: { x: p.x, z: p.z }, yaw, force: opts.force, tryOnly: true });
           if (!tried.ok) return { ...tried, building: null, tune: { ...HOUSE_TUNE } };
           homes.ask(model, { x: tried.x, z: tried.z }, yaw, tried.clear, tried.y);
           if (opts.go) this.player.reset(new THREE.Vector3(tried.x, tried.y + 0.3, tried.z));
@@ -7326,6 +7325,10 @@ class App {
     this.net.setHello(this.helloNow());
     const arrivalSpawn = this.spawn.clone();
     void this.world.loadPack(stand).then((clearSpawn) => {
+      // The hello with this world went out before the pack did: anything the server has already
+      // said is built here was refused for having nowhere to go, and this is where it is tried
+      // again. A world with nothing built on it does nothing at all.
+      homes.ready();
       const p = this.player;
       if (p.mounted || p.aboard || p.noclip) return;
       // Still standing where we arrived: move to open ground now that the real city is in.
@@ -7698,6 +7701,9 @@ class App {
     this.remotes.setWorld(planet.id, this.zone);
     this.net.setHello(this.helloNow());
     await this.world.loadPack(pose.pos);
+    // As on the walking arrival: the hello went out before the pack, so what the server has already
+    // said is built here is tried again now that there is a world to build it in.
+    homes.ready();
     if (this.world.planet !== planet || !this.world.vehicles.includes(hull)) return null;
     this.savePlace(true);
     return hull;

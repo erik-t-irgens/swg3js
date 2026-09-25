@@ -59,6 +59,7 @@ function world() {
       if (typeof f === 'function') f();
     },
     refuseNext: () => (refuse = true),
+    allowNext: () => (refuse = false),
   };
 }
 
@@ -113,6 +114,25 @@ const settle = () => new Promise((r) => setTimeout(r, 0));
   w.h.word({ t: 'homeUp', home: row('h1') });
   await settle();
   ok(w.placed.length === 2, 'and the next word about it tries again rather than being swallowed');
+}
+
+{
+  // The ordering this whole retry exists for: the browser says hello with its new planet **before**
+  // the pack has loaded, so the server's list arrives at a world with no streamer in it and every
+  // house is refused for having nowhere to go. Thrown away there, they would never come back.
+  const w = world();
+  w.refuseNext();
+  w.h.word({ t: 'homes', world: 'tatooine', rows: [row('h1'), row('h2', { x: 500 })] });
+  await settle();
+  ok(w.h.report().standing === 0, 'a list arriving before the world is loaded stands nothing');
+  ok(w.h.report().rows.length === 2, 'but is kept, because it is what the server says is built there');
+  w.allowNext();
+  w.h.ready();
+  await settle();
+  ok(w.h.report().standing === 2, 'and the moment the world is ready they all go up');
+  w.h.ready();
+  await settle();
+  ok(w.placed.length === 4, 'and asking again once they are standing builds nothing more');
 }
 
 // ---------------------------------------------------------------- taking them down

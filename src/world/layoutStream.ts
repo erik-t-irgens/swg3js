@@ -12,7 +12,7 @@ import { ACTOR_LAYER, INTERIOR_LAYER, crossing } from './portalRender';
 import { mirroredTransform, type EffectHandle, type ParticleEffects } from './particles';
 import { castsShadow, drawsAfterWater } from './surfaces';
 import { marks } from './marks.ts';
-import { floraClearRadius } from './floraClear.ts';
+import { floraClearRadius, modelReach } from './floraClear.ts';
 // Which room a name picks is a rule of its own, with a node test over it; this file calls it rather
 // than keeping a second copy.
 import { namedCellIndex } from './cloning.ts';
@@ -404,6 +404,49 @@ export class LayoutStreamer {
     this.dropFromTier(placed);
     this.lastColliderX = NaN;
     return true;
+  }
+
+  /**
+   * What the world already has standing within `reach` of a point: each one's place and its own
+   * size on the ground.
+   *
+   * The size is the model's own box and **nothing else**. The snapshot's `radius` is not a size:
+   * it is a load distance, kilometres on some worlds, and is the same trap `floraClear.ts` was
+   * written for. Measured over the real packs, taking it as a fallback for a thing with no box
+   * refused 100% of one world, and the commonest thing "in the way" on another was a cloud of
+   * insects -- so an object with no box of its own is in the way of nothing: it is drawn as
+   * nothing, and a particle effect is not a thing anybody can walk into whatever its box says.
+   *
+   * It walks the regions the circle touches rather than the whole world: a planet has tens of
+   * thousands of these and this is asked on a keypress, not on a frame. Objects inside a building
+   * are left out, since the building around them is standing in the same place and says so itself.
+   */
+  objectsNear(x: number, z: number, reach: number): { x: number; z: number; radius: number; template: string; model: string }[] {
+    const out: { x: number; z: number; radius: number; template: string; model: string }[] = [];
+    const span = reach + Math.min(this.largestRadius, COLLIDER_RADIUS_CAP);
+    const rx0 = Math.floor((x - span) / REGION);
+    const rx1 = Math.floor((x + span) / REGION);
+    const rz0 = Math.floor((z - span) / REGION);
+    const rz1 = Math.floor((z + span) / REGION);
+    for (let rz = rz0; rz <= rz1; rz++) {
+      for (let rx = rx0; rx <= rx1; rx++) {
+        const region = this.regions.get(`${rx},${rz}`);
+        if (!region) continue;
+        for (const list of region.objects) {
+          for (const o of list) {
+            if (o.contained) continue;
+            const def = this.defOf(o.model);
+            if (def?.particle) continue;
+            const radius = modelReach(def?.bounds);
+            if (!(radius > 0)) continue;
+            const want = radius + reach;
+            if ((o.x - x) ** 2 + (o.z - z) ** 2 > want * want) continue;
+            out.push({ x: o.x, z: o.z, radius, template: o.template, model: o.model });
+          }
+        }
+      }
+    }
+    return out;
   }
 
   private addExclusion(e: Exclusion): void {

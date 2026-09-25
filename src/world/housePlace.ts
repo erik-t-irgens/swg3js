@@ -198,3 +198,65 @@ export function spotAhead(from: { x: number; z: number }, yaw: number, p: Patch,
 export function clearRadius(p: Patch, tune = HOUSE_TUNE): number {
   return Math.hypot(p.hx, p.hz) + tune.margin;
 }
+
+/** Something the world already has standing: where it is and how big it is on the ground. */
+export interface Standing {
+  x: number;
+  z: number;
+  radius: number;
+  /** What it is, so a refusal can say what is in the way rather than only that something is. */
+  template?: string;
+}
+
+/**
+ * Whatever the world already has standing in the way of a patch, or null.
+ *
+ * It is the two discs and nothing cleverer: the patch's own circle against each object's. A patch
+ * is a rectangle and an object is a box, so two discs refuse a little more ground than a true test
+ * would -- which is the right way to be wrong here, because the cost of refusing a spot is a step
+ * to one side and the cost of taking one is a house through a cantina wall.
+ *
+ * The **nearest** is answered rather than the first found, so the refusal names the thing a player
+ * can actually see themselves standing next to.
+ */
+export function blockedBy(p: Patch, at: { x: number; z: number }, yaw: number, standing: readonly Standing[], tune = HOUSE_TUNE): Standing | null {
+  const reach = clearRadius(p, tune);
+  const cos = Math.cos(yaw);
+  const sin = Math.sin(yaw);
+  // The patch's own middle, which is not the spot the building was asked for.
+  const mx = at.x + (p.cx * cos - p.cz * sin);
+  const mz = at.z + (p.cx * sin + p.cz * cos);
+  let best: Standing | null = null;
+  let bestGap = Infinity;
+  for (const s of standing) {
+    if (!(s.radius > 0)) continue;
+    const d = Math.hypot(s.x - mx, s.z - mz);
+    const gap = d - (s.radius + reach);
+    if (gap >= 0) continue;
+    if (gap < bestGap) {
+      bestGap = gap;
+      best = s;
+    }
+  }
+  return best;
+}
+
+/**
+ * What to call a thing that is in the way, out of the template the snapshot placed it under.
+ *
+ * Templates are paths (`object/building/general/shared_cantina.iff`), so this is the last part of
+ * one with its wrapping taken off and its underscores turned back into spaces. It is for a line of
+ * words a player reads and for nothing else; nothing is ever keyed on it.
+ */
+export function blockerName(template: string | undefined): string {
+  const leaf = String(template ?? '')
+    .split('/')
+    .pop();
+  if (!leaf) return 'something';
+  const bare = leaf
+    .replace(/\.iff$/i, '')
+    .replace(/^shared_/, '')
+    .replace(/_/g, ' ')
+    .trim();
+  return bare || 'something';
+}

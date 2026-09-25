@@ -34,7 +34,7 @@ import { Group, groups, RAPIER as R } from '../core/physics';
 import { CHUNK_RES, CHUNK_SIZE, Terrain } from './terrain';
 import { SwgTerrain, type BuildingLayerSource, type SwgWaterTable } from './swgTerrain';
 import { LayoutStreamer, type Building, type CellState, type PlacedObject } from './layoutStream';
-import { clearRadius, groundVerdict, patchOfBounds, patchProbes, spotAhead } from './housePlace.ts';
+import { blockedBy, blockerName, clearRadius, groundVerdict, patchOfBounds, patchProbes, spotAhead } from './housePlace.ts';
 import { outdoorNav } from './nav/outdoorNav.ts';
 import { wildLife, type WildDeps } from './wildLife.ts';
 import { standingPeople, type PeopleDeps, type StandingRow } from './standingPeople.ts';
@@ -2996,7 +2996,7 @@ export class World {
    */
   async placeBuilding(
     model: string,
-    opts: { at?: { x: number; z: number }; from?: { x: number; z: number }; yaw?: number; force?: boolean; key?: string; y?: number } = {},
+    opts: { at?: { x: number; z: number }; from?: { x: number; z: number }; yaw?: number; force?: boolean; key?: string; y?: number; tryOnly?: boolean } = {},
   ): Promise<{ ok: boolean; why: string | null; key: string; x: number; z: number; y: number; yaw: number; rise: number; sink: number; slope: number; clear: number; building: Building | null }> {
     const stream = this.layoutStream;
     const key = opts.key ?? `runtime/${model}`;
@@ -3026,7 +3026,27 @@ export class World {
     // A height the caller already has is the one to stand it at, whatever the ground says now; the
     // ground is measured either way, so the numbers come back and a refusal is still a refusal.
     const y = opts.y ?? verdict.y;
-    if (!verdict.ok && !opts.force && opts.y === undefined) return { ...verdict, key, x: at.x, z: at.z, yaw, clear, why: verdict.why, building: null };
+    const given = opts.y !== undefined;
+    if (!verdict.ok && !opts.force && !given) return { ...verdict, key, x: at.x, z: at.z, yaw, clear, why: verdict.why, building: null };
+    // What the world already has standing there. A house put down in a town's street would look
+    // exactly like a bug, and the world's own objects are the only thing that knows where a town
+    // is: nothing in the archives marks a no-build zone, and the real server's were a table it
+    // kept rather than anything the client shipped.
+    if (!given && !opts.force) {
+      const blocker = blockedBy(patch, at, yaw, stream.objectsNear(at.x, at.z, clear));
+      if (blocker) {
+        const why = `${blockerName(blocker.template)} is already standing there`;
+        return { ...verdict, ok: false, key, x: at.x, z: at.z, yaw, clear, why, building: null };
+      }
+      // And not in the water. The sea is drawn over the ground rather than instead of it, so the
+      // ground test passes perfectly well on a lake bed.
+      const wet = probes.find((p) => this.terrain.waterHeightAt(p.x, p.z) > this.terrain.heightAt(p.x, p.z));
+      if (wet) return { ...verdict, ok: false, key, x: at.x, z: at.z, yaw, clear, why: 'that is under water', building: null };
+    }
+    // Every test made and nothing built: what the relay path asks, since there the house goes up
+    // when the server answers and a building put into the world here and taken out again a moment
+    // later is a model loaded, its programs built and a flicker, all for an answer already known.
+    if (opts.tryOnly) return { ok: true, why: verdict.ok ? null : `the ground is not level, but: ${verdict.why}`, key, x: at.x, z: at.z, y, yaw, rise: verdict.rise, sink: verdict.sink, slope: verdict.slope, clear, building: null };
     const q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
     const building = await stream.place({
       model,
