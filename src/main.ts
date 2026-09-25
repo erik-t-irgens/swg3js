@@ -100,6 +100,8 @@ import { ShuttleMenu } from './ui/shuttleMenu.ts';
 import { loadGalaxyFile, planetOfRouteId } from './data/galaxy';
 import { homes } from './net/homes.ts';
 import { creditText, purse } from './net/purse.ts';
+import { BAND_TUNE, band, loadMusic, musicPack, partsFor, songsFor, stemFor } from './audio/band.ts';
+import { BandBar } from './ui/bandBar.ts';
 import { TRAVEL_TUNE, canBoard, shuttleAt, shuttleWords, thingAt, travelThingsOf, type Ticket, type TravelRow, type TravelThing } from './world/travelTerminal.ts';
 import { TerminalUi, type TerminalPort } from './ui/terminalUi.ts';
 import { allDeeds, deedById, deedLine, footprintOf, loadDeeds, wrongWorld, type DeedRow } from './world/deeds.ts';
@@ -516,6 +518,9 @@ class App {
   private readonly liftMenu: LiftMenu;
   private readonly housingUi: HousingUi;
   private readonly placingBar: PlacingBar;
+  private readonly bandBar: BandBar;
+  /** Which song the instrument in hand is set to, and whether the bar has ever been shown. */
+  private bandSong = 1;
   private readonly shuttleMenu: ShuttleMenu;
   private readonly terminalUi: TerminalUi;
   /** The shuttle fares, fetched once with the galaxy file; null until it lands, and on a pack that has none. */
@@ -1270,6 +1275,30 @@ class App {
     this.placingBar.onTurn = (n) => this.turnPlacing(n);
     this.placingBar.onPlace = () => void this.dropPlacing();
     this.placingBar.onCancel = () => this.stopPlacing();
+    // The band: an instrument in hand plays its own track of a song, and everybody in earshot is
+    // heard on theirs. There is no world music in this game and none is wanted.
+    this.bandBar = new BandBar(this.ui);
+    this.bandBar.onPlay = () => this.toggleBand();
+    this.bandBar.onFlourish = (n) => {
+      if (!band.flourish(n, this.player.worldPos)) this.messages.system('this song has no such flourish for that instrument');
+    };
+    this.bandBar.onSong = (step) => {
+      const songs = songsFor(stemFor(this.instrumentHeld() ?? ''));
+      if (!songs.length) return;
+      const at = Math.max(0, songs.indexOf(this.bandSong));
+      this.bandSong = songs[(at + step + songs.length) % songs.length];
+      // Changing song while playing changes what is played, which is what a band leader does.
+      if (band.mine) this.toggleBand(), this.toggleBand();
+    };
+    band.attach({
+      loop: (id, at, gain) => this.audio.loop(id, { x: at.x, y: at.y, z: at.z, gain, space: this.listenerPose.space }),
+      once: (id, at, gain) => this.audio.play(id, { x: at.x, y: at.y, z: at.z, gain, space: this.listenerPose.space }),
+      stop: (key, fade) => this.audio.stop(key, fade),
+      move: (key, at) => this.audio.move(key, at.x, at.y, at.z),
+      provide: (id, template) => this.audio.bank.offer(id, template),
+      seconds: () => sharedClock.walkSeconds(),
+    });
+    void loadMusic(import.meta.env.BASE_URL);
     void loadDeeds(import.meta.env.BASE_URL);
     this.npcUi = new NpcUi(this.ui);
     this.appearanceUi = new AppearanceUi(this.ui, () => this.saveAppearance());
@@ -1606,6 +1635,8 @@ class App {
         if (typeof opts.turn === 'number') this.turnPlacing(opts.turn);
         if (typeof opts.reach === 'number' && this.placing) this.placing.reach = opts.reach;
         if (this.placing) this.stepPlacing();
+    // An instrument in hand: its own row under the world, and its part kept at the player's place.
+    this.stepBand();
         if (opts.drop) {
           const was = this.placing?.state;
           await this.dropPlacing();
@@ -1688,6 +1719,34 @@ class App {
           nearest: near.slice(0, 3).map((n) => ({ kind: n.t.kind, away: Math.round(n.d), cell: n.t.cell })),
           note: this.travelRowsFor === here && !this.travelRows.length ? 'no travel.json for this world: npm run swg -- travel assets-private (with your emulator checkout), then reload' : '',
           tune: { ...TRAVEL_TUNE },
+        };
+      },
+      /**
+       * The band: the music players make, which is the only music in this game.
+       *
+       * `__debug.band()` reports what is in your hands, which songs it has a part in and what is
+       * playing; `{ song: 4 }` sets the song, `{ play: true }` starts or stops it, `{ flourish: 3 }`
+       * strikes one, and `{ tune: { reach, bar } }` moves the band's own numbers.
+       */
+      band: (opts: { song?: number; play?: boolean; flourish?: number; tune?: Partial<typeof BAND_TUNE> } = {}) => {
+        if (opts.tune) Object.assign(BAND_TUNE, opts.tune);
+        const instrument = this.instrumentHeld();
+        const stem = stemFor(instrument ?? '');
+        if (typeof opts.song === 'number') this.bandSong = Math.round(opts.song);
+        if (opts.play) this.toggleBand();
+        if (typeof opts.flourish === 'number' && !band.flourish(opts.flourish, this.player.worldPos)) {
+          return { error: 'this song has no such flourish for that instrument', ...band.report() };
+        }
+        const pack = musicPack();
+        return {
+          holding: instrument,
+          plays: stem ? (pack?.stemNames[stem] ?? stem) : null,
+          song: this.bandSong,
+          hasAPartIn: songsFor(stem),
+          flourishes: partsFor(this.bandSong, stem)?.flourishes.length ?? 0,
+          ...band.report(),
+          note: pack ? '' : 'no music converted: npm run swg -- music @SWG assets-private --retail-only',
+          instruments: pack ? Object.keys(pack.instruments).length : 0,
         };
       },
       /** What is built on the world you are standing on, whose each one is, and what the server last said. */
@@ -6122,6 +6181,8 @@ class App {
     this.equipment.reset();
     // A new character has a purse of its own; the last one's number must not be read as this one's.
     purse.reset();
+    // Nobody's music carries to the next character.
+    band.clear();
     this.map.hide();
     if (this.player.mounted) this.handleMount();
     // Off the ship before its room's physics world goes with the world.
@@ -8175,6 +8236,8 @@ class App {
     // The ghost of a building being put down: where it stands and whether it may, worked out after
     // the camera so it reads the heading this very frame.
     if (this.placing) this.stepPlacing();
+    // An instrument in hand: its own row under the world, and its part kept at the player's place.
+    this.stepBand();
     // Mounted or piloted, a ship out of the cockpit and the chase is always drawn.
     if (ship) this.showHull(ship, true);
     // Aboard a ship the view is upright in the hull's frame, as the body is; adrift in space, in the body's own.
@@ -9827,6 +9890,56 @@ class App {
       this.lastHouse = { x: out.x, z: out.z, key: out.key };
       this.messages.system(`${deed.name} stands`);
     } else this.messages.system(out.why ?? 'it would not go there');
+  }
+
+  // ---- The band: an instrument in hand, its own track of a song, and everybody else's. ----
+
+  /** The instrument in the player's hands, by its catalogue id, or null. */
+  private instrumentHeld(): string | null {
+    const held = this.player.equipped.right ?? this.player.equipped.left ?? null;
+    if (!held) return null;
+    return stemFor(held.id) ? held.id : null;
+  }
+
+  /**
+   * The band's own frame: the row under the world while an instrument is held, this player's part
+   * kept at their own place, and everybody in earshot heard on their own instrument.
+   *
+   * It is called from the frame loop and writes to the page only when the words have changed.
+   */
+  private stepBand(): void {
+    const instrument = this.instrumentHeld();
+    if (!instrument) {
+      if (band.mine) band.stop(this.player.worldPos);
+      if (this.bandBar.open) this.bandBar.hide();
+      return;
+    }
+    const stem = stemFor(instrument);
+    const songs = songsFor(stem);
+    if (!songs.includes(this.bandSong)) this.bandSong = songs[0] ?? 0;
+    const parts = partsFor(this.bandSong, stem);
+    const pack = musicPack();
+    const name = pack?.stemNames[stem ?? ''] ?? stem ?? 'instrument';
+    this.bandBar.show(
+      this.bandSong ? `song ${this.bandSong} · ${name}` : `${name}: no song`,
+      !!band.mine,
+      songs.length ? `${songs.length} songs have a ${name} part` : pack ? `no song has a ${name} part` : 'no music converted: run the converter\'s `music` command',
+      parts ? parts.flourishes.map((_, i) => i + 1) : [],
+    );
+    // The part follows the player, so walking away from a band is heard as walking away.
+    if (band.mine) band.moveMine(this.player.worldPos);
+  }
+
+  /** Start or stop playing what the bar is set to. */
+  private toggleBand(): void {
+    const instrument = this.instrumentHeld();
+    if (!instrument) return;
+    if (band.mine) {
+      band.stop(this.player.worldPos);
+      return;
+    }
+    const why = band.start(this.bandSong, instrument, this.player.worldPos);
+    if (why) this.messages.system(why);
   }
 
   /** What the Housing tab shows: every deed whose building this game can really put down. */

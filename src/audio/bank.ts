@@ -199,7 +199,21 @@ export class SoundBank {
   }
 
   template(id: string): SoundTemplate | null {
-    return this.index?.templates[id] ?? null;
+    return this.offered.get(id) ?? this.index?.templates[id] ?? null;
+  }
+
+  /**
+   * Templates made outside the game's own pack, hung in front of its lookup.
+   *
+   * The game's sounds each come from a `.snd`; Jedi Academy's saber files and the player music's
+   * stems have none at all, so whoever plays them makes a template and offers it here. It is a Map
+   * rather than a write into the index, so nothing a conversion wrote is ever overwritten and a
+   * pack reloaded under it keeps every offer.
+   */
+  private readonly offered = new Map<string, SoundTemplate>();
+
+  offer(id: string, template: SoundTemplate): void {
+    this.offered.set(id, template);
   }
 
   get templateCount(): number {

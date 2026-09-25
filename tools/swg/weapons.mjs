@@ -18,6 +18,11 @@ export const WEAPON_CLASSES = {
   lightsaberStaff: { fights: 'lightsaber', hands: 'right', label: 'Double-bladed lightsabers' },
   // The grenades: not held, thrown by the gadget slots, which take their models from here.
   thrown: { fights: 'thrown', hands: 'right', label: 'Grenades and thrown weapons' },
+  // The instruments, which are held and are not weapons at all: the owner's call is that they come
+  // through this pack because it is the one thing in the game that puts a model in a hand, gives it
+  // the game's own name and lists it on a rack. Holding one is what lets a song's own track for that
+  // instrument be played (`src/audio/band.ts`); nothing about one ever fights.
+  instrument: { fights: 'none', hands: 'right', label: 'Instruments' },
 };
 
 /** A melee folder's class when its weapon turns out to carry a lightsaber blade (the named sabers under sword/ and polearm/). */
@@ -34,6 +39,9 @@ export function saberClassFor(template) {
  */
 export function weaponClassOf(template) {
   const t = template.toLowerCase();
+  // An instrument is not under object/weapon/ at all, and is taken first for that reason: it is
+  // held and named exactly as a weapon is, and fights with nothing.
+  if (/^object\/tangible\/instrument\//.test(t)) return /\/base\//.test(t) ? { skip: 'a base template' } : { cls: 'instrument' };
   if (!t.startsWith('object/weapon/')) return { skip: 'not a weapon' };
   if (/\/lightsaber\//.test(t)) return { cls: 'lightsaber' };
   // The crafted sabers live under the sword folders, their appearance a lightsaber file (.lsb).

@@ -202,6 +202,8 @@ import { statusJson } from './statusplan.mjs';
 const DEED_PACK_VERSION = 1;
 /** The shape of a world's 	ravel.json. A pack written by an older run is asked for again. */
 const TRAVEL_PACK_VERSION = 1;
+/** The shape of music/music.json. A pack written by an older run is asked for again. */
+const MUSIC_PACK_VERSION = 1;
 import { openTre, openVfs, readHeader } from './tre.mjs';
 
 // A .env beside package.json names the folders once; @NAME anywhere in the arguments becomes that
@@ -3939,7 +3941,11 @@ switch (cmd) {
       return out;
     };
     const limit = options.limit ? Number(options.limit) : Infinity;
-    const { weapons, skipped } = buildWeapons(galleryTemplates(vfs, 'object/weapon/'), { convert, fxFor, describe: (template, id) => describeItem(vfs, template, id, itemCaches) }, { log: console.log, limit });
+    // The instruments come through with the weapons: they are held, named and racked exactly as a
+    // weapon is and they fight with nothing, which is the owner's call and the reason the pack has an
+    // instrument class. They are not under object/weapon/, so their folder is scanned beside it.
+    const weaponTemplates = [...galleryTemplates(vfs, 'object/weapon/'), ...galleryTemplates(vfs, 'object/tangible/instrument/')];
+    const { weapons, skipped } = buildWeapons(weaponTemplates, { convert, fxFor, describe: (template, id) => describeItem(vfs, template, id, itemCaches) }, { log: console.log, limit });
     // Effects beyond the guns' own rows (EXTRA_EFFECTS in weapons.mjs): the held triggers' beams,
     // the lightning's muzzle, and the burn a body that has been set alight wears.
     const effects = {};
@@ -5668,6 +5674,83 @@ switch (cmd) {
     }
     break;
   }
+  case 'music': {
+    // <swg-dir> <out-dir> [--no-samples]: the music players make, and nothing else.
+    //
+    // There is no world music in this game and there is not meant to be: the owner's decision is
+    // that the only music is diegetic, so the background score in `music/` is left where it is and
+    // this reads `player_music/`, which the game wrote as **one track per instrument per song** --
+    // exactly what a band layering up sounds like. `tools/swg/music.mjs` says what the names mean
+    // and what the one thing not in the archives is.
+    if (!pos[2]) usage();
+    const M = await import('./music.mjs');
+    const vfs = mount(pos[1]);
+    const out = join(pos[2], 'music');
+    const samples = [...vfs.list()].filter((n) => n.startsWith('player_music/sample/'));
+    const { songs, odd } = M.readSongs(samples);
+    const counts = M.musicCounts(songs);
+    mkdirSync(out, { recursive: true });
+    // Every instrument the weapons pack carries, and which stem each plays. Read from that pack so
+    // this never has a second opinion about which instruments the game has.
+    let instruments = { placed: [], unplaced: [] };
+    const weaponsFile = join(pos[2], 'weapons', 'manifest.json');
+    if (existsSync(weaponsFile)) {
+      try {
+        const w = JSON.parse(readFileSync(weaponsFile, 'utf8'));
+        instruments = M.instrumentStems((w.weapons ?? []).filter((e) => e.class === 'instrument').map((e) => e.id));
+      } catch {
+        /* an unreadable weapons pack leaves the instruments unplaced, which the line below says */
+      }
+    }
+    // The samples themselves, copied as they are, as the sound bank copies its own.
+    let copied = 0;
+    let missing = 0;
+    if (!flags.has('--no-samples')) {
+      mkdirSync(join(out, 'samples'), { recursive: true });
+      for (const s of songs) {
+        for (const stem of Object.values(s.stems)) {
+          for (const file of [stem.intro, stem.main, stem.outro, ...stem.flourishes]) {
+            if (!file) continue;
+            const to = join(out, 'samples', basename(file));
+            if (existsSync(to)) continue;
+            if (!vfs.has(file)) {
+              missing++;
+              continue;
+            }
+            writeFileSync(to, vfs.read(file));
+            copied++;
+          }
+        }
+      }
+    }
+    const strip = (f) => (f ? `samples/${basename(f)}` : null);
+    writeFileSync(
+      join(out, 'music.json'),
+      JSON.stringify(
+        {
+          version: MUSIC_PACK_VERSION,
+          source: { note: "the game's own player_music stems; there is no world music in this pack and none is wanted" },
+          counts,
+          stems: M.STEMS,
+          stemNames: M.STEM_NAMES,
+          instruments: Object.fromEntries(instruments.placed.map((i) => [i.id, i.stem])),
+          songs: songs.map((s) => ({
+            song: s.song,
+            stems: Object.fromEntries(Object.entries(s.stems).map(([k, v]) => [k, { intro: strip(v.intro), main: strip(v.main), outro: strip(v.outro), flourishes: v.flourishes.map(strip) }])),
+          })),
+        },
+        null,
+        1,
+      ),
+    );
+    console.log(`music: ${counts.songs} songs over ${counts.stems} instrument tracks, ${counts.parts} parts, ${counts.full} of them with every track`);
+    console.log(`  ${instruments.placed.length} instruments play a track, ${instruments.unplaced.length} are not placed${instruments.unplaced.length ? `: ${instruments.unplaced.join(', ')}` : ''}`);
+    if (!existsSync(weaponsFile)) console.log('  the weapons pack is not converted, so no instrument is placed: run `weapons` first');
+    if (copied || missing) console.log(`  ${copied} samples copied${missing ? `, ${missing} the archives do not hold` : ''}`);
+    if (odd.length) console.log(`  ${odd.length} samples under player_music this does not read, e.g. ${odd.slice(0, 3).map((o) => basename(o)).join(', ')}`);
+    break;
+  }
+
   case 'travel': {
     // <out-dir> [--core3=<dir>]: where the travel terminals, the ticket collectors and the shuttles
     // really stood, written into each converted world's own pack as `travel.json`.
