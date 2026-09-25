@@ -74,6 +74,26 @@ export interface PlacedObject {
   tier: number;
 }
 
+/**
+ * One object put into a world that is already streaming, in the **world's** own frame.
+ *
+ * The snapshot's objects arrive mirrored and centred on their layout, and the constructor undoes
+ * both before it makes a `PlacedObject`; anything placed in play is already where it is going, so
+ * this is what the constructor's loop produces rather than what it reads.
+ */
+export interface RuntimePlacement {
+  model: string;
+  template: string;
+  x: number;
+  y: number;
+  z: number;
+  q: THREE.Quaternion;
+  /** Its load radius: which size tier it belongs to and how far off it is drawn. */
+  radius: number;
+  /** How much ground round it the procedural flora keeps off, metres. Zero leaves the flora alone. */
+  clear?: number;
+}
+
 /** A placed portal building; the player's cell inside it is tracked by crossing its portals. */
 export interface Building {
   model: LoadedModel;
@@ -192,6 +212,15 @@ export class LayoutStreamer {
   private readonly blockAt = new Map<PlacedObject, number>();
   /** Objects wider than COLLIDER_RADIUS_CAP. Must stay a field initialiser: the constructor's loop fills it. */
   private readonly huge = new Set<PlacedObject>();
+  /**
+   * What each object placed in play brought with it, so taking it out again is exact.
+   *
+   * A tier built the ordinary way shares one instanced mesh between every copy of a model in it, so
+   * there is no such thing as taking one copy out; an object placed in play gets meshes of its own
+   * (an instanced mesh of one, which is what the pack's materials and the portal renderer expect to
+   * see) and this is where they are kept.
+   */
+  private readonly runtime = new Map<PlacedObject, { tier: LoadedTier; meshes: THREE.Object3D[]; building: Building | null; effects: EffectHandle[] }>();
   /** Huge objects whose collision is still being built, a few pieces an update. A field initialiser, as `huge`. */
   private readonly hugeQueue: HugeJob[] = [];
   private loads = 0;
@@ -219,6 +248,35 @@ export class LayoutStreamer {
    * back exactly.
    */
   prepare: ((objects: THREE.Object3D[]) => Promise<void>) | null = null;
+
+  /**
+   * A second pack to look in for anything the planet's own does not carry.
+   *
+   * A house is not in the world it is built on: the snapshot packs hold what the game's own worlds
+   * placed, and a player's house is in the gallery pack, which is loaded once and then stands behind
+   * the planet's for the rest of the session. Nothing about a model changes for being found there --
+   * it is instanced, collided, walked and lit exactly as a snapshot object is -- so the whole of the
+   * difference is these three lookups.
+   */
+  private guest: AssetPack | null = null;
+
+  /** Stand a second pack behind this world's own. Calling it again with the same pack does nothing. */
+  useGuestPack(pack: AssetPack | null): void {
+    this.guest = pack;
+  }
+
+  private defOf(id: string): PackModelDef | undefined {
+    return this.pack.find(id) ?? this.guest?.find(id);
+  }
+
+  private loadedOf(id: string): LoadedModel | null {
+    return this.pack.loaded(id) ?? this.guest?.loaded(id) ?? null;
+  }
+
+  private modelOf(id: string): Promise<LoadedModel> {
+    if (this.pack.find(id) || !this.guest) return this.pack.model(id);
+    return this.guest.model(id);
+  }
 
   constructor(
     private readonly scene: THREE.Scene,
@@ -259,6 +317,82 @@ export class LayoutStreamer {
       if (!p.contained) this.largestRadius = Math.max(this.largestRadius, Math.min(p.radius, COLLIDER_RADIUS_CAP));
       if (hugeColliders && !p.contained && p.radius > COLLIDER_RADIUS_CAP) this.huge.add(p);
     }
+  }
+
+  /**
+   * Put one object into a world that is already streaming: a house somebody has just placed.
+   *
+   * It is the constructor's own loop done once, and it works because nothing downstream is ever
+   * *told* that a building exists. The portal renderer keeps its meshes in a lazy map keyed on the
+   * building itself, the interiors pass walks `this.buildings`, and a tier's object list is the very
+   * array the region holds -- so an object pushed into a tier that is already loaded is seen by the
+   * collider pass with nothing merged and nothing rebuilt.
+   *
+   * The coordinates here are the **world's**, not the snapshot's: a house is put where somebody is
+   * standing, and they are standing in the world. Everything the constructor reads is already
+   * mirrored by the time it makes a `PlacedObject`, so this skips that step rather than undoing it.
+   *
+   * Returns the building it made, or null for an object with no rooms (which is still placed, and
+   * still drawn -- a garage has no cells and is scenery).
+   */
+  async place(p: RuntimePlacement): Promise<Building | null> {
+    const tier = TIERS.findIndex((t) => p.radius >= t.minRadius);
+    const placed: PlacedObject = {
+      model: p.model,
+      template: p.template,
+      x: p.x,
+      y: p.y,
+      z: p.z,
+      q: p.q,
+      radius: p.radius,
+      contained: false,
+      tier: tier < 0 ? TIERS.length - 1 : tier,
+    };
+    this.objects.push(placed);
+    const rx = Math.floor(p.x / REGION);
+    const rz = Math.floor(p.z / REGION);
+    const key = `${rx},${rz}`;
+    let region = this.regions.get(key);
+    if (!region) {
+      region = { rx, rz, cx: (rx + 0.5) * REGION, cz: (rz + 0.5) * REGION, objects: TIERS.map(() => []), tiers: TIERS.map(() => null) };
+      this.regions.set(key, region);
+    }
+    region.objects[placed.tier].push(placed);
+    if (p.clear && p.clear > 0) this.addExclusion({ x: p.x, z: p.z, r: p.clear });
+    this.largestRadius = Math.max(this.largestRadius, Math.min(placed.radius, COLLIDER_RADIUS_CAP));
+    // The collider pass only re-sweeps once the player has moved twelve metres; a house put down at
+    // their feet has to be solid before that, so the memory of where it last swept is thrown away.
+    this.lastColliderX = NaN;
+    const loaded = region.tiers[placed.tier];
+    // Not loaded yet, or still loading: the ordinary pass will build it with everything else, which
+    // is exactly right and needs nothing here.
+    if (!loaded || loaded === 'loading') return null;
+    return this.addToTier(loaded, placed);
+  }
+
+  /**
+   * Take one back out again: what an undo, a pick-up, or a world going away wants.
+   *
+   * Two things it does not undo, both deliberately. The patch of ground it kept the procedural
+   * flora off stays kept: the flora is drawn into a chunk when the chunk is built, so putting the
+   * exclusion back would leave a bald patch on every chunk already standing and grow trees only on
+   * the ones built after. And the widest radius the collider sweep reaches for is left where it is,
+   * which only ever makes that sweep look a little further than it needs to.
+   */
+  unplace(p: RuntimePlacement): boolean {
+    const i = this.objects.findIndex((o) => o.template === p.template && o.x === p.x && o.z === p.z);
+    if (i < 0) return false;
+    const placed = this.objects[i];
+    this.objects.splice(i, 1);
+    const region = this.regions.get(`${Math.floor(p.x / REGION)},${Math.floor(p.z / REGION)}`);
+    if (region) {
+      const list = region.objects[placed.tier];
+      const k = list.indexOf(placed);
+      if (k >= 0) list.splice(k, 1);
+    }
+    this.dropFromTier(placed);
+    this.lastColliderX = NaN;
+    return true;
   }
 
   private addExclusion(e: Exclusion): void {
@@ -308,7 +442,7 @@ export class LayoutStreamer {
       const region = this.regions.get(`${rx},${rz}`);
       const state = region?.tiers[o.tier];
       // The loaded model's real extent, from its geometry, beside the manifest's radius.
-      const loaded = this.pack.loaded(o.model);
+      const loaded = this.loadedOf(o.model);
       let size = '';
       if (loaded) {
         const box = new THREE.Box3();
@@ -319,7 +453,7 @@ export class LayoutStreamer {
         const v = box.getSize(new THREE.Vector3());
         size = `${v.x.toFixed(2)}x${v.y.toFixed(2)}x${v.z.toFixed(2)} (${loaded.primitives.length} prims)`;
       }
-      out.push({ template: o.template, model: o.model, d: Math.round(d), radius: o.radius, size, tier: o.tier, contained: o.contained, inManifest: !!this.pack.find(o.model), loaded: !!this.pack.loaded(o.model), region: `${rx},${rz}`, regionState: state === null ? 'not loaded' : state === 'loading' ? 'loading' : state ? 'loaded' : 'no region' });
+      out.push({ template: o.template, model: o.model, d: Math.round(d), radius: o.radius, size, tier: o.tier, contained: o.contained, inManifest: !!this.defOf(o.model), loaded: !!this.loadedOf(o.model), region: `${rx},${rz}`, regionState: state === null ? 'not loaded' : state === 'loading' ? 'loading' : state ? 'loaded' : 'no region' });
     }
     return out.sort((a, b) => a.d - b.d);
   }
@@ -415,7 +549,7 @@ export class LayoutStreamer {
     while (queue.length && (built === 0 || performance.now() - t0 < HUGE_BUILD_MS)) {
       const job = queue[0];
       const o = job.o;
-      const model = this.pack.loaded(o.model);
+      const model = this.loadedOf(o.model);
       const cols = this.colliders.get(o);
       if (!model || !cols || job.prim >= model.primitives.length) {
         queue.shift();
@@ -533,9 +667,9 @@ export class LayoutStreamer {
       const models = new Map<string, LoadedModel>();
       for (const id of ids) {
         // Particle effects have no mesh to load; the effect player fetches their descriptions.
-        if (this.pack.find(id)?.particle) continue;
+        if (this.defOf(id)?.particle) continue;
         try {
-          models.set(id, await this.pack.model(id));
+          models.set(id, await this.modelOf(id));
         } catch (err) {
           // Missing or broken model: its instances are skipped, once noted.
           if (!this.failed.has(id)) {
@@ -575,7 +709,7 @@ export class LayoutStreamer {
     const localFx = new THREE.Matrix4();
     if (this.effects) {
       for (const o of objects) {
-        const def = this.pack.find(o.model);
+        const def = this.defOf(o.model);
         if (def?.particle) effects.push(this.effects.place(def.file, tmpM.compose(tmpV.set(o.x, o.y, o.z), o.q, ONE), o.contained));
       }
     }
@@ -629,6 +763,113 @@ export class LayoutStreamer {
   }
 
   /**
+   * One object into a tier that is already built: `instance` done for a single placement.
+   *
+   * The difference from `instance` is the one thing that matters here. A tier instances a model
+   * once for every copy of it the region holds, and a copy cannot be taken out of an instanced mesh
+   * without rewriting it; so a placement made in play gets its own meshes -- an instanced mesh of
+   * one, because that is what the pack's materials, the shadow rules and the portal renderer all
+   * already expect to be handed -- and `runtime` remembers them so that taking it away is exact.
+   */
+  private async addToTier(loaded: LoadedTier, p: PlacedObject): Promise<Building | null> {
+    const rec: { tier: LoadedTier; meshes: THREE.Object3D[]; building: Building | null; effects: EffectHandle[] } = { tier: loaded, meshes: [], building: null, effects: [] };
+    this.runtime.set(p, rec);
+    this.loadedInstances++;
+    const def = this.defOf(p.model);
+    if (def?.particle) {
+      if (this.effects) {
+        rec.effects.push(this.effects.place(def.file, tmpM.compose(tmpV.set(p.x, p.y, p.z), p.q, ONE), false));
+        loaded.effects.push(...rec.effects);
+      }
+      return null;
+    }
+    let model: LoadedModel;
+    try {
+      model = await this.modelOf(p.model);
+    } catch (err) {
+      if (!this.failed.has(p.model)) {
+        this.failed.add(p.model);
+        console.warn(`snapshot model ${p.model} failed to load: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      return null;
+    }
+    // Taken away again, or its whole tier unloaded, while the model loaded.
+    if (this.disposed || this.runtime.get(p) !== rec) return null;
+    tmpM.compose(tmpV.set(p.x, p.y, p.z), p.q, ONE);
+    if (this.effects && model.def.effects?.length) {
+      const localFx = new THREE.Matrix4();
+      for (const fx of model.def.effects) rec.effects.push(this.effects.place(fx.file, localFx.multiplyMatrices(tmpM, mirroredTransform(fx.transform, localFx)), (fx.cell ?? 0) > 0));
+    }
+    loaded.effects.push(...rec.effects);
+    let building: Building | null = null;
+    if (model.interiorBoxes.length > 0) {
+      const matrix = new THREE.Matrix4().compose(tmpV.set(p.x, p.y, p.z), p.q, ONE);
+      building = { model, template: p.template, x: p.x, z: p.z, radius: model.radius, matrix, inverse: matrix.clone().invert(), interior: [], interiorBuilt: false, object: p };
+      loaded.buildings.push(building);
+      this.buildings.add(building);
+      rec.building = building;
+    }
+    for (const prim of model.primitives) {
+      // A portal building's rooms are drawn per cell by the portal renderer, out of `buildInterior`.
+      if (building && prim.cell > 0 && model.portals.length > 0) continue;
+      const mesh = new THREE.InstancedMesh(prim.geometry, prim.material, 1);
+      mesh.setMatrixAt(0, tmpM.compose(tmpV.set(p.x, p.y, p.z), p.q, ONE));
+      mesh.castShadow = model.radius >= SHADOW_MIN_RADIUS && castsShadow(prim.material);
+      if (drawsAfterWater(prim.material)) mesh.renderOrder = 3;
+      mesh.receiveShadow = true;
+      mesh.instanceMatrix.needsUpdate = true;
+      mesh.computeBoundingSphere();
+      if (this.prepare) mesh.visible = false;
+      this.scene.add(mesh);
+      rec.meshes.push(mesh);
+      loaded.meshes.push(mesh);
+    }
+    if (this.prepare && rec.meshes.length) {
+      try {
+        await this.prepare(rec.meshes);
+      } catch (err) {
+        console.warn('snapshot: an object placed in play could not be compiled ahead of its first draw; shown anyway', err);
+      }
+      if (this.disposed || this.runtime.get(p) !== rec) return building;
+      for (const mesh of rec.meshes) mesh.visible = true;
+    }
+    // A house is put down where somebody is standing, so its rooms are wanted now rather than at the
+    // next sweep. NaN before the first sweep, which fails the test and leaves it to the sweep.
+    if (building && Math.hypot(building.x - this.lastInteriorX, building.z - this.lastInteriorZ) - building.radius <= INTERIOR_RANGE) this.buildInterior(building);
+    this.lastColliderX = Number.NaN;
+    return building;
+  }
+
+  /** Everything `addToTier` made for one placement, undone. */
+  private dropFromTier(p: PlacedObject): void {
+    const rec = this.runtime.get(p);
+    this.runtime.delete(p);
+    this.removeColliders(p);
+    if (!rec) return;
+    if (rec.building) {
+      this.dropInterior(rec.building);
+      this.buildings.delete(rec.building);
+      const i = rec.tier.buildings.indexOf(rec.building);
+      if (i >= 0) rec.tier.buildings.splice(i, 1);
+      if (this.lastInside === rec.building) this.lastInside = null;
+    }
+    for (const mesh of rec.meshes) {
+      this.scene.remove(mesh);
+      const i = rec.tier.meshes.indexOf(mesh);
+      if (i >= 0) rec.tier.meshes.splice(i, 1);
+      if ((mesh as THREE.InstancedMesh).isInstancedMesh) (mesh as THREE.InstancedMesh).dispose();
+    }
+    if (this.effects) {
+      for (const h of rec.effects) {
+        this.effects.remove(h);
+        const i = rec.tier.effects.indexOf(h);
+        if (i >= 0) rec.tier.effects.splice(i, 1);
+      }
+    }
+    this.loadedInstances--;
+  }
+
+  /**
    * Make a building's interior meshes. Geometry and materials are shared with the model, so
    * this is a handful of Object3Ds, not a copy of the mesh; the portal renderer shows them.
    */
@@ -669,7 +910,7 @@ export class LayoutStreamer {
     for (const mesh of made) this.scene.add(mesh);
     if (!this.prepare) return;
     void this.prepare(made).catch((err) => {
-      console.warn('snapshot: a building’s rooms could not be compiled ahead of being drawn', err);
+      console.warn('snapshot: a buildingâ€™s rooms could not be compiled ahead of being drawn', err);
     });
   }
 
@@ -737,7 +978,12 @@ export class LayoutStreamer {
       if ((mesh as THREE.InstancedMesh).isInstancedMesh) (mesh as THREE.InstancedMesh).dispose();
     }
     for (const b of t.buildings) this.buildings.delete(b);
-    for (const o of t.objects) this.removeColliders(o);
+    for (const o of t.objects) {
+      this.removeColliders(o);
+      // Anything placed in play that rode this tier goes with it, and its record with it, or a
+      // later removal would take its meshes out twice and count its instance off twice.
+      this.runtime.delete(o);
+    }
     // A huge object whose pieces were still being built stops being built.
     if (this.hugeQueue.length) {
       let keep = 0;
@@ -782,7 +1028,7 @@ export class LayoutStreamer {
   }
 
   private addColliders(o: PlacedObject): void {
-    const model = this.pack.loaded(o.model);
+    const model = this.loadedOf(o.model);
     if (!model) return;
     const cols: R.Collider[] = [];
     for (const prim of model.primitives) {
@@ -836,7 +1082,7 @@ export class LayoutStreamer {
       // Squared, with the blocker's own disc folded into the bound rather than subtracted from a
       // root: `Math.hypot` is a call and a square root apiece, and this list is walked up to four
       // times a step over as many as fourteen hundred records. `dist - radius > reach` and
-      // `dist² > (reach + radius)²` are the same test for non-negative numbers.
+      // `distÂ² > (reach + radius)Â²` are the same test for non-negative numbers.
       const dx = b.x - x;
       const dz = b.z - z;
       const far = reach + b.radius;
@@ -859,7 +1105,7 @@ export class LayoutStreamer {
    */
   private noteBlocker(o: PlacedObject): void {
     if (o.contained || this.blockAt.has(o)) return;
-    const box = this.pack.loaded(o.model)?.bounds;
+    const box = this.loadedOf(o.model)?.bounds;
     if (!box) return;
     // **Extents and never corners.** A pack converted before the mesh reader took a BOX chunk's two
     // corners componentwise carries them the other way round -- seven models on one of the owner's

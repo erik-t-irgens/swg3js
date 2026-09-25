@@ -34,6 +34,7 @@ import { Group, groups, RAPIER as R } from '../core/physics';
 import { CHUNK_RES, CHUNK_SIZE, Terrain } from './terrain';
 import { SwgTerrain, type BuildingLayerSource, type SwgWaterTable } from './swgTerrain';
 import { LayoutStreamer, type Building, type CellState, type PlacedObject } from './layoutStream';
+import { clearRadius, groundVerdict, patchOfBounds, patchProbes, spotAhead } from './housePlace.ts';
 import { outdoorNav } from './nav/outdoorNav.ts';
 import { wildLife, type WildDeps } from './wildLife.ts';
 import { standingPeople, type PeopleDeps, type StandingRow } from './standingPeople.ts';
@@ -1684,6 +1685,14 @@ export class World {
     for (const c of this.structureColliders) this.physics.removeCollider(c);
     this.structureColliders = [];
     this.pack?.dispose();
+    // The houses' pack goes with the world it was used in, although it is not the world's own. Its
+    // materials joined this world's shadow cascades and the portal renderer's set when they were
+    // prepared, and nothing but a dispose takes them out again: kept across a world change it would
+    // be a leak in both, which shows as a stutter the next time the shadow distance moves. Fetching
+    // it again is a manifest and whichever buildings are put down, and only for a player who puts
+    // one down at all.
+    this.housePack?.then((p) => p?.dispose()).catch(() => undefined);
+    this.housePack = null;
     surfaces.sweep();
     this.pack = null;
     this.packStatus = 'no pack';
@@ -2952,6 +2961,77 @@ export class World {
 
   get buildings(): Iterable<Building> {
     return this.layoutStream?.buildings ?? [];
+  }
+
+  /**
+   * The pack the buildings a player can put down come out of, fetched once and then kept for the
+   * session. It is the gallery's: a snapshot pack holds what the game's own worlds placed, and the
+   * player houses are not placed on any world. On the gallery world itself it is the world's own
+   * pack and nothing is fetched twice.
+   */
+  private housePack: Promise<AssetPack | null> | null = null;
+
+  housesPack(): Promise<AssetPack | null> {
+    if (this.pack && this.pack.manifest.planet === 'gallery') return Promise.resolve(this.pack);
+    this.housePack ??= AssetPack.load('gallery');
+    return this.housePack;
+  }
+
+  /**
+   * Put a building on the ground in the world that is loaded, as a player placing a house does.
+   *
+   * Nothing here persists, crosses the relay or belongs to anybody: this is the placing itself, and
+   * the ground test in front of it. What it hands back says either where the house went or, in
+   * words, why the ground would not take it.
+   *
+   * The `y` it stands the building at is the ground, not the bottom of its box: a house's origin is
+   * its ground line and its cellar is modelled sixteen metres below that.
+   */
+  async placeBuilding(model: string, opts: { at?: { x: number; z: number }; from?: { x: number; z: number }; yaw?: number; force?: boolean } = {}): Promise<{ ok: boolean; why: string | null; x: number; z: number; y: number; yaw: number; rise: number; sink: number; slope: number; building: Building | null }> {
+    const stream = this.layoutStream;
+    const refuse = (why: string) => ({ ok: false, why, x: 0, z: 0, y: 0, yaw: 0, rise: 0, sink: 0, slope: 0, building: null });
+    if (!stream) return refuse('no world is loaded');
+    if (this.planet.space) return refuse('there is no ground out here');
+    const pack = await this.housesPack();
+    if (!pack) return refuse('the gallery pack is not converted, so there are no buildings to put down');
+    if (!pack.find(model)) return refuse(`${model} is not in the gallery pack`);
+    stream.useGuestPack(pack);
+    let loaded: LoadedModel;
+    try {
+      loaded = await pack.model(model);
+    } catch (err) {
+      return refuse(`${model} would not load: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    const patch = patchOfBounds({ min: loaded.bounds.min.toArray(), max: loaded.bounds.max.toArray() });
+    const yaw = opts.yaw ?? 0;
+    const at = opts.at ?? (opts.from ? spotAhead(opts.from, yaw, patch) : null);
+    if (!at) return refuse('no spot was given to put it on');
+    const probes = patchProbes(patch, at, yaw);
+    const verdict = groundVerdict(
+      probes,
+      probes.map((p) => this.terrain.heightAt(p.x, p.z)),
+    );
+    if (!verdict.ok && !opts.force) return { ...verdict, x: at.x, z: at.z, yaw, why: verdict.why, building: null };
+    const q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
+    const building = await stream.place({
+      model,
+      template: `runtime/${model}`,
+      x: at.x,
+      y: verdict.y,
+      z: at.z,
+      q,
+      // Its own radius, which is which size tier it joins and so how far off it is drawn. There is
+      // no need to force it into the far tier to be sure that tier is loaded: every tier of the
+      // region the player is standing in is within its own range of them.
+      radius: loaded.radius,
+      clear: clearRadius(patch),
+    });
+    return { ok: true, why: verdict.ok ? null : `stood anyway: ${verdict.why}`, x: at.x, z: at.z, y: verdict.y, yaw, rise: verdict.rise, sink: verdict.sink, slope: verdict.slope, building };
+  }
+
+  /** Take a building placed in play back out of the world. */
+  unplaceBuilding(at: { x: number; z: number }, template: string): boolean {
+    return this.layoutStream?.unplace({ model: '', template, x: at.x, y: 0, z: at.z, q: new THREE.Quaternion(), radius: 0 }) ?? false;
   }
 
   /** Materials whose shaders have been asked for ahead of their first draw. */
