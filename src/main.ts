@@ -99,6 +99,7 @@ import { SHUTTLE_TUNE, fareText, landingOn, portAt, portsOf, ridesFrom, type Far
 import { ShuttleMenu } from './ui/shuttleMenu.ts';
 import { loadGalaxyFile, planetOfRouteId } from './data/galaxy';
 import { homes } from './net/homes.ts';
+import { creditText, purse } from './net/purse.ts';
 import { allDeeds, deedById, deedLine, footprintOf, loadDeeds, wrongWorld, type DeedRow } from './world/deeds.ts';
 import { GHOST_TUNE, PlacementGhost, ghostSpot, ghostVerdict, turnBy, wheelReach, type GhostState } from './world/placeGhost.ts';
 import { patchOfFootprint } from './world/housePlace.ts';
@@ -1490,6 +1491,7 @@ class App {
             houses: walkIn.filter((d) => /^ply_/.test(d.id)).map((d) => d.id),
             other: walkIn.length - walkIn.filter((d) => /^ply_/.test(d.id)).length,
             shared: shared ? 'a house put down now is written down and everybody sees it' : 'no server: a house put down now stands here alone',
+          credits: creditText(purse.credits),
             standing: homes.report().standing,
             tune: { ...HOUSE_TUNE },
           };
@@ -1601,6 +1603,17 @@ class App {
           lots: p.deed.lots,
           tune: { ...GHOST_TUNE },
         };
+      },
+      /**
+       * What this character has to spend: a number on the character and not a thing in the backpack.
+       *
+       * `__debug.purse()` reports; `{ give: 5000 }` puts some in, which with a server only its admin
+       * may do; `{ ask: true }` asks the server what it really has.
+       */
+      purse: (opts: { give?: number; ask?: boolean } = {}) => {
+        if (opts.ask) purse.ask();
+        if (typeof opts.give === 'number') purse.give(opts.give);
+        return { ...purse.report(), reads: creditText(purse.credits) };
       },
       /** What is built on the world you are standing on, whose each one is, and what the server last said. */
       homes: () => {
@@ -4685,10 +4698,24 @@ class App {
       say: (text) => this.messages.system(text),
       send: (msg) => this.net.sendWord(msg),
     });
+    // What this character has to spend: the server's when there is one, the saved character's when
+    // there is not. Nothing here ever takes money off while a server is answering.
+    purse.attach({
+      send: (msg) => this.net.sendWord(msg),
+      say: (text) => this.messages.system(text),
+      shared: () => this.net.session.authority === 'server',
+      saved: () => this.current?.credits ?? null,
+      save: (credits) => {
+        if (!this.current) return;
+        this.current.credits = credits;
+        upsertCharacter(this.current);
+      },
+    });
     const homeWordWas = this.net.onWord;
     this.net.onWord = (msg) => {
       homeWordWas(msg);
       if (msg?.t === 'homes' || msg?.t === 'homeUp' || msg?.t === 'homeDown' || msg?.t === 'homeNo') homes.word(msg);
+      if (msg?.t === 'purse') purse.word(msg);
     };
     this.remotes.carrierPose = (to, pos, quat) => {
       const p = this.player;
@@ -6018,6 +6045,8 @@ class App {
     this.closePanels();
     // The hands are emptied on the way out, or the next character played (of the same species) would start with this one's weapon.
     this.equipment.reset();
+    // A new character has a purse of its own; the last one's number must not be read as this one's.
+    purse.reset();
     this.map.hide();
     if (this.player.mounted) this.handleMount();
     // Off the ship before its room's physics world goes with the world.
@@ -7474,6 +7503,9 @@ class App {
       // said is built here was refused for having nowhere to go, and this is where it is tried
       // again. A world with nothing built on it does nothing at all.
       homes.ready();
+      // What this character has to spend: asked for on arriving, so the shuttle panel has a number
+      // to show rather than a blank the first time it is opened.
+      purse.ask();
       const p = this.player;
       if (p.mounted || p.aboard || p.noclip) return;
       // Still standing where we arrived: move to open ground now that the real city is in.
@@ -9184,6 +9216,19 @@ class App {
     this.shuttleMenu.hide();
     this.shuttleFrom = null;
     if (!ride || this.traveling) return;
+    // The fare is the game's own and comes out before the ride, never after: with a server the
+    // server's answer is what starts the journey, and with none the number here is the truth.
+    // A fare that cannot be paid says so and nothing moves.
+    if (ride.price > 0) {
+      purse.spend(ride.price, `the shuttle to ${ride.name}`, () => void this.rideShuttle(ride));
+      return;
+    }
+    await this.rideShuttle(ride);
+  }
+
+  /** The journey itself, once the fare is paid. */
+  private async rideShuttle(ride: Ride): Promise<void> {
+    if (this.traveling) return;
     if (ride.kind === 'local') {
       const row = this.placeNames.find((p) => p.name === ride.name);
       if (!row) return;

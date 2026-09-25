@@ -34,6 +34,14 @@ export interface SavedCharacter {
    * no mood at all, which is every record from before there were any.
    */
   mood?: string;
+  /**
+   * What the character has to spend. A number and not a thing in the backpack, which is the
+   * owner's own call and is also what the game did -- nothing in the archives gives credits an
+   * object template. Absent on every record from before there were any, which reads as the
+   * starting amount the first time it is asked for. With a server the server holds it and this is
+   * not written at all.
+   */
+  credits?: number;
   planet: string;
   zone?: string;
   /** Where it last stood, and which way it faced; absent until it has been played. */

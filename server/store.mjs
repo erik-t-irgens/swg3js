@@ -24,6 +24,7 @@ import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, re
 import { join } from 'node:path';
 import { applyItems } from './ledger.mjs';
 import { applyHomes } from './homes.mjs';
+import { applyPurse } from './purse.mjs';
 
 /** The shape of the file. A file written by a newer server is left alone and not played into. */
 export const STORE_VERSION = 1;
@@ -49,7 +50,7 @@ function table(from = null) {
 
 /** An empty world: every slot that exists, each filled by the file that owns its shape. */
 export function emptyWorld(epoch = Date.now()) {
-  return { v: STORE_VERSION, seq: 0, epoch, players: table(), characters: table(), items: table(), houses: table(), settings: {} };
+  return { v: STORE_VERSION, seq: 0, epoch, players: table(), characters: table(), items: table(), houses: table(), purses: table(), settings: {} };
 }
 
 /**
@@ -95,7 +96,7 @@ export function applyChange(data, rec) {
       // decides what each row looks like on disk, and the same function runs when the thing happens
       // and when the log is replayed on start. Anything neither of them knows is a record from a
       // newer server: kept in the log, not understood here, and not an error.
-      return applyItems(data, rec) || applyHomes(data, rec);
+      return applyItems(data, rec) || applyHomes(data, rec) || applyPurse(data, rec);
   }
 }
 
@@ -147,7 +148,7 @@ export class Store {
     if (loaded) {
       // The tables are rebuilt rather than taken as they are: `JSON.parse` hands back plain objects,
       // and the keys in them came from a browser (see `table`).
-      this.data = { ...emptyWorld(loaded.epoch ?? epoch), ...loaded, players: table(loaded.players), characters: table(loaded.characters), items: table(loaded.items), houses: table(loaded.houses) };
+      this.data = { ...emptyWorld(loaded.epoch ?? epoch), ...loaded, players: table(loaded.players), characters: table(loaded.characters), items: table(loaded.items), houses: table(loaded.houses), purses: table(loaded.purses) };
       this.say(`world.json read: ${Object.keys(this.data.players).length} players, ${Object.keys(this.data.characters).length} characters, up to change ${this.data.seq}`);
     }
     let knownEpoch = !!loaded && Number.isFinite(loaded.epoch);

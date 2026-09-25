@@ -105,6 +105,11 @@
 //                                                          with the place; the server decides how many there are,
 //                                                          whose they are, and that two are not in one spot
 //   { t: 'removeHome', id }                                  take one of yours back down
+//   { t: 'purse', do: ask|spend|give, credits?, what? }       what a character has to spend (purse.mjs): a number on
+//                                                          the character and not a thing in a backpack. A spend is
+//                                                          asked for and never announced -- the answer is what the
+//                                                          browser may act on -- and one that would go below zero
+//                                                          moves nothing at all rather than going as far as it can
 // Server to browser:
 //   { t: 'hail', v, now, epoch, dayMs, nonce, word, ff }     sent the instant the socket opens, before anything is said
 //   { t: 'claimed', you, keep }   { t: 'denied', why }   { t: 'refused', why }   { t: 'taken', by }
@@ -156,6 +161,7 @@
 //   { t: 'homeUp', home }   { t: 'homeDown', id }   (to everybody on that world, the one who did it included, since
 //                                                          what they need to hear is the id the server gave it)
 //   { t: 'homeNo', why }   (to whoever asked, and to nobody else)
+//   { t: 'purse', credits?, spent?, given?, what?, why? }   (to whoever asked, and to nobody else)
 //
 // Everything but the claim, the ping and the ask goes to the world the player is on and no further
 // (rooms.mjs). Before this, a browser was told about people on other planets and dressed them,
@@ -179,6 +185,7 @@ import { NpcPlaces, cleanNpcBatch, cleanNpcDrop, cleanNpcHit } from './npcWire.m
 import { LEDGER_TUNING, Ledger, cleanItems, cleanTrade, mayItems } from './ledger.mjs';
 import { SPOT_TUNING, Spots, cleanSpot, mayClaim } from './spots.mjs';
 import { HOME_TUNING, Homes, cleanHome, cleanRemove, mayPlace } from './homes.mjs';
+import { PURSE_TUNING, Purses, credits, mayPurse } from './purse.mjs';
 
 /** What this server speaks. A browser that hears no hail is talking to the relay that came before. */
 const WIRE_VERSION = 2;
@@ -264,6 +271,7 @@ for (let i = 0; i < args.length; i++) {
   else if (name.startsWith('item.') && has(LEDGER_TUNING, name.slice(5))) LEDGER_TUNING[name.slice(5)] = value;
   else if (name.startsWith('spot.') && has(SPOT_TUNING, name.slice(5))) SPOT_TUNING[name.slice(5)] = value;
   else if (name.startsWith('home.') && has(HOME_TUNING, name.slice(5))) HOME_TUNING[name.slice(5)] = value;
+  else if (name.startsWith('purse.') && has(PURSE_TUNING, name.slice(6))) PURSE_TUNING[name.slice(6)] = value;
   else console.log(`  --set ${name}: there is no such number, and it has been ignored`);
 }
 
@@ -324,6 +332,10 @@ const spots = new Spots({ tuning: SPOT_TUNING });
 // goes out through the store, so the log has it before anybody is told.
 const homes = new Homes({ tuning: HOME_TUNING, write: (rec) => store.change(rec) });
 homes.load(store.data);
+// What each character has to spend (purse.mjs). A number and not a thing, written down like the
+// rest: a balance only in memory would be a different number after every restart.
+const purses = new Purses({ tuning: PURSE_TUNING, write: (rec) => store.change(rec) });
+purses.load(store.data);
 const settings = { friendlyFire: FRIENDLY_FIRE, word: WORD ? 1 : 0, dayMs: DAY };
 const had = store.data.settings ?? {};
 if (had.friendlyFire !== settings.friendlyFire || had.word !== settings.word || had.dayMs !== settings.dayMs) store.change({ t: 'settings', settings });
@@ -1187,6 +1199,32 @@ function onMessage(c, text, trimmed = false) {
       return;
     }
     deliverTo(spots.take(c.id, world, spot.kind, spot.what));
+  } else if (msg.t === 'purse') {
+    // What a character has to spend, and taking a fare out of it. A number and not a thing, so
+    // there is no row to move and no trade to make: the whole of it is "tell me" and "take this".
+    //
+    // The browser asks for the spend rather than announcing it, and the answer is what it may act
+    // on -- a browser that took the money itself and told the server afterwards would be a browser
+    // deciding what it could afford. A spend that would go below zero moves nothing at all.
+    if (!c.hello || !c.character) return;
+    c.spending ??= { at: 0, lines: 0 };
+    if (!mayPurse(c.spending, Date.now(), PURSE_TUNING)) return;
+    if (msg.do === 'ask') {
+      deliverTo(purses.tell(c.character, c.id));
+      return;
+    }
+    if (msg.do === 'spend') {
+      const amount = credits(msg.credits, PURSE_TUNING);
+      if (amount === null) return;
+      const what = typeof msg.what === 'string' && msg.what.length <= 64 ? msg.what : 'that';
+      deliverTo(purses.spend(c.character, amount, c.id, what));
+      return;
+    }
+    if (msg.do === 'give' && adminFor(store.data, ADMIN) === c.player) {
+      const amount = credits(msg.credits, PURSE_TUNING);
+      if (amount === null) return;
+      deliverTo(purses.give(c.character, amount, c.id));
+    }
   } else if (msg.t === 'placeHome' || msg.t === 'removeHome') {
     // A building put down in the world. Unlike a dock claim this *is* written down -- it is the
     // thing the whole of it is for -- and unlike an item it belongs to a world rather than to a
@@ -1249,6 +1287,7 @@ const server = createServer((req, res) => {
         items: ledger.describe(),
         spots: spots.describe(),
         homes: homes.describe(),
+        purses: purses.describe(),
         joinWord: WORD ? 'set' : 'none',
         admin: adminFor(store.data, ADMIN) || 'nobody yet',
         friendlyFire: FRIENDLY_FIRE,
@@ -1264,6 +1303,7 @@ const server = createServer((req, res) => {
         item: LEDGER_TUNING,
         spot: SPOT_TUNING,
         home: HOME_TUNING,
+        purse: PURSE_TUNING,
         // The distances a group works to, which are the client's own and not this server's to pick:
         // they are printed here so what is being enforced can be read off without reading the code.
         ranges: GROUP_RANGES,
