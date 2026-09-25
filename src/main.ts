@@ -50,6 +50,15 @@ const SCENE_PLACE_REACH = 400;
  * picture, not what is within arm's reach.
  */
 const SCENE_SHIP_REACH = 250;
+/**
+ * How much world a captured place builds, and how long it may take about it. Ours, every one.
+ *
+ * A scene's camera never moves, so unlike a walking player it has a known, finite view and nothing
+ * needs to arrive later. The near radius is cut well below the game's own because the far tiles are
+ * what carry a vista -- Theed's mountains are eleven kilometres out and are far tiles, not chunks --
+ * and the object reach does nothing at all here, since a scene has no streamer to reach with.
+ */
+const SCENE_REACH = { objects: 0, terrain: 3, far: 6, waitMs: 40000 };
 import { loadPlayerRig } from './player/rig';
 import { LOOK, lookReport, packPitch, wrapAngle } from './player/lookAt.ts';
 import { Character, loadSpeciesIndex, type SpeciesEntry } from './player/character';
@@ -5464,12 +5473,26 @@ class App {
     const stand = new THREE.Vector3(built.place.stand.x, built.place.stand.y, built.place.stand.z);
     built.group.position.copy(stand);
     this.world.scene.add(built.group);
+    // Nothing about a scene streams, so nothing is left to arrive after it is shown.
+    //
+    // The camera never moves, so the ground it can see is known before a frame is drawn and there
+    // is no reason to build it a chunk at a time the way a walking player needs. Left to stream it
+    // showed the procedural stand-in heights first and the world's own ground after, which is
+    // exactly the seam the owner saw. The reach is cut to what one fixed frustum can want -- the
+    // far tiles carry the vista, so the near radius can be small -- and the whole of it is waited
+    // for below before anybody is shown anything.
+    this.world.setReach(SCENE_REACH.objects, SCENE_REACH.terrain, SCENE_REACH.far);
     // The ground under it is the planet's own, generated as it is in play. It is streamed around
     // the **captured** standing spot, in the world's own coordinates, because that is where the
     // terrain's heights really are; the place's models are in their own frame at the origin, and
     // the two are brought together by standing the figure at the origin and putting the ground
     // there too (see `sceneGroundOffset`).
     await this.world.loadPack(stand);
+    // And the wait. `readyAround` is the same one a jump makes inside its closed tunnel: it builds
+    // what is left and links every program still queued, so the first frame drawn is the finished
+    // picture rather than the first instalment of it.
+    const whole = await this.world.readyAround(stand, SCENE_REACH.waitMs);
+    if (!whole) console.info(`place: ${key} was still building after ${(SCENE_REACH.waitMs / 1000) | 0}s; showing it as it stands`);
     this.scene3d = { key, built, stand, facing: (built.place.stand.heading * Math.PI) / 180, orbit: orbitFor(built.place), view: restView() };
     // The hour the place was captured at. Held, so the day does not walk off it while somebody is
     // choosing a face; given back when the scene goes.
@@ -5484,6 +5507,9 @@ class App {
     this.scene3d = null;
     if (s) disposePlace(s.built, (mats) => this.world.forgetMaterials(mats));
     this.world.sceneOnly = false;
+    // The player's own settings back, or the next world played would be built at a scene's reach.
+    const S = this.settings;
+    this.world.setReach(S.objectReach, S.terrainRadius, S.farRadius);
     clockKnob({ release: true });
     if (s) this.world.leave();
   }
