@@ -5586,6 +5586,22 @@ switch (cmd) {
     break;
   }
 
+  case 'clouds': {
+    // <out-dir>: measure every converted world's own cloud sheets and write what they say about
+    // its sky into <pack>/clouds.json -- how much of the sky each row covers and how dark that
+    // cover is, both of which are in the client's art and neither of which is anywhere as a number.
+    // It reads converted packs and no archive, so it takes no <swg-dir>.
+    if (!pos[1]) usage();
+    const { bakeClouds } = await import('./clouds.mjs');
+    const packs = GAME_PLANETS.filter((p) => existsSync(join(pos[1], p, 'sky.json')));
+    if (!packs.length) {
+      console.log(`no converted world under ${pos[1]} has a sky yet; run snapshot and sky first`);
+      break;
+    }
+    const out = bakeClouds(pos[1], packs, (line) => console.log(line));
+    console.log(`clouds: ${out.done.length} worlds measured${out.skipped.length ? `, ${out.skipped.length} with no sky` : ''}`);
+    break;
+  }
   case 'scenes': {
     // <out-dir> [--places=a,b] [--quality=0.35] [--aspect=3.8] [--cull=6]: the small worlds the
     // creation and selection screens stand a character in, built from the planet packs that are
