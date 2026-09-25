@@ -36,6 +36,7 @@ import { SwgTerrain, type BuildingLayerSource, type SwgWaterTable } from './swgT
 import { LayoutStreamer, type Building, type CellState, type PlacedObject } from './layoutStream';
 import { outdoorNav } from './nav/outdoorNav.ts';
 import { wildLife, type WildDeps } from './wildLife.ts';
+import { standingPeople, type PeopleDeps, type StandingRow } from './standingPeople.ts';
 import { CLONING_TUNE, facilitiesNear, SPAWN_CELL_NAME, type FacilityChoice, type NamedPlace } from './cloning.ts';
 import { isLiftCell, liftStops, stopAt, type LiftStop } from './lifts';
 import type { SunInfo } from '../core/postfx';
@@ -1375,6 +1376,9 @@ export class World {
     // simply has the wildlife it always had.
     await wildLife.load(this.packId, import.meta.env.BASE_URL);
     if (token !== this.loadToken) return null;
+    // The people who stand somewhere and stay there ride in the same pack the wildlife does, so the
+    // rows are taken from what that fetch already holds rather than fetched a second time.
+    standingPeople.adopt(wildLife.peopleRows() as StandingRow[]);
     this.packProgress = 0.12;
 
     const scatter: ScatterItem[] = [];
@@ -1590,6 +1594,7 @@ export class World {
     // nothing else holds them.
     outdoorNav.unload();
     wildLife.unload();
+    standingPeople.unload();
     // The water's height field holds a mesh and a material per thing that waded here, and the keys
     // are the bodies themselves: a world left with them still in the map holds every one of them.
     for (const body of this.simBodies.values()) body.dispose();
@@ -4212,6 +4217,27 @@ export class World {
     return this.wildDepsKept;
   }
 
+  /** What the standing people are allowed to ask of this world. Kept, like the wild world's. */
+  private peopleDepsKept: PeopleDeps | null = null;
+  private peopleDeps(): PeopleDeps {
+    if (!this.peopleDepsKept) {
+      this.peopleDepsKept = {
+        catalogue: () => this.mobileCatalogue,
+        // Stood as `spawned` with a world name, for the same two reasons the wildlife is: the
+        // manager leaves a spawned one where it was put, and the name keeps the hand-spawn cap and
+        // the NPC tab's clear off it.
+        spawn: (entry, at, inside, seed) => this.mobiles?.spawn(entry, at, { origin: 'spawned', seed, inside, worldId: `stood:${seed}` }) ?? 'no world',
+        remove: (m) => this.mobiles?.remove(m),
+        centre: () => this.layoutCenter,
+        held: () => this.streamHold || this.sceneOnly || !this.simulating,
+        // A person in a room needs that room's floor to exist first. The streamer builds a
+        // building's cells by distance, so asking for the ground there answers null until it has.
+        cellReady: (x, y, z) => this.groundAt(x, y + 2, z, true) !== null,
+      };
+    }
+    return this.peopleDepsKept;
+  }
+
   get layoutCenter(): { x: number; z: number } | null {
     return this.pack?.layout?.center ?? null;
   }
@@ -4788,6 +4814,7 @@ export class World {
     // The world's own lairs and herds, stood and put away as the player moves. On this clock and
     // not the frame's, so `__debug.advance` drives every respawn it has.
     wildLife.step(dt, this.simTime, playerPos, this.wildDeps());
+    standingPeople.step(dt, this.simTime, playerPos, this.peopleDeps());
     // `playerPos` is only read by a fighter under a long walk (`src/world/errand.ts`), which measures
     // how far the body was from the player to know whether anything along the route was solid. It is
     // handed in rather than picked out of `targets`, because the player leaves that list while

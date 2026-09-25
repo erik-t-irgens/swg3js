@@ -93,6 +93,7 @@ import { MAX_CLOUD_LAYERS, MAX_FLARE_SOURCES } from './core/fx/flareMath';
 import { SPACE_SKY_TUNE, tuneSpaceSky, type SunRule } from './space/suns';
 import { heatTuning, type HeatProduct } from './core/fx/heat';
 import { wildLife, WILD_TUNE } from './world/wildLife.ts';
+import { standingPeople, PEOPLE_TUNE } from './world/standingPeople.ts';
 import { LAIR_TUNE } from './world/mobiles/lairs.ts';
 import { CLOUD_MARCH, type CloudsPass } from './core/fx/clouds';
 import { CLOUD_TUNE, cloudLook, loadCloudPack, loadCloudVolumes, worthDrawing, type CloudPack } from './world/cloudLook.ts';
@@ -1377,6 +1378,23 @@ class App {
           nearest: near,
           tune: { ...WILD_TUNE, ...LAIR_TUNE },
         };
+      },
+      /**
+       * The people who stand somewhere and stay there: every one of them a real place the real
+       * server used, half of them inside a building. `{ go: true }` puts you at the nearest.
+       *
+       * `waiting` is the one worth knowing: a person in a cantina is not stood until that building's
+       * cells are really built, or they would have no floor and fall through the world.
+       */
+      people: (opts?: { go?: boolean; near?: number }) => {
+        const at = this.player.worldPos;
+        const near = standingPeople.nearest(at, Math.max(1, Math.min(20, opts?.near ?? 5)));
+        if (opts?.go && near.length) {
+          const p = near[0];
+          this.player.reset(new THREE.Vector3(p.x, this.world.terrain.heightAt(p.x, p.z) + 0.3, p.z));
+          return { went: p, note: p.indoors ? 'indoors: they stand once the building around them is built' : 'they stand on the next pass' };
+        }
+        return { ready: standingPeople.ready, ...standingPeople.last, standing: standingPeople.report(at), nearest: near, tune: { ...PEOPLE_TUNE } };
       },
       /** Teleport to a point in the original game's coordinates (the inverse of `swg()`); null when no layout is loaded. */
       teleportSwg: (x: number, z: number, yaw?: number) => {

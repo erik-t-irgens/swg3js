@@ -437,6 +437,16 @@ export class WildLife {
     return undefined;
   }
 
+  /**
+   * The people who stand still, out of the same pack.
+   *
+   * They ride in the world's half of the pack beside the areas, so they are handed on from here
+   * rather than fetched a second time by whoever stands them.
+   */
+  peopleRows(): readonly unknown[] {
+    return this.pack?.statics ?? [];
+  }
+
   /** What one site would stand, without standing it: for the console, and for a check. */
   holds(key: string): { lair: string; creatures: string[] } | null {
     const site = this.sites.find((s) => s.key === key);
