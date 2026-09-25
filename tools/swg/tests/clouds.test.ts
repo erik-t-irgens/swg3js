@@ -306,6 +306,11 @@ function tile(alpha: number, grey: number, size = 16): Buffer {
   ok(/vec2 cs = vec2\(textureSize\(uClouds, 0\)\)/.test(src) && /vUv \* cs - 0\.5/.test(src), 'and places them by that size rather than by a rule about halves');
   // And the two depths it weighs the taps by must be the same kind of number.
   ok(/fxViewZ\(texture\(uDepthFull, vUv\)\.r, uNearFar\.x, uNearFar\.y\)/.test(src), 'the full-resolution depth is turned into metres before it is compared with the half-resolution one, which already is');
+  // The fourth of the same kind, and the reason the strength is not only a number in the shader: at
+  // 0 the composite is `scene * 1 + 0`, an exact copy of its input, so the pass would spend its
+  // whole cost drawing the frame it was handed and report that it had drawn.
+  ok(/this\.base !== null && this\.amount > 0 && this\.look\.coverage > 0/.test(src), 'a strength of 0 stops the pass rather than making it an expensive copy of the picture');
+  ok(/reason\(ctx: FxFrameContext\): string \| null/.test(src), 'and every way it can decline to draw says so in words for the console listing');
   // And the depth product writes the far plane wherever nothing was drawn, so a sky pixel read as a
   // surface stops the ray before it reaches a deck that is 8.6 km off ten degrees above the horizon.
   ok(/depth < uFar \* 0\.999/.test(src), 'a pixel at the far plane is sky, not a surface the ray stops at');

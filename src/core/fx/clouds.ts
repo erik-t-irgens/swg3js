@@ -449,12 +449,29 @@ export class CloudsPass implements FxPass {
   wouldDraw(space: boolean, inside: boolean): boolean {
     // No volume, nothing to march. In space there is no sky to put cloud in, and indoors the march
     // would be stopped by the ceiling on every pixel, which is fill spent to draw nothing.
-    return this.base !== null && this.look.coverage > 0 && !space && !inside;
+    //
+    // The strength belongs here too, rather than only in the shader, where at 0 the composite is
+    // `scene * 1 + 0` -- an exact copy of its input. A pass that draws a copy of what it was given
+    // costs six milliseconds to change nothing, reports that it drew, and cannot be told apart from
+    // being switched off, which is precisely the state nobody can diagnose. R11: a pass with
+    // nothing to do says so and costs nothing. It is in this test and not only in `enabled` so that
+    // the flat sheets stay up: a sky with the march switched off and the sheets taken down for it
+    // would be a sky with no cloud of any kind.
+    return this.base !== null && this.amount > 0 && this.look.coverage > 0 && !space && !inside;
   }
 
   enabled(ctx: FxFrameContext): boolean {
     // The setting itself is the runner's: the registry ties this pass to `volumetricClouds`.
     return this.wouldDraw(ctx.space, ctx.inside);
+  }
+
+  reason(ctx: FxFrameContext): string | null {
+    if (!this.base) return 'the noise volumes have not been converted (npm run swg -- clouds assets-private)';
+    if (this.amount <= 0) return 'cloud strength is 0';
+    if (ctx.space) return 'in space there is no sky to put cloud in';
+    if (ctx.inside) return 'the camera is inside a building';
+    if (this.look.coverage <= 0) return "this world's own sky has no cloud at this weather";
+    return null;
   }
 
   needs(): readonly FxProductId[] {
