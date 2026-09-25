@@ -330,6 +330,21 @@ b { color: var(--accent); font-weight: 600; }
 .mob-more button { padding: 3px 12px; font-size: 11px; background: color-mix(in srgb, var(--pool) 20%, transparent); color: var(--text); border: 1px solid var(--panel-border); border-radius: 4px; cursor: pointer; }
 /* The Force tab: a row per power, the slot buttons at the right. */
 #force .wardrobe-panel { width: min(900px, 96vw); }
+/* The Housing tab: a row per deed the character owns, the examine pane beside them. */
+#housing .wardrobe-panel { width: min(900px, 96vw); }
+#housing .wardrobe-body { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); gap: 12px; padding: 8px 14px 10px; min-height: 0; }
+.housing-list { min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+.housing-row { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; align-items: baseline; padding: 6px 8px; border: 1px solid var(--panel-border); border-radius: 4px; cursor: pointer; }
+.housing-row:hover { border-color: var(--edge); }
+.housing-row.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.housing-row.cannot .housing-name { color: var(--muted); }
+.housing-name { font-size: 12px; color: var(--text); }
+.housing-line { font-size: 11px; color: var(--muted); letter-spacing: 0.02em; }
+.housing-up { font-size: 10px; color: var(--good); letter-spacing: 0.06em; text-transform: uppercase; }
+.housing-examine { min-height: 0; overflow-y: auto; border-left: 1px solid var(--panel-border); padding-left: 12px; }
+.housing-examine h3 { margin: 0 0 4px; font-size: 13px; color: var(--accent); }
+.housing-examine p { margin: 0 0 8px; font-size: 11px; color: var(--text); line-height: 1.5; }
+.housing-examine .why { color: var(--warn); }
 /* The backpack: "Worn and held" and "Backpack" side by side, a picture and a name to each item, the examine pane under them. */
 #backpack .wardrobe-panel { width: min(1040px, 96vw); outline: none; }
 #backpack .wardrobe-header .find { flex: none; width: 140px; padding: 4px 8px; font-size: 11px; background: color-mix(in srgb, var(--void) 30%, transparent); color: var(--text); border: 1px solid var(--panel-border); border-radius: 4px; }

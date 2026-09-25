@@ -198,6 +198,8 @@ import { core3MobileStats, scanServerSpawns } from './spawns.mjs';
 import { loadEffect } from './texrender.mjs';
 import { readTemplate, stringParam } from './objtemplate.mjs';
 import { statusJson } from './statusplan.mjs';
+/** The shape of deeds.json. A pack written by an older run is asked for again rather than read. */
+const DEED_PACK_VERSION = 1;
 import { openTre, openVfs, readHeader } from './tre.mjs';
 
 // A .env beside package.json names the folders once; @NAME anywhere in the arguments becomes that
@@ -5664,6 +5666,85 @@ switch (cmd) {
     }
     break;
   }
+  case 'deeds': {
+    // <swg-dir> <out-dir> [--core3=<dir>]: the deeds a player buys a building with, and everything
+    // needed to put one down -- what each makes, what it is called, the model this game draws it
+    // with, the grid the client drew while you placed it, its lots and its upkeep.
+    //
+    // It reads the archives **and** the owner's own emulator checkout, because neither alone is
+    // enough: the client's deed templates do not say what a deed makes (that was the server's), and
+    // the emulator does not carry a model. `tools/swg/deeds.mjs` says what the four-way join is and
+    // what comes of it. Nothing it writes may ever reach the repository.
+    //
+    // It must run after `gallery`, since it checks each deed's model against what that pack carries.
+    if (!pos[2]) usage();
+    const core3 = options.core3 ?? process.env.CORE3 ?? '';
+    if (!core3 || !existsSync(join(core3, 'object', 'tangible', 'deed'))) {
+      console.log(`deeds: no emulator scripts folder (--core3=<dir>, or CORE3 in .env); looked at ${core3 || '(nothing)'}`);
+      break;
+    }
+    const D = await import('./deeds.mjs');
+    const vfs = mount(pos[1]);
+    const out = pos[2];
+    const paramCache = new Map();
+    const labelCache = new Map();
+    const stringOf = (template, names) => {
+      try {
+        return resolveTemplateString(vfs, template, names, paramCache) ?? null;
+      } catch {
+        return null;
+      }
+    };
+    const textOf = (template, param) => {
+      try {
+        const sid = resolveTemplateParam(vfs, template, param, setStringId, paramCache);
+        return sid && sid.table && sid.key ? localize(vfs, `${sid.table}:${sid.key}`, labelCache) : null;
+      } catch {
+        return null;
+      }
+    };
+    // Which models this game really has, so a deed can say honestly whether it can be put down.
+    const galleryFile = join(out, 'gallery', 'manifest.json');
+    const models = new Set();
+    if (existsSync(galleryFile)) {
+      try {
+        const g = JSON.parse(readFileSync(galleryFile, 'utf8'));
+        for (const list of Object.values(g.categories ?? {})) for (const m of list) models.add(m.id);
+      } catch {
+        /* an unreadable gallery means no deed can be placed, which is what it says below */
+      }
+    }
+    const deeds = D.readDeeds(core3);
+    const buildings = D.readBuildings(core3);
+    const { rows, faults } = D.joinDeeds(deeds, buildings, {
+      has: (p) => vfs.has(p),
+      read: (p) => vfs.read(p),
+      templateString: stringOf,
+      name: (t) => textOf(t, 'objectName'),
+      desc: (t) => textOf(t, 'detailedDescription'),
+      hasModel: (id) => models.has(id),
+    });
+    const counts = D.deedCounts(rows);
+    mkdirSync(out, { recursive: true });
+    writeFileSync(
+      join(out, 'deeds.json'),
+      JSON.stringify(
+        {
+          version: DEED_PACK_VERSION,
+          source: { core3: true, note: 'what each deed makes, its lots and its upkeep are the emulator scripts; the name, the model and the footprint are the game archives' },
+          counts,
+          deeds: rows,
+        },
+        null,
+        1,
+      ),
+    );
+    console.log(`deeds: ${counts.deeds} buildings a player can buy, ${counts.named} named by the game, ${counts.withModel} with a model this game carries, ${counts.withFoot} with the grid the client placed them on`);
+    if (!models.size) console.log('  the gallery pack is not converted, so no deed names a model: run `gallery` first');
+    for (const f of faults.slice(0, 5)) console.log(`  footprint: ${f}`);
+    break;
+  }
+
   case 'spawns': {
     // <out-dir> [--core3=<dir>]: where the world's creatures and its standing people really were,
     // read out of the owner's own emulator checkout. It opens no game archive, so it takes no

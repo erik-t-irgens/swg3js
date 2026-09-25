@@ -99,6 +99,11 @@ import { SHUTTLE_TUNE, fareText, landingOn, portAt, portsOf, ridesFrom, type Far
 import { ShuttleMenu } from './ui/shuttleMenu.ts';
 import { loadGalaxyFile, planetOfRouteId } from './data/galaxy';
 import { homes } from './net/homes.ts';
+import { allDeeds, deedById, deedLine, footprintOf, loadDeeds, wrongWorld, type DeedRow } from './world/deeds.ts';
+import { GHOST_TUNE, PlacementGhost, ghostSpot, ghostVerdict, turnBy, wheelReach, type GhostState } from './world/placeGhost.ts';
+import { patchOfFootprint } from './world/housePlace.ts';
+import { PlacingBar } from './ui/placingBar.ts';
+import { HousingUi } from './ui/housingUi.ts';
 import { LAIR_TUNE } from './world/mobiles/lairs.ts';
 import { CLOUD_MARCH, type CloudsPass } from './core/fx/clouds';
 import { CLOUD_TUNE, cloudLook, loadCloudPack, loadCloudVolumes, worthDrawing, type CloudPack } from './world/cloudLook.ts';
@@ -261,7 +266,7 @@ function mountPrompt(v: import('./vehicles/vehicle').Vehicle, wingsKey: string =
 }
 
 const MOUNT_RANGE = 3.6;
-type InventoryTab = 'backpack' | 'wardrobe' | 'appearance' | 'weapons' | 'force';
+type InventoryTab = 'backpack' | 'housing' | 'wardrobe' | 'appearance' | 'weapons' | 'force';
 /**
  * What `__debug.send` takes beside a destination: which body walks, the walk whose rows to print,
  * calling the orders off, and the account's own invented numbers. It may be given as the first
@@ -506,6 +511,8 @@ class App {
   /** The same catalogue once it has arrived, for the jump's own reads (null until then). */
   private loadedCatalogue: HyperspaceCatalogue | null = null;
   private readonly liftMenu: LiftMenu;
+  private readonly housingUi: HousingUi;
+  private readonly placingBar: PlacingBar;
   private readonly shuttleMenu: ShuttleMenu;
   /** The shuttle fares, fetched once with the galaxy file; null until it lands, and on a pack that has none. */
   private fares: FareTable | null = null;
@@ -1223,6 +1230,20 @@ class App {
       this.freeMouse(false);
     };
     this.shuttleMenu.onPick = (i) => void this.takeShuttle(i);
+    // Housing: the deeds a character owns, and the ghost of a building being put down.
+    this.housingUi = new HousingUi(this.ui);
+    this.housingUi.onTab = (id) => this.toggleInventory(id as InventoryTab);
+    this.housingUi.onPlace = (id) => {
+      void this.startPlacing(id).then((why) => {
+        if (why) this.messages.system(why);
+      });
+    };
+    this.housingUi.onRemove = () => this.messages.system('take one down from the world itself, not from here');
+    this.placingBar = new PlacingBar(this.ui);
+    this.placingBar.onTurn = (n) => this.turnPlacing(n);
+    this.placingBar.onPlace = () => void this.dropPlacing();
+    this.placingBar.onCancel = () => this.stopPlacing();
+    void loadDeeds(import.meta.env.BASE_URL);
     this.npcUi = new NpcUi(this.ui);
     this.appearanceUi = new AppearanceUi(this.ui, () => this.saveAppearance());
     this.appearanceUi.onTab = (id) => this.toggleInventory(id as InventoryTab);
@@ -1529,6 +1550,56 @@ class App {
           nearest: near.slice(0, 3).map((t) => ({ name: t.name, kind: t.kind, away: Math.round(Math.hypot(t.x - at.x, t.z - at.z)) })),
           rides: rides.map((r, i) => `${i + 1}. ${r.name} — ${fareText(r.price)}${r.away ? ` (${(r.away / 1000).toFixed(1)} km)` : ''}`),
           tune: { ...SHUTTLE_TUNE },
+        };
+      },
+      /**
+       * The deeds a character can put a building down with, and the ghost that puts one down.
+       *
+       * `__debug.place()` lists what there is; `__debug.place('corellia_house_medium_deed')` takes
+       * that deed in hand, which is what the Housing tab's double-click does; `{ turn: 2 }` and
+       * `{ reach: 30 }` move the ghost as the buttons and the wheel do; `{ drop: true }` puts it
+       * down; `{ cancel: true }` gives it up; and `{ tune: { … } }` moves the ghost's own numbers.
+       */
+      deed: async (deed?: string, opts: { turn?: number; reach?: number; drop?: boolean; cancel?: boolean; tune?: Partial<typeof GHOST_TUNE> } = {}) => {
+        if (opts.tune) Object.assign(GHOST_TUNE, opts.tune);
+        if (opts.cancel) {
+          this.stopPlacing();
+          return { placing: null };
+        }
+        if (deed) {
+          const why = await this.startPlacing(deed);
+          if (why) return { error: why };
+        }
+        if (typeof opts.turn === 'number') this.turnPlacing(opts.turn);
+        if (typeof opts.reach === 'number' && this.placing) this.placing.reach = opts.reach;
+        if (this.placing) this.stepPlacing();
+        if (opts.drop) {
+          const was = this.placing?.state;
+          await this.dropPlacing();
+          return { dropped: !!was?.ok, why: was?.why ?? null };
+        }
+        const p = this.placing;
+        if (!p) {
+          const rows = allDeeds();
+          return {
+            placing: null,
+            deeds: rows.length,
+            placeable: rows.filter((d) => d.model && d.foot).map((d) => d.id),
+            note: rows.length ? 'pass one of those ids to take it in hand' : 'no deeds: npm run swg -- deeds @SWG assets-private --retail-only (with your emulator checkout), then reload',
+            tune: { ...GHOST_TUNE },
+          };
+        }
+        return {
+          placing: p.deed.id,
+          name: p.deed.name,
+          reach: Math.round(p.reach),
+          yaw: Number(((p.yaw * 180) / Math.PI).toFixed(0)),
+          at: p.state ? { x: Math.round(p.state.x), z: Math.round(p.state.z), y: Number(p.state.y.toFixed(1)) } : null,
+          ok: p.state?.ok ?? false,
+          why: p.state?.why ?? null,
+          foot: p.deed.foot ? `${p.deed.foot.w}x${p.deed.foot.h} cells of ${p.deed.foot.cw} m` : null,
+          lots: p.deed.lots,
+          tune: { ...GHOST_TUNE },
         };
       },
       /** What is built on the world you are standing on, whose each one is, and what the server last said. */
@@ -5635,6 +5706,11 @@ class App {
     // caught below); with the menu up it resumes; with a panel or the map up it closes that.
     window.addEventListener('keydown', (e) => {
       if (e.code !== 'Escape' || !this.inWorld || !this.started || this.traveling) return;
+      // A building in hand is given up before anything else: it is the thing on the screen.
+      if (this.isPlacing && !this.menu.open) {
+        this.stopPlacing();
+        return;
+      }
       // The Escape that dropped the lock (and so opened the menu) must not close it again in the same breath.
       if (this.menu.open) {
         if (performance.now() - this.menuOpenedAt > 300) this.resume();
@@ -7978,6 +8054,16 @@ class App {
       // below, never from the eye inside the skull. The orbit's own zoom finds the wheel already spent.
     }
     this.cam.release();
+    // A building in hand takes the wheel before the camera does: while it is out the wheel pushes
+    // the ghost away and pulls it back, which is the one thing the wheel does that is not a zoom.
+    // The camera zeroes what it reads, so this has to be first or the two would fight over it.
+    if (this.placing && input.wheel) {
+      this.wheelPlacing(-input.wheel);
+      input.wheel = 0;
+    }
+    // The ghost of a building being put down: where it stands and whether it may, worked out after
+    // the camera so it reads the heading this very frame.
+    if (this.placing) this.stepPlacing();
     // Mounted or piloted, a ship out of the cockpit and the chase is always drawn.
     if (ship) this.showHull(ship, true);
     // Aboard a ship the view is upright in the hull's frame, as the body is; adrift in space, in the body's own.
@@ -9251,7 +9337,7 @@ class App {
 
   /** The panels' open state moved to the tabs: closing one panel of a pair and opening the other keeps the mouse free. */
   private anyPanelOpen(): boolean {
-    return this.backpack.open || this.wardrobe.open || this.appearanceUi.open || this.weaponsUi.open || this.forceUi.open || this.vehiclesUi.open || this.shipEdit.open || this.npcUi.open || this.shipMenu.open || this.hyperspaceUi.open || this.liftMenu.open || this.shuttleMenu.open || this.menu.open;
+    return this.backpack.open || this.wardrobe.open || this.appearanceUi.open || this.weaponsUi.open || this.forceUi.open || this.vehiclesUi.open || this.shipEdit.open || this.npcUi.open || this.shipMenu.open || this.hyperspaceUi.open || this.liftMenu.open || this.shuttleMenu.open || this.housingUi.open || this.menu.open;
   }
 
   private jediKit(): JediKit {
@@ -9274,6 +9360,137 @@ class App {
     }
   }
 
+  /** A placement in hand: the deed, the ghost's distance and turn, and what it last said. */
+  private placing: { deed: DeedRow; reach: number; yaw: number; state: GhostState | null } | null = null;
+  private readonly ghost = new PlacementGhost();
+
+  /** Whether the player is placing a building, which takes the wheel and the click. */
+  get isPlacing(): boolean {
+    return !!this.placing;
+  }
+
+  /**
+   * Take a deed in hand: load its building, make a ghost of it and go into placing.
+   *
+   * The model is the gallery pack's own and is **borrowed**, never cloned: the ghost swaps each
+   * mesh's material for a see-through copy and puts the originals back when it lets go. It is
+   * prepared first, so a placement never compiles a program on the frame it starts.
+   */
+  private async startPlacing(deedId: string): Promise<string | null> {
+    const deed = deedById(deedId);
+    if (!deed) return 'there is no such deed';
+    if (!deed.model) return 'this game has no model for that building';
+    if (!deed.foot) return 'the archives have no footprint for that building';
+    const wrong = wrongWorld(deed, this.world.planet.id);
+    if (wrong) return wrong;
+    if (this.player.mounted || this.player.piloting || this.player.aboard || this.player.noclip) return 'not while you are riding or aboard something';
+    const pack = await this.world.housesPack();
+    if (!pack) return 'the gallery pack is not converted';
+    let model;
+    try {
+      model = await pack.model(deed.model);
+    } catch (err) {
+      return `${deed.model} would not load: ${err instanceof Error ? err.message : String(err)}`;
+    }
+    // The ghost draws the whole building, rooms and all, which is what makes it read as a house
+    // rather than as a shell; it is one shared scene, never a copy.
+    const shown = model.scene;
+    await this.world.prepareActor(shown);
+    this.closePanels();
+    this.ghost.hold(shown);
+    if (!this.ghost.group.parent) this.world.scene.add(this.ghost.group);
+    this.placing = { deed, reach: GHOST_TUNE.reach, yaw: this.player.heading, state: null };
+    this.placingBar.show(deed.name, false, 'move it where you want it');
+    this.messages.system(`placing ${deed.name}: the wheel moves it, the buttons turn it, a click puts it down`);
+    return null;
+  }
+
+  /** Give the deed back and put the model away exactly as it was found. */
+  private stopPlacing(): void {
+    if (!this.placing) return;
+    const mine = this.ghost.release();
+    if (mine.length) this.world.forgetMaterials(mine);
+    this.placing = null;
+    this.placingBar.hide();
+  }
+
+  /**
+   * The placement's own frame: where the ghost stands, whether it may, and the grid under it.
+   *
+   * Everything it decides is the same three tests a house placed any other way makes, with the
+   * footprint's own patch in place of the model's box, because a deed carries the very grid the
+   * game measured with.
+   */
+  private stepPlacing(): void {
+    const p = this.placing;
+    if (!p) return;
+    const foot = footprintOf(p.deed);
+    if (!foot) return;
+    const me = this.player.worldPos;
+    const at = ghostSpot({ x: me.x, z: me.z }, this.player.heading, p.reach);
+    const state = ghostVerdict(patchOfFootprint(foot), at, p.yaw, {
+      heightAt: (x, z) => this.world.terrain.heightAt(x, z),
+      waterAt: (x, z) => this.world.terrain.waterHeightAt(x, z),
+      standing: (x, z, reach) => this.world.standingNear(x, z, reach),
+    });
+    p.state = state;
+    this.ghost.place(state, foot, p.deed.foot?.rows ?? [], (x, z) => this.world.terrain.heightAt(x, z));
+    this.placingBar.show(p.deed.name, state.ok, state.why);
+  }
+
+  /** The wheel while placing: push the ghost out or pull it in. */
+  private wheelPlacing(notches: number): void {
+    if (this.placing) this.placing.reach = wheelReach(this.placing.reach, notches);
+  }
+
+  /** A turn button, or the turn keys. */
+  private turnPlacing(presses: number): void {
+    if (this.placing) this.placing.yaw = turnBy(this.placing.yaw, presses);
+  }
+
+  /** Put it down, if the ground will take it. */
+  private async dropPlacing(): Promise<void> {
+    const p = this.placing;
+    const model = p?.deed.model;
+    if (!p?.state?.ok || !model) return;
+    const { deed, state } = p;
+    this.stopPlacing();
+    // With a server the house goes up when the server answers, exactly as everybody else's does.
+    if (this.net.session.authority === 'server') {
+      homes.ask(model, { x: state.x, z: state.z }, state.yaw, state.clear, state.y);
+      this.messages.system(`${deed.name}: asking the server for the ground`);
+      return;
+    }
+    const out = await this.world.placeBuilding(model, { at: { x: state.x, z: state.z }, yaw: state.yaw, y: state.y });
+    if (out.ok) {
+      this.lastHouse = { x: out.x, z: out.z, key: out.key };
+      this.messages.system(`${deed.name} stands`);
+    } else this.messages.system(out.why ?? 'it would not go there');
+  }
+
+  /** What the Housing tab shows: every deed whose building this game can really put down. */
+  private showHousing(): void {
+    const here = this.world.planet.id;
+    const rows = allDeeds();
+    const cells = rows
+      .filter((d) => d.model)
+      .map((d) => ({
+        id: d.id,
+        name: d.name,
+        line: deedLine(d),
+        desc: d.desc,
+        why: !d.foot ? 'the archives have no footprint for it' : (wrongWorld(d, here) ?? ''),
+        standing: 0,
+      }));
+    this.housingUi.show({
+      cells,
+      note: rows.length
+        ? 'none of the buildings in the pack has a model this game carries: run `npm run swg -- gallery` first'
+        : 'no deeds: run `npm run swg -- deeds @SWG assets-private --retail-only` with your emulator checkout, and reload',
+      built: { now: homes.report().standing, most: 0 },
+    });
+  }
+
   /** The Skills tab shown for the class in play: its skills on offer, and its slots. */
   private showSkills(): void {
     const jedi = this.kit.id === 'jedi';
@@ -9294,6 +9511,7 @@ class App {
     if (this.npcUi.open) this.npcUi.hide();
     if (this.shipMenu.open) this.shipMenu.hide();
     if (this.hyperspaceUi.open) this.hyperspaceUi.hide();
+    if (this.housingUi.open) this.housingUi.hide();
     if (this.liftMenu.open) this.liftMenu.hide();
     if (this.shuttleMenu.open) {
       this.shuttleMenu.hide();
@@ -10107,7 +10325,7 @@ class App {
       return;
     }
     const want = tab ?? this.inventoryTab;
-    const wasOpen = tab === undefined && (this.backpack.open || this.wardrobe.open || this.appearanceUi.open || this.weaponsUi.open || this.forceUi.open);
+    const wasOpen = tab === undefined && (this.backpack.open || this.housingUi.open || this.wardrobe.open || this.appearanceUi.open || this.weaponsUi.open || this.forceUi.open);
     this.closePanels();
     // The backpack's own open and close, from the game's interface table.
     this.audio.ui.play(wasOpen ? 'panelClose' : tab !== undefined ? 'select' : 'panelOpen');
@@ -10130,7 +10348,8 @@ class App {
       this.appearanceUi.show();
       if (character) this.appearanceUi.attach(character, import.meta.env.BASE_URL);
       else this.appearanceUi.explain('This character is a single model, not a set of parts, so there is nothing to shape. Convert it with <code>npm run swg -- species</code>.');
-    } else if (want === 'force') this.showSkills();
+    } else if (want === 'housing') this.showHousing();
+    else if (want === 'force') this.showSkills();
     else {
       this.weaponsUi.held = { right: this.player.equipped.right?.id ?? null, left: this.player.equipped.left?.id ?? null };
       this.weaponsUi.show();
@@ -10954,7 +11173,15 @@ class App {
         if (input.pressedAction('spawner') && !jumpBusy) this.toggleSpawner();
         if (input.pressedAction('ship')) this.toggleShipMenu();
         if (input.pressedAction('help')) this.hud.toggleHelp();
-        if (!this.map.open && !this.anyPanelOpen()) {
+        // A building in hand takes the click and the two turn keys before anything else does: a
+        // click puts it down, the strafe keys turn it, and neither reaches the player while it is
+        // out. Escape gives it up, which is handled where every other Escape is.
+        if (this.placing) {
+          if (input.pressedAction('attack')) void this.dropPlacing();
+          if (input.pressedAction('left')) this.turnPlacing(-1);
+          if (input.pressedAction('right')) this.turnPlacing(1);
+        }
+        if (!this.map.open && !this.anyPanelOpen() && !this.placing) {
           if (input.pressedAction('saberToggle') && this.kit.id === 'jedi' && !player.mounted) player.toggleSaber();
           if (input.pressedAction('switchClass')) this.setClass(this.kit.id === 'jedi' ? 'bounty_hunter' : 'jedi');
           // Locked from the jump's enter stage until control returns, but for the crew in the tunnel (`pressJumpE`); the key only:

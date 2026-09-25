@@ -25,6 +25,7 @@ export function wireTabs(root: HTMLElement, current: string, onPick: (id: string
 /** The inventory's tabs: the backpack first; the old wardrobe and weapons panels stay as developer tools that give what they put on. */
 export const INVENTORY_TABS: TabDef[] = [
   { id: 'backpack', label: 'Backpack' },
+  { id: 'housing', label: 'Housing' },
   { id: 'appearance', label: 'Appearance' },
   { id: 'force', label: 'Skills' },
   { id: 'wardrobe', label: 'Clothes (give)' },

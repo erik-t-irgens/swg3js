@@ -3069,6 +3069,15 @@ export class World {
     return this.layoutStream?.unplace(key) ?? false;
   }
 
+  /**
+   * What the world already has standing near a point: each one's place and its own size on the
+   * ground. Empty with no world, which reads as "nothing is in the way" and is right: a placement
+   * with no world loaded has already been refused for having no world.
+   */
+  standingNear(x: number, z: number, reach: number): { x: number; z: number; radius: number; template?: string }[] {
+    return this.layoutStream?.objectsNear(x, z, reach) ?? [];
+  }
+
   /** Materials whose shaders have been asked for ahead of their first draw. */
   private readonly compiledMaterials = new WeakSet<THREE.Material>();
 
