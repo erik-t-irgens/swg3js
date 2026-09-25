@@ -2980,16 +2980,27 @@ export class World {
   /**
    * Put a building on the ground in the world that is loaded, as a player placing a house does.
    *
-   * Nothing here persists, crosses the relay or belongs to anybody: this is the placing itself, and
-   * the ground test in front of it. What it hands back says either where the house went or, in
-   * words, why the ground would not take it.
+   * This is the placing itself and the ground test in front of it; whether it is written down and
+   * who is told is the relay's (`src/net/homes.ts`). What it hands back says either where the house
+   * went or, in words, why the ground would not take it.
    *
    * The `y` it stands the building at is the ground, not the bottom of its box: a house's origin is
-   * its ground line and its cellar is modelled sixteen metres below that.
+   * its ground line and its cellar is modelled sixteen metres below that. A `y` given by the caller
+   * is used as it stands and the ground is still measured, because a house standing on a world has
+   * one height and that is the one the server wrote down -- a second browser re-measuring would
+   * agree today and would not the day the terrain changes under everybody.
+   *
+   * `key` is what it is filed under, and is what takes it away again. The default is a name of its
+   * own per model, so `__debug.house` on its own puts one down and can take it back; a home carries
+   * the id the server gave it.
    */
-  async placeBuilding(model: string, opts: { at?: { x: number; z: number }; from?: { x: number; z: number }; yaw?: number; force?: boolean } = {}): Promise<{ ok: boolean; why: string | null; x: number; z: number; y: number; yaw: number; rise: number; sink: number; slope: number; building: Building | null }> {
+  async placeBuilding(
+    model: string,
+    opts: { at?: { x: number; z: number }; from?: { x: number; z: number }; yaw?: number; force?: boolean; key?: string; y?: number } = {},
+  ): Promise<{ ok: boolean; why: string | null; key: string; x: number; z: number; y: number; yaw: number; rise: number; sink: number; slope: number; clear: number; building: Building | null }> {
     const stream = this.layoutStream;
-    const refuse = (why: string) => ({ ok: false, why, x: 0, z: 0, y: 0, yaw: 0, rise: 0, sink: 0, slope: 0, building: null });
+    const key = opts.key ?? `runtime/${model}`;
+    const refuse = (why: string) => ({ ok: false, why, key, x: 0, z: 0, y: 0, yaw: 0, rise: 0, sink: 0, slope: 0, clear: 0, building: null });
     if (!stream) return refuse('no world is loaded');
     if (this.planet.space) return refuse('there is no ground out here');
     const pack = await this.housesPack();
@@ -3011,27 +3022,31 @@ export class World {
       probes,
       probes.map((p) => this.terrain.heightAt(p.x, p.z)),
     );
-    if (!verdict.ok && !opts.force) return { ...verdict, x: at.x, z: at.z, yaw, why: verdict.why, building: null };
+    const clear = clearRadius(patch);
+    // A height the caller already has is the one to stand it at, whatever the ground says now; the
+    // ground is measured either way, so the numbers come back and a refusal is still a refusal.
+    const y = opts.y ?? verdict.y;
+    if (!verdict.ok && !opts.force && opts.y === undefined) return { ...verdict, key, x: at.x, z: at.z, yaw, clear, why: verdict.why, building: null };
     const q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
     const building = await stream.place({
       model,
-      template: `runtime/${model}`,
+      template: key,
       x: at.x,
-      y: verdict.y,
+      y,
       z: at.z,
       q,
       // Its own radius, which is which size tier it joins and so how far off it is drawn. There is
       // no need to force it into the far tier to be sure that tier is loaded: every tier of the
       // region the player is standing in is within its own range of them.
       radius: loaded.radius,
-      clear: clearRadius(patch),
+      clear,
     });
-    return { ok: true, why: verdict.ok ? null : `stood anyway: ${verdict.why}`, x: at.x, z: at.z, y: verdict.y, yaw, rise: verdict.rise, sink: verdict.sink, slope: verdict.slope, building };
+    return { ok: true, why: verdict.ok ? null : `stood anyway: ${verdict.why}`, key, x: at.x, z: at.z, y, yaw, rise: verdict.rise, sink: verdict.sink, slope: verdict.slope, clear, building };
   }
 
-  /** Take a building placed in play back out of the world. */
-  unplaceBuilding(at: { x: number; z: number }, template: string): boolean {
-    return this.layoutStream?.unplace({ model: '', template, x: at.x, y: 0, z: at.z, q: new THREE.Quaternion(), radius: 0 }) ?? false;
+  /** Take a building placed in play back out of the world, by what it was filed under. */
+  unplaceBuilding(key: string): boolean {
+    return this.layoutStream?.unplace(key) ?? false;
   }
 
   /** Materials whose shaders have been asked for ahead of their first draw. */

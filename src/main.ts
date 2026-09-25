@@ -95,6 +95,7 @@ import { heatTuning, type HeatProduct } from './core/fx/heat';
 import { wildLife, WILD_TUNE } from './world/wildLife.ts';
 import { standingPeople, PEOPLE_TUNE } from './world/standingPeople.ts';
 import { HOUSE_TUNE } from './world/housePlace.ts';
+import { homes } from './net/homes.ts';
 import { LAIR_TUNE } from './world/mobiles/lairs.ts';
 import { CLOUD_MARCH, type CloudsPass } from './core/fx/clouds';
 import { CLOUD_TUNE, cloudLook, loadCloudPack, loadCloudVolumes, worthDrawing, type CloudPack } from './world/cloudLook.ts';
@@ -647,7 +648,7 @@ class App {
   /** The nearest living thing's name, found at `HUD_WIRING.nearbyHz` rather than on the frame path. */
   private nearbyName = '';
   /** The last building `__debug.house` put down, so the same helper can take it away again. */
-  private lastHouse: { x: number; z: number; template: string } | null = null;
+  private lastHouse: { x: number; z: number; key: string } | null = null;
   private nearbyClock = 0;
   /**
    * The two words the long prompt line needs that the bar's own state has no room for: how many
@@ -1411,14 +1412,28 @@ class App {
        * and wants an eye on them: measured over four real worlds they take between a tenth and a
        * half of the open ground, depending on the world and the size of the building.
        *
-       * Nothing about it is saved, sent or owned: it is gone the moment you leave the world.
+       * **With a server it is a real home** and with none it is a sketch. Connected, the placing
+       * goes to the relay, the house appears when the server answers, everybody standing on that
+       * world sees it, and it is still there tomorrow. With no server set it stands here alone and
+       * is gone the moment you leave the world. `{ local: true }` forces the second even with a
+       * server, which is how to try a spot without asking anybody.
        */
-      house: async (model?: string, opts: { yaw?: number; force?: boolean; go?: boolean; remove?: boolean; tune?: Partial<typeof HOUSE_TUNE> } = {}) => {
+      house: async (model?: string, opts: { yaw?: number; force?: boolean; go?: boolean; remove?: boolean; local?: boolean; tune?: Partial<typeof HOUSE_TUNE> } = {}) => {
         if (opts.tune) Object.assign(HOUSE_TUNE, opts.tune);
+        const shared = !opts.local && this.net.session.authority === 'server';
         if (opts.remove) {
+          // Connected, the last one of yours nearest you, since the server is what says what is
+          // yours; alone, whatever this helper last put down.
+          if (shared) {
+            const p = this.player.worldPos;
+            const mine = homes.mine(this.net.session.character ?? '', { x: p.x, z: p.z });
+            if (!mine.length) return { error: 'you have nothing standing on this world' };
+            homes.askDown(mine[0].id);
+            return { asked: mine[0].id, note: 'it comes down when the server answers' };
+          }
           const last = this.lastHouse;
           if (!last) return { error: 'nothing has been put down this session' };
-          const gone = this.world.unplaceBuilding(last, last.template);
+          const gone = this.world.unplaceBuilding(last.key);
           if (gone) this.lastHouse = null;
           return { removed: gone, was: last };
         }
@@ -1430,13 +1445,26 @@ class App {
             note: 'pass one of these ids; the ones beginning ply_ are the buildings players bought',
             houses: walkIn.filter((d) => /^ply_/.test(d.id)).map((d) => d.id),
             other: walkIn.length - walkIn.filter((d) => /^ply_/.test(d.id)).length,
+            shared: shared ? 'a house put down now is written down and everybody sees it' : 'no server: a house put down now stands here alone',
+            standing: homes.report().standing,
             tune: { ...HOUSE_TUNE },
           };
         }
         const yaw = opts.yaw ?? this.player.heading;
         const p = this.player.worldPos;
+        // Connected, the ground is still tested here -- this browser is the only side with any
+        // terrain -- and what goes to the server is the answer. The house itself goes up when the
+        // server says so, in `homes.word`, exactly as everybody else's does.
+        if (shared) {
+          const tried = await this.world.placeBuilding(model, { from: { x: p.x, z: p.z }, yaw, force: opts.force, key: 'house:trying' });
+          this.world.unplaceBuilding('house:trying');
+          if (!tried.ok) return { ...tried, building: null, tune: { ...HOUSE_TUNE } };
+          homes.ask(model, { x: tried.x, z: tried.z }, yaw, tried.clear, tried.y);
+          if (opts.go) this.player.reset(new THREE.Vector3(tried.x, tried.y + 0.3, tried.z));
+          return { ...tried, building: 'asked for; it goes up when the server answers', tune: { ...HOUSE_TUNE } };
+        }
         const out = await this.world.placeBuilding(model, { from: { x: p.x, z: p.z }, yaw, force: opts.force });
-        if (out.ok) this.lastHouse = { x: out.x, z: out.z, template: `runtime/${model}` };
+        if (out.ok) this.lastHouse = { x: out.x, z: out.z, key: out.key };
         if (out.ok && opts.go) this.player.reset(new THREE.Vector3(out.x, out.y + 0.3, out.z));
         // A building whose rooms the pack knows about but which came back without one was placed
         // into a size tier this region has not loaded: it is standing, and its rooms arrive with
@@ -1444,6 +1472,12 @@ class App {
         const rooms = (pack.find(model)?.cells?.length ?? 0) > 1;
         const stood = out.building ? 'placed, with rooms' : rooms ? 'placed; its rooms come with its size tier' : 'placed, no rooms';
         return { ...out, building: out.ok ? stood : null, tune: { ...HOUSE_TUNE } };
+      },
+      /** What is built on the world you are standing on, whose each one is, and what the server last said. */
+      homes: () => {
+        const p = this.player.worldPos;
+        const me = this.net.session.character ?? '';
+        return { ...homes.report(), shared: this.net.session.authority === 'server', mine: homes.mine(me, { x: p.x, z: p.z }).map((r) => r.id) };
       },
       /** Teleport to a point in the original game's coordinates (the inverse of `swg()`); null when no layout is loaded. */
       teleportSwg: (x: number, z: number, yaw?: number) => {
@@ -4513,6 +4547,20 @@ class App {
       // made to agree; a word with no kind on it is taken as it always was.
       if (msg?.t === 'spot') this.docking.spotAnswer(String(msg.what ?? ''), msg.granted === 1, String(msg.why ?? ''), msg.kind as SpotKind | undefined);
     };
+    // The buildings players have put down. Everything about one comes from the server -- where it
+    // stands, how high, whose it is -- and this side only stands it up, through the same call a
+    // house put down with no server at all goes through.
+    homes.attach({
+      place: (model, o) => this.world.placeBuilding(model, o),
+      unplace: (key) => this.world.unplaceBuilding(key),
+      say: (text) => this.messages.system(text),
+      send: (msg) => this.net.sendWord(msg),
+    });
+    const homeWordWas = this.net.onWord;
+    this.net.onWord = (msg) => {
+      homeWordWas(msg);
+      if (msg?.t === 'homes' || msg?.t === 'homeUp' || msg?.t === 'homeDown' || msg?.t === 'homeNo') homes.word(msg);
+    };
     this.remotes.carrierPose = (to, pos, quat) => {
       const p = this.player;
       const v = to === this.net.id ? p.mounted ?? p.piloting ?? p.aboard?.vehicle ?? null : null;
@@ -7245,6 +7293,10 @@ class App {
     // before one would otherwise say what it hurt on the planet arrived at.
     this.shipHud.clear();
     this.feedback.clear();
+    // The buildings players have put down go with the world that held them: the next world's list
+    // comes whole from the server on arriving, and a row kept from this one would be a house
+    // standing in the wrong place with nothing left to take it down.
+    homes.clear();
     this.world.load(planet, packIdOf(planet, this.zone));
     // This world's named places, off the same list the map reads and cached there: what the death
     // card calls each facility. Never awaited, and a world whose pack has no list simply has none.

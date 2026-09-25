@@ -99,6 +99,12 @@
 //                                                          another on. The server's answer is the only thing that
 //                                                          makes a claim real, and a line that closes gives back
 //                                                          everything it held
+//   { t: 'placeHome', model, x, y, z, h, r }                 put a building down in the world you are standing on
+//                                                          (homes.mjs). The ground was tested in the browser, which
+//                                                          is the only side with any terrain, so the height comes up
+//                                                          with the place; the server decides how many there are,
+//                                                          whose they are, and that two are not in one spot
+//   { t: 'removeHome', id }                                  take one of yours back down
 // Server to browser:
 //   { t: 'hail', v, now, epoch, dayMs, nonce, word, ff }     sent the instant the socket opens, before anything is said
 //   { t: 'claimed', you, keep }   { t: 'denied', why }   { t: 'refused', why }   { t: 'taken', by }
@@ -145,6 +151,11 @@
 //                                                           browser has to work out what the other is looking at)
 //   { t: 'trade', do: 'done', with, gave, got }   { t: 'trade', do: 'off', why }   { t: 'trade', do: 'refused', why }
 //   { t: 'spot', kind, what, granted, why? }   (to whoever asked, and to nobody else)
+//   { t: 'homes', world, rows: [{ id, owner, model, x, y, z, h, r, at }] }   (what is built on this world, sent on
+//                                                          arriving; a world with none sends nothing at all)
+//   { t: 'homeUp', home }   { t: 'homeDown', id }   (to everybody on that world, the one who did it included, since
+//                                                          what they need to hear is the id the server gave it)
+//   { t: 'homeNo', why }   (to whoever asked, and to nobody else)
 //
 // Everything but the claim, the ping and the ask goes to the world the player is on and no further
 // (rooms.mjs). Before this, a browser was told about people on other planets and dressed them,
@@ -167,6 +178,7 @@ import { COMBAT_WIRE, Duels, cleanBlocked, cleanDied, cleanDuel, cleanEnd, clean
 import { NpcPlaces, cleanNpcBatch, cleanNpcDrop, cleanNpcHit } from './npcWire.mjs';
 import { LEDGER_TUNING, Ledger, cleanItems, cleanTrade, mayItems } from './ledger.mjs';
 import { SPOT_TUNING, Spots, cleanSpot, mayClaim } from './spots.mjs';
+import { HOME_TUNING, Homes, cleanHome, cleanRemove, mayPlace } from './homes.mjs';
 
 /** What this server speaks. A browser that hears no hail is talking to the relay that came before. */
 const WIRE_VERSION = 2;
@@ -251,6 +263,7 @@ for (let i = 0; i < args.length; i++) {
   else if (name.startsWith('own.') && has(OWN_TUNING, name.slice(4))) OWN_TUNING[name.slice(4)] = value;
   else if (name.startsWith('item.') && has(LEDGER_TUNING, name.slice(5))) LEDGER_TUNING[name.slice(5)] = value;
   else if (name.startsWith('spot.') && has(SPOT_TUNING, name.slice(5))) SPOT_TUNING[name.slice(5)] = value;
+  else if (name.startsWith('home.') && has(HOME_TUNING, name.slice(5))) HOME_TUNING[name.slice(5)] = value;
   else console.log(`  --set ${name}: there is no such number, and it has been ignored`);
 }
 
@@ -306,6 +319,11 @@ ledger.load(store.data);
 // rides another on (spots.mjs). Held by connection and never written down -- a claim means "a ship is
 // flying at this right now", which nothing about a restart can still be true of.
 const spots = new Spots({ tuning: SPOT_TUNING });
+// The buildings players have put down (homes.mjs). Written to disk like the items and unlike
+// everything else here: a house that did not survive a restart would not be a home. Every change
+// goes out through the store, so the log has it before anybody is told.
+const homes = new Homes({ tuning: HOME_TUNING, write: (rec) => store.change(rec) });
+homes.load(store.data);
 const settings = { friendlyFire: FRIENDLY_FIRE, word: WORD ? 1 : 0, dayMs: DAY };
 const had = store.data.settings ?? {};
 if (had.friendlyFire !== settings.friendlyFire || had.word !== settings.word || had.dayMs !== settings.dayMs) store.change({ t: 'settings', settings });
@@ -728,6 +746,13 @@ function onMessage(c, text, trimmed = false) {
     if (first || move.from !== key) {
       const where = npcPlaces.rows(key);
       if (where.length) send(c, { t: 'npcState', r: where });
+    }
+    // The buildings standing on this world. Sent whole on arrival and then only as they change, the
+    // same shape as the creatures above: a world with none sends nothing at all, so a browser built
+    // before any of this existed is handed exactly what it was handed before.
+    if (first || move.from !== key) {
+      const built = homes.forWorld(key);
+      if (built.length) send(c, { t: 'homes', world: key, rows: built });
     }
     if (first) {
       tellRoomAbout(key, c);
@@ -1162,6 +1187,33 @@ function onMessage(c, text, trimmed = false) {
       return;
     }
     deliverTo(spots.take(c.id, world, spot.kind, spot.what));
+  } else if (msg.t === 'placeHome' || msg.t === 'removeHome') {
+    // A building put down in the world. Unlike a dock claim this *is* written down -- it is the
+    // thing the whole of it is for -- and unlike an item it belongs to a world rather than to a
+    // backpack, so everybody standing on that world is told and everybody who arrives later is
+    // handed it with the rest of what stands there.
+    //
+    // The server has no terrain, so whether the ground will take a house is the browser's answer
+    // and the height comes up the wire with the place. What is decided here is what a second
+    // browser could disagree with: how many there are, whose they are, and that two of them are
+    // not in the same place.
+    if (!c.hello) return;
+    const world = rooms.keyOf(c.id);
+    if (!world) return;
+    c.building ??= { at: 0, lines: 0 };
+    // Dropped in silence, and safely: a house that did not go up is one the browser never saw
+    // appear, and the next press asks again. A dock claim cannot be dropped that way and says so.
+    if (!mayPlace(c.building, Date.now(), HOME_TUNING)) return;
+    const others = [...rooms.members(world)];
+    if (msg.t === 'placeHome') {
+      const want = cleanHome(msg, HOME_TUNING);
+      if (!want) return;
+      deliverTo(homes.place(c.character, c.id, world, want, others));
+    } else {
+      const gone = cleanRemove(msg);
+      if (!gone) return;
+      deliverTo(homes.remove(c.character, c.id, gone.id, others, adminFor(store.data, ADMIN) === c.player));
+    }
   }
 }
 
@@ -1196,6 +1248,7 @@ const server = createServer((req, res) => {
         creaturePlaces: npcPlaces.describe(),
         items: ledger.describe(),
         spots: spots.describe(),
+        homes: homes.describe(),
         joinWord: WORD ? 'set' : 'none',
         admin: adminFor(store.data, ADMIN) || 'nobody yet',
         friendlyFire: FRIENDLY_FIRE,
@@ -1210,6 +1263,7 @@ const server = createServer((req, res) => {
         own: OWN_TUNING,
         item: LEDGER_TUNING,
         spot: SPOT_TUNING,
+        home: HOME_TUNING,
         // The distances a group works to, which are the client's own and not this server's to pick:
         // they are printed here so what is being enforced can be read off without reading the code.
         ranges: GROUP_RANGES,

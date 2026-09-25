@@ -276,6 +276,16 @@ export class Session {
   private nonce = '';
   /** The character this session is about, and what was last worked out about it. */
   private charId = '';
+
+  /**
+   * Which character this session claimed, as the server knows it. It is what the server files
+   * anything owned under -- the items, and the buildings a player has put down -- so anything that
+   * asks "is this one mine" compares against this and never against a name or a connection.
+   */
+  get character(): string {
+    return this.charId;
+  }
+
   private charName = '';
   private charMark = '';
   private about: CharacterAbout = { species: '', class: 'jedi', planet: '', zone: '' };

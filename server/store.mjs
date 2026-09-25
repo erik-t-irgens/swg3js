@@ -1,7 +1,7 @@
 // The truth the server keeps between runs: the players it knows, their characters, the things they
-// own (a row per item, whose shape is the ledger's: see ledger.mjs), the houses (an empty slot still)
-// and the switches it was started with. One file you can read, plus a log of the changes since it was
-// last written.
+// own (a row per item, whose shape is the ledger's: see ledger.mjs), the buildings they have put
+// down (a row per house, whose shape is homes.mjs's) and the switches it was started with. One file
+// you can read, plus a log of the changes since it was last written.
 //
 // How it is written, and why: the snapshot goes to `world.json.tmp`, is flushed to the disk and
 // only then renamed over `world.json`, so a machine that loses power mid-write still has the last
@@ -23,6 +23,7 @@
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import { applyItems } from './ledger.mjs';
+import { applyHomes } from './homes.mjs';
 
 /** The shape of the file. A file written by a newer server is left alone and not played into. */
 export const STORE_VERSION = 1;
@@ -46,7 +47,7 @@ function table(from = null) {
   return out;
 }
 
-/** An empty world: the slots that exist, including the two this pass leaves empty on purpose. */
+/** An empty world: every slot that exists, each filled by the file that owns its shape. */
 export function emptyWorld(epoch = Date.now()) {
   return { v: STORE_VERSION, seq: 0, epoch, players: table(), characters: table(), items: table(), houses: table(), settings: {} };
 }
@@ -89,12 +90,12 @@ export function applyChange(data, rec) {
       return true;
     }
     default:
-      // What a character owns is the ledger's shape rather than this file's, so a record about one
-      // row goes there to be applied: one place decides what a row looks like on disk, and the same
-      // function runs when a trade happens and when the log is replayed on start. Anything it does
-      // not know either is a record from a newer server: kept in the log, not understood here, and
-      // not an error.
-      return applyItems(data, rec);
+      // What a character owns is the ledger's shape rather than this file's, and a building it has
+      // put down is `homes.mjs`'s, so a record about either goes there to be applied: one place
+      // decides what each row looks like on disk, and the same function runs when the thing happens
+      // and when the log is replayed on start. Anything neither of them knows is a record from a
+      // newer server: kept in the log, not understood here, and not an error.
+      return applyItems(data, rec) || applyHomes(data, rec);
   }
 }
 

@@ -555,6 +555,13 @@ export class Net {
       // lane or on the spot on a hull that one ship rides another on. Handed over whole, as the
       // group's words are; what it means belongs to src/space/docking.ts.
       case 'spot':
+      // The buildings players have put down on this world: the list handed over on arriving, and
+      // one going up or coming down while you are standing there. Handed over whole, as the group's
+      // words are; what they mean belongs to src/net/homes.ts.
+      case 'homes':
+      case 'homeUp':
+      case 'homeDown':
+      case 'homeNo':
       case 'duel':
         // The group and the words players type: handed over whole to whoever owns them. Nothing is
         // read here, so this switch does not have to grow a case for every word a group can say.

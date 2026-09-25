@@ -221,6 +221,12 @@ export class LayoutStreamer {
    * see) and this is where they are kept.
    */
   private readonly runtime = new Map<PlacedObject, { tier: LoadedTier; meshes: THREE.Object3D[]; building: Building | null; effects: EffectHandle[] }>();
+  /**
+   * What each object placed in play was filed under, which is its `template`: the runtime ones are
+   * given a name of their own (a home carries the id the server gave it) and it is a name nothing
+   * in a snapshot has, so a removal is one lookup and can never reach a snapshot object by accident.
+   */
+  private readonly placedByKey = new Map<string, PlacedObject>();
   /** Huge objects whose collision is still being built, a few pieces an update. A field initialiser, as `huge`. */
   private readonly hugeQueue: HugeJob[] = [];
   private loads = 0;
@@ -349,6 +355,7 @@ export class LayoutStreamer {
       tier: tier < 0 ? TIERS.length - 1 : tier,
     };
     this.objects.push(placed);
+    this.placedByKey.set(p.template, placed);
     const rx = Math.floor(p.x / REGION);
     const rz = Math.floor(p.z / REGION);
     const key = `${rx},${rz}`;
@@ -371,7 +378,10 @@ export class LayoutStreamer {
   }
 
   /**
-   * Take one back out again: what an undo, a pick-up, or a world going away wants.
+   * Take one back out again: what an undo, a pick-up, or a world going away wants. It is named by
+   * the `template` it was placed under, which for anything put down in play is a name of its own
+   * (a home carries the id the server gave it) and is a name nothing in a snapshot has -- so this
+   * is one lookup and can never reach a snapshot object by accident.
    *
    * Two things it does not undo, both deliberately. The patch of ground it kept the procedural
    * flora off stays kept: the flora is drawn into a chunk when the chunk is built, so putting the
@@ -379,12 +389,13 @@ export class LayoutStreamer {
    * the ones built after. And the widest radius the collider sweep reaches for is left where it is,
    * which only ever makes that sweep look a little further than it needs to.
    */
-  unplace(p: RuntimePlacement): boolean {
-    const i = this.objects.findIndex((o) => o.template === p.template && o.x === p.x && o.z === p.z);
-    if (i < 0) return false;
-    const placed = this.objects[i];
-    this.objects.splice(i, 1);
-    const region = this.regions.get(`${Math.floor(p.x / REGION)},${Math.floor(p.z / REGION)}`);
+  unplace(template: string): boolean {
+    const placed = this.placedByKey.get(template);
+    if (!placed) return false;
+    this.placedByKey.delete(template);
+    const i = this.objects.indexOf(placed);
+    if (i >= 0) this.objects.splice(i, 1);
+    const region = this.regions.get(`${Math.floor(placed.x / REGION)},${Math.floor(placed.z / REGION)}`);
     if (region) {
       const list = region.objects[placed.tier];
       const k = list.indexOf(placed);
