@@ -204,6 +204,11 @@ const half = [
   { value: 0.5, label: 'Half (faster)' },
   { value: 1, label: 'Full' },
 ];
+const cloudQuality = [
+  { value: 0.25, label: 'Quarter (fastest)' },
+  { value: 0.5, label: 'Half' },
+  { value: 1, label: 'Full' },
+];
 
 export const FX_KNOBS: readonly FxKnobDef[] = [
   { key: 'effects', pass: null, label: 'Effects', kind: 'toggle', requires: [], hint: 'Runs the picture through the effects below. Switching it recompiles every shader in the background (a notice counts them); the picture changes over when they are ready.' },
@@ -219,7 +224,9 @@ export const FX_KNOBS: readonly FxKnobDef[] = [
   { key: 'heatHaze', pass: 'heatHaze', label: 'Heat haze', kind: 'toggle', requires: ['effects'], hint: 'The air shimmers over lava, behind running engines and in front of a flame thrower, as the game drew it over Mustafar\'s lava.' },
   { key: 'heatHazeStrength', pass: 'heatHaze', label: 'Heat haze strength', kind: 'range', min: 0, max: 2, step: 0.05, format: two, requires: ['effects', 'heatHaze'], hint: '1 is the shimmer the game drew; 2 moves the picture twice as far.' },
   { key: 'volumetricClouds', pass: 'volumetricClouds', label: 'Volumetric clouds', kind: 'toggle', requires: ['effects'], hint: "Cloud the sky is really made of rather than a picture drawn across it, marched through a slab overhead and lit by the world's own sun, so each planet keeps its own colour. By far the most expensive thing here; off puts the flat sheets back exactly." },
-  { key: 'volumetricCloudQuality', pass: 'volumetricClouds', label: 'Cloud resolution', kind: 'select', options: half, requires: ['effects', 'volumetricClouds'], hint: 'The share of the screen the march runs at, smoothed back up along edges. Quarter costs about a quarter of half.' },
+  // This one offers a quarter as well: the march is the dearest pass in the chain by a long way, and
+  // a quarter of the screen is the setting that decides whether it can be afforded at all.
+  { key: 'volumetricCloudQuality', pass: 'volumetricClouds', label: 'Cloud resolution', kind: 'select', options: cloudQuality, requires: ['effects', 'volumetricClouds'], hint: 'The share of the screen the march runs at, smoothed back up along edges by depth. Quarter costs about a quarter of half, and cloud has no hard edges of its own to lose.' },
   { key: 'volumetricCloudAmount', pass: 'volumetricClouds', label: 'Cloud strength', kind: 'range', min: 0, max: 1, step: 0.05, format: two, requires: ['effects', 'volumetricClouds'], hint: 'How much of the march reaches the picture. At 0 the sky is untouched with the pass still running, which is the way to see what it costs against what it gives.' },  { key: 'lightShafts', pass: 'lightShafts', label: 'Light shafts', kind: 'toggle', requires: ['effects'], hint: 'Daylight through the doorways of the room you are in: a beam in the dusty air and a bright patch where it lands; and a soft glow in the air around the room\'s own lamps.' },
   { key: 'lightShaftStrength', pass: 'lightShafts', label: 'Light shaft strength', kind: 'range', min: 0, max: 1.5, step: 0.05, format: two, requires: ['effects', 'lightShafts'], hint: '0.4 clean air, 0.8 a dusty cantina, 1.2 a smoky hall.' },
   { key: 'roomGlowStrength', pass: 'lightShafts', label: 'Lamp glow', kind: 'range', min: 0, max: 1.5, step: 0.05, format: two, requires: ['effects', 'lightShafts'], hint: 'The haze around a room\'s lamps and in the depth of a lit hall, in the room\'s own colours; 0 turns it off.' },
