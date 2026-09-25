@@ -6,7 +6,7 @@
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { gatherLevels, measureTile } from '../clouds.mjs';
-import { cloudLook, levelAt, worthDrawing, CLOUD_TUNE, type CloudPack } from '../../../src/world/cloudLook.ts';
+import { billowCut, cloudLook, levelAt, worthDrawing, CLOUD_TUNE, type CloudPack } from '../../../src/world/cloudLook.ts';
 import { encodePng } from '../png.mjs';
 
 let passed = 0;
@@ -131,6 +131,65 @@ function tile(alpha: number, grey: number, size = 16): Buffer {
     ok(measured >= 1, `${measured} worlds measured`);
     ok(darkest.pack === 'mustafar', `the darkest sky in the game is the lava world's, which is what its own art says (${darkest.pack}, brightness ${darkest.brightness})`);
     ok(thickest.coverage > 0.8, `and the thickest is a real storm deck (${thickest.pack}, ${(thickest.coverage * 100).toFixed(0)}%)`);
+  }
+}
+
+{
+  // The calibration, checked against the real volume rather than against arithmetic.
+  //
+  // Coverage is a share of sky and the march cuts the billow channel to get it. The cut is not
+  // `1 - coverage`, because the billow does not fill nought to one; the ends come from the pack,
+  // measured off the bytes it wrote. This loads those bytes and counts, which is the only way to
+  // know the two agree.
+  const noiseFile = 'assets-private/clouds/noise_base.rgba';
+  const manFile = 'assets-private/clouds/manifest.json';
+  if (!existsSync(noiseFile) || !existsSync(manFile)) {
+    note('no noise volume here, so the cut was checked on its own');
+    ok(billowCut(0, { lo: 0.5, hi: 0.9 }) === 0.9, 'no coverage cuts at the top of the billow, which keeps nothing');
+    ok(billowCut(1, { lo: 0.5, hi: 0.9 }) === 0.5, 'and all of it cuts at the bottom, which keeps everything');
+    ok(billowCut(0.5, { lo: 0, hi: 1 }) === 0.5, 'and half of it, half way');
+    ok(billowCut(2, { lo: 0.5, hi: 0.9 }) === 0.5 && billowCut(-1, { lo: 0.5, hi: 0.9 }) === 0.9, 'a coverage outside nought to one is held inside it');
+  } else {
+    const man = JSON.parse(readFileSync(manFile, 'utf8')) as { billow: { lo: number; hi: number }; base: { size: number } };
+    const bytes = readFileSync(noiseFile);
+    const n = man.base.size ** 3;
+    ok(bytes.length === n * 4, `the volume on disk is the size its manifest claims (${bytes.length} bytes for ${man.base.size} cubed)`);
+    // The share of sky each world's coverage really produces, through the cut the march will use.
+    const hist = new Uint32Array(256);
+    for (let i = 0; i < n; i++) hist[bytes[i * 4]]++;
+    const shareAbove = (cut: number): number => {
+      const at = Math.round(cut * 255);
+      let hit = 0;
+      for (let v = at + 1; v < 256; v++) hit += hist[v];
+      return hit / n;
+    };
+    const worlds: [number, string][] = [
+      [0.12, 'Tatooine'],
+      [0.27, 'Naboo'],
+      [0.35, 'Mustafar'],
+      [0.67, 'Kashyyyk dead forest'],
+      [0.85, 'Dathomir'],
+    ];
+    let worst = 0;
+    for (const [coverage, who] of worlds) {
+      const got = shareAbove(billowCut(coverage, man.billow));
+      note(`${who.padEnd(22)} asked for ${(coverage * 100).toFixed(0).padStart(3)}% of the sky, the volume gives ${(got * 100).toFixed(0).padStart(3)}%`);
+      worst = Math.max(worst, Math.abs(got - coverage));
+    }
+    ok(worst < 0.22, `every world gets roughly the sky its own art asked for (worst off by ${(worst * 100).toFixed(0)} points)`);
+    // And the thing the naive cut got wrong: it must not saturate.
+    const naive = shareAbove(1 - 0.35);
+    const proper = shareAbove(billowCut(0.35, man.billow));
+    ok(naive > proper + 0.3, `cutting at one minus coverage instead would give the lava world ${(naive * 100).toFixed(0)}% of the sky rather than ${(proper * 100).toFixed(0)}%, which is why the ends are measured`);
+    // Monotone, or a cloudier world would somehow have less cloud.
+    let last = -1;
+    let rising = true;
+    for (let c = 0; c <= 1.0001; c += 0.05) {
+      const s = shareAbove(billowCut(c, man.billow));
+      if (s < last - 1e-9) rising = false;
+      last = s;
+    }
+    ok(rising, 'and a cloudier world never comes out with less cloud than a clearer one');
   }
 }
 

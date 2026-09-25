@@ -5600,6 +5600,31 @@ switch (cmd) {
     }
     const out = bakeClouds(pos[1], packs, (line) => console.log(line));
     console.log(`clouds: ${out.done.length} worlds measured${out.skipped.length ? `, ${out.skipped.length} with no sky` : ''}`);
+    // And the two noise volumes the march reads. Nothing in them comes out of the archives -- they
+    // are generic cloud noise, the same on every world, and the client drew its sky as flat sheets
+    // and had none -- so the pack says `invented` on the made-up system's own precedent.
+    if (!options['no-noise']) {
+      const { billowRange, buildBase, buildDetail, CLOUD_NOISE } = await import('./cloudnoise.mjs');
+      const dir = join(pos[1], 'clouds');
+      mkdirSync(dir, { recursive: true });
+      const say = (what) => (n, of) => {
+        if (n === of || n % 32 === 0) process.stdout.write(`\rclouds: ${what} ${n}/${of}   `);
+      };
+      const t0 = Date.now();
+      const base = buildBase(CLOUD_NOISE.baseSize, CLOUD_NOISE, say('base volume'));
+      const detail = buildDetail(CLOUD_NOISE.detailSize, CLOUD_NOISE, say('detail volume'));
+      process.stdout.write('\r');
+      writeFileSync(join(dir, 'noise_base.rgba'), base);
+      writeFileSync(join(dir, 'noise_detail.rgba'), detail);
+      // The calibration, measured off the volume just written: coverage is a share of sky and the
+      // march turns it into a threshold on the billow, which does not fill nought to one.
+      const billow = billowRange(base, CLOUD_NOISE.baseSize);
+      writeFileSync(
+        join(dir, 'manifest.json'),
+        JSON.stringify({ format: 1, source: 'invented', base: { size: CLOUD_NOISE.baseSize, channels: 4, file: 'noise_base.rgba' }, detail: { size: CLOUD_NOISE.detailSize, channels: 4, file: 'noise_detail.rgba' }, billow, frequencies: { base: CLOUD_NOISE.baseFrequencies, detail: CLOUD_NOISE.detailFrequencies } }, null, 1),
+      );
+      console.log(`clouds: noise volumes written (${(base.length / 1048576).toFixed(1)} MB + ${(detail.length / 1024).toFixed(0)} KB) in ${((Date.now() - t0) / 1000).toFixed(0)}s; the billow lies between ${billow.lo} and ${billow.hi}`);
+    }
     break;
   }
   case 'scenes': {

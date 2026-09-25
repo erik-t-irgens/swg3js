@@ -125,6 +125,49 @@ export function worthDrawing(look: CloudLook, tune = CLOUD_TUNE): boolean {
   return !look.storming && look.coverage >= tune.minCoverage;
 }
 
+/** Where the baked billow really lies, as the noise pack measured it off its own bytes. */
+export interface BillowRange {
+  lo: number;
+  hi: number;
+}
+
+/**
+ * The threshold on the billow that gives this share of sky.
+ *
+ * **The calibration, and the reason it is not `1 - coverage`.** Coverage is a share of sky and the
+ * march turns it into a cut through the billow channel, but the billow does not fill nought to one:
+ * measured over the real volume it lies between 0.58 and 0.90. Cutting at `1 - coverage` is
+ * therefore a cliff -- a quarter covered gives 57% of the sky, a third gives 88%, and everything
+ * past a third saturates at all of it. Cutting between the measured ends instead is very nearly
+ * linear, and the ends come from the pack rather than from here so that changing the noise
+ * re-calibrates this with it.
+ */
+export function billowCut(coverage: number, billow: BillowRange): number {
+  const lo = Math.min(billow.lo, billow.hi);
+  const hi = Math.max(billow.lo, billow.hi);
+  return hi - (hi - lo) * clamp01(coverage);
+}
+
+/** The baked noise volumes' own record. Null when the `clouds` command has not been run. */
+export interface CloudNoisePack {
+  format: number;
+  source: string;
+  base: { size: number; channels: number; file: string };
+  detail: { size: number; channels: number; file: string };
+  billow: BillowRange;
+}
+
+export async function loadCloudNoise(base = ''): Promise<CloudNoisePack | null> {
+  try {
+    const res = await fetch(`${base}assets-private/clouds/manifest.json`);
+    if (!res.ok) return null;
+    const pack = (await res.json()) as CloudNoisePack;
+    return pack?.format === 1 && pack.base?.size > 0 && pack.billow ? pack : null;
+  } catch {
+    return null;
+  }
+}
+
 /** A world's measured sky, fetched from its pack. Null when the `clouds` command has not been run. */
 export async function loadCloudPack(packId: string, base = ''): Promise<CloudPack | null> {
   try {
