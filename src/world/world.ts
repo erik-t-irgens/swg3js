@@ -678,6 +678,15 @@ export class World {
   private readonly csmMaterials = new WeakSet<THREE.Material>();
   private csmScanAt = 0;
   private loadToken = 0;
+  /**
+   * True while this world is being loaded only to stand a character in one of the captured places.
+   *
+   * It skips exactly one thing: the placed-object streamer. The ground, the sky, the water, the
+   * flora and the weather all load and run as they always do, because those are what make the hour
+   * real; the objects come from `scenes/`, already culled to the one frustum that camera can see.
+   * Set before `loadPack` and cleared when the world is left.
+   */
+  sceneOnly = false;
 
   /** The ships pack's particle effects (bolts in flight, their hits), played wherever the ships go, on every planet. */
   readonly shipFx: ParticleEffects;
@@ -1450,7 +1459,15 @@ export class World {
     }
 
     // Snapshot objects stream in around the player from here on (see LayoutStreamer).
-    if (layout) {
+    //
+    // A scene skips this whole branch and nothing else. The creation and selection screens show one
+    // of the owner's captured places: the ground, the sky, the water and the weather are the
+    // world's own, which is what makes the sun of that hour really light a character and the clouds
+    // really move, but the placed objects come from `scenes/` already culled to the one frustum
+    // that camera can see. Streaming a whole planet's worth beside them would build thousands of
+    // things nobody can look at, and take the load from seconds to a minute. Everything above this
+    // -- the terrain, the sky, the flora, the ground textures -- runs exactly as it always does.
+    if (layout && !this.sceneOnly) {
       this.layoutStream?.dispose();
       this.particles?.dispose();
       this.particles = new ParticleEffects(this.scene, pack.url(''));
@@ -2949,7 +2966,8 @@ export class World {
    * builds a program that is never drawn. A material flagged `userData.unlit` is kept out of the
    * cascades altogether, for the same reason in reverse.
    */
-  private adoptMaterials(root: THREE.Object3D): THREE.Object3D[] {
+  /** Public because a baked place's materials are adopted from outside: see sceneWorld.ts. */
+  adoptMaterials(root: THREE.Object3D): THREE.Object3D[] {
     const csm = this.csm;
     const fresh: THREE.Object3D[] = [];
     root.traverse((o) => {
@@ -3073,7 +3091,8 @@ export class World {
   }
 
   /** A yield between compile steps: a message to itself when the tab is hidden (never throttled), else a zero timer. */
-  private breath(): Promise<void> {
+  /** Public because a baked place yields between models as it builds, the same as every other load. */
+  breath(): Promise<void> {
     return new Promise<void>((resolve) => {
       if (typeof document === 'undefined' || !document.hidden) {
         setTimeout(resolve, 0);

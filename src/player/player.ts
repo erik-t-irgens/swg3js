@@ -2365,6 +2365,26 @@ export class Player {
     this.group.updateMatrixWorld(true);
   }
 
+  /**
+   * Stand where you are and breathe: the figure animated with no input, no physics and no camera.
+   *
+   * This is what the creation and selection screens want. `update` is the whole of being alive --
+   * it reads the keys, moves a kinematic body through the character controller, takes the heading
+   * off the camera and hurts you for standing in lava -- and none of that belongs on a screen where
+   * somebody is choosing a hat. What is left is the part that makes a figure look like a person:
+   * the rig's own idle, ticked, and the drawn body put where the rig now is.
+   *
+   * It is the same quartet the mounted and noclip branches of `update` already use, which is the
+   * precedent for it being safe: neither of those steps physics either. Without it the figure is
+   * simply frozen, because `CharacterRig.update` is called from nowhere else for the player.
+   */
+  standStill(dt: number): void {
+    this.rig?.stopOverride();
+    this.animateRig(dt, 0, false);
+    this.placeVisual();
+    this.group.updateMatrixWorld(true);
+  }
+
   private animateRig(dt: number, speed: number, moving: boolean, mz = 0, mx = 0): void {
     const rig = this.rig;
     if (!rig) return;

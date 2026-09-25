@@ -29,7 +29,9 @@ import { SSAO_BASE_POWER } from './core/fx/ssaoMath.ts';
 import type { FighterGlow } from './world/npcs';
 import { DEFAULT_TIER } from './world/npcs.ts';
 import { captureScene, headingDegrees, sceneLine } from './world/sceneCapture.ts';
-import { framePlace, orbitFor, packPlanet, FRAME_ASPECT } from './world/scenePlaces.ts';
+import { framePlace, orbitFor, packPlanet, FRAME_ASPECT, ORBIT_EYE_HEIGHT } from './world/scenePlaces.ts';
+import { buildPlace, disposePlace, sceneManifest, type BuiltPlace } from './world/sceneWorld.ts';
+import { clampView, restView, viewPose, type SceneView } from './world/sceneView.ts';
 import { sceneSpots } from './data/scenes.ts';
 /**
  * How near a named place has to be for `__debug.scene` to call the shot that place's. Ours, and
@@ -682,6 +684,16 @@ class App {
   private current: SavedCharacter | null = null;
   /** The creator is up: the appearance and wardrobe panels at full size over no world at all. */
   private creating = false;
+  /**
+   * The captured place a character is being stood in, or null for the plain doll on a dark stage.
+   *
+   * While this is set the frame loop takes a short path of its own (`stepScene`): the world draws,
+   * the sky runs, the weather blows and the figure breathes, and none of the rest of being alive
+   * happens. It is deliberately **not** `inWorld`, which some twenty places read to mean "the
+   * player is somewhere" -- the pointer lock, Escape, every panel's `canOpen`, `savePlace`, the
+   * class record. Borrowing that flag would have changed all of them at once.
+   */
+  private scene3d: { key: string; built: BuiltPlace; stand: THREE.Vector3; facing: number; orbit: { yaw: number; pitch: number; distance: number }; view: SceneView } | null = null;
   /** A planet is loaded and the loop runs the world; false on the select screen and in the creator, where nothing streams. */
   private inWorld = false;
   private lastPlaceSave = 0;
@@ -4110,6 +4122,39 @@ class App {
        * the orbit hangs off the body's own focus point and not off the feet. It is for recognising the
        * shot and judging where a ship looks right, and the pictures themselves are framed by `shoot`.
        */
+      /**
+       * Stand the character in one of the baked places, in three dimensions, with the world's own sun,
+       * sky and weather: `await place('tyrena')`, `await place(null)` to come out, `await place()` to list
+       * what is built. Needs `npm run swg -- scenes assets-private` to have been run.
+       *
+       * The captured camera is as far out as it goes, because the bake carries only what that one frustum
+       * can see. Move the view with `placeView`.
+       */
+      place: async (key?: string | null) => {
+        if (key === undefined) {
+          const man = await sceneManifest();
+          return man ? { built: man.places.map((p) => `${p.key} (${p.pack}, ${p.instances} things)`), showing: this.scene3d?.key ?? null } : 'no places built; run: npm run swg -- scenes assets-private';
+        }
+        if (key === null) {
+          await this.hideScene();
+          return 'out';
+        }
+        const ok = await this.showScene(key);
+        if (!ok) return `could not stand anyone in ${key}`;
+        const s = this.scene3d!;
+        return { place: s.key, world: s.built.place.pack, draws: s.built.draws, models: s.built.models, triangles: s.built.triangles, missing: s.built.missing, hours: s.built.place.hours.length };
+      },
+      /**
+       * The creator's camera while a place is up: `placeView({ zoom: 0.7, pan: 0.3, spin: 3.14 })` spins the
+       * figure half round, winds in and looks up at the face; nothing reads it back.
+       */
+      placeView: (v?: Partial<SceneView>) => {
+        const s = this.scene3d;
+        if (!s) return 'nobody is standing in a place';
+        if (v) s.view = clampView({ ...s.view, ...v });
+        const pose = viewPose(s.orbit, s.view, ORBIT_EYE_HEIGHT);
+        return { ...s.view, metres: Number(pose.distance.toFixed(2)), farthest: Number(s.orbit.distance.toFixed(2)), looksAt: Number(pose.look.y.toFixed(2)) };
+      },
       goToShot: async (key?: string) => {
         const spots = sceneSpots();
         if (!key || !spots.some((s) => s.key === key)) {
@@ -5383,6 +5428,115 @@ class App {
   private resume(): void {
     this.menu.hide();
     this.freeMouse(false);
+  }
+
+  /**
+   * Stand the character in one of the captured places, loading the world behind the screen.
+   *
+   * Answers false and changes nothing when there are no places built on this install, which is the
+   * ordinary state of a fresh checkout: the screen then shows the doll on its dark stage exactly as
+   * it always did. That fallback is the whole safety of this -- a scene is an improvement on a
+   * screen that already works, never a thing the screen needs.
+   */
+  private async showScene(key: string): Promise<boolean> {
+    const man = await sceneManifest();
+    if (!man || !man.places.some((p) => p.key === key)) return false;
+    const row = man.places.find((p) => p.key === key)!;
+    const where = packPlanet(row.pack);
+    if (!where) return false;
+    await this.hideScene();
+    // The streamer is what a scene skips, and only that: the ground, the sky, the water and the
+    // weather all load as they always do, since those are what make the hour real.
+    this.world.sceneOnly = true;
+    this.world.load(planetById(where.planet), row.pack);
+    const built = await buildPlace(key, {
+      adopt: (root) => this.world.adoptMaterials(root),
+      breath: () => this.world.breath(),
+    });
+    if (!built) {
+      this.world.sceneOnly = false;
+      return false;
+    }
+    // The place is put back where it was captured. Its models are baked in their own frame with
+    // the feet at the origin -- which keeps the file's numbers small and lets a place describe
+    // itself -- and the ground is the planet's own at the planet's own heights, so one offset on
+    // the group is what brings the two together.
+    const stand = new THREE.Vector3(built.place.stand.x, built.place.stand.y, built.place.stand.z);
+    built.group.position.copy(stand);
+    this.world.scene.add(built.group);
+    // The ground under it is the planet's own, generated as it is in play. It is streamed around
+    // the **captured** standing spot, in the world's own coordinates, because that is where the
+    // terrain's heights really are; the place's models are in their own frame at the origin, and
+    // the two are brought together by standing the figure at the origin and putting the ground
+    // there too (see `sceneGroundOffset`).
+    await this.world.loadPack(stand);
+    this.scene3d = { key, built, stand, facing: (built.place.stand.heading * Math.PI) / 180, orbit: orbitFor(built.place), view: restView() };
+    // The hour the place was captured at. Held, so the day does not walk off it while somebody is
+    // choosing a face; given back when the scene goes.
+    const hour = built.place.hours[Math.floor((built.place.hours.length - 1) / 2)]?.hour;
+    if (hour !== undefined) this.world.day.time = hour / 24;
+    return true;
+  }
+
+  /** Let go of the place, its models and the world behind it, and give the day back. */
+  private async hideScene(): Promise<void> {
+    const s = this.scene3d;
+    this.scene3d = null;
+    if (s) disposePlace(s.built, (mats) => this.world.forgetMaterials(mats));
+    this.world.sceneOnly = false;
+    clockKnob({ release: true });
+    if (s) this.world.leave();
+  }
+
+  /**
+   * One frame of a character standing in a captured place.
+   *
+   * Everything here is either what makes the picture or what makes the figure look alive, and
+   * nothing else. `world.update` is not gameplay -- it is the draw's own engine: the day, the sky's
+   * blend, the lighting, the fog, the water's clock, the weather, the terrain streaming in around
+   * the spot and the animated surfaces all live in it, which is exactly the list of things the
+   * owner asked for when they said they wanted three dimensions rather than a photograph.
+   *
+   * What is **not** here is the whole of being alive: no input, no character controller, no
+   * physics step, no combat, no relay, no prompts and no display. A creator is a place to choose a
+   * hat in.
+   */
+  private stepScene(dt: number): void {
+    const s = this.scene3d;
+    if (!s) return;
+    // Everything here is in the world's own coordinates, not the place's.
+    //
+    // The bake writes a place in its own frame with the feet at the origin, which keeps its numbers
+    // small and lets a place describe itself. But the **ground** is the planet's own, generated at
+    // the planet's own heights, so the two only meet if the place is put back where it came from.
+    // It is one offset on the group, and it costs no precision: a world is at most twelve
+    // kilometres across, where a float still resolves a millimetre.
+    const stand = s.stand;
+    // `placeVisual` writes the drawn body from `pos` and `heading`, so those are what is driven
+    // here; writing the group directly would be undone by the next frame's own placement.
+    this.player.pos.copy(stand);
+    this.player.heading = s.facing + s.view.spin;
+    this.player.group.visible = true;
+    this.player.standStill(dt);
+
+    // The camera: the shot's own line, as far along it as the view has been wound. The pose is
+    // reckoned from the feet, so it is carried to where the feet really are.
+    const pose = viewPose(s.orbit, s.view, ORBIT_EYE_HEIGHT);
+    const cam = this.cam.camera;
+    cam.fov = s.built.place.camera.fov;
+    cam.position.set(stand.x + pose.camera.x, stand.y + pose.camera.y, stand.z + pose.camera.z);
+    cam.lookAt(stand.x + pose.look.x, stand.y + pose.look.y, stand.z + pose.look.z);
+    cam.updateProjectionMatrix();
+    cam.updateMatrixWorld();
+
+    // The world's own engine, at the place's own feet. Nothing is hurt and nothing is targeted.
+    this.world.update(dt, stand, cam.position, false, () => {}, null);
+    this.effects.update(dt);
+    this.world.updateWeatherView(dt);
+    this.world.updateShadows(performance.now());
+    this.player.drawBlades(dt, cam);
+    this.stepAudio(dt);
+    this.drawFrame();
   }
 
   /** Back to the select screen: the place is written, the world unloaded, nothing streams until a character is chosen. */
@@ -10139,6 +10293,14 @@ class App {
       this.lastDt = dt;
       const input = this.input;
       const player = this.player;
+      // A character standing in one of the captured places takes a path of its own: the world is
+      // loaded and drawn and its sky runs, but nobody is playing, so none of the rest of this
+      // frame -- the keys, the body, the fight, the streaming, the relay -- applies.
+      if (this.scene3d) {
+        this.stepScene(dt);
+        input.endFrame();
+        return;
+      }
       // On the select screen and in the creator there is no world: nothing streams, nothing draws
       // but the panels, and the frame costs nothing.
       if (!this.inWorld) {
