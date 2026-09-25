@@ -33,7 +33,7 @@ import * as THREE from 'three';
 import type { FxFrameContext } from './context';
 import type { FxProductId, FxSettings } from '../fxRegistry.ts';
 import { createFxQuad, FX_CAMERA, type FxDebugTexture, type FxPass, type FxWarmItem } from './pass';
-import { FX_BILATERAL_UPSAMPLE, FX_FULLSCREEN_VERTEX, FX_HASH, FX_LINEARIZE, FX_PHASE_HG, FX_SLAB, FX_VIEW_POS } from './glsl';
+import { FX_FULLSCREEN_VERTEX, FX_HASH, FX_LINEARIZE, FX_PHASE_HG, FX_SLAB, FX_VIEW_POS } from './glsl';
 import { CLOUD_MARCH, cutForCover, type CoverPoint } from './cloudMath.ts';
 
 // The numbers and the density rule live in `cloudMath.ts`, which the converter and the node tests
@@ -199,6 +199,21 @@ void main() {
 `;
 }
 
+// The upsample that brings the march back to the screen.
+//
+// **It cannot use `fxHalfTaps`,** which the rest of the chain does, and that cost this pass a whole
+// evening. That helper is written for a buffer at exactly half the screen -- its "half texel i sits
+// at full pixel 2i + 1" is baked into its arithmetic -- and the march runs at whatever fraction the
+// quality setting picks, a quarter, a half or the whole screen. At full resolution it therefore
+// read the cloud buffer at half of each coordinate, which is the bottom-left quarter of the march
+// stretched over the whole screen; that quarter is nearly all ground, where the march writes its
+// "no cloud here" value of (0, 0, 0, 1), and a composite handed that returns the scene untouched.
+// Not a wrong picture, not a shifted one: no picture at all, which is indistinguishable from the
+// pass being switched off. So the taps are worked out from the cloud buffer's own size.
+//
+// And the two depths must be in the same units. `uDepthHalf` is metres along the view axis and
+// `uDepthFull` is the raw depth buffer, which is neither metres nor linear, so comparing them
+// directly made the weights nonsense -- harmless here, since they are normalised, but nonsense.
 const COMPOSITE_FRAGMENT = /* glsl */ `
 precision highp float;
 varying vec2 vUv;
@@ -206,29 +221,49 @@ uniform sampler2D uScene;
 uniform sampler2D uClouds;
 uniform sampler2D uDepthHalf;
 uniform sampler2D uDepthFull;
+uniform vec2 uNearFar;
 uniform float uAmount;
 
-${FX_BILATERAL_UPSAMPLE}
+${FX_LINEARIZE}
 
 void main() {
   vec4 scene = texture(uScene, vUv);
-  ivec2 t00, t10, t01, t11;
-  vec4 w;
-  // Asked of the texture rather than handed over, as the light shafts do: one fewer uniform that
-  // can be a size the march is no longer running at.
-  fxHalfTaps(gl_FragCoord.xy, textureSize(uClouds, 0), t00, t10, t01, t11, w);
-  // Weighted by how close each half texel's own depth is to this pixel's. Without it the clouds
-  // halo every ridge, because a half texel that saw sky is blended into a pixel that saw rock.
-  float mine = texture(uDepthFull, vUv).r;
-  vec4 dz = vec4(texelFetch(uDepthHalf, t00, 0).r, texelFetch(uDepthHalf, t10, 0).r, texelFetch(uDepthHalf, t01, 0).r, texelFetch(uDepthHalf, t11, 0).r);
-  vec4 near = 1.0 / (abs(dz - vec4(mine)) * 0.05 + 1e-3);
-  vec4 ww = w * near;
+  // The four cloud texels around this pixel, at whatever fraction of the screen the march ran at.
+  vec2 cs = vec2(textureSize(uClouds, 0));
+  vec2 f = vUv * cs - 0.5;
+  ivec2 b = ivec2(floor(f));
+  vec2 t = f - vec2(b);
+  ivec2 hi = ivec2(cs) - 1;
+  ivec2 t00 = clamp(b, ivec2(0), hi);
+  ivec2 t10 = clamp(b + ivec2(1, 0), ivec2(0), hi);
+  ivec2 t01 = clamp(b + ivec2(0, 1), ivec2(0), hi);
+  ivec2 t11 = clamp(b + ivec2(1, 1), ivec2(0), hi);
+  vec4 w = vec4((1.0 - t.x) * (1.0 - t.y), t.x * (1.0 - t.y), (1.0 - t.x) * t.y, t.x * t.y);
+  // Weighted by how near each tap's own depth is to this pixel's, both in metres. Without it the
+  // clouds halo every ridge, because a tap that saw sky is blended into a pixel that saw rock.
+  float mine = fxViewZ(texture(uDepthFull, vUv).r, uNearFar.x, uNearFar.y);
+  vec4 dz = vec4(
+    texture(uDepthHalf, (vec2(t00) + 0.5) / cs).r,
+    texture(uDepthHalf, (vec2(t10) + 0.5) / cs).r,
+    texture(uDepthHalf, (vec2(t01) + 0.5) / cs).r,
+    texture(uDepthHalf, (vec2(t11) + 0.5) / cs).r);
+  vec4 ww = w / (abs(dz - vec4(mine)) * 0.05 + 1e-3);
   float sum = ww.x + ww.y + ww.z + ww.w;
   vec4 c = (texelFetch(uClouds, t00, 0) * ww.x + texelFetch(uClouds, t10, 0) * ww.y + texelFetch(uClouds, t01, 0) * ww.z + texelFetch(uClouds, t11, 0) * ww.w) / max(sum, 1e-5);
   float a = mix(1.0, c.a, uAmount);
   gl_FragColor = vec4(scene.rgb * a + c.rgb * uAmount, scene.a);
 }
 `;
+
+/** One half-float, as `readRenderTargetPixels` hands them back from a HalfFloat target. */
+function half(bits: number): number {
+  const sign = bits & 0x8000 ? -1 : 1;
+  const exp = (bits >> 10) & 0x1f;
+  const frac = bits & 0x3ff;
+  if (exp === 0) return sign * frac * 2 ** -24;
+  if (exp === 0x1f) return frac ? NaN : sign * Infinity;
+  return sign * (1 + frac / 1024) * 2 ** (exp - 15);
+}
 
 /** The march, and the upsample that brings it back. */
 export class CloudsPass implements FxPass {
@@ -310,6 +345,7 @@ export class CloudsPass implements FxPass {
         uClouds: { value: null },
         uDepthHalf: { value: null },
         uDepthFull: { value: null },
+        uNearFar: { value: new THREE.Vector2(0.05, 9000) },
         uAmount: { value: 1 },
       },
     });
@@ -328,6 +364,56 @@ export class CloudsPass implements FxPass {
 
   debugTextures(): readonly FxDebugTexture[] {
     return this.debug;
+  }
+
+  /**
+   * What the pass itself is holding, as against what the settings say.
+   *
+   * These are not the same thing and the difference has hidden two bugs already: `quality` and
+   * `amount` are only ever written in `setSize`, so a setting changed without a resize behind it
+   * leaves the pass running on the last values it was handed, and an `amount` of 0 makes the
+   * composite a no-op by construction -- the scene multiplied by one and nothing added.
+   */
+  report(): { hasNoise: boolean; quality: number; amount: number; size: [number, number]; cover: number } {
+    return { hasNoise: this.base !== null, quality: this.quality, amount: this.amount, size: [this.target.width, this.target.height], cover: this.cover.length };
+  }
+
+  /**
+   * Read the march's own buffer back off the card and say what is in it: console only, and a GPU
+   * sync, so never on a frame path.
+   *
+   * It answers the one question the picture cannot. The debug view forces the pass on, so seeing
+   * cloud through `fxView` proves nothing about an ordinary frame; this reads the buffer as the
+   * frame left it. `sky` is the share of the band that found cloud and `light` how bright it was,
+   * so a buffer full of cloud with nothing on the screen puts the fault squarely in the composite,
+   * and an empty buffer puts it in the march.
+   */
+  probe(renderer: THREE.WebGLRenderer): { sky: number; light: number; clear: number; samples: number } | null {
+    const w = this.target.width;
+    const h = this.target.height;
+    if (w < 4 || h < 4) return null;
+    // A band across the upper third, which is sky in any ordinary view.
+    const bw = Math.min(64, w);
+    const bh = Math.min(32, h);
+    const x = Math.max(0, Math.floor((w - bw) / 2));
+    const y = Math.max(0, Math.floor(h * 0.72));
+    const buf = new Uint16Array(bw * bh * 4);
+    try {
+      renderer.readRenderTargetPixels(this.target, x, Math.min(y, h - bh), bw, bh, buf);
+    } catch {
+      return null;
+    }
+    let cloud = 0;
+    let light = 0;
+    let clear = 0;
+    const n = bw * bh;
+    for (let i = 0; i < n; i++) {
+      const a = half(buf[i * 4 + 3]);
+      clear += a;
+      if (a < 0.98) cloud++;
+      light += (half(buf[i * 4]) + half(buf[i * 4 + 1]) + half(buf[i * 4 + 2])) / 3;
+    }
+    return { sky: Number((cloud / n).toFixed(3)), light: Number((light / n).toFixed(4)), clear: Number((clear / n).toFixed(3)), samples: n };
   }
 
   /**
@@ -432,6 +518,7 @@ export class CloudsPass implements FxPass {
     c.uClouds.value = target.texture;
     c.uDepthHalf.value = ctx.products.linearDepthHalf ?? null;
     c.uDepthFull.value = ctx.depth;
+    (c.uNearFar.value as THREE.Vector2).set(cam.near, cam.far);
     c.uAmount.value = this.amount;
     g.setRenderTarget(output);
     g.render(this.compositeQuad, FX_CAMERA);

@@ -297,6 +297,15 @@ function tile(alpha: number, grey: number, size = 16): Buffer {
   // zero, which over a planet is the whole sky, the pass writes nothing whatever. Every other pass
   // in the chain says `NoBlending` and this one did not.
   ok((src.match(/blending: THREE\.NoBlending/g) ?? []).length === 2, 'the march and its composite both write outright, since the alpha they write is data and not a blend factor');
+  // The third of the same kind. `fxHalfTaps` is written for a buffer at exactly half the screen,
+  // and the march runs at a quarter, a half or the whole of it: at full resolution it read the
+  // bottom-left quarter of the march stretched over the screen, which is nearly all ground, where
+  // the march writes its "nothing here" value -- and a composite handed that returns the scene
+  // untouched, which looks exactly like the pass being switched off.
+  ok(!/^\s*fxHalfTaps\(/m.test(src), "the upsample works its taps out from the cloud buffer's own size, since the march is not always at half the screen");
+  ok(/vec2 cs = vec2\(textureSize\(uClouds, 0\)\)/.test(src) && /vUv \* cs - 0\.5/.test(src), 'and places them by that size rather than by a rule about halves');
+  // And the two depths it weighs the taps by must be the same kind of number.
+  ok(/fxViewZ\(texture\(uDepthFull, vUv\)\.r, uNearFar\.x, uNearFar\.y\)/.test(src), 'the full-resolution depth is turned into metres before it is compared with the half-resolution one, which already is');
   // And the depth product writes the far plane wherever nothing was drawn, so a sky pixel read as a
   // surface stops the ray before it reaches a deck that is 8.6 km off ten degrees above the horizon.
   ok(/depth < uFar \* 0\.999/.test(src), 'a pixel at the far plane is sky, not a surface the ray stops at');

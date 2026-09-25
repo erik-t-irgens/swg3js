@@ -1695,10 +1695,23 @@ class App {
         }
         const w = this.world.weather.state;
         const pack = this.cloudPacks.get(this.world.packId) ?? null;
+        // Draw one ordinary frame first, with no debug view forcing anything on, then read the
+        // march's own buffer back off the card. The debug view overrides the pass's `enabled`, so
+        // what it shows says nothing about a real frame; this does.
+        this.drawFrame();
+        const chain = fx.describe().passes.find((p) => p.id === 'volumetricClouds') ?? null;
         return {
           setting: this.settings.volumetricClouds,
           quality: this.settings.volumetricCloudQuality,
           amount: this.settings.volumetricCloudAmount,
+          // What the chain decided about it on that frame, and what the pass is really holding:
+          // `ran` false means it never drew, whatever the settings say; `holding.amount` at 0 means
+          // it drew and the composite added nothing; `buffer.sky` is how much cloud is really in
+          // its target, so cloud there with nothing on the screen is the composite's fault.
+          ran: chain?.drewLastFrame ?? null,
+          chain: chain ? { setting: chain.setting, override: chain.override, missing: chain.missing } : null,
+          holding: pass.report(),
+          buffer: pass.probe(this.renderer),
           // The two things that must both be true before anything is drawn at all.
           volumes: pass.hasNoise ? 'loaded' : this.cloudVolumesAsked ? 'not converted (npm run swg -- clouds assets-private)' : 'not asked for yet',
           measured: pack ? `${pack.planet}: ${pack.levels.length} levels` : `${this.world.packId}: no clouds.json`,
