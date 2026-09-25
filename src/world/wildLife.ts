@@ -238,11 +238,20 @@ export class WildLife {
       if (!entry) continue;
       const spot = bodyAt(site, i, spread);
       const world = intoWorld(spot.x, spot.z, centre);
+      const middle = intoWorld(site.x, site.z, centre);
       const m = deps.spawn(entry, { x: world.x, z: world.z, y: deps.groundAt(world.x, world.z), heading: -spot.heading }, site.seed ^ i);
       if (typeof m === 'string') {
         this.last.refused = m;
         continue;
       }
+      // **Its home is the nest, not the spot it was put down on.** A mobile's home is where it was
+      // stood, and the brain wanders it eight to thirty metres from home every few seconds; a body
+      // stood five to fourteen metres out to begin with therefore drifts to forty from the thing it
+      // is supposed to be guarding, and going to the lair finds an empty patch of ground. Giving
+      // every one of them the site's own middle makes them range about the nest instead, which is
+      // what "four or five standing round it" means.
+      m.homeX = middle.x;
+      m.homeZ = middle.z;
       rec.bodies.push(m);
     }
     if (!rec.bodies.length) return false;
@@ -334,12 +343,36 @@ export class WildLife {
     return { lair: site.lair, creatures: who };
   }
 
-  /** For the console: every site that is standing, nearest first. */
-  report(at: THREE.Vector3, centre: { x: number; z: number } | null): { key: string; lair: string; bodies: number; broken: boolean; away: number }[] {
-    const out: { key: string; lair: string; bodies: number; broken: boolean; away: number }[] = [];
+  /**
+   * For the console: every site that is standing, nearest first, **and where its bodies really are**.
+   *
+   * The count alone was not enough, and the gap cost a whole round of guessing. A site can report
+   * four bodies standing while every one of them has wandered forty metres into a dune, and from the
+   * view that is indistinguishable from nothing having been stood at all. `bodies` therefore says
+   * how far each one is from its own nest and from the eye, which separates "they were never stood",
+   * "they were stood and taken away" and "they are right there, behind you" in one reading.
+   */
+  report(
+    at: THREE.Vector3,
+    centre: { x: number; z: number } | null,
+  ): { key: string; lair: string; nest: boolean; broken: boolean; away: number; bodies: { who: string; fromNest: number; fromEye: number; dead: boolean }[] }[] {
+    const out: { key: string; lair: string; nest: boolean; broken: boolean; away: number; bodies: { who: string; fromNest: number; fromEye: number; dead: boolean }[] }[] = [];
     for (const rec of this.standing.values()) {
       const w = centre ? intoWorld(rec.site.x, rec.site.z, centre) : { x: rec.site.x, z: rec.site.z };
-      out.push({ key: rec.site.key, lair: rec.site.lair, bodies: rec.bodies.length, broken: rec.brokeAt > 0, away: Math.round(Math.hypot(w.x - at.x, w.z - at.z)) });
+      out.push({
+        key: rec.site.key,
+        lair: rec.site.lair,
+        // A herd has no nest to stand round, which is worth seeing: it explains an empty middle.
+        nest: !!rec.def.nest,
+        broken: rec.brokeAt > 0,
+        away: Math.round(Math.hypot(w.x - at.x, w.z - at.z)),
+        bodies: rec.bodies.map((m) => ({
+          who: m.entry?.id ?? '?',
+          fromNest: Math.round(Math.hypot(m.pos.x - w.x, m.pos.z - w.z)),
+          fromEye: Math.round(Math.hypot(m.pos.x - at.x, m.pos.z - at.z)),
+          dead: m.dead,
+        })),
+      });
     }
     return out.sort((a, b) => a.away - b.away);
   }

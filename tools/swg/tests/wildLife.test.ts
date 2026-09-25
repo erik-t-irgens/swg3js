@@ -221,6 +221,21 @@ const bigArea = { name: 'a', shape: 'circle' as const, x: 0, z: 0, r: 3000, grou
   ok(bodies.length === after, 'while a lair that was really cleared stays cleared until its own clock is out');
 }
 
+// ------------------------------------------------------------------ homed on the nest, not on the spot
+{
+  // What this pins: a mobile's home is where it was stood, and the brain wanders it eight to thirty
+  // metres from home every few seconds. A body stood five to fourteen metres out to begin with
+  // therefore drifts to forty from the thing it is meant to be guarding, and walking to the lair
+  // finds bare ground. Every body's home is the site's own middle instead.
+  const world = readFileSync(new URL('../../../src/world/wildLife.ts', import.meta.url), 'utf8');
+  ok(/m\.homeX = middle\.x;/.test(world) && /m\.homeZ = middle\.z;/.test(world), "every body's home is the site's middle, so it wanders about its nest rather than away from it");
+  ok(/const middle = intoWorld\(site\.x, site\.z, centre\)/.test(world), "and that middle is the site's own place carried into the world, not the body's");
+  ok(!/m\.homeX = world\.x/.test(world), 'and never the spot it happened to be put down on, which is what sends a guard into the dunes');
+
+  // The report has to be able to tell the three endings apart, which is what the count alone could not.
+  ok(/fromNest:/.test(world) && /fromEye:/.test(world), 'and the console says how far each body is from its nest and from the eye, so "never stood", "taken away" and "right behind you" are three different readings');
+}
+
 // ------------------------------------------------------------------ the origin the manager reads
 {
   // `ambient` is the planet's own recyclable wildlife and the manager owns where those stand: past
