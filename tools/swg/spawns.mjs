@@ -2,7 +2,11 @@
 // world, after the client's world snapshot and its buildout tables. Screenplays call
 //   spawnSceneObject(zone, template, x, z, y, cellId, qw, qx, qy, qz)      (or ..., cellId, heading)
 //   spawnMobile(zone, mobileName, respawn, x, z, y, heading, cellId)
-// with Core3's (x, z, y) order: the third number is the height. Server template paths lack the
+// with Core3's (x, z, y) order, where **the SECOND number is the height** and the first and third
+// are the ground plane -- which is what the code below really does (`pos` keeps index 1 as the
+// height) and the opposite of what this line used to say. Anyone who believed the old wording and
+// "fixed" the code to match would swap every person's height for their northing. Server template
+// paths lack the
 // client's "shared_" prefix (object/static/structure/x/y.iff -> .../shared_y.iff). Only calls
 // with literal numbers outside building cells are placeable; the rest are counted.
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';

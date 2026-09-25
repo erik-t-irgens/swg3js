@@ -5757,7 +5757,7 @@ switch (cmd) {
       };
     }
     const lairOut = {};
-    for (const [name, l] of lairs) lairOut[name] = { kind: l.kind, mobiles: l.mobiles, cap: l.cap, nest: l.nest };
+    for (const [name, l] of lairs) lairOut[name] = { kind: l.kind, mobiles: l.mobiles, boss: l.boss, cap: l.cap, nest: l.nest, building: l.building, people: l.people };
     const groupOut = {};
     for (const [name, g] of groups) groupOut[name] = g;
     writeFileSync(
@@ -5803,8 +5803,12 @@ switch (cmd) {
         JSON.stringify(
           {
             format: 1,
-            source: 'core3',
             planet: world,
+            // Which half of this came from where, because the two halves are not the same kind of
+            // thing. Every standing person is a real place the real server used. Not one creature
+            // coordinate exists anywhere in that data: an area is a shape with a weighted list and
+            // a cap, and where each animal stands is drawn from a seed on this side.
+            source: { areas: 'core3', statics: 'core3', creaturePlaces: 'invented' },
             frameCheck: frame,
             counts: { areas: r.spawn.length, noSpawn: r.noSpawn.length, statics: rows.length, staticsDropped: dropped.get(world) ?? 0 },
             areas: r.spawn,

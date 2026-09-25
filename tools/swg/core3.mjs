@@ -90,6 +90,23 @@ export function flagWords(value) {
   return out;
 }
 
+/**
+ * A standing person's heading, in radians.
+ *
+ * **It is always degrees**, and the thing that makes that worth a function of its own is that the
+ * call which places an *object* in the very same files takes radians instead. A reader that tells
+ * them apart by size -- treating anything past a full turn as degrees -- is right for the great
+ * majority and wrong for every person whose heading happens to be a small number: minus one, five,
+ * minus three. There are 262 of those among 5,698, and each one comes out facing up to 286 degrees
+ * from where it should. So the rule is the flat one, and the single call in the whole tree that
+ * writes an explicit radian conversion is the only exception, which the reader folds before this
+ * ever sees it.
+ */
+function headingRadians(deg) {
+  const r = ((deg % 360) * Math.PI) / 180;
+  return Math.round(r * 10000) / 10000;
+}
+
 /** `getRandomNumber(n)` and a sum containing one, folded to the middle of the range it scatters over. */
 function middleOf(v) {
   if (typeof v === 'number') return v;
@@ -108,6 +125,16 @@ function middleOf(v) {
 
 /**
  * Each world's regions: where things spawn, where they must not, and what the places are called.
+ *
+ * **An area is a shape and not a place, and this is the one thing about wave 3 that has to be said
+ * out loud.** There is not one creature coordinate anywhere in this data: 451 areas, each a circle,
+ * a ring or a rectangle with a weighted list of lairs and a cap, and the real server drew a point
+ * inside the shape when it felt like it. So the wildlife cannot be "stood where the server stood
+ * it" -- nobody knows where that was, including the server, a second later. What is the server's is
+ * the *shape*, the *weights*, the *cap* and *which animals*; where each one stands is drawn from a
+ * seed on our side, and the pack says `source: 'invented'` about exactly that, on the made-up
+ * system's own precedent. The people in wave 4 are the opposite: every one of them is a real place
+ * the real server used.
  *
  * A row is `{name, x, y, {shape, ...}, tier, {groups}, cap}` with the last two only on a spawn area.
  * The tier is a bitmask of words; this keeps the three that matter and reports the rest as they are.
@@ -218,7 +245,24 @@ export function readLairs(scripts) {
       const nest = ['buildingsEasy', 'buildingsMedium', 'buildingsVeryEasy', 'buildingsHard', 'buildingsVeryHard']
         .map((k) => (Array.isArray(v[k]) ? v[k].find((s) => typeof s === 'string') : null))
         .find(Boolean) ?? null;
-      out.set(name, { kind, mobiles, cap: typeof v.spawnLimit === 'number' ? v.spawnLimit : 0, nest, mission: v.missionBuilding ?? null });
+      // A boss stands with the others at one in fourteen lairs and is the reason to walk up to one.
+      const boss = [];
+      if (Array.isArray(v.bossMobiles)) {
+        for (const m of v.bossMobiles) if (Array.isArray(m) && typeof m[0] === 'string') boss.push({ who: m[0], n: typeof m[1] === 'number' ? m[1] : 1 });
+      }
+      out.set(name, {
+        kind,
+        mobiles,
+        boss,
+        cap: typeof v.spawnLimit === 'number' ? v.spawnLimit : 0,
+        nest,
+        // The two words a lair says about itself. `buildingType` "none" is a herd with nothing to
+        // stand round and "theater" is a camp with a real building; unset means an ordinary nest.
+        // `mobType` "npc" means the things at it are people, and unset means they are animals.
+        building: typeof v.buildingType === 'string' ? v.buildingType : '',
+        people: v.mobType === 'npc',
+        mission: v.missionBuilding ?? null,
+      });
     }
   }
   return out;
@@ -348,7 +392,7 @@ export function readStatics(scripts) {
         continue;
       }
       const [respawn, x, height, y, heading, cell] = nums;
-      add(world, { who, x, y: height, z: y, heading, cell: cell || 0, respawn, gated: c.gated, where });
+      add(world, { who, x, y: height, z: y, heading: headingRadians(heading), cell: cell || 0, respawn, gated: c.gated, where });
     }
 
     // The one-table form: a screenplay with its own world and a list of rows in the same order.
@@ -369,7 +413,7 @@ export function readStatics(scripts) {
           continue;
         }
         const [respawn, x, height, y, heading, cell] = nums;
-        add(v.planet, { who: r[0], x, y: height, z: y, heading, cell: cell || 0, respawn, gated: false, where });
+        add(v.planet, { who: r[0], x, y: height, z: y, heading: headingRadians(heading), cell: cell || 0, respawn, gated: false, where });
       }
     }
   }

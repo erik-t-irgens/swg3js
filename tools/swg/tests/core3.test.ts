@@ -197,6 +197,19 @@ if (!core3 || !existsSync(join(core3, 'managers', 'planet'))) {
   const sane = heights.filter((h) => h > -600 && h < 600).length;
   ok(sane === heights.length, `every one of their heights is a height (${Math.round(Math.min(...heights))} to ${Math.round(Math.max(...heights))} m), which is what says the middle coordinate was read as one`);
 
+  // A heading is always degrees here, and the call that places an OBJECT in the same files takes
+  // radians. Telling them apart by size is right for most and wrong for every person whose heading
+  // is a small number, which is 262 of them facing up to 286 degrees from where they should.
+  const turns = rows.map((s) => s.heading);
+  ok(turns.every((h) => h >= -Math.PI * 2 && h <= Math.PI * 2), 'every heading comes out inside one turn, because every one of them was read as the degrees it is');
+  const small = rows.filter((s) => Math.abs(s.heading) > 0 && Math.abs(s.heading) < 0.12).length;
+  ok(small > 0, `${small} of them face within seven degrees of north, which is the set a size test would have read as radians and turned the wrong way`);
+
+  // The respawn is in the data and does not need inventing.
+  const waits = rows.map((s) => s.respawn).filter((r) => r > 0);
+  const fiveToTen = waits.filter((r) => r >= 300 && r <= 600).length;
+  ok(fiveToTen > waits.length / 2, `${fiveToTen} of ${waits.length} wait between five and ten minutes, which is the figure that was going to be invented`);
+
   // The frame, asked of the ground: the converted packs carry what `spawns` measured, which is a
   // witness built from the client's own terrain rules and not from these scripts.
   let checked = 0;
