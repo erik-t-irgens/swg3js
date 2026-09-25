@@ -39,7 +39,7 @@ import { BLADE_RADIUS, BladePath, type Striker } from '../../combat/sweep';
 import { CLASH } from '../../combat/clash.ts';
 import { nextLivingKey, PLAYER_KEY, type Aggression, type Hittable, type Living, type Side } from '../../combat/kit';
 import { hostileSides, sideOf } from '../../combat/targets';
-import { npcNow, NPC_TUNE, type NpcMark, type NpcRow, type NpcSubject } from '../../net/npcNet.ts';
+import { npcNow, NPC_TUNE, type NpcBrain, type NpcMark, type NpcRow, type NpcSubject } from '../../net/npcNet.ts';
 import { markActor } from '../portalRender';
 import { planBody, radiusToward, type BodyInput, type BodyPlan } from './shape';
 import { moveSpeeds, stepGait, type GaitStep } from './gait';
@@ -412,6 +412,10 @@ export class Mobile implements Living, NpcSubject {
   private readonly bladeTip = new THREE.Vector3();
   private readonly restPose = new Map<THREE.Object3D, { p: THREE.Vector3; q: THREE.Quaternion; s: THREE.Vector3 }>();
   private readonly memory = new Map<number, Grudge>();
+  /** The last mind a keeper said this creature had, kept until this browser is asked to take it on. */
+  private heldBrain: NpcBrain | null = null;
+  /** A target named by a keeper, waiting for a list of the living to be looked up in. */
+  private wantTarget: string | null = null;
   private targetKey: number | null = null;
   private targetRef: Living | null = null;
   private decision: Decision | null = null;
@@ -816,7 +820,66 @@ export class Mobile implements Living, NpcSubject {
       row.f = this.mark;
       this.mark = null;
     }
+    // What it is thinking, so whoever takes it over next does not start it over. Written only when
+    // there is something to say: a creature standing about with nothing on its mind costs no bytes.
+    const t = this.targetRef;
+    const target = t ? (t.key === PLAYER_KEY ? 'p' : ((t as { npcId?: string }).npcId ?? '')) : '';
+    if (target || this.stunned > 0 || this.slowed > 0 || this.dotLeft > 0 || this.goal) {
+      const b: NpcBrain = {};
+      if (target) b.t = target;
+      if (this.stunned > 0) b.st = Math.round(this.stunned * 100) / 100;
+      if (this.slowed > 0) b.sl = Math.round(this.slowed * 100) / 100;
+      if (this.dotLeft > 0) {
+        b.bd = Math.round(this.dotDps * 100) / 100;
+        b.bs = Math.round(this.dotLeft * 100) / 100;
+      }
+      if (this.goal) {
+        b.gx = Math.round(this.goal.x * 100) / 100;
+        b.gz = Math.round(this.goal.z * 100) / 100;
+      }
+      row.b = b;
+    } else row.b = undefined;
     return true;
+  }
+
+  /**
+   * Take on a mind handed over by whoever was keeping this creature.
+   *
+   * What cannot be carried is handled rather than dropped: a target named by an id this browser has
+   * never built simply is not found, and the creature picks a fight of its own on its next thought
+   * instead of standing still waiting for somebody who is not here.
+   */
+  private adoptBrain(b: NpcBrain): void {
+    if (b.st && b.st > 0) this.stunned = Math.max(this.stunned, b.st);
+    if (b.sl && b.sl > 0) this.slowed = Math.max(this.slowed, b.sl);
+    if (b.bd && b.bs && b.bs > 0) {
+      this.dotDps = b.bd;
+      this.dotLeft = b.bs;
+    }
+    if (typeof b.gx === 'number' && typeof b.gz === 'number') this.goal = { x: b.gx, z: b.gz };
+    // The target waits for the next thought, because the list of what is alive is handed to this
+    // creature a frame at a time and is not its to ask for.
+    this.wantTarget = b.t ?? null;
+  }
+
+  /**
+   * Find the thing a handed-over mind was fighting, now that there is a list to look in.
+   *
+   * Not finding it is an ordinary answer rather than a fault: the other browser may have been
+   * fighting something this one has never built. The creature then picks its own fight on this very
+   * thought instead of standing about waiting for somebody who is not here.
+   */
+  private takeWantedTarget(targets: readonly Living[]): void {
+    const want = this.wantTarget;
+    this.wantTarget = null;
+    if (!want) return;
+    for (const t of targets) {
+      const mine = want === 'p' ? t.key === PLAYER_KEY : (t as { npcId?: string }).npcId === want;
+      if (!mine || t.dead) continue;
+      this.targetRef = t;
+      this.targetKey = t.key;
+      return;
+    }
   }
 
   /**
@@ -827,6 +890,10 @@ export class Mobile implements Living, NpcSubject {
    */
   npcDrive(row: NpcRow, snap: boolean): void {
     if (this.disposed || this.dead) return;
+    // Kept, not applied: a driven copy thinks nothing, so its mind is only worth having at the
+    // moment this browser is asked to take it over. Holding the last one said is what makes that
+    // moment cost nothing and need no extra word on the wire.
+    if (row.b) this.heldBrain = row.b;
     this.toldAt.set(row.p[0], row.p[1], row.p[2]);
     this.toldHeading = row.h;
     this.toldSpeed = row.v;
@@ -913,6 +980,13 @@ export class Mobile implements Living, NpcSubject {
     this.stuckClock = 0;
     this.stuckCommanded = 0;
     this.ramp = this.speed;
+    // And its mind, as the last keeper left it. Without this a creature changes hands and forgets
+    // what it was fighting, where it was going and everything on it -- so a bantha being led away
+    // from a fight by a stun would shrug the stun off at the boundary and walk back into it.
+    if (this.heldBrain) {
+      this.adoptBrain(this.heldBrain);
+      this.heldBrain = null;
+    }
   }
 
   /**
@@ -1580,6 +1654,9 @@ export class Mobile implements Living, NpcSubject {
     for (const [k, g] of this.memory) if (now - g.at > BRAIN_TUNE.memory || g.who.dead) this.memory.delete(k);
     const list = this.brainTargets;
     list.length = 0;
+    // A mind handed over names what it was fighting, and this is the first moment there is a list of
+    // the living to find it in.
+    if (this.wantTarget) this.takeWantedTarget(ctx.targets);
     let current: Living | null = null;
     const reachOut = Math.max(BRAIN_TUNE.aggroBig, BRAIN_TUNE.leash) + 30;
     for (const t of ctx.targets) {

@@ -42,6 +42,14 @@ export const NPC_WIRE = {
   damage: 100000,
   /** A word for what was struck, or what struck. */
   what: 16,
+  /**
+   * The longest a timer a creature carries may claim to have left, in seconds.
+   *
+   * A bound on nonsense rather than a rule, as the damage cap is: nothing in the game stuns for
+   * anything like this long, and the point is only that a browser on another build cannot hand
+   * somebody a creature that is stunned for the rest of the evening.
+   */
+  timer: 600,
   /** How many creatures' last places the server keeps for one world, so a newcomer is told where things are. */
   remember: 4096,
 };
@@ -140,7 +148,38 @@ export function cleanNpcRow(x) {
     hp: num(x.hp, 0, 1, 1),
   };
   if (MARKS.includes(x.f)) out.f = x.f;
+  const b = cleanNpcBrain(x.b);
+  if (b) out.b = b;
   return out;
+}
+
+/**
+ * A cleaned copy of what a creature is thinking, or undefined.
+ *
+ * Every field is capped the same way every other field here is, and for the same reason: a browser
+ * on another build must not be able to hand somebody a creature stunned for a thousand years or
+ * walking toward a point past the edge of the world. The target is an id and is checked as one; the
+ * one word that is not an id is `p`, meaning the player, of whom there is exactly one.
+ */
+export function cleanNpcBrain(x) {
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return undefined;
+  const out = {};
+  if (x.t === 'p') out.t = 'p';
+  else {
+    const t = npcId(x.t);
+    if (t) out.t = t;
+  }
+  if (typeof x.st === 'number' && x.st > 0) out.st = num(x.st, 0, NPC_WIRE.timer, 0);
+  if (typeof x.sl === 'number' && x.sl > 0) out.sl = num(x.sl, 0, NPC_WIRE.timer, 0);
+  if (typeof x.bs === 'number' && x.bs > 0) {
+    out.bs = num(x.bs, 0, NPC_WIRE.timer, 0);
+    out.bd = num(x.bd, 0, NPC_WIRE.damage, 0);
+  }
+  if (typeof x.gx === 'number' && typeof x.gz === 'number') {
+    out.gx = num(x.gx, -NPC_WIRE.reach, NPC_WIRE.reach, 0);
+    out.gz = num(x.gz, -NPC_WIRE.reach, NPC_WIRE.reach, 0);
+  }
+  return Object.keys(out).length ? out : undefined;
 }
 
 /**

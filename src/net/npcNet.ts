@@ -163,6 +163,36 @@ export interface NpcRow {
   hp: number;
   /** Anything that has to be seen once. */
   f?: NpcMark;
+  /** What it is thinking, so a change of keeper does not start it over. */
+  b?: NpcBrain;
+}
+
+/**
+ * A creature's own mind, as much of it as crosses.
+ *
+ * **A target cannot cross as a key.** Every living thing's key is handed out by the browser it was
+ * made in (`nextLivingKey`), so the number one browser calls a bantha is another browser's rock.
+ * What does mean the same everywhere is the id the world knows a creature by and the fact that
+ * there is one player, so a target crosses as `'p'` or as that id and is looked up on arrival.
+ *
+ * The timers cross as the seconds they have left rather than as the moment they end, because the
+ * two browsers' clocks are their own and a moment is meaningless between them.
+ *
+ * Everything here is optional and a browser built before it simply ignores the field, which is the
+ * shape the rest of this protocol already has.
+ */
+export interface NpcBrain {
+  /** What it is fighting: `'p'` for the player, else the id the world knows that creature by. */
+  t?: string;
+  /** Seconds of stun and of slow left on it. */
+  st?: number;
+  sl?: number;
+  /** A burn: how much a second, and for how much longer. */
+  bd?: number;
+  bs?: number;
+  /** Where it was walking, in the world's own metres. */
+  gx?: number;
+  gz?: number;
 }
 
 /**
