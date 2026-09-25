@@ -86,6 +86,8 @@ interface Standing {
   brokeAt: number;
   /** How long it stays broken. */
   wait: number;
+  /** How many of its own were really killed here, as against taken away by the game. */
+  killed: number;
 }
 
 /**
@@ -226,7 +228,7 @@ export class WildLife {
     if (!def) return false;
     const n = standingAt(def, site.seed);
     const spread = spreadOf(def);
-    const rec: Standing = { site, def, bodies: [], brokeAt: 0, wait: respawnWait(site.seed) };
+    const rec: Standing = { site, def, bodies: [], brokeAt: 0, wait: respawnWait(site.seed), killed: 0 };
     for (let i = 0; i < n; i++) {
       const who = creatureAt(def, site.seed, i);
       if (!who) continue;
@@ -270,9 +272,23 @@ export class WildLife {
     void deps;
     for (const [key, rec] of this.standing) {
       const before = rec.bodies.length;
+      // **Killed is not the same as gone**, and treating the two alike is what makes a site vanish
+      // for good. A body the game took away for its own reasons -- it fell out of the world, the
+      // cap swept it, a travel disposed it -- is not a lair anybody cleared, and a site that lost
+      // its creatures that way should stand them again on the next pass rather than sit broken for
+      // ten minutes. So the ones that really died are counted as they go.
+      for (const m of rec.bodies) if (m.dead) rec.killed++;
       rec.bodies = rec.bodies.filter((m) => !m.dead && !m.removed);
       if (rec.bodies.length !== before) this.count();
-      if (rec.bodies.length === 0 && rec.brokeAt === 0) rec.brokeAt = now;
+      if (rec.bodies.length === 0) {
+        if (rec.killed === 0) {
+          // Nothing was killed here: forget it and let it stand again at once.
+          this.standing.delete(key);
+          this.count();
+          continue;
+        }
+        if (rec.brokeAt === 0) rec.brokeAt = now;
+      }
       // Once its clock is out the site is forgotten, and the next pass that comes near stands it
       // again from the same seed: the same animals in the same places, as the same world should.
       if (rec.brokeAt > 0 && now - rec.brokeAt >= rec.wait) {

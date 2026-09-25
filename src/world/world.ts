@@ -4183,9 +4183,13 @@ export class World {
     if (!this.wildDepsKept) {
       this.wildDepsKept = {
         catalogue: () => this.mobileCatalogue,
-        // `origin: 'world'` is how the manager is told this is not somebody's hand-spawn, so the
-        // NPC tab's own cap never refuses a lair and the tab's clear never sweeps one.
-        spawn: (entry, at, seed) => this.mobiles?.spawn(entry, at, { origin: 'ambient', seed, worldId: `wild:${seed}` }) ?? 'no world',
+        // **`origin: 'spawned'`, and the other one is a trap.** `ambient` is the planet's own
+        // recyclable wildlife, and the manager owns where those stand: past its range it moves each
+        // one to a fresh spot near the player rather than leaving it be (`manager.ts:784`). A lair's
+        // creatures belong at their lair, so they are `spawned`, which the manager only ever takes
+        // away when it is dead or has fallen out of the world. The `worldId` is what keeps the hand
+        // -spawn cap and the NPC tab's clear off them, since `spawn` reads that as origin `world`.
+        spawn: (entry, at, seed) => this.mobiles?.spawn(entry, at, { origin: 'spawned', seed, worldId: `wild:${seed}` }) ?? 'no world',
         remove: (m) => this.mobiles?.remove(m),
         groundAt: (x, z) => this.terrain.heightAt(x, z),
         centre: () => this.layoutCenter,

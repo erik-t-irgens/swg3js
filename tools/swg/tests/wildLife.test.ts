@@ -193,6 +193,47 @@ const bigArea = { name: 'a', shape: 'circle' as const, x: 0, z: 0, r: 3000, grou
   ok(bodies.length > madeBefore, 'once the clock is out the same seed stands the same animals in the same places again');
 }
 
+// ------------------------------------------------------------------ killed is not the same as gone
+{
+  // The bug this pins: a site whose creatures the game took away for its own reasons -- it swept
+  // them, they fell out of the world, a travel disposed them -- was marked broken and sat empty for
+  // five to ten minutes. Only a lair somebody really cleared should do that.
+  const w = new WildLife();
+  w.adopt(pack(nearAreas), manifest);
+  const { deps, bodies } = game();
+  const at = new THREE.Vector3(0, 0, 0);
+  for (let i = 0; i < 4; i++) w.step(WILD_TUNE.everySeconds + 0.1, i * 2, at, deps);
+  ok(w.last.up > 0, `${w.last.up} sites standing`);
+
+  // Taken away without dying: every site should be free to stand again at once.
+  for (const b of bodies) b.removed = true;
+  w.step(WILD_TUNE.everySeconds + 0.1, 20, at, deps);
+  ok(w.last.up === 0, 'a site whose creatures were taken away rather than killed is forgotten, not broken');
+  const had = bodies.length;
+  w.step(WILD_TUNE.everySeconds + 0.1, 22, at, deps);
+  ok(bodies.length > had, 'so it stands again on the very next pass instead of waiting out a respawn it never earned');
+
+  // Killed is the other thing, and that one does wait.
+  for (const b of bodies) if (!b.removed) b.dead = true;
+  w.step(WILD_TUNE.everySeconds + 0.1, 30, at, deps);
+  const after = bodies.length;
+  w.step(WILD_TUNE.everySeconds + 0.1, 32, at, deps);
+  ok(bodies.length === after, 'while a lair that was really cleared stays cleared until its own clock is out');
+}
+
+// ------------------------------------------------------------------ the origin the manager reads
+{
+  // `ambient` is the planet's own recyclable wildlife and the manager owns where those stand: past
+  // its range it moves each one to a fresh spot near the player. A lair's creatures belong at their
+  // lair, so they must be stood as `spawned`, and the `worldId` is what keeps the hand-spawn cap off
+  // them. This is two files apart from the rule it serves, so it is read as text.
+  const world = readFileSync(new URL('../../../src/world/world.ts', import.meta.url), 'utf8');
+  const line = /spawn: \(entry, at, seed\) =>[^\n]*/.exec(world)?.[0] ?? '';
+  ok(/origin: 'spawned'/.test(line), "the wild world stands its creatures as spawned, so the manager leaves them where their lair is");
+  ok(/worldId: `wild:/.test(line), 'and names them for the world, which is what keeps the hand-spawn cap and the NPC tab off them');
+  ok(!/origin: 'ambient'/.test(line), "and never as ambient, which would have the manager teleport each one to a fresh spot near the player");
+}
+
 // ------------------------------------------------------------------ a real world, where converted
 {
   const manFile = join('assets-private', 'spawns', 'manifest.json');
