@@ -29,8 +29,12 @@ export const GHOST_TUNE = {
   far: 60,
   /** How far one notch of the wheel moves it, metres. */
   step: 2,
-  /** How far one press of a turn button turns it, degrees. */
+  /** How far one press of a turn key turns it, degrees. */
   turn: 15,
+  /** How far one press of a height key lifts or drops it, metres. */
+  rise: 0.25,
+  /** The most it may be lifted or dropped off the ground either way, metres. */
+  most: 8,
   /** How see-through the building itself is while it is a ghost. */
   opacity: 0.45,
   /** How high over the ground the outline is drawn, metres: enough not to fight the ground for the pixel. */
@@ -51,6 +55,7 @@ export interface GhostDeps {
 export interface GhostState {
   x: number;
   z: number;
+  /** Where it stands, the player's own lift already in it: this is the height it is put down at. */
   y: number;
   yaw: number;
   ok: boolean;
@@ -58,17 +63,22 @@ export interface GhostState {
   why: string | null;
   /** How much ground it keeps to itself, for whoever places it. */
   clear: number;
+  /** How far the player has lifted it off the ground themselves, metres, signed. */
+  lift: number;
 }
 
 /**
- * Where a ghost stands for a player at `from` looking along `yaw`, pushed `reach` metres out.
+ * Where a ghost stands for a player at `from` facing along `yaw`, pushed `reach` metres out.
  *
- * The camera's forward is `(-sin yaw, 0, -cos yaw)`, which is the one convention this whole game
- * uses; the patch's own offset is **not** taken off here, unlike `spotAhead`, because the player is
- * moving the building by eye and what they are pointing at is where its origin goes.
+ * **The yaw is a body's heading, whose forward is `(sin yaw, cos yaw)`** -- not the camera's, whose
+ * forward is the negative of it. The two conventions live side by side in this game and are a
+ * quarter turn apart in neither: they are exactly opposite, so reading one as the other puts the
+ * ghost behind the player's back, which is what it did. The patch's own offset is **not** taken off
+ * here, unlike `spotAhead`, because the player is moving the building by eye and what they are
+ * pointing at is where its origin goes.
  */
 export function ghostSpot(from: { x: number; z: number }, yaw: number, reach: number): { x: number; z: number } {
-  return { x: from.x - Math.sin(yaw) * reach, z: from.z - Math.cos(yaw) * reach };
+  return { x: from.x + Math.sin(yaw) * reach, z: from.z + Math.cos(yaw) * reach };
 }
 
 /**
@@ -77,13 +87,18 @@ export function ghostSpot(from: { x: number; z: number }, yaw: number, reach: nu
  * It is the same three tests a house placed any other way makes -- the ground under its own
  * doorstep, what the world already has there, and the water -- with the footprint's own patch in
  * place of the model's box, because a deed carries the grid the game itself measured with.
+ *
+ * `lift` is the player's own nudge and is deliberately **outside** every test: it moves where the
+ * building is put down without moving what the ground is asked about, because the ground test is
+ * the one thing here that is not a matter of taste. So a doorway riding a little under the ground
+ * can be lifted clear by hand, and a spot the ground refuses cannot be lifted into being allowed.
  */
-export function ghostVerdict(patch: Patch, at: { x: number; z: number }, yaw: number, deps: GhostDeps): GhostState {
+export function ghostVerdict(patch: Patch, at: { x: number; z: number }, yaw: number, deps: GhostDeps, lift = 0): GhostState {
   const probes = patchProbes(patch, at, yaw);
   const heights = probes.map((p) => deps.heightAt(p.x, p.z));
   const v = groundVerdict(probes, heights);
   const clear = clearRadius(patch);
-  const base: GhostState = { x: at.x, z: at.z, y: v.y, yaw, ok: false, why: v.why, clear };
+  const base: GhostState = { x: at.x, z: at.z, y: v.y + lift, yaw, ok: false, why: v.why, clear, lift };
   if (!v.ok) return base;
   // The sea is drawn over the ground rather than instead of it, so the ground test passes perfectly
   // well on a lake bed and this is what keeps a house out of one.
@@ -104,11 +119,23 @@ export function wheelReach(reach: number, notches: number, tune = GHOST_TUNE): n
   return Math.min(tune.far, Math.max(tune.near, reach + notches * tune.step));
 }
 
-/** A turn button: one press, kept in one turn. */
+/** A turn key: one press, kept in one turn. */
 export function turnBy(yaw: number, presses: number, tune = GHOST_TUNE): number {
   const turn = Math.PI * 2;
   const next = yaw + (presses * tune.turn * Math.PI) / 180;
   return ((next % turn) + turn) % turn;
+}
+
+/**
+ * A height key: one press up or down, kept within `most` of the ground either way.
+ *
+ * It is here for the one case the ground test cannot help with -- a doorstep the ground laps over,
+ * which is within everything `groundVerdict` allows and still leaves a door half buried -- and it
+ * is bounded both ways so that it stays a nudge rather than a way to hang a house in the air.
+ */
+export function liftBy(lift: number, presses: number, tune = GHOST_TUNE): number {
+  const next = lift + presses * tune.rise;
+  return Math.min(tune.most, Math.max(-tune.most, Math.round(next / tune.rise) * tune.rise));
 }
 
 /**

@@ -45,7 +45,13 @@ export type Action =
   | 'rollLeft'
   | 'rollRight'
   // A ship whose wings open: the pilot opens and closes them.
-  | 'wings';
+  | 'wings'
+  // A building in hand: turning it and nudging it up or down. They have keys of their own rather
+  // than borrowing the strafe keys, so that the player can walk while they place.
+  | 'placeLeft'
+  | 'placeRight'
+  | 'placeUp'
+  | 'placeDown';
 
 /**
  * Default bindings, as KeyboardEvent codes and `Mouse<button>`. Crouch has X beside Ctrl
@@ -99,6 +105,13 @@ export const DEFAULT_BINDINGS: Record<Action, string[]> = {
   rollLeft: ['KeyZ'],
   rollRight: ['KeyV'],
   wings: ['KeyU'],
+  // A building in hand. Q and E are the other trigger and the use key, and R and F the saber throw
+  // and the torch: none of the four can be reached with a deed out, so they are borrowed rather
+  // than spent, and all four can be rebound from the Controls page like anything else.
+  placeLeft: ['KeyQ'],
+  placeRight: ['KeyE'],
+  placeUp: ['KeyR'],
+  placeDown: ['KeyF'],
 };
 const STORAGE_KEY = 'swg3js.bindings';
 

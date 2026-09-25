@@ -62,13 +62,26 @@ export const TRAVEL_TUNE = {
 };
 
 /**
- * The travel things of a world, in the world's own frame.
+ * The travel things of a world, **every one of them in the world's own frame**.
  *
  * Snapshot space is mirrored in X and centred on the layout centre, which is the streamer's own
- * transform: a thing **outside** a building was written in snapshot space and is brought over here,
- * while one **inside** keeps the building's own frame, because that is the frame its room is drawn
- * and walked in. Either way the building's place is brought over, since that is what ties a
- * terminal to the port it belongs to.
+ * transform, and that is the whole of what a thing standing outside a building needs. A thing
+ * *inside* one is written in the building's own frame instead -- that is the frame its room was
+ * authored and is drawn in -- and it is brought over here rather than left there, because the one
+ * thing it is measured against is the player's position, which is the world's for anybody walking
+ * a room (only a ship's rooms keep their own frame, and no starport is a ship).
+ *
+ * Leaving it in the building's frame is exactly what made the starports' terminals unreachable: the
+ * shuttleports' are outside and came out in the world's frame and worked, while a starport's read
+ * as a few metres from the world's origin and so stood some kilometres from the player wherever
+ * they went. Nothing ever showed, because there is nothing to show for a thing you are not near.
+ *
+ * How it gets there is not guessed at either. The offset is composed **in the snapshot's own frame**
+ * -- the very arithmetic the converter used for the outdoor children, turned by the building's
+ * snapshot yaw -- and only then is it mirrored, which is what the whole-world mirror does to every
+ * other point. Written the other way round (mirror the local point, then turn it by the mirrored
+ * yaw) the two paths disagree the moment a building is turned at all, which the node test catches
+ * by putting the same local place through both.
  */
 export function travelThingsOf(rows: readonly TravelRow[], centre: { x: number; z: number }): TravelThing[] {
   const out: TravelThing[] = [];
@@ -76,7 +89,21 @@ export function travelThingsOf(rows: readonly TravelRow[], centre: { x: number; 
     const bx = -(r.bx - centre.x);
     const bz = r.bz - centre.z;
     if (r.cell > 0) {
-      out.push({ kind: r.kind, x: r.x, y: r.y, z: r.z, yaw: r.yaw, cell: r.cell, building: r.building, bx, bz });
+      const cos = Math.cos(r.byaw);
+      const sin = Math.sin(r.byaw);
+      // The offset in the snapshot's frame, then mirrored across: the building's own place is
+      // already over here, so all that is left of the mirror is the offset's own across-part.
+      out.push({
+        kind: r.kind,
+        x: bx - (r.x * cos + r.z * sin),
+        y: r.by + r.y,
+        z: bz + (-r.x * sin + r.z * cos),
+        yaw: -(r.byaw + r.yaw),
+        cell: r.cell,
+        building: r.building,
+        bx,
+        bz,
+      });
       continue;
     }
     out.push({ kind: r.kind, x: -(r.x - centre.x), y: r.y, z: r.z - centre.z, yaw: -r.yaw, cell: 0, building: r.building, bx, bz });
@@ -87,10 +114,11 @@ export function travelThingsOf(rows: readonly TravelRow[], centre: { x: number; 
 /**
  * The terminal or collector somebody is standing at, or null.
  *
- * A thing inside a building is compared in that building's own frame and only for somebody in the
- * same room, which is why the room travels with it: two starports on one world are the same shape
- * and their terminals carry the same numbers, and without the room a player in one would be offered
- * the other's.
+ * Everything is in the world's frame, so the reach is one distance whether a thing stands in a room
+ * or in the open. The room is still asked about, because a terminal on the other side of a wall is
+ * four metres away and should not be reachable through it: a thing in a room is offered only to
+ * somebody standing in that same room of that same building, and one in the open only to somebody
+ * who is not indoors at all.
  */
 export function thingAt(things: readonly TravelThing[], at: { x: number; y: number; z: number }, room: { building: string; cell: number } | null, kind: 'terminal' | 'collector', tune = TRAVEL_TUNE): TravelThing | null {
   let best: TravelThing | null = null;
@@ -110,6 +138,8 @@ export function thingAt(things: readonly TravelThing[], at: { x: number; y: numb
 
 /** A ticket: where it is from, where it goes, and when it was bought. */
 export interface Ticket {
+  /** This ticket and no other, so the panel can name which one is being used or thrown away. */
+  id: string;
   /** The pack the journey starts on. */
   from: string;
   /** The pack it ends on; the same one for a hop about a single world. */
@@ -120,6 +150,41 @@ export interface Ticket {
   at: { x: number; z: number } | null;
   price: number;
   bought: number;
+}
+
+/** How many tickets may be held at once. Ours; a ticket has no weight and this is a sanity bound. */
+export const TICKETS_HELD = 12;
+
+/**
+ * Put a ticket in hand, oldest thrown away once there are too many.
+ *
+ * A player may hold several, which is the whole of the owner's ask: a ticket is a thing you buy and
+ * keep rather than a slot with one in it. The list is kept newest last, so the oldest is the one
+ * that goes when the cap is reached, and nothing is ever silently replaced.
+ */
+export function addTicket(tickets: readonly Ticket[], ticket: Ticket, most = TICKETS_HELD): Ticket[] {
+  const out = [...tickets.filter((t) => t.id !== ticket.id), ticket];
+  return out.length > most ? out.slice(out.length - most) : out;
+}
+
+/**
+ * Which ticket the collector would take, from the ones held.
+ *
+ * The one the player picked, when it is good from here; otherwise the oldest that is, so somebody
+ * who never opens the list is simply served in the order they bought. A ticket for another world's
+ * shuttle is not good here and is stepped over rather than refused, or holding one would stop every
+ * other ticket working.
+ */
+export function pickTicket(tickets: readonly Ticket[], using: string, here: string): Ticket | null {
+  const chosen = tickets.find((t) => t.id === using);
+  if (chosen && chosen.from === here) return chosen;
+  return tickets.find((t) => t.from === here) ?? null;
+}
+
+/** What a ticket reads as in the list. */
+export function ticketText(t: Ticket, here: string): string {
+  const where = t.from === here ? 'taken at the collector outside' : `from ${t.from}`;
+  return `to ${t.to} — ${where}`;
 }
 
 /**
@@ -189,4 +254,20 @@ export function canBoard(ticket: Ticket | null, here: string, s: ShuttleState): 
   if (ticket.from !== here) return { ok: false, why: `that ticket is for a shuttle from ${ticket.from}` };
   if (s.phase !== 'waiting') return { ok: false, why: shuttleWords(s) };
   return { ok: true, why: '' };
+}
+
+/**
+ * What standing at a collector offers, in words, whichever way it falls.
+ *
+ * It is one line rather than two because it answers one question -- can I get on -- and because a
+ * shuttle that is not there has to say so in the same place a shuttle that is says so. Before this
+ * the only time the shuttle's own clock was ever shown was the moment it refused, so somebody who
+ * pressed at the right moment never saw a shuttle at all and had no way of knowing one had been
+ * there: there is nothing drawn on the pad, and there was nothing said either.
+ */
+export function collectorWords(ticket: Ticket | null, here: string, s: ShuttleState): { can: boolean; text: string } {
+  const can = canBoard(ticket, here, s);
+  if (can.ok) return { can: true, text: `board the shuttle to ${ticket!.to} — it leaves in ${Math.ceil(s.left)}s` };
+  if (!ticket || ticket.from !== here) return { can: false, text: `${can.why}; ${shuttleWords(s)}` };
+  return { can: false, text: shuttleWords(s) };
 }

@@ -10,7 +10,7 @@
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { GHOST_TUNE, ghostSpot, ghostVerdict, outlineCells, turnBy, wheelReach, type GhostDeps } from '../../../src/world/placeGhost.ts';
+import { GHOST_TUNE, ghostSpot, ghostVerdict, liftBy, outlineCells, turnBy, wheelReach, type GhostDeps } from '../../../src/world/placeGhost.ts';
 import { HOUSE_TUNE, patchOfFootprint, type Footprint } from '../../../src/world/housePlace.ts';
 
 let passed = 0;
@@ -32,17 +32,27 @@ const flat = (h = 10): GhostDeps => ({ heightAt: () => h, waterAt: () => -Infini
 // ---------------------------------------------------------------- where it stands
 
 {
+  // The yaw is a body's heading, whose forward is (sin, cos) -- the comment at player.ts's
+  // `enemyNear` is the witness. The camera's yaw is the exact opposite of it, and reading one as
+  // the other is what put the ghost behind the player's back rather than in front of them.
   const at = ghostSpot({ x: 0, z: 0 }, 0, 20);
-  ok(Math.abs(at.x) < 1e-9 && Math.abs(at.z + 20) < 1e-9, "facing yaw 0 the ghost is down the camera's own forward, which is -z");
+  ok(Math.abs(at.x) < 1e-9 && Math.abs(at.z - 20) < 1e-9, 'facing heading 0 the ghost is down +z, which is where the body faces');
   const right = ghostSpot({ x: 0, z: 0 }, Math.PI / 2, 20);
-  ok(Math.abs(right.x + 20) < 1e-6 && Math.abs(right.z) < 1e-6, 'and a quarter turn puts it down -x');
+  ok(Math.abs(right.x - 20) < 1e-6 && Math.abs(right.z) < 1e-6, 'and a quarter turn puts it down +x');
+  for (const yaw of [0, 0.7, 1.9, -2.4, 3.9]) {
+    const spot = ghostSpot({ x: 3, z: -8 }, yaw, 12);
+    const along = (spot.x - 3) * Math.sin(yaw) + (spot.z + 8) * Math.cos(yaw);
+    assert.ok(Math.abs(along - 12) < 1e-6, `at heading ${yaw} the ghost is a full 12 m in front, not behind`);
+  }
+  passed++;
+  console.log('ok   and at every heading it is the whole reach in front of the body, never behind it');
 }
 
 {
   // Unlike the automatic spot, the patch's own offset is **not** taken off: the player is pointing
   // at where the building's origin goes, and the building hangs off that wherever its shape puts it.
   const a = ghostSpot({ x: 5, z: 5 }, 0, 10);
-  ok(a.x === 5 && a.z === -5, 'the ghost goes exactly where it is pointed, however the building is shaped');
+  ok(a.x === 5 && a.z === 15, 'the ghost goes exactly where it is pointed, however the building is shaped');
 }
 
 {
@@ -110,6 +120,37 @@ const flat = (h = 10): GhostDeps => ({ heightAt: () => h, waterAt: () => -Infini
   asked.length = 0;
   ghostVerdict(patch, { x: 0, z: 0 }, Math.PI, spy);
   ok(Math.abs(asked[0].z + patch.cz) < 1e-6, 'and turned about, the other side of it');
+}
+
+// ---------------------------------------------------------------- the player's own lift
+
+{
+  ok(liftBy(0, 1) === GHOST_TUNE.rise, 'a press raises it by a step');
+  ok(Math.abs(liftBy(0, -1) + GHOST_TUNE.rise) < 1e-9, 'and the other key lowers it by one');
+  ok(liftBy(0, 10_000) === GHOST_TUNE.most, 'however long it is held it never goes past the cap');
+  ok(liftBy(0, -10_000) === -GHOST_TUNE.most, 'nor past it downward');
+  for (let i = -60; i < 60; i++) {
+    const l = liftBy(0, i);
+    assert.ok(Math.abs(l) <= GHOST_TUNE.most + 1e-9, `${i} presses stays within the cap`);
+    assert.ok(Math.abs(l / GHOST_TUNE.rise - Math.round(l / GHOST_TUNE.rise)) < 1e-9, `${i} presses lands on a whole step`);
+  }
+  passed++;
+  console.log('ok   and every number of presses lands on a whole step inside the cap');
+}
+
+{
+  // The lift moves where the building is put down and **not** what the ground is asked about: a
+  // doorstep the ground laps over can be lifted clear, and no amount of lifting turns a slope the
+  // ground refuses into a spot it allows.
+  const patch = patchOfFootprint(HOUSE);
+  const level = ghostVerdict(patch, { x: 0, z: 0 }, 0, flat(), 1.5);
+  ok(level.ok && level.y === 11.5, 'a lift raises where it stands, and the ground still takes it');
+  ok(level.lift === 1.5, 'and the state carries the lift, for whoever puts it down');
+  const sloped: GhostDeps = { heightAt: (x) => 10 + x * 0.5, waterAt: () => -Infinity, standing: () => [] };
+  const cheat = ghostVerdict(patch, { x: 0, z: 0 }, 0, sloped, 50);
+  ok(!cheat.ok, 'and a spot the ground refuses is refused however high it is lifted');
+  const wet: GhostDeps = { heightAt: () => 10, waterAt: () => 12, standing: () => [] };
+  ok(!ghostVerdict(patch, { x: 0, z: 0 }, 0, wet, 20).ok, 'a lake is still a lake with the house held over it');
 }
 
 // ---------------------------------------------------------------- the grid

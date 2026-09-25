@@ -347,6 +347,10 @@ b { color: var(--accent); font-weight: 600; }
 .housing-examine .why { color: var(--warn); }
 /* The backpack: "Worn and held" and "Backpack" side by side, a picture and a name to each item, the examine pane under them. */
 #backpack .wardrobe-panel { width: min(1040px, 96vw); outline: none; }
+/* Credits are a number on the character rather than a thing in the pack, so they stand in the
+   header beside the count; empty, the span takes no room at all. */
+#backpack .bp-credits { flex: none; font-size: 11px; letter-spacing: 0.04em; color: var(--accent); }
+#backpack .bp-credits:empty { display: none; }
 #backpack .wardrobe-header .find { flex: none; width: 140px; padding: 4px 8px; font-size: 11px; background: color-mix(in srgb, var(--void) 30%, transparent); color: var(--text); border: 1px solid var(--panel-border); border-radius: 4px; }
 #weapons .wardrobe-header .dev-note { flex: none; font-size: 10px; color: var(--warn); letter-spacing: 0.03em; }
 .backpack-main { flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 8fr); gap: 12px; padding: 8px 14px 6px; }
@@ -602,11 +606,14 @@ b { color: var(--accent); font-weight: 600; }
   #start .cs-foot { font-size: 12.5px; }
 }
 
-/* The creator: the appearance and wardrobe panels at full size, the weapons tab and the close button out of the way, a bar below. */
+/* The creator: the appearance panel at full size, the close button out of the way, a bar below. */
 .overlay.creation { align-items: flex-start; padding-top: 10px; background: radial-gradient(ellipse at 50% 30%, rgba(30,48,70,0.95), color-mix(in srgb, var(--void) 98%, transparent)); backdrop-filter: none; }
 .overlay.creation .wardrobe-panel, .overlay.creation .wardrobe-panel.wide, #wardrobe.creation .wardrobe-panel { width: min(1500px, 97vw); max-width: none; height: calc(100vh - 92px); max-height: none; }
 .overlay.creation .wardrobe-preview { flex: 0 0 min(42%, 620px); }
-.overlay.creation .tab[data-tab="weapons"], .overlay.creation .close { display: none; }
+/* Making a character is one screen: the look. The clothes, the guns, the skills, the backpack and
+   the housing are all things a character does once it exists, and none of them has a record to
+   write to yet, so the whole strip goes rather than tab by tab. The panel keeps its header. */
+.overlay.creation .tabs, .overlay.creation .close { display: none; }
 /* The creator standing a character in one of the captured places: the world is drawn behind, so the
    editor becomes a window down the right and everything else gets out of its way.
    `pointer-events: none` on the overlay is what lets a drag on the world reach the canvas at all --
@@ -627,8 +634,6 @@ b { color: var(--accent); font-weight: 600; }
 #creator-bar button { padding: 8px 14px; font-size: 12px; background: color-mix(in srgb, var(--pool) 30%, transparent); color: var(--text); border: 1px solid var(--panel-border); border-radius: 4px; cursor: pointer; letter-spacing: 0.06em; }
 #creator-bar button:hover { border-color: var(--accent); }
 #creator-bar .create { background: color-mix(in srgb, var(--pool) 55%, transparent); border-color: var(--accent); font-weight: 600; }
-#creator-bar .steps { display: flex; gap: 4px; }
-#creator-bar .step.on { color: var(--accent); border-color: var(--accent); }
 #creator-bar .note { flex: 1; font-size: 11px; color: var(--warn); }
 #fade small { display: block; margin-top: 10px; font-size: 11px; letter-spacing: 0.08em; color: var(--muted); }
 

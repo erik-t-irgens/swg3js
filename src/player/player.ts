@@ -1057,6 +1057,12 @@ export class Player {
     }
   }
 
+  /** Whether what is held fights with nothing: an instrument, which is carried and played, never swung. */
+  get holdsNoWeapon(): boolean {
+    const r = this.equipped.right;
+    return !!r && FIGHTS[r.class] === 'none';
+  }
+
   /** Which blades show: the main one, the staff's second, the dual style's left-hand saber; none while thrown. */
   private updateBlades(): void {
     const p = this.parts;
@@ -1175,9 +1181,11 @@ export class Player {
   /**
    * Put a weapon from the rack in a hand: its model on the hand's hold point (the game's hardpoint,
    * which its meshes are made for), its class picking the carries, the style and the sweep. Returns
-   * the class of kit the weapon wants (a blaster the bounty hunter's, a blade the jedi's).
+   * the class of kit the weapon wants (a blaster the bounty hunter's, a blade the jedi's), or null
+   * for a thing that is not a weapon at all -- an instrument, which wants neither kit and must not
+   * light a blade or change the class to be picked up and played.
    */
-  equip(def: WeaponDef, model: THREE.Object3D, hand: 'right' | 'left' = 'right'): ClassId {
+  equip(def: WeaponDef, model: THREE.Object3D, hand: 'right' | 'left' = 'right'): ClassId | null {
     if (hand === 'left' && !OFF_HAND.has(def.class)) hand = 'right';
     this.unequip(hand);
     const bone = this.handBones[hand];
@@ -1219,10 +1227,10 @@ export class Player {
     if (fights === 'gun') {
       this.gunKind = gunKindOf(def.class);
       this.gunClass = def.class as 'pistol' | 'carbine' | 'rifle' | 'heavy';
-    } else if (this.classId === 'jedi' && !this.saberOn) this.toggleSaber();
+    } else if (fights !== 'none' && this.classId === 'jedi' && !this.saberOn) this.toggleSaber();
     this.settleStyle();
     this.updateBlades();
-    return fights === 'gun' ? 'bounty_hunter' : 'jedi';
+    return fights === 'gun' ? 'bounty_hunter' : fights === 'none' ? null : 'jedi';
   }
 
   /**
@@ -2231,7 +2239,10 @@ export class Player {
     // attack chains the next one; the rig plays the move's clip when it has it. With bare hands
     // on, the buttons are the kit's punches and kicks and the saber stays away.
     if (this.classId === 'jedi' && this.fists && this.saberOn) this.toggleSaber();
-    if (this.classId === 'jedi' && !this.fists) {
+    // A thing in hand that fights with nothing -- an instrument -- swings at nothing either. It
+    // hides the blade the way a melee weapon does and takes no attack at all: the click belongs to
+    // whatever it is for, and here that is the music.
+    if (this.classId === 'jedi' && !this.fists && !this.holdsNoWeapon) {
       const attackPressed = input.pressedAction('attack');
       const blockPressed = input.pressedAction('block');
       const throwPressed = input.pressedAction('saberThrow');

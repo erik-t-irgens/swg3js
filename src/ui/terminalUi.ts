@@ -42,11 +42,22 @@ export interface TerminalWorld {
   fare: string;
 }
 
+/** One thing the player's own ship will do, on the Your ship side. */
+export interface TerminalShipTrip {
+  /** What the game is told: a port by name, or the word for the orbit. */
+  id: string;
+  name: string;
+  /** In words: how far off, or what the orbit is. */
+  detail: string;
+  /** Why it cannot be taken, or empty. */
+  why: string;
+}
+
 export interface TerminalModel {
   /** What the terminal calls itself: the port it stands in. */
   title: string;
   /** Which side is showing. */
-  stage: 'here' | 'worlds' | 'there';
+  stage: 'here' | 'worlds' | 'there' | 'ship';
   /** The world whose ports are shown: this one on `here`, the picked one on `there`. */
   mapUrl: string | null;
   /** How wide a ground that picture covers, metres. */
@@ -59,8 +70,18 @@ export interface TerminalModel {
   credits: string;
   /** A line under everything: what the last press did, or what is wrong. */
   note: string;
-  /** A ticket already held, in words, or empty. */
-  ticket: string;
+  /**
+   * The tickets already held, newest last, with the one that would be used marked. Empty for none.
+   *
+   * More than one may be held, which is the game's own behaviour and the owner's ask: a ticket is a
+   * thing you buy and keep, and the collector asks which one you are handing over.
+   */
+  tickets: { id: string; text: string; using: boolean }[];
+  /**
+   * The Your ship side, when this terminal has one: the game's own `terminal_space` stands in its
+   * starports and is what launches the player's own ship. Null where there is none near.
+   */
+  ship: { trips: TerminalShipTrip[]; note: string } | null;
 }
 
 const TERMINAL_CSS = `
@@ -83,7 +104,13 @@ const TERMINAL_CSS = `
 #terminal .terminal-note { font-size: 11px; color: var(--muted); min-height: 1.3em; }
 #terminal .terminal-note.bad { color: var(--warn); }
 #terminal .terminal-credits { font-size: 11px; color: var(--accent); letter-spacing: 0.04em; }
-#terminal .terminal-ticket { font-size: 11px; color: var(--good); }
+#terminal .terminal-tickets { display: flex; flex-direction: column; gap: 2px; }
+#terminal .terminal-ticket { display: flex; align-items: baseline; gap: 6px; font-size: 11px; color: var(--good); cursor: pointer; padding: 2px 5px; border: 1px solid transparent; border-radius: 3px; }
+#terminal .terminal-ticket:hover { border-color: var(--rule); }
+#terminal .terminal-ticket.using { border-color: color-mix(in srgb, var(--good) 55%, transparent); background: color-mix(in srgb, var(--good) 10%, transparent); }
+#terminal .terminal-ticket .mark { flex: none; width: 1em; color: var(--good); }
+#terminal .terminal-ticket .drop { flex: none; margin-left: auto; font-size: 10px; color: var(--muted); background: none; border: 0; cursor: pointer; padding: 0 2px; }
+#terminal .terminal-ticket .drop:hover { color: var(--warn); }
 `;
 
 let styled = false;
@@ -103,9 +130,13 @@ export class TerminalUi {
   /** A world picked on the galaxy side, by its pack. */
   onWorld: (pack: string) => void = () => {};
   /** Which side to show. */
-  onStage: (stage: 'here' | 'worlds') => void = () => {};
+  onStage: (stage: 'here' | 'worlds' | 'ship') => void = () => {};
   /** Buy what is picked. */
   onBuy: () => void = () => {};
+  /** A ticket picked as the one to use, or thrown away. */
+  onTicket: (id: string, drop: boolean) => void = () => {};
+  /** Take the player's own ship somewhere: a port's name, or the orbit. */
+  onShipTrip: (id: string) => void = () => {};
 
   private model: TerminalModel | null = null;
   private pickedPort = '';
@@ -155,6 +186,18 @@ export class TerminalUi {
     this.pickedPort = '';
   }
 
+  /**
+   * The credits line alone, for a fare paid while the window is open.
+   *
+   * It writes the one element rather than redrawing: a redraw rebuilds the map's dots and the list,
+   * which would lose the pick the player is half way through making.
+   */
+  setCredits(text: string): void {
+    if (this.model) this.model.credits = text;
+    const line = this.root.querySelector('.terminal-credits');
+    if (line) line.textContent = text;
+  }
+
   private draw(): void {
     const m = this.model;
     if (!m) return;
@@ -165,6 +208,21 @@ export class TerminalUi {
     // map's own thumbnails use, so the size on the panel does not matter.
     if (m.stage === 'worlds' || !m.mapUrl) {
       map.innerHTML = `<div class="none">${escapeHtml(m.stage === 'worlds' ? 'pick a world, then a port on it' : 'this world has no map converted: the list beside is the whole of it')}</div>`;
+    } else if (m.stage === 'ship') {
+      // The same map, with only the pads a ship can land on dotted: a shuttleport is a shelter
+      // with a bench and your own ship has no business at one.
+      const e = m.mapWidth;
+      map.innerHTML =
+        `<img src="${escapeHtml(m.mapUrl)}" alt="">` +
+        m.ports
+          .filter((p) => p.kind === 'starport')
+          .map((p) => {
+            const left = (p.x + e / 2) / e;
+            const top = (e / 2 - p.z) / e;
+            if (!(left >= 0 && left <= 1 && top >= 0 && top <= 1)) return '';
+            return `<button type="button" class="dot star" style="left:${(left * 100).toFixed(2)}%;top:${(top * 100).toFixed(2)}%" data-trip="${escapeHtml(p.name)}" title="${escapeHtml(p.name)}"></button>`;
+          })
+          .join('');
     } else {
       const e = m.mapWidth;
       map.innerHTML =
@@ -179,24 +237,36 @@ export class TerminalUi {
           .join('');
     }
     const rows =
-      m.stage === 'worlds'
-        ? m.worlds.map((w) => `<div class="terminal-row" data-world="${escapeHtml(w.pack)}"><span>${escapeHtml(w.name)}</span><span class="fare">${escapeHtml(w.fare)}</span></div>`).join('')
-        : m.ports
-            .map(
-              (p) =>
-                `<div class="terminal-row${p.name === this.pickedPort ? ' on' : ''}${p.why ? ' cannot' : ''}" data-port="${escapeHtml(p.name)}"><span>${escapeHtml(p.name)}</span><span class="fare">${escapeHtml(p.why || p.fare)}${p.away ? ` · ${escapeHtml(p.away)}` : ''}</span></div>`,
-            )
-            .join('');
+      m.stage === 'ship'
+        ? (m.ship?.trips ?? [])
+            .map((t) => `<div class="terminal-row${t.why ? ' cannot' : ''}" data-trip="${escapeHtml(t.id)}"><span>${escapeHtml(t.name)}</span><span class="fare">${escapeHtml(t.why || t.detail)}</span></div>`)
+            .join('')
+        : m.stage === 'worlds'
+          ? m.worlds.map((w) => `<div class="terminal-row" data-world="${escapeHtml(w.pack)}"><span>${escapeHtml(w.name)}</span><span class="fare">${escapeHtml(w.fare)}</span></div>`).join('')
+          : m.ports
+              .map(
+                (p) =>
+                  `<div class="terminal-row${p.name === this.pickedPort ? ' on' : ''}${p.why ? ' cannot' : ''}" data-port="${escapeHtml(p.name)}"><span>${escapeHtml(p.name)}</span><span class="fare">${escapeHtml(p.why || p.fare)}${p.away ? ` · ${escapeHtml(p.away)}` : ''}</span></div>`,
+              )
+              .join('');
     const picked = m.ports.find((p) => p.name === this.pickedPort) ?? null;
+    const ship = m.stage === 'ship';
+    const empty = ship ? (m.ship?.note ?? 'this terminal does nothing for a ship') : 'nowhere to go from here';
+    // The tickets are a list rather than a line: more than one may be held, and the one that will
+    // be handed to the collector is the one picked here.
+    const tickets = m.tickets.length
+      ? `<div class="terminal-tickets">${m.tickets
+          .map((t) => `<div class="terminal-ticket${t.using ? ' using' : ''}" data-ticket="${escapeHtml(t.id)}"><span class="mark">${t.using ? '&#9679;' : ''}</span><span>${escapeHtml(t.text)}</span><button type="button" class="drop" data-drop="${escapeHtml(t.id)}" title="throw this ticket away">&times;</button></div>`)
+          .join('')}</div>`
+      : '';
     side.innerHTML =
-      `<div class="tabs"><button class="tab${m.stage === 'here' ? ' on' : ''}" data-stage="here">This world</button><button class="tab${m.stage !== 'here' ? ' on' : ''}" data-stage="worlds">Galaxy</button></div>` +
+      `<div class="tabs"><button class="tab${m.stage === 'here' ? ' on' : ''}" data-stage="here">This world</button><button class="tab${m.stage === 'worlds' || m.stage === 'there' ? ' on' : ''}" data-stage="worlds">Galaxy</button>${m.ship ? `<button class="tab${ship ? ' on' : ''}" data-stage="ship">Your ship</button>` : ''}</div>` +
       `${m.stage === 'there' ? `<p class="terminal-note">${escapeHtml(m.picked)}: pick a port</p>` : ''}` +
-      `<div class="terminal-list">${rows || '<p class="terminal-note">nowhere to go from here</p>'}</div>` +
-      `<div class="terminal-credits">${escapeHtml(m.credits)}</div>` +
-      `${m.ticket ? `<div class="terminal-ticket">${escapeHtml(m.ticket)}</div>` : ''}` +
-      `<div class="terminal-note${m.note && !picked ? ' bad' : ''}">${escapeHtml(m.note)}</div>` +
-      `<div class="ship-action"><button class="buy"${picked && !picked.why ? '' : ' disabled'}>${picked ? `Purchase — ${escapeHtml(picked.fare)}` : 'Purchase'}</button></div>` +
-      `<p class="menu-hint">A ticket is taken at the collector outside, when a shuttle has landed.</p>`;
+      `<div class="terminal-list">${rows || `<p class="terminal-note">${escapeHtml(empty)}</p>`}</div>` +
+      `${ship ? '' : `<div class="terminal-credits">${escapeHtml(m.credits)}</div>${tickets}`}` +
+      `<div class="terminal-note${m.note && !picked ? ' bad' : ''}">${escapeHtml(ship ? (m.ship?.note ?? '') : m.note)}</div>` +
+      `${ship ? '' : `<div class="ship-action"><button class="buy"${picked && !picked.why ? '' : ' disabled'}>${picked ? `Purchase — ${escapeHtml(picked.fare)}` : 'Purchase'}</button></div>`}` +
+      `<p class="menu-hint">${ship ? 'Your own ship, and nothing to pay. It launches from the pad outside.' : 'A ticket is taken at the collector outside, when a shuttle has landed. Click a ticket to choose which one.'}</p>`;
     for (const b of this.root.querySelectorAll<HTMLElement>('[data-port]')) {
       b.addEventListener('click', () => {
         this.pickedPort = b.dataset.port!;
@@ -204,8 +274,17 @@ export class TerminalUi {
         this.draw();
       });
     }
+    for (const b of this.root.querySelectorAll<HTMLElement>('[data-trip]')) b.addEventListener('click', () => this.onShipTrip(b.dataset.trip!));
     for (const b of side.querySelectorAll<HTMLElement>('[data-world]')) b.addEventListener('click', () => this.onWorld(b.dataset.world!));
-    for (const b of side.querySelectorAll<HTMLElement>('[data-stage]')) b.addEventListener('click', () => this.onStage(b.dataset.stage as 'here' | 'worlds'));
+    for (const b of side.querySelectorAll<HTMLElement>('[data-stage]')) b.addEventListener('click', () => this.onStage(b.dataset.stage as 'here' | 'worlds' | 'ship'));
+    // The throw-away is inside the row, so it must not also be read as choosing that ticket.
+    for (const b of side.querySelectorAll<HTMLElement>('[data-drop]')) {
+      b.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.onTicket(b.dataset.drop!, true);
+      });
+    }
+    for (const b of side.querySelectorAll<HTMLElement>('[data-ticket]')) b.addEventListener('click', () => this.onTicket(b.dataset.ticket!, false));
     side.querySelector('.buy')?.addEventListener('click', () => this.onBuy());
   }
 }

@@ -6,7 +6,12 @@ import { surfaces } from '../world/surfaces';
 import { OFF_HAND_CLASSES } from '../core/inventory.ts';
 import { fireLookLine, pickFireLook, type FireLook } from './fireLook.ts';
 
-export type WeaponClass = 'pistol' | 'carbine' | 'rifle' | 'heavy' | 'sword1h' | 'knife' | 'sword2h' | 'polearm' | 'fist' | 'lightsaber' | 'lightsaber2h' | 'lightsaberStaff' | 'thrown';
+/**
+ * What a hand can hold. `instrument` is the odd one and is deliberately here: an instrument is not
+ * a weapon and fights with nothing, but it is held in a hand, drawn on a rack, given and taken up by
+ * every path a weapon is, and the one thing this game has that does all of that is this list.
+ */
+export type WeaponClass = 'pistol' | 'carbine' | 'rifle' | 'heavy' | 'sword1h' | 'knife' | 'sword2h' | 'polearm' | 'fist' | 'lightsaber' | 'lightsaber2h' | 'lightsaberStaff' | 'thrown' | 'instrument';
 
 /**
  * A gun's client effect: the family and index its template names into the client's weapon table
@@ -37,8 +42,12 @@ export interface BladeDef {
 export function isSaber(cls: WeaponClass | undefined | null): boolean {
   return cls === 'lightsaber' || cls === 'lightsaber2h' || cls === 'lightsaberStaff';
 }
-/** How a class fights: a blaster, a single-blade style (fast, medium, strong), the staff, the lightsaber itself, or thrown (the grenades the gadget slots throw; not held). */
-export type Fights = 'gun' | 'single' | 'staff' | 'lightsaber' | 'thrown';
+/**
+ * How a class fights: a blaster, a single-blade style (fast, medium, strong), the staff, the
+ * lightsaber itself, thrown (the grenades the gadget slots throw; not held), or `none` -- which is
+ * an instrument, held in a hand and not a weapon at all.
+ */
+export type Fights = 'gun' | 'single' | 'staff' | 'lightsaber' | 'thrown' | 'none';
 
 export interface WeaponDef {
   id: string;
@@ -78,8 +87,8 @@ export interface WeaponsManifest {
 export type ExtraEffect = 'flame' | 'lightning' | 'lightningMuzzle' | 'acid' | 'ice' | 'onfire';
 
 /** What each class fights like, when the manifest does not say. */
-export const FIGHTS: Record<WeaponClass, Fights> = { pistol: 'gun', carbine: 'gun', rifle: 'gun', heavy: 'gun', sword1h: 'single', knife: 'single', sword2h: 'single', polearm: 'staff', fist: 'single', lightsaber: 'lightsaber', lightsaber2h: 'lightsaber', lightsaberStaff: 'lightsaber', thrown: 'thrown' };
-export const CLASS_LABELS: Record<WeaponClass, string> = { pistol: 'Pistols', carbine: 'Carbines', rifle: 'Rifles', heavy: 'Heavy weapons', sword1h: 'One-hand swords and clubs', knife: 'Knives', sword2h: 'Two-hand swords and axes', polearm: 'Polearms and lances', fist: 'Fist weapons', lightsaber: 'Lightsabers', lightsaber2h: 'Two-hand lightsabers', lightsaberStaff: 'Double-bladed lightsabers', thrown: 'Grenades and thrown weapons' };
+export const FIGHTS: Record<WeaponClass, Fights> = { pistol: 'gun', carbine: 'gun', rifle: 'gun', heavy: 'gun', sword1h: 'single', knife: 'single', sword2h: 'single', polearm: 'staff', fist: 'single', lightsaber: 'lightsaber', lightsaber2h: 'lightsaber', lightsaberStaff: 'lightsaber', thrown: 'thrown', instrument: 'none' };
+export const CLASS_LABELS: Record<WeaponClass, string> = { pistol: 'Pistols', carbine: 'Carbines', rifle: 'Rifles', heavy: 'Heavy weapons', sword1h: 'One-hand swords and clubs', knife: 'Knives', sword2h: 'Two-hand swords and axes', polearm: 'Polearms and lances', fist: 'Fist weapons', lightsaber: 'Lightsabers', lightsaber2h: 'Two-hand lightsabers', lightsaberStaff: 'Double-bladed lightsabers', thrown: 'Grenades and thrown weapons', instrument: 'Instruments' };
 /** Classes a left hand may hold too: every blade but the double-bladed staff; one in each hand fights as the dual style (the backpack's rules own the list). */
 export const OFF_HAND = OFF_HAND_CLASSES as ReadonlySet<WeaponClass>;
 /** The blaster carries a class plays: the pistol's, or the rifle's (carbines and heavy weapons use the rifle set). */

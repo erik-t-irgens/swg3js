@@ -92,7 +92,16 @@ export function musicPack(): MusicPack | null {
   return pack;
 }
 
-/** Which stem an instrument plays, or null when the pack cannot place it. */
+/**
+ * Which stem an instrument plays, or null when the pack cannot place it.
+ *
+ * An exact lookup on the instrument's own id, and deliberately so: the pack is keyed by the very
+ * ids the weapons pack carries, because the `music` command reads that pack and resolves every
+ * spelling itself (a `_hue` variant is the same instrument in a colour somebody picked, and there
+ * are fourteen instruments behind the archives' 28 templates). Measured over the real archives it
+ * places all 28, so there is nothing left here to guess at -- and a second opinion about spellings
+ * on this side is exactly how the two halves would come to disagree.
+ */
 export function stemFor(instrumentId: string, from: MusicPack | null = pack): string | null {
   if (!from) return null;
   return from.instruments[instrumentId] ?? null;

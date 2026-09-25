@@ -184,9 +184,11 @@ const flat = (probes: readonly { x: number; z: number }[], h = 10): number[] => 
 {
   const p: Patch = { hx: 4, hz: 4, cx: 0, cz: 0 };
   const at = spotAhead({ x: 0, z: 0 }, 0, p);
-  ok(Math.abs(at.x) < 1e-9 && Math.abs(at.z + HOUSE_TUNE.ahead) < 1e-9, "facing yaw 0 puts it down the camera's own forward, which is -z");
+  // A body's heading, whose forward is (sin, cos): heading 0 faces +z. Read as the camera's yaw,
+  // whose forward is the negative of that, every building landed behind the player's back.
+  ok(Math.abs(at.x) < 1e-9 && Math.abs(at.z - HOUSE_TUNE.ahead) < 1e-9, 'facing heading 0 puts it down +z, which is where the body is looking');
   const right = spotAhead({ x: 0, z: 0 }, Math.PI / 2, p);
-  ok(Math.abs(right.x + HOUSE_TUNE.ahead) < 1e-6 && Math.abs(right.z) < 1e-6, 'a quarter turn puts it down -x, as the camera turns');
+  ok(Math.abs(right.x - HOUSE_TUNE.ahead) < 1e-6 && Math.abs(right.z) < 1e-6, 'a quarter turn puts it down +x, as the body turns');
 }
 
 {

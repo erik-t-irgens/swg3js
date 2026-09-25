@@ -3078,6 +3078,17 @@ export class World {
     return this.layoutStream?.objectsNear(x, z, reach) ?? [];
   }
 
+  /**
+   * The nearest placed object of one of these templates within `reach` metres, or null.
+   *
+   * Unlike `standingNear` it keeps the objects **inside** buildings, because that is where the
+   * things anybody asks about by template stand: the ship terminals the game places in its
+   * starports are every one of them contained.
+   */
+  placedNear(templates: ReadonlySet<string>, at: { x: number; y: number; z: number }, reach: number): PlacedObject | null {
+    return this.layoutStream?.nearestPlaced(templates, at, reach) ?? null;
+  }
+
   /** Materials whose shaders have been asked for ahead of their first draw. */
   private readonly compiledMaterials = new WeakSet<THREE.Material>();
 

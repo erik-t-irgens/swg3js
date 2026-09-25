@@ -98,6 +98,10 @@ const ACTION_LABELS: Record<Action, string> = {
   rollLeft: 'Roll left (adrift in space)',
   rollRight: 'Roll right (adrift in space)',
   wings: 'Open and close the wings (flying a ship)',
+  placeLeft: 'Turn it left (placing a building)',
+  placeRight: 'Turn it right (placing a building)',
+  placeUp: 'Raise it (placing a building)',
+  placeDown: 'Lower it (placing a building)',
 };
 
 /**

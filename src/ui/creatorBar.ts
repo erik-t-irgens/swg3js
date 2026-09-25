@@ -1,6 +1,9 @@
 // The bar under the character creator: the name, the class, the world to start on, and the
-// button that makes the character. The creator itself is the appearance and wardrobe panels
-// at full size above it.
+// button that makes the character. The creator itself is the appearance panel at full size above
+// it, and that panel is the whole of making a character -- there is no step 2. Clothes, weapons,
+// skills and the backpack are what a character does once it exists and has a record to write to,
+// so the creator shows none of them (the tab strip is hidden in `.creation`). `onTab` and
+// `setStep` are kept because the wardrobe panel can still be shown here by hand.
 import type { ClassId } from '../combat/kit';
 import { PLANETS } from '../data/planets';
 
@@ -17,8 +20,7 @@ export class CreatorBar {
     const worlds = PLANETS.filter((p) => p.id !== 'gallery' && !p.space);
     this.root.innerHTML = `
       <button class="back">← Characters</button>
-      <div class="steps"><button class="step on" data-step="appearance">1 · Species &amp; look</button><button class="step" data-step="wardrobe">2 · Clothes</button></div>
-      <label>Name <input class="name" type="text" maxlength="24" placeholder="Character name" autocomplete="off" spellcheck="false" /></label>
+      <label>Name<input class="name" type="text" maxlength="24" placeholder="Character name" autocomplete="off" spellcheck="false" /></label>
       <label>Class <select class="class"><option value="jedi">Jedi</option><option value="bounty_hunter">Bounty Hunter</option></select></label>
       <label>Starts on <select class="planet">${worlds.map((p) => `<option value="${p.id}">${p.name} — ${p.tagline}</option>`).join('')}</select></label>
       <button class="create">Create character</button>

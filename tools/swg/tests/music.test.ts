@@ -268,4 +268,35 @@ const here = { x: 0, y: 0, z: 0 };
   }
 }
 
+// -------------------------------------------- the two halves meeting, over the real weapons pack
+//
+// The converter is the one place that decides which instrument plays what, and the game looks a
+// stem up by the instrument's **own id** with no normalising of its own -- so if the pack ever
+// carries an id the table cannot place, an instrument is held and plays silence with nothing to
+// say why. There are fourteen instruments behind the archives' 28 templates (a plain one and a
+// `_hue` one for most, and an `instrument_` prefix on two), and this is what proves the table
+// covers every spelling of them that a real pack hands over.
+{
+  const weaponsFile = join('assets-private', 'weapons', 'manifest.json');
+  const musicFile = join('assets-private', 'music', 'music.json');
+  if (!existsSync(weaponsFile)) {
+    note('no weapons pack here, so the join is not checked (npm run swg -- weapons @SWG assets-private --retail-only)');
+  } else {
+    const w = JSON.parse(readFileSync(weaponsFile, 'utf8')) as { weapons: { id: string; class: string }[] };
+    const held = w.weapons.filter((e) => e.class === 'instrument').map((e) => e.id);
+    if (!held.length) {
+      note('the weapons pack carries no instrument: it wants converting again, which is what puts them on the rack');
+    } else {
+      const { placed, unplaced } = instrumentStems(held);
+      ok(!unplaced.length, `every one of the ${held.length} instruments the weapons pack carries is placed on a track (${new Set(placed.map((p) => p.stem)).size} of the six stems used)`);
+      if (existsSync(musicFile)) {
+        const p = JSON.parse(readFileSync(musicFile, 'utf8')) as MusicPack;
+        const missing = held.filter((id) => !stemFor(id, p));
+        ok(!missing.length, "and the game finds each of them in the music pack by its own id, with no spelling rule of its own");
+        if (missing.length) note(`the music pack was written before these arrived: ${missing.slice(0, 6).join(', ')} — run the music command again after the weapons one`);
+      }
+    }
+  }
+}
+
 console.log(`\n${passed} checks passed`);

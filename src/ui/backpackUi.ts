@@ -37,6 +37,12 @@ export interface BackpackModel {
   /** What each hand shows while empty: the class's stand-in ('the plain saber') or null. */
   standIn: { right: string | null; left: string | null };
   noWardrobe: boolean;
+  /**
+   * What the character has to spend, already in words. Credits are a number on the character
+   * rather than a thing in the pack -- the game had no credit item and the owner's call was that
+   * they should not be one here -- so they stand in the header beside the count and not in a cell.
+   */
+  credits?: string;
 }
 
 /** How long the Destroy button waits for its second click, ms. */
@@ -58,6 +64,7 @@ export class BackpackUi {
   onTrade: () => void = () => {};
 
   private readonly count: HTMLElement;
+  private readonly credits: HTMLElement;
   private readonly find: HTMLInputElement;
   private readonly hands: HTMLElement;
   private readonly wornGrid: HTMLElement;
@@ -81,6 +88,7 @@ export class BackpackUi {
       <div class="wardrobe-panel backpack-panel" tabindex="-1">
         <div class="wardrobe-header">
           ${tabStrip(INVENTORY_TABS, 'backpack')}
+          <span class="bp-credits"></span>
           <span class="count"></span>
           <input class="find" placeholder="find" />
           <button class="trade">Trade</button>
@@ -102,6 +110,7 @@ export class BackpackUi {
       </div>`;
     parent.appendChild(this.root);
     this.count = this.root.querySelector('.count')!;
+    this.credits = this.root.querySelector('.bp-credits')!;
     this.find = this.root.querySelector('.find')!;
     this.hands = this.root.querySelector('[data-area="hands"]')!;
     this.wornGrid = this.root.querySelector('[data-area="worn"]')!;
@@ -234,6 +243,7 @@ export class BackpackUi {
     this.packGrid.scrollTop = scroll[1];
     const held = (right ? 1 : 0) + (left ? 1 : 0);
     this.count.textContent = `${model.cells.length} items · ${worn.length} worn · ${held} held`;
+    this.credits.textContent = model.credits ?? '';
     this.packCount.textContent = `(${pack.length})`;
     this.note.textContent = model.note ? `${model.note} · ` : '';
     if (this.selected && !this.cell(this.selected)) this.selected = null;

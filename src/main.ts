@@ -81,7 +81,7 @@ import { WeaponCatalogue, type WeaponDef } from './player/weapons';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 // `distanceWords` is the interface's own spelling of a distance, threshold and all, so the death
 // card's rows read exactly as the group roster's do.
-import { distanceWords, Hud, hudBindingsChanged, Roster, ROSTER_TUNE } from './ui/hud';
+import { distanceWords, Hud, hudBindingsChanged, keyLabel, Roster, ROSTER_TUNE } from './ui/hud';
 import { specFor, type DriveInput } from './vehicles/vehicle';
 import { interceptTime, leadPoint } from './combat/intercept';
 import { PostFX, type FxFrameInput, type SunInfo } from './core/postfx';
@@ -102,10 +102,12 @@ import { homes } from './net/homes.ts';
 import { creditText, purse } from './net/purse.ts';
 import { BAND_TUNE, band, loadMusic, musicPack, partsFor, songsFor, stemFor } from './audio/band.ts';
 import { BandBar } from './ui/bandBar.ts';
-import { TRAVEL_TUNE, canBoard, shuttleAt, shuttleWords, thingAt, travelThingsOf, type Ticket, type TravelRow, type TravelThing } from './world/travelTerminal.ts';
-import { TerminalUi, type TerminalPort } from './ui/terminalUi.ts';
+import { TRAVEL_TUNE, addTicket, canBoard, collectorWords, pickTicket, shuttleAt, shuttleWords, thingAt, ticketText, travelThingsOf, type ShuttleState, type Ticket, type TravelRow, type TravelThing } from './world/travelTerminal.ts';
+import { SHIP_TERMINAL_TEMPLATES, SHIP_TERMINAL_TUNE, SHIP_TRIP_ORBIT, shipTripsFrom, shipTripsNote, type ShipTerminalState } from './world/shipTerminal.ts';
+import type { PlacedObject } from './world/layoutStream';
+import { TerminalUi, type TerminalPort, type TerminalShipTrip } from './ui/terminalUi.ts';
 import { allDeeds, deedById, deedLine, footprintOf, loadDeeds, wrongWorld, type DeedRow } from './world/deeds.ts';
-import { GHOST_TUNE, PlacementGhost, ghostSpot, ghostVerdict, turnBy, wheelReach, type GhostState } from './world/placeGhost.ts';
+import { GHOST_TUNE, PlacementGhost, ghostSpot, ghostVerdict, liftBy, turnBy, wheelReach, type GhostState } from './world/placeGhost.ts';
 import { patchOfFootprint } from './world/housePlace.ts';
 import { PlacingBar } from './ui/placingBar.ts';
 import { HousingUi } from './ui/housingUi.ts';
@@ -1262,6 +1264,8 @@ class App {
       });
     };
     this.terminalUi.onBuy = () => this.buyTicket();
+    this.terminalUi.onTicket = (id, drop) => this.pickedTicket(id, drop);
+    this.terminalUi.onShipTrip = (id) => this.takeShipTrip(id);
     // Housing: the deeds a character owns, and the ghost of a building being put down.
     this.housingUi = new HousingUi(this.ui);
     this.housingUi.onTab = (id) => this.toggleInventory(id as InventoryTab);
@@ -1273,6 +1277,7 @@ class App {
     this.housingUi.onRemove = () => this.messages.system('take one down from the world itself, not from here');
     this.placingBar = new PlacingBar(this.ui);
     this.placingBar.onTurn = (n) => this.turnPlacing(n);
+    this.placingBar.onLift = (n) => this.liftPlacing(n);
     this.placingBar.onPlace = () => void this.dropPlacing();
     this.placingBar.onCancel = () => this.stopPlacing();
     // The band: an instrument in hand plays its own track of a song, and everybody in earshot is
@@ -1619,10 +1624,11 @@ class App {
        *
        * `__debug.place()` lists what there is; `__debug.place('corellia_house_medium_deed')` takes
        * that deed in hand, which is what the Housing tab's double-click does; `{ turn: 2 }` and
-       * `{ reach: 30 }` move the ghost as the buttons and the wheel do; `{ drop: true }` puts it
-       * down; `{ cancel: true }` gives it up; and `{ tune: { … } }` moves the ghost's own numbers.
+       * `{ reach: 30 }` move the ghost as the keys and the wheel do, `{ lift: 4 }` raises it four
+       * presses (and -4 lowers it); `{ drop: true }` puts it down; `{ cancel: true }` gives it up;
+       * and `{ tune: { … } }` moves the ghost's own numbers.
        */
-      deed: async (deed?: string, opts: { turn?: number; reach?: number; drop?: boolean; cancel?: boolean; tune?: Partial<typeof GHOST_TUNE> } = {}) => {
+      deed: async (deed?: string, opts: { turn?: number; lift?: number; reach?: number; drop?: boolean; cancel?: boolean; tune?: Partial<typeof GHOST_TUNE> } = {}) => {
         if (opts.tune) Object.assign(GHOST_TUNE, opts.tune);
         if (opts.cancel) {
           this.stopPlacing();
@@ -1633,10 +1639,9 @@ class App {
           if (why) return { error: why };
         }
         if (typeof opts.turn === 'number') this.turnPlacing(opts.turn);
+        if (typeof opts.lift === 'number') this.liftPlacing(opts.lift);
         if (typeof opts.reach === 'number' && this.placing) this.placing.reach = opts.reach;
         if (this.placing) this.stepPlacing();
-    // An instrument in hand: its own row under the world, and its part kept at the player's place.
-    this.stepBand();
         if (opts.drop) {
           const was = this.placing?.state;
           await this.dropPlacing();
@@ -1658,6 +1663,8 @@ class App {
           name: p.deed.name,
           reach: Math.round(p.reach),
           yaw: Number(((p.yaw * 180) / Math.PI).toFixed(0)),
+          lift: Number(p.lift.toFixed(2)),
+          keys: this.placeKeys(),
           at: p.state ? { x: Math.round(p.state.x), z: Math.round(p.state.z), y: Number(p.state.y.toFixed(1)) } : null,
           ok: p.state?.ok ?? false,
           why: p.state?.why ?? null,
@@ -1713,12 +1720,13 @@ class App {
           terminals: things.filter((t) => t.kind === 'terminal').length,
           collectors: things.filter((t) => t.kind === 'collector').length,
           at: this.travelHere()?.kind ?? null,
-          ticket: this.ticket ? `${this.ticket.to} (${creditText(this.ticket.price)})` : null,
+          shipTerminal: this.shipTerminalNear() ? { away: Number(Math.hypot(this.shipTerminalNear()!.x - this.player.worldPos.x, this.shipTerminalNear()!.z - this.player.worldPos.z).toFixed(1)), state: this.shipTerminalState() } : null,
+          tickets: this.tickets.map((t) => `${t.to} (${creditText(t.price)})${pickTicket(this.tickets, this.usingTicket, here) === t ? ' ← the one that would be used' : ''}`),
           credits: creditText(purse.credits),
           shuttles: ports.map((p) => `${p.name}: ${shuttleWords(shuttleAt(`${here}|${p.name}`, seconds))}`),
           nearest: near.slice(0, 3).map((n) => ({ kind: n.t.kind, away: Math.round(n.d), cell: n.t.cell })),
           note: this.travelRowsFor === here && !this.travelRows.length ? 'no travel.json for this world: npm run swg -- travel assets-private (with your emulator checkout), then reload' : '',
-          tune: { ...TRAVEL_TUNE },
+          tune: { ...TRAVEL_TUNE, ship: { ...SHIP_TERMINAL_TUNE } },
         };
       },
       /**
@@ -4845,6 +4853,13 @@ class App {
         upsertCharacter(this.current);
       },
     });
+    // The two panels that show the number while it can move: the backpack's header and the travel
+    // terminal's line. Both only redraw when they are open, so a fare paid with them shut costs
+    // nothing at all.
+    purse.onChange = () => {
+      if (this.backpack.open) void this.refreshBackpack();
+      if (this.terminalUi.open) this.terminalUi.setCredits(creditText(purse.credits));
+    };
     const homeWordWas = this.net.onWord;
     this.net.onWord = (msg) => {
       homeWordWas(msg);
@@ -6511,8 +6526,13 @@ class App {
       // own chain decides which of the things that want this key shows, since put in the else above
       // a doorway near a starport would hide the terminal rather than merely outranking it.
       const use = this.travelHere();
+      // At a collector the words carry the shuttle's own clock, which `collectorWords` says why.
       s.shuttle = !!use;
-      this.promptShuttle = use ? (use.kind === 'terminal' ? 'the travel terminal' : 'the shuttle') : '';
+      this.promptShuttle = use ? (use.kind === 'terminal' ? 'the travel terminal' : this.collectorLine(use)) : '';
+      if (!use && this.shipTerminalNear()) {
+        s.shuttle = true;
+        this.promptShuttle = 'the ship terminal';
+      }
     }
     const flown = p.mounted ?? p.piloting;
     if (flown) {
@@ -7064,6 +7084,7 @@ class App {
     this.backpack.render({
       cells,
       standIn: this.standIns(),
+      credits: creditText(purse.credits),
       noWardrobe: !!character && !ctx.wardrobe,
       note: !character ? 'this character is a single model: clothes cannot change' : !ctx.weapons ? 'no weapons converted' : undefined,
     });
@@ -9366,16 +9387,33 @@ class App {
     if (this.world.planet.space) return null;
     const things = this.travelThings();
     if (!things.length) return null;
+    // One frame for both: a starport's terminals stand in a room and a shuttleport's in the open,
+    // and both are in the world's frame by the time they get here. The room decides which of them
+    // may be reached at all, so a terminal on the far side of a wall is not offered through it.
     const at = p.worldPos;
     const cell = this.world.cellState;
     const room = cell ? { building: cell.building.template, cell: cell.cell } : null;
-    return thingAt(things, { x: p.pos.x, y: p.pos.y, z: p.pos.z }, room, 'terminal') ?? thingAt(things, { x: at.x, y: at.y, z: at.z }, null, 'collector');
+    const here = { x: at.x, y: at.y, z: at.z };
+    return thingAt(things, here, room, 'terminal') ?? thingAt(things, here, null, 'collector');
   }
 
-  /** E at a travel terminal, or at the collector outside it. */
+  /** E at a travel terminal, at the collector outside it, or at the ship terminal in the same room. */
   private handleTravel(): boolean {
     const thing = this.travelHere();
-    if (!thing) return false;
+    if (!thing) {
+      // A ship terminal opens the same window on its own side. It is checked after the travel
+      // terminal and the collector so that a starport's own chain is the game's: the shuttle first,
+      // your own ship second.
+      const own = this.shipTerminalNear();
+      if (!own) return false;
+      this.terminalStage = 'ship';
+      this.terminalWorld = '';
+      this.closePanels();
+      this.map.hide();
+      this.showTerminal(this.portOfBuilding({ kind: 'terminal', x: own.x, y: own.y, z: own.z, yaw: 0, cell: 0, building: own.template, bx: own.x, bz: own.z }));
+      this.freeMouse(true);
+      return true;
+    }
     if (thing.kind === 'collector') {
       this.boardShuttle(thing);
       return true;
@@ -9456,14 +9494,23 @@ class App {
   // ---- The travel terminal: what it shows, what it sells, and boarding at the collector. ----
 
   /** Which side of the terminal is showing, and which world was picked on the galaxy side. */
-  private terminalStage: 'here' | 'worlds' | 'there' = 'here';
+  private terminalStage: 'here' | 'worlds' | 'there' | 'ship' = 'here';
   private terminalWorld = '';
   /** The port the terminal that is open belongs to, which is what a fare is measured from. */
   private terminalPort: Port | null = null;
   /** The ports of the world picked on the galaxy side, once fetched. */
   private terminalThere: { pack: string; ports: Poi[] } = { pack: '', ports: [] };
-  /** The ticket in hand. Nothing carries it across a logout yet, which is said in the panel. */
-  private ticket: Ticket | null = null;
+  /**
+   * The tickets in hand, newest last, and which one the collector would take.
+   *
+   * A list rather than one, because a ticket is a thing you buy and keep: several may be held and
+   * the player says which is being handed over. Nothing carries them across a logout yet, which is
+   * said in the panel.
+   */
+  private tickets: Ticket[] = [];
+  private usingTicket = '';
+  /** The next ticket's number, so two bought in the same millisecond are still two tickets. */
+  private ticketNo = 0;
 
   /** Fill the terminal window for the port it stands in. */
   private showTerminal(port: Port | null): void {
@@ -9483,7 +9530,7 @@ class App {
       ports = this.terminalThere.ports
         .filter((p) => p.kind === 'starport' || p.kind === 'shuttleport')
         .map((p) => ({ name: p.name, x: p.x, z: p.z, kind: p.kind as 'starport' | 'shuttleport', price, fare: fareText(price), away: '', why: '' }));
-    } else if (this.terminalStage === 'here') {
+    } else if (this.terminalStage === 'here' || this.terminalStage === 'ship') {
       const local = Math.max(0, Math.round(fares.local?.[here] ?? 0));
       ports = this.placeNames
         .filter((p) => p.kind === 'starport' || p.kind === 'shuttleport')
@@ -9511,10 +9558,104 @@ class App {
         picked: this.terminalWorld,
         credits: `you have ${creditText(purse.credits)}`,
         note: from ? '' : 'this terminal names no port this world knows, so a fare cannot be worked out',
-        ticket: this.ticket ? `a ticket to ${this.ticket.to}, taken at the collector outside` : '',
+        tickets: this.tickets.map((t) => ({ id: t.id, text: ticketText(t, here), using: t === pickTicket(this.tickets, this.usingTicket, here) })),
+        ship: this.shipSide(from),
       });
     });
     this.terminalOpening = true;
+  }
+
+  /**
+   * The Your ship side of the terminal, or null where there is no ship terminal to stand at.
+   *
+   * The game placed these itself -- `terminal_space`, 130 of them over the ground worlds, every one
+   * inside a starport -- so whether this side exists at all is the world's snapshot answering and
+   * not a rule here. It is offered from whichever terminal is open, because the two stand a few
+   * metres apart in the same room and making the player walk between them would be a nuisance
+   * rather than a rule the game had.
+   */
+  private shipSide(from: Port | null): { trips: TerminalShipTrip[]; note: string } | null {
+    if (!this.shipTerminalNear()) return null;
+    const state = this.shipTerminalState();
+    const trips = shipTripsFrom(from ?? { name: '', x: 0, z: 0, kind: 'starport' }, this.portsHere(), state);
+    return {
+      trips: trips.map((t) => ({
+        id: t.kind === 'orbit' ? SHIP_TRIP_ORBIT : t.name,
+        name: t.kind === 'orbit' ? `${t.name} — launch` : t.name,
+        detail: t.kind === 'orbit' ? 'straight up, in your own ship' : `${((t.away ?? 0) / 1000).toFixed(1)} km`,
+        why: t.why,
+      })),
+      note: shipTripsNote(trips, state),
+    };
+  }
+
+  /**
+   * The ship terminal the player is standing at, or null. The game's own object, where the game put
+   * it, so nothing here decides which starports have one.
+   *
+   * The same standing rules as the travel terminal beside it, and for the same reason: a player in
+   * a saddle, at a ship's controls, aboard its rooms, noclipping or dying is not standing anywhere.
+   */
+  private shipTerminalNear(): PlacedObject | null {
+    const p = this.player;
+    if (p.mounted || p.aboard || p.eva || p.noclip || this.traveling || this.dying) return null;
+    if (this.world.planet.space) return null;
+    const at = p.worldPos;
+    return this.world.placedNear(SHIP_TERMINAL_TEMPLATES, { x: at.x, y: at.y, z: at.z }, SHIP_TERMINAL_TUNE.reach);
+  }
+
+  /**
+   * What a ship terminal knows about the player.
+   *
+   * **"Your ship" is whatever the rest of this game already means by it**, and that question was
+   * answered long before this panel: arriving in space puts you in the ship last flown, else the
+   * fitted one last stood out, else an X-wing. So the terminal has no ownership of its own to
+   * invent -- the owner's "right now, it's all of them" is exactly that rule -- and the launch it
+   * offers is the very crossing the galaxy map already makes into a system.
+   */
+  private shipTerminalState(): ShipTerminalState {
+    const zone = spaceZoneOf(this.world.planet);
+    const flying = !!this.pilotedShip();
+    return {
+      hasShip: true,
+      orbit: zone?.id ?? null,
+      orbitName: zone ? `${this.world.planet.name} orbit` : '',
+      canFly: !this.traveling && !this.dying && !flying,
+      whyNot: flying ? 'you are already flying: the ship menu is the way up from here' : this.traveling ? 'not while you are travelling' : '',
+    };
+  }
+
+  /** A trip the Your ship side offers: the orbit, or a starport on this world by name. */
+  private takeShipTrip(id: string): void {
+    const state = this.shipTerminalState();
+    if (!state.canFly) {
+      this.messages.system(state.whyNot || 'not from here');
+      return;
+    }
+    this.terminalUi.hide();
+    this.freeMouse(false);
+    if (id === SHIP_TRIP_ORBIT) {
+      const zone = spaceZoneOf(this.world.planet);
+      if (!zone) {
+        this.messages.system('nothing above this world to fly to');
+        return;
+      }
+      // The same crossing the galaxy map makes into a system: a space zone is always arrived at in
+      // a ship, so this needs no hull of its own to carry and none has to be standing on the pad.
+      this.messages.system(`your ship lifts for ${zone.name}`);
+      void this.travel(zone);
+      return;
+    }
+    const row = this.placeNames.find((p) => p.name === id);
+    if (!row) {
+      this.messages.system(`this world has no ${id}`);
+      return;
+    }
+    // A hop between two pads rather than a crossing: it sets the player down on their feet at the
+    // other starport, which is what a teleport does and what the shuttle beside it does too. The
+    // ship menu is still the only way to take a hull somewhere.
+    this.messages.system(`your ship sets down at ${row.name}`);
+    void this.teleport(this.world.planet, row, this.zone);
   }
 
   /** True while the terminal is being filled for the first time, so a late map still shows it. */
@@ -9546,24 +9687,65 @@ class App {
     const here = packIdOf(this.world.planet, this.zone);
     if (this.terminalStage === 'there' && this.terminalThere.pack) {
       const price = this.ridesHere(this.terminalPort ?? { name: '', x: 0, z: 0, kind: 'starport' }).find((r) => r.pack === this.terminalThere.pack)?.price ?? 0;
-      purse.spend(price, `a ticket to ${name}`, () => {
-        this.ticket = { from: here, pack: this.terminalThere.pack, to: name, at: null, price, bought: Date.now() };
-        this.messages.system(`a ticket to ${name}: it is taken at the collector outside`);
-        this.terminalUi.hide();
-        this.freeMouse(false);
-      });
+      purse.spend(price, `a ticket to ${name}`, () => this.keepTicket({ id: this.newTicketId(), from: here, pack: this.terminalThere.pack, to: name, at: null, price, bought: Date.now() }));
       return;
     }
     const row = this.placeNames.find((p) => p.name === name);
     const c = this.world.layoutCenter;
     if (!row || !c) return;
     const price = Math.max(0, Math.round(this.fares?.local?.[here] ?? 0));
-    purse.spend(price, `a ticket to ${name}`, () => {
-      this.ticket = { from: here, pack: here, to: name, at: { x: -(row.x - c.x), z: row.z - c.z }, price, bought: Date.now() };
-      this.messages.system(`a ticket to ${name}: it is taken at the collector outside`);
-      this.terminalUi.hide();
-      this.freeMouse(false);
-    });
+    purse.spend(price, `a ticket to ${name}`, () => this.keepTicket({ id: this.newTicketId(), from: here, pack: here, to: name, at: { x: -(row.x - c.x), z: row.z - c.z }, price, bought: Date.now() }));
+  }
+
+  private newTicketId(): string {
+    this.ticketNo++;
+    return `t${this.ticketNo}`;
+  }
+
+  /**
+   * A bought ticket goes in hand and becomes the one that will be used.
+   *
+   * The newest is chosen on purpose: somebody who has just bought a ticket is about to hand that
+   * one in, and a player who never opens the list is then served in the order they bought.
+   */
+  private keepTicket(ticket: Ticket): void {
+    this.tickets = addTicket(this.tickets, ticket);
+    this.usingTicket = ticket.id;
+    this.messages.system(`a ticket to ${ticket.to}: it is taken at the collector outside${this.tickets.length > 1 ? `, and you now hold ${this.tickets.length}` : ''}`);
+    this.terminalUi.hide();
+    this.freeMouse(false);
+  }
+
+  /** A ticket picked as the one to hand in, or thrown away. */
+  private pickedTicket(id: string, drop: boolean): void {
+    const t = this.tickets.find((x) => x.id === id);
+    if (!t) return;
+    if (drop) {
+      this.tickets = this.tickets.filter((x) => x.id !== id);
+      // Nothing is refunded: the game's own shuttle never gave anything back either.
+      this.messages.system(`the ticket to ${t.to} is thrown away`);
+    } else this.usingTicket = id;
+    this.showTerminal(null);
+  }
+
+  /**
+   * Where a collector's own shuttle is in its round.
+   *
+   * One method, because the words on the screen and the answer E gives have to be the same answer:
+   * asked in two places with two names for the port, a player could read that a shuttle was here and
+   * be told it was not. The name is the port's where the world knows one and the building's place
+   * otherwise, so a collector well away from any named port still keeps a round of its own.
+   */
+  private shuttleOf(collector: TravelThing): ShuttleState {
+    const here = packIdOf(this.world.planet, this.zone);
+    const port = this.portOfBuilding(collector);
+    return shuttleAt(`${here}|${port?.name ?? `${Math.round(collector.bx)},${Math.round(collector.bz)}`}`, sharedClock.walkSeconds());
+  }
+
+  /** What standing at a collector says: the ticket that would be handed in, and where the shuttle is. */
+  private collectorLine(collector: TravelThing): string {
+    const here = packIdOf(this.world.planet, this.zone);
+    return collectorWords(pickTicket(this.tickets, this.usingTicket, here), here, this.shuttleOf(collector)).text;
   }
 
   /**
@@ -9574,15 +9756,16 @@ class App {
    */
   private boardShuttle(collector: TravelThing): void {
     const here = packIdOf(this.world.planet, this.zone);
-    const port = this.portOfBuilding(collector);
-    const state = shuttleAt(`${here}|${port?.name ?? `${Math.round(collector.bx)},${Math.round(collector.bz)}`}`, sharedClock.walkSeconds());
-    const can = canBoard(this.ticket, here, state);
+    const state = this.shuttleOf(collector);
+    const ticket = pickTicket(this.tickets, this.usingTicket, here);
+    const can = canBoard(ticket, here, state);
     if (!can.ok) {
       this.messages.system(can.why);
       return;
     }
-    const ticket = this.ticket!;
-    this.ticket = null;
+    this.tickets = this.tickets.filter((t) => t !== ticket);
+    if (this.usingTicket === ticket!.id) this.usingTicket = this.tickets[this.tickets.length - 1]?.id ?? '';
+    if (!ticket) return;
     if (ticket.pack === here && ticket.at) {
       const row = this.placeNames.find((p) => p.name === ticket.to);
       if (row) {
@@ -9785,7 +9968,7 @@ class App {
   }
 
   /** A placement in hand: the deed, the ghost's distance and turn, and what it last said. */
-  private placing: { deed: DeedRow; reach: number; yaw: number; state: GhostState | null } | null = null;
+  private placing: { deed: DeedRow; reach: number; yaw: number; lift: number; state: GhostState | null } | null = null;
   private readonly ghost = new PlacementGhost();
 
   /** Whether the player is placing a building, which takes the wheel and the click. */
@@ -9823,10 +10006,17 @@ class App {
     this.closePanels();
     this.ghost.hold(shown);
     if (!this.ghost.group.parent) this.world.scene.add(this.ghost.group);
-    this.placing = { deed, reach: GHOST_TUNE.reach, yaw: this.player.heading, state: null };
-    this.placingBar.show(deed.name, false, 'move it where you want it');
-    this.messages.system(`placing ${deed.name}: the wheel moves it, the buttons turn it, a click puts it down`);
+    this.placing = { deed, reach: GHOST_TUNE.reach, yaw: this.player.heading, lift: 0, state: null };
+    this.placingBar.show(deed.name, false, 'move it where you want it', this.placeKeys(), 0);
+    const k = this.placeKeys();
+    this.messages.system(`placing ${deed.name}: the wheel moves it, ${k.left} and ${k.right} turn it, ${k.up} and ${k.down} raise and lower it, a click puts it down`);
     return null;
+  }
+
+  /** What the four placing keys are called just now, for the bar and the line that explains them. */
+  private placeKeys(): { left: string; right: string; up: string; down: string } {
+    const cap = (a: 'placeLeft' | 'placeRight' | 'placeUp' | 'placeDown') => keyLabel(this.input.bindings[a][0] ?? '');
+    return { left: cap('placeLeft'), right: cap('placeRight'), up: cap('placeUp'), down: cap('placeDown') };
   }
 
   /** Give the deed back and put the model away exactly as it was found. */
@@ -9852,14 +10042,20 @@ class App {
     if (!foot) return;
     const me = this.player.worldPos;
     const at = ghostSpot({ x: me.x, z: me.z }, this.player.heading, p.reach);
-    const state = ghostVerdict(patchOfFootprint(foot), at, p.yaw, {
-      heightAt: (x, z) => this.world.terrain.heightAt(x, z),
-      waterAt: (x, z) => this.world.terrain.waterHeightAt(x, z),
-      standing: (x, z, reach) => this.world.standingNear(x, z, reach),
-    });
+    const state = ghostVerdict(
+      patchOfFootprint(foot),
+      at,
+      p.yaw,
+      {
+        heightAt: (x, z) => this.world.terrain.heightAt(x, z),
+        waterAt: (x, z) => this.world.terrain.waterHeightAt(x, z),
+        standing: (x, z, reach) => this.world.standingNear(x, z, reach),
+      },
+      p.lift,
+    );
     p.state = state;
     this.ghost.place(state, foot, p.deed.foot?.rows ?? [], (x, z) => this.world.terrain.heightAt(x, z));
-    this.placingBar.show(p.deed.name, state.ok, state.why);
+    this.placingBar.show(p.deed.name, state.ok, state.why, this.placeKeys(), state.lift);
   }
 
   /** The wheel while placing: push the ghost out or pull it in. */
@@ -9867,9 +10063,14 @@ class App {
     if (this.placing) this.placing.reach = wheelReach(this.placing.reach, notches);
   }
 
-  /** A turn button, or the turn keys. */
+  /** A turn key, or a turn button on the bar. */
   private turnPlacing(presses: number): void {
     if (this.placing) this.placing.yaw = turnBy(this.placing.yaw, presses);
+  }
+
+  /** A height key, or a height button on the bar: the nudge for a doorstep the ground laps over. */
+  private liftPlacing(presses: number): void {
+    if (this.placing) this.placing.lift = liftBy(this.placing.lift, presses);
   }
 
   /** Put it down, if the ground will take it. */
@@ -11648,13 +11849,17 @@ class App {
         if (input.pressedAction('spawner') && !jumpBusy) this.toggleSpawner();
         if (input.pressedAction('ship')) this.toggleShipMenu();
         if (input.pressedAction('help')) this.hud.toggleHelp();
-        // A building in hand takes the click and the two turn keys before anything else does: a
-        // click puts it down, the strafe keys turn it, and neither reaches the player while it is
-        // out. Escape gives it up, which is handled where every other Escape is.
+        // A building in hand takes the click and its own four keys before anything else does: a
+        // click puts it down, two keys turn it and two raise and lower it. They are keys of their
+        // own rather than the strafe keys, so a player can still walk the building to where they
+        // want it; the buttons on the bar do the same, for a pointer that is not locked to the
+        // game. Escape gives it up, which is handled where every other Escape is.
         if (this.placing) {
           if (input.pressedAction('attack')) void this.dropPlacing();
-          if (input.pressedAction('left')) this.turnPlacing(-1);
-          if (input.pressedAction('right')) this.turnPlacing(1);
+          if (input.pressedAction('placeLeft')) this.turnPlacing(-1);
+          if (input.pressedAction('placeRight')) this.turnPlacing(1);
+          if (input.pressedAction('placeUp')) this.liftPlacing(1);
+          if (input.pressedAction('placeDown')) this.liftPlacing(-1);
         }
         if (!this.map.open && !this.anyPanelOpen() && !this.placing) {
           if (input.pressedAction('saberToggle') && this.kit.id === 'jedi' && !player.mounted) player.toggleSaber();

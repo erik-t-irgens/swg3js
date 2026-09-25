@@ -185,13 +185,17 @@ export function groundVerdict(
  * Far enough is the patch's own half-diagonal plus the margin: a small tent may be put down almost
  * at your feet and a guild hall cannot. The patch's own offset is taken off, so what ends up that
  * far away is the middle of the building rather than its doorstep.
+ *
+ * **The yaw is a body's heading, whose forward is `(sin yaw, cos yaw)`**, which is what every
+ * caller has in hand; the camera's own yaw is the exact opposite of it, and reading one as the
+ * other puts the building behind the player rather than in front.
  */
 export function spotAhead(from: { x: number; z: number }, yaw: number, p: Patch, tune = HOUSE_TUNE): { x: number; z: number } {
   const reach = Math.max(tune.ahead, Math.hypot(p.hx, p.hz) + tune.margin + 2);
   const cos = Math.cos(yaw);
   const sin = Math.sin(yaw);
-  // The camera's forward is (-sin yaw, 0, -cos yaw), and the patch offset turns with the building.
-  return { x: from.x - sin * reach - (p.cx * cos - p.cz * sin), z: from.z - cos * reach - (p.cx * sin + p.cz * cos) };
+  // The patch offset turns with the building, so it is taken off in the building's own frame.
+  return { x: from.x + sin * reach - (p.cx * cos - p.cz * sin), z: from.z + cos * reach - (p.cx * sin + p.cz * cos) };
 }
 
 /** How far from a house nothing else may stand: its own patch, plus the margin. */

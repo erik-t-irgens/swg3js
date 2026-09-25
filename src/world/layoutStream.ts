@@ -1209,6 +1209,44 @@ export class LayoutStreamer {
   }
 
   /**
+   * The nearest placed object of one of these templates, within `reach` metres, or null.
+   *
+   * Unlike `objectsNear` this **keeps the objects inside buildings**, because the things it is
+   * asked about are almost always in one: the ship terminals the game places in its starports are
+   * every last one of them `contained`, and a size-on-the-ground test is nothing to do with them
+   * either -- it is asked whether somebody is standing at one, which is a distance in three.
+   *
+   * It walks the regions the circle touches, as `objectsNear` does, since a planet has tens of
+   * thousands of placed objects and this is asked on a keypress rather than on a frame.
+   */
+  nearestPlaced(templates: ReadonlySet<string>, at: { x: number; y: number; z: number }, reach: number): PlacedObject | null {
+    let best: PlacedObject | null = null;
+    let bestD = reach;
+    const rx0 = Math.floor((at.x - reach) / REGION);
+    const rx1 = Math.floor((at.x + reach) / REGION);
+    const rz0 = Math.floor((at.z - reach) / REGION);
+    const rz1 = Math.floor((at.z + reach) / REGION);
+    for (let rz = rz0; rz <= rz1; rz++) {
+      for (let rx = rx0; rx <= rx1; rx++) {
+        const region = this.regions.get(`${rx},${rz}`);
+        if (!region) continue;
+        for (const list of region.objects) {
+          for (const o of list) {
+            if (!templates.has(o.template)) continue;
+            // The height counts as much as the ground distance: a starport stacks its floors and a
+            // terminal on the one above is not one you are standing at.
+            const d = Math.hypot(o.x - at.x, (o.y - at.y) * 1.5, o.z - at.z);
+            if (d >= bestD) continue;
+            bestD = d;
+            best = o;
+          }
+        }
+      }
+    }
+    return best;
+  }
+
+  /**
    * How many of those have a standing shape a body could get behind (`blockersNear`'s own list).
    *
    * It is the number to read before anything else about cover: nought here in a town is a wire that

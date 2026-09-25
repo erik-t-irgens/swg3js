@@ -30,6 +30,12 @@ export interface PurseDeps {
 
 export class Purse {
   private deps: PurseDeps | null = null;
+  /**
+   * Whoever wants telling when the number moves: the backpack's header and the travel terminal's
+   * line, which are both open while a fare is paid. It is a plain callback rather than a list
+   * because a panel that is shut has nothing to redraw and one that is open reads it again anyway.
+   */
+  onChange: () => void = () => {};
   /** What the server last said, or what the character was saved with. */
   private held = 0;
   /** Whether anything has ever told us a number. */
@@ -90,6 +96,7 @@ export class Purse {
     }
     this.held = this.credits - n;
     this.deps?.save(this.held);
+    this.onChange();
     then();
   }
 
@@ -102,6 +109,7 @@ export class Purse {
     }
     this.held = this.credits + n;
     this.deps?.save(this.held);
+    this.onChange();
     return this.held;
   }
 
@@ -109,8 +117,10 @@ export class Purse {
   word(msg: Record<string, unknown>): void {
     if (msg.t !== 'purse') return;
     if (typeof msg.credits === 'number' && Number.isFinite(msg.credits)) {
+      const was = this.held;
       this.held = Math.max(0, Math.floor(msg.credits));
       this.known = true;
+      if (was !== this.held) this.onChange();
     }
     if (typeof msg.why === 'string' && msg.why) {
       this.lastWhy = msg.why;

@@ -72,10 +72,11 @@ const CLASS_TEXT: Record<WeaponClass, string> = {
   lightsaber2h: 'Two-hand lightsaber',
   lightsaberStaff: 'Double-bladed lightsaber',
   thrown: 'Grenade',
+  instrument: 'Instrument',
 };
 
 /** The weapons rack's own class order, for the backpack's sort (the rack's headings read in this order). */
-export const WEAPON_ORDER: readonly WeaponClass[] = ['lightsaber', 'lightsaber2h', 'lightsaberStaff', 'sword1h', 'knife', 'fist', 'sword2h', 'polearm', 'pistol', 'carbine', 'rifle', 'heavy', 'thrown'];
+export const WEAPON_ORDER: readonly WeaponClass[] = ['lightsaber', 'lightsaber2h', 'lightsaberStaff', 'sword1h', 'knife', 'fist', 'sword2h', 'polearm', 'pistol', 'carbine', 'rifle', 'heavy', 'thrown', 'instrument'];
 
 /** A name or description as shown: trimmed, empty as null. */
 function clean(s: string | null | undefined): string | null {

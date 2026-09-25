@@ -7,7 +7,9 @@
 // Run: node tools/swg/tests/travelTerminal.test.ts
 
 import assert from 'node:assert/strict';
-import { TRAVEL_TUNE, canBoard, shuttleAt, shuttleWords, slotHash, thingAt, travelThingsOf, type TravelRow, type TravelThing } from '../../../src/world/travelTerminal.ts';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { TICKETS_HELD, TRAVEL_TUNE, addTicket, canBoard, collectorWords, pickTicket, shuttleAt, shuttleWords, slotHash, thingAt, ticketText, travelThingsOf, type Ticket, type TravelRow, type TravelThing } from '../../../src/world/travelTerminal.ts';
 
 let passed = 0;
 function ok(cond: boolean, what: string): void {
@@ -30,9 +32,36 @@ const row = (over: Partial<TravelRow> = {}): TravelRow => ({ kind: 'terminal', b
 }
 
 {
-  const out = travelThingsOf([row({ cell: 4, x: -2.74, y: 0.64, z: 48.17, bx: 100, bz: 200 })], { x: 0, z: 0 });
-  ok(out[0].cell === 4 && out[0].x === -2.74 && out[0].z === 48.17, "a thing inside a building keeps the building's own frame, which is the frame its room is drawn in");
-  ok(out[0].bx === -100, 'while the building itself is still brought over, since that is what ties a terminal to its port');
+  // The one that was wrong. A thing inside a building is written in the building's own frame, and
+  // the only thing it is ever measured against is the player, who is in the world's frame in any
+  // room that is not a ship's. Left where it was written, a starport's terminal read as a few
+  // metres from the world's origin -- kilometres from the port it stands in -- so no starport ever
+  // offered one, while the shuttleports, whose terminals stand outside, worked perfectly.
+  const out = travelThingsOf([row({ cell: 4, x: -2.74, y: 0.64, z: 48.17, bx: 100, by: 28, bz: 200 })], { x: 0, z: 0 });
+  ok(Math.abs(out[0].x - (-100 + 2.74)) < 1e-9 && Math.abs(out[0].z - (200 + 48.17)) < 1e-9, 'a thing inside a building comes out in the world, where the player is');
+  ok(Math.abs(out[0].y - 28.64) < 1e-9, "and at the building's own height plus its own, not at the room's local height");
+  ok(out[0].cell === 4 && out[0].bx === -100, 'it keeps its room, and the building is brought over, which is what ties a terminal to its port');
+}
+
+{
+  // The mirror and the turn are not guessed: they are whatever makes an indoor child of a building
+  // land where an outdoor child of the same building at the same local place lands. The converter
+  // composed the outdoor one in snapshot space and this file mirrors that as a whole, so the two
+  // paths meeting is the check. The first way it was written -- mirror the local point, then turn
+  // it by the mirrored yaw -- passes at a building facing straight on and is wrong at every other,
+  // which is why this sweeps the turn rather than checking one.
+  for (const byaw of [0, 0.4, -1.1, 2.7, Math.PI]) {
+    const local = { x: -3.5, y: 0.64, z: 12.25 };
+    const cos = Math.cos(byaw);
+    const sin = Math.sin(byaw);
+    // What the converter writes for a child of this building standing outside it, at that place.
+    const outdoor = row({ cell: 0, x: 100 + (local.x * cos + local.z * sin), y: 28 + local.y, z: 200 + (-local.x * sin + local.z * cos), bx: 100, by: 28, bz: 200, byaw });
+    const indoor = row({ cell: 4, x: local.x, y: local.y, z: local.z, bx: 100, by: 28, bz: 200, byaw });
+    const [a, b] = travelThingsOf([outdoor, indoor], { x: 10, z: 20 });
+    assert.ok(Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z) < 1e-6, `at a building turned ${byaw.toFixed(2)} the indoor and outdoor paths put the same place in the same spot`);
+  }
+  passed++;
+  console.log('ok   and an indoor child lands exactly where an outdoor one at the same local place does, at every turn');
 }
 
 // ---------------------------------------------------------------- standing at one
@@ -142,6 +171,95 @@ const row = (over: Partial<TravelRow> = {}): TravelRow => ({ kind: 'terminal', b
   ok(!canBoard(null, 'corellia', waitingNow).ok, 'no ticket boards nothing, however punctual the shuttle');
   const wrong = canBoard(ticket, 'naboo', waitingNow);
   ok(!wrong.ok && wrong.why.includes('corellia'), 'and a ticket bought somewhere else says where it was bought');
+}
+
+// ---------------------------------------------------------------- more than one ticket
+
+{
+  const t = (id: string, from = 'corellia', to = `port ${id}`): Ticket => ({ id, from, pack: 'naboo', to, at: null, price: 1000, bought: Number(id.slice(1)) });
+  let held: Ticket[] = [];
+  held = addTicket(held, t('t1'));
+  held = addTicket(held, t('t2'));
+  ok(held.length === 2, 'two tickets bought are two tickets held, which is the whole of it');
+  held = addTicket(held, { ...t('t2'), to: 'somewhere else' });
+  ok(held.length === 2 && held[1].to === 'somewhere else', 'and one bought again under the same number replaces it rather than doubling');
+  let many: Ticket[] = [];
+  for (let i = 0; i < TICKETS_HELD + 5; i++) many = addTicket(many, t(`t${i}`));
+  ok(many.length === TICKETS_HELD, `the cap holds at ${TICKETS_HELD}`);
+  ok(many[0].id === `t5`, 'and the oldest is the one that goes, never the newest');
+}
+
+{
+  const t = (id: string, from: string): Ticket => ({ id, from, pack: 'naboo', to: `to ${id}`, at: null, price: 1, bought: 0 });
+  const held = [t('a', 'corellia'), t('b', 'tatooine'), t('c', 'corellia')];
+  ok(pickTicket(held, 'c', 'corellia')?.id === 'c', 'the ticket the player picked is the one the collector takes');
+  ok(pickTicket(held, 'b', 'corellia')?.id === 'a', "a pick that is no good from here is stepped over for the oldest that is, rather than refusing everything");
+  ok(pickTicket(held, '', 'corellia')?.id === 'a', 'and somebody who never opens the list is served in the order they bought');
+  ok(pickTicket(held, '', 'naboo') === null, 'nowhere to go from a world none of them is from');
+  ok(pickTicket([], 'a', 'corellia') === null, 'and no tickets is no ticket');
+  ok(ticketText(held[0], 'corellia').includes('collector'), 'a ticket from here says where it is handed in');
+  ok(ticketText(held[1], 'corellia').includes('tatooine'), 'and one from elsewhere says where it was bought');
+}
+
+{
+  // The words at the collector: the one place a shuttle's own clock is ever shown, so pressing at
+  // the right moment must not look the same as pressing at the wrong one.
+  const ticket: Ticket = { id: 'a', from: 'corellia', pack: 'naboo', to: 'Theed', at: null, price: 1, bought: 0 };
+  const waitingNow = { phase: 'waiting' as const, until: 0, left: 42, glide: 1 };
+  const away = { phase: 'away' as const, until: 90, left: 0, glide: 0 };
+  const there = collectorWords(ticket, 'corellia', waitingNow);
+  ok(there.can && there.text.includes('Theed') && there.text.includes('42'), 'with a shuttle there it offers the journey and says how long it stays');
+  const not = collectorWords(ticket, 'corellia', away);
+  ok(!not.can && not.text.includes('1m'), 'with none there it says how long to wait, which is the only way to know one is coming');
+  const noTicket = collectorWords(null, 'corellia', waitingNow);
+  ok(!noTicket.can && noTicket.text.includes('no ticket') && noTicket.text.includes('here'), 'with no ticket it says both: what is missing and that a shuttle is waiting');
+}
+
+// ------------------------------------------------- the real packs, if this install has them
+
+// The check that would have caught it, over every pack this install has converted.
+//
+// A fixture agrees with whatever arithmetic wrote it, so the witness has to be an invariant: the
+// transform is a mirror and a turn, both rigid, so **however a thing is brought over, it must end
+// up exactly as far from its own building as it was written from it**. Left in the room's own
+// frame a starport terminal is 48 m from the world's origin and some thousands from its own port,
+// which this catches with no threshold to argue about. The distance itself is then printed, which
+// is what says a terminal really is inside the building rather than merely consistent with it.
+{
+  const packs = join(process.cwd(), 'assets-private');
+  const worlds = existsSync(packs) ? readdirSync(packs).filter((w) => existsSync(join(packs, w, 'travel.json'))) : [];
+  if (!worlds.length) {
+    note('no converted world carries a travel.json, so the real packs are not checked: npm run swg -- travel assets-private');
+  } else {
+    let indoors = 0;
+    let worst = 0;
+    let worstWhere = '';
+    for (const world of worlds) {
+      const pack = JSON.parse(readFileSync(join(packs, world, 'travel.json'), 'utf8')) as { rows: TravelRow[] };
+      const rows = (pack.rows ?? []).filter((r) => r.cell > 0);
+      // The centre is nothing to do with it: both the thing and its building take the same one, so
+      // the distance between them must come out the same whatever it is. It is swept to say so.
+      for (const centre of [{ x: 0, z: 0 }, { x: -1234.5, z: 678.25 }]) {
+        const things = travelThingsOf(rows, centre);
+        things.forEach((t, i) => {
+          const r = rows[i];
+          const was = Math.hypot(r.x, r.z);
+          const now = Math.hypot(t.x - t.bx, t.z - t.bz);
+          assert.ok(Math.abs(now - was) < 1e-6, `${world}: a ${t.kind} written ${was.toFixed(2)} m from its building came out ${now.toFixed(2)} m from it`);
+          assert.ok(Math.abs(t.y - (r.by + r.y)) < 1e-9, `${world}: a ${t.kind} must stand at its building's height plus its own`);
+          if (centre.x === 0 && now > worst) {
+            worst = now;
+            worstWhere = `${world}, a ${t.kind} in cell ${t.cell}`;
+          }
+        });
+        indoors += centre.x === 0 ? things.length : 0;
+      }
+    }
+    if (indoors) {
+      passed++;
+      console.log(`ok   every one of ${indoors} indoor travel things over ${worlds.length} converted worlds stays exactly where it was written relative to its own building (furthest out ${worst.toFixed(1)} m, ${worstWhere})`);
+    } else note(`${worlds.length} converted worlds and not one indoor travel thing between them, so nothing was measured`);
+  }
 }
 
 note(`every number of the timetable is ours: a round of ${TRAVEL_TUNE.every}s, a wait of ${TRAVEL_TUNE.waits}s, ${TRAVEL_TUNE.glide}s to come down; nothing in the archives says what the game's were`);
