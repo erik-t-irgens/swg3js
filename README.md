@@ -601,6 +601,12 @@ npm run swg -- scenes assets-private                                            
                                                                                   #    already converted (about twenty seconds; it opens no archive either, and never touches a pack)
 npm run swg -- clouds assets-private                                              #    how cloudy and how dark each world's own sky is, off the sheets the client drew it with,
                                                                                   #    and the noise the volumetric clouds march through (nine seconds; no archive)
+npm run swg -- deeds @SWG assets-private --retail-only                            #    the buildings a player can buy: what each makes, its name, its lots, its upkeep and
+                                                                                  #    the grid the client drew while you placed it (needs your emulator checkout; run after gallery)
+npm run swg -- travel assets-private                                              #    the travel terminals, the ticket collectors and the shuttles, where the game put them
+                                                                                  #    (needs the emulator checkout; opens no archive, so no @SWG; run after the worlds)
+npm run swg -- music @SWG assets-private --retail-only                            #    the music players make: twenty songs, one track per instrument, and nothing else
+                                                                                  #    (about 100 MB of samples; there is no world score in this game and none is wanted)
 npm run swg -- status assets-private                                              # 8. what is in place, and the command for anything missing
 npm run dev                                                                       # 9. play
 ```
