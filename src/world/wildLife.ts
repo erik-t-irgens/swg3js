@@ -69,8 +69,6 @@ export interface WildDeps {
   spawn(entry: MobileEntry, at: { x: number; z: number; y?: number; heading?: number }, seed: number): Mobile | string;
   /** Take one down. */
   remove(m: Mobile): void;
-  /** The ground under a point, in the world's own frame. */
-  groundAt(x: number, z: number): number;
   /** The layout's centre, which the snapshot's numbers are measured from; null before the pack lands. */
   centre(): { x: number; z: number } | null;
   /** True while the world is holding everything still (an ultra cruise), or has no streaming at all. */
@@ -239,7 +237,13 @@ export class WildLife {
       const spot = bodyAt(site, i, spread);
       const world = intoWorld(spot.x, spot.z, centre);
       const middle = intoWorld(site.x, site.z, centre);
-      const m = deps.spawn(entry, { x: world.x, z: world.z, y: deps.groundAt(world.x, world.z), heading: -spot.heading }, site.seed ^ i);
+      // **No height is given on purpose.** The manager works one out itself when it is not told one
+      // (`manager.ts:279`), and its answer is the real ground: what is standing there, a floor, a
+      // platform, a rock. Handing it the raw terrain height instead puts a body under the floor of
+      // anything built on that spot -- a camp's own hut, say -- and the physics then ejects it
+      // downward, out of the world, where the manager takes it away as spent. Which looks, from
+      // outside, exactly like a lair that stood and then vanished.
+      const m = deps.spawn(entry, { x: world.x, z: world.z, heading: -spot.heading }, site.seed ^ i);
       if (typeof m === 'string') {
         this.last.refused = m;
         continue;
@@ -281,12 +285,14 @@ export class WildLife {
     void deps;
     for (const [key, rec] of this.standing) {
       const before = rec.bodies.length;
-      // **Killed is not the same as gone**, and treating the two alike is what makes a site vanish
-      // for good. A body the game took away for its own reasons -- it fell out of the world, the
-      // cap swept it, a travel disposed it -- is not a lair anybody cleared, and a site that lost
-      // its creatures that way should stand them again on the next pass rather than sit broken for
-      // ten minutes. So the ones that really died are counted as they go.
-      for (const m of rec.bodies) if (m.dead) rec.killed++;
+      // **Killed is not the same as gone**, and telling them apart is not `dead` alone: disposing a
+      // mobile sets `dead` too (`mobile.ts:2077`), so a body the game merely took away reads exactly
+      // like one somebody fought. What separates them is the corpse. A creature that really died is
+      // dead and still in the world, lying there for its death clip and its timer; one that was
+      // taken away is dead and gone in the same instant. So a kill is only counted while the body is
+      // still there to see, and a site that lost its creatures any other way stands them again on
+      // the next pass rather than sitting broken for ten minutes.
+      for (const m of rec.bodies) if (m.dead && !m.removed) rec.killed++;
       rec.bodies = rec.bodies.filter((m) => !m.dead && !m.removed);
       if (rec.bodies.length !== before) this.count();
       if (rec.bodies.length === 0) {

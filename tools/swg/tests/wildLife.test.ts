@@ -45,7 +45,6 @@ function game(over: Partial<WildDeps> = {}): { deps: WildDeps; bodies: Body[]; c
     remove: (m) => {
       (m as unknown as Body).removed = true;
     },
-    groundAt: () => 0,
     centre: () => centre,
     held: () => false,
     ...over,
@@ -205,15 +204,21 @@ const bigArea = { name: 'a', shape: 'circle' as const, x: 0, z: 0, r: 3000, grou
   for (let i = 0; i < 4; i++) w.step(WILD_TUNE.everySeconds + 0.1, i * 2, at, deps);
   ok(w.last.up > 0, `${w.last.up} sites standing`);
 
-  // Taken away without dying: every site should be free to stand again at once.
-  for (const b of bodies) b.removed = true;
+  // **Taken away sets `dead` as well as `removed`**, which is the trap: disposing a mobile marks it
+  // dead (`mobile.ts:2077`), so a test that only sets `removed` would pass while the real thing
+  // failed. What tells a kill from a disposal is the corpse -- a creature that really died is dead
+  // and still in the world for its death clip; one taken away is dead and gone in the same instant.
+  for (const b of bodies) {
+    b.dead = true;
+    b.removed = true;
+  }
   w.step(WILD_TUNE.everySeconds + 0.1, 20, at, deps);
   ok(w.last.up === 0, 'a site whose creatures were taken away rather than killed is forgotten, not broken');
   const had = bodies.length;
   w.step(WILD_TUNE.everySeconds + 0.1, 22, at, deps);
   ok(bodies.length > had, 'so it stands again on the very next pass instead of waiting out a respawn it never earned');
 
-  // Killed is the other thing, and that one does wait.
+  // Killed is the other thing, and that one does wait. A corpse is dead and still there.
   for (const b of bodies) if (!b.removed) b.dead = true;
   w.step(WILD_TUNE.everySeconds + 0.1, 30, at, deps);
   const after = bodies.length;
@@ -234,6 +239,16 @@ const bigArea = { name: 'a', shape: 'circle' as const, x: 0, z: 0, r: 3000, grou
 
   // The report has to be able to tell the three endings apart, which is what the count alone could not.
   ok(/fromNest:/.test(world) && /fromEye:/.test(world), 'and the console says how far each body is from its nest and from the eye, so "never stood", "taken away" and "right behind you" are three different readings');
+
+  // **No height is passed to the manager**, which works one out itself that knows about whatever is
+  // built on that spot. Handing it the raw terrain height puts a body under the floor of a camp's
+  // own hut, where the physics ejects it out of the world and the manager takes it away as spent --
+  // which from outside is a lair that stood and then vanished.
+  ok(!/y: deps\.groundAt/.test(world), "no height is handed to the manager: its own answer knows about what is standing on that ground and the terrain's does not");
+  ok(/deps\.spawn\(entry, \{ x: world\.x, z: world\.z, heading:/.test(world), 'so a body is placed by its two ground numbers and its facing alone');
+
+  // And the kill test must not be `dead` alone, or a disposal reads as a fight.
+  ok(/if \(m\.dead && !m\.removed\) rec\.killed\+\+/.test(world), 'a kill is only counted while the body is still there, since disposing one marks it dead too');
 }
 
 // ------------------------------------------------------------------ the origin the manager reads

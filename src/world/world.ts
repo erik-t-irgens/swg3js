@@ -4191,7 +4191,6 @@ export class World {
         // -spawn cap and the NPC tab's clear off them, since `spawn` reads that as origin `world`.
         spawn: (entry, at, seed) => this.mobiles?.spawn(entry, at, { origin: 'spawned', seed, worldId: `wild:${seed}` }) ?? 'no world',
         remove: (m) => this.mobiles?.remove(m),
-        groundAt: (x, z) => this.terrain.heightAt(x, z),
         centre: () => this.layoutCenter,
         // It holds when the streamer holds (an ultra cruise pins both), and never runs at all for
         // the creation and selection screens, which are a cut-out world with no streaming.
