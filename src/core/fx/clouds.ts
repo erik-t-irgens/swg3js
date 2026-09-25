@@ -1,0 +1,426 @@
+// Volumetric clouds: a raymarch through a slab of sky, lit by the sun the world is already using.
+//
+// **It is the clouds and not the atmosphere.** The demo this came from welds two things together: a
+// cloud march, which is what is here, and Hillaire's atmosphere, which is not. That atmosphere is
+// Earth's air -- Rayleigh coefficients for our nitrogen, a Mie scale height of 1.2 km, ozone at
+// 25 km, a ground radius of 6360 km -- and bolting it on would overrule the client's own per-planet,
+// per-area, per-hour gradient sky and make every world look like a summer afternoon in Sweden. So
+// the march takes its sun, its ambient and its haze from `SkyLighting`, which is what the rest of
+// the scene is lit by, and that is also why Mustafar's red needs no table: its own sky ramp is
+// already red and the cloud simply takes it.
+//
+// Four things here are load-bearing and would each be easy to get wrong.
+//
+// **The coverage cut is calibrated, not assumed.** Coverage is a share of sky, and it becomes a
+// threshold on the billow channel -- which does not fill nought to one. Measured over the real
+// volume it lies between 0.576 and 0.898, so cutting at `1 - coverage` is a cliff that gives a third
+// covered eighty-eight per cent of the sky. The ends come from the noise pack; see `billowCut`.
+//
+// **It marches at half resolution and comes back through a depth-aware upsample.** A plain bilinear
+// upsample haloes every ridge and hull edge, because a half texel that saw sky is blended into a
+// full pixel that saw rock. `fxHalfTaps` weights the four taps by how close their own depth is, and
+// it already keeps the half-texel rule: half texel t is full pixel 2t + 1.
+//
+// **The march is stopped by the scene depth.** Clouds are sky, so anything solid ends the ray; the
+// slab is intersected first so a ray that never reaches the deck costs nothing at all.
+//
+// **It writes no depth and asks for no light.** Nothing else in the chain has to know it ran: the
+// god rays still count a cloud pixel as sky (they threshold on depth, and this writes none), water
+// reflections never saw the dome and still do not, and the light count never changes, so no material
+// anywhere recompiles when it is switched on.
+
+import * as THREE from 'three';
+import type { FxFrameContext } from './context';
+import type { FxProductId, FxSettings } from '../fxRegistry.ts';
+import { createFxQuad, FX_CAMERA, type FxPass, type FxWarmItem } from './pass';
+import { FX_BILATERAL_UPSAMPLE, FX_FULLSCREEN_VERTEX, FX_HASH, FX_LINEARIZE, FX_PHASE_HG, FX_SLAB, FX_VIEW_POS } from './glsl';
+
+/**
+ * Every invented number of the march. The client had no volume at all, so all of it is ours; the
+ * shape of the technique is published, the numbers it is tuned to here are not. Live through
+ * `__debug.clouds`.
+ */
+export const CLOUD_MARCH = {
+  /** Where the deck sits, in metres above the camera's own height. The sheets' own altitudes. */
+  bottom: 1500,
+  top: 2300,
+  /** How far along the ray to bother, in metres. Past this the haze has the sky anyway. */
+  reach: 26000,
+  /** Steps through the slab, and steps toward the sun from each of them. The cost, in two numbers. */
+  steps: 64,
+  lightSteps: 5,
+  /** Metres per unit of the base volume, and of the detail volume. */
+  baseScale: 4200,
+  detailScale: 260,
+  /** How hard the detail eats the edge of the shape. */
+  detailBite: 0.32,
+  /** Scattering: forward, backward, and how they are mixed. Two lobes, as cloud needs. */
+  gForward: 0.72,
+  gBackward: -0.24,
+  gMix: 0.42,
+  /** How thick a metre of cloud is. */
+  density: 0.055,
+  /** Sun-ward extinction, and the powder term that keeps a lit edge from reading as a flat card. */
+  lightDensity: 0.9,
+  powder: 0.42,
+  /** How much of the sky's ambient a cloud picks up, top and bottom. */
+  ambientTop: 0.55,
+  ambientBottom: 0.22,
+  /** How far the deck fades out at its own floor and ceiling, as a share of its depth. */
+  feather: 0.22,
+};
+
+const CLOUD_FRAGMENT = /* glsl */ `
+precision highp float;
+precision highp sampler3D;
+varying vec2 vUv;
+uniform sampler2D uDepth;
+uniform sampler3D uBase;
+uniform sampler3D uDetail;
+uniform vec2 uTanHalfFov;
+uniform vec2 uNearFar;
+uniform mat3 uViewToWorld;
+uniform vec3 uCamera;
+uniform vec3 uSunDir;
+uniform vec3 uSunColor;
+uniform vec3 uAmbient;
+uniform vec3 uFogColor;
+uniform float uFogDensity;
+/** x coverage cut on the billow, y brightness, z decks, w drift in metres. */
+uniform vec4 uLook;
+uniform float uTime;
+uniform vec2 uSlab;
+uniform float uSteps;
+uniform float uLightSteps;
+uniform float uJitter;
+
+${FX_LINEARIZE}
+${FX_VIEW_POS}
+${FX_SLAB}
+${FX_PHASE_HG}
+${FX_HASH}
+
+const float BASE_SCALE = ${CLOUD_MARCH.baseScale.toFixed(1)};
+const float DETAIL_SCALE = ${CLOUD_MARCH.detailScale.toFixed(1)};
+const float DETAIL_BITE = ${CLOUD_MARCH.detailBite.toFixed(3)};
+const float DENSITY = ${CLOUD_MARCH.density.toFixed(4)};
+const float LIGHT_DENSITY = ${CLOUD_MARCH.lightDensity.toFixed(3)};
+const float POWDER = ${CLOUD_MARCH.powder.toFixed(3)};
+const float G_FWD = ${CLOUD_MARCH.gForward.toFixed(3)};
+const float G_BACK = ${CLOUD_MARCH.gBackward.toFixed(3)};
+const float G_MIX = ${CLOUD_MARCH.gMix.toFixed(3)};
+const float AMB_TOP = ${CLOUD_MARCH.ambientTop.toFixed(3)};
+const float AMB_BOT = ${CLOUD_MARCH.ambientBottom.toFixed(3)};
+const float FEATHER = ${CLOUD_MARCH.feather.toFixed(3)};
+
+/** Where in the deck a height is, 0 at its floor and 1 at its ceiling. */
+float heightFrac(float y) { return clamp((y - uSlab.x) / max(1.0, uSlab.y - uSlab.x), 0.0, 1.0); }
+
+/**
+ * The deck's own profile. A cloud is not a brick: it is narrow at the bottom where it is forming,
+ * widest through the middle, and frayed at the top. Two decks get a second, thinner sheet above.
+ */
+float profile(float h, float decks) {
+  float low = smoothstep(0.0, FEATHER, h) * smoothstep(1.0, 1.0 - FEATHER * 1.6, h);
+  if (decks < 1.5) return low;
+  float split = smoothstep(0.52, 0.62, h);
+  return mix(low, low * 0.75 + smoothstep(0.6, 0.72, h) * smoothstep(1.0, 0.86, h) * 0.6, split);
+}
+
+/** How much cloud is at a point: the shape, cut to the coverage, then eaten by the detail. */
+float densityAt(vec3 p, float h, float cheap) {
+  vec3 drift = vec3(uLook.w * uTime, 0.0, uLook.w * uTime * 0.35);
+  vec4 base = texture(uBase, (p + drift) / BASE_SCALE);
+  // The billow, cut where the world's own coverage says. The cut is calibrated against the volume.
+  float shape = (base.r - uLook.x) / max(1e-3, 1.0 - uLook.x);
+  if (shape <= 0.0) return 0.0;
+  // The erosion channels take the edges off the shape before the profile does.
+  float erode = base.g * 0.625 + base.b * 0.25 + base.a * 0.125;
+  shape = clamp(shape - (1.0 - erode) * 0.35, 0.0, 1.0) * profile(h, uLook.z);
+  if (shape <= 0.0 || cheap > 0.5) return shape;
+  vec3 dp = (p + drift * 2.0) / DETAIL_SCALE;
+  vec3 d = texture(uDetail, dp).rgb;
+  float detail = d.r * 0.625 + d.g * 0.25 + d.b * 0.125;
+  // Eaten harder at the top, where a cloud frays, than at the base where it is solid.
+  return clamp(shape - (1.0 - detail) * DETAIL_BITE * mix(0.4, 1.0, h), 0.0, 1.0);
+}
+
+/** How much sun reaches a point: a few long steps toward it, and the powder that lights an edge. */
+float sunlight(vec3 p, float stepLen) {
+  float od = 0.0;
+  float t = stepLen * 0.5;
+  for (int i = 0; i < 8; i++) {
+    if (float(i) >= uLightSteps) break;
+    vec3 q = p + uSunDir * t;
+    float h = heightFrac(q.y);
+    od += densityAt(q, h, 1.0) * stepLen;
+    t += stepLen * (1.0 + float(i) * 0.6);
+  }
+  return exp(-od * DENSITY * LIGHT_DENSITY);
+}
+
+void main() {
+  vec3 viewDir = fxViewPos(vUv, 1.0, uTanHalfFov);
+  vec3 dir = normalize(uViewToWorld * viewDir);
+  // Anything solid ends the ray: a cloud is sky.
+  float depth = texture(uDepth, vUv).r;
+  float solid = depth > 0.0 ? depth : ${CLOUD_MARCH.reach.toFixed(1)};
+  vec2 hit = fxSlab(uCamera, dir, vec3(-1e7, uSlab.x, -1e7), vec3(1e7, uSlab.y, 1e7));
+  float near = max(hit.x, 0.0);
+  float far = min(min(hit.y, solid), ${CLOUD_MARCH.reach.toFixed(1)});
+  if (far <= near) { gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0); return; }
+
+  float span = far - near;
+  float stepLen = span / uSteps;
+  // A per-pixel offset, so the steps of neighbouring pixels do not line up into rings.
+  float t = near + stepLen * fxHash(vUv * 1024.0 + uJitter);
+  float cosT = dot(dir, uSunDir);
+  float phase = mix(fxPhaseHG(cosT, G_FWD), fxPhaseHG(cosT, G_BACK), G_MIX);
+
+  vec3 scattered = vec3(0.0);
+  float transmittance = 1.0;
+  for (int i = 0; i < 128; i++) {
+    if (float(i) >= uSteps || transmittance < 0.01) break;
+    vec3 p = uCamera + dir * t;
+    float h = heightFrac(p.y);
+    float d = densityAt(p, h, 0.0);
+    if (d > 0.001) {
+      float sigma = d * DENSITY;
+      float sun = sunlight(p, stepLen * 2.0);
+      // The powder term: a cloud lit from behind is bright at its edge and dark in its body, which
+      // a plain exponential cannot say. Without it a cloud reads as a flat card.
+      float powder = 1.0 - exp(-sigma * stepLen * 6.0);
+      vec3 light = uSunColor * sun * phase * mix(1.0, powder, POWDER);
+      light += uAmbient * mix(AMB_BOT, AMB_TOP, h);
+      // The cloud's own darkness, straight off the world's art.
+      light *= uLook.y;
+      float step_ = 1.0 - exp(-sigma * stepLen);
+      scattered += light * step_ * transmittance;
+      transmittance *= 1.0 - step_;
+    }
+    t += stepLen;
+  }
+  // The same haze everything else recedes into, so a far deck sits in the world's own air.
+  float haze = 1.0 - exp(-uFogDensity * uFogDensity * near * near);
+  scattered = mix(scattered, uFogColor * (1.0 - transmittance), clamp(haze, 0.0, 1.0));
+  gl_FragColor = vec4(scattered, transmittance);
+}
+`;
+
+const COMPOSITE_FRAGMENT = /* glsl */ `
+precision highp float;
+varying vec2 vUv;
+uniform sampler2D uScene;
+uniform sampler2D uClouds;
+uniform sampler2D uDepthHalf;
+uniform sampler2D uDepthFull;
+uniform ivec2 uHalfSize;
+uniform float uAmount;
+
+${FX_BILATERAL_UPSAMPLE}
+
+void main() {
+  vec4 scene = texture(uScene, vUv);
+  ivec2 t00, t10, t01, t11;
+  vec4 w;
+  fxHalfTaps(gl_FragCoord.xy, uHalfSize, t00, t10, t01, t11, w);
+  // Weighted by how close each half texel's own depth is to this pixel's. Without it the clouds
+  // halo every ridge, because a half texel that saw sky is blended into a pixel that saw rock.
+  float mine = texture(uDepthFull, vUv).r;
+  vec4 dz = vec4(texelFetch(uDepthHalf, t00, 0).r, texelFetch(uDepthHalf, t10, 0).r, texelFetch(uDepthHalf, t01, 0).r, texelFetch(uDepthHalf, t11, 0).r);
+  vec4 near = 1.0 / (abs(dz - vec4(mine)) * 0.05 + 1e-3);
+  vec4 ww = w * near;
+  float sum = ww.x + ww.y + ww.z + ww.w;
+  vec4 c = (texelFetch(uClouds, t00, 0) * ww.x + texelFetch(uClouds, t10, 0) * ww.y + texelFetch(uClouds, t01, 0) * ww.z + texelFetch(uClouds, t11, 0) * ww.w) / max(sum, 1e-5);
+  float a = mix(1.0, c.a, uAmount);
+  gl_FragColor = vec4(scene.rgb * a + c.rgb * uAmount, scene.a);
+}
+`;
+
+/** The march, and the upsample that brings it back. */
+export class CloudsPass implements FxPass {
+  readonly id = 'volumetricClouds' as const;
+  readonly timerLabel = 'pass:volumetricClouds';
+  private readonly marchMat: THREE.ShaderMaterial;
+  private readonly compositeMat: THREE.ShaderMaterial;
+  private readonly marchQuad: THREE.Mesh;
+  private readonly compositeQuad: THREE.Mesh;
+  private target: THREE.WebGLRenderTarget | null = null;
+  private width = 1;
+  private height = 1;
+  private quality = 0.5;
+  private amount = 1;
+  private time = 0;
+  private base: THREE.Data3DTexture | null = null;
+  private detail: THREE.Data3DTexture | null = null;
+  private billow = { lo: 0.576, hi: 0.898 };
+  /** What the world is asking for this frame, written by the game and read here. */
+  look = { coverage: 0, brightness: 1, decks: 1, drift: 0, on: false };
+  /** For the console: what the last frame really did. */
+  last = { drew: false, coverage: 0, cut: 0, steps: 0, size: [0, 0] as [number, number] };
+
+  constructor() {
+    this.marchMat = new THREE.ShaderMaterial({
+      vertexShader: FX_FULLSCREEN_VERTEX,
+      fragmentShader: CLOUD_FRAGMENT,
+      depthTest: false,
+      depthWrite: false,
+      uniforms: {
+        uDepth: { value: null },
+        uBase: { value: null },
+        uDetail: { value: null },
+        uTanHalfFov: { value: new THREE.Vector2(1, 1) },
+        uNearFar: { value: new THREE.Vector2(0.05, 9000) },
+        uViewToWorld: { value: new THREE.Matrix3() },
+        uCamera: { value: new THREE.Vector3() },
+        uSunDir: { value: new THREE.Vector3(0, 1, 0) },
+        uSunColor: { value: new THREE.Color(1, 1, 1) },
+        uAmbient: { value: new THREE.Color(0.3, 0.35, 0.4) },
+        uFogColor: { value: new THREE.Color(0.6, 0.7, 0.8) },
+        uFogDensity: { value: 0 },
+        uLook: { value: new THREE.Vector4(0.9, 1, 1, 0) },
+        uTime: { value: 0 },
+        uSlab: { value: new THREE.Vector2(CLOUD_MARCH.bottom, CLOUD_MARCH.top) },
+        uSteps: { value: CLOUD_MARCH.steps },
+        uLightSteps: { value: CLOUD_MARCH.lightSteps },
+        uJitter: { value: 0 },
+      },
+    });
+    this.compositeMat = new THREE.ShaderMaterial({
+      vertexShader: FX_FULLSCREEN_VERTEX,
+      fragmentShader: COMPOSITE_FRAGMENT,
+      depthTest: false,
+      depthWrite: false,
+      uniforms: {
+        uScene: { value: null },
+        uClouds: { value: null },
+        uDepthHalf: { value: null },
+        uDepthFull: { value: null },
+        uHalfSize: { value: new THREE.Vector2(1, 1) },
+        uAmount: { value: 1 },
+      },
+    });
+    this.marchQuad = createFxQuad(this.marchMat);
+    this.compositeQuad = createFxQuad(this.compositeMat);
+  }
+
+  /**
+   * The noise volumes, handed over once they have been fetched. Until then the pass answers false to
+   * `enabled` and costs nothing: a march with no shape to march through would draw a grey sky.
+   */
+  setNoise(base: THREE.Data3DTexture, detail: THREE.Data3DTexture, billow: { lo: number; hi: number }): void {
+    this.base = base;
+    this.detail = detail;
+    this.billow = billow;
+    this.marchMat.uniforms.uBase.value = base;
+    this.marchMat.uniforms.uDetail.value = detail;
+  }
+
+  get hasNoise(): boolean {
+    return this.base !== null;
+  }
+
+  enabled(ctx: FxFrameContext): boolean {
+    // No volume, nothing to march. In space there is no sky to put cloud in, and indoors the march
+    // would be stopped by the ceiling on every pixel, which is fill spent to draw nothing.
+    return this.base !== null && this.look.on && this.look.coverage > 0 && !ctx.space && !ctx.inside;
+  }
+
+  needs(): readonly FxProductId[] {
+    return ['linearDepthHalf'];
+  }
+
+  prepare(): void {}
+
+  setSize(width: number, height: number, settings: FxSettings): void {
+    this.width = Math.max(1, width);
+    this.height = Math.max(1, height);
+    this.quality = Math.min(1, Math.max(0.25, (settings as { volumetricCloudQuality?: number }).volumetricCloudQuality ?? 0.5));
+    this.amount = Math.min(1, Math.max(0, (settings as { volumetricCloudAmount?: number }).volumetricCloudAmount ?? 1));
+    const w = Math.max(1, Math.round(this.width * this.quality));
+    const h = Math.max(1, Math.round(this.height * this.quality));
+    if (this.target && (this.target.width !== w || this.target.height !== h)) {
+      this.target.dispose();
+      this.target = null;
+    }
+    if (!this.target) {
+      this.target = new THREE.WebGLRenderTarget(w, h, { type: THREE.HalfFloatType, depthBuffer: false, stencilBuffer: false, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter });
+    }
+  }
+
+  render(ctx: FxFrameContext, input: THREE.WebGLRenderTarget, output: THREE.WebGLRenderTarget | null): boolean {
+    const g = ctx.renderer;
+    const target = this.target;
+    if (!target || !this.base) return false;
+    const cam = ctx.camera;
+    const u = this.marchMat.uniforms;
+    const tan = Math.tan(((cam.fov * Math.PI) / 180) / 2);
+    (u.uTanHalfFov.value as THREE.Vector2).set(tan * cam.aspect, tan);
+    (u.uNearFar.value as THREE.Vector2).set(cam.near, cam.far);
+    (u.uViewToWorld.value as THREE.Matrix3).setFromMatrix4(cam.matrixWorld);
+    (u.uCamera.value as THREE.Vector3).copy(cam.position);
+    // The sun the rest of the scene is lit by, which is where every world's own colour comes from.
+    const sun = ctx.sun;
+    if (sun) {
+      (u.uSunDir.value as THREE.Vector3).copy(sun.dir).normalize();
+      (u.uSunColor.value as THREE.Color).copy(sun.color).multiplyScalar(Math.max(0, sun.intensity));
+    }
+    const lighting = ctx.lighting;
+    if (lighting) (u.uAmbient.value as THREE.Color).copy(lighting.ambient);
+    // The same haze the rest of the scene recedes into, so a far deck sits in the world's own air.
+    (u.uFogColor.value as THREE.Color).copy(ctx.fogColor);
+    u.uFogDensity.value = ctx.fogDensity;
+    // The slab rides the camera's own height, so the deck is always overhead rather than underfoot
+    // on a world whose ground climbs a kilometre.
+    (u.uSlab.value as THREE.Vector2).set(cam.position.y + CLOUD_MARCH.bottom, cam.position.y + CLOUD_MARCH.top);
+    const cut = billowCutLocal(this.look.coverage, this.billow);
+    (u.uLook.value as THREE.Vector4).set(cut, this.look.brightness, this.look.decks, this.look.drift);
+    this.time += ctx.dt;
+    u.uTime.value = this.time;
+    u.uDepth.value = ctx.products.linearDepthHalf ?? null;
+    u.uSteps.value = Math.round(CLOUD_MARCH.steps * (0.5 + this.quality));
+    u.uLightSteps.value = CLOUD_MARCH.lightSteps;
+    u.uJitter.value = (this.time * 37.1) % 1000;
+
+    g.setRenderTarget(target);
+    g.render(this.marchQuad, FX_CAMERA);
+
+    const c = this.compositeMat.uniforms;
+    c.uScene.value = input.texture;
+    c.uClouds.value = target.texture;
+    c.uDepthHalf.value = ctx.products.linearDepthHalf ?? null;
+    c.uDepthFull.value = ctx.depth;
+    (c.uHalfSize.value as THREE.Vector2).set(target.width, target.height);
+    c.uAmount.value = this.amount;
+    g.setRenderTarget(output);
+    g.render(this.compositeQuad, FX_CAMERA);
+    this.last = { drew: true, coverage: this.look.coverage, cut: Number(cut.toFixed(3)), steps: u.uSteps.value as number, size: [target.width, target.height] };
+    return true;
+  }
+
+  materials(): FxWarmItem[] {
+    return [
+      { material: this.marchMat, object: this.marchQuad, where: 'target' },
+      { material: this.compositeMat, object: this.compositeQuad, where: 'both' },
+    ];
+  }
+
+  dispose(): void {
+    this.target?.dispose();
+    this.target = null;
+    this.marchMat.dispose();
+    this.compositeMat.dispose();
+  }
+}
+
+/**
+ * The calibrated cut, restated here so the pass needs no import from the world.
+ *
+ * Kept in step with `billowCut` in `src/world/cloudLook.ts` by a node test, on the same footing as
+ * the palette and the display's geometry: two copies of one number, checked rather than trusted.
+ */
+function billowCutLocal(coverage: number, billow: { lo: number; hi: number }): number {
+  const lo = Math.min(billow.lo, billow.hi);
+  const hi = Math.max(billow.lo, billow.hi);
+  return hi - (hi - lo) * Math.min(1, Math.max(0, coverage));
+}

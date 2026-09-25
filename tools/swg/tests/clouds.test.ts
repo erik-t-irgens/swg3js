@@ -193,6 +193,22 @@ function tile(alpha: number, grey: number, size = 16): Buffer {
   }
 }
 
+{
+  // The march carries its own copy of the cut, because the pass may not import the world. Two
+  // copies of one number are kept in step by checking rather than by hoping -- the same footing the
+  // palette and the display's geometry are on -- and the shader's own constants are read as text,
+  // since a shader is a string and no compiler will ever look at it.
+  const src = readFileSync(new URL('../../../src/core/fx/clouds.ts', import.meta.url), 'utf8');
+  const local = /function billowCutLocal\([\s\S]*?\n\}/.exec(src)?.[0] ?? '';
+  ok(/hi - \(hi - lo\) \* Math\.min\(1, Math\.max\(0, coverage\)\)/.test(local), "the march's own copy of the cut is the same arithmetic as the world's");
+  ok(/uLook\.x/.test(src) && /base\.r - uLook\.x/.test(src), 'and the shader cuts the billow channel at the number it is handed, rather than at one of its own');
+  // Nothing in the march may ask for a light or write depth: both would reach outside the pass.
+  ok(!/castShadow|PointLight|DirectionalLight/.test(src), 'the march asks for no light, so no material anywhere recompiles when it is switched on');
+  ok(/depthWrite: false/.test(src) && !/depthWrite: true/.test(src), 'and writes no depth, which is what keeps a cloud pixel sky to the god rays');
+  // The slab rides the camera, or a world whose ground climbs a kilometre has cloud underfoot.
+  ok(/uSlab\.value as THREE\.Vector2\)\.set\(cam\.position\.y \+/.test(src), "the deck rides the camera's own height rather than sitting at a fixed altitude");
+}
+
 interface CloudLevelish {
   coverage: number;
   brightness: number;

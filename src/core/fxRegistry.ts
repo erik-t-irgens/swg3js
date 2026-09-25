@@ -24,6 +24,12 @@ export interface FxSettings {
   waterReflectionResolution: number;
   heatHaze: boolean;
   heatHazeStrength: number;
+  /** Volumetric clouds in place of the flat sheets. Off by default: it is the most expensive pass in the chain. */
+  volumetricClouds: boolean;
+  /** How much of the march reaches the picture, 0 to 1. At 0 the picture is untouched with the pass still on. */
+  volumetricCloudAmount: number;
+  /** The fraction of the screen it marches at. */
+  volumetricCloudQuality: number;
   /** Daylight through the doorways of the room the camera is in, and a glow around its lamps. */
   lightShafts: boolean;
   lightShaftStrength: number;
@@ -65,6 +71,7 @@ export type FxPassId =
   | 'waterReflections'
   | 'heatHaze'
   | 'lightShafts'
+  | 'volumetricClouds'
   | 'godRays'
   | 'underwater'
   | 'depthOfField'
@@ -161,6 +168,9 @@ export const FX_DEFAULTS: FxSettings = {
   waterReflectionResolution: 0.5,
   heatHaze: true,
   heatHazeStrength: 1,
+  volumetricClouds: false,
+  volumetricCloudAmount: 1,
+  volumetricCloudQuality: 0.5,
   lightShafts: true,
   lightShaftStrength: 0.8,
   roomGlowStrength: 0.5,
@@ -208,7 +218,9 @@ export const FX_KNOBS: readonly FxKnobDef[] = [
   { key: 'waterReflectionResolution', pass: 'waterReflections', label: 'Water reflection resolution', kind: 'select', options: half, requires: ['effects', 'waterReflections'], hint: 'Half traces a quarter of the pixels and smooths them back along the water; full is sharper and about three times the cost.' },
   { key: 'heatHaze', pass: 'heatHaze', label: 'Heat haze', kind: 'toggle', requires: ['effects'], hint: 'The air shimmers over lava, behind running engines and in front of a flame thrower, as the game drew it over Mustafar\'s lava.' },
   { key: 'heatHazeStrength', pass: 'heatHaze', label: 'Heat haze strength', kind: 'range', min: 0, max: 2, step: 0.05, format: two, requires: ['effects', 'heatHaze'], hint: '1 is the shimmer the game drew; 2 moves the picture twice as far.' },
-  { key: 'lightShafts', pass: 'lightShafts', label: 'Light shafts', kind: 'toggle', requires: ['effects'], hint: 'Daylight through the doorways of the room you are in: a beam in the dusty air and a bright patch where it lands; and a soft glow in the air around the room\'s own lamps.' },
+  { key: 'volumetricClouds', pass: 'volumetricClouds', label: 'Volumetric clouds', kind: 'toggle', requires: ['effects'], hint: "Cloud the sky is really made of rather than a picture drawn across it, marched through a slab overhead and lit by the world's own sun, so each planet keeps its own colour. By far the most expensive thing here; off puts the flat sheets back exactly." },
+  { key: 'volumetricCloudQuality', pass: 'volumetricClouds', label: 'Cloud resolution', kind: 'select', options: half, requires: ['effects', 'volumetricClouds'], hint: 'The share of the screen the march runs at, smoothed back up along edges. Quarter costs about a quarter of half.' },
+  { key: 'volumetricCloudAmount', pass: 'volumetricClouds', label: 'Cloud strength', kind: 'range', min: 0, max: 1, step: 0.05, format: two, requires: ['effects', 'volumetricClouds'], hint: 'How much of the march reaches the picture. At 0 the sky is untouched with the pass still running, which is the way to see what it costs against what it gives.' },  { key: 'lightShafts', pass: 'lightShafts', label: 'Light shafts', kind: 'toggle', requires: ['effects'], hint: 'Daylight through the doorways of the room you are in: a beam in the dusty air and a bright patch where it lands; and a soft glow in the air around the room\'s own lamps.' },
   { key: 'lightShaftStrength', pass: 'lightShafts', label: 'Light shaft strength', kind: 'range', min: 0, max: 1.5, step: 0.05, format: two, requires: ['effects', 'lightShafts'], hint: '0.4 clean air, 0.8 a dusty cantina, 1.2 a smoky hall.' },
   { key: 'roomGlowStrength', pass: 'lightShafts', label: 'Lamp glow', kind: 'range', min: 0, max: 1.5, step: 0.05, format: two, requires: ['effects', 'lightShafts'], hint: 'The haze around a room\'s lamps and in the depth of a lit hall, in the room\'s own colours; 0 turns it off.' },
   { key: 'roomMotes', pass: null, label: 'Dust motes', kind: 'toggle', requires: [], hint: 'Specks of dust drifting in rooms and aboard ships, glinting where daylight or a lamp catches them. Works with Effects off.' },
@@ -247,6 +259,7 @@ export const FX_PASSES: readonly FxPassDef[] = [
   { id: 'waterReflections', stage: 'scene', toggles: ['waterReflections'], required: false, needs: ['linearDepthHalf', 'waterMask'], budgetMs: 0.6, typical: false, canBeLast: false, live: true, why: 'Adds reflected scene light on water pixels. After occlusion so the reflected ground carries it, before the lens so reflections shimmer, defocus, smear and bloom like anything seen directly.' },
   { id: 'heatHaze', stage: 'scene', toggles: ['heatHaze'], required: false, needs: ['heat', 'linearDepthHalf'], budgetMs: 0.16, typical: false, canBeLast: false, live: true, why: 'Displaces what the surfaces look like, so it follows every surface pass; before the atmosphere and the lens, since the air and the glass sit between the heat and the eye.' },
   { id: 'lightShafts', stage: 'scene', toggles: ['lightShafts'], required: false, needs: ['linearDepthHalf', 'normalsHalf'], budgetMs: 0.3, typical: false, canBeLast: false, live: true, why: 'Daylight scattered in the air of the room the camera is in, from its doorways, the sunlit patch where it lands, and the glow around the room\'s lamps. Evaluated per pixel along the view ray and stopped by the scene depth, which scene meshes cannot read. Atmosphere: after the surface passes (SSAO has darkened the corners the patch lands among), before god rays, depth of field, motion blur and bloom, so the beams defocus, smear and bloom with the room.' },
+  { id: 'volumetricClouds', stage: 'scene', toggles: ['volumetricClouds'], required: false, needs: ['linearDepthHalf'], budgetMs: 6, typical: false, canBeLast: false, live: true, why: 'Cloud the sky is really made of rather than a sheet drawn across it: a raymarch through a slab overhead, lit by the very sun, ambient and haze the rest of the scene is lit by, which is how each world keeps its own colour with no table of its own. After the surface passes, so occlusion, blade light and reflections have already settled what the surfaces are, and after the heat, since the air sits between the heat and the eye; before the god rays, so the sky they are drawn from is the cloudy one and a broken deck makes shafts by itself; before depth of field, motion blur, bloom and the grade, so the clouds defocus, smear, spill and are graded with the picture. It marches at a fraction of the screen and comes back through a depth-aware upsample, since a plain one haloes every ridge. By far the most expensive pass here, which is why it is off by default and has a quality of its own.' },
   { id: 'godRays', stage: 'scene', toggles: ['godRays'], required: false, needs: ['linearDepthHalf'], budgetMs: 0.25, typical: true, canBeLast: false, live: true, why: 'Scattered sunlight. Before depth of field, since rays are far light that should soften with the far background they overlay, and before the blur and the bloom so they smear and spill like the sun.' },
   { id: 'underwater', stage: 'scene', toggles: ['underwater'], required: false, needs: [], budgetMs: 0.12, typical: false, canBeLast: false, live: true, why: 'What the water between the eye and each pixel does to it, and the shimmer of the light bending through the ripples overhead. After the god rays, so scattered sunlight is graded by the water it comes through like anything else; before the lens, so the aperture and the shutter soften and smear what the water has already done. It reads the full-resolution scene depth itself and asks for no product, and it draws on no frame the camera is dry.' },
   { id: 'depthOfField', stage: 'lens', toggles: ['depthOfField'], required: false, needs: ['linearDepthHalf', 'dofGlow'], budgetMs: 0.35, typical: false, canBeLast: false, live: true, why: 'The aperture needs colour and depth aligned, so it comes before motion blur; before bloom so a defocused highlight blooms as a disc.' },
