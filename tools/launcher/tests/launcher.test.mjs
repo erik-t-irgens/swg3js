@@ -268,7 +268,7 @@ process.on('exit', () => rmSync(scratch, { recursive: true, force: true }));
   // Every step that opens an archive is retail-only. A couple of commands open none at all -- they
   // are built out of packs that are already converted -- and asking those for `--retail-only` would
   // be asking them about something they never look at.
-  const ARCHIVE_FREE = new Set(['navgrid', 'scenes']);
+  const ARCHIVE_FREE = new Set(['navgrid', 'scenes', 'clouds']);
   const fromArchives = real.steps.filter((s) => !ARCHIVE_FREE.has(s.command));
   ok(fromArchives.every((s) => s.args.includes('--retail-only')), `every step that reads an archive is retail-only (${fromArchives.length} of ${real.steps.length})`);
   ok(real.steps.filter((s) => ARCHIVE_FREE.has(s.command)).every((s) => !s.args.includes('--retail-only')), 'and the ones that read none do not pretend to care');

@@ -304,6 +304,27 @@ export class SwgSky {
   /** Cloud sheets live outside the camera-following group: their altitude is fixed in the world. */
   readonly cloudGroup = new THREE.Group();
   /**
+   * Whether the flat sheets are drawn. False while the volumetric march is drawing the sky instead:
+   * the march stands in the same slab the sheets hang in, so both at once is the cloud twice over.
+   *
+   * It hides the meshes and not the group, which is what keeps the lens flare dimming by cloud: the
+   * sheets go on being weighed, drifted and faded every frame, `cloudLayers` still reports them, and
+   * putting the setting back is one frame with nothing to rebuild.
+   *
+   * It writes through to the meshes rather than waiting for the next update, because the sky is
+   * stepped before the frame is drawn: left to the update, a toggle would show one frame carrying
+   * both skies at once.
+   */
+  get sheets(): boolean {
+    return this.sheetsOn;
+  }
+  set sheets(on: boolean) {
+    if (on === this.sheetsOn) return;
+    this.sheetsOn = on;
+    for (const c of this.clouds) c.mesh.visible = on && (c.mesh.material.uniforms.uOpacity.value as number) > 0.002;
+  }
+  private sheetsOn = true;
+  /**
    * A fixed pool of four sheets, bottom 0, bottom 1, top 0, top 1: each altitude blends the two
    * heaviest cloud images of the blocks in the mix. `file` is the image a sheet shows this frame.
    * Every sheet is built at load with the same program, so a new image never makes a material.
@@ -1250,7 +1271,7 @@ export class SwgSky {
       (u.uCamera.value as THREE.Vector3).copy(camPos);
       // White by day and grey by night in the client, lit by the main light's colour.
       (u.uColor.value as THREE.Color).copy(L.main).multiplyScalar(isDay ? 1 : 0.5);
-      c.mesh.visible = w[k] > 0.002;
+      c.mesh.visible = this.sheetsOn && w[k] > 0.002;
     }
   }
 
@@ -1410,7 +1431,9 @@ export class SwgSky {
       const u = mesh.material.uniforms;
       const tex = u.uMap.value as THREE.Texture | null;
       const opacity = u.uOpacity.value as number;
-      if (!mesh.visible || !tex || !(opacity > 0.002)) continue;
+      // The opacity is the sheet's own weight, which is the very test that sets `visible`, so this
+      // reads the same sheets as before and goes on reading them while the march has them hidden.
+      if (!tex || !(opacity > 0.002)) continue;
       const o = out[n++];
       o.texture = tex;
       // The cloud group sits at y 0, so a sheet's own height is its altitude.

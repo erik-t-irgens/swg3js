@@ -14,6 +14,7 @@ import { installHeatHaze } from './heat';
 import type { HeatSources } from '../../world/heatSources';
 import { LensFlarePass } from './lensFlare';
 import { LightShaftsPass } from './lightShafts';
+import { CloudsPass } from './clouds';
 import { UnderwaterPass } from './underwater';
 import { DepthOfFieldPass } from './dof';
 import { DofGlowProduct, type DofGlowCollector } from './dofGlow';
@@ -56,6 +57,11 @@ export function installEffects(postfx: PostFX, deps: FxInstallDeps = {}): void {
   if (deps.heat) installHeatHaze(postfx, deps.heat);
   // The room's air needs nothing from the game here: it reads RoomAir's frame through the frame context.
   postfx.registerPass(new LightShaftsPass());
+  // The clouds. Registered always and drawing never, until the game hands over the noise volumes
+  // and tells it what this world's sky is: with no volume it answers false to `enabled` and costs
+  // nothing at all, which is the state of every install that has not run the `clouds` command.
+  // Where it sits in the chain is the registry's business, not this line's.
+  postfx.registerPass(new CloudsPass());
   // The look under water needs nothing from the game here either: it reads whether the camera is
   // under a surface, how deep, and which body's colour and opacity from the frame context, and asks
   // for no product. It draws on no frame the camera is dry. Where it sits in the chain is the

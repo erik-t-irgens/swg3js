@@ -92,6 +92,8 @@ import { createCloudLayers, createSkyLights, flareLook, tuneFlareLook } from './
 import { MAX_CLOUD_LAYERS, MAX_FLARE_SOURCES } from './core/fx/flareMath';
 import { SPACE_SKY_TUNE, tuneSpaceSky, type SunRule } from './space/suns';
 import { heatTuning, type HeatProduct } from './core/fx/heat';
+import { CLOUD_MARCH, type CloudsPass } from './core/fx/clouds';
+import { CLOUD_TUNE, cloudLook, loadCloudPack, loadCloudVolumes, worthDrawing, type CloudPack } from './world/cloudLook.ts';
 import { tuneUnderwater, unknownUnderwaterKeys, type UnderwaterTune } from './core/fx/underwaterMath.ts';
 import type { UnderwaterPass } from './core/fx/underwater';
 import { FIGURE_SPHERE, followDepth, measureLocalSphere, type FxMoverList, type LocalSphere, type VelocityProduct } from './core/fx/velocity';
@@ -565,6 +567,17 @@ class App {
   /** What the effects are told about each frame, refilled in drawFrame rather than made again. */
   private readonly fxInput: FxFrameInput = { camera: null as unknown as THREE.PerspectiveCamera, dt: 1 / 60, sun: null, portalView: false, cameraInHull: false, inside: false, aboard: false, space: false, fog: null, daylight: 1, dayIndex: 0, lighting: null, planetId: '', aiming: false, aimAmount: 0, firstPerson: false, orbitDistance: 0, skyLights: createSkyLights(MAX_FLARE_SOURCES), skyLightCount: 0, clouds: createCloudLayers(MAX_CLOUD_LAYERS), cloudCount: 0, cameraUnderwater: false, cameraSubmerged: false, underwaterDepth: 0, underwaterColor: new THREE.Color(0x2e7fbb), underwaterOpacity: 0.75, underwaterReach: 0, waterInView: false, blades: this.fxBlades, lights: this.fxLights, room: null, followFar: 0, weather: null };
   private readonly fxSun: SunInfo = { dir: new THREE.Vector3(), color: new THREE.Color(), intensity: 0 };
+  /**
+   * Each world's measured sky, kept for the session once it has been fetched (a few hundred bytes,
+   * and a travel usually returns to a world already measured). A key with a null value is one whose
+   * fetch is in flight or whose pack was converted before the `clouds` command existed.
+   */
+  private readonly cloudPacks = new Map<string, CloudPack | null>();
+  /** The noise volumes, which are the same on every world: asked for once and shared by every chain. */
+  private cloudVolumes: Awaited<ReturnType<typeof loadCloudVolumes>> = null;
+  private cloudVolumesAsked = false;
+  /** What the console is overriding the world's own sky with, so a clear world can be flown under an overcast. */
+  private readonly cloudForce: { coverage: number | null; brightness: number | null; drift: number | null } = { coverage: null, brightness: null, drift: null };
   /** What the debug mask draws: the player and whatever they ride or are aboard. */
   private readonly fxMaskObjects: THREE.Object3D[] = [];
   /** Work going on in the background: the Effects switch compiling every shader for the other path. */
@@ -1646,6 +1659,51 @@ class App {
         if (typeof opts?.strength === 'number' && Number.isFinite(opts.strength)) fx.strength = Math.max(0, opts.strength);
         if (opts?.view === 0 || opts?.view === 1) fx.view = opts.view;
         return { effects: { ...fx }, wardrobe: this.wardrobe.doll.dofReport(), appearance: this.appearanceUi.doll.dofReport() };
+      },
+      /**
+       * The volumetric clouds: what this world's sky measured, what the march is being asked for, and
+       * every number of the march live. `{ steps, lightSteps, bottom, top }` and the look move on the
+       * next frame; the rest (`density`, `detailBite`, `gForward`, `powder`, `ambientTop`, ...) are
+       * constants in the program, so moving one rebuilds it once. `{ coverage }` overrides what the
+       * world says, so a clear world can be flown under an overcast to time it; null gives it back.
+       */
+      clouds: (opts?: Partial<typeof CLOUD_MARCH> & { coverage?: number | null; brightness?: number | null; drift?: number | null; standDownDust?: number | null }) => {
+        const fx = this.postfx;
+        const pass = fx?.pass<CloudsPass>('volumetricClouds');
+        if (!fx || !pass) return 'the effects are off; turn Effects on in the menu';
+        let rebuild = false;
+        if (opts) {
+          for (const k of Object.keys(CLOUD_MARCH) as (keyof typeof CLOUD_MARCH)[]) {
+            const v = opts[k];
+            if (typeof v !== 'number' || !Number.isFinite(v)) continue;
+            CLOUD_MARCH[k] = v;
+            // The slab and the two step counts are uniforms; everything else is in the program.
+            if (k !== 'bottom' && k !== 'top' && k !== 'steps' && k !== 'lightSteps') rebuild = true;
+          }
+          if ('standDownDust' in opts) CLOUD_TUNE.standDownDust = opts.standDownDust ?? 0.5;
+          if ('coverage' in opts) this.cloudForce.coverage = opts.coverage ?? null;
+          if ('brightness' in opts) this.cloudForce.brightness = opts.brightness ?? null;
+          if ('drift' in opts) this.cloudForce.drift = opts.drift ?? null;
+          if (rebuild) pass.retune();
+        }
+        const w = this.world.weather.state;
+        const pack = this.cloudPacks.get(this.world.packId) ?? null;
+        return {
+          setting: this.settings.volumetricClouds,
+          quality: this.settings.volumetricCloudQuality,
+          amount: this.settings.volumetricCloudAmount,
+          // The two things that must both be true before anything is drawn at all.
+          volumes: pass.hasNoise ? 'loaded' : this.cloudVolumesAsked ? 'not converted (npm run swg -- clouds assets-private)' : 'not asked for yet',
+          measured: pack ? `${pack.planet}: ${pack.levels.length} levels` : `${this.world.packId}: no clouds.json`,
+          weather: { level: Number(w.level.toFixed(2)), wind: Number(w.windSpeed.toFixed(2)), heading: Math.round((w.windHeading * 180) / Math.PI), dust: Number(w.dust.toFixed(2)) },
+          asked: { ...pass.look },
+          forced: { ...this.cloudForce },
+          sheets: this.world.swgSky?.sheets ?? null,
+          drawn: pass.last,
+          march: { ...CLOUD_MARCH },
+          rebuilt: rebuild,
+          gpuMs: fx.timer.enabled ? (fx.timing().rows['pass:volumetricClouds']?.gpuMs ?? null) : null,
+        };
       },
       /** Compile every pass and product material again and say how many programs that made; a second call should say 0. */
       fxWarm: async () => (this.postfx ? await this.postfx.warmUp() : 'the effects are off; turn Effects on in the menu'),
@@ -8354,6 +8412,54 @@ class App {
     fx.strength = S.depthOfFieldStrength;
   }
 
+  /**
+   * Hand the volumetric march this world's sky and this frame's weather, and take the flat sheets
+   * down while it is really drawing.
+   *
+   * Three things it must not do. It must not be on a load path: the measured sky is fetched lazily,
+   * once per pack, and a world with none (a pack converted before the `clouds` command) simply never
+   * draws cloud, which is exactly what the pass answers to a coverage of 0. It must not hold the
+   * pass in a field: the Effects switch builds a second chain and disposes the first, so the pass is
+   * looked up each frame and the volumes, which belong to no chain, are handed to whichever pass
+   * asks. And it must put the sheets back whenever the march is not drawing -- the setting off, the
+   * effects off, indoors, in space, a world with no cloud -- or a switch taken mid-flight leaves a
+   * sky with nothing in it at all.
+   */
+  private feedClouds(): void {
+    const sky = this.world.swgSky;
+    const pass = this.settings.volumetricClouds ? this.postfx?.pass<CloudsPass>('volumetricClouds') : undefined;
+    if (!pass) {
+      if (sky) sky.sheets = true;
+      return;
+    }
+    if (!pass.hasNoise) {
+      if (this.cloudVolumes) pass.setNoise(this.cloudVolumes.base, this.cloudVolumes.detail, this.cloudVolumes.billow);
+      else if (!this.cloudVolumesAsked) {
+        this.cloudVolumesAsked = true;
+        void loadCloudVolumes(import.meta.env.BASE_URL).then((v) => {
+          this.cloudVolumes = v;
+        });
+      }
+    }
+    const id = this.world.packId;
+    if (id && !this.cloudPacks.has(id)) {
+      this.cloudPacks.set(id, null);
+      void loadCloudPack(id, import.meta.env.BASE_URL).then((p) => this.cloudPacks.set(id, p));
+    }
+    const w = this.world.weather.state;
+    const on = w.enabled;
+    // A dust storm has the sky already; rain and snow leave it, and a rainy sky wants its cloud.
+    const look = cloudLook(this.cloudPacks.get(id) ?? null, on ? w.level : 0, on ? w.windSpeed : 0, on && w.dust >= CLOUD_TUNE.standDownDust);
+    const l = pass.look;
+    const force = this.cloudForce;
+    l.coverage = force.coverage ?? (worthDrawing(look) ? look.coverage : 0);
+    l.brightness = force.brightness ?? look.brightness;
+    l.decks = look.decks;
+    l.drift = force.drift ?? look.drift;
+    l.heading = w.windHeading;
+    if (sky) sky.sheets = !pass.wouldDraw(!!this.world.planet?.space, this.world.inside);
+  }
+
   private drawFrame(): void {
     const cam = this.cam.camera;
     cam.updateMatrixWorld();
@@ -8387,6 +8493,10 @@ class App {
     this.renderer.info.autoReset = false;
     info.calls = 0;
     info.triangles = 0;
+    // What the volumetric march is asked to draw, and whether the flat sheets stand down for it.
+    // Before the scene is drawn, because the sheets are in it; the sky wrote their visibility in
+    // `world.update`, so a toggle here is seen on the very frame it is made.
+    this.feedClouds();
     // With the effects on, the passes draw into their target and the picture goes out through them.
     const postfx = this.postfx;
     // Decided before the scene is drawn, so the lit water and the reflections pass never disagree

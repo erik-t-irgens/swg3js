@@ -82,6 +82,12 @@
 //                                                                  see, with every texture taken down to the pixels it really covers. It opens no
 //                                                                  archive, so it takes no <swg-dir>, and it must run after the worlds it draws
 //                                                                  from. It writes only under <out-dir>/scenes and never touches a pack
+//   node tools/swg/cli.mjs clouds <out-dir> [--no-noise]           what each converted world's sky is really like, measured off the cloud sheets
+//                                                                  the client drew it with (<pack>/clouds.json: how much of the sky each weather
+//                                                                  row covers and how dark that cover is), and the two noise volumes the
+//                                                                  volumetric march reads (<out-dir>/clouds/, 8 MB, invented and the same on
+//                                                                  every world). It reads converted packs and no archive, so it takes no
+//                                                                  <swg-dir>, and it must run after sky
 //   node tools/swg/cli.mjs sandbox <swg-dir> <out-dir> [--seed=N]   a made-up system to fly in, 250 km across, as <out-dir>/space_sandbox:
 //                                                                  a sun and a sky borrowed from a converted zone, four to six planets with real
 //                                                                  places you can fly to, asteroid fields and three jump points; nothing in it
@@ -2339,6 +2345,20 @@ function packStatus(dir) {
     else if (sceneMan.format !== 1) need(`scenes ${dir}`, `the places were built in an older format (${sceneMan.format})`);
     else if (stalePacks.length) need(`scenes ${dir}`, `worlds converted since their places were built (${stalePacks.join(', ')})`);
     else console.log(`  places: ${sceneMan.places.length} for the creation and selection screens, ${sceneMan.models} models, ${(sceneMan.bytes / 1048576).toFixed(0)} MB`);
+  }
+  // The volumetric clouds. Asked for, although the setting itself is off by default, because with
+  // them missing the switch in the menu is one that turns nothing on and says nothing about why.
+  // Both halves are needed: the per-world measurement (what a sky covers and how dark it is, which
+  // is in the client's art) and the noise volumes (which are ours and the same on every world).
+  {
+    const skyWorlds = GAME_PLANETS.filter((p) => existsSync(join(dir, p, 'sky.json')));
+    const measured = skyWorlds.filter((p) => existsSync(join(dir, p, 'clouds.json')));
+    const noise = readQuiet(join(dir, 'clouds', 'manifest.json'));
+    const volumes = noise?.format === 1 && existsSync(join(dir, 'clouds', noise.base?.file ?? '')) && existsSync(join(dir, 'clouds', noise.detail?.file ?? ''));
+    if (!skyWorlds.length) console.log('  clouds: none yet, and none asked for until a world has a sky');
+    else if (!volumes) need(`clouds ${dir}`, 'the volumetric clouds have no noise to march through (clouds/)');
+    else if (measured.length < skyWorlds.length) need(`clouds ${dir}`, `worlds whose sky has not been measured (${skyWorlds.filter((p) => !measured.includes(p)).join(', ')})`);
+    else console.log(`  clouds: ${measured.length} worlds measured, and the volumes the march reads`);
   }
   const galaxyLine = galaxyStatus(readQuiet(join(dir, 'galaxy.json')));
   console.log(`  ${galaxyLine.line}`);

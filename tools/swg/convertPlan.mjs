@@ -162,6 +162,20 @@ export const STEP_FACTS = {
   // planets' places on top of it were measured with one pack in place and are the part of the
   // figure below that is reasoned rather than watched.
   sounds: { order: 34, lock: 'sounds', needs: ['ships', 'species', 'parts', 'clips-apply', 'player', 'snapshot'], seconds: 120, bytes: 0.7 * GB, measured: 'the bank: 7.6 s, 425 MB, 865 MB written; with one planet\'s places: 5.4 s, 510 MB' },
+
+  // The last two read the finished packs and open no archive at all, so they mount nothing -- which
+  // is why both are quick and hold so little for what they get through. Neither carries a planet on
+  // its command line, so neither has a SCOPE_ARG entry and each holds `pack:*`; that is what they
+  // want, since each reads every converted world in one run.
+  //
+  // The places the creation and selection screens stand a character in. It reads each pack's
+  // layout, manifest and models, writes only under <out>/scenes, and never touches a pack, so it
+  // waits for the snapshot alone; a world converted since is what `status` calls a stale place.
+  scenes: { order: 40, lock: 'pack', locks: ['scenes'], needs: ['snapshot'], seconds: 60, bytes: 0.5 * GB, measured: 'twelve worlds: 23.0 s, 228 MB, 911 MB of pack read down to 357 MB written' },
+  // What each world's sky is really like, measured off the cloud sheets the client drew it with,
+  // and the two noise volumes the volumetric march reads. Almost all of the time is the volumes:
+  // eight megabytes of noise on one core, the same on every world and written once.
+  clouds: { order: 41, lock: 'pack', locks: ['clouds'], needs: ['sky'], seconds: 30, bytes: 0.4 * GB, measured: 'eighteen worlds and the volumes: 9.1 s, 90 MB, 8.1 MB written' },
 };
 
 // Which commands carry the planet (or the zone) they write, and **where** on their own command

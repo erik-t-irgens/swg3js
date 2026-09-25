@@ -70,7 +70,18 @@ export const CLOUD_MARCH = {
   feather: 0.22,
 };
 
-const CLOUD_FRAGMENT = /* glsl */ `
+/**
+ * The march's program, built from the tune.
+ *
+ * Most of these are compile-time constants rather than uniforms on purpose: they are in the inner
+ * loop, several of them twice over, and a shader that reads thirty uniforms per step to draw the
+ * same picture is paying for a knob nobody moves in play. The price is that `__debug.clouds` rebuilds
+ * the program when one of them is moved, which is one compile on a console line and no cost at all
+ * to a frame nobody is tuning. The numbers that *are* uniforms (the slab, the step counts, the
+ * look and the drift) are the ones the world moves every frame.
+ */
+function cloudFragment(): string {
+  return /* glsl */ `
 precision highp float;
 precision highp sampler3D;
 varying vec2 vUv;
@@ -86,8 +97,10 @@ uniform vec3 uSunColor;
 uniform vec3 uAmbient;
 uniform vec3 uFogColor;
 uniform float uFogDensity;
-/** x coverage cut on the billow, y brightness, z decks, w drift in metres. */
-uniform vec4 uLook;
+/** x coverage cut on the billow, y brightness, z decks. */
+uniform vec3 uLook;
+/** Where the volume is sampled from, in metres per second of world x and z. */
+uniform vec2 uDrift;
 uniform float uTime;
 uniform vec2 uSlab;
 uniform float uSteps;
@@ -129,7 +142,7 @@ float profile(float h, float decks) {
 
 /** How much cloud is at a point: the shape, cut to the coverage, then eaten by the detail. */
 float densityAt(vec3 p, float h, float cheap) {
-  vec3 drift = vec3(uLook.w * uTime, 0.0, uLook.w * uTime * 0.35);
+  vec3 drift = vec3(uDrift.x * uTime, 0.0, uDrift.y * uTime);
   vec4 base = texture(uBase, (p + drift) / BASE_SCALE);
   // The billow, cut where the world's own coverage says. The cut is calibrated against the volume.
   float shape = (base.r - uLook.x) / max(1e-3, 1.0 - uLook.x);
@@ -206,6 +219,7 @@ void main() {
   gl_FragColor = vec4(scattered, transmittance);
 }
 `;
+}
 
 const COMPOSITE_FRAGMENT = /* glsl */ `
 precision highp float;
@@ -254,15 +268,20 @@ export class CloudsPass implements FxPass {
   private base: THREE.Data3DTexture | null = null;
   private detail: THREE.Data3DTexture | null = null;
   private billow = { lo: 0.576, hi: 0.898 };
-  /** What the world is asking for this frame, written by the game and read here. */
-  look = { coverage: 0, brightness: 1, decks: 1, drift: 0, on: false };
+  /**
+   * What the world is asking for this frame, written by the game and read here. `coverage`,
+   * `brightness` and `decks` are the world's own art (`cloudLook`); `drift` is the weather's wind in
+   * metres a second and `heading` the way it blows. There is no switch of its own here: the setting
+   * is the runner's, and a coverage of 0 is how the world says it has no cloud to draw.
+   */
+  look = { coverage: 0, brightness: 1, decks: 1, drift: 0, heading: 0 };
   /** For the console: what the last frame really did. */
   last = { drew: false, coverage: 0, cut: 0, steps: 0, size: [0, 0] as [number, number] };
 
   constructor() {
     this.marchMat = new THREE.ShaderMaterial({
       vertexShader: FX_FULLSCREEN_VERTEX,
-      fragmentShader: CLOUD_FRAGMENT,
+      fragmentShader: cloudFragment(),
       depthTest: false,
       depthWrite: false,
       uniforms: {
@@ -278,7 +297,8 @@ export class CloudsPass implements FxPass {
         uAmbient: { value: new THREE.Color(0.3, 0.35, 0.4) },
         uFogColor: { value: new THREE.Color(0.6, 0.7, 0.8) },
         uFogDensity: { value: 0 },
-        uLook: { value: new THREE.Vector4(0.9, 1, 1, 0) },
+        uLook: { value: new THREE.Vector3(0.9, 1, 1) },
+        uDrift: { value: new THREE.Vector2() },
         uTime: { value: 0 },
         uSlab: { value: new THREE.Vector2(CLOUD_MARCH.bottom, CLOUD_MARCH.top) },
         uSteps: { value: CLOUD_MARCH.steps },
@@ -320,10 +340,28 @@ export class CloudsPass implements FxPass {
     return this.base !== null;
   }
 
-  enabled(ctx: FxFrameContext): boolean {
+  /**
+   * Build the march's program again from `CLOUD_MARCH`, after the console has moved one of the
+   * numbers that is baked into it. One compile, on the next frame that draws.
+   */
+  retune(): void {
+    this.marchMat.fragmentShader = cloudFragment();
+    this.marchMat.needsUpdate = true;
+  }
+
+  /**
+   * What `enabled` asks, without needing a frame: the game reads it to know whether to take the flat
+   * sheets down, which it must decide before the scene is drawn and so before there is a context.
+   */
+  wouldDraw(space: boolean, inside: boolean): boolean {
     // No volume, nothing to march. In space there is no sky to put cloud in, and indoors the march
     // would be stopped by the ceiling on every pixel, which is fill spent to draw nothing.
-    return this.base !== null && this.look.on && this.look.coverage > 0 && !ctx.space && !ctx.inside;
+    return this.base !== null && this.look.coverage > 0 && !space && !inside;
+  }
+
+  enabled(ctx: FxFrameContext): boolean {
+    // The setting itself is the runner's: the registry ties this pass to `volumetricClouds`.
+    return this.wouldDraw(ctx.space, ctx.inside);
   }
 
   needs(): readonly FxProductId[] {
@@ -374,7 +412,11 @@ export class CloudsPass implements FxPass {
     // on a world whose ground climbs a kilometre.
     (u.uSlab.value as THREE.Vector2).set(cam.position.y + CLOUD_MARCH.bottom, cam.position.y + CLOUD_MARCH.top);
     const cut = billowCutLocal(this.look.coverage, this.billow);
-    (u.uLook.value as THREE.Vector4).set(cut, this.look.brightness, this.look.decks, this.look.drift);
+    (u.uLook.value as THREE.Vector3).set(cut, this.look.brightness, this.look.decks);
+    // The volume is sampled at `p + drift`, so a feature moves the other way: the sign here is what
+    // makes the cloud blow *toward* the wind's heading, the way the rain leans and the dust does
+    // (heading 0 is +Z turning toward +X, which is `driftScroll`'s own convention).
+    (u.uDrift.value as THREE.Vector2).set(-Math.sin(this.look.heading) * this.look.drift, -Math.cos(this.look.heading) * this.look.drift);
     this.time += ctx.dt;
     u.uTime.value = this.time;
     u.uDepth.value = ctx.products.linearDepthHalf ?? null;

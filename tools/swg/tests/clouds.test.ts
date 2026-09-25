@@ -207,6 +207,26 @@ function tile(alpha: number, grey: number, size = 16): Buffer {
   ok(/depthWrite: false/.test(src) && !/depthWrite: true/.test(src), 'and writes no depth, which is what keeps a cloud pixel sky to the god rays');
   // The slab rides the camera, or a world whose ground climbs a kilometre has cloud underfoot.
   ok(/uSlab\.value as THREE\.Vector2\)\.set\(cam\.position\.y \+/.test(src), "the deck rides the camera's own height rather than sitting at a fixed altitude");
+
+  // The owner asked for the march to stand where the sheets stand, and the sheets to stand down for
+  // it. Both are two files apart, so both are read as text here.
+  const sky = readFileSync(new URL('../../../src/world/sky.ts', import.meta.url), 'utf8');
+  // Read as text rather than imported: `clouds.ts` is a renderer file and pulls three in behind it.
+  const altitudes = /const CLOUD_ALTITUDES = \[(\d+), (\d+)\]/.exec(sky);
+  const slab = /bottom: (\d+),\s*\n\s*top: (\d+),/.exec(src);
+  ok(!!altitudes && !!slab, 'the sky still declares the altitudes its own sheets hang at, and the march its slab');
+  ok(
+    altitudes![1] === slab![1] && altitudes![2] === slab![2],
+    'and the march fills exactly the slab the flat sheets hang in, rather than a deck of its own somewhere else',
+  );
+  ok(/c\.mesh\.visible = this\.sheetsOn && /.test(sky), 'the sheets are taken down by one flag, so the two skies are never drawn at once');
+  // The flare is dimmed by cloud, and it reads the sheets: it must go on reading them while they are
+  // hidden, or switching the march on would make a cloudy noon flare like a clear one.
+  const layers = /cloudLayers\(out: readonly FxCloudLayer\[\]\): number \{[\s\S]*?\n  \}/.exec(sky)?.[0] ?? '';
+  ok(layers.length > 0 && !/mesh\.visible/.test(layers), 'and a hidden sheet is still reported to the lens flare, which is dimmed by cloud rather than by what is drawn');
+
+  // The wind. A cloud must blow the way the rain leans, which is the sign on the drift and nothing else.
+  ok(/uDrift\.value as THREE\.Vector2\)\.set\(-Math\.sin\(this\.look\.heading\)/.test(src), "the volume is sampled against the wind, so the cloud blows toward the heading as the rain and the dust do");
 }
 
 interface CloudLevelish {

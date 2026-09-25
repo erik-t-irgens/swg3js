@@ -20,6 +20,8 @@
 // (`SkyLighting`), which is why Mustafar's red needs no table: the march takes the sun and the
 // ambient the sky is already giving everything else.
 
+import * as THREE from 'three';
+
 /** One weather level of a world, as `clouds.json` records it. */
 export interface CloudLevel {
   level: number;
@@ -80,6 +82,14 @@ export const CLOUD_TUNE = {
   levelLift: 0.15,
   /** Below this coverage nothing is drawn at all, and the pass costs nothing. */
   minCoverage: 0.02,
+  /**
+   * How much driven dust stands the march down.
+   *
+   * A dust storm is the one weather that really fills the view: rain and snow you see the sky
+   * through, and a rainy sky wants its cloud. So this reads the dust alone, and the number is where
+   * a storm has taken the sky over rather than merely started.
+   */
+  standDownDust: 0.5,
 };
 
 const clamp01 = (v: number): number => (v < 0 ? 0 : v > 1 ? 1 : v);
@@ -166,6 +176,46 @@ export async function loadCloudNoise(base = ''): Promise<CloudNoisePack | null> 
   } catch {
     return null;
   }
+}
+
+/**
+ * Fetch the two noise volumes and make the 3D textures the march samples.
+ *
+ * They are raw bytes rather than a picture on purpose: a 128-cube volume is two million texels and
+ * no image format holds three dimensions, so the file is exactly what is uploaded and the manifest
+ * says how to read it. Repeat wrapping, because the volume is sampled over and over across a sky
+ * kilometres wide and it was generated to tile.
+ *
+ * Both are fetched once for the session and shared: they are the same on every world, which is what
+ * lets a travel cost nothing.
+ */
+let volumesOnce: Promise<{ base: THREE.Data3DTexture; detail: THREE.Data3DTexture; billow: BillowRange } | null> | null = null;
+export function loadCloudVolumes(base = ''): Promise<{ base: THREE.Data3DTexture; detail: THREE.Data3DTexture; billow: BillowRange } | null> {
+  volumesOnce ??= (async () => {
+    const man = await loadCloudNoise(base);
+    if (!man) return null;
+    const grab = async (file: string, size: number): Promise<THREE.Data3DTexture | null> => {
+      const res = await fetch(`${base}assets-private/clouds/${file}`);
+      if (!res.ok) return null;
+      const bytes = new Uint8Array(await res.arrayBuffer());
+      if (bytes.length !== size * size * size * 4) return null;
+      const tex = new THREE.Data3DTexture(bytes, size, size, size);
+      tex.format = THREE.RGBAFormat;
+      tex.type = THREE.UnsignedByteType;
+      tex.minFilter = THREE.LinearFilter;
+      tex.magFilter = THREE.LinearFilter;
+      tex.wrapS = THREE.RepeatWrapping;
+      tex.wrapT = THREE.RepeatWrapping;
+      tex.wrapR = THREE.RepeatWrapping;
+      tex.unpackAlignment = 1;
+      tex.needsUpdate = true;
+      return tex;
+    };
+    const [b, d] = await Promise.all([grab(man.base.file, man.base.size), grab(man.detail.file, man.detail.size)]);
+    if (!b || !d) return null;
+    return { base: b, detail: d, billow: man.billow };
+  })();
+  return volumesOnce;
 }
 
 /** A world's measured sky, fetched from its pack. Null when the `clouds` command has not been run. */
