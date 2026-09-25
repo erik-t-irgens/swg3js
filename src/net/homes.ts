@@ -69,6 +69,14 @@ export class Homes {
 
   /** Which world these rows are about, so entering the same one again is told from a change of world. */
   private world = '';
+  /**
+   * Which world load a placing belongs to. A house takes a model load and a compile to go up, and
+   * the world can be torn down and rebuilt in that time -- on a respawn into the same world the
+   * rows survive, so "is it still wanted" cannot answer it, and without this the house would be
+   * marked standing while it was really put into a world that no longer exists and `ready` would
+   * never look at it again.
+   */
+  private age = 0;
 
   /**
    * A world is being loaded. Everything built in the old one went with it, so nothing is standing
@@ -83,6 +91,7 @@ export class Homes {
   enter(world: string): void {
     this.standing.clear();
     this.busy.clear();
+    this.age++;
     if (world !== this.world) {
       this.rows.clear();
       this.world = world;
@@ -161,12 +170,15 @@ export class Homes {
     if (!deps) return;
     this.busy.add(row.id);
     this.rows.set(row.id, row);
+    const age = this.age;
     try {
       // The server's own height, not one measured again here: the ground was tested once, by
       // whoever placed it, and a house has one height whatever browser is looking at it.
       const out = await deps.place(row.model, { at: { x: row.x, z: row.z }, yaw: row.h, key: homeKey(row.id), y: row.y });
-      // Taken down, or the world left, while it was going up.
-      if (!this.rows.has(row.id)) {
+      // Taken down, or the world torn down, while it was going up. Both leave it not standing, and
+      // the second is why the age is checked at all: after a reload into the same world the rows
+      // are still there and wanting it is not the question.
+      if (age !== this.age || !this.rows.has(row.id)) {
         deps.unplace(homeKey(row.id));
         return;
       }

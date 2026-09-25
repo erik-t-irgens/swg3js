@@ -192,6 +192,26 @@ const settle = () => new Promise((r) => setTimeout(r, 0));
 }
 
 {
+  // A world torn down and rebuilt while a house is still going up. The rows survive a reload into
+  // the same world, so "is it still wanted" cannot answer this -- and if it were allowed to count
+  // as standing, it would have been put into a world that no longer exists and nothing would ever
+  // look at it again.
+  const w = world();
+  w.h.enter('tatooine:');
+  w.holdNext();
+  w.h.word({ t: 'homes', world: 'tatooine', rows: [row('h1')] });
+  await settle();
+  w.h.enter('tatooine:');
+  w.release();
+  await settle();
+  ok(w.h.report().standing === 0, 'a house that landed in a world that has since gone is not standing');
+  ok(w.removed.includes(homeKey('h1')), 'and is taken out of wherever it landed');
+  w.h.ready();
+  await settle();
+  ok(w.h.report().standing === 1, 'and the next time the world is ready it goes up properly');
+}
+
+{
   const w = world();
   w.h.enter('tatooine:');
   w.h.word({ t: 'homes', world: 'tatooine', rows: [row('h1')] });
