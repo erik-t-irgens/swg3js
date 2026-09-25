@@ -118,6 +118,7 @@ import { ambientOverrides, lookBounds, spawnDistance } from './world/mobiles/spa
 import { AppearanceUi } from './ui/appearanceUi';
 import { CharacterSelect } from './ui/characterSelect';
 import { CreatorBar } from './ui/creatorBar';
+import { PlaceBar } from './ui/placeBar.ts';
 import { Menu, keyName, onBindingsChanged, notifyBindingsChanged } from './ui/menu';
 import { ShipMenu, type ShipCruise, type ShipStatus } from './ui/shipMenu';
 import { BOARD_TUNE, Docking, boardRow, onPeerHullGone, peerHullGone, peerRooms, setPeerRooms, type BoardState, type CrossSide, type CrossTo, type PeerRooms, type SpotKind } from './space/docking';
@@ -5441,6 +5442,16 @@ class App {
 
   /** Whether the pointer has been wired to the world behind a place; done once and then kept. */
   private placeInputBound = false;
+  /** The creator's row of places and hours; built once and shown only while a place is up. */
+  private readonly placeBar = new PlaceBar(
+    (key) => void this.switchPlace(key),
+    (hour) => {
+      // Only the clock moves. The sky reads it every frame and blends its own rows to it, so an
+      // hour costs nothing at all -- which is the whole reason a place is one camera and a list of
+      // hours rather than a scene per hour.
+      this.world.day.time = hour / 24;
+    },
+  );
   /** The words under the world saying what turns the figure and what moves the view. */
   private readonly placeHint = ((): HTMLElement => {
     const el = document.createElement('div');
@@ -5526,6 +5537,7 @@ class App {
     // weather all load as they always do, since those are what make the hour real.
     this.bindPlaceInput();
     if (!this.placeHint.parentElement) this.ui.appendChild(this.placeHint);
+    if (!this.placeBar.element.parentElement) this.ui.appendChild(this.placeBar.element);
     this.world.sceneOnly = true;
     this.world.load(planetById(where.planet), row.pack);
     const built = await buildPlace(key, {
@@ -6707,7 +6719,10 @@ class App {
     const man = await sceneManifest();
     const first = man?.creator[0];
     if (!first || !this.creating) return;
-    if (await this.showScene(first)) this.enterPlaceLayout(true);
+    if (await this.showScene(first)) {
+      this.enterPlaceLayout(true);
+      this.fillPlaceBar();
+    }
   }
 
   /**
@@ -6722,6 +6737,42 @@ class App {
     this.wardrobe.root.classList.toggle('in-place', on);
     this.appearanceUi.root.classList.toggle('in-place', on);
     this.placeHint.hidden = !on;
+    this.placeBar.element.hidden = !on;
+  }
+
+  /**
+   * Change which place the character is standing in, which is a world load and therefore not free.
+   *
+   * The row goes dead while it runs rather than the one button pressed: a second place asked for
+   * while the first is still building would have two worlds loading over each other, and the second
+   * would finish into a scene the first had already torn down.
+   */
+  private async switchPlace(key: string): Promise<void> {
+    if (!this.creating) return;
+    this.placeBar.setBusy(true);
+    try {
+      if (await this.showScene(key)) this.fillPlaceBar();
+    } finally {
+      this.placeBar.setBusy(false);
+    }
+  }
+
+  /** Tell the row what is offered and what is up, from the manifest and the place that is loaded. */
+  private fillPlaceBar(): void {
+    void sceneManifest().then((man) => {
+      if (!man) return;
+      const offered = man.creator.length ? man.creator : man.places.map((p) => p.key);
+      const s = this.scene3d;
+      this.placeBar.setPlaces(
+        offered.map((key) => {
+          const row = man.places.find((p) => p.key === key);
+          const here = s?.key === key ? s.built.place : null;
+          return { key, place: here?.place ?? null, pack: row?.pack ?? '', hours: here?.hours ?? [] };
+        }),
+        s?.key ?? null,
+      );
+      if (s) this.placeBar.setHour(this.world.day.time * 24);
+    });
   }
 
   private showCreatorTab(tab: 'appearance' | 'wardrobe'): void {
