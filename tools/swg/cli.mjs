@@ -200,6 +200,8 @@ import { readTemplate, stringParam } from './objtemplate.mjs';
 import { statusJson } from './statusplan.mjs';
 /** The shape of deeds.json. A pack written by an older run is asked for again rather than read. */
 const DEED_PACK_VERSION = 1;
+/** The shape of a world's 	ravel.json. A pack written by an older run is asked for again. */
+const TRAVEL_PACK_VERSION = 1;
 import { openTre, openVfs, readHeader } from './tre.mjs';
 
 // A .env beside package.json names the folders once; @NAME anywhere in the arguments becomes that
@@ -5666,6 +5668,53 @@ switch (cmd) {
     }
     break;
   }
+  case 'travel': {
+    // <out-dir> [--core3=<dir>]: where the travel terminals, the ticket collectors and the shuttles
+    // really stood, written into each converted world's own pack as `travel.json`.
+    //
+    // None of the three is in a world snapshot -- Corellia's places 413 terminals and not one
+    // travel terminal, because travel was the server's -- so this reads the owner's own emulator
+    // checkout for the `childObjects` each starport and shuttleport building carries, and joins
+    // them to where this game's own packs place those buildings. It opens no game archive, so it
+    // takes no <swg-dir>; it must run after the worlds. `tools/swg/travel.mjs` says what the two
+    // surprises in the numbers are. Nothing it writes may ever reach the repository.
+    if (!pos[1]) usage();
+    const core3 = options.core3 ?? process.env.CORE3 ?? '';
+    if (!core3 || !existsSync(join(core3, 'object', 'building'))) {
+      console.log(`travel: no emulator scripts folder (--core3=<dir>, or CORE3 in .env); looked at ${core3 || '(nothing)'}`);
+      break;
+    }
+    const T = await import('./travel.mjs');
+    const out = pos[1];
+    const byTemplate = T.readTravelBuildings(core3);
+    console.log(`travel: ${byTemplate.size / 2} building templates carry travel children`);
+    let worlds = 0;
+    let things = 0;
+    for (const dir of readdirSync(out, { withFileTypes: true })) {
+      if (!dir.isDirectory()) continue;
+      const layoutFile = join(out, dir.name, 'layout.json');
+      if (!existsSync(layoutFile)) continue;
+      let layout;
+      try {
+        layout = JSON.parse(readFileSync(layoutFile, 'utf8'));
+      } catch {
+        continue;
+      }
+      const rows = T.placeTravel(layout.objects ?? [], byTemplate);
+      if (!rows.length) continue;
+      const counts = T.travelCounts(rows);
+      writeFileSync(
+        join(out, dir.name, 'travel.json'),
+        JSON.stringify({ version: TRAVEL_PACK_VERSION, planet: layout.planet ?? dir.name, source: { core3: true, note: "the children of each starport and shuttleport building, joined to where this world's own snapshot places them" }, counts, rows }, null, 1),
+      );
+      worlds++;
+      things += rows.length;
+      console.log(`  ${dir.name}: ${counts.terminals} terminals, ${counts.collectors} collectors, ${counts.shuttles} shuttles over ${counts.buildings} kinds of building`);
+    }
+    console.log(`travel: ${things} things over ${worlds} worlds`);
+    break;
+  }
+
   case 'deeds': {
     // <swg-dir> <out-dir> [--core3=<dir>]: the deeds a player buys a building with, and everything
     // needed to put one down -- what each makes, what it is called, the model this game draws it

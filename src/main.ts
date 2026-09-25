@@ -100,6 +100,8 @@ import { ShuttleMenu } from './ui/shuttleMenu.ts';
 import { loadGalaxyFile, planetOfRouteId } from './data/galaxy';
 import { homes } from './net/homes.ts';
 import { creditText, purse } from './net/purse.ts';
+import { TRAVEL_TUNE, canBoard, shuttleAt, shuttleWords, thingAt, travelThingsOf, type Ticket, type TravelRow, type TravelThing } from './world/travelTerminal.ts';
+import { TerminalUi, type TerminalPort } from './ui/terminalUi.ts';
 import { allDeeds, deedById, deedLine, footprintOf, loadDeeds, wrongWorld, type DeedRow } from './world/deeds.ts';
 import { GHOST_TUNE, PlacementGhost, ghostSpot, ghostVerdict, turnBy, wheelReach, type GhostState } from './world/placeGhost.ts';
 import { patchOfFootprint } from './world/housePlace.ts';
@@ -515,6 +517,7 @@ class App {
   private readonly housingUi: HousingUi;
   private readonly placingBar: PlacingBar;
   private readonly shuttleMenu: ShuttleMenu;
+  private readonly terminalUi: TerminalUi;
   /** The shuttle fares, fetched once with the galaxy file; null until it lands, and on a pack that has none. */
   private fares: FareTable | null = null;
   private readonly loadingScreen: LoadingScreen;
@@ -1231,6 +1234,29 @@ class App {
       this.freeMouse(false);
     };
     this.shuttleMenu.onPick = (i) => void this.takeShuttle(i);
+    // The travel terminal: the local map of this world's ports, the galaxy side, and the purchase.
+    this.terminalUi = new TerminalUi(this.ui);
+    this.terminalUi.onClose = () => {
+      this.terminalUi.hide();
+      this.freeMouse(false);
+    };
+    this.terminalUi.onPort = () => this.showTerminal(null);
+    this.terminalUi.onStage = (stage) => {
+      this.terminalStage = stage;
+      if (stage === 'here') this.terminalWorld = '';
+      this.showTerminal(null);
+    };
+    this.terminalUi.onWorld = (pack) => {
+      // Picking a world fetches its own places, then shows them on its own map: a ticket names a
+      // port and not a planet, which is what the game did and what makes a fare mean something.
+      this.terminalWorld = planetOfRouteId(pack)?.name ?? pack;
+      void this.poisOf(pack).then((rows) => {
+        this.terminalThere = { pack, ports: rows };
+        this.terminalStage = 'there';
+        this.showTerminal(null);
+      });
+    };
+    this.terminalUi.onBuy = () => this.buyTicket();
     // Housing: the deeds a character owns, and the ghost of a building being put down.
     this.housingUi = new HousingUi(this.ui);
     this.housingUi.onTab = (id) => this.toggleInventory(id as InventoryTab);
@@ -1384,6 +1410,7 @@ class App {
     draggable(this.hyperspaceUi.root, '.ship-panel', '.ship-header', 'hyperspace');
     draggable(this.liftMenu.root, '.ship-panel', '.ship-header', 'lift');
     draggable(this.shuttleMenu.root, '.ship-panel', '.ship-header', 'shuttle');
+    draggable(this.terminalUi.root, '.ship-panel', '.ship-header', 'terminal');
     for (const [id, ui] of [['wardrobe', this.wardrobe], ['weapons', this.weaponsUi], ['garage', this.vehiclesUi], ['npcs', this.npcUi], ['appearance', this.appearanceUi], ['backpack', this.backpack], ['shipedit', this.shipEdit], ['force', this.forceUi]] as const) draggable(ui.root, '.wardrobe-panel', '.wardrobe-header', id);
     // Console hooks for driving the game from tests: window.__debug.teleport(x, z, yaw), .look(yaw, pitch), .cell().
     (window as unknown as { __debug: unknown }).__debug = {
@@ -1526,7 +1553,7 @@ class App {
        * try one without walking there; `{ take: 2 }` takes the ride the panel would number 2; and
        * `{ tune: { reach } }` moves how near you have to stand, which is the one number of ours.
        */
-      shuttle: (opts: { go?: boolean; take?: number; tune?: Partial<typeof SHUTTLE_TUNE> } = {}) => {
+      shuttle: (opts: { go?: boolean; take?: number; list?: boolean; tune?: Partial<typeof SHUTTLE_TUNE> } = {}) => {
         if (opts.tune) Object.assign(SHUTTLE_TUNE, opts.tune);
         const ports = this.portsHere();
         const at = this.player.worldPos;
@@ -1534,9 +1561,13 @@ class App {
         if (opts.go && near.length) {
           const t = near[0];
           this.player.reset(new THREE.Vector3(t.x, this.world.terrain.heightAt(t.x, t.z) + 0.3, t.z));
-          return { went: t.name, note: 'press E, or call this again to see what it offers' };
+          return { went: t.name, note: 'press E at a terminal inside, or call this again to see what the port offers' };
         }
         const here = this.portHere();
+        if (opts.list && here) {
+          this.showShuttleList(here);
+          return { showing: here.name };
+        }
         const rides = here ? this.ridesHere(here) : [];
         if (typeof opts.take === 'number' && here) {
           this.shuttleFrom = { port: here, rides };
@@ -1614,6 +1645,50 @@ class App {
         if (opts.ask) purse.ask();
         if (typeof opts.give === 'number') purse.give(opts.give);
         return { ...purse.report(), reads: creditText(purse.credits) };
+      },
+      /**
+       * The travel terminals, the ticket collectors and the shuttles of this world.
+       *
+       * `__debug.terminal()` reports every one of them, which you are standing at, and where each
+       * port's shuttle is in its round; `{ go: true }` puts you at the nearest terminal, which is
+       * how to try one without finding a starport first; `{ open: true }` opens the window as E
+       * does; `{ tune: { every, waits } }` moves the timetable, every number of which is ours.
+       */
+      terminal: (opts: { go?: boolean; open?: boolean; tune?: Partial<typeof TRAVEL_TUNE> } = {}) => {
+        if (opts.tune) Object.assign(TRAVEL_TUNE, opts.tune);
+        const things = this.travelThings();
+        const here = packIdOf(this.world.planet, this.zone);
+        const at = this.player.worldPos;
+        const near = things
+          .filter((t) => t.kind !== 'shuttle')
+          .map((t) => ({ t, d: Math.hypot(t.bx - at.x, t.bz - at.z) }))
+          .sort((a, b) => a.d - b.d);
+        if (opts.go && near.length) {
+          const t = near[0].t;
+          // A terminal indoors is in the building's own frame; the building's place is what a walker
+          // can be put at, and the door is what they walk through from there.
+          this.player.reset(new THREE.Vector3(t.bx, this.world.terrain.heightAt(t.bx, t.bz) + 0.3, t.bz));
+          return { went: t.kind, at: { x: Math.round(t.bx), z: Math.round(t.bz) }, note: t.cell > 0 ? 'its terminal is inside: walk in and press E' : 'press E' };
+        }
+        if (opts.open) {
+          const used = this.handleTravel();
+          if (!used) return { error: 'nothing to use here: stand at a terminal or a collector' };
+          return { opened: true };
+        }
+        const seconds = sharedClock.walkSeconds();
+        const ports = this.portsHere().slice(0, 6);
+        return {
+          rows: this.travelRowsFor === here ? this.travelRows.length : 0,
+          terminals: things.filter((t) => t.kind === 'terminal').length,
+          collectors: things.filter((t) => t.kind === 'collector').length,
+          at: this.travelHere()?.kind ?? null,
+          ticket: this.ticket ? `${this.ticket.to} (${creditText(this.ticket.price)})` : null,
+          credits: creditText(purse.credits),
+          shuttles: ports.map((p) => `${p.name}: ${shuttleWords(shuttleAt(`${here}|${p.name}`, seconds))}`),
+          nearest: near.slice(0, 3).map((n) => ({ kind: n.t.kind, away: Math.round(n.d), cell: n.t.cell })),
+          note: this.travelRowsFor === here && !this.travelRows.length ? 'no travel.json for this world: npm run swg -- travel assets-private (with your emulator checkout), then reload' : '',
+          tune: { ...TRAVEL_TUNE },
+        };
       },
       /** What is built on the world you are standing on, whose each one is, and what the server last said. */
       homes: () => {
@@ -6369,12 +6444,14 @@ class App {
           this.promptDoorless = doorless ? doorless.label : '';
         }
       }
-      // A port is gathered whatever else is beside you, and the bar's own chain decides which of the
-      // four that want this key shows: put in the else above, a doorless building near a starport
-      // would hide the shuttle rather than merely outranking it.
-      const port = !room ? this.portHere() : null;
-      s.shuttle = !!port;
-      this.promptShuttle = port ? port.name : '';
+      // The travel terminal, and the ticket collector outside it. A terminal is a **thing** you use
+      // and not a place you stand in: E is a general use key, and a forty-metre circle round a
+      // starport is not something you use. It is gathered whatever else is beside you and the bar's
+      // own chain decides which of the things that want this key shows, since put in the else above
+      // a doorway near a starport would hide the terminal rather than merely outranking it.
+      const use = this.travelHere();
+      s.shuttle = !!use;
+      this.promptShuttle = use ? (use.kind === 'terminal' ? 'the travel terminal' : 'the shuttle') : '';
     }
     const flown = p.mounted ?? p.piloting;
     if (flown) {
@@ -7503,6 +7580,8 @@ class App {
       // said is built here was refused for having nowhere to go, and this is where it is tried
       // again. A world with nothing built on it does nothing at all.
       homes.ready();
+      // The travel terminals, the collectors and the shuttles of this world.
+      void this.loadTravel(packIdOf(planet, this.zone));
       // What this character has to spend: asked for on arriving, so the shuttle panel has a number
       // to show rather than a blank the first time it is opened.
       purse.ask();
@@ -9159,7 +9238,7 @@ class App {
     return this.portsCache.ports;
   }
 
-  /** The port the player is standing at, on foot in the world and nowhere else. */
+  /** The port the player is standing at, which is what a terminal belongs to and what a fare is from. */
   private portHere(): Port | null {
     const p = this.player;
     if (p.mounted || p.piloting || p.aboard || p.eva || p.noclip || this.traveling || this.dying) return null;
@@ -9168,6 +9247,99 @@ class App {
     if (!ports.length) return null;
     const at = p.worldPos;
     return portAt(ports, { x: at.x, z: at.z });
+  }
+
+  /**
+   * A world's travel terminals, collectors and shuttles, out of its own pack.
+   *
+   * A world with no `travel.json` has none, which is every world until the converter's `travel`
+   * command has been run and is exactly how the game was before this existed: no terminal, and the
+   * developer's own shuttle list is the only way about.
+   */
+  private async loadTravel(pack: string): Promise<void> {
+    if (this.travelRowsFor === pack) return;
+    this.travelRowsFor = pack;
+    this.travelRows = [];
+    this.travelCache = { key: '', things: [] };
+    try {
+      const res = await fetch(`${import.meta.env.BASE_URL}assets-private/${pack}/travel.json`);
+      if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json')) return;
+      const data = (await res.json()) as { version?: number; rows?: TravelRow[] };
+      if (data.version !== 1 || !Array.isArray(data.rows)) return;
+      if (this.travelRowsFor !== pack) return;
+      this.travelRows = data.rows;
+      this.travelCache = { key: '', things: [] };
+    } catch {
+      /* a world with no travel pack simply has no terminals */
+    }
+  }
+
+  /** This world's travel terminals, collectors and shuttles, kept while the pack and the centre hold. */
+  private travelCache: { key: string; things: TravelThing[] } = { key: '', things: [] };
+
+  private travelThings(): TravelThing[] {
+    const c = this.world.layoutCenter;
+    const pack = packIdOf(this.world.planet, this.zone);
+    if (!c) return [];
+    const key = `${pack}|${c.x},${c.z}|${this.travelRowsFor === pack ? this.travelRows.length : -1}`;
+    if (this.travelCache.key !== key) this.travelCache = { key, things: this.travelRowsFor === pack ? travelThingsOf(this.travelRows, c) : [] };
+    return this.travelCache.things;
+  }
+
+  /** The world's travel rows as the pack carries them, and which pack they are for. */
+  private travelRows: TravelRow[] = [];
+  private travelRowsFor = '';
+
+  /**
+   * The travel terminal or ticket collector the player is standing at, or null.
+   *
+   * A terminal stands **in a room**, so what is asked for is the room the streamer already tracks
+   * for the player rather than a point: two starports on one world are the same building and their
+   * terminals carry identical numbers, so without the room a player in one would reach the other's.
+   */
+  private travelHere(): TravelThing | null {
+    const p = this.player;
+    if (p.mounted || p.piloting || p.aboard || p.eva || p.noclip || this.traveling || this.dying) return null;
+    if (this.world.planet.space) return null;
+    const things = this.travelThings();
+    if (!things.length) return null;
+    const at = p.worldPos;
+    const cell = this.world.cellState;
+    const room = cell ? { building: cell.building.template, cell: cell.cell } : null;
+    return thingAt(things, { x: p.pos.x, y: p.pos.y, z: p.pos.z }, room, 'terminal') ?? thingAt(things, { x: at.x, y: at.y, z: at.z }, null, 'collector');
+  }
+
+  /** E at a travel terminal, or at the collector outside it. */
+  private handleTravel(): boolean {
+    const thing = this.travelHere();
+    if (!thing) return false;
+    if (thing.kind === 'collector') {
+      this.boardShuttle(thing);
+      return true;
+    }
+    const port = this.portOfBuilding(thing);
+    this.terminalStage = 'here';
+    this.terminalWorld = '';
+    this.closePanels();
+    this.map.hide();
+    this.showTerminal(port);
+    this.freeMouse(true);
+    return true;
+  }
+
+  /** Which port a terminal belongs to: the one nearest the building it stands in. */
+  private portOfBuilding(thing: TravelThing): Port | null {
+    let best: Port | null = null;
+    let bestD = Infinity;
+    for (const p of this.portsHere()) {
+      const d = Math.hypot(p.x - thing.bx, p.z - thing.bz);
+      if (d >= bestD) continue;
+      bestD = d;
+      best = p;
+    }
+    // A terminal well away from any port this world names is still a terminal; it simply has no
+    // name of its own, and the panel says where it is instead.
+    return bestD <= 200 ? best : null;
   }
 
   /** Where a shuttle from `port` will take you, with the game's own fares. */
@@ -9179,31 +9351,23 @@ class App {
   }
 
   /**
-   * E at a starport or a shuttleport: the panel of where a shuttle goes and what it costs.
-   *
-   * It sits between the elevator and the zone gate in the key's order, which is the order the bar
-   * itself shows them in (`promptRules`, pinned by its own test): a lift shaft, an elevator and a
-   * doorway are underfoot and keep the key, while a speeder parked at the port does not -- the port
-   * is where you are standing, exactly as a doorway you are in is.
+   * The rides a port offers, shown as a plain list. It is the developer's way in (`__debug.shuttle`)
+   * and not a way a player travels: a player uses a terminal, buys a ticket and hands it to the
+   * collector, which is the game's own arrangement and what `handleTravel` does.
    */
-  private handleShuttle(): boolean {
-    const port = this.portHere();
-    if (!port) return false;
+  private showShuttleList(port: Port): void {
     const rides = this.ridesHere(port);
     this.shuttleFrom = { port, rides };
     this.closePanels();
     this.map.hide();
     this.shuttleMenu.show(
       port.name,
-      // Nothing refuses a ride yet: the fare is shown and not charged until credits exist, and every
-      // destination the rules offer is one this build really has a world for.
       rides.map((r) => ({ label: r.name, fare: fareText(r.price), away: r.away ? `${(r.away / 1000).toFixed(1)} km away` : '', why: '' })),
     );
     this.freeMouse(true);
-    return true;
   }
 
-  /** The port the shuttle menu was opened at, and what it offered. */
+  /** The port the shuttle list was opened at, and what it offered. */
   private shuttleFrom: { port: Port; rides: Ride[] } | null = null;
 
   /**
@@ -9224,6 +9388,158 @@ class App {
       return;
     }
     await this.rideShuttle(ride);
+  }
+
+  // ---- The travel terminal: what it shows, what it sells, and boarding at the collector. ----
+
+  /** Which side of the terminal is showing, and which world was picked on the galaxy side. */
+  private terminalStage: 'here' | 'worlds' | 'there' = 'here';
+  private terminalWorld = '';
+  /** The port the terminal that is open belongs to, which is what a fare is measured from. */
+  private terminalPort: Port | null = null;
+  /** The ports of the world picked on the galaxy side, once fetched. */
+  private terminalThere: { pack: string; ports: Poi[] } = { pack: '', ports: [] };
+  /** The ticket in hand. Nothing carries it across a logout yet, which is said in the panel. */
+  private ticket: Ticket | null = null;
+
+  /** Fill the terminal window for the port it stands in. */
+  private showTerminal(port: Port | null): void {
+    this.terminalPort = port ?? this.terminalPort;
+    const here = packIdOf(this.world.planet, this.zone);
+    const from = this.terminalPort;
+    const fares = this.fares ?? { routes: [], local: {} };
+    const rides = from ? this.ridesHere(from) : [];
+    const worlds = rides
+      .filter((r) => r.kind === 'world')
+      .map((r) => ({ pack: r.pack!, name: r.name, price: r.price, fare: fareText(r.price) }));
+    let ports: TerminalPort[] = [];
+    let mapPack = here;
+    if (this.terminalStage === 'there' && this.terminalThere.pack) {
+      mapPack = this.terminalThere.pack;
+      const price = worlds.find((w) => w.pack === this.terminalThere.pack)?.price ?? 0;
+      ports = this.terminalThere.ports
+        .filter((p) => p.kind === 'starport' || p.kind === 'shuttleport')
+        .map((p) => ({ name: p.name, x: p.x, z: p.z, kind: p.kind as 'starport' | 'shuttleport', price, fare: fareText(price), away: '', why: '' }));
+    } else if (this.terminalStage === 'here') {
+      const local = Math.max(0, Math.round(fares.local?.[here] ?? 0));
+      ports = this.placeNames
+        .filter((p) => p.kind === 'starport' || p.kind === 'shuttleport')
+        .map((p) => ({
+          name: p.name,
+          x: p.x,
+          z: p.z,
+          kind: p.kind as 'starport' | 'shuttleport',
+          price: local,
+          fare: fareText(local),
+          away: from ? `${(Math.hypot(-(p.x - (this.world.layoutCenter?.x ?? 0)) - from.x, p.z - (this.world.layoutCenter?.z ?? 0) - from.z) / 1000).toFixed(1)} km` : '',
+          why: from && p.name === from.name ? 'you are here' : '',
+        }));
+    }
+    void this.terminalMap(mapPack).then((meta) => {
+      if (!this.terminalUi.open && !this.terminalOpening) return;
+      this.terminalOpening = false;
+      this.terminalUi.show({
+        title: from ? from.name : 'this terminal',
+        stage: this.terminalStage,
+        mapUrl: meta?.url ?? null,
+        mapWidth: meta?.width ?? 16384,
+        ports,
+        worlds,
+        picked: this.terminalWorld,
+        credits: `you have ${creditText(purse.credits)}`,
+        note: from ? '' : 'this terminal names no port this world knows, so a fare cannot be worked out',
+        ticket: this.ticket ? `a ticket to ${this.ticket.to}, taken at the collector outside` : '',
+      });
+    });
+    this.terminalOpening = true;
+  }
+
+  /** True while the terminal is being filled for the first time, so a late map still shows it. */
+  private terminalOpening = false;
+
+  /** A world's own map picture and the ground it covers, fetched once per world for the session. */
+  private readonly terminalMaps = new Map<string, Promise<{ url: string; width: number } | null>>();
+
+  private terminalMap(pack: string): Promise<{ url: string; width: number } | null> {
+    let p = this.terminalMaps.get(pack);
+    if (!p) {
+      const base = `${import.meta.env.BASE_URL}assets-private/${pack}/`;
+      p = fetch(`${base}map.json`)
+        .then(async (res) => {
+          if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json')) return null;
+          const meta = (await res.json()) as { image?: string; width?: number };
+          return meta.image ? { url: `${base}${meta.image}`, width: Number(meta.width) || 16384 } : null;
+        })
+        .catch(() => null);
+      this.terminalMaps.set(pack, p);
+    }
+    return p;
+  }
+
+  /** Buy what the terminal has picked: the fare comes out and a ticket goes in hand. */
+  private buyTicket(): void {
+    const name = this.terminalUi.picked;
+    if (!name) return;
+    const here = packIdOf(this.world.planet, this.zone);
+    if (this.terminalStage === 'there' && this.terminalThere.pack) {
+      const price = this.ridesHere(this.terminalPort ?? { name: '', x: 0, z: 0, kind: 'starport' }).find((r) => r.pack === this.terminalThere.pack)?.price ?? 0;
+      purse.spend(price, `a ticket to ${name}`, () => {
+        this.ticket = { from: here, pack: this.terminalThere.pack, to: name, at: null, price, bought: Date.now() };
+        this.messages.system(`a ticket to ${name}: it is taken at the collector outside`);
+        this.terminalUi.hide();
+        this.freeMouse(false);
+      });
+      return;
+    }
+    const row = this.placeNames.find((p) => p.name === name);
+    const c = this.world.layoutCenter;
+    if (!row || !c) return;
+    const price = Math.max(0, Math.round(this.fares?.local?.[here] ?? 0));
+    purse.spend(price, `a ticket to ${name}`, () => {
+      this.ticket = { from: here, pack: here, to: name, at: { x: -(row.x - c.x), z: row.z - c.z }, price, bought: Date.now() };
+      this.messages.system(`a ticket to ${name}: it is taken at the collector outside`);
+      this.terminalUi.hide();
+      this.freeMouse(false);
+    });
+  }
+
+  /**
+   * E at the ticket collector: hand the ticket in and go, but only while a shuttle is really there.
+   *
+   * The shuttle's own clock is the wall clock everybody shares, so two people at one starport watch
+   * the same one land; nothing is sent between them to make that true.
+   */
+  private boardShuttle(collector: TravelThing): void {
+    const here = packIdOf(this.world.planet, this.zone);
+    const port = this.portOfBuilding(collector);
+    const state = shuttleAt(`${here}|${port?.name ?? `${Math.round(collector.bx)},${Math.round(collector.bz)}`}`, sharedClock.walkSeconds());
+    const can = canBoard(this.ticket, here, state);
+    if (!can.ok) {
+      this.messages.system(can.why);
+      return;
+    }
+    const ticket = this.ticket!;
+    this.ticket = null;
+    if (ticket.pack === here && ticket.at) {
+      const row = this.placeNames.find((p) => p.name === ticket.to);
+      if (row) {
+        this.messages.system(`the shuttle to ${ticket.to}`);
+        void this.teleport(this.world.planet, row, this.zone);
+        return;
+      }
+    }
+    const dest = planetOfRouteId(ticket.pack);
+    if (!dest) {
+      this.messages.system(`this build has no world for ${ticket.pack}`);
+      return;
+    }
+    const zone = dest.zones?.find((z) => z.pack === ticket.pack)?.id;
+    this.messages.system(`the shuttle to ${dest.name}`);
+    void this.poisOf(ticket.pack).then((rows) => {
+      const land = rows.find((r) => r.name === ticket.to) ?? landingOn(rows);
+      if (land) void this.teleport(dest, land, zone);
+      else void this.travel(dest, zone);
+    });
   }
 
   /** The journey itself, once the fare is paid. */
@@ -9382,7 +9698,7 @@ class App {
 
   /** The panels' open state moved to the tabs: closing one panel of a pair and opening the other keeps the mouse free. */
   private anyPanelOpen(): boolean {
-    return this.backpack.open || this.wardrobe.open || this.appearanceUi.open || this.weaponsUi.open || this.forceUi.open || this.vehiclesUi.open || this.shipEdit.open || this.npcUi.open || this.shipMenu.open || this.hyperspaceUi.open || this.liftMenu.open || this.shuttleMenu.open || this.housingUi.open || this.menu.open;
+    return this.backpack.open || this.wardrobe.open || this.appearanceUi.open || this.weaponsUi.open || this.forceUi.open || this.vehiclesUi.open || this.shipEdit.open || this.npcUi.open || this.shipMenu.open || this.hyperspaceUi.open || this.liftMenu.open || this.shuttleMenu.open || this.terminalUi.open || this.housingUi.open || this.menu.open;
   }
 
   private jediKit(): JediKit {
@@ -9557,6 +9873,7 @@ class App {
     if (this.shipMenu.open) this.shipMenu.hide();
     if (this.hyperspaceUi.open) this.hyperspaceUi.hide();
     if (this.housingUi.open) this.housingUi.hide();
+    if (this.terminalUi.open) this.terminalUi.hide();
     if (this.liftMenu.open) this.liftMenu.hide();
     if (this.shuttleMenu.open) {
       this.shuttleMenu.hide();
@@ -11233,7 +11550,7 @@ class App {
           // leaving for the select screen and the map's teleport abort the jump first.
           if (input.pressedAction('mount') && !player.noclip) {
             if (!this.hyperspace.locksControls) {
-              if (!this.handleElevator() && !this.handleShuttle() && !this.handleZoneGate()) this.handleMount();
+              if (!this.handleElevator() && !this.handleTravel() && !this.handleZoneGate()) this.handleMount();
             } else this.pressJumpE();
           }
           if (input.pressedAction('noclip') && !player.mounted && !this.hyperspace.locksControls) player.toggleNoclip();

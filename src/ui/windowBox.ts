@@ -59,6 +59,9 @@ export const WINDOW_MIN: Readonly<Record<string, Readonly<Size>>> = Object.freez
   // A shuttle's rows carry a place name and a fare, so it wants more width than a lift's floors and
   // more height: a starport on the busiest world offers eighteen of them.
   shuttle: { w: 460, h: 300 },
+  // The travel terminal carries a world's map beside a list of its ports, so it wants both a width
+  // and a height a picture can be read at.
+  terminal: { w: 640, h: 420 },
   group: { w: 220, h: 150 },
   trade: { w: 520, h: 320 },
 });
