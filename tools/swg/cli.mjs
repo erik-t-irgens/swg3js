@@ -88,6 +88,11 @@
 //                                                                  volumetric march reads (<out-dir>/clouds/, 8 MB, invented and the same on
 //                                                                  every world). It reads converted packs and no archive, so it takes no
 //                                                                  <swg-dir>, and it must run after sky
+//   node tools/swg/cli.mjs spawns <out-dir> [--core3=<dir>]        where the world's creatures and its standing people really were, and every
+//                                                                  creature's own level, health and damage, read out of the owner's emulator
+//                                                                  checkout (CORE3 in .env). It opens no game archive, so it takes no <swg-dir>,
+//                                                                  and it must run after the worlds and after mobiles. Writes <pack>/spawns.json
+//                                                                  per world and <out-dir>/spawns/manifest.json for the fleet
 //   node tools/swg/cli.mjs sandbox <swg-dir> <out-dir> [--seed=N]   a made-up system to fly in, 250 km across, as <out-dir>/space_sandbox:
 //                                                                  a sun and a sky borrowed from a converted zone, four to six planets with real
 //                                                                  places you can fly to, asteroid fields and three jump points; nothing in it
@@ -5655,6 +5660,133 @@ switch (cmd) {
       const reach = cover.filter((c) => c.sky > 0);
       console.log(`clouds: noise volumes written (${(base.length / 1048576).toFixed(1)} MB + ${(detail.length / 1024).toFixed(0)} KB) in ${((Date.now() - t0) / 1000).toFixed(0)}s; the billow lies between ${billow.lo} and ${billow.hi}, and a cut of ${reach.length ? reach[0].cut : '-'} to ${reach.length ? reach[reach.length - 1].cut : '-'} covers ${reach.length ? `${Math.round(reach[0].sky * 100)}% down to ${Math.round(reach[reach.length - 1].sky * 100)}%` : 'nothing'} of the sky`);
     }
+    break;
+  }
+  case 'spawns': {
+    // <out-dir> [--core3=<dir>]: where the world's creatures and its standing people really were,
+    // read out of the owner's own emulator checkout. It opens no game archive, so it takes no
+    // <swg-dir> and nothing about `--retail-only` applies to it; it must run after the worlds and
+    // after `mobiles`, since it joins what the server named to the models this game has.
+    //
+    // **Nothing it writes may ever reach the repository.** The checkout is a third-party project
+    // under its own licence: this reads its data, never its code, and everything written here lands
+    // in the git-ignored output folder exactly as the packs converted from the game's own archives
+    // do. `tools/swg/core3.mjs` says what the four-file chain is and where it is not what it looks
+    // like.
+    if (!pos[1]) usage();
+    const core3 = options.core3 ?? process.env.CORE3 ?? '';
+    if (!core3 || !existsSync(join(core3, 'managers', 'planet'))) {
+      console.log(`spawns: no emulator scripts folder (--core3=<dir>, or CORE3 in .env); looked at ${core3 || '(nothing)'}`);
+      break;
+    }
+    const c3 = await import('./core3.mjs');
+    const started = Date.now();
+    const regions = c3.readRegions(core3);
+    const groups = c3.readSpawnGroups(core3);
+    const lairs = c3.readLairs(core3);
+    const creatures = c3.readCreatures(core3);
+    const { statics, dropped } = c3.readStatics(core3);
+    const catFile = join(pos[1], 'mobiles', 'catalogue.json');
+    if (!existsSync(catFile)) {
+      console.log(`spawns: no mobiles catalogue at ${catFile}; run mobiles first, since every name here has to reach a model`);
+      break;
+    }
+    const cat = JSON.parse(readFileSync(catFile, 'utf8'));
+    const { joined, missing } = c3.joinCatalogue(creatures, cat.entries ?? []);
+
+    // The shared half: the creatures, what each lair stands and what each group may put down. One
+    // copy for the fleet, since a creature is the same animal on every world that has it.
+    const dir = join(pos[1], 'spawns');
+    mkdirSync(dir, { recursive: true });
+    const creatureOut = {};
+    for (const [who, c] of joined) {
+      creatureOut[who] = {
+        id: c.id,
+        level: c.level,
+        hp: c.hp,
+        hpMax: c.hpMax,
+        damage: c.damage,
+        armour: c.armour,
+        xp: c.xp,
+        diet: c.diet.toLowerCase(),
+        kind: c.mob.replace(/^MOB_/, '').toLowerCase(),
+        aggressive: c.aggressive,
+        attackable: c.attackable,
+        herd: c.herd,
+        pack: c.pack,
+        stalker: c.stalker,
+        social: c.social,
+        faction: c.faction,
+        tame: c.tame,
+        ferocity: c.ferocity,
+        hues: c.hues,
+      };
+    }
+    const lairOut = {};
+    for (const [name, l] of lairs) lairOut[name] = { kind: l.kind, mobiles: l.mobiles, cap: l.cap, nest: l.nest };
+    const groupOut = {};
+    for (const [name, g] of groups) groupOut[name] = g;
+    writeFileSync(
+      join(dir, 'manifest.json'),
+      JSON.stringify(
+        {
+          format: 1,
+          source: 'core3',
+          converted: new Date().toISOString(),
+          counts: { creatures: joined.size, unmatched: missing.length, lairs: lairs.size, groups: groups.size },
+          creatures: creatureOut,
+          lairs: lairOut,
+          groups: groupOut,
+          // Named rather than dropped in silence: a creature the server stood that this game has no
+          // body for is a hole in the world, and the only way anybody finds out is if it is written.
+          unmatched: missing.slice(0, 400).map((m) => `${m.who} (${m.template})`),
+        },
+        null,
+        1,
+      ),
+    );
+
+    // The per-world half: the areas, the people who stand still, and the frame measured again.
+    let areas = 0;
+    let people = 0;
+    let worlds = 0;
+    const noWorld = [];
+    for (const [world, r] of regions) {
+      const out = join(pos[1], world);
+      if (!existsSync(out)) {
+        noWorld.push(world);
+        continue;
+      }
+      const poiFile = join(out, 'pois.json');
+      const pois = existsSync(poiFile) ? (JSON.parse(readFileSync(poiFile, 'utf8')).pois ?? []) : [];
+      const frame = c3.frameCheck(r.named, pois);
+      const rows = (statics.get(world) ?? []).filter((s) => joined.has(s.who)).map((s) => ({ ...s, id: joined.get(s.who).id }));
+      writeFileSync(
+        join(out, 'spawns.json'),
+        JSON.stringify(
+          {
+            format: 1,
+            source: 'core3',
+            planet: world,
+            frameCheck: frame,
+            counts: { areas: r.spawn.length, noSpawn: r.noSpawn.length, statics: rows.length, staticsDropped: dropped.get(world) ?? 0 },
+            areas: r.spawn,
+            noSpawn: r.noSpawn,
+            statics: rows,
+          },
+          null,
+          1,
+        ),
+      );
+      areas += r.spawn.length;
+      people += rows.length;
+      worlds++;
+      if (frame.reading !== 'as-is' && frame.pairs > 2) console.log(`spawns: ${world} READS MIRRORED (${frame.mirrored} of ${frame.pairs} pairs) — every coordinate in it is wrong`);
+    }
+    console.log(
+      `spawns: ${worlds} worlds, ${areas} spawn areas, ${people} standing people, ${joined.size} creatures with the server's own level, health and damage (${missing.length} named a body we have not got), ${lairs.size} lairs, ${groups.size} groups in ${((Date.now() - started) / 1000).toFixed(1)}s`,
+    );
+    if (noWorld.length) console.log(`spawns: not converted yet, so left out: ${noWorld.join(', ')}`);
     break;
   }
   case 'scenes': {

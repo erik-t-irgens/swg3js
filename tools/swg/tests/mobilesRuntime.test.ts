@@ -851,10 +851,19 @@ function lod(over: Partial<LodInput> = {}): LodInput {
     }
     const jedi = dressed.filter((e) => wantsSaber(e.id));
     ok(jedi.length > 50, `${jedi.length} dressed Jedi, Sith and Inquisitors carry lightsabers`);
-    const protocol = file.entries.find((e) => e.id === '3po_protocol');
-    if (protocol && packJson(protocol)) ok(armed(protocol) === null, 'a protocol droid on the human skeleton holds nothing off the rack');
-    const ig88 = file.entries.find((e) => e.id === 'ig_88');
-    if (ig88 && packJson(ig88)) ok(armed(ig88)?.kind === 'gun', 'IG-88 carries a gun');
+    // **What arms a body is its own animation pack, never its name**, and the two droids below are
+    // the pair that proves it: both are on the same skeleton a stormtrooper uses, and a stormtrooper
+    // gets a rifle, but neither of their packs carries a single weapon role -- the game drew no
+    // aimed, fired or carried pose for either of them -- so the rule gives them nothing. The second
+    // of these used to assert the opposite, from the character's fiction rather than from the data,
+    // and went unnoticed because its pack had not been converted and the check skipped itself.
+    for (const id of ['3po_protocol', 'ig_88']) {
+      const droid = file.entries.find((e) => e.id === id);
+      const json = droid ? packJson(droid) : null;
+      if (!droid || !json) continue;
+      const weaponRoles = Object.keys((json.roles ?? {}) as Record<string, unknown>).filter((r) => /gun|rifle|pistol|carbine|saber|sword|shoot|fire|aim/.test(r));
+      ok(weaponRoles.length === 0 && armed(droid) === null, `${droid.pack} carries no weapon role of any kind, so nothing off the rack is put in its hands`);
+    }
     const wookiees = dressed.filter((e) => /^wookiee/.test(e.species ?? '') && packJson(e) && armed(e)?.kind === 'gun');
     ok(wookiees.length > 20 && wookiees.every((e) => armed(e)!.prefer.includes('bowcaster')), `every one of the ${wookiees.length} armed dressed Wookiees reaches for a bowcaster, whatever its id says`);
   }
