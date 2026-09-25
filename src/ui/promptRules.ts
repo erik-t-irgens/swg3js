@@ -150,6 +150,8 @@ export interface PromptState {
   lift: boolean;
   elevator: '' | 'up' | 'down';
   doorless: boolean;
+  /** Standing at a starport or a shuttleport, with somewhere for a shuttle to take you. */
+  shuttle: boolean;
   /**
    * Standing at one of the gates a world's zones are walked between: 'travel' where the pack names
    * a destination and 'nowhere' where it does not. It carries no place name, deliberately — a cap
@@ -183,6 +185,7 @@ export function newPromptState(): PromptState {
     lift: false,
     elevator: '',
     doorless: false,
+    shuttle: false,
     gate: '',
     boots: false,
     bootsReach: false,
@@ -204,6 +207,7 @@ export function resetPromptState(s: PromptState): PromptState {
   s.lift = false;
   s.elevator = '';
   s.doorless = false;
+  s.shuttle = false;
   s.gate = '';
   s.boots = false;
   s.bootsReach = false;
@@ -245,6 +249,9 @@ export const PROMPT_WORDS = Object.freeze({
   up: 'up a level',
   down: 'down a level',
   inside: 'go inside',
+  // A shuttle at a starport or a shuttleport. The cap says what it is, not where it goes: where is a
+  // list of places and fares, which is what the panel is for.
+  shuttle: 'the shuttle',
   // A gate between two of a world's zones. The cap says what happens, never where it goes: the
   // destination is a place name, which is the thing you are looking at, and it is said on the
   // message line as you come to the gate and written in full on the long line.
@@ -391,6 +398,9 @@ export function fillActions(s: PromptState, out: PromptAction[]): number {
   if (s.lift) n = push(out, n, 'mount', W.lift);
   else if (s.elevator) n = push(out, n, 'mount', s.elevator === 'down' ? W.down : W.up);
   else if (s.doorless) n = push(out, n, 'mount', W.inside);
+  // A port is a point forty metres wide and a doorway is underfoot, so the shuttle is the last of
+  // the four to have the key, exactly as the game's own dispatch orders them.
+  else if (s.shuttle) n = push(out, n, 'mount', W.shuttle);
 
   if (s.boots) {
     // The boots hold a surface out in space: a ship beside you is climbed into, otherwise they come off.

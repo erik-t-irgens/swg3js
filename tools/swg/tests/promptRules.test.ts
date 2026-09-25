@@ -160,6 +160,25 @@ const fill = (s: ReturnType<typeof newPromptState>) => fillActions(s, slots);
 }
 
 {
+  const n = fill(at({ shuttle: true }));
+  ok(n === 1 && words(n)[0] === PROMPT_WORDS.shuttle, 'standing at a starport: the shuttle');
+}
+
+{
+  // A port is a point forty metres wide; a lift shaft, an elevator and a doorway are underfoot. All
+  // four want the same key, and the shuttle is deliberately the last of them to get it.
+  for (const over of [{ lift: true }, { elevator: 'up' as const }, { doorless: true }]) {
+    const n = fill(at({ shuttle: true, ...over }));
+    ok(n === 1 && words(n)[0] !== PROMPT_WORDS.shuttle, `a ${Object.keys(over)[0]} at a starport keeps the key (${show(n).join(', ')})`);
+  }
+  // A speeder parked at the port does **not** take the key, the same way a doorway does not lose it
+  // to one: the port is where you are standing. Pinned here because the game's own dispatch has to
+  // agree with it, and a speeder is the likeliest thing to be parked at a starport.
+  const withSpeeder = fill(at({ shuttle: true, near: 'mount' }));
+  ok(withSpeeder === 1 && words(withSpeeder)[0] === PROMPT_WORDS.shuttle, `a speeder parked at the port: the shuttle keeps the key (${show(withSpeeder).join(', ')})`);
+}
+
+{
   // At one of the gates a world's zones are walked between. The cap says what happens and never
   // where it goes: a place name on a cap would be a label built outside the table below, which the
   // whole-bar check further down would catch, and where it leads is said on the message line.
@@ -245,6 +264,7 @@ const fill = (s: ReturnType<typeof newPromptState>) => fillActions(s, slots);
     ['a lift shaft', { lift: true }, PROMPT_WORDS.lift],
     ['an elevator', { elevator: 'up' as const }, PROMPT_WORDS.up],
     ['a building with no way in', { doorless: true }, PROMPT_WORDS.inside],
+    ['a starport', { shuttle: true }, PROMPT_WORDS.shuttle],
     ['a speeder', { near: 'mount' as const }, PROMPT_WORDS.mount],
     ['a ship with a room', { near: 'board' as const }, PROMPT_WORDS.board],
     ['a ship aboard', { aboard: true }, PROMPT_WORDS.stepOut],

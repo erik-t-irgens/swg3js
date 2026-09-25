@@ -56,6 +56,9 @@ export const WINDOW_MIN: Readonly<Record<string, Readonly<Size>>> = Object.freez
   force: { w: 680, h: 280 },
   menu: { w: 600, h: 360 },
   lift: { w: 340, h: 200 },
+  // A shuttle's rows carry a place name and a fare, so it wants more width than a lift's floors and
+  // more height: a starport on the busiest world offers eighteen of them.
+  shuttle: { w: 460, h: 300 },
   group: { w: 220, h: 150 },
   trade: { w: 520, h: 320 },
 });

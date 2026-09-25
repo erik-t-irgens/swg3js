@@ -95,6 +95,9 @@ import { heatTuning, type HeatProduct } from './core/fx/heat';
 import { wildLife, WILD_TUNE } from './world/wildLife.ts';
 import { standingPeople, PEOPLE_TUNE } from './world/standingPeople.ts';
 import { HOUSE_TUNE } from './world/housePlace.ts';
+import { SHUTTLE_TUNE, fareText, landingOn, portAt, portsOf, ridesFrom, type FareTable, type Port, type Ride } from './world/shuttle.ts';
+import { ShuttleMenu } from './ui/shuttleMenu.ts';
+import { loadGalaxyFile, planetOfRouteId } from './data/galaxy';
 import { homes } from './net/homes.ts';
 import { LAIR_TUNE } from './world/mobiles/lairs.ts';
 import { CLOUD_MARCH, type CloudsPass } from './core/fx/clouds';
@@ -503,6 +506,9 @@ class App {
   /** The same catalogue once it has arrived, for the jump's own reads (null until then). */
   private loadedCatalogue: HyperspaceCatalogue | null = null;
   private readonly liftMenu: LiftMenu;
+  private readonly shuttleMenu: ShuttleMenu;
+  /** The shuttle fares, fetched once with the galaxy file; null until it lands, and on a pack that has none. */
+  private fares: FareTable | null = null;
   private readonly loadingScreen: LoadingScreen;
   private readonly emoteWheel: EmoteWheel;
   /** Playing together: the relay's client and the other players it tells of. */
@@ -657,6 +663,8 @@ class App {
    */
   private promptLiftStops = 0;
   private promptDoorless = '';
+  /** The port the gather found, for the long line, which has room for its name. */
+  private promptShuttle = '';
   /**
    * The gates this world's zones are walked between, pointed at the pack by `arrive` and by the
    * jump's own crossing, and the clock that keeps a fight out of them. A world with no gates.json
@@ -1207,6 +1215,14 @@ class App {
       this.freeMouse(false);
     };
     this.liftMenu.onPick = (i) => this.rideLift(i);
+    // The shuttle menu: E at a starport or a shuttleport lists where it goes and what the game charged.
+    this.shuttleMenu = new ShuttleMenu(this.ui);
+    this.shuttleMenu.onClose = () => {
+      this.shuttleMenu.hide();
+      this.shuttleFrom = null;
+      this.freeMouse(false);
+    };
+    this.shuttleMenu.onPick = (i) => void this.takeShuttle(i);
     this.npcUi = new NpcUi(this.ui);
     this.appearanceUi = new AppearanceUi(this.ui, () => this.saveAppearance());
     this.appearanceUi.onTab = (id) => this.toggleInventory(id as InventoryTab);
@@ -1262,6 +1278,12 @@ class App {
     // The galaxy tab keeps a world's named places once it has read them; the death card reads the
     // same list through this rather than reaching into the map.
     this.poisOf = (id) => galaxy.loadPois(id);
+    // The shuttle fares: the game's own, out of the same file the galaxy map draws its routes from,
+    // fetched once for the session. A pack with no file leaves them null and a port then moves you
+    // about its own world for nothing rather than offering no ride at all.
+    void loadGalaxyFile(import.meta.env.BASE_URL).then((file) => {
+      if (file) this.fares = { routes: file.routes ?? [], local: file.local ?? {} };
+    });
     // The map window: the world here (the planet's own map, or the space zone in three axes) and the galaxy to travel.
     this.map = new MapUi(this.ui, galaxy, {
       here: () => {
@@ -1339,6 +1361,7 @@ class App {
     draggable(this.shipMenu.root, '.ship-panel', '.ship-header', 'ship');
     draggable(this.hyperspaceUi.root, '.ship-panel', '.ship-header', 'hyperspace');
     draggable(this.liftMenu.root, '.ship-panel', '.ship-header', 'lift');
+    draggable(this.shuttleMenu.root, '.ship-panel', '.ship-header', 'shuttle');
     for (const [id, ui] of [['wardrobe', this.wardrobe], ['weapons', this.weaponsUi], ['garage', this.vehiclesUi], ['npcs', this.npcUi], ['appearance', this.appearanceUi], ['backpack', this.backpack], ['shipedit', this.shipEdit], ['force', this.forceUi]] as const) draggable(ui.root, '.wardrobe-panel', '.wardrobe-header', id);
     // Console hooks for driving the game from tests: window.__debug.teleport(x, z, yaw), .look(yaw, pitch), .cell().
     (window as unknown as { __debug: unknown }).__debug = {
@@ -1471,6 +1494,42 @@ class App {
         const rooms = (pack.find(model)?.cells?.length ?? 0) > 1;
         const stood = out.building ? 'placed, with rooms' : rooms ? 'placed; its rooms come with its size tier' : 'placed, no rooms';
         return { ...out, building: out.ok ? stood : null, tune: { ...HOUSE_TUNE } };
+      },
+      /**
+       * The shuttles: every port on this world, which one you are standing at, and where a shuttle
+       * from it would take you at what fare.
+       *
+       * `__debug.shuttle()` reports; `{ go: true }` puts you at the nearest port, which is how to
+       * try one without walking there; `{ take: 2 }` takes the ride the panel would number 2; and
+       * `{ tune: { reach } }` moves how near you have to stand, which is the one number of ours.
+       */
+      shuttle: (opts: { go?: boolean; take?: number; tune?: Partial<typeof SHUTTLE_TUNE> } = {}) => {
+        if (opts.tune) Object.assign(SHUTTLE_TUNE, opts.tune);
+        const ports = this.portsHere();
+        const at = this.player.worldPos;
+        const near = [...ports].sort((a, b) => Math.hypot(a.x - at.x, a.z - at.z) - Math.hypot(b.x - at.x, b.z - at.z));
+        if (opts.go && near.length) {
+          const t = near[0];
+          this.player.reset(new THREE.Vector3(t.x, this.world.terrain.heightAt(t.x, t.z) + 0.3, t.z));
+          return { went: t.name, note: 'press E, or call this again to see what it offers' };
+        }
+        const here = this.portHere();
+        const rides = here ? this.ridesHere(here) : [];
+        if (typeof opts.take === 'number' && here) {
+          this.shuttleFrom = { port: here, rides };
+          const ride = rides[opts.take - 1];
+          if (!ride) return { error: `there is no ride ${opts.take} from ${here.name}`, rides: rides.map((r, i) => `${i + 1}. ${r.name}`) };
+          void this.takeShuttle(opts.take - 1);
+          return { taking: ride.name, fare: fareText(ride.price) };
+        }
+        return {
+          fares: this.fares ? `${this.fares.routes.length} routes between worlds` : 'no galaxy.json: local rides only, free',
+          ports: ports.length,
+          at: here ? here.name : null,
+          nearest: near.slice(0, 3).map((t) => ({ name: t.name, kind: t.kind, away: Math.round(Math.hypot(t.x - at.x, t.z - at.z)) })),
+          rides: rides.map((r, i) => `${i + 1}. ${r.name} — ${fareText(r.price)}${r.away ? ` (${(r.away / 1000).toFixed(1)} km)` : ''}`),
+          tune: { ...SHUTTLE_TUNE },
+        };
       },
       /** What is built on the world you are standing on, whose each one is, and what the server last said. */
       homes: () => {
@@ -5920,6 +5979,7 @@ class App {
     this.promptClock = 0;
     this.promptLiftStops = 0;
     this.promptDoorless = '';
+    this.promptShuttle = '';
     this.promptGate = '';
     this.zoneGates.clear();
     this.showBodyBlock(true);
@@ -6204,6 +6264,12 @@ class App {
           this.promptDoorless = doorless ? doorless.label : '';
         }
       }
+      // A port is gathered whatever else is beside you, and the bar's own chain decides which of the
+      // four that want this key shows: put in the else above, a doorless building near a starport
+      // would hide the shuttle rather than merely outranking it.
+      const port = !room ? this.portHere() : null;
+      s.shuttle = !!port;
+      this.promptShuttle = port ? port.name : '';
     }
     const flown = p.mounted ?? p.piloting;
     if (flown) {
@@ -8957,6 +9023,102 @@ class App {
   }
 
   /**
+   * This world's starports and shuttleports in the world's own frame, kept for as long as the world
+   * and the places behind them are the same two things.
+   *
+   * It is kept rather than worked out because the prompt gather asks for it eight times a second and
+   * it is a walk of every named place on the world; `placeNames` arrives after the world does, so
+   * the key is both the pack and how many places have landed.
+   */
+  private portsCache: { key: string; ports: Port[] } = { key: '', ports: [] };
+
+  private portsHere(): Port[] {
+    const c = this.world.layoutCenter;
+    const pack = packIdOf(this.world.planet, this.zone);
+    if (!c || this.placeNamesFor !== pack) return [];
+    const key = `${pack}|${this.placeNames.length}|${c.x},${c.z}`;
+    if (this.portsCache.key !== key) this.portsCache = { key, ports: portsOf(this.placeNames, c) };
+    return this.portsCache.ports;
+  }
+
+  /** The port the player is standing at, on foot in the world and nowhere else. */
+  private portHere(): Port | null {
+    const p = this.player;
+    if (p.mounted || p.piloting || p.aboard || p.eva || p.noclip || this.traveling || this.dying) return null;
+    if (this.world.planet.space) return null;
+    const ports = this.portsHere();
+    if (!ports.length) return null;
+    const at = p.worldPos;
+    return portAt(ports, { x: at.x, z: at.z });
+  }
+
+  /** Where a shuttle from `port` will take you, with the game's own fares. */
+  private ridesHere(port: Port): Ride[] {
+    const pack = packIdOf(this.world.planet, this.zone);
+    const fares = this.fares;
+    if (!fares) return ridesFrom(port, this.portsHere(), pack, { routes: [], local: {} }, () => null);
+    return ridesFrom(port, this.portsHere(), pack, fares, (id) => planetOfRouteId(id)?.name ?? null);
+  }
+
+  /**
+   * E at a starport or a shuttleport: the panel of where a shuttle goes and what it costs.
+   *
+   * It sits between the elevator and the zone gate in the key's order, which is the order the bar
+   * itself shows them in (`promptRules`, pinned by its own test): a lift shaft, an elevator and a
+   * doorway are underfoot and keep the key, while a speeder parked at the port does not -- the port
+   * is where you are standing, exactly as a doorway you are in is.
+   */
+  private handleShuttle(): boolean {
+    const port = this.portHere();
+    if (!port) return false;
+    const rides = this.ridesHere(port);
+    this.shuttleFrom = { port, rides };
+    this.closePanels();
+    this.map.hide();
+    this.shuttleMenu.show(
+      port.name,
+      // Nothing refuses a ride yet: the fare is shown and not charged until credits exist, and every
+      // destination the rules offer is one this build really has a world for.
+      rides.map((r) => ({ label: r.name, fare: fareText(r.price), away: r.away ? `${(r.away / 1000).toFixed(1)} km away` : '', why: '' })),
+    );
+    this.freeMouse(true);
+    return true;
+  }
+
+  /** The port the shuttle menu was opened at, and what it offered. */
+  private shuttleFrom: { port: Port; rides: Ride[] } | null = null;
+
+  /**
+   * Take a shuttle. A ride on this world is the map's own teleport to that place; a ride off it is
+   * the same call with the destination's pack, whose own starport is looked up first -- a world with
+   * no port at all lands the player wherever a travel there would have.
+   */
+  private async takeShuttle(index: number): Promise<void> {
+    const ride = this.shuttleFrom?.rides[index];
+    this.shuttleMenu.hide();
+    this.shuttleFrom = null;
+    if (!ride || this.traveling) return;
+    if (ride.kind === 'local') {
+      const row = this.placeNames.find((p) => p.name === ride.name);
+      if (!row) return;
+      this.messages.system(`the shuttle to ${ride.name}`);
+      await this.teleport(this.world.planet, row, this.zone);
+      return;
+    }
+    const dest = planetOfRouteId(ride.pack ?? '');
+    if (!dest) {
+      this.messages.system(`no shuttle to ${ride.name} from here`);
+      return;
+    }
+    const zone = dest.zones?.find((z) => z.pack === ride.pack)?.id;
+    const rows = await this.poisOf(ride.pack ?? '');
+    const land = landingOn(rows);
+    this.messages.system(`the shuttle to ${dest.name}`);
+    if (land) await this.teleport(dest, land, zone);
+    else await this.travel(dest, zone);
+  }
+
+  /**
    * Fill the death card with the facilities on this world, nearest first with how far each is from
    * where the body fell. A world with none (the lava planet, every zone of the tree planet, and
    * space, where there is no ground at all) keeps the card it always had, and the line says why
@@ -9089,7 +9251,7 @@ class App {
 
   /** The panels' open state moved to the tabs: closing one panel of a pair and opening the other keeps the mouse free. */
   private anyPanelOpen(): boolean {
-    return this.backpack.open || this.wardrobe.open || this.appearanceUi.open || this.weaponsUi.open || this.forceUi.open || this.vehiclesUi.open || this.shipEdit.open || this.npcUi.open || this.shipMenu.open || this.hyperspaceUi.open || this.liftMenu.open || this.menu.open;
+    return this.backpack.open || this.wardrobe.open || this.appearanceUi.open || this.weaponsUi.open || this.forceUi.open || this.vehiclesUi.open || this.shipEdit.open || this.npcUi.open || this.shipMenu.open || this.hyperspaceUi.open || this.liftMenu.open || this.shuttleMenu.open || this.menu.open;
   }
 
   private jediKit(): JediKit {
@@ -9133,6 +9295,10 @@ class App {
     if (this.shipMenu.open) this.shipMenu.hide();
     if (this.hyperspaceUi.open) this.hyperspaceUi.hide();
     if (this.liftMenu.open) this.liftMenu.hide();
+    if (this.shuttleMenu.open) {
+      this.shuttleMenu.hide();
+      this.shuttleFrom = null;
+    }
   }
 
   /** P: the ship menu, for whoever is in a ship (at its controls, riding it, or aboard as a passenger). */
@@ -10776,6 +10942,7 @@ class App {
       if (!this.traveling) this.hyperspace.update(dt, rawDt, this.menu.open);
       // The lift menu takes the number keys while it is up, before the kit's slots see them.
       if (this.liftMenu.open) for (let n = 1; n <= 9; n++) if (input.consumeKey(`Digit${n}`)) this.liftMenu.pickKey(n);
+          if (this.shuttleMenu.open) for (let n = 1; n <= 9; n++) if (input.consumeKey('Digit' + n)) this.shuttleMenu.pickKey(n);
 
       if (active) {
         // Not while a jump flies the ship: the map's teleport would abort it half way into another system's load.
@@ -10794,7 +10961,7 @@ class App {
           // leaving for the select screen and the map's teleport abort the jump first.
           if (input.pressedAction('mount') && !player.noclip) {
             if (!this.hyperspace.locksControls) {
-              if (!this.handleElevator() && !this.handleZoneGate()) this.handleMount();
+              if (!this.handleElevator() && !this.handleShuttle() && !this.handleZoneGate()) this.handleMount();
             } else this.pressJumpE();
           }
           if (input.pressedAction('noclip') && !player.mounted && !this.hyperspace.locksControls) player.toggleNoclip();
@@ -11000,6 +11167,7 @@ class App {
         else if (S8.lift) prompt = `<b>E</b> lift: ${this.promptLiftStops} levels`;
         else if (S8.elevator) prompt = `<b>E</b> elevator ${S8.elevator}`;
         else if (S8.doorless) prompt = `<b>E</b> enter ${this.promptDoorless} (no way in on foot)`;
+        else if (S8.shuttle) prompt = `<b>E</b> shuttle from ${this.promptShuttle}`;
         else if (player.piloting) prompt = `at the controls of the ${player.piloting.spec.label} Ãƒâ€šÃ‚Â· ${player.piloting.landed ? `landed Ãƒâ€šÃ‚Â· <b>W</b> or <b>Space</b> lifts off` : `<b>W</b>/<b>S</b> throttle Ãƒâ€šÃ‚Â· mouse steers${player.piloting.spec.ship && SHIP_GROUND.rule === 'landing' ? ` Ãƒâ€šÃ‚Â· hold <b>Ctrl</b> to set down Ãƒâ€šÃ‚Â· <b>${keyName(CUT_ENGINES_KEY)}</b> cuts the engines` : ''}`} Ãƒâ€šÃ‚Â· <b>Alt</b> looks around Ãƒâ€šÃ‚Â· <b>E</b> lets go Ãƒâ€šÃ‚Â· ${Math.round(Math.abs(player.piloting.speed) * 3.6)} km/h${shipHint}${player.piloting.landNote ? ` Ãƒâ€šÃ‚Â· ${player.piloting.landNote}` : ''}`;
         // Standing on something out in space: the boots hold, a jump lets go, and E climbs into a ship beside you.
         else if (isSurfaceRoom(player.aboard)) prompt = `<b>gravity boots</b> on ${S8.bootsReach ? 'a surface Ãƒâ€šÃ‚Â· <b>E</b> climbs into the ship' : 'a surface Ãƒâ€šÃ‚Â· <b>E</b> takes them off'} Ãƒâ€šÃ‚Â· <b>jump</b> lets go${player.aboard.atEdge ? ' Ãƒâ€šÃ‚Â· <b>the surface underfoot runs out near here</b>' : ''} Ãƒâ€šÃ‚Â· <b>${shipKey}</b> ship menu`;
