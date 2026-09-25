@@ -108,7 +108,7 @@ function tokenise(src) {
     // Every operator Lua has, whether or not a value can contain it: the ones that cannot only ever
     // appear in a statement this steps over, and tokenising them is what lets it step over them
     // rather than stopping the run on a file whose data is perfectly readable.
-    if ('{}[](),;=+-*/%^:#<>~&|'.includes(c)) {
+    if ('{}[](),;=+-*/%^:#<>~&|.'.includes(c)) {
       out.push({ kind: 'op', value: c, line });
       i++;
       continue;

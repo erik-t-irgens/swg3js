@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { findCalls, parseLuaValue, readLua, LuaCall } from '../lua.mjs';
-import { flagWords, frameCheck, joinCatalogue, readCreatures, readLairs, readRegions, readSpawnGroups, readStatics, CORE3_WORLDS } from '../core3.mjs';
+import { flagWords, frameCheck, heightCheck, joinCatalogue, readCreatures, readLairs, readRegions, readSpawnGroups, readStatics, CORE3_WORLDS } from '../core3.mjs';
 
 let passed = 0;
 function ok(cond: boolean, what: string): void {
@@ -77,25 +77,28 @@ function note(what: string): void {
   ok(one.args[3] === 5090.1 && one.args[5] === 591.3, 'so the two that bracket it are the ground plane');
 }
 
-// ------------------------------------------------------------------ the frame, which decides everything
+// ------------------------------------------------------------------ the frame, and the witness for it
 {
-  const named = [
-    { name: 'Alpha', shape: 'circle', x: 3460, z: -4768, r: 100 },
-    { name: 'Beta', shape: 'circle', x: -1218, z: -3688, r: 100 },
-    { name: 'Gamma', shape: 'rect', x: 0, z: 0, x2: 200, z2: 400 },
+  // **The witness must not be built from the same data.** This was got wrong once: matched against
+  // the packs' own place names the data agreed to the metre on every world, which looked like proof
+  // that no transform was needed -- and those place rows are themselves built from these files, so
+  // the check was comparing the data with itself and could only ever agree. The ground is the
+  // witness that works, because the terrain is generated from the client's own rules.
+  const ground = (x: number, _z: number) => (x > 0 ? 10 : 90);
+  const people = [
+    { x: 100, z: 0, y: 10, cell: 0 },
+    { x: 200, z: 0, y: 10, cell: 0 },
+    { x: 300, z: 0, y: 10, cell: 0 },
   ];
-  const asIs = frameCheck(named, [
-    { name: 'Alpha', x: 3460, z: -4768 },
-    { name: 'Beta', x: -1218, z: -3688 },
-    { name: 'Gamma', x: 100, z: 200 },
-  ]);
-  ok(asIs.reading === 'as-is' && asIs.pairs === 3 && asIs.median === 0, 'places that agree outright read as-is, and a rectangle is matched on its middle');
-  const flipped = frameCheck(named, [
-    { name: 'Alpha', x: -3460, z: -4768 },
-    { name: 'Beta', x: 1218, z: -3688 },
-  ]);
-  ok(flipped.reading === 'mirrored' && flipped.mirrored === 2, 'and if the world ever needs X negated the check says so rather than the coordinates being quietly wrong');
-  // A name shared by two different places is not a pair.
+  const snap = heightCheck(people, ground);
+  ok(snap.reading === 'snapshot' && snap.asIs === 0, 'people who stand at the height the ground really is at their own coordinates put the data in the snapshot\'s frame');
+  const flip = heightCheck(people.map((p) => ({ ...p, y: 90 })), ground);
+  ok(flip.reading === 'mirrored', 'and if they only fit with X negated the check says so, rather than the world quietly turning inside out');
+  ok(heightCheck([{ x: 1, z: 0, y: 999, cell: 7 }], ground).outdoors === 0, 'anyone standing in a building is not measured: their height is a floor\'s and the ground below says nothing');
+
+  // The name check is kept for what it really is: whether the two readers of one source agree.
+  const named = [{ name: 'Alpha', shape: 'circle', x: 3460, z: -4768, r: 100 }];
+  ok(frameCheck(named, [{ name: 'Alpha', x: 3460, z: -4768 }]).median === 0, 'the name check says the two readers of these scripts still agree, which is all it says');
   const dup = frameCheck([{ name: 'Ruins', shape: 'circle', x: 0, z: 0, r: 1 }], [{ name: 'Ruins', x: 5000, z: 5000 }, { name: 'Ruins', x: 0, z: 0 }]);
   ok(dup.pairs === 0, 'a name that is not unique on both sides is left out, since matching one to another puts them kilometres apart');
 }
@@ -180,29 +183,36 @@ if (!core3 || !existsSync(join(core3, 'managers', 'planet'))) {
   ok(brokenGroup + brokenLair === 0, 'and every group and lair an area names really exists, which is why this can be read without running anything');
 
   // The standing people, and the two forms they are written in.
-  const people = [...statics.values()].reduce((n, a) => n + a.length, 0);
-  ok(people > 700, `${people} people stand somewhere and stay there, over ${statics.size} worlds`);
-  ok([...dropped.values()].reduce((a, b) => a + b, 0) === 0, 'and not one row was dropped for a coordinate that would not read');
+  const rows = [...statics.values()].flat();
+  const people = rows.length;
+  ok(people > 4000, `${people} people stand somewhere and stay there, over ${statics.size} worlds`);
+  // Reading only the folder named for them finds about a sixth of that, and none of the indoor ones.
+  const indoors = rows.filter((s) => s.cell).length;
+  ok(indoors > 2000, `${indoors} of them are inside a building cell, which is what makes a cantina or a cave a place rather than a room`);
+  const inStaticFolder = rows.filter((s) => s.where === 'static_spawns').length;
+  ok(inStaticFolder < people / 3, `only ${inStaticFolder} are in the folder named after them, so reading that folder alone would lose most of the world`);
   // A height read into the wrong slot is the failure this guards: every one of them must be a
   // plausible height for ground, not a coordinate thousands of metres out.
-  const heights = [...statics.values()].flat().map((s) => s.y);
+  const heights = rows.map((s) => s.y);
   const sane = heights.filter((h) => h > -600 && h < 600).length;
   ok(sane === heights.length, `every one of their heights is a height (${Math.round(Math.min(...heights))} to ${Math.round(Math.max(...heights))} m), which is what says the middle coordinate was read as one`);
 
-  // The frame, measured against the packs themselves where they are converted.
+  // The frame, asked of the ground: the converted packs carry what `spawns` measured, which is a
+  // witness built from the client's own terrain rules and not from these scripts.
   let checked = 0;
-  let unanimous = 0;
+  let snapshot = 0;
   for (const world of CORE3_WORLDS) {
-    const poi = join('assets-private', world, 'pois.json');
-    if (!existsSync(poi)) continue;
-    const f = frameCheck(regions.get(world)?.named ?? [], JSON.parse(readFileSync(poi, 'utf8')).pois ?? []);
-    if (f.pairs < 2) continue;
+    const f = join('assets-private', world, 'spawns.json');
+    if (!existsSync(f)) continue;
+    const pack = JSON.parse(readFileSync(f, 'utf8')) as { frameCheck?: { reading: string; asIs: number; mirrored: number; outdoors: number } };
+    const c = pack.frameCheck;
+    if (!c || c.outdoors < 20) continue;
     checked++;
-    if (f.reading === 'as-is' && f.mirrored === 0) unanimous++;
-    note(`${world.padEnd(10)} ${f.pairs} places in common, ${f.asIs} as-is, ${f.mirrored} mirrored, median ${f.median} m`);
+    if (c.reading === 'snapshot') snapshot++;
+    note(`${world.padEnd(10)} ${c.outdoors} outdoors: the ground is ${c.asIs} m out as read, ${c.mirrored} m out mirrored`);
   }
   if (checked) {
-    ok(unanimous === checked, `the frame needs no transform on all ${checked} worlds that could be checked, which is the opposite of every other outside source here`);
+    ok(snapshot === checked, `on all ${checked} worlds the ground agrees with the numbers as they stand, so they are the snapshot's and the runtime applies the world's own mirror on top`);
   }
 
   // And the join, on the real catalogue.

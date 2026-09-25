@@ -27,10 +27,22 @@
 //     `(planet, who, respawn, x, HEIGHT, y, heading, cell)`, so the height sits *between* the two
 //     ground coordinates. Read in order into (x, y, z) every person in the world ends up lying in a
 //     line at head height.
-//   - **The frame needs no mirroring at all**, which is the opposite of what every other outside
-//     source in this converter has needed. Measured against the packs' own city list, four of
-//     Tatooine's towns agree to the metre with no transform; the client's own tables would have
-//     needed X negated. `frameCheck` measures it again on every run rather than trusting this note.
+//   - **The coordinates are the snapshot's, so the runtime mirrors them and the converter does not.**
+//     This one was got wrong first time round and the way it was got wrong is worth keeping. The
+//     numbers agree to the metre with the packs' own city list, which looked like proof that no
+//     transform was needed anywhere -- but those city rows are themselves built from these very
+//     files (`tools/swg/regions/`), so that check compared this data against itself and could only
+//     ever come out at nought. The game's own world space is the mirror of the snapshot's
+//     (`LayoutStreamer`: `gx = -(o.x - centre.x)`), so a body placed from these numbers without that
+//     mirror stands on the wrong side of the world.
+//
+//     What settles it is a witness with nothing to do with this data at all: the ground. The people
+//     who stand somewhere carry their own height, and the terrain is generated from the client's own
+//     rules. Measured over the 541 who stand outdoors on three worlds, the height under them at
+//     their own coordinates is right 528 times with a median error of **nought metres**, and under
+//     the mirrored ones it is 16 to 53 metres out and right almost nowhere. `heightCheck` does that
+//     measurement on every run and writes it into the pack, so the day this stops being true the
+//     converter says so instead of the world quietly turning inside out.
 //   - **The flag words are the engine's, not the scripts'**, so they are read as the words they are
 //     rather than as numbers. That is better: `HERD` and `AGGRESSIVE` say what they mean, and no
 //     value from a header this has never seen can be silently wrong.
@@ -270,11 +282,19 @@ export function readCreatures(scripts) {
 }
 
 /**
- * The people who stand somewhere and stay there.
+ * The people who stand somewhere and stay there: the whole screenplay tree, not one folder of it.
+ *
+ * Reading only the folder named for static spawns finds 830 of them. Reading all of it finds 5,257,
+ * because most of the world's standing people are in the caves and the points of interest rather
+ * than in the folder named after them, and **2,607 of them are inside a building cell** -- the
+ * people in a cantina, a cave or a dungeon, who are the whole of what makes a place feel lived in.
+ * This converter's older reader skips every one of those, which is why this one exists beside it.
  *
  * They are placed two ways and both are read. Most are a call per person, and a few worlds instead
  * keep one table of rows and loop over it; the two carry the same seven numbers in the same order,
  * so they come out as one list. **The height is the second of the three coordinates**, not the last.
+ * A file that names its world once and writes `self.planet` in every call has that read off its own
+ * table, which is 343 rows that would otherwise be lost.
  *
  * A call standing inside a conditional is taken anyway and marked, because the condition is quest
  * state this game does not have: somebody who would be there under some circumstance is better
@@ -285,35 +305,59 @@ export function readCreatures(scripts) {
 export function readStatics(scripts) {
   const out = new Map();
   const add = (world, row) => {
+    if (!CORE3_WORLDS.includes(world)) return;
     if (!out.has(world)) out.set(world, []);
     out.get(world).push(row);
   };
   const dropped = new Map();
-  const dir = join(scripts, 'screenplays', 'static_spawns');
-  for (const file of luaFiles(dir)) {
+  const root = join(scripts, 'screenplays');
+  for (const file of luaFiles(root)) {
     const src = readFileSync(file, 'utf8');
+    if (!src.includes('spawnMobile')) continue;
+    // Which part of the world's life this file is: a cave, a point of interest, a town, a dungeon.
+    // The folder is the only thing that says so, and it is worth keeping -- a person in a cave and a
+    // person in a town are the same row and not the same thing.
+    const where = file.slice(root.length + 1).split(/[\\/]/)[0];
+    // A file that names its world once and then writes `self.planet` in every call: read the
+    // screenplay's own table for it. Its logic is stepped over, so a file whose statements this
+    // cannot follow still gives up its world.
+    let own = '';
+    try {
+      for (const [, v] of readLua(src).values) {
+        if (v && typeof v === 'object' && !Array.isArray(v) && typeof v.planet === 'string') {
+          own = v.planet;
+          break;
+        }
+      }
+    } catch {
+      /* the world stays unknown and the rows that need it are counted, not guessed at */
+    }
+
     // The per-person form: (planet, who, respawn, x, height, y, heading, cell).
     for (const c of findCalls(src, ['spawnMobile'])) {
       const a = c.args;
-      const world = a[0];
+      const world = typeof a[0] === 'string' && CORE3_WORLDS.includes(a[0]) ? a[0] : own;
       const who = a[1];
-      if (typeof world !== 'string' || typeof who !== 'string') continue;
+      if (!world || typeof who !== 'string') {
+        dropped.set(world || '?', (dropped.get(world || '?') ?? 0) + 1);
+        continue;
+      }
       const nums = [a[2], a[3], a[4], a[5], a[6], a[7]].map(middleOf);
-      if (nums.some((n) => n === null)) {
+      if (nums.slice(0, 5).some((n) => n === null)) {
         dropped.set(world, (dropped.get(world) ?? 0) + 1);
         continue;
       }
       const [respawn, x, height, y, heading, cell] = nums;
-      add(world, { who, x, y: height, z: y, heading, cell: cell || 0, respawn, gated: c.gated });
+      add(world, { who, x, y: height, z: y, heading, cell: cell || 0, respawn, gated: c.gated, where });
     }
-    // The one-table form: a screenplay with its own world and a list of rows.
-    const { values } = (() => {
-      try {
-        return readLua(src);
-      } catch {
-        return { values: new Map() };
-      }
-    })();
+
+    // The one-table form: a screenplay with its own world and a list of rows in the same order.
+    let values;
+    try {
+      ({ values } = readLua(src));
+    } catch {
+      continue;
+    }
     for (const [, v] of values) {
       if (!v || typeof v !== 'object' || Array.isArray(v)) continue;
       if (typeof v.planet !== 'string' || !Array.isArray(v.mobiles)) continue;
@@ -325,7 +369,7 @@ export function readStatics(scripts) {
           continue;
         }
         const [respawn, x, height, y, heading, cell] = nums;
-        add(v.planet, { who: r[0], x, y: height, z: y, heading, cell: cell || 0, respawn, gated: false });
+        add(v.planet, { who: r[0], x, y: height, z: y, heading, cell: cell || 0, respawn, gated: false, where });
       }
     }
   }
@@ -370,13 +414,54 @@ export function joinCatalogue(creatures, entries) {
 }
 
 /**
- * Check the frame against the pack's own places, every run.
+ * Which frame the data is in, measured against the ground itself.
  *
- * Nothing else in this converter reads an outside source whose coordinates need no transform, so the
- * claim that these need none is exactly the kind that has to be measured rather than remembered.
- * The world's own named areas are matched by name against the pack's places, and the answer is how
- * far apart the two say the same place is -- as read, and with X negated. If the mirrored reading
- * ever wins, the run says so and the numbers are wrong.
+ * **The witness must not be anything built from this data**, which is the whole lesson here: matched
+ * against the packs' own place names it came out perfect and meant nothing, because those names are
+ * built from these same files. The terrain is not: it is generated from the client's own rules, and
+ * a person who stands outdoors carries the height they stand at. So the height under each of them is
+ * asked of the ground at their own coordinates and at the mirrored ones, and whichever answers with
+ * the smaller error is the frame the data is in.
+ *
+ * `heightAt(x, z)` is the pack's own sampler, which works in the snapshot's space. Anyone standing
+ * in a building is skipped: their height is a floor's and the ground below is irrelevant.
+ */
+export function heightCheck(statics, heightAt) {
+  const mine = [];
+  const flipped = [];
+  for (const p of statics) {
+    if (p.cell) continue;
+    const a = heightAt(p.x, p.z);
+    const b = heightAt(-p.x, p.z);
+    if (Number.isFinite(a)) mine.push(Math.abs(a - p.y));
+    if (Number.isFinite(b)) flipped.push(Math.abs(b - p.y));
+  }
+  const med = (a) => {
+    if (!a.length) return NaN;
+    const s = [...a].sort((x, y) => x - y);
+    return Math.round(s[s.length >> 1] * 10) / 10;
+  };
+  const within = (a) => a.filter((v) => v <= 2).length;
+  const asIs = med(mine);
+  const mirrored = med(flipped);
+  return {
+    outdoors: mine.length,
+    asIs,
+    mirrored,
+    withinAsIs: within(mine),
+    withinMirrored: within(flipped),
+    // The frame the numbers are in. The runtime still applies the world's own mirror on top of it:
+    // the snapshot's space is not the space a body is drawn in.
+    reading: !(mirrored < asIs) ? 'snapshot' : 'mirrored',
+  };
+}
+
+/**
+ * How far apart this data and the pack's places say the same named place is.
+ *
+ * Kept for what it is rather than for what it proves: the pack's place rows are built from these
+ * same files, so a disagreement here means the two readers have drifted apart, and agreement means
+ * nothing at all about the frame. `heightCheck` is what says which frame the numbers are in.
  */
 export function frameCheck(named, pois) {
   const key = (s) => String(s).toLowerCase().replace(/[^a-z0-9]/g, '');

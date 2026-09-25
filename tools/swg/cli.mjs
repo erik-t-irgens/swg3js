@@ -194,7 +194,7 @@ import { convertShipSounds, shipSoundStatus } from './shipsounds.mjs';
 import { extraEffectsStatus, forcePowersStatus } from './weapons.mjs';
 import { nameLocomotion } from './clipnames.mjs';
 import { moodEntries } from './moods.mjs';
-import { core3MobileStats, mobileTemplates, scanServerSpawns } from './spawns.mjs';
+import { core3MobileStats, scanServerSpawns } from './spawns.mjs';
 import { loadEffect } from './texrender.mjs';
 import { readTemplate, stringParam } from './objtemplate.mjs';
 import { statusJson } from './statusplan.mjs';
@@ -2587,11 +2587,13 @@ async function snapshotPlanet(vfs, planet, outDir) {
     if (spawns) {
       const st = spawns.stats;
       console.error(`server spawns (${core3}): ${st.objects} static objects placed, ${st.mobiles} creature and NPC spawns noted for spawns.json (${st.inCells + st.mobilesInCells} inside building cells skipped) from ${st.files} scripts`);
-      const names = [...new Set(spawns.mobiles.map((m) => m.name))];
-      const defs = mobileTemplates(core3, names);
-      const list = spawns.mobiles.map((m) => ({ name: m.name, x: m.pos[0], y: m.pos[1], z: m.pos[2], heading: Math.round(m.heading * 1000) / 1000, respawn: m.respawn, templates: defs.get(m.name)?.templates ?? [], label: defs.get(m.name)?.objectName ?? m.name }));
-      mkdirSync(outDir, { recursive: true });
-      writeFileSync(join(outDir, 'spawns.json'), JSON.stringify({ planet, source: 'core3', mobiles: list }));
+      // The static objects this placed are kept; the people it noted are not written here any more.
+      // `spawns.json` has one owner, the `spawns` command, which reads the same scripts with a real
+      // parser instead of a pattern: it finds 5,257 standing people to this reader's 3,094 (it takes
+      // the whole screenplay tree, not the folder named for them), it keeps the 2,607 who stand
+      // inside a building cell that this one counts and drops, and it carries the wildlife chain as
+      // well. Both wrote the same path in different shapes, so whichever ran second won and nothing
+      // said so.
     }
     console.error(`buildouts: ${buildout.objects} objects in ${buildout.areas} areas${buildout.eventAreas ? `, ${buildout.eventAreas} event-only areas skipped` : ''}${buildout.computedTemplates ? `, ${buildout.computedTemplates} rows named by hashing the archives' templates (the string table lacks them)` : ''}${buildout.unknownTemplates ? `, WARNING: ${buildout.unknownTemplates} rows with unknown templates (their objects are missing)` : ''}${buildout.missingTables ? `, ${buildout.missingTables} area tables missing` : ''}`);
     let cx;
@@ -5680,6 +5682,38 @@ switch (cmd) {
       break;
     }
     const c3 = await import('./core3.mjs');
+    const trn = await import('../../src/swg/terrain/trn.ts');
+    /**
+     * The pack's own ground, as a function of x and z, for the frame check.
+     *
+     * It is the client's own terrain rules with the buildings' own flattening layers on top, which
+     * is what `navgrid` walks a world with, and it works in the snapshot's space. That is exactly
+     * what makes it the right witness: it has nothing whatever to do with the scripts being read.
+     * A world whose terrain is not converted answers NaN and is simply not measured.
+     */
+    const terrainHeights = (dir) => {
+      try {
+        const layout = JSON.parse(readFileSync(join(dir, 'layout.json'), 'utf8'));
+        const trnPath = join(dir, layout.terrain ?? 'terrain.trn');
+        if (!existsSync(trnPath)) return () => NaN;
+        const template = trn.parseTerrainTemplate(new Uint8Array(readFileSync(trnPath)));
+        for (const b of trn.bitmapFiles(template)) {
+          const f = join(dir, b.file);
+          if (existsSync(f)) trn.attachBitmap(template, b.familyId, new Uint8Array(readFileSync(f)));
+        }
+        const sampler = new trn.TerrainSampler(template);
+        for (const o of layout.objects ?? []) {
+          if (!o.layer) continue;
+          const f = join(dir, o.layer);
+          if (!existsSync(f)) continue;
+          const L = trn.parseLayerFile(new Uint8Array(readFileSync(f)), template.generator);
+          if (L) sampler.addBuildingLayer(L, o.x, o.z, o.q ? Math.atan2(2 * (o.q[3] * o.q[1] + o.q[0] * o.q[2]), 1 - 2 * (o.q[1] * o.q[1] + o.q[2] * o.q[2])) : 0);
+        }
+        return (x, z) => sampler.heightAt(x, z);
+      } catch {
+        return () => NaN;
+      }
+    };
     const started = Date.now();
     const regions = c3.readRegions(core3);
     const groups = c3.readSpawnGroups(core3);
@@ -5757,10 +5791,13 @@ switch (cmd) {
         noWorld.push(world);
         continue;
       }
-      const poiFile = join(out, 'pois.json');
-      const pois = existsSync(poiFile) ? (JSON.parse(readFileSync(poiFile, 'utf8')).pois ?? []) : [];
-      const frame = c3.frameCheck(r.named, pois);
       const rows = (statics.get(world) ?? []).filter((s) => joined.has(s.who)).map((s) => ({ ...s, id: joined.get(s.who).id }));
+      // Which frame the numbers are in, asked of the ground rather than of anything built from the
+      // same scripts. `heightCheck` says why that distinction is the whole of it.
+      const frame = c3.heightCheck(rows, terrainHeights(out));
+      if (frame.reading !== 'snapshot' && frame.outdoors > 20) {
+        console.log(`spawns: ${world} READS MIRRORED (ground is ${frame.mirrored} m out as-is and ${frame.asIs} m mirrored) — every coordinate in it is on the wrong side of the world`);
+      }
       writeFileSync(
         join(out, 'spawns.json'),
         JSON.stringify(
@@ -5781,7 +5818,6 @@ switch (cmd) {
       areas += r.spawn.length;
       people += rows.length;
       worlds++;
-      if (frame.reading !== 'as-is' && frame.pairs > 2) console.log(`spawns: ${world} READS MIRRORED (${frame.mirrored} of ${frame.pairs} pairs) — every coordinate in it is wrong`);
     }
     console.log(
       `spawns: ${worlds} worlds, ${areas} spawn areas, ${people} standing people, ${joined.size} creatures with the server's own level, health and damage (${missing.length} named a body we have not got), ${lairs.size} lairs, ${groups.size} groups in ${((Date.now() - started) / 1000).toFixed(1)}s`,
