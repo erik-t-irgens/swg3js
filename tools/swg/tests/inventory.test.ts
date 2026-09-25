@@ -3,7 +3,7 @@
 // character into owned items, the starting kit, the species' verdict with the species packs' own
 // pieces, the words for slots, and a repeated id in a wardrobe. Plain node, no game files needed.
 import assert from 'node:assert/strict';
-import { OFF_HAND_CLASSES, chooseArrangement, fitFor, migrateInventory, normalizeOwned, occupancy, packPartOf, partToItemId, planHold, resolveKit, slotWords, speciesWords, type Fit, type HeldRef, type OwnedItem } from '../../../src/core/inventory.ts';
+import { OFF_HAND_CLASSES, chooseArrangement, cleanTint, countOf, fitFor, migrateInventory, mintThing, normalizeOwned, occupancy, packPartOf, partToItemId, planHold, resolveKit, slotWords, speciesWords, thingOf, type Fit, type HeldRef, type OwnedItem } from '../../../src/core/inventory.ts';
 import { itemInfo, wardrobeIndex, type ItemContext } from '../../../src/player/items.ts';
 
 let checks = 0;
@@ -107,7 +107,11 @@ const HOLD_BOTH = [['hold_r', 'hold_l']];
   const before = JSON.stringify(out);
   migrateInventory(out, [{ id: 'other', kind: 'wear', got: 9 }], (part) => partToItemId(part, has), 9);
   ok(JSON.stringify(out) === before, 'a second run changes nothing');
-  ok(normalizeOwned([{ id: 'a', kind: 'wear', got: 1 }, { id: 'a', kind: 'wear', got: 2 }, { id: 'a', kind: 'weapon', got: 3 }]).length === 2, 'normalizeOwned keeps one per kind and id');
+  // This used to be `normalizeOwned`'s own rule and is now the migration's: two of one item are two
+  // things, so keeping one per kind and id belongs where a character is *brought into* the backpack
+  // and nowhere else. The section at the end of this file pins the other half of it.
+  const merged = migrateInventory({ outfit: [], items: [{ id: 'a', kind: 'wear', got: 1 }, { id: 'a', kind: 'wear', got: 2 }, { id: 'a', kind: 'weapon', got: 3 }] } as never, [], () => null, 1);
+  ok((merged.items ?? []).length === 2, 'a migration keeps one per kind and id, which is what bringing a character in means');
 }
 
 // --- 5: the starting kit -----------------------------------------------------------------------
@@ -180,3 +184,67 @@ const HOLD_BOTH = [['hold_r', 'hold_l']];
 }
 
 console.log(`${checks} checks passed`);
+
+// ---------------------------------------------------------------- one thing, and not one kind
+//
+// An item was only ever a kind for a long time -- two of one shirt were one row -- and that is
+// exactly why colours, stats and crafting all waited: those are things one **thing** has. A row now
+// carries which one it is and its own colours, and a record from before carries neither, so reading
+// one forward is the part that matters most.
+
+{
+  let n = 0;
+  const mint = () => `t${n++}`;
+  const rows = normalizeOwned(
+    [
+      { id: 'shirt_s01', kind: 'wear', got: 5 },
+      { id: 'shirt_s01', kind: 'wear', got: 9 },
+    ] as OwnedItem[],
+    mint,
+  );
+  ok(rows.length === 2, 'two of one item are two things now, where they used to be one row');
+  ok(rows[0].thing !== rows[1].thing, 'and each has a name of its own');
+  ok(rows[0].id === rows[1].id, 'while both are still the same item, which is what the catalogue id is for');
+  ok(countOf(rows, 'wear', 'shirt_s01') === 2, 'and "have I got one of these" is still a question with an answer');
+  ok(thingOf(rows, rows[1].thing!) === rows[1], 'one of them can be named and found');
+}
+
+{
+  // A record from before instances: every row keeps what it was and gains a name. Such a record was
+  // itself deduped by kind and id, so nothing about reading it can change what the character held.
+  const old = [
+    { id: 'shirt_s01', kind: 'wear', got: 5 },
+    { id: 'pistol_cdef', kind: 'weapon', got: 6 },
+  ] as OwnedItem[];
+  const rows = normalizeOwned(old);
+  ok(rows.length === 2 && rows.every((r) => !!r.thing), 'an old record comes forward with a name minted per row');
+  ok(rows[0].id === 'shirt_s01' && rows[0].got === 5, 'and nothing else about it changes');
+  const again = normalizeOwned(rows);
+  ok(again[0].thing === rows[0].thing, 'and reading it a second time keeps the names, so they are stable across a save');
+}
+
+{
+  const rows = normalizeOwned([{ id: 'a', kind: 'wear', got: 1, thing: 'same' }, { id: 'b', kind: 'wear', got: 2, thing: 'same' }] as OwnedItem[]);
+  ok(rows.length === 1, 'two rows claiming to be the same thing are one thing, since a name is what a thing is');
+}
+
+{
+  const a = mintThing('wear', 'shirt_s01', 1000, () => 0.5);
+  const b = mintThing('wear', 'shirt_s01', 1000, () => 0.25);
+  ok(a !== b, 'two things got at the same moment still have different names');
+  ok(/^w/.test(a) && a.includes('shirt_s01'), "and a name says what it is, which is worth having when reading a record by eye");
+}
+
+{
+  ok(cleanTint({ 'index_color_1': 12 })!['index_color_1'] === 12, "a thing's own colours are kept by the customizer's own names");
+  ok(cleanTint({ 'index_color_1': 300 })!['index_color_1'] === 255, 'a value past the palette is brought back into it');
+  ok(cleanTint({ 'index_color_1': -4 })!['index_color_1'] === 0, 'and one below it likewise');
+  ok(cleanTint({ 'index_color_1': 2.6 })!['index_color_1'] === 3, 'a fraction is rounded: a palette has no half-colours');
+  ok(cleanTint({ __proto__: 1 } as unknown) === undefined, "one of the language's own names is not a colour");
+  ok(cleanTint({ a: 'red' } as unknown) === undefined && cleanTint(null) === undefined && cleanTint([1, 2] as unknown) === undefined, 'and nothing that is not a set of numbers is a set of colours');
+}
+
+{
+  const rows = normalizeOwned([{ id: 'a', kind: 'wear', got: 1, thing: 't1', tint: { 'index_color_1': 7 } }, { id: 'a', kind: 'wear', got: 1, thing: 't2' }] as OwnedItem[]);
+  ok(rows[0].tint?.['index_color_1'] === 7 && rows[1].tint === undefined, 'two of one item may be two colours, which is the whole reason a thing has a name');
+}

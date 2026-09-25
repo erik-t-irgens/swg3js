@@ -9,12 +9,64 @@
 export type Hand = 'right' | 'left';
 export type Fit = 'ok' | 'block' | 'hide';
 
-/** One thing a character owns, by catalogue id: a wardrobe item or a weapon off the rack. */
+/**
+ * One thing a character owns: a wardrobe item or a weapon off the rack.
+ *
+ * `id` is what it **is** -- the catalogue's own id, which every copy of it shares -- and `thing` is
+ * which one it is, minted the moment it was got and never reused. The two were one field for a long
+ * time, which is exactly why two of the same item could not be told apart, and why colours, stats
+ * and crafting all waited on this: they are things one *thing* has and not things a *kind* has.
+ *
+ * A row from before this has no `thing`; `normalizeOwned` mints one, so nothing has to be rewritten.
+ */
 export interface OwnedItem {
   id: string;
   kind: 'wear' | 'weapon';
   /** Date.now() when it was given: the backpack's "newest" order. */
   got: number;
+  /**
+   * Which one of them this is. Absent on a record from before there were instances, and minted on
+   * the way in; never shown to a player and never meaningful anywhere but as a key.
+   */
+  thing?: string;
+  /**
+   * This one thing's own colours, by the customizer's own variable names, or absent for the item's
+   * defaults. It is per **thing** and not per kind, which is the whole point: two of one shirt may
+   * be two colours.
+   */
+  tint?: Record<string, number>;
+}
+
+/**
+ * A name for one thing, from what it is and when it was got.
+ *
+ * It has to be unique within one character's own list and nowhere else, so it is short: the kind,
+ * the catalogue id, the moment and a few characters of chance. `crypto.randomUUID` is not reached
+ * for because this runs in a node test as well and a character's list is a few hundred rows at most.
+ */
+export function mintThing(kind: string, id: string, got: number, chance = Math.random): string {
+  const tail = Math.floor(chance() * 0x1000000)
+    .toString(36)
+    .padStart(4, '0');
+  return `${kind[0] ?? 'x'}${id}|${Math.round(got).toString(36)}|${tail}`;
+}
+
+/**
+ * A per-thing colour set, cleaned: the customizer's own variable names and whole numbers in its own
+ * range. Anything else is dropped, so a record edited by hand cannot put a colour out of a palette.
+ */
+export function cleanTint(tint: unknown, most = 255): Record<string, number> | undefined {
+  if (!tint || typeof tint !== 'object' || Array.isArray(tint)) return undefined;
+  const out: Record<string, number> = {};
+  let any = false;
+  for (const [k, v] of Object.entries(tint as Record<string, unknown>)) {
+    if (!/^[A-Za-z0-9_./|-]{1,64}$/.test(k) || k === '__proto__' || k === 'constructor' || k === 'prototype') continue;
+    if (typeof v !== 'number' || !Number.isFinite(v)) continue;
+    const n = Math.max(0, Math.min(most, Math.round(v)));
+    out[k] = n;
+    any = true;
+  }
+  return any ? out : undefined;
 }
 
 /** The appearance table's verdict per species (species ids of one gender: `wookiee_male`). */
@@ -177,18 +229,45 @@ export function resolveKit(cls: 'jedi' | 'bounty_hunter', look: (kind: 'wear' | 
   return { items: normalizeOwned(items), held };
 }
 
-/** Duplicates (same kind and id) removed, the first kept; anything malformed dropped. */
-export function normalizeOwned(items: readonly OwnedItem[] | null | undefined): OwnedItem[] {
+/**
+ * A character's list read in: every row given a `thing` of its own, its colours cleaned, and
+ * anything malformed dropped.
+ *
+ * **Duplicates are removed by `thing` and no longer by kind and id**, which is what lets a character
+ * hold two of one item at last. A record from before instances has no `thing` on any row, so one is
+ * minted per row -- and because such a record was itself deduped by kind and id, nothing about
+ * reading it changes what it held.
+ */
+export function normalizeOwned(items: readonly OwnedItem[] | null | undefined, mint: (kind: string, id: string, got: number) => string = mintThing): OwnedItem[] {
   const seen = new Set<string>();
   const out: OwnedItem[] = [];
   for (const o of items ?? []) {
     if (!o || typeof o.id !== 'string' || !o.id || (o.kind !== 'wear' && o.kind !== 'weapon')) continue;
-    const k = `${o.kind}:${o.id}`;
-    if (seen.has(k)) continue;
-    seen.add(k);
-    out.push({ id: o.id, kind: o.kind, got: Number.isFinite(o.got) ? o.got : 0 });
+    const got = Number.isFinite(o.got) ? o.got : 0;
+    const thing = typeof o.thing === 'string' && o.thing ? o.thing : mint(o.kind, o.id, got);
+    if (seen.has(thing)) continue;
+    seen.add(thing);
+    const row: OwnedItem = { id: o.id, kind: o.kind, got, thing };
+    const tint = cleanTint(o.tint);
+    if (tint) row.tint = tint;
+    out.push(row);
   }
   return out;
+}
+
+/**
+ * How many of one item a character holds. What the backpack counts and what a give refuses on: a
+ * thing is one thing, but "have I got one of these" is still a question worth asking.
+ */
+export function countOf(items: readonly OwnedItem[], kind: string, id: string): number {
+  let n = 0;
+  for (const o of items) if (o.kind === kind && o.id === id) n++;
+  return n;
+}
+
+/** One thing by its own name, or null. */
+export function thingOf(items: readonly OwnedItem[], thing: string): OwnedItem | null {
+  return items.find((o) => o.thing === thing) ?? null;
 }
 
 /**
@@ -205,7 +284,18 @@ export function migrateInventory<T extends { items?: OwnedItem[]; outfit: string
     const id = toItem(part);
     if (id) worn.push({ id, kind: 'wear', got: now });
   }
-  c.items = normalizeOwned([...(c.items ?? []), ...worn, ...kit]);
+  // One of each, and not one per list it turned up in. The three lists overlap on purpose -- a
+  // character is usually wearing something the kit also gives -- and until items had instances the
+  // collapse by kind and id happened in `normalizeOwned`, which now keeps duplicates because two of
+  // one item are two things. So the collapse lives here, where it is right: bringing a character
+  // into the backpack gives it one of each, and getting a second one afterwards is a second thing.
+  const once = new Map<string, OwnedItem>();
+  for (const o of [...(c.items ?? []), ...worn, ...kit]) {
+    if (!o || typeof o.id !== 'string' || !o.id) continue;
+    const k = `${o.kind}:${o.id}`;
+    if (!once.has(k)) once.set(k, o);
+  }
+  c.items = normalizeOwned([...once.values()]);
   c.inv = 1;
   return c;
 }
