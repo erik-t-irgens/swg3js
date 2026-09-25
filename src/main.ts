@@ -31,7 +31,7 @@ import { DEFAULT_TIER } from './world/npcs.ts';
 import { captureScene, headingDegrees, sceneLine } from './world/sceneCapture.ts';
 import { framePlace, orbitFor, packPlanet, FRAME_ASPECT, ORBIT_EYE_HEIGHT } from './world/scenePlaces.ts';
 import { buildPlace, disposePlace, sceneManifest, type BuiltPlace } from './world/sceneWorld.ts';
-import { clampView, restView, viewPose, type SceneView } from './world/sceneView.ts';
+import { clampView, dragView, restView, viewPose, zoomBy, type SceneView } from './world/sceneView.ts';
 import { sceneSpots } from './data/scenes.ts';
 /**
  * How near a named place has to be for `__debug.scene` to call the shot that place's. Ours, and
@@ -5439,6 +5439,74 @@ class App {
     this.freeMouse(false);
   }
 
+  /** Whether the pointer has been wired to the world behind a place; done once and then kept. */
+  private placeInputBound = false;
+  /** The words under the world saying what turns the figure and what moves the view. */
+  private readonly placeHint = ((): HTMLElement => {
+    const el = document.createElement('div');
+    el.id = 'place-hint';
+    el.hidden = true;
+    el.textContent = 'drag to turn · right-drag to look up and down · wheel to zoom · double-click to frame again';
+    return el;
+  })();
+
+  /**
+   * The pointer, while a character is standing in a place.
+   *
+   * Bound to the game's own canvas rather than to a panel, because that is what is behind the
+   * editor's window: the overlay is set to let events through (`.in-place` in the stylesheet) so a
+   * drag on the world arrives here, while the panel itself takes its own back.
+   *
+   * Every listener does nothing at all unless a place is up, so this is bound once and never
+   * unbound. A right drag is also stopped from opening the browser's own menu, since holding the
+   * right button is how the view is slid.
+   */
+  private bindPlaceInput(): void {
+    if (this.placeInputBound) return;
+    this.placeInputBound = true;
+    const canvas = this.renderer.domElement;
+    let dragging = 0;
+    let lastX = 0;
+    let lastY = 0;
+    canvas.addEventListener('pointerdown', (e) => {
+      if (!this.scene3d) return;
+      dragging = e.button === 2 ? 2 : 1;
+      lastX = e.clientX;
+      lastY = e.clientY;
+      canvas.setPointerCapture(e.pointerId);
+    });
+    canvas.addEventListener('pointermove', (e) => {
+      const s = this.scene3d;
+      if (!s || !dragging) return;
+      s.view = dragView(s.view, e.clientX - lastX, e.clientY - lastY, dragging === 2);
+      lastX = e.clientX;
+      lastY = e.clientY;
+    });
+    const up = (e: PointerEvent) => {
+      dragging = 0;
+      if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
+    };
+    canvas.addEventListener('pointerup', up);
+    canvas.addEventListener('pointercancel', up);
+    canvas.addEventListener('contextmenu', (e) => {
+      if (this.scene3d) e.preventDefault();
+    });
+    canvas.addEventListener(
+      'wheel',
+      (e) => {
+        const s = this.scene3d;
+        if (!s) return;
+        s.view = zoomBy(s.view, e.deltaY > 0 ? -1 : 1);
+        e.preventDefault();
+      },
+      { passive: false },
+    );
+    // Back to the shot you captured, which is the one framing that is certainly good.
+    canvas.addEventListener('dblclick', () => {
+      if (this.scene3d) this.scene3d.view = restView();
+    });
+  }
+
   /**
    * Stand the character in one of the captured places, loading the world behind the screen.
    *
@@ -5456,6 +5524,8 @@ class App {
     await this.hideScene();
     // The streamer is what a scene skips, and only that: the ground, the sky, the water and the
     // weather all load as they always do, since those are what make the hour real.
+    this.bindPlaceInput();
+    if (!this.placeHint.parentElement) this.ui.appendChild(this.placeHint);
     this.world.sceneOnly = true;
     this.world.load(planetById(where.planet), row.pack);
     const built = await buildPlace(key, {
@@ -6631,6 +6701,27 @@ class App {
     if (!this.creating) return;
     if (character) this.applyAppearance(character, this.legacyAppearance(species));
     this.showCreatorTab('appearance');
+    // A place to stand in, if this install has any built. It is asked for after the panels are up
+    // so the creator is usable the whole time the world is loading, and it answers false on a fresh
+    // checkout, where the creator is then exactly the screen it always was.
+    const man = await sceneManifest();
+    const first = man?.creator[0];
+    if (!first || !this.creating) return;
+    if (await this.showScene(first)) this.enterPlaceLayout(true);
+  }
+
+  /**
+   * The creator's two shapes: the editor as a window down the right with the world behind it, or
+   * the full-width panels over a dark backdrop when there is no place to stand in.
+   *
+   * One class on the two overlay roots, because everything that has to change -- the backdrop, the
+   * panel's width, the doll's column going entirely, and the overlay letting a drag through to the
+   * world -- is in the stylesheet beside the rules it is overriding.
+   */
+  private enterPlaceLayout(on: boolean): void {
+    this.wardrobe.root.classList.toggle('in-place', on);
+    this.appearanceUi.root.classList.toggle('in-place', on);
+    this.placeHint.hidden = !on;
   }
 
   private showCreatorTab(tab: 'appearance' | 'wardrobe'): void {
@@ -6656,6 +6747,10 @@ class App {
     this.creating = false;
     this.closePanels();
     this.creatorBar.hide();
+    this.enterPlaceLayout(false);
+    // The place goes with the creator, world and all. Not awaited: the caller either plays, which
+    // loads a world of its own over the top, or goes back to the select screen, which loads none.
+    void this.hideScene();
     this.wardrobe.root.classList.remove('creation');
     this.appearanceUi.root.classList.remove('creation');
     // The first I after making a character opens the backpack, not the creator's last tab.
