@@ -2354,9 +2354,13 @@ function packStatus(dir) {
     const skyWorlds = GAME_PLANETS.filter((p) => existsSync(join(dir, p, 'sky.json')));
     const measured = skyWorlds.filter((p) => existsSync(join(dir, p, 'clouds.json')));
     const noise = readQuiet(join(dir, 'clouds', 'manifest.json'));
-    const volumes = noise?.format === 1 && existsSync(join(dir, 'clouds', noise.base?.file ?? '')) && existsSync(join(dir, 'clouds', noise.detail?.file ?? ''));
+    const files = !!noise && existsSync(join(dir, 'clouds', noise.base?.file ?? '')) && existsSync(join(dir, 'clouds', noise.detail?.file ?? ''));
+    // Version 2 is the one that carries the measured cover curve. The bytes of a version 1 volume
+    // are the same, but the calibration that went with it gave a world asking for a quarter of the
+    // sky about a twentieth, so it is asked for again rather than read.
+    const volumes = files && noise.format === 2 && Array.isArray(noise.cover) && noise.cover.length > 1;
     if (!skyWorlds.length) console.log('  clouds: none yet, and none asked for until a world has a sky');
-    else if (!volumes) need(`clouds ${dir}`, 'the volumetric clouds have no noise to march through (clouds/)');
+    else if (!volumes) need(`clouds ${dir}`, files ? `the noise the volumetric clouds march through was calibrated before the coverage was measured (format ${noise.format})` : 'the volumetric clouds have no noise to march through (clouds/)');
     else if (measured.length < skyWorlds.length) need(`clouds ${dir}`, `worlds whose sky has not been measured (${skyWorlds.filter((p) => !measured.includes(p)).join(', ')})`);
     else console.log(`  clouds: ${measured.length} worlds measured, and the volumes the march reads`);
   }
@@ -5624,7 +5628,8 @@ switch (cmd) {
     // are generic cloud noise, the same on every world, and the client drew its sky as flat sheets
     // and had none -- so the pack says `invented` on the made-up system's own precedent.
     if (!options['no-noise']) {
-      const { billowRange, buildBase, buildDetail, CLOUD_NOISE } = await import('./cloudnoise.mjs');
+      const { billowRange, buildBase, buildDetail, coverCurve, CLOUD_NOISE } = await import('./cloudnoise.mjs');
+      const rule = await import('../../src/core/fx/cloudMath.ts');
       const dir = join(pos[1], 'clouds');
       mkdirSync(dir, { recursive: true });
       const say = (what) => (n, of) => {
@@ -5636,14 +5641,19 @@ switch (cmd) {
       process.stdout.write('\r');
       writeFileSync(join(dir, 'noise_base.rgba'), base);
       writeFileSync(join(dir, 'noise_detail.rgba'), detail);
-      // The calibration, measured off the volume just written: coverage is a share of sky and the
-      // march turns it into a threshold on the billow, which does not fill nought to one.
+      // The calibration, measured off the volumes just written: coverage is a share of sky, and
+      // what a share of sky costs in threshold is three things at once that none of them is
+      // arithmetic. `coverCurve` says why it is marched rather than reasoned about.
       const billow = billowRange(base, CLOUD_NOISE.baseSize);
+      process.stdout.write('clouds: measuring what each threshold really covers   ');
+      const cover = coverCurve(base, detail, CLOUD_NOISE.baseSize, CLOUD_NOISE.detailSize, rule.CLOUD_MARCH, rule);
+      process.stdout.write('\r');
       writeFileSync(
         join(dir, 'manifest.json'),
-        JSON.stringify({ format: 1, source: 'invented', base: { size: CLOUD_NOISE.baseSize, channels: 4, file: 'noise_base.rgba' }, detail: { size: CLOUD_NOISE.detailSize, channels: 4, file: 'noise_detail.rgba' }, billow, frequencies: { base: CLOUD_NOISE.baseFrequencies, detail: CLOUD_NOISE.detailFrequencies } }, null, 1),
+        JSON.stringify({ format: 2, source: 'invented', base: { size: CLOUD_NOISE.baseSize, channels: 4, file: 'noise_base.rgba' }, detail: { size: CLOUD_NOISE.detailSize, channels: 4, file: 'noise_detail.rgba' }, billow, cover, frequencies: { base: CLOUD_NOISE.baseFrequencies, detail: CLOUD_NOISE.detailFrequencies } }, null, 1),
       );
-      console.log(`clouds: noise volumes written (${(base.length / 1048576).toFixed(1)} MB + ${(detail.length / 1024).toFixed(0)} KB) in ${((Date.now() - t0) / 1000).toFixed(0)}s; the billow lies between ${billow.lo} and ${billow.hi}`);
+      const reach = cover.filter((c) => c.sky > 0);
+      console.log(`clouds: noise volumes written (${(base.length / 1048576).toFixed(1)} MB + ${(detail.length / 1024).toFixed(0)} KB) in ${((Date.now() - t0) / 1000).toFixed(0)}s; the billow lies between ${billow.lo} and ${billow.hi}, and a cut of ${reach.length ? reach[0].cut : '-'} to ${reach.length ? reach[reach.length - 1].cut : '-'} covers ${reach.length ? `${Math.round(reach[0].sky * 100)}% down to ${Math.round(reach[reach.length - 1].sky * 100)}%` : 'nothing'} of the sky`);
     }
     break;
   }

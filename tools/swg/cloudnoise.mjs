@@ -251,3 +251,55 @@ export function buildDetail(size = CLOUD_NOISE.detailSize, tune = CLOUD_NOISE, o
   }
   return out;
 }
+
+/**
+ * How much sky each threshold really fills, measured by marching the volumes just written.
+ *
+ * **Why this and not the billow's own ends.** `billowRange` says where the billow channel lies, and
+ * a cut placed between its ends gives that share of the *channel* above the cut. Three things then
+ * stand between that and the share of sky anybody sees. The base volume's own erosion channels take
+ * a bite out of whatever survived the cut and the detail volume takes another, which together eat
+ * most of a thin sky: measured, a world asking for a quarter of the sky was getting half a per cent
+ * of the deck and nothing at all overhead, and sixteen of the game's eighteen worlds ask for a
+ * quarter or less. And in the other direction a ray crosses eight hundred metres of deck, so once
+ * there *is* cloud the sky fills much faster than the volume does. Neither is arithmetic; both come
+ * out of the volume. So the sweep marches a grid of rays straight up through the deck at a set of
+ * cuts, writes down what share of them found cloud, and the game reads that table backwards.
+ *
+ * Straight up is the honest direction to measure in: it is the shortest way through the deck and so
+ * the least cloud any ray will find, and it is the one direction whose answer does not depend on
+ * where the camera happens to be standing.
+ */
+export function coverCurve(base, detail, baseSize, detailSize, march, rule, cuts = COVER_CUTS, rays = 64) {
+  const b = [0, 0, 0, 0];
+  const d = [0, 0, 0, 0];
+  const steps = march.steps;
+  const span = march.top - march.bottom;
+  const stepLen = span / steps;
+  const out = [];
+  for (const cut of cuts) {
+    let covered = 0;
+    for (let ry = 0; ry < rays; ry++) {
+      for (let rx = 0; rx < rays; rx++) {
+        // Spread over a good few kilometres of ground, which is several periods of the base volume.
+        const px = (rx / rays) * march.baseScale * 3;
+        const pz = (ry / rays) * march.baseScale * 3;
+        let od = 0;
+        for (let i = 0; i < steps; i++) {
+          const py = march.bottom + (i + 0.5) * stepLen;
+          const h = (py - march.bottom) / span;
+          rule.volumeTexel(base, baseSize, Math.round((px / march.baseScale) * baseSize), Math.round((py / march.baseScale) * baseSize), Math.round((pz / march.baseScale) * baseSize), b);
+          rule.volumeTexel(detail, detailSize, Math.round((px / march.detailScale) * detailSize), Math.round((py / march.detailScale) * detailSize), Math.round((pz / march.detailScale) * detailSize), d);
+          od += rule.densityFrom(b, d, h, cut, 2, march) * march.density * stepLen;
+        }
+        // Half the light stopped is the line between a covered sky and a hazy one.
+        if (1 - Math.exp(-od) >= 0.5) covered++;
+      }
+    }
+    out.push({ cut: Math.round(cut * 1000) / 1000, sky: Math.round((covered / (rays * rays)) * 1000) / 1000 });
+  }
+  return out;
+}
+
+/** The thresholds the sweep measures at: fine where the sky is changing fastest. */
+export const COVER_CUTS = [0.2, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95];

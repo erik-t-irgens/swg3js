@@ -8436,7 +8436,7 @@ class App {
       return;
     }
     if (!pass.hasNoise) {
-      if (this.cloudVolumes) pass.setNoise(this.cloudVolumes.base, this.cloudVolumes.detail, this.cloudVolumes.billow);
+      if (this.cloudVolumes) pass.setNoise(this.cloudVolumes.base, this.cloudVolumes.detail, this.cloudVolumes.cover);
       else if (!this.cloudVolumesAsked) {
         this.cloudVolumesAsked = true;
         void loadCloudVolumes(import.meta.env.BASE_URL).then((v) => {

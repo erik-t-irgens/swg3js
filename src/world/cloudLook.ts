@@ -21,6 +21,7 @@
 // ambient the sky is already giving everything else.
 
 import * as THREE from 'three';
+import type { CoverPoint } from '../core/fx/cloudMath.ts';
 
 /** One weather level of a world, as `clouds.json` records it. */
 export interface CloudLevel {
@@ -141,23 +142,6 @@ export interface BillowRange {
   hi: number;
 }
 
-/**
- * The threshold on the billow that gives this share of sky.
- *
- * **The calibration, and the reason it is not `1 - coverage`.** Coverage is a share of sky and the
- * march turns it into a cut through the billow channel, but the billow does not fill nought to one:
- * measured over the real volume it lies between 0.58 and 0.90. Cutting at `1 - coverage` is
- * therefore a cliff -- a quarter covered gives 57% of the sky, a third gives 88%, and everything
- * past a third saturates at all of it. Cutting between the measured ends instead is very nearly
- * linear, and the ends come from the pack rather than from here so that changing the noise
- * re-calibrates this with it.
- */
-export function billowCut(coverage: number, billow: BillowRange): number {
-  const lo = Math.min(billow.lo, billow.hi);
-  const hi = Math.max(billow.lo, billow.hi);
-  return hi - (hi - lo) * clamp01(coverage);
-}
-
 /** The baked noise volumes' own record. Null when the `clouds` command has not been run. */
 export interface CloudNoisePack {
   format: number;
@@ -165,6 +149,8 @@ export interface CloudNoisePack {
   base: { size: number; channels: number; file: string };
   detail: { size: number; channels: number; file: string };
   billow: BillowRange;
+  /** What share of sky each threshold really fills, marched through the volumes themselves. */
+  cover: CoverPoint[];
 }
 
 export async function loadCloudNoise(base = ''): Promise<CloudNoisePack | null> {
@@ -172,7 +158,10 @@ export async function loadCloudNoise(base = ''): Promise<CloudNoisePack | null> 
     const res = await fetch(`${base}assets-private/clouds/manifest.json`);
     if (!res.ok) return null;
     const pack = (await res.json()) as CloudNoisePack;
-    return pack?.format === 1 && pack.base?.size > 0 && pack.billow ? pack : null;
+    // Version 2 is the one that carries the measured cover curve. A version 1 volume is the same
+    // bytes with a calibration that under-delivered on sixteen of the eighteen worlds, and the
+    // command that mends it opens no archive, so it is refused rather than half-read.
+    return pack?.format === 2 && pack.base?.size > 0 && Array.isArray(pack.cover) && pack.cover.length > 1 ? pack : null;
   } catch {
     return null;
   }
@@ -189,8 +178,8 @@ export async function loadCloudNoise(base = ''): Promise<CloudNoisePack | null> 
  * Both are fetched once for the session and shared: they are the same on every world, which is what
  * lets a travel cost nothing.
  */
-let volumesOnce: Promise<{ base: THREE.Data3DTexture; detail: THREE.Data3DTexture; billow: BillowRange } | null> | null = null;
-export function loadCloudVolumes(base = ''): Promise<{ base: THREE.Data3DTexture; detail: THREE.Data3DTexture; billow: BillowRange } | null> {
+let volumesOnce: Promise<{ base: THREE.Data3DTexture; detail: THREE.Data3DTexture; cover: CoverPoint[] } | null> | null = null;
+export function loadCloudVolumes(base = ''): Promise<{ base: THREE.Data3DTexture; detail: THREE.Data3DTexture; cover: CoverPoint[] } | null> {
   volumesOnce ??= (async () => {
     const man = await loadCloudNoise(base);
     if (!man) return null;
@@ -213,7 +202,7 @@ export function loadCloudVolumes(base = ''): Promise<{ base: THREE.Data3DTexture
     };
     const [b, d] = await Promise.all([grab(man.base.file, man.base.size), grab(man.detail.file, man.detail.size)]);
     if (!b || !d) return null;
-    return { base: b, detail: d, billow: man.billow };
+    return { base: b, detail: d, cover: man.cover };
   })();
   return volumesOnce;
 }

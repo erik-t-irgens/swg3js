@@ -34,41 +34,11 @@ import type { FxFrameContext } from './context';
 import type { FxProductId, FxSettings } from '../fxRegistry.ts';
 import { createFxQuad, FX_CAMERA, type FxDebugTexture, type FxPass, type FxWarmItem } from './pass';
 import { FX_BILATERAL_UPSAMPLE, FX_FULLSCREEN_VERTEX, FX_HASH, FX_LINEARIZE, FX_PHASE_HG, FX_SLAB, FX_VIEW_POS } from './glsl';
+import { CLOUD_MARCH, cutForCover, type CoverPoint } from './cloudMath.ts';
 
-/**
- * Every invented number of the march. The client had no volume at all, so all of it is ours; the
- * shape of the technique is published, the numbers it is tuned to here are not. Live through
- * `__debug.clouds`.
- */
-export const CLOUD_MARCH = {
-  /** Where the deck sits, in metres above the camera's own height. The sheets' own altitudes. */
-  bottom: 1500,
-  top: 2300,
-  /** How far along the ray to bother, in metres. Past this the haze has the sky anyway. */
-  reach: 26000,
-  /** Steps through the slab, and steps toward the sun from each of them. The cost, in two numbers. */
-  steps: 64,
-  lightSteps: 5,
-  /** Metres per unit of the base volume, and of the detail volume. */
-  baseScale: 4200,
-  detailScale: 260,
-  /** How hard the detail eats the edge of the shape. */
-  detailBite: 0.32,
-  /** Scattering: forward, backward, and how they are mixed. Two lobes, as cloud needs. */
-  gForward: 0.72,
-  gBackward: -0.24,
-  gMix: 0.42,
-  /** How thick a metre of cloud is. */
-  density: 0.055,
-  /** Sun-ward extinction, and the powder term that keeps a lit edge from reading as a flat card. */
-  lightDensity: 0.9,
-  powder: 0.42,
-  /** How much of the sky's ambient a cloud picks up, top and bottom. */
-  ambientTop: 0.55,
-  ambientBottom: 0.22,
-  /** How far the deck fades out at its own floor and ceiling, as a share of its depth. */
-  feather: 0.22,
-};
+// The numbers and the density rule live in `cloudMath.ts`, which the converter and the node tests
+// read too: the shader below is generated from them, and the test checks its text against them.
+export { CLOUD_MARCH } from './cloudMath.ts';
 
 /**
  * The march's program, built from the tune.
@@ -116,6 +86,7 @@ ${FX_HASH}
 const float BASE_SCALE = ${CLOUD_MARCH.baseScale.toFixed(1)};
 const float DETAIL_SCALE = ${CLOUD_MARCH.detailScale.toFixed(1)};
 const float DETAIL_BITE = ${CLOUD_MARCH.detailBite.toFixed(3)};
+const float ERODE_BITE = ${CLOUD_MARCH.erodeBite.toFixed(3)};
 const float DENSITY = ${CLOUD_MARCH.density.toFixed(4)};
 const float LIGHT_DENSITY = ${CLOUD_MARCH.lightDensity.toFixed(3)};
 const float POWDER = ${CLOUD_MARCH.powder.toFixed(3)};
@@ -149,7 +120,7 @@ float densityAt(vec3 p, float h, float cheap) {
   if (shape <= 0.0) return 0.0;
   // The erosion channels take the edges off the shape before the profile does.
   float erode = base.g * 0.625 + base.b * 0.25 + base.a * 0.125;
-  shape = clamp(shape - (1.0 - erode) * 0.35, 0.0, 1.0) * profile(h, uLook.z);
+  shape = clamp(shape - (1.0 - erode) * ERODE_BITE, 0.0, 1.0) * profile(h, uLook.z);
   if (shape <= 0.0 || cheap > 0.5) return shape;
   vec3 dp = (p + drift * 2.0) / DETAIL_SCALE;
   vec3 d = texture(uDetail, dp).rgb;
@@ -280,7 +251,8 @@ export class CloudsPass implements FxPass {
   private time = 0;
   private base: THREE.Data3DTexture | null = null;
   private detail: THREE.Data3DTexture | null = null;
-  private billow = { lo: 0.576, hi: 0.898 };
+  /** The cut-to-sky curve the converter measured off the very volume above, most cloud first. */
+  private cover: readonly CoverPoint[] = [];
   /**
    * What the world is asking for this frame, written by the game and read here. `coverage`,
    * `brightness` and `decks` are the world's own art (`cloudLook`); `drift` is the weather's wind in
@@ -356,13 +328,14 @@ export class CloudsPass implements FxPass {
   }
 
   /**
-   * The noise volumes, handed over once they have been fetched. Until then the pass answers false to
-   * `enabled` and costs nothing: a march with no shape to march through would draw a grey sky.
+   * The noise volumes and their calibration, handed over once they have been fetched. Until then the
+   * pass answers false to `enabled` and costs nothing: a march with no shape to march through would
+   * draw a grey sky.
    */
-  setNoise(base: THREE.Data3DTexture, detail: THREE.Data3DTexture, billow: { lo: number; hi: number }): void {
+  setNoise(base: THREE.Data3DTexture, detail: THREE.Data3DTexture, cover: readonly CoverPoint[]): void {
     this.base = base;
     this.detail = detail;
-    this.billow = billow;
+    this.cover = cover;
     this.marchMat.uniforms.uBase.value = base;
     this.marchMat.uniforms.uDetail.value = detail;
   }
@@ -435,7 +408,7 @@ export class CloudsPass implements FxPass {
     // The slab rides the camera's own height, so the deck is always overhead rather than underfoot
     // on a world whose ground climbs a kilometre.
     (u.uSlab.value as THREE.Vector2).set(cam.position.y + CLOUD_MARCH.bottom, cam.position.y + CLOUD_MARCH.top);
-    const cut = billowCutLocal(this.look.coverage, this.billow);
+    const cut = cutForCover(this.look.coverage, this.cover);
     (u.uLook.value as THREE.Vector3).set(cut, this.look.brightness, this.look.decks);
     // The volume is sampled at `p + drift`, so a feature moves the other way: the sign here is what
     // makes the cloud blow *toward* the wind's heading, the way the rain leans and the dust does
@@ -477,14 +450,3 @@ export class CloudsPass implements FxPass {
   }
 }
 
-/**
- * The calibrated cut, restated here so the pass needs no import from the world.
- *
- * Kept in step with `billowCut` in `src/world/cloudLook.ts` by a node test, on the same footing as
- * the palette and the display's geometry: two copies of one number, checked rather than trusted.
- */
-function billowCutLocal(coverage: number, billow: { lo: number; hi: number }): number {
-  const lo = Math.min(billow.lo, billow.hi);
-  const hi = Math.max(billow.lo, billow.hi);
-  return hi - (hi - lo) * Math.min(1, Math.max(0, coverage));
-}
