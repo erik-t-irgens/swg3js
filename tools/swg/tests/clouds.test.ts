@@ -225,6 +225,31 @@ function tile(alpha: number, grey: number, size = 16): Buffer {
   const layers = /cloudLayers\(out: readonly FxCloudLayer\[\]\): number \{[\s\S]*?\n  \}/.exec(sky)?.[0] ?? '';
   ok(layers.length > 0 && !/mesh\.visible/.test(layers), 'and a hidden sheet is still reported to the lens flare, which is dimmed by cloud rather than by what is drawn');
 
+  // **The two that made it draw nothing at all**, both of them invisible in the code and identical
+  // on screen to "the march found no cloud", which is why they are pinned rather than remembered.
+  //
+  // A full-screen pass writes every pixel of its target outright and the alpha it writes is data,
+  // not a blend factor. Left at three's default blending the composite's own `gl_FragColor.a`,
+  // which is the scene's alpha carried on, is read as coverage -- so wherever the scene's alpha is
+  // zero, which over a planet is the whole sky, the pass writes nothing whatever. Every other pass
+  // in the chain says `NoBlending` and this one did not.
+  ok((src.match(/blending: THREE\.NoBlending/g) ?? []).length === 2, 'the march and its composite both write outright, since the alpha they write is data and not a blend factor');
+  // And the depth product writes the far plane wherever nothing was drawn, so a sky pixel read as a
+  // surface stops the ray before it reaches a deck that is 8.6 km off ten degrees above the horizon.
+  ok(/depth < uFar \* 0\.999/.test(src), 'a pixel at the far plane is sky, not a surface the ray stops at');
+  ok(/u\.uFar\.value = ctx\.far/.test(src), 'and the far plane it is compared against is the frame\'s own');
+
+  // The same trap across the rest of the chain, since it is not the clouds' alone: a pass that turns
+  // the depth test off is drawing over the whole screen, and every one of them must say how it blends.
+  const fxDir = new URL('../../../src/core/fx/', import.meta.url);
+  for (const file of readdirSync(fxDir).filter((f) => f.endsWith('.ts'))) {
+    const text = readFileSync(new URL(file, fxDir), 'utf8');
+    for (const block of text.match(/new THREE\.ShaderMaterial\(\{[\s\S]*?\n {4}\}\)/g) ?? []) {
+      if (!/depthTest: false/.test(block)) continue;
+      ok(/blending: THREE\./.test(block), `${file}: a full-screen material says how it blends rather than taking three's default`);
+    }
+  }
+
   // The wind. A cloud must blow the way the rain leans, which is the sign on the drift and nothing else.
   ok(/uDrift\.value as THREE\.Vector2\)\.set\(-Math\.sin\(this\.look\.heading\)/.test(src), "the volume is sampled against the wind, so the cloud blows toward the heading as the rain and the dust do");
 }

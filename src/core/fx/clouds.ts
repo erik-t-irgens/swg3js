@@ -32,7 +32,7 @@
 import * as THREE from 'three';
 import type { FxFrameContext } from './context';
 import type { FxProductId, FxSettings } from '../fxRegistry.ts';
-import { createFxQuad, FX_CAMERA, type FxPass, type FxWarmItem } from './pass';
+import { createFxQuad, FX_CAMERA, type FxDebugTexture, type FxPass, type FxWarmItem } from './pass';
 import { FX_BILATERAL_UPSAMPLE, FX_FULLSCREEN_VERTEX, FX_HASH, FX_LINEARIZE, FX_PHASE_HG, FX_SLAB, FX_VIEW_POS } from './glsl';
 
 /**
@@ -89,7 +89,7 @@ uniform sampler2D uDepth;
 uniform sampler3D uBase;
 uniform sampler3D uDetail;
 uniform vec2 uTanHalfFov;
-uniform vec2 uNearFar;
+uniform float uFar;
 uniform mat3 uViewToWorld;
 uniform vec3 uCamera;
 uniform vec3 uSunDir;
@@ -176,8 +176,15 @@ void main() {
   vec3 viewDir = fxViewPos(vUv, 1.0, uTanHalfFov);
   vec3 dir = normalize(uViewToWorld * viewDir);
   // Anything solid ends the ray: a cloud is sky.
+  //
+  // **A pixel at the far plane is sky, not a surface nine kilometres off.** The half-resolution
+  // depth writes the far plane wherever nothing was drawn, which over a planet is most of the
+  // upper half of the screen, and read as a surface it stops every ray before it reaches the deck:
+  // the deck hangs 1500 m up, so at ten degrees above the horizon it is already 8.6 km away and at
+  // five degrees it is seventeen, both of them past a 9 km far plane. That is a sky with no cloud
+  // in it anywhere except straight overhead, which is exactly what it looked like.
   float depth = texture(uDepth, vUv).r;
-  float solid = depth > 0.0 ? depth : ${CLOUD_MARCH.reach.toFixed(1)};
+  float solid = (depth > 0.0 && depth < uFar * 0.999) ? depth : ${CLOUD_MARCH.reach.toFixed(1)};
   vec2 hit = fxSlab(uCamera, dir, vec3(-1e7, uSlab.x, -1e7), vec3(1e7, uSlab.y, 1e7));
   float near = max(hit.x, 0.0);
   float far = min(min(hit.y, solid), ${CLOUD_MARCH.reach.toFixed(1)});
@@ -228,7 +235,6 @@ uniform sampler2D uScene;
 uniform sampler2D uClouds;
 uniform sampler2D uDepthHalf;
 uniform sampler2D uDepthFull;
-uniform ivec2 uHalfSize;
 uniform float uAmount;
 
 ${FX_BILATERAL_UPSAMPLE}
@@ -237,7 +243,9 @@ void main() {
   vec4 scene = texture(uScene, vUv);
   ivec2 t00, t10, t01, t11;
   vec4 w;
-  fxHalfTaps(gl_FragCoord.xy, uHalfSize, t00, t10, t01, t11, w);
+  // Asked of the texture rather than handed over, as the light shafts do: one fewer uniform that
+  // can be a size the march is no longer running at.
+  fxHalfTaps(gl_FragCoord.xy, textureSize(uClouds, 0), t00, t10, t01, t11, w);
   // Weighted by how close each half texel's own depth is to this pixel's. Without it the clouds
   // halo every ridge, because a half texel that saw sky is blended into a pixel that saw rock.
   float mine = texture(uDepthFull, vUv).r;
@@ -259,7 +267,12 @@ export class CloudsPass implements FxPass {
   private readonly compositeMat: THREE.ShaderMaterial;
   private readonly marchQuad: THREE.Mesh;
   private readonly compositeQuad: THREE.Mesh;
-  private target: THREE.WebGLRenderTarget | null = null;
+  /**
+   * The march's own buffer. Made once and resized, never made again: the debug view holds the
+   * texture it was given, and a target rebuilt on every quality change would hand it a dead one.
+   */
+  private readonly target: THREE.WebGLRenderTarget;
+  private readonly debug: readonly FxDebugTexture[];
   private width = 1;
   private height = 1;
   private quality = 0.5;
@@ -284,12 +297,17 @@ export class CloudsPass implements FxPass {
       fragmentShader: cloudFragment(),
       depthTest: false,
       depthWrite: false,
+      // Both of these write every pixel of their target outright, and the alpha they write is data
+      // -- how much light came through the cloud, and then the scene's own alpha carried on -- not
+      // a blend factor. Left at three's default the composite's alpha would be read as coverage and
+      // the pass would write nothing at all wherever the scene's alpha was zero, which is the sky.
+      blending: THREE.NoBlending,
       uniforms: {
         uDepth: { value: null },
         uBase: { value: null },
         uDetail: { value: null },
         uTanHalfFov: { value: new THREE.Vector2(1, 1) },
-        uNearFar: { value: new THREE.Vector2(0.05, 9000) },
+        uFar: { value: 9000 },
         uViewToWorld: { value: new THREE.Matrix3() },
         uCamera: { value: new THREE.Vector3() },
         uSunDir: { value: new THREE.Vector3(0, 1, 0) },
@@ -311,17 +329,30 @@ export class CloudsPass implements FxPass {
       fragmentShader: COMPOSITE_FRAGMENT,
       depthTest: false,
       depthWrite: false,
+      blending: THREE.NoBlending,
       uniforms: {
         uScene: { value: null },
         uClouds: { value: null },
         uDepthHalf: { value: null },
         uDepthFull: { value: null },
-        uHalfSize: { value: new THREE.Vector2(1, 1) },
         uAmount: { value: 1 },
       },
     });
     this.marchQuad = createFxQuad(this.marchMat);
     this.compositeQuad = createFxQuad(this.compositeMat);
+    this.target = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, depthBuffer: false, stencilBuffer: false, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter });
+    this.target.texture.name = 'fx.volumetricClouds';
+    // `march` is the light the ray gathered and `clear` is what it let through, white where the ray
+    // found nothing at all. Between them they separate "the march drew nothing" from "the upsample
+    // threw it away", which from the picture alone look exactly the same.
+    this.debug = [
+      { name: 'march', texture: this.target.texture, channels: 'rgb' },
+      { name: 'clear', texture: this.target.texture, channels: 'a' },
+    ];
+  }
+
+  debugTextures(): readonly FxDebugTexture[] {
+    return this.debug;
   }
 
   /**
@@ -375,26 +406,19 @@ export class CloudsPass implements FxPass {
     this.height = Math.max(1, height);
     this.quality = Math.min(1, Math.max(0.25, (settings as { volumetricCloudQuality?: number }).volumetricCloudQuality ?? 0.5));
     this.amount = Math.min(1, Math.max(0, (settings as { volumetricCloudAmount?: number }).volumetricCloudAmount ?? 1));
-    const w = Math.max(1, Math.round(this.width * this.quality));
-    const h = Math.max(1, Math.round(this.height * this.quality));
-    if (this.target && (this.target.width !== w || this.target.height !== h)) {
-      this.target.dispose();
-      this.target = null;
-    }
-    if (!this.target) {
-      this.target = new THREE.WebGLRenderTarget(w, h, { type: THREE.HalfFloatType, depthBuffer: false, stencilBuffer: false, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter });
-    }
+    this.target.setSize(Math.max(1, Math.round(this.width * this.quality)), Math.max(1, Math.round(this.height * this.quality)));
   }
 
   render(ctx: FxFrameContext, input: THREE.WebGLRenderTarget, output: THREE.WebGLRenderTarget | null): boolean {
     const g = ctx.renderer;
     const target = this.target;
-    if (!target || !this.base) return false;
+    if (!this.base) return false;
     const cam = ctx.camera;
     const u = this.marchMat.uniforms;
     const tan = Math.tan(((cam.fov * Math.PI) / 180) / 2);
     (u.uTanHalfFov.value as THREE.Vector2).set(tan * cam.aspect, tan);
-    (u.uNearFar.value as THREE.Vector2).set(cam.near, cam.far);
+    // What the depth product writes where nothing was drawn, which the march must read as sky.
+    u.uFar.value = ctx.far;
     (u.uViewToWorld.value as THREE.Matrix3).setFromMatrix4(cam.matrixWorld);
     (u.uCamera.value as THREE.Vector3).copy(cam.position);
     // The sun the rest of the scene is lit by, which is where every world's own colour comes from.
@@ -432,7 +456,6 @@ export class CloudsPass implements FxPass {
     c.uClouds.value = target.texture;
     c.uDepthHalf.value = ctx.products.linearDepthHalf ?? null;
     c.uDepthFull.value = ctx.depth;
-    (c.uHalfSize.value as THREE.Vector2).set(target.width, target.height);
     c.uAmount.value = this.amount;
     g.setRenderTarget(output);
     g.render(this.compositeQuad, FX_CAMERA);
@@ -448,8 +471,7 @@ export class CloudsPass implements FxPass {
   }
 
   dispose(): void {
-    this.target?.dispose();
-    this.target = null;
+    this.target.dispose();
     this.marchMat.dispose();
     this.compositeMat.dispose();
   }

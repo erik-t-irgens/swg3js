@@ -1666,6 +1666,9 @@ class App {
        * next frame; the rest (`density`, `detailBite`, `gForward`, `powder`, `ambientTop`, ...) are
        * constants in the program, so moving one rebuilds it once. `{ coverage }` overrides what the
        * world says, so a clear world can be flown under an overcast to time it; null gives it back.
+       * `__debug.fxView('volumetricClouds.march')` shows what the ray gathered and `'.clear'` what it
+       * let through (white where it found nothing), which is how to tell a march that drew nothing
+       * from an upsample that threw it away.
        */
       clouds: (opts?: Partial<typeof CLOUD_MARCH> & { coverage?: number | null; brightness?: number | null; drift?: number | null; standDownDust?: number | null }) => {
         const fx = this.postfx;

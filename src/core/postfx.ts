@@ -264,9 +264,16 @@ export class PostFX {
   configure(settings: FxSettings): void {
     const ssao = this.settings.ssaoResolution;
     const water = this.settings.waterReflectionResolution;
+    // The clouds take their strength from `setSize` as well as their resolution, so the resize is
+    // on either of the two and not on the resolution alone.
+    const cloudQuality = this.settings.volumetricCloudQuality;
+    const cloudAmount = this.settings.volumetricCloudAmount;
     Object.assign(this.settings, settings);
     if (this.settings.ssaoResolution !== ssao) this.byPassId.get('ssao')?.setSize(this.sizeV.x, this.sizeV.y, this.settings);
     if (this.settings.waterReflectionResolution !== water) this.byPassId.get('waterReflections')?.setSize(this.sizeV.x, this.sizeV.y, this.settings);
+    if (this.settings.volumetricCloudQuality !== cloudQuality || this.settings.volumetricCloudAmount !== cloudAmount) {
+      this.byPassId.get('volumetricClouds')?.setSize(this.sizeV.x, this.sizeV.y, this.settings);
+    }
   }
 
   begin(): void {
