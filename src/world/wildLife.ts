@@ -289,6 +289,35 @@ export class WildLife {
     this.last.bodies = n;
   }
 
+  /**
+   * For the console: the sites laid nearest this point, standing or not, in the world's own frame.
+   *
+   * A world lays hundreds of these over sixteen kilometres and stands only the four you are next
+   * to, so "is any of this working" is not a question the view can answer by itself: this is what
+   * says where the nearest one is so somebody can go and look at it.
+   */
+  nearest(at: THREE.Vector3, centre: { x: number; z: number } | null, n = 5): { key: string; lair: string; x: number; z: number; away: number; up: boolean }[] {
+    if (!centre) return [];
+    const out = this.sites.map((s) => {
+      const w = intoWorld(s.x, s.z, centre);
+      return { key: s.key, lair: s.lair, x: Math.round(w.x), z: Math.round(w.z), away: Math.round(Math.hypot(w.x - at.x, w.z - at.z)), up: this.standing.has(s.key) };
+    });
+    return out.sort((a, b) => a.away - b.away).slice(0, n);
+  }
+
+  /** What one site would stand, without standing it: for the console, and for a check. */
+  holds(key: string): { lair: string; creatures: string[] } | null {
+    const site = this.sites.find((s) => s.key === key);
+    const def = site ? this.manifest?.lairs[site.lair] : null;
+    if (!site || !def) return null;
+    const who: string[] = [];
+    for (let i = 0; i < standingAt(def, site.seed); i++) {
+      const c = creatureAt(def, site.seed, i);
+      if (c) who.push(c);
+    }
+    return { lair: site.lair, creatures: who };
+  }
+
   /** For the console: every site that is standing, nearest first. */
   report(at: THREE.Vector3, centre: { x: number; z: number } | null): { key: string; lair: string; bodies: number; broken: boolean; away: number }[] {
     const out: { key: string; lair: string; bodies: number; broken: boolean; away: number }[] = [];

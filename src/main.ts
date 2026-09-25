@@ -92,6 +92,8 @@ import { createCloudLayers, createSkyLights, flareLook, tuneFlareLook } from './
 import { MAX_CLOUD_LAYERS, MAX_FLARE_SOURCES } from './core/fx/flareMath';
 import { SPACE_SKY_TUNE, tuneSpaceSky, type SunRule } from './space/suns';
 import { heatTuning, type HeatProduct } from './core/fx/heat';
+import { wildLife, WILD_TUNE } from './world/wildLife.ts';
+import { LAIR_TUNE } from './world/mobiles/lairs.ts';
 import { CLOUD_MARCH, type CloudsPass } from './core/fx/clouds';
 import { CLOUD_TUNE, cloudLook, loadCloudPack, loadCloudVolumes, worthDrawing, type CloudPack } from './world/cloudLook.ts';
 import { tuneUnderwater, unknownUnderwaterKeys, type UnderwaterTune } from './core/fx/underwaterMath.ts';
@@ -1347,6 +1349,34 @@ class App {
         this.player.reset(at);
         if (yaw !== undefined) this.cam.yaw = yaw;
         return { cell: this.world.enterCellAt(at) };
+      },
+      /**
+       * The world's own wildlife: what is laid, what is standing, and where the nearest one is.
+       *
+       * A world lays hundreds of sites over sixteen kilometres and stands only the handful you are
+       * next to, so the view alone cannot answer "is any of this working": `nearest` says where they
+       * are and `{ go: true }` puts you at the closest one. `holds` says which animals a site would
+       * stand before it stands them. With no pack converted it answers `ready: false` and the world
+       * has exactly the wildlife it always had.
+       */
+      wild: (opts?: { go?: boolean; restand?: boolean; near?: number }) => {
+        if (opts?.restand) wildLife.restand();
+        const centre = this.world.layoutCenter;
+        const at = this.player.worldPos;
+        const near = wildLife.nearest(at, centre, Math.max(1, Math.min(20, opts?.near ?? 5)));
+        if (opts?.go && near.length) {
+          const s = near[0];
+          const y = this.world.terrain.heightAt(s.x, s.z) + 0.3;
+          this.player.reset(new THREE.Vector3(s.x, y, s.z));
+          return { went: s, holds: wildLife.holds(s.key), note: 'the site stands on the next pass, which is a second or two' };
+        }
+        return {
+          ready: wildLife.ready,
+          ...wildLife.last,
+          standing: wildLife.report(at, centre),
+          nearest: near,
+          tune: { ...WILD_TUNE, ...LAIR_TUNE },
+        };
       },
       /** Teleport to a point in the original game's coordinates (the inverse of `swg()`); null when no layout is loaded. */
       teleportSwg: (x: number, z: number, yaw?: number) => {
