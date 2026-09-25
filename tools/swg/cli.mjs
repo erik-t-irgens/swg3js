@@ -5758,6 +5758,58 @@ switch (cmd) {
     }
     const lairOut = {};
     for (const [name, l] of lairs) lairOut[name] = { kind: l.kind, mobiles: l.mobiles, boss: l.boss, cap: l.cap, nest: l.nest, building: l.building, people: l.people };
+
+    // The nests themselves, when the archives are to hand.
+    //
+    // A lair is a thing you walk up to and knock down, so it needs a model, and its model is in no
+    // planet pack: the client never placed one, the server stood them. They are converted here
+    // rather than by the snapshot for that reason, and only the ones a spawn area can really reach.
+    // Without `--swg` the rest of the command still runs and the pack simply has no nests, which is
+    // a world of herds and no lairs rather than a broken one.
+    const nests = {};
+    if (options.swg) {
+      const vfs = mount(options.swg);
+      const cache = new Map();
+      const nestDir = join(dir, 'nests');
+      mkdirSync(nestDir, { recursive: true });
+      // Only what a region can reach, and only the ones that are really a nest: the rest of the
+      // `buildings*` column names a camp or a base, which is a portal building and another wave's.
+      const wanted = new Set();
+      for (const [, r] of regions) {
+        for (const a of r.spawn) {
+          for (const g of a.groups) {
+            for (const s of groups.get(g) ?? []) {
+              const l = lairs.get(s.lair);
+              if (l?.nest && /\/tangible\//.test(l.nest)) wanted.add(l.nest);
+            }
+          }
+        }
+      }
+      let made = 0;
+      let failed = 0;
+      for (const template of wanted) {
+        try {
+          const r = resolveTemplateMesh(vfs, template, cache);
+          if (r.skip || !r.parts?.length) {
+            failed++;
+            continue;
+          }
+          const single = r.parts.length === 1 && !r.parts[0].transform && !r.effects?.length && !r.parts[0].hardpoints?.length;
+          const id = familyOf(single ? r.parts[0].mesh : r.appearance);
+          if (!nests[template]) {
+            if (!existsSync(join(nestDir, `${id}.glb`))) {
+              const conv = convertOne(vfs, single ? r.parts[0].mesh : r.appearance, join(nestDir, `${id}.glb`));
+              const b = conv.mesh.bounds ?? { min: [0, 0, 0], max: [0, 0, 0] };
+              nests[template] = { id, file: `nests/${id}.glb`, bounds: conv.flipX ? { min: [-b.max[0], b.min[1], b.min[2]], max: [-b.min[0], b.max[1], b.max[2]] } : b, triangles: conv.tris };
+            } else nests[template] = { id, file: `nests/${id}.glb` };
+            made++;
+          }
+        } catch {
+          failed++;
+        }
+      }
+      console.log(`spawns: ${made} nest models written${failed ? `, ${failed} that would not convert` : ''}`);
+    }
     const groupOut = {};
     for (const [name, g] of groups) groupOut[name] = g;
     writeFileSync(
@@ -5767,10 +5819,11 @@ switch (cmd) {
           format: 1,
           source: 'core3',
           converted: new Date().toISOString(),
-          counts: { creatures: joined.size, unmatched: missing.length, lairs: lairs.size, groups: groups.size },
+          counts: { creatures: joined.size, unmatched: missing.length, lairs: lairs.size, groups: groups.size, nests: Object.keys(nests).length },
           creatures: creatureOut,
           lairs: lairOut,
           groups: groupOut,
+          nests,
           // Named rather than dropped in silence: a creature the server stood that this game has no
           // body for is a hole in the world, and the only way anybody finds out is if it is written.
           unmatched: missing.slice(0, 400).map((m) => `${m.who} (${m.template})`),
