@@ -228,6 +228,32 @@ if (!core3 || !existsSync(join(core3, 'managers', 'planet'))) {
     ok(snapshot === checked, `on all ${checked} worlds the ground agrees with the numbers as they stand, so they are the snapshot's and the runtime applies the world's own mirror on top`);
   }
 
+  // The people indoors, whose position is a spot in a room and nowhere on a planet until the room
+  // it names is resolved. **The failure to guard against is the transform silently becoming the
+  // identity**, which is what happens if the cell's own transform is read instead of the one its
+  // building gives it: every row then keeps its little cell-local numbers, nothing throws, and
+  // several thousand people stand in a heap at the middle of the world.
+  let indoorRows = 0;
+  let moved = 0;
+  let withRoom = 0;
+  for (const world of CORE3_WORLDS) {
+    const f = join('assets-private', world, 'spawns.json');
+    if (!existsSync(f)) continue;
+    const pack = JSON.parse(readFileSync(f, 'utf8')) as { statics: { cell: number; room?: number | null; local?: number[]; x: number; y: number; z: number }[] };
+    for (const p of pack.statics) {
+      if (!p.cell) continue;
+      indoorRows++;
+      if (typeof p.room === 'number') withRoom++;
+      if (p.local && Math.hypot(p.x - p.local[0], p.z - p.local[2]) > 1) moved++;
+    }
+  }
+  if (indoorRows) {
+    ok(withRoom === indoorRows, `all ${indoorRows} people indoors name the room they stand in, so the runtime puts them in a cell rather than guessing from a point`);
+    ok(moved > indoorRows * 0.95, `${moved} of them were really carried out of their room's own frame into the world, which is what the identity bug would undo`);
+  } else {
+    note('no indoor people in these packs, so the room resolution was not measured (it wants --swg)');
+  }
+
   // And the join, on the real catalogue.
   const catFile = join('assets-private', 'mobiles', 'catalogue.json');
   if (existsSync(catFile)) {

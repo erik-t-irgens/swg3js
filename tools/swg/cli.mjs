@@ -5683,6 +5683,9 @@ switch (cmd) {
     }
     const c3 = await import('./core3.mjs');
     const trn = await import('../../src/swg/terrain/trn.ts');
+    // Mounted once when the archives are offered: the nests are converted from it and every world's
+    // snapshot is read from it to put the indoor people where they really stand.
+    const spawnVfs = options.swg ? mount(options.swg) : null;
     /**
      * The pack's own ground, as a function of x and z, for the frame check.
      *
@@ -5759,6 +5762,52 @@ switch (cmd) {
     const lairOut = {};
     for (const [name, l] of lairs) lairOut[name] = { kind: l.kind, mobiles: l.mobiles, boss: l.boss, cap: l.cap, nest: l.nest, building: l.building, people: l.people };
 
+    // Where the indoor people really stand, when the archives are to hand.
+    //
+    // **A person inside a building carries a position in that room's own frame and a number naming
+    // the room**, and that number is the client's own object id for the cell -- the emulator kept
+    // the world snapshot's ids, so the two join. Without the join those 2,524 rows are unusable:
+    // a position of (-3.5, -12.7, -6.7) is a spot in a cantina and nowhere on a planet.
+    //
+    // The snapshot's own structure is what makes it work, and it is the structure CLAUDE.md already
+    // records: an object indoors is contained by a **cell object** whose transform is identity and
+    // whose `cellIndex` is the room, and that cell is contained by the building. So the cell's
+    // world transform is the building's, and a person's world place is that transform applied to
+    // the position they were written with. The room number travels with them so the runtime knows
+    // which cell to put them in rather than guessing from a point.
+    const roomsOf = (world) => {
+      const out = new Map();
+      if (!options.swg) return out;
+      try {
+        const ws = `snapshot/${world}.ws`;
+        if (!spawnVfs.has(ws)) return out;
+        const snap = parseSnapshot(parseIff(spawnVfs.read(ws)));
+        const flat = flattenWithWorldTransforms(snap);
+        for (const { node, world } of flat) {
+          if (!node || !world || !(node.cellIndex > 0)) continue;
+          const tpl = snap.templates[node.templateIndex] ?? '';
+          if (!/\/cell\//.test(tpl)) continue;
+          // `world` is the flattener's own answer for this node, which for a cell is its building's
+          // -- a cell's own transform is identity. Reading `node.q`/`node.pos` instead gives exactly
+          // that identity and leaves every person standing at the middle of the world.
+          out.set(node.id, { cellIndex: node.cellIndex, q: world.q, pos: world.pos });
+        }
+      } catch {
+        /* a world whose snapshot will not read simply keeps its people indoors and unplaced */
+      }
+      return out;
+    };
+    /** A point in a room's own frame, put into the world by that room's transform. */
+    const intoWorld = (room, p) => {
+      const [w, x, y, z] = room.q;
+      const t = [2 * (y * p.z - z * p.y), 2 * (z * p.x - x * p.z), 2 * (x * p.y - y * p.x)];
+      return {
+        x: room.pos[0] + p.x + w * t[0] + (y * t[2] - z * t[1]),
+        y: room.pos[1] + p.y + w * t[1] + (z * t[0] - x * t[2]),
+        z: room.pos[2] + p.z + w * t[2] + (x * t[1] - y * t[0]),
+      };
+    };
+
     // The nests themselves, when the archives are to hand.
     //
     // A lair is a thing you walk up to and knock down, so it needs a model, and its model is in no
@@ -5768,7 +5817,6 @@ switch (cmd) {
     // a world of herds and no lairs rather than a broken one.
     const nests = {};
     if (options.swg) {
-      const vfs = mount(options.swg);
       const cache = new Map();
       const nestDir = join(dir, 'nests');
       mkdirSync(nestDir, { recursive: true });
@@ -5789,7 +5837,7 @@ switch (cmd) {
       let failed = 0;
       for (const template of wanted) {
         try {
-          const r = resolveTemplateMesh(vfs, template, cache);
+          const r = resolveTemplateMesh(spawnVfs, template, cache);
           if (r.skip || !r.parts?.length) {
             failed++;
             continue;
@@ -5798,7 +5846,7 @@ switch (cmd) {
           const id = familyOf(single ? r.parts[0].mesh : r.appearance);
           if (!nests[template]) {
             if (!existsSync(join(nestDir, `${id}.glb`))) {
-              const conv = convertOne(vfs, single ? r.parts[0].mesh : r.appearance, join(nestDir, `${id}.glb`));
+              const conv = convertOne(spawnVfs, single ? r.parts[0].mesh : r.appearance, join(nestDir, `${id}.glb`));
               const b = conv.mesh.bounds ?? { min: [0, 0, 0], max: [0, 0, 0] };
               nests[template] = { id, file: `nests/${id}.glb`, bounds: conv.flipX ? { min: [-b.max[0], b.min[1], b.min[2]], max: [-b.min[0], b.max[1], b.max[2]] } : b, triangles: conv.tris };
             } else nests[template] = { id, file: `nests/${id}.glb` };
@@ -5844,7 +5892,26 @@ switch (cmd) {
         noWorld.push(world);
         continue;
       }
-      const rows = (statics.get(world) ?? []).filter((s) => joined.has(s.who)).map((s) => ({ ...s, id: joined.get(s.who).id }));
+      const rooms = roomsOf(world);
+      let placedIndoors = 0;
+      let lostIndoors = 0;
+      const rows = (statics.get(world) ?? [])
+        .filter((s) => joined.has(s.who))
+        .map((s) => {
+          const row = { ...s, id: joined.get(s.who).id };
+          if (!s.cell) return row;
+          const room = rooms.get(s.cell);
+          if (!room) {
+            // Their position is a spot in a room and nowhere on a planet, so it is not a place.
+            lostIndoors++;
+            return { ...row, room: null };
+          }
+          placedIndoors++;
+          const at = intoWorld(room, { x: s.x, y: s.y, z: s.z });
+          return { ...row, ...at, room: room.cellIndex, local: [s.x, s.y, s.z] };
+        })
+        .filter((s) => s.cell === 0 || s.room !== null);
+      if (rooms.size) console.log(`spawns: ${world} — ${placedIndoors} people put in their own rooms${lostIndoors ? `, ${lostIndoors} whose room is in no snapshot and are left out` : ''}`);
       // Which frame the numbers are in, asked of the ground rather than of anything built from the
       // same scripts. `heightCheck` says why that distinction is the whole of it.
       const frame = c3.heightCheck(rows, terrainHeights(out));
