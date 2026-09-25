@@ -35,6 +35,7 @@ import { CHUNK_RES, CHUNK_SIZE, Terrain } from './terrain';
 import { SwgTerrain, type BuildingLayerSource, type SwgWaterTable } from './swgTerrain';
 import { LayoutStreamer, type Building, type CellState, type PlacedObject } from './layoutStream';
 import { outdoorNav } from './nav/outdoorNav.ts';
+import { wildLife, type WildDeps } from './wildLife.ts';
 import { CLONING_TUNE, facilitiesNear, SPAWN_CELL_NAME, type FacilityChoice, type NamedPlace } from './cloning.ts';
 import { isLiftCell, liftStops, stopAt, type LiftStop } from './lifts';
 import type { SunInfo } from '../core/postfx';
@@ -1369,6 +1370,11 @@ export class World {
     // the last one's ground.
     await outdoorNav.load(this.packId);
     if (token !== this.loadToken) return null;
+    // The world's own wildlife: where the server's spawn areas are and what may stand in them. A
+    // few hundred kilobytes a world beside the fleet's one manifest, and a world with no such pack
+    // simply has the wildlife it always had.
+    await wildLife.load(this.packId, import.meta.env.BASE_URL);
+    if (token !== this.loadToken) return null;
     this.packProgress = 0.12;
 
     const scatter: ScatterItem[] = [];
@@ -1583,6 +1589,7 @@ export class World {
     // The outdoor walkability grid: about forty megabytes of typed arrays for a 16 km world, and
     // nothing else holds them.
     outdoorNav.unload();
+    wildLife.unload();
     // The water's height field holds a mesh and a material per thing that waded here, and the keys
     // are the bodies themselves: a world left with them still in the map holds every one of them.
     for (const body of this.simBodies.values()) body.dispose();
@@ -4167,6 +4174,29 @@ export class World {
     return this.particles?.status ?? 'no particle effects';
   }
 
+  /**
+   * What the wild world is allowed to ask of this one. Kept, not built per step: it is handed over
+   * on every frame and nothing here may allocate in a frame.
+   */
+  private wildDepsKept: WildDeps | null = null;
+  private wildDeps(): WildDeps {
+    if (!this.wildDepsKept) {
+      this.wildDepsKept = {
+        catalogue: () => this.mobileCatalogue,
+        // `origin: 'world'` is how the manager is told this is not somebody's hand-spawn, so the
+        // NPC tab's own cap never refuses a lair and the tab's clear never sweeps one.
+        spawn: (entry, at, seed) => this.mobiles?.spawn(entry, at, { origin: 'ambient', seed, worldId: `wild:${seed}` }) ?? 'no world',
+        remove: (m) => this.mobiles?.remove(m),
+        groundAt: (x, z) => this.terrain.heightAt(x, z),
+        centre: () => this.layoutCenter,
+        // It holds when the streamer holds (an ultra cruise pins both), and never runs at all for
+        // the creation and selection screens, which are a cut-out world with no streaming.
+        held: () => this.streamHold || this.sceneOnly || !this.simulating,
+      };
+    }
+    return this.wildDepsKept;
+  }
+
   get layoutCenter(): { x: number; z: number } | null {
     return this.pack?.layout?.center ?? null;
   }
@@ -4732,6 +4762,9 @@ export class World {
     const targets = this.targets(true);
     this.creatures.update(dt, playerPos, this.hurtPlayer);
     this.mobiles?.update(dt, { now: this.simTime, dt, camera, playerPos, targets });
+    // The world's own lairs and herds, stood and put away as the player moves. On this clock and
+    // not the frame's, so `__debug.advance` drives every respawn it has.
+    wildLife.step(dt, this.simTime, playerPos, this.wildDeps());
     // `playerPos` is only read by a fighter under a long walk (`src/world/errand.ts`), which measures
     // how far the body was from the player to know whether anything along the route was solid. It is
     // handed in rather than picked out of `targets`, because the player leaves that list while
