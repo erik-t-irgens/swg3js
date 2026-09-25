@@ -5889,6 +5889,10 @@ class App {
     if (this.player.aboard) this.leaveShip(true);
     this.player.noclip = false;
     this.inWorld = false;
+    // Whatever was built on the world being left is forgotten outright, not merely taken down: the
+    // next character may be a different player entirely, and the server tells a browser what is
+    // built where when it says hello.
+    homes.clear();
     // The world is going and the group with it: the strip comes down here, because the frame that
     // would notice stops being run the moment there is no world, and a roster left standing behind
     // the select screen is last night's group with last night's distances on it.
@@ -7292,10 +7296,9 @@ class App {
     // before one would otherwise say what it hurt on the planet arrived at.
     this.shipHud.clear();
     this.feedback.clear();
-    // The buildings players have put down go with the world that held them: the next world's list
-    // comes whole from the server on arriving, and a row kept from this one would be a house
-    // standing in the wrong place with nothing left to take it down.
-    homes.clear();
+    // Nothing anybody built is standing once this world unloads; whether the list itself is thrown
+    // away turns on whether the world really changed, and `Homes.enter` says why.
+    homes.enter(`${planet.id}:${this.zone ?? ''}`);
     this.world.load(planet, packIdOf(planet, this.zone));
     // This world's named places, off the same list the map reads and cached there: what the death
     // card calls each facility. Never awaited, and a world whose pack has no list simply has none.

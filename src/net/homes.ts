@@ -67,15 +67,34 @@ export class Homes {
     this.deps = deps;
   }
 
+  /** Which world these rows are about, so entering the same one again is told from a change of world. */
+  private world = '';
+
   /**
-   * A world went away and took every building with it. The rows go too: the next world's list comes
-   * whole from the server, and a row kept from the last one would be a house standing in the wrong
-   * place with nothing to take it down.
+   * A world is being loaded. Everything built in the old one went with it, so nothing is standing
+   * any more whatever happens next.
+   *
+   * Whether the **rows** go too is the part that is not obvious. A row is what the server says is
+   * built on a world, and the server sends that list only when a browser *changes* world -- so on a
+   * respawn, a reload or any other arrival back where you already were, throwing the rows away
+   * would leave the houses gone with nothing left to ask for them again. So the rows go only when
+   * the world really changes, and `ready` puts the same ones back up when it does not.
    */
+  enter(world: string): void {
+    this.standing.clear();
+    this.busy.clear();
+    if (world !== this.world) {
+      this.rows.clear();
+      this.world = world;
+    }
+  }
+
+  /** Everything forgotten, whatever world it was: leaving for the select screen, or a test. */
   clear(): void {
     this.standing.clear();
     this.rows.clear();
     this.busy.clear();
+    this.world = '';
   }
 
   /**

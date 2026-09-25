@@ -164,13 +164,44 @@ const settle = () => new Promise((r) => setTimeout(r, 0));
 
 {
   const w = world();
+  w.h.enter('tatooine:');
   w.h.word({ t: 'homes', world: 'tatooine', rows: [row('h1'), row('h2', { x: 500 })] });
   await settle();
-  w.h.clear();
-  ok(w.h.report().standing === 0 && w.h.report().rows.length === 0, 'leaving a world forgets every building on it');
+  w.h.enter('naboo:');
+  ok(w.h.report().standing === 0 && w.h.report().rows.length === 0, 'going to another world forgets every building on the one left behind');
   w.h.word({ t: 'homes', world: 'naboo', rows: [row('h1')] });
   await settle();
   ok(w.placed.length === 3, 'so the same id on the next world is stood up rather than skipped');
+}
+
+{
+  // The one the server cannot help with: it sends the list only when a browser changes world, so
+  // arriving back where you already were -- a respawn, a reload -- must not throw the list away.
+  const w = world();
+  w.h.enter('tatooine:');
+  w.h.word({ t: 'homes', world: 'tatooine', rows: [row('h1'), row('h2', { x: 500 })] });
+  await settle();
+  ok(w.h.report().standing === 2, 'two houses are standing');
+  w.h.enter('tatooine:');
+  ok(w.h.report().standing === 0, 'a world reloading takes them down with it');
+  ok(w.h.report().rows.length === 2, 'but what the server said is built there is kept, because it will not be said again');
+  w.h.ready();
+  await settle();
+  ok(w.h.report().standing === 2, 'and they go back up when the world is ready');
+  ok(w.placed.length === 4, 'each one built again, since the world it was built in is gone');
+}
+
+{
+  const w = world();
+  w.h.enter('tatooine:');
+  w.h.word({ t: 'homes', world: 'tatooine', rows: [row('h1')] });
+  await settle();
+  w.h.clear();
+  ok(w.h.report().rows.length === 0, 'leaving for the select screen forgets everything, whatever world it was');
+  w.h.enter('tatooine:');
+  w.h.ready();
+  await settle();
+  ok(w.placed.length === 1, 'and coming back to the same world builds nothing until the server says so again');
 }
 
 // ---------------------------------------------------------------- what it says and what it sends
