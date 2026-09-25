@@ -13,7 +13,17 @@
  * `__debug.clouds`, and the ones the shader bakes in rebuild its program when they move.
  */
 export const CLOUD_MARCH = {
-  /** Where the deck sits, in metres above the camera's own height. The sheets' own altitudes. */
+  /**
+   * Where the deck sits, in metres, at the sheets' own altitudes and in the same frame they hang
+   * in: the world's, not the camera's.
+   *
+   * It rode the camera at first, on the reasoning that a world whose ground climbs a kilometre
+   * would otherwise have cloud underfoot. That is wrong twice over. The client's own sheets hang at
+   * a fixed height (their group sits at zero and each sheet at its altitude), so a deck that
+   * follows the eye is not the deck the sheets were in; and a deck always exactly fifteen hundred
+   * metres overhead is one no ship can ever climb into, which is most of the point of having a
+   * volume at all. Cloud underfoot on a high plateau is the price, and it is the client's price too.
+   */
   bottom: 1500,
   top: 2300,
   /** How far along the ray to bother, in metres. Past this the haze has the sky anyway. */

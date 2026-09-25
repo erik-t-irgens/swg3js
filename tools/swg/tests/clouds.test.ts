@@ -265,8 +265,11 @@ function tile(alpha: number, grey: number, size = 16): Buffer {
   // Nothing in the march may ask for a light or write depth: both would reach outside the pass.
   ok(!/castShadow|PointLight|DirectionalLight/.test(src), 'the march asks for no light, so no material anywhere recompiles when it is switched on');
   ok(/depthWrite: false/.test(src) && !/depthWrite: true/.test(src), 'and writes no depth, which is what keeps a cloud pixel sky to the god rays');
-  // The slab rides the camera, or a world whose ground climbs a kilometre has cloud underfoot.
-  ok(/uSlab\.value as THREE\.Vector2\)\.set\(cam\.position\.y \+/.test(src), "the deck rides the camera's own height rather than sitting at a fixed altitude");
+  // The deck hangs where the sheets hang and does not follow the eye. One that follows is a ceiling
+  // exactly fifteen hundred metres up wherever you go, which no ship can ever climb into and which
+  // rolls as you walk, and that is what it looked like.
+  ok(/uSlab\.value as THREE\.Vector2\)\.set\(CLOUD_MARCH\.bottom, CLOUD_MARCH\.top\)/.test(src), 'the deck hangs at a fixed altitude in the world, so a ship can fly up into it');
+  ok(!/cam\.position\.y \+ CLOUD_MARCH/.test(src), 'and nothing adds the camera back on');
 
   // The owner asked for the march to stand where the sheets stand, and the sheets to stand down for
   // it. Both are two files apart, so both are read as text here.

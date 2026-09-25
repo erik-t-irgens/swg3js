@@ -260,8 +260,11 @@ export class CloudsPass implements FxPass {
    * is the runner's, and a coverage of 0 is how the world says it has no cloud to draw.
    */
   look = { coverage: 0, brightness: 1, decks: 1, drift: 0, heading: 0 };
-  /** For the console: what the last frame really did. */
-  last = { drew: false, coverage: 0, cut: 0, steps: 0, size: [0, 0] as [number, number] };
+  /**
+   * For the console: what the last frame really did, and where the deck stood relative to the eye,
+   * which is the one thing that cannot be read off the picture.
+   */
+  last = { drew: false, coverage: 0, cut: 0, steps: 0, size: [0, 0] as [number, number], deck: [0, 0] as [number, number], eye: 0, where: 'under' as 'under' | 'in' | 'over' };
 
   constructor() {
     this.marchMat = new THREE.ShaderMaterial({
@@ -405,9 +408,9 @@ export class CloudsPass implements FxPass {
     // The same haze the rest of the scene recedes into, so a far deck sits in the world's own air.
     (u.uFogColor.value as THREE.Color).copy(ctx.fogColor);
     u.uFogDensity.value = ctx.fogDensity;
-    // The slab rides the camera's own height, so the deck is always overhead rather than underfoot
-    // on a world whose ground climbs a kilometre.
-    (u.uSlab.value as THREE.Vector2).set(cam.position.y + CLOUD_MARCH.bottom, cam.position.y + CLOUD_MARCH.top);
+    // The deck hangs in the world at the sheets' own altitudes and does not follow the eye: a deck
+    // that follows is one no ship can ever climb into. See `CLOUD_MARCH.bottom`.
+    (u.uSlab.value as THREE.Vector2).set(CLOUD_MARCH.bottom, CLOUD_MARCH.top);
     const cut = cutForCover(this.look.coverage, this.cover);
     (u.uLook.value as THREE.Vector3).set(cut, this.look.brightness, this.look.decks);
     // The volume is sampled at `p + drift`, so a feature moves the other way: the sign here is what
@@ -432,7 +435,17 @@ export class CloudsPass implements FxPass {
     c.uAmount.value = this.amount;
     g.setRenderTarget(output);
     g.render(this.compositeQuad, FX_CAMERA);
-    this.last = { drew: true, coverage: this.look.coverage, cut: Number(cut.toFixed(3)), steps: u.uSteps.value as number, size: [target.width, target.height] };
+    const eye = cam.position.y;
+    this.last = {
+      drew: true,
+      coverage: this.look.coverage,
+      cut: Number(cut.toFixed(3)),
+      steps: u.uSteps.value as number,
+      size: [target.width, target.height],
+      deck: [CLOUD_MARCH.bottom, CLOUD_MARCH.top],
+      eye: Math.round(eye),
+      where: eye < CLOUD_MARCH.bottom ? 'under' : eye > CLOUD_MARCH.top ? 'over' : 'in',
+    };
     return true;
   }
 

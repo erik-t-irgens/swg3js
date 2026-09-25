@@ -1663,9 +1663,13 @@ class App {
       /**
        * The volumetric clouds: what this world's sky measured, what the march is being asked for, and
        * every number of the march live. `{ steps, lightSteps, bottom, top }` and the look move on the
-       * next frame; the rest (`density`, `detailBite`, `gForward`, `powder`, `ambientTop`, ...) are
-       * constants in the program, so moving one rebuilds it once. `{ coverage }` overrides what the
-       * world says, so a clear world can be flown under an overcast to time it; null gives it back.
+       * next frame; the rest (`baseScale`, `density`, `detailBite`, `gForward`, `powder`, ...) are
+       * constants in the program, so moving one rebuilds it once. `baseScale` is how big one cloud
+       * is, in metres: smaller puts more of them across the sky, and a value kept wants the `clouds`
+       * command run again, since the coverage is calibrated against the volume at this scale.
+       * `{ coverage }` overrides what the world says, so a clear world can be flown under an
+       * overcast to time it; null gives it back. `drawn.where` says whether the eye is under the
+       * deck, in it or over it, which is the one thing the picture cannot tell you.
        * `__debug.fxView('volumetricClouds.march')` shows what the ray gathered and `'.clear'` what it
        * let through (white where it found nothing), which is how to tell a march that drew nothing
        * from an upsample that threw it away.
