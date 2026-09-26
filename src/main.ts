@@ -224,6 +224,7 @@ import { SURFACE_ROOM, SurfaceRoom, isSurfaceRoom, probeSurface, roomFrame, room
 import type { Vehicle, VehicleKind } from './vehicles/vehicle';
 import { HEAD_TO_EYE, SEATED_EYE_FALLBACK, SEAT_RULE, cockpitYawStep, frameFileName, mirroredOffset, seatDropUsed } from './vehicles/cockpitSeat';
 import { World } from './world/world';
+import { REFLECTIONS, reflectiveCount, setReflectionSource, type ReflectionSource } from './world/envmap';
 import { worldNav } from './world/nav/nav.ts';
 import { outdoorNav } from './world/nav/outdoorNav.ts';
 // The long walk: its numbers and its knob. The order itself is `NpcManager.send`; this file only
@@ -2553,6 +2554,19 @@ class App {
        * this reads, and it is a uniform the material already holds, so nothing recompiles.
        */
       gloss: (x?: number) => this.world.setGroundGloss(x) ?? 'this world has no ground textures',
+      /**
+       * Where shiny surfaces and water get their reflection from: `reflections()` says, `reflections({
+       * source: 'game' })` goes back to the planet's own cube maps out of the client's files (the old
+       * way), and `reflections({ source: 'sky' })` to our own sky dome, the default. The choice is
+       * remembered in this browser (`localStorage['swg.reflections']`) and takes effect at once.
+       */
+      reflections: (opts: { source?: ReflectionSource } = {}) => {
+        if (opts.source === 'sky' || opts.source === 'game') {
+          setReflectionSource(opts.source);
+          this.world.reflectionsChanged();
+        }
+        return { source: REFLECTIONS.source, registered: reflectiveCount(), note: REFLECTIONS.source === 'sky' ? 'our own sky dome, captured every few seconds' : "the planet's own cube maps where an area has one, the dome where it has none" };
+      },
       /** Play as another species or gender (`species()` lists what the pack has): `species('twilek_female')`. */
       species: async (id?: string) => {
         if (!id) return this.speciesList.length ? this.speciesList.map((s) => `${s.id}: ${s.morphs.length} sliders, ${s.variables.length} variables, ${s.jkaClips} JKA clips`) : `no species index (run the converter's species command); playing ${this.characterId}`;
@@ -7859,6 +7873,10 @@ class App {
     // made hidden and their textures uploaded, so the first hit neither compiles nor uploads.
     this.loadingScreen.setWhat('preparing ship effects');
     await this.world.ships.prepareEffects(this.renderer);
+    // The reflections go in before anything compiles, or the first capture of the sky lands on a live
+    // frame and rebuilds every reflective material in the world at once (a jump already waited).
+    this.loadingScreen.setWhat('reflections');
+    await this.world.reflectionsReady(3000);
     const tCompile = performance.now();
     // The line under the title is the one the screen always said on a machine where a program costs
     // a millisecond, and says why the wait is long on one where it costs a third of a second: a

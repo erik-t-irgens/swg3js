@@ -26,7 +26,7 @@ import { FALLBACK_LAVA_STYLE, groupLava, lavaStyleFor, type LavaStyle } from './
 import { applyLavaHarm, LAVA_HARM, lavaHarmReport, lavaTickDamage, newLavaHold, resetLavaHarm, resetLavaHold, stepLavaHold, tuneLavaHarm, type LavaHarmTune } from './lavaHarmMath.ts';
 import { burnReport, clearBurn, newPlayerBurn, takeBurn, tunePlayerBurn, type PlayerBurn, type PlayerBurnTune } from '../combat/burnMath.ts';
 import type { HeatSources, LavaHeatTable } from './heatSources';
-import { setEnvironment } from './envmap';
+import { REFLECTIONS, setEnvironment } from './envmap';
 import { PropFactory, type Collider, type Exclusion, type ScatterItem } from './props';
 import { FloraPlanter } from './flora';
 import { GROUND_NORMAL, TerrainTextures } from './terrainTextures.ts';
@@ -609,6 +609,12 @@ export class World {
   /** Set by main: needed to filter the sky into an environment map for reflective surfaces. */
   renderer: THREE.WebGLRenderer | null = null;
   private pmrem: THREE.PMREMGenerator | null = null;
+  /**
+   * The filtered environment reflective surfaces see, kept as its whole render target: disposing only a
+   * render target's texture frees nothing in three, so every capture of the sky used to leave a target
+   * behind on the GPU, one every few seconds for as long as a world was played.
+   */
+  private envTarget: THREE.WebGLRenderTarget | null = null;
   private envTexture: THREE.Texture | null = null;
   /** The first face of the reflection cube wanted (loading or loaded), or null while the dome is filtered instead. */
   private envWant: string | null = null;
@@ -2193,7 +2199,10 @@ export class World {
     this.day.swg = false;
     this.day.fixed = null;
     this.fill.intensity = 0;
-    this.envTexture?.dispose();
+    // Everything registered is told first, so nothing is left holding the target as it is freed.
+    setEnvironment(null);
+    this.envTarget?.dispose();
+    this.envTarget = null;
     this.envTexture = null;
     this.envWant = null;
     this.envFailed.clear();
@@ -2234,8 +2243,10 @@ export class World {
   }
 
   /**
-   * The environment reflective surfaces see: the block's day or night cube map when the pack
-   * has one, otherwise the sky dome itself, filtered again every few seconds as it changes.
+   * The environment reflective surfaces see: our own sky dome, filtered again every few seconds as it
+   * changes, which is the default (`REFLECTIONS.source` 'sky'); or, with the source set to 'game', the
+   * block's own day or night cube map out of the client's files when the pack has one and the dome
+   * only where it has none, which is what this did before.
    */
   private refreshEnvironment(dt: number): void {
     const sky = this.swgSky;
@@ -2243,7 +2254,7 @@ export class World {
     this.pmrem ??= this.makePmrem(this.renderer);
     // The heaviest block's cube for the hour (the weather's mix picks the block), by its first face:
     // a new area or level with another cube loads that one; a cube that failed is never asked again.
-    const cube = this.day.isDay ? sky.environment.day : sky.environment.night;
+    const cube = REFLECTIONS.source === 'game' ? (this.day.isDay ? sky.environment.day : sky.environment.night) : null;
     const usable = cube && cube.faces.length && !this.envFailed.has(cube.faces[0]) ? cube : null;
     if (usable) {
       const want = usable.faces[0];
@@ -2259,11 +2270,9 @@ export class World {
             return;
           }
           tex.colorSpace = THREE.SRGBColorSpace;
-          const env = pmrem.fromCubemap(tex).texture;
+          const target = pmrem.fromCubemap(tex);
           tex.dispose();
-          this.envTexture?.dispose();
-          this.envTexture = env;
-          setEnvironment(env, 1);
+          this.useEnvironment(target);
         },
         undefined,
         () => {
@@ -2280,10 +2289,44 @@ export class World {
     this.envTimer = 0;
     // Filtered from a 128 px cube like every other environment water may see, so swapping to it
     // never changes a water material's program key (envMapCubeUVHeight is in that key).
-    const env = this.pmrem.fromScene(sky.domeScene, 0.04, 1, 20000, { size: 128 }).texture;
-    this.envTexture?.dispose();
-    this.envTexture = env;
-    setEnvironment(env, 1);
+    this.useEnvironment(this.pmrem.fromScene(sky.domeScene, 0.04, 1, 20000, { size: 128 }));
+  }
+
+  /**
+   * A new environment for every reflective surface: it is handed to all of them first and only then is
+   * the last one freed, so nothing registered is ever left sampling a target that has gone. The
+   * interior cells' own copies are registered too (`assetPack.ts`), and water follows through its
+   * listener.
+   */
+  private useEnvironment(target: THREE.WebGLRenderTarget): void {
+    const old = this.envTarget;
+    this.envTarget = target;
+    this.envTexture = target.texture;
+    setEnvironment(target.texture, 1);
+    old?.dispose();
+  }
+
+  /**
+   * The reflections, in before the loading screen compiles: our own sky is captured here and now (and
+   * the game's cube map is asked for and waited on, up to `ms`, when that is the source), so the
+   * programs built behind the screen are the ones with a reflection in them. Arriving on a planet did
+   * not wait for this -- only a jump did -- and the first capture then landed on a live frame, where
+   * every reflective material in the world was rebuilt at once.
+   */
+  async reflectionsReady(ms: number): Promise<void> {
+    if (!this.swgSky || !this.renderer) return;
+    if (!this.envTexture) {
+      this.envTimer = 99;
+      this.refreshEnvironment(0);
+    }
+    await this.environmentReady(ms);
+  }
+
+  /** Where reflections come from changed (`setReflectionSource`): the next refresh takes it up. */
+  reflectionsChanged(): void {
+    this.envWant = null;
+    this.envTimer = 99;
+    this.refreshEnvironment(0);
   }
 
   /**

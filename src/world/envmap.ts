@@ -15,8 +15,51 @@ let current: THREE.Texture | null = null;
 let scale = 1;
 const listeners = new Set<(texture: THREE.Texture | null, scale: number) => void>();
 
+/**
+ * Where reflections come from. `sky` (the default since 2026-09-26, the owner's call) is our own sky
+ * dome, captured again every few seconds, so a shiny surface shows the sky it is really under at that
+ * hour and in that weather; `game` is what it was before, the planet's own day and night cube maps out
+ * of the client's files where an area has one, and the dome only where it has none. The owner asked
+ * for this to be easy to undo: `localStorage['swg.reflections'] = 'game'` (or `__debug.reflections({
+ * source: 'game' })`, which also remembers it) puts the old one back.
+ */
+export type ReflectionSource = 'sky' | 'game';
+export const REFLECTIONS: { source: ReflectionSource } = { source: savedSource() };
+
+function savedSource(): ReflectionSource {
+  try {
+    return globalThis.localStorage?.getItem('swg.reflections') === 'game' ? 'game' : 'sky';
+  } catch {
+    return 'sky';
+  }
+}
+
+/** Choose where reflections come from, and remember it in this browser. The world picks it up on its next refresh. */
+export function setReflectionSource(source: ReflectionSource): void {
+  REFLECTIONS.source = source;
+  try {
+    if (source === 'game') globalThis.localStorage?.setItem('swg.reflections', 'game');
+    else globalThis.localStorage?.removeItem('swg.reflections');
+  } catch {
+    /* a browser that keeps nothing still switches for this session */
+  }
+}
+
+/**
+ * A material that is disposed leaves the registry by itself. Nothing ever took one out before, so every
+ * reflective material of every world visited stayed here for the session, with its textures, and every
+ * refresh of the sky wrote to all the dead ones as well as the live.
+ */
+function forgetOnDispose(this: THREE.Material): void {
+  reflective.delete(this as THREE.MeshStandardMaterial);
+  this.removeEventListener('dispose', forgetOnDispose);
+}
+
 export function registerReflective(material: THREE.MeshStandardMaterial): void {
-  if (!reflective.has(material)) reflective.set(material, material.envMapIntensity);
+  if (!reflective.has(material)) {
+    reflective.set(material, material.envMapIntensity);
+    material.addEventListener('dispose', forgetOnDispose);
+  }
   if (current) {
     material.envMap = current;
     material.envMapIntensity = reflective.get(material)! * scale;
@@ -26,6 +69,12 @@ export function registerReflective(material: THREE.MeshStandardMaterial): void {
 
 export function unregisterReflective(material: THREE.MeshStandardMaterial): void {
   reflective.delete(material);
+  material.removeEventListener('dispose', forgetOnDispose);
+}
+
+/** How many materials are registered, for the console. */
+export function reflectiveCount(): number {
+  return reflective.size;
 }
 
 /** Set the environment every reflective material sees (a PMREM-filtered texture, or null for none); each keeps its own intensity times `envScale`. */

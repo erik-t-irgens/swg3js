@@ -244,6 +244,10 @@ export class AssetPack {
               if (cell > 0 && !m.userData.interior) {
                 m = m.clone();
                 m.userData.interior = true;
+                // The copy joins the registry as the original did. Left out, it kept whatever reflection
+                // map the original had when it was cloned -- none at all when the sky had not been
+                // captured yet, and a freed one once an old capture is let go of.
+                if (isReflective(m)) registerReflective(m);
                 mats[i] = m;
                 if (Array.isArray(o.material)) o.material[i] = m;
                 else o.material = m;
