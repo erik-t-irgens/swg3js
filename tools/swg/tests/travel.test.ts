@@ -119,24 +119,32 @@ function note(what: string): void {
     let worlds = 0;
     let things = 0;
     let indoors = 0;
+    let drawn = 0;
     for (const planet of ['corellia', 'naboo', 'tatooine', 'talus', 'rori', 'lok', 'dantooine', 'endor', 'yavin4', 'dathomir']) {
       const file = join('assets-private', planet, 'travel.json');
       if (!existsSync(file)) continue;
-      const pack = JSON.parse(readFileSync(file, 'utf8')) as { version: number; rows: { kind: string; cell: number; x: number; y: number; z: number }[] };
-      assert.ok(pack.version === 1, `${planet}: the pack is the shape this build reads`);
+      const pack = JSON.parse(readFileSync(file, 'utf8')) as { version: number; rows: { kind: string; model?: string | null; cell: number; x: number; y: number; z: number }[] };
+      assert.ok(pack.version === 2, `${planet}: the pack is the shape this build reads`);
       const counts = travelCounts(pack.rows);
       assert.ok(counts.terminals > 0, `${planet}: it has somewhere to buy a ticket`);
       assert.ok(counts.collectors > 0, `${planet}: and somewhere to board`);
       for (const r of pack.rows) assert.ok(Number.isFinite(r.x) && Number.isFinite(r.y) && Number.isFinite(r.z), `${planet}: every one of them is somewhere real`);
+      // Every terminal and every collector must name a model, or they are things to press and not
+      // to see -- which is the state the first cut of this left every world in.
+      for (const r of pack.rows) if (r.kind !== 'shuttle') assert.ok(!!r.model, `${planet}: a ${r.kind} says what it is drawn with`);
+      drawn += pack.rows.filter((r) => r.model).length;
       worlds++;
       things += pack.rows.length;
       indoors += counts.indoors;
     }
-    if (!worlds) note('no world carries travel.json yet (npm run swg -- travel assets-private)');
+    if (!worlds) note("no world carries travel.json yet (npm run swg -- travel '@SWG' assets-private --retail-only)");
     else {
       passed++;
       console.log(`ok   ${things} travel things over ${worlds} converted worlds, every one of them somewhere real`);
+      passed++;
+      console.log(`ok   and ${drawn} of them are drawn, which is every terminal and collector plus a shuttleport's own shuttle`);
       note(`${indoors} of them stand inside a building, which is where a terminal belongs and why the cell travels with it`);
+      note(`${things - drawn} are the starports' own transports, which have no single model: their mesh is a placeholder and the hull is five pieces the converter does not assemble`);
     }
   }
 }

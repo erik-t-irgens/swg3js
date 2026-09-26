@@ -1733,12 +1733,30 @@ class App {
           terminals: things.filter((t) => t.kind === 'terminal').length,
           collectors: things.filter((t) => t.kind === 'collector').length,
           at: this.travelHere()?.kind ?? null,
+          // What is really standing in the world, which is the one question a pack that has not been
+          // reconverted answers differently: an old pack names no model on any row, so every count
+          // here is nought and the note below says which command to run.
+          drawn: {
+            terminals: this.travelStood.keys.length,
+            collectors: this.travelStood.droids.length,
+            withModel: things.filter((t) => t.model).length,
+            of: things.length,
+            nearest: things
+              .filter((t) => t.model)
+              .map((t) => ({ kind: t.kind, model: t.model, away: Math.round(Math.hypot(t.x - this.player.worldPos.x, t.z - this.player.worldPos.z)) }))
+              .sort((a, b) => a.away - b.away)
+              .slice(0, 3),
+          },
           shipTerminal: this.shipTerminalNear() ? { away: Number(Math.hypot(this.shipTerminalNear()!.x - this.player.worldPos.x, this.shipTerminalNear()!.z - this.player.worldPos.z).toFixed(1)), state: this.shipTerminalState() } : null,
           tickets: this.tickets.map((t) => `${t.to} (${creditText(t.price)})${pickTicket(this.tickets, this.usingTicket, here) === t ? ' ← the one that would be used' : ''}`),
           credits: creditText(purse.credits),
           shuttles: ports.map((p) => `${p.name}: ${shuttleWords(shuttleAt(`${here}|${p.name}`, seconds))}`),
           nearest: near.slice(0, 3).map((n) => ({ kind: n.t.kind, away: Math.round(n.d), cell: n.t.cell })),
-          note: this.travelRowsFor === here && !this.travelRows.length ? 'no travel.json for this world: npm run swg -- travel assets-private (with your emulator checkout), then reload' : '',
+          note: !this.travelRows.length
+            ? "no travel.json for this world: npm run swg -- travel '@SWG' assets-private --retail-only (with your emulator checkout), then reload"
+            : things.length && !things.some((t) => t.model)
+              ? "this world's travel pack was written before the models were named, so the terminals are there to press and not to see: run travel again and reload"
+              : '',
           tune: { ...TRAVEL_TUNE, ship: { ...SHIP_TERMINAL_TUNE } },
         };
       },
