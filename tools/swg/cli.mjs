@@ -3837,7 +3837,11 @@ switch (cmd) {
       }
     }
     const bytes = catalogue.reduce((a, c) => a + c.parts.reduce((b, p) => b + p.bytes, 0), 0);
-    writeFileSync(join(outDir, 'wardrobe.json'), JSON.stringify({ species: speciesId, gender, skeleton: baseSkeletonFile, items: catalogue }, null, 2));
+    // Stamped, so `status` can tell a wardrobe converted before a change to how a surface is read
+    // from one converted after it. **This is the write the `wardrobe` command makes**; the other
+    // one, in the parts path, writes a folder of its own, and stamping only that one left the owner
+    // running the wardrobe four times over and being asked for it again each time.
+    writeFileSync(join(outDir, 'wardrobe.json'), JSON.stringify({ species: speciesId, gender, skeleton: baseSkeletonFile, materialFormat: MATERIAL_FORMAT, items: catalogue }, null, 2));
     if (recipes.length) {
       const palettes = exportPalettes(vfs, recipes.flatMap((r) => palettesOf(r)));
       writeFileSync(join(outDir, 'customize.json'), JSON.stringify({ images: 'customize/', recipes, palettes }, null, 1));
