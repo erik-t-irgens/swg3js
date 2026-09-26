@@ -16,6 +16,59 @@ export interface ShaderFamilyDef {
   size: number;
   /** Pack-relative PNG. */
   file: string;
+  /**
+   * The family's own bump map, pack-relative, or null where the archives have none for it.
+   *
+   * Absent (rather than null) means a pack converted before these were read: the ground is then
+   * lit exactly as it always was, and `status` asks for the world again.
+   */
+  normal?: string | null;
+}
+
+/**
+ * The ground's own bumps, folded into the normal the lighting uses.
+ *
+ * Injected **after** `injectWetness` has run, which puts this block first at the same anchor: the
+ * ground's own relief, and then a puddle's surface laid over it. The other order wipes the rain
+ * rings out.
+ *
+ * Three things about the arithmetic. The ground's texture coordinate is world XZ, so the tangent is
+ * world +X and the bitangent world +Z by construction -- no tangent frame is built and none should
+ * be, which is also why three's own normal-map path cannot be used here (the ground carries no `uv`
+ * attribute at all). Slopes are **added** rather than normals blended, which is exact when every
+ * frame is the same one and is what the water already does for its two layers. And the green channel
+ * is read as it stands, the way this project settled the question for every other surface.
+ */
+function injectGroundNormal(shader: { fragmentShader: string; uniforms: Record<string, { value: unknown }> }, normals: THREE.DataArrayTexture, scale: { value: number }): void {
+  shader.uniforms.uGroundNormal = { value: normals };
+  shader.uniforms.uGroundNormalScale = scale;
+  shader.fragmentShader = shader.fragmentShader
+    .replace(
+      '#include <common>',
+      `#include <common>
+uniform sampler2DArray uGroundNormal;
+uniform float uGroundNormalScale;
+// The height gradient a family's bump map asks for at this point: a tangent-space normal (x, y, z)
+// with z up gives the gradient -xy/z, and the tangent frame here is world X and world Z.
+vec2 groundSlope(float family) {
+  int id = clamp(int(family + 0.5), 0, TERRAIN_FAMILIES - 1);
+  vec3 n = texture(uGroundNormal, vec3(vGroundXZ / uGroundSize[id], uGroundLayer[id])).xyz * 2.0 - 1.0;
+  return -n.xy / max(n.z, 0.2);
+}`,
+    )
+    .replace(
+      '#include <normal_fragment_maps>',
+      `#include <normal_fragment_maps>
+{
+  vec3 gw = vBary / max(vBary.x + vBary.y + vBary.z, 1e-4);
+  vec2 gs = (groundSlope(vFamily.x) * gw.x + groundSlope(vFamily.y) * gw.y + groundSlope(vFamily.z) * gw.z) * uGroundNormalScale;
+  // The ground's own lean, as a gradient, so the two add rather than one replacing the other: the
+  // view matrix is orthonormal, so its transpose is its inverse and nothing new is uploaded.
+  vec3 gN = normalize((vec4(normal, 0.0) * viewMatrix).xyz);
+  vec2 gg = vec2(-gN.x, -gN.z) / max(gN.y, 0.2);
+  normal = normalize((viewMatrix * vec4(normalize(vec3(-(gg.x + gs.x), 1.0, -(gg.y + gs.y))), 0.0)).xyz);
+}`,
+    );
 }
 
 const LAYER_SIZE = 512;
@@ -28,8 +81,21 @@ const GROUND_REPEAT = 4;
 /** Largest family id the uniform lookup arrays cover; ids are dense per planet, well under this. */
 const MAX_FAMILY_ID = 127;
 
+/**
+ * How strongly the ground's own bumps lean the light. Ours, and live through `__debug.normals`.
+ *
+ * The client shaded this terrain per pixel with these maps and this game did not, which is why the
+ * ground has been the flattest thing in it: the geometry normal is a smoothed difference of the
+ * heightfield, so below the terrain's own step there was no variation at all.
+ */
+export const GROUND_NORMAL = { scale: 1 };
+
 export class TerrainTextures {
   readonly texture: THREE.DataArrayTexture;
+  /** The same families' bump maps, layer for layer, or null for a pack converted before they were read. */
+  readonly normals: THREE.DataArrayTexture | null;
+  /** The live strength, written by the Graphics setting; the ground has no `normalMap` for the usual path to find. */
+  private normalScale: { value: number } = { value: GROUND_NORMAL.scale };
   /** Family id → layer index; families without a texture use layer 0. */
   private readonly layerOf: Float32Array;
   private readonly sizeOf: Float32Array;
@@ -39,8 +105,9 @@ export class TerrainTextures {
   private readonly layerIndex: Map<number, number>;
   private readonly averages = new Map<number, THREE.Color>();
 
-  private constructor(texture: THREE.DataArrayTexture, families: ShaderFamilyDef[], layers: Map<number, number>, planet: Map<number, string>) {
+  private constructor(texture: THREE.DataArrayTexture, families: ShaderFamilyDef[], layers: Map<number, number>, planet: Map<number, string>, normals: THREE.DataArrayTexture | null = null) {
     this.texture = texture;
+    this.normals = normals;
     this.families = families;
     this.layerIndex = layers;
     // Ids on the ground are the planet's (plus any a building's layer file added); the pack lists
@@ -107,7 +174,37 @@ export class TerrainTextures {
     texture.generateMipmaps = true;
     texture.anisotropy = anisotropy;
     texture.needsUpdate = true;
-    return new TerrainTextures(texture, kept, layers, planet);
+    // The bump maps, as a second array of exactly the same shape, so the two share one layer
+    // lookup: a family with no map of its own gets a flat layer rather than a missing one, which
+    // keeps the indices identical and costs one layer of three bytes repeated.
+    let normals: THREE.DataArrayTexture | null = null;
+    if (kept.some((f) => f.normal)) {
+      const nImages = await Promise.all(kept.map((f) => (f.normal ? loadImage(pack.url(f.normal)) : Promise.resolve(null))));
+      const nData = new Uint8Array(size * size * 4 * kept.length);
+      // Flat everywhere first: (128, 128, 255) is straight up, so a family with no map leans nowhere.
+      for (let i = 0; i < nData.length; i += 4) {
+        nData[i] = 128;
+        nData[i + 1] = 128;
+        nData[i + 2] = 255;
+        nData[i + 3] = 255;
+      }
+      kept.forEach((f, layer) => {
+        const im = nImages[layer];
+        if (!im) return;
+        ctx.clearRect(0, 0, size, size);
+        ctx.drawImage(im, 0, 0, size, size);
+        nData.set(ctx.getImageData(0, 0, size, size).data, layer * size * size * 4);
+      });
+      normals = new THREE.DataArrayTexture(nData, size, size, kept.length);
+      // No colour space on a normal map: its bytes are a direction, not a colour.
+      normals.wrapS = normals.wrapT = THREE.RepeatWrapping;
+      normals.minFilter = THREE.LinearMipmapLinearFilter;
+      normals.magFilter = THREE.LinearFilter;
+      normals.generateMipmaps = true;
+      normals.anisotropy = anisotropy;
+      normals.needsUpdate = true;
+    }
+    return new TerrainTextures(texture, kept, layers, planet, normals);
   }
 
   /**
@@ -121,8 +218,10 @@ export class TerrainTextures {
     const previous = mat.onBeforeCompile;
     const count = this.layerOf.length;
     const texture = this.texture;
+    const normals = this.normals;
     const layerOf = this.layerOf;
     const sizeOf = this.sizeOf;
+    const normalScale = this.normalScale;
     mat.onBeforeCompile = (shader, renderer) => {
       previous.call(mat, shader, renderer);
       shader.defines = { ...(shader.defines ?? {}), TERRAIN_FAMILIES: count };
@@ -138,12 +237,24 @@ export class TerrainTextures {
       // Rain, puddles and snow: after the blend (map_fragment), so wetness darkens the blended
       // colour. Compiled in once and driven by the weather's shared uniforms.
       injectWetness(shader, 'ground');
+      if (normals) injectGroundNormal(shader, normals, normalScale);
     };
     // The ground carries its own wet injection; the material scan must not wrap it again.
     mat.userData.wetBuiltIn = true;
-    mat.customProgramCacheKey = () => `swg-ground-wet-${count}`;
+    mat.customProgramCacheKey = () => `swg-ground-wet-${count}-${normals ? 'bump' : 'flat'}`;
     this.material = mat;
     return mat;
+  }
+
+  /**
+   * How strongly the ground's bumps lean the light, live. Answers whether there were any to move.
+   *
+   * It is a uniform the material already holds, so nothing is recompiled and nothing is rebuilt.
+   */
+  setNormalScale(x: number): boolean {
+    this.normalScale.value = x;
+    GROUND_NORMAL.scale = x;
+    return !!this.normals;
   }
 
   /** The mean colour of a family's texture (its layer's pixels, sampled sparsely), for dust and spray; null without one. */
@@ -171,6 +282,7 @@ export class TerrainTextures {
 
   dispose(): void {
     this.texture.dispose();
+    this.normals?.dispose();
     this.material?.dispose();
   }
 }

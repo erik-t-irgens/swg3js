@@ -4496,6 +4496,10 @@ export class World {
         }
       }
     });
+    // The ground has no `normalMap` of three's own for that scan to find -- its bumps are an array
+    // sampled by this game's own injection -- so without this line the one slider meant to move
+    // every normal in the world would move every one except the ground's.
+    if (this.groundTextures?.setNormalScale(x)) n++;
     return n;
   }
 

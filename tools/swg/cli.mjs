@@ -203,6 +203,8 @@ const DEED_PACK_VERSION = 1;
 /** The shape of a world's 	ravel.json. A pack written by an older run is asked for again. */
 // 2: every row carries the model it is drawn with, and the shuttleports' own shuttles are in it.
 const TRAVEL_PACK_VERSION = 2;
+// 2: every ground family carries the bump map the client shaded this terrain with.
+const TERRAIN_SHADERS_VERSION = 2;
 /** The shape of music/music.json. A pack written by an older run is asked for again. */
 const MUSIC_PACK_VERSION = 1;
 import { openTre, openVfs, readHeader } from './tre.mjs';
@@ -893,6 +895,7 @@ async function copyTerrain(vfs, planet, outDir) {
 function copyTerrainShaders(vfs, template, outDir) {
   const families = [];
   let missing = 0;
+  let bumped = 0;
   // Families the planet's rules use, plus any that building layer files in the pack add by name.
   const wanted = [...template.generator.shaderGroup.families.values()];
   const known = new Set(wanted.map((f) => f.name.toLowerCase()));
@@ -927,25 +930,52 @@ function copyTerrainShaders(vfs, template, outDir) {
       continue;
     }
     try {
-      const { main } = shaderTextures(parseIff(vfs.read(path)));
+      const { main, slots } = shaderTextures(parseIff(vfs.read(path)));
       if (!main || !vfs.has(main)) throw new Error(`no main texture${main ? ` (${main} not in archives)` : ''}`);
       const img = downscaleRgba(decodeDds(vfs.read(main)), 512);
       // The alpha channel is a specular or blend mask, not transparency: browsers drop the colour of
       // transparent pixels when they draw an image, so the ground texture is written opaque.
       for (let i = 3; i < img.rgba.length; i += 4) img.rgba[i] = 255;
-      const rel = `terrain/shaders/${fam.id}_${fam.name.replace(/[^a-z0-9]+/gi, '_').toLowerCase()}.png`;
+      const stemName = `${fam.id}_${fam.name.replace(/[^a-z0-9]+/gi, '_').toLowerCase()}`;
+      const rel = `terrain/shaders/${stemName}.png`;
       mkdirSync(join(outDir, 'terrain/shaders'), { recursive: true });
       writeFileSync(join(outDir, rel), encodePng(img.width, img.height, img.rgba));
       entry.file = rel;
       entry.texture = main;
+      // The ground's own bump map, which the client shaded this terrain with per pixel: nearly every
+      // family names one (the effect is a dot3 terrain effect on all but a handful), and reading the
+      // slot and throwing it away is the reason the ground is the one lit surface in this game with
+      // no relief below the terrain's own step.
+      //
+      // **Never through `normalFor`.** Its swizzle test reads x out of the alpha whenever the alpha
+      // varies far more than the red, and a terrain bump map keeps the shader's own extra channel
+      // there -- measured, the test fires on 83 of the 177 and would throw the real red away and
+      // rebuild x from a channel that is not x. These are plain tangent-space maps: measured over
+      // all 177, the RGB reads as a unit vector to within a percent and z is never negative.
+      const nrml = slots.find((s) => s.slot === 'NRML' || s.slot === 'DOT3' || s.slot === 'CNRM');
+      entry.normal = null;
+      if (nrml && vfs.has(nrml.path)) {
+        try {
+          const n = downscaleRgba(decodeDds(vfs.read(nrml.path)), 512);
+          for (let i = 3; i < n.rgba.length; i += 4) n.rgba[i] = 255;
+          const nrel = `terrain/shaders/${stemName}_n.png`;
+          writeFileSync(join(outDir, nrel), encodePng(n.width, n.height, n.rgba));
+          entry.normal = nrel;
+          bumped++;
+        } catch (err) {
+          console.warn(`terrain normal ${nrml.path}: ${err.message}`);
+        }
+      }
     } catch (err) {
       console.warn(`terrain shader ${path}: ${err.message}`);
       missing++;
     }
   }
   mkdirSync(join(outDir, 'terrain'), { recursive: true });
-  writeFileSync(join(outDir, 'terrain/shaders.json'), JSON.stringify({ families }, null, 1));
-  console.error(`  terrain shaders: ${families.length - missing}/${families.length} families with textures -> terrain/shaders.json`);
+  // Versioned, because `status` cannot otherwise tell an old pack from a new one and nothing would
+  // ever ask for it again -- the hole that has already cost this project twice over the rigs.
+  writeFileSync(join(outDir, 'terrain/shaders.json'), JSON.stringify({ version: TERRAIN_SHADERS_VERSION, families }, null, 1));
+  console.error(`  terrain shaders: ${families.length - missing}/${families.length} families with textures, ${bumped} with a bump map -> terrain/shaders.json`);
 }
 
 /** The shader families a terrain layer file (.lay) carries: SFAM chunks of its SGRP form. */
@@ -2050,7 +2080,7 @@ function packStatus(dir) {
       // on ten planets would bury the one line that matters.
       gates ? `${gates.gates.length} zone gates${gates.gates.filter((g) => !g.to).length ? `, ${gates.gates.filter((g) => !g.to).length} leading nowhere named` : ''}` : null,
       terrain ? `terrain${layers ? ` + ${layers} building layers` : ''}` : 'NO TERRAIN',
-      shaders ? `ground textures ${textured}/${shaders.families.length}` : 'NO GROUND TEXTURES',
+      shaders ? `ground textures ${textured}/${shaders.families.length}${shaders.version === TERRAIN_SHADERS_VERSION ? `, ${shaders.families.filter((f) => f.normal).length} bumped` : ', FLAT (no bump maps)'}` : 'NO GROUND TEXTURES',
       sky ? `sky (${sky.blocks.length} blocks${sky.weather ? `, weather ${new Set(sky.blocks.map((b) => b.cameraEffect?.file).filter(Boolean)).size} effects` : ', NO WEATHER'})` : 'NO SKY',
       water ? `water (${Object.keys(water.shaders ?? {}).length} shaders, ${Object.values(water.shaders ?? {}).filter((s) => s.kind === 'lava').length} lava${waterPackNeedsHarm(water) ? ', NO WATER VALUES' : ''})` : terrain ? 'NO WATER LOOK' : null,
       withCells.length ? (floored ? `floors ${floored}/${withCells.length} buildings${graphOnly ? ', GRAPHS ONLY (no walkable meshes)' : ''}${floorless ? `, ${floorless} with none in the archives` : ''}` : 'NO FLOORS') : null,
@@ -2068,6 +2098,9 @@ function packStatus(dir) {
     if (!objects) need(`snapshot <swg-dir> ${planet} ${packDir} --center=auto --radius=all --retail-only`, `${planet} has no objects`);
     if (!terrain) need(`snapshot <swg-dir> ${planet} ${packDir} --center=auto --radius=all --retail-only`, `${planet} has no terrain`);
     else if (!shaders) need(`terrain <swg-dir> all ${dir} --retail-only`, `${planet} has no ground textures`);
+    // A pack written before the bump maps were read draws the ground perfectly flat below the
+    // terrain's own step, and nothing in the game can tell: it has textures and they are right.
+    else if (shaders.version !== TERRAIN_SHADERS_VERSION) need(`terrain <swg-dir> all ${dir} --retail-only`, `${planet}'s ground has no bump maps, so it is lit flat`);
     else if (!sky) need(`sky <swg-dir> all ${dir} --retail-only`, `${planet} has no sky`);
     else if (!sky.weather) need(`sky <swg-dir> all ${dir} --retail-only`, `${planet} sky has no weather effects`);
     else if (skyEffectsUncarried(packDir, sky)) need(`sky <swg-dir> all ${dir} --retail-only`, `${planet} sky's effects were converted before the effects their particles carry`);
