@@ -44,7 +44,7 @@ export const DIST_KINDS = new Set(['.html', '.js', '.css', '.wasm', '.json', '.s
 export const FORBIDDEN_KINDS = new Set(['.tre', '.toc', '.pk3', '.iff', '.msh', '.mgn', '.sht', '.dds', '.ans', '.skt', '.lmg', '.sat', '.apt', '.pob', '.trn', '.lay', '.snd', '.cdf', '.stf', '.ws', '.gla', '.glm', '.clips']);
 
 /** The parts of the game's source the converter imports (it runs them with Node's type stripping). */
-const SOURCE_FILES = ['src/swg/terrain/trn.ts', 'src/swg/terrain/generator.ts', 'src/swg/terrain/flora.ts', 'src/swg/terrain/fractal.ts', 'src/swg/terrain/iff.ts', 'src/swg/terrain/shaderKey.ts'];
+const SOURCE_FILES = ['src/swg/terrain/trn.ts', 'src/swg/terrain/generator.ts', 'src/swg/terrain/flora.ts', 'src/swg/terrain/fractal.ts', 'src/swg/terrain/iff.ts', 'src/swg/terrain/shaderKey.ts', 'src/core/fx/cloudMath.ts', 'src/data/scenes.ts', 'src/world/scenePlaces.ts', 'src/data/planets.ts', 'src/world/sceneCapture.ts'];
 /** The launcher proper (the bootstrap is built into the exe and is not needed in the release). */
 const LAUNCHER_FILES = ['tools/launcher/main.mjs', 'tools/launcher/checks.mjs', 'tools/launcher/plan.mjs', 'tools/launcher/serve.mjs', 'tools/launcher/page.html', 'tools/launcher/README.md'];
 /** The converter's data files, beside its modules. */

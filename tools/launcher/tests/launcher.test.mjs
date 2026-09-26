@@ -387,14 +387,22 @@ process.on('exit', () => rmSync(scratch, { recursive: true, force: true }));
   ok(/--dist is not taken/.test(packSrc) && /--with-untracked is for trying a release on this machine and is never CI/.test(packSrc), 'the pack takes no dist folder of anyone else\'s, and CI never packs untracked files');
 }
 {
-  // The real checkout's list: every relative file its code names is in it.
+  // The real checkout's list: every relative file its code names is in it. It is handed the smallest
+  // build the pack accepts (a page and an empty manifest) rather than none, because with no build at
+  // all `releaseFiles` stops at "holds no built game" before it ever looks at what the code names: this
+  // test passed that way for two days while every release CI tried to pack was refused for leaving out
+  // five files the converter imports, and the launcher stayed on an older game.
+  const mini = join(scratch, 'minidist');
+  mkdirSync(join(mini, '.vite'), { recursive: true });
+  writeFileSync(join(mini, 'index.html'), '<!doctype html>');
+  writeFileSync(join(mini, '.vite', 'manifest.json'), '{}');
   let err = null;
   try {
-    releaseFiles({ root, dist: join(scratch, 'nodist'), untracked: true });
+    releaseFiles({ root, dist: mini, untracked: true });
   } catch (e) {
     err = e;
   }
-  ok(err && /holds no built game/.test(err.message) && !/leaves out/.test(err.message) && !/not a file git knows/.test(err.message), `the checkout's own list is complete (only the missing build is reported)${err && err.message.split('\n').length > 2 ? `: ${err.message}` : ''}`);
+  ok(!err, `the checkout's own list is complete${err ? `: ${err.message}` : ''}`);
   const lib = join(scratch, 'importer');
   mkdirSync(join(lib, 'tools'), { recursive: true });
   writeFileSync(join(lib, 'tools', 'a.mjs'), "import './b.mjs';\nconst x = await import('../src/c.ts');\nnew URL('./d.json', import.meta.url);\nimport './gone.mjs';");
