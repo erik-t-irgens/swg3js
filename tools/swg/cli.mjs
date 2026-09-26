@@ -2731,7 +2731,11 @@ function packStatus(dir) {
   }
   if (ships && (ships.materialFormat ?? 1) < MATERIAL_FORMAT) need(`ships <swg-dir> ${dir} --retail-only`, "ships' models were converted before animated and glowing surfaces");
   const gallery = readJson(join(dir, 'gallery/manifest.json'));
-  if (gallery && (gallery.materialFormat ?? 1) < MATERIAL_FORMAT) need(`gallery <swg-dir> ${dir} --retail-only`, "the gallery's models were converted before animated and glowing surfaces");
+  // The gallery was the development world and was never asked for, which left every launcher with an
+  // empty Housing tab: the buildings a player puts down are the gallery's models, and the deeds below
+  // are asked for only once it exists. So it is asked for like any other pack now (the owner's call).
+  if (!gallery) need(`gallery <swg-dir> ${dir} --retail-only`, 'no gallery pack: the Housing tab has no buildings to put down, since every house is one of its models');
+  else if ((gallery.materialFormat ?? 1) < MATERIAL_FORMAT) need(`gallery <swg-dir> ${dir} --retail-only`, "the gallery's models were converted before animated and glowing surfaces");
   // The deeds a player buys a building with, which was the other pack nothing reported: without it
   // the Housing tab is empty and no building can be put down at all. It checks each deed against the
   // gallery's models, so it is asked for after the gallery and never before one exists. What each
