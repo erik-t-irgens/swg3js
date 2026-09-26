@@ -4,6 +4,7 @@ import type { Physics, RAPIER } from '../core/physics';
 import { CreatureManager } from './creatures';
 import { NpcManager, type NpcDeps } from './npcs';
 import { MobileManager } from './mobiles/manager';
+import type { Mobile } from './mobiles/mobile';
 import { MobileAssets } from './mobiles/assets';
 import { MobileCatalogue } from './mobiles/catalogue';
 import { ambientOverrides } from './mobiles/spawning';
@@ -3067,6 +3068,52 @@ export class World {
   /** Take a building placed in play back out of the world, by what it was filed under. */
   unplaceBuilding(key: string): boolean {
     return this.layoutStream?.unplace(key) ?? false;
+  }
+
+  /**
+   * Stand a named catalogue mobile at a place and leave it there, as the world's own standing people
+   * are stood: spawned rather than roaming, with a world name so the hand-spawn cap and the NPC
+   * tab's clear both step over it.
+   */
+  standMobile(id: string, at: { x: number; z: number; heading?: number }, inside: boolean, worldId: string): Mobile | null {
+    const entry = this.mobileCatalogue?.byId(id);
+    if (!entry) return null;
+    const m = this.mobiles?.spawn(entry, at, { origin: 'spawned', inside, worldId });
+    return typeof m === 'string' || !m ? null : m;
+  }
+
+  /** One of those taken away again. */
+  unstandMobile(m: Mobile): void {
+    this.mobiles?.remove(m);
+  }
+
+  /**
+   * Stand a plain model somewhere, out of this world's own pack.
+   *
+   * It is `placeBuilding` with every one of the house rules taken off, and that is the whole of the
+   * difference: no ground verdict, nothing asked about what is already standing there, no water
+   * test, no flora kept off, no gallery pack behind the world's own. Those exist because a player
+   * chooses where a house goes; a thing the game's own data says stands here goes where the data
+   * says, and refusing it would be refusing the world.
+   *
+   * Filed under `key`, which is a name of its own, so a removal is one lookup and can never reach
+   * something the snapshot placed.
+   */
+  async placeProp(model: string, o: { key: string; at: { x: number; y: number; z: number }; yaw: number; inside?: boolean }): Promise<boolean> {
+    const stream = this.layoutStream;
+    if (!stream || !this.pack) return false;
+    if (!this.pack.find(model)) return false;
+    let loaded: LoadedModel;
+    try {
+      loaded = await this.pack.model(model);
+    } catch (err) {
+      console.warn(`prop ${model} would not load`, err);
+      return false;
+    }
+    if (this.layoutStream !== stream) return false;
+    const q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), o.yaw);
+    await stream.place({ model, template: o.key, x: o.at.x, y: o.at.y, z: o.at.z, q, radius: loaded.radius, inside: o.inside });
+    return true;
   }
 
   /**

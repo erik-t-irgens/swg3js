@@ -17,9 +17,17 @@
 // tests): relative imports only as `import type`, no enum, no namespace, no constructor parameter
 // properties.
 
+/** The pack this file reads. 2 added the model each row is drawn with. */
+export const TRAVEL_PACK_VERSION = 2;
+
 /** One travel thing, as a world's pack carries it. */
 export interface TravelRow {
   kind: 'terminal' | 'collector' | 'shuttle';
+  /**
+   * What to draw it with: a model in this world's own pack, a mobiles catalogue entry for the
+   * collector (which is a droid), or null for a thing this game has no model for.
+   */
+  model?: string | null;
   building: string;
   /** The room it stands in, or 0 for out in the open. */
   cell: number;
@@ -37,6 +45,8 @@ export interface TravelRow {
 /** One of them in the world's own frame, with what it belongs to. */
 export interface TravelThing {
   kind: 'terminal' | 'collector' | 'shuttle';
+  /** The model it is drawn with, or null. */
+  model: string | null;
   /** Where it really is, in the world's frame. */
   x: number;
   y: number;
@@ -95,6 +105,7 @@ export function travelThingsOf(rows: readonly TravelRow[], centre: { x: number; 
       // already over here, so all that is left of the mirror is the offset's own across-part.
       out.push({
         kind: r.kind,
+        model: r.model ?? null,
         x: bx - (r.x * cos + r.z * sin),
         y: r.by + r.y,
         z: bz + (-r.x * sin + r.z * cos),
@@ -106,7 +117,7 @@ export function travelThingsOf(rows: readonly TravelRow[], centre: { x: number; 
       });
       continue;
     }
-    out.push({ kind: r.kind, x: -(r.x - centre.x), y: r.y, z: r.z - centre.z, yaw: -r.yaw, cell: 0, building: r.building, bx, bz });
+    out.push({ kind: r.kind, model: r.model ?? null, x: -(r.x - centre.x), y: r.y, z: r.z - centre.z, yaw: -r.yaw, cell: 0, building: r.building, bx, bz });
   }
   return out;
 }

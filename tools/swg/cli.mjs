@@ -201,7 +201,8 @@ import { statusJson } from './statusplan.mjs';
 /** The shape of deeds.json. A pack written by an older run is asked for again rather than read. */
 const DEED_PACK_VERSION = 1;
 /** The shape of a world's 	ravel.json. A pack written by an older run is asked for again. */
-const TRAVEL_PACK_VERSION = 1;
+// 2: every row carries the model it is drawn with, and the shuttleports' own shuttles are in it.
+const TRAVEL_PACK_VERSION = 2;
 /** The shape of music/music.json. A pack written by an older run is asked for again. */
 const MUSIC_PACK_VERSION = 1;
 import { openTre, openVfs, readHeader } from './tre.mjs';
@@ -5752,27 +5753,35 @@ switch (cmd) {
   }
 
   case 'travel': {
-    // <out-dir> [--core3=<dir>]: where the travel terminals, the ticket collectors and the shuttles
-    // really stood, written into each converted world's own pack as `travel.json`.
+    // <swg-dir> <out-dir> [--core3=<dir>]: where the travel terminals, the ticket collectors and the
+    // shuttles really stood, written into each converted world's own pack as `travel.json`, with the
+    // two models that draw them converted into that world's own folder.
     //
     // None of the three is in a world snapshot -- Corellia's places 413 terminals and not one
     // travel terminal, because travel was the server's -- so this reads the owner's own emulator
     // checkout for the `childObjects` each starport and shuttleport building carries, and joins
-    // them to where this game's own packs place those buildings. It opens no game archive, so it
-    // takes no <swg-dir>; it must run after the worlds. `tools/swg/travel.mjs` says what the two
-    // surprises in the numbers are. Nothing it writes may ever reach the repository.
-    if (!pos[1]) usage();
+    // them to where this game's own packs place those buildings. It must run after the worlds.
+    // `tools/swg/travel.mjs` says what the surprises in the numbers are. Nothing it writes may ever
+    // reach the repository.
+    //
+    // It takes a <swg-dir> now and did not before: the terminal and the shuttle are ordinary static
+    // appearances the archives hold, and no world snapshot places either of them, so the only way to
+    // draw the thing the player presses is to convert it here beside the rows that say where it
+    // stands. The collector needs nothing: it is a droid the mobiles pack already carries.
+    if (!pos[2]) usage();
     const core3 = options.core3 ?? process.env.CORE3 ?? '';
     if (!core3 || !existsSync(join(core3, 'object', 'building'))) {
       console.log(`travel: no emulator scripts folder (--core3=<dir>, or CORE3 in .env); looked at ${core3 || '(nothing)'}`);
       break;
     }
     const T = await import('./travel.mjs');
-    const out = pos[1];
+    const vfs = mount(pos[1]);
+    const out = pos[2];
     const byTemplate = T.readTravelBuildings(core3);
     console.log(`travel: ${byTemplate.size / 2} building templates carry travel children`);
     let worlds = 0;
     let things = 0;
+    let drawn = 0;
     for (const dir of readdirSync(out, { withFileTypes: true })) {
       if (!dir.isDirectory()) continue;
       const layoutFile = join(out, dir.name, 'layout.json');
@@ -5786,6 +5795,31 @@ switch (cmd) {
       const rows = T.placeTravel(layout.objects ?? [], byTemplate);
       if (!rows.length) continue;
       const counts = T.travelCounts(rows);
+      // Whatever this world's rows really name, converted into its own pack and merged into its
+      // `layout` category, which is the one the streamer reads a model out of. A world that already
+      // has the model (one of them places a travel terminal of its own) keeps the entry it has.
+      const manifestPath = join(out, dir.name, 'manifest.json');
+      const manifest = existsSync(manifestPath) ? JSON.parse(readFileSync(manifestPath, 'utf8')) : { planet: layout.planet ?? dir.name, categories: {} };
+      manifest.categories ??= {};
+      manifest.categories.layout ??= [];
+      for (const [id, appearance] of T.TRAVEL_MODELS) {
+        if (!rows.some((r) => r.model === id)) continue;
+        if (manifest.categories.layout.some((d) => d.id === id)) continue;
+        if (!vfs.has(appearance)) {
+          console.warn(`  ${dir.name}: ${id} has no appearance in the archives`);
+          continue;
+        }
+        try {
+          const conv = convertOne(vfs, appearance, join(out, dir.name, `${id}.glb`));
+          const b = conv.mesh.bounds ?? { min: [0, 0, 0], max: [0, 0, 0] };
+          const bounds = conv.flipX ? { min: [-b.max[0], b.min[1], b.min[2]], max: [-b.min[0], b.max[1], b.max[2]] } : b;
+          manifest.categories.layout.push({ id, file: `${id}.glb`, bounds, triangles: conv.tris, textured: conv.textured, shaders: conv.shaders.length, appearance });
+          drawn++;
+        } catch (err) {
+          console.warn(`  ${dir.name}: ${id} would not convert: ${err.message}`);
+        }
+      }
+      writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
       writeFileSync(
         join(out, dir.name, 'travel.json'),
         JSON.stringify({ version: TRAVEL_PACK_VERSION, planet: layout.planet ?? dir.name, source: { core3: true, note: "the children of each starport and shuttleport building, joined to where this world's own snapshot places them" }, counts, rows }, null, 1),
@@ -5794,7 +5828,8 @@ switch (cmd) {
       things += rows.length;
       console.log(`  ${dir.name}: ${counts.terminals} terminals, ${counts.collectors} collectors, ${counts.shuttles} shuttles over ${counts.buildings} kinds of building`);
     }
-    console.log(`travel: ${things} things over ${worlds} worlds`);
+    console.log(`travel: ${things} things over ${worlds} worlds, ${drawn} models converted`);
+    console.log('  the ticket collector is the mobiles pack\'s own droid and needs no conversion here');
     break;
   }
 

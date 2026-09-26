@@ -29,14 +29,50 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { readLua } from './lua.mjs';
 
-/** What a child object is to this game, or null for one it has no use for. */
+/**
+ * What a child object is to this game, or null for one it has no use for.
+ *
+ * The shuttle is named twice over and the first cut of this only knew one of the names: a starport
+ * declares a `player_transport` and a **shuttleport declares a `player_shuttle`**, so every
+ * shuttleport in the game came out with a terminal, a collector and no shuttle at all -- 33
+ * placements over the converted worlds, which is most of the ports there are.
+ */
 export function kindOfChild(templateFile) {
   const t = String(templateFile ?? '');
   if (/\/terminal_travel(_|\.)/.test(t)) return 'terminal';
   if (/ticket_collector/.test(t)) return 'collector';
-  if (/player_transport/.test(t)) return 'shuttle';
+  if (/player_(transport|shuttle)/.test(t)) return 'shuttle';
   return null;
 }
+
+/**
+ * Which model this game draws a travel thing with, or null where it has none.
+ *
+ * It is written into the pack rather than worked out at run time, so the game never guesses a name
+ * and a pack converted before a model existed simply carries null. The collector is a droid and is
+ * the mobiles pack's, which is why it is named as a catalogue entry rather than as a model file.
+ */
+export function modelOfKind(kind, templateFile) {
+  const t = String(templateFile ?? '');
+  if (kind === 'terminal') return 'ksk_all_travel';
+  if (kind === 'collector') return '3po_protocol_droid_silver';
+  // The starport's transport has no single model: its own mesh is a placeholder and the hull it
+  // shows is five separate pieces hung off its client data. Only the shuttleport's is drawn.
+  if (kind === 'shuttle') return /player_shuttle/.test(t) ? 'shuttle' : null;
+  return null;
+}
+
+/**
+ * The models this game draws a travel thing with, and where each one's appearance lives.
+ *
+ * No world snapshot places either of them -- the terminals and the shuttles were the server's, which
+ * is the whole reason this command exists -- so the `travel` command converts them into each world
+ * that needs one. The collector is not here: it is a droid and the mobiles pack already carries it.
+ */
+export const TRAVEL_MODELS = [
+  ['ksk_all_travel', 'appearance/ksk_all_travel.apt'],
+  ['shuttle', 'appearance/shuttle.apt'],
+];
 
 /** Every `.lua` under a folder. */
 function luaFiles(dir, out = []) {
@@ -101,7 +137,7 @@ export function readTravelBuildings(scriptsDir) {
         if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
         // The emulator writes a child as (x, z, y) with z the height: this puts it back the way the
         // rest of this converter and the whole game read a place.
-        kids.push({ kind, x, y: z, z: y, yaw: Math.round(childYaw(c) * 1e4) / 1e4, cell: Number.isFinite(c.cellid) ? Math.round(c.cellid) : -1 });
+        kids.push({ kind, model: modelOfKind(kind, c.templateFile), x, y: z, z: y, yaw: Math.round(childYaw(c) * 1e4) / 1e4, cell: Number.isFinite(c.cellid) ? Math.round(c.cellid) : -1 });
       }
       // A snapshot names a building by its **shared** template, which is the one the client has;
       // the scripts are named for the server's. Both are written so the join is a plain string
@@ -137,11 +173,12 @@ export function placeTravel(placements, byTemplate) {
     const sin = Math.sin(yaw);
     for (const k of kids) {
       if (k.cell > 0) {
-        out.push({ kind: k.kind, building: p.template, at: p.id ?? null, cell: k.cell, x: k.x, y: k.y, z: k.z, yaw: k.yaw, bx: p.x, by: p.y, bz: p.z, byaw: Math.round(yaw * 1e4) / 1e4 });
+        out.push({ kind: k.kind, model: k.model ?? null, building: p.template, at: p.id ?? null, cell: k.cell, x: k.x, y: k.y, z: k.z, yaw: k.yaw, bx: p.x, by: p.y, bz: p.z, byaw: Math.round(yaw * 1e4) / 1e4 });
         continue;
       }
       out.push({
         kind: k.kind,
+        model: k.model ?? null,
         building: p.template,
         at: p.id ?? null,
         cell: 0,

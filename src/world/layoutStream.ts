@@ -118,6 +118,15 @@ export interface RuntimePlacement {
   radius: number;
   /** How much ground round it the procedural flora keeps off, metres. Zero leaves the flora alone. */
   clear?: number;
+  /**
+   * Standing inside a building rather than out in the open.
+   *
+   * It changes two things and both matter: the mesh joins the actor layer, without which it is
+   * stencilled out of the room's own pass and shows only through a doorway; and its collision takes
+   * the indoor rule, so a walker indoors is stopped by it rather than filtering it out with the
+   * building's shell. The place is still the world's, as it is for anything else placed in play.
+   */
+  inside?: boolean;
 }
 
 /** A placed portal building; the player's cell inside it is tracked by crossing its portals. */
@@ -377,7 +386,7 @@ export class LayoutStreamer {
       z: p.z,
       q: p.q,
       radius: p.radius,
-      contained: false,
+      contained: !!p.inside,
       tier: tier < 0 ? TIERS.length - 1 : tier,
     };
     this.objects.push(placed);
@@ -896,6 +905,10 @@ export class LayoutStreamer {
       mesh.setMatrixAt(0, tmpM.compose(tmpV.set(p.x, p.y, p.z), p.q, ONE));
       mesh.castShadow = model.radius >= SHADOW_MIN_RADIUS && castsShadow(prim.material);
       if (drawsAfterWater(prim.material)) mesh.renderOrder = 3;
+      // A thing standing in a room is drawn with the room, which is the actor layer -- the same line
+      // the bulk path has. Without it an indoor placement is stencilled out of the room's own pass
+      // and can only be seen through a doorway from outside, which is worse than not drawing it.
+      if (p.contained) mesh.layers.enable(ACTOR_LAYER);
       mesh.receiveShadow = true;
       mesh.instanceMatrix.needsUpdate = true;
       mesh.computeBoundingSphere();

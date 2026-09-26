@@ -6,7 +6,7 @@
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { childYaw, kindOfChild, placeTravel, readTravelBuildings, travelCounts, yawOfQuat } from '../travel.mjs';
+import { childYaw, kindOfChild, modelOfKind, placeTravel, readTravelBuildings, travelCounts, yawOfQuat } from '../travel.mjs';
 
 let passed = 0;
 function ok(cond: boolean, what: string): void {
@@ -25,8 +25,23 @@ function note(what: string): void {
   ok(kindOfChild('object/tangible/terminal/terminal_travel_tutorial.iff') === 'terminal', 'and so is the tutorial one');
   ok(kindOfChild('object/tangible/travel/ticket_collector/ticket_collector.iff') === 'collector', 'a ticket collector is where a ticket is taken');
   ok(kindOfChild('object/mobile/player_transport.iff') === 'shuttle', 'and the transport is the shuttle itself');
+  // The shuttle has two names and only one of them was known, so every shuttleport in the game came
+  // out with a terminal, a collector and no shuttle: a starport declares a transport and a
+  // shuttleport declares a shuttle.
+  ok(kindOfChild('object/creature/npc/theme_park/player_shuttle.iff') === 'shuttle', "a shuttleport's own shuttle is a shuttle too, which is the name that was being dropped");
   ok(kindOfChild('object/tangible/terminal/terminal_bank.iff') === null, 'a bank terminal is not a travel terminal, although both are terminals');
   ok(kindOfChild(undefined) === null, 'and nothing at all is nothing');
+}
+
+{
+  // Which model draws each thing is written into the pack rather than worked out in the game, so
+  // nothing downstream ever guesses at a name and a pack made before a model existed carries null.
+  ok(modelOfKind('terminal', 'object/tangible/terminal/terminal_travel.iff') === 'ksk_all_travel', 'a terminal names the model the terminal is drawn with');
+  ok(modelOfKind('collector', 'x/ticket_collector.iff') === '3po_protocol_droid_silver', 'the collector is a droid, and names a catalogue entry rather than a model file');
+  ok(modelOfKind('shuttle', 'object/creature/npc/theme_park/player_shuttle.iff') === 'shuttle', "a shuttleport's shuttle has a model of its own");
+  // The starport's transport is deliberately left undrawn: its own mesh is a placeholder and the
+  // hull it shows is five separate pieces hung off its client data, which nothing here assembles.
+  ok(modelOfKind('shuttle', 'object/mobile/player_transport.iff') === null, 'and the starport transport has none, which is said rather than guessed at');
 }
 
 // ---------------------------------------------------------------- the frame

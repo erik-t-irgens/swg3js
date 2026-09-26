@@ -102,7 +102,7 @@ import { homes } from './net/homes.ts';
 import { creditText, purse } from './net/purse.ts';
 import { BAND_TUNE, band, loadMusic, musicPack, partsFor, songsFor, stemFor } from './audio/band.ts';
 import { BandBar } from './ui/bandBar.ts';
-import { TRAVEL_TUNE, addTicket, canBoard, collectorWords, pickTicket, shuttleAt, shuttleWords, thingAt, ticketText, travelThingsOf, type ShuttleState, type Ticket, type TravelRow, type TravelThing } from './world/travelTerminal.ts';
+import { TRAVEL_PACK_VERSION, TRAVEL_TUNE, addTicket, canBoard, collectorWords, pickTicket, shuttleAt, shuttleWords, thingAt, ticketText, travelThingsOf, type ShuttleState, type Ticket, type TravelRow, type TravelThing } from './world/travelTerminal.ts';
 import { SHIP_TERMINAL_TEMPLATES, SHIP_TERMINAL_TUNE, SHIP_TRIP_ORBIT, shipTripsFrom, shipTripsNote, type ShipTerminalState } from './world/shipTerminal.ts';
 import type { PlacedObject } from './world/layoutStream';
 import { TerminalUi, type TerminalPort, type TerminalShipTrip } from './ui/terminalUi.ts';
@@ -121,6 +121,7 @@ import { MOTION_TUNING, MOVER_LIMITS } from './core/fx/velocityMath.ts';
 import type { MotionBlurPass } from './core/fx/motionBlur';
 import { HeatSources, plumeNoiseFrequency } from './world/heatSources';
 import { MobileAssets } from './world/mobiles/assets';
+import type { Mobile } from './world/mobiles/mobile';
 import { vehiclePlumes } from './vehicles/enginePlumes';
 import { Notice } from './ui/notice';
 import { MESSAGES, MessageLine, plain, tuneMessages } from './ui/messages';
@@ -9367,7 +9368,12 @@ class App {
    * developer's own shuttle list is the only way about.
    */
   private async loadTravel(pack: string): Promise<void> {
-    if (this.travelRowsFor === pack) return;
+    // The rows are fetched once per world; standing them is a separate thing and happens on every
+    // arrival, because a world unloaded and loaded again is the same pack with none of its props.
+    if (this.travelRowsFor === pack) {
+      void this.standTravel(pack);
+      return;
+    }
     this.travelRowsFor = pack;
     this.travelRows = [];
     this.travelCache = { key: '', things: [] };
@@ -9375,13 +9381,61 @@ class App {
       const res = await fetch(`${import.meta.env.BASE_URL}assets-private/${pack}/travel.json`);
       if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json')) return;
       const data = (await res.json()) as { version?: number; rows?: TravelRow[] };
-      if (data.version !== 1 || !Array.isArray(data.rows)) return;
+      // A pack written before the models were named carries no `model` on any row, so it reads as a
+      // world whose terminals are there to press and not to see. Refusing it outright would take
+      // travel away from an install that has not reconverted, which is worse than drawing nothing.
+      if (!Array.isArray(data.rows) || !(data.version === 1 || data.version === TRAVEL_PACK_VERSION)) return;
       if (this.travelRowsFor !== pack) return;
       this.travelRows = data.rows;
       this.travelCache = { key: '', things: [] };
+      void this.standTravel(pack);
     } catch {
       /* a world with no travel pack simply has no terminals */
     }
+  }
+
+  /** What has been stood up for the world's travel things, so leaving takes it all down again. */
+  private travelStood: { pack: string; keys: string[]; droids: Mobile[] } = { pack: '', keys: [], droids: [] };
+
+  /**
+   * Draw the world's travel things where the data says they stand.
+   *
+   * The terminal and the shuttle are models in this world's own pack and go through the streamer, so
+   * they are instanced, compiled before they show, lit, shadowed and solid exactly as every other
+   * placed object is -- a terminal is a thing you walk into, not a picture. The collector is a droid
+   * and goes through the mobiles manager instead, which is what already stands a named catalogue
+   * entry at a place and keeps it there.
+   *
+   * It is deliberately not awaited by whoever asked for the rows: standing a hundred models is a
+   * model load and a compile apiece, and the terminals must not hold a travel up.
+   */
+  private async standTravel(pack: string): Promise<void> {
+    // Anything stood for a world that is still here comes down; anything stood for a world that has
+    // been unloaded is simply forgotten, since the streamer and the mobiles manager went with it and
+    // reaching into either for a record they no longer hold is asking for a throw.
+    this.clearTravelStood(this.travelStood.pack === pack);
+    this.travelStood.pack = pack;
+    const things = this.travelThings();
+    for (const [i, t] of things.entries()) {
+      if (this.travelRowsFor !== pack) return;
+      if (!t.model) continue;
+      if (t.kind === 'collector') {
+        const droid = this.world.standMobile(t.model, { x: t.x, z: t.z, heading: t.yaw }, t.cell > 0, `travel:${pack}:${i}`);
+        if (droid) this.travelStood.droids.push(droid);
+        continue;
+      }
+      const key = `travel:${pack}:${i}`;
+      if (await this.world.placeProp(t.model, { key, at: { x: t.x, y: t.y, z: t.z }, yaw: t.yaw, inside: t.cell > 0 })) this.travelStood.keys.push(key);
+    }
+  }
+
+  /** Everything `standTravel` stood, taken down where the world it was stood in is still here. */
+  private clearTravelStood(takeDown: boolean): void {
+    if (takeDown) {
+      for (const key of this.travelStood.keys) this.world.unplaceBuilding(key);
+      for (const droid of this.travelStood.droids) this.world.unstandMobile(droid);
+    }
+    this.travelStood = { pack: '', keys: [], droids: [] };
   }
 
   /** This world's travel terminals, collectors and shuttles, kept while the pack and the centre hold. */
@@ -9436,7 +9490,7 @@ class App {
       this.terminalWorld = '';
       this.closePanels();
       this.map.hide();
-      this.showTerminal(this.portOfBuilding({ kind: 'terminal', x: own.x, y: own.y, z: own.z, yaw: 0, cell: 0, building: own.template, bx: own.x, bz: own.z }));
+      this.showTerminal(this.portOfBuilding({ kind: 'terminal', model: null, x: own.x, y: own.y, z: own.z, yaw: 0, cell: 0, building: own.template, bx: own.x, bz: own.z }));
       this.freeMouse(true);
       return true;
     }
