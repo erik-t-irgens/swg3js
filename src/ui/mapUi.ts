@@ -682,6 +682,60 @@ export class MapUi {
     this.raf = requestAnimationFrame(() => this.loop());
   }
 
+  /** Whoever has the galaxy view just now, or null. While it is lent the map may not be opened. */
+  private lentTo: HTMLElement | null = null;
+  private lendRaf = 0;
+
+  /** Whether the galaxy view is somewhere else, which is what `canOpen` must ask before showing. */
+  get lent(): boolean {
+    return !!this.lentTo;
+  }
+
+  /**
+   * Lend the galaxy -- the canvas, the labels, the mouse layer and all -- to another panel's box.
+   *
+   * There is **one** WebGL context for this window and it is deliberate: the two tabs pass the same
+   * canvas between them. A second galaxy in a context of its own would be a fifth context in the
+   * game and would upload all twelve globe pictures again, some forty megabytes of them, because
+   * three's texture cache is per renderer and disposing one copy would take the other with it. So the
+   * view is lent rather than copied, which is safe because the map window and the travel terminal can
+   * never be open at once: both ways into the terminal close the map first.
+   *
+   * Handing it back puts everything where `showTab` expects to find it.
+   */
+  lendGalaxy(holder: HTMLElement | null): void {
+    if (this.lentTo === holder) return;
+    cancelAnimationFrame(this.lendRaf);
+    this.lendRaf = 0;
+    if (!holder) {
+      this.lentTo = null;
+      this.galaxy.hide();
+      // Back where the window's own tabs look for them.
+      this.hereBody.insertBefore(this.canvas3d, this.labelLayer);
+      this.galaxy.returnHolder();
+      this.galaxy.setReachable(null);
+      this.galaxy.onPick = null;
+      return;
+    }
+    this.lentTo = holder;
+    this.canvas3d.hidden = false;
+    this.galaxy.attachCanvas(this.canvas3d);
+    holder.appendChild(this.galaxy.holder);
+    // The pictures and the route file are asked for from `show`, which a borrower never calls.
+    this.galaxy.warmUp();
+    const frame = () => {
+      if (this.lentTo !== holder) return;
+      this.galaxy.drawView(this.mapRenderer());
+      this.lendRaf = requestAnimationFrame(frame);
+    };
+    frame();
+  }
+
+  /** The galaxy's own pick and lighting, for a borrower. */
+  get galaxyView(): GalaxyMap {
+    return this.galaxy;
+  }
+
   /**
    * The map window's own renderer, made on the first frame that wants it. The space view makes the
    * same one where it draws first; whichever tab is opened first builds it, and both draw with it.

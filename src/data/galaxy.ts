@@ -253,6 +253,29 @@ export function planetOfRouteId(id: string): PlanetDef | null {
   return PLANETS.find((p) => p.id === id) ?? PLANETS.find((p) => p.zones?.some((z) => z.pack === id)) ?? null;
 }
 
+/** Which system a route's pack id belongs to, or null for one this build has no world for. */
+export function systemOfPack(id: string): string | null {
+  const planet = planetOfRouteId(id);
+  return planet ? (systemOf(planet.id)?.id ?? null) : null;
+}
+
+/**
+ * The systems a list of route packs reaches.
+ *
+ * It takes the packs rather than reading the route file, and that is the whole point of it: which
+ * worlds can be flown to from where you stand is a directed question with a fare, a starport rule
+ * and a "this build has no such world" rule, and all three already live in `ridesFrom`. Working it
+ * out a second time here would light a line on the map that the panel beside it refuses to sell.
+ */
+export function systemsOfWorlds(packs: readonly string[]): Set<string> {
+  const out = new Set<string>();
+  for (const p of packs) {
+    const sys = systemOfPack(p);
+    if (sys) out.add(sys);
+  }
+  return out;
+}
+
 /**
  * The routes as lines between systems: a route whose ends are in one system (Corellia to Talus) draws
  * nothing, a name no world of ours has is left out, and a pair that appears both ways is one line at

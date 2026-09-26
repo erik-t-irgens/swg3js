@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import { PLANETS } from '../../../src/data/planets.ts';
 import {
-  GALAXY_LEFT_OUT, GALAXY_SYSTEMS, GALAXY_TUNE, destinationFor, drawnSystems, gridSquare, idsOf, planetOfRouteId, planetTextureOf, systemOf, systemPlace, systemRoutes, worldsOf, zoneFor,
+  GALAXY_LEFT_OUT, GALAXY_SYSTEMS, GALAXY_TUNE, destinationFor, drawnSystems, gridSquare, idsOf, planetOfRouteId, planetTextureOf, systemOf, systemOfPack, systemPlace, systemRoutes, systemsOfWorlds, worldsOf, zoneFor,
   type GalaxyFile, type GalaxySystemDef,
 } from '../../../src/data/galaxy.ts';
 import { HyperspaceCatalogue, destinationsOf, type SpacePack } from '../../../src/space/spaceData.ts';
@@ -81,6 +81,22 @@ ok(!!tatoo && tatoo.price === 700, 'a pair named both ways is one line, at the l
 ok(routes.some((r) => (r.from === 'kashyyyk' && r.to === 'naboo') || (r.from === 'naboo' && r.to === 'kashyyyk')), 'a route named by a zone pack is read as that zone\'s world');
 ok(planetOfRouteId('kashyyyk_main')?.id === 'kashyyyk' && planetOfRouteId('coruscant') === null, 'a pack name resolves to its planet, and an unknown name to nothing');
 ok(systemRoutes(null).length === 0, 'with no galaxy.json converted, no routes are drawn');
+
+// 3b. Which systems a terminal lights on the galaxy. It takes the list of worlds the panel is already
+// offering rather than reading the route file again, because that list carries three rules the file
+// does not -- the fares are directed, only a starport leaves a world at all, and a destination this
+// build has no name for is dropped -- and a second opinion here would light a line the panel refuses.
+{
+  ok(systemOfPack('tatooine') === 'tatoo', 'a world resolves to the system it is in');
+  ok(systemOfPack('kashyyyk_main') === 'kashyyyk', "and so does one named by a zone's own pack");
+  ok(systemOfPack('coruscant') === null, 'a world this build does not have is in no system');
+  const lit = systemsOfWorlds(['naboo', 'talus', 'coruscant']);
+  ok(lit.size === 2, 'the systems a list of worlds reaches, with the ones we have no world for left out');
+  // The trap worth pinning: Corellia and Talus are one system, so a world you can fly to can be in
+  // the very system you are standing in. Lighting must not drop it for being where you already are.
+  ok(systemsOfWorlds(['talus']).has(systemOfPack('corellia')!), "a destination inside your own system still lights it, which is Corellia and Talus and Naboo and Rori");
+  ok(systemsOfWorlds([]).size === 0, 'and a port that goes nowhere lights nothing');
+}
 
 // 4. Where a jump into a system comes out. These packs stand for a planet's orbit with a launch point
 // and a station named after the neighbouring world (Corellia's, which holds Talus's station), and for a

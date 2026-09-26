@@ -390,6 +390,9 @@ export class GalaxyMap {
       this.panning = false;
       if (!clicked) return;
       const id = this.view.pickAt(e.offsetX, e.offsetY, this.viewHolder.clientWidth || 1, this.viewHolder.clientHeight || 1);
+      // Whoever has borrowed the view gets first refusal on the pick: the travel terminal shows this
+      // same galaxy and wants a click to mean "buy a ticket there", not "fill in the map's panel".
+      if (this.onPick && this.onPick(id)) return;
       this.showSystem(id ? (drawnSystems().find((s) => s.id === id) ?? null) : null);
     });
     c.addEventListener('pointercancel', () => {
@@ -419,6 +422,48 @@ export class GalaxyMap {
   }
 
   /**
+   * The holder the canvas and the labels live in, for a panel that borrows the whole view.
+   *
+   * It is the holder and not the bare canvas because the labels, the layer that catches the mouse
+   * and the note are all children of it: moving the canvas alone would leave the names of the worlds
+   * behind in the map window.
+   */
+  get holder(): HTMLElement {
+    return this.viewHolder;
+  }
+
+  /** The holder put back where this window's own tabs look for it. */
+  returnHolder(): void {
+    this.mainEl.prepend(this.viewHolder);
+  }
+
+  /**
+   * First refusal on a click, for whoever has borrowed the view. Returning true means "handled":
+   * the map's own panel is left alone.
+   */
+  onPick: ((systemId: string | null) => boolean) | null = null;
+
+  /** Which systems may be picked at all, or null for every one. Passed straight to the view. */
+  setReachable(systems: ReadonlySet<string> | null): void {
+    this.view.setReachable(systems);
+  }
+
+  /** Whether a system may be picked, for a borrower deciding what a click means. */
+  canPick(systemId: string): boolean {
+    return this.view.canPick(systemId);
+  }
+
+  /**
+   * Fetch the globes and the routes without showing the window.
+   *
+   * A borrower needs this: the pictures and the route file are asked for once, from `show`, and a
+   * view lent out before the map has ever been opened would otherwise be bare globes and no lines.
+   */
+  warmUp(): void {
+    this.askGlobes();
+  }
+
+  /**
    * One frame of the galaxy, with the map window's own renderer. The renderer is the space view's as
    * well, and each tab sizes it to its own holder on the frame it draws: the drawing buffer is the
    * only thing that changes, so moving between the tabs costs nothing but a resize.
@@ -426,7 +471,10 @@ export class GalaxyMap {
   drawView(renderer: THREE.WebGLRenderer): void {
     const w = this.viewHolder.clientWidth;
     const h = this.viewHolder.clientHeight;
-    if (!w || !h || this.mainEl.hidden) return;
+    // The hidden test is only about this window's own tab. Lent out, the holder is somewhere else
+    // altogether and this window is shut, so its own body being hidden says nothing -- the holder's
+    // own box is what says whether there is anything to draw into, and it is zero when there is not.
+    if (!w || !h || (this.mainEl.hidden && this.viewHolder.parentElement === this.mainEl)) return;
     const ratio = renderer.getPixelRatio();
     // Compared the way three sizes the buffer (it floors): compared rounded, a holder whose width times
     // 1.25 or 1.5 ends in more than a half set the size again on every frame, which throws the

@@ -97,7 +97,7 @@ import { standingPeople, PEOPLE_TUNE } from './world/standingPeople.ts';
 import { HOUSE_TUNE } from './world/housePlace.ts';
 import { SHUTTLE_TUNE, fareText, landingOn, portAt, portsOf, ridesFrom, type FareTable, type Port, type Ride } from './world/shuttle.ts';
 import { ShuttleMenu } from './ui/shuttleMenu.ts';
-import { loadGalaxyFile, planetOfRouteId } from './data/galaxy';
+import { loadGalaxyFile, planetOfRouteId, systemOfPack, systemsOfWorlds } from './data/galaxy';
 import { homes } from './net/homes.ts';
 import { creditText, purse } from './net/purse.ts';
 import { BAND_TUNE, band, loadMusic, musicPack, partsFor, songsFor, stemFor } from './audio/band.ts';
@@ -1245,6 +1245,7 @@ class App {
     // The travel terminal: the local map of this world's ports, the galaxy side, and the purchase.
     this.terminalUi = new TerminalUi(this.ui);
     this.terminalUi.onClose = () => {
+      this.lendGalaxy(false);
       this.terminalUi.hide();
       this.freeMouse(false);
     };
@@ -9625,6 +9626,10 @@ class App {
           why: from && p.name === from.name ? 'you are here' : '',
         }));
     }
+    // The galaxy itself on the galaxy side, borrowed from the map window rather than built a second
+    // time, and given the list of worlds this port can really reach so that only those light up.
+    // Before the panel draws, so the box is already filled when it decides what to show.
+    this.lendGalaxy(this.terminalStage === 'worlds', worlds);
     void this.terminalMap(mapPack).then((meta) => {
       if (!this.terminalUi.open && !this.terminalOpening) return;
       this.terminalOpening = false;
@@ -9740,6 +9745,40 @@ class App {
 
   /** True while the terminal is being filled for the first time, so a late map still shows it. */
   private terminalOpening = false;
+
+  /**
+   * Borrow the map window's galaxy into the terminal, or give it back.
+   *
+   * It is the map's own view moved, not a second one: there is one WebGL context for that window on
+   * purpose, and a second galaxy would upload all twelve globe pictures again. It is safe because
+   * the two can never be open at once -- both ways into the terminal close the map first.
+   *
+   * What lights up is not worked out here either. `worlds` is the list the terminal is already
+   * showing down its right-hand side, which came from `ridesFrom` and so already carries the
+   * directed fares, the starports-only rule and the "this build has no such world" rule. Deriving it
+   * a second time from the route file would light a line the panel beside it refuses to sell.
+   */
+  private lendGalaxy(on: boolean, worlds: readonly { pack: string }[] = []): void {
+    if (!on) {
+      this.map.lendGalaxy(null);
+      return;
+    }
+    this.map.lendGalaxy(this.terminalUi.galaxyBox);
+    const reach = systemsOfWorlds(worlds.map((w) => w.pack));
+    this.map.galaxyView.setReachable(reach);
+    this.map.galaxyView.onPick = (systemId) => {
+      if (!systemId) return true;
+      if (!this.map.galaxyView.canPick(systemId)) {
+        this.messages.system('no shuttle goes there from here');
+        return true;
+      }
+      // A system can hold two worlds this port reaches; the cheaper is offered and the list beside
+      // still names the other. A click on the system you are standing in means a world in it.
+      const pack = worlds.map((w) => w.pack).find((p) => systemOfPack(p) === systemId);
+      if (pack) this.terminalUi.onWorld(pack);
+      return true;
+    };
+  }
 
   /** A world's own map picture and the ground it covers, fetched once per world for the session. */
   private readonly terminalMaps = new Map<string, Promise<{ url: string; width: number } | null>>();
@@ -10321,7 +10360,12 @@ class App {
     if (this.shipMenu.open) this.shipMenu.hide();
     if (this.hyperspaceUi.open) this.hyperspaceUi.hide();
     if (this.housingUi.open) this.housingUi.hide();
-    if (this.terminalUi.open) this.terminalUi.hide();
+    if (this.terminalUi.open) {
+      // The galaxy goes home first: the terminal is about to be hidden with the map window's own
+      // canvas and label layer sitting inside it, and nothing else would ever put them back.
+      this.lendGalaxy(false);
+      this.terminalUi.hide();
+    }
     if (this.liftMenu.open) this.liftMenu.hide();
     if (this.shuttleMenu.open) {
       this.shuttleMenu.hide();
@@ -11186,6 +11230,13 @@ class App {
 
 
   private toggleMap(): void {
+    // The galaxy is one view and the terminal may be holding it. It should never happen -- both ways
+    // into the terminal close the map first, and M is not read while a panel is up -- but opening the
+    // window onto a box whose canvas is somewhere else would be a blank tab and no way to say why.
+    if (!this.map.open && this.map.lent) {
+      this.messages.system('the terminal has the galaxy open; close it first');
+      return;
+    }
     if (this.map.open) {
       this.map.hide();
       this.input.captured = false;

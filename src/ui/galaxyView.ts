@@ -41,9 +41,24 @@ export const GALAXY_VIEW_TUNE = {
   /** Where the view starts, so the whole galaxy is in the frame. */
   startDistance: 1900,
   startPitch: 0.8,
+  /**
+   * How much of itself a world or a route keeps when it cannot be flown to from here. Invented.
+   *
+   * Not zero: a galaxy with only three lines on it says nothing about the galaxy. The muted ones are
+   * still there to read and are plainly not on offer.
+   */
+  muteShare: 0.28,
 };
 
 const clamp = (v: number, lo: number, hi: number) => (v < lo ? lo : v > hi ? hi : v);
+
+/** A colour dimmed toward black by a share of itself, channel by channel. */
+function mute(hex: number, share: number): number {
+  const r = Math.round(((hex >> 16) & 0xff) * share);
+  const g = Math.round(((hex >> 8) & 0xff) * share);
+  const b = Math.round((hex & 0xff) * share);
+  return (r << 16) | (g << 8) | b;
+}
 
 /**
  * Where the galaxy view looks. Its own, rather than the space map's: that one's distances are a space
@@ -113,6 +128,8 @@ interface Globe {
   looks: readonly [string, string, string];
   /** Which one it is wearing, so a frame that changes nothing writes nothing. */
   look: LabelLook;
+  /** The colour it wears when it is lit: its own, or white once its own picture is on it. */
+  colour?: number;
 }
 
 export class GalaxyView {
@@ -121,6 +138,10 @@ export class GalaxyView {
   private readonly camera = new THREE.PerspectiveCamera(50, 16 / 9, 1, GALAXY_VIEW_TUNE.far);
   private readonly globes: Globe[] = [];
   private readonly routeLines: THREE.LineSegments;
+  /** The routes that cannot be flown from here: the same lines, drawn dim rather than left out. */
+  private readonly mutedLines: THREE.LineSegments;
+  /** Which systems may be picked, or null for all of them. */
+  private reachable: ReadonlySet<string> | null = null;
   private readonly here: THREE.Mesh;
   private readonly picked: THREE.Mesh;
   private readonly disc: THREE.Points;
@@ -173,6 +194,14 @@ export class GalaxyView {
     this.routeLines.frustumCulled = false;
     this.routeLines.visible = false;
     this.scene.add(this.routeLines);
+    // The muted set, made here beside the lit one so that its program is linked on the same first
+    // frame and lighting a different set of routes later never compiles anything.
+    const mutedGeometry = new THREE.BufferGeometry();
+    mutedGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(0), 3));
+    this.mutedLines = new THREE.LineSegments(mutedGeometry, new THREE.LineBasicMaterial({ color: 0x7fd7ff, transparent: true, opacity: GALAXY_VIEW_TUNE.routeOpacity * GALAXY_VIEW_TUNE.muteShare }));
+    this.mutedLines.frustumCulled = false;
+    this.mutedLines.visible = false;
+    this.scene.add(this.mutedLines);
     const ring = new THREE.RingGeometry(0.84, 1, 40);
     this.here = new THREE.Mesh(ring, new THREE.MeshBasicMaterial({ color: 0xff9d5a, transparent: true, opacity: 0.9, depthTest: false, side: THREE.DoubleSide }));
     this.picked = new THREE.Mesh(ring, new THREE.MeshBasicMaterial({ color: 0x7fd7ff, transparent: true, opacity: 0.9, depthTest: false, side: THREE.DoubleSide }));
@@ -233,26 +262,79 @@ export class GalaxyView {
     this.fillRoutes();
   }
 
-  /** The route lines' ends, written into a buffer made the first time a file gives more than it held. */
+  /**
+   * Which systems can really be reached from where the player stands, or null for "all of them".
+   *
+   * It is a set handed in and never worked out here, and deliberately so: what is flyable is a
+   * directed question with a fare, a starport rule and a "this build has no such world" rule, and
+   * all three already live in one place. A second opinion drawn off the route file would light a
+   * line the terminal beside it refuses to sell.
+   *
+   * Setting it moves no geometry and builds no program: the lit and the muted lines are two sets
+   * that both exist from the start, and a globe's colour is a uniform.
+   */
+  setReachable(systems: ReadonlySet<string> | null): void {
+    this.reachable = systems;
+    this.fillRoutes();
+    for (const g of this.globes) this.lightGlobe(g);
+  }
+
+  /** Whether a system may be picked at all. Everything may, until somebody says otherwise. */
+  canPick(systemId: string): boolean {
+    return !this.reachable || this.reachable.has(systemId) || systemId === this.hereId;
+  }
+
+  /** A globe's own colour, dimmed where it cannot be reached. */
+  private lightGlobe(g: Globe): void {
+    const lit = this.canPick(g.sys.id);
+    const base = g.material.map && g.material.map !== this.blank ? 0xffffff : (g.colour ?? 0xb9c6d8);
+    g.material.color.setHex(lit ? base : mute(base, GALAXY_VIEW_TUNE.muteShare));
+  }
+
+  /**
+   * The route lines' ends, written into buffers made the first time a file gives more than they held.
+   *
+   * Two sets rather than one, because a line cannot be half a colour: the reachable ones go in the
+   * lit set and everything else in the muted one, and both buffers are sized for every route so that
+   * changing which is which never allocates.
+   */
   private fillRoutes(): void {
     const want = this.routes.length * 2 * 3;
-    let attr = this.routeLines.geometry.getAttribute('position') as THREE.BufferAttribute;
-    if (attr.array.length < want) {
-      attr = new THREE.BufferAttribute(new Float32Array(want), 3);
-      this.routeLines.geometry.setAttribute('position', attr);
-    }
-    let n = 0;
+    const ends = (lines: THREE.LineSegments) => {
+      let attr = lines.geometry.getAttribute('position') as THREE.BufferAttribute;
+      if (attr.array.length < want) {
+        attr = new THREE.BufferAttribute(new Float32Array(want), 3);
+        lines.geometry.setAttribute('position', attr);
+      }
+      return attr;
+    };
+    const litAttr = ends(this.routeLines);
+    const dimAttr = ends(this.mutedLines);
+    let lit = 0;
+    let dim = 0;
     for (const r of this.routes) {
       const a = this.globes.find((g) => g.sys.id === r.from);
       const b = this.globes.find((g) => g.sys.id === r.to);
       if (!a || !b) continue;
+      // A route is lit when it touches the system the player is standing in and reaches one they can
+      // really fly to. Everything else is drawn and muted rather than left out, so the shape of the
+      // galaxy's own network is still there to read.
+      const on = !this.reachable || ((r.from === this.hereId || r.to === this.hereId) && (this.reachable.has(r.from) || this.reachable.has(r.to)));
+      const attr = on ? litAttr : dimAttr;
+      let n = on ? lit : dim;
       attr.setXYZ(n++, a.at.x, a.at.y, a.at.z);
       attr.setXYZ(n++, b.at.x, b.at.y, b.at.z);
+      if (on) lit = n;
+      else dim = n;
     }
-    attr.needsUpdate = true;
-    this.routeLines.geometry.setDrawRange(0, n);
+    litAttr.needsUpdate = true;
+    dimAttr.needsUpdate = true;
+    this.routeLines.geometry.setDrawRange(0, lit);
+    this.mutedLines.geometry.setDrawRange(0, dim);
     this.routeLines.geometry.boundingSphere = null;
-    this.routeLines.visible = n > 0;
+    this.mutedLines.geometry.boundingSphere = null;
+    this.routeLines.visible = lit > 0;
+    this.mutedLines.visible = dim > 0;
   }
 
   /** The shuttle routes, as lines between systems; handed over once the pack's own file has been read. */
@@ -269,8 +351,12 @@ export class GalaxyView {
   setGlobe(systemId: string, colour: number, texture: THREE.Texture | null): void {
     const g = this.globes.find((x) => x.sys.id === systemId);
     if (!g) return;
-    g.material.color.setHex(texture ? 0xffffff : colour);
+    // The colour it would wear if it were lit, kept so that muting and un-muting are reversible:
+    // written straight onto the material, a dimmed globe that later got its picture would keep the
+    // dimming for ever.
+    g.colour = colour;
     g.material.map = texture ?? this.blank;
+    this.lightGlobe(g);
   }
 
   /** The system the player is in, ringed on the map. */
@@ -371,13 +457,16 @@ export class GalaxyView {
       const wasHere = this.here.visible;
       const wasPicked = this.picked.visible;
       const wasRoutes = this.routeLines.visible;
+      const wasMuted = this.mutedLines.visible;
       this.here.visible = true;
       this.picked.visible = true;
       this.routeLines.visible = true;
+      this.mutedLines.visible = true;
       renderer.compile(this.scene, this.camera);
       this.here.visible = wasHere;
       this.picked.visible = wasPicked;
       this.routeLines.visible = wasRoutes;
+      this.mutedLines.visible = wasMuted;
     }
     renderer.render(this.scene, this.camera);
     this.frames++;

@@ -90,6 +90,12 @@ const TERMINAL_CSS = `
 #terminal .terminal-map { position: relative; align-self: start; border: 1px solid var(--panel-border); border-radius: 4px; overflow: hidden; background: color-mix(in srgb, var(--void) 40%, transparent); aspect-ratio: 1 / 1; }
 #terminal .terminal-map img { display: block; width: 100%; height: 100%; object-fit: cover; opacity: 0.8; }
 #terminal .terminal-map .none { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 11px; color: var(--muted); text-align: center; padding: 0 20px; }
+/* The box the map window's own galaxy is lent into. The draw never writes a character into it: it
+   holds a borrowed canvas and a borrowed label layer, and an innerHTML here would throw both away
+   on the first click anywhere in the window. */
+#terminal .terminal-galaxy { position: relative; align-self: stretch; min-height: 320px; display: flex; }
+#terminal .terminal-galaxy[hidden] { display: none; }
+#terminal .terminal-galaxy > * { flex: 1 1 auto; min-width: 0; }
 #terminal .dot { position: absolute; transform: translate(-50%, -50%); width: 13px; height: 13px; padding: 0; border-radius: 50%; border: 1px solid var(--accent); background: color-mix(in srgb, var(--accent) 45%, transparent); cursor: pointer; }
 #terminal .dot.star { border-radius: 2px; width: 12px; height: 12px; }
 #terminal .dot.on { border-color: var(--good); background: var(--good); }
@@ -140,6 +146,8 @@ export class TerminalUi {
 
   private model: TerminalModel | null = null;
   private pickedPort = '';
+  /** The box the galaxy is lent into. `draw()` never writes into it; only the game fills it. */
+  readonly galaxyBox: HTMLElement;
 
   constructor(parent: HTMLElement) {
     installStyle();
@@ -155,10 +163,12 @@ export class TerminalUi {
         </div>
         <div class="terminal-body">
           <div class="terminal-map"></div>
+          <div class="terminal-galaxy" hidden></div>
           <div class="terminal-side"></div>
         </div>
       </div>`;
     parent.appendChild(this.root);
+    this.galaxyBox = this.root.querySelector<HTMLElement>('.terminal-galaxy')!;
     this.root.querySelector('.close')!.addEventListener('click', () => this.onClose());
     this.root.addEventListener('click', (e) => {
       if (e.target === this.root) this.onClose();
@@ -206,7 +216,14 @@ export class TerminalUi {
     const side = this.root.querySelector<HTMLElement>('.terminal-side')!;
     // The map, with the ports dotted on it as a share of the picture: the same placing the galaxy
     // map's own thumbnails use, so the size on the panel does not matter.
-    if (m.stage === 'worlds' || !m.mapUrl) {
+    // The galaxy side shows the real galaxy, borrowed from the map window: its box is a sibling of
+    // the picture's and neither is ever written into while the other is showing.
+    const galaxy = m.stage === 'worlds' && this.galaxyBox.childElementCount > 0;
+    this.galaxyBox.hidden = !galaxy;
+    map.hidden = galaxy;
+    if (galaxy) {
+      // Nothing to draw here at all: what is in that box is somebody else's canvas.
+    } else if (m.stage === 'worlds' || !m.mapUrl) {
       map.innerHTML = `<div class="none">${escapeHtml(m.stage === 'worlds' ? 'pick a world, then a port on it' : 'this world has no map converted: the list beside is the whole of it')}</div>`;
     } else if (m.stage === 'ship') {
       // The same map, with only the pads a ship can land on dotted: a shuttleport is a shelter
