@@ -47,6 +47,7 @@ const WORDS = {
   deeds: 'Buildings a player can buy',
   travel: 'Travel terminals and shuttles',
   fittings: 'What stands inside buildings',
+  spawns: 'Where the creatures and people stand',
   scenes: 'The character screens’ places',
   clouds: 'Clouds',
   loading: 'Loading pictures',

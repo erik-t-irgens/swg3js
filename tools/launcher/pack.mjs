@@ -188,7 +188,9 @@ export function releaseFiles({ root = ROOT, dist, git = null, untracked = false 
   for (const rel of built.files) add(`dist/${rel}`, join(dist, ...rel.split('/')), { built: true });
   // The converter (its modules, not its tests, and its data) and the server, from git's list.
   const gitList = [...new Set([...tracked.keys(), ...extra])].sort();
-  for (const rel of gitList) if (/^tools\/swg\/[^/]+\.mjs$/.test(rel) || /^tools\/swg\/packs\/[^/]+\.json$/.test(rel) || /^server\/[^/]+\.mjs$/.test(rel)) add(rel);
+  // The Core3 reference goes with the converter: it is what travel, fittings, deeds, spawns, snapshot and
+  // mobiles read in place of an emulator nobody running the launcher has (`tools/swg/core3ref.mjs`).
+  for (const rel of gitList) if (/^tools\/swg\/[^/]+\.mjs$/.test(rel) || /^tools\/swg\/packs\/[^/]+\.json$/.test(rel) || /^tools\/swg\/core3ref\/[^/]+\.json$/.test(rel) || /^server\/[^/]+\.mjs$/.test(rel)) add(rel);
   for (const rel of CONVERTER_DATA) add(rel);
   for (const rel of SOURCE_FILES) add(rel);
   // The launcher proper, and the root files.

@@ -397,12 +397,20 @@ process.on('exit', () => rmSync(scratch, { recursive: true, force: true }));
   writeFileSync(join(mini, 'index.html'), '<!doctype html>');
   writeFileSync(join(mini, '.vite', 'manifest.json'), '{}');
   let err = null;
+  let packed = [];
   try {
-    releaseFiles({ root, dist: mini, untracked: true });
+    packed = releaseFiles({ root, dist: mini, untracked: true });
   } catch (e) {
     err = e;
   }
   ok(!err, `the checkout's own list is complete${err ? `: ${err.message}` : ''}`);
+  // The Core3 reference is read by folder rather than named by an import, so the check above cannot see
+  // it go missing; without it every launcher's starports stand empty and nothing says why.
+  const refIndex = JSON.parse(readFileSync(join(root, 'tools', 'swg', 'core3ref', 'index.json'), 'utf8'));
+  const refFiles = ['index.json', ...Object.values(refIndex.files)].map((f) => `tools/swg/core3ref/${f}`);
+  const packedPaths = new Set(packed.map((f) => f.path));
+  const lost = refFiles.filter((f) => !packedPaths.has(f));
+  ok(!lost.length, `the release carries the Core3 reference, all ${refFiles.length} files${lost.length ? ` (missing ${lost.join(', ')})` : ''}`);
   const lib = join(scratch, 'importer');
   mkdirSync(join(lib, 'tools'), { recursive: true });
   writeFileSync(join(lib, 'tools', 'a.mjs'), "import './b.mjs';\nconst x = await import('../src/c.ts');\nnew URL('./d.json', import.meta.url);\nimport './gone.mjs';");

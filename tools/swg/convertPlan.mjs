@@ -206,6 +206,12 @@ export const STEP_FACTS = {
   // and the two noise volumes the volumetric march reads. Almost all of the time is the volumes:
   // eight megabytes of noise on one core, the same on every world and written once.
   clouds: { order: 41, lock: 'pack', locks: ['clouds'], needs: ['sky'], seconds: 30, bytes: 0.4 * GB, measured: 'eighteen worlds and the volumes: 9.1 s, 90 MB, 8.1 MB written' },
+  // Where the world's creatures and its standing people were, out of the Core3 reference. It joins
+  // every name the server used to a model in the mobiles catalogue (`joinCatalogue`), so it waits for
+  // the mobiles, and it reads each world's snapshot to put the indoor people in their rooms, so it
+  // waits for the snapshot as well. It writes `spawns.json` into each of the ten worlds the server
+  // populated and its own `spawns/` folder, so it holds `pack:*` and `spawns`.
+  spawns: { order: 42, lock: 'pack', locks: ['spawns'], needs: ['snapshot', 'mobiles'], seconds: 15, bytes: 0.6 * GB, measured: 'ten worlds, 4,619 people, 1,459 lairs: 6.1 s, 450 MB' },
 };
 
 // Which commands carry the planet (or the zone) they write, and **where** on their own command

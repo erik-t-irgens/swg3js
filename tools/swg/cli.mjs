@@ -94,8 +94,8 @@
 //                                                                  left out, since the space command already converts every one of them
 //   node tools/swg/cli.mjs travel <swg-dir> <out-dir> [--core3=<dir>]   where each world's travel terminals, ticket collectors and shuttles really
 //                                                                  stood, as <pack>/travel.json with the models that draw them; none of it is in a
-//                                                                  snapshot, because travel was the server's, so it reads the owner's emulator
-//                                                                  checkout (CORE3 in .env) and must run after the worlds
+//                                                                  snapshot, because travel was the server's, so it reads the emulator's scripts
+//                                                                  out of the Core3 reference in the checkout, and must run after the worlds
 //   node tools/swg/cli.mjs fittings <swg-dir> <out-dir> [--core3=<dir>]   the other children of a building: the elevator panel by a lift's doorway,
 //                                                                  the bank terminal outside a bank, the cloning and insurance terminals in a
 //                                                                  cloning facility, the sign over a cantina's door. Same source and same rule as
@@ -105,8 +105,8 @@
 //   node tools/swg/cli.mjs music <swg-dir> <out-dir>               the player music: one track per instrument per song, as <out-dir>/music
 //                                                                  (about 100 MB). The background score is deliberately left out
 //   node tools/swg/cli.mjs spawns <out-dir> [--core3=<dir>]        where the world's creatures and its standing people really were, and every
-//                                                                  creature's own level, health and damage, read out of the owner's emulator
-//                                                                  checkout (CORE3 in .env). It opens no game archive, so it takes no <swg-dir>,
+//                                                                  creature's own level, health and damage, read out of the Core3 reference
+//                                                                  in the checkout. It opens no game archive, so it takes no <swg-dir>,
 //                                                                  and it must run after the worlds and after mobiles. Writes <pack>/spawns.json
 //                                                                  per world and <out-dir>/spawns/manifest.json for the fleet
 //   node tools/swg/cli.mjs sandbox <swg-dir> <out-dir> [--seed=N]   a made-up system to fly in, 250 km across, as <out-dir>/space_sandbox:
@@ -132,6 +132,10 @@
 //                                                                  asks again until nothing is; stop it and run it again to carry on.
 //                                                                  <out-dir> is assets-private unless another is named, the two installs are
 //                                                                  found without a .env, and every step runs with --retail-only
+//   node tools/swg/cli.mjs core3-reference <core3-dir>             what travel, fittings, deeds, spawns, snapshot and mobiles read from SWGEmu's
+//                                                                  scripts (MMOCoreORB/bin/scripts), kept as tools/swg/core3ref/ in the checkout
+//                                                                  and shipped with the converter, so nobody needs the emulator; every answer is
+//                                                                  compared with a fresh read of the folder before it is kept
 //   node tools/swg/cli.mjs status <out-dir> [--json]               what the packs under <out-dir> hold and which commands would fill the gaps
 //                                                                  (--json: the same as steps in order, arguments split, for the launcher)
 //   node tools/swg/cli.mjs terrain-check <out-dir> [--limit=n] [--layers] [--at=x,z]
@@ -147,8 +151,8 @@
 //        --ws-add=<archive>@x1,z1,x2,z2 (snapshot, why, audit: also place what an older publish's world snapshot in that
 //                       archive put inside the rectangle; stat <file> --all lists every archive carrying a file)
 //        --near=x,z,r (why: only objects within r metres of x,z; the pattern "." matches everything)
-//        --core3=<dir> (SWGEmu's MMOCoreORB/bin/scripts: place the static objects its screenplays spawn,
-//                       and write the creature and NPC spawns to <pack>/spawns.json; or set CORE3 in the environment)
+//        --core3=<dir> (travel, fittings, deeds, spawns, snapshot, mobiles: read SWGEmu's MMOCoreORB/bin/scripts
+//                       live instead of the Core3 reference in tools/swg/core3ref/; --core3=none reads neither)
 //        --no-flip (keep left-handed coordinates)  --no-textures (skip DDS decoding)
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
@@ -210,7 +214,8 @@ import { convertShipSounds, shipSoundStatus } from './shipsounds.mjs';
 import { extraEffectsStatus, forcePowersStatus } from './weapons.mjs';
 import { nameLocomotion } from './clipnames.mjs';
 import { moodEntries } from './moods.mjs';
-import { core3MobileStats, scanServerSpawns } from './spawns.mjs';
+import { core3SourceFor, writeCore3Reference } from './core3ref.mjs';
+import { CORE3_WORLDS } from './core3.mjs';
 import { loadEffect } from './texrender.mjs';
 import { readTemplate, stringParam } from './objtemplate.mjs';
 import { statusJson } from './statusplan.mjs';
@@ -2218,11 +2223,13 @@ function loadPlanetObjects(vfs, planet) {
   const snapshotCount = snap.nodes.length;
   const buildout = loadBuildouts(vfs, planet, { events: flags.has('--events') });
   mergeBuildouts(snap, buildout);
-  // Server placements (SWGEmu's scripts) are a third source, when a checkout is given.
-  const core3 = options.core3 ?? process.env.CORE3;
+  // Server placements (SWGEmu's scripts) are a third source: the reference kept in the checkout
+  // (`core3ref.mjs`), or a folder named outright with --core3=<dir>, and none with --core3=none.
+  const c3 = core3SourceFor(options);
+  const core3 = c3 && !c3.missing ? c3.where : null;
   let spawns = null;
   if (core3) {
-    spawns = scanServerSpawns(core3, planet);
+    spawns = c3.scanServerSpawns(planet);
     let nextId = 1 << 29;
     const extra = spawns.objects.map((o) => ({ id: nextId++, containedBy: 0, template: o.template, cellIndex: 0, q: o.q, pos: o.pos, radius: 4, portalLayoutCrc: 0, children: [], area: `server:${o.file}` }));
     mergeBuildouts(snap, { nodes: extra });
@@ -2351,8 +2358,8 @@ function packStatus(dir) {
     const sky = readJson(join(packDir, 'sky.json'));
     const water = readJson(join(packDir, 'water.json'));
     // The two things the server stood on a world's buildings and no snapshot carries: travel, and
-    // everything else. Both need the owner's emulator checkout, so they are reported as they stand
-    // and asked for once each rather than shouted about.
+    // everything else. Both read the Core3 reference the converter carries, so they are reported as
+    // they stand and asked for once each rather than shouted about.
     const travel = readJson(join(packDir, 'travel.json'));
     const fittings = readJson(join(packDir, 'fittings.json'));
     // The cells' walkable floors, which a pack converted before they were read simply has not got:
@@ -2452,7 +2459,7 @@ function packStatus(dir) {
     // join was written: those gates stand there doing nothing and nothing else would say so.
     if (!gates && layout && layout.objects.some((o) => isZoneGate(o.template))) need(`pois <swg-dir> all ${dir} --retail-only`, `${planet}'s zone gates have no destinations`);
     if (objects && (manifest.materialFormat ?? 1) < MATERIAL_FORMAT) need(`snapshot <swg-dir> all ${dir} --radius=all --retail-only`, `${planet}'s models were converted before animated and glowing surfaces`);
-    // Travel and the fittings both hang off the same blocks in the owner's own emulator checkout,
+    // Travel and the fittings both hang off the same blocks of the emulator's scripts (the Core3 reference),
     // and both must run after the world they join to. A world the scripts really say nothing about
     // writes no file at all, so "none" and "not run yet" cannot be told apart here and the ask is
     // made once rather than repeated at every planet -- which is what the two flags below are for.
@@ -2727,14 +2734,13 @@ function packStatus(dir) {
   if (gallery && (gallery.materialFormat ?? 1) < MATERIAL_FORMAT) need(`gallery <swg-dir> ${dir} --retail-only`, "the gallery's models were converted before animated and glowing surfaces");
   // The deeds a player buys a building with, which was the other pack nothing reported: without it
   // the Housing tab is empty and no building can be put down at all. It checks each deed against the
-  // gallery's models, so it is asked for after the gallery and never before one exists. Like the
-  // fittings it needs the owner's own emulator checkout and says so plainly when there is none; a
-  // machine without one is told once and the drive stops asking rather than looping.
+  // gallery's models, so it is asked for after the gallery and never before one exists. What each
+  // deed makes comes from the Core3 reference the converter carries, so nobody needs the emulator.
   if (gallery) {
     const deedPack = readJson(join(dir, 'deeds.json'));
     if (!deedPack) {
       console.log('  deeds: none (the Housing tab is empty and no building can be put down)');
-      need(`deeds <swg-dir> ${dir} --retail-only`, 'no deeds converted: the Housing tab is empty (needs an emulator checkout, CORE3 in .env)');
+      need(`deeds <swg-dir> ${dir} --retail-only`, 'no deeds converted: the Housing tab is empty');
     } else {
       const rows = deedPack.deeds ?? [];
       const withModel = rows.filter((d) => d.model).length;
@@ -2854,6 +2860,18 @@ function packStatus(dir) {
     if (nonRetail) need(rerun, `${nonRetail} mobile units came from archives outside the retail set`);
     if (toDo && partial) need(rerun, `the last mobiles run converted only ${partial}; this converts the other ${toDo} units and keeps the rest`);
     else if (toDo) need(rerun, `${toDo} mobile models, packs or wearable folders missing or out of date`);
+    // Where the world's creatures and its standing people were: `spawns`, out of the Core3 reference
+    // the converter carries, joined to this catalogue. It was never asked for while it needed the
+    // owner's own emulator checkout, so no launcher ever had any of it; it is asked for now whenever a
+    // world the server populated has a pack and no `spawns.json`.
+    const spawnWorlds = CORE3_WORLDS.filter((w) => existsSync(join(dir, w, 'manifest.json')));
+    const unspawned = spawnWorlds.filter((w) => !existsSync(join(dir, w, 'spawns.json')));
+    const spawnManifest = readQuiet(join(dir, 'spawns', 'manifest.json'));
+    if (spawnWorlds.length && (unspawned.length || !spawnManifest)) {
+      need(`spawns ${dir} --swg=<swg-dir> --retail-only`, unspawned.length ? `the creatures and standing people the server placed on ${unspawned.join(', ')} are not there (spawns.json)` : "the creatures the worlds place have no level, health or damage of the server's (spawns/manifest.json)");
+    } else if (spawnWorlds.length) {
+      console.log(`  spawns: ${spawnWorlds.length} worlds with the creatures and standing people the server placed`);
+    }
   }
   // The sound bank: every sound the game may play, the samples, and where each one is used.
   const sound = soundStatus(dir, readJson);
@@ -3769,14 +3787,18 @@ switch (cmd) {
     const vfs = mount(pos[1]);
     const outRoot = pos[2];
     const source = M.sourceStampOf({ retailOnly: flags.has('--retail-only'), archives: vfs.archives.map((a) => [basename(a.path).toLowerCase(), statSync(a.path).size]) });
-    const core3Dir = options.core3 === 'none' ? null : options.core3 ?? process.env.CORE3 ?? null;
+    // Each mobile's health and damage from the emulator's own numbers: the Core3 reference kept in the
+    // checkout (`core3ref.mjs`), a folder named outright with --core3=<dir>, or none with --core3=none.
+    const c3 = core3SourceFor(options);
     let core3Stats = null;
-    if (core3Dir) {
-      core3Stats = core3MobileStats(core3Dir);
+    if (c3 && !c3.missing) {
+      core3Stats = c3.core3MobileStats();
       if (!core3Stats.size) {
-        console.log(`core3: no scripts/mobile under ${core3Dir}; stats stay heuristic`);
+        console.log(`core3: no mobile stats in ${c3.where}; stats stay heuristic`);
         core3Stats = null;
       }
+    } else if (c3?.missing) {
+      console.log(`core3: ${c3.missing}; stats stay heuristic`);
     }
     M.runMobiles({
       vfs,
@@ -3793,7 +3815,7 @@ switch (cmd) {
         match: options.match ?? null,
         limit: options.limit ? Number(options.limit) : null,
         maxVariants: options['max-variants'] ? Number(options['max-variants']) : 32,
-        core3: options.core3 === 'none' ? 'none' : core3Dir ? 'read' : null,
+        core3: options.core3 === 'none' ? 'none' : core3Stats ? 'read' : null,
       },
     });
     printEffectSummary();
@@ -6208,26 +6230,27 @@ switch (cmd) {
     // two models that draw them converted into that world's own folder.
     //
     // None of the three is in a world snapshot -- Corellia's places 413 terminals and not one
-    // travel terminal, because travel was the server's -- so this reads the owner's own emulator
-    // checkout for the `childObjects` each starport and shuttleport building carries, and joins
-    // them to where this game's own packs place those buildings. It must run after the worlds.
-    // `tools/swg/travel.mjs` says what the surprises in the numbers are. Nothing it writes may ever
-    // reach the repository.
+    // travel terminal, because travel was the server's -- so this reads the `childObjects` each
+    // starport and shuttleport building carries in the emulator's scripts, out of the Core3
+    // reference kept in the checkout (`core3ref.mjs`; --core3=<dir> reads a folder instead), and
+    // joins them to where this game's own packs place those buildings. It must run after the worlds.
+    // `tools/swg/travel.mjs` says what the surprises in the numbers are. What it writes goes into the
+    // converted packs, which never reach the repository.
     //
     // It takes a <swg-dir> now and did not before: the terminal and the shuttle are ordinary static
     // appearances the archives hold, and no world snapshot places either of them, so the only way to
     // draw the thing the player presses is to convert it here beside the rows that say where it
     // stands. The collector needs nothing: it is a droid the mobiles pack already carries.
     if (!pos[2]) usage();
-    const core3 = options.core3 ?? process.env.CORE3 ?? '';
-    if (!core3 || !existsSync(join(core3, 'object', 'building'))) {
-      console.log(`travel: no emulator scripts folder (--core3=<dir>, or CORE3 in .env); looked at ${core3 || '(nothing)'}`);
+    const c3 = core3SourceFor(options);
+    if (!c3 || c3.missing) {
+      console.log(`travel: ${c3 ? c3.missing : '--core3=none: no emulator data, so no terminals, collectors or shuttles'}`);
       break;
     }
     const T = await import('./travel.mjs');
     const vfs = mount(pos[1]);
     const out = pos[2];
-    const byTemplate = T.readTravelBuildings(core3);
+    const byTemplate = c3.readTravelBuildings();
     console.log(`travel: ${byTemplate.size / 2} building templates carry travel children`);
     let worlds = 0;
     let things = 0;
@@ -6374,7 +6397,8 @@ switch (cmd) {
     // carries, written into each converted world's own pack as `fittings.json` with every model they
     // need converted beside them.
     //
-    // Two sources, both the owner's emulator checkout. A **building template's `childObjects`** are
+    // Two sources, both the emulator's scripts, read out of the Core3 reference kept in the checkout
+    // (`core3ref.mjs`; --core3=<dir> reads a folder instead). A **building template's `childObjects`** are
     // what stands wherever that kind of building stands: the elevator panel beside a lift's doorway,
     // the bank terminal outside a bank, the cloning and insurance terminals, the sign over a
     // cantina's door. It reads the same blocks the `travel` command does and keeps everything travel
@@ -6384,26 +6408,26 @@ switch (cmd) {
     // could already take the outdoor half of those and drops every one in a cell; this takes both,
     // and takes them without reconverting a world.
     //
-    // `tools/swg/fittings.mjs` says what was measured. It must run after the worlds. Nothing it
-    // writes may ever reach the repository.
+    // `tools/swg/fittings.mjs` says what was measured. It must run after the worlds. What it writes
+    // goes into the converted packs, which never reach the repository.
     if (!pos[2]) usage();
-    const core3 = options.core3 ?? process.env.CORE3 ?? '';
-    if (!core3 || !existsSync(join(core3, 'object', 'building'))) {
-      console.log(`fittings: no emulator scripts folder (--core3=<dir>, or CORE3 in .env); looked at ${core3 || '(nothing)'}`);
+    const c3 = core3SourceFor(options);
+    if (!c3 || c3.missing) {
+      console.log(`fittings: ${c3 ? c3.missing : '--core3=none: no emulator data, so no fittings'}`);
       break;
     }
     const F = await import('./fittings.mjs');
     const T = await import('./travel.mjs');
     const vfs = mount(pos[1]);
     const out = pos[2];
-    const byTemplate = F.readFittingBuildings(core3);
+    const byTemplate = c3.readFittingBuildings();
     // Which model draws each kind of fitting is worked out once for the whole run, because a
     // template's appearance is the same on every world and resolving it is an archive read apiece.
     // Both sources go through the same resolution, so a thing the screenplays and a building both
     // place (an elevator panel is each on different worlds) is one model and one conversion.
     const templates = new Set();
     for (const kids of byTemplate.values()) for (const k of kids) templates.add(k.template);
-    for (const planet of GAME_PLANETS) for (const p of F.readServerProps(core3, planet)) templates.add(p.template);
+    for (const planet of GAME_PLANETS) for (const p of c3.readServerProps(planet)) templates.add(p.template);
     const paramCache = new Map();
     const { models, missing } = F.fittingModels(templates, (shared) => (vfs.has(shared) ? resolveTemplateString(vfs, shared, ['appearanceFilename'], paramCache) : null));
     for (const kids of byTemplate.values()) for (const k of kids) k.model = models.get(k.template)?.id ?? null;
@@ -6428,7 +6452,7 @@ switch (cmd) {
       // than a template's children, so they are joined to this world by name and, where they stand
       // in a room, through the client's own cell object id.
       const planet = layout.planet ?? dir.name;
-      const props = F.readServerProps(core3, planet);
+      const props = c3.readServerProps(planet);
       if (props.length) {
         const cells = cellIndexById(vfs, planet);
         for (const p of props) {
@@ -6500,16 +6524,17 @@ switch (cmd) {
     // needed to put one down -- what each makes, what it is called, the model this game draws it
     // with, the grid the client drew while you placed it, its lots and its upkeep.
     //
-    // It reads the archives **and** the owner's own emulator checkout, because neither alone is
-    // enough: the client's deed templates do not say what a deed makes (that was the server's), and
-    // the emulator does not carry a model. `tools/swg/deeds.mjs` says what the four-way join is and
-    // what comes of it. Nothing it writes may ever reach the repository.
+    // It reads the archives **and** the emulator's scripts (the Core3 reference kept in the checkout,
+    // `core3ref.mjs`; --core3=<dir> reads a folder instead), because neither alone is enough: the
+    // client's deed templates do not say what a deed makes (that was the server's), and the emulator
+    // does not carry a model. `tools/swg/deeds.mjs` says what the four-way join is and what comes of
+    // it. What it writes goes into the converted content, which never reaches the repository.
     //
     // It must run after `gallery`, since it checks each deed's model against what that pack carries.
     if (!pos[2]) usage();
-    const core3 = options.core3 ?? process.env.CORE3 ?? '';
-    if (!core3 || !existsSync(join(core3, 'object', 'tangible', 'deed'))) {
-      console.log(`deeds: no emulator scripts folder (--core3=<dir>, or CORE3 in .env); looked at ${core3 || '(nothing)'}`);
+    const c3 = core3SourceFor(options);
+    if (!c3 || c3.missing) {
+      console.log(`deeds: ${c3 ? c3.missing : '--core3=none: no emulator data, so no deeds'}`);
       break;
     }
     const D = await import('./deeds.mjs');
@@ -6543,8 +6568,8 @@ switch (cmd) {
         /* an unreadable gallery means no deed can be placed, which is what it says below */
       }
     }
-    const deeds = D.readDeeds(core3);
-    const buildings = D.readBuildings(core3);
+    const deeds = c3.readDeeds();
+    const buildings = c3.readBuildings();
     const { rows, faults } = D.joinDeeds(deeds, buildings, {
       has: (p) => vfs.has(p),
       read: (p) => vfs.read(p),
@@ -6574,21 +6599,45 @@ switch (cmd) {
     break;
   }
 
+  case 'core3-reference': {
+    // <core3-dir>: what the six commands that read the emulator's scripts take out of them, written as
+    // `tools/swg/core3ref/` in the checkout so that every converter -- a checkout with no emulator and
+    // every launcher -- converts the same thing without one. `core3ref.mjs` says what is kept and why.
+    // Each answer is compared with a fresh read of the folder before anything is written over the old
+    // reference, so a reference that would answer differently is never kept. Run it in a checkout when
+    // the emulator's scripts change, and commit what it writes.
+    const dir = pos[1] ?? process.env.CORE3 ?? '';
+    const t0 = Date.now();
+    console.log(`core3-reference: reading ${dir || '(nothing named; give <core3-dir> or CORE3 in .env)'}`);
+    let index;
+    try {
+      index = writeCore3Reference(dir, { extraZones: GAME_PLANETS, log: console.log });
+    } catch (err) {
+      console.error(`core3-reference: ${err.message}`);
+      process.exitCode = 1;
+      break;
+    }
+    console.log(`core3-reference: ${Object.keys(index.files).length} readers over ${index.zones.length} zones, every answer checked against the folder, in ${((Date.now() - t0) / 1000).toFixed(1)} s -> tools/swg/core3ref/`);
+    break;
+  }
+
   case 'spawns': {
     // <out-dir> [--core3=<dir>]: where the world's creatures and its standing people really were,
-    // read out of the owner's own emulator checkout. It opens no game archive, so it takes no
+    // read out of the emulator's scripts -- the Core3 reference kept in the checkout (`core3ref.mjs`),
+    // or a folder named outright with --core3=<dir>. It opens no game archive, so it takes no
     // <swg-dir> and nothing about `--retail-only` applies to it; it must run after the worlds and
     // after `mobiles`, since it joins what the server named to the models this game has.
     //
-    // **Nothing it writes may ever reach the repository.** The checkout is a third-party project
-    // under its own licence: this reads its data, never its code, and everything written here lands
-    // in the git-ignored output folder exactly as the packs converted from the game's own archives
-    // do. `tools/swg/core3.mjs` says what the four-file chain is and where it is not what it looks
-    // like.
+    // The emulator is a third-party project under its own licence (AGPL-3.0). What the reference
+    // keeps is the data its readers take out -- names, places, counts and stats -- and never its
+    // code; the owner's call is that this data is referenced, not taken, and ships with the
+    // converter so nobody has to install an emulator. What this command writes lands in the
+    // git-ignored output folder exactly as the packs converted from the game's own archives do.
+    // `tools/swg/core3.mjs` says what the four-file chain is and where it is not what it looks like.
     if (!pos[1]) usage();
-    const core3 = options.core3 ?? process.env.CORE3 ?? '';
-    if (!core3 || !existsSync(join(core3, 'managers', 'planet'))) {
-      console.log(`spawns: no emulator scripts folder (--core3=<dir>, or CORE3 in .env); looked at ${core3 || '(nothing)'}`);
+    const src = core3SourceFor(options);
+    if (!src || src.missing) {
+      console.log(`spawns: ${src ? src.missing : '--core3=none: no emulator data, so no spawns'}`);
       break;
     }
     const c3 = await import('./core3.mjs');
@@ -6628,11 +6677,11 @@ switch (cmd) {
       }
     };
     const started = Date.now();
-    const regions = c3.readRegions(core3);
-    const groups = c3.readSpawnGroups(core3);
-    const lairs = c3.readLairs(core3);
-    const creatures = c3.readCreatures(core3);
-    const { statics, dropped } = c3.readStatics(core3);
+    const regions = src.readRegions();
+    const groups = src.readSpawnGroups();
+    const lairs = src.readLairs();
+    const creatures = src.readCreatures();
+    const { statics, dropped } = src.readStatics();
     const catFile = join(pos[1], 'mobiles', 'catalogue.json');
     if (!existsSync(catFile)) {
       console.log(`spawns: no mobiles catalogue at ${catFile}; run mobiles first, since every name here has to reach a model`);
