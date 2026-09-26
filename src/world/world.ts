@@ -3794,6 +3794,11 @@ export class World {
     // world. The switch is read once, here, and short-circuits before the catalogue is even asked, so
     // an arrival with it off does exactly as much work as it did before and no more.
     if (wildlifeWanted() && !this.ambientFromCatalogue(center)) this.creatures.spawnAround(center);
+    // The people the server stood here, before the screen lifts rather than after: every one within
+    // range is stood in one forced pass, so their models are loaded and their programs compiled by
+    // the warm-up that follows instead of a few at a time on live frames as the player walks in.
+    // The cap is the same forty; what the force changes is only the three-a-pass trickle.
+    standingPeople.step(0, this.simTime, new THREE.Vector3(center.x, this.terrain.heightAt(center.x, center.z), center.z), this.peopleDeps(), true);
     markActor(this.creatures.group);
     // Turrets are spawned from the NPC tab (B) now, not stood around the arrival point.
     markActor(this.turrets.group);
@@ -4434,7 +4439,7 @@ export class World {
         // Stood as `spawned` with a world name, for the same two reasons the wildlife is: the
         // manager leaves a spawned one where it was put, and the name keeps the hand-spawn cap and
         // the NPC tab's clear off it.
-        spawn: (entry, at, inside, seed) => this.mobiles?.spawn(entry, at, { origin: 'spawned', seed, inside, worldId: `stood:${seed}` }) ?? 'no world',
+        spawn: (entry, at, inside, seed, essential) => this.mobiles?.spawn(entry, at, { origin: 'spawned', seed, inside, worldId: `stood:${seed}`, essential }) ?? 'no world',
         remove: (m) => this.mobiles?.remove(m),
         centre: () => this.layoutCenter,
         held: () => this.streamHold || this.sceneOnly || !this.simulating,

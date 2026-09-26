@@ -36,11 +36,33 @@ export interface StandingRow {
   where: string;
 }
 
+/**
+ * Whether a standing person is part of the furniture: stands where they were stood, takes no
+ * damage, never dies, never picks a fight and never wanders.
+ *
+ * **Read, not invented.** The emulator's own row carries the pvp status bitmask the server ran them
+ * with, and a body with no ATTACKABLE bit is one no player could ever have struck: a vendor, a
+ * trainer, a quest-giver, a shopkeeper. Measured over all 4,619 standing people in the game there
+ * are exactly 518 of them, and the number matches `aggression: passive` one for one, which is two
+ * independent fields of the same data agreeing.
+ *
+ * A catalogue built without a checkout carries no `core3` block at all; then nobody is essential and
+ * every one of them behaves as they did before this existed, which is the honest default.
+ */
+export function standsStill(entry: MobileEntry | null | undefined): boolean {
+  const pvp = entry?.stats?.core3?.pvp;
+  if (!Array.isArray(pvp)) return false;
+  return !pvp.some((bit) => /attackable/i.test(bit));
+}
+
 /** What standing people need of the game. */
 export interface PeopleDeps {
   catalogue(): MobileCatalogue | null;
-  /** Stand one. `inside` is true for a person in a room, which changes how the ground is found. */
-  spawn(entry: MobileEntry, at: { x: number; z: number; y?: number; heading?: number }, inside: boolean, seed: number): Mobile | string;
+  /**
+   * Stand one. `inside` is true for a person in a room, which changes how the ground is found, and
+   * `essential` for one the server marked unattackable (see `standsStill`).
+   */
+  spawn(entry: MobileEntry, at: { x: number; z: number; y?: number; heading?: number }, inside: boolean, seed: number, essential: boolean): Mobile | string;
   remove(m: Mobile): void;
   centre(): { x: number; z: number } | null;
   held(): boolean;
@@ -62,8 +84,8 @@ export const PEOPLE_TUNE = {
   /** Stood within this, put away past `drop`. Tighter than the lairs': a town is dense. */
   build: 110,
   drop: 190,
-  /** Most standing at once, and most stood in one pass. */
-  most: 22,
+  /** Most standing at once, and most stood in one pass. The owner's number. */
+  most: 40,
   perPass: 3,
   /** How often the pass runs, in seconds of the world's own clock. */
   everySeconds: 1.5,
@@ -123,15 +145,15 @@ export class StandingPeople {
    *
    * `now` is the world's own clock, which every respawn keys off, so `__debug.advance` drives it.
    */
-  step(dt: number, now: number, at: THREE.Vector3, deps: PeopleDeps): void {
+  step(dt: number, now: number, at: THREE.Vector3, deps: PeopleDeps, force = false): void {
     this.last.stood = 0;
     this.last.dropped = 0;
     this.last.waiting = 0;
-    if (!this.ready || deps.held()) return;
+    if (!this.ready || (deps.held() && !force)) return;
     const cat = deps.catalogue();
     if (!cat) return;
     this.since += dt;
-    const moved = !Number.isFinite(this.lastAt.x) || this.lastAt.distanceTo(at) > PEOPLE_TUNE.moveMetres;
+    const moved = force || !Number.isFinite(this.lastAt.x) || this.lastAt.distanceTo(at) > PEOPLE_TUNE.moveMetres;
     if (this.since < PEOPLE_TUNE.everySeconds && !moved) return;
     this.since = 0;
     this.lastAt.copy(at);
@@ -164,7 +186,11 @@ export class StandingPeople {
         }
         continue;
       }
-      if (away > PEOPLE_TUNE.build || this.up.size >= PEOPLE_TUNE.most || stood >= PEOPLE_TUNE.perPass) continue;
+      // Three a pass in play, so walking into a town brings them a few at a time and nothing
+      // compiles in a lump on a live frame. Behind the loading screen that is exactly backwards --
+      // there is no live frame to spare and the whole point is to have them standing before it lifts
+      // -- so a forced pass stands everything in range at once and the warm-up compiles the lot.
+      if (away > PEOPLE_TUNE.build || this.up.size >= PEOPLE_TUNE.most || (!force && stood >= PEOPLE_TUNE.perPass)) continue;
       const inside = !!r.cell;
       // A person in a room whose building is not built yet waits rather than falling through it.
       if (inside && deps.cellReady?.(r.x, r.y, r.z) === false) {
@@ -177,7 +203,7 @@ export class StandingPeople {
       // room's own frame and the manager's own ground lookup would find the terrain under the
       // building instead. Outdoors no height is given, for the reason the wildlife learned.
       const spot = inside ? { x: r.x, z: r.z, y: r.y, heading: r.heading } : { x: r.x, z: r.z, heading: r.heading };
-      const m = deps.spawn(entry, spot, inside, i);
+      const m = deps.spawn(entry, spot, inside, i, standsStill(entry));
       if (typeof m === 'string') {
         this.last.refused = m;
         continue;

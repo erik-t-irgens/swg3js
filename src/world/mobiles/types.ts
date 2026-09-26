@@ -77,6 +77,12 @@ export interface MobileEntry {
     ranged: { range: number; additive: boolean } | null;
     attackCooldown: number;
     tags: string[];
+    /**
+     * What the emulator's own row said, where the catalogue was built with a checkout. `pvp` is its
+     * status bitmask and is the one thing in here that says whether a body may be attacked at all:
+     * a vendor, a trainer and a quest-giver carry none of its bits.
+     */
+    core3?: { pvp?: string[]; faction?: string; socialGroup?: string; weapons?: string[] } | null;
   };
   ready: boolean;
   notReady?: string;

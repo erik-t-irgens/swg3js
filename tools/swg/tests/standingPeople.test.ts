@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as THREE from 'three';
-import { StandingPeople, PEOPLE_TUNE, type PeopleDeps, type StandingRow } from '../../../src/world/standingPeople.ts';
+import { StandingPeople, PEOPLE_TUNE, standsStill, type PeopleDeps, type StandingRow } from '../../../src/world/standingPeople.ts';
 
 let passed = 0;
 function ok(cond: boolean, what: string): void {
@@ -48,6 +48,42 @@ function game(over: Partial<PeopleDeps> = {}): { deps: PeopleDeps; bodies: Body[
 }
 
 const row = (over: Partial<StandingRow> = {}): StandingRow => ({ who: 'somebody', id: 'body', x: 0, y: 10, z: 0, heading: 0, cell: 0, respawn: 300, where: 'static_spawns', ...over });
+
+// ------------------------------------------------------------------ who stands still
+
+{
+  // Read off the emulator's own pvp status bitmask, not guessed at: a body with no ATTACKABLE bit is
+  // one no player could ever have struck, which is a vendor, a trainer or a quest-giver.
+  const of = (pvp: string[] | undefined) => ({ id: 'x', stats: { core3: pvp ? { pvp } : undefined } }) as never;
+  ok(standsStill(of(['NONE'])), 'a body the server marked unattackable stands still and cannot be hurt');
+  ok(!standsStill(of(['ATTACKABLE'])), 'and one that could be attacked is an ordinary body');
+  ok(!standsStill(of(['AGGRESSIVE', 'ATTACKABLE', 'ENEMY'])), 'however the bits are ordered');
+  // A catalogue built with no emulator checkout carries no block at all, and then nobody is
+  // essential and the game is exactly what it was.
+  ok(!standsStill(of(undefined)), 'a catalogue with no emulator stats makes nobody essential');
+  ok(!standsStill(null) && !standsStill(undefined), 'and nothing at all is nobody');
+
+  // Over the real catalogue, if it is here: the count is checked against `aggression: passive`,
+  // which is a **second field of the same data** and so an independent witness that the rule reads
+  // the right thing. They are not identical and are not meant to be -- the bitmask says whether a
+  // body may be struck and the aggression says how it behaves, and 11 of the 2,105 bodies with an
+  // emulator row differ between the two. What matters is that they agree to within a couple of
+  // percent, which a rule reading the wrong field could not do.
+  const cat = join('assets-private', 'mobiles', 'catalogue.json');
+  if (!existsSync(cat)) note('no mobiles catalogue here, so the rule is not checked against the real one');
+  else {
+    const file = JSON.parse(readFileSync(cat, 'utf8')) as Record<string, unknown>;
+    const list = (Object.values(file).find((v) => Array.isArray(v) && v.length > 1000) ?? []) as { stats?: { aggression?: string; core3?: { pvp?: string[] } } }[];
+    const withBits = list.filter((e) => Array.isArray(e.stats?.core3?.pvp));
+    const essential = withBits.filter((e) => standsStill(e as never));
+    const passive = withBits.filter((e) => e.stats?.aggression === 'passive');
+    ok(essential.length > 0, `${essential.length} of the catalogue's ${withBits.length} bodies with an emulator row are essential`);
+    const apart = Math.abs(essential.length - passive.length) / Math.max(1, passive.length);
+    assert.ok(apart < 0.05, `and that is within a few of how many the same data calls passive (${essential.length} against ${passive.length})`);
+    passed++;
+    console.log(`ok   and within ${(apart * 100).toFixed(1)}% of how many the same data calls passive (${passive.length}), which is a second field agreeing`);
+  }
+}
 
 // ------------------------------------------------------------------ what is taken and what is refused
 {
