@@ -173,8 +173,12 @@ export class PropCatalogue {
    * ghost and the thing that is finally stood are the same file read once.
    */
   async model(def: PropDef): Promise<THREE.Group> {
-    if (!this.assets) throw new Error('the props pack has not loaded');
-    const loaded = await this.assets.model(def.model);
+    // Through the getter, never the field: the field is null until something asks, and `release`
+    // empties it on every arrival. Read directly it threw "the props pack has not loaded" for every
+    // prop in a panel that was plainly full of them, since nothing had happened to mint one yet.
+    const pack = this.pack;
+    if (!pack) throw new Error(this.note || 'the props pack has not loaded');
+    const loaded = await pack.model(def.model);
     return loaded.scene.clone();
   }
 }

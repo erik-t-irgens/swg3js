@@ -74,6 +74,24 @@ export const TRAVEL_MODELS = [
   ['shuttle', 'appearance/shuttle.apt'],
 ];
 
+/** Just the ids, which is what tells a row this command is answerable for from one it is not. */
+export const TRAVEL_OWN_MODELS = new Set(TRAVEL_MODELS.map(([id]) => id));
+
+/**
+ * Whether a pack's rows name a model that should be in its layout category and is not -- which is how
+ * `status` tells a world that was converted again after these rows were written, since a snapshot
+ * rewrites that category outright and silently takes them out.
+ *
+ * `own`, when given, is the set of models the command is answerable for. It matters: the ticket
+ * collector is drawn with the mobiles pack's own protocol droid and is never in a world's layout at
+ * all, so judged without it every world looked as if its travel rows had been lost and `status` asked
+ * for `travel` again however many times it had just been run. A status line that cries wolf is worse
+ * than one that says nothing, and this project has paid for that once before in print.
+ */
+export function rowsLost(rows, layoutIds, own = null) {
+  return (rows ?? []).some((r) => r.model && (!own || own.has(r.model)) && !layoutIds.has(r.model));
+}
+
 /** Every `.lua` under a folder. */
 function luaFiles(dir, out = []) {
   let entries;

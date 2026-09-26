@@ -30,13 +30,11 @@
 //
 // Nothing here is invented: the multiply, the coordinate set and which texture are all the client's.
 import * as THREE from 'three';
+import { wrapCompile, type Wrappable } from './compileHooks.ts';
 import { surfaces } from './surfaces.ts';
 
 /** Marks our own compile hook, so a material is never wrapped twice. */
-const DETAIL_HOOK = Symbol('detailMap');
-type Hook = THREE.Material['onBeforeCompile'] & { [DETAIL_HOOK]?: true };
-/** The program key each wrapped material had before it was wrapped. */
-const baseKeys = new WeakMap<THREE.Material, () => string>();
+export const DETAIL_HOOK = Symbol('detailMap');
 /** Warned once per missing anchor, so a shader three changes under us says so without filling the console. */
 const warned = new Set<string>();
 
@@ -95,9 +93,10 @@ export function injectDetail(shader: THREE.WebGLProgramParametersWithUniforms, t
  * Wrap a material's compile hook so the detail follows whatever came before (the cascades', the
  * wetness's), and key its program apart.
  *
- * Idempotent, and written the way `applyWetness` is for the same reason: a material whose hook
- * something replaced since (the cascades set up again) is wrapped again around the new hook, with
- * the key it had before the first wrap.
+ * Idempotent through `wrapCompile`, which walks the **whole** hook chain for its mark rather than
+ * reading the outermost hook: this wrap going on the outside of the wet one is exactly what made
+ * both of them re-wrap on every material scan until the shader would not compile. See
+ * `compileHooks.ts`.
  */
 export function applyDetail(mat: THREE.Material, texture: THREE.Texture): void {
   // The define has to be on the material before its program is ever asked for, which it is: this is
@@ -108,21 +107,7 @@ export function applyDetail(mat: THREE.Material, texture: THREE.Texture): void {
   // here would allocate an object a scan for nothing and would be a change three never notices.
   const defines = (mat.defines ?? {}) as Record<string, string>;
   if (defines.USE_UV1 === undefined) mat.defines = { ...defines, USE_UV1: '' };
-  const previous = mat.onBeforeCompile as Hook;
-  if (previous[DETAIL_HOOK]) return;
-  const hook: Hook = function swgDetail(this: THREE.Material, shader: THREE.WebGLProgramParametersWithUniforms, renderer: THREE.WebGLRenderer) {
-    previous.call(this, shader, renderer);
-    injectDetail(shader, texture);
-  };
-  hook[DETAIL_HOOK] = true;
-  mat.onBeforeCompile = hook;
-  let base = baseKeys.get(mat);
-  if (!base) {
-    base = mat.customProgramCacheKey;
-    baseKeys.set(mat, base);
-  }
-  const key = base;
-  mat.customProgramCacheKey = () => `detail|${key.call(mat)}`;
+  wrapCompile(mat as unknown as Wrappable, DETAIL_HOOK, 'detail', (shader) => injectDetail(shader as unknown as THREE.WebGLProgramParametersWithUniforms, texture));
 }
 
 /**

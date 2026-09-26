@@ -54,6 +54,11 @@ export const WINDOW_MIN: Readonly<Record<string, Readonly<Size>>> = Object.freez
   backpack: { w: 680, h: 440 },
   shipedit: { w: 680, h: 420 },
   force: { w: 680, h: 280 },
+  // The deeds a player can buy, each row a name with its size, its lots and its upkeep.
+  housing: { w: 680, h: 340 },
+  // The props: a folding group per kind over a grid of pictures, so it wants the room the wardrobe's
+  // own grid does and a little more height, since there are ninety-five groups to scroll.
+  props: { w: 680, h: 420 },
   menu: { w: 600, h: 360 },
   lift: { w: 340, h: 200 },
   // A shuttle's rows carry a place name and a fare, so it wants more width than a lift's floors and

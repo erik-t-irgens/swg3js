@@ -1365,7 +1365,7 @@ class App {
     // press is still read while captured. It is wired here rather than in each panel because the
     // guard is the game's to make: the group panel and the trade window hold the mouse without
     // joining `anyPanelOpen`, so a panel closing under one of those must leave the pointer alone.
-    for (const panel of [this.backpack, this.wardrobe, this.appearanceUi, this.weaponsUi, this.forceUi, this.vehiclesUi, this.npcUi, this.shipEdit, this.housingUi]) panel.onClose = () => this.handBackMouse();
+    for (const panel of [this.backpack, this.wardrobe, this.appearanceUi, this.weaponsUi, this.forceUi, this.vehiclesUi, this.npcUi, this.shipEdit, this.housingUi, this.propsUi]) panel.onClose = () => this.handBackMouse();
     // The tabs: a click on the other tab of a panel swaps to it, the key toggles whichever was last open.
     this.wardrobe.onTab = (id) => this.toggleInventory(id as InventoryTab);
     // The Clothes (give) tab dresses through the equipment: the game's slots, the compile before the
@@ -1503,7 +1503,10 @@ class App {
     draggable(this.liftMenu.root, '.ship-panel', '.ship-header', 'lift');
     draggable(this.shuttleMenu.root, '.ship-panel', '.ship-header', 'shuttle');
     draggable(this.terminalUi.root, '.ship-panel', '.ship-header', 'terminal');
-    for (const [id, ui] of [['wardrobe', this.wardrobe], ['weapons', this.weaponsUi], ['garage', this.vehiclesUi], ['npcs', this.npcUi], ['appearance', this.appearanceUi], ['backpack', this.backpack], ['shipedit', this.shipEdit], ['force', this.forceUi]] as const) draggable(ui.root, '.wardrobe-panel', '.wardrobe-header', id);
+    // Every panel built on the wardrobe's frame moves by its header and sizes by its grip. A panel
+    // left off this list has no grip, cannot be moved and keeps whatever size the stylesheet gives
+    // it, which is what had happened to the Props and Housing tabs.
+    for (const [id, ui] of [['wardrobe', this.wardrobe], ['weapons', this.weaponsUi], ['garage', this.vehiclesUi], ['npcs', this.npcUi], ['appearance', this.appearanceUi], ['backpack', this.backpack], ['shipedit', this.shipEdit], ['force', this.forceUi], ['housing', this.housingUi], ['props', this.propsUi]] as const) draggable(ui.root, '.wardrobe-panel', '.wardrobe-header', id);
     // Console hooks for driving the game from tests: window.__debug.teleport(x, z, yaw), .look(yaw, pitch), .cell().
     (window as unknown as { __debug: unknown }).__debug = {
       /**
@@ -10486,7 +10489,7 @@ class App {
 
   /** The panels' open state moved to the tabs: closing one panel of a pair and opening the other keeps the mouse free. */
   private anyPanelOpen(): boolean {
-    return this.backpack.open || this.wardrobe.open || this.appearanceUi.open || this.weaponsUi.open || this.forceUi.open || this.vehiclesUi.open || this.shipEdit.open || this.npcUi.open || this.shipMenu.open || this.hyperspaceUi.open || this.liftMenu.open || this.shuttleMenu.open || this.terminalUi.open || this.housingUi.open || this.menu.open;
+    return this.backpack.open || this.wardrobe.open || this.appearanceUi.open || this.weaponsUi.open || this.forceUi.open || this.vehiclesUi.open || this.shipEdit.open || this.npcUi.open || this.shipMenu.open || this.hyperspaceUi.open || this.liftMenu.open || this.shuttleMenu.open || this.terminalUi.open || this.housingUi.open || this.propsUi.open || this.menu.open;
   }
 
   private jediKit(): JediKit {

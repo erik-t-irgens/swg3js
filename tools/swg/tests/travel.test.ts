@@ -6,7 +6,7 @@
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { childYaw, kindOfChild, modelOfKind, placeChildren, readTravelBuildings, travelCounts, yawOfQuat } from '../travel.mjs';
+import { childYaw, kindOfChild, modelOfKind, placeChildren, readTravelBuildings, rowsLost, TRAVEL_MODELS, TRAVEL_OWN_MODELS, travelCounts, yawOfQuat } from '../travel.mjs';
 
 let passed = 0;
 function ok(cond: boolean, what: string): void {
@@ -147,6 +147,50 @@ function note(what: string): void {
       note(`${things - drawn} are the starports' own transports, which have no single model: their mesh is a placeholder and the hull is five pieces the converter does not assemble`);
     }
   }
+}
+
+// ---- Whether a world's rows were lost, and the false alarm it caused -----------------------------
+//
+// `status` tells a world that was snapshotted again since these rows were written by looking for a row
+// whose model the pack's layout category no longer carries -- a snapshot rewrites that category
+// outright and silently takes the terminals out of it. The trap is that **not every row's model is in
+// the layout in the first place**: the ticket collector is drawn with the mobiles pack's own protocol
+// droid, deliberately, and is never in a world's layout at all. Judged without that, every world on
+// the owner's machine looked as if its rows had been lost, and `status` asked for `travel` again
+// however many times it had just been run. This project has published a false accusation from a status
+// line once before; the rule is pinned here so it cannot happen a third time.
+{
+  const layout = new Set(['ksk_all_travel', 'shuttle']);
+  const rows = [
+    { kind: 'terminal', model: 'ksk_all_travel' },
+    { kind: 'collector', model: '3po_protocol_droid_silver' },
+    { kind: 'shuttle', model: 'shuttle' },
+    { kind: 'shuttle', model: null },
+  ];
+  assert.equal(rowsLost(rows, layout, TRAVEL_OWN_MODELS), false, 'a full world is not lost');
+  passed++;
+  console.log('ok   a world with every one of its own models is not called lost');
+  assert.equal(rowsLost(rows, new Set(['shuttle']), TRAVEL_OWN_MODELS), true, 'a missing terminal is lost');
+  passed++;
+  console.log('ok   and one whose terminal model has gone is');
+  // The collector is the whole point: it is in no layout anywhere, and must never be counted.
+  assert.equal(TRAVEL_OWN_MODELS.has('3po_protocol_droid_silver'), false, 'the collector is not one of ours');
+  assert.equal(rowsLost([{ kind: 'collector', model: '3po_protocol_droid_silver' }], new Set(), TRAVEL_OWN_MODELS), false, 'a collector alone is never lost');
+  passed++;
+  console.log("ok   the collector is drawn from the mobiles pack and is never counted as lost (the false alarm)");
+  // Without the set, which is how the fittings are judged, every model is this command's own.
+  assert.equal(rowsLost([{ kind: 'x', model: 'anything' }], new Set()), true, 'with no set, any missing model is lost');
+  passed++;
+  console.log('ok   with no set of its own -- how the fittings are judged -- any missing model counts');
+  // And the set is read off the list of models the command really converts, so adding one extends the
+  // check by itself rather than needing this rule edited too.
+  assert.deepEqual([...TRAVEL_OWN_MODELS].sort(), TRAVEL_MODELS.map(([id]) => id).sort(), 'the set is the models the command writes');
+  passed++;
+  console.log('ok   and the set is exactly the models the command converts, so a new one is covered by itself');
+  // A row with no model at all is a starport's own transport, which has no single mesh: never lost.
+  assert.equal(rowsLost([{ kind: 'shuttle', model: null }], new Set(), TRAVEL_OWN_MODELS), false, 'a row with no model is not lost');
+  passed++;
+  console.log("ok   and a row with no model -- a starport's own transport -- is not lost either");
 }
 
 console.log(`\n${passed} checks passed`);

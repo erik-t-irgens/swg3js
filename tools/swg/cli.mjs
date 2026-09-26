@@ -214,6 +214,8 @@ import { core3MobileStats, scanServerSpawns } from './spawns.mjs';
 import { loadEffect } from './texrender.mjs';
 import { readTemplate, stringParam } from './objtemplate.mjs';
 import { statusJson } from './statusplan.mjs';
+// Only `status` needs these two here; the `travel` command itself loads the whole module when it runs.
+import { rowsLost, TRAVEL_OWN_MODELS } from './travel.mjs';
 import { PROPS_PACK_VERSION, propCounts as propCountsOf } from './props.mjs';
 /** The shape of deeds.json. A pack written by an older run is asked for again rather than read. */
 const DEED_PACK_VERSION = 1;
@@ -2444,9 +2446,10 @@ function packStatus(dir) {
     // longer has. Nothing else would notice: the files are there and their versions are current.
     // So the models are checked, not merely the file.
     const layoutIds = new Set((manifest.categories?.layout ?? []).map((d) => d.id));
-    const lost = (rows) => (rows ?? []).some((r) => r.model && !layoutIds.has(r.model));
-    if (travel && lost(travel.rows)) wantTravel = true;
-    if (fittings && lost(fittings.rows)) wantFittings = true;
+    // Only the models each command is answerable for: `rowsLost` in travel.mjs says why, and it is
+    // the difference between this check and a `status` line that asks for travel for ever.
+    if (travel && rowsLost(travel.rows, layoutIds, TRAVEL_OWN_MODELS)) wantTravel = true;
+    if (fittings && rowsLost(fittings.rows, layoutIds)) wantFittings = true;
   }
   // Both must run **after** any snapshot, since a snapshot rewrites the layout category they append
   // to; `convert` reads the order from here, so naming them after the worlds is what keeps it right.

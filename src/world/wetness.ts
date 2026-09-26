@@ -6,6 +6,7 @@
 // compiled into each program once, when the material first joins, and skipped by a branch
 // while everything is dry.
 import * as THREE from 'three';
+import { wrapCompile, type Wrappable } from './compileHooks.ts';
 
 /** Stands for "no surface known here" in the roof map (the same value as the roof grid's ROOF_OPEN). */
 const OPEN = -1e9;
@@ -301,34 +302,21 @@ export function isWettable(m: THREE.Material, owner: THREE.Object3D): boolean {
 }
 
 /** Marks our own compile hook, so a material is never wrapped twice. */
-const WET_HOOK = Symbol('wetObject');
-type Hook = THREE.Material['onBeforeCompile'] & { [WET_HOOK]?: true };
-/** The program key each wrapped material had before it was wrapped. */
-const baseKeys = new WeakMap<THREE.Material, () => string>();
+export const WET_HOOK = Symbol('wetObject');
 
 /**
  * Wrap a material's compile hook so the wet chunk follows whatever came before (the cascades'),
- * and key its program apart. Idempotent: a material already wrapped is left alone, and one whose
- * hook something replaced since (the cascades set up again) is wrapped again around the new hook,
- * with the key it had before the first wrap.
+ * and key its program apart.
+ *
+ * Idempotent, and the guard is `wrapCompile`'s rather than this file's own, because this file's own
+ * read only the **outermost** hook: once the detail map wrapped on the outside of this one, this one
+ * stopped recognising itself and re-wrapped on every quarter-second material scan until the shader
+ * declared its varyings six times over and would not compile. `compileHooks.ts` says the whole of it.
+ * A material whose hook something **replaced** (the cascades set up again) has this mark nowhere in
+ * its chain and is wrapped afresh, which is what it needs.
  */
 export function applyWetness(mat: THREE.MeshStandardMaterial): void {
-  const previous = mat.onBeforeCompile as Hook;
-  if (previous[WET_HOOK]) return;
-  const hook: Hook = function wetObject(this: THREE.Material, shader: THREE.WebGLProgramParametersWithUniforms, renderer: THREE.WebGLRenderer) {
-    previous.call(this, shader, renderer);
-    injectWetness(shader, 'object');
-  };
-  hook[WET_HOOK] = true;
-  mat.onBeforeCompile = hook;
-  let base = baseKeys.get(mat);
-  if (!base) {
-    // Three's default key is the hook's source, which is now ours: the same for every wrapped material.
-    base = mat.customProgramCacheKey;
-    baseKeys.set(mat, base);
-  }
-  const key = base;
-  mat.customProgramCacheKey = () => `wet-object|${key.call(mat)}`;
+  wrapCompile(mat as unknown as Wrappable, WET_HOOK, 'wet-object', (shader) => injectWetness(shader as unknown as THREE.WebGLProgramParametersWithUniforms, 'object'));
 }
 
 /** What the scan decided for each material, by the first mesh it was met on. */

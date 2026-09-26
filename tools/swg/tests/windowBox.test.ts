@@ -80,6 +80,51 @@ const ok = (cond: boolean, what: string) => {
   ok(wired.has('group') && wired.has('trade'), 'the group\'s panel and the trade window are wired too');
   // The select screen is a whole screen, not a window: it is never moved or sized.
   ok(!wired.has('start') && !wired.has('select') && !calls.some((c) => /\bselect\b|#start/.test(c)), 'the select screen is never made a window');
+
+  // ---- A panel is named in three lists and must be in all of them ------------------------------
+  //
+  // Every panel built on the wardrobe's own frame has to be handed to `draggable` (or it has no grip
+  // and cannot be moved), named in `anyPanelOpen()` (or the game does not know the screen is taken)
+  // and given an `onClose` (or its close button leaves the player with no cursor and no walk). The
+  // Props tab was in none of the three, and the Housing tab in only two, because each list is a line
+  // of its own that a new panel has to be added to by hand. So the panels are read out of the code
+  // that builds them -- every `new XxxUi(` field on the app -- and checked against all three lists.
+  const mainText = readFileSync(new URL('main.ts', src), 'utf8');
+  // Which UI classes draw on the wardrobe's frame, read from their own markup.
+  const uiFiles = files.filter((f) => f.startsWith('ui/'));
+  const framed = new Set<string>();
+  for (const file of uiFiles) {
+    const text = readFileSync(new URL(file, src), 'utf8');
+    if (!/class="wardrobe-panel/.test(text)) continue;
+    const cls = /export class (\w+)/.exec(text);
+    if (cls) framed.add(cls[1]);
+  }
+  ok(framed.size >= 8, `the panels on the wardrobe's frame are read out of their own markup (${framed.size}: ${[...framed].sort().join(', ')})`);
+  // The field each is held on, from `new <Class>(` in the app.
+  const fieldOf = new Map<string, string>();
+  for (const cls of framed) {
+    const m2 = new RegExp(`this\\.(\\w+)\\s*=\\s*new ${cls}\\(`).exec(mainText);
+    if (m2) fieldOf.set(cls, m2[1]);
+  }
+  const unfound = [...framed].filter((c) => !fieldOf.has(c));
+  ok(unfound.length === 0, `and each is found on a field of the app${unfound.length ? `: ${unfound.join(', ')} are not` : ` (${fieldOf.size})`}`);
+  const anyOpen = /private anyPanelOpen\(\): boolean \{\s*return ([^;]+);/.exec(mainText)?.[1] ?? '';
+  const closeLoop = /for \(const panel of \[([^\]]*)\]\) panel\.onClose/.exec(mainText)?.[1] ?? '';
+  // Every line that hands anything to `draggable`, loops included: read as whole lines rather than
+  // with a pattern over the list, because a pattern that stopped at the first `]` saw only the first
+  // pair of a loop and passed every panel after it.
+  const dragLines = mainText
+    .split('\n')
+    .filter((l) => /(?<![\w.])draggable\(/.test(l))
+    .join('\n');
+  const gaps: string[] = [];
+  for (const [cls, field] of fieldOf) {
+    const named = (where: string) => new RegExp(`\\bthis\\.${field}\\b`).test(where);
+    if (!named(anyOpen)) gaps.push(`${cls} is not in anyPanelOpen()`);
+    if (!named(closeLoop)) gaps.push(`${cls} has no onClose`);
+    if (!named(dragLines)) gaps.push(`${cls} is not handed to draggable`);
+  }
+  ok(gaps.length === 0, `every one of them is in all three lists${gaps.length ? `:\n     ${gaps.join('\n     ')}` : ''}`);
   // The smallest browser the game is judged at is 1280x720, and at 150% scaling that is 853x480 CSS
   // pixels: every minimum must fit inside that, or a window could be made unable to show all of itself.
   const tooBig = Object.entries(WINDOW_MIN).filter(([, m]) => m.w > 853 || m.h > 480).map(([id]) => id);
