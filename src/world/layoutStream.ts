@@ -98,6 +98,8 @@ export interface PlacedObject {
   radius: number;
   contained: boolean;
   tier: number;
+  /** Given collision whatever its size: a thing put down in play, never a snapshot's own prop. */
+  solid?: boolean;
 }
 
 /**
@@ -118,6 +120,15 @@ export interface RuntimePlacement {
   radius: number;
   /** How much ground round it the procedural flora keeps off, metres. Zero leaves the flora alone. */
   clear?: number;
+  /**
+   * Solid whatever its size.
+   *
+   * The collider sweep has a floor under which nothing is given collision, because a snapshot places
+   * tens of thousands of small props and a collider apiece is not worth it. A thing the game itself
+   * puts down in play is not one of those: a travel terminal is 1.6 m across, well under the floor,
+   * and it is the very thing a player walks up to and presses.
+   */
+  solid?: boolean;
   /**
    * Standing inside a building rather than out in the open.
    *
@@ -387,6 +398,7 @@ export class LayoutStreamer {
       q: p.q,
       radius: p.radius,
       contained: !!p.inside,
+      solid: !!p.solid,
       tier: tier < 0 ? TIERS.length - 1 : tier,
     };
     this.objects.push(placed);
@@ -1111,7 +1123,10 @@ export class LayoutStreamer {
         for (const t of region.tiers) {
           if (!t || t === 'loading') continue;
           for (const o of t.objects) {
-            if (o.radius < COLLIDER_MIN_RADIUS || this.colliders.has(o) || this.huge.has(o)) continue;
+            // The size floor is about the snapshot's tens of thousands of small props. A thing put
+            // down in play is a handful of deliberate things, and the one the player walks up to and
+            // presses -- a travel terminal, 0.78 m of radius -- is well under it.
+            if ((o.radius < COLLIDER_MIN_RADIUS && !o.solid) || this.colliders.has(o) || this.huge.has(o)) continue;
             if (colliderFar(o, px, pz, 1)) continue;
             this.addColliders(o);
           }
@@ -1412,6 +1427,24 @@ export class LayoutStreamer {
    * player is standing, and the owner keeps a list of the doors the game cannot find rather than
    * the game papering over them.
    */
+  /**
+   * The nearest building whose rooms are loaded, whatever its doors. For the console's own way in.
+   *
+   * It is not `doorlessNear` with the test taken off: that one also refuses while the player is
+   * already inside something, which is the last thing a "put me in the next building" call wants.
+   */
+  nearestBuilding(pos: THREE.Vector3): Building | null {
+    let best: Building | null = null;
+    let bestD = Infinity;
+    for (const b of this.buildings) {
+      const d = Math.hypot(b.x - pos.x, b.z - pos.z);
+      if (d >= bestD || !b.model.def.cells?.length) continue;
+      bestD = d;
+      best = b;
+    }
+    return best;
+  }
+
   doorlessNear(pos: THREE.Vector3): Building | null {
     let best: Building | null = null;
     let bestD = Infinity;

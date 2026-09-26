@@ -2396,6 +2396,53 @@ class App {
       },
       /** The buildings around the player and whether each can be walked into (E offers a way into the ones that cannot). */
       doorless: () => this.world.describeDoorless(this.player.pos),
+      /**
+       * Every building this world places, by model name, with how far off each one is; with a
+       * `match` only the ones whose model or template holds that text.
+       *
+       * It is the whole world's answer and not what happens to be streamed in, so it is the way to
+       * find one thing in the gallery's two hundred and nineteen and walk to it. `__debug.enter()`
+       * is what then puts you inside.
+       */
+      buildings: (match = '', limit = 30) => {
+        const at = this.player.worldPos;
+        const rx = new RegExp(match.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+        return this.world.placedObjects
+          .filter((o) => !o.contained && (!match || rx.test(o.model) || rx.test(o.template)))
+          .map((o) => ({ model: o.model, template: o.template, away: Math.round(Math.hypot(o.x - at.x, o.z - at.z)), at: [Math.round(o.x), Math.round(o.y), Math.round(o.z)] }))
+          .sort((a, b) => a.away - b.away)
+          .slice(0, limit);
+      },
+      /**
+       * Go into a building: the nearest one with no name given, else the nearest whose model or
+       * template holds the text. It puts the player in the room a doorway opens into.
+       *
+       * `E` only ever offers this for a building with **no passable doorway at all**, since anything
+       * with a door is walked into; this is the same call with that rule taken off, which is what
+       * makes it a way to get inside the ones whose way in was a server object the game no longer has.
+       */
+      enter: async (match = '') => {
+        const at = this.player.worldPos;
+        const rx = new RegExp(match.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+        const found = this.world.placedObjects
+          .filter((o) => !o.contained && (!match || rx.test(o.model) || rx.test(o.template)))
+          .map((o) => ({ o, away: Math.hypot(o.x - at.x, o.z - at.z) }))
+          .sort((a, b) => a.away - b.away)[0];
+        if (!found) return { error: match ? `no building here matches ${match}` : 'no buildings in this world' };
+        // The streamer only knows a building once its region is loaded, so stand beside it first and
+        // let the world settle; then ask for the way in.
+        if (found.away > 60) {
+          this.player.reset(new THREE.Vector3(found.o.x, this.world.terrain.heightAt(found.o.x, found.o.z) + 0.3, found.o.z + Math.max(12, found.o.radius * 0.1)));
+          this.world.jumpTo(this.player.worldPos);
+          this.physics.stepOnce();
+          await this.settle();
+        }
+        const went = this.world.enterDoorless(this.player.worldPos, true);
+        if (!went) return { at: found.o.model, away: Math.round(found.away), error: 'that building has no rooms to go into' };
+        this.player.reset(went.at);
+        this.physics.stepOnce();
+        return { entered: found.o.model, template: found.o.template, cell: went.cell, at: went.at.toArray().map((n) => Math.round(n)) };
+      },
       /** Building interiors: how many are built against how many every loaded building would hold. `force` builds them all to compare. */
       interiors: (force = false) => this.world.interiorStats(force),
       /** Draw calls of the whole frame, summed over the portal renderer's passes. */
@@ -9435,16 +9482,26 @@ class App {
     this.clearTravelStood(this.travelStood.pack === pack);
     this.travelStood.pack = pack;
     const things = this.travelThings();
+    // The collector is a droid out of the mobile catalogue, and that catalogue is fetched once at
+    // boot and is **usually still in flight when the first planet loads** -- the very trap CLAUDE.md
+    // names. Asked for it then, the world answers null, and nothing ever asked again: every ticket
+    // collector in the game was silently missing. The load is memoised, so waiting costs nothing
+    // after the first world and the terminals do not wait for it.
+    if (things.some((t) => t.kind === 'collector' && t.model)) await this.world.loadMobileCatalogue();
+    if (this.travelRowsFor !== pack) return;
     for (const [i, t] of things.entries()) {
       if (this.travelRowsFor !== pack) return;
       if (!t.model) continue;
+      const key = `travel:${pack}:${i}`;
       if (t.kind === 'collector') {
-        const droid = this.world.standMobile(t.model, { x: t.x, z: t.z, heading: t.yaw }, t.cell > 0, `travel:${pack}:${i}`);
+        const droid = this.world.standMobile(t.model, { x: t.x, z: t.z, heading: t.yaw }, t.cell > 0, key);
         if (droid) this.travelStood.droids.push(droid);
+        else console.warn(`the ticket collector ${t.model} is not in the mobile catalogue`);
         continue;
       }
-      const key = `travel:${pack}:${i}`;
-      if (await this.world.placeProp(t.model, { key, at: { x: t.x, y: t.y, z: t.z }, yaw: t.yaw, inside: t.cell > 0 })) this.travelStood.keys.push(key);
+      // Solid whatever its size: a terminal is under the sweep's own floor for small props and is
+      // exactly the thing a player walks up to.
+      if (await this.world.placeProp(t.model, { key, at: { x: t.x, y: t.y, z: t.z }, yaw: t.yaw, inside: t.cell > 0, solid: true })) this.travelStood.keys.push(key);
     }
   }
 
@@ -11300,9 +11357,9 @@ class App {
       return true;
     }
     if (this.world.doorlessNear(p.pos)) {
-      const at = this.world.enterDoorless(p.pos);
-      if (at) {
-        p.pos.copy(at);
+      const went = this.world.enterDoorless(p.pos);
+      if (went) {
+        p.pos.copy(went.at);
         p.vel.set(0, 0, 0);
         this.physics.stepOnce();
       }

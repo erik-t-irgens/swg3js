@@ -3099,7 +3099,7 @@ export class World {
    * Filed under `key`, which is a name of its own, so a removal is one lookup and can never reach
    * something the snapshot placed.
    */
-  async placeProp(model: string, o: { key: string; at: { x: number; y: number; z: number }; yaw: number; inside?: boolean }): Promise<boolean> {
+  async placeProp(model: string, o: { key: string; at: { x: number; y: number; z: number }; yaw: number; inside?: boolean; solid?: boolean }): Promise<boolean> {
     const stream = this.layoutStream;
     if (!stream || !this.pack) return false;
     if (!this.pack.find(model)) return false;
@@ -3112,7 +3112,7 @@ export class World {
     }
     if (this.layoutStream !== stream) return false;
     const q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), o.yaw);
-    await stream.place({ model, template: o.key, x: o.at.x, y: o.at.y, z: o.at.z, q, radius: loaded.radius, inside: o.inside });
+    await stream.place({ model, template: o.key, x: o.at.x, y: o.at.y, z: o.at.z, q, radius: loaded.radius, inside: o.inside, solid: o.solid });
     return true;
   }
 
@@ -4314,16 +4314,22 @@ export class World {
     return entry.at;
   }
 
-  /** Put the player inside the doorless building beside them: a standing spot in its entry room, and the cell. */
-  enterDoorless(pos: THREE.Vector3): THREE.Vector3 | null {
+  /**
+   * Put the player inside the building beside them: a standing spot in its entry room, and the cell.
+   *
+   * `any` takes the doorless rule off, which the key never does: E offers this only for a building
+   * with no passable doorway at all, since anything with a door is walked into. The console wants it
+   * without that rule, to get inside a building whose real way in was a server object.
+   */
+  enterDoorless(pos: THREE.Vector3, any = false): { at: THREE.Vector3; cell: number } | null {
     if (!this.layoutStream) return null;
-    const b = this.layoutStream.doorlessNear(pos);
+    const b = any ? this.layoutStream.nearestBuilding(pos) : this.layoutStream.doorlessNear(pos);
     if (!b) return null;
     const entry = this.layoutStream.entryOf(b);
     if (!entry) return null;
     this.cellState = { building: b, cell: entry.cell };
     this.prevPlayerPos.copy(entry.at);
-    return entry.at;
+    return { at: entry.at, cell: entry.cell };
   }
 
   /** Flora planted so far and the appearances the pack lacked (diagnostics). */
