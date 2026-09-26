@@ -103,6 +103,7 @@ import { creditText, purse } from './net/purse.ts';
 import { BAND_TUNE, animFor, band, loadMusic, musicPack, partsFor, songsFor, stemFor } from './audio/band.ts';
 import { BandBar } from './ui/bandBar.ts';
 import { TRAVEL_PACK_VERSION, TRAVEL_TUNE, addTicket, canBoard, collectorWords, pickTicket, shuttleAt, shuttleWords, thingAt, ticketText, travelThingsOf, type ShuttleState, type Ticket, type TravelRow, type TravelThing } from './world/travelTerminal.ts';
+import { FITTINGS_PACK_VERSION, fittingTally, fittingsOf, type FittingRow } from './world/fittings.ts';
 import { SHIP_TERMINAL_TEMPLATES, SHIP_TERMINAL_TUNE, SHIP_TRIP_ORBIT, shipTripsFrom, shipTripsNote, type ShipTerminalState } from './world/shipTerminal.ts';
 import type { PlacedObject } from './world/layoutStream';
 import { TerminalUi, type TerminalPort, type TerminalShipTrip } from './ui/terminalUi.ts';
@@ -1756,6 +1757,32 @@ class App {
               ? "this world's travel pack was written before the models were named, so the terminals are there to press and not to see: run travel again and reload"
               : '',
           tune: { ...TRAVEL_TUNE, ship: { ...SHIP_TERMINAL_TUNE } },
+        };
+      },
+      /**
+       * The fittings: what the server stood on this world's buildings and no snapshot carries.
+       *
+       * `__debug.fittings()` says how many the pack holds, how many are really standing and which
+       * are nearest; `{ go: true }` walks to the nearest one, which is how a fitting in the wrong
+       * place is found without hunting for it.
+       */
+      fittings: (opts: { go?: boolean } = {}) => {
+        const here = packIdOf(this.world.planet, this.zone);
+        const c = this.world.layoutCenter;
+        const things = c && this.fittingRowsFor === here ? fittingsOf(this.fittingRows, c) : [];
+        const at = this.player.worldPos;
+        const near = things.map((f) => ({ f, d: Math.hypot(f.x - at.x, f.z - at.z) })).sort((a, b) => a.d - b.d);
+        if (opts.go && near.length) {
+          const f = near[0].f;
+          this.player.reset(new THREE.Vector3(f.x, this.world.terrain.heightAt(f.x, f.z) + 0.3, f.z));
+          return { went: f.model, at: { x: Math.round(f.x), z: Math.round(f.z) }, note: f.cell > 0 ? 'it is inside: walk in through the door' : '' };
+        }
+        return {
+          rows: this.fittingRowsFor === here ? this.fittingRows.length : 0,
+          standing: this.fittingsStood.keys.length,
+          ...fittingTally(things),
+          nearest: near.slice(0, 5).map((n) => ({ model: n.f.model, away: Math.round(n.d), cell: n.f.cell })),
+          note: this.fittingRows.length ? '' : "no fittings.json for this world: npm run swg -- fittings '@SWG' assets-private --retail-only (with your emulator checkout), then reload",
         };
       },
       /**
@@ -7757,8 +7784,10 @@ class App {
       // said is built here was refused for having nowhere to go, and this is where it is tried
       // again. A world with nothing built on it does nothing at all.
       homes.ready();
-      // The travel terminals, the collectors and the shuttles of this world.
+      // The travel terminals, the collectors and the shuttles of this world, and the fittings the
+      // server stood on its other buildings.
       void this.loadTravel(packIdOf(planet, this.zone));
+      void this.loadFittings(packIdOf(planet, this.zone));
       // What this character has to spend: asked for on arriving, so the shuttle panel has a number
       // to show rather than a blank the first time it is opened.
       purse.ask();
@@ -9531,6 +9560,70 @@ class App {
   /** The world's travel rows as the pack carries them, and which pack they are for. */
   private travelRows: TravelRow[] = [];
   private travelRowsFor = '';
+
+  /** The world's fittings as the pack carries them, what was stood, and which pack both are for. */
+  private fittingRows: FittingRow[] = [];
+  private fittingRowsFor = '';
+  private fittingsStood: { pack: string; keys: string[] } = { pack: '', keys: [] };
+
+  /**
+   * A world's fittings, out of its own pack.
+   *
+   * A world with no `fittings.json` has none, which is every world until the converter's `fittings`
+   * command has been run and is exactly how the game was before this existed: the elevator panels,
+   * the bank terminals, the cloning and insurance terminals and the hanging signs simply are not
+   * there, as they have never been, because no snapshot carries one.
+   */
+  private async loadFittings(pack: string): Promise<void> {
+    if (this.fittingRowsFor === pack) {
+      void this.standFittings(pack);
+      return;
+    }
+    this.fittingRowsFor = pack;
+    this.fittingRows = [];
+    try {
+      const res = await fetch(`${import.meta.env.BASE_URL}assets-private/${pack}/fittings.json`);
+      if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json')) return;
+      const data = (await res.json()) as { version?: number; rows?: FittingRow[] };
+      if (!Array.isArray(data.rows) || data.version !== FITTINGS_PACK_VERSION) return;
+      if (this.fittingRowsFor !== pack) return;
+      this.fittingRows = data.rows;
+      void this.standFittings(pack);
+    } catch {
+      /* a world with no fittings pack simply has none */
+    }
+  }
+
+  /**
+   * Draw the world's fittings where the data says they stand.
+   *
+   * Every one is a model in this world's own pack and goes through the streamer, so it is instanced,
+   * compiled before it shows, lit, shadowed and solid exactly as every other placed object is. They
+   * are stood in one go rather than by distance: the busiest world has a couple of hundred of them
+   * over two dozen models, and every one after the first of a model is an instance of something the
+   * pack has already loaded.
+   *
+   * Deliberately not awaited: an arrival must not wait on scenery.
+   */
+  private async standFittings(pack: string): Promise<void> {
+    this.clearFittingsStood(this.fittingsStood.pack === pack);
+    this.fittingsStood.pack = pack;
+    const c = this.world.layoutCenter;
+    if (!c || this.fittingRowsFor !== pack) return;
+    for (const [i, f] of fittingsOf(this.fittingRows, c).entries()) {
+      if (this.fittingRowsFor !== pack) return;
+      const key = `fitting:${pack}:${i}`;
+      // Solid whatever its size: a terminal or a panel is under the sweep's own floor for small
+      // props and is exactly the thing the owner asked to be able to walk into rather than through.
+      if (await this.world.placeProp(f.model, { key, at: { x: f.x, y: f.y, z: f.z }, yaw: f.yaw, inside: f.cell > 0, solid: true })) this.fittingsStood.keys.push(key);
+    }
+  }
+
+  /** Everything `standFittings` stood, taken down where the world it was stood in is still here. */
+  private clearFittingsStood(takeDown: boolean): void {
+    if (takeDown) for (const key of this.fittingsStood.keys) this.world.unplaceBuilding(key);
+    this.fittingsStood = { pack: '', keys: [] };
+  }
 
   /**
    * The travel terminal or ticket collector the player is standing at, or null.

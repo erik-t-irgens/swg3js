@@ -88,6 +88,18 @@
 //                                                                  volumetric march reads (<out-dir>/clouds/, 8 MB, invented and the same on
 //                                                                  every world). It reads converted packs and no archive, so it takes no
 //                                                                  <swg-dir>, and it must run after sky
+//   node tools/swg/cli.mjs travel <swg-dir> <out-dir> [--core3=<dir>]   where each world's travel terminals, ticket collectors and shuttles really
+//                                                                  stood, as <pack>/travel.json with the models that draw them; none of it is in a
+//                                                                  snapshot, because travel was the server's, so it reads the owner's emulator
+//                                                                  checkout (CORE3 in .env) and must run after the worlds
+//   node tools/swg/cli.mjs fittings <swg-dir> <out-dir> [--core3=<dir>]   the other children of a building: the elevator panel by a lift's doorway,
+//                                                                  the bank terminal outside a bank, the cloning and insurance terminals in a
+//                                                                  cloning facility, the sign over a cantina's door. Same source and same rule as
+//                                                                  travel, keeping everything travel does not, as <pack>/fittings.json
+//   node tools/swg/cli.mjs deeds <swg-dir> <out-dir> [--core3=<dir>]   the deeds a player buys a building with: what each makes, its name, its model,
+//                                                                  the footprint grid, its lots and its upkeep, as <out-dir>/deeds.json
+//   node tools/swg/cli.mjs music <swg-dir> <out-dir>               the player music: one track per instrument per song, as <out-dir>/music
+//                                                                  (about 100 MB). The background score is deliberately left out
 //   node tools/swg/cli.mjs spawns <out-dir> [--core3=<dir>]        where the world's creatures and its standing people really were, and every
 //                                                                  creature's own level, health and damage, read out of the owner's emulator
 //                                                                  checkout (CORE3 in .env). It opens no game archive, so it takes no <swg-dir>,
@@ -200,9 +212,11 @@ import { readTemplate, stringParam } from './objtemplate.mjs';
 import { statusJson } from './statusplan.mjs';
 /** The shape of deeds.json. A pack written by an older run is asked for again rather than read. */
 const DEED_PACK_VERSION = 1;
-/** The shape of a world's 	ravel.json. A pack written by an older run is asked for again. */
+/** The shape of a world's travel.json. A pack written by an older run is asked for again. */
 // 2: every row carries the model it is drawn with, and the shuttleports' own shuttles are in it.
 const TRAVEL_PACK_VERSION = 2;
+/** The shape of a world's fittings.json: the other things the server stood on its buildings. */
+const FITTINGS_PACK_VERSION = 1;
 // 2: every ground family carries the bump map the client shaded this terrain with.
 const TERRAIN_SHADERS_VERSION = 2;
 /** The shape of music/music.json. A pack written by an older run is asked for again. */
@@ -2012,6 +2026,8 @@ function packStatus(dir) {
   };
   console.log(`packs under ${dir}:`);
   let planets = 0;
+  let wantTravel = false;
+  let wantFittings = false;
   for (const planet of GAME_PLANETS) {
     const packDir = join(dir, planet);
     const manifest = readJson(join(packDir, 'manifest.json'));
@@ -2032,6 +2048,11 @@ function packStatus(dir) {
     const layers = existsSync(join(packDir, 'terrain')) ? readdirSync(join(packDir, 'terrain')).filter((f) => f.endsWith('.lay')).length : 0;
     const sky = readJson(join(packDir, 'sky.json'));
     const water = readJson(join(packDir, 'water.json'));
+    // The two things the server stood on a world's buildings and no snapshot carries: travel, and
+    // everything else. Both need the owner's emulator checkout, so they are reported as they stand
+    // and asked for once each rather than shouted about.
+    const travel = readJson(join(packDir, 'travel.json'));
+    const fittings = readJson(join(packDir, 'fittings.json'));
     // The cells' walkable floors, which a pack converted before they were read simply has not got:
     // the game falls back to walking straight at what it wants, so this asks rather than warns.
     const withCells = (manifest.categories?.layout ?? []).filter((m) => m.cells && m.cells.length);
@@ -2090,6 +2111,8 @@ function packStatus(dir) {
       // says: a world baked at one and its neighbour at another would steer two different ways
       // with nothing anywhere to show it.
       navGrid ? `nav grid ${navGrid.nx}x${navGrid.nz} at ${navGrid.cell} m, ${navGrid.slopeDegrees ?? '?'} deg${navMoved ? ', BAKED AROUND ANOTHER CENTRE' : ''}${navNoIndoor ? ', NO BUILDING FOOTPRINTS' : ''}${navCut.length ? `, ${navCut.length} TOWN${navCut.length === 1 ? '' : 'S'} OFF THE MAIN REGION` : ''}` : 'no nav grid',
+      travel ? `travel ${travel.counts?.terminals ?? 0} terminals, ${travel.counts?.collectors ?? 0} collectors, ${travel.counts?.shuttles ?? 0} shuttles${travel.version !== TRAVEL_PACK_VERSION ? ' (UNDRAWN: no models)' : ''}` : 'no travel',
+      fittings ? `${fittings.counts?.things ?? 0} fittings` : 'no fittings',
     ].filter(Boolean);
     console.log(`  ${planet}: ${parts.join(', ')}`);
     if (navCut.length) {
@@ -2127,7 +2150,17 @@ function packStatus(dir) {
     // join was written: those gates stand there doing nothing and nothing else would say so.
     if (!gates && layout && layout.objects.some((o) => isZoneGate(o.template))) need(`pois <swg-dir> all ${dir} --retail-only`, `${planet}'s zone gates have no destinations`);
     if (objects && (manifest.materialFormat ?? 1) < MATERIAL_FORMAT) need(`snapshot <swg-dir> all ${dir} --radius=all --retail-only`, `${planet}'s models were converted before animated and glowing surfaces`);
+    // Travel and the fittings both hang off the same blocks in the owner's own emulator checkout,
+    // and both must run after the world they join to. A world the scripts really say nothing about
+    // writes no file at all, so "none" and "not run yet" cannot be told apart here and the ask is
+    // made once rather than repeated at every planet -- which is what the two flags below are for.
+    if (objects && !travel) wantTravel = true;
+    else if (travel && travel.version !== TRAVEL_PACK_VERSION) wantTravel = true;
+    if (objects && !fittings) wantFittings = true;
+    else if (fittings && fittings.version !== FITTINGS_PACK_VERSION) wantFittings = true;
   }
+  if (wantTravel) need(`travel <swg-dir> ${dir} --retail-only`, 'no world has its travel terminals, ticket collectors or shuttles: a starport is a building with nothing in it');
+  if (wantFittings) need(`fittings <swg-dir> ${dir} --retail-only`, "no world has the fittings the server stood on its buildings: no elevator panel by a lift, no bank terminal outside a bank, no sign over a cantina's door");
   const creatures = readJson(join(dir, 'creatures/manifest.json'));
   if (!creatures) {
     console.log('  creatures: none');
@@ -5833,8 +5866,7 @@ switch (cmd) {
       } catch {
         continue;
       }
-      const rows = T.placeTravel(layout.objects ?? [], byTemplate);
-      if (!rows.length) continue;
+      const rows = T.placeChildren(layout.objects ?? [], byTemplate);
       const counts = T.travelCounts(rows);
       // Whatever this world's rows really name, converted into its own pack and merged into its
       // `layout` category, which is the one the streamer reads a model out of. A world that already
@@ -5867,10 +5899,100 @@ switch (cmd) {
       );
       worlds++;
       things += rows.length;
-      console.log(`  ${dir.name}: ${counts.terminals} terminals, ${counts.collectors} collectors, ${counts.shuttles} shuttles over ${counts.buildings} kinds of building`);
+      // A world with no starport at all is written too, with no rows in it: without the file there
+      // is no way to tell "this world has none" from "this command has never been run", and status
+      // would ask for it again for ever on an install where it has.
+      if (rows.length) console.log(`  ${dir.name}: ${counts.terminals} terminals, ${counts.collectors} collectors, ${counts.shuttles} shuttles over ${counts.buildings} kinds of building`);
     }
     console.log(`travel: ${things} things over ${worlds} worlds, ${drawn} models converted`);
     console.log('  the ticket collector is the mobiles pack\'s own droid and needs no conversion here');
+    break;
+  }
+
+  case 'fittings': {
+    // <swg-dir> <out-dir> [--core3=<dir>]: the other children of a building -- the elevator panel
+    // beside a lift's doorway, the bank terminal outside a bank, the cloning and insurance terminals
+    // in a cloning facility, the sign hanging over a cantina's door -- written into each converted
+    // world's own pack as `fittings.json` with every model they need converted beside them.
+    //
+    // It reads the same `childObjects` blocks the `travel` command does and keeps everything travel
+    // does not, which is how the two cannot stand two things in one place. `tools/swg/fittings.mjs`
+    // says what was measured. It must run after the worlds. Nothing it writes may ever reach the
+    // repository.
+    if (!pos[2]) usage();
+    const core3 = options.core3 ?? process.env.CORE3 ?? '';
+    if (!core3 || !existsSync(join(core3, 'object', 'building'))) {
+      console.log(`fittings: no emulator scripts folder (--core3=<dir>, or CORE3 in .env); looked at ${core3 || '(nothing)'}`);
+      break;
+    }
+    const F = await import('./fittings.mjs');
+    const T = await import('./travel.mjs');
+    const vfs = mount(pos[1]);
+    const out = pos[2];
+    const byTemplate = F.readFittingBuildings(core3);
+    // Which model draws each kind of fitting is worked out once for the whole run, because a
+    // template's appearance is the same on every world and resolving it is an archive read apiece.
+    const templates = new Set();
+    for (const kids of byTemplate.values()) for (const k of kids) templates.add(k.template);
+    const paramCache = new Map();
+    const { models, missing } = F.fittingModels(templates, (shared) => (vfs.has(shared) ? resolveTemplateString(vfs, shared, ['appearanceFilename'], paramCache) : null));
+    for (const kids of byTemplate.values()) for (const k of kids) k.model = models.get(k.template)?.id ?? null;
+    console.log(`fittings: ${byTemplate.size / 2} building templates carry them, ${models.size} of ${templates.size} kinds have a model the archives hold`);
+    if (missing.length) console.log(`  no model for ${missing.length}: ${missing.slice(0, 6).join(', ')}`);
+    let worlds = 0;
+    let things = 0;
+    let drawn = 0;
+    let lost = 0;
+    for (const dir of readdirSync(out, { withFileTypes: true })) {
+      if (!dir.isDirectory()) continue;
+      const layoutFile = join(out, dir.name, 'layout.json');
+      if (!existsSync(layoutFile)) continue;
+      let layout;
+      try {
+        layout = JSON.parse(readFileSync(layoutFile, 'utf8'));
+      } catch {
+        continue;
+      }
+      const all = T.placeChildren(layout.objects ?? [], byTemplate);
+      // A fitting this game cannot draw is left out of the pack rather than written as a place with
+      // nothing in it: unlike a travel terminal, which is a thing you press whether or not it shows,
+      // a fitting is only ever something to look at and walk into.
+      const rows = all.filter((r) => r.model);
+      lost += all.length - rows.length;
+      const counts = F.fittingCounts(rows);
+      const manifestPath = join(out, dir.name, 'manifest.json');
+      const manifest = existsSync(manifestPath) ? JSON.parse(readFileSync(manifestPath, 'utf8')) : { planet: layout.planet ?? dir.name, categories: {} };
+      manifest.categories ??= {};
+      manifest.categories.layout ??= [];
+      for (const id of new Set(rows.map((r) => r.model))) {
+        if (manifest.categories.layout.some((d) => d.id === id)) continue;
+        const appearance = [...models.values()].find((m) => m.id === id)?.appearance;
+        if (!appearance || !vfs.has(appearance)) {
+          console.warn(`  ${dir.name}: ${id} has no appearance in the archives`);
+          continue;
+        }
+        try {
+          const conv = convertOne(vfs, appearance, join(out, dir.name, `${id}.glb`));
+          const b = conv.mesh.bounds ?? { min: [0, 0, 0], max: [0, 0, 0] };
+          const bounds = conv.flipX ? { min: [-b.max[0], b.min[1], b.min[2]], max: [-b.min[0], b.max[1], b.max[2]] } : b;
+          manifest.categories.layout.push({ id, file: `${id}.glb`, bounds, triangles: conv.tris, textured: conv.textured, shaders: conv.shaders.length, appearance });
+          drawn++;
+        } catch (err) {
+          console.warn(`  ${dir.name}: ${id} would not convert: ${err.message}`);
+        }
+      }
+      writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+      writeFileSync(
+        join(out, dir.name, 'fittings.json'),
+        JSON.stringify({ version: FITTINGS_PACK_VERSION, planet: layout.planet ?? dir.name, source: { core3: true, note: "the children of each building that travel has no use for, joined to where this world's own snapshot places them" }, counts, rows }, null, 1),
+      );
+      worlds++;
+      things += rows.length;
+      // Written even for a world whose buildings carry nothing, for the same reason travel's is:
+      // without the file, "none here" and "never run" read the same and status asks for ever.
+      if (rows.length) console.log(`  ${dir.name}: ${counts.things} fittings (${counts.indoors} in a room) of ${counts.models} kinds over ${counts.buildings} kinds of building`);
+    }
+    console.log(`fittings: ${things} things over ${worlds} worlds, ${drawn} models converted${lost ? `, ${lost} left out for having no model` : ''}`);
     break;
   }
 

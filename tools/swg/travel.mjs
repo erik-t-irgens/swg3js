@@ -108,12 +108,17 @@ export function childYaw(c) {
 }
 
 /**
- * Every building template that carries travel children, and what each carries.
+ * Every building template that carries children this caller wants, and what each carries.
+ *
+ * `keep(templateFile)` answers with whatever the caller wants written on that child -- its kind and
+ * its model for travel, its own template for a fitting -- or null for a child it has no use for.
+ * The place, the turn and the room are the same for every caller and are read here, which is the
+ * whole reason the two commands that read these blocks share one walk.
  *
  * The key is the building's own template path as the snapshots write it, so the join to a world is
  * a plain string match and nothing has to be guessed from a name.
  */
-export function readTravelBuildings(scriptsDir) {
+export function readBuildingChildren(scriptsDir, keep) {
   const out = new Map();
   for (const file of luaFiles(join(scriptsDir, 'object', 'building'))) {
     let parsed;
@@ -129,15 +134,15 @@ export function readTravelBuildings(scriptsDir) {
       const kids = [];
       for (const c of v.childObjects) {
         if (!c || typeof c !== 'object') continue;
-        const kind = kindOfChild(c.templateFile);
-        if (!kind) continue;
+        const extra = keep(c.templateFile);
+        if (!extra) continue;
         const x = Number(c.x);
         const y = Number(c.y);
         const z = Number(c.z);
         if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
         // The emulator writes a child as (x, z, y) with z the height: this puts it back the way the
         // rest of this converter and the whole game read a place.
-        kids.push({ kind, model: modelOfKind(kind, c.templateFile), x, y: z, z: y, yaw: Math.round(childYaw(c) * 1e4) / 1e4, cell: Number.isFinite(c.cellid) ? Math.round(c.cellid) : -1 });
+        kids.push({ ...extra, x, y: z, z: y, yaw: Math.round(childYaw(c) * 1e4) / 1e4, cell: Number.isFinite(c.cellid) ? Math.round(c.cellid) : -1 });
       }
       // A snapshot names a building by its **shared** template, which is the one the client has;
       // the scripts are named for the server's. Both are written so the join is a plain string
@@ -151,8 +156,16 @@ export function readTravelBuildings(scriptsDir) {
   return out;
 }
 
+/** Every building template that carries travel children, and what each carries. */
+export function readTravelBuildings(scriptsDir) {
+  return readBuildingChildren(scriptsDir, (t) => {
+    const kind = kindOfChild(t);
+    return kind ? { kind, model: modelOfKind(kind, t) } : null;
+  });
+}
+
 /**
- * Where every travel child of a world really stands, in the snapshot's own frame.
+ * Where every child of a world's buildings really stands, in the snapshot's own frame.
  *
  * `placements` is the world's own layout: one entry per placed object with its template, its place
  * and its turn. A building the scripts say nothing about contributes nothing, and a world with no
@@ -162,8 +175,12 @@ export function readTravelBuildings(scriptsDir) {
  * A child inside a building keeps the **cell** it was written for and its place is left in the
  * building's own frame, because that is the frame the game will draw and walk it in; a child
  * outside (`cell` -1) is turned into the world's frame here, since nothing else will.
+ *
+ * Whatever the reader hung on a child that is not its place -- its kind, its model, the template it
+ * came from -- is carried through untouched, which is what lets the travel rows and the fittings
+ * rows come out of one piece of arithmetic.
  */
-export function placeTravel(placements, byTemplate) {
+export function placeChildren(placements, byTemplate) {
   const out = [];
   for (const p of placements) {
     const kids = byTemplate.get(p.template);
@@ -172,12 +189,13 @@ export function placeTravel(placements, byTemplate) {
     const cos = Math.cos(yaw);
     const sin = Math.sin(yaw);
     for (const k of kids) {
+      const { x: _x, y: _y, z: _z, yaw: _yaw, cell: _cell, ...rest } = k;
       if (k.cell > 0) {
-        out.push({ kind: k.kind, model: k.model ?? null, building: p.template, at: p.id ?? null, cell: k.cell, x: k.x, y: k.y, z: k.z, yaw: k.yaw, bx: p.x, by: p.y, bz: p.z, byaw: Math.round(yaw * 1e4) / 1e4 });
+        out.push({ ...rest, model: k.model ?? null, building: p.template, at: p.id ?? null, cell: k.cell, x: k.x, y: k.y, z: k.z, yaw: k.yaw, bx: p.x, by: p.y, bz: p.z, byaw: Math.round(yaw * 1e4) / 1e4 });
         continue;
       }
       out.push({
-        kind: k.kind,
+        ...rest,
         model: k.model ?? null,
         building: p.template,
         at: p.id ?? null,

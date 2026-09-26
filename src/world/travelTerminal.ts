@@ -94,32 +94,42 @@ export const TRAVEL_TUNE = {
  * by putting the same local place through both.
  */
 export function travelThingsOf(rows: readonly TravelRow[], centre: { x: number; z: number }): TravelThing[] {
-  const out: TravelThing[] = [];
-  for (const r of rows) {
-    const bx = -(r.bx - centre.x);
-    const bz = r.bz - centre.z;
-    if (r.cell > 0) {
-      const cos = Math.cos(r.byaw);
-      const sin = Math.sin(r.byaw);
-      // The offset in the snapshot's frame, then mirrored across: the building's own place is
-      // already over here, so all that is left of the mirror is the offset's own across-part.
-      out.push({
-        kind: r.kind,
-        model: r.model ?? null,
-        x: bx - (r.x * cos + r.z * sin),
-        y: r.by + r.y,
-        z: bz + (-r.x * sin + r.z * cos),
-        yaw: -(r.byaw + r.yaw),
-        cell: r.cell,
-        building: r.building,
-        bx,
-        bz,
-      });
-      continue;
-    }
-    out.push({ kind: r.kind, model: r.model ?? null, x: -(r.x - centre.x), y: r.y, z: r.z - centre.z, yaw: -r.yaw, cell: 0, building: r.building, bx, bz });
+  return rows.map((r) => ({ kind: r.kind, model: r.model ?? null, building: r.building, ...childInWorld(r, centre) }));
+}
+
+/** A child of a building, as a pack writes one: its place, and where the building it belongs to stands. */
+export interface ChildPlace {
+  /** The room it stands in, or 0 or less for out in the open. */
+  cell: number;
+  x: number;
+  y: number;
+  z: number;
+  yaw: number;
+  bx: number;
+  by: number;
+  bz: number;
+  byaw: number;
+}
+
+/**
+ * One child of a building, brought into the world's own frame.
+ *
+ * This is the arithmetic the long comment above is about, in one place, because the travel things
+ * and the fittings are the same rows read out of the same blocks and there is exactly one way to
+ * get them over here. Everything either of them adds -- a kind, a model, a template -- is the
+ * caller's to carry.
+ */
+export function childInWorld(r: ChildPlace, centre: { x: number; z: number }): { x: number; y: number; z: number; yaw: number; cell: number; bx: number; bz: number } {
+  const bx = -(r.bx - centre.x);
+  const bz = r.bz - centre.z;
+  if (r.cell > 0) {
+    const cos = Math.cos(r.byaw);
+    const sin = Math.sin(r.byaw);
+    // The offset in the snapshot's frame, then mirrored across: the building's own place is
+    // already over here, so all that is left of the mirror is the offset's own across-part.
+    return { x: bx - (r.x * cos + r.z * sin), y: r.by + r.y, z: bz + (-r.x * sin + r.z * cos), yaw: -(r.byaw + r.yaw), cell: r.cell, bx, bz };
   }
-  return out;
+  return { x: -(r.x - centre.x), y: r.y, z: r.z - centre.z, yaw: -r.yaw, cell: 0, bx, bz };
 }
 
 /**

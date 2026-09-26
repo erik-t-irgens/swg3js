@@ -6,7 +6,7 @@
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { childYaw, kindOfChild, modelOfKind, placeTravel, readTravelBuildings, travelCounts, yawOfQuat } from '../travel.mjs';
+import { childYaw, kindOfChild, modelOfKind, placeChildren, readTravelBuildings, travelCounts, yawOfQuat } from '../travel.mjs';
 
 let passed = 0;
 function ok(cond: boolean, what: string): void {
@@ -52,7 +52,7 @@ function note(what: string): void {
   // 48 m along the building and 0.64 m off its floor, and read the other way round it would be
   // forty-eight metres in the air.
   const buildings = new Map([['object/building/a.iff', [{ kind: 'terminal', x: -2.74, y: 0.64, z: 48.17, yaw: 0, cell: 4 }]]]);
-  const rows = placeTravel([{ template: 'object/building/a.iff', x: 100, y: 5, z: 200, q: [1, 0, 0, 0] }], buildings);
+  const rows = placeChildren([{ template: 'object/building/a.iff', x: 100, y: 5, z: 200, q: [1, 0, 0, 0] }], buildings);
   ok(rows.length === 1 && rows[0].cell === 4, 'a child inside a building keeps the cell it was written for');
   ok(rows[0].y === 0.64 && rows[0].z === 48.17, "and its place is left in the building's own frame, which is the frame the game will walk it in");
   ok(rows[0].bx === 100 && rows[0].bz === 200, 'with the building it stands in written beside it');
@@ -60,10 +60,10 @@ function note(what: string): void {
 
 {
   const buildings = new Map([['object/building/a.iff', [{ kind: 'collector', x: 10, y: 0, z: -10, yaw: 0, cell: -1 }]]]);
-  const straight = placeTravel([{ template: 'object/building/a.iff', x: 0, y: 0, z: 0, q: [1, 0, 0, 0] }], buildings);
+  const straight = placeChildren([{ template: 'object/building/a.iff', x: 0, y: 0, z: 0, q: [1, 0, 0, 0] }], buildings);
   ok(straight[0].cell === 0 && straight[0].x === 10 && straight[0].z === -10, 'a child outside a building is put into the world, since nothing else will');
   // A quarter turn about the up axis: [w, x, y, z] with y = sin(45deg).
-  const turned = placeTravel([{ template: 'object/building/a.iff', x: 0, y: 0, z: 0, q: [Math.SQRT1_2, 0, Math.SQRT1_2, 0] }], buildings);
+  const turned = placeChildren([{ template: 'object/building/a.iff', x: 0, y: 0, z: 0, q: [Math.SQRT1_2, 0, Math.SQRT1_2, 0] }], buildings);
   ok(Math.abs(turned[0].x + 10) < 1e-3 && Math.abs(turned[0].z + 10) < 1e-3, 'and turns with the building it belongs to');
   ok(Math.abs(turned[0].byaw - Math.PI / 2) < 1e-3, "and is told which way that building faces");
 }
@@ -77,9 +77,9 @@ function note(what: string): void {
 
 {
   const buildings = new Map([['object/building/a.iff', [{ kind: 'terminal', x: 0, y: 0, z: 0, yaw: 0, cell: 1 }]]]);
-  const none = placeTravel([{ template: 'object/building/b.iff', x: 0, y: 0, z: 0, q: [1, 0, 0, 0] }], buildings);
+  const none = placeChildren([{ template: 'object/building/b.iff', x: 0, y: 0, z: 0, q: [1, 0, 0, 0] }], buildings);
   ok(none.length === 0, 'a building the scripts say nothing about contributes nothing');
-  const twice = placeTravel(
+  const twice = placeChildren(
     [
       { template: 'object/building/a.iff', x: 0, y: 0, z: 0, q: [1, 0, 0, 0] },
       { template: 'object/building/a.iff', x: 500, y: 0, z: 0, q: [1, 0, 0, 0] },
