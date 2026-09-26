@@ -70,6 +70,60 @@ export const BAND_TUNE = {
 
 export const MUSIC_PACK_VERSION = 1;
 
+/**
+ * Which body animation each instrument is played with: the rig's `music_N` branch.
+ *
+ * Every species rig already carries all 46 of these clips -- six loops and forty flourishes -- and
+ * has since the rigs were first converted. What was missing was anything asking for one.
+ *
+ * The grouping is the **animation** grouping and is not the stem's: five poses cover the fourteen
+ * instruments by how they are held, not by what they sound like, so a traz and a kloo horn share a
+ * pose while playing different parts. Two independent sources give the same answer for the ten the
+ * game let a player perform with -- the animation table names each branch's own file, and the
+ * emulator's performance manager maps the same ten the same way -- so only the five marked here are
+ * ours. **`music_6` is never used**: its branch points at the shrug, which is why it has no
+ * flourishes at all.
+ *
+ * It is written here rather than in the pack because the clips need no conversion: an install that
+ * has never rerun a converter still plays them.
+ */
+export const MUSIC_ANIM: Record<string, string> = {
+  bandfill: 'music_1',
+  bandfill_hue: 'music_1',
+  nalargon: 'music_2',
+  nalargon_hue: 'music_2',
+  organ_max_rebo: 'music_2',
+  instrument_organ_max_rebo: 'music_2',
+  instrument_organ_figrin_dan: 'music_2',
+  slitherhorn: 'music_3',
+  slitherhorn_hue: 'music_3',
+  fizz: 'music_3',
+  fizz_hue: 'music_3',
+  fanfar: 'music_3',
+  fanfar_hue: 'music_3',
+  kloo_horn: 'music_3',
+  kloo_horn_hue: 'music_3',
+  traz: 'music_3',
+  traz_hue: 'music_3',
+  flute_droopy: 'music_3',
+  flute_droopy_hue: 'music_3',
+  ommni_box: 'music_4',
+  ommni_box_hue: 'music_4',
+  mandoviol: 'music_5',
+  mandoviol_hue: 'music_5',
+  xantha: 'music_5',
+  xantha_hue: 'music_5',
+  // Ours: the table names no pose for these four, so each takes the one it is most like.
+  valahorn: 'music_3',
+  flanged_jessoon: 'music_3',
+  downey_box: 'music_4',
+};
+
+/** The rig branch an instrument is played with, or null for one with no pose. */
+export function animFor(instrumentId: string): string | null {
+  return MUSIC_ANIM[instrumentId] ?? null;
+}
+
 let pack: MusicPack | null = null;
 let pending: Promise<MusicPack | null> | null = null;
 

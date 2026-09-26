@@ -3,7 +3,7 @@
 import * as THREE from 'three';
 import { CharacterRig, loadPlayerRig, type RigState } from '../player/rig';
 import { markActor } from '../world/portalRender';
-import { isDanceClip, isFlourishClip, loopsEmote } from '../core/emotes';
+import { isDanceClip, isFlourishClip, isMusicLoop, loopsEmote } from '../core/emotes';
 import type { Hello, PeerState, PeerVehicle } from './net';
 import { easeInHull, MIN_GLIDE_SECONDS, peerAboard, placeInHull } from './aboardMath.ts';
 import type { Garage } from '../vehicles/garage';
@@ -866,7 +866,10 @@ export class RemotePlayers {
       return;
     }
     r.rig?.play(clip, { fadeIn: 0.15, loop: loopsEmote(clip) });
-    r.dance = isDanceClip(clip) ? clip : isFlourishClip(clip) ? r.dance : null;
+    // A performance loop of either kind is what a flourish returns to. With this and loopsEmote,
+    // another player playing an instrument loops and comes back from its flourishes with nothing
+    // added to the wire: a performance crosses as the clip name an emote always has.
+    r.dance = isDanceClip(clip) || isMusicLoop(clip) ? clip : isFlourishClip(clip) ? r.dance : null;
   }
 
   remove(id: number): void {

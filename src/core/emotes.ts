@@ -32,7 +32,25 @@ export function danceOf(clip: string): string | null {
   return m ? m[1] : null;
 }
 
-/** A flourish: one of skill_action_1..8's branches, played over a dance loop. */
+/**
+ * A performance loop for an instrument: loop_skill:speed2:music_N, N the instrument's own group.
+ *
+ * It is the very shape a dance is -- the same third branch of the skill loop with `music_N` where a
+ * dance has `dance_N` -- so everything the dances already do works for it unchanged. The clips have
+ * been in every species pack since the rigs were first converted; nothing in the game ever asked for
+ * one, which is the whole of why nobody has seen a character play an instrument.
+ */
+export function isMusicLoop(name: string): boolean {
+  return /^loop_skill:speed2:music_\d+$/.test(name);
+}
+
+/** The style a performance clip is for, dance or music ("dance_18", "music_3"), or null. */
+export function performOf(clip: string): string | null {
+  const m = /:((?:dance|music)_\d+)$/.exec(clip);
+  return m ? m[1] : null;
+}
+
+/** A flourish: one of skill_action_1..8's branches, played over a dance or a music loop. */
 export function isFlourishClip(name: string): boolean {
   return /^skill_action_\d+(:|$)/.test(name);
 }
@@ -43,9 +61,15 @@ export function isEmoteClip(name: string): boolean {
   return /^(emt_|emote_?|dance_|social_)/.test(name) && !/^(lower|upper):/.test(name) && !/_ag$/.test(name);
 }
 
-/** Whether an emote keeps going until the player moves (a dance, a sit) rather than playing once. */
+/**
+ * Whether an emote keeps going until the player moves (a dance, a performance, a sit) rather than
+ * playing once.
+ *
+ * This one line is what makes a performance loop **on every screen**: another player's emotes cross
+ * the relay as a clip name, and the peer side asks this same question of it.
+ */
 export function loopsEmote(name: string): boolean {
-  return isDanceClip(name) || /^dance_/.test(name) || name === 'loop_sitting_ground';
+  return isDanceClip(name) || isMusicLoop(name) || /^dance_/.test(name) || name === 'loop_sitting_ground';
 }
 
 /** "emt_wave1" reads as "Wave 1", "loop_skill:speed2:dance_3" as "Dance: rhythmic", "loop_sitting_ground" as "Sit". */

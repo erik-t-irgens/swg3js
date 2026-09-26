@@ -8,11 +8,12 @@
 // Run: node tools/swg/tests/music.test.ts
 
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { STEMS, STEM_OURS, instrumentStems, musicCounts, performanceName, readSampleName, readSongs } from '../music.mjs';
-import { BAND_TUNE, Band, bandWords, inBand, musicId, musicTemplate, partsFor, songOffset, songsFor, stemFor, type MusicPack } from '../../../src/audio/band.ts';
+import { BAND_TUNE, Band, MUSIC_ANIM, animFor, bandWords, inBand, musicId, musicTemplate, partsFor, songOffset, songsFor, stemFor, type MusicPack } from '../../../src/audio/band.ts';
 import { TemplateRun, makeStart } from '../../../src/audio/template.ts';
+import { isFlourishClip, isMusicLoop, loopsEmote, performOf } from '../../../src/core/emotes.ts';
 
 let passed = 0;
 function ok(cond: boolean, what: string): void {
@@ -316,6 +317,51 @@ const here = { x: 0, y: 0, z: 0 };
     note(`${full} of the ${p.songs.length} songs carry all six; the rest carry fewer, so holding an instrument really does decide whether you have a part`);
     const placed = Object.keys(p.instruments).length;
     note(placed ? `${placed} instruments are placed on a track` : 'no instrument is placed yet: the weapons pack wants converting again for the instrument class');
+  }
+}
+
+// ---------------------------------------------------------------- the poses a performer plays
+
+{
+  ok(isMusicLoop('loop_skill:speed2:music_3'), 'a performance loop is the skill loop\'s third branch, as a dance is');
+  ok(!isMusicLoop('loop_skill:speed2:dance_3') && !isMusicLoop('skill_action_1:music_3'), 'and neither a dance nor a flourish is one');
+  ok(performOf('loop_skill:speed2:music_3') === 'music_3' && performOf('loop_skill:speed2:dance_18') === 'dance_18', 'a performance names its own style, whichever kind it is');
+  ok(loopsEmote('loop_skill:speed2:music_3'), 'it loops until the player moves -- the one line that makes it loop on every other screen too');
+  ok(isFlourishClip('skill_action_7:music_5'), 'and a flourish is a flourish whatever it is over');
+}
+
+{
+  // Five poses cover the fourteen instruments by how each is held, which is not how they sound: a
+  // traz and a kloo horn share a pose and play different parts. `music_6` is the shrug and is never
+  // anybody's.
+  const groups = new Set(Object.values(MUSIC_ANIM));
+  ok(groups.size === 5, `five poses over the instruments (${[...groups].sort().join(', ')})`);
+  ok(!groups.has('music_6'), 'and never the sixth branch, which is the shrug and has no flourishes at all');
+  ok(animFor('kloo_horn') === animFor('kloo_horn_hue'), 'a colour variant is played the same way, being the same instrument');
+  ok(animFor('kloo_horn') !== animFor('mandoviol'), 'a horn and a stringed thing are not');
+  ok(animFor('not_an_instrument') === null, 'and something that is not an instrument has no pose');
+}
+
+{
+  // The clips really are in the rigs, and have been since they were first converted -- nothing
+  // needed converting again for this, only something asking for them.
+  const dir = join('assets-private', 'characters');
+  const species = existsSync(dir) ? readdirSync(dir).filter((s) => existsSync(join(dir, s, 'parts.json'))) : [];
+  if (!species.length) note('no species packs here, so the poses are not checked against a real rig');
+  else {
+    let worst = '';
+    let missing = 0;
+    for (const s of species) {
+      const raw = readFileSync(join(dir, s, 'parts.json'), 'utf8');
+      for (const group of new Set(Object.values(MUSIC_ANIM))) {
+        const loop = `loop_skill:speed2:${group}`;
+        if (!raw.includes(`"${loop}"`)) {
+          missing++;
+          worst = `${s} has no ${loop}`;
+        }
+      }
+    }
+    ok(!missing, `every pose an instrument needs is in all ${species.length} species rigs${worst ? ` (${worst})` : ''}`);
   }
 }
 

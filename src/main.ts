@@ -100,7 +100,7 @@ import { ShuttleMenu } from './ui/shuttleMenu.ts';
 import { loadGalaxyFile, planetOfRouteId, systemOfPack, systemsOfWorlds } from './data/galaxy';
 import { homes } from './net/homes.ts';
 import { creditText, purse } from './net/purse.ts';
-import { BAND_TUNE, band, loadMusic, musicPack, partsFor, songsFor, stemFor } from './audio/band.ts';
+import { BAND_TUNE, animFor, band, loadMusic, musicPack, partsFor, songsFor, stemFor } from './audio/band.ts';
 import { BandBar } from './ui/bandBar.ts';
 import { TRAVEL_PACK_VERSION, TRAVEL_TUNE, addTicket, canBoard, collectorWords, pickTicket, shuttleAt, shuttleWords, thingAt, ticketText, travelThingsOf, type ShuttleState, type Ticket, type TravelRow, type TravelThing } from './world/travelTerminal.ts';
 import { SHIP_TERMINAL_TEMPLATES, SHIP_TERMINAL_TUNE, SHIP_TRIP_ORBIT, shipTripsFrom, shipTripsNote, type ShipTerminalState } from './world/shipTerminal.ts';
@@ -193,7 +193,7 @@ import type { Bolt } from './combat/bolts';
 import { applyAppearance, dress, packLook } from './player/look';
 import { RemotePlayers, watchPeers } from './net/remotePlayers';
 import { remoteBlades } from './net/remoteBlades.ts';
-import { danceOf, defaultEmotes, emoteChoices, FLOURISHES, isDanceClip, isFlourishClip, loadEmotes, loopsEmote, saveEmotes } from './core/emotes';
+import { danceOf, defaultEmotes, emoteChoices, FLOURISHES, isDanceClip, isFlourishClip, isMusicLoop, loadEmotes, loopsEmote, performOf, saveEmotes } from './core/emotes';
 import { HUD_DPR_RANGE, HUD_LINES_RANGE, HUD_SCALE_RANGE, loadSettings, type Settings } from './core/settings';
 import { deleteCharacter, knownToServer, loadCharacters, markKnownToServer, newCharacterId, upsertCharacter, type Appearance, type SavedCharacter } from './core/characters';
 import { FRAME_NUDGE, Garage, type VehicleDef } from './vehicles/garage';
@@ -1286,9 +1286,7 @@ class App {
     // heard on theirs. There is no world music in this game and none is wanted.
     this.bandBar = new BandBar(this.ui);
     this.bandBar.onPlay = () => this.toggleBand();
-    this.bandBar.onFlourish = (n) => {
-      if (!band.flourish(n, this.player.worldPos)) this.messages.system('this song has no such flourish for that instrument');
-    };
+    this.bandBar.onFlourish = (n) => this.bandFlourish(n);
     this.bandBar.onPick = (song) => {
       if (song === this.bandSong) return;
       this.bandSong = song;
@@ -1773,9 +1771,7 @@ class App {
         const stem = stemFor(instrument ?? '');
         if (typeof opts.song === 'number') this.bandSong = Math.round(opts.song);
         if (opts.play) this.toggleBand();
-        if (typeof opts.flourish === 'number' && !band.flourish(opts.flourish, this.player.worldPos)) {
-          return { error: 'this song has no such flourish for that instrument', ...band.report() };
-        }
+        if (typeof opts.flourish === 'number') this.bandFlourish(opts.flourish);
         const pack = musicPack();
         return {
           holding: instrument,
@@ -7272,7 +7268,9 @@ class App {
       return;
     }
     this.emoting = true;
-    this.dance = isDanceClip(clip) ? clip : isFlourishClip(clip) ? this.dance : null;
+    // dance is the performance loop, whichever kind it is: a music loop keeps its place here so
+    // that a flourish over it returns to it, exactly as a dance's does.
+    this.dance = isDanceClip(clip) || isMusicLoop(clip) ? clip : isFlourishClip(clip) ? this.dance : null;
     this.net.sendEmote(clip);
   }
 
@@ -7305,12 +7303,16 @@ class App {
   private stepDance(): void {
     const rig = this.player.rig;
     if (!this.dance || !this.emoting || !rig) return;
-    const style = danceOf(this.dance);
-    for (let i = 1; i <= FLOURISHES; i++) {
-      if (!this.input.consumeKey(`Digit${i}`)) continue;
-      const clip = style ? rig.variant(`skill_action_${i}`, style) : null;
-      if (clip) this.playEmote(clip);
-      else this.messages.system(`this dance has no flourish ${i}`);
+    const style = performOf(this.dance);
+    // A performance's digits belong to the band, which takes them a few lines later and plays the
+    // sound with the pose. Taken here they would play the pose in silence.
+    if (!isMusicLoop(this.dance)) {
+      for (let i = 1; i <= FLOURISHES; i++) {
+        if (!this.input.consumeKey(`Digit${i}`)) continue;
+        const clip = style ? rig.variant(`skill_action_${i}`, style) : null;
+        if (clip) this.playEmote(clip);
+        else this.messages.system(`this dance has no flourish ${i}`);
+      }
     }
     if (!rig.overriding) rig.play(this.dance, { fadeIn: 0.15, loop: true });
   }
@@ -10312,7 +10314,7 @@ class App {
   private stepBand(): void {
     const instrument = this.instrumentHeld();
     if (!instrument || !this.bandOpen) {
-      if (band.mine) band.stop(this.player.worldPos);
+      this.stopBand();
       if (this.bandBar.open) this.bandBar.hide();
       this.bandOpen = this.bandOpen && !!instrument;
       return;
@@ -10367,7 +10369,7 @@ class App {
       if (!this.instrumentHeld()) this.messages.system('nothing in your hands to play: an instrument goes in a hand like a weapon');
       else {
         this.bandOpen = !this.bandOpen;
-        if (!this.bandOpen && band.mine) band.stop(this.player.worldPos);
+        if (!this.bandOpen) this.stopBand();
       }
     }
     if (!this.bandOpen || !band.mine) return;
@@ -10375,7 +10377,7 @@ class App {
       // The digit is spelled rather than looked up in the bindings, exactly as a dance's flourishes
       // are: eight keys in a row are what a flourish is, and rebinding a slot must not move them.
       if (!input.consumeKey(`Digit${n}`)) continue;
-      if (!band.flourish(n, this.player.worldPos)) this.messages.system('this song has no such flourish for that instrument');
+      this.bandFlourish(n);
     }
   }
 
@@ -10384,11 +10386,40 @@ class App {
     const instrument = this.instrumentHeld();
     if (!instrument) return;
     if (band.mine) {
-      band.stop(this.player.worldPos);
+      this.stopBand();
       return;
     }
     const why = band.start(this.bandSong, instrument, this.player.worldPos);
-    if (why) this.messages.system(why);
+    if (why) {
+      this.messages.system(why);
+      return;
+    }
+    // The body plays it too. The pose is the rig's own performance loop for this instrument, which
+    // is the very branch of the very selector a dance uses, so it loops, it ends when the player
+    // moves and it crosses the relay with nothing new sent -- all of that is the emote path's
+    // already. A rig with no pose for this instrument simply plays the music.
+    this.playEmote(this.player.rig?.variant('loop_skill:speed2', animFor(instrument) ?? '') ?? null);
+  }
+
+  /** Stop playing: the music and the pose together, wherever the stop came from. */
+  private stopBand(): void {
+    if (band.mine) band.stop(this.player.worldPos);
+    if (this.dance && isMusicLoop(this.dance)) this.endEmote();
+  }
+
+  /**
+   * A flourish: the sound and the pose, over the loop the body goes back to.
+   *
+   * One method because three things flourish -- the row's buttons, the number keys and the console --
+   * and the pose must not be played where the sound was refused.
+   */
+  private bandFlourish(n: number): void {
+    if (!band.flourish(n, this.player.worldPos)) {
+      this.messages.system('this song has no such flourish for that instrument');
+      return;
+    }
+    const instrument = this.instrumentHeld();
+    if (instrument) this.playEmote(this.player.rig?.variant(`skill_action_${n}`, animFor(instrument) ?? '') ?? null);
   }
 
   /** What the Housing tab shows: every deed whose building this game can really put down. */
