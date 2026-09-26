@@ -521,8 +521,19 @@ const surfaceEffects = new Map();
  * a separate texture (`*_spec.dds`, `*_ref.dds`), and that is what is read now. A third of them are
  * grey and the rest carry colour, so what is taken is the luminance: glTF's roughness is one number
  * and a coloured specular has no place to go in it.
+ *
+ * **And how much of a surface is a mirror is a second mask, in its own place.** The client's line is
+ * `result.rgb = lerp(diffuseLitSurface, envColor, envMask) + specular`, so `envMask` is metalness in
+ * three's terms with the scene's environment behind it -- and `envMaskOf` reads which texture and
+ * channel it is out of the shader's own program, because it is not always the main texture's alpha.
+ * Measured over the 1,400 retail shaders with an environment cube: 981 use the main's alpha, 378 use
+ * the MASK slot's, 25 the SPEC slot's and 16 are unreadable and fall back on the main's. Taken from
+ * the gloss map instead, as it was, a hull's shine stood in for its chrome; taken from the main's
+ * alpha on the whole hue family, the *hue* mask did -- which is a two-tone shape mask and has
+ * nothing at all to do with reflection, so a customizable armour piece was mirror-bright wherever
+ * its second colour happened to fall.
  */
-function surfaceFor(vfs, effect, slots, dds, alphaMode, { alphaIsEmissive = false } = {}) {
+function surfaceFor(vfs, effect, slots, dds, alphaMode, { alphaIsEmissive = false, envMask = null } = {}) {
   const name = (effect ?? '').toLowerCase();
   let tags = surfaceEffects.get(name);
   if (!tags) {
@@ -541,30 +552,49 @@ function surfaceFor(vfs, effect, slots, dds, alphaMode, { alphaIsEmissive = fals
   if (!specular) return {};
   // The shader's own gloss map, where it names one that is not simply the diffuse again.
   const own = glossMap(vfs, slots, dds);
-  if (own) return { metallic: 1, roughness: 1, mr: { png: own.png }, glossFrom: own.path };
   // A glowing texture's alpha is its glow mask, not a gloss mask.
   const masked = dds.hasAlpha && alphaMode === 'OPAQUE' && !alphaIsEmissive;
-  if (!masked) return { metallic: reflective ? 0.6 : 0, roughness: reflective ? 0.3 : 0.45 };
-  // Roughness in green, metalness in blue, both from the mask.
-  const mr = new Uint8Array(dds.width * dds.height * 4);
-  for (let i = 0; i < dds.width * dds.height; i++) {
-    const a = dds.rgba[i * 4 + 3];
-    mr[i * 4] = 0;
-    mr[i * 4 + 1] = 255 - Math.round(a * 0.85);
-    mr[i * 4 + 2] = reflective ? a : 0;
-    mr[i * 4 + 3] = 255;
+  // And how much of it is a mirror, out of whichever texture the shader's own program named.
+  const env = reflective ? envSource(vfs, slots, dds, envMask) : null;
+  if (!own && !masked && !env) return { metallic: reflective ? 0.6 : 0, roughness: reflective ? 0.3 : 0.45 };
+  // Roughness in green, metalness in blue. Two sources, not one: the gloss says how smooth it is and
+  // the environment mask says how much of it is chrome, and on 603 of the retail shaders that use
+  // both those are two different textures.
+  const gloss = own ? { w: own.width, h: own.height, read: own.read } : masked ? { w: dds.width, h: dds.height, read: (x, y) => dds.rgba[(y * dds.width + x) * 4 + 3] } : null;
+  const w = Math.max(gloss?.w ?? 1, env?.w ?? 1);
+  const h = Math.max(gloss?.h ?? 1, env?.h ?? 1);
+  const mr = new Uint8Array(w * h * 4);
+  // Nearest: the two masks are usually the same size, and where they are not this is a roughness
+  // map, not a photograph.
+  const at = (src, x, y) => src.read(Math.min(src.w - 1, Math.floor((x * src.w) / w)), Math.min(src.h - 1, Math.floor((y * src.h) / h)));
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = (y * w + x) * 4;
+      const g = gloss ? at(gloss, x, y) : 0;
+      mr[i] = 0;
+      // With no gloss map at all (a reflective shader whose colour alpha is real transparency), the
+      // roughness is the flat one this returned before the mask was read: 0.3 for something
+      // reflective, 0.45 otherwise, written as a byte so the one image carries both channels.
+      mr[i + 1] = gloss ? 255 - Math.round(g * 0.85) : reflective ? 77 : 115;
+      mr[i + 2] = env ? at(env, x, y) : reflective && gloss ? g : 0;
+      mr[i + 3] = 255;
+    }
   }
-  return { metallic: 1, roughness: 1, mr: { png: encodePng(dds.width, dds.height, mr) } };
+  return { metallic: 1, roughness: 1, mr: { png: encodePng(w, h, mr) }, ...(own ? { glossFrom: own.path } : {}), ...(env ? { envFrom: `${env.slot}.${env.channel}` } : {}) };
 
   /**
-   * The metal-roughness image a shader's own SPEC texture makes, or null where it has none worth
-   * reading. Cached per file: one gloss map is shared by dozens of shaders.
+   * How glossy a shader's own SPEC texture says it is, as a reader over its pixels, or null where it
+   * names none worth reading. Cached per file: one gloss map is shared by dozens of shaders.
+   *
+   * A reader rather than a finished image, because the roughness and the metalness now come from two
+   * different textures on the 603 shaders whose gloss is a file of its own and whose environment
+   * mask is the main's alpha, and one of them has to be sampled into the other's size.
    */
   function glossMap(vfsIn, slotList, main) {
     const spec = (slotList ?? []).find((s) => s.slot === 'SPEC');
     if (!spec?.path) return null;
     const path = String(spec.path).replace(/\\/g, '/');
-    // The same file as the diffuse: its alpha is the mask, which is the branch below. 3,149 of the
+    // The same file as the diffuse: its alpha is the mask, which is the branch above. 3,149 of the
     // 4,844 are this, and reading it here as a colour map would turn every one of them to mud. The
     // main's path is taken from the slot list rather than from the decoded image, which carries
     // pixels and no name.
@@ -577,17 +607,17 @@ function surfaceFor(vfs, effect, slots, dds, alphaMode, { alphaIsEmissive = fals
     try {
       if (vfsIn.has(path)) {
         const img = decodeDds(vfsIn.read(path));
-        const mrOwn = new Uint8Array(img.width * img.height * 4);
-        for (let i = 0; i < img.width * img.height; i++) {
-          // Luminance: a third of these maps are grey and the rest carry a coloured specular, which
-          // glTF's one roughness number has nowhere to keep.
-          const g = Math.round(img.rgba[i * 4] * 0.2126 + img.rgba[i * 4 + 1] * 0.7152 + img.rgba[i * 4 + 2] * 0.0722);
-          mrOwn[i * 4] = 0;
-          mrOwn[i * 4 + 1] = 255 - Math.round(g * 0.85);
-          mrOwn[i * 4 + 2] = reflective ? g : 0;
-          mrOwn[i * 4 + 3] = 255;
-        }
-        out = { png: encodePng(img.width, img.height, mrOwn), path };
+        // Luminance: a third of these maps are grey and the rest carry a coloured specular, which
+        // glTF's one roughness number has nowhere to keep.
+        out = {
+          path,
+          w: img.width,
+          h: img.height,
+          read: (x, y) => {
+            const i = (y * img.width + x) * 4;
+            return Math.round(img.rgba[i] * 0.2126 + img.rgba[i + 1] * 0.7152 + img.rgba[i + 2] * 0.0722);
+          },
+        };
       }
     } catch (err) {
       console.error(`  gloss map ${path} skipped: ${err.message}`);
@@ -595,6 +625,38 @@ function surfaceFor(vfs, effect, slots, dds, alphaMode, { alphaIsEmissive = fals
     glossCache.set(path, out);
     return out;
   }
+}
+
+/** Environment-mask textures already read this run, by path. */
+const envMaskCache = new Map();
+
+/**
+ * How much of a surface is a mirror, as a reader over whichever texture the shader's program named.
+ *
+ * `envMaskOf` has read the slot and the channel out of the pixel program; this is only the reading.
+ * A shader with no environment cube never gets here, and one whose program could not be read falls
+ * back on the main texture's alpha, which is what 981 of the 1,400 really use.
+ */
+function envSource(vfs, slots, dds, envMask) {
+  const slot = envMask?.slot ?? 'MAIN';
+  const channel = envMask?.channel ?? 'a';
+  const pick = channel === 'a' ? 3 : 1;
+  const mainOf = (img) => ({ slot, channel, w: img.width, h: img.height, read: (x, y) => img.rgba[(y * img.width + x) * 4 + pick] });
+  if (slot === 'MAIN') return dds.hasAlpha || channel !== 'a' ? mainOf(dds) : null;
+  const named = (slots ?? []).find((s) => s.slot === slot);
+  if (!named?.path) return null;
+  const path = String(named.path).replace(/\\/g, '/');
+  const key = `${path}|${channel}`;
+  const had = envMaskCache.get(key);
+  if (had !== undefined) return had ? { ...had, slot, channel } : null;
+  let out = null;
+  try {
+    if (vfs.has(path)) out = mainOf(decodeDds(vfs.read(path)));
+  } catch (err) {
+    console.error(`  environment mask ${path} skipped: ${err.message}`);
+  }
+  envMaskCache.set(key, out);
+  return out;
 }
 
 /** Gloss maps already read this run, by path: one is shared by dozens of shaders. */

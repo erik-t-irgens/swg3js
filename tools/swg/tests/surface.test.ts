@@ -488,7 +488,7 @@ const T = (shader: string, d: any = deps) => surfaceTexture(vfs, shader, d);
   // The line grew the gloss counts when the converter started reading a shader's own specular map
   // instead of guessing from the diffuse alpha; these fixtures name none, so both are nought.
   ok(c.glossy === 0 && c.glossMaps === 0, 'and no gloss map, since none of these fixtures names one');
-  ok(/^surfaces: 2 flip-books, 1 scrolling, 1 unlit, 1 additive, 2 glowing \(\d+\.\d MB of glow images\), 0 with the shader's own gloss map \(0 maps\), 0 with a detail map \(0 maps, 0\.0 MB\)$/.test(surfaceCountsLine(c)), 'and the snapshot line reads as designed');
+  ok(/^surfaces: 2 flip-books, 1 scrolling, 1 unlit, 1 additive, 2 glowing \(\d+\.\d MB of glow images\), 0 with the shader's own gloss map \(0 maps\), 0 with a detail map \(0 maps, 0\.0 MB\), 0 reflective \(0 whose mirror mask is not the colour texture's alpha\)$/.test(surfaceCountsLine(c)), 'and the snapshot line reads as designed');
   const line = surfaceLine(T('shader/whitewater.sht'), describeSurface(vfs, 'shader/whitewater.sht'));
   ok(line === 'translucent, alpha test 6/255, no depth write, no shadow; scrolls colour (-0.25,-0.6)/s, alpha (0.6,0)/s, split alpha', `the materials line for the whitewater (${line})`);
   ok(surfaceLine(T('shader/anim_screen.sht'), describeSurface(vfs, 'shader/anim_screen.sht')) === 'flip-book 4 frames, 0.1 s each; unlit', 'the materials line for an unlit flip-book');

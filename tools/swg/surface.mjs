@@ -15,7 +15,9 @@ import { shaderTextures } from './sht.mjs';
  * 3: every surface wears the gloss map its own shader names rather than a guess from the colour
  *    texture's alpha, a baked shader carries the surface fields it was getting none of, and glass
  *    blends rather than being cut out.
- * 4: the detail map, with the coordinate set of its own that the meshes have always carried.
+ * 4: the detail map, with the coordinate set of its own that the meshes have always carried, and
+ *    how much of a surface is a mirror read from the texture and channel its own program names
+ *    rather than always from the colour texture's alpha.
  */
 export const MATERIAL_FORMAT = 4;
 
@@ -264,6 +266,65 @@ export function emissiveOf(effectName, pixelText, samplers) {
   return null;
 }
 
+/**
+ * Which texture and channel the environment mask comes from: null, or { slot, channel }.
+ *
+ * The client's envmask programs all end the same way -- `result.rgb = lerp(diffuseLitSurface,
+ * envColor, envMask) + allSpecularLight` -- so `envMask` is how much of a surface is a mirror, and
+ * in three's terms it is metalness with the scene's environment behind it. What differs, and what
+ * cost this a real bug, is **where the mask comes from**:
+ *
+ *   a_envmask_specmap     envMask = tex2D(diffuseMap, tcs_MAIN).a          -- MAIN's alpha
+ *   h_color2_envmask_*    envMask = tex2D(specular_envMap, tcs_MAIN).a     -- the MASK slot's alpha,
+ *                         while MAIN's alpha is the *hue* mask for the two-tone customizing
+ *
+ * Read as MAIN's alpha everywhere, the whole hue family had a two-tone shape mask standing in for
+ * its shininess -- which has nothing to do with it, and made a customizable armour piece mirror-
+ * bright wherever its second colour happened to be.
+ *
+ * So it is read out of the program, exactly as `emissiveOf` reads the glow's, and falls back on
+ * MAIN's alpha only for a shader whose program the archives lack.
+ */
+export function envMaskOf(pixelText, samplers) {
+  const text = (pixelText ?? '').replace(/\/\/[^\n]*/g, '');
+  // Assembly (the whole `c_` family is ps.1.1): the lit colour lerps toward the environment cube by
+  // a sampler's alpha, `lrp r0, t0.a, t1, r0` with t1 on ENVM. It is the mirror of the glow reader's
+  // own assembly branch, which looks for an lrp toward MAIN instead, and the two must not be
+  // confused: one is a sign that lights itself, the other is chrome.
+  for (const m of text.matchAll(/\blrp\s+r\d+(?:\.\w+)?\s*,\s*t(\d+)\.a\s*,\s*t(\d+)\b/g)) {
+    if (samplers?.[Number(m[2])] === 'ENVM') return { slot: samplers?.[Number(m[1])] ?? 'MAIN', channel: 'a' };
+  }
+  // The same lerp with the mask taken through a register rather than straight off a sampler
+  // (`mov r0, t0` then `lrp r0.rgb, r0.w, t1, r0`, which is the plainest of the palette effects):
+  // the nearest move into that register before the lerp says which texture it really is.
+  for (const m of text.matchAll(/\blrp\s+r\d+(?:\.\w+)?\s*,\s*r(\d+)\.[wa]\s*,\s*t(\d+)\b/g)) {
+    if (samplers?.[Number(m[2])] !== 'ENVM') continue;
+    const moves = [...text.slice(0, m.index).matchAll(new RegExp(`\\bmov\\s+r${m[1]}(?:\\.\\w+)?\\s*,\\s*t(\\d+)\\b`, 'g'))];
+    const from = moves.length ? samplers?.[Number(moves[moves.length - 1][1])] : undefined;
+    return { slot: from ?? 'MAIN', channel: 'a' };
+  }
+  if (!/\benvMask\s*=/.test(text)) return null;
+  const bySampler = new Map();
+  for (const m of text.matchAll(/sampler\w*\s+(\w+)\s*:\s*register\s*\(\s*s(\d+)\s*\)/g)) {
+    const tag = samplers?.[Number(m[2])];
+    if (tag) bySampler.set(m[1], tag);
+  }
+  const slotOf = (v) => bySampler.get(v) ?? slotByVariable(v);
+  const assign = /\benvMask\s*=\s*([^;]+);/.exec(text);
+  if (!assign) return null;
+  const rhs = assign[1];
+  const direct = /tex(?:2D|CUBE)\w*\s*\(\s*(\w+)[^)]*\)\s*\.\s*(rgb|a)\b/.exec(rhs);
+  if (direct) return { slot: slotOf(direct[1]), channel: direct[2] };
+  const viaLocal = /\b(\w+)\s*\.\s*(rgb|a)\b/.exec(rhs);
+  if (viaLocal) {
+    // The nearest read before the assignment, for the same reason the glow's reader needs it: the
+    // hue programs declare `sample` twice, once from the diffuse map and once from the mask.
+    const reads = [...text.slice(0, assign.index).matchAll(new RegExp(`\\b${viaLocal[1]}\\s*=\\s*tex2D\\w*\\s*\\(\\s*(\\w+)`, 'g'))];
+    if (reads.length) return { slot: slotOf(reads[reads.length - 1][1]), channel: viaLocal[2] };
+  }
+  return null;
+}
+
 /** Records of a shader's TSNS / ARVS / TCSS form: tag -> values. */
 function records(v, formName, size, read) {
   const out = new Map();
@@ -288,6 +349,7 @@ const blank = (shader) => ({
   scroll: null,
   split: false,
   emissive: null,
+  envMask: null,
   anim: null,
   timing: null,
   flip: null,
@@ -355,6 +417,7 @@ function describeStatic(vfs, ssht, out, cache) {
   const psh = programText(vfs, pass.pixelProgram, cache);
   out.split = isSplitAlpha(pass.pixelProgram, psh, pass.samplers);
   out.emissive = emissiveOf(out.effect ?? (out.inline ? '' : pass.pixelProgram), psh, pass.samplers);
+  out.envMask = envMaskOf(psh, pass.samplers);
   const sets = scrollSets(vsh);
   const rates = scrolls.get(out.mainSlot ?? 'MAIN') ?? scrolls.get('MAIN');
   if (rates && sets.set0 === 'xy') {
@@ -708,8 +771,10 @@ export function surfaceTexture(vfs, shaderPath, deps) {
     // A flip-book glows in every frame or in none, so no frame ever takes the glow map away.
     if (Math.max(...masks.map((x) => x.max)) < 8 / 255) masks = null;
   }
-  // The main's alpha is a glow mask, not a gloss mask, only when it is split into a glow.
-  Object.assign(result, deps.surfaceFor(d.effect, d.textures, main, alphaMode, { alphaIsEmissive: !!masks && !glow.keepAlpha }));
+  // The main's alpha is a glow mask, not a gloss mask, only when it is split into a glow. The
+  // environment mask is handed over as the shader's own program named it, rather than being guessed
+  // at: on 378 of the 1,400 shaders that have one it is not in the main texture at all.
+  Object.assign(result, deps.surfaceFor(d.effect, d.textures, main, alphaMode, { alphaIsEmissive: !!masks && !glow.keepAlpha, envMask: d.envMask }));
   const normalSlot = d.textures.find((s) => /^(CNRM|NRML|DOT3)$/.test(s.slot));
   const normal = normalSlot ? deps.normalFor(normalSlot.path) : null;
   if (normal) result.normal = normal;
@@ -842,7 +907,7 @@ function paneLike(img) {
 }
 
 export function surfaceCounts(entries) {
-  const c = { flipBooks: 0, scrolling: 0, unlit: 0, additive: 0, glowing: 0, glowBytes: 0, glossy: 0, glossMaps: 0, detailed: 0, detailMaps: 0, detailBytes: 0 };
+  const c = { flipBooks: 0, scrolling: 0, unlit: 0, additive: 0, glowing: 0, glowBytes: 0, glossy: 0, glossMaps: 0, detailed: 0, detailMaps: 0, detailBytes: 0, mirrored: 0, mirrorElsewhere: 0 };
   const glow = new Map();
   const gloss = new Set();
   const detail = new Map();
@@ -861,6 +926,12 @@ export function surfaceCounts(entries) {
       c.detailed++;
       detail.set(t.detail.path, t.detail.png.length);
     }
+    // How much of it is a mirror, and how often that mask is somewhere other than the colour
+    // texture's alpha -- which is the whole point of reading it off the program.
+    if (t.envFrom) {
+      c.mirrored++;
+      if (t.envFrom !== 'MAIN.a') c.mirrorElsewhere++;
+    }
     if (t.emissive) {
       c.glowing++;
       glow.set(t.emissive.path, t.emissive.png.length);
@@ -875,5 +946,5 @@ export function surfaceCounts(entries) {
 }
 
 export function surfaceCountsLine(c) {
-  return `surfaces: ${c.flipBooks} flip-books, ${c.scrolling} scrolling, ${c.unlit} unlit, ${c.additive} additive, ${c.glowing} glowing (${(c.glowBytes / 1e6).toFixed(1)} MB of glow images), ${c.glossy} with the shader's own gloss map (${c.glossMaps} maps), ${c.detailed} with a detail map (${c.detailMaps} maps, ${(c.detailBytes / 1e6).toFixed(1)} MB)`;
+  return `surfaces: ${c.flipBooks} flip-books, ${c.scrolling} scrolling, ${c.unlit} unlit, ${c.additive} additive, ${c.glowing} glowing (${(c.glowBytes / 1e6).toFixed(1)} MB of glow images), ${c.glossy} with the shader's own gloss map (${c.glossMaps} maps), ${c.detailed} with a detail map (${c.detailMaps} maps, ${(c.detailBytes / 1e6).toFixed(1)} MB), ${c.mirrored} reflective (${c.mirrorElsewhere} whose mirror mask is not the colour texture's alpha)`;
 }

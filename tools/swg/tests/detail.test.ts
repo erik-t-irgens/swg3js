@@ -20,7 +20,7 @@
 import { parseMesh } from '../msh.mjs';
 import { parseIff } from '../iff.mjs';
 import { buildGlb } from '../glb.mjs';
-import { MATERIAL_FORMAT, surfaceCounts, surfaceCountsLine } from '../surface.mjs';
+import { MATERIAL_FORMAT, envMaskOf, surfaceCounts, surfaceCountsLine } from '../surface.mjs';
 import { applyDetail, injectDetail } from '../../../src/world/detailMap.ts';
 
 let checks = 0;
@@ -268,5 +268,92 @@ const fakeTexture = { isTexture: true, name: 'detail' } as unknown as import('th
   ok('which is a set of its own and not the main one scaled', p.uvs2![3] === 8 && p.uvs![3] === 0.25);
 }
 
-console.log(`\ndetail maps: ${checks} checks, ${bad} failed`);
+// ---- Where the environment mask lives --------------------------------------------------------------
+//
+// The client's envmask line is `lerp(diffuseLitSurface, envColor, envMask)`, so the mask is metalness.
+// Which texture it comes out of is not one answer: measured over the 1,400 retail shaders with an
+// environment cube, 981 use the colour texture's alpha, 378 the MASK slot's, 25 the SPEC slot's and
+// 16 cannot be read at all. These fixtures are the real programs' shapes, cut down.
+
+{
+  // The plain HLSL family: `envMask = tex2D(diffuseMap, tcs_MAIN).a`.
+  const plainHlsl = `
+	sampler diffuseMap : register(s0);
+	sampler specularMap : register(s1);
+	sampler envMap : register(s2);
+	float4 main() : COLOR {
+		float4 sample = tex2D(diffuseMap, tcs_MAIN);
+		envMask = sample.a;
+		result.rgb = lerp(diffuseLitSurface, envColor, envMask) + allSpecularLight;
+	}`;
+  const slots = { 0: 'MAIN', 1: 'SPEC', 2: 'ENVM' };
+  const got = envMaskOf(plainHlsl, slots);
+  ok('the plain family takes the mirror mask from the colour texture\'s alpha', got?.slot === 'MAIN' && got.channel === 'a', JSON.stringify(got));
+}
+{
+  // The hue family, which is the one that was wrong: `sample` is declared twice, and the second read
+  // is the mask slot's. The colour texture's alpha there is the *hue* mask -- a two-tone shape mask
+  // with nothing to do with reflection.
+  const hueHlsl = `
+	sampler diffuseMap : register(s0);
+	sampler specular_envMap : register(s1);
+	sampler envMap : register(s2);
+	float4 main() : COLOR {
+		float4 sample = tex2D(diffuseMap, tcs_MAIN);
+		hueMask = sample.a;
+		float4 sample = tex2D(specular_envMap, tcs_MAIN);
+		specularMask = sample.rgb;
+		envMask = sample.a;
+		result.rgb = lerp(diffuseLitSurface, envColor, envMask) + allSpecularLight;
+	}`;
+  const got = envMaskOf(hueHlsl, { 0: 'MAIN', 1: 'MASK', 2: 'ENVM' });
+  ok('the hue family takes it from the mask slot, not the hue mask beside it', got?.slot === 'MASK' && got.channel === 'a', JSON.stringify(got));
+}
+{
+  // The palette family is assembly, and the lerp names its samplers directly.
+  const asm = `
+	ps.1.1
+	tex   t0
+	tex   t1
+	tex   t2
+	mul r0, t0, v0
+	lrp r0, t0.a, t1, r0
+	mad r0.rgb, t2.a, v1, r0`;
+  const got = envMaskOf(asm, { 0: 'MAIN', 1: 'ENVM', 2: 'SPEC' });
+  ok('assembly: the lerp toward the cube names the mask', got?.slot === 'MAIN' && got.channel === 'a', JSON.stringify(got));
+  // And the plainest of them takes it through a register.
+  const viaReg = `
+	ps.1.1
+	tex   t0
+	tex   t1
+	mov r0, t0
+	mul r0.xyz, v0, r0
+	lrp r0.rgb, r0.w, t1, r0`;
+  const got2 = envMaskOf(viaReg, { 0: 'MAIN', 1: 'ENVM' });
+  ok('and through a register when that is how it is written', got2?.slot === 'MAIN' && got2.channel === 'a', JSON.stringify(got2));
+}
+{
+  // A lerp toward the colour texture rather than the cube is a *glow*, not a mirror, and must not be
+  // read as one -- the two differ by nothing but which sampler the lerp reaches for.
+  const glowAsm = `
+	ps.1.1
+	tex t0
+	tex t1
+	lrp r0.rgb, t1.a, t0, r0`;
+  ok('a lerp toward the colour texture is a glow and is not taken for a mirror', envMaskOf(glowAsm, { 0: 'MAIN', 1: 'SPEC' }) === null);
+  ok('a program that mentions no mask at all answers nothing', envMaskOf('float4 main() { result = tex2D(m, uv); }', { 0: 'MAIN' }) === null);
+  ok('and so does no program at all', envMaskOf(null as unknown as string, { 0: 'MAIN' }) === null);
+}
+{
+  const c = surfaceCounts([
+    { path: 'a', envFrom: 'MAIN.a' },
+    { path: 'b', envFrom: 'MASK.a' },
+    { path: 'c', envFrom: 'SPEC.a' },
+    { path: 'd' },
+  ]);
+  ok('the reflective surfaces are counted', c.mirrored === 3, `${c.mirrored}`);
+  ok('and the ones whose mask is elsewhere apart, which is the point of reading it', c.mirrorElsewhere === 2, `${c.mirrorElsewhere}`);
+}
+
+console.log(`\ndetail and mirror masks: ${checks} checks, ${bad} failed`);
 if (bad) process.exit(1);
