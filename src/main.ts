@@ -1781,7 +1781,7 @@ class App {
           holding: instrument,
           plays: stem ? (pack?.stemNames[stem] ?? stem) : null,
           song: this.bandSong,
-          hasAPartIn: songsFor(stem),
+          hasAPartIn: songsFor(instrument ?? ''),
           flourishes: partsFor(this.bandSong, stem)?.flourishes.length ?? 0,
           ...band.report(),
           note: pack ? '' : 'no music converted: npm run swg -- music @SWG assets-private --retail-only',
@@ -10317,8 +10317,8 @@ class App {
       this.bandOpen = this.bandOpen && !!instrument;
       return;
     }
-    const stem = stemFor(instrument);
-    const songs = songsFor(stem);
+    const stem = stemFor(instrument, undefined, this.bandSong);
+    const songs = songsFor(instrument);
     if (!songs.includes(this.bandSong)) this.bandSong = songs[0] ?? 0;
     const parts = partsFor(this.bandSong, stem);
     const pack = musicPack();

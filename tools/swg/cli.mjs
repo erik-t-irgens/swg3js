@@ -5691,14 +5691,20 @@ switch (cmd) {
     const { songs, odd } = M.readSongs(samples);
     const counts = M.musicCounts(songs);
     mkdirSync(out, { recursive: true });
-    // Every instrument the weapons pack carries, and which stem each plays. Read from that pack so
-    // this never has a second opinion about which instruments the game has.
+    // Every instrument the weapons pack carries, and which stem each plays. Which instruments exist
+    // is read from that pack, so this never has a second opinion about it; which stem each one plays
+    // is read from the game's own performance table, which states it outright on twenty rows apiece.
     let instruments = { placed: [], unplaced: [] };
+    const byName = M.readStems(vfs);
+    console.log(`music: the performance table names ${byName.size} instruments and which part each plays`);
     const weaponsFile = join(pos[2], 'weapons', 'manifest.json');
     if (existsSync(weaponsFile)) {
       try {
         const w = JSON.parse(readFileSync(weaponsFile, 'utf8'));
-        instruments = M.instrumentStems((w.weapons ?? []).filter((e) => e.class === 'instrument').map((e) => e.id));
+        instruments = M.instrumentStems(
+          (w.weapons ?? []).filter((e) => e.class === 'instrument').map((e) => e.id),
+          byName,
+        );
       } catch {
         /* an unreadable weapons pack leaves the instruments unplaced, which the line below says */
       }
@@ -5734,7 +5740,9 @@ switch (cmd) {
           counts,
           stems: M.STEMS,
           stemNames: M.STEM_NAMES,
-          instruments: Object.fromEntries(instruments.placed.map((i) => [i.id, i.stem])),
+          // A stem an instrument plays, and where the table says otherwise for a particular song
+          // (the xantha takes the mandoviol's part for the first ten), the songs that differ.
+          instruments: Object.fromEntries(instruments.placed.map((i) => [i.id, i.songs ? { stem: i.stem, songs: i.songs } : i.stem])),
           songs: songs.map((s) => ({
             song: s.song,
             stems: Object.fromEntries(Object.entries(s.stems).map(([k, v]) => [k, { intro: strip(v.intro), main: strip(v.main), outro: strip(v.outro), flourishes: v.flourishes.map(strip) }])),

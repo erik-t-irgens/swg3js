@@ -10,7 +10,7 @@
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { STEMS, STEM_OF, instrumentStems, musicCounts, readSampleName, readSongs } from '../music.mjs';
+import { STEMS, STEM_OURS, instrumentStems, musicCounts, performanceName, readSampleName, readSongs } from '../music.mjs';
 import { BAND_TUNE, Band, bandWords, inBand, musicId, musicTemplate, partsFor, songOffset, songsFor, stemFor, type MusicPack } from '../../../src/audio/band.ts';
 import { TemplateRun, makeStart } from '../../../src/audio/template.ts';
 
@@ -77,12 +77,34 @@ function note(what: string): void {
 // ---------------------------------------------------------------- which instrument plays what
 
 {
-  const { placed, unplaced } = instrumentStems(['kloo_horn', 'kloo_horn_hue', 'mandoviol', 'traz', 'fanfar', 'not_an_instrument']);
-  ok(placed.find((p) => p.id === 'kloo_horn')?.stem === 'khorn', 'the six instruments the samples are named for play their own tracks');
-  ok(placed.find((p) => p.id === 'kloo_horn_hue')?.stem === 'khorn', 'and a colour variant plays the same one, since it is the same instrument');
-  ok(placed.find((p) => p.id === 'fanfar')?.stem === 'khorn', 'an instrument the samples are not named for is put with the one it is most like');
-  ok(unplaced.length === 1 && unplaced[0] === 'not_an_instrument', 'and one that cannot be placed is said out loud rather than given somebody else\'s part');
-  ok(STEMS.length === 6 && new Set(Object.values(STEM_OF)).size === 6, 'six stems, and every one of them is somebody\'s');
+  // How a template's own id is spelled in the game's own table: squashed, without the colour, and
+  // two that do not fall out of the rule and are named rather than fudged.
+  ok(performanceName('kloo_horn_hue') === 'kloohorn', "a colour variant is the same instrument, spelled the table's way");
+  ok(performanceName('ommni_box') === 'omnibox', 'the template spells the box with two m and the table with one');
+  ok(performanceName('instrument_organ_max_rebo') === 'organmaxrebo', 'and the prefix some templates carry comes off');
+}
+
+{
+  // The table, as the real one is shaped: a row per song per instrument naming the very sample file.
+  const byName = new Map([
+    ['kloohorn', new Map([[1, 'khorn'], [2, 'khorn']])],
+    ['traz', new Map([[1, 'shorn'], [2, 'shorn']])],
+    // The one instrument whose answer is not a single stem: the xantha takes the mandoviol's part
+    // for the first half of the songs and its own for the second, which is why those songs carry
+    // five stems and the rest six.
+    ['xantha', new Map([[1, 'mand'], [2, 'xantha'], [3, 'xantha']])],
+  ]);
+  const { placed, unplaced } = instrumentStems(['kloo_horn', 'kloo_horn_hue', 'traz', 'xantha', 'organ_max_rebo', 'not_an_instrument'], byName);
+  ok(placed.find((p) => p.id === 'kloo_horn')?.stem === 'khorn', 'an instrument plays what the table says it plays');
+  ok(placed.find((p) => p.id === 'kloo_horn_hue')?.stem === 'khorn', 'and a colour variant plays the same, since it is the same instrument');
+  // Guessed from what it looks like the traz was a drum. The table says otherwise on all twenty of
+  // its rows, and six of the fourteen were wrong that way.
+  ok(placed.find((p) => p.id === 'traz')?.stem === 'shorn', "the traz is not a drum, whatever it looks like: the table is read and not the shape of the thing");
+  const x = placed.find((p) => p.id === 'xantha');
+  ok(x?.stem === 'xantha' && x?.songs?.[1] === 'mand', 'the xantha plays its own part on most songs and the mandoviol\'s on the ones the table says');
+  ok(placed.find((p) => p.id === 'organ_max_rebo')?.ours === true, 'an instrument the table never names takes one of ours, and is marked as ours');
+  ok(unplaced.length === 1 && unplaced[0] === 'not_an_instrument', "and one that is neither is said out loud rather than given somebody else's part");
+  ok(STEMS.length === 6 && new Set(Object.values(STEM_OURS)).size >= 1, 'six stems, and the ones we chose for ourselves are the only ones written by hand');
 }
 
 // ---------------------------------------------------------------- the band
@@ -92,7 +114,7 @@ const fixture: MusicPack = {
   counts: {},
   stems: ['khorn', 'mand'],
   stemNames: { khorn: 'kloo horn', mand: 'mandoviol' },
-  instruments: { kloo_horn: 'khorn', mandoviol: 'mand', nalargon: 'nlrg' },
+  instruments: { kloo_horn: 'khorn', mandoviol: 'mand', nalargon: 'nlrg', xantha: { stem: 'mand', songs: { 2: 'khorn' } } },
   songs: [
     { song: 1, stems: { khorn: { intro: 'samples/a_intro.wav', main: 'samples/a_main_lp.wav', outro: 'samples/a_outro.wav', flourishes: ['samples/a_f1_lp.wav'] }, mand: { intro: null, main: 'samples/b_main_lp.wav', outro: null, flourishes: [] } } },
     { song: 2, stems: { khorn: { intro: null, main: 'samples/c_main_lp.wav', outro: null, flourishes: [] } } },
@@ -102,9 +124,13 @@ const fixture: MusicPack = {
 {
   ok(stemFor('kloo_horn', fixture) === 'khorn', 'an instrument names its stem');
   ok(stemFor('a_rock', fixture) === null, 'and something that is not one names none');
-  ok(songsFor('khorn', fixture).join() === '1,2', 'a kloo horn has a part in both songs');
-  ok(songsFor('mand', fixture).join() === '1', 'and a mandoviol in only the one that wrote it a track');
-  ok(songsFor('nlrg', fixture).length === 0, 'an instrument with no track in any song has nothing to play');
+  ok(songsFor('kloo_horn', fixture).join() === '1,2', 'a kloo horn has a part in both songs');
+  ok(songsFor('mandoviol', fixture).join() === '1', 'and a mandoviol in only the one that wrote it a track');
+  ok(songsFor('nalargon', fixture).length === 0, 'an instrument with no track in any song has nothing to play');
+  // The whole reason `songsFor` takes the instrument and not a stem: asked by stem, an instrument
+  // whose part changes from song to song is refused half the songs it can really play.
+  ok(stemFor('xantha', fixture, 1) === 'mand' && stemFor('xantha', fixture, 2) === 'khorn', 'an instrument whose part changes by song answers per song');
+  ok(songsFor('xantha', fixture).join() === '1,2', 'and has a part in both of them, one on each stem');
   ok(partsFor(1, 'khorn', fixture)?.main === 'samples/a_main_lp.wav', "a part is the instrument's own");
   ok(partsFor(2, 'mand', fixture) === null, 'and a song with no track for that instrument has none: there is no falling back on somebody else\'s');
 }
@@ -311,15 +337,22 @@ const here = { x: 0, y: 0, z: 0 };
     const held = w.weapons.filter((e) => e.class === 'instrument').map((e) => e.id);
     if (!held.length) {
       note('the weapons pack carries no instrument: it wants converting again, which is what puts them on the rack');
+    } else if (!existsSync(musicFile)) {
+      note('no music pack here, so the join is not checked');
     } else {
-      const { placed, unplaced } = instrumentStems(held);
-      ok(!unplaced.length, `every one of the ${held.length} instruments the weapons pack carries is placed on a track (${new Set(placed.map((p) => p.stem)).size} of the six stems used)`);
-      if (existsSync(musicFile)) {
-        const p = JSON.parse(readFileSync(musicFile, 'utf8')) as MusicPack;
-        const missing = held.filter((id) => !stemFor(id, p));
-        ok(!missing.length, "and the game finds each of them in the music pack by its own id, with no spelling rule of its own");
-        if (missing.length) note(`the music pack was written before these arrived: ${missing.slice(0, 6).join(', ')} — run the music command again after the weapons one`);
-      }
+      // Read out of the **converted pack**, which is what the game reads, rather than worked out
+      // again here: the mapping comes off the game's own performance table now, and the table is in
+      // the archives rather than in this file, so re-deriving it would need an archive mount and
+      // would be a second opinion besides.
+      const p = JSON.parse(readFileSync(musicFile, 'utf8')) as MusicPack;
+      const missing = held.filter((id) => !stemFor(id, p));
+      ok(!missing.length, `every one of the ${held.length} instruments the weapons pack carries is placed on a track (${new Set(held.map((id) => stemFor(id, p))).size} of the six stems used)`);
+      if (missing.length) note(`the music pack was written before these arrived: ${missing.slice(0, 6).join(', ')} — run the music command again after the weapons one`);
+      // And the one instrument the table splits by song really is split in the pack, or ten of the
+      // twenty songs are refused to whoever holds it.
+      const split = held.filter((id) => typeof p.instruments[id] === 'object');
+      note(split.length ? `${split.join(', ')} play a different part on some songs, which the table says and the pack keeps` : 'no instrument in this pack changes its part by song: an old pack, or a table that no longer says so');
+      for (const id of held) ok(songsFor(id, p).length > 0, `a ${id} has a part in at least one song (${songsFor(id, p).length} of ${p.songs.length})`);
     }
   }
 }

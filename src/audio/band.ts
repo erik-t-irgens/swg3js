@@ -41,8 +41,11 @@ export interface MusicPack {
   counts: Record<string, number>;
   stems: string[];
   stemNames: Record<string, string>;
-  /** Which stem each instrument in the weapons pack plays. */
-  instruments: Record<string, string>;
+  /**
+   * Which stem each instrument in the weapons pack plays: a stem outright, or a stem with the songs
+   * the game's own table says it plays something else on (the xantha, and nothing else in retail).
+   */
+  instruments: Record<string, string | { stem: string; songs?: Record<number, string> }>;
   songs: { song: number; stems: Record<string, StemParts> }[];
 }
 
@@ -93,18 +96,23 @@ export function musicPack(): MusicPack | null {
 }
 
 /**
- * Which stem an instrument plays, or null when the pack cannot place it.
+ * Which stem an instrument plays, **of a given song**, or null when the pack cannot place it.
  *
  * An exact lookup on the instrument's own id, and deliberately so: the pack is keyed by the very
  * ids the weapons pack carries, because the `music` command reads that pack and resolves every
  * spelling itself (a `_hue` variant is the same instrument in a colour somebody picked, and there
- * are fourteen instruments behind the archives' 28 templates). Measured over the real archives it
- * places all 28, so there is nothing left here to guess at -- and a second opinion about spellings
- * on this side is exactly how the two halves would come to disagree.
+ * are fourteen instruments behind the archives' 28 templates).
+ *
+ * The song matters for one instrument and the game's own table is what says so: the **xantha plays
+ * the mandoviol's part for songs 1 to 10 and its own for 11 to 20**, which is exactly why those
+ * first ten songs carry five stems and the rest carry six. Asked without a song, an instrument
+ * answers with the stem it plays on most of them.
  */
-export function stemFor(instrumentId: string, from: MusicPack | null = pack): string | null {
-  if (!from) return null;
-  return from.instruments[instrumentId] ?? null;
+export function stemFor(instrumentId: string, from: MusicPack | null = pack, song?: number): string | null {
+  const entry = from?.instruments[instrumentId];
+  if (!entry) return null;
+  if (typeof entry === 'string') return entry;
+  return (song !== undefined ? entry.songs?.[song] : undefined) ?? entry.stem;
 }
 
 /** A song by its number, or null. */
@@ -112,10 +120,16 @@ export function songOf(n: number, from: MusicPack | null = pack): { song: number
   return from?.songs.find((s) => s.song === n) ?? null;
 }
 
-/** Every song this instrument really has a track for, by number. */
-export function songsFor(stem: string | null, from: MusicPack | null = pack): number[] {
-  if (!stem || !from) return [];
-  return from.songs.filter((s) => !!s.stems[stem]).map((s) => s.song);
+/**
+ * Every song this instrument really has a track for, by number.
+ *
+ * It takes the **instrument** and not a stem, because which stem it plays can differ from song to
+ * song: asked by stem, a xantha was told the first ten songs had no part for it when the game gave
+ * it the mandoviol's.
+ */
+export function songsFor(instrumentId: string | null, from: MusicPack | null = pack): number[] {
+  if (!instrumentId || !from) return [];
+  return from.songs.filter((s) => !!s.stems[stemFor(instrumentId, from, s.song) ?? '']).map((s) => s.song);
 }
 
 /**

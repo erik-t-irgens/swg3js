@@ -18,43 +18,74 @@
 // whatever song the band is playing, and two players on two instruments layer because the game
 // wrote them to.
 //
-// What is **not** in the archives is which of the fourteen instrument templates plays which of the
-// six stems. That mapping is ours (`STEM_OF`), it is written down here rather than guessed at in the
-// game, and the ones it cannot place are said out loud rather than silently dropped.
+// Which instrument plays which stem **is** in the archives, and the first cut of this said it was
+// not. `datatables/performance/performance.iff` has a row per song per instrument, and its
+// `mainloop` column names the very sample file that song's part is: twenty rows an instrument, and
+// on every one of the fourteen the twenty agree. Guessing from what an instrument looks like got six
+// of those fourteen wrong -- the traz is not a drum, the fizz is not a rattle, and the ommni box is
+// not a keyboard as far as the game's own music is concerned. It is read now, and the handful of
+// instruments the table does not name are the only ones still ours.
 //
-// Dependency-free but for node's own modules; shared with tools/swg/tests/music.test.ts.
+// Dependency-free but for node's own modules and this folder's readers; shared with
+// tools/swg/tests/music.test.ts.
+
+import { parseDatatable } from './datatable.mjs';
+import { parseIff } from './iff.mjs';
+
+/** The table that states it, one row per song per instrument. */
+const PERFORMANCE_TABLE = 'datatables/performance/performance.iff';
 
 /**
- * Which stem each instrument plays, and why.
+ * The instruments the game's own table does **not** name, and what they play. Ours, one line each.
  *
- * Six stems and fourteen instruments, so some share. The six are named for real instruments -- the
- * kloo horn, the mandoviol, the nalargon, the slitherhorn, the xantha and a drum -- and every one of
- * those six takes its own; the rest are put with the one they are most like, which is a judgement
- * and is marked as one. A player holding two instruments that share a stem is playing the same part
- * as a player holding the other, which is exactly what a band of two kloo horns would sound like.
+ * Five of the twenty-seven templates the weapons pack carries have no row in the performance table
+ * at all -- the two organs and the Figrin D'an one are decorations the game never let a player
+ * perform with -- so if they are to be held and played at all, something has to choose. They take
+ * the nalargon's part, which is the keyboard.
  */
-export const STEM_OF = {
-  // The six the samples are named for.
-  kloo_horn: 'khorn',
-  mandoviol: 'mand',
-  nalargon: 'nlrg',
-  slitherhorn: 'shorn',
-  xantha: 'xantha',
-  traz: 'drum',
-  // And the rest, by what they are: a judgement of ours, one line each.
-  bandfill: 'drum', // a struck box: the drum's part
-  fizz: 'drum', // a rattle
-  fanfar: 'khorn', // a horn
-  valahorn: 'khorn', // a horn
-  kloo_horn_hue: 'khorn',
-  flute_droopy: 'shorn', // a wind instrument, like the slitherhorn
-  flanged_jessoon: 'shorn',
-  ommni_box: 'nlrg', // a keyed box, like the nalargon
-  downey_box: 'nlrg',
-  organ_max_rebo: 'nlrg', // the Max Rebo organ is a keyboard
+export const STEM_OURS = {
+  organ_max_rebo: 'nlrg',
   instrument_organ_max_rebo: 'nlrg',
   instrument_organ_figrin_dan: 'nlrg',
 };
+
+/**
+ * How a template's own id is spelled in the performance table.
+ *
+ * The table writes them squashed and without the colour variant: `kloo_horn_hue` is `kloohorn`. Two
+ * do not fall out of that rule and are named here rather than fudged: the template spells the ommni
+ * box with two m's and the table with one, and `downey_box` keeps its shape.
+ */
+export function performanceName(id) {
+  const bare = String(id ?? '')
+    .replace(/_hue$/, '')
+    .replace(/^instrument_/, '');
+  const squashed = bare.replace(/_/g, '');
+  return squashed === 'ommnibox' ? 'omnibox' : squashed;
+}
+
+/**
+ * Which stem each instrument plays, read off the game's own table.
+ *
+ * The answer is per song and not merely per instrument, which is the one thing a single mapping
+ * could never say: the **xantha plays the mandoviol's part for songs 1 to 10 and its own for 11 to
+ * 20**, which is exactly why those first ten songs carry five stems and the rest carry six. Told
+ * only "the xantha plays xantha", a player holding one is refused half the songs in the game.
+ */
+export function readStems(vfs) {
+  const table = parseDatatable(parseIff(Buffer.from(vfs.read(PERFORMANCE_TABLE))));
+  const out = new Map();
+  for (const row of table.rows) {
+    const inst = row.requiredInstrument;
+    if (!inst) continue;
+    const song = Number(/song(\d+)_/.exec(String(row.mainloop ?? ''))?.[1]);
+    const stem = /song\d+_([a-z]+)_/.exec(String(row.mainloop ?? ''))?.[1];
+    if (!stem || !Number.isFinite(song)) continue;
+    if (!out.has(inst)) out.set(inst, new Map());
+    out.get(inst).set(song, stem);
+  }
+  return out;
+}
 
 /** The six stems the samples are written for, in the order a band reads best in. */
 export const STEMS = ['drum', 'nlrg', 'mand', 'khorn', 'shorn', 'xantha'];
@@ -140,15 +171,31 @@ export function musicCounts(songs) {
   return { songs: songs.length, stems: stems.size, parts, full };
 }
 
-/** Which instruments the pack can really be played with, and which it cannot place. */
-export function instrumentStems(ids) {
+/**
+ * Which instruments the pack can really be played with, and which it cannot place.
+ *
+ * `byName` is what `readStems` gave, keyed by the table's own spelling. Each placed instrument gets
+ * the stem it plays on most songs and, where the table disagrees with itself across the songs, the
+ * songs that differ -- which is the xantha and nothing else in the retail table.
+ */
+export function instrumentStems(ids, byName = new Map()) {
   const placed = [];
   const unplaced = [];
   for (const id of ids) {
-    const key = id.replace(/^shared_/, '').replace(/_hue$/, '');
-    const stem = STEM_OF[key] ?? STEM_OF[id] ?? null;
-    if (stem) placed.push({ id, stem });
-    else unplaced.push(id);
+    const rows = byName.get(performanceName(id.replace(/^shared_/, '')));
+    if (!rows || !rows.size) {
+      const ours = STEM_OURS[id] ?? STEM_OURS[id.replace(/_hue$/, '')] ?? null;
+      if (ours) placed.push({ id, stem: ours, ours: true });
+      else unplaced.push(id);
+      continue;
+    }
+    // The stem it plays on most songs is its own; anything else is written out per song.
+    const tally = new Map();
+    for (const s of rows.values()) tally.set(s, (tally.get(s) ?? 0) + 1);
+    const stem = [...tally].sort((a, b) => b[1] - a[1])[0][0];
+    const songs = {};
+    for (const [song, s] of rows) if (s !== stem) songs[song] = s;
+    placed.push(Object.keys(songs).length ? { id, stem, songs } : { id, stem });
   }
   return { placed, unplaced };
 }
