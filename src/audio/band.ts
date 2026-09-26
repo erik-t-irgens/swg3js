@@ -176,7 +176,13 @@ export function standsOnGround(instrumentId: string | null): boolean {
 export const FLOOR_TUNE = {
   /** How far in front of the player it is set down, metres. */
   ahead: 1.15,
-  /** How far it is turned from facing the player, radians: 0 is square on. */
+  /**
+   * How it is turned from the way the player faces, radians.
+   *
+   * Nought, which is to say **the same way the player faces**, and not the half turn that reads as
+   * "facing them": these models are authored looking back down their own -Z, so a nalargon turned to
+   * face the player showed the player its back.
+   */
   turn: 0,
 };
 

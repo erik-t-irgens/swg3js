@@ -836,15 +836,22 @@ export class LayoutStreamer {
         // so each placed building gets its own meshes; a building without portal data draws normally.
         // Those meshes are made only once the player is near (see buildInterior).
         const perBuilding = prim.cell > 0 && model.portals.length > 0;
-        const instanced = perBuilding ? list.filter((_, i) => !built[i]) : list;
-        if (!instanced.length) continue;
+        const all = perBuilding ? list.filter((_, i) => !built[i]) : list;
+        if (!all.length) continue;
+        // Indoor and outdoor copies of one model go in **separate** meshes, because only the indoor
+        // ones want the actor layer and a mesh wears its layers whole. One chair in a cantina used
+        // to put every chair of that model on the street onto the actor layer as well, which outside
+        // a building is drawn over the whole screen with no stencil -- so a chair behind a wall two
+        // streets away was drawn through it.
+        const groupsOf = [all.filter((p) => !p.contained), all.filter((p) => p.contained)].filter((g) => g.length);
+        for (const instanced of groupsOf) {
         const mesh = new THREE.InstancedMesh(prim.geometry, prim.material, instanced.length);
         instanced.forEach((p, i) => {
           tmpM.compose(tmpV.set(p.x, p.y, p.z), p.q, ONE);
           mesh.setMatrixAt(i, tmpM);
         });
         // Objects placed inside buildings draw in every pass, like actors, so they show with the room.
-        if (instanced.some((p) => p.contained)) mesh.layers.enable(ACTOR_LAYER);
+        if (instanced[0].contained) mesh.layers.enable(ACTOR_LAYER);
         mesh.castShadow = model.radius >= SHADOW_MIN_RADIUS && castsShadow(prim.material);
         // A translucent fall or screen draws after the terrain water, which follows the player and
         // so always sorts nearer than this mesh's centre of all its placements.
@@ -856,6 +863,7 @@ export class LayoutStreamer {
         if (this.prepare) mesh.visible = false;
         this.scene.add(mesh);
         meshes.push(mesh);
+        }
       }
     }
     this.loadedModels += byModel.size;

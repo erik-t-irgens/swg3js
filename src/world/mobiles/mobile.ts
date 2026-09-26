@@ -295,6 +295,17 @@ export class Mobile implements Living, NpcSubject {
   /** Where it came from: the leash is measured from here. */
   homeX: number;
   homeZ: number;
+  /**
+   * A body that is part of the furniture: it stands where it was stood and nothing moves it.
+   *
+   * The ticket collector is the first of them and there will be many more -- the shopkeeper behind
+   * a counter, the officer at a terminal, everyone the game had standing at a post. It takes no
+   * damage, never dies, never picks a fight, never flees and never wanders, and it is the whole
+   * brain that is skipped rather than each of its branches: a body that cannot think has no state to
+   * be left in. What it still does is everything that makes it a body and not a statue -- it is
+   * drawn, animated, lit, culled, followed through a building's portals and stood on the floor.
+   */
+  essential = false;
   /** The model's meshes, whose shadow flag the manager sets. */
   meshes: THREE.Mesh[] = [];
   model: THREE.Object3D | null = null;
@@ -1050,6 +1061,9 @@ export class Mobile implements Living, NpcSubject {
 
   damage(amount: number, from?: THREE.Vector3, push = 0, source?: Living | null): void {
     if (this.dead || this.disposed) return;
+    // Essential: the blow lands, is heard and marks, and takes nothing off. Refused here rather than
+    // by giving it a great deal of health, so that nothing anywhere has to know how much is enough.
+    if (this.essential) return;
     // Allies do not hurt each other: a shot or a swing from its own side, from one that would never
     // pick a fight with it, passes it by. Without this a pack firing at the player through its own
     // ring turned on itself and feuded for the rest of the fight. It is asked before the blow is
@@ -1537,8 +1551,10 @@ export class Mobile implements Living, NpcSubject {
     if (this.downPhase === 'lie' && this.now >= this.downUntil) this.getUp();
     // 8. The ground: every frame near, every fourth frame farther out.
     if (tier.name === 'near' || (this.frame + this.key) % 4 === 0) this.checkGround(t);
-    // 9. Think.
-    if (this.now >= this.thinkAt && !this.downPhase) {
+    // 9. Think. One that is essential does not: it stands where it was stood, faces the way it was
+    // faced, and takes no interest in anything. Skipping the whole brain rather than gating each of
+    // its branches is the point -- there is no state it can be left in and nothing to come out of.
+    if (this.now >= this.thinkAt && !this.downPhase && !this.essential) {
       this.think(ctx);
       this.thinkAt = this.now + tier.think * (0.85 + Math.random() * 0.3);
     }

@@ -8,7 +8,7 @@ import type { Mobile } from './mobiles/mobile';
 import { MobileAssets } from './mobiles/assets';
 import { MobileCatalogue } from './mobiles/catalogue';
 import { ambientOverrides } from './mobiles/spawning';
-import { wildlifeWanted } from './spawnSeed.ts';
+import { scratchWanted, wildlifeWanted } from './spawnSeed.ts';
 import { DayCycle } from './daycycle';
 import { SwgSky, type SkyLighting } from './sky';
 import { Weather, type WeatherViewContext, type WeatherWorldContext } from './weather';
@@ -3075,10 +3075,10 @@ export class World {
    * are stood: spawned rather than roaming, with a world name so the hand-spawn cap and the NPC
    * tab's clear both step over it.
    */
-  standMobile(id: string, at: { x: number; z: number; heading?: number }, inside: boolean, worldId: string): Mobile | null {
+  standMobile(id: string, at: { x: number; z: number; heading?: number }, inside: boolean, worldId: string, essential = false): Mobile | null {
     const entry = this.mobileCatalogue?.byId(id);
     if (!entry) return null;
-    const m = this.mobiles?.spawn(entry, at, { origin: 'spawned', inside, worldId });
+    const m = this.mobiles?.spawn(entry, at, { origin: 'spawned', inside, worldId, essential });
     return typeof m === 'string' || !m ? null : m;
   }
 
@@ -3797,12 +3797,19 @@ export class World {
     markActor(this.creatures.group);
     // Turrets are spawned from the NPC tab (B) now, not stood around the arrival point.
     markActor(this.turrets.group);
-    // The loose props: two dozen crates and balls of ours stood in rings round the arrival point,
-    // for a fight to knock about. Here rather than in `loadPack`, because here the ground round the
-    // arrival has already been generated (the `stream` above) and the loading screen's own compile
-    // still follows, so their two programs are built behind it. None is stood in space.
+    // The developer's own two dozen crates and balls in rings round the arrival point, and the
+    // placeholder bike beside them. Both were there to have something to shove about and something
+    // to ride before this game had a garage or a world with anything in it, and both are now
+    // furniture in a game that has its own -- so they are behind one switch, off unless this
+    // browser's storage says otherwise (`localStorage['swg.scratch'] = '1'`, SCRATCH_KEY in
+    // src/world/spawnSeed.ts), exactly as the wildlife is. Read once, here, so an arrival with it
+    // off does no work at all for either.
+    if (!scratchWanted()) return;
+    // Here rather than in `loadPack`, because here the ground round the arrival has already been
+    // generated (the `stream` above) and the loading screen's own compile still follows, so their
+    // programs are built behind it. Neither is stood in space: there is no ground for them, and the
+    // player arrives in a ship.
     loadLooseProps(this, center, (x, z) => this.terrain.heightAt(x, z), !!this.planet.space);
-    // No bike is stood in space: there is no ground for it, and the player arrives in a ship.
     if (this.planet.space) return;
     const sx = center.x + 5;
     const sz = center.z + 4;

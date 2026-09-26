@@ -91,6 +91,35 @@ const rigClipsParsed = new Map<string, THREE.AnimationClip[]>();
 /** The wardrobes' catalogues, one fetch per folder however many characters dress from it. */
 const wardrobes = new Map<string, Promise<(Wardrobe & { skeleton?: string }) | null>>();
 
+/**
+ * The shaders a garment's bare skin wears: the archives' own generic names, which carry no texture
+ * because the client filled each in from whoever was wearing the garment.
+ *
+ * Measured over the whole wardrobe, every textureless material but one is one of exactly three:
+ * `skin_body` (154), `skin_leccu` (13) and `skin_skull` (10). The part is what the name says, and
+ * the wearer's own material for that part is the one whose name ends the same way -- `twk_f_leccu`
+ * for a Twi'lek's head-tails, `hum_m_body` for a human's midriff.
+ */
+const SKIN_SHADER = /(^|\/)skin_([a-z0-9]+)\.sht$/i;
+
+/**
+ * Where a species names a part differently from the garment.
+ *
+ * One entry, and it is read off the packs rather than guessed: a human's head material is
+ * `hum_f_head`, a Twi'lek's is `twk_f_skull`, and a garment asks for `skin_skull` either way.
+ */
+const SKIN_PART_ALSO: Record<string, string[]> = { skull: ['skull', 'head'] };
+
+/** A mesh's material name, taking the first of a multi-material. */
+function materialName(m: THREE.Material | THREE.Material[]): string {
+  return (Array.isArray(m) ? m[0]?.name : m.name) ?? '';
+}
+
+/** Which part of the body a generic skin material is, or null for a material that is not one. */
+function skinPartOf(name: string): string | null {
+  return SKIN_SHADER.exec(name)?.[2]?.toLowerCase() ?? null;
+}
+
 /** How a character is loaded when it is not a player species as the game ships it. */
 export interface CharacterOptions {
   /**
@@ -452,12 +481,71 @@ export class Character {
       meta: { kind: meta.kind ?? (/^hair_/.test(key) ? 'hair' : undefined), template: meta.template },
       head: null,
     });
+    // Bare skin a garment leaves showing takes the wearer's own skin, which is the whole of why a
+    // bikini, a bustier and the Ithorian trousers came out stark white.
+    this.wearSkinOn(meshes);
     // Put on after the character was prepared for first person: worked out now (after markActor
     // above, so the masks it saves carry the actor layer).
     if (this.headPrepared) this.prepareHeadOf(this.parts.get(key)!);
     // A part loaded after a colour changed takes the rendered texture too (once it is registered,
     // so its materials are found), and one that reads a chosen colour is rendered in it.
     this.customizer?.reapply();
+  }
+
+  /**
+   * A garment's bare skin wears the **wearer's** skin, not a blank.
+   *
+   * A bikini's midriff, a bustier's shoulders and the Ithorian trousers' legs are part of the
+   * garment's own mesh, and the client gave those triangles the body shader of whoever was wearing
+   * it -- which is how a Twi'lek's lekku pattern and a character's own tone and tattoos reach a
+   * piece of clothing. The archives name that material generically, `shader/skin_body.sht`, with no
+   * texture of its own; converted as it stands it is a material with no map, which draws as a flat
+   * pale grey and reads as a missing texture. Measured over the wardrobe: 178 materials on 4 species
+   * folders, every single one of them that shader and nothing else.
+   *
+   * So a mesh wearing one is given the wearer's own material for that part outright, the one the
+   * customizer renders the skin into. One material shared rather than a copy, so a change of skin
+   * colour reaches the clothes on the same frame it reaches the body and costs nothing -- and a
+   * Twi'lek's lekku pattern reaches a hat's head-tails the same way.
+   */
+  private wearSkinOn(meshes: THREE.SkinnedMesh[]): void {
+    for (const m of meshes) if (skinPartOf(materialName(m.material))) this.bareSkin.add(m);
+    if (!this.bareSkin.size) return;
+    for (const m of [...this.bareSkin]) {
+      const part = skinPartOf(materialName(m.material));
+      if (!part) {
+        this.bareSkin.delete(m);
+        continue;
+      }
+      const own = this.skinMaterialFor(part);
+      // Not yet: the body is put on after some of what it is worn under, which is the ordinary order
+      // for a species pack's own dress. It waits, and every wait is tried again on the next piece.
+      if (!own) continue;
+      m.material = own;
+      this.bareSkin.delete(m);
+    }
+  }
+
+  /** Worn meshes whose bare skin is waiting for a body to take its colour from. */
+  private readonly bareSkin = new Set<THREE.SkinnedMesh>();
+
+  /**
+   * The wearer's own material for one part of the body: the one whose name ends the same way the
+   * garment's generic one does, and never a generic one itself. Null before that part is on.
+   */
+  private skinMaterialFor(part: string): THREE.Material | null {
+    const names = SKIN_PART_ALSO[part] ?? [part];
+    for (const want of names) {
+      const suffix = new RegExp(`_${want}\\.sht(@|$)`, 'i');
+      for (const p of this.parts.values()) {
+        for (const m of p.meshes) {
+          const name = materialName(m.material);
+          if (skinPartOf(name) || !suffix.test(name)) continue;
+          return Array.isArray(m.material) ? m.material[0] : m.material;
+        }
+      }
+    }
+    return null;
   }
 
   /** First person: read by the split meshes' draw hooks, so it is an object they hold, not a field of this. */

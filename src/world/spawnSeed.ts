@@ -32,6 +32,17 @@ import { sha256, toHex, utf8 } from '../net/hash.ts';
  */
 export const WILDLIFE_KEY = 'swg.wildlife';
 
+/**
+ * The switch that puts the developer's own two dozen crates and balls back round the arrival point,
+ * and the placeholder speeder bike beside them.
+ *
+ * Both were there to have something to shove about and something to ride before there was a garage
+ * or a world with anything in it, and both are now furniture in a game that has its own. They are
+ * off unless this browser's storage holds `'1'` under this key, and kept rather than deleted because
+ * they are still the quickest way to try the physics or the driving on a world with neither.
+ */
+export const SCRATCH_KEY = 'swg.scratch';
+
 /** Where a browser keeps its own small things; a node test hands in its own, a browser gets storage. */
 export interface SwitchStore {
   get(key: string): string | null;
@@ -61,6 +72,18 @@ export function wildlifeWanted(store: SwitchStore = browserSwitches()): boolean 
   } catch {
     // A store that throws is a store with nothing in it. This is read on the way into a world, and
     // the way into a world is not somewhere a storage that has been switched off may throw.
+    return false;
+  }
+}
+
+/**
+ * Whether the developer's own loose crates and the placeholder bike are stood on arrival. Off unless
+ * the switch says otherwise, the same way round and for the same reason as the wildlife's.
+ */
+export function scratchWanted(store: SwitchStore = browserSwitches()): boolean {
+  try {
+    return store.get(SCRATCH_KEY) === '1';
+  } catch {
     return false;
   }
 }

@@ -56,6 +56,12 @@ export interface SpawnOpts {
    * about it across a wire says; a spawn without one is this browser's own business, as before.
    */
   worldId?: string;
+  /**
+   * Part of the furniture: it stands where it is stood, takes no damage and never dies.
+   *
+   * The ticket collector, and everyone else the game had standing at a post. See `Mobile.essential`.
+   */
+  essential?: boolean;
 }
 
 export interface MobileManagerDeps {
@@ -336,6 +342,7 @@ export class MobileManager {
       m.navCell = held.cell;
     }
     this.held.set(m, held);
+    m.essential = !!opts.essential;
     if (opts.worldId) {
       this.byWorldId.set(opts.worldId, m);
       this.worldIds.set(m, opts.worldId);

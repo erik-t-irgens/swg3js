@@ -352,6 +352,14 @@ export class Player {
   private readonly held: { right: THREE.Object3D | null; left: THREE.Object3D | null } = { right: null, left: null };
   /** Where the right hand's thing was taken from, while it is standing in the world instead. */
   private setDown: { parent: THREE.Object3D; index: number } | null = null;
+  /**
+   * Keep the right hand's thing out of sight although it is held.
+   *
+   * The three instruments that are furniture: a nalargon is the height of a man and the two boxes
+   * are cabinets, so carrying one looks like a fault. It is the caller's word rather than a rule
+   * here, because what counts as too big to carry is not something this file can know.
+   */
+  hideRight = false;
   /** A held weapon's reach for the hit sweep: its grip end and its far end, in the model's own frame. */
   private readonly reach: { right: { near: THREE.Object3D; far: THREE.Object3D } | null; left: { near: THREE.Object3D; far: THREE.Object3D } | null } = { right: null, left: null };
   /** Aiming the blaster (right mouse held): the aimed carry, a steadier shot, the camera in closer. */
@@ -1091,7 +1099,7 @@ export class Player {
     p.rifle.visible = this.classId === 'bounty_hunter' && !gunRight && !bare;
     // A thing set down is no longer in the hand and no longer answers to the hand's rules: it is
     // standing in the world, and writing `visible` from here would take it away every frame.
-    if (this.held.right && !this.setDown) this.held.right.visible = (inHand || gunRight) && !bare;
+    if (this.held.right && !this.setDown) this.held.right.visible = (inHand || gunRight) && !bare && !this.hideRight;
     if (this.held.left) this.held.left.visible = !this.orbiting && !bare;
     for (const g of this.orbit) g.visible = this.orbiting;
     this.flying.visible = this.thrown.inFlight;

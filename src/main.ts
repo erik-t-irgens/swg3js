@@ -9638,7 +9638,9 @@ class App {
     if (!this.travelWaiting.length) return;
     const left: typeof this.travelWaiting = [];
     for (const w of this.travelWaiting) {
-      const droid = this.world.standMobile(w.model, { x: w.x, z: w.z, heading: w.yaw }, w.inside, w.key);
+      // Essential: a ticket collector stands at its pad. It does not wander off, cannot be shot and
+      // never dies, which is what a person standing at a post is -- the first of many.
+      const droid = this.world.standMobile(w.model, { x: w.x, z: w.z, heading: w.yaw }, w.inside, w.key, true);
       if (droid) this.travelStood.droids.push({ droid, row: w });
       else {
         this.travelRefused = this.world.mobileNote() ?? 'the ticket collector would not stand';
@@ -10547,6 +10549,7 @@ class App {
   private stepBandClock(): void {
     band.tick();
     if (band.mine) band.moveMine(this.player.worldPos);
+    this.hideCarriedInstrument();
   }
 
   /** Whether the band's row is up. The Start Playing ability opens and closes it. */
@@ -10635,8 +10638,18 @@ class App {
     // Its own foot on the ground under it rather than on the player's: a step, a kerb or a cantina's
     // floor is what it stands on, and aboard a ship or in a room there is no terrain to ask.
     at.y = this.world.groundAt(at.x, p.worldPos.y + 1, at.z, !!p.inside) ?? p.worldPos.y;
-    // Facing the player, which is the way round a cabinet is played from.
-    p.putHeldDown(this.world.scene, at, yaw + Math.PI + FLOOR_TUNE.turn);
+    p.putHeldDown(this.world.scene, at, yaw + FLOOR_TUNE.turn);
+  }
+
+  /**
+   * A floor instrument in hand is not shown until it is played.
+   *
+   * A nalargon is the height of a man and the two boxes are cabinets: carried, they look like a
+   * mistake, and the game never had anybody carry one. So while one is "held" and nothing is being
+   * played it is simply not drawn, and it appears the moment it is set down to play.
+   */
+  private hideCarriedInstrument(): void {
+    this.player.hideRight = standsOnGround(this.player.equipped.right?.id ?? null) && !this.player.heldIsDown;
   }
 
   /**
