@@ -40,6 +40,8 @@ interface PropModel {
   bounds?: { min: number[]; max: number[] } | null;
   triangles?: number;
   appearance?: string;
+  /** A brazier's fire, a fountain's spray, a chimney's smoke: parts of the appearance, placed with it. */
+  effects?: { file: string; id: string; transform?: number[]; cell?: number }[];
 }
 
 interface PropsManifest {
@@ -128,6 +130,9 @@ export class PropCatalogue {
           bounds: d.bounds ?? { min: [0, 0, 0], max: [0, 0, 0] },
           triangles: d.triangles ?? 0,
           ...(d.appearance ? { appearance: d.appearance } : {}),
+          // A prop's own fire, spray or smoke. The streamer places these wherever it stands the
+          // model, by the same lines that serve the snapshot's own braziers.
+          ...(d.effects?.length ? { effects: d.effects } : {}),
         }));
         this.packManifest = { planet: 'props', categories: { layout } };
       } catch (err) {

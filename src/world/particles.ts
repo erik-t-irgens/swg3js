@@ -1171,11 +1171,25 @@ export class ParticleEffects {
   private load(file: string): Promise<EffectDef | null> {
     let p = this.defs.get(file);
     if (!p) {
+      // An effect out of another pack standing behind this world (a prop a player put down brings
+      // its own fire, spray or smoke) names its way out of this pack's folder: `../props/particles/
+      // x.json`. Its textures are written relative to its own pack, so they have to travel with it,
+      // and the way out is exactly the part of the path up to the last climb. A fetch normalises the
+      // `..` itself, so nothing else here needs to know about it.
+      const climb = file.lastIndexOf('../');
+      const out = climb < 0 ? '' : file.slice(0, climb + 3);
       p = fetch(this.baseUrl + file)
         .then(async (r) => {
           if (!r.ok) throw new Error(`${r.status}`);
           const def = (await r.json()) as EffectDef;
-          for (const g of def.groups) for (const e of g.emitters) if (e.particle.quad?.texture.file) this.texture(e.particle.quad.texture.file);
+          for (const g of def.groups) {
+            for (const e of g.emitters) {
+              const tex = e.particle.quad?.texture;
+              if (!tex?.file) continue;
+              if (out) tex.file = out + tex.file;
+              this.texture(tex.file);
+            }
+          }
           return def;
         })
         .catch((err) => {

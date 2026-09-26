@@ -1014,8 +1014,15 @@ function convertParticle(vfs, prtPath, outDir) {
   return entry;
 }
 
-/** Attached effects of a converted model, as the manifest stores them (transforms in the model's unflipped space). */
-function attachedEffects(vfs, effects, outDir) {
+/**
+ * Attached effects of a converted model, as the manifest stores them (transforms in the model's
+ * unflipped space).
+ *
+ * `prefix` is for a pack that is not a world's own: the game loads an effect relative to the pack of
+ * the world it is standing in, so one out of the props pack has to name its way out of that folder
+ * (`../props/`). Everything a world converts leaves it empty and nothing about those changes.
+ */
+function attachedEffects(vfs, effects, outDir, prefix = '') {
   const out = [];
   for (const e of effects ?? []) {
     const p = convertParticle(vfs, e.particle, outDir);
@@ -1023,7 +1030,7 @@ function attachedEffects(vfs, effects, outDir) {
       console.error(`  attached effect ${e.particle} skipped: ${p.failed}`);
       continue;
     }
-    out.push({ file: p.file, id: p.id, ...(e.transform ? { transform: e.transform.map((v) => Math.round(v * 10000) / 10000) } : {}), ...(e.cell !== undefined ? { cell: e.cell } : {}) });
+    out.push({ file: prefix + p.file, id: p.id, ...(e.transform ? { transform: e.transform.map((v) => Math.round(v * 10000) / 10000) } : {}), ...(e.cell !== undefined ? { cell: e.cell } : {}) });
   }
   return out;
 }
@@ -6282,7 +6289,14 @@ switch (cmd) {
               /* a prop with no picture is still a prop */
             }
           }
-          models.set(id, { id, file: `${id}.glb`, bounds, triangles: conv.tris, icon, appearance: source, ...(conv.tris ? {} : { failed: 'no triangles' }) });
+          // A brazier's fire, a fountain's spray, a chimney's smoke, a candle's flame. They are
+          // **parts of the appearance**, not something hung on by a table: a composite appearance
+          // lists its mesh and its `.prt` side by side, which is why the snapshot's own braziers
+          // burn and a prop put down out of this pack did not -- this command simply never asked for
+          // them. The streamer places a model's own effects wherever that model is stood, by the
+          // same two lines that serve the snapshot, so nothing on the game's side had to change.
+          const effects = attachedEffects(vfs, conv.effects, outDir, '../props/');
+          models.set(id, { id, file: `${id}.glb`, bounds, triangles: conv.tris, icon, appearance: source, ...(effects.length ? { effects } : {}), ...(conv.tris ? {} : { failed: 'no triangles' }) });
           converted++;
           if (converted % 250 === 0) console.log(`  ${converted} models so far`);
         } catch (err) {
