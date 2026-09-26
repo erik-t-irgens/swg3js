@@ -796,8 +796,21 @@ export class LayoutStreamer {
         if (this.disposed) return null;
       }
       if (region.tiers[tier] !== 'loading') return null;
-      const loaded = this.instance(objects, models);
+      // Anything a player put down is left out of the bulk build and added one at a time below.
+      //
+      // The bulk build makes **one instanced mesh per model for every copy of it**, and a copy cannot
+      // be taken out of an instanced mesh -- which is the whole reason `addToTier` gives a runtime
+      // placement meshes of its own and keeps a `runtime` record so a removal is exact. An object
+      // placed before its tier had loaded went in with the bulk instead and had no such record, so
+      // `unplace` took nothing out: picking a prop back up left it standing and putting it down again
+      // made a second one. Every prop stood on arrival was in exactly that state, since a world is
+      // arrived in long before its tiers are built.
+      const runtimePlaced = objects.filter((o) => this.placedByKey.get(o.template) === o);
+      const bulk = runtimePlaced.length ? objects.filter((o) => this.placedByKey.get(o.template) !== o) : objects;
+      const loaded = this.instance(bulk, models);
       region.tiers[tier] = loaded;
+      for (const o of runtimePlaced) await this.addToTier(loaded, o);
+      if (region.tiers[tier] !== loaded) return null;
       // A huge object's collision comes with its tier, a few pieces an update, never keyed on the player's distance.
       for (const o of objects) if (this.huge.has(o) && !this.colliders.has(o)) this.queueHuge(o);
       // A region that arrives already under the player's nose needs its interiors now.

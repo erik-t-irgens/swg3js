@@ -426,6 +426,26 @@ interface MeshBatch {
 /** How many instances one mesh batch may draw, so a runaway emitter cannot cost the frame. */
 const MAX_MESH_INSTANCES = 512;
 
+/**
+ * Where an effect's own pack is, relative to the pack these effects are loaded from.
+ *
+ * Every file an effect names -- its quads' textures, the models its mesh particles draw -- is written
+ * relative to the pack the effect was converted into, and the game loads effects relative to the pack
+ * of the world it is standing in. Those are the same folder for a world's own effects and are not for
+ * an effect out of a pack standing behind it: a prop a player put down brings its own fire, and its
+ * effect is named `../props/particles/fx_pt_fountain_garden.json`.
+ *
+ * The prefix is the path up to the last `particles/`, because that is where every pack-relative name
+ * begins. **Not** the path up to the last `../`, which was the first cut of this and is one folder
+ * short: `../props/particles/x.json` gives `../` there, so the effect itself loaded and then every
+ * texture it named 404'd one folder above the pack -- a brazier that burns nothing and a fountain that
+ * sprays nothing, with the effect apparently playing.
+ */
+export function packPrefix(file: string): string {
+  const cut = file.lastIndexOf('particles/');
+  return cut > 0 ? file.slice(0, cut) : '';
+}
+
 /** Farthest first, so alpha quads blend back to front; one function, not a closure a frame. */
 const byDistanceDesc = (x: QueueEntry, y: QueueEntry): number => y.d - x.d;
 
@@ -1001,6 +1021,13 @@ export class ParticleEffects {
   private meshCount = 0;
   private readonly fogColor = new THREE.Color(0.6, 0.6, 0.6);
   private readonly textureErrors = new Set<string>();
+  /**
+   * The models a mesh particle asked for and did not get, so `status` says so rather than only the
+   * console. A mesh emitter whose model never arrives draws nothing at all and looks exactly like an
+   * effect that was never placed, which is a whole evening's difference when the thing in hand is a
+   * ribbon: its quads are written with alpha nought for their whole life and the mesh is all there is.
+   */
+  private readonly meshErrors = new Set<string>();
   private lastCamera: THREE.Camera | null = null;
   private fogDensity = 0;
   private quadCount = 0;
@@ -1083,10 +1110,13 @@ export class ParticleEffects {
           const mats = Array.isArray(m.material) ? m.material : [m.material];
           for (const mat of mats) parts.push({ geometry: g, material: mat });
         });
+        if (!parts.length) this.meshErrors.add(`${file} (no mesh in it)`);
         this.meshModels.set(file, parts.length ? parts : null);
       })
       .catch((err) => {
-        console.warn(`particle mesh ${file} failed to load: ${err instanceof Error ? err.message : String(err)}`);
+        const why = err instanceof Error ? err.message : String(err);
+        console.warn(`particle mesh ${file} failed to load: ${why}`);
+        this.meshErrors.add(`${file} (${why})`);
         this.meshModels.set(file, null);
       });
     return null;
@@ -1167,7 +1197,7 @@ export class ParticleEffects {
   }
 
   get status(): string {
-    return `${this.instances.size} particle effects placed, ${this.activeCount} playing, ${this.children.size} carried by particles${this.childrenSkipped ? ` (${this.childrenSkipped} skipped at the caps)` : ''}, ${this.quadCount} quads in ${this.batches.size} batches${this.meshBatches.size ? `, ${this.meshCount} mesh particles from ${this.meshBatches.size} model(s)` : ''}${this.textureErrors.size ? `, ${this.textureErrors.size} textures failed to load: ${[...this.textureErrors].join(', ')}` : ''}`;
+    return `${this.instances.size} particle effects placed, ${this.activeCount} playing, ${this.children.size} carried by particles${this.childrenSkipped ? ` (${this.childrenSkipped} skipped at the caps)` : ''}, ${this.quadCount} quads in ${this.batches.size} batches${this.meshBatches.size ? `, ${this.meshCount} mesh particles from ${this.meshBatches.size} model(s)` : ''}${this.textureErrors.size ? `, ${this.textureErrors.size} textures failed to load: ${[...this.textureErrors].join(', ')}` : ''}${this.meshErrors.size ? `, ${this.meshErrors.size} particle models failed to load: ${[...this.meshErrors].join(', ')}` : ''}`;
   }
 
   /**
@@ -1294,25 +1324,25 @@ export class ParticleEffects {
   private load(file: string): Promise<EffectDef | null> {
     let p = this.defs.get(file);
     if (!p) {
-      // An effect out of another pack standing behind this world (a prop a player put down brings
-      // its own fire, spray or smoke) names its way out of this pack's folder: `../props/particles/
-      // x.json`. Its textures are written relative to its own pack, so they have to travel with it,
-      // and the way out is exactly the part of the path up to the last climb. A fetch normalises the
-      // `..` itself, so nothing else here needs to know about it.
-      const climb = file.lastIndexOf('../');
-      const out = climb < 0 ? '' : file.slice(0, climb + 3);
+      const out = packPrefix(file);
       p = fetch(this.baseUrl + file)
         .then(async (r) => {
           if (!r.ok) throw new Error(`${r.status}`);
           const def = (await r.json()) as EffectDef;
-          for (const g of def.groups) {
-            for (const e of g.emitters) {
-              const tex = e.particle.quad?.texture;
-              if (!tex?.file) continue;
-              if (out) tex.file = out + tex.file;
-              this.texture(tex.file);
+          // Everything the effect names is relative to **its own** pack, so where that is not this
+          // world's pack the prefix travels with each of them: its quads' textures and the models its
+          // mesh particles draw alike.
+          if (out) {
+            for (const g of def.groups) {
+              for (const e of g.emitters) {
+                const tex = e.particle.quad?.texture;
+                if (tex?.file) tex.file = out + tex.file;
+                const mesh = e.particle.mesh;
+                if (mesh?.file) mesh.file = out + mesh.file;
+              }
             }
           }
+          for (const g of def.groups) for (const e of g.emitters) if (e.particle.quad?.texture.file) this.texture(e.particle.quad.texture.file);
           return def;
         })
         .catch((err) => {
@@ -1776,6 +1806,7 @@ export class ParticleEffects {
     }
     this.meshBatches.clear();
     this.meshModels.clear();
+    this.meshErrors.clear();
     for (const t of this.textures.values()) t.dispose();
     this.textures.clear();
     this.white.dispose();

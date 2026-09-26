@@ -105,6 +105,10 @@ import { BandBar } from './ui/bandBar.ts';
 import { TRAVEL_PACK_VERSION, TRAVEL_TUNE, addTicket, canBoard, collectorWords, pickTicket, shuttleAt, shuttleWords, thingAt, ticketText, travelThingsOf, type ShuttleState, type Ticket, type TravelRow, type TravelThing } from './world/travelTerminal.ts';
 import { FITTINGS_PACK_VERSION, fittingTally, fittingsOf, type FittingRow } from './world/fittings.ts';
 import type { EffectHandle } from './world/particles.ts';
+// How wet the world is, and which of our own injections a material is wearing: two numbers the
+// console's shine report needs, since how shiny a surface looks is partly the weather's.
+import { WEATHER_UNIFORMS } from './world/wetness.ts';
+import { wrapsOn } from './world/compileHooks.ts';
 
 /** One ticket collector waiting to be stood, or standing and able to be stood again if it goes. */
 interface TravelWait {
@@ -1309,11 +1313,15 @@ class App {
     void this.props.load().then(() => {
       if (this.propsUi.open) this.propsUi.attach(this.props);
     });
+    // The bar serves whichever of the two is in hand. Its turn and lift buttons always did, because
+    // those go through one method each; its Place and Cancel spoke only to the building, so a prop in
+    // hand could be neither put down nor given up from the bar -- and giving one up is the only way
+    // out of a prop picked back up, so it had to be placed again wherever the ghost happened to be.
     this.placingBar = new PlacingBar(this.ui);
     this.placingBar.onTurn = (n) => this.turnPlacing(n);
     this.placingBar.onLift = (n) => this.liftPlacing(n);
-    this.placingBar.onPlace = () => void this.dropPlacing();
-    this.placingBar.onCancel = () => this.stopPlacing();
+    this.placingBar.onPlace = () => void (this.propPlacing ? this.dropPlacingProp() : this.dropPlacing());
+    this.placingBar.onCancel = () => (this.propPlacing ? this.stopPlacingProp() : this.stopPlacing());
     // The band: an instrument in hand plays its own track of a song, and everybody in earshot is
     // heard on theirs. There is no world music in this game and none is wanted.
     this.bandBar = new BandBar(this.ui);
@@ -1807,6 +1815,75 @@ class App {
           standing: mine.length,
           tune: { ...PROP_TUNE },
         };
+      },
+      /**
+       * How shiny the things the player is wearing and holding really are, in numbers.
+       *
+       * "Too reflective" cannot be judged from here and cannot be traced from the packs alone: a
+       * material's shine is its metalness, its roughness, whether it has a metalness map at all and
+       * what environment the world has given it, and only the live material has all four. `match`
+       * narrows it to materials whose name holds that text (`__debug.shine('pants')`).
+       */
+      shine: (match?: string) => {
+        const want = (match ?? '').toLowerCase();
+        const rows: Record<string, unknown>[] = [];
+        const seen = new Set<THREE.Material>();
+        const look = (root: THREE.Object3D | null | undefined, where: string) => {
+          root?.traverse((o) => {
+            const mesh = o as THREE.Mesh;
+            if (!mesh.isMesh) return;
+            for (const m of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) {
+              if (!m || seen.has(m)) continue;
+              seen.add(m);
+              if (want && !m.name.toLowerCase().includes(want)) continue;
+              const s = m as THREE.MeshStandardMaterial;
+              rows.push({
+                where,
+                name: m.name || '(unnamed)',
+                metalness: s.isMeshStandardMaterial ? Number(s.metalness.toFixed(3)) : null,
+                roughness: s.isMeshStandardMaterial ? Number(s.roughness.toFixed(3)) : null,
+                metalnessMap: !!s.metalnessMap,
+                roughnessMap: !!s.roughnessMap,
+                envMap: !!s.envMap,
+                envMapIntensity: s.isMeshStandardMaterial ? Number((s.envMapIntensity ?? 1).toFixed(3)) : null,
+                // What `isReflective` in envmap.ts asks, which is what decides whether it gets one.
+                countsReflective: !!s.isMeshStandardMaterial && (s.metalnessMap !== null || s.metalness > 0.05 || s.roughness < 0.5),
+                wraps: wrapsOn(m as unknown as Parameters<typeof wrapsOn>[0]).join(',') || 'none',
+                detail: (m.userData.swgDetail as string | undefined) ?? null,
+              });
+            }
+          });
+        };
+        look(this.player.rig?.root, 'worn');
+        for (const hand of ['right', 'left'] as const) look(this.player.heldNode(hand), `held ${hand}`);
+        return { materials: rows.length, wetness: Number(WEATHER_UNIFORMS.uWetness.value.toFixed(3)), rows: rows.sort((a, b) => Number(b.countsReflective) - Number(a.countsReflective)).slice(0, 30) };
+      },
+      /**
+       * The dancer's props: what is in each hand, the effect it names, and whether that effect is
+       * really playing and drawing anything.
+       *
+       * Their sticks and ribbons are mesh particles, and a mesh particle has four places to fall over
+       * -- the prop names no effect, the effect does not load, the effect names no model, or the model
+       * does not load -- so all four are reported rather than guessed at one at a time.
+       */
+      heldFx: () => {
+        const fxs = this.world.weaponFx;
+        const hands = (['right', 'left'] as const).map((hand) => {
+          const def = this.player.equipped[hand];
+          const held = this.heldProps[hand];
+          return {
+            hand,
+            item: def?.id ?? null,
+            class: def?.class ?? null,
+            model: def?.file ?? null,
+            effect: def?.effect ?? null,
+            node: !!this.player.heldNode(hand),
+            placed: !!held,
+            playing: held ? fxs.playing(held.fx) : false,
+            particles: held ? fxs.particlesOf(held.fx) : 0,
+          };
+        });
+        return { hands, fx: fxs.status };
       },
       /**
        * What this character has to spend: a number on the character and not a thing in the backpack.
@@ -10622,8 +10699,15 @@ class App {
   // refused only for the owner's two -- buried under the world, or swallowed by a wall. See
   // `propPlace.ts`.
 
-  /** A prop in hand: which one, how far ahead, how it is turned, how far it has been lifted. */
-  private propPlacing: { def: PropDef; reach: number; turn: PropTurn; lift: number; ok: boolean; why: string | null } | null = null;
+  /**
+   * A prop in hand: which one, how far ahead, how it is turned, how far it has been lifted.
+   *
+   * `from` is the row it was **picked back up** from, when it was. Giving up a prop taken out of the
+   * world would otherwise throw it away, since picking one up takes it off the world and out of the
+   * store in the same breath: with the row kept, Escape puts it back exactly where it stood, which is
+   * what anybody pressing Escape means.
+   */
+  private propPlacing: { def: PropDef; reach: number; turn: PropTurn; lift: number; ok: boolean; why: string | null; from: PlacedProp | null } | null = null;
 
   /** Whether a prop is in hand, which takes the wheel and the click exactly as a building does. */
   get isPlacingProp(): boolean {
@@ -10655,20 +10739,32 @@ class App {
     this.closePanelsForPlacing();
     this.ghost.hold(model);
     if (!this.ghost.group.parent) this.world.scene.add(this.ghost.group);
-    this.propPlacing = { def, reach: PROP_TUNE.reach, turn: { ...NO_TURN }, lift: 0, ok: true, why: null };
+    this.propPlacing = { def, reach: PROP_TUNE.reach, turn: { ...NO_TURN }, lift: 0, ok: true, why: null, from: null };
     const k = this.placeKeys();
     this.placingBar.show(def.name || def.id, true, 'move it where you want it', k, 0);
     this.messages.system(`placing ${def.name || def.id}: the wheel moves it, ${k.left} and ${k.right} turn it, ${k.up} and ${k.down} raise and lower it, shift with a turn key tips it, a click puts it down`);
     return null;
   }
 
-  /** Put a prop down out of hand without placing it. */
+  /**
+   * Give up a prop in hand.
+   *
+   * One that was **picked back up** goes back where it stood: taking one up removes it from the world
+   * and from the store at once, so giving up without putting it back would throw a player's own thing
+   * away on a press of Escape. One taken fresh from the Props tab has nothing to go back to.
+   */
   private stopPlacingProp(): void {
-    if (!this.propPlacing) return;
+    const p = this.propPlacing;
+    if (!p) return;
     const mine = this.ghost.release();
     if (mine.length) this.world.forgetMaterials(mine);
     this.propPlacing = null;
     this.placingBar.hide();
+    if (!p.from) return;
+    const back = p.from;
+    void placedProps
+      .put(back.id, { x: back.x, y: back.y, z: back.z }, back.q, !!back.inside, this.placedDeps(), (world, rows) => this.savePlaced(world, rows))
+      .then((row) => this.messages.system(row ? `${p.def.name || p.def.id} put back where it was` : (placedProps.note ?? 'it could not be put back')));
   }
 
   /**
@@ -10835,11 +10931,15 @@ class App {
     const def = this.props.find(row.id);
     placedProps.take(row.thing, this.placedDeps(), (world, rows) => this.savePlaced(world, rows));
     this.messages.system(`${def?.name || row.id} picked up`);
-    // Back in hand, turned as it stood, so a nudge is one press and a click puts it back.
+    // Back in hand, turned as it stood, so a nudge is one press and a click puts it back. The row it
+    // came from is kept with it, so giving up returns it rather than losing it.
     if (!def) return;
     void this.startPlacingProp(def.id).then((why) => {
       if (why) this.messages.system(why);
-      else if (this.propPlacing) this.propPlacing.turn = { x: row.q[0], y: row.q[1], z: row.q[2], w: row.q[3] };
+      else if (this.propPlacing) {
+        this.propPlacing.turn = { x: row.q[0], y: row.q[1], z: row.q[2], w: row.q[3] };
+        this.propPlacing.from = row;
+      }
     });
   }
 
