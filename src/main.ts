@@ -120,10 +120,14 @@ import { SHIP_TERMINAL_TEMPLATES, SHIP_TERMINAL_TUNE, SHIP_TRIP_ORBIT, shipTrips
 import type { PlacedObject } from './world/layoutStream';
 import { TerminalUi, type TerminalPort, type TerminalShipTrip } from './ui/terminalUi.ts';
 import { allDeeds, deedById, deedLine, footprintOf, loadDeeds, wrongWorld, type DeedRow } from './world/deeds.ts';
-import { GHOST_TUNE, PlacementGhost, ghostSpot, ghostVerdict, liftBy, turnBy, wheelReach, type GhostState } from './world/placeGhost.ts';
+import { GHOST_TUNE, PlacementGhost, ghostSpot, ghostVerdict, liftBy, turnBy as houseTurnBy, wheelReach, type GhostState } from './world/placeGhost.ts';
 import { patchOfFootprint } from './world/housePlace.ts';
 import { PlacingBar } from './ui/placingBar.ts';
 import { HousingUi } from './ui/housingUi.ts';
+import { PropsUi } from './ui/propsUi.ts';
+import { PropCatalogue, type PropDef } from './world/propCatalogue.ts';
+import { PROP_TUNE, NO_TURN, liftBy as propLiftBy, propSpot, propVerdict, pushBy, turnBy, type PropTurn } from './world/propPlace.ts';
+import { placedProps, propsKey, type PlacedDeps, type PlacedProp } from './world/propsPlaced.ts';
 import { LAIR_TUNE } from './world/mobiles/lairs.ts';
 import { CLOUD_MARCH, type CloudsPass } from './core/fx/clouds';
 import { CLOUD_TUNE, cloudLook, loadCloudPack, loadCloudVolumes, worthDrawing, type CloudPack } from './world/cloudLook.ts';
@@ -287,7 +291,7 @@ function mountPrompt(v: import('./vehicles/vehicle').Vehicle, wingsKey: string =
 }
 
 const MOUNT_RANGE = 3.6;
-type InventoryTab = 'backpack' | 'housing' | 'wardrobe' | 'appearance' | 'weapons' | 'force';
+type InventoryTab = 'backpack' | 'housing' | 'props' | 'wardrobe' | 'appearance' | 'weapons' | 'force';
 /**
  * What `__debug.send` takes beside a destination: which body walks, the walk whose rows to print,
  * calling the orders off, and the account's own invented numbers. It may be given as the first
@@ -533,6 +537,9 @@ class App {
   private loadedCatalogue: HyperspaceCatalogue | null = null;
   private readonly liftMenu: LiftMenu;
   private readonly housingUi: HousingUi;
+  /** Every prop in the game, and the tab that lists them. */
+  private readonly propsUi: PropsUi;
+  private readonly props: PropCatalogue;
   private readonly placingBar: PlacingBar;
   private readonly bandBar: BandBar;
   /** Which song the instrument in hand is set to, and whether the bar has ever been shown. */
@@ -1290,6 +1297,18 @@ class App {
       });
     };
     this.housingUi.onRemove = () => this.messages.system('take one down from the world itself, not from here');
+    // The props: every one in the game, listed and put down by the same hand a building is.
+    this.props = new PropCatalogue(import.meta.env.BASE_URL);
+    this.propsUi = new PropsUi(this.ui);
+    this.propsUi.onTab = (id) => this.toggleInventory(id as InventoryTab);
+    this.propsUi.onPlace = (id) => {
+      void this.startPlacingProp(id).then((why) => {
+        if (why) this.messages.system(why);
+      });
+    };
+    void this.props.load().then(() => {
+      if (this.propsUi.open) this.propsUi.attach(this.props);
+    });
     this.placingBar = new PlacingBar(this.ui);
     this.placingBar.onTurn = (n) => this.turnPlacing(n);
     this.placingBar.onLift = (n) => this.liftPlacing(n);
@@ -1710,6 +1729,77 @@ class App {
           foot: p.deed.foot ? `${p.deed.foot.w}x${p.deed.foot.h} cells of ${p.deed.foot.cw} m` : null,
           lots: p.deed.lots,
           tune: { ...GHOST_TUNE },
+        };
+      },
+      /**
+       * A prop in hand, and the props this world has standing.
+       *
+       * `__debug.prop()` reports what is in hand, what it would do where it is, and everything this
+       * player has put down here. `__debug.prop('chair_s01')` takes one in hand (and loads the
+       * catalogue if this session has not opened the panel); `{ turn: 3 }` presses the turn key
+       * three times, `{ axis: 'x' }` picks which way, `{ lift: -4 }` lowers it four presses,
+       * `{ reach: 5 }` holds it five metres out, `{ drop: true }` puts it down, `{ take: true }`
+       * picks the nearest one of yours back up, `{ cancel: true }` gives it up and
+       * `{ tune: { … } }` moves the numbers, every one of which is ours.
+       *
+       * `find` searches the catalogue by name or id, which is the only way to learn an id from a
+       * driven tab: the panel's list cannot be read from here.
+       */
+      prop: async (id?: string, opts: { turn?: number; axis?: 'x' | 'y' | 'z'; lift?: number; reach?: number; drop?: boolean; take?: boolean; cancel?: boolean; find?: string; tune?: Partial<typeof PROP_TUNE> } = {}) => {
+        if (opts.tune) Object.assign(PROP_TUNE, opts.tune);
+        if (opts.cancel) {
+          this.stopPlacingProp();
+          return { placing: null };
+        }
+        if (!this.props.loaded) await this.props.load();
+        if (opts.find !== undefined) {
+          const q = opts.find.toLowerCase();
+          const hits = this.props.all.filter((p) => p.id.includes(q) || (p.name ?? '').toLowerCase().includes(q));
+          return { found: hits.length, first: hits.slice(0, 40).map((p) => ({ id: p.id, name: p.name ?? null, group: p.group, size: p.size })) };
+        }
+        if (opts.take) {
+          this.takeNearestProp();
+          return { standing: placedProps.all.length };
+        }
+        if (id) {
+          const why = await this.startPlacingProp(id);
+          if (why) return { error: why, note: this.props.note || undefined };
+        }
+        if (typeof opts.reach === 'number' && this.propPlacing) this.propPlacing.reach = opts.reach;
+        if (typeof opts.turn === 'number') this.turnPlacing(opts.turn, opts.axis ?? 'y');
+        if (typeof opts.lift === 'number') this.liftPlacing(opts.lift);
+        if (this.propPlacing) this.stepPlacingProp();
+        if (opts.drop) {
+          const was = this.propPlacing;
+          await this.dropPlacingProp();
+          return { dropped: !!was?.ok, why: was?.why ?? placedProps.note ?? null, standing: placedProps.all.length };
+        }
+        const p = this.propPlacing;
+        const mine = placedProps.all.map((r) => ({ thing: r.thing, id: r.id, at: [Math.round(r.x), Number(r.y.toFixed(1)), Math.round(r.z)], inside: !!r.inside }));
+        if (!p) {
+          return {
+            placing: null,
+            catalogue: this.props.all.length,
+            groups: this.props.groups().length,
+            note: this.props.all.length ? "pass an id to take one in hand; { find: 'chair' } searches" : this.props.note || 'no props pack',
+            standing: mine.length,
+            mine: mine.slice(0, 40),
+            tune: { ...PROP_TUNE },
+          };
+        }
+        return {
+          placing: p.def.id,
+          name: p.def.name ?? null,
+          size: p.def.size,
+          reach: Number(p.reach.toFixed(2)),
+          lift: Number(p.lift.toFixed(2)),
+          turn: { x: Number(p.turn.x.toFixed(3)), y: Number(p.turn.y.toFixed(3)), z: Number(p.turn.z.toFixed(3)), w: Number(p.turn.w.toFixed(3)) },
+          at: { x: Number(this.ghost.group.position.x.toFixed(2)), y: Number(this.ghost.group.position.y.toFixed(2)), z: Number(this.ghost.group.position.z.toFixed(2)) },
+          ok: p.ok,
+          why: p.why,
+          keys: this.placeKeys(),
+          standing: mine.length,
+          tune: { ...PROP_TUNE },
         };
       },
       /**
@@ -6055,9 +6145,13 @@ class App {
       // A held Escape autorepeats, and every other keydown listener in the game already says so.
       if (e.repeat) return;
       if (e.code !== 'Escape' || !this.inWorld || !this.started || this.traveling) return;
-      // A building in hand is given up before anything else: it is the thing on the screen.
+      // A building or a prop in hand is given up before anything else: it is the thing on the screen.
       if (this.isPlacing && !this.menu.open) {
         this.stopPlacing();
+        return;
+      }
+      if (this.isPlacingProp && !this.menu.open) {
+        this.stopPlacingProp();
         return;
       }
       // The Escape that dropped the lock (and so opened the menu) must not close it again in the same breath.
@@ -7861,6 +7955,8 @@ class App {
       // server stood on its other buildings.
       void this.loadTravel(packIdOf(planet, this.zone));
       void this.loadFittings(packIdOf(planet, this.zone));
+      // And whatever this player has put down here themselves, which is kept per world.
+      void this.enterPlaced(packIdOf(planet, this.zone));
       // What this character has to spend: asked for on arriving, so the shuttle panel has a number
       // to show rather than a blank the first time it is opened.
       purse.ask();
@@ -7896,6 +7992,10 @@ class App {
     this.traveling = true;
     this.map.hide();
     this.closePanels();
+    // Whatever was in hand is given up before the world under it goes: a ghost holds borrowed
+    // meshes out of a pack this world owns, and a prop's pack is let go on the far side.
+    this.stopPlacing();
+    this.stopPlacingProp();
     this.input.captured = false;
     const zone = planet.zones?.find((z) => z.id === zoneId);
     console.info(`travel: to ${planet.name}${zone ? ` (${zone.name})` : ''}${ship ? ` flying the ${ship.def.id}${ship.crew ? ` from its rooms${ship.crew.piloting ? ' at the controls' : ''}` : ''}` : ''}`);
@@ -8447,13 +8547,15 @@ class App {
     // A building in hand takes the wheel before the camera does: while it is out the wheel pushes
     // the ghost away and pulls it back, which is the one thing the wheel does that is not a zoom.
     // The camera zeroes what it reads, so this has to be first or the two would fight over it.
-    if (this.placing && input.wheel) {
+    if ((this.placing || this.propPlacing) && input.wheel) {
       this.wheelPlacing(-input.wheel);
       input.wheel = 0;
     }
     // The ghost of a building being put down: where it stands and whether it may, worked out after
-    // the camera so it reads the heading this very frame.
+    // the camera so it reads the heading this very frame. A prop in hand is the same thing with its
+    // own rules, and only ever one of the two is out.
     if (this.placing) this.stepPlacing();
+    else if (this.propPlacing) this.stepPlacingProp();
     // An instrument in hand: its own row under the world, and its part kept at the player's place.
     this.stepBand();
     // Mounted or piloted, a ship out of the cockpit and the chase is always drawn.
@@ -9752,6 +9854,31 @@ class App {
   }
 
   /**
+   * Stand whatever this player has put down in the world they have just come to.
+   *
+   * The catalogue is asked for first, because a row names a prop and only the catalogue knows which
+   * model that is; on a machine that has never opened the Props tab this is the one place it loads.
+   * Deliberately not awaited, like the fittings: an arrival waits on nothing a player put there.
+   */
+  private async enterPlaced(pack: string): Promise<void> {
+    placedProps.leave();
+    // The last world's copy of the props pack goes with the last world: its materials joined that
+    // world's cascades and the portal renderer's set, and nothing but a dispose takes them out.
+    this.props.release();
+    // Nothing kept here: the catalogue is a few megabytes and is not fetched to stand nothing.
+    if (!this.placedStore().get(propsKey(pack))) return;
+    if (!this.props.loaded) {
+      try {
+        await this.props.load();
+      } catch {
+        return;
+      }
+    }
+    if (packIdOf(this.world.planet, this.zone) !== pack) return;
+    await placedProps.enter(pack, this.placedStore(), this.placedDeps());
+  }
+
+  /**
    * The travel terminal or ticket collector the player is standing at, or null.
    *
    * A terminal stands **in a room**, so what is asked for is the room the streamer already tracks
@@ -10473,18 +10600,120 @@ class App {
     this.placingBar.show(p.deed.name, state.ok, state.why, this.placeKeys(), state.lift);
   }
 
+  // ---------------------------------------------------------------------------------------------
+  // A prop in hand.
+  //
+  // The same hand as a building's and deliberately not the same rules. A building is judged on the
+  // ground it would sit on and refused; a prop may go indoors, on a shelf, upside down, and is
+  // refused only for the owner's two -- buried under the world, or swallowed by a wall. See
+  // `propPlace.ts`.
+
+  /** A prop in hand: which one, how far ahead, how it is turned, how far it has been lifted. */
+  private propPlacing: { def: PropDef; reach: number; turn: PropTurn; lift: number; ok: boolean; why: string | null } | null = null;
+
+  /** Whether a prop is in hand, which takes the wheel and the click exactly as a building does. */
+  get isPlacingProp(): boolean {
+    return !!this.propPlacing;
+  }
+
+  /** The Props tab, with the catalogue attached if it has landed. */
+  private showProps(): void {
+    this.propsUi.held = this.propPlacing?.def.id ?? null;
+    this.propsUi.show();
+    this.propsUi.attach(this.props.loaded ? this.props : null);
+    if (!this.props.loaded) void this.props.load().then(() => this.propsUi.open && this.propsUi.attach(this.props));
+  }
+
+  /** Take a prop in hand. Answers why not, or null. */
+  private async startPlacingProp(id: string): Promise<string | null> {
+    const def = this.props.find(id);
+    if (!def) return 'there is no such prop';
+    if (this.player.mounted || this.player.piloting || this.player.noclip) return 'not while you are riding or piloting';
+    let model: THREE.Object3D;
+    try {
+      model = await this.props.model(def);
+    } catch (err) {
+      return `${def.model} would not load: ${err instanceof Error ? err.message : String(err)}`;
+    }
+    await this.world.prepareActor(model);
+    this.stopPlacing();
+    this.stopPlacingProp();
+    this.closePanels();
+    this.ghost.hold(model);
+    if (!this.ghost.group.parent) this.world.scene.add(this.ghost.group);
+    this.propPlacing = { def, reach: PROP_TUNE.reach, turn: { ...NO_TURN }, lift: 0, ok: true, why: null };
+    const k = this.placeKeys();
+    this.placingBar.show(def.name || def.id, true, 'move it where you want it', k, 0);
+    this.messages.system(`placing ${def.name || def.id}: the wheel moves it, ${k.left} and ${k.right} turn it, ${k.up} and ${k.down} raise and lower it, shift with a turn key tips it, a click puts it down`);
+    return null;
+  }
+
+  /** Put a prop down out of hand without placing it. */
+  private stopPlacingProp(): void {
+    if (!this.propPlacing) return;
+    const mine = this.ghost.release();
+    if (mine.length) this.world.forgetMaterials(mine);
+    this.propPlacing = null;
+    this.placingBar.hide();
+  }
+
+  /**
+   * One frame of a prop in hand: where it would stand and whether it may.
+   *
+   * The floor under a point is the room's indoors and the terrain outdoors, which is `groundAt`'s
+   * own rule, and whether a point is inside something is one short query of the world. Both are the
+   * game's to answer; the judging is `propVerdict`'s.
+   */
+  private stepPlacingProp(): void {
+    const p = this.propPlacing;
+    if (!p) return;
+    const me = this.player.worldPos;
+    const inside = !!this.player.inside;
+    const spot = propSpot({ x: me.x, y: me.y, z: me.z }, this.player.heading, p.reach);
+    // The thing sits on whatever is under the spot, plus however far the player has lifted it.
+    const floor = this.world.groundAt(spot.x, me.y + 1.6, spot.z, inside);
+    const at = { x: spot.x, y: (floor ?? me.y) + p.lift, z: spot.z };
+    const v = propVerdict(p.def.bounds, at, p.turn, {
+      floorAt: (x, y, z) => this.world.groundAt(x, y + 0.5, z, inside),
+      solidAt: (x, y, z) => this.world.solidAt(x, y, z),
+    });
+    p.ok = v.ok;
+    p.why = v.why;
+    this.ghost.placeProp(at, p.turn, v.ok);
+    this.placingBar.show(p.def.name || p.def.id, v.ok, v.why, this.placeKeys(), p.lift);
+  }
+
   /** The wheel while placing: push the ghost out or pull it in. */
   private wheelPlacing(notches: number): void {
+    if (this.propPlacing) {
+      this.propPlacing.reach = pushBy(this.propPlacing.reach, notches);
+      return;
+    }
     if (this.placing) this.placing.reach = wheelReach(this.placing.reach, notches);
   }
 
-  /** A turn key, or a turn button on the bar. */
-  private turnPlacing(presses: number): void {
-    if (this.placing) this.placing.yaw = turnBy(this.placing.yaw, presses);
+  /**
+   * A turn key, or a turn button on the bar.
+   *
+   * A building spins about the world's up and nothing else, which is all a building can do. A prop
+   * turns about all three: the plain key about up, shift about the axis across the player's view and
+   * control about the one along it, so "tip it away from me" and "roll it" are each one key.
+   */
+  private turnPlacing(presses: number, axis: 'x' | 'y' | 'z' = 'y'): void {
+    const p = this.propPlacing;
+    if (p) {
+      p.turn = turnBy(p.turn, axis, (presses * PROP_TUNE.turn * Math.PI) / 180);
+      return;
+    }
+    if (this.placing) this.placing.yaw = houseTurnBy(this.placing.yaw, presses);
   }
 
   /** A height key, or a height button on the bar: the nudge for a doorstep the ground laps over. */
   private liftPlacing(presses: number): void {
+    if (this.propPlacing) {
+      this.propPlacing.lift = propLiftBy(this.propPlacing.lift, presses);
+      return;
+    }
     if (this.placing) this.placing.lift = liftBy(this.placing.lift, presses);
   }
 
@@ -10506,6 +10735,98 @@ class App {
       this.lastHouse = { x: out.x, z: out.z, key: out.key };
       this.messages.system(`${deed.name} stands`);
     } else this.messages.system(out.why ?? 'it would not go there');
+  }
+
+  /**
+   * Put a prop down where the ghost has it, and keep it.
+   *
+   * The thing stands through the streamer exactly as a fitting and a travel terminal do -- instanced,
+   * compiled before it shows, lit, shadowed and solid -- and the row goes into this browser's own
+   * storage for this world, so it is there next time. With a server it would be the server's row;
+   * that half is not wired yet and this file is written so it is the same rows sent.
+   */
+  private async dropPlacingProp(): Promise<void> {
+    const p = this.propPlacing;
+    if (!p) return;
+    if (!p.ok) {
+      this.messages.system(p.why ?? 'it will not go there');
+      return;
+    }
+    const at = { x: this.ghost.group.position.x, y: this.ghost.group.position.y, z: this.ghost.group.position.z };
+    const q: [number, number, number, number] = [p.turn.x, p.turn.y, p.turn.z, p.turn.w];
+    const name = p.def.name || p.def.id;
+    const id = p.def.id;
+    const inside = !!this.player.inside;
+    this.stopPlacingProp();
+    const row = await placedProps.put(id, at, q, inside, this.placedDeps(), (world, rows) => this.savePlaced(world, rows));
+    this.messages.system(row ? `${name} is down` : (placedProps.note ?? 'it would not go there'));
+  }
+
+  /** How a placed prop is stood and taken down: the streamer's own placement, keyed on the thing. */
+  private placedDeps(): PlacedDeps {
+    return {
+      stand: async (row) => {
+        const def = this.props.find(row.id);
+        if (!def) return false;
+        return this.world.placeProp(def.model, { key: `prop:${row.thing}`, at: { x: row.x, y: row.y, z: row.z }, yaw: 0, turn: row.q, pack: this.props.pack, inside: !!row.inside, solid: true });
+      },
+      clear: (thing) => {
+        this.world.unplaceBuilding(`prop:${thing}`);
+      },
+    };
+  }
+
+  /** Where this browser keeps what it has put down. One key a world. */
+  private savePlaced(world: string, rows: readonly PlacedProp[]): void {
+    try {
+      localStorage.setItem(propsKey(world), JSON.stringify(rows));
+    } catch {
+      /* a browser with no storage keeps them for the session, which is what it can do */
+    }
+  }
+
+  /** The browser's own small store, or nothing at all (a private window, cleared data). */
+  private placedStore(): { get(key: string): string | null } {
+    return {
+      get: (key) => {
+        try {
+          return localStorage.getItem(key);
+        } catch {
+          return null;
+        }
+      },
+    };
+  }
+
+  /**
+   * Take the nearest prop you have put down back up, and hold it again.
+   *
+   * This is the whole of the "edit mode" the owner asked for, and it is one key rather than a mode:
+   * a thing picked up is off the world and out of the store at once and is back in your hands as a
+   * ghost, so moving it is putting it down again and throwing it away is Escape. There is no state
+   * to be in and nothing to turn off, which is the one thing a mode would have brought with it.
+   *
+   * It does **not** go into the backpack. The backpack is the item ledger, keyed on catalogue ids
+   * with a count, and a prop is a thing with an identity of its own; dropping one in there would be
+   * the very duplication that file exists to prevent. Holding it is the honest answer until the
+   * ledger keeps things rather than kinds.
+   */
+  private takeNearestProp(): void {
+    const me = this.player.worldPos;
+    const row = placedProps.nearest({ x: me.x, y: me.y, z: me.z }, PROP_TUNE.far);
+    if (!row) {
+      this.messages.system('nothing of yours is standing near enough to pick up');
+      return;
+    }
+    const def = this.props.find(row.id);
+    placedProps.take(row.thing, this.placedDeps(), (world, rows) => this.savePlaced(world, rows));
+    this.messages.system(`${def?.name || row.id} picked up`);
+    // Back in hand, turned as it stood, so a nudge is one press and a click puts it back.
+    if (!def) return;
+    void this.startPlacingProp(def.id).then((why) => {
+      if (why) this.messages.system(why);
+      else if (this.propPlacing) this.propPlacing.turn = { x: row.q[0], y: row.q[1], z: row.q[2], w: row.q[3] };
+    });
   }
 
   // ---- The band: an instrument in hand, its own track of a song, and everybody else's. ----
@@ -11601,7 +11922,7 @@ class App {
       return;
     }
     const want = tab ?? this.inventoryTab;
-    const wasOpen = tab === undefined && (this.backpack.open || this.housingUi.open || this.wardrobe.open || this.appearanceUi.open || this.weaponsUi.open || this.forceUi.open);
+    const wasOpen = tab === undefined && (this.backpack.open || this.housingUi.open || this.propsUi.open || this.wardrobe.open || this.appearanceUi.open || this.weaponsUi.open || this.forceUi.open);
     this.closePanels();
     // The backpack's own open and close, from the game's interface table.
     this.audio.ui.play(wasOpen ? 'panelClose' : tab !== undefined ? 'select' : 'panelOpen');
@@ -11625,6 +11946,7 @@ class App {
       if (character) this.appearanceUi.attach(character, import.meta.env.BASE_URL);
       else this.appearanceUi.explain('This character is a single model, not a set of parts, so there is nothing to shape. Convert it with <code>npm run swg -- species</code>.');
     } else if (want === 'housing') this.showHousing();
+    else if (want === 'props') this.showProps();
     else if (want === 'force') this.showSkills();
     else {
       this.weaponsUi.held = { right: this.player.equipped.right?.id ?? null, left: this.player.equipped.left?.id ?? null };
@@ -12468,7 +12790,21 @@ class App {
           if (input.pressedAction('placeUp')) this.liftPlacing(1);
           if (input.pressedAction('placeDown')) this.liftPlacing(-1);
         }
-        if (!this.map.open && !this.anyPanelOpen() && !this.placing) {
+        // A prop in hand takes the same four keys and the same click, and the two shift keys pick
+        // which axis a turn is about: plain about up, shift about the axis across the view (tip it
+        // away), control about the one along it (roll it). The owner asked for three dimensions.
+        if (this.propPlacing) {
+          if (input.pressedAction('attack')) void this.dropPlacingProp();
+          const axis = input.isDown('ShiftLeft') || input.isDown('ShiftRight') ? 'x' : input.isDown('ControlLeft') || input.isDown('ControlRight') ? 'z' : 'y';
+          if (input.pressedAction('placeLeft')) this.turnPlacing(-1, axis);
+          if (input.pressedAction('placeRight')) this.turnPlacing(1, axis);
+          if (input.pressedAction('placeUp')) this.liftPlacing(1);
+          if (input.pressedAction('placeDown')) this.liftPlacing(-1);
+        }
+        // Pick the nearest thing you have put down back up, so a weapon in a case can be taken out
+        // and used again. Never while something is already in hand, which would swap one for another.
+        if (input.pressedAction('takeProp') && !this.placing && !this.propPlacing && !this.anyPanelOpen()) this.takeNearestProp();
+        if (!this.map.open && !this.anyPanelOpen() && !this.placing && !this.propPlacing) {
           if (input.pressedAction('saberToggle') && this.kit.id === 'jedi' && !player.mounted) player.toggleSaber();
           if (input.pressedAction('switchClass')) this.setClass(this.kit.id === 'jedi' ? 'bounty_hunter' : 'jedi');
           // Locked from the jump's enter stage until control returns, but for the crew in the tunnel (`pressJumpE`); the key only:

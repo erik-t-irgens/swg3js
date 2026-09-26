@@ -149,6 +149,22 @@ export class AssetPack {
 
   private constructor(readonly manifest: PackManifest, private readonly baseUrl: string) {}
 
+  /**
+   * A pack over a folder whose manifest is already in hand and is not a planet's.
+   *
+   * The props pack is the one of these: it is a catalogue of things first and a bag of models
+   * second, so its file lists eight and a half thousand props over three thousand models and is
+   * read by the panel rather than by the streamer. Building a pack from that list here, instead of
+   * writing the whole manifest twice in the converter, is the difference between a change of file
+   * shape (a nine-hundred-megabyte reconversion) and no change at all.
+   *
+   * Nothing is fetched: there is no layout to place and no floors to read, because nobody walks
+   * inside a chair.
+   */
+  static from(manifest: PackManifest, baseUrl: string): AssetPack {
+    return new AssetPack(manifest, baseUrl);
+  }
+
   static async load(planetId: string): Promise<AssetPack | null> {
     const baseUrl = `${import.meta.env.BASE_URL}assets-private/${planetId}/`;
     try {

@@ -302,32 +302,47 @@ export class LayoutStreamer {
   prepare: ((objects: THREE.Object3D[]) => Promise<void>) | null = null;
 
   /**
-   * A second pack to look in for anything the planet's own does not carry.
+   * Other packs to look in for anything the planet's own does not carry.
    *
    * A house is not in the world it is built on: the snapshot packs hold what the game's own worlds
    * placed, and a player's house is in the gallery pack, which is loaded once and then stands behind
-   * the planet's for the rest of the session. Nothing about a model changes for being found there --
-   * it is instanced, collided, walked and lit exactly as a snapshot object is -- so the whole of the
-   * difference is these three lookups.
+   * the planet's for the rest of the session. A prop a player puts down is the same thing out of the
+   * props pack, which is why this is a list rather than the one slot it began as -- somebody with a
+   * house up and a chair in it needs both behind the world at once. Nothing about a model changes
+   * for being found in one: it is instanced, collided, walked and lit exactly as a snapshot object
+   * is, so the whole of the difference is these three lookups.
    */
-  private guest: AssetPack | null = null;
+  private readonly guests: AssetPack[] = [];
 
-  /** Stand a second pack behind this world's own. Calling it again with the same pack does nothing. */
+  /** Stand another pack behind this world's own. Calling it again with the same pack does nothing. */
   useGuestPack(pack: AssetPack | null): void {
-    this.guest = pack;
+    if (pack && !this.guests.includes(pack)) this.guests.push(pack);
   }
 
   private defOf(id: string): PackModelDef | undefined {
-    return this.pack.find(id) ?? this.guest?.find(id);
+    const mine = this.pack.find(id);
+    if (mine) return mine;
+    for (const g of this.guests) {
+      const hit = g.find(id);
+      if (hit) return hit;
+    }
+    return undefined;
   }
 
   private loadedOf(id: string): LoadedModel | null {
-    return this.pack.loaded(id) ?? this.guest?.loaded(id) ?? null;
+    const mine = this.pack.loaded(id);
+    if (mine) return mine;
+    for (const g of this.guests) {
+      const hit = g.loaded(id);
+      if (hit) return hit;
+    }
+    return null;
   }
 
   private modelOf(id: string): Promise<LoadedModel> {
-    if (this.pack.find(id) || !this.guest) return this.pack.model(id);
-    return this.guest.model(id);
+    if (this.pack.find(id)) return this.pack.model(id);
+    for (const g of this.guests) if (g.find(id)) return g.model(id);
+    return this.pack.model(id);
   }
 
   constructor(

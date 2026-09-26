@@ -308,6 +308,70 @@ export function buildWeaponView(items: readonly WeaponRow[], opts: WeaponOptions
   return finish(byGroup, opts.order, opts.find, listed);
 }
 
+/** One prop, as the panel reads it off the pack. */
+export interface PropRow {
+  id: string;
+  group: string;
+  name?: string | null;
+  description?: string | null;
+  icon?: string | null;
+  size?: { w: number; h: number; d: number };
+}
+
+export interface PropOptions {
+  /** The find box, already lower-cased and trimmed. */
+  find: string;
+  /** The prop in hand now, if any: its cell wears the mark. */
+  held: string | null;
+  /** Each group's heading, in the order the panel reads. */
+  order: readonly { id: string; label: string }[];
+  /** A prop's picture as a URL, or null; the catalogue answers it, since only it knows the folder. */
+  iconUrl: (p: PropRow) => string | null;
+}
+
+/**
+ * The Props tab's groups.
+ *
+ * The same shape as the rack's, deliberately: eight and a half thousand things is far too many to
+ * read as a list, and the one arrangement this game already has for that many is the give screen's
+ * folding groups of pictures with a find box over them. What a cell says beyond its name is the one
+ * thing a player choosing furniture actually wants, which is **how big it is**.
+ */
+export function buildPropView(items: readonly PropRow[], opts: PropOptions): GiveView {
+  const byGroup = new Map<string, GiveCell[]>();
+  let listed = 0;
+  for (const p of items) {
+    listed++;
+    // 87% of props carry the game's own name; the rest had their key on the server and read as words
+    // made from the id, which is the same fallback the ship components and the dance props take.
+    const name = p.name?.trim() || wearName(p.id);
+    const icon = opts.iconUrl(p);
+    const s = p.size;
+    const size = s && (s.w || s.h || s.d) ? `${s.w.toFixed(1)} x ${s.h.toFixed(1)} x ${s.d.toFixed(1)} m` : '';
+    const held = opts.held === p.id;
+    const cell: GiveCell = {
+      id: p.id,
+      name,
+      label: name,
+      mark: '',
+      tag: held ? 'in hand' : '',
+      icon,
+      picture: icon ? 'icon' : 'blank',
+      initials: initialsOf(name),
+      on: held,
+      unseen: false,
+      fit: 'ok',
+      other: false,
+      group: p.group,
+      title: [p.id, size].filter(Boolean).join('\n'),
+      note: size,
+      description: p.description?.trim() ?? '',
+    };
+    (byGroup.get(p.group) ?? byGroup.set(p.group, []).get(p.group)!).push(cell);
+  }
+  return finish(byGroup, opts.order, opts.find, listed);
+}
+
 /**
  * Where the start every id in a set has in common ends, walked back to the last '_' so the part that
  * is left starts at a whole word. Walking back is also what keeps it from being empty when one id is

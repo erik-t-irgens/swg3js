@@ -3112,19 +3112,26 @@ export class World {
    * Filed under `key`, which is a name of its own, so a removal is one lookup and can never reach
    * something the snapshot placed.
    */
-  async placeProp(model: string, o: { key: string; at: { x: number; y: number; z: number }; yaw: number; inside?: boolean; solid?: boolean }): Promise<boolean> {
+  async placeProp(model: string, o: { key: string; at: { x: number; y: number; z: number }; yaw: number; turn?: readonly number[]; pack?: AssetPack | null; inside?: boolean; solid?: boolean }): Promise<boolean> {
     const stream = this.layoutStream;
-    if (!stream || !this.pack) return false;
-    if (!this.pack.find(model)) return false;
+    const from = o.pack ?? this.pack;
+    if (!stream || !from) return false;
+    if (!from.find(model)) return false;
+    // A pack that is not this world's stands behind it for as long as the world is up, exactly as
+    // the gallery does for a house: the streamer reloads a tier whenever the player walks away and
+    // back, and a model it could not find the second time would simply stop being drawn.
+    if (from !== this.pack) stream.useGuestPack(from);
     let loaded: LoadedModel;
     try {
-      loaded = await this.pack.model(model);
+      loaded = await from.model(model);
     } catch (err) {
       console.warn(`prop ${model} would not load`, err);
       return false;
     }
     if (this.layoutStream !== stream) return false;
-    const q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), o.yaw);
+    // A turn about all three axes where one is given (a prop a player has laid on its side), else
+    // the plain spin about up that everything the game itself places uses.
+    const q = o.turn && o.turn.length === 4 ? new THREE.Quaternion(o.turn[0], o.turn[1], o.turn[2], o.turn[3]) : new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), o.yaw);
     await stream.place({ model, template: o.key, x: o.at.x, y: o.at.y, z: o.at.z, q, radius: loaded.radius, inside: o.inside, solid: o.solid });
     return true;
   }
@@ -5330,6 +5337,18 @@ export class World {
     // What stands still only: a ray from inside a body (the player's capsule, a fighter's, a
     // creature's) would otherwise find that body and call its middle the floor.
     return this.physics.topSurface(x, z, y + 0.2, 40, filter, World.staticOnly);
+  }
+
+  /**
+   * Whether a point is inside something solid: a wall, a floor, a rock, a crate.
+   *
+   * Asked by the prop placement and nothing else so far, which is why it is a point and not a shape.
+   * Only what stands still counts -- a prop may be put down where a creature happens to be standing
+   * and the creature will walk away, while a wall will not -- and the peers are skipped for the same
+   * reason as everywhere else, since a player standing in a doorway is not a doorway.
+   */
+  solidAt(x: number, y: number, z: number): boolean {
+    return this.physics.pointInSolid(x, y, z);
   }
 
   /** A collider that is part of the world rather than of something that moves. */

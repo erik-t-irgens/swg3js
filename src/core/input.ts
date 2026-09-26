@@ -51,7 +51,9 @@ export type Action =
   | 'placeLeft'
   | 'placeRight'
   | 'placeUp'
-  | 'placeDown';
+  | 'placeDown'
+  // A prop of yours standing near: pick it back up.
+  | 'takeProp';
 
 /**
  * Default bindings, as KeyboardEvent codes and `Mouse<button>`. Crouch has X beside Ctrl
@@ -112,6 +114,9 @@ export const DEFAULT_BINDINGS: Record<Action, string[]> = {
   placeRight: ['KeyE'],
   placeUp: ['KeyR'],
   placeDown: ['KeyF'],
+  // Picking one of your own props back up. It is a key of its own rather than the use key, which is
+  // already the doorway, the lift, the shuttle and the mount and would have to lose to all four.
+  takeProp: ['KeyJ'],
 };
 const STORAGE_KEY = 'swg3js.bindings';
 

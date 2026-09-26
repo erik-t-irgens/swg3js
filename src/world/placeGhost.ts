@@ -246,7 +246,9 @@ export class PlacementGhost {
   place(state: GhostState, f: Footprint | null, rows: readonly string[], heightAt: (x: number, z: number) => number): void {
     this.ok = state.ok;
     this.group.position.set(state.x, state.y, state.z);
+    this.group.quaternion.identity();
     this.group.rotation.set(0, state.yaw, 0);
+    if (this.grid) this.grid.visible = true;
     this.group.visible = !!this.model;
     for (const m of this.mine) {
       const mat = m as THREE.MeshStandardMaterial;
@@ -254,6 +256,31 @@ export class PlacementGhost {
       if (mat.emissive) mat.emissive.set(colourHex(state.ok ? 'good' : 'bad')).multiplyScalar(0.25);
     }
     if (f) this.drawGrid(f, rows, state, heightAt);
+  }
+
+  /**
+   * The same for a prop, which has no footprint grid and a turn about all three axes.
+   *
+   * No grid because there is nothing to draw one of: a `.sfp` footprint is a structure's and a prop
+   * has none, and a grid under a teacup would say nothing anybody needs. And a quaternion rather
+   * than a yaw because the owner asked to be able to lay a crate on its side.
+   */
+  placeProp(at: { x: number; y: number; z: number }, turn: { x: number; y: number; z: number; w: number }, ok: boolean): void {
+    this.ok = ok;
+    this.group.position.set(at.x, at.y, at.z);
+    this.group.quaternion.set(turn.x, turn.y, turn.z, turn.w);
+    this.group.visible = !!this.model;
+    for (const m of this.mine) {
+      const mat = m as THREE.MeshStandardMaterial;
+      if (mat.color) mat.color.set(colourHex(ok ? 'good' : 'bad'));
+      if (mat.emissive) mat.emissive.set(colourHex(ok ? 'good' : 'bad')).multiplyScalar(0.25);
+    }
+    this.hideGrid();
+  }
+
+  /** The grid put away, for a ghost that has none. */
+  private hideGrid(): void {
+    if (this.grid) this.grid.visible = false;
   }
 
   /**

@@ -459,6 +459,36 @@ export class Physics {
   private readonly downRay = new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: -1, z: 0 });
 
   /**
+   * Whether a point is inside something that stands still: a wall, a floor, a rock, a crate.
+   *
+   * Rapier answers which colliders contain a point, and the first one that is fixed or bodiless is
+   * the answer. What moves is stepped over on purpose -- a prop may be put down where somebody is
+   * standing, because they will walk away and a wall will not -- and so are the peers and the
+   * corpses, for the reason every other query here skips them.
+   *
+   * The point is a `Vector3` made once and written into: this is asked nine times a frame while a
+   * prop is in hand, and nine objects a frame is nine thousand a minute.
+   */
+  pointInSolid(x: number, y: number, z: number): boolean {
+    const p = this.solidPoint;
+    p.x = x;
+    p.y = y;
+    p.z = z;
+    let hit = false;
+    this.world.intersectionsWithPoint(p, (c) => {
+      if (this.peers.has(c.handle) || this.ragdolls.has(c.handle)) return true;
+      const body = c.parent();
+      if (body && !body.isFixed()) return true;
+      hit = true;
+      // False stops the walk: the first solid thing is the whole answer.
+      return false;
+    });
+    return hit;
+  }
+
+  private readonly solidPoint = { x: 0, y: 0, z: 0 };
+
+  /**
    * Height of the first surface straight down from (x, fromY, z) within maxDist, among colliders the
    * groups and `include` accept, or null. Reuses one ray (the weather's roof grid casts dozens a frame).
    */

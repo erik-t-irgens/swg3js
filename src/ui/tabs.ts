@@ -26,6 +26,7 @@ export function wireTabs(root: HTMLElement, current: string, onPick: (id: string
 export const INVENTORY_TABS: TabDef[] = [
   { id: 'backpack', label: 'Backpack' },
   { id: 'housing', label: 'Housing' },
+  { id: 'props', label: 'Props' },
   { id: 'appearance', label: 'Appearance' },
   { id: 'force', label: 'Skills' },
   { id: 'wardrobe', label: 'Clothes (give)' },

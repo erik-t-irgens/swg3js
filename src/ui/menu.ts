@@ -98,10 +98,11 @@ const ACTION_LABELS: Record<Action, string> = {
   rollLeft: 'Roll left (adrift in space)',
   rollRight: 'Roll right (adrift in space)',
   wings: 'Open and close the wings (flying a ship)',
-  placeLeft: 'Turn it left (placing a building)',
-  placeRight: 'Turn it right (placing a building)',
-  placeUp: 'Raise it (placing a building)',
-  placeDown: 'Lower it (placing a building)',
+  placeLeft: 'Turn it left (placing; shift and ctrl tip and roll)',
+  placeRight: 'Turn it right (placing; shift and ctrl tip and roll)',
+  placeUp: 'Raise it (placing)',
+  placeDown: 'Lower it (placing)',
+  takeProp: 'Pick up a prop of yours',
 };
 
 /**
