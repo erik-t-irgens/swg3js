@@ -145,6 +145,41 @@ export function animFor(instrumentId: string): string | null {
   return MUSIC_ANIM[instrumentId] ?? null;
 }
 
+/**
+ * The instruments that stand on the ground rather than being carried.
+ *
+ * The nalargon is a great horned thing the height of a man, the ommni box and the downey box are
+ * cabinets: the game stood all three on the floor and the player walked up to one. Everything else
+ * in the list is held, which is why this is a list of three rather than a flag on the rest.
+ *
+ * They still come through the weapons pack and are still "held" as far as the backpack and the
+ * hands are concerned -- that is what puts the model in the world at all. What changes is where the
+ * model is while it is being played: on the ground in front of the player instead of in their hand.
+ */
+export const FLOOR_INSTRUMENTS = new Set([
+  'nalargon',
+  'nalargon_hue',
+  // Max Rebo's organ is a nalargon, which is why it stands with them: the owner's "all of them".
+  'organ_max_rebo',
+  'instrument_organ_max_rebo',
+  'ommni_box',
+  'ommni_box_hue',
+  'downey_box',
+]);
+
+/** Whether an instrument is one of the three that stand on the ground. */
+export function standsOnGround(instrumentId: string | null): boolean {
+  return !!instrumentId && FLOOR_INSTRUMENTS.has(instrumentId);
+}
+
+/** Where a floor instrument stands and how the player stands to it. Ours; live through `__debug.band`. */
+export const FLOOR_TUNE = {
+  /** How far in front of the player it is set down, metres. */
+  ahead: 1.15,
+  /** How far it is turned from facing the player, radians: 0 is square on. */
+  turn: 0,
+};
+
 let pack: MusicPack | null = null;
 let pending: Promise<MusicPack | null> | null = null;
 

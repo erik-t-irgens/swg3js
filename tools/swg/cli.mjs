@@ -218,7 +218,8 @@ const TRAVEL_PACK_VERSION = 2;
 /** The shape of a world's fittings.json: the other things the server stood on its buildings. */
 const FITTINGS_PACK_VERSION = 1;
 // 2: every ground family carries the bump map the client shaded this terrain with.
-const TERRAIN_SHADERS_VERSION = 2;
+// 3: and its gloss map, the AUX0 slot the effect's own name calls a specmap.
+const TERRAIN_SHADERS_VERSION = 3;
 /** The shape of music/music.json. A pack written by an older run is asked for again. */
 const MUSIC_PACK_VERSION = 1;
 import { openTre, openVfs, readHeader } from './tre.mjs';
@@ -910,6 +911,7 @@ function copyTerrainShaders(vfs, template, outDir) {
   const families = [];
   let missing = 0;
   let bumped = 0;
+  let glossy = 0;
   // Families the planet's rules use, plus any that building layer files in the pack add by name.
   const wanted = [...template.generator.shaderGroup.families.values()];
   const known = new Set(wanted.map((f) => f.name.toLowerCase()));
@@ -980,6 +982,36 @@ function copyTerrainShaders(vfs, template, outDir) {
           console.warn(`terrain normal ${nrml.path}: ${err.message}`);
         }
       }
+      // The ground's gloss, which is the other half of how the client shaded it: 290 of the 323
+      // families name an AUX0 slot and every one of those files is a `*_spec.dds`, so the effect's
+      // own name (`dot3_terrain_specmap`) and the file's agree about what it is. Its values are low
+      // -- 0 to about 90 of 255 on most families -- which is a sheen on wet rock and polished
+      // concrete rather than a mirror, and it is the difference between damp stone and dry sand.
+      //
+      // It is written as a **file of its own and read into the bump map's alpha at load**, rather
+      // than packed into that PNG here: a browser drawing an image into a 2D canvas premultiplies,
+      // so a pixel whose alpha is nought comes back with its colour gone, and the colour there is
+      // the surface's normal. Two files on disk, one texture in memory.
+      const aux = slots.find((s) => s.slot === 'AUX0');
+      entry.specular = null;
+      if (aux && vfs.has(aux.path)) {
+        try {
+          const s = downscaleRgba(decodeDds(vfs.read(aux.path)), 512);
+          // Grey on 132 of the 172 and near-grey on the rest, so the red channel is the mask; the
+          // alpha is a second copy of it on every one measured and is not read.
+          for (let i = 0; i < s.rgba.length; i += 4) {
+            s.rgba[i + 1] = s.rgba[i];
+            s.rgba[i + 2] = s.rgba[i];
+            s.rgba[i + 3] = 255;
+          }
+          const srel = `terrain/shaders/${stemName}_s.png`;
+          writeFileSync(join(outDir, srel), encodePng(s.width, s.height, s.rgba));
+          entry.specular = srel;
+          glossy++;
+        } catch (err) {
+          console.warn(`terrain specular ${aux.path}: ${err.message}`);
+        }
+      }
     } catch (err) {
       console.warn(`terrain shader ${path}: ${err.message}`);
       missing++;
@@ -989,7 +1021,7 @@ function copyTerrainShaders(vfs, template, outDir) {
   // Versioned, because `status` cannot otherwise tell an old pack from a new one and nothing would
   // ever ask for it again -- the hole that has already cost this project twice over the rigs.
   writeFileSync(join(outDir, 'terrain/shaders.json'), JSON.stringify({ version: TERRAIN_SHADERS_VERSION, families }, null, 1));
-  console.error(`  terrain shaders: ${families.length - missing}/${families.length} families with textures, ${bumped} with a bump map -> terrain/shaders.json`);
+  console.error(`  terrain shaders: ${families.length - missing}/${families.length} families with textures, ${bumped} with a bump map, ${glossy} with a gloss map -> terrain/shaders.json`);
 }
 
 /** The shader families a terrain layer file (.lay) carries: SFAM chunks of its SGRP form. */
@@ -1880,6 +1912,54 @@ async function terrainCheck(dir, limit, opts = {}) {
 }
 
 /** A planet's objects from both placement sources: the world snapshot and the buildout areas. */
+/**
+ * Every cell object in a world's snapshot, by the client's own object id, with the building it
+ * belongs to and where that building stands.
+ *
+ * This is the join that lets the emulator's in-cell props be placed at all: a screenplay names a
+ * cell by that id, not by a room number, and the id means nothing without the snapshot in hand.
+ * Cached per world, since the `fittings` command asks once per pack.
+ */
+const cellIdCache = new Map();
+function cellIndexById(vfs, planet) {
+  const had = cellIdCache.get(planet);
+  if (had) return had;
+  const out = new Map();
+  cellIdCache.set(planet, out);
+  const wsPath = `snapshot/${planet}.ws`;
+  if (!vfs.has(wsPath)) return out;
+  let snap;
+  try {
+    snap = parseSnapshot(parseIff(vfs.read(wsPath)));
+  } catch {
+    return out;
+  }
+  const walk = (node, building) => {
+    const t = snap.templates[node.templateIndex] ?? '';
+    const isCell = /shared_cell\.iff$/.test(t);
+    if (isCell && building) {
+      out.set(node.id, {
+        building: snap.templates[building.templateIndex] ?? '',
+        cellIndex: node.cellIndex,
+        bx: building.pos[0],
+        by: building.pos[1],
+        bz: building.pos[2],
+        byaw: Math.round(yawOfLayoutQuat(building.q) * 1e4) / 1e4,
+      });
+    }
+    for (const c of node.children ?? []) walk(c, isCell ? building : node);
+  };
+  for (const n of snap.nodes) walk(n, null);
+  return out;
+}
+
+/** A snapshot node's yaw. Its quaternion is [w, x, y, z] exactly as a layout's is. */
+function yawOfLayoutQuat(q) {
+  if (!Array.isArray(q) || q.length < 4) return 0;
+  const [w, x, y, z] = q.map(Number);
+  return Math.atan2(2 * (x * z + w * y), 1 - 2 * (x * x + y * y));
+}
+
 function loadPlanetObjects(vfs, planet) {
   // The launch planets ship a world snapshot; the expansions' planets place everything through
   // buildout tables and have none, so an empty snapshot is fine as long as buildouts exist.
@@ -2101,7 +2181,7 @@ function packStatus(dir) {
       // on ten planets would bury the one line that matters.
       gates ? `${gates.gates.length} zone gates${gates.gates.filter((g) => !g.to).length ? `, ${gates.gates.filter((g) => !g.to).length} leading nowhere named` : ''}` : null,
       terrain ? `terrain${layers ? ` + ${layers} building layers` : ''}` : 'NO TERRAIN',
-      shaders ? `ground textures ${textured}/${shaders.families.length}${shaders.version === TERRAIN_SHADERS_VERSION ? `, ${shaders.families.filter((f) => f.normal).length} bumped` : ', FLAT (no bump maps)'}` : 'NO GROUND TEXTURES',
+      shaders ? `ground textures ${textured}/${shaders.families.length}${shaders.version === TERRAIN_SHADERS_VERSION ? `, ${shaders.families.filter((f) => f.normal).length} bumped, ${shaders.families.filter((f) => f.specular).length} glossy` : ', FLAT (no bump or gloss maps)'}` : 'NO GROUND TEXTURES',
       sky ? `sky (${sky.blocks.length} blocks${sky.weather ? `, weather ${new Set(sky.blocks.map((b) => b.cameraEffect?.file).filter(Boolean)).size} effects` : ', NO WEATHER'})` : 'NO SKY',
       water ? `water (${Object.keys(water.shaders ?? {}).length} shaders, ${Object.values(water.shaders ?? {}).filter((s) => s.kind === 'lava').length} lava${waterPackNeedsHarm(water) ? ', NO WATER VALUES' : ''})` : terrain ? 'NO WATER LOOK' : null,
       withCells.length ? (floored ? `floors ${floored}/${withCells.length} buildings${graphOnly ? ', GRAPHS ONLY (no walkable meshes)' : ''}${floorless ? `, ${floorless} with none in the archives` : ''}` : 'NO FLOORS') : null,
@@ -2123,7 +2203,7 @@ function packStatus(dir) {
     else if (!shaders) need(`terrain <swg-dir> all ${dir} --retail-only`, `${planet} has no ground textures`);
     // A pack written before the bump maps were read draws the ground perfectly flat below the
     // terrain's own step, and nothing in the game can tell: it has textures and they are right.
-    else if (shaders.version !== TERRAIN_SHADERS_VERSION) need(`terrain <swg-dir> all ${dir} --retail-only`, `${planet}'s ground has no bump maps, so it is lit flat`);
+    else if (shaders.version !== TERRAIN_SHADERS_VERSION) need(`terrain <swg-dir> all ${dir} --retail-only`, `${planet}'s ground is missing the bump and gloss maps the client shaded it with, so it is lit flat and matt`);
     else if (!sky) need(`sky <swg-dir> all ${dir} --retail-only`, `${planet} has no sky`);
     else if (!sky.weather) need(`sky <swg-dir> all ${dir} --retail-only`, `${planet} sky has no weather effects`);
     else if (skyEffectsUncarried(packDir, sky)) need(`sky <swg-dir> all ${dir} --retail-only`, `${planet} sky's effects were converted before the effects their particles carry`);
@@ -5910,15 +5990,22 @@ switch (cmd) {
   }
 
   case 'fittings': {
-    // <swg-dir> <out-dir> [--core3=<dir>]: the other children of a building -- the elevator panel
-    // beside a lift's doorway, the bank terminal outside a bank, the cloning and insurance terminals
-    // in a cloning facility, the sign hanging over a cantina's door -- written into each converted
-    // world's own pack as `fittings.json` with every model they need converted beside them.
+    // <swg-dir> <out-dir> [--core3=<dir>]: every static prop the server stood that no world snapshot
+    // carries, written into each converted world's own pack as `fittings.json` with every model they
+    // need converted beside them.
     //
-    // It reads the same `childObjects` blocks the `travel` command does and keeps everything travel
-    // does not, which is how the two cannot stand two things in one place. `tools/swg/fittings.mjs`
-    // says what was measured. It must run after the worlds. Nothing it writes may ever reach the
-    // repository.
+    // Two sources, both the owner's emulator checkout. A **building template's `childObjects`** are
+    // what stands wherever that kind of building stands: the elevator panel beside a lift's doorway,
+    // the bank terminal outside a bank, the cloning and insurance terminals, the sign over a
+    // cantina's door. It reads the same blocks the `travel` command does and keeps everything travel
+    // does not, so the two can never stand two things in one place. A **screenplay's
+    // `spawnSceneObject`** is one object at one place on one world: the campsites, the crafting
+    // stations, the dungeon props, the tiki torches, the powered-down droids. `snapshot --core3`
+    // could already take the outdoor half of those and drops every one in a cell; this takes both,
+    // and takes them without reconverting a world.
+    //
+    // `tools/swg/fittings.mjs` says what was measured. It must run after the worlds. Nothing it
+    // writes may ever reach the repository.
     if (!pos[2]) usage();
     const core3 = options.core3 ?? process.env.CORE3 ?? '';
     if (!core3 || !existsSync(join(core3, 'object', 'building'))) {
@@ -5932,8 +6019,11 @@ switch (cmd) {
     const byTemplate = F.readFittingBuildings(core3);
     // Which model draws each kind of fitting is worked out once for the whole run, because a
     // template's appearance is the same on every world and resolving it is an archive read apiece.
+    // Both sources go through the same resolution, so a thing the screenplays and a building both
+    // place (an elevator panel is each on different worlds) is one model and one conversion.
     const templates = new Set();
     for (const kids of byTemplate.values()) for (const k of kids) templates.add(k.template);
+    for (const planet of GAME_PLANETS) for (const p of F.readServerProps(core3, planet)) templates.add(p.template);
     const paramCache = new Map();
     const { models, missing } = F.fittingModels(templates, (shared) => (vfs.has(shared) ? resolveTemplateString(vfs, shared, ['appearanceFilename'], paramCache) : null));
     for (const kids of byTemplate.values()) for (const k of kids) k.model = models.get(k.template)?.id ?? null;
@@ -5954,6 +6044,34 @@ switch (cmd) {
         continue;
       }
       const all = T.placeChildren(layout.objects ?? [], byTemplate);
+      // The second source: the emulator's own screenplays. These are one object at one place rather
+      // than a template's children, so they are joined to this world by name and, where they stand
+      // in a room, through the client's own cell object id.
+      const planet = layout.planet ?? dir.name;
+      const props = F.readServerProps(core3, planet);
+      if (props.length) {
+        const cells = cellIndexById(vfs, planet);
+        for (const p of props) {
+          const model = models.get(p.template)?.id ?? null;
+          if (!model) {
+            if (!missing.includes(p.template)) missing.push(p.template);
+            lost++;
+            continue;
+          }
+          if (!p.cellId) {
+            all.push({ template: p.template, model, building: `server:${planet}`, at: null, cell: 0, x: p.x, y: p.y, z: p.z, yaw: p.yaw, bx: p.x, by: p.y, bz: p.z, byaw: 0 });
+            continue;
+          }
+          const c = cells.get(p.cellId);
+          // A cell the client's own snapshot does not have is a building the server put up itself:
+          // there is nothing here to hang it on, so it is counted rather than placed wrongly.
+          if (!c) {
+            lost++;
+            continue;
+          }
+          all.push({ template: p.template, model, building: c.building, at: null, cell: c.cellIndex, x: p.x, y: p.y, z: p.z, yaw: p.yaw, bx: c.bx, by: c.by, bz: c.bz, byaw: c.byaw });
+        }
+      }
       // A fitting this game cannot draw is left out of the pack rather than written as a place with
       // nothing in it: unlike a travel terminal, which is a thing you press whether or not it shows,
       // a fitting is only ever something to look at and walk into.
@@ -5964,9 +6082,10 @@ switch (cmd) {
       const manifest = existsSync(manifestPath) ? JSON.parse(readFileSync(manifestPath, 'utf8')) : { planet: layout.planet ?? dir.name, categories: {} };
       manifest.categories ??= {};
       manifest.categories.layout ??= [];
+      const appearanceOfId = new Map([...models.values()].map((m) => [m.id, m.appearance]));
       for (const id of new Set(rows.map((r) => r.model))) {
         if (manifest.categories.layout.some((d) => d.id === id)) continue;
-        const appearance = [...models.values()].find((m) => m.id === id)?.appearance;
+        const appearance = appearanceOfId.get(id);
         if (!appearance || !vfs.has(appearance)) {
           console.warn(`  ${dir.name}: ${id} has no appearance in the archives`);
           continue;

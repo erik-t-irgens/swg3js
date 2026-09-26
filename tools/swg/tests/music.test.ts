@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { STEMS, STEM_OURS, instrumentStems, musicCounts, performanceName, readSampleName, readSongs } from '../music.mjs';
-import { BAND_TUNE, Band, MUSIC_ANIM, animFor, bandWords, inBand, musicId, musicTemplate, partsFor, songOffset, songsFor, stemFor, type MusicPack } from '../../../src/audio/band.ts';
+import { BAND_TUNE, Band, FLOOR_INSTRUMENTS, MUSIC_ANIM, animFor, bandWords, inBand, musicId, musicTemplate, partsFor, songOffset, songsFor, standsOnGround, stemFor, type MusicPack } from '../../../src/audio/band.ts';
 import { TemplateRun, makeStart } from '../../../src/audio/template.ts';
 import { isFlourishClip, isMusicLoop, loopsEmote, performOf } from '../../../src/core/emotes.ts';
 
@@ -338,6 +338,23 @@ const here = { x: 0, y: 0, z: 0 };
   d.b.start(2, 'kloo_horn', here);
   ok(d.stopped.length === was + 1, 'changing song lets the old part go');
   ok(d.onces[d.onces.length - 1].id === 'music:c_main_lp', 'and starts the new one (song 2 has no intro for this instrument)');
+}
+
+// ---------------------------------------------------------------- the three that stand on the ground
+
+{
+  ok(standsOnGround('nalargon') && standsOnGround('ommni_box') && standsOnGround('downey_box'), 'the three the owner named stand on the ground');
+  ok(!standsOnGround('kloo_horn') && !standsOnGround(null), 'and a horn is carried, as is nothing at all');
+  // Every one of those names must be an instrument the pack really carries: a name that has drifted
+  // is a nalargon held out at arm's length again, with nothing anywhere to say so.
+  const packFile = join('assets-private', 'music', 'music.json');
+  if (!existsSync(packFile)) note('no music pack here, so the floor instruments are not checked against real ids');
+  else {
+    const ids = Object.keys((JSON.parse(readFileSync(packFile, 'utf8')) as MusicPack).instruments);
+    for (const id of FLOOR_INSTRUMENTS) assert.ok(ids.includes(id), `${id} is an instrument the pack really carries`);
+    passed++;
+    console.log(`ok   all ${FLOOR_INSTRUMENTS.size} of the instruments that stand on the ground are in the pack under those names`);
+  }
 }
 
 // ---------------------------------------------------------------- it follows the player

@@ -23,6 +23,15 @@ export interface ShaderFamilyDef {
    * lit exactly as it always was, and `status` asks for the world again.
    */
   normal?: string | null;
+  /**
+   * The family's own gloss map, pack-relative, or null. The client's AUX0 slot, whose files are all
+   * named `*_spec` and whose effect is `dot3_terrain_specmap`: the ground's shine.
+   *
+   * A file of its own rather than the bump map's alpha, because a browser drawing an image into a
+   * 2D canvas premultiplies and a pixel with no gloss would come back with its normal wiped out.
+   * The two are read into one texture at load all the same.
+   */
+  specular?: string | null;
 }
 
 /**
@@ -53,22 +62,29 @@ const GROUND_DECLS_END = '// <ground-declarations-end>';
  * frame is the same one and is what the water already does for its two layers. And the green channel
  * is read as it stands, the way this project settled the question for every other surface.
  */
-export function injectGroundNormal(shader: { fragmentShader: string; uniforms: Record<string, { value: unknown }> }, normals: THREE.DataArrayTexture | null, scale: { value: number }): boolean {
+export function injectGroundNormal(shader: { fragmentShader: string; uniforms: Record<string, { value: unknown }> }, normals: THREE.DataArrayTexture | null, scale: { value: number }, gloss: { value: number } = { value: GROUND_NORMAL.gloss }): boolean {
   // A stage that is not there is left alone rather than written to: a use with no declaration does
   // not draw the ground wrongly, it does not draw the ground.
-  if (!shader.fragmentShader.includes(GROUND_DECLS_END) || !shader.fragmentShader.includes('#include <normal_fragment_maps>')) return false;
+  if (!shader.fragmentShader.includes(GROUND_DECLS_END) || !shader.fragmentShader.includes('#include <normal_fragment_maps>') || !shader.fragmentShader.includes('#include <roughnessmap_fragment>')) return false;
   if (normals) shader.uniforms.uGroundNormal = { value: normals };
   shader.uniforms.uGroundNormalScale = scale;
+  shader.uniforms.uGroundGloss = gloss;
   shader.fragmentShader = shader.fragmentShader
     .replace(
       GROUND_DECLS_END,
       `uniform sampler2DArray uGroundNormal;
 uniform float uGroundNormalScale;
-// The height gradient a family's bump map asks for at this point: a tangent-space normal (x, y, z)
-// with z up gives the gradient -xy/z, and the tangent frame here is world X and world Z.
-vec2 groundSlope(float family) {
+uniform float uGroundGloss;
+// A family's bump and gloss at this point: the direction in rgb, the client's own specular mask in
+// alpha, which the loader read out of a file of its own and put here.
+vec4 groundBump(float family) {
   int id = clamp(int(family + 0.5), 0, TERRAIN_FAMILIES - 1);
-  vec3 n = texture(uGroundNormal, vec3(vGroundXZ / uGroundSize[id], uGroundLayer[id])).xyz * 2.0 - 1.0;
+  return texture(uGroundNormal, vec3(vGroundXZ / uGroundSize[id], uGroundLayer[id]));
+}
+// The height gradient a family's bump map asks for: a tangent-space normal (x, y, z) with z up
+// gives the gradient -xy/z, and the tangent frame here is world X and world Z.
+vec2 groundSlope(float family) {
+  vec3 n = groundBump(family).xyz * 2.0 - 1.0;
   return -n.xy / max(n.z, 0.2);
 }
 ${GROUND_DECLS_END}`,
@@ -84,6 +100,17 @@ ${GROUND_DECLS_END}`,
   vec3 gN = normalize((vec4(normal, 0.0) * viewMatrix).xyz);
   vec2 gg = vec2(-gN.x, -gN.z) / max(gN.y, 0.2);
   normal = normalize((viewMatrix * vec4(normalize(vec3(-(gg.x + gs.x), 1.0, -(gg.y + gs.y))), 0.0)).xyz);
+}`,
+    )
+    // Before the weather's own roughness, which is written at the same stage and must have the last
+    // word: wet stone is smoother than dry stone however glossy the dry stone was.
+    .replace(
+      '#include <roughnessmap_fragment>',
+      `#include <roughnessmap_fragment>
+{
+  vec3 gw = vBary / max(vBary.x + vBary.y + vBary.z, 1e-4);
+  float gloss = groundBump(vFamily.x).a * gw.x + groundBump(vFamily.y).a * gw.y + groundBump(vFamily.z).a * gw.z;
+  roughnessFactor = clamp(roughnessFactor - gloss * uGroundGloss, 0.08, 1.0);
 }`,
     );
   return true;
@@ -106,7 +133,16 @@ const MAX_FAMILY_ID = 127;
  * ground has been the flattest thing in it: the geometry normal is a smoothed difference of the
  * heightfield, so below the terrain's own step there was no variation at all.
  */
-export const GROUND_NORMAL = { scale: 1 };
+export const GROUND_NORMAL = {
+  scale: 1,
+  /**
+   * How much of the client's own gloss mask is taken off the ground's roughness. Ours.
+   *
+   * The masks are low -- 0 to about 90 of 255 on most families -- so at 1 the shiniest ground goes
+   * from fully matt to roughness 0.65, which is damp stone rather than a mirror.
+   */
+  gloss: 1,
+};
 
 /** Whether the owner has turned the ground's relief off by hand, which needs no build. */
 function groundBumpOff(): boolean {
@@ -123,6 +159,8 @@ export class TerrainTextures {
   readonly normals: THREE.DataArrayTexture | null;
   /** The live strength, written by the Graphics setting; the ground has no `normalMap` for the usual path to find. */
   private normalScale: { value: number } = { value: GROUND_NORMAL.scale };
+  /** The live gloss, the same way: a uniform the material already holds, so nothing recompiles. */
+  private glossScale: { value: number } = { value: GROUND_NORMAL.gloss };
   /** Family id → layer index; families without a texture use layer 0. */
   private readonly layerOf: Float32Array;
   private readonly sizeOf: Float32Array;
@@ -205,25 +243,43 @@ export class TerrainTextures {
     // lookup: a family with no map of its own gets a flat layer rather than a missing one, which
     // keeps the indices identical and costs one layer of three bytes repeated.
     let normals: THREE.DataArrayTexture | null = null;
-    // A way back to the flat ground without a build, for the same reason the wetness wrap has one:
-    // everything the ground's relief adds is inside one shader program, and a program that will not
-    // compile draws no ground at all. `localStorage['swg.ground.bump'] = '0'` and reload.
-    if (kept.some((f) => f.normal) && !groundBumpOff()) {
+    // A way back to the flat, matt ground without a build, for the same reason the wetness wrap has
+    // one: everything the relief and the gloss add is inside one shader program, and a program that
+    // will not compile draws no ground at all. `localStorage['swg.ground.bump'] = '0'` and reload.
+    if (kept.some((f) => f.normal || f.specular) && !groundBumpOff()) {
       const nImages = await Promise.all(kept.map((f) => (f.normal ? loadImage(pack.url(f.normal)) : Promise.resolve(null))));
+      const sImages = await Promise.all(kept.map((f) => (f.specular ? loadImage(pack.url(f.specular)) : Promise.resolve(null))));
       const nData = new Uint8Array(size * size * 4 * kept.length);
-      // Flat everywhere first: (128, 128, 255) is straight up, so a family with no map leans nowhere.
+      // Flat and matt everywhere first: (128, 128, 255) is straight up, and nought in the alpha is
+      // no gloss at all, so a family with neither map is exactly the ground as it was.
       for (let i = 0; i < nData.length; i += 4) {
         nData[i] = 128;
         nData[i + 1] = 128;
         nData[i + 2] = 255;
-        nData[i + 3] = 255;
+        nData[i + 3] = 0;
       }
       kept.forEach((f, layer) => {
+        const at = layer * size * size * 4;
         const im = nImages[layer];
-        if (!im) return;
-        ctx.clearRect(0, 0, size, size);
-        ctx.drawImage(im, 0, 0, size, size);
-        nData.set(ctx.getImageData(0, 0, size, size).data, layer * size * size * 4);
+        if (im) {
+          ctx.clearRect(0, 0, size, size);
+          ctx.drawImage(im, 0, 0, size, size);
+          const px = ctx.getImageData(0, 0, size, size).data;
+          // Only the direction: the alpha of that PNG is the converter's own opaque filler, and the
+          // gloss is a file of its own because a 2D canvas cannot carry both.
+          for (let i = 0; i < px.length; i += 4) {
+            nData[at + i] = px[i];
+            nData[at + i + 1] = px[i + 1];
+            nData[at + i + 2] = px[i + 2];
+          }
+        }
+        const sm = sImages[layer];
+        if (sm) {
+          ctx.clearRect(0, 0, size, size);
+          ctx.drawImage(sm, 0, 0, size, size);
+          const px = ctx.getImageData(0, 0, size, size).data;
+          for (let i = 0; i < px.length; i += 4) nData[at + i + 3] = px[i];
+        }
       });
       normals = new THREE.DataArrayTexture(nData, size, size, kept.length);
       // No colour space on a normal map: its bytes are a direction, not a colour.
@@ -252,6 +308,7 @@ export class TerrainTextures {
     const layerOf = this.layerOf;
     const sizeOf = this.sizeOf;
     const normalScale = this.normalScale;
+    const glossScale = this.glossScale;
     mat.onBeforeCompile = (shader, renderer) => {
       previous.call(mat, shader, renderer);
       shader.defines = { ...(shader.defines ?? {}), TERRAIN_FAMILIES: count };
@@ -267,7 +324,7 @@ export class TerrainTextures {
       // Rain, puddles and snow: after the blend (map_fragment), so wetness darkens the blended
       // colour. Compiled in once and driven by the weather's shared uniforms.
       injectWetness(shader, 'ground');
-      if (normals && !injectGroundNormal(shader, normals, normalScale)) console.warn('the ground shader has no place for its bump maps; the ground is lit flat');
+      if (normals && !injectGroundNormal(shader, normals, normalScale, glossScale)) console.warn('the ground shader has no place for its bump and gloss maps; the ground is lit flat and matt');
     };
     // The ground carries its own wet injection; the material scan must not wrap it again.
     mat.userData.wetBuiltIn = true;
@@ -285,6 +342,18 @@ export class TerrainTextures {
     this.normalScale.value = x;
     GROUND_NORMAL.scale = x;
     return !!this.normals;
+  }
+
+  /** How much of the client's gloss mask the ground wears, live. Answers whether there was one. */
+  setGloss(x: number): boolean {
+    this.glossScale.value = x;
+    GROUND_NORMAL.gloss = x;
+    return !!this.normals;
+  }
+
+  /** How many families brought a bump map and how many a gloss map, for the console. */
+  get mapCounts(): { bumped: number; glossy: number; of: number } {
+    return { bumped: this.families.filter((f) => f.normal).length, glossy: this.families.filter((f) => f.specular).length, of: this.families.length };
   }
 
   /** The mean colour of a family's texture (its layer's pixels, sampled sparsely), for dust and spray; null without one. */

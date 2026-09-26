@@ -84,6 +84,14 @@ function build(withBumps: boolean): { fragmentShader: string; vertexShader: stri
   }
   passed++;
   console.log('ok   as is everything the block itself reads');
+
+  // The gloss rides in the same texture's alpha and is written at the roughness stage, which is a
+  // second place the same ordering trap could be sprung.
+  const glossUse = f.indexOf('float gloss = groundBump(');
+  ok(glossUse > 0, "the client's own gloss mask is read");
+  ok(f.indexOf('vec4 groundBump(float family)') < glossUse, 'through a function defined above it');
+  ok(f.indexOf('uniform float uGroundGloss;') < glossUse, 'with its own strength declared above it');
+  ok(f.indexOf('#include <roughnessmap_fragment>') < glossUse, 'and written where a roughness exists to change');
 }
 
 // ---------------------------------------------------------------- the ground and the weather still agree
@@ -97,6 +105,10 @@ function build(withBumps: boolean): { fragmentShader: string; vertexShader: stri
   const anchor = f.indexOf('#include <normal_fragment_maps>');
   ok(anchor >= 0 && bump > anchor, 'the bump block is written at the normal stage, where a normal exists to change');
   ok(rings > bump, "and the rain's rings are written after it, so a puddle's surface is laid over the ground's grain rather than wiped out by it");
+  // Wet stone is smoother than dry stone however glossy the dry stone was, so the weather's own
+  // roughness must have the last word over the client's gloss mask.
+  const wetRough = f.search(/roughnessFactor\s*=\s*mix|roughnessFactor\s*-=|wetRough/);
+  ok(wetRough < 0 || wetRough > f.indexOf('float gloss = groundBump('), "and the weather's roughness is written after the gloss");
   ok(build(false).fragmentShader.indexOf('groundSlope') < 0, 'a pack with no bump maps gets a shader with no trace of them, which is the ground exactly as it was');
 }
 

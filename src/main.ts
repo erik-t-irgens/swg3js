@@ -100,10 +100,21 @@ import { ShuttleMenu } from './ui/shuttleMenu.ts';
 import { loadGalaxyFile, planetOfRouteId, systemOfPack, systemsOfWorlds } from './data/galaxy';
 import { homes } from './net/homes.ts';
 import { creditText, purse } from './net/purse.ts';
-import { BAND_TUNE, animFor, band, loadMusic, musicPack, partsFor, songsFor, stemFor } from './audio/band.ts';
+import { BAND_TUNE, FLOOR_TUNE, animFor, band, loadMusic, musicPack, partsFor, songsFor, standsOnGround, stemFor } from './audio/band.ts';
 import { BandBar } from './ui/bandBar.ts';
 import { TRAVEL_PACK_VERSION, TRAVEL_TUNE, addTicket, canBoard, collectorWords, pickTicket, shuttleAt, shuttleWords, thingAt, ticketText, travelThingsOf, type ShuttleState, type Ticket, type TravelRow, type TravelThing } from './world/travelTerminal.ts';
 import { FITTINGS_PACK_VERSION, fittingTally, fittingsOf, type FittingRow } from './world/fittings.ts';
+
+/** One ticket collector waiting to be stood, or standing and able to be stood again if it goes. */
+interface TravelWait {
+  key: string;
+  model: string;
+  x: number;
+  y: number;
+  z: number;
+  yaw: number;
+  inside: boolean;
+}
 import { SHIP_TERMINAL_TEMPLATES, SHIP_TERMINAL_TUNE, SHIP_TRIP_ORBIT, shipTripsFrom, shipTripsNote, type ShipTerminalState } from './world/shipTerminal.ts';
 import type { PlacedObject } from './world/layoutStream';
 import { TerminalUi, type TerminalPort, type TerminalShipTrip } from './ui/terminalUi.ts';
@@ -1753,10 +1764,21 @@ class App {
           drawn: {
             terminals: this.travelStood.keys.length,
             collectors: this.travelStood.droids.length,
-            // A collector that has not stood yet, and the reason the last try gave: the droid is a
-            // mobile and its spawn can be refused for reasons that have nothing to do with it.
+            // A collector that has not stood yet, the reason the last try gave, and how many have
+            // had to be stood a second time: the droid is a mobile, and a mobile is taken away when
+            // it dies or falls out of the world as well as being refused a spawn in the first place.
             collectorsWaiting: this.travelWaiting.length,
             collectorRefused: this.travelRefused || null,
+            collectorsRestood: this.travelGone,
+            // Where each one really is now, which is the one thing that tells a collector standing
+            // somewhere wrong from one that is not standing at all.
+            collectorsAt: this.travelStood.droids.map((s) => ({
+              away: Math.round(Math.hypot(s.droid.pos.x - this.player.worldPos.x, s.droid.pos.z - this.player.worldPos.z)),
+              // How far it is off the ground under it: a droid sunk or hanging says so here.
+              overGround: Number((s.droid.pos.y - this.world.terrain.heightAt(s.droid.pos.x, s.droid.pos.z)).toFixed(2)),
+              shown: s.droid.group.visible,
+              dead: s.droid.dead,
+            })).sort((a, b) => a.away - b.away).slice(0, 4),
             withModel: things.filter((t) => t.model).length,
             of: things.length,
             nearest: things
@@ -2332,6 +2354,14 @@ class App {
         const own = c?.customizer?.setNormalScale(x, y) ?? 0;
         return `${world} materials in the world and ${own} of the character's set to (${x}, ${y})`;
       },
+      /**
+       * The ground's own gloss, out of the client's specular masks: `gloss()` says how many families
+       * brought one, `gloss(0)` is the matt ground of before and `gloss(2)` twice the shine.
+       *
+       * It is the ground's alone. Nothing else in the game has a gloss mask of the client's that
+       * this reads, and it is a uniform the material already holds, so nothing recompiles.
+       */
+      gloss: (x?: number) => this.world.setGroundGloss(x) ?? 'this world has no ground textures',
       /** Play as another species or gender (`species()` lists what the pack has): `species('twilek_female')`. */
       species: async (id?: string) => {
         if (!id) return this.speciesList.length ? this.speciesList.map((s) => `${s.id}: ${s.morphs.length} sliders, ${s.variables.length} variables, ${s.jkaClips} JKA clips`) : `no species index (run the converter's species command); playing ${this.characterId}`;
@@ -9517,7 +9547,7 @@ class App {
   }
 
   /** What has been stood up for the world's travel things, so leaving takes it all down again. */
-  private travelStood: { pack: string; keys: string[]; droids: Mobile[] } = { pack: '', keys: [], droids: [] };
+  private travelStood: { pack: string; keys: string[]; droids: { droid: Mobile; row: TravelWait }[] } = { pack: '', keys: [], droids: [] };
 
   /**
    * Draw the world's travel things where the data says they stand.
@@ -9555,7 +9585,7 @@ class App {
         // its model not planned yet, the budget full, a cell whose floor is not built, the manager
         // not there at all. Asked once on arrival, every one of those was a collector that never
         // appeared and never would. `stepTravelStand` asks again until it stands.
-        this.travelWaiting.push({ key, model: t.model, x: t.x, z: t.z, yaw: t.yaw, inside: t.cell > 0 });
+        this.travelWaiting.push({ key, model: t.model, x: t.x, y: t.y, z: t.z, yaw: t.yaw, inside: t.cell > 0 });
         continue;
       }
       // Solid whatever its size: a terminal is under the sweep's own floor for small props and is
@@ -9568,15 +9598,16 @@ class App {
   private clearTravelStood(takeDown: boolean): void {
     if (takeDown) {
       for (const key of this.travelStood.keys) this.world.unplaceBuilding(key);
-      for (const droid of this.travelStood.droids) this.world.unstandMobile(droid);
+      for (const s of this.travelStood.droids) this.world.unstandMobile(s.droid);
     }
     this.travelStood = { pack: '', keys: [], droids: [] };
     this.travelWaiting = [];
     this.travelRefused = '';
+    this.travelGone = 0;
   }
 
   /** The ticket collectors still to be stood, and why the last try was refused. */
-  private travelWaiting: { key: string; model: string; x: number; z: number; yaw: number; inside: boolean }[] = [];
+  private travelWaiting: TravelWait[] = [];
   private travelRefused = '';
   private travelTriedAt = 0;
 
@@ -9591,12 +9622,24 @@ class App {
    * can say why rather than leaving an empty pad and no explanation.
    */
   private stepTravelStand(now: number): void {
-    if (!this.travelWaiting.length || now - this.travelTriedAt < 1) return;
+    if (now - this.travelTriedAt < 1) return;
     this.travelTriedAt = now;
+    // One that has gone is asked for again. A mobile is taken away when it dies or falls out of the
+    // world, and a droid stood the instant a world arrived can be standing on ground the streamer
+    // has not built yet -- which is a collector the player saw for a moment and then never again.
+    // Nothing else would notice, and a collector that is not there is a shuttle nobody can board.
+    for (let i = this.travelStood.droids.length - 1; i >= 0; i--) {
+      const s = this.travelStood.droids[i];
+      if (!s.droid.removed) continue;
+      this.travelStood.droids.splice(i, 1);
+      this.travelGone++;
+      this.travelWaiting.push(s.row);
+    }
+    if (!this.travelWaiting.length) return;
     const left: typeof this.travelWaiting = [];
     for (const w of this.travelWaiting) {
       const droid = this.world.standMobile(w.model, { x: w.x, z: w.z, heading: w.yaw }, w.inside, w.key);
-      if (droid) this.travelStood.droids.push(droid);
+      if (droid) this.travelStood.droids.push({ droid, row: w });
       else {
         this.travelRefused = this.world.mobileNote() ?? 'the ticket collector would not stand';
         left.push(w);
@@ -9604,6 +9647,9 @@ class App {
     }
     this.travelWaiting = left;
   }
+
+  /** How many times a collector that was standing has had to be stood again. */
+  private travelGone = 0;
 
   /** This world's travel terminals, collectors and shuttles, kept while the pack and the centre hold. */
   private travelCache: { key: string; things: TravelThing[] } = { key: '', things: [] };
@@ -10556,16 +10602,41 @@ class App {
     }
     const why = band.start(this.bandSong, instrument, this.player.worldPos);
     if (why) this.messages.system(why);
+    else this.setDownInstrument(instrument);
     // The body is posed by `band.onSegment`, which fires for the part that really starts: the pose
     // is the rig's own performance loop for this instrument, the very branch of the very selector a
     // dance uses, so it loops, it ends when the player moves and it crosses the relay with nothing
     // new sent. A rig with no pose for this instrument simply plays the music.
   }
 
-  /** Stop playing: the music and the pose together, wherever the stop came from. */
+  /** Stop playing: the music, the pose and a floor instrument taken back up, wherever the stop came from. */
   private stopBand(): void {
     if (band.mine) band.stop(this.player.worldPos);
     if (this.dance && isMusicLoop(this.dance)) this.endEmote();
+    if (this.player.heldIsDown) this.player.putHeldDown(null, null);
+  }
+
+  /**
+   * A nalargon, an ommni box or a downey box is stood on the ground in front of the player.
+   *
+   * Three of the game's fourteen instruments are furniture rather than something you carry, and they
+   * were being held out at arm's length like a horn. The model in the hand is the model on the
+   * floor -- nothing is cloned -- and it is put back in the hand when the performance stops, so the
+   * backpack, the hands and everything that reads what is held are untouched by it.
+   *
+   * The player is already standing where they should be: it is set down in front of them, facing
+   * back, so walking up to it and playing is what a player does with it.
+   */
+  private setDownInstrument(instrument: string): void {
+    if (!standsOnGround(instrument)) return;
+    const p = this.player;
+    const yaw = p.heading;
+    const at = new THREE.Vector3(p.worldPos.x + Math.sin(yaw) * FLOOR_TUNE.ahead, 0, p.worldPos.z + Math.cos(yaw) * FLOOR_TUNE.ahead);
+    // Its own foot on the ground under it rather than on the player's: a step, a kerb or a cantina's
+    // floor is what it stands on, and aboard a ship or in a room there is no terrain to ask.
+    at.y = this.world.groundAt(at.x, p.worldPos.y + 1, at.z, !!p.inside) ?? p.worldPos.y;
+    // Facing the player, which is the way round a cabinet is played from.
+    p.putHeldDown(this.world.scene, at, yaw + Math.PI + FLOOR_TUNE.turn);
   }
 
   /**

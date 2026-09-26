@@ -350,6 +350,8 @@ export class Player {
   /** The weapons in hand from the rack (assets-private/weapons), and their models on the hand bones. */
   readonly equipped: { right: WeaponDef | null; left: WeaponDef | null } = { right: null, left: null };
   private readonly held: { right: THREE.Object3D | null; left: THREE.Object3D | null } = { right: null, left: null };
+  /** Where the right hand's thing was taken from, while it is standing in the world instead. */
+  private setDown: { parent: THREE.Object3D; index: number } | null = null;
   /** A held weapon's reach for the hit sweep: its grip end and its far end, in the model's own frame. */
   private readonly reach: { right: { near: THREE.Object3D; far: THREE.Object3D } | null; left: { near: THREE.Object3D; far: THREE.Object3D } | null } = { right: null, left: null };
   /** Aiming the blaster (right mouse held): the aimed carry, a steadier shot, the camera in closer. */
@@ -1087,10 +1089,55 @@ export class Player {
     p.hilt2.visible = !saberLeft;
     p.blade2.visible = on && leftSaber;
     p.rifle.visible = this.classId === 'bounty_hunter' && !gunRight && !bare;
-    if (this.held.right) this.held.right.visible = (inHand || gunRight) && !bare;
+    // A thing set down is no longer in the hand and no longer answers to the hand's rules: it is
+    // standing in the world, and writing `visible` from here would take it away every frame.
+    if (this.held.right && !this.setDown) this.held.right.visible = (inHand || gunRight) && !bare;
     if (this.held.left) this.held.left.visible = !this.orbiting && !bare;
     for (const g of this.orbit) g.visible = this.orbiting;
     this.flying.visible = this.thrown.inFlight;
+  }
+
+  /**
+   * Stand what is in the right hand on the ground, or take it back up.
+   *
+   * It is one object moved between two parents and nothing is cloned: the model in the hand is the
+   * model on the floor. Three of the game's instruments are the whole reason it exists -- a nalargon
+   * is the height of a man and the ommni and downey boxes are cabinets, and the game stood all three
+   * on the floor and had the player walk up to one.
+   *
+   * `into` is where it goes (the world's scene); with no `at` it comes back to the hand it left,
+   * at the place in that hand's children it had, so nothing about the figure changes.
+   */
+  putHeldDown(into: THREE.Object3D | null, at: THREE.Vector3 | null, yaw = 0): boolean {
+    const obj = this.held.right;
+    if (!obj) return false;
+    if (at && into) {
+      if (!this.setDown) {
+        const parent = obj.parent;
+        if (!parent) return false;
+        this.setDown = { parent, index: parent.children.indexOf(obj) };
+      }
+      into.add(obj);
+      obj.position.copy(at);
+      obj.quaternion.setFromAxisAngle(UP_AXIS, yaw);
+      obj.scale.setScalar(1);
+      obj.visible = true;
+      return true;
+    }
+    const was = this.setDown;
+    if (!was) return false;
+    this.setDown = null;
+    was.parent.add(obj);
+    // Back where a hand's thing belongs: the hold's own transform is written every frame by the rig,
+    // so nothing here has to remember what it was.
+    obj.position.set(0, 0, 0);
+    obj.quaternion.identity();
+    return true;
+  }
+
+  /** Whether the right hand's thing is standing in the world rather than being held. */
+  get heldIsDown(): boolean {
+    return !!this.setDown;
   }
 
   /** True while a swing can hurt: the saber system's attack moves, or the stand-in swing's middle. */

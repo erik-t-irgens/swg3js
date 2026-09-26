@@ -7,7 +7,7 @@
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { fittingCounts, fittingModels, modelIdOf, readFittingBuildings } from '../fittings.mjs';
+import { fittingCounts, fittingModels, modelIdOf, readFittingBuildings, readServerProps } from '../fittings.mjs';
 import { kindOfChild, placeChildren } from '../travel.mjs';
 import { childInWorld } from '../../../src/world/travelTerminal.ts';
 
@@ -41,6 +41,8 @@ function note(what: string): void {
   ok(modelIdOf('appearance/thm_all_elevator_panel_up_s02.apt') === 'thm_all_elevator_panel_up_s02', "a model's id is its appearance's own base name");
   ok(modelIdOf('appearance\\ksk_all_bank.apt') === 'ksk_all_bank', 'written with the other slash too, which is how some of them are');
   ok(modelIdOf('') === null && modelIdOf(null) === null, 'and a template with no appearance names no model');
+  // A particle effect has no mesh to convert and the pack's own effects path is what draws one.
+  ok(modelIdOf('appearance/pt_magic_sparks.prt') === null, 'a particle effect names no model, rather than being handed to the mesh converter');
   const { models, missing } = fittingModels(['a/b/x.iff', 'a/b/y.iff', 'a/b/z.iff'], (shared) => (shared === 'a/b/shared_z.iff' ? null : 'appearance/one.apt'));
   ok(models.get('a/b/x.iff')?.id === 'one' && models.get('a/b/y.iff')?.id === 'one', 'two templates on one appearance are one model');
   ok(missing.length === 1 && missing[0] === 'a/b/z.iff', 'and a template the client has nothing for is named rather than dropped in silence');
@@ -83,6 +85,21 @@ function note(what: string): void {
     let travelKid = 0;
     for (const kids of byTemplate.values()) for (const k of kids as { template: string }[]) if (kindOfChild(k.template)) travelKid++;
     ok(travelKid === 0, 'and not one of their children is a travel thing, so the two commands cannot stand two things in one place');
+
+    // The second source, and the two things about its numbers that a reading of the code will not
+    // catch: the height is the middle of the three, and the cell is an object id rather than a room.
+    const props = readServerProps(core3, 'tatooine');
+    ok(props.length > 0, `${props.length} static objects the screenplays stand on one world`);
+    const inCell = props.filter((p: { cellId: number }) => p.cellId > 0);
+    ok(inCell.length > 0, `${inCell.length} of them inside a building`);
+    // Every one of those cell ids is a real client object id, which is a big number: a room index
+    // would be under a hundred, and reading it as one would put every indoor prop in room 4.
+    ok(inCell.every((p: { cellId: number }) => p.cellId > 1000), 'and every cell it names is an object id, not a room number');
+    // The outdoor ones stand on a world whose ground is a few hundred metres at most: read with the
+    // depth as the height, they would be kilometres up or down.
+    const outdoor = props.filter((p: { cellId: number }) => !p.cellId);
+    ok(outdoor.length > 0 && outdoor.every((p: { y: number }) => Math.abs(p.y) < 600), 'and the height of an outdoor one is the middle of its three numbers, not the last');
+    ok(props.every((p: { yaw: number }) => Number.isFinite(p.yaw) && Math.abs(p.yaw) <= Math.PI + 1e-6), 'every turn reads as a turn');
   }
 }
 

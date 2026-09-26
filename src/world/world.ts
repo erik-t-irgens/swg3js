@@ -28,7 +28,7 @@ import type { HeatSources, LavaHeatTable } from './heatSources';
 import { setEnvironment } from './envmap';
 import { PropFactory, type Collider, type Exclusion, type ScatterItem } from './props';
 import { FloraPlanter } from './flora';
-import { TerrainTextures } from './terrainTextures';
+import { GROUND_NORMAL, TerrainTextures } from './terrainTextures.ts';
 import { AssetPack, type LoadedModel } from './assetPack';
 import { OUTPOSTS } from '../data/outposts';
 import { Group, groups, RAPIER as R } from '../core/physics';
@@ -4514,6 +4514,20 @@ export class World {
     // every normal in the world would move every one except the ground's.
     if (this.groundTextures?.setNormalScale(x)) n++;
     return n;
+  }
+
+  /**
+   * How much of the client's own gloss mask the ground wears, live, and what it has to wear.
+   *
+   * Its own knob rather than part of the normals': the two come out of one texture but they are
+   * different things, and the ground is the only surface in the game with a gloss map of ours to
+   * move at all.
+   */
+  setGroundGloss(x?: number): { bumped: number; glossy: number; of: number; gloss: number } | null {
+    const t = this.groundTextures;
+    if (!t) return null;
+    if (x !== undefined) t.setGloss(x);
+    return { ...t.mapCounts, gloss: GROUND_NORMAL.gloss };
   }
 
   /**
