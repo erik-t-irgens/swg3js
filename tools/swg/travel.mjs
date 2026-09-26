@@ -27,6 +27,7 @@
 
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { isForm, readCString } from './iff.mjs';
 import { readLua } from './lua.mjs';
 
 /**
@@ -122,7 +123,11 @@ function luaFiles(dir, out = []) {
  * quarter turn, and 20 of the 1,002 building children are off unit length somewhere -- so the angle
  * is taken in a form that does not care how long the quaternion is: `2wy` and `w² - y²` are the same
  * multiple of the sine and cosine of the turn whatever its length. Read as if it were unit length
- * (`1 - 2y²`), Theed's transport stood at 116.6 degrees rather than 90 and sat crooked in its hangar.
+ * (`1 - 2y²`), Theed's transport stood at 116.6 degrees rather than 90.
+ *
+ * That reading is right and stays. What is wrong is **the value the emulator wrote for Theed**: the
+ * quarter turn it reads as faithfully puts the transport a quarter turn out in its hangar, and the
+ * correction is ours, in `SHUTTLE_TURN` below, rather than a different reading of the quaternion.
  */
 export function childYaw(c) {
   const w = Number(c.ow ?? 1);
@@ -165,6 +170,51 @@ export function moodOfRow(row, rig) {
   return /theed/i.test(String(row?.building ?? '')) ? 'theed' : 'calm';
 }
 
+/**
+ * Our corrections to the turn the emulator gives a shuttle, as the child's own yaw in its building's
+ * frame, by the building it stands in. The reference in `core3ref/` is left as the emulator wrote it;
+ * this is applied over it when the rows are written, by `correctShuttleTurn`.
+ *
+ * Theed's hangar is the one entry. The emulator writes its transport (0, 1, 0, 1), a quarter turn,
+ * and that is simply wrong: the hangar's only way out for a ship is the doorway at its own +Z, and
+ * every frame of Theed's landing and lift-off clears the building at 0 and runs into it at every
+ * other quarter turn (512 hull points inside it at the quarter turn the emulator gives, none at 0);
+ * the ramp's foot lands 2.8 m from Theed's own ticket collector at 0 and 19.9 m from it as written;
+ * and Theed's whole layout is the ordinary Naboo starport's turned half round, which takes that
+ * starport's transport (half a turn) to 0. The owner, looking at it, asked for exactly this.
+ *
+ * The outpost starports are not here although the same measurement points at them: their lift-off
+ * grazes the pad's tower by about a metre at the turn they are given, on a clip made for a ground
+ * starport, which is a lead and not a proof, and the owner will look at one first.
+ */
+export const SHUTTLE_TURN = {
+  'object/building/naboo/hangar_naboo_theed.iff': 0,
+};
+
+/** Our corrected yaw for a shuttle standing in this building, whichever way the template is spelled, or null. */
+export function shuttleTurnFix(building) {
+  const t = String(building ?? '').replace(/\/shared_([^/]+)$/, '/$1');
+  return Object.hasOwn(SHUTTLE_TURN, t) ? SHUTTLE_TURN[t] : null;
+}
+
+/**
+ * A travel row with our correction to its shuttle's turn, where there is one: **assigned, never
+ * added**, so a row corrected twice comes out the same. That matters because the two ways the
+ * children are read disagree about sharing -- a live read of the scripts files one list under both
+ * spellings of a building, and the reference in the checkout two -- and a correction added to the
+ * children rather than set on the rows would land twice on one path and once on the other.
+ *
+ * A child inside a building keeps its own yaw in the building's frame; one outside is in the world's,
+ * which is the building's turn and its own composed, as `placeChildren` wrote it.
+ */
+export function correctShuttleTurn(row) {
+  if (row?.kind !== 'shuttle') return row;
+  const fix = shuttleTurnFix(row.building);
+  if (fix === null) return row;
+  row.yaw = Math.round((row.cell > 0 ? fix : Number(row.byaw ?? 0) + fix) * 1e4) / 1e4;
+  return row;
+}
+
 /** The four clips a rig's round is made of, by the names the table gives them. */
 const RIG_ROLES = { land: 'land', lift: 'take_off', ground: 'loop_ground', sky: 'loop_sky' };
 
@@ -192,6 +242,116 @@ export function rigClipTable(names) {
     if (row.land && row.lift) out[mood] = row;
   }
   return out;
+}
+
+/**
+ * The roles whose clips say when things happen. The two loops are left out: the ground loop marks
+ * the engines starting and the take-off on its one and only frame, which is the pose it holds for a
+ * whole minute, and nothing says the client fired a loop's marks at all.
+ */
+export const RIG_FX_ROLES = ['land', 'lift'];
+
+const slash = (s) => String(s).replace(/\\/g, '/').replace(/^\/+/, '');
+const round4 = (x) => Math.round(x * 1e4) / 1e4;
+
+/**
+ * What one of the client effects a shuttle's client data names does (`FORM CLEF > 0001`), read to
+ * the byte on the four the transport names.
+ *
+ *   - `PSND`: a sound, played once.
+ *   - `CPAP`: a particle effect, then a float. Over all 1,037 retail client effects that float is
+ *     always there (sometimes with a byte and four more floats after it, which are not read), and it
+ *     is read as **how long the effect plays, in seconds**: an inference, and a good one, since the
+ *     calm landing lights its engines at 6.6 s and 6.6 + 15 is 21.6, with touchdown at 22.3.
+ *   - `CAMS`: four floats, a camera shake. Read as the amount, a rate, how long it lasts and the
+ *     radius in metres it reaches, from the pattern over the 193 files that carry one (a fighter
+ *     blowing up is 0.6, 20, 1.2, 96; a heavy footstep 0.02, 1, 0.67, 32). That reading is ours.
+ *
+ * `FFBK` (force feedback) and `CLGT` (a light) are not read.
+ */
+export function readShuttleEffect(root) {
+  if (!isForm(root) || root.type !== 'CLEF') throw new Error(`not a client effect: ${root?.type ?? root?.tag}`);
+  const out = { sounds: [], particles: [], shake: null };
+  const walk = (node) => {
+    if (isForm(node)) {
+      for (const c of node.children) walk(c);
+      return;
+    }
+    const d = node.data;
+    if (node.tag === 'PSND') {
+      const s = readCString(d, 0).value;
+      if (s) out.sounds.push(slash(s));
+    } else if (node.tag === 'CPAP') {
+      const r = readCString(d, 0);
+      if (r.value) out.particles.push({ prt: slash(r.value), seconds: r.next + 4 <= d.length ? round4(d.readFloatLE(r.next)) : 0 });
+    } else if (node.tag === 'CAMS' && d.length >= 16) {
+      out.shake = [0, 4, 8, 12].map((o) => round4(d.readFloatLE(o)));
+    }
+  };
+  walk(root);
+  return out;
+}
+
+/**
+ * A clip mark's joint and event, out of the name the file gives it: `hpevent_hp_engine_3_start` is the
+ * event `start` at the joint `hp_engine_3`, `hpevent_root_touchdown` is `touchdown` at `root`. Split at
+ * the last underscore, which is an inference that every mark in the shuttles' clips bears out: every
+ * joint it gives is in the skeleton and every event but the two loops' is one the client data names.
+ */
+export function splitHpEvent(name) {
+  const m = /^hpevent_(.+)_([^_]+)$/i.exec(String(name ?? ''));
+  return m ? { joint: m[1], event: m[2] } : null;
+}
+
+/**
+ * One landing's or lift-off's marks as the game plays them: seconds into the clip, the joint and the
+ * event, in order, from the messages `parseClipMessages` reads out of the clip and the timing
+ * `clipTiming` reads.
+ *
+ * Three kinds of mark are dropped and counted rather than kept:
+ *
+ *   - one on the frame after the clip's last (`frame >= frames`). The shuttle's landing marks the
+ *     take-off there, which played would sound the lift-off at the moment it touches down;
+ *   - one whose event the client data does not name (`idlground`, `idlsky`): nothing to play;
+ *   - one at a joint the skeleton does not have, which nothing could be placed at.
+ *
+ * The time is the frame over the clip's own rate, and a time scale the table plays the clip at
+ * scales it as it scales the clip.
+ */
+export function rigMarks(messages, timing, { timeScale = 1, events = null, joints = null } = {}) {
+  const dropped = { end: 0, unnamed: 0, joint: 0, other: 0 };
+  const marks = [];
+  if (!timing || !(timing.frames > 0)) return { marks, dropped };
+  const rate = (timing.fps > 0 ? timing.fps : 30) * (timeScale > 0 ? timeScale : 1);
+  const byName = joints ? new Map(joints.map((j) => [String(j).toLowerCase(), j])) : null;
+  const seen = new Set();
+  for (const m of messages ?? []) {
+    const hp = splitHpEvent(m.name);
+    if (!hp) {
+      dropped.other++;
+      continue;
+    }
+    if (m.frame >= timing.frames) {
+      dropped.end++;
+      continue;
+    }
+    const event = hp.event.toLowerCase();
+    if (events && !events.has(event)) {
+      dropped.unnamed++;
+      continue;
+    }
+    const joint = byName ? byName.get(hp.joint.toLowerCase()) : hp.joint;
+    if (!joint) {
+      dropped.joint++;
+      continue;
+    }
+    const key = `${m.frame}|${joint}|${event}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    marks.push({ t: round4(Math.max(0, m.frame) / rate), joint, event });
+  }
+  marks.sort((a, b) => a.t - b.t || (a.joint < b.joint ? -1 : a.joint > b.joint ? 1 : 0));
+  return { marks, dropped };
 }
 
 /**

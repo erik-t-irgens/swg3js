@@ -9,7 +9,7 @@
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { TICKETS_HELD, TRAVEL_PACK_VERSION, TRAVEL_TUNE, addTicket, canBoard, collectorWords, pickTicket, rigPose, rigTimes, shuttleAt, shuttleWords, slotHash, thingAt, ticketText, travelPackReadable, travelThingAt, travelThingsOf, type RigPose, type Ticket, type TravelRow, type TravelThing } from '../../../src/world/travelTerminal.ts';
+import { TICKETS_HELD, TRAVEL_PACK_VERSION, TRAVEL_TUNE, addTicket, canBoard, collectorWords, markFires, pickTicket, rigClip, rigPose, rigTimes, shuttleAt, shuttleShake, shuttleWords, slotHash, thingAt, ticketText, travelPackReadable, travelThingAt, travelThingsOf, windowOpen, type RigPose, type Ticket, type TravelRow, type TravelThing } from '../../../src/world/travelTerminal.ts';
 
 let passed = 0;
 function ok(cond: boolean, what: string): void {
@@ -207,10 +207,30 @@ const row = (over: Partial<TravelRow> = {}): TravelRow => ({ kind: 'terminal', b
   ok(rigTimes(null, '') === null && rigTimes({ file: 'r', parts: [], moods: { calm: { land: 'l', lift: 't' } }, seconds: { l: 26.6, t: 20 } }, 'theed')?.land === 26.6, "a rig's times are its clips' lengths, falling back on its first branch");
   assert.deepEqual(shuttleAt('a port', 1234), shuttleAt('a port', 1234, TRAVEL_TUNE, null));
   ok(true, 'and a shuttle with no rig keeps the round it always had');
-  ok(travelPackReadable(1) && travelPackReadable(2) && travelPackReadable(3) && !travelPackReadable(4) && !travelPackReadable(undefined), 'a pack of any version from before the rigs is still read, so an install that has not converted again keeps its terminals');
+  ok(travelPackReadable(1) && travelPackReadable(2) && travelPackReadable(3) && travelPackReadable(4) && !travelPackReadable(5) && !travelPackReadable(undefined), 'a pack of any version from before the rigs or their sounds is still read, so an install that has not converted again keeps its terminals');
   const cli = readFileSync(new URL('../cli.mjs', import.meta.url), 'utf8');
   const written = Number(/const TRAVEL_PACK_VERSION = (\d+);/.exec(cli)?.[1]);
   ok(written === TRAVEL_PACK_VERSION, `and the version the converter writes is the one the game reads (${written} and ${TRAVEL_PACK_VERSION})`);
+}
+
+// ---------------------------------------------------------------- what a shuttle's clips mark
+
+{
+  // A one-shot fires on the frame its mark is crossed, once, and not late.
+  ok(markFires(6.6, 6.58, 6.62, 0.5) && !markFires(6.6, 6.6, 6.7, 0.5) && !markFires(6.6, 6.5, 6.59, 0.5), 'a sound starts on the frame its mark is crossed, and on no frame either side of it');
+  ok(markFires(0.0333, -Infinity, 0.05, 0.5), 'a role just begun counts as coming from -Infinity, so a mark on its first instant still starts');
+  ok(!markFires(13.3, -Infinity, 15, 0.5), "and that same rule lets go of a mark crossed long ago: somebody who comes into view part way down does not hear the whole landing at once");
+  ok(!markFires(13.3, 13.2, 14, 0.5), 'nor does a frame that stalled past a mark play it late');
+  // A flame is a state: lit from its mark for exactly its seconds.
+  ok(windowOpen(6.6, 15, 6.6) && windowOpen(6.6, 15, 21.5) && !windowOpen(6.6, 15, 21.6) && !windowOpen(6.6, 15, 6.5), "a flame is lit from its mark for exactly as long as its client effect says, and at no other moment");
+  // The shake: the file's amount times our scale, falling to nothing at the file's radius.
+  const cams = [0.02, 50, 7, 50];
+  ok(Math.abs(shuttleShake(cams, 0, 1, 0, 25) - 0.5) < 1e-9, 'the take-off shakes the view by half with the camera on the pad, at our scale');
+  ok(Math.abs(shuttleShake(cams, 0, 1, 25, 25) - 0.25) < 1e-9 && shuttleShake(cams, 0, 1, 50, 25) === 0 && shuttleShake(cams, 0, 1, 80, 25) === 0, 'falling off to nothing at the radius the file gives');
+  ok(shuttleShake(cams, 0, 7, 0, 25) === 0 && shuttleShake(cams, 1, 0.5, 0, 25) === 0, 'and only for the seconds the file gives, from its mark');
+  ok(shuttleShake(null, 0, 1, 0, 25) === 0 && shuttleShake([0.02, 50], 0, 1, 0, 25) === 0 && shuttleShake(cams, 0, 1, 0, 1000) === 1, 'no shake is no shake, and none is ever past the whole of the view');
+  const rig = { file: 'r', parts: [], moods: { calm: { land: 'land:calm', lift: 'take_off:calm' }, theed: { land: 'land:theed', lift: 'take_off:theed', ground: 'loop_ground:theed' } }, seconds: {} };
+  ok(rigClip(rig, 'theed', 'land') === 'land:theed' && rigClip(rig, 'nowhere', 'lift') === 'take_off:calm' && rigClip(rig, 'calm', 'ground') === null && rigClip(null, '', 'land') === null, "a role's clip is its branch's, falling back on the rig's first branch as its times do");
 }
 
 // ---------------------------------------------------------------- boarding

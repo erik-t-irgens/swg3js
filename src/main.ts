@@ -7,7 +7,7 @@ import { BountyHunterKit } from './combat/bountyHunter';
 import { Effects } from './combat/effects';
 import { JediKit } from './combat/jedi';
 import type { ClassId, Kit, KitContext } from './combat/kit';
-import { ThirdPersonCamera } from './core/camera';
+import { setViewShake, ThirdPersonCamera } from './core/camera.ts';
 import { PortalRenderer, SHADOW_STRAYS } from './world/portalRender.ts';
 import { Input, type Action } from './core/input';
 import { Physics } from './core/physics';
@@ -105,7 +105,7 @@ import { BandBar } from './ui/bandBar.ts';
 import { TRAVEL_TUNE, addTicket, canBoard, collectorWords, pickTicket, rigTimes, shuttleAt, shuttleWords, ticketText, travelPackReadable, travelThingAt, travelThingsOf, type ShuttleState, type ShuttleTimes, type Ticket, type TravelRig, type TravelRow, type TravelThing } from './world/travelTerminal.ts';
 import { SHUTTLE_RIG_TUNE, ShuttleRigs } from './world/shuttleRigs.ts';
 import { FITTINGS_PACK_VERSION, fittingTally, fittingsOf, type FittingRow } from './world/fittings.ts';
-import type { EffectHandle } from './world/particles.ts';
+import { ParticleEffects, type EffectHandle } from './world/particles.ts';
 // How wet the world is, and which of our own injections a material is wearing: two numbers the
 // console's shine report needs, since how shiny a surface looks is partly the weather's.
 import { WEATHER_UNIFORMS } from './world/wetness.ts';
@@ -1908,14 +1908,22 @@ class App {
        * port's shuttle is in its round; `{ go: true }` puts you at the nearest terminal, which is
        * how to try one without finding a starport first; `{ open: true }` opens the window as E
        * does; `{ tune: { every, waits } }` moves the timetable, every number of which is ours, and
-       * `{ rigs: { reach, solid } }` the drawn shuttles' own two numbers. `shuttlesDrawn` is every
-       * shuttle standing on its rig: where it is in its round and whether it is solid just now.
+       * `{ rigs: { reach, solid, effects, near, late, shake, spaceEvery, spaceMove } }` the drawn
+       * shuttles' own. `shuttlesDrawn` is every shuttle standing on its rig: where it is in its round,
+       * whether it is solid just now, the room an indoor one's sounds are in, how many flames it has
+       * lit and how many are still dying away, and whether its idle loop is playing.
        */
       terminal: (opts: { go?: boolean; open?: boolean; tune?: Partial<typeof TRAVEL_TUNE>; rigs?: Partial<typeof SHUTTLE_RIG_TUNE> } = {}) => {
         if (opts.tune) Object.assign(TRAVEL_TUNE, opts.tune);
         if (opts.rigs) {
-          if (typeof opts.rigs.reach === 'number' && opts.rigs.reach > 0) SHUTTLE_RIG_TUNE.reach = opts.rigs.reach;
-          if (typeof opts.rigs.solid === 'boolean') SHUTTLE_RIG_TUNE.solid = opts.rigs.solid;
+          // Every number and switch of the drawn shuttles, each taken only as the kind it already is and
+          // never below nought; a reach of nought would take every shuttle down by another name.
+          const tune = SHUTTLE_RIG_TUNE as Record<string, number | boolean>;
+          for (const [k, v] of Object.entries(opts.rigs as Record<string, unknown>)) {
+            if (!(k in tune)) continue;
+            if (typeof tune[k] === 'boolean' && typeof v === 'boolean') tune[k] = v;
+            else if (typeof tune[k] === 'number' && typeof v === 'number' && Number.isFinite(v) && v >= 0 && (v > 0 || k !== 'reach')) tune[k] = v;
+          }
         }
         const things = this.travelThings();
         const here = packIdOf(this.world.planet, this.zone);
@@ -1987,7 +1995,9 @@ class App {
               ? "this world's travel pack was written before the models were named, so the terminals are there to press and not to see: run travel again and reload"
               : things.some((t) => t.kind === 'shuttle') && !things.some((t) => t.rig)
                 ? "this world's travel pack was written before the shuttles' rigs, so they stand still: run travel again and reload"
-                : '',
+                : Object.keys(this.travelRigs).length && !Object.values(this.travelRigs).some((r) => r.marks)
+                  ? "this world's travel pack was written before the shuttles' sounds and flames, so they land in silence and Theed's transport stands a quarter turn out: run travel again and reload"
+                  : '',
           tune: { ...TRAVEL_TUNE, ship: { ...SHIP_TERMINAL_TUNE }, rigs: { ...SHUTTLE_RIG_TUNE } },
         };
       },
@@ -6609,6 +6619,10 @@ class App {
     // Every voice and every looping source goes with the world, or a planet's beds would follow
     // the player onto the select screen and into the next character's world.
     this.audio.stopAll();
+    // The shuttles with it: they are in the scene and the physics that outlive the world, and left
+    // stood they would land, hum and lift off behind the select screen, heard from wherever the camera
+    // was left. The next arrival stands its own world's again.
+    this.shuttleRigs?.clear();
     this.savePlace(true);
     this.menu.hide();
     this.closePanels();
@@ -7128,8 +7142,12 @@ class App {
     // here" argument: a droid refused on arrival must be asked for again. On the page's own clock:
     // the audio clock stands at nought until the first click, and no collector anywhere stood before it.
     this.stepTravelStand(performance.now() / 1000);
-    // The shuttles, posed where their round says they are, on the clock everybody shares.
-    this.shuttleRigs?.update(this.cam.camera.position);
+    // The shuttles, posed where their round says they are, on the clock everybody shares, with the
+    // sounds, flames and shake their own clips mark; here, after the camera has moved and before the
+    // mixer steps, so a sound they start this frame is placed this frame. Only in a world: the mixer
+    // steps on the select screen and in the creator too, and a stand still in flight when the player
+    // left could otherwise land a shuttle, loud, behind either.
+    if (this.inWorld) this.shuttleRigs?.update(dt, this.cam.camera, this.world.scene.fog instanceof THREE.FogExp2 ? this.world.scene.fog : null);
     this.audio.update(dt, pose);
   }
 
@@ -9976,8 +9994,27 @@ class App {
       base: `${import.meta.env.BASE_URL}assets-private/`,
       prepare: (root) => this.world.prepareActor(root),
       forget: (materials) => this.world.forgetMaterials(materials),
+      // The flames and the smoke: effects of their own for the session, made in the world's scene just
+      // as the ships' and the weapons' are, so the world's own scan joins their batches to the portal
+      // renderer and compiles them. Named from the root of the packs, because a rig's effects are
+      // converted once for every world, beside the rigs in `travel/`.
+      fx: new ParticleEffects(this.world.scene, `${import.meta.env.BASE_URL}assets-private/`),
+      renderer: this.renderer,
+      audio: this.audio,
+      // The room a shuttle indoors stands in (Theed's hangar), numbered as every other sound's is. Asked
+      // a few times a second while that shuttle moves; `indoorsAt` answers "out in the open" with nothing
+      // allocated, and only a point really in a room pays for `buildingAt`'s record.
+      spaceAt: (x, y, z) => {
+        if (!this.world.indoorsAt(x, y, z)) return null;
+        const state = this.world.buildingAt(this.shuttleSpaceAt.set(x, y, z));
+        return state ? { building: this.spaceIdOf(state.building), cell: state.cell } : null;
+      },
+      shake: (amount) => setViewShake(amount),
     }));
   }
+
+  /** Where a shuttle's room is asked for; a field, so asking allocates nothing. */
+  private readonly shuttleSpaceAt = new THREE.Vector3();
 
   /**
    * The name a port's shuttle keeps its round under: the port's, where the world knows one, and the

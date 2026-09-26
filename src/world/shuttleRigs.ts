@@ -15,12 +15,22 @@
 // shuttle it replaced was a placed prop you could not walk through, and a parked hull you could would
 // be the first thing anybody noticed. Every number of ours is `SHUTTLE_RIG_TUNE`, live through
 // `__debug.terminal({ rigs: ... })`.
+//
+// And it is heard and seen working, from the game's own data and nothing of ours but the scales: its
+// idle loop while it is there, and at the moments its own clips mark (`travelTerminal.ts`, `RigMark`)
+// the sounds, the engine flames, the smoke on the pad and the shake its client data names. A sound is
+// an event, started on the frame its mark is crossed; a flame is a state, lit for as long as its mark's
+// window is open in the clip playing now, so whoever looks sees the same flames whenever they looked.
+// The effects are the session's own `ParticleEffects`, handed in (`ShuttleRigDeps.fx`) rather than made
+// here, which is also what lets a node test stand one in.
 
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { cleanTrimesh, Group, groups, RAPIER as R, TRIMESH_FLAGS, type Physics } from '../core/physics.ts';
+import { OUTSIDE, type SoundSpace } from '../audio/distance.ts';
+import type { EffectHandle } from './particles.ts';
 import { surfaces } from './surfaces.ts';
-import { rigPose, type RigClips, type RigPose, type ShuttleState, type ShuttleTimes, type TravelRig } from './travelTerminal.ts';
+import { markFires, rigPose, shuttleShake, windowOpen, type RigClips, type RigPose, type ShuttleState, type ShuttleTimes, type TravelRig } from './travelTerminal.ts';
 
 /** Every number of ours about the drawn shuttles. */
 export const SHUTTLE_RIG_TUNE = {
@@ -28,7 +38,64 @@ export const SHUTTLE_RIG_TUNE = {
   reach: 9000,
   /** Whether a parked shuttle is solid. */
   solid: true,
+  /** Whether the shuttles make their sounds, show their flames and shake the view at all. */
+  effects: true,
+  /** Metres from the camera within which a shuttle's flames are lit and its one-shot sounds start. */
+  near: 2000,
+  /**
+   * How much further off than the files say a shuttle's flames and smoke are still drawn: every emitter
+   * of the game's thins from 20 m and is gone at 200, and a transport lights its engines 360 m up, so
+   * with the files' own distances nobody on the pad would see them. Ten times is `near` again.
+   */
+  fxReach: 10,
+  /**
+   * Seconds after its mark a one-shot may still start: met later than this -- a shuttle come into
+   * view part way through its landing, a frame that stalled -- it is let go rather than played late.
+   */
+  late: 0.5,
+  /**
+   * What the client effect's shake amount is multiplied by to make the view's own 0-to-1 shake: the
+   * files write 0.02, and at this scale that is half the view's shake with the camera on the pad.
+   */
+  shake: 25,
+  /**
+   * Seconds between asks of which room an indoor shuttle's sounds are in (Theed's hangar), while it is
+   * shown and moving: its approach comes in through the hangar's doorway and its lift-off leaves by it.
+   */
+  spaceEvery: 0.25,
+  /** Metres its hull must have moved since the last such ask before it is asked again; a parked hull asks nothing. */
+  spaceMove: 1,
 };
+
+/** The session's particle effects, as much of them as the shuttles use (`ParticleEffects`). */
+export interface ShuttleFx {
+  prepare(file: string, renderer?: THREE.WebGLRenderer | null): Promise<boolean>;
+  place(file: string, matrix: THREE.Matrix4, contained: boolean, transient?: boolean, frame?: THREE.Matrix4 | null, solid?: boolean, options?: { sound?: boolean; reach?: number }): EffectHandle;
+  move(handle: EffectHandle, matrix: THREE.Matrix4): void;
+  remove(handle: EffectHandle): void;
+  /** Live particles of one placed effect: 0 while it is loading or asleep, and once what it made has died away. */
+  particlesOf(handle: EffectHandle): number;
+  update(dt: number, camera: THREE.Camera, fog: THREE.FogExp2 | null): void;
+}
+
+/** Where a sound plays, and the room it plays in; the mixer's own options, as much as is used here. */
+export interface ShuttleSoundAt {
+  x?: number;
+  y?: number;
+  z?: number;
+  space?: SoundSpace;
+}
+
+/** The mixer, as much of it as the shuttles use (`AudioSystem`). */
+export interface ShuttleAudio {
+  /** Ask the bank for what these will need, ahead of the moment they are played. Never awaited. */
+  prepare(ids: Iterable<string>): void;
+  play(id: string, options?: ShuttleSoundAt): number;
+  loop(id: string, options?: ShuttleSoundAt): number;
+  move(key: number, x: number, y: number, z: number): void;
+  stop(key: number, fade?: number): void;
+  setSpace(key: number, space: SoundSpace): void;
+}
 
 /** What a stood shuttle needs from the game: where it is in its round, now. */
 export interface ShuttleClock {
@@ -45,7 +112,57 @@ export interface ShuttleRigDeps {
   prepare(root: THREE.Object3D): Promise<void>;
   /** Out of the portal renderer's set and the cascades' map, before a material is disposed. */
   forget(materials: Iterable<THREE.Material>): void;
+  /**
+   * The session's particle effects the flames and the smoke play in, updated from `update`; left out,
+   * nothing is lit. The world's own scan joins their batches to the portal renderer and compiles them,
+   * as it does the ships' and the weapons' effects, since they are made in the same scene.
+   */
+  fx?: ShuttleFx | null;
+  /** What the effects' textures are uploaded with ahead of their first quad; null in a test. */
+  renderer?: THREE.WebGLRenderer | null;
+  /** The mixer; left out, the shuttles are silent. */
+  audio?: ShuttleAudio | null;
+  /**
+   * The sound space of the room a point stands in, or null out in the open (Theed's hangar is a room).
+   * Asked a few times a second at most, and only for a shuttle indoors that is moving.
+   */
+  spaceAt?(x: number, y: number, z: number): SoundSpace | null;
+  /** Shake the view this frame, 0 to 1 (`setViewShake`); the strongest ask of the frame wins. */
+  shake?(amount: number): void;
 }
+
+/** A flame or a smoke a mark lights, while its window is open: its handle, or null while it is out. */
+interface Lit {
+  t: number;
+  seconds: number;
+  file: string;
+  joint: THREE.Object3D;
+  handle: EffectHandle | null;
+}
+
+/** The sounds a mark starts once. */
+interface Shot {
+  t: number;
+  sounds: string[];
+  joint: THREE.Object3D;
+}
+
+/** A shake a mark opens. */
+interface Shake {
+  t: number;
+  shake: number[];
+  joint: THREE.Object3D;
+}
+
+/** What one clip of a stood shuttle does and when, bound to that shuttle's own joints. */
+interface ClipFx {
+  lit: Lit[];
+  shots: Shot[];
+  shakes: Shake[];
+}
+
+/** How many one-shots a shuttle keeps moving with their joints at once; the oldest is let go past it. */
+const VOICES_KEPT = 8;
 
 /** A rig as loaded: its joints, its clips, and each piece's model with the joint it rides. */
 interface RigAsset {
@@ -70,10 +187,44 @@ interface Stood {
   hull: { vertices: Float32Array; indices: Uint32Array } | null;
   collider: R.Collider | null;
   role: RigPose['role'];
+  /** What its landing and its lift-off do and when, bound to its own joints; empty for a pack from before. */
+  fx: Partial<Record<RigPose['role'], ClipFx>>;
+  /** The joints any of that happens at, whose world matrices are brought up to date before it is read. */
+  fxJoints: THREE.Object3D[];
+  /** The role whose clip `fxAt` was read in, or null while it was shown in none. */
+  fxRole: RigPose['role'] | null;
+  /** Last frame's seconds in that clip: a one-shot fires on the frame its mark is crossed. */
+  fxAt: number;
+  /** The joint the idle loop follows and the view's distance is measured from. */
+  body: THREE.Object3D;
+  /** The idle loop its client data names, its voice while it plays (0 while it does not), and whether it was asked for this showing. */
+  ambient: string | null;
+  loop: number;
+  idleAsked: boolean;
+  /** Every sound its client data can play, asked of the bank at `stand` and again as each clip begins. */
+  sounds: string[];
+  /** The one-shots started, moved with their joints while it is shown. */
+  voices: { key: number; joint: THREE.Object3D }[];
+  /**
+   * Flames put out and still dying away, moved with their joints while it is shown, and taken out of
+   * the effects once what they made is gone (or on `clear`), since a standing effect never ends by itself.
+   */
+  dying: { handle: EffectHandle; joint: THREE.Object3D }[];
+  /**
+   * The room an indoor shuttle's sounds are in, where its hull is now: this record is the shuttle's own,
+   * written in place, and the loop and every sound it started are pointed at it when it changes. Out in
+   * the open it stays outside and is never handed to the mixer.
+   */
+  space: SoundSpace;
+  /** Where the hull was when the room was last asked for, and the seconds until it may be asked again. */
+  spaceFrom: THREE.Vector3;
+  spaceClock: number;
 }
 
 const tmpPose: RigPose = { role: 'sky', seconds: 0, shown: false };
 const tmpV = new THREE.Vector3();
+const tmpCam = new THREE.Vector3();
+const tmpJoint = new THREE.Vector3();
 
 export class ShuttleRigs {
   private readonly deps: ShuttleRigDeps;
@@ -84,14 +235,32 @@ export class ShuttleRigs {
   note = '';
   /** Moved on by every `clear`, so a stand begun for a world that has gone is dropped. */
   private generation = 0;
+  /** The particle files already prepared this session, so each is prepared once however many shuttles use it. */
+  private readonly preparedFx = new Map<string, Promise<boolean>>();
 
   constructor(deps: ShuttleRigDeps) {
     this.deps = deps;
   }
 
-  /** How many are stood, and each one's pose, for the console. */
-  describe(): { stood: number; note: string; shuttles: { key: string; role: string; shown: boolean; solid: boolean; inside: boolean }[] } {
-    return { stood: this.stood.length, note: this.note, shuttles: this.stood.map((s) => ({ key: s.key, role: s.role, shown: s.shown, solid: !!s.collider, inside: s.inside })) };
+  /** How many are stood, and each one's pose and what it is doing, for the console. */
+  describe(): { stood: number; note: string; shuttles: { key: string; role: string; shown: boolean; solid: boolean; inside: boolean; room: string | null; lit: number; dying: number; idling: boolean; marks: number }[] } {
+    return {
+      stood: this.stood.length,
+      note: this.note,
+      shuttles: this.stood.map((s) => ({
+        key: s.key,
+        role: s.role,
+        shown: s.shown,
+        solid: !!s.collider,
+        inside: s.inside,
+        // Which room its sounds are in just now, for a shuttle indoors: "building/cell", or outside.
+        room: s.inside ? (s.space.building === OUTSIDE.building ? 'outside' : `${s.space.building}/${s.space.cell}`) : null,
+        lit: (s.fxRole ? s.fx[s.fxRole]?.lit ?? [] : []).filter((l) => l.handle).length,
+        dying: s.dying.length,
+        idling: s.loop !== 0,
+        marks: Object.values(s.fx).reduce((n, c) => n + (c ? c.lit.length + c.shots.length + c.shakes.length : 0), 0),
+      })),
+    };
   }
 
   /** Every stood shuttle's root, for the motion blur: the root stays on its pad and the joints move. */
@@ -192,22 +361,290 @@ export class ShuttleRigs {
       this.note = `the rig ${rig.file} has no ${actions.land ? 'lift-off' : 'landing'} clip`;
       return false;
     }
-    this.stood.push({ key, root, mixer, actions, current: null, clock, inside, shown: false, hull: null, collider: null, role: 'sky' });
+    // What its clips mark, bound to this shuttle's own joints, and its effects made ready before it is
+    // ever shown: loaded, their batches made (hidden, so the world's scan compiles them) and their
+    // textures uploaded, so the first flame does not wait on any of it.
+    const bound = this.bindFx(rig, clips, joints);
+    if (bound.files.length && this.deps.fx) {
+      await this.prepareFx(bound.files);
+      if (generation !== this.generation) {
+        this.deps.scene.remove(root);
+        return false;
+      }
+    }
+    // Its sounds asked for now as well: the mixer drops a one-shot whose samples have not arrived
+    // within a tenth of a second or so of being played, and a take-off's are hundreds of kilobytes,
+    // so asked for only when its mark came round the first landing anybody watched would be silent.
+    const sounds = soundsOf(rig);
+    if (sounds.length) this.deps.audio?.prepare(sounds);
+    this.stood.push({
+      key,
+      root,
+      mixer,
+      actions,
+      current: null,
+      clock,
+      inside,
+      shown: false,
+      hull: null,
+      collider: null,
+      role: 'sky',
+      fx: bound.fx,
+      fxJoints: bound.joints,
+      fxRole: null,
+      fxAt: -Infinity,
+      body: joints.getObjectByName('root') ?? joints,
+      ambient: rig.ambient ?? null,
+      loop: 0,
+      idleAsked: false,
+      sounds,
+      voices: [],
+      dying: [],
+      space: { building: OUTSIDE.building, cell: OUTSIDE.cell },
+      spaceFrom: new THREE.Vector3(Infinity, Infinity, Infinity),
+      spaceClock: 0,
+    });
     return true;
   }
 
-  /** Put every shuttle near the camera where its round says it is. */
-  update(camera: THREE.Vector3): void {
+  /**
+   * A rig's marks for one shuttle: each landing and lift-off mark turned into what it does -- the
+   * sounds it starts, the effects it lights and for how long, the shake it opens -- at the joint it
+   * names on this shuttle's own clone. A mark whose event or joint is not there does nothing, and a
+   * pack from before the marks binds nothing at all.
+   */
+  private bindFx(rig: TravelRig, clips: RigClips, joints: THREE.Object3D): { fx: Stood['fx']; joints: THREE.Object3D[]; files: string[] } {
+    const fx: Stood['fx'] = {};
+    const used = new Set<THREE.Object3D>();
+    const files = new Set<string>();
+    const events = rig.events ?? {};
+    for (const role of ['land', 'lift'] as const) {
+      const name = clips[role];
+      const marks = name ? rig.marks?.[name] : undefined;
+      if (!marks?.length) continue;
+      const c: ClipFx = { lit: [], shots: [], shakes: [] };
+      for (const m of marks) {
+        const ev = events[m.event];
+        const joint = joints.getObjectByName(m.joint);
+        if (!ev || !joint) continue;
+        if (ev.sounds?.length) c.shots.push({ t: m.t, sounds: ev.sounds, joint });
+        for (const p of ev.particles ?? []) {
+          if (!p.file || !(p.seconds > 0)) continue;
+          c.lit.push({ t: m.t, seconds: p.seconds, file: p.file, joint, handle: null });
+          files.add(p.file);
+        }
+        if (ev.shake && ev.shake.length >= 4) c.shakes.push({ t: m.t, shake: ev.shake, joint });
+        used.add(joint);
+      }
+      fx[role] = c;
+    }
+    return { fx, joints: [...used], files: [...files] };
+  }
+
+  /** Each particle file prepared once for the session, however many shuttles use it. */
+  private prepareFx(files: string[]): Promise<unknown> {
+    const fx = this.deps.fx;
+    if (!fx) return Promise.resolve();
+    const waits: Promise<boolean>[] = [];
+    for (const f of files) {
+      let p = this.preparedFx.get(f);
+      if (!p) {
+        p = fx.prepare(f, this.deps.renderer ?? null).catch(() => false);
+        this.preparedFx.set(f, p);
+      }
+      waits.push(p);
+    }
+    return Promise.all(waits);
+  }
+
+  /**
+   * Put every shuttle near the camera where its round says it is, with its sounds, flames and shake
+   * where its clips say, and step the effects those are played in.
+   */
+  update(dt: number, camera: THREE.Camera, fog: THREE.FogExp2 | null = null): void {
     const reach = SHUTTLE_RIG_TUNE.reach;
+    camera.updateMatrixWorld();
+    tmpCam.setFromMatrixPosition(camera.matrixWorld);
     for (const s of this.stood) {
       const pose = rigPose(s.clock.state(), s.clock.times, tmpPose);
-      const near = s.root.position.distanceToSquared(camera) < reach * reach;
+      const near = s.root.position.distanceToSquared(tmpCam) < reach * reach;
       s.role = pose.role;
       s.shown = pose.shown && near;
       s.root.visible = s.shown;
       if (s.shown) this.pose(s, pose);
       this.solid(s, s.shown && pose.role === 'ground' && SHUTTLE_RIG_TUNE.solid);
+      this.effects(s, pose, dt);
     }
+    this.deps.fx?.update(dt, camera, fog);
+  }
+
+  /**
+   * One shuttle's sounds, flames and shake for this frame, after it has been posed.
+   *
+   * The idle loop plays for as long as it is shown and follows its hull. A one-shot starts on the frame
+   * its mark is crossed (`markFires`), a role just begun counting as coming from -Infinity so a mark
+   * on its first instant is not lost, and follows its joint while it plays. A flame is lit for exactly
+   * as long as its window is open in the clip playing now (`windowOpen`), placed at its joint in the
+   * world with no frame and moved with it every frame, and put out -- told to make no more, so what it
+   * made dies away where it is -- when the window closes, the role changes or the shuttle is not shown.
+   *
+   * A flame is placed as a standing effect and not a passing one. `ParticleEffects` ends a passing
+   * effect whose emitters never run out once it is two of its particles' lives and a second and a half
+   * old, and drops every particle it has at once: the transport's engines went out 6.5 s into their 15
+   * and the pad's smoke 3.5 s into its 5. A standing effect plays its own timing for as long as it is
+   * placed, so its window is what ends it. What that costs is that the effects run a standing effect
+   * ahead by its particles' longest life the first time it wakes (2.5 s for the engines, 1 s for the
+   * smoke), so a flame is a whole flame on its first frame -- which is also what makes it the same
+   * flame for somebody who comes into view part way through its window -- and that nothing takes one
+   * away but its owner, which `sweepDying` does once what it made has died away.
+   */
+  private effects(s: Stood, pose: RigPose, dt: number): void {
+    const on = s.shown && SHUTTLE_RIG_TUNE.effects;
+    const role = on ? pose.role : null;
+    const audio = this.deps.audio ?? null;
+    const changed = role !== s.fxRole;
+    if (changed) {
+      this.putOut(s);
+      s.fxRole = role;
+      s.fxAt = -Infinity;
+    }
+    if (!on) {
+      this.stopLoop(s);
+      this.sweepDying(s, false);
+      return;
+    }
+    for (const j of s.fxJoints) j.updateWorldMatrix(true, false);
+    s.body.updateWorldMatrix(true, false);
+    tmpJoint.setFromMatrixPosition(s.body.matrixWorld);
+    // Asked again on each change of role -- a building that has streamed out and back is a new room --
+    // and as the hull moves, so the approach and the lift-off are heard where they are flown.
+    this.trackSpace(s, dt, changed);
+    // A clip begun: its sounds asked for again, since the bank gives back what nothing has played for
+    // a while and a round is many minutes long. What is already in costs a lookup apiece.
+    if (changed && audio && s.sounds.length) audio.prepare(s.sounds);
+    const space = s.inside ? s.space : undefined;
+    if (audio && s.ambient) {
+      // Asked for once a showing: a mixer with no such sound answers 0, and asking again every frame
+      // would be a refusal a frame for as long as it stands there.
+      if (!s.idleAsked) {
+        s.idleAsked = true;
+        s.loop = audio.loop(s.ambient, { x: tmpJoint.x, y: tmpJoint.y, z: tmpJoint.z, space });
+      } else if (s.loop) audio.move(s.loop, tmpJoint.x, tmpJoint.y, tmpJoint.z);
+    }
+    const near = tmpJoint.distanceTo(tmpCam) <= SHUTTLE_RIG_TUNE.near;
+    const c = role ? s.fx[role] : undefined;
+    const now = pose.seconds;
+    if (c) {
+      if (near && audio) {
+        for (const shot of c.shots) {
+          if (!markFires(shot.t, s.fxAt, now, SHUTTLE_RIG_TUNE.late)) continue;
+          tmpJoint.setFromMatrixPosition(shot.joint.matrixWorld);
+          for (const id of shot.sounds) {
+            const key = audio.play(id, { x: tmpJoint.x, y: tmpJoint.y, z: tmpJoint.z, space });
+            if (!key) continue;
+            s.voices.push({ key, joint: shot.joint });
+            if (s.voices.length > VOICES_KEPT) s.voices.shift();
+          }
+        }
+      }
+      const fx = this.deps.fx;
+      if (fx) {
+        for (const l of c.lit) {
+          if (near && windowOpen(l.t, l.seconds, now)) {
+            if (!l.handle) l.handle = fx.place(l.file, l.joint.matrixWorld, s.inside, false, null, false, { reach: SHUTTLE_RIG_TUNE.fxReach });
+            else fx.move(l.handle, l.joint.matrixWorld);
+          } else if (l.handle) this.out(s, l);
+        }
+      }
+      const shake = this.deps.shake;
+      if (shake) {
+        for (const k of c.shakes) {
+          tmpJoint.setFromMatrixPosition(k.joint.matrixWorld);
+          const amount = shuttleShake(k.shake, k.t, now, tmpJoint.distanceTo(tmpCam), SHUTTLE_RIG_TUNE.shake);
+          if (amount > 0) shake(amount);
+        }
+      }
+    }
+    s.fxAt = now;
+    if (audio) {
+      for (const v of s.voices) {
+        tmpJoint.setFromMatrixPosition(v.joint.matrixWorld);
+        audio.move(v.key, tmpJoint.x, tmpJoint.y, tmpJoint.z);
+      }
+    }
+    this.sweepDying(s, true);
+  }
+
+  /**
+   * Which room an indoor shuttle's sounds are in, asked where its hull is now (`tmpJoint`) rather than
+   * at its pad: Theed's transport flies its approach in through the hangar's doorway from some seventy
+   * metres out and leaves by it, and all of that is out in the open, heard muffled from the hangar and
+   * dry from the street. Asked when `force` says so (a new clip) and otherwise at most every
+   * `spaceEvery` seconds once the hull has moved `spaceMove` metres since the last ask, so a parked hull
+   * asks nothing at all. The answer is copied into the shuttle's own record, and when it differs the
+   * loop and every sound it started are pointed at that record.
+   */
+  private trackSpace(s: Stood, dt: number, force: boolean): void {
+    const spaceAt = this.deps.spaceAt;
+    if (!s.inside || !spaceAt) return;
+    s.spaceClock -= dt;
+    if (!force) {
+      if (s.spaceClock > 0) return;
+      const move = SHUTTLE_RIG_TUNE.spaceMove;
+      if (tmpJoint.distanceToSquared(s.spaceFrom) < move * move) return;
+    }
+    s.spaceClock = SHUTTLE_RIG_TUNE.spaceEvery;
+    s.spaceFrom.copy(tmpJoint);
+    const found = spaceAt(tmpJoint.x, tmpJoint.y, tmpJoint.z);
+    const building = found ? found.building : OUTSIDE.building;
+    const cell = found ? found.cell : OUTSIDE.cell;
+    if (building === s.space.building && cell === s.space.cell) return;
+    s.space.building = building;
+    s.space.cell = cell;
+    const audio = this.deps.audio;
+    if (!audio) return;
+    if (s.loop) audio.setSpace(s.loop, s.space);
+    for (const v of s.voices) audio.setSpace(v.key, s.space);
+  }
+
+  /** A flame's window has closed: it makes no more and what it made dies away, still riding its joint. */
+  private out(s: Stood, l: Lit): void {
+    if (!l.handle) return;
+    l.handle.rateScale = 0;
+    s.dying.push({ handle: l.handle, joint: l.joint });
+    l.handle = null;
+  }
+
+  /** Every flame a shuttle has lit, put out. */
+  private putOut(s: Stood): void {
+    for (const c of Object.values(s.fx)) if (c) for (const l of c.lit) this.out(s, l);
+  }
+
+  /**
+   * The flames still dying away: moved with their joints while it is shown, and taken out of the
+   * effects the moment none of what they made is left. A standing effect never ends by itself, so this
+   * is the only thing that takes one away; one still loading or asleep for distance has nothing left
+   * to die away and goes at once.
+   */
+  private sweepDying(s: Stood, shown: boolean): void {
+    const fx = this.deps.fx;
+    if (!fx || !s.dying.length) return;
+    for (let i = s.dying.length - 1; i >= 0; i--) {
+      const d = s.dying[i];
+      if (fx.particlesOf(d.handle) === 0) {
+        fx.remove(d.handle);
+        s.dying.splice(i, 1);
+        continue;
+      }
+      if (shown) fx.move(d.handle, d.joint.matrixWorld);
+    }
+  }
+
+  private stopLoop(s: Stood): void {
+    s.idleAsked = false;
+    if (!s.loop) return;
+    this.deps.audio?.stop(s.loop);
+    s.loop = 0;
   }
 
   private pose(s: Stood, pose: RigPose): void {
@@ -250,10 +687,28 @@ export class ShuttleRigs {
     s.collider = this.deps.physics.world.createCollider(desc);
   }
 
-  /** Take every shuttle down and let go of the rigs: the world they stood in is going. */
+  /**
+   * Take every shuttle down and let go of the rigs: the world they stood in is going. Every effect a
+   * shuttle placed goes with it, lit or still dying away, and every sound it started stops, the idle
+   * loop first; the effects themselves are the session's and stay, prepared, for the next world.
+   */
   clear(): void {
     this.generation++;
+    const fx = this.deps.fx;
+    const audio = this.deps.audio;
     for (const s of this.stood) {
+      for (const c of Object.values(s.fx)) {
+        if (!c) continue;
+        for (const l of c.lit) {
+          if (l.handle) fx?.remove(l.handle);
+          l.handle = null;
+        }
+      }
+      for (const d of s.dying) fx?.remove(d.handle);
+      s.dying.length = 0;
+      this.stopLoop(s);
+      if (audio) for (const v of s.voices) audio.stop(v.key);
+      s.voices.length = 0;
       this.solid(s, false);
       s.mixer.stopAllAction();
       s.mixer.uncacheRoot(s.root.children[0]);
@@ -271,6 +726,14 @@ export class ShuttleRigs {
       });
     }
   }
+}
+
+/** Every sound a rig's client data can play: its idle loop and each event's sounds, once apiece. */
+function soundsOf(rig: TravelRig): string[] {
+  const out = new Set<string>();
+  if (rig.ambient) out.add(rig.ambient);
+  for (const ev of Object.values(rig.events ?? {})) for (const id of ev.sounds ?? []) if (id) out.add(id);
+  return [...out];
 }
 
 /** The hull's triangles in the world, from every mesh under a posed root; null when there are none. */

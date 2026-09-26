@@ -19,10 +19,12 @@
 
 /**
  * The pack this file reads. 2 added the model each row is drawn with; 3 the rig each shuttle lands
- * with. Every version from 1 up is still read: an install that has not converted again keeps its
- * terminals, and its shuttles stand still as they always did.
+ * with; 4 what each rig sounds and shows as it comes and goes, and Theed's transport turned square in
+ * its hangar. Every version from 1 up is still read: an install that has not converted again keeps
+ * its terminals, a pack from before the rigs stands its shuttles still as they always did, and one
+ * from before 4 lands them in silence.
  */
-export const TRAVEL_PACK_VERSION = 3;
+export const TRAVEL_PACK_VERSION = 4;
 
 /** Whether this build reads a travel.json of that version. */
 export function travelPackReadable(version: unknown): boolean {
@@ -38,14 +40,41 @@ export interface RigClips {
 }
 
 /**
+ * What a shuttle's client data does at one of its events, out of the client effect it names: sounds
+ * played once, particle effects lit for so many seconds (the float after the effect's name, read as a
+ * lifetime), and a camera shake as the file's four numbers (the amount, a rate, how many seconds and
+ * the radius in metres, which reading is ours).
+ */
+export interface RigEvent {
+  sounds?: string[];
+  particles?: { file: string; seconds: number }[];
+  shake?: number[] | null;
+}
+
+/** A moment a rig's clip marks: seconds into the clip, the joint it happens at, and which event. */
+export interface RigMark {
+  t: number;
+  joint: string;
+  event: string;
+}
+
+/**
  * A shuttle's rig as the pack carries it: the skeleton and its clips, the pieces that hang on its
  * joints, the clips by branch, and each clip's length. Every file is from the root of the packs.
+ *
+ * From pack 4 it also carries what it sounds and shows: the loop its client data plays while it is
+ * there (`ambient`), what each of its events does (`events`), and when in each landing and lift-off
+ * clip each event happens (`marks`, by the clip's name). A pack from before has none of the three and
+ * its shuttles land in silence.
  */
 export interface TravelRig {
   file: string;
   parts: { joint: string; file: string; bounds?: { min: number[]; max: number[] } }[];
   moods: Record<string, RigClips>;
   seconds: Record<string, number>;
+  ambient?: string | null;
+  events?: Record<string, RigEvent>;
+  marks?: Record<string, RigMark[]>;
 }
 
 /** One travel thing, as a world's pack carries it. */
@@ -361,6 +390,52 @@ export function rigPose(s: ShuttleState, times: ShuttleTimes, out: RigPose): Rig
       out.shown = false;
   }
   return out;
+}
+
+/**
+ * The clip a rig plays in a role for one branch, or null where it has none: the name its marks are
+ * filed under. Falls back on the rig's first branch as `rigTimes` does.
+ */
+export function rigClip(rig: TravelRig | null | undefined, mood: string, role: RigPose['role']): string | null {
+  const clips = rig ? rig.moods[mood] ?? Object.values(rig.moods)[0] : undefined;
+  return clips?.[role] ?? null;
+}
+
+/**
+ * Whether a one-shot marked at `t` is to start on a frame that took the clip from `prev` to `now`: it
+ * was crossed, `prev < t <= now`, and not so long ago that starting it now would be starting it late.
+ *
+ * A role that has only just begun counts as having come from -Infinity, so a mark on the clip's very
+ * first instant still fires; and that same rule is what keeps somebody who comes into view part way
+ * through a landing from hearing every sound it has already made at once, because each of those was
+ * crossed more than `late` seconds ago.
+ */
+export function markFires(t: number, prev: number, now: number, late: number): boolean {
+  return t > prev && t <= now && now - t <= late;
+}
+
+/**
+ * Whether something a mark lights for `seconds` is lit at `now`: from its mark to its end, and never
+ * outside it. A state rather than an event, so a flame is lit on the frame anybody sees it whether or
+ * not they saw it lit, and two people looking at one shuttle see the same flames.
+ */
+export function windowOpen(t: number, seconds: number, now: number): boolean {
+  return now >= t && now < t + seconds;
+}
+
+/**
+ * How hard a client effect's shake shakes the view, 0 to 1: the file's amount times our scale, falling
+ * off to nothing at the file's radius, for as long as the file says, from its mark. `shake` is the
+ * file's four numbers as written (amount, rate, seconds, radius); anything shorter shakes nothing.
+ */
+export function shuttleShake(shake: readonly number[] | null | undefined, t: number, now: number, distance: number, scale: number): number {
+  if (!shake || shake.length < 4) return 0;
+  const amount = shake[0];
+  const seconds = shake[2];
+  const radius = shake[3];
+  if (!(amount > 0) || !(radius > 0) || !windowOpen(t, seconds, now)) return 0;
+  const near = 1 - distance / radius;
+  return near > 0 ? Math.min(1, amount * scale * near) : 0;
 }
 
 /** What a shuttle's state reads as under the collector, in words. */

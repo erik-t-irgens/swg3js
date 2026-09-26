@@ -6,7 +6,7 @@
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { childYaw, kindOfChild, modelOfKind, moodOfRow, placeChildren, readTravelBuildings, rigClipTable, rigOfRow, rowsLost, TRAVEL_MODELS, TRAVEL_OWN_MODELS, travelCounts, yawOfQuat } from '../travel.mjs';
+import { childYaw, correctShuttleTurn, kindOfChild, modelOfKind, moodOfRow, placeChildren, readShuttleEffect, readTravelBuildings, RIG_FX_ROLES, rigClipTable, rigMarks, rigOfRow, rowsLost, SHUTTLE_TURN, shuttleTurnFix, splitHpEvent, TRAVEL_MODELS, TRAVEL_OWN_MODELS, travelCounts, yawOfQuat } from '../travel.mjs';
 
 let passed = 0;
 function ok(cond: boolean, what: string): void {
@@ -74,12 +74,111 @@ function note(what: string): void {
   ok(Math.abs(childYaw({ ow: 0.909306, oy: -0.416129 }) + 0.858) < 0.01, "a child's own turn is read the same way, out of its ow and oy");
   ok(childYaw({}) === 0, 'and a child with no turn at all faces along the building');
   // Theed's transport is written (0, 1, 0, 1): a quarter turn that is not unit length. Read as if it
-  // were, it stood at 116.6 degrees and sat crooked in its hangar.
+  // were, it stood at 116.6 degrees rather than 90.
   ok(Math.abs(childYaw({ oy: 1, ow: 1 }) - Math.PI / 2) < 1e-9, 'a quarter turn written at any length is a quarter turn');
   ok(Math.abs(childYaw({ oy: 0.7, ow: 0.7 }) - Math.PI / 2) < 1e-9, 'including the 0.7 and 0.7 the scripts write for one');
   const ref = JSON.parse(readFileSync(new URL('../core3ref/travel-buildings.json', import.meta.url), 'utf8')) as { $map: [string, { kind: string; yaw: number }[]][] };
   const theed = ref.$map.find(([t]) => t === 'object/building/naboo/hangar_naboo_theed.iff')?.[1].find((k) => k.kind === 'shuttle');
-  ok(!!theed && Math.abs(theed.yaw - Math.PI / 2) < 1e-3, `and the reference in the checkout carries Theed's transport square in its hangar (${theed ? ((theed.yaw * 180) / Math.PI).toFixed(1) : '?'} degrees)`);
+  // The reference is the emulator's reading and is left as it wrote it: the quarter turn is its value,
+  // and a wrong one (see below), which is corrected when the rows are written and never in here.
+  ok(!!theed && Math.abs(theed.yaw - Math.PI / 2) < 1e-3, `and the reference in the checkout keeps the emulator's own turn for Theed's transport, which is ours to correct (${theed ? ((theed.yaw * 180) / Math.PI).toFixed(1) : '?'} degrees)`);
+}
+
+// ---------------------------------------------------------------- our correction of Theed's turn
+
+{
+  // The emulator's quarter turn puts Theed's transport a quarter turn out in its hangar: its only way
+  // out for a ship is the doorway at the hangar's own +Z, and the transport's clips fly in and out that
+  // way only at a child yaw of 0. The correction is ours and is set on the row, whichever spelling of
+  // the building the row names, and set rather than added, so a row corrected twice is the same row.
+  ok(shuttleTurnFix('object/building/naboo/hangar_naboo_theed.iff') === 0 && shuttleTurnFix('object/building/naboo/shared_hangar_naboo_theed.iff') === 0, "Theed's hangar is corrected under both of its names");
+  ok(shuttleTurnFix('object/building/naboo/shared_starport_naboo.iff') === null && shuttleTurnFix('object/building/military/shared_outpost_starport.iff') === null && shuttleTurnFix(undefined) === null, 'and nothing else is: not the other starports, and not the outposts, which the owner is to look at first');
+  ok(Object.keys(SHUTTLE_TURN).length === 1, 'the table of our corrections holds Theed and only Theed');
+  const kids = [
+    { kind: 'shuttle', model: null, x: 0, y: 7.97928, z: 0, yaw: Math.round((Math.PI / 2) * 1e4) / 1e4, cell: 5 },
+    { kind: 'collector', model: '3po_protocol_droid_silver', x: -10, y: 10, z: 0, yaw: -1.5708, cell: 5 },
+  ];
+  // The live read files one list under both spellings, as `readBuildingChildren` does; the rows it
+  // makes are corrected exactly once however many times the correction is run over them.
+  const live = new Map([
+    ['object/building/naboo/hangar_naboo_theed.iff', kids],
+    ['object/building/naboo/shared_hangar_naboo_theed.iff', kids],
+  ]);
+  const q = [Math.cos(0.7054 / 2), 0, Math.sin(0.7054 / 2), 0];
+  const rows = placeChildren([{ template: 'object/building/naboo/shared_hangar_naboo_theed.iff', x: -4795.27, y: 5.95, z: 4238.79, q }], live);
+  for (const r of rows) correctShuttleTurn(r);
+  const shuttle = rows.find((r: { kind: string }) => r.kind === 'shuttle');
+  ok(!!shuttle && shuttle.yaw === 0 && shuttle.cell === 5, "Theed's transport stands at child yaw 0 in its hangar's cell 5, which is the owner's quarter turn back");
+  for (const r of rows) correctShuttleTurn(r);
+  ok(shuttle?.yaw === 0, 'and corrected twice it is the same, since the correction is set and never added');
+  ok(kids[0].yaw === Math.round((Math.PI / 2) * 1e4) / 1e4, "while the children it came from keep the emulator's own turn");
+  ok(rows.find((r: { kind: string }) => r.kind === 'collector')?.yaw === -1.5708, "and the collector beside it is not the shuttle's correction to make");
+  // One standing out in the open takes the building's turn with it, as `placeChildren` wrote it.
+  const outdoor = correctShuttleTurn({ kind: 'shuttle', building: 'object/building/naboo/hangar_naboo_theed.iff', cell: 0, yaw: 9, byaw: 0.5 });
+  ok(outdoor.yaw === 0.5, "outdoors it would be the building's own turn composed with ours");
+  const other = correctShuttleTurn({ kind: 'shuttle', building: 'object/building/naboo/shared_starport_naboo.iff', cell: 0, yaw: 1.7316, byaw: -1.41 });
+  ok(other.yaw === 1.7316, 'and every other shuttle keeps the turn the emulator gave it');
+}
+
+// ---------------------------------------------------------------- what a shuttle sounds and shows
+
+{
+  // A client effect, laid out as the transport's take-off is, to the byte: its sound, its smoke and
+  // the float after it, and the four numbers of its shake.
+  const cstr = (s: string) => Buffer.concat([Buffer.from(s, 'latin1'), Buffer.from([0])]);
+  const floats = (...v: number[]) => {
+    const b = Buffer.alloc(v.length * 4);
+    v.forEach((x, i) => b.writeFloatLE(x, i * 4));
+    return b;
+  };
+  const clef = {
+    tag: 'FORM',
+    type: 'CLEF',
+    children: [
+      {
+        tag: 'FORM',
+        type: '0001',
+        children: [
+          { tag: 'PSND', data: cstr('sound/veh_transport_takeoff.snd') },
+          { tag: 'CPAP', data: Buffer.concat([cstr('appearance\\pt_takeoff_radius.prt'), floats(5)]) },
+          { tag: 'CAMS', data: floats(0.02, 50, 7, 50) },
+          { tag: 'FFBK', data: Buffer.alloc(8) },
+        ],
+      },
+    ],
+  };
+  const fx = readShuttleEffect(clef);
+  ok(fx.sounds.join() === 'sound/veh_transport_takeoff.snd', "a client effect's sound is read");
+  ok(fx.particles.length === 1 && fx.particles[0].prt === 'appearance/pt_takeoff_radius.prt' && fx.particles[0].seconds === 5, 'its particle effect with the seconds written after it, the path in the game\'s own slashes');
+  ok(fx.shake?.join() === '0.02,50,7,50', 'and its shake as the four numbers the file writes');
+  assert.throws(() => readShuttleEffect({ tag: 'FORM', type: 'CLDF', children: [] }));
+  ok(true, 'and anything that is not a client effect is refused');
+
+  ok(JSON.stringify(splitHpEvent('hpevent_hp_engine_3_start')) === '{"joint":"hp_engine_3","event":"start"}', "a mark's name is the joint and the event, split at the last underscore");
+  ok(JSON.stringify(splitHpEvent('hpevent_root_touchdown')) === '{"joint":"root","event":"touchdown"}' && splitHpEvent('event_footstep') === null, 'and a mark that is not a hardpoint event is not one');
+  ok(RIG_FX_ROLES.join() === 'land,lift', 'only the landing and the lift-off are read for marks, never the two one-frame loops');
+
+  // The shuttle's own landing, as its file marks it: the landing sound at frame 225, and the take-off
+  // and the ground idle on frame 625, which is one past the clip's last.
+  const events = new Set(['land', 'takeoff']);
+  const got = rigMarks(
+    [
+      { name: 'hpevent_root_land', frame: 225 },
+      { name: 'hpevent_root_idlground', frame: 625 },
+      { name: 'hpevent_root_takeoff', frame: 625 },
+      { name: 'hpevent_root_idlground', frame: 10 },
+      { name: 'hpevent_tail_land', frame: 20 },
+      { name: 'fire1', frame: 30 },
+    ],
+    { fps: 30, frames: 625 },
+    { events, joints: ['ROOT', 'hp_engine_1'] },
+  );
+  ok(got.marks.length === 1 && got.marks[0].t === 7.5 && got.marks[0].joint === 'ROOT' && got.marks[0].event === 'land', 'the landing sounds 7.5 s in, at the joint as the skeleton spells it');
+  ok(got.dropped.end === 2, 'a mark one past the clip\'s last frame is left out, or the lift-off would sound at the moment it touches down');
+  ok(got.dropped.unnamed === 1 && got.dropped.joint === 1 && got.dropped.other === 1, 'as is an event the client data does not name, a joint the skeleton lacks, and anything that is not a hardpoint event');
+  const doubled = rigMarks([{ name: 'hpevent_root_land', frame: 60 }, { name: 'hpevent_root_land', frame: 60 }], { fps: 30, frames: 100 }, { timeScale: 2 });
+  ok(doubled.marks.length === 1 && doubled.marks[0].t === 1, 'a mark written twice is one mark, and a clip the table plays twice as fast marks it twice as soon');
+  ok(rigMarks([{ name: 'hpevent_root_land', frame: 1 }], null).marks.length === 0, 'and a clip whose timing cannot be read marks nothing rather than something against a made-up length');
 }
 
 // ---------------------------------------------------------------- which rig a shuttle lands with
@@ -143,15 +242,36 @@ function note(what: string): void {
     let things = 0;
     let indoors = 0;
     let drawn = 0;
+    let theedRows = 0;
+    let fxRigs = 0;
     for (const planet of ['corellia', 'naboo', 'tatooine', 'talus', 'rori', 'lok', 'dantooine', 'endor', 'yavin4', 'dathomir']) {
       const file = join('assets-private', planet, 'travel.json');
       if (!existsSync(file)) continue;
-      const pack = JSON.parse(readFileSync(file, 'utf8')) as { version: number; rigs?: Record<string, { file: string; parts: { file: string }[] }>; rows: { kind: string; model?: string | null; rig?: string; cell: number; x: number; y: number; z: number }[] };
-      assert.ok(pack.version === 3, `${planet}: the pack is the shape this build writes (run travel again if not)`);
+      type Rig = { file: string; parts: { file: string }[]; ambient?: string | null; events?: Record<string, { sounds?: string[]; particles?: { file: string; seconds: number }[]; shake?: number[] }>; marks?: Record<string, { t: number; joint: string; event: string }[]>; seconds: Record<string, number> };
+      const pack = JSON.parse(readFileSync(file, 'utf8')) as { version: number; rigs?: Record<string, Rig>; rows: { kind: string; building: string; model?: string | null; rig?: string; cell: number; x: number; y: number; z: number; yaw: number }[] };
+      assert.ok(pack.version === 4, `${planet}: the pack is the shape this build writes (run travel again if not)`);
       // Every shuttle lands on a rig the file carries, and every file the rig names is on disk: the
       // rigs are one folder every world shares, so a world can be current while its pieces have gone.
       for (const r of pack.rows) if (r.kind === 'shuttle') assert.ok(!!r.rig && !!pack.rigs?.[r.rig], `${planet}: a shuttle names a rig the file carries`);
       for (const rig of Object.values(pack.rigs ?? {})) for (const f of [rig.file, ...rig.parts.map((p) => p.file)]) assert.ok(existsSync(join('assets-private', f)), `${planet}: ${f} is on disk`);
+      // And what it sounds and shows: an idle loop, events, and marks that name only events it has and
+      // fall inside the clips they are filed under, with every effect those events light on disk.
+      for (const [id, rig] of Object.entries(pack.rigs ?? {})) {
+        assert.ok(!!rig.ambient && rig.events && Object.keys(rig.events).length > 0 && rig.marks && Object.keys(rig.marks).length > 0, `${planet}: the ${id} carries its idle loop, its events and its marks`);
+        for (const [clip, marks] of Object.entries(rig.marks ?? {})) {
+          for (const m of marks) {
+            assert.ok(!!rig.events?.[m.event], `${planet}: the ${id}'s ${clip} marks ${m.event}, which its events answer`);
+            assert.ok(m.t >= 0 && m.t < (rig.seconds[clip] ?? 0) + 1e-3, `${planet}: the ${id}'s ${clip} marks ${m.event} at ${m.t} s, inside the clip`);
+          }
+        }
+        for (const ev of Object.values(rig.events ?? {})) for (const p of ev.particles ?? []) assert.ok(p.seconds > 0 && existsSync(join('assets-private', p.file)), `${planet}: ${p.file} is on disk and lit for a while`);
+      }
+      // Theed's transport, corrected: child yaw 0 in its hangar, the owner's quarter turn back.
+      for (const r of pack.rows) if (r.kind === 'shuttle' && /hangar_naboo_theed/.test(r.building)) {
+        assert.ok(r.yaw === 0 && r.cell > 0, `${planet}: Theed's transport stands at child yaw 0 in its hangar (${r.yaw})`);
+        theedRows++;
+      }
+      if (pack.rigs?.transport?.marks) fxRigs++;
       const counts = travelCounts(pack.rows);
       assert.ok(counts.terminals > 0, `${planet}: it has somewhere to buy a ticket`);
       assert.ok(counts.collectors > 0, `${planet}: and somewhere to board`);
@@ -174,6 +294,12 @@ function note(what: string): void {
       note(`${things - drawn} are the starports' own transports, which have no single model: their mesh is a placeholder and the hull is five pieces hung on the transport rig's joints`);
       passed++;
       console.log('ok   and every shuttle lands on a rig whose files are on disk');
+      passed++;
+      console.log(`ok   and every rig carries its idle loop, its events and its marks, every mark inside its clip and every effect on disk (${fxRigs} worlds with the transport's)`);
+      if (theedRows) {
+        passed++;
+        console.log(`ok   and Theed's transport stands at child yaw 0 in its hangar (${theedRows} row${theedRows === 1 ? '' : 's'})`);
+      } else note("no converted world places Theed's hangar, so its corrected row is not checked on disk");
     }
   }
 }

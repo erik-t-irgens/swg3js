@@ -179,6 +179,13 @@ export interface EffectHandle {
   /** Draw untextured quad emitters as flat colour (the hyperspace tunnel); no other effect asks. */
   readonly solid?: boolean;
   /**
+   * Multiplies how far off the effect is still drawn and kept running: its emitters' distances for
+   * thinning out and its distance for going to sleep. Absent is 1, the files' own. A landing shuttle
+   * lights its engines hundreds of metres up, well past the 200 m every emitter of the game's thins
+   * to nothing at.
+   */
+  readonly reach?: number;
+  /**
    * False keeps the effect silent whatever its emitters name. The weather passes it: its channels'
    * own sound is played at the channel's share of the mix, which no handle here can know, so a
    * voice must never start behind its back.
@@ -910,6 +917,9 @@ class EmitterState {
       this.lodPercent = 1;
       return;
     } else [min, max] = [lo, hi];
+    const k = this.handle.reach ?? 1;
+    min *= k;
+    max *= k;
     const span = max - min;
     this.lodPercent = span <= 0 ? (distance < max ? 1 : 0) : clamp01(1 - (distance - min) / span);
   }
@@ -980,7 +990,7 @@ class EffectInstance {
         life = Math.max(life, waveMax(e.lifeTime));
       }
     }
-    this.sleepDistance = reach + DORMANT_SLACK;
+    this.sleepDistance = reach * (handle.reach ?? 1) + DORMANT_SLACK;
     this.maxLife = life;
   }
 
@@ -1254,8 +1264,8 @@ export class ParticleEffects {
    * matrixWorld, kept by reference) `matrix` is in that frame, and the effect simulates there and is
    * carried into the world as it is drawn: something played aboard stays in the room while the ship flies.
    */
-  place(file: string, matrix: THREE.Matrix4, contained: boolean, transient = false, frame: THREE.Matrix4 | null = null, solid = false, options: { sound?: boolean } = {}): EffectHandle {
-    return this.start({ file, matrix: matrix.clone(), contained, transient, frame, rateScale: 1, depth: 0, solid, sound: options.sound });
+  place(file: string, matrix: THREE.Matrix4, contained: boolean, transient = false, frame: THREE.Matrix4 | null = null, solid = false, options: { sound?: boolean; reach?: number } = {}): EffectHandle {
+    return this.start({ file, matrix: matrix.clone(), contained, transient, frame, rateScale: 1, depth: 0, solid, sound: options.sound, ...(options.reach && options.reach > 0 ? { reach: options.reach } : {}) });
   }
 
   /** Load a handle's effect and play it once loaded, unless it was removed meanwhile. */
@@ -1339,7 +1349,7 @@ export class ParticleEffects {
     }
     // `sound` is carried down with the frame and the building: an effect whose owner asked for
     // silence (the weather's channels) must not be given a voice by something its particles spawn.
-    const handle = this.start({ file, matrix: matrix.clone(), contained: parent.contained, transient: true, frame: parent.frame, rateScale: 1, depth, sound: parent.sound });
+    const handle = this.start({ file, matrix: matrix.clone(), contained: parent.contained, transient: true, frame: parent.frame, rateScale: 1, depth, sound: parent.sound, ...(parent.reach ? { reach: parent.reach } : {}) });
     this.children.add(handle);
     return handle;
   }

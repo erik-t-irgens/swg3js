@@ -209,7 +209,7 @@ import { exportSky } from './sky.mjs';
 import { exportWater, readWaterHarm, waterHarmLines, waterPackNeedsHarm } from './water.mjs';
 import { convertSounds, soundStatus } from './sound.mjs';
 import { convertSoundPlaces, placesStatus } from './soundplaces.mjs';
-import { clipEventStatus, convertClipEvents } from './clipevents.mjs';
+import { clipEventStatus, clipTiming, convertClipEvents, parseClipMessages } from './clipevents.mjs';
 import { convertJkaSounds, jkaSoundStatus } from './jkasound.mjs';
 import { convertShipSounds, shipSoundStatus } from './shipsounds.mjs';
 import { extraEffectsStatus, forcePowersStatus } from './weapons.mjs';
@@ -230,7 +230,10 @@ const DEED_PACK_VERSION = 1;
 // 2: every row carries the model it is drawn with, and the shuttleports' own shuttles are in it.
 // 3: every shuttle names the rig it lands and lifts off with (the file carries the rigs), and a
 //    child's turn is read from a quaternion of any length (Theed's transport was 26.6 degrees out).
-const TRAVEL_PACK_VERSION = 3;
+// 4: every rig carries what it sounds and shows as it comes and goes (its idle loop, its events'
+//    sounds, flames and shake, and when its clips mark each), and Theed's transport stands square in
+//    its hangar by our own correction of the emulator's turn.
+const TRAVEL_PACK_VERSION = 4;
 /** The shape of a world's fittings.json: the other things the server stood on its buildings. */
 const FITTINGS_PACK_VERSION = 1;
 // 2: every ground family carries the bump map the client shaded this terrain with.
@@ -1051,9 +1054,10 @@ function convertParticle(vfs, prtPath, outDir) {
  * One of the shuttles' rigs, into <out>/travel/: the skeleton and its clips with no mesh (its own mesh
  * is a placeholder), and every static piece its client data hangs on one of its joints, each an
  * ordinary model. Returns what travel.json carries for it, with every path from the root of the packs:
- * the rig, the pieces and the joint each rides, the clips by role and branch, and each clip's seconds.
+ * the rig, the pieces and the joint each rides, the clips by role and branch, and each clip's seconds,
+ * and what it sounds and shows as it comes and goes (`travelRigEffects`).
  */
-function convertTravelRig(vfs, out, id, T) {
+function convertTravelRig(vfs, out, id, T, clientDataSounds) {
   const src = T.TRAVEL_RIGS[id];
   if (!src) throw new Error(`no rig called ${id}`);
   mkdirSync(join(out, 'travel'), { recursive: true });
@@ -1076,7 +1080,85 @@ function convertTravelRig(vfs, out, id, T) {
   if (!parts.length) throw new Error(`${src.clientData} hangs nothing on the rig`);
   const seconds = {};
   for (const row of Object.values(moods)) for (const clip of Object.values(row)) seconds[clip] = info.clipSeconds?.[clip] ?? 0;
-  return { file, sat: src.sat, joints: info.joints, parts, moods, seconds };
+  const fx = travelRigEffects(vfs, out, src, moods, T, clientDataSounds);
+  return { file, sat: src.sat, joints: info.joints, parts, moods, seconds, ambient: fx.ambient, events: fx.events, marks: fx.marks, fxNotes: fx.notes };
+}
+
+/**
+ * What a shuttle sounds and shows as it comes and goes, all of it the game's own and none of it timed
+ * by us: the loop its client data plays while it is there (`ASND`), every event its client data
+ * answers (`CEFT`/`CSND`, a sound or a client effect that `readShuttleEffect` reads), and when in each
+ * landing and lift-off clip each of those events happens, which the clips mark themselves as
+ * `hpevent_<joint>_<event>` (the clip-event pack drops every one of those, so they are read here).
+ *
+ * A client effect's particle effects are converted once for every world into `<out>/travel/particles/`,
+ * beside the rigs, and written from the root of the packs. Returns `{ ambient, events, marks, notes }`,
+ * `events` keyed by the event's name in lower case and `marks` by the clip's name.
+ */
+function travelRigEffects(vfs, out, src, moods, T, clientDataSounds) {
+  const notes = [];
+  const cd = clientDataSounds ? clientDataSounds(parseIff(vfs.read(src.clientData))) : null;
+  const events = {};
+  for (const [raw, path] of Object.entries(cd?.events ?? {})) {
+    const name = raw.toLowerCase();
+    const ev = {};
+    if (/\.snd$/i.test(path)) ev.sounds = [path];
+    else if (/\.cef$/i.test(path)) {
+      if (!vfs.has(path)) {
+        notes.push(`${name}: ${path} is not in the archives`);
+        continue;
+      }
+      const cef = T.readShuttleEffect(parseIff(vfs.read(path)));
+      if (cef.sounds.length) ev.sounds = cef.sounds;
+      const particles = [];
+      for (const p of cef.particles) {
+        if (!(p.seconds > 0)) {
+          notes.push(`${name}: ${p.prt} says nothing of how long it plays`);
+          continue;
+        }
+        const conv = convertParticle(vfs, p.prt, join(out, 'travel'));
+        if (conv.failed || !conv.file) {
+          notes.push(`${name}: ${p.prt} would not convert${conv.failed ? ` (${conv.failed})` : ''}`);
+          continue;
+        }
+        particles.push({ file: `travel/${conv.file}`, seconds: p.seconds });
+      }
+      if (particles.length) ev.particles = particles;
+      if (cef.shake) ev.shake = cef.shake;
+    }
+    if (Object.keys(ev).length) events[name] = ev;
+  }
+  // The marks: out of the very clips the rig's table plays for its landing and its lift-off.
+  const marks = {};
+  const sat = parseSat(readIff(vfs, src.sat));
+  const skeletonFile = sat.skeletons[0]?.file;
+  const latFile = (skeletonFile && sat.animationTables.get(skeletonFile.toLowerCase())) ?? [...sat.animationTables.values()][0];
+  if (!skeletonFile || !latFile || !vfs.has(latFile)) {
+    notes.push(`no animation table to read the marks from`);
+    return { ambient: cd?.ambient ?? null, events, marks, notes };
+  }
+  const joints = parseSkeleton(readIff(vfs, skeletonFile), (f) => (vfs.has(f) ? readIff(vfs, f) : null)).joints.map((j) => j.name);
+  const entries = parseLat(readIff(vfs, latFile)).entries;
+  const known = new Set(Object.keys(events));
+  const dropped = { end: 0, unnamed: 0, joint: 0, other: 0 };
+  const clips = new Set();
+  for (const row of Object.values(moods)) for (const role of T.RIG_FX_ROLES) if (row[role]) clips.add(row[role]);
+  for (const clip of clips) {
+    const e = entries.find((x) => x.name === clip);
+    const root = !e ? null : e.kind === 'inline' ? e.form : e.kind === 'file' && vfs.has(e.file) ? readIff(vfs, e.file) : null;
+    if (!root) {
+      notes.push(`${clip}: its animation is not in the archives`);
+      continue;
+    }
+    const got = T.rigMarks(parseClipMessages(root)?.events ?? [], clipTiming(root), { timeScale: e.timeScale || 1, events: known, joints });
+    for (const k of Object.keys(dropped)) dropped[k] += got.dropped[k];
+    if (got.marks.length) marks[clip] = got.marks;
+  }
+  if (dropped.end) notes.push(`${dropped.end} mark(s) on the frame after a clip's last left out`);
+  if (dropped.unnamed) notes.push(`${dropped.unnamed} mark(s) whose event the client data does not name left out`);
+  if (dropped.joint) notes.push(`${dropped.joint} mark(s) at a joint the skeleton lacks left out`);
+  if (dropped.other) notes.push(`${dropped.other} mark(s) that are not a hardpoint event left out`);
+  return { ambient: cd?.ambient ?? null, events, marks, notes };
 }
 
 /**
@@ -2519,7 +2601,7 @@ function packStatus(dir) {
       // says: a world baked at one and its neighbour at another would steer two different ways
       // with nothing anywhere to show it.
       navGrid ? `nav grid ${navGrid.nx}x${navGrid.nz} at ${navGrid.cell} m, ${navGrid.slopeDegrees ?? '?'} deg${navMoved ? ', BAKED AROUND ANOTHER CENTRE' : ''}${navNoIndoor ? ', NO BUILDING FOOTPRINTS' : ''}${navCut.length ? `, ${navCut.length} TOWN${navCut.length === 1 ? '' : 'S'} OFF THE MAIN REGION` : ''}` : 'no nav grid',
-      travel ? `travel ${travel.counts?.terminals ?? 0} terminals, ${travel.counts?.collectors ?? 0} collectors, ${travel.counts?.shuttles ?? 0} shuttles${(travel.version ?? 1) < 2 ? ' (UNDRAWN: no models)' : travel.version !== TRAVEL_PACK_VERSION ? ' (THE SHUTTLES STAND STILL: no rigs)' : ''}` : 'no travel',
+      travel ? `travel ${travel.counts?.terminals ?? 0} terminals, ${travel.counts?.collectors ?? 0} collectors, ${travel.counts?.shuttles ?? 0} shuttles${(travel.version ?? 1) < 2 ? ' (UNDRAWN: no models)' : travel.version < 3 ? ' (THE SHUTTLES STAND STILL: no rigs)' : travel.version !== TRAVEL_PACK_VERSION ? " (SILENT SHUTTLES: no engine sounds, flames or shake, and Theed's transport a quarter turn out)" : ''}` : 'no travel',
       fittings ? `${fittings.counts?.things ?? 0} fittings` : 'no fittings',
     ].filter(Boolean);
     console.log(`  ${planet}: ${parts.join(', ')}`);
@@ -2566,7 +2648,7 @@ function packStatus(dir) {
     else if (travel && travel.version !== TRAVEL_PACK_VERSION) wantTravel = true;
     // The rigs live in one folder every world shares, so a world's file can be current while the
     // pieces it names have gone.
-    else if (travel && Object.values(travel.rigs ?? {}).some((r) => !existsSync(join(dir, r.file)) || (r.parts ?? []).some((p) => !existsSync(join(dir, p.file))))) wantTravel = true;
+    else if (travel && Object.values(travel.rigs ?? {}).some((r) => !existsSync(join(dir, r.file)) || (r.parts ?? []).some((p) => !existsSync(join(dir, p.file))) || Object.values(r.events ?? {}).some((e) => (e.particles ?? []).some((p) => !existsSync(join(dir, p.file)))))) wantTravel = true;
     // The fires, sprays, flames and glows the objects' client data hangs on them (`objeffects`),
     // keyed by template: wanted again whenever what the table was built from is newer than it.
     if (objects && objEffectsStale(packDir, ['layout.json', 'fittings.json', 'travel.json'])) wantObjEffects = true;
@@ -6365,6 +6447,7 @@ switch (cmd) {
       break;
     }
     const T = await import('./travel.mjs');
+    const { parseClientDataSounds } = await import('./soundsources.mjs');
     const vfs = mount(pos[1]);
     const out = pos[2];
     const byTemplate = c3.readTravelBuildings();
@@ -6380,9 +6463,14 @@ switch (cmd) {
       if (id in rigs) return rigs[id];
       rigs[id] = null;
       try {
-        rigs[id] = convertTravelRig(vfs, out, id, T);
+        rigs[id] = convertTravelRig(vfs, out, id, T, parseClientDataSounds);
         const r = rigs[id];
         console.log(`  the ${id}: ${r.parts.length} piece${r.parts.length === 1 ? '' : 's'} on ${new Set(r.parts.map((p) => p.joint)).size} joint${r.parts.length === 1 ? '' : 's'}, ${Object.entries(r.moods).map(([m, c]) => `${m || 'one branch'} landing in ${r.seconds[c.land]} s and lifting off in ${r.seconds[c.lift]} s`).join('; ')}`);
+        // What it sounds and shows as it comes and goes, and whatever of its own marks was left out.
+        const effects = Object.values(r.events).reduce((n, e) => n + (e.particles?.length ?? 0), 0);
+        console.log(`    ${Object.keys(r.events).length} events (${Object.keys(r.events).join(', ') || 'none'}), ${effects} particle effect${effects === 1 ? '' : 's'}, ${Object.values(r.marks).reduce((n, m) => n + m.length, 0)} marks over ${Object.keys(r.marks).length} clips${r.ambient ? `, idling on ${r.ambient}` : ''}`);
+        for (const n of r.fxNotes) console.log(`    ${n}`);
+        delete r.fxNotes;
       } catch (err) {
         console.warn(`  the ${id} would not convert, so it is drawn as it was: ${err.message}`);
       }
@@ -6428,7 +6516,14 @@ switch (cmd) {
       // Each shuttle names the rig it lands with and the branch of that rig's clips it plays, and the
       // file carries the rigs its rows name, with paths from the root of the packs.
       const used = {};
+      let turned = 0;
       for (const r of rows) {
+        // Our correction to a shuttle's turn, set on the row rather than added to the children the
+        // row came from: the live read and the reference share those lists differently, and an
+        // addition would land twice on one of them (travel.mjs, `correctShuttleTurn`).
+        const was = r.yaw;
+        T.correctShuttleTurn(r);
+        if (r.yaw !== was) turned++;
         const rig = T.rigOfRow(r);
         const def = rig ? rigFor(rig) : null;
         if (!def) continue;
@@ -6446,7 +6541,7 @@ switch (cmd) {
       // A world with no starport at all is written too, with no rows in it: without the file there
       // is no way to tell "this world has none" from "this command has never been run", and status
       // would ask for it again for ever on an install where it has.
-      if (rows.length) console.log(`  ${dir.name}: ${counts.terminals} terminals, ${counts.collectors} collectors, ${counts.shuttles} shuttles over ${counts.buildings} kinds of building`);
+      if (rows.length) console.log(`  ${dir.name}: ${counts.terminals} terminals, ${counts.collectors} collectors, ${counts.shuttles} shuttles over ${counts.buildings} kinds of building${turned ? `, ${turned} shuttle${turned === 1 ? '' : 's'} turned by our own correction` : ''}`);
     }
     console.log(`travel: ${things} things over ${worlds} worlds, ${drawn} models converted`);
     console.log('  the ticket collector is the mobiles pack\'s own droid and needs no conversion here');
