@@ -6,15 +6,21 @@ import { existsSync, readdirSync, statSync, statfsSync } from 'node:fs';
 import { dirname, join, parse, resolve, sep } from 'node:path';
 import { isRetailByName } from '../swg/manifest.mjs';
 
-/** What a first full conversion comes to on disk, with room to spare (the owner's is 13 to 14 GB). Ours. */
-export const FULL_CONVERSION_BYTES = 16 * 1024 ** 3;
+/**
+ * What a first full conversion comes to on disk, with room to spare. Ours, and measured again
+ * whenever a pack is added: the owner's own folder is **16.4 GB** today, of which the character rigs
+ * are 4.4, the gallery 1.5, the wardrobes 1.4, the creatures and NPCs 1.1, the props 0.9 and the
+ * sound bank 0.9. It read 16 GB while the real total had already passed it, which is a check that
+ * would have said yes to a disk that then filled up.
+ */
+export const FULL_CONVERSION_BYTES = 20 * 1024 ** 3;
 /** The least a conversion into a folder that already holds content is started with. Ours. */
 export const TOP_UP_BYTES = 3 * 1024 ** 3;
 
 /** Names that say a folder already holds converted content (any one is enough). */
-const CONTENT_MARKS = ['tatooine', 'corellia', 'naboo', 'creatures', 'player', 'weapons', 'ships', 'sounds', 'mobiles', 'characters', 'wardrobe', 'galaxy.json', 'space_tatooine'];
+const CONTENT_MARKS = ['tatooine', 'corellia', 'naboo', 'creatures', 'player', 'weapons', 'ships', 'sounds', 'mobiles', 'characters', 'wardrobe', 'galaxy.json', 'space_tatooine', 'props', 'music', 'scenes', 'deeds.json'];
 /** The packs that make up most of the size: while none is there, the whole conversion is still ahead. */
-const LARGE_MARKS = ['tatooine', 'sounds', 'mobiles', 'wardrobe', 'characters'];
+const LARGE_MARKS = ['tatooine', 'sounds', 'mobiles', 'wardrobe', 'characters', 'gallery', 'props'];
 
 const isDir = (p) => {
   try {
@@ -109,7 +115,9 @@ export function isInside(inner, outer) {
  * that does not exist yet is fine: the conversion makes it.
  */
 export function checkOut(dir, { appDir, dataDir, swg, jka } = {}) {
-  if (!dir) return { ok: false, sentence: 'Choose a folder for the converted content (about 14 GB when it is all done).' };
+  // The size is read off the constant and never typed again here: it was typed twice and both copies
+  // drifted below what a conversion really comes to.
+  if (!dir) return { ok: false, sentence: `Choose a folder for the converted content (about ${formatBytes(FULL_CONVERSION_BYTES)} when it is all done).` };
   const full = resolve(dir);
   if (parse(full).root === full || parse(full).root === full + sep) return { ok: false, sentence: 'Choose a folder rather than the root of a drive.' };
   if (appDir && isInside(full, appDir)) return { ok: false, sentence: 'That folder is inside the launcher\'s own install, which every update replaces. Choose another.' };

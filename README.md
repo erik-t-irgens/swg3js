@@ -612,6 +612,12 @@ npm run swg -- travel @SWG assets-private --retail-only                         
                                                                                   #    with the two models that draw them (needs the emulator checkout too; run after the worlds).
                                                                                   #    It took no @SWG before this and now does: no snapshot places a travel terminal, so the
                                                                                   #    thing the player presses has to be converted here beside the row saying where it stands
+npm run swg -- fittings @SWG assets-private --retail-only                         #    everything else the server stood inside the game's own buildings: the elevator panel beside a
+                                                                                  #    lift, the bank terminal outside a bank, the sign over a cantina's door, the campsites and the
+                                                                                  #    dungeon props (needs the emulator checkout; run after the worlds, as travel does)
+npm run swg -- props @SWG assets-private --retail-only                            #    every prop and every piece of furniture in the game as one pack, which is what the Props tab
+                                                                                  #    lists and a player puts down: 8,596 things in 2,894 models, about 900 MB (a minute and a half;
+                                                                                  #    forty-four of them carry their own fire, spray, flame or smoke)
 npm run swg -- music @SWG assets-private --retail-only                            #    the music players make: twenty songs, one track per instrument, and nothing else
                                                                                   #    (about 100 MB of samples; there is no world score in this game and none is wanted).
                                                                                   #    Run it after `weapons`: it reads that pack to learn which instruments the game has

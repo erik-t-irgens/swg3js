@@ -2553,6 +2553,18 @@ function packStatus(dir) {
     if ((propsPack.version ?? 0) !== PROPS_PACK_VERSION) need(`props <swg-dir> ${dir} --retail-only`, 'the props pack is an older shape than this build reads');
     else if ((propsPack.materialFormat ?? 1) < MATERIAL_FORMAT) need(`props <swg-dir> ${dir} --retail-only`, "the props' models were converted before the gloss maps their own shaders name");
   }
+  // The only music in this game is the music players make, and it is the one pack that was reported
+  // nowhere: without it an instrument offers its songs and plays nothing at all, and nothing ever
+  // said so, so a machine converted from the launcher had silent bands for as long as it existed.
+  const musicPack = readJson(join(dir, 'music/music.json'));
+  if (!musicPack) {
+    console.log('  music: none (an instrument in hand offers its songs and plays nothing)');
+    need(`music <swg-dir> ${dir} --retail-only`, 'no player music converted: holding an instrument plays nothing');
+  } else {
+    const c = musicPack.counts ?? {};
+    console.log(`  music: ${c.songs ?? musicPack.songs?.length ?? 0} songs over ${c.stems ?? 0} instrument tracks, ${c.parts ?? 0} parts, ${c.full ?? 0} with every track; ${Object.keys(musicPack.instruments ?? {}).length} instruments placed`);
+    if ((musicPack.version ?? 0) !== MUSIC_PACK_VERSION) need(`music <swg-dir> ${dir} --retail-only`, 'the music pack is an older shape than this build reads');
+  }
   const weapons = readJson(join(dir, 'weapons/manifest.json'));
   if (!weapons) {
     console.log('  weapons: none (the placeholder saber and rifle are used)');
@@ -2690,6 +2702,23 @@ function packStatus(dir) {
   if (ships && (ships.materialFormat ?? 1) < MATERIAL_FORMAT) need(`ships <swg-dir> ${dir} --retail-only`, "ships' models were converted before animated and glowing surfaces");
   const gallery = readJson(join(dir, 'gallery/manifest.json'));
   if (gallery && (gallery.materialFormat ?? 1) < MATERIAL_FORMAT) need(`gallery <swg-dir> ${dir} --retail-only`, "the gallery's models were converted before animated and glowing surfaces");
+  // The deeds a player buys a building with, which was the other pack nothing reported: without it
+  // the Housing tab is empty and no building can be put down at all. It checks each deed against the
+  // gallery's models, so it is asked for after the gallery and never before one exists. Like the
+  // fittings it needs the owner's own emulator checkout and says so plainly when there is none; a
+  // machine without one is told once and the drive stops asking rather than looping.
+  if (gallery) {
+    const deedPack = readJson(join(dir, 'deeds.json'));
+    if (!deedPack) {
+      console.log('  deeds: none (the Housing tab is empty and no building can be put down)');
+      need(`deeds <swg-dir> ${dir} --retail-only`, 'no deeds converted: the Housing tab is empty (needs an emulator checkout, CORE3 in .env)');
+    } else {
+      const rows = deedPack.deeds ?? [];
+      const withModel = rows.filter((d) => d.model).length;
+      console.log(`  deeds: ${rows.length} buildings a player can buy, ${withModel} with a model this game draws`);
+      if ((deedPack.version ?? 0) !== DEED_PACK_VERSION) need(`deeds <swg-dir> ${dir} --retail-only`, 'the deeds were written in an older shape than this build reads');
+    }
+  }
   const readQuiet = (file) => {
     try {
       return readJson(file);

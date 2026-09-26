@@ -83,7 +83,7 @@ The converted content is wherever the player chose, never in here.
 
 ## The conversion drive
 
-Convert checks the folders and the free space (16 GB for a first conversion, 3 GB to top up; ours),
+Convert checks the folders and the free space (20 GB for a first conversion, 3 GB to top up; ours, and the figure is FULL_CONVERSION_BYTES in checks.mjs, measured against the owner's own folder rather than typed twice),
 and then hands the whole job to the converter's own driver, `tools/swg/convertDrive.mjs` — the same one
 `npm run swg -- convert` runs, so the page and the command line follow one set of rules and neither
 can drift from the other. The driver asks `status <out> --json` what is missing, works out from

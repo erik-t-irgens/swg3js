@@ -23,7 +23,7 @@ import { createServer } from 'node:http';
 import { networkInterfaces } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { checkJka, checkOut, checkSwg, formatBytes, roomFor } from './checks.mjs';
+import { checkJka, checkOut, checkSwg, formatBytes, FULL_CONVERSION_BYTES, roomFor } from './checks.mjs';
 import { labelOf, planSteps, readStatus } from './plan.mjs';
 import { resolveUnder, sendFile } from './serve.mjs';
 
@@ -432,6 +432,10 @@ export async function start(ctx) {
     relay: relay && { running: relay.running, port: relay.port, word: relay.word, startedAt: relay.startedAt, lines: relay.lines.slice(-12), log: relay.log, addresses: lanAddresses().map((a) => `ws://${a}:${relay.port}`) },
     game: { url: gameUrl(port), built: existsSync(join(distDir, 'index.html')) },
     paths: { data: dataDir, app: appDir, logs: logsDir },
+    // How big a full conversion is, in the page's own words, so the figure lives in one place. It
+    // was typed into the page and into a sentence in `checks.mjs` as well, and both drifted below
+    // what a conversion really comes to.
+    sizes: { full: formatBytes(FULL_CONVERSION_BYTES) },
   });
 
   const pageHtml = () => readFileSync(join(HERE, 'page.html'), 'utf8').replace('%TOKEN%', token);

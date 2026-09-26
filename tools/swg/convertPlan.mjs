@@ -82,10 +82,18 @@ export const COST = {
  *   bytes     what one child of it is budgeted to hold at its peak
  *   measured  what was really run and what it really cost, or absent for a step nobody has run
  *
- * Every step below has been run against the owner's own archives and watched: the `measured` field
+ * Most steps below have been run against the owner's own archives and watched: the `measured` field
  * is what it really cost, and `bytes` is that with about a third on top, since a peak seen once is
- * not a ceiling. A step added later that nobody has run carries no `measured` and is budgeted at
- * `COST.UNMEASURED_BYTES`, which the test holds above every figure here.
+ * not a ceiling. A step nobody has watched carries no `measured` and is budgeted at
+ * `COST.UNMEASURED_BYTES` whatever its `bytes` says, which the test holds above every figure here --
+ * so an entry added with a hopeful number can never be the one that oversubscribes the machine, and
+ * its `seconds` is only how the list is paced and reported.
+ *
+ * **Every command `status` can ask for needs an entry here**, or it is treated as a command this
+ * file has never heard of: no order, nothing it waits for, and run alone. That is safe but it is
+ * luck rather than design -- a step with no `needs` may be run before the one whose output it reads,
+ * which does not fail, it quietly writes a pack that is wrong. `convertPlan.test.ts` reads the
+ * converter's own `need(` calls and fails if one of them is missing from this table.
  */
 export const STEP_FACTS = {
   // The planets. Every one of these writes into the planet packs and gates on a pack being there
@@ -163,10 +171,32 @@ export const STEP_FACTS = {
   // figure below that is reasoned rather than watched.
   sounds: { order: 34, lock: 'sounds', needs: ['ships', 'species', 'parts', 'clips-apply', 'player', 'snapshot'], seconds: 120, bytes: 0.7 * GB, measured: 'the bank: 7.6 s, 425 MB, 865 MB written; with one planet\'s places: 5.4 s, 510 MB' },
 
+  // Every prop and every piece of furniture in the game as one pack of its own. It is the longest
+  // single step here by a wide margin -- about three thousand models with a picture baked for each --
+  // and it reads nothing any other step writes, so it stands late only because nothing is waiting on
+  // it and there is no sense holding the quick steps behind it.
+  props: { order: 35, lock: 'props', needs: [], seconds: 120, bytes: 1.65 * GB, measured: '8,596 props in 2,894 models: 96.6 s, 1,241 MB, 908 MB written on a first run' },
+  // The player music: one track per instrument per song, copied as it is into a folder of its own.
+  // A second run copies no sample it already has, which is why the figure below is so small for a
+  // step that writes 220 MB the first time.
+  music: { order: 36, lock: 'music', needs: [], seconds: 30, bytes: 0.4 * GB, measured: '20 songs, 1,210 parts: 1.7 s, 278 MB; the first run writes 220 MB of samples' },
+  // Travel and the fittings both **append** their models to each pack's layout category, and a
+  // `snapshot` writes that category outright -- so both must run after every snapshot or a world
+  // reconverted afterwards silently loses its terminals and its elevator panels. Neither carries a
+  // planet on its command line, so neither has a SCOPE_ARG entry and each holds `pack:*`, which is
+  // the truth about them: one run writes into every converted world.
+  travel: { order: 37, lock: 'pack', needs: ['snapshot'], seconds: 20, bytes: 0.42 * GB, measured: '246 things over 32 worlds: 2.6 s, 306 MB' },
+  fittings: { order: 38, lock: 'pack', needs: ['snapshot'], seconds: 40, bytes: 0.52 * GB, measured: '889 things over 32 worlds: 15.5 s, 388 MB' },
+  // The deeds a player buys a building with. It checks each deed's building against the models the
+  // gallery carries, so it waits for the gallery; it writes one file at the top of the folder.
+  deeds: { order: 39, lock: 'deeds', needs: ['gallery'], seconds: 20, bytes: 0.4 * GB, measured: '111 deeds: 2.0 s, 288 MB' },
+
   // The last two read the finished packs and open no archive at all, so they mount nothing -- which
   // is why both are quick and hold so little for what they get through. Neither carries a planet on
   // its command line, so neither has a SCOPE_ARG entry and each holds `pack:*`; that is what they
-  // want, since each reads every converted world in one run.
+  // want, since each reads every converted world in one run. Both stand after travel and the
+  // fittings for the same reason those two stand after the snapshot: they read a pack's layout, and
+  // those two are the last things to write into it.
   //
   // The places the creation and selection screens stand a character in. It reads each pack's
   // layout, manifest and models, writes only under <out>/scenes, and never touches a pack, so it

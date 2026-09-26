@@ -15,13 +15,19 @@ import { resolve, sep } from 'node:path';
 /** The one status format this launcher reads. */
 export const STATUS_FORMAT = 1;
 
-/** Plain words for the converter's commands, for the page. Any command not here shows its own name. */
+/**
+ * Plain words for the converter's commands, for the page. Any command not here shows its own name,
+ * which is what a player saw for six of them: a step reading `navgrid` or `fittings` says nothing to
+ * anybody. `launcher.test.mjs` reads the converter's own `need(` calls and fails if one of them has
+ * no words here, so a command added later cannot quietly go back to showing its own name.
+ */
 const WORDS = {
   snapshot: 'Planets: objects, terrain, sky and flora',
   terrain: 'Ground textures',
   sky: 'Skies and weather',
   water: 'Water and lava',
   pois: 'Named places',
+  navgrid: 'Where bodies can walk outdoors',
   creatures: 'Creatures',
   player: 'The player character',
   parts: 'The character as parts',
@@ -35,7 +41,14 @@ const WORDS = {
   space: 'Space zones',
   maps: 'Planet maps and the galaxy',
   sounds: 'Sounds',
+  music: 'The music players make',
   gallery: 'The gallery',
+  props: 'Props and furniture',
+  deeds: 'Buildings a player can buy',
+  travel: 'Travel terminals and shuttles',
+  fittings: 'What stands inside buildings',
+  scenes: 'The character screens’ places',
+  clouds: 'Clouds',
   loading: 'Loading pictures',
 };
 

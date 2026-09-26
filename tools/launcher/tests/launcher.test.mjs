@@ -19,6 +19,7 @@ import { checkJka, checkOut, checkSwg, formatBytes, isInside, roomFor, FULL_CONV
 import { labelOf, nextStep, planSteps, readStatus, setAside } from '../plan.mjs';
 import { mimeOf, parseRange, resolveUnder } from '../serve.mjs';
 import { blobHash, distFiles, refusal, releaseFiles, unreachedImports, ustarName, writeTar } from '../pack.mjs';
+import { STEP_FACTS } from '../../swg/convertPlan.mjs';
 import { splitCommand, statusJson } from '../../swg/statusplan.mjs';
 import { isRetailByName } from '../../swg/manifest.mjs';
 import { start, gameUrl } from '../main.mjs';
@@ -484,6 +485,64 @@ process.on('exit', () => rmSync(scratch, { recursive: true, force: true }));
   const literals = rest.match(/#[0-9a-fA-F]{3,8}\b|rgba?\(/g) ?? [];
   ok(literals.length === 0, `no colour is typed anywhere else on the page${literals.length ? `: ${literals.join(', ')}` : ''}`);
   ok(!/\bui_[a-z]+|\.dds\b|<img|url\(/.test(html), 'and no picture at all is drawn on it, least of all the client\'s own interface');
+}
+
+// ---- Every command status can ask for has words on the page and a place in the plan --------------
+//
+// Two lists that must not fall behind the converter, and both had. The launcher shows a step's own
+// command name for anything it has no plain words for, so a player reading the list saw `navgrid` and
+// `fittings`; and the converter's driver treats a command with no entry in `STEP_FACTS` as one it has
+// never heard of -- no order, nothing it waits for, run alone -- which is safe by luck and not by
+// design, since a step with no `needs` may run before the one whose output it reads and then write a
+// pack that is quietly wrong.
+//
+// Both are checked against the converter itself: every `need(` in `cli.mjs` names a command status
+// can ask a caller to run, so that is the list, read as text rather than by running anything.
+{
+  const cli = readFileSync(join(root, 'tools', 'swg', 'cli.mjs'), 'utf8');
+  const asked = new Set();
+  for (const m of cli.matchAll(/need\(\s*[`'"]([a-z][a-z0-9-]*)/g)) asked.add(m[1]);
+  // A `&&` in a to-do line is two steps, and the second one is asked for just as much as the first.
+  for (const m of cli.matchAll(/&&\s*([a-z][a-z0-9-]+)\s/g)) if (/^(clips-apply|parts|species|sounds|mobiles)$/.test(m[1])) asked.add(m[1]);
+  ok(asked.size >= 20, `the converter asks for ${asked.size} different commands`);
+
+  const planText = readFileSync(join(root, 'tools', 'launcher', 'plan.mjs'), 'utf8');
+  const wordsBlock = /const WORDS = \{([\s\S]*?)\n\};/.exec(planText);
+  ok(!!wordsBlock, 'the launcher has a table of plain words');
+  const worded = new Set();
+  for (const m of wordsBlock[1].matchAll(/^\s*'?([a-z][a-z0-9-]*)'?:/gm)) worded.add(m[1]);
+  const unworded = [...asked].filter((c) => !worded.has(c)).sort();
+  ok(unworded.length === 0, `every command the converter asks for has plain words for the page${unworded.length ? `; missing: ${unworded.join(', ')}` : ` (${worded.size} in the table)`}`);
+  // And each of them really reads as words rather than as the command over again.
+  const bare = [...asked].filter((c) => labelOf([c]) === c).sort();
+  ok(bare.length === 0, `and none of them shows its own command name${bare.length ? `: ${bare.join(', ')}` : ''}`);
+
+  const planned = new Set(Object.keys(STEP_FACTS));
+  const unplanned = [...asked].filter((c) => !planned.has(c)).sort();
+  ok(unplanned.length === 0, `every one of them has a place in the converter's plan${unplanned.length ? `; missing: ${unplanned.join(', ')}` : ` (${planned.size} steps)`}`);
+  // Nothing may claim to wait for a step that is not in the table either, or the wait is ignored.
+  const badNeeds = Object.entries(STEP_FACTS).flatMap(([k, f]) => (f.needs ?? []).filter((n) => !planned.has(n)).map((n) => `${k} waits for ${n}`));
+  ok(badNeeds.length === 0, `and nothing waits for a step the plan has never heard of${badNeeds.length ? `: ${badNeeds.join('; ')}` : ''}`);
+  // Two orders the size of the work depends on: the things that append to a pack's layout must come
+  // after the snapshot that rewrites it, and the two that read a finished pack after those.
+  const orderOf = (c) => STEP_FACTS[c].order;
+  ok(orderOf('travel') > orderOf('snapshot') && orderOf('fittings') > orderOf('snapshot'), 'the travel terminals and the fittings run after the snapshot that would wipe them');
+  ok(orderOf('scenes') > orderOf('travel') && orderOf('scenes') > orderOf('fittings'), "and the character screens' places after both, since they read the layout");
+  ok(orderOf('deeds') > orderOf('gallery'), 'the deeds run after the gallery, whose models they are checked against');
+}
+
+// ---- How big a conversion is, in one place -------------------------------------------------------
+//
+// The figure was typed into the page and into a sentence in `checks.mjs`, and both fell behind: the
+// page said 14 GB and the check 16 while the owner's own folder had passed 16.
+{
+  const words = formatBytes(FULL_CONVERSION_BYTES);
+  ok(checkOut('').sentence.includes(words), `the folder's own sentence names the size from the constant (${words})`);
+  const html = readFileSync(join(root, 'tools', 'launcher', 'page.html'), 'utf8');
+  const typed = html.match(/about \d+(\.\d+)? ?GB/g) ?? [];
+  ok(typed.length === 0, `and no size is typed into the page${typed.length ? `: ${typed.join(', ')}` : ' (it reads the launcher\'s own)'}`);
+  ok(/s\.sizes[\s\S]{0,120}placeholder/.test(html), 'which the page takes from the state it is handed');
+  ok(FULL_CONVERSION_BYTES >= 17 * 1024 ** 3, 'and the figure is above what a full conversion really comes to');
 }
 
 console.log(`\n${checks} checks passed`);
