@@ -5,7 +5,7 @@
 // the clock's freeze, speed and backwards time, and the shadow and draw-order helpers.
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
-import { AnimatedSurfaces, applySurface, castsShadow, drawsAfterWater, type SurfaceContext, type SwgSurface } from '../../../src/world/surfaces.ts';
+import { AnimatedSurfaces, applySurface, BASIN_WATER_SHADERS, castsShadow, drawsAfterWater, isBasinWater, type SurfaceContext, type SwgSurface } from '../../../src/world/surfaces.ts';
 
 let passed = 0;
 const ok = (cond: boolean, msg: string) => {
@@ -384,6 +384,11 @@ const anim8 = (map = [0, 1, 2, 3, 4, 5, 6, 7]): SwgSurface => ({ anim: { mode: '
   const canister = new THREE.MeshStandardMaterial({ name: 'shader/con_gen_inorganic_water.sht' });
   ok(!castsShadow(basin) && !castsShadow(pool) && !castsShadow([plain, basin]), 'blended water casts no shadow onto its own basin');
   ok(castsShadow(stucco) && castsShadow(canister), 'while a blended wall and an opaque prop named for water both keep theirs');
+  // The fountains' and pools' water goes to the water system; falling water, foam and props do not.
+  const named = (name: string) => new THREE.MeshStandardMaterial({ transparent: true, name });
+  ok(isBasinWater(basin) && isBasinWater(pool) && isBasinWater(named('shader/thed_water_aaes23.sht')), "a fountain's basin water is the water system's, the statue fountains', Coronet's and Theed's alike");
+  ok(!isBasinWater(named('shader/waterfall_fountain_fast.sht')) && !isBasinWater(named('shader/whitewater_mesh_aa7.sht')) && !isBasinWater(canister), 'and the falling water, the foam and a canister of water stay as the model draws them');
+  ok(BASIN_WATER_SHADERS.size === 7, 'seven basin waters in all, each measured level over the whole of its surface');
   const fall = new THREE.MeshStandardMaterial({ transparent: true });
   fall.userData.swg = { scroll: { map: [0, -0.5] } };
   const fence = new THREE.MeshBasicMaterial({ transparent: true });

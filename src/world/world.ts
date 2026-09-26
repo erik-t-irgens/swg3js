@@ -35,7 +35,7 @@ import { OUTPOSTS } from '../data/outposts';
 import { Group, groups, RAPIER as R } from '../core/physics';
 import { CHUNK_RES, CHUNK_SIZE, Terrain } from './terrain';
 import { SwgTerrain, type BuildingLayerSource, type SwgWaterTable } from './swgTerrain';
-import { LayoutStreamer, type Building, type CellState, type PlacedObject } from './layoutStream';
+import { LayoutStreamer, type Building, type CellState, type PlacedObject, type WaterSurfaceHandle } from './layoutStream';
 import { blockedBy, blockerName, clearRadius, groundVerdict, patchOfBounds, patchProbes, spotAhead } from './housePlace.ts';
 import { outdoorNav } from './nav/outdoorNav.ts';
 import { wildLife, type WildDeps } from './wildLife.ts';
@@ -1499,6 +1499,9 @@ export class World {
       // null, which is the behaviour this had before -- a tier drawn the moment it loads -- and is
       // the way to see for yourself what the hold is worth on your own machine.
       if (SHADER_PACING) this.layoutStream.prepare = (objects) => this.prepareStreamed(objects);
+      // A fountain's or a pool's water is drawn by the water system (the owner's call): reflecting,
+      // rippling and ringed by rain like a lake, and never swelling.
+      this.layoutStream.waterSurface = (geometry, matrix, name) => this.basinWaterBody(geometry, matrix, name);
       // A space zone's hyperspace effects are made ready now (their textured batches hidden in the scene, their
       // textures uploaded), so settle() compiles them behind the loading screen and no jump builds a program on a
       // live frame. Not `solid`: the jump places them without it (placeZoneEffect). `spaceData` was set by
@@ -2320,6 +2323,37 @@ export class World {
       this.refreshEnvironment(0);
     }
     await this.environmentReady(ms);
+  }
+
+  /**
+   * The water standing in one placed fountain's or pool's basin, as a body of the water system: the
+   * basin's own level surface out of the model (shared, never disposed here), placed where that copy
+   * stands, drawn with this planet's water look as a lake -- which ripples and takes rain rings and the
+   * water pass's reflections but never swells, since a lake has no swell. The streamer calls it for
+   * each outdoor copy and takes it away with its tier.
+   */
+  private basinWaterBody(geometry: THREE.BufferGeometry, matrix: THREE.Matrix4, name: string): WaterSurfaceHandle | null {
+    if (!this.renderer || this.planet?.space) return null;
+    const bodies = this.waterBodies;
+    const mesh = new THREE.Mesh(geometry);
+    matrix.decompose(mesh.position, mesh.quaternion, mesh.scale);
+    mesh.name = `water:basin:${name}`;
+    mesh.receiveShadow = true;
+    const body = bodies.add(mesh, false, bodies.lookFor(null, this.planet), 'lake');
+    const lit = body.lit;
+    this.waterMaterials.push(lit);
+    this.scene.add(mesh);
+    return {
+      mesh,
+      remove: () => {
+        this.scene.remove(mesh);
+        const i = this.waterMaterials.indexOf(lit);
+        if (i >= 0) this.waterMaterials.splice(i, 1);
+        // Out of the portal renderer's set and the cascades' map before the body disposes it.
+        this.forgetMaterials([lit]);
+        bodies.remove(mesh);
+      },
+    };
   }
 
   /** Where reflections come from changed (`setReflectionSource`): the next refresh takes it up. */

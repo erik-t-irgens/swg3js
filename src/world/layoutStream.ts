@@ -11,7 +11,7 @@ import { CHUNK_SIZE } from './terrain';
 import type { Exclusion } from './props';
 import { ACTOR_LAYER, INTERIOR_LAYER, crossing } from './portalRender';
 import { mirroredTransform, type EffectHandle, type ParticleEffects } from './particles';
-import { castsShadow, drawsAfterWater } from './surfaces';
+import { castsShadow, drawsAfterWater, isBasinWater } from './surfaces';
 import { marks } from './marks.ts';
 import { floraClearRadius, modelReach } from './floraClear.ts';
 // Which room a name picks is a rule of its own, with a node test over it; this file calls it rather
@@ -182,6 +182,17 @@ interface LoadedTier {
   objects: PlacedObject[];
   /** Particle effects placed with this tier: effects of their own, and those attached to its models. */
   effects: EffectHandle[];
+  /** The water standing in its fountains' and pools' basins, drawn by the world's water system. */
+  waters: WaterSurfaceHandle[];
+}
+
+/**
+ * A basin's water the world made for one placed copy: the mesh (so the tier can prepare it with its own
+ * before it is shown), and how to take it away again.
+ */
+export interface WaterSurfaceHandle {
+  mesh: THREE.Mesh;
+  remove(): void;
 }
 
 interface Region {
@@ -278,7 +289,7 @@ export class LayoutStreamer {
    * (an instanced mesh of one, which is what the pack's materials and the portal renderer expect to
    * see) and this is where they are kept.
    */
-  private readonly runtime = new Map<PlacedObject, { tier: LoadedTier; meshes: THREE.Object3D[]; building: Building | null; effects: EffectHandle[] }>();
+  private readonly runtime = new Map<PlacedObject, { tier: LoadedTier; meshes: THREE.Object3D[]; building: Building | null; effects: EffectHandle[]; waters: WaterSurfaceHandle[] }>();
   /**
    * What each object placed in play was filed under, which is its `template`: the runtime ones are
    * given a name of their own (a home carries the id the server gave it) and it is a name nothing
@@ -312,6 +323,29 @@ export class LayoutStreamer {
    * back exactly.
    */
   prepare: ((objects: THREE.Object3D[]) => Promise<void>) | null = null;
+
+  /**
+   * Makes a water body of a basin's water for one placed copy (`isBasinWater`): the world's, since the
+   * water system is. The model's own piece is then not drawn for that copy. Null draws every basin as
+   * the blended surface the model carries, which is what happened before.
+   */
+  waterSurface: ((geometry: THREE.BufferGeometry, matrix: THREE.Matrix4, name: string) => WaterSurfaceHandle | null) | null = null;
+
+  /** Hand a basin's water to the world for each of these copies, and say which the world would not take. */
+  private basinWater(prim: { geometry: THREE.BufferGeometry }, copies: readonly PlacedObject[], name: string, into: WaterSurfaceHandle[]): PlacedObject[] {
+    const refused: PlacedObject[] = [];
+    for (const p of copies) {
+      const h = this.waterSurface ? this.waterSurface(prim.geometry, new THREE.Matrix4().compose(tmpV.set(p.x, p.y, p.z), p.q, ONE), name) : null;
+      if (!h) {
+        refused.push(p);
+        continue;
+      }
+      // Hidden until its programs exist, like every mesh the tier makes; the tier shows it after `prepare`.
+      if (this.prepare) h.mesh.visible = false;
+      into.push(h);
+    }
+    return refused;
+  }
 
   /**
    * Other packs to look in for anything the planet's own does not carry.
@@ -882,6 +916,7 @@ export class LayoutStreamer {
     const meshes: THREE.Object3D[] = [];
     const buildings: Building[] = [];
     const effects: EffectHandle[] = [];
+    const waters: WaterSurfaceHandle[] = [];
     const localFx = new THREE.Matrix4();
     if (this.effects) {
       for (const o of objects) {
@@ -921,8 +956,18 @@ export class LayoutStreamer {
         // so each placed building gets its own meshes; a building without portal data draws normally.
         // Those meshes are made only once the player is near (see buildInterior).
         const perBuilding = prim.cell > 0 && model.portals.length > 0;
-        const all = perBuilding ? list.filter((_, i) => !built[i]) : list;
+        let all = perBuilding ? list.filter((_, i) => !built[i]) : list;
         if (!all.length) continue;
+        // A fountain's or a pool's water standing out in the open is the water system's: a body per
+        // copy, prepared with the tier's own meshes. One in a room stays the model's, since the room
+        // pass draws what stands indoors and a world water body is not drawn there.
+        if (this.waterSurface && prim.cell <= 0 && isBasinWater(prim.material)) {
+          const before = waters.length;
+          const refused = this.basinWater(prim, all.filter((p) => !p.contained), model.def.id, waters);
+          for (let i = before; i < waters.length; i++) meshes.push(waters[i].mesh);
+          all = [...all.filter((p) => p.contained), ...refused];
+          if (!all.length) continue;
+        }
         // Indoor and outdoor copies of one model go in **separate** meshes, because only the indoor
         // ones want the actor layer and a mesh wears its layers whole. One chair in a cantina used
         // to put every chair of that model on the street onto the actor layer as well, which outside
@@ -953,7 +998,7 @@ export class LayoutStreamer {
     }
     this.loadedModels += byModel.size;
     this.loadedInstances += objects.length;
-    return { meshes, buildings, objects, effects };
+    return { meshes, buildings, objects, effects, waters };
   }
 
   /**
@@ -966,7 +1011,7 @@ export class LayoutStreamer {
    * already expect to be handed -- and `runtime` remembers them so that taking it away is exact.
    */
   private async addToTier(loaded: LoadedTier, p: PlacedObject): Promise<Building | null> {
-    const rec: { tier: LoadedTier; meshes: THREE.Object3D[]; building: Building | null; effects: EffectHandle[] } = { tier: loaded, meshes: [], building: null, effects: [] };
+    const rec: { tier: LoadedTier; meshes: THREE.Object3D[]; building: Building | null; effects: EffectHandle[]; waters: WaterSurfaceHandle[] } = { tier: loaded, meshes: [], building: null, effects: [], waters: [] };
     this.runtime.set(p, rec);
     this.loadedInstances++;
     const def = this.defOf(p.model);
@@ -1013,6 +1058,13 @@ export class LayoutStreamer {
     for (const prim of model.primitives) {
       // A portal building's rooms are drawn per cell by the portal renderer, out of `buildInterior`.
       if (building && prim.cell > 0 && model.portals.length > 0) continue;
+      // A basin put down out in the open holds the water system's water, as the world's own do.
+      if (!p.contained && prim.cell <= 0 && isBasinWater(prim.material) && !this.basinWater(prim, [p], model.def.id, rec.waters).length) {
+        const h = rec.waters[rec.waters.length - 1];
+        loaded.waters.push(h);
+        rec.meshes.push(h.mesh);
+        continue;
+      }
       const mesh = new THREE.InstancedMesh(prim.geometry, prim.material, 1);
       mesh.setMatrixAt(0, tmpM.compose(tmpV.set(p.x, p.y, p.z), p.q, ONE));
       mesh.castShadow = model.radius >= SHADOW_MIN_RADIUS && castsShadow(prim.material);
@@ -1063,6 +1115,11 @@ export class LayoutStreamer {
       const i = rec.tier.meshes.indexOf(mesh);
       if (i >= 0) rec.tier.meshes.splice(i, 1);
       if ((mesh as THREE.InstancedMesh).isInstancedMesh) (mesh as THREE.InstancedMesh).dispose();
+    }
+    for (const w of rec.waters) {
+      w.remove();
+      const i = rec.tier.waters.indexOf(w);
+      if (i >= 0) rec.tier.waters.splice(i, 1);
     }
     if (this.effects) {
       for (const h of rec.effects) {
@@ -1196,6 +1253,7 @@ export class LayoutStreamer {
       this.hugeQueue.length = keep;
     }
     if (this.effects) for (const h of t.effects) this.effects.remove(h);
+    for (const w of t.waters) w.remove();
     this.loadedInstances -= t.objects.length;
     region.tiers[tier] = null;
   }

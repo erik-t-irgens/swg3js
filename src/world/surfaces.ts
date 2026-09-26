@@ -489,6 +489,29 @@ export function isBlendedWater(m: THREE.Material): boolean {
   return m.transparent && /(^|[/_])wter_|water/i.test(m.name);
 }
 
+/**
+ * The water standing in a fountain's or a pool's basin, which is drawn by the game's own water system --
+ * reflecting through the water pass, rippling, ringed by rain, never swelling -- rather than as the
+ * blended surface the model carries (the owner's call). Named exactly, shader by shader, because each
+ * was measured: every one of these is a level surface over the whole of its area. The waterfalls and
+ * the foam are not here (upright, and meant to scroll), nor the geyser bowls (half of them is rock),
+ * nor the water inside a tank or a canister, nor the Nightsister pool and the mine's dirty water.
+ */
+export const BASIN_WATER_SHADERS: ReadonlySet<string> = new Set([
+  'shader/corl_fountain_water_aaes23.sht',
+  'shader/thed_water_aaes23.sht',
+  'shader/wter_aqua.sht',
+  'shader/ply_imp_garden_base_water_aa7.sht',
+  'shader/ply_imp_garden_base_water_aaes20.sht',
+  'shader/ply_water_ca7.sht',
+  'shader/tatt_tusken_water_ca7.sht',
+]);
+
+/** Whether a converted material is a basin's water (see `BASIN_WATER_SHADERS`). */
+export function isBasinWater(m: THREE.Material): boolean {
+  return BASIN_WATER_SHADERS.has(m.name);
+}
+
 /** Whether a mesh with these materials should cast: false when any carries `userData.noShadow`, or is blended water. */
 export function castsShadow(material: THREE.Material | THREE.Material[]): boolean {
   if (Array.isArray(material)) {
