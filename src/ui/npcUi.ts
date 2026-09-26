@@ -173,6 +173,22 @@ export class NpcUi {
   /** A click on another tab: the game swaps the panels. */
   onTab: (id: string) => void = () => {};
 
+  /**
+   * A close the player asked for -- the X button, or a click on the backdrop.
+   *
+   * It is not the same as `hide()`, which `App.closePanels()` calls on every panel at once and whose
+   * callers decide the mouse for themselves. Only a close the player asked for hands the pointer
+   * back, and nine panels had no way to say so: they called `hide()`, nothing cleared the input's
+   * `captured`, and every key and the mouse stayed dead until some other panel's own key was pressed
+   * twice. The panels that were already right do exactly this.
+   */
+  onClose: () => void = () => {};
+
+  /** Close because the player asked, and give the mouse back. */
+  private dismiss(): void {
+    this.hide();
+    this.onClose();
+  }
   constructor(parent: HTMLElement) {
     this.root = document.createElement('div');
     this.root.id = 'npcs';
@@ -197,10 +213,10 @@ export class NpcUi {
     this.readyOnly = this.root.querySelector('.ready-only input')!;
     this.chips = this.root.querySelector('.mob-chips')!;
     this.chips.innerHTML = CHIPS.map((c) => `<button class="mob-chip${c === this.chip ? ' on' : ''}" data-chip="${c}">${escapeHtml(CHIP_LABELS[c])}</button>`).join('');
-    this.root.querySelector('.close')!.addEventListener('click', () => this.hide());
+    this.root.querySelector('.close')!.addEventListener('click', () => this.dismiss());
     wireTabs(this.root, 'npcs', (id) => this.onTab(id));
     this.root.addEventListener('click', (e) => {
-      if (e.target === this.root) this.hide();
+      if (e.target === this.root) this.dismiss();
     });
     this.find.addEventListener('input', () => {
       window.clearTimeout(this.findTimer);

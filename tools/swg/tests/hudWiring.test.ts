@@ -93,7 +93,14 @@ const pkg = JSON.parse(read('package.json')) as { scripts: Record<string, string
   // the lift — and neither of them is written into the prompt line.
   const gatherAt = main.indexOf('private gatherPrompt(');
   ok(gatherAt > 0, 'the state is gathered in one place');
-  const gather = main.slice(gatherAt, gatherAt + 4500);
+  // The method's real end, not a guessed length. It was 4,500 characters, which is a bound on how
+  // much may be *written* rather than on what is being asked, and three separate changes have now
+  // failed this check by adding a comment rather than by moving a call out of the gather. A method
+  // ends at the first line that closes a brace at the class's own indent.
+  // The line endings are the working copy's, so the closing brace is matched rather than spelled.
+  const closes = /\r?\n {2}\}\r?\n/.exec(main.slice(gatherAt));
+  ok(!!closes, "and the gather's own end is found rather than assumed");
+  const gather = main.slice(gatherAt, gatherAt + (closes?.index ?? 0));
   ok(gather.includes('this.world.elevatorsNear('), 'the gather asks for the elevators near');
   ok(gather.includes('this.liftHere()'), 'the gather asks for the lift underfoot');
   ok(gather.includes('this.world.doorlessNear('), 'the gather asks for the doorless building near');
@@ -262,6 +269,12 @@ const pkg = JSON.parse(read('package.json')) as { scripts: Record<string, string
     ['at an elevator, going up', (s) => void (s.elevator = 'up'), 'E up a level'],
     ['at an elevator, going down', (s) => void (s.elevator = 'down'), 'E down a level'],
     ['beside a building with no way in', (s) => void (s.doorless = true), 'E go inside'],
+    // A port's three things. This table had no row for any of them, which is exactly why all three
+    // wore one word, "the shuttle", for as long as they did.
+    ['at a ticket terminal', (s) => void (s.travel = 'terminal'), 'E the ticket terminal'],
+    ['at the ticket collector', (s) => void (s.travel = 'collector'), 'E the ticket collector'],
+    ['at a ship terminal', (s) => void (s.travel = 'ship'), 'E the ship terminal'],
+    ['a terminal and a lift shaft at once', (s) => void ((s.travel = 'terminal'), (s.lift = true)), 'E the lift'],
     // The gate between two of a world's zones. The cap says what happens; where it goes is a place
     // name, which is said on the message line as you come to it and never worn by a cap.
     ['at a gate between two zones', (s) => void (s.gate = 'travel'), 'E through the gate'],

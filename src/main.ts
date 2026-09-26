@@ -682,7 +682,7 @@ class App {
   private promptLiftStops = 0;
   private promptDoorless = '';
   /** The port the gather found, for the long line, which has room for its name. */
-  private promptShuttle = '';
+  private promptTravel = '';
   /**
    * The gates this world's zones are walked between, pointed at the pack by `arrive` and by the
    * jump's own crossing, and the clock that keeps a fight out of them. A world with no gates.json
@@ -1296,7 +1296,12 @@ class App {
       if (band.mine) this.toggleBand(), this.toggleBand();
     };
     band.attach({
-      loop: (id, at, gain) => this.audio.loop(id, { x: at.x, y: at.y, z: at.z, gain, space: this.listenerPose.space }),
+      // The offset is the whole of "everybody's loop starts where the song is": a part is started as
+      // though it had begun that many seconds ago, which is what `PlayOptions.at` is for and what
+      // the run's own `offsetInto` turns into the seek the source is started at. The adapter used to
+      // take three arguments and drop the fourth, so two players a minute apart each began at the
+      // top of their own sample and the bar they are meant to share did nothing.
+      loop: (id, at, gain, offset) => this.audio.loop(id, { x: at.x, y: at.y, z: at.z, gain, space: this.listenerPose.space, at: this.audio.now - offset }),
       once: (id, at, gain) => this.audio.play(id, { x: at.x, y: at.y, z: at.z, gain, space: this.listenerPose.space }),
       stop: (key, fade) => this.audio.stop(key, fade),
       move: (key, at) => this.audio.move(key, at.x, at.y, at.z),
@@ -1308,6 +1313,14 @@ class App {
     this.npcUi = new NpcUi(this.ui);
     this.appearanceUi = new AppearanceUi(this.ui, () => this.saveAppearance());
     this.appearanceUi.onTab = (id) => this.toggleInventory(id as InventoryTab);
+    // Every panel that closes because the player asked hands the mouse back. Nine of them had no way
+    // to say so: their X button and their backdrop called `hide()`, nothing cleared the input's
+    // `captured`, and the game went on simulating with every key and the mouse dead -- the only way
+    // out being to open and close some other panel with its own key, which works only because a key
+    // press is still read while captured. It is wired here rather than in each panel because the
+    // guard is the game's to make: the group panel and the trade window hold the mouse without
+    // joining `anyPanelOpen`, so a panel closing under one of those must leave the pointer alone.
+    for (const panel of [this.backpack, this.wardrobe, this.appearanceUi, this.weaponsUi, this.forceUi, this.vehiclesUi, this.npcUi, this.shipEdit, this.housingUi]) panel.onClose = () => this.handBackMouse();
     // The tabs: a click on the other tab of a panel swaps to it, the key toggles whichever was last open.
     this.wardrobe.onTab = (id) => this.toggleInventory(id as InventoryTab);
     // The Clothes (give) tab dresses through the equipment: the game's slots, the compile before the
@@ -5495,6 +5508,9 @@ class App {
     });
     // The trade window moves by its head (its find field still takes a click) and sizes by its corner.
     draggable(tradeUi.root, '.trade-panel', '.trade-head', 'trade');
+    // The two windows that hold the mouse without joining `anyPanelOpen`, told to the one place that
+    // hands it back, so a panel closing under either of them leaves the pointer where it is.
+    this.mouseHeldElsewhere = () => groupUi.open || tradeUi.open;
     // The backpack's own Trade button: ask whoever this player is standing by and looking at. It is
     // the same rule the chat line's /trade comes to, and the ledger is what refuses it when there is
     // no server, nobody there, or they are past the game's own 8 m.
@@ -5881,6 +5897,8 @@ class App {
     // Escape: in the world it opens the menu (the browser drops the pointer lock on it, which is
     // caught below); with the menu up it resumes; with a panel or the map up it closes that.
     window.addEventListener('keydown', (e) => {
+      // A held Escape autorepeats, and every other keydown listener in the game already says so.
+      if (e.repeat) return;
       if (e.code !== 'Escape' || !this.inWorld || !this.started || this.traveling) return;
       // A building in hand is given up before anything else: it is the thing on the screen.
       if (this.isPlacing && !this.menu.open) {
@@ -5960,15 +5978,27 @@ class App {
   // ---- The Escape menu and its settings. ----
 
   private menuOpenedAt = 0;
+  private menuClosedAt = 0;
 
+  /**
+   * The guard is both ways round, and used not to be.
+   *
+   * Opening the menu is a press of Escape that the browser has also taken the pointer lock on, so
+   * there are two routes in -- the key and the unlock that follows it -- and the one press must not
+   * walk through both. That was already true of the closing press, which is what `menuOpenedAt`
+   * holds off for 300 ms; it was not true of the opening one, so the press that resumed the game
+   * went straight back out through whichever of the two routes fired second and put the menu up
+   * again. A third press then closed it, which is exactly what the owner saw.
+   */
   private openMenu(): void {
-    if (this.menu.open) return;
+    if (this.menu.open || performance.now() - this.menuClosedAt < 300) return;
     this.menuOpenedAt = performance.now();
     this.menu.show();
     this.freeMouse(true);
   }
 
   private resume(): void {
+    this.menuClosedAt = performance.now();
     this.menu.hide();
     this.freeMouse(false);
   }
@@ -6235,7 +6265,7 @@ class App {
     this.promptClock = 0;
     this.promptLiftStops = 0;
     this.promptDoorless = '';
-    this.promptShuttle = '';
+    this.promptTravel = '';
     this.promptGate = '';
     this.zoneGates.clear();
     this.showBodyBlock(true);
@@ -6525,14 +6555,12 @@ class App {
       // starport is not something you use. It is gathered whatever else is beside you and the bar's
       // own chain decides which of the things that want this key shows, since put in the else above
       // a doorway near a starport would hide the terminal rather than merely outranking it.
+      // A port's three things, in the order the key itself takes them. At a collector the words
+      // carry the shuttle's own clock, which `collectorWords` says why; the two terminals say what
+      // they are for, since a terminal you walk up to gives no sign of it.
       const use = this.travelHere();
-      // At a collector the words carry the shuttle's own clock, which `collectorWords` says why.
-      s.shuttle = !!use;
-      this.promptShuttle = use ? (use.kind === 'terminal' ? 'the travel terminal' : this.collectorLine(use)) : '';
-      if (!use && this.shipTerminalNear()) {
-        s.shuttle = true;
-        this.promptShuttle = 'the ship terminal';
-      }
+      s.travel = use ? (use.kind === 'terminal' ? 'terminal' : 'collector') : this.shipTerminalNear() ? 'ship' : '';
+      this.promptTravel = s.travel === 'collector' && use ? this.collectorLine(use) : s.travel === 'ship' ? 'the ship terminal: your own ship' : s.travel ? 'the ticket terminal: buy a ticket' : '';
     }
     const flown = p.mounted ?? p.piloting;
     if (flown) {
@@ -10333,6 +10361,23 @@ class App {
     else this.input.requestLock();
   }
 
+  /**
+   * Give the mouse back, unless something else on the screen still wants it.
+   *
+   * What a panel knows is that it has closed; whether the pointer goes back to the game is the
+   * game's to say, because two windows hold the mouse without being panels in the tab sense -- the
+   * group's roster and the trade window, both of which are deliberately allowed to stand over a
+   * panel. This is the same question `TradeUi` asks through its own `elseHasMouse`, asked from the
+   * other side.
+   */
+  private handBackMouse(): void {
+    if (this.anyPanelOpen() || this.map.open || this.mouseHeldElsewhere()) return;
+    this.freeMouse(false);
+  }
+
+  /** Whether one of the two windows that hold the mouse without joining `anyPanelOpen` has it. */
+  private mouseHeldElsewhere: () => boolean = () => false;
+
   /** B: the spawner, the garage or the NPCs tab; the key toggles the last tab used, a tab click swaps. */
   private toggleSpawner(tab?: 'garage' | 'npcs'): void {
     const want = tab ?? this.spawnerTab;
@@ -12074,7 +12119,7 @@ class App {
         else if (S8.lift) prompt = `<b>E</b> lift: ${this.promptLiftStops} levels`;
         else if (S8.elevator) prompt = `<b>E</b> elevator ${S8.elevator}`;
         else if (S8.doorless) prompt = `<b>E</b> enter ${this.promptDoorless} (no way in on foot)`;
-        else if (S8.shuttle) prompt = `<b>E</b> shuttle from ${this.promptShuttle}`;
+        else if (S8.travel) prompt = `<b>E</b> ${this.promptTravel}`;
         else if (player.piloting) prompt = `at the controls of the ${player.piloting.spec.label} Ãƒâ€šÃ‚Â· ${player.piloting.landed ? `landed Ãƒâ€šÃ‚Â· <b>W</b> or <b>Space</b> lifts off` : `<b>W</b>/<b>S</b> throttle Ãƒâ€šÃ‚Â· mouse steers${player.piloting.spec.ship && SHIP_GROUND.rule === 'landing' ? ` Ãƒâ€šÃ‚Â· hold <b>Ctrl</b> to set down Ãƒâ€šÃ‚Â· <b>${keyName(CUT_ENGINES_KEY)}</b> cuts the engines` : ''}`} Ãƒâ€šÃ‚Â· <b>Alt</b> looks around Ãƒâ€šÃ‚Â· <b>E</b> lets go Ãƒâ€šÃ‚Â· ${Math.round(Math.abs(player.piloting.speed) * 3.6)} km/h${shipHint}${player.piloting.landNote ? ` Ãƒâ€šÃ‚Â· ${player.piloting.landNote}` : ''}`;
         // Standing on something out in space: the boots hold, a jump lets go, and E climbs into a ship beside you.
         else if (isSurfaceRoom(player.aboard)) prompt = `<b>gravity boots</b> on ${S8.bootsReach ? 'a surface Ãƒâ€šÃ‚Â· <b>E</b> climbs into the ship' : 'a surface Ãƒâ€šÃ‚Â· <b>E</b> takes them off'} Ãƒâ€šÃ‚Â· <b>jump</b> lets go${player.aboard.atEdge ? ' Ãƒâ€šÃ‚Â· <b>the surface underfoot runs out near here</b>' : ''} Ãƒâ€šÃ‚Â· <b>${shipKey}</b> ship menu`;

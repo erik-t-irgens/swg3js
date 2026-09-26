@@ -18,6 +18,22 @@ export class ForceUi {
   /** The loadout changed: the game gives it to the kit and keeps it with the character. */
   onChange: (loadout: (string | null)[]) => void = () => {};
 
+  /**
+   * A close the player asked for -- the X button, or a click on the backdrop.
+   *
+   * It is not the same as `hide()`, which `App.closePanels()` calls on every panel at once and whose
+   * callers decide the mouse for themselves. Only a close the player asked for hands the pointer
+   * back, and nine panels had no way to say so: they called `hide()`, nothing cleared the input's
+   * `captured`, and every key and the mouse stayed dead until some other panel's own key was pressed
+   * twice. The panels that were already right do exactly this.
+   */
+  onClose: () => void = () => {};
+
+  /** Close because the player asked, and give the mouse back. */
+  private dismiss(): void {
+    this.hide();
+    this.onClose();
+  }
   constructor(parent: HTMLElement) {
     this.root = document.createElement('div');
     this.root.id = 'force';
@@ -33,10 +49,10 @@ export class ForceUi {
       </div>`;
     parent.appendChild(this.root);
     this.body = this.root.querySelector('.weapons-body')!;
-    this.root.querySelector('.close')!.addEventListener('click', () => this.hide());
+    this.root.querySelector('.close')!.addEventListener('click', () => this.dismiss());
     wireTabs(this.root, 'force', (id) => this.onTab(id));
     this.root.addEventListener('click', (e) => {
-      if (e.target === this.root) this.hide();
+      if (e.target === this.root) this.dismiss();
     });
   }
 

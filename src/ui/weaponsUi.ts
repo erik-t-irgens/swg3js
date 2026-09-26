@@ -61,6 +61,22 @@ export class WeaponsUi {
   /** A click on another tab: the game swaps the panels. */
   onTab: (id: string) => void = () => {};
 
+  /**
+   * A close the player asked for -- the X button, or a click on the backdrop.
+   *
+   * It is not the same as `hide()`, which `App.closePanels()` calls on every panel at once and whose
+   * callers decide the mouse for themselves. Only a close the player asked for hands the pointer
+   * back, and nine panels had no way to say so: they called `hide()`, nothing cleared the input's
+   * `captured`, and every key and the mouse stayed dead until some other panel's own key was pressed
+   * twice. The panels that were already right do exactly this.
+   */
+  onClose: () => void = () => {};
+
+  /** Close because the player asked, and give the mouse back. */
+  private dismiss(): void {
+    this.hide();
+    this.onClose();
+  }
   constructor(parent: HTMLElement, private readonly onPick: (def: WeaponDef | null, hand: 'right' | 'left') => void) {
     this.root = document.createElement('div');
     this.root.id = 'weapons';
@@ -84,7 +100,7 @@ export class WeaponsUi {
     this.count = this.root.querySelector('.count')!;
     this.find = this.root.querySelector('.find')!;
     this.examine = this.root.querySelector('.bp-examine')!;
-    this.root.querySelector('.close')!.addEventListener('click', () => this.hide());
+    this.root.querySelector('.close')!.addEventListener('click', () => this.dismiss());
     wireTabs(this.root, 'weapons', (id) => this.onTab(id));
     this.root.querySelector('.empty')!.addEventListener('click', () => {
       this.onPick(null, 'right');
@@ -98,7 +114,7 @@ export class WeaponsUi {
     });
     this.root.addEventListener('click', (e) => {
       if (e.target === this.root) {
-        this.hide();
+        this.dismiss();
         return;
       }
       const target = e.target as HTMLElement;

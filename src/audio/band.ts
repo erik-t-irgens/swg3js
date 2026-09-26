@@ -139,33 +139,37 @@ export function musicId(file: string): string {
  * A made template for one part. The settings are ours: nothing in `player_music/` carries a `.snd`,
  * so there is nothing of the game's to copy and these are chosen.
  *
- * `loops` is the file's own `_lp`, which is the one thing the game did say.
+ * `loops` is the file's own `_lp`, which is the one thing the game did say. `[-1, -1]` is for ever,
+ * exactly as the saber hum's own made template says it, and a part that is not a loop simply leaves
+ * the field out, which the reader takes as one play.
+ *
+ * **It is written as a real `SoundTemplate` and is not cast.** The first cut of this was a hand-made
+ * object behind `as unknown as SoundTemplate`, and it had six faults the compiler would have caught
+ * in one go: scalars where the reader wants a `Variation` or a two-number range (which is what threw
+ * -- `volume: 1` made `vol.range[0]` a read off undefined), the sample path one `../` short of where
+ * the music really lives, `loop` where the field is `loops` (so a main part played once and then
+ * hung), `placedMusic`, which routes a sound onto the **ambience** slider, and four fields the
+ * interface does not have at all. Leaving out `volume`, `pitch`, `delay` and the fades is the point:
+ * the reader's own defaults are exactly what is wanted, and absent cannot be the wrong shape.
+ *
+ * The path is two levels up, not one: the bank fetches from `assets-private/sounds/samples/`, the
+ * sabers' own `../jka/` reaches `assets-private/sounds/jka/` beside it, and the music is a sibling
+ * of `sounds/` rather than a child, at `assets-private/music/samples/`.
  */
 export function musicTemplate(file: string, loops: boolean): SoundTemplate {
-  const sample = `../music/${file.startsWith('samples/') ? file : `samples/${file}`}`;
-  return {
-    id: musicId(file),
+  const sample = `../../music/${file.startsWith('samples/') ? file : `samples/${file}`}`;
+  const t: SoundTemplate = {
+    dim: 3,
     samples: [sample],
+    // The game's own category 9 is player music, which is what this is, and which the mixer's own
+    // table already sends to the music slider.
+    category: 9,
+    priority: 0,
     // The one radius that matters: how far a band carries. Everything past it is silence, and the
     // whole of the falloff inside it is `distance.ts`, as for every other sound in the game.
     full: 8,
-    loop: loops ? 0 : 1,
-    loopGap: 0,
-    delay: 0,
-    fadeIn: 0.05,
-    fadeOut: 0.3,
-    volume: 1,
-    pitch: 0,
-    volumeDrift: 0,
-    pitchDrift: 0,
-    priority: 0,
-    category: 0,
-    order: 0,
-    flat: false,
-    // It is music, so it answers to the music slider and nothing else.
-    keptMusic: false,
-    placedMusic: true,
-  } as unknown as SoundTemplate;
+  };
+  return loops ? { ...t, loops: [-1, -1] } : t;
 }
 
 /**

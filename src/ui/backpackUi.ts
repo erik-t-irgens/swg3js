@@ -80,6 +80,22 @@ export class BackpackUi {
   /** The newest item already scrolled to, so a re-render does not scroll again. */
   private shownNew: string | null = null;
 
+  /**
+   * A close the player asked for -- the X button, or a click on the backdrop.
+   *
+   * It is not the same as `hide()`, which `App.closePanels()` calls on every panel at once and whose
+   * callers decide the mouse for themselves. Only a close the player asked for hands the pointer
+   * back, and nine panels had no way to say so: they called `hide()`, nothing cleared the input's
+   * `captured`, and every key and the mouse stayed dead until some other panel's own key was pressed
+   * twice. The panels that were already right do exactly this.
+   */
+  onClose: () => void = () => {};
+
+  /** Close because the player asked, and give the mouse back. */
+  private dismiss(): void {
+    this.hide();
+    this.onClose();
+  }
   constructor(parent: HTMLElement) {
     this.root = document.createElement('div');
     this.root.id = 'backpack';
@@ -118,14 +134,14 @@ export class BackpackUi {
     this.packCount = this.root.querySelector('.bp-pack-count')!;
     this.examine = this.root.querySelector('.bp-examine')!;
     this.note = this.root.querySelector('.bp-note')!;
-    this.root.querySelector('.close')!.addEventListener('click', () => this.hide());
+    this.root.querySelector('.close')!.addEventListener('click', () => this.dismiss());
     this.root.querySelector('.trade')!.addEventListener('click', () => this.onTrade());
     wireTabs(this.root, 'backpack', (id) => this.onTab(id));
     this.find.addEventListener('input', () => this.render(this.model));
     // A click on the backdrop closes it; one inside must not.
     this.root.addEventListener('click', (e) => {
       if (e.target === this.root) {
-        this.hide();
+        this.dismiss();
         return;
       }
       const cell = (e.target as HTMLElement).closest<HTMLElement>('.bp-cell[data-key]');

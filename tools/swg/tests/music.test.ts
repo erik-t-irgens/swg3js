@@ -12,6 +12,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { STEMS, STEM_OF, instrumentStems, musicCounts, readSampleName, readSongs } from '../music.mjs';
 import { BAND_TUNE, Band, bandWords, inBand, musicId, musicTemplate, partsFor, songOffset, songsFor, stemFor, type MusicPack } from '../../../src/audio/band.ts';
+import { TemplateRun, makeStart } from '../../../src/audio/template.ts';
 
 let passed = 0;
 function ok(cond: boolean, what: string): void {
@@ -109,12 +110,36 @@ const fixture: MusicPack = {
 }
 
 {
-  ok(musicTemplate('samples/a_main_lp.wav', true).samples[0] === '../music/samples/a_main_lp.wav', "a made template points at the music folder beside the bank's own samples");
-  ok(musicTemplate('a_main_lp.wav', true).samples[0] === '../music/samples/a_main_lp.wav', 'however the file was written');
+  // The bank fetches a sample from `assets-private/sounds/samples/`, and the music is a sibling of
+  // `sounds/` rather than a child of it, so the way out is two levels and not one. The sabers' own
+  // made templates say `../jka/`, which is right for them and wrong here: `assets-private/sounds/jka/`
+  // really is beside the samples folder. One `../` too few is a 404 on every note.
+  ok(musicTemplate('samples/a_main_lp.wav', true).samples[0] === '../../music/samples/a_main_lp.wav', 'a made template reaches out of the bank\'s samples folder and into the music one');
+  ok(musicTemplate('a_main_lp.wav', true).samples[0] === '../../music/samples/a_main_lp.wav', 'however the file was written');
   ok(musicId('samples/a_main_lp.wav') === 'music:a_main_lp', 'and one name a file, so nothing is ever made twice');
-  const loop = musicTemplate('samples/a_main_lp.wav', true) as unknown as { loop: number };
-  const once = musicTemplate('samples/a_intro.wav', false) as unknown as { loop: number };
-  ok(loop.loop === 0 && once.loop === 1, "the file's own _lp is what says it loops, which is the one thing the game did say");
+  const loop = musicTemplate('samples/a_main_lp.wav', true);
+  const once = musicTemplate('samples/a_intro.wav', false);
+  ok(loop.loops?.[0] === -1 && loop.loops?.[1] === -1, "the file's own _lp is what says it loops, which is the one thing the game did say");
+  ok(once.loops === undefined, 'and a part that is not a loop leaves the field out, which the reader takes as one play');
+  ok(loop.category === 9 && !loop.placedMusic, "it is the game's own player music, so it answers to the music slider and not the ambience one");
+  ok(loop.dim === 3, 'and it has a place in the world, so it is heard from where the player stands');
+}
+
+{
+  // The check the whole suite was missing, and the reason a crash sat under twenty passing
+  // assertions: nothing ever built a run out of one of these. The first cut was a hand-made object
+  // behind `as unknown as SoundTemplate` whose `volume: 1` was a number where the reader wants a
+  // variation, so the very first line of `TemplateRun` that read it threw. Building one here is one
+  // line and it cannot be got wrong again.
+  const run = new TemplateRun(musicTemplate('samples/a_main_lp.wav', true), () => 0.5, 0);
+  ok(run.loops, 'a made loop really loops when the reader is given it');
+  ok(run.begin === 0, 'and begins at once: no delay, because the field is absent and absent means none');
+  const start = makeStart();
+  ok(run.nextDue(1, start), 'and is due at once');
+  ok(start.gain === 1 && start.rate === 1, "at its own volume and its own pitch, which are the reader's defaults");
+  ok(Number.isFinite(start.at) && Number.isFinite(start.fadeIn), 'and every number it hands the mixer is a number');
+  const plain = new TemplateRun(musicTemplate('samples/a_intro.wav', false), () => 0.5, 0);
+  ok(!plain.loops, 'while an intro plays once');
 }
 
 {

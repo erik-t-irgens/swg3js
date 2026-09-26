@@ -26,6 +26,22 @@ export class VehiclesUi {
   /** A ship's edit button: the game opens its edit page (components, droid and paint). */
   onEdit: (def: VehicleDef) => void = () => {};
 
+  /**
+   * A close the player asked for -- the X button, or a click on the backdrop.
+   *
+   * It is not the same as `hide()`, which `App.closePanels()` calls on every panel at once and whose
+   * callers decide the mouse for themselves. Only a close the player asked for hands the pointer
+   * back, and nine panels had no way to say so: they called `hide()`, nothing cleared the input's
+   * `captured`, and every key and the mouse stayed dead until some other panel's own key was pressed
+   * twice. The panels that were already right do exactly this.
+   */
+  onClose: () => void = () => {};
+
+  /** Close because the player asked, and give the mouse back. */
+  private dismiss(): void {
+    this.hide();
+    this.onClose();
+  }
   constructor(parent: HTMLElement, private readonly onSpawn: (def: VehicleDef, kind?: VehicleKind) => void, private readonly onClear: () => number) {
     this.root = document.createElement('div');
     this.root.id = 'garage';
@@ -44,7 +60,7 @@ export class VehiclesUi {
     parent.appendChild(this.root);
     this.body = this.root.querySelector('.weapons-body')!;
     this.count = this.root.querySelector('.count')!;
-    this.root.querySelector('.close')!.addEventListener('click', () => this.hide());
+    this.root.querySelector('.close')!.addEventListener('click', () => this.dismiss());
     wireTabs(this.root, 'garage', (id) => this.onTab(id));
     this.root.querySelector('.clear')!.addEventListener('click', () => {
       const n = this.onClear();
@@ -52,7 +68,7 @@ export class VehiclesUi {
     });
     this.root.querySelector('.find')!.addEventListener('input', () => this.render());
     this.root.addEventListener('click', (e) => {
-      if (e.target === this.root) this.hide();
+      if (e.target === this.root) this.dismiss();
     });
   }
 

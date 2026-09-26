@@ -80,6 +80,22 @@ export class WardrobeUi {
   private dollFor: Character | null = null;
   private dollParts = '';
 
+  /**
+   * A close the player asked for -- the X button, or a click on the backdrop.
+   *
+   * It is not the same as `hide()`, which `App.closePanels()` calls on every panel at once and whose
+   * callers decide the mouse for themselves. Only a close the player asked for hands the pointer
+   * back, and nine panels had no way to say so: they called `hide()`, nothing cleared the input's
+   * `captured`, and every key and the mouse stayed dead until some other panel's own key was pressed
+   * twice. The panels that were already right do exactly this.
+   */
+  onClose: () => void = () => {};
+
+  /** Close because the player asked, and give the mouse back. */
+  private dismiss(): void {
+    this.hide();
+    this.onClose();
+  }
   constructor(parent: HTMLElement, private readonly onChange: () => void) {
     this.root = document.createElement('div');
     this.root.id = 'wardrobe';
@@ -108,7 +124,7 @@ export class WardrobeUi {
     this.examine = this.root.querySelector<HTMLElement>('.bp-examine')!;
     this.preview = new CharacterPreview();
     this.root.querySelector<HTMLElement>('.wardrobe-preview')!.prepend(this.preview.canvas);
-    this.root.querySelector('.close')!.addEventListener('click', () => this.hide());
+    this.root.querySelector('.close')!.addEventListener('click', () => this.dismiss());
     this.root.querySelector('.strip')!.addEventListener('click', () => void this.stripAll());
     this.root.querySelector('.mixed')!.addEventListener('change', () => this.build());
     this.root.querySelector('.blocked')!.addEventListener('change', () => this.build());
@@ -121,7 +137,7 @@ export class WardrobeUi {
     // A click on the backdrop closes it; one inside must not.
     this.root.addEventListener('click', (e) => {
       if (e.target === this.root) {
-        this.hide();
+        this.dismiss();
         return;
       }
       const cell = (e.target as HTMLElement).closest<HTMLElement>('.bp-cell[data-id]');

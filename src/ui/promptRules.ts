@@ -150,8 +150,16 @@ export interface PromptState {
   lift: boolean;
   elevator: '' | 'up' | 'down';
   doorless: boolean;
-  /** Standing at a starport or a shuttleport, with somewhere for a shuttle to take you. */
-  shuttle: boolean;
+  /**
+   * Which of a port's three things is within reach: the terminal a ticket is bought at, the
+   * collector it is handed to outside, or the terminal the player's own ship answers to.
+   *
+   * They were one boolean and one word, "the shuttle", which named none of the three and was wrong
+   * about all of them. They are mutually exclusive where they are gathered -- the terminal wins over
+   * the collector, and the ship terminal is only reached when neither is there -- which is the same
+   * chain the key itself takes, so one field with four values is the shape and not three booleans.
+   */
+  travel: '' | 'terminal' | 'collector' | 'ship';
   /**
    * Standing at one of the gates a world's zones are walked between: 'travel' where the pack names
    * a destination and 'nowhere' where it does not. It carries no place name, deliberately — a cap
@@ -185,7 +193,7 @@ export function newPromptState(): PromptState {
     lift: false,
     elevator: '',
     doorless: false,
-    shuttle: false,
+    travel: '',
     gate: '',
     boots: false,
     bootsReach: false,
@@ -207,7 +215,7 @@ export function resetPromptState(s: PromptState): PromptState {
   s.lift = false;
   s.elevator = '';
   s.doorless = false;
-  s.shuttle = false;
+  s.travel = '';
   s.gate = '';
   s.boots = false;
   s.bootsReach = false;
@@ -249,9 +257,13 @@ export const PROMPT_WORDS = Object.freeze({
   up: 'up a level',
   down: 'down a level',
   inside: 'go inside',
-  // A shuttle at a starport or a shuttleport. The cap says what it is, not where it goes: where is a
-  // list of places and fares, which is what the panel is for.
-  shuttle: 'the shuttle',
+  // A port's three things, each named for itself. The cap says what you are standing at, not where it
+  // goes: where is a list of places and fares, which is what the panel is for. They were one word,
+  // "the shuttle", which was the wrong noun for all three -- a terminal is not a shuttle, and the
+  // one thing at a port that really is a shuttle is the thing the collector puts you on.
+  ticketTerminal: 'the ticket terminal',
+  collector: 'the ticket collector',
+  shipTerminal: 'the ship terminal',
   // A gate between two of a world's zones. The cap says what happens, never where it goes: the
   // destination is a place name, which is the thing you are looking at, and it is said on the
   // message line as you come to the gate and written in full on the long line.
@@ -398,9 +410,10 @@ export function fillActions(s: PromptState, out: PromptAction[]): number {
   if (s.lift) n = push(out, n, 'mount', W.lift);
   else if (s.elevator) n = push(out, n, 'mount', s.elevator === 'down' ? W.down : W.up);
   else if (s.doorless) n = push(out, n, 'mount', W.inside);
-  // A port is a point forty metres wide and a doorway is underfoot, so the shuttle is the last of
-  // the four to have the key, exactly as the game's own dispatch orders them.
-  else if (s.shuttle) n = push(out, n, 'mount', W.shuttle);
+  // A port's own things are the last of the four to have the key, exactly as the game's own dispatch
+  // orders them: a lift shaft, an elevator and a doorway are all underfoot and all outrank a terminal
+  // you have walked up to.
+  else if (s.travel) n = push(out, n, 'mount', s.travel === 'collector' ? W.collector : s.travel === 'ship' ? W.shipTerminal : W.ticketTerminal);
 
   if (s.boots) {
     // The boots hold a surface out in space: a ship beside you is climbed into, otherwise they come off.

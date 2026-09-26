@@ -160,22 +160,33 @@ const fill = (s: ReturnType<typeof newPromptState>) => fillActions(s, slots);
 }
 
 {
-  const n = fill(at({ shuttle: true }));
-  ok(n === 1 && words(n)[0] === PROMPT_WORDS.shuttle, 'standing at a starport: the shuttle');
+  // A port's three things are named for themselves. They were one word, "the shuttle", which is the
+  // wrong noun for all three: two of them are terminals and the third is the droid that takes the
+  // ticket, and the thing that really is a shuttle is what the droid puts you on.
+  const cases = [
+    ['terminal', PROMPT_WORDS.ticketTerminal],
+    ['collector', PROMPT_WORDS.collector],
+    ['ship', PROMPT_WORDS.shipTerminal],
+  ] as const;
+  for (const [travel, word] of cases) {
+    const n = fill(at({ travel }));
+    ok(n === 1 && words(n)[0] === word, `standing at the ${travel}: ${word}`);
+  }
+  ok(new Set(cases.map(([, w]) => w)).size === 3, 'and no two of them wear the same word');
 }
 
 {
   // A port is a point forty metres wide; a lift shaft, an elevator and a doorway are underfoot. All
-  // four want the same key, and the shuttle is deliberately the last of them to get it.
+  // four want the same key, and the port's own things are deliberately the last of them to get it.
   for (const over of [{ lift: true }, { elevator: 'up' as const }, { doorless: true }]) {
-    const n = fill(at({ shuttle: true, ...over }));
-    ok(n === 1 && words(n)[0] !== PROMPT_WORDS.shuttle, `a ${Object.keys(over)[0]} at a starport keeps the key (${show(n).join(', ')})`);
+    const n = fill(at({ travel: 'terminal', ...over }));
+    ok(n === 1 && words(n)[0] !== PROMPT_WORDS.ticketTerminal, `a ${Object.keys(over)[0]} at a starport keeps the key (${show(n).join(', ')})`);
   }
   // A speeder parked at the port does **not** take the key, the same way a doorway does not lose it
   // to one: the port is where you are standing. Pinned here because the game's own dispatch has to
   // agree with it, and a speeder is the likeliest thing to be parked at a starport.
-  const withSpeeder = fill(at({ shuttle: true, near: 'mount' }));
-  ok(withSpeeder === 1 && words(withSpeeder)[0] === PROMPT_WORDS.shuttle, `a speeder parked at the port: the shuttle keeps the key (${show(withSpeeder).join(', ')})`);
+  const withSpeeder = fill(at({ travel: 'terminal', near: 'mount' }));
+  ok(withSpeeder === 1 && words(withSpeeder)[0] === PROMPT_WORDS.ticketTerminal, `a speeder parked at the port: the terminal keeps the key (${show(withSpeeder).join(', ')})`);
 }
 
 {
@@ -264,7 +275,7 @@ const fill = (s: ReturnType<typeof newPromptState>) => fillActions(s, slots);
     ['a lift shaft', { lift: true }, PROMPT_WORDS.lift],
     ['an elevator', { elevator: 'up' as const }, PROMPT_WORDS.up],
     ['a building with no way in', { doorless: true }, PROMPT_WORDS.inside],
-    ['a starport', { shuttle: true }, PROMPT_WORDS.shuttle],
+    ['a starport', { travel: 'terminal' as const }, PROMPT_WORDS.ticketTerminal],
     ['a speeder', { near: 'mount' as const }, PROMPT_WORDS.mount],
     ['a ship with a room', { near: 'board' as const }, PROMPT_WORDS.board],
     ['a ship aboard', { aboard: true }, PROMPT_WORDS.stepOut],
