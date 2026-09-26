@@ -1148,6 +1148,16 @@ export class Player {
     return !!this.setDown;
   }
 
+  /**
+   * What is on a hand bone, or null: the model of whatever is held.
+   *
+   * For a dancer's prop it is an **empty** group, because the prop is a particle effect and has no
+   * model; the caller plays the effect at its world matrix. That is the whole reason this is public.
+   */
+  heldNode(hand: 'left' | 'right'): THREE.Object3D | null {
+    return this.held[hand];
+  }
+
   /** True while a swing can hurt: the saber system's attack moves, or the stand-in swing's middle. */
   get bladeActive(): boolean {
     if (this.thrown.inFlight) return false;

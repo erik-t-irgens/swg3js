@@ -11,7 +11,7 @@ import { fireLookLine, pickFireLook, type FireLook } from './fireLook.ts';
  * a weapon and fights with nothing, but it is held in a hand, drawn on a rack, given and taken up by
  * every path a weapon is, and the one thing this game has that does all of that is this list.
  */
-export type WeaponClass = 'pistol' | 'carbine' | 'rifle' | 'heavy' | 'sword1h' | 'knife' | 'sword2h' | 'polearm' | 'fist' | 'lightsaber' | 'lightsaber2h' | 'lightsaberStaff' | 'thrown' | 'instrument';
+export type WeaponClass = 'pistol' | 'carbine' | 'rifle' | 'heavy' | 'sword1h' | 'knife' | 'sword2h' | 'polearm' | 'fist' | 'lightsaber' | 'lightsaber2h' | 'lightsaberStaff' | 'thrown' | 'instrument' | 'entertainer';
 
 /**
  * A gun's client effect: the family and index its template names into the client's weapon table
@@ -53,8 +53,17 @@ export interface WeaponDef {
   id: string;
   template: string;
   class: WeaponClass;
-  model: string;
-  file: string;
+  /**
+   * The model in the pack, or null for a thing that has none.
+   *
+   * Every rack item is a model but one kind: 89 of the dancer's 107 props name a particle effect and
+   * nothing else, because a sparkler with the sparks taken out is nothing rather than a smaller
+   * sparkler. Such a one carries `effect` instead and is played at the hand.
+   */
+  model: string | null;
+  file: string | null;
+  /** A prop that is a particle effect rather than a model: the file, relative to the weapons folder. */
+  effect?: string | null;
   bounds?: { min: number[]; max: number[] };
   length: number;
   blade?: BladeDef;
@@ -87,8 +96,8 @@ export interface WeaponsManifest {
 export type ExtraEffect = 'flame' | 'lightning' | 'lightningMuzzle' | 'acid' | 'ice' | 'onfire';
 
 /** What each class fights like, when the manifest does not say. */
-export const FIGHTS: Record<WeaponClass, Fights> = { pistol: 'gun', carbine: 'gun', rifle: 'gun', heavy: 'gun', sword1h: 'single', knife: 'single', sword2h: 'single', polearm: 'staff', fist: 'single', lightsaber: 'lightsaber', lightsaber2h: 'lightsaber', lightsaberStaff: 'lightsaber', thrown: 'thrown', instrument: 'none' };
-export const CLASS_LABELS: Record<WeaponClass, string> = { pistol: 'Pistols', carbine: 'Carbines', rifle: 'Rifles', heavy: 'Heavy weapons', sword1h: 'One-hand swords and clubs', knife: 'Knives', sword2h: 'Two-hand swords and axes', polearm: 'Polearms and lances', fist: 'Fist weapons', lightsaber: 'Lightsabers', lightsaber2h: 'Two-hand lightsabers', lightsaberStaff: 'Double-bladed lightsabers', thrown: 'Grenades and thrown weapons', instrument: 'Instruments' };
+export const FIGHTS: Record<WeaponClass, Fights> = { pistol: 'gun', carbine: 'gun', rifle: 'gun', heavy: 'gun', sword1h: 'single', knife: 'single', sword2h: 'single', polearm: 'staff', fist: 'single', lightsaber: 'lightsaber', lightsaber2h: 'lightsaber', lightsaberStaff: 'lightsaber', thrown: 'thrown', instrument: 'none', entertainer: 'none' };
+export const CLASS_LABELS: Record<WeaponClass, string> = { pistol: 'Pistols', carbine: 'Carbines', rifle: 'Rifles', heavy: 'Heavy weapons', sword1h: 'One-hand swords and clubs', knife: 'Knives', sword2h: 'Two-hand swords and axes', polearm: 'Polearms and lances', fist: 'Fist weapons', lightsaber: 'Lightsabers', lightsaber2h: 'Two-hand lightsabers', lightsaberStaff: 'Double-bladed lightsabers', thrown: 'Grenades and thrown weapons', instrument: 'Instruments', entertainer: "Dancer's props" };
 /** Classes a left hand may hold too: every blade but the double-bladed staff; one in each hand fights as the dual style (the backpack's rules own the list). */
 export const OFF_HAND = OFF_HAND_CLASSES as ReadonlySet<WeaponClass>;
 /** The blaster carries a class plays: the pistol's, or the rifle's (carbines and heavy weapons use the rifle set). */
@@ -161,8 +170,16 @@ export class WeaponCatalogue {
     return out;
   }
 
-  /** The model for a weapon, a fresh copy each time (materials shared). */
+  /**
+   * The model for a weapon, a fresh copy each time (materials shared).
+   *
+   * An empty group for a thing that has none: a dancer's sparkler or ribbon is a particle effect and
+   * nothing else, so what goes in the hand is a node the effect is played at. Answering an empty
+   * group rather than throwing keeps every path that holds something -- the player's, a peer's, a
+   * mobile's -- one path.
+   */
   async model(def: WeaponDef): Promise<THREE.Group> {
+    if (!def.file) return new THREE.Group();
     let p = this.models.get(def.file);
     if (!p) {
       p = this.loader.loadAsync(`${this.baseUrl}${def.file}`).then((gltf) => {

@@ -575,12 +575,16 @@ export class MobileManager {
     // is the unarmed guard, and `stepStance` leaves it relaxed.
     if (!rack || !def) return { equipment: null, extras: null };
     const model = await rack.model(def);
-    let ready = this.preparedWeapons.get(def.file);
-    if (!ready) {
-      ready = this.deps.assets.prepareRoot(model);
-      this.preparedWeapons.set(def.file, ready);
+    // A thing with no model of its own (a dancer's prop that is a particle effect) has nothing to
+    // prepare: the group is empty, and preparing an empty group would key the cache on null.
+    if (def.file) {
+      let ready = this.preparedWeapons.get(def.file);
+      if (!ready) {
+        ready = this.deps.assets.prepareRoot(model);
+        this.preparedWeapons.set(def.file, ready);
+      }
+      await ready;
     }
-    await ready;
     const b = def.bounds;
     const saber = choice.kind === 'saber';
     return {

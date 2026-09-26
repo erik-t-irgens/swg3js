@@ -73,6 +73,7 @@ const CLASS_TEXT: Record<WeaponClass, string> = {
   lightsaberStaff: 'Double-bladed lightsaber',
   thrown: 'Grenade',
   instrument: 'Instrument',
+  entertainer: "Dancer's prop",
 };
 
 /** The weapons rack's own class order, for the backpack's sort (the rack's headings read in this order). */

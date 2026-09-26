@@ -104,6 +104,7 @@ import { BAND_TUNE, FLOOR_TUNE, animFor, band, loadMusic, musicPack, partsFor, s
 import { BandBar } from './ui/bandBar.ts';
 import { TRAVEL_PACK_VERSION, TRAVEL_TUNE, addTicket, canBoard, collectorWords, pickTicket, shuttleAt, shuttleWords, thingAt, ticketText, travelThingsOf, type ShuttleState, type Ticket, type TravelRow, type TravelThing } from './world/travelTerminal.ts';
 import { FITTINGS_PACK_VERSION, fittingTally, fittingsOf, type FittingRow } from './world/fittings.ts';
+import type { EffectHandle } from './world/particles.ts';
 
 /** One ticket collector waiting to be stood, or standing and able to be stood again if it goes. */
 interface TravelWait {
@@ -10567,6 +10568,45 @@ class App {
     band.tick();
     if (band.mine) band.moveMine(this.player.worldPos);
     this.hideCarriedInstrument();
+    this.stepHeldProps();
+  }
+
+  /** The particle effect a dancer's prop is, one per hand, following the hand that holds it. */
+  private readonly heldProps: { left: { fx: EffectHandle; id: string } | null; right: { fx: EffectHandle; id: string } | null } = { left: null, right: null };
+
+  /**
+   * A dancer's prop is a particle effect and not a model, so the hand plays it rather than holds it.
+   *
+   * Eighty-nine of the game's hundred and seven of them name a `.prt` and nothing else -- a ribbon,
+   * a sparkler, a glowstick -- so what goes on the hand bone is an empty group and this puts the
+   * effect where that group is, every frame. It is kept per hand and moved rather than replaced, or
+   * a sparkler would start again from nothing thirty times a second.
+   */
+  private stepHeldProps(): void {
+    const fxs = this.world.weaponFx;
+    for (const hand of ['left', 'right'] as const) {
+      const def = this.player.equipped[hand];
+      const file = def?.effect ?? null;
+      const had = this.heldProps[hand];
+      if (!file) {
+        if (had) {
+          fxs.remove(had.fx);
+          this.heldProps[hand] = null;
+        }
+        continue;
+      }
+      const at = this.player.heldNode(hand);
+      if (!at) continue;
+      at.updateWorldMatrix(true, false);
+      if (had && had.id === def!.id) {
+        fxs.move(had.fx, at.matrixWorld);
+        continue;
+      }
+      if (had) fxs.remove(had.fx);
+      // Aboard a ship the hand is in the hull's frame, exactly as a held flame is.
+      const frame = this.player.aboard && !isSurfaceRoom(this.player.aboard) ? this.player.aboard.vehicle.group.matrixWorld : null;
+      this.heldProps[hand] = { fx: fxs.place(file, at.matrixWorld, false, false, frame), id: def!.id };
+    }
   }
 
   /** Whether the band's row is up. The Start Playing ability opens and closes it. */

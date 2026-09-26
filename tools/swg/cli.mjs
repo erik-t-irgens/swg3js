@@ -2315,9 +2315,20 @@ function packStatus(dir) {
     else if (travel && travel.version !== TRAVEL_PACK_VERSION) wantTravel = true;
     if (objects && !fittings) wantFittings = true;
     else if (fittings && fittings.version !== FITTINGS_PACK_VERSION) wantFittings = true;
+    // Both commands **append** their models to the manifest's layout category, and a later
+    // `snapshot` writes that category outright -- so a reconversion of a world silently takes the
+    // travel terminals and every fitting out of it, leaving rows that name a model the pack no
+    // longer has. Nothing else would notice: the files are there and their versions are current.
+    // So the models are checked, not merely the file.
+    const layoutIds = new Set((manifest.categories?.layout ?? []).map((d) => d.id));
+    const lost = (rows) => (rows ?? []).some((r) => r.model && !layoutIds.has(r.model));
+    if (travel && lost(travel.rows)) wantTravel = true;
+    if (fittings && lost(fittings.rows)) wantFittings = true;
   }
-  if (wantTravel) need(`travel <swg-dir> ${dir} --retail-only`, 'no world has its travel terminals, ticket collectors or shuttles: a starport is a building with nothing in it');
-  if (wantFittings) need(`fittings <swg-dir> ${dir} --retail-only`, "no world has the fittings the server stood on its buildings: no elevator panel by a lift, no bank terminal outside a bank, no sign over a cantina's door");
+  // Both must run **after** any snapshot, since a snapshot rewrites the layout category they append
+  // to; `convert` reads the order from here, so naming them after the worlds is what keeps it right.
+  if (wantTravel) need(`travel <swg-dir> ${dir} --retail-only`, 'no world has its travel terminals, ticket collectors or shuttles, or a world was converted again after they were written: a starport is a building with nothing in it');
+  if (wantFittings) need(`fittings <swg-dir> ${dir} --retail-only`, "no world has the fittings the server stood on its buildings, or a world was converted again after they were written: no elevator panel by a lift, no bank terminal outside a bank, no sign over a cantina's door");
   const creatures = readJson(join(dir, 'creatures/manifest.json'));
   if (!creatures) {
     console.log('  creatures: none');
@@ -4060,7 +4071,16 @@ switch (cmd) {
     const convert = (template) => {
       const r = resolveTemplateMesh(vfs, template, cache);
       if (r.skip) return { skip: r.skip };
-      if (r.particle) return { skip: 'particle effect' };
+      // **A thing whose whole appearance is a particle effect.** Every other rack item is a model
+      // and this was a skip; the dancer's props are the exception and they are most of their own
+      // family -- 89 of the 107 name a `.prt` and nothing else, because a sparkler with the sparks
+      // taken out is not a smaller sparkler, it is nothing. It is written as an effect with no
+      // model, and the game plays it at the hand instead of hanging a mesh there.
+      if (r.particle) {
+        // `particleFile` is declared below and is initialised before `buildWeapons` ever calls this.
+        const file = particleFile(r.particle);
+        return file ? { model: null, file: null, bounds: null, effect: file, blade: null, icon: null } : { skip: 'particle effect' };
+      }
       if (r.skeletal) return { skip: 'skeletal appearance' };
       const single = r.parts.length === 1 && !r.parts[0].transform && !r.effects?.length && !r.parts[0].hardpoints?.length;
       const id = familyOf(single ? r.parts[0].mesh : r.appearance);
@@ -4177,10 +4197,11 @@ switch (cmd) {
       return out;
     };
     const limit = options.limit ? Number(options.limit) : Infinity;
-    // The instruments come through with the weapons: they are held, named and racked exactly as a
-    // weapon is and they fight with nothing, which is the owner's call and the reason the pack has an
-    // instrument class. They are not under object/weapon/, so their folder is scanned beside it.
-    const weaponTemplates = [...galleryTemplates(vfs, 'object/weapon/'), ...galleryTemplates(vfs, 'object/tangible/instrument/')];
+    // The instruments and the dancer's props come through with the weapons: they are held, named and
+    // racked exactly as a weapon is and they fight with nothing, which is the owner's call and the
+    // reason the pack has an instrument and an entertainer class. Neither is under object/weapon/,
+    // so their folders are scanned beside it.
+    const weaponTemplates = [...galleryTemplates(vfs, 'object/weapon/'), ...galleryTemplates(vfs, 'object/tangible/instrument/'), ...galleryTemplates(vfs, 'object/tangible/dance_prop/')];
     const { weapons, skipped } = buildWeapons(weaponTemplates, { convert, fxFor, describe: (template, id) => describeItem(vfs, template, id, itemCaches) }, { log: console.log, limit });
     // Effects beyond the guns' own rows (EXTRA_EFFECTS in weapons.mjs): the held triggers' beams,
     // the lightning's muzzle, and the burn a body that has been set alight wears.

@@ -18,10 +18,11 @@ import { GroupState, escapeHtml, groupHtml, groupShell } from './catalogue.ts';
 import { GIVE_TUNE, buildWeaponView, giveCellHtml, openGroups, weaponName, type GiveCell, type GiveView } from './giveModel.ts';
 import { CLASS_LABELS, OFF_HAND, type WeaponCatalogue, type WeaponClass, type WeaponDef } from '../player/weapons.ts';
 
-// The instruments come last, because they are the one group here that fights with nothing. They are
-// in this panel at all because it is the panel that gives you a thing to hold, and an instrument is
-// exactly that: the only music in this game is the music players make with one.
-const ORDER: WeaponClass[] = ['lightsaber', 'lightsaber2h', 'lightsaberStaff', 'sword1h', 'knife', 'fist', 'sword2h', 'polearm', 'pistol', 'carbine', 'rifle', 'heavy', 'thrown', 'instrument'];
+// The instruments and the dancer's props come last, because they are the groups here that fight
+// with nothing. They are in this panel at all because it is the panel that gives you a thing to
+// hold, and both are exactly that: the only music in this game is the music players make with an
+// instrument, and a sparkler is a sparkler.
+const ORDER: WeaponClass[] = ['lightsaber', 'lightsaber2h', 'lightsaberStaff', 'sword1h', 'knife', 'fist', 'sword2h', 'polearm', 'pistol', 'carbine', 'rifle', 'heavy', 'thrown', 'instrument', 'entertainer'];
 /** What a class fights like, for its heading. */
 const NOTES: Record<WeaponClass, string> = {
   lightsaber: 'one hand: fast, medium and strong styles',
@@ -38,6 +39,7 @@ const NOTES: Record<WeaponClass, string> = {
   heavy: 'each fires as its kind: click one to read what it does',
   thrown: 'not held: the Skills tab puts the grenades in the number slots, and each flies as its own model',
   instrument: 'not a weapon: hold one and its own part of a song plays, which is the only music in this game',
+  entertainer: "not a weapon: the dancer's ribbons, sparklers, glowsticks and batons. Most of them are a particle effect rather than a model, which is what the game made them",
 };
 
 /** The class groups in the order the rack reads, for the display rules. */

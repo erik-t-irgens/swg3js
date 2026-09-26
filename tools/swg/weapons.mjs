@@ -23,6 +23,12 @@ export const WEAPON_CLASSES = {
   // the game's own name and lists it on a rack. Holding one is what lets a song's own track for that
   // instrument be played (`src/audio/band.ts`); nothing about one ever fights.
   instrument: { fights: 'none', hands: 'right', label: 'Instruments' },
+  // The dancer's props: ribbons, sparklers, glowsticks, batons, fans, torches. They come through
+  // this pack for the instruments' own reason, and they have one thing nothing else here has --
+  // **most of them are not a model at all**. Of the 107 templates, 89 name a `.prt`: the prop *is*
+  // the particle effect, and a sparkler with the sparks taken out is nothing. The 17 that are meshes
+  // (the batons, the fans, a staff, a sword, the Life Day flowers) are held exactly as a weapon is.
+  entertainer: { fights: 'none', hands: 'either', label: "Dancer's props" },
 };
 
 /** A melee folder's class when its weapon turns out to carry a lightsaber blade (the named sabers under sword/ and polearm/). */
@@ -42,6 +48,10 @@ export function weaponClassOf(template) {
   // An instrument is not under object/weapon/ at all, and is taken first for that reason: it is
   // held and named exactly as a weapon is, and fights with nothing.
   if (/^object\/tangible\/instrument\//.test(t)) return /\/base\//.test(t) ? { skip: 'a base template' } : { cls: 'instrument' };
+  // A dancer's prop, for the same reason and with the same rule about a base template. The `_l` and
+  // `_r` in the name is the hand the game meant it for; both are kept, because a pair of ribbons is
+  // two props and the rack is where a player picks which hand a thing goes in.
+  if (/^object\/tangible\/dance_prop\//.test(t)) return /\/(shared_)?prop_base\.iff$/.test(t) ? { skip: 'a base template' } : { cls: 'entertainer' };
   if (!t.startsWith('object/weapon/')) return { skip: 'not a weapon' };
   if (/\/lightsaber\//.test(t)) return { cls: 'lightsaber' };
   // The crafted sabers live under the sword folders, their appearance a lightsaber file (.lsb).
@@ -192,6 +202,9 @@ export function buildWeapons(templates, deps, { log = () => {}, limit = Infinity
     // A weapon with a blade file is a lightsaber whatever folder it sits in (the named sabers under sword/ and polearm/).
     const cls = r.blade ? saberClassFor(template) : c.cls;
     const entry = { id: weaponLabel(template), template, class: cls, model: r.model, file: r.file, bounds: r.bounds, length: Number(weaponLength(r.bounds).toFixed(2)) };
+    // A thing that is a particle effect and no model: a sparkler, a ribbon, a glowstick. It is held
+    // in the sense that it plays at the hand, and it has no bounds and nothing to measure.
+    if (r.effect) entry.effect = r.effect;
     // What the backpack shows: the game's own name and description, the hands its arrangement takes, and the picture.
     const d = deps.describe?.(template, entry.id);
     if (d) Object.assign(entry, { name: d.name, description: d.description, slots: d.slots });
