@@ -658,7 +658,14 @@ export function surfaceTexture(vfs, shaderPath, deps) {
   }
   const em = d.emissive;
   // 5. Translucent: blending (InvSrcAlpha) and testing without depth writes, for the looks that need it.
-  const looksTranslucent = !!(d.scroll || d.split || em?.kind === 'full' || d.anim);
+  //
+  // **Glass is one of them.** The rule that keeps a blending shader a cut-out is right for foliage,
+  // hair and fences -- three sorts transparency per object, and an instanced field of it draws far
+  // over near -- but a lens is not a leaf: a visor's alpha is a mid grey everywhere and never
+  // reaches opaque, so a half-threshold cut-out throws most of it away and leaves the wearer looking
+  // out through two holes. Named glass is let through here rather than judged by the shape of its
+  // alpha, which was measured and does not separate a lens from a hair card.
+  const looksTranslucent = !!(d.scroll || d.split || em?.kind === 'full' || d.anim || result.glass);
   if (!additive && alphaMode === 'MASK' && pass?.alphaBlend && pass.alphaTest && !pass.zWrite && pass.blendDst === 5 && looksTranslucent) {
     result.translucent = true;
     if (d.alphaRef > 0) result.alphaTest = Math.round((d.alphaRef / 255) * 1e4) / 1e4;
@@ -785,14 +792,20 @@ export function describeLines(d) {
 
 /** Counts over a pack's texture entries for the snapshot's `surfaces:` line. */
 export function surfaceCounts(entries) {
-  const c = { flipBooks: 0, scrolling: 0, unlit: 0, additive: 0, glowing: 0, glowBytes: 0 };
+  const c = { flipBooks: 0, scrolling: 0, unlit: 0, additive: 0, glowing: 0, glowBytes: 0, glossy: 0, glossMaps: 0 };
   const glow = new Map();
+  const gloss = new Set();
   for (const t of entries ?? []) {
     if (!t || t.invisible) continue;
     if (t.anim) c.flipBooks++;
     if (t.scroll) c.scrolling++;
     if (t.unlit && t.blend !== 'add') c.unlit++;
     if (t.blend === 'add') c.additive++;
+    // Read from the shader's **own** gloss texture rather than guessed from the diffuse alpha.
+    if (t.glossFrom) {
+      c.glossy++;
+      gloss.add(t.glossFrom);
+    }
     if (t.emissive) {
       c.glowing++;
       glow.set(t.emissive.path, t.emissive.png.length);
@@ -800,9 +813,10 @@ export function surfaceCounts(entries) {
     }
   }
   for (const n of glow.values()) c.glowBytes += n;
+  c.glossMaps = gloss.size;
   return c;
 }
 
 export function surfaceCountsLine(c) {
-  return `surfaces: ${c.flipBooks} flip-books, ${c.scrolling} scrolling, ${c.unlit} unlit, ${c.additive} additive, ${c.glowing} glowing (${(c.glowBytes / 1e6).toFixed(1)} MB of glow images)`;
+  return `surfaces: ${c.flipBooks} flip-books, ${c.scrolling} scrolling, ${c.unlit} unlit, ${c.additive} additive, ${c.glowing} glowing (${(c.glowBytes / 1e6).toFixed(1)} MB of glow images), ${c.glossy} with the shader's own gloss map (${c.glossMaps} maps)`;
 }

@@ -10651,10 +10651,11 @@ class App {
     if (!standsOnGround(instrument)) return;
     const p = this.player;
     const yaw = p.heading;
-    const at = new THREE.Vector3(p.worldPos.x + Math.sin(yaw) * FLOOR_TUNE.ahead, 0, p.worldPos.z + Math.cos(yaw) * FLOOR_TUNE.ahead);
-    // Its own foot on the ground under it rather than on the player's: a step, a kerb or a cantina's
-    // floor is what it stands on, and aboard a ship or in a room there is no terrain to ask.
-    at.y = this.world.groundAt(at.x, p.worldPos.y + 1, at.z, !!p.inside) ?? p.worldPos.y;
+    // **The player's own feet, not the ground under the spot.** `pos` is where the figure stands and
+    // a character's origin is at its feet, so this is right on a tower, on a crate, on a building's
+    // upper floor and on a ship's deck alike -- all of which a ray at the terrain would drop it
+    // through, which is what the owner found by standing on one.
+    const at = new THREE.Vector3(p.worldPos.x + Math.sin(yaw) * FLOOR_TUNE.ahead, p.worldPos.y, p.worldPos.z + Math.cos(yaw) * FLOOR_TUNE.ahead);
     p.putHeldDown(this.world.scene, at, yaw + FLOOR_TUNE.turn);
   }
 

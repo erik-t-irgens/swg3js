@@ -309,7 +309,11 @@ function printEffectSummary() {
  * someone is aboard. "cockpit" is not glass: it names the panels around the pilot as often as
  * the canopy. --glass=<regex> marks more shaders for a ship whose windows are named otherwise.
  */
-const GLASS_NAMED = new RegExp(options.glass ? `glass|window|windshield|canopy|transparen|viewport|pane|${options.glass}` : 'glass|window|windshield|canopy|transparen|viewport|pane', 'i');
+// `goggle`, `visor` and `lens` are here for the same reason the rest are: a lens is glass. The
+// goggles were the witness -- their own texture's alpha runs 0 to 165 and averages 72, which is a
+// tinted visor and nothing like a cut-out, and drawn as one at a half threshold most of it was
+// discarded and the wearer looked out through two holes.
+const GLASS_NAMED = new RegExp(options.glass ? `glass|window|windshield|canopy|transparen|viewport|pane|goggle|visor|lens|${options.glass}` : 'glass|window|windshield|canopy|transparen|viewport|pane|goggle|visor|lens', 'i');
 
 /** What surface.mjs has read of each shader (and its effects' passes and programs), for this run. */
 const surfaceCache = new Map();
@@ -452,11 +456,21 @@ function normalFor(vfs, file) {
 const surfaceEffects = new Map();
 
 /**
- * How shiny a shader's surface is, from its effect and texture slots. The game keeps the
- * specular and reflection mask in the alpha channel of the diffuse map (when the effect does
- * not use alpha for transparency): bright alpha means glossy metal or glass. Reflective
- * shaders carry an environment cube map (slot ENVM) that the scene's own environment replaces.
- * Returns glTF metallic/roughness factors and, where a mask exists, a metallicRoughness image.
+ * How shiny a shader's surface is, from its effect and texture slots.
+ *
+ * Most of the game's shaders keep the specular and reflection mask in the **alpha of the diffuse
+ * map** (when the effect does not use alpha for transparency): bright alpha means glossy metal or
+ * glass. Reflective shaders carry an environment cube map (slot ENVM) that the scene's own
+ * environment replaces. Returns glTF metallic/roughness factors and, where a mask exists, a
+ * metallicRoughness image.
+ *
+ * **But 1,695 shaders name a gloss map of their own** and reading the diffuse alpha on those was
+ * reading the wrong channel of the wrong file. Measured over all 22,322 shaders in the archives:
+ * 4,844 carry a SPEC slot, and on 3,149 of them it names the very same file as MAIN -- which is why
+ * the alpha rule works as well as it does and why it is kept for those. On the other 1,695 it names
+ * a separate texture (`*_spec.dds`, `*_ref.dds`), and that is what is read now. A third of them are
+ * grey and the rest carry colour, so what is taken is the luminance: glTF's roughness is one number
+ * and a coloured specular has no place to go in it.
  */
 function surfaceFor(vfs, effect, slots, dds, alphaMode, { alphaIsEmissive = false } = {}) {
   const name = (effect ?? '').toLowerCase();
@@ -475,6 +489,9 @@ function surfaceFor(vfs, effect, slots, dds, alphaMode, { alphaIsEmissive = fals
   const reflective = slotTags.has('ENVM') || tags.has('ENVM') || /env|chrome|mirror|refl/.test(name);
   const specular = reflective || slotTags.has('SPEC') || tags.has('SPEC') || /spec|gloss|shin|metal|glass/.test(name);
   if (!specular) return {};
+  // The shader's own gloss map, where it names one that is not simply the diffuse again.
+  const own = glossMap(vfs, slots, dds);
+  if (own) return { metallic: 1, roughness: 1, mr: { png: own.png }, glossFrom: own.path };
   // A glowing texture's alpha is its glow mask, not a gloss mask.
   const masked = dds.hasAlpha && alphaMode === 'OPAQUE' && !alphaIsEmissive;
   if (!masked) return { metallic: reflective ? 0.6 : 0, roughness: reflective ? 0.3 : 0.45 };
@@ -488,7 +505,50 @@ function surfaceFor(vfs, effect, slots, dds, alphaMode, { alphaIsEmissive = fals
     mr[i * 4 + 3] = 255;
   }
   return { metallic: 1, roughness: 1, mr: { png: encodePng(dds.width, dds.height, mr) } };
+
+  /**
+   * The metal-roughness image a shader's own SPEC texture makes, or null where it has none worth
+   * reading. Cached per file: one gloss map is shared by dozens of shaders.
+   */
+  function glossMap(vfsIn, slotList, main) {
+    const spec = (slotList ?? []).find((s) => s.slot === 'SPEC');
+    if (!spec?.path) return null;
+    const path = String(spec.path).replace(/\\/g, '/');
+    // The same file as the diffuse: its alpha is the mask, which is the branch below. 3,149 of the
+    // 4,844 are this, and reading it here as a colour map would turn every one of them to mud. The
+    // main's path is taken from the slot list rather than from the decoded image, which carries
+    // pixels and no name.
+    const mainPath = String((slotList ?? []).find((s) => s.slot === 'MAIN')?.path ?? '').replace(/\\/g, '/');
+    if (path.toLowerCase() === mainPath.toLowerCase()) return null;
+    void main;
+    const had = glossCache.get(path);
+    if (had !== undefined) return had;
+    let out = null;
+    try {
+      if (vfsIn.has(path)) {
+        const img = decodeDds(vfsIn.read(path));
+        const mrOwn = new Uint8Array(img.width * img.height * 4);
+        for (let i = 0; i < img.width * img.height; i++) {
+          // Luminance: a third of these maps are grey and the rest carry a coloured specular, which
+          // glTF's one roughness number has nowhere to keep.
+          const g = Math.round(img.rgba[i * 4] * 0.2126 + img.rgba[i * 4 + 1] * 0.7152 + img.rgba[i * 4 + 2] * 0.0722);
+          mrOwn[i * 4] = 0;
+          mrOwn[i * 4 + 1] = 255 - Math.round(g * 0.85);
+          mrOwn[i * 4 + 2] = reflective ? g : 0;
+          mrOwn[i * 4 + 3] = 255;
+        }
+        out = { png: encodePng(img.width, img.height, mrOwn), path };
+      }
+    } catch (err) {
+      console.error(`  gloss map ${path} skipped: ${err.message}`);
+    }
+    glossCache.set(path, out);
+    return out;
+  }
 }
+
+/** Gloss maps already read this run, by path: one is shared by dozens of shaders. */
+const glossCache = new Map();
 
 /** Apply a row-major 3x4 transform to a parsed mesh's positions and normals in place. */
 function transformMesh(mesh, m) {
@@ -1408,7 +1468,24 @@ function skinnedTexture(vfs, shaderPath, slots, ctx, info, mesh = null) {
   if (image.hasAlpha === undefined) for (let i = 3; i < image.rgba.length; i += 4) if (image.rgba[i] !== 255) { hasAlpha = true; break; }
   const normalFile = shader?.textureFiles?.get('CNRM') ?? shader?.textureFiles?.get('NRML') ?? shader?.textureFiles?.get('DOT3') ?? null;
   const normal = normalFile ? normalFor(vfs, normalFile) : null;
-  const result = { path: `${shaderPath}#${rendered ? basename(rendered.file) : 'baked'}`, png: encodePng(image.width, image.height, image.rgba), hasAlpha, alphaMode, ...(normal ? { normal } : {}) };
+  // Everything about the surface that is not the picture -- whether it is glass, whether it blends
+  // rather than being cut out, and its gloss map -- is `surfaceTexture`'s to read, and a shader that
+  // is **baked** was getting none of it: this path built its own entry from the baked image and
+  // stopped there. That is why the goggles' lens came out as a cut-out at a half threshold with most
+  // of itself discarded, and why no customizable wearable had a specular map at all. The image here
+  // is the bake's; the rest is taken from the shader as it stands.
+  const plain = textureFor(vfs, shaderPath);
+  const result = {
+    path: `${shaderPath}#${rendered ? basename(rendered.file) : 'baked'}`,
+    png: encodePng(image.width, image.height, image.rgba),
+    hasAlpha,
+    alphaMode,
+    ...(normal ? { normal } : {}),
+    ...(plain?.glass ? { glass: true } : {}),
+    ...(plain?.translucent ? { translucent: true, ...(plain.alphaTest !== undefined ? { alphaTest: plain.alphaTest } : {}) } : {}),
+    ...(plain?.noShadow ? { noShadow: true } : {}),
+    ...(plain?.mr ? { mr: plain.mr, metallic: plain.metallic, roughness: plain.roughness, ...(plain.glossFrom ? { glossFrom: plain.glossFrom } : {}) } : {}),
+  };
   // The icon's copy of the baked texture, reduced (the item pictures never decode a PNG just encoded).
   if (wantThumbs) Object.defineProperty(result, 'thumb', { value: thumbTexture(image.width, image.height, image.rgba), enumerable: false });
   return result;

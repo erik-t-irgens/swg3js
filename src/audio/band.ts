@@ -174,8 +174,12 @@ export function standsOnGround(instrumentId: string | null): boolean {
 
 /** Where a floor instrument stands and how the player stands to it. Ours; live through `__debug.band`. */
 export const FLOOR_TUNE = {
-  /** How far in front of the player it is set down, metres. */
-  ahead: 1.15,
+  /**
+   * How far in front of the player it is set down, metres. Nought, which the owner settled by eye:
+   * these models are authored about the spot the player stands to play them, so putting one "in
+   * front" put it a stride away from where it belongs.
+   */
+  ahead: 0,
   /**
    * How it is turned from the way the player faces, radians.
    *
