@@ -497,8 +497,10 @@ const T = (shader: string, d: any = deps) => surfaceTexture(vfs, shader, d);
   // Bumped whenever what a pack's materials carry changes, so `status` asks for every pack again.
   // 3 was the gloss maps: a surface wears the one its own shader names, a baked shader carries the
   // surface fields it was getting none of, and glass blends rather than being cut out. 4 is the
-  // detail maps, with the second coordinate set the meshes have always carried.
-  ok(MATERIAL_FORMAT === 4, 'the material format is 4');
+  // detail maps, with the second coordinate set the meshes have always carried. 5 is 4 mended: a 4
+  // gave a roughness of nought to every shader with a specular texture of its own, so every pack
+  // written at 4 is a pack of mirrors and must be asked for again.
+  ok(MATERIAL_FORMAT === 5, 'the material format is 5');
   // eff.mjs imports surface.mjs; surface.mjs must not import eff.mjs back (a cycle breaks the first
   // time either module reads the other's binding while it evaluates).
   const surfaceSource = readFileSync(new URL('../surface.mjs', import.meta.url), 'utf8');

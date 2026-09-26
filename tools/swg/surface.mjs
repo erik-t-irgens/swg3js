@@ -18,8 +18,13 @@ import { shaderTextures } from './sht.mjs';
  * 4: the detail map, with the coordinate set of its own that the meshes have always carried, and
  *    how much of a surface is a mirror read from the texture and channel its own program names
  *    rather than always from the colour texture's alpha.
+ * 5: the same as 4, mended. Every pack written at 4 gave a roughness of nought -- a perfect mirror --
+ *    to all 1,710 shaders that name a specular texture of their own, because the image the two masks
+ *    are written into took its size from a field the gloss reader does not carry and came out one
+ *    pixel of NaN. Nothing else about a 4 is wrong, but a pack cannot be mended in place, so the
+ *    number moves and `status` asks for every one of them again.
  */
-export const MATERIAL_FORMAT = 4;
+export const MATERIAL_FORMAT = 5;
 
 /** The glTF alpha mode an effect's pass state gives (a cut-out effect by name is a MASK too). */
 export function alphaModeFor({ alphaBlend, alphaTest }, effectName = '') {
