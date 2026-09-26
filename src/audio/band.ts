@@ -58,14 +58,35 @@ export const BAND_TUNE = {
   /** How far off another player's instrument can still be heard, metres. */
   reach: 45,
   /**
+   * The radius within which an instrument is at its full volume, metres; past it the mixer's own
+   * curve takes over and it is silent at `DISTANCE_TUNE.audible` times this (80 m as both stand).
+   *
+   * A template is made once and kept, so this is read when a part is first played and moving it
+   * afterwards moves only the parts nobody has played yet.
+   */
+  full: 8,
+  /**
    * How long a song's loop is taken to be, seconds, for lining two players up.
    *
    * It is not read off the file: a buffer's length is not known until it has been decoded, and two
    * browsers must agree before either has decoded anything. So the offset is taken modulo this, and
    * a song whose real loop is not a whole number of these drifts within one bar rather than being
-   * in a different place for each player.
+   * in a different place for each player. It is what somebody joining another player's performance
+   * part way through comes in on; a performance of your own starts at the top, because it starts
+   * with its intro.
    */
   bar: 8,
+  /**
+   * How far ahead of a part's last moment the next one is handed to the mixer, seconds.
+   *
+   * The seam between two parts must be exact -- a music loop with a frame's gap in it is a stutter
+   * once a bar -- and Web Audio honours a start time to the sample, so the next part is **scheduled**
+   * at the moment this one ends rather than started when a frame notices. This is only how long
+   * before that moment the frame loop has to have got round to it.
+   */
+  ahead: 0.25,
+  /** How long a part is faded out when a performance is stopped part way through, seconds. */
+  cut: 0.12,
 };
 
 export const MUSIC_PACK_VERSION = 1;
@@ -207,9 +228,13 @@ export function musicId(file: string): string {
  * A made template for one part. The settings are ours: nothing in `player_music/` carries a `.snd`,
  * so there is nothing of the game's to copy and these are chosen.
  *
- * `loops` is the file's own `_lp`, which is the one thing the game did say. `[-1, -1]` is for ever,
- * exactly as the saber hum's own made template says it, and a part that is not a loop simply leaves
- * the field out, which the reader takes as one play.
+ * **Nothing here loops.** `_lp` in these file names is not a flag: all 880 flourishes in the pack
+ * are named `_lp` and every one of them is a single strike, so reading the name as "play for ever"
+ * left a flourish sounding at the spot it was struck until the world went away, and eight of them at
+ * once over the top of each other. A performance is a **chain** of single plays instead, each one
+ * scheduled at the exact moment the last ends, which is both what the owner asked for (intro alone,
+ * then the loop; a flourish waits its turn and hands back) and the only way a loop can have a moment
+ * in it at which anything may be decided. `loops` is kept for a caller that really wants one.
  *
  * **It is written as a real `SoundTemplate` and is not cast.** The first cut of this was a hand-made
  * object behind `as unknown as SoundTemplate`, and it had six faults the compiler would have caught
@@ -235,7 +260,7 @@ export function musicTemplate(file: string, loops: boolean): SoundTemplate {
     priority: 0,
     // The one radius that matters: how far a band carries. Everything past it is silence, and the
     // whole of the falloff inside it is `distance.ts`, as for every other sound in the game.
-    full: 8,
+    full: BAND_TUNE.full,
   };
   return loops ? { ...t, loops: [-1, -1] } : t;
 }
@@ -277,15 +302,53 @@ export function bandWords(p: Performance | null, names: Record<string, string> =
 export interface BandDeps {
   /** Start a looping part at a place, and answer its key. */
   loop(id: string, at: { x: number; y: number; z: number }, gain: number, offset: number): number;
-  /** Play a part once at a place. */
-  once(id: string, at: { x: number; y: number; z: number }, gain: number): number;
+  /**
+   * Play a part once at a place, and answer its key.
+   *
+   * `when` is a moment on the **audio** clock to start at, or 0 for now. It is what makes a chain of
+   * parts one piece of music rather than a part a frame late: Web Audio honours it to the sample.
+   */
+  once(id: string, at: { x: number; y: number; z: number }, gain: number, when?: number): number;
   stop(key: number, fade?: number): void;
   /** Move a voice that is already playing, for a performer who walks. */
   move?(key: number, at: { x: number; y: number; z: number }): void;
   /** Hang a made template in front of the bank's own lookup. */
   provide(id: string, template: SoundTemplate): void;
+  /** Ask for a part's sample, so its length is known before it is wanted. */
+  prepare?(ids: string[]): void;
+  /** How long a part is, seconds, or 0 while its sample is still being decoded. */
+  duration?(id: string): number;
+  /** The audio clock, in seconds: the one a start time is measured against. */
+  now?(): number;
   /** The shared clock, in seconds. */
   seconds(): number;
+}
+
+/** Which part of a performance is sounding. */
+export type SegmentKind = 'intro' | 'main' | 'flourish' | 'outro';
+
+/** One part of a performance, sounding or scheduled to. */
+interface Segment {
+  kind: SegmentKind;
+  /** Which flourish, or 0. */
+  n: number;
+  id: string;
+  key: number;
+  startsAt: number;
+  /** 0 until the sample has been decoded and its length is known. */
+  endsAt: number;
+}
+
+/** One performer's line: what they are playing, what is sounding, and what waits its turn. */
+interface Line {
+  song: number;
+  stem: string;
+  at: { x: number; y: number; z: number };
+  sounding: Segment | null;
+  /** The part already handed to the mixer to start the moment this one ends. */
+  next: Segment | null;
+  /** The flourish waiting its turn, or 0. Never more than one. */
+  queued: number;
 }
 
 /**
@@ -299,10 +362,17 @@ export interface BandDeps {
 export class Band {
   private deps: BandDeps | null = null;
   private readonly made = new Set<string>();
-  /** One voice per performer: the local player is `0`. */
-  private readonly voices = new Map<number, { key: number; song: number; stem: string }>();
+  /** One line per performer: the local player is `0`. */
+  private readonly lines = new Map<number, Line>();
   /** What this player is playing, or null. */
   mine: Performance | null = null;
+  /**
+   * Told when this player's own performance moves on to a part, so the body can be posed with it.
+   *
+   * The animation is the sound's, not the key press's: a flourish struck in the middle of a bar is
+   * heard at the top of the next one, and the body has to wait with it or the two come apart.
+   */
+  onSegment: ((kind: SegmentKind, n: number) => void) | null = null;
 
   attach(deps: BandDeps): void {
     this.deps = deps;
@@ -313,9 +383,29 @@ export class Band {
     const id = musicId(file);
     if (!this.made.has(id)) {
       this.made.add(id);
-      this.deps?.provide(id, musicTemplate(file, /_lp$/.test(file.replace(/\.[^.]+$/, ''))));
+      // Never a loop: a performance is a chain of single plays, and `_lp` in these names is not a
+      // flag. See `musicTemplate`.
+      this.deps?.provide(id, musicTemplate(file, false));
     }
     return id;
+  }
+
+  /** The audio clock, or the shared one where the mixer has not been asked for its own. */
+  private clock(): number {
+    return this.deps?.now?.() ?? this.deps?.seconds() ?? 0;
+  }
+
+  /** Hand one part to the mixer, to start now or at a moment already decided. */
+  private begin(line: Line, kind: SegmentKind, n: number, file: string, when: number): Segment | null {
+    const d = this.deps;
+    if (!d) return null;
+    const id = this.idFor(file);
+    const gain = BAND_TUNE.gain * (kind === 'flourish' ? BAND_TUNE.flourish : 1);
+    const key = d.once(id, line.at, gain, when || undefined);
+    if (!key) return null;
+    const startsAt = when || this.clock();
+    const length = d.duration?.(id) ?? 0;
+    return { kind, n, id, key, startsAt, endsAt: length > 0 ? startsAt + length : 0 };
   }
 
   /**
@@ -323,99 +413,227 @@ export class Band {
    *
    * It refuses in words rather than silently: holding the wrong instrument for a song is the
    * commonest thing that will happen and the player has to be told which it is.
+   *
+   * **The intro plays alone.** It used to be laid over the loop, on the reasoning that a band is
+   * already lined up by the clock so a late joiner should play its intro while the others play on;
+   * the owner's answer is that a song begins with its intro and then repeats, and they are right --
+   * what the old way sounded like was two parts at once. The shared bar is kept where it still means
+   * something, which is joining somebody else's performance already in progress (`hear`).
    */
   start(song: number, instrument: string | null, at: { x: number; y: number; z: number }): string | null {
     if (!this.deps) return 'there is no sound yet';
     if (!pack) return 'no music is converted: run the converter\'s `music` command';
     if (!instrument) return 'nothing in your hands to play';
-    const stem = stemFor(instrument);
+    const stem = stemFor(instrument, pack, song);
     if (!stem) return 'that is not an instrument this game can play';
     const parts = partsFor(song, stem);
     if (!parts) return `song ${song} has no part for the ${pack.stemNames[stem] ?? stem}`;
-    this.stopOne(0);
-    const key = this.deps.loop(this.idFor(parts.main), at, BAND_TUNE.gain, songOffset(this.deps.seconds()));
-    if (!key) return 'the music would not start';
-    this.voices.set(0, { key, song, stem });
+    this.stopLine(0, 0);
+    // Every part of this song is asked for at once, so the chain never reaches a seam whose sample
+    // has not been decoded: a length that is not known yet is a part that cannot be scheduled.
+    this.deps.prepare?.([parts.main, parts.intro, parts.outro, ...parts.flourishes].filter((f): f is string => !!f).map((f) => this.idFor(f)));
+    const line: Line = { song, stem, at: { ...at }, sounding: null, next: null, queued: 0 };
+    const first = this.begin(line, parts.intro ? 'intro' : 'main', 0, parts.intro ?? parts.main, 0);
+    if (!first) return 'the music would not start';
+    line.sounding = first;
+    this.lines.set(0, line);
     this.mine = { song, stem, flourish: 0 };
-    // The intro over the top of the loop rather than before it: a band's parts are already lined up
-    // by the clock, so a player who joins late plays the intro while everybody else plays on.
-    if (parts.intro) this.deps.once(this.idFor(parts.intro), at, BAND_TUNE.gain);
+    this.onSegment?.(first.kind, 0);
     return null;
   }
 
   /**
    * Keep this player's own part at their own place, so walking away from a band is heard as walking
-   * away. A voice's place is the mixer's to move and this is the one call that does it.
+   * away, and somebody else hears you coming.
+   *
+   * **Every** voice of the line is moved, not only the one sounding: the next part is handed to the
+   * mixer up to a quarter of a second early, and one left at the place it was scheduled from is a
+   * flourish that plays where you were standing rather than where you are.
    */
   moveMine(at: { x: number; y: number; z: number }): void {
-    const had = this.voices.get(0);
-    if (had) this.deps?.move?.(had.key, at);
+    const line = this.lines.get(0);
+    if (!line) return;
+    line.at.x = at.x;
+    line.at.y = at.y;
+    line.at.z = at.z;
+    const move = this.deps?.move;
+    if (!move) return;
+    if (line.sounding) move(line.sounding.key, at);
+    if (line.next) move(line.next.key, at);
   }
 
-  /** A flourish over the part, if this song has that one for this instrument. */
-  flourish(n: number, at: { x: number; y: number; z: number }): boolean {
+  /**
+   * Ask for a flourish. It waits its turn.
+   *
+   * It is **queued, not played**: the part sounding now finishes and the flourish is the next thing
+   * heard, once, and then the loop again. At most one waits at a time, and asking again while one
+   * waits replaces it rather than adding to it -- pressing four of them in a bar plays the fourth,
+   * which is what a player means by it. Answers whether this song has that flourish at all.
+   */
+  flourish(n: number): boolean {
     const mine = this.mine;
-    if (!this.deps || !mine) return false;
+    const line = this.lines.get(0);
+    if (!this.deps || !mine || !line) return false;
     const parts = partsFor(mine.song, mine.stem);
-    const file = parts?.flourishes[n - 1];
-    if (!file) return false;
-    this.deps.once(this.idFor(file), at, BAND_TUNE.gain * BAND_TUNE.flourish);
+    if (!parts?.flourishes[n - 1]) return false;
+    line.queued = n;
     mine.flourish = n;
     return true;
   }
 
-  /** Stop playing: the outro over the top, and the loop let go. */
+  /** What is waiting its turn for this player, or 0. */
+  queued(): number {
+    return this.lines.get(0)?.queued ?? 0;
+  }
+
+  /** What this player is hearing of their own performance right now. */
+  sounding(): { kind: SegmentKind; n: number } | null {
+    const s = this.lines.get(0)?.sounding;
+    return s ? { kind: s.kind, n: s.n } : null;
+  }
+
+  /** Stop playing: what is sounding is let go and the outro takes its place. */
   stop(at: { x: number; y: number; z: number }): void {
     const mine = this.mine;
-    if (mine && this.deps) {
+    const line = this.lines.get(0);
+    if (mine && line && this.deps) {
       const parts = partsFor(mine.song, mine.stem);
-      if (parts?.outro) this.deps.once(this.idFor(parts.outro), at, BAND_TUNE.gain);
+      this.stopLine(0, BAND_TUNE.cut);
+      if (parts?.outro) {
+        const only: Line = { song: mine.song, stem: mine.stem, at: { ...at }, sounding: null, next: null, queued: 0 };
+        // The outro is the last thing this line does: it is given a line of its own with no song
+        // behind it, so nothing follows it and the tick lets go the moment it has played.
+        const seg = this.begin(only, 'outro', 0, parts.outro, 0);
+        if (seg) {
+          only.sounding = seg;
+          this.lines.set(0, only);
+        }
+        this.onSegment?.('outro', 0);
+      }
+    } else {
+      this.stopLine(0, BAND_TUNE.cut);
     }
     this.mine = null;
-    this.stopOne(0);
+  }
+
+  /**
+   * One frame of every performance: the seam between one part and the next.
+   *
+   * There is one decision and it is made here. A part's length is known once its sample has been
+   * decoded; a little before it ends the next part is **scheduled** at the exact moment it will,
+   * which is the flourish that was waiting if one was, else the loop again. Scheduling rather than
+   * starting is the whole of why a bar has no gap in it.
+   */
+  tick(): void {
+    if (!this.deps) return;
+    const now = this.clock();
+    for (const [id, line] of [...this.lines]) this.step(id, line, now);
+  }
+
+  private step(id: number, line: Line, now: number): void {
+    const sounding = line.sounding;
+    if (!sounding) {
+      this.stopLine(id, 0);
+      return;
+    }
+    // A length that was not known when the part was handed over: ask again now it has been decoded.
+    if (!sounding.endsAt) {
+      const length = this.deps?.duration?.(sounding.id) ?? 0;
+      if (length > 0) sounding.endsAt = sounding.startsAt + length;
+    }
+    if (line.next && now >= line.next.startsAt) {
+      line.sounding = line.next;
+      line.next = null;
+      if (id === 0) {
+        this.onSegment?.(line.sounding.kind, line.sounding.n);
+        if (this.mine) this.mine.flourish = line.sounding.kind === 'flourish' ? line.sounding.n : 0;
+      }
+      return;
+    }
+    if (!sounding.endsAt || line.next) return;
+    // The outro is the end of it: when it has played, the line goes.
+    if (sounding.kind === 'outro') {
+      if (now >= sounding.endsAt) this.stopLine(id, 0);
+      return;
+    }
+    if (now < sounding.endsAt - BAND_TUNE.ahead) return;
+    const parts = partsFor(line.song, line.stem);
+    if (!parts) {
+      this.stopLine(id, 0);
+      return;
+    }
+    // Whatever was waiting, once; else the loop. Taking it off the queue here is what makes "the
+    // next one only" true: from this moment a press queues the part after.
+    const wanted = line.queued;
+    const file = wanted ? parts.flourishes[wanted - 1] : parts.main;
+    const seg = this.begin(line, wanted ? 'flourish' : 'main', wanted, file ?? parts.main, sounding.endsAt);
+    if (!seg) return;
+    line.queued = 0;
+    line.next = seg;
   }
 
   /**
    * What another player is playing, and where they are. `null` stops hearing them.
    *
    * Their own stem is played at their own place, so two people on two instruments really are the
-   * two tracks the game wrote; the loop is started at the shared offset, so they line up whoever
-   * pressed first.
+   * two tracks the game wrote; they are joined at the shared offset, since we are coming in part way
+   * through something they began, and from there their line chains like anybody's.
    */
   hear(id: number, what: Performance | null, at: { x: number; y: number; z: number } | null, away: number): void {
     if (!this.deps || !id) return;
-    const had = this.voices.get(id);
+    const had = this.lines.get(id);
     if (!what || !at || away > BAND_TUNE.reach) {
-      this.stopOne(id);
+      this.stopLine(id, BAND_TUNE.cut);
       return;
     }
     const parts = partsFor(what.song, what.stem);
     if (!parts) {
-      this.stopOne(id);
+      this.stopLine(id, BAND_TUNE.cut);
       return;
     }
-    if (had && had.song === what.song && had.stem === what.stem) return;
-    this.stopOne(id);
-    const key = this.deps.loop(this.idFor(parts.main), at, BAND_TUNE.gain, songOffset(this.deps.seconds()));
-    if (key) this.voices.set(id, { key, song: what.song, stem: what.stem });
+    if (had && had.song === what.song && had.stem === what.stem) {
+      had.at.x = at.x;
+      had.at.y = at.y;
+      had.at.z = at.z;
+      if (had.sounding) this.deps.move?.(had.sounding.key, at);
+      if (had.next) this.deps.move?.(had.next.key, at);
+      return;
+    }
+    this.stopLine(id, BAND_TUNE.cut);
+    const line: Line = { song: what.song, stem: what.stem, at: { ...at }, sounding: null, next: null, queued: 0 };
+    const mainId = this.idFor(parts.main);
+    const key = this.deps.loop(mainId, at, BAND_TUNE.gain, songOffset(this.deps.seconds()));
+    if (!key) return;
+    line.sounding = { kind: 'main', n: 0, id: mainId, key, startsAt: this.clock(), endsAt: 0 };
+    this.lines.set(id, line);
   }
 
-  private stopOne(id: number): void {
-    const had = this.voices.get(id);
-    if (!had) return;
-    this.voices.delete(id);
-    this.deps?.stop(had.key);
+  private stopLine(id: number, fade: number): void {
+    const line = this.lines.get(id);
+    if (!line) return;
+    this.lines.delete(id);
+    if (line.sounding) this.deps?.stop(line.sounding.key, fade);
+    if (line.next) this.deps?.stop(line.next.key, 0);
   }
 
   /** Everybody's music stopped: a world going away, or a character put down. */
   clear(): void {
-    for (const id of [...this.voices.keys()]) this.stopOne(id);
+    for (const id of [...this.lines.keys()]) this.stopLine(id, 0);
     this.mine = null;
   }
 
   /** What `__debug.band()` prints. */
-  report(): { mine: string; playing: number; made: number; songs: number; tune: typeof BAND_TUNE } {
-    return { mine: bandWords(this.mine), playing: this.voices.size, made: this.made.size, songs: pack?.songs.length ?? 0, tune: { ...BAND_TUNE } };
+  report(): { mine: string; sounding: string; queued: number; playing: number; made: number; songs: number; tune: typeof BAND_TUNE } {
+    const s = this.lines.get(0)?.sounding;
+    return {
+      mine: bandWords(this.mine),
+      sounding: s ? `${s.kind}${s.n ? ` ${s.n}` : ''}${s.endsAt ? `, ${(s.endsAt - this.clock()).toFixed(1)} s left` : ', length not known yet'}` : '',
+      queued: this.queued(),
+      playing: this.lines.size,
+      made: this.made.size,
+      songs: pack?.songs.length ?? 0,
+      tune: { ...BAND_TUNE },
+    };
   }
 }
 

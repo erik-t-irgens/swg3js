@@ -117,7 +117,7 @@ const fixture: MusicPack = {
   stemNames: { khorn: 'kloo horn', mand: 'mandoviol' },
   instruments: { kloo_horn: 'khorn', mandoviol: 'mand', nalargon: 'nlrg', xantha: { stem: 'mand', songs: { 2: 'khorn' } } },
   songs: [
-    { song: 1, stems: { khorn: { intro: 'samples/a_intro.wav', main: 'samples/a_main_lp.wav', outro: 'samples/a_outro.wav', flourishes: ['samples/a_f1_lp.wav'] }, mand: { intro: null, main: 'samples/b_main_lp.wav', outro: null, flourishes: [] } } },
+    { song: 1, stems: { khorn: { intro: 'samples/a_intro.wav', main: 'samples/a_main_lp.wav', outro: 'samples/a_outro.wav', flourishes: ['samples/a_f1_lp.wav', 'samples/a_f2_lp.wav', 'samples/a_f3_lp.wav'] }, mand: { intro: null, main: 'samples/b_main_lp.wav', outro: null, flourishes: [] } } },
     { song: 2, stems: { khorn: { intro: null, main: 'samples/c_main_lp.wav', outro: null, flourishes: [] } } },
   ],
 };
@@ -182,27 +182,48 @@ const fixture: MusicPack = {
   console.log('ok   and it is always inside one bar, even before the clock started');
 }
 
+/**
+ * A band with a mixer of nothing behind it, and a clock the test winds by hand.
+ *
+ * Every part is two seconds long, so a whole performance can be walked through a bar at a time.
+ * `run(seconds)` moves the clock in small steps and ticks, which is the frame loop.
+ */
 function driven() {
   const loops: { id: string; gain: number; offset: number }[] = [];
-  const onces: string[] = [];
+  const onces: { id: string; gain: number; when: number }[] = [];
   const stopped: number[] = [];
-  const provided: string[] = [];
+  const provided: { id: string; loops: boolean }[] = [];
+  const moved: { key: number; x: number }[] = [];
+  const segments: string[] = [];
   let next = 1;
+  let clock = 100;
+  const LENGTH = 2;
   const b = new Band();
   b.attach({
     loop: (id, _at, gain, offset) => {
       loops.push({ id, gain, offset });
       return next++;
     },
-    once: (id) => {
-      onces.push(id);
+    once: (id, _at, gain, when) => {
+      onces.push({ id, gain, when: when ?? 0 });
       return next++;
     },
     stop: (key) => stopped.push(key),
-    provide: (id) => provided.push(id),
+    move: (key, at) => moved.push({ key, x: at.x }),
+    provide: (id, t) => provided.push({ id, loops: !!t.loops }),
+    duration: () => LENGTH,
+    now: () => clock,
     seconds: () => 40,
   });
-  return { b, loops, onces, stopped, provided };
+  b.onSegment = (kind, n) => segments.push(n ? `${kind} ${n}` : kind);
+  /** Move the clock on, ticking as a frame loop would. */
+  const run = (seconds: number): void => {
+    for (let t = 0; t < seconds; t += 1 / 30) {
+      clock += 1 / 30;
+      b.tick();
+    }
+  };
+  return { b, loops, onces, stopped, provided, moved, segments, run, length: LENGTH, at: () => clock };
 }
 
 const here = { x: 0, y: 0, z: 0 };
@@ -224,41 +245,111 @@ const here = { x: 0, y: 0, z: 0 };
   ok(!!stemFor('kloo_horn'), 'the pack loads');
 }
 
+// ---------------------------------------------------------------- the shape of a performance
+
 {
+  // The intro **alone**, and the loop after it. It used to be laid over the loop and the two were
+  // heard at once, which is the thing the owner reported first.
   const d = driven();
   ok(d.b.start(1, 'kloo_horn', here) === null, 'a kloo horn plays song 1');
-  ok(d.loops.length === 1 && d.loops[0].id === 'music:a_main_lp', 'and it is that instrument\'s own loop that starts');
-  ok(d.loops[0].offset === songOffset(40), 'started where the song is, not where the press was');
-  ok(d.onces[0] === 'music:a_intro', 'with the intro over the top, so a player joining late does not hold the band up');
-  ok(d.provided.length === 2, 'and a template made for each part, once');
+  ok(d.loops.length === 0, 'nothing is started as a forever loop: a performance is a chain of single plays');
+  ok(d.onces.length === 1 && d.onces[0].id === 'music:a_intro', 'the intro is the only thing playing when a song begins');
+  ok(d.segments.join(',') === 'intro', 'and the body is posed for the intro and nothing else');
+  ok(d.provided.every((p) => !p.loops), 'no part is made as a looping template, whatever its file is called');
   ok(d.b.mine?.stem === 'khorn', 'and the band knows what it is playing');
+
+  // The loop takes over at the moment the intro ends, and is scheduled rather than started late.
+  d.run(d.length + 0.2);
+  ok(d.onces.length === 2 && d.onces[1].id === 'music:a_main_lp', 'when the intro ends the loop is what follows it');
+  ok(Math.abs(d.onces[1].when - (100 + d.length)) < 0.05, 'handed to the mixer with the exact moment the intro ends, so the seam has nothing in it');
+  ok(d.segments.join(',') === 'intro,main', 'and the body changes with it');
+  d.run(d.length);
+  ok(d.onces.length === 3 && d.onces[2].id === 'music:a_main_lp', 'and the loop comes round again by itself');
 }
 
 {
   const d = driven();
   ok(d.b.start(2, 'mandoviol', here)?.includes('no part for the mandoviol') === true, 'a song with no track for your instrument says which instrument it is');
-  ok(d.loops.length === 0, 'and plays nothing at all rather than somebody else\'s part');
+  ok(d.onces.length === 0, 'and plays nothing at all rather than somebody else\'s part');
   ok(d.b.start(1, null, here) === 'nothing in your hands to play', 'and empty hands play nothing');
   ok(d.b.start(1, 'a_rock', here)?.includes('not an instrument') === true, 'as does something that is not an instrument');
 }
 
+// ---------------------------------------------------------------- a flourish waits its turn
+
 {
   const d = driven();
   d.b.start(1, 'kloo_horn', here);
-  ok(d.b.flourish(1, here), 'a flourish this song has for this instrument plays');
-  ok(d.onces[d.onces.length - 1] === 'music:a_f1_lp', 'and it is the right one');
-  ok(!d.b.flourish(5, here), 'and one it has not does nothing at all');
-  d.b.stop(here);
-  ok(d.onces[d.onces.length - 1] === 'music:a_outro' && d.stopped.length === 1, 'stopping plays the outro and lets the loop go');
-  ok(d.b.mine === null, 'and nothing is playing afterwards');
+  d.run(d.length + 0.2); // past the intro, into the loop
+  const was = d.onces.length;
+  ok(d.b.flourish(1), 'a flourish this song has for this instrument is taken');
+  ok(d.onces.length === was, 'and nothing sounds on the press: it waits for the part that is playing to finish');
+  ok(d.b.queued() === 1, 'it is what is waiting');
+  ok(!d.b.flourish(5), 'and one this song has not is refused');
+  ok(d.b.queued() === 1, 'which leaves what was waiting where it was');
+
+  // Asking again replaces: four presses in a bar are one flourish, the last one.
+  d.b.flourish(2);
+  d.b.flourish(3);
+  ok(d.b.queued() === 3, 'asking again replaces what was waiting rather than adding to it');
+
+  d.run(d.length);
+  ok(d.onces[d.onces.length - 1].id === 'music:a_f3_lp', 'the last one asked for is the one that plays');
+  ok(d.b.queued() === 0, 'and the queue is empty from the moment it is taken, so a press now is for the part after');
+  ok(d.segments[d.segments.length - 1] === 'flourish 3', 'the body is posed for the flourish when the flourish sounds, not when it was asked for');
+
+  d.run(d.length);
+  ok(d.onces[d.onces.length - 1].id === 'music:a_main_lp', 'a flourish plays once and hands back to the loop');
+  ok(d.segments[d.segments.length - 1] === 'main', 'and the body goes back with it');
+}
+
+{
+  // One flourish straight into another, which is what queueing during a flourish means.
+  const d = driven();
+  d.b.start(1, 'kloo_horn', here);
+  d.run(d.length + 0.2);
+  d.b.flourish(1);
+  d.run(d.length);
+  ok(d.onces[d.onces.length - 1].id === 'music:a_f1_lp', 'the first flourish is playing');
+  d.b.flourish(2);
+  d.run(d.length);
+  ok(d.onces[d.onces.length - 1].id === 'music:a_f2_lp', 'and one asked for during it follows it straight on');
+  d.run(d.length);
+  ok(d.onces[d.onces.length - 1].id === 'music:a_main_lp', 'then the loop, since nothing else was asked for');
 }
 
 {
   const d = driven();
   d.b.start(1, 'kloo_horn', here);
-  const was = d.loops.length;
+  d.run(d.length + 0.2);
+  d.b.stop(here);
+  ok(d.onces[d.onces.length - 1].id === 'music:a_outro' && d.stopped.length > 0, 'stopping lets what is playing go and plays the outro in its place');
+  ok(d.b.mine === null, 'and nothing is being played afterwards');
+  const after = d.onces.length;
+  d.run(d.length * 3);
+  ok(d.onces.length === after, 'the outro is the end of it: nothing follows an outro');
+}
+
+{
+  const d = driven();
+  d.b.start(1, 'kloo_horn', here);
+  d.run(0.5);
+  const was = d.stopped.length;
   d.b.start(2, 'kloo_horn', here);
-  ok(d.loops.length === was + 1 && d.stopped.length === 1, 'changing song lets the old loop go and starts the new one');
+  ok(d.stopped.length === was + 1, 'changing song lets the old part go');
+  ok(d.onces[d.onces.length - 1].id === 'music:c_main_lp', 'and starts the new one (song 2 has no intro for this instrument)');
+}
+
+// ---------------------------------------------------------------- it follows the player
+
+{
+  const d = driven();
+  d.b.start(1, 'kloo_horn', here);
+  // Far enough into the intro that the loop after it has already been handed over.
+  d.run(d.length - BAND_TUNE.ahead / 2);
+  d.moved.length = 0;
+  d.b.moveMine({ x: 30, y: 0, z: 0 });
+  ok(d.moved.length === 2 && d.moved.every((m) => m.x === 30), 'walking moves the part sounding **and** the one already scheduled, or a flourish plays where you were standing');
 }
 
 {
@@ -283,8 +374,11 @@ const here = { x: 0, y: 0, z: 0 };
   const d = driven();
   d.b.start(1, 'kloo_horn', here);
   d.b.hear(7, { song: 1, stem: 'mand', flourish: 0 }, here, 5);
-  ok(d.loops.length === 2, 'two players on two instruments are two tracks: that is the whole of a band');
-  ok(d.loops[0].offset === d.loops[1].offset, 'and both started at the same place in the bar, so they line up');
+  // Your own performance is a chain of single plays, because it has a shape: an intro, then a loop
+  // with a moment in it where a flourish may take its turn. Somebody else's is joined part way
+  // through something they began, so it comes in on the shared bar and is simply looped.
+  ok(d.onces.length === 1 && d.loops.length === 1, 'two players on two instruments are two tracks: that is the whole of a band');
+  ok(d.loops[0].offset === songOffset(40), "and the one joined part way through comes in where the song is, not where we happened to walk up");
   d.b.clear();
   ok(d.stopped.length === 2 && d.b.report().playing === 0, 'and a world going away stops all of it');
 }

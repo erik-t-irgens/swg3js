@@ -15,7 +15,7 @@
     "launcher:build": "node tools/launcher/build-exe.mjs",
     "launcher:pack": "node tools/launcher/pack.mjs",
     "test:launcher": "node tools/launcher/tests/launcher.test.mjs",
-    "test:terrain": "node tools/swg/tests/terrain.test.ts && node tools/swg/tests/terrainAudit.test.ts && node tools/swg/tests/floraClear.test.ts",
+    "test:terrain": "node tools/swg/tests/groundShader.test.ts && node tools/swg/tests/terrain.test.ts && node tools/swg/tests/terrainAudit.test.ts && node tools/swg/tests/floraClear.test.ts",
     "test:nav": "node tools/swg/tests/nav.test.ts && node tools/swg/tests/errand.test.ts && node tools/swg/tests/outdoorNav.test.ts",
     "test:cover": "node tools/swg/tests/cover.test.ts && node tools/swg/tests/groundSkill.test.ts && node tools/swg/tests/fighterMove.test.ts && node tools/swg/tests/coverBrain.test.ts",
     "test:weather": "node tools/swg/tests/weather.test.ts && node tools/swg/tests/wetness.test.ts",

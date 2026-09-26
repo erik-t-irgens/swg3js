@@ -105,6 +105,15 @@ export interface PlayOptions {
   /** An audio-clock time to start at, to the sample: what player music will lay its parts on. */
   at?: number;
   /**
+   * An audio-clock moment this voice may not sound before.
+   *
+   * `at` moves the voice's own clock, which is how a loop is joined part way through; this is the
+   * other thing, and the band needs both: the moment the source itself is started. A part handed
+   * over a quarter of a second early with the moment the one before it ends is a seam with nothing
+   * in it, which a part started when a frame happens to notice can never be.
+   */
+  when?: number;
+  /**
    * The caller saying this is not a sound in the world but one made at the ear: a panel's click, a
    * confirmation, a warning. It takes no distance, nothing of a wall between it and the ear and
    * nothing of the room. It is asked of the caller rather than read off the template's category,
@@ -234,6 +243,8 @@ interface Playing {
   pitchWritten: number;
   /** Audio time the sound playing now ends. */
   endsAt: number;
+  /** Audio time the source may not start before, or 0: the band's own seam. */
+  when: number;
   /** Audio time the loop now due was first asked for, for the patience drop. */
   askedAt: number;
   /** The gain the listener would hear it at, before the group and the master. */
@@ -466,6 +477,20 @@ export class AudioSystem {
   }
 
   /**
+   * How long a template's own sample is, seconds, or 0 while it is still being fetched or decoded.
+   *
+   * Only the band asks: it chains one part to the next at the exact moment the last ends, and there
+   * is no other way to know when that is. 0 means "not yet", never "no sound" -- a caller must ask
+   * again rather than treat it as an answer. The bank answers from its index where it has one and
+   * from the decoded buffer otherwise, which is what the music's own samples need: they are a
+   * sibling of the bank's own folder and are in no index.
+   */
+  duration(id: string): number {
+    const sample = this.bank.template(id)?.samples[0];
+    return sample ? this.bank.length(sample) : 0;
+  }
+
+  /**
    * Start a template. Returns a key, or 0 when nothing started (no pack, no template, no slot). A
    * key is always usable: `stop`, `move` and `setGain` on 0 do nothing.
    */
@@ -511,6 +536,7 @@ export class AudioSystem {
       rate: 1,
       pitchWritten: 0,
       endsAt: 0,
+      when: options.when ?? 0,
       askedAt: now,
       audible: 1,
       stopping: false,
@@ -1009,7 +1035,7 @@ export class AudioSystem {
     // running for hours never leaves a line of dead nodes behind.
     src.onended = () => src.disconnect();
     this.join(slot, p.group);
-    let at = Math.max(ctx.currentTime, this.start.at);
+    let at = Math.max(ctx.currentTime, this.start.at, p.when);
     // A bed that waited as a virtual voice comes in where its own clock has reached. A negative
     // answer means its clock is in the gap between two loops, so it waits that out and comes in at
     // the top rather than part way through the sample.
@@ -1181,19 +1207,25 @@ export class AudioSystem {
   }
 
   /**
-   * Whether a voice is in the world at all. A sound the caller made at the ear is not, and neither
-   * is the music bus: they are heard wherever the ear is, at the gain they were given, with no
-   * distance, no wall between them and nothing of the room about them. A click muffled through a
-   * wall because the player walked into a cantina reads as a fault in the menu.
+   * Whether a voice is in the world at all. A sound the caller made at the ear is not: it is heard
+   * wherever the ear is, at the gain it was given, with no distance, no wall between it and nothing
+   * of the room about it. A click muffled through a wall because the player walked into a cantina
+   * reads as a fault in the menu.
    *
    * It asks the caller (`PlayOptions.ui`) rather than the template's category, because the game's
    * own interface table is not all of one category: two of its rows are category 2 and would land
    * on the effects layer, and three more carry a distance, which on a voice with no place of its
    * own means "heard only in the ear's own building" -- silence the moment the player steps
    * indoors.
+   *
+   * **The music bus is in the world when it has a place in it**, which in this game is always. The
+   * whole of the music here is somebody playing an instrument where they are standing -- there is no
+   * score and there never will be -- so a band exempt from distance was heard at full volume from
+   * the other side of a planet, through walls, with no room about it. A placeless music voice would
+   * still be exempt, and none exists; if a score is ever added it will be one, and will read right.
    */
   private worldly(p: Playing): boolean {
-    return !p.ui && p.group !== 'music';
+    return !p.ui && (p.group !== 'music' || p.placed);
   }
 
   /**

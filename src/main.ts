@@ -1301,12 +1301,27 @@ class App {
       // take three arguments and drop the fourth, so two players a minute apart each began at the
       // top of their own sample and the bar they are meant to share did nothing.
       loop: (id, at, gain, offset) => this.audio.loop(id, { x: at.x, y: at.y, z: at.z, gain, space: this.listenerPose.space, at: this.audio.now - offset }),
-      once: (id, at, gain) => this.audio.play(id, { x: at.x, y: at.y, z: at.z, gain, space: this.listenerPose.space }),
+      // `when` is the seam: the moment the part before this one ends, given to the mixer a quarter
+      // of a second early so the source is scheduled rather than started on whichever frame notices.
+      once: (id, at, gain, when) => this.audio.play(id, { x: at.x, y: at.y, z: at.z, gain, space: this.listenerPose.space, when }),
       stop: (key, fade) => this.audio.stop(key, fade),
       move: (key, at) => this.audio.move(key, at.x, at.y, at.z),
       provide: (id, template) => this.audio.bank.offer(id, template),
+      prepare: (ids) => this.audio.prepare(ids),
+      duration: (id) => this.audio.duration(id),
+      now: () => this.audio.now,
       seconds: () => sharedClock.walkSeconds(),
     });
+    // The body is posed by the part that is really sounding, not by the key that asked for it: a
+    // flourish pressed in the middle of a bar is heard at the top of the next one.
+    band.onSegment = (kind, n) => {
+      const instrument = this.instrumentHeld();
+      if (!instrument) return;
+      const branch = animFor(instrument);
+      if (!branch) return;
+      if (kind === 'flourish' && n > 0) this.playEmote(this.player.rig?.variant(`skill_action_${n}`, branch) ?? null);
+      else if (kind === 'main' || kind === 'intro') this.playEmote(this.player.rig?.variant('loop_skill:speed2', branch) ?? null);
+    };
     void loadMusic(import.meta.env.BASE_URL);
     void loadDeeds(import.meta.env.BASE_URL);
     this.npcUi = new NpcUi(this.ui);
@@ -1738,6 +1753,10 @@ class App {
           drawn: {
             terminals: this.travelStood.keys.length,
             collectors: this.travelStood.droids.length,
+            // A collector that has not stood yet, and the reason the last try gave: the droid is a
+            // mobile and its spawn can be refused for reasons that have nothing to do with it.
+            collectorsWaiting: this.travelWaiting.length,
+            collectorRefused: this.travelRefused || null,
             withModel: things.filter((t) => t.model).length,
             of: things.length,
             nearest: things
@@ -6819,6 +6838,12 @@ class App {
     // on the same frame it lands rather than the next.
     this.stepFeet(dt, pose.x, pose.y, pose.z);
     this.stepVehicleSounds(dt);
+    // The band's seams, here rather than with its row, because a performance goes on whether or not
+    // that row is up and a flourish's turn must not wait on a panel.
+    this.stepBandClock();
+    // And the collectors that have not managed to stand yet, which is the same "every frame reaches
+    // here" argument: a droid refused on arrival must be asked for again.
+    this.stepTravelStand(this.audio.now);
     this.audio.update(dt, pose);
   }
 
@@ -9525,9 +9550,12 @@ class App {
       if (!t.model) continue;
       const key = `travel:${pack}:${i}`;
       if (t.kind === 'collector') {
-        const droid = this.world.standMobile(t.model, { x: t.x, z: t.z, heading: t.yaw }, t.cell > 0, key);
-        if (droid) this.travelStood.droids.push(droid);
-        else console.warn(`the ticket collector ${t.model} is not in the mobile catalogue`);
+        // Asked for once and then left waiting: a droid is a mobile, and a mobile's spawn is refused
+        // for half a dozen reasons that are all about **this moment** rather than about the droid --
+        // its model not planned yet, the budget full, a cell whose floor is not built, the manager
+        // not there at all. Asked once on arrival, every one of those was a collector that never
+        // appeared and never would. `stepTravelStand` asks again until it stands.
+        this.travelWaiting.push({ key, model: t.model, x: t.x, z: t.z, yaw: t.yaw, inside: t.cell > 0 });
         continue;
       }
       // Solid whatever its size: a terminal is under the sweep's own floor for small props and is
@@ -9543,6 +9571,38 @@ class App {
       for (const droid of this.travelStood.droids) this.world.unstandMobile(droid);
     }
     this.travelStood = { pack: '', keys: [], droids: [] };
+    this.travelWaiting = [];
+    this.travelRefused = '';
+  }
+
+  /** The ticket collectors still to be stood, and why the last try was refused. */
+  private travelWaiting: { key: string; model: string; x: number; z: number; yaw: number; inside: boolean }[] = [];
+  private travelRefused = '';
+  private travelTriedAt = 0;
+
+  /**
+   * Ask again for the ticket collectors that have not stood yet.
+   *
+   * A droid is a mobile and a mobile's spawn is refused for reasons that are about the moment rather
+   * than about the droid: its model not planned, the memory budget full, the cell it stands in not
+   * built yet, the catalogue still in flight, no manager at all. Every one of those was permanent
+   * when the collectors were asked for once on arrival. A second a try is cheap -- there are eleven
+   * of them in the whole game -- and the reason the last one gave is kept, so `__debug.terminal()`
+   * can say why rather than leaving an empty pad and no explanation.
+   */
+  private stepTravelStand(now: number): void {
+    if (!this.travelWaiting.length || now - this.travelTriedAt < 1) return;
+    this.travelTriedAt = now;
+    const left: typeof this.travelWaiting = [];
+    for (const w of this.travelWaiting) {
+      const droid = this.world.standMobile(w.model, { x: w.x, z: w.z, heading: w.yaw }, w.inside, w.key);
+      if (droid) this.travelStood.droids.push(droid);
+      else {
+        this.travelRefused = this.world.mobileNote() ?? 'the ticket collector would not stand';
+        left.push(w);
+      }
+    }
+    this.travelWaiting = left;
   }
 
   /** This world's travel terminals, collectors and shuttles, kept while the pack and the centre hold. */
@@ -10431,6 +10491,18 @@ class App {
     if (band.mine) band.moveMine(this.player.worldPos);
   }
 
+  /**
+   * One frame of everybody's music: the seam where one part hands over to the next.
+   *
+   * It is stepped beside the feet and the guns rather than with the band's own row, because that is
+   * the one place the frame loop reaches every step whatever is on the screen -- and the seam is
+   * where a flourish gets its turn, which must not wait on a panel being shut.
+   */
+  private stepBandClock(): void {
+    band.tick();
+    if (band.mine) band.moveMine(this.player.worldPos);
+  }
+
   /** Whether the band's row is up. The Start Playing ability opens and closes it. */
   private bandOpen = false;
 
@@ -10483,15 +10555,11 @@ class App {
       return;
     }
     const why = band.start(this.bandSong, instrument, this.player.worldPos);
-    if (why) {
-      this.messages.system(why);
-      return;
-    }
-    // The body plays it too. The pose is the rig's own performance loop for this instrument, which
-    // is the very branch of the very selector a dance uses, so it loops, it ends when the player
-    // moves and it crosses the relay with nothing new sent -- all of that is the emote path's
-    // already. A rig with no pose for this instrument simply plays the music.
-    this.playEmote(this.player.rig?.variant('loop_skill:speed2', animFor(instrument) ?? '') ?? null);
+    if (why) this.messages.system(why);
+    // The body is posed by `band.onSegment`, which fires for the part that really starts: the pose
+    // is the rig's own performance loop for this instrument, the very branch of the very selector a
+    // dance uses, so it loops, it ends when the player moves and it crosses the relay with nothing
+    // new sent. A rig with no pose for this instrument simply plays the music.
   }
 
   /** Stop playing: the music and the pose together, wherever the stop came from. */
@@ -10501,18 +10569,14 @@ class App {
   }
 
   /**
-   * A flourish: the sound and the pose, over the loop the body goes back to.
+   * Ask for a flourish. It waits its turn and the body waits with it.
    *
-   * One method because three things flourish -- the row's buttons, the number keys and the console --
-   * and the pose must not be played where the sound was refused.
+   * One method because three things flourish -- the row's buttons, the number keys and the console.
+   * Neither the sound nor the pose happens here: both are the band's, at the top of the next bar,
+   * through `onSegment`. A player who presses four in a bar gets the fourth, once.
    */
   private bandFlourish(n: number): void {
-    if (!band.flourish(n, this.player.worldPos)) {
-      this.messages.system('this song has no such flourish for that instrument');
-      return;
-    }
-    const instrument = this.instrumentHeld();
-    if (instrument) this.playEmote(this.player.rig?.variant(`skill_action_${n}`, animFor(instrument) ?? '') ?? null);
+    if (!band.flourish(n)) this.messages.system('this song has no such flourish for that instrument');
   }
 
   /** What the Housing tab shows: every deed whose building this game can really put down. */

@@ -3082,6 +3082,19 @@ export class World {
     return typeof m === 'string' || !m ? null : m;
   }
 
+  /**
+   * Why the last spawn was refused, in the manager's own words, or null.
+   *
+   * `standMobile` answers null for half a dozen quite different reasons -- no catalogue yet, no
+   * manager, a model with no file, a full memory budget, a cell with no floor built -- and a caller
+   * that means to ask again needs to know which, or an empty spot has no explanation anywhere.
+   */
+  mobileNote(): string | null {
+    if (!this.mobileCatalogue) return 'the creature and NPC catalogue has not loaded yet';
+    if (!this.mobiles) return 'this world has no mobiles manager';
+    return this.mobiles.lastNote ?? null;
+  }
+
   /** One of those taken away again. */
   unstandMobile(m: Mobile): void {
     this.mobiles?.remove(m);

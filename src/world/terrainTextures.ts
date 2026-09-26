@@ -6,7 +6,7 @@
 import * as THREE from 'three';
 import type { CSM } from 'three/examples/jsm/csm/CSM.js';
 import type { AssetPack } from './assetPack';
-import { injectWetness } from './wetness';
+import { injectWetness } from './wetness.ts';
 
 /** One entry of terrain/shaders.json written by the converter. */
 export interface ShaderFamilyDef {
@@ -26,11 +26,25 @@ export interface ShaderFamilyDef {
 }
 
 /**
+ * The marker the ground's own declarations end with, and the one place anything may be injected
+ * after them.
+ *
+ * Three separate injections write into this shader at `#include <common>` -- the ground's own
+ * textures, the weather's, and the bumps below -- and each of them inserts at the **first** match,
+ * so the last to run lands **first** in the file. That put `uniform sampler2DArray uGroundNormal;`
+ * above `precision highp sampler2DArray;` and `groundSlope()` above every uniform and varying it
+ * reads, which is not a subtle error: the program fails to compile and the ground is not drawn at
+ * all. A marker of its own makes the order of the calls stop mattering.
+ */
+const GROUND_DECLS_END = '// <ground-declarations-end>';
+
+/**
  * The ground's own bumps, folded into the normal the lighting uses.
  *
- * Injected **after** `injectWetness` has run, which puts this block first at the same anchor: the
- * ground's own relief, and then a puddle's surface laid over it. The other order wipes the rain
- * rings out.
+ * Its declarations go after `GROUND_DECLS_END`, so they always follow the ground's own; its work
+ * goes at `#include <normal_fragment_maps>`, which `injectWetness` has already written to, so this
+ * block lands **before** the wetness one and a puddle's surface is laid over the ground's relief
+ * rather than wiped out by it.
  *
  * Three things about the arithmetic. The ground's texture coordinate is world XZ, so the tangent is
  * world +X and the bitangent world +Z by construction -- no tangent frame is built and none should
@@ -39,14 +53,16 @@ export interface ShaderFamilyDef {
  * frame is the same one and is what the water already does for its two layers. And the green channel
  * is read as it stands, the way this project settled the question for every other surface.
  */
-function injectGroundNormal(shader: { fragmentShader: string; uniforms: Record<string, { value: unknown }> }, normals: THREE.DataArrayTexture, scale: { value: number }): void {
-  shader.uniforms.uGroundNormal = { value: normals };
+export function injectGroundNormal(shader: { fragmentShader: string; uniforms: Record<string, { value: unknown }> }, normals: THREE.DataArrayTexture | null, scale: { value: number }): boolean {
+  // A stage that is not there is left alone rather than written to: a use with no declaration does
+  // not draw the ground wrongly, it does not draw the ground.
+  if (!shader.fragmentShader.includes(GROUND_DECLS_END) || !shader.fragmentShader.includes('#include <normal_fragment_maps>')) return false;
+  if (normals) shader.uniforms.uGroundNormal = { value: normals };
   shader.uniforms.uGroundNormalScale = scale;
   shader.fragmentShader = shader.fragmentShader
     .replace(
-      '#include <common>',
-      `#include <common>
-uniform sampler2DArray uGroundNormal;
+      GROUND_DECLS_END,
+      `uniform sampler2DArray uGroundNormal;
 uniform float uGroundNormalScale;
 // The height gradient a family's bump map asks for at this point: a tangent-space normal (x, y, z)
 // with z up gives the gradient -xy/z, and the tangent frame here is world X and world Z.
@@ -54,7 +70,8 @@ vec2 groundSlope(float family) {
   int id = clamp(int(family + 0.5), 0, TERRAIN_FAMILIES - 1);
   vec3 n = texture(uGroundNormal, vec3(vGroundXZ / uGroundSize[id], uGroundLayer[id])).xyz * 2.0 - 1.0;
   return -n.xy / max(n.z, 0.2);
-}`,
+}
+${GROUND_DECLS_END}`,
     )
     .replace(
       '#include <normal_fragment_maps>',
@@ -69,6 +86,7 @@ vec2 groundSlope(float family) {
   normal = normalize((viewMatrix * vec4(normalize(vec3(-(gg.x + gs.x), 1.0, -(gg.y + gs.y))), 0.0)).xyz);
 }`,
     );
+  return true;
 }
 
 const LAYER_SIZE = 512;
@@ -89,6 +107,15 @@ const MAX_FAMILY_ID = 127;
  * heightfield, so below the terrain's own step there was no variation at all.
  */
 export const GROUND_NORMAL = { scale: 1 };
+
+/** Whether the owner has turned the ground's relief off by hand, which needs no build. */
+function groundBumpOff(): boolean {
+  try {
+    return localStorage.getItem('swg.ground.bump') === '0';
+  } catch {
+    return false;
+  }
+}
 
 export class TerrainTextures {
   readonly texture: THREE.DataArrayTexture;
@@ -178,7 +205,10 @@ export class TerrainTextures {
     // lookup: a family with no map of its own gets a flat layer rather than a missing one, which
     // keeps the indices identical and costs one layer of three bytes repeated.
     let normals: THREE.DataArrayTexture | null = null;
-    if (kept.some((f) => f.normal)) {
+    // A way back to the flat ground without a build, for the same reason the wetness wrap has one:
+    // everything the ground's relief adds is inside one shader program, and a program that will not
+    // compile draws no ground at all. `localStorage['swg.ground.bump'] = '0'` and reload.
+    if (kept.some((f) => f.normal) && !groundBumpOff()) {
       const nImages = await Promise.all(kept.map((f) => (f.normal ? loadImage(pack.url(f.normal)) : Promise.resolve(null))));
       const nData = new Uint8Array(size * size * 4 * kept.length);
       // Flat everywhere first: (128, 128, 255) is straight up, so a family with no map leans nowhere.
@@ -232,12 +262,12 @@ export class TerrainTextures {
         .replace('#include <common>', '#include <common>\nattribute vec3 aFamily;\nattribute vec3 aBary;\nvarying vec3 vFamily;\nvarying vec3 vBary;\nvarying vec2 vGroundXZ;')
         .replace('#include <worldpos_vertex>', '#include <worldpos_vertex>\nvFamily = aFamily;\nvBary = aBary;\nvGroundXZ = (modelMatrix * vec4(transformed, 1.0)).xz;');
       shader.fragmentShader = shader.fragmentShader
-        .replace('#include <common>', '#include <common>\nprecision highp sampler2DArray;\nuniform sampler2DArray uGround;\nuniform float uGroundLayer[TERRAIN_FAMILIES];\nuniform float uGroundSize[TERRAIN_FAMILIES];\nvarying vec3 vFamily;\nvarying vec3 vBary;\nvarying vec2 vGroundXZ;\nvec4 groundSample(float family) {\n  int id = clamp(int(family + 0.5), 0, TERRAIN_FAMILIES - 1);\n  return texture(uGround, vec3(vGroundXZ / uGroundSize[id], uGroundLayer[id]));\n}')
+        .replace('#include <common>', `#include <common>\nprecision highp sampler2DArray;\nuniform sampler2DArray uGround;\nuniform float uGroundLayer[TERRAIN_FAMILIES];\nuniform float uGroundSize[TERRAIN_FAMILIES];\nvarying vec3 vFamily;\nvarying vec3 vBary;\nvarying vec2 vGroundXZ;\nvec4 groundSample(float family) {\n  int id = clamp(int(family + 0.5), 0, TERRAIN_FAMILIES - 1);\n  return texture(uGround, vec3(vGroundXZ / uGroundSize[id], uGroundLayer[id]));\n}\n${GROUND_DECLS_END}`)
         .replace('#include <map_fragment>', '#include <map_fragment>\n{\n  vec3 w = vBary / max(vBary.x + vBary.y + vBary.z, 1e-4);\n  vec4 g = groundSample(vFamily.x) * w.x + groundSample(vFamily.y) * w.y + groundSample(vFamily.z) * w.z;\n  diffuseColor.rgb *= g.rgb;\n}');
       // Rain, puddles and snow: after the blend (map_fragment), so wetness darkens the blended
       // colour. Compiled in once and driven by the weather's shared uniforms.
       injectWetness(shader, 'ground');
-      if (normals) injectGroundNormal(shader, normals, normalScale);
+      if (normals && !injectGroundNormal(shader, normals, normalScale)) console.warn('the ground shader has no place for its bump maps; the ground is lit flat');
     };
     // The ground carries its own wet injection; the material scan must not wrap it again.
     mat.userData.wetBuiltIn = true;
