@@ -61,9 +61,10 @@ export interface ErrandTune {
    * How far the player's placed-object colliders reach, metres. `COLLIDER_RANGE` in
    * `src/world/layoutStream.ts`. **Not ours.** Within this the body is stopped by what stops the
    * player -- which is not everything that is drawn: the same loop skips anything whose radius is
-   * under `COLLIDER_MIN_RADIUS` and anything a building contains, at every distance. So this is the
-   * range within which the buildings, the rocks and the larger crates are solid, and the small props
-   * are never solid anywhere.
+   * under `COLLIDER_MIN_RADIUS`, at every distance. So this is the range within which the buildings,
+   * the rocks and the larger crates are solid, and the small props are never solid anywhere. What a
+   * building **contains** is solid too now, within its own nearer range (`COLLIDER_INDOOR_RANGE`),
+   * which is why a route that runs through a town's rooms meets the furniture.
    */
   objectsWithin: number;
   /**
@@ -650,7 +651,7 @@ export class Errand {
         'under this order the body takes no target and will not fight back: rule 1 outranks the attacker memory and clears it',
         'a fighter has no side-step at all, so a body that wedges leans until the clock ends the order',
         'a fighter has no water sense: it walks the lake bed, so the first long walk belongs on a dry world',
-        'small props (under the streamer\'s own metre-and-a-half radius floor) and everything inside a building are never given collision at any distance, so walking through one of those is the game as it stands and not a steering failure',
+        "small props (under the streamer's own metre-and-a-half radius floor) are never given collision at any distance, so walking through one of those is the game as it stands and not a steering failure",
       ],
       tune: { ...ERRAND_TUNE },
       ours: 'the order is the brain\'s own first rule with the home moved and the return state held; every number of the account but objectsWithin and terrainWithin is invented',

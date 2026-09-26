@@ -431,14 +431,17 @@ function walk(e: Errand, b: Walker, w: FakeWorld, opts: { to: { x: number; z: nu
   ok((e.report().caveats as string[]).some((c) => /side-step/.test(c)), 'and that it has no side-step');
   ok((e.report().caveats as string[]).some((c) => /fight back/.test(c)), 'and that it will not fight back');
   // The one that keeps the next wave readable: "inside the bubble" is not "everything was solid".
-  ok((e.report().caveats as string[]).some((c) => /small props/.test(c)), 'and that small props and anything inside a building are never solid at any distance');
+  ok((e.report().caveats as string[]).some((c) => /small props/.test(c)), 'and that small props are never solid at any distance');
 }
 {
-  // And that caveat is a claim about the running game, so it is read off it rather than asserted:
-  // the streamer's collider loop skips a radius under its own floor and everything contained.
+  // And that caveat is a claim about the running game, so it is read off it rather than asserted.
+  // What a building contains **is** solid now, within a range of its own; what is still never solid
+  // is anything under the streamer's own minimum radius.
   const stream = src('../../../src/world/layoutStream.ts');
   ok(/const COLLIDER_MIN_RADIUS = /.test(stream), 'the streamer still has a minimum radius below which nothing is given collision');
-  ok(/o\.contained \|\| o\.radius < COLLIDER_MIN_RADIUS/.test(stream), 'and still skips both that and everything a building contains, whatever the distance');
+  ok(/o\.radius < COLLIDER_MIN_RADIUS/.test(stream), 'and still skips that, whatever the distance');
+  ok(/const COLLIDER_INDOOR_RANGE = /.test(stream), 'while a thing inside a building has a range of its own');
+  ok(/o\.contained \? d > COLLIDER_INDOOR_RANGE/.test(stream), "measured to the thing itself, since a snapshot's radius is a load distance and not a size");
 }
 
 // ---------------------------------------------------------------------------

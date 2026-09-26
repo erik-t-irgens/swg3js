@@ -47,11 +47,12 @@
 //
 // ## Not indoors
 //
-// `ask.indoors` answers none at once and casts no ray. That is not laziness: **objects placed inside
-// a building have no collision at all** -- `layoutStream.ts` skips every contained object, which on
-// one planet is 5,046 of them, 1,987 of them waist high and wide enough to hide behind, and not one
-// solid. A cover search indoors would find spots behind crates that stop no bolts, which is worse
-// than finding none. It belongs to whoever makes those props solid.
+// `ask.indoors` answers none at once and casts no ray. The reason it was written has since gone:
+// what a building contains really is solid now, within its own range. What has **not** changed is
+// `layoutStream.noteBlocker`, which still steps over every contained object, so the list this search
+// reads is empty indoors and would find nothing however hard it looked. Turning that on is a wave of
+// its own: the blocker list is walked up to four times a step, and a town's rooms would put
+// thousands of chairs in it. Until then this answers none, and answers it at once.
 //
 // Pure: no three, no rapier, no browser. The physics is handed in as `CoverDeps`, so the node test
 // builds a real rapier world, puts real boxes in it and asks this the real question rather than a

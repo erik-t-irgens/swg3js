@@ -37,6 +37,32 @@ const INTERIOR_DROP = 220;
 const COLLIDER_RANGE = 170;
 const COLLIDER_MIN_RADIUS = 1.5;
 /**
+ * How near the furniture inside a building is made solid, metres. Invented.
+ *
+ * It is a rule of its own, and the reason is the trap this project has now paid for three times: a
+ * snapshot's `radius` is a **load distance and not a size**. Out in the open that costs nothing,
+ * because the test subtracts it and a thing loaded from far off is usually big; measured over every
+ * converted world the smallest radius any contained object carries is 32 and the largest is over a
+ * kilometre, so read the same way a crate in a cantina would be solid from half a mile away. Taken
+ * as a plain distance to the thing itself and measured over every converted world, the worst spot
+ * in the game is 360 colliders and 57,440 triangles (a town on the desert world; Corellia's worst is
+ * 295 and 68,683). That is about 25 ms of building, and only when the whole lot arrives at once,
+ * which happens behind a loading screen: the sweep runs when the player has moved twelve metres, so
+ * walking into a town brings them in a few at a time.
+ */
+const COLLIDER_INDOOR_RANGE = 60;
+
+/**
+ * Whether an object is out of range of the collider sweep, by whichever rule it answers to.
+ *
+ * One function because the build and the drop must agree exactly: two copies of this arithmetic
+ * that disagree by a metre build a collider and drop it again on every pass.
+ */
+function colliderFar(o: PlacedObject, px: number, pz: number, slack: number): boolean {
+  const d = Math.hypot(o.x - px, o.z - pz);
+  return o.contained ? d > COLLIDER_INDOOR_RANGE * slack : d - o.radius > COLLIDER_RANGE * slack;
+}
+/**
  * The widest radius the collider sweep reaches for. An object wider than this (the Star Destroyer,
  * whose radius counts from a model origin that is not its middle) is "huge": its collision is built
  * with its tier, whatever the player's distance, a piece at a time.
@@ -1058,7 +1084,7 @@ export class LayoutStreamer {
     for (const o of this.colliders.keys()) {
       // A huge object's collision comes and goes with its tier, not with the player's distance.
       if (this.huge.has(o)) continue;
-      if (Math.hypot(o.x - px, o.z - pz) - o.radius > COLLIDER_RANGE * UNLOAD_SLACK) this.removeColliders(o);
+      if (colliderFar(o, px, pz, UNLOAD_SLACK)) this.removeColliders(o);
     }
     const reach = COLLIDER_RANGE + this.largestRadius;
     const rx0 = Math.floor((px - reach) / REGION);
@@ -1072,8 +1098,8 @@ export class LayoutStreamer {
         for (const t of region.tiers) {
           if (!t || t === 'loading') continue;
           for (const o of t.objects) {
-            if (o.contained || o.radius < COLLIDER_MIN_RADIUS || this.colliders.has(o) || this.huge.has(o)) continue;
-            if (Math.hypot(o.x - px, o.z - pz) - o.radius > COLLIDER_RANGE) continue;
+            if (o.radius < COLLIDER_MIN_RADIUS || this.colliders.has(o) || this.huge.has(o)) continue;
+            if (colliderFar(o, px, pz, 1)) continue;
             this.addColliders(o);
           }
         }
@@ -1090,13 +1116,27 @@ export class LayoutStreamer {
       if (!posAttr || posAttr.count < 3) continue;
       const idx = prim.geometry.getIndex();
       const indices = idx ? new Uint32Array(idx.array as ArrayLike<number>) : Uint32Array.from({ length: posAttr.count - (posAttr.count % 3) }, (_, i) => i);
-      const desc = R.ColliderDesc.trimesh(new Float32Array(posAttr.array as ArrayLike<number>), indices)
+      // Cleaned and flagged, as every other trimesh in the game is. This was the one path that did
+      // neither, which mattered less while it carried a few hundred big models and matters a great
+      // deal now that it carries the thousands of small ones a town's rooms are furnished with: a
+      // degenerate triangle under a character controller is an engine panic after which every call
+      // fails. Measured on the worst spot this change reaches it costs about sixty per cent more to
+      // build and makes the first step after insertion twenty-six times cheaper.
+      const clean = cleanTrimesh(new Float32Array(posAttr.array as ArrayLike<number>), indices);
+      // Nothing survived the clean: every triangle was degenerate. That is a mesh with no collision
+      // to give rather than an error, and it is stepped over the way the huge path steps over one.
+      if (!clean) continue;
+      const desc = R.ColliderDesc.trimesh(clean.vertices, clean.indices, TRIMESH_FLAGS)
         .setTranslation(o.x, o.y, o.z)
         .setRotation({ x: o.q.x, y: o.q.y, z: o.q.z, w: o.q.w })
         .setFriction(0.8);
-      // Building shells and interiors get their own collision groups so someone inside ignores the shell.
-      if (prim.cell === 0) desc.setCollisionGroups(groups(Group.exterior, Group.all));
-      else if (prim.cell > 0) desc.setCollisionGroups(groups(Group.interior, Group.all));
+      // Building shells and interiors get their own collision groups so someone inside ignores the
+      // shell. A thing standing **in** a room is the room's, whatever cell its own primitives claim:
+      // a plain prop's are -1, which would leave it wearing the engine's default groups -- accepted
+      // by the player, and also by the weather's roof grid and the outdoor ground test, neither of
+      // which has any business finding a chair.
+      if (o.contained || prim.cell > 0) desc.setCollisionGroups(groups(Group.interior, Group.all));
+      else if (prim.cell === 0) desc.setCollisionGroups(groups(Group.exterior, Group.all));
       const col = this.physics.world.createCollider(desc);
       cols.push(col);
       this.colliderTemplate.set(col.handle, o.template);
