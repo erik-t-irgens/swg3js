@@ -1832,9 +1832,23 @@ class App {
        * `__debug.band()` reports what is in your hands, which songs it has a part in and what is
        * playing; `{ song: 4 }` sets the song, `{ play: true }` starts or stops it, `{ flourish: 3 }`
        * strikes one, and `{ tune: { reach, bar } }` moves the band's own numbers.
+       *
+       * `{ floor: { ahead: 0.4, turn: 0 } }` moves a floor instrument while it is standing there:
+       * `ahead` in metres out in front of the player (negative is behind), `turn` in radians from
+       * the way the player faces. It is put down again on the spot, so the numbers can be read off
+       * by eye rather than guessed at and then written into `FLOOR_TUNE`.
        */
-      band: (opts: { song?: number; play?: boolean; flourish?: number; tune?: Partial<typeof BAND_TUNE> } = {}) => {
+      band: (opts: { song?: number; play?: boolean; flourish?: number; tune?: Partial<typeof BAND_TUNE>; floor?: Partial<typeof FLOOR_TUNE> } = {}) => {
         if (opts.tune) Object.assign(BAND_TUNE, opts.tune);
+        if (opts.floor) {
+          Object.assign(FLOOR_TUNE, opts.floor);
+          // Standing already: pick it up and set it down again, so the change is seen at once.
+          const held = this.instrumentHeld();
+          if (held && this.player.heldIsDown) {
+            this.player.putHeldDown(null, null);
+            this.setDownInstrument(held);
+          }
+        }
         const instrument = this.instrumentHeld();
         const stem = stemFor(instrument ?? '');
         if (typeof opts.song === 'number') this.bandSong = Math.round(opts.song);
@@ -1848,6 +1862,9 @@ class App {
           hasAPartIn: songsFor(instrument ?? ''),
           flourishes: partsFor(this.bandSong, stem)?.flourishes.length ?? 0,
           ...band.report(),
+          // Where a floor instrument stands, so the owner can move it by eye and read the numbers
+          // back rather than guessing at them.
+          floor: standsOnGround(instrument) ? { ...FLOOR_TUNE, standing: this.player.heldIsDown } : null,
           note: pack ? '' : 'no music converted: npm run swg -- music @SWG assets-private --retail-only',
           instruments: pack ? Object.keys(pack.instruments).length : 0,
         };
