@@ -985,6 +985,38 @@ function passFor(vfs, shaderPath) {
   }
 }
 
+/** resolve(outDir) -> Map(appearance -> { file } | null): the models the pack's mesh particles draw. */
+const particleMeshes = new Map();
+
+/**
+ * The model a mesh particle draws, converted into the pack beside the effect that names it.
+ *
+ * One GLB per appearance per pack, shared by every effect that names it -- the glow torch alone is
+ * named by 61 of them. The path goes through the same `convertOne` every other static model does, so
+ * a mesh particle's model is textured, glow-split and gloss-mapped exactly as the world's are.
+ */
+function particleMesh(vfs, appearance, outDir) {
+  const pack = resolve(outDir);
+  if (!particleMeshes.has(pack)) particleMeshes.set(pack, new Map());
+  const cache = particleMeshes.get(pack);
+  const key = appearance.toLowerCase();
+  const had = cache.get(key);
+  if (had !== undefined) return had;
+  let out = null;
+  try {
+    const id = `pm_${familyOf(appearance)}`;
+    const file = `particles/${id}.glb`;
+    mkdirSync(join(outDir, 'particles'), { recursive: true });
+    const conv = convertOne(vfs, appearance, join(outDir, file));
+    out = conv.tris ? { file, id, triangles: conv.tris } : null;
+    if (!conv.tris) console.error(`  particle mesh ${appearance}: converted with no triangles`);
+  } catch (err) {
+    console.error(`  particle mesh ${appearance} skipped: ${err.message}`);
+  }
+  cache.set(key, out);
+  return out;
+}
+
 /** Convert a particle effect into the pack (cached per file); returns its manifest entry or { failed }. */
 function convertParticle(vfs, prtPath, outDir) {
   const pack = resolve(outDir);
@@ -992,6 +1024,7 @@ function convertParticle(vfs, prtPath, outDir) {
   let entry = particleEffects.get(key);
   if (entry) return entry;
   if (!particleTextures.has(pack)) particleTextures.set(pack, new Map());
+  if (!particleMeshes.has(pack)) particleMeshes.set(pack, new Map());
   // A placeholder while this one converts: an effect that carries itself, however far down its
   // attachments, gets the placeholder back instead of recursing for ever.
   particleEffects.set(key, { pending: true });
@@ -1002,13 +1035,17 @@ function convertParticle(vfs, prtPath, outDir) {
       textures: particleTextures.get(pack),
       // The effects its particles carry, converted into the same pack and cached like any other.
       attach: (p) => convertParticle(vfs, p.replace(/\\/g, '/'), outDir),
+      // And the model a mesh particle draws, likewise: one GLB per appearance per pack, shared by
+      // every effect that names it (the glow torch is named by 61 of them).
+      meshFor: (appearance) => particleMesh(vfs, appearance, outDir),
+      meshes: particleMeshes.get(pack),
       write: (file, bytes) => {
         mkdirSync(dirname(file), { recursive: true });
         writeFileSync(file, bytes);
       },
       log: (m) => console.error(m),
     });
-    console.error(`  ${entry.id}: particle effect, ${entry.quads} quad emitter(s)${entry.meshes ? `, ${entry.meshes} mesh emitter(s) (not drawn yet)` : ''}${entry.attached ? `, ${entry.attached} carried effect(s)` : ''}${entry.missingTextures.length ? `, textures missing: ${entry.missingTextures.join(', ')}` : ''}`);
+    console.error(`  ${entry.id}: particle effect, ${entry.quads} quad emitter(s)${entry.meshes ? `, ${entry.meshes} mesh emitter(s)${entry.meshFiles ? ` (${entry.meshFiles} model(s))` : ''}` : ''}${entry.attached ? `, ${entry.attached} carried effect(s)` : ''}${entry.missingTextures.length ? `, missing: ${entry.missingTextures.join(', ')}` : ''}`);
   } catch (err) {
     entry = { failed: err.message };
   }

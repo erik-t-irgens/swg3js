@@ -1783,6 +1783,9 @@ class App {
           return {
             placing: null,
             catalogue: this.props.all.length,
+            // Empty means nothing can be put down, whatever the panel shows.
+            world: placedProps.inWorld || '(none: nothing can be put down)',
+            pack: this.props.pack ? 'minted' : 'not minted',
             groups: this.props.groups().length,
             note: this.props.all.length ? "pass an id to take one in hand; { find: 'chair' } searches" : this.props.note || 'no props pack',
             standing: mine.length,
@@ -9857,24 +9860,32 @@ class App {
   }
 
   /**
-   * Stand whatever this player has put down in the world they have just come to.
+   * Stand whatever this player has put down in the world they have just come to, and tell the store
+   * **which world that is**.
    *
-   * The catalogue is asked for first, because a row names a prop and only the catalogue knows which
-   * model that is; on a machine that has never opened the Props tab this is the one place it loads.
-   * Deliberately not awaited, like the fittings: an arrival waits on nothing a player put there.
+   * The second half is not an afterthought: it is what the store needs before anything can be put
+   * down at all, and skipping it is why nothing could be placed on a machine that had never placed
+   * anything. The first cut returned early when the browser had no rows kept for this world -- to
+   * avoid fetching a few megabytes of catalogue to stand nothing -- and left `PlacedProps` with no
+   * world, so the first `put` answered "there is no world to put it in" and every one after it did
+   * too. So the world is handed over always, and only the **catalogue** waits on there being rows:
+   * a row names a prop and only the catalogue knows which model draws it, while an empty world needs
+   * nothing fetched.
+   *
+   * Deliberately not awaited by whoever arrives, like the fittings: an arrival waits on nothing a
+   * player put there.
    */
   private async enterPlaced(pack: string): Promise<void> {
     placedProps.leave();
     // The last world's copy of the props pack goes with the last world: its materials joined that
     // world's cascades and the portal renderer's set, and nothing but a dispose takes them out.
     this.props.release();
-    // Nothing kept here: the catalogue is a few megabytes and is not fetched to stand nothing.
-    if (!this.placedStore().get(propsKey(pack))) return;
-    if (!this.props.loaded) {
+    // The catalogue only where there is something to stand; the world always.
+    if (this.placedStore().get(propsKey(pack)) && !this.props.loaded) {
       try {
         await this.props.load();
       } catch {
-        return;
+        /* no catalogue: the rows cannot be stood, but this world is still the world to put one in */
       }
     }
     if (packIdOf(this.world.planet, this.zone) !== pack) return;
@@ -10548,7 +10559,7 @@ class App {
     // rather than as a shell; it is one shared scene, never a copy.
     const shown = model.scene;
     await this.world.prepareActor(shown);
-    this.closePanels();
+    this.closePanelsForPlacing();
     this.ghost.hold(shown);
     if (!this.ghost.group.parent) this.world.scene.add(this.ghost.group);
     this.placing = { deed, reach: GHOST_TUNE.reach, yaw: this.player.heading, lift: 0, state: null };
@@ -10641,7 +10652,7 @@ class App {
     await this.world.prepareActor(model);
     this.stopPlacing();
     this.stopPlacingProp();
-    this.closePanels();
+    this.closePanelsForPlacing();
     this.ghost.hold(model);
     if (!this.ghost.group.parent) this.world.scene.add(this.ghost.group);
     this.propPlacing = { def, reach: PROP_TUNE.reach, turn: { ...NO_TURN }, lift: 0, ok: true, why: null };
@@ -11089,6 +11100,7 @@ class App {
     if (this.shipMenu.open) this.shipMenu.hide();
     if (this.hyperspaceUi.open) this.hyperspaceUi.hide();
     if (this.housingUi.open) this.housingUi.hide();
+    if (this.propsUi.open) this.propsUi.hide();
     if (this.terminalUi.open) {
       // The galaxy goes home first: the terminal is about to be hidden with the map window's own
       // canvas and label layer sitting inside it, and nothing else would ever put them back.
@@ -11100,6 +11112,19 @@ class App {
       this.shuttleMenu.hide();
       this.shuttleFrom = null;
     }
+  }
+
+  /**
+   * Close the panels because something was taken in hand, and give the mouse back to the game.
+   *
+   * `closePanels` deliberately does not hand the mouse back -- it is called on every panel at once and
+   * a panel closing under the group's window or the trade window must leave the pointer alone -- so
+   * taking a deed or a prop in hand has to ask for it, or the player is left with a free cursor, no
+   * walk and nothing to click on. This is the one place it is right to do both.
+   */
+  private closePanelsForPlacing(): void {
+    this.closePanels();
+    this.handBackMouse();
   }
 
   /** P: the ship menu, for whoever is in a ship (at its controls, riding it, or aboard as a passenger). */

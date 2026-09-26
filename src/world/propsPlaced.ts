@@ -118,6 +118,16 @@ export class PlacedProps {
   }
 
   /**
+   * Which world the store is in, or '' for none.
+   *
+   * Worth reporting, because an empty one is the whole reason nothing could be put down: every `put`
+   * answers "there is no world to put it in" and the cause is nowhere near the press.
+   */
+  get inWorld(): string {
+    return this.world;
+  }
+
+  /**
    * Come to a world: read what is kept for it and stand the lot.
    *
    * Not awaited by whoever arrives -- standing a hundred models is a hundred loads -- and every

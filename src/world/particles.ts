@@ -11,7 +11,9 @@
 // rewritten each frame, so an area with dozens of effects costs a handful of draw calls. Effects
 // beyond their level-of-detail range go dormant and drop their particles.
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { ACTOR_LAYER } from './portalRender';
+import { surfaces } from './surfaces.ts';
 
 export interface WaveForm {
   /** 0 linear, 1 spline (drawn as linear). */
@@ -127,7 +129,13 @@ export interface EmitterDef {
     speedScale: WaveForm;
     relativeRotation: WaveForm[] | null;
     quad?: { rotation: WaveForm; length: WaveForm; width: WaveForm; texture: ParticleTextureDef; linked: boolean };
-    mesh?: { path: string; scale: WaveForm; rotation: WaveForm[] };
+    /**
+     * A particle that draws a model rather than a billboard. `file` is the GLB the converter wrote
+     * into the same pack, absent in a pack converted before it read them -- and while it was absent
+     * a mesh emitter drew nothing, which on the entertainer's ribbon stick is the whole prop, since
+     * its quads are written with alpha 0 for their entire life.
+     */
+    mesh?: { path: string; scale: WaveForm; rotation: WaveForm[]; file?: string };
     /** Effects each particle carries; only those with a `file` are played. */
     attachments?: ParticleAttachmentDef[];
   };
@@ -392,6 +400,32 @@ interface QueueEntry {
   d: number;
 }
 
+/**
+ * One model a mesh particle draws, as instances.
+ *
+ * A mesh emitter is the plainest thing in this file: the simulation already gives every particle a
+ * place, an age and a life, so drawing one is a matrix per live particle -- its position, the three
+ * rotation curves and the scale curve -- written into an `InstancedMesh` per primitive of the model.
+ * Nothing about the simulation changes and no new program is needed beyond the model's own.
+ *
+ * What it does **not** do is fade: an instanced draw has no per-instance alpha without a material of
+ * its own, so the alpha curve is folded into the instance colour, which reads as a fade on the glowing
+ * meshes these really are (a torch, a glow stick, a firework) and as a darkening on an opaque one.
+ * Said plainly rather than hidden, because it is the one place this is not what the client did.
+ */
+interface MeshBatch {
+  key: string;
+  /** One per primitive of the model, added to the scene and hidden while nothing draws. */
+  parts: THREE.InstancedMesh[];
+  capacity: number;
+  /** Particles queued this frame. */
+  queue: QueueEntry[];
+  entries: QueueEntry[];
+}
+
+/** How many instances one mesh batch may draw, so a runaway emitter cannot cost the frame. */
+const MAX_MESH_INSTANCES = 512;
+
 /** Farthest first, so alpha quads blend back to front; one function, not a closure a frame. */
 const byDistanceDesc = (x: QueueEntry, y: QueueEntry): number => y.d - x.d;
 
@@ -450,6 +484,12 @@ const tmpUp = new THREE.Vector3();
 const tmpSide = new THREE.Vector3();
 const tmpColor = new THREE.Color();
 const tmpM = new THREE.Matrix4();
+/** The mesh particles' own scratch: one matrix, turn, scale, Euler and colour, never a frame's worth. */
+const meshM = new THREE.Matrix4();
+const meshQ = new THREE.Quaternion();
+const meshS = new THREE.Vector3();
+const meshE = new THREE.Euler();
+const meshC = new THREE.Color();
 const tmpM3 = new THREE.Matrix3();
 const tmpM3Local = new THREE.Matrix3();
 const tmpPos = new THREE.Vector3();
@@ -951,9 +991,14 @@ export class ParticleEffects {
   private readonly defs = new Map<string, Promise<EffectDef | null>>();
   private readonly textures = new Map<string, THREE.Texture>();
   private readonly batches = new Map<string, Batch>();
+  /** The models mesh particles draw, by pack-relative GLB: one batch each, however many effects name it. */
+  private readonly meshBatches = new Map<string, MeshBatch>();
+  /** Each model's primitives once its GLB has loaded, or null while it is in flight or has failed. */
+  private readonly meshModels = new Map<string, { geometry: THREE.BufferGeometry; material: THREE.Material }[] | null>();
   private readonly instances = new Map<EffectHandle, EffectInstance>();
   private readonly pending = new Set<EffectHandle>();
   private readonly loader = new THREE.TextureLoader();
+  private meshCount = 0;
   private readonly fogColor = new THREE.Color(0.6, 0.6, 0.6);
   private readonly textureErrors = new Set<string>();
   private lastCamera: THREE.Camera | null = null;
@@ -1003,6 +1048,84 @@ export class ParticleEffects {
     return this.quadCount;
   }
 
+  /** Mesh particles drawn in the last update, for the console. */
+  get meshes(): number {
+    return this.meshCount;
+  }
+
+  /**
+   * The primitives of a model a mesh particle draws, or null while it loads (and for good if it
+   * cannot be read).
+   *
+   * Loaded once per pack-relative file however many effects name it -- the glow torch is named by 61
+   * of the game's own -- and its materials are the GLB's own, so nothing new is compiled beyond the
+   * first draw of each. Fetched through `surfaces.withPlugin`, as every converted static model is, so
+   * a flip-book or a scrolling surface on one behaves as it does anywhere else.
+   */
+  private meshModel(file: string): { geometry: THREE.BufferGeometry; material: THREE.Material }[] | null {
+    const had = this.meshModels.get(file);
+    if (had !== undefined) return had;
+    this.meshModels.set(file, null);
+    void surfaces
+      .withPlugin(new GLTFLoader())
+      .loadAsync(this.baseUrl + file)
+      .then((gltf) => {
+        if (this.disposed) return;
+        const parts: { geometry: THREE.BufferGeometry; material: THREE.Material }[] = [];
+        gltf.scene.updateWorldMatrix(true, true);
+        gltf.scene.traverse((o) => {
+          const m = o as THREE.Mesh;
+          if (!m.isMesh) return;
+          // Baked into the geometry once: a particle's matrix is the instance's, so a mesh that sat
+          // somewhere under its own model root would otherwise lose that offset.
+          const g = m.geometry.clone();
+          g.applyMatrix4(m.matrixWorld);
+          const mats = Array.isArray(m.material) ? m.material : [m.material];
+          for (const mat of mats) parts.push({ geometry: g, material: mat });
+        });
+        this.meshModels.set(file, parts.length ? parts : null);
+      })
+      .catch((err) => {
+        console.warn(`particle mesh ${file} failed to load: ${err instanceof Error ? err.message : String(err)}`);
+        this.meshModels.set(file, null);
+      });
+    return null;
+  }
+
+  /** The batch a model's instances draw in, made on first use and kept. */
+  private meshBatch(file: string): MeshBatch | null {
+    let b = this.meshBatches.get(file);
+    if (b) return b;
+    const parts = this.meshModel(file);
+    if (!parts) return null;
+    b = { key: file, parts: [], capacity: 0, queue: [], entries: [] };
+    for (const part of parts) {
+      const inst = new THREE.InstancedMesh(part.geometry, part.material, 1);
+      inst.frustumCulled = false;
+      inst.matrixAutoUpdate = false;
+      inst.castShadow = false;
+      inst.receiveShadow = false;
+      inst.count = 0;
+      inst.visible = false;
+      if (this.actorLayer) inst.layers.enable(ACTOR_LAYER);
+      this.scene.add(inst);
+      b.parts.push(inst);
+    }
+    this.growMesh(b, 8);
+    this.meshBatches.set(file, b);
+    return b;
+  }
+
+  private growMesh(b: MeshBatch, n: number): void {
+    b.capacity = n;
+    for (const inst of b.parts) {
+      inst.instanceMatrix = new THREE.InstancedBufferAttribute(new Float32Array(n * 16), 16).setUsage(THREE.DynamicDrawUsage);
+      inst.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(n * 3), 3).setUsage(THREE.DynamicDrawUsage);
+      // Three reads `count` against the attribute it was made with, so the record is rebuilt whole.
+      (inst as unknown as { _maxInstanceCount?: number })._maxInstanceCount = n;
+    }
+  }
+
   /**
    * Load an effect's description, make its batches now (hidden), and wait for their textures,
    * uploading them when a renderer is given; so neither a program nor a texture upload waits for
@@ -1044,7 +1167,7 @@ export class ParticleEffects {
   }
 
   get status(): string {
-    return `${this.instances.size} particle effects placed, ${this.activeCount} playing, ${this.children.size} carried by particles${this.childrenSkipped ? ` (${this.childrenSkipped} skipped at the caps)` : ''}, ${this.quadCount} quads in ${this.batches.size} batches${this.textureErrors.size ? `, ${this.textureErrors.size} textures failed to load: ${[...this.textureErrors].join(', ')}` : ''}`;
+    return `${this.instances.size} particle effects placed, ${this.activeCount} playing, ${this.children.size} carried by particles${this.childrenSkipped ? ` (${this.childrenSkipped} skipped at the caps)` : ''}, ${this.quadCount} quads in ${this.batches.size} batches${this.meshBatches.size ? `, ${this.meshCount} mesh particles from ${this.meshBatches.size} model(s)` : ''}${this.textureErrors.size ? `, ${this.textureErrors.size} textures failed to load: ${[...this.textureErrors].join(', ')}` : ''}`;
   }
 
   /**
@@ -1349,6 +1472,30 @@ export class ParticleEffects {
         continue;
       }
       for (const e of inst.emitters) {
+        // A mesh particle draws its model rather than a billboard: queued into that model's own batch
+        // and filled below. A pack converted before the models were read has no `file` and draws
+        // nothing, exactly as it did.
+        if (e.def.particle.type === 'mesh') {
+          const file = e.def.particle.mesh?.file;
+          if (!file || !e.particles.length) continue;
+          const mb = this.meshBatch(file);
+          if (!mb) continue;
+          for (let k = 0; k < e.particles.length; k++) {
+            const p = e.particles[k];
+            const n = mb.queue.length;
+            let q = mb.entries[n];
+            if (q) {
+              q.p = p;
+              q.e = e;
+              q.d = 0;
+            } else {
+              q = { p, e, d: 0 };
+              mb.entries[n] = q;
+            }
+            mb.queue.push(q);
+          }
+          continue;
+        }
         // An emitter that only carries other effects draws nothing of its own; an untextured one only for a `solid` handle.
         const tex = e.def.particle.quad?.texture;
         const solid = e.solid;
@@ -1377,6 +1524,55 @@ export class ParticleEffects {
     let total = 0;
     for (const b of this.batches.values()) total += this.fill(b, total);
     this.quadCount = total;
+    let drawn = 0;
+    for (const b of this.meshBatches.values()) drawn += this.fillMesh(b);
+    this.meshCount = drawn;
+  }
+
+  /**
+   * One frame of a model's instances: a matrix and a colour per live particle.
+   *
+   * The matrix is the particle's own place, the three rotation curves and the scale curve; the colour
+   * is the ramp times the alpha curve, since an instanced draw has no per-instance alpha of its own.
+   * A `localSpace` emitter's particles are in the emitter's frame, which is where the client keeps a
+   * held prop's, so the emitter's own transform is applied -- the same rule the quads follow.
+   */
+  private fillMesh(b: MeshBatch): number {
+    const q = b.queue;
+    let n = Math.min(q.length, MAX_MESH_INSTANCES);
+    if (n > b.capacity) this.growMesh(b, Math.min(MAX_MESH_INSTANCES, Math.max(n, b.capacity * 2)));
+    for (let i = 0; i < n; i++) {
+      const { p, e } = q[i];
+      const d = e.def;
+      const m = d.particle.mesh!;
+      const t = p.age / p.life;
+      const s = wave(m.scale, t, p.r1) * e.effect.scale;
+      // The game's rotation curves are turns, as the quads' are, and its X is mirrored: the same
+      // convention `updateTransform` applies to an emitter's own placement.
+      meshQ.setFromEuler(meshE.set(wave(m.rotation[0], t, p.r2) * TWO_PI, -wave(m.rotation[1], t, p.r2) * TWO_PI, -wave(m.rotation[2], t, p.r2) * TWO_PI));
+      meshS.setScalar(s);
+      meshM.compose(p.pos, meshQ, meshS);
+      // Put into the world exactly where a quad is: a particle carried by its emitter through the
+      // emitter's own transform, and an effect in a hull's frame through that hull's matrix.
+      if (d.localSpace) meshM.premultiply(e.world);
+      if (e.frame) meshM.premultiply(e.frame);
+      const alpha = clamp01(wave(d.particle.alpha, t, p.r0)) * (e.handle.alphaScale ?? 1);
+      rampColor(d.particle.color, d.particle.color.sample === 1 ? p.r3 : t, meshC).multiplyScalar(alpha);
+      for (const inst of b.parts) {
+        inst.setMatrixAt(i, meshM);
+        inst.instanceColor!.setXYZ(i, meshC.r, meshC.g, meshC.b);
+      }
+    }
+    for (const inst of b.parts) {
+      inst.count = n;
+      inst.visible = n > 0;
+      if (n > 0) {
+        inst.instanceMatrix.needsUpdate = true;
+        inst.instanceColor!.needsUpdate = true;
+      }
+    }
+    q.length = 0;
+    return n;
   }
 
   private fill(b: Batch, drawnSoFar: number): number {
@@ -1568,6 +1764,18 @@ export class ParticleEffects {
     }
     this.batches.clear();
     this.batchMaterials.length = 0;
+    // The models mesh particles drew. Each geometry is this file's own clone (the model's own matrix
+    // baked in) so it is disposed here; a material is the GLB's, and the loader's own cache owns it,
+    // exactly as a quad batch's texture is owned here and a placed model's material is not.
+    for (const b of this.meshBatches.values()) {
+      for (const inst of b.parts) {
+        this.scene.remove(inst);
+        inst.geometry.dispose();
+        inst.dispose();
+      }
+    }
+    this.meshBatches.clear();
+    this.meshModels.clear();
     for (const t of this.textures.values()) t.dispose();
     this.textures.clear();
     this.white.dispose();

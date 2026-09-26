@@ -194,6 +194,18 @@ async function store(): Promise<void> {
   const p = new PlacedProps();
   await p.enter('tatooine', { get: () => null }, deps);
   ok('a world with nothing kept stands nothing', p.all.length === 0 && stood.length === 0);
+  // And is still a world you can put something down in. This is the one that was missed: the arrival
+  // skipped `enter` entirely when the browser had nothing kept for the world, to save fetching a
+  // catalogue to stand nothing, and left the store with no world at all -- so the very first press
+  // answered "there is no world to put it in", and so did every one after it. Nothing could ever be
+  // placed on a machine that had not already placed something, which is every machine.
+  ok('but it is still a world something can be put down in', p.inWorld === 'tatooine', `world "${p.inWorld}"`);
+  const firstEver = await p.put('chair', { x: 0, y: 0, z: 0 }, [0, 0, 0, 1], false, deps, save, 1, () => 0.5);
+  ok('so the first thing ever placed goes down', !!firstEver, p.note);
+  p.take(firstEver!.thing, deps, save);
+  stood.length = 0;
+  took.length = 0;
+  saved = [];
 
   let tick = 1;
   const a = await p.put('chair', { x: 0, y: 0, z: 0 }, [0, 0, 0, 1], false, deps, save, 1, () => (tick = (tick * 16807) % 2147483647) / 2147483647);

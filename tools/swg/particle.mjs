@@ -403,7 +403,7 @@ export function blendFor(pass) {
  * which is what the game plays. Without it attachments keep only their path, as before.
  * Returns the manifest entry.
  */
-export function exportParticle(vfs, prtPath, outDir, { textureFor, passFor, textures = new Map(), write, log = () => {}, attach = null }) {
+export function exportParticle(vfs, prtPath, outDir, { textureFor, passFor, textures = new Map(), write, log = () => {}, attach = null, meshFor = null, meshes: meshCache = new Map() }) {
   const path = prtPath.replace(/\\/g, '/');
   if (!vfs.has(path)) throw new Error(`Not in archives: ${path}`);
   const effect = parseParticleEffect(parseIff(vfs.read(path)));
@@ -434,8 +434,27 @@ export function exportParticle(vfs, prtPath, outDir, { textureFor, passFor, text
           }
         }
       }
+      // A particle that draws a **mesh** rather than a billboard. 297 of the 2,097 retail effects have
+      // one and 119 are nothing else, so those drew nothing at all while this was skipped: the
+      // entertainer's ribbon stick is the plainest case, since its quads are written with alpha 0 for
+      // their whole life and the stick you hold is entirely the mesh. Its appearance is converted into
+      // the same pack and its file written on the emitter, exactly as a texture's is.
       if (e.particle.type !== 'quad') {
         meshes++;
+        const mp = String(e.particle.mesh?.path ?? '').replace(/\\/g, '/');
+        if (!mp || !meshFor) continue;
+        let entry = meshCache.get(mp);
+        if (entry === undefined) {
+          entry = null;
+          try {
+            entry = meshFor(mp) ?? null;
+          } catch (err) {
+            log(`  particle mesh ${mp} skipped: ${err.message}`);
+          }
+          meshCache.set(mp, entry);
+        }
+        if (entry?.file) e.particle.mesh.file = entry.file;
+        else missing.push(mp);
         continue;
       }
       quads++;
@@ -465,5 +484,6 @@ export function exportParticle(vfs, prtPath, outDir, { textureFor, passFor, text
   }
   const radius = round(effectRadius(effect));
   write(`${outDir}/particles/${id}.json`, JSON.stringify(effect));
-  return { id, source: path, file: `particles/${id}.json`, particle: true, bounds: { min: [-radius, 0, -radius], max: [radius, radius, radius] }, triangles: 0, emitters: quads + meshes, quads, meshes, missingTextures: missing, ...(attached ? { attached } : {}) };
+  const meshFiles = [...meshCache.values()].filter((m) => m?.file).length;
+  return { id, source: path, file: `particles/${id}.json`, particle: true, bounds: { min: [-radius, 0, -radius], max: [radius, radius, radius] }, triangles: 0, emitters: quads + meshes, quads, meshes, ...(meshFiles ? { meshFiles } : {}), missingTextures: missing, ...(attached ? { attached } : {}) };
 }
