@@ -14,6 +14,9 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { ACTOR_LAYER } from './portalRender';
 import { surfaces } from './surfaces.ts';
+// Whether an emitter draws anything, which decides whether it is made at all. Pure and node-tested,
+// because an emitter wrongly refused there is indistinguishable from an effect that never played.
+import { emitterKept, type DrawableEmitter } from './particleDraw.ts';
 
 export interface WaveForm {
   /** 0 linear, 1 spline (drawn as linear). */
@@ -938,13 +941,13 @@ class EffectInstance {
     let life = 0;
     for (const g of def.groups) {
       for (const e of g.emitters) {
-        // Kept when it draws (a quad with a texture), or when it draws nothing itself but its
-        // particles carry converted effects (a light dust storm's wisps, a lightning chain).
-        const tex = e.particle.type === 'quad' ? e.particle.quad?.texture : undefined;
-        // An untextured quad (the hyperspace tunnel) draws only for a handle placed `solid`.
-        const drawn = (!!tex?.file && tex.visible) || (!!handle.solid && e.particle.type === 'quad' && !tex?.shader);
+        // Kept when it draws (a quad with a texture, or a mesh with a model), or when it draws
+        // nothing itself but its particles carry converted effects (a light dust storm's wisps, a
+        // lightning chain). The rule is `particleDraw.ts`, where a node test holds it: an emitter
+        // refused here is never made and never spawns, so getting it wrong looks exactly like an
+        // effect that was never placed.
         const carries = !!host && !!e.particle.attachments?.some((a) => a.file);
-        if (!e.visible || !(drawn || carries)) continue;
+        if (!emitterKept(e as DrawableEmitter, { solid: !!handle.solid, carries })) continue;
         this.emitters.push(new EmitterState(e, def, handle, host));
         const [lo, hi] = e.lod;
         reach = Math.max(reach, (lo >= -1 && lo < 0) || (hi >= -1 && hi < 0) ? GLOBAL_LOD[1] : lo < 1 || hi < 1 ? GLOBAL_LOD[1] : hi);

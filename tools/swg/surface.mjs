@@ -669,6 +669,50 @@ export function fitRgba(img, max) {
 /** The glow images of one texture are capped at this size; its lit image with them, texel for texel. */
 export const GLOW_MAX = 512;
 
+/**
+ * The one metalness-roughness image, out of the two masks that feed it: roughness in green from the
+ * gloss, metalness in blue from the environment mask. On 603 of the retail shaders those are two
+ * different textures of two different sizes, so each is sampled into the larger of the two.
+ *
+ * A source is `{ w, h, read(x, y) }` over 0..255, and **its size is checked rather than trusted**.
+ * This lives here, out of the command that used to hold it inline, for one reason: read through a
+ * field the reader does not have (`width` for `w`) the size comes out undefined, the image comes out
+ * one pixel square, every sample is NaN, a Uint8Array writes NaN as nought, and nought in green is
+ * roughness nought -- a perfect mirror on every surface with a gloss map of its own, which is 1,710
+ * of the retail shaders. Nothing caught it because the tests pinned what the converter *decided* and
+ * never what it *drew*, so the decision was right and the picture was a mirror.
+ */
+export function combineMasks({ gloss = null, env = null, reflective = false }) {
+  const sized = (src, what) => {
+    if (!src) return null;
+    if (!(src.w > 0) || !(src.h > 0) || typeof src.read !== 'function') throw new Error(`the ${what} mask has no readable size (w=${src.w}, h=${src.h})`);
+    return src;
+  };
+  const g = sized(gloss, 'gloss');
+  const e = sized(env, 'environment');
+  if (!g && !e) throw new Error('a metalness-roughness image needs at least one mask');
+  const w = Math.max(g?.w ?? 1, e?.w ?? 1);
+  const h = Math.max(g?.h ?? 1, e?.h ?? 1);
+  const rgba = new Uint8Array(w * h * 4);
+  // Nearest: the two masks are usually the same size, and where they are not this is a roughness
+  // map, not a photograph.
+  const at = (src, x, y) => src.read(Math.min(src.w - 1, Math.floor((x * src.w) / w)), Math.min(src.h - 1, Math.floor((y * src.h) / h)));
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = (y * w + x) * 4;
+      const v = g ? at(g, x, y) : 0;
+      rgba[i] = 0;
+      // With no gloss map at all (a reflective shader whose colour alpha is real transparency), the
+      // roughness is the flat one this returned before the mask was read: 0.3 for something
+      // reflective, 0.45 otherwise, written as a byte so the one image carries both channels.
+      rgba[i + 1] = g ? 255 - Math.round(v * 0.85) : reflective ? 77 : 115;
+      rgba[i + 2] = e ? at(e, x, y) : reflective && g ? v : 0;
+      rgba[i + 3] = 255;
+    }
+  }
+  return { w, h, rgba };
+}
+
 /** A main image handed in by deps.mainImage, as decodeDds gives one: `hasAlpha` from the answer, else read from its pixels. */
 function paintedImage(img) {
   let hasAlpha = img.hasAlpha;

@@ -176,7 +176,7 @@ import { effectAlphaMode, shaderTextures } from './sht.mjs';
 import { bakeShader, describeShader, describeVariables, loadImage, loadShader, parseBlueprint, parsePalette, preparedShaders, renderBlueprint, renderContext, shaderNeedsBake } from './texrender.mjs';
 import { ImageRegistry, exportBlueprint, exportPalettes, exportShader, palettesOf } from './customize.mjs';
 import { effectAlpha, alphaModeFor } from './eff.mjs';
-import { MATERIAL_FORMAT, describeLines, describeSurface, surfaceCounts, surfaceCountsLine, surfaceLine, surfaceTexture } from './surface.mjs';
+import { MATERIAL_FORMAT, combineMasks, describeLines, describeSurface, surfaceCounts, surfaceCountsLine, surfaceLine, surfaceTexture } from './surface.mjs';
 import { localize, parseDatatable, parseStringTable } from './datatable.mjs';
 import { galaxyData, galaxyStatus, SPACE_PACK_VERSION, SPACE_ZONES, spaceZoneStatus } from './space.mjs';
 import { SANDBOX_ZONE, buildSandbox, pickSkyZone, sandboxStatus } from './sandbox.mjs';
@@ -563,29 +563,12 @@ function surfaceFor(vfs, effect, slots, dds, alphaMode, { alphaIsEmissive = fals
   // And how much of it is a mirror, out of whichever texture the shader's own program named.
   const env = reflective ? envSource(vfs, slots, dds, envMask) : null;
   if (!own && !masked && !env) return { metallic: reflective ? 0.6 : 0, roughness: reflective ? 0.3 : 0.45 };
-  // Roughness in green, metalness in blue. Two sources, not one: the gloss says how smooth it is and
-  // the environment mask says how much of it is chrome, and on 603 of the retail shaders that use
-  // both those are two different textures.
-  const gloss = own ? { w: own.width, h: own.height, read: own.read } : masked ? { w: dds.width, h: dds.height, read: (x, y) => dds.rgba[(y * dds.width + x) * 4 + 3] } : null;
-  const w = Math.max(gloss?.w ?? 1, env?.w ?? 1);
-  const h = Math.max(gloss?.h ?? 1, env?.h ?? 1);
-  const mr = new Uint8Array(w * h * 4);
-  // Nearest: the two masks are usually the same size, and where they are not this is a roughness
-  // map, not a photograph.
-  const at = (src, x, y) => src.read(Math.min(src.w - 1, Math.floor((x * src.w) / w)), Math.min(src.h - 1, Math.floor((y * src.h) / h)));
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      const i = (y * w + x) * 4;
-      const g = gloss ? at(gloss, x, y) : 0;
-      mr[i] = 0;
-      // With no gloss map at all (a reflective shader whose colour alpha is real transparency), the
-      // roughness is the flat one this returned before the mask was read: 0.3 for something
-      // reflective, 0.45 otherwise, written as a byte so the one image carries both channels.
-      mr[i + 1] = gloss ? 255 - Math.round(g * 0.85) : reflective ? 77 : 115;
-      mr[i + 2] = env ? at(env, x, y) : reflective && gloss ? g : 0;
-      mr[i + 3] = 255;
-    }
-  }
+  // Roughness in green, metalness in blue, out of whichever masks this shader has. The arithmetic is
+  // `combineMasks` in surface.mjs, where a node test can reach it: written out here it read the
+  // gloss reader's size through a field the reader does not carry, and a one-pixel image of NaN is a
+  // mirror on every surface in the game with a gloss map of its own.
+  const gloss = own ? { w: own.w, h: own.h, read: own.read } : masked ? { w: dds.width, h: dds.height, read: (x, y) => dds.rgba[(y * dds.width + x) * 4 + 3] } : null;
+  const { w, h, rgba: mr } = combineMasks({ gloss, env, reflective });
   return { metallic: 1, roughness: 1, mr: { png: encodePng(w, h, mr) }, ...(own ? { glossFrom: own.path } : {}), ...(env ? { envFrom: `${env.slot}.${env.channel}` } : {}) };
 
   /**

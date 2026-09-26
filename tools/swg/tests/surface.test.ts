@@ -13,7 +13,7 @@ import { effectAlpha, alphaModeFor } from '../eff.mjs';
 import { buildGlb } from '../glb.mjs';
 import { readFileSync } from 'node:fs';
 import {
-  MATERIAL_FORMAT, alphaModeFor as surfaceAlphaModeFor, alphaAsGrey, describeLines, describeSurface, emissiveOf, fitRgba, isSplitAlpha, maskOf, passState, rgbOnly,
+  MATERIAL_FORMAT, alphaModeFor as surfaceAlphaModeFor, alphaAsGrey, combineMasks, describeLines, describeSurface, emissiveOf, fitRgba, isSplitAlpha, maskOf, passState, rgbOnly,
   scrollSets, shaderPathOf, splitGlow, surfaceCounts, surfaceCountsLine, surfaceLine, surfaceTexture, timingOf,
 } from '../surface.mjs';
 
@@ -544,6 +544,53 @@ const modelOf = (shaders: string[]) => {
   ok(j.samplers.length === 1 && j.extensionsUsed === undefined && j.materials.every((m: any) => !m.extras?.swg && !m.extensions), 'a model with none of the new fields has one sampler, no extensionsUsed and no extras.swg');
   ok(j.materials.find((m: any) => m.name === 'shader/plain_alpha.sht').alphaMode === 'MASK' && j.materials.find((m: any) => m.name === 'shader/plain_alpha.sht').alphaCutoff === 0.5, 'a plain cut-out is written as before');
   ok(j.textures.length === j.images.length && j.textures.every((t: any, i: number) => t.source === i && t.sampler === 0), 'one texture per image on sampler 0, as before');
+}
+
+// The one metalness-roughness image, out of the two masks that feed it.
+//
+// These check the picture and not the decision, which is the whole reason they exist: the decision
+// (metalness 1, roughness 1, a map) was right while the map itself was one pixel of nought, and a
+// roughness of nought is a mirror. Every surface in the game with a gloss map of its own wore it.
+{
+  /** A reader over a flat value, the shape combineMasks takes. */
+  const flat = (w: number, h: number, v: number) => ({ w, h, read: () => v });
+  const green = (img: { w: number; h: number; rgba: Uint8Array }, i = 0) => img.rgba[i * 4 + 1];
+  const blue = (img: { w: number; h: number; rgba: Uint8Array }, i = 0) => img.rgba[i * 4 + 2];
+
+  const g = combineMasks({ gloss: flat(64, 32, 200) });
+  ok(g.w === 64 && g.h === 32, 'the image is the size of the mask it was made from, not one pixel');
+  ok(g.rgba.length === 64 * 32 * 4, 'and it has that many pixels in it');
+  ok(green(g) === 255 - Math.round(200 * 0.85), 'a glossy mask writes a low roughness into green');
+  ok(blue(g) === 0, 'and nothing into blue, since a shader with no reflection is not metal');
+  ok([...g.rgba].every((v, i) => i % 4 !== 1 || v === green(g)), 'a flat mask gives one roughness over the whole image');
+
+  // The failure that shipped: a reader whose size is read through a field it does not carry.
+  const noSize = { width: 64, height: 32, read: () => 200 } as unknown as { w: number; h: number; read: () => number };
+  let threw = '';
+  try {
+    combineMasks({ gloss: noSize });
+  } catch (err) {
+    threw = err instanceof Error ? err.message : String(err);
+  }
+  ok(/no readable size/.test(threw), 'a mask whose size cannot be read is refused outright rather than made into one pixel of NaN');
+  ok(!/NaN/.test(String(green(combineMasks({ gloss: flat(4, 4, 0) })))), 'and nothing a mask can hold ever writes NaN');
+
+  // Two masks of two different sizes, which 603 of the retail shaders have.
+  const both = combineMasks({ gloss: flat(16, 16, 100), env: flat(64, 64, 240), reflective: true });
+  ok(both.w === 64 && both.h === 64, 'two masks of different sizes give the larger of the two');
+  ok(green(both) === 255 - Math.round(100 * 0.85) && blue(both) === 240, 'each channel still comes from its own mask');
+
+  const envOnly = combineMasks({ env: flat(8, 8, 255), reflective: true });
+  ok(envOnly.w === 8 && green(envOnly) === 77 && blue(envOnly) === 255, 'a reflective shader with no gloss keeps the flat roughness it always had');
+  ok(combineMasks({ env: flat(8, 8, 0) }).rgba[1] === 115, 'and an unreflective one keeps its own');
+
+  let empty = '';
+  try {
+    combineMasks({});
+  } catch (err) {
+    empty = err instanceof Error ? err.message : String(err);
+  }
+  ok(/at least one mask/.test(empty), 'and an image with no mask at all is refused, since the caller should not have asked');
 }
 
 console.log(`${passed} checks passed`);

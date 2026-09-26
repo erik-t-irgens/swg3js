@@ -18,6 +18,11 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 let passed = 0;
+const ok = (cond: boolean, msg: string) => {
+  assert.ok(cond, msg);
+  passed++;
+  console.log(`ok   ${msg}`);
+};
 
 // ---- The real pack: the entertainer props and what they carry -------------------------------------
 //
@@ -97,6 +102,35 @@ if (!existsSync(particles)) {
     passed++;
     console.log('ok   and the pack really holds every effect they name');
   }
+}
+
+// ---- Which emitters the runtime makes at all -------------------------------------------------------
+//
+// The half that was missing. The drawing was written and this rule was not, so every mesh emitter in
+// the game was refused before it could spawn a single particle: the effect was placed, it reported
+// itself playing, and it had nothing in it. That is the exact reading the owner sent back, and it is
+// why the pack checks above all passed while nothing appeared.
+{
+  const { emitterDrawn, emitterKept } = await import('../../../src/world/particleDraw.ts');
+  const quad = (file: string | null, visible = true, shader: string | null = null) => ({ particle: { type: 'quad', quad: { texture: { file, visible, shader } } } });
+  const mesh = (file: string | null) => ({ particle: { type: 'mesh', mesh: { file } } });
+
+  ok(emitterDrawn(mesh('particles/pm_x.glb')), 'a mesh emitter that names a model draws');
+  ok(!emitterDrawn(mesh(null)), 'and one out of a pack converted before the models were read does not');
+  ok(emitterKept(mesh('particles/pm_x.glb')), 'so the effect makes it, which is what lets it spawn at all');
+  ok(!emitterKept(mesh(null)), 'and leaves out the one that would draw nothing');
+
+  ok(emitterDrawn(quad('particles/t.png')), 'a quad with a texture switched on draws, as it always did');
+  ok(!emitterDrawn(quad('particles/t.png', false)), 'one whose texture is switched off does not');
+  ok(!emitterDrawn(quad(null)), 'and one with no texture does not');
+  ok(emitterDrawn(quad(null), true), 'unless the effect was placed solid, which is the jump tunnel');
+  ok(!emitterDrawn(quad(null, true, 'shader/x.sht'), true), 'and not even then when it names a shader of its own');
+  ok(!emitterDrawn(mesh(null), true), 'solid never rescues a mesh emitter, which has no untextured form');
+
+  ok(!emitterKept({ visible: false, ...mesh('particles/pm_x.glb') }), 'an emitter the file switches off is left out whatever it would draw');
+  ok(emitterKept(quad(null), { carries: true }), 'one that draws nothing is still made when its particles carry effects');
+  ok(!emitterKept(quad(null)), 'and is not when they carry none');
+  ok(!emitterKept({}), 'an emitter with no particle description at all is left out rather than throwing');
 }
 
 console.log(`\n${passed} checks passed`);
