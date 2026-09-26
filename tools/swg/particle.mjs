@@ -122,6 +122,11 @@ function parseTiming(node) {
   return { startDelay: [round(r.f32()), round(r.f32())], loopDelay: [round(r.f32()), round(r.f32())], loopCount: [r.i32(), r.i32()] };
 }
 
+/** A particle texture (FORM PTEX), which a swoosh carries too (swoosh.mjs). */
+export function parseParticleTexture(node) {
+  return parseTexture(node);
+}
+
 function parseTexture(node) {
   expectForm(node, 'PTEX');
   const chunk = chunks(node)[0];
@@ -394,6 +399,33 @@ export function blendFor(pass) {
 }
 
 /**
+ * A particle texture's picture in the pack: its shader's main texture written once per pack as
+ * particles/<name>.png (`textures` is the pack's cache, keyed by shader), with the blend its effect's
+ * first pass asks for. Null when the shader has no texture the converter can read. Shared by the quad
+ * particles and the swooshes, which name their textures the same way.
+ */
+export function particleTexture(tex, outDir, { textureFor, passFor, textures, write, log = () => {} }) {
+  if (!tex?.shader) return null;
+  const shader = tex.shader.toLowerCase().startsWith('shader/') ? tex.shader : `shader/${tex.shader}`;
+  let entry = textures.get(shader);
+  if (entry === undefined) {
+    entry = null;
+    try {
+      const t = textureFor(shader);
+      if (t?.png) {
+        const file = `particles/${basename(t.path).replace(/\.dds$/i, '')}.png`;
+        write(`${outDir}/${file}`, t.png);
+        entry = { file, blend: blendFor(passFor(shader)) };
+      }
+    } catch (err) {
+      log(`  particle texture ${shader} skipped: ${err.message}`);
+    }
+    textures.set(shader, entry);
+  }
+  return entry;
+}
+
+/**
  * Convert one particle effect into the pack: particles/<id>.json plus the textures its quads
  * draw, as PNGs under particles/. `textureFor(shaderPath)` supplies { path, png } for a shader
  * and `passFor(shaderPath)` its effect's first fixed-function pass (for the blend mode).
@@ -436,9 +468,10 @@ export function exportParticle(vfs, prtPath, outDir, { textureFor, passFor, text
       }
       // A particle that draws a **mesh** rather than a billboard. 297 of the 2,097 retail effects have
       // one and 119 are nothing else, so those drew nothing at all while this was skipped: the
-      // entertainer's ribbon stick is the plainest case, since its quads are written with alpha 0 for
-      // their whole life and the stick you hold is entirely the mesh. Its appearance is converted into
-      // the same pack and its file written on the emitter, exactly as a texture's is.
+      // entertainer's ribbon stick is the plainest case, since the stick you hold is the mesh (its one
+      // quad is written with alpha 0 for its whole life and is there only to carry the ribbon, a swoosh:
+      // swoosh.mjs). Its appearance is converted into the same pack and its file written on the
+      // emitter, exactly as a texture's is.
       if (e.particle.type !== 'quad') {
         meshes++;
         const mp = String(e.particle.mesh?.path ?? '').replace(/\\/g, '/');
@@ -460,26 +493,11 @@ export function exportParticle(vfs, prtPath, outDir, { textureFor, passFor, text
       quads++;
       const tex = e.particle.quad.texture;
       if (!tex.shader) continue;
-      const shader = tex.shader.toLowerCase().startsWith('shader/') ? tex.shader : `shader/${tex.shader}`;
-      let entry = textures.get(shader);
-      if (entry === undefined) {
-        entry = null;
-        try {
-          const t = textureFor(shader);
-          if (t?.png) {
-            const file = `particles/${basename(t.path).replace(/\.dds$/i, '')}.png`;
-            write(`${outDir}/${file}`, t.png);
-            entry = { file, blend: blendFor(passFor(shader)) };
-          }
-        } catch (err) {
-          log(`  particle texture ${shader} skipped: ${err.message}`);
-        }
-        textures.set(shader, entry);
-      }
+      const entry = particleTexture(tex, outDir, { textureFor, passFor, textures, write, log });
       if (entry) {
         tex.file = entry.file;
         tex.blend = entry.blend;
-      } else missing.push(shader);
+      } else missing.push(tex.shader.toLowerCase().startsWith('shader/') ? tex.shader : `shader/${tex.shader}`);
     }
   }
   const radius = round(effectRadius(effect));

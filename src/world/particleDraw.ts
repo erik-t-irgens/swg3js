@@ -6,9 +6,9 @@
  * this refuses is never built, never spawns a particle and so never reaches the drawing, which from
  * the outside is an effect that is placed and playing with nothing in it. When mesh particles were
  * added, the drawing was written and this was not, so every mesh emitter in the game was dropped
- * before it could spawn -- and the entertainer's ribbon stick, whose quads the client itself writes
- * with alpha nought for their whole life, is *only* mesh emitters, so it showed an empty hand while a
- * sparkler, which has real quads beside its mesh, showed its sparks and not its stick.
+ * before it could spawn -- and the entertainer's ribbon stick draws nothing but its mesh (its one quad,
+ * written with alpha nought for its whole life, is there only to carry the ribbon), so it showed an
+ * empty hand while a sparkler, which has real quads beside its mesh, showed its sparks and not its stick.
  *
  * Nothing here knows about three or about the rest of the runtime, so the node test holds the rule
  * itself rather than a copy of it.

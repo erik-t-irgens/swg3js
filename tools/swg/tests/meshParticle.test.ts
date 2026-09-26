@@ -3,10 +3,10 @@
 // **Why this exists.** The converter read mesh emitters, counted them and threw them away, and the
 // runtime only ever looked at `.quad`. 297 of the 2,097 retail effects carry a mesh emitter and 119
 // are mesh emitters and nothing else, so those drew nothing at all. The entertainer's ribbon stick is
-// the plainest case and the one the owner reported: its two quad emitters are written with **alpha 0
-// for their whole life**, so everything you are meant to see is the mesh, and holding one showed an
-// empty hand. A sparkler has real quads, so its sparks showed and only its stick was missing -- which
-// is exactly the pair of symptoms reported, from one cause.
+// the plainest case and the one the owner reported: its quad emitters are written with **alpha 0 for
+// their whole life** and are there only to carry the ribbons (swooshes, `swoosh.mjs`), so the stick
+// itself is the mesh, and holding one showed an empty hand. A sparkler has real quads, so its sparks
+// showed and only its stick was missing -- which is exactly the pair of symptoms reported, from one cause.
 //
 // What is pinned here is the converter's half (an emitter's model is converted and its file written on
 // the emitter, and an effect with no model to convert is left exactly as it was) and the arithmetic of
@@ -63,12 +63,14 @@ if (!existsSync(particles)) {
   passed++;
   console.log(`ok   and every one of the ${models.size} models it names is on disk`);
 
-  // The ribbon stick: the case the owner reported. Its quads are invisible on purpose, so the mesh is
-  // the whole prop -- which is why "nothing appears at all" and not merely "no stick".
+  // The ribbon stick: the case the owner reported. Its quads are invisible on purpose: the stick is the
+  // mesh -- which is why "nothing appears at all" and not merely "no stick" -- and each quad is there to
+  // carry a ribbon, which only a swoosh reader can convert.
   const ribbon = join(particles, 'fx_pt_entertainer_ribbon_stick_double.json');
   if (!existsSync(ribbon)) console.log('note the ribbon stick is not in this pack');
   else {
-    const d = JSON.parse(readFileSync(ribbon, 'utf8')) as { groups: { emitters: { particle: { type: string; alpha?: { points: number[][] }; mesh?: { file?: string } } }[] }[] };
+    type Att = { path: string; file?: string };
+    const d = JSON.parse(readFileSync(ribbon, 'utf8')) as { groups: { emitters: { particle: { type: string; alpha?: { points: number[][] }; mesh?: { file?: string }; attachments?: Att[] } }[] }[] };
     const all = d.groups.flatMap((g) => g.emitters);
     const quads = all.filter((e) => e.particle.type === 'quad');
     const meshes = all.filter((e) => e.particle.type === 'mesh');
@@ -76,13 +78,21 @@ if (!existsSync(particles)) {
     const invisible = quads.every((e) => (e.particle.alpha?.points ?? []).every((p) => p[1] === 0));
     assert.ok(invisible, 'every one of its quads is written with alpha 0 for its whole life');
     passed++;
-    console.log(`ok   the ribbon stick's ${quads.length} quads are alpha 0 throughout, so the mesh is the whole prop`);
+    console.log(`ok   the ribbon stick's ${quads.length} quads are alpha 0 throughout, so the stick is the mesh`);
     assert.ok(
       meshes.every((e) => e.particle.mesh?.file),
       'and each of its mesh emitters names a model',
     );
     passed++;
     console.log(`ok   and each of its ${meshes.length} mesh emitters names a model`);
+    const ribbons = quads.flatMap((e) => e.particle.attachments ?? []).filter((a) => /\.swh$/i.test(a.path));
+    assert.ok(ribbons.length === quads.length, `each invisible quad carries a ribbon (${ribbons.length} ribbons on ${quads.length} quads)`);
+    passed++;
+    console.log(`ok   each of its ${quads.length} invisible quads carries a ribbon`);
+    const drawn = ribbons.filter((a) => a.file && existsSync(join(pack, a.file)) && (JSON.parse(readFileSync(join(pack, a.file), 'utf8')) as { kind?: string }).kind === 'swoosh');
+    assert.equal(drawn.length, ribbons.length, 'and every ribbon is converted, as a swoosh, onto disk (rerun the weapons command if not)');
+    passed++;
+    console.log('ok   and every ribbon is converted as a swoosh and is on disk');
   }
 
   // And the props on the rack that are an effect and nothing else: each must name an effect the pack

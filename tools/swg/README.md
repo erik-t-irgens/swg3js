@@ -161,6 +161,7 @@ Status:
 | Cell floors and path graphs (.flr: VERT, TRIS, PGRF) | Every field of the 60-byte triangle checked against all 499,007 retail triangles of the current version, and the older three versions parsed with the same record; written per pack as `floors.json`, mirrored and re-wound with the meshes; tested on a hand-built file |
 | Component appearances (.cmp) | Parts baked into one mesh by their transforms |
 | Skeletal (.sat) in snapshots | Creatures and NPCs are left to the server; other skeletal things (the Sarlacc, animated banners) are baked at their bind pose as static props |
-| Particles (.prt) | Exported as `particles/<id>.json` with their textures; the game plays them (quads only; mesh particles and attachments are read but not drawn yet) |
+| Particles (.prt) | Exported as `particles/<id>.json` with their textures, the models their mesh particles draw and the effects their particles carry; the game plays all three |
+| Ribbons (.swh) | A particle carries one as an attachment (the entertainers' ribbon sticks, the glow sticks, the sparkly streamers); exported as `particles/swh_<name>.json` with its texture and the effect it names, and drawn as a strip behind its carrier. All 89 retail files read to the byte; what the rate, count and subdivision fields mean is our reading, and nine fields are carried unread |
 
 Archive reading is verified on real client data. Mesh conversion is still being validated; if a conversion fails, run `dump` on the file and share the output.

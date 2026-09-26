@@ -170,6 +170,7 @@ import { loadBuildouts, mergeBuildouts } from './buildout.mjs';
 import { R, composeMeshes, mergeSkeletons, parseAnimation, parseLat, parseLmg, parseMgn, parseSat, parseSkeleton, poseAtFrame, readIff, skinData, skinnedPrimitives } from './skeletal.mjs';
 import { resolveAppearanceToMesh, resolveTemplateMesh, resolveTemplateString } from './objtemplate.mjs';
 import { exportParticle, parseParticleEffect } from './particle.mjs';
+import { exportSwoosh, swooshStatus } from './swoosh.mjs';
 import { defaultJkaClips, importJkaClips } from './jka.mjs';
 import { extractClips, readGlb, replaceClips, skinJoints } from './glbclips.mjs';
 import { packClips, retargetClips, unpackClips } from './clipbundle.mjs';
@@ -1022,8 +1023,10 @@ function convertParticle(vfs, prtPath, outDir) {
       textureFor: (shader) => textureFor(vfs, shader),
       passFor: (shader) => passFor(vfs, shader),
       textures: particleTextures.get(pack),
-      // The effects its particles carry, converted into the same pack and cached like any other.
-      attach: (p) => convertParticle(vfs, p.replace(/\\/g, '/'), outDir),
+      // The effects its particles carry, converted into the same pack and cached like any other. A
+      // carried `.swh` is a ribbon, not a particle effect (swoosh.mjs): told apart by its extension,
+      // never by its root tag, since a flip-book shader (.sht) is a FORM SWSH too.
+      attach: (p) => (/\.swh$/i.test(p) ? convertSwoosh(vfs, p.replace(/\\/g, '/'), outDir) : convertParticle(vfs, p.replace(/\\/g, '/'), outDir)),
       // And the model a mesh particle draws, likewise: one GLB per appearance per pack, shared by
       // every effect that names it (the glow torch is named by 61 of them).
       meshFor: (appearance) => particleMesh(vfs, appearance, outDir),
@@ -1035,6 +1038,38 @@ function convertParticle(vfs, prtPath, outDir) {
       log: (m) => console.error(m),
     });
     console.error(`  ${entry.id}: particle effect, ${entry.quads} quad emitter(s)${entry.meshes ? `, ${entry.meshes} mesh emitter(s)${entry.meshFiles ? ` (${entry.meshFiles} model(s))` : ''}` : ''}${entry.attached ? `, ${entry.attached} carried effect(s)` : ''}${entry.missingTextures.length ? `, missing: ${entry.missingTextures.join(', ')}` : ''}`);
+  } catch (err) {
+    entry = { failed: err.message };
+  }
+  particleEffects.set(key, entry);
+  return entry;
+}
+
+/**
+ * Convert a ribbon a particle carries into the pack (cached with the particle effects, per file per
+ * pack): particles/swh_<name>.json, its texture shared with the pack's quad particles, and the effect
+ * it names converted as any carried effect is. Returns its manifest entry or { failed }.
+ */
+function convertSwoosh(vfs, swhPath, outDir) {
+  const pack = resolve(outDir);
+  const key = `${pack}|${swhPath.toLowerCase()}`;
+  let entry = particleEffects.get(key);
+  if (entry) return entry;
+  if (!particleTextures.has(pack)) particleTextures.set(pack, new Map());
+  particleEffects.set(key, { pending: true });
+  try {
+    entry = exportSwoosh(vfs, swhPath, outDir, {
+      textureFor: (shader) => textureFor(vfs, shader),
+      passFor: (shader) => passFor(vfs, shader),
+      textures: particleTextures.get(pack),
+      attach: (p) => convertParticle(vfs, p.replace(/\\/g, '/'), outDir),
+      write: (file, bytes) => {
+        mkdirSync(dirname(file), { recursive: true });
+        writeFileSync(file, bytes);
+      },
+      log: (m) => console.error(m),
+    });
+    console.error(`  ${entry.id}: a ribbon${entry.attached ? ' and the effect it carries' : ''}${entry.missingTextures.length ? `, missing: ${entry.missingTextures.join(', ')}` : ''}`);
   } catch (err) {
     entry = { failed: err.message };
   }
@@ -2657,6 +2692,12 @@ function packStatus(dir) {
     console.log(`  the Force: ${force.line}`);
     if (!force.has) need(`weapons <swg-dir> ${dir} --retail-only`, 'the Force powers have none of the game\'s own effects (every power throws the same spark)');
     else if (force.old) need(`weapons <swg-dir> ${dir} --retail-only`, 'the Force powers were converted before the beams and the sounds were written');
+    // The ribbons the entertainers' sticks and the glow sticks trail: carried by their particles and
+    // failed as particle effects until swoosh.mjs read them, so a pack from before has the stick and no
+    // ribbon on it.
+    const ribbons = swooshStatus(join(dir, 'weapons', 'particles'), { readdirSync, readFileSync, existsSync });
+    if (ribbons.ribbons) console.log(`  ribbons: ${ribbons.ribbons - ribbons.missing} of the ${ribbons.ribbons} that ${ribbons.carriers} held effects trail`);
+    if (ribbons.missing) need(`weapons <swg-dir> ${dir} --retail-only`, `${ribbons.missing} ribbons the entertainers' sticks trail were never converted (the stick shows, the ribbon does not)`);
   }
   // The wardrobe folders (optional, as the README says): what the backpack can show of each; the to-do comes from
   // the same table the mobiles block uses, so the two can never ask for different commands.

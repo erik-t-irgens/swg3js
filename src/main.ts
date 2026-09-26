@@ -227,6 +227,7 @@ import { World } from './world/world';
 import { REFLECTIONS, reflectiveCount, setReflectionSource, type ReflectionSource } from './world/envmap';
 import { BASIN_WATER_TUNE } from './world/basinWater.ts';
 import { FOUNTAIN_SPRAY_TUNE } from './world/particleDraw.ts';
+import { SWOOSH_TUNE } from './world/swooshTrail.ts';
 import { worldNav } from './world/nav/nav.ts';
 import { outdoorNav } from './world/nav/outdoorNav.ts';
 // The long walk: its numbers and its knob. The order itself is `NpcManager.send`; this file only
@@ -3330,6 +3331,18 @@ class App {
           console.log(JSON.stringify(emitters.slice(0, 60)));
         }
         return { status: this.world.particleStatus, total: list.length, playing: list.filter((p) => p.playing).length };
+      },
+      /**
+       * The ribbons the entertainers' sticks and the glow sticks trail (`swooshTrail.ts`): `ribbons()` gives
+       * every number of ours about them, and `ribbons({ width: 1.5, length: 2, tailFade: 0.3 })` moves any of
+       * them at once (`width` and `length` multiply what each file asks; `tailFade` is the share of the length
+       * that fades out; `rate`, `samples` and `subdivisions` are for the files that say none of it).
+       */
+      ribbons: (opts: Partial<typeof SWOOSH_TUNE> = {}) => {
+        for (const [k, v] of Object.entries(opts)) {
+          if (k in SWOOSH_TUNE && typeof v === 'number' && Number.isFinite(v) && v >= 0) (SWOOSH_TUNE as Record<string, number>)[k] = v;
+        }
+        return { tune: { ...SWOOSH_TUNE }, status: this.world.particleStatus };
       },
       /** Scale the sky's fog density (1 is the client's value) and report it. */
       fog: (scale?: number) => {

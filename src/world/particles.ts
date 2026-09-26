@@ -17,6 +17,7 @@ import { surfaces } from './surfaces.ts';
 // Whether an emitter draws anything, which decides whether it is made at all. Pure and node-tested,
 // because an emitter wrongly refused there is indistinguishable from an effect that never played.
 import { FOUNTAIN_SPRAY_TUNE, emitterKept, isFountainSpray, type DrawableEmitter } from './particleDraw.ts';
+import { SWOOSH_TUNE, SwooshTrail, stripQuads, writeStrip, type SwooshDef } from './swooshTrail.ts';
 
 export interface WaveForm {
   /** 0 linear, 1 spline (drawn as linear). */
@@ -135,8 +136,8 @@ export interface EmitterDef {
     /**
      * A particle that draws a model rather than a billboard. `file` is the GLB the converter wrote
      * into the same pack, absent in a pack converted before it read them -- and while it was absent
-     * a mesh emitter drew nothing, which on the entertainer's ribbon stick is the whole prop, since
-     * its quads are written with alpha 0 for their entire life.
+     * a mesh emitter drew nothing, which on the entertainer's ribbon stick is the whole stick: its one
+     * quad is written with alpha 0 for its entire life and is there only to carry the ribbon.
      */
     mesh?: { path: string; scale: WaveForm; rotation: WaveForm[]; file?: string };
     /** Effects each particle carries; only those with a `file` are played. */
@@ -395,7 +396,26 @@ interface Batch {
   queue: QueueEntry[];
   /** The queue's entry records, kept and refilled so a frame makes none (only ever grows). */
   entries: QueueEntry[];
+  /** Ribbons drawn in this batch this frame, after its particles (a kept array, emptied each frame). */
+  strips: SwooshInstance[];
 }
+
+/**
+ * A ribbon a particle trails (`swooshTrail.ts`): the handle it answers to (moved by its carrier like
+ * any carried effect, stopped the same way), its points, and the effect it names, played where its
+ * carrier is.
+ */
+interface SwooshInstance {
+  handle: EffectHandle;
+  trail: SwooshTrail;
+  child: EffectHandle | null;
+  /** Points `trail.points` wrote this frame, for the fill. */
+  n: number;
+}
+
+/** A file this loads: a particle effect, or a ribbon, which says so in its `kind`. */
+type LoadedDef = EffectDef | SwooshDef;
+const isSwoosh = (d: LoadedDef): d is SwooshDef => (d as SwooshDef).kind === 'swoosh';
 
 interface QueueEntry {
   p: Particle;
@@ -1017,7 +1037,9 @@ class EffectInstance {
 
 /** Plays converted particle effects at placed positions, batching their quads per texture. */
 export class ParticleEffects {
-  private readonly defs = new Map<string, Promise<EffectDef | null>>();
+  private readonly defs = new Map<string, Promise<LoadedDef | null>>();
+  /** The ribbons playing, by the handle their carrier moves. */
+  private readonly swooshes = new Map<EffectHandle, SwooshInstance>();
   private readonly textures = new Map<string, THREE.Texture>();
   private readonly batches = new Map<string, Batch>();
   /** The models mesh particles draw, by pack-relative GLB: one batch each, however many effects name it. */
@@ -1034,7 +1056,7 @@ export class ParticleEffects {
    * The models a mesh particle asked for and did not get, so `status` says so rather than only the
    * console. A mesh emitter whose model never arrives draws nothing at all and looks exactly like an
    * effect that was never placed, which is a whole evening's difference when the thing in hand is a
-   * ribbon: its quads are written with alpha nought for their whole life and the mesh is all there is.
+   * ribbon stick: its one quad is written with alpha nought and the mesh is the whole of the stick.
    */
   private readonly meshErrors = new Set<string>();
   private lastCamera: THREE.Camera | null = null;
@@ -1176,6 +1198,22 @@ export class ParticleEffects {
     seen.add(file);
     const def = await this.load(file);
     if (!def || this.disposed) return false;
+    if (isSwoosh(def)) {
+      // A ribbon draws in its texture's batch, made now and hidden like a quad's, and prepares the
+      // effect it names.
+      const tex = def.texture;
+      const waits: Promise<unknown>[] = [];
+      if (def.appearance?.file) waits.push(this.prepare(def.appearance.file, renderer, seen));
+      if (tex.file && tex.visible) {
+        this.batch(tex.file, tex.blend ?? 'alpha');
+        const ready = this.textureReady.get(tex.file);
+        if (ready) waits.push(ready);
+      }
+      await Promise.all(waits);
+      const t = tex.file ? this.textures.get(tex.file) : undefined;
+      if (renderer && t && tex.file && !this.textureErrors.has(tex.file) && !this.disposed) renderer.initTexture(t);
+      return true;
+    }
     const waits: Promise<unknown>[] = [];
     for (const g of def.groups) {
       for (const e of g.emitters) {
@@ -1206,7 +1244,7 @@ export class ParticleEffects {
   }
 
   get status(): string {
-    return `${this.instances.size} particle effects placed, ${this.activeCount} playing, ${this.children.size} carried by particles${this.childrenSkipped ? ` (${this.childrenSkipped} skipped at the caps)` : ''}, ${this.quadCount} quads in ${this.batches.size} batches${this.meshBatches.size ? `, ${this.meshCount} mesh particles from ${this.meshBatches.size} model(s)` : ''}${this.textureErrors.size ? `, ${this.textureErrors.size} textures failed to load: ${[...this.textureErrors].join(', ')}` : ''}${this.meshErrors.size ? `, ${this.meshErrors.size} particle models failed to load: ${[...this.meshErrors].join(', ')}` : ''}`;
+    return `${this.instances.size} particle effects placed, ${this.activeCount} playing, ${this.children.size} carried by particles${this.swooshes.size ? ` (${this.swooshes.size} of them ribbons)` : ''}${this.childrenSkipped ? ` (${this.childrenSkipped} skipped at the caps)` : ''}, ${this.quadCount} quads in ${this.batches.size} batches${this.meshBatches.size ? `, ${this.meshCount} mesh particles from ${this.meshBatches.size} model(s)` : ''}${this.textureErrors.size ? `, ${this.textureErrors.size} textures failed to load: ${[...this.textureErrors].join(', ')}` : ''}${this.meshErrors.size ? `, ${this.meshErrors.size} particle models failed to load: ${[...this.meshErrors].join(', ')}` : ''}`;
   }
 
   /**
@@ -1227,6 +1265,13 @@ export class ParticleEffects {
       const wanted = this.pending.delete(handle);
       if (this.disposed || !wanted || !def) {
         this.children.delete(handle);
+        return;
+      }
+      if (isSwoosh(def)) {
+        // A ribbon: points from where its carrier moves the handle, and the effect it names played there.
+        const file = def.appearance?.file;
+        const child = file ? this.placeChild(file, handle.matrix, handle) : null;
+        this.swooshes.set(handle, { handle, trail: new SwooshTrail(def), child, n: 0 });
         return;
       }
       this.instances.set(handle, new EffectInstance(handle, def, this.host));
@@ -1303,6 +1348,8 @@ export class ParticleEffects {
   move(handle: EffectHandle, matrix: THREE.Matrix4): void {
     handle.matrix.copy(matrix);
     this.instances.get(handle)?.position.setFromMatrixPosition(matrix);
+    const s = this.swooshes.get(handle);
+    if (s) s.trail.idle = 0;
   }
 
   remove(handle: EffectHandle): void {
@@ -1312,6 +1359,11 @@ export class ParticleEffects {
     this.children.delete(handle);
     this.endSound(handle);
     this.effectSounds.delete(handle);
+    const s = this.swooshes.get(handle);
+    if (s) {
+      if (s.child) s.child.rateScale = 0;
+      this.swooshes.delete(handle);
+    }
   }
 
   /** Live particles of one placed effect (0 while it is loading or asleep), for the console. */
@@ -1321,7 +1373,7 @@ export class ParticleEffects {
 
   /** Whether a placed effect is still to come or still playing. */
   playing(handle: EffectHandle): boolean {
-    return this.pending.has(handle) || (this.instances.get(handle)?.finished === false);
+    return this.pending.has(handle) || this.swooshes.has(handle) || this.instances.get(handle)?.finished === false;
   }
 
   /** The additive batches drawing this frame (fill sets visible by quad count), for the depth of field's glow depth. Fills `out` from `n`; returns the new count. */
@@ -1330,14 +1382,24 @@ export class ParticleEffects {
     return n;
   }
 
-  private load(file: string): Promise<EffectDef | null> {
+  private load(file: string): Promise<LoadedDef | null> {
     let p = this.defs.get(file);
     if (!p) {
       const out = packPrefix(file);
       p = fetch(this.baseUrl + file)
         .then(async (r) => {
           if (!r.ok) throw new Error(`${r.status}`);
-          const def = (await r.json()) as EffectDef;
+          const loaded = (await r.json()) as LoadedDef;
+          if (isSwoosh(loaded)) {
+            // A ribbon names its texture and the effect it carries relative to its own pack, as an effect does.
+            if (out) {
+              if (loaded.texture.file) loaded.texture.file = out + loaded.texture.file;
+              if (loaded.appearance?.file) loaded.appearance.file = out + loaded.appearance.file;
+            }
+            if (loaded.texture.file) this.texture(loaded.texture.file);
+            return loaded;
+          }
+          const def = loaded;
           // Everything the effect names is relative to **its own** pack, so where that is not this
           // world's pack the prefix travels with each of them: its quads' textures, the models its
           // mesh particles draw, and the effects its particles carry, which were left behind -- a
@@ -1426,7 +1488,7 @@ export class ParticleEffects {
     mesh.visible = false;
     this.scene.add(mesh);
     this.batchMaterials.push(material);
-    b = { key, blend, mesh, material, capacity: 0, positions: new Float32Array(0), colors: new Float32Array(0), uvs: new Float32Array(0), queue: [], entries: [] };
+    b = { key, blend, mesh, material, capacity: 0, positions: new Float32Array(0), colors: new Float32Array(0), uvs: new Float32Array(0), queue: [], entries: [], strips: [] };
     this.grow(b, 256);
     this.batches.set(key, b);
     return b;
@@ -1464,6 +1526,7 @@ export class ParticleEffects {
     camera.matrixWorld.extractBasis(camX, camY, camZ);
     for (const b of this.batches.values()) {
       b.queue.length = 0;
+      b.strips.length = 0;
       b.material.uniforms.uFogDensity.value = this.fogDensity;
     }
     let active = 0;
@@ -1563,12 +1626,45 @@ export class ParticleEffects {
       }
     }
     this.activeCount = active;
+    // The ribbons, after the effects whose particles carry them have moved them this frame.
+    if (this.swooshes.size) this.stepSwooshes(dt);
     let total = 0;
     for (const b of this.batches.values()) total += this.fill(b, total);
     this.quadCount = total;
     let drawn = 0;
     for (const b of this.meshBatches.values()) drawn += this.fillMesh(b);
     this.meshCount = drawn;
+  }
+
+  /**
+   * Every ribbon one step on: a point taken where its carrier stands while it still carries it, the
+   * tail let go as it ages, and what is left queued in its texture's batch. A ribbon is live while its
+   * handle runs and its carrier keeps moving it; stopped (its particle died, its effect went to sleep or
+   * was removed) it draws on until its tail has run out behind the last point and then goes, taking
+   * the effect it named with it. The idle rule is for a carrier that never says it has let go.
+   */
+  private stepSwooshes(dt: number): void {
+    for (const [handle, s] of this.swooshes) {
+      const trail = s.trail;
+      const live = handle.rateScale > 0 && trail.idle < SWOOSH_TUNE.idleStop;
+      trail.idle += dt;
+      tmpV.setFromMatrixPosition(handle.matrix);
+      if (!trail.step(dt, tmpV.x, tmpV.y, tmpV.z, live)) {
+        if (s.child) s.child.rateScale = 0;
+        this.swooshes.delete(handle);
+        this.children.delete(handle);
+        continue;
+      }
+      if (s.child) {
+        if (live) this.move(s.child, handle.matrix);
+        else s.child.rateScale = 0;
+      }
+      const tex = trail.def.texture;
+      if (!tex.file || !tex.visible) continue;
+      s.n = trail.points(tmpV.x, tmpV.y, tmpV.z, live, handle.frame ? handle.frame.elements : null);
+      if (s.n < 2) continue;
+      this.batch(tex.file, tex.blend ?? 'alpha').strips.push(s);
+    }
   }
 
   /**
@@ -1623,7 +1719,11 @@ export class ParticleEffects {
     if (b.blend !== 'add') q.sort(byDistanceDesc);
     let n = Math.min(q.length, MAX_QUADS - drawnSoFar);
     if (n < 0) n = 0;
-    if (n > b.capacity) this.grow(b, Math.min(MAX_QUADS, Math.max(n, b.capacity * 2)));
+    // The ribbons in this batch go after its particles, within what the frame has left.
+    let want = 0;
+    for (const s of b.strips) want += stripQuads(s.n);
+    const room = Math.max(0, Math.min(want, MAX_QUADS - drawnSoFar - n));
+    if (n + room > b.capacity) this.grow(b, Math.min(MAX_QUADS, Math.max(n + room, b.capacity * 2)));
     const pos = b.positions;
     const col = b.colors;
     const uv = b.uvs;
@@ -1733,18 +1833,34 @@ export class ParticleEffects {
       uv[uo + 4] = cu; uv[uo + 5] = cv;
       uv[uo + 6] = cu; uv[uo + 7] = cv + size;
     }
+    let total = n;
+    for (const s of b.strips) {
+      const left = n + room - total;
+      if (left <= 0) break;
+      const def = s.trail.def;
+      const tex = def.texture;
+      // A ribbon's texture frames run on its own clock, as a quad's run on its age.
+      const used = Math.max(1, tex.frameEnd + 1 - tex.frameStart);
+      let frame = tex.frameStart;
+      if (tex.framesPerSecond > 0) frame += Math.floor(s.trail.clock * tex.framesPerSecond) % used;
+      const perColumn = Math.max(1, tex.framesPerColumn);
+      const size = tex.frameUVSize || 1;
+      const c = def.color;
+      const alpha = clamp01(c[3] ?? 1) * (s.handle.alphaScale ?? 1);
+      total += writeStrip(s.trail.drawn, s.n, camPos, def.width * SWOOSH_TUNE.width, c[0] ?? 1, c[1] ?? 1, c[2] ?? 1, alpha, (frame % perColumn) * size, Math.floor(frame / perColumn) * size, size, pos, col, uv, total, left);
+    }
     const g = b.mesh.geometry;
-    g.setDrawRange(0, n * 6);
-    b.mesh.visible = n > 0;
-    if (n > 0) {
-      (g.getAttribute('position') as THREE.BufferAttribute).addUpdateRange(0, n * 12);
+    g.setDrawRange(0, total * 6);
+    b.mesh.visible = total > 0;
+    if (total > 0) {
+      (g.getAttribute('position') as THREE.BufferAttribute).addUpdateRange(0, total * 12);
       (g.getAttribute('position') as THREE.BufferAttribute).needsUpdate = true;
-      (g.getAttribute('aColor') as THREE.BufferAttribute).addUpdateRange(0, n * 16);
+      (g.getAttribute('aColor') as THREE.BufferAttribute).addUpdateRange(0, total * 16);
       (g.getAttribute('aColor') as THREE.BufferAttribute).needsUpdate = true;
-      (g.getAttribute('uv') as THREE.BufferAttribute).addUpdateRange(0, n * 8);
+      (g.getAttribute('uv') as THREE.BufferAttribute).addUpdateRange(0, total * 8);
       (g.getAttribute('uv') as THREE.BufferAttribute).needsUpdate = true;
     }
-    return n;
+    return total;
   }
 
   /**
@@ -1825,6 +1941,7 @@ export class ParticleEffects {
     this.textures.clear();
     this.white.dispose();
     this.instances.clear();
+    this.swooshes.clear();
     this.pending.clear();
     this.children.clear();
     // Every loop let go before the records that named it: a voice left behind would follow a point
